@@ -61,7 +61,8 @@
       "enum": [
         "mcp_degraded", "no_world_transform", "no_node_id", "volume_null_pre_d168", "tol_config_unknown",
         "interfaces_truncated", "no_secid", "truncated_scan", "edges_truncated", "detect_absent", "ecad_absent",
-        "report_parts_mismatch", "unit_converted_mil", "components_truncated", "nets_truncated"
+        "report_parts_mismatch", "unit_converted_mil", "components_truncated", "nets_truncated",
+        "tree_truncated", "parts_truncated", "no_depth_seq", "no_auto_named_flag", "interfaces_unreadable"
       ]
     },
     "source": {
@@ -112,6 +113,7 @@
         "tool": {"type": "string"},
         "call_id": {"type": ["string", "null"]},
         "node_id_at_capture": {"type": ["string", "null"]},
+        "iface_row_id_at_capture": {"type": ["string", "null"]},
         "captured_at": {"type": ["integer", "null"]},
         "detected_at": {"type": ["integer", "null"]},
         "params_hash": {"type": ["string", "null"]}

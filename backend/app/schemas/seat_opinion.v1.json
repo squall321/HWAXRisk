@@ -18,7 +18,7 @@
       "type": "string",
       "enum": ["xd", "sim", "cam", "rel", "soc", "disp", "mech", "pcb", "rf", "passive", "pwr", "sh", "mem", "std", "material", "delib"]
     },
-    "origin": {"type": "string", "enum": ["primary", "counter", "adversary"]},
+    "origin": {"type": "string", "enum": ["primary", "counter", "adversary", "new"]},
     "cycle": {"type": "integer", "minimum": 1},
     "turns": {
       "type": "array",
@@ -39,7 +39,7 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["tool", "args_gist", "ok", "activity_idx", "round"],
+        "required": ["tool", "activity_idx"],
         "properties": {
           "tool": {"type": "string", "minLength": 1},
           "args_gist": {"type": "string"},
@@ -49,9 +49,9 @@
         }
       }
     },
-    "tool_calls_n": {"type": "integer", "minimum": 0},
+    "tool_calls_n": {"type": ["integer", "null"], "minimum": 0},
     "tool_calls_ok": {"type": ["integer", "null"], "minimum": 0},
-    "knowledge_hits_n": {"type": "integer", "minimum": 0},
+    "knowledge_hits_n": {"type": ["integer", "null"], "minimum": 0},
     "cited_refs": {"type": "array", "items": {"type": "string"}},
     "cited_refs_resolved": {"type": "array", "items": {"type": "string"}},
     "cited_ckeys": {"type": "array", "items": {"type": "string", "pattern": "^ck:[0-9a-f]{12}$"}},
@@ -68,6 +68,7 @@
     "raised_finding_ids": {"type": "array", "items": {"$ref": "#/definitions/global_finding_id"}},
     "contested_finding_ids": {"type": "array", "items": {"$ref": "#/definitions/global_finding_id"}},
     "character_sentences": {"type": "array", "maxItems": 5, "items": {"type": "string", "maxLength": 240}},
+    "model": {"type": ["string", "null"]},
     "excerpt_for_rag": {"type": "string", "maxLength": 1500}
   },
   "definitions": {

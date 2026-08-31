@@ -1238,6 +1238,27 @@ CITED_REF_RE = re.compile(r"\b(?:reg|narr|rule|c|d|sig|warn|gate|p|e|rpt|inc|car
 # IR·상태층을 가리키는 스킴 — quality.ir_cite_rate 의 분자다(§6.5.5).
 IR_REF_KINDS = frozenset({"p", "e", "c", "d", "sig", "warn", "gate", "rule"})
 EXCERPT_FOR_RAG_MAX = 1500          # rr_seat_opinions.excerpt_for_rag 상한(§5.2.2 F)
+# seat_opinion.character_sentences — 성격을 드러낸 문장만 발췌한다(plan §4.5, ≤5문장·각 ≤240자).
+CHARACTER_SENTENCES_MAX = 5
+CHARACTER_SENTENCE_MAX = 240
+_CHARACTER_RE = re.compile(r"성격|성향|철학|경향|의도")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。])\s+|[\n]+")
+
+
+def _character_sentences(rows: Sequence[Mapping[str, Any]]) -> list[str]:
+    """좌석 발언에서 성격·성향·철학·경향·의도를 말한 문장만 뽑는다(§5.6.3 E7 좌석 개인 기억의 입력)."""
+    out: list[str] = []
+    for row in rows:
+        for sentence in _SENTENCE_SPLIT_RE.split(str(row.get("say_excerpt") or "")):
+            text = sentence.strip()
+            if not text or not _CHARACTER_RE.search(text):
+                continue
+            text = text[:CHARACTER_SENTENCE_MAX]
+            if text not in out:
+                out.append(text)
+            if len(out) >= CHARACTER_SENTENCES_MAX:
+                return out
+    return out
 SAY_EXCERPT_MAX = 2000              # seat_opinion.turns[].say_excerpt 상한(§6.7.2 7단계)
 ABSTAIN_PREFIX = "판정 불가"        # §6.8.2 — 최종 발언이 이 말로 시작하면 abstain 이다.
 _STANCES = ("agree", "conditional", "oppose", "abstain")
@@ -1283,7 +1304,7 @@ def _opinion_id(panel_id: str, agent_key: str, cycle: int) -> str:
 def _panel_scope(store, panel_id: str) -> tuple[dict, dict, list[dict], SpecContext]:
     """패널 행·타깃 행·seats 와 cites 검증 스코프(SpecContext)를 만든다."""
     panel = store.query_one(
-        "SELECT id, target_key, owner_sub, panel_no, tier, seats_json, conv_id, chair_template"
+        "SELECT id, target_key, owner_sub, panel_no, tier, seats_json, conv_id, chair_template, model_json"
         " FROM rr_panels WHERE id = ?", (panel_id,))
     if panel is None:
         raise AppError("E404", f"패널을 찾을 수 없습니다 — {panel_id}.", 404)
@@ -1412,6 +1433,11 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
     snapshot_id = ctx.snapshot_ids[-1] if ctx.snapshot_ids else None
     now = now_epoch()
     versions = {k: (atoms[0].get(k) if atoms else None) for k in ("rule_version", "ir_version", "diff_version")}
+    # D6 — 좌석 의견 안에 그 패널이 쓴 모델 이름 사본을 둔다(plan §4.5, rr_panels.model_json.model).
+    try:
+        panel_model = (json.loads(panel["model_json"] or "{}") or {}).get("model")
+    except (TypeError, ValueError):
+        panel_model = None
 
     # 좌석 목록 = seats_json 5석 + (발언·귀속이 있는) 반대석·추가 좌석.
     roster: list[tuple[str, str, str]] = [
@@ -1468,7 +1494,9 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
             "tool_calls": list(state.get("tool_calls") or []),
             "tool_calls_n": state.get("tool_calls_n"),
             "tool_calls_ok": state.get("tool_calls_ok"),
-            "knowledge_hits_n": 0,
+            # 지식 카드 적중을 세는 원천이 아직 없다 — 0 이라고 적으면 '없었다' 로 읽히므로 미측정(null)으로 둔다.
+            "knowledge_hits_n": None,
+            "model": panel_model,
             "cited_refs": refs, "cited_refs_resolved": resolved_refs, "cited_ckeys": cited_ckeys,
             "quality": {
                 "used_tool": state.get("used_tool"), "cited_ir": cited_ir,
@@ -1478,14 +1506,14 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
             },
             "raised_finding_ids": sorted(set(raised_by_seat.get(agent_key) or ())),
             "contested_finding_ids": sorted(set(contested_by_seat.get(agent_key) or ())),
-            "character_sentences": [],
+            "character_sentences": _character_sentences(rows),
             "excerpt_for_rag": "\n".join(str(r.get("say_excerpt") or "") for r in rows)[:EXCERPT_FOR_RAG_MAX],
         }
         opinion_rows.append((
             opinion_id, target_key, panel_id, owner_sub, agent_key, domain,
             origin if origin in ("primary", "counter", "adversary", "new") else "new", cycle,
             canonical_json(opinion),
-            final_stance, state.get("tool_calls_n"), state.get("tool_calls_ok"), 0,
+            final_stance, state.get("tool_calls_n"), state.get("tool_calls_ok"), None,
             json.dumps(refs, ensure_ascii=False), json.dumps(opinion["quality"], ensure_ascii=False),
             json.dumps(opinion["raised_finding_ids"], ensure_ascii=False),
             opinion["excerpt_for_rag"], now,

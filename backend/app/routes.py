@@ -9,13 +9,18 @@ from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app import brief as brief_module
 from app import config, diff as diff_module
+from app import export as export_module
 from app import identity, ir_builder, narrative, planner, ra_client, runner, sameas, taxonomy
+from app import roster as roster_module
 from app import state as state_module
 from app import registry as registry_module
+from app.adapters import base as adapters_base
+from app.adapters import registry as adapters_registry
 from app.adapters.registry import list_adapters
 from app.common import canonical_json, new_uuid, now_epoch, parse_ref, sha256_hex
 from app.errors import AppError
@@ -376,11 +381,40 @@ class SnapshotBody(BaseModel):
 @router.post("/projects/{project_id}/snapshots")
 def create_snapshot(project_id: str, body: SnapshotBody,
                     ident: identity.Identity = Depends(identity.current)) -> dict:
-    """스냅샷 동결(202 {job_id}). 어댑터 capture 가 없어 아직 소스를 읽을 수 없다."""
+    """스냅샷 동결 — 등록된 소스 카드를 어댑터가 읽고 ir_builder 가 IR 을 동결한다(plan §2.11.3).
+
+    rr_jobs 는 타깃 패널 전용 표라 여기서는 백그라운드 잡을 만들지 않고 동기로 캡처한 뒤
+    `{snapshot_id, ir_hash, reused, partial, blocked, gates_summary, degraded}` 를 그대로 돌려준다.
+    """
     owner_sub = _require_user(ident)
     _project_row(project_id, owner_sub)
-    raise _not_implemented(
-        "스냅샷 동결", "adapters/{mcad,dyna,ecad}.py 의 capture 가 아직 없다(ir_builder.freeze_snapshot 은 준비됨)")
+    store = get_store()
+    # 만료 PAT 는 쓰지 않는다 — 값이 있기만 하면 쓰면 서비스 PAT 폴백이 죽어 게이트웨이 401 로 강등된다
+    # (runner.resolve_credential·roster.credential 과 같은 규칙).
+    credential = store.get_credential(owner_sub) or {}
+    portal_pat = str(credential.get("portal_pat") or "") or None
+    if int(credential.get("pat_exp") or 0) <= now_epoch() + runner.CREDENTIAL_MARGIN_S:
+        portal_pat = None
+    channels = adapters_registry.clients_from_settings(
+        config.settings, config.load_secrets(config.settings.data_dir), portal_pat=portal_pat)
+    principal = adapters_base.Principal(owner_sub=owner_sub, portal_pat=channels["portal_pat"],
+                                        service_pat=channels["service_pat"])
+    try:
+        captured = adapters_registry.capture_all(
+            sources=_project_sources(project_id), principal=principal, mcp_client=channels["mcp"],
+            rest_client=channels["rest"], kinds=list(body.kinds) or None, report_ids=body.report_ids,
+            detect_result_file_id=body.detect_result_file_id)
+    finally:
+        # 채널은 자기 httpx.Client 를 소유한다 — 닫지 않으면 스냅샷 요청마다 소켓이 샌다(roster.fetch_for_target 과 같은 처리).
+        for channel in (channels["mcp"], channels["rest"]):
+            if channel is not None:
+                channel.close()
+    prior = store.query_one(
+        "SELECT id FROM rr_snapshots WHERE project_id = ? ORDER BY created_at DESC, id LIMIT 1", (project_id,))
+    return ir_builder.freeze_snapshot(
+        store, project_id=project_id, owner_sub=owner_sub, label=body.label or f"snap-{now_epoch()}",
+        adapter_results=captured["results"], calls=captured["calls"],
+        snapshot_id=captured["snapshot_id"], derived_from=prior["id"] if prior else None)
 
 
 class DimBody(BaseModel):
@@ -607,6 +641,27 @@ def get_precedents(diff_id: str = Query(...), ident: identity.Identity = Depends
 
 
 # ================================================================ 타깃·로스터
+def _ecad_absent(snapshot: dict) -> bool:
+    """ECAD 부재 판정은 IR 이 계산한 missing.ecad_absent 다.
+
+    kinds_json 으로 볼 수 없다 — capture_all 이 요청 kinds 와 무관하게 ecad 스텁 소스를 언제나 실어
+    kinds_json 에는 'ecad' 가 늘 들어 있다(그때 missing.ecad_absent 는 True 다).
+    """
+    return bool(_loads(snapshot.get("missing_json"), {}).get("ecad_absent", True))
+
+
+def _ecad_absent_for_target(store: Any, target: dict) -> bool:
+    """타깃이 가리키는 스냅샷(diff 면 target_snapshot)의 missing.ecad_absent. 못 찾으면 부재로 본다."""
+    snapshot_id = target["ref_id"]
+    if target["kind"] == "diff":
+        row = store.query_one("SELECT target_snapshot_id FROM rr_diffs WHERE id = ?", (target["ref_id"],))
+        if row is None:
+            return True
+        snapshot_id = row["target_snapshot_id"]
+    row = store.query_one("SELECT missing_json FROM rr_snapshots WHERE id = ?", (snapshot_id,))
+    return True if row is None else _ecad_absent(dict(row))
+
+
 class TargetBody(BaseModel):
     kind: str
     ref_id: str
@@ -628,7 +683,7 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
     if body.kind == "snap":
         snapshot = _snapshot_row(body.ref_id, owner_sub)
         project_id, base_project_id, ir_hash = snapshot["project_id"], None, snapshot["ir_hash"]
-        ecad_absent = "ecad" not in _loads(snapshot["kinds_json"], [])
+        ecad_absent = _ecad_absent(snapshot)
         blocked_snapshots = [body.ref_id]
     else:
         row = store.query_one(
@@ -638,7 +693,7 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
             raise AppError("E404", f"diff 를 찾을 수 없습니다 — {body.ref_id}.", 404)
         snapshot = _snapshot_row(row["target_snapshot_id"], owner_sub)
         project_id, base_project_id, ir_hash = row["target_project_id"], row["base_project_id"], snapshot["ir_hash"]
-        ecad_absent = "ecad" not in _loads(snapshot["kinds_json"], [])
+        ecad_absent = _ecad_absent(snapshot)
         blocked_snapshots = [row["base_snapshot_id"], row["target_snapshot_id"]]
 
     # G6(unit_scale) 차단 스냅샷 위에는 타깃을 열지 않는다(plan §3.2.2 G6 effect — diff 409 와 같은 형식).
@@ -656,6 +711,14 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
         raise AppError("E409", f"이미 열린 타깃입니다 — {target_key}.", 409)
     now = now_epoch()
     roster = {"roster_size": 0, "deferred": 0, "frozen_at": None}
+    # 로스터 원천 — 본문 agents 가 있으면 그것이 우선이고, 없으면 게이트웨이를 조회한다(자격이 없으면 unavailable).
+    # 게이트웨이 호출은 트랜잭션 밖에서 끝낸다(DB 락을 네트워크 대기 동안 잡지 않는다).
+    agents: list[dict] = [dict(a) for a in (body.agents or [])]
+    roster_source = roster_module.SOURCE_BODY if agents else roster_module.SOURCE_UNAVAILABLE
+    if not agents:
+        fetched = roster_module.fetch_for_target(store, kind=body.kind, ref_id=body.ref_id,
+                                                 owner_sub=owner_sub)
+        agents, roster_source = fetched["agents"], fetched["source"]
     # 타깃 행과 로스터 고정은 한 트랜잭션이다 — 고정이 실패하면 roster_size 0 인 타깃만 남아 재생성이 409 로 막힌다.
     with store.tx():
         store.execute(
@@ -666,8 +729,8 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
              canonical_json(ident.to_dict()), now, config.settings.risk_default_close_level,
              canonical_json(ra_client.empty_sync()), now, now),
         )
-        if body.agents:
-            roster = planner.freeze_roster(store, target_key, owner_sub, body.agents, ecad_absent=ecad_absent)
+        if agents:
+            roster = planner.freeze_roster(store, target_key, owner_sub, agents, ecad_absent=ecad_absent)
     plan = planner.tier_plan(store, target_key) if roster["roster_size"] else None
     return {
         "target_key": target_key,
@@ -675,8 +738,8 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
         "deferred": roster["deferred"],
         "tier_plan": plan["tiers"] if plan else None,
         "cost_estimate": plan["cost_estimate"] if plan else None,
-        # 로스터 원천(list_agents)을 앱이 직접 조회하는 배선은 아직 없다 — agents 를 실어 보내면 그 자리에서 고정된다.
-        "roster_source": "body.agents" if body.agents else "unset",
+        # 로스터 원천 — body.agents(호출자 제공) · gateway(list_agents+recommend_agents) · unavailable(자격·게이트웨이 부재).
+        "roster_source": roster_source,
     }
 
 
@@ -689,12 +752,25 @@ def refresh_roster(target_key: str, body: RosterBody = RosterBody(),
                    ident: identity.Identity = Depends(identity.current)) -> dict:
     """`list_agents` 에 새로 생긴 키만 pending 으로 덧붙인다(기존 종결 행 불변).
 
-    본문 없는 호출도 받는다(plan §0.5.1·§8.2.3 — 인자 없이 `{added_pending}`). 빈 agents 면 갱신 0건이다.
-    로스터 원천을 앱이 게이트웨이 `list_agents`·`recommend_agents` 로 직접 조회하는 배선은 P1 이다(§6.3).
+    본문 없는 호출도 받는다(plan §0.5.1·§8.2.3 — 인자 없이 `{added_pending}`). 본문 agents 가 있으면 그것이 우선이고,
+    없으면 게이트웨이 `list_agents`·`recommend_agents` 를 조회한다(자격이 없으면 갱신 0건 + roster_source='unavailable').
     """
     owner_sub = _require_user(ident)
-    _target_row(target_key, owner_sub)
-    return planner.refresh_roster(get_store(), target_key, (body or RosterBody()).agents)
+    target = _target_row(target_key, owner_sub)
+    store = get_store()
+    agents: list[dict] = [dict(a) for a in ((body or RosterBody()).agents or [])]
+    roster_source = roster_module.SOURCE_BODY if agents else roster_module.SOURCE_UNAVAILABLE
+    if not agents:
+        fetched = roster_module.fetch_for_target(store, kind=target["kind"], ref_id=target["ref_id"],
+                                                 owner_sub=owner_sub)
+        agents, roster_source = fetched["agents"], fetched["source"]
+    if agents and target["roster_frozen_at"] is None:
+        # 고정된 적이 없는 타깃(생성 때 게이트웨이가 불통이었다)은 덧붙이기가 아니라 최초 고정이다 —
+        # ECAD 부재 반영과 roster_frozen_at 갱신이 여기서 같이 일어나야 로스터 0 짜리 타깃이 남지 않는다.
+        frozen = planner.freeze_roster(store, target_key, owner_sub, agents,
+                                       ecad_absent=_ecad_absent_for_target(store, target))
+        return {"added_pending": frozen["roster_size"], "roster_source": roster_source}
+    return {**planner.refresh_roster(store, target_key, agents), "roster_source": roster_source}
 
 
 # ================================================================ 잡
@@ -1197,14 +1273,30 @@ def get_ref(ref: str, snapshot_id: str | None = None, diff_id: str | None = None
 
 # ================================================================ 이동(export·import)
 @router.get("/export")
-def get_export(since: int = 0, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """JSONL 내보내기 — 모듈 `export.py`(plan §0.4.1)가 아직 없다."""
-    _require_user(ident)
-    raise _not_implemented("export", "backend/app/export.py 가 아직 없다(plan §8.2.3 JSONL 규약)")
+def get_export(since: int = 0, ident: identity.Identity = Depends(identity.current)) -> StreamingResponse:
+    """JSONL 내보내기(소유자 행만) — 첫 줄 헤더 `{schema_version, app_version, origin}`, 이어서 §5.2.2 A→H 표 순서로 `{table, row}`.
+
+    같은 내용을 `$HEAX_DATA_DIR/exports/<ts>.jsonl` 에 남기고(plan §5.2.5 (1)) 그 파일을 그대로 흘려보낸다.
+    """
+    owner_sub = _require_user(ident)
+    path = export_module.write_export_file(get_store(), owner_sub, int(since))
+
+    def _stream():
+        with path.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                yield line
+
+    return StreamingResponse(_stream(), media_type="application/x-ndjson", headers={
+        "Content-Disposition": f'attachment; filename="{path.name}"', "X-Export-Path": str(path)})
 
 
 @router.post("/import")
-def post_import(ident: identity.Identity = Depends(identity.current)) -> dict:
-    """JSONL 들여오기 — 병합 규칙(§4.7.1·§2.10 재적용)을 담을 `export.py` 가 아직 없다."""
-    _require_user(ident)
-    raise _not_implemented("import", "backend/app/export.py 가 아직 없다(사람 확정이 자동을 이기는 병합 규칙 포함)")
+async def post_import(request: Request, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """JSONL 들여오기 — `{inserted, merged, skipped, conflicts[]}`. 병합 규칙은 export.py(사람 확정이 자동을 이긴다)."""
+    owner_sub = _require_user(ident)
+    raw = await request.body()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise AppError("E100", "본문이 UTF-8 JSONL 이 아닙니다.", 422) from exc
+    return export_module.import_jsonl(get_store(), owner_sub, text)

@@ -1,0 +1,592 @@
+# 소스 어댑터(mcad·dyna·ecad_stub)와 게이트웨이 발견·캡처 오케스트레이션 — 응답 형상은 P1 정찰 실측 그대로이고 외부 호출은 전부 MockTransport(실 네트워크 0)
+from __future__ import annotations
+
+import json
+
+import httpx
+import pytest
+
+from app import ir_builder
+from app.adapters import dyna as dyna_adapter
+from app.adapters import ecad_stub, mcad
+from app.adapters import registry as adapters_registry
+from app.adapters.base import CallRecorder, Principal, RestGetClient
+from app.errors import AppError
+from app.ra_client import McpHttpClient
+
+OWNER = "me@example.com"
+SF_PROJECT = "001a02ba21cd51064a68c35"
+APP_KEY = "heax-step_forge"
+DYNA_APP_KEY = "heax-kooremapper_mcp"
+KSHA = "abcd1234ef567890abcd1234ef567890abcd1234ef567890abcd1234ef567890"
+
+
+# ---------------------------------------------------------------- 소스 응답 픽스처(정찰 실측 형상)
+TREE_JSON = {
+    "project": "sif-e2e",
+    "unit_system": "mm",
+    "files": [{"relpath": "a_stack.step", "sha256": "0" * 64, "size_bytes": 1024,
+               "schema_ap": "AUTOMOTIVE_DESIGN", "header_unit": "millimetre"}],
+    "nodes": [
+        {"id": "n0", "parent_id": None, "kind": "file", "name": "a_stack.step", "path": "/sif-e2e/a_stack.step",
+         "depth": 1, "seq": 0, "shape_def_id": None, "transform": None, "world_transform": None,
+         "auto_named": False, "color": None},
+        {"id": "n1", "parent_id": "n0", "kind": "assembly", "name": "STACK_ASM",
+         "path": "/sif-e2e/a_stack.step/STACK_ASM", "depth": 2, "seq": 1, "shape_def_id": None,
+         "transform": None, "world_transform": None, "auto_named": False, "color": None},
+        {"id": "n4", "parent_id": "n1", "kind": "instance", "name": "PLATE_1",
+         "path": "/sif-e2e/a_stack.step/STACK_ASM/PLATE_1", "depth": 3, "seq": 4, "shape_def_id": "s1",
+         "transform": None,
+         "world_transform": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+         "auto_named": False, "color": None},
+        {"id": "n5", "parent_id": "n1", "kind": "instance", "name": "PLATE_2",
+         "path": "/sif-e2e/a_stack.step/STACK_ASM/PLATE_2", "depth": 3, "seq": 5, "shape_def_id": "s2",
+         "transform": None,
+         # z 로 1.2 mm 올려 쌓은 두 번째 판재 — world 재계산이 살아 있으면 bbox_world 가 [.., 1.2, .., 2.2] 다.
+         "world_transform": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 1.2], [0, 0, 0, 1]],
+         "auto_named": False, "color": None},
+        {"id": "n6", "parent_id": "n1", "kind": "instance", "name": "BRACKET_L",
+         "path": "/sif-e2e/a_stack.step/STACK_ASM/BRACKET_L", "depth": 3, "seq": 6, "shape_def_id": None,
+         "transform": None, "world_transform": None, "auto_named": True, "color": None},
+    ],
+    "shape_defs": {
+        "s1": {"kind": "solid", "bbox": [0, 0, 0, 50, 40, 1.2], "volume": 2400.0, "area": 4120.0,
+               "centroid": [25.0, 20.0, 0.6], "material": "AL6061", "density": None, "density_unit": None,
+               "instance_count": 1, "has_geometry": 1, "solid_count": 1, "construction_only": False,
+               "xcaf_entry": "0:1:1:1", "step_file": "a_stack.step"},
+        "s2": {"kind": "solid", "bbox": [0, 0, 0, 50, 40, 1.0], "volume": 2000.0, "area": 3800.0,
+               "centroid": [25.0, 20.0, 0.5], "material": "AL6061", "density": None, "density_unit": None,
+               "instance_count": 1, "has_geometry": 1, "solid_count": 1, "construction_only": False,
+               "xcaf_entry": "0:1:1:2", "step_file": "a_stack.step"},
+    },
+    "summary": {"files": 1, "shape_defs": 2, "nodes": 5, "assemblies": 1, "instances": 3,
+                "leaf_instances": 2, "max_depth": 4, "auto_named_nodes": 1, "auto_named_defs": 0,
+                "defs_without_geometry": 1, "warnings": 1},
+    "warnings": [{"severity": "WARNING", "code": "auto_named", "message": "이름이 자동 생성됐다.",
+                  "ref": "a_stack.step#BRACKET_L"}],
+}
+
+GRAPH_JSON = {
+    "nodes": [{"id": "n4", "name": "PLATE_1", "path": "/sif-e2e/a_stack.step/STACK_ASM/PLATE_1",
+               "shape_def": "s1", "degree": 1}],
+    "edges": [{"a": "n4", "b": "n5", "kind": "tied"}],
+    "orphans": [],
+    "counts": {"tied": 1},
+    "scope": None,
+}
+
+PARTS_REST = {"parts": [
+    {"id": "n4", "shape_def_id": "s1", "name": "PLATE_1", "path": "/sif-e2e/a_stack.step/STACK_ASM/PLATE_1",
+     "kind": "solid", "bbox": [0, 0, 0, 50, 40, 1.2], "volume": 2400.0},
+    {"id": "n5", "shape_def_id": "s2", "name": "PLATE_2", "path": "/sif-e2e/a_stack.step/STACK_ASM/PLATE_2",
+     "kind": "solid", "bbox": [0, 0, 0, 50, 40, 1.0], "volume": 2000.0},
+]}
+
+# MCP list_parts — id·shape_def_id 없음, bbox 는 shape_def 로컬, volume 등은 전부 null(정찰 실측).
+PARTS_MCP = {"parts": [
+    {"name": "PLATE_1", "path": "/sif-e2e/a_stack.step/STACK_ASM/PLATE_1", "kind": "solid",
+     "bbox": [0.0, 0.0, 0.0, 50.0, 40.0, 1.2], "color": None, "instance_count": 1, "has_geometry": 1,
+     "volume": None, "area": None, "centroid": None, "material": None, "density": None, "density_unit": None},
+    {"name": "PLATE_2", "path": "/sif-e2e/a_stack.step/STACK_ASM/PLATE_2", "kind": "solid",
+     "bbox": [0.0, 0.0, 0.0, 50.0, 40.0, 1.0], "color": None, "instance_count": 1, "has_geometry": 1,
+     "volume": None, "area": None, "centroid": None, "material": None, "density": None, "density_unit": None},
+]}
+
+PROJECT_TREE_MCP = {
+    "summary": TREE_JSON["summary"],
+    "warnings": [],
+    "nodes": [{"name": "a_stack.step", "kind": "file", "path": "/sif-e2e/a_stack.step"},
+              {"name": "STACK_ASM", "kind": "assembly", "path": "/sif-e2e/a_stack.step/STACK_ASM"},
+              {"name": "PLATE_1", "kind": "instance", "path": "/sif-e2e/a_stack.step/STACK_ASM/PLATE_1"},
+              {"name": "PLATE_2", "kind": "instance", "path": "/sif-e2e/a_stack.step/STACK_ASM/PLATE_2"}],
+}
+
+# list_interfaces — 13필드, row id 없음, cross_file 은 int, counts 는 0인 kind 키를 생략한다.
+IFACE_TIED = {"counts": {"tied": 1}, "interfaces": [
+    {"node_a": "n4", "node_b": "n5", "name_a": "PLATE_1", "name_b": "PLATE_2", "kind": "tied",
+     "min_gap": 0.0, "contact_area_est": 2000.0, "band_width": 0.05, "penetration_depth": None,
+     "penetration_volume": None, "cross_file": 0, "status": "confirmed", "note": "공차 밴드 안에서 맞닿음"},
+]}
+IFACE_EMPTY = {"counts": {"tied": 1}, "interfaces": []}
+# REST /projects/{id}/interfaces — MCP 판과 같은 필드에 **행 id 가 더 있다**(StepForge app/rest.py:257 SELECT).
+# 그래서 정상 경로는 이 응답을 쓰고 계면 원장이 행 id 로 앵커된다.
+IFACE_REST = {"counts": {"tied": 1}, "interfaces": [
+    dict(IFACE_TIED["interfaces"][0], id=41),
+]}
+# interface_graph(json) — counts 4키 고정, orphans 는 배열, edges 는 nodes 없이 실제 노드 id 를 쓴다.
+IFACE_GRAPH = {"counts": {"tied": 1, "touching": 0, "clearance": 0, "interference": 0}, "orphans": ["n6"],
+               "edges": [{"a": "n4", "b": "n5", "name_a": "PLATE_1", "name_b": "PLATE_2", "kind": "tied",
+                          "min_gap": 0.0, "contact_area_est": 2000.0, "cross_file": False,
+                          "status": "confirmed"}]}
+
+JOB_STATUS_DONE = {"status": "done", "finished_at": 1756590000,
+                   "params": {"tied_gap": 0.05, "clearance_gap": 1.0, "tied_area": 1.0, "tied_width": 0.05,
+                              "scope": None}}
+
+INSPECT_FILE = {"meta": {
+    "nodes": 12000, "elements": 9800, "parts": 2, "valid": True,
+    "bbox_min": [0, 0, 0], "bbox_max": [50, 40, 2.2], "size": [50, 40, 2.2],
+    "keyword_counts": {"*PART": 2, "*SECTION_SOLID": 1, "*CONTACT_TIED_SURFACE_TO_SURFACE": 1},
+    "truncated_scan": False, "includes": [],
+    "modelmeta": {
+        "conventions": {"unit": "mm-kg-ms"},
+        "parts": [
+            {"pid": 1, "title": "Stack\\PLATE_1", "elem_class": "solid", "n_elems": 5000,
+             "bbox_min": [0, 0, 0], "bbox_max": [50, 40, 1.2], "size": [50, 40, 1.2], "area_ext": 4120.0,
+             "volume": 2400.0, "proj": {"x": 2000.0, "y": 60.0, "z": 48.0},
+             "material": {"mid": 1, "kfile": {"keyword": "*MAT_ELASTIC", "name": "AL", "E": 70000.0},
+                          "db": {"match_basis": "name-mat", "db_mid": 3, "name": "AL6061", "tag": "AL6061"}}},
+            {"pid": 2, "title": "Stack\\SHIELD", "elem_class": "shell", "n_elems": 4800,
+             "bbox_min": [0, 0, 1.2], "bbox_max": [50, 40, 1.4], "size": [50, 40, 0.2], "area_ext": 3800.0,
+             "volume": 0, "proj": {"x": 2000.0, "y": 10.0, "z": 8.0},
+             "material": {"mid": 2, "kfile": {"keyword": "*MAT_PIECEWISE_LINEAR_PLASTICITY"}, "db": None}},
+        ],
+        "connectivity": {
+            "contact_edges": [{"a": 1, "b": 2, "a_title": "Stack\\PLATE_1", "b_title": "Stack\\SHIELD",
+                               "contact": 1, "type": "*CONTACT_TIED_SURFACE_TO_SURFACE", "title": "tie1",
+                               "fs": None}],
+            "single_surface": [{"contact": 2, "type": "*CONTACT_AUTOMATIC_SINGLE_SURFACE",
+                                "title": "self", "pids": [1, 2]}],
+            "contacts_total": 2, "unresolved_sides": 0, "edges_truncated": False,
+        },
+    },
+}}
+
+
+# ---------------------------------------------------------------- 전송(MockTransport)
+def _mcp_handler(tools: dict, seen: list | None = None):
+    """게이트웨이 MCP 를 흉내내는 MockTransport 핸들러. 계약에 없는 도구는 isError 로 돌려준다."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode())
+        if payload["method"] == "initialize":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {}},
+                                  headers={"mcp-session-id": "sess-1"})
+        if payload["method"] == "notifications/initialized":
+            return httpx.Response(202)
+        name = payload["params"]["name"]
+        if seen is not None:
+            seen.append((name, payload["params"]["arguments"]))
+        if name not in tools:
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1,
+                                             "result": {"isError": True,
+                                                        "content": [{"type": "text", "text": f"unknown tool: {name}"}]}})
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1,
+                                         "result": {"structuredContent": tools[name]}})
+
+    return handler
+
+
+def _rest_handler(routes: dict, seen: list | None = None):
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET", "어댑터는 소스 앱에 GET 만 한다"
+        assert request.headers["authorization"] == "Bearer service-pat"
+        path = request.url.path
+        if seen is not None:
+            seen.append(path)
+        if path not in routes:
+            return httpx.Response(404, json={"detail": "not found"})
+        return httpx.Response(200, json=routes[path])
+
+    return handler
+
+
+def _mcp(tools: dict, seen: list | None = None) -> McpHttpClient:
+    return McpHttpClient("https://gw.test/mcp", headers={"Authorization": "Bearer pat"},
+                         client=httpx.Client(transport=httpx.MockTransport(_mcp_handler(tools, seen))))
+
+
+def _rest(routes: dict, seen: list | None = None, token: str | None = "service-pat") -> RestGetClient:
+    return RestGetClient("https://heax.test", token,
+                         client=httpx.Client(transport=httpx.MockTransport(_rest_handler(routes, seen))))
+
+
+BASE = f"/apps/step_forge/api/projects/{SF_PROJECT}"
+REST_ROUTES = {
+    BASE: {"id": SF_PROJECT, "name": "sif-e2e",
+           "tol_config": {"tied_gap": 0.05, "clearance_gap": 1.0, "tied_area": 1.0, "tied_width": 0.05}},
+    f"{BASE}/tree": TREE_JSON,
+    f"{BASE}/artifacts/graph/": GRAPH_JSON,
+    f"{BASE}/parts": PARTS_REST,
+    f"{BASE}/interfaces": IFACE_REST,
+}
+MCP_TOOLS_FULL = {
+    "job_status": JOB_STATUS_DONE,
+    "list_interfaces": IFACE_TIED,
+    "interface_graph": IFACE_GRAPH,
+    "project_tree": PROJECT_TREE_MCP,
+    "list_parts": PARTS_MCP,
+}
+
+
+def _principal(portal: str | None = "portal-pat", service: str | None = "service-pat") -> Principal:
+    return Principal(owner_sub=OWNER, portal_pat=portal, service_pat=service)
+
+
+# ---------------------------------------------------------------- 게이트웨이 발견(§2.13.2)
+def _tools_map_client(body: dict, seen: list | None = None) -> httpx.Client:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if seen is not None:
+            seen.append(request.url.path)
+        return httpx.Response(200, json=body)
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_gateway_registry_matches_prefixed_tool_names():
+    """게이트웨이는 충돌 시 backend_key 접두를 붙인다 — suffix 매칭이어야 mcad 가 발견된다(recon §4 8항)."""
+    body = {"map": {
+        "list_parts": APP_KEY, "list_interfaces": APP_KEY, "interface_graph": APP_KEY,
+        "project_tree": APP_KEY, "part_mesh_map": APP_KEY, "heaxstep_forge_job_status": APP_KEY,
+        "job_status": "smart-twin-cluster",
+    }}
+    registry = adapters_registry.GatewayRegistry("http://gw.test:9110/mcp", client=_tools_map_client(body))
+    probe = registry.probe("mcad")
+    assert probe["app_key"] == APP_KEY
+    assert probe["reachable"] is True and probe["tools_missing"] == []
+    assert probe["rest_ok"] is None
+
+
+def test_gateway_registry_reports_missing_tools_and_survives_failure():
+    registry = adapters_registry.GatewayRegistry("http://gw.test:9110/mcp",
+                                                 client=_tools_map_client({"map": {"list_parts": APP_KEY}}))
+    probe = registry.probe("mcad")
+    assert probe["reachable"] is False
+    assert set(probe["tools_missing"]) == set(mcad.REQUIRED_TOOLS) - {"list_parts"}
+
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused")
+
+    dead = adapters_registry.GatewayRegistry("http://gw.test:9110/mcp",
+                                             client=httpx.Client(transport=httpx.MockTransport(boom)))
+    assert dead.load() == {}
+    assert dead.probe("ecad")["reachable"] is False
+
+
+def test_gateway_http_base_strips_mcp_suffix():
+    assert adapters_registry.gateway_http_base("http://127.0.0.1:9110/mcp") == "http://127.0.0.1:9110"
+    assert adapters_registry.gateway_http_base("http://127.0.0.1:9110/") == "http://127.0.0.1:9110"
+
+
+# ---------------------------------------------------------------- mcad 정상 경로(REST 정본)
+def _capture_mcad(*, rest_token="service-pat", tools=None, ref=None, rest_seen=None, mcp_seen=None,
+                  routes=None):
+    recorder = CallRecorder("cafe0000deadbeef", mcp=_mcp(tools or MCP_TOOLS_FULL, mcp_seen),
+                            rest=_rest(routes or REST_ROUTES, rest_seen, rest_token))
+    adapter = mcad.McadAdapter(APP_KEY)
+    payload = {"stepforge_project_id": SF_PROJECT, "detect_job_id": "01JDET"}
+    payload.update(ref or {})
+    return adapter.capture(payload, _principal(), recorder), recorder
+
+
+def test_mcad_rest_channel_builds_world_bbox_and_resolves_edges_by_node_id():
+    result, recorder = _capture_mcad()
+    source = result["source"]
+    assert source["channel"] == "rest+mcp"
+    assert source["ref"]["unit_system"] == "mm"
+    assert source["ref"]["detect_finished_at"] == 1756590000
+    assert source["ref"]["step_files"][0]["header_unit"] == "millimetre"
+    assert source["degraded"] == []
+    assert source["tol_known_keys"] == ["clearance_gap", "tied_area", "tied_gap", "tied_width"]
+    assert len(source["tol_config_hash"]) == 64
+
+    parts = {n["label"]: n for n in result["nodes"] if n["kind"] == "part"}
+    assert set(parts) == {"PLATE_1", "PLATE_2"}          # shape_def 없는 BRACKET_L 은 노드가 아니다
+    plate2 = parts["PLATE_2"]["attrs"]
+    # world_transform 을 8꼭짓점에 적용해 축정렬 bbox 를 다시 잡는다(±0.01 mm).
+    assert plate2["bbox_world"] == pytest.approx([0, 0, 1.2, 50, 40, 2.2], abs=0.01)
+    assert plate2["centroid_world"] == pytest.approx([25.0, 20.0, 1.7], abs=0.01)
+    assert plate2["bbox_def"] == [0, 0, 0, 50, 40, 1.0]  # 정의 좌표계는 그대로 남는다
+    assert plate2["min_dim"] == 1.0 and plate2["size_sorted"] == [50, 40, 1.0]
+    assert parts["PLATE_1"]["provenance"]["node_id_at_capture"] == "n4"
+
+    ifaces = [e for e in result["edges"] if e["kind"] == "tied"]
+    assert len(ifaces) == 1
+    edge = ifaces[0]
+    assert edge["a"].endswith("PLATE_1") and edge["b"].endswith("PLATE_2")
+    assert edge["attrs"]["cross_file"] is False          # 소스 int 0 → bool 정규화
+    assert edge["attrs"]["penetration_depth_is_lower_bound"] is True
+    assert edge["attrs"]["tol_config_hash"] == source["tol_config_hash"]
+    assert edge["status"] == "confirmed"
+    assert any(e["kind"] == "part_of" for e in result["edges"])
+
+    # 소스 원문 warnings 는 축어로 보존한다.
+    assert [w["code"] for w in result["warnings"] if w["code"] == "auto_named"] == ["auto_named"]
+    # 모든 호출이 로그로 남고 call_id 는 record_calls 공식과 같다.
+    assert result["call_ids"] == [c for c in result["call_ids"]] and result["call_ids"][0] == "cafe0000-001"
+    assert len(recorder.calls) == len(result["call_ids"])
+    assert {c["channel"] for c in recorder.calls} == {"mcp", "rest"}
+
+
+def test_mcad_source_hash_is_deterministic_and_covers_tol_and_job():
+    first, _ = _capture_mcad()
+    second, _ = _capture_mcad()
+    assert first["source"]["source_hash"] == second["source"]["source_hash"]
+    other, _ = _capture_mcad(ref={"detect_job_id": "01JOTHER"})
+    assert other["source"]["source_hash"] != first["source"]["source_hash"]
+
+
+def test_mcad_stops_when_detect_job_is_not_done():
+    tools = dict(MCP_TOOLS_FULL, job_status={"status": "running", "params": {}})
+    with pytest.raises(AppError) as err:
+        _capture_mcad(tools=tools)
+    assert err.value.http_status == 409 and err.value.code == "detect_not_done"
+
+
+# ---------------------------------------------------------------- mcad 강등 경로(MCP 만)
+def test_mcad_without_service_pat_degrades_to_mcp_only():
+    """서비스 PAT 가 없으면 REST 를 한 번도 부르지 않고 mcp_degraded 로 내려간다."""
+    rest_seen: list[str] = []
+    result, _ = _capture_mcad(rest_token=None, rest_seen=rest_seen)
+    assert rest_seen == []
+    source = result["source"]
+    assert source["channel"] == "mcp"
+    assert {"mcp_degraded", "no_node_id", "no_world_transform", "volume_null_pre_d168"} <= set(source["degraded"])
+    # tol 은 detect 잡 params 4키로 아직 살아 있다.
+    assert "tol_config_unknown" not in source["degraded"]
+    assert source["ref"]["unit_system"] is None          # G6 (b) 입력이 결측이다
+    parts = [n for n in result["nodes"] if n["kind"] == "part"]
+    assert {n["label"] for n in parts} == {"PLATE_1", "PLATE_2"}
+    assert all(n["attrs"]["bbox_world"] is None and n["attrs"]["volume"] is None for n in parts)
+    assert all("volume_null" in n["status_flags"] for n in parts)
+    assert result["missing"] == {"world_transform_absent": True, "volume_null": True}
+    # 끝점 id 를 못 쓰므로 이름이 유일할 때만 엣지를 세운다.
+    assert [e["kind"] for e in result["edges"] if e["kind"] == "tied"] == ["tied"]
+
+
+def test_mcad_mcp_only_drops_edges_with_duplicate_names():
+    twin = json.loads(json.dumps(PROJECT_TREE_MCP))
+    twin["nodes"].append({"name": "PLATE_1", "kind": "instance",
+                          "path": "/sif-e2e/a_stack.step/STACK_ASM/COPY/PLATE_1"})
+    parts = json.loads(json.dumps(PARTS_MCP))
+    parts["parts"].append(dict(parts["parts"][0], path="/sif-e2e/a_stack.step/STACK_ASM/COPY/PLATE_1"))
+    tools = dict(MCP_TOOLS_FULL, project_tree=twin, list_parts=parts)
+    result, _ = _capture_mcad(rest_token=None, tools=tools)
+    assert [e["kind"] for e in result["edges"] if e["kind"] == "tied"] == []
+    assert [w["code"] for w in result["warnings"] if w["code"] == "ambiguous_edge_endpoint"]
+
+
+def test_mcad_detects_truncation_by_interface_graph_counts():
+    """소스가 truncated 플래그를 주지 않으므로 counts 합 > 수신 행 수로 판정한다(recon §4 4항).
+
+    정상 경로는 REST /interfaces 라 그쪽을 비우고, MCP 폴백도 같은 규칙임을 함께 고정한다.
+    """
+    tools = dict(MCP_TOOLS_FULL, list_interfaces=IFACE_EMPTY)
+    routes = dict(REST_ROUTES, **{f"{BASE}/interfaces": IFACE_EMPTY})
+    result, _ = _capture_mcad(tools=tools, routes=routes)
+    assert "interfaces_truncated" in result["source"]["degraded"]
+    # MCP 폴백(REST 자격 없음)에서도 같은 판정이다.
+    degraded_only, _ = _capture_mcad(tools=tools, rest_token=None)
+    assert "interfaces_truncated" in degraded_only["source"]["degraded"]
+    # counts 는 0 인 kind 키가 생략돼 와도 4키 고정으로 정규화한다.
+    assert set(result["source"]["stats"]["interface_counts"]) == set(mcad.IFACE_KINDS)
+
+
+def test_mcad_marks_tol_unknown_without_job_or_tol_config():
+    routes = dict(REST_ROUTES)
+    routes[BASE] = {"id": SF_PROJECT, "name": "sif-e2e"}
+    recorder = CallRecorder("cafe0000deadbeef", mcp=_mcp(MCP_TOOLS_FULL), rest=_rest(routes))
+    result = mcad.McadAdapter(APP_KEY).capture({"stepforge_project_id": SF_PROJECT}, _principal(), recorder)
+    assert result["source"]["tol_config_hash"] is None
+    assert {"tol_config_unknown", "detect_absent"} <= set(result["source"]["degraded"])
+
+
+def test_mcad_raises_when_tree_unreadable_on_both_channels():
+    recorder = CallRecorder("cafe0000deadbeef", mcp=_mcp({}), rest=_rest({}, token=None))
+    with pytest.raises(AppError) as err:
+        mcad.McadAdapter(APP_KEY).capture({"stepforge_project_id": SF_PROJECT}, _principal(), recorder)
+    assert err.value.http_status == 409 and err.value.code == "source_unreachable"
+
+
+# ---------------------------------------------------------------- dyna
+def test_dyna_without_portal_pat_makes_no_call():
+    """러너 자격 (b) 가 없으면 호출을 한 번도 하지 않고 dyna_absent 로 내려간다(plan §2.13.4)."""
+    def boom(request: httpx.Request) -> httpx.Response:
+        raise AssertionError(f"자격 없이 소스 호출이 나갔다: {request.url}")
+
+    recorder = CallRecorder("cafe0000deadbeef",
+                            mcp=McpHttpClient("https://gw.test/mcp",
+                                              client=httpx.Client(transport=httpx.MockTransport(boom))))
+    result = dyna_adapter.DynaAdapter(DYNA_APP_KEY).capture(
+        {"session_id": "01JSES", "file_id": "01JFIL"}, _principal(portal=None), recorder)
+    assert result["missing"] == {"dyna_absent": True}
+    assert result["nodes"] == [] and recorder.calls == []
+    assert result["source"]["channel"] is None
+    assert [w["code"] for w in result["warnings"]] == ["dyna_pat_absent"]
+
+
+def test_dyna_capture_builds_pid_nodes_contacts_and_scope():
+    tools = {"inspect_file": INSPECT_FILE, "material_usage": {"materials": []},
+             "section_contact_usage": {"sections": []}, "corpus_summary": {"sessions": 12}}
+    recorder = CallRecorder("cafe0000deadbeef", mcp=_mcp(tools))
+    result = dyna_adapter.DynaAdapter(DYNA_APP_KEY).capture(
+        {"session_id": "01JSES", "file_id": "01JFIL", "sha256": KSHA}, _principal(), recorder)
+    pids = {n["local_key"]: n for n in result["nodes"] if n["kind"] == "pid"}
+    assert set(pids) == {"1", "2"}
+    assert pids["1"]["canon_key"] == f"dyna:{KSHA[:8]}:1"
+    assert pids["1"]["group"] == "Stack"                  # `\` 앞이 group 이다
+    # shell 파트의 volume 0 은 미측정이지 0 이 아니다.
+    assert pids["2"]["attrs"]["volume"] is None and "shell_volume_zero" in pids["2"]["status_flags"]
+    assert "no_secid" in result["source"]["degraded"] and pids["1"]["attrs"]["secid"] is None
+    contact = [e for e in result["edges"] if e["kind"] == "contact"]
+    scope = [e for e in result["edges"] if e["kind"] == "scope"]
+    assert len(contact) == 1 and contact[0]["attrs"]["contact_type"] == "*CONTACT_TIED_SURFACE_TO_SURFACE"
+    assert scope[0]["b"] is None and len(scope[0]["members"]) == 2
+    assert result["source"]["context"]["corpus_usage"]["corpus"] == {"sessions": 12}
+    assert result["source"]["stats"]["size"] == [50, 40, 2.2]
+    assert "detect_absent" in result["source"]["degraded"]
+
+
+def test_dyna_result_absent_without_reports():
+    recorder = CallRecorder("cafe0000deadbeef", mcp=_mcp({}))
+    result = dyna_adapter.DynaResultAdapter(DYNA_APP_KEY).capture({}, _principal(), recorder)
+    assert result["results"] is None and result["missing"] == {"dyna_result_absent": True}
+    assert recorder.calls == []
+
+
+def _report_mcp(by_report: dict, extra: dict | None = None) -> McpHttpClient:
+    """report_summary 만 report_id 별로 다른 응답을 주는 MCP 전송."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode())
+        if payload["method"] == "initialize":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {}},
+                                  headers={"mcp-session-id": "sess-1"})
+        if payload["method"] == "notifications/initialized":
+            return httpx.Response(202)
+        name = payload["params"]["name"]
+        args = payload["params"]["arguments"]
+        if name == "report_summary":
+            body = by_report.get(str(args.get("report_id")))
+        else:
+            body = (extra or {}).get(name)
+        if body is None:
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {
+                "isError": True, "content": [{"type": "text", "text": f"unknown: {name}"}]}})
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"structuredContent": body}})
+
+    return McpHttpClient("https://gw.test/mcp", client=httpx.Client(transport=httpx.MockTransport(handler)))
+
+
+def test_dyna_result_flags_kind_mismatch():
+    """지정한 리포트의 kind 가 섞이면 results 를 만들지 않고 result_kind_mismatch 를 세운다(plan §2.2)."""
+    recorder = CallRecorder("cafe0000deadbeef", mcp=_report_mcp({
+        "r1": {"id": "r1", "kind": "deep", "summary": "요약", "sim_params": {}},
+        "r2": {"id": "r2", "kind": "sphere", "summary": "요약", "sim_params": {}},
+    }))
+    result = dyna_adapter.DynaResultAdapter(DYNA_APP_KEY).capture(
+        {"report_ids": ["r1", "r2"]}, _principal(), recorder)
+    assert result["results"] is None
+    assert result["missing"] == {"result_kind_mismatch": True}
+    assert [w["code"] for w in result["warnings"]] == ["result_kind_mismatch"]
+
+
+def test_dyna_result_builds_results_overlay():
+    summary = {"id": "r1", "kind": "sphere", "label": "낙하", "summary": "요약", "n_cases": 12,
+               "sim_params": {"unit_system": "mm-kg-ms", "drop_height": 1.2,
+                              "impactor": {"mass": 0.5, "velocity": 4.85}}}
+    extra = {
+        "report_part_risk": {"report_id": "r1", "kind": "sphere", "parts": [
+            {"part_id": "1", "part_name": "Stack\\PLATE_1", "worst_stress": {"value": 210.0, "case_key": "0deg"},
+             "worst_g": {"value": 900.0}, "worst_disp": None, "min_safety_factor": None}]},
+        "report_findings": [{"severity": "WARNING", "title": "국부 항복", "detail": "…", "recommendation": "…"}],
+        "report_worst_cases": [{"case_key": "0deg", "identity": {"angle": 0}, "max_stress": 210.0,
+                                "max_g": 900.0, "max_disp": 1.1, "min_safety_factor": None}],
+        "report_energy_flow": {"edges": [{"src": 1, "dst": 2, "name": "tie1", "peak_force": 12.0,
+                                          "total_work": 3.0, "confidence": "low"}]},
+    }
+    recorder = CallRecorder("cafe0000deadbeef", mcp=_report_mcp({"r1": summary}, extra))
+    result = dyna_adapter.DynaResultAdapter(DYNA_APP_KEY).capture(
+        {"report_ids": ["r1"], "dyna_source_hash": KSHA, "pid_to_nid": {"1": f"dyna:{KSHA[:8]}:1"}},
+        _principal(), recorder)
+    results = result["results"]
+    assert results["kind"] == "sphere" and results["report_ids"] == ["r1"]
+    assert results["part_risk"][0]["nid"] == f"dyna:{KSHA[:8]}:1"
+    assert results["part_risk"][0]["min_safety_factor"] is None      # sphere 는 항상 null 이다
+    assert [f["severity"] for f in results["findings"]] == ["WARNING"]
+    assert results["worst_cases"][0]["case_key"] == "0deg"
+    # src/dst 가 pid 임을 확정하기 전이라 load_path 엣지는 만들지 않고 원문만 둔다.
+    assert result["edges"] == [] and len(results["energy_edges"]) == 1
+    assert result["source"]["binding"] == {"bound_to_dyna_source_hash": KSHA, "method": "user_declared"}
+    assert len(results["sim_params_hash"]) == 64
+
+
+def test_group_of_follows_report_parser_rule():
+    assert dyna_adapter.group_of("Stack\\PLATE_1") == "Stack"
+    assert dyna_adapter.group_of("Housing/Top") == "Housing"
+    assert dyna_adapter.group_of("PLATE") == "Other"
+
+
+# ---------------------------------------------------------------- ecad 스텁
+def test_ecad_stub_is_contract_only():
+    recorder = CallRecorder("cafe0000deadbeef", mcp=_mcp({}))
+    result = ecad_stub.EcadStubAdapter().capture({}, _principal(), recorder)
+    assert result["nodes"] == [] and result["edges"] == []
+    assert result["degraded"] == ["ecad_absent"] and result["missing"] == {"ecad_absent": True}
+    assert recorder.calls == []
+    assert ecad_stub.REQUIRED_TOOLS == ("odb_get_board", "odb_list_components", "odb_list_nets",
+                                        "odb_get_stackup")
+
+
+# ---------------------------------------------------------------- capture_all → freeze_snapshot
+def test_capture_all_requires_mcad_source():
+    with pytest.raises(AppError) as err:
+        adapters_registry.capture_all(sources=[{"kind": "dyna", "ref": {}}], principal=_principal())
+    assert err.value.http_status == 409 and err.value.code == "source_unreachable"
+
+
+def test_capture_all_freezes_snapshot_with_matching_call_ids(risk_store):
+    risk_store.execute(
+        "INSERT INTO rr_projects(id, owner_sub, code, created_at, updated_at) VALUES (?,?,?,?,?)",
+        ("p_cap", OWNER, "DV1", 100, 100))
+    tools = dict(MCP_TOOLS_FULL, inspect_file=INSPECT_FILE, material_usage={}, section_contact_usage={},
+                 corpus_summary={},
+                 report_summary={"id": "r1", "kind": "sphere", "summary": "요약", "sim_params": {}},
+                 report_part_risk={"parts": [{"part_id": "1", "part_name": "Stack\\PLATE_1",
+                                              "worst_stress": {"value": 210.0, "case_key": "0deg"},
+                                              "worst_g": {"value": 900.0}, "worst_disp": None,
+                                              "min_safety_factor": None}]},
+                 report_findings=[], report_worst_cases=[], report_energy_flow={"edges": []})
+    mcp_client = _mcp(tools)
+    rest_client = _rest(REST_ROUTES)
+    captured = adapters_registry.capture_all(
+        sources=[{"kind": "mcad", "app_key": APP_KEY, "ref": {"stepforge_project_id": SF_PROJECT,
+                                                              "detect_job_id": "01JDET"}},
+                 {"kind": "dyna", "app_key": DYNA_APP_KEY, "ref": {"session_id": "01JSES", "file_id": "01JFIL",
+                                                                   "sha256": KSHA}},
+                 {"kind": "dyna_result", "app_key": DYNA_APP_KEY, "ref": {"report_ids": ["r1"]}}],
+        principal=_principal(), mcp_client=mcp_client, rest_client=rest_client)
+    kinds = [r["source"]["kind"] for r in captured["results"]]
+    assert kinds == ["mcad", "dyna", "dyna_result", "ecad"]
+    # dyna_result 는 dyna 뒤에 와야 pid→nid 를 넘겨받는다(결과층 오버레이가 nid 로 붙는다).
+    overlay = captured["results"][2]["results"]["part_risk"][0]
+    assert overlay["nid"] == ir_builder.make_nid(f"dyna:{KSHA[:8]}:1")
+    assert captured["results"][2]["source"]["binding"]["bound_to_dyna_source_hash"] == KSHA
+
+    frozen = ir_builder.freeze_snapshot(
+        risk_store, project_id="p_cap", owner_sub=OWNER, label="DV1",
+        adapter_results=captured["results"], calls=captured["calls"],
+        snapshot_id=captured["snapshot_id"], captured_at=1756600000)
+    assert frozen["reused"] is False and len(frozen["ir_hash"]) == 64
+    ir = ir_builder.load_ir(risk_store, frozen["snapshot_id"])
+    assert ir["missing"]["ecad_absent"] is True and ir["missing"]["dyna_absent"] is False
+    assert {n["domain"] for n in ir["nodes"]} == {"mcad", "dyna"}
+    # 결과층이 dyna 노드 위에 오버레이로 붙는다(nid 사상이 맞아야 살아난다).
+    overlaid = [n for n in ir["nodes"] if (n["attrs"].get("results") or {}).get("worst_stress")]
+    assert [n["local_key"] for n in overlaid] == ["1"]
+
+    # provenance.call_id 가 rr_snapshot_calls 의 실제 행 id 와 일치해야 인용 tool:<call_id> 가 산다.
+    rows = {r["call_id"] for r in ir_builder.load_calls(risk_store, frozen["snapshot_id"],
+                                                        include_response=False)}
+    used = {n["provenance"]["call_id"] for n in ir["nodes"] if n["provenance"].get("call_id")}
+    assert used and used <= rows
+    logged = {r["tool"] for r in ir_builder.load_calls(risk_store, frozen["snapshot_id"],
+                                                       include_response=False)}
+    assert f"GET /apps/step_forge/api/projects/{SF_PROJECT}/tree" in logged
+
+    # 같은 원문으로 다시 동결하면 같은 ir_hash 라 기존 스냅샷을 재사용한다(결정론).
+    again = ir_builder.freeze_snapshot(
+        risk_store, project_id="p_cap", owner_sub=OWNER, label="DV1",
+        adapter_results=captured["results"], calls=[], snapshot_id=captured["snapshot_id"],
+        captured_at=1756600000)
+    assert again["reused"] is True and again["ir_hash"] == frozen["ir_hash"]

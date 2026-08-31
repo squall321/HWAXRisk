@@ -1,6 +1,7 @@
-# E2E 스모크 — 가짜 어댑터·FakePanelEngine 으로 과제→소스→스냅샷→게이트→2차 스냅샷→same-as→diff→타깃→편성→패널→원자→등록부→완결→브리프를 외부 호출 0 으로 한 번 흘린다(plan §9 통과 기준)
+# E2E 스모크 — 실 어댑터 계약(MockTransport 위 가짜 StepForge·KooRemapper)과 FakePanelEngine 으로 과제→소스→스냅샷→게이트→2차 스냅샷→same-as→diff→타깃→편성→패널→원자→등록부→완결→브리프→export 왕복을 외부 호출 0 으로 한 번 흘린다(plan §9 통과 기준)
 from __future__ import annotations
 
+import collections
 import copy
 import json
 
@@ -8,9 +9,14 @@ import httpx
 import pytest
 
 from app import brief as brief_module
-from app import common, diff as diff_module, identity, ir_builder, narrative, planner, registry, routes, sameas
+from app import diff as diff_module, export, identity, ir_builder, narrative, planner, registry, routes, sameas
 from app import state as state_module
+from app.adapters import registry as adapters_registry
+from app.adapters.base import RestGetClient
 from app.errors import AppError
+from app.ra_client import McpHttpClient
+from app.risk_store import RiskStore
+from tests import test_adapters as recon
 from tests.conftest import FIXTURES_DIR
 
 OWNER = "e2e@example.com"
@@ -49,49 +55,84 @@ def _fixture(name: str) -> dict:
     return json.loads((FIXTURES_DIR / "ir" / name).read_text(encoding="utf-8"))
 
 
-class FakeAdapter:
-    """IrSource 프로토콜의 시험용 구현 — 네트워크 대신 픽스처 AdapterResult 를 돌려준다."""
+class FakeSourceApps:
+    """정찰(recon) 실측 응답 형상을 그대로 돌려주는 가짜 StepForge·KooRemapper.
 
-    version = "1.0-fake"
+    실 어댑터(app/adapters/*.py)가 이 응답 위에서 돌므로 계약이 깨지면 이 스모크가 먼저 깨진다.
+    전송은 httpx.MockTransport 뿐이라 소켓으로 나가는 호출이 하나도 없다.
+    """
 
-    def __init__(self, kind: str, result: dict) -> None:
-        self.kind = kind
-        self._result = result
-        self.captures = 0
+    def __init__(self) -> None:
+        self.rest = copy.deepcopy(recon.REST_ROUTES)
+        self.tools = copy.deepcopy(dict(
+            recon.MCP_TOOLS_FULL,
+            inspect_file=recon.INSPECT_FILE,
+            material_usage={"materials": []},
+            section_contact_usage={"sections": []},
+            corpus_summary={"sessions": 12},
+            report_summary={"id": "r1", "kind": "sphere", "label": "낙하", "summary": "낙하 12케이스 요약",
+                            "n_cases": 12, "sim_params": {"unit_system": "mm-kg-ms", "drop_height": 1.2}},
+            report_part_risk={"report_id": "r1", "kind": "sphere", "parts": [
+                {"part_id": "1", "part_name": "Stack\\PLATE_1",
+                 "worst_stress": {"value": 210.0, "case_key": "0deg"}, "worst_g": {"value": 900.0},
+                 "worst_disp": None, "min_safety_factor": None}]},
+            report_findings=[],
+            report_worst_cases=[{"case_key": "0deg", "identity": {"angle": 0}, "max_stress": 210.0,
+                                 "max_g": 900.0, "max_disp": 1.1, "min_safety_factor": None}],
+            report_energy_flow={"edges": []},
+        ))
+        self.rest_seen: list[str] = []
+        self.mcp_seen: list[tuple[str, dict]] = []
 
-    def discover(self, registry_map):  # noqa: ARG002 — 프로토콜 서명만 맞춘다.
-        return {"kind": self.kind, "app_key": self._result["source"].get("app_key")}
+    # ---- 2차 스냅샷용 설계 변경 — PLATE_2 두께 1.0→1.4 mm · PLATE_1 재질 교체 · tied 간극 0.00→0.35 mm.
+    def revise(self) -> None:
+        tree = self.rest[f"{recon.BASE}/tree"]
+        s2 = tree["shape_defs"]["s2"]
+        s2["bbox"][5] = 1.4
+        s2["volume"] = 2800.0
+        tree["shape_defs"]["s1"]["material"] = "AZ91D"
+        for part in self.rest[f"{recon.BASE}/parts"]["parts"]:
+            if part["shape_def_id"] == "s2":
+                part["bbox"][5] = 1.4
+                part["volume"] = 2800.0
+        self.tools["list_interfaces"]["interfaces"][0]["min_gap"] = 0.35
+        self.tools["interface_graph"]["edges"][0]["min_gap"] = 0.35
 
-    def capture(self, ref, principal, recorder):  # noqa: ARG002
-        self.captures += 1
-        return copy.deepcopy(self._result)
+    # ---- 전송(MockTransport). 계약에 없는 도구·경로는 소스 앱처럼 오류로 돌려준다.
+    def _mcp_handler(self, request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode())
+        if payload["method"] == "initialize":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {}},
+                                  headers={"mcp-session-id": "sess-e2e"})
+        if payload["method"] == "notifications/initialized":
+            return httpx.Response(202)
+        name = payload["params"]["name"]
+        self.mcp_seen.append((name, payload["params"]["arguments"]))
+        if name not in self.tools:
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {
+                "isError": True, "content": [{"type": "text", "text": f"unknown tool: {name}"}]}})
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1,
+                                         "result": {"structuredContent": self.tools[name]}})
 
+    def _rest_handler(self, request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET", "어댑터는 소스 앱에 GET 만 한다."
+        assert request.headers["authorization"] == "Bearer service-pat"
+        self.rest_seen.append(request.url.path)
+        body = self.rest.get(request.url.path)
+        if body is None:
+            return httpx.Response(404, json={"detail": "not found"})
+        return httpx.Response(200, json=body)
 
-def _revised_mcad(base: dict) -> dict:
-    """2차 스냅샷용 설계 변경 — PLATE_2 두께 1.0→1.4 mm · BRACKET_L 재질 교체 · tied 간극 0.00→0.35 mm."""
-    revised = copy.deepcopy(base)
-    for node in revised["nodes"]:
-        if node["canon_key"].endswith("PLATE_2"):
-            attrs = node["attrs"]
-            attrs["bbox_def"][5] = 1.4
-            attrs["bbox_world"][5] = 1.4
-            attrs["size_def"][2] = 1.4
-            attrs["size_sorted"][2] = 1.4
-            attrs["min_dim"] = 1.4
-            attrs["volume"] = 3500.0
-        elif node["canon_key"].endswith("BRACKET_L"):
-            node["attrs"]["material"] = "AL6061"
-    for edge in revised["edges"]:
-        if edge["kind"] == "tied":
-            edge["attrs"]["min_gap"] = 0.35
-    return revised
-
-
-def _freeze(store, adapters, *, label: str, project_id: str, captured_at: int) -> dict:
-    """어댑터 capture 결과를 모아 IR 을 동결한다 — POST /projects/{id}/snapshots 가 501 인 동안의 우회 배선이다."""
-    results = [a.capture({}, None, None) for a in adapters]
-    return ir_builder.freeze_snapshot(store, project_id=project_id, owner_sub=OWNER, label=label,
-                                      adapter_results=results, captured_at=captured_at)
+    def channels(self) -> dict:
+        """routes.create_snapshot 이 부르는 clients_from_settings 의 반환 형상."""
+        return {
+            "mcp": McpHttpClient("https://gw.test/mcp", headers={"Authorization": "Bearer portal-pat"},
+                                 client=httpx.Client(transport=httpx.MockTransport(self._mcp_handler))),
+            "rest": RestGetClient("https://heax.test", "service-pat",
+                                  client=httpx.Client(transport=httpx.MockTransport(self._rest_handler))),
+            "portal_pat": "portal-pat",
+            "service_pat": "service-pat",
+        }
 
 
 # ---------------------------------------------------------------- 가짜 심의 엔진(engine_client 의 자리)
@@ -177,64 +218,8 @@ def _risk_spec(*, target_key: str, project_id: str, snapshot_ids: tuple[str, str
     }
 
 
-# ---------------------------------------------------------------- narrative.persist_panel_result 대역
-def _spec_context(store, panel, target_key: str, project_id: str, snapshot_ids, diff_id: str) -> narrative.SpecContext:
-    irs = {}
-    for sid in snapshot_ids:
-        ir = ir_builder.load_ir(store, sid)
-        irs[sid] = {
-            "nodes": {n["nid"]: {**n, **(n.get("attrs") or {})} for n in ir["nodes"]},
-            "edges": {e["eid"]: {**e, **(e.get("attrs") or {})} for e in ir["edges"]},
-            "dims_named": ir.get("dims_named") or [],
-            "rollups": ir.get("rollups") or {},
-            "warnings": ir.get("warnings") or [],
-        }
-    row = store.query_one("SELECT diff_json FROM rr_diffs WHERE id = ?", (diff_id,))
-    return narrative.SpecContext(
-        panel_id=panel["id"], target_key=target_key, project_id=project_id, owner_sub=OWNER,
-        kind="diff", snapshot_ids=tuple(snapshot_ids), diff_id=diff_id, store=store,
-        irs=irs, diff=json.loads(row["diff_json"]),
-        seats=tuple(s["key"] for s in panel["seats"]),
-    )
-
-
-def _make_persist(ctx: narrative.SpecContext):
-    """rr_findings·좌석 회계까지 저장하는 대역. 앱의 narrative.persist_panel_result 는 아직 없다(배선 메모)."""
-    captured: dict = {}
-
-    def persist(store, panel_id, *, decision_text, spec, turns, attribution, actor=None):  # noqa: ARG001
-        normalized = narrative.normalize_risk_spec(spec or {}, ctx, prose=decision_text)
-        captured["normalized"] = normalized
-        atoms = normalized["spec"]["findings"] + normalized["spec"]["gains"]
-        now = common.now_epoch()
-        for index, atom in enumerate(atoms):
-            store.execute(
-                "INSERT INTO rr_findings(finding_id, claim_uid, target_key, panel_id, project_id, owner_sub,"
-                " visibility, direction, domain, mechanism, mechanism_detail, change_kind, subject_key, ckeys_json,"
-                " severity, sev3, judgement, detectability, detect_tool, evidence_grade, precedent, cluster_key,"
-                " finding_json, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (
-                    f"{panel_id}-{index}", atom["claim_uid"], ctx.target_key, panel_id, ctx.project_id, OWNER,
-                    "private", atom["direction"], atom["domain"], atom["mechanism"], atom["mechanism_detail"],
-                    atom["change_kind"], atom["subject_key"], common.canonical_json(atom["subject"]["ckeys"]),
-                    atom["severity"], atom["sev3"], atom["judgement"], atom["detectability"]["level"],
-                    atom["detectability"]["tool"], atom["evidence_grade"], atom["precedent"], atom["cluster_key"],
-                    common.canonical_json(atom), now,
-                ),
-            )
-        seats = []
-        for key in ctx.seats:
-            state = attribution["seats"].get(key) or {}
-            seats.append({"agent_key": key, "opinion_id": f"{panel_id}:{key}",
-                          "turns_n": int(state.get("turns_n") or 0),
-                          "cited_refs_n": 1, "abstained": False})
-        return {"seats": seats, "findings": len(atoms)}
-
-    return persist, captured
-
-
 # ================================================================ 본 흐름
-def test_e2e_full_flow(wired, ident, monkeypatch):
+def test_e2e_full_flow(wired, ident, monkeypatch, tmp_path):
     """계획 §9 의 한 바퀴 — 어느 단계도 외부를 부르지 않고 원장이 이어진다."""
     store = wired
 
@@ -245,42 +230,64 @@ def test_e2e_full_flow(wired, ident, monkeypatch):
     assert store.query_one("SELECT code FROM rr_projects WHERE id = ?", (project_id,))["code"] == PROJECT_CODE
 
     # ── 2. 소스 연결(POST /api/projects/{id}/sources) — 어댑터가 planned 라 probe 는 unreachable 이 정상이다.
-    for kind, app_key in (("mcad", "heax-step_forge"), ("dyna", "heax-kooremapper_mcp")):
-        added = routes.add_source(project_id, routes.SourceBody(kind=kind, app_key=app_key, ref={"f": kind}),
+    #     ref 는 정찰 실측 계약 그대로다(mcad=stepforge_project_id·detect_job_id, dyna=session_id·file_id·sha256).
+    source_refs = {
+        "mcad": {"stepforge_project_id": recon.SF_PROJECT, "detect_job_id": "01JDET"},
+        "dyna": {"session_id": "01JSES", "file_id": "01JFIL", "sha256": recon.KSHA},
+        "dyna_result": {"report_ids": ["r1"]},
+    }
+    for kind, app_key in (("mcad", recon.APP_KEY), ("dyna", recon.DYNA_APP_KEY),
+                          ("dyna_result", recon.DYNA_APP_KEY)):
+        added = routes.add_source(project_id, routes.SourceBody(kind=kind, app_key=app_key, ref=source_refs[kind]),
                                   ident=ident)
         assert added["ok"] is True
         assert added["probe"]["status"] in ("linked", "unreachable")
-    assert len(routes._project_sources(project_id)) == 2
+    assert len(routes._project_sources(project_id)) == 3
 
-    # ── 3. 스냅샷(IR 동결). 라우트는 어댑터 capture 부재로 아직 501 이고, 동결 자체는 가짜 어댑터로 돈다.
-    with pytest.raises(AppError) as not_impl:
-        routes.create_snapshot(project_id, routes.SnapshotBody(label="DV1", kinds=["mcad"]), ident=ident)
-    assert not_impl.value.http_status == 501
-
-    mcad = FakeAdapter("mcad", _fixture("adapter_mcad_basic.json"))
-    dyna = FakeAdapter("dyna", _fixture("adapter_dyna_basic.json"))
-    first = _freeze(store, [mcad, dyna], label="DV1", project_id=project_id, captured_at=1756600000)
-    assert first["reused"] is False and mcad.captures == 1 and dyna.captures == 1
-    assert len(first["ir_hash"]) == 64
-    assert store.query_one("SELECT node_count, edge_count FROM rr_snapshots WHERE id = ?",
-                           (first["snapshot_id"],))["node_count"] == 7
+    # ── 3. 스냅샷(POST /api/projects/{id}/snapshots). 라우트가 실 어댑터를 부른다 — 더는 501 이 아니다.
+    apps = FakeSourceApps()
+    monkeypatch.setattr(adapters_registry, "clients_from_settings", lambda *a, **k: apps.channels())
+    first = routes.create_snapshot(project_id, routes.SnapshotBody(label="DV1"), ident=ident)
+    assert set(first) >= {"snapshot_id", "ir_hash", "reused", "partial", "blocked", "gates_summary", "degraded"}
+    assert first["reused"] is False and len(first["ir_hash"]) == 64
+    # 실제로 소스 앱을 찔렀다 — REST 5경로 + MCP 도구 호출. /interfaces 는 StepForge REST 에 실재하고
+    # (app/rest.py `/projects/{project_id}/interfaces`) MCP 판에 없는 행 id·truncation 을 준다.
+    assert apps.rest_seen == [recon.BASE, f"{recon.BASE}/tree", f"{recon.BASE}/artifacts/graph/",
+                              f"{recon.BASE}/parts", f"{recon.BASE}/interfaces"]
+    # REST 가 살아 있으면 계면은 REST 1회로 받고 MCP list_interfaces 4회는 부르지 않는다(정찰 §4 1항의 예산).
+    seen_mcp = {name for name, _ in apps.mcp_seen}
+    assert seen_mcp >= {"job_status", "interface_graph", "inspect_file", "report_summary"}
+    assert "list_interfaces" not in seen_mcp
+    ir_first = ir_builder.load_ir(store, first["snapshot_id"])
+    assert {n["domain"] for n in ir_first["nodes"]} == {"mcad", "dyna"}
+    assert store.query_one("SELECT node_count FROM rr_snapshots WHERE id = ?",
+                           (first["snapshot_id"],))["node_count"] == len(ir_first["nodes"])
+    # 결과층 오버레이는 nid 로 붙는다 — pid 1(Stack\PLATE_1) 위에 낙하 결과가 얹혔다.
+    overlaid = [n for n in ir_first["nodes"] if (n["attrs"].get("results") or {}).get("worst_stress")]
+    assert [n["local_key"] for n in overlaid] == ["1"]
+    # 캡처 호출은 전부 원장에 남고 인용 주소(tool:<call_id>)가 실재한다.
+    calls = ir_builder.load_calls(store, first["snapshot_id"], include_response=False)
+    assert f"GET /apps/step_forge/api/projects/{recon.SF_PROJECT}/tree" in {c["tool"] for c in calls}
 
     # ── 4. state 게이트 — 동결이 rr_states 를 함께 쓴다(G1~G6 판정 + 요약문).
     state = state_module.load_state(store, first["snapshot_id"])
     assert set(state["gates"]) == {"G1", "G2", "G3", "G4", "G5", "G6"}
     assert first["gates_summary"] == {k: bool(v["pass"]) for k, v in state["gates"].items()}
-    # 픽스처는 계면 1건이 auto(미확정)라 G3 만 fail 이고, G6(단위)가 살아 있어 차단은 아니다.
-    assert state["gates"]["G3"]["pass"] is False and state["gates"]["G6"]["pass"] is True
+    # 소스가 단위(mm)를 주고 계면이 confirmed 라 차단은 없다.
+    assert state["gates"]["G6"]["pass"] is True
     assert state["blocked"] is False and state["summary_text"].startswith("[대상]")
     assert store.query_one("SELECT blocked FROM rr_states WHERE snapshot_id = ?",
                            (first["snapshot_id"],))["blocked"] == 0
 
-    # ── 5. 두 번째 스냅샷 — 같은 과제의 개정판(두께·재질·간극 변경).
-    mcad2 = FakeAdapter("mcad", _revised_mcad(_fixture("adapter_mcad_basic.json")))
-    dyna2 = FakeAdapter("dyna", _fixture("adapter_dyna_basic.json"))
-    second = _freeze(store, [mcad2, dyna2], label="DV2", project_id=project_id, captured_at=1756700000)
+    # ── 5. 두 번째 스냅샷 — 같은 소스 앱이 개정판을 돌려준다(두께 1.0→1.4 · 재질 교체 · 간극 0.00→0.35).
+    apps.revise()
+    second = routes.create_snapshot(project_id, routes.SnapshotBody(label="DV2"), ident=ident)
     assert second["reused"] is False
     assert second["ir_hash"] != first["ir_hash"]
+    # 결정론 — 소스 응답이 그대로면 같은 ir_hash 가 나와 앞 스냅샷을 재사용한다(§2.5).
+    repeat = routes.create_snapshot(project_id, routes.SnapshotBody(label="DV2 재캡처"), ident=ident)
+    assert repeat["ir_hash"] == second["ir_hash"] and repeat["reused"] is True
+    assert repeat["snapshot_id"] == second["snapshot_id"]
 
     # ── 6. same-as — 두 스냅샷의 노드가 전부 대응한다(GET /api/sameas).
     review = routes.get_sameas(base=first["snapshot_id"], target=second["snapshot_id"], ident=ident)
@@ -288,7 +295,11 @@ def test_e2e_full_flow(wired, ident, monkeypatch):
     ir_base = ir_builder.load_ir(store, first["snapshot_id"])
     ir_target = ir_builder.load_ir(store, second["snapshot_id"])
     links = sameas.resolve(ir_base["nodes"], ir_target["nodes"], ir_base["edges"], ir_target["edges"], "pair", {})
-    assert len(links) == len(ir_base["nodes"]) == 7
+    # 불변식은 '기저 노드가 하나도 안 빠지고 대응된다' 이지 특정 개수가 아니다. 개수는 구성으로 고정한다 —
+    # mcad 3(어셈블리 + 기하 있는 파트 2. BRACKET_L 은 parts 응답에 없어 missing_geometry 로 빠진다) + dyna 3.
+    assert len(links) == len(ir_base["nodes"])
+    by_domain = collections.Counter(n["domain"] for n in ir_base["nodes"])
+    assert by_domain == {"mcad": 3, "dyna": 3}
     assert {link["status"] for link in links} == {"auto"}
 
     # ── 7. diff(POST /api/diffs) — 3층 + 의미 이벤트.
@@ -335,7 +346,7 @@ def test_e2e_full_flow(wired, ident, monkeypatch):
     assert sorted(seats) == sorted(f"{d}-agent-0" for d in ROSTER_DOMAINS)
     assert delib_opts["chair_template"] == planner.CHAIR_TEMPLATE
     assert delib_opts["question"].startswith(f"[리스크심사 {PROJECT_CODE} {target_key}]")
-    assert "mcad f=mcad" in delib_opts["question"] and "dyna f=dyna" in delib_opts["question"]
+    assert "mcad " in delib_opts["question"] and "dyna " in delib_opts["question"]
     # E0c(좌석 계약)는 브리프에서 빼고 build_delib_opts 가 다시 끼운다 — 항목 수는 같다.
     assert [e["source"] for e in delib_opts["evidence"]][1] == "seat_contract"
     assert len(delib_opts["evidence"]) == len(payload["evidence"])
@@ -367,11 +378,8 @@ def test_e2e_full_flow(wired, ident, monkeypatch):
     assert narrative.validate_risk_spec(parsed_spec) == []
 
     # ── 13. 원자 + 등록부 병합 + 완결 판정(POST /api/panels/{id}/complete).
-    ctx = _spec_context(store, panel, target_key, project_id,
-                        (first["snapshot_id"], second["snapshot_id"]), diff_id)
-    persist, captured = _make_persist(ctx)
-    monkeypatch.setattr(narrative, "persist_panel_result", persist, raising=False)
-
+    #     대역 없이 실제 narrative.persist_panel_result 를 태운다 — 배선이 켜졌다는 증거다(§6.7.2 8단계).
+    assert callable(getattr(narrative, "persist_panel_result", None))
     completed = routes.complete_panel(
         panel_id, engine="web", decision_text=result["decision_text"], turns=result["turns"],
         report_id=result["report_id"], conv_id=result["conv_id"], events=result["events"],
@@ -383,14 +391,18 @@ def test_e2e_full_flow(wired, ident, monkeypatch):
     assert completed["engine"] == "web" and completed["tool_mode"] == "tools"
 
     # 원자 — findings 2 + gains 1 이 전부 해석돼 rr_findings 에 앉는다.
-    normalized = captured["normalized"]
-    assert normalized["ok"] is True and "spec_parse_failed" not in normalized["quality"]["flag"]
-    atoms = normalized["spec"]["findings"] + normalized["spec"]["gains"]
-    assert len(atoms) == 3
+    atom_rows = store.query(
+        "SELECT finding_id, direction, subject_key, cluster_key, finding_json FROM rr_findings WHERE panel_id = ?"
+        " ORDER BY finding_id", (panel_id,))
+    assert len(atom_rows) == 3
+    atoms = [json.loads(r["finding_json"]) for r in atom_rows]
     assert all(a["subject_key"] and not a["subject_unresolved"] for a in atoms)
-    assert all(not a["dangling"] for a in atoms), "cites 는 실제 diff cid 라 dangling 이 없어야 한다."
-    assert {a["subject_key"] for a in atoms} == {thickness["subject_key"], material["subject_key"]}
-    assert store.query_one("SELECT COUNT(*) AS n FROM rr_findings WHERE panel_id = ?", (panel_id,))["n"] == 3
+    assert all(not a.get("dangling") for a in atoms), "cites 는 실제 diff cid 라 dangling 이 없어야 한다."
+    assert {r["subject_key"] for r in atom_rows} == {thickness["subject_key"], material["subject_key"]}
+    # 좌석 의견 행도 같은 경로에서 앉는다(발언이 있는 좌석만).
+    opinion_seats = {r["agent_key"] for r in store.query(
+        "SELECT agent_key FROM rr_seat_opinions WHERE panel_id = ? ORDER BY agent_key", (panel_id,))}
+    assert set(seats) <= opinion_seats
 
     # 등록부 — improvement 는 risk 와 다른 행으로 묶인다(.imp 접미).
     assert completed["findings_n"] == 3
@@ -444,6 +456,48 @@ def test_e2e_full_flow(wired, ident, monkeypatch):
     assert final["conv_id"] == "conv-e2e-0001" and final["report_id"] == 4242
     assert json.loads(final["model_json"])["model"] == "fake-model-1"
     assert json.loads(final["quality_json"])["actor_verified"] is True
+
+    # ── 15. 이동(GET /api/export → POST /api/import) — 한 바퀴가 만든 원장이 빈 상자로 그대로 건너간다.
+    body = "".join(export.iter_lines(store, OWNER, 0, data_dir=tmp_path))
+    head = json.loads(body.splitlines()[0])
+    assert head["schema_version"] == store.schema_version()
+    tables = {json.loads(line)["table"] for line in body.splitlines()[1:]}
+    assert {"rr_projects", "rr_sources", "rr_snapshots", "rr_snapshot_calls", "rr_diffs", "rr_targets",
+            "rr_panels", "rr_findings", "rr_registry"} <= tables
+
+    other = RiskStore(tmp_path / "moved" / "risk_review.db")
+    other.open()
+    other.migrate()
+    try:
+        moved = export.import_jsonl(other, OWNER, body)
+        assert moved["conflicts"] == [] and moved["inserted"] == len(body.splitlines()) - 1
+        # 왕복은 행 수·해시가 같아야 한다(BLOB 캡처 응답 포함).
+        assert export.row_digest(other, OWNER) == export.row_digest(store, OWNER)
+        assert bytes(other.query_one("SELECT response_gz FROM rr_snapshot_calls WHERE call_id = ?",
+                                     (calls[0]["call_id"],))["response_gz"]) == \
+               bytes(store.query_one("SELECT response_gz FROM rr_snapshot_calls WHERE call_id = ?",
+                                     (calls[0]["call_id"],))["response_gz"])
+        # 두 번째 들여오기는 멱등이다.
+        again_moved = export.import_jsonl(other, OWNER, body)
+        assert again_moved["inserted"] == 0 and again_moved["conflicts"] == []
+    finally:
+        other.close()
+
+
+# ================================================================ 스냅샷 라우트의 어댑터 계약
+def test_snapshot_route_calls_the_adapter_instead_of_501(wired, ident, monkeypatch):  # noqa: ARG001
+    """소스 카드 ref 가 비면 어댑터가 그 자리에서 422 를 낸다 — 라우트는 더는 not_implemented 가 아니다."""
+    project = routes.create_project(routes.ProjectBody(code="M22REF", name="ref 누락 과제", stage="DV1"),
+                                    ident=ident)
+    routes.add_source(project["id"], routes.SourceBody(kind="mcad", app_key=recon.APP_KEY, ref={}), ident=ident)
+    apps = FakeSourceApps()
+    monkeypatch.setattr(adapters_registry, "clients_from_settings", lambda *a, **k: apps.channels())
+
+    with pytest.raises(AppError) as err:
+        routes.create_snapshot(project["id"], routes.SnapshotBody(label="빈 ref"), ident=ident)
+    assert err.value.http_status == 422 and err.value.code != "not_implemented"
+    assert "stepforge_project_id" in err.value.message
+    assert apps.rest_seen == [] and apps.mcp_seen == []
 
 
 # ================================================================ 결정론(통과 기준 (4))

@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import re
+import sqlite3
 from typing import Any, Callable, Mapping, Protocol, Sequence, runtime_checkable
 
 from app.common import R, canonical_json, new_uuid, now_epoch, sha256_hex
@@ -1125,11 +1126,20 @@ def build_ir(
 
 
 # ---------------------------------------------------------------- 저장(plan §2.11.3 8단계·§2.11.4)
-def resolve_ckey(store, ckey: str, *, max_hops: int = 5) -> str:
-    """rr_part_keys.merged_into 체인을 따라 유효 ckey 를 돌려준다(plan §2.7.3, 체인 최대 5)."""
+def resolve_ckey(store, ckey: str, *, owner_sub: str | None = None, max_hops: int = 5) -> str:
+    """rr_part_keys.merged_into 체인을 따라 유효 ckey 를 돌려준다(plan §2.7.3, 체인 최대 5).
+
+    owner_sub 를 주면 자기 원장만 본다 — ckey 는 내용 파생 키라 다른 사용자의 병합 체인이 내 노드 ckey 를
+    갈아 끼우는 것을 막는다(sameas.resolve_ckey 와 같은 규칙).
+    """
     current = ckey
     for _ in range(max_hops):
-        row = store.query_one("SELECT status, merged_into FROM rr_part_keys WHERE ckey = ?", (current,))
+        sql = "SELECT status, merged_into FROM rr_part_keys WHERE ckey = ?"
+        params: list[Any] = [current]
+        if owner_sub:
+            sql += " AND owner_sub = ?"
+            params.append(owner_sub)
+        row = store.query_one(sql, tuple(params))
         if row is None or row["status"] != "merged" or not row["merged_into"]:
             return current
         current = row["merged_into"]
@@ -1146,23 +1156,30 @@ def _upsert_part_keys(store, ir: Mapping[str, Any]) -> None:
         if not ckey or node["nid"] != node.get("dn"):
             continue
         bucket = geom_bucket(_node_size_sorted(node), (node.get("attrs") or {}).get("volume"))
+        # ckey 는 sha1(name_norm_canon|geom_bucket|material_norm) 이라 다른 사용자가 같은 표준 부품을 올리면
+        # 악의 없이도 충돌한다 — 남의 사설 원장을 고치지 않도록 소유자까지 걸어 조회·갱신한다(plan §2.7.3).
         row = store.query_one(
-            "SELECT ckey, aliases_json, first_project_id, n_projects, n_snapshots FROM rr_part_keys WHERE ckey = ?",
-            (ckey,),
+            "SELECT ckey, aliases_json, first_project_id, n_projects, n_snapshots FROM rr_part_keys"
+            " WHERE ckey = ? AND owner_sub = ?",
+            (ckey, owner_sub),
         )
         alias = {
             "project_id": project_id, "domain": node["domain"], "label": node["label"],
             "local_key": node["local_key"], "name_norm": node["name_norm"],
         }
         if row is None:
-            store.execute(
-                "INSERT INTO rr_part_keys (ckey, owner_sub, visibility, status, merged_into, display_name,"
-                " name_norm_canon, geom_bucket, material_norm, aliases_json, first_project_id, first_snapshot_id,"
-                " first_nid, n_projects, n_snapshots, created_by, created_at, updated_at)"
-                " VALUES (?,?,'private','candidate',NULL,NULL,?,?,?,?,?,?,?,1,1,?,?,?)",
-                (ckey, owner_sub, node["name_norm_canon"], bucket, _node_material(node),
-                 canonical_json([alias]), project_id, ir["snapshot_id"], node["nid"], owner_sub, now, now),
-            )
+            try:
+                store.execute(
+                    "INSERT INTO rr_part_keys (ckey, owner_sub, visibility, status, merged_into, display_name,"
+                    " name_norm_canon, geom_bucket, material_norm, aliases_json, first_project_id, first_snapshot_id,"
+                    " first_nid, n_projects, n_snapshots, created_by, created_at, updated_at)"
+                    " VALUES (?,?,'private','candidate',NULL,NULL,?,?,?,?,?,?,?,1,1,?,?,?)",
+                    (ckey, owner_sub, node["name_norm_canon"], bucket, _node_material(node),
+                     canonical_json([alias]), project_id, ir["snapshot_id"], node["nid"], owner_sub, now, now),
+                )
+            except sqlite3.IntegrityError:
+                # 같은 ckey 를 다른 사용자가 먼저 적립했다(PK 는 ckey 하나뿐) — 남의 행은 건드리지 않고 지나간다.
+                pass
             continue
         aliases = json.loads(row["aliases_json"] or "[]")
         known_projects = {a.get("project_id") for a in aliases}
@@ -1170,8 +1187,10 @@ def _upsert_part_keys(store, ir: Mapping[str, Any]) -> None:
             aliases.append(alias)
         n_projects = int(row["n_projects"] or 1) + (0 if project_id in known_projects else 1)
         store.execute(
-            "UPDATE rr_part_keys SET aliases_json = ?, n_projects = ?, n_snapshots = ?, updated_at = ? WHERE ckey = ?",
-            (canonical_json(sorted(aliases, key=canonical_json)), n_projects, int(row["n_snapshots"] or 1) + 1, now, ckey),
+            "UPDATE rr_part_keys SET aliases_json = ?, n_projects = ?, n_snapshots = ?, updated_at = ?"
+            " WHERE ckey = ? AND owner_sub = ?",
+            (canonical_json(sorted(aliases, key=canonical_json)), n_projects, int(row["n_snapshots"] or 1) + 1, now,
+             ckey, owner_sub),
         )
 
 
@@ -1300,7 +1319,8 @@ def freeze_snapshot(
         dim_defs=dim_defs,
         dim_vocab=dim_vocab,
         project_codes=project_codes,
-        resolve_ckey_fn=build_kwargs.pop("resolve_ckey_fn", None) or (lambda ck: resolve_ckey(store, ck)),
+        resolve_ckey_fn=build_kwargs.pop("resolve_ckey_fn", None)
+        or (lambda ck: resolve_ckey(store, ck, owner_sub=owner_sub)),
         **build_kwargs,
     )
 
