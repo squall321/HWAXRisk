@@ -1,0 +1,153 @@
+{
+  "taxonomy_version": "1.0",
+  "axes": {
+    "domain": [
+      {"code": "xd", "label": "XD(외관·조립 설계)", "ecad_dependent": false},
+      {"code": "sim", "label": "해석(CAE)", "ecad_dependent": false},
+      {"code": "cam", "label": "카메라 모듈", "ecad_dependent": false},
+      {"code": "rel", "label": "신뢰성", "ecad_dependent": false},
+      {"code": "soc", "label": "SoC·프로세서", "ecad_dependent": true},
+      {"code": "disp", "label": "디스플레이 모듈", "ecad_dependent": false},
+      {"code": "mech", "label": "기구 구조", "ecad_dependent": false},
+      {"code": "pcb", "label": "PCB", "ecad_dependent": true},
+      {"code": "rf", "label": "RF·안테나", "ecad_dependent": true},
+      {"code": "passive", "label": "수동 소자", "ecad_dependent": true},
+      {"code": "pwr", "label": "전원·배터리", "ecad_dependent": true},
+      {"code": "sh", "label": "SH", "ecad_dependent": false},
+      {"code": "mem", "label": "메모리", "ecad_dependent": true},
+      {"code": "std", "label": "규격·표준", "ecad_dependent": false},
+      {"code": "material", "label": "재료", "ecad_dependent": false}
+    ],
+    "mechanism": [
+      {"code": "thermal.cte_mismatch", "mechanism": "thermal", "detail": "cte_mismatch", "label": "CTE 불일치", "description": "이종 재료 열팽창 차이가 계면 응력·휨을 만든다.", "default_detectability": "sim-detectable", "default_tools": ["report_part_risk"], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "thermal.thermal_shock", "mechanism": "thermal", "detail": "thermal_shock", "label": "열충격", "description": "급격한 온도 사이클이 접합부·패키지에 누적 손상을 준다.", "default_detectability": "sim-detectable", "default_tools": ["predict_sed"], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "thermal.hotspot", "mechanism": "thermal", "detail": "hotspot", "label": "핫스팟", "description": "국부 발열이 주변 부품 허용 온도를 넘긴다.", "default_detectability": "sim-detectable", "default_tools": [], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "thermal.thermal_resistance", "mechanism": "thermal", "detail": "thermal_resistance", "label": "열저항", "description": "열경로의 계면·재료 열저항이 방열을 막는다.", "default_detectability": "unknown", "default_tools": [], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "thermal.solder_fatigue", "mechanism": "thermal", "detail": "solder_fatigue", "label": "솔더 피로", "description": "열 사이클에 의한 솔더 접합 피로 균열.", "default_detectability": "sim-detectable", "default_tools": ["predict_sed"], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "mechanical.drop_stress", "mechanism": "mechanical", "detail": "drop_stress", "label": "낙하 응력", "description": "낙하 충격으로 파트에 생기는 최대 응력·변형.", "default_detectability": "sim-detectable", "default_tools": ["report_part_risk", "report_worst_cases"], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "mechanical.bending", "mechanism": "mechanical", "detail": "bending", "label": "굽힘", "description": "굽힘 하중에 의한 응력·변형.", "default_detectability": "sim-detectable", "default_tools": ["report_part_risk"], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "mechanical.buckling", "mechanism": "mechanical", "detail": "buckling", "label": "좌굴", "description": "박판·프레임의 압축 좌굴.", "default_detectability": "sim-detectable", "default_tools": [], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "mechanical.fatigue", "mechanism": "mechanical", "detail": "fatigue", "label": "기계 피로", "description": "반복 하중에 의한 피로 손상.", "default_detectability": "test-only", "default_tools": [], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "mechanical.vibration", "mechanism": "mechanical", "detail": "vibration", "label": "진동", "description": "진동 환경에서의 공진·피로.", "default_detectability": "sim-detectable", "default_tools": [], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "mechanical.press_fit", "mechanism": "mechanical", "detail": "press_fit", "label": "압입", "description": "억지끼움 계면의 조립 응력.", "default_detectability": "sim-detectable", "default_tools": ["list_interfaces"], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "mechanical.rattle", "mechanism": "mechanical", "detail": "rattle", "label": "래틀", "description": "간극 있는 파트의 유동·소음.", "default_detectability": "test-only", "default_tools": [], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "mechanical.mass", "mechanism": "mechanical", "detail": "mass", "label": "질량", "description": "질량·질량 분포 변화의 영향.", "default_detectability": "sim-detectable", "default_tools": ["mass_estimate"], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "interface.tied", "mechanism": "interface", "detail": "tied", "label": "접합", "description": "tied 계면의 존재·강도.", "default_detectability": "sim-detectable", "default_tools": ["list_interfaces"], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "interface.touching", "mechanism": "interface", "detail": "touching", "label": "접촉", "description": "touching 계면의 존재·상태.", "default_detectability": "sim-detectable", "default_tools": ["list_interfaces"], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "interface.clearance", "mechanism": "interface", "detail": "clearance", "label": "간극", "description": "clearance 계면의 값·분포.", "default_detectability": "sim-detectable", "default_tools": ["list_interfaces"], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "interface.interference", "mechanism": "interface", "detail": "interference", "label": "간섭", "description": "파트 간 기하 간섭(억지끼움 의도인지 설계오류인지 확정 필요).", "default_detectability": "sim-detectable", "default_tools": ["list_interfaces", "interface_graph"], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "interface.tied_loss", "mechanism": "interface", "detail": "tied_loss", "label": "접합 소실", "description": "이전 리비전의 tied 계면이 touching·clearance 로 바뀜.", "default_detectability": "sim-detectable", "default_tools": ["list_interfaces"], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "interface.clearance_close", "mechanism": "interface", "detail": "clearance_close", "label": "간극 근접", "description": "clearance 가 0 에 가까워져 접촉 가능성이 생김.", "default_detectability": "sim-detectable", "default_tools": ["list_interfaces"], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "interface.adhesive_area", "mechanism": "interface", "detail": "adhesive_area", "label": "접착 면적", "description": "접착 계면 밴드 면적의 크기·변화.", "default_detectability": "sim-detectable", "default_tools": ["list_interfaces"], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "interface.tolerance_stackup", "mechanism": "interface", "detail": "tolerance_stackup", "label": "공차 누적", "description": "조립 공차 누적으로 공칭 간극이 실물에서 사라짐.", "default_detectability": "unknown", "default_tools": [], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "interface.cross_file_untrusted", "mechanism": "interface", "detail": "cross_file_untrusted", "label": "교차 파일 좌표 불신", "description": "서로 다른 STEP 파일 간 계면이 좌표계 의심 상태.", "default_detectability": "sim-detectable", "default_tools": ["interface_graph"], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "electrical.net", "mechanism": "electrical", "detail": "net", "label": "넷", "description": "넷 연결·배선 변화.", "default_detectability": "unknown", "default_tools": [], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "electrical.si_pi", "mechanism": "electrical", "detail": "si_pi", "label": "SI/PI", "description": "신호·전원 무결성.", "default_detectability": "unknown", "default_tools": [], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "electrical.emi", "mechanism": "electrical", "detail": "emi", "label": "EMI", "description": "전자파 간섭·차폐.", "default_detectability": "test-only", "default_tools": [], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "electrical.creepage", "mechanism": "electrical", "detail": "creepage", "label": "연면 거리", "description": "절연 연면·공간 거리 부족.", "default_detectability": "unknown", "default_tools": [], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "electrical.pad_lift", "mechanism": "electrical", "detail": "pad_lift", "label": "패드 들뜸", "description": "기계·열 하중에 의한 패드 박리.", "default_detectability": "test-only", "default_tools": [], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "material.creep", "mechanism": "material", "detail": "creep", "label": "크리프", "description": "장기 하중 하 재료 변형.", "default_detectability": "test-only", "default_tools": [], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "material.moisture", "mechanism": "material", "detail": "moisture", "label": "흡습", "description": "흡습에 의한 물성 변화·팽창.", "default_detectability": "test-only", "default_tools": [], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "material.corrosion", "mechanism": "material", "detail": "corrosion", "label": "부식", "description": "환경 노출에 의한 부식.", "default_detectability": "field-only", "default_tools": [], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "material.property_uncertain", "mechanism": "material", "detail": "property_uncertain", "label": "물성 불확실", "description": "재료 물성 출처가 없거나 범위가 넓음.", "default_detectability": "unknown", "default_tools": ["get_material"], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "material.adhesive_aging", "mechanism": "material", "detail": "adhesive_aging", "label": "접착 노화", "description": "접착제 경시 열화.", "default_detectability": "test-only", "default_tools": [], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "material.supplier_change", "mechanism": "material", "detail": "supplier_change", "label": "공급처 변경", "description": "재료 공급처·등급 변경에 따른 물성 차이.", "default_detectability": "unknown", "default_tools": ["compare_materials"], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "process.tolerance", "mechanism": "process", "detail": "tolerance", "label": "공정 공차", "description": "가공·성형 공차가 설계 치수를 벗어남.", "default_detectability": "unknown", "default_tools": [], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "process.solder", "mechanism": "process", "detail": "solder", "label": "솔더 공정", "description": "리플로우·솔더링 공정 변수.", "default_detectability": "test-only", "default_tools": [], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "process.adhesive_cure", "mechanism": "process", "detail": "adhesive_cure", "label": "접착 경화", "description": "접착제 경화 조건·수축.", "default_detectability": "test-only", "default_tools": [], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "process.screw_torque", "mechanism": "process", "detail": "screw_torque", "label": "체결 토크", "description": "나사 체결 토크·풀림.", "default_detectability": "test-only", "default_tools": [], "version_added": "1.0", "status": "active", "merged_into": null},
+      {"code": "process.warpage", "mechanism": "process", "detail": "warpage", "label": "휨", "description": "공정 열이력에 의한 보드·패키지 휨.", "default_detectability": "sim-detectable", "default_tools": ["pcb_warpage_surrogate"], "version_added": "1.0", "status": "active", "merged_into": null}
+    ],
+    "change_kind": [
+      {"code": "dimension", "label": "치수", "description": "bbox·두께·간극 등 수치 변화."},
+      {"code": "placement", "label": "배치", "description": "위치·회전 변화."},
+      {"code": "topology", "label": "위상", "description": "파트·계면·접촉의 추가·삭제·종류 변화."},
+      {"code": "material", "label": "재료", "description": "재료명·물성 변화."},
+      {"code": "type", "label": "교체", "description": "파트가 다른 파트로 대체됨."},
+      {"code": "count", "label": "개수", "description": "파트 추가·삭제·분할·병합."},
+      {"code": "discretization", "label": "이산화", "description": "메시 밀도 변화(설계 변경 아님, delta 선례 제외)."},
+      {"code": "result", "label": "결과", "description": "해석 결과 지표 변화."},
+      {"code": "load_path", "label": "하중 경로", "description": "에너지 흐름 엣지 변화."},
+      {"code": "consistency", "label": "정합", "description": "치수 참조 소실·메시 미갱신 등 정합 신호."},
+      {"code": "electrical", "label": "전기", "description": "넷·부품 배치·스택업 변화(ECAD)."},
+      {"code": "none", "label": "없음", "description": "snap 타깃의 기본값."}
+    ],
+    "trigger_condition": [
+      {"family": "env", "label": "환경", "examples": ["env.thermal_cycle", "env.humidity", "env.shock", "env.salt"]},
+      {"family": "load", "label": "하중", "examples": ["load.drop", "load.bend", "load.press", "load.torsion"]},
+      {"family": "time", "label": "시간", "examples": ["time.aging", "time.creep"]},
+      {"family": "mfg", "label": "제조", "examples": ["mfg.tolerance", "mfg.process_variation"]},
+      {"family": "use", "label": "사용", "examples": ["use.scenario"]},
+      {"family": "none", "label": "없음", "examples": ["none"]}
+    ],
+    "severity_judgement": {"경미": ["OK", "WARNING"], "중대": ["WARNING", "FAIL"], "치명": ["FAIL"]},
+    "sev3": {"경미": 1, "중대": 2, "치명": 3},
+    "detectability": [
+      {"code": "sim-detectable", "label": "해석 검출 가능", "tool_required": true},
+      {"code": "test-only", "label": "시험으로만", "tool_required": false},
+      {"code": "field-only", "label": "필드에서만", "tool_required": false},
+      {"code": "unknown", "label": "미상", "tool_required": false}
+    ],
+    "evidence_grade": [
+      {"code": "측정", "rank": 4, "sources": ["inc:", "rpt:(test_run)"]},
+      {"code": "문헌·규격", "rank": 3, "sources": ["card:(standard|paper|checklist|lessons_learned)"]},
+      {"code": "도구예측", "rank": 2, "sources": ["tool:", "sig:", "c:", "e:", "p:", "d:", "rule:", "dyna:rpt:"]},
+      {"code": "경험칙", "rank": 1, "sources": []}
+    ],
+    "precedent": [
+      {"code": "in_range", "label": "코퍼스 범위 안"},
+      {"code": "out_of_range", "label": "코퍼스 범위 밖(첫 사례)"},
+      {"code": "none", "label": "비교 불가(corpus_n<5 또는 대응 값 없음)"}
+    ],
+    "direction": [
+      {"code": "risk", "label": "리스크"},
+      {"code": "improvement", "label": "개선"},
+      {"code": "neutral", "label": "중립"}
+    ],
+    "status": [
+      {"code": "open", "label": "미결"},
+      {"code": "verified", "label": "검증됨(라벨·사람)"},
+      {"code": "dismissed", "label": "기각(라벨·사람)"},
+      {"code": "mitigated", "label": "완화됨"},
+      {"code": "superseded", "label": "대체됨"}
+    ]
+  },
+  "enum_defaults": {
+    "direction": "neutral", "severity": "경미", "judgement": "undetermined", "detectability.level": "unknown",
+    "evidence_grade": "경험칙", "precedent": "none", "polarity": "inference", "confidence": "low",
+    "verdict": "undetermined", "status": "open"
+  },
+  "priority_weights": {
+    "w_det": {"field-only": 3, "test-only": 2, "unknown": 2, "sim-detectable": 1},
+    "w_grade": {"측정": 1.0, "도구예측": 0.9, "문헌·규격": 0.8, "경험칙": 0.6},
+    "contested_factor": 0.8
+  },
+  "synonyms": {
+    "간섭": "interface.interference",
+    "interference": "interface.interference",
+    "낙하": "mechanical.drop_stress",
+    "drop": "mechanical.drop_stress",
+    "CTE": "thermal.cte_mismatch",
+    "열팽창": "thermal.cte_mismatch",
+    "열충격": "thermal.thermal_shock",
+    "간극": "interface.clearance",
+    "접합": "interface.tied",
+    "접착": "interface.adhesive_area",
+    "공차": "process.tolerance",
+    "휨": "process.warpage",
+    "warpage": "process.warpage",
+    "피로": "mechanical.fatigue",
+    "진동": "mechanical.vibration",
+    "크리프": "material.creep",
+    "흡습": "material.moisture",
+    "부식": "material.corrosion"
+  },
+  "failure_map": [
+    {"ra_failure_mode_category": "crack", "mechanisms": ["mechanical.drop_stress", "mechanical.bending"]},
+    {"ra_failure_mode_category": "delamination", "mechanisms": ["interface.adhesive_area", "material.adhesive_aging", "thermal.cte_mismatch"]},
+    {"ra_failure_mode_category": "deformation", "mechanisms": ["process.warpage", "material.creep", "mechanical.buckling"]},
+    {"ra_failure_mode_category": "solder_crack", "mechanisms": ["thermal.solder_fatigue", "thermal.thermal_shock"]},
+    {"ra_failure_mode_category": "corrosion", "mechanisms": ["material.corrosion", "material.moisture"]}
+  ],
+  "voc_map": []
+}

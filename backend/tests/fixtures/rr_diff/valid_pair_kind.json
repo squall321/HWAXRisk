@@ -1,0 +1,259 @@
+{
+ "diff_version": "1.0",
+ "diff_id": "df087996d45b03e7eb8c133c0298fd98",
+ "project_id": "e73c023a2e8e90349bb4d853730e1bfc",
+ "base": {
+  "snapshot_id": "c3ff832377ee3e0bcdd66aa561bdfa33",
+  "ir_hash": "2b05f03a9274122eb5ff1a8bf49def9b02c59923e996f3a2a9d59f2fcf6b142d",
+  "label": "F7-DV1 2026-07-02"
+ },
+ "target": {
+  "snapshot_id": "cb519346bd0f7b617b5e9c7bde68dd42",
+  "ir_hash": "58c4605bdfda7b31505809fc64e1100907349a996bee5033006c50ecb38e5f89",
+  "label": "F7-DV2 2026-08-20"
+ },
+ "taxonomy_version": "1.0",
+ "rule_version": "rules-1.0",
+ "lexicon_version": "lex-1.0",
+ "comparability": {
+  "tol_parity": true,
+  "tol_keys_known": true,
+  "unit_parity": true,
+  "result_parity": null,
+  "scope_parity": true,
+  "coordinate_ok": true,
+  "partial_any": false,
+  "G7": {
+   "count": 0,
+   "threshold": 0,
+   "pass": true,
+   "effect": "none",
+   "detail": []
+  },
+  "base_blocked": false,
+  "target_blocked": false
+ },
+ "correspondence": {
+  "matched": [
+   {
+    "dn": "p:87ae2f56d589",
+    "nid_base": "p:87ae2f56d589",
+    "nid_target": "p:87ae2f56d589",
+    "ckey": "ck:9454ed2282ce",
+    "method": "exact_path",
+    "score": 1.0,
+    "status": "auto"
+   },
+   {
+    "dn": "p:8051c8e0492d",
+    "nid_base": "p:8051c8e0492d",
+    "nid_target": "p:8051c8e0492d",
+    "ckey": "ck:cac61ffcbaf1",
+    "method": "exact_path",
+    "score": 1.0,
+    "status": "auto"
+   }
+  ],
+  "unmatched_base": [],
+  "unmatched_target": [],
+  "pending_n": 0,
+  "method_counts": {
+   "ledger": 0,
+   "pid_map": 0,
+   "exact_path": 2,
+   "fingerprint": 0,
+   "name_norm": 0,
+   "fuzzy": 0,
+   "manual": 0
+  }
+ },
+ "structural": {
+  "node_changes": [],
+  "edge_changes": [
+   {
+    "cid": "c:a16ef6fb676c",
+    "op": "kind_changed",
+    "eid_base": "e:f1dabe4da27f",
+    "eid_target": "e:f1dabe4da27f",
+    "dn_a": "p:87ae2f56d589",
+    "dn_b": "p:8051c8e0492d",
+    "ckey_a": "ck:9454ed2282ce",
+    "ckey_b": "ck:cac61ffcbaf1",
+    "kind_family": "iface",
+    "kind_from": "tied",
+    "kind_to": "touching",
+    "rank_from": 2,
+    "rank_to": 1,
+    "rank_delta": -1,
+    "status_from": "confirmed",
+    "status_to": "auto",
+    "cross_file": false,
+    "excluded_reason": null,
+    "confidence": "medium"
+   }
+  ],
+  "orphans_delta": {
+   "base": [],
+   "target": [],
+   "became_orphan": [],
+   "left_orphan": []
+  },
+  "hierarchy_moves": [],
+  "dyna": {
+   "contacts_added": [],
+   "contacts_removed": [],
+   "scope_changed": []
+  }
+ },
+ "parametric": {
+  "node_params": [],
+  "edge_params": [
+   {
+    "cid": "c:ec0f586d4d8b",
+    "eid": "e:f1dabe4da27f",
+    "ckeys": [
+     "ck:9454ed2282ce",
+     "ck:cac61ffcbaf1"
+    ],
+    "attr": "min_gap",
+    "before": 0.0,
+    "after": 0.018,
+    "delta": 0.018,
+    "rel_delta": null,
+    "unit": "mm",
+    "flag": "changed",
+    "lower_bound": false,
+    "excluded_reason": null,
+    "size_pct": 90.0,
+    "text": "PLATE_1↔PLATE_2 min_gap 0.000→0.018 mm [c:ec0f586d4d8b]"
+   }
+  ],
+  "materials": [],
+  "dims_delta": [],
+  "result_delta": [],
+  "rollup_delta": []
+ },
+ "semantic": {
+  "blocked_by": null,
+  "events": [
+   {
+    "cid": "c:ff53effab071",
+    "code": "iface.rank_down",
+    "change_kind": "topology",
+    "subject": {
+     "dns": [
+      "p:87ae2f56d589",
+      "p:8051c8e0492d"
+     ],
+     "ckeys": [
+      "ck:9454ed2282ce",
+      "ck:cac61ffcbaf1"
+     ],
+     "eids": {
+      "base": "e:f1dabe4da27f",
+      "target": "e:f1dabe4da27f"
+     },
+     "names": [
+      "PLATE_1",
+      "PLATE_2"
+     ]
+    },
+    "subject_key": "ck:9454ed2282ce|ck:cac61ffcbaf1",
+    "before": "tied",
+    "after": "touching",
+    "magnitude": {
+     "value": -1,
+     "unit": "rank",
+     "rel": null
+    },
+    "derived_from": [
+     "c:a16ef6fb676c"
+    ],
+    "neighborhood": {
+     "k": 1,
+     "ckeys": []
+    },
+    "confidence": "medium",
+    "design_relevant": true,
+    "unconfirmed": false,
+    "lower_bound": false,
+    "excluded_reason": null,
+    "text": "PLATE_1↔PLATE_2 kind tied→touching (rank 2→1) min_gap=0.000→0.018 mm [c:ff53effab071]"
+   },
+   {
+    "cid": "c:a5d3584ad055",
+    "code": "iface.gap_changed",
+    "change_kind": "dimension",
+    "change_sub": "gap",
+    "subject": {
+     "dns": [
+      "p:87ae2f56d589",
+      "p:8051c8e0492d"
+     ],
+     "ckeys": [
+      "ck:9454ed2282ce",
+      "ck:cac61ffcbaf1"
+     ],
+     "eids": {},
+     "names": [
+      "PLATE_1",
+      "PLATE_2"
+     ]
+    },
+    "subject_key": "ck:9454ed2282ce|ck:cac61ffcbaf1",
+    "before": 0.0,
+    "after": 0.018,
+    "magnitude": {
+     "value": 0.018,
+     "unit": "mm",
+     "rel": null
+    },
+    "derived_from": [
+     "c:ec0f586d4d8b"
+    ],
+    "neighborhood": {
+     "k": 1,
+     "ckeys": []
+    },
+    "confidence": "medium",
+    "design_relevant": true,
+    "unconfirmed": false,
+    "lower_bound": false,
+    "excluded_reason": null,
+    "text": "PLATE_1↔PLATE_2 min_gap 0.000→0.018 mm [c:ec0f586d4d8b]"
+   }
+  ]
+ },
+ "character_seed": [
+  {
+   "tag": "char:change_style:topology_change",
+   "cites": [
+    "c:ff53effab071"
+   ]
+  }
+ ],
+ "stats": {
+  "nodes_added": 0,
+  "nodes_removed": 0,
+  "nodes_matched": 2,
+  "edges_added": 0,
+  "edges_removed": 0,
+  "edges_kind_changed": 1,
+  "params_changed": 1,
+  "params_noise": 6,
+  "params_excluded": 0,
+  "events": 2,
+  "events_by_change_kind": {
+   "topology": 1,
+   "dimension": 1
+  },
+  "events_by_confidence": {
+   "high": 0,
+   "medium": 2,
+   "low": 0
+  }
+ },
+ "summary_text": "[대상] base F7-DV1 c3ff8323 → target F7-DV2 cb519346\n[구조] 계면 rank 하락 1 [c:a16ef6fb676c]",
+ "summary_status": "ok",
+ "created_at": 1756700000
+}

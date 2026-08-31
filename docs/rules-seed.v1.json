@@ -1,0 +1,49 @@
+{
+  "version": "rules-1.0",
+  "notes": [
+    "P1 에서 '사람이 손으로 쓴 규칙' 으로 활성화되는 시드 6종(plan §3.2.6). 패턴 승격 산출이 아니다.",
+    "조건 DSL 은 {all:[{ref, op, value}], any:[]} 이고 op ∈ eq|ne|gte|lte|between|in|exists. aggregate 는 매치 집합에 대한 계수 조건이다.",
+    "why_it_matters·fix_hint 는 규칙 저작자(사람)의 문장이라 «…» 원문 인용이고 판단어 린터 대상이 아니다.",
+    "severity 는 택소노미 축 ⑤(경미|중대|치명). laminate hard|guideline|info 는 치명|중대|경미 로 매핑한다."
+  ],
+  "derived_refs": {
+    "edge.mapped_mcad_kind": "dyna contact 쌍을 dn 으로 mcad 에 사상했을 때의 mcad 엣지 kind(없으면 null)",
+    "node.degree_tied": "리프 노드가 끝점인 tied 엣지 수(status != rejected)",
+    "node.min_dim": "node.attrs.min_dim(= min(size_def))",
+    "edge.min_gap": "edge.attrs.min_gap",
+    "edge.cross_file": "edge.attrs.cross_file 을 0|1 정수로",
+    "warnings.code": "rr_ir.warnings[].code"
+  },
+  "rules": [
+    {"id": "R-001", "name": "interference_auto_present", "severity": "중대", "status": "active",
+     "condition_json": {"all": [{"ref": "edge.kind", "op": "eq", "value": "interference"}, {"ref": "edge.status", "op": "eq", "value": "auto"}], "any": []},
+     "aggregate": {"count_gte": 1},
+     "why_it_matters": "간섭이 auto 로 남아 있으면 억지끼움 의도인지 설계오류인지 확정되지 않은 것이다",
+     "fix_hint": "set_interface 로 kind 확정 또는 형상 수정 후 재검출"},
+    {"id": "R-002", "name": "tight_clearance_cluster", "severity": "경미", "status": "active",
+     "condition_json": {"all": [{"ref": "edge.kind", "op": "eq", "value": "clearance"}, {"ref": "edge.min_gap", "op": "lte", "value": 0.2}], "any": []},
+     "aggregate": {"count_gte": 5},
+     "why_it_matters": "0.2 mm 이하 간극이 다섯 곳 이상이면 조립 공차 누적으로 실물에서 접촉이 생기는 자리가 여럿이다",
+     "fix_hint": "간극 쌍마다 공차 스택을 rr_dim_defs 로 정의해 재평가하거나 간극을 늘린다"},
+    {"id": "R-003", "name": "thin_leaf_tied_both_sides", "severity": "중대", "status": "active",
+     "condition_json": {"all": [{"ref": "node.min_dim", "op": "lte", "value": 0.3}, {"ref": "node.degree_tied", "op": "gte", "value": 2}], "any": []},
+     "aggregate": {"count_gte": 1},
+     "why_it_matters": "0.3 mm 이하 박판이 양면 접합되면 접합 강성 차이가 그 박판에 집중되어 낙하·굽힘에서 응력이 몰린다",
+     "fix_hint": "박판 두께 또는 접합 면적을 재검토하고 해석 리포트의 해당 파트 worst_stress 를 확인한다"},
+    {"id": "R-004", "name": "unit_mismatch_warning", "severity": "치명", "status": "active",
+     "condition_json": {"all": [{"ref": "warnings.code", "op": "in", "value": ["unit_mismatch"]}], "any": []},
+     "aggregate": {"exists": true},
+     "why_it_matters": "단위가 섞인 스냅샷은 모든 수치 비교가 무효라 심사를 진행할 수 없다",
+     "fix_hint": "STEP 헤더 단위를 millimetre 로 맞춰 다시 파싱하고 새 스냅샷을 만든다"},
+    {"id": "R-005", "name": "cross_file_with_suspect_coords", "severity": "중대", "status": "active",
+     "condition_json": {"all": [{"ref": "edge.cross_file", "op": "eq", "value": 1}, {"ref": "warnings.code", "op": "in", "value": ["suspect_coordinate_systems", "files_all_overlap"]}], "any": []},
+     "aggregate": {"count_gte": 1},
+     "why_it_matters": "좌표계가 의심되는 파일 사이의 계면은 검출 자체가 배치 오류의 산물일 수 있다",
+     "fix_hint": "파일별 배치 원점을 확인해 좌표계를 맞춘 뒤 재검출한다"},
+    {"id": "R-006", "name": "dyna_contact_without_mcad_tie", "severity": "중대", "status": "active",
+     "condition_json": {"all": [{"ref": "edge.kind", "op": "eq", "value": "contact"}, {"ref": "edge.mapped_mcad_kind", "op": "in", "value": [null, "clearance"]}], "any": []},
+     "aggregate": {"count_gte": 1},
+     "why_it_matters": "해석 모델의 접촉 쌍이 CAD 에서는 닿지 않는 파트라면 해석 접촉 정의와 형상이 어긋난 것이다",
+     "fix_hint": "K파일 접촉 정의와 CAD 계면(tied·touching·interference)을 대조해 어느 쪽이 정본인지 확정한다"}
+  ]
+}

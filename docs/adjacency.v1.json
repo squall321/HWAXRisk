@@ -1,0 +1,21 @@
+{
+  "version": "adjacency-1.0",
+  "note": "counter 석을 뽑는 도메인 인접 사전(plan §6.4.2). Settings risk_adjacency 로 덮어쓴다.",
+  "adjacency": {
+    "mech": ["pcb", "disp", "sh"],
+    "pcb": ["mech", "pwr", "rf", "std"],
+    "sim": ["rel", "mech", "material"],
+    "rel": ["sim", "material", "std"],
+    "pwr": ["pcb", "rf", "soc", "passive"],
+    "rf": ["pcb", "pwr", "mem"],
+    "disp": ["mech", "xd"],
+    "cam": ["mech", "xd"],
+    "soc": ["pwr", "mem", "sh"],
+    "passive": ["pwr", "pcb"],
+    "sh": ["mech", "soc"],
+    "mem": ["soc", "rf"],
+    "std": ["rel", "pcb"],
+    "material": ["sim", "rel"],
+    "xd": ["mech", "disp", "cam"]
+  }
+}

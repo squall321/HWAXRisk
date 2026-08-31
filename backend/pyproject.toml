@@ -1,0 +1,40 @@
+[project]
+name = "hwax-risk"
+version = "0.1.0"
+description = "설계 IR 스냅샷·diff 위에서 HW/XD 전문가 패널이 리스크·개선·성격을 판정하고 등록부로 누적하는 HEAX 앱 (FastAPI + MCP streamable HTTP)"
+requires-python = ">=3.12"
+dependencies = [
+    # mcp<2 핀: 2.0.0 은 FastMCP(mcp.server.fastmcp) 를 제거해 이 코드와 비호환.
+    # hermetic SIF(PYTHONNOUSERSITE=1)에서 상한 없으면 mcp 2.0 이 깔려 크래시. (thermal_shock·materialtwin·laminate 동일)
+    "mcp>=1.10,<2",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+    "pydantic>=2.7",
+    "jsonschema>=4.21",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8",
+    "httpx>=0.27",
+    "anyio>=4",
+    "jsonschema>=4.21",
+]
+
+[project.scripts]
+hwax-risk = "app.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+app = ["schemas/*.json", "static/*.html"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

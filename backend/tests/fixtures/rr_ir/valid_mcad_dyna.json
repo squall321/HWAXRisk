@@ -1,0 +1,805 @@
+{
+ "ir_version": "1.0",
+ "snapshot_id": "c3ff832377ee3e0bcdd66aa561bdfa33",
+ "project_id": "e73c023a2e8e90349bb4d853730e1bfc",
+ "owner_sub": "user@example.com",
+ "label": "M22 DV1 2026-08-31",
+ "captured_at": 1756600000,
+ "derived_from": null,
+ "partial": false,
+ "sources": [
+  {
+   "kind": "mcad",
+   "app_key": "heax-step_forge",
+   "adapter_version": "1.0",
+   "channel": "rest+mcp",
+   "ref": {
+    "stepforge_project_id": "001a02ba21cd51064a68c35",
+    "project_name": "sif-e2e",
+    "detect_job_id": "01JDET",
+    "detect_finished_at": 1756590000,
+    "step_files": [
+     {
+      "relpath": "a_stack.step",
+      "sha256": "3e64cc41cf8e07b43936d7bc4eaf8bdb8e2abcec1f44c7b915ac0a0c27ebc41a",
+      "header_unit": "millimetre",
+      "schema_ap": "AUTOMOTIVE_DESIGN"
+     }
+    ]
+   },
+   "source_hash": "dea2453dca42e6aee7ef0e3d9c77ec6a368957c74a6992aef28e57ababc34924",
+   "tol_config_hash": "99aec9656043c45c8af715ca225d5e6add340292cb36eab0102e99d17576eef5",
+   "tol_known_keys": [
+    "tied_gap",
+    "clearance_gap",
+    "tied_area",
+    "tied_width"
+   ],
+   "scope": null,
+   "stats": {
+    "files": 1,
+    "nodes": 4,
+    "leaf_instances": 3,
+    "assemblies": 1,
+    "max_depth": 3,
+    "auto_named_nodes": 0,
+    "interfaces": 2,
+    "orphans": 0
+   },
+   "degraded": [],
+   "captured_at": 1756600000
+  },
+  {
+   "kind": "dyna",
+   "app_key": "heax-kooremapper_mcp",
+   "adapter_version": "1.0",
+   "channel": "mcp",
+   "ref": {
+    "session_id": "01JSESS",
+    "file_id": "01JFILE",
+    "filename": "assembled_tied.k",
+    "sha256": "e8de64cc806d7e290b951bcdc6124e9d3428bd7c89580d9b858b64c73e27020a",
+    "origin_job_id": null,
+    "modelmeta_detect": false,
+    "detect_result_file_id": null,
+    "includes": []
+   },
+   "source_hash": "e8de64cc806d7e290b951bcdc6124e9d3428bd7c89580d9b858b64c73e27020a",
+   "stats": {
+    "nodes": 12000,
+    "elements": 9800,
+    "parts": 3,
+    "keyword_counts": {
+     "*PART": 3
+    },
+    "contacts_total": 1,
+    "unresolved_sides": 0,
+    "edges_truncated": false,
+    "truncated_scan": false
+   },
+   "conventions": {},
+   "context": {
+    "corpus_usage": {
+     "materials": [],
+     "sections": [],
+     "contacts": [],
+     "fetched_at": 1756600000
+    }
+   },
+   "degraded": [
+    "no_secid",
+    "detect_absent"
+   ],
+   "captured_at": 1756600000
+  },
+  {
+   "kind": "ecad",
+   "app_key": null,
+   "adapter_version": "0.0-stub",
+   "channel": null,
+   "ref": {},
+   "source_hash": null,
+   "degraded": [
+    "ecad_absent"
+   ],
+   "captured_at": null
+  }
+ ],
+ "units": {
+  "length": "mm",
+  "area": "mm2",
+  "volume": "mm3",
+  "stress": "MPa",
+  "accel": "G",
+  "density": "as_in_file"
+ },
+ "nodes": [
+  {
+   "nid": "p:d4bb79a15430",
+   "canon_key": "mcad:/a_stack.step/STACK_ASM",
+   "domain": "mcad",
+   "kind": "assembly",
+   "label": "STACK_ASM",
+   "local_key": "/sif-e2e/a_stack.step/STACK_ASM",
+   "name_norm": "stack_asm",
+   "name_norm_canon": "stack_asm",
+   "group": null,
+   "ckey": null,
+   "dn": "p:d4bb79a15430",
+   "parent_nid": null,
+   "asm_key": null,
+   "attrs": {
+    "depth": 2,
+    "relpath": "a_stack.step"
+   },
+   "geom_fp": null,
+   "status_flags": [],
+   "provenance": {
+    "adapter": "mcad",
+    "app_key": "heax-step_forge",
+    "tool": "REST /tree",
+    "call_id": "c3ff8323-001",
+    "node_id_at_capture": "n12",
+    "captured_at": 1756600000
+   }
+  },
+  {
+   "nid": "p:87ae2f56d589",
+   "canon_key": "mcad:/a_stack.step/STACK_ASM/PLATE_1",
+   "domain": "mcad",
+   "kind": "part",
+   "label": "PLATE_1",
+   "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PLATE_1",
+   "name_norm": "plate_1",
+   "name_norm_canon": "plate",
+   "group": "stack_asm",
+   "ckey": "ck:01f70db1e74f",
+   "dn": "p:87ae2f56d589",
+   "parent_nid": "p:d4bb79a15430",
+   "asm_key": "a_stack/stack_asm",
+   "attrs": {
+    "shape_kind": "solid",
+    "bbox_def": [
+     0,
+     0,
+     0,
+     50,
+     50,
+     1.2
+    ],
+    "size_def": [
+     50,
+     50,
+     1.2
+    ],
+    "size_sorted": [
+     50,
+     50,
+     1.2
+    ],
+    "bbox_world": [
+     0,
+     0,
+     0,
+     50,
+     50,
+     1.2
+    ],
+    "centroid_def": [
+     25.0,
+     25.0,
+     0.6
+    ],
+    "centroid_world": [
+     25.0,
+     25.0,
+     0.6
+    ],
+    "volume": 3000.0,
+    "area": null,
+    "min_dim": 1.2,
+    "material": "AL6061",
+    "density": null,
+    "density_unit": null,
+    "color": null,
+    "instance_count": 1,
+    "has_geometry": true,
+    "depth": 3,
+    "solid_count": 1,
+    "construction_only": false,
+    "shape_def_id": "s1",
+    "step_file": "a_stack.step",
+    "xcaf_entry": "0:1:1:1"
+   },
+   "geom_fp": "2da81439c27486c4",
+   "status_flags": [],
+   "provenance": {
+    "adapter": "mcad",
+    "app_key": "heax-step_forge",
+    "tool": "REST /tree",
+    "call_id": "c3ff8323-001",
+    "node_id_at_capture": "n12",
+    "captured_at": 1756600000
+   }
+  },
+  {
+   "nid": "p:8051c8e0492d",
+   "canon_key": "mcad:/a_stack.step/STACK_ASM/PLATE_2",
+   "domain": "mcad",
+   "kind": "part",
+   "label": "PLATE_2",
+   "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PLATE_2",
+   "name_norm": "plate_2",
+   "name_norm_canon": "plate",
+   "group": "stack_asm",
+   "ckey": "ck:860cf8b0d3d0",
+   "dn": "p:8051c8e0492d",
+   "parent_nid": "p:d4bb79a15430",
+   "asm_key": "a_stack/stack_asm",
+   "attrs": {
+    "shape_kind": "solid",
+    "bbox_def": [
+     0,
+     0,
+     0,
+     50,
+     50,
+     1.0
+    ],
+    "size_def": [
+     50,
+     50,
+     1.0
+    ],
+    "size_sorted": [
+     50,
+     50,
+     1.0
+    ],
+    "bbox_world": [
+     0,
+     0,
+     0,
+     50,
+     50,
+     1.0
+    ],
+    "centroid_def": [
+     25.0,
+     25.0,
+     0.5
+    ],
+    "centroid_world": [
+     25.0,
+     25.0,
+     0.5
+    ],
+    "volume": 2500.0,
+    "area": null,
+    "min_dim": 1.0,
+    "material": "AL6061",
+    "density": null,
+    "density_unit": null,
+    "color": null,
+    "instance_count": 1,
+    "has_geometry": true,
+    "depth": 3,
+    "solid_count": 1,
+    "construction_only": false,
+    "shape_def_id": "s1",
+    "step_file": "a_stack.step",
+    "xcaf_entry": "0:1:1:1"
+   },
+   "geom_fp": "e67d897f6e691787",
+   "status_flags": [],
+   "provenance": {
+    "adapter": "mcad",
+    "app_key": "heax-step_forge",
+    "tool": "REST /tree",
+    "call_id": "c3ff8323-001",
+    "node_id_at_capture": "n12",
+    "captured_at": 1756600000
+   }
+  },
+  {
+   "nid": "p:d8f6805b7766",
+   "canon_key": "mcad:/a_stack.step/STACK_ASM/BRACKET_L",
+   "domain": "mcad",
+   "kind": "part",
+   "label": "BRACKET_L",
+   "local_key": "/sif-e2e/a_stack.step/STACK_ASM/BRACKET_L",
+   "name_norm": "bracket_l",
+   "name_norm_canon": "bracket_l",
+   "group": "stack_asm",
+   "ckey": "ck:323a88501a2e",
+   "dn": "p:d8f6805b7766",
+   "parent_nid": "p:d4bb79a15430",
+   "asm_key": "a_stack/stack_asm",
+   "attrs": {
+    "shape_kind": "solid",
+    "bbox_def": [
+     0,
+     0,
+     0,
+     20,
+     10,
+     1.0
+    ],
+    "size_def": [
+     20,
+     10,
+     1.0
+    ],
+    "size_sorted": [
+     20,
+     10,
+     1.0
+    ],
+    "bbox_world": [
+     0,
+     0,
+     0,
+     20,
+     10,
+     1.0
+    ],
+    "centroid_def": [
+     10.0,
+     5.0,
+     0.5
+    ],
+    "centroid_world": [
+     10.0,
+     5.0,
+     0.5
+    ],
+    "volume": 200.0,
+    "area": null,
+    "min_dim": 1.0,
+    "material": "SUS304",
+    "density": null,
+    "density_unit": null,
+    "color": null,
+    "instance_count": 1,
+    "has_geometry": true,
+    "depth": 3,
+    "solid_count": 1,
+    "construction_only": false,
+    "shape_def_id": "s1",
+    "step_file": "a_stack.step",
+    "xcaf_entry": "0:1:1:1"
+   },
+   "geom_fp": "b3715424aaa27b70",
+   "status_flags": [],
+   "provenance": {
+    "adapter": "mcad",
+    "app_key": "heax-step_forge",
+    "tool": "REST /tree",
+    "call_id": "c3ff8323-001",
+    "node_id_at_capture": "n12",
+    "captured_at": 1756600000
+   }
+  },
+  {
+   "nid": "p:3dfa28522271",
+   "canon_key": "dyna:e8de64cc:1",
+   "domain": "dyna",
+   "kind": "pid",
+   "label": "STACK\\PLATE_1",
+   "local_key": "1",
+   "name_norm": "plate_1",
+   "name_norm_canon": "plate",
+   "group": "STACK",
+   "ckey": null,
+   "dn": "p:3dfa28522271",
+   "parent_nid": null,
+   "asm_key": null,
+   "attrs": {
+    "title": "STACK\\PLATE_1",
+    "elem_class": "solid",
+    "n_elems": 3200,
+    "bbox_min": [
+     0,
+     0,
+     0
+    ],
+    "bbox_max": [
+     50,
+     50,
+     1.2
+    ],
+    "size": [
+     50,
+     50,
+     1.2
+    ],
+    "size_sorted": [
+     50,
+     50,
+     1.2
+    ],
+    "area_ext": 5000.0,
+    "volume": 3000.0,
+    "proj": {
+     "x": 0,
+     "y": 0,
+     "z": 0
+    },
+    "material": {
+     "mid": 1,
+     "keyword": "*MAT_PIECEWISE_LINEAR_PLASTICITY",
+     "name": "AL6061",
+     "E": 69000,
+     "nu": 0.33,
+     "rho": 2.7e-09,
+     "sigy": 276,
+     "db": null
+    },
+    "secid": null,
+    "section_hint": {
+     "has_section_shell": false,
+     "has_section_solid": true
+    },
+    "bridge": null
+   },
+   "geom_fp": "4ce091a83561d2ea",
+   "status_flags": []
+  },
+  {
+   "nid": "p:7aa51c64f811",
+   "canon_key": "dyna:e8de64cc:2",
+   "domain": "dyna",
+   "kind": "pid",
+   "label": "STACK\\PLATE_2",
+   "local_key": "2",
+   "name_norm": "plate_2",
+   "name_norm_canon": "plate",
+   "group": "STACK",
+   "ckey": null,
+   "dn": "p:7aa51c64f811",
+   "parent_nid": null,
+   "asm_key": null,
+   "attrs": {
+    "title": "STACK\\PLATE_2",
+    "elem_class": "solid",
+    "n_elems": 3200,
+    "bbox_min": [
+     0,
+     0,
+     0
+    ],
+    "bbox_max": [
+     50,
+     50,
+     1.0
+    ],
+    "size": [
+     50,
+     50,
+     1.0
+    ],
+    "size_sorted": [
+     50,
+     50,
+     1.0
+    ],
+    "area_ext": 5000.0,
+    "volume": 2500.0,
+    "proj": {
+     "x": 0,
+     "y": 0,
+     "z": 0
+    },
+    "material": {
+     "mid": 2,
+     "keyword": "*MAT_PIECEWISE_LINEAR_PLASTICITY",
+     "name": "AL6061",
+     "E": 69000,
+     "nu": 0.33,
+     "rho": 2.7e-09,
+     "sigy": 276,
+     "db": null
+    },
+    "secid": null,
+    "section_hint": {
+     "has_section_shell": false,
+     "has_section_solid": true
+    },
+    "bridge": null
+   },
+   "geom_fp": "949225fbca1ad44e",
+   "status_flags": []
+  },
+  {
+   "nid": "p:b7e12aec2003",
+   "canon_key": "dyna:e8de64cc:3",
+   "domain": "dyna",
+   "kind": "pid",
+   "label": "STACK\\BRACKET_L",
+   "local_key": "3",
+   "name_norm": "bracket_l",
+   "name_norm_canon": "bracket_l",
+   "group": "STACK",
+   "ckey": null,
+   "dn": "p:b7e12aec2003",
+   "parent_nid": null,
+   "asm_key": null,
+   "attrs": {
+    "title": "STACK\\BRACKET_L",
+    "elem_class": "solid",
+    "n_elems": 3200,
+    "bbox_min": [
+     0,
+     0,
+     0
+    ],
+    "bbox_max": [
+     20,
+     10,
+     1.0
+    ],
+    "size": [
+     20,
+     10,
+     1.0
+    ],
+    "size_sorted": [
+     20,
+     10,
+     1.0
+    ],
+    "area_ext": 5000.0,
+    "volume": 200.0,
+    "proj": {
+     "x": 0,
+     "y": 0,
+     "z": 0
+    },
+    "material": {
+     "mid": 3,
+     "keyword": "*MAT_PIECEWISE_LINEAR_PLASTICITY",
+     "name": "AL6061",
+     "E": 69000,
+     "nu": 0.33,
+     "rho": 2.7e-09,
+     "sigy": 276,
+     "db": null
+    },
+    "secid": null,
+    "section_hint": {
+     "has_section_shell": false,
+     "has_section_solid": true
+    },
+    "bridge": null
+   },
+   "geom_fp": "ca9cac484ac5b5fb",
+   "status_flags": []
+  }
+ ],
+ "edges": [
+  {
+   "eid": "e:f1dabe4da27f",
+   "kind": "tied",
+   "kind_family": "iface",
+   "a": "p:87ae2f56d589",
+   "b": "p:8051c8e0492d",
+   "domain": "mcad",
+   "status": "confirmed",
+   "attrs": {
+    "min_gap": 0.0,
+    "contact_area_est": 2500.0,
+    "band_width": 0.05,
+    "normal_align": null,
+    "penetration_depth": null,
+    "penetration_depth_is_lower_bound": true,
+    "penetration_volume": null,
+    "cross_file": false,
+    "face_pairs_count": null,
+    "note": "면 접촉",
+    "tol_config_hash": "99aec9656043c45c8af715ca225d5e6add340292cb36eab0102e99d17576eef5"
+   },
+   "provenance": {
+    "adapter": "mcad",
+    "app_key": "heax-step_forge",
+    "tool": "list_interfaces",
+    "call_id": "c3ff8323-004",
+    "captured_at": 1756600000,
+    "detected_at": null,
+    "params_hash": "99aec9656043c45c8af715ca225d5e6add340292cb36eab0102e99d17576eef5"
+   }
+  },
+  {
+   "eid": "e:c650f4ca3da5",
+   "kind": "interference",
+   "kind_family": "iface",
+   "a": "p:8051c8e0492d",
+   "b": "p:d8f6805b7766",
+   "domain": "mcad",
+   "status": "auto",
+   "attrs": {
+    "min_gap": 0.0,
+    "contact_area_est": 12.4,
+    "band_width": 0.05,
+    "normal_align": null,
+    "penetration_depth": 0.05,
+    "penetration_depth_is_lower_bound": true,
+    "penetration_volume": null,
+    "cross_file": false,
+    "face_pairs_count": null,
+    "note": "재검사 필요",
+    "tol_config_hash": "99aec9656043c45c8af715ca225d5e6add340292cb36eab0102e99d17576eef5"
+   }
+  },
+  {
+   "eid": "e:84b647c8963d",
+   "kind": "part_of",
+   "kind_family": "hier",
+   "a": "p:d4bb79a15430",
+   "b": "p:87ae2f56d589",
+   "domain": "mcad",
+   "status": "auto",
+   "attrs": {
+    "depth_delta": 1
+   }
+  },
+  {
+   "eid": "e:f12bd942e53f",
+   "kind": "contact",
+   "kind_family": "contact",
+   "a": "p:3dfa28522271",
+   "b": "p:7aa51c64f811",
+   "domain": "dyna",
+   "status": "auto",
+   "attrs": {
+    "contact_index": 1,
+    "contact_type": "*CONTACT_TIED_SURFACE_TO_SURFACE",
+    "title": "tie1",
+    "fs": null
+   }
+  }
+ ],
+ "same_as": [
+  {
+   "id": "sa:7033229e2ff4",
+   "scope": "intra",
+   "a": "p:87ae2f56d589",
+   "b": "p:3dfa28522271",
+   "method": "name_norm",
+   "score": 0.95,
+   "status": "auto",
+   "evidence": {
+    "name_sim": 1.0,
+    "geom_sim": 0.98,
+    "material_eq": 1.0,
+    "neighbor_sim": 0.5,
+    "rank_in_row": 1,
+    "n_candidates": 1
+   },
+   "decided_by": null,
+   "decided_at": null,
+   "ledger_id": null
+  },
+  {
+   "id": "sa:10acea742973",
+   "scope": "intra",
+   "a": "p:8051c8e0492d",
+   "b": "p:7aa51c64f811",
+   "method": "name_norm",
+   "score": 0.95,
+   "status": "auto",
+   "evidence": {
+    "name_sim": 1.0,
+    "geom_sim": 0.98,
+    "material_eq": 1.0,
+    "neighbor_sim": 0.5,
+    "rank_in_row": 1,
+    "n_candidates": 1
+   },
+   "decided_by": null,
+   "decided_at": null,
+   "ledger_id": null
+  },
+  {
+   "id": "sa:876b7668d6bb",
+   "scope": "intra",
+   "a": "p:d8f6805b7766",
+   "b": "p:b7e12aec2003",
+   "method": "name_norm",
+   "score": 0.95,
+   "status": "auto",
+   "evidence": {
+    "name_sim": 1.0,
+    "geom_sim": 0.98,
+    "material_eq": 1.0,
+    "neighbor_sim": 0.5,
+    "rank_in_row": 1,
+    "n_candidates": 1
+   },
+   "decided_by": null,
+   "decided_at": null,
+   "ledger_id": null
+  }
+ ],
+ "dims_named": [
+  {
+   "name": "plate_gap",
+   "value": 0.0,
+   "unit": "mm",
+   "method": "measured",
+   "ref": "e:f1dabe4da27f",
+   "formula": "edge[name=plate_1|plate_2].attrs.min_gap",
+   "owner_sub": "user@example.com",
+   "null_reason": null
+  },
+  {
+   "name": "hinge_plate_thickness",
+   "value": null,
+   "unit": "mm",
+   "method": "measured",
+   "ref": null,
+   "formula": "node[asm=a_stack/stack_asm/hinge_plate].attrs.min_dim",
+   "owner_sub": "user@example.com",
+   "null_reason": "ref_missing"
+  }
+ ],
+ "rollups": {
+  "by_assembly": [
+   {
+    "path_prefix": "a_stack",
+    "depth": 1,
+    "n_leaf": 3,
+    "edges_internal": {
+     "tied": 1,
+     "interference": 1
+    },
+    "edges_external": {},
+    "orphan_leaf": 0
+   },
+   {
+    "path_prefix": "a_stack/stack_asm",
+    "depth": 2,
+    "n_leaf": 3,
+    "edges_internal": {
+     "tied": 1,
+     "interference": 1
+    },
+    "edges_external": {},
+    "orphan_leaf": 0
+   }
+  ]
+ },
+ "results": null,
+ "missing": {
+  "ecad_absent": true,
+  "dyna_absent": false,
+  "dyna_result_absent": true,
+  "result_kind_mismatch": false,
+  "world_transform_absent": false,
+  "volume_null": false,
+  "material_density_unsourced": true
+ },
+ "warnings": [
+  {
+   "severity": "INFO",
+   "code": "ecad_absent",
+   "message": "ecad adapter not discovered",
+   "ref": null,
+   "source_kind": "ir_builder"
+  }
+ ],
+ "gates": {},
+ "character_seed": [],
+ "feature_vector": {},
+ "ir_hash": "630cda9b12eb3298d036d407cba79664c2217dd425b293aeb868b0d18a3b5fe9",
+ "versions": {
+  "ir_version": "1.0",
+  "adapter_versions": {
+   "mcad": "1.0",
+   "ecad": "0.0-stub",
+   "dyna": "1.0"
+  },
+  "taxonomy_version": "1.0",
+  "seed_rules_version": "seed-1.0",
+  "vocab_version": "vocab-1.0"
+ }
+}

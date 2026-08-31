@@ -1,0 +1,610 @@
+{
+ "schema": "risk_spec",
+ "version": "1.0",
+ "taxonomy_version": "1.0",
+ "scope": {
+  "kind": "diff",
+  "target_key": "diff:7f3e9c1a2b4d6e8f0a1b2c3d4e5f6071",
+  "project_refs": [
+   "F7"
+  ],
+  "ir_refs": [
+   "a1…",
+   "b2…"
+  ],
+  "diff_ref": "7f3e9c1a2b4d6e8f0a1b2c3d4e5f6071",
+  "ir_hash": "beef00…"
+ },
+ "findings": [
+  {
+   "id": "F1",
+   "direction": "risk",
+   "domain": "mech",
+   "mechanism": "mechanical",
+   "mechanism_detail": "drop_stress",
+   "change_kind": "dimension",
+   "subject": {
+    "ckeys": [
+     "ck:3f9a2b1c0d4e",
+     "ck:aa10bb20cc30"
+    ],
+    "names": [
+     "UTG",
+     "HOUSING_FRONT"
+    ]
+   },
+   "trigger_condition": "load.drop",
+   "trigger_text": "코너 자세 1.0 m",
+   "severity": "중대",
+   "judgement": "WARNING",
+   "detectability": {
+    "level": "sim-detectable",
+    "tool": "report_part_risk"
+   },
+   "evidence_grade": "도구예측",
+   "precedent": "none",
+   "cites": [
+    {
+     "ref": "c:7d21a0b1c2d3",
+     "quote": "UTG↔HOUSING_FRONT clearance min_gap 0.350→0.180 mm (−48.6%)"
+    },
+    {
+     "ref": "c:6677889900aa",
+     "quote": "UTG worst_stress 412→468 MPa (+13.6%) case corner_45→corner_45 kind=sphere"
+    },
+    {
+     "ref": "sig:results.over_yield[1]",
+     "quote": "over_yield UTG 0.78→0.89 (yield_stress=525 MPa)"
+    }
+   ],
+   "tool_calls": [
+    "report_part_risk(report_id=01K…)",
+    "list_interfaces(kind=clearance, name_like=UTG)"
+   ],
+   "claim": "UTG 에지와 HOUSING_FRONT 립 사이 간극이 0.350→0.180 mm 로 줄면서 코너 낙하(corner_45) 에서 UTG 최대 응력이 412→468 MPa 로 올라 항복 대비 0.89 에 이른다.",
+   "warrant": "간극 축소로 코너 충돌 시 하우징 립이 UTG 에지에 먼저 닿는 접촉 순서가 되며 sphere 리포트 corner_45 케이스가 그 위치에서 최대 응력을 보인다. 두 리포트는 kind·sim_params 가 같아 수치 비교가 유효하다.",
+   "resolving_check": {
+    "kind": "sim",
+    "ref": "sphere 리포트 corner 계열 케이스에서 UTG 에지 요소 응력 시계열 확인(report_part_series)"
+   },
+   "owner_domain": "mech",
+   "raised_by": [
+    "mech-housing-structure",
+    "sim-drop-impact"
+   ],
+   "contested_by": [],
+   "contest_note": "",
+   "status": "open"
+  },
+  {
+   "id": "F2",
+   "direction": "risk",
+   "domain": "disp",
+   "mechanism": "mechanical",
+   "mechanism_detail": "drop_stress",
+   "change_kind": "dimension",
+   "subject": {
+    "ckeys": [
+     "ck:3f9a2b1c0d4e",
+     "ck:5e6f70819293"
+    ],
+    "names": [
+     "UTG",
+     "PROTECT_FILM"
+    ]
+   },
+   "trigger_condition": "load.drop",
+   "trigger_text": "에지 우선 접촉",
+   "severity": "중대",
+   "judgement": "undetermined",
+   "detectability": {
+    "level": "test-only",
+    "tool": ""
+   },
+   "evidence_grade": "도구예측",
+   "precedent": "none",
+   "cites": [
+    {
+     "ref": "c:1122aabbccdd",
+     "quote": "PROTECT_FILM min_dim 0.080→0.060 mm (−25.0%) (min_dim 근사)"
+    },
+    {
+     "ref": "c:7d21a0b1c2d3",
+     "quote": "UTG↔HOUSING_FRONT clearance min_gap 0.350→0.180 mm (−48.6%)"
+    }
+   ],
+   "tool_calls": [
+    "list_parts(name_like=FILM)"
+   ],
+   "claim": "보호필름이 0.080→0.060 mm 로 얇아진 상태에서 에지 우선 접촉이 되면 UTG 에지 치핑 개시 하중이 낮아질 수 있으나 해석 모델에 에지 결함 분포가 없어 판정 불가다.",
+   "warrant": "UTG 에지 강도는 연마 결함 크기에 지배되고 이 값은 IR·리포트 어디에도 없다. 필름 두께 감소는 에지로 전달되는 접촉 하중을 키우는 방향의 사실이다.",
+   "resolving_check": {
+    "kind": "test",
+    "ref": "UTG 에지 4점 굽힘 + 코너 낙하 시험(DV2 시제 n≥5)"
+   },
+   "owner_domain": "disp",
+   "raised_by": [
+    "disp-utg-cover"
+   ],
+   "contested_by": [
+    "delib-baseline-defender"
+   ],
+   "contest_note": "에지 결함 데이터 없이 중대로 두는 것은 과잉 — undetermined 로 낮출 것",
+   "status": "open"
+  },
+  {
+   "id": "F3",
+   "direction": "risk",
+   "domain": "xd",
+   "mechanism": "process",
+   "mechanism_detail": "tolerance",
+   "change_kind": "dimension",
+   "subject": {
+    "ckeys": [
+     "ck:3f9a2b1c0d4e",
+     "ck:aa10bb20cc30"
+    ],
+    "names": [
+     "UTG",
+     "HOUSING_FRONT"
+    ]
+   },
+   "trigger_condition": "mfg.tolerance",
+   "trigger_text": "조립 공차 누적",
+   "severity": "경미",
+   "judgement": "WARNING",
+   "detectability": {
+    "level": "sim-detectable",
+    "tool": "list_interfaces"
+   },
+   "evidence_grade": "도구예측",
+   "precedent": "none",
+   "cites": [
+    {
+     "ref": "d:utg_edge_gap",
+     "quote": "utg_edge_gap 0.350→0.180 mm (−48.6%)"
+    },
+    {
+     "ref": "sig:hist.gap_mm",
+     "quote": "gap_hist_mm [0,0.01)=1 [0.01,0.05)=3 [0.05,0.1)=2 [0.1,0.2)=4 [0.2,0.5)=6"
+    }
+   ],
+   "tool_calls": [
+    "list_interfaces(kind=clearance)"
+   ],
+   "claim": "utg_edge_gap 0.180 mm 는 이 조립체의 clearance 분포에서 하위 구간에 들고 조립 공차 누적분이 없어 실물 간극이 0 이 될 수 있다.",
+   "warrant": "명명 치수가 공칭값이며 공차 스택 값은 IR 에 없다. 근접 간극 구간 분포가 그 사실을 보여준다.",
+   "resolving_check": {
+    "kind": "tool",
+    "ref": "rr_dim_defs 에 utg_edge_gap_tol 정의 후 재평가"
+   },
+   "owner_domain": "xd",
+   "raised_by": [
+    "xd-mech-assembly"
+   ],
+   "contested_by": [],
+   "contest_note": "",
+   "status": "open"
+  }
+ ],
+ "gains": [
+  {
+   "id": "G1",
+   "direction": "improvement",
+   "domain": "sim",
+   "mechanism": "mechanical",
+   "mechanism_detail": "drop_stress",
+   "change_kind": "dimension",
+   "subject": {
+    "ckeys": [
+     "ck:9f8e7d6c5b4a",
+     "ck:8a9b0c1d2e3f"
+    ],
+    "names": [
+     "DISPLAY_PANEL",
+     "OCA_TOP"
+    ]
+   },
+   "trigger_condition": "load.drop",
+   "trigger_text": "면 낙하(face_up)",
+   "severity": "경미",
+   "judgement": "OK",
+   "detectability": {
+    "level": "sim-detectable",
+    "tool": "report_part_risk"
+   },
+   "evidence_grade": "도구예측",
+   "precedent": "none",
+   "cites": [
+    {
+     "ref": "c:3344eeff0011",
+     "quote": "OCA_TOP min_dim 0.050→0.075 mm (+50.0%) (min_dim 근사)"
+    },
+    {
+     "ref": "c:bbccddeeff00",
+     "quote": "DISPLAY_PANEL worst_stress 355→331 MPa (−6.8%) case face_up→face_up kind=sphere"
+    }
+   ],
+   "tool_calls": [
+    "report_part_risk(report_id=01K…)"
+   ],
+   "claim": "OCA 가 0.050→0.075 mm 로 두꺼워지면서 면 낙하에서 DISPLAY_PANEL 최대 응력이 355→331 MPa 로 내려갔다.",
+   "warrant": "같은 kind·같은 sim_params 리포트의 같은 케이스(face_up) 수치이며 변경 항목 중 패널 위 적층에서 바뀐 것은 OCA 두께뿐이다.",
+   "resolving_check": {
+    "kind": "sim",
+    "ref": "OCA 두께 0.075 mm 고정 후 corner 계열 케이스 재확인"
+   },
+   "owner_domain": "sim",
+   "raised_by": [
+    "sim-drop-impact",
+    "delib-baseline-defender"
+   ],
+   "contested_by": [],
+   "contest_note": "",
+   "status": "open"
+  }
+ ],
+ "cross_domain": [
+  {
+   "id": "X1",
+   "from_domain": "mech",
+   "to_domain": "disp",
+   "path": "간극 축소(mech) → 코너 낙하 접촉 순서가 하우징 립→UTG 에지로 바뀜 → 에지 치핑 모드(disp) 가 지배 실패모드로 이동",
+   "cites": [
+    {
+     "ref": "c:7d21a0b1c2d3",
+     "quote": "UTG↔HOUSING_FRONT clearance min_gap 0.350→0.180 mm (−48.6%)"
+    }
+   ],
+   "raised_by": [
+    "disp-utg-cover"
+   ]
+  },
+  {
+   "id": "X2",
+   "from_domain": "mech",
+   "to_domain": "rel",
+   "path": "HINGE_PLATE_L↔DISPLAY_PANEL 접합이 tied→touching 이면 접이 사이클 중 상대 미끄럼이 생겨 패널 하부 마모·들뜸(rel) 이 새 경로가 된다",
+   "cites": [
+    {
+     "ref": "c:5b0e11aa22bb",
+     "quote": "HINGE_PLATE_L↔DISPLAY_PANEL kind tied→touching (rank 2→1) min_gap 0.000→0.018 mm status=auto(미확정 초안)"
+    }
+   ],
+   "raised_by": [
+    "rel-fold-cycle"
+   ]
+  }
+ ],
+ "character": {
+  "one_liner": "베젤 축소를 위해 UTG 에지 여유를 절반으로 줄이고 적층 두께를 재배분한 폴더블 DV2 — 에지 우선 접촉이 새 지배 경로다.",
+  "facets": [
+   {
+    "facet": "intent",
+    "na_reason": null,
+    "statements": [
+     {
+      "id": "C1",
+      "text": "이 변동은 두께가 아니라 베젤 폭을 줄이려는 변경이다 — 바뀐 치수는 UTG 에지 간극과 필름·OCA 두께뿐이고 전체 bbox_z 는 6.600→6.600 mm 로 같다.",
+      "polarity": "inference",
+      "by": [
+       "xd-mech-assembly"
+      ],
+      "cites": [
+       {
+        "ref": "d:utg_edge_gap",
+        "quote": "utg_edge_gap 0.350→0.180 mm (−48.6%)"
+       },
+       {
+        "ref": "sig:scale.bbox_world",
+        "quote": "bbox_world [158.2, 72.1, 6.600] mm"
+       }
+      ],
+      "tags": [
+       "char:philosophy:thin_first"
+      ],
+      "confidence": "high"
+     }
+    ]
+   },
+   {
+    "facet": "constraint",
+    "na_reason": null,
+    "statements": [
+     {
+      "id": "C2",
+      "text": "힌지 반경 1.500 mm 가 DV1 그대로라 접이 곡률은 고정 제약이고, 적층 두께 재배분은 그 반경 안에서만 이루어졌다.",
+      "polarity": "observation",
+      "by": [
+       "mech-housing-structure"
+      ],
+      "cites": [
+       {
+        "ref": "d:hinge_radius",
+        "quote": "hinge_radius 1.500→1.500 mm (0.0%)"
+       }
+      ],
+      "tags": [
+       "char:structure:foldable_hinge"
+      ],
+      "confidence": "high"
+     }
+    ]
+   },
+   {
+    "facet": "anomaly",
+    "na_reason": "비교 불가(코퍼스 n<5)",
+    "statements": []
+   },
+   {
+    "facet": "lineage",
+    "na_reason": null,
+    "statements": [
+     {
+      "id": "C3",
+      "text": "DV1 대비 파트 추가·삭제 없이 치수 4건과 접합 1건만 바뀐 리비전이라 구조는 계승, 계면 성격만 이동했다.",
+      "polarity": "observation",
+      "by": [
+       "chair"
+      ],
+      "cites": [
+       {
+        "ref": "c:5b0e11aa22bb",
+        "quote": "HINGE_PLATE_L↔DISPLAY_PANEL kind tied→touching (rank 2→1)"
+       }
+      ],
+      "tags": [
+       "char:change_style:dimension_tuning"
+      ],
+      "confidence": "high"
+     }
+    ]
+   },
+   {
+    "facet": "vulnerability",
+    "na_reason": null,
+    "statements": [
+     {
+      "id": "C4",
+      "text": "UTG 에지↔HOUSING_FRONT 립이 이 리비전의 취약 계면이다 — 간극 0.180 mm 에서 코너 낙하 응력이 468 MPa 로 항복 대비 0.89 다.",
+      "polarity": "inference",
+      "by": [
+       "mech-housing-structure",
+       "sim-drop-impact"
+      ],
+      "cites": [
+       {
+        "ref": "c:7d21a0b1c2d3",
+        "quote": "UTG↔HOUSING_FRONT clearance min_gap 0.350→0.180 mm (−48.6%)"
+       },
+       {
+        "ref": "c:6677889900aa",
+        "quote": "UTG worst_stress 412→468 MPa (+13.6%)"
+       }
+      ],
+      "tags": [
+       "char:interface:utg_housing_front",
+       "char:tolerance:tight"
+      ],
+      "confidence": "high"
+     }
+    ]
+   },
+   {
+    "facet": "strength",
+    "na_reason": null,
+    "statements": [
+     {
+      "id": "C5",
+      "text": "두꺼워진 OCA 가 면 낙하에서 패널 응력을 331 MPa 로 낮춰 면 낙하 여유는 DV1 보다 커졌다.",
+      "polarity": "observation",
+      "by": [
+       "sim-drop-impact",
+       "delib-baseline-defender"
+      ],
+      "cites": [
+       {
+        "ref": "c:bbccddeeff00",
+        "quote": "DISPLAY_PANEL worst_stress 355→331 MPa (−6.8%)"
+       }
+      ],
+      "tags": [
+       "char:structure:stacked"
+      ],
+      "confidence": "high"
+     }
+    ]
+   },
+   {
+    "facet": "tradeoff",
+    "na_reason": null,
+    "statements": [
+     {
+      "id": "C6",
+      "text": "베젤 폭(간극 0.170 mm 절감)을 얻고 코너 낙하 에지 여유(응력 +56 MPa)를 내줬다.",
+      "polarity": "inference",
+      "by": [
+       "chair"
+      ],
+      "cites": [
+       {
+        "ref": "c:7d21a0b1c2d3",
+        "quote": "UTG↔HOUSING_FRONT clearance min_gap 0.350→0.180 mm (−48.6%)"
+       },
+       {
+        "ref": "c:6677889900aa",
+        "quote": "UTG worst_stress 412→468 MPa (+13.6%)"
+       }
+      ],
+      "tags": [],
+      "confidence": "medium"
+     },
+     {
+      "id": "C7",
+      "text": "OCA 두께 +0.025 mm 로 면 낙하 응력 −24 MPa 를 얻는 대신 접이 영역 적층 강성이 올라 힌지 접합을 touching 으로 풀어야 했다.",
+      "polarity": "hypothesis",
+      "by": [
+       "mech-housing-structure"
+      ],
+      "cites": [
+       {
+        "ref": "c:3344eeff0011",
+        "quote": "OCA_TOP min_dim 0.050→0.075 mm (+50.0%)"
+       },
+       {
+        "ref": "c:bbccddeeff00",
+        "quote": "DISPLAY_PANEL worst_stress 355→331 MPa (−6.8%)"
+       },
+       {
+        "ref": "c:5b0e11aa22bb",
+        "quote": "HINGE_PLATE_L↔DISPLAY_PANEL kind tied→touching (rank 2→1)"
+       }
+      ],
+      "tags": [
+       "x:stack_stiffness_budget"
+      ],
+      "confidence": "low"
+     }
+    ]
+   },
+   {
+    "facet": "unknown",
+    "na_reason": null,
+    "statements": [
+     {
+      "id": "C8",
+      "text": "UTG 에지 결함 분포와 조립 공차 스택이 IR 에 없어 F2·F3 은 판정 불가다(O1·O2).",
+      "polarity": "observation",
+      "by": [
+       "disp-utg-cover",
+       "xd-mech-assembly"
+      ],
+      "cites": [
+       {
+        "ref": "d:utg_edge_gap",
+        "quote": "utg_edge_gap 0.350→0.180 mm (−48.6%)"
+       }
+      ],
+      "tags": [],
+      "confidence": "high"
+     },
+     {
+      "id": "C9",
+      "text": "ECAD 부재로 pcb·pwr·rf·soc·passive·mem 관점(FPC 접힘 영역·커넥터 위치)은 미평가다(O3).",
+      "polarity": "observation",
+      "by": [
+       "code"
+      ],
+      "cites": [
+       {
+        "ref": "sig:counts.ecad.components",
+        "quote": "ecad.components=미측정 (ecad_absent)"
+       }
+      ],
+      "tags": [
+       "char:analysis:ecad_absent"
+      ],
+      "confidence": "high"
+     }
+    ]
+   }
+  ]
+ },
+ "open_items": [
+  {
+   "id": "O1",
+   "question": "UTG 에지 결함 크기 분포(연마 조건별)가 있는가",
+   "resolving_check": {
+    "kind": "test",
+    "ref": "UTG 에지 4점 굽힘 n≥30 와이블"
+   },
+   "owner_domain": "disp"
+  },
+  {
+   "id": "O2",
+   "question": "utg_edge_gap 의 조립 공차 스택(±)은 얼마인가",
+   "resolving_check": {
+    "kind": "tool",
+    "ref": "rr_dim_defs utg_edge_gap_tol 정의 후 재평가"
+   },
+   "owner_domain": "xd"
+  },
+  {
+   "id": "O3",
+   "question": "HINGE_PLATE_L↔DISPLAY_PANEL 이 실제로 접착 해제인가 검출 오분류인가",
+   "resolving_check": {
+    "kind": "tool",
+    "ref": "set_interface 로 사람 확정 후 재스냅샷"
+   },
+   "owner_domain": "mech"
+  }
+ ],
+ "coverage": {
+  "seats": [
+   {
+    "key": "mech-housing-structure",
+    "domain": "mech",
+    "origin": "primary"
+   },
+   {
+    "key": "sim-drop-impact",
+    "domain": "sim",
+    "origin": "primary"
+   },
+   {
+    "key": "xd-mech-assembly",
+    "domain": "xd",
+    "origin": "primary"
+   },
+   {
+    "key": "disp-utg-cover",
+    "domain": "disp",
+    "origin": "primary"
+   },
+   {
+    "key": "rel-fold-cycle",
+    "domain": "rel",
+    "origin": "counter"
+   },
+   {
+    "key": "delib-baseline-defender",
+    "domain": "delib",
+    "origin": "adversary"
+   }
+  ],
+  "domains_seated": [
+   "mech",
+   "sim",
+   "xd",
+   "disp",
+   "rel"
+  ],
+  "domains_missing": [
+   "pcb",
+   "pwr",
+   "rf",
+   "soc",
+   "passive",
+   "mem",
+   "cam",
+   "sh",
+   "std",
+   "material"
+  ]
+ },
+ "verdict": "conditional",
+ "verdict_conditions": [
+  "O3 확정 후 HINGE 접합이 tied 로 복원되지 않으면 rel 재심",
+  "O2 공차 스택 반영 시 utg_edge_gap 최소값 ≥ 0.10 mm"
+ ],
+ "evidence_profile": {
+  "tool": 9,
+  "card": 3,
+  "precedent": {
+   "verified": 0,
+   "dismissed": 0
+  },
+  "heuristic": 0,
+  "measured": 0
+ }
+}

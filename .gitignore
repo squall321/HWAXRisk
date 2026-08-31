@@ -1,0 +1,17 @@
+.venv/
+backend/.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.coverage
+.bkit/
+.koo-llm-sessions/
+data/*.db*
+var/
+node_modules/
+frontend/dist/
+# tsc 빌드 산출물(정본은 .ts 파일)
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts

@@ -1,0 +1,38 @@
+{
+ "opinion_id": "2465a128ca302ed5d3a3a2c232fa6895",
+ "target_key": "diff:7f3e9c1a2b4d6e8f0a1b2c3d4e5f6071",
+ "panel_id": "78a22de52a55c9ea873fefba8d4d078d",
+ "agent_key": "rel-fold-cycle",
+ "domain": "rel",
+ "origin": "counter",
+ "cycle": 1,
+ "turns": [
+  {
+   "round": 1,
+   "say_excerpt": "판정 불가 — 다음 확인 O1.",
+   "position": "판정 불가",
+   "stance": "abstain",
+   "non_negotiable": ""
+  }
+ ],
+ "final_stance": "abstain",
+ "tool_calls": [],
+ "tool_calls_n": 1,
+ "tool_calls_ok": null,
+ "knowledge_hits_n": 0,
+ "cited_refs": [],
+ "cited_refs_resolved": [],
+ "cited_ckeys": [],
+ "quality": {
+  "used_tool": null,
+  "cited_ir": false,
+  "grade_min": null,
+  "dangling_n": 0
+ },
+ "raised_finding_ids": [],
+ "contested_finding_ids": [
+  "78a22de52a55c9ea873fefba8d4d078d#F2"
+ ],
+ "character_sentences": [],
+ "excerpt_for_rag": "판정 불가 — 다음 확인 O1."
+}

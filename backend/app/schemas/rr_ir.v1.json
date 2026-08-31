@@ -1,0 +1,349 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "hwax-risk/rr_ir.v1.json",
+  "title": "rr_ir v1 — 설계 IR 스냅샷 봉투(plan §2.2~§2.9)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "ir_version", "snapshot_id", "project_id", "owner_sub", "label", "captured_at", "derived_from", "partial",
+    "sources", "units", "nodes", "edges", "same_as", "dims_named", "rollups", "results", "missing", "warnings",
+    "ir_hash", "versions"
+  ],
+  "properties": {
+    "ir_version": {"type": "string", "enum": ["1.0", "1.1"]},
+    "snapshot_id": {"$ref": "#/definitions/hex32"},
+    "project_id": {"$ref": "#/definitions/hex32"},
+    "owner_sub": {"type": "string"},
+    "label": {"type": "string"},
+    "captured_at": {"type": "integer"},
+    "derived_from": {"oneOf": [{"$ref": "#/definitions/hex32"}, {"type": "null"}]},
+    "partial": {"type": "boolean"},
+    "sources": {"type": "array", "items": {"$ref": "#/definitions/source"}},
+    "units": {"$ref": "#/definitions/units"},
+    "nodes": {"type": "array", "items": {"$ref": "#/definitions/node"}},
+    "edges": {"type": "array", "items": {"$ref": "#/definitions/edge"}},
+    "same_as": {"type": "array", "items": {"$ref": "#/definitions/same_as"}},
+    "dims_named": {"type": "array", "items": {"$ref": "#/definitions/dim_named"}},
+    "rollups": {
+      "type": "object",
+      "required": ["by_assembly"],
+      "properties": {"by_assembly": {"type": "array", "items": {"$ref": "#/definitions/rollup_row"}}}
+    },
+    "results": {"oneOf": [{"type": "null"}, {"$ref": "#/definitions/results"}]},
+    "missing": {"$ref": "#/definitions/missing"},
+    "warnings": {"type": "array", "items": {"$ref": "#/definitions/warning"}},
+    "gates": {"type": "object", "additionalProperties": {"$ref": "#/definitions/gate"}},
+    "character_seed": {"type": "array", "items": {"$ref": "#/definitions/character_seed"}},
+    "feature_vector": {"type": "object"},
+    "ir_hash": {"$ref": "#/definitions/sha256"},
+    "versions": {
+      "type": "object",
+      "required": ["ir_version", "adapter_versions", "taxonomy_version", "seed_rules_version", "vocab_version"],
+      "properties": {
+        "ir_version": {"type": "string", "enum": ["1.0", "1.1"]},
+        "adapter_versions": {"type": "object", "additionalProperties": {"type": "string"}},
+        "taxonomy_version": {"type": "string"},
+        "seed_rules_version": {"type": "string"},
+        "vocab_version": {"type": "string"}
+      }
+    }
+  },
+  "definitions": {
+    "hex32": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nid": {"type": "string", "pattern": "^p:[0-9a-f]{12}$"},
+    "eid": {"type": "string", "pattern": "^e:[0-9a-f]{12}$"},
+    "ckey": {"type": "string", "pattern": "^ck:[0-9a-f]{12}$"},
+    "vec3": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3},
+    "source_kind": {"type": "string", "enum": ["mcad", "dyna", "dyna_result", "ecad"]},
+    "degraded_code": {
+      "type": "string",
+      "enum": [
+        "mcp_degraded", "no_world_transform", "no_node_id", "volume_null_pre_d168", "tol_config_unknown",
+        "interfaces_truncated", "no_secid", "truncated_scan", "edges_truncated", "detect_absent", "ecad_absent",
+        "report_parts_mismatch", "unit_converted_mil", "components_truncated", "nets_truncated"
+      ]
+    },
+    "source": {
+      "type": "object",
+      "required": ["kind", "app_key", "adapter_version", "channel", "ref", "source_hash", "degraded", "captured_at"],
+      "properties": {
+        "kind": {"$ref": "#/definitions/source_kind"},
+        "app_key": {"type": ["string", "null"]},
+        "adapter_version": {"type": "string"},
+        "channel": {"type": ["string", "null"], "enum": ["rest+mcp", "mcp", "rest", null]},
+        "ref": {"type": "object"},
+        "source_hash": {"type": ["string", "null"]},
+        "tol_config_hash": {"type": ["string", "null"]},
+        "tol_known_keys": {"type": "array", "items": {"type": "string"}},
+        "scope": {"type": ["object", "null"]},
+        "stats": {"type": "object"},
+        "conventions": {"type": "object"},
+        "context": {"type": "object"},
+        "binding": {
+          "type": "object",
+          "required": ["bound_to_dyna_source_hash", "method"],
+          "properties": {
+            "bound_to_dyna_source_hash": {"type": "string"},
+            "method": {"type": "string", "enum": ["user_declared", "same_session_weak"]}
+          }
+        },
+        "degraded": {"type": "array", "items": {"$ref": "#/definitions/degraded_code"}},
+        "captured_at": {"type": ["integer", "null"]}
+      }
+    },
+    "units": {
+      "type": "object",
+      "required": ["length", "area", "volume", "stress", "accel", "density"],
+      "properties": {
+        "length": {"const": "mm"},
+        "area": {"const": "mm2"},
+        "volume": {"const": "mm3"},
+        "stress": {"const": "MPa"},
+        "accel": {"const": "G"},
+        "density": {"const": "as_in_file"}
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "properties": {
+        "adapter": {"type": "string"},
+        "app_key": {"type": ["string", "null"]},
+        "tool": {"type": "string"},
+        "call_id": {"type": ["string", "null"]},
+        "node_id_at_capture": {"type": ["string", "null"]},
+        "captured_at": {"type": ["integer", "null"]},
+        "detected_at": {"type": ["integer", "null"]},
+        "params_hash": {"type": ["string", "null"]}
+      }
+    },
+    "node": {
+      "type": "object",
+      "required": ["nid", "canon_key", "domain", "kind", "label", "local_key", "name_norm", "name_norm_canon", "group", "ckey", "dn", "parent_nid", "asm_key", "attrs", "geom_fp", "status_flags"],
+      "properties": {
+        "nid": {"$ref": "#/definitions/nid"},
+        "canon_key": {"type": "string", "pattern": "^(mcad|dyna|ecad):"},
+        "domain": {"type": "string", "enum": ["mcad", "dyna", "ecad"]},
+        "kind": {"type": "string", "enum": ["part", "assembly", "file", "pid", "contact_set", "component", "net", "layer"]},
+        "label": {"type": "string"},
+        "local_key": {"type": "string"},
+        "name_norm": {"type": "string"},
+        "name_norm_canon": {"type": "string"},
+        "group": {"type": ["string", "null"]},
+        "ckey": {"oneOf": [{"$ref": "#/definitions/ckey"}, {"type": "null"}]},
+        "dn": {"$ref": "#/definitions/nid"},
+        "parent_nid": {"oneOf": [{"$ref": "#/definitions/nid"}, {"type": "null"}]},
+        "asm_key": {"type": ["string", "null"]},
+        "attrs": {"$ref": "#/definitions/node_attrs"},
+        "geom_fp": {"type": ["string", "null"]},
+        "status_flags": {
+          "type": "array",
+          "items": {"type": "string", "enum": ["auto_named", "duplicate_name", "missing_geometry", "construction_only", "multi_solid", "volume_null", "shell_volume_zero", "scope_out"]}
+        },
+        "provenance": {"$ref": "#/definitions/provenance"}
+      }
+    },
+    "node_attrs": {
+      "type": "object",
+      "properties": {
+        "shape_kind": {"type": "string", "enum": ["solid", "shell", "face", "compound", "compsolid", "other"]},
+        "bbox_def": {"type": "array", "items": {"type": "number"}, "minItems": 6, "maxItems": 6},
+        "size_def": {"$ref": "#/definitions/vec3"},
+        "size_sorted": {"$ref": "#/definitions/vec3"},
+        "bbox_world": {"oneOf": [{"type": "array", "items": {"type": "number"}, "minItems": 6, "maxItems": 6}, {"type": "null"}]},
+        "centroid_def": {"oneOf": [{"$ref": "#/definitions/vec3"}, {"type": "null"}]},
+        "centroid_world": {"oneOf": [{"$ref": "#/definitions/vec3"}, {"type": "null"}]},
+        "volume": {"type": ["number", "null"]},
+        "area": {"type": ["number", "null"]},
+        "min_dim": {"type": ["number", "null"]},
+        "material": {"type": ["string", "object", "null"]},
+        "density": {"type": ["number", "null"]},
+        "density_unit": {"type": ["string", "null"]},
+        "elem_class": {"type": "string", "enum": ["solid", "shell", "mixed"]},
+        "n_elems": {"type": "integer"},
+        "side": {"type": "string", "enum": ["top", "bottom"]},
+        "type": {"type": "string", "enum": ["signal", "plane", "dielectric", "soldermask", "silkscreen"]},
+        "depth": {"type": "integer"}
+      }
+    },
+    "edge": {
+      "type": "object",
+      "required": ["eid", "kind", "kind_family", "a", "b", "domain", "status", "attrs"],
+      "properties": {
+        "eid": {"$ref": "#/definitions/eid"},
+        "kind": {"type": "string", "enum": ["tied", "touching", "clearance", "interference", "geometric", "contact", "scope", "bridge", "part_of", "load_path", "net"]},
+        "kind_family": {"type": "string", "enum": ["iface", "contact", "hier", "bridge", "load_path", "net"]},
+        "a": {"$ref": "#/definitions/nid"},
+        "b": {"oneOf": [{"$ref": "#/definitions/nid"}, {"type": "null"}]},
+        "members": {"type": "array", "items": {"$ref": "#/definitions/nid"}},
+        "domain": {"type": "string", "enum": ["mcad", "dyna", "dyna_result", "ecad", "cross"]},
+        "status": {"type": "string", "enum": ["auto", "confirmed", "manual", "manual_ledger", "rejected"]},
+        "attrs": {"$ref": "#/definitions/edge_attrs"},
+        "provenance": {"$ref": "#/definitions/provenance"}
+      }
+    },
+    "edge_attrs": {
+      "type": "object",
+      "properties": {
+        "min_gap": {"type": ["number", "null"]},
+        "contact_area_est": {"type": ["number", "null"]},
+        "band_width": {"type": ["number", "null"]},
+        "normal_align": {"type": ["number", "null"]},
+        "penetration_depth": {"type": ["number", "null"]},
+        "penetration_depth_is_lower_bound": {"type": "boolean"},
+        "penetration_volume": {"type": ["number", "null"]},
+        "cross_file": {"type": "boolean"},
+        "face_pairs_count": {"type": ["integer", "null"]},
+        "note": {"type": "string"},
+        "tol_config_hash": {"type": ["string", "null"]},
+        "kind_source": {"type": "string"},
+        "contact_index": {"type": "integer"},
+        "contact_type": {"type": "string"},
+        "fs": {"type": ["number", "null"]},
+        "gap_min": {"type": "number"},
+        "gap_avg": {"type": "number"},
+        "pairs": {"type": "integer"},
+        "bridge_stale": {"type": "boolean"},
+        "depth_delta": {"type": "integer"},
+        "pin": {"type": ["integer", "string", "null"]}
+      }
+    },
+    "same_as": {
+      "type": "object",
+      "required": ["id", "scope", "a", "b", "method", "score", "status"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^sa:[0-9a-f]{12}$"},
+        "scope": {"type": "string", "enum": ["intra", "pair"]},
+        "a": {"$ref": "#/definitions/nid"},
+        "b": {"$ref": "#/definitions/nid"},
+        "method": {"type": "string", "enum": ["ledger", "pid_map", "exact_path", "fingerprint", "name_norm", "fuzzy", "manual"]},
+        "score": {"type": "number", "minimum": 0, "maximum": 1},
+        "status": {"type": "string", "enum": ["auto", "pending", "confirmed", "rejected"]},
+        "evidence": {"type": "object"},
+        "decided_by": {"type": ["string", "null"]},
+        "decided_at": {"type": ["integer", "null"]},
+        "ledger_id": {"type": ["string", "null"]}
+      }
+    },
+    "dim_named": {
+      "type": "object",
+      "required": ["name", "value", "unit", "method", "ref", "formula", "owner_sub", "null_reason"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^[A-Za-z0-9_]+$"},
+        "value": {"type": ["number", "null"]},
+        "unit": {"type": "string"},
+        "method": {"type": "string", "enum": ["measured", "derived", "declared"]},
+        "ref": {"type": ["string", "array", "null"], "items": {"type": "string"}},
+        "formula": {"type": ["string", "null"]},
+        "owner_sub": {"type": "string"},
+        "null_reason": {"type": ["string", "null"], "enum": ["ref_missing", "ambiguous", "attr_null", "scope_out", null]}
+      },
+      "if": {"properties": {"null_reason": {"type": "string"}}},
+      "then": {"properties": {"value": {"type": "null"}}}
+    },
+    "rollup_row": {
+      "type": "object",
+      "required": ["path_prefix", "depth", "n_leaf", "edges_internal", "edges_external", "orphan_leaf"],
+      "properties": {
+        "path_prefix": {"type": "string"},
+        "depth": {"type": "integer", "minimum": 1},
+        "n_leaf": {"type": "integer", "minimum": 0},
+        "edges_internal": {"type": "object", "additionalProperties": {"type": "integer"}},
+        "edges_external": {"type": "object", "additionalProperties": {"type": "integer"}},
+        "orphan_leaf": {"type": "integer", "minimum": 0}
+      }
+    },
+    "results": {
+      "type": "object",
+      "required": ["report_ids", "kind", "sim_params_hash", "parts_map", "part_risk", "findings"],
+      "properties": {
+        "report_ids": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 3},
+        "kind": {"type": "string", "enum": ["deep", "sphere", "impact"]},
+        "sim_params_hash": {"$ref": "#/definitions/sha256"},
+        "summary": {"type": ["string", "object", "null"]},
+        "parts_map": {"type": "object", "additionalProperties": {"$ref": "#/definitions/nid"}},
+        "part_risk": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["nid", "pid", "worst_stress", "worst_g", "worst_disp", "min_safety_factor"],
+            "properties": {
+              "nid": {"$ref": "#/definitions/nid"},
+              "pid": {"type": ["integer", "string"]},
+              "worst_stress": {"oneOf": [{"type": "null"}, {"type": "object", "properties": {"value": {"type": ["number", "null"]}, "case_key": {"type": ["string", "null"]}}}]},
+              "worst_g": {"type": ["number", "null"]},
+              "worst_disp": {"type": ["number", "null"]},
+              "min_safety_factor": {"type": ["number", "null"]},
+              "by_report": {"type": "object"}
+            }
+          }
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["severity", "title", "detail"],
+            "properties": {
+              "severity": {"type": "string"},
+              "title": {"type": "string"},
+              "detail": {"type": "string"},
+              "recommendation": {"type": ["string", "null"]}
+            }
+          }
+        },
+        "energy_edges": {"type": "array"},
+        "worst_cases": {"type": "array", "maxItems": 5}
+      }
+    },
+    "missing": {
+      "type": "object",
+      "required": ["ecad_absent", "dyna_absent", "dyna_result_absent", "result_kind_mismatch", "world_transform_absent", "volume_null", "material_density_unsourced"],
+      "properties": {
+        "ecad_absent": {"type": "boolean"},
+        "dyna_absent": {"type": "boolean"},
+        "dyna_result_absent": {"type": "boolean"},
+        "result_kind_mismatch": {"type": "boolean"},
+        "world_transform_absent": {"type": "boolean"},
+        "volume_null": {"type": "boolean"},
+        "material_density_unsourced": {"type": "boolean"}
+      }
+    },
+    "warning": {
+      "type": "object",
+      "required": ["severity", "code", "message", "ref", "source_kind"],
+      "properties": {
+        "severity": {"type": "string", "enum": ["CRITICAL", "WARNING", "INFO"]},
+        "code": {"type": "string"},
+        "message": {"type": "string"},
+        "ref": {"type": ["string", "null"]},
+        "source_kind": {"type": "string", "enum": ["mcad", "dyna", "dyna_result", "ecad", "ir_builder"]}
+      }
+    },
+    "gate": {
+      "type": "object",
+      "required": ["key", "count", "threshold", "pass", "blocking", "effect", "detail"],
+      "properties": {
+        "key": {"type": "string"},
+        "count": {"type": ["integer", "null"]},
+        "threshold": {"type": ["number", "null"]},
+        "pass": {"type": "boolean"},
+        "blocking": {"type": "boolean"},
+        "effect": {"type": "string"},
+        "ack_by": {"type": ["string", "null"]},
+        "ack_at": {"type": ["integer", "null"]},
+        "ack_reason": {"type": ["string", "null"]},
+        "detail": {"type": "array"}
+      }
+    },
+    "character_seed": {
+      "type": "object",
+      "required": ["tag", "rule", "cites", "text"],
+      "properties": {
+        "tag": {"type": "string", "pattern": "^char:[a-z_]+:[A-Za-z0-9_]+$"},
+        "rule": {"type": "string"},
+        "cites": {"type": "array", "items": {"type": "string"}},
+        "text": {"type": "string"}
+      }
+    }
+  }
+}

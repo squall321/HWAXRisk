@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HWAX Risk Review</title>
+  <style>
+    body { font-family: system-ui, -apple-system, "Noto Sans KR", sans-serif; max-width: 720px; margin: 3rem auto; padding: 0 1rem; color: #222; line-height: 1.6; }
+    h1 { font-size: 1.5rem; margin-bottom: .25rem; }
+    .badge { display: inline-block; font-size: .8rem; padding: .1rem .5rem; border-radius: .5rem; background: #ffe9a8; color: #5a4300; }
+    code { background: #f2f2f2; padding: .1rem .3rem; border-radius: .25rem; }
+    ul { padding-left: 1.2rem; }
+  </style>
+</head>
+<body>
+  <h1>HWAX Risk Review <span class="badge">P0 스캐폴드</span></h1>
+  <p>설계 리스크 심사 앱의 백엔드 골격만 올라와 있는 상태다. React SPA(frontend/dist)가 빌드되면 이 안내 대신 그 화면이 뜬다.</p>
+  <ul>
+    <li><a href="api/meta">api/meta</a> — 앱 id·버전·데이터 경로·스키마 버전·신원</li>
+    <li><a href="api/meta/taxonomy">api/meta/taxonomy</a> — 리스크 택소노미 v1</li>
+    <li><a href="api/meta/adapters">api/meta/adapters</a> — 소스 어댑터 현황</li>
+    <li><a href="api/meta/vocab">api/meta/vocab</a> — 어휘 자산 목록·버전</li>
+    <li><a href="api/health">api/health</a> — 헬스체크</li>
+    <li><code>mcp</code> — MCP streamable HTTP 엔드포인트(도구 3종. risk_health · risk_get_taxonomy · risk_get_meta)</li>
+  </ul>
+</body>
+</html>

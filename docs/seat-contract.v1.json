@@ -1,0 +1,43 @@
+{
+  "version": "seat-contract-1.0",
+  "notes": [
+    "도메인별 좌석 계약(plan §6.5.3). contract 의 16 문자열(_common + 15 도메인)이 엔진 상수 _RISK_SEAT_CONTRACT(PY) / RISK_SEAT_CONTRACT(JS) 와 바이트 동일해야 한다(check_chair_parity.py).",
+    "ECAD 의존 6 도메인(pcb·pwr·rf·soc·passive·mem)은 같은 문자열을 키마다 반복한다.",
+    "table 은 같은 내용의 구조화 표이고 pass_path 는 자유조회 통과 경로(app+free_allow | app+read | keep | material) 다."
+  ],
+  "contract": {
+    "_common": "[리스크 심사 좌석 계약] 1R 발언 전 당신 도메인 도구를 1개 이상 실제 호출하고 결과 수치와 id([c:]/[e:]/[p:]/[d:]/name:A|B)를 인용하라. 인용 없는 주장은 [경험칙]으로 등급이 내려간다. 근거는 검증 대상이지 결론이 아니다. interference·touching 의 'auto' 는 미확정 초안이고 penetration_depth 는 하한 추정치이며 contact_area_est 는 접촉면적이 아니라 공차 밴드 면적이다. null 은 미측정이지 0 이 아니다. 리스크만 나열하지 말고 개선점도 같은 형식으로 내라. 판정 불가면 '판정 불가 — 다음 확인 X' 로 답하라. 도구 호출 경로가 없는 실행(evidence_only)에서는 [근거]의 수치를 같은 형식으로 인용하라.",
+    "mech": "[mech] 필수: list_interfaces(kind=interference|touching) 또는 interface_graph 권장: inspect_report, mass_estimate(densities 출처 명시), list_parts(name_like) 산출: 계면 실명 쌍 + min_gap/penetration(하한 표기) + [e:]·[c:]·name:A|B 인용",
+    "xd": "[xd] 필수: list_parts 또는 list_interfaces(kind=clearance) 권장: project_tree, get_part_rules 산출: 조립 순서·공차 여유·서비스성, [d:] dims_named 인용",
+    "sim": "[sim] 필수: report_part_risk 또는 compare_reports(pair, report_ids ≥2) 권장: report_energy_flow, report_worst_cases, inspect_file 산출: 파트별 최악값·over_yield_ratio·load_path 엣지 인용, kind 불일치면 정성만",
+    "rel": "[rel] 필수: report_findings 또는 RA search_objects(type=incident) 권장: report_worst_cases, predict_sed(패키지 배치 치수 있을 때), get_reference_cases 산출: trigger_condition 명시, precedent in/out_of_range, inc: 인용",
+    "pcb": "[pcb] 필수: ODB 어댑터 odb_*(ECAD 앱이 apps 에 있을 때) 또는 list_parts(name_like); 부재 시 ecad_absent 를 발언에 명기 권장: check_design_rules, pcb_warpage_surrogate, predict_sed, RA get_subgraph 산출: 보드 근접 계면·스택업 변화, 결측이면 undetermined 허용",
+    "pwr": "[pwr] 필수: ODB 어댑터 odb_*(ECAD 앱이 apps 에 있을 때) 또는 list_parts(name_like); 부재 시 ecad_absent 를 발언에 명기 권장: check_design_rules, pcb_warpage_surrogate, predict_sed, RA get_subgraph 산출: 보드 근접 계면·스택업 변화, 결측이면 undetermined 허용",
+    "rf": "[rf] 필수: ODB 어댑터 odb_*(ECAD 앱이 apps 에 있을 때) 또는 list_parts(name_like); 부재 시 ecad_absent 를 발언에 명기 권장: check_design_rules, pcb_warpage_surrogate, predict_sed, RA get_subgraph 산출: 보드 근접 계면·스택업 변화, 결측이면 undetermined 허용",
+    "soc": "[soc] 필수: ODB 어댑터 odb_*(ECAD 앱이 apps 에 있을 때) 또는 list_parts(name_like); 부재 시 ecad_absent 를 발언에 명기 권장: check_design_rules, pcb_warpage_surrogate, predict_sed, RA get_subgraph 산출: 보드 근접 계면·스택업 변화, 결측이면 undetermined 허용",
+    "passive": "[passive] 필수: ODB 어댑터 odb_*(ECAD 앱이 apps 에 있을 때) 또는 list_parts(name_like); 부재 시 ecad_absent 를 발언에 명기 권장: check_design_rules, pcb_warpage_surrogate, predict_sed, RA get_subgraph 산출: 보드 근접 계면·스택업 변화, 결측이면 undetermined 허용",
+    "mem": "[mem] 필수: ODB 어댑터 odb_*(ECAD 앱이 apps 에 있을 때) 또는 list_parts(name_like); 부재 시 ecad_absent 를 발언에 명기 권장: check_design_rules, pcb_warpage_surrogate, predict_sed, RA get_subgraph 산출: 보드 근접 계면·스택업 변화, 결측이면 undetermined 허용",
+    "material": "[material] 필수: get_material 또는 compare_materials 권장: material_usage, find_materials_in_property_range 산출: 재료 교체 물성 delta 수치",
+    "disp": "[disp] 필수: list_interfaces(모듈 주변 계면) 권장: interface_graph, report_part_risk 산출: 모듈 경계 계면 실명",
+    "cam": "[cam] 필수: list_interfaces(모듈 주변 계면) 권장: interface_graph, report_part_risk 산출: 모듈 경계 계면 실명",
+    "sh": "[sh] 필수: list_interfaces(모듈 주변 계면) 권장: interface_graph, report_part_risk 산출: 모듈 경계 계면 실명",
+    "std": "[std] 필수: check_design_rules 또는 RA search_objects 권장: search_reports, get_object 산출: 규격 번호 인용([문헌·규격])"
+  },
+  "table": {
+    "mech": {"required": ["list_interfaces(kind=interference|touching)", "interface_graph"], "recommended": ["inspect_report", "mass_estimate(densities 출처 명시)", "list_parts(name_like)"], "output": "계면 실명 쌍 + min_gap/penetration(하한 표기) + [e:]·[c:]·name:A|B 인용", "pass_path": {"list_interfaces": "app+free_allow", "list_parts": "app+free_allow", "interface_graph": "app+read", "inspect_report": "app+read", "mass_estimate": "app+read"}},
+    "xd": {"required": ["list_parts", "list_interfaces(kind=clearance)"], "recommended": ["project_tree", "get_part_rules"], "output": "조립 순서·공차 여유·서비스성, [d:] dims_named 인용", "pass_path": {"list_parts": "app+free_allow", "list_interfaces": "app+free_allow", "get_part_rules": "app+free_allow", "project_tree": "app+read"}},
+    "sim": {"required": ["report_part_risk", "compare_reports(pair, report_ids ≥2)"], "recommended": ["report_energy_flow", "report_worst_cases", "inspect_file"], "output": "파트별 최악값·over_yield_ratio·load_path 엣지 인용, kind 불일치면 정성만", "pass_path": {"compare_reports": "app+free_allow", "report_*": "app+read", "inspect_file": "app+read"}},
+    "rel": {"required": ["report_findings", "search_objects(type=incident)"], "recommended": ["report_worst_cases", "predict_sed(패키지 배치 치수 있을 때)", "get_reference_cases"], "output": "trigger_condition 명시, precedent in/out_of_range, inc: 인용", "pass_path": {"report_findings": "app+read", "search_objects": "keep", "predict_sed": "keep", "get_reference_cases": "keep"}},
+    "pcb": {"required": ["odb_*(ECAD 앱이 apps 에 있을 때)", "list_parts(name_like)"], "recommended": ["check_design_rules", "pcb_warpage_surrogate", "predict_sed", "get_subgraph"], "output": "보드 근접 계면·스택업 변화, 결측이면 undetermined 허용", "pass_path": {"odb_*": "app+read(P7)", "list_parts": "app+free_allow", "check_design_rules": "keep", "pcb_warpage_surrogate": "keep", "predict_sed": "keep", "get_subgraph": "keep"}},
+    "pwr": {"same_as": "pcb"},
+    "rf": {"same_as": "pcb"},
+    "soc": {"same_as": "pcb"},
+    "passive": {"same_as": "pcb"},
+    "mem": {"same_as": "pcb"},
+    "material": {"required": ["get_material", "compare_materials"], "recommended": ["material_usage", "find_materials_in_property_range"], "output": "재료 교체 물성 delta 수치", "pass_path": {"get_material": "material", "compare_materials": "material", "find_materials_in_property_range": "material", "material_usage": "app+free_allow"}},
+    "disp": {"required": ["list_interfaces(모듈 주변 계면)"], "recommended": ["interface_graph", "report_part_risk"], "output": "모듈 경계 계면 실명", "pass_path": {"list_interfaces": "app+free_allow", "interface_graph": "app+read", "report_part_risk": "app+read"}},
+    "cam": {"same_as": "disp"},
+    "sh": {"same_as": "disp"},
+    "std": {"required": ["check_design_rules", "search_objects"], "recommended": ["search_reports", "get_object"], "output": "규격 번호 인용([문헌·규격])", "pass_path": {"check_design_rules": "keep", "search_objects": "keep", "search_reports": "keep", "get_object": "keep"}}
+  }
+}

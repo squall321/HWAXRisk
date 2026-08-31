@@ -1,0 +1,81 @@
+{
+ "opinion_id": "7d3c6b8d51ac8ec79a2adbf98045944f",
+ "target_key": "diff:7f3e9c1a2b4d6e8f0a1b2c3d4e5f6071",
+ "panel_id": "78a22de52a55c9ea873fefba8d4d078d",
+ "agent_key": "disp-utg-cover",
+ "domain": "disp",
+ "origin": "primary",
+ "cycle": 1,
+ "turns": [
+  {
+   "round": 1,
+   "say_excerpt": "UTG↔HOUSING_FRONT clearance min_gap 0.350→0.180 mm (−48.6%) [c:7d21a0b1c2d3] 를 보면 코너 접촉이 립이 아니라 에지로 옮겨간다.",
+   "position": "에지 우선 접촉 구조로의 이동 자체가 리스크 항목",
+   "stance": "conditional",
+   "non_negotiable": "에지 결함 분포 없이 OK 판정 금지"
+  },
+  {
+   "round": 2,
+   "say_excerpt": "반대석의 '중대 과잉' 지적은 받아들이되 judgement 는 undetermined 로 두고 severity 는 유지.",
+   "position": "F2 undetermined",
+   "stance": "conditional",
+   "non_negotiable": "동일"
+  },
+  {
+   "round": 3,
+   "say_excerpt": "F2 undetermined·O1 시험 선행.",
+   "position": "F2 undetermined·O1 시험 선행",
+   "stance": "conditional",
+   "non_negotiable": "동일"
+  }
+ ],
+ "final_stance": "conditional",
+ "tool_calls": [
+  {
+   "tool": "list_parts",
+   "args_gist": "name_like=FILM",
+   "ok": true,
+   "activity_idx": 11,
+   "round": 1
+  },
+  {
+   "tool": "list_interfaces",
+   "args_gist": "kind=clearance name_like=UTG",
+   "ok": true,
+   "activity_idx": 12,
+   "round": 1
+  }
+ ],
+ "tool_calls_n": 2,
+ "tool_calls_ok": 2,
+ "knowledge_hits_n": 1,
+ "cited_refs": [
+  "c:7d21a0b1c2d3",
+  "c:1122aabbccdd",
+  "name:UTG|HOUSING_FRONT"
+ ],
+ "cited_refs_resolved": [
+  "c:7d21a0b1c2d3",
+  "c:1122aabbccdd",
+  "e:41d2c0ffee11"
+ ],
+ "cited_ckeys": [
+  "ck:3f9a2b1c0d4e",
+  "ck:aa10bb20cc30",
+  "ck:5e6f70819293"
+ ],
+ "quality": {
+  "used_tool": true,
+  "cited_ir": true,
+  "grade_min": "도구예측",
+  "dangling_n": 0
+ },
+ "raised_finding_ids": [
+  "78a22de52a55c9ea873fefba8d4d078d#F2"
+ ],
+ "contested_finding_ids": [],
+ "character_sentences": [
+  "이 리비전의 성격은 '에지 우선 접촉' 으로의 이동이다."
+ ],
+ "excerpt_for_rag": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+}

@@ -1,0 +1,78 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "hwax-risk/seat_opinion.v1.json",
+  "title": "seat_opinion v1 — 좌석 1석 × 타깃 1개의 의견 레코드(plan §4.5, 코드 추출)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "opinion_id", "target_key", "panel_id", "agent_key", "domain", "origin", "cycle", "turns", "final_stance",
+    "tool_calls", "tool_calls_n", "tool_calls_ok", "knowledge_hits_n", "cited_refs", "cited_refs_resolved",
+    "cited_ckeys", "quality", "raised_finding_ids", "contested_finding_ids", "character_sentences", "excerpt_for_rag"
+  ],
+  "properties": {
+    "opinion_id": {"$ref": "#/definitions/hex32"},
+    "target_key": {"type": "string", "pattern": "^(snap|diff):[0-9a-f]{32}$"},
+    "panel_id": {"$ref": "#/definitions/hex32"},
+    "agent_key": {"type": "string", "minLength": 1},
+    "domain": {
+      "type": "string",
+      "enum": ["xd", "sim", "cam", "rel", "soc", "disp", "mech", "pcb", "rf", "passive", "pwr", "sh", "mem", "std", "material", "delib"]
+    },
+    "origin": {"type": "string", "enum": ["primary", "counter", "adversary"]},
+    "cycle": {"type": "integer", "minimum": 1},
+    "turns": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["round", "say_excerpt", "position", "stance", "non_negotiable"],
+        "properties": {
+          "round": {"type": "integer", "minimum": 1},
+          "say_excerpt": {"type": "string", "maxLength": 2000},
+          "position": {"type": "string"},
+          "stance": {"$ref": "#/definitions/stance"},
+          "non_negotiable": {"type": "string"}
+        }
+      }
+    },
+    "final_stance": {"$ref": "#/definitions/stance"},
+    "tool_calls": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["tool", "args_gist", "ok", "activity_idx", "round"],
+        "properties": {
+          "tool": {"type": "string", "minLength": 1},
+          "args_gist": {"type": "string"},
+          "ok": {"type": "boolean"},
+          "activity_idx": {"type": ["integer", "null"]},
+          "round": {"type": "integer", "minimum": 1}
+        }
+      }
+    },
+    "tool_calls_n": {"type": "integer", "minimum": 0},
+    "tool_calls_ok": {"type": ["integer", "null"], "minimum": 0},
+    "knowledge_hits_n": {"type": "integer", "minimum": 0},
+    "cited_refs": {"type": "array", "items": {"type": "string"}},
+    "cited_refs_resolved": {"type": "array", "items": {"type": "string"}},
+    "cited_ckeys": {"type": "array", "items": {"type": "string", "pattern": "^ck:[0-9a-f]{12}$"}},
+    "quality": {
+      "type": "object",
+      "required": ["used_tool", "cited_ir", "grade_min", "dangling_n"],
+      "properties": {
+        "used_tool": {"type": ["boolean", "null"]},
+        "cited_ir": {"type": "boolean"},
+        "grade_min": {"type": ["string", "null"], "enum": ["측정", "문헌·규격", "도구예측", "경험칙", null]},
+        "dangling_n": {"type": "integer", "minimum": 0}
+      }
+    },
+    "raised_finding_ids": {"type": "array", "items": {"$ref": "#/definitions/global_finding_id"}},
+    "contested_finding_ids": {"type": "array", "items": {"$ref": "#/definitions/global_finding_id"}},
+    "character_sentences": {"type": "array", "maxItems": 5, "items": {"type": "string", "maxLength": 240}},
+    "excerpt_for_rag": {"type": "string", "maxLength": 1500}
+  },
+  "definitions": {
+    "hex32": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "stance": {"type": "string", "enum": ["agree", "conditional", "oppose", "abstain"]},
+    "global_finding_id": {"type": "string", "pattern": "^[0-9a-f]{32}#[FG][0-9]+$"}
+  }
+}

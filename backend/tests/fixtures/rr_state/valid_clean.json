@@ -1,0 +1,302 @@
+{
+ "state_version": "1.0",
+ "snapshot_id": "c3ff832377ee3e0bcdd66aa561bdfa33",
+ "ir_hash": "2b05f03a9274122eb5ff1a8bf49def9b02c59923e996f3a2a9d59f2fcf6b142d",
+ "project_id": "e73c023a2e8e90349bb4d853730e1bfc",
+ "rule_version": "rules-1.0",
+ "taxonomy_version": "1.0",
+ "seed_rules_version": "seed-1.0",
+ "lexicon_version": "lex-1.0",
+ "computed_at": 1756600100,
+ "blocked": false,
+ "gates": {
+  "G1": {
+   "key": "dup_or_anon_names",
+   "count": 0,
+   "threshold": 5,
+   "pass": true,
+   "blocking": false,
+   "effect": "none",
+   "ack_by": null,
+   "ack_at": null,
+   "ack_reason": null,
+   "detail": []
+  },
+  "G2": {
+   "key": "sameas_pending",
+   "count": 0,
+   "threshold": 0,
+   "pass": true,
+   "blocking": false,
+   "effect": "none",
+   "ack_by": null,
+   "ack_at": null,
+   "ack_reason": null,
+   "detail": []
+  },
+  "G3": {
+   "key": "iface_unconfirmed",
+   "count": 1,
+   "threshold": 0,
+   "pass": false,
+   "blocking": false,
+   "effect": "mark",
+   "ack_by": null,
+   "ack_at": null,
+   "ack_reason": null,
+   "detail": []
+  },
+  "G4": {
+   "key": "coordinate",
+   "count": 0,
+   "threshold": 0,
+   "pass": true,
+   "blocking": false,
+   "effect": "none",
+   "ack_by": null,
+   "ack_at": null,
+   "ack_reason": null,
+   "detail": []
+  },
+  "G5": {
+   "key": "partial_scope",
+   "count": 0,
+   "threshold": 0,
+   "pass": true,
+   "blocking": false,
+   "effect": "none",
+   "ack_by": null,
+   "ack_at": null,
+   "ack_reason": null,
+   "detail": []
+  },
+  "G6": {
+   "key": "unit_scale",
+   "count": 0,
+   "threshold": 0,
+   "pass": true,
+   "blocking": true,
+   "effect": "none",
+   "ack_by": null,
+   "ack_at": null,
+   "ack_reason": null,
+   "detail": []
+  }
+ },
+ "missing": {
+  "ecad_absent": true,
+  "dyna_absent": true,
+  "dyna_result_absent": true,
+  "result_kind_mismatch": false,
+  "world_transform_absent": false,
+  "volume_null": false,
+  "material_density_unsourced": true
+ },
+ "signals": {
+  "counts.files": {
+   "kind": "count",
+   "value": 1,
+   "unit": null,
+   "refs": [],
+   "text": "files=1",
+   "derived_from": [],
+   "known": true
+  },
+  "counts.leaf": {
+   "kind": "count",
+   "value": 3,
+   "unit": null,
+   "refs": [],
+   "text": "leaf=3",
+   "derived_from": [],
+   "known": true
+  },
+  "ratios.tied_ratio": {
+   "kind": "ratio",
+   "value": 0.5,
+   "unit": null,
+   "refs": [],
+   "text": "tied_ratio=0.50 (tied 1 / 2)",
+   "derived_from": [
+    "counts.edges.tied"
+   ],
+   "known": true
+  },
+  "scale.mass_est": {
+   "kind": "scalar",
+   "value": null,
+   "unit": "g",
+   "refs": [],
+   "text": "mass_est=미측정 (밀도 출처 없음 3건)",
+   "derived_from": [],
+   "known": false
+  },
+  "counts.ecad.components": {
+   "kind": "count",
+   "value": null,
+   "unit": null,
+   "refs": [],
+   "text": "ecad.components=미측정 (ecad_absent)",
+   "derived_from": [],
+   "known": false
+  }
+ },
+ "character_seed": [
+  {
+   "tag": "char:analysis:no_dyna",
+   "rule": "seed.analysis.no_dyna",
+   "cites": [],
+   "text": "dyna=absent"
+  }
+ ],
+ "feature_vector": {
+  "version": "fv-1.0",
+  "names": [
+   "n_leaf",
+   "n_files",
+   "n_tied",
+   "n_touching",
+   "n_clearance",
+   "n_interference",
+   "orphan_ratio",
+   "cross_file_ratio",
+   "bbox_x",
+   "bbox_y",
+   "bbox_z",
+   "total_volume",
+   "n_materials",
+   "material_null_ratio",
+   "thin_ratio",
+   "median_gap",
+   "min_gap",
+   "max_pen_depth",
+   "n_dyna_pids",
+   "n_dyna_contacts",
+   "shell_ratio",
+   "n_ecad_cmp"
+  ],
+  "values": [
+   1.386,
+   0.693,
+   0.693,
+   0.0,
+   0.0,
+   0.693,
+   0.0,
+   0.0,
+   3.93,
+   3.93,
+   1.435,
+   8.65,
+   1.099,
+   0.0,
+   0.0,
+   0.0,
+   null,
+   0.049,
+   null,
+   null,
+   null,
+   null
+  ],
+  "known": [
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   true,
+   false,
+   true,
+   false,
+   false,
+   false,
+   false
+  ],
+  "transform": [
+   "log1p",
+   "log1p",
+   "log1p",
+   "log1p",
+   "log1p",
+   "log1p",
+   "id",
+   "id",
+   "log1p",
+   "log1p",
+   "log1p",
+   "log1p",
+   "log1p",
+   "id",
+   "id",
+   "log1p",
+   "log1p",
+   "log1p",
+   "log1p",
+   "log1p",
+   "id",
+   "log1p"
+  ]
+ },
+ "precedent": {
+  "corpus_n": 0,
+  "per_feature": {
+   "n_leaf": "none",
+   "n_files": "none",
+   "n_tied": "none",
+   "n_touching": "none",
+   "n_clearance": "none",
+   "n_interference": "none",
+   "orphan_ratio": "none",
+   "cross_file_ratio": "none",
+   "bbox_x": "none",
+   "bbox_y": "none",
+   "bbox_z": "none",
+   "total_volume": "none",
+   "n_materials": "none",
+   "material_null_ratio": "none",
+   "thin_ratio": "none",
+   "median_gap": "none",
+   "min_gap": "none",
+   "max_pen_depth": "none",
+   "n_dyna_pids": "none",
+   "n_dyna_contacts": "none",
+   "shell_ratio": "none",
+   "n_ecad_cmp": "none"
+  },
+  "out_of_range_count": 0
+ },
+ "rule_hits": [
+  {
+   "rule": "R-001",
+   "version": "rules-1.0",
+   "severity": "중대",
+   "pass": false,
+   "found": {
+    "count": 1,
+    "refs": [
+     "e:9a1f3c2b0d4e"
+    ],
+    "text": "interference status=auto 1건"
+   },
+   "why_it_matters": "«간섭이 auto 로 남아 있으면 억지끼움 의도인지 설계오류인지 확정되지 않은 것이다»",
+   "fix_hint": "«set_interface 로 kind 확정 또는 형상 수정 후 재검출»",
+   "payload_hash": "c6684128ffd7c56f3cfbed9c324e912ea39e1fe704eed65205b5432b1befaea3",
+   "refs": [
+    "e:9a1f3c2b0d4e"
+   ]
+  }
+ ],
+ "summary_text": "[대상] 과제 M22 스냅샷 c3ff8323 ir_hash=2b05f03a9274 소스 mcad=heax-step_forge dyna=absent dyna_result=absent ecad=absent\n[게이트] G1 pass · G2 pass · G3 fail(1, ack 없음) · G4 pass · G5 pass · G6 pass [gate:G3]",
+ "summary_status": "ok"
+}

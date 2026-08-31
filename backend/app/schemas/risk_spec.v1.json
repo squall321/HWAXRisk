@@ -1,0 +1,227 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "hwax-risk/risk_spec.v1.json",
+  "title": "risk_spec v1 — 의장 결정문 뒤 json 펜스의 기계판독 규격(plan §4.2·§4.3·§4.6)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "version", "taxonomy_version", "scope", "findings", "gains", "cross_domain", "character",
+    "open_items", "coverage", "verdict", "verdict_conditions", "evidence_profile"
+  ],
+  "properties": {
+    "schema": {"const": "risk_spec"},
+    "version": {"const": "1.0"},
+    "taxonomy_version": {"type": "string"},
+    "scope": {
+      "type": "object",
+      "required": ["kind", "target_key", "project_refs", "ir_refs", "diff_ref", "ir_hash"],
+      "properties": {
+        "kind": {"type": "string", "enum": ["snap", "diff"]},
+        "target_key": {"type": "string", "pattern": "^(snap|diff):[0-9a-f]{32}$"},
+        "project_refs": {"type": "array", "items": {"type": "string"}},
+        "ir_refs": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 2},
+        "diff_ref": {"type": ["string", "null"]},
+        "ir_hash": {"type": "string"}
+      }
+    },
+    "findings": {"type": "array", "items": {"$ref": "#/definitions/finding"}},
+    "gains": {
+      "type": "array",
+      "items": {"allOf": [{"$ref": "#/definitions/finding"}, {"properties": {"id": {"pattern": "^G[0-9]+$"}}}]}
+    },
+    "cross_domain": {"type": "array", "items": {"$ref": "#/definitions/cross_domain"}},
+    "character": {"$ref": "#/definitions/character"},
+    "open_items": {"type": "array", "items": {"$ref": "#/definitions/open_item"}},
+    "coverage": {
+      "type": "object",
+      "required": ["seats", "domains_seated", "domains_missing"],
+      "properties": {
+        "seats": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["key", "domain", "origin"],
+            "properties": {
+              "key": {"type": "string", "minLength": 1},
+              "domain": {"$ref": "#/definitions/seat_domain"},
+              "origin": {"type": "string", "enum": ["primary", "counter", "adversary"]}
+            }
+          }
+        },
+        "domains_seated": {"type": "array", "items": {"$ref": "#/definitions/domain"}},
+        "domains_missing": {"type": "array", "items": {"$ref": "#/definitions/domain"}}
+      }
+    },
+    "verdict": {"type": "string", "enum": ["go", "conditional", "no-go", "undetermined"]},
+    "verdict_conditions": {"type": "array", "items": {"type": "string"}},
+    "evidence_profile": {
+      "type": "object",
+      "required": ["tool", "card", "precedent", "heuristic", "measured"],
+      "properties": {
+        "tool": {"type": "integer", "minimum": 0},
+        "card": {"type": "integer", "minimum": 0},
+        "precedent": {
+          "type": "object",
+          "required": ["verified", "dismissed"],
+          "properties": {
+            "verified": {"type": "integer", "minimum": 0},
+            "dismissed": {"type": "integer", "minimum": 0}
+          }
+        },
+        "heuristic": {"type": "integer", "minimum": 0},
+        "measured": {"type": "integer", "minimum": 0}
+      }
+    }
+  },
+  "definitions": {
+    "domain": {
+      "type": "string",
+      "enum": ["xd", "sim", "cam", "rel", "soc", "disp", "mech", "pcb", "rf", "passive", "pwr", "sh", "mem", "std", "material"]
+    },
+    "seat_domain": {
+      "type": "string",
+      "enum": ["xd", "sim", "cam", "rel", "soc", "disp", "mech", "pcb", "rf", "passive", "pwr", "sh", "mem", "std", "material", "delib"]
+    },
+    "ckey": {"type": "string", "pattern": "^ck:[0-9a-f]{12}$"},
+    "cite": {
+      "type": "object",
+      "required": ["ref", "quote"],
+      "properties": {
+        "ref": {"type": "string", "minLength": 1},
+        "quote": {"type": "string"}
+      }
+    },
+    "resolving_check": {
+      "type": "object",
+      "required": ["kind", "ref"],
+      "properties": {
+        "kind": {"type": "string", "enum": ["tool", "sim", "test", "field"]},
+        "ref": {"type": "string"}
+      }
+    },
+    "finding": {
+      "type": "object",
+      "required": [
+        "id", "direction", "domain", "mechanism", "mechanism_detail", "change_kind", "subject", "trigger_condition",
+        "severity", "judgement", "detectability", "evidence_grade", "precedent", "cites", "tool_calls", "claim",
+        "warrant", "resolving_check", "owner_domain", "raised_by", "contested_by", "contest_note", "status"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[FG][0-9]+$"},
+        "direction": {"type": "string", "enum": ["risk", "improvement", "neutral"]},
+        "domain": {"$ref": "#/definitions/domain"},
+        "mechanism": {"type": "string", "enum": ["thermal", "mechanical", "interface", "electrical", "material", "process"]},
+        "mechanism_detail": {"type": "string"},
+        "mechanism_free": {"type": "string"},
+        "change_kind": {
+          "type": "string",
+          "enum": ["dimension", "placement", "topology", "material", "type", "count", "discretization", "result", "load_path", "consistency", "electrical", "none"]
+        },
+        "subject": {
+          "type": "object",
+          "required": ["ckeys", "names"],
+          "properties": {
+            "ckeys": {"type": "array", "items": {"$ref": "#/definitions/ckey"}, "maxItems": 2},
+            "names": {"type": "array", "items": {"type": "string"}, "maxItems": 2},
+            "asm_key": {"type": ["string", "null"]}
+          }
+        },
+        "trigger_condition": {"type": "string", "pattern": "^((env|load|time|mfg|use)\\.[a-z_]+|none)$"},
+        "trigger_text": {"type": "string", "maxLength": 120},
+        "severity": {"type": "string", "enum": ["경미", "중대", "치명"]},
+        "judgement": {"type": "string", "enum": ["OK", "WARNING", "FAIL", "undetermined"]},
+        "detectability": {
+          "type": "object",
+          "required": ["level", "tool"],
+          "properties": {
+            "level": {"type": "string", "enum": ["sim-detectable", "test-only", "field-only", "unknown"]},
+            "tool": {"type": "string"}
+          }
+        },
+        "evidence_grade": {"type": "string", "enum": ["측정", "문헌·규격", "도구예측", "경험칙"]},
+        "precedent": {"type": "string", "enum": ["in_range", "out_of_range", "none"]},
+        "cites": {"type": "array", "items": {"$ref": "#/definitions/cite"}},
+        "tool_calls": {"type": "array", "items": {"type": "string"}},
+        "claim": {"type": "string", "maxLength": 600},
+        "warrant": {"type": "string", "maxLength": 1200},
+        "resolving_check": {"$ref": "#/definitions/resolving_check"},
+        "owner_domain": {"$ref": "#/definitions/domain"},
+        "raised_by": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+        "contested_by": {"type": "array", "items": {"type": "string"}},
+        "contest_note": {"type": "string", "maxLength": 300},
+        "status": {"type": "string", "enum": ["open"]}
+      }
+    },
+    "cross_domain": {
+      "type": "object",
+      "required": ["id", "from_domain", "to_domain", "path", "cites", "raised_by"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^X[0-9]+$"},
+        "from_domain": {"$ref": "#/definitions/domain"},
+        "to_domain": {"$ref": "#/definitions/domain"},
+        "path": {"type": "string", "maxLength": 400},
+        "cites": {"type": "array", "items": {"$ref": "#/definitions/cite"}},
+        "raised_by": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "statement": {
+      "type": "object",
+      "required": ["id", "text", "polarity", "by", "cites", "tags", "confidence"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^C[0-9]+$"},
+        "facet": {"$ref": "#/definitions/facet_name"},
+        "text": {"type": "string", "maxLength": 240},
+        "polarity": {"type": "string", "enum": ["observation", "inference", "hypothesis"]},
+        "by": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1},
+        "cites": {"type": "array", "items": {"$ref": "#/definitions/cite"}},
+        "tags": {"type": "array", "items": {"type": "string", "pattern": "^(char:[a-z_]+:[A-Za-z0-9_]+|x:[A-Za-z0-9_]+)$"}},
+        "confidence": {"type": "string", "enum": ["high", "medium", "low"]}
+      }
+    },
+    "facet_name": {
+      "type": "string",
+      "enum": ["intent", "constraint", "anomaly", "lineage", "vulnerability", "strength", "tradeoff", "unknown"]
+    },
+    "facet": {
+      "type": "object",
+      "required": ["facet", "statements", "na_reason"],
+      "properties": {
+        "facet": {"$ref": "#/definitions/facet_name"},
+        "statements": {"type": "array", "items": {"$ref": "#/definitions/statement"}},
+        "na_reason": {"type": ["string", "null"]}
+      }
+    },
+    "character": {
+      "type": "object",
+      "required": ["one_liner", "facets"],
+      "properties": {
+        "one_liner": {"type": "string", "maxLength": 140},
+        "facets": {
+          "type": "array",
+          "minItems": 8,
+          "maxItems": 8,
+          "items": [
+            {"allOf": [{"$ref": "#/definitions/facet"}, {"properties": {"facet": {"const": "intent"}}}]},
+            {"allOf": [{"$ref": "#/definitions/facet"}, {"properties": {"facet": {"const": "constraint"}}}]},
+            {"allOf": [{"$ref": "#/definitions/facet"}, {"properties": {"facet": {"const": "anomaly"}}}]},
+            {"allOf": [{"$ref": "#/definitions/facet"}, {"properties": {"facet": {"const": "lineage"}}}]},
+            {"allOf": [{"$ref": "#/definitions/facet"}, {"properties": {"facet": {"const": "vulnerability"}}}]},
+            {"allOf": [{"$ref": "#/definitions/facet"}, {"properties": {"facet": {"const": "strength"}}}]},
+            {"allOf": [{"$ref": "#/definitions/facet"}, {"properties": {"facet": {"const": "tradeoff"}}}]},
+            {"allOf": [{"$ref": "#/definitions/facet"}, {"properties": {"facet": {"const": "unknown"}}}]}
+          ]
+        }
+      }
+    },
+    "open_item": {
+      "type": "object",
+      "required": ["id", "question", "resolving_check", "owner_domain"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^O[0-9]+$"},
+        "question": {"type": "string", "maxLength": 200},
+        "resolving_check": {"$ref": "#/definitions/resolving_check"},
+        "owner_domain": {"$ref": "#/definitions/domain"}
+      }
+    }
+  }
+}

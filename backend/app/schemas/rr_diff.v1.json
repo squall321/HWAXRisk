@@ -1,0 +1,358 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "hwax-risk/rr_diff.v1.json",
+  "title": "rr_diff v1 — base/target 두 스냅샷의 3층 diff(plan §3.3)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "diff_version", "diff_id", "project_id", "base", "target", "taxonomy_version", "rule_version", "comparability",
+    "correspondence", "structural", "parametric", "semantic", "character_seed", "stats", "summary_text",
+    "summary_status", "created_at"
+  ],
+  "properties": {
+    "diff_version": {"const": "1.0"},
+    "diff_id": {"$ref": "#/definitions/hex32"},
+    "project_id": {"$ref": "#/definitions/hex32"},
+    "base": {"$ref": "#/definitions/side"},
+    "target": {"$ref": "#/definitions/side"},
+    "taxonomy_version": {"type": "string"},
+    "rule_version": {"type": "string"},
+    "lexicon_version": {"type": "string"},
+    "comparability": {
+      "type": "object",
+      "required": ["tol_parity", "tol_keys_known", "unit_parity", "result_parity", "scope_parity", "coordinate_ok", "partial_any", "G7", "base_blocked", "target_blocked"],
+      "properties": {
+        "tol_parity": {"type": ["boolean", "null"]},
+        "tol_keys_known": {"type": "boolean"},
+        "unit_parity": {"type": "boolean"},
+        "result_parity": {"type": ["boolean", "null"]},
+        "scope_parity": {"type": "boolean"},
+        "coordinate_ok": {"type": "boolean"},
+        "partial_any": {"type": "boolean"},
+        "ir_version_parity": {"type": "boolean"},
+        "G7": {
+          "type": "object",
+          "required": ["count", "threshold", "pass", "effect", "detail"],
+          "properties": {
+            "count": {"type": "integer", "minimum": 0},
+            "threshold": {"type": "integer"},
+            "pass": {"type": "boolean"},
+            "effect": {"type": "string", "enum": ["none", "exclude_by_reason"]},
+            "detail": {"type": "array"}
+          }
+        },
+        "base_blocked": {"type": "boolean"},
+        "target_blocked": {"type": "boolean"}
+      }
+    },
+    "correspondence": {
+      "type": "object",
+      "required": ["matched", "unmatched_base", "unmatched_target", "pending_n", "method_counts"],
+      "properties": {
+        "matched": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["dn", "nid_base", "nid_target", "ckey", "method", "score", "status"],
+            "properties": {
+              "dn": {"$ref": "#/definitions/nid"},
+              "nid_base": {"$ref": "#/definitions/nid"},
+              "nid_target": {"$ref": "#/definitions/nid"},
+              "ckey": {"oneOf": [{"$ref": "#/definitions/ckey"}, {"type": "null"}]},
+              "method": {"$ref": "#/definitions/sameas_method"},
+              "score": {"type": "number", "minimum": 0, "maximum": 1},
+              "status": {"type": "string", "enum": ["auto", "pending", "confirmed", "rejected"]}
+            }
+          }
+        },
+        "unmatched_base": {"type": "array", "items": {"$ref": "#/definitions/nid"}},
+        "unmatched_target": {"type": "array", "items": {"$ref": "#/definitions/nid"}},
+        "pending_n": {"type": "integer", "minimum": 0},
+        "method_counts": {
+          "type": "object",
+          "required": ["ledger", "pid_map", "exact_path", "fingerprint", "name_norm", "fuzzy", "manual"],
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "structural": {
+      "type": "object",
+      "required": ["node_changes", "edge_changes", "orphans_delta", "hierarchy_moves", "dyna"],
+      "properties": {
+        "node_changes": {"type": "array", "items": {"$ref": "#/definitions/node_change"}},
+        "edge_changes": {"type": "array", "items": {"$ref": "#/definitions/edge_change"}},
+        "orphans_delta": {
+          "type": "object",
+          "properties": {
+            "base": {"type": "array", "items": {"$ref": "#/definitions/nid"}},
+            "target": {"type": "array", "items": {"$ref": "#/definitions/nid"}},
+            "became_orphan": {"type": "array", "items": {"$ref": "#/definitions/nid"}},
+            "left_orphan": {"type": "array", "items": {"$ref": "#/definitions/nid"}}
+          }
+        },
+        "hierarchy_moves": {"type": "array", "items": {"$ref": "#/definitions/node_change"}},
+        "dyna": {
+          "type": "object",
+          "properties": {
+            "contacts_added": {"type": "array", "items": {"$ref": "#/definitions/cid"}},
+            "contacts_removed": {"type": "array", "items": {"$ref": "#/definitions/cid"}},
+            "scope_changed": {"type": "array", "items": {"type": "object", "required": ["cid", "contact_index"], "properties": {"cid": {"$ref": "#/definitions/cid"}, "contact_index": {"type": "integer"}}}}
+          }
+        }
+      }
+    },
+    "parametric": {
+      "type": "object",
+      "required": ["node_params", "edge_params", "materials", "dims_delta", "result_delta", "rollup_delta"],
+      "properties": {
+        "node_params": {"type": "array", "items": {"$ref": "#/definitions/param_item"}},
+        "edge_params": {"type": "array", "items": {"$ref": "#/definitions/param_item"}},
+        "materials": {"type": "array", "items": {"$ref": "#/definitions/material_item"}},
+        "dims_delta": {"type": "array", "items": {"$ref": "#/definitions/param_item"}},
+        "result_delta": {"type": "array", "items": {"$ref": "#/definitions/result_item"}},
+        "rollup_delta": {"type": "array", "items": {"$ref": "#/definitions/rollup_item"}}
+      }
+    },
+    "semantic": {
+      "type": "object",
+      "required": ["blocked_by", "events"],
+      "properties": {
+        "blocked_by": {"type": ["string", "null"], "enum": ["G2", null]},
+        "events": {"type": "array", "items": {"$ref": "#/definitions/event"}}
+      }
+    },
+    "character_seed": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["tag", "cites"],
+        "properties": {
+          "tag": {"type": "string", "pattern": "^char:change_style:(dimension_tuning|topology_change|material_swap|placement_shift|mixed)$"},
+          "cites": {"type": "array", "items": {"type": "string"}},
+          "rule": {"type": "string"},
+          "text": {"type": "string"}
+        }
+      }
+    },
+    "stats": {
+      "type": "object",
+      "required": ["nodes_added", "nodes_removed", "nodes_matched", "edges_added", "edges_removed", "edges_kind_changed", "params_changed", "params_noise", "params_excluded", "events", "events_by_change_kind", "events_by_confidence"],
+      "properties": {
+        "nodes_added": {"type": "integer", "minimum": 0},
+        "nodes_removed": {"type": "integer", "minimum": 0},
+        "nodes_matched": {"type": "integer", "minimum": 0},
+        "edges_added": {"type": "integer", "minimum": 0},
+        "edges_removed": {"type": "integer", "minimum": 0},
+        "edges_kind_changed": {"type": "integer", "minimum": 0},
+        "params_changed": {"type": "integer", "minimum": 0},
+        "params_noise": {"type": "integer", "minimum": 0},
+        "params_excluded": {"type": "integer", "minimum": 0},
+        "events": {"type": "integer", "minimum": 0},
+        "events_by_change_kind": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "events_by_confidence": {
+          "type": "object",
+          "properties": {"high": {"type": "integer"}, "medium": {"type": "integer"}, "low": {"type": "integer"}}
+        }
+      }
+    },
+    "summary_text": {"type": "string", "maxLength": 2000},
+    "summary_status": {"type": "string", "enum": ["ok", "lint_failed"]},
+    "created_at": {"type": "integer"}
+  },
+  "definitions": {
+    "hex32": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nid": {"type": "string", "pattern": "^p:[0-9a-f]{12}$"},
+    "eid": {"type": "string", "pattern": "^e:[0-9a-f]{12}$"},
+    "cid": {"type": "string", "pattern": "^c:[0-9a-f]{12}$"},
+    "ckey": {"type": "string", "pattern": "^ck:[0-9a-f]{12}$"},
+    "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+    "sameas_method": {"type": "string", "enum": ["ledger", "pid_map", "exact_path", "fingerprint", "name_norm", "fuzzy", "manual"]},
+    "excluded_reason": {
+      "type": ["string", "null"],
+      "enum": ["tol_differs", "tol_unknown", "result_kind_differs", "sim_params_differ", "unit_scale", "partial_scope", "suspect_coords", "null_one_side", "sameas_pending", "bridge_stale", null]
+    },
+    "side": {
+      "type": "object",
+      "required": ["snapshot_id", "ir_hash", "label"],
+      "properties": {
+        "snapshot_id": {"$ref": "#/definitions/hex32"},
+        "ir_hash": {"$ref": "#/definitions/sha256"},
+        "label": {"type": "string"}
+      }
+    },
+    "node_change": {
+      "type": "object",
+      "required": ["cid", "op", "dn", "nid_base", "nid_target", "ckey", "label", "kind", "domain", "correspondence_method", "confidence"],
+      "properties": {
+        "cid": {"$ref": "#/definitions/cid"},
+        "op": {"type": "string", "enum": ["added", "removed", "replaced", "split", "merged", "moved_in_tree"]},
+        "dn": {"$ref": "#/definitions/nid"},
+        "nid_base": {"oneOf": [{"$ref": "#/definitions/nid"}, {"type": "null"}]},
+        "nid_target": {"oneOf": [{"$ref": "#/definitions/nid"}, {"type": "null"}]},
+        "ckey": {"oneOf": [{"$ref": "#/definitions/ckey"}, {"type": "null"}]},
+        "label": {"type": "string"},
+        "kind": {"type": "string"},
+        "domain": {"type": "string", "enum": ["mcad", "dyna", "ecad"]},
+        "neighborhood_1hop": {"type": "array", "items": {"type": ["string", "null"]}},
+        "correspondence_method": {"oneOf": [{"$ref": "#/definitions/sameas_method"}, {"type": "null"}]},
+        "confidence": {"$ref": "#/definitions/confidence"}
+      }
+    },
+    "edge_change": {
+      "type": "object",
+      "required": ["cid", "op", "eid_base", "eid_target", "dn_a", "dn_b", "kind_from", "kind_to", "status_from", "status_to", "cross_file", "excluded_reason", "confidence"],
+      "properties": {
+        "cid": {"$ref": "#/definitions/cid"},
+        "op": {"type": "string", "enum": ["added", "removed", "kind_changed", "status_changed"]},
+        "eid_base": {"oneOf": [{"$ref": "#/definitions/eid"}, {"type": "null"}]},
+        "eid_target": {"oneOf": [{"$ref": "#/definitions/eid"}, {"type": "null"}]},
+        "dn_a": {"$ref": "#/definitions/nid"},
+        "dn_b": {"oneOf": [{"$ref": "#/definitions/nid"}, {"type": "null"}]},
+        "ckey_a": {"oneOf": [{"$ref": "#/definitions/ckey"}, {"type": "null"}]},
+        "ckey_b": {"oneOf": [{"$ref": "#/definitions/ckey"}, {"type": "null"}]},
+        "kind_family": {"type": "string", "enum": ["iface", "contact", "hier", "bridge", "load_path", "net"]},
+        "kind_from": {"type": ["string", "null"]},
+        "kind_to": {"type": ["string", "null"]},
+        "rank_from": {"type": ["integer", "null"]},
+        "rank_to": {"type": ["integer", "null"]},
+        "rank_delta": {"type": ["integer", "null"]},
+        "status_from": {"type": ["string", "null"]},
+        "status_to": {"type": ["string", "null"]},
+        "cross_file": {"type": "boolean"},
+        "excluded_reason": {"$ref": "#/definitions/excluded_reason"},
+        "confidence": {"$ref": "#/definitions/confidence"}
+      }
+    },
+    "param_item": {
+      "type": "object",
+      "required": ["cid", "attr", "before", "after", "delta", "rel_delta", "unit", "flag", "lower_bound", "excluded_reason", "text"],
+      "properties": {
+        "cid": {"$ref": "#/definitions/cid"},
+        "dn": {"$ref": "#/definitions/nid"},
+        "eid": {"$ref": "#/definitions/eid"},
+        "name": {"type": "string"},
+        "ckey": {"oneOf": [{"$ref": "#/definitions/ckey"}, {"type": "null"}]},
+        "ckeys": {"type": "array", "items": {"oneOf": [{"$ref": "#/definitions/ckey"}, {"type": "null"}]}},
+        "attr": {"type": "string"},
+        "before": {"type": ["number", "null"]},
+        "after": {"type": ["number", "null"]},
+        "delta": {"type": ["number", "null"]},
+        "rel_delta": {"type": ["number", "null"]},
+        "unit": {"type": ["string", "null"]},
+        "flag": {"type": "string", "enum": ["changed", "noise", "incomparable", "null_one_side"]},
+        "lower_bound": {"type": "boolean"},
+        "excluded_reason": {"$ref": "#/definitions/excluded_reason"},
+        "size_pct": {"type": ["number", "null"]},
+        "text": {"type": "string"}
+      }
+    },
+    "material_item": {
+      "type": "object",
+      "required": ["cid", "dn", "ckey", "field", "before", "after"],
+      "properties": {
+        "cid": {"$ref": "#/definitions/cid"},
+        "dn": {"$ref": "#/definitions/nid"},
+        "ckey": {"oneOf": [{"$ref": "#/definitions/ckey"}, {"type": "null"}]},
+        "field": {"type": "string", "enum": ["name", "material_norm", "mid", "keyword", "match_basis"]},
+        "before": {"type": ["string", "number", "null"]},
+        "after": {"type": ["string", "number", "null"]}
+      }
+    },
+    "result_item": {
+      "type": "object",
+      "required": ["cid", "dn", "ckey", "pid_before", "pid_after", "metric", "before", "after", "delta", "rel_delta", "unit", "case_key_before", "case_key_after", "kind", "excluded_reason"],
+      "properties": {
+        "cid": {"$ref": "#/definitions/cid"},
+        "dn": {"$ref": "#/definitions/nid"},
+        "ckey": {"oneOf": [{"$ref": "#/definitions/ckey"}, {"type": "null"}]},
+        "pid_before": {"type": ["integer", "string", "null"]},
+        "pid_after": {"type": ["integer", "string", "null"]},
+        "metric": {"type": "string", "enum": ["worst_stress", "worst_g", "worst_disp", "min_safety_factor"]},
+        "before": {"type": ["number", "null"]},
+        "after": {"type": ["number", "null"]},
+        "delta": {"type": ["number", "null"]},
+        "rel_delta": {"type": ["number", "null"]},
+        "unit": {"type": ["string", "null"]},
+        "case_key_before": {"type": ["string", "null"]},
+        "case_key_after": {"type": ["string", "null"]},
+        "kind": {"type": "string", "enum": ["deep", "sphere", "impact"]},
+        "excluded_reason": {"$ref": "#/definitions/excluded_reason"}
+      }
+    },
+    "before_after_int": {
+      "type": "object",
+      "required": ["before", "after"],
+      "properties": {"before": {"type": ["integer", "object"]}, "after": {"type": ["integer", "object"]}}
+    },
+    "rollup_item": {
+      "type": "object",
+      "required": ["cid", "asm_key", "path_prefix", "n_leaf", "edges_internal", "edges_external", "orphan_leaf"],
+      "properties": {
+        "cid": {"$ref": "#/definitions/cid"},
+        "asm_key": {"type": "string"},
+        "path_prefix": {"type": "string"},
+        "n_leaf": {"$ref": "#/definitions/before_after_int"},
+        "edges_internal": {"$ref": "#/definitions/before_after_int"},
+        "edges_external": {"$ref": "#/definitions/before_after_int"},
+        "orphan_leaf": {"$ref": "#/definitions/before_after_int"}
+      }
+    },
+    "event": {
+      "type": "object",
+      "required": ["cid", "code", "change_kind", "subject", "subject_key", "before", "after", "magnitude", "derived_from", "confidence", "design_relevant", "unconfirmed", "lower_bound", "excluded_reason", "text"],
+      "properties": {
+        "cid": {"$ref": "#/definitions/cid"},
+        "code": {
+          "type": "string",
+          "enum": [
+            "part.added", "part.removed", "part.replaced", "part.split", "part.merged", "part.resized",
+            "part.thickness_changed", "part.moved", "part.rotated", "part.material_changed", "part.tree_moved",
+            "iface.added", "iface.removed", "iface.clearance_appeared", "iface.clearance_cleared",
+            "iface.rank_up", "iface.rank_down", "iface.interference_new", "iface.interference_cleared",
+            "iface.gap_changed", "iface.band_area_changed", "iface.penetration_changed",
+            "contact.added", "contact.removed", "contact.type_changed", "contact.friction_changed", "contact.scope_changed",
+            "mesh.density_changed", "result.part_metric_shift",
+            "loadpath.edge_added", "loadpath.edge_removed", "loadpath.work_shift",
+            "dim.named_changed", "dim.named_unmeasured", "asm.rollup_changed", "cross.bridge_stale",
+            "ecad.net_changed", "ecad.component_moved", "ecad.stackup_changed"
+          ]
+        },
+        "change_kind": {
+          "type": "string",
+          "enum": ["dimension", "placement", "topology", "material", "type", "count", "discretization", "result", "load_path", "consistency", "electrical", "none", "contact_type", "parameter"]
+        },
+        "change_sub": {"type": ["string", "null"]},
+        "subject": {
+          "type": "object",
+          "properties": {
+            "dns": {"type": "array", "items": {"$ref": "#/definitions/nid"}},
+            "ckeys": {"type": "array", "items": {"oneOf": [{"$ref": "#/definitions/ckey"}, {"type": "null"}]}},
+            "eids": {"type": "object"},
+            "names": {"type": "array", "items": {"type": "string"}}
+          }
+        },
+        "subject_key": {"type": "string"},
+        "before": {},
+        "after": {},
+        "magnitude": {
+          "type": ["object", "null"],
+          "properties": {
+            "value": {"type": ["number", "null"]},
+            "unit": {"type": ["string", "null"]},
+            "rel": {"type": ["number", "null"]}
+          }
+        },
+        "derived_from": {"type": "array", "items": {"type": "string"}},
+        "neighborhood": {"type": "object"},
+        "confidence": {"$ref": "#/definitions/confidence"},
+        "design_relevant": {"type": "boolean"},
+        "unconfirmed": {"type": "boolean"},
+        "lower_bound": {"type": "boolean"},
+        "excluded_reason": {"$ref": "#/definitions/excluded_reason"},
+        "caveat": {"type": ["string", "null"]},
+        "text": {"type": "string"}
+      }
+    }
+  }
+}

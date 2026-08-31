@@ -1,0 +1,139 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "hwax-risk/rr_state.v1.json",
+  "title": "rr_state v1 — 단일 스냅샷 결정론 상태 평가(plan §3.2)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "state_version", "snapshot_id", "ir_hash", "project_id", "rule_version", "taxonomy_version", "seed_rules_version",
+    "computed_at", "blocked", "gates", "missing", "signals", "character_seed", "feature_vector", "precedent",
+    "rule_hits", "summary_text", "summary_status"
+  ],
+  "properties": {
+    "state_version": {"const": "1.0"},
+    "snapshot_id": {"$ref": "#/definitions/hex32"},
+    "ir_hash": {"$ref": "#/definitions/sha256"},
+    "project_id": {"$ref": "#/definitions/hex32"},
+    "rule_version": {"type": "string"},
+    "taxonomy_version": {"type": "string"},
+    "seed_rules_version": {"type": "string"},
+    "lexicon_version": {"type": "string"},
+    "computed_at": {"type": "integer"},
+    "blocked": {"type": "boolean"},
+    "gates": {
+      "type": "object",
+      "required": ["G1", "G2", "G3", "G4", "G5", "G6"],
+      "propertyNames": {"pattern": "^G[1-6]$"},
+      "additionalProperties": {"$ref": "#/definitions/gate"}
+    },
+    "missing": {
+      "type": "object",
+      "required": ["ecad_absent", "dyna_absent", "dyna_result_absent", "result_kind_mismatch", "world_transform_absent", "volume_null", "material_density_unsourced"],
+      "additionalProperties": {"type": "boolean"}
+    },
+    "signals": {"type": "object", "additionalProperties": {"$ref": "#/definitions/signal"}},
+    "character_seed": {"type": "array", "items": {"$ref": "#/definitions/character_seed"}},
+    "feature_vector": {"$ref": "#/definitions/feature_vector"},
+    "precedent": {
+      "type": "object",
+      "required": ["corpus_n", "per_feature", "out_of_range_count"],
+      "properties": {
+        "corpus_n": {"type": "integer", "minimum": 0},
+        "per_feature": {"type": "object", "additionalProperties": {"type": "string", "enum": ["in_range", "out_of_range", "none"]}},
+        "out_of_range_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "rule_hits": {"type": "array", "items": {"$ref": "#/definitions/rule_hit"}},
+    "summary_text": {"type": "string", "maxLength": 2000},
+    "summary_status": {"type": "string", "enum": ["ok", "lint_failed"]}
+  },
+  "definitions": {
+    "hex32": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "gate": {
+      "type": "object",
+      "required": ["key", "count", "threshold", "pass", "blocking", "effect", "ack_by", "ack_at", "ack_reason", "detail"],
+      "properties": {
+        "key": {"type": "string", "enum": ["dup_or_anon_names", "sameas_pending", "iface_unconfirmed", "coordinate", "partial_scope", "unit_scale"]},
+        "count": {"type": ["integer", "null"]},
+        "threshold": {"type": ["number", "null"]},
+        "pass": {"type": "boolean"},
+        "blocking": {"type": "boolean"},
+        "effect": {"type": "string", "enum": ["none", "mark", "block_semantic", "degrade_cross_file", "mark_partial", "block"]},
+        "ack_by": {"type": ["string", "null"]},
+        "ack_at": {"type": ["integer", "null"]},
+        "ack_reason": {"type": ["string", "null"]},
+        "detail": {"type": "array", "items": {"type": ["string", "object"]}}
+      }
+    },
+    "signal": {
+      "type": "object",
+      "required": ["kind", "value", "unit", "refs", "text", "derived_from", "known"],
+      "properties": {
+        "kind": {"type": "string", "enum": ["count", "ratio", "scalar", "vec", "top", "hist", "flag", "table"]},
+        "value": {},
+        "unit": {"type": ["string", "null"]},
+        "refs": {"type": "array", "items": {"type": "string"}},
+        "text": {"type": "string"},
+        "derived_from": {"type": "array", "items": {"type": "string"}},
+        "known": {"type": "boolean"}
+      }
+    },
+    "character_seed": {
+      "type": "object",
+      "required": ["tag", "rule", "cites", "text"],
+      "properties": {
+        "tag": {"type": "string", "pattern": "^char:[a-z_]+:[A-Za-z0-9_]+$"},
+        "rule": {"type": "string"},
+        "cites": {"type": "array", "items": {"type": "string"}},
+        "text": {"type": "string"}
+      }
+    },
+    "feature_vector": {
+      "type": "object",
+      "required": ["version", "names", "values", "known", "transform"],
+      "properties": {
+        "version": {"const": "fv-1.0"},
+        "names": {
+          "type": "array",
+          "minItems": 22,
+          "maxItems": 22,
+          "items": [
+            {"const": "n_leaf"}, {"const": "n_files"}, {"const": "n_tied"}, {"const": "n_touching"}, {"const": "n_clearance"},
+            {"const": "n_interference"}, {"const": "orphan_ratio"}, {"const": "cross_file_ratio"}, {"const": "bbox_x"},
+            {"const": "bbox_y"}, {"const": "bbox_z"}, {"const": "total_volume"}, {"const": "n_materials"},
+            {"const": "material_null_ratio"}, {"const": "thin_ratio"}, {"const": "median_gap"}, {"const": "min_gap"},
+            {"const": "max_pen_depth"}, {"const": "n_dyna_pids"}, {"const": "n_dyna_contacts"}, {"const": "shell_ratio"},
+            {"const": "n_ecad_cmp"}
+          ]
+        },
+        "values": {"type": "array", "minItems": 22, "maxItems": 22, "items": {"type": ["number", "null"]}},
+        "known": {"type": "array", "minItems": 22, "maxItems": 22, "items": {"type": "boolean"}},
+        "transform": {"type": "array", "minItems": 22, "maxItems": 22, "items": {"type": "string", "enum": ["log1p", "id"]}}
+      }
+    },
+    "rule_hit": {
+      "type": "object",
+      "required": ["rule", "version", "severity", "pass", "found", "why_it_matters", "fix_hint", "payload_hash", "refs"],
+      "properties": {
+        "rule": {"type": "string", "pattern": "^R-[0-9]{3}$"},
+        "version": {"type": "string"},
+        "severity": {"type": "string", "enum": ["경미", "중대", "치명"]},
+        "pass": {"type": "boolean"},
+        "found": {
+          "type": "object",
+          "required": ["count", "refs", "text"],
+          "properties": {
+            "count": {"type": "integer", "minimum": 0},
+            "refs": {"type": "array", "items": {"type": "string"}},
+            "text": {"type": "string"}
+          }
+        },
+        "why_it_matters": {"type": "string"},
+        "fix_hint": {"type": "string"},
+        "payload_hash": {"$ref": "#/definitions/sha256"},
+        "refs": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}
