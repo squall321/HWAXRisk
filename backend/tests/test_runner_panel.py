@@ -1,0 +1,499 @@
+# runner.py 패널 1건 시험 — 좌석 귀속·delib_opts·잡 자격(pat_unavailable)·FakePanelEngine 완주(plan §6.7)
+from __future__ import annotations
+
+import dataclasses
+import json
+import types
+
+import pytest
+
+from app import config, planner, runner
+from app.common import now_epoch
+from app.errors import AppError
+
+OWNER = "u@x"
+ADVERSARY = planner.ADVERSARY_KEY
+
+
+# ---------------------------------------------------------------- 원장 준비
+def agents(sizes: dict[str, int]) -> list[dict]:
+    return [
+        {"key": f"{dom}-a{i:03d}", "domain": dom, "relevance": (n - i) / 100.0}
+        for dom, n in sizes.items()
+        for i in range(n)
+    ]
+
+
+def make_project(store, project_id: str = "p1", code: str = "PRJ-1") -> None:
+    now = now_epoch()
+    store.execute(
+        "INSERT INTO rr_projects(id, owner_sub, code, name, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (project_id, OWNER, code, "테스트 과제", now, now),
+    )
+
+
+def make_target(store, target_key: str = "t1", *, kind: str = "diff", report_ids: list | None = None) -> str:
+    now = now_epoch()
+    store.execute(
+        "INSERT INTO rr_targets(target_key, owner_sub, kind, ref_id, project_id, ir_hash, external_sync_json,"
+        " report_ids_json, level, created_at, updated_at) VALUES (?, ?, ?, 'diff-1', 'p1', 'h1', '{}', ?, 'C0', ?, ?)",
+        (target_key, OWNER, kind, json.dumps(report_ids or []), now, now),
+    )
+    return target_key
+
+
+def seeded(store, sizes: dict[str, int] | None = None) -> str:
+    make_project(store)
+    target_key = make_target(store)
+    store.execute(
+        "INSERT INTO rr_diffs(id, target_project_id, base_project_id, target_snapshot_id, base_snapshot_id,"
+        " owner_sub, diff_version, diff_json, summary_text, created_at)"
+        " VALUES ('diff-1', 'p1', 'p0', 's1', 's0', ?, '1.0', '{}', ?, ?)",
+        (OWNER, "구조 3건·치수 2건이 바뀌었다.", now_epoch()),
+    )
+    planner.freeze_roster(store, target_key, OWNER, agents(sizes or {"mech": 2, "sim": 2, "rel": 1, "xd": 1, "pcb": 1}))
+    return target_key
+
+
+def give_credential(store, owner_sub: str = OWNER) -> None:
+    store.upsert_credential(
+        owner_sub, "pat-secret", "sub-1", "u@x", json.dumps(["hwax-risk"]),
+        now_epoch() + 30 * 86400,
+    )
+
+
+def coverage(store, target_key: str) -> dict[str, dict]:
+    return {
+        r["agent_key"]: dict(r)
+        for r in store.query(
+            "SELECT agent_key, status, retry, opinion_id, model, panel_id FROM rr_coverage WHERE target_key = ?",
+            (target_key,),
+        )
+    }
+
+
+# ---------------------------------------------------------------- 테스트 대역
+class FakePanelEngine:
+    """SSE 캡처 결과와 같은 형태({decision_text, turns, conv_id, events})를 돌려주는 심의 엔진 대역."""
+
+    def __init__(self, seat_keys: list[str] | None = None, *, raise_error: Exception | None = None) -> None:
+        self.seat_keys = seat_keys or []
+        self.raise_error = raise_error
+        self.calls: list[dict] = []
+        self.owner_subs: list[str | None] = []
+        self.health_calls = 0
+
+    def health(self) -> dict:
+        self.health_calls += 1
+        return {"model": "glm-fake", "provider": "vllm", "endpoint_host": "127.0.0.1", "engine_rev": "rev1"}
+
+    def run(self, delib_opts, *, owner_sub=None):
+        self.calls.append(dict(delib_opts))
+        self.owner_subs.append(owner_sub)
+        if self.raise_error is not None:
+            raise self.raise_error
+        keys = [p["key"] for p in delib_opts["personas"]]
+        turns = [{"round": r, "persona": key, "say": f"{key} 라운드 {r} 발언"} for r in (1, 2, 3) for key in keys]
+        events: list[dict] = [{"kind": "personas", "personas": [{"key": k} for k in keys + [ADVERSARY]]}]
+        for key in keys:
+            events.append({"kind": "status", "step": f"{key} 조회: list_interfaces", "tool": "list_interfaces"})
+            events.append({"kind": "evidence", "source": f"{key} · list_interfaces", "text": "…"})
+        events.append({"kind": "evidence", "source": "rr_diff", "text": "공용 근거"})
+        return {
+            "decision_text": "판정문 본문.\n```json\n{}\n```",
+            "turns": turns,
+            "events": events,
+            "conv_id": "conv-1",
+            "report_id": 77,
+            "call_path": "portal",
+        }
+
+
+def fake_narrative(recorder: dict) -> types.SimpleNamespace:
+    """narrative 대역 — 러너가 부르는 세 함수만 갖춘다(실물은 배선 담당이 채운다)."""
+
+    def prior_evidence(store, target_key, *, user_memo=None, seats=None, panel_id=None, exclude=()):
+        recorder["prior_evidence"] = {"target_key": target_key, "user_memo": user_memo}
+        return [{"source": "rr_state", "tool": "gates", "args": target_key, "result": "G1 pass"}]
+
+    def parse_risk_spec(text):
+        return {"findings": [{"id": "F1"}]} if "```json" in text else None
+
+    def persist_panel_result(store, panel_id, *, decision_text, spec, turns, attribution, actor=None):
+        recorder["persist"] = {"panel_id": panel_id, "spec": spec, "turns": len(turns),
+                               "attribution": attribution}
+        panel = store.query_one("SELECT seats_json FROM rr_panels WHERE id = ?", (panel_id,))
+        seats = json.loads(panel["seats_json"])
+        return {
+            "seats": [
+                {"agent_key": s["key"], "opinion_id": f"op-{i}", "turns_n": 3, "cited_refs_n": 2,
+                 "cited_ir": i < 3, "abstained": False}
+                for i, s in enumerate(seats)
+            ],
+            "findings_total": 3,
+            "adversary_rejects": 1,
+            "grade_dist": {"A": 2, "B": 1},
+        }
+
+    return types.SimpleNamespace(
+        prior_evidence=prior_evidence, parse_risk_spec=parse_risk_spec, persist_panel_result=persist_panel_result
+    )
+
+
+def fake_registry(recorder: dict, *, level: str = "C0", raised: bool = False) -> types.SimpleNamespace:
+    def merge_panel(store, panel_id):
+        recorder["merge_panel"] = panel_id
+        return {"new_clusters": 2}
+
+    def close_level(store, target_key, **kwargs):
+        return {"level": level, "raised": raised}
+
+    def build_consolidated_report(store, target_key, lvl):
+        recorder["report"] = (target_key, lvl)
+        return {"ok": True}
+
+    return types.SimpleNamespace(
+        merge_panel=merge_panel, close_level=close_level, build_consolidated_report=build_consolidated_report
+    )
+
+
+# ---------------------------------------------------------------- 좌석 귀속(plan §6.7 7단계)
+def test_attribute_events_counts_attempts_and_successes():
+    seats = ["mech-a", "sim-b"]
+    events = [
+        {"kind": "personas", "personas": [{"key": "mech-a"}, {"key": "sim-b"}, {"key": ADVERSARY}]},
+        {"kind": "status", "step": "mech-a 조회: list_interfaces"},
+        {"kind": "evidence", "source": "mech-a · list_interfaces", "text": "…"},
+        {"kind": "status", "step": "sim-b 조회: interface_graph"},     # 빈 결과 — evidence 없음
+        {"kind": "evidence", "source": "rr_state", "text": "공용 E0"},  # 좌석 귀속 없음
+        {"kind": "turn", "persona": "mech-a", "say": "…"},
+        {"kind": "turn", "persona": "sim-b", "say": "…"},
+    ]
+    out = runner.attribute_events(events, seats)
+    assert out["seats"]["mech-a"]["tool_calls_n"] == 1
+    assert out["seats"]["mech-a"]["tool_calls_ok"] == 1
+    assert out["seats"]["mech-a"]["used_tool"] is True
+    assert out["seats"]["mech-a"]["tool_calls"] == [{"tool": "list_interfaces", "activity_idx": 0}]
+    # 빈 결과 호출은 status 만 나오므로 tool_calls_n ≥ tool_calls_ok 가 유지된다.
+    assert (out["seats"]["sim-b"]["tool_calls_n"], out["seats"]["sim-b"]["tool_calls_ok"]) == (1, 0)
+    assert out["seats"]["sim-b"]["used_tool"] is False
+    assert out["seats"][ADVERSARY]["used_tool"] is False
+    assert out["seats"]["mech-a"]["turns_n"] == 1
+    assert out["extra_seats"] == []
+    assert out["attribution_rate"] == 1.0 and (out["attributable"], out["attributed"]) == (3, 3)
+
+
+def test_attribute_events_marks_extra_seats_and_unattributed():
+    out = runner.attribute_events(
+        [
+            {"kind": "personas", "personas": [{"key": "mech-a"}, {"key": "새좌석-x"}]},
+            {"kind": "status", "step": "새좌석-x 조회: list_interfaces"},
+        ],
+        ["mech-a"],
+    )
+    assert out["extra_seats"] == ["새좌석-x"]
+    assert (out["attributable"], out["attributed"]) == (1, 0)
+    assert out["attribution_rate"] == 0.0
+
+
+def test_attribute_events_without_events_is_unattributable():
+    out = runner.attribute_events(None, ["mech-a"])
+    assert out["seats"]["mech-a"]["used_tool"] is None
+    assert out["seats"]["mech-a"]["tool_calls_n"] is None
+    assert out["attribution_rate"] is None
+
+
+# ---------------------------------------------------------------- 자격(plan §6.7 3단계)
+def test_resolve_credential_prefers_owner_then_service(risk_store, tmp_path):
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    assert runner.resolve_credential(risk_store, cfg, OWNER) is None
+
+    give_credential(risk_store)
+    assert runner.resolve_credential(risk_store, cfg, OWNER) == {"kind": "owner", "email": "u@x"}
+
+    # 만료가 코앞이면 (b) 를 쓰지 않는다.
+    risk_store.upsert_credential(OWNER, "pat", "sub-1", "u@x", "[]", now_epoch() + 60)
+    assert runner.resolve_credential(risk_store, cfg, OWNER) is None
+
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("HWAXRISK_PORTAL_PAT=svc-pat\n", encoding="utf-8")
+    secrets.chmod(0o600)
+    assert runner.resolve_credential(risk_store, cfg, OWNER) == {"kind": "service", "email": None}
+
+
+def test_create_job_without_credential_is_pat_unavailable(risk_store, tmp_path):
+    target_key = seeded(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    with pytest.raises(AppError) as exc:
+        runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)
+    assert (exc.value.code, exc.value.http_status) == ("pat_unavailable", 422)
+    assert risk_store.query("SELECT id FROM rr_jobs") == []
+
+
+def test_create_job_records_plan_and_guards_tier_c(risk_store, tmp_path):
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+
+    with pytest.raises(AppError) as exc:
+        runner.create_job(risk_store, target_key, "C", owner_sub=OWNER, settings=cfg)
+    assert exc.value.code == "E100"                       # Tier C 는 consent 필수
+    with pytest.raises(AppError):
+        runner.create_job(risk_store, target_key, "Z", owner_sub=OWNER, settings=cfg)
+
+    out = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, modifiers=["voi"],
+                            user_memo="메모", settings=cfg)
+    plan = {t["tier"]: t for t in planner.tier_plan(risk_store, target_key, settings=cfg)["tiers"]}["A"]
+    assert out["panels_planned"] == plan["panels"]
+    assert out["llm_calls_estimate"] == {"low": plan["llm_calls_low"], "high": plan["llm_calls_high"]}
+    assert out["credential"] == "owner"
+
+    row = risk_store.query_one(
+        "SELECT state, tier, params_json, panels_total, concurrency FROM rr_jobs WHERE id = ?", (out["job_id"],)
+    )
+    assert (row["state"], row["tier"], row["panels_total"]) == ("queued", "A", plan["panels"])
+    params = json.loads(row["params_json"])
+    assert params["modifiers"] == ["voi", "toulmin"] and params["credential"] == "owner"
+    assert params["user_memo"] == "메모" and params["consent"] is False
+
+
+def test_claim_next_job_marks_pat_unavailable_and_keeps_state(risk_store, tmp_path):
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+
+    risk_store.delete_credential(OWNER)                   # 자격이 사라졌다
+    assert runner.claim_next_job(risk_store, cfg) is None
+    row = risk_store.query_one("SELECT state, error FROM rr_jobs WHERE id = ?", (job_id,))
+    assert (row["state"], row["error"]) == ("queued", "pat_unavailable")
+
+    give_credential(risk_store)                           # 자격이 생기면 다음 주기에 집는다
+    job = runner.claim_next_job(risk_store, cfg)
+    assert job["id"] == job_id and job["state"] == "running" and job["credential"] == "owner"
+    assert job["params"]["tier"] == "A"
+
+
+def test_claim_next_job_respects_serial_and_daily_cap(risk_store, tmp_path):
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+
+    panel = planner.plan_next_panel(risk_store, target_key, "A", settings=cfg)
+    planner.start_panel_seats(risk_store, panel["id"])     # 같은 타깃에 running 패널이 있으면 건너뛴다
+    assert runner.claim_next_job(risk_store, cfg) is None
+
+    risk_store.execute("UPDATE rr_panels SET status = 'done' WHERE id = ?", (panel["id"],))
+    capped = dataclasses.replace(cfg, risk_daily_panel_cap=1)
+    assert runner.claim_next_job(risk_store, capped) is None
+    row = risk_store.query_one("SELECT state, pause_reason FROM rr_jobs WHERE id = ?", (job_id,))
+    assert (row["state"], row["pause_reason"]) == ("paused", "daily_cap")
+
+
+def test_job_state_transitions(risk_store, tmp_path):
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+
+    assert runner.pause_job(risk_store, job_id, reason="user")["state"] == "paused"
+    with pytest.raises(AppError) as exc:
+        runner.pause_job(risk_store, job_id)
+    assert exc.value.http_status == 409
+    assert runner.resume_job(risk_store, job_id)["state"] == "queued"
+    with pytest.raises(AppError):
+        runner.resume_job(risk_store, job_id)
+    assert runner.cancel_job(risk_store, job_id)["state"] == "cancelled"
+    assert runner.cancel_job(risk_store, job_id)["state"] == "cancelled"      # 멱등
+    with pytest.raises(AppError) as exc:
+        runner.pause_job(risk_store, "없는잡")
+    assert exc.value.code == "E404"
+
+
+# ---------------------------------------------------------------- delib_opts(plan §6.6.4)
+def test_build_delib_opts_shape_and_forbidden_keys(risk_store):
+    target_key = seeded(risk_store)
+    panel = planner.plan_next_panel(risk_store, target_key, "A")
+    recorder: dict = {}
+    opts = runner.build_delib_opts(
+        risk_store, config.settings, panel, user_memo="사용자 메모", narrative_mod=fake_narrative(recorder)
+    )
+
+    assert opts["chair_template"] == "risk-review"
+    assert opts["modifiers"] == ["toulmin"] and opts["rounds"] == panel["rounds"]
+    assert (opts["free_tools"], opts["tool_budget"]) == (planner.FREE_TOOLS, planner.TOOL_BUDGET)
+    assert [p["key"] for p in opts["personas"]] == [s["key"] for s in panel["seats"]]
+    assert all(p["role"] == "" for p in opts["personas"])
+    assert [p["origin"] for p in opts["personas"]] == [s["origin"] for s in panel["seats"]]
+    assert opts["tools"] == panel["tools"]
+    assert len(opts["apps"]) <= planner.MAX_APPS and "heax-step_forge" in opts["apps"]
+    assert len(opts["evidence"]) <= planner.MAX_EVIDENCE
+
+    # E0 바로 뒤가 좌석 계약표(E0c)이고, 사용자 메모는 마지막 슬롯이다.
+    assert opts["evidence"][1]["source"] == "seat_contract"
+    assert opts["evidence"][1]["tool"] == "seat-contract.v1"
+    assert opts["evidence"][-1] == {"source": "user_memo", "tool": "note", "result": "사용자 메모"}
+    assert recorder["prior_evidence"] == {"target_key": target_key, "user_memo": "사용자 메모"}
+
+    for forbidden in ("human_note", "continue_summary", "non_negotiables", "search_sources",
+                      "stop_after_round", "build_plan"):
+        assert forbidden not in opts
+
+    assert target_key in opts["question"] and "PRJ-1" in opts["question"]
+    assert "구조 3건" in opts["question"]
+
+
+def test_seat_contract_evidence_budget():
+    item = runner.seat_contract_evidence(["mech", "mech", "sim", "없는도메인"])
+    assert item["source"] == "seat_contract" and item["args"] == "mech,sim,없는도메인"
+    lines = item["result"].splitlines()
+    assert len(lines) == 2                                        # 없는 도메인 줄은 실리지 않는다
+    assert all(len(line) <= runner.SEAT_CONTRACT_LINE_MAX for line in lines)
+    assert len(item["result"]) <= runner.SEAT_CONTRACT_TOTAL_MAX
+
+
+# ---------------------------------------------------------------- 패널 1건 완주(plan §6.7.2)
+def test_run_panel_completes_with_fake_engine(risk_store, tmp_path):
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+    job = runner.claim_next_job(risk_store, cfg)
+    assert job["id"] == job_id
+
+    recorder: dict = {}
+    engine = FakePanelEngine()
+    out = runner.run_panel(
+        risk_store, cfg, engine, job,
+        narrative_mod=fake_narrative(recorder), registry_mod=fake_registry(recorder),
+    )
+
+    assert out["status"] == "done" and out["parsed"] is True
+    assert out["new_clusters"] == 2 and out["quality_flags"] == []
+    assert out["coverage"] == {"done": 5}
+
+    panel = risk_store.query_one(
+        "SELECT status, decision_text, risk_spec_parsed, conv_id, report_id, llm_calls, quality_json, model_json,"
+        " seats_json, started_at, ended_at FROM rr_panels WHERE id = ?", (out["panel_id"],)
+    )
+    assert panel["status"] == "done" and panel["risk_spec_parsed"] == 1
+    assert (panel["conv_id"], panel["report_id"]) == ("conv-1", 77)
+    assert panel["started_at"] and panel["ended_at"]
+    seats = json.loads(panel["seats_json"])
+
+    # 사후 표기 llm_calls = turn 수 + 좌석 조회 status × 3 + T + 3(plan §6.10.2).
+    assert panel["llm_calls"] == out["llm_calls"] == 3 * len(seats) + len(seats) * 3 + 2 + 3
+    model = json.loads(panel["model_json"])
+    assert model["captured"] == "health_snapshot" and model["model"] == "glm-fake"
+    assert engine.health_calls == 2                                # 시작·종료 스냅샷
+
+    quality = json.loads(panel["quality_json"])
+    assert quality["tool_use_rate"] == 1.0 and quality["attribution_rate"] == 1.0
+    assert quality["ir_cite_rate"] == pytest.approx(3 / 5)
+    assert quality["credential"] == "owner" and quality["call_path"] == "portal"
+    assert quality["new_clusters"] == 2 and quality["flags"] == []
+    assert quality["grade_dist"] == {"A": 2, "B": 1}
+
+    rows = coverage(risk_store, target_key)
+    for seat in seats:
+        assert rows[seat["key"]]["status"] == "done"
+        assert rows[seat["key"]]["opinion_id"] and rows[seat["key"]]["model"] == "glm-fake"
+    assert planner.check_invariants(risk_store, target_key) == []
+
+    assert recorder["merge_panel"] == out["panel_id"]
+    assert recorder["persist"]["panel_id"] == out["panel_id"]
+    assert risk_store.query_one("SELECT panels_done FROM rr_jobs WHERE id = ?", (job_id,))["panels_done"] == 1
+    assert len(engine.calls) == 1 and engine.calls[0]["chair_template"] == "risk-review"
+
+
+def test_run_panel_flags_weak_quality_when_seats_do_not_use_tools(risk_store, tmp_path):
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)
+    job = runner.claim_next_job(risk_store, cfg)
+
+    class SilentEngine(FakePanelEngine):
+        def run(self, delib_opts, *, owner_sub=None):
+            result = dict(super().run(delib_opts, owner_sub=owner_sub))
+            keys = [p["key"] for p in delib_opts["personas"]]
+            result["events"] = [{"kind": "personas", "personas": [{"key": k} for k in keys]}]
+            return result
+
+    recorder: dict = {}
+    narrative = fake_narrative(recorder)
+    original = narrative.persist_panel_result
+
+    def no_ir(store, panel_id, **kwargs):
+        extracted = dict(original(store, panel_id, **kwargs))
+        extracted["seats"] = [dict(s, cited_ir=False, cited_refs_n=0) for s in extracted["seats"]]
+        extracted["adversary_rejects"] = 0
+        return extracted
+
+    narrative.persist_panel_result = no_ir
+    out = runner.run_panel(risk_store, cfg, SilentEngine(), job,
+                           narrative_mod=narrative, registry_mod=fake_registry(recorder))
+
+    assert out["status"] == "done"
+    assert out["coverage"] == {"done_weak": 5}                     # used_tool=false · cited_refs=∅
+    assert set(out["quality_flags"]) == {"low_tool_use", "low_ir_cite", "adversary_silent"}
+
+
+def test_run_panel_engine_error_returns_seats_to_pending(risk_store, tmp_path):
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)
+    job = runner.claim_next_job(risk_store, cfg)
+
+    recorder: dict = {}
+    engine = FakePanelEngine(raise_error=runner.EngineError("연결 끊김"))
+    out = runner.run_panel(risk_store, cfg, engine, job,
+                           narrative_mod=fake_narrative(recorder), registry_mod=fake_registry(recorder))
+
+    assert out["status"] == "error" and "연결 끊김" in out["error"]
+    panel = risk_store.query_one(
+        "SELECT status, retry, error, seats_json, ended_at FROM rr_panels WHERE id = ?", (out["panel_id"],)
+    )
+    assert (panel["status"], panel["retry"]) == ("error", 1)
+    rows = coverage(risk_store, target_key)
+    assert {r["status"] for r in rows.values()} == {"pending"}
+    # 그 패널 좌석만 retry 가 올랐고 panel_id 는 지워졌다.
+    for seat in json.loads(panel["seats_json"]):
+        assert (rows[seat["key"]]["retry"], rows[seat["key"]]["panel_id"]) == (1, None)
+    assert "merge_panel" not in recorder
+
+
+def test_run_panel_without_pending_completes_job(risk_store, tmp_path):
+    target_key = seeded(risk_store, {"mech": 1})
+    give_credential(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+    job = runner.claim_next_job(risk_store, cfg)
+    risk_store.execute(
+        "UPDATE rr_coverage SET status = 'skipped', reason = '사용자' WHERE target_key = ?", (target_key,)
+    )
+
+    recorder: dict = {}
+    out = runner.run_panel(risk_store, cfg, FakePanelEngine(), job,
+                           narrative_mod=fake_narrative(recorder), registry_mod=fake_registry(recorder))
+    assert out["panel_id"] is None and out["status"] == "no_panel"
+    assert out["job_state"] == "completed" and out["next_job"] is None
+    assert risk_store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))["state"] == "completed"
+
+
+def test_recover_running_panels_after_restart(risk_store, tmp_path):
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+    runner.claim_next_job(risk_store, cfg)
+    panel = planner.plan_next_panel(risk_store, target_key, "A", settings=cfg)
+    planner.start_panel_seats(risk_store, panel["id"])
+
+    assert runner.recover_running_panels(risk_store) == {"recovered": 1}
+    row = risk_store.query_one("SELECT status, error, retry FROM rr_panels WHERE id = ?", (panel["id"],))
+    assert (row["status"], row["error"], row["retry"]) == ("error", "restart", 1)
+    assert {r["status"] for r in coverage(risk_store, target_key).values()} == {"pending"}
+    assert risk_store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))["state"] == "queued"

@@ -1,0 +1,167 @@
+{
+ "source": {
+  "kind": "dyna",
+  "app_key": "heax-kooremapper_mcp",
+  "adapter_version": "1.0",
+  "channel": "mcp",
+  "ref": {
+   "session_id": "01JSES",
+   "file_id": "01JFIL",
+   "filename": "assembled_tied.k",
+   "sha256": "abcd123400000000000000000000000000000000000000000000000000000000"
+  },
+  "source_hash": "abcd123400000000000000000000000000000000000000000000000000000000",
+  "stats": {
+   "nodes": 12000,
+   "elements": 9800,
+   "parts": 2,
+   "bbox_min": [
+    0,
+    0,
+    0
+   ],
+   "bbox_max": [
+    50,
+    40,
+    2.2
+   ],
+   "size": [
+    50,
+    40,
+    2.2
+   ],
+   "contacts_total": 1,
+   "unresolved_sides": 0
+  },
+  "degraded": [
+   "no_secid"
+  ]
+ },
+ "nodes": [
+  {
+   "canon_key": "dyna:abcd1234:1",
+   "domain": "dyna",
+   "kind": "pid",
+   "label": "Stack\\PLATE_1",
+   "local_key": "1",
+   "status_flags": [],
+   "attrs": {
+    "title": "Stack\\PLATE_1",
+    "elem_class": "solid",
+    "n_elems": 5000,
+    "bbox_min": [
+     0,
+     0,
+     0
+    ],
+    "bbox_max": [
+     50,
+     40,
+     1.2
+    ],
+    "size": [
+     50,
+     40,
+     1.2
+    ],
+    "size_sorted": [
+     50,
+     40,
+     1.2
+    ],
+    "area_ext": 4000.0,
+    "volume": 3000.0,
+    "material": {
+     "mid": 1,
+     "keyword": "*MAT_ELASTIC",
+     "db": {
+      "tag": "AL6061",
+      "name": "AL6061"
+     }
+    },
+    "secid": null
+   },
+   "provenance": {
+    "adapter": "dyna",
+    "tool": "inspect_file",
+    "call_id": "cafe0000-010"
+   }
+  },
+  {
+   "canon_key": "dyna:abcd1234:2",
+   "domain": "dyna",
+   "kind": "pid",
+   "label": "Stack\\PLATE_2",
+   "local_key": "2",
+   "status_flags": [],
+   "attrs": {
+    "title": "Stack\\PLATE_2",
+    "elem_class": "solid",
+    "n_elems": 4800,
+    "bbox_min": [
+     0,
+     0,
+     0
+    ],
+    "bbox_max": [
+     50,
+     40,
+     1.0
+    ],
+    "size": [
+     50,
+     40,
+     1.0
+    ],
+    "size_sorted": [
+     50,
+     40,
+     1.0
+    ],
+    "area_ext": 3800.0,
+    "volume": 2500.0,
+    "material": {
+     "mid": 1,
+     "keyword": "*MAT_ELASTIC",
+     "db": {
+      "tag": "AL6061",
+      "name": "AL6061"
+     }
+    },
+    "secid": null
+   },
+   "provenance": {
+    "adapter": "dyna",
+    "tool": "inspect_file",
+    "call_id": "cafe0000-010"
+   }
+  }
+ ],
+ "edges": [
+  {
+   "kind": "contact",
+   "domain": "dyna",
+   "status": "auto",
+   "a": "dyna:abcd1234:1",
+   "b": "dyna:abcd1234:2",
+   "attrs": {
+    "contact_index": 1,
+    "contact_type": "*CONTACT_TIED_SURFACE_TO_SURFACE",
+    "title": "tie1",
+    "fs": null
+   },
+   "provenance": {
+    "adapter": "dyna",
+    "tool": "inspect_file",
+    "call_id": "cafe0000-010"
+   }
+  }
+ ],
+ "warnings": [],
+ "degraded": [
+  "no_secid"
+ ],
+ "call_ids": [
+  "cafe0000-010"
+ ]
+}

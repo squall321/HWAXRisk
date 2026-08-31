@@ -1,0 +1,84 @@
+{
+ "source": {
+  "kind": "dyna_result",
+  "app_key": "heax-kooremapper_mcp",
+  "adapter_version": "1.0",
+  "channel": "mcp",
+  "ref": {
+   "report_ids": [
+    "01JRPT"
+   ],
+   "report_kind": "sphere",
+   "session_id": "01JSES"
+  },
+  "source_hash": "sha-report",
+  "binding": {
+   "bound_to_dyna_source_hash": "abcd123400000000000000000000000000000000000000000000000000000000",
+   "method": "user_declared"
+  },
+  "degraded": []
+ },
+ "nodes": [],
+ "edges": [],
+ "warnings": [],
+ "degraded": [],
+ "call_ids": [
+  "cafe0000-020"
+ ],
+ "results": {
+  "report_ids": [
+   "01JRPT"
+  ],
+  "kind": "sphere",
+  "sim_params_hash": "simp-1",
+  "summary": "구 낙하 1.2 m",
+  "parts_map": {
+   "1": "p:bed8237aee03",
+   "2": "p:c4c095adced5"
+  },
+  "part_risk": [
+   {
+    "nid": "p:bed8237aee03",
+    "pid": 1,
+    "worst_stress": {
+     "value": 231.4,
+     "case_key": "c1"
+    },
+    "worst_g": 88.2,
+    "worst_disp": 0.42,
+    "min_safety_factor": 1.12
+   },
+   {
+    "nid": "p:c4c095adced5",
+    "pid": 2,
+    "worst_stress": {
+     "value": 120.0,
+     "case_key": "c1"
+    },
+    "worst_g": 40.1,
+    "worst_disp": 0.2,
+    "min_safety_factor": 2.3
+   }
+  ],
+  "findings": [
+   {
+    "severity": "WARNING",
+    "title": "PLATE_1 항복 근접",
+    "detail": "원문",
+    "recommendation": "원문"
+   }
+  ],
+  "energy_edges": [
+   {
+    "name": "PLATE_1→PLATE_2",
+    "peak_force": 900.0,
+    "total_work": 12.5,
+    "confidence": "medium"
+   }
+  ],
+  "worst_cases": [],
+  "sim_params": {
+   "yield_stress": 240.0
+  }
+ }
+}

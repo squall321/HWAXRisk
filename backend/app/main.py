@@ -11,7 +11,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app import config, identity
+from app import config, engine_client, identity
 from app.errors import AppError
 from app.mcp_server import mcp
 from app.risk_store import close_store, get_store
@@ -67,8 +67,8 @@ async def _lifespan(app: FastAPI):
     # ⑤ identity 캐시 초기화.
     identity.reset_cache()
     # ⑥ 이식한 MCP Route 의 세션 매니저는 자동 기동되지 않으므로 직접 구동한다(MaterialTwinWeb·ThermalShockMCP 와 동일).
-    # ⑦ 러너 스레드. 종료는 역순.
-    runner = RiskRunner(store, settings)
+    # ⑦ 러너 스레드. 엔진은 주입식이라 러너 자체는 LLM 을 부르지 않는다(plan §6.7.1 (A) 경로).
+    runner = RiskRunner(store, settings, engine=engine_client.build_engine(store, settings))
     app.state.runner = runner
     try:
         async with mcp.session_manager.run():

@@ -22,6 +22,7 @@
 | §4.6.3 | character-vocab | `backend/app/assets/character-vocab.v1.json` |
 | §5.2.2 · §5.2.5 | 앱 DB DDL 전문(A~H) · 데이터 지속(pre-migrate 사본·origin.json·user_version) | `backend/app/risk_store.py`(v1 = DDL 전문) · `main.py` lifespan |
 | §6.4 · §6.5.3 | adjacency · seat-contract | `backend/app/assets/adjacency.v1.json` · `seat-contract.v1.json` |
+| §6.11 | MCP 경로의 실행 등급(웹 러너 · L1 단발 · L2 오케스트레이터 · 재제출) | `README.md` "Claude Code 에서 심사 돌리기" · 포털 `infra/pipeline/hwax-risk-review.js` |
 | §7.1 | 택소노미 v1 | `backend/app/assets/taxonomy.v1.json` · `backend/app/taxonomy.py` |
 | §8.2 | 앱 구조·매니페스트·REST·MCP·Settings·시크릿·신원·러너·헬스·기동 순서 | `.portal/manifest.yaml` · `backend/app/{main,routes,mcp_server,config,identity,runner}.py` · `frontend/` |
 | §8.3 | 엔진 파리티(PY/JS 문자열) | `backend/tests/test_parity.py`(skip 조건부) |
@@ -62,6 +63,12 @@
   `risk_get_brief(target_key, tier='B')` · `risk_submit_panel_result(panel_id, engine, decision_text, turns, report_id, actor, model=None)`.
   P0 본문은 전부 `{error:'not_implemented', ready_in}`(snapshot P1 · diff P2 · registry/claims/submit P3 · brief P5).
 - 게이트웨이 경유 호출은 heax 서비스 PAT 신원으로 도달하므로 최종 사용자는 오지 않는다 — 쓰기 도구는 `actor`(미검증 표기) 인자를 받는다.
+- Claude 연결 경로 둘(§6.11). 게이트웨이(`:9110`)를 붙인 세션은 백엔드 `heax-hwax_risk` 로 `risk_*` 6종을 그대로 본다.
+  앱만 직접 붙이려면 `claude mcp add --transport http hwax-risk <포털베이스>/apps/hwax_risk/mcp --header "Authorization: Bearer heax_pat_…"`
+  (로컬 dev 는 리포의 `.mcp.json` 과 같은 `http://127.0.0.1:8000/mcp`).
+- 실행 등급 둘 — L1 단발은 `hwax-deliberate` 에 `chairTemplate:'risk-review'`(원장 미연동), L2 는 포털 워크플로 `hwax-risk-review`
+  (`{targetKey, tier, panels?, actor?, model?}`)가 `risk_get_brief` → 패널별 심의 → `risk_submit_panel_result` 로 돈다. 자세한 표는 `README.md`.
+  Tier A 대표 패널과 무인 배치는 웹 러너 전용이라 `risk_get_brief(target_key, tier:'A')` 는 `{error:'tier_a_web_only'}` 다.
 
 ## REST
 

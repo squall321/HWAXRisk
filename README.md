@@ -106,6 +106,23 @@ claude mcp add --transport http hwax-risk http://127.0.0.1:8000/mcp
 claude mcp add --transport http hwax-risk <포털베이스>/apps/hwax_risk/mcp --header "Authorization: Bearer heax_pat_…"
 ```
 
+직접 등록은 선택이다. 게이트웨이(`:9110`)가 heax `GET /api/v1/mcp/servers` 폴링으로 이 앱을 백엔드
+`heax-hwax_risk` 로 자동 흡수하므로, 게이트웨이를 이미 붙여 둔 Claude Code 세션은 `risk_*` 6종을
+그대로 본다. 위 두 줄은 게이트웨이 없이 앱만 직접 붙일 때 쓴다.
+
+## Claude Code 에서 심사 돌리기
+
+심의 엔진은 둘이고 앱 MCP 는 그 사이의 원장 접점이다(계획 §6.11).
+
+| 등급 | 어떻게 | 원장 |
+|---|---|---|
+| L1 단발 | `hwax-deliberate` 워크플로에 `chairTemplate:'risk-review'` — 결정문 8항목 + `risk_spec` 펜스 + 기준선 옹호 지정석이 붙는다 | 미연동. 결과를 넣으려면 `risk_submit_panel_result` 를 사람이 부른다(패널이 `planned` 로 편성돼 있어야 하며 없으면 409) |
+| L2 오케스트레이터 | `hwax-risk-review` 워크플로(`{targetKey, tier, panels?, actor?, model?}`) — `risk_get_brief` 로 패널·근거를 받아 패널마다 심의를 돌리고 `risk_submit_panel_result` 로 되돌린다 | `engine='mcp'` · `tool_mode='evidence_only'` · `actor_verified:false` |
+
+두 워크플로 정본은 포털 리포 `HWAXPortal/infra/pipeline/` 에 있고 `infra/scripts/sync-workflows.sh`
+로 `.claude/workflows/` 사본에 반영한다. Tier A 대표 패널과 무인 배치는 웹 러너 전용이라
+`risk_get_brief(target_key, tier:'A')` 는 `{error:'tier_a_web_only'}` 를 돌려준다.
+
 ## 테스트
 
 ```bash

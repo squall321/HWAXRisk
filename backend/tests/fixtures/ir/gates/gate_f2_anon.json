@@ -1,0 +1,3694 @@
+{
+ "case": "gate_f2_anon",
+ "note": "리프 40 중 auto_named 9 → G1 fail(9 > 5), 나머지 pass",
+ "adapter_results": [
+  {
+   "source": {
+    "kind": "mcad",
+    "app_key": "heax-step_forge",
+    "adapter_version": "1.0",
+    "channel": "rest+mcp",
+    "ref": {
+     "stepforge_project_id": "001a02ba21cd51064a68c35",
+     "project_name": "sif-e2e",
+     "unit_system": "mm",
+     "detect_job_id": "01JDET",
+     "step_files": [
+      {
+       "relpath": "a_stack.step",
+       "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+       "header_unit": "millimetre",
+       "schema_ap": "AUTOMOTIVE_DESIGN"
+      }
+     ]
+    },
+    "source_hash": "sha-mcad",
+    "tol_config_hash": "tol-a",
+    "tol_known_keys": [
+     "tied_gap",
+     "clearance_gap",
+     "tied_area",
+     "tied_width"
+    ],
+    "scope": null,
+    "stats": {
+     "files": 1,
+     "leaf_instances": 3,
+     "assemblies": 1,
+     "interfaces": 2
+    },
+    "degraded": []
+   },
+   "nodes": [
+    {
+     "canon_key": "mcad:/a_stack.step",
+     "domain": "mcad",
+     "kind": "file",
+     "label": "a_stack.step",
+     "local_key": "/sif-e2e/a_stack.step",
+     "status_flags": [],
+     "attrs": {
+      "depth": 1,
+      "relpath": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "domain": "mcad",
+     "kind": "assembly",
+     "label": "STACK_ASM",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "depth": 2,
+      "relpath": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "captured_at": 1756600000
+     },
+     "parent_canon_key": "mcad:/a_stack.step"
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_00",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_00",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_00",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.0
+      ],
+      "size_def": [
+       50,
+       40,
+       1.0
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.0
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.0
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.5
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.5
+      ],
+      "volume": 500.0,
+      "area": null,
+      "min_dim": 1.0,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_01",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_01",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_01",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.01
+      ],
+      "size_def": [
+       50,
+       40,
+       1.01
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.01
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.01
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.505
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.505
+      ],
+      "volume": 501.0,
+      "area": null,
+      "min_dim": 1.01,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_02",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_02",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_02",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.02
+      ],
+      "size_def": [
+       50,
+       40,
+       1.02
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.02
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.02
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.51
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.51
+      ],
+      "volume": 502.0,
+      "area": null,
+      "min_dim": 1.02,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_03",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_03",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_03",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.03
+      ],
+      "size_def": [
+       50,
+       40,
+       1.03
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.03
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.03
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.515
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.515
+      ],
+      "volume": 503.0,
+      "area": null,
+      "min_dim": 1.03,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_04",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_04",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_04",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.04
+      ],
+      "size_def": [
+       50,
+       40,
+       1.04
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.04
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.04
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.52
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.52
+      ],
+      "volume": 504.0,
+      "area": null,
+      "min_dim": 1.04,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_05",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_05",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_05",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.05
+      ],
+      "size_def": [
+       50,
+       40,
+       1.05
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.05
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.05
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.525
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.525
+      ],
+      "volume": 505.0,
+      "area": null,
+      "min_dim": 1.05,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_06",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_06",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_06",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.06
+      ],
+      "size_def": [
+       50,
+       40,
+       1.06
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.06
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.06
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.53
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.53
+      ],
+      "volume": 506.0,
+      "area": null,
+      "min_dim": 1.06,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_07",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_07",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_07",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.07
+      ],
+      "size_def": [
+       50,
+       40,
+       1.07
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.07
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.07
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.535
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.535
+      ],
+      "volume": 507.0,
+      "area": null,
+      "min_dim": 1.07,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_08",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_08",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_08",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.08
+      ],
+      "size_def": [
+       50,
+       40,
+       1.08
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.08
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.08
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.54
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.54
+      ],
+      "volume": 508.0,
+      "area": null,
+      "min_dim": 1.08,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_09",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_09",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_09",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.09
+      ],
+      "size_def": [
+       50,
+       40,
+       1.09
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.09
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.09
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.545
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.545
+      ],
+      "volume": 509.0,
+      "area": null,
+      "min_dim": 1.09,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_10",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_10",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_10",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.1
+      ],
+      "size_def": [
+       50,
+       40,
+       1.1
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.1
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.1
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.55
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.55
+      ],
+      "volume": 510.0,
+      "area": null,
+      "min_dim": 1.1,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_11",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_11",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_11",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.11
+      ],
+      "size_def": [
+       50,
+       40,
+       1.11
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.11
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.11
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.555
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.555
+      ],
+      "volume": 511.0,
+      "area": null,
+      "min_dim": 1.11,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_12",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_12",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_12",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.12
+      ],
+      "size_def": [
+       50,
+       40,
+       1.12
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.12
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.12
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.56
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.56
+      ],
+      "volume": 512.0,
+      "area": null,
+      "min_dim": 1.12,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_13",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_13",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_13",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.13
+      ],
+      "size_def": [
+       50,
+       40,
+       1.13
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.13
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.13
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.565
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.565
+      ],
+      "volume": 513.0,
+      "area": null,
+      "min_dim": 1.13,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_14",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_14",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_14",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.1400000000000001
+      ],
+      "size_def": [
+       50,
+       40,
+       1.1400000000000001
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.1400000000000001
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.1400000000000001
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.5700000000000001
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.5700000000000001
+      ],
+      "volume": 514.0,
+      "area": null,
+      "min_dim": 1.1400000000000001,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_15",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_15",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_15",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.15
+      ],
+      "size_def": [
+       50,
+       40,
+       1.15
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.15
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.15
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.575
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.575
+      ],
+      "volume": 515.0,
+      "area": null,
+      "min_dim": 1.15,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_16",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_16",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_16",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.16
+      ],
+      "size_def": [
+       50,
+       40,
+       1.16
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.16
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.16
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.58
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.58
+      ],
+      "volume": 516.0,
+      "area": null,
+      "min_dim": 1.16,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_17",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_17",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_17",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.17
+      ],
+      "size_def": [
+       50,
+       40,
+       1.17
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.17
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.17
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.585
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.585
+      ],
+      "volume": 517.0,
+      "area": null,
+      "min_dim": 1.17,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_18",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_18",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_18",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.18
+      ],
+      "size_def": [
+       50,
+       40,
+       1.18
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.18
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.18
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.59
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.59
+      ],
+      "volume": 518.0,
+      "area": null,
+      "min_dim": 1.18,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_19",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_19",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_19",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.19
+      ],
+      "size_def": [
+       50,
+       40,
+       1.19
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.19
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.19
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.595
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.595
+      ],
+      "volume": 519.0,
+      "area": null,
+      "min_dim": 1.19,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_20",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_20",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_20",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.2
+      ],
+      "size_def": [
+       50,
+       40,
+       1.2
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.2
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.2
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.6
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.6
+      ],
+      "volume": 520.0,
+      "area": null,
+      "min_dim": 1.2,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_21",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_21",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_21",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.21
+      ],
+      "size_def": [
+       50,
+       40,
+       1.21
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.21
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.21
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.605
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.605
+      ],
+      "volume": 521.0,
+      "area": null,
+      "min_dim": 1.21,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_22",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_22",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_22",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.22
+      ],
+      "size_def": [
+       50,
+       40,
+       1.22
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.22
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.22
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.61
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.61
+      ],
+      "volume": 522.0,
+      "area": null,
+      "min_dim": 1.22,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_23",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_23",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_23",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.23
+      ],
+      "size_def": [
+       50,
+       40,
+       1.23
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.23
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.23
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.615
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.615
+      ],
+      "volume": 523.0,
+      "area": null,
+      "min_dim": 1.23,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_24",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_24",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_24",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.24
+      ],
+      "size_def": [
+       50,
+       40,
+       1.24
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.24
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.24
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.62
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.62
+      ],
+      "volume": 524.0,
+      "area": null,
+      "min_dim": 1.24,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_25",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_25",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_25",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.25
+      ],
+      "size_def": [
+       50,
+       40,
+       1.25
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.25
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.25
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.625
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.625
+      ],
+      "volume": 525.0,
+      "area": null,
+      "min_dim": 1.25,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_26",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_26",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_26",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.26
+      ],
+      "size_def": [
+       50,
+       40,
+       1.26
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.26
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.26
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.63
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.63
+      ],
+      "volume": 526.0,
+      "area": null,
+      "min_dim": 1.26,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_27",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_27",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_27",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.27
+      ],
+      "size_def": [
+       50,
+       40,
+       1.27
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.27
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.27
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.635
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.635
+      ],
+      "volume": 527.0,
+      "area": null,
+      "min_dim": 1.27,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_28",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_28",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_28",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.28
+      ],
+      "size_def": [
+       50,
+       40,
+       1.28
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.28
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.28
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.64
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.64
+      ],
+      "volume": 528.0,
+      "area": null,
+      "min_dim": 1.28,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_29",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_29",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_29",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.29
+      ],
+      "size_def": [
+       50,
+       40,
+       1.29
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.29
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.29
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.645
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.645
+      ],
+      "volume": 529.0,
+      "area": null,
+      "min_dim": 1.29,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_30",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PART_30",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_30",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.3
+      ],
+      "size_def": [
+       50,
+       40,
+       1.3
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.3
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.3
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.65
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.65
+      ],
+      "volume": 530.0,
+      "area": null,
+      "min_dim": 1.3,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/SOLID_A",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "SOLID_A",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/SOLID_A",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [
+      "auto_named"
+     ],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       2.0
+      ],
+      "size_def": [
+       50,
+       40,
+       2.0
+      ],
+      "size_sorted": [
+       50,
+       40,
+       2.0
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       2.0
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       1.0
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       1.0
+      ],
+      "volume": 900.0,
+      "area": null,
+      "min_dim": 2.0,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/SOLID_B",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "SOLID_B",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/SOLID_B",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [
+      "auto_named"
+     ],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       2.01
+      ],
+      "size_def": [
+       50,
+       40,
+       2.01
+      ],
+      "size_sorted": [
+       50,
+       40,
+       2.01
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       2.01
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       1.005
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       1.005
+      ],
+      "volume": 901.0,
+      "area": null,
+      "min_dim": 2.01,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/SOLID_C",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "SOLID_C",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/SOLID_C",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [
+      "auto_named"
+     ],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       2.02
+      ],
+      "size_def": [
+       50,
+       40,
+       2.02
+      ],
+      "size_sorted": [
+       50,
+       40,
+       2.02
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       2.02
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       1.01
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       1.01
+      ],
+      "volume": 902.0,
+      "area": null,
+      "min_dim": 2.02,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/SOLID_D",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "SOLID_D",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/SOLID_D",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [
+      "auto_named"
+     ],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       2.03
+      ],
+      "size_def": [
+       50,
+       40,
+       2.03
+      ],
+      "size_sorted": [
+       50,
+       40,
+       2.03
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       2.03
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       1.015
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       1.015
+      ],
+      "volume": 903.0,
+      "area": null,
+      "min_dim": 2.03,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/SOLID_E",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "SOLID_E",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/SOLID_E",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [
+      "auto_named"
+     ],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       2.04
+      ],
+      "size_def": [
+       50,
+       40,
+       2.04
+      ],
+      "size_sorted": [
+       50,
+       40,
+       2.04
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       2.04
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       1.02
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       1.02
+      ],
+      "volume": 904.0,
+      "area": null,
+      "min_dim": 2.04,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/SOLID_F",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "SOLID_F",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/SOLID_F",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [
+      "auto_named"
+     ],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       2.05
+      ],
+      "size_def": [
+       50,
+       40,
+       2.05
+      ],
+      "size_sorted": [
+       50,
+       40,
+       2.05
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       2.05
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       1.025
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       1.025
+      ],
+      "volume": 905.0,
+      "area": null,
+      "min_dim": 2.05,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/SOLID_G",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "SOLID_G",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/SOLID_G",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [
+      "auto_named"
+     ],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       2.06
+      ],
+      "size_def": [
+       50,
+       40,
+       2.06
+      ],
+      "size_sorted": [
+       50,
+       40,
+       2.06
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       2.06
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       1.03
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       1.03
+      ],
+      "volume": 906.0,
+      "area": null,
+      "min_dim": 2.06,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/SOLID_H",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "SOLID_H",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/SOLID_H",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [
+      "auto_named"
+     ],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       2.07
+      ],
+      "size_def": [
+       50,
+       40,
+       2.07
+      ],
+      "size_sorted": [
+       50,
+       40,
+       2.07
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       2.07
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       1.035
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       1.035
+      ],
+      "volume": 907.0,
+      "area": null,
+      "min_dim": 2.07,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/SOLID_I",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "SOLID_I",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/SOLID_I",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [
+      "auto_named"
+     ],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       2.08
+      ],
+      "size_def": [
+       50,
+       40,
+       2.08
+      ],
+      "size_sorted": [
+       50,
+       40,
+       2.08
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       2.08
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       1.04
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       1.04
+      ],
+      "volume": 908.0,
+      "area": null,
+      "min_dim": 2.08,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    }
+   ],
+   "edges": [],
+   "warnings": [],
+   "degraded": [],
+   "call_ids": [
+    "cafe0000-001"
+   ]
+  }
+ ],
+ "iface_ledger": [],
+ "expect": {
+  "gates": {
+   "G1": false,
+   "G2": true,
+   "G3": true,
+   "G4": true,
+   "G5": true,
+   "G6": true
+  },
+  "blocked": false,
+  "partial": false,
+  "n_leaf": 40,
+  "G1": {
+   "count": 9,
+   "threshold": 5.0,
+   "effect": "mark"
+  }
+ },
+ "subcase": {
+  "note": "리프 10·auto_named 4 → 4 ≤ max(5, 1.0) 라 G1 pass",
+  "adapter_results": [
+   {
+    "source": {
+     "kind": "mcad",
+     "app_key": "heax-step_forge",
+     "adapter_version": "1.0",
+     "channel": "rest+mcp",
+     "ref": {
+      "stepforge_project_id": "001a02ba21cd51064a68c35",
+      "project_name": "sif-e2e",
+      "unit_system": "mm",
+      "detect_job_id": "01JDET",
+      "step_files": [
+       {
+        "relpath": "a_stack.step",
+        "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "header_unit": "millimetre",
+        "schema_ap": "AUTOMOTIVE_DESIGN"
+       }
+      ]
+     },
+     "source_hash": "sha-mcad",
+     "tol_config_hash": "tol-a",
+     "tol_known_keys": [
+      "tied_gap",
+      "clearance_gap",
+      "tied_area",
+      "tied_width"
+     ],
+     "scope": null,
+     "stats": {
+      "files": 1,
+      "leaf_instances": 3,
+      "assemblies": 1,
+      "interfaces": 2
+     },
+     "degraded": []
+    },
+    "nodes": [
+     {
+      "canon_key": "mcad:/a_stack.step",
+      "domain": "mcad",
+      "kind": "file",
+      "label": "a_stack.step",
+      "local_key": "/sif-e2e/a_stack.step",
+      "status_flags": [],
+      "attrs": {
+       "depth": 1,
+       "relpath": "a_stack.step"
+      },
+      "provenance": {
+       "adapter": "mcad",
+       "app_key": "heax-step_forge",
+       "tool": "REST /tree",
+       "call_id": "cafe0000-001",
+       "captured_at": 1756600000
+      }
+     },
+     {
+      "canon_key": "mcad:/a_stack.step/STACK_ASM",
+      "domain": "mcad",
+      "kind": "assembly",
+      "label": "STACK_ASM",
+      "local_key": "/sif-e2e/a_stack.step/STACK_ASM",
+      "status_flags": [],
+      "attrs": {
+       "depth": 2,
+       "relpath": "a_stack.step"
+      },
+      "provenance": {
+       "adapter": "mcad",
+       "app_key": "heax-step_forge",
+       "tool": "REST /tree",
+       "call_id": "cafe0000-001",
+       "captured_at": 1756600000
+      },
+      "parent_canon_key": "mcad:/a_stack.step"
+     },
+     {
+      "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_00",
+      "domain": "mcad",
+      "kind": "part",
+      "label": "PART_00",
+      "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_00",
+      "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+      "status_flags": [],
+      "attrs": {
+       "shape_kind": "solid",
+       "bbox_def": [
+        0,
+        0,
+        0,
+        50,
+        40,
+        1.0
+       ],
+       "size_def": [
+        50,
+        40,
+        1.0
+       ],
+       "size_sorted": [
+        50,
+        40,
+        1.0
+       ],
+       "bbox_world": [
+        0,
+        0,
+        0,
+        50,
+        40,
+        1.0
+       ],
+       "centroid_def": [
+        25.0,
+        20.0,
+        0.5
+       ],
+       "centroid_world": [
+        25.0,
+        20.0,
+        0.5
+       ],
+       "volume": 500.0,
+       "area": null,
+       "min_dim": 1.0,
+       "material": "AL6061",
+       "density": null,
+       "density_unit": null,
+       "color": null,
+       "instance_count": 1,
+       "has_geometry": true,
+       "depth": 3,
+       "solid_count": 1,
+       "construction_only": false,
+       "step_file": "a_stack.step"
+      },
+      "provenance": {
+       "adapter": "mcad",
+       "app_key": "heax-step_forge",
+       "tool": "REST /tree",
+       "call_id": "cafe0000-001",
+       "node_id_at_capture": "n1",
+       "captured_at": 1756600000
+      }
+     },
+     {
+      "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_01",
+      "domain": "mcad",
+      "kind": "part",
+      "label": "PART_01",
+      "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_01",
+      "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+      "status_flags": [],
+      "attrs": {
+       "shape_kind": "solid",
+       "bbox_def": [
+        0,
+        0,
+        0,
+        50,
+        40,
+        1.01
+       ],
+       "size_def": [
+        50,
+        40,
+        1.01
+       ],
+       "size_sorted": [
+        50,
+        40,
+        1.01
+       ],
+       "bbox_world": [
+        0,
+        0,
+        0,
+        50,
+        40,
+        1.01
+       ],
+       "centroid_def": [
+        25.0,
+        20.0,
+        0.505
+       ],
+       "centroid_world": [
+        25.0,
+        20.0,
+        0.505
+       ],
+       "volume": 501.0,
+       "area": null,
+       "min_dim": 1.01,
+       "material": "AL6061",
+       "density": null,
+       "density_unit": null,
+       "color": null,
+       "instance_count": 1,
+       "has_geometry": true,
+       "depth": 3,
+       "solid_count": 1,
+       "construction_only": false,
+       "step_file": "a_stack.step"
+      },
+      "provenance": {
+       "adapter": "mcad",
+       "app_key": "heax-step_forge",
+       "tool": "REST /tree",
+       "call_id": "cafe0000-001",
+       "node_id_at_capture": "n1",
+       "captured_at": 1756600000
+      }
+     },
+     {
+      "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_02",
+      "domain": "mcad",
+      "kind": "part",
+      "label": "PART_02",
+      "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_02",
+      "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+      "status_flags": [],
+      "attrs": {
+       "shape_kind": "solid",
+       "bbox_def": [
+        0,
+        0,
+        0,
+        50,
+        40,
+        1.02
+       ],
+       "size_def": [
+        50,
+        40,
+        1.02
+       ],
+       "size_sorted": [
+        50,
+        40,
+        1.02
+       ],
+       "bbox_world": [
+        0,
+        0,
+        0,
+        50,
+        40,
+        1.02
+       ],
+       "centroid_def": [
+        25.0,
+        20.0,
+        0.51
+       ],
+       "centroid_world": [
+        25.0,
+        20.0,
+        0.51
+       ],
+       "volume": 502.0,
+       "area": null,
+       "min_dim": 1.02,
+       "material": "AL6061",
+       "density": null,
+       "density_unit": null,
+       "color": null,
+       "instance_count": 1,
+       "has_geometry": true,
+       "depth": 3,
+       "solid_count": 1,
+       "construction_only": false,
+       "step_file": "a_stack.step"
+      },
+      "provenance": {
+       "adapter": "mcad",
+       "app_key": "heax-step_forge",
+       "tool": "REST /tree",
+       "call_id": "cafe0000-001",
+       "node_id_at_capture": "n1",
+       "captured_at": 1756600000
+      }
+     },
+     {
+      "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_03",
+      "domain": "mcad",
+      "kind": "part",
+      "label": "PART_03",
+      "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_03",
+      "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+      "status_flags": [],
+      "attrs": {
+       "shape_kind": "solid",
+       "bbox_def": [
+        0,
+        0,
+        0,
+        50,
+        40,
+        1.03
+       ],
+       "size_def": [
+        50,
+        40,
+        1.03
+       ],
+       "size_sorted": [
+        50,
+        40,
+        1.03
+       ],
+       "bbox_world": [
+        0,
+        0,
+        0,
+        50,
+        40,
+        1.03
+       ],
+       "centroid_def": [
+        25.0,
+        20.0,
+        0.515
+       ],
+       "centroid_world": [
+        25.0,
+        20.0,
+        0.515
+       ],
+       "volume": 503.0,
+       "area": null,
+       "min_dim": 1.03,
+       "material": "AL6061",
+       "density": null,
+       "density_unit": null,
+       "color": null,
+       "instance_count": 1,
+       "has_geometry": true,
+       "depth": 3,
+       "solid_count": 1,
+       "construction_only": false,
+       "step_file": "a_stack.step"
+      },
+      "provenance": {
+       "adapter": "mcad",
+       "app_key": "heax-step_forge",
+       "tool": "REST /tree",
+       "call_id": "cafe0000-001",
+       "node_id_at_capture": "n1",
+       "captured_at": 1756600000
+      }
+     },
+     {
+      "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_04",
+      "domain": "mcad",
+      "kind": "part",
+      "label": "PART_04",
+      "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_04",
+      "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+      "status_flags": [],
+      "attrs": {
+       "shape_kind": "solid",
+       "bbox_def": [
+        0,
+        0,
+        0,
+        50,
+        40,
+        1.04
+       ],
+       "size_def": [
+        50,
+        40,
+        1.04
+       ],
+       "size_sorted": [
+        50,
+        40,
+        1.04
+       ],
+       "bbox_world": [
+        0,
+        0,
+        0,
+        50,
+        40,
+        1.04
+       ],
+       "centroid_def": [
+        25.0,
+        20.0,
+        0.52
+       ],
+       "centroid_world": [
+        25.0,
+        20.0,
+        0.52
+       ],
+       "volume": 504.0,
+       "area": null,
+       "min_dim": 1.04,
+       "material": "AL6061",
+       "density": null,
+       "density_unit": null,
+       "color": null,
+       "instance_count": 1,
+       "has_geometry": true,
+       "depth": 3,
+       "solid_count": 1,
+       "construction_only": false,
+       "step_file": "a_stack.step"
+      },
+      "provenance": {
+       "adapter": "mcad",
+       "app_key": "heax-step_forge",
+       "tool": "REST /tree",
+       "call_id": "cafe0000-001",
+       "node_id_at_capture": "n1",
+       "captured_at": 1756600000
+      }
+     },
+     {
+      "canon_key": "mcad:/a_stack.step/STACK_ASM/PART_05",
+      "domain": "mcad",
+      "kind": "part",
+      "label": "PART_05",
+      "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PART_05",
+      "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+      "status_flags": [],
+      "attrs": {
+       "shape_kind": "solid",
+       "bbox_def": [
+        0,
+        0,
+        0,
+        50,
+        40,
+        1.05
+       ],
+       "size_def": [
+        50,
+        40,
+        1.05
+       ],
+       "size_sorted": [
+        50,
+        40,
+        1.05
+       ],
+       "bbox_world": [
+        0,
+        0,
+        0,
+        50,
+        40,
+        1.05
+       ],
+       "centroid_def": [
+        25.0,
+        20.0,
+        0.525
+       ],
+       "centroid_world": [
+        25.0,
+        20.0,
+        0.525
+       ],
+       "volume": 505.0,
+       "area": null,
+       "min_dim": 1.05,
+       "material": "AL6061",
+       "density": null,
+       "density_unit": null,
+       "color": null,
+       "instance_count": 1,
+       "has_geometry": true,
+       "depth": 3,
+       "solid_count": 1,
+       "construction_only": false,
+       "step_file": "a_stack.step"
+      },
+      "provenance": {
+       "adapter": "mcad",
+       "app_key": "heax-step_forge",
+       "tool": "REST /tree",
+       "call_id": "cafe0000-001",
+       "node_id_at_capture": "n1",
+       "captured_at": 1756600000
+      }
+     },
+     {
+      "canon_key": "mcad:/a_stack.step/STACK_ASM/SOLID_A",
+      "domain": "mcad",
+      "kind": "part",
+      "label": "SOLID_A",
+      "local_key": "/sif-e2e/a_stack.step/STACK_ASM/SOLID_A",
+      "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+      "status_flags": [
+       "auto_named"
+      ],
+      "attrs": {
+       "shape_kind": "solid",
+       "bbox_def": [
+        0,
+        0,
+        0,
+        50,
+        40,
+        2.0
+       ],
+       "size_def": [
+        50,
+        40,
+        2.0
+       ],
+       "size_sorted": [
+        50,
+        40,
+        2.0
+       ],
+       "bbox_world": [
+        0,
+        0,
+        0,
+        50,
+        40,
+        2.0
+       ],
+       "centroid_def": [
+        25.0,
+        20.0,
+        1.0
+       ],
+       "centroid_world": [
+        25.0,
+        20.0,
+        1.0
+       ],
+       "volume": 900.0,
+       "area": null,
+       "min_dim": 2.0,
+       "material": "AL6061",
+       "density": null,
+       "density_unit": null,
+       "color": null,
+       "instance_count": 1,
+       "has_geometry": true,
+       "depth": 3,
+       "solid_count": 1,
+       "construction_only": false,
+       "step_file": "a_stack.step"
+      },
+      "provenance": {
+       "adapter": "mcad",
+       "app_key": "heax-step_forge",
+       "tool": "REST /tree",
+       "call_id": "cafe0000-001",
+       "node_id_at_capture": "n1",
+       "captured_at": 1756600000
+      }
+     },
+     {
+      "canon_key": "mcad:/a_stack.step/STACK_ASM/SOLID_B",
+      "domain": "mcad",
+      "kind": "part",
+      "label": "SOLID_B",
+      "local_key": "/sif-e2e/a_stack.step/STACK_ASM/SOLID_B",
+      "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+      "status_flags": [
+       "auto_named"
+      ],
+      "attrs": {
+       "shape_kind": "solid",
+       "bbox_def": [
+        0,
+        0,
+        0,
+        50,
+        40,
+        2.01
+       ],
+       "size_def": [
+        50,
+        40,
+        2.01
+       ],
+       "size_sorted": [
+        50,
+        40,
+        2.01
+       ],
+       "bbox_world": [
+        0,
+        0,
+        0,
+        50,
+        40,
+        2.01
+       ],
+       "centroid_def": [
+        25.0,
+        20.0,
+        1.005
+       ],
+       "centroid_world": [
+        25.0,
+        20.0,
+        1.005
+       ],
+       "volume": 901.0,
+       "area": null,
+       "min_dim": 2.01,
+       "material": "AL6061",
+       "density": null,
+       "density_unit": null,
+       "color": null,
+       "instance_count": 1,
+       "has_geometry": true,
+       "depth": 3,
+       "solid_count": 1,
+       "construction_only": false,
+       "step_file": "a_stack.step"
+      },
+      "provenance": {
+       "adapter": "mcad",
+       "app_key": "heax-step_forge",
+       "tool": "REST /tree",
+       "call_id": "cafe0000-001",
+       "node_id_at_capture": "n1",
+       "captured_at": 1756600000
+      }
+     },
+     {
+      "canon_key": "mcad:/a_stack.step/STACK_ASM/SOLID_C",
+      "domain": "mcad",
+      "kind": "part",
+      "label": "SOLID_C",
+      "local_key": "/sif-e2e/a_stack.step/STACK_ASM/SOLID_C",
+      "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+      "status_flags": [
+       "auto_named"
+      ],
+      "attrs": {
+       "shape_kind": "solid",
+       "bbox_def": [
+        0,
+        0,
+        0,
+        50,
+        40,
+        2.02
+       ],
+       "size_def": [
+        50,
+        40,
+        2.02
+       ],
+       "size_sorted": [
+        50,
+        40,
+        2.02
+       ],
+       "bbox_world": [
+        0,
+        0,
+        0,
+        50,
+        40,
+        2.02
+       ],
+       "centroid_def": [
+        25.0,
+        20.0,
+        1.01
+       ],
+       "centroid_world": [
+        25.0,
+        20.0,
+        1.01
+       ],
+       "volume": 902.0,
+       "area": null,
+       "min_dim": 2.02,
+       "material": "AL6061",
+       "density": null,
+       "density_unit": null,
+       "color": null,
+       "instance_count": 1,
+       "has_geometry": true,
+       "depth": 3,
+       "solid_count": 1,
+       "construction_only": false,
+       "step_file": "a_stack.step"
+      },
+      "provenance": {
+       "adapter": "mcad",
+       "app_key": "heax-step_forge",
+       "tool": "REST /tree",
+       "call_id": "cafe0000-001",
+       "node_id_at_capture": "n1",
+       "captured_at": 1756600000
+      }
+     },
+     {
+      "canon_key": "mcad:/a_stack.step/STACK_ASM/SOLID_D",
+      "domain": "mcad",
+      "kind": "part",
+      "label": "SOLID_D",
+      "local_key": "/sif-e2e/a_stack.step/STACK_ASM/SOLID_D",
+      "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+      "status_flags": [
+       "auto_named"
+      ],
+      "attrs": {
+       "shape_kind": "solid",
+       "bbox_def": [
+        0,
+        0,
+        0,
+        50,
+        40,
+        2.03
+       ],
+       "size_def": [
+        50,
+        40,
+        2.03
+       ],
+       "size_sorted": [
+        50,
+        40,
+        2.03
+       ],
+       "bbox_world": [
+        0,
+        0,
+        0,
+        50,
+        40,
+        2.03
+       ],
+       "centroid_def": [
+        25.0,
+        20.0,
+        1.015
+       ],
+       "centroid_world": [
+        25.0,
+        20.0,
+        1.015
+       ],
+       "volume": 903.0,
+       "area": null,
+       "min_dim": 2.03,
+       "material": "AL6061",
+       "density": null,
+       "density_unit": null,
+       "color": null,
+       "instance_count": 1,
+       "has_geometry": true,
+       "depth": 3,
+       "solid_count": 1,
+       "construction_only": false,
+       "step_file": "a_stack.step"
+      },
+      "provenance": {
+       "adapter": "mcad",
+       "app_key": "heax-step_forge",
+       "tool": "REST /tree",
+       "call_id": "cafe0000-001",
+       "node_id_at_capture": "n1",
+       "captured_at": 1756600000
+      }
+     }
+    ],
+    "edges": [],
+    "warnings": [],
+    "degraded": [],
+    "call_ids": [
+     "cafe0000-001"
+    ]
+   }
+  ],
+  "expect": {
+   "gates": {
+    "G1": true,
+    "G2": true,
+    "G3": true,
+    "G4": true,
+    "G5": true,
+    "G6": true
+   },
+   "blocked": false,
+   "partial": false,
+   "n_leaf": 10,
+   "G1": {
+    "count": 4,
+    "threshold": 5.0,
+    "effect": "none"
+   }
+  }
+ }
+}

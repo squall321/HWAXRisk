@@ -1,0 +1,284 @@
+{
+ "case": "gate_f3_unit",
+ "note": "tree.warnings unit_mismatch 1 → G6 fail·blocked=true",
+ "adapter_results": [
+  {
+   "source": {
+    "kind": "mcad",
+    "app_key": "heax-step_forge",
+    "adapter_version": "1.0",
+    "channel": "rest+mcp",
+    "ref": {
+     "stepforge_project_id": "001a02ba21cd51064a68c35",
+     "project_name": "sif-e2e",
+     "unit_system": "mm",
+     "detect_job_id": "01JDET",
+     "step_files": [
+      {
+       "relpath": "a_stack.step",
+       "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+       "header_unit": "millimetre",
+       "schema_ap": "AUTOMOTIVE_DESIGN"
+      }
+     ]
+    },
+    "source_hash": "sha-mcad",
+    "tol_config_hash": "tol-a",
+    "tol_known_keys": [
+     "tied_gap",
+     "clearance_gap",
+     "tied_area",
+     "tied_width"
+    ],
+    "scope": null,
+    "stats": {
+     "files": 1,
+     "leaf_instances": 3,
+     "assemblies": 1,
+     "interfaces": 2
+    },
+    "degraded": []
+   },
+   "nodes": [
+    {
+     "canon_key": "mcad:/a_stack.step",
+     "domain": "mcad",
+     "kind": "file",
+     "label": "a_stack.step",
+     "local_key": "/sif-e2e/a_stack.step",
+     "status_flags": [],
+     "attrs": {
+      "depth": 1,
+      "relpath": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "domain": "mcad",
+     "kind": "assembly",
+     "label": "STACK_ASM",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "depth": 2,
+      "relpath": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "captured_at": 1756600000
+     },
+     "parent_canon_key": "mcad:/a_stack.step"
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PLATE_1",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PLATE_1",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PLATE_1",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.2
+      ],
+      "size_def": [
+       50,
+       40,
+       1.2
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.2
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.2
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.6
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.6
+      ],
+      "volume": 3000.0,
+      "area": null,
+      "min_dim": 1.2,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PLATE_2",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PLATE_2",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PLATE_2",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.0
+      ],
+      "size_def": [
+       50,
+       40,
+       1.0
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.0
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.0
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.5
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.5
+      ],
+      "volume": 2500.0,
+      "area": null,
+      "min_dim": 1.0,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    }
+   ],
+   "edges": [
+    {
+     "kind": "tied",
+     "domain": "mcad",
+     "status": "confirmed",
+     "a": "mcad:/a_stack.step/STACK_ASM/PLATE_1",
+     "b": "mcad:/a_stack.step/STACK_ASM/PLATE_2",
+     "attrs": {
+      "min_gap": 0.0,
+      "contact_area_est": null,
+      "band_width": 0.05,
+      "normal_align": null,
+      "penetration_depth": null,
+      "penetration_depth_is_lower_bound": true,
+      "penetration_volume": null,
+      "cross_file": false,
+      "face_pairs_count": null,
+      "note": "소스 원문",
+      "tol_config_hash": "tol-a"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "tool": "list_interfaces",
+      "call_id": "cafe0000-004",
+      "detected_at": null,
+      "params_hash": "tol-a"
+     }
+    }
+   ],
+   "warnings": [
+    {
+     "severity": "WARNING",
+     "code": "unit_mismatch",
+     "message": "header_unit=inch 인 STEP 파일이 있다",
+     "ref": "a_stack.step"
+    }
+   ],
+   "degraded": [],
+   "call_ids": [
+    "cafe0000-001"
+   ]
+  }
+ ],
+ "iface_ledger": [],
+ "expect": {
+  "gates": {
+   "G1": true,
+   "G2": true,
+   "G3": true,
+   "G4": true,
+   "G5": true,
+   "G6": false
+  },
+  "blocked": true,
+  "partial": false,
+  "n_leaf": 2,
+  "G6": {
+   "count": 1,
+   "threshold": 0,
+   "effect": "block",
+   "blocking": true
+  }
+ }
+}

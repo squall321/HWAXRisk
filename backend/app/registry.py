@@ -1180,3 +1180,40 @@ def build_report(store: RiskStore, target_key: str) -> dict:
             "minutes": split_rich_text("\n".join(minutes)),
         },
     }
+
+
+# ---------------------------------------------------------------- 러너 접점(plan §6.7.2 10·12단계)
+
+
+def merge_panel(store: RiskStore, panel_id: str) -> dict:
+    """패널 1건이 끝난 직후의 등록부 병합 — 그 패널의 타깃을 다시 병합하고 신규 클러스터 수를 센다.
+
+    `merge()` 는 타깃 단위 멱등 재계산이므로 여기서는 병합 전후의 cluster_key 집합 차이만 더 센다
+    (`quality_json.new_clusters` 는 수확 체감 판정의 입력이다, plan §6.7.2 10단계).
+    """
+    panel = store.query_one("SELECT id, target_key FROM rr_panels WHERE id = ?", (panel_id,))
+    if panel is None:
+        raise AppError("E404", f"패널을 찾지 못했습니다: {panel_id}", 404)
+    target_key = panel["target_key"]
+    before = {
+        r["cluster_key"]
+        for r in store.query("SELECT cluster_key FROM rr_registry WHERE target_key = ?", (target_key,))
+    }
+    out = merge(store, target_key)
+    after = {
+        r["cluster_key"]
+        for r in store.query("SELECT cluster_key FROM rr_registry WHERE target_key = ?", (target_key,))
+    }
+    return {**out, "panel_id": panel_id, "new_clusters": len(after - before)}
+
+
+def build_consolidated_report(store: RiskStore, target_key: str, level: str | None = None) -> dict:
+    """완결 레벨이 오른 직후의 통합 보고서 새 버전(plan §6.9). 조립은 `build_report` 가 하고 여기서는 판을 기록한다.
+
+    RA 로 보내는 것은 §6.7.2 11단계(외부 반영)의 몫이라 여기서는 앱 DB 만 만진다 — 조립 결과를 돌려주고
+    `rr_targets.level` 은 `close_level()` 이 이미 올려 두었다.
+    """
+    report = build_report(store, target_key)
+    if level:
+        report["level"] = level
+    return report

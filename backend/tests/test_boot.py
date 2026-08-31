@@ -98,13 +98,14 @@ def test_meta_taxonomy(client):
 
 
 def test_meta_adapters_p0_fixed_list(client):
+    """plan §8.2.3 응답 모양 — `{apps:[{app_key, kind, tools_ok, choices[]}]}`(발견 로직은 P1)."""
     r = client.get("/api/meta/adapters")
     assert r.status_code == 200
-    assert r.json() == [
-        {"kind": "mcad", "app": "heax-step_forge", "status": "planned"},
-        {"kind": "dyna", "app": "heax-kooremapper_mcp", "status": "planned"},
-        {"kind": "ecad", "app": None, "status": "contract_only"},
-    ]
+    assert r.json() == {"apps": [
+        {"kind": "mcad", "app_key": "heax-step_forge", "status": "planned", "tools_ok": False, "choices": []},
+        {"kind": "dyna", "app_key": "heax-kooremapper_mcp", "status": "planned", "tools_ok": False, "choices": []},
+        {"kind": "ecad", "app_key": None, "status": "contract_only", "tools_ok": False, "choices": []},
+    ]}
 
 
 def test_meta_vocab_lists_runtime_assets(client):

@@ -5,7 +5,10 @@ import shutil
 import sqlite3
 import threading
 import time
+from collections.abc import Iterable, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any, Iterator
 
 from app import config
 from app.errors import AppError
@@ -391,9 +394,11 @@ class RiskStore:
 
     def __init__(self, db_path: Path | str) -> None:
         self.db_path = Path(db_path)
-        self._lock = threading.Lock()
+        # RLock 이다 — tx() 안에서 execute·query 를 다시 부르는 같은 스레드가 자기 락에 막히면 안 된다.
+        self._lock = threading.RLock()
         self._conn: sqlite3.Connection | None = None
         self._existed = False
+        self._tx_depth = 0
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -481,11 +486,69 @@ class RiskStore:
             ).fetchall()
         return [r["name"] for r in rows]
 
+    # ------------------------------------------------------------ 원시 도구(모듈들이 자기 SQL 을 이 위에서 돌린다)
+    # 각 모듈은 sqlite3.connect 를 따로 열지 않고 여기 넷만 쓴다. 'select *' 대신 컬럼을 명시해 뒤에 붙는 열에 깨지지 않게 한다.
+    @contextmanager
+    def tx(self) -> Iterator[sqlite3.Connection]:
+        """BEGIN IMMEDIATE 트랜잭션. 정상 종료면 commit, 예외면 rollback 하고 예외를 그대로 올린다.
+
+        재진입 안전 — 이미 열린 트랜잭션 안에서 다시 부르면 새 BEGIN 없이 같은 트랜잭션에 합류하고,
+        가장 바깥 블록이 끝날 때 한 번만 commit 한다. 안쪽에서 난 예외는 바깥까지 전파되므로 전체가 rollback 된다.
+        """
+        with self._lock:
+            if self._tx_depth > 0:
+                self._tx_depth += 1
+                try:
+                    yield self.conn
+                finally:
+                    self._tx_depth -= 1
+                return
+            conn = self.conn
+            conn.execute("BEGIN IMMEDIATE")
+            self._tx_depth = 1
+            try:
+                yield conn
+            except BaseException:
+                conn.rollback()
+                raise
+            else:
+                conn.commit()
+            finally:
+                self._tx_depth = 0
+
+    def query(self, sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> list[sqlite3.Row]:
+        """SELECT 결과 전부(sqlite3.Row 리스트). row['col'] 로 읽고 dict(row) 로 바꿀 수 있다."""
+        with self._lock:
+            return self.conn.execute(sql, params).fetchall()
+
+    def query_one(self, sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> sqlite3.Row | None:
+        """첫 행 또는 None."""
+        with self._lock:
+            return self.conn.execute(sql, params).fetchone()
+
+    def execute(self, sql: str, params: Sequence[Any] | Mapping[str, Any] = ()) -> int:
+        """문장 하나를 돌리고 rowcount 를 돌려준다. tx() 밖이면 바로 commit, 안이면 그 트랜잭션에 맡긴다."""
+        with self._lock:
+            cur = self.conn.execute(sql, params)
+            if self._tx_depth == 0:
+                self.conn.commit()
+            return cur.rowcount
+
+    def executemany(self, sql: str, seq_of_params: Iterable[Sequence[Any] | Mapping[str, Any]]) -> int:
+        """같은 문장을 여러 파라미터로 돌리고 rowcount 를 돌려준다. commit 규칙은 execute 와 같다."""
+        with self._lock:
+            cur = self.conn.executemany(sql, seq_of_params)
+            if self._tx_depth == 0:
+                self.conn.commit()
+            return cur.rowcount
+
     # ------------------------------------------------------------ 살림 표 _user_credentials(러너 자격 (b), plan §8.2.7)
     def get_credential(self, owner_sub: str) -> dict | None:
         """owner_sub 의 행(dict) 또는 None. portal_pat 값도 포함되므로 응답에 그대로 싣지 않는다."""
         with self._lock:
-            row = self.conn.execute("SELECT * FROM _user_credentials WHERE owner_sub = ?", (owner_sub,)).fetchone()
+            row = self.conn.execute(
+                "SELECT owner_sub, portal_pat, pat_sub, pat_email, pat_groups_json, pat_exp, registered_at"
+                " FROM _user_credentials WHERE owner_sub = ?", (owner_sub,)).fetchone()
         return dict(row) if row is not None else None
 
     def upsert_credential(self, owner_sub: str, portal_pat: str, pat_sub: str | None, pat_email: str | None,

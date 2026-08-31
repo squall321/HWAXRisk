@@ -1,0 +1,504 @@
+{
+ "case": "gate_f5_partial",
+ "note": "scope 지정·좌표계 경고 1·cross_file 엣지 1 → G4·G5 fail·partial",
+ "adapter_results": [
+  {
+   "source": {
+    "kind": "mcad",
+    "app_key": "heax-step_forge",
+    "adapter_version": "1.0",
+    "channel": "rest+mcp",
+    "ref": {
+     "stepforge_project_id": "001a02ba21cd51064a68c35",
+     "project_name": "sif-e2e",
+     "unit_system": "mm",
+     "detect_job_id": "01JDET",
+     "step_files": [
+      {
+       "relpath": "a_stack.step",
+       "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+       "header_unit": "millimetre",
+       "schema_ap": "AUTOMOTIVE_DESIGN"
+      },
+      {
+       "relpath": "b_cover.step",
+       "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+       "header_unit": "millimetre",
+       "schema_ap": "AUTOMOTIVE_DESIGN"
+      }
+     ]
+    },
+    "source_hash": "sha-mcad",
+    "tol_config_hash": "tol-a",
+    "tol_known_keys": [
+     "tied_gap",
+     "clearance_gap",
+     "tied_area",
+     "tied_width"
+    ],
+    "scope": {
+     "match": [
+      "PLATE*"
+     ]
+    },
+    "stats": {
+     "files": 2,
+     "leaf_instances": 3,
+     "assemblies": 1,
+     "interfaces": 2
+    },
+    "degraded": []
+   },
+   "nodes": [
+    {
+     "canon_key": "mcad:/a_stack.step",
+     "domain": "mcad",
+     "kind": "file",
+     "label": "a_stack.step",
+     "local_key": "/sif-e2e/a_stack.step",
+     "status_flags": [],
+     "attrs": {
+      "depth": 1,
+      "relpath": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "domain": "mcad",
+     "kind": "assembly",
+     "label": "STACK_ASM",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "depth": 2,
+      "relpath": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "captured_at": 1756600000
+     },
+     "parent_canon_key": "mcad:/a_stack.step"
+    },
+    {
+     "canon_key": "mcad:/b_cover.step",
+     "domain": "mcad",
+     "kind": "file",
+     "label": "b_cover.step",
+     "local_key": "/sif-e2e/b_cover.step",
+     "status_flags": [],
+     "attrs": {
+      "depth": 1,
+      "relpath": "b_cover.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/b_cover.step/COVER_ASM",
+     "domain": "mcad",
+     "kind": "assembly",
+     "label": "COVER_ASM",
+     "local_key": "/sif-e2e/b_cover.step/COVER_ASM",
+     "status_flags": [],
+     "attrs": {
+      "depth": 2,
+      "relpath": "b_cover.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "captured_at": 1756600000
+     },
+     "parent_canon_key": "mcad:/b_cover.step"
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PLATE_1",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PLATE_1",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PLATE_1",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.2
+      ],
+      "size_def": [
+       50,
+       40,
+       1.2
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.2
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.2
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.6
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.6
+      ],
+      "volume": 3000.0,
+      "area": null,
+      "min_dim": 1.2,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/a_stack.step/STACK_ASM/PLATE_2",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "PLATE_2",
+     "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PLATE_2",
+     "parent_canon_key": "mcad:/a_stack.step/STACK_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.0
+      ],
+      "size_def": [
+       50,
+       40,
+       1.0
+      ],
+      "size_sorted": [
+       50,
+       40,
+       1.0
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       1.0
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.5
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.5
+      ],
+      "volume": 2500.0,
+      "area": null,
+      "min_dim": 1.0,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "a_stack.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/b_cover.step/COVER_ASM/COVER_TOP",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "COVER_TOP",
+     "local_key": "/sif-e2e/b_cover.step/COVER_ASM/COVER_TOP",
+     "parent_canon_key": "mcad:/b_cover.step/COVER_ASM",
+     "status_flags": [],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       0.6
+      ],
+      "size_def": [
+       50,
+       40,
+       0.6
+      ],
+      "size_sorted": [
+       50,
+       40,
+       0.6
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       0.6
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.3
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.3
+      ],
+      "volume": 900.0,
+      "area": null,
+      "min_dim": 0.6,
+      "material": "AL6061",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "b_cover.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    },
+    {
+     "canon_key": "mcad:/b_cover.step/COVER_ASM/HINGE_R",
+     "domain": "mcad",
+     "kind": "part",
+     "label": "HINGE_R",
+     "local_key": "/sif-e2e/b_cover.step/COVER_ASM/HINGE_R",
+     "parent_canon_key": "mcad:/b_cover.step/COVER_ASM",
+     "status_flags": [
+      "scope_out"
+     ],
+     "attrs": {
+      "shape_kind": "solid",
+      "bbox_def": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       0.5
+      ],
+      "size_def": [
+       50,
+       40,
+       0.5
+      ],
+      "size_sorted": [
+       50,
+       40,
+       0.5
+      ],
+      "bbox_world": [
+       0,
+       0,
+       0,
+       50,
+       40,
+       0.5
+      ],
+      "centroid_def": [
+       25.0,
+       20.0,
+       0.25
+      ],
+      "centroid_world": [
+       25.0,
+       20.0,
+       0.25
+      ],
+      "volume": 80.0,
+      "area": null,
+      "min_dim": 0.5,
+      "material": "SUS304",
+      "density": null,
+      "density_unit": null,
+      "color": null,
+      "instance_count": 1,
+      "has_geometry": true,
+      "depth": 3,
+      "solid_count": 1,
+      "construction_only": false,
+      "step_file": "b_cover.step"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "app_key": "heax-step_forge",
+      "tool": "REST /tree",
+      "call_id": "cafe0000-001",
+      "node_id_at_capture": "n1",
+      "captured_at": 1756600000
+     }
+    }
+   ],
+   "edges": [
+    {
+     "kind": "tied",
+     "domain": "mcad",
+     "status": "confirmed",
+     "a": "mcad:/a_stack.step/STACK_ASM/PLATE_1",
+     "b": "mcad:/a_stack.step/STACK_ASM/PLATE_2",
+     "attrs": {
+      "min_gap": 0.0,
+      "contact_area_est": 2000.0,
+      "band_width": 0.05,
+      "normal_align": null,
+      "penetration_depth": null,
+      "penetration_depth_is_lower_bound": true,
+      "penetration_volume": null,
+      "cross_file": false,
+      "face_pairs_count": null,
+      "note": "소스 원문",
+      "tol_config_hash": "tol-a"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "tool": "list_interfaces",
+      "call_id": "cafe0000-004",
+      "detected_at": null,
+      "params_hash": "tol-a"
+     }
+    },
+    {
+     "kind": "clearance",
+     "domain": "mcad",
+     "status": "confirmed",
+     "a": "mcad:/a_stack.step/STACK_ASM/PLATE_1",
+     "b": "mcad:/b_cover.step/COVER_ASM/COVER_TOP",
+     "attrs": {
+      "min_gap": 0.12,
+      "contact_area_est": null,
+      "band_width": 0.05,
+      "normal_align": null,
+      "penetration_depth": null,
+      "penetration_depth_is_lower_bound": true,
+      "penetration_volume": null,
+      "cross_file": true,
+      "face_pairs_count": null,
+      "note": "소스 원문",
+      "tol_config_hash": "tol-a"
+     },
+     "provenance": {
+      "adapter": "mcad",
+      "tool": "list_interfaces",
+      "call_id": "cafe0000-004",
+      "detected_at": null,
+      "params_hash": "tol-a"
+     }
+    }
+   ],
+   "warnings": [
+    {
+     "severity": "WARNING",
+     "code": "suspect_coordinate_systems",
+     "message": "파일 간 좌표계가 겹친다",
+     "ref": "b_cover.step"
+    }
+   ],
+   "degraded": [],
+   "call_ids": [
+    "cafe0000-001"
+   ]
+  }
+ ],
+ "iface_ledger": [],
+ "expect": {
+  "gates": {
+   "G1": true,
+   "G2": true,
+   "G3": true,
+   "G4": false,
+   "G5": false,
+   "G6": true
+  },
+  "blocked": false,
+  "partial": true,
+  "n_leaf": 4,
+  "G4": {
+   "count": 1,
+   "threshold": 0,
+   "effect": "degrade_cross_file"
+  },
+  "G5": {
+   "count": 1,
+   "threshold": 0,
+   "effect": "mark_partial"
+  }
+ }
+}
