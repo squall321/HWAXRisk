@@ -1,13 +1,14 @@
-# 런타임 JSON 자산 로더 — docs/*.v1.json(taxonomy·character-vocab·seat-contract·rules-seed·adjacency·character-seed-rules)
+# 런타임 JSON 자산 로더 — backend/app/assets/*.v1.json(taxonomy·character-vocab·seat-contract·rules-seed·adjacency·character-seed-rules)
 from __future__ import annotations
 
 import json
 from functools import lru_cache
+from pathlib import Path
 
-from app.config import BASE_DIR
 from app.errors import AppError
 
-DOCS_DIR = BASE_DIR / "docs"
+# 자산 정본은 앱 패키지 안(plan §0.4.5) — pyproject package-data 로 wheel 에도 실린다.
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 ASSET_VERSION = "v1"
 
 # /meta/vocab 이 이름·버전을 나열하는 어휘 자산(taxonomy 는 /meta/taxonomy 로 따로 낸다).
@@ -20,14 +21,14 @@ VOCAB_ASSETS: tuple[str, ...] = (
 )
 
 
-def asset_path(name: str):
-    """docs/<name>.v1.json 경로."""
-    return DOCS_DIR / f"{name}.{ASSET_VERSION}.json"
+def asset_path(name: str) -> Path:
+    """assets/<name>.v1.json 경로."""
+    return ASSETS_DIR / f"{name}.{ASSET_VERSION}.json"
 
 
 @lru_cache(maxsize=None)
 def load_json(name: str) -> dict:
-    """docs/<name>.v1.json 을 읽어 dict 로 돌려준다(프로세스 캐시). 없거나 깨지면 E300."""
+    """assets/<name>.v1.json 을 읽어 dict 로 돌려준다(프로세스 캐시). 없거나 깨지면 E300."""
     path = asset_path(name)
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -38,7 +39,7 @@ def load_json(name: str) -> dict:
 
 
 def load_taxonomy() -> dict:
-    """리스크 택소노미 v1(docs/taxonomy.v1.json)."""
+    """리스크 택소노미 v1(assets/taxonomy.v1.json)."""
     return load_json("taxonomy")
 
 

@@ -12,6 +12,8 @@ dependencies = [
     "pydantic>=2.7",
     "jsonschema>=4.21",
     "pyyaml>=6.0",
+    # identity.py 의 heax /auth/me 되묻기·PUT /me/portal-pat 의 포털 검증 호출(plan §8.2.3·§8.2.8).
+    "httpx>=0.27",
 ]
 
 [project.optional-dependencies]
@@ -33,7 +35,7 @@ build-backend = "setuptools.build_meta"
 include = ["app*"]
 
 [tool.setuptools.package-data]
-app = ["schemas/*.json", "static/*.html"]
+app = ["schemas/*.json", "assets/*.json", "static/*.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

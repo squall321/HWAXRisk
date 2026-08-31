@@ -5,24 +5,26 @@
 과제의 MCAD(StepForge)·Dyna(DynaForge)·ECAD(ODB 어댑터 계약, 스텁) 소스를 **읽기 전용**으로 읽어
 불변 설계 IR 스냅샷(rr_ir)으로 동결하고, 단일 스냅샷의 상태(rr_state)와 두 스냅샷의 3층 diff(rr_diff)를
 결론 없이 코드가 정리하며, HW/XD 전문가 패널이 낸 finding·gain·성격 서술을 IR id 에 앵커된 원자로
-앱 DB 에 누적해 다음 과제의 심사 브리프에 되먹인다. 계획 정본은 포털 리포
-`HWAXPortal/docs/design-risk-review/plan.md` 이고, 이 리포의 `docs/plan.md` 는 그 포인터와 앱 관점 요약이다.
+앱 DB 에 누적해 다음 과제의 심사 브리프에 되먹인다. 이름·경로·계약 정본은 포털 리포
+`HWAXPortal/docs/design-risk-review/plan.md`(§10.8 #28) 이고, 이 리포의 `docs/plan.md` 는 그 포인터와 앱 관점 요약이다.
 
-현재는 **P0 스캐폴드** 단계다 — 계약(스키마·자산 JSON)·설정·스토어 골격·risk_spec 파서·읽기 전용 MCP 도구 3종·
-REST `/api/meta*`·Vite/React 플레이스홀더 SPA 까지만 있다. 레이아웃은 HEAXHub `fastapi_react` 스택(`backend/` + `frontend/`,
-MaterialTwinWeb 선례)이다.
+현재는 **P0 스캐폴드(정합 완료)** 단계다 — 계약(스키마·자산 JSON)·설정·스토어(§5.2.2 DDL 전문)·risk_spec 파서·MCP 도구 6종 시그니처·
+REST `/api/health`·`/api/me`·`/api/me/portal-pat`·`/api/meta/*`·러너 골격·어댑터 레지스트리 v0·Vite/React 플레이스홀더 SPA 까지 있다.
+레이아웃은 HEAXHub `fastapi_react` 스택(`backend/` + `frontend/`, MaterialTwinWeb 선례)이다.
 
 ## 구성 요소
 
 | 구성 | 내용 |
 |---|---|
-| REST | `/api/meta` · `/api/meta/taxonomy` · `/api/meta/adapters` · `/api/meta/vocab` (Caddy 경유 `/apps/hwax_risk/api/…`) |
-| MCP | `hwax-risk` 서버, 도구 3종 `risk_health` · `risk_get_taxonomy` · `risk_get_meta`. 앱 내부 exact `Route('/mcp')` → `/apps/hwax_risk/mcp` → 게이트웨이 백엔드 `heax-hwax_risk` |
-| 헬스 | `GET /api/health` → `{status, app_id, version, schema_version, data_dir}` |
+| REST | `GET /api/health` · `GET /api/me` · `PUT /api/me/portal-pat` · `GET /api/meta/taxonomy` · `/api/meta/adapters` · `/api/meta/vocab` (Caddy 경유 `/apps/hwax_risk/api/…`, plan §8.2.3) |
+| 헬스 | `GET /api/health` → `{ok: true, app_version, schema_version}` (형식 고정, 러너 상태는 싣지 않는다) |
+| 신원 | `backend/app/identity.py` — `Authorization: Bearer`(우선) 또는 쿠키 `heax_access_token` 을 heax `GET /api/v1/auth/me` 로 되묻고 `sha256(token)` TTL 60 s 캐시. `X-Heax-User-*` 헤더는 읽지 않는다(위조 가능). 토큰 없음·401·불통은 anonymous |
+| MCP | `hwax-risk` 서버, 도구 6종 `risk_get_snapshot(P1)` · `risk_get_diff(P2)` · `risk_get_registry` · `risk_claims_for_ref` · `risk_submit_panel_result(P3)` · `risk_get_brief(P5)` — P0 본문은 `{error:'not_implemented', ready_in}`. 앱 내부 exact `Route('/mcp')` → `/apps/hwax_risk/mcp` → 게이트웨이 백엔드 `heax-hwax_risk` |
 | UI | `GET /` → `frontend/dist`(StaticFiles, html=True). dist 가 없으면 `backend/app/static/index.html` 플레이스홀더 |
-| DB | `<data>/risk_review.db` — P0 는 `rr_projects · rr_sources · rr_snapshots · rr_snapshot_calls` 4표 + `schema_migrations` |
+| DB | `<data>/risk_review.db` — `PRAGMA user_version`=1, plan §5.2.2 `rr_*` 표 전문(33표) + 살림 표 `_schema_migrations` · `_user_credentials`, WAL |
+| 러너 | `backend/app/runner.py` — 데몬 스레드 `panel_loop`·`sync_loop`·`nightly_loop`(P0 는 잠만 잔다), lifespan 이 start/stop |
 | 스키마 | `backend/app/schemas/{rr_ir, rr_state, rr_diff, risk_spec, seat_opinion}.v1.json`(JSON Schema draft-07) |
-| 자산 | `docs/{taxonomy, character-vocab, character-seed-rules, adjacency, rules-seed, seat-contract}.v1.json` · `docs/odb-adapter-contract.md` |
+| 자산 | `backend/app/assets/{taxonomy, character-vocab, character-seed-rules, adjacency, rules-seed, seat-contract}.v1.json`(package-data) · `docs/odb-adapter-contract.md` |
 
 ## 설치
 
@@ -36,11 +38,7 @@ pnpm install            # pnpm 10 · node 20, pnpm-lock.yaml 은 커밋 대상
 pnpm build              # frontend/dist 생성(.gitignore)
 ```
 
-Python ≥ 3.12. `mcp` 는 `>=1.10,<2` 로 핀한다(2.0 은 FastMCP 를 제거해 비호환).
-
-**editable 설치 전제.** 런타임 자산 `docs/*.v1.json` 은 리포 루트의 `docs/` 에서 읽으며 wheel 패키지 데이터에 들어 있지 않다.
-비-editable 설치(wheel)에서는 `/api/meta/taxonomy`·`risk_get_taxonomy` 가 503 이 된다 — HEAX `fastapi_react` 스택은
-`pip install -e ../backend` 이라 지금은 동작하고, 자산을 `backend/app/assets/` 로 옮기는 일은 P1 이다(plan §5.2.5 (1)).
+Python ≥ 3.12. `mcp` 는 `>=1.10,<2` 로 핀한다(2.0 은 FastMCP 를 제거해 비호환). `httpx` 는 런타임 의존성이다(신원 되묻기·포털 PAT 검증).
 
 ## 실행
 
@@ -56,8 +54,8 @@ cd backend
 확인.
 
 ```bash
-curl -s http://127.0.0.1:8000/api/health
-curl -s http://127.0.0.1:8000/api/meta
+curl -s http://127.0.0.1:8000/api/health          # {"ok":true,"app_version":"0.1.0","schema_version":1}
+curl -s http://127.0.0.1:8000/api/me              # 토큰 없으면 anonymous
 curl -s http://127.0.0.1:8000/api/meta/taxonomy | head -c 400
 ```
 
@@ -65,15 +63,22 @@ HEAX 러너는 `PORT · HOST=127.0.0.1 · HEAX_DATA_DIR · ROOT_PATH=/apps/hwax_
 앱은 `ROOT_PATH` 를 FastAPI `root_path` 에만 쓰고 라우트는 `/` 기준으로 선언한다. 프런트엔드는 `fetch('api/…')` 상대경로와
 Vite `base: './'` 로 서브패스에서 그대로 동작한다.
 
-## 데이터 경로
+## 설정·데이터 경로·시크릿
 
-우선순위 `HWAX_RISK_DATA_DIR` > `HEAX_DATA_DIR` > `<리포>/data`. 첫 기동 시 디렉터리를 만들고 쓸 수 없으면 기동을
-중단하며, `<data>/risk_review.db` 에 `schema_migrations` 와 v1 표 4종을 만든다(멱등, 버전 정본은 `PRAGMA user_version`).
+env 접두는 `HWAXRISK_`(plan §8.2.6). 데이터 루트 우선순위 `HWAXRISK_DATA_DIR` > `HEAX_DATA_DIR` > `<리포>/data`. 첫 기동 시 디렉터리를
+만들고 쓸 수 없으면 기동을 중단하며, `<data>/risk_review.db` 에 v1 DDL 을 적용하고(멱등, 버전 정본은 `PRAGMA user_version`, 이력은
+`_schema_migrations`) `origin.json{hostname, app_version, schema_version, written_at}` 을 쓴다. 기존 DB 의 `user_version` 이 목표보다
+낮으면 적용 직전 `risk_review.db.pre-migrate-<ts>` 사본을 남기고, 코드보다 높으면 기동을 실패시킨다.
 확장자 `.db` 는 HEAXHub `appdata-to-drive.sh` 의 `sqlite3 .backup` 원자 스냅샷 조건이다. 로컬 실행 시 리포 `data/` 는
 `.gitignore` 로 `*.db*` 를 제외한다.
 
+시크릿은 `<data>/secrets.env`(0600, `KEY=VALUE`) 의 `HWAXRISK_PORTAL_PAT · HWAXRISK_HEAX_SERVICE_PAT · HWAXRISK_AIDH_API_KEY` 3종이며 값은
+로그에 싣지 않는다. `GET /api/me.box.secrets_valid` 는 세 값이 있고 `origin.json.hostname` 이 현재 호스트와 같을 때만 true 다.
+사용자 포털 PAT 는 `PUT /api/me/portal-pat {pat}` 로 등록한다(email 일치 → aud `mcp-gateway`+scope `api` → 만료 ≥24 h → 포털
+`GET /agent/conversations?limit=1` 200 순으로 검증, 실패 코드 `pat_email_mismatch · pat_audience · pat_expiring · pat_invalid`, `null` 은 삭제).
+
 ```bash
-HWAX_RISK_DATA_DIR=/tmp/hwax-risk-data backend/.venv/bin/hwax-risk --port 8001
+HWAXRISK_DATA_DIR=/tmp/hwax-risk-data backend/.venv/bin/hwax-risk --port 8001
 ```
 
 ## HEAX 등록
@@ -86,8 +91,10 @@ HWAX_RISK_DATA_DIR=/tmp/hwax-risk-data backend/.venv/bin/hwax-risk --port 8001
    (PYTHONNOUSERSITE=1 재설치 + httpx 명시 + import 검증)를 실행한다.
 4. 기동 후 heax `GET /api/v1/mcp/servers` 에 `hwax_risk` 가 나오면 게이트웨이 revive 루프가 `heax-hwax_risk` 백엔드를 자동 흡수한다(설정 변경 0).
 
-매니페스트 요점 — `schema_version 2 · app_type web_app · execution_target linux_runner · build{python_venv, stack fastapi_react, 3.12} ·
-launch{service, env PYTHONNOUSERSITE=1, health /api/health} · permissions.visibility team · resources{cpu 1, memory_gb 1} · source{git, main} · mcp{expose, /mcp, streamable_http}`.
+매니페스트 요점(plan §8.2.2) — `schema_version 2 · app_type web_app · execution_target linux_runner · build{python_venv, stack fastapi_react, 3.12} ·
+launch{service, env {PYTHONNOUSERSITE: "1"} 만, health /api/health} · permissions.visibility company · resources{cpu 1, memory_gb 2} · source{git, main} ·
+mcp{expose, /mcp, streamable_http, allowed_groups []}`. `HWAXRISK_DATA_DIR` 은 `launch.env` 에 두지 않는다(HEAX 런처의 `HEAX_DATA_DIR` 폴백만,
+context-notes D6).
 
 ## MCP 등록 예
 
@@ -105,8 +112,11 @@ claude mcp add --transport http hwax-risk <포털베이스>/apps/hwax_risk/mcp -
 cd backend && .venv/bin/python -m pytest -q
 ```
 
-`backend/tests/` — 헬스(`/api/health`, 옛 `/health`·`/api/v1` 404) · `/`(dist 유무 분기) · 데이터 경로 우선순위 · 스토어 마이그레이션 멱등 ·
-risk_spec 파서 픽스처 · 스키마 라운드트립 · MCP 도구 3종 + exact `Route('/mcp')`(Mount 아님·307 아님) · 매니페스트 스키마 검증 · 신원 헤더.
+`backend/tests/` — `test_boot.py`(기동 3점: `/api/health` 3키 · `POST /mcp` initialize+세션 헤더 · `/` text/html, dist 유무 분기, 옛 경로 404) ·
+`test_config_datadir.py`(경로 우선순위·Settings 기본값·secrets.env) · `test_store.py`(user_version 1·rr_ 33표+살림 2·멱등·pre-migrate 사본·상위 버전 예외) ·
+`test_parser.py`(risk_spec 파서) · `test_schemas.py` · `test_mcp_tools.py`(6종 고정·not_implemented·exact `Route('/mcp')`) · `test_manifest.py` ·
+`test_identity.py`(Bearer/쿠키/위조 헤더/캐시, heax 는 `httpx.MockTransport`) · `test_me.py`(`/me`·`/me/portal-pat` 422 4종·등록·삭제, 포털은 MockTransport) ·
+`test_runner.py` · `test_parity.py`(`HWAX_PORTAL_REPO` 와 엔진 additive 가 있을 때만, 아니면 skip). 외부 HTTP 실호출은 없다.
 `frontend/dist` 가 있든 없든 전부 통과해야 한다.
 
 ## 프로젝트 구조
@@ -115,14 +125,14 @@ risk_spec 파서 픽스처 · 스키마 라운드트립 · MCP 도구 3종 + exa
 HWAXRisk/
 ├── .portal/manifest.yaml     # HEAX 매니페스트 v2 정본(stack fastapi_react)
 ├── .mcp.json                 # dev 로컬 http 등록 예
-├── docs/                     # plan.md(포인터+요약) · odb-adapter-contract.md · *.v1.json 자산 6종
+├── docs/                     # plan.md(포인터+요약) · odb-adapter-contract.md
 ├── backend/
-│   ├── pyproject.toml        # hwax-risk, 콘솔 스크립트 hwax-risk
-│   ├── app/                  # config · risk_store · narrative · taxonomy · identity · api · mcp_server · main · cli · schemas/ · static/
+│   ├── pyproject.toml        # hwax-risk, 콘솔 스크립트 hwax-risk, package-data(schemas·assets·static)
+│   ├── app/                  # config · risk_store · narrative · taxonomy · identity · routes · mcp_server · runner · main · cli · adapters/ · schemas/ · assets/ · static/
 │   ├── tests/
 │   ├── scripts/heaxhub-build.sh   # SIF hermetic 보정 훅
 │   └── .venv/                # git 제외
 ├── frontend/                 # Vite+React(TS) — package.json · pnpm-lock.yaml · src/{main,App,api}.tsx,ts · dist/(git 제외)
 ├── checklist.md · context-notes.md
-└── data/                     # HEAX_DATA_DIR 폴백(sqlite 는 git 제외)
+└── data/                     # HEAX_DATA_DIR 폴백(*.db* 는 git 제외)
 ```

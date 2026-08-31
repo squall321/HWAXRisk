@@ -1,19 +1,14 @@
-# hwax-risk MCP 서버 — FastMCP 읽기 전용 도구 3종(risk_health · risk_get_taxonomy · risk_get_meta), main.py 가 Route('/mcp') 로 이식
+# hwax-risk MCP 서버 — FastMCP 도구 6종(plan §0.5.2 시그니처, P0 본문은 전부 not_implemented + ready_in), main.py 가 Route('/mcp') 로 이식
 from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from app.api import meta_payload
-from app.risk_store import get_store
-from app.taxonomy import load_taxonomy
+_INSTRUCTIONS = """HWAX Risk Review — 설계 리스크 심사 앱의 MCP 서버. 도구 6종은 P0 에서 시그니처만 등록돼 있고
+본문은 {error:'not_implemented', ready_in:'P1|P2|P3|P5'} 를 돌려준다(risk_get_snapshot P1 · risk_get_diff P2 ·
+risk_get_registry/risk_claims_for_ref/risk_submit_panel_result P3 · risk_get_brief P5)."""
 
-_INSTRUCTIONS = """HWAX Risk Review — 설계 리스크 심사 앱의 MCP 서버(P0 스캐폴드, 읽기 전용).
-- risk_health: 저장소 상태(DB 경로·스키마 버전·표 목록).
-- risk_get_taxonomy: 리스크 택소노미 v1(8축·failure_map·voc_map).
-- risk_get_meta: 앱 id·버전·데이터 경로·스키마 버전·root_path."""
-
-# loopback 바인드 + Caddy 경계 전제로 Host 검증(DNS rebinding 보호)은 끈다(ThermalShockMCP 와 동일).
+# loopback 바인드 + Caddy 경계 전제로 Host 검증(DNS rebinding 보호)은 끈다(LaminateAnalyzerMCP 선례).
 # streamable_http_path 는 기본 '/mcp' — main.py 가 streamable_http_app() 의 Route('/mcp') 를 메인 라우터에 이식해
 # exact /mcp 로 매칭된다(Mount('/mcp') 는 trailing slash 없는 /mcp 를 307 으로 돌려 MCP 클라이언트가 못 따라간다 — 실측).
 mcp = FastMCP(
@@ -23,19 +18,49 @@ mcp = FastMCP(
 )
 
 
-@mcp.tool()
-def risk_health() -> dict:
-    """앱 저장소 상태를 돌려준다 — ok·db_path·schema_version·rr_ 표 목록."""
-    return get_store().health()
+def _not_implemented(ready_in: str) -> dict:
+    return {"error": "not_implemented", "ready_in": ready_in}
 
 
 @mcp.tool()
-def risk_get_taxonomy() -> dict:
-    """리스크 택소노미 v1(docs/taxonomy.v1.json) 전체를 돌려준다."""
-    return load_taxonomy()
+def risk_get_snapshot(snapshot_id: str, part: str) -> dict:
+    """스냅샷 조회(part ∈ ir|state|nodes|edges|calls) — ready_in P1."""
+    return _not_implemented("P1")
 
 
 @mcp.tool()
-def risk_get_meta() -> dict:
-    """앱 메타(app_id·version·data_dir·schema_version·root_path)를 돌려준다 — REST /api/meta 와 같고 identity 만 없다."""
-    return meta_payload()
+def risk_get_diff(diff_id: str, part: str) -> dict:
+    """diff 조회(part ∈ diff|summary|events) — ready_in P2."""
+    return _not_implemented("P2")
+
+
+@mcp.tool()
+def risk_get_registry(target_key: str) -> dict:
+    """타깃 등록부(rr_registry 행 ≤200 + verdict 후보) 조회 — ready_in P3."""
+    return _not_implemented("P3")
+
+
+@mcp.tool()
+def risk_claims_for_ref(ref: str) -> dict:
+    """참조(ref 문법 §0.2.1)에 앵커된 주장 목록(rr_claim_refs 조인 ≤100) 조회 — ready_in P3."""
+    return _not_implemented("P3")
+
+
+@mcp.tool()
+def risk_get_brief(target_key: str, tier: str = "B") -> dict:
+    """패널 브리프(panels·evidence E0~E9·budget) 조회, tier='A' 는 웹 전용 — ready_in P5."""
+    return _not_implemented("P5")
+
+
+@mcp.tool()
+def risk_submit_panel_result(
+    panel_id: str,
+    engine: str,
+    decision_text: str,
+    turns: list[dict],
+    report_id: int | None,
+    actor: str,
+    model: str | None = None,
+) -> dict:
+    """패널 결과 제출(REST POST /api/panels/{id}/complete 와 같은 함수, actor 는 미검증 표기) — ready_in P3."""
+    return _not_implemented("P3")

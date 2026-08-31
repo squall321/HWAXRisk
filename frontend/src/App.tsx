@@ -1,16 +1,18 @@
-// P0 플레이스홀더 화면 — 앱 메타(api/meta)와 어댑터 현황(api/meta/adapters)만 보여준다.
+// P0 플레이스홀더 화면 — 헬스(api/health)·신원(api/me)·어댑터 현황(api/meta/adapters)만 보여준다.
 import { useEffect, useState } from "react";
-import { api, Adapter, Meta } from "./api";
+import { api, Adapter, Health, Me } from "./api";
 
 export default function App() {
-  const [meta, setMeta] = useState<Meta | null>(null);
+  const [health, setHealth] = useState<Health | null>(null);
+  const [me, setMe] = useState<Me | null>(null);
   const [adapters, setAdapters] = useState<Adapter[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    Promise.all([api.meta(), api.adapters()])
-      .then(([m, a]) => {
-        setMeta(m);
+    Promise.all([api.health(), api.me(), api.adapters()])
+      .then(([h, m, a]) => {
+        setHealth(h);
+        setMe(m);
         setAdapters(a);
       })
       .catch((e) => setError(e instanceof Error ? e.message : String(e)));
@@ -24,33 +26,42 @@ export default function App() {
         </h1>
         <p className="subtitle">
           설계 리스크 심사 앱의 골격만 올라와 있는 상태다. 심사 화면은 P1 이후에 붙는다.
-          REST <code>api/meta</code> · MCP <code>mcp</code>(도구 3종. risk_health · risk_get_taxonomy · risk_get_meta).
+          REST <code>api/health</code> · <code>api/me</code> · MCP <code>mcp</code>(도구 6종. risk_get_snapshot · risk_get_diff ·
+          risk_get_registry · risk_claims_for_ref · risk_get_brief · risk_submit_panel_result — P0 는 not_implemented).
         </p>
       </header>
 
       {error && <p className="error">불러오기 실패. {error}</p>}
 
       <section>
-        <h2>앱 메타</h2>
-        {meta ? (
+        <h2>앱 상태</h2>
+        {health && me ? (
           <table>
             <tbody>
               <tr>
-                <th>app_id</th>
-                <td>{meta.app_id}</td>
+                <th>ok</th>
+                <td>{String(health.ok)}</td>
               </tr>
               <tr>
-                <th>version</th>
-                <td>{meta.version}</td>
+                <th>app_version</th>
+                <td>{health.app_version}</td>
               </tr>
               <tr>
                 <th>schema_version</th>
-                <td>{meta.schema_version}</td>
+                <td>{health.schema_version}</td>
               </tr>
               <tr>
-                <th>data_dir</th>
+                <th>신원</th>
+                <td>{me.anonymous ? "익명" : `${me.email} (${me.source})`}</td>
+              </tr>
+              <tr>
+                <th>포털 PAT</th>
+                <td>{me.portal_pat ? `등록됨 (${me.portal_pat.email})` : "미등록"}</td>
+              </tr>
+              <tr>
+                <th>박스</th>
                 <td>
-                  <code>{meta.data_dir}</code>
+                  <code>{me.box.hostname}</code> · secrets_valid {String(me.box.secrets_valid)}
                 </td>
               </tr>
             </tbody>

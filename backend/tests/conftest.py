@@ -1,4 +1,4 @@
-# 공용 pytest 픽스처 — 데이터 경로를 임시 디렉터리로 격리(HWAX_RISK_DATA_DIR)하고 lifespan 이 켜진 TestClient 를 준다
+# 공용 pytest 픽스처 — 데이터 경로를 임시 디렉터리로 격리(HWAXRISK_DATA_DIR)하고 lifespan 이 켜진 TestClient 를 준다
 from __future__ import annotations
 
 import os
@@ -21,7 +21,7 @@ _SESSION_DATA_DIR: str | None = None
 def pytest_configure(config):
     global _SESSION_DATA_DIR
     _SESSION_DATA_DIR = tempfile.mkdtemp(prefix="hwaxrisk-test-")
-    os.environ["HWAX_RISK_DATA_DIR"] = _SESSION_DATA_DIR
+    os.environ["HWAXRISK_DATA_DIR"] = _SESSION_DATA_DIR
     os.environ.pop("HEAX_DATA_DIR", None)
     os.environ.pop("ROOT_PATH", None)
 
@@ -33,7 +33,7 @@ def pytest_unconfigure(config):
 
 @pytest.fixture(scope="session")
 def session_data_dir() -> Path:
-    """세션 전체가 공유하는 임시 데이터 디렉터리(HWAX_RISK_DATA_DIR 값)."""
+    """세션 전체가 공유하는 임시 데이터 디렉터리(HWAXRISK_DATA_DIR 값)."""
     assert _SESSION_DATA_DIR is not None
     return Path(_SESSION_DATA_DIR)
 

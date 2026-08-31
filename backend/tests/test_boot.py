@@ -1,4 +1,4 @@
-# 기동 스모크 — /api/health · / (dist 없음 → 플레이스홀더, 있음 → frontend/dist/index.html) · /api/meta 계열 응답 형식
+# 기동 3점(plan §8.2.10) — /api/health 정확한 3키 · POST /mcp initialize 200 + mcp-session-id · GET / text/html — 와 /api/meta 계열·옛 경로 404
 from __future__ import annotations
 
 import importlib
@@ -9,19 +9,33 @@ from app.config import settings
 from app.mcp_server import mcp
 
 
-def test_health_shape(client, session_data_dir):
+def test_health_exact_three_keys(client):
     r = client.get("/api/health")
     assert r.status_code == 200
-    body = r.json()
-    assert body["status"] == "ok"
-    assert body["app_id"] == "hwax_risk"
-    assert body["version"] == settings.APP_VERSION
-    assert body["schema_version"] == 1
-    assert body["data_dir"] == str(session_data_dir)
+    assert r.json() == {"ok": True, "app_version": settings.app_version, "schema_version": 1}
 
 
-def test_old_health_path_is_gone(client):
-    assert client.get("/health").status_code == 404
+def test_mcp_initialize_with_session_header(client):
+    r = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {"protocolVersion": "2025-03-26", "capabilities": {},
+                         "clientInfo": {"name": "pytest", "version": "0"}}},
+        headers={"Accept": "application/json, text/event-stream", "Content-Type": "application/json"},
+    )
+    assert r.status_code == 200
+    assert r.headers.get("mcp-session-id")
+
+
+def test_index_is_html(client):
+    r = client.get("/")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+
+
+def test_old_paths_are_gone(client):
+    for path in ("/health", "/api/v1/meta", "/api/v1/health", "/api/meta"):
+        assert client.get(path).status_code == 404, path
 
 
 def _reload_main_with_base_dir(monkeypatch, base_dir: Path):
@@ -45,7 +59,6 @@ def test_index_serves_dist_or_placeholder(monkeypatch, tmp_path):
     orig_app = main_mod.app
     orig_session_manager = mcp._session_manager
     try:
-        # 분기 1: 가짜 frontend/dist(index.html 포함) → StaticFiles('/', html=True) 가 그 index.html 을 준다.
         fake_root = tmp_path / "with_dist"
         fake_index = fake_root / "frontend" / "dist" / "index.html"
         fake_index.parent.mkdir(parents=True)
@@ -57,36 +70,20 @@ def test_index_serves_dist_or_placeholder(monkeypatch, tmp_path):
         assert r.headers["content-type"].startswith("text/html")
         assert r.text == fake_index.read_text(encoding="utf-8")
 
-        # 분기 2: dist 없는 빈 루트 → 플레이스홀더.
         no_dist = _reload_main_with_base_dir(monkeypatch, tmp_path / "without_dist")
         r = TestClient(no_dist).get("/")
         assert r.status_code == 200
         assert r.headers["content-type"].startswith("text/html")
         assert "P0" in r.text
-        # 서브패스(/apps/hwax_risk) 아래에서도 동작하도록 상대 링크(api/meta)를 쓴다.
-        assert "api/meta" in r.text and "api/v1" not in r.text
+        # 서브패스(/apps/hwax_risk) 아래에서도 동작하도록 상대 링크(api/health)를 쓴다.
+        assert "api/health" in r.text and "api/v1" not in r.text and "api/meta\"" not in r.text
+        for name in ("risk_get_snapshot", "risk_submit_panel_result"):
+            assert name in r.text
     finally:
-        # 다른 테스트가 `from app.main import app` 으로 보는 객체와 mcp 세션 매니저를 원래대로 돌린다.
         monkeypatch.undo()
         importlib.reload(main_mod)
         main_mod.app = orig_app
         mcp._session_manager = orig_session_manager
-
-
-def test_meta(client, session_data_dir):
-    r = client.get("/api/meta")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["app_id"] == "hwax_risk"
-    assert body["version"] == settings.APP_VERSION
-    assert body["data_dir"] == str(session_data_dir)
-    assert body["schema_version"] == 1
-    assert body["root_path"] == ""
-    assert set(body["identity"]) >= {"email", "groups"}
-
-
-def test_old_v1_prefix_is_gone(client):
-    assert client.get("/api/v1/meta").status_code == 404
 
 
 def test_meta_taxonomy(client):
@@ -113,8 +110,7 @@ def test_meta_adapters_p0_fixed_list(client):
 def test_meta_vocab_lists_runtime_assets(client):
     r = client.get("/api/meta/vocab")
     assert r.status_code == 200
-    body = r.json()
-    text = str(body)
+    text = str(r.json())
     for name in ("character-vocab", "seat-contract", "rules-seed", "adjacency", "character-seed-rules"):
         assert name in text, f"{name} 가 /meta/vocab 응답에 없다"
-    assert "version" in text.lower() or "1.0" in text
+    assert "1.0" in text or "version" in text.lower()
