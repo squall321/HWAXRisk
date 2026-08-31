@@ -1,0 +1,225 @@
+{
+ "case": "gate_f6_mcad_absent",
+ "note": "kinds=['dyna'] · missing.mcad_absent=true → G3·G4 pass=null(mcad_absent), G6 은 dyna 단위만 보고 pass. ir_builder 는 mcad 없는 스냅샷을 만들지 않으므로(§2.11.3 1단계) 이 케이스만 IR 을 직접 싣는다",
+ "ir": {
+  "ir_version": "1.0",
+  "snapshot_id": "00000000000000000000000000000000",
+  "project_id": "e73c023a2e8e90349bb4d853730e1bfc",
+  "owner_sub": "user@example.com",
+  "label": "게이트 픽스처 f6",
+  "captured_at": 1756600000,
+  "partial": false,
+  "sources": [
+   {
+    "kind": "dyna",
+    "app_key": "heax-kooremapper_mcp",
+    "adapter_version": "1.0",
+    "channel": "mcp",
+    "ref": {
+     "session_id": "01JSES",
+     "file_id": "01JFIL",
+     "filename": "assembled_tied.k",
+     "sha256": "abcd123400000000000000000000000000000000000000000000000000000000"
+    },
+    "source_hash": "abcd123400000000000000000000000000000000000000000000000000000000",
+    "stats": {
+     "nodes": 12000,
+     "elements": 9800,
+     "parts": 2,
+     "bbox_min": [
+      0,
+      0,
+      0
+     ],
+     "bbox_max": [
+      50,
+      40,
+      2.2
+     ],
+     "size": [
+      50,
+      40,
+      2.2
+     ],
+     "contacts_total": 1,
+     "unresolved_sides": 0
+    },
+    "degraded": [
+     "no_secid"
+    ],
+    "scope": null
+   }
+  ],
+  "nodes": [
+   {
+    "canon_key": "dyna:abcd1234:1",
+    "domain": "dyna",
+    "kind": "pid",
+    "label": "Stack\\PLATE_1",
+    "local_key": "1",
+    "status_flags": [],
+    "attrs": {
+     "title": "Stack\\PLATE_1",
+     "elem_class": "solid",
+     "n_elems": 5000,
+     "bbox_min": [
+      0,
+      0,
+      0
+     ],
+     "bbox_max": [
+      50,
+      40,
+      1.2
+     ],
+     "size": [
+      50,
+      40,
+      1.2
+     ],
+     "size_sorted": [
+      50,
+      40,
+      1.2
+     ],
+     "area_ext": 4000.0,
+     "volume": 3000.0,
+     "material": {
+      "mid": 1,
+      "keyword": "*MAT_ELASTIC",
+      "db": {
+       "tag": "AL6061",
+       "name": "AL6061"
+      }
+     },
+     "secid": null
+    },
+    "provenance": {
+     "adapter": "dyna",
+     "tool": "inspect_file",
+     "call_id": "cafe0000-010"
+    },
+    "nid": "p:dynaabcd1234",
+    "dn": "p:dynaabcd1234"
+   },
+   {
+    "canon_key": "dyna:abcd1234:2",
+    "domain": "dyna",
+    "kind": "pid",
+    "label": "Stack\\PLATE_2",
+    "local_key": "2",
+    "status_flags": [],
+    "attrs": {
+     "title": "Stack\\PLATE_2",
+     "elem_class": "solid",
+     "n_elems": 4800,
+     "bbox_min": [
+      0,
+      0,
+      0
+     ],
+     "bbox_max": [
+      50,
+      40,
+      1.0
+     ],
+     "size": [
+      50,
+      40,
+      1.0
+     ],
+     "size_sorted": [
+      50,
+      40,
+      1.0
+     ],
+     "area_ext": 3800.0,
+     "volume": 2500.0,
+     "material": {
+      "mid": 1,
+      "keyword": "*MAT_ELASTIC",
+      "db": {
+       "tag": "AL6061",
+       "name": "AL6061"
+      }
+     },
+     "secid": null
+    },
+    "provenance": {
+     "adapter": "dyna",
+     "tool": "inspect_file",
+     "call_id": "cafe0000-010"
+    },
+    "nid": "p:dynaabcd1234",
+    "dn": "p:dynaabcd1234"
+   }
+  ],
+  "edges": [
+   {
+    "kind": "contact",
+    "domain": "dyna",
+    "status": "auto",
+    "a": "p:dynaabcd1234",
+    "b": "p:dynaabcd1234",
+    "attrs": {
+     "contact_index": 1,
+     "contact_type": "*CONTACT_TIED_SURFACE_TO_SURFACE",
+     "title": "tie1",
+     "fs": null
+    },
+    "provenance": {
+     "adapter": "dyna",
+     "tool": "inspect_file",
+     "call_id": "cafe0000-010"
+    },
+    "eid": "e:dyna0000",
+    "kind_family": "iface"
+   }
+  ],
+  "same_as": [],
+  "dims_named": {},
+  "rollups": {
+   "by_assembly": []
+  },
+  "results": null,
+  "missing": {
+   "mcad_absent": true,
+   "iface_kinds_absent": false,
+   "dyna_absent": false,
+   "ecad_absent": true,
+   "dyna_result_absent": true
+  },
+  "warnings": [],
+  "ir_hash": "f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6f6",
+  "versions": {
+   "taxonomy_version": "1.0",
+   "seed_rules_version": "seed-1.0"
+  }
+ },
+ "expect": {
+  "blocked": false,
+  "G1": {
+   "pass": true
+  },
+  "G2": {
+   "pass": true
+  },
+  "G3": {
+   "pass": null,
+   "reason": "mcad_absent",
+   "count": null
+  },
+  "G4": {
+   "pass": null,
+   "reason": "mcad_absent",
+   "count": null
+  },
+  "G5": {
+   "pass": true
+  },
+  "G6": {
+   "pass": true,
+   "reason": null
+  }
+ }
+}

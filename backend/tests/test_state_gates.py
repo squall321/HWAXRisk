@@ -40,8 +40,10 @@ def clean_ir() -> dict:
     return build_ir(load_case("gate_f1_clean"))
 
 
-# ---------------------------------------------------------------- 게이트 픽스처 5케이스(plan §3.2.2)
+# ---------------------------------------------------------------- 게이트 픽스처 8케이스(plan §3.2.2)
 CASES = ("gate_f1_clean", "gate_f2_anon", "gate_f3_unit", "gate_f4_iface", "gate_f5_partial")
+# f6~f8 은 3값(pass=null)·사유·unknown_blocking 을 보는 케이스라 기대값 형식이 다르다(plan §2.12).
+NULL_CASES = ("gate_f6_mcad_absent", "gate_f7_capture_partial", "gate_f8_unit_unknown")
 
 
 @pytest.mark.parametrize("case", CASES)
@@ -57,7 +59,7 @@ def test_gate_fixture_verdicts_match_the_plan_table(case):
     assert sum(1 for n in ir["nodes"] if n["domain"] == "mcad" and n["kind"] == "part") == expect["n_leaf"]
     for key in GATE_KEYS:
         record = state["gates"][key]
-        assert set(record) == {"key", "count", "threshold", "pass", "blocking", "effect",
+        assert set(record) == {"key", "count", "threshold", "pass", "reason", "blocking", "effect",
                                "ack_by", "ack_at", "ack_reason", "detail"}
         assert record["blocking"] is (key == "G6")
         if record["pass"]:
@@ -369,3 +371,67 @@ def test_g4_failure_marks_the_pair_coordinates_as_not_ok():
     comp = diff_module.comparability(_pair_ir("tol-a"), _pair_ir("tol-a"), coordinate_fail, clean_state)
     assert comp["coordinate_ok"] is False
     assert comp["partial_any"] is False        # 두 IR 자체는 partial 이 아니다
+
+
+# ---------------------------------------------------------------- 3값·사유·unknown_blocking(plan §2.12)
+def _gates_of(bundle: dict) -> tuple[dict, bool, list]:
+    """f6 은 ir 을 직접 싣는다 — ir_builder 가 mcad 없는 스냅샷을 거부하기 때문이다(§2.11.3 1단계)."""
+    if "ir" in bundle:
+        ir = bundle["ir"]
+        return st.compute_gates(ir), st.is_blocked(st.compute_gates(ir)), st.evaluate_rules(ir)
+    state = build_state(bundle)
+    return state["gates"], state["blocked"], state["rule_hits"]
+
+
+@pytest.mark.parametrize("case", NULL_CASES)
+def test_gate_three_valued_pass_and_reason(case):
+    bundle = load_case(case)
+    gates, blocked, _hits = _gates_of(bundle)
+    expect = bundle["expect"]
+    assert blocked is expect["blocked"], bundle["note"]
+    for key in GATE_KEYS:
+        record = gates[key]
+        assert "reason" in record
+        # 사유는 다섯뿐이고 pass ∈ true|false 면 null 이다(§2.12·§8.2.3).
+        assert record["reason"] in (None, *st.GATE_NULL_REASONS)
+        if record["pass"] is not None:
+            assert record["reason"] is None
+        for field, value in (expect.get(key) or {}).items():
+            assert record[field] == value, f"{case} {key}.{field}"
+
+
+def test_g6_unknown_blocking_blocks_without_being_a_fail():
+    """pass=null 인데도 차단이다 — '계산 불가면 pass' 가 유일한 차단 게이트를 무력화하던 자리(§2.12)."""
+    gates, blocked, hits = _gates_of(load_case("gate_f8_unit_unknown"))
+    g6 = gates["G6"]
+    assert g6["pass"] is None and g6["reason"] == "unit_unknown" and g6["blocking"] is True
+    assert blocked is True
+    assert st.blocked_reason(gates) == "unit_unknown"
+    # G4 는 같은 mcp_degraded 에서 warnings 입력이 0 이라 '경고 없음' 이 아니라 '검문 불가' 다.
+    assert gates["G4"]["pass"] is None and gates["G4"]["reason"] == "warnings_unavailable"
+    # 같은 픽스처에서 R-004·R-005 는 evaluable=false·degraded 다(§3.2.6).
+    by_rule = {h["rule"]: h for h in hits}
+    for rule in ("R-004", "R-005"):
+        assert by_rule[rule]["evaluable"] is False
+        assert by_rule[rule]["not_evaluable_reason"] == "degraded"
+        assert by_rule[rule]["pass"] is None
+
+
+def test_mcad_absent_and_capture_partial_reasons():
+    absent, _b, hits = _gates_of(load_case("gate_f6_mcad_absent"))
+    assert absent["G3"]["reason"] == absent["G4"]["reason"] == "mcad_absent"
+    assert absent["G6"]["pass"] is True                      # dyna 단위만 보고 판정한다
+    assert all(h["not_evaluable_reason"] == "source_absent" for h in hits if not h["evaluable"])
+
+    partial, _b2, hits2 = _gates_of(load_case("gate_f7_capture_partial"))
+    assert partial["G3"]["pass"] is None and partial["G3"]["reason"] == "capture_partial"
+    assert {h["rule"] for h in hits2 if h["not_evaluable_reason"] == "degraded"} == {"R-001"}
+
+
+def test_ack_never_flips_pass_and_blocked_uses_the_plan_formula():
+    acks = {"iface_unconfirmed": {"by": OWNER, "at": 1756600002, "reason": "확인 후 진행"}}
+    state = st.build_state(build_ir(load_case("gate_f4_iface")), acks=acks, computed_at=1756600001)
+    g3 = state["gates"]["G3"]
+    assert g3["pass"] is False and g3["ack_by"] == OWNER and g3["ack_reason"] == "확인 후 진행"
+    # ack 는 gates_hash 를 바꾸지 않는다(그 지문은 판정만 본다).
+    assert st.gates_hash(state["gates"]) == st.gates_hash(st.compute_gates(build_ir(load_case("gate_f4_iface"))))

@@ -1064,6 +1064,9 @@ def build_ir(
         (n["attrs"].get("density") is not None and not n["attrs"].get("density_unit")) for n in mcad_parts
     ) or any(((n["attrs"].get("material") or {}).get("db") is None) for n in dyna_nodes if n["kind"] == "pid")
     missing = {
+        # 게이트 G3·G4·G6 과 규칙 evaluable 의 입력이다(plan §2.12·§3.2.6) — 어댑터 선언값도 이 키로 덮인다.
+        "mcad_absent": not any(s["kind"] == "mcad" for s in sources),
+        "iface_kinds_absent": False,
         "ecad_absent": not any(s["kind"] == "ecad" and "ecad_absent" not in s["degraded"] for s in sources),
         "dyna_absent": not has_dyna,
         "dyna_result_absent": bool(has_dyna and not results),
@@ -1194,8 +1197,15 @@ def _upsert_part_keys(store, ir: Mapping[str, Any]) -> None:
         )
 
 
-def record_calls(store, snapshot_id: str, owner_sub: str, calls: Sequence[Mapping[str, Any]], *, start_seq: int | None = None) -> list[str]:
-    """소스 호출 원문을 rr_snapshot_calls 에 gzip 으로 남긴다(plan §2.11.4). call_id 목록을 순서대로 돌려준다."""
+def record_calls(store, snapshot_id: str, owner_sub: str, calls: Sequence[Mapping[str, Any]], *,
+                 start_seq: int | None = None, job_id: str | None = None) -> list[str]:
+    """소스 호출 원문을 rr_snapshot_calls 에 gzip 으로 남긴다(plan §2.11.4). call_id 목록을 순서대로 돌려준다.
+
+    `call_id` 접두는 스냅샷이 아니라 **잡** id 다 — 실패한 잡에는 스냅샷이 없기 때문이다. 잡 오케스트레이션이
+    아직 없는 동기 캡처 경로는 잡 하나가 곧 스냅샷 하나라 `job_id` 를 생략하고 `snapshot_id` 를 잡 식별자로 쓴다
+    (`adapters.base.CallRecorder` 가 캡처 전에 매기는 call_id 와 같은 값이라 provenance.call_id 가 실제 행과 맞는다).
+    """
+    job = job_id or snapshot_id
     if start_seq is None:
         row = store.query_one("SELECT MAX(seq) AS m FROM rr_snapshot_calls WHERE snapshot_id = ?", (snapshot_id,))
         start_seq = int(row["m"] or 0) + 1 if row else 1
@@ -1203,7 +1213,7 @@ def record_calls(store, snapshot_id: str, owner_sub: str, calls: Sequence[Mappin
     rows = []
     for offset, call in enumerate(calls):
         seq = start_seq + offset
-        call_id = f"{snapshot_id[:8]}-{seq:03d}"
+        call_id = f"{job[:8]}-{seq:03d}"
         response = call.get("response")
         if response is None:
             blob, sha, size = None, None, None
@@ -1213,7 +1223,7 @@ def record_calls(store, snapshot_id: str, owner_sub: str, calls: Sequence[Mappin
             blob, sha, size = gzip.compress(data), sha256_hex(data), len(data)
         args_json = canonical_json(call.get("args") or {})
         rows.append((
-            call_id, snapshot_id, owner_sub, seq, str(call.get("source_kind") or "mcad"), call.get("app_key"),
+            call_id, job, snapshot_id, owner_sub, seq, str(call.get("source_kind") or "mcad"), call.get("app_key"),
             str(call.get("channel") or "mcp"), str(call.get("tool") or ""), args_json, sha256_hex(args_json),
             1 if call.get("ok", True) else 0, call.get("http_status"), sha, blob, size,
             int(call.get("started_at") or now_epoch()), call.get("duration_ms"), call.get("error"),
@@ -1221,9 +1231,9 @@ def record_calls(store, snapshot_id: str, owner_sub: str, calls: Sequence[Mappin
         call_ids.append(call_id)
     if rows:
         store.executemany(
-            "INSERT OR REPLACE INTO rr_snapshot_calls (call_id, snapshot_id, owner_sub, seq, source_kind, app_key,"
-            " channel, tool, args_json, args_hash, ok, http_status, response_sha256, response_gz, response_bytes,"
-            " started_at, duration_ms, error) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT OR REPLACE INTO rr_snapshot_calls (call_id, job_id, snapshot_id, owner_sub, seq, source_kind,"
+            " app_key, channel, tool, args_json, args_hash, ok, http_status, response_sha256, response_gz,"
+            " response_bytes, started_at, duration_ms, error) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
     return call_ids
@@ -1328,13 +1338,17 @@ def freeze_snapshot(
         "SELECT id FROM rr_snapshots WHERE project_id = ? AND ir_hash = ?", (project_id, ir["ir_hash"]),
     )
     if existing is not None:
+        from app import state as state_module  # noqa: PLC0415 — 순환 임포트를 피하려 지연 임포트한다.
+
         snapshot_id = existing["id"]
         if calls:
             record_calls(store, snapshot_id, owner_sub, calls)
         frozen = load_ir(store, snapshot_id)
         return {
             "snapshot_id": snapshot_id, "ir_hash": ir["ir_hash"], "reused": True,
-            "partial": bool(frozen.get("partial")), "blocked": bool(frozen.get("gates", {}).get("G6", {}).get("pass") is False),
+            "partial": bool(frozen.get("partial")),
+            # 차단은 계획 식이다 — pass=false 뿐 아니라 unknown_blocking(pass=null·unit_unknown)도 차단이다(§2.12).
+            "blocked": state_module.is_blocked(frozen.get("gates") or {}),
             "gates_summary": {k: bool(v.get("pass")) for k, v in (frozen.get("gates") or {}).items()},
             "degraded": sorted({d for s in frozen.get("sources") or [] for d in s.get("degraded") or []}),
         }
@@ -1403,13 +1417,15 @@ def freeze_snapshot(
 
             state_module.save_state(store, state, owner_sub=owner_sub)
 
+    from app import state as blocked_module  # noqa: PLC0415 — 순환 임포트를 피하려 지연 임포트한다.
+
     gates = ir.get("gates") or {}
     return {
         "snapshot_id": snapshot_id,
         "ir_hash": ir["ir_hash"],
         "reused": False,
         "partial": bool(ir["partial"]),
-        "blocked": bool(gates.get("G6", {}).get("pass") is False),
+        "blocked": blocked_module.is_blocked(gates),
         "gates_summary": {k: bool(v.get("pass")) for k, v in gates.items()},
         "degraded": degraded,
     }

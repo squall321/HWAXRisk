@@ -127,15 +127,19 @@ def _source(ir: Mapping[str, Any], kind: str) -> dict | None:
 
 
 def _gate_word(record: Mapping[str, Any]) -> str:
-    """게이트 한 칸의 표기 — pass 또는 fail(건수[, ack])."""
-    if record.get("pass"):
+    """게이트 한 칸의 표기 — pass · n/a(사유) · fail(건수[, ack])(plan §2.12)."""
+    if record.get("pass") is True:
         return "pass"
+    if record.get("pass") is None:
+        return "n/a(" + str(record.get("reason") or "unknown") + ")"
     ack = "ack 있음" if record.get("ack") or record.get("ack_by") else "ack 없음"
     return "fail(" + str(record.get("count")) + ", " + ack + ")"
 
 
 def _rule_word(hit: Mapping[str, Any]) -> str:
-    """규칙 한 칸의 표기 — pass 또는 fail(N건)."""
+    """규칙 한 칸의 표기 — pass · 평가 불가(사유) · fail(N건)(plan §3.2.6)."""
+    if hit.get("evaluable") is False or hit.get("pass") is None:
+        return "평가 불가(" + str(hit.get("not_evaluable_reason") or "unknown") + ")"
     if hit.get("pass"):
         return "pass"
     return "fail(" + str((hit.get("found") or {}).get("count")) + "건)"
@@ -148,20 +152,73 @@ def _names(ir_index: Mapping[str, Mapping[str, Any]], edge: Mapping[str, Any]) -
 
 
 # ---------------------------------------------------------------- 게이트 G1~G6(plan §2.12·§3.2.2)
+# pass=null 의 사유는 이 5종뿐이다(plan §2.12 표). pass ∈ true|false 이면 reason 은 null 이다.
+GATE_NULL_REASONS: tuple[str, ...] = (
+    "mcad_absent", "capture_partial", "unit_only", "warnings_unavailable", "unit_unknown",
+)
+# G6 의 unknown_blocking — pass=null 이면서 차단을 유지하는 유일한 사유(plan §2.12).
+UNKNOWN_BLOCKING_REASON = "unit_unknown"
+
+
+def is_blocked(gates: Mapping[str, Any] | None) -> bool:
+    """`blocked = (G6.pass is False) or (G6.pass is None and G6.reason == 'unit_unknown')`(plan §2.12)."""
+    g6 = (gates or {}).get("G6") or {}
+    if not isinstance(g6, Mapping):
+        return False
+    if g6.get("pass") is False:
+        return True
+    return g6.get("pass") is None and g6.get("reason") == UNKNOWN_BLOCKING_REASON
+
+
+def gates_hash(gates: Mapping[str, Any] | None) -> str:
+    """게이트 판정만의 지문(ack 3필드 제외, sha256[:12]). ack 로는 안 바뀌고 판정이 재계산으로 바뀌면 바뀐다."""
+    stripped = {
+        key: {k: v for k, v in dict(record).items() if k not in ("ack_by", "ack_at", "ack_reason")}
+        for key, record in sorted((gates or {}).items()) if isinstance(record, Mapping)
+    }
+    return sha256_hex(canonical_json(stripped))[:12]
+
+
+def blocked_reason(gates: Mapping[str, Any] | None) -> str | None:
+    """차단 사유 — `unit_mismatch`(pass=false) 또는 `unit_unknown`(unknown_blocking). 차단이 아니면 None."""
+    g6 = (gates or {}).get("G6") or {}
+    if not isinstance(g6, Mapping):
+        return None
+    if g6.get("pass") is False:
+        return "unit_mismatch"
+    if g6.get("pass") is None and g6.get("reason") == UNKNOWN_BLOCKING_REASON:
+        return UNKNOWN_BLOCKING_REASON
+    return None
+
+
 def compute_gates(ir: Mapping[str, Any], *, acks: Mapping[str, Mapping[str, Any]] | None = None) -> dict:
-    """게이트 6종을 IR 필드에서 직접 계산한다. blocking 은 G6 뿐이고 ack 가 붙어도 pass 는 false 로 남는다."""
+    """게이트 6종을 IR 필드에서 직접 계산한다. blocking 은 G6 뿐이고 ack 가 붙어도 pass 는 false 로 남는다.
+
+    `pass` 는 3값(true|false|null)이고 null 은 '검문할 입력이 통째로 없다' 이며 `reason` 에 사유를 적는다 —
+    pass 로 세지 않는다(plan §2.12 '입력이 없을 때의 pass=null').
+    """
     acks = dict(acks or {})
     leaves = _leaves(ir)
     edges = _live_edges(ir)
     warnings = list(ir.get("warnings") or [])
     n_leaf = len(leaves)
+    missing = dict(ir.get("missing") or {})
+    mcad_source = _source(ir, "mcad")
+    mcad_degraded = set((mcad_source or {}).get("degraded") or ())
+    all_degraded = {code for s in ir.get("sources") or [] for code in (s.get("degraded") or ())}
+    mcad_absent = bool(missing.get("mcad_absent")) or mcad_source is None
+    capture_partial = bool(missing.get("iface_kinds_absent")) or "capture_partial" in all_degraded
+    # tree.warnings 는 REST 전용이라 mcp_degraded 면 입력이 0 이다 — 0 건을 '경고 없음' 으로 읽지 않는다(§2.12).
+    warnings_unavailable = (not mcad_absent) and "mcp_degraded" in mcad_degraded
 
-    def gate(key: str, count: int | None, threshold: float | None, passed: bool, effect: str,
-             detail: Sequence[Any], blocking: bool = False) -> dict:
+    def gate(key: str, count: int | None, threshold: float | None, passed: bool | None, effect: str,
+             detail: Sequence[Any], blocking: bool = False, reason: str | None = None) -> dict:
         ack = acks.get(key) or {}
+        value = None if passed is None else bool(passed)
         return {
-            "key": key, "count": count, "threshold": threshold, "pass": bool(passed),
-            "blocking": bool(blocking), "effect": effect if not passed else "none",
+            "key": key, "count": count, "threshold": threshold, "pass": value,
+            "reason": reason if value is None else None,
+            "blocking": bool(blocking), "effect": "none" if value is True else effect,
             "ack_by": ack.get("by"), "ack_at": ack.get("at"), "ack_reason": ack.get("reason"),
             "detail": list(detail),
         }
@@ -178,12 +235,18 @@ def compute_gates(ir: Mapping[str, Any], *, acks: Mapping[str, Mapping[str, Any]
               [s.get("a") for s in pending[:_TOP_K]] + [w.get("ref") for w in conflicts[:_TOP_K]])
 
     unconfirmed = [e for e in edges if e.get("kind") == "interference" and e.get("status") == "auto"]
-    g3 = gate("iface_unconfirmed", len(unconfirmed), 0, not unconfirmed, "mark",
-              [e["eid"] for e in unconfirmed[:_TOP_K]])
+    # 간섭은 mcad 검출 산출이라 mcad 가 없거나 kind 가 통째로 빠지면 '없음' 이 아니라 '검문 불가' 다(§2.12).
+    g3_reason = "mcad_absent" if mcad_absent else ("capture_partial" if capture_partial else None)
+    g3 = gate("iface_unconfirmed", None if g3_reason else len(unconfirmed), 0,
+              None if g3_reason else not unconfirmed, "mark",
+              [] if g3_reason else [e["eid"] for e in unconfirmed[:_TOP_K]], reason=g3_reason)
 
     coord = [w for w in warnings if w.get("code") in _COORD_WARNINGS]
-    g4 = gate("coordinate", len(coord), 0, not coord, "degrade_cross_file",
-              [f"warn:{w.get('code')}#{w.get('ref')}" for w in coord[:_TOP_K]])
+    g4_reason = "mcad_absent" if mcad_absent else ("warnings_unavailable" if warnings_unavailable else None)
+    g4 = gate("coordinate", None if g4_reason else len(coord), 0,
+              None if g4_reason else not coord, "degrade_cross_file",
+              [] if g4_reason else [f"warn:{w.get('code')}#{w.get('ref')}" for w in coord[:_TOP_K]],
+              reason=g4_reason)
 
     scoped = any(s.get("scope") is not None for s in ir.get("sources") or [])
     out_of_scope = [n for n in leaves if "scope_out" in (n.get("status_flags") or [])] if scoped else []
@@ -192,28 +255,41 @@ def compute_gates(ir: Mapping[str, Any], *, acks: Mapping[str, Mapping[str, Any]
 
     g6_count = 0
     g6_detail: list[Any] = []
+    mcad = mcad_source or {}
+    dyna = _source(ir, "dyna")
+    ecad = _source(ir, "ecad")
+    # (a) tree.warnings unit_mismatch·(b) mcad unit_system 은 둘 다 mcad REST 전용 입력이다.
     for w in warnings:
         if w.get("code") == "unit_mismatch":
             g6_count += 1
             g6_detail.append(f"warn:unit_mismatch#{w.get('ref')}")
-    mcad = _source(ir, "mcad") or {}
-    unit_system = (mcad.get("ref") or {}).get("unit_system")
-    if unit_system is not None and str(unit_system) != "mm":
-        g6_count += 1
-        g6_detail.append(f"unit_system={unit_system}")
-    dyna = _source(ir, "dyna")
-    dyna_diag = _diag(((dyna or {}).get("stats") or {}).get("size"))
-    mcad_diag = _diag(_bbox_union(leaves))
-    if dyna_diag and mcad_diag:
-        ratio = dyna_diag / mcad_diag
-        if not (0.95 <= ratio <= 1.05):
+    if not mcad_absent:
+        unit_system = (mcad.get("ref") or {}).get("unit_system")
+        if unit_system is not None and str(unit_system) != "mm":
             g6_count += 1
-            g6_detail.append(f"dyna/mcad 대각비 {round(ratio, 3)}")
-    ecad = _source(ir, "ecad") or {}
-    if "unit_conversion_failed" in (ecad.get("degraded") or []):
+            g6_detail.append(f"unit_system={unit_system}")
+        # (c) dyna↔mcad 대각비는 mcad 가 있을 때만 계산한다. 계산 불가면 unknown 이고 계수 0 이다.
+        dyna_diag = _diag(((dyna or {}).get("stats") or {}).get("size"))
+        mcad_diag = _diag(_bbox_union(leaves))
+        if dyna_diag and mcad_diag:
+            ratio = dyna_diag / mcad_diag
+            if not (0.95 <= ratio <= 1.05):
+                g6_count += 1
+                g6_detail.append(f"dyna/mcad 대각비 {round(ratio, 3)}")
+    if "unit_conversion_failed" in ((ecad or {}).get("degraded") or []):
         g6_count += 1
         g6_detail.append("ecad unit_conversion_failed")
-    g6 = gate("unit_scale", g6_count, 0, g6_count == 0, "block", g6_detail, blocking=True)
+
+    g6_reason: str | None = None
+    if warnings_unavailable:
+        # mcad 는 있는데 REST /tree 를 못 읽었다 — (a)·(b) 입력이 통째로 없다. 차단은 유지한다(unknown_blocking).
+        g6_reason = UNKNOWN_BLOCKING_REASON
+    elif mcad_absent and dyna is None and ecad is None:
+        # dyna·ecad 단위 검문 입력조차 없다 — 검문 대상 자체가 없다.
+        g6_reason = "unit_only"
+    g6 = gate("unit_scale", None if g6_reason else g6_count, 0,
+              None if g6_reason else g6_count == 0, "block",
+              [] if g6_reason else g6_detail, blocking=True, reason=g6_reason)
 
     return {"G1": g1, "G2": g2, "G3": g3, "G4": g4, "G5": g5, "G6": g6}
 
@@ -747,6 +823,44 @@ def _derived_node_ref(node: Mapping[str, Any], ref: str, degree_tied: Mapping[st
     return _attr(node, ref.split(".", 1)[1])
 
 
+# 규칙별 `evaluable=false` 조건(plan §3.2.6 표). 값은 not_evaluable_reason 어휘 3종뿐이다.
+NOT_EVALUABLE_REASONS: tuple[str, ...] = ("source_absent", "degraded", "truncated")
+_RULE_NEEDS_MCAD = ("R-001", "R-002", "R-003", "R-004", "R-005", "R-006")
+_RULE_DEGRADED: dict[str, tuple[str, ...]] = {
+    "R-001": ("capture_partial",),
+    "R-003": ("volume_null_pre_d168",),
+    "R-004": ("mcp_degraded",),
+    "R-005": ("mcp_degraded",),
+}
+_RULE_TRUNCATED = ("R-001", "R-002")
+
+
+def not_evaluable_reason(ir: Mapping[str, Any], rule_id: str) -> str | None:
+    """그 규칙의 입력이 이 스냅샷에 실재하지 않으면 사유를, 실재하면 None(plan §3.2.6).
+
+    `pass` 만으로는 '검문했고 위반이 없다' 와 '검문할 입력이 없었다' 가 구분되지 않아 결측이 조용히
+    '이상 없음' 으로 읽힌다 — 그 자리를 이 함수가 닫는다.
+    """
+    missing = dict(ir.get("missing") or {})
+    sources = list(ir.get("sources") or [])
+    degraded = {code for s in sources for code in (s.get("degraded") or ())}
+    mcad_absent = bool(missing.get("mcad_absent")) or not any(s.get("kind") == "mcad" for s in sources)
+    if rule_id in _RULE_NEEDS_MCAD and mcad_absent:
+        return "source_absent"
+    if rule_id == "R-006" and bool(missing.get("dyna_absent")):
+        return "source_absent"
+    if rule_id == "R-007" and bool(missing.get("req_absent")):
+        return "source_absent"
+    if bool(missing.get("iface_kinds_absent")) and rule_id == "R-001":
+        return "degraded"
+    for code in _RULE_DEGRADED.get(rule_id, ()):
+        if code in degraded:
+            return "degraded"
+    if rule_id in _RULE_TRUNCATED and "interfaces_truncated" in degraded:
+        return "truncated"
+    return None
+
+
 def evaluate_rules(ir: Mapping[str, Any], rules: Sequence[Mapping[str, Any]] | None = None) -> list[dict]:
     """rr_rules(또는 시드)의 조건 DSL 을 IR 위에서 즉시 실행한다. 부작용 없음·결정론이며 조건이 걸리면 pass=false 다."""
     rules = list(rules if rules is not None else load_seed_rules())
@@ -828,11 +942,15 @@ def evaluate_rules(ir: Mapping[str, Any], rules: Sequence[Mapping[str, Any]] | N
 
         found = {"count": count, "refs": refs, "text": f"{rule.get('name') or rule.get('id')} {count}건"}
         version = str(rule.get("rule_version") or "rules-1.0")
+        reason = not_evaluable_reason(ir, str(rule.get("id")))
+        evaluable = reason is None
         out.append({
             "rule": str(rule.get("id")),
             "version": version,
             "severity": rule.get("severity"),
-            "pass": not fired,
+            "pass": (not fired) if evaluable else None,
+            "evaluable": evaluable,
+            "not_evaluable_reason": reason,
             "found": found,
             "why_it_matters": f"«{rule.get('why_it_matters') or ''}»",
             "fix_hint": f"«{rule.get('fix_hint') or ''}»",
@@ -922,7 +1040,7 @@ def build_state(
         "taxonomy_version": str(versions.get("taxonomy_version") or "1.0"),
         "seed_rules_version": str(versions.get("seed_rules_version") or "seed-1.0"),
         "computed_at": int(computed_at if computed_at is not None else now_epoch()),
-        "blocked": gates["G6"]["pass"] is False,
+        "blocked": is_blocked(gates),
         "gates": gates,
         "missing": dict(ir.get("missing") or {}),
         "signals": signals,

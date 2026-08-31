@@ -260,10 +260,19 @@ class RaClient:
             self._mcp.close()
 
 
+# RA 인스턴스·보고서 쓰기 전용 자격. 읽기용 HWAXRISK_PORTAL_PAT(scopes ['read'])와 절대 섞지 않는다(plan §8.2.7).
+WRITE_SECRET_KEY = "HWAXRISK_PORTAL_PAT_RW"
+
+
 def ra_client_from_settings(settings, secrets: Mapping[str, str] | None = None, *,
                             client: httpx.Client | None = None) -> RaClient:
-    """Settings·secrets.env 로 RaClient 를 만든다. PAT 가 없으면 available=False 인 객체가 나온다."""
-    token = (secrets or {}).get("HWAXRISK_PORTAL_PAT")
+    """Settings·secrets.env 로 RaClient 를 만든다 — 쓰기 키 `HWAXRISK_PORTAL_PAT_RW` 만 쓴다(§5.1 원칙 10).
+
+    이 클라이언트는 create_object·update_object·add_object_alias·link_objects·보고서 초안까지 부르므로
+    좌석 자유조회가 쓰는 읽기 전용 PAT 로는 열지 않는다. 키가 없으면 available=False 인 객체가 나오고
+    external_sync 는 조용히 pending 으로 남는다(폴백 규약 그대로).
+    """
+    token = (secrets or {}).get(WRITE_SECRET_KEY)
     return RaClient(getattr(settings, "gateway_mcp", ""), token, client=client)
 
 

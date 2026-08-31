@@ -33,12 +33,22 @@ CLAIM_LIMIT = 100
 
 
 def _owner(actor: str | None) -> str:
-    """게이트웨이 신고 `actor`(이메일)를 소유권 검사 키로 쓴다(§6.11).
+    """게이트웨이 신고 `actor`(이메일)를 쓰기 도구의 소유권 검사 키로 쓴다(§6.11).
 
-    actor 가 없으면 어떤 행에도 맞지 않는 빈 문자열이라 조회·쓰기가 전부 E404 다 — 최종 사용자를 해석할 수
-    없는 호출에 남의 설계 데이터를 내주지 않는다.
+    actor 가 없으면 어떤 행에도 맞지 않는 빈 문자열이라 쓰기가 E404 다 — 최종 사용자를 해석할 수 없는 호출에
+    남의 원장을 고치게 두지 않는다. 읽기 범위는 이 값으로 정하지 않는다(§5.1 원칙 9 — `_caller()` 를 쓴다).
     """
     return str(actor or "").strip().lower()
+
+
+def _caller() -> dict:
+    """이번 /mcp 요청의 caller(§8.2.5 ①) — 도달한 Authorization 만 신원이고 자칭 `actor` 는 신원이 아니다."""
+    try:
+        request = mcp.get_context().request_context.request
+    except (AttributeError, LookupError, ValueError):
+        # 요청 밖(직접 함수 호출·테스트)에서는 열지 않는다 — service 는 조직 공개 과제만 본다.
+        request = None
+    return routes.mcp_caller(request)
 
 
 def _guarded(fn, *args: Any, **kwargs: Any) -> dict:
@@ -53,44 +63,52 @@ def _guarded(fn, *args: Any, **kwargs: Any) -> dict:
         return {"error": "internal_error", "message": "내부 오류 — 서버 로그를 확인하세요."}
 
 
+def _scoped(kind: str, key: str, fn, *args: Any, **kwargs: Any) -> dict:
+    """읽기 4종 공통 — caller 범위 밖이면 `{error:'not_visible'}`, 안이면 그 행 owner 로 REST 와 같은 함수를 부른다."""
+    def call() -> dict:
+        owner_sub = routes.mcp_scope_owner(kind, key, _caller())
+        return fn(*args, owner_sub=owner_sub, **kwargs)
+
+    return _guarded(call)
+
+
 @mcp.tool()
-def risk_get_snapshot(snapshot_id: str, part: str, actor: str | None = None) -> dict:
+def risk_get_snapshot(snapshot_id: str, part: str) -> dict:
     """스냅샷 조회(part ∈ ir|state|nodes|edges|calls, nodes·edges 는 상위 500 + truncated)."""
     limit = NODE_LIMIT if part in ("nodes", "edges") else None
-    return _guarded(routes.snapshot_part, snapshot_id, part, owner_sub=_owner(actor), limit=limit)
+    return _scoped("snapshot", snapshot_id, routes.snapshot_part, snapshot_id, part, limit=limit)
 
 
 @mcp.tool()
-def risk_get_diff(diff_id: str, part: str, actor: str | None = None) -> dict:
+def risk_get_diff(diff_id: str, part: str) -> dict:
     """diff 조회(part ∈ diff|summary|events, events 는 ≤500 + truncated)."""
     limit = EVENT_LIMIT if part == "events" else None
-    return _guarded(routes.diff_part, diff_id, part, owner_sub=_owner(actor), limit=limit)
+    return _scoped("diff", diff_id, routes.diff_part, diff_id, part, limit=limit)
 
 
 @mcp.tool()
 def risk_get_registry(target_key: str, status: str | None = None, severity: str | None = None,
-                      domain: str | None = None, actor: str | None = None) -> dict:
+                      domain: str | None = None) -> dict:
     """타깃 등록부(rr_registry 행 ≤200 + verdict 후보) 조회, status·severity·domain 으로 거른다."""
-    return _guarded(routes.registry_payload, target_key, owner_sub=_owner(actor), status=status,
-                    severity=severity, domain=domain, limit=REGISTRY_LIMIT)
+    return _scoped("target", target_key, routes.registry_payload, target_key, status=status,
+                   severity=severity, domain=domain, limit=REGISTRY_LIMIT)
 
 
 @mcp.tool()
-def risk_claims_for_ref(ref: str, actor: str | None = None) -> dict:
+def risk_claims_for_ref(ref: str) -> dict:
     """참조(ref 문법 §0.2.1)에 앵커된 주장 목록(rr_claim_refs 조인 ≤100) 조회."""
-    return _guarded(routes.claims_for_ref, ref, owner_sub=_owner(actor), limit=CLAIM_LIMIT)
+    # 단일 id 가 아니라 역색인이라 문지기 대신 caller 가 보는 과제 집합으로 결과를 좁힌다(§8.2.5 ②).
+    return _guarded(lambda: routes.claims_for_ref(
+        ref, limit=CLAIM_LIMIT, projects=routes.visible_projects(_caller())))
 
 
 @mcp.tool()
-def risk_get_brief(target_key: str, tier: str = "B", actor: str | None = None) -> dict:
-    """패널 브리프(panels·evidence E0~E9·budget) 조회, tier='A' 는 웹 전용({error:'tier_a_web_only'})."""
+def risk_get_brief(target_key: str, brief_token: str, tier: str = "B") -> dict:
+    """패널 브리프(panels·evidence E0~E9·budget) 조회 — 열쇠는 brief_token 이고 tier='A' 는 웹 전용."""
     if tier == "A":
         return {"error": "tier_a_web_only"}
-    payload = _guarded(routes.brief_payload, target_key, tier, owner_sub=_owner(actor), actor=actor)
-    if actor is None:
-        # 게이트웨이는 heax 서비스 PAT 로 도달해 최종 사용자를 싣지 않는다 — 호출자를 owner 로 해석할 수 없다(§6.11).
-        payload["reason"] = "caller_unresolved"
-    return payload
+    # caller 판정이 아니라 UI·REST 가 발급한 토큰 대조다 — 불일치·만료는 {error:'brief_token_invalid'}(§8.2.5).
+    return _guarded(routes.brief_by_token, target_key, brief_token, tier)
 
 
 @mcp.tool()

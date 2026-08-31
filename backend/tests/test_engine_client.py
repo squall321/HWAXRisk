@@ -7,7 +7,12 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from app import engine_client
+from app import engine_client, identity
+
+def _enc(pat: str) -> str:
+    """저장 열 portal_pat_enc 는 Fernet 암호문이다(plan §8.2.7) — 픽스처도 같은 형식으로 넣는다."""
+    return identity.encrypt_pat(pat).decode("ascii")
+
 from app.runner import EngineBusy, EngineError
 
 # agent-server 실제 프레임 규약 — `event: <name>\ndata: <json>\n\n`(deliberation.py `_sse`/`_delib`).
@@ -104,7 +109,7 @@ def test_run_prefers_owner_pat_over_service(tmp_path):
     (tmp_path / "secrets.env").chmod(0o600)
     from app.common import now_epoch
 
-    store = _Store({"portal_pat": "owner-pat", "pat_email": "me@example.com",
+    store = _Store({"portal_pat": _enc("owner-pat"), "pat_email": "me@example.com",
                     "pat_groups_json": '["g1"]', "pat_exp": now_epoch() + 86400})
     seen: dict = {}
 

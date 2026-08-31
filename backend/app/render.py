@@ -1,13 +1,21 @@
 # 정규 표기(canonical text)·summary_text 코드 조립·판단어 린터 — plan §3.4(LLM 없음, 코드가 rr_state·rr_diff 에서 문자열을 짓는다)
 from __future__ import annotations
 
+import hashlib
 import math
 import re
-from typing import Any, Iterable, Sequence
+import unicodedata
+from typing import Any, Callable, Iterable, Sequence
 
 __all__ = [
     "LEXICON_VERSION",
     "SUMMARY_MAX",
+    "INJECTION_VERSION",
+    "INJECTION_LEXICON",
+    "SANITIZE_LIMITS",
+    "sanitize_source_text",
+    "injection_hit",
+    "suspect_placeholder",
     "JUDGEMENT_LEXICON",
     "LINT_NEUTRAL_PATTERNS",
     "JudgementLintError",
@@ -60,7 +68,7 @@ JUDGEMENT_LEXICON: tuple[dict, ...] = (
     {"id": "L15", "pattern": r"치명|중대|경미", "allow": (r"severity=(치명|중대|경미)",)},
     {"id": "L16", "pattern": r"OK|FAIL|PASS(?!_)", "allow": (r"pass=(true|false)", r"G\d\s(pass|fail)",
                                                               r"judgement=(OK|FAIL|PASS|WARNING|undetermined)")},
-    {"id": "L17", "pattern": r"추천|제안|판단|결론|평가", "allow": (r"상태 평가", r"평가어")},
+    {"id": "L17", "pattern": r"추천|제안|판단|결론|평가", "allow": (r"상태 평가", r"평가어", r"평가 불가")},
 )
 
 # 린터가 보지 않는 구간(plan §3.4.3 — 원문 인용·참조·태그·도구/앱 id 는 검사 대상이 아니다).
@@ -91,6 +99,98 @@ class JudgementLintError(Exception):
         super().__init__(f"판단어 린터 위반 {len(violations)}건(lexicon {lexicon_version}).")
         self.violations = violations
         self.lexicon_version = lexicon_version
+
+
+# ---------------------------------------------------------------- 표기층 위생(plan §0.6 '표기층 위생' 행·§3.4.1)
+INJECTION_VERSION = "inj-1.0"
+
+# 종류별 상한(plan §0.6). 상한 뒤에 «…» 로 감싸므로 실제 라인은 +2자다.
+SANITIZE_LIMITS: dict[str, int] = {
+    "label": 120, "note": 300, "title": 200, "message": 350,
+    "memo": 400, "statement": 200, "claim": 160,
+}
+DEFAULT_SANITIZE_KIND = "label"
+
+# 제거 대상 — 제어문자(C0/C1, 개행·탭은 앞서 공백으로 바꾼다) · zero-width · 양방향 제어.
+_ZERO_WIDTH = "\u200b\u200c\u200d\ufeff"
+_BIDI = "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f-\x9f]")
+_STRIP_RE = re.compile("[" + _ZERO_WIDTH + _BIDI + "]")
+_WHITESPACE_RE = re.compile(r"[\n\r\t\v\f]+")
+_SPACES_RE = re.compile(r" {2,}")
+
+# 저장형 프롬프트 인젝션 어휘(plan §3.4.1 시드 X01~X10). 항목은 {id, pattern}.
+INJECTION_LEXICON: tuple[dict, ...] = (
+    # X01 은 plan 시드에 어순 하나를 더한다 — '이전 지시를 무시하고' 처럼 목적어가 앞에 오는 형태가 실제로 온다.
+    {"id": "X01", "pattern": r"무시(하고|하라|해라|해)?\s*(위|이전|앞)|(위|이전|앞)\s*\S{0,10}\s*무시"},
+    {"id": "X02", "pattern": r"(?i)ignore\s+(all\s+)?(previous|prior|above)"},
+    {"id": "X03", "pattern": r"(?i)(system|developer)\s*(prompt|message|instruction)"},
+    {"id": "X04", "pattern": r"(?i)너는\s*이제|당신은\s*이제|from now on"},
+    {"id": "X05", "pattern": r"(?i)^\s*(assistant|system|user)\s*:"},
+    {"id": "X06", "pattern": r"(?i)</?(system|instructions?|tool_call)>"},
+    {"id": "X07", "pattern": r"```"},
+    {"id": "X08", "pattern": r"(?i)https?://"},
+    {"id": "X09", "pattern": r"(?i)(reveal|출력하라|그대로\s*복사).{0,20}(prompt|지시|규칙)"},
+    {"id": "X10", "pattern": r"[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f-\x9f]"},
+)
+_INJECTION_COMPILED = tuple((item["id"], re.compile(item["pattern"])) for item in INJECTION_LEXICON)
+
+
+def injection_hit(text: str) -> str | None:
+    """인젝션 어휘에 걸린 첫 항목 id(없으면 None). 위생 통과본을 대상으로 검사한다(§3.4.1)."""
+    for lexicon_id, pattern in _INJECTION_COMPILED:
+        if pattern.search(text or ""):
+            return lexicon_id
+    return None
+
+
+def source_sha1(text: Any) -> str:
+    """원본 문자열의 sha1 앞 12자 — 자리표시자·큐 payload·복원 승인이 같은 키를 쓴다."""
+    return hashlib.sha1(("" if text is None else str(text)).encode("utf-8")).hexdigest()[:12]
+
+
+def suspect_placeholder(text: Any) -> str:
+    """`«[suspect_text <sha1[:12]>]»` — 원문 대신 실리는 자리표시자."""
+    return QUOTE_OPEN + f"[suspect_text {source_sha1(text)}]" + QUOTE_CLOSE
+
+
+def sanitize_source_text(text: Any, kind: str = DEFAULT_SANITIZE_KIND, *,
+                         block: bool | None = None,
+                         on_suspect: Callable[[dict], None] | None = None) -> str:
+    """원천 문자열을 표기층에 넣기 직전에 위생 처리한다(plan §0.6·§3.4.1).
+
+    NFC → 제어·zero-width·양방향 제어 제거 → 개행·탭을 공백 1개로 → 연속 공백 압축 → 종류별 상한 → `«…»`.
+    `INJECTION_LEXICON` 적중이고 `block` 이면 문자열 **전체** 를 `«[suspect_text <sha1[:12]>]»` 로 바꾸고
+    `on_suspect({sha1, raw, lexicon_id, lexicon_version})` 을 부른다(호출자가 rr_curation_queue 에 올린다).
+
+    표기층 전용이다 — `rr_snapshots.ir_json` 원본과 `ir_hash` 는 이 함수로 바뀌지 않는다.
+    """
+    raw = "" if text is None else str(text)
+    s = unicodedata.normalize("NFC", raw)
+    s = _WHITESPACE_RE.sub(" ", s)
+    s = _CONTROL_RE.sub("", s)
+    s = _STRIP_RE.sub("", s)
+    s = _SPACES_RE.sub(" ", s).strip()
+    limit = SANITIZE_LIMITS.get(kind, SANITIZE_LIMITS[DEFAULT_SANITIZE_KIND])
+    s = s[:limit]
+    if block is None:
+        block = _suspect_block_setting()
+    lexicon_id = injection_hit(s)
+    if lexicon_id is not None and block:
+        if on_suspect is not None:
+            on_suspect({"sha1": source_sha1(raw), "raw": raw, "lexicon_id": lexicon_id,
+                        "lexicon_version": INJECTION_VERSION})
+        return suspect_placeholder(raw)
+    return quote_source(s)
+
+
+def _suspect_block_setting() -> bool:
+    """Settings `risk_suspect_text_block`(기본 true). config 를 못 읽으면 막는 쪽(True)이 기본이다."""
+    try:
+        from app import config  # noqa: PLC0415 — 선택 의존이라 지연 임포트한다.
+        return bool(config.settings.risk_suspect_text_block)
+    except Exception:                                    # pragma: no cover — 설정 부재는 닫힘으로 본다.
+        return True
 
 
 def quote_source(text: Any) -> str:
@@ -425,8 +525,13 @@ def _summarize_state(state: dict, context: dict) -> str:
         gate = gates.get(name)
         if not isinstance(gate, dict):
             continue
-        if gate.get("pass"):
+        if gate.get("pass") is True:
             gate_items.append(f"{name} pass")
+            continue
+        if gate.get("pass") is None:
+            # 입력이 없어 검문하지 못했다 — pass 로 세지 않는다(plan §2.12).
+            gate_items.append(f"{name} n/a({gate.get('reason') or 'unknown'})")
+            gate_refs.append(f"gate:{name}")
             continue
         ack = gate.get("ack_reason")
         ack_text = f", ack {quote_source(ack)}" if ack else ", ack 없음"
@@ -494,7 +599,10 @@ def _summarize_state(state: dict, context: dict) -> str:
         if not isinstance(hit, dict):
             continue
         rule_id = hit.get("rule") or ""
-        if hit.get("pass"):
+        if hit.get("evaluable") is False or hit.get("pass") is None:
+            # 결측을 '이상 없음' 으로 읽히게 두지 않는다(plan §3.2.6).
+            rules.append(f"{rule_id} 평가 불가({hit.get('not_evaluable_reason') or 'unknown'})")
+        elif hit.get("pass"):
             rules.append(f"{rule_id} pass")
         else:
             count = (hit.get("found") or {}).get("count", 0)

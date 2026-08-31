@@ -157,11 +157,18 @@ def header_line(store: RiskStore, data_dir: Path | None = None) -> dict:
             "origin": read_origin(data_dir)}
 
 
-def _select(store: RiskStore, table: str, owner_sub: str, since: int) -> Iterator[dict]:
+# 반출 기본 제외 — 회수된 과제와 코퍼스 제외 과제(plan §5.2.6 (ii)). `include_excluded=1` 로만 싣는다.
+_PROJECT_SCOPE_SQL = ("project_id IN (SELECT id FROM rr_projects WHERE owner_sub = ?"
+                      " AND status <> 'purged' AND (corpus_excluded = 0 OR ? = 1))")
+
+
+def _select(store: RiskStore, table: str, owner_sub: str, since: int,
+            include_excluded: bool = False) -> Iterator[dict]:
     """한 표의 소유자 행을 PK 순으로 흘린다.
 
     owner_sub 열이 없는 공용 표(rr_dim_vocab·rr_rules·rr_metrics·rr_delta_priors)는 소유자로 거를 수 없다 —
     그 중 visibility 열이 있는 표는 'org' 행만 싣는다(남의 사설 집계가 내 JSONL 에 따라 나가지 않게 한다).
+    `project_id` 를 가진 표는 회수·코퍼스 제외 과제를 기본으로 뺀다(plan §5.2.6 (ii)).
     """
     cols, pks = _table_meta(store, table)
     sql = f"SELECT {', '.join(_quote(c) for c in cols)} FROM {table}"
@@ -172,6 +179,13 @@ def _select(store: RiskStore, table: str, owner_sub: str, since: int) -> Iterato
         params.append(owner_sub)
     elif "visibility" in cols:
         where.append("visibility = 'org'")
+    if table == "rr_projects":
+        where.append("status <> 'purged'")
+        if not include_excluded:
+            where.append("corpus_excluded = 0")
+    elif "project_id" in cols:
+        where.append(_PROJECT_SCOPE_SQL)
+        params += [owner_sub, 1 if include_excluded else 0]
     since_cols = [c for c in _SINCE_COLS.get(table, ()) if c in cols]
     if since > 0 and since_cols:
         expr = since_cols[0] if len(since_cols) == 1 else f"COALESCE({', '.join(since_cols)})"
@@ -185,16 +199,54 @@ def _select(store: RiskStore, table: str, owner_sub: str, since: int) -> Iterato
         yield {c: _encode(row[c]) for c in cols}
 
 
-def iter_lines(store: RiskStore, owner_sub: str, since: int = 0, data_dir: Path | None = None) -> Iterator[str]:
+def iter_lines(store: RiskStore, owner_sub: str, since: int = 0, data_dir: Path | None = None,
+               include_excluded: bool = False) -> Iterator[str]:
     """JSONL 한 줄씩 — 첫 줄 헤더, 이어서 §5.2.2 A→H 표 순서로 {"table", "row"} 줄."""
     yield _json_line(header_line(store, data_dir))
     for table in TABLE_ORDER:
-        for row in _select(store, table, owner_sub, since):
+        for row in _select(store, table, owner_sub, since, include_excluded):
             yield _json_line({"table": table, "row": row})
 
 
-def write_export_file(store: RiskStore, owner_sub: str, since: int = 0, data_dir: Path | None = None) -> Path:
-    """같은 내용을 $HEAX_DATA_DIR/exports/<ts>.jsonl 에 남기고 그 경로를 돌려준다(plan §5.2.5 (1)·§8.2.3)."""
+def classification_max(store: RiskStore, owner_sub: str, include_excluded: bool = False) -> str:
+    """이 반출에 든 과제의 최고 등급 — `X-Risk-Classification-Max` 헤더 값(plan §0.6 '데이터 등급·반출')."""
+    sql = ("SELECT COUNT(*) AS n FROM rr_projects WHERE owner_sub = ? AND status <> 'purged'"
+           " AND classification = 'confidential'")
+    if not include_excluded:
+        sql += " AND corpus_excluded = 0"
+    row = store.query_one(sql, (owner_sub,))
+    return "confidential" if row is not None and int(row["n"] or 0) > 0 else "internal"
+
+
+def purge_old_exports(data_dir: Path | None = None, retain_days: int | None = None, now: int | None = None) -> int:
+    """`risk_export_retain_days` 보다 오래된 exports/*.jsonl 을 지운다(지운 개수). 0 이하면 정리하지 않는다."""
+    root = config.settings.data_dir if data_dir is None else data_dir
+    days = config.settings.risk_export_retain_days if retain_days is None else retain_days
+    if days <= 0:
+        return 0
+    out_dir = root / EXPORTS_DIRNAME
+    if not out_dir.is_dir():
+        return 0
+    cutoff = (int(time.time()) if now is None else now) - days * 86400
+    removed = 0
+    for path in out_dir.glob("*.jsonl"):
+        try:
+            if path.stat().st_mtime < cutoff:
+                path.unlink()
+                removed += 1
+        except OSError:                            # 정리 실패는 비치명적이다(반출 자체를 막지 않는다).
+            continue
+    return removed
+
+
+def write_export_file(store: RiskStore, owner_sub: str, since: int = 0, data_dir: Path | None = None,
+                      include_excluded: bool = False) -> Path:
+    """같은 내용을 $HEAX_DATA_DIR/exports/<ts>.jsonl 에 0600 으로 남기고 그 경로를 돌려준다(plan §5.2.5 (1)).
+
+    사본은 평문이라 모드를 0600 으로 고정하고, 같은 함수 끝에서 보존기간이 지난 사본을 지운다.
+    """
+    import os                                      # noqa: PLC0415 — 0600 생성에만 쓴다.
+
     root = config.settings.data_dir if data_dir is None else data_dir
     out_dir = root / EXPORTS_DIRNAME
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -204,9 +256,11 @@ def write_export_file(store: RiskStore, owner_sub: str, since: int = 0, data_dir
     while path.exists():                          # 같은 초에 두 번 부르면 뒤 호출이 앞 파일을 지우지 않게 한다.
         path = out_dir / f"{ts}-{seq}.jsonl"
         seq += 1
-    with path.open("w", encoding="utf-8") as fh:
-        for line in iter_lines(store, owner_sub, since, data_dir):
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        for line in iter_lines(store, owner_sub, since, data_dir, include_excluded):
             fh.write(line)
+    purge_old_exports(data_dir)
     return path
 
 
@@ -299,11 +353,15 @@ def import_jsonl(store: RiskStore, owner_sub: str, text: str) -> dict:
                     skipped += 1
                     conflicts.append({"table": table, "key": _key_of(row, pks), "reason": "owner_conflict"})
                     continue
+                # 본문에 없는 열은 INSERT 에서 뺀다 — 명시적 NULL 을 넣으면 NOT NULL DEFAULT 열(classification·
+                # lifecycle·status·mcp_visibility …)이 DEFAULT 를 못 받고 IntegrityError 로 눕는다. 내보내기는
+                # 언제나 전 열을 싣지만 손으로 만든 줄은 부분 열이라 이 갈래가 필요하다.
+                given = [c for c in cols if c in row]
                 try:
                     store.execute(
-                        f"INSERT INTO {table}({', '.join(_quote(c) for c in cols)})"
-                        f" VALUES ({', '.join('?' for _ in cols)})",
-                        tuple(values[c] for c in cols),
+                        f"INSERT INTO {table}({', '.join(_quote(c) for c in given)})"
+                        f" VALUES ({', '.join('?' for _ in given)})",
+                        tuple(values[c] for c in given),
                     )
                 except sqlite3.IntegrityError:
                     # PK 는 다른데 UNIQUE 만 겹치는 행(두 박스가 같은 과제를 각자 만든 경우) — 그 줄만 눕힌다.

@@ -18,12 +18,13 @@ TOOL_NAMES = [
     "risk_submit_panel_result",
 ]
 # 도구별 대표 인자와, 빈 원장에서 기대하는 오류 코드(없으면 None = 정상 응답).
+# 읽기 4종은 범위 밖 id 의 존재를 숨겨 not_visible 이고, 브리프는 caller 가 아니라 brief_token 대조다(§8.2.5).
 CALLS = [
-    ("risk_get_snapshot", {"snapshot_id": "s1", "part": "ir", "actor": "a@x"}, "E404"),
-    ("risk_get_diff", {"diff_id": "d1", "part": "summary", "actor": "a@x"}, "E404"),
-    ("risk_get_registry", {"target_key": "snap:s1", "actor": "a@x"}, "E404"),
-    ("risk_claims_for_ref", {"ref": "e:0123456789ab", "actor": "a@x"}, None),
-    ("risk_get_brief", {"target_key": "snap:s1", "actor": "a@x"}, "E404"),
+    ("risk_get_snapshot", {"snapshot_id": "s1", "part": "ir"}, "not_visible"),
+    ("risk_get_diff", {"diff_id": "d1", "part": "summary"}, "not_visible"),
+    ("risk_get_registry", {"target_key": "snap:s1"}, "not_visible"),
+    ("risk_claims_for_ref", {"ref": "e:0123456789ab"}, None),
+    ("risk_get_brief", {"target_key": "snap:s1", "brief_token": "nope"}, "brief_token_invalid"),
     ("risk_submit_panel_result", {"panel_id": "p1", "engine": "mcp", "decision_text": "…", "turns": [],
                                   "report_id": None, "actor": "someone@example.com"}, "E404"),
 ]
@@ -58,16 +59,17 @@ def test_server_name():
 def test_signatures_follow_plan():
     tools = {t.name: t for t in asyncio.run(srv.mcp.list_tools())}
     props = lambda n: tools[n].inputSchema["properties"]  # noqa: E731
-    # 조회 5종에는 소유권 해석용 actor(선택)가 붙는다 — 없으면 남의 행이 그대로 나간다(§6.11).
-    assert set(props("risk_get_snapshot")) == {"snapshot_id", "part", "actor"}
-    assert set(props("risk_get_diff")) == {"diff_id", "part", "actor"}
-    assert set(props("risk_get_registry")) == {"target_key", "status", "severity", "domain", "actor"}
-    assert set(props("risk_claims_for_ref")) == {"ref", "actor"}
-    assert set(props("risk_get_brief")) == {"target_key", "tier", "actor"}
+    # 읽기 4종에는 actor 가 없다 — 범위는 도달한 Authorization 이 정하고 자칭 문자열은 신원이 아니다(§8.2.5).
+    assert set(props("risk_get_snapshot")) == {"snapshot_id", "part"}
+    assert set(props("risk_get_diff")) == {"diff_id", "part"}
+    assert set(props("risk_get_registry")) == {"target_key", "status", "severity", "domain"}
+    assert set(props("risk_claims_for_ref")) == {"ref"}
+    assert set(props("risk_get_brief")) == {"target_key", "brief_token", "tier"}
     assert props("risk_get_brief")["tier"]["default"] == "B"
+    assert set(tools["risk_get_brief"].inputSchema["required"]) == {"target_key", "brief_token"}
     for name in ("risk_get_snapshot", "risk_get_diff", "risk_get_registry", "risk_claims_for_ref",
                  "risk_get_brief"):
-        assert "actor" not in set(tools[name].inputSchema.get("required") or ())
+        assert "actor" not in set(props(name))
     submit = props("risk_submit_panel_result")
     assert set(submit) == {"panel_id", "engine", "decision_text", "turns", "report_id", "actor", "model"}
     assert submit["model"]["default"] is None
@@ -87,36 +89,75 @@ def test_each_tool_answers_with_json_not_exception(name, args, error_code):
 
 def test_get_brief_tier_a_is_web_only():
     """Tier A 대표 패널은 웹 러너 전용이다(plan §6.11)."""
-    assert srv.risk_get_brief(target_key="snap:s1", tier="A") == {"error": "tier_a_web_only"}
+    assert srv.risk_get_brief(target_key="snap:s1", brief_token="t", tier="A") == {"error": "tier_a_web_only"}
 
 
-def test_read_tools_without_actor_do_not_leak(risk_store, monkeypatch):
-    """actor 를 해석할 수 없으면 남의 설계 데이터를 내주지 않는다(§6.11 — 미해석은 빈 결과)."""
+def _seed_private_target(store, monkeypatch):
+    """과제 1건(기본값 mcp_visibility='private') + 스냅샷 + 타깃."""
     import json as _json
 
     from app import common, routes
 
-    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    monkeypatch.setattr(routes, "get_store", lambda: store)
     now = common.now_epoch()
-    risk_store.execute(
+    store.execute(
+        "INSERT INTO rr_projects(id, owner_sub, code, name, created_at, updated_at)"
+        " VALUES ('p9', 'owner@a', 'PRJ-9', '비공개', ?, ?)", (now, now))
+    store.execute(
         "INSERT INTO rr_snapshots(id, owner_sub, project_id, ir_version, ir_hash, ir_json, source_ids_json,"
         " kinds_json, node_count, edge_count, created_at)"
         " VALUES ('s9', 'owner@a', 'p9', '1.0', 'h9', '{}', '[]', ?, 0, 0, ?)",
-        (_json.dumps(["mcad"]), now),
-    )
-    risk_store.execute(
+        (_json.dumps(["mcad"]), now))
+    store.execute(
         "INSERT INTO rr_targets(target_key, owner_sub, kind, ref_id, project_id, ir_hash, level,"
         " external_sync_json, created_at, updated_at) VALUES ('snap:s9', 'owner@a', 'snap', 's9', 'p9', 'h9',"
         " 'C0', '{}', ?, ?)", (now, now))
 
-    assert srv.risk_get_snapshot("s9", "ir")["error"] == "E404"          # actor 없음
-    assert srv.risk_get_snapshot("s9", "ir", actor="other@b")["error"] == "E404"   # 남의 것
-    assert srv.risk_get_registry("snap:s9")["error"] == "E404"
-    assert srv.risk_get_registry("snap:s9", actor="other@b")["error"] == "E404"
-    brief = srv.risk_get_brief("snap:s9")
-    assert brief["error"] == "E404" and brief["reason"] == "caller_unresolved"
+
+def test_read_tools_hide_projects_outside_the_caller_scope(risk_store, monkeypatch):
+    """기본값 private 과제는 게이트웨이 경유(service) caller 에게 not_visible 이다(plan §5.1 원칙 9·§8.2.5)."""
+    _seed_private_target(risk_store, monkeypatch)
+
+    assert srv.risk_get_snapshot("s9", "ir")["error"] == "not_visible"
+    assert srv.risk_get_registry("snap:s9")["error"] == "not_visible"
+    assert srv.risk_claims_for_ref("e:0123456789ab")["claims"] == []
+    # 존재를 숨긴 만큼 지표가 센다(§8.2.5 ③).
+    row = risk_store.query_one(
+        "SELECT value FROM rr_metrics WHERE dimension = 'global' AND metric = 'mcp_not_visible'")
+    assert row is not None and row["value"] == 2
     # 편성 부작용도 없다 — planned 패널이 만들어지지 않는다.
     assert risk_store.query("SELECT id FROM rr_panels") == []
+
+
+def test_org_visibility_opens_the_same_ids(risk_store, monkeypatch):
+    """소유자가 mcp_visibility='org' 로 토글하면 같은 id 가 열린다(§5.1 원칙 9)."""
+    _seed_private_target(risk_store, monkeypatch)
+    risk_store.execute("UPDATE rr_projects SET mcp_visibility = 'org' WHERE id = 'p9'")
+
+    assert srv.risk_get_snapshot("s9", "ir").get("error") != "not_visible"
+    assert srv.risk_get_registry("snap:s9").get("error") != "not_visible"
+
+
+def test_get_brief_needs_a_matching_unexpired_token(risk_store, monkeypatch):
+    """brief_token 은 없거나·다르거나·만료면 brief_token_invalid 이고 맞으면 그 패널 브리프가 열린다(§8.2.5)."""
+    from app import common, routes
+
+    _seed_private_target(risk_store, monkeypatch)
+    now = common.now_epoch()
+    risk_store.execute(
+        "INSERT INTO rr_panels(id, target_key, owner_sub, panel_no, tier, seats_json, rounds, status, created_at)"
+        " VALUES ('pan9', 'snap:s9', 'owner@a', 1, 'B', '[]', 2, 'planned', ?)", (now,))
+    token = routes.issue_brief_token(risk_store, "pan9")
+
+    assert srv.risk_get_brief("snap:s9", "")["error"] == "brief_token_invalid"
+    assert srv.risk_get_brief("snap:s9", token + "x")["error"] == "brief_token_invalid"
+    assert routes.resolve_brief_token("snap:s9", token)["id"] == "pan9"
+    # 만료된 토큰도 닫힌다.
+    risk_store.execute("UPDATE rr_panels SET brief_token_exp = ? WHERE id = 'pan9'", (now - 1,))
+    assert srv.risk_get_brief("snap:s9", token)["error"] == "brief_token_invalid"
+    # 원문은 저장하지 않는다 — 해시만 남는다.
+    row = risk_store.query_one("SELECT brief_token_hash FROM rr_panels WHERE id = 'pan9'")
+    assert row["brief_token_hash"] == routes.brief_token_hash(token) and token not in row["brief_token_hash"]
 
 
 def test_tools_call_the_same_functions_as_rest():

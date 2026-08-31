@@ -356,6 +356,26 @@ def test_e2e_full_flow(wired, ident, monkeypatch, tmp_path):
         " FROM rr_panels WHERE id = ?", (panel_id,)))
     assert panel["status"] == "planned"
 
+    # ── 10b. brief_token — REST 발급본으로만 MCP risk_get_brief 가 열린다(plan §8.2.5).
+    from app import mcp_server
+
+    assert "brief_token" not in payload["panels"][0]           # MCP 반환에는 토큰을 싣지 않는다
+    issued = routes.brief_payload(target_key, "B", owner_sub=OWNER, issue_token=True)
+    token = issued["panels"][0]["brief_token"]
+    assert token and store.query_one(
+        "SELECT brief_token_hash FROM rr_panels WHERE id = ?", (panel_id,))["brief_token_hash"] == \
+        routes.brief_token_hash(token)
+    assert mcp_server.risk_get_brief(target_key, token)["panels"][0]["panel_id"] == panel_id
+    assert mcp_server.risk_get_brief(target_key, token + "x")["error"] == "brief_token_invalid"
+    assert mcp_server.risk_get_brief(target_key, "")["error"] == "brief_token_invalid"
+    # 과제가 mcp_visibility='private'(기본값)이라 읽기 4종은 존재를 숨긴다(§5.1 원칙 9).
+    assert mcp_server.risk_get_snapshot(first["snapshot_id"], "ir")["error"] == "not_visible"
+    assert mcp_server.risk_get_registry(target_key)["error"] == "not_visible"
+    store.execute("UPDATE rr_projects SET mcp_visibility = 'org' WHERE id = ?", (project_id,))
+    assert mcp_server.risk_get_snapshot(first["snapshot_id"], "ir")["ir_hash"]
+    assert mcp_server.risk_get_registry(target_key)["target_key"] == target_key
+    store.execute("UPDATE rr_projects SET mcp_visibility = 'private' WHERE id = ?", (project_id,))
+
     # ── 11. 패널 실행 — 좌석 running 전환 후 FakePanelEngine 이 결정문을 돌려준다.
     assert planner.start_panel_seats(store, panel_id) == len(seats)
     assert store.query_one("SELECT status FROM rr_panels WHERE id = ?", (panel_id,))["status"] == "running"

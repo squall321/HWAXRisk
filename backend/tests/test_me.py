@@ -1,14 +1,16 @@
-# GET /api/me(익명·인증·box) · PUT /api/me/portal-pat — 익명 401, 422 4종(pat_email_mismatch·pat_audience·pat_expiring·pat_invalid), 정상 1행, null 삭제 0행
+# GET /api/me(익명·인증·box) · PUT /api/me/portal-pat — 익명 401, 422 4종(pat_email_mismatch·pat_audience·pat_expiring·pat_invalid), 정상 1행, null 삭제 0행 + 자격 Fernet 암복호·scopes/jti 계약(plan §8.2.7)
 from __future__ import annotations
 
 import base64
+import dataclasses
 import json
 import time
 
 import httpx
 import pytest
 
-from app import identity, routes
+from app import config, identity, routes
+from app.errors import AppError
 from app.risk_store import get_store
 
 TOKEN = "heax_pat_test_fake_bob"
@@ -19,15 +21,19 @@ AUTH = {"Authorization": f"Bearer {TOKEN}"}
 def _fake_jwt(**claims) -> str:
     """서명은 가짜(포털 검증은 MockTransport 가 대신한다). 기본 클레임은 정상 등록 조건."""
     payload = {"sub": "u-bob", "email": "bob@example.com", "aud": ["mcp-gateway", "heax-hub"], "scope": "api",
-               "groups": ["cae", "risk"], "exp": int(time.time()) + 30 * 86400, **claims}
+               "scopes": ["read"], "jti": "fake-jti-bob", "groups": ["cae", "risk"],
+               "exp": int(time.time()) + 30 * 86400, **claims}
     seg = lambda obj: base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")  # noqa: E731
     return f"{seg({'alg': 'HS256', 'typ': 'JWT'})}.{seg(payload)}.fakesig"
 
 
 def _rows() -> list[dict]:
+    """_user_credentials 의 신원 열만 읽는다 — PAT 저장 열 이름(portal_pat_enc)은 store DDL 소관이라 여기서 묶지 않는다."""
     store = get_store()
     with store._lock:
-        return [dict(r) for r in store.conn.execute("SELECT * FROM _user_credentials").fetchall()]
+        return [dict(r) for r in store.conn.execute(
+            "SELECT owner_sub, pat_sub, pat_email, pat_groups_json, pat_exp, registered_at"
+            " FROM _user_credentials").fetchall()]
 
 
 @pytest.fixture
@@ -66,7 +72,7 @@ def test_me_anonymous(client, wired):
     body = client.get("/api/me").json()
     assert body["anonymous"] is True and body["email"] is None and body["source"] == "none"
     assert body["portal_pat"] is None
-    assert set(body["box"]) == {"hostname", "secrets_valid"}
+    assert set(body["box"]) == {"hostname", "secrets_valid", "cred_key_present"}
     assert isinstance(body["box"]["hostname"], str) and body["box"]["secrets_valid"] is False
     assert set(body) == {"email", "display_name", "role", "organization", "anonymous", "source", "portal_pat", "box"}
 
@@ -124,7 +130,7 @@ def test_register_then_delete(client, wired):
 
     rows = _rows()
     assert len(rows) == 1
-    assert rows[0]["owner_sub"] == "bob@example.com" and rows[0]["portal_pat"] == pat
+    assert rows[0]["owner_sub"] == "bob@example.com"
     assert rows[0]["pat_sub"] == "u-bob" and json.loads(rows[0]["pat_groups_json"]) == ["cae", "risk"]
 
     me = client.get("/api/me", headers=AUTH).json()
@@ -139,6 +145,85 @@ def test_register_then_delete(client, wired):
     assert r.status_code == 200 and r.json() == {"registered": False, "email": None, "groups": [], "exp": None}
     assert _rows() == []
     assert client.get("/api/me", headers=AUTH).json()["portal_pat"] is None
+
+
+# ---------------------------------------------------------------- 자격 암호화(plan §8.2.7) — identity.* 단위
+FAKE_PAT = "fake.portal.pat-for-tests"
+
+
+def _claims(**over) -> dict:
+    return {"scopes": ["read"], "jti": "fake-jti-bob", **over}
+
+
+def test_encrypt_decrypt_round_trip():
+    blob = identity.encrypt_pat(FAKE_PAT)
+    assert isinstance(blob, bytes) and FAKE_PAT.encode() not in blob  # 원문이 암호문에 남지 않는다.
+    assert identity.decrypt_pat(blob) == FAKE_PAT
+    assert identity.encrypt_pat(FAKE_PAT) != blob  # Fernet 은 매번 다른 IV 를 쓴다.
+    assert identity.decrypt_pat(None) is None and identity.decrypt_pat(b"") is None
+    assert identity.decrypt_pat(b"garbage") is None
+
+
+def test_decrypt_after_key_rotation_is_none(monkeypatch):
+    """키를 갈아 끼우면 옛 행은 복호 불가 — 호출자는 자격 (a) 로 강등한다(전원 재등록 정책)."""
+    blob = identity.encrypt_pat(FAKE_PAT)
+    other = base64.urlsafe_b64encode(b"rotated-fake-key-32bytes-padding")
+    monkeypatch.setattr(config, "load_cred_key", lambda **kw: other)
+    assert identity.decrypt_pat(blob) is None
+
+
+@pytest.mark.parametrize("key", [None, b"not-a-fernet-key"], ids=["absent", "malformed"])
+def test_encrypt_without_usable_key_is_cred_key_absent(monkeypatch, key):
+    monkeypatch.setattr(config, "load_cred_key", lambda **kw: key)
+    with pytest.raises(AppError) as excinfo:
+        identity.encrypt_pat(FAKE_PAT)
+    assert excinfo.value.code == "cred_key_absent" and excinfo.value.http_status == 422
+    assert FAKE_PAT not in excinfo.value.message  # 오류 메시지에도 원문은 없다.
+    assert identity.decrypt_pat(b"anything") is None
+
+
+@pytest.mark.parametrize("scopes", [["read", "write"], ["write"], [], None, "read"],
+                         ids=["read_write", "write", "empty", "missing", "not_a_list"])
+def test_pat_scope_too_broad(scopes):
+    with pytest.raises(AppError) as excinfo:
+        identity.pat_scopes(_claims(scopes=scopes))
+    assert excinfo.value.code == "pat_scope_too_broad" and excinfo.value.http_status == 422
+
+
+def test_pat_scopes_read_only_passes():
+    assert identity.pat_scopes(_claims()) == ["read"]
+    assert identity.pat_scopes(_claims(scopes=[" READ "])) == ["read"]
+
+
+def test_pat_scopes_gate_can_be_turned_off(monkeypatch):
+    relaxed = dataclasses.replace(config.settings, risk_pat_require_read_only=False)
+    monkeypatch.setattr(config, "settings", relaxed)
+    assert identity.pat_scopes(_claims(scopes=["read", "write"])) == ["read", "write"]
+
+
+def test_credential_record_carries_scopes_and_jti():
+    rec = identity.credential_record(_claims(), FAKE_PAT)
+    assert set(rec) == {"portal_pat_enc", "pat_scopes_json", "pat_jti", "scopes"}
+    assert rec["scopes"] == ["read"] and json.loads(rec["pat_scopes_json"]) == ["read"]
+    assert rec["pat_jti"] == "fake-jti-bob"
+    assert identity.decrypt_pat(rec["portal_pat_enc"]) == FAKE_PAT
+    assert FAKE_PAT not in json.dumps({k: str(v) for k, v in rec.items()})
+
+
+def test_credential_record_requires_jti():
+    with pytest.raises(AppError) as excinfo:
+        identity.credential_record(_claims(jti=""), FAKE_PAT)
+    assert excinfo.value.code == "pat_invalid" and excinfo.value.http_status == 422
+
+
+def test_credential_pat_honors_revocation():
+    blob = identity.encrypt_pat(FAKE_PAT)
+    assert identity.credential_pat({"portal_pat_enc": blob, "revoked_at": None}) == FAKE_PAT
+    assert identity.credential_pat({"portal_pat_enc": blob, "revoked_at": 1}) is None
+    assert identity.credential_pat({"portal_pat_enc": None}) is None
+    assert identity.credential_pat(None) is None
+    # RiskStore.get_credential() 은 암호문을 portal_pat 키로 준다(경계 이름 바꾸기).
+    assert identity.credential_pat({"portal_pat": blob.decode(), "revoked_at": None}) == FAKE_PAT
 
 
 def test_box_mismatch_hides_credentials(client, wired, monkeypatch):

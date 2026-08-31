@@ -1,8 +1,9 @@
-# 데이터 경로 우선순위(HWAXRISK_DATA_DIR > HEAX_DATA_DIR > <리포>/data)·DB 파일명·디렉터리 생성·쓰기 불가 기동 중단·Settings 기본값(plan §8.2.6)·secrets.env
+# 데이터 경로 우선순위(HWAXRISK_DATA_DIR > HEAX_DATA_DIR > <리포>/data)·DB 파일명·디렉터리 생성·쓰기 불가 기동 중단·Settings 기본값(plan §8.2.6)·secrets.env·cred.key
 from __future__ import annotations
 
 import importlib
 import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,14 @@ import pytest
 from app import config
 
 _ENV_KEYS = ("HWAXRISK_DATA_DIR", "HEAX_DATA_DIR", "ROOT_PATH", "PORT", "HOST",
-             "HWAXRISK_PORTAL_BASE", "HWAXRISK_CONCURRENCY", "HWAXRISK_ADH_TEAM")
+             "HWAXRISK_PORTAL_BASE", "HWAXRISK_CONCURRENCY", "HWAXRISK_ADH_TEAM",
+             "HWAXRISK_MAX_LEAF", "HWAXRISK_MAX_INTERFACES", "HWAXRISK_SNAPSHOT_BUDGET_S",
+             "HWAXRISK_MCAD_DOMAINS", "HWAXRISK_SOURCE_DRIFT_BLOCK", "HWAXRISK_FIELD_EVIDENCE_LINES",
+             "HWAXRISK_BRIEF_TOKEN_TTL_S", "HWAXRISK_PAT_REQUIRE_READ_ONLY", "HWAXRISK_PAT_REVOCATION_POLL_S",
+             "HWAXRISK_ADMIN_ROLES", "HWAXRISK_EXPORT_ALLOWED_GROUPS", "HWAXRISK_EXPORT_RETAIN_DAYS",
+             "HWAXRISK_PRIOR_INCLUDE_HUMAN", "HWAXRISK_SUSPECT_TEXT_BLOCK",
+             "HWAXRISK_RECALL_REQUIRE_VERIFIED_ACTOR", "HWAXRISK_NEG_PRECEDENT_LINES",
+             "HWAXRISK_CLUSTER_DUP_SCAN")
 
 
 @pytest.fixture
@@ -101,6 +109,24 @@ def test_defaults_follow_plan(tmp_path, reload_config):
     assert s.risk_panel_llm_cap == 120
     assert s.risk_promote_distinct_models == 1
     assert s.adh_team is None and s.adh_group is None
+    # §8.2.6 이 더한 17행.
+    assert s.risk_admin_roles == ("admin",)
+    assert s.risk_export_allowed_groups == ()
+    assert s.risk_export_retain_days == 30
+    assert s.risk_prior_include_human is True
+    assert s.risk_suspect_text_block is True
+    assert s.risk_recall_require_verified_actor is True
+    assert s.risk_neg_precedent_lines == 6
+    assert s.risk_cluster_dup_scan is True
+    assert s.risk_max_leaf == 1500
+    assert s.risk_max_interfaces == 6000
+    assert s.risk_snapshot_budget_s == 180
+    assert s.risk_mcad_domains == ("mech", "cam", "xd", "disp", "sh")
+    assert s.risk_source_drift_block is False
+    assert s.risk_field_evidence_lines == 5
+    assert s.risk_brief_token_ttl_s == 900
+    assert s.risk_pat_require_read_only is True
+    assert s.risk_pat_revocation_poll_s == 60
 
 
 def test_env_overrides_with_hwaxrisk_prefix(tmp_path, reload_config):
@@ -112,6 +138,37 @@ def test_env_overrides_with_hwaxrisk_prefix(tmp_path, reload_config):
     assert s.portal_base == "http://portal.test:1"
     assert s.risk_concurrency == 1
     assert s.adh_team == "team-x"
+
+
+def test_new_settings_env_overrides(tmp_path, reload_config):
+    """§8.2.6 신규 17행의 형 변환 — 정수·csv·불리언."""
+    mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path), HWAXRISK_MAX_LEAF="40", HWAXRISK_MAX_INTERFACES="90",
+                        HWAXRISK_SNAPSHOT_BUDGET_S="600", HWAXRISK_MCAD_DOMAINS="mech, xd ",
+                        HWAXRISK_SOURCE_DRIFT_BLOCK="true", HWAXRISK_FIELD_EVIDENCE_LINES="0",
+                        HWAXRISK_BRIEF_TOKEN_TTL_S="60", HWAXRISK_PAT_REQUIRE_READ_ONLY="0",
+                        HWAXRISK_PAT_REVOCATION_POLL_S="5", HWAXRISK_ADMIN_ROLES="admin,curator",
+                        HWAXRISK_EXPORT_ALLOWED_GROUPS="cae,risk", HWAXRISK_EXPORT_RETAIN_DAYS="7",
+                        HWAXRISK_PRIOR_INCLUDE_HUMAN="no", HWAXRISK_SUSPECT_TEXT_BLOCK="off",
+                        HWAXRISK_RECALL_REQUIRE_VERIFIED_ACTOR="False", HWAXRISK_NEG_PRECEDENT_LINES="2",
+                        HWAXRISK_CLUSTER_DUP_SCAN="0")
+    s = mod.settings
+    assert (s.risk_max_leaf, s.risk_max_interfaces, s.risk_snapshot_budget_s) == (40, 90, 600)
+    assert s.risk_mcad_domains == ("mech", "xd")
+    assert s.risk_source_drift_block is True
+    assert (s.risk_field_evidence_lines, s.risk_brief_token_ttl_s, s.risk_pat_revocation_poll_s) == (0, 60, 5)
+    assert s.risk_pat_require_read_only is False
+    assert s.risk_admin_roles == ("admin", "curator") and s.risk_export_allowed_groups == ("cae", "risk")
+    assert s.risk_export_retain_days == 7 and s.risk_neg_precedent_lines == 2
+    assert s.risk_prior_include_human is False and s.risk_suspect_text_block is False
+    assert s.risk_recall_require_verified_actor is False and s.risk_cluster_dup_scan is False
+
+
+def test_bool_env_falls_back_on_garbage(tmp_path, reload_config):
+    """알 수 없는 값은 기본값 — 오타가 조용히 보안 스위치를 끄지 않게 한다."""
+    mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path), HWAXRISK_PAT_REQUIRE_READ_ONLY="maybe",
+                        HWAXRISK_SOURCE_DRIFT_BLOCK="")
+    assert mod.settings.risk_pat_require_read_only is True
+    assert mod.settings.risk_source_drift_block is False
 
 
 def test_load_secrets(tmp_path, caplog):
@@ -132,3 +189,48 @@ def test_load_secrets(tmp_path, caplog):
     with caplog.at_level("WARNING", logger="hwax_risk.config"):
         assert config.load_secrets(tmp_path) == got
     assert "0600" in caplog.text and "fake" not in caplog.text
+
+
+def test_cred_key_is_created_0600_and_reused(tmp_path, caplog):
+    """없으면 만들고(0600·Fernet 키 형식), 두 번째 호출은 같은 키를 돌려준다(plan §8.2.7)."""
+    path = config.cred_key_path(tmp_path)
+    assert path.name == "cred.key" and not path.exists()
+    with caplog.at_level("INFO", logger="hwax_risk.config"):
+        key = config.load_cred_key(tmp_path)
+    assert key is not None and len(key) == 44  # 32 바이트의 urlsafe base64.
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+    assert key.decode() not in caplog.text  # 키 값은 로그에 싣지 않는다.
+    assert config.load_cred_key(tmp_path) == key
+    from cryptography.fernet import Fernet
+
+    assert Fernet(key).decrypt(Fernet(key).encrypt(b"x")) == b"x"
+
+
+def test_cred_key_absent_without_create(tmp_path):
+    assert config.load_cred_key(tmp_path, create=False) is None
+    assert not config.cred_key_path(tmp_path).exists()
+
+
+def test_cred_key_warns_on_loose_mode(tmp_path, caplog):
+    key = config.load_cred_key(tmp_path)
+    config.cred_key_path(tmp_path).chmod(0o644)
+    with caplog.at_level("WARNING", logger="hwax_risk.config"):
+        assert config.load_cred_key(tmp_path) == key
+    assert "0600" in caplog.text and key.decode() not in caplog.text
+
+
+def test_cred_key_unwritable_dir_returns_none(tmp_path):
+    """읽기 전용 데이터 루트(SIF rootfs 등)에서는 None — 호출자가 422 cred_key_absent 로 거부한다."""
+    if os.geteuid() == 0:
+        pytest.skip("root 는 쓰기 권한 검사를 우회한다")
+    ro = tmp_path / "ro"
+    ro.mkdir()
+    ro.chmod(0o500)
+    try:
+        assert config.load_cred_key(ro) is None
+    finally:
+        ro.chmod(0o700)
+
+
+def test_cred_key_defaults_to_settings_data_dir():
+    assert config.cred_key_path() == Path(config.settings.data_dir) / "cred.key"

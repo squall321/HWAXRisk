@@ -97,6 +97,14 @@ export type PortalPatSummary = {
   email: string | null;
   groups: string[];
   exp: number | null;
+  /** 등록 시 강제된 PAT 스코프(계획 §8.2.7 — 읽기 전용 `['read']`). PAT 원문·암호문은 응답에 없다. */
+  scopes?: string[];
+  /** 포털이 폐기한 PAT 는 시각이 찍힌다 — 화면은 '이 PAT 는 폐기됨 — 재등록하세요' 를 띄운다. */
+  revoked_at?: number | null;
+  /** 폐기 대조 키(§8.2.7). 포털 토큰 페이지의 항목과 대조한다. */
+  jti?: string | null;
+  /** false 면 저장된 암호문을 현재 cred.key 로 풀 수 없다 — 화면엔 '등록됨' 인데 러너는 자격 (a) 로 강등된다. */
+  decryptable?: boolean;
 };
 
 export type Me = {
@@ -107,7 +115,8 @@ export type Me = {
   anonymous: boolean;
   source: "bearer" | "cookie" | "none";
   portal_pat: PortalPatSummary | null;
-  box: { hostname: string; secrets_valid: boolean };
+  /** cred_key_present=false 면 PAT 등록이 422 `cred_key_absent` 로 거부된다(§8.2.7). */
+  box: { hostname: string; secrets_valid: boolean; cred_key_present?: boolean };
 };
 
 export type Adapter = { kind: string; app: string | null; status: string };
@@ -630,6 +639,8 @@ export type BriefPanel = {
   panel_id: string;
   seats_json: JsonObject;
   delib_opts: JsonObject;
+  /** REST `GET /targets/{key}/brief` 만 싣는 1건짜리 열쇠 — L2 오케스트레이터가 MCP `risk_get_brief` 에 그대로 넘긴다(§8.2.5). */
+  brief_token?: string;
 };
 
 export type Brief = {

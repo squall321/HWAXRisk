@@ -9,9 +9,15 @@ import { Badge } from "../components/Badge";
 import { fmtEpoch } from "../format";
 import type { PortalPatSummary } from "../types";
 
-/** §8.2.4 가 고정한 동의 문구. 문장을 바꾸지 않는다. */
+/**
+ * §8.2.4 동의 문구 — 실제 집행 수준까지만 약속한다.
+ * 포털·게이트웨이는 아직 PAT 의 scopes 를 요청 경로에서 강제하지 않으므로(plan §10 #17 ② 결정 대기)
+ * '읽기 전용 자격을 맡겼다' 고 읽히게 두지 않는다. 폐기는 포털 토큰 페이지에서 한다.
+ */
 const CONSENT_TEXT =
-  "등록한 PAT 는 내 타깃의 무인 패널이 소스 앱을 읽을 때만 쓰이고(읽기 전용) 심의 결정문은 내 이름의 포털 대화로 저장됩니다.";
+  "등록한 PAT 는 내 타깃의 무인 패널이 소스 앱을 읽고 심의 결정문을 내 이름의 포털 대화로 저장하는 데만 쓰입니다. " +
+  "다만 포털은 아직 PAT 의 scopes 를 요청 단계에서 강제하지 않으므로 이 토큰 자체의 권한은 발급 시 선택한 범위보다 넓을 수 있습니다 — " +
+  "쓰기를 막으려면 포털 토큰 페이지에서 폐기하세요.";
 
 /** `PUT /me/portal-pat` 422 네 가지(§8.2.3) — 서버 code 를 사람이 읽는 문구와 다음 할 일로 바꾼다. */
 const PAT_ERRORS: Record<string, { title: string; detail: string }> = {

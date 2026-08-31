@@ -9,7 +9,7 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from app import config
+from app import config, identity
 from app.common import now_epoch
 
 # 프로토콜·예외의 정본은 러너다(러너가 이 모듈을 import 하지 않으므로 순환이 없다).
@@ -171,12 +171,14 @@ class PortalPanelEngine:
     def _credential(self, owner_sub: str | None) -> dict:
         if owner_sub and self.store is not None:
             row = self.store.get_credential(owner_sub)
-            if row and int(row.get("pat_exp") or 0) > now_epoch() + CREDENTIAL_MARGIN_S:
+            # 복호는 identity 가 한다 — 키 없음·폐기 표기·손상은 None 이고 그때는 자격 (a) 로 강등한다(§8.2.7).
+            pat = identity.credential_pat(row)
+            if pat and int(row.get("pat_exp") or 0) > now_epoch() + CREDENTIAL_MARGIN_S:
                 try:
                     groups = json.loads(row.get("pat_groups_json") or "[]")
                 except ValueError:
                     groups = []
-                return {"kind": "owner", "pat": row["portal_pat"], "email": row.get("pat_email"),
+                return {"kind": "owner", "pat": pat, "email": row.get("pat_email"),
                         "groups": groups if isinstance(groups, list) else []}
         secrets = config.load_secrets(self.settings.data_dir)
         pat = secrets.get("HWAXRISK_PORTAL_PAT")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import json
+import secrets
 import sqlite3
 import time
 from typing import Any
@@ -15,7 +16,7 @@ from pydantic import BaseModel, Field
 from app import brief as brief_module
 from app import config, diff as diff_module
 from app import export as export_module
-from app import identity, ir_builder, narrative, planner, ra_client, runner, sameas, taxonomy
+from app import identity, ir_builder, learning, narrative, planner, ra_client, requirements, runner, sameas, taxonomy
 from app import roster as roster_module
 from app import state as state_module
 from app import registry as registry_module
@@ -39,20 +40,59 @@ class PortalPatBody(BaseModel):
 
 
 def _pat_summary(row: dict | None) -> dict | None:
-    """_user_credentials 행 → {registered, email, groups[], exp}. PAT 값은 싣지 않는다."""
+    """_user_credentials 행 → {registered, email, groups[], exp, scopes[], revoked_at}. PAT 값·암호문은 싣지 않는다.
+
+    `revoked_at` 이 찍혀 있으면 SettingsPage 가 '이 PAT 는 폐기됨 — 재등록하세요' 를 띄운다(plan §8.2.7).
+    """
     if row is None:
         return None
     try:
         groups = json.loads(row.get("pat_groups_json") or "[]")
     except ValueError:
         groups = []
-    return {"registered": True, "email": row.get("pat_email"), "groups": groups, "exp": row.get("pat_exp")}
+    try:
+        scopes = json.loads(row.get("pat_scopes_json") or "[]")
+    except ValueError:
+        scopes = []
+    return {"registered": True, "email": row.get("pat_email"), "groups": groups, "exp": row.get("pat_exp"),
+            "scopes": scopes if isinstance(scopes, list) else [], "jti": row.get("pat_jti"),
+            "revoked_at": row.get("revoked_at"),
+            # 키가 바뀌었거나 사라져 복호가 안 되면 '등록됨' 인데 러너는 매번 자격 (a) 로 강등된다 — 그 사실을 드러낸다.
+            "decryptable": identity.credential_pat(row) is not None}
+
+
+def _caller_groups(ident: identity.Identity) -> list[str]:
+    """반출 자격 대조에 쓰는 이 호출자의 그룹 — heax role + 등록된 포털 PAT 의 groups 클레임.
+
+    `Identity` 에는 groups 열이 없다(heax /auth/me 가 role 만 준다) — 그래서 사용자가 스스로 등록한
+    PAT 의 groups 를 함께 본다. 둘 다 없으면 빈 목록이고 `risk_export_allowed_groups` 가 설정된 박스에서는
+    닫힘(403)이 기본이다.
+    """
+    groups = [ident.role] if ident.role else []
+    if ident.email:
+        row = get_store().get_credential(ident.email)
+        if row is not None:
+            groups += [str(g) for g in _loads(row.get("pat_groups_json"), []) if g]
+    return groups
 
 
 def _require_user(ident: identity.Identity) -> str:
     if ident.anonymous or not ident.email:
         raise AppError("unauthorized", "인증된 사용자만 호출할 수 있습니다.", 401)
     return ident.email
+
+
+def _audit(store: Any, owner_sub: str, *, scope: str, subject_id: str, action: str,
+           project_id: str | None = None, before: Any = None, after: Any = None,
+           reason: str | None = None, channel: str = "rest") -> None:
+    """rr_audit 1행(append-only, 사람 행위 한정 — plan §0.6). 열람(GET)은 남기지 않는다."""
+    store.execute(
+        "INSERT INTO rr_audit(id, owner_sub, actor, actor_verified, channel, scope, subject_id, project_id,"
+        " action, before_json, after_json, reason, at) VALUES (?,?,?,1,?,?,?,?,?,?,?,?,?)",
+        (new_uuid(), owner_sub, owner_sub, channel, scope, subject_id, project_id, action,
+         canonical_json(before) if before is not None else None,
+         canonical_json(after) if after is not None else None, reason, now_epoch()),
+    )
 
 
 def _decode_jwt_payload(pat: str) -> dict:
@@ -91,7 +131,9 @@ def get_me(request: Request, ident: identity.Identity = Depends(identity.current
     if not ident.anonymous and state.box_match:
         portal_pat = _pat_summary(get_store().get_credential(ident.email))
     payload["portal_pat"] = portal_pat
-    payload["box"] = {"hostname": state.hostname, "secrets_valid": state.secrets_valid}
+    payload["box"] = {"hostname": state.hostname, "secrets_valid": state.secrets_valid,
+                      # 부작용 없는 갈래로만 본다 — 여기서 키를 만들면 기존 암호문이 영구히 복호 불가가 된다.
+                      "cred_key_present": config.load_cred_key(create=False) is not None}
     return payload
 
 
@@ -118,8 +160,14 @@ def put_portal_pat(body: PortalPatBody, ident: identity.Identity = Depends(ident
     _verify_with_portal(body.pat)
 
     groups = claims.get("groups") if isinstance(claims.get("groups"), list) else []
-    store.upsert_credential(owner_sub, body.pat, claims.get("sub"), email, json.dumps(groups, ensure_ascii=False), int(exp))
-    return {"registered": True, "email": email, "groups": groups, "exp": int(exp)}
+    # 저장은 Fernet 암호문이다(plan §8.2.7) — scopes 검사·jti 추출·암호화를 identity 가 한 곳에서 한다.
+    rec = identity.credential_record(claims, body.pat)
+    store.upsert_credential(
+        owner_sub, rec["portal_pat_enc"].decode("ascii"), claims.get("sub"), email,
+        json.dumps(groups, ensure_ascii=False), int(exp),
+        pat_scopes_json=rec["pat_scopes_json"], pat_jti=rec["pat_jti"])
+    return {"registered": True, "email": email, "groups": groups, "exp": int(exp),
+            "scopes": rec["scopes"], "jti": rec["pat_jti"]}
 
 
 @router.get("/meta/taxonomy")
@@ -223,6 +271,67 @@ def _panel_row(panel_id: str, owner_sub: str | None) -> dict:
     return dict(row)
 
 
+# ================================================================ MCP 읽기 범위(plan §5.1 원칙 9 · §8.2.5)
+# 읽기 4종의 범위는 자칭 `actor` 가 아니라 /mcp 에 실제로 도달한 Authorization 이 정한다. 게이트웨이는 호출자
+# 토큰을 downstream 으로 넘기지 않고 자기 백엔드 헤더로 갈아 끼우므로 그 경로의 caller 는 언제나 service 이고,
+# 사람이 개인 heax_pat 로 앱 MCP 를 직접 등록해 부른 경우에만 그 사람의 범위가 열린다. 해석 실패는 service 다(닫힘).
+SERVICE_CALLER: dict[str, Any] = {"kind": "service", "email": None}
+
+
+def mcp_caller(request: Any) -> dict:
+    """이번 /mcp 요청의 caller — 신원이 해석되면 `user`, 토큰 없음·401·불통은 `service`."""
+    if request is None:
+        return dict(SERVICE_CALLER)
+    ident = identity.current(request)
+    if ident.anonymous or not ident.email:
+        return dict(SERVICE_CALLER)
+    return {"kind": "user", "email": ident.email}
+
+
+def visible_projects(caller: dict) -> list[str]:
+    """caller 가 MCP 로 볼 수 있는 과제 id — user 는 자기 소유 ∪ 멤버 ∪ `mcp_visibility='org'`, service 는 org 만."""
+    email = caller.get("email") if caller.get("kind") == "user" else None
+    if email:
+        rows = get_store().query(
+            "SELECT id FROM rr_projects WHERE owner_sub = ? OR mcp_visibility = 'org'"
+            " OR id IN (SELECT project_id FROM rr_project_members WHERE email = ?) ORDER BY id",
+            (email, email))
+    else:
+        rows = get_store().query("SELECT id FROM rr_projects WHERE mcp_visibility = 'org' ORDER BY id")
+    return [r["id"] for r in rows]
+
+
+def _not_visible(what: str) -> AppError:
+    """범위 밖 id 는 존재를 숨긴다 + `rr_metrics(dimension='global', metric='mcp_not_visible')` 1 증가."""
+    get_store().execute(
+        "INSERT INTO rr_metrics(period, dimension, key, metric, value, n, computed_at)"
+        " VALUES ('all','global','global','mcp_not_visible',1,1,?)"
+        " ON CONFLICT(period, dimension, key, metric) DO UPDATE SET value = value + 1, n = n + 1,"
+        " computed_at = excluded.computed_at", (now_epoch(),))
+    return AppError("not_visible", f"볼 수 없는 id 입니다 — {what}.", 404)
+
+
+def mcp_scope_owner(kind: str, key: str, caller: dict) -> str:
+    """읽기 4종의 문지기 — 통과하면 그 행의 owner_sub, 범위 밖·부재는 `not_visible`(존재를 숨긴다).
+
+    diff 는 base·target 두 과제가 모두 범위 안이어야 열린다(한쪽만 공개된 비교는 닫힌 쪽을 흘린다).
+    """
+    store = get_store()
+    if kind == "snapshot":
+        row = store.query_one("SELECT owner_sub, project_id FROM rr_snapshots WHERE id = ?", (key,))
+        projects = [row["project_id"]] if row is not None else []
+    elif kind == "diff":
+        row = store.query_one(
+            "SELECT owner_sub, base_project_id, target_project_id FROM rr_diffs WHERE id = ?", (key,))
+        projects = [row["base_project_id"], row["target_project_id"]] if row is not None else []
+    else:
+        row = store.query_one("SELECT owner_sub, project_id FROM rr_targets WHERE target_key = ?", (key,))
+        projects = [row["project_id"]] if row is not None else []
+    if row is None or not all(p in set(visible_projects(caller)) for p in projects):
+        raise _not_visible(key)
+    return row["owner_sub"]
+
+
 # ================================================================ 과제(plan §8.2.3)
 class ProjectBody(BaseModel):
     code: str = Field(max_length=40)
@@ -239,13 +348,21 @@ def create_project(body: ProjectBody, ident: identity.Identity = Depends(identit
     scope = body.adh_scope or {}
     now = now_epoch()
     project_id = new_uuid()
+    store = get_store()
     try:
-        get_store().execute(
-            "INSERT INTO rr_projects(id, owner_sub, code, name, stage, predecessor_project_id, adh_team,"
-            " adh_group, character_status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,'seed',?,?)",
-            (project_id, owner_sub, body.code, body.name, body.stage, body.predecessor_project_id,
-             scope.get("team"), scope.get("group"), now, now),
-        )
+        # 과제 행과 owner 멤버 행은 한 트랜잭션이다(risk_store rr_project_members 불변식 — owner 행 정확히 1건).
+        with store.tx():
+            store.execute(
+                "INSERT INTO rr_projects(id, owner_sub, code, name, stage, predecessor_project_id, adh_team,"
+                " adh_group, character_status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,'seed',?,?)",
+                (project_id, owner_sub, body.code, body.name, body.stage, body.predecessor_project_id,
+                 scope.get("team"), scope.get("group"), now, now),
+            )
+            store.execute(
+                "INSERT INTO rr_project_members(project_id, owner_sub, email, role, added_by, added_at,"
+                " updated_at) VALUES (?,?,?,'owner',?,?,?)",
+                (project_id, owner_sub, owner_sub, owner_sub, now, now),
+            )
     except sqlite3.IntegrityError as exc:
         raise AppError("E409", f"이미 있는 과제 코드입니다 — {body.code}.", 409) from exc
     return _project_row(project_id, owner_sub)
@@ -333,6 +450,165 @@ def get_project(project_id: str, ident: identity.Identity = Depends(identity.cur
     }
 
 
+ROLE_RANK: dict[str, int] = {"viewer": 1, "editor": 2, "owner": 3}
+PROJECT_PATCH_COLS: tuple[str, ...] = (
+    "lifecycle", "closed_at", "corpus_excluded", "excluded_reason", "classification",
+    "mcp_visibility", "product_code", "product_refs_json", "predecessor_product_code",
+)
+LIFECYCLES = ("active", "shipped", "cancelled", "archived")
+CLASSIFICATIONS = ("internal", "confidential")
+MCP_VISIBILITIES = ("private", "org")
+EXCLUDED_REASONS = ("fixture", "misregistered", "duplicate", "user")
+
+
+def project_role(project_id: str, email: str) -> str | None:
+    """그 과제에서 이 사람의 role — 소유자는 언제나 owner, 아니면 rr_project_members 행(없으면 None)."""
+    store = get_store()
+    row = store.query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,))
+    if row is None:
+        return None
+    if row["owner_sub"] == email:
+        return "owner"
+    member = store.query_one(
+        "SELECT role FROM rr_project_members WHERE project_id = ? AND email = ?", (project_id, email))
+    return member["role"] if member is not None else None
+
+
+def require_role(project_id: str, email: str, need: str) -> str:
+    """`need` 이상의 권한을 요구한다 — 멤버가 아니면 404(존재를 숨긴다), 등급 미달은 403 role_insufficient."""
+    role = project_role(project_id, email)
+    if role is None:
+        raise AppError("E404", f"과제({project_id}) 를 찾을 수 없습니다.", 404)
+    if ROLE_RANK.get(role, 0) < ROLE_RANK.get(need, 9):
+        raise AppError("role_insufficient", f"이 작업에는 {need} 이상 권한이 필요합니다(현재 {role}).", 403)
+    return role
+
+
+class ProjectPatchBody(BaseModel):
+    lifecycle: str | None = None
+    closed_at: int | None = None
+    corpus_excluded: bool | None = None
+    excluded_reason: str | None = None
+    classification: str | None = None
+    mcp_visibility: str | None = None
+    product_code: str | None = None
+    product_refs_json: list | None = None
+    predecessor_product_code: str | None = None
+
+
+@router.patch("/projects/{project_id}")
+def patch_project(project_id: str, body: ProjectPatchBody,
+                  ident: identity.Identity = Depends(identity.current)) -> dict:
+    """과제 메타 갱신(editor, `mcp_visibility` 는 owner 만) — plan §8.2.3.
+
+    `corpus_excluded` 토글은 같은 트랜잭션에서 delta 선례·패턴을 재합산하고,
+    `mcp_visibility` 변경은 `external_sync.ra` 의 `withheld → pending` 을 풀고 감사 1행을 남긴다(§5.5.3).
+    """
+    owner_sub = _require_user(ident)
+    role = require_role(project_id, owner_sub, "editor")
+    store = get_store()
+    before = store.query_one(
+        "SELECT id, owner_sub, status, lifecycle, corpus_excluded, excluded_reason, classification,"
+        " mcp_visibility, product_code, product_refs_json, predecessor_product_code, closed_at"
+        " FROM rr_projects WHERE id = ?", (project_id,))
+    if before is None:
+        raise AppError("E404", f"과제({project_id}) 를 찾을 수 없습니다.", 404)
+    if before["status"] == "purged":
+        raise AppError("project_purged", "회수된 과제는 고칠 수 없습니다.", 409)
+
+    patch = body.model_dump(exclude_unset=True)
+    if body.mcp_visibility is not None and role != "owner":
+        raise AppError("role_insufficient", "mcp_visibility 는 과제 소유자만 바꿀 수 있습니다.", 403)
+    if body.lifecycle is not None and body.lifecycle not in LIFECYCLES:
+        raise AppError("E100", f"lifecycle 은 {list(LIFECYCLES)} 중 하나여야 합니다.", 422)
+    if body.classification is not None and body.classification not in CLASSIFICATIONS:
+        raise AppError("E100", f"classification 은 {list(CLASSIFICATIONS)} 중 하나여야 합니다.", 422)
+    if body.mcp_visibility is not None and body.mcp_visibility not in MCP_VISIBILITIES:
+        raise AppError("E100", f"mcp_visibility 는 {list(MCP_VISIBILITIES)} 중 하나여야 합니다.", 422)
+    if (body.classification == "internal" and before["classification"] == "confidential"
+            and role != "owner"):
+        raise AppError("classification_downgrade", "confidential → internal 은 과제 소유자만 할 수 있습니다.", 422)
+    excluded_now = bool(patch["corpus_excluded"]) if "corpus_excluded" in patch else bool(before["corpus_excluded"])
+    reason_now = patch.get("excluded_reason", before["excluded_reason"])
+    if excluded_now and not (reason_now or "").strip():
+        raise AppError("excluded_reason_required", "corpus_excluded=1 에는 excluded_reason 이 필요합니다.", 422)
+    if reason_now and reason_now not in EXCLUDED_REASONS:
+        raise AppError("E100", f"excluded_reason 은 {list(EXCLUDED_REASONS)} 중 하나여야 합니다.", 422)
+
+    values: dict[str, Any] = {}
+    for col in PROJECT_PATCH_COLS:
+        if col not in patch:
+            continue
+        value = patch[col]
+        if col == "corpus_excluded":
+            value = 1 if value else 0
+        elif col == "product_refs_json":
+            value = canonical_json(value) if value is not None else None
+        values[col] = value
+    if not values:
+        raise AppError("E100", "바꿀 필드가 없습니다.", 422)
+    # lifecycle 이 active 를 떠나면 closed_at 을 기본으로 찍는다(호출자가 명시하면 그 값이 이긴다).
+    if values.get("lifecycle") not in (None, "active") and "closed_at" not in values:
+        values["closed_at"] = now_epoch()
+
+    corpus_changed = "corpus_excluded" in values and values["corpus_excluded"] != int(before["corpus_excluded"] or 0)
+    visibility_changed = "mcp_visibility" in values and values["mcp_visibility"] != before["mcp_visibility"]
+    now = now_epoch()
+    recomputed = {"delta_priors_rows": 0, "patterns_rows": 0}
+    resynced = {"targets": 0, "ra_ops_released": 0}
+
+    with store.tx():
+        assignments = ", ".join(f"{col} = ?" for col in values)
+        params = [*values.values()]
+        if visibility_changed:
+            assignments += ", mcp_visibility_by = ?, mcp_visibility_at = ?"
+            params += [owner_sub, now]
+        store.execute(f"UPDATE rr_projects SET {assignments}, updated_at = ? WHERE id = ?",
+                      (*params, now, project_id))
+        if corpus_changed:
+            # 코퍼스 필터가 바뀌면 delta 선례·패턴의 분모가 바뀐다(§0.6 코퍼스 필터).
+            recomputed["delta_priors_rows"] = int(learning.recompute_label_priors(store, now=now) or 0)
+            mined = learning.mine_patterns(store, owner_sub=owner_sub, now=now) or {}
+            recomputed["patterns_rows"] = len(mined.get("created") or ()) + len(mined.get("updated") or ())
+        if visibility_changed:
+            resynced = _release_withheld(store, project_id, now)
+            _audit(store, owner_sub, scope="project", subject_id=project_id, project_id=project_id,
+                   action="project.mcp_visibility", before={"mcp_visibility": before["mcp_visibility"]},
+                   after={"mcp_visibility": values["mcp_visibility"]})
+        else:
+            _audit(store, owner_sub, scope="project", subject_id=project_id, project_id=project_id,
+                   action="project.update", before={k: before[k] for k in values},
+                   after=dict(values))
+
+    row = store.query_one(
+        "SELECT id, owner_sub, code, name, stage, lifecycle, closed_at, corpus_excluded, excluded_reason,"
+        " classification, mcp_visibility, product_code, product_refs_json, predecessor_product_code,"
+        " status, created_at, updated_at FROM rr_projects WHERE id = ?", (project_id,))
+    out = {"project": dict(row), "recomputed": recomputed}
+    if visibility_changed:
+        out["resynced"] = resynced
+    return out
+
+
+def _release_withheld(store: Any, project_id: str, now: int) -> dict:
+    """`mcp_visibility='org'` 로 열린 과제의 타깃에서 `external_sync.ra` 의 withheld 를 pending 으로 되돌린다."""
+    released_targets = 0
+    released_ops = 0
+    for row in store.query(
+        "SELECT target_key, external_sync_json FROM rr_targets WHERE project_id = ?", (project_id,)):
+        sync = ra_client.load_external_sync(store, row["target_key"])
+        channel = sync.get("ra") or {}
+        if channel.get("state") != "withheld":
+            continue
+        channel["state"] = "pending"
+        channel["next_at"] = now
+        sync["ra"] = channel
+        ra_client.save_external_sync(store, row["target_key"], sync)
+        released_targets += 1
+        released_ops += len(channel.get("pending_ops") or [])
+    return {"targets": released_targets, "ra_ops_released": released_ops}
+
+
 class SourceBody(BaseModel):
     kind: str
     app_key: str | None = None
@@ -376,6 +652,35 @@ class SnapshotBody(BaseModel):
     kinds: list[str] = Field(default_factory=list)
     report_ids: list[int] | None = None
     detect_result_file_id: str | None = None
+    # 상한 초과 모델을 그래도 동결하겠다는 명시 요청(그때 예산은 600 s 다, plan §2.11.3).
+    allow_large: bool = False
+
+
+LARGE_BUDGET_S = 600
+
+
+def _check_model_size(captured: dict, allow_large: bool) -> None:
+    """리프·계면 수가 `risk_max_leaf`·`risk_max_interfaces` 를 넘으면 409 `model_too_large`(plan §2.11.3)."""
+    leaves = 0
+    interfaces = 0
+    for result in captured.get("results") or ():
+        stats = (result.get("source") or {}).get("stats") or {}
+        leaves += int(stats.get("leaf_instances") or 0)
+        interfaces += int(stats.get("interfaces") or 0)
+    max_leaf = int(config.settings.risk_max_leaf)
+    max_iface = int(config.settings.risk_max_interfaces)
+    if leaves <= max_leaf and interfaces <= max_iface:
+        return
+    if allow_large:
+        return
+    raise AppError(
+        "model_too_large",
+        f"모델이 상한을 넘습니다 — 리프 {leaves}/{max_leaf} · 계면 {interfaces}/{max_iface}."
+        " 그래도 동결하려면 allow_large=true 로 다시 보내세요(예산 600 s).",
+        409,
+        detail={"leaf": leaves, "interfaces": interfaces, "max_leaf": max_leaf,
+                "max_interfaces": max_iface, "budget_s": LARGE_BUDGET_S},
+    )
 
 
 @router.post("/projects/{project_id}/snapshots")
@@ -385,6 +690,7 @@ def create_snapshot(project_id: str, body: SnapshotBody,
 
     rr_jobs 는 타깃 패널 전용 표라 여기서는 백그라운드 잡을 만들지 않고 동기로 캡처한 뒤
     `{snapshot_id, ir_hash, reused, partial, blocked, gates_summary, degraded}` 를 그대로 돌려준다.
+    202 `{job_id}`·`rr_snapshot_jobs` 상태기계는 미착수다(§2.11.3) — 모델 상한 검문만 먼저 붙였다.
     """
     owner_sub = _require_user(ident)
     _project_row(project_id, owner_sub)
@@ -392,7 +698,7 @@ def create_snapshot(project_id: str, body: SnapshotBody,
     # 만료 PAT 는 쓰지 않는다 — 값이 있기만 하면 쓰면 서비스 PAT 폴백이 죽어 게이트웨이 401 로 강등된다
     # (runner.resolve_credential·roster.credential 과 같은 규칙).
     credential = store.get_credential(owner_sub) or {}
-    portal_pat = str(credential.get("portal_pat") or "") or None
+    portal_pat = identity.credential_pat(credential)
     if int(credential.get("pat_exp") or 0) <= now_epoch() + runner.CREDENTIAL_MARGIN_S:
         portal_pat = None
     channels = adapters_registry.clients_from_settings(
@@ -409,6 +715,7 @@ def create_snapshot(project_id: str, body: SnapshotBody,
         for channel in (channels["mcp"], channels["rest"]):
             if channel is not None:
                 channel.close()
+    _check_model_size(captured, body.allow_large)
     prior = store.query_one(
         "SELECT id FROM rr_snapshots WHERE project_id = ? ORDER BY created_at DESC, id LIMIT 1", (project_id,))
     return ir_builder.freeze_snapshot(
@@ -458,6 +765,80 @@ def add_dim(project_id: str, body: DimBody, ident: identity.Identity = Depends(i
         " WHERE project_id = ? AND name = ?", (project_id, body.name))
     vocab = store.query_one("SELECT name, kind, unit, vocab_version FROM rr_dim_vocab WHERE name = ?", (body.name,))
     return {**dict(row), "vocab": dict(vocab) if vocab else None}
+
+
+# ================================================================ 요구 규격(plan §2.8b · §8.2.3 4행)
+class RequirementItem(BaseModel):
+    kind: str
+    name: str
+    op: str | None = None
+    value_json: Any = None
+    unit: str | None = None
+    source_ref: str | None = None
+
+
+class RequirementDecision(BaseModel):
+    status: str
+    waive_reason: str | None = Field(default=None, max_length=300)
+
+
+class InheritBody(BaseModel):
+    from_project_id: str
+
+
+@router.get("/projects/{project_id}/requirements")
+def get_requirements(project_id: str, kind: str | None = None, status: str | None = None,
+                     ident: identity.Identity = Depends(identity.current)) -> dict:
+    """과제의 요구 목록(kind·status 필터). 판정·여유 계산은 state 가 하고 여기서는 원장만 읽는다."""
+    owner_sub = _require_user(ident)
+    _project_row(project_id, owner_sub)
+    return requirements.list_requirements(get_store(), project_id, kind=kind, status=status)
+
+
+@router.post("/projects/{project_id}/requirements")
+def post_requirements(project_id: str, body: list[RequirementItem],
+                      ident: identity.Identity = Depends(identity.current)) -> dict:
+    """요구 배열 UPSERT — `UNIQUE(project_id, kind, name)` 기준. 전건 선검사라 한 건이라도 틀리면 아무 행도 쓰지 않는다."""
+    owner_sub = _require_user(ident)
+    project = _project_row(project_id, owner_sub)
+    # owner_sub 는 호출자가 아니라 과제 소유 앵커다(plan §5.2.1 — 하위 표의 owner_sub 는 rr_projects 값의 복제다).
+    return requirements.upsert_requirements(
+        get_store(), project_id, project["owner_sub"], [item.model_dump() for item in body])
+
+
+@router.put("/requirements/{requirement_id}")
+def put_requirement(requirement_id: str, body: RequirementDecision,
+                    ident: identity.Identity = Depends(identity.current)) -> dict:
+    """요구 1건의 status 결정(candidate|confirmed|waived). waived 는 사유 필수이고 rr_audit 1행이 남는다."""
+    owner_sub = _require_user(ident)
+    store = get_store()
+    before = store.query_one(
+        "SELECT id, project_id, status, waive_reason FROM rr_requirements WHERE id = ?", (requirement_id,))
+    if before is None:
+        raise AppError("E404", f"요구를 찾을 수 없습니다 — {requirement_id}.", 404)
+    _project_row(before["project_id"], owner_sub)
+    updated = requirements.decide_requirement(
+        store, requirement_id, status=body.status, waive_reason=body.waive_reason, actor_sub=owner_sub)
+    _audit(store, owner_sub, scope="project", subject_id=requirement_id, project_id=before["project_id"],
+           action="requirement.decide",
+           before={"status": before["status"], "waive_reason": before["waive_reason"]},
+           after={"status": updated["status"], "waive_reason": updated["waive_reason"]},
+           reason=body.waive_reason)
+    return updated
+
+
+@router.post("/projects/{project_id}/requirements/inherit")
+def post_requirements_inherit(project_id: str, body: InheritBody,
+                              ident: identity.Identity = Depends(identity.current)) -> dict:
+    """계보 과제의 요구를 복사한다(status='candidate'·inherited_from, 멱등). 원본에도 조회 규약을 먼저 적용한다."""
+    owner_sub = _require_user(ident)
+    store = get_store()
+    project = _project_row(project_id, owner_sub)
+    source = store.query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (body.from_project_id,))
+    # 존재 여부는 모듈이 404 source_project_not_found 로 가른다 — 여기서는 있는 과제의 조회 규약만 본다.
+    if source is not None and source["owner_sub"] != owner_sub:
+        raise AppError("not_a_member", f"승계 원본 과제를 볼 수 없습니다 — {body.from_project_id}.", 403)
+    return requirements.inherit_requirements(store, project_id, project["owner_sub"], body.from_project_id)
 
 
 class LedgerItem(BaseModel):
@@ -556,6 +937,105 @@ def get_rule_hits(snapshot_id: str, ident: identity.Identity = Depends(identity.
         raise AppError("E404", f"rr_state 가 없습니다 — {snapshot_id}.", 404)
     return {"snapshot_id": snapshot_id, "rule_version": row["rule_version"],
             "rule_hits": _loads(row["rule_hits_json"], [])}
+
+
+# ---------------------------------------------------------------- 게이트 ack(plan §8.2.3 · §3.2.2)
+GATE_KEYS: tuple[str, ...] = ("G1", "G2", "G3", "G4", "G5", "G6", "G7")
+GATE_ACK_REASON_MAX = 300
+
+
+class GateAckBody(BaseModel):
+    reason: str = Field(default="", max_length=GATE_ACK_REASON_MAX)
+    gates_hash: str | None = None
+
+
+def _gate_state(snapshot_id: str, gate: str, owner_sub: str) -> tuple[dict, dict]:
+    """(gates_json 전체, 그 게이트 레코드). 어휘 밖·pass=true·G6 은 422, 상태 부재는 404."""
+    if gate not in GATE_KEYS:
+        raise AppError("E100", f"게이트는 {list(GATE_KEYS)} 중 하나여야 합니다 — {gate!r}.", 422)
+    _snapshot_row(snapshot_id, owner_sub)
+    row = get_store().query_one("SELECT gates_json FROM rr_states WHERE snapshot_id = ?", (snapshot_id,))
+    if row is None:
+        raise AppError("E404", f"rr_state 가 없습니다 — {snapshot_id}.", 404)
+    gates = _loads(row["gates_json"], {})
+    record = gates.get(gate)
+    if not isinstance(record, dict):
+        raise AppError("E404", f"이 스냅샷에 {gate} 레코드가 없습니다.", 404)
+    # G6 은 blocking 이라 ack 로 넘길 수 없다 — pass=false 든 unknown_blocking 이든 같다(§2.12).
+    if record.get("blocking") or gate == "G6":
+        raise AppError("gate_blocking", f"{gate} 는 차단 게이트라 ack 로 넘길 수 없습니다 — 소스를 고쳐 재캡처하세요.", 422)
+    if record.get("pass") is True:
+        raise AppError("gate_passing", f"{gate} 는 pass 라 ack 할 것이 없습니다.", 422)
+    return gates, record
+
+
+def _save_gate_ack_state(store: Any, snapshot_id: str, gates: dict, gate: str, ack: dict | None) -> dict:
+    """gates_json 의 그 게이트 한 칸에 ack 3필드를 반영해 되쓴다(판정 pass 는 바뀌지 않는다, §3.2.2)."""
+    record = dict(gates[gate])
+    record["ack_by"] = (ack or {}).get("by")
+    record["ack_at"] = (ack or {}).get("at")
+    record["ack_reason"] = (ack or {}).get("reason")
+    gates[gate] = record
+    store.execute("UPDATE rr_states SET gates_json = ? WHERE snapshot_id = ?",
+                  (canonical_json(gates), snapshot_id))
+    return record
+
+
+@router.post("/snapshots/{snapshot_id}/gates/{gate}/ack")
+def post_gate_ack(snapshot_id: str, gate: str, body: GateAckBody,
+                  ident: identity.Identity = Depends(identity.current)) -> dict:
+    """fail 게이트에 사유를 적고 진행한다. ack 가 붙어도 `pass` 는 false 로 남는다(plan §3.2.2)."""
+    owner_sub = _require_user(ident)
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise AppError("reason_required", "ack 에는 사유가 필요합니다(≤300자).", 422)
+    gates, record = _gate_state(snapshot_id, gate, owner_sub)
+    current_hash = state_module.gates_hash(gates)
+    if body.gates_hash and body.gates_hash != current_hash:
+        raise AppError("gates_hash_stale", "그 사이 게이트가 재계산됐습니다 — 다시 읽고 ack 하세요.", 409,
+                       detail={"gates_hash": current_hash})
+    store = get_store()
+    now = now_epoch()
+    with store.tx():
+        store.execute(
+            "INSERT INTO rr_gate_acks(snapshot_id, gate, owner_sub, diff_id, ack_by, ack_at, ack_reason,"
+            " gates_hash) VALUES (?,?,?,NULL,?,?,?,?)"
+            " ON CONFLICT(snapshot_id, gate) DO UPDATE SET ack_by=excluded.ack_by, ack_at=excluded.ack_at,"
+            " ack_reason=excluded.ack_reason, gates_hash=excluded.gates_hash,"
+            " revoked_by=NULL, revoked_at=NULL",
+            (snapshot_id, gate, owner_sub, owner_sub, now, reason, current_hash),
+        )
+        record = _save_gate_ack_state(store, snapshot_id, gates, gate,
+                                      {"by": owner_sub, "at": now, "reason": reason})
+        _audit(store, owner_sub, scope="snapshot", subject_id=snapshot_id, action="gate.ack",
+               after={"gate": gate, "gates_hash": current_hash}, reason=reason)
+    return {"gate": gate, "ack_by": owner_sub, "ack_at": now, "ack_reason": reason,
+            "gates_hash": current_hash, "pass": record.get("pass")}
+
+
+@router.delete("/snapshots/{snapshot_id}/gates/{gate}/ack")
+def delete_gate_ack(snapshot_id: str, gate: str,
+                    ident: identity.Identity = Depends(identity.current)) -> dict:
+    """ack 취소 — 행을 지우지 않고 `revoked_by`·`revoked_at` 을 찍는다(plan §5.2.1 삭제 없음)."""
+    owner_sub = _require_user(ident)
+    gates, _ = _gate_state(snapshot_id, gate, owner_sub)
+    store = get_store()
+    row = store.query_one(
+        "SELECT ack_by, ack_at, revoked_at FROM rr_gate_acks WHERE snapshot_id = ? AND gate = ?",
+        (snapshot_id, gate))
+    if row is None or row["revoked_at"] is not None:
+        raise AppError("E404", f"취소할 ack 가 없습니다 — {snapshot_id}/{gate}.", 404)
+    now = now_epoch()
+    with store.tx():
+        store.execute(
+            "UPDATE rr_gate_acks SET revoked_by = ?, revoked_at = ? WHERE snapshot_id = ? AND gate = ?",
+            (owner_sub, now, snapshot_id, gate))
+        record = _save_gate_ack_state(store, snapshot_id, gates, gate, None)
+        _audit(store, owner_sub, scope="snapshot", subject_id=snapshot_id, action="gate.ack",
+               before={"gate": gate, "ack_by": row["ack_by"]}, after={"gate": gate, "revoked": True})
+    return {"gate": gate, "ack_by": None, "ack_at": None, "ack_reason": None,
+            "gates_hash": state_module.gates_hash(gates), "pass": record.get("pass"),
+            "revoked_by": owner_sub, "revoked_at": now}
 
 
 # ================================================================ same-as·원장
@@ -698,13 +1178,22 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
 
     # G6(unit_scale) 차단 스냅샷 위에는 타깃을 열지 않는다(plan §3.2.2 G6 effect — diff 409 와 같은 형식).
     gates: dict = {}
+    reasons: list[str] = []
     for role, sid in zip(("base", "target") if body.kind == "diff" else ("target",), blocked_snapshots):
         state = store.query_one(
             "SELECT blocked, gates_json FROM rr_states WHERE snapshot_id = ?", (sid,))
-        if state is not None and state["blocked"]:
-            gates[role] = (_loads(state["gates_json"], {}) or {}).get("G6")
+        if state is None:
+            continue
+        gate_map = _loads(state["gates_json"], {}) or {}
+        reason = state_module.blocked_reason(gate_map)
+        if reason is None and not state["blocked"]:
+            continue
+        gates[role] = gate_map.get("G6")
+        reasons.append(reason or "unit_mismatch")
     if gates:
-        raise AppError("E409", f"게이트 G6 로 차단된 스냅샷입니다 — {canonical_json({'gates': gates})}.", 409)
+        reason = "unit_mismatch" if "unit_mismatch" in reasons else reasons[0]
+        raise AppError("gate_blocked", f"게이트 G6 로 차단된 스냅샷입니다(reason={reason}).", 409,
+                       detail={"gates": gates, "reason": reason})
 
     target_key = f"{body.kind}:{body.ref_id}"
     if store.query_one("SELECT target_key FROM rr_targets WHERE target_key = ?", (target_key,)) is not None:
@@ -941,8 +1430,48 @@ def _planned_panel(row: Any) -> dict:
     }
 
 
+BRIEF_TOKEN_BYTES = 24
+
+
+def brief_token_hash(token: str) -> str:
+    """brief_token 저장형 — sha256[:32]. 원문은 어디에도 저장하지 않는다(plan §8.2.5)."""
+    return sha256_hex(token.strip())[:32]
+
+
+def issue_brief_token(store: Any, panel_id: str) -> str:
+    """패널 1건에 붙는 brief_token 을 발급한다 — rr_panels 에는 해시와 만료(now + risk_brief_token_ttl_s)만 남는다."""
+    token = secrets.token_urlsafe(BRIEF_TOKEN_BYTES)
+    store.execute(
+        "UPDATE rr_panels SET brief_token_hash = ?, brief_token_exp = ? WHERE id = ?",
+        (brief_token_hash(token), now_epoch() + int(config.settings.risk_brief_token_ttl_s), panel_id))
+    return token
+
+
+def resolve_brief_token(target_key: str, brief_token: str | None) -> dict:
+    """brief_token 을 그 타깃의 패널 행과 대조한다 — 없음·불일치·만료는 `brief_token_invalid`(401 등가, §8.2.5)."""
+    token = (brief_token or "").strip()
+    row = None
+    if token:
+        row = get_store().query_one(
+            "SELECT id, target_key, owner_sub, brief_token_exp FROM rr_panels"
+            " WHERE target_key = ? AND brief_token_hash = ?", (target_key, brief_token_hash(token)))
+    if row is None or int(row["brief_token_exp"] or 0) < now_epoch():
+        raise AppError("brief_token_invalid", "브리프 토큰이 없거나 만료됐습니다 — 앱 화면에서 다시 받으세요.", 401)
+    return dict(row)
+
+
+def brief_by_token(target_key: str, brief_token: str | None, tier: str = "B") -> dict:
+    """MCP `risk_get_brief` 본체 — caller 판정 대신 brief_token 대조로 연다(plan §8.2.5).
+
+    토큰은 UI·REST `GET /targets/{key}/brief` 가 그 패널 1건·`risk_brief_token_ttl_s` 동안만 위임한 열쇠다.
+    """
+    panel = resolve_brief_token(target_key, brief_token)
+    return brief_payload(target_key, tier, owner_sub=panel["owner_sub"])
+
+
 def brief_payload(target_key: str, tier: str = "B", *, owner_sub: str | None = None,
-                  actor: str | None = None, exclude: tuple[str, ...] = ()) -> dict:
+                  actor: str | None = None, exclude: tuple[str, ...] = (),
+                  issue_token: bool = False) -> dict:
     """`GET /api/targets/{key}/brief?tier=` 본체 — MCP `risk_get_brief` 와 같은 함수.
 
     Tier A 대표 패널은 웹 러너 전용이라 여기서 막는다(§6.11). 패널이 없으면 결정론 편성으로 `planned` 1건을 만든다.
@@ -973,12 +1502,16 @@ def brief_payload(target_key: str, tier: str = "B", *, owner_sub: str | None = N
 
     out_panels = []
     for panel in panels:
-        out_panels.append({
+        item = {
             "panel_id": panel["id"],
             "panel_no": panel["panel_no"],
             "seats_json": panel["seats_json"],
             "delib_opts": runner.build_delib_opts(store, config.settings, panel, evidence=engine_evidence),
-        })
+        }
+        if issue_token:
+            # L2 오케스트레이터가 게이트웨이 MCP 로 같은 브리프를 다시 받을 유일한 열쇠다(§8.2.5).
+            item["brief_token"] = issue_brief_token(store, panel["id"])
+        out_panels.append(item)
     payload = {
         "target_key": target_key,
         "tier": tier,
@@ -998,8 +1531,9 @@ def brief_payload(target_key: str, tier: str = "B", *, owner_sub: str | None = N
 @router.get("/targets/{target_key}/brief")
 def get_brief(target_key: str, tier: str = "B",
               ident: identity.Identity = Depends(identity.current)) -> dict:
+    """패널 브리프 + 패널마다 1건의 `brief_token`(MCP `risk_get_brief` 의 열쇠, §8.2.5)."""
     owner_sub = _require_user(ident)
-    return brief_payload(target_key, tier, owner_sub=owner_sub)
+    return brief_payload(target_key, tier, owner_sub=owner_sub, issue_token=True)
 
 
 # ================================================================ 패널 결과 회수(REST·MCP 공용)
@@ -1127,6 +1661,12 @@ def complete_panel(panel_id: str, *, engine: str, decision_text: str, turns: lis
                                    model=model_json.get("model"))
         coverage_updated = True
 
+        # 미검증 actor(MCP 경로)가 낸 원자는 회수에서 격리한다 — 이 타깃 등록부·보고서에는 그대로 남고
+        # 다른 과제 브리프의 E5·E6·E7 후보에서만 빠진다(plan §3.4.1 회수 격리·§6.11).
+        if not actor_verified and config.settings.risk_recall_require_verified_actor:
+            store.execute("UPDATE rr_findings SET recall_eligible = 0 WHERE panel_id = ?", (panel_id,))
+            store.execute("UPDATE rr_character SET recall_eligible = 0 WHERE id LIKE ?", (f"{panel_id}#%",))
+
         merged = registry_module.merge(store, panel["target_key"])
         level = registry_module.close_level(store, panel["target_key"])
 
@@ -1222,8 +1762,13 @@ def _ref_from_store(info: dict, owner_sub: str) -> dict | None:
     return None
 
 
-def claims_for_ref(ref: str, *, owner_sub: str | None = None, limit: int = 100) -> dict:
-    """참조 1건에 앵커된 주장 목록 — MCP `risk_claims_for_ref` 와 같은 함수(rr_claim_refs 역색인, §4.4.4)."""
+def claims_for_ref(ref: str, *, owner_sub: str | None = None, limit: int = 100,
+                   projects: list[str] | None = None) -> dict:
+    """참조 1건에 앵커된 주장 목록 — MCP `risk_claims_for_ref` 와 같은 함수(rr_claim_refs 역색인, §4.4.4).
+
+    `projects` 를 주면 그 과제에 속한 타깃의 주장만 돌려준다 — MCP 읽기의 범위 판정이 쓰는 갈래로,
+    빈 목록은 '보이는 과제 0건' 이라 결과도 0건이다(§8.2.5 ②).
+    """
     info = parse_ref(ref)
     if info is None:
         raise AppError("E100", f"참조 문법(plan §0.2.1)에 맞지 않습니다 — {ref!r}.", 422)
@@ -1238,6 +1783,10 @@ def claims_for_ref(ref: str, *, owner_sub: str | None = None, limit: int = 100) 
     if owner_sub is not None:
         sql += " AND r.owner_sub = ?"
         params.append(owner_sub)
+    if projects is not None:
+        holes = ", ".join("?" for _ in projects) or "NULL"
+        sql += f" AND r.target_key IN (SELECT target_key FROM rr_targets WHERE project_id IN ({holes}))"
+        params.extend(projects)
     rows = get_store().query(sql + " ORDER BY r.claim_uid LIMIT ?", (*params, int(limit) + 1))
     truncated = len(rows) > int(limit)
     return {"ref": info["ref"], "ref_type": info["kind"],
@@ -1273,13 +1822,21 @@ def get_ref(ref: str, snapshot_id: str | None = None, diff_id: str | None = None
 
 # ================================================================ 이동(export·import)
 @router.get("/export")
-def get_export(since: int = 0, ident: identity.Identity = Depends(identity.current)) -> StreamingResponse:
+def get_export(since: int = 0, include_excluded: int = 0,
+               ident: identity.Identity = Depends(identity.current)) -> StreamingResponse:
     """JSONL 내보내기(소유자 행만) — 첫 줄 헤더 `{schema_version, app_version, origin}`, 이어서 §5.2.2 A→H 표 순서로 `{table, row}`.
 
-    같은 내용을 `$HEAX_DATA_DIR/exports/<ts>.jsonl` 에 남기고(plan §5.2.5 (1)) 그 파일을 그대로 흘려보낸다.
+    반출 자격은 `risk_export_allowed_groups` 로 막고(403 `export_not_allowed`), 실린 과제의 최고 등급을
+    `X-Risk-Classification-Max` 헤더로 알린다. `status='purged'`·`corpus_excluded=1` 과제는 기본 제외이고
+    `?include_excluded=1` 로만 싣는다(plan §0.6 '데이터 등급·반출'·§5.2.6 (ii)).
     """
     owner_sub = _require_user(ident)
-    path = export_module.write_export_file(get_store(), owner_sub, int(since))
+    allowed = [g for g in (config.settings.risk_export_allowed_groups or []) if g]
+    if allowed and not (set(allowed) & set(_caller_groups(ident))):
+        raise AppError("export_not_allowed", "이 계정 그룹은 반출 자격이 없습니다.", 403)
+    with_excluded = bool(int(include_excluded or 0))
+    store = get_store()
+    path = export_module.write_export_file(store, owner_sub, int(since), include_excluded=with_excluded)
 
     def _stream():
         with path.open("r", encoding="utf-8") as fh:
@@ -1287,7 +1844,10 @@ def get_export(since: int = 0, ident: identity.Identity = Depends(identity.curre
                 yield line
 
     return StreamingResponse(_stream(), media_type="application/x-ndjson", headers={
-        "Content-Disposition": f'attachment; filename="{path.name}"', "X-Export-Path": str(path)})
+        "Content-Disposition": f'attachment; filename="{path.name}"',
+        # 서버 절대 경로는 흘리지 않는다 — 파일명만 남긴다.
+        "X-Export-File": path.name,
+        "X-Risk-Classification-Max": export_module.classification_max(store, owner_sub, with_excluded)})
 
 
 @router.post("/import")

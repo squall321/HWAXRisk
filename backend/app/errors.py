@@ -7,12 +7,15 @@ from __future__ import annotations
 class AppError(Exception):
     """코드·메시지·HTTP 상태를 함께 갖는 표준 예외."""
 
-    def __init__(self, code: str, message: str, http_status: int = 500) -> None:
+    def __init__(self, code: str, message: str, http_status: int = 500,
+                 detail: dict | None = None) -> None:
         super().__init__(message)
         self.code = code
         self.message = message
         self.http_status = http_status
+        # 기계 판독용 부가 필드(예: 409 gate_blocked 의 {gates, reason}) — 본문 최상위에 함께 실린다.
+        self.detail = dict(detail or {})
 
     def to_dict(self) -> dict:
-        """REST 응답 본문 {error:{code,message}} 형식으로 변환."""
-        return {"error": {"code": self.code, "message": self.message}}
+        """REST 응답 본문 {error:{code,message}, …detail} 형식으로 변환."""
+        return {"error": {"code": self.code, "message": self.message}, **self.detail}

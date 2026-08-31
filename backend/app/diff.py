@@ -7,6 +7,7 @@ import math
 from typing import Any, Callable, Mapping, Sequence
 
 from . import sameas
+from . import state as state_module
 from .common import R, canonical_json, new_uuid, now_epoch
 from .errors import AppError
 
@@ -274,13 +275,24 @@ def comparability(base_ir: Mapping[str, Any], target_ir: Mapping[str, Any],
 
 def check_pair_blocked(base_state: Mapping[str, Any] | None,
                        target_state: Mapping[str, Any] | None) -> dict | None:
-    """G6 fail 이면 `{gates}` 를 돌려준다(호출자가 409 로 끝낸다, §3.3.1). 아니면 None."""
-    blocked = {}
-    if (base_state or {}).get("blocked"):
-        blocked["base"] = _dig(base_state or {}, "gates", "G6")
-    if (target_state or {}).get("blocked"):
-        blocked["target"] = _dig(target_state or {}, "gates", "G6")
-    return {"gates": blocked} if blocked else None
+    """G6 차단이면 `{gates, reason}` 을 돌려준다(호출자가 409 `gate_blocked` 로 끝낸다, §2.12·§8.2.3).
+
+    `reason ∈ unit_mismatch | unit_unknown` — 뒤가 `pass=null` 인 unknown_blocking 이다.
+    """
+    blocked: dict[str, Any] = {}
+    reasons: list[str] = []
+    for role, state in (("base", base_state), ("target", target_state)):
+        gates = (state or {}).get("gates") or {}
+        reason = state_module.blocked_reason(gates)
+        if reason is None and not (state or {}).get("blocked"):
+            continue
+        blocked[role] = _dig(state or {}, "gates", "G6")
+        reasons.append(reason or "unit_mismatch")
+    if not blocked:
+        return None
+    # 둘 다 차단이면 unit_mismatch(고칠 수 있는 쪽)를 앞세운다 — 화면 안내 문구가 갈린다.
+    reason = "unit_mismatch" if "unit_mismatch" in reasons else reasons[0]
+    return {"gates": blocked, "reason": reason}
 
 
 # ---------------------------------------------------------------- 대응(§3.3.1 correspondence)
@@ -1587,7 +1599,8 @@ def create_diff(store, base_snapshot_id: str, target_snapshot_id: str, *, owner_
 
     blocked = check_pair_blocked(base_state, target_state)
     if blocked is not None:
-        raise AppError("E409", f"게이트 G6 로 차단된 스냅샷입니다 — {canonical_json(blocked)}.", 409)
+        raise AppError("gate_blocked", f"게이트 G6 로 차단된 스냅샷입니다(reason={blocked['reason']}).",
+                       409, detail=blocked)
 
     existing = store.query_one(
         "SELECT id FROM rr_diffs WHERE base_snapshot_id=? AND target_snapshot_id=? AND owner_sub=?",

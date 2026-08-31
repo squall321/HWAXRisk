@@ -10,6 +10,11 @@ import pytest
 from app import config, identity, planner, roster, routes
 
 OWNER = "roster@example.com"
+
+def _enc(pat: str) -> str:
+    """저장 열 portal_pat_enc 는 Fernet 암호문이다(plan §8.2.7) — 픽스처도 같은 형식으로 넣는다."""
+    return identity.encrypt_pat(pat).decode("ascii")
+
 GATEWAY = "https://gw.test/mcp"
 DOMAINS = ("mech", "sim", "xd")
 
@@ -194,10 +199,10 @@ def test_credential_prefers_owner_pat_then_service_pat(risk_store, tmp_path):
     assert roster.credential(risk_store, OWNER, settings=cfg) == "service-pat"
 
     far = 2_000_000_000
-    risk_store.upsert_credential(OWNER, "owner-pat", "sub", OWNER, "[]", far)
+    risk_store.upsert_credential(OWNER, _enc("owner-pat"), "sub", OWNER, "[]", far)
     assert roster.credential(risk_store, OWNER, settings=cfg) == "owner-pat"
 
-    risk_store.upsert_credential(OWNER, "expired-pat", "sub", OWNER, "[]", 1)
+    risk_store.upsert_credential(OWNER, _enc("expired-pat"), "sub", OWNER, "[]", 1)
     assert roster.credential(risk_store, OWNER, settings=cfg) == "service-pat"   # 만료된 owner PAT 는 쓰지 않는다
 
 
@@ -264,7 +269,7 @@ def _snapshot(store) -> None:
 
 def test_create_target_uses_the_gateway_when_body_agents_are_absent(wired, ident, gateway_transport):
     _snapshot(wired)
-    wired.upsert_credential(OWNER, "owner-pat", "sub", OWNER, "[]", 2_000_000_000)
+    wired.upsert_credential(OWNER, _enc("owner-pat"), "sub", OWNER, "[]", 2_000_000_000)
     gateway_transport(_gateway_handler())
 
     out = routes.create_target(routes.TargetBody(kind="snap", ref_id="s1", consent=True), ident=ident)
@@ -276,7 +281,7 @@ def test_create_target_uses_the_gateway_when_body_agents_are_absent(wired, ident
 
 def test_create_target_prefers_body_agents_over_the_gateway(wired, ident, gateway_transport):
     _snapshot(wired)
-    wired.upsert_credential(OWNER, "owner-pat", "sub", OWNER, "[]", 2_000_000_000)
+    wired.upsert_credential(OWNER, _enc("owner-pat"), "sub", OWNER, "[]", 2_000_000_000)
     gateway_transport(_boom)                     # 본문이 있으면 게이트웨이를 부르지 않는다
 
     out = routes.create_target(
@@ -299,7 +304,7 @@ def test_create_target_without_credential_degrades_to_empty_roster(wired, ident,
 def test_refresh_roster_fetches_the_gateway_and_appends_only_new_keys(wired, ident, gateway_transport):
     _target(wired, "snap:s1", kind="snap", ref_id="s1")
     planner.freeze_roster(wired, "snap:s1", OWNER, [{"key": "mech-frame", "domain": "mech", "relevance": 2.6}])
-    wired.upsert_credential(OWNER, "owner-pat", "sub", OWNER, "[]", 2_000_000_000)
+    wired.upsert_credential(OWNER, _enc("owner-pat"), "sub", OWNER, "[]", 2_000_000_000)
     gateway_transport(_gateway_handler())
 
     out = routes.refresh_roster("snap:s1", routes.RosterBody(), ident=ident)

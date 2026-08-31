@@ -343,7 +343,11 @@ def test_result_on_one_side_only_is_kind_differs(result_ir):
 
 def test_check_pair_blocked_only_on_g6():
     g6 = {"blocked": True, "gates": {"G6": {"key": "unit_scale", "pass": False}}}
-    assert diff.check_pair_blocked(g6, None) == {"gates": {"base": {"key": "unit_scale", "pass": False}}}
+    assert diff.check_pair_blocked(g6, None) == {
+        "gates": {"base": {"key": "unit_scale", "pass": False}}, "reason": "unit_mismatch"}
+    # unknown_blocking — pass=null 이어도 차단이고 reason 은 unit_unknown 이다(§2.12).
+    unknown = {"blocked": True, "gates": {"G6": {"key": "unit_scale", "pass": None, "reason": "unit_unknown"}}}
+    assert diff.check_pair_blocked(None, unknown)["reason"] == "unit_unknown"
     assert diff.check_pair_blocked({"blocked": False}, {"blocked": False}) is None
     assert diff.check_pair_blocked(None, None) is None
 

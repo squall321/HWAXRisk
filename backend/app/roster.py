@@ -6,7 +6,7 @@ from typing import Any
 
 import httpx
 
-from app import config
+from app import config, identity
 from app.common import now_epoch
 from app.ra_client import DEFAULT_TIMEOUT, McpHttpClient
 from app.runner import CREDENTIAL_MARGIN_S
@@ -177,8 +177,10 @@ def credential(store: Any, owner_sub: str | None, *, settings: Any | None = None
     cfg = _cfg(settings)
     if owner_sub and store is not None:
         row = store.get_credential(owner_sub)
-        if row and int(row.get("pat_exp") or 0) > now_epoch() + CREDENTIAL_MARGIN_S:
-            return str(row.get("portal_pat") or "")
+        # 복호는 identity 가 한다 — 키 없음·폐기 표기·손상은 None 이라 자격 (a) 로 내려간다(plan §8.2.7).
+        pat = identity.credential_pat(row)
+        if pat and int(row.get("pat_exp") or 0) > now_epoch() + CREDENTIAL_MARGIN_S:
+            return pat
     return config.load_secrets(cfg.data_dir).get("HWAXRISK_PORTAL_PAT", "")
 
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 
 import httpx
@@ -41,7 +42,8 @@ def _seed(store: RiskStore, owner: str = ALICE, at: int = 1_000) -> None:
                                     "ir_hash": f"hash-{owner[:3]}", "ir_json": '{"nodes":[]}',
                                     "source_ids_json": "[]", "kinds_json": '["mcad"]', "node_count": 2,
                                     "edge_count": 1, "warnings_n": 0, "created_at": at})
-    _insert(store, "rr_snapshot_calls", {"call_id": f"{sid}-001", "snapshot_id": sid, "owner_sub": owner, "seq": 1,
+    _insert(store, "rr_snapshot_calls", {"call_id": f"{sid}-001", "job_id": sid, "snapshot_id": sid,
+                                         "owner_sub": owner, "seq": 1,
                                          "source_kind": "mcad", "channel": "rest", "tool": "/tree", "ok": 1,
                                          "response_gz": BLOB, "response_bytes": len(BLOB), "started_at": at})
     for nid in ("n1", "n2"):
@@ -90,7 +92,9 @@ def test_rows_follow_plan_table_order_and_skip_housekeeping(seeded):
     assert not any(t.startswith("_") for t in tables)
     order = {t: i for i, t in enumerate(export.TABLE_ORDER)}
     assert [order[t] for t in tables] == sorted(order[t] for t in tables)
-    assert export.TABLE_ORDER[:4] == ("rr_projects", "rr_sources", "rr_snapshots", "rr_snapshot_calls")
+    # 순서는 plan §5.2.2 v1 DDL 의 CREATE TABLE 차례 그대로다(과제 → 요구·멤버 → 소스 → 스냅샷 …).
+    assert export.TABLE_ORDER[:6] == ("rr_projects", "rr_requirements", "rr_project_members", "rr_sources",
+                                      "rr_snapshots", "rr_snapshot_jobs")
 
 
 def test_only_owner_rows_are_exported(seeded):
@@ -255,9 +259,14 @@ def test_export_route_streams_jsonl_and_leaves_a_file(client, wired):
     lines = r.text.splitlines()
     head = json.loads(lines[0])
     assert set(head) == {"schema_version", "app_version", "origin"}
-    saved = Path(r.headers["X-Export-Path"])
+    # 서버 절대 경로는 헤더로 흘리지 않는다 — 파일명만 남고 등급은 X-Risk-Classification-Max 로 온다(§0.6).
+    assert "X-Export-Path" not in r.headers
+    assert r.headers["X-Risk-Classification-Max"] in ("internal", "confidential")
+    saved = Path(config.settings.data_dir) / export.EXPORTS_DIRNAME / r.headers["X-Export-File"]
     assert saved.is_file() and saved.parent.name == export.EXPORTS_DIRNAME
     assert saved.read_text(encoding="utf-8") == r.text
+    # 사본은 평문이라 0600 으로 남는다(plan §5.2.5 (1)).
+    assert stat.S_IMODE(saved.stat().st_mode) == 0o600
 
 
 def test_import_route_inserts_then_reports_mismatch(client, wired):

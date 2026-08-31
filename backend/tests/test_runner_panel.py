@@ -7,7 +7,12 @@ import types
 
 import pytest
 
-from app import config, planner, runner
+from app import config, identity, planner, runner
+
+def _enc(pat: str) -> str:
+    """저장 열 portal_pat_enc 는 Fernet 암호문이다(plan §8.2.7) — 픽스처도 같은 형식으로 넣는다."""
+    return identity.encrypt_pat(pat).decode("ascii")
+
 from app.common import now_epoch
 from app.errors import AppError
 
@@ -57,7 +62,7 @@ def seeded(store, sizes: dict[str, int] | None = None) -> str:
 
 def give_credential(store, owner_sub: str = OWNER) -> None:
     store.upsert_credential(
-        owner_sub, "pat-secret", "sub-1", "u@x", json.dumps(["hwax-risk"]),
+        owner_sub, _enc("pat-secret"), "sub-1", "u@x", json.dumps(["hwax-risk"]),
         now_epoch() + 30 * 86400,
     )
 
@@ -212,7 +217,7 @@ def test_resolve_credential_prefers_owner_then_service(risk_store, tmp_path):
     assert runner.resolve_credential(risk_store, cfg, OWNER) == {"kind": "owner", "email": "u@x"}
 
     # 만료가 코앞이면 (b) 를 쓰지 않는다.
-    risk_store.upsert_credential(OWNER, "pat", "sub-1", "u@x", "[]", now_epoch() + 60)
+    risk_store.upsert_credential(OWNER, _enc("pat"), "sub-1", "u@x", "[]", now_epoch() + 60)
     assert runner.resolve_credential(risk_store, cfg, OWNER) is None
 
     secrets = tmp_path / "secrets.env"

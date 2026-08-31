@@ -6,7 +6,12 @@ import json
 
 import pytest
 
-from app import common, config, narrative, planner, registry, routes, runner
+from app import common, config, identity, narrative, planner, registry, routes, runner
+
+def _enc(pat: str) -> str:
+    """저장 열 portal_pat_enc 는 Fernet 암호문이다(plan §8.2.7) — 픽스처도 같은 형식으로 넣는다."""
+    return identity.encrypt_pat(pat).decode("ascii")
+
 from app.errors import AppError
 
 OWNER = "owner@example.com"
@@ -38,7 +43,7 @@ def _seed(store, *, owner: str = OWNER, target_key: str = "diff:d1") -> str:
         " VALUES (?, ?, 'diff', 'd1', 'p1', 'h1', '{}', '[]', 'C0', ?, ?)", (target_key, owner, now, now))
     planner.freeze_roster(store, target_key, owner,
                           _agents({"mech": 2, "sim": 2, "rel": 1, "xd": 1, "pcb": 1}))
-    store.upsert_credential(owner, "pat-secret", "sub-1", owner, "[]", common.now_epoch() + 30 * 86400)
+    store.upsert_credential(owner, _enc("pat-secret"), "sub-1", owner, "[]", common.now_epoch() + 30 * 86400)
     return target_key
 
 
@@ -256,7 +261,8 @@ def test_create_target_is_blocked_by_g6(risk_store, monkeypatch):
     ident = type("I", (), {"anonymous": False, "email": OWNER, "to_dict": lambda self: {"email": OWNER}})()
     with pytest.raises(AppError) as exc:
         routes.create_target(routes.TargetBody(kind="snap", ref_id="sblk", consent=True), ident=ident)
-    assert (exc.value.code, exc.value.http_status) == ("E409", 409)
+    assert (exc.value.code, exc.value.http_status) == ("gate_blocked", 409)
+    assert exc.value.detail["reason"] == "unit_mismatch" and "target" in exc.value.detail["gates"]
     assert "G6" in exc.value.message
     assert risk_store.query("SELECT target_key FROM rr_targets") == []
 

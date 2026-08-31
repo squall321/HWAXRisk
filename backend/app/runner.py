@@ -15,7 +15,8 @@ from app.errors import AppError
 
 log = logging.getLogger("hwax_risk.runner")
 
-# (스레드명, 폴링 주기 초). sync_loop(§5.5.3 external_sync)·nightly_loop(§7.7 야간 잡) 본문은 P4 배선·P6 에서 채운다.
+# (스레드명, 폴링 주기 초). sync_loop 은 PAT 폐기 대조(§8.2.7)를 돌리고 external_sync 재시도(§5.5.3)는 P4 배선,
+# nightly_loop(§7.7 야간 잡) 본문은 P6 에서 채운다.
 _LOOPS: tuple[tuple[str, float], ...] = (("panel_loop", 5.0), ("sync_loop", 60.0), ("nightly_loop", 60.0))
 
 # 좌석 귀속 정규식(plan §0.2.3·§6.7 7단계). SSE 스트림과 POST /api/panels/{id}/complete 의 events[] 에 같은 식을 쓴다.
@@ -155,8 +156,11 @@ def resolve_credential(store: Any, settings: Any | None, owner_sub: str | None) 
     """
     cfg = config.settings if settings is None else settings
     if owner_sub:
+        from app import identity  # noqa: PLC0415 — identity 는 config 만 읽으므로 지연 import 로 순환을 피한다.
+
         row = store.get_credential(owner_sub)
-        if row and int(row.get("pat_exp") or 0) > now_epoch() + CREDENTIAL_MARGIN_S:
+        # 복호되지 않는 자격(키 없음·폐기 표기·손상)은 엔진이 쓸 수 없으므로 (b) 로 세지 않는다(plan §8.2.7).
+        if row and identity.credential_pat(row) and int(row.get("pat_exp") or 0) > now_epoch() + CREDENTIAL_MARGIN_S:
             return {"kind": "owner", "email": row.get("pat_email")}
     secrets = config.load_secrets(cfg.data_dir)
     if secrets.get("HWAXRISK_PORTAL_PAT"):
@@ -830,6 +834,56 @@ def _complete_panel(
 
 
 # ---------------------------------------------------------------- 스레드
+# ---------------------------------------------------------------- PAT 폐기 대조(plan §8.2.7·§0.6 '자격 최소 권한')
+REVOKED_PATH = "/auth/pat/revoked.json"
+REVOKED_TIMEOUT_S = 3.0
+# 테스트가 httpx.MockTransport 를 꽂는 자리. None 이면 실제 네트워크.
+_revoked_transport: Any | None = None
+
+
+def fetch_revoked_jtis(settings) -> list[str] | None:
+    """포털 `GET /auth/pat/revoked.json` → `{"revoked":[jti…]}`. 형식이 아니거나 실패면 None(직전 목록 유지)."""
+    import httpx  # noqa: PLC0415 — 러너 정본 경로가 아니라 이 함수에서만 쓴다.
+
+    base = str(getattr(settings, "portal_base", "") or "").rstrip("/")
+    if not base:
+        return None
+    try:
+        with httpx.Client(transport=_revoked_transport, timeout=REVOKED_TIMEOUT_S) as client:
+            r = client.get(base + REVOKED_PATH)
+        if r.status_code != 200:
+            log.warning("PAT 폐기 목록 조회 실패(HTTP %s) — 직전 목록을 유지한다.", r.status_code)
+            return None
+        body = r.json()
+    except Exception as exc:  # noqa: BLE001 — 네트워크·파싱 실패는 비치명적이다(값은 로그하지 않는다).
+        log.warning("PAT 폐기 목록 조회 실패(%s) — 직전 목록을 유지한다.", type(exc).__name__)
+        return None
+    revoked = body.get("revoked") if isinstance(body, dict) else None
+    if not isinstance(revoked, list):
+        log.warning("PAT 폐기 목록 형식이 {'revoked':[jti…]} 가 아니다 — 직전 목록을 유지한다.")
+        return None
+    return [str(j) for j in revoked if str(j).strip()]
+
+
+def poll_revoked_pats(store, settings, *, now: int | None = None) -> dict:
+    """적중한 `pat_jti` 행에 `revoked_at` 을 찍는다 — 강등은 패널 경계에서 credential_pat 이 None 을 돌려 일어난다.
+
+    응답이 계약 형식이 아니거나 조회가 실패하면 아무 행도 건드리지 않는다(조용한 전체 강등 금지).
+    """
+    jtis = fetch_revoked_jtis(settings)
+    if not jtis:
+        return {"checked": 0, "revoked": 0}
+    stamp = now_epoch() if now is None else now
+    marks = ",".join("?" for _ in jtis)
+    rows = store.query(
+        f"SELECT owner_sub FROM _user_credentials WHERE pat_jti IN ({marks}) AND revoked_at IS NULL", jtis)
+    for row in rows:
+        store.execute(
+            "UPDATE _user_credentials SET revoked_at = ?, revoked_seen_at = ? WHERE owner_sub = ?",
+            (stamp, stamp, row["owner_sub"]))
+    return {"checked": len(jtis), "revoked": len(rows)}
+
+
 class RiskRunner:
     """main.py lifespan 이 start()/stop() 하는 객체. 엔진 클라이언트는 주입식이고 러너는 직접 LLM 을 부르지 않는다."""
 
@@ -851,6 +905,7 @@ class RiskRunner:
         self._threads: list[threading.Thread] = []
         self._workers: list[threading.Thread] = []
         self._last_tick: dict[str, float | None] = {name: None for name, _ in _LOOPS}
+        self._last_revocation_poll = 0.0
         concurrency = int(getattr(settings, "risk_concurrency", 1) or 1) if settings is not None else 1
         self._sem = threading.Semaphore(max(1, concurrency))
 
@@ -863,7 +918,25 @@ class RiskRunner:
                     self._panel_tick()
                 except Exception:  # noqa: BLE001 — 한 번의 실패가 스레드를 죽이지 않게 한다.
                     log.exception("panel_loop tick 실패")
+            elif name == "sync_loop":
+                try:
+                    self._revocation_tick()
+                except Exception:  # noqa: BLE001 — 폐기 대조 실패는 비치명적이다.
+                    log.exception("sync_loop 폐기 대조 실패")
             self._stop.wait(interval)
+
+    def _revocation_tick(self) -> None:
+        """포털 폐기 목록을 `risk_pat_revocation_poll_s` 주기로 대조한다(plan §8.2.7 '폐기 대조')."""
+        if self.store is None or self.settings is None:
+            return
+        period = float(getattr(self.settings, "risk_pat_revocation_poll_s", 0) or 0)
+        if period <= 0:
+            return
+        now = time.time()
+        if now - self._last_revocation_poll < period:
+            return
+        self._last_revocation_poll = now
+        poll_revoked_pats(self.store, self.settings)
 
     def _panel_tick(self) -> None:
         """잡 1건을 집어 패널 1건을 돌릴 워커를 띄운다(세마포어 risk_concurrency, 타깃당 직렬)."""

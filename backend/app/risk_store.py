@@ -1,4 +1,4 @@
-# 앱 DB(SQLite) 저장소 — RiskStore(stdlib sqlite3 + Lock), PRAGMA user_version 마이그레이션(v1 = plan §5.2.2 rr_* DDL 전문), 살림 표 _schema_migrations·_user_credentials
+# 앱 DB(SQLite) 저장소 — RiskStore(stdlib sqlite3 + Lock), PRAGMA user_version 마이그레이션(v1 = plan §5.2.2 rr_* 41표 DDL 전문), 살림 표 _schema_migrations·_user_credentials
 from __future__ import annotations
 
 import shutil
@@ -15,7 +15,8 @@ from app.errors import AppError
 
 # owner_sub 컬럼의 값은 heax 사용자 이메일(소문자)이다. 원천은 identity.py 의 heax `GET /api/v1/auth/me` 되묻기(plan §5.2.1·§8.2.8)이며
 # X-Heax-User-* 헤더는 service 모드 앱에 복사되지 않고 위조 가능하므로 원천으로 쓰지 않는다.
-# 아래 DDL 은 plan §5.2.2 A~H 의 ```sql 블록을 바이트 그대로 옮긴 것이다(고치려면 plan 을 먼저 고친다).
+# 아래 DDL 은 plan §5.2.2 A~H 의 ```sql 블록 8개(rr_ 41표·인덱스 58)를 바이트 그대로 옮긴 것이다 — 블록 경계의 빈 줄
+# 하나 말고는 문장이 문서와 같다(고치려면 plan 을 먼저 고친다).
 _DDL_V1_SQL = """\
 CREATE TABLE IF NOT EXISTS rr_projects (
   id TEXT PRIMARY KEY, owner_sub TEXT NOT NULL,
@@ -24,8 +25,49 @@ CREATE TABLE IF NOT EXISTS rr_projects (
   adh_team TEXT, adh_group TEXT,                -- 사용자 확인값, 자동 채움 금지
   ra_entity_id INTEGER, adh_character_record_id TEXT,
   character_status TEXT CHECK(character_status IN ('seed','panel','confirmed')) DEFAULT 'seed',
+  classification TEXT NOT NULL CHECK(classification IN ('internal','confidential')) DEFAULT 'confidential',  -- §5.2.5 (3) 반출 경계, 등록 화면 필수 선택
+  lifecycle TEXT NOT NULL CHECK(lifecycle IN ('active','shipped','cancelled','archived')) DEFAULT 'active',
+  closed_at INTEGER,                            -- lifecycle 이 active 를 떠난 시각
+  corpus_excluded INTEGER NOT NULL DEFAULT 0,   -- 1 = 학습·통계·회수에서 제외(§0.6 코퍼스 필터)
+  excluded_reason TEXT,                         -- 'fixture' | 'misregistered' | 'duplicate' | 'user' — corpus_excluded=1 이면 필수
+  status TEXT NOT NULL CHECK(status IN ('active','purged')) DEFAULT 'active',
+  mcp_visibility TEXT NOT NULL CHECK(mcp_visibility IN ('private','org')) DEFAULT 'private',  -- §5.1 원칙 9 투영·MCP 노출 토글(소유자만). private 면 RA 객체 미생성(external_sync.ra='withheld')·MCP 읽기 404 not_visible
+  mcp_visibility_by TEXT, mcp_visibility_at INTEGER,   -- 토글 주체·시각(rr_audit(action='project.mcp_visibility') 동반)
+  purged_at INTEGER, purge_report_json TEXT,    -- §5.2.6 회수 결과(층별 성공·불가 사유)
+  merged_into TEXT,                             -- 중복 등록 병합 대상 project_id(§8.2.3 POST /projects/{id}/merge, P4)
+  product_code TEXT,                            -- 대표 제품 코드(§7.6 라벨 경로 4 VOC 조회 키). 없으면 NULL 이고 경로 4 는 그 과제를 건너뛴다
+  product_refs_json TEXT,                       -- [{kind: 'ra_model'|'product_code', value, ra_entity_id}] 다중 제품 연결(§7.6 경로 1·2 의 (a) 항)
+  predecessor_product_code TEXT,                -- 계보 과제의 product_code(전작 VOC 를 이 과제 브리프에 실을 때의 조회 키)
   created_at INTEGER, updated_at INTEGER,
   UNIQUE(owner_sub, code));
+CREATE INDEX IF NOT EXISTS ix_rr_projects_corpus ON rr_projects(status, corpus_excluded);
+CREATE INDEX IF NOT EXISTS ix_rr_projects_product ON rr_projects(product_code);
+CREATE INDEX IF NOT EXISTS ix_rr_projects_mcpvis ON rr_projects(mcp_visibility, status);
+
+CREATE TABLE IF NOT EXISTS rr_requirements (                   -- §2.8b 요구 규격·치수 한계·필수 시나리오. 과제에 붙고 스냅샷에 복사되지 않는다
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, owner_sub TEXT NOT NULL,
+  kind TEXT NOT NULL CHECK(kind IN ('dim_limit','scenario','standard')),
+  name TEXT NOT NULL,                           -- dim_limit: rr_dim_vocab.name · scenario: 시나리오 이름 · standard: 규격 번호
+  op TEXT CHECK(op IN ('lte','gte','between')), -- dim_limit 전용, 그 밖에는 NULL
+  value_json TEXT,                              -- dim_limit: 스칼라 또는 [lo,hi] · scenario: {taxonomy_key, required} · standard: {clause, title}
+  unit TEXT,                                    -- dim_limit 전용. rr_dim_vocab.unit 과 다르면 등록 시 400 unit_mismatch
+  source_ref TEXT,                              -- 요구의 출처 문자열(card:·paper:·URL·문서명). standard 는 필수
+  status TEXT NOT NULL CHECK(status IN ('candidate','confirmed','waived')) DEFAULT 'candidate',
+  waive_reason TEXT,                            -- status='waived' 이면 필수(422)
+  inherited_from TEXT,                          -- 승계 원본 rr_requirements.id(§2.8b (2))
+  decided_by TEXT, decided_at INTEGER, created_at INTEGER, updated_at INTEGER,
+  UNIQUE(project_id, kind, name));
+CREATE INDEX IF NOT EXISTS ix_rr_req_project ON rr_requirements(project_id, kind, status);
+-- 불변식: kind='dim_limit' 이면 op·value_json·unit 이 전부 NOT NULL 이고 name 이 rr_dim_vocab 에 있다. 요구 편집은 ir_hash 를 바꾸지 않고 rr_states 재계산만 트리거한다(§2.8b (1)).
+
+CREATE TABLE IF NOT EXISTS rr_project_members (                -- §5.2.1 멤버십. 과제 생성 시 owner 행 자동 삽입
+  project_id TEXT NOT NULL, owner_sub TEXT NOT NULL,   -- 과제 owner 의 복제(§5.2.1 신원 앵커)
+  email TEXT NOT NULL,
+  role TEXT NOT NULL CHECK(role IN ('owner','editor','viewer')),
+  added_by TEXT, added_at INTEGER, updated_at INTEGER,
+  PRIMARY KEY(project_id, email));
+CREATE INDEX IF NOT EXISTS ix_rr_members_email ON rr_project_members(email, role);
+-- 불변식: 과제마다 role='owner' 행이 정확히 1건이고 그 email == rr_projects.owner_sub. 이양은 두 행 UPDATE + rr_projects.owner_sub + 하위 표 owner_sub 를 한 트랜잭션에서.
 
 CREATE TABLE IF NOT EXISTS rr_sources (
   id TEXT PRIMARY KEY, project_id TEXT NOT NULL, owner_sub TEXT NOT NULL,
@@ -34,6 +76,7 @@ CREATE TABLE IF NOT EXISTS rr_sources (
   bridge_declared INTEGER DEFAULT 0, probe_json TEXT, probe_at INTEGER,
   adapter_version TEXT, created_at INTEGER,
   UNIQUE(project_id, ref_key));
+CREATE INDEX IF NOT EXISTS ix_rr_sources_refkey ON rr_sources(ref_key);   -- 타 과제 동일 원천 감지(§8.2.3 duplicate_of)
 
 CREATE TABLE IF NOT EXISTS rr_snapshots (
   id TEXT PRIMARY KEY, project_id TEXT NOT NULL, owner_sub TEXT NOT NULL,
@@ -42,21 +85,44 @@ CREATE TABLE IF NOT EXISTS rr_snapshots (
   source_ids_json TEXT NOT NULL,                -- [{kind, app_key, ref, hash, tool_version, tol_params}]
   kinds_json TEXT NOT NULL,                     -- ['mcad','dyna',…]
   node_count INTEGER, edge_count INTEGER, missing_json TEXT, warnings_n INTEGER,
-  degraded TEXT,                                -- null | 'mcp_degraded'
+  degraded TEXT,                                -- degraded_json 의 첫 값(호환 컬럼) | null
+  degraded_json TEXT,                           -- §2.2 degraded 코드 배열(소스별 목록의 합집합)
+  primary_source TEXT CHECK(primary_source IN ('mcad','dyna','ecad')),   -- §2.2. ir_hash 입력은 아니고 조회·화면·게이트 분기 키다
+  capture_partial INTEGER NOT NULL DEFAULT 0,   -- 1 = 선택 호출 실패 또는 예산 초과로 부분 캡처(§2.11.3)
+  app_versions_json TEXT,                       -- {kind: {version, captured_via, extra}} — A 계획의 source_ids_json.tool_version 유령 필드를 대체한다
   adapter_versions_json TEXT, ra_entity_id INTEGER, adh_digest_record_id TEXT,
+  job_id TEXT,                                  -- 이 스냅샷을 만든 rr_snapshot_jobs.id
   created_at INTEGER,
   UNIQUE(project_id, ir_hash));
 CREATE INDEX IF NOT EXISTS ix_rr_snapshots_project ON rr_snapshots(project_id, created_at);
 
+CREATE TABLE IF NOT EXISTS rr_snapshot_jobs (                 -- §2.11.3 스냅샷 동결 잡. 실패해도 행이 남아 무엇이 왜 실패했는지가 보인다
+  id TEXT PRIMARY KEY, project_id TEXT NOT NULL, owner_sub TEXT NOT NULL,
+  label TEXT, kinds_json TEXT NOT NULL, params_json TEXT,     -- params: {report_ids, detect_result_file_id, allow_large}
+  state TEXT NOT NULL CHECK(state IN ('queued','running','done','partial','failed')) DEFAULT 'queued',
+  snapshot_id TEXT,                             -- done|partial 이면 채워진다
+  error_json TEXT,                              -- {stage, kind, tool, call_id, message} — 실패·부분의 지점
+  budget_s INTEGER, elapsed_ms INTEGER, calls_n INTEGER, calls_failed_n INTEGER,
+  started_at INTEGER, finished_at INTEGER, created_at INTEGER);
+CREATE INDEX IF NOT EXISTS ix_rr_snapshot_jobs_project ON rr_snapshot_jobs(project_id, created_at);
+CREATE INDEX IF NOT EXISTS ix_rr_snapshot_jobs_state ON rr_snapshot_jobs(state, created_at);
+-- 기동 시 state='running' 인 행은 'failed'(error_json.stage='restart')로 마감한다. 배치 패널 잡 표(rr_jobs)와 별개다 — 수명·상태 어휘·소유가 다르다.
+
 CREATE TABLE IF NOT EXISTS rr_snapshot_calls (                -- 행 정의는 §2.11.4
-  call_id TEXT PRIMARY KEY,                     -- '<snapshot_id[:8]>-<seq:03d>'
-  snapshot_id TEXT NOT NULL, owner_sub TEXT NOT NULL,
+  call_id TEXT PRIMARY KEY,                     -- '<job_id[:8]>-<seq:03d>' — 실패 잡에는 스냅샷이 없으므로 접두는 잡 id 다
+  job_id TEXT NOT NULL, snapshot_id TEXT,       -- snapshot_id 는 NULL 허용(실패·부분 잡의 원문 보존, 30일 뒤 response_gz=NULL)
+  owner_sub TEXT NOT NULL,
   seq INTEGER NOT NULL, source_kind TEXT NOT NULL, app_key TEXT,
   channel TEXT NOT NULL CHECK(channel IN ('mcp','rest')), tool TEXT NOT NULL,
   args_json TEXT, args_hash TEXT, ok INTEGER NOT NULL DEFAULT 1, http_status INTEGER,
   response_sha256 TEXT, response_gz BLOB, response_bytes INTEGER,
+  contract_ok INTEGER,                          -- §2.13.1 response_contract 검사 결과(NULL = 계약 미정의)
+  contract_missing_json TEXT,                   -- 빠진 JSON pointer 목록(위반 시)
+  reused_from_call_id TEXT,                     -- §2.11.3 재요청 시 원문 재사용
   started_at INTEGER, duration_ms INTEGER, error TEXT);
 CREATE INDEX IF NOT EXISTS ix_rr_calls_snapshot ON rr_snapshot_calls(snapshot_id, seq);
+CREATE INDEX IF NOT EXISTS ix_rr_calls_job ON rr_snapshot_calls(job_id, seq);
+CREATE INDEX IF NOT EXISTS ix_rr_calls_args ON rr_snapshot_calls(args_hash, ok);   -- 재사용 조회
 
 CREATE TABLE IF NOT EXISTS rr_ir_nodes (
   snapshot_id TEXT NOT NULL, nid TEXT NOT NULL, owner_sub TEXT NOT NULL,
@@ -82,6 +148,7 @@ CREATE TABLE IF NOT EXISTS rr_part_keys (
   status TEXT NOT NULL CHECK(status IN ('candidate','confirmed','merged')) DEFAULT 'candidate',
   merged_into TEXT, display_name TEXT,          -- §2.7.3 display_name(RA part 축 value)
   name_norm_canon TEXT NOT NULL, geom_bucket TEXT NOT NULL, material_norm TEXT NOT NULL,
+  vocab_version TEXT,                           -- 이 행의 name_norm_canon 을 만든 rr_dim_vocab 버전(§2.7.1 재계산 — 메이저 승급 후 옛 행 식별)
   aliases_json TEXT,                            -- [{project_id, domain, label, local_key, name_norm}] 동의어 원장(§2.7.3)
   ra_part_entity_id INTEGER, first_project_id TEXT, first_snapshot_id TEXT, first_nid TEXT,
   n_projects INTEGER DEFAULT 1, n_snapshots INTEGER DEFAULT 1,
@@ -96,6 +163,7 @@ CREATE TABLE IF NOT EXISTS rr_sameas (
   pair_key TEXT NOT NULL,                       -- intra: project_id, pair: 정렬한 두 project_id '|' 결합, global: '-'
   a_stable TEXT NOT NULL, b_stable TEXT NOT NULL,   -- stable key(§2.6.2 1단계): mcad canon_key · dyna name_norm_canon+'@'+elem_class · ecad refdes · global 은 ckey
   method TEXT, score REAL, status TEXT NOT NULL CHECK(status IN ('confirmed','rejected')),
+  prev_status TEXT, prev_decided_by TEXT, prev_decided_at INTEGER,   -- §5.9.5 rekey — 뒤집힌 확정의 직전 값(번복 이력, 행 하나로 유지)
   evidence TEXT, decided_by TEXT, decided_at INTEGER, snapshot_id_at_decision TEXT,
   UNIQUE(scope, pair_key, a_stable, b_stable));
 
@@ -150,6 +218,15 @@ CREATE INDEX IF NOT EXISTS ix_rr_events_code ON rr_diff_events(code);
 CREATE INDEX IF NOT EXISTS ix_rr_events_kind ON rr_diff_events(change_kind);
 CREATE INDEX IF NOT EXISTS ix_rr_events_subject ON rr_diff_events(subject_key);
 
+CREATE TABLE IF NOT EXISTS rr_gate_acks (                     -- §3.2.2 게이트 레코드의 ack_by·ack_at·ack_reason 이 사는 곳
+  snapshot_id TEXT NOT NULL, gate TEXT NOT NULL CHECK(gate IN ('G1','G2','G3','G4','G5','G6','G7')),
+  owner_sub TEXT NOT NULL, diff_id TEXT,        -- G7·pair 게이트는 diff 스코프
+  ack_by TEXT NOT NULL, ack_at INTEGER NOT NULL, ack_reason TEXT NOT NULL,   -- reason ≤300자, 빈 문자열 금지(422)
+  gates_hash TEXT NOT NULL,                     -- ack 시점 gates_json 의 sha1[:12] — 게이트 재계산으로 상태가 바뀌면 ack 는 stale
+  revoked_by TEXT, revoked_at INTEGER,          -- DELETE 는 행 삭제가 아니라 revoke 표기(§5.2.1 삭제 없음)
+  PRIMARY KEY(snapshot_id, gate));
+-- ack 가 붙어도 gates_json 의 pass 는 false 로 남는다(§3.2.2). G6 은 blocking 이라 ack 로 넘길 수 없다(422 gate_blocking).
+
 CREATE TABLE IF NOT EXISTS rr_targets (
   target_key TEXT PRIMARY KEY, owner_sub TEXT NOT NULL,
   kind TEXT NOT NULL CHECK(kind IN ('snap','diff')), ref_id TEXT NOT NULL,
@@ -167,6 +244,7 @@ CREATE INDEX IF NOT EXISTS ix_rr_targets_project ON rr_targets(project_id, creat
 CREATE TABLE IF NOT EXISTS rr_roster (                        -- §6.3
   target_key TEXT NOT NULL, agent_key TEXT NOT NULL, owner_sub TEXT NOT NULL, domain TEXT NOT NULL,
   relevance REAL, rank_in_domain INTEGER, ecad_dependent INTEGER DEFAULT 0, frozen_at INTEGER,
+  role_sha TEXT, persona_rev TEXT,              -- 로스터 동결 시점의 좌석 원본 role 문자열 sha256[:12] 와 그 값의 사람이 읽는 판번호(§7.7 스탬프) — 페르소나가 바뀐 뒤 회수한 발췌를 E7 에서 [이전 정의] 로 표기하는 근거
   PRIMARY KEY(target_key, agent_key));
 
 CREATE TABLE IF NOT EXISTS rr_coverage (                      -- §6.8.1
@@ -177,6 +255,8 @@ CREATE TABLE IF NOT EXISTS rr_coverage (                      -- §6.8.1
   cycle INTEGER DEFAULT 1, retry INTEGER DEFAULT 0,
   panel_id TEXT, opinion_id TEXT, adh_record_id TEXT, ra_assessment_id INTEGER,
   carried_from_opinion_id TEXT, reason TEXT,
+  status_source TEXT NOT NULL CHECK(status_source IN ('code','human')) DEFAULT 'code',
+  decided_by TEXT, decided_at INTEGER,          -- 사람 전이(skipped·carried→pending)의 주체·시각, PUT /targets/{key}/coverage/{agent_key}
   model TEXT,                                   -- 종결 시 그 패널의 rr_panels.model_json.model 사본(진행판·통합 보고서 모델 혼합 표, D6)
   started_at INTEGER, finished_at INTEGER, updated_at INTEGER,
   PRIMARY KEY(target_key, agent_key));
@@ -196,7 +276,11 @@ CREATE TABLE IF NOT EXISTS rr_panels (
   quality_json TEXT, llm_calls INTEGER, llm_calls_planned INTEGER,
   budget_json TEXT,                             -- §6.10.2 {S, R, T, est_low, est_high, cap, rounds_planned, tools_planned}
   evidence_refs_json TEXT,                      -- 이 패널 브리프에 실린 E0~E9 항목의 ref 목록(인용 추적)
-  model_json TEXT,                              -- D6 모델 출처 {runtime, provider, model, endpoint_host, captured ∈ health_snapshot|caller_reported|unavailable, engine_rev, chair_rev, seat_contract_rev, model_end?}(§6.7.2 1·7단계, §6.11)
+  evidence_excluded_json TEXT,                  -- 사람이 RecallPreview·POST jobs 의 exclude_evidence 로 뺀 항목 키·ref 목록(§5.6, rr_audit 동반)
+  brief_gz BLOB, brief_hash TEXT,               -- 이 패널이 실제로 받은 evidence 배열의 직렬화 전문 gzip 과 그 sha256[:12] — 브리프는 시변 조립물이라 원문이 없으면 quote·인용 재현이 불가하다(§5.6.1)
+  brief_item_hashes_json TEXT,                  -- {E0:'<sha256[:12]>', E0c:…, …, M:…} 항목별 해시. 같은 타깃의 이전 패널과 비교해 quality_json.brief_drift[] 를 만든다
+  brief_token_hash TEXT, brief_token_exp INTEGER,      -- §8.2.5 MCP `risk_get_brief` 대조용. UI·REST 가 발급한 1회용 토큰의 sha256[:32] 와 만료(발급 시각 + risk_brief_token_ttl_s). 토큰 원문은 저장하지 않는다
+  model_json TEXT,                              -- D6 모델 출처 {runtime, provider, model, endpoint_host, captured ∈ health_snapshot|caller_reported|unavailable, engine_rev, chair_rev, seat_contract_rev, sampling{temperature, top_p, max_tokens, seed?}, model_end?}(§6.7.2 1·7단계, §6.11)
   retry INTEGER DEFAULT 0, error TEXT, started_at INTEGER, ended_at INTEGER, created_at INTEGER,
   UNIQUE(target_key, panel_no));
 
@@ -204,13 +288,29 @@ CREATE TABLE IF NOT EXISTS rr_jobs (
   id TEXT PRIMARY KEY, target_key TEXT NOT NULL, owner_sub TEXT NOT NULL, tier TEXT,
   state TEXT NOT NULL CHECK(state IN ('queued','running','paused','cancelling','cancelled','completed','failed')),
   pause_reason TEXT CHECK(pause_reason IN ('diminishing','daily_cap','user')),
-  concurrency INTEGER DEFAULT 1, params_json TEXT, progress_json TEXT,
+  concurrency INTEGER DEFAULT 1, params_json TEXT, progress_json TEXT,   -- params_json 에 user_memo·modifiers·exclude_evidence[] 보존
+  state_by TEXT, state_at INTEGER,              -- pause/resume/cancel 주체·시각(자동 정지는 'code:diminishing'·'code:daily_cap')
+  credential_email TEXT,                        -- 러너가 실제로 쓴 PAT 의 email(§0.1.6 (b) 후보 순서), 서비스 자격이면 'service'
   panels_done INTEGER DEFAULT 0, panels_total INTEGER, error TEXT, created_at INTEGER, updated_at INTEGER);
 CREATE INDEX IF NOT EXISTS ix_rr_jobs_state ON rr_jobs(state, created_at);
 
+CREATE TABLE IF NOT EXISTS rr_panel_calls (                   -- 패널 중 좌석 도구 호출 원문. 포털 conv_store 는 사본이고 이 표가 정본이다(§6.7.2 7단계)
+  call_id TEXT PRIMARY KEY,                     -- '<panel_id[:8]>-<seq:03d>'
+  panel_id TEXT NOT NULL, target_key TEXT NOT NULL, owner_sub TEXT NOT NULL,
+  seq INTEGER NOT NULL, agent_key TEXT, round INTEGER,        -- agent_key 가 NULL 이면 좌석 귀속 불가(지정 도구·공용 주입)
+  source TEXT NOT NULL CHECK(source IN ('sse','events','tool_inject')),   -- sse: 러너 직접 캡처 · events: POST /panels/{id}/complete 의 events[] · tool_inject: delib_opts.tools 결과
+  tool TEXT NOT NULL, app_key TEXT, args_text TEXT,
+  ok INTEGER NOT NULL DEFAULT 1,
+  result_gz BLOB, result_bytes INTEGER, sha256 TEXT,          -- 원문 전문(절단 없음). sha256 은 gzip 해제본의 해시
+  conv_id TEXT, activity_idx INTEGER,           -- 포털 대화 좌표(있을 때만) — 레거시 'tool:conv:<conv_id>#<idx>' 참조 해석 키
+  started_at INTEGER, duration_ms INTEGER, error TEXT);
+CREATE INDEX IF NOT EXISTS ix_rr_panel_calls_panel ON rr_panel_calls(panel_id, seq);
+CREATE INDEX IF NOT EXISTS ix_rr_panel_calls_agent ON rr_panel_calls(agent_key, started_at);
+CREATE INDEX IF NOT EXISTS ix_rr_panel_calls_conv ON rr_panel_calls(conv_id, activity_idx);
+
 CREATE TABLE IF NOT EXISTS rr_seat_opinions (
   opinion_id TEXT PRIMARY KEY, target_key TEXT NOT NULL, panel_id TEXT NOT NULL, owner_sub TEXT NOT NULL,
-  agent_key TEXT NOT NULL, domain TEXT NOT NULL,
+  agent_key TEXT NOT NULL, domain TEXT NOT NULL, persona_rev TEXT,   -- 이 의견을 낸 시점의 좌석 페르소나 판번호(rr_roster.persona_rev 사본) — E7 [이전 정의] 접두 판정
   origin TEXT CHECK(origin IN ('primary','counter','adversary','new')),   -- adversary·new 는 원장 미집계 의견(§6.7 8단계·§6.8.3 4)
   cycle INTEGER DEFAULT 1,
   opinion_json TEXT NOT NULL,                   -- seat_opinion 전체(§0.1.3)
@@ -223,8 +323,10 @@ CREATE TABLE IF NOT EXISTS rr_seat_opinions (
 CREATE INDEX IF NOT EXISTS ix_rr_opinions_agent ON rr_seat_opinions(agent_key, created_at);
 
 CREATE TABLE IF NOT EXISTS rr_findings (
-  finding_id TEXT PRIMARY KEY, claim_uid TEXT NOT NULL UNIQUE,   -- '<panel_id>#F1' | '#G1'
-  target_key TEXT NOT NULL, panel_id TEXT NOT NULL, opinion_id TEXT,
+  finding_id TEXT PRIMARY KEY, claim_uid TEXT NOT NULL UNIQUE,   -- '<panel_id>#F1' | '#G1' | 사람은 '<target_key>#H<n>'(§0.2.2)
+  origin TEXT NOT NULL CHECK(origin IN ('llm','human')) DEFAULT 'llm',
+  author_sub TEXT,                              -- origin='human' 일 때 필수(작성자 이메일), llm 이면 NULL
+  target_key TEXT NOT NULL, panel_id TEXT, opinion_id TEXT,      -- panel_id 는 origin='human' 에서만 NULL 허용(CHECK 로 강제하지 않고 파서·API 가 보장)
   project_id TEXT NOT NULL, snapshot_id TEXT, diff_id TEXT, owner_sub TEXT NOT NULL,
   visibility TEXT CHECK(visibility IN ('private','org')) DEFAULT 'private',
   direction TEXT NOT NULL CHECK(direction IN ('risk','improvement','neutral')),
@@ -234,14 +336,21 @@ CREATE TABLE IF NOT EXISTS rr_findings (
   judgement TEXT CHECK(judgement IN ('OK','WARNING','FAIL','undetermined')),
   detectability TEXT, detect_tool TEXT,
   evidence_grade TEXT, precedent TEXT CHECK(precedent IN ('in_range','out_of_range','none')),
-  dangling INTEGER DEFAULT 0, cluster_key TEXT NOT NULL,
-  finding_json TEXT NOT NULL,                   -- finding 전체 + feature_snapshot + precedent_refs
-  status TEXT NOT NULL CHECK(status IN ('open','verified','dismissed','mitigated','superseded')) DEFAULT 'open',
+  requirement_ref TEXT,                         -- §2.8b (5) 이 finding 이 가리키는 요구 `req:<name>`(없으면 NULL). cites 와 별개로 '무슨 요구를 어겼나' 를 조인한다
+  dangling INTEGER DEFAULT 0, cluster_key TEXT NOT NULL,      -- 삽입 시 동결. 조인은 resolve_cluster_key() 를 거친다(§4.3.2)
+  finding_json TEXT NOT NULL,                   -- finding 전체 + feature_snapshot + precedent_refs + ref_aliases
+  recall_eligible INTEGER NOT NULL DEFAULT 1,   -- 0 = suspect_text 적중(§3.4.1) 또는 actor_verified=false 패널 산출 → E5·E7 후보 제외(그 타깃 등록부·보고서에는 남는다)
+  status TEXT NOT NULL CHECK(status IN ('open','rejected_in_panel','verified','dismissed','mitigated','superseded')) DEFAULT 'open',
+  status_source TEXT NOT NULL CHECK(status_source IN ('code','label_auto','label_manual','human')) DEFAULT 'code',
+  status_decided_by TEXT, status_decided_at INTEGER,
   status_reason TEXT, superseded_by TEXT,
   ra_entity_id INTEGER, adh_record_id TEXT,
   taxonomy_version TEXT, rule_version TEXT, ir_version TEXT, diff_version TEXT,
   created_at INTEGER, updated_at INTEGER);
 CREATE INDEX IF NOT EXISTS ix_rr_findings_cluster ON rr_findings(cluster_key);
+CREATE INDEX IF NOT EXISTS ix_rr_findings_req ON rr_findings(requirement_ref);
+CREATE INDEX IF NOT EXISTS ix_rr_findings_origin ON rr_findings(origin, target_key);
+CREATE INDEX IF NOT EXISTS ix_rr_findings_recall ON rr_findings(recall_eligible, status);
 CREATE INDEX IF NOT EXISTS ix_rr_findings_subject ON rr_findings(subject_key);
 CREATE INDEX IF NOT EXISTS ix_rr_findings_mech ON rr_findings(mechanism, mechanism_detail, change_kind);
 CREATE INDEX IF NOT EXISTS ix_rr_findings_project ON rr_findings(project_id, status);
@@ -249,17 +358,46 @@ CREATE INDEX IF NOT EXISTS ix_rr_findings_project ON rr_findings(project_id, sta
 CREATE TABLE IF NOT EXISTS rr_registry (
   target_key TEXT NOT NULL, cluster_key TEXT NOT NULL, owner_sub TEXT NOT NULL,
   visibility TEXT CHECK(visibility IN ('private','org')) DEFAULT 'private',
-  merged_json TEXT NOT NULL,                    -- 대표 finding + member finding_ids + resolving_checks 집합 + precedent_clusters
+  merged_json TEXT NOT NULL,                    -- 대표 finding + member finding_ids + resolving_checks 집합 + precedent_clusters + rejected_refs
   support INTEGER DEFAULT 1, contested INTEGER DEFAULT 0,
+  rejected INTEGER DEFAULT 0,                   -- §4.7.1 status='rejected_in_panel' 원자 수(support 와 분리). support=0 AND rejected≥1 이면 행 status 도 rejected_in_panel
+  family_key TEXT,                              -- §4.3.2 sha1(mechanism|mechanism_detail|change_kind)[:12] — subject 를 뺀 키. 근접 중복 클러스터 스캔의 묶음
   direction TEXT, mechanism TEXT, mechanism_detail TEXT, change_kind TEXT, subject_key TEXT,
   severity TEXT, sev3 INTEGER, judgement TEXT, evidence_grade TEXT, precedent TEXT,
   weak_subject INTEGER DEFAULT 0, priority REAL,   -- §4.3.2 · §4.7.1
-  status TEXT NOT NULL CHECK(status IN ('open','verified','dismissed','mitigated','superseded')) DEFAULT 'open',
+  status TEXT NOT NULL CHECK(status IN ('open','rejected_in_panel','verified','dismissed','mitigated','superseded')) DEFAULT 'open',
+  status_source TEXT NOT NULL CHECK(status_source IN ('code','label_auto','label_manual','human')) DEFAULT 'code',
+  status_decided_by TEXT, status_decided_at INTEGER, status_note TEXT,
+  status_basis_json TEXT,                       -- {evidence_ref?, label_id?, finding_ids[], support_at_decision, sev3_at_decision, grade_at_decision} — 재제기 비교의 기준선(§4.7.1)
+  needs_review_json TEXT,                       -- {escalated: bool, since: <epoch>, by_target: '<T′>', delta: {sev3, grade, support}} — 사람이 닫은 행이 더 강한 근거로 재제기됐을 때
   verified_by_json TEXT, stale_json TEXT,       -- §4.8 {<T′>: {stale: bool, unraised: bool}}
+  human_n INTEGER DEFAULT 0,                    -- §4.7.1 사람 finding 수(support 와 분리, 좌석으로 세지 않는다)
   superseded_by TEXT, ra_entity_id INTEGER, updated_at INTEGER,
   PRIMARY KEY(target_key, cluster_key));
 CREATE INDEX IF NOT EXISTS ix_rr_registry_cluster ON rr_registry(cluster_key);
 CREATE INDEX IF NOT EXISTS ix_rr_registry_subject ON rr_registry(subject_key, status);
+CREATE INDEX IF NOT EXISTS ix_rr_registry_family ON rr_registry(family_key, status);
+
+CREATE TABLE IF NOT EXISTS rr_cluster_alias (                 -- §4.3.2 cluster_key 생명주기. 옛 키 → 새 키의 유일한 자리
+  old_cluster_key TEXT PRIMARY KEY, new_cluster_key TEXT NOT NULL, owner_sub TEXT NOT NULL,
+  reason TEXT NOT NULL CHECK(reason IN ('taxonomy_major','ckey_merge','iface_alias','dim_rename','cluster_merge')),
+  evidence_json TEXT,                           -- {from, to, subject_before, subject_after, score?, vocab_version?, taxonomy_version?}
+  decided_by TEXT NOT NULL, decided_at INTEGER NOT NULL,
+  revoked_by TEXT, revoked_at INTEGER);         -- revoke 는 행 삭제가 아니라 표기(§5.2.1) — resolve_cluster_key() 가 건너뛴다
+CREATE INDEX IF NOT EXISTS ix_rr_cluster_alias_new ON rr_cluster_alias(new_cluster_key);
+-- 불변식: resolve_cluster_key() 체인 ≤5홉이고 순환 0(야간 잡이 rr_metrics(dimension=global, metric=nightly_cluster_alias_cycle) 로 건수를 남긴다).
+
+CREATE TABLE IF NOT EXISTS rr_registry_status_log (           -- append-only. 등록부·finding status 의 전이 이력(§4.7.1, §7.6)
+  id TEXT PRIMARY KEY, target_key TEXT NOT NULL, cluster_key TEXT NOT NULL, owner_sub TEXT NOT NULL,
+  seq INTEGER NOT NULL,                         -- (target_key, cluster_key) 안에서 1부터 증가, 응답 status_log_seq
+  from_status TEXT, to_status TEXT NOT NULL,
+  source TEXT NOT NULL CHECK(source IN ('code','label_auto','label_manual','human')),
+  decided_by TEXT, decided_at INTEGER NOT NULL,
+  evidence_ref TEXT, note TEXT, label_id TEXT,
+  basis_json TEXT,                              -- 그 시점 support·sev3·evidence_grade·member finding_ids
+  applied INTEGER NOT NULL DEFAULT 1,           -- 0 = 우선순위 규칙에 막혀 status 를 바꾸지 못한 시도(§7.6 conflict_with_human) — 시도도 남긴다
+  UNIQUE(target_key, cluster_key, seq));
+CREATE INDEX IF NOT EXISTS ix_rr_status_log_cluster ON rr_registry_status_log(cluster_key, decided_at);
 
 CREATE TABLE IF NOT EXISTS rr_claim_refs (
   claim_uid TEXT NOT NULL, ref_type TEXT NOT NULL, ref TEXT NOT NULL, quote TEXT,
@@ -274,6 +412,7 @@ CREATE TABLE IF NOT EXISTS rr_character (
   statement TEXT NOT NULL, polarity TEXT, cites_json TEXT, by_json TEXT,   -- by_json = 좌석 키 배열(§4.6.1 by)
   variants_json TEXT, dissent_json TEXT,        -- §4.6.4 2 후속 문장·상반 polarity 축어 보존
   first_target_key TEXT, support_panels INTEGER DEFAULT 1, support_targets INTEGER DEFAULT 1, confidence REAL,
+  recall_eligible INTEGER NOT NULL DEFAULT 1,   -- 0 = suspect_text 적중 또는 actor_verified=false 패널 산출 → E6 후보 제외(§3.4.1)
   needs_review INTEGER DEFAULT 0,               -- §4.8 5
   status TEXT NOT NULL CHECK(status IN ('seed','panel','confirmed','superseded')),
   superseded_by TEXT, decided_by TEXT, decided_at INTEGER, created_at INTEGER, updated_at INTEGER);
@@ -286,6 +425,8 @@ CREATE TABLE IF NOT EXISTS rr_iface_alias (
   visibility TEXT CHECK(visibility IN ('private','org')) DEFAULT 'private',
   aliases_json TEXT NOT NULL,                   -- [{name_a, name_b, asm_key_a, asm_key_b, project_id, snapshot_id}]
   source TEXT NOT NULL CHECK(source IN ('auto','human')), score REAL,
+  status TEXT NOT NULL CHECK(status IN ('active','revoked')) DEFAULT 'active',   -- §5.9.5 rekey — 사람이 별칭을 되돌리면 revoked 로 표기(행 삭제 없음)하고 영향 finding 의 subject_key·cluster_key 를 재계산한다
+  revoked_by TEXT, revoked_at INTEGER,
   ra_alias_ids_json TEXT, n_targets INTEGER DEFAULT 0, created_at INTEGER, updated_at INTEGER);
 CREATE INDEX IF NOT EXISTS ix_rr_alias_a ON rr_iface_alias(canonical_a);
 CREATE INDEX IF NOT EXISTS ix_rr_alias_b ON rr_iface_alias(canonical_b);
@@ -302,6 +443,7 @@ CREATE TABLE IF NOT EXISTS rr_delta_contrib (                 -- §4.7.1 타깃�
   change_kind TEXT NOT NULL, mechanism TEXT NOT NULL, mechanism_detail TEXT NOT NULL, target_key TEXT NOT NULL,
   owner_sub TEXT NOT NULL,
   n_raised INTEGER DEFAULT 0, n_improvement INTEGER DEFAULT 0,
+  n_raised_human INTEGER DEFAULT 0,             -- §4.7.1 사람 finding 기여(좌석 n_raised 와 분리, priors 합산은 §0.5.3 risk_prior_include_human)
   sev_hist_json TEXT, resolving_checks_json TEXT, updated_at INTEGER,
   PRIMARY KEY(change_kind, mechanism, mechanism_detail, target_key));
 CREATE INDEX IF NOT EXISTS ix_rr_delta_contrib_target ON rr_delta_contrib(target_key);
@@ -325,6 +467,7 @@ CREATE TABLE IF NOT EXISTS rr_patterns (
   status TEXT NOT NULL CHECK(status IN ('candidate','known','rule','predictor','deprecated','suspended')),
   n_findings INTEGER, n_targets INTEGER, n_projects INTEGER, n_experts INTEGER,
   n_confirmed INTEGER DEFAULT 0, n_refuted INTEGER DEFAULT 0, precision REAL,
+  merged_into TEXT,                             -- §4.3.2 4 — cluster_key_norm 이 별칭으로 합쳐졌을 때 대표 패턴 id(행 삭제 없음, 체인 ≤5)
   feature_ranges_json TEXT, card_record_id TEXT, design_trait_tag TEXT,
   curated_by TEXT, promoted_at INTEGER, suspended_reason TEXT, created_at INTEGER, updated_at INTEGER,
   UNIQUE(cluster_key_norm));
@@ -348,11 +491,29 @@ CREATE TABLE IF NOT EXISTS rr_metrics (
 
 CREATE TABLE IF NOT EXISTS rr_curation_queue (
   id TEXT PRIMARY KEY, owner_sub TEXT NOT NULL,
-  kind TEXT NOT NULL CHECK(kind IN ('unclassified_code','pattern_candidate','label_match','x_tag_promote')),
+  kind TEXT NOT NULL CHECK(kind IN ('unclassified_code','pattern_candidate','label_match','x_tag_promote','suspect_text','cluster_merge')),
   payload_json TEXT NOT NULL,
   status TEXT NOT NULL CHECK(status IN ('open','done','rejected')) DEFAULT 'open',
   decision_json TEXT, decided_by TEXT, decided_at INTEGER, created_at INTEGER);
 CREATE INDEX IF NOT EXISTS ix_rr_queue ON rr_curation_queue(kind, status, created_at);
+
+CREATE TABLE IF NOT EXISTS rr_audit (                         -- append-only. 사람 행위 한정(자동 전이는 각 표의 *_source 로 구분, §0.6)
+  id TEXT PRIMARY KEY, owner_sub TEXT NOT NULL,
+  actor TEXT NOT NULL, actor_verified INTEGER NOT NULL DEFAULT 1,   -- MCP 경로의 actor 는 0(§6.11)
+  channel TEXT NOT NULL CHECK(channel IN ('web','rest','mcp','import')),
+  scope TEXT NOT NULL CHECK(scope IN ('project','snapshot','diff','target','registry','coverage','job','panel','finding','member')),
+  subject_id TEXT NOT NULL,                     -- project_id · snapshot_id · target_key · '<target_key>#<cluster_key>' · job_id …
+  project_id TEXT,                              -- 조회 환원용(멤버십 판정·GET /projects/{id}/audit)
+  action TEXT NOT NULL,                         -- 'member.put' 'project.transfer' 'project.lifecycle' 'project.purge' 'gate.ack' 'gate.ack.revoke'
+                                                -- 'coverage.skip' 'coverage.uncarry' 'job.pause|resume|cancel' 'brief.exclude'
+                                                -- 'registry.status' 'verdict.final' 'finding.add|edit|delete' 'import.conflict'
+                                                -- 'project.classification' 'project.mcp_visibility'(§5.1 원칙 9 노출 토글) 'recall.approve' 'curation.decide' 'rekey'
+  before_json TEXT, after_json TEXT, reason TEXT,
+  at INTEGER NOT NULL);
+CREATE INDEX IF NOT EXISTS ix_rr_audit_subject ON rr_audit(scope, subject_id, at);
+CREATE INDEX IF NOT EXISTS ix_rr_audit_project ON rr_audit(project_id, at);
+CREATE INDEX IF NOT EXISTS ix_rr_audit_actor ON rr_audit(actor, at);
+-- 열람(GET) 로그는 남기지 않는다 — §10 #29 결정 항목이고 기본값은 '남기지 않음' 이다.
 
 CREATE TABLE IF NOT EXISTS rr_id_map (
   portal_kind TEXT NOT NULL CHECK(portal_kind IN ('project','snapshot','diff','opinion','registry','character','pattern','expert','trait')),
@@ -382,10 +543,12 @@ _DDL_V1: list[str] = _split_statements(_DDL_V1_SQL)
 MIGRATIONS: list[tuple[int, list[str]]] = [(1, _DDL_V1)]
 
 # 살림 표 2개 — rr_ 접두가 아니고 export 대상이 아니다(plan §5.2.5 (6)·§8.2.7). 버전 밖에서 항상 CREATE TABLE IF NOT EXISTS.
+# _user_credentials 열 정의는 plan §8.2.7 전문 그대로다 — 평문 열 portal_pat 은 폐기고 값은 portal_pat_enc(BLOB) 하나에만 있다.
 _HOUSEKEEPING_DDL: list[str] = [
     "CREATE TABLE IF NOT EXISTS _schema_migrations(version INTEGER PRIMARY KEY, applied_at INTEGER, app_version TEXT)",
-    "CREATE TABLE IF NOT EXISTS _user_credentials(owner_sub TEXT PRIMARY KEY, portal_pat TEXT NOT NULL, pat_sub TEXT, "
-    "pat_email TEXT, pat_groups_json TEXT, pat_exp INTEGER, registered_at INTEGER)",
+    "CREATE TABLE IF NOT EXISTS _user_credentials(owner_sub TEXT PRIMARY KEY, portal_pat_enc BLOB NOT NULL, "
+    "pat_sub TEXT, pat_email TEXT, pat_groups_json TEXT, pat_scopes_json TEXT NOT NULL, pat_jti TEXT NOT NULL, "
+    "pat_exp INTEGER, revoked_at INTEGER, revoked_seen_at INTEGER, registered_at INTEGER)",
 ]
 
 
@@ -544,30 +707,50 @@ class RiskStore:
 
     # ------------------------------------------------------------ 살림 표 _user_credentials(러너 자격 (b), plan §8.2.7)
     def get_credential(self, owner_sub: str) -> dict | None:
-        """owner_sub 의 행(dict) 또는 None. portal_pat 값도 포함되므로 응답에 그대로 싣지 않는다."""
+        """owner_sub 의 행(dict) 또는 None. 값은 응답·로그에 그대로 싣지 않는다(plan §8.2.7).
+
+        저장 열은 `portal_pat_enc`(BLOB) 하나이고 평문 열은 없다. 저장소는 그 값을 해석하지 않는다 —
+        Fernet 암복호(`HWAXRISK_CRED_KEY`)는 identity 쪽 몫이라 여기서는 BLOB 을 문자열로 되돌려
+        `portal_pat` 키로 넘기기만 한다.
+        """
         with self._lock:
             row = self.conn.execute(
-                "SELECT owner_sub, portal_pat, pat_sub, pat_email, pat_groups_json, pat_exp, registered_at"
+                "SELECT owner_sub, portal_pat_enc, pat_sub, pat_email, pat_groups_json, pat_scopes_json, pat_jti,"
+                " pat_exp, revoked_at, revoked_seen_at, registered_at"
                 " FROM _user_credentials WHERE owner_sub = ?", (owner_sub,)).fetchone()
-        return dict(row) if row is not None else None
+        if row is None:
+            return None
+        out = dict(row)
+        blob = out.pop("portal_pat_enc")
+        out["portal_pat"] = bytes(blob).decode("utf-8") if blob is not None else ""
+        return out
 
     def upsert_credential(self, owner_sub: str, portal_pat: str, pat_sub: str | None, pat_email: str | None,
-                          pat_groups_json: str, pat_exp: int | None) -> None:
+                          pat_groups_json: str, pat_exp: int | None,
+                          pat_scopes_json: str = "[]", pat_jti: str = "") -> None:
+        """등록·재등록(UPSERT). 넘어온 값은 `portal_pat_enc` BLOB 으로만 들어간다(평문 열 없음)."""
         with self._lock:
             self.conn.execute(
-                "INSERT INTO _user_credentials(owner_sub, portal_pat, pat_sub, pat_email, pat_groups_json, pat_exp, registered_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(owner_sub) DO UPDATE SET portal_pat=excluded.portal_pat, "
-                "pat_sub=excluded.pat_sub, pat_email=excluded.pat_email, pat_groups_json=excluded.pat_groups_json, "
-                "pat_exp=excluded.pat_exp, registered_at=excluded.registered_at",
-                (owner_sub, portal_pat, pat_sub, pat_email, pat_groups_json, pat_exp, int(time.time())),
+                "INSERT INTO _user_credentials(owner_sub, portal_pat_enc, pat_sub, pat_email, pat_groups_json,"
+                " pat_scopes_json, pat_jti, pat_exp, registered_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(owner_sub) DO UPDATE SET "
+                "portal_pat_enc=excluded.portal_pat_enc, pat_sub=excluded.pat_sub, pat_email=excluded.pat_email, "
+                "pat_groups_json=excluded.pat_groups_json, pat_scopes_json=excluded.pat_scopes_json, "
+                "pat_jti=excluded.pat_jti, pat_exp=excluded.pat_exp, registered_at=excluded.registered_at, "
+                # 재등록은 폐기 표기를 지운다 — 지우지 않으면 credential_pat 이 계속 None 이라 영구 강등된다.
+                "revoked_at=NULL, revoked_seen_at=NULL",
+                (owner_sub, portal_pat.encode("utf-8"), pat_sub, pat_email, pat_groups_json,
+                 pat_scopes_json, pat_jti, pat_exp, int(time.time())),
             )
-            self.conn.commit()
+            if self._tx_depth == 0:                 # tx() 안이면 바깥 트랜잭션에 맡긴다(execute 와 같은 규칙).
+                self.conn.commit()
 
     def delete_credential(self, owner_sub: str) -> int:
         """삭제한 행 수(0 또는 1)."""
         with self._lock:
             cur = self.conn.execute("DELETE FROM _user_credentials WHERE owner_sub = ?", (owner_sub,))
-            self.conn.commit()
+            if self._tx_depth == 0:
+                self.conn.commit()
         return cur.rowcount
 
 

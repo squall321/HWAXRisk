@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
-from app import taxonomy
-from app.common import now_epoch, parse_ref
+from app import render, taxonomy
+from app.common import canonical_json, new_uuid, now_epoch, parse_ref
 from app.errors import AppError
 
 # ---------------------------------------------------------------- 공유 상수(plan §0.6·§5.6.1)
@@ -140,6 +141,66 @@ def _s(value: Any, fallback: str = "") -> str:
     return fallback if value is None else str(value)
 
 
+# ---------------------------------------------------------------- 원천 문자열 위생(plan §3.4.1·§5.6.1)
+# 좌석 계약 `_common` 의 인젝션 방어는 «…» 표시에 전적으로 기댄다 — 그러니 소스 앱·사람·이전 LLM 이 쓴
+# 문자열은 이 두 함수를 거쳐서만 브리프 줄에 들어간다. 코드가 만든 라벨(`[d:`·`conf=`·`rel=`)은 밖에 둔다.
+_suspect_sink = threading.local()
+
+
+def begin_suspect_queue(store: Any, owner_sub: str | None) -> None:
+    """이 스레드의 `suspect_text` 적재 대상을 연다(prior_evidence 진입에서 부른다)."""
+    _suspect_sink.store = store
+    _suspect_sink.owner_sub = owner_sub
+    _suspect_sink.seen = set()
+
+
+def end_suspect_queue() -> None:
+    _suspect_sink.store = None
+    _suspect_sink.owner_sub = None
+    _suspect_sink.seen = None
+
+
+def _on_suspect(payload: Mapping[str, Any]) -> None:
+    """`rr_curation_queue(kind='suspect_text')` 1행. 같은 sha1 이 이미 열려 있으면 넣지 않는다."""
+    store = getattr(_suspect_sink, "store", None)
+    owner_sub = getattr(_suspect_sink, "owner_sub", None)
+    if store is None or not owner_sub:
+        return
+    sha1 = str(payload.get("sha1") or "")
+    seen = getattr(_suspect_sink, "seen", None)
+    if seen is not None:
+        if sha1 in seen:
+            return
+        seen.add(sha1)
+    row = store.query_one(
+        "SELECT id FROM rr_curation_queue WHERE kind = 'suspect_text' AND status = 'open'"
+        " AND payload_json LIKE ?", (f'%"sha1":"{sha1}"%',))
+    if row is not None:
+        return
+    store.execute(
+        "INSERT INTO rr_curation_queue(id, owner_sub, kind, payload_json, status, created_at)"
+        " VALUES (?,?, 'suspect_text', ?, 'open', ?)",
+        (new_uuid(), owner_sub, canonical_json(dict(payload)), now_epoch()),
+    )
+
+
+def _q(value: Any, kind: str = "label") -> str:
+    """외부 출처 문자열 한 칸 → 위생 통과본을 «…» 로 감싼 표기(적중은 `«[suspect_text …]»`)."""
+    return render.sanitize_source_text(value, kind, on_suspect=_on_suspect)
+
+
+def _ref_name(value: Any, kind: str = "label") -> str:
+    """참조 토큰 자리(`[d:<name>]`)의 이름 — 위생만 하고 «…» 는 벗긴다(토큰이 기계 판독 가능해야 한다).
+
+    인젝션 어휘에 걸리면 이름 대신 `suspect_text-<sha1[:12]>` 가 토큰이 되고 원문은 큐로 간다.
+    """
+    quoted = _q(value, kind)
+    inner = quoted[1:-1] if quoted.startswith(render.QUOTE_OPEN) and quoted.endswith(render.QUOTE_CLOSE) else quoted
+    if inner.startswith("[suspect_text "):
+        return "suspect_text-" + inner[len("[suspect_text "):-1]
+    return inner
+
+
 def _cut(text: Any, n: int) -> str:
     """한 필드를 n 자로 자른다(줄바꿈은 공백으로 접어 한 줄 규약을 지킨다)."""
     s = " ".join(_s(text).split())
@@ -246,7 +307,12 @@ def _gates_lines(gates: Any) -> str:
                 continue
             value = source[key]
             ok = value.get("pass") if isinstance(value, dict) else value
-            parts.append(f"{key} {'pass' if ok else 'fail'}")
+            if ok is None:
+                # 입력이 없어 검문하지 못했다 — pass 로도 fail 로도 세지 않는다(plan §2.12).
+                reason = value.get("reason") if isinstance(value, dict) else None
+                parts.append(f"{key} n/a({reason or 'unknown'})")
+            else:
+                parts.append(f"{key} {'pass' if ok else 'fail'}")
     return " · ".join(parts) if parts else "게이트 기록 없음"
 
 
@@ -265,10 +331,10 @@ def _source_apps(snapshot) -> str:
             kinds.add(kind)
             ref = item.get("ref")
             if isinstance(ref, dict):
-                detail = " ".join(f"{k}={v}" for k, v in sorted(ref.items()) if v is not None)
+                detail = " ".join(f"{k}={_q(v)}" for k, v in sorted(ref.items()) if v is not None)
             else:
-                detail = _s(ref)
-            parts.append(f"{kind} {_s(item.get('app_key'))} {detail}".strip())
+                detail = _q(ref)
+            parts.append(f"{kind} {_q(item.get('app_key'))} {detail}".strip())
     if "ecad" not in kinds:
         parts.append("ecad absent")
     return " · ".join(parts) if parts else "소스 기록 없음"
@@ -388,7 +454,8 @@ def _item_e2(store, ctx) -> dict:
             tail = " unconfirmed"
         elif row["excluded_reason"]:
             tail = f" excluded_reason={row['excluded_reason']}"
-        text = _s(row["text"]) or f"{_s(row['subject_key'])} {_s(row['change_kind'])}"
+        # 이벤트 정규 표기는 소스 앱 부품명을 그대로 담는다(render.fmt_label 은 감싸지 않는다) — 여기서 «…» 로 넣는다.
+        text = _q(_s(row["text"]) or f"{_s(row['subject_key'])} {_s(row['change_kind'])}", "note")
         # §3.3.2 의 cid 는 'c:' 접두를 포함한 값이고 §5.6.1 의 표기는 `[c:<cid>]` 다 — 접두를 두 번 붙이지 않는다.
         cid = _s(row["cid"])
         ref = cid if cid.startswith("c:") else f"c:{cid}"
@@ -410,8 +477,9 @@ def _item_e3(ctx) -> dict:
             rel = item.get("rel")
             rel_text = f" ({rel}%)" if rel is not None else ""
             lines.append(
-                f"[d:{_s(item.get('name'))}] {_s(item.get('base'), '미측정')}→{_s(item.get('target'), '미측정')} "
-                f"{_s(item.get('unit'))}{rel_text} method={_s(item.get('method'), '-')}"
+                f"[d:{_ref_name(item.get('name'))}] {_s(item.get('base'), '미측정')}"
+                f"→{_s(item.get('target'), '미측정')} "
+                f"{_q(item.get('unit'))}{rel_text} method={_q(item.get('method') or '-')}"
             )
     else:
         args = f"snap:{_s(ctx['snapshot_id'])}"
@@ -423,7 +491,8 @@ def _item_e3(ctx) -> dict:
             value = item.get("value") if isinstance(item, dict) else item
             unit = item.get("unit") if isinstance(item, dict) else ""
             method = item.get("method") if isinstance(item, dict) else None
-            lines.append(f"[d:{_s(name)}] {_s(value, '미측정')} {_s(unit)} method={_s(method, '-')}")
+            lines.append(f"[d:{_ref_name(name)}] {_s(value, '미측정')} {_q(unit)} "
+                         f"method={_q(method or '-')}")
     if not lines:
         lines = ["[명명 치수 없음 — rr_dim_defs 0건]"]
     return {"key": "E3", "args": args, "result": _body(source, lines)}
@@ -443,8 +512,9 @@ def _item_e4(ctx) -> dict:
                 if not isinstance(item, dict):
                     continue
                 lines.append(
-                    f"{_s(item.get('name'))} {_s(item.get('base'), '미측정')}→{_s(item.get('target'), '미측정')} "
-                    f"{_s(item.get('unit'))} rel={_s(item.get('rel'), '-')}"
+                    f"{_q(item.get('name'))} {_s(item.get('base'), '미측정')}"
+                    f"→{_s(item.get('target'), '미측정')} "
+                    f"{_q(item.get('unit'))} rel={_s(item.get('rel'), '-')}"
                 )
     else:
         args = f"snap:{_s(ctx['snapshot_id'])}"
@@ -452,7 +522,9 @@ def _item_e4(ctx) -> dict:
         rows = (ir.get("results") or {}).get("part_risk") if isinstance(ir.get("results"), dict) else None
         for item in (rows or [])[:5]:
             if isinstance(item, dict):
-                fields = " ".join(f"{k}={item[k]}" for k in sorted(item) if not isinstance(item[k], (dict, list)))
+                # part_risk 행의 값에는 dyna 소스가 쓴 파트명·이벤트 문자열이 섞인다 — 전부 «…» 안에 넣는다.
+                fields = " ".join(f"{k}={_q(item[k])}" for k in sorted(item)
+                                  if not isinstance(item[k], (dict, list)))
                 lines.append(fields)
     if not lines:
         lines = ["[dyna_result 부재]"]
@@ -470,9 +542,9 @@ def _registry_line(row, path: str) -> str:
         claim = merged["representative"].get("claim")
     return (
         f"reg:{row['target_key']}#{row['cluster_key']} | "
-        f"{_s(row['mechanism'], '-')}.{_s(row['mechanism_detail'], '-')} | {_cut(subject_names, 60)} | "
+        f"{_s(row['mechanism'], '-')}.{_s(row['mechanism_detail'], '-')} | {_q(subject_names)} | "
         f"{_s(row['severity'], '-')}/{_s(row['judgement'], '-')} | status {_s(row['status'], '-')} | "
-        f"support {row['support'] or 0} · contested {row['contested'] or 0} | {_cut(claim, 160)} | "
+        f"support {row['support'] or 0} · contested {row['contested'] or 0} | {_q(claim, 'claim')} | "
         f"[경로: {path}]"
     )
 
@@ -537,7 +609,7 @@ def _item_e6(store, similar: Mapping[str, Any], ctx) -> dict:
         marks = ",".join("?" for _ in project_ids)
         rows = store.query(
             "SELECT id, project_id, facet, tag, statement, by_json, support_panels, status "
-            f"FROM rr_character WHERE project_id IN ({marks}) "
+            f"FROM rr_character WHERE project_id IN ({marks}) AND recall_eligible = 1 "
             "AND (status = 'confirmed' OR (status = 'panel' AND support_panels >= 2))",
             project_ids,
         )
@@ -554,7 +626,7 @@ def _item_e6(store, similar: Mapping[str, Any], ctx) -> dict:
                          if str(e.get("project_id")) == row["project_id"]] or [])
             lines.append(
                 f"narr:{row['id']} | {_project_code(store, row['project_id'])} | {_s(row['facet'])} | "
-                f"{_s(row['tag'], '-')} | {_cut(row['statement'], 200)} | by {_cut(by_text, 40)} | "
+                f"{_s(row['tag'], '-')} | {_q(row['statement'], 'statement')} | by {_cut(by_text, 40)} | "
                 f"[{status}·경로 {paths}]"
             )
     if not lines:
@@ -757,12 +829,19 @@ def _item_e9(ctx) -> dict:
                 key=lambda w: (_SEVERITY_RANK.get(_s(w.get("severity")), 9), _s(w.get("code")))):
             ref_to = _s(warning.get("ref"))
             ref = f"warn:{_s(warning.get('code'))}" + (f"#{ref_to}" if ref_to else "")
-            lines.append(f"{ref} {_cut(warning.get('message'), 350)}")
+            lines.append(f"{ref} {_q(warning.get('message'), 'message')}")
     hits = _j(ctx["state"]["rule_hits_json"], []) if ctx["state"] is not None else []
     if isinstance(hits, dict):
         hits = hits.get("hits") or []
     for hit in hits if isinstance(hits, list) else []:
-        if not isinstance(hit, dict) or not hit.get("pass"):
+        if not isinstance(hit, dict):
+            continue
+        if hit.get("evaluable") is False or hit.get("pass") is None:
+            # 결측을 '이상 없음' 으로 읽히게 두지 않는다(plan §3.2.6·§5.6.1 E9).
+            lines.append(f"rule:{_s(hit.get('rule_id') or hit.get('rule'))} "
+                         f"평가 불가({_s(hit.get('not_evaluable_reason'), 'unknown')})")
+            continue
+        if not hit.get("pass"):
             continue
         found = hit.get("found") or []
         found_text = ",".join(str(x) for x in found[:3]) if isinstance(found, list) else _s(found)
@@ -786,7 +865,7 @@ def _item_memo(store, target_key: str) -> dict | None:
     memo = _j(row["params_json"], {}).get("user_memo")
     if not memo:
         return None
-    return {"key": "M", "args": target_key, "result": _body("user_memo", [str(memo)])}
+    return {"key": "M", "args": target_key, "result": _body("user_memo", [_q(memo, "memo")])}
 
 
 # ---------------------------------------------------------------- 참조 수집·린터
@@ -865,22 +944,27 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
         bool(ra is not None and getattr(ra, "available", False))
     similar = similar_projects(store, _s(ctx["target"]["project_id"]), adh=adh, ra=ra, owner_sub=owner_sub)
 
-    raw: list[dict] = [
-        _item_e0(store, ctx, external_ok, _panel_model(store, target_key, panel_id)),
-        _item_e0c(seats),
-        _item_e1(ctx),
-        _item_e2(store, ctx),
-        _item_e3(ctx),
-        _item_e4(ctx),
-        _item_e5(store, ctx, similar, owner_sub),
-        _item_e6(store, similar, ctx),
-        _item_e7(store, ctx, seats, adh),
-        _item_e8(store, ctx),
-        _item_e9(ctx),
-    ]
-    memo = _item_memo(store, target_key)
-    if memo is not None:
-        raw.append(memo)
+    # 조립하는 동안 원천 문자열 위생(§3.4.1)의 suspect_text 적재 대상을 이 스레드에 걸어 둔다.
+    begin_suspect_queue(store, owner_sub)
+    try:
+        raw: list[dict] = [
+            _item_e0(store, ctx, external_ok, _panel_model(store, target_key, panel_id)),
+            _item_e0c(seats),
+            _item_e1(ctx),
+            _item_e2(store, ctx),
+            _item_e3(ctx),
+            _item_e4(ctx),
+            _item_e5(store, ctx, similar, owner_sub),
+            _item_e6(store, similar, ctx),
+            _item_e7(store, ctx, seats, adh),
+            _item_e8(store, ctx),
+            _item_e9(ctx),
+        ]
+        memo = _item_memo(store, target_key)
+        if memo is not None:
+            raw.append(memo)
+    finally:
+        end_suspect_queue()
 
     excluded = {str(x) for x in exclude}
     order = {key: i for i, key in enumerate(ITEM_ORDER)}

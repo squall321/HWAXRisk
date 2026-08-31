@@ -824,7 +824,8 @@ def test_fixture_directory_is_shipped():
     assert (IR_FIXTURES / "adapter_mcad_basic.json").exists()
     assert sorted(p.name for p in (IR_FIXTURES / "gates").glob("*.json")) == [
         "gate_f1_clean.json", "gate_f2_anon.json", "gate_f3_unit.json",
-        "gate_f4_iface.json", "gate_f5_partial.json",
+        "gate_f4_iface.json", "gate_f5_partial.json", "gate_f6_mcad_absent.json",
+        "gate_f7_capture_partial.json", "gate_f8_unit_unknown.json",
     ]
 
 
