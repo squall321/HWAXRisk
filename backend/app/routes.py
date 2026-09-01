@@ -1129,8 +1129,10 @@ def create_snapshot(project_id: str, body: SnapshotBody,
     portal_pat = identity.credential_pat(credential)
     if int(credential.get("pat_exp") or 0) <= now_epoch() + runner.CREDENTIAL_MARGIN_S:
         portal_pat = None
+    # 사람이 시작한 캡처다 — 서비스 PAT 가 없으면 호출자 본인의 heax 토큰으로 REST 를 읽는다.
     channels = adapters_registry.clients_from_settings(
-        config.settings, config.load_secrets(config.settings.data_dir), portal_pat=portal_pat)
+        config.settings, config.load_secrets(config.settings.data_dir), portal_pat=portal_pat,
+        heax_token=ident.token)
     principal = adapters_base.Principal(owner_sub=owner_sub, portal_pat=channels["portal_pat"],
                                         service_pat=channels["service_pat"])
     try:

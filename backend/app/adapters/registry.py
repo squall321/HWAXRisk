@@ -206,17 +206,22 @@ def capture_all(*, sources: Sequence[Mapping[str, Any]], principal: Principal,
 
 
 def clients_from_settings(settings, secrets: Mapping[str, str] | None = None, *,
-                          portal_pat: str | None = None, http_client: httpx.Client | None = None,
+                          portal_pat: str | None = None, heax_token: str | None = None,
+                          http_client: httpx.Client | None = None,
                           timeout: float = DEFAULT_TIMEOUT) -> dict:
-    """Settings·secrets.env 로 캡처 채널을 만든다 — 게이트웨이 MCP(포털 PAT)와 heax REST(서비스 PAT).
+    """Settings·secrets.env 로 캡처 채널을 만든다 — 게이트웨이 MCP(포털 PAT)와 heax REST.
 
-    포털 PAT 가 없으면 mcp_client 는 None 이고, 서비스 PAT 가 없으면 REST 채널이 죽어 mcp_degraded 로 간다.
+    포털 PAT 가 없으면 mcp_client 는 None 이다. REST 채널의 자격은 두 갈래다 —
+    서비스 PAT(`HWAXRISK_HEAX_SERVICE_PAT`, 무인 배치용)가 있으면 그것을 쓰고, 없으면 사람이 시작한
+    캡처에 한해 **호출자 본인의 heax 토큰**(`heax_token`)을 그대로 쓴다. 그래서 로그인한 사용자는
+    별도 자격 발급 없이도 REST 채널이 살아나고, 자격이 아무것도 없을 때만 mcp_degraded 로 간다.
+    소스 앱은 읽기 전용이고 StepForge 는 per-user 격리가 없으므로(정찰 실측) 대리 읽기의 권한 확대는 없다.
     """
     from app.ra_client import McpHttpClient  # noqa: PLC0415 — 순환 임포트를 피하려 지연 임포트한다.
 
     secrets = dict(secrets or {})
     token = portal_pat or secrets.get("HWAXRISK_PORTAL_PAT")
-    service_pat = secrets.get("HWAXRISK_HEAX_SERVICE_PAT")
+    service_pat = secrets.get("HWAXRISK_HEAX_SERVICE_PAT") or (heax_token or None)
     mcp_client = None
     if token:
         mcp_client = McpHttpClient(getattr(settings, "gateway_mcp", ""),

@@ -37,12 +37,19 @@ class Identity:
     organization: str | None
     anonymous: bool
     source: str
+    # 호출자가 가져온 heax 토큰 원문. 사용자가 시작한 캡처에서 소스 앱(StepForge) REST 를 **그 사람 자격으로**
+    # 읽는 데만 쓴다 — 별도 서비스 PAT 없이도 REST 채널이 살아난다(plan §2.13.2 의 대안 경로).
+    # to_dict 에서 빼서 응답·로그로 새지 않게 한다. 무인 배치(러너)는 이 값이 없어 서비스 PAT 를 쓴다.
+    token: str | None = None
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        d = asdict(self)
+        d.pop("token", None)      # 신원 응답에 토큰을 절대 싣지 않는다.
+        return d
 
 
-ANONYMOUS = Identity(email=None, display_name=None, role=None, organization=None, anonymous=True, source="none")
+ANONYMOUS = Identity(email=None, display_name=None, role=None, organization=None, anonymous=True, source="none",
+                     token=None)
 
 # sha256(token) → (만료 monotonic 시각, heax 사용자 dict 또는 None(401)). 연결 실패는 캐시하지 않는다.
 _cache: dict[str, tuple[float, dict | None]] = {}
@@ -130,6 +137,7 @@ def current(request: Request) -> Identity:
         organization=user.get("organization"),
         anonymous=False,
         source=source,
+        token=token,
     )
 
 
