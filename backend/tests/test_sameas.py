@@ -47,10 +47,12 @@ def ecad(nid: str, refdes: str, canon: str | None = None, part_number="cap_x7r")
     }
 
 
-def bridge_edge(mcad_nid: str, dyna_nid: str, *, stale=False, eid="e:bridge01") -> dict:
+def bridge_edge(mcad_nid: str, dyna_nid: str, *, stale=False, eid="e:bridge01",
+                join_key="path:/x/plate") -> dict:
+    """브리지 엣지 — 조인 키는 REST 가용 시 `path:…`, MCP 폴백 시 `file+name:…` 이다(plan §2.5.1)."""
     return {"eid": eid, "kind": "bridge", "kind_family": "bridge", "a": mcad_nid, "b": dyna_nid,
             "domain": "dyna", "status": "auto",
-            "attrs": {"mesh_key": "assembled.k#1", "bridge_stale": stale}}
+            "attrs": {"join_key": join_key, "bridge_stale": stale}}
 
 
 def _one(records: list[dict]) -> dict:
@@ -97,7 +99,9 @@ def test_ladder_pid_map_uses_the_bridge_edge():
     m, d = mcad("m1", "/x/plate", "plate"), dyna("d1", "plate")
     record = _one(sameas.resolve([m], [d], [bridge_edge("m1", "d1")], [], "intra", None))
     assert (record["method"], record["score"], record["status"]) == ("pid_map", 1.0, "auto")
-    assert record["evidence"]["bridge"] == {"mesh_key": "assembled.k#1", "stale": False}
+    assert record["evidence"]["bridge"] == {"join_key": "path:/x/plate", "stale": False}
+    # 소스가 주는 행 id(mesh_key)는 앱 원장에 남기지 않는다 — 재파싱마다 바뀐다(plan §2.5.1).
+    assert "mesh_key" not in record["evidence"]["bridge"]
 
 
 def test_ladder_pid_map_follows_the_declaration_not_the_name():
@@ -598,3 +602,80 @@ def test_record_iface_aliases_keys_by_sorted_ckey_pair(risk_store):
     # 같은 스냅샷을 다시 넣어도 별칭은 늘지 않는다.
     assert sameas.record_iface_aliases(risk_store, nodes, edges, ckeys, owner_sub=OWNER,
                                        project_id="p1", snapshot_id="s1") == 0
+
+
+# ---------------------------------------------------------------- 키 일치율(plan §4.9 · §0.9 P2-11)
+MATCH_RATE_MIN = 0.95
+
+# 이름 규칙만 다른 두 과제의 같은 부품 목록. (A 이름, B 이름, auto_named 여부).
+NAME_VARIANTS: list[tuple[str, str, bool]] = [
+    ("plate_1", "plate_1", False),          # 그대로
+    ("plate_2", "plate_2#3", False),        # 인스턴스 순번 접미
+    ("bracket_l", "m22_bracket_l", False),  # 과제 코드 접두
+    ("cover", "cover_rev", False),          # 불용어
+    ("housing", "housing", False),
+    ("pcb_top", "board_top", False),        # 동의어
+    ("solid", "solid_7", True),             # 자동명(auto_named 접미)
+    ("frame", "frame", False),
+    ("gasket", "gasket", False),
+    ("shield", "shield", False),
+]
+
+
+def _variant_nodes(which: int) -> list[dict]:
+    """같은 부품 10개를 두 이름 규칙으로 만든 노드 목록(형상·재료는 같다)."""
+    from app import ir_builder as ib
+
+    nodes = []
+    for index, (left, right, auto) in enumerate(NAME_VARIANTS):
+        raw = left if which == 0 else right
+        canon = ib.name_norm_canon(ib.name_norm(raw, auto_named=auto), project_codes=["M22"])
+        nodes.append(mcad(f"n{index}", f"/x/{raw}", canon, (10.0, 5.0, 1.0), 50.0))
+    return nodes
+
+
+def test_ckey_and_subject_key_match_rate_across_two_naming_conventions():
+    """이름·인스턴스 접미·자동명만 다른 두 과제에서 ckey 일치율이 0.95 이상이다(plan §4.9)."""
+    left, right = _variant_nodes(0), _variant_nodes(1)
+    ckeys_left = [sameas.ckey_of_node(n) for n in left]
+    ckeys_right = [sameas.ckey_of_node(n) for n in right]
+    hits = sum(1 for a, b in zip(ckeys_left, ckeys_right) if a == b)
+    rate = hits / len(NAME_VARIANTS)
+    assert rate >= MATCH_RATE_MIN, [
+        (v[0], v[1]) for v, a, b in zip(NAME_VARIANTS, ckeys_left, ckeys_right) if a != b]
+
+    # subject_key(계면 쌍)는 ckey 쌍의 정렬 결합이라 같은 비율로 따라온다.
+    pairs_left = ["|".join(sorted(p)) for p in zip(ckeys_left, ckeys_left[1:])]
+    pairs_right = ["|".join(sorted(p)) for p in zip(ckeys_right, ckeys_right[1:])]
+    subject_rate = sum(1 for a, b in zip(pairs_left, pairs_right) if a == b) / len(pairs_left)
+    assert subject_rate >= MATCH_RATE_MIN
+
+
+def test_revision_inheritance_keeps_subject_and_cluster_keys(risk_store):
+    """같은 과제 DV1→DV2 에서 자동 승계 원장을 거친 뒤 subject_key 일치율 ≥0.95 이고 cluster_key 가 같다."""
+    from app import narrative
+
+    # 두께만 바뀐 두 리비전 — 형상 버킷이 옮겨가 ckey 는 달라진다.
+    base = [mcad("b1", "/x/film", "film", (10.0, 5.0, 0.08), 4.0),
+            mcad("b2", "/x/plate", "plate", (10.0, 5.0, 1.0), 50.0)]
+    target = [mcad("t1", "/x/film", "film", (10.0, 5.0, 0.06), 3.0),
+              mcad("t2", "/x/plate", "plate", (10.0, 5.0, 1.0), 50.0)]
+    sameas.assign_ckeys(risk_store, base, [], owner_sub=OWNER, project_id="p1", snapshot_id="s1")
+    links = [{"a": "b1", "b": "t1", "method": "exact_path", "score": 1.0, "status": "auto"},
+             {"a": "b2", "b": "t2", "method": "exact_path", "score": 1.0, "status": "auto"}]
+    applied = sameas.inherit_ckeys(risk_store, links, base, target, owner_sub=OWNER,
+                                   pair_kind="same_project_revision",
+                                   base_snapshot_id="s1", target_snapshot_id="s2")
+    assert len([a for a in applied if a.get("action") == "merged"]) >= 1
+
+    resolved_base = [sameas.resolve_ckey(risk_store, sameas.ckey_of_node(n), OWNER) for n in base]
+    resolved_target = [sameas.resolve_ckey(risk_store, sameas.ckey_of_node(n), OWNER) for n in target]
+    rate = sum(1 for a, b in zip(resolved_base, resolved_target) if a == b) / len(base)
+    assert rate >= MATCH_RATE_MIN
+
+    subject_base = "|".join(sorted(resolved_base))
+    subject_target = "|".join(sorted(resolved_target))
+    assert subject_base == subject_target
+    # 같은 subject_key·메커니즘이면 cluster_key 도 리비전을 넘어 같다(§4.3.2).
+    assert narrative.cluster_key_of("interface", "clearance", subject_base, "dimension") == \
+        narrative.cluster_key_of("interface", "clearance", subject_target, "dimension")

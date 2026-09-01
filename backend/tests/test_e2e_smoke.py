@@ -3,16 +3,19 @@ from __future__ import annotations
 
 import collections
 import copy
+import dataclasses
 import json
 
 import httpx
 import pytest
 
 from app import brief as brief_module
+from app import config
 from app import diff as diff_module, export, identity, ir_builder, narrative, planner, registry, routes, sameas
 from app import state as state_module
 from app.adapters import registry as adapters_registry
 from app.adapters.base import RestGetClient
+from app.common import sha256_hex
 from app.errors import AppError
 from app.ra_client import McpHttpClient
 from app.risk_store import RiskStore
@@ -225,7 +228,8 @@ def test_e2e_full_flow(wired, ident, monkeypatch, tmp_path):
 
     # ── 1. 과제 생성(POST /api/projects).
     project = routes.create_project(
-        routes.ProjectBody(code=PROJECT_CODE, name="E2E 스모크 과제", stage="DV1"), ident=ident)
+        routes.ProjectBody(code=PROJECT_CODE, name="E2E 스모크 과제", stage="DV1",
+                           classification="internal"), ident=ident)
     project_id = project["id"]
     assert store.query_one("SELECT code FROM rr_projects WHERE id = ?", (project_id,))["code"] == PROJECT_CODE
 
@@ -268,6 +272,15 @@ def test_e2e_full_flow(wired, ident, monkeypatch, tmp_path):
     # 캡처 호출은 전부 원장에 남고 인용 주소(tool:<call_id>)가 실재한다.
     calls = ir_builder.load_calls(store, first["snapshot_id"], include_response=False)
     assert f"GET /apps/step_forge/api/projects/{recon.SF_PROJECT}/tree" in {c["tool"] for c in calls}
+    # `GET /api/refs/tool:<call_id>` 는 메타가 아니라 보관한 gzip 원문을 돌려준다(plan §2.11.2·§0.9 P1-8).
+    with_response = ir_builder.load_calls(store, first["snapshot_id"])
+    sample = next(c for c in with_response if "response" in c)
+    resolved = routes.get_ref(f"tool:{sample['call_id']}", ident=ident)
+    assert resolved["ref_type"] == "tool" and resolved["resolved"] is True
+    payload = resolved["payload"]
+    assert payload["response_available"] is True and payload["response_truncated"] is False
+    assert payload["response"] == sample["response"]
+    assert sha256_hex(payload["response_text"]) == payload["response_sha256"]
 
     # ── 4. state 게이트 — 동결이 rr_states 를 함께 쓴다(G1~G6 판정 + 요약문).
     state = state_module.load_state(store, first["snapshot_id"])
@@ -507,7 +520,8 @@ def test_e2e_full_flow(wired, ident, monkeypatch, tmp_path):
 # ================================================================ 스냅샷 라우트의 어댑터 계약
 def test_snapshot_route_calls_the_adapter_instead_of_501(wired, ident, monkeypatch):  # noqa: ARG001
     """소스 카드 ref 가 비면 어댑터가 그 자리에서 422 를 낸다 — 라우트는 더는 not_implemented 가 아니다."""
-    project = routes.create_project(routes.ProjectBody(code="M22REF", name="ref 누락 과제", stage="DV1"),
+    project = routes.create_project(routes.ProjectBody(code="M22REF", name="ref 누락 과제", stage="DV1",
+                                                       classification="internal"),
                                     ident=ident)
     routes.add_source(project["id"], routes.SourceBody(kind="mcad", app_key=recon.APP_KEY, ref={}), ident=ident)
     apps = FakeSourceApps()
@@ -559,3 +573,57 @@ def test_seats_json_is_stable_for_the_same_roster(tmp_path):
             store.close()
     assert seats_json[0] == seats_json[1]
     assert json.loads(seats_json[0]) == sorted(json.loads(seats_json[0]), key=lambda s: (s["domain"], s["key"]))
+
+
+# ---------------------------------------------------------------- 스냅샷 잡 상태기계(plan §2.11.3 · §0.9 P1-22)
+def test_snapshot_job_records_its_state_and_guards_the_model_size(wired, ident, monkeypatch):
+    """정상 캡처는 done 1행, 상한 초과는 409 + failed 1행(호출 원문은 snapshot_id NULL 로 남는다)."""
+    store = wired
+    project = routes.create_project(
+        routes.ProjectBody(code="M22JOB", name="잡 상태기계", stage="DV1", classification="internal"),
+        ident=ident)
+    project_id = project["id"]
+    for kind, app_key, ref in (("mcad", recon.APP_KEY,
+                                {"stepforge_project_id": recon.SF_PROJECT, "detect_job_id": "01JDET"}),):
+        routes.add_source(project_id, routes.SourceBody(kind=kind, app_key=app_key, ref=ref), ident=ident)
+
+    apps = FakeSourceApps()
+    monkeypatch.setattr(adapters_registry, "clients_from_settings", lambda *a, **k: apps.channels())
+    out = routes.create_snapshot(project_id, routes.SnapshotBody(label="DV1"), ident=ident)
+    job = store.query_one(
+        "SELECT id, state, snapshot_id, calls_n, calls_failed_n, budget_s, started_at, finished_at"
+        " FROM rr_snapshot_jobs WHERE id = ?", (out["job_id"],))
+    assert job["state"] == out["job_state"] == "done"
+    assert job["snapshot_id"] == out["snapshot_id"] and job["calls_n"] > 0
+    assert job["started_at"] and job["finished_at"]
+    assert store.query_one("SELECT job_id FROM rr_snapshots WHERE id = ?",
+                           (out["snapshot_id"],))["job_id"] == out["job_id"]
+
+    # 상한 초과 — 409 model_too_large 이고 그 잡은 failed 로 남으며 호출 원문은 스냅샷 없이 보존된다.
+    small = dataclasses.replace(config.settings, risk_max_leaf=1, risk_max_interfaces=1)
+    monkeypatch.setattr(config, "settings", small)
+    apps.revise()
+    with pytest.raises(AppError) as exc:
+        routes.create_snapshot(project_id, routes.SnapshotBody(label="DV2"), ident=ident)
+    assert (exc.value.code, exc.value.http_status) == ("model_too_large", 409)
+    failed = store.query_one(
+        "SELECT id, state, snapshot_id, error_json FROM rr_snapshot_jobs WHERE state = 'failed'")
+    assert failed is not None and failed["snapshot_id"] is None
+    assert json.loads(failed["error_json"])["stage"] == "model_size"
+    orphan_calls = store.query(
+        "SELECT call_id, snapshot_id FROM rr_snapshot_calls WHERE job_id = ?", (failed["id"],))
+    assert orphan_calls and all(c["snapshot_id"] is None for c in orphan_calls)
+
+    # allow_large 재요청은 예산 600 s 로 통과한다.
+    allowed = routes.create_snapshot(
+        project_id, routes.SnapshotBody(label="DV2", allow_large=True), ident=ident)
+    assert allowed["job_state"] in ("done", "partial")
+    assert store.query_one("SELECT budget_s FROM rr_snapshot_jobs WHERE id = ?",
+                           (allowed["job_id"],))["budget_s"] == routes.LARGE_BUDGET_S
+
+    # 재기동 마감 — running 인 채 남은 행은 failed(error_json.stage='restart')다.
+    store.execute("UPDATE rr_snapshot_jobs SET state = 'running' WHERE id = ?", (allowed["job_id"],))
+    assert routes.close_stale_snapshot_jobs(store) == 1
+    closed = store.query_one(
+        "SELECT state, error_json FROM rr_snapshot_jobs WHERE id = ?", (allowed["job_id"],))
+    assert closed["state"] == "failed" and json.loads(closed["error_json"])["stage"] == "restart"

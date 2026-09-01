@@ -514,7 +514,9 @@ def test_revert_carried_raises_cycle(risk_store):
     target_key = seeded(risk_store, {"mech": 1})
     set_status(risk_store, target_key, "mech-a000", "carried", carried_from_opinion_id="op-prev")
     out = planner.revert_carried(risk_store, target_key, "mech-a000")
-    assert out == {"target_key": target_key, "agent_key": "mech-a000", "status": "pending", "cycle": 2}
+    assert {k: out[k] for k in ("target_key", "agent_key", "status", "cycle")} == {
+        "target_key": target_key, "agent_key": "mech-a000", "status": "pending", "cycle": 2}
+    assert out["status_source"] == "code" and out["decided_by"] is None      # 주체 없이 부르면 자동 전이다
     row = coverage(risk_store, target_key)["mech-a000"]
     # carried_from_opinion_id 는 남긴다(계보).
     assert (row["status"], row["cycle"], row["carried_from_opinion_id"]) == ("pending", 2, "op-prev")
@@ -646,3 +648,24 @@ def test_check_invariants_flags_seat_outside_roster(risk_store):
     )
     problems = planner.check_invariants(risk_store, target_key)
     assert [p for p in problems if p.startswith("(5)")]
+
+
+# ---------------------------------------------------------------- 사람 개입의 주체(plan §0.6·§0.9 P4-13)
+def test_human_seat_transitions_record_their_actor(risk_store):
+    """decided_by 를 주면 status_source='human'·decided_by·decided_at 이 함께 남는다."""
+    target_key = seeded(risk_store, {"mech": 2})
+    out = planner.skip_seat(risk_store, target_key, "mech-a000", "휴가", decided_by="me@x")
+    assert out["status_source"] == "human" and out["decided_by"] == "me@x" and out["decided_at"]
+    row = risk_store.query_one(
+        "SELECT status, reason, status_source, decided_by, decided_at FROM rr_coverage"
+        " WHERE target_key = ? AND agent_key = 'mech-a000'", (target_key,))
+    assert (row["status"], row["reason"]) == ("skipped", "휴가")
+    assert (row["status_source"], row["decided_by"]) == ("human", "me@x") and row["decided_at"]
+
+    with pytest.raises(AppError) as blank:
+        planner.skip_seat(risk_store, target_key, "mech-a001", "   ", decided_by="me@x")
+    assert blank.value.http_status == 422
+
+    set_status(risk_store, target_key, "mech-a001", "carried", carried_from_opinion_id="op-prev")
+    back = planner.revert_carried(risk_store, target_key, "mech-a001", decided_by="me@x")
+    assert back["status_source"] == "human" and back["decided_by"] == "me@x"

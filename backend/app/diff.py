@@ -240,6 +240,39 @@ def comparability(base_ir: Mapping[str, Any], target_ir: Mapping[str, Any],
     else:
         result_reason = None
 
+    # --- 소스 5키(plan §3.3.6 표). 전부 false 여도 diff 생성을 막지 않는다 — 막는 것은 G6 하나다.
+    base_sources = {str(x.get("kind")): x for x in (base_ir.get("sources") or ()) if isinstance(x, Mapping)}
+    target_sources = {str(x.get("kind")): x for x in (target_ir.get("sources") or ()) if isinstance(x, Mapping)}
+    common_kinds = sorted(set(base_sources) & set(target_sources))
+    app_version_parity: bool | None = True
+    for kind in common_kinds:
+        left = ((base_sources[kind].get("app_version") or {}).get("version"))
+        right = ((target_sources[kind].get("app_version") or {}).get("version"))
+        if left is None or right is None:
+            app_version_parity = None if app_version_parity is not False else False
+            continue
+        if left != right:
+            app_version_parity = False
+    if not common_kinds:
+        app_version_parity = None
+
+    base_adapters = dict(_dig(base_ir, "versions", "adapter_versions") or {})
+    target_adapters = dict(_dig(target_ir, "versions", "adapter_versions") or {})
+    adapter_parity = all(base_adapters.get(k) == target_adapters.get(k) for k in common_kinds) \
+        if common_kinds else True
+
+    drift_kinds = sorted({kind for kind, source in list(base_sources.items()) + list(target_sources.items())
+                          if "schema_drift" in (source.get("degraded") or ())})
+    source_schema_parity = not drift_kinds
+
+    def _capture_ok(ir: Mapping[str, Any]) -> bool:
+        missing = ir.get("missing") or {}
+        failed = [k for k in missing if str(k).endswith("_capture_failed") and missing[k]]
+        return not ir.get("capture_partial") and not ir.get("partial") and not failed
+
+    capture_parity = _capture_ok(base_ir) and _capture_ok(target_ir)
+    primary_source_parity = base_ir.get("primary_source") == target_ir.get("primary_source")
+
     base_scope = (base_mcad or {}).get("scope")
     target_scope = (target_mcad or {}).get("scope")
     detail: list[str] = []
@@ -266,6 +299,12 @@ def comparability(base_ir: Mapping[str, Any], target_ir: Mapping[str, Any],
         "coordinate_ok": not (_gate_fail(base_state, "G4") or _gate_fail(target_state, "G4")),
         "partial_any": bool(base_ir.get("partial")) or bool(target_ir.get("partial")),
         "ir_version_parity": base_ir.get("ir_version") == target_ir.get("ir_version"),
+        "app_version_parity": app_version_parity,
+        "adapter_parity": adapter_parity,
+        "source_schema_parity": source_schema_parity,
+        "source_schema_drift_kinds": drift_kinds,
+        "capture_parity": capture_parity,
+        "primary_source_parity": primary_source_parity,
         "G7": {"key": "yardstick_parity", "count": count, "threshold": 0, "pass": count == 0,
                "blocking": False, "effect": effect, "detail": sorted(set(detail))},
         "base_blocked": bool((base_state or {}).get("blocked")),
@@ -306,7 +345,7 @@ def _correspondence(base_nodes, target_nodes, links) -> dict:
     used_target: set[str] = set()
     pending_n = 0
     method_counts = {m: 0 for m in _MATCH_METHODS}
-    for link in sorted(links, key=lambda l: (str(l.get("a")), str(l.get("b")))):
+    for link in sorted(links, key=lambda link: (str(link.get("a")), str(link.get("b")))):
         status = str(link.get("status") or "")
         score = float(link.get("score") or 0.0)
         if status == "pending":
@@ -503,6 +542,8 @@ def compute_diff(base_ir: Mapping[str, Any], target_ir: Mapping[str, Any], *,
     semantic = _semantic(structural, parametric, corr, dn_of, ckey_of, method_of,
                          base_by, target_by, comp, g2_fail, g4_fail)
 
+    _apply_source_parity(comp, structural, parametric, semantic)
+
     events = semantic["events"]
     kinds: dict[str, int] = {}
     for event in events:
@@ -511,7 +552,8 @@ def compute_diff(base_ir: Mapping[str, Any], target_ir: Mapping[str, Any], *,
     for event in events:
         confidences[event["confidence"]] = confidences.get(event["confidence"], 0) + 1
 
-    character_seed = _change_style_seed(events)
+    # 파서 세대가 섞인 수치 변화를 설계 성향으로 학습하지 않는다(plan §3.3.6 마지막 문단).
+    character_seed = [] if comp["app_version_parity"] is False else _change_style_seed(events)
 
     all_params = (parametric["node_params"] + parametric["edge_params"] + parametric["dims_delta"]
                   + parametric["result_delta"])
@@ -1467,6 +1509,57 @@ def _dyna_noise(dn, dn_of, base_by, target_by, by_dn) -> bool:
     watched = [attrs.get(f"bbox_def_dims[{i}]") for i in range(3)] + [attrs.get("n_elems")]
     seen = [x for x in watched if x]
     return bool(seen) and all(x["flag"] == "noise" for x in seen)
+
+
+# 파라메트릭 버킷이 어느 소스에서 온 수치인지(plan §3.3.6 소스 5키의 적용 범위).
+_BUCKET_SOURCE: dict[str, str] = {
+    "node_params": "mcad", "edge_params": "mcad", "materials": "mcad",
+    "dims_delta": "mcad", "rollup_delta": "mcad", "result_delta": "dyna_result",
+}
+_CONFIDENCE_DOWN = {"high": "medium", "medium": "low", "low": "low"}
+
+
+def _apply_source_parity(comp: dict, structural: dict, parametric: dict, semantic: dict) -> None:
+    """소스 5키의 효과를 층에 적용한다(plan §3.3.6 표). 항목을 지우지 않고 사유·주의만 붙인다."""
+    def buckets() -> list[tuple[str, list]]:
+        return [(name, parametric.get(name) or []) for name in _BUCKET_SOURCE]
+
+    if not comp.get("source_schema_parity", True):
+        drift = set(comp.get("source_schema_drift_kinds") or ())
+        for name, items in buckets():
+            if _BUCKET_SOURCE[name] not in drift:
+                continue
+            for item in items:
+                if isinstance(item, dict) and not item.get("excluded_reason"):
+                    item["excluded_reason"] = "source_drift"
+
+    if not comp.get("capture_parity", True):
+        for _name, items in buckets():
+            for item in items:
+                if isinstance(item, dict) and not item.get("excluded_reason"):
+                    item["excluded_reason"] = "capture_partial"
+        for change in structural.get("edge_changes") or ():
+            if isinstance(change, dict) and not change.get("excluded_reason"):
+                change["excluded_reason"] = "capture_partial"
+        # 부분 캡처에서 '간섭 0' 이 '해소' 로 읽히지 않게 의미 이벤트를 만들지 않는다.
+        semantic["events"] = []
+        semantic["blocked_by"] = semantic.get("blocked_by") or "capture_partial"
+
+    if not comp.get("primary_source_parity", True):
+        for item in parametric.get("rollup_delta") or ():
+            if isinstance(item, dict) and not item.get("excluded_reason"):
+                item["excluded_reason"] = "partial_scope"
+
+    if comp.get("app_version_parity") is False or comp.get("adapter_parity") is False:
+        # 소스 앱·어댑터 세대가 다르면 제외가 아니라 주의(caveat)다 — 정상 리비전 비교를 죽이지 않는다.
+        for _name, items in buckets():
+            for item in items:
+                if isinstance(item, dict):
+                    item["caveat"] = "parser_differs"
+        for event in semantic.get("events") or ():
+            if isinstance(event, dict):
+                event["caveat"] = "parser_differs"
+                event["confidence"] = _CONFIDENCE_DOWN.get(str(event.get("confidence")), "low")
 
 
 def _change_style_seed(events: Sequence[Mapping[str, Any]]) -> list[dict]:

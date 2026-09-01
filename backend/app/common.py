@@ -100,7 +100,11 @@ def R(value: Any, kind: str) -> Any:
 
 
 # ---------------------------------------------------------------- 시계·id
-_clock: Callable[[], int] = lambda: int(time.time())
+def _default_clock() -> int:
+    return int(time.time())
+
+
+_clock: Callable[[], int] = _default_clock
 
 
 def now_epoch() -> int:

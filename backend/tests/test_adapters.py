@@ -263,6 +263,41 @@ def test_gateway_registry_reports_missing_tools_and_survives_failure():
     assert dead.probe("ecad")["reachable"] is False
 
 
+def test_ambiguous_tool_name_needs_the_app_key_and_warns(monkeypatch):
+    """한 want 집합이 두 백엔드에 다 있으면 app_key 로 좁히고, 그래도 다의면 reachable=false + 경고다."""
+    other = "heax-other_forge"
+    body = {"map": {}}
+    for tool in mcad.REQUIRED_TOOLS:
+        body["map"][tool] = APP_KEY
+        body["map"][f"otherforge_{tool}"] = other
+
+    registry = adapters_registry.GatewayRegistry("http://gw.test:9110/mcp", client=_tools_map_client(body))
+    ambiguous = registry.probe("mcad", app_key="heax-nobody")
+    assert ambiguous["app_key"] is None and ambiguous["reachable"] is False
+    assert ambiguous["warnings"] == ["ambiguous_tool_name"]
+    assert set(ambiguous["candidates"]) == {APP_KEY, other}
+
+    narrowed = adapters_registry.GatewayRegistry(
+        "http://gw.test:9110/mcp", client=_tools_map_client(body)).probe("mcad", app_key=other)
+    assert narrowed["app_key"] == other and narrowed["reachable"] is True
+    assert narrowed["warnings"] == []
+
+
+def test_type_unexpected_is_a_warning_not_a_silent_cast():
+    """정의 밖 cross_file 값은 조용한 캐스팅 대신 warnings.type_unexpected 1건이다(plan §2.13.1)."""
+    from app.adapters import mcad as mcad_module
+
+    warnings: list[dict] = []
+    assert mcad_module._as_bool(1, warnings=warnings) is True         # int 0/1 은 규칙대로 bool
+    assert mcad_module._as_bool(0, warnings=warnings) is False
+    assert mcad_module._as_bool(True, warnings=warnings) is True
+    assert warnings == []
+    assert mcad_module._as_bool("yes", tool="list_interfaces", field="cross_file",
+                                warnings=warnings) is True
+    assert [w["code"] for w in warnings] == ["type_unexpected"]
+    assert warnings[0]["ref"] == "list_interfaces" and "cross_file" in warnings[0]["message"]
+
+
 def test_gateway_http_base_strips_mcp_suffix():
     assert adapters_registry.gateway_http_base("http://127.0.0.1:9110/mcp") == "http://127.0.0.1:9110"
     assert adapters_registry.gateway_http_base("http://127.0.0.1:9110/") == "http://127.0.0.1:9110"
@@ -286,7 +321,9 @@ def test_mcad_rest_channel_builds_world_bbox_and_resolves_edges_by_node_id():
     assert source["ref"]["unit_system"] == "mm"
     assert source["ref"]["detect_finished_at"] == 1756590000
     assert source["ref"]["step_files"][0]["header_unit"] == "millimetre"
-    assert source["degraded"] == []
+    # 이 픽스처의 도구 지도에는 system_status 가 없다 — 버전은 null 이고 그 사실이 degraded 로 남는다(§2.2).
+    assert source["degraded"] == ["app_version_unknown"]
+    assert source["app_version"] == {"version": None, "captured_via": None, "extra": None}
     assert source["tol_known_keys"] == ["clearance_gap", "tied_area", "tied_gap", "tied_width"]
     assert len(source["tol_config_hash"]) == 64
 
@@ -529,10 +566,15 @@ def test_ecad_stub_is_contract_only():
 
 
 # ---------------------------------------------------------------- capture_all → freeze_snapshot
-def test_capture_all_requires_mcad_source():
+def test_capture_all_requires_at_least_one_connected_source():
+    """mcad 가 없어도 dyna 단독 캡처는 선다 — 소스가 아예 0 일 때만 409 다(plan §2.2·§0.9 P2-13)."""
     with pytest.raises(AppError) as err:
-        adapters_registry.capture_all(sources=[{"kind": "dyna", "ref": {}}], principal=_principal())
+        adapters_registry.capture_all(sources=[], principal=_principal())
     assert err.value.http_status == 409 and err.value.code == "source_unreachable"
+
+    with pytest.raises(AppError) as unknown_kind:
+        adapters_registry.capture_all(sources=[{"kind": "sketchup", "ref": {}}], principal=_principal())
+    assert unknown_kind.value.http_status == 409
 
 
 def test_capture_all_freezes_snapshot_with_matching_call_ids(risk_store):
@@ -590,3 +632,70 @@ def test_capture_all_freezes_snapshot_with_matching_call_ids(risk_store):
         adapter_results=captured["results"], calls=[], snapshot_id=captured["snapshot_id"],
         captured_at=1756600000)
     assert again["reused"] is True and again["ir_hash"] == frozen["ir_hash"]
+
+
+# ---------------------------------------------------------------- 응답 계약·소스 앱 버전(plan §2.13.1 · §0.9 P1-21)
+def test_response_contract_catches_two_drift_shapes():
+    """필드 누락과 타입 변경 둘 다 계약 위반이다 — 없는 계약은 검사 대상이 아니다(contract_ok=None)."""
+    from app.adapters import base as adapters_base
+
+    ok = adapters_base.check_contract("list_parts", {"parts": [{"id": 1}]})
+    assert ok["contract_ok"] is True and ok["missing"] == [] and ok["type_mismatch"] == []
+
+    missing = adapters_base.check_contract("list_parts", {"items": []})
+    assert missing["contract_ok"] is False and missing["missing"] == ["/parts"]
+
+    wrong_type = adapters_base.check_contract("list_parts", {"parts": {"0": {"id": 1}}})
+    assert wrong_type["contract_ok"] is False and wrong_type["type_mismatch"] == ["/parts"]
+
+    # 게이트웨이 접두형 이름도 같은 계약을 탄다.
+    assert adapters_base.check_contract("heaxstep_forge_list_parts", {"parts": []})["contract_ok"] is True
+    assert adapters_base.check_contract("모르는도구", {})["contract_ok"] is None
+
+
+def test_app_version_probe_is_one_call_and_survives_failure():
+    """system_status 를 1회만 부르고, 못 읽으면 version=null 이며 캡처는 계속된다."""
+    from app.adapters import base as adapters_base
+
+    tools = dict(MCP_TOOLS_FULL)
+    tools["heaxstep_forge_system_status"] = {"version": "0.4.1", "build": "abc"}
+    seen: list = []
+    recorder = CallRecorder("cafe0000deadbeef", mcp=_mcp(tools, seen))
+    version = adapters_base.probe_app_version(recorder, "mcad", app_key=APP_KEY)
+    assert version["version"] == "0.4.1" and version["captured_via"] == "heaxstep_forge_system_status"
+    assert version["extra"] == {"build": "abc"}
+    assert [name for name, _args in seen] == ["heaxstep_forge_system_status"]
+
+    blind = CallRecorder("cafe0000deadbeef", mcp=_mcp(MCP_TOOLS_FULL, []))
+    assert adapters_base.probe_app_version(blind, "mcad") == adapters_base.UNKNOWN_APP_VERSION
+
+
+def test_two_captures_differing_only_in_app_version_share_the_ir_hash():
+    """소스 앱 버전은 ir_hash 입력이 아니다 — 버전만 다른 두 캡처는 같은 스냅샷이다(plan §2.2)."""
+    from app import ir_builder
+
+    first, _ = _capture_mcad()
+    second, _ = _capture_mcad()
+    second["source"]["app_version"] = {"version": "9.9.9", "captured_via": "heaxstep_forge_system_status",
+                                       "extra": None}
+    ir_a = ir_builder.build_ir(project_id="p" * 32, owner_sub=OWNER, label="DV1",
+                               adapter_results=[first], snapshot_id="a" * 32, captured_at=1756600000)
+    ir_b = ir_builder.build_ir(project_id="p" * 32, owner_sub=OWNER, label="DV1",
+                               adapter_results=[second], snapshot_id="b" * 32, captured_at=1756600000)
+    assert ir_a["ir_hash"] == ir_b["ir_hash"]
+
+
+def test_contract_result_is_recorded_on_every_call_row():
+    """호출마다 contract_ok·contract_missing 이 행에 남는다(NULL = 계약 미정의)."""
+    tools = dict(MCP_TOOLS_FULL)
+    tools["list_parts"] = {"items": []}          # 계약 위반(필드 누락)
+    recorder = CallRecorder("cafe0000deadbeef", mcp=_mcp(tools, []))
+    ok = recorder.call("mcp", "interface_graph", {}, source_kind="mcad")
+    bad = recorder.call("mcp", "list_parts", {}, source_kind="mcad")
+    unknown = recorder.call("mcp", "job_status", {"job_id": "x"}, source_kind="mcad")
+    assert ok["contract_ok"] is True
+    assert bad["contract_ok"] is False and bad["contract_missing"] == ["/parts"]
+    assert unknown["contract_ok"] is None
+    logged = {c["tool"]: c for c in recorder.calls}
+    assert logged["list_parts"]["contract_missing"] == ["/parts"]
+    assert logged["job_status"]["contract_ok"] is None

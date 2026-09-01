@@ -365,6 +365,26 @@ def test_precedent_from_corpus_bounds(bounds, expected):
     assert finding["precedent_corpus_n"] == 7
 
 
+# 예측 도구 결과(predict_sed 등)는 IR 형상 속성이 아니라 _FEATURE_OF_ATTR 표에 없다 —
+# 코퍼스가 그 이름의 경계를 알면 그대로 대조해 범위 밖이면 선례를 강등한다(plan §0.9 P7-3 · §7.6).
+PREDICT_SED_CASES = [
+    ({"sed": {"min": 0.0, "max": 0.1}}, 0.42, "out_of_range"),
+    ({"sed": {"min": 0.0, "max": 1.0}}, 0.42, "in_range"),
+    ({"other": {"min": 0.0, "max": 1.0}}, 0.42, "none"),
+]
+
+
+@pytest.mark.parametrize("bounds,value,expected", PREDICT_SED_CASES)
+def test_predict_sed_result_outside_the_corpus_downgrades_the_precedent(bounds, value, expected):
+    activity = [{"tool": "predict_sed", "persona": "mech-housing-structure",
+                 "result_preview": f"sed={value}", "sed": value}]
+    scoped = make_ctx(conv_id="conv1", activity=activity, corpus={"n": 9, "per_feature": bounds})
+    finding = first_finding(make_spec(findings=[make_finding(
+        cites=[{"ref": "tool:conv:conv1#0", "quote": f"sed={value}"}], claim="", warrant="")]), scoped)
+    assert finding["feature_snapshot"]["tool:conv:conv1#0"]["sed"] == value
+    assert finding["precedent"] == expected
+
+
 def test_small_corpus_gives_no_precedent():
     scoped = make_ctx(corpus={"n": 3, "per_feature": {"min_gap": {"min": 0.010, "max": 1.0}}})
     finding = first_finding(make_spec(findings=[make_finding(
@@ -426,9 +446,12 @@ def test_change_kind_outside_the_axis_becomes_none(ctx):
     assert finding["change_kind"] == "none"
 
 
-def test_status_is_open_on_storage(ctx):
-    finding = first_finding(make_spec(findings=[make_finding(status="verified")]), ctx)
-    assert finding["status"] == "open"
+def test_status_is_open_on_storage_except_a_panel_rejection(ctx):
+    """저장 status 는 open 이 정본이지만 패널 기각(rejected_in_panel)만은 보존된다(plan §0.9 P3-20)."""
+    assert first_finding(make_spec(findings=[make_finding(status="verified")]), ctx)["status"] == "open"
+    assert first_finding(make_spec(findings=[make_finding(status="dismissed")]), ctx)["status"] == "open"
+    rejected = first_finding(make_spec(findings=[make_finding(status="rejected_in_panel")]), ctx)
+    assert rejected["status"] == "rejected_in_panel"
 
 
 def test_scope_kind_mismatch_fails_the_parse(ctx):

@@ -251,7 +251,8 @@ def test_state_envelope_fields(clean_ir):
     assert "G7" not in state["gates"]        # G7 은 pair 전용이라 rr_state 에 없다
     assert state["precedent"] == {"corpus_n": 0, "per_feature": {}, "out_of_range_count": 0}
     assert len(state["summary_text"]) <= 2000 and state["summary_status"] in ("ok", "lint_failed")
-    assert {h["rule"] for h in state["rule_hits"]} == {"R-001", "R-002", "R-003", "R-004", "R-005", "R-006"}
+    assert {h["rule"] for h in state["rule_hits"]} == {
+        "R-001", "R-002", "R-003", "R-004", "R-005", "R-006", "R-007"}
 
 
 def test_build_state_is_deterministic(clean_ir):
@@ -435,3 +436,63 @@ def test_ack_never_flips_pass_and_blocked_uses_the_plan_formula():
     assert g3["pass"] is False and g3["ack_by"] == OWNER and g3["ack_reason"] == "확인 후 진행"
     # ack 는 gates_hash 를 바꾸지 않는다(그 지문은 판정만 본다).
     assert st.gates_hash(state["gates"]) == st.gates_hash(st.compute_gates(build_ir(load_case("gate_f4_iface"))))
+
+
+# ---------------------------------------------------------------- 규칙 시드 7종·evaluable·payload_hash(plan §0.9 P1-7)
+
+def test_seed_rules_are_seven_kinds():
+    """시드는 R-001~R-007 이다 — R-007(요구 여유)이 빠지면 state.py 의 분기가 영영 서지 않는다."""
+    assert [r["id"] for r in st.load_seed_rules()] == [
+        "R-001", "R-002", "R-003", "R-004", "R-005", "R-006", "R-007"]
+
+
+def test_r007_is_null_without_requirements_and_fails_on_negative_margin(clean_ir):
+    """요구 0건이면 pass=null(source_absent), 여유 ≤0 인 요구가 있으면 pass=false 다(plan §3.2.6)."""
+    by_rule = {h["rule"]: h for h in st.evaluate_rules(clean_ir)}
+    r007 = by_rule["R-007"]
+    assert r007["pass"] is None and r007["evaluable"] is False
+    assert r007["not_evaluable_reason"] == "source_absent"
+
+    rows = [
+        {"name": "gap_main", "op": "gte", "limit": 0.5, "unit": "mm", "actual": 0.2,
+         "margin": -0.3, "rel": -0.6, "known": True, "status": "active"},
+        {"name": "wall_min", "op": "gte", "limit": 1.0, "unit": "mm", "actual": None,
+         "margin": None, "rel": None, "known": False, "status": "active"},
+    ]
+    hit = {h["rule"]: h for h in st.evaluate_rules(clean_ir, req_margin=rows)}["R-007"]
+    assert hit["evaluable"] is True and hit["pass"] is False
+    assert hit["found"]["count"] == 1                      # known=false 행은 세지 않는다
+    assert hit["found"]["refs"] == ["req:gap_main", "d:gap_main"]
+    assert hit["severity"] == "치명"
+
+    ok_rows = [dict(rows[0], margin=0.3, rel=0.6)]
+    ok = {h["rule"]: h for h in st.evaluate_rules(clean_ir, req_margin=ok_rows)}["R-007"]
+    assert ok["evaluable"] is True and ok["pass"] is True
+
+
+def test_not_evaluable_rules_are_null_in_every_reason(clean_ir):
+    """사유 3종(source_absent·degraded·truncated) 모두에서 지정 규칙이 pass=null 이다."""
+    absent = {h["rule"]: h for h in _gates_of(load_case("gate_f6_mcad_absent"))[2]}
+    for rule in ("R-001", "R-003", "R-005", "R-006"):
+        assert absent[rule]["not_evaluable_reason"] == "source_absent" and absent[rule]["pass"] is None
+
+    degraded = {h["rule"]: h for h in _gates_of(load_case("gate_f8_unit_unknown"))[2]}
+    for rule in ("R-004", "R-005"):
+        assert degraded[rule]["not_evaluable_reason"] == "degraded" and degraded[rule]["pass"] is None
+
+    truncated_ir = copy.deepcopy(clean_ir)
+    for source in truncated_ir["sources"]:
+        if source["kind"] == "mcad":
+            source["degraded"] = list(source.get("degraded") or []) + ["interfaces_truncated"]
+    hits = {h["rule"]: h for h in st.evaluate_rules(truncated_ir)}
+    for rule in ("R-001", "R-002"):
+        assert hits[rule]["not_evaluable_reason"] == "truncated" and hits[rule]["pass"] is None
+
+
+def test_rule_payload_hash_is_identical_for_the_same_ir(clean_ir):
+    """같은 IR 을 두 번 평가하면 규칙 7종의 payload_hash 가 바이트 동일하다."""
+    first = st.evaluate_rules(clean_ir)
+    second = st.evaluate_rules(copy.deepcopy(clean_ir))
+    assert [h["rule"] for h in first] == [h["rule"] for h in second]
+    assert [h["payload_hash"] for h in first] == [h["payload_hash"] for h in second]
+    assert all(h["payload_hash"] for h in first)

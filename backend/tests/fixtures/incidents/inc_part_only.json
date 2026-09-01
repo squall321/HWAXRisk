@@ -1,0 +1,10 @@
+{
+ "id": "INC-2026-002",
+ "project_id": "P1",
+ "ckeys": ["ck:aaaaaaaaaaaa"],
+ "mechanism": "vibration",
+ "outcome": "confirmed",
+ "occurred_at": 9600000,
+ "severity_observed": "경미",
+ "note": "메커니즘이 다르다 — 2/3 이라 자동 확정이 아니라 큐로 간다"
+}

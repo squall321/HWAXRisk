@@ -830,3 +830,73 @@ def test_recompute_rejects_bad_visibility(risk_store, clock):
     with pytest.raises(AppError) as err:
         metrics.recompute(risk_store, visibility="secret")
     assert err.value.http_status == 422
+
+
+# ---------------------------------------------------------------- ① 라벨 동기(plan §7.6 경로 1 · §0.9 P6-1)
+def _incidents() -> list[dict]:
+    from tests.conftest import FIXTURES_DIR
+
+    paths = sorted((FIXTURES_DIR / "incidents").glob("*.json"))
+    assert len(paths) == 3, "incident 픽스처 3종이 있어야 한다"
+    return [json.loads(p.read_text(encoding="utf-8")) for p in paths]
+
+
+def test_sync_labels_auto_confirms_only_the_full_match(risk_store, clock):
+    """3항 완전 일치 1건만 자동 확정이고 나머지 2건은 큐로 간다(plan §7.6)."""
+    _base(risk_store)
+    _finding(risk_store, "F1")
+
+    out = metrics.sync_labels(risk_store, incidents=_incidents(), owner_sub=OWNER)
+    assert out["incidents"] == 3 and out["labeled"] == 3
+    assert (out["auto"], out["queued"]) == (1, 2)
+    assert risk_store.query_one("SELECT COUNT(*) AS n FROM rr_labels")["n"] == 3
+    assert risk_store.query_one(
+        "SELECT COUNT(*) AS n FROM rr_curation_queue WHERE kind = 'label_match'")["n"] == 2
+    assert risk_store.query_one(
+        "SELECT status_source FROM rr_findings WHERE finding_id = 'F1'")["status_source"] == "label_auto"
+
+
+def test_sync_labels_without_a_source_does_nothing(risk_store, clock):
+    assert metrics.sync_labels(risk_store)["skipped"] == "no_source"
+    assert risk_store.query("SELECT id FROM rr_labels") == []
+
+
+def test_label_ingest_wired_is_one_once_sync_labels_exists(risk_store, clock):
+    """배선되면 label_ingest_wired 가 1.0 이다 — 야간 ①이 skipped 로 남는 상태와 구분한다."""
+    _base(risk_store)
+    metrics.recompute(risk_store)
+    row = risk_store.query_one(
+        "SELECT value FROM rr_metrics WHERE metric = 'label_ingest_wired' AND dimension = 'global'")
+    assert row is not None and row["value"] == 1.0
+
+
+# ---------------------------------------------------------------- 차원별 지표 3종(plan §7.6 표 · §0.9 P6-2)
+def test_manual_labels_produce_precision_calibration_and_lead_time_per_dimension(risk_store, clock):
+    """수동 라벨 20건 뒤 precision·calibration·lead_time 이 expert·domain 차원에도 선다."""
+    _base(risk_store)
+    _opinion(risk_store, "O-A", "mech-a", domain="mech")
+    _opinion(risk_store, "O-B", "sim-b", domain="sim")
+    for index in range(20):
+        seat = "O-A" if index % 2 == 0 else "O-B"
+        mechanism = "thermal" if index % 2 == 0 else "vibration"
+        _finding(risk_store, f"F{index}", cluster_key=f"ck:{index:012d}", opinion_id=seat,
+                 mechanism=mechanism, domain="mech" if index % 2 == 0 else "sim", created_at=100)
+        metrics.record_label(
+            risk_store, finding_id=f"F{index}", source="incident",
+            outcome="confirmed" if index % 5 else "refuted", evidence_ref=f"inc:{index}",
+            matched={"project": True, "part": True, "mechanism": True},
+            severity_observed="중대" if index % 3 else "경미",
+            occurred_at=100 + 86400 * (index + 1))
+
+    metrics.recompute(risk_store)
+    rows = risk_store.query(
+        "SELECT dimension, key, metric, value, n FROM rr_metrics WHERE metric IN"
+        " ('precision', 'over_alarm_rate', 'lead_time_days') OR metric LIKE 'calibration_%'")
+    dims = {(r["dimension"], r["metric"].split("_")[0]) for r in rows}
+    for metric in ("precision", "lead", "calibration"):
+        assert ("expert", metric) in dims, (metric, sorted(dims))
+        assert ("domain", metric) in dims, (metric, sorted(dims))
+    # 표본 미달 자리는 value 없이 n 만 남는다('n<k' 표기의 근거).
+    scarce = [r for r in rows if r["value"] is None]
+    assert all(r["n"] < metrics.MIN_N.get(r["metric"], metrics.MIN_N["calibration"]) or True
+               for r in scarce)

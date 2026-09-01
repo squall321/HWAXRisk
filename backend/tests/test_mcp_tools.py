@@ -1,4 +1,4 @@
-# FastMCP 도구 6종(plan §0.5.2) 이름·시그니처 고정 · 없는 id 는 예외 대신 오류 dict · tier A 는 웹 전용 + 이식된 exact Route('/mcp')(initialize·307 아님·HTTP tools/list 6종)
+# FastMCP 도구 7종(plan §0.5.2) 이름·시그니처 고정 · 없는 id 는 예외 대신 오류 dict · tier A 는 웹 전용 + 이식된 exact Route('/mcp')(initialize·307 아님·HTTP tools/list 7종)
 from __future__ import annotations
 
 import asyncio
@@ -16,6 +16,7 @@ TOOL_NAMES = [
     "risk_claims_for_ref",
     "risk_get_brief",
     "risk_submit_panel_result",
+    "risk_add_finding",
 ]
 # 도구별 대표 인자와, 빈 원장에서 기대하는 오류 코드(없으면 None = 정상 응답).
 # 읽기 4종은 범위 밖 id 의 존재를 숨겨 not_visible 이고, 브리프는 caller 가 아니라 brief_token 대조다(§8.2.5).
@@ -27,6 +28,9 @@ CALLS = [
     ("risk_get_brief", {"target_key": "snap:s1", "brief_token": "nope"}, "brief_token_invalid"),
     ("risk_submit_panel_result", {"panel_id": "p1", "engine": "mcp", "decision_text": "…", "turns": [],
                                   "report_id": None, "actor": "someone@example.com"}, "E404"),
+    ("risk_add_finding", {"target_key": "diff:d1", "claim": "간극이 좁다",
+                          "cites": [{"ref": "p:0123456789ab", "quote": "«PLATE_1»"}],
+                          "actor": "someone@example.com"}, "E404"),
 ]
 _HANGUL = re.compile(r"[가-힣]")
 
@@ -44,7 +48,7 @@ def _call_via_mcp(name: str, args: dict | None = None) -> dict:
     return json.loads(res[0].text)
 
 
-def test_six_tools_registered_in_order():
+def test_seven_tools_registered_in_order():
     tools = asyncio.run(srv.mcp.list_tools())
     assert [t.name for t in tools] == TOOL_NAMES
     for t in tools:
@@ -210,7 +214,7 @@ def _jsonrpc_result(r) -> dict:
 
 
 def test_http_tools_list_over_mcp_route(client):
-    """plan §9.1 통과 기준 13 — HTTP JSON-RPC 로 initialize → notifications/initialized → tools/list(세션 헤더 재사용) 6종."""
+    """plan §9.1 통과 기준 13 — HTTP JSON-RPC 로 initialize → notifications/initialized → tools/list(세션 헤더 재사용) 7종."""
     headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
     r = client.post(
         "/mcp",
@@ -231,3 +235,31 @@ def test_http_tools_list_over_mcp_route(client):
     assert r.status_code == 200
     result = _jsonrpc_result(r)
     assert [t["name"] for t in result["tools"]] == TOOL_NAMES
+
+
+# ---------------------------------------------------------------- 사람 finding 두 입구(plan §0.9 P5-10)
+def test_add_finding_via_mcp_writes_the_same_row_as_rest(risk_store, monkeypatch):
+    """같은 입력이면 MCP 도구와 REST 라우트가 식별자만 다른 같은 행을 만든다."""
+    from app import routes
+    from tests.test_project_patch import _human_body, _ident, _seeded_target
+
+    target_key = _seeded_target(risk_store, monkeypatch)
+    rest = routes.create_human_finding(target_key, _human_body(), ident=_ident("owner@example.com"))
+    tool = srv.risk_add_finding(
+        target_key=target_key, claim="조립 시 간극이 부족해 보인다",
+        cites=[{"ref": "p:0123456789ab", "quote": "«PLATE_1»"}], actor="owner@example.com",
+        direction="risk", domain="mech", mechanism="interface", mechanism_detail="clearance",
+        change_kind="dimension", subject_key="sk:1", subject_names=["PLATE_1"], severity="중대",
+        judgement="WARNING")
+    assert "error" not in tool, tool
+
+    cols = ("origin", "author_sub", "panel_id", "direction", "mechanism", "mechanism_detail",
+            "change_kind", "subject_key", "severity", "sev3", "judgement", "cluster_key", "status")
+    rows = {}
+    for name, finding_id in (("rest", rest["finding_id"]), ("mcp", tool["finding_id"])):
+        row = risk_store.query_one(
+            f"SELECT {', '.join(cols)} FROM rr_findings WHERE finding_id = ?", (finding_id,))
+        rows[name] = dict(row)
+    assert rows["rest"] == rows["mcp"]
+    assert rows["mcp"]["origin"] == "human" and rows["mcp"]["author_sub"] == "owner@example.com"
+    assert tool["claim_uid"] != rest["claim_uid"]           # 순번만 다르다

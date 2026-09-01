@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from typing import Any, Mapping, Sequence
 
+from app.adapters import base
 from app.adapters.base import AdapterResult, CallRecorder, Principal, Probe, SourceAdapter
 from app.common import canonical_json, now_epoch, sha256_hex
 from app.errors import AppError
@@ -28,9 +29,21 @@ JOB_TOL_KEYS: tuple[str, ...] = ("tied_gap", "clearance_gap", "tied_area", "tied
 NODE_KIND_MAP: dict[str, str] = {"step-file": "file", "assembly": "assembly", "instance": "part"}
 
 
-# ---------------------------------------------------------------- 타입 정규화(recon §4 9항)
-def _as_bool(value: Any) -> bool:
-    """cross_file·has_geometry 가 소스에 따라 int 로도 bool 로도 온다 — IR 로 올릴 때 bool 로 통일한다."""
+# ---------------------------------------------------------------- 타입 정규화(recon §4 9항 · plan §2.13.1)
+def _as_bool(value: Any, *, tool: str = "", field: str = "", warnings: list | None = None) -> bool:
+    """cross_file·has_geometry 가 소스에 따라 int 로도 bool 로도 온다 — IR 로 올릴 때 bool 로 통일한다.
+
+    규칙은 `bool(int(v))` 다. 정의 밖 값(문자열·소수·None)은 무언의 캐스팅 대신 `type_unexpected`
+    경고 1건으로 남긴다 — 조용한 캐스팅이 `null≠0` 원칙을 깨기 때문이다(plan §2.13.1 표).
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return bool(value)
+    if value is not None and warnings is not None:
+        warnings.append({"severity": "WARNING", "code": "type_unexpected",
+                         "message": f"{field or 'value'}={value!r}", "ref": tool or None,
+                         "source_kind": "mcad"})
     return bool(value)
 
 
@@ -323,6 +336,9 @@ class McadAdapter(SourceAdapter):
 
         scope = job_params.get("scope") or ((graph or {}).get("scope") if graph else None)
         step_files = _step_files(tree)
+        app_version = base.probe_app_version(recorder, KIND, app_key=app_key)
+        if not app_version.get("version"):
+            degraded.add("app_version_unknown")
         source = {
             "kind": KIND,
             "app_key": app_key,
@@ -345,6 +361,8 @@ class McadAdapter(SourceAdapter):
             "tol_known_keys": tol_keys,
             "scope": dict(scope) if isinstance(scope, Mapping) else None,
             "stats": _stats(tree, mcp_tree, nodes, len(iface_rows), orphan_n, graph_counts),
+            # 소스 앱 버전은 ir_hash 입력이 아니다 — 쌍의 comparability.app_version_parity 가 이 값을 본다(§2.2).
+            "app_version": app_version,
             "degraded": sorted(degraded),
             "captured_at": captured_at,
         }
@@ -609,7 +627,8 @@ def _edges_from_interfaces(rows: Sequence[Mapping[str, Any]], *, nodes: Sequence
                 # 부울 경로(penetration_volume 산출)가 아니면 깊이는 하한값이다(plan §2.4).
                 "penetration_depth_is_lower_bound": penetration_volume is None,
                 "penetration_volume": penetration_volume,
-                "cross_file": _as_bool(row.get("cross_file")),
+                "cross_file": _as_bool(row.get("cross_file"), tool="list_interfaces",
+                                       field="cross_file", warnings=warnings),
                 "face_pairs_count": None,
                 "note": row.get("note"),
                 "tol_config_hash": tol_hash,

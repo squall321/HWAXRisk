@@ -30,6 +30,8 @@ SECRET_KEYS: tuple[str, ...] = (
     "HWAXRISK_PORTAL_PAT", "HWAXRISK_PORTAL_PAT_RW", "HWAXRISK_HEAX_SERVICE_PAT",
     "HWAXRISK_AIDH_API_KEY", "HWAXRISK_CRED_KEY",
 )
+# 있으면 읽지만 없어도 기동을 막지 않는 키(plan §5.2.5 (3a) ③ — 없으면 health warnings 에 backup_unencrypted).
+OPTIONAL_SECRET_KEYS: tuple[str, ...] = ("HWAXRISK_BACKUP_KEY",)
 
 # 로스터 15 도메인(plan §0.6 실측 순서).
 _DEFAULT_ROSTER_DOMAINS = "xd,sim,cam,rel,soc,disp,mech,pcb,rf,passive,pwr,sh,mem,std,material"
@@ -185,9 +187,16 @@ def load_secrets(data_dir: Path) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         key, value = key.strip(), value.strip()
-        if key in SECRET_KEYS and value:
+        if key in (*SECRET_KEYS, *OPTIONAL_SECRET_KEYS) and value:
             out[key] = value
     return out
+
+
+def backup_key(data_dir: Path | None = None, env: Mapping[str, str] | None = None) -> str:
+    """age 공개키(`HWAXRISK_BACKUP_KEY`) — secrets.env 우선, 없으면 환경변수. 없으면 빈 문자열(plan §5.2.5 (3a))."""
+    root = settings.data_dir if data_dir is None else data_dir
+    environ = os.environ if env is None else env
+    return (load_secrets(root).get("HWAXRISK_BACKUP_KEY") or environ.get("HWAXRISK_BACKUP_KEY") or "").strip()
 
 
 def cred_key_path(data_dir: Path | None = None) -> Path:

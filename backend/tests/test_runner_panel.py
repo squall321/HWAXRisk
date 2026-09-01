@@ -87,6 +87,8 @@ class FakePanelEngine:
         self.calls: list[dict] = []
         self.owner_subs: list[str | None] = []
         self.health_calls = 0
+        self.evidence_sent: list[dict] = []
+        self.last_events: list[dict] = []
 
     def health(self) -> dict:
         self.health_calls += 1
@@ -104,6 +106,11 @@ class FakePanelEngine:
             events.append({"kind": "status", "step": f"{key} 조회: list_interfaces", "tool": "list_interfaces"})
             events.append({"kind": "evidence", "source": f"{key} · list_interfaces", "text": "…"})
         events.append({"kind": "evidence", "source": "rr_diff", "text": "공용 근거"})
+        # 브리프로 보낸 prior_evidence 는 항목마다 채택 사실을 되돌려준다(plan §5.6 '드롭 0' 확인용).
+        self.evidence_sent = list(delib_opts.get("evidence") or [])
+        for item in self.evidence_sent:
+            events.append({"kind": "evidence", "source": str(item.get("source") or ""), "included": True})
+        self.last_events = events
         return {
             "decision_text": "판정문 본문.\n```json\n{}\n```",
             "turns": turns,
@@ -145,10 +152,11 @@ def fake_narrative(recorder: dict) -> types.SimpleNamespace:
     )
 
 
-def fake_registry(recorder: dict, *, level: str = "C0", raised: bool = False) -> types.SimpleNamespace:
+def fake_registry(recorder: dict, *, level: str = "C0", raised: bool = False,
+                  new_clusters: int = 2) -> types.SimpleNamespace:
     def merge_panel(store, panel_id):
         recorder["merge_panel"] = panel_id
-        return {"new_clusters": 2}
+        return {"new_clusters": new_clusters}
 
     def close_level(store, target_key, **kwargs):
         return {"level": level, "raised": raised}
@@ -223,7 +231,40 @@ def test_resolve_credential_prefers_owner_then_service(risk_store, tmp_path):
     secrets = tmp_path / "secrets.env"
     secrets.write_text("HWAXRISK_PORTAL_PAT=svc-pat\n", encoding="utf-8")
     secrets.chmod(0o600)
-    assert runner.resolve_credential(risk_store, cfg, OWNER) == {"kind": "service", "email": None}
+    # 서비스 자격의 email 은 'service' 로 기록한다(rr_jobs.credential_email 이 사람 계정과 구분된다).
+    assert runner.resolve_credential(risk_store, cfg, OWNER) == {"kind": "service", "email": "service"}
+
+
+def test_resolve_credential_tries_the_requester_before_the_target_owner(risk_store, tmp_path):
+    """(c) 요청자 → (b) 타깃 owner → (a) 서비스 3단이고 첫 적중의 email 이 정본이다(plan §0.1.6)."""
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    peer = "peer@x"
+
+    # 둘 다 없음 → None.
+    assert runner.resolve_credential(risk_store, cfg, OWNER, peer) is None
+
+    # 요청자만 있음 → requester.
+    risk_store.upsert_credential(peer, _enc("pat-peer"), "sub-2", peer, "[]", now_epoch() + 30 * 86400)
+    assert runner.resolve_credential(risk_store, cfg, OWNER, peer) == {"kind": "requester", "email": peer}
+
+    # 둘 다 있음 → 요청자가 먼저다.
+    give_credential(risk_store)
+    assert runner.resolve_credential(risk_store, cfg, OWNER, peer)["kind"] == "requester"
+
+    # 요청자 자격이 만료되면 타깃 owner 로 내려간다.
+    risk_store.upsert_credential(peer, _enc("pat-peer"), "sub-2", peer, "[]", now_epoch() + 60)
+    assert runner.resolve_credential(risk_store, cfg, OWNER, peer) == {"kind": "owner", "email": "u@x"}
+
+
+def test_create_job_records_the_credential_email(risk_store, tmp_path):
+    target_key = seeded(risk_store)
+    peer = "peer@x"
+    risk_store.upsert_credential(peer, _enc("pat-peer"), "sub-2", peer, "[]", now_epoch() + 30 * 86400)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    out = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg, requester_sub=peer)
+    assert out["credential"] == "requester" and out["credential_email"] == peer
+    row = risk_store.query_one("SELECT credential_email, owner_sub FROM rr_jobs WHERE id = ?", (out["job_id"],))
+    assert row["credential_email"] == peer and row["owner_sub"] == OWNER
 
 
 def test_create_job_without_credential_is_pat_unavailable(risk_store, tmp_path):
@@ -412,6 +453,26 @@ def test_run_panel_completes_with_fake_engine(risk_store, tmp_path):
     assert len(engine.calls) == 1 and engine.calls[0]["chair_template"] == "risk-review"
 
 
+def test_engine_accepts_every_evidence_item_that_was_sent(risk_store, tmp_path):
+    """보낸 prior_evidence 항목 수와 엔진 로그의 채택(included=true) 수가 같다 — 드롭 0(plan §0.9 P1-10)."""
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)
+    job = runner.claim_next_job(risk_store, cfg)
+
+    recorder: dict = {}
+    engine = FakePanelEngine()
+    runner.run_panel(risk_store, cfg, engine, job,
+                     narrative_mod=fake_narrative(recorder), registry_mod=fake_registry(recorder))
+
+    sent = engine.calls[0]["evidence"]
+    assert sent, "브리프 항목이 하나도 실리지 않았다."
+    accepted = [e for e in engine.last_events if e.get("kind") == "evidence" and e.get("included") is True]
+    assert len(accepted) == len(sent)
+    assert [e["source"] for e in accepted] == [str(item.get("source") or "") for item in sent]
+
+
 def test_run_panel_flags_weak_quality_when_seats_do_not_use_tools(risk_store, tmp_path):
     target_key = seeded(risk_store)
     give_credential(risk_store)
@@ -488,6 +549,32 @@ def test_run_panel_without_pending_completes_job(risk_store, tmp_path):
     assert risk_store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))["state"] == "completed"
 
 
+def test_run_panel_pauses_the_job_when_returns_diminish(risk_store, tmp_path):
+    """최근 DIMINISHING_WINDOW 패널의 new_clusters 가 0 이고 C1 이상이면 잡이 수확 체감으로 멈춘다(plan §0.9 P4-11)."""
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+    job = runner.claim_next_job(risk_store, cfg)
+
+    now = now_epoch()
+    for offset in range(runner.DIMINISHING_WINDOW):
+        risk_store.execute(
+            "INSERT INTO rr_panels(id, target_key, owner_sub, panel_no, seats_json, status, quality_json,"
+            " created_at) VALUES (?, ?, ?, ?, '[]', 'done', ?, ?)",
+            (f"old-{offset}", target_key, OWNER, 90 + offset, json.dumps({"new_clusters": 0}), now),
+        )
+
+    recorder: dict = {}
+    out = runner.run_panel(risk_store, cfg, FakePanelEngine(), job,
+                           narrative_mod=fake_narrative(recorder),
+                           registry_mod=fake_registry(recorder, level="C1", new_clusters=0))
+
+    assert out["status"] == "done"
+    row = risk_store.query_one("SELECT state, pause_reason FROM rr_jobs WHERE id = ?", (job_id,))
+    assert (row["state"], row["pause_reason"]) == ("paused", "diminishing")
+
+
 def test_recover_running_panels_after_restart(risk_store, tmp_path):
     target_key = seeded(risk_store)
     give_credential(risk_store)
@@ -502,3 +589,123 @@ def test_recover_running_panels_after_restart(risk_store, tmp_path):
     assert (row["status"], row["error"], row["retry"]) == ("error", "restart", 1)
     assert {r["status"] for r in coverage(risk_store, target_key).values()} == {"pending"}
     assert risk_store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))["state"] == "queued"
+
+
+# ---------------------------------------------------------------- 모델 출처 스냅샷(plan §6.7.2 1단계 · §0.9 P1-13)
+class HealthEngine:
+    """health() 응답만 갈아 끼우는 엔진 대역. 예외를 넣으면 /health 불통을 흉내 낸다."""
+
+    def __init__(self, info: dict | None = None, *, raise_error: Exception | None = None) -> None:
+        self._info = info
+        self._raise = raise_error
+
+    def health(self) -> dict:
+        if self._raise is not None:
+            raise self._raise
+        return dict(self._info or {})
+
+
+HEALTH_FIXTURES = {
+    "정상": {
+        "runtime": "agent-server", "provider": "vllm", "model": "glm-4.6",
+        "endpoint_host": "h", "captured": "health_snapshot", "engine_rev": "e1", "chair_rev": "c9f1",
+    },
+    "변경": {
+        "runtime": "agent-server", "provider": "vllm", "model": "glm-4.6-turbo",
+        "endpoint_host": "h2", "captured": "health_snapshot", "engine_rev": "e2", "chair_rev": "c9f1",
+    },
+}
+
+
+@pytest.mark.parametrize("case", list(HEALTH_FIXTURES))
+def test_snapshot_model_records_the_engine_health(case):
+    expect = HEALTH_FIXTURES[case]
+    engine = HealthEngine({"provider": expect["provider"], "model": expect["model"],
+                           "endpoint_host": expect["endpoint_host"], "engine_rev": expect["engine_rev"],
+                           "chair_rev": expect["chair_rev"]})
+    model = runner.snapshot_model(engine)
+    for key in ("runtime", "provider", "model", "endpoint_host", "captured", "engine_rev", "chair_rev"):
+        assert model[key] == expect[key], key
+    assert model["seat_contract_rev"] == runner.seat_contract_rev()
+
+
+def test_snapshot_model_is_unavailable_when_health_fails_or_is_missing():
+    """불통·미노출 둘 다 예외 없이 captured='unavailable'·model='unknown' 이다."""
+    down = runner.snapshot_model(HealthEngine(raise_error=RuntimeError("connect error")))
+    assert down["captured"] == "unavailable" and down["model"] == "unknown"
+    assert down["seat_contract_rev"] == runner.seat_contract_rev()
+
+    class NoHealth:
+        pass
+
+    absent = runner.snapshot_model(NoHealth())
+    assert absent["captured"] == "unavailable" and absent["model"] == "unknown"
+
+
+def test_snapshot_model_leaves_chair_rev_null_when_the_engine_does_not_report_it():
+    model = runner.snapshot_model(HealthEngine({"model": "glm-4.6"}))
+    assert model["chair_rev"] is None and model["captured"] == "health_snapshot"
+
+
+# ---------------------------------------------------------------- 패널 실행 원문·브리프 동결(plan §0.9 P3-19)
+def test_panel_calls_and_frozen_brief_are_the_app_record(risk_store, tmp_path):
+    """좌석 도구 호출은 rr_panel_calls 에 seq 순으로 남고, 브리프는 동결본이 그대로 나온다."""
+    import gzip
+
+    from app.common import sha256_hex
+
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)
+    job = runner.claim_next_job(risk_store, cfg)
+
+    recorder: dict = {}
+    engine = FakePanelEngine()
+    out = runner.run_panel(risk_store, cfg, engine, job,
+                           narrative_mod=fake_narrative(recorder), registry_mod=fake_registry(recorder))
+    panel_id = out["panel_id"]
+
+    calls = risk_store.query(
+        "SELECT call_id, seq, agent_key, tool, source, result_gz, sha256 FROM rr_panel_calls"
+        " WHERE panel_id = ? ORDER BY seq", (panel_id,))
+    seats = json.loads(risk_store.query_one(
+        "SELECT seats_json FROM rr_panels WHERE id = ?", (panel_id,))["seats_json"])
+    # 좌석마다 status→evidence 한 쌍 + 공용 evidence + 브리프 항목 수만큼 기록된다.
+    assert len(calls) >= len(seats)
+    assert [c["seq"] for c in calls] == list(range(1, len(calls) + 1))
+    assert all(c["call_id"] == f"{panel_id[:8]}-{c['seq']:03d}" for c in calls)
+    assert all(c["source"] == "sse" for c in calls)
+    with_text = [c for c in calls if c["result_gz"] is not None]
+    assert with_text and all(
+        sha256_hex(gzip.decompress(c["result_gz"]).decode("utf-8")) == c["sha256"] for c in with_text)
+
+    frozen = runner.load_brief(risk_store, panel_id)
+    assert frozen["evidence"] == engine.calls[0]["evidence"]
+    assert frozen["brief_hash"] and frozen["item_hashes"]
+    row = risk_store.query_one("SELECT brief_hash, brief_gz FROM rr_panels WHERE id = ?", (panel_id,))
+    assert row["brief_hash"] == frozen["brief_hash"] and row["brief_gz"] is not None
+
+
+def test_second_panel_reports_only_the_changed_brief_keys(risk_store):
+    """같은 타깃의 두 번째 패널은 실제로 달라진 항목 키만 brief_drift 로 남긴다."""
+    target_key = seeded(risk_store)
+    now = now_epoch()
+    panels = []
+    for no in (1, 2):
+        panel_id = f"pan{no}"
+        risk_store.execute(
+            "INSERT INTO rr_panels(id, target_key, owner_sub, panel_no, seats_json, status, created_at)"
+            " VALUES (?, ?, ?, ?, '[]', 'planned', ?)", (panel_id, target_key, OWNER, no, now))
+        panels.append({"id": panel_id, "target_key": target_key, "owner_sub": OWNER})
+
+    evidence = [{"source": "rr_state", "tool": "gates", "args": target_key, "result": "G1 pass"},
+                {"source": "rr_diff", "tool": "summary", "args": target_key, "result": "변경 3건"}]
+    first = runner.freeze_brief(risk_store, panels[0], evidence)
+    assert first["brief_drift"] == []                    # 앞 패널이 없으면 비교 대상도 없다
+
+    changed = [{**evidence[0], "result": "G1 fail"}, evidence[1]]
+    second = runner.freeze_brief(risk_store, panels[1], changed)
+    assert second["brief_drift"] == ["rr_state"]         # 달라진 항목 키만 실린다
+    assert second["brief_hash"] != first["brief_hash"]
+    assert runner.load_brief(risk_store, "pan2")["evidence"] == changed

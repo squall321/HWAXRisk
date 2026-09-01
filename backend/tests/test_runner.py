@@ -39,7 +39,9 @@ def test_lifespan_wires_runner_and_box_state(client):
     assert app.state.box_match is True
     assert app.state.secrets_valid is False  # 테스트 데이터 루트에는 secrets.env 가 없다.
     # /api/health 형식은 고정이고 러너 상태를 싣지 않는다.
-    assert set(client.get("/api/health").json()) == {"ok", "app_version", "schema_version"}
+    # /api/health 는 러너 상태를 싣지 않는다(경고는 backup_unencrypted 하나뿐, plan §5.2.5 (3a) ③).
+    assert set(client.get("/api/health").json()) <= {"ok", "app_version", "schema_version", "warnings"}
+    assert set(client.get("/api/health").json()) >= {"ok", "app_version", "schema_version"}
 
 
 def test_origin_json_written(client, session_data_dir):

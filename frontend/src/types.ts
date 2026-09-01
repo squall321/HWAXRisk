@@ -352,6 +352,28 @@ export type RuleHit = {
   fix_hint: string;
 };
 
+// ── 요구 규격(rr_requirements, plan §2.8b) ─────────────────────────────────────
+export type RequirementKind = "dim_limit" | "scenario" | "standard";
+export type RequirementStatus = "candidate" | "confirmed" | "waived";
+export type RequirementCreate = {
+  kind: RequirementKind;
+  name: string;
+  op?: string | null;
+  value_json?: unknown;
+  unit?: string | null;
+  source_ref?: string | null;
+};
+export type Requirement = RequirementCreate & {
+  id: string;
+  project_id: string;
+  status: RequirementStatus;
+  waive_reason?: string | null;
+  inherited_from?: string | null;
+  decided_by?: string | null;
+  decided_at?: number | null;
+};
+export type RequirementList = { project_id: string; requirements: Requirement[] };
+
 export type DimDefCreate = { name: string; kind: string; unit: string; extractor: string };
 export type DimDef = DimDefCreate & { id: string; project_id: string; vocab_status: string };
 

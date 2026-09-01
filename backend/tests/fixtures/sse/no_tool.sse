@@ -1,0 +1,18 @@
+event: delib
+data: {"kind": "personas", "personas": [{"key": "mech-a0", "origin": "primary"}]}
+
+event: status
+data: {"step": "브리프 조립 중", "tool": null}
+
+event: delib
+data: {"kind": "turn", "round": 1, "persona": "mech-a0", "say": "도구 없이 말한다", "stance": "agree"}
+
+event: delib
+data: {"kind": "decision", "text": "도구 0 결정문"}
+
+event: result
+data: {"type": "text", "content": "전문"}
+
+event: done
+data: {}
+

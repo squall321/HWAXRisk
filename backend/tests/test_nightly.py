@@ -329,17 +329,20 @@ def test_run_nightly_runs_steps_and_stamps_metrics(risk_store):
 
 
 def test_run_nightly_skips_unwired_steps_without_metric(risk_store):
-    """① 라벨 유입과 ⑤ z-score 통계는 아직 주인이 없다 — 실패(0.0)가 아니라 skipped 로 남는다."""
+    """⑤ z-score 통계는 아직 주인이 없다 — 실패(0.0)가 아니라 skipped 로 남는다."""
     out = nightly.run_nightly(risk_store, now=NOW)
     by_name = {s["step"]: s for s in out["steps"]}
-    for step in ("labels", "fv_stats"):
-        assert by_name[step]["status"] == "skipped"
-        assert "미배선" in by_name[step]["result"]["skipped"]
-        # 미배선은 행 자체를 만들지 않아 '돌았는데 실패' 와 구분된다.
-        assert nightly.metric_value(risk_store, f"nightly_{step}_ok") is None
-    # 미배선 사실을 결과 최상단에도 드러낸다 — 라벨 자동 유입 4경로가 아직 없다는 뜻이다.
-    assert {"labels", "fv_stats"} <= set(out["unwired"])
-    assert nightly.metric_value(risk_store, "label_ingest_wired") == 0.0
+    assert by_name["fv_stats"]["status"] == "skipped"
+    assert "미배선" in by_name["fv_stats"]["result"]["skipped"]
+    # 미배선은 행 자체를 만들지 않아 '돌았는데 실패' 와 구분된다.
+    assert nightly.metric_value(risk_store, "nightly_fv_stats_ok") is None
+    assert "fv_stats" in set(out["unwired"])
+
+    # ① 라벨 유입은 배선됐다(metrics.sync_labels) — 원천이 없으면 '미배선' 이 아니라 no_source 다.
+    assert by_name["labels"]["status"] == "skipped"
+    assert by_name["labels"]["result"]["skipped"] == "no_source"
+    assert "labels" not in set(out["unwired"])
+    assert nightly.metric_value(risk_store, "label_ingest_wired") == 1.0
 
 
 def test_metrics_step_is_one_corpus_wide_computation(risk_store):

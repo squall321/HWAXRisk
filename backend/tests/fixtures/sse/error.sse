@@ -1,0 +1,9 @@
+event: delib
+data: {"kind": "personas", "personas": [{"key": "mech-a0", "origin": "primary"}]}
+
+event: status
+data: {"step": "mech-a0 조회: list_interfaces", "tool": "list_interfaces"}
+
+event: error
+data: {"message": "engine crashed", "code": "engine_error"}
+

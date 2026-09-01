@@ -68,7 +68,8 @@ JUDGEMENT_LEXICON: tuple[dict, ...] = (
     {"id": "L15", "pattern": r"치명|중대|경미", "allow": (r"severity=(치명|중대|경미)",)},
     {"id": "L16", "pattern": r"OK|FAIL|PASS(?!_)", "allow": (r"pass=(true|false)", r"G\d\s(pass|fail)",
                                                               r"judgement=(OK|FAIL|PASS|WARNING|undetermined)")},
-    {"id": "L17", "pattern": r"추천|제안|판단|결론|평가", "allow": (r"상태 평가", r"평가어", r"평가 불가")},
+    # '결론 아님' 은 브리프 프레이밍 줄의 고정 문구다 — 결론을 금지하는 문장 자체가 걸리면 안 된다(plan §5.6.2).
+    {"id": "L17", "pattern": r"추천|제안|판단|결론|평가", "allow": (r"상태 평가", r"평가어", r"평가 불가", r"결론\s?아님")},
 )
 
 # 린터가 보지 않는 구간(plan §3.4.3 — 원문 인용·참조·태그·도구/앱 id 는 검사 대상이 아니다).
@@ -175,7 +176,8 @@ def sanitize_source_text(text: Any, kind: str = DEFAULT_SANITIZE_KIND, *,
     s = s[:limit]
     if block is None:
         block = _suspect_block_setting()
-    lexicon_id = injection_hit(s)
+    # 위생 통과본과 원문을 함께 본다 — X10(제어문자)처럼 위생이 지워 버리는 표지도 '의심' 의 근거다(§3.4.1).
+    lexicon_id = injection_hit(s) or injection_hit(raw)
     if lexicon_id is not None and block:
         if on_suspect is not None:
             on_suspect({"sha1": source_sha1(raw), "raw": raw, "lexicon_id": lexicon_id,
@@ -413,27 +415,46 @@ def event_text(event: dict | None) -> str:
 
 
 # ---------------------------------------------------------------- 섹션 조립
-def _render_section(tag: str, items: Sequence[str], limit: int, sep: str = " · ") -> str:
+def _render_section(tag: str, items: Sequence[str], limit: int, sep: str = " · ", ref: str = "") -> str:
     head = f"[{tag}] "
     kept: list[str] = []
     used = len(head)
+    line = ""
     for index, item in enumerate(items):
         text = (item or "").strip()
         if not text:
             continue
         add = (len(sep) if kept else 0) + len(text)
         if kept and used + add > limit:
-            return head + sep.join(kept) + f"{sep}… 외 {len(items) - index}건"
+            line = head + sep.join(kept) + f"{sep}… 외 {len(items) - index}건"
+            break
         kept.append(text)
         used += add
-    return head + sep.join(kept) if kept else head + "없음"
+    else:
+        line = head + sep.join(kept) if kept else head + "없음"
+    return _with_ref(line, ref)
 
 
-def _fit_total(sections: list[tuple[str, list[str], int, str]], budget: int) -> str:
-    """섹션을 조립하고 총량이 budget 을 넘으면 뒤 섹션의 항목부터 접는다(결정론)."""
-    work = [(tag, list(items), limit, sep) for tag, items, limit, sep in sections]
+# 줄 끝 참조 토큰 `[sig:…]`·`[gate:…]`·`[p:…]` … 이 한 개라도 있는지 본다(plan §0.9 6항).
+_REF_TOKEN = re.compile(r"\[[a-z]+:[^\]]*\]")
+
+
+def _with_ref(line: str, ref: str) -> str:
+    """줄에 참조가 하나도 없으면 섹션 기본 참조를 붙인다 — 요약의 모든 줄은 참조 ≥1 이다(plan §0.9 6항)."""
+    if not ref or _REF_TOKEN.search(line):
+        return line
+    return f"{line} {fmt_refs(ref)}"
+
+
+def _fit_total(sections: list[tuple], budget: int) -> str:
+    """섹션을 조립하고 총량이 budget 을 넘으면 뒤 섹션의 항목부터 접는다(결정론).
+
+    섹션 튜플은 `(tag, items, limit, sep)` 또는 `(tag, items, limit, sep, ref)` 다. `ref` 는 그 줄에
+    항목발 참조가 하나도 없을 때만 붙는 기본 참조이고, 항목이 접혀도 사라지지 않는다.
+    """
+    work = [(s[0], list(s[1]), s[2], s[3], s[4] if len(s) > 4 else "") for s in sections]
     for _ in range(4000):
-        lines = [_render_section(tag, items, limit, sep) for tag, items, limit, sep in work]
+        lines = [_render_section(*section) for section in work]
         text = "\n".join(lines)
         if len(text) <= budget:
             return text
@@ -443,7 +464,7 @@ def _fit_total(sections: list[tuple[str, list[str], int, str]], budget: int) -> 
                 break
         else:
             return text[:budget]
-    return "\n".join(_render_section(t, i, l, s) for t, i, l, s in work)[:budget]
+    return "\n".join(_render_section(*section) for section in work)[:budget]
 
 
 def _first(values: Iterable[Any], default: Any = None) -> Any:
@@ -611,18 +632,20 @@ def _summarize_state(state: dict, context: dict) -> str:
     seeds = [str(seed.get("tag") or "") for seed in state.get("character_seed") or () if isinstance(seed, dict)]
     absent = [name for name in sorted(missing) if missing.get(name)]
 
+    first_rule = _first((str(h.get("rule") or "") for h in state.get("rule_hits") or () if isinstance(h, dict)), "")
+
     return _fit_total(
         [
-            ("대상", target, 320, " "),
-            ("게이트", gate_items, 240, " · "),
-            ("구조", structure, 300, " · "),
-            ("상위 계면", iface, 420, " · "),
-            ("치수", dims, 300, " · "),
-            ("재료", materials, 120, " · "),
-            ("Dyna", dyna, 320, " · "),
-            ("규칙", rules, 200, " · "),
-            ("씨앗", seeds, 120, " · "),
-            ("결측", absent, 160, " · "),
+            ("대상", target, 320, " ", "sig:counts.files"),
+            ("게이트", gate_items, 240, " · ", "gate:G1"),
+            ("구조", structure, 300, " · ", "sig:counts.*"),
+            ("상위 계면", iface, 420, " · ", "sig:top.interference"),
+            ("치수", dims, 300, " · ", "sig:dims_named"),
+            ("재료", materials, 120, " · ", "sig:counts.material_null"),
+            ("Dyna", dyna, 320, " · ", "sig:counts.dyna.pids"),
+            ("규칙", rules, 200, " · ", f"rule:{first_rule}" if first_rule else "sig:rule_hits"),
+            ("씨앗", seeds, 120, " · ", "sig:character_seed"),
+            ("결측", absent, 160, " · ", "sig:missing"),
         ],
         SUMMARY_MAX,
     )
@@ -744,14 +767,14 @@ def _summarize_diff(diff: dict, context: dict) -> str:
 
     return _fit_total(
         [
-            ("대상", target, 220, " "),
-            ("비교가능성", comparability_items, 200, " · "),
-            ("구조", structure_items, 260, " · "),
-            ("의미", semantic_items, 700, " | "),
-            ("치수", dims_items, 420, " · "),
-            ("재료", material_items, 100, " · "),
-            ("결과", result_items, 160, " · "),
-            ("씨앗", seeds, 60, " · "),
+            ("대상", target, 220, " ", "sig:ir_hash"),
+            ("비교가능성", comparability_items, 200, " · ", "gate:G7"),
+            ("구조", structure_items, 260, " · ", "sig:counts.edges.total"),
+            ("의미", semantic_items, 700, " | ", "gate:G2"),
+            ("치수", dims_items, 420, " · ", "sig:dims_named"),
+            ("재료", material_items, 100, " · ", "sig:counts.materials_distinct"),
+            ("결과", result_items, 160, " · ", "sig:results.part_risk_top"),
+            ("씨앗", seeds, 60, " · ", "sig:character_seed"),
         ],
         SUMMARY_MAX,
     )

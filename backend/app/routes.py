@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import gzip
 import json
 import secrets
 import sqlite3
@@ -16,7 +17,7 @@ from pydantic import BaseModel, Field
 from app import brief as brief_module
 from app import config, diff as diff_module
 from app import export as export_module
-from app import identity, ir_builder, learning, narrative, planner, ra_client, requirements, runner, sameas, taxonomy
+from app import identity, ir_builder, learning, metrics, narrative, planner, ra_client, requirements, runner, sameas, taxonomy
 from app import roster as roster_module
 from app import state as state_module
 from app import registry as registry_module
@@ -193,17 +194,38 @@ def get_vocab() -> dict:
     return {"asset_version": taxonomy.ASSET_VERSION, "assets": taxonomy.vocab_index()}
 
 
+METRICS_LIMIT_MAX = 2000
+
+
 @router.get("/meta/metrics")
-def get_metrics(ident: identity.Identity = Depends(identity.current)) -> dict:
-    """rr_metrics 행(소유자 + org 공개). 지표 계산은 §7.6 야간 잡의 몫이고 여기서는 읽기만 한다."""
-    owner_sub = _require_user(ident)          # 다른 조회 경로와 같이 익명은 401 이다(heax 불통 익명 강등 방어).
-    store = get_store()
-    rows = store.query(
+def get_metrics(limit: int = 500, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """rr_metrics 행 전부(코퍼스 1벌). 계산은 §7.6 야간 잡·`POST /meta/metrics/recompute` 의 몫이다.
+
+    소유자 축으로 좁히지 않는다 — rr_metrics 의 PK 는 `(period, dimension, key, metric)` 뿐이고
+    `key` 는 좌석 키·domain·mechanism·project_id·pattern_id·'global' 이라 owner_sub 가 실릴 자리가 없다
+    (§5.2.2·metrics.recompute 는 '코퍼스 전체 1회' 계산이다). 옛 `key = <owner_sub>` 필터는 어떤 행과도
+    맞지 않아 `visibility='private'` 로 적힌 재계산 결과를 전부 가렸다.
+    """
+    _require_user(ident)                      # 다른 조회 경로와 같이 익명은 401 이다(heax 불통 익명 강등 방어).
+    rows = get_store().query(
         "SELECT period, dimension, key, metric, value, n, computed_at, visibility FROM rr_metrics"
-        " WHERE visibility = 'org' OR key = ? ORDER BY period DESC, dimension, key, metric LIMIT 500",
-        (owner_sub,),
+        " ORDER BY period DESC, dimension, key, metric LIMIT ?",
+        (max(1, min(int(limit), METRICS_LIMIT_MAX)),),
     )
     return {"metrics": [dict(r) for r in rows]}
+
+
+class MetricsRecomputeBody(BaseModel):
+    period: str = "all"
+    visibility: str = "private"
+
+
+@router.post("/meta/metrics/recompute")
+def post_metrics_recompute(body: MetricsRecomputeBody = MetricsRecomputeBody(),
+                           ident: identity.Identity = Depends(identity.current)) -> dict:
+    """§7.6 지표 재계산 1회(야간 잡 ④ 와 같은 함수). 계산 단위는 코퍼스 전체이므로 소유자별 사본은 없다."""
+    _require_user(ident)
+    return metrics.recompute(get_store(), period=body.period, visibility=body.visibility)
 
 
 # ================================================================ 공통 헬퍼
@@ -336,6 +358,8 @@ def mcp_scope_owner(kind: str, key: str, caller: dict) -> str:
 class ProjectBody(BaseModel):
     code: str = Field(max_length=40)
     name: str = Field(max_length=200)
+    # 등급은 반출 경계를 정하므로 등록 시 사람이 고른다 — 빠지면 422 다(plan §5.2.5 (3)·§0.6 '데이터 등급·반출').
+    classification: str | None = None
     stage: str | None = None
     predecessor_project_id: str | None = None
     adh_scope: dict | None = None
@@ -343,8 +367,13 @@ class ProjectBody(BaseModel):
 
 @router.post("/projects")
 def create_project(body: ProjectBody, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """rr_projects 1행. `UNIQUE(owner_sub, code)` 충돌은 409."""
+    """rr_projects 1행. `UNIQUE(owner_sub, code)` 충돌은 409, 등급 미지정·어휘 밖은 422."""
     owner_sub = _require_user(ident)
+    if body.classification is None:
+        raise AppError("classification_required",
+                       f"등급(classification)을 골라야 합니다 — {list(CLASSIFICATIONS)}.", 422)
+    if body.classification not in CLASSIFICATIONS:
+        raise AppError("E100", f"classification 은 {list(CLASSIFICATIONS)} 중 하나여야 합니다.", 422)
     scope = body.adh_scope or {}
     now = now_epoch()
     project_id = new_uuid()
@@ -353,10 +382,11 @@ def create_project(body: ProjectBody, ident: identity.Identity = Depends(identit
         # 과제 행과 owner 멤버 행은 한 트랜잭션이다(risk_store rr_project_members 불변식 — owner 행 정확히 1건).
         with store.tx():
             store.execute(
-                "INSERT INTO rr_projects(id, owner_sub, code, name, stage, predecessor_project_id, adh_team,"
-                " adh_group, character_status, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,'seed',?,?)",
-                (project_id, owner_sub, body.code, body.name, body.stage, body.predecessor_project_id,
-                 scope.get("team"), scope.get("group"), now, now),
+                "INSERT INTO rr_projects(id, owner_sub, code, name, stage, classification,"
+                " predecessor_project_id, adh_team, adh_group, character_status, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,'seed',?,?)",
+                (project_id, owner_sub, body.code, body.name, body.stage, body.classification,
+                 body.predecessor_project_id, scope.get("team"), scope.get("group"), now, now),
             )
             store.execute(
                 "INSERT INTO rr_project_members(project_id, owner_sub, email, role, added_by, added_at,"
@@ -572,6 +602,7 @@ def patch_project(project_id: str, body: ProjectPatchBody,
             recomputed["patterns_rows"] = len(mined.get("created") or ()) + len(mined.get("updated") or ())
         if visibility_changed:
             resynced = _release_withheld(store, project_id, now)
+            resynced["adh_retag_ops"] = _queue_visibility_retag(store, project_id, values["mcp_visibility"])
             _audit(store, owner_sub, scope="project", subject_id=project_id, project_id=project_id,
                    action="project.mcp_visibility", before={"mcp_visibility": before["mcp_visibility"]},
                    after={"mcp_visibility": values["mcp_visibility"]})
@@ -607,6 +638,338 @@ def _release_withheld(store: Any, project_id: str, now: int) -> dict:
         released_targets += 1
         released_ops += len(channel.get("pending_ops") or [])
     return {"targets": released_targets, "ra_ops_released": released_ops}
+
+
+def _queue_visibility_retag(store: Any, project_id: str, visibility: str) -> int:
+    """가시성이 바뀐 과제의 AIDataHub 레코드에 태그 재부착 op 를 올린다(본문 무변경 UPSERT, plan §8.2.5 ②)."""
+    ops = 0
+    for row in store.query(
+        "SELECT target_key FROM rr_targets WHERE project_id = ? ORDER BY target_key", (project_id,)
+    ):
+        records = store.query(
+            "SELECT adh_record_id FROM rr_seat_opinions WHERE target_key = ? AND adh_record_id IS NOT NULL",
+            (row["target_key"],))
+        payload = [{"op": "retag", "reason": "visibility_retag", "record_id": str(r["adh_record_id"]),
+                    "visibility": visibility} for r in records]
+        if not payload:
+            continue
+        ra_client.queue_sync_ops(store, row["target_key"], "adh", payload)
+        ops += len(payload)
+    return ops
+
+
+# ---------------------------------------------------------------- 멤버십·이양·이력·폐기(plan §5.2.1·§5.2.6·§8.2.3)
+# 이양이 owner_sub 를 함께 옮기는 하위 11표(전부 project_id 를 직접 갖는다). 신원 앵커는 rr_projects.owner_sub
+# 하나이고 하위 표의 owner_sub 는 그 복제라 불일치는 불변식 위반이다(plan §5.2.1).
+TRANSFER_PROJECT_TABLES: tuple[str, ...] = (
+    "rr_project_members", "rr_sources", "rr_requirements", "rr_snapshots", "rr_snapshot_jobs",
+    "rr_dim_defs", "rr_iface_ledger", "rr_targets", "rr_findings", "rr_character", "rr_labels",
+)
+# 과제를 직접 가리키지 않고 스냅샷·타깃을 거쳐 달린 표. 같은 트랜잭션에서 함께 옮긴다.
+TRANSFER_DERIVED: tuple[tuple[str, str], ...] = (
+    ("rr_ir_nodes", "snapshot_id IN (SELECT id FROM rr_snapshots WHERE project_id = ?)"),
+    ("rr_ir_edges", "snapshot_id IN (SELECT id FROM rr_snapshots WHERE project_id = ?)"),
+    ("rr_states", "snapshot_id IN (SELECT id FROM rr_snapshots WHERE project_id = ?)"),
+    ("rr_snapshot_calls", "snapshot_id IN (SELECT id FROM rr_snapshots WHERE project_id = ?)"),
+    ("rr_gate_acks", "snapshot_id IN (SELECT id FROM rr_snapshots WHERE project_id = ?)"),
+    ("rr_coverage", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_roster", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_panels", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_panel_calls", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_seat_opinions", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_jobs", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_registry", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_registry_status_log", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_claim_refs", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_delta_contrib", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+)
+MEMBER_ROLES = ("viewer", "editor")
+RUNNING_JOB_STATES = ("queued", "running", "paused", "cancelling")
+
+
+def _is_admin(ident: identity.Identity) -> bool:
+    """`risk_admin_roles` 에 든 heax role 은 전 과제에서 editor 이고 이양·폐기는 owner 와 동등하다(plan §0.6)."""
+    return bool(ident.role) and ident.role in tuple(config.settings.risk_admin_roles)
+
+
+def _require_owner(project_id: str, ident: identity.Identity) -> str:
+    """owner 전용 경로 — admin role 은 owner 와 동등하게 통과한다."""
+    email = _require_user(ident)
+    if _is_admin(ident):
+        if get_store().query_one("SELECT id FROM rr_projects WHERE id = ?", (project_id,)) is None:
+            raise AppError("E404", f"과제({project_id}) 를 찾을 수 없습니다.", 404)
+        return email
+    require_role(project_id, email, "owner")
+    return email
+
+
+def _members_of(project_id: str) -> list[dict]:
+    rows = get_store().query(
+        "SELECT project_id, email, role, added_by, added_at, updated_at FROM rr_project_members"
+        " WHERE project_id = ? ORDER BY role, email", (project_id,))
+    return [dict(r) for r in rows]
+
+
+class MemberItem(BaseModel):
+    email: str = Field(max_length=200)
+    role: str
+
+
+class MembersBody(BaseModel):
+    members: list[MemberItem] = Field(default_factory=list)
+    remove: list[str] = Field(default_factory=list)
+
+
+@router.get("/projects/{project_id}/members")
+def get_members(project_id: str, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """멤버 표(viewer 이상). 멤버가 아니면 404 로 존재를 숨긴다."""
+    email = _require_user(ident)
+    if not _is_admin(ident):
+        require_role(project_id, email, "viewer")
+    return {"project_id": project_id, "members": _members_of(project_id)}
+
+
+@router.put("/projects/{project_id}/members")
+def put_members(project_id: str, body: MembersBody,
+                ident: identity.Identity = Depends(identity.current)) -> dict:
+    """멤버 배열 UPSERT·삭제(owner 전용). owner 행은 여기서 바뀌지 않는다 — 이양(`/transfer`)만이 바꾼다."""
+    owner_sub = _require_owner(project_id, ident)
+    store = get_store()
+    project = store.query_one("SELECT owner_sub, status FROM rr_projects WHERE id = ?", (project_id,))
+    if project is None:
+        raise AppError("E404", f"과제({project_id}) 를 찾을 수 없습니다.", 404)
+    if project["status"] == "purged":
+        raise AppError("project_purged", "회수된 과제는 고칠 수 없습니다.", 409)
+    for item in body.members:
+        if item.role not in MEMBER_ROLES:
+            raise AppError("E100", f"role 은 {list(MEMBER_ROLES)} 중 하나여야 합니다 — {item.role!r}.", 422)
+        if item.email == project["owner_sub"]:
+            raise AppError("owner_row_immutable", "소유자 행은 이양으로만 바뀝니다.", 422)
+    if project["owner_sub"] in set(body.remove):
+        raise AppError("owner_row_immutable", "소유자 행은 지울 수 없습니다.", 422)
+
+    before = _members_of(project_id)
+    now = now_epoch()
+    with store.tx():
+        for item in body.members:
+            store.execute(
+                "INSERT INTO rr_project_members(project_id, owner_sub, email, role, added_by, added_at,"
+                " updated_at) VALUES (?,?,?,?,?,?,?)"
+                " ON CONFLICT(project_id, email) DO UPDATE SET role = excluded.role, updated_at = excluded.updated_at",
+                (project_id, project["owner_sub"], item.email, item.role, owner_sub, now, now),
+            )
+        for email in body.remove:
+            store.execute("DELETE FROM rr_project_members WHERE project_id = ? AND email = ?",
+                          (project_id, email))
+        after = _members_of(project_id)
+        _audit(store, owner_sub, scope="project", subject_id=project_id, project_id=project_id,
+               action="member.put", before={"members": before}, after={"members": after})
+    return {"project_id": project_id, "members": after}
+
+
+class TransferBody(BaseModel):
+    to_email: str = Field(max_length=200)
+    reason: str = Field(max_length=300)
+
+
+@router.post("/projects/{project_id}/transfer")
+def transfer_project(project_id: str, body: TransferBody,
+                     ident: identity.Identity = Depends(identity.current)) -> dict:
+    """소유권 이양 — 과제 행·멤버 두 행·하위 표 owner_sub 를 한 트랜잭션에서 옮긴다(plan §5.2.1)."""
+    actor = _require_owner(project_id, ident)
+    store = get_store()
+    project = store.query_one("SELECT owner_sub, status FROM rr_projects WHERE id = ?", (project_id,))
+    if project is None:
+        raise AppError("E404", f"과제({project_id}) 를 찾을 수 없습니다.", 404)
+    if project["status"] == "purged":
+        raise AppError("project_purged", "회수된 과제는 이양할 수 없습니다.", 409)
+    to_email = (body.to_email or "").strip().lower()
+    if "@" not in to_email or to_email.startswith("@") or to_email.endswith("@"):
+        raise AppError("unknown_user", f"heax 사용자 이메일이 아닙니다 — {body.to_email!r}.", 422)
+    old_owner = project["owner_sub"]
+    if to_email == old_owner:
+        raise AppError("same_owner", "이미 이 사람이 소유자입니다.", 422)
+    if not (body.reason or "").strip():
+        raise AppError("E100", "이양에는 사유가 필요합니다.", 422)
+    running = store.query_one(
+        "SELECT COUNT(*) AS n FROM rr_jobs WHERE state IN ('queued','running','paused','cancelling')"
+        " AND target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)", (project_id,))
+    if int(running["n"] or 0) > 0:
+        raise AppError("job_running", "진행 중 배치 잡이 있습니다 — 먼저 pause 하세요.", 409)
+
+    now = now_epoch()
+    rows_updated: dict[str, int] = {}
+    with store.tx():
+        store.execute("UPDATE rr_projects SET owner_sub = ?, updated_at = ? WHERE id = ?",
+                      (to_email, now, project_id))
+        # 새 소유자 행을 owner 로 올리고 이전 소유자는 editor 로 남긴다(멤버 행은 지우지 않는다).
+        store.execute(
+            "INSERT INTO rr_project_members(project_id, owner_sub, email, role, added_by, added_at, updated_at)"
+            " VALUES (?,?,?,'owner',?,?,?)"
+            " ON CONFLICT(project_id, email) DO UPDATE SET role = 'owner', updated_at = excluded.updated_at",
+            (project_id, to_email, to_email, actor, now, now))
+        store.execute(
+            "UPDATE rr_project_members SET role = 'editor', updated_at = ? WHERE project_id = ? AND email = ?",
+            (now, project_id, old_owner))
+        for table in TRANSFER_PROJECT_TABLES:
+            rows_updated[table] = int(store.execute(
+                f"UPDATE {table} SET owner_sub = ? WHERE project_id = ?", (to_email, project_id)) or 0)
+        for table, where in TRANSFER_DERIVED:
+            rows_updated[table] = int(store.execute(
+                f"UPDATE {table} SET owner_sub = ? WHERE {where}", (to_email, project_id)) or 0)
+        _audit(store, actor, scope="project", subject_id=project_id, project_id=project_id,
+               action="project.transfer", before={"owner_sub": old_owner}, after={"owner_sub": to_email},
+               reason=body.reason)
+    return {"from": old_owner, "to": to_email, "rows_updated": {"tables": rows_updated}}
+
+
+@router.get("/projects/{project_id}/audit")
+def get_project_audit(project_id: str, action: str | None = None, since: int = 0,
+                      until: int | None = None, limit: int = 100, offset: int = 0,
+                      ident: identity.Identity = Depends(identity.current)) -> dict:
+    """사람 행위 감사 로그 조회(viewer 이상). 자동 전이는 애초에 rr_audit 에 들어가지 않는다(plan §0.6)."""
+    email = _require_user(ident)
+    if not _is_admin(ident):
+        require_role(project_id, email, "viewer")
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+    sql = ("SELECT id, actor, actor_verified, channel, scope, subject_id, project_id, action, before_json,"
+           " after_json, reason, at FROM rr_audit WHERE project_id = ? AND at >= ?")
+    params: list[Any] = [project_id, int(since)]
+    if action:
+        sql += " AND action = ?"
+        params.append(action)
+    if until is not None:
+        sql += " AND at <= ?"
+        params.append(int(until))
+    total = get_store().query_one(sql.replace(
+        "SELECT id, actor, actor_verified, channel, scope, subject_id, project_id, action, before_json,"
+        " after_json, reason, at FROM", "SELECT COUNT(*) AS n FROM", 1), tuple(params))
+    rows = get_store().query(sql + " ORDER BY at DESC, id DESC LIMIT ? OFFSET ?", (*params, limit, offset))
+    entries = []
+    for row in rows:
+        item = dict(row)
+        item["before"] = _loads(item.pop("before_json"), {})
+        item["after"] = _loads(item.pop("after_json"), {})
+        item["actor_verified"] = bool(item["actor_verified"])
+        entries.append(item)
+    return {"project_id": project_id, "total": int(total["n"] or 0), "limit": limit, "offset": offset,
+            "entries": entries}
+
+
+class PurgeBody(BaseModel):
+    code: str = Field(max_length=40)
+    reason: str = Field(max_length=300)
+
+
+# 폐기가 비우는 원문 열(plan §5.2.6). NOT NULL 열은 DDL 이 41표로 동결돼 있어 NULL 대신 빈 문자열로 비운다.
+PURGE_BLANK_SQL: tuple[tuple[str, str], ...] = (
+    ("rr_snapshots", "UPDATE rr_snapshots SET ir_json = '' WHERE project_id = ?"),
+    ("rr_snapshot_calls", "UPDATE rr_snapshot_calls SET response_gz = NULL"
+                          " WHERE snapshot_id IN (SELECT id FROM rr_snapshots WHERE project_id = ?)"),
+    ("rr_states", "UPDATE rr_states SET state_json = '', summary_text = NULL"
+                  " WHERE snapshot_id IN (SELECT id FROM rr_snapshots WHERE project_id = ?)"),
+    ("rr_panels", "UPDATE rr_panels SET decision_text = NULL, risk_spec_json = NULL, brief_gz = NULL"
+                  " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_panel_calls", "UPDATE rr_panel_calls SET result_gz = NULL"
+                       " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_seat_opinions", "UPDATE rr_seat_opinions SET opinion_json = '', excerpt_for_rag = NULL"
+                         " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_findings", "UPDATE rr_findings SET finding_json = '' WHERE project_id = ?"),
+    ("rr_character", "UPDATE rr_character SET statement = '' WHERE project_id = ?"),
+)
+
+
+def _purge_exports(project_id: str) -> int:
+    """`$DATA_DIR/exports/` 에서 그 과제가 실린 사본을 지운다(plan §5.2.6 6층)."""
+    out_dir = config.settings.data_dir / export_module.EXPORTS_DIRNAME
+    removed = 0
+    if not out_dir.is_dir():
+        return 0
+    for path in out_dir.glob("*.jsonl"):
+        try:
+            if project_id in path.read_text(encoding="utf-8", errors="ignore"):
+                path.unlink()
+                removed += 1
+        except OSError:                          # 파일 정리 실패는 비치명적이다 — remaining 에 남지 않는다.
+            continue
+    return removed
+
+
+@router.post("/projects/{project_id}/purge")
+def purge_project(project_id: str, body: PurgeBody,
+                  ident: identity.Identity = Depends(identity.current)) -> dict:
+    """과제 폐기(owner 또는 admin) — 행 삭제가 아니라 원문 열을 비우는 tombstone 이다(plan §5.2.6).
+
+    해시·카운트·`rr_audit`·`rr_registry_status_log` 는 남는다. 다른 과제가 인용한 `reg:`·`narr:` 는
+    dangling 이 아니라 '폐기된 과제 — 원문 없음' 으로 해석된다.
+    """
+    actor = _require_owner(project_id, ident)
+    store = get_store()
+    project = store.query_one("SELECT code, status FROM rr_projects WHERE id = ?", (project_id,))
+    if project is None:
+        raise AppError("E404", f"과제({project_id}) 를 찾을 수 없습니다.", 404)
+    if project["status"] == "purged":
+        raise AppError("already_purged", "이미 폐기된 과제입니다.", 409)
+    if (body.code or "").strip() != project["code"]:
+        raise AppError("code_mismatch", "과제 코드가 일치하지 않습니다.", 422)
+
+    now = now_epoch()
+    layers: dict[str, dict] = {}
+    with store.tx():
+        blanked: dict[str, int] = {}
+        for table, sql in PURGE_BLANK_SQL:
+            blanked[table] = int(store.execute(sql, (project_id,)) or 0)
+        cancelled_n = store.execute(
+            "UPDATE rr_jobs SET state = 'cancelled', state_by = ?, state_at = ?"
+            " WHERE state IN ('queued','running','paused','cancelling')"
+            " AND target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)",
+            (actor, now, project_id))
+        skipped_n = store.execute(
+            "UPDATE rr_coverage SET status = 'skipped', reason = 'project_purged', status_source = 'code',"
+            " updated_at = ? WHERE status IN ('pending','assigned','running','deferred','carried')"
+            " AND target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)",
+            (now, project_id))
+        layers["db"] = {"blanked": blanked, "jobs_cancelled": int(cancelled_n or 0),
+                        "coverage_skipped": int(skipped_n or 0)}
+
+        # 2층 학습 — 기여를 지우고 delta 선례·패턴을 재합산한다(코퍼스 분모에서 빠진다).
+        contrib_n = store.execute(
+            "DELETE FROM rr_delta_contrib WHERE target_key IN"
+            " (SELECT target_key FROM rr_targets WHERE project_id = ?)", (project_id,))
+        store.execute(
+            "UPDATE rr_projects SET status = 'purged', purged_at = ?, corpus_excluded = 1,"
+            " excluded_reason = 'user', updated_at = ? WHERE id = ?", (now, now, project_id))
+        priors = int(learning.recompute_label_priors(store, now=now) or 0)
+        mined = learning.mine_patterns(store, owner_sub=actor, now=now) or {}
+        metrics_n = store.execute(
+            "UPDATE rr_metrics SET value = NULL WHERE dimension = 'project' AND key = ?", (project_id,))
+        layers["learning"] = {
+            "delta_contrib_deleted": int(contrib_n or 0),
+            "delta_priors_rows": priors,
+            "patterns_rows": len(mined.get("created") or ()) + len(mined.get("updated") or ()),
+            "metrics_invalidated": int(metrics_n or 0),
+        }
+        layers["files"] = {"exports_removed": _purge_exports(project_id)}
+
+        remaining = [
+            {"layer": "adh", "reason": "delete_api_absent",
+             "detail": "AIDataHub 레코드는 같은 _external_id 로 빈 UPSERT 만 가능하고 임베딩 잔여 벡터는 재색인 전까지 남는다."},
+            {"layer": "ra", "reason": "no_delete_permission",
+             "detail": "RA 코드 무수정 원칙상 삭제 권한이 없는 객체는 status='retracted' 표기만 남는다."},
+            {"layer": "portal_conversations", "reason": "not_owned",
+             "detail": "다른 사용자 소유 대화는 지울 수 없다."},
+            {"layer": "drive", "reason": "retention_window",
+             "detail": "Drive app-data tar 5세대는 보존 주기가 지나야 사라진다."},
+        ]
+        report = {"project_id": project_id, "purged_at": now, "by": actor, "reason": body.reason,
+                  "layers": layers, "remaining": remaining}
+        store.execute("UPDATE rr_projects SET purge_report_json = ? WHERE id = ?",
+                      (canonical_json(report), project_id))
+        _audit(store, actor, scope="project", subject_id=project_id, project_id=project_id,
+               action="project.purge", before={"status": project["status"]}, after={"status": "purged"},
+               reason=body.reason)
+    return {"job_id": project_id, "status": "purged", "purge_report": report}
 
 
 class SourceBody(BaseModel):
@@ -683,18 +1046,83 @@ def _check_model_size(captured: dict, allow_large: bool) -> None:
     )
 
 
+# ---------------------------------------------------------------- 스냅샷 잡 상태기계(plan §2.11.3 · §0.9 P1-22)
+SNAPSHOT_JOB_STATES = ("queued", "running", "done", "partial", "failed")
+
+
+def _snapshot_job_start(store: Any, *, job_id: str, project_id: str, owner_sub: str, label: str | None,
+                        kinds: list[str], params: dict, budget_s: int) -> None:
+    """잡 행 1건(queued→running). 실패해도 이 행이 남아 무엇이 왜 실패했는지가 보인다."""
+    now = now_epoch()
+    store.execute(
+        "INSERT INTO rr_snapshot_jobs(id, project_id, owner_sub, label, kinds_json, params_json, state,"
+        " budget_s, started_at, created_at) VALUES (?,?,?,?,?,?, 'running', ?,?,?)",
+        (job_id, project_id, owner_sub, label, canonical_json(kinds), canonical_json(params),
+         budget_s, now, now),
+    )
+
+
+def _snapshot_job_finish(store: Any, job_id: str, *, state: str, snapshot_id: str | None = None,
+                         error: dict | None = None, calls: int = 0, calls_failed: int = 0,
+                         started: int | None = None) -> None:
+    now = now_epoch()
+    store.execute(
+        "UPDATE rr_snapshot_jobs SET state = ?, snapshot_id = ?, error_json = ?, calls_n = ?,"
+        " calls_failed_n = ?, elapsed_ms = ?, finished_at = ? WHERE id = ?",
+        (state, snapshot_id, canonical_json(error) if error else None, calls, calls_failed,
+         max(0, (now - int(started or now)) * 1000), now, job_id),
+    )
+
+
+def close_stale_snapshot_jobs(store: Any) -> int:
+    """기동 시 `state='running'` 이던 행을 failed(error_json.stage='restart')로 마감한다(plan §2.11.3)."""
+    rows = store.query("SELECT id FROM rr_snapshot_jobs WHERE state = 'running'", ())
+    for row in rows:
+        _snapshot_job_finish(store, str(row["id"]), state="failed",
+                             error={"stage": "restart", "message": "앱이 재기동해 잡을 마감했다."})
+    return len(rows)
+
+
+def reuse_prior_calls(store: Any, project_id: str, calls: list[dict]) -> int:
+    """직전 잡의 `ok=1`·같은 `args_hash` 호출을 재사용 표기한다 — 소스를 다시 부르지 않았다는 사실을 남긴다.
+
+    실제 재호출 회피는 캡처 계층의 몫이고, 여기서는 그 사실을 `reused_from_call_id` 로 기록한다(§2.11.3).
+    """
+    reused = 0
+    for call in calls:
+        args_hash = sha256_hex(canonical_json(call.get("args") or {}))
+        row = store.query_one(
+            "SELECT call_id FROM rr_snapshot_calls WHERE args_hash = ? AND ok = 1 AND tool = ?"
+            " AND snapshot_id IN (SELECT id FROM rr_snapshots WHERE project_id = ?)"
+            " ORDER BY started_at DESC LIMIT 1",
+            (args_hash, str(call.get("tool") or ""), project_id))
+        if row is not None:
+            call["reused_from_call_id"] = str(row["call_id"])
+            reused += 1
+    return reused
+
+
 @router.post("/projects/{project_id}/snapshots")
 def create_snapshot(project_id: str, body: SnapshotBody,
                     ident: identity.Identity = Depends(identity.current)) -> dict:
     """스냅샷 동결 — 등록된 소스 카드를 어댑터가 읽고 ir_builder 가 IR 을 동결한다(plan §2.11.3).
 
-    rr_jobs 는 타깃 패널 전용 표라 여기서는 백그라운드 잡을 만들지 않고 동기로 캡처한 뒤
-    `{snapshot_id, ir_hash, reused, partial, blocked, gates_summary, degraded}` 를 그대로 돌려준다.
-    202 `{job_id}`·`rr_snapshot_jobs` 상태기계는 미착수다(§2.11.3) — 모델 상한 검문만 먼저 붙였다.
+    rr_jobs 는 타깃 패널 전용 표라 여기서는 백그라운드 워커를 띄우지 않고 동기로 캡처하되,
+    `rr_snapshot_jobs` 상태기계(queued→running→done|partial|failed)는 그대로 남긴다 — 실패해도 행이 남아
+    무엇이 왜 실패했는지가 보이고, 그 잡의 호출 행은 `snapshot_id IS NULL` 로 원문을 지킨다(§2.11.3).
+    반환은 `{snapshot_id, ir_hash, reused, partial, blocked, gates_summary, degraded, job_id, job_state}` 다.
     """
     owner_sub = _require_user(ident)
     _project_row(project_id, owner_sub)
     store = get_store()
+    job_id = new_uuid()
+    started = now_epoch()
+    budget_s = LARGE_BUDGET_S if body.allow_large else int(config.settings.risk_snapshot_budget_s)
+    _snapshot_job_start(store, job_id=job_id, project_id=project_id, owner_sub=owner_sub,
+                        label=body.label, kinds=list(body.kinds),
+                        params={"report_ids": body.report_ids,
+                                "detect_result_file_id": body.detect_result_file_id,
+                                "allow_large": bool(body.allow_large)}, budget_s=budget_s)
     # 만료 PAT 는 쓰지 않는다 — 값이 있기만 하면 쓰면 서비스 PAT 폴백이 죽어 게이트웨이 401 로 강등된다
     # (runner.resolve_credential·roster.credential 과 같은 규칙).
     credential = store.get_credential(owner_sub) or {}
@@ -710,18 +1138,44 @@ def create_snapshot(project_id: str, body: SnapshotBody,
             sources=_project_sources(project_id), principal=principal, mcp_client=channels["mcp"],
             rest_client=channels["rest"], kinds=list(body.kinds) or None, report_ids=body.report_ids,
             detect_result_file_id=body.detect_result_file_id)
+    except AppError as exc:
+        # 캡처가 통째로 실패해도 잡 행은 남는다 — 그 잡의 호출 원문은 snapshot_id NULL 로 보존된다.
+        _snapshot_job_finish(store, job_id, state="failed", started=started,
+                             error={"stage": "capture", "message": exc.message, "code": exc.code})
+        raise
     finally:
         # 채널은 자기 httpx.Client 를 소유한다 — 닫지 않으면 스냅샷 요청마다 소켓이 샌다(roster.fetch_for_target 과 같은 처리).
         for channel in (channels["mcp"], channels["rest"]):
             if channel is not None:
                 channel.close()
-    _check_model_size(captured, body.allow_large)
+    calls = list(captured["calls"])
+    # 버전 조회(system_status)는 선택 호출이라 실패해도 부분 캡처가 아니다 — 그 사실은 degraded 로 남는다(§2.2).
+    failed_calls = [c for c in calls
+                    if not c.get("ok", True) and not str(c.get("tool") or "").endswith("system_status")]
+    try:
+        _check_model_size(captured, body.allow_large)
+    except AppError as exc:
+        _snapshot_job_finish(store, job_id, state="failed", started=started, calls=len(calls),
+                             calls_failed=len(failed_calls),
+                             error={"stage": "model_size", "message": exc.message, "code": exc.code})
+        # 실패 잡의 호출 원문은 스냅샷 없이 남긴다(30일 보존, §2.11.4).
+        ir_builder.record_calls(store, None, owner_sub, calls, job_id=job_id, start_seq=1)
+        raise
+    reused = reuse_prior_calls(store, project_id, calls)
     prior = store.query_one(
         "SELECT id FROM rr_snapshots WHERE project_id = ? ORDER BY created_at DESC, id LIMIT 1", (project_id,))
-    return ir_builder.freeze_snapshot(
+    out = ir_builder.freeze_snapshot(
         store, project_id=project_id, owner_sub=owner_sub, label=body.label or f"snap-{now_epoch()}",
-        adapter_results=captured["results"], calls=captured["calls"],
+        adapter_results=captured["results"], calls=calls, job_id=job_id,
         snapshot_id=captured["snapshot_id"], derived_from=prior["id"] if prior else None)
+    state = "partial" if (out.get("partial") or failed_calls) else "done"
+    _snapshot_job_finish(store, job_id, state=state, snapshot_id=out["snapshot_id"], started=started,
+                         calls=len(calls), calls_failed=len(failed_calls),
+                         error={"stage": "capture_partial",
+                                "failed_calls": [c.get("tool") for c in failed_calls]} if failed_calls else None)
+    store.execute("UPDATE rr_snapshots SET job_id = ?, capture_partial = ? WHERE id = ?",
+                  (job_id, 1 if state == "partial" else 0, out["snapshot_id"]))
+    return {**out, "job_id": job_id, "job_state": state, "calls_reused": reused}
 
 
 class DimBody(BaseModel):
@@ -1274,12 +1728,21 @@ class JobBody(BaseModel):
 @router.post("/targets/{target_key}/jobs")
 def create_job(target_key: str, body: JobBody,
                ident: identity.Identity = Depends(identity.current)) -> dict:
-    """배치 잡 1건(Tier C 는 consent 필수, 러너 자격이 없으면 422 pat_unavailable)."""
-    owner_sub = _require_user(ident)
-    _target_row(target_key, owner_sub)
-    return runner.create_job(get_store(), target_key, body.tier, owner_sub=owner_sub,
+    """배치 잡 1건(Tier C 는 consent 필수, 러너 자격이 없으면 422 pat_unavailable).
+
+    소유자만이 아니라 그 과제의 editor 도 잡을 만든다 — 잡 행의 `owner_sub` 는 신원 앵커(타깃 소유자)를
+    승계하고 실제로 쓰인 자격의 email 은 `credential_email` 에 남는다(plan §0.1.6·§5.2.1).
+    """
+    email = _require_user(ident)
+    row = get_store().query_one(
+        "SELECT owner_sub, project_id FROM rr_targets WHERE target_key = ?", (target_key,))
+    if row is None:
+        raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
+    if not _is_admin(ident):
+        require_role(row["project_id"], email, "editor")
+    return runner.create_job(get_store(), target_key, body.tier, owner_sub=row["owner_sub"],
                              modifiers=body.modifiers, user_memo=body.user_memo,
-                             concurrency=body.concurrency, consent=body.consent)
+                             concurrency=body.concurrency, consent=body.consent, requester_sub=email)
 
 
 JOB_ACTIONS = {"pause": runner.pause_job, "resume": runner.resume_job, "cancel": runner.cancel_job}
@@ -1287,12 +1750,52 @@ JOB_ACTIONS = {"pause": runner.pause_job, "resume": runner.resume_job, "cancel":
 
 @router.post("/jobs/{job_id}/{action}")
 def job_action(job_id: str, action: str, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """일시정지·재개·취소(패널 경계에서 반영)."""
+    """일시정지·재개·취소(패널 경계에서 반영). 주체는 rr_jobs.state_by 에 남는다(plan §0.6)."""
     owner_sub = _require_user(ident)
     if action not in JOB_ACTIONS:
         raise AppError("E404", f"모르는 잡 조작입니다 — {action}.", 404)
     _owned_row("SELECT id, owner_sub FROM rr_jobs WHERE id = ?", (job_id,), owner_sub, f"잡({job_id})")
-    return JOB_ACTIONS[action](get_store(), job_id)
+    return JOB_ACTIONS[action](get_store(), job_id, by=owner_sub)
+
+
+class CoverageBody(BaseModel):
+    status: str
+    reason: str | None = None
+
+
+@router.put("/targets/{target_key}/coverage/{agent_key}")
+def put_coverage(target_key: str, agent_key: str, body: CoverageBody,
+                 ident: identity.Identity = Depends(identity.current)) -> dict:
+    """좌석 상태를 사람이 옮긴다 — skipped(사유 필수)와 carried→pending 되돌리기 두 갈래다(plan §6.8.1).
+
+    행에는 `status_source='human'`·`decided_by`·`decided_at` 이 남고 `rr_audit` 에 1행이 붙는다.
+    """
+    email = _require_user(ident)
+    store = get_store()
+    row = store.query_one(
+        "SELECT owner_sub, project_id FROM rr_targets WHERE target_key = ?", (target_key,))
+    if row is None:
+        raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
+    if not _is_admin(ident):
+        require_role(row["project_id"], email, "editor")
+    before = store.query_one(
+        "SELECT status FROM rr_coverage WHERE target_key = ? AND agent_key = ?", (target_key, agent_key))
+    if before is None:
+        raise AppError("E404", f"원장 행이 없습니다: {target_key}:{agent_key}", 404)
+    if body.status not in ("skipped", "pending"):
+        raise AppError("E100", "status 는 'skipped' 또는 'pending'(carried 되돌리기) 여야 합니다.", 422)
+
+    with store.tx():
+        if body.status == "skipped":
+            out = planner.skip_seat(store, target_key, agent_key, body.reason or "", decided_by=email)
+            action = "coverage.skip"
+        else:
+            out = planner.revert_carried(store, target_key, agent_key, decided_by=email)
+            action = "coverage.uncarry"
+        _audit(store, email, scope="coverage", subject_id=f"{target_key}#{agent_key}",
+               project_id=row["project_id"], action=action, before={"status": before["status"]},
+               after={"status": out["status"]}, reason=body.reason)
+    return out
 
 
 # ================================================================ 커버리지·등록부·패널
@@ -1394,14 +1897,130 @@ class RegistryStatusBody(BaseModel):
     target_key: str | None = None
 
 
+# 등록부 상태 → 라벨 outcome(§7.6 경로 5). mitigated 는 사람 표기만이라 라벨이 없다(label_needed=false).
+REGISTRY_LABEL_OUTCOME = {"verified": "confirmed", "dismissed": "refuted"}
+
+
+def _cluster_finding_ids(store: Any, cluster_key: str, owner_sub: str,
+                         target_key: str | None) -> list[str]:
+    """그 등록부 클러스터에 실린 finding id — 사람 확정 라벨의 대상."""
+    sql = "SELECT finding_id FROM rr_findings WHERE cluster_key = ? AND owner_sub = ?"
+    params: list[Any] = [cluster_key, owner_sub]
+    if target_key:
+        sql += " AND target_key = ?"
+        params.append(target_key)
+    return [str(r["finding_id"]) for r in store.query(sql + " ORDER BY finding_id", params)]
+
+
 @router.put("/registry/{cluster_key:path}/status")
 def put_registry_status(cluster_key: str, body: RegistryStatusBody,
                         ident: identity.Identity = Depends(identity.current)) -> dict:
-    """verified·dismissed 는 라벨 대상(§7.6), mitigated 는 사람 표기만(§4.7.1)."""
+    """verified·dismissed 는 라벨 대상(§7.6), mitigated 는 사람 표기만(§4.7.1).
+
+    `label_needed` 면 같은 트랜잭션에서 `metrics.record_label(source='expert_review')` 를 클러스터의
+    finding 마다 잇는다 — 그 함수가 `rr_labels`·`rr_registry_status_log`·`rr_delta_priors`·패턴 카운트·
+    AIDataHub 재부착 op 를 한 번에 처리한다. 근거 없는 확정은 record_label 이 422 로 막고 그때는
+    등록부 갱신도 함께 되돌아간다(사람 확정만 남고 라벨이 없는 상태를 만들지 않는다).
+    """
     owner_sub = _require_user(ident)
-    return registry_module.set_status(get_store(), cluster_key, body.status, owner_sub=owner_sub,
-                                      target_key=body.target_key, evidence_ref=body.evidence_ref,
-                                      note=body.note, actor=owner_sub)
+    store = get_store()
+    with store.tx():
+        out = registry_module.set_status(store, cluster_key, body.status, owner_sub=owner_sub,
+                                         target_key=body.target_key, evidence_ref=body.evidence_ref,
+                                         note=body.note, actor=owner_sub)
+        if out.get("label_needed"):
+            outcome = REGISTRY_LABEL_OUTCOME[out["status"]]
+            out["labels"] = [
+                metrics.record_label(
+                    store, finding_id=finding_id, source="expert_review", outcome=outcome,
+                    evidence_ref=body.evidence_ref or "", owner_sub=owner_sub,
+                    labeled_by=owner_sub, evidence_note=body.note)
+                for finding_id in _cluster_finding_ids(store, cluster_key, owner_sub, body.target_key)]
+    return out
+
+
+class RegistryMergeBody(BaseModel):
+    into: str                      # 살아남을 대표 cluster_key
+    reason: str = "cluster_merge"
+    target_key: str | None = None
+
+
+@router.put("/registry/{cluster_key:path}/merge")
+def put_registry_merge(cluster_key: str, body: RegistryMergeBody,
+                       ident: identity.Identity = Depends(identity.current)) -> dict:
+    """두 클러스터를 사람 확정으로 잇는다 — 별칭 1행 + 그 타깃 재병합(plan §4.3.2·§0.9 P3-22).
+
+    finding 행의 `cluster_key` 는 바이트 불변이고 병합은 조회 시 별칭 해석으로 이뤄진다. family_key 가
+    다르면 422 — 메커니즘이 다른 두 클러스터를 한 행으로 접지 않는다.
+    """
+    owner_sub = _require_user(ident)
+    store = get_store()
+    left = store.query_one(
+        "SELECT target_key, family_key FROM rr_registry WHERE cluster_key = ? AND owner_sub = ? LIMIT 1",
+        (cluster_key, owner_sub))
+    right = store.query_one(
+        "SELECT target_key, family_key FROM rr_registry WHERE cluster_key = ? AND owner_sub = ? LIMIT 1",
+        (body.into, owner_sub))
+    if left is None or right is None:
+        raise AppError("E404", "두 등록부 클러스터가 모두 있어야 합니다.", 404)
+    if left["family_key"] and right["family_key"] and left["family_key"] != right["family_key"]:
+        raise AppError("family_key_mismatch", "family_key 가 다른 클러스터는 병합할 수 없습니다.", 422)
+
+    with store.tx():
+        alias = registry_module.add_cluster_alias(
+            store, cluster_key, body.into, owner_sub=owner_sub, reason=body.reason,
+            evidence={"from": cluster_key, "to": body.into, "by": owner_sub})
+        _audit(store, owner_sub, scope="registry", subject_id=f"{left['target_key']}#{cluster_key}",
+               action="registry.merge", before={"cluster_key": cluster_key},
+               after={"cluster_key": body.into})
+    merged = registry_module.merge(store, body.target_key or left["target_key"], owner_sub=owner_sub)
+    return {"alias": alias, "merged": {k: merged[k] for k in ("clusters", "inserted", "updated", "unchanged")}}
+
+
+@router.delete("/registry/{cluster_key:path}/merge")
+def delete_registry_merge(cluster_key: str, target_key: str | None = None,
+                          ident: identity.Identity = Depends(identity.current)) -> dict:
+    """별칭 철회 — 행은 남고 revoked_at 만 찍히며 재병합에서 다시 갈린다."""
+    owner_sub = _require_user(ident)
+    store = get_store()
+    row = store.query_one(
+        "SELECT target_key FROM rr_registry WHERE cluster_key = ? AND owner_sub = ? LIMIT 1",
+        (cluster_key, owner_sub))
+    with store.tx():
+        out = registry_module.revoke_cluster_alias(store, cluster_key, owner_sub=owner_sub)
+        _audit(store, owner_sub, scope="registry", subject_id=cluster_key,
+               action="registry.merge.revoke", before={"cluster_key": cluster_key}, after=out)
+    if row is not None:
+        registry_module.merge(store, target_key or row["target_key"], owner_sub=owner_sub)
+    return out
+
+
+class RegistryVisibilityBody(BaseModel):
+    visibility: str
+    target_key: str | None = None
+
+
+@router.put("/registry/{cluster_key:path}/visibility")
+def put_registry_visibility(cluster_key: str, body: RegistryVisibilityBody,
+                            ident: identity.Identity = Depends(identity.current)) -> dict:
+    """등록부 행의 조직 공개 토글(소유자 전용) — rr_audit 1행을 남긴다(plan §0.9 P6-8)."""
+    owner_sub = _require_user(ident)
+    store = get_store()
+    with store.tx():
+        out = registry_module.set_visibility(store, cluster_key, body.visibility,
+                                             owner_sub=owner_sub, target_key=body.target_key)
+        _audit(store, owner_sub, scope="registry", subject_id=cluster_key,
+               action="registry.visibility", before={"visibility": out["before"]},
+               after={"visibility": out["visibility"]})
+    return out
+
+
+@router.get("/panels/{panel_id}/brief")
+def get_panel_brief(panel_id: str, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """그 패널이 실제로 받은 브리프 — 재조립이 아니라 동결본을 돌려준다(plan §5.6.1·§0.9 P3-19)."""
+    owner_sub = _require_user(ident)
+    _panel_row(panel_id, owner_sub)
+    return runner.load_brief(get_store(), panel_id)
 
 
 @router.post("/targets/{target_key}/resync")
@@ -1753,13 +2372,68 @@ def _ref_from_store(info: dict, owner_sub: str) -> dict | None:
             "SELECT id, project_id, facet, tag, statement, status FROM rr_character WHERE id = ? AND owner_sub = ?",
             (info["character_id"], owner_sub))
         return dict(row) if row is not None else None
+    if kind == "tool" and "conv_id" in info:
+        # 레거시 참조 — 포털 대화가 지워져도 rr_panel_calls(conv_id, activity_idx)로 해석한다(§6.7.2 7단계).
+        row = store.query_one(
+            "SELECT call_id, panel_id, target_key, seq, agent_key, tool, result_gz, result_bytes, sha256,"
+            " conv_id, activity_idx FROM rr_panel_calls WHERE conv_id = ? AND activity_idx = ?"
+            " AND owner_sub = ?", (info["conv_id"], int(info["idx"]), owner_sub))
+        return _panel_call_payload(row) if row is not None else None
+    if kind == "tool" and str(info.get("call_id") or "").startswith("panel:"):
+        row = store.query_one(
+            "SELECT call_id, panel_id, target_key, seq, agent_key, tool, result_gz, result_bytes, sha256,"
+            " conv_id, activity_idx FROM rr_panel_calls WHERE call_id = ? AND owner_sub = ?",
+            (str(info["call_id"])[len("panel:"):], owner_sub))
+        return _panel_call_payload(row) if row is not None else None
     if kind == "tool" and "call_id" in info:
         row = store.query_one(
             "SELECT call_id, snapshot_id, seq, source_kind, app_key, channel, tool, args_json, ok, http_status,"
-            " response_sha256, response_bytes, started_at, duration_ms, error FROM rr_snapshot_calls"
+            " response_sha256, response_gz, response_bytes, started_at, duration_ms, error FROM rr_snapshot_calls"
             " WHERE call_id = ? AND owner_sub = ?", (info["call_id"], owner_sub))
-        return dict(row) if row is not None else None
+        return _tool_call_payload(row) if row is not None else None
     return None
+
+
+# `GET /api/refs/tool:<call_id>` 가 돌려주는 원문 발췌 상한(자). 넘으면 앞부분만 싣고 잘림을 표기한다.
+REF_RESPONSE_MAX = 200_000
+
+
+def _panel_call_payload(row: Any) -> dict:
+    """rr_panel_calls 한 행 — 좌석 도구 호출 원문(§6.7.2 7단계). 원문이 없으면 quote_unverifiable 이다."""
+    item = {key: row[key] for key in row.keys() if key != "result_gz"}
+    blob = row["result_gz"]
+    item["result_available"] = blob is not None
+    if blob is None:
+        item["quote_unverifiable"] = True
+        return item
+    text = gzip.decompress(blob).decode("utf-8")
+    item["result_text"] = text[:REF_RESPONSE_MAX]
+    item["result_truncated"] = len(text) > REF_RESPONSE_MAX
+    return item
+
+
+def _tool_call_payload(row: Any) -> dict:
+    """rr_snapshot_calls 한 행을 참조 payload 로 편다 — 보관한 gzip 원문을 풀어 함께 싣는다(plan §2.11.2).
+
+    원문이 없으면(보존기간이 지나 `response_gz=NULL`) 해시·메타만 남고 `response_available=false` 다.
+    """
+    item = {key: row[key] for key in row.keys() if key != "response_gz"}
+    blob = row["response_gz"]
+    item["response_available"] = blob is not None
+    item["response_truncated"] = False
+    if blob is None:
+        return item
+    text = gzip.decompress(blob).decode("utf-8")
+    if len(text) > REF_RESPONSE_MAX:
+        item["response_text"] = text[:REF_RESPONSE_MAX]
+        item["response_truncated"] = True
+        return item
+    item["response_text"] = text
+    try:
+        item["response"] = json.loads(text)
+    except json.JSONDecodeError:
+        pass
+    return item
 
 
 def claims_for_ref(ref: str, *, owner_sub: str | None = None, limit: int = 100,
@@ -1820,6 +2494,144 @@ def get_ref(ref: str, snapshot_id: str | None = None, diff_id: str | None = None
     return {"ref_type": info["kind"], "resolved": True, "payload": payload}
 
 
+# ---------------------------------------------------------------- 사전 편집과 재계산(plan §2.7.1·§0.9 P2-12)
+# 사전은 성장 사전이라 편집이 곧 키 변경이다 — 추가는 마이너, 변경·삭제·stop_token 추가는 메이저다.
+VOCAB_ROW_NAME = "_vocab"          # 사전 전역 행(치수 이름이 아니라 사전 자체의 자리)
+VOCAB_OPS = ("add", "remove")
+
+
+def _vocab_row(store: Any) -> dict:
+    row = store.query_one(
+        "SELECT name, synonyms_json, stop_tokens_json, vocab_version FROM rr_dim_vocab WHERE name = ?",
+        (VOCAB_ROW_NAME,))
+    if row is None:
+        return {"synonyms": {}, "stop_tokens": [], "vocab_version": "1.0"}
+    return {"synonyms": _loads(row["synonyms_json"], {}),
+            "stop_tokens": _loads(row["stop_tokens_json"], []),
+            "vocab_version": row["vocab_version"] or "1.0"}
+
+
+def bump_vocab_version(current: str, level: str) -> str:
+    """마이너 `1.<m>` · 메이저 `<M>.0`(plan §0.6 키 계보)."""
+    try:
+        major, minor = (int(x) for x in str(current or "1.0").split(".", 1))
+    except ValueError:
+        major, minor = 1, 0
+    return f"{major + 1}.0" if level == "major" else f"{major}.{minor + 1}"
+
+
+def vocab_recompute_pending(store: Any) -> bool:
+    """메이저 승급 뒤 `recompute_part_keys.py` 가 아직 안 돈 상태(plan §2.7.1)."""
+    row = store.query_one(
+        "SELECT description, vocab_version FROM rr_dim_vocab WHERE name = ?", (VOCAB_ROW_NAME,))
+    if row is None:
+        return False
+    return _loads(row["description"], {}).get("recomputed_at") is None and \
+        str(row["vocab_version"] or "1.0").endswith(".0") and str(row["vocab_version"]) != "1.0"
+
+
+def _save_vocab(store: Any, *, synonyms: dict, stop_tokens: list, version: str,
+                owner_sub: str, recomputed_at: int | None) -> None:
+    now = now_epoch()
+    store.execute(
+        "INSERT INTO rr_dim_vocab(name, kind, unit, description, synonyms_json, stop_tokens_json,"
+        " vocab_version, created_by, created_at) VALUES (?, 'other', NULL, ?, ?, ?, ?, ?, ?)"
+        " ON CONFLICT(name) DO UPDATE SET description = excluded.description,"
+        " synonyms_json = excluded.synonyms_json, stop_tokens_json = excluded.stop_tokens_json,"
+        " vocab_version = excluded.vocab_version",
+        (VOCAB_ROW_NAME, canonical_json({"recomputed_at": recomputed_at}),
+         canonical_json(synonyms), canonical_json(sorted(stop_tokens)), version, owner_sub, now),
+    )
+
+
+class VocabSynonymBody(BaseModel):
+    head: str
+    from_: list[str] = Field(default_factory=list, alias="from")
+    op: str = "add"
+
+    model_config = {"populate_by_name": True}
+
+
+class VocabStopTokenBody(BaseModel):
+    tokens: list[str] = Field(default_factory=list)
+    op: str = "add"
+
+
+def _require_vocab_admin(ident: identity.Identity) -> str:
+    email = _require_user(ident)
+    if not _is_admin(ident):
+        raise AppError("role_insufficient", "사전 편집은 risk_admin_roles 만 할 수 있습니다.", 403)
+    return email
+
+
+def _apply_vocab_edit(store: Any, *, level: str, mutate, owner_sub: str) -> dict:
+    """사전 편집 1건 — 같은 트랜잭션에서 값과 vocab_version 을 함께 올린다.
+
+    메이저는 재계산(`recompute_part_keys.py`)이 필수라, 재계산 전에 두 번째 메이저가 오면 409 다.
+    """
+    current = _vocab_row(store)
+    if level == "major" and vocab_recompute_pending(store):
+        raise AppError("vocab_recompute_required",
+                       "직전 메이저 승급의 재계산(recompute_part_keys.py)이 아직 안 돌았습니다.", 409)
+    synonyms = dict(current["synonyms"])
+    stop_tokens = list(current["stop_tokens"])
+    mutate(synonyms, stop_tokens)
+    version = bump_vocab_version(current["vocab_version"], level)
+    with store.tx():
+        _save_vocab(store, synonyms=synonyms, stop_tokens=stop_tokens, version=version,
+                    owner_sub=owner_sub, recomputed_at=None if level == "major" else 1)
+        _audit(store, owner_sub, scope="project", subject_id=VOCAB_ROW_NAME,
+               action="vocab.edit", before={"vocab_version": current["vocab_version"]},
+               after={"vocab_version": version, "bump": level})
+    return {"vocab_version": version, "bump": level, "synonyms": synonyms,
+            "stop_tokens": sorted(stop_tokens),
+            "recompute_required": level == "major"}
+
+
+@router.post("/vocab/synonyms")
+def post_vocab_synonyms(body: VocabSynonymBody,
+                        ident: identity.Identity = Depends(identity.current)) -> dict:
+    """동의어 추가는 마이너, 삭제는 메이저다(plan §2.7.1 '사전 편집과 재계산')."""
+    owner_sub = _require_vocab_admin(ident)
+    if body.op not in VOCAB_OPS:
+        raise AppError("E100", f"op 는 {list(VOCAB_OPS)} 중 하나여야 합니다.", 422)
+    head = (body.head or "").strip().lower()
+    aliases = [str(x).strip().lower() for x in body.from_ if str(x).strip()]
+    if not head or not aliases:
+        raise AppError("E100", "head 와 from[] 이 필요합니다.", 422)
+
+    def mutate(synonyms: dict, _stop_tokens: list) -> None:
+        for alias in aliases:
+            if body.op == "add":
+                synonyms[alias] = head
+            else:
+                synonyms.pop(alias, None)
+
+    return _apply_vocab_edit(get_store(), level="minor" if body.op == "add" else "major",
+                             mutate=mutate, owner_sub=owner_sub)
+
+
+@router.post("/vocab/stop-tokens")
+def post_vocab_stop_tokens(body: VocabStopTokenBody,
+                           ident: identity.Identity = Depends(identity.current)) -> dict:
+    """stop_token 추가·삭제는 둘 다 키를 바꾼다 — 메이저 승급이다(plan §2.7.1)."""
+    owner_sub = _require_vocab_admin(ident)
+    if body.op not in VOCAB_OPS:
+        raise AppError("E100", f"op 는 {list(VOCAB_OPS)} 중 하나여야 합니다.", 422)
+    tokens = [str(x).strip().lower() for x in body.tokens if str(x).strip()]
+    if not tokens:
+        raise AppError("E100", "tokens[] 가 필요합니다.", 422)
+
+    def mutate(_synonyms: dict, stop_tokens: list) -> None:
+        for token in tokens:
+            if body.op == "add" and token not in stop_tokens:
+                stop_tokens.append(token)
+            elif body.op == "remove" and token in stop_tokens:
+                stop_tokens.remove(token)
+
+    return _apply_vocab_edit(get_store(), level="major", mutate=mutate, owner_sub=owner_sub)
+
+
 # ================================================================ 이동(export·import)
 @router.get("/export")
 def get_export(since: int = 0, include_excluded: int = 0,
@@ -1860,3 +2672,379 @@ async def post_import(request: Request, ident: identity.Identity = Depends(ident
     except UnicodeDecodeError as exc:
         raise AppError("E100", "본문이 UTF-8 JSONL 이 아닙니다.", 422) from exc
     return export_module.import_jsonl(get_store(), owner_sub, text)
+
+
+# ================================================================ P6 — 라벨·큐레이션 결정·승격 상태(plan §7.5·§7.6·§7.7)
+class LabelBody(BaseModel):
+    outcome: str
+    evidence_ref: str
+    source: str = "expert_review"
+    severity_observed: str | None = None
+    occurred_at: int | None = None
+    evidence_note: str | None = None
+    pattern_id: str | None = None
+
+
+# ---------------------------------------------------------------- 사람 finding 1급 레코드(plan §4.3.1·§0.9 P3-17)
+class HumanFindingBody(BaseModel):
+    direction: str = "risk"
+    domain: str | None = None
+    mechanism: str = "unclassified"
+    mechanism_detail: str | None = None
+    change_kind: str | None = None
+    subject_key: str | None = None
+    subject_names: list[str] = Field(default_factory=list)
+    severity: str | None = None
+    judgement: str | None = None
+    trigger_condition: str | None = None
+    claim: str = Field(max_length=2000)
+    warrant: str | None = None
+    cites: list[dict] = Field(default_factory=list)
+    requirement_ref: str | None = None
+
+
+HUMAN_DIRECTIONS = ("risk", "improvement", "neutral")
+HUMAN_SEVERITIES = ("경미", "중대", "치명")
+HUMAN_JUDGEMENTS = ("OK", "WARNING", "FAIL", "undetermined")
+_SEV3_OF = {"경미": 1, "중대": 2, "치명": 3}
+
+
+def _next_human_claim_uid(store: Any, target_key: str) -> str:
+    """`<target_key>#H<n>` — 그 타깃의 사람 finding 순번(plan §0.2.2)."""
+    rows = store.query(
+        "SELECT claim_uid FROM rr_findings WHERE target_key = ? AND origin = 'human'", (target_key,))
+    used = []
+    for row in rows:
+        tail = str(row["claim_uid"]).rsplit("#H", 1)
+        if len(tail) == 2 and tail[1].isdigit():
+            used.append(int(tail[1]))
+    return f"{target_key}#H{(max(used) + 1) if used else 1}"
+
+
+def _human_finding_row(store: Any, finding_id: str, owner_sub: str) -> dict:
+    row = store.query_one(
+        "SELECT finding_id, claim_uid, target_key, project_id, owner_sub, origin, author_sub, direction,"
+        " cluster_key, finding_json, status FROM rr_findings WHERE finding_id = ?", (finding_id,))
+    if row is None or row["owner_sub"] != owner_sub:
+        raise AppError("E404", f"finding 을 찾을 수 없습니다 — {finding_id}.", 404)
+    if row["origin"] != "human":
+        raise AppError("llm_finding_immutable", "패널이 낸 원자는 REST 로 고치지 않습니다(재제출만).", 422)
+    return dict(row)
+
+
+@router.post("/targets/{target_key}/findings")
+def create_human_finding(target_key: str, body: HumanFindingBody,
+                         ident: identity.Identity = Depends(identity.current)) -> dict:
+    """사람이 직접 제기하는 finding 1건 — 패널 산출과 같은 표에 `origin='human'` 으로 앉는다(plan §4.3.1).
+
+    인용이 0건이면 422 다. 등급·판정은 사람이 고르고 `panel_id` 는 NULL 이며 병합에서 전문가 지지로 세지
+    않는다(`human_n` 으로 따로 센다, §4.7.1).
+    """
+    email = _require_user(ident)
+    store = get_store()
+    row = store.query_one(
+        "SELECT owner_sub, project_id, kind, ref_id FROM rr_targets WHERE target_key = ?", (target_key,))
+    if row is None:
+        raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
+    if not _is_admin(ident):
+        require_role(row["project_id"], email, "editor")
+    if body.direction not in HUMAN_DIRECTIONS:
+        raise AppError("E100", f"direction 은 {list(HUMAN_DIRECTIONS)} 중 하나여야 합니다.", 422)
+    if body.severity is not None and body.severity not in HUMAN_SEVERITIES:
+        raise AppError("E100", f"severity 는 {list(HUMAN_SEVERITIES)} 중 하나여야 합니다.", 422)
+    if body.judgement is not None and body.judgement not in HUMAN_JUDGEMENTS:
+        raise AppError("E100", f"judgement 는 {list(HUMAN_JUDGEMENTS)} 중 하나여야 합니다.", 422)
+    cites = [c for c in body.cites if isinstance(c, dict) and str(c.get("ref") or "").strip()]
+    if not cites:
+        raise AppError("cites_required", "사람 finding 도 인용이 최소 1건 필요합니다(§4.3.1).", 422)
+    if not (body.claim or "").strip():
+        raise AppError("E100", "claim 이 비었습니다.", 422)
+
+    now = now_epoch()
+    claim_uid = _next_human_claim_uid(store, target_key)
+    finding_id = claim_uid
+    severity = body.severity or "경미"
+    subject_key = (body.subject_key or "").strip()
+    cluster_key = narrative.cluster_key_of(body.mechanism, body.mechanism_detail or "", subject_key,
+                                           body.change_kind or "")
+    finding_json = {
+        "id": claim_uid, "origin": "human", "author_sub": email,
+        "direction": body.direction, "domain": body.domain, "mechanism": body.mechanism,
+        "mechanism_detail": body.mechanism_detail, "change_kind": body.change_kind,
+        "subject": {"ckeys": [], "names": list(body.subject_names)},
+        "subject_key": subject_key, "severity": severity, "judgement": body.judgement or "undetermined",
+        "trigger_condition": body.trigger_condition, "claim": body.claim, "warrant": body.warrant or "",
+        "cites": cites, "requirement_ref": body.requirement_ref, "status": "open",
+    }
+    with store.tx():
+        store.execute(
+            "INSERT INTO rr_findings(finding_id, claim_uid, origin, author_sub, target_key, panel_id,"
+            " opinion_id, project_id, owner_sub, visibility, direction, domain, mechanism, mechanism_detail,"
+            " change_kind, subject_key, ckeys_json, trigger_condition, severity, sev3, judgement,"
+            " evidence_grade, precedent, requirement_ref, dangling, cluster_key, finding_json,"
+            " recall_eligible, status, status_source, created_at, updated_at)"
+            " VALUES (?,?, 'human', ?, ?, NULL, NULL, ?, ?, 'private', ?,?,?,?,?,?, '[]', ?,?,?,?, '경험칙',"
+            " 'none', ?, 0, ?, ?, 1, 'open', 'code', ?, ?)",
+            (finding_id, claim_uid, email, target_key, row["project_id"], row["owner_sub"],
+             body.direction, body.domain, body.mechanism, body.mechanism_detail, body.change_kind,
+             subject_key, body.trigger_condition, severity, _SEV3_OF.get(severity, 1),
+             body.judgement or "undetermined", body.requirement_ref, cluster_key,
+             canonical_json(finding_json), now, now),
+        )
+        for cite in cites:
+            ref = str(cite.get("ref"))
+            info = parse_ref(ref)
+            store.execute(
+                "INSERT OR REPLACE INTO rr_claim_refs(claim_uid, ref_type, ref, quote, owner_sub, target_key,"
+                " dangling) VALUES (?,?,?,?,?,?,?)",
+                (claim_uid, (info or {}).get("kind") or "unknown", ref, str(cite.get("quote") or ""),
+                 row["owner_sub"], target_key, 0 if info else 1),
+            )
+        _audit(store, email, scope="finding", subject_id=finding_id, project_id=row["project_id"],
+               action="finding.create", after={"origin": "human", "claim_uid": claim_uid})
+    registry_module.merge(get_store(), target_key)
+    return {"finding_id": finding_id, "claim_uid": claim_uid, "cluster_key": cluster_key, "origin": "human"}
+
+
+@router.put("/findings/{finding_id}")
+def update_human_finding(finding_id: str, body: HumanFindingBody,
+                         ident: identity.Identity = Depends(identity.current)) -> dict:
+    """작성자만 고칠 수 있다 — 패널이 낸 llm 행은 422 다."""
+    email = _require_user(ident)
+    store = get_store()
+    row = _human_finding_row(store, finding_id, _require_user(ident))
+    if row["author_sub"] != email and not _is_admin(ident):
+        raise AppError("role_insufficient", "작성자만 고칠 수 있습니다.", 403)
+    cites = [c for c in body.cites if isinstance(c, dict) and str(c.get("ref") or "").strip()]
+    if not cites:
+        raise AppError("cites_required", "사람 finding 도 인용이 최소 1건 필요합니다(§4.3.1).", 422)
+    finding_json = _loads(row["finding_json"], {})
+    finding_json.update({"claim": body.claim, "warrant": body.warrant or "", "cites": cites,
+                         "severity": body.severity or finding_json.get("severity") or "경미",
+                         "judgement": body.judgement or finding_json.get("judgement") or "undetermined"})
+    now = now_epoch()
+    with store.tx():
+        store.execute(
+            "UPDATE rr_findings SET severity = ?, sev3 = ?, judgement = ?, finding_json = ?, updated_at = ?"
+            " WHERE finding_id = ?",
+            (finding_json["severity"], _SEV3_OF.get(finding_json["severity"], 1), finding_json["judgement"],
+             canonical_json(finding_json), now, finding_id))
+        _audit(store, email, scope="finding", subject_id=finding_id, project_id=row["project_id"],
+               action="finding.update", before={"claim": _loads(row["finding_json"], {}).get("claim")},
+               after={"claim": body.claim})
+    registry_module.merge(store, row["target_key"])
+    return {"finding_id": finding_id, "updated": True}
+
+
+@router.delete("/findings/{finding_id}")
+def delete_human_finding(finding_id: str, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """작성자 삭제 — 인용 역색인도 함께 지운다. 패널이 낸 행은 422 다."""
+    email = _require_user(ident)
+    store = get_store()
+    row = _human_finding_row(store, finding_id, email)
+    if row["author_sub"] != email and not _is_admin(ident):
+        raise AppError("role_insufficient", "작성자만 지울 수 있습니다.", 403)
+    with store.tx():
+        store.execute("DELETE FROM rr_claim_refs WHERE claim_uid = ?", (row["claim_uid"],))
+        store.execute("DELETE FROM rr_findings WHERE finding_id = ?", (finding_id,))
+        _audit(store, email, scope="finding", subject_id=finding_id, project_id=row["project_id"],
+               action="finding.delete", before={"claim_uid": row["claim_uid"]})
+    registry_module.merge(store, row["target_key"])
+    return {"finding_id": finding_id, "deleted": True}
+
+
+@router.post("/findings/{finding_id}/labels")
+def post_finding_label(finding_id: str, body: LabelBody,
+                       ident: identity.Identity = Depends(identity.current)) -> dict:
+    """§7.6 라벨 경로 5(사람) — finding·등록부 화면이 직접 붙이는 `confirmed|refuted|inconclusive`.
+
+    자동 4경로(incident·test_run·sim·voc)는 야간 잡의 입구라 REST 로는 받지 않는다 — 사람 손으로
+    `matched_by='auto'` 라벨을 세우면 3항 매칭 없이 자동 확정 통계가 부풀기 때문이다.
+    어휘 422·남의 finding 404 와 훅(상태 전이·선례·패턴 카운트)은 `metrics.record_label` 이 낸다.
+    """
+    owner_sub = _require_user(ident)
+    if body.source not in metrics.MANUAL_SOURCES:
+        raise AppError("E100", f"사람 라벨의 source 는 {sorted(metrics.MANUAL_SOURCES)} 뿐입니다 — {body.source!r}.", 422)
+    return metrics.record_label(
+        get_store(), finding_id=finding_id, source=body.source, outcome=body.outcome,
+        evidence_ref=body.evidence_ref, owner_sub=owner_sub, severity_observed=body.severity_observed,
+        occurred_at=body.occurred_at, evidence_note=body.evidence_note, labeled_by=owner_sub,
+        pattern_id=body.pattern_id)
+
+
+# 큐 kind 별 결정 어휘(§7.7 표). 여기 없는 kind 는 적용 함수가 아직 없어 501 이다(라우트가 로직을 지어내지 않는다).
+CURATION_DECISIONS: dict[str, tuple[str, ...]] = {
+    "label_match": ("confirmed", "refuted", "inconclusive", "reject"),
+    "pattern_candidate": ("known", "rule", "predictor", "suspended", "deprecated", "reject"),
+    # 의심 문구는 사람이 원문을 보고 승인(원문 복원 + 회수 복귀)하거나 기각(격리 유지)한다(§3.4.1).
+    "suspect_text": ("approve", "reject"),
+    # 근접 중복 클러스터 — merge 는 별칭 1행 + 재병합, reject 는 그대로 두 행이다
+    # (payload {"suppress": true} 로 기각하면 다음 스캔이 그 쌍을 다시 올리지 않는다, §7.7 표).
+    "cluster_merge": ("merge", "reject"),
+    # 미분류 코드 — map 은 기존 detail 로, new 는 사람이 준 새 detail 로 옮긴다(둘 다 별칭 경로).
+    "unclassified_code": ("map", "new", "reject"),
+}
+# 감사 로그의 scope 는 rr_audit CHECK 어휘 안에서 고른다(§5.2.2 — 'curation' 은 그 어휘에 없다).
+CURATION_AUDIT_SCOPE: dict[str, str] = {"label_match": "finding", "pattern_candidate": "registry",
+                                        "suspect_text": "finding", "cluster_merge": "registry",
+                                        "unclassified_code": "finding"}
+CURATION_LIMIT_MAX = 200
+
+
+def _bump_minor(version: str) -> str:
+    """`1.0` → `1.1` — 택소노미 마이너 승급(이전 값은 결정 기록에 남는다, plan §7.7)."""
+    try:
+        major, minor = (int(x) for x in str(version or "1.0").split(".", 1))
+    except ValueError:
+        return "1.1"
+    return f"{major}.{minor + 1}"
+
+
+class CurationDecisionBody(BaseModel):
+    decision: str
+    reason: str | None = None
+    payload: dict | None = None
+
+
+@router.get("/curation")
+def get_curation(kind: str | None = None, status: str | None = "open", limit: int = 200,
+                 ident: identity.Identity = Depends(identity.current)) -> dict:
+    """큐레이션 큐 조회(내 소유 행만) — `?kind=&status=open&limit≤200`."""
+    owner_sub = _require_user(ident)
+    sql = ("SELECT id, kind, payload_json, status, decision_json, decided_by, decided_at, created_at"
+           " FROM rr_curation_queue WHERE owner_sub = ?")
+    params: list[Any] = [owner_sub]
+    if kind:
+        sql += " AND kind = ?"
+        params.append(kind)
+    if status:
+        sql += " AND status = ?"
+        params.append(status)
+    params.append(max(1, min(int(limit), CURATION_LIMIT_MAX)))
+    rows = []
+    for row in get_store().query(sql + " ORDER BY created_at, id LIMIT ?", params):
+        item = dict(row)
+        item["payload"] = _loads(item.pop("payload_json"), {})
+        item["decision"] = _loads(item.pop("decision_json"), {})
+        rows.append(item)
+    return {"rows": rows}
+
+
+@router.put("/curation/{queue_id}")
+def put_curation(queue_id: str, body: CurationDecisionBody,
+                 ident: identity.Identity = Depends(identity.current)) -> dict:
+    """큐레이션 결정(§8.2.3) — `{status, decision_json, applied}` + `rr_audit(action='curation.decide')`.
+
+    `pattern_candidate` 승인은 `learning.promote` 가 게이트를 다시 보고 미달이면 422 를 낸다 —
+    같은 트랜잭션이라 그때 큐 상태도 열린 채로 남는다(승인 기록만 남고 승격이 없는 상태를 만들지 않는다).
+    `label_match` 는 적용 함수가 따로 없다 — `metrics.is_counted_label` 이 이 큐의 status 로 계수 여부를
+    정하므로 결정 자체가 적용이다(`done` 이면 그 라벨이 precision·선례 분모에 든다).
+    """
+    owner_sub = _require_user(ident)
+    store = get_store()
+    row = _owned_row("SELECT id, owner_sub, kind, payload_json, status FROM rr_curation_queue WHERE id = ?",
+                     (queue_id,), owner_sub, "큐레이션 항목")
+    kind = str(row["kind"])
+    allowed = CURATION_DECISIONS.get(kind)
+    if allowed is None:
+        raise _not_implemented(f"큐레이션 kind '{kind}' 의 결정",
+                               "적용 함수가 아직 없습니다(unclassified_code·x_tag_promote·suspect_text·cluster_merge 는 P1·P5 몫).")
+    if body.decision not in allowed:
+        raise AppError("decision_not_allowed_for_kind",
+                       f"'{kind}' 큐의 결정 어휘가 아닙니다 — {body.decision!r}. 허용 {list(allowed)}.", 422)
+    if row["status"] != "open":
+        raise AppError("E409", f"이미 결정된 항목입니다 — status={row['status']}.", 409)
+
+    payload = _loads(row["payload_json"], {})
+    decision_json = {"decision": body.decision, "reason": body.reason, "payload": body.payload or {}}
+    status = "rejected" if body.decision == "reject" else "done"
+    applied: dict = {}
+    with store.tx():
+        if kind == "suspect_text" and body.decision == "approve":
+            # 승인은 원문 복원이다 — 자리표시자가 가리키던 sha1 의 원문을 돌려주고 그 finding 을 회수로 되돌린다.
+            claim_uid = str(payload.get("claim_uid") or "")
+            restored = 0
+            if claim_uid:
+                restored = int(store.execute(
+                    "UPDATE rr_findings SET recall_eligible = 1, updated_at = ?"
+                    " WHERE claim_uid = ? AND owner_sub = ?", (now_epoch(), claim_uid, owner_sub)) or 0)
+            applied = {"restored_text": payload.get("raw"), "sha1": payload.get("sha1"),
+                       "findings_recalled": restored}
+        if kind == "unclassified_code" and body.decision in ("map", "new"):
+            # 미분류 코드를 택소노미 값으로 옮긴다 — finding 의 cluster_key 는 불변이고 별칭만 더한다(§4.3.2).
+            detail = str((body.payload or {}).get("mechanism_detail") or "").strip()
+            if not detail:
+                raise AppError("E100", "payload.mechanism_detail 이 필요합니다.", 422)
+            finding_id = str(payload.get("finding_id") or "")
+            row = store.query_one(
+                "SELECT mechanism, mechanism_detail FROM rr_findings WHERE finding_id = ? AND owner_sub = ?",
+                (finding_id, owner_sub))
+            if row is None:
+                raise AppError("E404", f"finding 을 찾을 수 없습니다 — {finding_id}.", 404)
+            before_version = taxonomy.version_of(taxonomy.load_json("taxonomy")) or "1.0"
+            plan = learning.plan_remap(store, mechanism=str(row["mechanism"] or ""),
+                                       from_detail=str(row["mechanism_detail"] or ""),
+                                       to_detail=detail)
+            out_remap = learning.apply_remap(store, plan, owner_sub=owner_sub)
+            applied = {"mechanism_detail": detail, "decision": body.decision,
+                       "taxonomy_version_before": before_version,
+                       # 자산 파일은 앱이 고치지 않는다 — 승급 값은 결정 기록에 남고 자산 갱신은 사람 몫이다.
+                       "taxonomy_version_after": _bump_minor(before_version), **out_remap}
+        if kind == "cluster_merge" and body.decision == "merge":
+            # 두 클러스터를 한 행으로 접는다 — family_key 가 다르면 422 이고 support 는 distinct 패널 수로 다시 센다.
+            key_a, key_b = str(payload.get("a") or ""), str(payload.get("b") or "")
+            rows = {key: store.query_one(
+                "SELECT target_key, family_key FROM rr_registry WHERE cluster_key = ? AND owner_sub = ? LIMIT 1",
+                (key, owner_sub)) for key in (key_a, key_b)}
+            if not all(rows.values()):
+                raise AppError("E404", "두 등록부 클러스터가 모두 있어야 합니다.", 404)
+            if rows[key_a]["family_key"] and rows[key_b]["family_key"] \
+                    and rows[key_a]["family_key"] != rows[key_b]["family_key"]:
+                raise AppError("family_key_mismatch", "family_key 가 다른 클러스터는 병합할 수 없습니다.", 422)
+            alias = registry_module.add_cluster_alias(store, key_a, key_b, owner_sub=owner_sub,
+                                                      reason="cluster_merge",
+                                                      evidence={"from": key_a, "to": key_b,
+                                                                "score": payload.get("score")})
+            merged = registry_module.merge(store, rows[key_a]["target_key"], owner_sub=owner_sub)
+            applied = {"alias": alias, "clusters": merged["clusters"]}
+        if kind == "pattern_candidate" and body.decision != "reject":
+            pattern_id = str(payload.get("pattern_id") or "")
+            if not pattern_id:
+                raise AppError("E100", "pattern_candidate payload 에 pattern_id 가 없습니다.", 422)
+            extra = body.payload or {}
+            applied = learning.promote(store, pattern_id, to_status=body.decision, decided_by=owner_sub,
+                                       reason=body.reason, rule=extra.get("rule"), cv=extra.get("cv"))
+        store.execute(
+            "UPDATE rr_curation_queue SET status = ?, decision_json = ?, decided_by = ?, decided_at = ?"
+            " WHERE id = ?", (status, canonical_json(decision_json), owner_sub, now_epoch(), queue_id))
+        _audit(store, owner_sub, scope=CURATION_AUDIT_SCOPE[kind],
+               subject_id=str(payload.get("finding_id") or payload.get("cluster_key_norm")
+                              or payload.get("a") or queue_id),
+               action="curation.decide", before={"kind": kind, "status": "open"},
+               after={"status": status, "decision": body.decision}, reason=body.reason)
+    return {"status": status, "decision_json": decision_json, "applied": applied}
+
+
+# 'select *' 금지 — rr_patterns 에서 화면이 쓰는 열만 적는다(feature_ranges_json 은 상세 조회의 몫).
+PATTERN_COLUMNS = (
+    "id, owner_sub, visibility, cluster_key_norm, mechanism, mechanism_detail, change_kind, subject_class, "
+    "status, n_findings, n_targets, n_projects, n_experts, n_confirmed, n_refuted, precision, merged_into, "
+    "card_record_id, design_trait_tag, curated_by, promoted_at, suspended_reason, created_at, updated_at"
+)
+
+
+@router.get("/patterns")
+def get_patterns(status: str | None = None,
+                 ident: identity.Identity = Depends(identity.current)) -> dict:
+    """§7.5 승격 상태 조회 — 내 패턴 + org 공개 패턴과, 그중 지금 도는 규칙(`active_pattern_rules`)."""
+    owner_sub = _require_user(ident)
+    store = get_store()
+    sql = f"SELECT {PATTERN_COLUMNS} FROM rr_patterns WHERE (owner_sub = ? OR visibility = 'org')"
+    params: list[Any] = [owner_sub]
+    if status:
+        sql += " AND status = ?"
+        params.append(status)
+    patterns = [dict(r) for r in store.query(sql + " ORDER BY id", params)]
+    ids = {p["id"] for p in patterns}
+    rules = [r for r in learning.active_pattern_rules(store) if r.get("pattern_id") in ids]
+    return {"patterns": patterns, "rules": rules}

@@ -9,10 +9,27 @@ from app.config import settings
 from app.mcp_server import mcp
 
 
-def test_health_exact_three_keys(client):
+def test_health_exact_three_keys(client, monkeypatch):
+    """정상 상태의 health 는 3키 고정이다(plan §5.2.5 (6))."""
+    from app import main
+
+    monkeypatch.setattr(main, "health_warnings", lambda: [])
     r = client.get("/api/health")
     assert r.status_code == 200
     assert r.json() == {"ok": True, "app_version": settings.app_version, "schema_version": 1}
+
+
+def test_health_reports_backup_unencrypted_without_an_age_key(client, monkeypatch):
+    """age 공개키가 없으면 백업 사본이 평문으로 나간다 — health warnings 로 드러낸다(plan §5.2.5 (3a) ③)."""
+    from app import main
+
+    monkeypatch.setattr(config, "backup_key", lambda *a, **k: "")
+    assert main.health_warnings() == ["backup_unencrypted"]
+    assert client.get("/api/health").json()["warnings"] == ["backup_unencrypted"]
+
+    monkeypatch.setattr(config, "backup_key", lambda *a, **k: "age1examplerecipient")
+    assert main.health_warnings() == []
+    assert "warnings" not in client.get("/api/health").json()
 
 
 def test_mcp_initialize_with_session_header(client):

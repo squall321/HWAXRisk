@@ -105,6 +105,35 @@ def test_name_norm_canon_rules(normalized, expected):
     assert ib.name_norm_canon(normalized) == expected
 
 
+# 표시명 접미 변형표(plan §0.9 P1-9 · §2.7.1). `#\\d+` 는 항상 지우고 `_\\d+` 는 인스턴스 플래그가 있을 때만 지운다 —
+# plan §2.7.1 은 `plate_1`·`plate_2` 를 서로 다른 부품으로 남겨야 한다고 못박는다.
+CKEY_SUFFIX_CASES = [
+    ("PLATE_1", False, True),        # 기준
+    ("PLATE_1#2", False, True),      # 인스턴스 순번 접미 — 같은 ckey
+    ("PLATE_1_3", True, True),       # auto_named 인스턴스 접미 — 같은 ckey
+    ("PLATE_1_3", False, False),     # 플래그 없는 `_3` 은 다른 부품 번호다
+    ("PLATE_2", False, False),       # 실 부품 번호는 갈라져야 한다
+]
+
+
+@pytest.mark.parametrize("label,auto_named,same", CKEY_SUFFIX_CASES,
+                         ids=[f"{c[0]}-{c[1]}" for c in CKEY_SUFFIX_CASES])
+def test_ckey_is_stable_across_instance_suffixes(label, auto_named, same):
+    """같은 파트의 표시명 접미 변형은 같은 ckey 를 낸다(재료·형상 버킷 고정)."""
+    def ckey_of(text: str, flag: bool) -> str:
+        canon = ib.name_norm_canon(ib.name_norm(text, auto_named=flag))
+        return ib.canonical_part_key(canon, "bx:1.0|2.0|3.0", "al6061")
+
+    base = ckey_of("PLATE_1", False)
+    assert (ckey_of(label, auto_named) == base) is same
+
+
+def test_ckey_changes_when_only_the_material_changes():
+    canon = ib.name_norm_canon(ib.name_norm("PLATE_1"))
+    bucket = "bx:1.0|2.0|3.0"
+    assert ib.canonical_part_key(canon, bucket, "al6061") != ib.canonical_part_key(canon, bucket, "az91d")
+
+
 def test_name_norm_canon_drops_project_codes():
     assert ib.name_norm_canon("m22_plate_1", project_codes=["M22"]) == "plate_1"
 
@@ -243,10 +272,17 @@ def test_sources_are_ordered_and_defaulted(mcad_result, dyna_result, dyna_result
     assert dyna["captured_at"] == 1756600000           # 없으면 봉투 captured_at 을 물려받는다
 
 
-def test_mcad_source_is_mandatory(dyna_result):
-    with pytest.raises(AppError) as exc:
-        build([dyna_result])
-    assert exc.value.code == "E100" and exc.value.http_status == 409
+def test_dyna_only_snapshot_stands_with_dyna_as_the_primary_source(dyna_result):
+    """mcad 없이도 IR 은 선다 — primary_source='dyna'·missing.mcad_absent=true 다(plan §2.2·§0.9 P2-13)."""
+    ir = build([dyna_result])
+    assert ir["primary_source"] == "dyna"
+    assert ir["missing"]["mcad_absent"] is True
+    assert [s["kind"] for s in ir["sources"]] == ["dyna_result"] or "mcad" not in \
+        {s["kind"] for s in ir["sources"]}
+
+    with pytest.raises(AppError) as empty:
+        build([])
+    assert empty.value.code == "E100" and empty.value.http_status == 409
 
 
 def test_unknown_and_duplicated_source_kinds_are_rejected(mcad_result):
@@ -713,8 +749,14 @@ def test_freeze_snapshot_reports_degraded_sources(risk_store, mcad_result, dyna_
     result = ib.freeze_snapshot(risk_store, project_id=PROJECT, owner_sub=OWNER, label="DV1",
                                 adapter_results=[degraded, dyna_result], captured_at=1756600000)
     assert result["degraded"] == ["mcp_degraded", "no_secid", "no_world_transform"]
-    row = risk_store.query_one("SELECT degraded FROM rr_snapshots WHERE id = ?", (result["snapshot_id"],))
-    assert row["degraded"] == "mcp_degraded,no_secid,no_world_transform"
+    row = risk_store.query_one(
+        "SELECT degraded, degraded_json, app_versions_json, primary_source FROM rr_snapshots WHERE id = ?",
+        (result["snapshot_id"],))
+    # degraded 는 배열의 첫 값만 담는 호환 컬럼이고 배열은 degraded_json 이다(plan §2.2).
+    assert row["degraded"] == "mcp_degraded"
+    assert json.loads(row["degraded_json"]) == ["mcp_degraded", "no_secid", "no_world_transform"]
+    # 소스 앱 버전은 kind 별로 열에 남는다(ir_hash 입력이 아니다, §2.2·§0.9 P1-21).
+    assert set(json.loads(row["app_versions_json"])) == {"mcad", "dyna"}
 
 
 def test_record_calls_and_load_calls_round_trip(risk_store):

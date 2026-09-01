@@ -1,0 +1,10 @@
+{
+ "id": "INC-2026-001",
+ "project_id": "P1",
+ "ckeys": ["ck:aaaaaaaaaaaa"],
+ "mechanism": "thermal",
+ "outcome": "confirmed",
+ "occurred_at": 9500000,
+ "severity_observed": "중대",
+ "note": "필드에서 같은 계면이 실제로 터졌다 — 3항(project·part·mechanism) 전부 일치"
+}

@@ -12,7 +12,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from jsonschema import Draft7Validator
 
 from app import render
-from app.common import canonical_json, new_uuid, now_epoch, parse_ref
+from app.common import canonical_json, now_epoch, parse_ref
 from app.errors import AppError
 from app.taxonomy import load_taxonomy
 
@@ -118,6 +118,8 @@ FEATURE_SNAPSHOT_PER_REF = 12
 FEATURE_SNAPSHOT_PER_FINDING = 40
 
 # §4.3.3 precedent — cites 원천 속성명 → feature_vector 차원 이름.
+# 표에 없는 이름이라도 코퍼스가 그 이름의 경계를 알고 있으면 그대로 대조한다(아래 pass-through) —
+# 예측 도구(predict_sed 등)가 내는 값은 IR 형상 속성이 아니라서 이 표에 미리 적을 수 없기 때문이다(§7.6).
 _FEATURE_OF_ATTR: dict[str, str] = {
     "min_gap": "min_gap",
     "penetration_depth": "max_pen_depth",
@@ -675,8 +677,9 @@ def precedent_from_snapshot(feature_snapshot: dict, ctx: SpecContext) -> tuple[s
     compared = False
     for attrs in feature_snapshot.values():
         for attr, value in attrs.items():
-            feature = _FEATURE_OF_ATTR.get(attr)
-            if feature is None or feature not in per_feature:
+            # 표에 없으면 attr 이름 그대로 코퍼스에 있는지 본다 — 예측 도구 결과의 자리다(§7.6).
+            feature = _FEATURE_OF_ATTR.get(attr, attr)
+            if feature not in per_feature:
                 continue
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 continue
@@ -870,7 +873,8 @@ def _normalize_finding(finding: dict, path: str, ctx: SpecContext, *, is_gain: b
         warnings.append(f"{path}: sim-detectable 인데 tool 이 없어 unknown 으로 보정했다.")
         detectability["level"] = "unknown"
     finding["detectability"] = detectability
-    finding["status"] = "open"
+    # 저장 시 status 는 open 이 정본이다 — 단 하나, 패널에서 기각된 원자는 그 사실을 보존한다(plan §4.7.1).
+    finding["status"] = "rejected_in_panel" if str(finding.get("status") or "").strip() == "rejected_in_panel" else "open"
 
     # 4·5. subject 해석과 subject_key.
     subject = resolve_subject(finding.get("subject") or {}, ctx)
@@ -1288,7 +1292,9 @@ def prior_evidence(store, target_key: str, *, user_memo: str | None = None,
     """
     from app import brief as brief_module  # noqa: PLC0415 — 순환 import 회피(brief 는 narrative 를 쓴다).
 
-    built = brief_module.build_brief(store, target_key, seats=seats, panel_id=panel_id, exclude=tuple(exclude))
+    # 조립 경로는 strict_lint 다 — 판단어가 섞인 브리프를 엔진에 보내느니 E500 으로 멈춘다(plan §5.6.2).
+    built = brief_module.build_brief(store, target_key, seats=seats, panel_id=panel_id,
+                                     exclude=tuple(exclude), strict_lint=True)
     items = [item for item, key in zip(built["evidence"], built["keys"]) if key != "E0c"]
     if user_memo and not any(str(i.get("source")) == "user_memo" for i in items):
         items.append({"source": "user_memo", "tool": "note", "args": target_key,
@@ -1401,6 +1407,25 @@ def _atom_seat_index(atoms: Sequence[Mapping[str, Any]]) -> tuple[dict[str, list
         for key in atom.get("contested_by") or ():
             contested.setdefault(str(key), []).append(uid)
     return raised, contested
+
+
+# 원자 본문에서 저장형 인젝션을 찾는 자리(plan §3.4.1). 적중이면 그 finding 은 회수 후보에서 빠지고(recall_eligible=0)
+# 원문은 rr_curation_queue(kind='suspect_text') 로 간다 — 사람이 승인하면 되돌아온다.
+SUSPECT_FIELDS: tuple[str, ...] = ("claim", "warrant", "statement", "title", "mechanism_free",
+                                  "trigger_condition", "contest_note")
+
+
+def suspect_hit(atom: Mapping[str, Any]) -> dict | None:
+    """원자 본문 필드 중 인젝션 어휘에 걸린 첫 자리의 큐 payload(없으면 None)."""
+    for name in SUSPECT_FIELDS:
+        value = atom.get(name)
+        if not isinstance(value, str) or not value:
+            continue
+        lexicon_id = render.injection_hit(value)
+        if lexicon_id is not None:
+            return {"sha1": render.source_sha1(value), "raw": value, "lexicon_id": lexicon_id,
+                    "lexicon_version": render.INJECTION_VERSION, "field": name}
+    return None
 
 
 def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec: Mapping[str, Any] | None = None,
@@ -1545,13 +1570,14 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
         for atom in atoms:
             uid = str(atom.get("claim_uid") or "")
             raised = [str(k) for k in (atom.get("raised_by") or ())]
+            suspect = suspect_hit(atom)
             store.execute(
                 "INSERT INTO rr_findings(finding_id, claim_uid, target_key, panel_id, opinion_id, project_id,"
                 " snapshot_id, diff_id, owner_sub, visibility, direction, domain, mechanism, mechanism_detail,"
                 " mechanism_free, change_kind, subject_key, ckeys_json, trigger_condition, severity, sev3,"
                 " judgement, detectability, detect_tool, evidence_grade, precedent, dangling, cluster_key,"
-                " finding_json, status, taxonomy_version, rule_version, ir_version, diff_version,"
-                " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " finding_json, recall_eligible, status, taxonomy_version, rule_version, ir_version, diff_version,"
+                " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     uid, uid, target_key, panel_id,
                     next((opinion_of[k] for k in raised if k in opinion_of), None), project_id,
@@ -1564,7 +1590,8 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
                     atom.get("judgement"), (atom.get("detectability") or {}).get("level"),
                     (atom.get("detectability") or {}).get("tool"), atom.get("evidence_grade"),
                     atom.get("precedent"), 1 if atom.get("dangling") else 0, atom.get("cluster_key"),
-                    json.dumps(atom, ensure_ascii=False, sort_keys=True), "open",
+                    json.dumps(atom, ensure_ascii=False, sort_keys=True),
+                    0 if suspect is not None else 1, "open",
                     atom.get("taxonomy_version"), versions["rule_version"], versions["ir_version"],
                     versions["diff_version"], now, now,
                 ),
@@ -1579,6 +1606,23 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
                     (uid, str(cite.get("ref_type") or "unknown"), ref, str(cite.get("quote") or ""),
                      owner_sub, target_key, 0 if cite.get("ok") else 1),
                 )
+
+            if suspect is not None:
+                # 같은 sha1 이 이미 열려 있으면 다시 넣지 않는다(브리프 큐 적재와 같은 규칙).
+                opened = store.query_one(
+                    "SELECT id FROM rr_curation_queue WHERE kind = 'suspect_text' AND status = 'open'"
+                    " AND payload_json LIKE ?", (f'%"sha1":"{suspect["sha1"]}"%',))
+                if opened is None:
+                    from app.common import new_uuid  # noqa: PLC0415 — 이 자리에서만 쓴다.
+
+                    store.execute(
+                        "INSERT INTO rr_curation_queue(id, owner_sub, kind, payload_json, status, created_at)"
+                        " VALUES (?,?, 'suspect_text', ?, 'open', ?)",
+                        (new_uuid(), owner_sub,
+                         canonical_json({**suspect, "claim_uid": uid, "finding_id": uid,
+                                         "target_key": target_key, "panel_id": panel_id}),
+                         now),
+                    )
 
         # 성격 진술(§4.6 L2 panel 층). 같은 패널이 다시 제출되면 그 패널의 행만 갈아 끼운다.
         store.execute("DELETE FROM rr_character WHERE id LIKE ?", (f"{panel_id}#%",))

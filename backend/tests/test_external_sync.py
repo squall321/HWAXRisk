@@ -360,3 +360,52 @@ def test_adh_search_tools_send_the_documented_arguments():
         "agent_type": "risk-review-memory", "q": "DV2 요약", "mode": "hybrid",
         "required_tags": ["hwax:expert:mech-housing-structure"],
         "retrieval_config": {"top_k": 3}}
+
+
+# ---------------------------------------------------------------- 러너 재시도 틱·소유권(plan §5.5.3·§0.9 P3-14)
+def test_sync_loop_retries_a_due_channel_once_within_the_period(target_store, frozen_clock):
+    """다음 주기(60 s) 안에 만기 채널을 정확히 1회 재시도한다 — 만기 전에는 부르지 않는다."""
+    from app import config, runner
+
+    queue_sync_ops(target_store, TARGET, "ra", [{"op": "create_object"}])
+    note_sync_failure(target_store, TARGET, "ra", "http_500")      # next_at = now + 15분
+    sent: list[tuple] = []
+
+    def send(store, target_key, channel, ops):
+        sent.append((target_key, channel, tuple(canonical(ops))))
+        return True
+
+    def canonical(ops):
+        return tuple(json.dumps(op, sort_keys=True) for op in ops)
+
+    risk_runner = runner.RiskRunner(target_store, config.settings, engine=None, external_sync_send=send)
+    assert risk_runner._external_sync_tick() == {"due": 0, "sent": 0, "failed": 0}
+    assert sent == []                                              # 아직 만기 전이다
+
+    entry = _sync_json(target_store)["ra"]
+    common.set_clock(lambda: entry["next_at"])                     # 만기 시각으로 시계를 옮긴다
+    out = risk_runner._external_sync_tick()
+    assert out == {"due": 1, "sent": 1, "failed": 0}
+    assert len(sent) == 1 and sent[0][0:2] == (TARGET, "ra")
+    # 성공하면 대기 op 가 비고 같은 주기에 두 번 보내지 않는다.
+    assert risk_runner._external_sync_tick() == {"due": 0, "sent": 0, "failed": 0}
+    assert len(sent) == 1
+    assert _sync_json(target_store)["ra"]["pending_ops"] == []
+    common.set_clock(lambda: NOW)
+
+
+def test_resync_route_rejects_a_non_owner(target_store, monkeypatch):
+    """재동기는 타깃 소유자만 — 다른 신원은 (E403, 403) 이다."""
+    from app import routes
+    from app.errors import AppError
+
+    monkeypatch.setattr(routes, "get_store", lambda: target_store)
+    ident = type("I", (), {"anonymous": False, "email": "other@example.com", "role": None,
+                           "to_dict": lambda self: {}})()
+    with pytest.raises(AppError) as exc:
+        routes.post_resync(TARGET, ident=ident)
+    assert (exc.value.code, exc.value.http_status) == ("E403", 403)
+
+    owner = type("I", (), {"anonymous": False, "email": OWNER, "role": None,
+                           "to_dict": lambda self: {}})()
+    assert set(routes.post_resync(TARGET, ident=owner)) == set(SYNC_CHANNELS)

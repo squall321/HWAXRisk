@@ -21,6 +21,9 @@ import { fmtCounts, fmtEpoch } from "../format";
 import { FACET_ORDER } from "../types";
 import type {
   AdapterEntry,
+  Requirement,
+  RequirementKind,
+  RequirementStatus,
   CharacterStatement,
   Gate,
   IfaceLedgerRow,
@@ -327,6 +330,159 @@ function DimForm({ projectId }: { projectId: string }) {
         dim 정의 추가
       </button>
     </form>
+  );
+}
+
+// 요구 탭(plan §2.8b·§8.2.4) — rr_requirements 표·등록·waive. 여유 계산은 SnapshotPage 의 sig:req.margin 이 보여준다.
+function RequirementsCard({ projectId, predecessorId }: { projectId: string; predecessorId?: string | null }) {
+  const rows = useAsync(() => riskApi.listRequirements(projectId), [projectId]);
+  const [kind, setKind] = useState<RequirementKind>("dim_limit");
+  const [name, setName] = useState("");
+  const [op, setOp] = useState("lte");
+  const [value, setValue] = useState("");
+  const [unit, setUnit] = useState("mm");
+  const [sourceRef, setSourceRef] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setBusy(true);
+    setError(null);
+    try {
+      let parsed: unknown = value.trim();
+      try {
+        parsed = JSON.parse(value);
+      } catch {
+        // 숫자·JSON 이 아니면 문자열 그대로 보낸다 — 어휘 검사는 서버가 한다.
+      }
+      await riskApi.upsertRequirements(projectId, [
+        {
+          kind,
+          name: name.trim(),
+          op: kind === "dim_limit" ? op : null,
+          value_json: parsed,
+          unit: kind === "dim_limit" ? unit.trim() || null : null,
+          source_ref: sourceRef.trim() || null,
+        },
+      ]);
+      setName("");
+      setValue("");
+      rows.reload();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function decide(id: string, status: RequirementStatus) {
+    setError(null);
+    try {
+      const reason = status === "waived" ? window.prompt("waive 사유(필수)") : null;
+      if (status === "waived" && !reason) return;   // 사유 없는 waive 는 서버가 422 다
+      await riskApi.decideRequirement(id, { status, waive_reason: reason });
+      rows.reload();
+    } catch (err) {
+      setError(err);
+    }
+  }
+
+  async function inherit() {
+    if (!predecessorId) return;
+    setError(null);
+    try {
+      await riskApi.inheritRequirements(projectId, predecessorId);
+      rows.reload();
+    } catch (err) {
+      setError(err);
+    }
+  }
+
+  const columns: Array<Column<Requirement>> = [
+    { key: "kind", header: "kind", cell: (r) => r.kind },
+    { key: "name", header: "name", cell: (r) => r.name },
+    { key: "op", header: "op", cell: (r) => r.op ?? "—" },
+    { key: "value", header: "value", cell: (r) => JSON.stringify(r.value_json ?? null) },
+    { key: "unit", header: "unit", cell: (r) => r.unit ?? "—" },
+    { key: "status", header: "status", cell: (r) => <StatusBadge value={r.status} /> },
+    { key: "waive_reason", header: "사유", cell: (r) => r.waive_reason ?? "—" },
+    {
+      key: "actions",
+      header: "결정",
+      cell: (r) => (
+        <span className="rr-row">
+          <button type="button" className="rr-btn rr-btn-quiet" onClick={() => decide(r.id, "confirmed")}>
+            확정
+          </button>
+          <button type="button" className="rr-btn rr-btn-quiet" onClick={() => decide(r.id, "waived")}>
+            waive
+          </button>
+        </span>
+      ),
+    },
+  ];
+
+  return (
+    <SectionCard
+      title="요구"
+      subtitle="요구는 스냅샷에 복사되지 않습니다 — 고쳐도 ir_hash 는 그대로이고 rr_state 만 다시 계산됩니다."
+    >
+      <ErrorBanner error={error ?? rows.error} />
+      {rows.loading ? <LoadingBlock /> : null}
+      <DataTable
+        columns={columns}
+        rows={rows.data?.requirements ?? []}
+        rowKey={(r) => r.id}
+        empty="등록된 요구가 없습니다 — 판정은 좌석 기준입니다(missing.req_absent)."
+      />
+      {predecessorId ? (
+        <button type="button" className="rr-btn rr-btn-quiet" onClick={inherit}>
+          계보 과제에서 요구 승계
+        </button>
+      ) : null}
+      <form className="rr-form" onSubmit={submit}>
+        <div className="rr-form-grid">
+          <label className="rr-field">
+            <span>kind</span>
+            <select className="rr-input" value={kind} onChange={(e) => setKind(e.target.value as RequirementKind)}>
+              <option value="dim_limit">dim_limit</option>
+              <option value="scenario">scenario</option>
+              <option value="standard">standard</option>
+            </select>
+          </label>
+          <label className="rr-field">
+            <span>name</span>
+            <input className="rr-input" value={name} onChange={(e) => setName(e.target.value)} />
+          </label>
+          <label className="rr-field">
+            <span>op</span>
+            <select className="rr-input" value={op} onChange={(e) => setOp(e.target.value)}
+                    disabled={kind !== "dim_limit"}>
+              <option value="lte">lte</option>
+              <option value="gte">gte</option>
+              <option value="between">between</option>
+            </select>
+          </label>
+          <label className="rr-field">
+            <span>value(JSON)</span>
+            <input className="rr-input" value={value} onChange={(e) => setValue(e.target.value)} />
+          </label>
+          <label className="rr-field">
+            <span>unit</span>
+            <input className="rr-input" value={unit} onChange={(e) => setUnit(e.target.value)}
+                   disabled={kind !== "dim_limit"} />
+          </label>
+          <label className="rr-field">
+            <span>source_ref</span>
+            <input className="rr-input" value={sourceRef} onChange={(e) => setSourceRef(e.target.value)} />
+          </label>
+        </div>
+        <button type="submit" className="rr-btn" disabled={busy || name.trim() === ""}>
+          요구 저장
+        </button>
+      </form>
+    </SectionCard>
   );
 }
 
@@ -753,6 +909,11 @@ export default function ProjectPage() {
           <SnapshotPage snapshotId={snapshotId} />
         </>
       ) : null}
+
+      <RequirementsCard
+        projectId={projectId}
+        predecessorId={(detail.data as ProjectDetail | null)?.project?.predecessor_project_id ?? null}
+      />
 
       <SectionCard title="dims 정의">
         <DimForm projectId={projectId} />

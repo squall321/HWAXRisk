@@ -447,26 +447,65 @@ def test_verdict_counts_only_open_and_verified(risk_store):
 
 @pytest.mark.parametrize("status,label_needed", [("verified", True), ("dismissed", True), ("mitigated", False)])
 def test_set_status_allowed_values(risk_store, clock, status, label_needed):
+    """사람 전이는 status 5열 + 로그 1행을 남긴다(plan §4.7.1·§0.9 P3-15)."""
     _target(risk_store)
     _reg_row(risk_store, "T1", "c1")
     out = registry.set_status(risk_store, "c1", status, owner_sub=OWNER, evidence_ref="[rpt:12]", note="확인",
                               actor="reviewer@example.com")
-    assert out == {"cluster_key": "c1", "status": status, "updated": 1, "label_needed": label_needed}
+    assert out["cluster_key"] == "c1" and out["status"] == status
+    assert (out["updated"], out["label_needed"]) == (1, label_needed)
+    assert out["status_source"] == "human" and out["decided_by"] == "reviewer@example.com"
+    assert out["decided_at"] == 1000 and out["status_log_seq"] == 1
     row = risk_store.query_one(
-        "SELECT status, verified_by_json, updated_at FROM rr_registry WHERE target_key = ? AND cluster_key = ?",
-        ("T1", "c1"))
+        "SELECT status, status_source, status_decided_by, status_decided_at, status_note, status_basis_json,"
+        " verified_by_json, updated_at FROM rr_registry WHERE target_key = ? AND cluster_key = ?", ("T1", "c1"))
     assert row["status"] == status and row["updated_at"] == 1000
+    assert row["status_source"] == "human" and row["status_decided_by"] == "reviewer@example.com"
+    assert row["status_decided_at"] == 1000
+    basis = json.loads(row["status_basis_json"])
+    assert basis["evidence_ref"] == "[rpt:12]" and "support_at_decision" in basis
     assert json.loads(row["verified_by_json"]) == [
         {"status": status, "by": "reviewer@example.com", "at": 1000, "evidence_ref": "[rpt:12]", "note": "확인"}
     ]
+    log = risk_store.query_one(
+        "SELECT seq, from_status, to_status, source, decided_by, applied FROM rr_registry_status_log"
+        " WHERE target_key = 'T1' AND cluster_key = 'c1'")
+    assert (log["seq"], log["from_status"], log["to_status"]) == (1, "open", status)
+    assert (log["source"], log["decided_by"], log["applied"]) == ("human", "reviewer@example.com", 1)
 
 
-@pytest.mark.parametrize("status", ["open", "superseded", "VERIFIED", "", "resolved"])
+def test_set_status_requires_a_basis(risk_store):
+    """verified·dismissed·open 은 evidence_ref 없이, mitigated 는 note 없이 422 다."""
+    _target(risk_store)
+    _reg_row(risk_store, "T1", "c1")
+    for status, code in (("verified", "evidence_ref_required"), ("dismissed", "evidence_ref_required"),
+                         ("open", "evidence_ref_required"), ("mitigated", "note_required")):
+        with pytest.raises(AppError) as exc:
+            registry.set_status(risk_store, "c1", status, owner_sub=OWNER)
+        assert (exc.value.code, exc.value.http_status) == (code, 422)
+    assert risk_store.query_one(
+        "SELECT status FROM rr_registry WHERE cluster_key = ?", ("c1",))["status"] == "open"
+    assert risk_store.query("SELECT id FROM rr_registry_status_log") == []
+
+
+def test_set_status_can_reopen_a_row_with_a_basis(risk_store, clock):
+    """open 되돌리기는 어휘 안이고 근거가 있으면 통과한다 — 로그 seq 는 계속 오른다."""
+    _target(risk_store)
+    _reg_row(risk_store, "T1", "c1")
+    registry.set_status(risk_store, "c1", "dismissed", owner_sub=OWNER, evidence_ref="[rpt:12]")
+    clock["t"] = 1100
+    out = registry.set_status(risk_store, "c1", "open", owner_sub=OWNER, evidence_ref="[rpt:13]")
+    assert out["status"] == "open" and out["status_log_seq"] == 2
+    assert risk_store.query_one(
+        "SELECT status, status_source FROM rr_registry WHERE cluster_key = 'c1'")["status"] == "open"
+
+
+@pytest.mark.parametrize("status", ["superseded", "VERIFIED", "", "resolved"])
 def test_set_status_rejects_vocabulary_outside(risk_store, status):
     _target(risk_store)
     _reg_row(risk_store, "T1", "c1")
     with pytest.raises(AppError) as exc:
-        registry.set_status(risk_store, "c1", status, owner_sub=OWNER)
+        registry.set_status(risk_store, "c1", status, owner_sub=OWNER, evidence_ref="[rpt:12]")
     assert exc.value.code == "E100" and exc.value.http_status == 422
     assert risk_store.query_one(
         "SELECT status FROM rr_registry WHERE cluster_key = ?", ("c1",))["status"] == "open"
@@ -476,10 +515,10 @@ def test_set_status_unknown_cluster_or_owner_is_404(risk_store):
     _target(risk_store)
     _reg_row(risk_store, "T1", "c1")
     with pytest.raises(AppError) as missing:
-        registry.set_status(risk_store, "nope", "verified", owner_sub=OWNER)
+        registry.set_status(risk_store, "nope", "verified", owner_sub=OWNER, evidence_ref="[rpt:12]")
     assert missing.value.code == "E404" and missing.value.http_status == 404
     with pytest.raises(AppError) as other:
-        registry.set_status(risk_store, "c1", "verified", owner_sub="someone@else.com")
+        registry.set_status(risk_store, "c1", "verified", owner_sub="someone@else.com", evidence_ref="[rpt:12]")
     assert other.value.code == "E404"
 
 
@@ -489,16 +528,20 @@ def test_set_status_target_key_narrows_and_log_appends(risk_store, clock):
     _target(risk_store, "T2")
     _reg_row(risk_store, "T1", "c1")
     _reg_row(risk_store, "T2", "c1")
-    assert registry.set_status(risk_store, "c1", "verified", owner_sub=OWNER, target_key="T1")["updated"] == 1
+    assert registry.set_status(risk_store, "c1", "verified", owner_sub=OWNER, target_key="T1",
+                               evidence_ref="[rpt:12]")["updated"] == 1
     assert risk_store.query_one(
         "SELECT status FROM rr_registry WHERE target_key = 'T2' AND cluster_key = 'c1'")["status"] == "open"
 
     clock["t"] = 1100
-    assert registry.set_status(risk_store, "c1", "mitigated", owner_sub=OWNER)["updated"] == 2
+    assert registry.set_status(risk_store, "c1", "mitigated", owner_sub=OWNER, note="치구로 대체")["updated"] == 2
     log = json.loads(risk_store.query_one(
         "SELECT verified_by_json FROM rr_registry WHERE target_key = 'T1' AND cluster_key = 'c1'")["verified_by_json"])
     assert [e["status"] for e in log] == ["verified", "mitigated"]
     assert [e["at"] for e in log] == [1000, 1100]
+    # 로그 seq 는 (target_key, cluster_key) 안에서 1부터 오른다.
+    assert [r["seq"] for r in risk_store.query(
+        "SELECT seq FROM rr_registry_status_log WHERE target_key = 'T1' AND cluster_key = 'c1' ORDER BY seq")] == [1, 2]
     # actor 를 안 주면 owner_sub 가 기록된다.
     assert log[1]["by"] == OWNER
 
@@ -806,3 +849,163 @@ def test_close_level_unknown_target_is_404(risk_store):
     with pytest.raises(AppError) as exc:
         registry.close_level(risk_store, "NOPE")
     assert exc.value.code == "E404" and exc.value.http_status == 404
+
+
+# ================================================================ 재제기 강도(escalated, plan §4.7.1 · §0.9 P3-16)
+def _dismissed_row(store, target_key: str, cluster_key: str, *, sev3: int, support: int, grade: str) -> None:
+    """사람이 dismissed 로 닫아 둔 행 — 그때의 기준선을 status_basis_json 에 남긴다."""
+    _target(store, target_key)
+    _reg_row(store, target_key, cluster_key)
+    store.execute(
+        "UPDATE rr_registry SET status = 'dismissed', status_source = 'human', status_decided_by = ?,"
+        " status_decided_at = 900, status_basis_json = ?, sev3 = ?, support = ?, evidence_grade = ?"
+        " WHERE target_key = ? AND cluster_key = ?",
+        (OWNER, json.dumps({"evidence_ref": "rpt:1", "finding_ids": [], "support_at_decision": support,
+                            "sev3_at_decision": sev3, "grade_at_decision": grade}),
+         sev3, support, grade, target_key, cluster_key))
+
+
+@pytest.mark.parametrize("new_sev3,expected", [(3, True), (1, False)])
+def test_a_stronger_reraise_flags_the_dismissed_row(risk_store, clock, new_sev3, expected):
+    """강도가 오른 재제기는 needs_review_json 을 남기고, 같은 강도면 남기지 않는다. status 는 불변이다."""
+    _dismissed_row(risk_store, "T_old", "ck:reraise00001", sev3=1, support=1, grade="경험칙")
+    row = {"target_key": "T_new", "cluster_key": "ck:reraise00001", "sev3": new_sev3, "support": 1,
+           "evidence_grade": "경험칙"}
+    flagged = registry._flag_escalations(risk_store, [row], "T_new", 1234)
+
+    saved = risk_store.query_one(
+        "SELECT status, status_source, needs_review_json FROM rr_registry"
+        " WHERE target_key = 'T_old' AND cluster_key = 'ck:reraise00001'")
+    assert (saved["status"], saved["status_source"]) == ("dismissed", "human")   # status 는 그대로다
+    if expected:
+        assert flagged == ["ck:reraise00001"]
+        note = json.loads(saved["needs_review_json"])
+        assert note["escalated"] is True and note["by_target"] == "T_new" and note["since"] == 1234
+        assert note["delta"]["sev3"] == new_sev3 - 1
+    else:
+        assert flagged == [] and saved["needs_review_json"] is None
+
+
+def test_human_reconfirmation_clears_the_escalation_flag(risk_store, clock):
+    """사람이 다시 확정하면 재검토 표기가 지워진다(set_status 가 needs_review_json 을 비운다)."""
+    _dismissed_row(risk_store, "T_old", "ck:reraise00002", sev3=1, support=1, grade="경험칙")
+    registry._flag_escalations(risk_store, [{"target_key": "T_new", "cluster_key": "ck:reraise00002",
+                                             "sev3": 3, "support": 2, "evidence_grade": "도구예측"}],
+                               "T_new", 1234)
+    assert risk_store.query_one(
+        "SELECT needs_review_json FROM rr_registry WHERE target_key = 'T_old'")["needs_review_json"]
+
+    registry.set_status(risk_store, "ck:reraise00002", "dismissed", owner_sub=OWNER, target_key="T_old",
+                        evidence_ref="rpt:2")
+    assert risk_store.query_one(
+        "SELECT needs_review_json FROM rr_registry WHERE target_key = 'T_old'")["needs_review_json"] is None
+
+
+# ================================================================ 조직 공개 토글(plan §5.1 원칙 9 · §0.9 P6-8)
+def test_visibility_toggle_is_owner_only_and_writes_stay_closed(risk_store, clock):
+    """org 로 열면 읽기가 열리고 쓰기는 그대로 소유자만이다(남의 신원은 404 가 아니라 403)."""
+    from app import routes
+
+    _target(risk_store)
+    _reg_row(risk_store, "T1", "c1")
+    other = "someone@else.com"
+
+    with pytest.raises(AppError) as stranger:
+        registry.set_visibility(risk_store, "c1", "org", owner_sub=other)
+    assert (stranger.value.code, stranger.value.http_status) == ("E403", 403)
+
+    out = registry.set_visibility(risk_store, "c1", "org", owner_sub=OWNER)
+    assert out["visibility"] == "org" and out["updated"] == 1
+    assert risk_store.query_one(
+        "SELECT visibility FROM rr_registry WHERE cluster_key = 'c1'")["visibility"] == "org"
+
+    # 공개는 읽기 경계다 — 남의 신원이 쓰려 하면 403 이고, 그 사실이 404 로 숨겨지지 않는다.
+    with pytest.raises(AppError) as write:
+        registry.set_status(risk_store, "c1", "verified", owner_sub=other, evidence_ref="rpt:1")
+    assert (write.value.code, write.value.http_status) == ("E403", 403)
+
+    with pytest.raises(AppError) as vocab:
+        registry.set_visibility(risk_store, "c1", "public", owner_sub=OWNER)
+    assert vocab.value.http_status == 422
+
+    # 라우트는 감사 1행을 남긴다.
+    ident = type("I", (), {"anonymous": False, "email": OWNER, "role": None,
+                           "to_dict": lambda self: {}})()
+    import app.routes as routes_module
+    original = routes_module.get_store
+    routes_module.get_store = lambda: risk_store
+    try:
+        routes.put_registry_visibility("c1", routes.RegistryVisibilityBody(visibility="private"), ident=ident)
+    finally:
+        routes_module.get_store = original
+    assert risk_store.query_one(
+        "SELECT COUNT(*) AS n FROM rr_audit WHERE action = 'registry.visibility'")["n"] == 1
+    assert risk_store.query_one(
+        "SELECT visibility FROM rr_registry WHERE cluster_key = 'c1'")["visibility"] == "private"
+
+
+# ================================================================ 키 별칭 재키(plan §4.3.2 · §0.9 P3-22)
+def test_cluster_alias_write_revoke_and_hop_limit(risk_store, clock):
+    """사람 확정 1행 → 병합이 대표 키로 접고, 철회하면 다시 갈린다. 6홉·순환은 409 다."""
+    _target(risk_store)
+    _reg_row(risk_store, "T1", "ck:a0000000001")
+    _reg_row(risk_store, "T1", "ck:b0000000002")
+
+    alias = registry.add_cluster_alias(risk_store, "ck:a0000000001", "ck:b0000000002", owner_sub=OWNER)
+    assert alias["new_cluster_key"] == "ck:b0000000002"
+    assert registry.resolve_cluster_key(risk_store, "ck:a0000000001") == "ck:b0000000002"
+
+    with pytest.raises(AppError) as again:
+        registry.add_cluster_alias(risk_store, "ck:a0000000001", "ck:b0000000002", owner_sub=OWNER)
+    assert again.value.http_status == 409
+
+    with pytest.raises(AppError) as cycle:
+        registry.add_cluster_alias(risk_store, "ck:b0000000002", "ck:a0000000001", owner_sub=OWNER)
+    assert (cycle.value.code, cycle.value.http_status) == ("alias_chain_too_long", 409)
+
+    revoked = registry.revoke_cluster_alias(risk_store, "ck:a0000000001", owner_sub=OWNER)
+    assert revoked["revoked"] is True
+    # 철회는 행 삭제가 아니라 표기다 — 행은 남고 해석만 끊긴다.
+    assert risk_store.query_one(
+        "SELECT revoked_at FROM rr_cluster_alias WHERE old_cluster_key = 'ck:a0000000001'")["revoked_at"]
+    assert registry.resolve_cluster_key(risk_store, "ck:a0000000001") == "ck:a0000000001"
+
+
+def test_cluster_alias_chain_stops_at_five_hops(risk_store, clock):
+    """체인은 5홉까지다 — 6홉째 별칭은 409 이고 행이 생기지 않는다."""
+    keys = [f"ck:hop{i:09d}" for i in range(7)]
+    # 끝에서부터 이어 붙인다(새 별칭은 자기 뒤 체인 길이를 본다).
+    made = 0
+    for old, new in reversed(list(zip(keys, keys[1:]))):
+        try:
+            registry.add_cluster_alias(risk_store, old, new, owner_sub=OWNER, reason="taxonomy_major")
+        except AppError as exc:
+            assert (exc.code, exc.http_status) == ("alias_chain_too_long", 409)
+            break
+        made += 1
+    else:
+        raise AssertionError("6홉째에서 막혔어야 한다")
+    assert made == registry.ALIAS_MAX_HOPS
+    assert risk_store.query_one("SELECT COUNT(*) AS n FROM rr_cluster_alias")["n"] == registry.ALIAS_MAX_HOPS
+
+
+def test_merge_folds_findings_through_a_human_alias(risk_store, clock):
+    """finding 행의 cluster_key 는 불변이고 병합만 대표 키로 접힌다(별칭 해석)."""
+    _target(risk_store)
+    _finding(risk_store, "T1", "F1", "ck:x0000000001", panel_id="P1")
+    _finding(risk_store, "T1", "F2", "ck:y0000000002", panel_id="P2")
+    before = registry.merge(risk_store, "T1", owner_sub=OWNER)
+    assert before["clusters"] == 2
+
+    registry.add_cluster_alias(risk_store, "ck:x0000000001", "ck:y0000000002", owner_sub=OWNER)
+    after = registry.merge(risk_store, "T1", owner_sub=OWNER)
+    assert after["clusters"] == 1
+    row = risk_store.query_one(
+        "SELECT support FROM rr_registry WHERE cluster_key = 'ck:y0000000002' AND target_key = 'T1'")
+    assert row["support"] == 2                       # support 는 합이 아니라 distinct 패널 수다
+    assert {r["cluster_key"] for r in risk_store.query(
+        "SELECT cluster_key FROM rr_findings WHERE target_key = 'T1'")} == {
+        "ck:x0000000001", "ck:y0000000002"}          # finding 행의 키는 바이트 불변이다
+
+    registry.revoke_cluster_alias(risk_store, "ck:x0000000001", owner_sub=OWNER)
+    assert registry.merge(risk_store, "T1", owner_sub=OWNER)["clusters"] == 2

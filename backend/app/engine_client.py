@@ -214,7 +214,7 @@ class PortalPanelEngine:
 
     # -- 1단계 model 스냅샷 ----------------------------------------------------
     def health(self) -> dict:
-        """agent-server `GET /health` — runner._engine_health 가 D6 model_json 을 채운다. 불통이면 예외."""
+        """agent-server `GET /health` — runner.snapshot_model 이 D6 model_json 을 채운다. 불통이면 예외."""
         base = str(getattr(self.settings, "agent_url", "") or DEFAULT_AGENT_URL).rstrip("/")
         with self._client(HEALTH_TIMEOUT_S) as client:
             r = client.get(base + "/health")
@@ -234,6 +234,10 @@ class PortalPanelEngine:
             "provider": info.get("provider") or "vllm",
             "endpoint_host": endpoint_host,
             "engine_rev": info.get("engine_rev") or info.get("version"),
+            # 좌석 계약(chair) 상수의 해시·샘플링 설정은 엔진만 안다 — 실어 보내면 그대로 옮긴다(§6.7.2 1단계).
+            "chair_rev": info.get("chair_rev"),
+            "sampling": info.get("sampling"),
+            "vllm": vllm,
         }
 
     # -- 6·7단계 엔진 호출·SSE 캡처 ---------------------------------------------

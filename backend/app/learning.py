@@ -1019,3 +1019,55 @@ def active_pattern_rules(store: RiskStore) -> list[dict]:
     return [dict(r) for r in store.query(
         "SELECT id, pattern_id, rule_version, severity, condition_json, why_it_matters, fix_hint, backtest_json "
         "FROM rr_rules WHERE source = 'pattern' AND status = 'active' ORDER BY id", ())]
+
+
+# ---------------------------------------------------------------- 택소노미 재매핑(plan §7.7·§4.3.2 — 스크립트가 부르는 정본)
+REMAP_DECIDED_BY = "code:taxonomy_remap"
+
+
+def plan_remap(store: RiskStore, *, mechanism: str, from_detail: str, to_detail: str) -> list[dict]:
+    """옮길 finding 과 그 새 cluster_key 목록(쓰지 않는다). 저장된 cluster_key 는 바이트 불변이다."""
+    from app import narrative  # noqa: PLC0415 — narrative 는 learning 을 import 하지 않는다.
+
+    rows = store.query(
+        "SELECT finding_id, cluster_key, mechanism, mechanism_detail, change_kind, subject_key, owner_sub"
+        " FROM rr_findings WHERE mechanism = ? AND mechanism_detail = ? ORDER BY finding_id",
+        (mechanism, from_detail))
+    out: list[dict] = []
+    for row in rows:
+        new_key = narrative.cluster_key_of(_s(row["mechanism"]), to_detail,
+                                           _s(row["subject_key"]), _s(row["change_kind"]))
+        if new_key == _s(row["cluster_key"]):
+            continue
+        out.append({"finding_id": _s(row["finding_id"]), "old_cluster_key": _s(row["cluster_key"]),
+                    "new_cluster_key": new_key, "owner_sub": _s(row["owner_sub"]),
+                    "from_detail": from_detail, "to_detail": to_detail})
+    return out
+
+
+def apply_remap(store: RiskStore, rows: Sequence[Mapping[str, Any]], *,
+                owner_sub: str | None = None) -> dict:
+    """별칭 행만 더한다 — rr_findings.cluster_key 는 건드리지 않는다(인용은 별칭 해석으로 이어진다).
+
+    멱등이다 — 이미 이어진 쌍은 건너뛰므로 2회 실행에 새 행이 0 이다.
+    """
+    written = 0
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        pair = (row["old_cluster_key"], row["new_cluster_key"])
+        if pair in seen:
+            continue
+        seen.add(pair)
+        if resolve_cluster_key(store, row["old_cluster_key"]) == row["new_cluster_key"]:
+            continue
+        try:
+            registry.add_cluster_alias(store, row["old_cluster_key"], row["new_cluster_key"],
+                                       owner_sub=owner_sub or row["owner_sub"], reason="taxonomy_major",
+                                       evidence={"from_detail": row["from_detail"],
+                                                 "to_detail": row["to_detail"], "by": REMAP_DECIDED_BY})
+        except AppError:
+            continue                      # 이미 있는 별칭·홉 초과는 건너뛴다(멱등)
+        written += 1
+    mined = mine_patterns(store, owner_sub=owner_sub) or {}
+    return {"aliases_written": written,
+            "patterns_touched": len(mined.get("created") or ()) + len(mined.get("updated") or ())}

@@ -12,6 +12,9 @@ import type {
   DiffSummary,
   DimDef,
   DimDefCreate,
+  Requirement,
+  RequirementCreate,
+  RequirementList,
   Health,
   IfaceLedgerRow,
   ImportResult,
@@ -240,6 +243,18 @@ export const riskApi = {
     request<SourceCreated>(`projects/${encodeURIComponent(id)}/sources`, { method: "POST", body, ...o }),
   createSnapshot: (id: string, body: SnapshotCreate, o?: Opt) =>
     request<SnapshotAccepted>(`projects/${encodeURIComponent(id)}/snapshots`, { method: "POST", body, ...o }),
+  listRequirements: (id: string, o?: Opt) =>
+    request<RequirementList>(`projects/${encodeURIComponent(id)}/requirements`, o),
+  upsertRequirements: (id: string, body: RequirementCreate[], o?: Opt) =>
+    request<RequirementList>(`projects/${encodeURIComponent(id)}/requirements`, { method: "POST", body, ...o }),
+  decideRequirement: (rid: string, body: { status: string; waive_reason?: string | null }, o?: Opt) =>
+    request<Requirement>(`requirements/${encodeURIComponent(rid)}`, { method: "PUT", body, ...o }),
+  inheritRequirements: (id: string, fromProjectId: string, o?: Opt) =>
+    request<RequirementList>(`projects/${encodeURIComponent(id)}/requirements/inherit`, {
+      method: "POST",
+      body: { from_project_id: fromProjectId },
+      ...o,
+    }),
   createDim: (id: string, body: DimDefCreate, o?: Opt) =>
     request<DimDef>(`projects/${encodeURIComponent(id)}/dims`, { method: "POST", body, ...o }),
   putIfaceLedger: (id: string, rows: IfaceLedgerRow[], o?: Opt) =>

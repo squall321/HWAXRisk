@@ -841,10 +841,14 @@ def build_ir(
         for key, value in (result.get("missing") or {}).items():
             missing_declared[str(key)] = bool(value)
 
-    if not any(s["kind"] == "mcad" for s in sources):
-        raise AppError("E100", "mcad 소스가 없는 스냅샷은 만들지 않습니다(plan §2.11.3 1단계).", http_status=409)
+    if not sources:
+        raise AppError("E100", "소스가 하나도 없는 스냅샷은 만들지 않습니다(plan §2.11.3 1단계).", http_status=409)
     sources.sort(key=lambda s: SOURCE_KINDS.index(s["kind"]))
-    project_name = ((next(s for s in sources if s["kind"] == "mcad").get("ref") or {}).get("project_name")) or None
+    mcad_source = next((s for s in sources if s["kind"] == "mcad"), None)
+    # mcad 없이도 스냅샷은 선다 — 그때 정본 소스는 dyna 이고 형상층 게이트는 pass=null 이다(plan §2.2·§3.2.2).
+    primary_source = "mcad" if mcad_source is not None else (
+        "dyna" if any(s["kind"] in ("dyna", "dyna_result") for s in sources) else "ecad")
+    project_name = ((mcad_source or {}).get("ref") or {}).get("project_name") or None
 
     # --- 노드 정규화(nid·name_norm·name_norm_canon·geom_fp·asm_key)
     nodes: list[dict] = []
@@ -1108,6 +1112,8 @@ def build_ir(
         "captured_at": captured,
         "derived_from": derived_from,
         "partial": partial,
+        # 정본 소스 — mcad 가 없으면 dyna 다. ir_hash 입력이 아니라 조회·화면·게이트 분기 키다(§2.2).
+        "primary_source": primary_source,
         "sources": sources,
         "units": {"length": "mm", "area": "mm2", "volume": "mm3", "stress": "MPa", "accel": "G", "density": "as_in_file"},
         "nodes": sorted(nodes, key=lambda n: n["nid"]),
@@ -1197,7 +1203,7 @@ def _upsert_part_keys(store, ir: Mapping[str, Any]) -> None:
         )
 
 
-def record_calls(store, snapshot_id: str, owner_sub: str, calls: Sequence[Mapping[str, Any]], *,
+def record_calls(store, snapshot_id: str | None, owner_sub: str, calls: Sequence[Mapping[str, Any]], *,
                  start_seq: int | None = None, job_id: str | None = None) -> list[str]:
     """소스 호출 원문을 rr_snapshot_calls 에 gzip 으로 남긴다(plan §2.11.4). call_id 목록을 순서대로 돌려준다.
 
@@ -1207,7 +1213,11 @@ def record_calls(store, snapshot_id: str, owner_sub: str, calls: Sequence[Mappin
     """
     job = job_id or snapshot_id
     if start_seq is None:
-        row = store.query_one("SELECT MAX(seq) AS m FROM rr_snapshot_calls WHERE snapshot_id = ?", (snapshot_id,))
+        if snapshot_id is None:
+            row = store.query_one("SELECT MAX(seq) AS m FROM rr_snapshot_calls WHERE job_id = ?", (job,))
+        else:
+            row = store.query_one(
+                "SELECT MAX(seq) AS m FROM rr_snapshot_calls WHERE snapshot_id = ?", (snapshot_id,))
         start_seq = int(row["m"] or 0) + 1 if row else 1
     call_ids: list[str] = []
     rows = []
@@ -1222,10 +1232,14 @@ def record_calls(store, snapshot_id: str, owner_sub: str, calls: Sequence[Mappin
             data = text.encode("utf-8")
             blob, sha, size = gzip.compress(data), sha256_hex(data), len(data)
         args_json = canonical_json(call.get("args") or {})
+        contract_ok = call.get("contract_ok")
         rows.append((
             call_id, job, snapshot_id, owner_sub, seq, str(call.get("source_kind") or "mcad"), call.get("app_key"),
             str(call.get("channel") or "mcp"), str(call.get("tool") or ""), args_json, sha256_hex(args_json),
             1 if call.get("ok", True) else 0, call.get("http_status"), sha, blob, size,
+            None if contract_ok is None else (1 if contract_ok else 0),
+            canonical_json(list(call.get("contract_missing") or ())) if call.get("contract_missing") else None,
+            call.get("reused_from_call_id"),
             int(call.get("started_at") or now_epoch()), call.get("duration_ms"), call.get("error"),
         ))
         call_ids.append(call_id)
@@ -1233,7 +1247,8 @@ def record_calls(store, snapshot_id: str, owner_sub: str, calls: Sequence[Mappin
         store.executemany(
             "INSERT OR REPLACE INTO rr_snapshot_calls (call_id, job_id, snapshot_id, owner_sub, seq, source_kind,"
             " app_key, channel, tool, args_json, args_hash, ok, http_status, response_sha256, response_gz,"
-            " response_bytes, started_at, duration_ms, error) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " response_bytes, contract_ok, contract_missing_json, reused_from_call_id, started_at,"
+            " duration_ms, error) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             rows,
         )
     return call_ids
@@ -1286,6 +1301,7 @@ def freeze_snapshot(
     captured_at: int | None = None,
     project_codes: Sequence[str] = (),
     with_state: bool = True,
+    job_id: str | None = None,
     **build_kwargs: Any,
 ) -> dict:
     """IR 을 조립해 동결한다(plan §2.11.3 8~9단계).
@@ -1342,7 +1358,7 @@ def freeze_snapshot(
 
         snapshot_id = existing["id"]
         if calls:
-            record_calls(store, snapshot_id, owner_sub, calls)
+            record_calls(store, snapshot_id, owner_sub, calls, job_id=job_id)
         frozen = load_ir(store, snapshot_id)
         return {
             "snapshot_id": snapshot_id, "ir_hash": ir["ir_hash"], "reused": True,
@@ -1367,8 +1383,9 @@ def freeze_snapshot(
     with store.tx():
         store.execute(
             "INSERT INTO rr_snapshots (id, project_id, owner_sub, ir_version, ir_hash, ir_json, source_ids_json,"
-            " kinds_json, node_count, edge_count, missing_json, warnings_n, degraded, adapter_versions_json, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " kinds_json, node_count, edge_count, missing_json, warnings_n, degraded, degraded_json,"
+            " app_versions_json, primary_source, adapter_versions_json, created_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 snapshot_id, project_id, owner_sub, ir["ir_version"], ir["ir_hash"], canonical_json(ir),
                 canonical_json([
@@ -1378,7 +1395,12 @@ def freeze_snapshot(
                 ]),
                 canonical_json([s["kind"] for s in ir["sources"]]),
                 len(ir["nodes"]), len(ir["edges"]), canonical_json(ir["missing"]), len(ir["warnings"]),
-                ",".join(degraded) or None, canonical_json(ir["versions"]["adapter_versions"]), ir["captured_at"],
+                # degraded 는 호환 컬럼(첫 값)이고 배열은 degraded_json 이다(§2.2).
+                (degraded[0] if degraded else None), canonical_json(list(degraded)),
+                # 소스 앱 버전은 ir_hash 입력이 아니라 열로만 남는다 — pair 의 app_version_parity 가 본다.
+                canonical_json({s["kind"]: (s.get("app_version") or {}) for s in ir["sources"]}),
+                ir.get("primary_source"),
+                canonical_json(ir["versions"]["adapter_versions"]), ir["captured_at"],
             ),
         )
         store.executemany(
@@ -1410,7 +1432,7 @@ def freeze_snapshot(
             ],
         )
         if calls:
-            record_calls(store, snapshot_id, owner_sub, calls, start_seq=1)
+            record_calls(store, snapshot_id, owner_sub, calls, start_seq=1, job_id=job_id)
         _upsert_part_keys(store, ir)
         if state is not None:
             from app import state as state_module  # noqa: PLC0415

@@ -539,3 +539,165 @@ def test_precedents_missing_diff_raises_e404(risk_store):
     with pytest.raises(AppError) as exc:
         brief.precedents(risk_store, "nope")
     assert exc.value.code == "E404"
+
+
+def test_lint_items_uses_the_render_linter_and_strict_mode_raises(risk_store):
+    """린터 이름이 어긋나면 브리프가 검사되지 않고 조용히 통과한다 — 그 자리를 잠근다(plan §0.9 P5-8)."""
+    from app import render
+
+    assert brief.lint_items.__module__ == "app.brief"
+    planted = [{"key": "E5", "source": "rr_registry.prior", "tool": "prior", "args": "t",
+                "result": "[검증 대상] 이 계면은 치명적 위험이며 반드시 개선해야 한다"}]
+    lint = brief.lint_items(planted)
+    assert lint["ok"] is False and lint["reason"] is None
+    assert {v["token"] for v in lint["violations"]} >= {"위험", "개선"}
+    # 같은 줄을 render 린터에 직접 넣은 결과와 같은 판정이어야 한다(두 경로가 한 사전을 본다).
+    assert render.lint_text(planted[0]["result"])["ok"] is False
+
+    # 자산 원문(좌석 계약)은 인용이라 검사 대상이 아니다.
+    assert brief.lint_items([{"key": "E0c", "source": "seat_contract",
+                              "result": "리스크만 나열하지 말고 개선점도 같은 규격으로"}])["ok"] is True
+
+    target_key = seed_diff_target(risk_store)
+    clean = brief.build_brief(risk_store, target_key, strict_lint=True)
+    assert clean["meta"]["lint"]["ok"] is True
+
+
+def test_strict_lint_raises_when_an_item_carries_a_judgement_word(risk_store, monkeypatch):
+    """strict_lint 조립 경로는 판단어가 섞이면 E500 으로 멈춘다."""
+    target_key = seed_diff_target(risk_store)
+    original = brief._item_e9
+
+    def poisoned(*args, **kwargs):
+        item = original(*args, **kwargs)
+        item["result"] = "[경고] 이 계면은 위험하다"
+        return item
+
+    monkeypatch.setattr(brief, "_item_e9", poisoned)
+    with pytest.raises(AppError) as exc:
+        brief.build_brief(risk_store, target_key, strict_lint=True)
+    assert exc.value.code == "E500"
+
+
+# ---------------------------------------------------------------- 코퍼스 필터가 회수에 걸린다(plan §0.6·§0.9 P5-11)
+def test_corpus_excluded_project_drops_out_of_recall(risk_store):
+    """corpus_excluded=1 로 바꾸면 E5·E6 에서 그 과제가 빠지고 코퍼스 수도 준다."""
+    target_key = seed_diff_target(risk_store)
+    before = brief.build_brief(risk_store, target_key, owner_sub=OWNER)
+    before_e5 = next(i["result"] for i, k in zip(before["evidence"], before["keys"]) if k == "E5")
+    before_similar = brief.similar_projects(risk_store, "p_now", owner_sub=OWNER)
+    assert "p_prev" in {e["project_id"] for e in before_similar["merged"]}
+    assert "[선행 등록부 없음" not in before_e5
+
+    risk_store.execute(
+        "UPDATE rr_projects SET corpus_excluded = 1, excluded_reason = 'fixture' WHERE id = 'p_prev'")
+    after = brief.build_brief(risk_store, target_key, owner_sub=OWNER)
+    after_e5 = next(i["result"] for i, k in zip(after["evidence"], after["keys"]) if k == "E5")
+    after_e6 = next(i["result"] for i, k in zip(after["evidence"], after["keys"]) if k == "E6")
+    assert after_e5 != before_e5 and "[선행 등록부 없음" in after_e5
+    assert "n_projects=1" in after_e6                       # p_now 하나만 남는다
+    after_similar = brief.similar_projects(risk_store, "p_now", owner_sub=OWNER)
+    assert "p_prev" not in {e["project_id"] for e in after_similar["merged"]}
+
+
+# ---------------------------------------------------------------- E5 세 블록(plan §5.6.1·§0.9 P5-12)
+def _e5(built: dict) -> str:
+    return next(i["result"] for i, k in zip(built["evidence"], built["keys"]) if k == "E5")
+
+
+def test_e5_splits_living_and_rejected_precedents(risk_store):
+    """기각·반증 선례는 E5− 블록에만 실리고 E5+ 에는 0건이다."""
+    target_key = seed_diff_target(risk_store)
+    risk_store.execute(
+        "INSERT INTO rr_registry(target_key, cluster_key, owner_sub, visibility, merged_json, support,"
+        " contested, rejected, direction, mechanism, mechanism_detail, change_kind, subject_key, severity,"
+        " sev3, judgement, status, status_source, updated_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("diff:d0", "clu_rejected", OWNER, "org",
+         _j({"subject_names": ["HOUSING"], "claim": "기각된 주장",
+             "contest_notes": [{"finding_id": "F9", "by": ["adv"], "note": "재현되지 않았다"}]}),
+         0, 1, 2, "risk", "interface", "interference", "placement", SUBJECT, "중대", 2, "WARNING",
+         "rejected_in_panel", "code", 700))
+
+    body = _e5(brief.build_brief(risk_store, target_key, owner_sub=OWNER))
+    positive, negative = body.split("[E5− 기각·반증 선례]")
+    assert "[E5+ 살아 있는 선례]" in positive
+    assert "clu_rejected" not in positive                       # 기각은 살아 있는 선례가 아니다
+    assert "clu_rejected" in negative and "rejected 2" in negative
+    assert "[E10 필드·VOC·문헌 근거]" in negative
+    assert "[필드·문헌 근거 없음 — 제품 연결 미등록]" in negative
+
+
+def test_e5_missing_blocks_use_their_own_wording(risk_store):
+    """기각 선례가 0건이면 그 블록만 결측 문구다(빈 블록을 만들지 않는다)."""
+    target_key = seed_diff_target(risk_store)
+    body = _e5(brief.build_brief(risk_store, target_key, owner_sub=OWNER))
+    assert "[기각된 선례 없음 — 이 조합에서 기각 0건]" in body
+    assert "[선행 등록부 없음" not in body                       # 살아 있는 선례는 있다
+
+
+def test_recall_searches_always_exclude_three_status_tags():
+    """회수 검색은 기각·철회·대체 태그를 항상 뺀다(plan §5.6.3 상태 필터)."""
+    assert brief.RECALL_EXCLUDE_TAGS == ("status:dismissed", "status:rejected_in_panel", "status:superseded")
+
+
+# ---------------------------------------------------------------- 계면 별칭 회수(plan §5.9.4·§0.9 P5-5)
+def test_interface_alias_recovers_a_precedent_without_lineage(risk_store):
+    """계보가 없고 이름 규칙이 다른 과제라도 rr_iface_alias 가 이어 주면 E5 에 그 줄이 실린다."""
+    target_key = seed_diff_target(risk_store)
+    # 계보를 끊고(전작 링크 제거) 이전 과제 등록부의 subject_key 를 이름 기반 키로 바꾼다.
+    risk_store.execute("UPDATE rr_projects SET predecessor_project_id = NULL WHERE id = 'p_now'")
+    alias_key = "iface:housing|bracket"
+    risk_store.execute("UPDATE rr_registry SET subject_key = ? WHERE cluster_key = 'clu1'", (alias_key,))
+    assert "clu1" not in _e5(brief.build_brief(risk_store, target_key, owner_sub=OWNER))
+
+    canonical = SUBJECT.split(":", 1)[1] if SUBJECT.startswith("iface:") else SUBJECT
+    a, b = canonical.split("|")
+    risk_store.execute(
+        "INSERT INTO rr_iface_alias(alias_key, canonical_a, canonical_b, owner_sub, visibility,"
+        " aliases_json, source, score, status, created_at, updated_at)"
+        " VALUES (?,?,?,?, 'org', '[]', 'human', 1.0, 'active', 1, 1)",
+        (alias_key, a, b, OWNER))
+    body = _e5(brief.build_brief(risk_store, target_key, owner_sub=OWNER))
+    assert "clu1" in body and "subject·별칭" in body
+
+
+def test_alias_expand_is_bidirectional_and_ignores_revoked_rows(risk_store):
+    risk_store.execute(
+        "INSERT INTO rr_iface_alias(alias_key, canonical_a, canonical_b, owner_sub, visibility,"
+        " aliases_json, source, score, status, created_at, updated_at)"
+        " VALUES ('a|b', 'ck:1', 'ck:2', ?, 'org', '[]', 'human', 1.0, 'active', 1, 1)", (OWNER,))
+    risk_store.execute(
+        "INSERT INTO rr_iface_alias(alias_key, canonical_a, canonical_b, owner_sub, visibility,"
+        " aliases_json, source, score, status, created_at, updated_at)"
+        " VALUES ('x|y', 'ck:8', 'ck:9', ?, 'org', '[]', 'human', 1.0, 'revoked', 1, 1)", (OWNER,))
+    assert brief.alias_expand(risk_store, {"a|b"}) == {
+        "a|b": "subject", "ck:1|ck:2": "subject·별칭", "iface:ck:1|ck:2": "subject·별칭"}
+    assert brief.alias_expand(risk_store, {"ck:1|ck:2"}) == {"ck:1|ck:2": "subject", "a|b": "subject·별칭"}
+    assert brief.alias_expand(risk_store, {"x|y"}) == {"x|y": "subject"}
+
+
+def test_human_raised_precedent_is_marked_and_can_be_turned_off(risk_store, monkeypatch):
+    """사람 제기 선례는 접두로 드러나고 risk_prior_include_human=false 면 그 줄이 빠진다(plan §0.9 P5-10)."""
+    import dataclasses
+
+    from app import config
+
+    target_key = seed_diff_target(risk_store)
+    risk_store.execute(
+        "INSERT INTO rr_registry(target_key, cluster_key, owner_sub, visibility, merged_json, support,"
+        " contested, rejected, human_n, direction, mechanism, mechanism_detail, change_kind, subject_key,"
+        " severity, sev3, judgement, status, status_source, updated_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("diff:d0", "clu_human", OWNER, "org",
+         _j({"subject_names": ["HOUSING"], "claim": "사람이 제기한 주장", "human_refs": ["diff:d0#H1"]}),
+         0, 0, 0, 1, "risk", "interface", "interference", "placement", SUBJECT, "중대", 2, "WARNING",
+         "open", "code", 700))
+
+    body = _e5(brief.build_brief(risk_store, target_key, owner_sub=OWNER))
+    assert "[사람 제기·검증 대상] reg:diff:d0#clu_human" in body
+
+    monkeypatch.setattr(config, "settings",
+                        dataclasses.replace(config.settings, risk_prior_include_human=False))
+    without = _e5(brief.build_brief(risk_store, target_key, owner_sub=OWNER))
+    assert "clu_human" not in without and "clu1" in without

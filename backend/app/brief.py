@@ -7,7 +7,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
-from app import render, taxonomy
+from app import config, render, taxonomy
 from app.common import canonical_json, new_uuid, now_epoch, parse_ref
 from app.errors import AppError
 
@@ -19,10 +19,14 @@ ENGINE_BUDGET = 11000
 EVIDENCE_MAX_ITEMS = 12
 
 # 항목별 라인 상한. 합 10600 ≤ 11000 이라 드롭 0 이 산술로 보장된다(plan §5.6.1).
+# E5 는 세 블록(E5+ 700 · E5− 300 · E10 500)이라 1500 이고, 그 500 은 E1(−250)·E6(−150)·E9(−100)
+# 재배분으로 낸다 — 합 10600 은 그대로다(plan §5.6.1 '부정 선례').
 CAPS: dict[str, int] = {
-    "E0": 500, "E0c": 1000, "E1": 1900, "E2": 1100, "E3": 700, "E4": 600,
-    "E5": 1000, "E6": 800, "E7": 1400, "E8": 500, "E9": 700, "M": 400,
+    "E0": 500, "E0c": 1000, "E1": 1650, "E2": 1100, "E3": 700, "E4": 600,
+    "E5": 1500, "E6": 650, "E7": 1400, "E8": 500, "E9": 600, "M": 400,
 }
+# E5 안쪽 블록 상한(plan §5.6.1).
+E5_POSITIVE_CAP, E5_NEGATIVE_CAP, E5_FIELD_CAP = 700, 300, 500
 ITEM_ORDER: tuple[str, ...] = ("E0", "E0c", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9", "M")
 
 # E7 고정 슬롯(plan §5.6.3) — 좌석당 줄 220자, 좌석 합 1100자. 다른 항목이 비어도 늘리지 않는다.
@@ -52,7 +56,8 @@ _TRACKED_SCHEMES = ("reg", "narr", "rule", "c", "d")
 _REF_TOKEN = re.compile(r"\b(?:reg|narr|rule|c|d|sig|warn|gate|p|e|rpt|inc|card):[^\s\]|]+")
 
 # §7.3 교집합 가중.
-_PATH_WEIGHT = {"lineage": 3.0, "vector": 2.0, "text": 1.0, "subject": 2.0}
+# 별칭으로 이어진 subject 는 정확 매치보다 한 급 낮게 센다(연결이 사람 확정 별칭에 기댄다).
+_PATH_WEIGHT = {"lineage": 3.0, "vector": 2.0, "text": 1.0, "subject": 2.0, "subject·별칭": 1.5}
 # 벡터 경로가 열리는 최소 코퍼스(plan §7.3 2단계).
 VECTOR_MIN_CORPUS = 5
 
@@ -549,18 +554,54 @@ def _registry_line(row, path: str) -> str:
     )
 
 
+def _negative_line(row) -> str:
+    """E5− 한 줄 — 기각·반증 선례. 살아 있는 선례와 형식을 달리해 섞이지 않게 한다(plan §5.6.1)."""
+    merged = _j(row["merged_json"], {})
+    subject_names = merged.get("subject_names") or merged.get("subject_name") or row["subject_key"]
+    if isinstance(subject_names, list):
+        subject_names = "↔".join(str(x) for x in subject_names)
+    notes = merged.get("contest_notes") or []
+    excerpt = ""
+    if isinstance(notes, list) and notes:
+        excerpt = _s((notes[0] or {}).get("note") if isinstance(notes[0], dict) else notes[0])
+    source = _s(row["status_source"], "code") if "status_source" in row.keys() else "code"
+    return (
+        f"reg:{row['target_key']}#{row['cluster_key']} | "
+        f"{_s(row['mechanism'], '-')}.{_s(row['mechanism_detail'], '-')} | {_q(subject_names)} | "
+        f"status {_s(row['status'], '-')}({source}) | rejected {row['rejected'] or 0} · "
+        f"support {row['support'] or 0} | {_q(excerpt or '-', 'claim')}"
+    )
+
+
 _REGISTRY_COLS = (
-    "target_key, cluster_key, merged_json, support, contested, direction, mechanism, mechanism_detail, "
-    "change_kind, subject_key, severity, sev3, judgement, status, updated_at"
+    "target_key, cluster_key, merged_json, support, contested, rejected, human_n, direction, mechanism, "
+    "mechanism_detail, change_kind, subject_key, severity, sev3, judgement, status, status_source, "
+    "needs_review_json, updated_at"
 )
+# E5+ 는 살아 있는 선례, E5− 는 기각·반증 선례다. 한 줄도 두 블록에 겹쳐 실리지 않는다(plan §5.6.1).
+E5_POSITIVE_STATUSES = ("open", "verified")
+# 회수 검색에서 항상 빼는 상태 태그 3종(plan §5.6.3 '상태 필터') — 기각·철회·대체된 발언은 돌아오지 않는다.
+RECALL_EXCLUDE_TAGS: tuple[str, ...] = ("status:dismissed", "status:rejected_in_panel", "status:superseded")
+E5_NEGATIVE_STATUSES = ("rejected_in_panel", "dismissed")
 
 
-def _item_e5(store, ctx, similar: Mapping[str, Any], owner_sub: str | None) -> dict:
-    source = _SOURCES["E5"][0]
+def _corpus_ids(store) -> set[str]:
+    """회수가 보는 과제 집합 — §0.6 코퍼스 필터(registry.corpus_projects) 하나만 본다(plan §0.9 P5-11)."""
+    from app import registry  # noqa: PLC0415 — registry 는 brief 를 import 하지 않는다.
+
+    return registry.corpus_projects(store)
+
+
+def _e5_candidates(store, ctx, similar: Mapping[str, Any], owner_sub: str | None,
+                   statuses: Sequence[str]) -> list[tuple[str, Any]]:
+    """E5 후보 행 — 계보·유사 과제(경로 태그 포함)와 subject 정확 매치. 코퍼스 필터를 통과한 과제만 본다."""
     project_paths: dict[str, str] = {}
     for entry in similar.get("merged") or []:
         paths = entry.get("paths") or []
         project_paths[str(entry.get("project_id"))] = "|".join(str(p) for p in paths) or "벡터"
+    corpus = _corpus_ids(store)
+    project_paths = {pid: path for pid, path in project_paths.items() if pid in corpus}
+    marks_status = ",".join("?" for _ in statuses)
     rows: list[tuple[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     if project_paths:
@@ -568,9 +609,9 @@ def _item_e5(store, ctx, similar: Mapping[str, Any], owner_sub: str | None) -> d
         vis, vis_params = _visibility_clause(owner_sub, "r")
         found = store.query(
             f"SELECT {_REGISTRY_COLS} FROM rr_registry AS r "
-            f"WHERE r.status IN ('open','verified') AND r.target_key IN "
+            f"WHERE r.status IN ({marks_status}) AND r.target_key IN "
             f"(SELECT target_key FROM rr_targets WHERE project_id IN ({marks})){vis}",
-            [*project_paths.keys(), *vis_params],
+            [*statuses, *project_paths.keys(), *vis_params],
         )
         for row in found:
             key = (row["target_key"], row["cluster_key"])
@@ -583,8 +624,10 @@ def _item_e5(store, ctx, similar: Mapping[str, Any], owner_sub: str | None) -> d
         vis, vis_params = _visibility_clause(owner_sub, "r")
         found = store.query(
             f"SELECT {_REGISTRY_COLS} FROM rr_registry AS r "
-            f"WHERE r.subject_key = ? AND r.status IN ('open','verified'){vis}",
-            [hit["subject_key"], *vis_params],
+            f"WHERE r.subject_key = ? AND r.status IN ({marks_status})"
+            f" AND r.target_key IN (SELECT target_key FROM rr_targets WHERE project_id IN"
+            f" (SELECT id FROM rr_projects WHERE status = 'active' AND corpus_excluded = 0)){vis}",
+            [hit["subject_key"], *statuses, *vis_params],
         )
         for row in found:
             key = (row["target_key"], row["cluster_key"])
@@ -592,18 +635,74 @@ def _item_e5(store, ctx, similar: Mapping[str, Any], owner_sub: str | None) -> d
                 continue
             seen.add(key)
             rows.append((_s(hit.get("path"), "subject"), row))
+    if not getattr(config.settings, "risk_prior_include_human", True):
+        # 사람 제기 선례를 회수에서 뺀다(Settings risk_prior_include_human=false, plan §5.6.1).
+        rows = [(path, row) for path, row in rows if not _is_human_row(row)]
     rows.sort(key=lambda pr: (-(pr[1]["sev3"] or 0), -(pr[1]["support"] or 0),
                               -(pr[1]["updated_at"] or 0), _s(pr[1]["cluster_key"])))
-    lines = [_registry_line(row, path) for path, row in rows]
-    if not lines:
-        lines = ["[선행 등록부 없음 — 이 과제 계보·유사 과제 0건]"]
+    return rows
+
+
+def _is_human_row(row) -> bool:
+    """전문가 지지 없이 사람만 제기한 등록부 행(support=0·human_n≥1)."""
+    return int(row["human_n"] or 0) >= 1 and int(row["support"] or 0) == 0
+
+
+def _e5_prefix(row) -> str:
+    """E5+ 줄 접두 — 재검토(escalated)·사람 제기(origin='human')를 드러낸다(plan §5.6.1)."""
+    escalated = bool((_j(row["needs_review_json"], {}) or {}).get("escalated"))
+    human = _is_human_row(row)
+    if escalated and human:
+        return "[재검토·사람 제기] "
+    if escalated:
+        return "[재검토] "
+    if human:
+        return "[사람 제기·검증 대상] "
+    return ""
+
+
+def _item_e5(store, ctx, similar: Mapping[str, Any], owner_sub: str | None) -> dict:
+    """E5 세 블록 — E5+(살아 있는 선례) · E5−(기각·반증 선례) · E10(필드·문헌 근거)(plan §5.6.1).
+
+    기각 선례는 두 번째 블록에만 실린다 — 살아 있는 선례로 되돌아오지 않게 하고, 동시에 '과거에
+    기각됐다' 는 사실이 발화될 자리를 만든다.
+    """
+    source = _SOURCES["E5"][0]
+    positive = [_e5_prefix(row) + _registry_line(row, path)
+                for path, row in _e5_candidates(store, ctx, similar, owner_sub, E5_POSITIVE_STATUSES)]
+    negative = [_negative_line(row)
+                for _path, row in _e5_candidates(store, ctx, similar, owner_sub, E5_NEGATIVE_STATUSES)]
+    neg_max = int(getattr(config.settings, "risk_neg_precedent_lines", 6) or 6)
+
+    lines = ["[E5+ 살아 있는 선례]"]
+    lines += (clip_lines("\n".join(positive), E5_POSITIVE_CAP).split("\n") if positive
+              else ["[선행 등록부 없음 — 이 과제 계보·유사 과제 0건]"])
+    lines.append("[E5− 기각·반증 선례]")
+    lines += (clip_lines("\n".join(negative[:neg_max]), E5_NEGATIVE_CAP).split("\n") if negative
+              else ["[기각된 선례 없음 — 이 조합에서 기각 0건]"])
+    lines.append("[E10 필드·VOC·문헌 근거]")
+    lines += _field_evidence_lines(store, ctx)
     return {"key": "E5", "args": _s(ctx["target"]["target_key"]), "result": _body(source, lines)}
+
+
+def _field_evidence_lines(store, ctx) -> list[str]:
+    """E10 블록 — 제품 연결이 없으면 결측 문구 한 줄이다(실호출은 러너 몫이라 여기서 외부를 열지 않는다)."""
+    project_id = _s(ctx["target"]["project_id"])
+    row = store.query_one(
+        "SELECT product_code, product_refs_json, predecessor_product_code FROM rr_projects WHERE id = ?",
+        (project_id,)) if project_id else None
+    if row is None or not (_s(row["product_code"]) or _s(row["predecessor_product_code"])
+                           or _j(row["product_refs_json"], [])):
+        return ["[필드·문헌 근거 없음 — 제품 연결 미등록]"]
+    return ["[필드·문헌 근거 없음 — VOC 0건]"]
 
 
 # ---------------------------------------------------------------- E6 유사 과제 성격
 def _item_e6(store, similar: Mapping[str, Any], ctx) -> dict:
     source = _SOURCES["E6"][0]
-    project_ids = [str(e.get("project_id")) for e in (similar.get("merged") or [])]
+    corpus = _corpus_ids(store)
+    project_ids = [str(e.get("project_id")) for e in (similar.get("merged") or [])
+                   if str(e.get("project_id")) in corpus]
     lines: list[str] = []
     if project_ids:
         marks = ",".join("?" for _ in project_ids)
@@ -630,8 +729,7 @@ def _item_e6(store, similar: Mapping[str, Any], ctx) -> dict:
                 f"[{status}·경로 {paths}]"
             )
     if not lines:
-        corpus = store.query_one("SELECT COUNT(*) AS n FROM rr_projects")
-        lines = [f"[유사 과제 성격 진술 없음 — 코퍼스 n_projects={corpus['n'] if corpus else 0}]"]
+        lines = [f"[유사 과제 성격 진술 없음 — 코퍼스 n_projects={len(corpus)}]"]
     return {"key": "E6", "args": _s(ctx["target"]["target_key"]), "result": _body(source, lines)}
 
 
@@ -758,7 +856,8 @@ def _adh_seat_memory(adh, agent_key: str, ctx) -> str | None:
         summary = _s(ctx["state"]["summary_text"])[:200]
     code = _s(ctx["target"]["project_id"])
     reply = adh.agent_search("risk-review-memory", f"{code} {summary}", mode="hybrid",
-                             required_tags=[f"hwax:expert:{agent_key}"], top_k=3)
+                             required_tags=[f"hwax:expert:{agent_key}"], top_k=3,
+                             exclude_tags=list(RECALL_EXCLUDE_TAGS))
     if not reply.get("ok"):
         return None
     hits = reply.get("result") or []
@@ -886,22 +985,27 @@ def collect_refs(items: Sequence[Mapping[str, Any]]) -> list[str]:
 
 
 _QUOTE_PREFIX = ("reg:", "narr:", "rule:", "warn:")
+# 자산 원문을 그대로 싣는 항목 — 좌석 계약은 사람이 쓴 계약문이라 인용이지 코드 산문이 아니다(plan §3.4.3).
+_QUOTED_SOURCES = ("seat_contract",)
 
 
 def lint_items(items: Sequence[Mapping[str, Any]]) -> dict:
     """코드가 쓴 문장에만 판단어 린터를 돌린다(원문 인용 줄은 제외, plan §5.6.2 린터 적용 범위).
 
-    render.lint_judgement 가 아직 없는 단계에서는 ok=None·reason='render_unavailable' 로 표기만 한다.
+    린터 정본은 `render.lint_text` 다 — 이름이 어긋나면 어떤 브리프도 검사되지 않고 조용히 통과하므로
+    아래 테스트(test_brief.py)가 그 자리를 잠근다. render 를 못 읽는 경우에만 ok=None 이다.
     """
     try:
         from app import render  # type: ignore
     except ImportError:
         return {"ok": None, "reason": "render_unavailable", "violations": []}
-    lint = getattr(render, "lint_judgement", None)
+    lint = getattr(render, "lint_text", None)
     if lint is None:
         return {"ok": None, "reason": "render_unavailable", "violations": []}
     violations: list[dict] = []
     for item in items:
+        if str(item.get("source") or "") in _QUOTED_SOURCES:
+            continue
         for line_no, line in enumerate(str(item.get("result") or "").split("\n"), start=1):
             if line.strip().startswith(_QUOTE_PREFIX):
                 continue
@@ -1012,10 +1116,14 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
 
 # ---------------------------------------------------------------- §5.7 유사 검색
 def _latest_snapshot_by_project(store) -> dict[str, str]:
+    """과제별 최신 스냅샷 — 코퍼스에서 빠진 과제(§0.6)는 애초에 들어오지 않는다."""
+    corpus = _corpus_ids(store)
     rows = store.query(
         "SELECT project_id, id, created_at FROM rr_snapshots ORDER BY project_id, created_at, id")
     out: dict[str, str] = {}
     for row in rows:
+        if _s(row["project_id"]) not in corpus:
+            continue
         out[_s(row["project_id"])] = _s(row["id"])
     return out
 
@@ -1104,6 +1212,9 @@ def similar_projects(store, project_id: str, k: int = 5, *, owner_sub: str | Non
                             "hops": hop, "relation": "successor"})
             frontier.append(row["id"])
 
+    # 코퍼스에서 빠진 과제는 어느 경로로도 회수되지 않는다(§0.6 코퍼스 필터).
+    corpus = _corpus_ids(store)
+    lineage = [entry for entry in lineage if entry["project_id"] in corpus]
     latest = _latest_snapshot_by_project(store)
     corpus_n = len([p for p in latest if store.query_one(
         "SELECT snapshot_id FROM rr_states WHERE snapshot_id = ?", (latest[p],)) is not None])
@@ -1143,7 +1254,7 @@ def similar_projects(store, project_id: str, k: int = 5, *, owner_sub: str | Non
         entry = merged_scores.setdefault(pid, {"project_id": pid, "score": 0.0, "paths": []})
         if path not in entry["paths"]:
             entry["paths"].append(path)
-            entry["score"] += _PATH_WEIGHT[path]
+            entry["score"] += _PATH_WEIGHT.get(path, _PATH_WEIGHT["subject"])
 
     for entry in lineage:
         _add(entry["project_id"], "lineage")
@@ -1153,7 +1264,7 @@ def similar_projects(store, project_id: str, k: int = 5, *, owner_sub: str | Non
         _add(_s(entry.get("project_id")), "text")
     for entry in subject:
         for pid in entry.get("project_ids") or []:
-            _add(pid, "subject")
+            _add(pid, _s(entry.get("path"), "subject"))
     merged = sorted(merged_scores.values(), key=lambda e: (-e["score"], e["project_id"]))[:k]
 
     return {"lineage": lineage, "vector": vector, "text": text, "subject": subject,
@@ -1172,7 +1283,8 @@ def _text_path(store, project_id: str, latest: Mapping[str, str], adh, k: int) -
     query = _s(state["summary_text"])[:300] if state is not None else ""
     if not query:
         return [], "summary_text 없음"
-    reply = adh.hybrid_search(query, top_k=k, tags=["hwax-risk-review"])
+    reply = adh.hybrid_search(query, top_k=k, tags=["hwax-risk-review"],
+                              exclude_tags=list(RECALL_EXCLUDE_TAGS))
     if not reply.get("ok"):
         return [], _s(reply.get("error"), "hybrid_search 실패")
     hits = reply.get("result") or []
@@ -1192,13 +1304,43 @@ def _text_path(store, project_id: str, latest: Mapping[str, str], adh, k: int) -
     return out, None
 
 
-def _subject_path(store, snapshot_id: str | None, owner_sub: str | None) -> list[dict]:
-    """§5.9.4 1) 정확 매치 — 이번 IR 의 subject_key 로 등록부를 회수한다."""
-    keys = _subject_keys(store, snapshot_id)
+def alias_expand(store, keys: set[str]) -> dict[str, str]:
+    """subject_key 집합을 `rr_iface_alias`(status='active') 로 양방향 확장한다(plan §5.9.4·§0.9 P5-5).
+
+    반환은 `{조회 키: 경로 태그}` 다 — 원래 키는 'subject', 별칭으로 이어붙인 키는 'subject·별칭' 이라
+    그 줄이 무엇으로 이어졌는지 브리프에 남는다. 계보가 없고 이름 규칙이 다른 과제를 잇는 유일한 다리다.
+    """
+    out: dict[str, str] = {key: "subject" for key in keys if key}
     if not keys:
+        return out
+
+    def bare(key: str) -> str:
+        """계면 subject_key 는 `iface:` 접두를 달고 오기도 한다 — 비교는 접두를 뗀 쌍으로 한다."""
+        return key[len("iface:"):] if key.startswith("iface:") else key
+
+    bare_keys = {bare(key): key for key in keys if key}
+    rows = store.query(
+        "SELECT alias_key, canonical_a, canonical_b FROM rr_iface_alias WHERE status = 'active'", ())
+    for row in rows:
+        alias_key = _s(row["alias_key"])
+        canonical = "|".join(sorted([_s(row["canonical_a"]), _s(row["canonical_b"])]))
+        if not alias_key or not canonical:
+            continue
+        if bare(alias_key) in bare_keys:
+            out.setdefault(canonical, "subject·별칭")
+            out.setdefault(f"iface:{canonical}", "subject·별칭")
+        if bare(canonical) in bare_keys:
+            out.setdefault(alias_key, "subject·별칭")
+    return out
+
+
+def _subject_path(store, snapshot_id: str | None, owner_sub: str | None) -> list[dict]:
+    """§5.9.4 1) 정확 매치 — 이번 IR 의 subject_key(별칭 확장 포함)로 등록부를 회수한다."""
+    paths = alias_expand(store, _subject_keys(store, snapshot_id))
+    if not paths:
         return []
     out: list[dict] = []
-    for subject_key in sorted(keys):
+    for subject_key in sorted(paths):
         vis, vis_params = _visibility_clause(owner_sub)
         rows = store.query(
             "SELECT target_key, status FROM rr_registry WHERE subject_key = ? "
@@ -1214,9 +1356,12 @@ def _subject_path(store, snapshot_id: str | None, owner_sub: str | None) -> list
             pid = _s(target["project_id"]) if target is not None else ""
             if pid and pid not in project_ids:
                 project_ids.append(pid)
+        project_ids = [pid for pid in project_ids if pid in _corpus_ids(store)]
+        if not project_ids:
+            continue
         out.append({"subject_key": subject_key, "n_registry": len(rows),
                     "n_verified": len([r for r in rows if r["status"] == "verified"]),
-                    "project_ids": project_ids, "path": "subject"})
+                    "project_ids": project_ids, "path": paths[subject_key]})
     return out
 
 

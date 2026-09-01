@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from typing import Any, Callable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from app.common import canonical_json, now_epoch, sha256_hex
 from app.errors import AppError
@@ -774,7 +774,7 @@ def compute_feature_vector(ir: Mapping[str, Any], signals: Mapping[str, Any]) ->
 
 # ---------------------------------------------------------------- rule_hits(plan §3.2.6)
 def load_seed_rules() -> list[dict]:
-    """assets/rules-seed.v1.json 의 시드 6종(사람이 손으로 쓴 규칙)."""
+    """assets/rules-seed.v1.json 의 시드 7종(사람이 손으로 쓴 규칙 — R-007 요구 여유 포함)."""
     doc = load_json("rules-seed")
     version = str(doc.get("version") or "rules-1.0")
     return [dict(r, rule_version=version) for r in doc.get("rules") or [] if r.get("status", "active") == "active"]
@@ -815,6 +815,11 @@ def _derived_edge_ref(ir: Mapping[str, Any], edge: Mapping[str, Any], ref: str, 
     return _attr(edge, ref.split(".", 1)[1])
 
 
+def _derived_req_ref(row: Mapping[str, Any], ref: str) -> Any:
+    """`state.req.margin.<field>` — 요구 여유 표 한 행의 필드(plan §3.2.6 R-007)."""
+    return row.get(ref.rsplit(".", 1)[1])
+
+
 def _derived_node_ref(node: Mapping[str, Any], ref: str, degree_tied: Mapping[str, int]) -> Any:
     if ref == "node.min_dim":
         return _attr(node, "min_dim")
@@ -826,6 +831,7 @@ def _derived_node_ref(node: Mapping[str, Any], ref: str, degree_tied: Mapping[st
 # 규칙별 `evaluable=false` 조건(plan §3.2.6 표). 값은 not_evaluable_reason 어휘 3종뿐이다.
 NOT_EVALUABLE_REASONS: tuple[str, ...] = ("source_absent", "degraded", "truncated")
 _RULE_NEEDS_MCAD = ("R-001", "R-002", "R-003", "R-004", "R-005", "R-006")
+# 요구는 IR 이 아니라 rr_requirements 에서 오므로 R-007 은 mcad 부재로 평가 불가가 되지 않는다.
 _RULE_DEGRADED: dict[str, tuple[str, ...]] = {
     "R-001": ("capture_partial",),
     "R-003": ("volume_null_pre_d168",),
@@ -861,9 +867,21 @@ def not_evaluable_reason(ir: Mapping[str, Any], rule_id: str) -> str | None:
     return None
 
 
-def evaluate_rules(ir: Mapping[str, Any], rules: Sequence[Mapping[str, Any]] | None = None) -> list[dict]:
-    """rr_rules(또는 시드)의 조건 DSL 을 IR 위에서 즉시 실행한다. 부작용 없음·결정론이며 조건이 걸리면 pass=false 다."""
+def evaluate_rules(ir: Mapping[str, Any], rules: Sequence[Mapping[str, Any]] | None = None, *,
+                   req_margin: Sequence[Mapping[str, Any]] | None = None,
+                   extra_missing: Mapping[str, Any] | None = None) -> list[dict]:
+    """rr_rules(또는 시드)의 조건 DSL 을 IR 위에서 즉시 실행한다. 부작용 없음·결정론이며 조건이 걸리면 pass=false 다.
+
+    `req_margin` 은 `sig:req.margin` 의 행 목록이다(R-007 의 주체). 넘기지 않으면 요구 입력이 없는 것이라
+    `missing.req_absent` 로 보고 R-007 은 `pass=null` 이다 — 요구가 없는데 pass 로 세지 않는다(plan §3.2.6).
+    """
     rules = list(rules if rules is not None else load_seed_rules())
+    req_rows = [r for r in (req_margin or ()) if isinstance(r, Mapping)]
+    missing_view = dict(ir.get("missing") or {})
+    if extra_missing:
+        missing_view.update(extra_missing)
+    missing_view.setdefault("req_absent", not req_rows)
+    reason_ir = {"missing": missing_view, "sources": list(ir.get("sources") or ())}
     edges = _live_edges(ir)
     nodes = list(ir.get("nodes") or [])
     index = {n["nid"]: n for n in nodes}
@@ -900,6 +918,7 @@ def evaluate_rules(ir: Mapping[str, Any], rules: Sequence[Mapping[str, Any]] | N
         aggregate = rule.get("aggregate") or {"count_gte": 1}
 
         global_all = [c for c in all_conds if str(c["ref"]).startswith("warnings.")]
+        req_all = [c for c in all_conds if str(c["ref"]).startswith("state.req.margin.")]
         edge_all = [c for c in all_conds if str(c["ref"]).startswith("edge.")]
         node_all = [c for c in all_conds if str(c["ref"]).startswith("node.")]
         global_any = [c for c in any_conds if str(c["ref"]).startswith("warnings.")]
@@ -913,6 +932,15 @@ def evaluate_rules(ir: Mapping[str, Any], rules: Sequence[Mapping[str, Any]] | N
         refs: list[str] = []
         if not global_ok:
             matched: list[str] = []
+        elif req_all:
+            names = sorted(
+                str(row.get("name"))
+                for row in req_rows
+                if all(_cmp(_derived_req_ref(row, c["ref"]), c["op"], c.get("value")) for c in req_all)
+            )
+            matched = names
+            # 요구 한 건은 `req:<name>`·`[d:<name>]` 쌍으로 인용한다(plan §3.2.6 R-007).
+            refs = [ref for name in names for ref in (f"req:{name}", f"d:{name}")]
         elif edge_all or (subject_any and not node_all):
             matched = []
             for e in edges:
@@ -942,7 +970,7 @@ def evaluate_rules(ir: Mapping[str, Any], rules: Sequence[Mapping[str, Any]] | N
 
         found = {"count": count, "refs": refs, "text": f"{rule.get('name') or rule.get('id')} {count}건"}
         version = str(rule.get("rule_version") or "rules-1.0")
-        reason = not_evaluable_reason(ir, str(rule.get("id")))
+        reason = not_evaluable_reason(reason_ir, str(rule.get("id")))
         evaluable = reason is None
         out.append({
             "rule": str(rule.get("id")),
@@ -1022,13 +1050,24 @@ def build_state(
     acks: Mapping[str, Mapping[str, Any]] | None = None,
     precedent: Mapping[str, Any] | None = None,
     computed_at: int | None = None,
+    req: Mapping[str, Any] | None = None,
 ) -> dict:
-    """rr_state 봉투 하나(state_version '1.0'). 같은 (ir_hash, rule_version) 이면 같은 값이 나온다."""
+    """rr_state 봉투 하나(state_version '1.0'). 같은 (ir_hash, rule_version) 이면 같은 값이 나온다.
+
+    `req` 는 `requirements.compute_req_signals()` 의 결과다(`{'signals': …, 'missing': …}`). 요구는 IR 에
+    복사되지 않으므로 여기서만 합쳐지고, 그래서 요구를 고쳐도 `ir_hash` 는 바이트 불변이다(plan §2.8b).
+    """
     gates = compute_gates(ir, acks=acks)
     signals = compute_signals(ir, gates)
+    req_signals = dict((req or {}).get("signals") or {})
+    req_missing = dict((req or {}).get("missing") or {})
+    signals.update(req_signals)
+    margin_signal = req_signals.get("req.margin") or {}
+    margin_rows = margin_signal.get("value") if isinstance(margin_signal, Mapping) else None
     seeds = compute_character_seed(ir, signals, gates)
     features = compute_feature_vector(ir, signals)
-    hits = evaluate_rules(ir, rules)
+    hits = evaluate_rules(ir, rules, req_margin=margin_rows if isinstance(margin_rows, list) else None,
+                          extra_missing=req_missing or None)
     versions = dict(ir.get("versions") or {})
 
     state = {
@@ -1042,7 +1081,7 @@ def build_state(
         "computed_at": int(computed_at if computed_at is not None else now_epoch()),
         "blocked": is_blocked(gates),
         "gates": gates,
-        "missing": dict(ir.get("missing") or {}),
+        "missing": {**dict(ir.get("missing") or {}), **req_missing},
         "signals": signals,
         "character_seed": seeds,
         "feature_vector": features,
@@ -1099,10 +1138,12 @@ def load_state(store, snapshot_id: str) -> dict | None:
 def compute_state_for_snapshot(store, snapshot_id: str, *, rules: Sequence[Mapping[str, Any]] | None = None,
                                acks: Mapping[str, Mapping[str, Any]] | None = None, save: bool = True) -> dict:
     """동결된 IR 을 읽어 rr_state 를 계산하고(기본) 저장한다. '재해석 적용'·규칙 갱신 뒤 재계산 경로다."""
+    from app import requirements  # noqa: PLC0415 — 순환 임포트를 피하려 지연 임포트한다.
     from app.ir_builder import load_ir  # noqa: PLC0415 — 순환 임포트를 피하려 지연 임포트한다.
 
     ir = load_ir(store, snapshot_id)
-    state = build_state(ir, rules=rules if rules is not None else load_active_rules(store), acks=acks)
+    req = requirements.compute_req_signals(store, ir["project_id"], ir)
+    state = build_state(ir, rules=rules if rules is not None else load_active_rules(store), acks=acks, req=req)
     if save:
         save_state(store, state)
     return state

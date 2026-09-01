@@ -375,3 +375,34 @@ def test_rest_error_codes_follow_the_plan(client, rest):
     assert missing.status_code == 404 and missing.json()["error"]["code"] == "source_project_not_found"
     # 남의 과제는 404 로 존재를 숨긴다(조회 규약).
     assert client.get("/api/projects/없는과제/requirements", headers=REST_AUTH).status_code == 404
+
+
+# ---------------------------------------------------------------- 요구 변경과 ir_hash 불변(plan §2.8b (1)·§0.9 P1-20)
+def test_editing_requirements_keeps_ir_hash_and_only_moves_computed_at(store, monkeypatch):
+    """요구는 스냅샷에 복사되지 않는다 — 고쳐도 ir_json·ir_hash 는 바이트 불변이고 rr_states.computed_at 만 오른다."""
+    import json
+
+    from app import state as st
+    from tests.test_state_gates import build_ir, load_case
+
+    ir = build_ir(load_case("gate_f1_clean"), snapshot_id="S1")
+    ir["project_id"] = "P1"
+    store.execute(
+        "INSERT INTO rr_snapshots(id, project_id, owner_sub, ir_version, ir_hash, ir_json, source_ids_json,"
+        " kinds_json, created_at) VALUES ('S1','P1',?, ?, ?, ?, '[]','[\"mcad\"]', 1)",
+        (OWNER, ir["ir_version"], ir["ir_hash"], json.dumps(ir, ensure_ascii=False, sort_keys=True)))
+
+    before_row = store.query_one("SELECT ir_json, ir_hash FROM rr_snapshots WHERE id = 'S1'")
+    first = st.compute_state_for_snapshot(store, "S1")
+    assert {h["rule"]: h["pass"] for h in first["rule_hits"]}["R-007"] is None      # 요구 0건 → 평가 불가
+
+    _post(store, [{"kind": "dim_limit", "name": "gap_main", "op": "lte", "value_json": 0.2, "unit": "mm"}])
+    monkeypatch.setattr(st, "now_epoch", lambda: first["computed_at"] + 10)
+    second = st.compute_state_for_snapshot(store, "S1")
+
+    after_row = store.query_one("SELECT ir_json, ir_hash FROM rr_snapshots WHERE id = 'S1'")
+    assert after_row["ir_json"] == before_row["ir_json"]           # 원본 바이트 불변
+    assert after_row["ir_hash"] == before_row["ir_hash"]
+    assert second["computed_at"] > first["computed_at"]
+    assert second["missing"]["req_absent"] is False
+    assert "req.margin" in second["signals"]

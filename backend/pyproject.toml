@@ -24,6 +24,7 @@ test = [
     "httpx>=0.27",
     "anyio>=4",
     "jsonschema>=4.21",
+    "ruff>=0.5",
 ]
 
 [project.scripts]
@@ -42,3 +43,18 @@ app = ["schemas/*.json", "assets/*.json", "static/*.html"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.ruff]
+# 앱 코드는 한 줄이 길다(정규 표기·SQL 문자열). 규칙은 기본 E·F 에 한정한다 — 포맷터는 쓰지 않는다.
+line-length = 140
+target-version = "py312"
+src = ["."]
+
+[tool.ruff.lint]
+select = ["E", "F"]
+# 줄 길이는 기존 코드(정규 표기·SQL 문자열)가 이미 넘겨 두었다 — 규칙에서 뺀다.
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# 시험은 픽스처를 위해 import 순서를 섞고(E402) TYPE_CHECKING 밖 타입 이름을 문자열 없이 쓴다(F821).
+"tests/*" = ["E402", "F821"]

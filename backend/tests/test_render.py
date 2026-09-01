@@ -4,6 +4,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import re
 
 import pytest
 
@@ -59,6 +60,8 @@ LEXICON_IDS = [item["id"] for item in JUDGEMENT_LEXICON]
 
 SNAP_SECTIONS = ["대상", "게이트", "구조", "상위 계면", "치수", "재료", "Dyna", "규칙", "씨앗", "결측"]
 DIFF_SECTIONS = ["대상", "비교가능성", "구조", "의미", "치수", "재료", "결과", "씨앗"]
+# 줄마다 참조 단언에 쓰는 토큰(plan §0.9 P1-6·P2-6).
+REF_TOKEN = re.compile(r"\[(?:p|e|c|d|sig|gate|rule):[^\]]+\]")
 
 
 @pytest.fixture(scope="module")
@@ -224,6 +227,35 @@ def test_diff_summary_sections_and_budget(diff):
     assert "result_parity=null" in text
     assert "결과 비교 제외(result_kind_differs)" in text
     assert lint_text(text)["ok"] is True
+
+
+def test_every_snap_summary_line_carries_a_reference(state):
+    """plan §0.9 P1-6 — rr_state 요약의 모든 줄에 [p:]·[e:]·sig:·gate:·rule: 참조가 하나 이상 있다."""
+    text = summarize(state, "snap", {"project_code": "M22", "sources": {"mcad": "heax-step_forge"}})
+    lines = text.split("\n")
+    assert len(lines) == len(SNAP_SECTIONS)
+    for line in lines:
+        assert REF_TOKEN.search(line), f"참조 없는 줄 — {line}"
+
+
+def test_every_diff_summary_line_carries_a_reference(diff):
+    """plan §0.9 P2-6 — pair 요약도 줄마다 참조를 갖는다(항목 참조가 있으면 [c:] 가 그 자리다)."""
+    text = summarize(diff, "diff", {"sources": {"mcad": "heax-step_forge"}})
+    lines = text.split("\n")
+    assert len(lines) == len(DIFF_SECTIONS)
+    for line in lines:
+        assert REF_TOKEN.search(line), f"참조 없는 줄 — {line}"
+    assert "[c:" in text
+
+
+def test_empty_sections_still_carry_the_section_reference(state):
+    """항목이 하나도 없어 '없음' 으로 접힌 줄에도 섹션 기본 참조가 남는다."""
+    payload = copy.deepcopy(state)
+    payload["character_seed"] = []
+    text = summarize(payload, "snap", {})
+    seed_line = next(line for line in text.split("\n") if line.startswith("[씨앗]"))
+    assert seed_line.endswith("[sig:character_seed]")
+    assert "없음" in seed_line
 
 
 def test_summary_is_deterministic(state, diff):

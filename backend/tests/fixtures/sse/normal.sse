@@ -1,0 +1,33 @@
+event: delib
+data: {"kind": "personas", "personas": [{"key": "mech-a0", "origin": "primary"}, {"key": "sim-a0", "origin": "primary"}, {"key": "delib-baseline-defender", "origin": "counter"}]}
+
+event: status
+data: {"step": "mech-a0 조회: list_interfaces", "tool": "list_interfaces"}
+
+event: delib
+data: {"kind": "evidence", "source": "mech-a0 · list_interfaces", "text": "간극 2건", "included": true}
+
+event: status
+data: {"step": "sim-a0 조회: report_part_risk", "tool": "report_part_risk"}
+
+event: delib
+data: {"kind": "evidence", "source": "sim-a0 · report_part_risk", "text": "worst 210 MPa", "included": true}
+
+event: delib
+data: {"kind": "turn", "round": 1, "persona": "mech-a0", "say": "간극이 좁다", "stance": "oppose"}
+
+event: delib
+data: {"kind": "turn", "round": 1, "persona": "sim-a0", "say": "응력이 몰린다", "stance": "agree"}
+
+event: delib
+data: {"kind": "decision", "text": "결정문 본문"}
+
+event: delib
+data: {"kind": "outcome", "report_id": 77, "tally": {"agree": 1, "total": 2}}
+
+event: result
+data: {"type": "text", "content": "전문"}
+
+event: done
+data: {}
+

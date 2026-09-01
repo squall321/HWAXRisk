@@ -700,9 +700,13 @@ def fail_panel_seats(store: Any, panel_id: str, *, reason: str = "engine_fail") 
     return {"seats": outcome}
 
 
-def skip_seat(store: Any, target_key: str, agent_key: str, reason: str) -> dict:
-    """사용자 조작 — 비종결 좌석을 skipped(reason 필수)로 닫는다."""
-    if not reason:
+def skip_seat(store: Any, target_key: str, agent_key: str, reason: str, *, decided_by: str | None = None) -> dict:
+    """사용자 조작 — 비종결 좌석을 skipped(reason 필수)로 닫는다.
+
+    `decided_by` 를 주면 `status_source='human'`·`decided_by`·`decided_at` 을 함께 적는다 — 자동 전이와
+    사람 전이를 열로 구분하는 자리다(plan §0.6 '사람 개입 기록').
+    """
+    if not (reason or "").strip():
         raise AppError("E100", "skipped 에는 reason 이 필요합니다.", 422)
     row = store.query_one(
         "SELECT status FROM rr_coverage WHERE target_key = ? AND agent_key = ?", (target_key, agent_key)
@@ -712,14 +716,17 @@ def skip_seat(store: Any, target_key: str, agent_key: str, reason: str) -> dict:
     _guard(row["status"], "skipped")
     now = now_epoch()
     store.execute(
-        "UPDATE rr_coverage SET status = 'skipped', reason = ?, finished_at = ?, updated_at = ?"
-        " WHERE target_key = ? AND agent_key = ?",
-        (reason, now, now, target_key, agent_key),
+        "UPDATE rr_coverage SET status = 'skipped', reason = ?, finished_at = ?, updated_at = ?,"
+        " status_source = ?, decided_by = ?, decided_at = ? WHERE target_key = ? AND agent_key = ?",
+        (reason, now, now, "human" if decided_by else "code", decided_by, now if decided_by else None,
+         target_key, agent_key),
     )
-    return {"target_key": target_key, "agent_key": agent_key, "status": "skipped", "reason": reason}
+    return {"target_key": target_key, "agent_key": agent_key, "status": "skipped", "reason": reason,
+            "status_source": "human" if decided_by else "code", "decided_by": decided_by,
+            "decided_at": now if decided_by else None}
 
 
-def revert_carried(store: Any, target_key: str, agent_key: str) -> dict:
+def revert_carried(store: Any, target_key: str, agent_key: str, *, decided_by: str | None = None) -> dict:
     """carried → pending(cycle+1) 되돌리기(사용자 조작). carried_from_opinion_id 는 남긴다."""
     row = store.query_one(
         "SELECT status, cycle FROM rr_coverage WHERE target_key = ? AND agent_key = ?", (target_key, agent_key)
@@ -730,11 +737,14 @@ def revert_carried(store: Any, target_key: str, agent_key: str) -> dict:
     cycle = int(row["cycle"] or 1) + 1
     now = now_epoch()
     store.execute(
-        "UPDATE rr_coverage SET status = 'pending', cycle = ?, reason = NULL, finished_at = NULL, updated_at = ?"
-        " WHERE target_key = ? AND agent_key = ?",
-        (cycle, now, target_key, agent_key),
+        "UPDATE rr_coverage SET status = 'pending', cycle = ?, reason = NULL, finished_at = NULL, updated_at = ?,"
+        " status_source = ?, decided_by = ?, decided_at = ? WHERE target_key = ? AND agent_key = ?",
+        (cycle, now, "human" if decided_by else "code", decided_by, now if decided_by else None,
+         target_key, agent_key),
     )
-    return {"target_key": target_key, "agent_key": agent_key, "status": "pending", "cycle": cycle}
+    return {"target_key": target_key, "agent_key": agent_key, "status": "pending", "cycle": cycle,
+            "status_source": "human" if decided_by else "code", "decided_by": decided_by,
+            "decided_at": now if decided_by else None}
 
 
 def apply_carry_over(

@@ -541,9 +541,10 @@ def distinct_models(store: RiskStore, *, owner_sub: str, cluster_key_norm: str) 
 
 
 def _corpus_projects(store: RiskStore) -> set[str]:
-    """§0.6 코퍼스 필터 — status='active' AND corpus_excluded=0 인 과제만 통계에 든다."""
-    return {str(r["id"]) for r in store.query(
-        "SELECT id FROM rr_projects WHERE status = 'active' AND corpus_excluded = 0", ())}
+    """§0.6 코퍼스 필터 — status='active' AND corpus_excluded=0 인 과제만 통계에 든다(정본은 registry)."""
+    from app import registry  # noqa: PLC0415 — registry 는 metrics 를 import 하지 않는다.
+
+    return registry.corpus_projects(store)
 
 
 def _dims_of(atom: Mapping[str, Any]) -> list[tuple[str, str]]:
@@ -685,6 +686,11 @@ def _precision_rows(out: list, label_atoms: Sequence[Mapping[str, Any]]) -> None
     _emit_ratio(out, "precision", acc)
 
 
+# 선행시간·보정도가 나는 차원(plan §7.6 표 — 전문가·도메인도 자기 층을 갖는다).
+LEAD_TIME_DIMS: tuple[str, ...] = ("global", "project", "mechanism", "expert", "domain")
+CALIBRATION_DIMS: tuple[str, ...] = ("global", "expert", "domain", "mechanism")
+
+
 def _lead_time_rows(out: list, label_atoms: Sequence[Mapping[str, Any]]) -> None:
     """median(incident.occurred_on − finding.created_at) 일수(plan §7.6)."""
     buckets: dict[tuple[str, str], list[float]] = {}
@@ -697,7 +703,7 @@ def _lead_time_rows(out: list, label_atoms: Sequence[Mapping[str, Any]]) -> None
             continue
         days = (float(occurred) - float(created)) / 86400.0
         for dim, key in label["_dims"]:
-            if dim not in ("global", "project", "mechanism"):
+            if dim not in LEAD_TIME_DIMS:
                 continue
             buckets.setdefault((dim, key), []).append(days)
     floor = MIN_N["lead_time_days"]
@@ -747,9 +753,9 @@ def _recall_proxy_rows(out: list, atoms: Sequence[Mapping[str, Any]],
 
 def _calibration_rows(out: list, label_atoms: Sequence[Mapping[str, Any]]) -> None:
     """예측 sev3 × 관측 severity_observed 3×3 혼동행렬. rr_metrics 에 열을 늘리지 않으려 셀별 행으로 편다."""
-    cells: dict[str, int] = {}
-    total = 0
-    over_num = over_den = 0
+    cells: dict[tuple[str, str, str], int] = {}
+    totals: dict[tuple[str, str], int] = {}
+    over: dict[tuple[str, str], list[int]] = {}
     for label in label_atoms:
         observed = _s(label.get("severity_observed"))
         if observed not in SEV_LABELS:
@@ -758,18 +764,26 @@ def _calibration_rows(out: list, label_atoms: Sequence[Mapping[str, Any]]) -> No
         predicted = SEV_LABELS[int(sev3) - 1] if isinstance(sev3, int) and 1 <= int(sev3) <= 3 else None
         if predicted is None:
             continue
-        cells[f"calibration_{predicted}x{observed}"] = cells.get(f"calibration_{predicted}x{observed}", 0) + 1
-        total += 1
-        if predicted == "치명":
-            over_den += 1
-            over_num += 1 if observed == "경미" else 0
-    if not total:
+        for dim, key in label["_dims"]:
+            if dim not in CALIBRATION_DIMS:
+                continue
+            cells[(dim, key, f"calibration_{predicted}x{observed}")] = \
+                cells.get((dim, key, f"calibration_{predicted}x{observed}"), 0) + 1
+            totals[(dim, key)] = totals.get((dim, key), 0) + 1
+            bucket = over.setdefault((dim, key), [0, 0])
+            if predicted == "치명":
+                bucket[1] += 1
+                bucket[0] += 1 if observed == "경미" else 0
+    if not totals:
         return
-    enough = total >= MIN_N["calibration"]
-    for metric in sorted(cells):
-        out.append(("global", "global", metric, float(cells[metric]) if enough else None, total))
-    value = round(over_num / over_den, 6) if over_den >= MIN_N["over_alarm_rate"] else None
-    out.append(("global", "global", "over_alarm_rate", value, over_den))
+    for dim, key, metric in sorted(cells):
+        total = totals[(dim, key)]
+        enough = total >= MIN_N["calibration"]
+        out.append((dim, key, metric, float(cells[(dim, key, metric)]) if enough else None, total))
+    for dim, key in sorted(over):
+        num, den = over[(dim, key)]
+        value = round(num / den, 6) if den >= MIN_N["over_alarm_rate"] else None
+        out.append((dim, key, "over_alarm_rate", value, den))
 
 
 def _corpus_ratio_rows(out: list, atoms: Sequence[Mapping[str, Any]]) -> None:
@@ -1181,3 +1195,69 @@ def recompute(store: RiskStore, *, period: str = "all", visibility: str = "priva
         _drop_stale(store, period, {(dim, key, metric) for dim, key, metric, _v, _n in rows})
     return {"period": period, "computed_at": now, "rows": len(rows), "labels": len(stat_labels),
             "held_labels": len(held), "findings": len(eligible), "badge": badge}
+
+
+# ---------------------------------------------------------------- ① 라벨 동기(야간 STEP_HOOKS['labels'], plan §7.6 경로 1)
+# incident 레코드에서 읽는 키. RA 가 주는 이름이 다르면 어댑터가 이 모양으로 맞춘다(앱은 한 모양만 안다).
+INCIDENT_KEYS: tuple[str, ...] = ("id", "project_id", "ckeys", "mechanism", "outcome", "occurred_at",
+                                  "severity_observed")
+
+
+def _incident_match(finding: Mapping[str, Any], incident: Mapping[str, Any]) -> dict:
+    """3항 매칭(project·part·mechanism)의 적중 표 — 점수는 match_score 가 센다(plan §7.6)."""
+    ckeys = set(str(c) for c in (incident.get("ckeys") or ()))
+    finding_ckeys = set()
+    try:
+        finding_ckeys = {str(c) for c in json.loads(finding["ckeys_json"] or "[]")}
+    except (TypeError, ValueError):
+        finding_ckeys = set()
+    if finding["subject_key"]:
+        finding_ckeys.add(str(finding["subject_key"]))
+    return {
+        "project": _s(finding["project_id"]) == _s(incident.get("project_id")),
+        "part": bool(ckeys & finding_ckeys),
+        "mechanism": _s(finding["mechanism"]) == _s(incident.get("mechanism")),
+    }
+
+
+def sync_labels(store: RiskStore, *, incidents: Sequence[Mapping[str, Any]] | None = None,
+                ra: Any = None, owner_sub: str | None = None, now: int | None = None) -> dict:
+    """RA incident 레코드를 라벨 경로 1로 흘린다(plan §7.6). 완전 일치(3/3)만 자동 확정이다.
+
+    레코드는 주입식이다 — `incidents` 가 없고 `ra` 도 없으면 아무것도 하지 않고 skipped 를 돌려준다
+    (야간 잡이 자격 없는 박스에서 조용히 도는 자리다). 앱이 스스로 외부를 열지 않는다.
+    """
+    if incidents is None:
+        fetch = getattr(ra, "list_incidents", None) if ra is not None else None
+        if not callable(fetch):
+            return {"incidents": 0, "labeled": 0, "auto": 0, "queued": 0, "skipped": "no_source"}
+        incidents = list(fetch() or ())
+    rows = store.query(
+        "SELECT finding_id, project_id, mechanism, subject_key, ckeys_json, owner_sub, status"
+        " FROM rr_findings WHERE status IN ('open','verified','dismissed') ORDER BY finding_id", ())
+    labeled = auto = queued = 0
+    for incident in incidents:
+        best: tuple[float, dict, dict] | None = None
+        for row in rows:
+            matched = _incident_match(row, incident)
+            score = match_score(matched)
+            if score <= 0:
+                continue
+            if best is None or score > best[0]:
+                best = (score, dict(row), matched)
+        if best is None:
+            continue
+        _score, finding, matched = best
+        out = record_label(
+            store, finding_id=_s(finding["finding_id"]), source="incident",
+            outcome=_s(incident.get("outcome")) or "confirmed",
+            evidence_ref=f"inc:{_s(incident.get('id'))}",
+            owner_sub=owner_sub or _s(finding["owner_sub"]), matched=matched,
+            severity_observed=incident.get("severity_observed"),
+            occurred_at=incident.get("occurred_at"),
+        )
+        labeled += 1
+        auto += 1 if out.get("auto") else 0
+        queued += 1 if out.get("queue_id") else 0
+    return {"incidents": len(incidents), "labeled": labeled, "auto": auto, "queued": queued,
+            "skipped": None, "now": now}

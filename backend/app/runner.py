@@ -1,6 +1,7 @@
 # 배치 러너(plan §6.7·§8.2.9) — panel_loop 이 잡을 집어 패널을 편성·실행하고 SSE 귀속·커버리지·등록부로 넘긴다. 엔진은 주입식(PanelEngine)
 from __future__ import annotations
 
+import gzip
 import json
 import logging
 import re
@@ -10,7 +11,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
 from app import config, planner, taxonomy
-from app.common import canonical_json, new_uuid, now_epoch
+from app.common import canonical_json, new_uuid, now_epoch, sha256_hex
 from app.errors import AppError
 
 log = logging.getLogger("hwax_risk.runner")
@@ -149,22 +150,40 @@ def attribute_events(
 
 
 # ---------------------------------------------------------------- 러너 자격(plan §6.7 3단계)
-def resolve_credential(store: Any, settings: Any | None, owner_sub: str | None) -> dict | None:
-    """(b) 타깃 owner 가 등록한 포털 PAT → (a) 서비스 계정 PAT 순으로 자격을 정한다. 둘 다 없으면 None.
+def _usable_credential(store: Any, email: str | None) -> dict | None:
+    """그 사람이 등록한 포털 PAT 가 실제로 쓸 수 있으면 자격 행, 아니면 None(plan §8.2.7).
 
+    복호되지 않는 자격(키 없음·폐기 표기·손상)과 만료 임박은 엔진이 쓸 수 없으므로 후보로 세지 않는다.
+    """
+    if not email:
+        return None
+    from app import identity  # noqa: PLC0415 — identity 는 config 만 읽으므로 지연 import 로 순환을 피한다.
+
+    row = store.get_credential(email)
+    if row and identity.credential_pat(row) and int(row.get("pat_exp") or 0) > now_epoch() + CREDENTIAL_MARGIN_S:
+        return row
+    return None
+
+
+def resolve_credential(store: Any, settings: Any | None, owner_sub: str | None,
+                       requester_sub: str | None = None) -> dict | None:
+    """(c) 잡을 만든 사람 → (b) 타깃 owner → (a) 서비스 계정 PAT 순으로 자격을 정한다. 셋 다 없으면 None.
+
+    동료(editor)가 남의 과제에 잡을 만들 수 있게 되면서 '누구 자격으로 돌았나' 가 갈린다 — 첫 적중의
+    email 을 `rr_jobs.credential_email` 에 적어 진행판·감사가 그 사실을 본다(plan §0.1.6·§6.7 3단계).
     시크릿 값은 돌려주지 않는다(엔진 클라이언트가 같은 규칙으로 다시 읽는다). 반환은 {kind, email?}.
     """
     cfg = config.settings if settings is None else settings
-    if owner_sub:
-        from app import identity  # noqa: PLC0415 — identity 는 config 만 읽으므로 지연 import 로 순환을 피한다.
-
-        row = store.get_credential(owner_sub)
-        # 복호되지 않는 자격(키 없음·폐기 표기·손상)은 엔진이 쓸 수 없으므로 (b) 로 세지 않는다(plan §8.2.7).
-        if row and identity.credential_pat(row) and int(row.get("pat_exp") or 0) > now_epoch() + CREDENTIAL_MARGIN_S:
-            return {"kind": "owner", "email": row.get("pat_email")}
+    if requester_sub and requester_sub != owner_sub:
+        row = _usable_credential(store, requester_sub)
+        if row is not None:
+            return {"kind": "requester", "email": row.get("pat_email") or requester_sub}
+    row = _usable_credential(store, owner_sub)
+    if row is not None:
+        return {"kind": "owner", "email": row.get("pat_email") or owner_sub}
     secrets = config.load_secrets(cfg.data_dir)
     if secrets.get("HWAXRISK_PORTAL_PAT"):
-        return {"kind": "service", "email": None}
+        return {"kind": "service", "email": "service"}
     return None
 
 
@@ -291,6 +310,110 @@ def build_delib_opts(
     }
 
 
+# ---------------------------------------------------------------- 패널 실행 원문·브리프 동결(plan §6.7.2 7단계·§5.6.1)
+def brief_hashes(evidence: Sequence[Mapping[str, Any]], keys: Sequence[str] | None = None) -> dict:
+    """브리프 항목별 해시 표 `{키: sha256[:12]}` — 다음 패널의 brief_drift 비교 기준이다."""
+    out: dict[str, str] = {}
+    for index, item in enumerate(evidence):
+        key = str((keys or [])[index]) if keys and index < len(keys) else str(item.get("source") or index)
+        out[key] = sha256_hex(canonical_json(dict(item)))[:12]
+    return out
+
+
+def freeze_brief(store: Any, panel: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]],
+                 keys: Sequence[str] | None = None) -> dict:
+    """패널이 실제로 받은 evidence 전문을 gzip 으로 동결한다(brief_gz·brief_hash·brief_item_hashes_json).
+
+    브리프는 시변 조립물이라 원문이 없으면 quote·인용 재현이 불가하다. 같은 타깃의 이전 패널과 항목 해시를
+    비교해 실제로 달라진 키만 `quality_json.brief_drift[]` 로 남긴다(plan §5.6.1).
+    """
+    payload = canonical_json(list(evidence))
+    blob = gzip.compress(payload.encode("utf-8"))
+    digest = sha256_hex(payload)[:12]
+    item_hashes = brief_hashes(evidence, keys)
+    previous = store.query_one(
+        "SELECT brief_item_hashes_json FROM rr_panels WHERE target_key = ? AND id != ?"
+        " AND brief_item_hashes_json IS NOT NULL ORDER BY panel_no DESC LIMIT 1",
+        (panel["target_key"], panel["id"]))
+    drift: list[str] = []
+    if previous is not None:
+        try:
+            before = json.loads(previous["brief_item_hashes_json"] or "{}")
+        except ValueError:
+            before = {}
+        drift = sorted(k for k in set(before) | set(item_hashes) if before.get(k) != item_hashes.get(k))
+    store.execute(
+        "UPDATE rr_panels SET brief_gz = ?, brief_hash = ?, brief_item_hashes_json = ? WHERE id = ?",
+        (blob, digest, canonical_json(item_hashes), panel["id"]))
+    return {"brief_hash": digest, "items": len(item_hashes), "brief_drift": drift}
+
+
+def load_brief(store: Any, panel_id: str) -> dict:
+    """동결한 브리프를 재조립 없이 되돌려준다(GET /api/panels/{id}/brief 의 본체)."""
+    row = store.query_one(
+        "SELECT id, target_key, owner_sub, brief_gz, brief_hash, brief_item_hashes_json"
+        " FROM rr_panels WHERE id = ?", (panel_id,))
+    if row is None:
+        raise AppError("E404", f"패널을 찾지 못했습니다 — {panel_id}.", 404)
+    if row["brief_gz"] is None:
+        raise AppError("brief_absent", "이 패널에는 동결한 브리프가 없습니다.", 404)
+    evidence = json.loads(gzip.decompress(row["brief_gz"]).decode("utf-8"))
+    return {"panel_id": row["id"], "target_key": row["target_key"], "brief_hash": row["brief_hash"],
+            "evidence": evidence,
+            "item_hashes": json.loads(row["brief_item_hashes_json"] or "{}")}
+
+
+def record_panel_calls(store: Any, panel: Mapping[str, Any], events: Sequence[Mapping[str, Any]] | None,
+                       *, source: str = "events", conv_id: str | None = None) -> int:
+    """좌석 도구 호출 원문을 rr_panel_calls 에 seq 순으로 남긴다(포털 대화가 아니라 이 표가 정본이다).
+
+    `status` 는 시도, 뒤따르는 `evidence` 는 그 결과다. `text` 가 없으면 `result_gz=NULL` 이고 해시도 없다
+    (그 인용은 §4.4.2 대조에서 `quote_unverifiable` 이 된다).
+    """
+    if not events:
+        return 0
+    store.execute("DELETE FROM rr_panel_calls WHERE panel_id = ?", (panel["id"],))
+    seat_keys = {str(s.get("key")) for s in panel.get("seats") or ()}
+    rows: list[tuple] = []
+    pending: dict[str, dict] = {}
+    seq = 0
+    activity_idx = 0
+    now = now_epoch()
+    for event in events:
+        kind = str(event.get("kind") or "")
+        if kind == "status":
+            match = STATUS_LOOKUP_RE.match(str(event.get("step") or ""))
+            if not match:
+                continue
+            key, tool = match.group("key"), match.group("tool") or str(event.get("tool") or "")
+            pending[key] = {"tool": tool, "activity_idx": activity_idx}
+            activity_idx += 1
+            continue
+        if kind != "evidence":
+            continue
+        source_text = str(event.get("source") or "")
+        key = source_text.split(EVIDENCE_SEP, 1)[0].strip() if EVIDENCE_SEP in source_text else ""
+        opened = pending.pop(key, None)
+        tool = (opened or {}).get("tool") or (
+            source_text.split(EVIDENCE_SEP, 1)[1].strip() if EVIDENCE_SEP in source_text else source_text)
+        seq += 1
+        text = event.get("text") if isinstance(event.get("text"), str) else None
+        blob = gzip.compress(text.encode("utf-8")) if text else None
+        rows.append((
+            f"{str(panel['id'])[:8]}-{seq:03d}", panel["id"], panel["target_key"], panel["owner_sub"],
+            seq, key if key in seat_keys else None, None, source, tool, None, None, 1,
+            blob, len(text.encode("utf-8")) if text else None, sha256_hex(text) if text else None,
+            conv_id, (opened or {}).get("activity_idx"), now, None, None,
+        ))
+    if rows:
+        store.executemany(
+            "INSERT OR REPLACE INTO rr_panel_calls(call_id, panel_id, target_key, owner_sub, seq, agent_key,"
+            " round, source, tool, app_key, args_text, ok, result_gz, result_bytes, sha256, conv_id,"
+            " activity_idx, started_at, duration_ms, error) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            rows)
+    return len(rows)
+
+
 # ---------------------------------------------------------------- 잡(plan §6.4.3·§8.2.3)
 def _params(row: Mapping[str, Any]) -> dict:
     try:
@@ -321,14 +444,19 @@ def create_job(
     concurrency: int = 1,
     consent: bool = False,
     settings: Any | None = None,
+    requester_sub: str | None = None,
 ) -> dict:
-    """배치 잡 1건을 만든다(POST /api/targets/{key}/jobs). Tier C 는 consent 필수, 러너 자격이 없으면 422."""
+    """배치 잡 1건을 만든다(POST /api/targets/{key}/jobs). Tier C 는 consent 필수, 러너 자격이 없으면 422.
+
+    `requester_sub` 는 잡을 만든 사람이다(동료 editor 일 수 있다) — 자격은 요청자 → 타깃 owner → 서비스 순이고
+    첫 적중의 email 이 `rr_jobs.credential_email` 에 남는다(plan §0.1.6).
+    """
     cfg = config.settings if settings is None else settings
     if tier not in planner.TIERS:
         raise AppError("E100", f"모르는 tier — {tier!r}. 허용 {list(planner.TIERS)}.", 422)
     if tier == "C" and not consent:
         raise AppError("E100", "Tier C 는 consent:true 명시 승인이 필요합니다.", 422)
-    credential = resolve_credential(store, cfg, owner_sub)
+    credential = resolve_credential(store, cfg, owner_sub, requester_sub)
     if credential is None:
         raise AppError("pat_unavailable", "러너 자격이 없습니다 — 포털 PAT 를 등록하거나 서비스 PAT 를 설정하세요.", 422)
 
@@ -342,49 +470,59 @@ def create_job(
         "user_memo": (str(user_memo)[:USER_MEMO_MAX] if user_memo else None),
         "consent": bool(consent),
         "credential": credential["kind"],
+        "requester": requester_sub,
     }
     store.execute(
-        "INSERT INTO rr_jobs(id, target_key, owner_sub, tier, state, concurrency, params_json, panels_done,"
-        " panels_total, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', ?, ?, 0, ?, ?, ?)",
+        "INSERT INTO rr_jobs(id, target_key, owner_sub, tier, state, concurrency, params_json, credential_email,"
+        " panels_done, panels_total, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, 0, ?, ?, ?)",
         (job_id, target_key, owner_sub, tier, max(1, min(int(concurrency), int(cfg.risk_concurrency))),
-         canonical_json(params), row["panels"], now, now),
+         canonical_json(params), credential.get("email"), row["panels"], now, now),
     )
     return {
         "job_id": job_id,
         "panels_planned": row["panels"],
         "llm_calls_estimate": {"low": row["llm_calls_low"], "high": row["llm_calls_high"]},
         "credential": credential["kind"],
+        "credential_email": credential.get("email"),
     }
 
 
-def _set_job(store: Any, job_id: str, state: str, *, reason: str | None = None, error: str | None = None) -> dict:
-    store.execute(
-        "UPDATE rr_jobs SET state = ?, pause_reason = ?, error = ?, updated_at = ? WHERE id = ?",
-        (state, reason, error, now_epoch(), job_id),
-    )
-    return {"job_id": job_id, "state": state, "pause_reason": reason}
+def _set_job(store: Any, job_id: str, state: str, *, reason: str | None = None, error: str | None = None,
+             by: str | None = None) -> dict:
+    """잡 상태 전이 1건. `by` 는 주체다 — 사람은 email, 자동 정지는 'code:diminishing'·'code:daily_cap'(plan §0.6)."""
+    now = now_epoch()
+    actor = by or (f"code:{reason}" if reason in ("diminishing", "daily_cap") else None)
+    if actor:
+        store.execute(
+            "UPDATE rr_jobs SET state = ?, pause_reason = ?, error = ?, state_by = ?, state_at = ?,"
+            " updated_at = ? WHERE id = ?", (state, reason, error, actor, now, now, job_id))
+    else:
+        store.execute(
+            "UPDATE rr_jobs SET state = ?, pause_reason = ?, error = ?, updated_at = ? WHERE id = ?",
+            (state, reason, error, now, job_id))
+    return {"job_id": job_id, "state": state, "pause_reason": reason, "state_by": actor, "state_at": now}
 
 
-def pause_job(store: Any, job_id: str, *, reason: str = "user") -> dict:
+def pause_job(store: Any, job_id: str, *, reason: str = "user", by: str | None = None) -> dict:
     """패널 경계에서 반영되는 일시정지(reason ∈ diminishing|daily_cap|user)."""
     row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))
     if row is None:
         raise AppError("E404", f"잡이 없습니다: {job_id}", 404)
     if row["state"] not in ("queued", "running"):
         raise AppError("E100", f"일시정지할 수 없는 상태입니다 — {row['state']}.", 409)
-    return _set_job(store, job_id, "paused", reason=reason)
+    return _set_job(store, job_id, "paused", reason=reason, by=by)
 
 
-def resume_job(store: Any, job_id: str) -> dict:
+def resume_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
     row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))
     if row is None:
         raise AppError("E404", f"잡이 없습니다: {job_id}", 404)
     if row["state"] != "paused":
         raise AppError("E100", f"재개할 수 없는 상태입니다 — {row['state']}.", 409)
-    return _set_job(store, job_id, "queued")
+    return _set_job(store, job_id, "queued", by=by)
 
 
-def cancel_job(store: Any, job_id: str) -> dict:
+def cancel_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
     """진행 중 패널은 끝까지 가고 그 다음 패널 경계에서 cancelled 가 된다."""
     row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))
     if row is None:
@@ -392,8 +530,8 @@ def cancel_job(store: Any, job_id: str) -> dict:
     if row["state"] in ("cancelled", "completed", "failed"):
         return {"job_id": job_id, "state": row["state"], "pause_reason": None}
     if row["state"] == "running":
-        return _set_job(store, job_id, "cancelling")
-    return _set_job(store, job_id, "cancelled")
+        return _set_job(store, job_id, "cancelling", by=by)
+    return _set_job(store, job_id, "cancelled", by=by)
 
 
 def _panels_today(store: Any, target_key: str) -> int:
@@ -431,7 +569,7 @@ def claim_next_job(store: Any, settings: Any | None = None) -> dict | None:
         if _panels_today(store, job["target_key"]) >= int(cfg.risk_daily_panel_cap):
             _set_job(store, job["id"], "paused", reason="daily_cap")
             continue
-        credential = resolve_credential(store, cfg, job["owner_sub"])
+        credential = resolve_credential(store, cfg, job["owner_sub"], _params(row).get("requester"))
         if credential is None:
             store.execute(
                 "UPDATE rr_jobs SET error = 'pat_unavailable', updated_at = ? WHERE id = ?", (now_epoch(), job["id"])
@@ -442,6 +580,8 @@ def claim_next_job(store: Any, settings: Any | None = None) -> dict | None:
             job["state"] = "running"
         job["params"] = _params(row)
         job["credential"] = credential["kind"]
+        job["credential_email"] = credential.get("email")
+        store.execute("UPDATE rr_jobs SET credential_email = ? WHERE id = ?", (credential.get("email"), job["id"]))
         return job
     return None
 
@@ -469,8 +609,12 @@ def seat_contract_rev() -> str:
     return sha256_hex(taxonomy.asset_path("seat-contract").read_bytes())[:12]
 
 
-def _engine_health(engine: Any) -> dict:
-    """엔진이 health() 를 노출하면 D6 model_json 시작 스냅샷을 만든다(없으면 captured='unavailable')."""
+def snapshot_model(engine: Any) -> dict:
+    """엔진이 health() 를 노출하면 D6 model_json 스냅샷을 만든다(없으면 captured='unavailable').
+
+    plan §6.7.2 1단계의 출처 스냅샷이다 — 정상이면 `captured='health_snapshot'`, 불통·미노출이면
+    `captured='unavailable'`·`model='unknown'` 이고 어느 경우에도 예외를 올리지 않는다.
+    """
     probe = getattr(engine, "health", None)
     if not callable(probe):
         return {"runtime": "agent-server", "captured": "unavailable", "model": "unknown",
@@ -490,8 +634,9 @@ def _engine_health(engine: Any) -> dict:
         "engine_rev": info.get("engine_rev") or info.get("version"),
         "vllm": info.get("vllm"),
         "sampling": info.get("sampling"),
-        # chair_rev 는 엔진(deliberation.py) 상수의 해시라 앱에 원문이 없다 — 비워 둔다(§6.7.2 1단계 미충족 표기).
-        "chair_rev": None,
+        # chair_rev 는 엔진(deliberation.py) 상수의 해시다 — 엔진 /health 가 실어 보내면 그대로 적고,
+        # 안 보내면 null 이다(앱에는 원문이 없어 스스로 계산하지 못한다, §6.7.2 1단계).
+        "chair_rev": info.get("chair_rev"),
         "seat_contract_rev": seat_contract_rev(),
     }
 
@@ -647,11 +792,13 @@ def run_panel(
 
     planner.start_panel_seats(store, panel["id"])
     try:
-        model_json = _engine_health(engine)
+        model_json = snapshot_model(engine)
         store.execute("UPDATE rr_panels SET model_json = ? WHERE id = ?", (canonical_json(model_json), panel["id"]))
         delib_opts = build_delib_opts(
             store, settings, panel, user_memo=params.get("user_memo"), narrative_mod=narrative_mod
         )
+        # 브리프는 시변 조립물이라 이 패널이 실제로 받은 전문을 동결한다(§5.6.1).
+        frozen = freeze_brief(store, panel, delib_opts["evidence"])
     except Exception as exc:  # noqa: BLE001 — 브리프 조립 실패도 좌석을 pending 으로 되돌리고 닫는다.
         log.exception("패널 %s 브리프 조립 실패", panel["id"])
         return _close_panel_error(store, panel, job, f"brief_error: {type(exc).__name__}: {exc}", settings)
@@ -688,7 +835,7 @@ def run_panel(
         return _close_panel_error(store, panel, job, error or "engine_error", settings)
     return _complete_panel(
         store, settings, panel, job, result, model_json,
-        narrative_mod=narrative_mod, registry_mod=registry_mod, engine=engine,
+        narrative_mod=narrative_mod, registry_mod=registry_mod, engine=engine, frozen_brief=frozen,
     )
 
 
@@ -715,6 +862,7 @@ def _complete_panel(
     narrative_mod: Any | None,
     registry_mod: Any | None,
     engine: Any,
+    frozen_brief: Mapping[str, Any] | None = None,
 ) -> dict:
     if narrative_mod is None:
         from app import narrative as narrative_mod  # noqa: PLC0415
@@ -727,6 +875,9 @@ def _complete_panel(
     events = result.get("events")
     attribution = attribute_events(events, seat_keys)
 
+    # 좌석 도구 호출 원문은 포털 대화가 아니라 이 표가 정본이다(§6.7.2 7단계).
+    record_panel_calls(store, panel, events, source="sse", conv_id=result.get("conv_id"))
+
     spec = narrative_mod.parse_risk_spec(decision_text)
     parsed = spec is not None
     now = now_epoch()
@@ -735,7 +886,7 @@ def _complete_panel(
     model_final = dict(model_json)
     model_changed = False
     if model_json.get("captured") == "health_snapshot":
-        after = _engine_health(engine)
+        after = snapshot_model(engine)
         if after.get("captured") == "health_snapshot" and (
             after.get("model") != model_json.get("model") or after.get("vllm") != model_json.get("vllm")
         ):
@@ -786,6 +937,7 @@ def _complete_panel(
 
         merged = registry_mod.merge_panel(store, panel["id"])
         new_clusters = int((merged or {}).get("new_clusters") or 0)
+        escalated = list((merged or {}).get("escalated") or ())
 
         llm_calls = len(turns) + attribution["lookups"] * 3 + len(panel["tools"]) + 3
         quality = _quality(
@@ -801,6 +953,14 @@ def _complete_panel(
         )
         if model_changed and "model_changed_midrun" not in quality["flags"]:
             quality["flags"].append("model_changed_midrun")
+        if frozen_brief and frozen_brief.get("brief_drift"):
+            quality["brief_drift"] = list(frozen_brief["brief_drift"])
+        if frozen_brief and frozen_brief.get("brief_hash"):
+            quality["brief_hash"] = frozen_brief["brief_hash"]
+        if escalated and "registry_escalated" not in quality["flags"]:
+            # 사람이 닫았던 행이 더 강한 근거로 재제기됐다 — 사람이 다시 볼 자리다(plan §4.7.1).
+            quality["flags"].append("registry_escalated")
+            quality["escalated_clusters"] = escalated
         if result.get("call_groups"):
             quality["call_groups"] = list(result["call_groups"])
         store.execute(
@@ -895,6 +1055,7 @@ class RiskRunner:
         *,
         narrative_mod: Any | None = None,
         registry_mod: Any | None = None,
+        external_sync_send: Any | None = None,
     ) -> None:
         self.store = store
         self.settings = settings
@@ -906,6 +1067,8 @@ class RiskRunner:
         self._workers: list[threading.Thread] = []
         self._last_tick: dict[str, float | None] = {name: None for name, _ in _LOOPS}
         self._last_revocation_poll = 0.0
+        # 외부 반영 전송기(주입식). None 이면 재시도 틱은 due 만 세고 아무것도 보내지 않는다(§5.5.3).
+        self.external_sync_send = external_sync_send
         concurrency = int(getattr(settings, "risk_concurrency", 1) or 1) if settings is not None else 1
         self._sem = threading.Semaphore(max(1, concurrency))
 
@@ -923,6 +1086,10 @@ class RiskRunner:
                     self._revocation_tick()
                 except Exception:  # noqa: BLE001 — 폐기 대조 실패는 비치명적이다.
                     log.exception("sync_loop 폐기 대조 실패")
+                try:
+                    self._external_sync_tick()
+                except Exception:  # noqa: BLE001 — 외부 반영 재시도 실패도 러너를 죽이지 않는다.
+                    log.exception("sync_loop external_sync 재시도 실패")
             self._stop.wait(interval)
 
     def _revocation_tick(self) -> None:
@@ -937,6 +1104,17 @@ class RiskRunner:
             return
         self._last_revocation_poll = now
         poll_revoked_pats(self.store, self.settings)
+
+    def _external_sync_tick(self) -> dict:
+        """`next_at` 이 지난 pending 채널을 1회 재시도한다(plan §5.5.3 — sync_loop 주기 60 s).
+
+        전송기(`send`)는 주입식이라 러너 자체는 외부를 열지 않는다. 없으면 due 만 세고 지나간다.
+        """
+        if self.store is None or self.settings is None:
+            return {"due": 0, "sent": 0, "skipped": "store 없음"}
+        from app import nightly  # noqa: PLC0415 — nightly 는 runner 를 import 하지 않는다.
+
+        return nightly.retry_external_sync(self.store, now=now_epoch(), send=self.external_sync_send)
 
     def _panel_tick(self) -> None:
         """잡 1건을 집어 패널 1건을 돌릴 워커를 띄운다(세마포어 risk_concurrency, 타깃당 직렬)."""
@@ -979,6 +1157,10 @@ class RiskRunner:
         if self.store is not None:
             try:
                 recover_running_panels(self.store)
+                # 스냅샷 잡도 같은 자리에서 마감한다 — running 인 채 남으면 영영 진행판에 걸린다(§2.11.3).
+                from app import routes as routes_module  # noqa: PLC0415 — routes 는 runner 를 import 한다.
+
+                routes_module.close_stale_snapshot_jobs(self.store)
             except Exception:  # noqa: BLE001 — 복구 실패가 기동을 막지 않는다.
                 log.exception("재기동 복구 실패")
         for name, interval in _LOOPS:

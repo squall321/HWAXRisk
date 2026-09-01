@@ -7,6 +7,25 @@ import httpx
 
 from app.ra_client import DEFAULT_TIMEOUT, McpHttpClient
 
+# 레코드에 붙는 범위 태그(plan §8.2.5 ②) — 소유자와 가시성. 조직 검색은 `hwax:vis:org` 만 본다.
+OWNER_TAG_PREFIX = "hwax:owner:"
+VISIBILITY_TAG_PREFIX = "hwax:vis:"
+
+
+def with_scope_tags(record: Mapping[str, Any], *, owner_sub: str | None,
+                    visibility: str | None) -> dict:
+    """레코드에 소유자·가시성 태그를 붙인다(기존 같은 접두 태그는 갈아 끼운다 — 토글 재부착의 자리)."""
+    row = dict(record)
+    tags = [str(t) for t in (row.get("tags") or [])
+            if not str(t).startswith((OWNER_TAG_PREFIX, VISIBILITY_TAG_PREFIX))]
+    if owner_sub:
+        tags.append(f"{OWNER_TAG_PREFIX}{owner_sub}")
+    if visibility:
+        tags.append(f"{VISIBILITY_TAG_PREFIX}{visibility}")
+    row["tags"] = sorted(set(tags))
+    return row
+
+
 # import 는 REST 만 쓴다 — MCP import_record 는 _external_id 를 받지 못해 재실행 시 중복을 만든다(plan §5.4.2).
 IMPORT_PATH = "/api/records/import"
 # 이 값이 섞이면 external_id_map 이 같은 _external_id 를 두 레코드로 만든다(A 계획의 'hwax-portal' 폐기).
@@ -98,16 +117,20 @@ class AdhClient:
             return {"ok": False, "error": "unparsable_response", "detail": response.text[:500]}
 
     # -- REST 반영 -----------------------------------------------------------
-    def import_records(self, records: Sequence[Mapping[str, Any]], *, dry_run: bool = False) -> dict:
+    def import_records(self, records: Sequence[Mapping[str, Any]], *, dry_run: bool = False,
+                       owner_sub: str | None = None, visibility: str | None = None) -> dict:
         """`POST /api/records/import?external_source=hwax-risk` — `_external_id` 로 UPSERT 한다.
 
         레코드 id 는 불변이므로 재실행해도 `narr:`·`card:` 인용 대상이 바뀌지 않는다.
+        `owner_sub`·`visibility` 를 주면 소유자·가시성 태그를 붙인다 — 조직 태그 검색이 비공개 과제를
+        긁어 오지 않게 하는 유일한 자리다(plan §8.2.5 ②·§0.9 P3-23).
         """
         if not self.available:
             return self._unavailable()
         if not records:
             return {"ok": True, "result": {"records": []}}
-        payload = {"records": [dict(r) for r in records], "dry_run": bool(dry_run)}
+        rows = [with_scope_tags(r, owner_sub=owner_sub, visibility=visibility) for r in records]
+        payload = {"records": rows, "dry_run": bool(dry_run)}
         return self._post_json(IMPORT_PATH, payload, params={"external_source": EXTERNAL_SOURCE})
 
     def record_ids(self, reply: Mapping[str, Any]) -> dict[str, str]:
@@ -133,7 +156,8 @@ class AdhClient:
         return self._mcp.call(name, arguments)
 
     def hybrid_search(self, q: str, *, top_k: int = 5, tags: Sequence[str] | None = None,
-                      data_types: Sequence[str] | None = None) -> dict:
+                      data_types: Sequence[str] | None = None,
+                      exclude_tags: Sequence[str] | None = None) -> dict:
         """유사 서술 경로 (c) — summary_text 앞 300자로 찾는다(plan §5.4.7·§7.3 3단계).
 
         e5 코사인은 절대값을 비교하지 않고 상대 순위만 쓴다(무관한 문장도 0.89 가 정상이다).
@@ -143,6 +167,8 @@ class AdhClient:
             args["data_types"] = list(data_types)
         if tags:
             args["tags"] = list(tags)
+        if exclude_tags:
+            args["exclude_tags"] = list(exclude_tags)
         return self.call_tool("hybrid_search", args)
 
     def tag_search(self, tags: Sequence[str], *, limit: int = 20) -> dict:
@@ -150,11 +176,14 @@ class AdhClient:
         return self.call_tool("tag_search", {"tags": list(tags), "limit": limit})
 
     def agent_search(self, agent_type: str, q: str, *, mode: str = "hybrid",
-                     required_tags: Sequence[str] | None = None, top_k: int = 3) -> dict:
+                     required_tags: Sequence[str] | None = None, top_k: int = 3,
+                     exclude_tags: Sequence[str] | None = None) -> dict:
         """좌석 개인 기억 2차 경로 — 의사 에이전트 `risk-review-memory` 안에서만 찾는다(§5.6.3 2)."""
         args: dict[str, Any] = {"agent_type": agent_type, "q": q, "mode": mode}
         if required_tags:
             args["required_tags"] = list(required_tags)
+        if exclude_tags:
+            args["exclude_tags"] = list(exclude_tags)
         if top_k:
             args["retrieval_config"] = {"top_k": top_k}
         return self.call_tool("agent_search", args)

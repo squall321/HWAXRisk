@@ -155,10 +155,12 @@ def test_health_reads_agent_server(tmp_path):
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/health"
         return httpx.Response(200, json={"model": "glm-4.6", "vllm": "http://vllm.box:8000/v1",
-                                         "version": "eng-1"})
+                                         "version": "eng-1", "chair_rev": "c9f1"})
 
     info = _engine(tmp_path, handler).health()
-    assert info == {"model": "glm-4.6", "provider": "vllm", "endpoint_host": "vllm.box", "engine_rev": "eng-1"}
+    # chair_rev·sampling·vllm 은 엔진만 아는 값이라 그대로 옮긴다(§6.7.2 1단계).
+    assert info == {"model": "glm-4.6", "provider": "vllm", "endpoint_host": "vllm.box", "engine_rev": "eng-1",
+                    "chair_rev": "c9f1", "sampling": None, "vllm": "http://vllm.box:8000/v1"}
 
 
 class FakePanelEngine:
@@ -198,3 +200,48 @@ def test_fake_engine_returns_given_decision():
     assert out["decision_text"] == "결정문"
     assert out["conv_id"] == "c9"
     assert engine.calls == [{"question": "q"}]
+
+
+# ---------------------------------------------------------------- SSE 픽스처 3종(plan §0.9 P3-4)
+SSE_DIR = __import__("pathlib").Path(__file__).resolve().parent / "fixtures" / "sse"
+
+# (파일, 좌석, 기대 tool_calls_n, tool_calls_ok, attribution_rate)
+SSE_EXPECTED = [
+    ("normal.sse", ["mech-a0", "sim-a0"], 2, 2, 1.0),
+    ("no_tool.sse", ["mech-a0"], 0, 0, None),
+]
+
+
+def _stream(name: str) -> list[str]:
+    return (SSE_DIR / name).read_text(encoding="utf-8").splitlines()
+
+
+@pytest.mark.parametrize("name,seats,calls_n,calls_ok,rate", SSE_EXPECTED, ids=[c[0] for c in SSE_EXPECTED])
+def test_sse_fixtures_match_the_expected_attribution_table(name, seats, calls_n, calls_ok, rate):
+    """픽스처 스트림 → parse_sse → collect_stream → attribute_events 가 기대 표와 같다."""
+    from app.runner import attribute_events
+
+    result = engine_client.collect_stream(engine_client.parse_sse(_stream(name)))
+    attribution = attribute_events(result["events"], seats)
+    assert sum(attribution["seats"][k]["tool_calls_n"] for k in seats) == calls_n
+    assert sum(attribution["seats"][k]["tool_calls_ok"] for k in seats) == calls_ok
+    assert attribution["attribution_rate"] == rate
+    assert result["decision_text"]
+
+
+def test_error_stream_fixture_raises_engine_error():
+    with pytest.raises(EngineError):
+        engine_client.collect_stream(engine_client.parse_sse(_stream("error.sse")))
+
+
+def test_events_replay_path_matches_the_direct_sse_path():
+    """같은 스트림의 events[] 를 재주입해도 귀속 수치가 같고 0.95 이상이다(plan §6.7.2 7단계)."""
+    from app.runner import attribute_events
+
+    seats = ["mech-a0", "sim-a0"]
+    direct = engine_client.collect_stream(engine_client.parse_sse(_stream("normal.sse")))
+    live = attribute_events(direct["events"], seats)
+    # events[] 는 그대로 직렬화·역직렬화되어 POST /panels/{id}/complete 로 다시 들어온다.
+    replayed = attribute_events(json.loads(json.dumps(direct["events"])), seats)
+    assert replayed == live
+    assert live["attribution_rate"] >= 0.95

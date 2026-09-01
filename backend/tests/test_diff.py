@@ -518,3 +518,60 @@ def test_create_diff_refuses_a_g6_blocked_snapshot(risk_store, base_ir):
         diff.create_diff(risk_store, base_id, target_id, owner_sub=owner)
     assert excinfo.value.http_status == 409
     assert risk_store.query("SELECT id FROM rr_diffs WHERE owner_sub=?", (owner,)) == []
+
+
+# ---------------------------------------------------------------- 소스 5키(plan §3.3.6 표 · §0.9 P2-14)
+def test_source_five_keys_are_all_parity_for_the_same_snapshot(base_ir):
+    comp = diff.comparability(base_ir, base_ir)
+    assert comp["adapter_parity"] is True and comp["source_schema_parity"] is True
+    assert comp["capture_parity"] is True and comp["primary_source_parity"] is True
+    assert comp["source_schema_drift_kinds"] == []
+
+
+def test_app_version_drift_keeps_items_but_marks_parser_differs(base_ir):
+    """버전이 다르면 제외가 아니라 caveat 이고 의미 이벤트 confidence 가 한 단계 내려간다."""
+    base = json.loads(json.dumps(base_ir))
+    target = _load("pair_kind")
+    _mcad_source(base)["app_version"] = {"version": "0.1.0", "captured_via": "system_status"}
+    _mcad_source(target)["app_version"] = {"version": "0.2.0", "captured_via": "system_status"}
+    d = diff.compute_diff(base, target)
+    comp = d["comparability"]
+    assert comp["app_version_parity"] is False
+    changed = [p for p in d["parametric"]["edge_params"] if p["flag"] == "changed"]
+    assert changed and all(p["caveat"] == "parser_differs" for p in changed)
+    assert all(not p["excluded_reason"] or p["excluded_reason"] != "source_drift" for p in changed)
+    assert d["semantic"]["events"], "의미 이벤트는 만들되 등급만 낮춘다"
+    assert all(e["confidence"] in ("medium", "low") for e in d["semantic"]["events"])
+    # 파서 세대가 섞인 수치 변화는 설계 성향 씨앗으로 학습하지 않는다.
+    assert d["character_seed"] == []
+    # 버전만 다른 두 캡처는 ir_hash 입력이 아니므로 스냅샷 해시는 그대로다.
+    assert base["ir_hash"] == base_ir["ir_hash"]
+
+
+def test_schema_drift_excludes_that_kind_and_capture_partial_blocks_events(base_ir):
+    base = json.loads(json.dumps(base_ir))
+    target = _load("pair_kind")
+    _mcad_source(target)["degraded"] = list(_mcad_source(target).get("degraded") or []) + ["schema_drift"]
+    drift = diff.compute_diff(base, target)
+    assert drift["comparability"]["source_schema_parity"] is False
+    assert drift["comparability"]["source_schema_drift_kinds"] == ["mcad"]
+    assert all(p["excluded_reason"] for p in drift["parametric"]["edge_params"])
+    assert drift["stats"]["excluded_by_reason"].get("source_drift")
+
+    partial = _load("pair_kind")
+    partial["capture_partial"] = True
+    out = diff.compute_diff(base, partial)
+    assert out["comparability"]["capture_parity"] is False
+    assert out["semantic"]["events"] == []                 # 간섭 0 이 '해소' 로 읽히지 않게 한다
+    assert all(p["excluded_reason"] for p in out["parametric"]["edge_params"])
+
+
+def test_primary_source_drift_only_drops_the_rollup_delta(base_ir):
+    base = json.loads(json.dumps(base_ir))
+    target = _load("pair_kind")
+    base["primary_source"] = "mcad"
+    target["primary_source"] = "dyna"
+    d = diff.compute_diff(base, target)
+    assert d["comparability"]["primary_source_parity"] is False
+    assert all(item["excluded_reason"] == "partial_scope" for item in d["parametric"]["rollup_delta"])
+    assert d["structural"]["node_changes"] or d["structural"]["edge_changes"]   # 구조층은 그대로다

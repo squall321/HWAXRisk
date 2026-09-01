@@ -1,0 +1,10 @@
+{
+ "id": "INC-2026-003",
+ "project_id": "P1",
+ "ckeys": ["ck:zzzzzzzzzzzz"],
+ "mechanism": "vibration",
+ "outcome": "refuted",
+ "occurred_at": 9700000,
+ "severity_observed": "경미",
+ "note": "과제만 같다 — 1/3 이라 큐로 간다"
+}

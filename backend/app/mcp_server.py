@@ -1,4 +1,4 @@
-# hwax-risk MCP 서버 — 도구 6종(plan §0.5.2 시그니처)은 REST 와 같은 함수를 부르는 원장 접점이다(§6.11, LLM 을 부르지 않는다)
+# hwax-risk MCP 서버 — 도구 7종(plan §0.5.2 시그니처)은 REST 와 같은 함수를 부르는 원장 접점이다(§6.11, LLM 을 부르지 않는다)
 from __future__ import annotations
 
 import logging
@@ -12,9 +12,10 @@ from app.errors import AppError
 
 log = logging.getLogger("hwax_risk.mcp")
 
-_INSTRUCTIONS = """HWAX Risk Review — 설계 리스크 심사 앱의 MCP 서버. 도구 6종은 심의 엔진이 아니라 원장 접점이다 —
+_INSTRUCTIONS = """HWAX Risk Review — 설계 리스크 심사 앱의 MCP 서버. 도구 7종은 심의 엔진이 아니라 원장 접점이다 —
 조회 4종(risk_get_snapshot · risk_get_diff · risk_get_registry · risk_claims_for_ref) · 브리프 공급(risk_get_brief,
-tier 'A' 는 웹 전용) · 결과 회수(risk_submit_panel_result, engine='mcp' 는 evidence_only 등급으로 기록)."""
+tier 'A' 는 웹 전용) · 결과 회수(risk_submit_panel_result, engine='mcp' 는 evidence_only 등급으로 기록) ·
+사람 finding 등록(risk_add_finding, actor 는 미검증 표기)."""
 
 # loopback 바인드 + Caddy 경계 전제로 Host 검증(DNS rebinding 보호)은 끈다(LaminateAnalyzerMCP 선례).
 # streamable_http_path 는 기본 '/mcp' — main.py 가 streamable_http_app() 의 Route('/mcp') 를 메인 라우터에 이식해
@@ -130,3 +131,33 @@ def risk_submit_panel_result(
         # 다만 소유권 검사에는 쓴다 — 아무나 남의 panel_id 를 종결하면 원장이 오염된다.
         actor=actor, actor_verified=False, owner_sub=_owner(actor),
     )
+
+
+@mcp.tool()
+def risk_add_finding(
+    target_key: str,
+    claim: str,
+    cites: list[dict],
+    *,
+    actor: str,
+    direction: str = "risk",
+    domain: str | None = None,
+    mechanism: str = "unclassified",
+    mechanism_detail: str | None = None,
+    change_kind: str | None = None,
+    subject_key: str | None = None,
+    subject_names: list[str] | None = None,
+    severity: str | None = None,
+    judgement: str | None = None,
+    warrant: str | None = None,
+) -> dict:
+    """사람 finding 등록(REST POST /api/targets/{key}/findings 와 같은 함수, 인용 0건은 422)."""
+    body = routes.HumanFindingBody(
+        direction=direction, domain=domain, mechanism=mechanism, mechanism_detail=mechanism_detail,
+        change_kind=change_kind, subject_key=subject_key, subject_names=list(subject_names or []),
+        severity=severity, judgement=judgement, claim=claim, warrant=warrant, cites=list(cites or []),
+    )
+    email = _owner(actor)
+    ident = routes.identity.Identity(email=email, display_name=email, role="user", organization=None,
+                                     anonymous=not email, source="mcp")
+    return _guarded(routes.create_human_finding, target_key, body, ident=ident)

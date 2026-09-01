@@ -484,8 +484,12 @@ def resolve(
                 if a_nid in a_by_nid and b_nid in b_by_nid and a_nid not in taken_a and b_nid not in taken_b:
                     if (a_nid, b_nid) in blocked:
                         continue
+                    # 조인 키는 REST 가용 시 `path:…`, MCP 폴백 시 `file+name:…` 이다(plan §2.5.1).
+                    # 소스가 주는 행 id 는 쓰지 않는다 — 그 값은 재파싱마다 바뀐다.
+                    join_key = at.get("join_key") or (at.get("bridge") or {}).get("join_key") \
+                        if isinstance(at.get("bridge"), Mapping) else at.get("join_key")
                     accept(a_nid, b_nid, "pid_map", 1.0,
-                           {"bridge": {"mesh_key": at.get("mesh_key"), "stale": False}})
+                           {"bridge": {"join_key": join_key, "stale": False}})
                     break
 
     # --- 3단계 exact_path — pair 스코프의 mcad 만.
@@ -870,7 +874,7 @@ def inherit_ckeys(store, links: Sequence[Mapping[str, Any]],
     applied: list[dict] = []
 
     with store.tx():
-        for link in sorted(links, key=lambda l: (str(l.get("a")), str(l.get("b")))):
+        for link in sorted(links, key=lambda item: (str(item.get("a")), str(item.get("b")))):
             method = str(link.get("method") or "")
             score = float(link.get("score") or 0.0)
             if str(link.get("status")) not in ("confirmed", "auto"):

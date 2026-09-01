@@ -1,9 +1,10 @@
 # 등록부 병합·verdict 후보·완결 레벨 C1~C3·무효화(stale/superseded)·통합 보고서 조립 — plan §4.7·§4.8·§6.9
 from __future__ import annotations
 
+import hashlib
 import json
 import math
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
 from app import common, config
@@ -62,7 +63,22 @@ _REGISTRY_COLUMNS = (
 _MERGE_OWNED_COLUMNS = (
     "merged_json", "support", "contested", "direction", "mechanism", "mechanism_detail", "change_kind",
     "subject_key", "severity", "sev3", "judgement", "evidence_grade", "precedent", "weak_subject", "priority",
+    "rejected", "human_n", "family_key",
 )
+
+
+def corpus_projects(store: RiskStore) -> set[str]:
+    """§0.6 코퍼스 필터 정본 — `status='active' AND corpus_excluded=0` 인 과제 id 집합.
+
+    학습·통계(metrics)와 회수(brief)가 같은 함수를 본다 — 두 곳이 각자 SQL 을 쓰면 필터가 갈린다.
+    """
+    return {str(r["id"]) for r in store.query(
+        "SELECT id FROM rr_projects WHERE status = 'active' AND corpus_excluded = 0", ())}
+
+
+def family_key_of(mechanism: str, mechanism_detail: str, change_kind: str) -> str:
+    """§4.3.2 family_key — sha1(mechanism|mechanism_detail|change_kind)[:12]. subject 를 뺀 묶음 키다."""
+    return hashlib.sha1(f"{mechanism}|{mechanism_detail}|{change_kind}".encode()).hexdigest()[:12]
 
 
 # ---------------------------------------------------------------- 작은 도우미
@@ -145,7 +161,8 @@ def _load_findings(store: RiskStore, target_key: str) -> list[dict]:
     rows = store.query(
         "SELECT finding_id, claim_uid, panel_id, opinion_id, owner_sub, visibility, direction, domain, "
         "mechanism, mechanism_detail, change_kind, subject_key, ckeys_json, severity, sev3, judgement, "
-        "detectability, detect_tool, evidence_grade, precedent, cluster_key, finding_json, created_at "
+        "detectability, detect_tool, evidence_grade, precedent, cluster_key, finding_json, origin, "
+        "author_sub, status, created_at "
         "FROM rr_findings WHERE target_key = ? ORDER BY finding_id",
         (target_key,),
     )
@@ -175,10 +192,18 @@ def _representative(members: list[dict]) -> dict:
 
 def _merge_cluster(target_key: str, stored_key: str, base_key: str, bucket: str, members: list[dict]) -> dict:
     """한 클러스터의 집계 행을 만든다(plan §4.7.1 병합 규칙)."""
-    members = sorted(members, key=lambda m: _clean_str(m.get("finding_id")))
+    all_members = sorted(members, key=lambda m: _clean_str(m.get("finding_id")))
+    # 패널에서 기각된 원자(status='rejected_in_panel')는 지지에서 빠지고 rejected 로 따로 센다(plan §4.7.1).
+    rejected_members = [m for m in all_members if _clean_str(m.get("status")) == "rejected_in_panel"]
+    members = [m for m in all_members if _clean_str(m.get("status")) != "rejected_in_panel"]
+    if not members:
+        members = rejected_members            # 대표·집계 계산에는 기각 원자라도 써야 행을 만들 수 있다
+    # 사람 finding 은 전문가 지지로 세지 않는다 — human_n 으로 따로 센다(plan §4.7.1).
+    llm_members = [m for m in members if _clean_str(m.get("origin") or "llm") != "human"]
+    human_n = sum(1 for m in members if _clean_str(m.get("origin")) == "human")
 
-    panels = sorted({_clean_str(m.get("panel_id")) for m in members if m.get("panel_id")})
-    support = len(panels) if panels else len(members)
+    panels = sorted({_clean_str(m.get("panel_id")) for m in llm_members if m.get("panel_id")})
+    support = len(panels) if panels else len(llm_members)
 
     contested = 0
     contest_notes: list[dict] = []
@@ -283,6 +308,8 @@ def _merge_cluster(target_key: str, stored_key: str, base_key: str, bucket: str,
         "claim_finding_id": rep["finding_id"],
         "warrant": _clean_str(rep["_json"].get("warrant")),
         "member_ids": [m["finding_id"] for m in members],
+        "rejected_refs": [m["finding_id"] for m in rejected_members],
+        "human_refs": [m["finding_id"] for m in members if _clean_str(m.get("origin")) == "human"],
         "panels": panels,
         "raised_by": sorted(raised_by),
         "contest_notes": contest_notes,
@@ -317,6 +344,16 @@ def _merge_cluster(target_key: str, stored_key: str, base_key: str, bucket: str,
         "precedent": precedent,
         "weak_subject": 1 if weak_subject else 0,
         "priority": priority,
+        "rejected": len(rejected_members),
+        "human_n": human_n,
+        "family_key": family_key_of(
+            _clean_str(rep.get("mechanism")) or "unclassified",
+            _clean_str(rep.get("mechanism_detail")),
+            _clean_str(rep.get("change_kind")),
+        ),
+        # 전원이 기각한 클러스터는 코드가 세운 판정이다 — 사람이 닫은 status 를 덮지는 않는다.
+        "code_status": "rejected_in_panel" if not [m for m in all_members
+                                                   if _clean_str(m.get("status")) != "rejected_in_panel"] else "open",
     }
 
 
@@ -327,12 +364,22 @@ def _write_registry_row(store: RiskStore, row: dict, now: int) -> str:
         (row["target_key"], row["cluster_key"]),
     )
     if existing is not None:
+        # 사람·라벨이 정한 status 는 병합이 건드리지 않는다 — 코드 출처일 때만 rejected_in_panel↔open 을 옮긴다.
+        code_status = row.get("code_status") or "open"
+        status_row = store.query_one(
+            "SELECT status, status_source FROM rr_registry WHERE target_key = ? AND cluster_key = ?",
+            (row["target_key"], row["cluster_key"]))
+        status_moves = (status_row is not None and status_row["status_source"] == "code"
+                        and status_row["status"] != code_status)
         same = all(existing[col] == row[col] for col in _MERGE_OWNED_COLUMNS)
-        if same:
+        if same and not status_moves:
             return "unchanged"
         sets = ", ".join(f"{col} = :{col}" for col in _MERGE_OWNED_COLUMNS)
         params = {col: row[col] for col in _MERGE_OWNED_COLUMNS}
         params.update({"target_key": row["target_key"], "cluster_key": row["cluster_key"], "updated_at": now})
+        if status_moves:
+            sets += ", status = :code_status"
+            params["code_status"] = code_status
         store.execute(
             f"UPDATE rr_registry SET {sets}, updated_at = :updated_at "
             "WHERE target_key = :target_key AND cluster_key = :cluster_key",
@@ -341,11 +388,13 @@ def _write_registry_row(store: RiskStore, row: dict, now: int) -> str:
         return "updated"
     store.execute(
         "INSERT INTO rr_registry (target_key, cluster_key, owner_sub, visibility, merged_json, support, contested, "
-        "direction, mechanism, mechanism_detail, change_kind, subject_key, severity, sev3, judgement, evidence_grade, "
-        "precedent, weak_subject, priority, status, verified_by_json, stale_json, updated_at) "
-        "VALUES (:target_key, :cluster_key, :owner_sub, :visibility, :merged_json, :support, :contested, :direction, "
+        "rejected, human_n, family_key, direction, mechanism, mechanism_detail, change_kind, subject_key, severity, "
+        "sev3, judgement, evidence_grade, precedent, weak_subject, priority, status, verified_by_json, stale_json, "
+        "updated_at) "
+        "VALUES (:target_key, :cluster_key, :owner_sub, :visibility, :merged_json, :support, :contested, "
+        ":rejected, :human_n, :family_key, :direction, "
         ":mechanism, :mechanism_detail, :change_kind, :subject_key, :severity, :sev3, :judgement, :evidence_grade, "
-        ":precedent, :weak_subject, :priority, 'open', NULL, NULL, :updated_at)",
+        ":precedent, :weak_subject, :priority, :code_status, NULL, NULL, :updated_at)",
         {**row, "updated_at": now},
     )
     return "inserted"
@@ -477,10 +526,15 @@ def merge(store: RiskStore, target_key: str, *, owner_sub: str | None = None) ->
         owner_sub = _clean_str(row["owner_sub"]) if row is not None else ""
 
     buckets: dict[tuple[str, str], list[dict]] = {}
+    alias_cache: dict[str, str] = {}
     for item in findings:
         base = _clean_str(item.get("cluster_key"))
         if not base:
             continue
+        # 사람이 확정한 별칭이 있으면 대표 키로 접어 병합한다(finding 행의 cluster_key 는 불변, §4.3.2).
+        if base not in alias_cache:
+            alias_cache[base] = resolve_cluster_key(store, base)
+        base = alias_cache[base] or base
         buckets.setdefault((base, _bucket_of(_clean_str(item.get("direction")))), []).append(item)
 
     rows: list[dict] = []
@@ -492,9 +546,11 @@ def merge(store: RiskStore, target_key: str, *, owner_sub: str | None = None) ->
         rows.append(row)
 
     counts = {"inserted": 0, "updated": 0, "unchanged": 0}
+    escalated: list[str] = []
     with store.tx():
         for row in rows:
             counts[_write_registry_row(store, row, now)] += 1
+        escalated = _flag_escalations(store, rows, target_key, now)
         affected = _recompute_contrib(store, target_key, owner_sub or "", rows, now)
         priors_written = _recompute_priors(store, affected, now)
         candidate = verdict_candidate(store, target_key)
@@ -514,7 +570,48 @@ def merge(store: RiskStore, target_key: str, *, owner_sub: str | None = None) ->
         "unchanged": counts["unchanged"],
         "priors_written": priors_written,
         "verdict_candidate": candidate["verdict"],
+        "escalated": escalated,
     }
+
+
+# 재제기 강도 비교 축(plan §4.7.1) — 하나라도 기준선보다 크면 '더 강한 근거' 다.
+def _is_stronger(row: Mapping[str, Any], basis: Mapping[str, Any]) -> dict | None:
+    """새 집계가 사람이 닫을 때의 기준선보다 강하면 delta(없으면 None)."""
+    sev3 = int(row.get("sev3") or 0) - int(basis.get("sev3_at_decision") or 0)
+    support = int(row.get("support") or 0) - int(basis.get("support_at_decision") or 0)
+    grade = (GRADE_ORDER.get(_clean_str(row.get("evidence_grade")), 0)
+             - GRADE_ORDER.get(_clean_str(basis.get("grade_at_decision")), 0))
+    if sev3 <= 0 and support <= 0 and grade <= 0:
+        return None
+    return {"sev3": sev3, "support": support, "grade": grade}
+
+
+def _flag_escalations(store: RiskStore, rows: Sequence[Mapping[str, Any]], target_key: str, now: int) -> list[str]:
+    """사람이 dismissed 로 닫은 같은 클러스터가 더 강한 근거로 재제기되면 그 행에 재검토 표기를 남긴다.
+
+    status 는 dismissed 그대로다 — 코드가 사람 판정을 뒤집지 않는다. 판정 후보에는 그대로 든다(plan §4.7.1).
+    """
+    flagged: list[str] = []
+    for row in rows:
+        others = store.query(
+            "SELECT target_key, cluster_key, status, status_source, status_basis_json, needs_review_json"
+            " FROM rr_registry WHERE cluster_key = ? AND target_key != ? AND status = 'dismissed'"
+            " AND status_source = 'human' ORDER BY target_key",
+            (row["cluster_key"], target_key),
+        )
+        for other in others:
+            basis = _loads(other["status_basis_json"], {})
+            delta = _is_stronger(row, basis)
+            if delta is None:
+                continue
+            note = {"escalated": True, "since": now, "by_target": target_key, "delta": delta}
+            store.execute(
+                "UPDATE rr_registry SET needs_review_json = ?, updated_at = ?"
+                " WHERE target_key = ? AND cluster_key = ?",
+                (common.canonical_json(note), now, other["target_key"], other["cluster_key"]),
+            )
+            flagged.append(str(other["cluster_key"]))
+    return flagged
 
 
 # ---------------------------------------------------------------- §4.7.2 verdict 후보
@@ -571,6 +668,21 @@ def verdict_candidate(store: RiskStore, target_key: str) -> dict:
     return {"verdict": "undetermined", "counts": counts, "reasons": ["FAIL 클러스터가 전부 반대석 기각 상태"]}
 
 
+def _next_status_seq(store: RiskStore, target_key: str, cluster_key: str) -> int:
+    """(target_key, cluster_key) 안에서 1부터 오르는 status 로그 순번(plan §4.7.1)."""
+    row = store.query_one(
+        "SELECT MAX(seq) AS mx FROM rr_registry_status_log WHERE target_key = ? AND cluster_key = ?",
+        (target_key, cluster_key),
+    )
+    return int(row["mx"] if row is not None and row["mx"] is not None else 0) + 1
+
+
+# 사람이 고를 수 있는 등록부 상태(plan §4.7.1). open 은 되돌리기다.
+HUMAN_STATUSES: tuple[str, ...] = ("open", "verified", "dismissed", "mitigated")
+# 근거 참조가 필요한 전이 — 사람이 닫는 판정은 무엇을 보고 닫았는지가 함께 남아야 한다.
+EVIDENCE_REQUIRED: tuple[str, ...] = ("verified", "dismissed", "open")
+
+
 def set_status(
     store: RiskStore,
     cluster_key: str,
@@ -582,39 +694,71 @@ def set_status(
     note: str | None = None,
     actor: str | None = None,
 ) -> dict:
-    """PUT /api/registry/{cluster}/status — 사람·라벨이 정하는 상태 전이(plan §4.7.1).
+    """PUT /api/registry/{cluster}/status — 사람이 정하는 상태 전이(plan §4.7.1·§7.6).
 
-    verified·dismissed 는 라벨(§7.6) 생성이 뒤따르고 mitigated 는 사람 표기만이다. 라벨 생성 자체는 이 모듈이 하지 않는다.
+    쓰는 것은 status 5열(`status`·`status_source='human'`·`status_decided_by`·`status_decided_at`·
+    `status_basis_json`)과 append-only `rr_registry_status_log` 1행이다. verified·dismissed·open 은
+    `evidence_ref` 가, mitigated 는 `note` 가 없으면 422 다 — 근거 없는 사람 판정을 원장에 남기지 않는다.
     """
-    if status not in ("verified", "dismissed", "mitigated"):
+    if status not in HUMAN_STATUSES:
         raise AppError("E100", f"등록부 상태 어휘 밖입니다: {status}", 422)
+    if status in EVIDENCE_REQUIRED and not (evidence_ref or "").strip():
+        raise AppError("evidence_ref_required", f"'{status}' 전이에는 evidence_ref 가 필요합니다.", 422)
+    if status == "mitigated" and not (note or "").strip():
+        raise AppError("note_required", "'mitigated' 전이에는 note 가 필요합니다.", 422)
     now = common.now_epoch()
-    sql = "SELECT target_key, cluster_key, verified_by_json FROM rr_registry WHERE cluster_key = ? AND owner_sub = ?"
+    sql = ("SELECT target_key, cluster_key, verified_by_json, status, support, sev3, evidence_grade,"
+           " merged_json FROM rr_registry WHERE cluster_key = ? AND owner_sub = ?")
     params: list[Any] = [cluster_key, owner_sub]
     if target_key:
         sql += " AND target_key = ?"
         params.append(target_key)
     rows = store.query(sql + " ORDER BY target_key", params)
     if not rows:
+        # 조직 공개(visibility='org') 행이 남의 소유라면 '없다' 가 아니라 '쓸 수 없다' 다 — 읽기는 열려 있다.
+        visible = store.query_one(
+            "SELECT owner_sub FROM rr_registry WHERE cluster_key = ? AND visibility = 'org' LIMIT 1",
+            (cluster_key,))
+        if visible is not None:
+            raise AppError("E403", "조직 공개 등록부 행은 소유자만 고칠 수 있습니다.", 403)
         raise AppError("E404", f"등록부 클러스터를 찾지 못했습니다: {cluster_key}", 404)
     updated = 0
+    seqs: dict[str, int] = {}
+    decided_by = actor or owner_sub
     with store.tx():
         for row in rows:
             log = _loads(row["verified_by_json"], [])
-            log.append({
-                "status": status,
-                "by": actor or owner_sub,
-                "at": now,
+            log.append({"status": status, "by": decided_by, "at": now,
+                        "evidence_ref": evidence_ref or "", "note": note or ""})
+            basis = {
                 "evidence_ref": evidence_ref or "",
-                "note": note or "",
-            })
+                "finding_ids": _loads(row["merged_json"], {}).get("member_ids", []),
+                "support_at_decision": int(row["support"] or 0),
+                "sev3_at_decision": int(row["sev3"] or 0),
+                "grade_at_decision": _clean_str(row["evidence_grade"]),
+            }
             store.execute(
-                "UPDATE rr_registry SET status = ?, verified_by_json = ?, updated_at = ? "
-                "WHERE target_key = ? AND cluster_key = ?",
-                (status, common.canonical_json(log), now, row["target_key"], row["cluster_key"]),
+                "UPDATE rr_registry SET status = ?, status_source = 'human', status_decided_by = ?,"
+                " status_decided_at = ?, status_note = ?, status_basis_json = ?, verified_by_json = ?,"
+                " needs_review_json = NULL, updated_at = ? WHERE target_key = ? AND cluster_key = ?",
+                (status, decided_by, now, note, common.canonical_json(basis), common.canonical_json(log),
+                 now, row["target_key"], row["cluster_key"]),
             )
+            seq = _next_status_seq(store, row["target_key"], row["cluster_key"])
+            store.execute(
+                "INSERT INTO rr_registry_status_log(id, target_key, cluster_key, owner_sub, seq, from_status,"
+                " to_status, source, decided_by, decided_at, evidence_ref, note, label_id, basis_json, applied)"
+                " VALUES (?,?,?,?,?,?,?, 'human', ?,?,?,?, NULL, ?, 1)",
+                (common.new_uuid(), row["target_key"], row["cluster_key"], owner_sub, seq,
+                 _clean_str(row["status"]), status, decided_by, now, evidence_ref, note,
+                 common.canonical_json(basis)),
+            )
+            seqs[str(row["cluster_key"])] = seq
             updated += 1
-    return {"cluster_key": cluster_key, "status": status, "updated": updated, "label_needed": status != "mitigated"}
+    return {"cluster_key": cluster_key, "status": status, "updated": updated,
+            "status_source": "human", "decided_by": decided_by, "decided_at": now,
+            "status_log_seq": max(seqs.values()) if seqs else 0,
+            "label_needed": status in ("verified", "dismissed")}
 
 
 # ---------------------------------------------------------------- §4.8 무효화(stale · superseded)
@@ -1217,3 +1361,116 @@ def build_consolidated_report(store: RiskStore, target_key: str, level: str | No
     if level:
         report["level"] = level
     return report
+
+
+REGISTRY_VISIBILITIES: tuple[str, ...] = ("private", "org")
+
+
+def set_visibility(store: RiskStore, cluster_key: str, visibility: str, *, owner_sub: str,
+                   target_key: str | None = None) -> dict:
+    """등록부 행의 조직 공개 토글(소유자 전용, plan §5.1 원칙 9·§0.9 P6-8).
+
+    `org` 로 열면 다른 신원의 회수(E5·유사 과제)가 이 행을 보고, `private` 로 닫으면 보이지 않는다.
+    쓰기는 어느 쪽이든 소유자만이다 — 공개는 읽기 경계이지 쓰기 경계가 아니다.
+    """
+    if visibility not in REGISTRY_VISIBILITIES:
+        raise AppError("E100", f"visibility 는 {list(REGISTRY_VISIBILITIES)} 중 하나여야 합니다.", 422)
+    sql = "SELECT target_key, cluster_key, visibility FROM rr_registry WHERE cluster_key = ? AND owner_sub = ?"
+    params: list[Any] = [cluster_key, owner_sub]
+    if target_key:
+        sql += " AND target_key = ?"
+        params.append(target_key)
+    rows = store.query(sql + " ORDER BY target_key", params)
+    if not rows:
+        visible = store.query_one(
+            "SELECT owner_sub FROM rr_registry WHERE cluster_key = ? LIMIT 1", (cluster_key,))
+        if visible is not None:
+            raise AppError("E403", "등록부 행의 공개 범위는 소유자만 바꿀 수 있습니다.", 403)
+        raise AppError("E404", f"등록부 클러스터를 찾지 못했습니다: {cluster_key}", 404)
+    now = common.now_epoch()
+    before = sorted({_clean_str(r["visibility"]) or "private" for r in rows})
+    with store.tx():
+        for row in rows:
+            store.execute(
+                "UPDATE rr_registry SET visibility = ?, updated_at = ? WHERE target_key = ? AND cluster_key = ?",
+                (visibility, now, row["target_key"], row["cluster_key"]))
+    return {"cluster_key": cluster_key, "visibility": visibility, "updated": len(rows), "before": before}
+
+
+# ---------------------------------------------------------------- §4.3.2 cluster_key 별칭(사람 확정)
+ALIAS_MAX_HOPS = 5
+ALIAS_REASONS: tuple[str, ...] = ("taxonomy_major", "ckey_merge", "iface_alias", "dim_rename", "cluster_merge")
+
+
+def resolve_cluster_key(store: RiskStore, cluster_key: str) -> str:
+    """별칭 체인을 따라간 대표 cluster_key(≤5홉·순환 차단). 정본은 learning.resolve_cluster_key 다."""
+    from app import learning  # noqa: PLC0415 — learning 은 registry 를 import 하지 않는다.
+
+    return learning.resolve_cluster_key(store, cluster_key)
+
+
+def _alias_hops(store: RiskStore, start: str) -> int:
+    """start 에서 시작하는 별칭 체인의 홉 수. 순환이면 ALIAS_MAX_HOPS + 1 을 돌려준다."""
+    seen = {start}
+    current, hops = start, 0
+    while True:
+        row = store.query_one(
+            "SELECT new_cluster_key FROM rr_cluster_alias WHERE old_cluster_key = ? AND revoked_at IS NULL",
+            (current,))
+        if row is None:
+            return hops
+        nxt = _clean_str(row["new_cluster_key"])
+        if not nxt or nxt in seen:
+            return ALIAS_MAX_HOPS + 1
+        seen.add(nxt)
+        current = nxt
+        hops += 1
+        if hops > ALIAS_MAX_HOPS:
+            return hops
+
+
+def add_cluster_alias(store: RiskStore, old_cluster_key: str, new_cluster_key: str, *, owner_sub: str,
+                      reason: str = "cluster_merge", evidence: Mapping[str, Any] | None = None) -> dict:
+    """사람 확정으로 옛 키 → 새 키 별칭 1행(plan §4.3.2). 6홉·순환은 409 다.
+
+    행을 지우지 않는다 — 철회는 `revoke_cluster_alias` 가 `revoked_at` 을 찍고 병합이 다시 갈린다.
+    """
+    old_key, new_key = _clean_str(old_cluster_key), _clean_str(new_cluster_key)
+    if not old_key or not new_key:
+        raise AppError("E100", "old·new cluster_key 가 모두 필요합니다.", 422)
+    if old_key == new_key:
+        raise AppError("E100", "같은 키로는 별칭을 만들 수 없습니다.", 422)
+    if reason not in ALIAS_REASONS:
+        raise AppError("E100", f"reason 은 {list(ALIAS_REASONS)} 중 하나여야 합니다.", 422)
+    existing = store.query_one(
+        "SELECT new_cluster_key, revoked_at FROM rr_cluster_alias WHERE old_cluster_key = ?", (old_key,))
+    if existing is not None and existing["revoked_at"] is None:
+        raise AppError("E409", f"이미 별칭이 있는 키입니다 — {old_key} → {existing['new_cluster_key']}.", 409)
+    # 새 키 뒤로 이어진 체인이 5홉을 넘거나 되돌아오면(순환) 만들지 않는다.
+    if _alias_hops(store, new_key) + 1 > ALIAS_MAX_HOPS or resolve_cluster_key(store, new_key) == old_key:
+        raise AppError("alias_chain_too_long",
+                       f"별칭 체인이 {ALIAS_MAX_HOPS} 홉을 넘거나 순환합니다 — {old_key} → {new_key}.", 409)
+    now = common.now_epoch()
+    store.execute(
+        "INSERT OR REPLACE INTO rr_cluster_alias(old_cluster_key, new_cluster_key, owner_sub, reason,"
+        " evidence_json, decided_by, decided_at, revoked_by, revoked_at) VALUES (?,?,?,?,?,?,?, NULL, NULL)",
+        (old_key, new_key, owner_sub, reason, common.canonical_json(dict(evidence or {})), owner_sub, now),
+    )
+    return {"old_cluster_key": old_key, "new_cluster_key": new_key, "reason": reason, "decided_at": now}
+
+
+def revoke_cluster_alias(store: RiskStore, old_cluster_key: str, *, owner_sub: str) -> dict:
+    """별칭 철회 — 행을 지우지 않고 `revoked_at` 만 찍는다(§5.2.1). 이후 병합은 다시 두 행으로 갈린다."""
+    old_key = _clean_str(old_cluster_key)
+    row = store.query_one(
+        "SELECT new_cluster_key, revoked_at FROM rr_cluster_alias WHERE old_cluster_key = ? AND owner_sub = ?",
+        (old_key, owner_sub))
+    if row is None:
+        raise AppError("E404", f"별칭이 없습니다 — {old_key}.", 404)
+    if row["revoked_at"] is not None:
+        return {"old_cluster_key": old_key, "revoked": False, "already": True}
+    now = common.now_epoch()
+    store.execute(
+        "UPDATE rr_cluster_alias SET revoked_by = ?, revoked_at = ? WHERE old_cluster_key = ?",
+        (owner_sub, now, old_key))
+    return {"old_cluster_key": old_key, "revoked": True, "revoked_at": now}

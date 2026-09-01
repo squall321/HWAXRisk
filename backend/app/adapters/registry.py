@@ -63,6 +63,8 @@ class GatewayRegistry:
         self.timeout = timeout
         self._map: dict[str, str] | None = None
         self._error: str | None = None
+        # kind → 다의 후보 목록(plan §2.13.2 ambiguous_tool_name).
+        self._ambiguous: dict[str, list[str]] = {}
 
     def _http(self) -> httpx.Client:
         if self._client is None:
@@ -89,7 +91,11 @@ class GatewayRegistry:
         return self._map
 
     def app_key_for(self, kind: str, preferred: str | None = None) -> str | None:
-        """도구 집합으로 백엔드를 찾는다. 후보가 여럿이면 사용자가 고른 preferred(rr_sources.app_key)를 쓴다."""
+        """도구 집합으로 백엔드를 찾는다. 후보가 여럿이면 사용자가 고른 preferred(rr_sources.app_key)로 좁힌다.
+
+        preferred 로도 좁혀지지 않으면 아무 백엔드나 고르지 않고 None 을 돌려준다 — 그 상태는
+        `probe.reachable=false` + `warnings ∋ ambiguous_tool_name` 로 드러난다(plan §2.13.2).
+        """
         wants = REQUIRED_TOOLS.get(kind, ())
         tools = self.load()
         candidates: dict[str, set[str]] = {}
@@ -102,13 +108,17 @@ class GatewayRegistry:
             return preferred
         if len(full) == 1:
             return full[0]
+        if len(full) > 1:
+            self._ambiguous[kind] = full
+            return None
         if preferred and preferred in candidates:
             return preferred
-        return full[0] if full else None
+        return None
 
     def probe(self, kind: str, app_key: str | None = None) -> Probe:
         """plan §2.13.1 Probe. rest_ok 는 게이트웨이가 알 수 없는 값이라 None 이다(REST 는 캡처가 실증한다)."""
         wants = REQUIRED_TOOLS.get(kind, ())
+        self._ambiguous.pop(kind, None)
         resolved = self.app_key_for(kind, app_key or default_app_key(kind))
         tools = self.load()
         present, missing = [], []
@@ -116,9 +126,11 @@ class GatewayRegistry:
             found = any(tool_matches(name, want) and (resolved is None or backend == resolved)
                         for name, backend in tools.items())
             (present if found else missing).append(want)
+        warnings = ["ambiguous_tool_name"] if kind in self._ambiguous else []
         return {"kind": kind, "app_key": resolved, "reachable": bool(resolved) and not missing,
                 "tools_present": present, "tools_missing": missing, "rest_ok": None,
-                "gateway_error": self._error}
+                "gateway_error": self._error, "warnings": warnings,
+                "candidates": self._ambiguous.get(kind, [])}
 
     def close(self) -> None:
         if self._owns_client and self._client is not None:
@@ -157,10 +169,10 @@ def capture_all(*, sources: Sequence[Mapping[str, Any]], principal: Principal,
         if kind in CAPTURE_ORDER and kind not in by_kind:
             by_kind[kind] = dict(row)
     wanted = [k for k in CAPTURE_ORDER if (kinds is None or k in kinds or k == "ecad")]
-    if "mcad" not in by_kind or "mcad" not in wanted:
+    if not [k for k in wanted if k in by_kind]:
+        # mcad 가 없어도 dyna 단독 스냅샷은 만든다(plan §2.2 primary_source) — 소스가 아예 0 일 때만 막는다.
         raise AppError("source_unreachable",
-                       "mcad 소스가 없는 스냅샷은 만들지 않습니다 — StepForge 소스를 먼저 연결하세요.",
-                       http_status=409)
+                       "연결된 소스가 없습니다 — 소스를 먼저 연결하세요.", http_status=409)
 
     recorder = CallRecorder(sid, mcp=mcp_client, rest=rest_client)
     results: list[dict] = []

@@ -96,8 +96,31 @@ async def _app_error_handler(_request: Request, exc: AppError) -> JSONResponse:
 
 @app.get("/api/health")
 def health() -> dict:
-    """헬스체크 — HEAX 러너 health_check(path /api/health)가 읽는다. 형식 고정 {ok, app_version, schema_version}(plan §5.2.5 (6))."""
-    return {"ok": True, "app_version": config.APP_VERSION, "schema_version": get_store().schema_version()}
+    """헬스체크 — HEAX 러너 health_check(path /api/health)가 읽는다. 형식 {ok, app_version, schema_version}(plan §5.2.5 (6)).
+
+    경고가 있을 때만 `warnings[]` 를 더한다 — 지금은 `backup_unencrypted` 하나뿐이고, 그 상태에서도
+    백업 자체는 막지 않는다(백업 없음이 더 나쁘다, plan §5.2.5 (3a) ③).
+    """
+    out = {"ok": True, "app_version": config.APP_VERSION, "schema_version": get_store().schema_version()}
+    warnings = health_warnings()
+    if warnings:
+        out["warnings"] = warnings
+    return out
+
+
+def health_warnings() -> list[str]:
+    """헬스 경고 코드 목록 — 백업 평문 사본(§5.2.5 (3a))과 사전 메이저 승급 후 재계산 미실행(§2.7.1)."""
+    from app import routes  # noqa: PLC0415 — routes 는 main 을 import 하지 않는다.
+
+    warnings: list[str] = []
+    if not config.backup_key():
+        warnings.append("backup_unencrypted")
+    try:
+        if routes.vocab_recompute_pending(get_store()):
+            warnings.append("vocab_recompute_pending")
+    except Exception:  # noqa: BLE001 — 헬스는 저장소 문제로 500 이 되지 않는다.
+        pass
+    return warnings
 
 
 # 모든 /api/* 는 StaticFiles 마운트보다 먼저 등록한다.

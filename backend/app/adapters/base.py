@@ -36,6 +36,9 @@ class Probe(TypedDict):
     rest_ok: bool | None
     # 게이트웨이 자체가 불통이면 그 사유를 싣는다 — '앱이 없다' 와 '게이트웨이가 죽었다' 를 가른다(plan 강등 표기 원칙).
     gateway_error: str | None
+    # 도구 이름이 두 백엔드에 다 있어 좁히지 못한 경우 `ambiguous_tool_name`(plan §2.13.2).
+    warnings: list[str]
+    candidates: list[str]
 
 
 class AdapterResult(TypedDict, total=False):
@@ -180,14 +183,19 @@ class CallRecorder:
         call_id = self._next_call_id()
         ok = bool(reply.get("ok"))
         error = None if ok else str(reply.get("error") or "unknown_error")
+        # 응답 계약 검사(§2.13.1) — 위반은 예외가 아니라 행에 남는 표기다.
+        contract = check_contract(tool, reply.get("result")) if ok else {
+            "contract_ok": None, "missing": [], "type_mismatch": []}
         self.calls.append({
             "source_kind": source_kind, "app_key": app_key, "channel": channel, "tool": logged_tool,
             "args": args, "response": reply.get("result") if ok else None, "ok": ok,
             "http_status": reply.get("http_status"), "started_at": started, "duration_ms": duration_ms,
-            "error": error,
+            "error": error, "contract_ok": contract["contract_ok"],
+            "contract_missing": sorted(set(contract["missing"]) | set(contract["type_mismatch"])),
         })
         return {"ok": ok, "result": reply.get("result"), "call_id": call_id,
-                "http_status": reply.get("http_status"), "error": error}
+                "http_status": reply.get("http_status"), "error": error,
+                "contract_ok": contract["contract_ok"], "contract_missing": contract["missing"]}
 
     def call_ids(self, source_kind: str | None = None) -> list[str]:
         """지금까지 남긴 call_id 목록(kind 로 거를 수 있다). AdapterResult.call_ids 의 값이다."""
@@ -197,3 +205,83 @@ class CallRecorder:
                 continue
             out.append(f"{self.snapshot_id[:8]}-{self._start_seq + index:03d}")
         return out
+
+
+# ---------------------------------------------------------------- 응답 계약·소스 앱 버전(plan §2.13.1)
+# 도구 → 그 응답에 반드시 있어야 하는 JSON 포인터와 기대 타입. 파서 갱신을 설계 변경과 가르는 자리다.
+RESPONSE_CONTRACT: dict[str, dict[str, str]] = {
+    "project_tree": {"/summary": "object"},
+    "list_parts": {"/parts": "array"},
+    "list_interfaces": {"/interfaces": "array"},
+    "interface_graph": {"/edges": "array"},
+    "part_mesh_map": {"/rows": "array"},
+    "report_summary": {"/id": "any"},
+}
+_TYPE_OF = {"object": dict, "array": list, "string": str, "number": (int, float), "boolean": bool}
+
+
+def _pointer(payload: Any, pointer: str) -> tuple[bool, Any]:
+    """JSON 포인터 한 칸 해석 — (존재, 값)."""
+    current = payload
+    for token in [t for t in str(pointer).split("/") if t]:
+        if not isinstance(current, Mapping) or token not in current:
+            return False, None
+        current = current[token]
+    return True, current
+
+
+def check_contract(tool: str, payload: Any, contract: Mapping[str, Mapping[str, str]] | None = None) -> dict:
+    """도구 응답이 계약을 지키는지 본다(plan §2.13.1).
+
+    반환 `{contract_ok, missing[], type_mismatch[]}` — 계약이 없으면 `contract_ok=None`(검사 대상 아님)이다.
+    위반은 예외가 아니라 표기다: 호출자가 `warnings.source_schema_drift` + `degraded.schema_drift` 로 남긴다.
+    """
+    table = dict(contract or RESPONSE_CONTRACT)
+    spec = None
+    for name, pointers in table.items():
+        if tool == name or tool.endswith(f"_{name}"):
+            spec = pointers
+            break
+    if spec is None:
+        return {"contract_ok": None, "missing": [], "type_mismatch": []}
+    missing: list[str] = []
+    mismatch: list[str] = []
+    for pointer, kind in spec.items():
+        found, value = _pointer(payload, pointer)
+        if not found:
+            missing.append(pointer)
+            continue
+        expected = _TYPE_OF.get(kind)
+        if expected is not None and not isinstance(value, expected):
+            mismatch.append(pointer)
+    return {"contract_ok": not missing and not mismatch, "missing": missing, "type_mismatch": mismatch}
+
+
+# kind → 그 앱의 버전을 읽는 도구(plan §2.2 app_version 행). 못 읽으면 version=null 이고 degraded 다.
+SYSTEM_STATUS_TOOL: dict[str, str] = {
+    "mcad": "heaxstep_forge_system_status",
+    "dyna": "heaxkooremapper_mcp_system_status",
+    "dyna_result": "heaxkooremapper_mcp_system_status",
+}
+UNKNOWN_APP_VERSION: dict[str, Any] = {"version": None, "captured_via": None, "extra": None}
+
+
+def probe_app_version(recorder: Any, kind: str, *, app_key: str | None = None) -> dict:
+    """소스 앱 버전을 1회 읽는다 — 실패해도 캡처를 멈추지 않고 `version=null` 로 남긴다(plan §2.2).
+
+    이 값은 `ir_hash` 입력이 아니다 — 소스 앱 배포가 설계 변경으로 보이면 안 된다(§3.3.6 이 쌍에서 비교한다).
+    """
+    tool = SYSTEM_STATUS_TOOL.get(kind)
+    if not tool or recorder is None or not bool(getattr(recorder, "mcp_available", False)):
+        return dict(UNKNOWN_APP_VERSION)
+    reply = recorder.call("mcp", tool, {}, source_kind=kind, app_key=app_key)
+    if not reply.get("ok"):
+        return dict(UNKNOWN_APP_VERSION)
+    body = reply.get("result")
+    if not isinstance(body, Mapping):
+        return dict(UNKNOWN_APP_VERSION)
+    app_block = body.get("app") if isinstance(body.get("app"), Mapping) else {}
+    version = body.get("version") or body.get("app_version") or app_block.get("version")
+    extra = {k: body[k] for k in ("build", "commit", "started_at", "schema_version") if k in body}
+    return {"version": str(version) if version else None, "captured_via": tool if version else None,
+            "extra": extra or None}
