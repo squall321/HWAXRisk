@@ -6,7 +6,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-from app import narrative
+from app import narrative, ra_client
 from app.common import new_uuid, now_epoch, parse_ref, sha256_hex
 from app.errors import AppError
 from app.registry import CHARACTER_STATUS_ORDER, FACET_ORDER
@@ -315,6 +315,91 @@ def queue_x_tag_promotions(store: RiskStore, *, owner_sub: str) -> list[str]:
             )
             queued.append(tag)
     return queued
+
+
+def promote_x_tag(store: RiskStore, *, tag: str, axis: str, owner_sub: str) -> dict:
+    """`x:<value>` 자유 태그를 통제 어휘 `<axis>:<value>` 로 승격한다(plan §7.7 x_tag_promote 행).
+
+    자산 파일(`character-vocab.v1.json`)은 앱이 고치지 않는다 — 어휘 마이너 승급 값은 결정 기록에만 남고
+    자산 갱신은 사람 몫이다(`unclassified_code` 와 같은 관례). 여기서 바꾸는 것은 소유자의 진술 행뿐이다.
+
+    대표 태그(`tag`)가 없던 행은 승격 태그가 대표가 되고 그 축의 facet 을 따른다. 이미 `char:` 대표가 있는
+    행은 대표·facet 을 그대로 두고 태그 목록에만 더한다 — 승격은 어휘를 넓히는 일이지 진술을 재분류하는 일이 아니다.
+    """
+    value = str(tag or "")[2:] if str(tag or "").startswith("x:") else ""
+    if not value:
+        raise AppError("E100", f"승격 대상은 `x:<value>` 자유 태그여야 합니다 — {tag!r}.", 422)
+
+    axes = _vocab().get("axes") or {}
+    allowed = axes.get(axis)
+    if allowed is None:
+        raise AppError("axis_unknown", f"통제 어휘에 없는 축입니다 — {axis!r}. 허용 {sorted(axes)}.", 422)
+    if not isinstance(allowed, list):
+        # char:interface 는 값이 rr_iface_alias 에서 파생돼 통제 목록이 없다(§4.6.3 (4)) — 자유 태그를 여기로 올릴 수 없다.
+        raise AppError("axis_not_promotable", f"값 목록이 없는 축으로는 승격할 수 없습니다 — {axis!r}.", 422)
+
+    new_tag = f"{axis}:{value}"
+    already = value in allowed
+    version_before = str(_vocab().get("version") or "vocab-1.0")
+
+    rows = store.query(
+        "SELECT id, project_id, facet, tag, tags_json, first_target_key, support_panels FROM rr_character"
+        " WHERE owner_sub = ? AND status != 'superseded' AND tags_json LIKE ?",
+        (owner_sub, f"%{tag}%"))
+    now = now_epoch()
+    changed: list[dict] = []
+    with store.tx():
+        for row in rows:
+            tags = _loads(row["tags_json"], []) or []
+            if tag not in tags:
+                continue                      # LIKE 가 부분 문자열로 걸러 온 행(x:stack 이 x:stack_budget 을 문다)
+            merged = [new_tag if t == tag else t for t in tags]
+            deduped: list[str] = []
+            for t in merged:
+                if t not in deduped:
+                    deduped.append(t)
+            lead = str(row["tag"] or "") or None
+            if lead is None or not lead.startswith("char:"):
+                store.execute(
+                    "UPDATE rr_character SET tag = ?, facet = ?, tags_json = ?, updated_at = ? WHERE id = ?",
+                    (new_tag, facet_of_tag(new_tag), json.dumps(deduped, ensure_ascii=False), now, row["id"]))
+            else:
+                store.execute("UPDATE rr_character SET tags_json = ?, updated_at = ? WHERE id = ?",
+                              (json.dumps(deduped, ensure_ascii=False), now, row["id"]))
+            changed.append({"id": row["id"], "project_id": row["project_id"],
+                            "target_key": row["first_target_key"],
+                            "support_panels": int(row["support_panels"] or 1)})
+
+    # 승격 전 `x:` 태그는 RA 에 잇지 않는다(§5.4 ⑦) — 이제 design_trait·exhibits 를 올릴 자격이 생겼다.
+    ops = 0
+    for item in changed:
+        if not item["target_key"]:
+            continue
+        ra_client.queue_sync_ops(store, str(item["target_key"]), "ra", [{
+            "op": "merge_object", "reason": "x_tag_promote", "type": "design_trait",
+            "tag": new_tag, "props": {"status": "vocab"},
+        }, {
+            "op": "link", "reason": "x_tag_promote", "relation": "exhibits",
+            "tag": new_tag, "project_id": item["project_id"],
+            "evidence_note": f"narr:{item['id']}", "props": {"support": item["support_panels"]},
+        }])
+        ops += 2
+
+    return {"tag": tag, "new_tag": new_tag, "axis": axis, "value": value,
+            "statements": len(changed), "projects": sorted({str(c["project_id"]) for c in changed}),
+            "targets": sorted({str(c["target_key"]) for c in changed if c["target_key"]}),
+            "already_in_vocab": already, "vocab_version_before": version_before,
+            # 값이 이미 어휘에 있으면 승급할 것이 없다 — 진술만 통제 태그로 옮긴다.
+            "vocab_version_after": version_before if already else _bump_vocab_minor(version_before),
+            "ra_ops": ops}
+
+
+def _bump_vocab_minor(version: str) -> str:
+    """`vocab-1.0` → `vocab-1.1` — 어휘 마이너 승급(plan §7.7). 형식을 모르면 그대로 둔다."""
+    head, _, tail = str(version or "").rpartition(".")
+    if not head or not tail.isdigit():
+        return str(version or "")
+    return f"{head}.{int(tail) + 1}"
 
 
 # ---------------------------------------------------------------- 프로파일 조립(표시·재사용 순서)

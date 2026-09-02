@@ -5,7 +5,7 @@
 코드 대조로 확인해 적은 작업 대장이며, 앞으로의 진행은 이 문서를 늘려 가며 한다. 정본 체크리스트는 단계 착수 전에 쓴 것이라 P1~P7 항목이
 전부 미체크로 남아 있다 — 여기서 실측한 완료 상태가 그보다 최신이다.
 
-마지막 실측 2026-09-02 — `pytest` **1085 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · 커밋 8건(`4cf8ed5`~`37b9c3b`) · `origin/main` 동기.
+마지막 실측 2026-09-02 — `pytest` **1092 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · 커밋 8건(`4cf8ed5`~`37b9c3b`) · `origin/main` 동기.
 
 ## 진척 요약
 
@@ -26,10 +26,16 @@
 
 착수 순서대로 적었다. 외부 자격·합의가 필요 없는 항목만 여기에 둔다.
 
-- [ ] **`x_tag_promote` 큐 결정 어휘 부재 — `PUT /api/curation/{id}` 가 501 이다.**
-  `character.py:311` 이 이 kind 로 큐를 쌓고 DDL CHECK(`risk_store.py:494`)도 6종을 허용하는데, `routes.py:2878` 의
-  `CURATION_DECISIONS` 에는 5종만 있어 성격 X태그 승격을 사람이 결정할 길이 없다. 어휘와 적용 함수(`character.promote_x_tag`)를 잇고
-  결정 뒤 `metrics.recompute` 재호출까지 붙인다. → 검증: `x_tag_promote` 행 1건을 `done` 으로 닫고 `rr_character` 태그 반영 확인
+- [x] **`x_tag_promote` 큐 결정 어휘** (2026-09-02) — `CURATION_DECISIONS` 에 `("promote", "reject")` 를 넣고
+  `character.promote_x_tag(store, tag, axis, owner_sub)` 를 붙였다. 승격은 소유자의 살아 있는 진술만 통제 태그로 옮기고(대표 태그가
+  없던 행은 승격 태그가 대표가 되며 그 축의 facet 을 따르고, 이미 `char:` 대표가 있으면 대표·facet 불변), 어휘 마이너 승급 값은
+  결정 기록에만 남긴다(자산 파일은 앱이 고치지 않는다 — `unclassified_code` 관례). 승격된 태그는 `design_trait`+`exhibits` op 로 RA 에
+  올라간다(§5.4 ⑦ — `x:` 는 승격 전 미연결). 축은 코드가 못 고르므로 `payload.axis` 없으면 422 이고 큐는 열린 채다.
+  회귀 가드로 'DDL 이 허용한 kind == 결정 어휘 == 감사 scope' 를 시험으로 고정했다.
+- [x] **`character-vocab.v1.json` 이 정본과 어긋나 있었다** (2026-09-02, 위 작업 중 발견) — 자산에 `char:constraint` 축이 통째로 없고
+  `char:analysis` 가 5값이었다(정본 plan §4.6.3 블록은 8축·8값). 그래서 씨앗이 내는 `char:analysis:sim_only`·`ecad_only`
+  (`character.py` `SOURCE_ABSENT_SEEDS`)가 `narrative.py:1046` 어휘 검사에서 **어휘 밖으로 판정돼 `x:sim_only` 로 강등**되고
+  `x_tag_promote` 큐를 채우고 있었다 — 통제 값이 자유 태그 후보로 되돌아오는 고리다. 자산을 정본 블록과 바이트 동일하게 맞췄다.
 - [ ] **E10 필드·VOC·문헌 근거가 스텁이다.**
   `brief.py:688 _field_evidence_lines` 가 제품 연결 유무만 보고 늘 `[필드·문헌 근거 없음 …]` 한 줄을 낸다. 정본 §5.6.1 E10·§6.5.2 가
   요구하는 것 — `get_top_issues`·`query_voc`·`search_scholar` 실호출을 러너가 하고 `rr_panel_calls(source_kind='brief')` 에 저장해 24 h
@@ -46,7 +52,7 @@
 - [ ] **라벨 자동 유입 4경로 미구현**(RA incident · test_run · DynaForge · VOC). 야간 ①·⑤(`metrics.sync_labels`·`refresh_fv_stats`)가
   비어 있고 `run_nightly()['unwired']` 와 `rr_metrics(label_ingest_wired)` 배지로 드러내는 중이다 — 숨긴 게 아니라 학습 루프의 분모가
   아직 사람 라벨뿐이라는 뜻이다. 경로 1·2 는 RA 게이트웨이 읽기, 3 은 러너 자격 (b), 4 는 `product_code` 조건이 선행한다.
-- [ ] **`ruff` 가 venv 에 없다** — `pyproject.toml [test]` 에는 있는데 `backend/.venv` 에 설치돼 있지 않아 린트가 안 돈다. `pip install -e ".[test]"` 재실행.
+- [x] **`ruff` 설치** (2026-09-02) — `pip install -e ".[test]"` 재실행. `ruff check .` All checks passed.
 - [ ] **로컬 `frontend/dist` 재빌드** — 마지막 프런트 커밋(`c74b551`, 01:27)보다 dist(01:18)가 이르다. 배포본은 SIF 빌드가 다시 말아 정상이므로 로컬만 해당.
 - [ ] 백테스트 표본 재설계(§7.5 정본 결정 대기) — train 구간에서만 범위 산출 · 라벨 없는 심사 타깃을 관측 음성으로 편입 · 홀드아웃 최소 표본.
   계획이 표본 우주를 정하지 않아 코드로 지어내지 않고 남겨 둔 것이다(context-notes 2026-08-31 P6 항).
@@ -112,8 +118,9 @@
 
 ## 다음 수
 
-1장이 외부 의존이 없어 바로 된다. 그중에서도 **`x_tag_promote` 어휘**(막힌 경로 1건, 작음) → **CurationQueue 화면**(REST 4종이 UI 없이 떠 있음) →
-**E10 실호출**(브리프 근거 한 축이 통째로 비어 있음) 순이 값이 크다. 2장은 B1(heax 서비스 PAT) 하나가 풀리면 여러 통과 기준이 함께 닫힌다.
+1장이 외부 의존이 없어 바로 된다. `x_tag_promote` 어휘와 어휘 자산 정합은 닫혔고, 다음은 **CurationQueue 화면**(REST 4종이 UI 없이
+떠 있고, 방금 연 승격 결정도 화면이 없으면 쓸 수 없다) → **E10 실호출**(브리프 근거 한 축이 통째로 비어 있음) 순이 값이 크다.
+2장은 B1(heax 서비스 PAT) 하나가 풀리면 여러 통과 기준이 함께 닫힌다.
 
 ## 완료 기록 — P0 (2026-08-31)
 

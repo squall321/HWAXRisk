@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import pathlib
 
 import pytest
 
@@ -261,11 +262,12 @@ def test_curation_refuses_foreign_rows_wrong_vocabulary_unwired_kinds_and_replay
         routes.put_curation("Q1", routes.CurationDecisionBody(decision="known"), ident=_ident())
     assert (vocab.value.code, vocab.value.http_status) == ("decision_not_allowed_for_kind", 422)
 
-    # 적용 함수가 없는 kind 는 결정만 기록하지 않는다(라우트가 로직을 지어내지 않는다).
+    # 승격은 어느 축으로 올릴지를 코드가 고를 수 없다 — payload.axis 없이는 422 고 큐는 열린 채다.
     _queue_row(store, "x_tag_promote", {"tag": "x:stack_budget"}, queue_id="Q4")
-    with pytest.raises(AppError) as unwired:
+    with pytest.raises(AppError) as no_axis:
         routes.put_curation("Q4", routes.CurationDecisionBody(decision="promote"), ident=_ident())
-    assert unwired.value.http_status == 501
+    assert no_axis.value.http_status == 422
+    assert store.query_one("SELECT status FROM rr_curation_queue WHERE id = 'Q4'")["status"] == "open"
 
     # cluster_merge 는 P5 에서 적용 함수가 붙었다 — reject 는 두 행을 그대로 둔다.
     routes.put_curation("Q2", routes.CurationDecisionBody(decision="reject"), ident=_ident())
@@ -277,6 +279,86 @@ def test_curation_refuses_foreign_rows_wrong_vocabulary_unwired_kinds_and_replay
     with pytest.raises(AppError) as replay:
         routes.put_curation("Q1", routes.CurationDecisionBody(decision="confirmed"), ident=_ident())
     assert replay.value.http_status == 409
+
+
+# ================================================================ 자유 태그 승격(plan §7.7 x_tag_promote)
+def test_every_queue_kind_the_ddl_allows_has_a_decision_vocabulary():
+    """DDL 이 쌓게 허용한 kind 는 전부 결정할 수 있어야 한다 — 어휘가 없으면 그 큐가 501 로 막힌다."""
+    import re
+
+    from app import risk_store as risk_store_module
+
+    ddl = pathlib.Path(risk_store_module.__file__).read_text(encoding="utf-8")
+    body = re.search(r"rr_curation_queue.*?kind TEXT NOT NULL CHECK\(kind IN \(([^)]*)\)", ddl, re.S).group(1)
+    kinds = {k.strip().strip("'") for k in body.split(",")}
+
+    assert kinds == set(routes.CURATION_DECISIONS)
+    assert kinds == set(routes.CURATION_AUDIT_SCOPE)
+
+
+def _character(store, sid, *, tags, lead=None, facet="unknown", target_key=None, project_id=PROJECT):
+    store.execute(
+        "INSERT INTO rr_character(id, project_id, owner_sub, facet, tag, tags_json, statement, polarity,"
+        " by_json, support_panels, support_targets, recall_eligible, needs_review, status,"
+        " first_target_key, created_at, updated_at)"
+        " VALUES (?,?,?,?,?,?,'문장','observation','[]',2,3,1,0,'panel',?,1,1)",
+        (sid, project_id, OWNER, facet, lead, json.dumps(tags, ensure_ascii=False), target_key))
+
+
+def test_x_tag_promotion_rewrites_statements_and_records_the_vocabulary_bump(store, clock):
+    """승격은 진술을 통제 태그로 옮기고, 어휘 승급 값은 결정 기록에만 남긴다(자산 파일은 앱이 안 고친다)."""
+    _project(store)
+    _target(store)
+    _character(store, "PN1#C1", tags=["x:stack_budget"], target_key=TARGET)
+    _character(store, "PN1#C2", tags=["char:structure:thin_stack", "x:stack_budget"],
+               lead="char:structure:thin_stack", facet="intent", target_key=TARGET)
+    _character(store, "PN1#C3", tags=["x:stack_budget_v2"])      # 부분 문자열로 걸려서는 안 되는 이웃
+    queue_id = _queue_row(store, "x_tag_promote", {"tag": "x:stack_budget"}, queue_id="QX")
+
+    out = routes.put_curation(
+        queue_id, routes.CurationDecisionBody(decision="promote", reason="XD 리더 승인",
+                                              payload={"axis": "char:constraint"}), ident=_ident())
+
+    applied = out["applied"]
+    assert out["status"] == "done"
+    assert (applied["new_tag"], applied["statements"]) == ("char:constraint:stack_budget", 2)
+    assert (applied["vocab_version_before"], applied["vocab_version_after"]) == ("vocab-1.0", "vocab-1.1")
+    assert applied["already_in_vocab"] is False
+
+    rows = {r["id"]: r for r in store.query("SELECT id, facet, tag, tags_json FROM rr_character")}
+    # 대표 태그가 없던 행은 승격 태그가 대표가 되고 그 축의 facet 을 따른다.
+    assert (rows["PN1#C1"]["tag"], rows["PN1#C1"]["facet"]) == ("char:constraint:stack_budget", "constraint")
+    # 이미 대표가 있던 행은 대표·facet 이 그대로다 — 승격은 어휘를 넓히는 일이지 재분류가 아니다.
+    assert (rows["PN1#C2"]["tag"], rows["PN1#C2"]["facet"]) == ("char:structure:thin_stack", "intent")
+    assert json.loads(rows["PN1#C2"]["tags_json"]) == ["char:structure:thin_stack",
+                                                       "char:constraint:stack_budget"]
+    assert json.loads(rows["PN1#C3"]["tags_json"]) == ["x:stack_budget_v2"]
+
+    # 승격 전에는 RA 에 잇지 않던 태그다(§5.4 ⑦) — 이제 design_trait·exhibits op 가 올라간다.
+    sync = json.loads(store.query_one(
+        "SELECT external_sync_json AS j FROM rr_targets WHERE target_key = ?", (TARGET,))["j"])
+    pending = sync["ra"]["pending_ops"]
+    # design_trait 객체는 태그마다 하나로 접히고(queue_sync_ops 가 같은 op 를 합친다), exhibits 는 진술마다 하나다.
+    assert [op["op"] for op in pending] == ["merge_object", "link", "link"]
+    assert {op["reason"] for op in pending} == {"x_tag_promote"}
+    assert pending[0]["props"] == {"status": "vocab"}
+    assert [op["evidence_note"] for op in pending[1:]] == ["narr:PN1#C1", "narr:PN1#C2"]
+
+    audit = store.query_one("SELECT scope, subject_id FROM rr_audit WHERE action = 'curation.decide'")
+    assert (audit["scope"], audit["subject_id"]) == ("project", "x:stack_budget")
+
+
+def test_x_tag_rejection_leaves_the_statements_alone(store, clock):
+    _project(store)
+    _character(store, "PN1#C1", tags=["x:stack_budget"])
+    queue_id = _queue_row(store, "x_tag_promote", {"tag": "x:stack_budget"}, queue_id="QX")
+
+    out = routes.put_curation(queue_id, routes.CurationDecisionBody(decision="reject", reason="너무 좁다"),
+                              ident=_ident())
+
+    assert (out["status"], out["applied"]) == ("rejected", {})
+    assert json.loads(store.query_one(
+        "SELECT tags_json AS t FROM rr_character WHERE id = 'PN1#C1'")["t"]) == ["x:stack_budget"]
 
 
 # ================================================================ 승격 결정 · GET /patterns

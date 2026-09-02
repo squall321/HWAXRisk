@@ -261,6 +261,71 @@ def test_x_tag_scan_counts_inside_one_owner(risk_store):
     assert row["owner_sub"] == "u-other"
 
 
+# ---------------------------------------------------------------- 자유 태그 승격(plan §7.7)
+
+def test_promote_x_tag_refuses_a_non_free_tag_and_an_unknown_or_open_axis(risk_store):
+    with pytest.raises(AppError) as not_free:
+        character.promote_x_tag(risk_store, tag="char:structure:thin_stack", axis="char:constraint",
+                                owner_sub=OWNER)
+    assert not_free.value.http_status == 422
+
+    with pytest.raises(AppError) as unknown:
+        character.promote_x_tag(risk_store, tag="x:stack_budget", axis="char:nope", owner_sub=OWNER)
+    assert unknown.value.code == "axis_unknown"
+
+    # char:interface 값은 rr_iface_alias 에서 파생돼 통제 목록이 없다 — 자유 태그를 그리로 올릴 수 없다(§4.6.3 (4)).
+    with pytest.raises(AppError) as open_axis:
+        character.promote_x_tag(risk_store, tag="x:stack_budget", axis="char:interface", owner_sub=OWNER)
+    assert open_axis.value.code == "axis_not_promotable"
+
+
+def test_promote_x_tag_touches_only_my_live_statements(risk_store):
+    """남의 행·폐기된 행은 건드리지 않는다 — 진술은 소유자 표다."""
+    _project(risk_store)
+    _statement(risk_store, "panelA#C1", facet="anomaly", tags=["x:stack_budget"], statement="A")
+    _statement(risk_store, "panelB#C1", facet="anomaly", tags=["x:stack_budget"], statement="B",
+               target=TARGET_B)
+    _statement(risk_store, "panelC#C1", facet="anomaly", tags=["x:stack_budget"], statement="C",
+               target=TARGET_C)
+    risk_store.execute("UPDATE rr_character SET owner_sub = 'u-other' WHERE id = 'panelB#C1'")
+    risk_store.execute("UPDATE rr_character SET status = 'superseded' WHERE id = 'panelC#C1'")
+
+    out = character.promote_x_tag(risk_store, tag="x:stack_budget", axis="char:tolerance",
+                                  owner_sub=OWNER)
+
+    assert out["statements"] == 1
+    tags = {r["id"]: json.loads(r["tags_json"]) for r in risk_store.query(
+        "SELECT id, tags_json FROM rr_character", ())}
+    assert tags["panelA#C1"] == ["char:tolerance:stack_budget"]
+    assert tags["panelB#C1"] == ["x:stack_budget"]           # 남의 행
+    assert tags["panelC#C1"] == ["x:stack_budget"]           # 폐기된 행
+
+
+def test_promote_x_tag_into_an_existing_value_moves_statements_without_bumping(risk_store):
+    """값이 이미 어휘에 있으면 승급할 것이 없다 — 진술만 통제 태그로 옮긴다."""
+    _project(risk_store)
+    _statement(risk_store, "panelA#C1", facet="anomaly", tags=["x:tight"], statement="A")
+
+    out = character.promote_x_tag(risk_store, tag="x:tight", axis="char:tolerance", owner_sub=OWNER)
+
+    assert out["already_in_vocab"] is True
+    assert out["vocab_version_before"] == out["vocab_version_after"] == "vocab-1.0"
+    assert json.loads(risk_store.query_one(
+        "SELECT tags_json AS t FROM rr_character WHERE id = 'panelA#C1'")["t"]) == ["char:tolerance:tight"]
+
+
+def test_promoted_statements_stop_coming_back_as_candidates(risk_store):
+    """승격하면 그 태그를 단 진술이 사라지므로 다음 스캔이 같은 후보를 다시 올리지 않는다."""
+    _project(risk_store)
+    for sid, target in (("panelA#C1", TARGET_A), ("panelB#C1", TARGET_B), ("panelC#C1", TARGET_C)):
+        _statement(risk_store, sid, facet="anomaly", tags=["x:stack_budget"], statement="A", target=target)
+    assert character.queue_x_tag_promotions(risk_store, owner_sub=OWNER) == ["x:stack_budget"]
+
+    character.promote_x_tag(risk_store, tag="x:stack_budget", axis="char:constraint", owner_sub=OWNER)
+
+    assert character.queue_x_tag_promotions(risk_store, owner_sub=OWNER) == []
+
+
 # ---------------------------------------------------------------- 프로파일 조립
 
 def test_profile_orders_by_status_then_support_then_grade(risk_store):

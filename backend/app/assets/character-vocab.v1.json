@@ -4,10 +4,11 @@
   "char:interface":"<alias from rr_iface_alias or name_norm_a_name_norm_b>",
   "char:tolerance":["tight","moderate","loose"],
   "char:maturity":["auto_iface_high","confirmed","anon_names_high","ledger_applied"],
-  "char:analysis":["no_dyna","dyna_structure_only","dyna_with_results","ecad_absent","ecad_present"],
+  "char:analysis":["no_dyna","dyna_structure_only","dyna_with_results","ecad_absent","ecad_present","mcad_present","sim_only","ecad_only"],
+  "char:constraint":["requirement_tight","requirement_absent","standard_driven"],
   "char:change_style":["dimension_tuning","topology_change","material_swap","placement_shift","mixed"],
   "char:philosophy":["mass_first","stiffness_first","thermal_first","cost_first","serviceability_first","thin_first","drop_first","yield_first"]},
- "seed_axes":["char:structure","char:interface","char:tolerance","char:maturity","char:analysis","char:change_style"],
+ "seed_axes":["char:structure","char:interface","char:tolerance","char:maturity","char:analysis","char:constraint","char:change_style"],
  "seat_only_axes":["char:philosophy"],
  "free_prefix":"x:","free_max_per_narrative":3,
  "promote":{"targets":3,"panels":2}}

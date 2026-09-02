@@ -15,7 +15,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from app import brief as brief_module
-from app import config, diff as diff_module
+from app import character, config, diff as diff_module
 from app import export as export_module
 from app import identity, ir_builder, learning, metrics, narrative, planner, ra_client, requirements, runner, sameas, taxonomy
 from app import roster as roster_module
@@ -2885,11 +2885,15 @@ CURATION_DECISIONS: dict[str, tuple[str, ...]] = {
     "cluster_merge": ("merge", "reject"),
     # 미분류 코드 — map 은 기존 detail 로, new 는 사람이 준 새 detail 로 옮긴다(둘 다 별칭 경로).
     "unclassified_code": ("map", "new", "reject"),
+    # 자유 태그 승격 — promote 는 payload.axis 로 `char:<axis>:<value>` 를 만들고, reject 는 그 태그를 다시 올리지 않는다.
+    "x_tag_promote": ("promote", "reject"),
 }
 # 감사 로그의 scope 는 rr_audit CHECK 어휘 안에서 고른다(§5.2.2 — 'curation' 은 그 어휘에 없다).
 CURATION_AUDIT_SCOPE: dict[str, str] = {"label_match": "finding", "pattern_candidate": "registry",
                                         "suspect_text": "finding", "cluster_merge": "registry",
-                                        "unclassified_code": "finding"}
+                                        "unclassified_code": "finding",
+                                        # 승격은 한 과제가 아니라 소유자 코퍼스의 진술을 건드린다 — 가장 가까운 어휘가 'project' 다.
+                                        "x_tag_promote": "project"}
 CURATION_LIMIT_MAX = 200
 
 
@@ -3009,6 +3013,13 @@ def put_curation(queue_id: str, body: CurationDecisionBody,
                                                                 "score": payload.get("score")})
             merged = registry_module.merge(store, rows[key_a]["target_key"], owner_sub=owner_sub)
             applied = {"alias": alias, "clusters": merged["clusters"]}
+        if kind == "x_tag_promote" and body.decision == "promote":
+            # 어휘를 넓히는 결정이다 — 어느 축으로 올릴지는 코드가 고를 수 없어 사람이 payload.axis 로 준다.
+            axis = str((body.payload or {}).get("axis") or "").strip()
+            if not axis:
+                raise AppError("E100", "payload.axis 가 필요합니다(예: 'char:structure').", 422)
+            applied = character.promote_x_tag(store, tag=str(payload.get("tag") or ""),
+                                              axis=axis, owner_sub=owner_sub)
         if kind == "pattern_candidate" and body.decision != "reject":
             pattern_id = str(payload.get("pattern_id") or "")
             if not pattern_id:
@@ -3021,7 +3032,7 @@ def put_curation(queue_id: str, body: CurationDecisionBody,
             " WHERE id = ?", (status, canonical_json(decision_json), owner_sub, now_epoch(), queue_id))
         _audit(store, owner_sub, scope=CURATION_AUDIT_SCOPE[kind],
                subject_id=str(payload.get("finding_id") or payload.get("cluster_key_norm")
-                              or payload.get("a") or queue_id),
+                              or payload.get("a") or payload.get("tag") or queue_id),
                action="curation.decide", before={"kind": kind, "status": "open"},
                after={"status": status, "decision": body.decision}, reason=body.reason)
     return {"status": status, "decision_json": decision_json, "applied": applied}
