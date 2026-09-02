@@ -419,6 +419,44 @@ def test_mcad_detects_truncation_by_interface_graph_counts():
     assert set(result["source"]["stats"]["interface_counts"]) == set(mcad.IFACE_KINDS)
 
 
+def test_mcad_asks_for_every_part_and_flags_a_short_list():
+    """REST `/parts` 는 limit 기본이 500 이고 총수를 주지 않는다 — 명시 상한 + 트리 리프 대조가 유일한 방어다.
+
+    잘린 파트 목록은 오류가 아니라 **없는 리스크**를 만든다(그 파트의 계면·치수가 통째로 사라진다).
+    """
+    seen: list[str] = []
+    urls: list[str] = []
+
+    def handler(request):
+        urls.append(str(request.url))
+        seen.append(request.url.path)
+        body = REST_ROUTES.get(request.url.path)
+        return httpx.Response(200, json=body) if body is not None else httpx.Response(404, json={})
+
+    rest = RestGetClient("https://heax.test", "service-pat",
+                         client=httpx.Client(transport=httpx.MockTransport(handler)))
+    recorder = CallRecorder("cafe0000deadbeef", mcp=_mcp(MCP_TOOLS_FULL), rest=rest)
+    result = mcad.McadAdapter(APP_KEY).capture({"stepforge_project_id": SF_PROJECT}, _principal(), recorder)
+
+    # 상한을 명시하지 않으면 소스가 500 으로 클램프한다 — 501번째부터 조용히 사라진다.
+    parts_url = next(u for u in urls if u.endswith("/parts") or "/parts?" in u)
+    assert f"limit={mcad.REST_PARTS_LIMIT}" in parts_url
+    # 픽스처는 트리 리프 2 개 · 파트 2 개로 같다 — 정상이면 절단 표기가 없다.
+    assert "parts_truncated" not in result["source"]["degraded"]
+
+
+def test_mcad_flags_parts_truncated_when_the_list_is_shorter_than_the_tree():
+    short = {"parts": PARTS_REST["parts"][:1]}
+    routes = dict(REST_ROUTES, **{f"{BASE}/parts": short})
+    result, _ = _capture_mcad(routes=routes)
+
+    # 트리 리프 3 개인데 파트 1 개만 왔다 — 소스가 잘랐다는 뜻이다.
+    assert "parts_truncated" in result["source"]["degraded"]
+    # 경고는 결과 최상위에 실린다 — 사유가 없으면 사람은 왜 잘렸는지 알 수 없다.
+    warning = next(w for w in result["warnings"] if w["code"] == "parts_truncated")
+    assert warning["message"] == "파트 목록이 잘렸다 — 트리 리프 2 개 중 1 개만 받았다."
+
+
 def test_mcad_marks_tol_unknown_without_job_or_tol_config():
     routes = dict(REST_ROUTES)
     routes[BASE] = {"id": SF_PROJECT, "name": "sif-e2e"}

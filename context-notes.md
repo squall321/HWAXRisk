@@ -324,3 +324,26 @@
 - **남은 P1 잔여.** `choices[]`(StepForge `list_projects` 로 프로젝트 선택지 채우기)는 소스 앱 도구 실호출이라 포털 PAT 가
   선행한다 — 지금은 빈 배열이고 사용자가 ref 를 직접 적는다.
 - **검증.** `pytest` **1103 passed, 2 skipped** · `ruff` All checks passed · 실 게이트웨이로 mcad/dyna ready·소스 등록 linked 확인.
+
+### D13. 실 STEP 을 붙이기 전에 mcad REST 계약을 실물과 대조했다 — 파트 절단 버그 (2026-09-02)
+
+- **왜 지금.** 캡처 경로는 한 번도 실 StepForge 를 만난 적이 없다. 자격이 풀리는 순간 처음 도는 코드라,
+  붙이기 전에 어댑터가 기대하는 REST 를 실물(`/home/koopark/claude/StepForge/app/rest.py`)과 맞춰 봤다.
+- **맞은 것.** 5경로 전부 실재하고(`/projects/{id}` · `/tree` · `/parts` · `/interfaces` · `/artifacts/graph/`),
+  base 는 `heax_base` + `rest()` 가 붙이는 `/apps/{slug}/api` 로 정확하며, `artifacts/graph/` 의 빈 `ref` 도
+  StepForge 가 `_store_artifact(conn, pid, "graph", "", …)` 로 빈 문자열에 저장하는 것과 맞는다.
+  `/tree` 는 FileResponse 지만 `media_type='application/json'` 이라 `response.json()` 이 그대로 판다.
+- **틀린 것 — `/parts` 의 limit.** StepForge 는 `limit: int = Query(500, ge=1, le=5000)` 이고 어댑터는 아무것도 안 넘겼다.
+  **501번째 파트부터 조용히 사라진다.** 같은 파일에서 `/interfaces` 는 `{"limit": REST_IFACE_LIMIT}`(5000)을 넘기고 있었으니
+  상한을 몰라서가 아니라 REST 경로를 나중에 붙이면서 빠뜨린 것이다.
+- **왜 조용한가.** `/interfaces` 는 `counts` 로 총수를 주어 `sum(counts) > len(rows)` 로 절단을 잡는데, `/parts` 는 총수를
+  주지 않는다. 그리고 **MCP 폴백에는 이미 가드가 있었다** — `tree.summary.leaf_instances > len(parts)` 로 `parts_truncated`
+  를 붙인다(recon §2.2). REST 경로에만 그 대조가 빠져 있었다.
+- **고침.** `REST_PARTS_LIMIT = 5000` 을 명시해 넘기고, REST 트리의 `summary.leaf_instances` 와 대조해 짧으면
+  `degraded='parts_truncated'` + 사유 경고를 남긴다(MCP 분기와 같은 규칙). 경고는 결과 최상위 `warnings` 에 실린다.
+- **왜 이게 나쁜 버그인가.** 잘린 파트 목록은 예외를 내지 않는다 — 그 파트의 계면·치수·규칙 히트가 통째로 사라진 채
+  스냅샷이 '정상' 으로 동결되고, 게이트도 통과하고, 패널은 있지도 않은 깨끗한 모델을 심사한다.
+  **오류가 아니라 '없는 리스크' 를 만든다.** 첫 실접촉에서만 드러나는 종류다.
+- **픽스처 오독 정정.** `TREE_JSON` 에 `summary` 가 없다고 보고 하나 더 넣었는데, 아래쪽에 이미 있었고(중복 키라 뒤엣것이 이김)
+  `leaf_instances=2` 로 실제와 맞게 적혀 있었다. 내 중복 키를 걷어냈다 — 픽스처는 처음부터 옳았고 코드에만 가드가 없었다.
+- **검증.** `pytest` **1105 passed, 2 skipped**(시험 2건 추가 — limit 명시 확인 · 짧은 목록에서 절단 표기) · `ruff` 통과.

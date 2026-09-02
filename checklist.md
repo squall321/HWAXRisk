@@ -5,7 +5,7 @@
 코드 대조로 확인해 적은 작업 대장이며, 앞으로의 진행은 이 문서를 늘려 가며 한다. 정본 체크리스트는 단계 착수 전에 쓴 것이라 P1~P7 항목이
 전부 미체크로 남아 있다 — 여기서 실측한 완료 상태가 그보다 최신이다.
 
-마지막 실측 2026-09-02 — `pytest` **1103 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · `ruff` 통과 · `pnpm build` 통과.
+마지막 실측 2026-09-02 — `pytest` **1105 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · `ruff` 통과 · `pnpm build` 통과.
 
 ## 진척 요약
 
@@ -43,6 +43,13 @@
   ecad 는 도구 4종이 없어 `contract_only`. 소스 등록이 `status='linked'` 를 적는다. 게이트웨이를 못 읽으면 `planned` +
   `gateway_error` 로 남긴다 — '도구가 없다' 와 '못 물어봤다' 를 섞지 않는다.
   `choices[]`(StepForge 프로젝트 선택지)는 소스 앱 도구 실호출이라 포털 PAT 가 선행한다 — 아직 빈 배열이고 사용자가 ref 를 직접 적는다.
+- [x] **mcad REST 계약 점검 + 파트 절단 버그** (2026-09-02) — 실 STEP 을 붙이기 전에 어댑터가 기대하는 StepForge REST 를
+  실물(`/home/koopark/claude/StepForge/app/rest.py`)과 대조했다. 5경로·base·`artifacts/graph/` 의 빈 `ref` 까지 전부 맞았는데
+  **`/parts` 하나가 틀렸다** — `limit` 기본이 500 인데 어댑터가 안 넘겨 501번째 파트부터 조용히 사라진다(`/interfaces` 는
+  5000 을 넘기고 있었다). `/parts` 는 `/interfaces` 의 `counts` 같은 총수도 주지 않아 응답만으로는 잘렸는지 알 수 없다.
+  MCP 폴백에는 이미 트리 요약 대조 가드가 있었는데(recon §2.2) REST 경로에만 빠져 있었다. `REST_PARTS_LIMIT=5000` 명시 +
+  `summary.leaf_instances` 대조로 `degraded='parts_truncated'` + 사유 경고를 붙였다. **잘린 파트 목록은 오류가 아니라
+  '없는 리스크' 를 만든다** — 그 파트의 계면·치수가 통째로 사라진 채 심사가 정상으로 보인다.
 - [ ] **E10 필드·VOC·문헌 근거가 스텁이다.**
   `brief.py:688 _field_evidence_lines` 가 제품 연결 유무만 보고 늘 `[필드·문헌 근거 없음 …]` 한 줄을 낸다. 정본 §5.6.1 E10·§6.5.2 가
   요구하는 것 — `get_top_issues`·`query_voc`·`search_scholar` 실호출을 러너가 하고 `rr_panel_calls(source_kind='brief')` 에 저장해 24 h

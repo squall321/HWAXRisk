@@ -22,6 +22,8 @@ IFACE_KINDS: tuple[str, ...] = ("tied", "touching", "clearance", "interference")
 MCP_IFACE_LIMIT = 500
 # REST /interfaces 는 한 번에 5000행까지 준다 — 살아 있으면 MCP 4회를 이 1회로 대체한다(recon §4 1항).
 REST_IFACE_LIMIT = 5000
+# REST /parts 도 limit 를 받고 **기본값이 500** 이다 — 안 주면 501번째 파트부터 조용히 사라진다(소스 상한 5000).
+REST_PARTS_LIMIT = 5000
 # tol_config 를 못 읽었을 때 detect 잡 params 에서 읽는 4키(plan §2.2 tol_known_keys).
 JOB_TOL_KEYS: tuple[str, ...] = ("tied_gap", "clearance_gap", "tied_area", "tied_width")
 # tree.json 노드 kind → IR 노드 kind. 소스 어휘는 core/model.py 의 5종뿐이고(step-file·assembly·instance +
@@ -219,9 +221,19 @@ class McadAdapter(SourceAdapter):
             reply = rest(f"/projects/{project_id}/artifacts/graph/")
             if reply["ok"] and isinstance(reply["result"], Mapping):
                 graph = dict(reply["result"])
-            reply = rest(f"/projects/{project_id}/parts")
+            reply = rest(f"/projects/{project_id}/parts", {"limit": REST_PARTS_LIMIT})
             if reply["ok"]:
                 parts_rest = _rows(reply["result"], "parts")
+                # /parts 는 총수를 주지 않는다(/interfaces 의 counts 같은 것이 없다) — MCP 경로와 같은
+                # 방식으로 트리 요약의 리프 수와 비교한다. 잘린 파트 목록은 없는 리스크를 만들어 낸다.
+                summary_rest = (tree or {}).get("summary")
+                leaf_rest = summary_rest.get("leaf_instances") if isinstance(summary_rest, Mapping) else None
+                if isinstance(leaf_rest, int) and not isinstance(leaf_rest, bool) \
+                        and leaf_rest > len(parts_rest):
+                    degraded.add("parts_truncated")
+                    warnings.append(_warn(
+                        "parts_truncated",
+                        f"파트 목록이 잘렸다 — 트리 리프 {leaf_rest} 개 중 {len(parts_rest)} 개만 받았다.", None))
 
         # ③ 폴백(MCP). 노드 3키뿐이라 depth·seq·shape_def_id·auto_named·color·world_transform 이 소실된다.
         mcp_tree: dict | None = None
