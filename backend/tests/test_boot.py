@@ -132,3 +132,12 @@ def test_meta_vocab_lists_runtime_assets(client):
     for name in ("character-vocab", "seat-contract", "rules-seed", "adjacency", "character-seed-rules"):
         assert name in text, f"{name} 가 /meta/vocab 응답에 없다"
     assert "1.0" in text or "version" in text.lower()
+
+
+def test_meta_vocab_carries_the_promotable_axes(client):
+    """자유 태그 승격 화면의 축 선택지는 서버가 준다 — 통제 어휘를 화면이 따로 갖지 않게(§7.7)."""
+    axes = client.get("/api/meta/vocab").json()["promotable_axes"]
+
+    assert axes == sorted(axes) and "char:structure" in axes and "char:constraint" in axes
+    # 값 목록이 없는 축은 선택지에 없다 — 서버 가드(axis_not_promotable)와 같은 판정이다.
+    assert "char:interface" not in axes

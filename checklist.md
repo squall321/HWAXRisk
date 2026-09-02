@@ -5,7 +5,7 @@
 코드 대조로 확인해 적은 작업 대장이며, 앞으로의 진행은 이 문서를 늘려 가며 한다. 정본 체크리스트는 단계 착수 전에 쓴 것이라 P1~P7 항목이
 전부 미체크로 남아 있다 — 여기서 실측한 완료 상태가 그보다 최신이다.
 
-마지막 실측 2026-09-02 — `pytest` **1092 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · 커밋 8건(`4cf8ed5`~`37b9c3b`) · `origin/main` 동기.
+마지막 실측 2026-09-02 — `pytest` **1094 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · 커밋 8건(`4cf8ed5`~`37b9c3b`) · `origin/main` 동기.
 
 ## 진척 요약
 
@@ -20,7 +20,7 @@
 | P6 학습 루프 | §9.7 | **부분** — 라벨 자동 유입 4경로 미구현(의도적 노출) | `learning.py` · `metrics.py` · `nightly.py` · `bootstrap_*.py` |
 | P7 ODB 실연동 | §9.8 | **미착수**(조건부 — ODB hub 계약 합의 대기) | `adapters/ecad_stub.py` 만 |
 
-실측 규모 — 백엔드 `app/` 38모듈 25,018줄 · 프런트 `src/` 5,363줄 · REST 64경로 · MCP 7도구 · DDL `rr_*` 41표 + 살림 2표 · 테스트 42파일.
+실측 규모 — 백엔드 `app/` 38모듈 25,018줄 · 프런트 `src/` 5,700여 줄 · REST 64경로 · MCP 7도구 · DDL `rr_*` 41표 + 살림 2표 · 테스트 42파일.
 
 ## 1. 앱 코드 구멍 — 지금 바로 가능한 것
 
@@ -42,18 +42,24 @@
   재사용 · `voc:`·`paper:` 참조와 등급 매핑(§0.2.1 (5)) · `GET /refs` 해석 · `taxonomy.v1.json` 의 `voc_map` 시드 12행(현재 `[]`) ·
   `evidence_profile.field`. 지표 `field_evidence_rate`(`metrics.py:43`)는 이미 있으나 분자가 항상 0 이다.
   → 검증: 제품 연결된 타깃에서 E10 ≤5줄·`voc:` 인용이 `GET /refs` 200·미등록 타깃은 결측 1줄, 항목 수 12·드롭 0
-- [ ] **프런트 화면 6종 부재** — REST 는 있는데 사람이 쓸 입구가 없다.
-  - [ ] `CurationQueue.tsx`(`#/curation`) — `GET /curation`·`PUT /curation/{id}` 가 UI 없이 떠 있다(인젝션 의심 문구·라벨 대조·패턴 후보·근접 중복 병합 전부 여기로 온다)
+- **프런트 화면** — REST 는 있는데 사람이 쓸 입구가 없던 것들.
+  - [x] `CurationQueuePage.tsx`(`#/curation`) (2026-09-02) — kind 6종의 열린 항목을 사람이 결정한다. 결정 어휘는 서버
+    `CURATION_DECISIONS` 와 같은 집합이고 그 사실을 시험으로 고정했다. 값을 더 받아야 하는 결정(`x_tag_promote` 의 `axis`,
+    `unclassified_code` 의 `mechanism_detail`)은 빈 값이면 버튼이 잠긴다. 승격 축 선택지는 `GET /meta/vocab.promotable_axes`
+    로 서버가 준다 — 통제 어휘를 화면이 따로 갖지 않는다. 성격 승격 UI(아래 항)가 여기 안에 함께 들어갔다.
   - [ ] `CoverageHeatmap` — 커버리지 히트맵·자격 표시·미착석 배지(§9.5)
   - [ ] `TargetPage` '리스크 직접 등록' 폼 — `POST /targets/{key}/findings` 의 UI 짝(작성자만 수정·삭제)
   - [ ] `TargetPage` '브리프 토큰 복사' 버튼 — L2 워크플로가 `briefToken` 없이는 앱을 못 부른다
-  - [ ] 성격 승격 UI — 위 `x_tag_promote` 와 짝
   - [ ] `ProjectPage` '사전' 탭 — `POST /vocab/synonyms`·`stop-tokens` 와 재계산 필요 배너
 - [ ] **라벨 자동 유입 4경로 미구현**(RA incident · test_run · DynaForge · VOC). 야간 ①·⑤(`metrics.sync_labels`·`refresh_fv_stats`)가
   비어 있고 `run_nightly()['unwired']` 와 `rr_metrics(label_ingest_wired)` 배지로 드러내는 중이다 — 숨긴 게 아니라 학습 루프의 분모가
   아직 사람 라벨뿐이라는 뜻이다. 경로 1·2 는 RA 게이트웨이 읽기, 3 은 러너 자격 (b), 4 는 `product_code` 조건이 선행한다.
 - [x] **`ruff` 설치** (2026-09-02) — `pip install -e ".[test]"` 재실행. `ruff check .` All checks passed.
-- [ ] **로컬 `frontend/dist` 재빌드** — 마지막 프런트 커밋(`c74b551`, 01:27)보다 dist(01:18)가 이르다. 배포본은 SIF 빌드가 다시 말아 정상이므로 로컬만 해당.
+- [x] **로컬 `frontend/dist` 재빌드** (2026-09-02) — `pnpm build` 통과(`tsc -b && vite build`).
+- [ ] **프런트가 부르는데 서버에 없는 경로 2종** (2026-09-02 발견) — `GET /panels/{id}/transcript`(`PanelTranscript.tsx`) ·
+  `GET /targets/{key}/seats`(`TargetPage.tsx`). 둘 다 404 → '아직 준비 중' 배너로 접히지만, 패널 속기록 화면과 도메인별 좌석
+  목록이 UI 에서 죽어 있다는 뜻이다. 정본 §0.5.1 경로 목록에도 없어 **경로를 더할지 화면을 접을지 정본 결정이 먼저** 다
+  — 속기록은 §5.2.2 F·§6.7.2 7단계가 `rr_panel_calls` 원문 보존을 요구하므로 경로를 더하는 쪽이 자연스럽다.
 - [ ] 백테스트 표본 재설계(§7.5 정본 결정 대기) — train 구간에서만 범위 산출 · 라벨 없는 심사 타깃을 관측 음성으로 편입 · 홀드아웃 최소 표본.
   계획이 표본 우주를 정하지 않아 코드로 지어내지 않고 남겨 둔 것이다(context-notes 2026-08-31 P6 항).
 - [ ] 골든 `backend/tests/golden/sif-e2e.ir.json` 부재 — 선행 B2(골든 프로젝트 재파싱)가 닫혀야 만들 수 있다(↓ 2장).
@@ -118,8 +124,8 @@
 
 ## 다음 수
 
-1장이 외부 의존이 없어 바로 된다. `x_tag_promote` 어휘와 어휘 자산 정합은 닫혔고, 다음은 **CurationQueue 화면**(REST 4종이 UI 없이
-떠 있고, 방금 연 승격 결정도 화면이 없으면 쓸 수 없다) → **E10 실호출**(브리프 근거 한 축이 통째로 비어 있음) 순이 값이 크다.
+1장이 외부 의존이 없어 바로 된다. `x_tag_promote` 어휘·어휘 자산 정합·CurationQueue 화면은 닫혔다. 다음은
+**E10 실호출**(브리프 근거 한 축이 통째로 비어 있음)이 값이 가장 크고, 그 앞에 **죽은 경로 2종**(속기록·좌석)의 정본 결정이 있다.
 2장은 B1(heax 서비스 PAT) 하나가 풀리면 여러 통과 기준이 함께 닫힌다.
 
 ## 완료 기록 — P0 (2026-08-31)

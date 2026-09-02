@@ -129,7 +129,12 @@ export type TaxonomyAxis = { code: string; label: string; [key: string]: JsonVal
 export type Taxonomy = { taxonomy_version: string; axes: Record<string, TaxonomyAxis[]> };
 
 export type VocabAsset = { name: string; file: string; present: boolean; version: string | null };
-export type VocabIndex = { asset_version: string; assets: VocabAsset[] };
+export type VocabIndex = {
+  asset_version: string;
+  assets: VocabAsset[];
+  /** 자유 태그를 올릴 수 있는 축 — 통제 값 목록이 있는 축만 서버가 준다(§7.7). */
+  promotable_axes: string[];
+};
 
 export type MetricRow = {
   period: string;
@@ -721,4 +726,45 @@ export type ImportResult = {
   merged: number;
   skipped: number;
   conflicts: Array<{ table: string; key: string; local: JsonValue; incoming: JsonValue }>;
+};
+
+// ── 큐레이션 큐(plan §7.7) ──────────────────────────────────────────────────
+
+/** DDL 이 허용하는 6종. 결정 어휘는 kind 마다 다르다. */
+export type CurationKind =
+  | "unclassified_code"
+  | "pattern_candidate"
+  | "label_match"
+  | "x_tag_promote"
+  | "suspect_text"
+  | "cluster_merge";
+
+export type CurationStatus = "open" | "done" | "rejected";
+
+export type CurationRow = {
+  id: string;
+  kind: CurationKind;
+  /** kind 마다 모양이 다르다 — 화면은 아는 키만 꺼내 보이고 나머지는 원문으로 접는다. */
+  payload: JsonObject;
+  status: CurationStatus;
+  decision: JsonObject;
+  decided_by: string | null;
+  decided_at: number | null;
+  created_at: number;
+};
+
+export type CurationList = { rows: CurationRow[] };
+
+export type CurationDecision = {
+  decision: string;
+  reason?: string | null;
+  /** 결정에 딸린 인자 — 승격의 `axis`, 미분류 코드의 `mechanism_detail` 등. */
+  payload?: JsonObject | null;
+};
+
+export type CurationDecided = {
+  status: CurationStatus;
+  decision_json: JsonObject;
+  /** 적용 결과. 적용 함수가 없는 결정(단순 기각·라벨 확정)은 빈 객체다. */
+  applied: JsonObject;
 };

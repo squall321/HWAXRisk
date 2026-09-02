@@ -296,6 +296,24 @@ def test_every_queue_kind_the_ddl_allows_has_a_decision_vocabulary():
     assert kinds == set(routes.CURATION_AUDIT_SCOPE)
 
 
+def test_curation_screen_uses_the_same_decision_vocabulary_as_the_server():
+    """화면의 결정 어휘는 서버 CURATION_DECISIONS 와 같은 집합이어야 한다 — 어휘가 두 곳에 적히면 한쪽만 늙는다."""
+    page = (pathlib.Path(__file__).resolve().parents[2] / "frontend" / "src" / "pages"
+            / "CurationQueuePage.tsx")
+    if not page.exists():
+        pytest.skip("프런트엔드 화면이 없다")
+    text = page.read_text(encoding="utf-8")
+
+    import re
+
+    blocks = re.findall(r'kind:\s*"(\w+)".*?decisions:\s*\[(.*?)\]', text, re.S)
+    screen = {kind: tuple(re.findall(r'value:\s*"([\w]+)"', body)) for kind, body in blocks}
+
+    assert screen.keys() == routes.CURATION_DECISIONS.keys()
+    for kind, values in screen.items():
+        assert set(values) == set(routes.CURATION_DECISIONS[kind]), kind
+
+
 def _character(store, sid, *, tags, lead=None, facet="unknown", target_key=None, project_id=PROJECT):
     store.execute(
         "INSERT INTO rr_character(id, project_id, owner_sub, facet, tag, tags_json, statement, polarity,"

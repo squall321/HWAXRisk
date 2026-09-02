@@ -317,6 +317,14 @@ def queue_x_tag_promotions(store: RiskStore, *, owner_sub: str) -> list[str]:
     return queued
 
 
+def promotable_axes() -> list[str]:
+    """자유 태그를 올릴 수 있는 축 — 통제 값 목록이 있는 축만이다(char:interface 는 별칭 파생이라 빠진다).
+
+    화면의 축 선택지와 `promote_x_tag` 의 가드가 같은 판정을 쓰도록 여기 한 곳에서 낸다.
+    """
+    return sorted(k for k, v in (_vocab().get("axes") or {}).items() if isinstance(v, list))
+
+
 def promote_x_tag(store: RiskStore, *, tag: str, axis: str, owner_sub: str) -> dict:
     """`x:<value>` 자유 태그를 통제 어휘 `<axis>:<value>` 로 승격한다(plan §7.7 x_tag_promote 행).
 
@@ -333,7 +341,7 @@ def promote_x_tag(store: RiskStore, *, tag: str, axis: str, owner_sub: str) -> d
     axes = _vocab().get("axes") or {}
     allowed = axes.get(axis)
     if allowed is None:
-        raise AppError("axis_unknown", f"통제 어휘에 없는 축입니다 — {axis!r}. 허용 {sorted(axes)}.", 422)
+        raise AppError("axis_unknown", f"통제 어휘에 없는 축입니다 — {axis!r}. 허용 {promotable_axes()}.", 422)
     if not isinstance(allowed, list):
         # char:interface 는 값이 rr_iface_alias 에서 파생돼 통제 목록이 없다(§4.6.3 (4)) — 자유 태그를 여기로 올릴 수 없다.
         raise AppError("axis_not_promotable", f"값 목록이 없는 축으로는 승격할 수 없습니다 — {axis!r}.", 422)

@@ -1,10 +1,11 @@
-// 앱 셸 — HashRouter 라우트 5개와 상단 내비. 딥링크는 /apps/hwax_risk/#/targets/<key> 형식이라 새로고침에 안전하다(계획 §8.2.4).
+// 앱 셸 — HashRouter 라우트 6개와 상단 내비. 딥링크는 /apps/hwax_risk/#/targets/<key> 형식이라 새로고침에 안전하다(계획 §8.2.4).
 import { HashRouter, Link, NavLink, Route, Routes, useParams } from "react-router-dom";
 import RiskHomePage from "./pages/RiskHomePage";
 import ProjectPage from "./pages/ProjectPage";
 import SnapshotPage from "./pages/SnapshotPage";
 import ComparePage from "./pages/ComparePage";
 import TargetPage from "./pages/TargetPage";
+import CurationQueuePage from "./pages/CurationQueuePage";
 import SettingsPage from "./pages/SettingsPage";
 import { SectionCard } from "./components/SectionCard";
 import { EmptyBlock } from "./components/StateBlocks";
@@ -12,6 +13,7 @@ import { EmptyBlock } from "./components/StateBlocks";
 const NAV = [
   { to: "/", label: "과제", end: true },
   { to: "/compare", label: "비교" },
+  { to: "/curation", label: "큐레이션" },
   { to: "/settings", label: "설정" },
 ];
 
@@ -34,7 +36,7 @@ function NotFoundPage() {
     <SectionCard title="없는 주소입니다.">
       <EmptyBlock
         title="이 주소에 해당하는 화면이 없습니다."
-        hint="딥링크는 #/projects/<id> · #/snapshots/<id> · #/compare · #/targets/<key> · #/settings 형식입니다."
+        hint="딥링크는 #/projects/<id> · #/snapshots/<id> · #/compare · #/targets/<key> · #/curation · #/settings 형식입니다."
         action={
           <Link className="rr-btn rr-btn-primary" to="/">
             과제 목록으로
@@ -72,6 +74,7 @@ function Shell() {
           <Route path="/snapshots/:id" element={<SnapshotRoute />} />
           <Route path="/compare" element={<ComparePage />} />
           <Route path="/targets/:key" element={<TargetPage />} />
+          <Route path="/curation" element={<CurationQueuePage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Routes>

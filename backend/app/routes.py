@@ -191,7 +191,12 @@ def get_adapters() -> dict:
 
 @router.get("/meta/vocab")
 def get_vocab() -> dict:
-    return {"asset_version": taxonomy.ASSET_VERSION, "assets": taxonomy.vocab_index()}
+    """어휘 자산 목록 + 자유 태그를 올릴 수 있는 축(§7.7 x_tag_promote 화면의 선택지).
+
+    축 목록을 화면이 따로 갖지 않게 서버가 준다 — 통제 어휘가 두 곳에 적히면 한쪽만 늙는다.
+    """
+    return {"asset_version": taxonomy.ASSET_VERSION, "assets": taxonomy.vocab_index(),
+            "promotable_axes": character.promotable_axes()}
 
 
 METRICS_LIMIT_MAX = 2000

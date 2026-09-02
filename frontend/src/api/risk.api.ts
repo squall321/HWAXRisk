@@ -5,6 +5,9 @@ import type {
   Brief,
   CharacterProfile,
   Coverage,
+  CurationDecided,
+  CurationDecision,
+  CurationList,
   DiffCreate,
   DiffCreated,
   DiffDoc,
@@ -317,6 +320,12 @@ export const riskApi = {
     request<ResyncQueued>(`targets/${encodeTargetKey(key)}/resync`, { method: "POST", ...o }),
   refreshRoster: (key: string, o?: Opt) =>
     request<RosterRefreshed>(`targets/${encodeTargetKey(key)}/refresh_roster`, { method: "POST", ...o }),
+
+  // ── 큐레이션 큐 ───────────────────────────────────────────────────────────
+  getCuration: (query: { kind?: string; status?: string; limit?: number } = {}, o?: Opt) =>
+    request<CurationList>("curation", { query, ...o }),
+  decideCuration: (queueId: string, body: CurationDecision, o?: Opt) =>
+    request<CurationDecided>(`curation/${encodeURIComponent(queueId)}`, { method: "PUT", body, ...o }),
 
   // ── 참조 · 반출입 ─────────────────────────────────────────────────────────
   getRef: (ref: string, o?: Opt) => request<RefResolution>(`refs/${encodeURIComponent(ref)}`, o),
