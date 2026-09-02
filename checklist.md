@@ -1,71 +1,133 @@
-<!-- HWAXRisk 앱 리포의 P0 앱 슬라이스 체크리스트 — 포털 정본 checklist.md(P0 전체)에서 앱 몫만 떼어 왔다 -->
+<!-- HWAXRisk 앱 리포 작업 대장 — P0~P6 진척과 앱 몫 잔여 백로그. 포털 정본 checklist.md 에서 앱 몫만 떼어 와 실측으로 갱신한다 -->
 # HWAXRisk 체크리스트
 
-정본은 `HWAXPortal/docs/design-risk-review/{plan.md, checklist.md}`. 이 문서는 **앱 리포에 속한 P0 항목**만 다룬다.
-엔진 additive(deliberation.py·hwax-deliberate.js)·포털 메뉴·HEAXHub 등록·RA/AIDataHub 부트스트랩은 포털 정본 체크리스트의 몫이다.
+계획 정본은 `HWAXPortal/docs/design-risk-review/{plan.md, checklist.md}` 다. 이 문서는 **앱 리포가 실제로 무엇까지 했고 무엇이 남았는지**를
+코드 대조로 확인해 적은 작업 대장이며, 앞으로의 진행은 이 문서를 늘려 가며 한다. 정본 체크리스트는 단계 착수 전에 쓴 것이라 P1~P7 항목이
+전부 미체크로 남아 있다 — 여기서 실측한 완료 상태가 그보다 최신이다.
 
-## 1단계 — 준비 (이번 세션)
+마지막 실측 2026-09-02 — `pytest` **1085 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · 커밋 8건(`4cf8ed5`~`37b9c3b`) · `origin/main` 동기.
+
+## 진척 요약
+
+| 단계 | 정본 절 | 상태 | 근거 |
+|---|---|---|---|
+| P0 부트스트랩 | §9.1 | **완료** — 실환경 통과 기준 일부 미실측(↓ 3장) | 스캐폴드·계약·정합 A-δ, SIF 빌드·기동·게이트웨이 흡수 확인 |
+| P1 IR·상태·게이트·규칙(MCAD) | §9.2 | **완료**(합성 픽스처 기준) | `ir_builder.py` · `state.py` · `render.py` · `requirements.py` · `adapters/mcad.py` · `export.py` |
+| P2 Dyna·same-as·원장·diff | §9.3 | **완료**(합성 픽스처 기준) | `adapters/dyna.py` · `sameas.py` · `diff.py` · `ComparePage.tsx` · `recompute_part_keys.py` |
+| P3 패널 e2e·서술 저장 | §9.4 | **완료**(엔진 실호출 미실측) | `narrative.py` · `runner.py` · `registry.py` · `character.py` · `ra_client.py` · `adh_client.py` |
+| P4 커버리지·편성·배치·보고서 | §9.5 | **완료** | `planner.py` · `roster.py` · `runner.py` 배치 · C1~C3 · `GET /api/meta/metrics` |
+| P5 재사용 루프 | §9.6 | **부분** — E10 필드·VOC 근거가 스텁, UI 3종 부재 | `brief.py` E5±·E6~E8 · `risk_add_finding` · `/api/precedents` |
+| P6 학습 루프 | §9.7 | **부분** — 라벨 자동 유입 4경로 미구현(의도적 노출) | `learning.py` · `metrics.py` · `nightly.py` · `bootstrap_*.py` |
+| P7 ODB 실연동 | §9.8 | **미착수**(조건부 — ODB hub 계약 합의 대기) | `adapters/ecad_stub.py` 만 |
+
+실측 규모 — 백엔드 `app/` 38모듈 25,018줄 · 프런트 `src/` 5,363줄 · REST 64경로 · MCP 7도구 · DDL `rr_*` 41표 + 살림 2표 · 테스트 42파일.
+
+## 1. 앱 코드 구멍 — 지금 바로 가능한 것
+
+착수 순서대로 적었다. 외부 자격·합의가 필요 없는 항목만 여기에 둔다.
+
+- [ ] **`x_tag_promote` 큐 결정 어휘 부재 — `PUT /api/curation/{id}` 가 501 이다.**
+  `character.py:311` 이 이 kind 로 큐를 쌓고 DDL CHECK(`risk_store.py:494`)도 6종을 허용하는데, `routes.py:2878` 의
+  `CURATION_DECISIONS` 에는 5종만 있어 성격 X태그 승격을 사람이 결정할 길이 없다. 어휘와 적용 함수(`character.promote_x_tag`)를 잇고
+  결정 뒤 `metrics.recompute` 재호출까지 붙인다. → 검증: `x_tag_promote` 행 1건을 `done` 으로 닫고 `rr_character` 태그 반영 확인
+- [ ] **E10 필드·VOC·문헌 근거가 스텁이다.**
+  `brief.py:688 _field_evidence_lines` 가 제품 연결 유무만 보고 늘 `[필드·문헌 근거 없음 …]` 한 줄을 낸다. 정본 §5.6.1 E10·§6.5.2 가
+  요구하는 것 — `get_top_issues`·`query_voc`·`search_scholar` 실호출을 러너가 하고 `rr_panel_calls(source_kind='brief')` 에 저장해 24 h
+  재사용 · `voc:`·`paper:` 참조와 등급 매핑(§0.2.1 (5)) · `GET /refs` 해석 · `taxonomy.v1.json` 의 `voc_map` 시드 12행(현재 `[]`) ·
+  `evidence_profile.field`. 지표 `field_evidence_rate`(`metrics.py:43`)는 이미 있으나 분자가 항상 0 이다.
+  → 검증: 제품 연결된 타깃에서 E10 ≤5줄·`voc:` 인용이 `GET /refs` 200·미등록 타깃은 결측 1줄, 항목 수 12·드롭 0
+- [ ] **프런트 화면 6종 부재** — REST 는 있는데 사람이 쓸 입구가 없다.
+  - [ ] `CurationQueue.tsx`(`#/curation`) — `GET /curation`·`PUT /curation/{id}` 가 UI 없이 떠 있다(인젝션 의심 문구·라벨 대조·패턴 후보·근접 중복 병합 전부 여기로 온다)
+  - [ ] `CoverageHeatmap` — 커버리지 히트맵·자격 표시·미착석 배지(§9.5)
+  - [ ] `TargetPage` '리스크 직접 등록' 폼 — `POST /targets/{key}/findings` 의 UI 짝(작성자만 수정·삭제)
+  - [ ] `TargetPage` '브리프 토큰 복사' 버튼 — L2 워크플로가 `briefToken` 없이는 앱을 못 부른다
+  - [ ] 성격 승격 UI — 위 `x_tag_promote` 와 짝
+  - [ ] `ProjectPage` '사전' 탭 — `POST /vocab/synonyms`·`stop-tokens` 와 재계산 필요 배너
+- [ ] **라벨 자동 유입 4경로 미구현**(RA incident · test_run · DynaForge · VOC). 야간 ①·⑤(`metrics.sync_labels`·`refresh_fv_stats`)가
+  비어 있고 `run_nightly()['unwired']` 와 `rr_metrics(label_ingest_wired)` 배지로 드러내는 중이다 — 숨긴 게 아니라 학습 루프의 분모가
+  아직 사람 라벨뿐이라는 뜻이다. 경로 1·2 는 RA 게이트웨이 읽기, 3 은 러너 자격 (b), 4 는 `product_code` 조건이 선행한다.
+- [ ] **`ruff` 가 venv 에 없다** — `pyproject.toml [test]` 에는 있는데 `backend/.venv` 에 설치돼 있지 않아 린트가 안 돈다. `pip install -e ".[test]"` 재실행.
+- [ ] **로컬 `frontend/dist` 재빌드** — 마지막 프런트 커밋(`c74b551`, 01:27)보다 dist(01:18)가 이르다. 배포본은 SIF 빌드가 다시 말아 정상이므로 로컬만 해당.
+- [ ] 백테스트 표본 재설계(§7.5 정본 결정 대기) — train 구간에서만 범위 산출 · 라벨 없는 심사 타깃을 관측 음성으로 편입 · 홀드아웃 최소 표본.
+  계획이 표본 우주를 정하지 않아 코드로 지어내지 않고 남겨 둔 것이다(context-notes 2026-08-31 P6 항).
+- [ ] 골든 `backend/tests/golden/sif-e2e.ir.json` 부재 — 선행 B2(골든 프로젝트 재파싱)가 닫혀야 만들 수 있다(↓ 2장).
+
+## 2. 실환경 실측 대기 — 자격·선행 조건이 필요한 것
+
+여기 있는 것은 코드가 없어서가 아니라 **소스 앱·자격·실데이터가 없어 합성 픽스처로만 채워 둔** 통과 기준이다.
+
+- [ ] **B1 heax 서비스 PAT 발급**(§10 #2) — 최대 단일 레버. 미발급이면 REST 채널 0회 · 계면 엣지 0건 · G6 `unknown_blocking` 으로 diff·타깃이 막힌다
+- [ ] **B2 골든 `sif-e2e` StepForge 재파싱·재검출**(§10 #15, 사용자 실행) — 미실행이면 첫 캡처가 `volume_null_pre_d168` 확정
+- [ ] **B4 실무 규모 STEP 1건 업로드** · **B5 DynaForge 세션·K파일·리포트 각 1건**(P2 (8)(9) 선행) · **B6 `heax-materialtwin_web` 기동**(§10 #41)
+- [ ] `var/app_data/hwax_risk/secrets.env`(0600) 5키 — `HWAXRISK_PORTAL_PAT`(scopes read) · `HWAXRISK_PORTAL_PAT_RW` · `HWAXRISK_HEAX_SERVICE_PAT` ·
+  `HWAXRISK_AIDH_API_KEY` · `HWAXRISK_CRED_KEY`(Fernet) → `redeploy-app.sh hwax-risk`. 현재 `cred.key` 만 있다
+- [ ] `bootstrap_ra_ontology.py --base <RA> --apply`(env `RA_ADMIN_PAT`, §10 #1 승인 선행) · `bootstrap_adh.py`(§10 #10 확인 선행) 1회 실행
+- [ ] 통과 기준 실측 — P0 (4) StepForge 직접 읽기 · (9) 러너 자격 3항 · (16) app-data 왕복(`appdata-to-drive.sh` → 복원 `integrity_check ok`) ·
+  (17) 신원 해석 라이브 · (18) 자격 최소 권한·암호 보관 4항
+- [ ] P3 엔진 실호출 실측 — 포털 `/agent/chat` 경로 (A) 로 패널 1건 완주 · SSE 귀속 ≥95% · 도구 사용률 ≥80% · IR 인용 ≥50%
+- [ ] 성능 실측 — 500·2000 diff <5 s + RSS 피크 기록(§10 27) · 500파트 캡처 ≤10 s
+
+**이미 실측된 것**(다시 하지 않는다) — SIF 빌드·기동·Caddy 라우트·게이트웨이 `heax-hwax_risk` 자동 흡수(`POST /mcp` 200 · `tools/list` 응답,
+`var/logs/integration_hwax_risk.log`) · `var/app_data/hwax_risk/` 생성과 DB 지속 · 로컬 기동 3점.
+
+## 3. 이 리포 밖 — 포털·엔진 몫
+
+앱 코드는 손대지 않지만 앱의 통과 기준이 여기에 걸려 있다.
+
+- [ ] 포털 `delibTaxonomy.ts`(JobId·JOBS 8행째·JOB_ROUTING·suggestJob) · `conversations.api.ts` ConvKind · `agent/routes.py` `ConvCreate.kind`
+- [ ] agent-server `GET /health` 에 `sampling{temperature, top_p, max_tokens, seed?}` 1키 additive — 없으면 앱은 `sampling=null` 로 진행한다(막히지 않음)
+- [ ] `delib_metrics.py` 에 risk_spec 파싱 성공률 1종
+- [ ] `HWAXPortal/infra/pipeline/hwax-risk-review.js` args 에 `briefToken` 필수화(§6.11) + `sync-workflows.sh`
+- [ ] `check_chair_parity.py` exit 0 확인 — 되면 이 리포 `test_parity.py` 가 skip 에서 실검사로 바뀐다
+
+**HEAX 플랫폼 쪽 알림**(앱 버그 아님) — 헬스 프로브가 `/apps/hwax_risk/apps/hwax_risk/api/health` 로 접두를 두 번 붙여 404 를 3,756회 냈다
+(200 은 0회). `materialtwin_web`·`web_design_agents`·`voice_recorder` 로그에도 같은 이중 접두가 있어 플랫폼 공통 문제다. 앱은 정상 기동 중이다.
+
+## 4. P7 — 조건부, 미착수
+
+- [ ] `adapters/ecad.py`(계약 4도구, `registry.py` 도구명 발견) · ir_version 1.1(`MIGRATIONS` v2) · refdes↔파트 사전 UI · `ecad.*` 이벤트 · SedInput 어댑터
+- [ ] 예측기 HEAX 앱 계획서(별도 리포·매니페스트, 라벨 원천 `GET /api/export`) — 활성화 게이트 `n_labeled ≥50`·`project ≥15`
+- [ ] 선행(§10 9·14a) — ODB hub 계약 합의, 명명 규칙. 그전에는 `ecad_stub.py` 가 `discover` 만 하고 `capture` 는 빈 결과 + `ecad_absent` 다
+
+## 5. 운영·이관
+
+- [ ] dev crontab `appdata-to-drive.sh` 일 1회(기본 03:30, RETAIN 5) — `secrets.env` 제외 패턴 additive(§10 #18 ② 승인 대기)
+- [ ] cae00 이관(§8.4.4 6, P3 실측 통과 뒤) — `build-all-to-drive.sh` → cae00 `dist-from-drive.sh` → 자격 재발급 → `redeploy-app.sh hwax-risk`.
+  이후 dev→cae00 은 `GET /api/export` → `POST /api/import` 만
+
+## 6. 정본에 남은 사용자 결정
+
+포털 `checklist.md` '착수 전 — 사용자 결정' 절의 미결 항목 중 앱 동작을 바꾸는 것만 옮겨 적는다. 코드는 각 항의 **기본값**으로 이미 돌고 있다.
+
+- [ ] #17 MCP 쓰기 귀속 — `actor` 미검증(`actor_verified:false`) 유지 vs 게이트웨이 `x-hwax-user` 전달 (기본 미채택)
+- [ ] #18b 데이터 등급 — `confidential` 이면 조직 공개를 막을지 (현재 등급과 `mcp_visibility` 는 분리돼 있다)
+- [ ] #29 과제 공유 기본값 — 명시 초대만(기본) vs 부서 자동 viewer / 열람 감사 로그 (기본 안 남김)
+- [ ] #31 사람 finding 을 선례로 되먹일지 — `risk_prior_include_human` 기본 true
+- [ ] #32 인젝션 위생 강도 — 자리표시자 차단(기본) vs 어휘 축소 vs 경고만
+- [ ] #37 소스 응답 계약 위반 강도 — `risk_source_drift_block=false`+`caveat='parser_differs'`(기본) vs 차단
+- [ ] #39 모델 상한 — `risk_max_leaf` 1500 · `risk_max_interfaces` 6000 · 예산 180 s(`allow_large` 600) 값 승인
+- [ ] #5·6·7 로스터·마감 — 도메인 15 · ECAD 6 · 기본 마감 C2 vs C3 · carried 90일 · 패널 LLM 상한 120
+- [ ] #33·40 브리프 예산 — 기각·반증 선례(E5−)를 다른 과제 브리프에 실을지(기본 실음, 6줄 상한) · `delib_opts.evidence` 항목 상한 12 상향 (기본 접어 둠)
+- [ ] #23·24 매니페스트 확정값·리포 위치 승인 — 코드·등록은 이미 그 값으로 서 있다(`squall321/HWAXRisk`, `company`, `memory_gb 2`)
+
+## 다음 수
+
+1장이 외부 의존이 없어 바로 된다. 그중에서도 **`x_tag_promote` 어휘**(막힌 경로 1건, 작음) → **CurationQueue 화면**(REST 4종이 UI 없이 떠 있음) →
+**E10 실호출**(브리프 근거 한 축이 통째로 비어 있음) 순이 값이 크다. 2장은 B1(heax 서비스 PAT) 하나가 풀리면 여러 통과 기준이 함께 닫힌다.
+
+## 완료 기록 — P0 (2026-08-31)
+
+<details>
+<summary>P0 스캐폴드·정합 항목(전부 완료)</summary>
+
 - [x] 이름·경로 정본 확정(context-notes D2·D6) — 리포 `HWAXRisk` · id `hwax_risk` · Caddy `/apps/hwax_risk` · MCP `heax-hwax_risk` · REST `/api`
-- [x] ThermalShockMCP 골격 조사(pyproject·.gitignore·manifest v2·main.py 마운트 방식·config HEAX_DATA_DIR 폴백)
-- [x] HEAXHub `schemas/manifest.schema.v2.json`·`manifest_validator.py` 조사(루트 `mcp` 키는 스키마 밖 — context-notes D4 메모)
-- [x] backend/pyproject.toml / .gitignore / .portal/manifest.yaml / .mcp.json
-- [x] README.md / checklist.md / context-notes.md / docs/plan.md / docs/odb-adapter-contract.md
-- [ ] git 첫 커밋(리포에 커밋 0건 — P0 정합까지 합쳐 사용자가 결정)
+- [x] `backend/pyproject.toml` / `.gitignore` / `.portal/manifest.yaml` / `.mcp.json` / 문서 5종
+- [x] `config.py`(§8.2.6 전 필드·데이터 루트 우선순위·`secrets.env`) · `risk_store.py`(§5.2.2 DDL 전문·`_schema_migrations`·pre-migrate 사본) ·
+  `narrative.py` v0 · `taxonomy.py` · `identity.py`(되묻기+TTL 캐시) · `routes.py` · `mcp_server.py` · `main.py` lifespan ①~⑦ · `runner.py` 골격 · `cli.py`
+- [x] 스키마 5종 · 자산 6종(package-data) · `docs/odb-adapter-contract.md`
+- [x] `fastapi_react` 레이아웃 전환(D5) — `backend/` + `frontend/`, `pnpm build` → `frontend/dist`
+- [x] P0 정합 A-δ 13항(D6) — env 접두 `HWAXRISK_` · DDL 전문 · lifespan · MCP 6종 시그니처 · 자산 이동 · 매니페스트 · identity 재작성 · 테스트 재편
+- [x] GitHub `squall321/HWAXRisk` 생성·push · HEAXHub `integrations/hwax-risk/.portal/manifest.yaml` 커밋 → SIF 빌드 → 기동 → 게이트웨이 흡수
+- [x] 정본 불일치 2건 해소 — DDL 표 수는 41표(정본 §5.2.2 전문 기준) · heax 불통 시 anonymous 유지(§8.2.8, context-notes D6)
 
-## 2단계 — 앱 골격 (병렬 빌더, 경로는 D5 전환 후 `backend/app/`)
-- [x] `app/config.py` — Settings(plan §8.2.6 전 필드, env `HWAXRISK_<대문자>`), 우선순위 `HWAXRISK_DATA_DIR > HEAX_DATA_DIR > <리포>/data`, 쓰기 불가면 기동 중단, DB 파일 `risk_review.db`, `secrets.env` 로드
-- [x] `app/risk_store.py` — RiskStore(sqlite3+Lock, WAL), `PRAGMA user_version` 정본 + `_schema_migrations` 이력 + v1 = plan §5.2.2 DDL 전문(rr_* 33표+인덱스) + 살림 표 `_user_credentials`, pre-migrate 사본, 상위 버전 기동 실패
-- [x] `app/narrative.py` — `parse_risk_spec`(펜스 → 균형 중괄호 → schema 검사 → 실패 None) · `validate_risk_spec`(jsonschema)
-- [x] `app/taxonomy.py` — `load_taxonomy()`·`load_json(name)`·버전, 자산은 `backend/app/assets/`
-- [x] `app/identity.py` — `current(request) -> Identity`(Bearer > 쿠키 `heax_access_token` → heax `/api/v1/auth/me`, sha256 TTL 60 s 캐시, `X-Heax-User-*` 미사용)
-- [x] `app/routes.py` — `/api/me` · `PUT /api/me/portal-pat` · `/api/meta/taxonomy` · `/meta/adapters` · `/meta/vocab`, `Depends(identity.current)`
-- [x] `app/mcp_server.py` — FastMCP `hwax-risk` 도구 6종 시그니처(§0.5.2), 본문 `not_implemented` + `ready_in`
-- [x] `app/main.py` — `/api/health {ok, app_version, schema_version}` · api 라우터 · MCP `Route('/mcp')` 이식 · `/` StaticFiles(frontend/dist, 없으면 플레이스홀더) · lifespan ①~⑦(§8.2.10)
-- [x] `app/runner.py` — 스레드 3개 골격(start/stop/status) · `app/adapters/{base,registry}.py` v0
-- [x] `app/cli.py` — `hwax-risk --port`
-- [x] `app/schemas/{rr_ir, rr_state, rr_diff, risk_spec, seat_opinion}.v1.json`
-- [x] `app/assets/{taxonomy, character-vocab, character-seed-rules, adjacency, rules-seed, seat-contract}.v1.json`(package-data)
-
-## 3단계 — 테스트
-- [x] `tests/conftest.py`(HWAXRISK_DATA_DIR=임시 디렉터리 · lifespan TestClient)
-- [x] `test_boot.py`(기동 3점 + dist 분기 + 옛 경로 404) · `test_config_datadir.py`(우선순위·폴백·생성·쓰기 불가·Settings 기본값·secrets) · `test_store.py`(user_version 1·33+2표·멱등·pre-migrate 사본·상위 버전 예외)
-- [x] `test_parser.py`(합성 6 + 픽스처 .md 6 parametrize) · `test_schemas.py`(5 스키마 × 유효/무효 ≥2)
-- [x] `test_mcp_tools.py`(6종 이름 고정·not_implemented·exact `/mcp` Route·307 아님·HTTP JSON-RPC tools/list 6종) · `test_manifest.py`(v2 스키마 허용 오류 2건·§8.2.2 값) · `test_runner.py`
-- [x] `test_identity.py`(Bearer/쿠키/위조 헤더/익명/10회 1호출, MockTransport) · `test_me.py`(익명·인증·401·422 4종·등록 1행·null 삭제 0행) · `test_parity.py`(조건부 skip)
-- [x] `pip install -e ".[test]"` + 전체 pytest green(dist 유무 양쪽)
-
-## 4단계 — 통합 검증
-- [x] `hwax-risk --port 8000` 기동 → `/api/health` 200 · `POST /mcp` initialize 200 · `/` index.html
-- [x] `HWAXRISK_DATA_DIR` 격리 환경에서 DB 생성·재기동 멱등 확인
-- 실측 — `ROOT_PATH=/apps/hwax_risk` 로 기동해 `/api/health` 200 · `/mcp` initialize 200 · `/` index.html 확인(2026-08-31).
-
-## 5단계 — fastapi_react 레이아웃 전환 (context-notes D5)
-- [x] `app/`·`tests/`·`pyproject.toml` → `backend/` 이동, `.venv` 는 `backend/.venv` 로 재생성
-- [x] `frontend/`(HEAXHub `templates/fastapi-react/frontend` 본뜸) — `hwax-risk-frontend`, `pnpm install`(lock 커밋) + `pnpm build` → `frontend/dist`
-- [x] `main.py` 등록 순서 `/api/health` → `/api` 라우터 → MCP `Route('/mcp')` 이식 → `StaticFiles('/')`(dist 있을 때만)
-- [x] `config.py` `BASE_DIR`=리포 루트·`risk_review.db`
-- [x] 매니페스트 `stack fastapi_react`·`launch.env PYTHONNOUSERSITE`·`health /api/health`, `backend/scripts/heaxhub-build.sh`
-- [x] 테스트 추가 — `/api/health`·옛 `/health`·옛 prefix 404·`/` dist 분기·exact `/mcp` Route(307 아님) — 70 passed(dist 있음/없음)
-- 실측 — `ROOT_PATH=/apps/hwax_risk` 기동 → `/api/health` 200 · `/` dist index.html · `assets/*.js` 200 · `POST /mcp` 200(리다이렉트 없음) · `risk_review.db` 생성(2026-08-31).
-
-## 6단계 — P0 정합 (plan §9.1 A-δ, context-notes D6)
-- [x] env 접두 `HWAXRISK_` 복원(코드·테스트·문서·매니페스트) · Settings §8.2.6 전 필드 · `secrets.env` 로드
-- [x] `risk_store.py` v1 = §5.2.2 DDL 전문 + `_schema_migrations`·`_user_credentials` · pre-migrate 사본 · 상위 버전 기동 실패
-- [x] `main.py` lifespan ①~⑦ — `origin.json` · `secrets_valid`(box_match AND 3키) · identity 캐시 · MCP session_manager · 러너
-- [x] `mcp_server.py` 6종 시그니처(옛 `risk_health·risk_get_taxonomy·risk_get_meta` 제거) · DNS-rebinding 보호 off
-- [x] 자산 `docs/*.v1.json` → `backend/app/assets/`(git mv, package-data) · `httpx` 런타임 의존 · `adapters/` v0 · `runner.py` 골격
-- [x] 매니페스트 — `company` · `memory_gb 2` · `launch.env {PYTHONNOUSERSITE}` 만(`HWAXRISK_DATA_DIR` 미기재, 이유 D6) · `allowed_groups []` · description §8.2.2 문구
-- [x] `identity.py` 재작성(`current`, 되묻기+캐시+`reset_cache`) · `api.py`→`routes.py`(git mv) · `GET /me` · `PUT /me/portal-pat`(422 4종·UPSERT·null 삭제·익명 401) · `/api/meta` 제거
-- [x] 테스트 — `test_health`→`test_boot` · `test_parse_risk_spec`→`test_parser` · `test_identity` 재작성 · `test_me`·`test_parity` 신설 · `test_store` 33+2 · `test_manifest` A-δ 값
-- [x] 문서 — README·checklist·context-notes·docs/plan.md·`static/index.html`·`frontend/src/{api.ts,App.tsx}` 표기(6종·`/api/health` 3키·`/api/me`·`_schema_migrations`·`HWAXRISK_`)
-- 실측(2026-08-31) — pytest **103 passed, 2 skipped**(`test_parity` — `HWAX_PORTAL_REPO` 미설정) · `pnpm build` 성공 · TestClient `GET /api/health {ok:true, app_version:'0.1.0', schema_version:1}` · `POST /mcp` initialize 200 + `mcp-session-id` · HTTP JSON-RPC `tools/list` 6종(세션 헤더 재사용, `test_mcp_tools`) · `GET /` text/html · 데이터 루트에 `origin.json`+`risk_review.db` 생성 · 러너 3스레드 alive.
-- [x] 리뷰 반영 — HTTP `tools/list` 경로 실증 테스트 추가(통과 기준 13) · PAT 검증 포털 불통 422→503 `pat_verify_unavailable` 제안을 context-notes D6 에 기록(코드는 §8.2.3 수정 뒤)
-- [ ] 정본 불일치 결정 대기 — §5.2.2 DDL 전문은 rr_ 표 33개(`rr_delta_contrib` 포함), plan 요약 문구는 32표(D6)
-- [ ] 정본 §8.2.8 결정 대기 — heax 불통 시 앱 503 vs anonymous(코드·브리프는 anonymous, D6 'identity 불통 처리'); 포털 plan 문구 수정 또는 코드 503 승격 중 택일
-
-## 보류 (이번 P0 앱 슬라이스 밖 — context-notes D4·D6)
-- [ ] GitHub `squall321/HWAXRisk` 생성·push
-- [ ] HEAXHub `integrations/hwax-risk/.portal/manifest.yaml` 복사본 커밋 → 스캔·SIF 빌드·기동·게이트웨이 흡수 확인(plan §9.1 통과 기준 13~16)
-- [ ] 엔진 additive(`_CHAIR_ITEMS['risk-review']` 등)·`HWAXPortal/scripts/check_chair_parity.py`·포털 메뉴 창(`systems.yaml` 타일·`/risk`·`RiskLaunchPage`) — 되면 `test_parity.py` 가 skip 에서 실검사로 바뀐다
-- [ ] `backend/scripts/{bootstrap_ra_ontology,bootstrap_adh}.py` · `export.py` 자리 · `adapters/registry.py` `/tools-map` 발견 로직(P1)
-- [ ] risk_spec 정규화 10단계(P3)·어댑터 실구현(P1~)·러너 본문(P3~)·MCP 도구 본문(P1~P5)
+</details>
