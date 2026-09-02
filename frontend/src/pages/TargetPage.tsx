@@ -184,7 +184,7 @@ function CoverageHeatmap({ coverage, targetKey }: { coverage: Coverage; targetKe
           <ErrorBanner error={seats.error} onRetry={seats.reload} />
           {seats.loading && !seats.data ? <LoadingBlock /> : null}
           {seats.data ? (
-            <DataTable columns={seatColumns} rows={seats.data} rowKey={(s) => s.agent_key} empty="좌석이 없습니다." />
+            <DataTable columns={seatColumns} rows={seats.data.seats} rowKey={(s) => s.agent_key} empty="좌석이 없습니다." />
           ) : null}
           <p className="rr-muted">좌석 상태 되돌리기 · skipped 사유 입력 경로는 아직 서버에 없습니다.</p>
         </div>
@@ -335,7 +335,7 @@ function PanelsCard({ targetKey }: { targetKey: string }) {
   const panels = useAsync((signal) => riskApi.getPanels(targetKey, { signal }), [targetKey]);
   const [openPanel, setOpenPanel] = useState<string | null>(null);
 
-  const rows = panels.data ?? [];
+  const rows = panels.data?.panels ?? [];
   /** 모델 혼합 — 어떤 LLM 이 점검했는지 세기만 한다(§6.11 D6). 판정을 새로 만들지 않고 패널을 센다. */
   const models = useMemo(() => {
     const map = new Map<string, ModelMixRow>();

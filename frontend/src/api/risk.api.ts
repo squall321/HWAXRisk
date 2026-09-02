@@ -1,6 +1,6 @@
 // 앱 REST 얇은 클라이언트 — 계획 §8.2.3 을 1:1 로 감싼다. 모든 경로는 상대 'api/…' 라 /apps/hwax_risk/ 아래서 그대로 풀린다.
 import type {
-  AdapterEntry,
+  AdapterList,
   ApiErrorBody,
   Brief,
   CharacterProfile,
@@ -26,7 +26,7 @@ import type {
   JobStateResponse,
   Me,
   Metrics,
-  Panel,
+  PanelList,
   PanelComplete,
   PanelCompleted,
   PanelTranscript,
@@ -41,14 +41,14 @@ import type {
   RegistryStatusUpdate,
   ResyncQueued,
   RosterRefreshed,
-  RuleHit,
+  RuleHitList,
   SameAs,
   SameAsDecided,
   SameAsDecision,
-  Seat,
+  SeatList,
   Similar,
   SnapshotAccepted,
-  SnapshotCall,
+  SnapshotCallList,
   SnapshotCreate,
   SnapshotIr,
   SnapshotState,
@@ -234,7 +234,7 @@ export const riskApi = {
   putPortalPat: (pat: string | null, o?: Opt) =>
     request<PortalPatSummary>("me/portal-pat", { method: "PUT", body: { pat }, ...o }),
   getTaxonomy: (o?: Opt) => request<Taxonomy>("meta/taxonomy", o),
-  getAdapters: (o?: Opt) => request<AdapterEntry[]>("meta/adapters", o),
+  getAdapters: (o?: Opt) => request<AdapterList>("meta/adapters", o),
   getVocab: (o?: Opt) => request<VocabIndex>("meta/vocab", o),
   getMetrics: (o?: Opt) => request<Metrics>("meta/metrics", o),
 
@@ -275,8 +275,9 @@ export const riskApi = {
   getSnapshotEdges: (id: string, o?: Opt) =>
     request<IrEdge[]>(`snapshots/${encodeURIComponent(id)}`, { query: { part: "edges" }, ...o }),
   getSnapshotCalls: (id: string, o?: Opt) =>
-    request<SnapshotCall[]>(`snapshots/${encodeURIComponent(id)}`, { query: { part: "calls" }, ...o }),
-  getRuleHits: (id: string, o?: Opt) => request<RuleHit[]>(`snapshots/${encodeURIComponent(id)}/rule_hits`, o),
+    request<SnapshotCallList>(`snapshots/${encodeURIComponent(id)}`, { query: { part: "calls" }, ...o }),
+  getRuleHits: (id: string, o?: Opt) =>
+    request<RuleHitList>(`snapshots/${encodeURIComponent(id)}/rule_hits`, o),
 
   // ── same-as · diff ────────────────────────────────────────────────────────
   getSameAs: (base: string, target: string, o?: Opt) => request<SameAs>("sameas", { query: { base, target }, ...o }),
@@ -303,9 +304,9 @@ export const riskApi = {
 
   getCoverage: (key: string, o?: Opt) => request<Coverage>(`targets/${encodeTargetKey(key)}/coverage`, o),
   getSeats: (key: string, domain: string, o?: Opt) =>
-    request<Seat[]>(`targets/${encodeTargetKey(key)}/seats`, { query: { domain }, ...o }),
+    request<SeatList>(`targets/${encodeTargetKey(key)}/seats`, { query: { domain }, ...o }),
   getRegistry: (key: string, o?: Opt) => request<Registry>(`targets/${encodeTargetKey(key)}/registry`, o),
-  getPanels: (key: string, o?: Opt) => request<Panel[]>(`targets/${encodeTargetKey(key)}/panels`, o),
+  getPanels: (key: string, o?: Opt) => request<PanelList>(`targets/${encodeTargetKey(key)}/panels`, o),
   getPanelTranscript: (panelId: string, o?: Opt) =>
     request<PanelTranscript>(`panels/${encodeURIComponent(panelId)}/transcript`, o),
   getBrief: (key: string, tier?: string, o?: Opt) =>

@@ -1845,8 +1845,11 @@ def registry_payload(target_key: str, *, owner_sub: str | None = None, status: s
     truncated = limit is not None and len(rows) > int(limit)
     if limit is not None:
         rows = rows[: int(limit)]
+    target = store.query_one("SELECT verdict_final FROM rr_targets WHERE target_key = ?", (target_key,))
     return {"target_key": target_key, "rows": rows, "truncated": truncated,
-            "verdict_candidate": registry_module.verdict_candidate(store, target_key)}
+            "verdict_candidate": registry_module.verdict_candidate(store, target_key),
+            # 후보는 코드가 내고 확정은 사람이 낸다(§8.2.4) — 화면 헤더가 둘을 한 응답에서 읽는다.
+            "verdict_final": target["verdict_final"] if target is not None else None}
 
 
 @router.get("/targets/{target_key}/registry")
@@ -1854,6 +1857,26 @@ def get_registry(target_key: str, status: str | None = None, severity: str | Non
                  domain: str | None = None, ident: identity.Identity = Depends(identity.current)) -> dict:
     owner_sub = _require_user(ident)
     return registry_payload(target_key, owner_sub=owner_sub, status=status, severity=severity, domain=domain)
+
+
+@router.get("/targets/{target_key}/seats")
+def get_seats(target_key: str, domain: str | None = None,
+              ident: identity.Identity = Depends(identity.current)) -> dict:
+    """도메인 한 칸의 좌석 목록 — `CoverageHeatmap` 셀 클릭의 드릴다운이다(§8.2.4).
+
+    `GET coverage` 는 도메인×상태 카운트만 준다(5 s 폴링이라 가볍게 둔다). 여기서만 행을 편다.
+    """
+    owner_sub = _require_user(ident)
+    _target_row(target_key, owner_sub)
+    sql = ("SELECT agent_key, domain, tier, origin, status, reason, panel_id, opinion_id, model,"
+           " status_source, decided_by, decided_at, started_at, finished_at"
+           " FROM rr_coverage WHERE target_key = ?")
+    params: list[Any] = [target_key]
+    if domain:
+        sql += " AND domain = ?"
+        params.append(domain)
+    rows = [dict(r) for r in get_store().query(sql + " ORDER BY domain, agent_key", params)]
+    return {"target_key": target_key, "domain": domain, "seats": rows}
 
 
 @router.get("/targets/{target_key}/panels")
@@ -1874,6 +1897,36 @@ def get_panels(target_key: str, ident: identity.Identity = Depends(identity.curr
         item["model"] = _loads(item.pop("model_json"), {})
         panels.append(item)
     return {"target_key": target_key, "panels": panels}
+
+
+@router.get("/panels/{panel_id}/transcript")
+def get_panel_transcript(panel_id: str, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """`PanelTranscript` '발언' 탭 — 앱 DB 의 좌석 발언·결정문·risk_spec(§8.2.4).
+
+    포털 conv_store 를 읽지 않는다. 발언은 `rr_seat_opinions.opinion_json.turns` 를 좌석마다 펴서
+    라운드 순으로 합친 것이고, 결정문·risk_spec 은 `rr_panels` 원문 그대로다.
+    """
+    owner_sub = _require_user(ident)
+    panel = _owned_row(
+        "SELECT id, owner_sub, decision_text, risk_spec_json FROM rr_panels WHERE id = ?",
+        (panel_id,), owner_sub, f"패널 {panel_id}")
+    turns: list[dict] = []
+    for row in get_store().query(
+            "SELECT agent_key, opinion_json FROM rr_seat_opinions WHERE panel_id = ? ORDER BY agent_key",
+            (panel_id,)):
+        for turn in _loads(row["opinion_json"], {}).get("turns") or ():
+            if not isinstance(turn, dict):
+                continue
+            turns.append({"seat": row["agent_key"], "round": int(turn.get("round") or 0),
+                          "say_excerpt": str(turn.get("say_excerpt") or ""),
+                          "position": turn.get("position") or None,
+                          "stance": turn.get("stance") or None})
+    # 좌석을 섞지 않고 라운드로 묶는다 — 같은 라운드 안에서는 좌석 키 순이다(표시 순서를 결정론으로).
+    turns.sort(key=lambda t: (t["round"], t["seat"]))
+    # `_loads(x, None)` 은 isinstance(v, NoneType) 이라 늘 None 이다 — 빈 dict 로 받고 비면 null 로 돌린다.
+    spec = _loads(panel["risk_spec_json"], {})
+    return {"panel_id": panel_id, "decision_text": panel["decision_text"] or "",
+            "turns": turns, "risk_spec": spec or None}
 
 
 class VerdictBody(BaseModel):

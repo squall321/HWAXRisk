@@ -3,7 +3,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { riskApi } from "../api/risk.api";
 import { POLL_MS, useAsync, useInterval } from "../hooks/useAsync";
-import { CardGrid, SectionCard, VerbatimBlock } from "../components/SectionCard";
+import { CardGrid, SectionCard } from "../components/SectionCard";
 import type { Column } from "../components/DataTable";
 import { DataTable, KeyValueTable } from "../components/DataTable";
 import { GateBanner, GateTable } from "../components/GateBanner";
@@ -17,7 +17,7 @@ import {
   StatusBadge,
   UnseatedBadge,
 } from "../components/Badge";
-import { fmtCounts, fmtEpoch } from "../format";
+import { fmtCounts, fmtEpoch, fmtNum } from "../format";
 import { FACET_ORDER } from "../types";
 import type {
   AdapterEntry,
@@ -78,7 +78,7 @@ function SourceCard({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
 
-  const chosen = candidates.find((a) => (a.app ?? "") === appKey);
+  const chosen = candidates.find((a) => (a.app_key ?? "") === appKey);
   const choices = chosen?.choices ?? [];
   const stub = kind === "ecad" && candidates.length === 0;
 
@@ -142,8 +142,8 @@ function SourceCard({
           <select className="rr-select" value={appKey} onChange={(e) => setAppKey(e.target.value)}>
             <option value="">선택</option>
             {candidates.map((a) => (
-              <option key={a.app ?? a.kind} value={a.app ?? ""}>
-                {a.app ?? a.kind} ({a.status})
+              <option key={a.app_key ?? a.kind} value={a.app_key ?? ""}>
+                {a.app_key ?? a.kind} ({a.status})
               </option>
             ))}
           </select>
@@ -592,9 +592,16 @@ function IfaceLedgerEditor({ projectId }: { projectId: string }) {
 
 function CharacterCard({ projectId }: { projectId: string }) {
   const character = useAsync((signal) => riskApi.getCharacter(projectId, { signal }), [projectId]);
+  // 서버는 층(seed·panel·confirmed·superseded)으로 주고 화면은 facet 격자로 보인다 — 여기서만 뒤집는다.
   const byFacet = useMemo(() => {
     const map = new Map<string, CharacterStatement[]>();
-    for (const entry of character.data?.facets ?? []) map.set(entry.facet, entry.statements);
+    for (const items of Object.values(character.data?.layers ?? {})) {
+      for (const statement of items) {
+        const list = map.get(statement.facet) ?? [];
+        list.push(statement);
+        map.set(statement.facet, list);
+      }
+    }
     return map;
   }, [character.data]);
 
@@ -604,18 +611,21 @@ function CharacterCard({ projectId }: { projectId: string }) {
       {character.loading && !character.data ? <LoadingBlock /> : null}
       {character.data ? (
         <>
-          {character.data.one_liner ? <VerbatimBlock text={character.data.one_liner} label="한 줄 요약" /> : null}
+          {character.data.character_status ? (
+            <div className="rr-row">
+              <span className="rr-muted">과제 성격 층</span>
+              <Badge tone="info">{character.data.character_status}</Badge>
+            </div>
+          ) : null}
           <div className="rr-stack">
             {FACET_ORDER.map((facet) => {
               const statements = byFacet.get(facet) ?? [];
-              const naReason = character.data?.facets.find((f) => f.facet === facet)?.na_reason ?? null;
               return (
                 <div key={facet} className="rr-panel">
                   <div className="rr-row rr-panel-head">
                     <strong>
                       {FACET_LABEL[facet]} <span className="rr-muted">{facet}</span>
                     </strong>
-                    {naReason ? <Badge tone="muted">{naReason}</Badge> : null}
                   </div>
                   <div className="rr-cols">
                     {STATEMENT_LAYERS.map((layer) => {
@@ -654,37 +664,115 @@ function CharacterCard({ projectId }: { projectId: string }) {
 
 function SimilarCard({ projectId }: { projectId: string }) {
   const similar = useAsync((signal) => riskApi.getSimilar(projectId, { signal }), [projectId]);
+  const data = similar.data;
+  const projectLink = (id: string, label?: string | null) => (
+    <Link to={`/projects/${encodeURIComponent(id)}`}>{label || id}</Link>
+  );
+  // 경로마다 항목 모양이 다르다 — 한 표로 합치지 않는다(§5.7 '경로를 섞지 않는다').
+  const empty = data !== null && data.lineage.length === 0 && data.vector.length === 0
+    && data.text.length === 0 && data.subject.length === 0;
+
   return (
-    <SectionCard title="유사 과제" subtitle="출처별 top-k 를 섞지 않고 따로 보입니다.">
+    <SectionCard
+      title="유사 과제"
+      subtitle={
+        data ? `회수 경로 4종을 섞지 않고 따로 보입니다 · 코퍼스 ${data.corpus_n}건` : "회수 경로 4종을 섞지 않고 따로 보입니다."
+      }
+    >
       <ErrorBanner error={similar.error} onRetry={similar.reload} />
-      {similar.loading && !similar.data ? <LoadingBlock /> : null}
-      {similar.data && similar.data.by_source.length === 0 ? (
-        <EmptyBlock title="유사 과제가 없습니다." hint="비교할 출처가 아직 없거나 top-k 가 비어 있습니다." />
+      {similar.loading && !data ? <LoadingBlock /> : null}
+      {empty ? (
+        <EmptyBlock title="유사 과제가 없습니다." hint="계보가 없고 코퍼스가 아직 얕습니다." />
       ) : null}
-      {similar.data
-        ? similar.data.by_source.map((group) => (
-            <div key={group.source} className="rr-stack">
-              <h3 className="rr-subhead">{group.source}</h3>
-              {group.items.length === 0 ? (
-                <EmptyBlock title="이 출처의 항목이 없습니다." />
-              ) : (
-                <ul className="rr-list">
-                  {group.items.map((item) => (
-                    <li key={item.project_id}>
-                      <Link to={`/projects/${encodeURIComponent(item.project_id)}`}>
-                        {item.code} · {item.name}
-                      </Link>
-                      <span className="rr-muted">
-                        {" "}
-                        · score {item.score} · {item.why}
+      {data ? (
+        <>
+          <div className="rr-stack">
+            <h3 className="rr-subhead">계보</h3>
+            {data.lineage.length === 0 ? (
+              <p className="rr-muted">선행·후속 과제가 없습니다.</p>
+            ) : (
+              <ul className="rr-list">
+                {data.lineage.map((e) => (
+                  <li key={`${e.relation}:${e.project_id}`}>
+                    {projectLink(e.project_id, e.code)}
+                    <span className="rr-muted"> · {e.relation} · {e.hops}홉</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="rr-stack">
+            <h3 className="rr-subhead">특징 벡터</h3>
+            {data.vector.length === 0 ? (
+              <p className="rr-muted">{data.reason.vector ?? "이웃이 없습니다."}</p>
+            ) : (
+              <ul className="rr-list">
+                {data.vector.map((e) => (
+                  <li key={e.project_id}>
+                    {projectLink(e.project_id)}
+                    <span className="rr-muted"> · cosine {fmtNum(e.cosine)} · {e.rank}위</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="rr-stack">
+            <h3 className="rr-subhead">서술(AIDataHub)</h3>
+            {data.text.length === 0 ? (
+              <p className="rr-muted">{data.reason.text ?? "적중이 없습니다."}</p>
+            ) : (
+              <ul className="rr-list">
+                {data.text.map((e) => (
+                  <li key={e.record_id || `${e.project_id}:${e.rank}`}>
+                    {projectLink(e.project_id)}
+                    <span className="rr-muted"> · {e.rank}위 · {e.section_id || "-"}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="rr-stack">
+            <h3 className="rr-subhead">같은 subject</h3>
+            {data.subject.length === 0 ? (
+              <p className="rr-muted">겹치는 subject 가 없습니다.</p>
+            ) : (
+              <ul className="rr-list">
+                {data.subject.map((e) => (
+                  <li key={e.subject_key}>
+                    <code>{e.subject_key}</code>
+                    <span className="rr-muted">
+                      {" "}· 등록부 {e.n_registry}건(확인 {e.n_verified}) · 과제{" "}
+                    </span>
+                    {e.project_ids.map((pid, i) => (
+                      <span key={pid}>
+                        {i > 0 ? ", " : ""}
+                        {projectLink(pid)}
                       </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
+                    ))}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          {data.merged.length > 0 ? (
+            <div className="rr-stack">
+              <h3 className="rr-subhead">경로 합산</h3>
+              <ul className="rr-list">
+                {data.merged.map((e) => (
+                  <li key={e.project_id}>
+                    {projectLink(e.project_id)}
+                    <span className="rr-muted"> · score {fmtNum(e.score)} · {e.paths.join(" · ")}</span>
+                  </li>
+                ))}
+              </ul>
             </div>
-          ))
-        : null}
+          ) : null}
+        </>
+      ) : null}
     </SectionCard>
   );
 }
@@ -856,7 +944,7 @@ export default function ProjectPage() {
                 key={kind}
                 kind={kind}
                 detail={detail.data as ProjectDetail}
-                adapters={adapters.data ?? []}
+                adapters={adapters.data?.apps ?? []}
                 onChanged={detail.reload}
               />
             ))}

@@ -119,11 +119,12 @@ export type Me = {
   box: { hostname: string; secrets_valid: boolean; cred_key_present?: boolean };
 };
 
-export type Adapter = { kind: string; app: string | null; status: string };
+export type Adapter = { kind: string; app_key: string | null; status: string };
 
 /** `GET /meta/adapters` 의 P1 확장형 — 소스 카드 선택지(§8.2.3 각주). */
 export type AdapterChoice = { value: string; label: string; detail?: string | null };
 export type AdapterEntry = Adapter & { tools_ok?: boolean; choices?: AdapterChoice[] };
+export type AdapterList = { apps: AdapterEntry[] };
 
 export type TaxonomyAxis = { code: string; label: string; [key: string]: JsonValue | undefined };
 export type Taxonomy = { taxonomy_version: string; axes: Record<string, TaxonomyAxis[]> };
@@ -526,6 +527,9 @@ export type Coverage = {
   roster_size: number;
   /** 도메인 코드 → 커버리지 상태별 좌석 수. */
   by_domain: Record<string, Partial<Record<CoverageStatus, number>>>;
+  /** 전체 합계(도메인을 가로지른 상태별 수). */
+  by_status: Partial<Record<CoverageStatus, number>>;
+  strong: number;
   unseated_n: number;
   level: CoverageLevel;
   close_level: CloseLevel;
@@ -534,11 +538,22 @@ export type Coverage = {
 export type Seat = {
   agent_key: string;
   domain: string;
+  tier: string | null;
+  origin: "primary" | "counter" | null;
   status: CoverageStatus;
   reason: string | null;
   panel_id: string | null;
   opinion_id: string | null;
+  model: string | null;
+  /** 'human' 이면 사람이 옮긴 상태다(§6.8.2) — 셀 툴팁의 decided_by 와 짝. */
+  status_source: "code" | "human";
+  decided_by: string | null;
+  decided_at: number | null;
+  started_at: number | null;
+  finished_at: number | null;
 };
+
+export type SeatList = { target_key: string; domain: string | null; seats: Seat[] };
 
 // ── 등록부 · verdict ─────────────────────────────────────────────────────────
 
@@ -571,7 +586,10 @@ export type VerdictCandidate = {
 };
 
 export type Registry = {
+  target_key: string;
   rows: RegistryRow[];
+  /** limit 를 넘겨 잘렸는지(REST 조회는 limit 를 주지 않아 늘 false 다 — MCP 경로가 쓴다). */
+  truncated: boolean;
   verdict_candidate: VerdictCandidate | null;
   verdict_final: Verdict | null;
 };
@@ -686,29 +704,60 @@ export type CharacterStatement = {
   statement: string;
   polarity: string;
   cites: Cite[];
-  by: string;
+  by: string[];
+  tags: string[];
   status: CharacterStatementStatus;
+  needs_review?: number;
+  first_target_key?: string | null;
+  updated_at?: number;
   support_panels: number;
   support_targets: number;
 };
 
+/** 서버는 층(seed · panel · confirmed · superseded)으로 나눠 준다 — 섞지 않는다(§4.6.4). */
+export type CharacterLayers = Record<"seed" | "panel" | "confirmed" | "superseded", CharacterStatement[]>;
+
 export type CharacterProfile = {
   project_id: string;
-  one_liner: string | null;
-  /** facet 8종 순서 고정. 층(seed·panel·confirmed)은 statement.status 로 구분한다. */
-  facets: Array<{ facet: Facet; statements: CharacterStatement[]; na_reason: string | null }>;
+  character_status: string | null;
+  layers: CharacterLayers;
 };
 
-export type SimilarProject = {
+// 유사 과제 — 회수 경로 4종을 섞지 않는다(§5.7·§8.2.4). 경로마다 항목 모양이 다르다.
+export type LineageEntry = {
   project_id: string;
-  code: string;
-  name: string;
-  score: number;
-  why: string;
+  code: string | null;
+  hops: number;
+  relation: "predecessor" | "successor";
 };
+export type VectorNeighbour = {
+  project_id: string;
+  snapshot_id: string;
+  cosine: number;
+  top_features: JsonValue;
+  rank: number;
+};
+export type TextHit = { record_id: string; project_id: string; rank: number; section_id: string };
+export type SubjectHit = {
+  subject_key: string;
+  n_registry: number;
+  n_verified: number;
+  project_ids: string[];
+  path: JsonValue;
+};
+/** 경로 가중 합산 — 어느 경로로 걸렸는지 `paths` 에 남는다(섞은 것이 아니라 병기다). */
+export type MergedHit = { project_id: string; score: number; paths: string[] };
 
-/** 출처별 top-k 를 섞지 않는다(§8.2.4). */
-export type Similar = { by_source: Array<{ source: string; items: SimilarProject[] }> };
+export type Similar = {
+  lineage: LineageEntry[];
+  vector: VectorNeighbour[];
+  text: TextHit[];
+  subject: SubjectHit[];
+  merged: MergedHit[];
+  corpus_n: number;
+  /** 그 경로가 비었다면 왜 비었는지(코퍼스 부족·external_sync 불통 등). */
+  reason: { vector: string | null; text: string | null };
+};
 
 // ── 참조 해석 · 동기화 · 반출입 ─────────────────────────────────────────────
 
@@ -768,3 +817,10 @@ export type CurationDecided = {
   /** 적용 결과. 적용 함수가 없는 결정(단순 기각·라벨 확정)은 빈 객체다. */
   applied: JsonObject;
 };
+
+/** `GET /snapshots/{id}?part=calls` 봉투. */
+export type SnapshotCallList = { snapshot_id: string; calls: SnapshotCall[] };
+/** `GET /snapshots/{id}/rule_hits` 봉투. */
+export type RuleHitList = { snapshot_id: string; rule_version: string | null; rule_hits: RuleHit[] };
+/** `GET /targets/{key}/panels` 봉투. */
+export type PanelList = { target_key: string; panels: Panel[] };

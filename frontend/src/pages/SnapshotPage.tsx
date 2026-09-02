@@ -466,7 +466,7 @@ export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
           <ErrorBanner error={ruleHits.error} onRetry={ruleHits.reload} />
         )}
         {ruleHits.loading && !ruleHits.data ? <LoadingBlock /> : null}
-        {ruleHits.data ? <RuleHitTable hits={ruleHits.data} /> : null}
+        {ruleHits.data ? <RuleHitTable hits={ruleHits.data.rule_hits} /> : null}
       </SectionCard>
 
       <SectionCard title="경고">
@@ -480,7 +480,7 @@ export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
           <ErrorBanner error={calls.error} onRetry={calls.reload} />
         )}
         {calls.loading && !calls.data ? <LoadingBlock /> : null}
-        {calls.data ? <CallTable calls={calls.data} /> : null}
+        {calls.data ? <CallTable calls={calls.data.calls} /> : null}
       </SectionCard>
     </>
   );

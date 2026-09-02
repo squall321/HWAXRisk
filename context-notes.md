@@ -269,3 +269,33 @@
   '아직 준비 중' 배너로 접히지만 두 화면 기능이 죽어 있다. 정본 §0.5.1 목록에도 없어 **경로를 더할지 화면을 접을지 결정이 먼저**라
   이번에 고치지 않고 checklist 1장에 적었다(속기록은 §5.2.2 F·§6.7.2 7단계가 원문 보존을 요구하므로 경로를 더하는 쪽이 자연스럽다).
 - **검증.** `pytest` **1094 passed, 2 skipped** · `ruff` All checks passed · `pnpm build`(`tsc -b && vite build`) 통과.
+
+### D10. 프런트↔서버 계약 표류를 전수 대조로 걷어냈다 (2026-09-02)
+
+- **어떻게 시작됐나.** 죽은 경로 2종(`/panels/{id}/transcript`·`/targets/{key}/seats`)을 살리려다, 같은 방식으로 응답 **모양**까지
+  대조해 봤다. 클라이언트 호출과 `@router` 데코레이터를 기계로 맞춰 보고, 임시 DB 를 띄워 UI 가 부르는 GET 21개의 실제 응답
+  최상위 키를 찍어 `types.ts` 와 나란히 놓았다. 9건이 어긋나 있었다.
+- **정본이 판정했고, 대부분 서버가 맞았다.** §8.2.3 응답표(`apps[{app_key,…}]`)·§8.2.4 화면표(`L0 seed · L2 panel · confirmed
+  3층 나란히`, `출처별 top-k 를 섞지 않음`)가 서버 쪽 모양이었다. 그래서 클라이언트를 서버에 맞췄다 — 반대로 했으면 정본에서
+  멀어진다. 봉투 관례(`{rows}`·`{panels}`·`{projects}`)도 서버가 일관돼 있었다(정본 표기 `rr_panels[]` 는 '내용이 그 행들' 이라는
+  뜻이고, 같은 표기의 `rr_registry[]` 를 클라이언트도 `{rows, verdict_candidate}` 로 받고 있었다).
+- **조용히 깨져 있던 것들.** `adapters.filter(...)` 는 객체에 대고 부르니 TypeError 로 소스 연결 폼이 통째로 죽고,
+  `character.data.facets`·`similar.data.by_source` 는 `undefined` 라 성격·유사 과제 카드가 늘 빈 채였다. 404 로 접히는
+  두 경로와 달리 이쪽은 배너조차 없었다 — 화면이 '데이터가 없다' 처럼 보였다.
+- **서버에 더한 셋.** ① `GET /panels/{id}/transcript` — `rr_seat_opinions.opinion_json.turns` 를 좌석마다 펴서 라운드로 묶는다
+  (같은 라운드 안은 좌석 키 순 — 표시 순서를 결정론으로). ② `GET /targets/{key}/seats?domain=` — `coverage` 는 5 s 폴링이라
+  카운트만 두고 행은 여기서만 편다. ③ `registry_payload` 의 `verdict_final` — 헤더가 후보와 확정을 한 응답에서 읽는다.
+  셋 다 §0.5.1 경로 목록에는 없지만 §8.2.4 화면표가 요구하는 데이터이고 다른 어떤 경로도 주지 않았다.
+- **`_loads(x, None)` 함정.** `return value if isinstance(value, type(default)) else default` 라 default 가 `None` 이면
+  `type(None)` 과 비교해 **무엇을 넣든 None** 이 나온다. 속기록의 `risk_spec` 을 그렇게 부르다 스모크에서 걸렸다.
+  `{}` 로 받고 `spec or None` 로 돌린다. 리포 안의 다른 `_loads` 호출은 전부 `[]`·`{}` 기본값이라 이 함정에 걸린 곳은 없다.
+- **가드 둘.** ① `tests/test_client_contract.py` — 클라이언트가 부르는 모든 경로가 서버에 있는지 검사한다(서버의 `{}` 자리는
+  클라이언트 리터럴도 받게 해 `POST /jobs/{id}/{action}` 을 정상 처리). 경로 하나를 일부러 지워 실제로 실패하는 것까지 확인했다.
+  ② 모양은 TypeScript 가 잡는다 — 봉투 타입을 고치자 `tsc` 가 깨진 소비처 20곳을 그대로 짚었다. 이 두 축이면 다음 표류는
+  조용히 지나가지 않는다.
+- **앞선 조사 정정.** `CoverageHeatmap` 은 '없음' 이 아니라 `TargetPage.tsx` 안에 있었다(내 grep 이 대소문자를 가렸다).
+  드릴다운이 부르던 좌석 경로가 없어 죽어 있었을 뿐이고 이번에 살아났다. checklist 를 고쳤다.
+- **아직 남은 것.** `TargetPage` 가 '좌석 상태 되돌리기 · skipped 사유 입력 경로는 아직 서버에 없습니다' 라고 적어 두었는데
+  `PUT /targets/{key}/coverage/{agent_key}` 는 서버에 있다 — 클라이언트에 함수가 없을 뿐이다(§8.2.4 가 요구하는 폼).
+- **검증.** `pytest` **1101 passed, 2 skipped**(시험 7건 추가) · `ruff` All checks passed · `pnpm build` 통과 ·
+  임시 데이터로 속기록 3발언(라운드 순)·좌석 드릴다운·`verdict_final`·어댑터 `app_key` 실응답 확인.

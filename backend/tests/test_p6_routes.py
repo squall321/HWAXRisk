@@ -281,6 +281,96 @@ def test_curation_refuses_foreign_rows_wrong_vocabulary_unwired_kinds_and_replay
     assert replay.value.http_status == 409
 
 
+# ================================================================ 화면이 부르던 죽은 경로 2종(§8.2.4)
+def _opinion_with_turns(store, opinion_id, agent_key, domain, turns, *, panel_id=PANEL):
+    store.execute(
+        "INSERT INTO rr_seat_opinions(opinion_id, target_key, panel_id, owner_sub, agent_key, domain,"
+        " origin, cycle, opinion_json, final_stance, created_at) VALUES (?,?,?,?,?,?,'primary',1,?,?,1)",
+        (opinion_id, TARGET, panel_id, OWNER, agent_key, domain,
+         json.dumps({"turns": turns}, ensure_ascii=False), turns[-1]["stance"]))
+
+
+def test_panel_transcript_flattens_seat_turns_by_round(store, clock):
+    """`PanelTranscript` '발언' 탭 — 좌석 발언을 라운드로 묶고 결정문·risk_spec 은 원문 그대로다."""
+    _project(store)
+    _target(store)
+    _panel(store)
+    store.execute("UPDATE rr_panels SET decision_text = ?, risk_spec_json = ? WHERE id = ?",
+                  ("[판정] 조건부.", json.dumps({"verdict": "conditional"}), PANEL))
+    _opinion_with_turns(store, "OP-a", "mech-a", "mech",
+                        [{"round": 1, "say_excerpt": "얇다.", "position": "risk", "stance": "oppose"},
+                         {"round": 2, "say_excerpt": "수용.", "position": "risk", "stance": "conditional"}])
+    _opinion_with_turns(store, "OP-b", "thermal-b", "thermal",
+                        [{"round": 1, "say_excerpt": "무난.", "position": "ok", "stance": "agree"}])
+
+    out = routes.get_panel_transcript(PANEL, ident=_ident())
+
+    assert out["decision_text"] == "[판정] 조건부."
+    assert out["risk_spec"] == {"verdict": "conditional"}
+    # 좌석을 섞지 않고 라운드로 묶는다 — 같은 라운드 안에서는 좌석 키 순이다(결정론).
+    assert [(t["round"], t["seat"], t["stance"]) for t in out["turns"]] == [
+        (1, "mech-a", "oppose"), (1, "thermal-b", "agree"), (2, "mech-a", "conditional")]
+
+
+def test_panel_transcript_without_a_spec_returns_null_not_an_empty_object(store, clock):
+    _project(store)
+    _target(store)
+    _panel(store)
+
+    out = routes.get_panel_transcript(PANEL, ident=_ident())
+
+    assert (out["decision_text"], out["turns"], out["risk_spec"]) == ("", [], None)
+
+
+def test_panel_transcript_hides_other_owners_panels(store, clock):
+    _project(store, owner_sub=OTHER)
+    _target(store, owner_sub=OTHER)
+    _panel(store, owner_sub=OTHER)
+
+    with pytest.raises(AppError) as err:
+        routes.get_panel_transcript(PANEL, ident=_ident())
+    assert err.value.http_status == 404
+
+
+def _coverage(store, agent_key, domain, status, **extra):
+    cols = {"target_key": TARGET, "agent_key": agent_key, "owner_sub": OWNER, "domain": domain,
+            "status": status, "updated_at": 1, **extra}
+    store.execute(f"INSERT INTO rr_coverage({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                  tuple(cols.values()))
+
+
+def test_seats_drill_down_filters_by_domain(store, clock):
+    """`CoverageHeatmap` 셀 클릭의 드릴다운 — coverage 는 카운트만 주고 행은 여기서만 편다(§8.2.4)."""
+    _project(store)
+    _target(store)
+    _coverage(store, "mech-a", "mech", "done", panel_id=PANEL, opinion_id="OP-a")
+    _coverage(store, "ecad-c", "ecad", "skipped", reason="ECAD 소스 없음",
+              status_source="human", decided_by=OWNER)
+
+    one = routes.get_seats(TARGET, domain="mech", ident=_ident())
+    every = routes.get_seats(TARGET, ident=_ident())
+
+    assert [s["agent_key"] for s in one["seats"]] == ["mech-a"]
+    assert one["seats"][0]["opinion_id"] == "OP-a"
+    # 사람이 옮긴 상태는 주체가 남는다 — 셀 툴팁의 decided_by 가 이 값이다(§6.8.2).
+    skipped = next(s for s in every["seats"] if s["agent_key"] == "ecad-c")
+    assert (skipped["status_source"], skipped["decided_by"], skipped["reason"]) == (
+        "human", OWNER, "ECAD 소스 없음")
+    assert [s["agent_key"] for s in every["seats"]] == ["ecad-c", "mech-a"]
+
+
+def test_registry_payload_carries_the_final_verdict(store, clock):
+    """헤더의 verdict_final 과 등록부 카드가 같은 응답을 쓴다(§8.2.4) — 후보는 코드, 확정은 사람이다."""
+    _project(store)
+    _target(store)
+    store.execute("UPDATE rr_targets SET verdict_final = 'conditional' WHERE target_key = ?", (TARGET,))
+
+    out = routes.get_registry(TARGET, ident=_ident())
+
+    assert out["verdict_final"] == "conditional"
+    assert "verdict_candidate" in out and out["target_key"] == TARGET
+
+
 # ================================================================ 자유 태그 승격(plan §7.7 x_tag_promote)
 def test_every_queue_kind_the_ddl_allows_has_a_decision_vocabulary():
     """DDL 이 쌓게 허용한 kind 는 전부 결정할 수 있어야 한다 — 어휘가 없으면 그 큐가 501 로 막힌다."""
