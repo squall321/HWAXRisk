@@ -299,3 +299,28 @@
   `PUT /targets/{key}/coverage/{agent_key}` 는 서버에 있다 — 클라이언트에 함수가 없을 뿐이다(§8.2.4 가 요구하는 폼).
 - **검증.** `pytest` **1101 passed, 2 skipped**(시험 7건 추가) · `ruff` All checks passed · `pnpm build` 통과 ·
   임시 데이터로 속기록 3발언(라운드 순)·좌석 드릴다운·`verdict_final`·어댑터 `app_key` 실응답 확인.
+
+### D12. 어댑터 발견을 이었다 — 소스 카드가 거짓말을 멈춘다 (2026-09-02)
+
+- **증상.** `POST /projects/{id}/sources` 가 소스 카드를 늘 `status='unreachable'` 로 적었다. `list_adapters()` 가
+  `ADAPTERS` 고정 목록(mcad·dyna `status='planned'`)을 돌려주기 때문이고 `GET /meta/adapters` 도 같은 값을 냈다.
+  그런데 `capture_all` 은 probe 상태를 보지 않으므로 **실제로는 캡처가 돈다** — 배지만 '연결 안 됨' 이었다.
+  사용자가 시도조차 안 하게 만드는 종류의 거짓말이라 실 STEP 을 붙이기 전에 먼저 닫았다.
+- **구현은 이미 있었다.** `GatewayRegistry`(도구명 suffix 매칭·다의 판정·Probe)가 완성돼 있고 배선만 없었다.
+  `discover_adapters(token=, force=, client=)` 로 감싸 두 경로에 이었다.
+- **캐시.** `/meta/adapters` 는 ProjectPage 를 열 때마다 불린다 — 60 s 모듈 캐시를 뒀다(identity 의 TTL 60 s 와 같은 결).
+  모듈 수준 캐시는 시험 사이로 새므로 conftest 에 autouse 리셋 픽스처를 넣었다.
+- **'없다' 와 '못 물어봤다' 를 나눴다.** 게이트웨이를 못 읽으면 `status='planned'` + `gateway_error` 로 남긴다. 도구가 실제로
+  빠졌을 때만 `unavailable` 이다. ecad 는 도구가 다 보여도 `contract_only` 다 — 계약만 있는 스텁이고 붙는 것은 P7 이다(§2.5.3).
+  폴백에서도 `app_key` 는 고정 목록 값을 유지한다(화면에 빈칸을 보이지 않게).
+- **실측(2026-09-02).** 라이브 게이트웨이에 도구 329종·백엔드 15개가 떠 있고 **mcad `heax-step_forge` ready · dyna
+  `heax-kooremapper_mcp` ready** 다(요구 도구 전부 present). ecad 만 4종 부재. 소스 등록이 `linked` 를 적는다.
+- **시험이 잡아 준 것.** ① `test_meta_adapters_p0_fixed_list` 가 고정 목록을 못 박고 있었다 — 실측 3종으로 다시 썼다.
+  ② e2e 스모크의 '외부 호출 0' 가드가 소스 등록의 새 게이트웨이 호출을 즉시 잡았다. 발견 결과를 실제 형태 그대로 캐시에
+  미리 넣는 픽스처로 풀었다(호출을 우회한 게 아니라 '이미 답을 안다' 는 상태를 만든 것). 시험은 여전히 네트워크를 안 쓴다.
+- **자격 서술 정정.** 이 작업 중 확인한 것 — 커밋 `37b9c3b` 이 캡처 경로의 heax 서비스 PAT 의존을 이미 없앴는데
+  checklist 2장은 여전히 'B1 = 최대 단일 레버' 라고 적고 있었다. 실제 필요는 셋으로 갈린다 — 캡처는 로그인만,
+  패널 심의는 사용자 포털 PAT 1개(`resolve_credential` (b)), 서비스 키는 무인 배치 전용. 문서를 고쳤다.
+- **남은 P1 잔여.** `choices[]`(StepForge `list_projects` 로 프로젝트 선택지 채우기)는 소스 앱 도구 실호출이라 포털 PAT 가
+  선행한다 — 지금은 빈 배열이고 사용자가 ref 를 직접 적는다.
+- **검증.** `pytest` **1103 passed, 2 skipped** · `ruff` All checks passed · 실 게이트웨이로 mcad/dyna ready·소스 등록 linked 확인.

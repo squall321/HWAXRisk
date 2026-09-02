@@ -1,11 +1,13 @@
 # 어댑터 레지스트리 — P0 고정 목록(/api/meta/adapters)과 게이트웨이 /tools-map 발견(GatewayRegistry), 그리고 kind 별 캡처 오케스트레이션(capture_all, plan §2.11.3·§2.13.2)
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any, Mapping, Sequence
 
 import httpx
 
-from app import ir_builder
+from app import config, ir_builder
 from app.adapters import dyna as dyna_adapter
 from app.adapters import ecad_stub, mcad
 from app.adapters.base import DEFAULT_TIMEOUT, CallRecorder, IrAdapter, Principal, Probe, RestGetClient
@@ -32,8 +34,73 @@ DISCOVERY_TIMEOUT = 10.0
 
 
 def list_adapters() -> list[dict]:
-    """/api/meta/adapters 본문 — [{kind, app, status}]."""
+    """고정 목록 — 게이트웨이를 못 읽을 때의 폴백이다(발견은 `discover_adapters`)."""
     return [a.to_dict() for a in ADAPTERS]
+
+
+# 발견 결과 캐시 — /meta/adapters 와 소스 카드가 화면마다 부르므로 게이트웨이를 매번 때리지 않는다.
+DISCOVERY_TTL_S = 60.0
+_discovery_lock = threading.Lock()
+_discovery_cache: dict[str, Any] = {"at": 0.0, "rows": None}
+
+
+def reset_discovery_cache() -> None:
+    """시험·재배포용 — 다음 호출이 게이트웨이를 다시 읽는다."""
+    with _discovery_lock:
+        _discovery_cache["at"] = 0.0
+        _discovery_cache["rows"] = None
+
+
+def _status_of(kind: str, probe: Probe, gateway_read: bool) -> str:
+    """정적 status 를 실측으로 덮는다 — 어휘는 `planned | ready | contract_only | unavailable`.
+
+    ecad 는 계약만 있는 스텁이라 도구가 다 보여도 `contract_only` 다(§2.5.3 — 붙는 것은 P7).
+    게이트웨이를 아예 못 읽었으면 `planned` 로 남긴다 — '도구가 없다' 와 '못 물어봤다' 는 다르다.
+    """
+    if kind == "ecad":
+        return "contract_only"
+    if not gateway_read:
+        return "planned"
+    return "ready" if probe["reachable"] else "unavailable"
+
+
+def discover_adapters(*, token: str | None = None, force: bool = False,
+                      client: httpx.Client | None = None) -> list[dict]:
+    """게이트웨이 `/tools-map` 실측으로 kind 별 가용성을 낸다 — `/meta/adapters` 와 소스 카드의 정본.
+
+    실패는 예외가 아니라 폴백이다(고정 목록 + `status='planned'`) — 발견이 안 된다고 캡처를 막지 않는다.
+    `choices[]` 는 소스 앱 도구를 실제로 불러야 채워지고 그건 포털 PAT 가 필요해 아직 빈 배열이다(P1 잔여).
+    `client` 는 시험이 `httpx.MockTransport` 를 넣는 자리다 — 시험은 게이트웨이를 실제로 때리지 않는다.
+    """
+    now = time.time()
+    with _discovery_lock:
+        rows = _discovery_cache["rows"]
+        if not force and rows is not None and now - float(_discovery_cache["at"]) < DISCOVERY_TTL_S:
+            return [dict(r) for r in rows]
+
+    registry = GatewayRegistry(config.settings.gateway_mcp, token=token, client=client)
+    try:
+        gateway_read = bool(registry.load())
+        rows = []
+        for adapter in ADAPTERS:
+            probe = registry.probe(adapter.kind, adapter.app_key)
+            rows.append({
+                "kind": adapter.kind,
+                "app_key": probe["app_key"] or adapter.app_key,
+                "status": _status_of(adapter.kind, probe, gateway_read),
+                "tools_ok": bool(probe["reachable"]),
+                "tools_missing": list(probe["tools_missing"]),
+                "gateway_error": probe["gateway_error"],
+                "warnings": list(probe["warnings"]),
+                "choices": [],
+            })
+    finally:
+        registry.close()
+
+    with _discovery_lock:
+        _discovery_cache["at"] = now
+        _discovery_cache["rows"] = rows
+    return [dict(r) for r in rows]
 
 
 def default_app_key(kind: str) -> str | None:

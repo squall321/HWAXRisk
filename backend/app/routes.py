@@ -23,7 +23,6 @@ from app import state as state_module
 from app import registry as registry_module
 from app.adapters import base as adapters_base
 from app.adapters import registry as adapters_registry
-from app.adapters.registry import list_adapters
 from app.common import canonical_json, new_uuid, now_epoch, parse_ref, sha256_hex
 from app.errors import AppError
 from app.risk_store import get_store
@@ -177,16 +176,14 @@ def get_taxonomy() -> dict:
 
 
 @router.get("/meta/adapters")
-def get_adapters() -> dict:
+def get_adapters(ident: identity.Identity = Depends(identity.current)) -> dict:
     """`{apps:[{app_key, kind, tools_ok, choices[]}]}`(plan §8.2.3·§8.2.4 ProjectPage 소스 카드).
 
-    발견 로직(도구 확인·선택지 열거)은 P1 이라 지금은 `tools_ok=false`·`choices=[]` 로 채운다 — 키는 확정이다.
+    게이트웨이 `/tools-map` 실측이다(60 s 캐시). 못 읽으면 고정 목록 + `status='planned'` 로 떨어지며,
+    그 사실은 `gateway_error` 로 드러난다 — '도구가 없다' 와 '못 물어봤다' 를 섞지 않는다.
+    `choices[]` 는 소스 앱 도구를 실제로 불러야 채워지고 그건 포털 PAT 가 필요해 아직 빈 배열이다(P1 잔여).
     """
-    return {"apps": [
-        {"app_key": a.get("app"), "kind": a.get("kind"), "status": a.get("status"),
-         "tools_ok": a.get("status") == "ready", "choices": []}
-        for a in list_adapters()
-    ]}
+    return {"apps": adapters_registry.discover_adapters(token=ident.token)}
 
 
 @router.get("/meta/vocab")
@@ -995,12 +992,26 @@ def add_source(project_id: str, body: SourceBody,
     _project_row(project_id, owner_sub)
     if body.kind not in SOURCE_KINDS:
         raise AppError("E100", f"kind 는 {list(SOURCE_KINDS)} 중 하나여야 합니다 — {body.kind!r}.", 422)
-    adapter = next((a for a in list_adapters() if a["kind"] == body.kind.split("_")[0]), None)
+    # 게이트웨이 실측으로 카드 상태를 정한다 — 고정 목록으로 적으면 캡처가 도는데도 '연결 안 됨' 이라고 적힌다.
+    kind_root = body.kind.split("_")[0]
+    adapter = next((a for a in adapters_registry.discover_adapters(token=ident.token)
+                    if a["kind"] == kind_root), None)
+    reachable = bool(adapter and adapter["tools_ok"])
+    if adapter is None:
+        detail = "adapter_unknown"
+    elif reachable:
+        detail = f"tools_ok app_key={adapter['app_key']}"
+    else:
+        missing = ",".join(adapter["tools_missing"]) or "-"
+        detail = f"adapter={adapter['status']} missing={missing}"
+        if adapter["gateway_error"]:
+            detail += f" gateway_error={adapter['gateway_error']}"
     probe = {
-        "reachable": False,
-        "detail": f"adapter={adapter['status']}" if adapter else "adapter_unknown",
-        "capture_mode": None,
-        "status": "linked" if adapter and adapter["status"] == "ready" else "unreachable",
+        "reachable": reachable,
+        "detail": detail,
+        # mcad·dyna 는 REST 가 정본이고 게이트웨이 MCP 는 폴백이다(§2.5.1) — 실제 등급은 캡처가 정한다.
+        "capture_mode": "rest_primary" if reachable else None,
+        "status": "linked" if reachable else "unreachable",
     }
     ref_key = f"{body.kind}:{body.app_key or '-'}:{canonical_json(body.ref)}"
     now = now_epoch()

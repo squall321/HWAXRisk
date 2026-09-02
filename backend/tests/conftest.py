@@ -63,3 +63,13 @@ def risk_store(tmp_path):
     store.migrate()
     yield store
     store.close()
+
+
+@pytest.fixture(autouse=True)
+def _reset_adapter_discovery():
+    """어댑터 발견은 모듈 수준 60 s 캐시라 시험 사이로 샌다 — 매 시험 앞뒤로 비운다."""
+    from app.adapters import registry as adapters_registry
+
+    adapters_registry.reset_discovery_cache()
+    yield
+    adapters_registry.reset_discovery_cache()

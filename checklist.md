@@ -5,7 +5,7 @@
 코드 대조로 확인해 적은 작업 대장이며, 앞으로의 진행은 이 문서를 늘려 가며 한다. 정본 체크리스트는 단계 착수 전에 쓴 것이라 P1~P7 항목이
 전부 미체크로 남아 있다 — 여기서 실측한 완료 상태가 그보다 최신이다.
 
-마지막 실측 2026-09-02 — `pytest` **1101 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · 커밋 8건(`4cf8ed5`~`37b9c3b`) · `origin/main` 동기.
+마지막 실측 2026-09-02 — `pytest` **1103 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · `ruff` 통과 · `pnpm build` 통과.
 
 ## 진척 요약
 
@@ -36,6 +36,13 @@
   `char:analysis` 가 5값이었다(정본 plan §4.6.3 블록은 8축·8값). 그래서 씨앗이 내는 `char:analysis:sim_only`·`ecad_only`
   (`character.py` `SOURCE_ABSENT_SEEDS`)가 `narrative.py:1046` 어휘 검사에서 **어휘 밖으로 판정돼 `x:sim_only` 로 강등**되고
   `x_tag_promote` 큐를 채우고 있었다 — 통제 값이 자유 태그 후보로 되돌아오는 고리다. 자산을 정본 블록과 바이트 동일하게 맞췄다.
+- [x] **어댑터 발견 배선** (2026-09-02) — `list_adapters()` 고정 목록이 mcad 를 늘 `planned` 로 적어, 캡처는 도는데도
+  소스 카드가 '연결 안 됨' 이라고 거짓말하고 있었다(`capture_all` 은 probe 상태를 보지 않는다). 이미 구현돼 있던
+  `GatewayRegistry` 를 `discover_adapters(token=, force=, client=)`(60 s 캐시)로 감싸 `GET /meta/adapters` 와
+  `POST /projects/{id}/sources` 에 이었다. 실측 — mcad `heax-step_forge` **ready** · dyna `heax-kooremapper_mcp` **ready** ·
+  ecad 는 도구 4종이 없어 `contract_only`. 소스 등록이 `status='linked'` 를 적는다. 게이트웨이를 못 읽으면 `planned` +
+  `gateway_error` 로 남긴다 — '도구가 없다' 와 '못 물어봤다' 를 섞지 않는다.
+  `choices[]`(StepForge 프로젝트 선택지)는 소스 앱 도구 실호출이라 포털 PAT 가 선행한다 — 아직 빈 배열이고 사용자가 ref 를 직접 적는다.
 - [ ] **E10 필드·VOC·문헌 근거가 스텁이다.**
   `brief.py:688 _field_evidence_lines` 가 제품 연결 유무만 보고 늘 `[필드·문헌 근거 없음 …]` 한 줄을 낸다. 정본 §5.6.1 E10·§6.5.2 가
   요구하는 것 — `get_top_issues`·`query_voc`·`search_scholar` 실호출을 러너가 하고 `rr_panel_calls(source_kind='brief')` 에 저장해 24 h
@@ -74,7 +81,13 @@
 
 여기 있는 것은 코드가 없어서가 아니라 **소스 앱·자격·실데이터가 없어 합성 픽스처로만 채워 둔** 통과 기준이다.
 
-- [ ] **B1 heax 서비스 PAT 발급**(§10 #2) — 최대 단일 레버. 미발급이면 REST 채널 0회 · 계면 엣지 0건 · G6 `unknown_blocking` 으로 diff·타깃이 막힌다
+- **자격 — 정본 서술이 낡았다(2026-09-02 정정).** 정본은 B1(heax 서비스 PAT)을 '최대 단일 레버' 로 적었지만 커밋 `37b9c3b` 이
+  그 레버를 이미 뺐다 — **사람이 시작한 캡처는 호출자 본인의 heax 토큰으로 StepForge REST 를 읽는다**(대리 읽기, 읽기 전용,
+  권한 확대 없음). 지금 실제로 필요한 것은 셋으로 갈린다.
+  - [x] STEP 읽어 스냅샷 동결 → 게이트·규칙 — **추가 자격 0**(로그인만). 코드 준비됨
+  - [ ] 패널 심의(LLM 좌석) — 사용자가 SettingsPage 에서 **포털 PAT 1개** 등록(`resolve_credential` 의 (b) owner 자격).
+    `cred.key` 는 배포 박스에 있어 등록은 지금도 된다
+  - [ ] 무인 배치(야간 러너)·RA/ADH 쓰기 — `secrets.env` 서비스 키(현재 파일 자체가 없다)
 - [ ] **B2 골든 `sif-e2e` StepForge 재파싱·재검출**(§10 #15, 사용자 실행) — 미실행이면 첫 캡처가 `volume_null_pre_d168` 확정
 - [ ] **B4 실무 규모 STEP 1건 업로드** · **B5 DynaForge 세션·K파일·리포트 각 1건**(P2 (8)(9) 선행) · **B6 `heax-materialtwin_web` 기동**(§10 #41)
 - [ ] `var/app_data/hwax_risk/secrets.env`(0600) 5키 — `HWAXRISK_PORTAL_PAT`(scopes read) · `HWAXRISK_PORTAL_PAT_RW` · `HWAXRISK_HEAX_SERVICE_PAT` ·
@@ -132,7 +145,8 @@
 
 1장이 외부 의존이 없어 바로 된다. `x_tag_promote` 어휘·어휘 자산 정합·CurationQueue 화면은 닫혔다. 다음은
 **E10 실호출**(브리프 근거 한 축이 통째로 비어 있음)이 값이 가장 크고, 그 앞에 **죽은 경로 2종**(속기록·좌석)의 정본 결정이 있다.
-2장은 B1(heax 서비스 PAT) 하나가 풀리면 여러 통과 기준이 함께 닫힌다.
+2장의 자격 항은 생각보다 가볍다 — 캡처는 로그인만으로 되고, 패널까지 가려면 **사용자 포털 PAT 1개**면 된다.
+서비스 키는 무인 배치를 켤 때 필요하다.
 
 남은 UI 구멍 하나 더 — `TargetPage` 가 '좌석 상태 되돌리기 · skipped 사유 입력 경로는 아직 서버에 없습니다' 라고 적어 두었는데
 `PUT /targets/{key}/coverage/{agent_key}` 는 서버에 있다(클라이언트에 함수가 없을 뿐이다). §8.2.4 가 요구하는 폼이라 다음 차례다.

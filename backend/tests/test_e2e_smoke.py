@@ -40,6 +40,31 @@ def no_network(monkeypatch):
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", _blocked)
 
 
+@pytest.fixture(autouse=True)
+def seeded_discovery():
+    """소스 등록은 어댑터 가용성을 게이트웨이에 묻는다 — 그 답을 미리 캐시에 넣어 호출 없이 진행한다.
+
+    발견 결과를 지어내지 않고 실제 형태 그대로 넣는다(도구가 다 보이는 정상 상태).
+    """
+    from app.adapters import dyna as dyna_adapter
+    from app.adapters import mcad
+    from app.adapters import registry as adapters_registry
+
+    tools = {name: "heax-step_forge" for name in mcad.REQUIRED_TOOLS}
+    tools.update({name: "heax-kooremapper_mcp" for name in dyna_adapter.REQUIRED_TOOLS})
+
+    def handler(request):
+        return httpx.Response(200, json={"map": tools})
+
+    http = httpx.Client(transport=httpx.MockTransport(handler))
+    try:
+        adapters_registry.discover_adapters(client=http, force=True)
+    finally:
+        http.close()
+    yield
+    adapters_registry.reset_discovery_cache()
+
+
 @pytest.fixture
 def ident() -> identity.Identity:
     return identity.Identity(email=OWNER, display_name="E2E", role="user", organization="qa",

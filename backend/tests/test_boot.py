@@ -4,7 +4,10 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
+import httpx
+
 from app import config
+from app.adapters import registry as adapters_registry
 from app.config import settings
 from app.mcp_server import mcp
 
@@ -114,15 +117,73 @@ def test_meta_taxonomy(client):
     assert axes["severity_judgement"] == {"경미": ["OK", "WARNING"], "중대": ["WARNING", "FAIL"], "치명": ["FAIL"]}
 
 
-def test_meta_adapters_p0_fixed_list(client):
-    """plan §8.2.3 응답 모양 — `{apps:[{app_key, kind, tools_ok, choices[]}]}`(발견 로직은 P1)."""
-    r = client.get("/api/meta/adapters")
-    assert r.status_code == 200
-    assert r.json() == {"apps": [
-        {"kind": "mcad", "app_key": "heax-step_forge", "status": "planned", "tools_ok": False, "choices": []},
-        {"kind": "dyna", "app_key": "heax-kooremapper_mcp", "status": "planned", "tools_ok": False, "choices": []},
-        {"kind": "ecad", "app_key": None, "status": "contract_only", "tools_ok": False, "choices": []},
-    ]}
+def _tools_map_client(payload, status_code=200):
+    """게이트웨이 `/tools-map` 을 흉내 낸다 — 시험은 실제 게이트웨이를 때리지 않는다."""
+    def handler(request):
+        assert request.url.path.endswith("/tools-map")
+        return httpx.Response(status_code, json=payload)
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def _full_map():
+    """mcad·dyna 가 요구하는 도구를 다 갖춘 지도(ecad 4종은 일부러 뺀다)."""
+    from app.adapters import dyna as dyna_adapter
+    from app.adapters import mcad
+
+    out = {name: "heax-step_forge" for name in mcad.REQUIRED_TOOLS}
+    out.update({name: "heax-kooremapper_mcp" for name in dyna_adapter.REQUIRED_TOOLS})
+    return {"map": out}
+
+
+def test_meta_adapters_reports_what_the_gateway_actually_has(client):
+    """plan §8.2.3 응답 모양 + 게이트웨이 실측 — 도구가 다 보이면 `ready`·`tools_ok` 다."""
+    adapters_registry.reset_discovery_cache()
+    http = _tools_map_client(_full_map())
+    try:
+        rows = {r["kind"]: r for r in adapters_registry.discover_adapters(client=http, force=True)}
+    finally:
+        http.close()
+
+    assert rows["mcad"]["status"] == "ready" and rows["mcad"]["tools_ok"] is True
+    assert rows["mcad"]["app_key"] == "heax-step_forge"
+    assert rows["dyna"]["status"] == "ready" and rows["dyna"]["tools_ok"] is True
+    # ecad 는 도구가 다 보여도 계약만 있는 스텁이다(§2.5.3) — 붙는 것은 P7.
+    assert rows["ecad"]["status"] == "contract_only" and rows["ecad"]["tools_ok"] is False
+    assert set(rows["mcad"]) == {"kind", "app_key", "status", "tools_ok", "tools_missing",
+                                 "gateway_error", "warnings", "choices"}
+
+
+def test_meta_adapters_falls_back_when_the_gateway_cannot_be_read(client):
+    """'도구가 없다' 와 '못 물어봤다' 를 섞지 않는다 — 못 읽으면 planned 로 남고 사유가 실린다."""
+    adapters_registry.reset_discovery_cache()
+    http = _tools_map_client({}, status_code=503)
+    try:
+        rows = {r["kind"]: r for r in adapters_registry.discover_adapters(client=http, force=True)}
+    finally:
+        http.close()
+        adapters_registry.reset_discovery_cache()
+
+    assert rows["mcad"]["status"] == "planned" and rows["mcad"]["tools_ok"] is False
+    assert rows["mcad"]["gateway_error"] == "http_503"
+    # 폴백에서도 app_key 는 고정 목록 값을 유지한다 — 화면이 빈칸을 보이지 않게.
+    assert rows["mcad"]["app_key"] == "heax-step_forge"
+
+
+def test_meta_adapters_route_shape(client):
+    """라우트 자체의 봉투 — `{apps:[…]}`(클라이언트 `AdapterList` 와 같은 모양)."""
+    # 캐시를 먼저 채워 라우트가 게이트웨이를 때리지 않게 한다(시험에 외부 HTTP 실호출은 없다).
+    http = _tools_map_client(_full_map())
+    try:
+        adapters_registry.discover_adapters(client=http, force=True)
+    finally:
+        http.close()
+
+    body = client.get("/api/meta/adapters").json()
+
+    assert list(body) == ["apps"]
+    assert [a["kind"] for a in body["apps"]] == ["mcad", "dyna", "ecad"]
+    assert body["apps"][0]["tools_ok"] is True
 
 
 def test_meta_vocab_lists_runtime_assets(client):
