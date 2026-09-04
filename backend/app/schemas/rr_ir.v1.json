@@ -19,6 +19,11 @@
     "derived_from": {"oneOf": [{"$ref": "#/definitions/hex32"}, {"type": "null"}]},
     "partial": {"type": "boolean"},
     "sources": {"type": "array", "items": {"$ref": "#/definitions/source"}},
+    "primary_source": {"type": ["string", "null"], "enum": ["mcad", "dyna", "ecad", null]},
+    "context": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"corpus_usage": {"type": ["object", "null"]}}
+    },
     "units": {"$ref": "#/definitions/units"},
     "nodes": {"type": "array", "items": {"$ref": "#/definitions/node"}},
     "edges": {"type": "array", "items": {"$ref": "#/definitions/edge"}},
@@ -60,13 +65,17 @@
       "type": "string",
       "enum": [
         "mcp_degraded", "no_world_transform", "no_node_id", "volume_null_pre_d168", "tol_config_unknown",
+        "app_version_unknown",
         "interfaces_truncated", "no_secid", "truncated_scan", "edges_truncated", "detect_absent", "ecad_absent",
         "report_parts_mismatch", "unit_converted_mil", "components_truncated", "nets_truncated",
-        "tree_truncated", "parts_truncated", "no_depth_seq", "no_auto_named_flag", "interfaces_unreadable"
+        "tree_truncated", "parts_truncated", "no_depth_seq", "no_auto_named_flag", "interfaces_unreadable",
+        "capture_partial", "capture_call_failed", "schema_drift", "large_model", "mcad_absent",
+        "dyna_absent", "fuzzy_skipped_large"
       ]
     },
     "source": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["kind", "app_key", "adapter_version", "channel", "ref", "source_hash", "degraded", "captured_at"],
       "properties": {
         "kind": {"$ref": "#/definitions/source_kind"},
@@ -80,7 +89,14 @@
         "scope": {"type": ["object", "null"]},
         "stats": {"type": "object"},
         "conventions": {"type": "object"},
-        "context": {"type": "object"},
+        "app_version": {
+          "type": ["object", "null"],
+          "properties": {
+            "version": {"type": ["string", "null"]},
+            "captured_via": {"type": ["string", "null"]},
+            "extra": {"type": ["object", "null"]}
+          }
+        },
         "binding": {
           "type": "object",
           "required": ["bound_to_dyna_source_hash", "method"],

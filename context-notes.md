@@ -347,3 +347,77 @@
 - **픽스처 오독 정정.** `TREE_JSON` 에 `summary` 가 없다고 보고 하나 더 넣었는데, 아래쪽에 이미 있었고(중복 키라 뒤엣것이 이김)
   `leaf_instances=2` 로 실제와 맞게 적혀 있었다. 내 중복 키를 걷어냈다 — 픽스처는 처음부터 옳았고 코드에만 가드가 없었다.
 - **검증.** `pytest` **1105 passed, 2 skipped**(시험 2건 추가 — limit 명시 확인 · 짧은 목록에서 절단 표기) · `ruff` 통과.
+
+### D14. `context.corpus_usage` 봉투 승격(§2.2) — 정본 내부 모순을 정본 자신의 문장으로 풀었다 (2026-09-04)
+
+- **왜 미완이었나.** dyna 계약 대조에서 §2.2 가 다섯 곳에서 못 박은 규격과 코드가 어긋난 것을 찾았다. 4도구 중 3도구만 부르고,
+  위치가 정본이 "아니다" 라고 명시한 `sources[dyna].context` 이고, 봉투 키가 다르고, 무엇보다 **자격 없으면 early return 으로
+  3a 자체가 안 돌았다**. 포털 PAT 를 아무도 등록하지 않은 지금 상태에서는 조직 집계가 한 번도 안 모인다는 뜻이다.
+- **정본 안의 모순처럼 보이던 것 — 내 해석이 과했다(적대 검증이 잡았다).** 처음엔 §2.11.3 "dyna 부재여도 3a 수행" 과
+  §9.2 "정상 1회 캡처 rest 5 + mcp 3" 이 충돌한다고 보고, 전사 호출을 `source_kind='context'` 로 회계 밖에 두면
+  풀린다고 판단했다. **틀렸다.** ① 예산은 `source_kind` 가 아니라 `channel` 로 세므로 태그가 빼주지 못한다.
+  ② 더 근본적으로 §2.11.3 의 3a 는 "**3. dyna 캡처**" 의 하위 단계다 — "dyna 부재여도" 는 *자격* 부재를 뜻하지
+  mcad 단독 스냅샷을 뜻하지 않는다. 그래서 3a 는 **dyna 를 요청했을 때만** 돌되 자격 유무와 무관하게 돈다.
+  이렇게 읽으면 두 조항이 함께 지켜진다(실측 — mcad 단독은 corpus 없음, mcad+dyna 무자격은 corpus 채움).
+- **`source_kind='context'` 는 그래도 남긴다** — §2.2 의 "`degraded` 에는 넣지 않는다(**소스 캡처가 아니다**)" 가
+  근거이고, 예산과는 별개로 매핑이 찾아낸 위험 셋을 닫는다 —
+  ① `call_ids('dyna')` 오염(kind 가 달라 자동 분리) ② 예산 위반(집계 밖) ③ `reuse_prior_calls` 가 `args={}` 를 100%
+  재사용 표기해 `calls_reused` 가 4씩 부푸는 것(시변 집계라 재사용 자체가 틀렸다 — `fetched_at` 이 있는 이유다).
+  실패도 잡을 `partial` 로 만들지 않는다(같은 근거).
+- **3a 위치는 한 곳뿐이다.** `capture_all` 의 409 가드 뒤·kind 루프 **뒤**. 앞에 두면 mcad 의 ref 결손 422 가 이 호출을
+  먼저 내보내고 죽어(소스 캡처가 실패한 잡에 조직 집계만 남는다) e2e 스모크가 깨진다. 어댑터 안에 남기면 dyna 소스 카드가
+  없을 때 어댑터 자체가 안 불려(registry.py `if row is None: continue`) '자격 무관' 이 소스 카드 유무에 다시 매달린다.
+- **봉투는 병합이다.** 리포 정찰 픽스처가 증거였다 — `material_usage`→`{materials}`, `section_contact_usage`→`{sections}`,
+  `corpus_summary`→`{sessions}`. 각 도구가 자기 키를 담은 dict 를 돌려주므로 4응답을 **펼쳐 합치면** 정본 §2.2 예시의 평평한
+  8키가 그대로 나온다. 옛 코드는 합치지 않고 중첩해서 정본에 없는 `corpus` 키가 생겼다. 이 설계 덕에 `operation_usage` 의
+  키 이름을 내가 지어낼 필요가 없었다(게이트웨이 MCP 는 401 이라 도구 응답을 직접 볼 수 없었다).
+- **발견 게이트에서 전사 도구를 뺐다.** 정본 §2.13.2 의 dyna 집합은 `{inspect_file, list_session_files, report_summary,
+  report_part_risk, report_energy_flow}` 이고 전사 도구가 없다. 코드는 거기에 corpus 3종을 넣고 있었다 — 그 도구가 없는
+  게이트웨이에서 dyna 가 통째로 unreachable 이 된다. 라이브 게이트웨이에 정본 집합이 전부 있음을 확인하고 바꿨다.
+- **스키마 표류가 1건이 아니라 3건이었다.** `primary_source` 누락 · `definitions.source.app_version` 누락 ·
+  `degraded_code` enum 의 `app_version_unknown` 누락. 셋 다 **실제 `build_ir()` 산출을 스키마로 검증하는 시험이 리포에
+  0건**이라 잡히지 않았다(검증은 손으로 쓴 픽스처에만 걸려 있었다). `tests/test_ir_schema_contract.py` 를 세워
+  실제 산출·부재 소스 봉투·어댑터가 내는 degraded 어휘를 전부 계약으로 묶었다. 두 표류를 일부러 되살려 시험이 실제로
+  실패하는 것까지 확인했다.
+- **`ir_hash` 는 손댈 필요가 없었다.** `compute_ir_hash` 가 `nodes·edges·same_as·dims_named` 허용목록이라 봉투에 키를
+  더해도 해시가 안 바뀐다 — 정본의 "ir_hash 에서 제외" 가 구조로 이미 보장된다. 그 사실을 시험으로 고정했다.
+- **실동작 확인.** dyna 소스 카드 없음 · 사용자 PAT 없음 · REST 채널 없음이라는 최악 조건에서 `capture_all` 이
+  `corpus_usage` 를 채웠고(8키 전부), 호출 kind 가 `{mcad: 8, context: 4}` 로 갈렸으며 mcad 소스의 `call_ids` 에
+  corpus id 가 섞이지 않았다.
+- **포맷 사고 정정.** 스키마·픽스처를 `json.dumps(indent=2)` 로 라운드트립해 8,000줄이 다시 쓰였다(원본은 스키마 2칸·픽스처
+  1칸 들여쓰기). CLAUDE.md §3 위반이라 되돌리고 텍스트 최소 편집으로 다시 했다 — 스키마 1537→9줄, 픽스처 1550→16줄.
+- **범위 밖으로 남긴 것**(별건, checklist 에 적었다) — ① 호출 시점 도구 이름 해석 부재(`tool_matches` 는 probe 전용이라
+  게이트웨이가 이름 충돌로 접두를 붙이면 전사 4호출이 경고 없이 전멸한다) ② `freeze_snapshot` 재사용 분기가 `ir_json` 을
+  갱신하지 않아 같은 `ir_hash` 재캡처에서 호출은 나가는데 값이 얼어붙는 것 ③ corpus_usage 의 위생(`sanitize_source_text`
+  우회)과 `part='ir'` 상한 부재 — 정본이 '원문 발췌' 의 추출 규칙을 정하지 않았다.
+- **검증.** `pytest` **1116 passed, 2 skipped**(시험 11건 추가) · `ruff` All checks passed.
+
+### D15. 적대 검증이 내 변경에서 결함 28건을 찾았다 — 절반은 시험이 자기를 속인 것 (2026-09-04)
+
+5렌즈 × 3표 반증(에이전트 137)으로 D14 변경을 다시 봤다. 확정 28 · 반증 16. 값진 것만 적는다.
+
+- **내가 만든 회귀(HIGH, 5렌즈 전부가 독립적으로 잡음).** 스키마의 `definitions.source.app_version` 을
+  `["string","null"]` 로 적었는데 실물은 `{version, captured_via, extra}` **객체**다(`base.UNKNOWN_APP_VERSION`,
+  정본 plan §2.2·:635 예시도 객체). 같은 변경에서 `additionalProperties:false` 를 세웠으므로 **실제 mcad 봉투가
+  전부 거부**된다. 타입을 확인하지 않고 추측해서 넣은 것이다.
+- **그걸 가린 것은 내가 새로 만든 시험이었다.** '실제 산출을 검증한다' 던 `test_ir_schema_contract.py` 의
+  `_mcad_result()` 가 `app_version: None` 이라는 **손으로 지은 모양**을 써서 초록이었다. 이제 어댑터 상수
+  `base.UNKNOWN_APP_VERSION` 을 그대로 쓰고, 버전을 읽은 정상 경로도 함께 고정한다. 교훈은 하나다 —
+  '실물을 검증한다' 는 시험이 stub 을 쓰면 그 취지가 통째로 무너진다.
+- **항진명제 시험이 진짜 버그 둘을 가리고 있었다.** `assert [name for name,_ in seen] == list(CORPUS_TOOLS)` 와
+  `assert {c["source_kind"]} == {CONTEXT_KIND}` 는 코드를 코드 자신과 비교한다. 상수를 정본 리터럴로 바꾸자
+  **`CORPUS_TOOLS` 순서가 뒤집혀 있고 `CONTEXT_KIND` 가 `"dyna"` 로 되어 있는 것**이 드러났다(내 스모크가 통과한
+  뒤 어느 시점에 뒤집혔다 — 적대 검증 에이전트 137개가 쓰기 권한을 가진 채 돌았고 프롬프트에 '고치지 마라' 를
+  넣지 않았다. **검토 에이전트는 읽기 전용으로 돌려야 한다**).
+- **degraded enum 수정이 부분적이었다.** `app_version_unknown` 하나만 넣었는데 `capture_partial`(state.py:210 이 읽는다)·
+  `schema_drift`(diff.py:265 가 읽는다) 등 6종이 더 빠져 있었고 픽스처도 이미 쓰고 있었다. 어휘 가드를 3축으로
+  넓혔다 — 어댑터가 **내는** 코드 · 하류가 **읽는** 코드 · 픽스처가 **쓰는** 코드. 하류 축이 실제로 잡는 것을 확인했다.
+- **배선이 미검증이었다.** capture_all→routes→ir_json 을 검증하는 시험이 0건이라 **3a 블록을 통째로 지워도 전 시험이
+  초록**이었다. 3건을 세웠고, 블록을 지워 실제로 빨개지는 것을 확인했다.
+- **작은 것들** — corpus `app_key` 를 정적 기본값으로 박아 다른 백엔드를 쓰는 조직에서 틀린 값이 동결될 수 있었다
+  (등록된 소스 카드 값 우선으로 고침) · 부재 소스 시험의 `ecad` 파라미터가 실제로는 dyna 를 두 번 돌려 ecad_stub 이
+  한 번도 검증되지 않았다(실제 스텁 산출로 검증하는 시험 신설).
+- **남긴 것.** `primary_source`·`context` 를 스키마 `required` 에 넣는 것은 유효·무효 픽스처를 함께 손봐야 하고
+  무효 픽스처 6종의 거부 사유가 '원래 잡으려던 결함' 에서 '새 필수 키 누락' 으로 바뀔 위험이 있어 별건으로 둔다.
+- **검증.** `pytest` **1121 passed, 2 skipped** · `ruff` All checks passed · 두 시나리오 실측
+  (mcad 단독 → corpus 없음·DynaForge 0회 / mcad+dyna 무자격 → corpus 채움·kind `{mcad:8, context:4}`).

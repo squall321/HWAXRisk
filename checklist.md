@@ -5,14 +5,14 @@
 코드 대조로 확인해 적은 작업 대장이며, 앞으로의 진행은 이 문서를 늘려 가며 한다. 정본 체크리스트는 단계 착수 전에 쓴 것이라 P1~P7 항목이
 전부 미체크로 남아 있다 — 여기서 실측한 완료 상태가 그보다 최신이다.
 
-마지막 실측 2026-09-02 — `pytest` **1105 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · `ruff` 통과 · `pnpm build` 통과.
+마지막 실측 2026-09-04 — `pytest` **1121 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · `ruff` 통과 · `pnpm build` 통과.
 
 ## 진척 요약
 
 | 단계 | 정본 절 | 상태 | 근거 |
 |---|---|---|---|
 | P0 부트스트랩 | §9.1 | **완료** — 실환경 통과 기준 일부 미실측(↓ 3장) | 스캐폴드·계약·정합 A-δ, SIF 빌드·기동·게이트웨이 흡수 확인 |
-| P1 IR·상태·게이트·규칙(MCAD) | §9.2 | **완료**(합성 픽스처 기준) | `ir_builder.py` · `state.py` · `render.py` · `requirements.py` · `adapters/mcad.py` · `export.py` |
+| P1 IR·상태·게이트·규칙(MCAD) | §9.2 | **완료**(합성 픽스처 기준) — §2.2 봉투 승격은 2026-09-04 에 닫음 | `ir_builder.py` · `state.py` · `render.py` · `requirements.py` · `adapters/mcad.py` · `export.py` |
 | P2 Dyna·same-as·원장·diff | §9.3 | **완료**(합성 픽스처 기준) | `adapters/dyna.py` · `sameas.py` · `diff.py` · `ComparePage.tsx` · `recompute_part_keys.py` |
 | P3 패널 e2e·서술 저장 | §9.4 | **완료**(엔진 실호출 미실측) | `narrative.py` · `runner.py` · `registry.py` · `character.py` · `ra_client.py` · `adh_client.py` |
 | P4 커버리지·편성·배치·보고서 | §9.5 | **완료** | `planner.py` · `roster.py` · `runner.py` 배치 · C1~C3 · `GET /api/meta/metrics` |
@@ -66,6 +66,29 @@
   - [ ] `TargetPage` '리스크 직접 등록' 폼 — `POST /targets/{key}/findings` 의 UI 짝(작성자만 수정·삭제)
   - [ ] `TargetPage` '브리프 토큰 복사' 버튼 — L2 워크플로가 `briefToken` 없이는 앱을 못 부른다
   - [ ] `ProjectPage` '사전' 탭 — `POST /vocab/synonyms`·`stop-tokens` 와 재계산 필요 배너
+- [x] **`context.corpus_usage` 봉투 승격(§2.2) + rr_ir 스키마 표류 3건** (2026-09-04) — dyna 계약 대조에서 나온 P1 미완 항목.
+  전사 집계를 4도구·정본 순서로 늘리고 `sources[dyna].context` → 봉투 최상위 `context.corpus_usage` 로 옮겼으며,
+  `capture_all` 의 kind 루프 뒤로 들어내 **dyna 소스 카드도 사용자 PAT 도 없을 때 돌게** 했다(정본이 명시한 요구인데
+  early return 으로 안 돌고 있었다). 정본 내부 모순(§2.11.3 "부재여도 수행" vs §9.2 "rest5+mcp3 초과는 실패")은
+  적대 검증이 내 해석을 정정했다 — 3a 는 "3. dyna 캡처" 의 하위 단계이고 "부재여도" 는 *자격* 부재를 뜻하므로
+  **dyna 를 요청했을 때만** 돌되 자격 무관이다(mcad 단독은 DynaForge 를 안 부른다). 전사 호출은
+  `source_kind='context'` 로 `call_ids`·`reuse_prior_calls`·`partial` 판정 밖에 둔다. 봉투는 4응답의 병합이다.
+  스키마는 `primary_source`·`source.app_version`·`degraded` 의 `app_version_unknown` 셋이 빠져 있어 실제 산출이
+  자기 계약을 어기고 있었고, **실제 `build_ir()` 산출을 검증하는 시험**(`test_ir_schema_contract.py`)을 세워 막았다.
+  적대 검증(5렌즈·137에이전트)이 확정 28건을 냈고 그중 내가 만든 회귀 하나(`app_version` 타입을 추측으로 넣어 실제
+  mcad 봉투가 전부 거부)와 항진명제 시험이 가리던 버그 둘(`CORPUS_TOOLS` 순서 역전·`CONTEXT_KIND='dyna'`)을 잡았다.
+- [ ] **스키마 `required` 에 `primary_source`·`context` 추가** (2026-09-04 발견, 별건) — properties 에만 넣어
+  두 키가 없어도 통과한다. 유효 픽스처(`valid_mcad_only.json`)에 둘 다 없어 함께 손봐야 하고, 무효 픽스처 6종의
+  거부 사유가 '원래 잡으려던 결함' 에서 '새 필수 키 누락' 으로 바뀔 위험이 있어 한 번에 하지 않았다.
+- [ ] **호출 시점 도구 이름 해석 부재** (2026-09-04 발견, 별건) — `tool_matches`(suffix 매칭)는 probe 에서만 쓰이고
+  어댑터는 맨이름으로 호출한다. 게이트웨이가 이름 충돌로 접두를 붙이면(정본 §2.13.2 가 그 규칙을 적어 두었다)
+  그 호출들이 조용히 전멸한다. 전사 집계는 probe 없이 돌아 특히 취약하다 — 모든 어댑터에 걸친 문제다.
+- [ ] **`freeze_snapshot` 재사용 분기가 값을 얼린다** (2026-09-04 발견, 별건) — 같은 `ir_hash` 면 기존 스냅샷을
+  `reused=True` 로 돌려주고 `ir_json` 을 갱신하지 않는다. 전사 집계는 시변인데 호출은 매번 나가고 값은 첫 스냅샷에
+  얼어붙는다(`fetched_at` 이 그 사실을 드러내지도 못한다).
+- [ ] **corpus_usage 의 위생·상한 미정** (2026-09-04 발견) — 남의 모델 재료명·섹션명 원문이 들어오는데
+  `sanitize_source_text`(§3.4.1) 를 타지 않고 `part='ir'` 응답에 상한도 없다. 정본이 '원문 발췌' 의 추출 규칙을
+  정하지 않아 코드로 지어내지 않았다 — 화면·브리프가 이 값을 읽기 시작하기 전에 정본 결정이 필요하다.
 - [ ] **라벨 자동 유입 4경로 미구현**(RA incident · test_run · DynaForge · VOC). 야간 ①·⑤(`metrics.sync_labels`·`refresh_fv_stats`)가
   비어 있고 `run_nightly()['unwired']` 와 `rr_metrics(label_ingest_wired)` 배지로 드러내는 중이다 — 숨긴 게 아니라 학습 루프의 분모가
   아직 사람 라벨뿐이라는 뜻이다. 경로 1·2 는 RA 게이트웨이 읽기, 3 은 러너 자격 (b), 4 는 `product_code` 조건이 선행한다.

@@ -331,7 +331,7 @@ def round_attrs(obj: Any, kind: str | None = None) -> Any:
 def compute_ir_hash(ir: Mapping[str, Any]) -> str:
     """ir_hash(plan §2.11.1) — 노드·엣지·확정 same_as·dims_named 만 정렬해 정규 JSON 으로 해싱한다.
 
-    provenance·captured_at·snapshot_id·sources[].stats/context·warnings·rollups·gates·character_seed·
+    provenance·captured_at·snapshot_id·sources[].stats·봉투 context·warnings·rollups·gates·character_seed·
     feature_vector 는 입력에 없다. 그래서 같은 소스·같은 잣대·같은 원장이면 재추출해도 같은 값이 나온다.
     """
     nodes = sorted(
@@ -792,6 +792,8 @@ def build_ir(
     dim_vocab: Mapping[str, Mapping[str, Any]] | None = None,
     project_codes: Sequence[str] = (),
     synonyms: Mapping[str, str] | None = None,
+    # 봉투 최상위 조직 문맥(§2.2 context.corpus_usage) — 소스 캡처가 아니라 capture_all 이 따로 모은다.
+    context: Mapping[str, Any] | None = None,
     resolve_ckey_fn: Callable[[str], str] | None = None,
     sameas_resolve: Callable[..., Sequence[Mapping[str, Any]]] | None = None,
     versions: Mapping[str, str] | None = None,
@@ -1115,6 +1117,9 @@ def build_ir(
         # 정본 소스 — mcad 가 없으면 dyna 다. ir_hash 입력이 아니라 조회·화면·게이트 분기 키다(§2.2).
         "primary_source": primary_source,
         "sources": sources,
+        # 소스 밖 조직 문맥(§2.2). 소스 하위에 두면 dyna 부재 하나로 조직 집계까지 버려진다.
+        # ir_hash 입력이 아니다 — compute_ir_hash 가 nodes·edges·same_as·dims_named 만 보는 허용목록이라 구조가 보장한다.
+        "context": dict(context) if context else {"corpus_usage": None},
         "units": {"length": "mm", "area": "mm2", "volume": "mm3", "stress": "MPa", "accel": "G", "density": "as_in_file"},
         "nodes": sorted(nodes, key=lambda n: n["nid"]),
         "edges": sorted(edges, key=lambda e: e["eid"]),

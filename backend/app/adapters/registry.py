@@ -11,7 +11,7 @@ from app import config, ir_builder
 from app.adapters import dyna as dyna_adapter
 from app.adapters import ecad_stub, mcad
 from app.adapters.base import DEFAULT_TIMEOUT, CallRecorder, IrAdapter, Principal, Probe, RestGetClient
-from app.common import new_uuid
+from app.common import new_uuid, now_epoch
 from app.errors import AppError
 
 # P0 고정 목록. 게이트웨이 /tools-map 도구명 집합으로 kind 를 바인딩하는 발견 로직(plan §8.2.11)은 GatewayRegistry 가 한다.
@@ -269,7 +269,21 @@ def capture_all(*, sources: Sequence[Mapping[str, Any]], principal: Principal,
             # 결과층 오버레이는 nid 로 붙는다 — nid 는 canon_key 만으로 정해지므로 여기서 미리 계산한다.
             pid_to_nid = {str(n.get("local_key")): ir_builder.make_nid(str(n.get("canon_key")))
                           for n in result.get("nodes") or [] if n.get("kind") == "pid"}
-    return {"snapshot_id": sid, "results": results, "calls": recorder.calls}
+
+    # 3a 전사 집계(§2.11.3) — 소스 카드·자격과 무관하게 kind 루프 **뒤**에서 한 번 돈다.
+    # 앞에 두면 mcad 의 ref 결손 422 가 이 호출을 먼저 내보내고 죽는다(소스 캡처가 실패한 잡에 조직 집계만 남는다).
+    # 3a 전사 집계(§2.11.3 3) — dyna 캡처의 하위 단계다. "dyna 부재여도 수행" 은 **자격** 부재를 뜻하므로
+    # 자격·세션 유무와 무관하게 돌되(3b 를 건너뛴 경우 포함), dyna 를 요청하지 않은 mcad 단독 스냅샷에서는
+    # 돌지 않는다 — 그러면 §9.2 통과 기준 2 의 호출 예산(rest 5 + mcp 3)을 mcp 7 로 넘겨 mcp_degraded 지문과 겹친다.
+    # kind 루프 뒤에 두는 이유는 앞에 두면 mcad 의 ref 결손 422 가 이 호출을 먼저 내보내고 죽기 때문이다.
+    context = None
+    dyna_row = by_kind.get("dyna")
+    if mcp_client is not None and dyna_row is not None and "dyna" in wanted:
+        # 과제가 고른 dyna app_key 를 쓴다 — 정적 기본값을 박으면 다른 백엔드를 쓰는 조직에서 틀린 값이 동결된다.
+        context = dyna_adapter.corpus_context(
+            recorder, app_key=str(dyna_row.get("app_key") or "") or default_app_key("dyna"),
+            captured_at=now_epoch())
+    return {"snapshot_id": sid, "results": results, "calls": recorder.calls, "context": context}
 
 
 def clients_from_settings(settings, secrets: Mapping[str, str] | None = None, *,

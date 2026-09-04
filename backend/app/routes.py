@@ -23,6 +23,7 @@ from app import state as state_module
 from app import registry as registry_module
 from app.adapters import base as adapters_base
 from app.adapters import registry as adapters_registry
+from app.adapters.dyna import CONTEXT_KIND as CONTEXT_CALL_KIND
 from app.common import canonical_json, new_uuid, now_epoch, parse_ref, sha256_hex
 from app.errors import AppError
 from app.risk_store import get_store
@@ -1106,6 +1107,10 @@ def reuse_prior_calls(store: Any, project_id: str, calls: list[dict]) -> int:
     """
     reused = 0
     for call in calls:
+        # 전사 집계는 args 가 늘 {} 라 두 번째 스냅샷부터 전부 걸린다 — 게다가 시변 집계라 재사용이 틀렸다
+        # (`fetched_at` 이 있는 이유다). 소스 호출만 센다(§2.11.3).
+        if str(call.get("source_kind") or "") == CONTEXT_CALL_KIND:
+            continue
         args_hash = sha256_hex(canonical_json(call.get("args") or {}))
         row = store.query_one(
             "SELECT call_id FROM rr_snapshot_calls WHERE args_hash = ? AND ok = 1 AND tool = ?"
@@ -1168,8 +1173,10 @@ def create_snapshot(project_id: str, body: SnapshotBody,
                 channel.close()
     calls = list(captured["calls"])
     # 버전 조회(system_status)는 선택 호출이라 실패해도 부분 캡처가 아니다 — 그 사실은 degraded 로 남는다(§2.2).
+    # 전사 집계(source_kind='context')도 소스 캡처가 아니라 봉투 문맥이라 실패가 잡을 partial 로 만들지 않는다(§2.2).
     failed_calls = [c for c in calls
-                    if not c.get("ok", True) and not str(c.get("tool") or "").endswith("system_status")]
+                    if not c.get("ok", True) and not str(c.get("tool") or "").endswith("system_status")
+                    and str(c.get("source_kind") or "") != CONTEXT_CALL_KIND]
     try:
         _check_model_size(captured, body.allow_large)
     except AppError as exc:
@@ -1185,6 +1192,7 @@ def create_snapshot(project_id: str, body: SnapshotBody,
     out = ir_builder.freeze_snapshot(
         store, project_id=project_id, owner_sub=owner_sub, label=body.label or f"snap-{now_epoch()}",
         adapter_results=captured["results"], calls=calls, job_id=job_id,
+        context=captured.get("context"),
         snapshot_id=captured["snapshot_id"], derived_from=prior["id"] if prior else None)
     state = "partial" if (out.get("partial") or failed_calls) else "done"
     _snapshot_job_finish(store, job_id, state=state, snapshot_id=out["snapshot_id"], started=started,

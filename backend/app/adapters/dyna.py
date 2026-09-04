@@ -8,11 +8,19 @@ from app.common import canonical_json, now_epoch, sha256_hex
 
 ADAPTER_VERSION = "1.0"
 KIND = "dyna"
+# 전사 집계 호출의 원장 kind — 소스 캡처와 섞이지 않게 별도 값이다(§2.2 "소스 캡처가 아니다").
+CONTEXT_KIND = "context"
 RESULT_KIND = "dyna_result"
 
 # DynaAdapter 가 실제로 부르는 도구만 발견 게이트로 쓴다 — 리포트 도구는 dyna_result 의 게이트다(recon §4).
+# 정본 §2.13.2 의 dyna 집합. 전사 집계 4종은 여기 없다 — 소스 캡처가 아니라 봉투 문맥이고(§2.2),
+# 발견 게이트에 넣으면 그 도구가 없는 게이트웨이에서 dyna 가 통째로 unreachable 이 된다.
 REQUIRED_TOOLS: tuple[str, ...] = (
-    "inspect_file", "download_result", "corpus_summary", "material_usage", "section_contact_usage",
+    "inspect_file", "list_session_files", "report_summary", "report_part_risk", "report_energy_flow",
+)
+# 전사 집계(3a) — 자격 무관으로 부르고 봉투 최상위 context.corpus_usage 를 채운다. 순서는 정본 §2.11.3 3a 고정.
+CORPUS_TOOLS: tuple[str, ...] = (
+    "corpus_summary", "material_usage", "section_contact_usage", "operation_usage",
 )
 # 한 스냅샷에 실을 수 있는 리포트 상한(plan §2.13.4).
 MAX_REPORTS = 3
@@ -123,7 +131,6 @@ class DynaAdapter(SourceAdapter):
         else:
             degraded.add("detect_absent")
 
-        context = _corpus_context(recorder, app_key=app_key, captured_at=captured_at)
         source = {
             "kind": KIND, "app_key": app_key, "adapter_version": ADAPTER_VERSION, "channel": "mcp",
             "ref": {"session_id": session_id, "file_id": file_id, "filename": ref.get("filename") or meta.get("filename"),
@@ -133,7 +140,6 @@ class DynaAdapter(SourceAdapter):
             "source_hash": sha256 or None,
             "stats": _stats(meta, connectivity, nodes),
             "conventions": dict(modelmeta.get("conventions") or {}),
-            "context": context,
             "degraded": sorted(degraded), "captured_at": captured_at,
         }
         return {"source": source, "nodes": nodes, "edges": edges, "warnings": warnings,
@@ -345,14 +351,28 @@ def _geometric_edges(payload: Any, *, sha256: str, app_key: str | None, call_id:
     return edges
 
 
-def _corpus_context(recorder: CallRecorder, *, app_key: str | None, captured_at: int) -> dict:
-    """전사 집계 3종 — 파일·세션·소유자 무관 조직 분포이고 ir_hash 에서 빠진다(plan §2.5.2)."""
-    usage: dict[str, Any] = {"fetched_at": captured_at}
-    for tool, key in (("material_usage", "materials"), ("section_contact_usage", "sections"),
-                      ("corpus_summary", "corpus")):
-        reply = recorder.call("mcp", tool, {}, source_kind=KIND, app_key=app_key)
-        usage[key] = reply["result"] if reply["ok"] else None
-    return {"corpus_usage": usage}
+def corpus_context(recorder: CallRecorder, *, app_key: str | None, captured_at: int) -> dict:
+    """전사 집계 4종 → 봉투 최상위 `context.corpus_usage`(plan §2.2·§2.11.3 3a).
+
+    소스 캡처가 아니다 — 자격(러너 (b)) 없이 서비스 시야로도 실데이터가 오므로 `dyna_absent` 여도 돌고,
+    실패해도 `degraded` 에 넣지 않는다(정본 §2.2). 그래서 호출은 `source_kind='context'` 로 적어
+    소스 캡처 예산(§9.2 통과 기준 2 의 rest 5 + mcp 3)과 `sources[].call_ids` 밖에 둔다.
+
+    봉투는 네 응답을 **펼쳐 합친다** — 각 도구가 자기 키를 담은 dict 를 돌려주므로(`corpus_summary`
+    → sessions·files·jobs, `section_contact_usage` → sections·contacts) 정본 §2.2 예시의 평평한 키가 그대로 나온다.
+    네 호출이 전부 실패하면 `corpus_usage` 는 `None` 이다.
+    """
+    usage: dict[str, Any] = {"app_key": app_key, "fetched_at": captured_at}
+    ok = 0
+    for tool in CORPUS_TOOLS:
+        reply = recorder.call("mcp", tool, {}, source_kind=CONTEXT_KIND, app_key=app_key)
+        if not reply["ok"]:
+            continue
+        ok += 1
+        result = reply["result"]
+        if isinstance(result, Mapping):
+            usage.update(result)
+    return {"corpus_usage": usage if ok else None}
 
 
 def _stats(meta: Mapping[str, Any], connectivity: Mapping[str, Any],

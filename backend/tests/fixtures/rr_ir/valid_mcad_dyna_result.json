@@ -78,14 +78,6 @@
     "truncated_scan": false
    },
    "conventions": {},
-   "context": {
-    "corpus_usage": {
-     "materials": [],
-     "sections": [],
-     "contacts": [],
-     "fetched_at": 1756600000
-    }
-   },
    "degraded": [
     "no_secid",
     "detect_absent"
@@ -125,6 +117,14 @@
    "captured_at": null
   }
  ],
+ "context": {
+  "corpus_usage": {
+   "materials": [],
+   "sections": [],
+   "contacts": [],
+   "fetched_at": 1756600000
+  }
+ },
  "units": {
   "length": "mm",
   "area": "mm2",

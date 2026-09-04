@@ -491,8 +491,7 @@ def test_dyna_without_portal_pat_makes_no_call():
 
 
 def test_dyna_capture_builds_pid_nodes_contacts_and_scope():
-    tools = {"inspect_file": INSPECT_FILE, "material_usage": {"materials": []},
-             "section_contact_usage": {"sections": []}, "corpus_summary": {"sessions": 12}}
+    tools = {"inspect_file": INSPECT_FILE}
     recorder = CallRecorder("cafe0000deadbeef", mcp=_mcp(tools))
     result = dyna_adapter.DynaAdapter(DYNA_APP_KEY).capture(
         {"session_id": "01JSES", "file_id": "01JFIL", "sha256": KSHA}, _principal(), recorder)
@@ -507,9 +506,134 @@ def test_dyna_capture_builds_pid_nodes_contacts_and_scope():
     scope = [e for e in result["edges"] if e["kind"] == "scope"]
     assert len(contact) == 1 and contact[0]["attrs"]["contact_type"] == "*CONTACT_TIED_SURFACE_TO_SURFACE"
     assert scope[0]["b"] is None and len(scope[0]["members"]) == 2
-    assert result["source"]["context"]["corpus_usage"]["corpus"] == {"sessions": 12}
+    # 전사 집계는 어댑터가 아니라 capture_all 의 몫이다(§2.11.3 3a) — 소스 dict 에 context 키가 없다.
+    assert "context" not in result["source"]
     assert result["source"]["stats"]["size"] == [50, 40, 2.2]
     assert "detect_absent" in result["source"]["degraded"]
+
+
+def test_corpus_context_merges_four_tools_in_the_canonical_order():
+    """§2.2·§2.11.3 3a — 4응답을 펼쳐 합치고, 호출은 소스 캡처가 아닌 kind 로 적는다."""
+    seen: list = []
+    tools = {"corpus_summary": {"sessions": 12, "files": 25, "jobs": 8},
+             "material_usage": {"materials": [{"mid": 1}]},
+             "section_contact_usage": {"sections": [{"secid": 7}], "contacts": [{"cid": 3}]},
+             "operation_usage": {"operations": [{"op": "remesh", "n": 4}]}}
+    recorder = CallRecorder("cafe0000deadbeef", mcp=_mcp(tools, seen))
+    out = dyna_adapter.corpus_context(recorder, app_key=DYNA_APP_KEY, captured_at=1756600000)
+
+    # 순서는 정본 §2.11.3 3a 가 고정한다 — 상수를 다시 읽으면 항진명제가 되므로 값을 박는다.
+    assert [name for name, _ in seen] == [
+        "corpus_summary", "material_usage", "section_contact_usage", "operation_usage"]
+    # 중첩이 아니라 병합이다 — 정본 §2.2 예시의 평평한 키가 그대로 나온다.
+    assert out["corpus_usage"] == {
+        "app_key": DYNA_APP_KEY, "fetched_at": 1756600000,
+        "sessions": 12, "files": 25, "jobs": 8,
+        "materials": [{"mid": 1}], "sections": [{"secid": 7}], "contacts": [{"cid": 3}],
+        "operations": [{"op": "remesh", "n": 4}]}
+    # 소스 캡처 예산·sources[].call_ids·재사용 표기 밖에 두려면 kind 가 소스 kind 와 달라야 한다.
+    # 상수를 다시 읽으면 CONTEXT_KIND='dyna' 로 되돌려도 초록이라 값을 박는다.
+    assert {c["source_kind"] for c in recorder.calls} == {"context"}
+    assert dyna_adapter.CONTEXT_KIND not in ("mcad", "dyna", "dyna_result", "ecad")
+
+
+_CORPUS_STUBS = {"corpus_summary": {"sessions": 12}, "material_usage": {"materials": []},
+                 "section_contact_usage": {"sections": [], "contacts": []},
+                 "operation_usage": {"operations": []}}
+
+
+def test_capture_all_collects_the_context_even_without_any_credential():
+    """§2.11.3 3a — 자격(러너 (b))이 없어 3b 를 건너뛰어도 전사 집계는 돈다. 그게 이 항의 요지다.
+
+    이 시험이 없으면 capture_all 의 3a 블록을 통째로 지워도 전 시험이 초록이다.
+    """
+    out = adapters_registry.capture_all(
+        sources=[{"kind": "mcad", "app_key": APP_KEY, "ref": {"stepforge_project_id": SF_PROJECT}},
+                 {"kind": "dyna", "app_key": DYNA_APP_KEY, "ref": {}}],
+        principal=_principal(portal=None, service=None),
+        mcp_client=_mcp(dict(MCP_TOOLS_FULL, **_CORPUS_STUBS)),
+        rest_client=_rest(REST_ROUTES), kinds=["mcad", "dyna"])
+
+    # 자격이 없어 dyna 소스는 부재로 떨어지는데(3b 건너뜀) 조직 집계는 채워진다.
+    assert any(r["missing"].get("dyna_absent") for r in out["results"])
+    usage = out["context"]["corpus_usage"]
+    assert usage is not None and usage["sessions"] == 12
+    # 소스 캡처 회계와 섞이지 않는다 — kind 가 갈리고 mcad 소스의 call_ids 에 전사 호출이 없다.
+    by_kind: dict = {}
+    for c in out["calls"]:
+        by_kind[c["source_kind"]] = by_kind.get(c["source_kind"], 0) + 1
+    assert by_kind[dyna_adapter.CONTEXT_KIND] == 4
+    assert len(set(out["results"][0]["call_ids"])) == by_kind["mcad"], "mcad call_ids 에 전사 호출이 섞였다"
+
+
+def test_an_mcad_only_snapshot_stays_inside_the_call_budget():
+    """3a 는 'dyna 캡처' 의 하위 단계다(§2.11.3 3) — mcad 단독 요청은 DynaForge 를 부르지 않는다.
+
+    부르면 정상 경로가 mcp 7 이 되어 §9.2 통과 기준 2 가 `mcp_degraded` 폴백의 지문으로 쓰는 값과 겹친다.
+    """
+    out = adapters_registry.capture_all(
+        sources=[{"kind": "mcad", "app_key": APP_KEY, "ref": {"stepforge_project_id": SF_PROJECT}}],
+        principal=_principal(), mcp_client=_mcp(dict(MCP_TOOLS_FULL, **_CORPUS_STUBS)),
+        rest_client=_rest(REST_ROUTES), kinds=["mcad"])
+
+    assert out["context"] is None
+    # 예산은 source_kind 가 아니라 channel 로 센다(§9.2 통과 기준 2) — 태그로는 빼줄 수 없다.
+    called = {c["tool"] for c in out["calls"]}
+    assert called & set(dyna_adapter.CORPUS_TOOLS) == set(), "mcad 단독인데 DynaForge 를 불렀다"
+    assert all(c["source_kind"] != dyna_adapter.CONTEXT_KIND for c in out["calls"])
+    # 이 픽스처의 mcad 경로가 쓰는 mcp 호출 수는 3 을 넘지 않는다(정본 상한).
+    assert sum(1 for c in out["calls"] if c["channel"] == "mcp") <= 3
+
+
+def test_capture_all_uses_the_registered_dyna_app_key_for_the_context():
+    """과제가 고른 dyna app_key 를 쓴다 — 정적 기본값을 박으면 다른 백엔드 조직에서 틀린 값이 동결된다."""
+    out = adapters_registry.capture_all(
+        sources=[{"kind": "mcad", "app_key": APP_KEY, "ref": {"stepforge_project_id": SF_PROJECT}},
+                 {"kind": "dyna", "app_key": "heax-other_dyna", "ref": {}}],
+        principal=_principal(portal=None, service=None),
+        mcp_client=_mcp(dict(MCP_TOOLS_FULL, **_CORPUS_STUBS)),
+        rest_client=_rest(REST_ROUTES), kinds=["mcad", "dyna"])
+
+    assert out["context"]["corpus_usage"]["app_key"] == "heax-other_dyna"
+
+
+def test_context_survives_the_route_into_the_frozen_envelope(risk_store, monkeypatch):
+    """capture_all → freeze_snapshot → ir_json 배선 — 통과 기준 (23)(e) 는 여기까지가 한 줄이다."""
+    from app import ir_builder
+
+    usage = {"app_key": DYNA_APP_KEY, "sessions": 12, "fetched_at": 1756600000}
+    captured, _ = _capture_mcad()
+    out = ir_builder.freeze_snapshot(
+        risk_store, project_id="0" * 32, owner_sub=OWNER, label="DV1",
+        adapter_results=[captured], context={"corpus_usage": usage}, with_state=False)
+
+    stored = json.loads(risk_store.query_one(
+        "SELECT ir_json FROM rr_snapshots WHERE id = ?", (out["snapshot_id"],))["ir_json"])
+    assert stored["context"]["corpus_usage"] == usage
+    assert all("context" not in s for s in stored["sources"])
+
+
+def test_corpus_context_is_null_only_when_all_four_fail():
+    """일부만 실패하면 나머지는 싣는다. 넷 다 실패해야 null 이다(§2.2)."""
+    # 스텁에 없는 도구는 isError 로 떨어진다 — corpus_summary 하나만 살려 둔다.
+    partial = dyna_adapter.corpus_context(
+        CallRecorder("cafe0000deadbeef", mcp=_mcp({"corpus_summary": {"sessions": 12}})),
+        app_key=DYNA_APP_KEY, captured_at=1)
+    assert partial["corpus_usage"]["sessions"] == 12
+
+    dead = dyna_adapter.corpus_context(
+        CallRecorder("cafe0000deadbeef", mcp=_mcp({})), app_key=DYNA_APP_KEY, captured_at=1)
+    assert dead["corpus_usage"] is None
+
+
+def test_corpus_tools_are_not_a_discovery_gate():
+    """전사 4종은 발견 게이트가 아니다 — 넣으면 그 도구 없는 게이트웨이에서 dyna 가 통째로 죽는다(§2.13.2)."""
+    assert set(dyna_adapter.CORPUS_TOOLS) == {
+        "corpus_summary", "material_usage", "section_contact_usage", "operation_usage"}
+    # 정본 §2.13.2 의 dyna 집합.
+    assert set(dyna_adapter.REQUIRED_TOOLS) == {
+        "inspect_file", "list_session_files", "report_summary", "report_part_risk", "report_energy_flow"}
+    assert set(dyna_adapter.CORPUS_TOOLS) & set(dyna_adapter.REQUIRED_TOOLS) == set()
 
 
 def test_dyna_result_absent_without_reports():
