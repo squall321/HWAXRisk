@@ -219,6 +219,31 @@ class SpecContext:
     versions: dict = field(default_factory=dict)         # taxonomy_version·rule_version·ir_version·diff_version·planner_version
 
     # ------------------------------------------------ 조회
+    def field_evidence(self, kind: str, key: str) -> dict | None:
+        """`voc:`·`paper:` 해석 — 이 타깃의 브리프가 실제로 부른 응답 원문 안에 그 항목이 있어야 한다.
+
+        정본이 두 갈래로 적은 것(§0.2.1 '브리프 E10 블록에 실린 것만' · §5.6.2 'rr_panel_calls 에 남아
+        해석된다')은 같은 뜻이다 — 브리프가 부른 원문 원장이 곧 실린 것의 목록이다(rr_brief_calls).
+        좌석이 지어낸 `voc:` 는 원장에 없으므로 dangling 이고 등급이 오르지 않는다.
+        """
+        import gzip  # noqa: PLC0415 — 이 경로에서만 쓴다.
+
+        tool = "get_top_issues" if kind == "voc" else "search_scholar"
+        rows = self._rows(
+            "SELECT result_gz FROM rr_brief_calls WHERE target_key = ? AND tool = ? AND ok = 1"
+            " ORDER BY fetched_at DESC LIMIT 3", (self.target_key, tool))
+        wanted = ("issue_key",) if kind == "voc" else ("record_id", "doi")
+        for row in rows:
+            try:
+                payload = json.loads(gzip.decompress(row["result_gz"]).decode("utf-8"))
+            except (OSError, TypeError, ValueError):
+                continue
+            items = payload.get("issues" if kind == "voc" else "papers") if isinstance(payload, Mapping) else None
+            for item in items or ():
+                if isinstance(item, Mapping) and any(str(item.get(w) or "") == key for w in wanted):
+                    return dict(item)
+        return None
+
     def requirement(self, name: str) -> dict | None:
         """`req:<name>` 해석 — 이 과제의 rr_requirements 행. 좌석 계약(std)이 이 인용을 필수로 요구한다."""
         rows = self._rows(
@@ -513,6 +538,10 @@ def _resolve_one(ref: str, ctx: SpecContext, raised_by: Sequence[str]) -> dict:
     if kind == "req":
         row = ctx.requirement(info["name"])
         return {"ok": row is not None, "reason": None if row else "not_in_scope", "payload": row, "verified": True}
+    if kind in ("voc", "paper"):
+        item = ctx.field_evidence(kind, info["issue_key"] if kind == "voc" else info["paper_id"])
+        return {"ok": item is not None, "reason": None if item else "not_in_scope",
+                "payload": item, "verified": True}
     if kind == "warn":
         item = ctx.warning(info["code"], info.get("ref_to"))
         return {"ok": item is not None, "reason": None if item else "not_in_scope", "payload": item, "verified": True}
@@ -639,11 +668,11 @@ def evidence_grade_from_cites(resolved: dict, ctx: SpecContext | None = None) ->
         kinds.append((str(row.get("ref_type")), str(row.get("ref"))))
     test_runs = ctx.test_run_reports if ctx else frozenset()
     for ref_type, ref in kinds:
-        if ref_type in ("inc", "req"):
+        if ref_type in ("inc", "req", "voc"):
             return "측정"
         if ref_type == "rpt" and ref.split(":", 1)[-1] in test_runs:
             return "측정"
-    if any(ref_type == "card" for ref_type, _ in kinds):
+    if any(ref_type in ("card", "paper") for ref_type, _ in kinds):
         return "문헌·규격"
     if any(ref_type in ("tool", "sig", "c", "e", "p", "d", "rule", "rpt", "narr", "reg", "gate", "warn", "name")
            for ref_type, _ in kinds):
@@ -1302,9 +1331,13 @@ def prior_evidence(store, target_key: str, *, user_memo: str | None = None,
     """
     from app import brief as brief_module  # noqa: PLC0415 — 순환 import 회피(brief 는 narrative 를 쓴다).
 
+    from app import field_source  # noqa: PLC0415 — 선택 채널이라 지연 import 한다.
+
     # 조립 경로는 strict_lint 다 — 판단어가 섞인 브리프를 엔진에 보내느니 E500 으로 멈춘다(plan §5.6.2).
+    # E10 조회 채널은 없으면 None 이다(그 블록만 결측 문구가 되고 조립은 완주한다).
     built = brief_module.build_brief(store, target_key, seats=seats, panel_id=panel_id,
-                                     exclude=tuple(exclude), strict_lint=True)
+                                     exclude=tuple(exclude), field=field_source.from_settings(),
+                                     strict_lint=True)
     items = [item for item, key in zip(built["evidence"], built["keys"]) if key != "E0c"]
     if user_memo and not any(str(i.get("source")) == "user_memo" for i in items):
         items.append({"source": "user_memo", "tool": "note", "args": target_key,

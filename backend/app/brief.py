@@ -25,8 +25,12 @@ CAPS: dict[str, int] = {
     "E0": 500, "E0c": 1000, "E1": 1650, "E2": 1100, "E3": 700, "E4": 600,
     "E5": 1500, "E6": 650, "E7": 1400, "E8": 500, "E9": 600, "M": 400,
 }
-# E5 안쪽 블록 상한(plan §5.6.1).
-E5_POSITIVE_CAP, E5_NEGATIVE_CAP, E5_FIELD_CAP = 700, 300, 500
+# E5 안쪽 블록 상한(plan §5.6.1). 정본은 E10 을 500 이라 적지만 그 합 1500 은 CAPS['E5'] 에 들어가지 않는다 —
+# CAPS 는 오버헤드(line_overhead 52)까지 포함하는 **라인** 상한이라 result 실효 한도가 1448 이고, 여기에
+# 프레이밍 56 + 블록 머리글 3줄 51 이 먼저 든다. 세 블록을 정본 값대로 채우면 1608 이 필요해 160 을 넘기고,
+# clip_lines 가 뒤에서부터 버리므로 맨 뒤 E10 이 통째로 조용히 사라진다. 그래서 E10 만 실효 잔여로 맞춘다
+# (E5+·E5− 는 정본 값 그대로 — 선례를 깎지 않는다, context-notes D18).
+E5_POSITIVE_CAP, E5_NEGATIVE_CAP, E5_FIELD_CAP = 700, 300, 340
 ITEM_ORDER: tuple[str, ...] = ("E0", "E0c", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9", "M")
 
 # E7 고정 슬롯(plan §5.6.3) — 좌석당 줄 220자, 좌석 합 1100자. 다른 항목이 비어도 늘리지 않는다.
@@ -661,7 +665,7 @@ def _e5_prefix(row) -> str:
     return ""
 
 
-def _item_e5(store, ctx, similar: Mapping[str, Any], owner_sub: str | None) -> dict:
+def _item_e5(store, ctx, similar: Mapping[str, Any], owner_sub: str | None, field=None) -> dict:
     """E5 세 블록 — E5+(살아 있는 선례) · E5−(기각·반증 선례) · E10(필드·문헌 근거)(plan §5.6.1).
 
     기각 선례는 두 번째 블록에만 실린다 — 살아 있는 선례로 되돌아오지 않게 하고, 동시에 '과거에
@@ -681,20 +685,125 @@ def _item_e5(store, ctx, similar: Mapping[str, Any], owner_sub: str | None) -> d
     lines += (clip_lines("\n".join(negative[:neg_max]), E5_NEGATIVE_CAP).split("\n") if negative
               else ["[기각된 선례 없음 — 이 조합에서 기각 0건]"])
     lines.append("[E10 필드·VOC·문헌 근거]")
-    lines += _field_evidence_lines(store, ctx)
+    lines += _field_evidence_lines(store, ctx, field)
     return {"key": "E5", "args": _s(ctx["target"]["target_key"]), "result": _body(source, lines)}
 
 
-def _field_evidence_lines(store, ctx) -> list[str]:
-    """E10 블록 — 제품 연결이 없으면 결측 문구 한 줄이다(실호출은 러너 몫이라 여기서 외부를 열지 않는다)."""
-    project_id = _s(ctx["target"]["project_id"])
+# E10 실호출 데드라인(plan §5.6.2 — 호출마다 개별, 초과·오류는 그 줄만 빠진다).
+FIELD_CALL_TIMEOUT_S = 5.0
+# 저장 원문 재사용 창(§5.6.2 — VOC 는 하루 단위로 바뀐다).
+FIELD_REUSE_S = 24 * 3600
+FIELD_TOOLS: tuple[str, ...] = ("get_top_issues", "search_scholar")
+_VOC_CATEGORY, _VOC_EXCERPT, _PAPER_TITLE, _PAPER_EXCERPT = 40, 80, 60, 80
+# get_top_issues 조회 창(plan §5.6.2 — 90d).
+VOC_WINDOW_DAYS = 90
+
+
+def product_keys(store, project_id: str) -> tuple[list[str], bool]:
+    """§5.6.2 제품 해석 — `product_refs_json` → `product_code` → `predecessor_product_code` 순.
+
+    돌려주는 두 번째 값은 '전작인가' 다(전작이면 줄 앞에 `[전작]` 을 붙인다).
+    """
     row = store.query_one(
         "SELECT product_code, product_refs_json, predecessor_product_code FROM rr_projects WHERE id = ?",
         (project_id,)) if project_id else None
-    if row is None or not (_s(row["product_code"]) or _s(row["predecessor_product_code"])
-                           or _j(row["product_refs_json"], [])):
+    if row is None:
+        return [], False
+    refs = [_s(r.get("value") if isinstance(r, Mapping) else r)
+            for r in (_j(row["product_refs_json"], []) or [])]
+    refs = [r for r in refs if r]
+    if refs:
+        return refs, False
+    if _s(row["product_code"]):
+        return [_s(row["product_code"])], False
+    if _s(row["predecessor_product_code"]):
+        return [_s(row["predecessor_product_code"])], True
+    return [], False
+
+
+def scholar_query(store, ctx) -> str:
+    """§5.6.2 — 성격 태그 상위 2 + mechanism 상위 1. 결정론이어야 24 h 캐시 키가 선다."""
+    project_id = _s(ctx["target"]["project_id"])
+    tags = [_s(r["tag"]) for r in store.query(
+        "SELECT tag FROM rr_character WHERE project_id = ? AND tag IS NOT NULL AND status != 'superseded'"
+        " ORDER BY support_panels DESC, id LIMIT 2", (project_id,))] if project_id else []
+    mechs = [_s(r["mechanism"]) for r in store.query(
+        "SELECT mechanism, COUNT(*) AS n FROM rr_findings WHERE target_key = ? AND mechanism IS NOT NULL"
+        " GROUP BY mechanism ORDER BY n DESC, mechanism LIMIT 1", (_s(ctx["target"]["target_key"]),))]
+    parts = [t.split(":")[-1] for t in tags if t] + [m for m in mechs if m]
+    return " ".join(parts)
+
+
+def _field_evidence_lines(store, ctx, field=None) -> list[str]:
+    """E10 블록(plan §5.6.1·§5.6.2).
+
+    `field` 는 게이트웨이 MCP 채널이다(없으면 조회 없이 결측 문구 한 줄). 호출 원문은 `rr_brief_calls` 에
+    남아 `voc:`·`paper:` 참조의 해석 원장이 되고 같은 타깃은 24 h 안이면 그 원문을 재사용한다.
+    실패한 호출은 그 줄만 빠지고 블록 끝에 `[조회 불가: <tool>]` 한 줄이 남는다 — '실패' 는 판단어
+    린터(L14)에 걸려 브리프 조립이 통째로 죽으므로 상태 서술로 적는다(context-notes D18).
+    """
+    project_id = _s(ctx["target"]["project_id"])
+    codes, inherited = product_keys(store, project_id)
+    if not codes:
         return ["[필드·문헌 근거 없음 — 제품 연결 미등록]"]
-    return ["[필드·문헌 근거 없음 — VOC 0건]"]
+    if field is None:
+        return ["[필드·문헌 근거 없음 — 조회 채널 없음]"]
+
+    target_key = _s(ctx["target"]["target_key"])
+    owner_sub = _s(ctx["target"]["owner_sub"])
+    prefix = "[전작] " if inherited else ""
+    lines: list[str] = []
+    unreachable: list[str] = []
+
+    issues = field.fetch(store, target_key, owner_sub, "get_top_issues",
+                         {"product_code": codes[0], "window_days": VOC_WINDOW_DAYS})
+    if issues is None:
+        unreachable.append("get_top_issues")
+    else:
+        for item in (_rows_of(issues, "issues") or [])[:3]:
+            key = _s(item.get("issue_key"))
+            if not key:
+                continue
+            # 응답의 자유 문자열은 전부 위생을 거쳐 «…» 안에 둔다 — 밖에 두면 판단어 린터에 그대로 노출돼
+            # 남의 VOC 문구 하나가 브리프 조립을 통째로 죽인다(§3.4.1 은 브리프의 외부 문자열을 위생 대상으로 못 박는다).
+            # 기간은 응답이 아니라 내가 보낸 인자로 적는다(외부 문자열을 하나 줄인다).
+            cat = render.sanitize_source_text(_s(item.get("category"))[:_VOC_CATEGORY], "voc")
+            excerpt = render.sanitize_source_text(_s(item.get("text"))[:_VOC_EXCERPT], "voc")
+            lines.append(f"{prefix}voc:{codes[0]}#{key} | {cat} | n={_int(item.get('n'))} |"
+                         f" {VOC_WINDOW_DAYS}d | {excerpt}")
+
+    query = scholar_query(store, ctx)
+    papers = field.fetch(store, target_key, owner_sub, "search_scholar", {"q": query}) if query else None
+    if query and papers is None:
+        unreachable.append("search_scholar")
+    else:
+        for item in (_rows_of(papers, "papers") or [])[:2]:
+            pid = _s(item.get("record_id")) or _s(item.get("doi"))
+            if not pid:
+                continue
+            title = render.sanitize_source_text(_s(item.get("title"))[:_PAPER_TITLE], "paper")
+            excerpt = render.sanitize_source_text(_s(item.get("abstract"))[:_PAPER_EXCERPT], "paper")
+            lines.append(f"paper:{pid} | {title} | {excerpt}")
+
+    lines = lines[: max(1, int(getattr(config.settings, "risk_field_evidence_lines", 5)))]
+    lines += [f"[조회 불가: {tool}]" for tool in unreachable]
+    return lines or ["[필드·문헌 근거 없음 — VOC 0건]"]
+
+
+def _int(value: Any) -> int | str:
+    """건수는 정수로만 싣는다 — 소스가 문자열을 주면 그 값이 린터 앞에 그대로 서지 않게 한다."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return "?"
+
+
+def _rows_of(payload, key: str) -> list:
+    """`{key: [...]}` 도 `[...]` 도 받는다(소스 응답 봉투가 갈린다)."""
+    if isinstance(payload, Mapping):
+        rows = payload.get(key)
+        return [r for r in rows if isinstance(r, Mapping)] if isinstance(rows, list) else []
+    return [r for r in payload if isinstance(r, Mapping)] if isinstance(payload, list) else []
 
 
 # ---------------------------------------------------------------- E6 유사 과제 성격
@@ -1033,7 +1142,7 @@ def _seats_of_panel(store, target_key: str, panel_id: str | None) -> list[dict]:
 
 def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | None = None,
                 panel_id: str | None = None, exclude: Sequence[str] = (), owner_sub: str | None = None,
-                adh=None, ra=None, strict_lint: bool = False) -> dict:
+                adh=None, ra=None, field=None, strict_lint: bool = False) -> dict:
     """타깃·패널을 받아 E0~E9 를 delib_opts.evidence 형식으로 조립한다(plan §5.6.2, 결정론).
 
     항목마다 라인 길이를 CAP 안으로 먼저 강제하므로 엔진 예산 11000 에서 드롭이 0 이다.
@@ -1058,7 +1167,7 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
             _item_e2(store, ctx),
             _item_e3(ctx),
             _item_e4(ctx),
-            _item_e5(store, ctx, similar, owner_sub),
+            _item_e5(store, ctx, similar, owner_sub, field),
             _item_e6(store, similar, ctx),
             _item_e7(store, ctx, seats, adh),
             _item_e8(store, ctx),

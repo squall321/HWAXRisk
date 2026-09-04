@@ -128,7 +128,8 @@ def new_uuid() -> str:
 # ---------------------------------------------------------------- 참조 문법(plan §0.2.1)
 # 스킴 이름 → 파싱 결과 dict 의 키(문서 순서). 파서는 대괄호 유무를 모두 받는다.
 REF_SCHEMES: tuple[str, ...] = (
-    "p", "e", "c", "d", "name", "tool", "card", "narr", "reg", "warn", "gate", "sig", "rule", "req", "rpt", "inc",
+    "p", "e", "c", "d", "name", "tool", "card", "narr", "reg", "warn", "gate", "sig", "rule", "req",
+    "voc", "paper", "rpt", "inc",
 )
 
 _HEX12 = re.compile(r"^[0-9a-f]{12}$")
@@ -216,6 +217,18 @@ def parse_ref(text: str) -> dict | None:
         if not rest:
             return None
         return {"kind": "req", "name": rest, "ref": f"req:{rest}"}
+    if scheme == "voc":
+        # `voc:<product_code>#<issue_key>` — issue_key 에 `#` 가 올 수 있으므로 앞에서 한 번만 자른다.
+        if "#" not in rest:
+            return None
+        product_code, issue_key = rest.split("#", 1)
+        if not product_code or not issue_key:
+            return None
+        return {"kind": "voc", "product_code": product_code, "issue_key": issue_key, "ref": f"voc:{rest}"}
+    if scheme == "paper":
+        if not rest:
+            return None
+        return {"kind": "paper", "paper_id": rest, "ref": f"paper:{rest}"}
     if scheme == "rpt":
         return {"kind": "rpt", "report_id": rest, "ref": f"rpt:{rest}"}
     return {"kind": "inc", "object_id": rest, "ref": f"inc:{rest}"}

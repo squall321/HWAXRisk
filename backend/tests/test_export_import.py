@@ -12,6 +12,10 @@ from app import config, export, identity
 from app.errors import AppError
 from app.risk_store import RiskStore, get_store
 
+from app.risk_store import MIGRATIONS as _MIGRATIONS
+
+LATEST_SCHEMA = _MIGRATIONS[-1][0]
+
 ALICE = "alice@example.com"
 BOB = "bob@example.com"
 BLOB = b"\x1f\x8b\x08\x00fake-gzip\x00\xff"
@@ -80,7 +84,7 @@ def _lines(store: RiskStore, owner: str = ALICE, since: int = 0) -> list[dict]:
 def test_header_is_first_line(seeded):
     head = _lines(seeded)[0]
     assert set(head) == {"schema_version", "app_version", "origin"}
-    assert head["schema_version"] == seeded.schema_version() == 1
+    assert head["schema_version"] == seeded.schema_version() == LATEST_SCHEMA
     assert head["app_version"] == config.APP_VERSION
     assert isinstance(head["origin"], dict) and "hostname" in head["origin"]
 

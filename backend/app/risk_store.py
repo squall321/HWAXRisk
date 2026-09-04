@@ -539,8 +539,27 @@ def _split_statements(sql: str) -> list[str]:
 
 _DDL_V1: list[str] = _split_statements(_DDL_V1_SQL)
 
+# v2 — 브리프 조립이 부른 외부 도구의 응답 원문(§5.6.2 E10). rr_panel_calls 에 넣지 않는 이유는 셋이다 —
+# 그 표는 panel_id NOT NULL 이고(브리프는 패널 편성 전에도 돈다), record_panel_calls 가 패널 시작 때
+# `DELETE WHERE panel_id = ?` 로 지우며(브리프 원문이 사라진다), E10 결과는 패널이 아니라 **타깃 단위로 24 h
+# 공유**된다. 정본 §5.6.2 는 `rr_panel_calls(source_kind='brief')` 라 적지만 그 표의 열은 `source` 이고
+# CHECK 어휘 확장은 마이그레이션 허용 연산 밖이라, 구조가 맞는 별도 표로 둔다(context-notes D18).
+_DDL_V2_SQL = """
+CREATE TABLE IF NOT EXISTS rr_brief_calls (                   -- 브리프 조립이 부른 외부 도구 응답 원문(§5.6.2 E10)
+  call_id TEXT PRIMARY KEY,                     -- 'b-<target_key sha256[:8]>-<seq:03d>'
+  target_key TEXT NOT NULL, owner_sub TEXT NOT NULL,
+  tool TEXT NOT NULL, app_key TEXT,
+  args_json TEXT NOT NULL, args_hash TEXT NOT NULL,           -- 24 h 재사용 판정 키는 (target_key, tool, args_hash)
+  ok INTEGER NOT NULL DEFAULT 1,
+  result_gz BLOB, result_bytes INTEGER, sha256 TEXT,          -- 원문 전문(절단 없음). voc:·paper: 참조 해석의 원장
+  fetched_at INTEGER NOT NULL,                  -- 재사용 창(24 h) 판정 기준 시각
+  duration_ms INTEGER, error TEXT);
+CREATE INDEX IF NOT EXISTS ix_rr_brief_calls_reuse ON rr_brief_calls(target_key, tool, args_hash, fetched_at);
+"""
+_DDL_V2: list[str] = _split_statements(_DDL_V2_SQL)
+
 # 버전 오름차순. 한 버전 = 한 트랜잭션. 허용 연산은 CREATE TABLE IF NOT EXISTS · ADD COLUMN · CREATE INDEX IF NOT EXISTS 뿐(plan §5.2.5 (6)).
-MIGRATIONS: list[tuple[int, list[str]]] = [(1, _DDL_V1)]
+MIGRATIONS: list[tuple[int, list[str]]] = [(1, _DDL_V1), (2, _DDL_V2)]
 
 # 살림 표 2개 — rr_ 접두가 아니고 export 대상이 아니다(plan §5.2.5 (6)·§8.2.7). 버전 밖에서 항상 CREATE TABLE IF NOT EXISTS.
 # _user_credentials 열 정의는 plan §8.2.7 전문 그대로다 — 평문 열 portal_pat 은 폐기고 값은 portal_pat_enc(BLOB) 하나에만 있다.

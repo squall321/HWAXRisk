@@ -24,6 +24,7 @@ from app import registry as registry_module
 from app.adapters import base as adapters_base
 from app.adapters import registry as adapters_registry
 from app.adapters.dyna import CONTEXT_KIND as CONTEXT_CALL_KIND
+from app import field_source
 from app.common import canonical_json, new_uuid, now_epoch, parse_ref, sha256_hex
 from app.errors import AppError
 from app.risk_store import get_store
@@ -2193,8 +2194,11 @@ def brief_payload(target_key: str, tier: str = "B", *, owner_sub: str | None = N
 
     seats = panels[0]["seats"] if panels else None
     panel_id = panels[0]["id"] if panels else None
+    # REST·MCP 미리보기도 같은 브리프를 만든다 — E10 을 러너에만 두면 이 경로의 그 블록이 영영 빈다.
+    # 24 h 캐시가 있어 미리보기가 게이트웨이를 매번 왕복하지는 않는다(§5.6.2).
     brief = brief_module.build_brief(store, target_key, seats=seats, panel_id=panel_id,
-                                     exclude=exclude, owner_sub=target["owner_sub"])
+                                     exclude=exclude, owner_sub=target["owner_sub"],
+                                     field=field_source.from_settings())
     # E0c(좌석 계약)는 build_delib_opts 가 다시 끼우므로 엔진 몫 evidence 에서는 뺀다.
     engine_evidence = [item for item, key in zip(brief["evidence"], brief["keys"]) if key != "E0c"]
 

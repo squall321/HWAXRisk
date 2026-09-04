@@ -5,6 +5,10 @@ import time
 
 from app.runner import RiskRunner
 
+from app.risk_store import MIGRATIONS as _MIGRATIONS
+
+LATEST_SCHEMA = _MIGRATIONS[-1][0]
+
 THREADS = ["panel_loop", "sync_loop", "nightly_loop"]
 
 
@@ -49,4 +53,4 @@ def test_origin_json_written(client, session_data_dir):
 
     origin = json.loads((session_data_dir / "origin.json").read_text(encoding="utf-8"))
     assert set(origin) == {"hostname", "app_version", "schema_version", "written_at"}
-    assert origin["app_version"] == "0.1.0" and origin["schema_version"] == 1
+    assert origin["app_version"] == "0.1.0" and origin["schema_version"] == LATEST_SCHEMA

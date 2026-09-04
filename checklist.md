@@ -5,7 +5,7 @@
 코드 대조로 확인해 적은 작업 대장이며, 앞으로의 진행은 이 문서를 늘려 가며 한다. 정본 체크리스트는 단계 착수 전에 쓴 것이라 P1~P7 항목이
 전부 미체크로 남아 있다 — 여기서 실측한 완료 상태가 그보다 최신이다.
 
-마지막 실측 2026-09-04 — `pytest` **1124 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · `ruff` 통과 · `pnpm build` 통과.
+마지막 실측 2026-09-04 — `pytest` **1134 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · `ruff` 통과 · `pnpm build` 통과.
 
 ## 진척 요약
 
@@ -16,11 +16,11 @@
 | P2 Dyna·same-as·원장·diff | §9.3 | **완료**(합성 픽스처 기준) | `adapters/dyna.py` · `sameas.py` · `diff.py` · `ComparePage.tsx` · `recompute_part_keys.py` |
 | P3 패널 e2e·서술 저장 | §9.4 | **완료**(엔진 실호출 미실측) | `narrative.py` · `runner.py` · `registry.py` · `character.py` · `ra_client.py` · `adh_client.py` |
 | P4 커버리지·편성·배치·보고서 | §9.5 | **완료** | `planner.py` · `roster.py` · `runner.py` 배치 · C1~C3 · `GET /api/meta/metrics` |
-| P5 재사용 루프 | §9.6 | **부분** — E10 필드·VOC 근거가 스텁, UI 3종 부재 | `brief.py` E5±·E6~E8 · `risk_add_finding` · `/api/precedents` |
+| P5 재사용 루프 | §9.6 | **부분** — E10 은 2026-09-04 에 닫음, UI 2종 부재 | `brief.py` E5±·E6~E8 · `risk_add_finding` · `/api/precedents` |
 | P6 학습 루프 | §9.7 | **부분** — 라벨 자동 유입 4경로 미구현(의도적 노출) | `learning.py` · `metrics.py` · `nightly.py` · `bootstrap_*.py` |
 | P7 ODB 실연동 | §9.8 | **미착수**(조건부 — ODB hub 계약 합의 대기) | `adapters/ecad_stub.py` 만 |
 
-실측 규모 — 백엔드 `app/` 38모듈 25,018줄 · 프런트 `src/` 5,700여 줄 · REST 66경로 · MCP 7도구 · DDL `rr_*` 41표 + 살림 2표 · 테스트 42파일.
+실측 규모 — 백엔드 `app/` 38모듈 25,018줄 · 프런트 `src/` 5,700여 줄 · REST 66경로 · MCP 7도구 · DDL `rr_*` 42표(v2) + 살림 2표 · 테스트 42파일.
 
 ## 1. 앱 코드 구멍 — 지금 바로 가능한 것
 
@@ -54,14 +54,23 @@
   `REF_SCHEMES` 에 없어 전부 dangling·경험칙이었다(정본 §0.2.1 (5)는 `측정`). 파싱·해석(`rr_requirements`)·등급을
   이었다. `parse_ref` 의 catch-all 이 `inc:` 라 스킴만 더하고 분기를 빠뜨리면 사고 참조로 읽혀 등급이 튄다 —
   분기를 명시로 넣었다. `voc:`·`paper:` 는 해석 규칙이 정본 안에서 갈려 E10 본체와 함께 간다.
-- [ ] **E10 필드·VOC·문헌 근거 — 정본 결정 4건 대기** (2026-09-04 매핑 완료, 착수 보류)
-  정본 §5.6.1·§5.6.2 가 줄 형식·상한·호출·데드라인까지 정했는데도 넷이 비어 있다(context-notes D17).
-  ① E5 세 블록 산술이 성립하지 않는다 — 합 1500 이 CAPS 1500 에 안 들어가고 `clip_lines` 가 E10 을 먼저 지운다(실효 잔여 319자)
-  ② 정본 결측 문구 `[조회 실패: <tool>]` 가 정본 린터(L14 '실패')에 걸려 strict_lint 경로에서 E500
-  ③ `rr_panel_calls` 에 `source_kind` 열이 없고(CHECK 확장은 마이그레이션 규칙 위반) `panel_id` NOT NULL 인데
-     E10 은 타깃 단위 24h 공유이며 `record_panel_calls` 의 DELETE 가 그 행을 지운다
-  ④ 24h 재사용의 키·저장처·결정론 보장이 비어 있다
-  그 밖에 `voc:` 존재 검증 원장이 정본 세 곳에서 다르고, `voc_map` 시드 12행은 예시 4개 중 3개가 택소노미 밖이다.
+- [x] **E10 필드·VOC·문헌 근거** (2026-09-04) — P0 결정 4건을 실측 위에서 확정하고 구현했다(context-notes D18).
+  ① `E5_FIELD_CAP` 500→340(CAPS 는 오버헤드 포함 라인 상한이라 정본 합 1500 이 안 들어가고 clip_lines 가 E10 을
+  먼저 지웠다 — 선례 두 블록은 정본 값 그대로) ② 결측 문구를 `[조회 불가: …]` 로(정본의 '실패' 가 판단어 린터 L14 에
+  걸려 strict_lint 경로에서 브리프가 죽는다) ③ `rr_brief_calls`(DDL v2) — `rr_panel_calls` 는 `source_kind` 열이 없고
+  `panel_id` NOT NULL 이며 패널 DELETE 가 브리프 행을 지운다 ④ 24h 캐시 키 `(target_key, tool, args_hash)`·행 하나 갱신.
+  `voc:`·`paper:` 를 1급 참조로 만들고 등급을 §0.2.1 (5)대로 이었다 — **브리프가 부른 원문 원장이 곧 '실린 것' 의
+  목록**이라 정본의 두 갈래(§0.2.1 '실린 것만' vs §5.6.2 '원장에 남아')가 한 갈래가 됐다. 좌석이 지어낸 `voc:` 는
+  dangling 이고 등급이 안 오른다. 외부 자유 문자열은 전부 `«…»` 안으로 넣었다(밖에 두면 남의 VOC 문구 하나가
+  브리프 조립을 죽인다) — 적대적 응답으로 방어를 시험에 고정했다.
+- [ ] **`taxonomy.voc_map` 시드 12행** (2026-09-04, E10 범위 밖) — §7.6 라벨 경로 4 의 입력이다. 정본이 예시 4개만
+  주고 그중 3개(`mechanical.fracture`·`interface.gap`·`interface.delamination`)가 택소노미 38코드 밖이라
+  코드 신설(마이너 승급 → 지표 계열 분리) vs 기존 코드 사상 결정이 선행한다.
+- [ ] **`evidence_profile.field`** (2026-09-04 발견) — §0.2.1 (5)가 `voc:` 인용 수를 이 키로 세라 하는데
+  §0.1 용어표·`risk_spec.v1.json` 어디에도 자리가 없다(5키뿐). 의장이 신고하는 6번째 키인지 코드 계산값인지,
+  `_profile_mismatch` 대조에 넣을지(넣으면 기존 의장 헤더가 전부 header_mismatch) 정본 결정 필요.
+- [ ] **정본 §4.4.3 등급 표에 세 행 추가** — §0.2.1 (5)는 `req:`·`voc:`→측정, `paper:`→문헌·규격 이라 하고
+  "§4.4.3 표가 이 세 행을 그대로 쓴다" 고 적지만 그 표에 세 행이 없다. 코드는 §0.2.1 을 따랐다(정본 문면 개정 필요).
 - **프런트 화면** — REST 는 있는데 사람이 쓸 입구가 없던 것들.
   - [x] `CurationQueuePage.tsx`(`#/curation`) (2026-09-02) — kind 6종의 열린 항목을 사람이 결정한다. 결정 어휘는 서버
     `CURATION_DECISIONS` 와 같은 집합이고 그 사실을 시험으로 고정했다. 값을 더 받아야 하는 결정(`x_tag_promote` 의 `axis`,

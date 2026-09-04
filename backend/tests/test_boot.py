@@ -11,6 +11,10 @@ from app.adapters import registry as adapters_registry
 from app.config import settings
 from app.mcp_server import mcp
 
+from app.risk_store import MIGRATIONS as _MIGRATIONS
+
+LATEST_SCHEMA = _MIGRATIONS[-1][0]
+
 
 def test_health_exact_three_keys(client, monkeypatch):
     """정상 상태의 health 는 3키 고정이다(plan §5.2.5 (6))."""
@@ -19,7 +23,7 @@ def test_health_exact_three_keys(client, monkeypatch):
     monkeypatch.setattr(main, "health_warnings", lambda: [])
     r = client.get("/api/health")
     assert r.status_code == 200
-    assert r.json() == {"ok": True, "app_version": settings.app_version, "schema_version": 1}
+    assert r.json() == {"ok": True, "app_version": settings.app_version, "schema_version": LATEST_SCHEMA}
 
 
 def test_health_reports_backup_unencrypted_without_an_age_key(client, monkeypatch):
