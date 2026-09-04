@@ -128,7 +128,7 @@ def new_uuid() -> str:
 # ---------------------------------------------------------------- 참조 문법(plan §0.2.1)
 # 스킴 이름 → 파싱 결과 dict 의 키(문서 순서). 파서는 대괄호 유무를 모두 받는다.
 REF_SCHEMES: tuple[str, ...] = (
-    "p", "e", "c", "d", "name", "tool", "card", "narr", "reg", "warn", "gate", "sig", "rule", "rpt", "inc",
+    "p", "e", "c", "d", "name", "tool", "card", "narr", "reg", "warn", "gate", "sig", "rule", "req", "rpt", "inc",
 )
 
 _HEX12 = re.compile(r"^[0-9a-f]{12}$")
@@ -210,6 +210,12 @@ def parse_ref(text: str) -> dict | None:
         return {"kind": "sig", "key": rest, "ref": f"sig:{rest}"}
     if scheme == "rule":
         return {"kind": "rule", "rule_id": rest, "ref": f"rule:{rest}"}
+    if scheme == "req":
+        # 요구 참조(§0.2.1) — 이름만 담는다. 마지막 줄이 catch-all `inc:` 라 분기를 빠뜨리면
+        # `req:` 가 조용히 사고 참조로 읽혀 등급이 곧장 `측정` 으로 튄다.
+        if not rest:
+            return None
+        return {"kind": "req", "name": rest, "ref": f"req:{rest}"}
     if scheme == "rpt":
         return {"kind": "rpt", "report_id": rest, "ref": f"rpt:{rest}"}
     return {"kind": "inc", "object_id": rest, "ref": f"inc:{rest}"}

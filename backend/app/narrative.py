@@ -219,6 +219,13 @@ class SpecContext:
     versions: dict = field(default_factory=dict)         # taxonomy_version·rule_version·ir_version·diff_version·planner_version
 
     # ------------------------------------------------ 조회
+    def requirement(self, name: str) -> dict | None:
+        """`req:<name>` 해석 — 이 과제의 rr_requirements 행. 좌석 계약(std)이 이 인용을 필수로 요구한다."""
+        rows = self._rows(
+            "SELECT id, name, kind, op, value_json, unit, status, source_ref FROM rr_requirements"
+            " WHERE project_id = ? AND name = ? LIMIT 1", (self.project_id, name))
+        return dict(rows[0]) if rows else None
+
     def _rows(self, sql: str, params: Sequence) -> list:
         if self.store is None:
             return []
@@ -503,6 +510,9 @@ def _resolve_one(ref: str, ctx: SpecContext, raised_by: Sequence[str]) -> dict:
     if kind == "rule":
         hit = ctx.rule(info["rule_id"])
         return {"ok": hit is not None, "reason": None if hit else "not_in_scope", "payload": hit, "verified": True}
+    if kind == "req":
+        row = ctx.requirement(info["name"])
+        return {"ok": row is not None, "reason": None if row else "not_in_scope", "payload": row, "verified": True}
     if kind == "warn":
         item = ctx.warning(info["code"], info.get("ref_to"))
         return {"ok": item is not None, "reason": None if item else "not_in_scope", "payload": item, "verified": True}
@@ -629,7 +639,7 @@ def evidence_grade_from_cites(resolved: dict, ctx: SpecContext | None = None) ->
         kinds.append((str(row.get("ref_type")), str(row.get("ref"))))
     test_runs = ctx.test_run_reports if ctx else frozenset()
     for ref_type, ref in kinds:
-        if ref_type == "inc":
+        if ref_type in ("inc", "req"):
             return "측정"
         if ref_type == "rpt" and ref.split(":", 1)[-1] in test_runs:
             return "측정"

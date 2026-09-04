@@ -406,3 +406,47 @@ def test_editing_requirements_keeps_ir_hash_and_only_moves_computed_at(store, mo
     assert second["computed_at"] > first["computed_at"]
     assert second["missing"]["req_absent"] is False
     assert "req.margin" in second["signals"]
+
+
+# ---------------------------------------------------------------- req: 참조(plan §0.2.1 (5))
+def test_a_requirement_reference_parses_without_falling_through_to_incident():
+    """`parse_ref` 의 마지막 줄이 catch-all `inc:` 다 — 분기를 빠뜨리면 req: 가 사고 참조로 읽혀 등급이 튄다."""
+    from app.common import REF_SCHEMES, parse_ref
+
+    assert "req" in REF_SCHEMES
+    assert parse_ref("req:thickness") == {"kind": "req", "name": "thickness", "ref": "req:thickness"}
+    assert parse_ref("req:") is None
+
+
+def test_a_registered_requirement_resolves_and_grades_as_measured(risk_store):
+    """좌석 계약(std·_common)이 `req:` 인용을 지시한다 — 등록된 요구는 §0.2.1 (5) 대로 `측정` 이다."""
+    from app import narrative
+
+    risk_store.execute(
+        "INSERT INTO rr_projects(id, owner_sub, code, name, created_at, updated_at)"
+        " VALUES ('P1','u@x','F7','F7',1,1)")
+    risk_store.execute(
+        "INSERT INTO rr_requirements(id, project_id, owner_sub, kind, name, op, value_json, unit, status,"
+        " created_at, updated_at) VALUES ('R1','P1','u@x','dim_limit','thickness','gte','0.3','mm',"
+        "'confirmed',1,1)")
+    ctx = narrative.SpecContext(project_id="P1", owner_sub="u@x", store=risk_store)
+
+    resolved = narrative.resolve_cites([{"ref": "req:thickness"}], ctx, claim="두께 여유", raised_by=["std"])
+
+    assert resolved["dangling"] == []
+    assert narrative.evidence_grade_from_cites(resolved, ctx) == "측정"
+
+
+def test_an_unregistered_requirement_stays_dangling_and_heuristic(risk_store):
+    """등록되지 않은 요구를 인용하면 dangling 이고 등급은 경험칙이다 — 지어낸 요구가 등급을 올리지 못한다."""
+    from app import narrative
+
+    risk_store.execute(
+        "INSERT INTO rr_projects(id, owner_sub, code, name, created_at, updated_at)"
+        " VALUES ('P1','u@x','F7','F7',1,1)")
+    ctx = narrative.SpecContext(project_id="P1", owner_sub="u@x", store=risk_store)
+
+    resolved = narrative.resolve_cites([{"ref": "req:nope"}], ctx, claim="근거 없음", raised_by=["std"])
+
+    assert resolved["dangling"] == ["req:nope"]
+    assert narrative.evidence_grade_from_cites(resolved, ctx) == "경험칙"

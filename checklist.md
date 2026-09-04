@@ -5,7 +5,7 @@
 코드 대조로 확인해 적은 작업 대장이며, 앞으로의 진행은 이 문서를 늘려 가며 한다. 정본 체크리스트는 단계 착수 전에 쓴 것이라 P1~P7 항목이
 전부 미체크로 남아 있다 — 여기서 실측한 완료 상태가 그보다 최신이다.
 
-마지막 실측 2026-09-04 — `pytest` **1121 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · `ruff` 통과 · `pnpm build` 통과.
+마지막 실측 2026-09-04 — `pytest` **1124 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · `ruff` 통과 · `pnpm build` 통과.
 
 ## 진척 요약
 
@@ -50,12 +50,18 @@
   MCP 폴백에는 이미 트리 요약 대조 가드가 있었는데(recon §2.2) REST 경로에만 빠져 있었다. `REST_PARTS_LIMIT=5000` 명시 +
   `summary.leaf_instances` 대조로 `degraded='parts_truncated'` + 사유 경고를 붙였다. **잘린 파트 목록은 오류가 아니라
   '없는 리스크' 를 만든다** — 그 파트의 계면·치수가 통째로 사라진 채 심사가 정상으로 보인다.
-- [ ] **E10 필드·VOC·문헌 근거가 스텁이다.**
-  `brief.py:688 _field_evidence_lines` 가 제품 연결 유무만 보고 늘 `[필드·문헌 근거 없음 …]` 한 줄을 낸다. 정본 §5.6.1 E10·§6.5.2 가
-  요구하는 것 — `get_top_issues`·`query_voc`·`search_scholar` 실호출을 러너가 하고 `rr_panel_calls(source_kind='brief')` 에 저장해 24 h
-  재사용 · `voc:`·`paper:` 참조와 등급 매핑(§0.2.1 (5)) · `GET /refs` 해석 · `taxonomy.v1.json` 의 `voc_map` 시드 12행(현재 `[]`) ·
-  `evidence_profile.field`. 지표 `field_evidence_rate`(`metrics.py:43`)는 이미 있으나 분자가 항상 0 이다.
-  → 검증: 제품 연결된 타깃에서 E10 ≤5줄·`voc:` 인용이 `GET /refs` 200·미등록 타깃은 결측 1줄, 항목 수 12·드롭 0
+- [x] **`req:` 참조를 1급으로** (2026-09-04, E10 매핑에서 딸려 나옴) — 좌석 계약이 `req:` 인용을 **지시**하는데
+  `REF_SCHEMES` 에 없어 전부 dangling·경험칙이었다(정본 §0.2.1 (5)는 `측정`). 파싱·해석(`rr_requirements`)·등급을
+  이었다. `parse_ref` 의 catch-all 이 `inc:` 라 스킴만 더하고 분기를 빠뜨리면 사고 참조로 읽혀 등급이 튄다 —
+  분기를 명시로 넣었다. `voc:`·`paper:` 는 해석 규칙이 정본 안에서 갈려 E10 본체와 함께 간다.
+- [ ] **E10 필드·VOC·문헌 근거 — 정본 결정 4건 대기** (2026-09-04 매핑 완료, 착수 보류)
+  정본 §5.6.1·§5.6.2 가 줄 형식·상한·호출·데드라인까지 정했는데도 넷이 비어 있다(context-notes D17).
+  ① E5 세 블록 산술이 성립하지 않는다 — 합 1500 이 CAPS 1500 에 안 들어가고 `clip_lines` 가 E10 을 먼저 지운다(실효 잔여 319자)
+  ② 정본 결측 문구 `[조회 실패: <tool>]` 가 정본 린터(L14 '실패')에 걸려 strict_lint 경로에서 E500
+  ③ `rr_panel_calls` 에 `source_kind` 열이 없고(CHECK 확장은 마이그레이션 규칙 위반) `panel_id` NOT NULL 인데
+     E10 은 타깃 단위 24h 공유이며 `record_panel_calls` 의 DELETE 가 그 행을 지운다
+  ④ 24h 재사용의 키·저장처·결정론 보장이 비어 있다
+  그 밖에 `voc:` 존재 검증 원장이 정본 세 곳에서 다르고, `voc_map` 시드 12행은 예시 4개 중 3개가 택소노미 밖이다.
 - **프런트 화면** — REST 는 있는데 사람이 쓸 입구가 없던 것들.
   - [x] `CurationQueuePage.tsx`(`#/curation`) (2026-09-02) — kind 6종의 열린 항목을 사람이 결정한다. 결정 어휘는 서버
     `CURATION_DECISIONS` 와 같은 집합이고 그 사실을 시험으로 고정했다. 값을 더 받아야 하는 결정(`x_tag_promote` 의 `axis`,

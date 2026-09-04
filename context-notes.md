@@ -421,3 +421,57 @@
   무효 픽스처 6종의 거부 사유가 '원래 잡으려던 결함' 에서 '새 필수 키 누락' 으로 바뀔 위험이 있어 별건으로 둔다.
 - **검증.** `pytest` **1121 passed, 2 skipped** · `ruff` All checks passed · 두 시나리오 실측
   (mcad 단독 → corpus 없음·DynaForge 0회 / mcad+dyna 무자격 → corpus 채움·kind `{mcad:8, context:4}`).
+
+### D16. E10 착수 전에 `req:` 참조를 1급으로 만들었다 — 좌석 계약이 지시하는 인용이 파서에 없었다 (2026-09-04)
+
+- **E10 매핑에서 딸려 나온 것.** 정본 §0.2.1 (5) 는 `req:`·`voc:` → **측정**, `paper:` → **문헌·규격** 이라고
+  세 행을 못 박는데 `common.REF_SCHEMES` 에 셋 다 없었다. 그중 `req:` 는 **이미 쓰이고 있었다** —
+  좌석 계약(`seat-contract.v1.json`)의 `_common` 이 "판정은 브리프 E0·E3 에 실린 요구(req:)의 한계와 여유를
+  기준으로 하라" 고 지시하고, `std` 좌석은 `req:<name>` 인용을 **필수**로 요구하며, `requirements.py` 가
+  E3 줄에 `req:` 를 싣는다. 그런데 `parse_ref('req:thickness')` 가 `None` 이라 그 인용은 전부 `dangling` 이 되고
+  등급이 **경험칙**으로 떨어졌다 — 정본이 `측정` 이라고 적은 자리에서.
+- **왜 나쁜가.** §6.5.2 가 적어 둔 그대로다 — "그것이 좌석에게 닿지 않으면 `evidence_grade` 분포가
+  `도구예측·경험칙` 으로 굳어 학습 루프가 사고 이력을 못 쓴다". 등급은 재제기 escalated 판정(§4.7.1)과
+  E5 정렬에도 들어가므로 조용히 전체 계보를 낮춘다.
+- **catch-all 함정.** `parse_ref` 의 마지막 줄이 `return {"kind": "inc", ...}` 다. 스킴만 `REF_SCHEMES` 에 더하고
+  분기를 빠뜨리면 `req:` 가 **사고 참조로 읽혀 등급이 곧장 `측정`** 으로 튄다(해석 없이). 그래서 분기를
+  catch-all 앞에 명시로 넣고 그 사실을 시험 주석에 남겼다.
+- **해석 원장은 명확했다** — `rr_requirements` 의 그 과제 행이다(`SpecContext.requirement`). `project_id` 는
+  `panel_context`(narrative.py:1369)가 이미 채우므로 패널 경로에서 끝까지 통한다. 등록되지 않은 요구를
+  인용하면 여전히 dangling·경험칙이다(지어낸 요구가 등급을 올리지 못한다).
+- **`voc:`·`paper:` 는 함께 넣지 않았다.** 등급은 해석이 성공해야 오르는데(`evidence_grade_from_cites` 가
+  `ok and grade_ok` 만 센다), 그 둘의 **해석 규칙이 정본 안에서 갈린다** — §0.2.1 은 `voc:` 를 "브리프 E10
+  블록에 실린 것만", §5.6.2 는 "`rr_panel_calls` 에 남아 해석된다", §5.6.4 는 추적 목록을 5종으로 못 박는다.
+  E10 본체 결정과 함께 가야 한다.
+- **검증.** `pytest` **1124 passed, 2 skipped**(시험 3건 추가) · `ruff` 통과.
+
+### D17. E10 은 정본이 정하지 않은 P0 결정 4개를 안고 있다 — 구현 보류 (2026-09-04)
+
+5축 매핑(읽기 전용)과 완결성 비판이 낸 결론이다. 정본 §5.6.1·§5.6.2 가 줄 형식·상한·호출·데드라인까지
+촘촘히 적어 두었는데도, 리포에 실제로 넣으려면 정본이 답하지 않은 것이 넷 남는다.
+
+1. **E5 세 블록 산술이 성립하지 않는다.** 정본은 "세 블록 합 1500" 이라 쓰지만 `CAPS['E5']=1500` 은
+   오버헤드(≈75)·프레이밍·머리글까지 포함하는 **라인 상한**이라 세 블록이 다 차면 실효 한도를 183자 넘긴다.
+   `build_brief` 의 `clip_lines` 가 뒤에서부터 버리므로 **맨 뒤 E10 이 먼저 조용히 죽는다**. 실효 잔여는 319자.
+   E5_FIELD_CAP 을 잔여치로 낮출지 · E5+ 700 을 줄일지 · 블록 순서를 뒤집을지 · CAPS 를 올리고 다른 항목에서
+   뺄지 — 정본은 넷 중 어느 것도 말하지 않는다.
+2. **정본의 결측 문구가 정본의 린터에 걸린다.** `[조회 실패: <tool>]` 의 '실패' 가 `render.JUDGEMENT_LEXICON`
+   L14 에 걸리고 `LINT_NEUTRAL_PATTERNS` 로도 마스킹되지 않아 `strict_lint=True` 인 러너 경로에서 브리프
+   조립이 E500 으로 죽는다. 문구를 바꾸면 정본 문면 개정이고, 린터에 예외를 더하면 판단어 검문에 구멍이 난다.
+3. **`rr_panel_calls` 에 `source_kind` 열이 없다.** 열 이름은 `source` 이고 CHECK 는 `sse|events|tool_inject` 다.
+   CHECK 확장은 리포·정본의 마이그레이션 규칙(ADD COLUMN·인덱스만)을 어기므로 **열 추가(v2 마이그레이션)가
+   유일한 길**이고, 그러면 `test_store.py` 의 `MIGRATIONS[-1][0] == 1` 이 깨진다. 더구나 `panel_id` 가 NOT NULL
+   인데 E10 결과는 **타깃 단위 24 h 공유**이고 브리프는 패널 편성 전에도 돌며,
+   `runner.record_panel_calls` 의 `DELETE ... WHERE panel_id = ?` 가 그 행을 지운다.
+4. **24 h 재사용의 키·저장처가 비어 있다.** 판정 키(target_key? project_id? (product_code, tool, args)?),
+   재사용 시 새 행인지 인용인지(`rr_panel_calls` 에는 `reused_from_call_id`·`args_hash` 열이 없다),
+   그리고 결정론 시험('두 번 조립하면 바이트 동일')을 이 캐시가 어떻게 지키는지.
+
+그 밖에 P1·P2 로 — `voc:` 존재 검증 원장이 §0.2.1/§5.6.2/§5.6.4 세 곳에서 서로 다르게 적혀 있고,
+`paper:` 의 record_id 와 DOI 구별 규칙이 없으며, `voc_map` 시드 12행은 정본이 예시 4개만 주는데
+그중 3개(`mechanical.fracture`·`interface.gap`·`interface.delamination`)가 택소노미 38코드 밖이고,
+`evidence_profile.field` 는 §0.2.1 (5) 가 요구하지만 §0.1 용어표·risk_spec 스키마 어디에도 자리가 없다.
+
+**하지 않은 이유.** 3번은 DB 마이그레이션(되돌리기 어려운 계약 변경), 2번은 정본 내부 모순, P2 는 통제
+어휘 8행을 코드가 지어내야 하는 일이다. 어느 하나라도 틀리게 고르면 작업이 통째로 무의미해지므로
+결정 전에는 착수하지 않는다(CLAUDE.md §1).
