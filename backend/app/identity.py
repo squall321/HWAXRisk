@@ -1,7 +1,9 @@
-# 인바운드 신원 해석 — Authorization Bearer(우선) 또는 쿠키 heax_access_token 을 heax GET /api/v1/auth/me 로 되묻고 sha256(token) TTL 60 s 캐시(plan §8.2.8) + 사용자 포털 PAT 자격 Fernet 암복호(plan §8.2.7)
+# 인바운드 신원 해석 — Authorization Bearer(우선) 또는 쿠키 heax_access_token 을 heax GET /api/v1/auth/me 로 되묻고 sha256(token) TTL 60 s 캐시(plan §8.2.8) + 게이트웨이 SSO 단언(rrsso_) HMAC 검증 + 사용자 포털 PAT 자격 Fernet 암복호(plan §8.2.7)
 from __future__ import annotations
 
+import base64
 import hashlib
+import hmac
 import json
 import logging
 import threading
@@ -29,7 +31,7 @@ HEAX_TIMEOUT_S = 2.0
 
 @dataclass(frozen=True)
 class Identity:
-    """호출자 신원. source 는 토큰 출처(bearer | cookie | none), anonymous 는 토큰이 없거나 heax 가 거부한 경우."""
+    """호출자 신원. source 는 토큰 출처(bearer | cookie | sso | none), anonymous 는 토큰이 없거나 heax 가 거부한 경우."""
 
     email: str | None
     display_name: str | None
@@ -122,11 +124,70 @@ def _evict_locked() -> None:
         _cache.pop(key, None)
 
 
+# ---------------------------------------------------------------- 게이트웨이 SSO 신원 단언(rrsso_)
+# MCP 게이트웨이는 호출자의 heax 토큰을 갖고 있지 않다 — 서비스 계정 하나로 붙기 때문에 위임이 없으면
+# 이 앱 눈에는 모든 MCP 호출이 '게이트웨이'고, 사용자 소유 과제가 0건으로 보인다(2026-09-07 실측).
+# 그래서 POST /api/auth/sso 가 공유 시크릿을 받고 **무상태 HMAC 단언**을 내준다. 저장소를 새로 만들지
+# 않고, 신뢰의 근거는 헤더 위치가 아니라 서명이다 — 위 §의 'X-Heax-User-* 를 안 읽는다' 원칙과 어긋나지 않는다.
+SSO_PREFIX = "rrsso_"
+_SSO_MAX_TTL_S = 3600
+
+
+def _b64u(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _unb64u(text: str) -> bytes:
+    return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
+
+
+def mint_sso_assertion(email: str, *, ttl_s: int, secret: str, now: float | None = None) -> str:
+    """`rrsso_<payload>.<서명>` — 이메일과 만료만 담아 HMAC-SHA256 으로 봉인한다(저장하지 않는다)."""
+    ttl = max(60, min(int(ttl_s), _SSO_MAX_TTL_S))
+    exp = int((time.time() if now is None else now) + ttl)
+    body = _b64u(json.dumps({"e": email, "x": exp}, separators=(",", ":")).encode("utf-8"))
+    sig = hmac.new(secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest()
+    return f"{SSO_PREFIX}{body}.{_b64u(sig)}"
+
+
+def _verify_sso_assertion(token: str) -> str | None:
+    """단언이 이 앱의 시크릿으로 서명됐고 아직 안 만료됐으면 이메일, 아니면 None(사유는 남기지 않는다)."""
+    secret = config.heax_gateway_secret()
+    if not secret:
+        return None
+    body, _, sig_b64 = token[len(SSO_PREFIX):].partition(".")
+    if not body or not sig_b64:
+        return None
+    want = hmac.new(secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest()
+    try:
+        got = _unb64u(sig_b64)
+    except (ValueError, TypeError):
+        return None
+    if not hmac.compare_digest(want, got):
+        return None
+    try:
+        claims = json.loads(_unb64u(body))
+    except (ValueError, TypeError):
+        return None
+    email = str(claims.get("e") or "").strip().lower()
+    if not isinstance(claims.get("x"), int) or claims["x"] <= time.time() or "@" not in email:
+        return None
+    return email
+
+
 def current(request: Request) -> Identity:
     """FastAPI Depends 용 — Bearer > 쿠키 순으로 토큰을 잡아 heax 에 되묻는다. 토큰 없음·401·불통은 anonymous."""
     token, source = _token_from(request)
     if token is None:
         return ANONYMOUS
+    if token.startswith(SSO_PREFIX):
+        email = _verify_sso_assertion(token)
+        if not email:
+            return ANONYMOUS
+        # 역할·부서는 단언에 없다 — 관리자 권한이 필요한 경로는 SSO 호출자에게 닫힌다(의도).
+        # token 도 싣지 않는다. 소스 앱(StepForge 등) REST 는 heax 토큰을 원하므로 이 값은 거기서 쓸모가 없다.
+        return Identity(email=email, display_name=None, role=None, organization=None,
+                        anonymous=False, source="sso", token=None)
     user = _lookup(token)
     if not user or not user.get("email"):
         return ANONYMOUS

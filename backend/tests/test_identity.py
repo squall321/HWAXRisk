@@ -101,3 +101,64 @@ def test_me_endpoint_uses_identity(client, heax):
     body = client.get("/api/me", headers={"Authorization": f"Bearer {FAKE_TOKEN}",
                                           "X-Heax-User-Email": "mallory@example.com"}).json()
     assert body["email"] == "alice@example.com" and body["source"] == "bearer"
+
+
+# ---------------------------------------------------------------- 게이트웨이 SSO 위임(rrsso_)
+SSO_SECRET = "test-gateway-secret-0123456789"
+
+
+@pytest.fixture
+def sso(monkeypatch):
+    """이 앱의 게이트웨이 시크릿을 고정한다(secrets.env·env 를 건드리지 않는다)."""
+    from app import config
+
+    monkeypatch.setattr(config, "heax_gateway_secret", lambda *a, **k: SSO_SECRET)
+    return SSO_SECRET
+
+
+def test_sso_assertion_is_accepted_without_heax(sso, monkeypatch):
+    """단언은 heax 되묻기 없이 통과한다 — 게이트웨이가 사용자 토큰을 못 가진 상황이 이 기능의 이유다."""
+    def boom(req):
+        raise AssertionError("SSO 경로가 heax 를 불렀다")
+
+    monkeypatch.setattr(identity, "_transport", httpx.MockTransport(boom))
+    token = identity.mint_sso_assertion("Bob@Example.com", ttl_s=900, secret=SSO_SECRET)
+    ident = identity.current(_request({"Authorization": f"Bearer {token}"}))
+    assert ident.email == "bob@example.com" and ident.anonymous is False and ident.source == "sso"
+    # 단언은 소스 앱 REST 에 쓸모가 없다 — 실어 보내지 않는다.
+    assert ident.token is None and ident.role is None
+
+
+def test_sso_assertion_rejected_when_tampered_or_expired(sso):
+    good = identity.mint_sso_assertion("bob@example.com", ttl_s=900, secret=SSO_SECRET)
+    body, _, sig = good[len(identity.SSO_PREFIX):].partition(".")
+    forged = identity.mint_sso_assertion("mallory@example.com", ttl_s=900, secret="other-secret")
+    swapped = f"{identity.SSO_PREFIX}{forged[len(identity.SSO_PREFIX):].partition('.')[0]}.{sig}"
+    expired = identity.mint_sso_assertion("bob@example.com", ttl_s=900, secret=SSO_SECRET,
+                                          now=__import__("time").time() - 4000)
+    for bad in (forged, swapped, expired, f"{identity.SSO_PREFIX}{body}", "rrsso_", f"{identity.SSO_PREFIX}x.y"):
+        assert identity.current(_request({"Authorization": f"Bearer {bad}"})) == identity.ANONYMOUS
+
+
+def test_sso_endpoint_mints_only_with_secret(client, sso):
+    r = client.post("/api/auth/sso", headers={"X-Heax-Gateway-Secret": "wrong",
+                                              "X-Heax-User-Email": "bob@example.com"})
+    assert r.status_code == 401
+    r = client.post("/api/auth/sso", headers={"X-Heax-Gateway-Secret": SSO_SECRET,
+                                              "X-Heax-User-Email": "not-an-email"})
+    assert r.status_code == 401
+    r = client.post("/api/auth/sso", headers={"X-Heax-Gateway-Secret": SSO_SECRET,
+                                              "X-Heax-User-Email": "Bob@Example.com"})
+    assert r.status_code == 200
+    token = r.json()["access_token"]
+    assert token.startswith(identity.SSO_PREFIX)
+    assert client.get("/api/me", headers={"Authorization": f"Bearer {token}"}).json()["email"] == "bob@example.com"
+
+
+def test_sso_endpoint_is_404_without_secret(client, monkeypatch):
+    """시크릿 미설정 박스에서는 존재 자체를 알리지 않는다."""
+    from app import config
+
+    monkeypatch.setattr(config, "heax_gateway_secret", lambda *a, **k: "")
+    r = client.post("/api/auth/sso", headers={"X-Heax-Gateway-Secret": "x", "X-Heax-User-Email": "b@e.com"})
+    assert r.status_code == 404

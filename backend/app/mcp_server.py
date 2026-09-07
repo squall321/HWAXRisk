@@ -1,4 +1,4 @@
-# hwax-risk MCP 서버 — 도구 7종(plan §0.5.2 시그니처)은 REST 와 같은 함수를 부르는 원장 접점이다(§6.11, LLM 을 부르지 않는다)
+# hwax-risk MCP 서버 — 도구 14종(발견 7 + 원장 7)은 REST 와 같은 함수를 부르는 접점이다(§6.11, LLM 을 부르지 않는다)
 from __future__ import annotations
 
 import logging

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import gzip
+import hmac
 import json
 import secrets
 import sqlite3
@@ -121,6 +122,27 @@ def _verify_with_portal(pat: str) -> None:
         raise AppError("pat_invalid", f"포털 검증 호출 실패({type(exc).__name__}).", 422) from exc
     if r.status_code != 200:
         raise AppError("pat_invalid", f"포털이 PAT 를 거부했습니다(HTTP {r.status_code}).", 422)
+
+
+@router.post("/auth/sso")
+def post_auth_sso(request: Request) -> dict:
+    """게이트웨이 전용 신원 위임 — 공유 시크릿을 받고 그 이메일의 단기 HMAC 단언을 내준다(§8.2.8).
+
+    시크릿 미설정이면 404 다 — 열려 있지 않다는 사실 자체를 굳이 알리지 않는다(KooRemapper 와 같은 규약).
+    """
+    secret = config.heax_gateway_secret()
+    if not secret:
+        raise AppError("not_found", "SSO 위임이 설정돼 있지 않습니다.", 404)
+    got = request.headers.get("x-heax-gateway-secret", "")
+    if not hmac.compare_digest(got, secret):
+        raise AppError("unauthorized", "게이트웨이 시크릿이 맞지 않습니다.", 401)
+    email = (request.headers.get("x-heax-user-email") or "").strip().lower()
+    if "@" not in email:
+        raise AppError("bad_email", "X-Heax-User-Email 이 이메일 형식이 아닙니다.", 401)
+    token = identity.mint_sso_assertion(email, ttl_s=config.settings.sso_ttl_s, secret=secret)
+    # 단언은 저장하지 않으므로 회수도 없다 — 게이트웨이 캐시가 이 수명보다 길면 만료 단언으로 부르게 되니
+    # expires_in 을 함께 준다(게이트웨이는 실패 시 1회 재발급하므로 어긋나도 자가 복구된다).
+    return {"access_token": token, "token_type": "bearer", "expires_in": config.settings.sso_ttl_s}
 
 
 @router.get("/me")

@@ -31,7 +31,10 @@ SECRET_KEYS: tuple[str, ...] = (
     "HWAXRISK_AIDH_API_KEY", "HWAXRISK_CRED_KEY",
 )
 # 있으면 읽지만 없어도 기동을 막지 않는 키(plan §5.2.5 (3a) ③ — 없으면 health warnings 에 backup_unencrypted).
-OPTIONAL_SECRET_KEYS: tuple[str, ...] = ("HWAXRISK_BACKUP_KEY",)
+# HEAX_GATEWAY_SECRET: MCP 게이트웨이와만 나눠 갖는 이 앱 전용 값. 있어야 /auth/sso 가 열린다(없으면 404).
+#   HEAXHub 의 gateway_shared_secret 을 재사용하지 않는다 — 그 값은 portal_auth 라우트에서 Caddy 가
+#   모든 요청에 주입하므로, 같은 값을 쓰면 로그인한 아무나 남의 이메일로 단언을 발급받을 수 있다.
+OPTIONAL_SECRET_KEYS: tuple[str, ...] = ("HWAXRISK_BACKUP_KEY", "HWAXRISK_HEAX_GATEWAY_SECRET")
 
 # 로스터 15 도메인(plan §0.6 실측 순서).
 _DEFAULT_ROSTER_DOMAINS = "xd,sim,cam,rel,soc,disp,mech,pcb,rf,passive,pwr,sh,mem,std,material"
@@ -69,6 +72,8 @@ class Settings:
     portal_base: str
     heax_api: str
     heax_base: str
+    # SSO 로 발급하는 신원 단언의 수명(초). 짧게 둔다 — 저장하지 않는 무상태 토큰이라 회수가 없다.
+    sso_ttl_s: int
     gateway_mcp: str
     aidh_base: str
     agent_url: str
@@ -135,6 +140,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         portal_base=env.get("HWAXRISK_PORTAL_BASE", "http://127.0.0.1:5283"),
         heax_api=env.get("HWAXRISK_HEAX_API", "http://127.0.0.1:4040"),
         heax_base=env.get("HWAXRISK_HEAX_BASE", "http://127.0.0.1:4180"),
+        sso_ttl_s=int(env.get("HWAXRISK_SSO_TTL_S", "900")),
         gateway_mcp=env.get("HWAXRISK_GATEWAY_MCP", "http://127.0.0.1:9110/mcp"),
         aidh_base=env.get("HWAXRISK_AIDH_BASE", "http://127.0.0.1:8001"),
         agent_url=env.get("HWAXRISK_AGENT_URL", ""),
@@ -197,6 +203,14 @@ def backup_key(data_dir: Path | None = None, env: Mapping[str, str] | None = Non
     root = settings.data_dir if data_dir is None else data_dir
     environ = os.environ if env is None else env
     return (load_secrets(root).get("HWAXRISK_BACKUP_KEY") or environ.get("HWAXRISK_BACKUP_KEY") or "").strip()
+
+
+def heax_gateway_secret(data_dir: Path | None = None, env: Mapping[str, str] | None = None) -> str:
+    """게이트웨이 SSO 공유 시크릿 — secrets.env 우선, 없으면 환경변수. 없으면 빈 문자열(= /auth/sso 404)."""
+    root = settings.data_dir if data_dir is None else data_dir
+    environ = os.environ if env is None else env
+    return (load_secrets(root).get("HWAXRISK_HEAX_GATEWAY_SECRET")
+            or environ.get("HWAXRISK_HEAX_GATEWAY_SECRET") or "").strip()
 
 
 def cred_key_path(data_dir: Path | None = None) -> Path:
