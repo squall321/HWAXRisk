@@ -1,4 +1,4 @@
-# FastMCP 도구 7종(plan §0.5.2) 이름·시그니처 고정 · 없는 id 는 예외 대신 오류 dict · tier A 는 웹 전용 + 이식된 exact Route('/mcp')(initialize·307 아님·HTTP tools/list 7종)
+# FastMCP 도구 이름·시그니처 고정 · 없는 id 는 예외 대신 오류 dict · tier A 는 웹 전용 + 이식된 exact Route('/mcp')(initialize·307 아님)
 from __future__ import annotations
 
 import asyncio
@@ -9,7 +9,16 @@ import pytest
 
 import app.mcp_server as srv
 
+# 발견·조회 7종(2026-09-07 추가)이 먼저 온다 — MCP 클라이언트는 id 를 모른 채 들어오므로
+# risk_list_projects 가 실질적 진입점이다. 그 뒤가 원장 접점 7종(plan §0.5.2).
 TOOL_NAMES = [
+    "risk_list_projects",
+    "risk_get_coverage",
+    "risk_list_panels",
+    "risk_get_panel_transcript",
+    "risk_taxonomy",
+    "risk_get_precedents",
+    "risk_similar_projects",
     "risk_get_snapshot",
     "risk_get_diff",
     "risk_get_registry",
@@ -21,6 +30,14 @@ TOOL_NAMES = [
 # 도구별 대표 인자와, 빈 원장에서 기대하는 오류 코드(없으면 None = 정상 응답).
 # 읽기 4종은 범위 밖 id 의 존재를 숨겨 not_visible 이고, 브리프는 caller 가 아니라 brief_token 대조다(§8.2.5).
 CALLS = [
+    # 발견·조회 — 빈 원장에서 목록은 정상 응답(빈 배열), 단일 id 는 존재를 숨긴다.
+    ("risk_list_projects", {}, None),
+    ("risk_taxonomy", {}, None),
+    ("risk_get_coverage", {"target_key": "snap:s1"}, "not_visible"),
+    ("risk_list_panels", {"target_key": "snap:s1"}, "not_visible"),
+    ("risk_get_panel_transcript", {"panel_id": "p1"}, "not_visible"),
+    ("risk_get_precedents", {"diff_id": "d1"}, "not_visible"),
+    ("risk_similar_projects", {"project_id": "p1"}, "not_visible"),
     ("risk_get_snapshot", {"snapshot_id": "s1", "part": "ir"}, "not_visible"),
     ("risk_get_diff", {"diff_id": "d1", "part": "summary"}, "not_visible"),
     ("risk_get_registry", {"target_key": "snap:s1"}, "not_visible"),
@@ -48,7 +65,7 @@ def _call_via_mcp(name: str, args: dict | None = None) -> dict:
     return json.loads(res[0].text)
 
 
-def test_seven_tools_registered_in_order():
+def test_tools_registered_in_order():
     tools = asyncio.run(srv.mcp.list_tools())
     assert [t.name for t in tools] == TOOL_NAMES
     for t in tools:
@@ -72,8 +89,15 @@ def test_signatures_follow_plan():
     assert props("risk_get_brief")["tier"]["default"] == "B"
     assert set(tools["risk_get_brief"].inputSchema["required"]) == {"target_key", "brief_token"}
     for name in ("risk_get_snapshot", "risk_get_diff", "risk_get_registry", "risk_claims_for_ref",
-                 "risk_get_brief"):
+                 "risk_get_brief", "risk_list_projects", "risk_get_coverage", "risk_list_panels",
+                 "risk_get_panel_transcript", "risk_taxonomy", "risk_get_precedents",
+                 "risk_similar_projects"):
         assert "actor" not in set(props(name))
+    # 발견·조회는 인자가 최소여야 한다 — id 를 모르는 클라이언트가 첫 호출로 쓴다.
+    assert set(props("risk_list_projects")) == set()
+    assert set(props("risk_taxonomy")) == set()
+    assert set(props("risk_get_coverage")) == {"target_key", "with_seats", "domain"}
+    assert set(props("risk_similar_projects")) == {"project_id", "k"}
     submit = props("risk_submit_panel_result")
     assert set(submit) == {"panel_id", "engine", "decision_text", "turns", "report_id", "actor", "model"}
     assert submit["model"]["default"] is None
@@ -125,10 +149,14 @@ def test_read_tools_hide_projects_outside_the_caller_scope(risk_store, monkeypat
     assert srv.risk_get_snapshot("s9", "ir")["error"] == "not_visible"
     assert srv.risk_get_registry("snap:s9")["error"] == "not_visible"
     assert srv.risk_claims_for_ref("e:0123456789ab")["claims"] == []
+    # 새 조회 도구도 같은 문지기를 탄다 — 목록은 빈 배열로, 단일 id 는 not_visible 로 숨긴다.
+    assert srv.risk_list_projects()["projects"] == []
+    assert srv.risk_get_coverage("snap:s9")["error"] == "not_visible"
+    assert srv.risk_list_panels("snap:s9")["error"] == "not_visible"
     # 존재를 숨긴 만큼 지표가 센다(§8.2.5 ③).
     row = risk_store.query_one(
         "SELECT value FROM rr_metrics WHERE dimension = 'global' AND metric = 'mcp_not_visible'")
-    assert row is not None and row["value"] == 2
+    assert row is not None and row["value"] == 4
     # 편성 부작용도 없다 — planned 패널이 만들어지지 않는다.
     assert risk_store.query("SELECT id FROM rr_panels") == []
 

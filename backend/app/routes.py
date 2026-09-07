@@ -350,6 +350,15 @@ def mcp_scope_owner(kind: str, key: str, caller: dict) -> str:
         row = store.query_one(
             "SELECT owner_sub, base_project_id, target_project_id FROM rr_diffs WHERE id = ?", (key,))
         projects = [row["base_project_id"], row["target_project_id"]] if row is not None else []
+    elif kind == "project":
+        row = store.query_one("SELECT owner_sub, id AS project_id FROM rr_projects WHERE id = ?", (key,))
+        projects = [row["project_id"]] if row is not None else []
+    elif kind == "panel":
+        # 패널은 과제를 직접 안 들고 타깃을 거친다 — 타깃의 과제로 범위를 본다.
+        row = store.query_one(
+            "SELECT p.owner_sub AS owner_sub, t.project_id AS project_id FROM rr_panels p"
+            " JOIN rr_targets t ON t.target_key = p.target_key WHERE p.id = ?", (key,))
+        projects = [row["project_id"]] if row is not None else []
     else:
         row = store.query_one("SELECT owner_sub, project_id FROM rr_targets WHERE target_key = ?", (key,))
         projects = [row["project_id"]] if row is not None else []
@@ -420,25 +429,47 @@ def _project_sources(project_id: str) -> list[dict]:
 @router.get("/projects")
 def list_projects(ident: identity.Identity = Depends(identity.current)) -> dict:
     """과제 카드 그리드의 원천 — 소스 상태·최근 스냅샷·열린 타깃·커버리지·level."""
-    owner_sub = _require_user(ident)
+    return projects_payload(owner_sub=_require_user(ident))
+
+
+def projects_payload(*, owner_sub: str | None = None, project_ids: list[str] | None = None) -> dict:
+    """`GET /projects` 본체 — MCP `risk_list_projects` 와 같은 함수.
+
+    웹은 `owner_sub` 로 자기 과제만 본다. MCP 는 단일 소유자가 아니라 **볼 수 있는 과제 집합**
+    (`visible_projects`)이 범위라 `project_ids` 로 받는다 — 그래서 두 인자가 따로 있다.
+    id 를 알아낼 길이 이것뿐이라(나머지 도구가 전부 id 를 인자로 받는다) 목록이 곧 진입점이다."""
     store = get_store()
+    if project_ids is not None:
+        if not project_ids:
+            return {"projects": []}
+        marks = ",".join("?" for _ in project_ids)
+        rows = store.query(
+            f"SELECT id, code, name, stage, owner_sub, created_at FROM rr_projects WHERE id IN ({marks})"
+            " ORDER BY created_at DESC, id", tuple(project_ids))
+    else:
+        rows = store.query(
+            "SELECT id, code, name, stage, owner_sub, created_at FROM rr_projects WHERE owner_sub = ?"
+            " ORDER BY created_at DESC, id", (owner_sub,))
     projects = []
-    for row in store.query(
-        "SELECT id, code, name, stage, created_at FROM rr_projects WHERE owner_sub = ? ORDER BY created_at DESC, id",
-        (owner_sub,),
-    ):
+    for row in rows:
+        _own = row["owner_sub"]
         last = store.query_one(
             "SELECT MAX(created_at) AS ts FROM rr_snapshots WHERE project_id = ?", (row["id"],))
         targets = [dict(t) for t in store.query(
             "SELECT target_key, level, created_at FROM rr_targets WHERE project_id = ? AND owner_sub = ?"
-            " ORDER BY created_at DESC", (row["id"], owner_sub))]
+            " ORDER BY created_at DESC", (row["id"], _own))]
         coverage_pct = None
         if targets:
             summary = planner.coverage_summary(store, targets[0]["target_key"])
             if summary["roster_size"]:
                 coverage_pct = round(100.0 * summary["terminal_n"] / summary["roster_size"], 1)
+        _snap = store.query_one(
+            "SELECT id FROM rr_snapshots WHERE project_id = ? ORDER BY created_at DESC, id LIMIT 1",
+            (row["id"],))
         projects.append({
             "id": row["id"], "code": row["code"], "name": row["name"], "stage": row["stage"],
+            "targets": [t["target_key"] for t in targets],
+            "last_snapshot_id": _snap["id"] if _snap else None,
             "sources": [{"kind": s["kind"], "app_key": s["app_key"], "status": s["status"]}
                         for s in _project_sources(row["id"])],
             "last_snapshot_at": last["ts"] if last else None,
@@ -1354,7 +1385,7 @@ def put_iface_ledger(project_id: str, body: list[LedgerItem],
 
 
 # ================================================================ 스냅샷 조회
-SNAPSHOT_PARTS = ("ir", "state", "nodes", "edges", "calls")
+SNAPSHOT_PARTS = ("ir", "state", "nodes", "edges", "calls", "rule_hits")
 
 
 def snapshot_part(snapshot_id: str, part: str, *, owner_sub: str | None = None,
@@ -1374,6 +1405,15 @@ def snapshot_part(snapshot_id: str, part: str, *, owner_sub: str | None = None,
     if part == "calls":
         return {"snapshot_id": snapshot_id,
                 "calls": ir_builder.load_calls(store, snapshot_id, include_response=False)}
+    if part == "rule_hits":
+        # 코드가 기계적으로 잡아낸 상태 위반 — 리스크 후보의 1차 목록이다. 별 라우트로만 있어
+        # MCP 에서 안 보였다(도구를 늘리지 않고 part 한 칸으로 연다).
+        row = store.query_one(
+            "SELECT rule_hits_json, rule_version FROM rr_states WHERE snapshot_id = ?", (snapshot_id,))
+        if row is None:
+            raise AppError("E404", f"rr_state 가 없습니다 — {snapshot_id}.", 404)
+        return {"snapshot_id": snapshot_id, "rule_version": row["rule_version"],
+                "rule_hits": _loads(row["rule_hits_json"], [])}
     if part == "nodes":
         sql = ("SELECT nid, kind, source_kind, name, name_norm, ckey, dn, geom_fp, asm_key, material_norm,"
                " size_sorted_json, volume FROM rr_ir_nodes WHERE snapshot_id = ? ORDER BY nid")
@@ -1829,7 +1869,14 @@ def put_coverage(target_key: str, agent_key: str, body: CoverageBody,
 @router.get("/targets/{target_key}/coverage")
 def get_coverage(target_key: str, ident: identity.Identity = Depends(identity.current)) -> dict:
     """진행판 — 도메인별 상태·미착석 수·완결 레벨(레벨 계산은 registry.close_level)."""
-    owner_sub = _require_user(ident)
+    return coverage_payload(target_key, owner_sub=_require_user(ident))
+
+
+def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
+    """`GET /targets/{key}/coverage` 본체 — MCP `risk_get_coverage` 와 같은 함수.
+
+    좌석 행까지 함께 준다(웹은 카운트만 5초 폴링하고 드릴다운을 따로 부르지만, MCP 는 왕복이
+    비싸고 '더 돌려야 하나' 판단에 미착석 좌석이 바로 필요하다)."""
     _target_row(target_key, owner_sub)
     store = get_store()
     summary = planner.coverage_summary(store, target_key)
@@ -1838,6 +1885,7 @@ def get_coverage(target_key: str, ident: identity.Identity = Depends(identity.cu
         "SELECT id, tier, state, pause_reason, panels_done, panels_total, error FROM rr_jobs"
         " WHERE target_key = ? ORDER BY created_at DESC LIMIT 1", (target_key,))
     return {
+        "target_key": target_key,
         "job": dict(job) if job is not None else None,
         "roster_size": summary["roster_size"],
         "by_domain": summary["by_domain"],
@@ -1847,6 +1895,60 @@ def get_coverage(target_key: str, ident: identity.Identity = Depends(identity.cu
         "level": level["level"],
         "close_level": level["close_level"],
     }
+
+
+def seats_payload(target_key: str, domain: str | None = None, *, owner_sub: str | None = None) -> dict:
+    """`GET /targets/{key}/seats` 본체 — MCP `risk_get_coverage(with_seats=True)` 가 같이 쓴다."""
+    _target_row(target_key, owner_sub)
+    sql = ("SELECT agent_key, domain, tier, origin, status, reason, panel_id, opinion_id, model,"
+           " status_source, decided_by, decided_at, started_at, finished_at"
+           " FROM rr_coverage WHERE target_key = ?")
+    params: list[Any] = [target_key]
+    if domain:
+        sql += " AND domain = ?"
+        params.append(domain)
+    rows = [dict(r) for r in get_store().query(sql + " ORDER BY domain, agent_key", params)]
+    return {"target_key": target_key, "domain": domain, "seats": rows}
+
+
+def panels_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
+    """`GET /targets/{key}/panels` 본체 — MCP `risk_list_panels` 와 같은 함수."""
+    _target_row(target_key, owner_sub)
+    rows = get_store().query(
+        "SELECT id, panel_no, tier, seats_json, modifiers_json, rounds, engine, tool_mode, conv_id, report_id,"
+        " status, risk_spec_parsed, quality_json, model_json, llm_calls, retry, error, started_at, ended_at"
+        " FROM rr_panels WHERE target_key = ? ORDER BY panel_no", (target_key,))
+    panels = []
+    for row in rows:
+        item = dict(row)
+        item["seats"] = _loads(item.pop("seats_json"), [])
+        item["modifiers"] = _loads(item.pop("modifiers_json"), [])
+        item["quality"] = _loads(item.pop("quality_json"), {})
+        item["model"] = _loads(item.pop("model_json"), {})
+        panels.append(item)
+    return {"target_key": target_key, "panels": panels}
+
+
+def panel_transcript_payload(panel_id: str, *, owner_sub: str | None = None) -> dict:
+    """`GET /panels/{id}/transcript` 본체 — MCP `risk_get_panel_transcript` 와 같은 함수."""
+    panel = _owned_row(
+        "SELECT id, owner_sub, decision_text, risk_spec_json FROM rr_panels WHERE id = ?",
+        (panel_id,), owner_sub, f"패널 {panel_id}")
+    turns: list[dict] = []
+    for row in get_store().query(
+            "SELECT agent_key, opinion_json FROM rr_seat_opinions WHERE panel_id = ? ORDER BY agent_key",
+            (panel_id,)):
+        for turn in _loads(row["opinion_json"], {}).get("turns") or ():
+            if not isinstance(turn, dict):
+                continue
+            turns.append({"seat": row["agent_key"], "round": int(turn.get("round") or 0),
+                          "say_excerpt": str(turn.get("say_excerpt") or ""),
+                          "position": turn.get("position") or None,
+                          "stance": turn.get("stance") or None})
+    turns.sort(key=lambda t: (t["round"], t["seat"]))
+    spec = _loads(panel["risk_spec_json"], {})
+    return {"panel_id": panel_id, "decision_text": panel["decision_text"] or "",
+            "turns": turns, "risk_spec": spec or None}
 
 
 def registry_payload(target_key: str, *, owner_sub: str | None = None, status: str | None = None,
@@ -1886,37 +1988,13 @@ def get_seats(target_key: str, domain: str | None = None,
 
     `GET coverage` 는 도메인×상태 카운트만 준다(5 s 폴링이라 가볍게 둔다). 여기서만 행을 편다.
     """
-    owner_sub = _require_user(ident)
-    _target_row(target_key, owner_sub)
-    sql = ("SELECT agent_key, domain, tier, origin, status, reason, panel_id, opinion_id, model,"
-           " status_source, decided_by, decided_at, started_at, finished_at"
-           " FROM rr_coverage WHERE target_key = ?")
-    params: list[Any] = [target_key]
-    if domain:
-        sql += " AND domain = ?"
-        params.append(domain)
-    rows = [dict(r) for r in get_store().query(sql + " ORDER BY domain, agent_key", params)]
-    return {"target_key": target_key, "domain": domain, "seats": rows}
+    return seats_payload(target_key, domain, owner_sub=_require_user(ident))
 
 
 @router.get("/targets/{target_key}/panels")
 def get_panels(target_key: str, ident: identity.Identity = Depends(identity.current)) -> dict:
     """패널 목록(conv_id · report_id · quality_json · model_json)."""
-    owner_sub = _require_user(ident)
-    _target_row(target_key, owner_sub)
-    rows = get_store().query(
-        "SELECT id, panel_no, tier, seats_json, modifiers_json, rounds, engine, tool_mode, conv_id, report_id,"
-        " status, risk_spec_parsed, quality_json, model_json, llm_calls, retry, error, started_at, ended_at"
-        " FROM rr_panels WHERE target_key = ? ORDER BY panel_no", (target_key,))
-    panels = []
-    for row in rows:
-        item = dict(row)
-        item["seats"] = _loads(item.pop("seats_json"), [])
-        item["modifiers"] = _loads(item.pop("modifiers_json"), [])
-        item["quality"] = _loads(item.pop("quality_json"), {})
-        item["model"] = _loads(item.pop("model_json"), {})
-        panels.append(item)
-    return {"target_key": target_key, "panels": panels}
+    return panels_payload(target_key, owner_sub=_require_user(ident))
 
 
 @router.get("/panels/{panel_id}/transcript")
@@ -1926,27 +2004,7 @@ def get_panel_transcript(panel_id: str, ident: identity.Identity = Depends(ident
     포털 conv_store 를 읽지 않는다. 발언은 `rr_seat_opinions.opinion_json.turns` 를 좌석마다 펴서
     라운드 순으로 합친 것이고, 결정문·risk_spec 은 `rr_panels` 원문 그대로다.
     """
-    owner_sub = _require_user(ident)
-    panel = _owned_row(
-        "SELECT id, owner_sub, decision_text, risk_spec_json FROM rr_panels WHERE id = ?",
-        (panel_id,), owner_sub, f"패널 {panel_id}")
-    turns: list[dict] = []
-    for row in get_store().query(
-            "SELECT agent_key, opinion_json FROM rr_seat_opinions WHERE panel_id = ? ORDER BY agent_key",
-            (panel_id,)):
-        for turn in _loads(row["opinion_json"], {}).get("turns") or ():
-            if not isinstance(turn, dict):
-                continue
-            turns.append({"seat": row["agent_key"], "round": int(turn.get("round") or 0),
-                          "say_excerpt": str(turn.get("say_excerpt") or ""),
-                          "position": turn.get("position") or None,
-                          "stance": turn.get("stance") or None})
-    # 좌석을 섞지 않고 라운드로 묶는다 — 같은 라운드 안에서는 좌석 키 순이다(표시 순서를 결정론으로).
-    turns.sort(key=lambda t: (t["round"], t["seat"]))
-    # `_loads(x, None)` 은 isinstance(v, NoneType) 이라 늘 None 이다 — 빈 dict 로 받고 비면 null 로 돌린다.
-    spec = _loads(panel["risk_spec_json"], {})
-    return {"panel_id": panel_id, "decision_text": panel["decision_text"] or "",
-            "turns": turns, "risk_spec": spec or None}
+    return panel_transcript_payload(panel_id, owner_sub=_require_user(ident))
 
 
 class VerdictBody(BaseModel):

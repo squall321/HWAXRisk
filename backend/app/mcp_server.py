@@ -12,10 +12,17 @@ from app.errors import AppError
 
 log = logging.getLogger("hwax_risk.mcp")
 
-_INSTRUCTIONS = """HWAX Risk Review — 설계 리스크 심사 앱의 MCP 서버. 도구 7종은 심의 엔진이 아니라 원장 접점이다 —
-조회 4종(risk_get_snapshot · risk_get_diff · risk_get_registry · risk_claims_for_ref) · 브리프 공급(risk_get_brief,
-tier 'A' 는 웹 전용) · 결과 회수(risk_submit_panel_result, engine='mcp' 는 evidence_only 등급으로 기록) ·
-사람 finding 등록(risk_add_finding, actor 는 미검증 표기)."""
+_INSTRUCTIONS = """HWAX Risk Review — 설계 리스크 심사 앱의 MCP 서버. 심의 엔진이 아니라 원장 접점이다(LLM 을 부르지 않는다).
+
+시작은 risk_list_projects 다 — 나머지 도구가 전부 id(project_id·snapshot_id·diff_id·target_key·panel_id)를
+인자로 받는데, 그 id 를 알아낼 길이 이것뿐이다.
+
+발견: risk_list_projects(과제·타깃·최근 스냅샷 id) · risk_similar_projects · risk_get_precedents(선례)
+조회: risk_get_snapshot(part=ir|state|nodes|edges|calls|rule_hits) · risk_get_diff · risk_get_registry ·
+      risk_claims_for_ref · risk_get_coverage(진행판·좌석) · risk_list_panels · risk_get_panel_transcript
+어휘: risk_taxonomy — severity·judgement·direction 의 허용값(추측해서 넣으면 422 다)
+심사: risk_get_brief(열쇠는 brief_token, tier 'A' 는 웹 전용) · risk_submit_panel_result(engine='mcp' 는
+      evidence_only 등급) · risk_add_finding(actor 는 미검증 표기)"""
 
 # loopback 바인드 + Caddy 경계 전제로 Host 검증(DNS rebinding 보호)은 끈다(LaminateAnalyzerMCP 선례).
 # streamable_http_path 는 기본 '/mcp' — main.py 가 streamable_http_app() 의 Route('/mcp') 를 메인 라우터에 이식해
@@ -74,8 +81,67 @@ def _scoped(kind: str, key: str, fn, *args: Any, **kwargs: Any) -> dict:
 
 
 @mcp.tool()
+def risk_list_projects() -> dict:
+    """여기서 시작한다 — 볼 수 있는 심사 과제 목록(targets[]=target_key · last_snapshot_id · 커버리지 · level)."""
+    # 다른 도구가 전부 id 를 인자로 받는데 그 id 를 알아낼 길이 이것뿐이다(발견 도구 부재가 나머지를 잠근다).
+    return _guarded(lambda: routes.projects_payload(
+        project_ids=routes.visible_projects(_caller())))
+
+
+@mcp.tool()
+def risk_get_coverage(target_key: str, with_seats: bool = True, domain: str | None = None) -> dict:
+    """심사 진행판 — 도메인별 상태·미착석 수·완결 레벨·잡 상태와 좌석 행(with_seats=False 면 카운트만)."""
+    # '더 돌려야 하나, 끝났나' 의 근거. 등록부는 판정 행만 주고 좌석이 몇 개 비었는지는 말하지 않는다.
+    def call() -> dict:
+        owner_sub = routes.mcp_scope_owner("target", target_key, _caller())
+        out = routes.coverage_payload(target_key, owner_sub=owner_sub)
+        if with_seats:
+            out["seats"] = routes.seats_payload(target_key, domain, owner_sub=owner_sub)["seats"]
+        return out
+
+    return _guarded(call)
+
+
+@mcp.tool()
+def risk_list_panels(target_key: str) -> dict:
+    """이 타깃에서 이미 돈 패널 목록(좌석·라운드·엔진·품질·보고서 id) — panel_id 의 출처다."""
+    return _scoped("target", target_key, routes.panels_payload, target_key)
+
+
+@mcp.tool()
+def risk_get_panel_transcript(panel_id: str) -> dict:
+    """패널 한 건의 좌석 발언·결정문·risk_spec — 보충 회차 전에 읽어 중복 제기를 막는다."""
+    return _scoped("panel", panel_id, routes.panel_transcript_payload, panel_id)
+
+
+@mcp.tool()
+def risk_taxonomy() -> dict:
+    """통제 어휘 — mechanism·severity·judgement·direction·domain 허용값(추측해 넣으면 422 다)."""
+    return _guarded(lambda: {
+        "taxonomy": routes.taxonomy.load_taxonomy(),
+        "asset_version": routes.taxonomy.ASSET_VERSION,
+        "vocab": routes.taxonomy.vocab_index(),
+        "promotable_axes": routes.character.promotable_axes(),
+    })
+
+
+@mcp.tool()
+def risk_get_precedents(diff_id: str) -> dict:
+    """선례 — 같은 subject 의 과거 판정과 델타 선례(이 변경이 전에도 문제였나)."""
+    return _scoped("diff", diff_id, lambda d, *, owner_sub: routes.brief_module.precedents(
+        routes.get_store(), d, owner_sub=owner_sub), diff_id)
+
+
+@mcp.tool()
+def risk_similar_projects(project_id: str, k: int = 5) -> dict:
+    """비슷한 과제 top-k — 계보·벡터·서술·subject 네 경로별로 따로 준다(섞지 않는다)."""
+    return _scoped("project", project_id, lambda pid, *, owner_sub: routes.brief_module.similar_projects(
+        routes.get_store(), pid, max(1, min(20, int(k))), owner_sub=owner_sub), project_id)
+
+
+@mcp.tool()
 def risk_get_snapshot(snapshot_id: str, part: str) -> dict:
-    """스냅샷 조회(part ∈ ir|state|nodes|edges|calls, nodes·edges 는 상위 500 + truncated)."""
+    """스냅샷 조회(part ∈ ir|state|nodes|edges|calls|rule_hits, nodes·edges 는 상위 500 + truncated)."""
     limit = NODE_LIMIT if part in ("nodes", "edges") else None
     return _scoped("snapshot", snapshot_id, routes.snapshot_part, snapshot_id, part, limit=limit)
 
