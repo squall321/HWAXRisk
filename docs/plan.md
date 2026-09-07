@@ -67,14 +67,23 @@
 ## MCP
 
 - 서버 `hwax-risk`(FastMCP, `mcp>=1.10,<2`, DNS-rebinding 보호 off), 앱 내부 exact `Route('/mcp')`(Mount 아님 — 307 없음) → `/apps/hwax_risk/mcp` → 게이트웨이 백엔드 `heax-hwax_risk`.
-- 도구 **7종**, 전부 실구현(§0.5.2 6종 + P5 의 `risk_add_finding`) — `risk_get_snapshot(snapshot_id, part)` · `risk_get_diff(diff_id, part)` ·
+- 도구 **14종**, 전부 실구현. 발견 7종(2026-09-07 추가) — `risk_list_projects`(진입점) · `risk_get_coverage` ·
+  `risk_list_panels` · `risk_get_panel_transcript` · `risk_taxonomy` · `risk_get_precedents` · `risk_similar_projects`.
+  나머지 원장 7종(§0.5.2 6종 + P5 의 `risk_add_finding`) — `risk_get_snapshot(snapshot_id, part)` · `risk_get_diff(diff_id, part)` ·
   `risk_get_registry(target_key, status?, severity?)` · `risk_claims_for_ref(ref)` · `risk_get_brief(target_key, brief_token, tier='B')` ·
   `risk_submit_panel_result(panel_id, engine, decision_text, turns, report_id, actor, model=None)` · `risk_add_finding`(P3 REST 를 감싼다).
 - 읽기 4종은 `mcp_caller` → `routes.visible_projects(caller)` 로 범위를 거르고 밖이면 `{error:'not_visible'}` 다 — 서비스 신원에는
   `mcp_visibility='org'` 과제만, 개인 PAT 에는 멤버십 범위까지 열린다(§5.1 원칙 9). `risk_get_brief` 는 `actor` 만으로는 열리지 않고
   `GET /targets/{key}/brief` 가 발급한 `brief_token` 으로만 200 이다.
-- 게이트웨이 경유 호출은 heax 서비스 PAT 신원으로 도달하므로 최종 사용자는 오지 않는다 — 쓰기 도구는 `actor`(미검증 표기) 인자를 받는다.
-- Claude 연결 경로 둘(§6.11). 게이트웨이(`:9110`)를 붙인 세션은 백엔드 `heax-hwax_risk` 로 `risk_*` 7종을 그대로 본다.
+- 게이트웨이 경유 호출도 **사용자 신원으로 온다**(2026-09-07). `POST /api/auth/sso` 가 공유 시크릿
+  (`secrets.env` 의 `HWAXRISK_HEAX_GATEWAY_SECRET`, 없으면 404)을 받고 이메일·만료만 담은 무상태 HMAC 단언
+  `rrsso_…`(기본 900 s)을 내주며, 게이트웨이는 그것을 `X-Heax-Sso-Assertion` 헤더로 실어 부른다.
+  Authorization 은 Caddy `forward_auth` 통과용 heax 서비스 토큰이라 비워둘 수 없어 헤더를 따로 쓴다.
+  `identity.current` 는 그 헤더를 먼저 보고 **서명만** 검증한다(heax 되묻기 없음) — 신뢰 근거가 헤더 위치가 아니라
+  서명이라 위조 헤더는 anonymous 로 떨어진다. 역할·부서는 단언에 없으므로 관리자 경로는 SSO 호출자에게 닫힌다.
+  이 배선이 없으면 서비스 신원이라 `mcp_visibility='org'` 과제만 보이고, 실제 과제가 전부 private 이면 0건이 된다(실측).
+  쓰기 도구의 `actor` 인자는 그대로 미검증 표기다.
+- Claude 연결 경로 둘(§6.11). 게이트웨이(`:9110`)를 붙인 세션은 백엔드 `heax-hwax_risk` 로 `risk_*` 14종을 그대로 본다.
   앱만 직접 붙이려면 `claude mcp add --transport http hwax-risk <포털베이스>/apps/hwax_risk/mcp --header "Authorization: Bearer heax_pat_…"`
   (로컬 dev 는 리포의 `.mcp.json` 과 같은 `http://127.0.0.1:8000/mcp`).
 - 실행 등급 둘 — L1 단발은 `hwax-deliberate` 에 `chairTemplate:'risk-review'`(원장 미연동), L2 는 포털 워크플로 `hwax-risk-review`
