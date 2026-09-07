@@ -1,4 +1,4 @@
-# 인바운드 신원 해석 — Authorization Bearer(우선) 또는 쿠키 heax_access_token 을 heax GET /api/v1/auth/me 로 되묻고 sha256(token) TTL 60 s 캐시(plan §8.2.8) + 게이트웨이 SSO 단언(rrsso_) HMAC 검증 + 사용자 포털 PAT 자격 Fernet 암복호(plan §8.2.7)
+# 인바운드 신원 해석 — 게이트웨이 SSO 단언 헤더(우선)·Authorization Bearer 또는 쿠키 heax_access_token 을 heax GET /api/v1/auth/me 로 되묻고 sha256(token) TTL 60 s 캐시(plan §8.2.8) + 게이트웨이 SSO 단언(rrsso_) HMAC 검증 + 사용자 포털 PAT 자격 Fernet 암복호(plan §8.2.7)
 from __future__ import annotations
 
 import base64
@@ -22,6 +22,9 @@ from app.errors import AppError
 log = logging.getLogger("hwax_risk.identity")
 
 COOKIE_NAME = "heax_access_token"
+# 게이트웨이가 사용자 자격을 싣는 헤더와 그 자격의 접두사(아래 '게이트웨이 SSO 신원 단언' 절).
+SSO_HEADER = "x-heax-sso-assertion"
+SSO_PREFIX = "rrsso_"
 CACHE_TTL_S = 60.0
 HEAX_TIMEOUT_S = 2.0
 
@@ -67,6 +70,12 @@ def reset_cache() -> None:
 
 
 def _token_from(request: Request) -> tuple[str | None, str]:
+    # 게이트웨이가 실어 보내는 서명 단언이 먼저다. Caddy forward_auth 뒤에 있는 이 앱은
+    # Authorization 을 heax 가 아는 서비스 토큰으로 지켜야 문을 통과하므로, 사용자 자격은
+    # 이 헤더로 온다. 위치가 아니라 서명을 믿기 때문에 위조 헤더는 아래 검증에서 떨어진다.
+    sso = (request.headers.get(SSO_HEADER) or "").strip()
+    if sso:
+        return sso, "sso"
     auth = request.headers.get("authorization", "")
     if auth[:7].lower() == "bearer " and auth[7:].strip():
         return auth[7:].strip(), "bearer"
@@ -129,7 +138,6 @@ def _evict_locked() -> None:
 # 이 앱 눈에는 모든 MCP 호출이 '게이트웨이'고, 사용자 소유 과제가 0건으로 보인다(2026-09-07 실측).
 # 그래서 POST /api/auth/sso 가 공유 시크릿을 받고 **무상태 HMAC 단언**을 내준다. 저장소를 새로 만들지
 # 않고, 신뢰의 근거는 헤더 위치가 아니라 서명이다 — 위 §의 'X-Heax-User-* 를 안 읽는다' 원칙과 어긋나지 않는다.
-SSO_PREFIX = "rrsso_"
 _SSO_MAX_TTL_S = 3600
 
 
@@ -153,7 +161,7 @@ def mint_sso_assertion(email: str, *, ttl_s: int, secret: str, now: float | None
 def _verify_sso_assertion(token: str) -> str | None:
     """단언이 이 앱의 시크릿으로 서명됐고 아직 안 만료됐으면 이메일, 아니면 None(사유는 남기지 않는다)."""
     secret = config.heax_gateway_secret()
-    if not secret:
+    if not secret or not token.startswith(SSO_PREFIX):
         return None
     body, _, sig_b64 = token[len(SSO_PREFIX):].partition(".")
     if not body or not sig_b64:
@@ -176,11 +184,14 @@ def _verify_sso_assertion(token: str) -> str | None:
 
 
 def current(request: Request) -> Identity:
-    """FastAPI Depends 용 — Bearer > 쿠키 순으로 토큰을 잡아 heax 에 되묻는다. 토큰 없음·401·불통은 anonymous."""
+    """FastAPI Depends 용 — SSO 단언 > Bearer > 쿠키 순. 단언은 서명만 보고, 나머지는 heax 에 되묻는다.
+
+    토큰 없음·서명 불일치·401·불통은 전부 anonymous 다.
+    """
     token, source = _token_from(request)
     if token is None:
         return ANONYMOUS
-    if token.startswith(SSO_PREFIX):
+    if source == "sso" or token.startswith(SSO_PREFIX):
         email = _verify_sso_assertion(token)
         if not email:
             return ANONYMOUS

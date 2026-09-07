@@ -162,3 +162,19 @@ def test_sso_endpoint_is_404_without_secret(client, monkeypatch):
     monkeypatch.setattr(config, "heax_gateway_secret", lambda *a, **k: "")
     r = client.post("/api/auth/sso", headers={"X-Heax-Gateway-Secret": "x", "X-Heax-User-Email": "b@e.com"})
     assert r.status_code == 404
+
+
+def test_sso_header_beats_service_bearer(sso, heax):
+    """게이트웨이 실제 배선 — Authorization 은 Caddy 통과용 서비스 토큰, 사용자 자격은 헤더로 온다."""
+    token = identity.mint_sso_assertion("carol@example.com", ttl_s=900, secret=SSO_SECRET)
+    ident = identity.current(_request({"Authorization": f"Bearer {FAKE_TOKEN}",
+                                       identity.SSO_HEADER: token}))
+    assert ident.email == "carol@example.com" and ident.source == "sso"
+    assert heax == []          # 서명만 봤다 — heax 되묻기가 없었다.
+
+
+def test_forged_sso_header_does_not_fall_back_to_heax(sso, heax):
+    """위조 헤더는 anonymous 다 — Bearer 로 조용히 강등해 남의 시야를 주지 않는다."""
+    ident = identity.current(_request({"Authorization": f"Bearer {FAKE_TOKEN}",
+                                       identity.SSO_HEADER: "rrsso_forged.sig"}))
+    assert ident == identity.ANONYMOUS and heax == []
