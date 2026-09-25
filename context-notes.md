@@ -576,3 +576,29 @@
   삼키지 않는다 · `_framing` 의 날짜는 ISO 고정폭이라 E5 산술이 날짜로 흔들리지 않고, 그 산술 시험은
   실측값에서 계산하므로 프레이밍이 길어지면 스스로 깨진다.
 - **검증.** `pytest` **1148 passed, 2 skipped**(시험 2건 추가) · `ruff` 통과.
+
+### D21. 재사용 스냅샷 — 불변은 지키고, 버려지던 값은 낸다 (2026-09-25)
+
+체크리스트 1장 "`freeze_snapshot` 재사용 분기가 값을 얼린다" 를 닫았다. 문제를 정확히 적으면 —
+`ir_hash` 는 허용목록(`nodes`·`edges`·`same_as`·`dims_named`)이라 **전사 집계는 해시 입력이 아니다**.
+그래서 모델이 그대로면 조직 집계가 바뀌어도 같은 해시가 나오고, 재사용 분기가 기존 스냅샷을 돌려주며
+방금 받은 집계를 버린다. 호출은 매번 나가는데(비용·지연) 값은 첫 스냅샷에 얼어 있다.
+
+**고칠 수 없는 쪽을 먼저 정했다.** `ir_json` 을 UPDATE 하는 건 스냅샷 불변(§2.1)을 깨는 일이고
+docstring 이 그걸 명시한다. 그러니 스냅샷은 그대로 두고 **응답이 사실을 다 말하게** 했다 —
+
+- `context` — 이번에 받은 집계. 버리지 않는다. 두 분기가 같은 키를 낸다(재사용이든 아니든 "이번 값").
+- `context_frozen_at` — 얼어 있는 값이 언제 조회된 것인지.
+- `context_changed` — 값이 달라졌는지. `fetched_at`·`app_key` 는 비교에서 뺀다(그것까지 비교하면
+  언제나 `True` 라 아무것도 못 알려 준다). **이번 4호출이 전부 실패하면 `None`** 이다 — 안 변한 게
+  아니라 모르는 것이고, 그 둘을 같은 `False` 로 눕히면 또 '없는 리스크' 가 된다.
+
+**같이 나온 것.** `routes.create_snapshot` 끝의
+`UPDATE rr_snapshots SET job_id = ?, capture_partial = ? WHERE id = ?` 가 재사용일 때도 돌아
+**남의 스냅샷을 이번 잡으로 덮어쓰고** 있었다. 이번 캡처가 부분이면 완주했던 스냅샷이 부분으로 바뀌고,
+`job_id` 는 자기를 만든 잡을 잃는다. 재사용이면 그 UPDATE 를 건너뛴다 — 여러 잡이 한 스냅샷을 재사용하니
+잡→스냅샷 방향은 `rr_snapshot_jobs.snapshot_id` 가 맡는 게 맞다. 이쪽이 스냅샷 불변의 진짜 위반이었다.
+
+**검증.** 시험 2건 — `test_reuse_returns_this_calls_corpus_not_the_frozen_one`(네 경우: 신규 · 값 변화 ·
+`fetched_at` 만 다름 · 전부 실패), `test_reusing_a_snapshot_does_not_restamp_it_with_the_new_job`
+(고치기 전 실제로 깨지는 것까지 확인했다). `pytest` **1151 passed, 2 skipped** · `ruff` 통과.

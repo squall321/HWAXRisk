@@ -600,6 +600,33 @@ def test_seats_json_is_stable_for_the_same_roster(tmp_path):
     assert json.loads(seats_json[0]) == sorted(json.loads(seats_json[0]), key=lambda s: (s["domain"], s["key"]))
 
 
+def test_reusing_a_snapshot_does_not_restamp_it_with_the_new_job(wired, ident, monkeypatch):
+    """같은 모델을 두 번 캡처하면 두 번째는 재사용이다 — 그때 남의 스냅샷에 이번 잡을 덮어쓰지 않는다.
+
+    스냅샷은 불변이고(§2.1) `job_id`·`capture_partial` 은 **자기를 만든 잡**을 가리킨다. 여러 잡이 한
+    스냅샷을 재사용하므로 그 방향은 `rr_snapshot_jobs.snapshot_id` 가 맡는다.
+    """
+    store = wired
+    project_id = routes.create_project(
+        routes.ProjectBody(code="M22REUSE", name="재사용", stage="DV1", classification="internal"),
+        ident=ident)["id"]
+    routes.add_source(project_id, routes.SourceBody(
+        kind="mcad", app_key=recon.APP_KEY,
+        ref={"stepforge_project_id": recon.SF_PROJECT, "detect_job_id": "01JDET"}), ident=ident)
+    apps = FakeSourceApps()
+    monkeypatch.setattr(adapters_registry, "clients_from_settings", lambda *a, **k: apps.channels())
+
+    first = routes.create_snapshot(project_id, routes.SnapshotBody(label="DV1"), ident=ident)
+    second = routes.create_snapshot(project_id, routes.SnapshotBody(label="다시"), ident=ident)
+    assert second["reused"] is True and second["snapshot_id"] == first["snapshot_id"]
+    assert second["job_id"] != first["job_id"]
+    row = store.query_one("SELECT job_id FROM rr_snapshots WHERE id = ?", (first["snapshot_id"],))
+    assert row["job_id"] == first["job_id"]
+    # 두 번째 잡도 자기가 어느 스냅샷을 재사용했는지는 남긴다 — 연결이 사라지는 게 아니다.
+    assert store.query_one("SELECT snapshot_id FROM rr_snapshot_jobs WHERE id = ?",
+                           (second["job_id"],))["snapshot_id"] == first["snapshot_id"]
+
+
 # ---------------------------------------------------------------- 스냅샷 잡 상태기계(plan §2.11.3 · §0.9 P1-22)
 def test_snapshot_job_records_its_state_and_guards_the_model_size(wired, ident, monkeypatch):
     """정상 캡처는 done 1행, 상한 초과는 409 + failed 1행(호출 원문은 snapshot_id NULL 로 남는다)."""

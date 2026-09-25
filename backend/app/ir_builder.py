@@ -1208,6 +1208,23 @@ def _upsert_part_keys(store, ir: Mapping[str, Any]) -> None:
         )
 
 
+def _corpus_aggregates(ir_context: Any) -> dict:
+    """전사 집계에서 메타(`fetched_at`·`app_key`)를 뺀 실값만 남긴다.
+
+    얼어 있는 값과 이번에 받은 값을 비교하는 기준이다 — `fetched_at` 은 부를 때마다 달라지므로
+    그것까지 비교하면 '언제나 변했다' 가 되어 아무것도 못 알려 준다.
+    """
+    usage = (ir_context or {}).get("corpus_usage")
+    if not isinstance(usage, Mapping):
+        return {}
+    return {k: v for k, v in usage.items() if k not in ("fetched_at", "app_key")}
+
+
+def _corpus_fetched_at(ir_context: Any) -> int | None:
+    usage = (ir_context or {}).get("corpus_usage")
+    return int(usage["fetched_at"]) if isinstance(usage, Mapping) and usage.get("fetched_at") else None
+
+
 def record_calls(store, snapshot_id: str | None, owner_sub: str, calls: Sequence[Mapping[str, Any]], *,
                  start_seq: int | None = None, job_id: str | None = None) -> list[str]:
     """소스 호출 원문을 rr_snapshot_calls 에 gzip 으로 남긴다(plan §2.11.4). call_id 목록을 순서대로 돌려준다.
@@ -1372,6 +1389,13 @@ def freeze_snapshot(
             "blocked": state_module.is_blocked(frozen.get("gates") or {}),
             "gates_summary": {k: bool(v.get("pass")) for k, v in (frozen.get("gates") or {}).items()},
             "degraded": sorted({d for s in frozen.get("sources") or [] for d in s.get("degraded") or []}),
+            # 전사 집계는 시변인데 스냅샷은 불변이다 — ir_json 을 갱신하지 않으므로(§2.1) 얼어 있는 값은
+            # 첫 캡처 시점 값이다. 이번에 받은 값을 버리지 않고 함께 돌려주고, 언제 얼었는지와 달라졌는지를
+            # 밖으로 낸다. 달라졌는지를 모르는 경우(이번 4호출이 전부 실패)는 False 가 아니라 None 이다.
+            "context": dict(ir.get("context") or {}),
+            "context_frozen_at": _corpus_fetched_at(frozen.get("context")),
+            "context_changed": (None if not _corpus_aggregates(ir.get("context"))
+                                else _corpus_aggregates(ir.get("context")) != _corpus_aggregates(frozen.get("context"))),
         }
 
     snapshot_id = ir["snapshot_id"]
@@ -1455,4 +1479,8 @@ def freeze_snapshot(
         "blocked": blocked_module.is_blocked(gates),
         "gates_summary": {k: bool(v.get("pass")) for k, v in gates.items()},
         "degraded": degraded,
+        # 새로 언 스냅샷이라 얼어 있는 값이 곧 이번 값이다 — 재사용 분기와 키를 맞춘다.
+        "context": dict(ir.get("context") or {}),
+        "context_frozen_at": _corpus_fetched_at(ir.get("context")),
+        "context_changed": False,
     }

@@ -1253,8 +1253,12 @@ def create_snapshot(project_id: str, body: SnapshotBody,
                          calls=len(calls), calls_failed=len(failed_calls),
                          error={"stage": "capture_partial",
                                 "failed_calls": [c.get("tool") for c in failed_calls]} if failed_calls else None)
-    store.execute("UPDATE rr_snapshots SET job_id = ?, capture_partial = ? WHERE id = ?",
-                  (job_id, 1 if state == "partial" else 0, out["snapshot_id"]))
+    # 재사용이면 남의 스냅샷이다 — 이번 잡의 부분 여부를 거기에 덮어쓰면 완주했던 스냅샷이 부분으로 바뀐다.
+    # 잡→스냅샷 연결은 rr_snapshot_jobs 에 이미 있고(여러 잡이 한 스냅샷을 재사용한다), 스냅샷의 job_id 는
+    # 자기를 만든 잡을 가리켜야 한다.
+    if not out.get("reused"):
+        store.execute("UPDATE rr_snapshots SET job_id = ?, capture_partial = ? WHERE id = ?",
+                      (job_id, 1 if state == "partial" else 0, out["snapshot_id"]))
     return {**out, "job_id": job_id, "job_state": state, "calls_reused": reused}
 
 

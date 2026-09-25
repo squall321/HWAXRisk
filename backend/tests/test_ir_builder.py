@@ -734,6 +734,42 @@ def test_freeze_snapshot_reuses_the_same_ir_hash(risk_store, mcad_result):
     assert ib.load_ir(risk_store, first["snapshot_id"])["label"] == "DV1"
 
 
+def test_reuse_returns_this_calls_corpus_not_the_frozen_one(risk_store, mcad_result):
+    """전사 집계는 시변인데 스냅샷은 불변이다 — 재사용이 이번 값을 버리지 않는다(§2.1·§2.2).
+
+    같은 `ir_hash` 면 `ir_json` 은 첫 캡처 값 그대로다. 그래서 응답이 ① 이번에 받은 값 ② 얼어 있는 값의
+    조회 시각 ③ 달라졌는지를 모두 낸다. 이게 없으면 조직 집계가 첫 스냅샷에 조용히 얼어붙는다.
+    """
+    first = ib.freeze_snapshot(risk_store, project_id=PROJECT, owner_sub=OWNER, label="DV1",
+                               adapter_results=[mcad_result], captured_at=1756600000,
+                               context={"corpus_usage": {"sessions": 12, "fetched_at": 1756600000}})
+    assert first["reused"] is False
+    assert first["context_frozen_at"] == 1756600000 and first["context_changed"] is False
+
+    second = ib.freeze_snapshot(risk_store, project_id=PROJECT, owner_sub=OWNER, label="다시",
+                                adapter_results=[mcad_result], captured_at=1756699999,
+                                context={"corpus_usage": {"sessions": 31, "fetched_at": 1756699999}})
+    assert second["reused"] is True
+    # 얼어 있는 값은 첫 시각이고, 이번 값은 그대로 돌려받는다.
+    assert second["context_frozen_at"] == 1756600000
+    assert second["context"]["corpus_usage"]["sessions"] == 31
+    assert second["context_changed"] is True
+    # 불변 — 얼어 있는 본문은 여전히 첫 값이다.
+    assert ib.load_ir(risk_store, first["snapshot_id"])["context"]["corpus_usage"]["sessions"] == 12
+
+    # 값이 같으면 변한 게 아니다 — fetched_at 만 달라도 changed 가 되면 아무것도 못 알려 준다.
+    same = ib.freeze_snapshot(risk_store, project_id=PROJECT, owner_sub=OWNER, label="또",
+                              adapter_results=[mcad_result], captured_at=1756777777,
+                              context={"corpus_usage": {"sessions": 12, "fetched_at": 1756777777}})
+    assert same["context_changed"] is False
+
+    # 이번 4호출이 전부 실패하면 corpus_usage 는 None 이다 — 변했는지 '모른다'(False 가 아니다).
+    dead = ib.freeze_snapshot(risk_store, project_id=PROJECT, owner_sub=OWNER, label="죽음",
+                              adapter_results=[mcad_result], captured_at=1756888888,
+                              context={"corpus_usage": None})
+    assert dead["context_changed"] is None
+
+
 def test_freeze_snapshot_stores_gates_and_seeds_inside_the_frozen_ir(risk_store, mcad_result):
     result = ib.freeze_snapshot(risk_store, project_id=PROJECT, owner_sub=OWNER, label="DV1",
                                 adapter_results=[mcad_result], captured_at=1756600000)
