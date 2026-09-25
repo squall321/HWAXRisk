@@ -20,6 +20,7 @@ import {
 import { fmtCounts, fmtEpoch, fmtNum } from "../format";
 import { FACET_ORDER } from "../types";
 import type {
+  VocabBump,
   AdapterEntry,
   Requirement,
   RequirementKind,
@@ -590,6 +591,120 @@ function IfaceLedgerEditor({ projectId }: { projectId: string }) {
   );
 }
 
+function VocabCard() {
+  const vocab = useAsync((signal) => riskApi.getVocab({ signal }), []);
+  const [head, setHead] = useState("");
+  const [aliases, setAliases] = useState("");
+  const [tokens, setTokens] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const [bump, setBump] = useState<VocabBump | null>(null);
+
+  async function run(work: () => Promise<VocabBump>) {
+    setBusy(true);
+    setError(null);
+    try {
+      setBump(await work());
+      vocab.reload();
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const aliasList = aliases.split(/[\n,]/).map((x) => x.trim()).filter(Boolean);
+  const tokenList = tokens.split(/[\n,]/).map((x) => x.trim()).filter(Boolean);
+
+  return (
+    <SectionCard
+      title="사전"
+      subtitle="동의어 추가는 마이너, 삭제는 메이저 승급입니다. 메이저면 기존 ckey 를 다시 계산해야 합니다(§2.7.1)."
+    >
+      <ErrorBanner error={error} />
+      <ErrorBanner error={vocab.error} onRetry={vocab.reload} />
+      {bump ? (
+        <div
+          className={bump.recompute_required ? "rr-banner rr-banner-error" : "rr-banner rr-banner-info"}
+          role="alert"
+        >
+          <span className="rr-banner-title">
+            {bump.vocab_version} · {bump.bump} 승급
+          </span>
+          <span className="rr-banner-detail">
+            {bump.recompute_required
+              ? "메이저 승급입니다 — 기존 파트 키가 낡았습니다. backend/scripts/recompute_part_keys.py 를 돌리기 전까지 새 스냅샷은 409 recompute_pending 입니다."
+              : "마이너 승급입니다 — 기존 ckey 와 ir_hash 는 그대로입니다."}
+          </span>
+        </div>
+      ) : null}
+
+      <div className="rr-stack">
+        <h3 className="rr-subhead">동의어</h3>
+        <div className="rr-row">
+          <label className="rr-field">
+            <span>head — 대표 이름</span>
+            <input className="rr-input" value={head} onChange={(e) => setHead(e.target.value)} />
+          </label>
+          <label className="rr-field">
+            <span>from — 줄 또는 쉼표로 구분</span>
+            <input className="rr-input" value={aliases} onChange={(e) => setAliases(e.target.value)} />
+          </label>
+          <button
+            type="button"
+            className="rr-btn"
+            disabled={busy || !head.trim() || aliasList.length === 0}
+            onClick={() => run(() => riskApi.putVocabSynonym({ head: head.trim(), from: aliasList, op: "add" }))}
+          >
+            추가(마이너)
+          </button>
+          <button
+            type="button"
+            className="rr-btn rr-btn-quiet"
+            disabled={busy || !head.trim() || aliasList.length === 0}
+            onClick={() => run(() => riskApi.putVocabSynonym({ head: head.trim(), from: aliasList, op: "remove" }))}
+          >
+            삭제(메이저)
+          </button>
+        </div>
+      </div>
+
+      <div className="rr-stack">
+        <h3 className="rr-subhead">stop tokens</h3>
+        <div className="rr-row">
+          <label className="rr-field">
+            <span>tokens — 줄 또는 쉼표로 구분</span>
+            <input className="rr-input" value={tokens} onChange={(e) => setTokens(e.target.value)} />
+          </label>
+          <button
+            type="button"
+            className="rr-btn"
+            disabled={busy || tokenList.length === 0}
+            onClick={() => run(() => riskApi.putVocabStopTokens({ tokens: tokenList, op: "add" }))}
+          >
+            추가(마이너)
+          </button>
+          <button
+            type="button"
+            className="rr-btn rr-btn-quiet"
+            disabled={busy || tokenList.length === 0}
+            onClick={() => run(() => riskApi.putVocabStopTokens({ tokens: tokenList, op: "remove" }))}
+          >
+            삭제(메이저)
+          </button>
+        </div>
+      </div>
+
+      {vocab.data ? (
+        <p className="rr-muted">
+          어휘 자산 {vocab.data.assets.length}종 · 자산 판 {vocab.data.asset_version}
+        </p>
+      ) : null}
+    </SectionCard>
+  );
+}
+
+
 function CharacterCard({ projectId }: { projectId: string }) {
   const character = useAsync((signal) => riskApi.getCharacter(projectId, { signal }), [projectId]);
   // 서버는 층(seed·panel·confirmed·superseded)으로 주고 화면은 facet 격자로 보인다 — 여기서만 뒤집는다.
@@ -1011,6 +1126,7 @@ export default function ProjectPage() {
         <IfaceLedgerEditor projectId={projectId} />
       </SectionCard>
 
+      <VocabCard />
       <CharacterCard projectId={projectId} />
       <SimilarCard projectId={projectId} />
     </>

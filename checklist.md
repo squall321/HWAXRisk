@@ -5,7 +5,7 @@
 코드 대조로 확인해 적은 작업 대장이며, 앞으로의 진행은 이 문서를 늘려 가며 한다. 정본 체크리스트는 단계 착수 전에 쓴 것이라 P1~P7 항목이
 전부 미체크로 남아 있다 — 여기서 실측한 완료 상태가 그보다 최신이다.
 
-마지막 실측 2026-09-04 — `pytest` **1134 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · `ruff` 통과 · `pnpm build` 통과.
+마지막 실측 2026-09-25 — `pytest` **1147 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · `ruff` 통과 · `pnpm build` 통과.
 
 ## 진척 요약
 
@@ -16,7 +16,7 @@
 | P2 Dyna·same-as·원장·diff | §9.3 | **완료**(합성 픽스처 기준) | `adapters/dyna.py` · `sameas.py` · `diff.py` · `ComparePage.tsx` · `recompute_part_keys.py` |
 | P3 패널 e2e·서술 저장 | §9.4 | **완료**(엔진 실호출 미실측) | `narrative.py` · `runner.py` · `registry.py` · `character.py` · `ra_client.py` · `adh_client.py` |
 | P4 커버리지·편성·배치·보고서 | §9.5 | **완료** | `planner.py` · `roster.py` · `runner.py` 배치 · C1~C3 · `GET /api/meta/metrics` |
-| P5 재사용 루프 | §9.6 | **부분** — E10 은 2026-09-04 에 닫음, UI 2종 부재 | `brief.py` E5±·E6~E8 · `risk_add_finding` · `/api/precedents` |
+| P5 재사용 루프 | §9.6 | **완료**(합성 픽스처 기준) — E10·UI 3종 2026-09-25 에 닫음 | `brief.py` E5±·E6~E8 · `risk_add_finding` · `/api/precedents` |
 | P6 학습 루프 | §9.7 | **부분** — 라벨 자동 유입 4경로 미구현(의도적 노출) | `learning.py` · `metrics.py` · `nightly.py` · `bootstrap_*.py` |
 | P7 ODB 실연동 | §9.8 | **미착수**(조건부 — ODB hub 계약 합의 대기) | `adapters/ecad_stub.py` 만 |
 
@@ -71,16 +71,21 @@
   `_profile_mismatch` 대조에 넣을지(넣으면 기존 의장 헤더가 전부 header_mismatch) 정본 결정 필요.
 - [ ] **정본 §4.4.3 등급 표에 세 행 추가** — §0.2.1 (5)는 `req:`·`voc:`→측정, `paper:`→문헌·규격 이라 하고
   "§4.4.3 표가 이 세 행을 그대로 쓴다" 고 적지만 그 표에 세 행이 없다. 코드는 §0.2.1 을 따랐다(정본 문면 개정 필요).
-- **프런트 화면** — REST 는 있는데 사람이 쓸 입구가 없던 것들.
+- [x] **프런트 화면 5종 전부** (2026-09-25 완료) — REST 는 있는데 사람이 쓸 입구가 없던 것들.
   - [x] `CurationQueuePage.tsx`(`#/curation`) (2026-09-02) — kind 6종의 열린 항목을 사람이 결정한다. 결정 어휘는 서버
     `CURATION_DECISIONS` 와 같은 집합이고 그 사실을 시험으로 고정했다. 값을 더 받아야 하는 결정(`x_tag_promote` 의 `axis`,
     `unclassified_code` 의 `mechanism_detail`)은 빈 값이면 버튼이 잠긴다. 승격 축 선택지는 `GET /meta/vocab.promotable_axes`
     로 서버가 준다 — 통제 어휘를 화면이 따로 갖지 않는다. 성격 승격 UI(아래 항)가 여기 안에 함께 들어갔다.
   - [x] `CoverageHeatmap` — 이미 `TargetPage.tsx` 안에 있었다(앞선 조사에서 대소문자 때문에 못 찾았다). 셀 클릭 드릴다운이
     부르던 좌석 경로가 없어 죽어 있던 것이고, 위 계약 정리로 살아났다.
-  - [ ] `TargetPage` '리스크 직접 등록' 폼 — `POST /targets/{key}/findings` 의 UI 짝(작성자만 수정·삭제)
-  - [ ] `TargetPage` '브리프 토큰 복사' 버튼 — L2 워크플로가 `briefToken` 없이는 앱을 못 부른다
-  - [ ] `ProjectPage` '사전' 탭 — `POST /vocab/synonyms`·`stop-tokens` 와 재계산 필요 배너
+  - [x] `TargetPage` '리스크 직접 등록' 폼 (2026-09-25) — `HumanFindingForm`. 인용 최소 1건을 폼이 먼저
+    강제한다(서버 422 를 보고 나서야 알게 두지 않는다 — 서버 가드는 그대로). mechanism 선택지는
+    `GET /meta/taxonomy` 에서 온다.
+  - [x] `TargetPage` '브리프 토큰 복사' (2026-09-25) — `BriefTokens`(RecallPreview 안). 실측으로 32자
+    토큰이 발급되고 DB 에는 해시만 남는 것을 확인했다 — "떠나면 다시 볼 수 없다" 는 문구가 사실이다.
+    클립보드가 막힌 환경은 `window.prompt` 폴백.
+  - [x] `ProjectPage` '사전' (2026-09-25) — `VocabCard`. 추가는 마이너, 삭제는 메이저이고 메이저면
+    붉은 배너로 `recompute_part_keys.py` 안내를 띄운다(실측 — 추가 1.1/minor, 삭제 2.0/major).
 - [x] **`context.corpus_usage` 봉투 승격(§2.2) + rr_ir 스키마 표류 3건** (2026-09-04) — dyna 계약 대조에서 나온 P1 미완 항목.
   전사 집계를 4도구·정본 순서로 늘리고 `sources[dyna].context` → 봉투 최상위 `context.corpus_usage` 로 옮겼으며,
   `capture_all` 의 kind 루프 뒤로 들어내 **dyna 소스 카드도 사용자 PAT 도 없을 때 돌게** 했다(정본이 명시한 요구인데

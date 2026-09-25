@@ -824,3 +824,41 @@ export type SnapshotCallList = { snapshot_id: string; calls: SnapshotCall[] };
 export type RuleHitList = { snapshot_id: string; rule_version: string | null; rule_hits: RuleHit[] };
 /** `GET /targets/{key}/panels` 봉투. */
 export type PanelList = { target_key: string; panels: Panel[] };
+
+// ── 사람 finding · 사전 편집(plan §4.3.1 · §2.7.1) ──────────────────────────
+
+/** `POST /targets/{key}/findings` 본문. 인용이 0건이면 서버가 422 다. */
+export type HumanFindingCreate = {
+  direction: Direction;
+  domain?: string | null;
+  mechanism: string;
+  mechanism_detail?: string | null;
+  subject_key?: string | null;
+  subject_names?: string[];
+  severity?: Severity | null;
+  judgement?: Judgement | null;
+  trigger_condition?: string | null;
+  claim: string;
+  warrant?: string | null;
+  /** §0.2.1 문법의 참조. `cites:[]` 는 422 라 폼이 최소 1건을 강제한다. */
+  cites: Array<{ ref: string; quote?: string }>;
+  requirement_ref?: string | null;
+};
+
+export type HumanFindingCreated = {
+  finding_id: string;
+  claim_uid: string;
+  cluster_key: string;
+  origin: "human";
+};
+
+/** 동의어 추가는 마이너, 삭제는 메이저 승급이다(§2.7.1). */
+export type VocabOp = "add" | "remove";
+export type VocabBump = {
+  vocab_version: string;
+  bump: "minor" | "major";
+  synonyms: Record<string, string[]>;
+  stop_tokens: string[];
+  /** major 승급이면 true — 화면은 `recompute_part_keys.py` 안내 배너를 띄운다(§2.7.1). */
+  recompute_required: boolean;
+};

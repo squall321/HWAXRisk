@@ -7,6 +7,7 @@ import { POLL_MS, useAsync, useInterval } from "../hooks/useAsync";
 import { SectionCard, VerbatimBlock } from "../components/SectionCard";
 import type { Column } from "../components/DataTable";
 import { DataTable, KeyValueTable, TableScroll } from "../components/DataTable";
+import { HumanFindingForm } from "../components/HumanFindingForm";
 import { EmptyBlock, ErrorBanner, LoadingBlock, NotReadyBlock } from "../components/StateBlocks";
 import {
   Badge,
@@ -27,6 +28,7 @@ import {
 import { PanelTranscript } from "../components/PanelTranscript";
 import { fmtEpoch, fmtJson, fmtNum } from "../format";
 import type {
+  BriefPanel,
   Coverage,
   CoverageStatus,
   EvidenceItem,
@@ -451,6 +453,8 @@ function PanelsCard({ targetKey }: { targetKey: string }) {
 }
 
 function RegistryCard({ targetKey, registry }: { targetKey: string; registry: Async<Registry> }) {
+  // mechanism 선택지는 서버 택소노미에서 온다(§7.1) — 화면이 어휘를 따로 가지면 한쪽만 늙는다.
+  const taxonomy = useAsync((signal) => riskApi.getTaxonomy({ signal }), []);
   const [severity, setSeverity] = useState("");
   const [domain, setDomain] = useState("");
   const [direction, setDirection] = useState("");
@@ -534,6 +538,11 @@ function RegistryCard({ targetKey, registry }: { targetKey: string; registry: As
         <ErrorBanner error={registry.error} onRetry={registry.reload} />
         <ErrorBanner error={error} />
         {registry.loading && !registry.data ? <LoadingBlock /> : null}
+        <HumanFindingForm
+          targetKey={targetKey}
+          mechanisms={taxonomy.data?.axes?.mechanism ?? []}
+          onCreated={registry.reload}
+        />
         <div className="rr-row">
           <select className="rr-select" value={severity} onChange={(e) => setSeverity(e.target.value)}>
             <option value="">severity 전체</option>
@@ -710,6 +719,61 @@ function ConsolidatedReportCard({ level, sync }: { level: string | null; sync: E
   );
 }
 
+/**
+ * 패널마다 1건인 `brief_token` — L2 오케스트레이터(`hwax-risk-review`)가 MCP `risk_get_brief` 에
+ * 그대로 넘기는 유일한 열쇠다(§8.2.5). 이 값 없이는 게이트웨이 경유 호출이 열리지 않는다.
+ * 토큰은 발급 때만 원문이 오고 앱은 해시만 저장하므로 이 화면을 떠나면 다시 볼 수 없다.
+ */
+function BriefTokens({ panels }: { panels: BriefPanel[] }) {
+  const [copied, setCopied] = useState<string | null>(null);
+  const withToken = panels.filter((p) => p.brief_token);
+
+  if (withToken.length === 0) {
+    return (
+      <p className="rr-muted">
+        브리프 토큰이 없습니다 — 편성된 패널이 없거나 이 경로가 토큰을 발급하지 않았습니다.
+      </p>
+    );
+  }
+
+  async function copy(panelId: string, token: string) {
+    try {
+      await navigator.clipboard.writeText(token);
+      setCopied(panelId);
+    } catch {
+      // 클립보드가 막힌 환경(비보안 오리진 등) — 값을 직접 고를 수 있게 노출만 한다.
+      setCopied(null);
+      window.prompt("브리프 토큰(복사하세요)", token);
+    }
+  }
+
+  return (
+    <div className="rr-stack">
+      <h3 className="rr-subhead">브리프 토큰</h3>
+      <p className="rr-muted">
+        L2 워크플로 인자 <code>briefToken</code> 에 넣습니다. 발급 때만 원문이 오므로 이 화면을 떠나면
+        다시 볼 수 없습니다(앱은 해시만 저장합니다).
+      </p>
+      <ul className="rr-list">
+        {withToken.map((panel) => (
+          <li key={panel.panel_id} className="rr-row">
+            <code>{panel.panel_id}</code>
+            <button
+              type="button"
+              className="rr-btn rr-btn-quiet"
+              onClick={() => copy(panel.panel_id, panel.brief_token as string)}
+            >
+              토큰 복사
+            </button>
+            {copied === panel.panel_id ? <Badge tone="ok">복사됨</Badge> : null}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+
 function RecallPreview({ targetKey }: { targetKey: string }) {
   const [tier, setTier] = useState<string>("");
   const brief = useAsync(
@@ -751,6 +815,7 @@ function RecallPreview({ targetKey }: { targetKey: string }) {
           <p className="rr-muted">
             패널 {brief.data.panels.length}개 · {brief.data.budget.bytes} bytes · 잘린 항목 {brief.data.budget.dropped}
           </p>
+          <BriefTokens panels={brief.data.panels} />
           {slots.length === 0 ? <EmptyBlock title="근거 슬롯이 비어 있습니다." /> : null}
           {slots.map(([slot, items]) => (
             <div key={slot} className="rr-stack">

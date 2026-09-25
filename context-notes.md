@@ -528,3 +528,31 @@
 
 **검증.** `pytest` **1134 passed, 2 skipped**(시험 12건 추가) · `ruff` 통과 · DDL v1→v2 업그레이드가
 데이터를 보존하고 pre-migrate 사본을 남기는 것 실측 · 악의적 VOC 응답에 대한 위생·린터 방어 실증.
+
+### D19. 프런트 화면 3종 — REST 가 UI 없이 떠 있던 마지막 자리 (2026-09-25)
+
+큐레이션 큐(D-2026-09-02)와 같은 종류다 — 서버 경로는 있는데 사람이 쓸 입구가 없던 것들.
+
+- **`HumanFindingForm`**(TargetPage 등록부 카드) — `POST /targets/{key}/findings` 의 짝.
+  **인용 최소 1건을 폼이 먼저 강제한다** — 서버가 `cites:[]` 를 422 로 막으므로(§4.3.1), 사용자가 422 를
+  보고 나서야 알게 두지 않는다. 서버 가드는 그대로 남긴다(화면이 유일한 방벽이 되지 않게).
+  `mechanism` 선택지는 `GET /meta/taxonomy` 의 축에서 온다 — 어휘를 화면이 따로 가지면 한쪽만 늙는다.
+  실측 — 인용 1건이면 200 `{finding_id:'snap:S1#H1', origin:'human'}`, 0건이면 422.
+- **`BriefTokens`**(RecallPreview 안) — `GET /targets/{key}/brief` 가 패널마다 싣는 `brief_token` 을
+  복사한다. L2 오케스트레이터(`hwax-risk-review`)가 MCP `risk_get_brief` 에 넘기는 **유일한 열쇠**이고
+  이 값 없이는 게이트웨이 경유 호출이 안 열린다(§8.2.5). 클립보드가 막힌 환경(비보안 오리진)에서는
+  `window.prompt` 로 값을 노출해 직접 고를 수 있게 한다.
+  실측 — 편성된 패널에 32자 토큰이 발급되고 **DB 에는 해시만 남는다**(`brief_token_hash`) —
+  화면 문구 "이 화면을 떠나면 다시 볼 수 없습니다" 가 사실이다.
+- **`VocabCard`**(ProjectPage) — `POST /vocab/synonyms`·`stop-tokens`. 추가는 마이너, 삭제는 메이저이고
+  메이저면 붉은 배너로 `recompute_part_keys.py` 안내를 띄운다(§2.7.1). 실측 — 추가 `1.1/minor/
+  recompute_required=false`, 삭제 `2.0/major/true`.
+- **타입을 두 번 추측했다가 실물로 고쳤다.** `HumanFindingCreated` 를 `{dangling, evidence_grade}` 로,
+  `VocabBump` 를 `recompute_pending` 으로 적었는데 실제는 `{finding_id, claim_uid, cluster_key, origin}` 과
+  `recompute_required`(+`synonyms`·`stop_tokens`)다. D14 의 `app_version` 과 같은 실수라 이번에는
+  커밋 전에 라우트 반환문을 직접 읽어 맞췄다 — **응답 모양은 추측하지 말고 `return` 문을 본다**.
+- **3주 공백 확인.** 이 세션 재개 시 제 마지막 커밋(`6680384`) 위에 다른 세션의 커밋 4개가 있었다
+  (MCP 도구 7종·게이트웨이 사용자 위임). 프런트엔드는 건드리지 않아 충돌 0 이었고, 시험은 1134→1147 로
+  늘어 있었다. 재개 전에 `git log`·`pytest`·`checklist` 를 먼저 확인한 것이 그 판단의 근거다.
+- **검증.** `pytest` **1147 passed, 2 skipped** · `ruff` 통과 · `tsc -b && vite build` 통과 ·
+  `test_client_contract` 가 새 경로 3종을 인정 · 세 경로 실응답 확인.

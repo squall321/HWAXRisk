@@ -5,6 +5,8 @@ import type {
   Brief,
   CharacterProfile,
   Coverage,
+  HumanFindingCreate,
+  HumanFindingCreated,
   CurationDecided,
   CurationDecision,
   CurationList,
@@ -60,7 +62,9 @@ import type {
   TargetJobCreate,
   TargetJobCreated,
   VerdictUpdate,
+  VocabBump,
   VocabIndex,
+  VocabOp,
 } from "../types";
 
 /** REST base. 절대경로·오리진을 하드코딩하지 않는다 — Vite base './' 와 짝이다. */
@@ -321,6 +325,14 @@ export const riskApi = {
     request<ResyncQueued>(`targets/${encodeTargetKey(key)}/resync`, { method: "POST", ...o }),
   refreshRoster: (key: string, o?: Opt) =>
     request<RosterRefreshed>(`targets/${encodeTargetKey(key)}/refresh_roster`, { method: "POST", ...o }),
+
+  // ── 사람 finding · 사전 ───────────────────────────────────────────────────
+  createFinding: (key: string, body: HumanFindingCreate, o?: Opt) =>
+    request<HumanFindingCreated>(`targets/${encodeTargetKey(key)}/findings`, { method: "POST", body, ...o }),
+  putVocabSynonym: (body: { head: string; from: string[]; op: VocabOp }, o?: Opt) =>
+    request<VocabBump>("vocab/synonyms", { method: "POST", body, ...o }),
+  putVocabStopTokens: (body: { tokens: string[]; op: VocabOp }, o?: Opt) =>
+    request<VocabBump>("vocab/stop-tokens", { method: "POST", body, ...o }),
 
   // ── 큐레이션 큐 ───────────────────────────────────────────────────────────
   getCuration: (query: { kind?: string; status?: string; limit?: number } = {}, o?: Opt) =>
