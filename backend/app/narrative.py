@@ -1335,9 +1335,14 @@ def prior_evidence(store, target_key: str, *, user_memo: str | None = None,
 
     # 조립 경로는 strict_lint 다 — 판단어가 섞인 브리프를 엔진에 보내느니 E500 으로 멈춘다(plan §5.6.2).
     # E10 조회 채널은 없으면 None 이다(그 블록만 결측 문구가 되고 조립은 완주한다).
-    built = brief_module.build_brief(store, target_key, seats=seats, panel_id=panel_id,
-                                     exclude=tuple(exclude), field=field_source.from_settings(),
-                                     strict_lint=True)
+    field = field_source.from_settings()
+    try:
+        built = brief_module.build_brief(store, target_key, seats=seats, panel_id=panel_id,
+                                        exclude=tuple(exclude), field=field, strict_lint=True)
+    finally:
+        # 채널은 자기 httpx.Client 를 소유한다 — 닫지 않으면 브리프 조립마다 소켓이 샌다.
+        if field is not None:
+            field.close()
     items = [item for item, key in zip(built["evidence"], built["keys"]) if key != "E0c"]
     if user_memo and not any(str(i.get("source")) == "user_memo" for i in items):
         items.append({"source": "user_memo", "tool": "note", "args": target_key,

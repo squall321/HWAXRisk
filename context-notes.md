@@ -556,3 +556,23 @@
   늘어 있었다. 재개 전에 `git log`·`pytest`·`checklist` 를 먼저 확인한 것이 그 판단의 근거다.
 - **검증.** `pytest` **1147 passed, 2 skipped** · `ruff` 통과 · `tsc -b && vite build` 통과 ·
   `test_client_contract` 가 새 경로 3종을 인정 · 세 경로 실응답 확인.
+
+### D20. E10 자체 점검에서 내 버그 둘을 먼저 잡았다 (2026-09-25)
+
+적대 검증(5렌즈)을 돌리면서, 렌즈가 놓칠 수 있는 곳을 직접 확인해 둘을 찾았다.
+
+- **`product_refs_json` 의 `kind` 를 안 가렸다.** 정본 §5.6.2 는 "`product_refs_json` 의 **`product_code`
+  값들**" 이고 항목 모양은 `[{kind: 'ra_model'|'product_code', value, ra_entity_id}]`(§5.2.2 DDL 주석 2310행)다.
+  내 `product_keys` 는 종류를 안 가리고 모든 항목의 `value` 를 썼다 — **`ra_model` 의 값(RA 엔티티 코드)이
+  제품코드로 쓰여 VOC 를 엉뚱한 키로 조회한다.** 응답이 비면 `[필드·문헌 근거 없음 — VOC 0건]` 이 되어
+  오류 없이 '필드 이력 없음' 으로 보인다 — 또 '없는 리스크' 계열이다. kind 필터를 넣고 폴백 순서까지 시험에 고정했다.
+- **채널을 닫지 않았다.** `McpHttpClient` 는 자기 `httpx.Client` 를 소유하고 `close()` 가 있는데
+  `from_settings()` 로 만든 채널을 아무도 닫지 않았다. 리포에는 이미 같은 관례가 주석까지 달려 있다
+  (`routes.py` capture_all 뒤 "닫지 않으면 스냅샷 요청마다 소켓이 샌다"). 브리프 조립은 패널마다·미리보기
+  요청마다 돌아 누수가 더 빠르다. `FieldSource.close()` 를 주고 두 호출자를 `try/finally` 로 감쌌다.
+- **확인해서 문제 없던 것들**(렌즈 결과와 대조할 기준) — `scholar_query` 의 두 쿼리에 타이브레이커가
+  있어(`, id` · `, mechanism`) 정렬 결정론은 안전하다 · `_cached` 가 `ok = 1` 만 보므로 실패 응답을
+  캐시해 재시도를 막지 않는다 · `except Exception` 은 `KeyboardInterrupt`·`SystemExit`(BaseException)을
+  삼키지 않는다 · `_framing` 의 날짜는 ISO 고정폭이라 E5 산술이 날짜로 흔들리지 않고, 그 산술 시험은
+  실측값에서 계산하므로 프레이밍이 길어지면 스스로 깨진다.
+- **검증.** `pytest` **1148 passed, 2 skipped**(시험 2건 추가) · `ruff` 통과.

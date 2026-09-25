@@ -56,6 +56,12 @@ class FieldSource:
                      ok=ok, error=None if ok else _error_of(reply), started=started)
         return result if ok else None
 
+    def close(self) -> None:
+        """자기 httpx.Client 를 닫는다 — 닫지 않으면 브리프 조립마다 소켓이 샌다(capture_all 과 같은 처리)."""
+        closer = getattr(self.mcp, "close", None)
+        if callable(closer):
+            closer()
+
     # ------------------------------------------------ 원장
     def _cached(self, store, target_key: str, tool: str, args_hash: str) -> Any | None:
         row = store.query_one(

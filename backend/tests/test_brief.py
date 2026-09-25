@@ -887,3 +887,47 @@ def test_only_the_citations_the_brief_actually_loaded_resolve(risk_store):
     invented = narrative.resolve_cites([{"ref": "voc:F7-2024#없는이슈"}], ctx, claim="c", raised_by=["rel"])
     assert invented["dangling"] == ["voc:F7-2024#없는이슈"]
     assert narrative.evidence_grade_from_cites(invented, ctx) == "경험칙"
+
+
+def test_only_product_code_refs_become_lookup_keys(risk_store):
+    """§5.6.2 — `product_refs_json` 의 **`product_code` 값들**만 조회 키다.
+
+    항목 모양은 `[{kind: 'ra_model'|'product_code', value, ra_entity_id}]`(§5.2.2) 이므로 kind 를 가려야 한다.
+    안 가리면 `ra_model` 의 값이 제품코드로 쓰여 VOC 를 엉뚱한 키로 조회한다.
+    """
+    refs = [{"kind": "ra_model", "value": "RA-999", "ra_entity_id": 1},
+            {"kind": "product_code", "value": "F7-2024", "ra_entity_id": 2}]
+    risk_store.execute(
+        "INSERT INTO rr_projects(id, owner_sub, code, name, product_refs_json, product_code,"
+        " created_at, updated_at) VALUES ('P1','u@x','F7','F7',?,'F7-FALLBACK',1,1)",
+        (json.dumps(refs),))
+
+    assert brief.product_keys(risk_store, "P1") == (["F7-2024"], False)
+
+    # product_code 종류가 없으면 rr_projects.product_code 로 떨어진다(전작이 아니다).
+    risk_store.execute("UPDATE rr_projects SET product_refs_json = ? WHERE id = 'P1'",
+                       (json.dumps([refs[0]]),))
+    assert brief.product_keys(risk_store, "P1") == (["F7-FALLBACK"], False)
+
+    # 셋 다 없으면 빈 목록이다.
+    risk_store.execute("UPDATE rr_projects SET product_refs_json = NULL, product_code = NULL WHERE id = 'P1'")
+    assert brief.product_keys(risk_store, "P1") == ([], False)
+
+
+def test_the_field_channel_is_closed_after_assembly(risk_store, monkeypatch):
+    """채널은 자기 httpx.Client 를 소유한다 — 닫지 않으면 브리프 조립마다 소켓이 샌다."""
+    closed = []
+
+    class _Client:
+        def call(self, name, args):
+            return {"ok": False, "error": "down"}
+
+        def close(self):
+            closed.append(True)
+
+    source = field_source.FieldSource(_Client())
+    source.close()
+
+    assert closed == [True]
+    # close 가 없는 채널(시험 stub)에도 안전하다.
+    field_source.FieldSource(_FieldStub({})).close()

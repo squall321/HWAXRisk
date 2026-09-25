@@ -709,9 +709,11 @@ def product_keys(store, project_id: str) -> tuple[list[str], bool]:
         (project_id,)) if project_id else None
     if row is None:
         return [], False
-    refs = [_s(r.get("value") if isinstance(r, Mapping) else r)
-            for r in (_j(row["product_refs_json"], []) or [])]
-    refs = [r for r in refs if r]
+    # 정본 §5.6.2 는 "`product_refs_json` 의 **`product_code` 값들**" 이라고 적는다 — 항목 모양은
+    # `[{kind: 'ra_model'|'product_code', value, ra_entity_id}]`(§5.2.2 DDL 주석)이므로 kind 를 가려야 한다.
+    # 안 가리면 `ra_model` 의 값이 제품코드로 쓰여 VOC 를 엉뚱한 키로 조회한다.
+    refs = [_s(r.get("value")) for r in (_j(row["product_refs_json"], []) or [])
+            if isinstance(r, Mapping) and _s(r.get("kind")) == "product_code" and _s(r.get("value"))]
     if refs:
         return refs, False
     if _s(row["product_code"]):
