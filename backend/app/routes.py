@@ -397,6 +397,11 @@ class ProjectBody(BaseModel):
     classification: str | None = None
     stage: str | None = None
     predecessor_project_id: str | None = None
+    # 제품 3열(정본 §8.2.3 POST 계약) — §7.6 라벨 경로 4·§5.6.1 E10 의 조회 키다. 없으면 pydantic 이
+    # extra 를 조용히 버려, 정본 계약대로 보낸 클라이언트가 **오류 없이** 제품 연결 없는 과제를 얻는다.
+    product_code: str | None = None
+    product_refs_json: list | None = None
+    predecessor_product_code: str | None = None
     adh_scope: dict | None = None
 
 
@@ -413,15 +418,30 @@ def create_project(body: ProjectBody, ident: identity.Identity = Depends(identit
     now = now_epoch()
     project_id = new_uuid()
     store = get_store()
+    # 정본 §8.2.4 — "첫 행이 product_code 대표값으로 들어가고 계보 과제가 있으면 그 과제의
+    # product_code 가 predecessor_product_code 로 채워진다". 대표값은 `kind='product_code'` 인 행에서
+    # 고른다(`ra_model` 값은 RA 엔티티 코드라 VOC 조회 키가 아니다 — brief.product_keys 와 같은 규칙).
+    refs = [r for r in (body.product_refs_json or []) if isinstance(r, dict)]
+    product_code = body.product_code or next(
+        (str(r.get("value")) for r in refs
+         if str(r.get("kind") or "") == "product_code" and r.get("value")), None)
+    predecessor_product_code = body.predecessor_product_code
+    if predecessor_product_code is None and body.predecessor_project_id:
+        prior = store.query_one("SELECT product_code FROM rr_projects WHERE id = ? AND owner_sub = ?",
+                                (body.predecessor_project_id, owner_sub))
+        predecessor_product_code = (prior["product_code"] if prior else None) or None
     try:
         # 과제 행과 owner 멤버 행은 한 트랜잭션이다(risk_store rr_project_members 불변식 — owner 행 정확히 1건).
         with store.tx():
             store.execute(
                 "INSERT INTO rr_projects(id, owner_sub, code, name, stage, classification,"
-                " predecessor_project_id, adh_team, adh_group, character_status, created_at, updated_at)"
-                " VALUES (?,?,?,?,?,?,?,?,?,'seed',?,?)",
+                " predecessor_project_id, product_code, product_refs_json, predecessor_product_code,"
+                " adh_team, adh_group, character_status, created_at, updated_at)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,'seed',?,?)",
                 (project_id, owner_sub, body.code, body.name, body.stage, body.classification,
-                 body.predecessor_project_id, scope.get("team"), scope.get("group"), now, now),
+                 body.predecessor_project_id, product_code,
+                 canonical_json(refs) if refs else None, predecessor_product_code,
+                 scope.get("team"), scope.get("group"), now, now),
             )
             store.execute(
                 "INSERT INTO rr_project_members(project_id, owner_sub, email, role, added_by, added_at,"
@@ -733,6 +753,8 @@ TRANSFER_DERIVED: tuple[tuple[str, str], ...] = (
     ("rr_roster", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_panels", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_panel_calls", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    # 빠뜨리면 새 소유자의 반출(owner_sub 스코프)에서 해석 원장이 사라져 voc:·paper: 인용이 dangling 된다.
+    ("rr_brief_calls", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_seat_opinions", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_jobs", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_registry", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
@@ -934,6 +956,10 @@ PURGE_BLANK_SQL: tuple[tuple[str, str], ...] = (
                          " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_findings", "UPDATE rr_findings SET finding_json = '' WHERE project_id = ?"),
     ("rr_character", "UPDATE rr_character SET statement = '' WHERE project_id = ?"),
+    # 브리프가 부른 외부 VOC·문헌 **원문**이다(§5.6.2). 비우지 않으면 폐기·코퍼스 제외 뒤에도 DB 와
+    # 반출 JSONL 에 남는다 — rr_panel_calls.result_gz 와 같은 성질의 열이다.
+    ("rr_brief_calls", "UPDATE rr_brief_calls SET result_gz = NULL"
+                       " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
 )
 
 
@@ -2525,9 +2551,21 @@ def get_similar(project_id: str, k: int = 5, ident: identity.Identity = Depends(
 
 
 def _ref_from_store(info: dict, owner_sub: str) -> dict | None:
-    """스냅샷 스코프 없이 전역으로 주소가 잡히는 참조(reg·narr·tool·rpt·inc·card)를 원장에서 찾는다."""
+    """스냅샷 스코프 없이 전역으로 주소가 잡히는 참조(reg·narr·tool·rpt·inc·card·req·voc·paper)를 원장에서 찾는다."""
     store = get_store()
     kind = info["kind"]
+    if kind == "req":
+        # 과제 스코프는 참조 문자열에 없다 — 호출자 소유 요구에서 찾는다. 범위·정렬은 인용 해석과 같다
+        # (waived 제외·kind 순서, §2.8b) — 갈리면 인용은 해석되는데 REST 가 404 가 된다.
+        row = store.query_one(
+            "SELECT id, project_id, name, kind, op, value_json, unit, status, source_ref FROM rr_requirements"
+            " WHERE name = ? AND owner_sub = ? AND status IN ('candidate','confirmed')"
+            " ORDER BY kind LIMIT 1", (info["name"], owner_sub))
+        return dict(row) if row is not None else None
+    if kind in ("voc", "paper"):
+        return narrative.find_field_item(
+            store, kind, info["issue_key"] if kind == "voc" else info["paper_id"],
+            product_code=info.get("product_code"), owner_sub=owner_sub)
     if kind == "reg":
         row = store.query_one(
             "SELECT target_key, cluster_key, merged_json, severity, judgement, status, support, contested"

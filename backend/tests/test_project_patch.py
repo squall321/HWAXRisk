@@ -787,3 +787,64 @@ def test_mcp_not_visible_counter_rises_once_per_hidden_read(risk_store, monkeypa
     row = risk_store.query_one(
         "SELECT value, n FROM rr_metrics WHERE metric = 'mcp_not_visible' AND dimension = 'global'")
     assert (row["value"], row["n"]) == (4.0, 4)
+
+
+# ------------------------------------------------- 적대 검증에서 확정된 배선 누락(2026-09-25)
+def _brief_call(store, target_key: str, owner: str = OWNER) -> None:
+    """브리프가 부른 외부 VOC 원문 1행 — rr_panel_calls.result_gz 와 같은 성질의 열이다."""
+    store.execute(
+        "INSERT INTO rr_brief_calls(call_id, target_key, owner_sub, tool, app_key, args_json, args_hash,"
+        " ok, result_gz, result_bytes, sha256, fetched_at) VALUES ('b-1', ?, ?, 'get_top_issues',"
+        " 'signalforge', '{\"product_code\":\"F7\"}', 'ah1', 1, X'1f8b', 2, 'sh1', 1)", (target_key, owner))
+
+
+def test_purge_blanks_the_external_field_payload_too(risk_store, monkeypatch):
+    """폐기는 외부 VOC·문헌 **원문**도 비운다 — 안 비우면 tombstone 뒤에도 DB·반출에 남는다."""
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    project_id = _project(risk_store)
+    _brief_call(risk_store, _target(risk_store, project_id))
+
+    routes.purge_project(project_id, routes.PurgeBody(code="PRJ-p1", reason="정리"), ident=_ident())
+
+    row = risk_store.query_one("SELECT result_gz, sha256 FROM rr_brief_calls WHERE call_id = 'b-1'")
+    assert row["result_gz"] is None, "외부 VOC 원문이 폐기 뒤에도 남았다"
+    assert row["sha256"] == "sh1", "해시는 남는다(폐기는 행 삭제가 아니다)"
+
+
+def test_transfer_moves_the_field_resolution_ledger(risk_store, monkeypatch):
+    """이양이 이 표를 빠뜨리면 새 소유자의 반출(owner_sub 스코프)에서 해석 원장이 사라진다."""
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    project_id = _project(risk_store)
+    _member(risk_store, project_id, EDITOR, "editor")
+    _brief_call(risk_store, _target(risk_store, project_id))
+
+    routes.transfer_project(project_id, routes.TransferBody(to_email=EDITOR, reason="담당 교체"), ident=_ident())
+
+    assert risk_store.query_one(
+        "SELECT owner_sub FROM rr_brief_calls WHERE call_id = 'b-1'")["owner_sub"] == EDITOR
+
+
+def test_create_project_keeps_the_product_link_it_was_sent(risk_store, monkeypatch):
+    """정본 §8.2.3 POST 계약의 제품 3열 — 없으면 pydantic 이 extra 를 버려 **오류 없이** 사라졌다.
+
+    대표값 규칙은 §8.2.4 다 — `kind='product_code'` 인 첫 행이 대표값이고(`ra_model` 값은 RA 엔티티
+    코드라 VOC 조회 키가 아니다) 계보 과제가 있으면 그 과제의 `product_code` 가 전작으로 채워진다.
+    """
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    prior = routes.create_project(routes.ProjectBody(
+        code="OLD-1", name="전작", classification="internal", product_code="F6-2023"), ident=_ident())
+    assert risk_store.query_one(
+        "SELECT product_code FROM rr_projects WHERE id = ?", (prior["id"],))["product_code"] == "F6-2023"
+
+    made = routes.create_project(routes.ProjectBody(
+        code="NEW-1", name="후임", classification="internal",
+        predecessor_project_id=prior["id"],
+        product_refs_json=[{"kind": "ra_model", "value": "RA-MODEL-9"},
+                           {"kind": "product_code", "value": "F7-2024"}]), ident=_ident())
+
+    row = risk_store.query_one(
+        "SELECT product_code, product_refs_json, predecessor_product_code FROM rr_projects WHERE id = ?",
+        (made["id"],))
+    assert row["product_code"] == "F7-2024", "ra_model 값이 대표 제품코드로 잡혔다"
+    assert row["predecessor_product_code"] == "F6-2023"
+    assert len(json.loads(row["product_refs_json"])) == 2

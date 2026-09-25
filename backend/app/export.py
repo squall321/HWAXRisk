@@ -45,6 +45,7 @@ _SINCE_COLS: dict[str, tuple[str, ...]] = {
     "rr_sources": ("created_at",),
     "rr_snapshots": ("created_at",),
     "rr_snapshot_calls": ("started_at",),
+    "rr_brief_calls": ("fetched_at",),
     "rr_ir_nodes": (),
     "rr_ir_edges": (),
     "rr_part_keys": ("updated_at", "created_at"),

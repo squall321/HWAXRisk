@@ -76,7 +76,10 @@ JUDGEMENT_LEXICON: tuple[dict, ...] = (
 LINT_NEUTRAL_PATTERNS: tuple[str, ...] = (
     QUOTE_OPEN + r"[^" + QUOTE_CLOSE + r"]*" + QUOTE_CLOSE,      # «원문 인용»
     r"\[[a-z]+:[^\]]*\]",                                        # 산문 표기의 참조 [c:…]
-    r"(?<![A-Za-z0-9_])(?:p|e|c|d|sig|gate|rule|warn|narr|reg|card|rpt|inc|tool|name):[^\s\]]+",
+    # 1급 참조 토큰 전종(§0.2.1). 여기 없는 스킴은 마스킹되지 않아 **외부 문자열이 린터 앞에 그대로 선다** —
+    # `voc:`·`paper:` 의 issue_key·DOI 와 `req:` 의 규격 번호는 남이 지은 문자열이고 «…» 로 감쌀 수도 없다
+    # (감싸면 참조로 파싱되지 않는다). 새 스킴을 REF_SCHEMES 에 넣을 때 이 줄도 같이 넣어야 한다.
+    r"(?<![A-Za-z0-9_])(?:p|e|c|d|sig|gate|rule|warn|narr|reg|card|rpt|inc|tool|name|req|voc|paper):[^\s\]]+",
     r"char:[a-z_]+:[A-Za-z0-9_]+",                               # 성격 통제 어휘 태그
     r"(?<![A-Za-z0-9_])x:[A-Za-z0-9_]+",                         # 자유 제안 태그
 )

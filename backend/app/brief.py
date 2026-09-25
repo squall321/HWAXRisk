@@ -31,6 +31,10 @@ CAPS: dict[str, int] = {
 # clip_lines 가 뒤에서부터 버리므로 맨 뒤 E10 이 통째로 조용히 사라진다. 그래서 E10 만 실효 잔여로 맞춘다
 # (E5+·E5− 는 정본 값 그대로 — 선례를 깎지 않는다, context-notes D18).
 E5_POSITIVE_CAP, E5_NEGATIVE_CAP, E5_FIELD_CAP = 700, 300, 340
+# 그 실효 잔여의 근거 — CAPS['E5'] 에서 먼저 드는 오버헤드다(line_overhead 52 + 프레이밍 ≤56 +
+# 블록 머리글 3줄 51). 세 캡의 합이 `CAPS['E5'] − E5_STRUCTURAL` 를 넘으면 clip_lines 가 뒤에서부터
+# 버려 맨 뒤 E10 이 통째로 사라진다. 주석으로만 두면 다시 틀어지므로 시험이 이 부등식을 지킨다.
+E5_STRUCTURAL = 159
 ITEM_ORDER: tuple[str, ...] = ("E0", "E0c", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9", "M")
 
 # E7 고정 슬롯(plan §5.6.3) — 좌석당 줄 220자, 좌석 합 1100자. 다른 항목이 비어도 늘리지 않는다.
@@ -695,8 +699,9 @@ FIELD_CALL_TIMEOUT_S = 5.0
 FIELD_REUSE_S = 24 * 3600
 FIELD_TOOLS: tuple[str, ...] = ("get_top_issues", "search_scholar")
 _VOC_CATEGORY, _VOC_EXCERPT, _PAPER_TITLE, _PAPER_EXCERPT = 40, 80, 60, 80
-# get_top_issues 조회 창(plan §5.6.2 — 90d).
+# get_top_issues 조회 창(plan §5.6.2 — 90d)과 카테고리 수(§5.6.2 "상위 카테고리 3")·문헌 수(상위 2).
 VOC_WINDOW_DAYS = 90
+VOC_CATEGORIES, PAPER_TOP = 3, 2
 
 
 def product_keys(store, project_id: str) -> tuple[list[str], bool]:
@@ -736,6 +741,35 @@ def scholar_query(store, ctx) -> str:
     return " ".join(parts)
 
 
+def rendered_field_items(payload: Any, kind: str) -> list[Mapping[str, Any]]:
+    """E10 이 **실제로 줄로 만든** 항목들. 조립과 `voc:`·`paper:` 존재 검증이 같은 규칙을 봐야 한다.
+
+    정본 §0.2.1 은 `voc:` 를 "브리프 E10 블록에 실린 것만" 이라 적는다. 응답 원문 전체를 근거로 삼으면
+    블록에 안 실린 4번째 이슈를 인용해도 측정 등급을 받는다 — 이슈 키는 연번이라 추측이 쉽다.
+    `voc` 는 정본 "상위 카테고리 3" 이라 카테고리로 중복을 걷고(먼저 나온 이슈가 그 카테고리 대표),
+    `paper` 는 상위 2 다. 줄 수·문자 상한은 여기서 재현하지 않으므로 이 목록은 **상한**이다.
+    """
+    rows = _rows_of(payload, "issues" if kind == "voc" else "papers") or []
+    out: list[Mapping[str, Any]] = []
+    seen: set[str] = set()
+    for item in rows:
+        if not isinstance(item, Mapping):
+            continue
+        if kind == "voc":
+            if not _s(item.get("issue_key")):
+                continue
+            cat = _s(item.get("category"))
+            if cat in seen:
+                continue
+            seen.add(cat)
+        elif not (_s(item.get("record_id")) or _s(item.get("doi"))):
+            continue
+        out.append(item)
+        if len(out) >= (VOC_CATEGORIES if kind == "voc" else PAPER_TOP):
+            break
+    return out
+
+
 def _field_evidence_lines(store, ctx, field=None) -> list[str]:
     """E10 블록(plan §5.6.1·§5.6.2).
 
@@ -762,14 +796,12 @@ def _field_evidence_lines(store, ctx, field=None) -> list[str]:
     if issues is None:
         unreachable.append("get_top_issues")
     else:
-        for item in (_rows_of(issues, "issues") or [])[:3]:
-            key = _s(item.get("issue_key"))
-            if not key:
-                continue
+        for item in rendered_field_items(issues, "voc"):
+            key, raw_cat = _s(item.get("issue_key")), _s(item.get("category"))
             # 응답의 자유 문자열은 전부 위생을 거쳐 «…» 안에 둔다 — 밖에 두면 판단어 린터에 그대로 노출돼
             # 남의 VOC 문구 하나가 브리프 조립을 통째로 죽인다(§3.4.1 은 브리프의 외부 문자열을 위생 대상으로 못 박는다).
             # 기간은 응답이 아니라 내가 보낸 인자로 적는다(외부 문자열을 하나 줄인다).
-            cat = render.sanitize_source_text(_s(item.get("category"))[:_VOC_CATEGORY], "voc")
+            cat = render.sanitize_source_text(raw_cat[:_VOC_CATEGORY], "voc")
             excerpt = render.sanitize_source_text(_s(item.get("text"))[:_VOC_EXCERPT], "voc")
             lines.append(f"{prefix}voc:{codes[0]}#{key} | {cat} | n={_int(item.get('n'))} |"
                          f" {VOC_WINDOW_DAYS}d | {excerpt}")
@@ -779,17 +811,24 @@ def _field_evidence_lines(store, ctx, field=None) -> list[str]:
     if query and papers is None:
         unreachable.append("search_scholar")
     else:
-        for item in (_rows_of(papers, "papers") or [])[:2]:
+        for item in rendered_field_items(papers, "paper"):
             pid = _s(item.get("record_id")) or _s(item.get("doi"))
-            if not pid:
-                continue
             title = render.sanitize_source_text(_s(item.get("title"))[:_PAPER_TITLE], "paper")
             excerpt = render.sanitize_source_text(_s(item.get("abstract"))[:_PAPER_EXCERPT], "paper")
             lines.append(f"paper:{pid} | {title} | {excerpt}")
 
     lines = lines[: max(1, int(getattr(config.settings, "risk_field_evidence_lines", 5)))]
-    lines += [f"[조회 불가: {tool}]" for tool in unreachable]
-    return lines or ["[필드·문헌 근거 없음 — VOC 0건]"]
+    # 줄 수 상한(정본 "합쳐 최대 5줄")은 근거 줄에만 걸고 `[조회 불가]` 는 그 밖이다(정본은 그 줄을 따로 적는다).
+    tail = [f"[조회 불가: {tool}]" for tool in unreachable]
+    # 문자 상한(E5_FIELD_CAP)은 여기서 걸어야 한다 — 걸지 않으면 E5 항목 전체가 실효 한도를 넘고
+    # clip_lines 가 **뒤에서부터** 버려 E10 이 통째로 사라진다(D18 이 340 을 계산한 이유이자, 그 값을
+    # 적용하지 않아 D18 이 막으려던 실패가 그대로 살아 있던 자리다). 꼬리 길이를 먼저 떼어 두어
+    # 조회 불가 사실이 예산 때문에 지워지지 않게 한다 — 그게 지워지면 '조회했는데 0건' 과 구별되지 않는다.
+    tail_len = sum(len(t) + 1 for t in tail)
+    if lines:
+        clipped = clip_lines("\n".join(lines), max(0, E5_FIELD_CAP - tail_len))
+        lines = clipped.split("\n") if clipped else []
+    return (lines + tail) or ["[필드·문헌 근거 없음 — VOC 0건]"]
 
 
 def _int(value: Any) -> int | str:

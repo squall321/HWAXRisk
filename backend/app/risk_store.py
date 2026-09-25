@@ -546,7 +546,7 @@ _DDL_V1: list[str] = _split_statements(_DDL_V1_SQL)
 # CHECK 어휘 확장은 마이그레이션 허용 연산 밖이라, 구조가 맞는 별도 표로 둔다(context-notes D18).
 _DDL_V2_SQL = """
 CREATE TABLE IF NOT EXISTS rr_brief_calls (                   -- 브리프 조립이 부른 외부 도구 응답 원문(§5.6.2 E10)
-  call_id TEXT PRIMARY KEY,                     -- 'b-<target_key sha256[:8]>-<seq:03d>'
+  call_id TEXT PRIMARY KEY,                     -- 'b-<sha256(target_key|tool|args_hash)[:24]>' — 키 하나당 한 행(§5.6.2)
   target_key TEXT NOT NULL, owner_sub TEXT NOT NULL,
   tool TEXT NOT NULL, app_key TEXT,
   args_json TEXT NOT NULL, args_hash TEXT NOT NULL,           -- 24 h 재사용 판정 키는 (target_key, tool, args_hash)

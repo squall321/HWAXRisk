@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from app import brief, field_source, render
+from app import brief, field_source, narrative, render
 from app.errors import AppError
 from app.ra_client import empty_sync
 
@@ -931,3 +931,114 @@ def test_the_field_channel_is_closed_after_assembly(risk_store, monkeypatch):
     assert closed == [True]
     # close 가 없는 채널(시험 stub)에도 안전하다.
     field_source.FieldSource(_FieldStub({})).close()
+
+
+# ------------------------------------------------- E10 적대 검증에서 확정된 결함들(2026-09-25)
+def test_the_field_block_stays_inside_its_character_budget(risk_store):
+    """E5_FIELD_CAP 이 실제로 걸린다 — 안 걸면 E5 항목이 실효 한도를 넘고 clip_lines 가 뒤부터 버린다.
+
+    D18 이 340 을 계산한 이유가 바로 그것인데 그 값을 어디에도 적용하지 않아, 막으려던 실패가
+    그대로 살아 있었다(적대 검증 5렌즈 전원 지적).
+    """
+    long_issues = {"issues": [
+        {"issue_key": f"ISS-{i}", "category": f"카테고리{i}", "n": i, "text": "가" * 400}
+        for i in range(1, 6)]}
+    ctx = _field_target(risk_store)
+    source = field_source.FieldSource(_FieldStub({"get_top_issues": long_issues}, boom=["search_scholar"]))
+    _character_tag(risk_store)
+
+    lines = brief._field_evidence_lines(risk_store, ctx, source)
+
+    body = [ln for ln in lines if not ln.startswith("[조회 불가")]
+    assert len("\n".join(body)) <= brief.E5_FIELD_CAP
+    # 조회 불가 사실은 예산 때문에 지워지지 않는다 — 지워지면 '조회했는데 0건' 과 구별되지 않는다.
+    assert lines[-1] == "[조회 불가: search_scholar]"
+
+
+def test_the_three_e5_block_caps_fit_the_item_line_cap(risk_store):
+    """D18 산술을 기계가 검사한다 — 세 블록 캡의 합 + 오버헤드 ≤ CAPS['E5'].
+
+    이 부등식이 깨지면 `clip_lines` 가 **뒤에서부터** 버려 맨 뒤 E10 이 통째로 사라진다. 주석으로만
+    두었다가 실제로 값을 적용하지 않은 것이 이번에 확정된 결함이므로 산술 자체를 고정한다.
+    """
+    caps = brief.E5_POSITIVE_CAP + brief.E5_NEGATIVE_CAP + brief.E5_FIELD_CAP
+    assert caps + brief.E5_STRUCTURAL <= brief.CAPS["E5"]
+
+    # E5_STRUCTURAL 이 실측보다 작으면 위 부등식이 거짓 안심이 된다 — 빈 항목으로 실측해 대조한다.
+    ctx = _field_target(risk_store, product_code=None)
+    empty = brief._item_e5(risk_store, ctx, {}, "u@x", None)
+    heads = [ln for ln in empty["result"].split("\n") if ln.startswith("[E5") or ln.startswith("[E10")]
+    assert len(heads) == 3
+    measured = brief.line_overhead(empty) + brief.FRAMING_MAX + sum(len(h) + 1 for h in heads)
+    assert measured <= brief.E5_STRUCTURAL + brief.FRAMING_MAX
+
+
+def test_voc_lines_are_top_categories_not_the_first_three_issues(risk_store):
+    """정본 §5.6.2 는 '상위 카테고리 3' 이다 — 같은 카테고리가 세 줄을 차지하면 VOC 의 넓이가 사라진다."""
+    same_cat = {"issues": [
+        {"issue_key": "ISS-1", "category": "파손/깨짐", "n": 9, "text": "힌지"},
+        {"issue_key": "ISS-2", "category": "파손/깨짐", "n": 8, "text": "브래킷"},
+        {"issue_key": "ISS-3", "category": "파손/깨짐", "n": 7, "text": "커버"},
+        {"issue_key": "ISS-4", "category": "발열", "n": 2, "text": "후면"},
+    ]}
+    ctx = _field_target(risk_store)
+    source = field_source.FieldSource(_FieldStub({"get_top_issues": same_cat}, boom=["search_scholar"]))
+
+    voc = [ln for ln in brief._field_evidence_lines(risk_store, ctx, source) if ln.startswith("voc:")]
+
+    assert [ln.split("#")[1].split(" ")[0] for ln in voc] == ["ISS-1", "ISS-4"]
+
+
+def test_a_failed_refetch_does_not_erase_the_stored_payload(risk_store):
+    """실패는 캐시 미스일 뿐이다 — 성공 원문을 지우면 이미 인용된 voc: 가 dangling 으로 뒤바뀐다.
+
+    행이 `(target, tool, args)` 당 하나뿐이라 `INSERT OR REPLACE` 가 `result_gz` 를 NULL 로 만들었다.
+    """
+    source = field_source.FieldSource(_FieldStub({"get_top_issues": ISSUES}))
+    args = {"product_code": "F7-2024", "window_days": 90}
+    assert source.fetch(risk_store, "snap:S1", "u@x", "get_top_issues", args) is not None
+    before = risk_store.query_one("SELECT result_gz, sha256 FROM rr_brief_calls")["sha256"]
+    # 24 h 창을 넘긴 상태를 만든다 — 그래야 다음 조립이 실제로 재조회한다.
+    risk_store.execute("UPDATE rr_brief_calls SET fetched_at = 0")
+
+    dead = field_source.FieldSource(_FieldStub({}, boom=["get_top_issues"]))
+    assert dead.fetch(risk_store, "snap:S1", "u@x", "get_top_issues", args) is None
+
+    rows = risk_store.query("SELECT ok, result_gz, sha256, error FROM rr_brief_calls", ())
+    assert len(rows) == 1, "키 하나당 한 행 규칙이 깨졌다"
+    assert rows[0]["result_gz"] is not None, "실패가 성공 원문을 지웠다"
+    assert rows[0]["sha256"] == before
+
+
+def test_a_cited_issue_must_be_one_the_block_actually_carried(risk_store):
+    """§0.2.1 — '브리프 E10 블록에 실린 것만'. 원문에만 있는 4번째 이슈는 dangling 이다."""
+    deep = {"issues": [{"issue_key": f"ISS-{i}", "category": f"c{i}", "n": i, "text": "t"}
+                       for i in range(1, 8)]}
+    ctx = _field_target(risk_store)
+    source = field_source.FieldSource(_FieldStub({"get_top_issues": deep}, boom=["search_scholar"]))
+    brief._field_evidence_lines(risk_store, ctx, source)
+
+    spec = narrative.SpecContext(owner_sub="u@x", store=risk_store, target_key="snap:S1")
+    assert spec.field_evidence("voc", "ISS-1", "F7-2024") is not None
+    assert spec.field_evidence("voc", "ISS-5", "F7-2024") is None, "블록에 없던 이슈가 해석됐다"
+    # 제품코드가 다른 인용은 남의 필드 이력이다.
+    assert spec.field_evidence("voc", "ISS-1", "OTHER-99") is None
+
+
+def test_older_scholar_queries_stay_resolvable(risk_store):
+    """scholar_query 는 성격 태그가 쌓이면 바뀐다 — 행 수를 자르면 예전 패널의 paper: 가 뒤늦게 죽는다."""
+    _field_target(risk_store)
+    source = field_source.FieldSource(_FieldStub({"search_scholar": PAPERS}))
+    first = source.fetch(risk_store, "snap:S1", "u@x", "search_scholar", {"q": "q0"})
+    assert first is not None
+    # 가장 오래된 행으로 못 박는다 — 같은 초에 넣으면 정렬이 불확정이라 재현이 안 된다.
+    risk_store.execute("UPDATE rr_brief_calls SET fetched_at = 1 WHERE tool = 'search_scholar'")
+    for i in range(1, 5):                            # 질의문이 바뀌며 새 행이 쌓인다
+        later = field_source.FieldSource(
+            _FieldStub({"search_scholar": {"papers": [{"doi": f"10.1/{i}", "title": "t", "abstract": "a"}]}}))
+        later.fetch(risk_store, "snap:S1", "u@x", "search_scholar", {"q": f"q{i}"})
+        risk_store.execute("UPDATE rr_brief_calls SET fetched_at = ? WHERE args_json LIKE ?",
+                           (100 + i, f'%"q{i}"%'))
+
+    spec = narrative.SpecContext(owner_sub="u@x", store=risk_store, target_key="snap:S1")
+    assert spec.field_evidence("paper", "10.1000/abc") is not None, "가장 오래된 질의의 인용이 죽었다"

@@ -219,36 +219,35 @@ class SpecContext:
     versions: dict = field(default_factory=dict)         # taxonomy_version·rule_version·ir_version·diff_version·planner_version
 
     # ------------------------------------------------ 조회
-    def field_evidence(self, kind: str, key: str) -> dict | None:
-        """`voc:`·`paper:` 해석 — 이 타깃의 브리프가 실제로 부른 응답 원문 안에 그 항목이 있어야 한다.
+    def field_evidence(self, kind: str, key: str, product_code: str | None = None) -> dict | None:
+        """`voc:`·`paper:` 해석 — 이 타깃의 브리프가 **블록에 실은** 항목이어야 한다.
 
-        정본이 두 갈래로 적은 것(§0.2.1 '브리프 E10 블록에 실린 것만' · §5.6.2 'rr_panel_calls 에 남아
-        해석된다')은 같은 뜻이다 — 브리프가 부른 원문 원장이 곧 실린 것의 목록이다(rr_brief_calls).
-        좌석이 지어낸 `voc:` 는 원장에 없으므로 dangling 이고 등급이 오르지 않는다.
+        정본이 두 갈래로 적은 것(§0.2.1 '브리프 E10 블록에 실린 것만' · §5.6.2 '원장에 남아 해석된다')은
+        같은 뜻이다 — 브리프가 부른 원문 원장이 곧 실린 것의 목록이다(`rr_brief_calls`). 다만 '부른 것' 과
+        '실린 것' 은 다르다. 원문에는 이슈가 수십 건 와도 블록은 상위 카테고리 3 + 문헌 2 만 싣는다.
+        원문 전체를 근거로 삼으면 블록에 없던 이슈를 인용해도 측정 등급이 붙는다(이슈 키는 연번이라
+        추측이 쉽다). 그래서 조립과 같은 선택 규칙(`brief.rendered_field_items`)을 통과한 항목만 인정한다.
+
+        `voc:` 는 제품코드까지 대조한다 — 원장 행은 특정 `product_code` 로 부른 응답이므로, 코드가 다른
+        인용을 통과시키면 남의 제품 필드 이력이 이 제품의 근거로 선다.
+        행 수를 자르지 않는다 — `search_scholar` 의 질의문은 성격 태그·mechanism 이 쌓이면 바뀌어
+        `args_hash` 마다 새 행이 생기고, 몇 행만 보면 **예전 패널의 `paper:` 인용이 뒤늦게 dangling** 이 된다.
         """
-        import gzip  # noqa: PLC0415 — 이 경로에서만 쓴다.
-
-        tool = "get_top_issues" if kind == "voc" else "search_scholar"
-        rows = self._rows(
-            "SELECT result_gz FROM rr_brief_calls WHERE target_key = ? AND tool = ? AND ok = 1"
-            " ORDER BY fetched_at DESC LIMIT 3", (self.target_key, tool))
-        wanted = ("issue_key",) if kind == "voc" else ("record_id", "doi")
-        for row in rows:
-            try:
-                payload = json.loads(gzip.decompress(row["result_gz"]).decode("utf-8"))
-            except (OSError, TypeError, ValueError):
-                continue
-            items = payload.get("issues" if kind == "voc" else "papers") if isinstance(payload, Mapping) else None
-            for item in items or ():
-                if isinstance(item, Mapping) and any(str(item.get(w) or "") == key for w in wanted):
-                    return dict(item)
-        return None
+        return find_field_item(self.store, kind, key, product_code=product_code, target_key=self.target_key)
 
     def requirement(self, name: str) -> dict | None:
-        """`req:<name>` 해석 — 이 과제의 rr_requirements 행. 좌석 계약(std)이 이 인용을 필수로 요구한다."""
+        """`req:<name>` 해석 — 이 과제의 rr_requirements 행. 좌석 계약(std)이 이 인용을 필수로 요구한다.
+
+        정본은 범위를 못 박는다 — "`rr_requirements(project_id, status ∈ candidate|confirmed)` 에 있는지
+        확인하고 없으면 `dangling=true` + 등급 강등"(§4.3.1 requirement_ref). `waived` 는 **과제가
+        포기한 요구**라 인용 근거가 아니다. 걸러내지 않으면 포기한 한계를 인용해 등급이 측정으로 오른다.
+        UNIQUE 가 `(project_id, kind, name)` 이라 같은 이름이 kind 마다 있을 수 있다 — 정렬 없이 한 행만
+        집으면 어느 kind 가 잡히는지 비결정이고, `standard` 는 등급이 다르므로(§2.8b) 등급까지 흔들린다.
+        """
         rows = self._rows(
             "SELECT id, name, kind, op, value_json, unit, status, source_ref FROM rr_requirements"
-            " WHERE project_id = ? AND name = ? LIMIT 1", (self.project_id, name))
+            " WHERE project_id = ? AND name = ? AND status IN ('candidate','confirmed')"
+            " ORDER BY kind LIMIT 1", (self.project_id, name))
         return dict(rows[0]) if rows else None
 
     def _rows(self, sql: str, params: Sequence) -> list:
@@ -453,6 +452,47 @@ def name_norm(text: Any) -> str:
 
 
 # ================================================================ §4.4 cites — 존재 검증·quote 대조·근거 등급
+def find_field_item(store, kind: str, key: str, *, product_code: str | None = None,
+                    target_key: str | None = None, owner_sub: str | None = None) -> dict | None:
+    """`voc:`·`paper:` 한 건을 `rr_brief_calls` 원장에서 찾는다(§5.6.2).
+
+    `SpecContext.field_evidence`(타깃 스코프)와 `GET /api/refs/{ref}`(소유자 스코프)가 **같은 규칙**을
+    쓰게 하려고 모듈 함수로 둔다 — 두 곳이 갈리면 인용은 해석되는데 REST 는 404 가 되거나 그 반대가 된다.
+    """
+    import gzip  # noqa: PLC0415 — 이 경로에서만 쓴다.
+
+    from app import brief as brief_module  # noqa: PLC0415 — 순환 import 회피(brief 는 narrative 를 쓴다).
+
+    if store is None:
+        return None
+    tool = "get_top_issues" if kind == "voc" else "search_scholar"
+    where = ["tool = ?", "ok = 1"]
+    params: list = [tool]
+    if target_key is not None:
+        where.insert(0, "target_key = ?")
+        params.insert(0, target_key)
+    if owner_sub is not None:
+        where.append("owner_sub = ?")
+        params.append(owner_sub)
+    rows = store.query(
+        f"SELECT result_gz, args_json FROM rr_brief_calls WHERE {' AND '.join(where)}"
+        " ORDER BY fetched_at DESC", tuple(params))
+    wanted = ("issue_key",) if kind == "voc" else ("record_id", "doi")
+    for row in rows:
+        if product_code is not None:
+            args = json.loads(row["args_json"]) if row["args_json"] else {}
+            if str((args or {}).get("product_code") or "") != product_code:
+                continue
+        try:
+            payload = json.loads(gzip.decompress(row["result_gz"]).decode("utf-8"))
+        except (OSError, TypeError, ValueError):
+            continue
+        for item in brief_module.rendered_field_items(payload, kind):
+            if any(str(item.get(w) or "") == key for w in wanted):
+                return dict(item)
+    return None
+
+
 def canonical_text_for(ref: str, ctx: SpecContext) -> str | None:
     """참조 하나의 정규 표기(§3.4.1). 만들 수 없으면 None 이고 quote 대조 (2) 는 건너뛴다."""
     info = parse_ref(ref)
@@ -539,7 +579,8 @@ def _resolve_one(ref: str, ctx: SpecContext, raised_by: Sequence[str]) -> dict:
         row = ctx.requirement(info["name"])
         return {"ok": row is not None, "reason": None if row else "not_in_scope", "payload": row, "verified": True}
     if kind in ("voc", "paper"):
-        item = ctx.field_evidence(kind, info["issue_key"] if kind == "voc" else info["paper_id"])
+        item = (ctx.field_evidence("voc", info["issue_key"], info["product_code"]) if kind == "voc"
+                else ctx.field_evidence("paper", info["paper_id"]))
         return {"ok": item is not None, "reason": None if item else "not_in_scope",
                 "payload": item, "verified": True}
     if kind == "warn":
@@ -622,6 +663,10 @@ def resolve_cites(cites: Sequence[dict], ctx: SpecContext, *, claim: str = "", w
             "grade_ok": False,
             "canonical": None,
         }
+        # `req:` 는 kind 마다 등급이 다르다(§2.8b — standard 만 문헌·규격). 등급 함수가 payload 를
+        # 받지 않으므로 필요한 한 칸만 행에 싣는다.
+        if info and info["kind"] == "req" and isinstance(outcome.get("payload"), Mapping):
+            row["req_kind"] = str(outcome["payload"].get("kind") or "")
         if not outcome["ok"]:
             dangling.append(ref)
         else:
@@ -662,8 +707,15 @@ def resolve_cites(cites: Sequence[dict], ctx: SpecContext, *, claim: str = "", w
 def evidence_grade_from_cites(resolved: dict, ctx: SpecContext | None = None) -> str:
     """§4.4.3 표 — dangling·quote_mismatch 가 아닌 cites 만 세어 등급을 판정한다."""
     kinds: list[tuple[str, str]] = []
+    # `req:` 중 kind='standard' 는 측정이 아니다 — 정본 §2.8b 는 "`standard` kind 만 예외이며 등급은
+    # 측정이 아니라 문헌·규격, `source_ref` 종류를 따른다" 고 적는다. 규격 번호를 인용한 것은 실측이
+    # 아니라 문헌이다. 이 예외가 없으면 요구 행 하나만 등록돼 있어도 전 클러스터가 측정으로 오른다.
+    standards: list[str] = []
     for row in resolved.get("cites") or ():
         if not row.get("ok") or not row.get("grade_ok"):
+            continue
+        if str(row.get("ref_type")) == "req" and str(row.get("req_kind") or "") == "standard":
+            standards.append(str(row.get("ref")))
             continue
         kinds.append((str(row.get("ref_type")), str(row.get("ref"))))
     test_runs = ctx.test_run_reports if ctx else frozenset()
@@ -672,7 +724,7 @@ def evidence_grade_from_cites(resolved: dict, ctx: SpecContext | None = None) ->
             return "측정"
         if ref_type == "rpt" and ref.split(":", 1)[-1] in test_runs:
             return "측정"
-    if any(ref_type in ("card", "paper") for ref_type, _ in kinds):
+    if standards or any(ref_type in ("card", "paper") for ref_type, _ in kinds):
         return "문헌·규격"
     if any(ref_type in ("tool", "sig", "c", "e", "p", "d", "rule", "rpt", "narr", "reg", "gate", "warn", "name")
            for ref_type, _ in kinds):

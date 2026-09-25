@@ -76,14 +76,23 @@ class FieldSource:
                 args_hash: str, result: Any, *, ok: bool, error: str | None, started: float) -> None:
         blob = _pack(result) if ok else None
         raw = canonical_json(result) if ok else ""
+        row = (_call_id(target_key, tool, args_hash), target_key, owner_sub, tool,
+               APP_KEY_BY_TOOL.get(tool), canonical_json(dict(args)), args_hash, 1 if ok else 0,
+               blob, len(raw.encode()) if ok else None, sha256_hex(raw) if ok else None,
+               now_epoch(), int((time.monotonic() - started) * 1000), error)
+        # 성공은 그 행을 새 원문으로 갱신한다. **실패는 덮어쓰지 않는다** — 행이 하나뿐이라
+        # REPLACE 하면 `result_gz` 가 NULL 이 되어, 그 원문으로 해석되던 `voc:`·`paper:` 인용이
+        # 전부 dangling 으로 뒤바뀌고 등급이 측정→경험칙으로 떨어진다(§0.2.1 (2)). 실패는 캐시
+        # 미스일 뿐이고(`_cached` 는 `ok = 1` 만 본다) 브리프에는 `[조회 불가: <tool>]` 로 이미 드러난다.
+        verb = "INSERT OR REPLACE" if ok else "INSERT OR IGNORE"
         store.execute(
-            "INSERT OR REPLACE INTO rr_brief_calls(call_id, target_key, owner_sub, tool, app_key, args_json,"
+            f"{verb} INTO rr_brief_calls(call_id, target_key, owner_sub, tool, app_key, args_json,"
             " args_hash, ok, result_gz, result_bytes, sha256, fetched_at, duration_ms, error)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (_call_id(target_key, tool, args_hash), target_key, owner_sub, tool,
-             APP_KEY_BY_TOOL.get(tool), canonical_json(dict(args)), args_hash, 1 if ok else 0,
-             blob, len(raw.encode()) if ok else None, sha256_hex(raw) if ok else None,
-             now_epoch(), int((time.monotonic() - started) * 1000), error))
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", row)
+        if not ok:
+            # 성공 행은 건드리지 않고, 실패 행일 때만 마지막 시도 사실을 갱신한다(원장이 거짓말하지 않게).
+            store.execute("UPDATE rr_brief_calls SET fetched_at = ?, duration_ms = ?, error = ?"
+                          " WHERE call_id = ? AND ok = 0", (row[11], row[12], error, row[0]))
 
 
 def from_settings(settings=None, *, portal_pat: str | None = None, http_client: Any = None):

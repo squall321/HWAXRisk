@@ -450,3 +450,67 @@ def test_an_unregistered_requirement_stays_dangling_and_heuristic(risk_store):
 
     assert resolved["dangling"] == ["req:nope"]
     assert narrative.evidence_grade_from_cites(resolved, ctx) == "경험칙"
+
+
+# ------------------------------------------------- 적대 검증에서 확정된 등급 결함(2026-09-25)
+def test_a_waived_requirement_does_not_raise_the_grade(risk_store):
+    """정본 §4.3.1 — 범위는 `status ∈ candidate|confirmed` 다. `waived` 는 과제가 **포기한** 요구다.
+
+    걸러내지 않으면 포기한 한계를 인용해 등급이 측정으로 오른다.
+    """
+    from app import narrative
+
+    risk_store.execute(
+        "INSERT INTO rr_projects(id, owner_sub, code, name, created_at, updated_at)"
+        " VALUES ('P1','u@x','F7','F7',1,1)")
+    risk_store.execute(
+        "INSERT INTO rr_requirements(id, project_id, owner_sub, kind, name, op, value_json, unit, status,"
+        " waive_reason, created_at, updated_at) VALUES ('R1','P1','u@x','dim_limit','thickness','gte','0.3',"
+        "'mm','waived','원가',1,1)")
+    ctx = narrative.SpecContext(project_id="P1", owner_sub="u@x", store=risk_store)
+
+    resolved = narrative.resolve_cites([{"ref": "req:thickness"}], ctx, raised_by=["std"])
+
+    assert resolved["dangling"] == ["req:thickness"]
+    assert narrative.evidence_grade_from_cites(resolved, ctx) == "경험칙"
+
+
+def test_a_standard_requirement_grades_as_literature_not_measured(risk_store):
+    """정본 §2.8b — "`standard` kind 만 예외이며 등급은 측정이 아니라 문헌·규격 이다".
+
+    규격 번호를 인용한 것은 실측이 아니다. 이 예외가 없으면 요구 행 하나만 등록돼 있어도
+    전 클러스터가 측정으로 올라 `all_heuristic` 안전장치와 `[가설 단계]` 표기가 사실상 죽는다.
+    """
+    from app import narrative
+
+    risk_store.execute(
+        "INSERT INTO rr_projects(id, owner_sub, code, name, created_at, updated_at)"
+        " VALUES ('P1','u@x','F7','F7',1,1)")
+    risk_store.execute(
+        "INSERT INTO rr_requirements(id, project_id, owner_sub, kind, name, value_json, status, source_ref,"
+        " created_at, updated_at) VALUES ('R1','P1','u@x','standard','IEC 62368-1 §5.4',"
+        "'{\"clause\":\"5.4\",\"title\":\"t\"}','confirmed','card:abc',1,1)")
+    ctx = narrative.SpecContext(project_id="P1", owner_sub="u@x", store=risk_store)
+
+    resolved = narrative.resolve_cites([{"ref": "req:IEC 62368-1 §5.4"}], ctx, raised_by=["std"])
+
+    assert resolved["dangling"] == []
+    assert narrative.evidence_grade_from_cites(resolved, ctx) == "문헌·규격"
+
+
+def test_the_same_name_in_two_kinds_resolves_deterministically(risk_store):
+    """UNIQUE 는 `(project_id, kind, name)` 이다 — 정렬 없이 한 행만 집으면 등급이 흔들린다."""
+    from app import narrative
+
+    risk_store.execute(
+        "INSERT INTO rr_projects(id, owner_sub, code, name, created_at, updated_at)"
+        " VALUES ('P1','u@x','F7','F7',1,1)")
+    for rid, kind in (("R1", "standard"), ("R2", "scenario")):
+        risk_store.execute(
+            "INSERT INTO rr_requirements(id, project_id, owner_sub, kind, name, value_json, status,"
+            " source_ref, created_at, updated_at) VALUES (?,?,'u@x',?,'drop','{}','confirmed','card:a',1,1)",
+            (rid, "P1", kind))
+    ctx = narrative.SpecContext(project_id="P1", owner_sub="u@x", store=risk_store)
+
+    picks = {ctx.requirement("drop")["kind"] for _ in range(5)}
+    assert picks == {"scenario"}, "kind 순서가 결정론이 아니다"

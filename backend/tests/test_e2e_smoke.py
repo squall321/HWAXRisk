@@ -600,6 +600,59 @@ def test_seats_json_is_stable_for_the_same_roster(tmp_path):
     assert json.loads(seats_json[0]) == sorted(json.loads(seats_json[0]), key=lambda s: (s["domain"], s["key"]))
 
 
+def test_the_three_new_first_class_refs_resolve_over_rest(wired, ident, monkeypatch):
+    """정본 P5 통과 기준 (14) — E10 줄의 `voc:`·`paper:` 가 `GET /api/refs/{ref}` 로 **200 해석**된다.
+
+    `req:` 도 같다(좌석 std 계약의 필수 인용 원천). 분기가 없으면 인용 해석은 통과하는데 REST 는 404 라
+    화면·보고서에서 dangling 으로 보인다 — 인용과 REST 가 같은 규칙을 쓰는지까지 여기서 고정한다.
+    """
+    from app import brief as brief_module
+    from app import field_source
+
+    store = wired
+    monkeypatch.setattr(routes, "get_store", lambda: store)
+    project_id = routes.create_project(
+        routes.ProjectBody(code="M22REF", name="참조 해석", stage="DV1", classification="internal",
+                           product_code="F7-2024"), ident=ident)["id"]
+    store.execute(
+        "INSERT INTO rr_targets(target_key, owner_sub, kind, ref_id, project_id, ir_hash,"
+        " external_sync_json, created_at, updated_at)"
+        " VALUES ('snap:SR','" + OWNER + "','snap','SR',?,'h1','{}',1,1)", (project_id,))
+    store.execute(
+        "INSERT INTO rr_requirements(id, project_id, owner_sub, kind, name, op, value_json, unit, status,"
+        " created_at, updated_at) VALUES ('R1',?,?,'dim_limit','thickness','gte','0.3','mm','confirmed',1,1)",
+        (project_id, OWNER))
+
+    class _Stub:
+        def call(self, name, args):
+            if name == "get_top_issues":
+                return {"ok": True, "result": {"issues": [
+                    {"issue_key": "ISS-1", "category": "파손", "n": 4, "text": "힌지"}]}}
+            return {"ok": True, "result": {"papers": [
+                {"doi": "10.1000/xyz", "title": "drop", "abstract": "stress"}]}}
+
+    store.execute("INSERT INTO rr_character(id, project_id, owner_sub, facet, tag, tags_json, statement,"
+                  " polarity, by_json, support_panels, support_targets, recall_eligible, needs_review,"
+                  " status, created_at, updated_at)"
+                  " VALUES ('C1',?,?,'intent','char:structure:thin_stack','[]','s','observation','[]',"
+                  "2,1,1,0,'panel',1,1)", (project_id, OWNER))
+    ctx = brief_module._target_context(store, "snap:SR")
+    lines = brief_module._field_evidence_lines(store, ctx, field_source.FieldSource(_Stub()))
+    assert any(ln.startswith("voc:F7-2024#ISS-1") for ln in lines), lines
+
+    for ref, kind in (("voc:F7-2024#ISS-1", "voc"), ("paper:10.1000/xyz", "paper"),
+                      ("req:thickness", "req")):
+        out = routes.get_ref(ref, ident=ident)
+        assert (out["ref_type"], out["resolved"]) == (kind, True), ref
+        assert out["payload"], ref
+
+    # 지어낸 인용은 REST 도 404 다 — 해석과 REST 가 같은 규칙을 쓴다는 뜻이다.
+    for bad in ("voc:F7-2024#ISS-9", "paper:10.1000/nope", "req:nope"):
+        with pytest.raises(AppError) as exc:
+            routes.get_ref(bad, ident=ident)
+        assert exc.value.http_status == 404, bad
+
+
 def test_reusing_a_snapshot_does_not_restamp_it_with_the_new_job(wired, ident, monkeypatch):
     """같은 모델을 두 번 캡처하면 두 번째는 재사용이다 — 그때 남의 스냅샷에 이번 잡을 덮어쓰지 않는다.
 
