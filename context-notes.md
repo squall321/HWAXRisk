@@ -810,3 +810,36 @@ P6 통과 기준 9항의 식별자를 코드·시험에 전수 대조하니 `표
 런타임에서 `null > 0` 이 조용히 false 가 되는 일을 피했다.
 
 **검증.** `pytest` **1179 passed, 2 skipped**(시험 1건) · `ruff` 통과 · `pnpm build` 통과.
+
+### D28. 통과 기준 식별자를 자동 전수 대조했다 (2026-09-26)
+
+'품질' 카드가 통과 기준 대조에서 나왔으니 그 방법을 **자동화해 전수로** 돌렸다 — 정본의 번호 붙은
+통과 기준 246줄에서 백틱 식별자 451종을 뽑아 이 리포의 `*.py`·`*.ts*`·`*.json` 전체와 대조했다.
+흔적 없는 것 26종. 그중 20종은 엔진(`_RISK_READ_TOOLS`·`_RESCREEN`·`prompt_fn` …)·허브
+(`manifest_validator`)·게이트웨이(`per_user_sso`·`list_sessions`) 소관이라 걸러 냈고 6종이 남았다.
+
+**고친 것 — 오류 코드 표기 2건.** 코드가 `evidence_ref_required`·`family_key_mismatch` 인데 정본은
+`evidence_required`(3회)·`family_key_differs`(2회)로 적고 다른 표기는 정본에 **0회**다. 사소해 보이지만
+**오류 코드는 계약**이다 — 클라이언트가 문자열로 분기하므로 표기가 갈리면 '근거 없이 verified 를 찍는
+것을 막는 가드' 가 화면에서 '알 수 없는 오류' 로 보인다. 가드 자체는 있었으니 기능이 아니라 계약의
+표류였다. `family_key` 가드는 **두 곳**이었다(직접 병합 + 큐레이션 큐 병합) — 한 곳만 고치면 같은 버그가
+남는다. `note_required` 는 원래 정본 표기였다(내 첫 grep 이 `head -10` 에 잘려 없다고 봤다).
+
+**같이 드러난 것 — `required` 변경의 영향 범위를 내가 좁게 봤다.** D26 에서 `tests/fixtures/rr_ir/` 만
+손봤는데 `tests/fixtures/diff_pairs/` 7종도 같은 스키마로 검증된다. 시험이 잡았다
+(`test_pair_fixtures_validate_against_rr_ir_schema`). 이번엔 디렉터리를 고르지 않고 **IR 모양인 픽스처를
+전수로** 찾아 처리했다 — 조건은 `ir_hash`·`nodes` 키 보유다. 교훈은 '한 디렉터리를 보고 다 봤다고 하지
+말 것' 이고, 그걸 잡아 준 것이 스키마 대조 시험이라는 점이 중요하다.
+
+**클라이언트 죽은 선언도 반대 방향으로 전수 점검했다.** `test_client_contract.py` 는 클라이언트가
+**부르는** 경로의 서버 존재를 본다 — **부르지 않는 선언**은 대상이 아니다('품질' 카드가 그 구멍에서
+나왔다). 56종 중 4종이 미사용이었고 나머지 셋은 빠진 기능이 아니었다 — `getSnapshotNodes`·
+`getSnapshotEdges` 는 화면이 `part=ir` 로 이미 그려 중복이고, `completePanel` 은 엔진·러너 콜백이라
+UI 가 부르면 안 되며, `exportJsonl` 은 운영자 이관 경로로 정본 §8.2.4 에 화면이 없다. 다음 세션이 다시
+조사하지 않도록 체크리스트에 결론을 적었다.
+
+**남긴 4건**은 체크리스트 2장에 사유와 함께 올렸다. 중요한 둘은 `warnings.ambiguous_bridge_key`(조인 키
+다의일 때 엉뚱한 브리지가 조용히 생긴다)와 `missing.mcad_capture_failed`(요약 응답으로 노드·엣지를
+지어내지 않고 mcad 를 통째로 버려야 한다) — 둘 다 '없는 리스크' 계열이라 다음에 먼저 볼 것이다.
+
+**검증.** `pytest` **1181 passed, 2 skipped** · `ruff` 통과 · `pnpm build` 통과.

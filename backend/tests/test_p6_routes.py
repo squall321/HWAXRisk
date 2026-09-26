@@ -582,7 +582,7 @@ def test_cluster_merge_rejects_a_family_mismatch(store, clock):
     queue_id = _dup_queue(store, key_a, key_b)
     with pytest.raises(AppError) as exc:
         routes.put_curation(queue_id, routes.CurationDecisionBody(decision="merge"), ident=_ident())
-    assert (exc.value.code, exc.value.http_status) == ("family_key_mismatch", 422)
+    assert (exc.value.code, exc.value.http_status) == ("family_key_differs", 422)
     assert store.query("SELECT old_cluster_key FROM rr_cluster_alias") == []
     assert store.query_one(
         "SELECT status FROM rr_curation_queue WHERE id = ?", (queue_id,))["status"] == "open"

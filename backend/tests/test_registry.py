@@ -478,8 +478,8 @@ def test_set_status_requires_a_basis(risk_store):
     """verified·dismissed·open 은 evidence_ref 없이, mitigated 는 note 없이 422 다."""
     _target(risk_store)
     _reg_row(risk_store, "T1", "c1")
-    for status, code in (("verified", "evidence_ref_required"), ("dismissed", "evidence_ref_required"),
-                         ("open", "evidence_ref_required"), ("mitigated", "note_required")):
+    for status, code in (("verified", "evidence_required"), ("dismissed", "evidence_required"),
+                         ("open", "evidence_required"), ("mitigated", "note_required")):
         with pytest.raises(AppError) as exc:
             registry.set_status(risk_store, "c1", status, owner_sub=OWNER)
         assert (exc.value.code, exc.value.http_status) == (code, 422)
@@ -1009,3 +1009,22 @@ def test_merge_folds_findings_through_a_human_alias(risk_store, clock):
 
     registry.revoke_cluster_alias(risk_store, "ck:x0000000001", owner_sub=OWNER)
     assert registry.merge(risk_store, "T1", owner_sub=OWNER)["clusters"] == 2
+
+
+def test_error_codes_use_the_canonical_spelling():
+    """오류 코드는 계약이다 — 클라이언트가 문자열로 분기한다(정본 §8.2.3 통과 기준 15 · §4.3.2 13).
+
+    코드는 `evidence_ref_required`·`family_key_mismatch` 로 적혀 있었고 정본은 `evidence_required`·
+    `family_key_differs` 로 일관되게 적는다(다른 표기는 정본에 0회). 표기가 갈리면 정본대로 분기한
+    클라이언트가 그 422 를 못 알아본다 — 사람이 근거 없이 확정하는 것을 막는 가드가 화면에서
+    '알 수 없는 오류' 로 보인다는 뜻이다.
+    """
+    import re
+    from pathlib import Path
+
+    src = "\n".join(p.read_text(encoding="utf-8")
+                    for p in (Path(__file__).resolve().parents[1] / "app").rglob("*.py"))
+    for gone in ("evidence_ref_required", "family_key_mismatch"):
+        assert gone not in src, f"옛 표기가 남았다 — {gone}"
+    for code in ("evidence_required", "family_key_differs", "note_required"):
+        assert re.search(rf'AppError\(\s*"{code}"', src), f"정본 표기 코드가 없다 — {code}"

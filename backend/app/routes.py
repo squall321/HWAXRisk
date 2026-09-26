@@ -2155,7 +2155,7 @@ def put_registry_merge(cluster_key: str, body: RegistryMergeBody,
     if left is None or right is None:
         raise AppError("E404", "두 등록부 클러스터가 모두 있어야 합니다.", 404)
     if left["family_key"] and right["family_key"] and left["family_key"] != right["family_key"]:
-        raise AppError("family_key_mismatch", "family_key 가 다른 클러스터는 병합할 수 없습니다.", 422)
+        raise AppError("family_key_differs", "family_key 가 다른 클러스터는 병합할 수 없습니다.", 422)
 
     with store.tx():
         alias = registry_module.add_cluster_alias(
@@ -3216,7 +3216,7 @@ def put_curation(queue_id: str, body: CurationDecisionBody,
                 raise AppError("E404", "두 등록부 클러스터가 모두 있어야 합니다.", 404)
             if rows[key_a]["family_key"] and rows[key_b]["family_key"] \
                     and rows[key_a]["family_key"] != rows[key_b]["family_key"]:
-                raise AppError("family_key_mismatch", "family_key 가 다른 클러스터는 병합할 수 없습니다.", 422)
+                raise AppError("family_key_differs", "family_key 가 다른 클러스터는 병합할 수 없습니다.", 422)
             alias = registry_module.add_cluster_alias(store, key_a, key_b, owner_sub=owner_sub,
                                                       reason="cluster_merge",
                                                       evidence={"from": key_a, "to": key_b,

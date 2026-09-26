@@ -703,7 +703,8 @@ def set_status(
     if status not in HUMAN_STATUSES:
         raise AppError("E100", f"등록부 상태 어휘 밖입니다: {status}", 422)
     if status in EVIDENCE_REQUIRED and not (evidence_ref or "").strip():
-        raise AppError("evidence_ref_required", f"'{status}' 전이에는 evidence_ref 가 필요합니다.", 422)
+        # 코드는 정본 표기다(§8.2.3 통과 기준 15 `422 evidence_required`) — 클라이언트가 코드로 분기한다.
+        raise AppError("evidence_required", f"'{status}' 전이에는 evidence_ref 가 필요합니다.", 422)
     if status == "mitigated" and not (note or "").strip():
         raise AppError("note_required", "'mitigated' 전이에는 note 가 필요합니다.", 422)
     now = common.now_epoch()
