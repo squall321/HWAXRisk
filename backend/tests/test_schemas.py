@@ -69,6 +69,31 @@ def test_invalid_fixtures_are_rejected(name):
         assert list(v.iter_errors(obj)), f"{path.name} 이 스키마를 통과했다(무효여야 한다)"
 
 
+@pytest.mark.parametrize("name", SCHEMA_NAMES)
+def test_invalid_fixtures_are_rejected_for_their_own_reason(name):
+    """'거부됐다' 만으로는 부족하다 — **왜** 거부됐는지가 픽스처 이름이 말하는 결함이어야 한다.
+
+    `required` 에 키를 더하거나 어휘를 좁히면 무효 픽스처가 새 사유로도 거부된다. 거부 여부만 보는
+    시험은 그때도 초록이라, 원래 잡으려던 결함이 사라졌는지 알 수 없다(항진명제가 버그를 가린 전례가
+    이 리포에 있다 — `CORPUS_TOOLS` 순서 역전·`CONTEXT_KIND` 값). 그래서 픽스처 이름의 토큰 하나가
+    실제 오류의 **경로 또는 문구**에 나타나야 한다고 못 박는다.
+    """
+    v = _validator(_load_schema(name))
+    _, invalid = _fixtures(name)
+    for path in invalid:
+        obj = json.loads(path.read_text(encoding="utf-8"))
+        errors = list(v.iter_errors(obj))
+        assert errors, f"{path.name} 이 스키마를 통과했다(무효여야 한다)"
+        where = " ".join(
+            f"{'/'.join(str(x) for x in e.absolute_path)} {e.message} {e.validator}" for e in errors)
+        # 이름의 꼬리 숫자는 개수다(`facet7` = 8축이어야 하는데 7축) — 떼고 본다.
+        tokens = [t.rstrip("0123456789") for t in path.stem.split("_")
+                  if t not in ("invalid", "to") and len(t) >= 3]
+        assert any(t in where for t in tokens), (
+            f"{path.name} 의 거부 사유가 이름과 무관하다 — 원래 결함이 검사되는지 알 수 없다.\n"
+            f"  이름 토큰 {tokens}\n  실제 사유 {where[:300]}")
+
+
 def test_total_invalid_fixtures_at_least_ten():
     """plan §9.1 통과 기준 10 — 무효 픽스처 거부 ≥10건."""
     total = sum(len(_fixtures(n)[1]) for n in SCHEMA_NAMES)

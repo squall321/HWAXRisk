@@ -7,7 +7,7 @@
   "required": [
     "ir_version", "snapshot_id", "project_id", "owner_sub", "label", "captured_at", "derived_from", "partial",
     "sources", "units", "nodes", "edges", "same_as", "dims_named", "rollups", "results", "missing", "warnings",
-    "ir_hash", "versions"
+    "ir_hash", "versions", "primary_source", "context"
   ],
   "properties": {
     "ir_version": {"type": "string", "enum": ["1.0", "1.1"]},

@@ -5,6 +5,8 @@
  "label": "M22 DV1 2026-08-31",
  "captured_at": 1756600000,
  "derived_from": null,
+ "primary_source": "mcad",
+ "context": {"corpus_usage": null},
  "partial": false,
  "sources": [
   {
