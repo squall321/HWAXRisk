@@ -10,7 +10,15 @@ import httpx
 from app import config, ir_builder
 from app.adapters import dyna as dyna_adapter
 from app.adapters import ecad_stub, mcad
-from app.adapters.base import DEFAULT_TIMEOUT, CallRecorder, IrAdapter, Principal, Probe, RestGetClient
+from app.adapters.base import (
+    DEFAULT_TIMEOUT,
+    CallRecorder,
+    IrAdapter,
+    Principal,
+    Probe,
+    RestGetClient,
+    tool_matches,
+)
 from app.common import new_uuid, now_epoch
 from app.errors import AppError
 
@@ -41,7 +49,7 @@ def list_adapters() -> list[dict]:
 # 발견 결과 캐시 — /meta/adapters 와 소스 카드가 화면마다 부르므로 게이트웨이를 매번 때리지 않는다.
 DISCOVERY_TTL_S = 60.0
 _discovery_lock = threading.Lock()
-_discovery_cache: dict[str, Any] = {"at": 0.0, "rows": None}
+_discovery_cache: dict[str, Any] = {"at": 0.0, "rows": None, "tool_names": None, "tool_names_at": 0.0}
 
 
 def reset_discovery_cache() -> None:
@@ -49,6 +57,8 @@ def reset_discovery_cache() -> None:
     with _discovery_lock:
         _discovery_cache["at"] = 0.0
         _discovery_cache["rows"] = None
+        _discovery_cache["tool_names"] = None
+        _discovery_cache["tool_names_at"] = 0.0
 
 
 def _status_of(kind: str, probe: Probe, gateway_read: bool) -> str:
@@ -107,9 +117,28 @@ def default_app_key(kind: str) -> str | None:
     return next((a.app_key for a in ADAPTERS if a.kind == kind.split("_")[0]), None)
 
 
-def tool_matches(name: str, want: str) -> bool:
-    """게이트웨이는 이름 충돌 시 `backend_key.replace('-','')+'_'` 접두를 양쪽에 붙인다 — suffix 로 맞춘다(recon §4 8항)."""
-    return name == want or name.endswith(f"_{want}")
+def gateway_tool_names(*, token: str | None = None, client: httpx.Client | None = None,
+                       force: bool = False) -> tuple[str, ...]:
+    """게이트웨이가 실제로 노출하는 도구 이름들. 실패는 예외가 아니라 빈 튜플(맨이름으로 부른다).
+
+    발견과 같은 TTL 로 캐시한다 — 캡처 한 번에 지도를 여러 번 받아 오지 않는다.
+    """
+    now = time.time()
+    with _discovery_lock:
+        cached = _discovery_cache.get("tool_names")
+        seen_at = float(_discovery_cache.get("tool_names_at") or 0)
+        if not force and cached is not None and now - seen_at < DISCOVERY_TTL_S:
+            return tuple(cached)
+
+    registry = GatewayRegistry(config.settings.gateway_mcp, token=token, client=client)
+    try:
+        names = tuple(sorted(registry.load()))
+    finally:
+        registry.close()
+    with _discovery_lock:
+        _discovery_cache["tool_names"] = names
+        _discovery_cache["tool_names_at"] = now
+    return names
 
 
 def gateway_http_base(gateway_mcp_url: str) -> str:
@@ -222,12 +251,17 @@ def capture_all(*, sources: Sequence[Mapping[str, Any]], principal: Principal,
                 mcp_client: Any = None, rest_client: RestGetClient | None = None,
                 snapshot_id: str | None = None, kinds: Sequence[str] | None = None,
                 report_ids: Sequence[Any] | None = None,
-                detect_result_file_id: str | None = None) -> dict:
+                detect_result_file_id: str | None = None,
+                tool_names: Sequence[str] = ()) -> dict:
     """등록된 소스 카드를 kind 순서로 캡처한다(plan §2.11.3 1~5단계).
 
     반환 `{snapshot_id, results, calls, probes}`. snapshot_id 를 미리 정하는 이유는 provenance.call_id 가
     동결 후 rr_snapshot_calls 의 실제 id 와 같아야 하기 때문이다(CallRecorder 참조).
     mcad 소스가 없으면 409 다 — mcad 없는 스냅샷은 만들지 않는다.
+
+    `tool_names` 는 게이트웨이 실이름 목록이다(정본 §2.13.2 이름 해석). 여기서 직접 받아 오지 않는다 —
+    자격을 아는 곳은 `clients_from_settings` 이고, 캡처가 스스로 발견 요청을 내보내면 캡처 경로가
+    '외부 호출 안 함' 계약을 깬다(E2E 스모크가 그것을 막는다). 비면 맨이름으로 부른다.
     """
     sid = snapshot_id or new_uuid()
     by_kind: dict[str, dict] = {}
@@ -241,7 +275,7 @@ def capture_all(*, sources: Sequence[Mapping[str, Any]], principal: Principal,
         raise AppError("source_unreachable",
                        "연결된 소스가 없습니다 — 소스를 먼저 연결하세요.", http_status=409)
 
-    recorder = CallRecorder(sid, mcp=mcp_client, rest=rest_client)
+    recorder = CallRecorder(sid, mcp=mcp_client, rest=rest_client, tool_names=tool_names)
     results: list[dict] = []
     dyna_source_hash: str | None = None
     pid_to_nid: dict[str, str] = {}
@@ -310,4 +344,7 @@ def clients_from_settings(settings, secrets: Mapping[str, str] | None = None, *,
                                    client=http_client, timeout=timeout)
     rest_client = RestGetClient(getattr(settings, "heax_base", ""), service_pat,
                                 client=http_client, timeout=timeout)
-    return {"mcp": mcp_client, "rest": rest_client, "portal_pat": token, "service_pat": service_pat}
+    # 게이트웨이 실이름 목록(§2.13.2) — 자격이 있을 때만 받고 60 s 캐시를 탄다. 실패는 빈 튜플이다.
+    names = gateway_tool_names(token=token, client=http_client) if mcp_client is not None else ()
+    return {"mcp": mcp_client, "rest": rest_client, "portal_pat": token, "service_pat": service_pat,
+            "tool_names": names}

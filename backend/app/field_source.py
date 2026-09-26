@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import gzip
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from app import config
@@ -28,10 +28,13 @@ class FieldSource:
     호출 원문은 `rr_brief_calls` 에 남아 `voc:`·`paper:` 참조의 해석 원장이 된다.
     """
 
-    def __init__(self, mcp: Any, *, timeout: float | None = None, reuse_s: int | None = None) -> None:
+    def __init__(self, mcp: Any, *, timeout: float | None = None, reuse_s: int | None = None,
+                 tool_names: Sequence[str] = ()) -> None:
         self.mcp = mcp
         self.timeout = float(timeout if timeout is not None else 5.0)
         self.reuse_s = int(reuse_s if reuse_s is not None else 24 * 3600)
+        # 게이트웨이 실이름들(§2.13.2). E10 은 probe 없이 돌아 이름 접두에 특히 취약하다.
+        self.tool_names = tuple(tool_names)
 
     # ------------------------------------------------ 조회
     def fetch(self, store, target_key: str, owner_sub: str, tool: str,
@@ -45,7 +48,11 @@ class FieldSource:
         try:
             # 데드라인은 클라이언트가 가진다(McpHttpClient.call 은 timeout 인자를 받지 않는다) —
             # from_settings 가 그 값으로 클라이언트를 만든다.
-            reply = self.mcp.call(tool, dict(args))
+            # 호출은 게이트웨이 실이름으로 나가고 **원장에는 맨이름을 적는다.** 캡처 원장
+            # (`rr_snapshot_calls`)과 규칙이 다른 이유는 이 표의 `tool` 이 24 h 재사용 키이자
+            # `voc:`·`paper:` 해석 키이기 때문이다 — 실이름을 적으면 게이트웨이가 접두를 붙이는 날
+            # 캐시가 통째로 무효가 되고 예전 인용이 dangling 이 된다(읽는 쪽은 맨이름으로 찾는다).
+            reply = self.mcp.call(_real_name(tool, self.tool_names), dict(args))
         except Exception as exc:                      # noqa: BLE001 — 채널 오류는 그 줄만 빼는 사유다.
             self._record(store, target_key, owner_sub, tool, args, args_hash, None,
                          ok=False, error=f"{type(exc).__name__}", started=started)
@@ -103,10 +110,13 @@ def from_settings(settings=None, *, portal_pat: str | None = None, http_client: 
     token = portal_pat or config.load_secrets(cfg.data_dir).get("HWAXRISK_PORTAL_PAT")
     if not token:
         return None
+    from app.adapters.registry import gateway_tool_names  # noqa: PLC0415 — 순환 import 회피.
+
     return FieldSource(McpHttpClient(getattr(cfg, "gateway_mcp", ""),
                                      headers={"Authorization": f"Bearer {token}"},
                                      client=http_client, timeout=FIELD_TIMEOUT_S),
-                       timeout=FIELD_TIMEOUT_S)
+                       timeout=FIELD_TIMEOUT_S,
+                       tool_names=gateway_tool_names(token=token, client=http_client))
 
 
 def for_target(store, target_key: str, *, settings=None, http_client: Any = None):
@@ -141,6 +151,13 @@ def _call_id(target_key: str, tool: str, args_hash: str) -> str:
     24 h 창이 지나 다시 부르면 그 행을 새 원문으로 갱신한다.
     """
     return f"b-{sha256_hex(f'{target_key}|{tool}|{args_hash}')[:24]}"
+
+
+def _real_name(want: str, names: Sequence[str]) -> str:
+    """맨이름 → 게이트웨이 실이름. 어댑터와 같은 규칙을 쓴다(§2.13.2)."""
+    from app.adapters.base import resolve_tool_name  # noqa: PLC0415 — 순환 import 회피.
+
+    return resolve_tool_name(want, names) if names else want
 
 
 def _pack(result: Any) -> bytes:

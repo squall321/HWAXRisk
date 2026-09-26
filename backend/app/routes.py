@@ -1240,7 +1240,8 @@ def create_snapshot(project_id: str, body: SnapshotBody,
         captured = adapters_registry.capture_all(
             sources=_project_sources(project_id), principal=principal, mcp_client=channels["mcp"],
             rest_client=channels["rest"], kinds=list(body.kinds) or None, report_ids=body.report_ids,
-            detect_result_file_id=body.detect_result_file_id)
+            detect_result_file_id=body.detect_result_file_id,
+            tool_names=channels.get("tool_names") or ())
     except AppError as exc:
         # 캡처가 통째로 실패해도 잡 행은 남는다 — 그 잡의 호출 원문은 snapshot_id NULL 로 보존된다.
         _snapshot_job_finish(store, job_id, state="failed", started=started,

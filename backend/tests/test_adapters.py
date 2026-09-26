@@ -10,6 +10,7 @@ from app import ir_builder
 from app.adapters import dyna as dyna_adapter
 from app.adapters import ecad_stub, mcad
 from app.adapters import registry as adapters_registry
+from app.adapters import base as adapters_base
 from app.adapters.base import CallRecorder, Principal, RestGetClient
 from app.errors import AppError
 from app.ra_client import McpHttpClient
@@ -861,3 +862,70 @@ def test_contract_result_is_recorded_on_every_call_row():
     logged = {c["tool"]: c for c in recorder.calls}
     assert logged["list_parts"]["contract_missing"] == ["/parts"]
     assert logged["job_status"]["contract_ok"] is None
+
+
+# ------------------------------------------------- 호출 시점 이름 해석(정본 §2.13.2 · 통과 기준 (23)(a))
+def test_a_prefixed_tool_is_called_by_its_real_name_and_logged_that_way():
+    """정본 §2.13.2 — "게이트웨이 실이름(접두 포함형)을 **호출 인자와** rr_snapshot_calls.tool 에 적는다".
+
+    suffix 매칭이 probe 에만 있고 호출은 맨이름으로 나가면, 게이트웨이가 이름 충돌로 접두를 붙이는
+    순간 그 호출들이 **조용히 전멸한다** — probe 는 suffix 로 찾으니 '도구 있음' 으로 보고하고
+    실패는 어댑터 쪽에서만 난다.
+    """
+    # 게이트웨이에는 접두형만 있다(맨이름 job_status 는 없다).
+    tools = {"heaxstep_forge_job_status": JOB_STATUS_DONE}
+    seen: list = []
+    recorder = CallRecorder("cafe0000deadbeef", mcp=_mcp(tools, seen),
+                            tool_names=("heaxstep_forge_job_status", "heaxkooremapper_mcp_inspect_file"))
+
+    out = recorder.call("mcp", "job_status", {"job_id": "J1"}, source_kind="mcad")
+
+    assert out["ok"] is True, "맨이름으로 불러 조용히 실패했다"
+    assert [n for n, _ in seen] == ["heaxstep_forge_job_status"], "호출 인자가 맨이름이었다"
+    assert [c["tool"] for c in recorder.calls] == ["heaxstep_forge_job_status"], "원장이 맨이름이었다"
+
+
+def test_name_resolution_keeps_the_contract_check_on_the_bare_name():
+    """계약표는 맨이름 키다 — 실이름으로 찾으면 검사가 조용히 꺼진다(계약 위반이 전부 통과한다)."""
+    tools = {"heaxstep_forge_list_parts": {"items": []}}      # 계약 위반(필드 누락)
+    recorder = CallRecorder("cafe0000deadbeef", mcp=_mcp(tools, []),
+                            tool_names=("heaxstep_forge_list_parts",))
+
+    out = recorder.call("mcp", "list_parts", {}, source_kind="mcad")
+
+    assert out["contract_ok"] is False and out["contract_missing"] == ["/parts"]
+
+
+def test_an_ambiguous_name_is_not_guessed():
+    """한 맨이름에 후보가 둘이면 아무 쪽이나 고르지 않는다 — 남의 백엔드를 부르는 것보다 실패가 낫다.
+
+    그 상태는 probe 의 `ambiguous_tool_name` 이 이미 드러낸다(§2.13.2).
+    """
+    names = ("heaxstep_forge_job_status", "heaxkooremapper_mcp_job_status")
+    assert adapters_base.resolve_tool_name("job_status", names) == "job_status"
+    # 맨이름이 실제로 있으면 그것이 정답이다(접두형이 함께 있어도).
+    assert adapters_base.resolve_tool_name("job_status", (*names, "job_status")) == "job_status"
+    # 발견이 안 됐으면(빈 목록) 예전처럼 맨이름이다.
+    assert adapters_base.resolve_tool_name("job_status", ()) == "job_status"
+
+
+def test_gateway_tool_names_caches_and_survives_failure(monkeypatch):
+    """이름 목록은 발견과 같은 TTL 로 캐시한다 — 캡처 한 번에 지도를 여러 번 받아 오지 않는다."""
+    adapters_registry.reset_discovery_cache()
+    seen: list = []
+    body = {"map": {"heaxstep_forge_list_parts": APP_KEY, "job_status": "other"}}
+    client = _tools_map_client(body, seen)
+
+    first = adapters_registry.gateway_tool_names(client=client)
+    second = adapters_registry.gateway_tool_names(client=client)
+
+    assert first == ("heaxstep_forge_list_parts", "job_status") and second == first
+    assert len(seen) == 1, "캐시가 듣지 않았다"
+
+    # 게이트웨이가 죽어 있으면 빈 튜플이다(맨이름으로 부른다) — 발견 실패가 캡처를 막지 않는다.
+    adapters_registry.reset_discovery_cache()
+    def dead(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no gateway")
+    assert adapters_registry.gateway_tool_names(
+        client=httpx.Client(transport=httpx.MockTransport(dead))) == ()
+    adapters_registry.reset_discovery_cache()

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict, dataclass
-from typing import Any, Mapping, Protocol, TypedDict
+from typing import Any, Mapping, Protocol, Sequence, TypedDict
 
 import httpx
 
@@ -136,6 +136,30 @@ class RestGetClient:
             self._client = None
 
 
+def tool_matches(name: str, want: str) -> bool:
+    """게이트웨이는 이름 충돌 시 `backend_key.replace('-','')+'_'` 접두를 양쪽에 붙인다 — suffix 로 맞춘다(recon §4 8항)."""
+    return name == want or name.endswith(f"_{want}")
+
+
+def resolve_tool_name(want: str, names: Sequence[str]) -> str:
+    """맨이름 하나 → 게이트웨이 **실이름**(접두 포함형). 못 찾거나 다의면 맨이름 그대로.
+
+    정본 §2.13.2 는 "그렇게 얻은 게이트웨이 실이름(접두 포함형 그대로)을 **호출 인자와**
+    `rr_snapshot_calls.tool` 에 적는다" 고 적고 통과 기준 (23)(a)가 그 둘을 함께 검사한다.
+    그런데 suffix 매칭은 probe 에서만 쓰였고 호출은 맨이름으로 나갔다 — 게이트웨이가 이름 충돌로 접두를
+    붙이는 순간 그 호출들이 **조용히 전멸한다.** probe 는 도구를 찾았다고 보고하므로(suffix 로 찾으니까)
+    실패가 어댑터 쪽에서만 나고 원인이 이름이라는 단서가 없다.
+
+    판정은 `tool_matches` 와 같은 규칙이다 — 두 곳이 갈리면 probe 가 찾은 도구를 호출이 못 찾는다.
+    다의면 아무 쪽이나 고르지 않는다 — 남의 백엔드를 부르는 것보다 맨이름으로 실패하는 편이 낫고,
+    그 상태는 probe 의 `ambiguous_tool_name` 이 이미 드러낸다.
+    """
+    hits = sorted(n for n in names if tool_matches(n, want))
+    if want in hits:
+        return want
+    return hits[0] if len(hits) == 1 else want
+
+
 class CallRecorder:
     """어댑터의 모든 소스 호출을 실행하고 rr_snapshot_calls 행 초안으로 모은다(plan §2.11.4).
 
@@ -144,10 +168,13 @@ class CallRecorder:
     """
 
     def __init__(self, snapshot_id: str, *, mcp: ToolChannel | None = None,
-                 rest: RestGetClient | None = None, start_seq: int = 1) -> None:
+                 rest: RestGetClient | None = None, start_seq: int = 1,
+                 tool_names: Sequence[str] = ()) -> None:
         self.snapshot_id = snapshot_id
         self.mcp = mcp
         self.rest = rest
+        # 게이트웨이가 노출하는 실이름들 — 비면 맨이름으로 부른다(발견 실패가 캡처를 막지 않는다).
+        self.tool_names = tuple(tool_names)
         self.calls: list[dict] = []
         self._start_seq = int(start_seq)
         self._seq = int(start_seq)
@@ -175,8 +202,12 @@ class CallRecorder:
             reply = self.rest.get(tool, args) if self.rest is not None else {"ok": False, "error": "no_channel"}
             logged_tool = f"GET {tool}"
         elif channel == "mcp":
-            reply = self.mcp.call(tool, args) if self.mcp is not None else {"ok": False, "error": "no_channel"}
-            logged_tool = tool
+            # 정본 §2.13.2 — 발견으로 얻은 **게이트웨이 실이름**(접두 포함형)을 호출 인자와
+            # `rr_snapshot_calls.tool` 에 적는다. 맨이름으로 부르면 게이트웨이가 이름 충돌로 접두를
+            # 붙이는 순간 호출이 조용히 전멸한다(probe 는 suffix 로 찾으니 '도구 있음' 으로 보고한다).
+            real = resolve_tool_name(tool, self.tool_names) if self.tool_names else tool
+            reply = self.mcp.call(real, args) if self.mcp is not None else {"ok": False, "error": "no_channel"}
+            logged_tool = real
         else:
             raise ValueError(f"모르는 채널 — {channel!r}. 'mcp' 또는 'rest' 뿐이다.")
         duration_ms = int((time.monotonic() - began) * 1000)
@@ -184,6 +215,7 @@ class CallRecorder:
         ok = bool(reply.get("ok"))
         error = None if ok else str(reply.get("error") or "unknown_error")
         # 응답 계약 검사(§2.13.1) — 위반은 예외가 아니라 행에 남는 표기다.
+        # 계약표는 맨이름 키다 — 실이름으로 찾으면 전부 '계약 없는 도구' 가 되어 검사가 조용히 꺼진다.
         contract = check_contract(tool, reply.get("result")) if ok else {
             "contract_ok": None, "missing": [], "type_mismatch": []}
         self.calls.append({
