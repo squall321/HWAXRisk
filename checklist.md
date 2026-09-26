@@ -5,7 +5,7 @@
 코드 대조로 확인해 적은 작업 대장이며, 앞으로의 진행은 이 문서를 늘려 가며 한다. 정본 체크리스트는 단계 착수 전에 쓴 것이라 P1~P7 항목이
 전부 미체크로 남아 있다 — 여기서 실측한 완료 상태가 그보다 최신이다.
 
-마지막 실측 2026-09-25 — `pytest` **1178 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · `ruff` 통과 · `pnpm build` 통과.
+마지막 실측 2026-09-25 — `pytest` **1179 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · `ruff` 통과 · `pnpm build` 통과.
 
 ## 진척 요약
 
@@ -63,14 +63,19 @@
   목록**이라 정본의 두 갈래(§0.2.1 '실린 것만' vs §5.6.2 '원장에 남아')가 한 갈래가 됐다. 좌석이 지어낸 `voc:` 는
   dangling 이고 등급이 안 오른다. 외부 자유 문자열은 전부 `«…»` 안으로 넣었다(밖에 두면 남의 VOC 문구 하나가
   브리프 조립을 죽인다) — 적대적 응답으로 방어를 시험에 고정했다.
+- [x] **'품질' 카드 — 죽어 있던 `GET /meta/metrics`** (2026-09-26) — 정본 §9.7 산출물이 "지표 대시보드
+  (앱 `TargetPage` 하단 '품질' 카드) · '루프 작동' 배지" 를 요구하는데 `getMetrics` 가 API 클라이언트에만
+  선언돼 있고 **아무도 부르지 않았다**(화면 5종 점검에서 이 경로를 놓쳤다). 배지 판정은 이미 서버가
+  `rr_metrics` 행(`loop_ok`·`loop_bottleneck_*`·`label_ingest_wired`)으로 내고 있어 화면만 없었다.
+  `QualityCard` 를 만들어 배지 3종 + 지표 표를 보이고, 정본 P6 통과 기준 2 의 **'표본 부족' 표기**를
+  세웠다(`value=null` + `n` — 0 으로 보이면 '나쁜 값' 으로 읽힌다). 같이 나온 계약 표류 1건 —
+  `MetricRow.value` 가 `number` 인데 서버는 표본 부족 시 `null` 을 보낸다(`tsc` 가 새 카드에서 바로 잡았다).
 - [ ] **`taxonomy.voc_map` 시드 12행** (2026-09-04, E10 범위 밖) — §7.6 라벨 경로 4 의 입력이다. 정본이 예시 4개만
   주고 그중 3개(`mechanical.fracture`·`interface.gap`·`interface.delamination`)가 택소노미 38코드 밖이라
   코드 신설(마이너 승급 → 지표 계열 분리) vs 기존 코드 사상 결정이 선행한다.
 - [ ] **`evidence_profile.field`** (2026-09-04 발견) — §0.2.1 (5)가 `voc:` 인용 수를 이 키로 세라 하는데
   §0.1 용어표·`risk_spec.v1.json` 어디에도 자리가 없다(5키뿐). 의장이 신고하는 6번째 키인지 코드 계산값인지,
   `_profile_mismatch` 대조에 넣을지(넣으면 기존 의장 헤더가 전부 header_mismatch) 정본 결정 필요.
-- [ ] **정본 §4.4.3 등급 표에 세 행 추가** — §0.2.1 (5)는 `req:`·`voc:`→측정, `paper:`→문헌·규격 이라 하고
-  "§4.4.3 표가 이 세 행을 그대로 쓴다" 고 적지만 그 표에 세 행이 없다. 코드는 §0.2.1 을 따랐다(정본 문면 개정 필요).
 - [x] **프런트 화면 5종 전부** (2026-09-25 완료) — REST 는 있는데 사람이 쓸 입구가 없던 것들.
   - [x] `CurationQueuePage.tsx`(`#/curation`) (2026-09-02) — kind 6종의 열린 항목을 사람이 결정한다. 결정 어휘는 서버
     `CURATION_DECISIONS` 와 같은 집합이고 그 사실을 시험으로 고정했다. 값을 더 받아야 하는 결정(`x_tag_promote` 의 `axis`,
@@ -201,6 +206,12 @@
 
 앱 코드는 손대지 않지만 앱의 통과 기준이 여기에 걸려 있다.
 
+- [ ] **정본 §4.4.3 등급 표에 세 행 추가**(`HWAXPortal/docs/design-risk-review/plan.md`, 문면 개정 1건) —
+  §0.2.1 (5)가 "`req:` 와 `voc:` 는 `측정`, `paper:` 는 `문헌·규격` 이다(§4.4.3 자동 산출 표가 이 세 행을
+  그대로 쓴다)" 고 적는데 그 표에 세 행이 없다. 코드는 §0.2.1 을 따랐고 시험으로 고정했다. 붙여넣을 초안 —
+  `| req: | 측정 | 단 kind='standard' 는 문헌·규격(§2.8b) · status ∈ candidate\|confirmed 만 |` ·
+  `| voc: | 측정 | 브리프 E10 블록에 실린 항목만(§0.2.1) |` ·
+  `| paper: | 문헌·규격 | 같음 |`. 표기만 맞추는 일이라 코드 변경 0 이다.
 - [ ] 포털 `delibTaxonomy.ts`(JobId·JOBS 8행째·JOB_ROUTING·suggestJob) · `conversations.api.ts` ConvKind · `agent/routes.py` `ConvCreate.kind`
 - [ ] agent-server `GET /health` 에 `sampling{temperature, top_p, max_tokens, seed?}` 1키 additive — 없으면 앱은 `sampling=null` 로 진행한다(막히지 않음)
 - [ ] `delib_metrics.py` 에 risk_spec 파싱 성공률 1종

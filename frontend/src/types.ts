@@ -142,7 +142,8 @@ export type MetricRow = {
   dimension: "expert" | "domain" | "mechanism" | "pattern" | "project" | "global";
   key: string;
   metric: string;
-  value: number;
+  /** 표본 부족(n < 지표별 임계)이면 서버가 값을 만들지 않고 null 을 낸다(§7.6). */
+  value: number | null;
   n: number;
 };
 export type Metrics = { metrics: MetricRow[] };

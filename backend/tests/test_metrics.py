@@ -943,3 +943,29 @@ def test_field_evidence_rate_ignores_dangling_and_matches_the_brief_key_rule(ris
     assert brief.product_keys_of(
         {"product_code": None, "product_refs_json": None,
          "predecessor_product_code": "F6-2023"})[0] == ["F6-2023"]
+
+
+def test_insufficient_sample_is_a_null_value_with_n_not_a_zero(risk_store, clock):
+    """정본 P6 통과 기준 2 — `n<임계` 는 '표본 부족' 이다. 0 으로 두면 '나쁜 값' 으로 읽힌다.
+
+    화면이 그 구분을 할 수 있어야 하므로 `value=null` + `n` 이 함께 실려야 한다(§4 원칙 — null 은
+    미측정이지 0 이 아니다). `GET /meta/metrics` 응답에 그대로 나온다.
+    """
+    _project(risk_store, PROJECT, product_code="MX-1")
+    _target(risk_store)
+    _panel(risk_store, PANEL)
+    _registry(risk_store)
+    _finding(risk_store, "F1")
+    metrics.recompute(risk_store)
+
+    rows = {(r["dimension"], r["key"], r["metric"]): r for r in risk_store.query(
+        "SELECT dimension, key, metric, value, n FROM rr_metrics", ())}
+    short = [r for r in rows.values() if r["value"] is None]
+    assert short, "임계 미달 지표가 하나도 없다 — 이 시험의 전제가 깨졌다"
+    assert all(r["n"] is not None for r in short), "표본 부족인데 n 이 없으면 화면이 사유를 못 보인다"
+
+    # 배지 3종 + 배선 여부는 판정이라 값이 항상 있다(표본 부족으로 비지 않는다).
+    for metric in ("loop_ok", "loop_bottleneck_labels", "loop_bottleneck_queue",
+                   "loop_bottleneck_coverage", "label_ingest_wired"):
+        row = rows[("global", "global", metric)]
+        assert row["value"] in (0.0, 1.0), f"{metric} 이 판정값이 아니다: {row['value']}"

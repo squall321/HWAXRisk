@@ -8,6 +8,7 @@ import { SectionCard, VerbatimBlock } from "../components/SectionCard";
 import type { Column } from "../components/DataTable";
 import { DataTable, KeyValueTable, TableScroll } from "../components/DataTable";
 import { HumanFindingForm } from "../components/HumanFindingForm";
+import { QualityCard } from "../components/QualityCard";
 import { EmptyBlock, ErrorBanner, LoadingBlock, NotReadyBlock } from "../components/StateBlocks";
 import {
   Badge,
@@ -990,6 +991,7 @@ export default function TargetPage() {
       <RegistryCard targetKey={targetKey} registry={registry} />
       <ConsolidatedReportCard level={coverage.data?.level ?? null} sync={sync} />
       <RecallPreview targetKey={targetKey} />
+      <QualityCard />
     </>
   );
 }
