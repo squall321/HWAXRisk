@@ -545,6 +545,35 @@ def canonical_text_for(ref: str, ctx: SpecContext) -> str | None:
             return None
         preview = item.get("result_preview")
         return str(preview) if preview is not None else None
+    if kind in ("voc", "paper"):
+        # 좌석이 읽은 것은 E10 줄 그 자체다 — 조립과 같은 함수로 줄을 만들어 대조한다. 분기가 없으면
+        # quote 대조가 건너뛰어지고, **아무도 대조할 수 없는 외부 근거**라 지어낸 인용문이 가장 잘
+        # 먹히는 자리가 된다(VOC 원문은 사람이 눈으로 확인할 방법이 없다).
+        from app import brief as brief_module  # noqa: PLC0415 — 순환 import 회피(brief 는 narrative 를 쓴다).
+
+        if kind == "voc":
+            item = ctx.field_evidence("voc", info["issue_key"], info["product_code"])
+            return (brief_module.field_evidence_line(item, "voc", product_code=info["product_code"])
+                    if item is not None else None)
+        item = ctx.field_evidence("paper", info["paper_id"])
+        return brief_module.field_evidence_line(item, "paper") if item is not None else None
+    if kind == "req":
+        # 요구의 한계값이 정규 표기다 — 좌석이 `req:` 를 인용하며 한계를 다르게 적는 것을 잡는다
+        # (§4.4.2 가 존재하는 이유가 그 실패다). `standard` 는 한계가 없어 조항·제목이 표기다(§2.8b).
+        row = ctx.requirement(info["name"])
+        if row is None:
+            return None
+        try:
+            value = json.loads(row["value_json"]) if row.get("value_json") else None
+        except (TypeError, ValueError):
+            value = None
+        if str(row.get("kind") or "") == "standard":
+            meta = value if isinstance(value, Mapping) else {}
+            parts = [info["name"], str(meta.get("clause") or ""), str(meta.get("title") or "")]
+            return " ".join(p for p in parts if p)
+        if row.get("op") is None:
+            return f"{info['name']} {canonical_json(value)}"
+        return f"{info['name']} {row['op']} {canonical_json(value)} {row.get('unit') or ''}".strip()
     return None
 
 

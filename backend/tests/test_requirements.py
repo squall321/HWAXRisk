@@ -546,3 +546,25 @@ def test_character_grade_verifies_the_two_locally_checkable_schemes(risk_store):
         " created_at, updated_at) VALUES ('R2','P1','u@x','standard','IEC 1','{}','confirmed','card:a',1,1)")
     assert character.evidence_grade_of(
         [{"ref": "req:IEC 1"}], store=risk_store, project_id="P1") == "문헌·규격"
+
+
+def test_a_misquoted_requirement_limit_is_caught(risk_store):
+    """§4.4.2 — 좌석이 `req:` 를 인용하며 한계를 다르게 적는 것을 잡는다(그 실패가 이 규칙의 이유다)."""
+    from app import narrative
+
+    risk_store.execute(
+        "INSERT INTO rr_projects(id, owner_sub, code, name, created_at, updated_at)"
+        " VALUES ('P1','u@x','F7','F7',1,1)")
+    risk_store.execute(
+        "INSERT INTO rr_requirements(id, project_id, owner_sub, kind, name, op, value_json, unit, status,"
+        " created_at, updated_at) VALUES ('R1','P1','u@x','dim_limit','thickness','gte','0.3','mm',"
+        "'confirmed',1,1)")
+    ctx = narrative.SpecContext(project_id="P1", owner_sub="u@x", store=risk_store)
+
+    right = narrative.resolve_cites([{"ref": "req:thickness", "quote": "0.3"}], ctx, raised_by=["std"])
+    assert right["quote_mismatch"] == []
+    assert narrative.evidence_grade_from_cites(right, ctx) == "측정"
+
+    wrong = narrative.resolve_cites([{"ref": "req:thickness", "quote": "0.5"}], ctx, raised_by=["std"])
+    assert wrong["quote_mismatch"] == ["req:thickness"], "한계를 다르게 적은 인용이 통과했다"
+    assert narrative.evidence_grade_from_cites(wrong, ctx) == "경험칙"

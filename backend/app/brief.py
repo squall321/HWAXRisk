@@ -778,6 +778,30 @@ def rendered_field_items(payload: Any, kind: str) -> list[Mapping[str, Any]]:
     return out
 
 
+def field_evidence_line(item: Mapping[str, Any], kind: str, *, product_code: str = "") -> str:
+    """E10 한 줄의 정규 표기(§5.6.1 줄 형식). `[전작]` 접두는 코드 라벨이라 여기 넣지 않는다.
+
+    조립과 **quote 대조**(§4.4.2)가 같은 문자열을 봐야 한다 — 좌석은 이 줄을 읽고 인용하므로,
+    대조 기준이 이 줄이 아니면 지어낸 인용문이 그대로 통과한다. 그래서 줄을 만드는 곳을 한 곳에 둔다.
+
+    응답의 자유 문자열은 전부 위생을 거쳐 «…» 안에 둔다 — 밖에 두면 판단어 린터에 그대로 노출돼 남의
+    VOC 문구 하나가 브리프 조립을 통째로 죽인다(§3.4.1). `render.sanitize_source_text` 를 직접 부르지
+    않고 `_q` 를 쓴다 — 직접 부르면 `on_suspect` 가 빠져 인젝션 적중이 자리표시자로만 가려지고
+    `rr_curation_queue` 에 안 올라간다(사람이 주입 시도를 영영 모른다). `_cut` 은 줄바꿈을 접는다 —
+    접지 않으면 남의 VOC 한 줄이 두 줄이 되어 줄 수 상한을 우회한다.
+    기간은 응답이 아니라 내가 보낸 인자로 적는다(외부 문자열을 하나 줄인다).
+    """
+    if kind == "voc":
+        cat = _q(_cut(item.get("category"), _VOC_CATEGORY), "voc")
+        excerpt = _q(_cut(item.get("text"), _VOC_EXCERPT), "voc")
+        return (f"voc:{product_code}#{_s(item.get('issue_key'))} | {cat} | n={_int(item.get('n'))} |"
+                f" {VOC_WINDOW_DAYS}d | {excerpt}")
+    pid = _s(item.get("record_id")) or _s(item.get("doi"))
+    title = _q(_cut(item.get("title"), _PAPER_TITLE), "paper")
+    excerpt = _q(_cut(item.get("abstract"), _PAPER_EXCERPT), "paper")
+    return f"paper:{pid} | {title} | {excerpt}"
+
+
 def _field_evidence_lines(store, ctx, field=None) -> list[str]:
     """E10 블록(plan §5.6.1·§5.6.2).
 
@@ -805,18 +829,7 @@ def _field_evidence_lines(store, ctx, field=None) -> list[str]:
         unreachable.append("get_top_issues")
     else:
         for item in rendered_field_items(issues, "voc"):
-            key, raw_cat = _s(item.get("issue_key")), _s(item.get("category"))
-            # 응답의 자유 문자열은 전부 위생을 거쳐 «…» 안에 둔다 — 밖에 두면 판단어 린터에 그대로 노출돼
-            # 남의 VOC 문구 하나가 브리프 조립을 통째로 죽인다(§3.4.1 은 브리프의 외부 문자열을 위생 대상으로 못 박는다).
-            # 기간은 응답이 아니라 내가 보낸 인자로 적는다(외부 문자열을 하나 줄인다).
-            # `render.sanitize_source_text` 를 직접 부르지 않고 `_q` 를 쓴다 — 직접 부르면 `on_suspect` 가
-            # 빠져 인젝션 적중이 자리표시자로만 가려지고 `rr_curation_queue` 에 안 올라간다(사람이 주입
-            # 시도를 영영 모른다). `_cut` 은 줄바꿈을 접는다 — 접지 않으면 남의 VOC 한 줄이 두 줄이 되어
-            # 줄 수 상한을 우회한다.
-            cat = _q(_cut(raw_cat, _VOC_CATEGORY), "voc")
-            excerpt = _q(_cut(item.get("text"), _VOC_EXCERPT), "voc")
-            lines.append(f"{prefix}voc:{codes[0]}#{key} | {cat} | n={_int(item.get('n'))} |"
-                         f" {VOC_WINDOW_DAYS}d | {excerpt}")
+            lines.append(prefix + field_evidence_line(item, "voc", product_code=codes[0]))
 
     query = scholar_query(store, ctx)
     papers = field.fetch(store, target_key, owner_sub, "search_scholar", {"q": query}) if query else None
@@ -824,10 +837,7 @@ def _field_evidence_lines(store, ctx, field=None) -> list[str]:
         unreachable.append("search_scholar")
     else:
         for item in rendered_field_items(papers, "paper"):
-            pid = _s(item.get("record_id")) or _s(item.get("doi"))
-            title = _q(_cut(item.get("title"), _PAPER_TITLE), "paper")
-            excerpt = _q(_cut(item.get("abstract"), _PAPER_EXCERPT), "paper")
-            lines.append(f"paper:{pid} | {title} | {excerpt}")
+            lines.append(field_evidence_line(item, "paper"))
 
     lines = lines[: max(1, int(getattr(config.settings, "risk_field_evidence_lines", 5)))]
     # 줄 수 상한(정본 "합쳐 최대 5줄")은 근거 줄에만 걸고 `[조회 불가]` 는 그 밖이다(정본은 그 줄을 따로 적는다).

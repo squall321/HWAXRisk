@@ -1091,3 +1091,27 @@ def test_the_field_channel_uses_the_target_owners_credential(risk_store, monkeyp
                         lambda email: {"portal_pat": "곧만료", "pat_exp": common.now_epoch() + 10})
     field_source.for_target(risk_store, "snap:S1")
     assert seen["portal_pat"] is None
+
+
+def test_a_fabricated_quote_on_field_evidence_is_caught(risk_store):
+    """§4.4.2 quote 대조 — 좌석이 읽은 것은 E10 줄 그 자체다.
+
+    `canonical_text_for` 에 분기가 없으면 대조가 건너뛰어지고, **아무도 눈으로 확인할 수 없는 외부
+    근거**라 지어낸 인용문이 가장 잘 먹히는 자리가 된다.
+    """
+    ctx = _field_target(risk_store)
+    source = field_source.FieldSource(_FieldStub({"get_top_issues": ISSUES}, boom=["search_scholar"]))
+    lines = brief._field_evidence_lines(risk_store, ctx, source)
+    assert lines[0].startswith("voc:F7-2024#ISS-1")
+
+    spec = narrative.SpecContext(owner_sub="u@x", store=risk_store, target_key="snap:S1",
+                                 project_id="P1")
+    real = narrative.resolve_cites(
+        [{"ref": "voc:F7-2024#ISS-1", "quote": "낙하 후 힌지 파손"}], spec)
+    assert real["quote_mismatch"] == [] and real["dangling"] == []
+
+    fake = narrative.resolve_cites(
+        [{"ref": "voc:F7-2024#ISS-1", "quote": "배터리 발화 12건"}], spec)
+    assert fake["quote_mismatch"] == ["voc:F7-2024#ISS-1"], "지어낸 인용문이 통과했다"
+    # 대조 실패는 등급을 못 올린다 — grade_ok 가 아니므로 측정이 되지 않는다.
+    assert narrative.evidence_grade_from_cites(fake, spec) == "경험칙"
