@@ -712,8 +712,16 @@ def product_keys(store, project_id: str) -> tuple[list[str], bool]:
     row = store.query_one(
         "SELECT product_code, product_refs_json, predecessor_product_code FROM rr_projects WHERE id = ?",
         (project_id,)) if project_id else None
-    if row is None:
-        return [], False
+    return product_keys_of(row) if row is not None else ([], False)
+
+
+def product_keys_of(row: Mapping[str, Any]) -> tuple[list[str], bool]:
+    """제품 3열 → 조회 키. 행을 이미 손에 든 호출자(지표)가 같은 규칙을 쓰도록 따로 둔다.
+
+    지표 `field_evidence_rate` 의 분모('제품 연결이 있는 과제')가 이 판정과 갈리면 양방향으로 틀린다 —
+    `ra_model` 만 든 과제를 분모에 넣으면 E10 이 구조적으로 불가능한데 지표가 낮게 나오고,
+    전작 코드만 있는 과제를 빼면 E10 이 도는데 분모에서 사라진다.
+    """
     # 정본 §5.6.2 는 "`product_refs_json` 의 **`product_code` 값들**" 이라고 적는다 — 항목 모양은
     # `[{kind: 'ra_model'|'product_code', value, ra_entity_id}]`(§5.2.2 DDL 주석)이므로 kind 를 가려야 한다.
     # 안 가리면 `ra_model` 의 값이 제품코드로 쓰여 VOC 를 엉뚱한 키로 조회한다.
@@ -801,8 +809,12 @@ def _field_evidence_lines(store, ctx, field=None) -> list[str]:
             # 응답의 자유 문자열은 전부 위생을 거쳐 «…» 안에 둔다 — 밖에 두면 판단어 린터에 그대로 노출돼
             # 남의 VOC 문구 하나가 브리프 조립을 통째로 죽인다(§3.4.1 은 브리프의 외부 문자열을 위생 대상으로 못 박는다).
             # 기간은 응답이 아니라 내가 보낸 인자로 적는다(외부 문자열을 하나 줄인다).
-            cat = render.sanitize_source_text(raw_cat[:_VOC_CATEGORY], "voc")
-            excerpt = render.sanitize_source_text(_s(item.get("text"))[:_VOC_EXCERPT], "voc")
+            # `render.sanitize_source_text` 를 직접 부르지 않고 `_q` 를 쓴다 — 직접 부르면 `on_suspect` 가
+            # 빠져 인젝션 적중이 자리표시자로만 가려지고 `rr_curation_queue` 에 안 올라간다(사람이 주입
+            # 시도를 영영 모른다). `_cut` 은 줄바꿈을 접는다 — 접지 않으면 남의 VOC 한 줄이 두 줄이 되어
+            # 줄 수 상한을 우회한다.
+            cat = _q(_cut(raw_cat, _VOC_CATEGORY), "voc")
+            excerpt = _q(_cut(item.get("text"), _VOC_EXCERPT), "voc")
             lines.append(f"{prefix}voc:{codes[0]}#{key} | {cat} | n={_int(item.get('n'))} |"
                          f" {VOC_WINDOW_DAYS}d | {excerpt}")
 
@@ -813,8 +825,8 @@ def _field_evidence_lines(store, ctx, field=None) -> list[str]:
     else:
         for item in rendered_field_items(papers, "paper"):
             pid = _s(item.get("record_id")) or _s(item.get("doi"))
-            title = render.sanitize_source_text(_s(item.get("title"))[:_PAPER_TITLE], "paper")
-            excerpt = render.sanitize_source_text(_s(item.get("abstract"))[:_PAPER_EXCERPT], "paper")
+            title = _q(_cut(item.get("title"), _PAPER_TITLE), "paper")
+            excerpt = _q(_cut(item.get("abstract"), _PAPER_EXCERPT), "paper")
             lines.append(f"paper:{pid} | {title} | {excerpt}")
 
     lines = lines[: max(1, int(getattr(config.settings, "risk_field_evidence_lines", 5)))]

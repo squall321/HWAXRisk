@@ -625,8 +625,11 @@ def _load_atoms(store: RiskStore) -> list[dict]:
         "SELECT id, cluster_key_norm, status FROM rr_patterns", ())}
     known = {_s(r["cluster_key_norm"]) for r in store.query(
         "SELECT cluster_key_norm FROM rr_patterns WHERE status IN ('known','rule','predictor')", ())}
+    # dangling 인용은 세지 않는다 — 이 지표가 재는 것은 '필드 근거가 실제로 심의에 쓰였는가' 이고,
+    # 해석되지 않는 인용까지 세면 지어낸 `voc:` 한 줄로 값이 부풀어 지표가 자기 목적을 잃는다(§0.2.1 (2)).
     cited = {str(r["claim_uid"]) for r in store.query(
-        "SELECT claim_uid FROM rr_claim_refs WHERE ref LIKE 'voc:%' OR ref LIKE 'paper:%'", ())}
+        "SELECT claim_uid FROM rr_claim_refs WHERE (ref LIKE 'voc:%' OR ref LIKE 'paper:%')"
+        " AND COALESCE(dangling, 0) = 0", ())}
 
     cache: dict[str, str] = {}
     atoms: list[dict] = []
@@ -827,12 +830,16 @@ def _req_rows(out: list, atoms: Sequence[Mapping[str, Any]]) -> None:
 
 def _field_evidence_rows(out: list, store: RiskStore, atoms: Sequence[Mapping[str, Any]]) -> None:
     """E10 이 실릴 수 있는(제품 연결이 있는) 과제의 패널 중 voc:·paper: 를 인용한 finding 이 있는 비율."""
+    from app import brief as brief_module   # noqa: PLC0415 — 제품 키 판정을 한 곳에서 쓴다.
+
     linked = set()
     for row in store.query(
-        "SELECT id, product_code, product_refs_json FROM rr_projects "
+        "SELECT id, product_code, product_refs_json, predecessor_product_code FROM rr_projects "
         "WHERE status = 'active' AND corpus_excluded = 0", ()
     ):
-        if _s(row["product_code"]).strip() or _loads(row["product_refs_json"], []):
+        # 조립이 실제로 조회 키를 얻는 과제만 분모다 — `ra_model` 만 든 과제는 E10 이 구조적으로
+        # 불가능하고(키 0건), 전작 코드만 있는 과제는 E10 이 돈다. 판정을 brief 와 공유한다.
+        if brief_module.product_keys_of(row)[0]:
             linked.add(str(row["id"]))
     panels: dict[str, bool] = {}
     for atom in atoms:

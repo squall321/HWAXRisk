@@ -77,15 +77,36 @@ def _panel_of(statement_id: str) -> str | None:
     return text.split("#", 1)[0] if "#" in text else None
 
 
-def evidence_grade_of(cites: Sequence[Mapping[str, Any]] | None) -> str:
-    """저장된 cites 로 근거 등급을 낸다 — 판정표는 narrative.evidence_grade_from_cites 가 정본이다(§4.4.3)."""
+def evidence_grade_of(cites: Sequence[Mapping[str, Any]] | None, *, store: Any = None,
+                      project_id: str | None = None, target_key: str | None = None) -> str:
+    """저장된 cites 로 근거 등급을 낸다 — 판정표는 narrative.evidence_grade_from_cites 가 정본이다(§4.4.3).
+
+    스냅샷·diff 스코프가 없으므로 `p:`·`e:`·`c:` 는 존재 검증 없이 센다 — 스코프 없이 강등하면 파트를
+    인용한 성격 행이 전부 경험칙으로 떨어진다. `inc:` 도 검증하지 않는다(RA 사고는 지역 검증 경로가
+    없고, 정본은 채널 부재를 강등 사유로 보지 않는다 — `_resolve_one` 의 `verified=False` 와 같은 규칙).
+
+    그러나 **`req:`·`voc:` 는 store 만 있으면 지역에서 확인할 수 있다.** 확인하지 않으면 지어낸 인용
+    한 줄이 성격 행을 최고 등급(측정)으로 올린다. `req:` 는 kind 까지 읽어야 한다 — `standard` 는
+    측정이 아니라 문헌·규격이다(정본 §2.8b). store 가 없으면 예전처럼 검증 없이 세므로, 호출자가
+    store 를 주지 않는 경로의 동작은 바뀌지 않는다.
+    """
+    ctx = (narrative.SpecContext(store=store, project_id=project_id or "", target_key=target_key or "")
+           if store is not None else None)
     rows: list[dict] = []
     for cite in cites or ():
         ref = str((cite or {}).get("ref") or "") if isinstance(cite, Mapping) else str(cite or "")
         info = parse_ref(ref)
         if info is None:
             continue
-        rows.append({"ok": True, "grade_ok": True, "ref_type": info["kind"], "ref": info["ref"]})
+        row = {"ok": True, "grade_ok": True, "ref_type": info["kind"], "ref": info["ref"]}
+        if ctx is not None and info["kind"] == "req":
+            found = ctx.requirement(info["name"])
+            row["ok"] = row["grade_ok"] = found is not None
+            row["req_kind"] = str((found or {}).get("kind") or "")
+        elif ctx is not None and info["kind"] == "voc":
+            found = ctx.field_evidence("voc", info["issue_key"], info["product_code"])
+            row["ok"] = row["grade_ok"] = found is not None
+        rows.append(row)
     return narrative.evidence_grade_from_cites({"cites": rows})
 
 
@@ -438,7 +459,8 @@ def build_profile(store: RiskStore, project_id: str) -> dict:
         item["by"] = _loads(item.pop("by_json"), [])
         item["variants"] = _loads(item.pop("variants_json"), [])
         item["dissent"] = _loads(item.pop("dissent_json"), [])
-        item["evidence_grade"] = evidence_grade_of(item["cites"])
+        item["evidence_grade"] = evidence_grade_of(
+            item["cites"], store=store, project_id=project_id, target_key=item.get("first_target_key"))
         item["layer"] = item["status"]
         if item["status"] == "superseded":
             superseded.append(item)

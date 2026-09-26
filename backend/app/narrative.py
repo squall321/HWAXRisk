@@ -1387,7 +1387,7 @@ def prior_evidence(store, target_key: str, *, user_memo: str | None = None,
 
     # 조립 경로는 strict_lint 다 — 판단어가 섞인 브리프를 엔진에 보내느니 E500 으로 멈춘다(plan §5.6.2).
     # E10 조회 채널은 없으면 None 이다(그 블록만 결측 문구가 되고 조립은 완주한다).
-    field = field_source.from_settings()
+    field = field_source.for_target(store, target_key)
     try:
         built = brief_module.build_brief(store, target_key, seats=seats, panel_id=panel_id,
                                         exclude=tuple(exclude), field=field, strict_lint=True)

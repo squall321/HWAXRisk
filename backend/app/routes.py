@@ -2306,7 +2306,8 @@ def brief_payload(target_key: str, tier: str = "B", *, owner_sub: str | None = N
     panel_id = panels[0]["id"] if panels else None
     # REST·MCP 미리보기도 같은 브리프를 만든다 — E10 을 러너에만 두면 이 경로의 그 블록이 영영 빈다.
     # 24 h 캐시가 있어 미리보기가 게이트웨이를 매번 왕복하지는 않는다(§5.6.2).
-    field = field_source.from_settings()
+    # 자격은 (b) 타깃 owner → (a) 서비스 순이다 — 서비스 시야로만 부르면 빈 응답이 'VOC 0건' 으로 굳는다.
+    field = field_source.for_target(store, target_key)
     try:
         brief = brief_module.build_brief(store, target_key, seats=seats, panel_id=panel_id,
                                         exclude=exclude, owner_sub=target["owner_sub"], field=field)

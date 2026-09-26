@@ -109,6 +109,29 @@ def from_settings(settings=None, *, portal_pat: str | None = None, http_client: 
                        timeout=FIELD_TIMEOUT_S)
 
 
+def for_target(store, target_key: str, *, settings=None, http_client: Any = None):
+    """타깃의 E10 조회 채널 — 자격 (b) 타깃 owner 의 포털 PAT, 없으면 (a) 서비스 PAT(plan §0.1.6).
+
+    서비스 PAT 만 쓰면 남의 시야로 도는 셈이다. 시야 밖 응답은 오류가 아니라 **빈 배열**로 와서
+    브리프에는 `[필드·문헌 근거 없음 — VOC 0건]` 으로만 보이고, 그 값이 24 h 재사용된다 —
+    없는 리스크가 굳는 경로다. 그래서 러너·로스터와 같은 자격 순서를 쓴다.
+
+    (c) 요청자 자격은 이 경로에 없다 — 브리프를 여는 MCP 경로의 `actor` 는 게이트웨이 신고값이고
+    미검증이므로(§6.11) 자격 선택에 쓰면 남의 PAT 를 고르게 된다.
+    만료 임박한 PAT 는 쓰지 않는다 — 값이 있기만 하면 쓰면 (a) 폴백이 죽어 게이트웨이 401 로 강등된다
+    (`runner.resolve_credential`·`roster.credential` 과 같은 규칙).
+    """
+    from app import identity  # noqa: PLC0415 — 순환 import 회피.
+    from app import runner    # noqa: PLC0415 — 만료 여유 상수만 쓴다.
+
+    row = store.query_one("SELECT owner_sub FROM rr_targets WHERE target_key = ?", (target_key,))
+    credential = (store.get_credential(row["owner_sub"]) if row else None) or {}
+    portal_pat = identity.credential_pat(credential)
+    if int(credential.get("pat_exp") or 0) <= now_epoch() + runner.CREDENTIAL_MARGIN_S:
+        portal_pat = None
+    return from_settings(settings, portal_pat=portal_pat, http_client=http_client)
+
+
 # ---------------------------------------------------------------- 작은 도구
 def _call_id(target_key: str, tool: str, args_hash: str) -> str:
     """브리프 호출 id — `(타깃, 도구, 인자)` 하나당 한 행이다.

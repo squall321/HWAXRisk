@@ -514,3 +514,35 @@ def test_the_same_name_in_two_kinds_resolves_deterministically(risk_store):
 
     picks = {ctx.requirement("drop")["kind"] for _ in range(5)}
     assert picks == {"scenario"}, "kind 순서가 결정론이 아니다"
+
+
+def test_character_grade_verifies_the_two_locally_checkable_schemes(risk_store):
+    """`character.evidence_grade_of` 가 존재 검증 없이 `req:`·`voc:` 를 측정으로 올렸다.
+
+    `inc:` 는 검증하지 않는다 — RA 사고는 지역 검증 경로가 없고 정본은 채널 부재를 강등 사유로 보지
+    않는다. `p:`·`e:`·`c:` 도 스코프가 없어 검증하지 않는다(강등하면 파트 인용이 전부 경험칙이 된다).
+    """
+    from app import character
+
+    risk_store.execute(
+        "INSERT INTO rr_projects(id, owner_sub, code, name, created_at, updated_at)"
+        " VALUES ('P1','u@x','F7','F7',1,1)")
+    risk_store.execute(
+        "INSERT INTO rr_requirements(id, project_id, owner_sub, kind, name, op, value_json, unit, status,"
+        " created_at, updated_at) VALUES ('R1','P1','u@x','dim_limit','thickness','gte','0.3','mm',"
+        "'confirmed',1,1)")
+
+    real = [{"ref": "req:thickness"}]
+    made_up = [{"ref": "req:지어낸요구"}]
+    # store 를 주지 않으면 예전처럼 검증 없이 센다(호출자 동작을 바꾸지 않는다).
+    assert character.evidence_grade_of(made_up) == "측정"
+    assert character.evidence_grade_of(real, store=risk_store, project_id="P1") == "측정"
+    assert character.evidence_grade_of(made_up, store=risk_store, project_id="P1") == "경험칙"
+    # 지역 검증 경로가 없는 스킴은 그대로 센다.
+    assert character.evidence_grade_of([{"ref": "inc:RA-1"}], store=risk_store, project_id="P1") == "측정"
+    # standard kind 는 측정이 아니라 문헌·규격이다(§2.8b) — 검증 경로에서도 같다.
+    risk_store.execute(
+        "INSERT INTO rr_requirements(id, project_id, owner_sub, kind, name, value_json, status, source_ref,"
+        " created_at, updated_at) VALUES ('R2','P1','u@x','standard','IEC 1','{}','confirmed','card:a',1,1)")
+    assert character.evidence_grade_of(
+        [{"ref": "req:IEC 1"}], store=risk_store, project_id="P1") == "문헌·규격"

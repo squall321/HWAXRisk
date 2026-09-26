@@ -900,3 +900,46 @@ def test_manual_labels_produce_precision_calibration_and_lead_time_per_dimension
     scarce = [r for r in rows if r["value"] is None]
     assert all(r["n"] < metrics.MIN_N.get(r["metric"], metrics.MIN_N["calibration"]) or True
                for r in scarce)
+
+
+def test_field_evidence_rate_ignores_dangling_and_matches_the_brief_key_rule(risk_store, clock):
+    """이 지표가 재는 것은 '필드 근거가 실제로 심의에 쓰였는가' 다 — 두 곳이 어긋나 있었다.
+
+    ① 분자가 `dangling` 인 인용까지 세어 지어낸 `voc:` 한 줄로 값이 부풀었다.
+    ② 분모가 `product_refs_json` 이 비어 있지 않기만 하면 셌다 — `ra_model` 만 든 과제는 조립이
+       조회 키를 못 얻어 E10 이 **구조적으로 불가능**한데 분모에 들어(값이 낮게 나온다), 전작 코드만
+       있는 과제는 E10 이 도는데 분모에서 빠졌다. 판정을 `brief.product_keys_of` 와 공유한다.
+    """
+    _project(risk_store, PROJECT, product_code="MX-1")
+    _target(risk_store)
+    _panel(risk_store, PANEL)
+    _panel(risk_store, "PN2", panel_no=2)
+    _panel(risk_store, "PN3", panel_no=3)     # MIN_N['field_evidence_rate'] = 3
+    _registry(risk_store)
+    _finding(risk_store, "F1")
+    _finding(risk_store, "F2", panel_id="PN2", cluster_key="ck:bbbbbbbbbbbb")
+    _finding(risk_store, "F3", panel_id="PN3", cluster_key="ck:cccccccccccc")
+    # 지어낸 인용 — 해석되지 않아 dangling=1 이다.
+    risk_store.execute(
+        "INSERT INTO rr_claim_refs(claim_uid, ref_type, ref, owner_sub, target_key, dangling) "
+        "VALUES ('F1#c', 'voc', 'voc:MX-1#지어냄', ?, ?, 1)", (OWNER, TARGET))
+    metrics.recompute(risk_store)
+    field = risk_store.query_one("SELECT value, n FROM rr_metrics WHERE metric = 'field_evidence_rate'")
+    assert field["value"] == pytest.approx(0.0), "dangling 인용이 지표를 부풀렸다"
+    assert field["n"] == 3
+
+    # 같은 인용이 해석되면(dangling=0) 값이 올라간다 — 분자가 아예 죽은 게 아님을 함께 고정한다.
+    risk_store.execute("UPDATE rr_claim_refs SET dangling = 0 WHERE claim_uid = 'F1#c'")
+    metrics.recompute(risk_store)
+    assert risk_store.query_one(
+        "SELECT value FROM rr_metrics WHERE metric = 'field_evidence_rate'")["value"] == pytest.approx(1 / 3)
+
+    # 분모 — ra_model 만 든 과제는 조회 키가 0건이라 들어오지 않고, 전작 코드만 있는 과제는 들어온다.
+    from app import brief
+
+    assert brief.product_keys_of(
+        {"product_code": None, "product_refs_json": '[{"kind":"ra_model","value":"RA-9"}]',
+         "predecessor_product_code": None})[0] == []
+    assert brief.product_keys_of(
+        {"product_code": None, "product_refs_json": None,
+         "predecessor_product_code": "F6-2023"})[0] == ["F6-2023"]
