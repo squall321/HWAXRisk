@@ -5,7 +5,7 @@
 코드 대조로 확인해 적은 작업 대장이며, 앞으로의 진행은 이 문서를 늘려 가며 한다. 정본 체크리스트는 단계 착수 전에 쓴 것이라 P1~P7 항목이
 전부 미체크로 남아 있다 — 여기서 실측한 완료 상태가 그보다 최신이다.
 
-마지막 실측 2026-09-25 — `pytest` **1181 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · `ruff` 통과 · `pnpm build` 통과.
+마지막 실측 2026-09-29 — `pytest` **1184 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · `ruff` 통과 · `pnpm build` 통과.
 
 ## 진척 요약
 
@@ -187,12 +187,26 @@
   `codes[0]` 만 조회한다. 정본이 "`product_code` **값들**"(복수, §5.6.2)이라 적고 호출은
   `get_top_issues(product_code, 90d)`(단수)라 적는다. 제품마다 부르면 호출 예산이 제품 수만큼 늘고
   5줄 상한을 제품들이 나눠 쓰게 되므로 코드로 지어내지 않았다(↓ 6장에 결정 행을 뒀다).
+- [x] **`missing.mcad_capture_failed` — 잘린 트리로 IR 을 지어내던 것** (2026-09-29) — MCP 폴백 응답에
+  `nodes` 키가 없으면(리프 >500) 정본 §2.5.1·§2.13.3 은 **mcad 를 통째로 버리라** 한다. 코드는
+  `tree_truncated` 만 세우고 계속 진행해 `list_parts`(500 클램프·truncated 플래그 없음)로 노드를 만들었다.
+  **실측으로 증명했다** — 요약이 리프 620건이라 말하는데 IR 은 파트 2건으로 서고(실환경이면 620 중 500)
+  `missing` 은 그 사실을 한 마디도 안 한다. 사라진 파트가 낀 간섭이 함께 사라지므로 '없는 리스크' 다.
+  §2.2 degraded 표가 이 경로를 **"실무 어셈블리에서는 상시 경로"** 라 적는다 — 첫 실캡처에서 바로 걸린다.
+  `_capture_failed` 로 마감하고(소스 행은 남긴다 — 원인을 사람이 봐야 한다) 정본 표대로 `mcad_absent` 와
+  **함께** 세워 형상층 게이트가 `pass=null` 로 내려가게 했다 — 그러지 않으면 노드 0건인데 위반 0건이라
+  G3 가 통과로 읽힌다. 같이 맞춘 것 — `missing` 키가 코드 9·스키마 7·정본 11 로 셋이 갈려 있었다.
+  정본 11키로 통일하고 IR 모양 픽스처 16종을 실산출에 맞췄다. 어댑터 선언이 **기본값 있는 키만** 통과하는
+  필터도 주석으로 못 박았다(없는 키를 선언하면 조용히 버려진다 — 이번에 그 함정을 직접 밟았다).
+  시험 3건, 전부 고치기 전 깨진다.
 - [ ] **정본 통과 기준 대조에서 남은 4건**(2026-09-26, 식별자 전수 대조로 발견) —
-  ① `warnings.ambiguous_bridge_key`(P2 기준 (23)(d)) — 같은 `(step_file, source_name)` 2행이면
-  브리지 엣지 0건 + 경고 1건이어야 하는데 코드에 그 경고가 없다. 조인 키가 다의일 때 엉뚱한 브리지가
-  조용히 생기는 쪽이라 **'없는 리스크' 계열**이다 · ② `missing.mcad_capture_failed`(§2.13.3) — MCP 폴백
-  응답에 `nodes` 키가 없으면(리프 >500) `degraded: tree_truncated` 를 세우고 **mcad 를 통째로 버려야**
-  하는데 그 플래그가 없다(요약만으로 노드·엣지를 지어내면 안 된다) · ③ `rr_findings.finding_json.cited_by_later[]`
+  ① **범위를 잘못 적었다 — `ambiguous_bridge_key` 가 없는 게 아니라 브리지 자체가 없다.** `part_mesh_map`
+  을 아무도 부르지 않고(`mcad.py` 주석이 "캡처가 한 번도 부르지 않는다" 고 적어 둔 그대로) `kind='bridge'`
+  엣지를 만드는 코드가 0건이다. 그래서 `attrs.dyna.bridge.join_key`·`bridge_stale`·`ambiguous_bridge_key`
+  가 전부 없고, 그 엣지를 입력으로 쓰는 `sameas` 2단계 `pid_map` 과 `diff` 의 `cross.bridge_stale` 이
+  **구조적으로 죽어 있다**. 정본 MCP 3 예산(§2.13.3 `job_status`·`part_mesh_map`·`inspect_report`) 중
+  코드는 `job_status`·`interface_graph` 둘만 부른다 — `inspect_report` 의 `source_inconsistent` 교차 검증도
+  함께 없다. P2 산출물 한 덩이라 별도 단위로 한다 · ② **완료(2026-09-29, ↓ 1장)** · ③ `rr_findings.finding_json.cited_by_later[]`
   (§5.6 (4)) — 인용된 선례에 후속 `claim_uid` 를 누적해야 '선례가 실제로 쓰였는지' 의 원자료가 된다 ·
   ④ 등록부 `subject_ckeys` 를 `resolve_ckey()` 로 해석하는지(§5.9.1) — 이름이 다를 수 있어 의미 대조가 필요하다.
   ①②는 어댑터 픽스처가 선행이고 ③④는 원자·별칭 경로를 건드려 한 번에 하지 않았다.
