@@ -152,6 +152,55 @@ class McadAdapter(SourceAdapter):
     def discover(self, registry: Any) -> Probe:
         return registry.probe(KIND, self.app_key)
 
+    # -- 필수 호출 실패 마감 -------------------------------------------------
+    def _capture_failed(self, recorder: CallRecorder, *, ref: Mapping[str, Any], project_id: str,
+                        app_key: str | None, mcp_tree: Mapping[str, Any],
+                        captured_at: int, degraded: set[str], warnings: list[dict],
+                        detect_job_id: Any, detect_finished_at: Any,
+                        job_params: Mapping[str, Any]) -> AdapterResult:
+        """mcad 필수 호출 실패 마감(plan §2.2 missing 표 · §2.5.1 · §2.13.3).
+
+        `summary` 로 `sources[mcad].stats` 만 채우고 **노드·엣지를 하나도 만들지 않는다.** 소스 행은 남긴다 —
+        어느 앱을 어떤 인자로 불렀고 무엇이 왔는지가 원장에 있어야 사람이 원인을 본다.
+        `missing.mcad_capture_failed` 는 정본 표대로 **`mcad_absent` 와 함께** 선다 — 그래야 형상층 게이트가
+        `pass=null` 로 내려가고(§2.12·§3.2.2 G1~G3) '노드 0건인데 위반 0건' 이 통과로 읽히지 않는다.
+        """
+        # REST 는 애초에 안 열렸으므로 tol 은 잡 params 4키만이다(§2.2 tol_known_keys).
+        tol_hash, tol_keys = _tol_hash(None, job_params)
+        source = {
+            "kind": KIND,
+            "app_key": app_key,
+            "adapter_version": ADAPTER_VERSION,
+            "channel": "mcp",
+            "ref": {
+                "stepforge_project_id": project_id,
+                "project_name": str(mcp_tree.get("project") or ref.get("project_name") or "") or None,
+                "unit_system": None,
+                "detect_job_id": detect_job_id,
+                "detect_finished_at": detect_finished_at,
+                "step_files": [],
+            },
+            # 노드가 없으니 step 파일 해시도 없다 — 호출 인자만으로 계보를 남긴다.
+            "source_hash": sha256_hex(canonical_json(
+                {"project_id": project_id, "detect_job_id": detect_job_id, "capture_failed": True})),
+            "tol_config_hash": tol_hash,
+            "tol_known_keys": tol_keys,
+            "scope": None,
+            "stats": _stats(None, mcp_tree, [], 0, 0, {}),
+            "app_version": None,
+            "degraded": sorted(degraded),
+            "captured_at": captured_at,
+        }
+        return {
+            "source": source,
+            "nodes": [],
+            "edges": [],
+            "warnings": warnings,
+            "degraded": sorted(degraded),
+            "call_ids": recorder.call_ids(KIND),
+            "missing": {"mcad_capture_failed": True, "mcad_absent": True},
+        }
+
     # -- 캡처 ---------------------------------------------------------------
     def capture(self, ref: Mapping[str, Any], principal: Principal | None,
                 recorder: CallRecorder) -> AdapterResult:
@@ -250,8 +299,17 @@ class McadAdapter(SourceAdapter):
             mcp_tree = dict(reply["result"]) if isinstance(reply["result"], Mapping) else {}
             if not isinstance(mcp_tree.get("nodes"), list):
                 # 노드 500 초과면 소스가 nodes 키 자체를 빼고 summary·note 만 준다(recon §2.2).
+                # 정본 §2.5.1·§2.13.3 — 그때는 **mcad 를 통째로 버린다.** 요약만으로는 노드·엣지를 만들 수
+                # 없고, `list_parts` 는 500 으로 클램프하면서 truncated 플래그를 주지 않으므로 계속 진행하면
+                # 501번째부터 조용히 사라진 IR 을 '정상' 으로 동결한다 — 그 파트가 낀 간섭이 함께 사라진다.
+                # 실무 어셈블리에서는 이 경로가 상시 경로다(§2.2 degraded 표 tree_truncated 항).
                 degraded.add("tree_truncated")
                 warnings.append(_warn("tree_truncated", str(mcp_tree.get("note") or "노드 요약만 수신했다."), None))
+                return self._capture_failed(recorder, ref=ref, project_id=project_id, app_key=app_key,
+                                            mcp_tree=mcp_tree, captured_at=captured_at,
+                                            degraded=degraded, warnings=warnings,
+                                            detect_job_id=detect_job_id, detect_finished_at=detect_finished_at,
+                                            job_params=job_params)
             reply = mcp("list_parts", {"project_id": project_id, "limit": MCP_IFACE_LIMIT})
             parts_mcp = _rows(reply["result"], "parts") if reply["ok"] else []
             parts_call = reply["call_id"]

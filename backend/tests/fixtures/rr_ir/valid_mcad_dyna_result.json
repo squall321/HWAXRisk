@@ -848,6 +848,11 @@
   "worst_cases": []
  },
  "missing": {
+  "mcad_absent": false,
+  "iface_kinds_absent": false,
+  "mcad_capture_failed": false,
+  "dyna_capture_failed": false,
+  "ecad_capture_failed": false,
   "ecad_absent": true,
   "dyna_absent": false,
   "dyna_result_absent": false,

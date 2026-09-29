@@ -1080,9 +1080,16 @@ def build_ir(
         "world_transform_absent": bool(mcad_parts) and all(n["attrs"].get("bbox_world") is None for n in mcad_parts),
         "volume_null": bool(mcad_parts) and all(n["attrs"].get("volume") is None for n in mcad_parts),
         "material_density_unsourced": bool(density_unsourced),
+        # kind 별 **필수 호출** 실패(정본 §2.2 missing 표) — 그 kind 의 노드·엣지를 하나도 만들지 않고
+        # `<kind>_absent` 와 함께 선다. 어댑터가 선언하고 여기 기본값이 있어야 아래 update 를 통과한다.
+        "mcad_capture_failed": False,
+        "dyna_capture_failed": False,
+        "ecad_capture_failed": False,
     }
     if has_dyna_result and not results:
         missing["dyna_result_absent"] = True
+    # 어댑터 선언은 **기본값이 있는 키만** 통과한다 — 없는 키를 선언하면 조용히 버려지므로, 새 플래그는
+    # 위 기본값에 함께 넣어야 한다(그러지 않으면 어댑터가 세운 사실이 봉투에 안 실린다).
     missing.update({k: v for k, v in missing_declared.items() if k in missing})
 
     partial = any(s.get("scope") is not None for s in sources)

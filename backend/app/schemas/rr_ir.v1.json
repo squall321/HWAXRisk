@@ -315,9 +315,14 @@
     },
     "missing": {
       "type": "object",
-      "required": ["ecad_absent", "dyna_absent", "dyna_result_absent", "result_kind_mismatch", "world_transform_absent", "volume_null", "material_density_unsourced"],
+      "required": ["mcad_absent", "ecad_absent", "dyna_absent", "dyna_result_absent", "result_kind_mismatch", "iface_kinds_absent", "world_transform_absent", "volume_null", "material_density_unsourced", "mcad_capture_failed", "dyna_capture_failed", "ecad_capture_failed"],
       "properties": {
+        "mcad_absent": {"type": "boolean"},
         "ecad_absent": {"type": "boolean"},
+        "iface_kinds_absent": {"type": "boolean"},
+        "mcad_capture_failed": {"type": "boolean"},
+        "dyna_capture_failed": {"type": "boolean"},
+        "ecad_capture_failed": {"type": "boolean"},
         "dyna_absent": {"type": "boolean"},
         "dyna_result_absent": {"type": "boolean"},
         "result_kind_mismatch": {"type": "boolean"},

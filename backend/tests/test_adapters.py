@@ -929,3 +929,65 @@ def test_gateway_tool_names_caches_and_survives_failure(monkeypatch):
     assert adapters_registry.gateway_tool_names(
         client=httpx.Client(transport=httpx.MockTransport(dead))) == ()
     adapters_registry.reset_discovery_cache()
+
+
+def test_a_truncated_tree_discards_mcad_instead_of_building_a_clipped_ir():
+    """정본 §2.5.1·§2.13.3 — `nodes` 키가 없으면 mcad 를 **통째로 버린다**.
+
+    리프 > 500 이면 소스가 `nodes` 키를 빼고 `{summary, warnings, note}` 만 준다. 그때 계속 진행하면
+    `list_parts`(500 클램프, truncated 플래그 없음)로 노드를 만들어 **501번째부터 조용히 사라진 IR** 을
+    '정상' 으로 동결한다 — 그 파트가 낀 간섭이 함께 사라지므로 '없는 리스크' 가 된다.
+    §2.2 degraded 표는 이 경로를 "실무 어셈블리에서는 상시 경로" 라고 적는다.
+    """
+    truncated = {"summary": {"files": 1, "nodes": 900, "leaf_instances": 620, "assemblies": 40,
+                             "max_depth": 5, "auto_named_nodes": 3},
+                 "warnings": [], "note": "노드가 500을 넘어 목록을 생략했다."}
+    tools = dict(MCP_TOOLS_FULL, project_tree=truncated)
+    result, _ = _capture_mcad(tools=tools, rest_token=None)
+
+    assert result["nodes"] == [] and result["edges"] == [], "요약만으로 노드·엣지를 지어냈다"
+    # 정본 §2.2 missing 표 — `<kind>_capture_failed` 는 `<kind>_absent` 와 **함께** 선다.
+    assert result["missing"] == {"mcad_capture_failed": True, "mcad_absent": True}
+    assert "tree_truncated" in result["degraded"]
+    assert [w["code"] for w in result["warnings"]] == ["tree_truncated"]
+    # 소스 행은 남는다 — 무엇을 어떻게 불렀는지가 원장에 있어야 사람이 원인을 본다.
+    source = result["source"]
+    assert source["kind"] == "mcad" and source["stats"]["leaf_instances"] == 620
+    assert source["ref"]["step_files"] == [] and source["source_hash"]
+
+
+def test_a_truncated_tree_stops_before_the_interface_calls():
+    """노드를 못 만들면 계면도 못 만든다 — 끝점을 해석할 노드가 없으므로 호출을 더 내보내지 않는다."""
+    truncated = {"summary": {"leaf_instances": 620}, "warnings": [], "note": "생략"}
+    seen: list = []
+    _capture_mcad(tools=dict(MCP_TOOLS_FULL, project_tree=truncated), rest_token=None, mcp_seen=seen)
+
+    called = [name for name, _ in seen]
+    assert "project_tree" in called
+    assert "list_interfaces" not in called and "interface_graph" not in called
+    assert "list_parts" not in called, "버릴 트리인데 파트 목록까지 받아 왔다"
+
+
+def test_the_ir_marks_a_failed_mcad_capture_and_drops_its_geometry_gates():
+    """버린 mcad 가 IR 에서 어떻게 보이나 — 노드 0건 · 두 플래그 · 형상층 게이트 pass=null."""
+    from app import state as state_module
+
+    truncated = {"summary": {"files": 1, "nodes": 900, "leaf_instances": 620},
+                 "warnings": [], "note": "생략"}
+    mcad_result, _ = _capture_mcad(tools=dict(MCP_TOOLS_FULL, project_tree=truncated), rest_token=None)
+    dyna = dyna_adapter.DynaAdapter(DYNA_APP_KEY).capture(
+        {"session_id": "01JSES", "file_id": "01JFIL", "sha256": KSHA}, _principal(),
+        CallRecorder("cafe0000deadbeef", mcp=_mcp({"inspect_file": INSPECT_FILE})))
+
+    ir = ir_builder.build_ir(project_id="p" * 32, owner_sub=OWNER, label="DV1",
+                             adapter_results=[mcad_result, dyna], snapshot_id="c" * 32,
+                             captured_at=1756600000)
+
+    assert ir["missing"]["mcad_capture_failed"] is True
+    assert ir["missing"]["mcad_absent"] is True
+    # mcad 가 없으니 정본 소스는 dyna 다(§2.2) — 노드는 dyna 것만 남는다.
+    assert {n["domain"] for n in ir["nodes"]} == {"dyna"}
+    state = state_module.build_state(ir)
+    # 형상층 게이트는 '위반 0건' 이 아니라 '입력 없음' 이다(§2.12) — 아니면 통과로 읽힌다.
+    assert state["gates"]["G3"]["pass"] is None
+    assert state["gates"]["G3"]["reason"] == "mcad_absent"
