@@ -6,6 +6,35 @@
 @tailwind utilities;
 
 @layer base {
+  /* preflight 를 껐으니(기존 rr-* 를 지키려고) 그중 **꼭 필요한 한 조각**만 손으로 가져온다 —
+     네이티브 <button>·<input> 의 브라우저 기본 테두리·배경이다. 이게 남아 있으면 새 컴포넌트가
+     Tailwind 로 아무리 칠해도 UA 테두리가 그대로 보인다(실제로 세그먼티드 컨트롤이 버튼 네 개로 보였다).
+     `.rr-btn` 은 font·padding·border·background 를 전부 자기 값으로 정하므로 영향을 받지 않는다. */
+  button,
+  [type="button"],
+  [type="submit"] {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    font: inherit;
+    color: inherit;
+    cursor: pointer;
+  }
+
+  /* 입력류도 같은 이유다 — 팔레트 입력란에 네이티브 포커스 링이 그대로 떴다.
+     `.rr-input`·`.rr-select`·`.rr-textarea` 는 border·background·padding 을 자기 값으로 정하므로 안전하다.
+     체크박스·라디오는 건드리지 않는다(네이티브 모양이 곧 그 컨트롤의 뜻이다). */
+  input:not([type="checkbox"]):not([type="radio"]),
+  textarea,
+  select {
+    appearance: none;
+    background: transparent;
+    border: 0;
+    font: inherit;
+    color: inherit;
+  }
+
   :root {
     --background: 0 0% 100%;
     --foreground: 222.2 84% 4.9%;

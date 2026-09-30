@@ -8,6 +8,7 @@ import { EmptyBlock, ErrorBanner, LoadingBlock } from "../components/StateBlocks
 import { Badge, LevelBadge, SourceStatusBadge, VerdictBadge } from "../components/Badge";
 import { DataTable } from "../components/DataTable";
 import type { Column } from "../components/DataTable";
+import { cn } from "../lib/cn";
 import { fmtEpoch, fmtPct } from "../format";
 import type { DiffListRow, ProjectCard, ReportListRow, SourceKind, TargetListRow } from "../types";
 
@@ -166,14 +167,24 @@ export default function RiskHomePage() {
         </div>
       ) : null}
 
-      <div className="rr-row" role="tablist" aria-label="홈 탭">
+      {/* 세그먼티드 컨트롤 — 버튼 네 개가 아니라 '지금 어디를 보고 있나' 를 말하는 한 덩이다. */}
+      <div
+        className="inline-flex w-fit items-center gap-0.5 rounded-lg border border-border bg-muted/50 p-0.5"
+        role="tablist"
+        aria-label="홈 탭"
+      >
         {HOME_TABS.map((item) => (
           <button
             key={item.tab}
             type="button"
             role="tab"
             aria-selected={tab === item.tab}
-            className={tab === item.tab ? "rr-btn rr-btn-primary" : "rr-btn"}
+            className={cn(
+              "rounded-md px-3 py-1.5 text-sm transition-colors",
+              tab === item.tab
+                ? "bg-background font-medium text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground",
+            )}
             onClick={() => setTab(item.tab)}
           >
             {item.label}

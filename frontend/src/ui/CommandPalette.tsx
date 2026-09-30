@@ -69,13 +69,13 @@ export function CommandPalette() {
     >
       <Command
         label="명령 팔레트"
-        className="w-full max-w-xl overflow-hidden rounded-lg border border-border bg-popover text-popover-foreground shadow-lg"
+        className="w-full max-w-xl overflow-hidden rounded-lg border border-border bg-popover text-popover-foreground shadow-lg outline-none focus:outline-none"
         onClick={(e) => e.stopPropagation()}
       >
         <Command.Input
           autoFocus
           placeholder="과제·타깃을 찾거나 화면을 엽니다."
-          className="w-full border-0 border-b border-border bg-transparent px-4 py-3 text-sm outline-none placeholder:text-muted-foreground"
+          className="w-full border-b border-border bg-transparent px-4 py-3 text-sm outline-none focus:outline-none focus:ring-0 placeholder:text-muted-foreground"
         />
         <Command.List className="max-h-[52vh] overflow-y-auto p-1.5">
           <Command.Empty className="px-3 py-6 text-center text-sm text-muted-foreground">

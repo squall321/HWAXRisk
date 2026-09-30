@@ -15,3 +15,6 @@ frontend/dist/
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts
+
+# 브라우저로 렌더를 확인할 때 나오는 산출물 — 리포에 담지 않는다.
+.playwright-mcp/

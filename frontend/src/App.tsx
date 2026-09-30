@@ -55,7 +55,7 @@ function Shell() {
   return (
     <div className="flex min-h-screen bg-background text-foreground">
       <CommandPalette />
-      <aside className="sticky top-0 hidden h-screen w-56 shrink-0 flex-col border-r border-border bg-card sm:flex">
+      <aside className="sticky top-0 hidden h-screen w-56 shrink-0 flex-col border-r border-border bg-muted/40 sm:flex">
         <NavLink to="/" className="flex flex-col gap-0.5 border-b border-border px-4 py-4 no-underline">
           <span className="text-sm font-semibold leading-tight text-foreground">설계 리스크 심사</span>
           <span className="text-xs text-muted-foreground">HWAX Risk Review</span>
@@ -86,7 +86,7 @@ function Shell() {
         </p>
       </aside>
       {/* 좁은 화면에서는 사이드바를 상단 줄로 접는다 — 숨기면 이동할 방법이 사라진다. */}
-      <nav className="fixed inset-x-0 top-0 z-40 flex gap-1 border-b border-border bg-card/95 px-2 py-1.5 backdrop-blur sm:hidden">
+      <nav className="fixed inset-x-0 top-0 z-40 flex gap-1 border-b border-border bg-muted/80 px-2 py-1.5 backdrop-blur sm:hidden">
         {NAV.map((item) => (
           <NavLink
             key={item.to}
