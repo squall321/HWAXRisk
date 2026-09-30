@@ -477,7 +477,11 @@ def resolve(
             if str(edge.get("kind") or "") != "bridge":
                 continue
             at = _attrs(edge)
-            if bool(at.get("bridge_stale")):
+            # 정본 자리는 `attrs.dyna.bridge`(§2.5.1) 다 — 옛 코드는 `attrs.bridge_stale` 을 봐서
+            # 생산자와 어긋났고, 없는 키가 falsy 라 **stale 을 항상 '아님' 으로 읽었다**.
+            bridge = ((at.get("dyna") or {}).get("bridge")
+                      if isinstance(at.get("dyna"), Mapping) else None) or {}
+            if bool(bridge.get("stale", at.get("bridge_stale"))):
                 continue                       # stale 이면 이 단계를 건너뛰고 6단계로 내린다.
             x, y = str(edge.get("a") or ""), str(edge.get("b") or "")
             for a_nid, b_nid in ((x, y), (y, x)):
@@ -486,10 +490,8 @@ def resolve(
                         continue
                     # 조인 키는 REST 가용 시 `path:…`, MCP 폴백 시 `file+name:…` 이다(plan §2.5.1).
                     # 소스가 주는 행 id 는 쓰지 않는다 — 그 값은 재파싱마다 바뀐다.
-                    join_key = at.get("join_key") or (at.get("bridge") or {}).get("join_key") \
-                        if isinstance(at.get("bridge"), Mapping) else at.get("join_key")
                     accept(a_nid, b_nid, "pid_map", 1.0,
-                           {"bridge": {"join_key": join_key, "stale": False}})
+                           {"bridge": {"join_key": bridge.get("join_key"), "stale": False}})
                     break
 
     # --- 3단계 exact_path — pair 스코프의 mcad 만.

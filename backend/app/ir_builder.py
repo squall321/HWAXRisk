@@ -918,6 +918,10 @@ def build_ir(
     used_pairs: set[str] = set()
     edges: list[dict] = []
     seen_eids: set[str] = set()
+    # dyna pid → 노드. 브리지 엣지(mcad part ↔ dyna pid)의 dyna 쪽 끝점을 여기서 푼다 — mcad 캡처는
+    # K파일 sha 를 모르므로 `dyna:<sha8>:<pid>` 를 스스로 만들 수 없고 `b_pid` 로만 넘긴다(§2.5.1).
+    dyna_by_pid = {str(n.get("local_key")): n for n in nodes
+                   if n.get("domain") == "dyna" and n.get("kind") == "pid" and n.get("local_key") is not None}
     for raw in raw_edges:
         kind = str(raw.get("kind") or "")
         family = kind_family_of(kind)
@@ -925,6 +929,12 @@ def build_ir(
         b = raw.get("b") or raw.get("b_canon_key")
         a_nid = a if isinstance(a, str) and a.startswith("p:") else (by_canon.get(a or "") or {}).get("nid")
         b_nid = b if isinstance(b, str) and b.startswith("p:") else (by_canon.get(b or "") or {}).get("nid")
+        if b_nid is None and raw.get("b_pid") is not None:
+            pid_node = dyna_by_pid.get(str(raw["b_pid"]))
+            # dyna 소스가 없거나 그 pid 가 없으면 브리지를 만들지 않는다 — 아래 공통 경로가
+            # `ambiguous_edge_endpoint` 로 남긴다(없는 노드를 가리키는 엣지를 만들지 않는다).
+            b = pid_node["canon_key"] if pid_node else f"pid:{raw['b_pid']}"
+            b_nid = pid_node["nid"] if pid_node else None
         if not a_nid or (b is not None and not b_nid):
             warnings.append({
                 "severity": "WARNING", "code": "ambiguous_edge_endpoint",

@@ -5,7 +5,7 @@
 코드 대조로 확인해 적은 작업 대장이며, 앞으로의 진행은 이 문서를 늘려 가며 한다. 정본 체크리스트는 단계 착수 전에 쓴 것이라 P1~P7 항목이
 전부 미체크로 남아 있다 — 여기서 실측한 완료 상태가 그보다 최신이다.
 
-마지막 실측 2026-09-29 — `pytest` **1184 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · `ruff` 통과 · `pnpm build` 통과.
+마지막 실측 2026-09-29 — `pytest` **1190 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · `ruff` 통과 · `pnpm build` 통과.
 
 ## 진척 요약
 
@@ -200,13 +200,16 @@
   필터도 주석으로 못 박았다(없는 키를 선언하면 조용히 버려진다 — 이번에 그 함정을 직접 밟았다).
   시험 3건, 전부 고치기 전 깨진다.
 - [ ] **정본 통과 기준 대조에서 남은 4건**(2026-09-26, 식별자 전수 대조로 발견) —
-  ① **범위를 잘못 적었다 — `ambiguous_bridge_key` 가 없는 게 아니라 브리지 자체가 없다.** `part_mesh_map`
-  을 아무도 부르지 않고(`mcad.py` 주석이 "캡처가 한 번도 부르지 않는다" 고 적어 둔 그대로) `kind='bridge'`
-  엣지를 만드는 코드가 0건이다. 그래서 `attrs.dyna.bridge.join_key`·`bridge_stale`·`ambiguous_bridge_key`
-  가 전부 없고, 그 엣지를 입력으로 쓰는 `sameas` 2단계 `pid_map` 과 `diff` 의 `cross.bridge_stale` 이
-  **구조적으로 죽어 있다**. 정본 MCP 3 예산(§2.13.3 `job_status`·`part_mesh_map`·`inspect_report`) 중
-  코드는 `job_status`·`interface_graph` 둘만 부른다 — `inspect_report` 의 `source_inconsistent` 교차 검증도
-  함께 없다. P2 산출물 한 덩이라 별도 단위로 한다 · ② **완료(2026-09-29, ↓ 1장)** · ③ `rr_findings.finding_json.cited_by_later[]`
+  ① **완료(2026-09-30)** — 브리지를 구현했다. `part_mesh_map` 을 정본 MCP 3 예산에서 부르고(§2.13.3),
+  `kind='bridge'` 엣지를 mcad part ↔ dyna pid 로 잇는다. 조인 키 2종(`path:` REST · `file+name:` MCP)과
+  `ambiguous_bridge_key`(같은 키 2행 이상이면 그 키만 건너뛴다 — 표 하나가 전부를 죽이지 않는다)을 세웠다.
+  도구 집합도 정본 6종으로 되돌렸다(코드는 5종이었다). 곁에서 셋이 더 나왔다 — **@** MCP 폴백에서
+  프로젝트 접두가 안 벗겨져 같은 파트의 canon_key 가 채널마다 달랐다(정본은 "반드시 제거한다";
+  same-as 3단계가 채널 간에 통째로 빗나가고 ckey 가 '과제 무관' 이라는 정의가 깨진다) · **@** `sameas` 의
+  브리지 attrs 자리가 `attrs.bridge_stale` 평면인데 정본은 `attrs.dyna.bridge` 다 — 시험 헬퍼도 같은
+  평면이라 **둘이 서로 맞춰져 있었지만 둘 다 정본과 달랐다**(브리지를 만드는 코드가 없어 안 드러난
+  항진명제 쌍) · **@** `bridge_stale` 판정이 **정본 내부 불일치**다(↓ 6장 결정 행). 시험 6건, 전부 고치기 전 깨진다.
+  · ② **완료(2026-09-29, ↓ 1장)** · ③ `rr_findings.finding_json.cited_by_later[]`
   (§5.6 (4)) — 인용된 선례에 후속 `claim_uid` 를 누적해야 '선례가 실제로 쓰였는지' 의 원자료가 된다 ·
   ④ 등록부 `subject_ckeys` 를 `resolve_ckey()` 로 해석하는지(§5.9.1) — 이름이 다를 수 있어 의미 대조가 필요하다.
   ①②는 어댑터 픽스처가 선행이고 ③④는 원자·별칭 경로를 건드려 한 번에 하지 않았다.
@@ -282,6 +285,15 @@
 - [ ] **E10 제품코드 복수 조회**(2026-09-26 발견) — `product_refs_json` 에 `product_code` 가 여럿일 때
   ㉮ 첫 값만 부른다(기본, 현재 코드) ㉯ 값마다 부르고 5줄 상한을 나눠 쓴다 ㉰ 값마다 부르고 상한을
   제품 수만큼 올린다. ㉯㉰ 는 호출 예산(§9.2)과 24 h 캐시 행 수가 제품 수에 비례해 늘어난다.
+- [ ] **`bridge_stale` 판정 — 정본 내부 불일치**(2026-09-30 발견) — §2.6.2 2단계는 stale=false 를
+  "K파일 filename 이 `mesh_report.artifacts.kfile` 과 같고 **그리고** pid 최대값이 part_mesh 행 수 이하"
+  로 적는데, `mesh_report` 는 §2.13.3 의 정상 경로 MCP 3(`job_status`·`part_mesh_map`·`inspect_report`)에
+  **없다**. 없는 근거로 'stale 아님' 이라 단정하지 않았으므로 지금은 브리지가 항상 stale 이고 **pid_map 이
+  돌지 않는다**(4단계 fingerprint 추정으로 내려간다). 선택지 —
+  ㉮ `mesh_report` 를 mcad MCP 4번째 호출로 추가한다(§9.2 통과 기준 2 의 'MCP 3' 숫자가 4로 바뀐다) ·
+  ㉯ pid 항만으로 false 를 낸다(정본 AND 를 한 항으로 약화 — 메시가 다른 K파일에서 나왔을 때 pid 가
+  우연히 맞으면 틀린 대응이 1.0/auto 로 확정된다) · ㉰ 지금대로 두고 pid_map 을 접어 둔다(브리지 엣지는
+  남아 `diff`·화면이 형상↔해석 대응을 보여 주되 same-as 는 4단계가 맡는다).
 - [ ] #33·40 브리프 예산 — 기각·반증 선례(E5−)를 다른 과제 브리프에 실을지(기본 실음, 6줄 상한) · `delib_opts.evidence` 항목 상한 12 상향 (기본 접어 둠)
 - [ ] #23·24 매니페스트 확정값·리포 위치 승인 — 코드·등록은 이미 그 값으로 서 있다(`squall321/HWAXRisk`, `company`, `memory_gb 2`)
 

@@ -211,12 +211,25 @@ REST_ROUTES = {
     f"{BASE}/parts": PARTS_REST,
     f"{BASE}/interfaces": IFACE_REST,
 }
+# part_mesh 표(plan §2.5.1) — REST 판은 `source_path`·`spec` 을 더 준다. pid 는 dyna INSPECT_FILE 의 1·2 와 짝이다.
+PART_MESH = {"rows": [
+    {"step_file": "a_stack.step", "source_name": "STACK_ASM/PLATE_1",
+     "source_path": "/sif-e2e/a_stack.step/STACK_ASM/PLATE_1", "worked_name": "PLATE_1_w",
+     "kind": "solid", "status": "done", "pid": 1, "node_start": 1, "node_count": 6000,
+     "elem_start": 1, "elem_count": 5000, "note": None},
+    {"step_file": "a_stack.step", "source_name": "STACK_ASM/PLATE_2",
+     "source_path": "/sif-e2e/a_stack.step/STACK_ASM/PLATE_2", "worked_name": "PLATE_2_w",
+     "kind": "shell", "status": "done", "pid": 2, "node_start": 6001, "node_count": 6000,
+     "elem_start": 5001, "elem_count": 4800, "note": None},
+]}
+
 MCP_TOOLS_FULL = {
     "job_status": JOB_STATUS_DONE,
     "list_interfaces": IFACE_TIED,
     "interface_graph": IFACE_GRAPH,
     "project_tree": PROJECT_TREE_MCP,
     "list_parts": PARTS_MCP,
+    "part_mesh_map": PART_MESH,
 }
 
 
@@ -991,3 +1004,121 @@ def test_the_ir_marks_a_failed_mcad_capture_and_drops_its_geometry_gates():
     # 형상층 게이트는 '위반 0건' 이 아니라 '입력 없음' 이다(§2.12) — 아니면 통과로 읽힌다.
     assert state["gates"]["G3"]["pass"] is None
     assert state["gates"]["G3"]["reason"] == "mcad_absent"
+
+
+# ------------------------------------------------- 브리지 엣지(정본 §2.5.1 part_mesh_map · §2.6.2 2단계 입력)
+def _bridge_ir(*, mesh=None, tools=None, rest_token="service-pat"):
+    """mcad + dyna 를 한 IR 로 조립한다 — 브리지는 두 소스가 다 있어야 선다."""
+    mcad_tools = dict(tools or MCP_TOOLS_FULL)
+    if mesh is not None:
+        mcad_tools["part_mesh_map"] = mesh
+    mcad_result, _ = _capture_mcad(tools=mcad_tools, rest_token=rest_token)
+    dyna = dyna_adapter.DynaAdapter(DYNA_APP_KEY).capture(
+        {"session_id": "01JSES", "file_id": "01JFIL", "sha256": KSHA}, _principal(),
+        CallRecorder("cafe0000deadbeef", mcp=_mcp({"inspect_file": INSPECT_FILE})))
+    ir = ir_builder.build_ir(project_id="p" * 32, owner_sub=OWNER, label="DV1",
+                             adapter_results=[mcad_result, dyna], snapshot_id="d" * 32,
+                             captured_at=1756600000)
+    return mcad_result, ir
+
+
+def test_part_mesh_map_builds_bridge_edges_between_mcad_parts_and_dyna_pids():
+    """정본 §2.5.1 — `part_mesh_map` 이 브리지 엣지(mcad part ↔ dyna pid)의 유일한 원천이다.
+
+    이 엣지가 없으면 same-as 2단계(`pid_map`, §2.6.2)와 diff 의 `cross.bridge_stale` 이 구조적으로
+    죽는다 — 형상과 해석을 잇는 유일한 확정 경로가 사라지고 4단계 fingerprint 추정만 남는다.
+    """
+    _mcad, ir = _bridge_ir()
+    bridges = [e for e in ir["edges"] if e["kind"] == "bridge"]
+
+    assert len(bridges) == 2, "브리지가 서지 않았다"
+    by_nid = {n["nid"]: n for n in ir["nodes"]}
+    for edge in bridges:
+        assert by_nid[edge["a"]]["domain"] == "mcad" and by_nid[edge["a"]]["kind"] == "part"
+        assert by_nid[edge["b"]]["domain"] == "dyna" and by_nid[edge["b"]]["kind"] == "pid"
+    # REST 가 열려 있으면 조인 키는 `path:` 다(§2.5.1 — 어느 쪽을 썼는지 접두로 남긴다).
+    keys = sorted(e["attrs"]["dyna"]["bridge"]["join_key"] for e in bridges)
+    assert all(k.startswith("path:") for k in keys), keys
+    assert ir["edges"] and all(e["kind_family"] == "bridge" for e in bridges)
+
+
+def test_the_join_key_prefix_records_which_channel_resolved_it():
+    """MCP 폴백에는 `source_path` 가 없다 — 그때는 `file+name:` 이고 그 사실이 엣지에 남는다."""
+    _mcad, ir = _bridge_ir(rest_token=None)
+    bridges = [e for e in ir["edges"] if e["kind"] == "bridge"]
+
+    assert bridges, "MCP 폴백에서 브리지가 통째로 사라졌다"
+    assert all(e["attrs"]["dyna"]["bridge"]["join_key"].startswith("file+name:") for e in bridges)
+
+
+def test_an_ambiguous_join_key_makes_no_bridge_and_says_so():
+    """정본 §2.5.1 — 같은 `(step_file, source_name)` 이 2행 이상이면 **브리지를 만들지 않고** 경고 1건.
+
+    어느 행이 맞는지 모르는 채 이으면 mcad 파트와 엉뚱한 dyna pid 가 한 부재로 묶이고, 그 오결선이
+    same-as 2단계를 타고 가짜 의미 이벤트를 만든다 — 오류 없이 틀린 답이 되는 쪽이다.
+    """
+    dup = {"rows": [
+        dict(PART_MESH["rows"][0]),
+        dict(PART_MESH["rows"][0], pid=7, worked_name="PLATE_1_w2"),   # 같은 키, 다른 pid
+        dict(PART_MESH["rows"][1]),
+    ]}
+    mcad_result, ir = _bridge_ir(mesh=dup)
+
+    bridges = [e for e in ir["edges"] if e["kind"] == "bridge"]
+    # 다의 키만 빠지고 멀쩡한 키는 남는다 — 표 하나가 전부를 죽이지 않는다.
+    assert len(bridges) == 1
+    assert bridges[0]["attrs"]["dyna"]["bridge"]["join_key"].endswith("PLATE_2")
+    codes = [w["code"] for w in mcad_result["warnings"] if w["code"] == "ambiguous_bridge_key"]
+    assert codes == ["ambiguous_bridge_key"], mcad_result["warnings"]
+
+
+def test_a_mesh_row_for_an_unknown_part_makes_no_bridge():
+    """표에 있는데 이 스냅샷 노드에 없는 파트 — 이으면 없는 노드를 가리키는 엣지가 된다."""
+    stray = {"rows": [dict(PART_MESH["rows"][0], source_name="STACK_ASM/GHOST",
+                           source_path="/sif-e2e/a_stack.step/STACK_ASM/GHOST")]}
+    mcad_result, ir = _bridge_ir(mesh=stray)
+
+    assert [e for e in ir["edges"] if e["kind"] == "bridge"] == []
+    assert "bridge_part_unresolved" in {w["code"] for w in mcad_result["warnings"]}
+
+
+def test_a_mesh_row_for_a_missing_pid_makes_no_bridge():
+    """dyna 에 그 pid 가 없으면 브리지를 만들지 않고 끝점 미해결로 남는다(추정으로 잇지 않는다)."""
+    ghost_pid = {"rows": [dict(PART_MESH["rows"][0], pid=99)]}
+    _mcad, ir = _bridge_ir(mesh=ghost_pid)
+
+    assert [e for e in ir["edges"] if e["kind"] == "bridge"] == []
+    assert "ambiguous_edge_endpoint" in {w["code"] for w in ir["warnings"]}
+
+
+def test_the_real_bridge_carries_its_stale_verdict_and_blocks_pid_map_until_checked():
+    """§2.6.2 2단계 — `bridge_stale=false` 일 때만 pid_map 이 돈다. 판정은 두 항의 AND 다.
+
+    앞 항(K파일 filename == `mesh_report.artifacts.kfile`)은 `mesh_report` 가 있어야 보는데 그 도구는
+    정본 MCP 3 예산(§2.13.3)에 없다 — 정본 안의 불일치다. 없는 근거로 'stale 아님' 이라 단정하지 않는다
+    (그게 pid_map 을 틀린 대응으로 채우는 길이다). 확인 못 했다는 사실을 attrs 에 남긴다.
+    """
+    from app import sameas
+
+    _mcad, ir = _bridge_ir()
+    bridges = [e for e in ir["edges"] if e["kind"] == "bridge"]
+    at = bridges[0]["attrs"]["dyna"]["bridge"]
+
+    assert at["pid_within_rows"] is True, "pid 항은 확인됐다(pid 최대값 2 ≤ 행 수 2)"
+    assert at["kfile_checked"] is False, "확인하지 않은 항을 확인한 것처럼 적었다"
+    assert at["stale"] is True, "kfile 항을 못 봤는데 stale 아님으로 단정했다"
+
+    mcad_nodes = [n for n in ir["nodes"] if n["domain"] == "mcad" and n["kind"] == "part"]
+    dyna_nodes = [n for n in ir["nodes"] if n["domain"] == "dyna" and n["kind"] == "pid"]
+    # stale 이면 이 단계를 건너뛴다 — pid_map 레코드가 0건이어야 한다(§2.6.2).
+    stale_records = sameas.resolve(mcad_nodes, dyna_nodes, bridges, [], "intra", None)
+    assert [r for r in stale_records if r["method"] == "pid_map"] == []
+
+    # 같은 엣지에서 stale 만 내리면 pid_map 이 실제로 돈다 — 소비처와 생산처의 attrs 자리가 맞는다는 뜻이다.
+    fresh = [dict(e, attrs={"dyna": {"bridge": dict(e["attrs"]["dyna"]["bridge"], stale=False)}})
+             for e in bridges]
+    records = [r for r in sameas.resolve(mcad_nodes, dyna_nodes, fresh, [], "intra", None)
+               if r["method"] == "pid_map"]
+    assert len(records) == 2, records
+    assert all(r["score"] == 1.0 and r["status"] == "auto" for r in records)
+    assert records[0]["evidence"]["bridge"]["join_key"].startswith("path:")

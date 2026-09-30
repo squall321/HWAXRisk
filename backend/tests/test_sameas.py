@@ -49,10 +49,15 @@ def ecad(nid: str, refdes: str, canon: str | None = None, part_number="cap_x7r")
 
 def bridge_edge(mcad_nid: str, dyna_nid: str, *, stale=False, eid="e:bridge01",
                 join_key="path:/x/plate") -> dict:
-    """브리지 엣지 — 조인 키는 REST 가용 시 `path:…`, MCP 폴백 시 `file+name:…` 이다(plan §2.5.1)."""
+    """브리지 엣지 — 조인 키는 REST 가용 시 `path:…`, MCP 폴백 시 `file+name:…` 이다(plan §2.5.1).
+
+    attrs 자리는 정본이 못 박은 `attrs.dyna.bridge` 다. 예전 이 헬퍼는 평면(`attrs.join_key`·
+    `attrs.bridge_stale`)이었고 소비처도 같은 평면을 읽어 **서로 맞춰져 있었지만 둘 다 정본과 달랐다** —
+    브리지를 만드는 코드가 없어 그 어긋남이 드러나지 않았다(항진명제 쌍).
+    """
     return {"eid": eid, "kind": "bridge", "kind_family": "bridge", "a": mcad_nid, "b": dyna_nid,
             "domain": "dyna", "status": "auto",
-            "attrs": {"join_key": join_key, "bridge_stale": stale}}
+            "attrs": {"dyna": {"bridge": {"join_key": join_key, "stale": stale}}}}
 
 
 def _one(records: list[dict]) -> dict:

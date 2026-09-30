@@ -878,3 +878,49 @@ D28 이 남긴 2건을 착수하면서 **먼저 범위가 틀렸음을 확인했
 세운 사실이 봉투에 조용히 안 실린다. 이번에 그 함정을 직접 밟았다.
 
 **검증.** `pytest` **1184 passed, 2 skipped**(시험 3건, 전부 고치기 전 깨짐) · `ruff` 통과.
+
+### D30. 브리지 — 만드는 쪽이 없어 어긋남이 드러나지 않았다 (2026-09-30)
+
+D29 가 정정한 범위대로 브리지 한 덩이를 구현했다. `part_mesh_map` 을 정본 MCP 3 예산에서 부르고
+`kind='bridge'` 엣지를 mcad part ↔ dyna pid 로 잇는다. 도구 집합도 정본 6종으로 되돌렸다(코드는 5종이고
+주석이 "캡처가 한 번도 부르지 않으므로 게이트에서 뺀다" 고 적어 두었다 — 이제 부른다).
+
+**설계에서 정한 것 넷.**
+
+1. **엣지를 누가 만드나.** mcad 가 먼저 캡처되고 dyna pid 를 모른다. 그래서 mcad 는 `a_canon_key` +
+   **`b_pid`** 로 내고 `ir_builder` 가 dyna pid 노드에서 끝점을 푼다 — `dyna:<sha8>:<pid>` 를 mcad 가
+   스스로 만들 수 없기 때문이다(K파일 sha 를 모른다). 못 풀면 기존 `ambiguous_edge_endpoint` 경로로
+   빠진다 — 없는 노드를 가리키는 엣지를 만들지 않는다.
+2. **조인 키는 식별자이지 경로가 아니다.** 처음에 `step_file + '/' + source_name` 으로 canon_key 를
+   지어냈다가 시험이 잡았다(MCP 폴백에서 브리지 0건). 경로로 만든 후보를 먼저 찾고, 안 맞으면
+   `source_name` 을 **경로 꼬리**로 대조한다. 후보가 둘 이상이면 고르지 않는다 — 엉뚱한 파트를 dyna pid 에
+   묶는 것이 브리지를 안 만드는 것보다 나쁘다.
+3. **다의 키는 그 키만 건너뛴다.** 정본은 "같은 `(step_file, source_name)` 이 2행 이상이면 브리지를
+   만들지 않고 `ambiguous_bridge_key`" 다. 표 하나가 전부를 죽이지 않게 키 단위로 막았다.
+4. **degraded 코드를 지어냈다가 되돌렸다.** `part_mesh_absent` 를 추가했는데 스키마 enum 가드 시험이
+   잡았다 — 정본 degraded 어휘에 mesh 관련 코드가 없다. 실패는 경고로만 남긴다(`interfaces_unreadable`
+   과 같은 처리). 브리지 0건 자체가 pid_map 을 건너뛰게 만든다.
+
+**곁에서 나온 것 셋 — 둘은 '서로 맞춰진 오류' 였다.**
+
+- **MCP 폴백에서 프로젝트 접두가 안 벗겨졌다.** MCP `project_tree` 응답에 `project` 키가 없어(§2.5.1 실측)
+  소스 카드에 `project_name` 이 없으면 이름이 아예 없다. 그때 접두가 남아 같은 파트의 canon_key 가
+  **채널마다 달랐다**(`mcad:/sif-e2e/…` vs `mcad:/…`). same-as 3단계(`exact_path`)가 REST 스냅샷과 MCP
+  폴백 스냅샷 사이에서 통째로 빗나가고 ckey 가 '과제 무관' 이라는 정의도 깨진다. 정본이 "path 는
+  `/{project}/…` 로 시작하므로 반드시 제거한다" 고 불변식을 적어 두었으므로 이름을 몰라도 첫 구간을 뗀다.
+- **`sameas` 의 브리지 attrs 자리가 정본과 달랐다.** 소비처는 `attrs.bridge_stale`·`attrs.join_key`
+  평면을 읽고 시험 헬퍼도 같은 평면을 만들었다 — **둘이 서로 맞춰져 있었으므로 시험은 늘 초록이었다.**
+  정본 자리는 `attrs.dyna.bridge` 다. 만드는 코드가 없어 이 어긋남이 드러날 방법이 없었다(항진명제 쌍의
+  세 번째 사례다 — `CORPUS_TOOLS`·`CONTEXT_KIND` 에 이어). 게다가 없는 키는 falsy 라 옛 소비처는
+  **stale 을 항상 '아님' 으로 읽었다** — 브리지가 생기는 날 stale 가드가 없는 채로 돌 예정이었다.
+- **`bridge_stale` 판정이 정본 내부 불일치다.** §2.6.2 는 false 를 "kfile 일치 **그리고** pid 최대값 ≤
+  행 수" 로 적는데 `mesh_report` 가 §2.13.3 의 MCP 3 예산에 없다. 없는 근거로 'stale 아님' 이라
+  단정하지 않았다 — 그게 pid_map 을 틀린 대응으로 1.0/auto 확정하는 길이다. 지금은 항상 stale 이고
+  `kfile_checked: false`·`pid_within_rows` 를 attrs 에 남겨 **왜** stale 인지 보이게 했다. 선택지 3개를
+  체크리스트 6장에 올렸다(값을 지어내지 않는다).
+
+**내가 만든 실수 하나.** stale 식을 `True if not pid_ok else stale` 로 꼬아 써서 의도와 **반대로**
+동작했다(pid 가 맞으면 stale 을 내렸다). 시험이 바로 잡았고 `stale = not (kfile_checked and pid_ok)` 로
+평평하게 고쳤다 — 조건을 꼬면 주석이 맞아도 코드가 틀린다.
+
+**검증.** `pytest` **1190 passed, 2 skipped**(시험 6건, 전부 고치기 전 깨짐) · `ruff` 통과.

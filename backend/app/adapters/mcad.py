@@ -12,10 +12,10 @@ from app.errors import AppError
 ADAPTER_VERSION = "1.0"
 KIND = "mcad"
 
-# 게이트웨이에 이 5종이 다 보여야 mcad 를 그 백엔드에 바인딩한다(plan §2.13.2).
-# part_mesh_map 은 캡처가 한 번도 부르지 않으므로 게이트에서 뺀다 — dyna 브리지를 만들 때 다시 넣는다(recon §4 5항).
+# 게이트웨이에 이 6종이 다 보여야 mcad 를 그 백엔드에 바인딩한다(plan §2.13.2 mcad 집합 그대로).
+# part_mesh_map 은 브리지 엣지(mcad part ↔ dyna pid)의 유일한 원천이고 정본 MCP 3 예산에 든다(§2.13.3).
 REQUIRED_TOOLS: tuple[str, ...] = (
-    "list_parts", "list_interfaces", "interface_graph", "project_tree", "job_status",
+    "list_parts", "list_interfaces", "interface_graph", "project_tree", "job_status", "part_mesh_map",
 )
 # 계면 kind 4종. MCP 폴백에서는 list_interfaces 를 kind 별로 부른다(소스 MAX_ROWS 500/호출).
 IFACE_KINDS: tuple[str, ...] = ("tied", "touching", "clearance", "interference")
@@ -125,17 +125,136 @@ def _normalize_transform(raw: Any) -> list[list[float]] | None:
 
 # ---------------------------------------------------------------- 경로·키
 def _strip_project(path: str, project_name: str | None) -> str:
-    """tree path 는 `/{project}/…` 로 시작한다 — 접두를 떼야 canon_key 가 프로젝트 이름에 흔들리지 않는다."""
+    """tree path 는 `/{project}/…` 로 시작한다 — 접두를 떼야 canon_key 가 프로젝트 이름에 흔들리지 않는다.
+
+    이름을 모를 때도 뗀다. MCP `project_tree` 응답에는 `project` 키가 없어(§2.5.1 실측) 소스 카드에
+    `project_name` 이 없으면 이름이 아예 없는데, 그때 접두를 남기면 **같은 파트의 canon_key 가 채널마다
+    달라진다** — REST 스냅샷과 MCP 폴백 스냅샷 사이에서 same-as 3단계(`exact_path`, canon_key 동일)가
+    통째로 빗나가고 ckey 가 '과제 무관' 이라는 정의도 깨진다. 정본이 "path 는 `/{project}/…` 로
+    시작하므로 반드시 제거한다" 고 불변식을 적어 두었으므로 첫 구간을 떼는 것이 그 문면대로다.
+    """
     text = str(path or "")
-    if project_name and text.startswith(f"/{project_name}/"):
-        return text[len(project_name) + 1:]
-    if project_name and text == f"/{project_name}":
-        return "/"
+    if project_name:
+        if text.startswith(f"/{project_name}/"):
+            return text[len(project_name) + 1:]
+        if text == f"/{project_name}":
+            return "/"
+        return text
+    if text.startswith("/") and text.count("/") >= 2:
+        return text[text.index("/", 1):]
     return text
+
+
+def _s(value: Any) -> str:
+    """문자열 한 칸 — None·비문자열은 빈 문자열이다(소스 응답을 그대로 믿지 않는다)."""
+    return "" if value is None else str(value).strip()
 
 
 def _canon_key(path: str, project_name: str | None) -> str:
     return "mcad:" + _strip_project(path, project_name)
+
+
+def _resolve_part(guess: str, source_name: str, canon_keys: set[str]) -> str | None:
+    """part_mesh 행의 파트를 이 스냅샷의 canon_key 하나로 푼다. 유일하지 않으면 None.
+
+    먼저 경로로 만든 후보를 그대로 찾고, 안 맞으면 `source_name` 을 **경로 꼬리**로 대조한다 —
+    조인 키는 식별자 문자열이라 경로와 글자가 같다고 보장되지 않는다(§2.5.1). 후보가 둘 이상이면
+    고르지 않는다 — 엉뚱한 파트를 dyna pid 에 묶는 것이 브리지를 안 만드는 것보다 나쁘다.
+    """
+    if guess in canon_keys:
+        return guess
+    if not source_name:
+        return None
+    tail = "/" + source_name.strip("/")
+    hits = sorted(k for k in canon_keys if k.endswith(tail))
+    return hits[0] if len(hits) == 1 else None
+
+
+def _bridge_edges(rows: Sequence[Mapping[str, Any]], *, project_name: str | None, canon_keys: set[str],
+                  rest_channel: bool, app_key: str | None, call_id: str | None, captured_at: int,
+                  warnings: list[dict]) -> list[dict]:
+    """part_mesh 표 → `kind='bridge'` 엣지(mcad part ↔ dyna pid)(plan §2.5.1 · §2.6.2 2단계 입력).
+
+    조인 키는 두 갈래다 — REST 가 열려 있으면 `path:<source_path>`, MCP 폴백이면
+    `file+name:<step_file>/<source_name>`. `mesh_key` 는 응답에 없다(소스 DB 컬럼으로만 존재하므로
+    무수정 원칙상 쓸 수 없다). 어느 쪽을 썼는지 `attrs.dyna.bridge.join_key` 접두로 남긴다.
+
+    **같은 `(step_file, source_name)` 이 2행 이상이면 그 키의 브리지를 만들지 않고 `ambiguous_bridge_key`**
+    를 남긴다 — 어느 행이 맞는지 모르는 채 이으면 mcad 파트와 엉뚱한 dyna pid 가 한 부재로 묶이고,
+    그 오결선이 same-as 2단계(pid_map)를 타고 가짜 의미 이벤트를 만든다. 오류 없이 틀린 답이 되는 쪽이다.
+
+    dyna 쪽 끝점은 `b_pid` 로 넘긴다 — mcad 캡처는 K파일 sha 를 모르므로 `dyna:<sha8>:<pid>` 를 스스로
+    만들 수 없다. ir_builder 가 dyna pid 노드에서 푼다.
+    """
+    by_key: dict[tuple[str, str], list[Mapping[str, Any]]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        step_file, source_name = _s(row.get("step_file")), _s(row.get("source_name"))
+        if not step_file or not source_name:
+            continue
+        by_key.setdefault((step_file, source_name), []).append(row)
+
+    # §2.6.2 2단계 stale 판정 — "K파일 filename 이 mesh_report.artifacts.kfile 과 같고 pid 최대값이
+    # part_mesh 행 수 이하일 때 false, 아니면 true". 두 항의 AND 다.
+    # 앞 항은 `mesh_report` 가 있어야 보는데 그 도구는 정본 MCP 3 예산(§2.13.3 job_status·part_mesh_map·
+    # inspect_report)에 없다 — 정본 안의 불일치다. 없는 근거로 'stale 아님' 이라 단정하지 않는다
+    # (그게 pid_map 을 틀린 대응으로 채우는 길이다). 확인 못 한 사실은 attrs 에 그대로 남긴다.
+    pids = [row.get("pid") for row in rows if isinstance(row, Mapping) and row.get("pid") is not None]
+    pid_ok = bool(pids) and max(int(x) for x in pids) <= len(rows)
+    kfile_checked = False       # mesh_report 를 부르지 않으므로 앞 항은 확인 불가다
+    stale = not (kfile_checked and pid_ok)
+    edges: list[dict] = []
+    for (step_file, source_name), group in sorted(by_key.items()):
+        if len(group) > 1:
+            warnings.append(_warn("ambiguous_bridge_key",
+                                  f"같은 (step_file, source_name) 이 {len(group)}행이라 브리지를 만들지 않았다.",
+                                  f"{step_file}/{source_name}"))
+            continue
+        row = group[0]
+        pid = row.get("pid")
+        if pid is None:
+            continue
+        source_path = _s(row.get("source_path"))
+        if rest_channel and source_path:
+            join_key = f"path:{source_path}"
+            canon = _resolve_part(_canon_key(source_path, project_name), source_name, canon_keys)
+        else:
+            # 조인 키는 **식별자 문자열**이다 — 경로와 같다고 가정하지 않고 노드와 대조해서 푼다.
+            join_key = f"file+name:{step_file}/{source_name}"
+            canon = _resolve_part(_canon_key(f"/{step_file}/{source_name}", project_name),
+                                  source_name, canon_keys)
+        if canon is None:
+            # 표는 있는데 그 파트가 이 스냅샷 노드에 없거나 둘 이상에 걸린다 — 이으면 없는 노드를
+            # 가리키거나 엉뚱한 파트를 가리키는 엣지가 된다.
+            warnings.append(_warn("bridge_part_unresolved",
+                                  "part_mesh 행의 파트를 이 스냅샷 노드에서 유일하게 풀지 못해 브리지를 만들지 않았다.",
+                                  join_key))
+            continue
+        edges.append({
+            "kind": "bridge",
+            "domain": KIND,
+            "status": _s(row.get("status")) or "auto",
+            "a_canon_key": canon,
+            "b_pid": str(pid),
+            "attrs": {"dyna": {"bridge": {
+                "join_key": join_key,
+                # 정본 표기는 `bridge_stale` 이고 자리는 `attrs.dyna.bridge` 다(§2.5.1) — same-as 2단계가
+                # 이 값을 보고 건너뛴다. kfile 항을 못 봤다는 사실을 함께 남긴다(사유 없는 true 가 아니다).
+                "stale": stale,
+                "pid_within_rows": pid_ok,
+                "kfile_checked": kfile_checked,
+                "worked_name": _s(row.get("worked_name")) or None,
+                "mesh_kind": _s(row.get("kind")) or None,
+                "node_count": row.get("node_count"),
+                "elem_count": row.get("elem_count"),
+                # part_mesh 행 수 — §2.6.2 2단계 stale 판정의 한 항(pid 최대값 ≤ 행 수)이다.
+                "rows_n": len(rows),
+            }}},
+            "provenance": {"adapter": KIND, "app_key": app_key, "tool": "part_mesh_map",
+                           "call_id": call_id, "captured_at": captured_at},
+        })
+    return edges
 
 
 class McadAdapter(SourceAdapter):
@@ -398,6 +517,20 @@ class McadAdapter(SourceAdapter):
         )
         warnings.extend(iface_warnings)
         edges.extend(_part_of_edges(nodes))
+
+        # ⑤b part_mesh 표 → 브리지 엣지(정본 MCP 3 예산의 두 번째 호출, §2.13.3).
+        # 표가 없으면 브리지 0건이고 그 사실만 남는다 — 추정으로 잇지 않는다(오결선이 가짜 의미 이벤트를 만든다).
+        mesh_reply = mcp("part_mesh_map", {"project_id": project_id})
+        if mesh_reply["ok"]:
+            edges.extend(_bridge_edges(
+                _rows(mesh_reply["result"], "rows"), project_name=project_name,
+                canon_keys={n["canon_key"] for n in nodes}, rest_channel=tree is not None,
+                app_key=app_key, call_id=mesh_reply["call_id"], captured_at=captured_at, warnings=warnings))
+        else:
+            # degraded 어휘는 스키마 enum 이고 정본에 mesh 관련 코드가 없다 — 지어내지 않고 경고로만 남긴다
+            # (`interfaces_unreadable` 과 같은 처리). 브리지 0건 자체가 pid_map 을 건너뛰게 만든다.
+            warnings.append(_warn("part_mesh_unreadable",
+                                  f"part_mesh 표를 읽지 못해 브리지를 만들지 않았다 — {mesh_reply['error']}", None))
 
         # ⑥ 소스 원문 warnings 를 축어로 보존한다(plan §2.5.1 13코드).
         for w in _rows((tree or {}), "warnings"):
