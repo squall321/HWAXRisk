@@ -320,3 +320,66 @@ def test_refresh_roster_without_credential_reports_unavailable(wired, ident, gat
     gateway_transport(_boom)
     assert routes.refresh_roster("snap:s1", routes.RosterBody(), ident=ident) == {
         "added_pending": 0, "roster_source": "unavailable"}
+
+
+# ------------------------------------------------- §4.8 스냅샷 변경 시 무효화 배선
+def _second_snapshot(store, sid="s2", ir_hash="h2") -> None:
+    store.execute(
+        "INSERT INTO rr_snapshots(id, owner_sub, project_id, ir_version, ir_hash, ir_json,"
+        " source_ids_json, kinds_json, node_count, edge_count, missing_json, warnings_n, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (sid, OWNER, "p1", "1", ir_hash, "{}", "[]", json.dumps(["mcad"]), 3, 2, "{}", 0, 200))
+
+
+def test_a_new_target_closes_the_previous_one(wired, ident):
+    """§4.8 1 — T′ 가 생기면 T 는 `superseded_by=T′` 로 닫힌다. 행은 그대로 남는다."""
+    _snapshot(wired)
+    _second_snapshot(wired)
+    first = routes.create_target(routes.TargetBody(kind="snap", ref_id="s1", consent=True,
+                                                   agents=[]), ident=ident)
+    second = routes.create_target(routes.TargetBody(kind="snap", ref_id="s2", consent=True,
+                                                    agents=[]), ident=ident)
+
+    assert second["superseded"]["previous_target_key"] == first["target_key"]
+    row = wired.query_one("SELECT superseded_by FROM rr_targets WHERE target_key = ?",
+                          (first["target_key"],))
+    assert row["superseded_by"] == second["target_key"]
+    # 첫 타깃일 때는 닫을 것이 없다.
+    assert first["superseded"]["previous_target_key"] is None
+
+
+def test_without_a_diff_the_ckey_comparison_is_skipped_not_treated_as_empty(wired, ident):
+    """**빈 `changed_ckeys` 로 진행하지 않는다.**
+
+    빈 집합은 '아무것도 안 바뀌었다' 와 같아서 등록부는 stale 0건, 좌석은 전원 carried 가 된다 —
+    재검증 없이 통과시키는 쪽이므로 '없는 리스크' 다. 두 스냅샷 사이 diff 가 없으면 건너뛰고 사유를 남긴다.
+    """
+    _snapshot(wired)
+    _second_snapshot(wired)
+    routes.create_target(routes.TargetBody(kind="snap", ref_id="s1", consent=True, agents=[]), ident=ident)
+    out = routes.create_target(routes.TargetBody(kind="snap", ref_id="s2", consent=True, agents=[]),
+                               ident=ident)["superseded"]
+
+    assert out["skipped"] == "diff_absent"
+    assert out["changed_ckeys"] is None, "모르는 값을 0 으로 적었다"
+    assert "registry" not in out and "carried" not in out
+
+
+def test_character_statements_citing_a_changed_ckey_need_review(wired, ident):
+    """§4.8 5 — 성격 행은 옮기지 않고 인용 ckey 가 변경에 들면 재확인 표기만 남긴다(status 는 불변)."""
+    _snapshot(wired)
+    wired.execute(
+        "INSERT INTO rr_character(id, project_id, owner_sub, facet, tag, tags_json, statement, polarity,"
+        " cites_json, by_json, support_panels, support_targets, recall_eligible, needs_review, status,"
+        " created_at, updated_at) VALUES ('C1','p1',?,'intent','char:structure:thin_stack','[]','문장',"
+        "'observation',?,'[]',1,1,1,0,'confirmed',1,1)",
+        (OWNER, json.dumps([{"ref": "p:aaaaaaaaaaaa", "ckey": "ck:changed0001"}])))
+
+    n = routes._flag_character_needs_review(wired, "p1", {"ck:changed0001"}, 300)
+
+    assert n == 1
+    row = wired.query_one("SELECT needs_review, status FROM rr_character WHERE id = 'C1'")
+    assert row["needs_review"] == 1
+    assert row["status"] == "confirmed", "코드가 사람 판정(confirmed)을 내렸다"
+    # 두 번 돌려도 같은 행을 다시 세지 않는다(needs_review=0 만 본다).
+    assert routes._flag_character_needs_review(wired, "p1", {"ck:changed0001"}, 300) == 0

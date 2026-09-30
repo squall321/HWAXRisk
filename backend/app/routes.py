@@ -1724,6 +1724,80 @@ class TargetBody(BaseModel):
     agents: list[dict] | None = None
 
 
+def _supersede_previous_target(store: Any, *, project_id: str, new_target_key: str,
+                              new_snapshot_id: str, owner_sub: str, now: int) -> dict:
+    """새 타깃 T′ 가 생기면 옛 타깃 T 를 닫고 무엇을 승계할지 정한다(plan §4.8 1·3·4·5).
+
+    **`changed_ckeys` 를 모를 때 빈 집합으로 진행하지 않는다.** 빈 집합은 '아무것도 안 바뀌었다' 와 같아서
+    등록부는 stale 0건, 좌석은 전원 carried 가 된다 — 재검증 없이 통과시키는 쪽이므로 '없는 리스크' 다.
+    두 스냅샷 사이 diff 가 없으면 1단계(닫기)만 하고 3·4·5 는 건너뛰며 그 사실을 응답에 남긴다.
+    정본은 "있으면 재사용, 없으면 생성" 이라 하지만 타깃 생성이 diff 를 부수효과로 만들면 게이트 차단·
+    비교 불가로 409 가 날 수 있어 **재사용만** 한다(생성은 사람이 `POST /diffs` 로 한다).
+
+    ckey 비교는 전부 `resolve_ckey`(§5.9.1 merged_into 끝까지)를 거친 유효 ckey 다 — 안 거치면 자동 승계로
+    병합된 키가 한쪽에서만 맞아 stale·carried 판정이 '어느 스냅샷 키로 계산했는지' 에 따라 갈린다.
+    """
+    prev = store.query_one(
+        "SELECT target_key, kind, ref_id FROM rr_targets WHERE project_id = ? AND target_key <> ?"
+        " AND superseded_by IS NULL AND owner_sub = ? ORDER BY created_at DESC, target_key LIMIT 1",
+        (project_id, new_target_key, owner_sub))
+    if prev is None:
+        return {"previous_target_key": None}
+    prev_key = str(prev["target_key"])
+    store.execute("UPDATE rr_targets SET superseded_by = ?, updated_at = ? WHERE target_key = ?",
+                  (new_target_key, now, prev_key))
+    out: dict = {"previous_target_key": prev_key, "changed_ckeys": None}
+
+    prev_snapshot = str(prev["ref_id"]) if prev["kind"] == "snap" else _diff_target_snapshot(store, prev["ref_id"])
+    diff_row = store.query_one(
+        "SELECT id FROM rr_diffs WHERE base_snapshot_id = ? AND target_snapshot_id = ? AND owner_sub = ?"
+        " ORDER BY created_at DESC LIMIT 1", (prev_snapshot, new_snapshot_id, owner_sub)) if prev_snapshot else None
+    if diff_row is None:
+        out["skipped"] = "diff_absent"
+        return out
+
+    def resolve(ckey: str) -> str:
+        return sameas.resolve_ckey(store, ckey, owner_sub)
+
+    diff_obj = diff_module.get_diff(store, str(diff_row["id"]), owner_sub=owner_sub, part="diff")
+    changed = diff_module.changed_ckeys(diff_obj, resolve)
+    out["changed_ckeys"] = len(changed)
+    out["registry"] = registry_module.invalidate(store, prev_key, new_target_key, changed,
+                                                resolve_ckey=resolve)
+    # 좌석 carried — 인용 ckey 는 좌석 의견 본문(`cited_ckeys`)에 이미 있다(§6.8.2 네 조건의 입력).
+    cited: dict[str, list[str]] = {}
+    for row in store.query(
+            "SELECT agent_key, opinion_json FROM rr_seat_opinions WHERE target_key = ?", (prev_key,)):
+        keys = _loads(row["opinion_json"], {}).get("cited_ckeys") or []
+        cited.setdefault(str(row["agent_key"]), []).extend(str(k) for k in keys)
+    out["carried"] = planner.apply_carry_over(store, new_target_key, prev_key, cited_ckeys=cited,
+                                              changed_ckeys=changed)
+    # §4.8 5 — 성격 행은 과제 단위라 옮기지 않고, 인용 ckey 가 변경에 들면 재확인 표기만 남긴다.
+    out["character_needs_review"] = _flag_character_needs_review(store, project_id, set(changed), now)
+    return out
+
+
+def _diff_target_snapshot(store: Any, diff_id: Any) -> str | None:
+    row = store.query_one("SELECT target_snapshot_id FROM rr_diffs WHERE id = ?", (diff_id,))
+    return str(row["target_snapshot_id"]) if row else None
+
+
+def _flag_character_needs_review(store: Any, project_id: str, changed: set[str], now: int) -> int:
+    """성격 서술의 인용 ckey 가 바뀐 주체에 들면 `needs_review=1`(plan §4.8 5).
+
+    status 는 건드리지 않는다 — confirmed 를 코드가 내리지 않는다(사람만 바꾼다).
+    """
+    flagged = 0
+    for row in store.query(
+            "SELECT id, cites_json FROM rr_character WHERE project_id = ? AND needs_review = 0", (project_id,)):
+        keys = {str((c or {}).get("ckey")) for c in _loads(row["cites_json"], []) if isinstance(c, dict)}
+        if keys & changed:
+            store.execute("UPDATE rr_character SET needs_review = 1, updated_at = ? WHERE id = ?",
+                          (now, row["id"]))
+            flagged += 1
+    return flagged
+
+
 @router.post("/targets")
 def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.current)) -> dict:
     """심사 타깃 1건. principal_json 은 신원 스냅샷일 뿐 러너가 이것으로 PAT 를 발급하지 않는다(§6.7 3단계)."""
@@ -1794,9 +1868,14 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
         )
         if agents:
             roster = planner.freeze_roster(store, target_key, owner_sub, agents, ecad_absent=ecad_absent)
+        # §4.8 — 옛 타깃을 닫고 승계를 정한다. 로스터 고정 **뒤**여야 carried 가 T′ 좌석 행에 앉는다.
+        superseded = _supersede_previous_target(
+            store, project_id=project_id, new_target_key=target_key,
+            new_snapshot_id=str(snapshot["id"]), owner_sub=owner_sub, now=now)
     plan = planner.tier_plan(store, target_key) if roster["roster_size"] else None
     return {
         "target_key": target_key,
+        "superseded": superseded,
         "roster_size": roster["roster_size"],
         "deferred": roster["deferred"],
         "tier_plan": plan["tiers"] if plan else None,

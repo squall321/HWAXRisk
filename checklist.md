@@ -5,7 +5,7 @@
 코드 대조로 확인해 적은 작업 대장이며, 앞으로의 진행은 이 문서를 늘려 가며 한다. 정본 체크리스트는 단계 착수 전에 쓴 것이라 P1~P7 항목이
 전부 미체크로 남아 있다 — 여기서 실측한 완료 상태가 그보다 최신이다.
 
-마지막 실측 2026-09-29 — `pytest` **1190 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · `ruff` 통과 · `pnpm build` 통과.
+마지막 실측 2026-09-29 — `pytest` **1193 passed, 2 skipped**(`test_parity` 는 `HWAX_PORTAL_REPO` 미설정) · `ruff` 통과 · `pnpm build` 통과.
 
 ## 진척 요약
 
@@ -199,6 +199,20 @@
   정본 11키로 통일하고 IR 모양 픽스처 16종을 실산출에 맞췄다. 어댑터 선언이 **기본값 있는 키만** 통과하는
   필터도 주석으로 못 박았다(없는 키를 선언하면 조용히 버려진다 — 이번에 그 함정을 직접 밟았다).
   시험 3건, 전부 고치기 전 깨진다.
+- [x] **§4.8 스냅샷 변경 시 무효화 배선** (2026-09-30) — 기계는 다 있는데(`rr_targets.superseded_by` 열 ·
+  `diff.changed_ckeys(resolve)` · `registry.invalidate(resolve_ckey=)` · `planner.apply_carry_over`)
+  **부르는 곳이 시험뿐이었다** — `create_target` 이 §4.8 을 전혀 하지 않아 stale·superseded·unraised·carried 가
+  한 번도 안 쓰였다. 시험이 함수를 직접 불러 초록이었을 뿐이다(브리지와 같은 계열). 이제 타깃 생성이
+  ① 옛 타깃을 `superseded_by=T′` 로 닫고 ③ 등록부 stale 를 표기하고 ④ 좌석 carried 를 판정하고
+  ⑤ 성격 행에 `needs_review` 를 남긴다(status 는 안 건드린다 — confirmed 를 코드가 내리지 않는다).
+  **안전 핵심 — `changed_ckeys` 를 모를 때 빈 집합으로 진행하지 않는다.** 빈 집합은 '아무것도 안 바뀌었다'
+  와 같아서 `invalidate` 는 stale 0건, `apply_carry_over` 는 **전 좌석 carried** 가 된다(정적으로 확인했다).
+  재검증 없이 통과시키는 쪽이라 '없는 리스크' 다. 두 스냅샷 사이 diff 가 없으면 ①만 하고 사유
+  (`skipped: diff_absent`)를 남긴다 — 정본은 "없으면 생성" 이라 하지만 타깃 생성이 diff 를 부수효과로
+  만들면 게이트 차단·비교 불가로 409 가 날 수 있어 **재사용만** 한다(생성은 `POST /diffs` 가 한다).
+  ckey 비교는 전부 `resolve_ckey` 를 거친다 — 안 거치면 자동 승계로 병합된 키가 한쪽에서만 맞아 판정이
+  '어느 스냅샷 키로 계산했는지' 에 따라 갈린다. 남은 것 — E5 의 `[변경 주체 — 재검증 대상]`·`[미변경 주체]`
+  접두(§4.8 3)는 아직 없다. 시험 3건, 전부 고치기 전 깨진다.
 - [ ] **정본 통과 기준 대조에서 남은 4건**(2026-09-26, 식별자 전수 대조로 발견) —
   ① **완료(2026-09-30)** — 브리지를 구현했다. `part_mesh_map` 을 정본 MCP 3 예산에서 부르고(§2.13.3),
   `kind='bridge'` 엣지를 mcad part ↔ dyna pid 로 잇는다. 조인 키 2종(`path:` REST · `file+name:` MCP)과
