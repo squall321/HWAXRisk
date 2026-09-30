@@ -1,3 +1,67 @@
+/* shadcn/ui 토큰 — 값은 Report Archive(사내 웹)와 같다. 두 앱을 오가는 사람이 조작법을 다시 배우지
+   않게 같은 언어를 쓴다. 아래 `--rr-*` 는 기존 608줄 CSS 가 쓰는 값이고, 화면을 옮겨 가며 걷어낸다.
+   Tailwind preflight 는 꺼 두었다(tailwind.config.js) — 켜면 그 CSS 가 한꺼번에 무너진다. */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    --primary: 221.2 83.2% 53.3%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96.1%;
+    --secondary-foreground: 222.2 47.4% 11.2%;
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96.1%;
+    --accent-foreground: 222.2 47.4% 11.2%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 221.2 83.2% 53.3%;
+    --radius: 0.5rem;
+    /* 판정 색 — shadcn 기본에 없어서 더한다. destructive('파괴적 조작')와 섞지 않는다. */
+    --ok: 142 71% 45%;
+    --ok-foreground: 0 0% 100%;
+    --warn: 38 92% 50%;
+    --warn-foreground: 26 83% 14%;
+  }
+
+  .dark,
+  [data-theme="dark"] {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    --card: 222.2 84% 4.9%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 84% 4.9%;
+    --popover-foreground: 210 40% 98%;
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 222.2 47.4% 11.2%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 224.3 76.3% 48%;
+    --ok: 142 69% 58%;
+    --ok-foreground: 144 61% 10%;
+    --warn: 48 96% 59%;
+    --warn-foreground: 26 83% 14%;
+  }
+}
+
 /* 전역 토큰과 공용 클래스 — 색·간격·타이포를 :root 변수로 두고 prefers-color-scheme 으로 다크 값만 덮는다. */
 
 :root {
