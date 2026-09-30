@@ -32,7 +32,11 @@ import type {
   PanelComplete,
   PanelCompleted,
   PanelTranscript,
+  DiffListRow,
+  Paged,
   PortalPatSummary,
+  ReportListRow,
+  TargetListRow,
   Precedents,
   Project,
   ProjectCreate,
@@ -288,6 +292,14 @@ export const riskApi = {
   decideSameAs: (decisions: SameAsDecision[], o?: Opt) =>
     request<SameAsDecided>("sameas/decide", { method: "POST", body: decisions, ...o }),
   createDiff: (body: DiffCreate, o?: Opt) => request<DiffCreated>("diffs", { method: "POST", body, ...o }),
+  // 목록 3종 — 홈 탭 3개가 이 셋이 없어 '아직 없습니다' 였다(정본 §8.2.4).
+  listDiffs: (q?: { project_id?: string; limit?: number; offset?: number }, o?: Opt) =>
+    request<Paged<"diffs", DiffListRow>>("diffs", { query: q, ...o }),
+  listTargets: (q?: { project_id?: string; include_superseded?: boolean; limit?: number; offset?: number },
+                o?: Opt) => request<Paged<"targets", TargetListRow>>("targets", { query: q, ...o }),
+  listReports: (q?: { project_id?: string; limit?: number; offset?: number }, o?: Opt) =>
+    request<Paged<"reports", ReportListRow>>("reports", { query: q, ...o }),
+
   getDiff: (id: string, o?: Opt) => request<DiffDoc>(`diffs/${encodeURIComponent(id)}`, { query: { part: "diff" }, ...o }),
   getDiffSummary: (id: string, o?: Opt) =>
     request<DiffSummary>(`diffs/${encodeURIComponent(id)}`, { query: { part: "summary" }, ...o }),

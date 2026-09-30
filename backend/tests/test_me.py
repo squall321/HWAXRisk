@@ -72,7 +72,10 @@ def test_me_anonymous(client, wired):
     body = client.get("/api/me").json()
     assert body["anonymous"] is True and body["email"] is None and body["source"] == "none"
     assert body["portal_pat"] is None
-    assert set(body["box"]) == {"hostname", "secrets_valid", "cred_key_present"}
+    # portal_base 는 진단값이다 — 이 주소가 틀리면 PAT 등록·패널이 전부 실패하는데 화면에 안 보이면
+    # 사람이 토큰을 의심한다(2026-09-30 실측). 비밀이 아니므로 익명 응답에도 싣는다.
+    assert set(body["box"]) == {"hostname", "secrets_valid", "cred_key_present", "portal_base"}
+    assert body["box"]["portal_base"].startswith("http")
     assert isinstance(body["box"]["hostname"], str) and body["box"]["secrets_valid"] is False
     assert set(body) == {"email", "display_name", "role", "organization", "anonymous", "source", "portal_pat", "box"}
 

@@ -869,3 +869,59 @@ export type VocabBump = {
   /** major 승급이면 true — 화면은 `recompute_part_keys.py` 안내 배너를 띄운다(§2.7.1). */
   recompute_required: boolean;
 };
+
+// ── 목록 3종(정본 §8.2.4 RiskHomePage 탭) ────────────────────────────────────
+// 목록은 고르기 위한 것이라 본문(diff_json·summary_text)이 없다 — 전문은 항목 경로가 준다.
+
+export type DiffListRow = {
+  id: string;
+  base_snapshot_id: string;
+  target_snapshot_id: string;
+  base_project_id: string;
+  target_project_id: string;
+  pair_kind: "same_project_revision" | "cross_project" | null;
+  diff_version: string;
+  summary_status: "ok" | "lint_failed" | null;
+  stats: Record<string, unknown>;
+  comparability: Record<string, unknown>;
+  /** 게이트가 막았나 — 이 diff 를 믿어도 되는지의 판정이다(§2.12). */
+  blocked: boolean;
+  gates_failed: string[];
+  diff_hash: string | null;
+  created_at: number | null;
+};
+
+export type TargetListRow = {
+  target_key: string;
+  kind: "snap" | "diff";
+  ref_id: string;
+  project_id: string;
+  level: string;
+  close_level: string | null;
+  verdict_candidate: string | null;
+  verdict_final: string | null;
+  /** §4.8 로 닫힌 타깃 — 기본 목록에는 안 나온다. */
+  superseded_by: string | null;
+  report_ids: string[];
+  roster_size: number;
+  coverage_pct: number | null;
+  created_at: number | null;
+  updated_at: number | null;
+};
+
+export type ReportListRow = {
+  report_id: string;
+  /** `rpt:<id>` — 앱은 보고서를 소유하지 않고 이 포인터만 갖는다(§5.3). */
+  ref: string;
+  target_key: string;
+  kind: "snap" | "diff";
+  project_id: string;
+  level: string;
+  verdict_final: string | null;
+  ra_state: string | null;
+  updated_at: number | null;
+};
+
+export type Paged<K extends string, T> = { total: number; limit: number; offset: number } & {
+  [P in K]: T[];
+};

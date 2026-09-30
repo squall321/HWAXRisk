@@ -1695,6 +1695,123 @@ def diff_part(diff_id: str, part: str, *, owner_sub: str | None = None, limit: i
     return payload
 
 
+# 목록 경로 3종(정본 §8.2.4 RiskHomePage '상단 탭 과제/비교(diff 목록)/타깃/보고서').
+# 이 셋이 없어서 첫 화면 탭 3개가 '목록 경로가 아직 없습니다' 였다 — 앱이 "여기 무엇이 있는지" 를
+# 보여 줄 방법이 없었다. 항목 경로(`/diffs/{id}` 등)만 있고 컬렉션 경로가 없던 자리다.
+# 무거운 본문(diff_json·summary_text)은 싣지 않는다 — 목록은 고르기 위한 것이고 전문은 항목 경로가 준다.
+LIST_LIMIT_DEFAULT, LIST_LIMIT_MAX = 50, 200
+
+
+def _list_window(limit: int, offset: int) -> tuple[int, int]:
+    """목록 창 — 상한을 넘기면 자르고, 음수는 0 으로 접는다(요청이 DB 를 통째로 끌지 않게)."""
+    return max(1, min(int(limit), LIST_LIMIT_MAX)), max(0, int(offset))
+
+
+@router.get("/diffs")
+def list_diffs(project_id: str | None = None, limit: int = LIST_LIMIT_DEFAULT, offset: int = 0,
+               ident: identity.Identity = Depends(identity.current)) -> dict:
+    """비교 목록 — 최신순. `project_id` 는 base·target 어느 쪽이든 그 과제가 걸린 diff 를 고른다."""
+    owner_sub = _require_user(ident)
+    take, skip = _list_window(limit, offset)
+    store = get_store()
+    where = ["owner_sub = ?"]
+    params: list[Any] = [owner_sub]
+    if project_id:
+        where.append("(base_project_id = ? OR target_project_id = ?)")
+        params += [project_id, project_id]
+    clause = " AND ".join(where)
+    total = store.query_one(f"SELECT COUNT(*) AS n FROM rr_diffs WHERE {clause}", tuple(params))["n"]
+    rows = store.query(
+        "SELECT id, base_snapshot_id, target_snapshot_id, base_project_id, target_project_id, pair_kind,"
+        " diff_version, summary_status, stats_json, comparability_json, gates_json, diff_hash, created_at"
+        f" FROM rr_diffs WHERE {clause} ORDER BY created_at DESC, id LIMIT ? OFFSET ?",
+        (*params, take, skip))
+    diffs = []
+    for row in rows:
+        item = dict(row)
+        item["stats"] = _loads(item.pop("stats_json"), {})
+        # 비교 가능성·게이트는 '이 diff 를 믿어도 되나' 의 판정이라 목록에서 바로 보여야 한다(§3.3.6·§2.12).
+        item["comparability"] = _loads(item.pop("comparability_json"), {})
+        gates = _loads(item.pop("gates_json"), {}) or {}
+        item["blocked"] = state_module.is_blocked(gates)
+        item["gates_failed"] = sorted(k for k, v in gates.items() if v.get("pass") is False)
+        diffs.append(item)
+    return {"diffs": diffs, "total": int(total or 0), "limit": take, "offset": skip}
+
+
+@router.get("/targets")
+def list_targets(project_id: str | None = None, include_superseded: bool = False,
+                 limit: int = LIST_LIMIT_DEFAULT, offset: int = 0,
+                 ident: identity.Identity = Depends(identity.current)) -> dict:
+    """타깃 목록 — 최신순. 기본은 살아 있는 타깃만이다(§4.8 로 닫힌 것은 `include_superseded` 로 본다)."""
+    owner_sub = _require_user(ident)
+    take, skip = _list_window(limit, offset)
+    store = get_store()
+    where = ["owner_sub = ?"]
+    params: list[Any] = [owner_sub]
+    if project_id:
+        where.append("project_id = ?")
+        params.append(project_id)
+    if not include_superseded:
+        where.append("superseded_by IS NULL")
+    clause = " AND ".join(where)
+    total = store.query_one(f"SELECT COUNT(*) AS n FROM rr_targets WHERE {clause}", tuple(params))["n"]
+    rows = store.query(
+        "SELECT target_key, kind, ref_id, project_id, base_project_id, ir_hash, level, close_level,"
+        " verdict_candidate, verdict_final, superseded_by, report_ids_json, roster_frozen_at,"
+        " created_at, updated_at"
+        f" FROM rr_targets WHERE {clause} ORDER BY created_at DESC, target_key LIMIT ? OFFSET ?",
+        (*params, take, skip))
+    targets = []
+    for row in rows:
+        item = dict(row)
+        item["report_ids"] = _loads(item.pop("report_ids_json"), [])
+        # 진행판 요약 — 목록에서 '얼마나 됐나' 가 보이지 않으면 사람이 타깃마다 들어가 봐야 한다.
+        summary = planner.coverage_summary(store, item["target_key"])
+        item["roster_size"] = summary["roster_size"]
+        item["coverage_pct"] = (round(100.0 * summary["terminal_n"] / summary["roster_size"], 1)
+                                if summary["roster_size"] else None)
+        targets.append(item)
+    return {"targets": targets, "total": int(total or 0), "limit": take, "offset": skip}
+
+
+@router.get("/reports")
+def list_reports(project_id: str | None = None, limit: int = LIST_LIMIT_DEFAULT, offset: int = 0,
+                 ident: identity.Identity = Depends(identity.current)) -> dict:
+    """보고서 목록 — 앱은 보고서를 소유하지 않는다(§5.3 외부 투영). RA `rpt:` 포인터를 타깃에서 모은다.
+
+    그래서 이 목록은 '어느 타깃이 어떤 보고서를 냈나' 이고, 전문은 RA 가 갖는다 — 앱이 사본을 두지 않는다.
+    보고서를 낸 적 없는 타깃은 빠진다(빈 줄로 목록을 채우지 않는다).
+    """
+    owner_sub = _require_user(ident)
+    take, skip = _list_window(limit, offset)
+    store = get_store()
+    where = ["owner_sub = ?", "report_ids_json IS NOT NULL", "report_ids_json <> '[]'"]
+    params: list[Any] = [owner_sub]
+    if project_id:
+        where.append("project_id = ?")
+        params.append(project_id)
+    clause = " AND ".join(where)
+    rows = store.query(
+        "SELECT target_key, kind, project_id, level, verdict_final, report_ids_json, external_sync_json,"
+        " updated_at FROM rr_targets"
+        f" WHERE {clause} ORDER BY updated_at DESC, target_key", tuple(params))
+    reports: list[dict] = []
+    for row in rows:
+        sync = _loads(row["external_sync_json"], {}) or {}
+        for report_id in _loads(row["report_ids_json"], []) or []:
+            reports.append({
+                "report_id": str(report_id),
+                "ref": f"rpt:{report_id}",
+                "target_key": row["target_key"], "kind": row["kind"], "project_id": row["project_id"],
+                "level": row["level"], "verdict_final": row["verdict_final"],
+                # RA 반영 상태 — '앱에는 있는데 RA 에 아직 안 올라간' 보고서를 구분한다(§5.5.3).
+                "ra_state": (sync.get("ra") or {}).get("state"),
+                "updated_at": row["updated_at"],
+            })
+    return {"reports": reports[skip:skip + take], "total": len(reports), "limit": take, "offset": skip}
+
+
 @router.get("/diffs/{diff_id}")
 def get_diff(diff_id: str, part: str = "diff",
              ident: identity.Identity = Depends(identity.current)) -> dict:

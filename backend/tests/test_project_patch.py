@@ -848,3 +848,82 @@ def test_create_project_keeps_the_product_link_it_was_sent(risk_store, monkeypat
     assert row["product_code"] == "F7-2024", "ra_model 값이 대표 제품코드로 잡혔다"
     assert row["predecessor_product_code"] == "F6-2023"
     assert len(json.loads(row["product_refs_json"])) == 2
+
+
+# ------------------------------------------------- 목록 경로 3종(정본 §8.2.4 RiskHomePage 탭)
+def _diff(store, diff_id: str, *, base_project: str, target_project: str, created_at: int,
+          gates: str = "{}", owner: str = OWNER) -> None:
+    store.execute(
+        "INSERT INTO rr_diffs(id, owner_sub, base_snapshot_id, target_snapshot_id, base_project_id,"
+        " target_project_id, pair_kind, diff_version, diff_json, summary_text, summary_status,"
+        " stats_json, comparability_json, gates_json, diff_hash, created_at)"
+        " VALUES (?,?,?,?,?,?,'same_project_revision','1.0','{\"huge\":true}','전문',"
+        "'ok','{\"nodes\":3}','{\"app_version_parity\":true}',?,'dh',?)",
+        (diff_id, owner, f"{diff_id}-b", f"{diff_id}-t", base_project, target_project, gates, created_at))
+
+
+def test_list_diffs_is_newest_first_owner_scoped_and_leaves_the_body_out(risk_store, monkeypatch):
+    """§8.2.4 '비교(diff 목록)' 탭의 원천. 목록은 고르기 위한 것이라 diff_json·summary_text 를 안 싣는다."""
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    p1, p2 = _project(risk_store, "p1"), _project(risk_store, "p2")
+    _diff(risk_store, "d_old", base_project=p1, target_project=p1, created_at=100)
+    _diff(risk_store, "d_new", base_project=p2, target_project=p2, created_at=300,
+          gates='{"G6": {"pass": false}, "G1": {"pass": true}}')
+    _diff(risk_store, "d_other", base_project=p1, target_project=p1, created_at=200, owner="other@x")
+
+    out = routes.list_diffs(ident=_ident())
+
+    assert [d["id"] for d in out["diffs"]] == ["d_new", "d_old"], "최신순이 아니거나 남의 것이 섞였다"
+    assert out["total"] == 2
+    assert "diff_json" not in out["diffs"][0] and "summary_text" not in out["diffs"][0]
+    # '이 diff 를 믿어도 되나' 를 목록에서 바로 본다.
+    assert out["diffs"][0]["gates_failed"] == ["G6"] and out["diffs"][0]["blocked"] is True
+    assert out["diffs"][0]["comparability"] == {"app_version_parity": True}
+    assert out["diffs"][1]["blocked"] is False
+    # 과제로 좁히면 base·target 어느 쪽이든 걸린다.
+    assert [d["id"] for d in routes.list_diffs(project_id="p1", ident=_ident())["diffs"]] == ["d_old"]
+
+
+def test_list_targets_hides_superseded_by_default_and_carries_progress(risk_store, monkeypatch):
+    """§8.2.4 '타깃' 탭. 목록에서 진행도가 안 보이면 사람이 타깃마다 들어가 봐야 한다."""
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    project_id = _project(risk_store, "p1")
+    _target(risk_store, project_id, "snap:live")
+    _target(risk_store, project_id, "snap:closed")
+    risk_store.execute("UPDATE rr_targets SET superseded_by = 'snap:live' WHERE target_key = 'snap:closed'")
+
+    live = routes.list_targets(ident=_ident())
+    assert [t["target_key"] for t in live["targets"]] == ["snap:live"], "§4.8 로 닫힌 타깃이 기본 목록에 남았다"
+    assert live["total"] == 1
+    assert live["targets"][0]["roster_size"] == 0 and live["targets"][0]["coverage_pct"] is None
+    assert live["targets"][0]["report_ids"] == []
+
+    both = routes.list_targets(include_superseded=True, ident=_ident())
+    assert {t["target_key"] for t in both["targets"]} == {"snap:live", "snap:closed"}
+    assert next(t for t in both["targets"] if t["target_key"] == "snap:closed")["superseded_by"] == "snap:live"
+
+
+def test_list_reports_collects_the_ra_pointers_and_skips_targets_without_any(risk_store, monkeypatch):
+    """앱은 보고서를 소유하지 않는다(§5.3) — RA `rpt:` 포인터를 타깃에서 모으고 전문은 싣지 않는다."""
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    project_id = _project(risk_store, "p1")
+    _target(risk_store, project_id, "snap:with")
+    _target(risk_store, project_id, "snap:without")
+    risk_store.execute(
+        "UPDATE rr_targets SET report_ids_json = '[\"R1\",\"R2\"]', verdict_final = 'conditional',"
+        " external_sync_json = '{\"ra\": {\"state\": \"synced\"}}' WHERE target_key = 'snap:with'")
+
+    out = routes.list_reports(ident=_ident())
+
+    assert out["total"] == 2, "보고서를 낸 적 없는 타깃이 빈 줄로 섞였다"
+    assert [r["ref"] for r in out["reports"]] == ["rpt:R1", "rpt:R2"]
+    assert all(r["target_key"] == "snap:with" for r in out["reports"])
+    assert out["reports"][0]["ra_state"] == "synced" and out["reports"][0]["verdict_final"] == "conditional"
+
+
+def test_the_list_window_is_clamped(risk_store, monkeypatch):
+    """요청이 DB 를 통째로 끌지 않는다 — 상한을 넘기면 자르고 음수 offset 은 0 이다."""
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    _project(risk_store, "p1")
+    out = routes.list_diffs(limit=9999, offset=-5, ident=_ident())
+    assert out["limit"] == routes.LIST_LIMIT_MAX and out["offset"] == 0
