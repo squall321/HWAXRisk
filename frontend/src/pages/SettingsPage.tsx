@@ -38,6 +38,23 @@ const PAT_ERRORS: Record<string, { title: string; detail: string }> = {
     title: "곧 만료되는 PAT 입니다.",
     detail: "만료까지 24시간이 채 남지 않았습니다. ttl 을 365일 이하 범위에서 넉넉히 잡아 다시 발급하세요.",
   },
+  // 포털 발급 화면이 scopes 를 ['read','write'] 로 주므로 링크를 그대로 따라간 사용자가 만나는 코드다.
+  pat_scope_too_broad: {
+    title: "범위가 넓은 PAT 입니다.",
+    detail:
+      "이 앱은 scopes 가 ['read'] 인 PAT 만 등록합니다. 위의 '포털에서 발급해 등록' 을 쓰면 그 범위로 바로 만들어 줍니다.",
+  },
+  cred_key_absent: {
+    title: "이 박스에 자격 암호키가 없습니다.",
+    detail:
+      "PAT 를 평문으로 저장하지 않으므로 키가 없으면 등록하지 않습니다. 운영자가 데이터 디렉터리의 cred.key 를 만들어야 합니다.",
+  },
+  // 설정 문제를 토큰 문제로 읽지 않게 따로 적는다(502).
+  portal_unreachable: {
+    title: "포털에 닿지 못했습니다 — PAT 문제가 아닙니다.",
+    detail:
+      "앱이 포털을 부르는 주소(HWAXRISK_PORTAL_BASE)가 실제 포털 오리진을 가리키지 않습니다. 토큰을 다시 발급해도 같은 오류가 납니다 — 운영자가 그 설정을 고쳐야 합니다.",
+  },
 };
 
 /** 4종은 전용 문구로, 나머지는 공용 배너로 접는다. */
@@ -245,8 +262,29 @@ export default function SettingsPage() {
                   label: "secrets_valid",
                   value: me.data.box.secrets_valid ? <Badge tone="ok">valid</Badge> : <Badge tone="bad">invalid</Badge>,
                 },
+                {
+                  label: "cred_key",
+                  value: me.data.box.cred_key_present ? (
+                    <Badge tone="ok">present</Badge>
+                  ) : (
+                    <Badge tone="bad">absent</Badge>
+                  ),
+                },
+                {
+                  // 이 값이 틀리면 PAT 등록·패널 실행이 전부 실패한다 — 안 보이면 사람이 토큰을 의심한다.
+                  label: "portal_base",
+                  value: me.data.box.portal_base ? (
+                    <code>{me.data.box.portal_base}</code>
+                  ) : (
+                    <span className="rr-muted">서버가 알려 주지 않았습니다.</span>
+                  ),
+                },
               ]}
             />
+            <p className="rr-muted">
+              portal_base 는 앱이 포털을 부르는 주소입니다. 이 값이 실제 포털 오리진(nginx)이 아니면 PAT 등록과
+              무인 패널이 모두 실패하고, 그 실패는 토큰 탓처럼 보입니다.
+            </p>
           </>
         ) : null}
         <ErrorBanner error={health.error} onRetry={health.reload} />

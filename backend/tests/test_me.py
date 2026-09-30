@@ -233,3 +233,42 @@ def test_box_mismatch_hides_credentials(client, wired, monkeypatch):
     assert len(_rows()) == 1
     monkeypatch.setattr(app.state, "box_match", False)
     assert client.get("/api/me", headers=AUTH).json()["portal_pat"] is None
+
+
+def test_an_unreachable_portal_is_not_reported_as_a_bad_pat(monkeypatch):
+    """설정 문제를 토큰 문제로 번역하지 않는다(2026-09-30 실측에서 이것 때문에 막혀 있었다).
+
+    `HWAXRISK_PORTAL_BASE` 기본값 `127.0.0.1:5283` 은 포털 vite 개발 포트라 실제 박스에서 죽어 있고
+    오리진은 nginx `:8088` 이다. 둘을 같은 `pat_invalid` 로 접으면 화면이 "값을 다시 복사하거나 새로
+    발급하세요" 로 번역해 사용자가 멀쩡한 토큰을 몇 번이고 다시 발급한다.
+    """
+    import httpx
+
+    from app import routes
+
+    def dead(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused", request=request)
+
+    monkeypatch.setattr(routes, "_portal_transport", httpx.MockTransport(dead))
+
+    with pytest.raises(AppError) as exc:
+        routes._verify_with_portal("pat-value")
+
+    assert exc.value.code == "portal_unreachable", "닿지 못한 것을 PAT 탓으로 적었다"
+    assert exc.value.http_status == 502, "502 여야 한다 — 422 는 '입력이 잘못됐다' 는 뜻이다"
+    assert "HWAXRISK_PORTAL_BASE" in exc.value.message, "고칠 곳을 가리키지 않는다"
+
+
+def test_a_portal_that_rejects_the_pat_still_reports_pat_invalid(monkeypatch):
+    """포털이 실제로 거부한 경우는 그대로 `pat_invalid` 다 — 구분이 반대로 뭉개지지 않게 함께 고정한다."""
+    import httpx
+
+    from app import routes
+
+    monkeypatch.setattr(routes, "_portal_transport",
+                        httpx.MockTransport(lambda r: httpx.Response(401, json={"detail": "no"})))
+
+    with pytest.raises(AppError) as exc:
+        routes._verify_with_portal("pat-value")
+
+    assert (exc.value.code, exc.value.http_status) == ("pat_invalid", 422)

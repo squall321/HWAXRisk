@@ -116,7 +116,13 @@ export type Me = {
   source: "bearer" | "cookie" | "none";
   portal_pat: PortalPatSummary | null;
   /** cred_key_present=false 면 PAT 등록이 422 `cred_key_absent` 로 거부된다(§8.2.7). */
-  box: { hostname: string; secrets_valid: boolean; cred_key_present?: boolean };
+  box: {
+    hostname: string;
+    secrets_valid: boolean;
+    cred_key_present?: boolean;
+    /** 앱이 포털을 부르는 주소. 틀리면 PAT 등록·패널 실행이 전부 실패한다(비밀이 아니다). */
+    portal_base?: string;
+  };
 };
 
 export type Adapter = { kind: string; app_key: string | null; status: string };

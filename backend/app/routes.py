@@ -114,12 +114,23 @@ def _decode_jwt_payload(pat: str) -> dict:
 
 
 def _verify_with_portal(pat: str) -> None:
-    url = f"{config.settings.portal_base.rstrip('/')}/agent/conversations?limit=1"
+    """등록 전에 포털이 이 PAT 를 받는지 확인한다(§8.2.3).
+
+    **포털에 닿지 못한 것과 포털이 거부한 것을 같은 코드로 접지 않는다.** 둘을 `pat_invalid` 로 뭉치면
+    화면이 "값을 다시 복사하거나 새로 발급하세요" 로 번역하는데, 실제 원인이 `HWAXRISK_PORTAL_BASE`
+    오지정이면 사용자는 멀쩡한 토큰을 몇 번이고 다시 발급하게 된다(2026-09-30 실측 — 기본값
+    `127.0.0.1:5283` 은 포털 vite 개발 포트라 이 박스에서 죽어 있고 실제 오리진은 nginx `:8088` 이다).
+    """
+    base = config.settings.portal_base.rstrip("/")
+    url = f"{base}/agent/conversations?limit=1"
     try:
         with httpx.Client(transport=_portal_transport, timeout=PORTAL_TIMEOUT_S) as client:
             r = client.get(url, headers={"Authorization": f"Bearer {pat}"})
     except httpx.HTTPError as exc:
-        raise AppError("pat_invalid", f"포털 검증 호출 실패({type(exc).__name__}).", 422) from exc
+        raise AppError(
+            "portal_unreachable",
+            f"포털에 닿지 못했습니다 — {base} ({type(exc).__name__}). PAT 문제가 아니라 설정 문제입니다"
+            f" — HWAXRISK_PORTAL_BASE 가 실제 포털 오리진(nginx)을 가리키는지 확인하세요.", 502) from exc
     if r.status_code != 200:
         raise AppError("pat_invalid", f"포털이 PAT 를 거부했습니다(HTTP {r.status_code}).", 422)
 
@@ -157,7 +168,11 @@ def get_me(request: Request, ident: identity.Identity = Depends(identity.current
     payload["portal_pat"] = portal_pat
     payload["box"] = {"hostname": state.hostname, "secrets_valid": state.secrets_valid,
                       # 부작용 없는 갈래로만 본다 — 여기서 키를 만들면 기존 암호문이 영구히 복호 불가가 된다.
-                      "cred_key_present": config.load_cred_key(create=False) is not None}
+                      "cred_key_present": config.load_cred_key(create=False) is not None,
+                      # 앱이 포털을 부르는 주소를 화면이 볼 수 있게 낸다(비밀이 아니다). 이 값이 틀리면
+                      # PAT 등록·패널 실행이 전부 실패하는데 화면에 안 보이면 사람이 토큰을 의심한다
+                      # (2026-09-30 실측 — 기본값이 포털 vite 개발 포트라 죽어 있었고 아무도 못 봤다).
+                      "portal_base": config.settings.portal_base}
     return payload
 
 
