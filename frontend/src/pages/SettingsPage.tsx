@@ -8,6 +8,7 @@ import { ErrorBanner, EmptyBlock, LoadingBlock, NotReadyBlock } from "../compone
 import { Badge } from "../components/Badge";
 import { fmtEpoch } from "../format";
 import type { PortalPatSummary } from "../types";
+import { PortalMintError, mintPortalPat } from "../api/portalPat";
 
 /**
  * §8.2.4 동의 문구 — 실제 집행 수준까지만 약속한다.
@@ -76,6 +77,32 @@ function PatSection({ summary, onChanged }: { summary: PortalPatSummary | null; 
     }
   }
 
+  /**
+   * 포털에서 발급받아 그대로 등록한다 — 사람이 값을 손으로 옮기는 단계를 없앤다.
+   *
+   * 발급은 **브라우저가** 한다. 앱 서버는 포털 `require_csrf`(double-submit)를 만족할 수 없어
+   * 사용자를 대신해 발급할 수 없다. 앱 SPA 는 포털과 같은 오리진이라 세션 쿠키와 CSRF 를 그대로 쓴다.
+   * 받은 값은 곧바로 서버로 넘기고 화면 상태에 담지 않는다(입력란에도 넣지 않는다).
+   */
+  async function mintAndSave() {
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const minted = await mintPortalPat();
+      const next = await riskApi.putPortalPat(minted.token);
+      setResult(next);
+      setPat("");
+      setNotice(`포털에서 발급해 등록했습니다 — jti ${minted.jti}`);
+      onChanged();
+    } catch (err) {
+      // 발급 단계 실패는 문구가 곧 사유다(권한·세션). 등록 단계 실패는 기존 422 표에 걸린다.
+      setError(err instanceof PortalMintError ? new Error(err.message) : err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const shown = result ?? summary;
 
   return (
@@ -112,22 +139,30 @@ function PatSection({ summary, onChanged }: { summary: PortalPatSummary | null; 
         />
       </label>
       <div className="rr-row">
+        <button type="button" className="rr-btn rr-btn-primary" onClick={mintAndSave} disabled={busy}>
+          {busy ? "처리 중." : "포털에서 발급해 등록"}
+        </button>
         <button
           type="button"
-          className="rr-btn rr-btn-primary"
+          className="rr-btn"
           onClick={() => save(pat.trim())}
           disabled={busy || pat.trim() === ""}
         >
-          등록
+          붙여넣은 값으로 등록
         </button>
         <button type="button" className="rr-btn" onClick={() => save(null)} disabled={busy || !shown?.registered}>
           삭제
         </button>
         <a href="/tokens" target="_blank" rel="noreferrer">
-          포털에서 PAT 발급
+          포털 토큰 화면
         </a>
       </div>
-      <p className="rr-muted">발급 조건 — aud 에 mcp-gateway 포함 · scope api · ttl 365일 이하.</p>
+      <p className="rr-muted">
+        '포털에서 발급해 등록' 은 이 브라우저의 포털 세션으로 <code>scopes ['read']</code> ·{" "}
+        <code>aud mcp-gateway</code> · ttl 90일 PAT 을 만들어 그대로 등록합니다 — 값이 화면에 보이지 않습니다.
+        포털이 토큰 발급 권한(<code>feat:api-token</code>)을 요구하면 관리자에게 그 권한을 먼저 받으세요.
+      </p>
+      <p className="rr-muted">직접 발급할 때의 조건 — aud 에 mcp-gateway 포함 · scope api · ttl 365일 이하.</p>
       <p className="rr-consent">{CONSENT_TEXT}</p>
     </>
   );
