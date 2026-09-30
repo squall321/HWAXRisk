@@ -584,7 +584,7 @@ def _negative_line(row) -> str:
 _REGISTRY_COLS = (
     "target_key, cluster_key, merged_json, support, contested, rejected, human_n, direction, mechanism, "
     "mechanism_detail, change_kind, subject_key, severity, sev3, judgement, status, status_source, "
-    "needs_review_json, updated_at"
+    "needs_review_json, stale_json, updated_at"
 )
 # E5+ 는 살아 있는 선례, E5− 는 기각·반증 선례다. 한 줄도 두 블록에 겹쳐 실리지 않는다(plan §5.6.1).
 E5_POSITIVE_STATUSES = ("open", "verified")
@@ -656,17 +656,37 @@ def _is_human_row(row) -> bool:
     return int(row["human_n"] or 0) >= 1 and int(row["support"] or 0) == 0
 
 
-def _e5_prefix(row) -> str:
-    """E5+ 줄 접두 — 재검토(escalated)·사람 제기(origin='human')를 드러낸다(plan §5.6.1)."""
+def _stale_prefix(row, target_key: str) -> str:
+    """§4.8 3 접두 — 이 타깃 기준으로 그 선례의 주체가 바뀌었는지.
+
+    §4.8 은 "E5 는 stale 클러스터를 `[변경 주체 — 재검증 대상]` 접두로, 나머지를 `[미변경 주체]` 로
+    싣는다" 고 적는다. 그 '나머지' 는 **§4.8 이 실제로 판정한 클러스터** 로 읽는다 — stale 표기는
+    `stale_json[T′]` 이고 그 판정은 같은 과제의 직전 타깃에만 일어난다. 다른 과제의 선례에는 항목이
+    아예 없는데 그것을 `[미변경 주체]` 로 적으면 **확인하지 않은 것을 확인했다고 적는 것**이다.
+    그래서 항목이 없으면 접두를 붙이지 않는다(모름과 '안 바뀜' 을 같은 글자로 쓰지 않는다).
+    """
+    entry = (_j(row["stale_json"], {}) or {}).get(target_key) if "stale_json" in row.keys() else None
+    if not isinstance(entry, Mapping):
+        return ""
+    return "[변경 주체 — 재검증 대상] " if entry.get("stale") else "[미변경 주체] "
+
+
+def _e5_prefix(row, target_key: str = "") -> str:
+    """E5+ 줄 접두 — 재검토(escalated)·사람 제기(origin='human')와 §4.8 변경 주체를 드러낸다.
+
+    §5.6.1 의 2종과 §4.8 의 2종은 서로를 참조하지 않는다 — 다른 사실이라 **겹쳐 붙인다**.
+    변경 주체가 먼저다(재검증이 필요한지가 좌석이 먼저 알아야 할 사실이다).
+    """
     escalated = bool((_j(row["needs_review_json"], {}) or {}).get("escalated"))
     human = _is_human_row(row)
+    head = _stale_prefix(row, target_key) if target_key else ""
     if escalated and human:
-        return "[재검토·사람 제기] "
+        return head + "[재검토·사람 제기] "
     if escalated:
-        return "[재검토] "
+        return head + "[재검토] "
     if human:
-        return "[사람 제기·검증 대상] "
-    return ""
+        return head + "[사람 제기·검증 대상] "
+    return head
 
 
 def _item_e5(store, ctx, similar: Mapping[str, Any], owner_sub: str | None, field=None) -> dict:
@@ -676,7 +696,8 @@ def _item_e5(store, ctx, similar: Mapping[str, Any], owner_sub: str | None, fiel
     기각됐다' 는 사실이 발화될 자리를 만든다.
     """
     source = _SOURCES["E5"][0]
-    positive = [_e5_prefix(row) + _registry_line(row, path)
+    target_key = _s(ctx["target"]["target_key"])
+    positive = [_e5_prefix(row, target_key) + _registry_line(row, path)
                 for path, row in _e5_candidates(store, ctx, similar, owner_sub, E5_POSITIVE_STATUSES)]
     negative = [_negative_line(row)
                 for _path, row in _e5_candidates(store, ctx, similar, owner_sub, E5_NEGATIVE_STATUSES)]

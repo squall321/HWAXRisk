@@ -1115,3 +1115,54 @@ def test_a_fabricated_quote_on_field_evidence_is_caught(risk_store):
     assert fake["quote_mismatch"] == ["voc:F7-2024#ISS-1"], "지어낸 인용문이 통과했다"
     # 대조 실패는 등급을 못 올린다 — grade_ok 가 아니므로 측정이 되지 않는다.
     assert narrative.evidence_grade_from_cites(fake, spec) == "경험칙"
+
+
+def test_e5_marks_whether_the_precedents_subject_changed(risk_store):
+    """§4.8 3 — stale 클러스터는 `[변경 주체 — 재검증 대상]`, 판정된 나머지는 `[미변경 주체]`.
+
+    **판정하지 않은 선례에는 붙이지 않는다.** stale 표기는 `stale_json[T′]` 이고 그 판정은 같은 과제의
+    직전 타깃에만 일어난다. 항목이 없는 선례를 `[미변경 주체]` 로 적으면 확인하지 않은 것을 확인했다고
+    적는 것이다 — 모름과 '안 바뀜' 을 같은 글자로 쓰지 않는다.
+    """
+    target_key = seed_diff_target(risk_store)
+    rows = (("clu_stale", _j({target_key: {"stale": True}})),
+            ("clu_fresh", _j({target_key: {"stale": False}})),
+            ("clu_unjudged", None),
+            ("clu_other", _j({"diff:other": {"stale": True}})))
+    for cluster, stale_json in rows:
+        risk_store.execute(
+            "INSERT INTO rr_registry(target_key, cluster_key, owner_sub, visibility, merged_json, support,"
+            " contested, rejected, human_n, direction, mechanism, mechanism_detail, change_kind, subject_key,"
+            " severity, sev3, judgement, status, status_source, stale_json, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            ("diff:d0", cluster, OWNER, "org", _j({"subject_names": ["HOUSING"], "claim": "주장"}),
+             2, 0, 0, 0, "risk", "interface", "interference", "placement", SUBJECT, "중대", 2, "WARNING",
+             "open", "code", stale_json, 700))
+
+    body = _e5(brief.build_brief(risk_store, target_key, owner_sub=OWNER))
+    line = {c: next((ln for ln in body.split("\n") if f"#{c}" in ln), "") for c, _ in rows}
+
+    assert line["clu_stale"].startswith("[변경 주체 — 재검증 대상] ")
+    assert line["clu_fresh"].startswith("[미변경 주체] ")
+    # 판정 자체가 없으면 접두가 없다 — 이 타깃 기준의 항목이 없거나 남의 타깃 항목만 있는 경우.
+    assert not line["clu_unjudged"].startswith("[")
+    assert not line["clu_other"].startswith("[")
+
+
+def test_the_stale_prefix_stacks_with_the_existing_two(risk_store):
+    """§5.6.1 의 접두 2종과 §4.8 의 2종은 다른 사실이라 겹쳐 붙는다 — 변경 주체가 먼저다."""
+    target_key = seed_diff_target(risk_store)
+    risk_store.execute(
+        "INSERT INTO rr_registry(target_key, cluster_key, owner_sub, visibility, merged_json, support,"
+        " contested, rejected, human_n, direction, mechanism, mechanism_detail, change_kind, subject_key,"
+        " severity, sev3, judgement, status, status_source, needs_review_json, stale_json, updated_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ("diff:d0", "clu_both", OWNER, "org",
+         _j({"subject_names": ["HOUSING"], "claim": "주장", "human_refs": ["diff:d0#H1"]}),
+         0, 0, 0, 1, "risk", "interface", "interference", "placement", SUBJECT, "중대", 2, "WARNING",
+         "open", "code", _j({"escalated": True}), _j({target_key: {"stale": True}}), 700))
+
+    body = _e5(brief.build_brief(risk_store, target_key, owner_sub=OWNER))
+    line = next(ln for ln in body.split("\n") if "#clu_both" in ln)
+
+    assert line.startswith("[변경 주체 — 재검증 대상] [재검토·사람 제기] reg:")
