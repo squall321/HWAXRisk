@@ -6,9 +6,20 @@ import { SectionCard } from "../components/SectionCard";
 import { KeyValueTable } from "../components/DataTable";
 import { ErrorBanner, EmptyBlock, LoadingBlock, NotReadyBlock } from "../components/StateBlocks";
 import { Badge } from "../components/Badge";
+import { Clock, KeyRound, ShieldAlert, ShieldCheck } from "lucide-react";
+import { Chip, Field, Mono } from "../ui/primitives";
+import { cn } from "../lib/cn";
 import { fmtEpoch } from "../format";
 import type { PortalPatSummary } from "../types";
 import { PortalMintError, mintPortalPat } from "../api/portalPat";
+
+/** `identity.current` 가 신원을 어디서 읽었나(§8.2.1) — 코드값을 그대로 보이지 않는다. */
+const ME_SOURCE: Record<string, string> = {
+  cookie: "포털 세션 쿠키",
+  bearer: "Authorization 헤더",
+  sso: "게이트웨이 위임 단언",
+  none: "없음(익명)",
+};
 
 /**
  * §8.2.4 동의 문구 — 실제 집행 수준까지만 약속한다.
@@ -66,6 +77,102 @@ function PatErrorBanner({ error }: { error: unknown }) {
     <div className="rr-banner rr-banner-error" role="alert">
       <span className="rr-banner-title">{known.title}</span>
       <span className="rr-banner-detail">{known.detail}</span>
+    </div>
+  );
+}
+
+/**
+ * PAT 상태를 **소리 내 말하는** 띠.
+ *
+ * 예전에는 `등록 상태 / email / groups / exp` 네 줄을 같은 크기로 늘어놓아, 만료된 PAT 과 멀쩡한
+ * PAT 이 똑같이 보였다. 이 값이 죽으면 무인 패널이 통째로 멈추므로(그때 잡은 `pat_unavailable` 로
+ * 조용히 queued 에 쌓인다) 화면이 먼저 말해야 한다. 서버가 주는데 안 그리던 `revoked_at`·`scopes`·
+ * `jti` 도 함께 낸다 — 포털에서 폐기했는데 화면이 'registered' 라고 말하는 일이 없게.
+ */
+function PatStatus({ summary }: { summary: PortalPatSummary | null }) {
+  if (!summary?.registered) {
+    return (
+      <div className="flex items-start gap-3 rounded-md border border-border bg-muted/40 px-4 py-3">
+        <KeyRound className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+        <div className="text-sm">
+          <div className="font-medium">등록된 PAT 이 없습니다.</div>
+          <p className="mt-0.5 text-muted-foreground">
+            이 자격이 없으면 무인 패널이 돌지 않습니다 — 아래 버튼 한 번이면 포털에서 받아 등록합니다.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const revoked = Boolean(summary.revoked_at);
+  const leftMs = summary.exp ? summary.exp * 1000 - Date.now() : null;
+  const expired = leftMs !== null && leftMs <= 0;
+  // 러너는 만료 30분 전부터 그 자격을 쓰지 않는다(runner.CREDENTIAL_MARGIN_S) — 그 선을 화면도 쓴다.
+  const soon = leftMs !== null && leftMs > 0 && leftMs < 24 * 3600 * 1000;
+  const tone = revoked || expired ? "bad" : soon ? "warn" : "ok";
+  const Icon = revoked || expired ? ShieldAlert : soon ? Clock : ShieldCheck;
+  const headline = revoked
+    ? "포털에서 폐기된 PAT 입니다."
+    : expired
+      ? "만료된 PAT 입니다."
+      : soon
+        ? "곧 만료됩니다."
+        : "쓸 수 있는 PAT 이 등록돼 있습니다.";
+  const detail = revoked
+    ? "무인 패널이 이 자격으로 돌지 않습니다. 새로 발급해 등록하세요."
+    : expired || soon
+      ? "러너는 만료 30분 전부터 이 자격을 쓰지 않습니다. 지금 다시 발급하세요."
+      : null;
+
+  return (
+    <div
+      className={cn(
+        "flex flex-col gap-3 rounded-md border px-4 py-3",
+        tone === "bad"
+          ? "border-destructive/30 bg-destructive/10"
+          : tone === "warn"
+            ? "border-warn/40 bg-warn/10"
+            : "border-ok/30 bg-ok/10",
+      )}
+    >
+      <div className="flex items-start gap-3">
+        <Icon
+          className={cn(
+            "mt-0.5 size-4 shrink-0",
+            tone === "bad" ? "text-destructive" : tone === "warn" ? "text-warn-foreground dark:text-warn" : "text-ok",
+          )}
+        />
+        <div className="text-sm">
+          <div className="font-medium">{headline}</div>
+          {detail ? <p className="mt-0.5 text-muted-foreground">{detail}</p> : null}
+        </div>
+      </div>
+      <dl className="grid grid-cols-2 gap-x-6 sm:grid-cols-4">
+        <Field label="계정">{summary.email ?? "-"}</Field>
+        <Field label="만료" hint="exp">
+          {summary.exp ? (
+            <span className={cn(expired && "text-destructive")}>
+              {fmtEpoch(summary.exp)}
+              {leftMs !== null ? (
+                <span className="ml-1.5 text-xs text-muted-foreground">
+                  {expired ? `${Math.floor(-leftMs / 3600000)}시간 전` : `${Math.floor(leftMs / 3600000)}시간 남음`}
+                </span>
+              ) : null}
+            </span>
+          ) : (
+            "-"
+          )}
+        </Field>
+        <Field label="범위" hint="scopes">
+          {summary.scopes?.length ? summary.scopes.join(" · ") : <span className="text-muted-foreground">-</span>}
+        </Field>
+        <Field label="토큰 식별자" hint="jti">
+          {summary.jti ? <Mono>{summary.jti.slice(0, 12)}</Mono> : <span className="text-muted-foreground">-</span>}
+        </Field>
+      </dl>
+      <p className="text-xs text-muted-foreground">
+        PAT 값 자체는 저장 뒤 어디에도 다시 보이지 않습니다. 소속은 {summary.groups.length ? summary.groups.join(" · ") : "없음"}.
+      </p>
     </div>
   );
 }
@@ -131,18 +238,7 @@ function PatSection({ summary, onChanged }: { summary: PortalPatSummary | null; 
           <span className="rr-banner-detail">PAT 값 자체는 저장 뒤 어디에도 다시 표시되지 않습니다.</span>
         </div>
       ) : null}
-      <KeyValueTable
-        rows={[
-          {
-            label: "등록 상태",
-            value: shown?.registered ? <Badge tone="ok">registered</Badge> : <Badge tone="muted">미등록</Badge>,
-          },
-          { label: "email", value: shown?.email ?? "-" },
-          { label: "groups", value: shown?.groups.length ? shown.groups.join(" · ") : "-" },
-          { label: "exp", value: fmtEpoch(shown?.exp ?? null) },
-        ]}
-      />
-      <p className="rr-muted">PAT 값은 저장 뒤 화면에 다시 보이지 않습니다.</p>
+      <PatStatus summary={shown} />
       <label className="rr-field">
         <span>포털 PAT</span>
         <input
@@ -221,19 +317,32 @@ export default function SettingsPage() {
         <ErrorBanner error={me.error} onRetry={me.reload} />
         {me.loading && !me.data ? <LoadingBlock /> : null}
         {me.data ? (
-          <KeyValueTable
-            rows={[
-              { label: "email", value: me.data.email ?? "-" },
-              { label: "display_name", value: me.data.display_name ?? "-" },
-              { label: "role", value: me.data.role ?? "-" },
-              { label: "organization", value: me.data.organization ?? "-" },
-              {
-                label: "anonymous",
-                value: me.data.anonymous ? <Badge tone="warn">anonymous</Badge> : <Badge tone="ok">인증됨</Badge>,
-              },
-              { label: "source", value: me.data.source },
-            ]}
-          />
+          /* 라벨은 사람 말로 두고 원시 필드명은 hint 로 접는다 — 화면이 DB 열 이름을 읽어 주는
+             자리가 아니다. 다만 필드명을 지우지는 않는다(API·로그와 대조할 때 그 이름이 필요하다). */
+          <dl className="grid gap-x-8 gap-y-1 sm:grid-cols-2 lg:grid-cols-3">
+            <Field label="계정" hint="email">
+              {me.data.email ?? <span className="text-muted-foreground">-</span>}
+            </Field>
+            <Field label="이름" hint="display_name">
+              {me.data.display_name ?? <span className="text-muted-foreground">-</span>}
+            </Field>
+            <Field label="역할" hint="role">
+              {me.data.role ?? <span className="text-muted-foreground">-</span>}
+            </Field>
+            <Field label="소속" hint="organization">
+              {me.data.organization ?? <span className="text-muted-foreground">-</span>}
+            </Field>
+            <Field label="신원 확인" hint="anonymous">
+              {me.data.anonymous ? (
+                <Chip tone="warn">확인 안 됨</Chip>
+              ) : (
+                <Chip tone="ok">확인됨</Chip>
+              )}
+            </Field>
+            <Field label="자격 출처" hint="source">
+              {ME_SOURCE[me.data.source] ?? me.data.source}
+            </Field>
+          </dl>
         ) : null}
       </SectionCard>
 
