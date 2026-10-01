@@ -10,6 +10,19 @@ export function fmtEpoch(value: number | null | undefined): string {
   return d.toLocaleString("ko-KR", { hour12: false });
 }
 
+/**
+ * 카드·목록용 짧은 날짜 — `2026. 9. 1. 4시 21분 3초` 는 한 줄에 들어가지도 않고 읽히지도 않는다.
+ * 올해면 `9. 1.`, 지난해면 `2025. 9. 1.` 로 연도를 그때만 붙인다. 정확한 시각은 상세 화면이 쓴다.
+ */
+export function fmtDay(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "-";
+  const ms = value > 1e12 ? value : value * 1000;
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return "-";
+  const sameYear = d.getFullYear() === new Date().getFullYear();
+  return d.toLocaleDateString("ko-KR", sameYear ? { month: "numeric", day: "numeric" } : undefined);
+}
+
 /** 0~100 커버리지 백분율. */
 export function fmtPct(value: number | null | undefined): string {
   if (value === null || value === undefined || Number.isNaN(value)) return "-";

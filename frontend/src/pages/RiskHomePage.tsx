@@ -5,11 +5,12 @@ import { riskApi } from "../api/risk.api";
 import { useAsync } from "../hooks/useAsync";
 import { CardGrid, SectionCard } from "../components/SectionCard";
 import { EmptyBlock, ErrorBanner, LoadingBlock } from "../components/StateBlocks";
-import { Badge, LevelBadge, SourceStatusBadge, VerdictBadge } from "../components/Badge";
+import { Badge, LevelBadge, VerdictBadge } from "../components/Badge";
+import { Chip } from "../ui/primitives";
 import { DataTable } from "../components/DataTable";
 import type { Column } from "../components/DataTable";
 import { cn } from "../lib/cn";
-import { fmtEpoch, fmtPct } from "../format";
+import { fmtDay, fmtEpoch, fmtPct } from "../format";
 import type { DiffListRow, ProjectCard, ReportListRow, SourceKind, TargetListRow } from "../types";
 
 /** 카드에 아이콘처럼 늘어놓는 소스 3종(해석 결과는 스냅샷 kinds 에서만 쓴다). */
@@ -32,29 +33,75 @@ const HOME_TABS: Array<{ tab: HomeTab; label: string }> = [
   { tab: "reports", label: "보고서" },
 ];
 
+/** 소스 상태 → 칩 색. 'unlinked'(연결 안 함)는 실패가 아니라 **아직 안 한 것**이라 muted 다. */
+const SOURCE_TONE: Record<string, "ok" | "warn" | "bad" | "muted"> = {
+  ready: "ok",
+  linked: "ok",
+  unavailable: "bad",
+  unreachable: "bad",
+  planned: "warn",
+  contract_only: "warn",
+  unlinked: "muted",
+};
+
+/**
+ * 과제 카드 — 요약 먼저다.
+ *
+ * 이 카드에서 사람이 먼저 알아야 할 것은 **"이 과제를 지금 심사할 수 있나"** 이고, 그건 소스가
+ * 붙었는지로 결정된다. 그래서 소스 3종을 맨 위 줄에 두고, 진행도(열린 타깃·커버리지)는 숫자를 키워
+ * 한눈에 읽히게 하며, 시각·단계 같은 보조 사실은 밑에 작게 깐다. 예전에는 다섯 줄이 같은 크기로
+ * 평평하게 쌓여 있어 무엇이 중요한지 읽는 사람이 매번 다시 판단해야 했다.
+ */
 function ProjectTile({ card }: { card: ProjectCard }) {
+  const linked = CARD_KINDS.filter((k) => {
+    const status = card.sources.find((s) => s.kind === k)?.status ?? "unlinked";
+    return status !== "unlinked";
+  }).length;
   return (
-    <Link to={`/projects/${encodeURIComponent(card.id)}`} className="rr-tile">
-      <div className="rr-row rr-tile-head">
-        <strong>{card.code}</strong>
-        <LevelBadge value={card.level} />
+    <Link
+      to={`/projects/${encodeURIComponent(card.id)}`}
+      className="group flex flex-col gap-3 rounded-lg border border-border bg-card p-4 shadow-sm no-underline transition-all hover:border-primary/50 hover:shadow-md"
+    >
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="truncate text-sm font-semibold text-foreground">{card.name}</div>
+          <div className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+            <span className="font-mono">{card.code}</span>
+            {card.stage ? <span>· {card.stage}</span> : null}
+          </div>
+        </div>
+        {/* level 은 타깃이 생겨야 정해진다 — 없을 때 '-' 배지를 그리면 '등급이 하이픈' 으로 읽힌다. */}
+        {card.level ? <LevelBadge value={card.level} /> : null}
       </div>
-      <div className="rr-tile-name">{card.name}</div>
-      <div className="rr-muted">{card.stage ?? "단계 미지정"}</div>
-      <div className="rr-row">
+
+      {/* 소스 — '지금 심사할 수 있나' 의 답이라 맨 위다. */}
+      <div className="flex flex-wrap items-center gap-1">
         {CARD_KINDS.map((kind) => {
-          const source = card.sources.find((s) => s.kind === kind);
+          const status = card.sources.find((s) => s.kind === kind)?.status ?? "unlinked";
           return (
-            <span key={kind} className="rr-row rr-tile-source">
-              <span className="rr-muted">{KIND_LABEL[kind]}</span>
-              <SourceStatusBadge value={source?.status ?? "unlinked"} />
-            </span>
+            <Chip key={kind} tone={SOURCE_TONE[status] ?? "muted"} title={`${KIND_LABEL[kind]} — ${status}`}>
+              {KIND_LABEL[kind]}
+            </Chip>
           );
         })}
+        {linked === 0 ? <span className="text-xs text-muted-foreground">소스를 먼저 연결하세요.</span> : null}
       </div>
-      <div className="rr-muted">최근 스냅샷 {fmtEpoch(card.last_snapshot_at)}</div>
-      <div className="rr-muted">
-        열린 타깃 {card.open_targets} · 커버리지 {fmtPct(card.coverage_pct)}
+
+      {/* 진행 — 숫자를 키워 한눈에. 없을 때 0 을 쓰지 않는다(미측정과 0 은 다르다). */}
+      <div className="mt-auto flex items-end gap-5 border-t border-border pt-3">
+        <div className="flex flex-col">
+          <span className="text-lg font-semibold leading-none tabular-nums">{card.open_targets}</span>
+          <span className="mt-1 text-xs text-muted-foreground">열린 타깃</span>
+        </div>
+        <div className="flex flex-col">
+          <span className="text-lg font-semibold leading-none tabular-nums">
+            {card.coverage_pct === null ? <span className="text-muted-foreground">—</span> : fmtPct(card.coverage_pct)}
+          </span>
+          <span className="mt-1 text-xs text-muted-foreground">커버리지</span>
+        </div>
+        <span className="ml-auto text-xs text-muted-foreground">
+          {card.last_snapshot_at ? `스냅샷 ${fmtDay(card.last_snapshot_at)}` : "스냅샷 없음"}
+        </span>
       </div>
     </Link>
   );
