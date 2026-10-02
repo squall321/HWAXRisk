@@ -8,6 +8,7 @@ import pytest
 import yaml
 from jsonschema import Draft7Validator
 
+from app import config
 from tests.conftest import REPO_ROOT
 
 MANIFEST_PATH = REPO_ROOT / ".portal" / "manifest.yaml"
@@ -54,14 +55,20 @@ def test_identity_values(manifest):
     assert isinstance(manifest.get("tags"), list) and manifest["tags"]
 
 
-def test_build_launch_permissions_resources(manifest):
+def test_build_launch_permissions_resources(manifest, tmp_path):
     assert manifest["build"]["type"] == "python_venv"
     assert manifest["build"]["stack"] == "fastapi_react"
     assert str(manifest["build"]["python_version"]) == "3.12"
     launch = manifest["launch"]
     assert launch["mode"] == "service"
     # HWAXRISK_DATA_DIR 은 넣지 않는다 — HEAX 런처의 HEAX_DATA_DIR 폴백만 쓴다(호스트 실행 시 /data 오지정 방지).
-    assert launch["env"] == {"PYTHONNOUSERSITE": "1"}
+    # 반대로 HWAXRISK_PORTAL_BASE 는 **반드시** 여기 있어야 한다 — 코드 기본값이 dev vite 포트라
+    # 빠지면 PAT 등록·폐기 대조·무인 패널이 전부 502 가 되고 토큰 탓처럼 보인다(context-notes D36).
+    # HEAXHub `.env` 의 APPTAINERENV_* 는 `.env` 를 소싱하지 않은 재배포에서 조용히 빠지므로 대안이 못 된다.
+    assert launch["env"] == {"PYTHONNOUSERSITE": "1", "HWAXRISK_PORTAL_BASE": "http://127.0.0.1:8088"}
+    code_default = config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path)}).portal_base
+    assert launch["env"]["HWAXRISK_PORTAL_BASE"] != code_default, (
+        "매니페스트가 코드 기본값과 같아지면 이 고정이 아무것도 막지 못한다")
     assert launch["health_check"] == {"type": "http", "path": "/api/health"}
     assert "restart_policy" in launch
     assert manifest["permissions"]["visibility"] == "company"
