@@ -1,5 +1,9 @@
 // 상태 배지 — 라벨은 서버가 준 문자열 그대로 쓰고(§8.2.4 '배지 = 저장 값과 같은 문자열') 색만 여기서 고른다.
+//
+// 모양은 `ui/primitives` 의 Chip 하나가 책임진다. 여기 남는 것은 **저장 값 → 색** 대응표뿐이다.
+// 그 대응표가 이 앱의 판정 어휘이고, Chip 은 그것을 모른다.
 import type { ReactNode } from "react";
+import { Chip } from "../ui/primitives";
 import type {
   BatchJobState,
   CoverageLevel,
@@ -28,9 +32,9 @@ export function Badge({
   children: ReactNode;
 }) {
   return (
-    <span className={`rr-badge rr-badge-${tone}`} title={title}>
+    <Chip tone={tone} title={title}>
       {children}
-    </span>
+    </Chip>
   );
 }
 
@@ -125,7 +129,7 @@ export const JobStateBadge = ({ value }: { value: SnapshotJobState | BatchJobSta
 export function ExternalSyncBadge({ sync }: { sync: ExternalSync | null | undefined }) {
   if (!sync) return null;
   return (
-    <span className="rr-badge-group">
+    <span className="inline-flex flex-wrap items-center gap-1">
       <Badge tone={toneOf(sync.ra)} title="ReportArchive 반영">
         RA {sync.ra}
       </Badge>

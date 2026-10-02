@@ -2,6 +2,7 @@
 import type { Column } from "./DataTable";
 import { DataTable } from "./DataTable";
 import { Badge } from "./Badge";
+import { Banner } from "../ui/primitives";
 import { fmtCell } from "../format";
 import type { Gate } from "../types";
 
@@ -28,10 +29,10 @@ export function GateBanner({ gates }: { gates: Gate[] }) {
   const failed = gates.filter((g) => !g.pass);
   if (failed.length === 0) return null;
   return (
-    <div className="rr-banner rr-banner-error" role="alert">
-      <span className="rr-banner-title">게이트 {failed.map((g) => g.id).join(" · ")} fail.</span>
-      <span className="rr-banner-detail">{failed.map((g) => g.message).join(" / ")}</span>
-    </div>
+    <Banner
+      title={`게이트 ${failed.map((g) => g.id).join(" · ")} fail.`}
+      detail={failed.map((g) => g.message).join(" / ")}
+    />
   );
 }
 

@@ -6,10 +6,9 @@ import { useAsync } from "../hooks/useAsync";
 import { CardGrid, SectionCard } from "../components/SectionCard";
 import { EmptyBlock, ErrorBanner, LoadingBlock } from "../components/StateBlocks";
 import { Badge, LevelBadge, VerdictBadge } from "../components/Badge";
-import { Chip } from "../ui/primitives";
+import { Banner, Chip, TabBar } from "../ui/primitives";
 import { DataTable } from "../components/DataTable";
 import type { Column } from "../components/DataTable";
-import { cn } from "../lib/cn";
 import { fmtDay, fmtEpoch, fmtPct } from "../format";
 import type { DiffListRow, ProjectCard, ReportListRow, SourceKind, TargetListRow } from "../types";
 
@@ -208,36 +207,14 @@ export default function RiskHomePage() {
     <>
       <ErrorBanner error={me.error} onRetry={me.reload} />
       {me.data && me.data.box.secrets_valid === false ? (
-        <div className="rr-banner rr-banner-error" role="alert">
-          <span className="rr-banner-title">이 박스의 자격이 없습니다.</span>
-          <Link to="/settings">설정</Link>
-        </div>
+        <Banner title="이 박스의 자격이 없습니다.">
+          <Link to="/settings" className="text-sm underline underline-offset-4">
+            설정
+          </Link>
+        </Banner>
       ) : null}
 
-      {/* 세그먼티드 컨트롤 — 버튼 네 개가 아니라 '지금 어디를 보고 있나' 를 말하는 한 덩이다. */}
-      <div
-        className="inline-flex w-fit items-center gap-0.5 rounded-lg border border-border bg-muted/50 p-0.5"
-        role="tablist"
-        aria-label="홈 탭"
-      >
-        {HOME_TABS.map((item) => (
-          <button
-            key={item.tab}
-            type="button"
-            role="tab"
-            aria-selected={tab === item.tab}
-            className={cn(
-              "rounded-md px-3 py-1.5 text-sm transition-colors",
-              tab === item.tab
-                ? "bg-background font-medium text-foreground shadow-sm"
-                : "text-muted-foreground hover:text-foreground",
-            )}
-            onClick={() => setTab(item.tab)}
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
+      <TabBar tabs={HOME_TABS} value={tab} onChange={setTab} label="홈 탭" />
 
       {tab === "diffs" ? <DiffsTab /> : null}
       {tab === "targets" ? <TargetsTab /> : null}
