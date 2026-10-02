@@ -212,6 +212,107 @@ export function Banner({
   );
 }
 
+/* ── 입력 ──────────────────────────────────────────────────────────────────── */
+// index.css 의 `:where(input…)` 리셋이 테두리·배경을 0 으로 깎아 두므로(네이티브 크롬 제거)
+// 여기서 명시적으로 되돌린다. `:where()` 는 특이도 0 이라 이 클래스가 항상 이긴다.
+const controlClass =
+  "h-9 w-full max-w-full rounded-md border border-input bg-background px-3 py-1 text-sm " +
+  "placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 " +
+  "focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background " +
+  "disabled:cursor-not-allowed disabled:opacity-50";
+
+export const Input = React.forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLInputElement>>(
+  ({ className, ...props }, ref) => <input ref={ref} className={cn(controlClass, className)} {...props} />,
+);
+Input.displayName = "Input";
+
+export const Select = React.forwardRef<HTMLSelectElement, React.SelectHTMLAttributes<HTMLSelectElement>>(
+  ({ className, ...props }, ref) => (
+    // 네이티브 화살표를 지웠으므로 직접 그린다 — 지우기만 하면 '열리는 것' 이라는 신호가 사라진다.
+    <select
+      ref={ref}
+      className={cn(
+        controlClass,
+        "appearance-none bg-[length:1rem] bg-[right_0.5rem_center] bg-no-repeat pr-8",
+        "bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20" +
+          "viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888%22%20stroke-width%3D%222%22" +
+          "%3E%3Cpath%20d%3D%22m6%209%206%206%206-6%22/%3E%3C/svg%3E')]",
+        className,
+      )}
+      {...props}
+    />
+  ),
+);
+Select.displayName = "Select";
+
+export const Textarea = React.forwardRef<HTMLTextAreaElement, React.TextareaHTMLAttributes<HTMLTextAreaElement>>(
+  ({ className, ...props }, ref) => (
+    <textarea ref={ref} className={cn(controlClass, "h-auto min-h-[5rem] py-2", className)} {...props} />
+  ),
+);
+Textarea.displayName = "Textarea";
+
+/** 라벨 + 입력 한 칸. `error` 가 있으면 그 자리에서 말한다(제출 뒤 어딘가에서 말하지 않는다). */
+export function FormField({
+  label,
+  hint,
+  error,
+  children,
+  className,
+}: {
+  label: React.ReactNode;
+  /** 형식·상한 같은 보조 설명. */
+  hint?: React.ReactNode;
+  error?: React.ReactNode;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <label className={cn("flex flex-col gap-1.5 text-sm", className)}>
+      <span className="flex flex-wrap items-baseline gap-1.5 text-xs font-medium text-muted-foreground">
+        {label}
+        {hint ? <span className="font-normal opacity-75">{hint}</span> : null}
+      </span>
+      {children}
+      {error ? <span className="text-xs text-destructive">{error}</span> : null}
+    </label>
+  );
+}
+
+/** 입력 칸을 자동으로 흘려 넣는 격자(좁으면 1열). 기존 `.rr-form-grid` 와 같은 14rem 기준이다. */
+export function FormGrid({ children, className }: { children: React.ReactNode; className?: string }) {
+  return (
+    <div className={cn("grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(14rem,1fr))]", className)}>
+      {children}
+    </div>
+  );
+}
+
+/** 카드 **안**의 작은 묶음(기존 `.rr-panel`). 카드가 구역이면 이것은 그 안의 한 덩이다. */
+export function SubPanel({
+  title,
+  actions,
+  children,
+  className,
+}: {
+  title?: React.ReactNode;
+  actions?: React.ReactNode;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={cn("flex flex-col gap-2 rounded-md border border-border bg-muted/40 p-3", className)}>
+      {title || actions ? (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          {title ? <h3 className="m-0 text-sm font-medium">{title}</h3> : <span />}
+          {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
+        </div>
+      ) : null}
+      {children}
+    </div>
+  );
+}
+
 /** 라벨과 값 한 쌍. 라벨은 사람 말로 쓰고, 원시 필드명은 `hint` 로 접어 둔다. */
 export function Field({
   label,

@@ -13,6 +13,19 @@
   /* 전부 `:where()` 로 감싼다 — 명시도 0 이라 **어떤 클래스든** 이 기본값을 덮는다.
      처음에 `input:not([type=checkbox]):not([type=radio])` 로 썼다가 `.rr-input`(0,1,0)보다
      명시도가 높아져(0,2,1) 기존 입력란의 테두리가 전부 사라졌다 — 실제로 띄워 보고 잡았다. */
+  /* preflight 에서 가져와야 하는 **두 번째** 조각 — 테두리 기본값.
+     Tailwind 의 `border` 유틸은 `border-width: 1px` 만 준다. `border-style: solid` 는 preflight 가
+     `*, ::before, ::after` 에 깔아 주는데 그것을 껐으므로 style 이 `none` 으로 남아 **width 가 있어도
+     선이 안 그려진다**. 실제로 `.border.border-border` 가 붙은 카드의 computed border-top-width 가
+     0px 이었다 — 앱의 모든 `border-*` 유틸이 무효였다(띄워 보고 잡았다).
+     style 만 켜면 안 된다 — 초기 width 가 `medium`(3px) 이라 온 화면에 3px 선이 생긴다. 둘을 같이 준다.
+     `:where()` 라 명시도 0 이고, 기존 `.rr-*` 의 `border: 1px solid …` 도 Tailwind 의 `.border` 도 이긴다. */
+  :where(*, ::before, ::after) {
+    border-width: 0;
+    border-style: solid;
+    border-color: hsl(var(--border));
+  }
+
   :where(button, [type="button"], [type="submit"]) {
     appearance: none;
     background: transparent;
