@@ -43,6 +43,13 @@
   ecad 는 도구 4종이 없어 `contract_only`. 소스 등록이 `status='linked'` 를 적는다. 게이트웨이를 못 읽으면 `planned` +
   `gateway_error` 로 남긴다 — '도구가 없다' 와 '못 물어봤다' 를 섞지 않는다.
   `choices[]`(StepForge 프로젝트 선택지)는 소스 앱 도구 실호출이라 포털 PAT 가 선행한다 — 아직 빈 배열이고 사용자가 ref 를 직접 적는다.
+- [x] **probe 에 나이가 생기는 구멍** (2026-10-01, PAT 재발급 실측 중 발견 — context-notes D36) — 위 항이 **연결 시점**의
+  거짓말을 고쳤는데 `probe_json` 은 그 한 번만 쓰이고 갱신되지 않았다. 그래서 라이브 앱은 방금 캡처가 200 으로 읽은
+  소스를 네 과제 전부 `unreachable` 이라 적고 있었다 — 한 번 잰 값이 영구히 현재 사실처럼 보인다. 캡처 성공 자체가
+  도달 측정이므로 `refresh_source_probes(store, project_id, calls)` 로 되쓴다. 호출 0건인 kind 는 건드리지 않고
+  (미측정은 실패가 아니다) `system_status`·전사 집계는 세지 않는다(캡처 `failed_calls` 와 같은 제외).
+  회귀는 E2E 스모크(배선 떼고 깨지는 것 확인)와 `test_project_patch.py` 음성 2건. 부수로 `capture_all` 독스트링의
+  허위 반환 키 `probes` 를 고쳤다(실제는 `context`, 읽는 곳 없음).
 - [x] **mcad REST 계약 점검 + 파트 절단 버그** (2026-09-02) — 실 STEP 을 붙이기 전에 어댑터가 기대하는 StepForge REST 를
   실물(`/home/koopark/claude/StepForge/app/rest.py`)과 대조했다. 5경로·base·`artifacts/graph/` 의 빈 `ref` 까지 전부 맞았는데
   **`/parts` 하나가 틀렸다** — `limit` 기본이 500 인데 어댑터가 안 넘겨 501번째 파트부터 조용히 사라진다(`/interfaces` 는
@@ -256,8 +263,12 @@
   그 레버를 이미 뺐다 — **사람이 시작한 캡처는 호출자 본인의 heax 토큰으로 StepForge REST 를 읽는다**(대리 읽기, 읽기 전용,
   권한 확대 없음). 지금 실제로 필요한 것은 셋으로 갈린다.
   - [x] STEP 읽어 스냅샷 동결 → 게이트·규칙 — **추가 자격 0**(로그인만). 코드 준비됨
-  - [ ] 패널 심의(LLM 좌석) — 사용자가 SettingsPage 에서 **포털 PAT 1개** 등록(`resolve_credential` 의 (b) owner 자격).
-    `cred.key` 는 배포 박스에 있어 등록은 지금도 된다
+  - [x] 패널 심의(LLM 좌석) — **포털 PAT 등록 실측 완료**(2026-10-01, context-notes D36). 라이브 배포본에서
+    '포털에서 발급해 등록' 버튼을 실제로 눌러 `oDRGWDrElFg7…`(만료 2026-12-30 · `scopes read` · `aud mcp-gateway`)
+    이 `_user_credentials` 에 들어갔다. 1차 시도는 컨테이너 `HWAXRISK_PORTAL_BASE` 가 죽은 포트 `5283` 이라
+    등록이 502 였고(내 `portal_unreachable` 진단이 그대로 떴다), HEAXHub `.env` 를 소싱한 재배포로 `8088` 을
+    넣어 해소했다. 그때 포털에 남은 고아 PAT `1OgmWBaZ…` 는 폐기했다.
+    그 PAT 으로 캡처 전 구간 200 — `:9110/tools-map` · StepForge REST 5경로 · `:9110/mcp` 5회
   - [ ] 무인 배치(야간 러너)·RA/ADH 쓰기 — `secrets.env` 서비스 키(현재 파일 자체가 없다)
 - [ ] **B2 골든 `sif-e2e` StepForge 재파싱·재검출**(§10 #15, 사용자 실행) — 미실행이면 첫 캡처가 `volume_null_pre_d168` 확정
 - [ ] **B4 실무 규모 STEP 1건 업로드** · **B5 DynaForge 세션·K파일·리포트 각 1건**(P2 (8)(9) 선행) · **B6 `heax-materialtwin_web` 기동**(§10 #41)

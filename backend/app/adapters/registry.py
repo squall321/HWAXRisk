@@ -255,7 +255,7 @@ def capture_all(*, sources: Sequence[Mapping[str, Any]], principal: Principal,
                 tool_names: Sequence[str] = ()) -> dict:
     """등록된 소스 카드를 kind 순서로 캡처한다(plan §2.11.3 1~5단계).
 
-    반환 `{snapshot_id, results, calls, probes}`. snapshot_id 를 미리 정하는 이유는 provenance.call_id 가
+    반환 `{snapshot_id, results, calls, context}`. snapshot_id 를 미리 정하는 이유는 provenance.call_id 가
     동결 후 rr_snapshot_calls 의 실제 id 와 같아야 하기 때문이다(CallRecorder 참조).
     mcad 소스가 없으면 409 다 — mcad 없는 스냅샷은 만들지 않는다.
 

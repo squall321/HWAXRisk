@@ -1218,6 +1218,46 @@ def reuse_prior_calls(store: Any, project_id: str, calls: list[dict]) -> int:
     return reused
 
 
+def refresh_source_probes(store: Any, project_id: str, calls: list[dict]) -> int:
+    """캡처가 실제로 본 것으로 소스 카드의 probe 를 갱신한다 — 측정값에 **나이**가 생기지 않게.
+
+    probe 는 `POST /projects/{id}/sources` 가 연결하는 순간 한 번만 적혔다. 그래서 그때 게이트웨이를
+    못 읽었으면 카드는 그 뒤로 영구히 `unreachable` 이라 적혀 있었다 — 방금 캡처가 그 소스를 200 으로
+    읽었는데도 그렇다. 어댑터 발견 배선(checklist 1장, 2026-09-02)이 **연결 시점**의 같은 거짓말을
+    고쳤고, 이것은 시간이 지나면 되살아나던 쪽이다. 캡처 성공은 그 자체로 도달 측정이므로 되쓴다.
+
+    `system_status`(선택 호출)와 전사 집계(`CONTEXT_CALL_KIND`)는 세지 않는다 — 캡처의 `failed_calls`
+    판정과 같은 제외다. 호출이 하나도 없던 kind 는 건드리지 않는다(미측정은 실패가 아니다).
+    """
+    seen: dict[str, dict] = {}
+    for call in calls:
+        kind = str(call.get("source_kind") or "")
+        if not kind or kind == CONTEXT_CALL_KIND or str(call.get("tool") or "").endswith("system_status"):
+            continue
+        slot = seen.setdefault(kind, {"ok": 0, "failed": [], "app_key": call.get("app_key")})
+        if call.get("ok", True):
+            slot["ok"] += 1
+        else:
+            slot["failed"].append(f"{call.get('tool')}={call.get('error') or 'error'}")
+    updated = 0
+    now = now_epoch()
+    for row in store.query(
+            "SELECT id, kind, probe_json FROM rr_sources WHERE project_id = ?", (project_id,)):
+        slot = seen.get(str(row["kind"]))
+        if slot is None:
+            continue
+        reachable = not slot["failed"]
+        detail = (f"capture_ok calls={slot['ok']} app_key={slot['app_key']}" if reachable
+                  else "capture_failed " + " ".join(slot["failed"][:3]))
+        probe = {**_loads(row["probe_json"], {}), "reachable": reachable, "detail": detail,
+                 "capture_mode": "rest_primary" if reachable else None,
+                 "status": "linked" if reachable else "unreachable"}
+        store.execute("UPDATE rr_sources SET probe_json = ?, probe_at = ? WHERE id = ?",
+                      (canonical_json(probe), now, row["id"]))
+        updated += 1
+    return updated
+
+
 @router.post("/projects/{project_id}/snapshots")
 def create_snapshot(project_id: str, body: SnapshotBody,
                     ident: identity.Identity = Depends(identity.current)) -> dict:
@@ -1283,6 +1323,8 @@ def create_snapshot(project_id: str, body: SnapshotBody,
         ir_builder.record_calls(store, None, owner_sub, calls, job_id=job_id, start_seq=1)
         raise
     reused = reuse_prior_calls(store, project_id, calls)
+    # 카드가 '연결 안 됨' 이라 적힌 채 캡처는 돌고 있는 상태를 없앤다 — 측정은 방금 한 이 캡처다.
+    refresh_source_probes(store, project_id, calls)
     prior = store.query_one(
         "SELECT id FROM rr_snapshots WHERE project_id = ? ORDER BY created_at DESC, id LIMIT 1", (project_id,))
     out = ir_builder.freeze_snapshot(

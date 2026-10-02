@@ -272,6 +272,8 @@ def test_e2e_full_flow(wired, ident, monkeypatch, tmp_path):
         assert added["ok"] is True
         assert added["probe"]["status"] in ("linked", "unreachable")
     assert len(routes._project_sources(project_id)) == 3
+    # 연결 시점의 probe 를 적어 둔다 — 아래 3단계가 이 값을 **갱신**하는지가 요지다(측정값에 나이가 생기면 안 된다).
+    probe_before = {s["kind"]: s["status"] for s in routes._project_sources(project_id)}
 
     # ── 3. 스냅샷(POST /api/projects/{id}/snapshots). 라우트가 실 어댑터를 부른다 — 더는 501 이 아니다.
     apps = FakeSourceApps()
@@ -287,6 +289,12 @@ def test_e2e_full_flow(wired, ident, monkeypatch, tmp_path):
     seen_mcp = {name for name, _ in apps.mcp_seen}
     assert seen_mcp >= {"job_status", "interface_graph", "inspect_file", "report_summary"}
     assert "list_interfaces" not in seen_mcp
+    # 방금 200 으로 읽은 소스를 카드가 계속 'unreachable' 이라 적지 않는다 — 캡처 성공이 도달 측정이다.
+    # (어댑터 발견 배선이 **연결 시점**의 같은 거짓말을 고쳤고, 이쪽은 시간이 지나면 되살아나던 쪽이다.)
+    probe_after = {s["kind"]: s["status"] for s in routes._project_sources(project_id)}
+    assert all(status == "linked" for status in probe_after.values()), (probe_before, probe_after)
+    detail = next(s["probe"]["detail"] for s in routes._project_sources(project_id) if s["kind"] == "mcad")
+    assert detail.startswith("capture_ok calls=")
     ir_first = ir_builder.load_ir(store, first["snapshot_id"])
     assert {n["domain"] for n in ir_first["nodes"]} == {"mcad", "dyna"}
     assert store.query_one("SELECT node_count FROM rr_snapshots WHERE id = ?",
