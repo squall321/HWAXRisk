@@ -1,6 +1,7 @@
-// 과제 화면 — 헤더·소스 카드 3장·스냅샷 동결·스냅샷 목록·dims·iface-ledger·성격 프로파일·유사 과제(계획 §8.2.4 ProjectPage 행). ?snapshot= 이면 같은 화면에 SnapshotPage 를 그린다.
+// 과제 화면 — 머리말·구역 탭 4개(심사·요구·정의·성격·사전)·소스 카드 3장·스냅샷 동결·스냅샷 목록·dims·iface-ledger·성격 프로파일·유사 과제(계획 §8.2.4 ProjectPage 행). ?snapshot= 이면 같은 화면에 SnapshotPage 를 그린다.
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
+import { ChevronRight, Link2, Plus, Snowflake, Trash2, X } from "lucide-react";
 import { riskApi } from "../api/risk.api";
 import { POLL_MS, useAsync, useInterval } from "../hooks/useAsync";
 import { CardGrid, SectionCard } from "../components/SectionCard";
@@ -17,6 +18,18 @@ import {
   StatusBadge,
   UnseatedBadge,
 } from "../components/Badge";
+import {
+  Banner,
+  Button,
+  FormField,
+  FormGrid,
+  Input,
+  Mono,
+  PageHeader,
+  Select,
+  SubPanel,
+  TabBar,
+} from "../ui/primitives";
 import { fmtCounts, fmtEpoch, fmtNum } from "../format";
 import { FACET_ORDER } from "../types";
 import type {
@@ -58,6 +71,28 @@ const STATEMENT_LAYERS: Array<{ status: CharacterStatement["status"]; label: str
   { status: "seed", label: "seed (L0)" },
   { status: "panel", label: "panel (L2)" },
   { status: "confirmed", label: "confirmed" },
+];
+
+/**
+ * 값이 없을 때 쓰는 자리 — 0 이나 '-' 가 아니라 '모름' 으로 읽히게 한다.
+ * 미측정·미입력은 실패가 아니고, 그 사실 자체가 정보다(앱 제1 규율).
+ */
+const UNKNOWN = <span className="text-muted-foreground">—</span>;
+
+/**
+ * 과제 화면의 구역 묶음 4개.
+ *
+ * 카드가 열세 장이라 한 줄로 쌓으면 아래 절반은 스크롤로만 닿는다. 그래서 묶되 — **심사를 시작하려면
+ * 꼭 봐야 하는 것(소스·스냅샷 동결·스냅샷 목록·잡·타깃)은 기본 탭에 그대로 둔다.** 뒤로 보낸 것은
+ * 가끔 고치는 정의(요구·dims·iface-ledger)와 참고용 맥락(성격·유사), 그리고 과제와 무관한 전사
+ * 사전이다. 정보를 지운 것은 없고 자리만 옮겼다.
+ */
+type ProjectTab = "review" | "spec" | "context" | "vocab";
+const PROJECT_TABS: Array<{ tab: ProjectTab; label: string }> = [
+  { tab: "review", label: "심사" },
+  { tab: "spec", label: "요구·정의" },
+  { tab: "context", label: "성격·유사" },
+  { tab: "vocab", label: "사전" },
 ];
 
 function SourceCard({
@@ -104,55 +139,54 @@ function SourceCard({
   }
 
   return (
-    <div className="rr-panel">
-      <div className="rr-row rr-panel-head">
-        <strong>{KIND_LABEL[kind]}</strong>
-        <SourceStatusBadge value={source?.status ?? "unlinked"} />
-      </div>
-      {stub ? <p className="rr-muted">연결 대기(스텁) — 어댑터를 찾지 못했습니다.</p> : null}
+    <SubPanel title={KIND_LABEL[kind]} actions={<SourceStatusBadge value={source?.status ?? "unlinked"} />}>
+      {stub ? (
+        <p className="m-0 text-sm text-muted-foreground">연결 대기(스텁) — 어댑터를 찾지 못했습니다.</p>
+      ) : null}
       {source ? (
+        // 카드가 좁으므로 한 열로 읽는다. 라벨은 사람 말이고 서버 필드명은 hint 로 남긴다.
         <KeyValueTable
+          columns={1}
           rows={[
-            { label: "app_key", value: source.app_key ?? "-" },
-            { label: "ref", value: source.ref ?? "-" },
-            { label: "bridge_declared", value: source.bridge_declared ? "true" : "false" },
+            { label: "어댑터", hint: "app_key", value: source.app_key ?? UNKNOWN },
+            { label: "참조", hint: "ref", value: source.ref ?? UNKNOWN },
+            { label: "브리지 선언", hint: "bridge_declared", value: source.bridge_declared ? "true" : "false" },
             {
-              label: "probe",
+              label: "도달 측정",
+              hint: "probe",
               value: source.probe ? (
-                <span className="rr-row">
+                <span className="flex flex-wrap items-center gap-2">
                   <Badge tone={source.probe.reachable ? "ok" : "bad"}>
                     {source.probe.reachable ? "reachable" : "unreachable"}
                   </Badge>
-                  <span className="rr-muted">
+                  <span className="text-muted-foreground">
                     {source.probe.detail} · {source.probe.capture_mode}
                   </span>
                 </span>
               ) : (
-                "-"
+                UNKNOWN
               ),
             },
           ]}
         />
       ) : (
-        <p className="rr-muted">아직 연결하지 않았습니다.</p>
+        <p className="m-0 text-sm text-muted-foreground">아직 연결하지 않았습니다.</p>
       )}
-      <form className="rr-form" onSubmit={link}>
+      <form className="mb-4 flex flex-col gap-3" onSubmit={link}>
         <ErrorBanner error={error} />
-        <label className="rr-field">
-          <span>app_key</span>
-          <select className="rr-select" value={appKey} onChange={(e) => setAppKey(e.target.value)}>
+        <FormField label="어댑터" hint="app_key">
+          <Select value={appKey} onChange={(e) => setAppKey(e.target.value)}>
             <option value="">선택</option>
             {candidates.map((a) => (
               <option key={a.app_key ?? a.kind} value={a.app_key ?? ""}>
                 {a.app_key ?? a.kind} ({a.status})
               </option>
             ))}
-          </select>
-        </label>
-        <label className="rr-field">
-          <span>ref</span>
+          </Select>
+        </FormField>
+        <FormField label="참조" hint="ref">
           {choices.length > 0 ? (
-            <select className="rr-select" value={ref} onChange={(e) => setRef(e.target.value)}>
+            <Select value={ref} onChange={(e) => setRef(e.target.value)}>
               <option value="">선택</option>
               {choices.map((c) => (
                 <option key={c.value} value={c.value}>
@@ -160,20 +194,21 @@ function SourceCard({
                   {c.detail ? ` — ${c.detail}` : ""}
                 </option>
               ))}
-            </select>
+            </Select>
           ) : (
-            <input className="rr-input" value={ref} onChange={(e) => setRef(e.target.value)} />
+            <Input value={ref} onChange={(e) => setRef(e.target.value)} />
           )}
-        </label>
-        <label className="rr-row">
+        </FormField>
+        <label className="flex flex-wrap items-center gap-2">
           <input type="checkbox" checked={bridge} onChange={(e) => setBridge(e.target.checked)} />
-          <span className="rr-muted">bridge_declared</span>
+          <span className="text-sm text-muted-foreground">bridge_declared</span>
         </label>
-        <button type="submit" className="rr-btn" disabled={busy || appKey === "" || ref === ""}>
+        <Button type="submit" variant="outline" className="self-start" disabled={busy || appKey === "" || ref === ""}>
+          <Link2 className="size-4" aria-hidden="true" />
           연결
-        </button>
+        </Button>
       </form>
-    </div>
+    </SubPanel>
   );
 }
 
@@ -234,41 +269,42 @@ function SnapshotForm({
   }
 
   return (
-    <form className="rr-form" onSubmit={submit}>
+    <form className="mb-4 flex flex-col gap-3" onSubmit={submit}>
       <ErrorBanner error={error} />
-      {notice ? <p className="rr-muted">{notice}</p> : null}
-      {degraded ? <p className="rr-muted">degraded — 일부 소스를 온전히 읽지 못한 채 동결했습니다.</p> : null}
+      {notice ? <p className="m-0 text-sm text-muted-foreground">{notice}</p> : null}
+      {/* degraded 는 서버가 준 사실이다 — 동결은 됐지만 온전히 읽지 못했다는 것을 지우지 않는다. */}
+      {degraded ? (
+        <Banner tone="warn" title="degraded" detail="일부 소스를 온전히 읽지 못한 채 동결했습니다." />
+      ) : null}
       {gates ? (
         <>
           <GateBanner gates={gates} />
           <GateTable gates={gates} />
         </>
       ) : null}
-      <div className="rr-row">
+      <div className="flex flex-wrap items-center gap-2">
         {SNAPSHOT_KINDS.map((kind) => (
-          <label key={kind} className="rr-row">
+          <label key={kind} className="flex flex-wrap items-center gap-2">
             <input type="checkbox" checked={kinds.includes(kind)} onChange={() => toggle(kind)} />
-            <span>{KIND_LABEL[kind]}</span>
+            <span className="text-sm">{KIND_LABEL[kind]}</span>
           </label>
         ))}
       </div>
-      <div className="rr-form-grid">
-        <label className="rr-field">
-          <span>label (선택)</span>
-          <input className="rr-input" value={label} onChange={(e) => setLabel(e.target.value)} />
-        </label>
-        <label className="rr-field">
-          <span>report_ids (쉼표 구분)</span>
-          <input className="rr-input" value={reportIds} onChange={(e) => setReportIds(e.target.value)} />
-        </label>
-        <label className="rr-field">
-          <span>detect_result_file_id (선택)</span>
-          <input className="rr-input" value={detectId} onChange={(e) => setDetectId(e.target.value)} />
-        </label>
-      </div>
-      <button type="submit" className="rr-btn rr-btn-primary" disabled={busy || kinds.length === 0}>
+      <FormGrid>
+        <FormField label="스냅샷 이름" hint="label · 선택">
+          <Input value={label} onChange={(e) => setLabel(e.target.value)} />
+        </FormField>
+        <FormField label="보고서 id" hint="report_ids · 쉼표 구분">
+          <Input value={reportIds} onChange={(e) => setReportIds(e.target.value)} />
+        </FormField>
+        <FormField label="detect 결과 파일" hint="detect_result_file_id · 선택">
+          <Input value={detectId} onChange={(e) => setDetectId(e.target.value)} />
+        </FormField>
+      </FormGrid>
+      <Button type="submit" className="self-start" disabled={busy || kinds.length === 0}>
+        <Snowflake className="size-4" aria-hidden="true" />
         스냅샷 동결
-      </button>
+      </Button>
     </form>
   );
 }
@@ -306,30 +342,26 @@ function DimForm({ projectId }: { projectId: string }) {
   const ready = name.trim() !== "" && kind.trim() !== "" && extractor.trim() !== "" && !busy;
 
   return (
-    <form className="rr-form" onSubmit={submit}>
+    <form className="mb-4 flex flex-col gap-3" onSubmit={submit}>
       <ErrorBanner error={error} />
-      {created ? <p className="rr-muted">등록됨 — {created}</p> : null}
-      <div className="rr-form-grid">
-        <label className="rr-field">
-          <span>name</span>
-          <input className="rr-input" value={name} onChange={(e) => setName(e.target.value)} />
-        </label>
-        <label className="rr-field">
-          <span>kind</span>
-          <input className="rr-input" value={kind} onChange={(e) => setKind(e.target.value)} />
-        </label>
-        <label className="rr-field">
-          <span>unit</span>
-          <input className="rr-input" value={unit} onChange={(e) => setUnit(e.target.value)} />
-        </label>
-        <label className="rr-field">
-          <span>extractor</span>
-          <input className="rr-input" value={extractor} onChange={(e) => setExtractor(e.target.value)} />
-        </label>
-      </div>
-      <button type="submit" className="rr-btn" disabled={!ready}>
+      {created ? <p className="m-0 text-sm text-muted-foreground">등록됨 — {created}</p> : null}
+      <FormGrid>
+        <FormField label="이름" hint="name">
+          <Input value={name} onChange={(e) => setName(e.target.value)} />
+        </FormField>
+        <FormField label="종류" hint="kind">
+          <Input value={kind} onChange={(e) => setKind(e.target.value)} />
+        </FormField>
+        <FormField label="단위" hint="unit">
+          <Input value={unit} onChange={(e) => setUnit(e.target.value)} />
+        </FormField>
+        <FormField label="추출기" hint="extractor">
+          <Input value={extractor} onChange={(e) => setExtractor(e.target.value)} />
+        </FormField>
+      </FormGrid>
+      <Button type="submit" variant="outline" className="self-start" disabled={!ready}>
         dim 정의 추가
-      </button>
+      </Button>
     </form>
   );
 }
@@ -401,24 +433,25 @@ function RequirementsCard({ projectId, predecessorId }: { projectId: string; pre
   }
 
   const columns: Array<Column<Requirement>> = [
-    { key: "kind", header: "kind", cell: (r) => r.kind },
-    { key: "name", header: "name", cell: (r) => r.name },
-    { key: "op", header: "op", cell: (r) => r.op ?? "—" },
-    { key: "value", header: "value", cell: (r) => JSON.stringify(r.value_json ?? null) },
-    { key: "unit", header: "unit", cell: (r) => r.unit ?? "—" },
-    { key: "status", header: "status", cell: (r) => <StatusBadge value={r.status} /> },
-    { key: "waive_reason", header: "사유", cell: (r) => r.waive_reason ?? "—" },
+    { key: "kind", header: "종류", cell: (r) => r.kind, nowrap: true },
+    { key: "name", header: "이름", cell: (r) => r.name },
+    { key: "op", header: "비교", cell: (r) => r.op ?? UNKNOWN, nowrap: true },
+    { key: "value", header: "값", cell: (r) => JSON.stringify(r.value_json ?? null) },
+    { key: "unit", header: "단위", cell: (r) => r.unit ?? UNKNOWN, nowrap: true },
+    { key: "status", header: "status", cell: (r) => <StatusBadge value={r.status} />, nowrap: true },
+    { key: "waive_reason", header: "사유", cell: (r) => r.waive_reason ?? UNKNOWN },
     {
       key: "actions",
       header: "결정",
+      nowrap: true,
       cell: (r) => (
-        <span className="rr-row">
-          <button type="button" className="rr-btn rr-btn-quiet" onClick={() => decide(r.id, "confirmed")}>
+        <span className="flex flex-wrap items-center gap-2">
+          <Button type="button" variant="ghost" size="sm" onClick={() => decide(r.id, "confirmed")}>
             확정
-          </button>
-          <button type="button" className="rr-btn rr-btn-quiet" onClick={() => decide(r.id, "waived")}>
+          </Button>
+          <Button type="button" variant="ghost" size="sm" onClick={() => decide(r.id, "waived")}>
             waive
-          </button>
+          </Button>
         </span>
       ),
     },
@@ -438,50 +471,42 @@ function RequirementsCard({ projectId, predecessorId }: { projectId: string; pre
         empty="등록된 요구가 없습니다 — 판정은 좌석 기준입니다(missing.req_absent)."
       />
       {predecessorId ? (
-        <button type="button" className="rr-btn rr-btn-quiet" onClick={inherit}>
+        <Button type="button" variant="ghost" className="mt-3" onClick={inherit}>
           계보 과제에서 요구 승계
-        </button>
+        </Button>
       ) : null}
-      <form className="rr-form" onSubmit={submit}>
-        <div className="rr-form-grid">
-          <label className="rr-field">
-            <span>kind</span>
-            <select className="rr-input" value={kind} onChange={(e) => setKind(e.target.value as RequirementKind)}>
+      <form className="mb-4 flex flex-col gap-3" onSubmit={submit}>
+        <FormGrid>
+          <FormField label="종류" hint="kind">
+            <Select value={kind} onChange={(e) => setKind(e.target.value as RequirementKind)}>
               <option value="dim_limit">dim_limit</option>
               <option value="scenario">scenario</option>
               <option value="standard">standard</option>
-            </select>
-          </label>
-          <label className="rr-field">
-            <span>name</span>
-            <input className="rr-input" value={name} onChange={(e) => setName(e.target.value)} />
-          </label>
-          <label className="rr-field">
-            <span>op</span>
-            <select className="rr-input" value={op} onChange={(e) => setOp(e.target.value)}
-                    disabled={kind !== "dim_limit"}>
+            </Select>
+          </FormField>
+          <FormField label="이름" hint="name">
+            <Input value={name} onChange={(e) => setName(e.target.value)} />
+          </FormField>
+          <FormField label="비교" hint="op">
+            <Select value={op} onChange={(e) => setOp(e.target.value)} disabled={kind !== "dim_limit"}>
               <option value="lte">lte</option>
               <option value="gte">gte</option>
               <option value="between">between</option>
-            </select>
-          </label>
-          <label className="rr-field">
-            <span>value(JSON)</span>
-            <input className="rr-input" value={value} onChange={(e) => setValue(e.target.value)} />
-          </label>
-          <label className="rr-field">
-            <span>unit</span>
-            <input className="rr-input" value={unit} onChange={(e) => setUnit(e.target.value)}
-                   disabled={kind !== "dim_limit"} />
-          </label>
-          <label className="rr-field">
-            <span>source_ref</span>
-            <input className="rr-input" value={sourceRef} onChange={(e) => setSourceRef(e.target.value)} />
-          </label>
-        </div>
-        <button type="submit" className="rr-btn" disabled={busy || name.trim() === ""}>
+            </Select>
+          </FormField>
+          <FormField label="값" hint="value_json · JSON">
+            <Input value={value} onChange={(e) => setValue(e.target.value)} />
+          </FormField>
+          <FormField label="단위" hint="unit">
+            <Input value={unit} onChange={(e) => setUnit(e.target.value)} disabled={kind !== "dim_limit"} />
+          </FormField>
+          <FormField label="출처" hint="source_ref">
+            <Input value={sourceRef} onChange={(e) => setSourceRef(e.target.value)} />
+          </FormField>
+        </FormGrid>
+        <Button type="submit" variant="outline" className="self-start" disabled={busy || name.trim() === ""}>
           요구 저장
-        </button>
+        </Button>
       </form>
     </SectionCard>
   );
@@ -516,16 +541,13 @@ function IfaceLedgerEditor({ projectId }: { projectId: string }) {
     {
       key: "pair_key",
       header: "pair_key",
-      cell: (r, i) => (
-        <input className="rr-input" value={r.pair_key} onChange={(e) => update(i, { pair_key: e.target.value })} />
-      ),
+      cell: (r, i) => <Input value={r.pair_key} onChange={(e) => update(i, { pair_key: e.target.value })} />,
     },
     {
       key: "kind_override",
       header: "kind_override",
       cell: (r, i) => (
-        <input
-          className="rr-input"
+        <Input
           value={r.kind_override ?? ""}
           onChange={(e) => update(i, { kind_override: e.target.value === "" ? null : e.target.value })}
         />
@@ -534,16 +556,13 @@ function IfaceLedgerEditor({ projectId }: { projectId: string }) {
     {
       key: "status",
       header: "status",
-      cell: (r, i) => (
-        <input className="rr-input" value={r.status} onChange={(e) => update(i, { status: e.target.value })} />
-      ),
+      cell: (r, i) => <Input value={r.status} onChange={(e) => update(i, { status: e.target.value })} />,
     },
     {
       key: "note",
       header: "note",
       cell: (r, i) => (
-        <input
-          className="rr-input"
+        <Input
           value={r.note ?? ""}
           onChange={(e) => update(i, { note: e.target.value === "" ? null : e.target.value })}
         />
@@ -552,10 +571,12 @@ function IfaceLedgerEditor({ projectId }: { projectId: string }) {
     {
       key: "remove",
       header: "",
+      nowrap: true,
       cell: (_r, i) => (
-        <button type="button" className="rr-btn rr-btn-quiet" onClick={() => setRows((p) => p.filter((_, j) => j !== i))}>
+        <Button type="button" variant="ghost" size="sm" onClick={() => setRows((p) => p.filter((_, j) => j !== i))}>
+          <Trash2 className="size-4" aria-hidden="true" />
           삭제
-        </button>
+        </Button>
       ),
     },
   ];
@@ -563,27 +584,23 @@ function IfaceLedgerEditor({ projectId }: { projectId: string }) {
   return (
     <>
       <ErrorBanner error={error} />
-      {saved ? <p className="rr-muted">확정 원장을 저장했습니다.</p> : null}
-      <DataTable
-        columns={columns}
-        rows={rows}
-        rowKey={(_r, i) => String(i)}
-        empty="확정할 인터페이스 행이 없습니다."
-      />
-      <div className="rr-row">
-        <button
+      {saved ? <p className="m-0 text-sm text-muted-foreground">확정 원장을 저장했습니다.</p> : null}
+      <DataTable columns={columns} rows={rows} rowKey={(_r, i) => String(i)} empty="확정할 인터페이스 행이 없습니다." />
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Button
           type="button"
-          className="rr-btn"
+          variant="outline"
           onClick={() => setRows((p) => [...p, { pair_key: "", kind_override: null, status: "confirmed", note: null }])}
         >
+          <Plus className="size-4" aria-hidden="true" />
           행 추가
-        </button>
-        <button type="button" className="rr-btn rr-btn-primary" onClick={save} disabled={busy || rows.length === 0}>
+        </Button>
+        <Button type="button" onClick={save} disabled={busy || rows.length === 0}>
           저장
-        </button>
-        <span className="rr-muted">확정은 앱 원장에만 기록됩니다.</span>
+        </Button>
+        <span className="text-sm text-muted-foreground">확정은 앱 원장에만 기록됩니다.</span>
       </div>
-      <p className="rr-muted">
+      <p className="mt-3 mb-0 text-sm text-muted-foreground">
         저장하면 원장이 이 표의 내용으로 대체될 수 있습니다. 조회 경로가 아직 없어 표는 빈 상태에서 시작하고, 저장
         응답으로 돌아온 전체 행이 그다음 기준 상태가 됩니다.
       </p>
@@ -624,79 +641,73 @@ function VocabCard() {
       <ErrorBanner error={error} />
       <ErrorBanner error={vocab.error} onRetry={vocab.reload} />
       {bump ? (
-        <div
-          className={bump.recompute_required ? "rr-banner rr-banner-error" : "rr-banner rr-banner-info"}
-          role="alert"
-        >
-          <span className="rr-banner-title">
-            {bump.vocab_version} · {bump.bump} 승급
-          </span>
-          <span className="rr-banner-detail">
-            {bump.recompute_required
+        // 메이저 승급은 기존 파트 키를 낡게 만든다 — 그래서 정보가 아니라 오류 톤이다.
+        <Banner
+          tone={bump.recompute_required ? "error" : "info"}
+          title={`${bump.vocab_version} · ${bump.bump} 승급`}
+          detail={
+            bump.recompute_required
               ? "메이저 승급입니다 — 기존 파트 키가 낡았습니다. backend/scripts/recompute_part_keys.py 를 돌리기 전까지 새 스냅샷은 409 recompute_pending 입니다."
-              : "마이너 승급입니다 — 기존 ckey 와 ir_hash 는 그대로입니다."}
-          </span>
-        </div>
+              : "마이너 승급입니다 — 기존 ckey 와 ir_hash 는 그대로입니다."
+          }
+        />
       ) : null}
 
-      <div className="rr-stack">
-        <h3 className="rr-subhead">동의어</h3>
-        <div className="rr-row">
-          <label className="rr-field">
-            <span>head — 대표 이름</span>
-            <input className="rr-input" value={head} onChange={(e) => setHead(e.target.value)} />
-          </label>
-          <label className="rr-field">
-            <span>from — 줄 또는 쉼표로 구분</span>
-            <input className="rr-input" value={aliases} onChange={(e) => setAliases(e.target.value)} />
-          </label>
-          <button
+      <div className="mt-3 flex flex-col gap-2">
+        <h3 className="m-0 text-sm text-muted-foreground">동의어</h3>
+        <div className="flex flex-wrap items-center gap-2">
+          <FormField label="대표 이름" hint="head">
+            <Input value={head} onChange={(e) => setHead(e.target.value)} />
+          </FormField>
+          <FormField label="동의어" hint="from · 줄 또는 쉼표로 구분">
+            <Input value={aliases} onChange={(e) => setAliases(e.target.value)} />
+          </FormField>
+          <Button
             type="button"
-            className="rr-btn"
+            variant="outline"
             disabled={busy || !head.trim() || aliasList.length === 0}
             onClick={() => run(() => riskApi.putVocabSynonym({ head: head.trim(), from: aliasList, op: "add" }))}
           >
             추가(마이너)
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            className="rr-btn rr-btn-quiet"
+            variant="ghost"
             disabled={busy || !head.trim() || aliasList.length === 0}
             onClick={() => run(() => riskApi.putVocabSynonym({ head: head.trim(), from: aliasList, op: "remove" }))}
           >
             삭제(메이저)
-          </button>
+          </Button>
         </div>
       </div>
 
-      <div className="rr-stack">
-        <h3 className="rr-subhead">stop tokens</h3>
-        <div className="rr-row">
-          <label className="rr-field">
-            <span>tokens — 줄 또는 쉼표로 구분</span>
-            <input className="rr-input" value={tokens} onChange={(e) => setTokens(e.target.value)} />
-          </label>
-          <button
+      <div className="mt-3 flex flex-col gap-2">
+        <h3 className="m-0 text-sm text-muted-foreground">stop tokens</h3>
+        <div className="flex flex-wrap items-center gap-2">
+          <FormField label="토큰" hint="tokens · 줄 또는 쉼표로 구분">
+            <Input value={tokens} onChange={(e) => setTokens(e.target.value)} />
+          </FormField>
+          <Button
             type="button"
-            className="rr-btn"
+            variant="outline"
             disabled={busy || tokenList.length === 0}
             onClick={() => run(() => riskApi.putVocabStopTokens({ tokens: tokenList, op: "add" }))}
           >
             추가(마이너)
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            className="rr-btn rr-btn-quiet"
+            variant="ghost"
             disabled={busy || tokenList.length === 0}
             onClick={() => run(() => riskApi.putVocabStopTokens({ tokens: tokenList, op: "remove" }))}
           >
             삭제(메이저)
-          </button>
+          </Button>
         </div>
       </div>
 
       {vocab.data ? (
-        <p className="rr-muted">
+        <p className="mt-3 mb-0 text-sm text-muted-foreground">
           어휘 자산 {vocab.data.assets.length}종 · 자산 판 {vocab.data.asset_version}
         </p>
       ) : null}
@@ -727,35 +738,37 @@ function CharacterCard({ projectId }: { projectId: string }) {
       {character.data ? (
         <>
           {character.data.character_status ? (
-            <div className="rr-row">
-              <span className="rr-muted">과제 성격 층</span>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm text-muted-foreground">과제 성격 층</span>
               <Badge tone="info">{character.data.character_status}</Badge>
             </div>
           ) : null}
-          <div className="rr-stack">
+          <div className="mt-3 flex flex-col gap-2">
             {FACET_ORDER.map((facet) => {
               const statements = byFacet.get(facet) ?? [];
               return (
-                <div key={facet} className="rr-panel">
-                  <div className="rr-row rr-panel-head">
-                    <strong>
-                      {FACET_LABEL[facet]} <span className="rr-muted">{facet}</span>
-                    </strong>
-                  </div>
-                  <div className="rr-cols">
+                <SubPanel
+                  key={facet}
+                  title={
+                    <>
+                      {FACET_LABEL[facet]} <span className="font-normal text-muted-foreground">{facet}</span>
+                    </>
+                  }
+                >
+                  <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(16rem,1fr))]">
                     {STATEMENT_LAYERS.map((layer) => {
                       const items = statements.filter((s) => s.status === layer.status);
                       return (
                         <div key={layer.status}>
-                          <div className="rr-muted">{layer.label}</div>
+                          <div className="text-sm text-muted-foreground">{layer.label}</div>
                           {items.length === 0 ? (
-                            <p className="rr-muted">없음</p>
+                            <p className="m-0 text-sm text-muted-foreground">없음</p>
                           ) : (
-                            <ul className="rr-list">
+                            <ul className="m-0 list-disc pl-5 text-sm [&>li]:mb-1">
                               {items.map((s) => (
                                 <li key={s.id}>
                                   <Badge tone="neutral">{s.tag}</Badge> {s.statement}
-                                  <span className="rr-muted">
+                                  <span className="text-muted-foreground">
                                     {" "}
                                     · {s.by} · 패널 {s.support_panels} · 타깃 {s.support_targets}
                                   </span>
@@ -767,7 +780,7 @@ function CharacterCard({ projectId }: { projectId: string }) {
                       );
                     })}
                   </div>
-                </div>
+                </SubPanel>
               );
             })}
           </div>
@@ -801,64 +814,64 @@ function SimilarCard({ projectId }: { projectId: string }) {
       ) : null}
       {data ? (
         <>
-          <div className="rr-stack">
-            <h3 className="rr-subhead">계보</h3>
+          <div className="mt-3 flex flex-col gap-2">
+            <h3 className="m-0 text-sm text-muted-foreground">계보</h3>
             {data.lineage.length === 0 ? (
-              <p className="rr-muted">선행·후속 과제가 없습니다.</p>
+              <p className="m-0 text-sm text-muted-foreground">선행·후속 과제가 없습니다.</p>
             ) : (
-              <ul className="rr-list">
+              <ul className="m-0 list-disc pl-5 text-sm [&>li]:mb-1">
                 {data.lineage.map((e) => (
                   <li key={`${e.relation}:${e.project_id}`}>
                     {projectLink(e.project_id, e.code)}
-                    <span className="rr-muted"> · {e.relation} · {e.hops}홉</span>
+                    <span className="text-muted-foreground"> · {e.relation} · {e.hops}홉</span>
                   </li>
                 ))}
               </ul>
             )}
           </div>
 
-          <div className="rr-stack">
-            <h3 className="rr-subhead">특징 벡터</h3>
+          <div className="mt-3 flex flex-col gap-2">
+            <h3 className="m-0 text-sm text-muted-foreground">특징 벡터</h3>
             {data.vector.length === 0 ? (
-              <p className="rr-muted">{data.reason.vector ?? "이웃이 없습니다."}</p>
+              <p className="m-0 text-sm text-muted-foreground">{data.reason.vector ?? "이웃이 없습니다."}</p>
             ) : (
-              <ul className="rr-list">
+              <ul className="m-0 list-disc pl-5 text-sm [&>li]:mb-1">
                 {data.vector.map((e) => (
                   <li key={e.project_id}>
                     {projectLink(e.project_id)}
-                    <span className="rr-muted"> · cosine {fmtNum(e.cosine)} · {e.rank}위</span>
+                    <span className="text-muted-foreground"> · cosine {fmtNum(e.cosine)} · {e.rank}위</span>
                   </li>
                 ))}
               </ul>
             )}
           </div>
 
-          <div className="rr-stack">
-            <h3 className="rr-subhead">서술(AIDataHub)</h3>
+          <div className="mt-3 flex flex-col gap-2">
+            <h3 className="m-0 text-sm text-muted-foreground">서술(AIDataHub)</h3>
             {data.text.length === 0 ? (
-              <p className="rr-muted">{data.reason.text ?? "적중이 없습니다."}</p>
+              <p className="m-0 text-sm text-muted-foreground">{data.reason.text ?? "적중이 없습니다."}</p>
             ) : (
-              <ul className="rr-list">
+              <ul className="m-0 list-disc pl-5 text-sm [&>li]:mb-1">
                 {data.text.map((e) => (
                   <li key={e.record_id || `${e.project_id}:${e.rank}`}>
                     {projectLink(e.project_id)}
-                    <span className="rr-muted"> · {e.rank}위 · {e.section_id || "-"}</span>
+                    <span className="text-muted-foreground"> · {e.rank}위 · {e.section_id || "-"}</span>
                   </li>
                 ))}
               </ul>
             )}
           </div>
 
-          <div className="rr-stack">
-            <h3 className="rr-subhead">같은 subject</h3>
+          <div className="mt-3 flex flex-col gap-2">
+            <h3 className="m-0 text-sm text-muted-foreground">같은 subject</h3>
             {data.subject.length === 0 ? (
-              <p className="rr-muted">겹치는 subject 가 없습니다.</p>
+              <p className="m-0 text-sm text-muted-foreground">겹치는 subject 가 없습니다.</p>
             ) : (
-              <ul className="rr-list">
+              <ul className="m-0 list-disc pl-5 text-sm [&>li]:mb-1">
                 {data.subject.map((e) => (
                   <li key={e.subject_key}>
-                    <code>{e.subject_key}</code>
-                    <span className="rr-muted">
+                    <Mono>{e.subject_key}</Mono>
+                    <span className="text-muted-foreground">
                       {" "}· 등록부 {e.n_registry}건(확인 {e.n_verified}) · 과제{" "}
                     </span>
                     {e.project_ids.map((pid, i) => (
@@ -874,13 +887,13 @@ function SimilarCard({ projectId }: { projectId: string }) {
           </div>
 
           {data.merged.length > 0 ? (
-            <div className="rr-stack">
-              <h3 className="rr-subhead">경로 합산</h3>
-              <ul className="rr-list">
+            <div className="mt-3 flex flex-col gap-2">
+              <h3 className="m-0 text-sm text-muted-foreground">경로 합산</h3>
+              <ul className="m-0 list-disc pl-5 text-sm [&>li]:mb-1">
                 {data.merged.map((e) => (
                   <li key={e.project_id}>
                     {projectLink(e.project_id)}
-                    <span className="rr-muted"> · score {fmtNum(e.score)} · {e.paths.join(" · ")}</span>
+                    <span className="text-muted-foreground"> · score {fmtNum(e.score)} · {e.paths.join(" · ")}</span>
                   </li>
                 ))}
               </ul>
@@ -897,6 +910,7 @@ export default function ProjectPage() {
   const projectId = id ?? "";
   const [params, setParams] = useSearchParams();
   const snapshotId = params.get("snapshot");
+  const [tab, setTab] = useState<ProjectTab>("review");
 
   const detail = useAsync((signal) => riskApi.getProject(projectId, { signal }), [projectId], projectId !== "");
   const adapters = useAsync((signal) => riskApi.getAdapters({ signal }), []);
@@ -917,20 +931,24 @@ export default function ProjectPage() {
       (best, s) => (best === null || s.captured_at > best.captured_at ? s : best),
       null,
     );
-    if (newest) setParams({ snapshot: newest.id });
+    if (newest) {
+      setParams({ snapshot: newest.id });
+      // 스냅샷 화면은 '심사' 탭에 그려진다 — 잡이 도는 동안 다른 탭에 가 있었어도 열린 것이 보여야 한다.
+      setTab("review");
+    }
   }, [pendingJob, detail.data, setParams]);
 
   const snapshotColumns: Column<SnapshotHeader>[] = [
-    { key: "id", header: "snapshot_id", cell: (s) => <code>{s.id}</code>, nowrap: true },
-    { key: "label", header: "label", cell: (s) => s.label ?? "-" },
-    { key: "hash", header: "ir_hash", cell: (s) => <code>{s.ir_hash}</code>, nowrap: true },
-    { key: "kinds", header: "kinds", cell: (s) => s.kinds.join(" · "), nowrap: true },
-    { key: "at", header: "captured_at", cell: (s) => fmtEpoch(s.captured_at), nowrap: true },
-    { key: "counts", header: "counts", cell: (s) => fmtCounts(s.counts) },
+    { key: "id", header: "스냅샷", cell: (s) => <Mono>{s.id}</Mono>, nowrap: true },
+    { key: "label", header: "이름", cell: (s) => s.label ?? UNKNOWN },
+    { key: "hash", header: "ir_hash", cell: (s) => <Mono>{s.ir_hash}</Mono>, nowrap: true },
+    { key: "kinds", header: "소스", cell: (s) => s.kinds.join(" · "), nowrap: true },
+    { key: "at", header: "동결 시각", cell: (s) => fmtEpoch(s.captured_at), nowrap: true },
+    { key: "counts", header: "집계", cell: (s) => fmtCounts(s.counts) },
     {
       key: "degraded",
       header: "degraded",
-      cell: (s) => (s.degraded ? <Badge tone="warn">degraded</Badge> : <span className="rr-muted">-</span>),
+      cell: (s) => (s.degraded ? <Badge tone="warn">degraded</Badge> : UNKNOWN),
       nowrap: true,
     },
   ];
@@ -938,197 +956,242 @@ export default function ProjectPage() {
   const targetColumns: Column<TargetHeader>[] = [
     {
       key: "key",
-      header: "target_key",
+      header: "타깃",
       nowrap: true,
       cell: (t) => <Link to={`/targets/${encodeURIComponent(t.target_key)}`}>{t.target_key}</Link>,
     },
-    { key: "kind", header: "kind", cell: (t) => t.kind, nowrap: true },
+    { key: "kind", header: "종류", cell: (t) => t.kind, nowrap: true },
     { key: "level", header: "level", cell: (t) => <LevelBadge value={t.level} />, nowrap: true },
     {
       key: "verdict",
-      header: "verdict_final",
+      header: "verdict",
       cell: (t) => <StatusBadge value={t.verdict_final ?? "undetermined"} />,
       nowrap: true,
     },
     { key: "unseated", header: "착석", cell: (t) => <UnseatedBadge n={t.unseated_n} />, nowrap: true },
-    { key: "sync", header: "external_sync", cell: (t) => <ExternalSyncBadge sync={t.external_sync} />, nowrap: true },
+    { key: "sync", header: "반영", cell: (t) => <ExternalSyncBadge sync={t.external_sync} />, nowrap: true },
     {
       key: "superseded",
-      header: "superseded_by",
+      header: "대체됨",
       nowrap: true,
       cell: (t) =>
         t.superseded_by ? (
           <Link to={`/targets/${encodeURIComponent(t.superseded_by)}`}>{t.superseded_by}</Link>
         ) : (
-          <span className="rr-muted">-</span>
+          UNKNOWN
         ),
     },
   ];
 
   const jobColumns: Column<JobHeader>[] = [
-    { key: "id", header: "job_id", cell: (j) => <code>{j.id}</code>, nowrap: true },
-    { key: "kind", header: "kind", cell: (j) => j.kind, nowrap: true },
-    { key: "state", header: "state", cell: (j) => <JobStateBadge value={j.state} />, nowrap: true },
+    { key: "id", header: "잡", cell: (j) => <Mono>{j.id}</Mono>, nowrap: true },
+    { key: "kind", header: "종류", cell: (j) => j.kind, nowrap: true },
+    { key: "state", header: "상태", cell: (j) => <JobStateBadge value={j.state} />, nowrap: true },
     {
       key: "progress",
-      header: "progress",
+      header: "진행",
       nowrap: true,
       width: "10rem",
       cell: (j) => {
         const pct = Math.max(0, Math.min(100, Math.round(j.progress * 100)));
         return (
-          <span className="rr-row">
-            <span
-              aria-hidden="true"
-              style={{ display: "inline-block", width: "6rem", height: "0.4rem", background: "var(--rr-muted-bg)" }}
-            >
-              <span style={{ display: "block", width: `${pct}%`, height: "100%", background: "currentColor" }} />
+          <span className="flex items-center gap-2">
+            <span aria-hidden="true" className="inline-block h-1.5 w-24 overflow-hidden rounded-full bg-muted">
+              <span className="block h-full rounded-full bg-primary" style={{ width: `${pct}%` }} />
             </span>
-            <span>{pct}%</span>
+            <span className="tabular-nums">{pct}%</span>
           </span>
         );
       },
     },
-    { key: "error", header: "error", cell: (j) => j.error ?? "-" },
+    { key: "error", header: "오류", cell: (j) => j.error ?? UNKNOWN },
   ];
+
+  /** 상위 화면으로 돌아가는 길 — 상세 화면은 id 로 들어오므로 늘 보여야 한다. */
+  const crumb = (
+    <>
+      <Link to="/">과제 목록</Link>
+      <ChevronRight className="size-3 opacity-60" aria-hidden="true" />
+      <span className="truncate">{detail.data?.project.code ?? projectId}</span>
+    </>
+  );
 
   if (projectId === "") {
     return (
-      <SectionCard title="과제">
-        <EmptyBlock title="과제를 찾을 수 없습니다." />
-      </SectionCard>
+      <>
+        <PageHeader crumb={crumb} title="과제" />
+        <SectionCard title="과제">
+          <EmptyBlock title="과제를 찾을 수 없습니다." />
+        </SectionCard>
+      </>
     );
   }
 
   return (
     <>
-      <SectionCard
-        title={detail.data ? `${detail.data.project.code} · ${detail.data.project.name}` : "과제"}
-        subtitle={`project_id ${projectId}`}
+      <PageHeader
+        crumb={crumb}
+        title={detail.data ? detail.data.project.name : "과제"}
+        // id 는 이름 자리가 아니라 보조 사실 자리다 — 사람은 이름으로 과제를 부르고 id 로 서버와 대조한다.
+        subtitle={
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+            {detail.data ? <Mono>{detail.data.project.code}</Mono> : null}
+            {detail.data?.project.stage ? <span>단계 {detail.data.project.stage}</span> : null}
+            <span className="opacity-70">project_id</span>
+            <Mono>{projectId}</Mono>
+          </span>
+        }
         actions={detail.data ? <ExternalSyncBadge sync={detail.data.project.external_sync ?? null} /> : null}
-      >
-        <ErrorBanner error={detail.error} onRetry={detail.reload} />
-        {detail.loading && !detail.data ? <LoadingBlock /> : null}
-        {detail.data ? (
-          <KeyValueTable
-            rows={[
-              { label: "stage", value: detail.data.project.stage ?? "-" },
-              {
-                label: "계보",
-                value: detail.data.project.predecessor_project_id ? (
-                  <Link to={`/projects/${encodeURIComponent(detail.data.project.predecessor_project_id)}`}>
-                    {detail.data.project.predecessor_project_id}
-                  </Link>
-                ) : (
-                  "-"
-                ),
-              },
-              {
-                label: "adh_scope",
-                value: detail.data.project.adh_scope
-                  ? `${detail.data.project.adh_scope.team} / ${detail.data.project.adh_scope.group}`
-                  : "-",
-              },
-              { label: "created_at", value: fmtEpoch(detail.data.project.created_at) },
-              {
-                label: "성격 태그",
-                value:
-                  detail.data.character_top_tags.length === 0 ? (
-                    <span className="rr-muted">없음</span>
-                  ) : (
-                    <span className="rr-badge-group">
-                      {detail.data.character_top_tags.map((t) => (
-                        <Badge key={t} tone="neutral">
-                          {t}
-                        </Badge>
-                      ))}
-                    </span>
-                  ),
-              },
-            ]}
-          />
-        ) : null}
-      </SectionCard>
+      />
 
-      <SectionCard title="소스" subtitle="unlinked → linked → unreachable. 소스 앱에 쓰기를 하지 않습니다.">
-        <ErrorBanner error={adapters.error} onRetry={adapters.reload} />
-        {detail.data ? (
-          <CardGrid min="20rem">
-            {SOURCE_KINDS.map((kind) => (
-              <SourceCard
-                key={kind}
-                kind={kind}
-                detail={detail.data as ProjectDetail}
-                adapters={adapters.data?.apps ?? []}
-                onChanged={detail.reload}
-              />
-            ))}
-          </CardGrid>
-        ) : null}
-      </SectionCard>
+      <TabBar tabs={PROJECT_TABS} value={tab} onChange={setTab} label="과제 구역 탭" />
 
-      <SectionCard title="스냅샷 동결" subtitle="소스 앱의 parse · detect 는 각 앱 화면에서 먼저 실행하세요.">
-        <SnapshotForm
-          projectId={projectId}
-          onQueued={(jobId) => {
-            setPendingJob(jobId);
-            detail.reload();
-          }}
-          onOpenSnapshot={(id) => setParams({ snapshot: id })}
-        />
-      </SectionCard>
-
-      <SectionCard title="잡" subtitle={active ? "진행 중 — 5초마다 갱신합니다." : undefined}>
-        <DataTable columns={jobColumns} rows={jobs} rowKey={(j) => j.id} empty="진행 중인 잡이 없습니다." />
-      </SectionCard>
-
-      <SectionCard title="스냅샷" subtitle="행을 누르면 아래에 스냅샷 화면이 열립니다.">
-        <DataTable
-          columns={snapshotColumns}
-          rows={detail.data?.snapshots ?? []}
-          rowKey={(s) => s.id}
-          selectedKey={snapshotId}
-          onRowClick={(s) => setParams({ snapshot: s.id })}
-          empty="동결된 스냅샷이 없습니다."
-        />
-      </SectionCard>
-
-      <SectionCard title="타깃">
-        <DataTable
-          columns={targetColumns}
-          rows={detail.data?.targets ?? []}
-          rowKey={(t) => t.target_key}
-          empty="열린 타깃이 없습니다."
-        />
-      </SectionCard>
-
-      {snapshotId ? (
+      {tab === "review" ? (
         <>
-          <div className="rr-row">
-            <button type="button" className="rr-btn rr-btn-quiet" onClick={() => setParams({})}>
-              스냅샷 화면 닫기
-            </button>
-          </div>
-          <SnapshotPage snapshotId={snapshotId} />
+          <SectionCard title="과제 개요">
+            <ErrorBanner error={detail.error} onRetry={detail.reload} />
+            {detail.loading && !detail.data ? <LoadingBlock /> : null}
+            {detail.data ? (
+              // 라벨은 사람 말로, 원시 필드명은 hint 로 접어 둔다(D35 — 화면이 엔지니어 덤프가 되지 않게 하되
+              // 서버와 대조할 이름을 지우지는 않는다). 값과 순서는 그대로다.
+              <KeyValueTable
+                rows={[
+                  { label: "단계", hint: "stage", value: detail.data.project.stage ?? UNKNOWN },
+                  {
+                    label: "선행 과제",
+                    hint: "predecessor_project_id",
+                    value: detail.data.project.predecessor_project_id ? (
+                      <Link to={`/projects/${encodeURIComponent(detail.data.project.predecessor_project_id)}`}>
+                        {detail.data.project.predecessor_project_id}
+                      </Link>
+                    ) : (
+                      UNKNOWN
+                    ),
+                  },
+                  {
+                    label: "AIDataHub 범위",
+                    hint: "adh_scope",
+                    value: detail.data.project.adh_scope
+                      ? `${detail.data.project.adh_scope.team} / ${detail.data.project.adh_scope.group}`
+                      : UNKNOWN,
+                  },
+                  { label: "만든 때", hint: "created_at", value: fmtEpoch(detail.data.project.created_at) },
+                  {
+                    label: "성격 태그",
+                    hint: "character_top_tags",
+                    value:
+                      detail.data.character_top_tags.length === 0 ? (
+                        <span className="text-muted-foreground">없음</span>
+                      ) : (
+                        <span className="inline-flex flex-wrap items-center gap-1">
+                          {detail.data.character_top_tags.map((t) => (
+                            <Badge key={t} tone="neutral">
+                              {t}
+                            </Badge>
+                          ))}
+                        </span>
+                      ),
+                  },
+                ]}
+              />
+            ) : null}
+          </SectionCard>
+
+          <SectionCard title="소스" subtitle="unlinked → linked → unreachable. 소스 앱에 쓰기를 하지 않습니다.">
+            <ErrorBanner error={adapters.error} onRetry={adapters.reload} />
+            {detail.data ? (
+              <CardGrid min="20rem">
+                {SOURCE_KINDS.map((kind) => (
+                  <SourceCard
+                    key={kind}
+                    kind={kind}
+                    detail={detail.data as ProjectDetail}
+                    adapters={adapters.data?.apps ?? []}
+                    onChanged={detail.reload}
+                  />
+                ))}
+              </CardGrid>
+            ) : null}
+          </SectionCard>
+
+          <SectionCard title="스냅샷 동결" subtitle="소스 앱의 parse · detect 는 각 앱 화면에서 먼저 실행하세요.">
+            <SnapshotForm
+              projectId={projectId}
+              onQueued={(jobId) => {
+                setPendingJob(jobId);
+                detail.reload();
+              }}
+              onOpenSnapshot={(id) => setParams({ snapshot: id })}
+            />
+          </SectionCard>
+
+          <SectionCard title="잡" subtitle={active ? "진행 중 — 5초마다 갱신합니다." : undefined}>
+            <DataTable columns={jobColumns} rows={jobs} rowKey={(j) => j.id} empty="진행 중인 잡이 없습니다." />
+          </SectionCard>
+
+          <SectionCard
+            title="스냅샷"
+            subtitle="행을 누르면 아래에 스냅샷 화면이 열립니다."
+            // 닫기는 열어 준 카드가 들고 있는다 — 떠다니는 버튼 한 개로는 무엇을 닫는지 말하지 못한다.
+            actions={
+              snapshotId ? (
+                <Button type="button" variant="ghost" size="sm" onClick={() => setParams({})}>
+                  <X className="size-4" aria-hidden="true" />
+                  스냅샷 화면 닫기
+                </Button>
+              ) : null
+            }
+          >
+            <DataTable
+              columns={snapshotColumns}
+              rows={detail.data?.snapshots ?? []}
+              rowKey={(s) => s.id}
+              selectedKey={snapshotId}
+              onRowClick={(s) => setParams({ snapshot: s.id })}
+              empty="동결된 스냅샷이 없습니다."
+            />
+          </SectionCard>
+
+          {/* 누른 행의 내용은 바로 아래에 와야 한다 — 전에는 타깃 표를 지나야 나왔다(열어 놓고도 못 찾는다). */}
+          {snapshotId ? <SnapshotPage snapshotId={snapshotId} /> : null}
+
+          <SectionCard title="타깃">
+            <DataTable
+              columns={targetColumns}
+              rows={detail.data?.targets ?? []}
+              rowKey={(t) => t.target_key}
+              empty="열린 타깃이 없습니다."
+            />
+          </SectionCard>
         </>
       ) : null}
 
-      <RequirementsCard
-        projectId={projectId}
-        predecessorId={(detail.data as ProjectDetail | null)?.project?.predecessor_project_id ?? null}
-      />
+      {tab === "spec" ? (
+        <>
+          <RequirementsCard
+            projectId={projectId}
+            predecessorId={(detail.data as ProjectDetail | null)?.project?.predecessor_project_id ?? null}
+          />
 
-      <SectionCard title="dims 정의">
-        <DimForm projectId={projectId} />
-      </SectionCard>
+          <SectionCard title="dims 정의">
+            <DimForm projectId={projectId} />
+          </SectionCard>
 
-      <SectionCard title="iface-ledger" subtitle="확정 원장은 앱 DB 에만 저장합니다.">
-        <IfaceLedgerEditor projectId={projectId} />
-      </SectionCard>
+          <SectionCard title="iface-ledger" subtitle="확정 원장은 앱 DB 에만 저장합니다.">
+            <IfaceLedgerEditor projectId={projectId} />
+          </SectionCard>
+        </>
+      ) : null}
 
-      <VocabCard />
-      <CharacterCard projectId={projectId} />
-      <SimilarCard projectId={projectId} />
+      {tab === "context" ? (
+        <>
+          <CharacterCard projectId={projectId} />
+          <SimilarCard projectId={projectId} />
+        </>
+      ) : null}
+
+      {/* 사전은 과제가 아니라 전사 자산이다 — 과제 구역과 섞이지 않게 탭을 따로 둔다. */}
+      {tab === "vocab" ? <VocabCard /> : null}
     </>
   );
 }
