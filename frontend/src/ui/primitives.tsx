@@ -57,12 +57,14 @@ export function CardHeader({ className, ...props }: React.HTMLAttributes<HTMLDiv
   return <div className={cn("flex flex-col gap-1 border-b border-border px-5 py-4", className)} {...props} />;
 }
 
+// `m-0` 은 장식이 아니다 — preflight 를 꺼 둬서 <h2>·<p> 의 UA margin(13.28px·14px, 실측)이
+// 그대로 살아 있다. 빼면 카드 머리말이 헐겁게 벌어진다. 새 조각에서 제목·문단을 쓸 때는 늘 붙인다.
 export function CardTitle({ className, ...props }: React.HTMLAttributes<HTMLHeadingElement>) {
-  return <h2 className={cn("text-base font-semibold leading-none tracking-tight", className)} {...props} />;
+  return <h2 className={cn("m-0 text-base font-semibold leading-none tracking-tight", className)} {...props} />;
 }
 
 export function CardDescription({ className, ...props }: React.HTMLAttributes<HTMLParagraphElement>) {
-  return <p className={cn("text-sm text-muted-foreground", className)} {...props} />;
+  return <p className={cn("m-0 text-sm text-muted-foreground", className)} {...props} />;
 }
 
 export function CardContent({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
