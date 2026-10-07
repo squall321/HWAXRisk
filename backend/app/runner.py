@@ -276,7 +276,8 @@ def build_delib_opts(
     narrative_mod: Any | None = None,
 ) -> dict:
     """패널 1건의 delib_opts(plan §6.6.4). human_note·continue_summary·non_negotiables·search_sources·
-    stop_after_round·build_plan 은 절대 싣지 않는다(불변식 extra_seats == ∅ 의 전제)."""
+    stop_after_round·build_plan 은 절대 싣지 않는다(불변식 extra_seats == ∅ 의 전제). voc 는 반대로
+    항상 'off' 로 싣는다 — 빼면 엔진 기본값 'auto' 가 되살아난다."""
     seats = panel["seats"]
     if evidence is None:
         module = narrative_mod
@@ -303,6 +304,12 @@ def build_delib_opts(
         "personas": [{"key": s["key"], "role": "", "origin": s["origin"]} for s in seats],
         "tools": list(panel["tools"]),
         "apps": _delib_apps(),
+        # 엔진의 자동 VOC 환기를 끈다. 안 실으면 기본값 'auto' 라, 질문(diff 요약 첫 줄·소스 id 가 실린다)에
+        # 엔진의 불량 화두 낱말(이슈·품질·불만·휨·발열 …)이 하나라도 있으면 SignalForge 를 부른다 — 환기 여부가
+        # 요약 문구에 달리고, S26U 실사용에서는 심사마다 걸렸다. 필드 이력의 정본은 브리프 E5 의 E10 블록이다 —
+        # `voc:` 인용은 거기 실린 것만 해석되므로(§0.2.1) 환기가 따로 넣은 VOC 는 인용해도 dangling 이고,
+        # 소급 심사에서는 그 뒤에 생긴 이슈가 새어 든다.
+        "voc": "off",
         "evidence": evidence[:planner.MAX_EVIDENCE],
         # 벽시계 상한 40분(plan §6.10.2). 엔진 기본값(30분)에 기대지 않고 계약값을 실어 보낸다.
         "timeout_s": PANEL_TIMEOUT_S,

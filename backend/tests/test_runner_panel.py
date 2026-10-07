@@ -390,6 +390,22 @@ def test_build_delib_opts_shape_and_forbidden_keys(risk_store):
     assert "구조 3건" in opts["question"]
 
 
+def test_delib_opts_turn_off_the_engines_automatic_voc_recall(risk_store, tmp_path):
+    """자동 VOC 환기를 끈 채로 엔진까지 간다 — 안 실으면 엔진 기본값 'auto' 가 리스크 심사마다 SignalForge 를 부른다."""
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)
+    job = runner.claim_next_job(risk_store, cfg)
+
+    recorder: dict = {}
+    engine = FakePanelEngine()
+    runner.run_panel(risk_store, cfg, engine, job,
+                     narrative_mod=fake_narrative(recorder), registry_mod=fake_registry(recorder))
+
+    assert engine.calls[0]["voc"] == "off"
+
+
 def test_seat_contract_evidence_budget():
     item = runner.seat_contract_evidence(["mech", "mech", "sim", "없는도메인"])
     assert item["source"] == "seat_contract" and item["args"] == "mech,sim,없는도메인"

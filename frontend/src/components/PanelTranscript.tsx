@@ -72,8 +72,19 @@ export function PanelTranscript({ panelId }: { panelId: string }) {
   const columns: Column<SeatTurn>[] = [
     { key: "seat", header: "좌석", cell: (t) => <code>{t.seat}</code>, nowrap: true },
     { key: "round", header: "라운드", cell: (t) => t.round, align: "right", nowrap: true },
-    { key: "position", header: "position", cell: (t) => t.position ?? "-", nowrap: true },
-    { key: "stance", header: "stance", cell: (t) => t.stance ?? "-", nowrap: true },
+    // 적지 않은 position·stance 는 '-' 가 아니라 '없다' 로 보인다(null 은 값이 아니다).
+    {
+      key: "position",
+      header: "position",
+      nowrap: true,
+      cell: (t) => t.position ?? <span className="text-muted-foreground">—</span>,
+    },
+    {
+      key: "stance",
+      header: "stance",
+      nowrap: true,
+      cell: (t) => t.stance ?? <span className="text-muted-foreground">—</span>,
+    },
     { key: "say", header: "발언 발췌", cell: (t) => t.say_excerpt },
   ];
 
@@ -93,27 +104,31 @@ export function PanelTranscript({ panelId }: { panelId: string }) {
   const parsed = spec ? specRows(spec) : [];
 
   return (
-    <div className="rr-stack">
+    <div className="mt-3 flex flex-col gap-2">
       <ErrorBanner error={transcript.error} onRetry={transcript.reload} />
       {transcript.loading && !transcript.data ? <LoadingBlock /> : null}
       {transcript.data ? (
         <>
           <VerbatimBlock text={transcript.data.decision_text} label="결정문" />
-          <h3 className="rr-subhead">좌석 발언</h3>
+          <h3 className="m-0 text-sm text-muted-foreground">좌석 발언</h3>
           <DataTable
             columns={columns}
             rows={transcript.data.turns}
             rowKey={(t, i) => `${t.seat}#${t.round}#${i}`}
             empty="좌석 발언이 없습니다."
           />
-          <h3 className="rr-subhead">risk_spec 파싱 결과</h3>
+          <h3 className="m-0 text-sm text-muted-foreground">risk_spec 파싱 결과</h3>
           {spec ? (
             <>
               <KeyValueTable
                 rows={[
-                  { label: "verdict", value: fmtCell(spec["verdict"]) },
-                  { label: "taxonomy_version", value: fmtCell(spec["taxonomy_version"]) },
-                  { label: "findings / gains", value: `${objectsAt(spec, "findings").length} / ${objectsAt(spec, "gains").length}` },
+                  { label: "패널 판정", hint: "verdict", value: fmtCell(spec["verdict"]) },
+                  { label: "택소노미 버전", hint: "taxonomy_version", value: fmtCell(spec["taxonomy_version"]) },
+                  {
+                    label: "지적 / 개선",
+                    hint: "findings / gains",
+                    value: `${objectsAt(spec, "findings").length} / ${objectsAt(spec, "gains").length}`,
+                  },
                 ]}
               />
               <DataTable
@@ -125,7 +140,7 @@ export function PanelTranscript({ panelId }: { panelId: string }) {
               <VerbatimBlock text={fmtJson(spec)} label="risk_spec 원문" />
             </>
           ) : (
-            <p className="rr-muted">risk_spec 이 아직 없습니다(파싱 실패이거나 진행 중).</p>
+            <p className="m-0 text-sm text-muted-foreground">risk_spec 이 아직 없습니다(파싱 실패이거나 진행 중).</p>
           )}
         </>
       ) : null}

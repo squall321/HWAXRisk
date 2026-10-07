@@ -116,18 +116,24 @@ export function PageHeader({
   title,
   subtitle,
   actions,
+  as: Heading = "h1",
 }: {
   /** 상위 화면으로 돌아가는 링크·경로. 상세 화면은 id 로 들어오므로 돌아갈 길이 늘 보여야 한다. */
   crumb?: React.ReactNode;
   title: React.ReactNode;
   subtitle?: React.ReactNode;
   actions?: React.ReactNode;
+  /**
+   * 제목의 수준. 기본 `h1` 이지만 **다른 화면 안에 끼워 그려지는 화면은 `h2` 로 내린다** —
+   * 그러지 않으면 품고 있는 화면의 문서 제목이 끼워진 쪽 이름으로 바뀐다(SnapshotPage 가 그랬다).
+   */
+  as?: "h1" | "h2";
 }) {
   return (
     <header className="mb-4 flex flex-wrap items-start justify-between gap-3">
       <div className="min-w-0 flex flex-col gap-1">
         {crumb ? <div className="flex items-center gap-1 text-xs text-muted-foreground">{crumb}</div> : null}
-        <h1 className="m-0 truncate text-xl font-semibold tracking-tight">{title}</h1>
+        <Heading className="m-0 truncate text-xl font-semibold tracking-tight">{title}</Heading>
         {subtitle ? <div className="text-sm text-muted-foreground">{subtitle}</div> : null}
       </div>
       {actions ? <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div> : null}
@@ -142,6 +148,7 @@ export function TabBar<T extends string>({
   onChange,
   label,
   className,
+  idPrefix = "tab",
 }: {
   tabs: ReadonlyArray<{ tab: T; label: React.ReactNode; count?: number | null }>;
   value: T;
@@ -149,7 +156,19 @@ export function TabBar<T extends string>({
   /** 스크린리더용 탭 묶음 이름. */
   label: string;
   className?: string;
+  /** 한 화면에 탭 묶음이 둘 이상일 때 id 가 겹치지 않게. */
+  idPrefix?: string;
 }) {
+  // role="tab" 을 쓰면 WAI-ARIA 가 좌우 화살표 이동을 약속한다 — 약속만 하고 안 지키면
+  // 키보드 사용자에게는 '탭처럼 보이는데 탭처럼 안 되는 것' 이 된다(역검토가 세 화면에서 잡았다).
+  function move(delta: number) {
+    const i = tabs.findIndex((t) => t.tab === value);
+    if (i === -1) return;
+    const next = tabs[(i + delta + tabs.length) % tabs.length];
+    onChange(next.tab);
+    // 초점도 같이 옮긴다 — 안 그러면 화살표를 눌러도 읽히는 것은 그대로다.
+    document.getElementById(`${idPrefix}-${next.tab}`)?.focus();
+  }
   return (
     <div
       // 세그먼티드 컨트롤 — 버튼 n 개가 아니라 '지금 어디를 보고 있나' 를 말하는 한 덩이다.
@@ -159,13 +178,21 @@ export function TabBar<T extends string>({
       )}
       role="tablist"
       aria-label={label}
+      onKeyDown={(event) => {
+        if (event.key === "ArrowRight") { event.preventDefault(); move(1); }
+        else if (event.key === "ArrowLeft") { event.preventDefault(); move(-1); }
+      }}
     >
       {tabs.map((item) => (
         <button
           key={item.tab}
+          id={`${idPrefix}-${item.tab}`}
           type="button"
           role="tab"
           aria-selected={value === item.tab}
+          aria-controls={`${idPrefix}panel-${item.tab}`}
+          // 선택된 탭만 Tab 키 순서에 둔다(roving tabindex) — 탭 묶음은 한 정거장이다.
+          tabIndex={value === item.tab ? 0 : -1}
           className={cn(
             "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm transition-colors",
             value === item.tab
@@ -185,18 +212,63 @@ export function TabBar<T extends string>({
   );
 }
 
+/**
+ * 탭 한 칸의 내용. **마운트를 유지하고 보이는 것만 바꾼다** — `{tab === "x" ? <Card/> : null}` 로 쓰면 안 된다.
+ *
+ * 왜 이게 공용이어야 하나. 화면을 탭으로 묶으면서 조건부 렌더를 쓰면 **자리를 옮기는 작업이 입력의 수명까지
+ * 바꾼다.** 실제로 그렇게 깨진 것 넷을 역검토가 잡았다 — ㉮ `iface-ledger` 의 저장 전 행은 메모리에만 있고
+ * 서버에서 다시 읽을 경로가 없는데 탭을 한 번 바꾸면 사라진다 · ㉯ 등록부의 상태 변경 폼(사유·근거 참조)과
+ * 판정 메모가 같은 이유로 날아간다 · ㉰ `credential === "service"` 경고가 탭 전환으로 사라진다 ·
+ * ㉱ **브리프 탭은 재진입마다 `GET /brief` 가 돌고 그 경로가 `issue_brief_token` 으로 `brief_token_hash` 를
+ * 덮어써, 사용자가 이미 복사해 둔 토큰이 조용히 무효가 된다**(routes.py `get_brief` → `issue_brief_token`).
+ *
+ * 숨기는 비용은 DOM 이 남는 것뿐이고, 날리는 비용은 사람이 친 글자다. 그래서 기본을 숨김으로 둔다.
+ * 정말 매번 새로 받아야 하는 칸이 있으면 그 칸만 호출자가 조건부로 쓰고 **왜 그런지 주석을 단다.**
+ */
+export function TabPanel({
+  active,
+  children,
+  /** 짝이 되는 탭의 값. TabBar 와 같은 `idPrefix` 를 주면 aria-controls 로 이어진다. */
+  tab,
+  idPrefix = "tab",
+}: {
+  active: boolean;
+  children: React.ReactNode;
+  tab?: string;
+  idPrefix?: string;
+}) {
+  // `hidden` 은 보조기술에게도 숨긴다 — 안 보이는 칸이 스크린리더에서만 읽히는 일이 없게.
+  return (
+    <div
+      hidden={!active}
+      role="tabpanel"
+      id={tab ? `${idPrefix}panel-${tab}` : undefined}
+      aria-labelledby={tab ? `${idPrefix}-${tab}` : undefined}
+    >
+      {children}
+    </div>
+  );
+}
+
 /** 한 줄 배너. 오류·정보·경고를 같은 모양으로 말한다(ErrorBanner·GateBanner 가 이것을 쓴다). */
 export function Banner({
   tone = "error",
   title,
   detail,
   children,
+  live = tone === "error" ? "alert" : "status",
 }: {
   tone?: "error" | "info" | "warn";
   title: React.ReactNode;
   detail?: React.ReactNode;
   /** 오른쪽에 붙는 버튼·링크. */
   children?: React.ReactNode;
+  /**
+   * 보조기기에게 어떻게 읽힐지. `alert` 는 **하던 말을 끊고** 읽고 `status` 는 정중히 기다린다.
+   * 기본은 톤을 따른다 — 오류만 끼어들 자격이 있다. '등록했습니다' 같은 성공 알림이나 행을 누를
+   * 때마다 뜨는 안내를 `alert` 로 두면 스크린리더 사용자에게는 소음이 된다(역검토가 둘 다 잡았다).
+   */
+  live?: "alert" | "status" | "none";
 }) {
   const skin =
     tone === "error"
@@ -206,7 +278,7 @@ export function Banner({
         : "border-primary/25 bg-primary/8 text-foreground";
   return (
     <div className={cn("mb-3 flex flex-wrap items-baseline gap-x-2 gap-y-1 rounded-md border px-3 py-2 text-sm", skin)}
-         role="alert">
+         role={live === "none" ? undefined : live}>
       <span className="font-medium">{title}</span>
       {detail ? <span className="text-foreground/75">{detail}</span> : null}
       {children ? <span className="ml-auto">{children}</span> : null}
@@ -228,19 +300,22 @@ export const Input = React.forwardRef<HTMLInputElement, React.InputHTMLAttribute
 );
 Input.displayName = "Input";
 
+/** `<select>` 의 펼침 화살표(lucide chevron-down 과 같은 모양). currentColor 를 못 쓰므로 토큰 대신 중립 회색이다. */
+const SELECT_ARROW =
+  "url(\"data:image/svg+xml;charset=utf-8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' " +
+  "fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'>" +
+  "<path d='m6 9 6 6 6-6'/></svg>\")";
+
 export const Select = React.forwardRef<HTMLSelectElement, React.SelectHTMLAttributes<HTMLSelectElement>>(
   ({ className, ...props }, ref) => (
     // 네이티브 화살표를 지웠으므로 직접 그린다 — 지우기만 하면 '열리는 것' 이라는 신호가 사라진다.
+    // 배경 이미지는 `style` 로 준다. Tailwind 임의값(`bg-[url(…)]`)으로 쓰면 스캐너가 **소스에 그대로
+    // 적힌 문자열**만 보므로, 길어서 `+` 로 쪼개는 순간 규칙이 아예 생성되지 않는다(실제로 빌드 CSS 에
+    // `svg+xml` 이 0건이었고 화살표 없는 네모만 남았다 — 역검토가 잡았다).
     <select
       ref={ref}
-      className={cn(
-        controlClass,
-        "appearance-none bg-[length:1rem] bg-[right_0.5rem_center] bg-no-repeat pr-8",
-        "bg-[url('data:image/svg+xml;charset=utf-8,%3Csvg%20xmlns%3D%22http%3A//www.w3.org/2000/svg%22%20" +
-          "viewBox%3D%220%200%2024%2024%22%20fill%3D%22none%22%20stroke%3D%22%23888%22%20stroke-width%3D%222%22" +
-          "%3E%3Cpath%20d%3D%22m6%209%206%206%206-6%22/%3E%3C/svg%3E')]",
-        className,
-      )}
+      className={cn(controlClass, "appearance-none bg-no-repeat pr-8", className)}
+      style={{ backgroundImage: SELECT_ARROW, backgroundPosition: "right 0.5rem center", backgroundSize: "1rem", ...props.style }}
       {...props}
     />
   ),

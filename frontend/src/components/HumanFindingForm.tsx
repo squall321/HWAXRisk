@@ -1,8 +1,10 @@
 // 사람이 직접 제기하는 리스크 등록 폼 — 패널 산출과 같은 표에 origin='human' 으로 앉는다(계획 §4.3.1)
 import { useState } from "react";
+import { Plus } from "lucide-react";
 import { riskApi } from "../api/risk.api";
 import { ErrorBanner } from "./StateBlocks";
 import { Badge } from "./Badge";
+import { Banner, Button, FormField, FormGrid, Input, Select, Textarea } from "../ui/primitives";
 import type { Direction, HumanFindingCreate, Judgement, Severity, TaxonomyAxis } from "../types";
 
 const DIRECTIONS: Direction[] = ["risk", "improvement", "neutral"];
@@ -82,11 +84,12 @@ export function HumanFindingForm({
 
   if (!open) {
     return (
-      <div className="rr-row">
-        <button type="button" className="rr-btn" onClick={() => setOpen(true)}>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button type="button" variant="outline" onClick={() => setOpen(true)}>
+          <Plus className="size-4" aria-hidden="true" />
           리스크 직접 등록
-        </button>
-        <span className="rr-muted">
+        </Button>
+        <span className="text-sm text-muted-foreground">
           좌석이 못 본 것을 사람이 올립니다. 등록한 행은 표에 <Badge tone="info">사람</Badge> 로 보이고
           전문가 지지로 세지 않습니다.
         </span>
@@ -95,105 +98,91 @@ export function HumanFindingForm({
   }
 
   return (
-    <div className="rr-stack">
+    <div className="mt-3 flex flex-col gap-3">
       <ErrorBanner error={error} />
       {made ? (
-        <div className="rr-banner rr-banner-info" role="status">
-          <span className="rr-banner-title">등록했습니다 — {made}</span>
-          <span className="rr-banner-detail">
-            근거 등급은 인용에서 코드가 산출합니다(§0.2.1 (5)). 수정·삭제는 작성자만 할 수 있습니다.
-          </span>
-        </div>
+        <Banner
+          tone="info"
+          live="status"
+          title={`등록했습니다 — ${made}`}
+          detail="근거 등급은 인용에서 코드가 산출합니다(§0.2.1 (5)). 수정·삭제는 작성자만 할 수 있습니다."
+        />
       ) : null}
 
-      <div className="rr-row">
-        <label className="rr-field">
-          <span>direction</span>
-          <select className="rr-select" value={direction} onChange={(e) => setDirection(e.target.value as Direction)}>
+      <FormGrid>
+        <FormField label="방향" hint="direction">
+          <Select value={direction} onChange={(e) => setDirection(e.target.value as Direction)}>
             {DIRECTIONS.map((d) => (
               <option key={d} value={d}>
                 {d}
               </option>
             ))}
-          </select>
-        </label>
-        <label className="rr-field">
-          <span>mechanism</span>
-          <select className="rr-select" value={mechanism} onChange={(e) => setMechanism(e.target.value)}>
+          </Select>
+        </FormField>
+        <FormField label="메커니즘" hint="mechanism">
+          <Select value={mechanism} onChange={(e) => setMechanism(e.target.value)}>
             <option value="unclassified">unclassified</option>
             {mechanisms.map((m) => (
               <option key={m.code} value={m.code}>
                 {m.code} · {m.label}
               </option>
             ))}
-          </select>
-        </label>
-        <label className="rr-field">
-          <span>severity</span>
-          <select className="rr-select" value={severity} onChange={(e) => setSeverity(e.target.value as Severity | "")}>
+          </Select>
+        </FormField>
+        <FormField label="심각도" hint="severity">
+          <Select value={severity} onChange={(e) => setSeverity(e.target.value as Severity | "")}>
             <option value="">(미정)</option>
             {SEVERITIES.map((v) => (
               <option key={v} value={v}>
                 {v}
               </option>
             ))}
-          </select>
-        </label>
-        <label className="rr-field">
-          <span>judgement</span>
-          <select
-            className="rr-select"
-            value={judgement}
-            onChange={(e) => setJudgement(e.target.value as Judgement | "")}
-          >
+          </Select>
+        </FormField>
+        <FormField label="판정" hint="judgement">
+          <Select value={judgement} onChange={(e) => setJudgement(e.target.value as Judgement | "")}>
             <option value="">(미정)</option>
             {JUDGEMENTS.map((v) => (
               <option key={v} value={v}>
                 {v}
               </option>
             ))}
-          </select>
-        </label>
-      </div>
+          </Select>
+        </FormField>
+      </FormGrid>
 
-      <div className="rr-row">
-        <label className="rr-field">
-          <span>subject_key(선택)</span>
-          <input className="rr-input" value={subject} onChange={(e) => setSubject(e.target.value)} />
-        </label>
-        <label className="rr-field">
-          <span>trigger_condition(선택)</span>
-          <input className="rr-input" value={trigger} onChange={(e) => setTrigger(e.target.value)} />
-        </label>
-      </div>
+      <FormGrid>
+        <FormField label="대상 키" hint="subject_key · 선택">
+          <Input value={subject} onChange={(e) => setSubject(e.target.value)} />
+        </FormField>
+        <FormField label="발생 조건" hint="trigger_condition · 선택">
+          <Input value={trigger} onChange={(e) => setTrigger(e.target.value)} />
+        </FormField>
+      </FormGrid>
 
-      <label className="rr-field">
-        <span>claim — 무엇이 문제인가(필수, 2000자 이내)</span>
-        <textarea className="rr-textarea" rows={3} value={claim} onChange={(e) => setClaim(e.target.value)} />
-      </label>
-      <label className="rr-field">
-        <span>warrant — 왜 그렇게 보는가(선택)</span>
-        <textarea className="rr-textarea" rows={2} value={warrant} onChange={(e) => setWarrant(e.target.value)} />
-      </label>
-      <label className="rr-field">
-        <span>cites — 한 줄에 참조 하나(필수 1건 이상). 공백 뒤는 인용문입니다.</span>
-        <textarea
-          className="rr-textarea"
+      <FormField label="무엇이 문제인가" hint="claim · 필수 · 2000자 이내">
+        <Textarea rows={3} value={claim} onChange={(e) => setClaim(e.target.value)} />
+      </FormField>
+      <FormField label="왜 그렇게 보는가" hint="warrant · 선택">
+        <Textarea rows={2} value={warrant} onChange={(e) => setWarrant(e.target.value)} />
+      </FormField>
+      <FormField label="근거 참조" hint="cites · 한 줄에 하나 · 1건 이상 필수. 공백 뒤는 인용문입니다.">
+        <Textarea
           rows={3}
           value={cites}
           onChange={(e) => setCites(e.target.value)}
           placeholder={"p:a1b2c3d4e5f6  두께 0.28mm\nreq:thickness\nvoc:F7-2024#ISS-1"}
         />
-      </label>
+      </FormField>
 
-      <div className="rr-row">
-        <button type="button" className="rr-btn rr-btn-primary" disabled={busy || !ready} onClick={submit}>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button type="button" disabled={busy || !ready} onClick={submit}>
           {busy ? "등록 중." : "등록"}
-        </button>
-        <button type="button" className="rr-btn rr-btn-quiet" onClick={() => setOpen(false)}>
+        </Button>
+        <Button type="button" variant="ghost" onClick={() => setOpen(false)}>
           닫기
-        </button>
-        <span className="rr-muted">
+        </Button>
+        <span className="text-sm text-muted-foreground">
           인용 {parsedCites.length}건
           {ready ? null : " — claim 과 인용 1건 이상이 필요합니다(서버도 같은 규칙으로 422 를 냅니다)."}
         </span>

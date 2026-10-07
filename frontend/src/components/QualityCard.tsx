@@ -1,11 +1,13 @@
 // 품질·학습 루프 계측 카드 — GET /api/meta/metrics 를 읽어 '루프 작동' 배지와 지표 표를 보인다(계획 §7.6·§9.7)
 import { useMemo } from "react";
+import { RefreshCw } from "lucide-react";
 import { riskApi } from "../api/risk.api";
 import { useAsync } from "../hooks/useAsync";
 import { SectionCard } from "./SectionCard";
 import { DataTable } from "./DataTable";
 import { Badge } from "./Badge";
 import { EmptyBlock, ErrorBanner, LoadingBlock } from "./StateBlocks";
+import { Button } from "../ui/primitives";
 import type { Column } from "./DataTable";
 import type { MetricRow } from "../types";
 
@@ -55,7 +57,8 @@ export function QualityCard() {
       header: "값",
       align: "right",
       nowrap: true,
-      cell: (r) => (r.value === null ? <span className="rr-muted">{valueText(r)}</span> : valueText(r)),
+      // 표본 부족은 '0' 이 아니라 '재지 않았다' 라서 흐리게 둔다(§7.6).
+      cell: (r) => (r.value === null ? <span className="text-muted-foreground">{valueText(r)}</span> : valueText(r)),
     },
     { key: "n", header: "n", cell: (r) => String(r.n), align: "right", nowrap: true },
   ];
@@ -77,16 +80,17 @@ export function QualityCard() {
             </Badge>
           ))}
           {wired && (wired.value ?? 1) === 0 ? <Badge tone="info">라벨 자동 유입 미배선</Badge> : null}
-          <button type="button" className="rr-btn" onClick={metrics.reload} disabled={metrics.loading}>
+          <Button type="button" variant="outline" onClick={metrics.reload} disabled={metrics.loading}>
+            <RefreshCw className="size-4" aria-hidden="true" />
             갱신
-          </button>
+          </Button>
         </>
       }
     >
       <ErrorBanner error={metrics.error} onRetry={metrics.reload} />
       {metrics.loading && !metrics.data ? <LoadingBlock /> : null}
       {wired && (wired.value ?? 1) === 0 ? (
-        <p className="rr-muted">
+        <p className="text-sm text-muted-foreground">
           라벨 자동 유입 4경로(RA incident · test_run · DynaForge · VOC)가 아직 배선되지 않았습니다 —
           학습 루프의 분모가 사람 라벨뿐이라는 뜻입니다. '병목 라벨' 은 그 사실의 결과일 수 있습니다.
         </p>

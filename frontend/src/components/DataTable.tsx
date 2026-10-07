@@ -7,6 +7,11 @@ export type Column<T> = {
   /** 열 식별자(React key). */
   key: string;
   header: ReactNode;
+  /**
+   * 머리글 옆에 작게 붙는 원시 필드명(`verdict_final` 등). `KeyValueTable` 의 `hint` 와 같은 규율이다 —
+   * 머리글을 한국어로 올리면서 서버와 대조할 이름까지 지우면, 화면에서 본 값을 API·DB 에서 찾을 길이 없어진다.
+   */
+  hint?: string;
   /** 셀 내용. 값 가공은 화면 몫이고 이 컴포넌트는 판단을 만들지 않는다. */
   cell: (row: T, index: number) => ReactNode;
   align?: "left" | "right" | "center";
@@ -62,6 +67,7 @@ export function DataTable<T>({
                 style={{ textAlign: c.align ?? "left", width: c.width }}
               >
                 {c.header}
+                {c.hint ? <span className="ml-1 font-mono font-normal opacity-60">{c.hint}</span> : null}
               </th>
             ))}
           </tr>

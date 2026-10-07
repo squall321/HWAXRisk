@@ -1,6 +1,8 @@
-// 타깃 화면 — 진행판·PanelRunner·패널 목록/모델 혼합·등록부·verdict·RecallPreview(계획 §8.2.4 TargetPage 행). :key 는 snap:<id>/diff:<id> 다.
+// 타깃 화면 — 판정 요약(verdict·완결 레벨)을 맨 위에 고정하고 그 아래 탭으로 진행판·패널·등록부·보고서·브리프·품질을 묶는다(계획 §8.2.4 TargetPage 행). :key 는 snap:<id>/diff:<id> 다.
 import { useMemo, useState } from "react";
+import type { ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
+import { ChevronLeft, RefreshCw, Users } from "lucide-react";
 import { riskApi } from "../api/risk.api";
 import type { Async } from "../hooks/useAsync";
 import { POLL_MS, useAsync, useInterval } from "../hooks/useAsync";
@@ -27,6 +29,10 @@ import {
   VerdictBadge,
 } from "../components/Badge";
 import { PanelTranscript } from "../components/PanelTranscript";
+import {
+  Button, FormField, FormGrid, Input, Mono, PageHeader, Select, SubPanel, TabBar, TabPanel,
+} from "../ui/primitives";
+import { cn } from "../lib/cn";
 import { fmtEpoch, fmtJson, fmtNum } from "../format";
 import type {
   BriefPanel,
@@ -60,18 +66,32 @@ const VERDICTS: Verdict[] = ["go", "conditional", "no-go", "undetermined"];
 const REGISTRY_STATUSES: RegistryStatusInput[] = ["verified", "dismissed", "mitigated"];
 const ACTIVE_JOB_STATES = new Set(["queued", "running", "cancelling"]);
 
+/** target_key 접두 → 사람이 읽는 이름. 모르는 접두는 그대로 보인다(어휘를 지어내지 않는다). */
+const KIND_LABEL: Record<string, string> = { snap: "스냅샷", diff: "비교" };
+
+/** 화면 구역 탭 — 카드 여덟 개가 한 줄로 쌓여 있던 것을 묶는다. 판정·커버리지는 탭 밖에 남는다. */
+type TargetTab = "coverage" | "panels" | "registry" | "report" | "brief" | "quality";
+
 /** 모델 혼합 표 한 줄 — 패널을 센 값만 담는다. */
 type ModelMixRow = { key: string; model: string; captured: string; n: number; done: number };
+
+/**
+ * 값이 없다는 사실을 그 자리에서 말한다 — `-` 는 '값이 하이픈' 으로 읽히고 0 과도 섞인다(null 은 0 이 아니다).
+ * 다섯 상세 화면이 같은 자리에서 같은 말을 해야 하므로 **공용(primitives)으로 올릴 후보**다.
+ */
+function Unknown({ children = "—" }: { children?: ReactNode }) {
+  return <span className="text-muted-foreground">{children}</span>;
+}
 
 /** 참조 하나를 눌러서 펼쳐 보는 상자(`GET refs/{ref}`). */
 function RefPeek({ value }: { value: string }) {
   const [open, setOpen] = useState(false);
   const resolved = useAsync((signal) => riskApi.getRef(value, { signal }), [value], open);
   return (
-    <div className="rr-stack">
-      <button type="button" className="rr-btn rr-btn-quiet" onClick={() => setOpen((v) => !v)}>
+    <div className="mt-3 flex flex-col gap-2">
+      <Button type="button" variant="ghost" size="sm" className="w-fit" onClick={() => setOpen((v) => !v)}>
         <code>{value}</code>
-      </button>
+      </Button>
       {open ? (
         <>
           <ErrorBanner error={resolved.error} onRetry={resolved.reload} />
@@ -106,25 +126,33 @@ function CoverageHeatmap({ coverage, targetKey }: { coverage: Coverage; targetKe
   const seatColumns: Column<Seat>[] = [
     { key: "agent", header: "agent_key", cell: (s) => <code>{s.agent_key}</code>, nowrap: true },
     { key: "status", header: "status", cell: (s) => <CoverageStatusBadge value={s.status} />, nowrap: true },
-    { key: "reason", header: "reason", cell: (s) => s.reason ?? "-" },
-    { key: "panel", header: "panel_id", cell: (s) => (s.panel_id ? <code>{s.panel_id}</code> : "-"), nowrap: true },
+    { key: "reason", header: "reason", cell: (s) => s.reason ?? <Unknown /> },
+    {
+      key: "panel",
+      header: "panel_id",
+      nowrap: true,
+      cell: (s) => (s.panel_id ? <code>{s.panel_id}</code> : <Unknown />),
+    },
     {
       key: "opinion",
       header: "opinion_id",
       nowrap: true,
-      cell: (s) => (s.opinion_id ? <code>{s.opinion_id}</code> : "-"),
+      cell: (s) => (s.opinion_id ? <code>{s.opinion_id}</code> : <Unknown />),
     },
   ];
 
   return (
     <>
       <TableScroll>
-        <table className="rr-table">
+        {/* 합계 행(tfoot)과 행 머리(th scope=row) 때문에 DataTable 로는 그릴 수 없다 — 클래스는 DataTable 과 같은 값이다. */}
+        <table className="w-full min-w-max border-collapse text-sm">
           <thead>
-            <tr>
-              <th scope="col">도메인</th>
+            <tr className="border-b border-border">
+              <th scope="col" className="px-3 py-2 text-left text-xs font-medium text-muted-foreground">
+                도메인
+              </th>
               {COVERAGE_STATUSES.map((s) => (
-                <th key={s} scope="col" style={{ textAlign: "right" }}>
+                <th key={s} scope="col" className="px-3 py-2 text-right text-xs font-medium text-muted-foreground">
                   {s}
                 </th>
               ))}
@@ -145,15 +173,21 @@ function CoverageHeatmap({ coverage, targetKey }: { coverage: Coverage; targetKe
                     setDomain(d);
                   }}
                   aria-selected={domain === d}
-                  className={domain === d ? "rr-row-selected" : undefined}
+                  className={cn(
+                    "cursor-pointer border-b border-border/60 last:border-0 hover:bg-muted/50",
+                    domain === d && "bg-accent",
+                  )}
                 >
-                  <th scope="row">{d}</th>
+                  <th scope="row" className="px-3 py-2 text-left align-top font-medium">
+                    {d}
+                  </th>
                   {COVERAGE_STATUSES.map((s) => {
                     const n = counts[s] ?? 0;
                     return (
-                      <td key={s} style={{ textAlign: "right" }} className="rr-nowrap">
+                      <td key={s} className="whitespace-nowrap px-3 py-2 text-right align-top tabular-nums">
                         {n === 0 ? (
-                          <span className="rr-muted">0</span>
+                          // 0 은 서버가 센 값이라 '모름' 이 아니다 — 흐리게만 둔다.
+                          <span className="text-muted-foreground">0</span>
                         ) : (
                           <Badge tone={toneOf(s)} title={s}>
                             {n}
@@ -168,10 +202,12 @@ function CoverageHeatmap({ coverage, targetKey }: { coverage: Coverage; targetKe
           </tbody>
           {domains.length > 0 ? (
             <tfoot>
-              <tr>
-                <th scope="row">합계</th>
+              <tr className="border-t border-border">
+                <th scope="row" className="px-3 py-2 text-left font-medium">
+                  합계
+                </th>
                 {COVERAGE_STATUSES.map((s) => (
-                  <td key={s} style={{ textAlign: "right" }} className="rr-nowrap">
+                  <td key={s} className="whitespace-nowrap px-3 py-2 text-right tabular-nums">
                     {totals[s] ?? 0}
                   </td>
                 ))}
@@ -182,14 +218,16 @@ function CoverageHeatmap({ coverage, targetKey }: { coverage: Coverage; targetKe
       </TableScroll>
       {domains.length === 0 ? <EmptyBlock title="커버리지 행이 없습니다." /> : null}
       {domain !== null ? (
-        <div className="rr-stack">
-          <h3 className="rr-subhead">{domain} 좌석</h3>
+        <div className="mt-3 flex flex-col gap-2">
+          <h3 className="m-0 text-sm text-muted-foreground">{domain} 좌석</h3>
           <ErrorBanner error={seats.error} onRetry={seats.reload} />
           {seats.loading && !seats.data ? <LoadingBlock /> : null}
           {seats.data ? (
             <DataTable columns={seatColumns} rows={seats.data.seats} rowKey={(s) => s.agent_key} empty="좌석이 없습니다." />
           ) : null}
-          <p className="rr-muted">좌석 상태 되돌리기 · skipped 사유 입력 경로는 아직 서버에 없습니다.</p>
+          <p className="m-0 text-sm text-muted-foreground">
+            좌석 상태 되돌리기 · skipped 사유 입력 경로는 아직 서버에 없습니다.
+          </p>
         </div>
       ) : null}
     </>
@@ -253,80 +291,72 @@ function PanelRunner({ targetKey, coverage, onChanged }: { targetKey: string; co
       {job ? (
         <KeyValueTable
           rows={[
-            { label: "job_id", value: <code>{job.id}</code> },
-            { label: "state", value: <JobStateBadge value={job.state} /> },
-            { label: "reason", value: job.reason ?? "-" },
-            { label: "progress", value: `${Math.round(job.progress * 100)}%` },
-            { label: "error", value: job.error ?? "-" },
-            { label: "일일 상한 잔량", value: String(job.daily_remaining) },
+            { label: "잡 id", hint: "job_id", value: <code>{job.id}</code> },
+            { label: "상태", hint: "state", value: <JobStateBadge value={job.state} /> },
+            { label: "사유", hint: "reason", value: job.reason ?? <Unknown /> },
+            { label: "진행", hint: "progress", value: `${Math.round(job.progress * 100)}%` },
+            { label: "오류", hint: "error", value: job.error ?? <Unknown /> },
+            { label: "일일 상한 잔량", hint: "daily_remaining", value: String(job.daily_remaining) },
           ]}
         />
       ) : (
-        <p className="rr-muted">진행 중인 배치 잡이 없습니다.</p>
+        <p className="text-sm text-muted-foreground">진행 중인 배치 잡이 없습니다.</p>
       )}
-      <div className="rr-form-grid">
-        <label className="rr-field">
-          <span>Tier</span>
-          <select className="rr-select" value={tier} onChange={(e) => setTier(e.target.value as Tier)}>
+      <FormGrid>
+        <FormField label="티어" hint="tier">
+          <Select value={tier} onChange={(e) => setTier(e.target.value as Tier)}>
             {TIERS.map((t) => (
               <option key={t} value={t}>
                 {t}
               </option>
             ))}
-          </select>
-        </label>
-        <label className="rr-field">
-          <span>concurrency (≤2)</span>
-          <input
-            className="rr-input"
+          </Select>
+        </FormField>
+        <FormField label="동시 실행" hint="concurrency ≤2">
+          <Input
             type="number"
             min={1}
             max={2}
             value={concurrency}
             onChange={(e) => setConcurrency(Math.min(2, Math.max(1, Number(e.target.value) || 1)))}
           />
-        </label>
-        <label className="rr-field">
-          <span>modifiers (쉼표 구분)</span>
-          <input className="rr-input" value={modifiers} onChange={(e) => setModifiers(e.target.value)} />
-        </label>
-        <label className="rr-field">
-          <span>user_memo</span>
-          <input className="rr-input" value={memo} onChange={(e) => setMemo(e.target.value)} />
-        </label>
-      </div>
+        </FormField>
+        <FormField label="수정자" hint="modifiers · 쉼표 구분">
+          <Input value={modifiers} onChange={(e) => setModifiers(e.target.value)} />
+        </FormField>
+        <FormField label="메모" hint="user_memo">
+          <Input value={memo} onChange={(e) => setMemo(e.target.value)} />
+        </FormField>
+      </FormGrid>
       {needsConsent ? (
-        <label className="rr-row">
+        <label className="mt-3 flex flex-wrap items-center gap-2 text-sm">
           <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} />
           <span>Tier C 는 명시 승인이 필요합니다.</span>
         </label>
       ) : null}
-      <div className="rr-row">
-        <button
-          type="button"
-          className="rr-btn rr-btn-primary"
-          onClick={start}
-          disabled={busy || (needsConsent && !consent)}
-        >
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <Button type="button" onClick={start} disabled={busy || (needsConsent && !consent)}>
           시작
-        </button>
-        <button type="button" className="rr-btn" onClick={() => control("pause")} disabled={busy || !job}>
+        </Button>
+        <Button type="button" variant="outline" onClick={() => control("pause")} disabled={busy || !job}>
           일시정지
-        </button>
-        <button type="button" className="rr-btn" onClick={() => control("resume")} disabled={busy || !job}>
+        </Button>
+        <Button type="button" variant="outline" onClick={() => control("resume")} disabled={busy || !job}>
           재개
-        </button>
-        <button type="button" className="rr-btn" onClick={() => control("cancel")} disabled={busy || !job}>
+        </Button>
+        <Button type="button" variant="outline" onClick={() => control("cancel")} disabled={busy || !job}>
           취소
-        </button>
+        </Button>
       </div>
-      {planned ? <p className="rr-muted">{planned}</p> : null}
+      {planned ? <p className="text-sm text-muted-foreground">{planned}</p> : null}
       {credential ? (
-        <div className="rr-row">
-          <span className="rr-muted">러너 자격</span>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <span className="text-sm text-muted-foreground">러너 자격</span>
           <StatusBadge value={credential} />
           {credential === "service" ? (
-            <span className="rr-muted">포털 PAT 미등록 — DynaForge 사용자 데이터는 서비스 시야로 읽습니다.</span>
+            <span className="text-sm text-muted-foreground">
+              포털 PAT 미등록 — DynaForge 사용자 데이터는 서비스 시야로 읽습니다.
+            </span>
           ) : null}
         </div>
       ) : null}
@@ -369,7 +399,7 @@ function PanelsCard({ targetKey }: { targetKey: string }) {
       // SSE 귀속이 없으면 서버가 null 로 둔다(§6.11) — 화면이 0 으로 바꿔 읽지 않는다.
       cell: (p) =>
         p.quality.tool_calls_n === null || p.quality.tool_calls_n === undefined ? (
-          <span className="rr-muted" title="도구 호출 기록 없음(evidence_only 또는 SSE 미귀속).">
+          <span className="text-muted-foreground" title="도구 호출 기록 없음(evidence_only 또는 SSE 미귀속).">
             기록 없음
           </span>
         ) : (
@@ -382,7 +412,7 @@ function PanelsCard({ targetKey }: { targetKey: string }) {
       key: "quality",
       header: "quality.flag",
       cell: (p) => (
-        <span className="rr-badge-group">
+        <span className="inline-flex flex-wrap items-center gap-1">
           {p.quality.flag.map((f) => (
             <Badge key={f} tone="warn">
               {f}
@@ -396,7 +426,8 @@ function PanelsCard({ targetKey }: { targetKey: string }) {
       header: "귀속률",
       align: "right",
       nowrap: true,
-      cell: (p) => fmtNum(p.quality.attribution_rate, 2),
+      // 귀속률 null 은 '0 귀속' 이 아니라 '재지 않았다' 다.
+      cell: (p) => (p.quality.attribution_rate === null ? <Unknown /> : fmtNum(p.quality.attribution_rate, 2)),
     },
     { key: "seats", header: "좌석", cell: (p) => String(p.seats.length), align: "right", nowrap: true },
     { key: "started", header: "시작", cell: (p) => fmtEpoch(p.started_at), nowrap: true },
@@ -405,14 +436,15 @@ function PanelsCard({ targetKey }: { targetKey: string }) {
       header: "기록",
       nowrap: true,
       cell: (p) => (
-        <span className="rr-row">
-          <button
+        <span className="flex flex-wrap items-center gap-2">
+          <Button
             type="button"
-            className="rr-btn rr-btn-quiet"
+            variant="ghost"
+            size="sm"
             onClick={() => setOpenPanel((cur) => (cur === p.panel_id ? null : p.panel_id))}
           >
             기록 열기
-          </button>
+          </Button>
           {p.report_id ? <code>{p.report_id}</code> : null}
           {p.conv_id ? <code>{p.conv_id}</code> : null}
         </span>
@@ -427,8 +459,8 @@ function PanelsCard({ targetKey }: { targetKey: string }) {
       {panels.data ? (
         <>
           <DataTable columns={columns} rows={rows} rowKey={(p) => p.panel_id} selectedKey={openPanel} empty="패널이 없습니다." />
-          <h3 className="rr-subhead">모델 혼합</h3>
-          <p className="rr-muted">
+          <h3 className="m-0 mt-4 text-sm text-muted-foreground">모델 혼합</h3>
+          <p className="text-sm text-muted-foreground">
             어떤 LLM 이 점검했는지 — `rr_panels.model_json.model` 기준으로 패널을 셉니다. captured 가
             caller_reported 이면 호출자 신고값이라 검증되지 않았습니다(§6.11 D6).
           </p>
@@ -443,7 +475,7 @@ function PanelsCard({ targetKey }: { targetKey: string }) {
             rowKey={(m) => m.key}
             empty="모델 기록이 없습니다."
           />
-          <p className="rr-muted">
+          <p className="text-sm text-muted-foreground">
             strong 비율은 좌석 단위 서버 계산값이라 위 진행판 열에 있는 값만 봅니다 — 이 표는 세지 않습니다.
           </p>
           {openPanel ? <PanelTranscript panelId={openPanel} /> : null}
@@ -544,40 +576,61 @@ function RegistryCard({ targetKey, registry }: { targetKey: string; registry: As
           mechanisms={taxonomy.data?.axes?.mechanism ?? []}
           onCreated={registry.reload}
         />
-        <div className="rr-row">
-          <select className="rr-select" value={severity} onChange={(e) => setSeverity(e.target.value)}>
+        {/* 걸러내기 네 칸 — Select 는 기본이 w-full 이라 한 줄에 서려면 폭을 풀어 준다. */}
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <Select
+            className="w-auto min-w-[9rem]"
+            aria-label="severity 걸러내기"
+            value={severity}
+            onChange={(e) => setSeverity(e.target.value)}
+          >
             <option value="">severity 전체</option>
             {["경미", "중대", "치명"].map((s) => (
               <option key={s} value={s}>
                 {s}
               </option>
             ))}
-          </select>
-          <select className="rr-select" value={domain} onChange={(e) => setDomain(e.target.value)}>
+          </Select>
+          <Select
+            className="w-auto min-w-[9rem]"
+            aria-label="domain 걸러내기"
+            value={domain}
+            onChange={(e) => setDomain(e.target.value)}
+          >
             <option value="">domain 전체</option>
             {domains.map((d) => (
               <option key={d} value={d}>
                 {d}
               </option>
             ))}
-          </select>
-          <select className="rr-select" value={direction} onChange={(e) => setDirection(e.target.value)}>
+          </Select>
+          <Select
+            className="w-auto min-w-[9rem]"
+            aria-label="direction 걸러내기"
+            value={direction}
+            onChange={(e) => setDirection(e.target.value)}
+          >
             <option value="">direction 전체</option>
             {["risk", "improvement", "neutral"].map((d) => (
               <option key={d} value={d}>
                 {d}
               </option>
             ))}
-          </select>
-          <select className="rr-select" value={status} onChange={(e) => setStatus(e.target.value)}>
+          </Select>
+          <Select
+            className="w-auto min-w-[9rem]"
+            aria-label="status 걸러내기"
+            value={status}
+            onChange={(e) => setStatus(e.target.value)}
+          >
             <option value="">status 전체</option>
             {["open", "verified", "dismissed", "mitigated", "superseded"].map((s) => (
               <option key={s} value={s}>
                 {s}
               </option>
             ))}
-          </select>
-          <span className="rr-muted">
+          </Select>
+          <span className="text-sm text-muted-foreground">
             {filtered.length} / {rows.length} 행
           </span>
         </div>
@@ -590,102 +643,102 @@ function RegistryCard({ targetKey, registry }: { targetKey: string; registry: As
           empty="등록부 행이 없습니다."
         />
         {selectedRow ? (
-          <div className="rr-panel">
-            <div className="rr-row rr-panel-head">
-              <strong>{selectedRow.cluster_key}</strong>
-              <RegistryStatusBadge value={selectedRow.status} />
-            </div>
+          <SubPanel
+            className="mt-3"
+            title={selectedRow.cluster_key}
+            actions={<RegistryStatusBadge value={selectedRow.status} />}
+          >
             <VerbatimBlock text={selectedRow.claim} label="claim" />
-            <h3 className="rr-subhead">근거</h3>
+            <h3 className="m-0 text-sm text-muted-foreground">근거</h3>
             {selectedRow.cites.length === 0 ? (
-              <p className="rr-muted">근거 참조가 없습니다.</p>
+              <p className="m-0 text-sm text-muted-foreground">근거 참조가 없습니다.</p>
             ) : (
-              <ul className="rr-list">
+              <ul className="m-0 list-disc pl-5 text-sm [&>li]:mb-1">
                 {selectedRow.cites.map((c, i) => (
                   <li key={`${c.ref}#${i}`}>
                     <RefPeek value={c.ref} />
-                    <span className="rr-muted">{c.quote}</span>
+                    <span className="text-sm text-muted-foreground">{c.quote}</span>
                     {c.dangling ? <Badge tone="bad">dangling</Badge> : null}
                   </li>
                 ))}
               </ul>
             )}
-            <h3 className="rr-subhead">상태 변경</h3>
-            <div className="rr-form-grid">
-              <label className="rr-field">
-                <span>status</span>
-                <select
-                  className="rr-select"
-                  value={nextStatus}
-                  onChange={(e) => setNextStatus(e.target.value as RegistryStatusInput)}
-                >
+            <h3 className="m-0 text-sm text-muted-foreground">상태 변경</h3>
+            <FormGrid>
+              <FormField label="바꿀 상태" hint="status">
+                <Select value={nextStatus} onChange={(e) => setNextStatus(e.target.value as RegistryStatusInput)}>
                   {REGISTRY_STATUSES.map((s) => (
                     <option key={s} value={s}>
                       {s}
                     </option>
                   ))}
-                </select>
-              </label>
-              <label className="rr-field">
-                <span>evidence_ref (선택)</span>
-                <input className="rr-input" value={evidenceRef} onChange={(e) => setEvidenceRef(e.target.value)} />
-              </label>
-              <label className="rr-field">
-                <span>note (선택)</span>
-                <input className="rr-input" value={note} onChange={(e) => setNote(e.target.value)} />
-              </label>
-            </div>
-            <button type="button" className="rr-btn" onClick={saveStatus} disabled={busy}>
+                </Select>
+              </FormField>
+              <FormField label="근거 참조" hint="evidence_ref · 선택">
+                <Input value={evidenceRef} onChange={(e) => setEvidenceRef(e.target.value)} />
+              </FormField>
+              <FormField label="메모" hint="note · 선택">
+                <Input value={note} onChange={(e) => setNote(e.target.value)} />
+              </FormField>
+            </FormGrid>
+            <Button type="button" variant="outline" className="w-fit" onClick={saveStatus} disabled={busy}>
               상태 저장
-            </button>
-          </div>
+            </Button>
+          </SubPanel>
         ) : null}
       </SectionCard>
 
-      <SectionCard title="verdict" subtitle="후보는 집계일 뿐이고 확정은 사람이 합니다.">
+      <SectionCard title="판정 확정" subtitle="후보는 집계일 뿐이고 확정은 사람이 합니다.">
         {registry.data?.verdict_candidate ? (
           <KeyValueTable
             rows={[
-              { label: "후보", value: <VerdictBadge value={registry.data.verdict_candidate.verdict} /> },
-              { label: "사유", value: registry.data.verdict_candidate.reason },
+              {
+                label: "집계 후보",
+                hint: "verdict_candidate.verdict",
+                value: <VerdictBadge value={registry.data.verdict_candidate.verdict} />,
+              },
+              { label: "후보 사유", hint: "reason", value: registry.data.verdict_candidate.reason },
               {
                 label: "조건",
+                hint: "conditions",
                 value:
                   registry.data.verdict_candidate.conditions.length === 0 ? (
-                    <span className="rr-muted">없음</span>
+                    <Unknown>없음</Unknown>
                   ) : (
-                    <ul className="rr-list">
+                    <ul className="m-0 list-disc pl-5 text-sm [&>li]:mb-1">
                       {registry.data.verdict_candidate.conditions.map((c, i) => (
                         <li key={i}>{c}</li>
                       ))}
                     </ul>
                   ),
               },
-              { label: "확정값", value: <VerdictBadge value={registry.data.verdict_final ?? "undetermined"} /> },
+              {
+                label: "확정값",
+                hint: "verdict_final",
+                value: <VerdictBadge value={registry.data.verdict_final ?? "undetermined"} />,
+              },
             ]}
           />
         ) : (
-          <p className="rr-muted">후보가 아직 없습니다.</p>
+          <p className="text-sm text-muted-foreground">후보가 아직 없습니다.</p>
         )}
-        <div className="rr-form-grid">
-          <label className="rr-field">
-            <span>verdict</span>
-            <select className="rr-select" value={verdict} onChange={(e) => setVerdict(e.target.value as Verdict)}>
+        <FormGrid>
+          <FormField label="판정" hint="verdict">
+            <Select value={verdict} onChange={(e) => setVerdict(e.target.value as Verdict)}>
               {VERDICTS.map((v) => (
                 <option key={v} value={v}>
                   {v}
                 </option>
               ))}
-            </select>
-          </label>
-          <label className="rr-field">
-            <span>note</span>
-            <input className="rr-input" value={verdictNote} onChange={(e) => setVerdictNote(e.target.value)} />
-          </label>
-        </div>
-        <button type="button" className="rr-btn rr-btn-primary" onClick={saveVerdict} disabled={busy}>
+            </Select>
+          </FormField>
+          <FormField label="사유 메모" hint="note">
+            <Input value={verdictNote} onChange={(e) => setVerdictNote(e.target.value)} />
+          </FormField>
+        </FormGrid>
+        <Button type="button" className="mt-3" onClick={saveVerdict} disabled={busy}>
           확정
-        </button>
+        </Button>
       </SectionCard>
     </>
   );
@@ -701,19 +754,21 @@ function ConsolidatedReportCard({ level, sync }: { level: string | null; sync: E
     >
       <KeyValueTable
         rows={[
-          { label: "현재 레벨", value: level ? <LevelBadge value={level} /> : "-" },
+          { label: "현재 레벨", hint: "level", value: level ? <LevelBadge value={level} /> : <Unknown /> },
           {
             label: "RA 반영",
-            value: sync ? <StatusBadge value={sync.ra} /> : <span className="rr-muted">재동기를 누르면 확인합니다.</span>,
+            hint: "external_sync.ra",
+            value: sync ? <StatusBadge value={sync.ra} /> : <Unknown>재동기를 누르면 확인합니다.</Unknown>,
           },
           {
             label: "AIDataHub 반영",
-            value: sync ? <StatusBadge value={sync.adh} /> : <span className="rr-muted">재동기를 누르면 확인합니다.</span>,
+            hint: "external_sync.adh",
+            value: sync ? <StatusBadge value={sync.adh} /> : <Unknown>재동기를 누르면 확인합니다.</Unknown>,
           },
         ]}
       />
       <NotReadyBlock what="통합 보고서 링크(v1/v2/v3)" />
-      <p className="rr-muted">
+      <p className="text-sm text-muted-foreground">
         패널별 RA 보고서 id 는 위 패널 표의 '기록' 칸에 있습니다. RA 반영이 unavailable 이어도 완결 레벨은 오릅니다.
       </p>
     </SectionCard>
@@ -731,7 +786,7 @@ function BriefTokens({ panels }: { panels: BriefPanel[] }) {
 
   if (withToken.length === 0) {
     return (
-      <p className="rr-muted">
+      <p className="text-sm text-muted-foreground">
         브리프 토큰이 없습니다 — 편성된 패널이 없거나 이 경로가 토큰을 발급하지 않았습니다.
       </p>
     );
@@ -749,24 +804,27 @@ function BriefTokens({ panels }: { panels: BriefPanel[] }) {
   }
 
   return (
-    <div className="rr-stack">
-      <h3 className="rr-subhead">브리프 토큰</h3>
-      <p className="rr-muted">
+    <div className="mt-3 flex flex-col gap-2">
+      <h3 className="m-0 text-sm text-muted-foreground">브리프 토큰</h3>
+      <p className="m-0 text-sm text-muted-foreground">
         L2 워크플로 인자 <code>briefToken</code> 에 넣습니다. 발급 때만 원문이 오므로 이 화면을 떠나면
         다시 볼 수 없습니다(앱은 해시만 저장합니다).
       </p>
-      <ul className="rr-list">
+      <ul className="m-0 list-disc pl-5 text-sm [&>li]:mb-1">
         {withToken.map((panel) => (
-          <li key={panel.panel_id} className="rr-row">
-            <code>{panel.panel_id}</code>
-            <button
-              type="button"
-              className="rr-btn rr-btn-quiet"
-              onClick={() => copy(panel.panel_id, panel.brief_token as string)}
-            >
-              토큰 복사
-            </button>
-            {copied === panel.panel_id ? <Badge tone="ok">복사됨</Badge> : null}
+          <li key={panel.panel_id}>
+            <span className="flex flex-wrap items-center gap-2">
+              <code>{panel.panel_id}</code>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => copy(panel.panel_id, panel.brief_token as string)}
+              >
+                토큰 복사
+              </Button>
+              {copied === panel.panel_id ? <Badge tone="ok">복사됨</Badge> : null}
+            </span>
           </li>
         ))}
       </ul>
@@ -799,28 +857,28 @@ function RecallPreview({ targetKey }: { targetKey: string }) {
       title="브리프(RecallPreview)"
       subtitle="항목은 제외만 할 수 있고 추가할 수 없습니다. 이 화면의 제외는 미리보기용이며 아직 서버 브리프에 반영되지 않습니다."
       actions={
-        <select className="rr-select" value={tier} onChange={(e) => setTier(e.target.value)}>
+        <Select className="w-auto min-w-[9rem]" aria-label="tier 걸러내기" value={tier} onChange={(e) => setTier(e.target.value)}>
           <option value="">tier 전체</option>
           {TIERS.map((t) => (
             <option key={t} value={t}>
               {t}
             </option>
           ))}
-        </select>
+        </Select>
       }
     >
       <ErrorBanner error={brief.error} onRetry={brief.reload} />
       {brief.loading && !brief.data ? <LoadingBlock /> : null}
       {brief.data ? (
         <>
-          <p className="rr-muted">
+          <p className="text-sm text-muted-foreground">
             패널 {brief.data.panels.length}개 · {brief.data.budget.bytes} bytes · 잘린 항목 {brief.data.budget.dropped}
           </p>
           <BriefTokens panels={brief.data.panels} />
           {slots.length === 0 ? <EmptyBlock title="근거 슬롯이 비어 있습니다." /> : null}
           {slots.map(([slot, items]) => (
-            <div key={slot} className="rr-stack">
-              <h3 className="rr-subhead">{slot}</h3>
+            <div key={slot} className="mt-3 flex flex-col gap-2">
+              <h3 className="m-0 text-sm text-muted-foreground">{slot}</h3>
               <DataTable
                 columns={[
                   {
@@ -870,6 +928,7 @@ export default function TargetPage() {
   const [error, setError] = useState<unknown>(null);
   const [sync, setSync] = useState<ExternalSync | null>(null);
   const [rosterNote, setRosterNote] = useState<string | null>(null);
+  const [tab, setTab] = useState<TargetTab>("coverage");
 
   const job = coverage.data?.job ?? null;
   const polling = job !== null && ACTIVE_JOB_STATES.has(job.state);
@@ -916,82 +975,147 @@ export default function TargetPage() {
 
   return (
     <>
-      <SectionCard
-        title="타깃"
-        subtitle={`target_key ${targetKey}`}
+      <PageHeader
+        // 과제로 돌아가는 링크는 아직 못 만든다 — 서버 응답에 과제 id 가 없다(아래 NotReadyBlock 과 같은 공백).
+        // 그래서 상위 화면은 홈의 타깃 목록이다.
+        crumb={
+          <Link to="/" className="inline-flex items-center gap-1 underline-offset-4 hover:underline">
+            <ChevronLeft className="size-3.5" aria-hidden="true" />
+            타깃 목록
+          </Link>
+        }
+        title={`${KIND_LABEL[kind] ?? kind} 심사`}
+        subtitle={
+          <span className="flex flex-wrap items-center gap-x-2">
+            <Mono>{targetKey}</Mono>
+            {coverage.data ? <span>좌석 {coverage.data.roster_size}석</span> : null}
+          </span>
+        }
         actions={
           <>
             {coverage.data ? <UnseatedBadge n={coverage.data.unseated_n} /> : null}
             <ExternalSyncBadge sync={sync} />
-            <button type="button" className="rr-btn" onClick={resync} disabled={busy}>
+            <Button type="button" variant="outline" onClick={resync} disabled={busy}>
+              <RefreshCw className="size-4" aria-hidden="true" />
               재동기
-            </button>
-            <button type="button" className="rr-btn" onClick={refreshRoster} disabled={busy}>
+            </Button>
+            <Button type="button" variant="outline" onClick={refreshRoster} disabled={busy}>
+              <Users className="size-4" aria-hidden="true" />
               로스터 갱신
-            </button>
+            </Button>
           </>
         }
-      >
+      />
+
+      {/*
+       * 요약 먼저 — 예전에는 이 카드가 `kind`·`ref_id` 로 시작하고 verdict 가 일곱 번째 줄이었다.
+       * 이 화면에서 사람이 가장 먼저 알아야 할 것은 **"이 타깃을 지금 닫을 수 있나"** 이고 그 답은
+       * verdict 와 완결 레벨이다. 그래서 둘을 맨 위로 올리고 신원(kind·ref_id)은 아래로 내렸다 —
+       * 지운 줄은 없다. 집계 후보는 아래 '판정 확정' 카드(등록부 탭)에 상세가 있지만, 탭에 들어가야
+       * 보이면 '늘 보여야 하는 판정' 이 숨으므로 배지 한 칸만 여기 둔다.
+       */}
+      <SectionCard title="판정" subtitle="이 타깃을 지금 닫을 수 있는지입니다. 확정은 사람이 하고 후보는 집계입니다.">
         <ErrorBanner error={error} />
         <ErrorBanner error={coverage.error} onRetry={coverage.reload} />
-        {rosterNote ? <p className="rr-muted">{rosterNote}</p> : null}
+        {rosterNote ? <p className="text-sm text-muted-foreground">{rosterNote}</p> : null}
         {coverage.loading && !coverage.data ? <LoadingBlock /> : null}
         <KeyValueTable
           rows={[
-            { label: "kind", value: kind },
             {
-              label: "ref_id",
+              label: "확정 판정",
+              hint: "verdict_final",
+              value: registry.data ? (
+                <VerdictBadge value={registry.data.verdict_final ?? "undetermined"} />
+              ) : (
+                <Unknown>등록부를 읽는 중입니다.</Unknown>
+              ),
+            },
+            {
+              label: "집계 후보",
+              hint: "verdict_candidate",
+              value: registry.data?.verdict_candidate ? (
+                <VerdictBadge value={registry.data.verdict_candidate.verdict} />
+              ) : (
+                <Unknown>후보가 아직 없습니다.</Unknown>
+              ),
+            },
+            { label: "완결 레벨", hint: "level", value: coverage.data ? <LevelBadge value={coverage.data.level} /> : <Unknown /> },
+            {
+              label: "닫기 레벨",
+              hint: "close_level",
+              value: coverage.data ? <LevelBadge value={coverage.data.close_level} /> : <Unknown />,
+            },
+            { label: "편성 좌석", hint: "roster_size", value: coverage.data ? String(coverage.data.roster_size) : <Unknown /> },
+            { label: "심사 대상", hint: "kind", value: KIND_LABEL[kind] ?? kind },
+            {
+              label: "대상 id",
+              hint: "ref_id",
               value:
                 kind === "snap" && refId ? (
                   <code>{refId}</code>
                 ) : refId ? (
                   <Link to={`/compare?diff=${encodeURIComponent(refId)}`}>{refId}</Link>
                 ) : (
-                  "-"
+                  <Unknown />
                 ),
             },
-            { label: "level", value: coverage.data ? <LevelBadge value={coverage.data.level} /> : "-" },
-            { label: "close_level", value: coverage.data ? <LevelBadge value={coverage.data.close_level} /> : "-" },
-            { label: "roster_size", value: coverage.data ? String(coverage.data.roster_size) : "-" },
             {
-              label: "verdict_final",
-              value: registry.data ? (
-                <VerdictBadge value={registry.data.verdict_final ?? "undetermined"} />
-              ) : (
-                <span className="rr-muted">등록부를 읽는 중입니다.</span>
-              ),
-            },
-            {
-              label: "external_sync",
-              value: sync ? (
-                <ExternalSyncBadge sync={sync} />
-              ) : (
-                <span className="rr-muted">재동기를 누르면 확인합니다.</span>
-              ),
+              label: "외부 반영",
+              hint: "external_sync",
+              value: sync ? <ExternalSyncBadge sync={sync} /> : <Unknown>재동기를 누르면 확인합니다.</Unknown>,
             },
           ]}
         />
         <NotReadyBlock what="ir_hash · 과제 링크 · superseded_by" />
       </SectionCard>
 
-      <SectionCard title="진행판" subtitle="행 = 도메인, 열 = 커버리지 상태. 행을 누르면 좌석 목록이 열립니다.">
-        {coverage.loading && !coverage.data ? <LoadingBlock /> : null}
-        {coverage.data ? (
-          <CoverageHeatmap coverage={coverage.data} targetKey={targetKey} />
-        ) : coverage.loading ? null : (
-          <EmptyBlock title="커버리지가 아직 없습니다." hint="타깃이 편성되면 도메인별 좌석 상태가 여기 쌓입니다." />
-        )}
-      </SectionCard>
+      <TabBar idPrefix="tgt"
+        label="타깃 구역 탭"
+        value={tab}
+        onChange={setTab}
+        tabs={[
+          { tab: "coverage", label: "진행판", count: coverage.data ? Object.keys(coverage.data.by_domain).length : null },
+          { tab: "panels", label: "패널" },
+          { tab: "registry", label: "등록부", count: registry.data ? registry.data.rows.length : null },
+          { tab: "report", label: "보고서" },
+          { tab: "brief", label: "브리프" },
+          { tab: "quality", label: "품질" },
+        ]}
+      />
 
-      <SectionCard title="패널 실행" subtitle={polling ? "진행 중 — 5초마다 갱신합니다." : undefined}>
-        <PanelRunner targetKey={targetKey} coverage={coverage.data} onChanged={coverage.reload} />
-      </SectionCard>
+      {/* 탭은 **보이는 것만** 바꾼다. 조건부 렌더로 쓰면 저장 전 폼(등록부 상태 변경·판정 메모)과
+          실행 직후 경고(credential === "service")가 탭 전환만으로 날아가고, 브리프는 재진입마다
+          brief_token 이 재발급돼 사용자가 복사해 둔 토큰이 무효가 된다. TabPanel 주석 참조. */}
+      <TabPanel active={tab === "coverage"} tab="coverage" idPrefix="tgt">
+        <SectionCard title="진행판" subtitle="행 = 도메인, 열 = 커버리지 상태. 행을 누르면 좌석 목록이 열립니다.">
+          {coverage.loading && !coverage.data ? <LoadingBlock /> : null}
+          {coverage.data ? (
+            <CoverageHeatmap coverage={coverage.data} targetKey={targetKey} />
+          ) : coverage.loading ? null : (
+            <EmptyBlock title="커버리지가 아직 없습니다." hint="타깃이 편성되면 도메인별 좌석 상태가 여기 쌓입니다." />
+          )}
+        </SectionCard>
 
-      <PanelsCard targetKey={targetKey} />
-      <RegistryCard targetKey={targetKey} registry={registry} />
-      <ConsolidatedReportCard level={coverage.data?.level ?? null} sync={sync} />
-      <RecallPreview targetKey={targetKey} />
-      <QualityCard />
+        <SectionCard title="패널 실행" subtitle={polling ? "진행 중 — 5초마다 갱신합니다." : undefined}>
+          <PanelRunner targetKey={targetKey} coverage={coverage.data} onChanged={coverage.reload} />
+        </SectionCard>
+      </TabPanel>
+
+      <TabPanel active={tab === "panels"} tab="panels" idPrefix="tgt">
+        <PanelsCard targetKey={targetKey} />
+      </TabPanel>
+      <TabPanel active={tab === "registry"} tab="registry" idPrefix="tgt">
+        <RegistryCard targetKey={targetKey} registry={registry} />
+      </TabPanel>
+      <TabPanel active={tab === "report"} tab="report" idPrefix="tgt">
+        <ConsolidatedReportCard level={coverage.data?.level ?? null} sync={sync} />
+      </TabPanel>
+      <TabPanel active={tab === "brief"} tab="brief" idPrefix="tgt">
+        <RecallPreview targetKey={targetKey} />
+      </TabPanel>
+      <TabPanel active={tab === "quality"} tab="quality" idPrefix="tgt">
+        <QualityCard />
+      </TabPanel>
     </>
   );
 }

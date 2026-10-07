@@ -1,6 +1,7 @@
 // 비교 화면 — base/target 선택·SameAsResolver·게이트·diff 생성·comparability·3층 DiffView·사건·선례·타깃 만들기(계획 §8.2.4 ComparePage 행).
 import { useMemo, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { GitCompare, Target } from "lucide-react";
 import { ApiError, isNotReady, riskApi } from "../api/risk.api";
 import { useAsync } from "../hooks/useAsync";
 import { SectionCard, VerbatimBlock } from "../components/SectionCard";
@@ -10,6 +11,7 @@ import { EmptyBlock, ErrorBanner, LoadingBlock, NotReadyBlock } from "../compone
 import { Badge } from "../components/Badge";
 import { GateBanner, GateTable, isGateFailing } from "../components/GateBanner";
 import { SameAsResolver } from "../components/SameAsResolver";
+import { Banner, Button, FormField, FormGrid, Mono, PageHeader, Select, SubPanel } from "../ui/primitives";
 import { fmtCell, fmtCounts, fmtEpoch } from "../format";
 import type { DiffBlocked, DiffEvent, DiffItem, DiffLayer, Gate, ProjectCard } from "../types";
 
@@ -37,6 +39,7 @@ const EXCLUDED_LABEL: Record<string, string> = {
 
 function SnapshotPicker({
   label,
+  field,
   projects,
   projectId,
   onProjectChange,
@@ -44,6 +47,8 @@ function SnapshotPicker({
   onChange,
 }: {
   label: string;
+  /** 서버·주소에서 쓰는 원시 이름(base · target) — 사람 말 라벨 옆에 작게 둔다. */
+  field: string;
   projects: ProjectCard[];
   projectId: string;
   onProjectChange: (projectId: string) => void;
@@ -53,14 +58,16 @@ function SnapshotPicker({
   const detail = useAsync((signal) => riskApi.getProject(projectId, { signal }), [projectId], projectId !== "");
 
   return (
-    <div className="rr-panel">
-      <div className="rr-row rr-panel-head">
-        <strong>{label}</strong>
-      </div>
-      <label className="rr-field">
-        <span>과제</span>
-        <select
-          className="rr-select"
+    <SubPanel
+      title={
+        <span className="flex items-baseline gap-1.5">
+          {label}
+          <Mono className="text-[0.7rem] opacity-70">{field}</Mono>
+        </span>
+      }
+    >
+      <FormField label="과제">
+        <Select
           value={projectId}
           onChange={(e) => {
             onProjectChange(e.target.value);
@@ -73,16 +80,15 @@ function SnapshotPicker({
               {p.code} · {p.name}
             </option>
           ))}
-        </select>
-      </label>
+        </Select>
+      </FormField>
       {isNotReady(detail.error) ? (
         <NotReadyBlock what="과제 상세" />
       ) : (
         <ErrorBanner error={detail.error} onRetry={detail.reload} />
       )}
-      <label className="rr-field">
-        <span>스냅샷</span>
-        <select className="rr-select" value={value} onChange={(e) => onChange(e.target.value)}>
+      <FormField label="스냅샷">
+        <Select value={value} onChange={(e) => onChange(e.target.value)}>
           <option value="">선택</option>
           {(detail.data?.snapshots ?? []).map((s) => (
             <option key={s.id} value={s.id}>
@@ -90,19 +96,30 @@ function SnapshotPicker({
               {s.degraded ? " · degraded" : ""}
             </option>
           ))}
-        </select>
-      </label>
+        </Select>
+      </FormField>
       {detail.loading && !detail.data ? <LoadingBlock label="스냅샷 목록을 불러오는 중." /> : null}
       {value ? (
-        <p className="rr-muted">
+        <p className="m-0 text-xs text-muted-foreground">
           snapshot_id <code>{value}</code>
         </p>
       ) : null}
-    </div>
+    </SubPanel>
   );
 }
 
-function DiffView({ diffId, semanticBlocked }: { diffId: string; semanticBlocked: boolean }) {
+function DiffView({
+  diffId,
+  base,
+  target,
+  semanticBlocked,
+}: {
+  diffId: string;
+  /** 주소에서 고른 두 스냅샷 — 식별자 카드가 그대로 보인다(diff 본문을 기다리지 않는다). */
+  base: string;
+  target: string;
+  semanticBlocked: boolean;
+}) {
   const doc = useAsync((signal) => riskApi.getDiff(diffId, { signal }), [diffId]);
   const summary = useAsync((signal) => riskApi.getDiffSummary(diffId, { signal }), [diffId]);
   const events = useAsync((signal) => riskApi.getDiffEvents(diffId, { signal }), [diffId]);
@@ -153,7 +170,7 @@ function DiffView({ diffId, semanticBlocked }: { diffId: string; semanticBlocked
       key: "refs",
       header: "refs",
       cell: (e) => (
-        <span className="rr-badge-group">
+        <span className="inline-flex flex-wrap items-center gap-1">
           {e.refs.map((r) => (
             <code key={r}>{r}</code>
           ))}
@@ -164,87 +181,117 @@ function DiffView({ diffId, semanticBlocked }: { diffId: string; semanticBlocked
 
   return (
     <>
-      <SectionCard title="diff 요약" subtitle="코드가 만든 summary_text 원문입니다 — 화면이 다시 쓰지 않습니다.">
-        {isNotReady(summary.error) ? (
-          <NotReadyBlock what="diff 요약" />
-        ) : (
-          <ErrorBanner error={summary.error} onRetry={summary.reload} />
-        )}
-        {summary.loading && !summary.data ? <LoadingBlock /> : null}
-        {summary.data ? (
-          <>
-            <VerbatimBlock text={summary.data.summary_text} label="summary_text" />
-            <ul className="rr-list">
-              {(summary.data.lines ?? []).map((line, i) => {
-                const cids = Array.from(line.matchAll(FOOTNOTE_RE)).map((m) => m[1]);
-                return (
-                  <li key={i}>
-                    {line}
-                    {cids.map((cid) => (
-                      <button
-                        key={cid}
-                        type="button"
-                        className="rr-btn rr-btn-quiet"
-                        onClick={() => setSelectedCid(cid)}
-                      >
-                        {cid}
-                      </button>
-                    ))}
-                  </li>
-                );
-              })}
-            </ul>
-          </>
-        ) : null}
+      {/* 순서를 바꿨다 — 비교할 수 없는 두 스냅샷의 diff 를 읽는 것은 무의미하므로 그 판정을 요약보다 위로 올렸다. */}
+      <SectionCard title="비교 가능성(comparability)" subtitle="판정은 서버가 계산한 값입니다.">
+        <div className="flex flex-col gap-3">
+          {isNotReady(doc.error) ? (
+            <NotReadyBlock what="diff 본문" />
+          ) : (
+            <ErrorBanner error={doc.error} onRetry={doc.reload} />
+          )}
+          {doc.loading && !doc.data ? <LoadingBlock /> : null}
+          {doc.data ? (
+            <KeyValueTable
+              rows={[
+                {
+                  label: "비교 가능",
+                  hint: "comparability.ok",
+                  value: (
+                    <Badge tone={doc.data.comparability.ok ? "ok" : "bad"}>
+                      {doc.data.comparability.ok ? "ok" : "no"}
+                    </Badge>
+                  ),
+                },
+                {
+                  label: "제외 사유",
+                  hint: "excluded_reason",
+                  value: doc.data.comparability.excluded_reason ? (
+                    <Badge
+                      tone="muted"
+                      title={EXCLUDED_LABEL[doc.data.comparability.excluded_reason] ?? "사전에 없는 사유입니다."}
+                    >
+                      {doc.data.comparability.excluded_reason}
+                    </Badge>
+                  ) : (
+                    <span className="text-muted-foreground">없음</span>
+                  ),
+                },
+                {
+                  label: "비고",
+                  hint: "note",
+                  value: doc.data.comparability.note ?? <span className="text-muted-foreground">없음</span>,
+                },
+                { label: "건수 집계", hint: "counts", value: fmtCounts(doc.data.counts) },
+                {
+                  label: "제외 항목",
+                  hint: "items[].excluded_reason",
+                  value:
+                    Object.keys(excludedCounts).length === 0 ? (
+                      <span className="text-muted-foreground">없음</span>
+                    ) : (
+                      <span className="inline-flex flex-wrap items-center gap-1">
+                        {Object.entries(excludedCounts).map(([reason, n]) => (
+                          <Badge key={reason} tone="muted" title={EXCLUDED_LABEL[reason] ?? "사전에 없는 사유입니다."}>
+                            {reason} {n}건
+                          </Badge>
+                        ))}
+                      </span>
+                    ),
+                },
+              ]}
+            />
+          ) : null}
+        </div>
       </SectionCard>
 
-      <SectionCard title="비교 가능성(comparability)" subtitle="판정은 서버가 계산한 값입니다.">
-        {isNotReady(doc.error) ? <NotReadyBlock what="diff 본문" /> : <ErrorBanner error={doc.error} onRetry={doc.reload} />}
-        {doc.loading && !doc.data ? <LoadingBlock /> : null}
-        {doc.data ? (
-          <KeyValueTable
-            rows={[
-              {
-                label: "비교 가능",
-                value: (
-                  <Badge tone={doc.data.comparability.ok ? "ok" : "bad"}>
-                    {doc.data.comparability.ok ? "ok" : "no"}
-                  </Badge>
-                ),
-              },
-              {
-                label: "excluded_reason",
-                value: doc.data.comparability.excluded_reason ? (
-                  <Badge
-                    tone="muted"
-                    title={EXCLUDED_LABEL[doc.data.comparability.excluded_reason] ?? "사전에 없는 사유입니다."}
-                  >
-                    {doc.data.comparability.excluded_reason}
-                  </Badge>
-                ) : (
-                  <span className="rr-muted">없음</span>
-                ),
-              },
-              { label: "note", value: doc.data.comparability.note ?? <span className="rr-muted">없음</span> },
-              { label: "counts", value: fmtCounts(doc.data.counts) },
-              {
-                label: "제외 항목",
-                value:
-                  Object.keys(excludedCounts).length === 0 ? (
-                    <span className="rr-muted">없음</span>
-                  ) : (
-                    <span className="rr-badge-group">
-                      {Object.entries(excludedCounts).map(([reason, n]) => (
-                        <Badge key={reason} tone="muted" title={EXCLUDED_LABEL[reason] ?? "사전에 없는 사유입니다."}>
-                          {reason} {n}건
-                        </Badge>
+      <SectionCard title="diff 요약" subtitle="코드가 만든 summary_text 원문입니다 — 화면이 다시 쓰지 않습니다.">
+        <div className="flex flex-col gap-3">
+          {isNotReady(summary.error) ? (
+            <NotReadyBlock what="diff 요약" />
+          ) : (
+            <ErrorBanner error={summary.error} onRetry={summary.reload} />
+          )}
+          {summary.loading && !summary.data ? <LoadingBlock /> : null}
+          {summary.data ? (
+            <>
+              <VerbatimBlock text={summary.data.summary_text} label="summary_text" />
+              <ul className="m-0 list-disc pl-5 text-sm [&>li]:mb-1">
+                {(summary.data.lines ?? []).map((line, i) => {
+                  const cids = Array.from(line.matchAll(FOOTNOTE_RE)).map((m) => m[1]);
+                  return (
+                    <li key={i}>
+                      {line}
+                      {cids.map((cid) => (
+                        <Button
+                          key={cid}
+                          type="button"
+                          // ghost 는 hover 전에 아무 표시가 없다 — 본문 안에 박힌 글자라 누를 수 있다는
+                          // 사실이 사라진다(레거시 .rr-btn-quiet 는 밑줄을 줬다). link 가 그 자리다.
+                          variant="link"
+                          size="sm"
+                          className="ml-1 h-auto p-0 align-baseline font-mono text-xs"
+                          onClick={() => setSelectedCid(cid)}
+                        >
+                          {cid}
+                        </Button>
                       ))}
-                    </span>
-                  ),
-              },
-            ]}
-          />
-        ) : null}
+                    </li>
+                  );
+                })}
+              </ul>
+            </>
+          ) : null}
+        </div>
+      </SectionCard>
+
+      {/* 아래로 내렸다 — 식별자는 대조할 때만 필요하고 판정·요약보다 먼저 읽을 것이 아니다(지우지는 않는다). */}
+      <SectionCard title="비교한 두 스냅샷" subtitle="주소에서 고른 짝입니다.">
+        <KeyValueTable
+          rows={[
+            { label: "기준 스냅샷", hint: "base_snapshot_id", value: <code>{base || "-"}</code> },
+            { label: "비교 대상 스냅샷", hint: "target_snapshot_id", value: <code>{target || "-"}</code> },
+          ]}
+        />
       </SectionCard>
 
       <SectionCard title="diff 3층" subtitle="구조 · 파라메트릭 · 의미 층을 서버가 준 항목 그대로 보입니다.">
@@ -252,15 +299,17 @@ function DiffView({ diffId, semanticBlocked }: { diffId: string; semanticBlocked
           ? LAYERS.map(({ layer, label }) => {
               const rows = (doc.data?.items ?? []).filter((d) => d.layer === layer);
               return (
-                <div key={layer} className="rr-stack">
-                  <h3 className="rr-subhead">
-                    {label} <span className="rr-muted">{rows.length}건</span>
+                <div key={layer} className="mt-3 flex flex-col gap-2">
+                  <h3 className="m-0 text-sm text-muted-foreground">
+                    <strong className="font-medium text-foreground">{label}</strong>{" "}
+                    <span className="tabular-nums">{rows.length}건</span>
                   </h3>
                   {layer === "semantic" && semanticBlocked ? (
-                    <div className="rr-banner rr-banner-info" role="alert">
-                      <span className="rr-banner-title">의미층 차단(G2).</span>
-                      <span className="rr-banner-detail">대응이 미확정이라 의미 이벤트를 만들지 않았습니다.</span>
-                    </div>
+                    <Banner
+                      tone="info"
+                      title="의미층 차단(G2)."
+                      detail="대응이 미확정이라 의미 이벤트를 만들지 않았습니다."
+                    />
                   ) : null}
                   <DataTable
                     columns={itemColumns}
@@ -281,44 +330,48 @@ function DiffView({ diffId, semanticBlocked }: { diffId: string; semanticBlocked
       </SectionCard>
 
       <SectionCard title="사건(events)" subtitle="의미층 이벤트 펼침 표입니다.">
-        {isNotReady(events.error) ? (
-          <NotReadyBlock what="사건 표" />
-        ) : (
-          <ErrorBanner error={events.error} onRetry={events.reload} />
-        )}
-        {events.loading && !events.data ? <LoadingBlock /> : null}
-        {events.data ? (
-          <DataTable
-            columns={eventColumns}
-            rows={events.data ?? []}
-            rowKey={(e, i) => `${e.cid}#${i}`}
-            selectedKey={selectedCid}
-            onRowClick={(e) => setSelectedCid(e.cid)}
-            empty="사건이 없습니다."
-          />
-        ) : null}
+        <div className="flex flex-col gap-3">
+          {isNotReady(events.error) ? (
+            <NotReadyBlock what="사건 표" />
+          ) : (
+            <ErrorBanner error={events.error} onRetry={events.reload} />
+          )}
+          {events.loading && !events.data ? <LoadingBlock /> : null}
+          {events.data ? (
+            <DataTable
+              columns={eventColumns}
+              rows={events.data ?? []}
+              rowKey={(e, i) => `${e.cid}#${i}`}
+              selectedKey={selectedCid}
+              onRowClick={(e) => setSelectedCid(e.cid)}
+              empty="사건이 없습니다."
+            />
+          ) : null}
+        </div>
       </SectionCard>
 
       <SectionCard title="선례" subtitle="rr_delta_priors 의 수치만 보입니다.">
-        {isNotReady(precedents.error) ? (
-          <NotReadyBlock what="선례" />
-        ) : (
-          <ErrorBanner error={precedents.error} onRetry={precedents.reload} />
-        )}
-        {precedents.loading && !precedents.data ? <LoadingBlock /> : null}
-        {precedents.data ? (
-          <DataTable
-            columns={[
-              { key: "cluster", header: "cluster_key", cell: (r) => <code>{String(r.cluster_key)}</code>, nowrap: true },
-              { key: "n", header: "n", cell: (r) => String(r.n), align: "right", nowrap: true },
-              { key: "in", header: "in_range", cell: (r) => String(r.in_range), align: "right", nowrap: true },
-              { key: "out", header: "out_of_range", cell: (r) => String(r.out_of_range), align: "right", nowrap: true },
-            ]}
-            rows={precedents.data.rows ?? []}
-            rowKey={(r, i) => `${String(r.cluster_key)}#${i}`}
-            empty="선례가 없습니다."
-          />
-        ) : null}
+        <div className="flex flex-col gap-3">
+          {isNotReady(precedents.error) ? (
+            <NotReadyBlock what="선례" />
+          ) : (
+            <ErrorBanner error={precedents.error} onRetry={precedents.reload} />
+          )}
+          {precedents.loading && !precedents.data ? <LoadingBlock /> : null}
+          {precedents.data ? (
+            <DataTable
+              columns={[
+                { key: "cluster", header: "cluster_key", cell: (r) => <code>{String(r.cluster_key)}</code>, nowrap: true },
+                { key: "n", header: "n", cell: (r) => String(r.n), align: "right", nowrap: true },
+                { key: "in", header: "in_range", cell: (r) => String(r.in_range), align: "right", nowrap: true },
+                { key: "out", header: "out_of_range", cell: (r) => String(r.out_of_range), align: "right", nowrap: true },
+              ]}
+              rows={precedents.data.rows ?? []}
+              rowKey={(r, i) => `${String(r.cluster_key)}#${i}`}
+              empty="선례가 없습니다."
+            />
+          ) : null}
+        </div>
       </SectionCard>
     </>
   );
@@ -394,59 +447,95 @@ export default function ComparePage() {
 
   return (
     <>
-      <SectionCard title="비교" subtitle="두 스냅샷의 구조 · 파라메트릭 · 의미 3층 diff 를 만듭니다.">
-        {isNotReady(projects.error) ? (
-          <NotReadyBlock what="과제 목록" />
-        ) : (
-          <ErrorBanner error={projects.error} onRetry={projects.reload} />
-        )}
-        {projects.loading && !projects.data ? <LoadingBlock label="과제 목록을 불러오는 중." /> : null}
-        {projects.data && projects.data.projects.length === 0 ? (
-          <EmptyBlock title="과제가 없습니다." hint="먼저 과제를 등록하고 스냅샷을 동결하세요." />
-        ) : null}
-        <div className="rr-cols">
-          <SnapshotPicker
-            label="base"
-            projects={projects.data?.projects ?? []}
-            projectId={baseProject}
-            onProjectChange={chooseBaseProject}
-            value={base}
-            onChange={(v) => setParam("base", v)}
-          />
-          <SnapshotPicker
-            label="target"
-            projects={projects.data?.projects ?? []}
-            projectId={targetProject}
-            onProjectChange={setTargetProject}
-            value={target}
-            onChange={(v) => setParam("target", v)}
-          />
-        </div>
-        <ErrorBanner error={error} />
-        {gates ? (
+      <PageHeader
+        crumb={
           <>
-            <GateBanner gates={gates} />
-            <GateTable gates={gates} />
+            <Link to="/">과제</Link>
+            <span aria-hidden="true">/</span>
+            <span>비교</span>
           </>
-        ) : null}
-        {semanticBlocked ? (
-          <div className="rr-banner rr-banner-info" role="alert">
-            <span className="rr-banner-title">의미층 차단(G2).</span>
-            <span className="rr-banner-detail">{g2?.message}</span>
+        }
+        title="스냅샷 비교"
+        // id 는 제목이 아니라 보조 사실이다. diff 가 아직 없으면 그 사실(없음)을 그대로 적는다.
+        subtitle={
+          diffId ? (
+            <>
+              <span className="font-mono opacity-60">diff_id</span>{" "}
+              <Mono className="break-all">{diffId}</Mono>
+            </>
+          ) : (
+            "두 스냅샷을 골라 구조 · 파라메트릭 · 의미 3층 diff 를 만듭니다."
+          )
+        }
+        // 'diff 생성' 은 바로 아래 고르기 칸의 상태(두 스냅샷·G6)에 달려 있어 그 칸 옆에 남긴다.
+        actions={
+          diffId ? (
+            <Button type="button" onClick={createTarget} disabled={busy}>
+              <Target className="size-4" aria-hidden="true" />
+              타깃 만들기
+            </Button>
+          ) : null
+        }
+      />
+
+      {/* diff 생성·타깃 만들기 둘이 같은 `error` 를 쓴다. 버튼 하나가 머리말로 올라갔으므로 배너도
+          화면 맨 위에 둔다 — 아래 카드 안에 두면 타깃 만들기 실패가 긴 화면 밑에서 조용히 뜬다. */}
+      <ErrorBanner error={error} />
+
+      {/* 순서를 바꿨다 — diff 가 있으면 그 판정이 먼저다. 고르기·same-as 는 그 diff 를 만든 수단이라 아래로 내렸다. */}
+      {diffId ? <DiffView diffId={diffId} base={base} target={target} semanticBlocked={semanticBlocked} /> : null}
+
+      <SectionCard title="비교할 스냅샷" subtitle="두 스냅샷의 구조 · 파라메트릭 · 의미 3층 diff 를 만듭니다.">
+        <div className="flex flex-col gap-3">
+          {isNotReady(projects.error) ? (
+            <NotReadyBlock what="과제 목록" />
+          ) : (
+            <ErrorBanner error={projects.error} onRetry={projects.reload} />
+          )}
+          {projects.loading && !projects.data ? <LoadingBlock label="과제 목록을 불러오는 중." /> : null}
+          {projects.data && projects.data.projects.length === 0 ? (
+            <EmptyBlock title="과제가 없습니다." hint="먼저 과제를 등록하고 스냅샷을 동결하세요." />
+          ) : null}
+          <FormGrid className="[grid-template-columns:repeat(auto-fit,minmax(16rem,1fr))]">
+            <SnapshotPicker
+              label="기준 스냅샷"
+              field="base"
+              projects={projects.data?.projects ?? []}
+              projectId={baseProject}
+              onProjectChange={chooseBaseProject}
+              value={base}
+              onChange={(v) => setParam("base", v)}
+            />
+            <SnapshotPicker
+              label="비교 대상 스냅샷"
+              field="target"
+              projects={projects.data?.projects ?? []}
+              projectId={targetProject}
+              onProjectChange={setTargetProject}
+              value={target}
+              onChange={(v) => setParam("target", v)}
+            />
+          </FormGrid>
+          {gates ? (
+            <>
+              <GateBanner gates={gates} />
+              <GateTable gates={gates} />
+            </>
+          ) : null}
+          {semanticBlocked ? <Banner tone="info" title="의미층 차단(G2)." detail={g2?.message} /> : null}
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              onClick={createDiff}
+              disabled={!ready || busy || blocked}
+              title={blocked ? "G6 fail 이라 diff 를 만들 수 없습니다." : undefined}
+            >
+              <GitCompare className="size-4" aria-hidden="true" />
+              diff 생성
+            </Button>
+            {blocked ? <span className="text-sm text-muted-foreground">G6 fail — diff 를 만들 수 없습니다.</span> : null}
+            {!ready ? <span className="text-sm text-muted-foreground">서로 다른 두 스냅샷을 고르세요.</span> : null}
           </div>
-        ) : null}
-        <div className="rr-row">
-          <button
-            type="button"
-            className="rr-btn rr-btn-primary"
-            onClick={createDiff}
-            disabled={!ready || busy || blocked}
-            title={blocked ? "G6 fail 이라 diff 를 만들 수 없습니다." : undefined}
-          >
-            diff 생성
-          </button>
-          {blocked ? <span className="rr-muted">G6 fail — diff 를 만들 수 없습니다.</span> : null}
-          {!ready ? <span className="rr-muted">서로 다른 두 스냅샷을 고르세요.</span> : null}
         </div>
       </SectionCard>
 
@@ -457,28 +546,6 @@ export default function ComparePage() {
           <EmptyBlock title="스냅샷을 두 개 고르면 매칭 후보가 나옵니다." />
         )}
       </SectionCard>
-
-      {diffId ? (
-        <>
-          <SectionCard
-            title="diff"
-            subtitle={`diff_id ${diffId}`}
-            actions={
-              <button type="button" className="rr-btn rr-btn-primary" onClick={createTarget} disabled={busy}>
-                타깃 만들기
-              </button>
-            }
-          >
-            <KeyValueTable
-              rows={[
-                { label: "base_snapshot_id", value: <code>{base || "-"}</code> },
-                { label: "target_snapshot_id", value: <code>{target || "-"}</code> },
-              ]}
-            />
-          </SectionCard>
-          <DiffView diffId={diffId} semanticBlocked={semanticBlocked} />
-        </>
-      ) : null}
     </>
   );
 }

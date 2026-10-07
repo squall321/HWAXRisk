@@ -1,13 +1,26 @@
 // 큐레이션 큐 화면 — kind 6종의 열린 항목을 사람이 결정한다(계획 §7.7). 자동 적용은 없고 결정은 전부 사람 손이다.
 import { useMemo, useState } from "react";
+import { RefreshCw } from "lucide-react";
 import { riskApi } from "../api/risk.api";
 import { useAsync } from "../hooks/useAsync";
-import { SectionCard } from "../components/SectionCard";
-import { DataTable } from "../components/DataTable";
+import { SectionCard, VerbatimBlock } from "../components/SectionCard";
+import { DataTable, KeyValueTable } from "../components/DataTable";
 import type { Column } from "../components/DataTable";
 import { EmptyBlock, ErrorBanner, LoadingBlock } from "../components/StateBlocks";
 import { Badge } from "../components/Badge";
 import type { Tone } from "../components/Badge";
+import {
+  Banner,
+  Button,
+  Chip,
+  FormField,
+  FormGrid,
+  Input,
+  Mono,
+  PageHeader,
+  Select,
+  TabBar,
+} from "../ui/primitives";
 import { fmtEpoch, fmtJson } from "../format";
 import type { CurationDecision, CurationKind, CurationRow, CurationStatus, JsonObject } from "../types";
 
@@ -88,6 +101,15 @@ const KIND_BY_NAME = new Map(KINDS.map((k) => [k.kind, k]));
 
 const STATUS_TONE: Record<CurationStatus, Tone> = { open: "warn", done: "ok", rejected: "muted" };
 
+/**
+ * 상태를 고르는 자리에서 쓸 사람 말. 배지는 저장 값(`open`·`done`·`rejected`)을 그대로 보이고
+ * (§8.2.4 '배지 = 저장 값과 같은 문자열') 이 이름은 고르는 칸과 건수 줄에서만 쓴다.
+ * 순서는 선택지 순서이기도 하다.
+ */
+const STATUS_LABEL: Record<CurationStatus, string> = { open: "열림", done: "결정됨", rejected: "기각됨" };
+/** 서버 창 상한(backend routes.py `CURATION_LIMIT_MAX`). 받아 온 수가 이것이면 더 있을 수 있다. */
+const CURATION_WINDOW = 200;
+
 /** 결정에 값을 더 받아야 하는 kind — 어느 축인지·어느 값으로인지는 코드가 고를 수 없다. */
 type ExtraField = { key: string; label: string; hint: string; options?: string[] };
 
@@ -96,7 +118,8 @@ function extraFieldFor(kind: CurationKind, decision: string, axes: string[]): Ex
     return { key: "axis", label: "올릴 축", hint: "`char:<axis>:<value>` 의 축입니다.", options: axes };
   }
   if (kind === "unclassified_code" && (decision === "map" || decision === "new")) {
-    return { key: "mechanism_detail", label: "mechanism_detail", hint: "옮겨 갈 택소노미 값입니다." };
+    // 라벨은 사람 말로 쓰고 원시 필드명은 설명에 남긴다 — 서버와 대조할 이름을 지우지는 않는다(D35).
+    return { key: "mechanism_detail", label: "옮겨 갈 값", hint: "mechanism_detail — 옮겨 갈 택소노미 값입니다." };
   }
   return null;
 }
@@ -117,6 +140,11 @@ function summarize(row: CurationRow): string {
     default:
       return pick("finding_id") || pick("cluster_key_norm");
   }
+}
+
+/** 값이 없다는 사실 자체를 적는다 — 빈 칸이나 `-` 로 그리면 '0' 이나 '없음' 처럼 읽힌다. */
+function Unknown({ what = "아직 없음" }: { what?: string }) {
+  return <Chip tone="muted">{what}</Chip>;
 }
 
 function DecisionForm({
@@ -155,18 +183,16 @@ function DecisionForm({
   }
 
   if (!spec) {
-    return <span className="rr-muted">이 화면이 모르는 kind 입니다 — 서버를 갱신하세요.</span>;
+    return <span className="text-sm text-muted-foreground">이 화면이 모르는 kind 입니다 — 서버를 갱신하세요.</span>;
   }
 
   return (
-    <div className="rr-stack">
+    <div className="flex flex-col gap-3">
       <ErrorBanner error={error} />
-      <p className="rr-muted">{spec.what}</p>
-      <div className="rr-row">
-        <label className="rr-field">
-          <span>결정</span>
-          <select
-            className="rr-select"
+      <p className="m-0 text-sm text-muted-foreground">{spec.what}</p>
+      <FormGrid>
+        <FormField label="결정">
+          <Select
             value={decision}
             onChange={(e) => {
               setDecision(e.target.value);
@@ -178,42 +204,41 @@ function DecisionForm({
                 {d.label}
               </option>
             ))}
-          </select>
-        </label>
+          </Select>
+        </FormField>
         {field ? (
-          <label className="rr-field">
-            <span>{field.label}</span>
+          // 설명은 입력 칸 옆에 둔다 — 폼 밑에 적으면 값을 넣은 **뒤에** 읽는다.
+          <FormField label={field.label} hint={field.hint}>
             {field.options ? (
-              <select className="rr-select" value={extra} onChange={(e) => setExtra(e.target.value)}>
+              <Select value={extra} onChange={(e) => setExtra(e.target.value)}>
                 <option value="">고르세요.</option>
                 {field.options.map((opt) => (
                   <option key={opt} value={opt}>
                     {opt}
                   </option>
                 ))}
-              </select>
+              </Select>
             ) : (
-              <input className="rr-input" value={extra} onChange={(e) => setExtra(e.target.value)} />
+              <Input value={extra} onChange={(e) => setExtra(e.target.value)} />
             )}
-          </label>
+          </FormField>
         ) : null}
-        <label className="rr-field">
-          <span>사유(선택)</span>
-          <input className="rr-input" value={reason} onChange={(e) => setReason(e.target.value)} />
-        </label>
-        <button
+        <FormField label="사유(선택)">
+          <Input value={reason} onChange={(e) => setReason(e.target.value)} />
+        </FormField>
+      </FormGrid>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
           type="button"
-          className="rr-btn rr-btn-primary"
           // 값을 더 받아야 하는 결정은 그 값이 빌 때 서버가 422 를 낸다 — 보내기 전에 막는다.
           disabled={busy || (field !== null && extra.trim() === "")}
           onClick={submit}
         >
           {busy ? "보내는 중." : "결정"}
-        </button>
+        </Button>
       </div>
-      {field ? <span className="rr-muted">{field.hint}</span> : null}
       {applied && Object.keys(applied).length > 0 ? (
-        <pre className="rr-verbatim">{fmtJson(applied)}</pre>
+        <VerbatimBlock label="적용 결과" text={fmtJson(applied)} />
       ) : null}
     </div>
   );
@@ -223,7 +248,7 @@ export default function CurationQueuePage() {
   const [kind, setKind] = useState<"" | CurationKind>("");
   const [status, setStatus] = useState<CurationStatus>("open");
   const queue = useAsync(
-    (signal) => riskApi.getCuration({ kind: kind || undefined, status }, { signal }),
+    (signal) => riskApi.getCuration({ kind: kind || undefined, status, limit: CURATION_WINDOW }, { signal }),
     [kind, status],
   );
   // 축 목록은 서버가 준다 — 통제 어휘를 화면이 따로 갖지 않는다.
@@ -239,6 +264,22 @@ export default function CurationQueuePage() {
     return acc;
   }, [rows]);
 
+  /**
+   * 탭에 붙는 건수는 **지금 불러온 행에서 센 것**이다. 아직 못 불러왔거나 종류를 하나로 좁혀 둔
+   * 동안에는 다른 종류가 몇 건인지 알 수 없으므로 0 대신 null 을 준다 — 0 건과 '모른다' 는 다르고,
+   * TabBar 는 null 이면 숫자 자리를 아예 만들지 않는다.
+   */
+  function countFor(target: "" | CurationKind): number | null {
+    if (!queue.data) return null;
+    if (kind !== "" && kind !== target) return null;
+    return target === "" ? rows.length : (byKind[target] ?? 0);
+  }
+
+  const kindTabs: Array<{ tab: "" | CurationKind; label: string; count: number | null }> = [
+    { tab: "", label: "전체", count: countFor("") },
+    ...KINDS.map((k) => ({ tab: k.kind, label: k.label, count: countFor(k.kind) })),
+  ];
+
   const columns: Column<CurationRow>[] = [
     {
       key: "kind",
@@ -246,7 +287,12 @@ export default function CurationQueuePage() {
       nowrap: true,
       cell: (r) => <Badge tone="info">{KIND_BY_NAME.get(r.kind)?.label ?? r.kind}</Badge>,
     },
-    { key: "subject", header: "대상", cell: (r) => <span className="rr-nowrap">{summarize(r) || "-"}</span> },
+    {
+      key: "subject",
+      header: "대상",
+      nowrap: true,
+      cell: (r) => summarize(r) || <span className="text-muted-foreground">—</span>,
+    },
     {
       key: "status",
       header: "상태",
@@ -258,48 +304,58 @@ export default function CurationQueuePage() {
       key: "decided",
       header: "결정",
       nowrap: true,
-      cell: (r) => (r.decided_at ? `${r.decided_by ?? "-"} · ${fmtEpoch(r.decided_at)}` : "-"),
+      // 결정 전인 것을 `-` 로 적으면 '결정자가 하이픈' 으로 읽힌다 — 비어 있다는 사실만 적는다.
+      // 판정 조건(`decided_at` 이 있나)은 바꾸지 않았다.
+      cell: (r) =>
+        r.decided_at ? (
+          `${r.decided_by ?? "—"} · ${fmtEpoch(r.decided_at)}`
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        ),
     },
   ];
 
   return (
     <>
-      <SectionCard
+      <PageHeader
+        // 상위 화면이 없다 — 사이드바의 형제 항목이라 과제 목록의 하위로 적으면 없는 계층을 지어내는 것이다.
         title="큐레이션 큐"
         subtitle="코드가 판정하지 않고 사람에게 넘긴 것들입니다. 자동 병합·자동 승격은 없습니다."
         actions={
-          <button type="button" className="rr-btn rr-btn-quiet" onClick={queue.reload}>
+          <Button type="button" variant="ghost" onClick={queue.reload}>
+            <RefreshCw className="size-4" aria-hidden="true" />
             새로 고침
-          </button>
+          </Button>
         }
-      >
-        <div className="rr-row">
-          <label className="rr-field">
-            <span>종류</span>
-            <select className="rr-select" value={kind} onChange={(e) => setKind(e.target.value as "" | CurationKind)}>
-              <option value="">전체</option>
-              {KINDS.map((k) => (
-                <option key={k.kind} value={k.kind}>
-                  {k.label}
-                  {byKind[k.kind] ? ` (${byKind[k.kind]})` : ""}
+      />
+
+      {/* 종류 고르기 — 건수를 탭에 달아 '어디에 쌓였나' 를 고르기 전에 읽게 한다. */}
+      <TabBar tabs={kindTabs} value={kind} onChange={setKind} label="큐레이션 종류" />
+
+      <SectionCard
+        title={kind === "" ? "모든 종류" : (KIND_BY_NAME.get(kind)?.label ?? kind)}
+        // 서버는 `{rows}` 만 주고 총계를 안 준다(routes.py get_curation). 그래서 `rows.length` 는
+        // **총계가 아니라 받아 온 창의 크기**다 — 상한(200)에 닿았으면 그렇게 말하고, 아니면
+        // 그때만 건수가 곧 총계다. 다른 화면은 `list.data.total` 을 쓰므로 모양이 같으면 총계로 읽힌다.
+        subtitle={
+          queue.data
+            ? rows.length >= CURATION_WINDOW
+              ? `${STATUS_LABEL[status]} ${rows.length}건 이상 — 창 상한입니다.`
+              : `${STATUS_LABEL[status]} ${rows.length}건`
+            : undefined
+        }
+        actions={
+          <FormField label="상태" className="w-36">
+            <Select value={status} onChange={(e) => setStatus(e.target.value as CurationStatus)}>
+              {(Object.keys(STATUS_LABEL) as CurationStatus[]).map((s) => (
+                <option key={s} value={s}>
+                  {STATUS_LABEL[s]}
                 </option>
               ))}
-            </select>
-          </label>
-          <label className="rr-field">
-            <span>상태</span>
-            <select
-              className="rr-select"
-              value={status}
-              onChange={(e) => setStatus(e.target.value as CurationStatus)}
-            >
-              <option value="open">열림</option>
-              <option value="done">결정됨</option>
-              <option value="rejected">기각됨</option>
-            </select>
-          </label>
-        </div>
-
+            </Select>
+          </FormField>
+        }
+      >
         <ErrorBanner error={queue.error} onRetry={queue.reload} />
         <ErrorBanner error={vocab.error} />
         {queue.loading && rows.length === 0 ? (
@@ -327,36 +383,56 @@ export default function CurationQueuePage() {
 
       {rows
         .filter((r) => r.id === openId)
-        .map((row) => (
-          <SectionCard
-            key={row.id}
-            title={`${KIND_BY_NAME.get(row.kind)?.label ?? row.kind} — ${summarize(row) || row.id}`}
-            subtitle={`올라온 때 ${fmtEpoch(row.created_at)}`}
-          >
-            {row.status === "open" ? (
-              <DecisionForm
-                row={row}
-                axes={axes}
-                onDone={() => {
-                  queue.reload();
-                  setOpenId(null);
-                }}
+        .map((row) => {
+          const subject = summarize(row);
+          const kindLabel = KIND_BY_NAME.get(row.kind)?.label ?? row.kind;
+          return (
+            <SectionCard
+              key={row.id}
+              title={kindLabel}
+              subtitle={subject ? <span className="break-all">{subject}</span> : <Mono>{row.id}</Mono>}
+              bodyClassName="flex flex-col gap-3"
+            >
+              {/* 개요 — 라벨은 사람 말로 쓰고 서버 필드명은 hint 로 접어 둔다(D35). 값은 서버가 준 그대로다. */}
+              <KeyValueTable
+                rows={[
+                  { label: "종류", hint: "kind", value: <Badge tone="info">{kindLabel}</Badge> },
+                  { label: "상태", hint: "status", value: <Badge tone={STATUS_TONE[row.status]}>{row.status}</Badge> },
+                  { label: "항목 id", hint: "id", value: <Mono>{row.id}</Mono> },
+                  { label: "올라온 때", hint: "created_at", value: fmtEpoch(row.created_at) },
+                  { label: "결정한 사람", hint: "decided_by", value: row.decided_by ?? <Unknown /> },
+                  {
+                    label: "결정한 때",
+                    hint: "decided_at",
+                    value: row.decided_at ? fmtEpoch(row.decided_at) : <Unknown />,
+                  },
+                ]}
               />
-            ) : (
-              <p className="rr-muted">
-                이미 {row.status} 로 닫힌 항목입니다. 다시 결정하면 서버가 409 를 냅니다.
-              </p>
-            )}
-            <h3 className="rr-subhead">payload 원문</h3>
-            <pre className="rr-verbatim">{fmtJson(row.payload)}</pre>
-            {row.decision && Object.keys(row.decision).length > 0 ? (
-              <>
-                <h3 className="rr-subhead">결정 기록</h3>
-                <pre className="rr-verbatim">{fmtJson(row.decision)}</pre>
-              </>
-            ) : null}
-          </SectionCard>
-        ))}
+              {row.status === "open" ? (
+                <DecisionForm
+                  row={row}
+                  axes={axes}
+                  onDone={() => {
+                    queue.reload();
+                    setOpenId(null);
+                  }}
+                />
+              ) : (
+                <Banner
+                  live="none"
+                  tone="info"
+                  title={`이미 ${row.status} 로 닫힌 항목입니다.`}
+                  detail="다시 결정하면 서버가 409 를 냅니다."
+                />
+              )}
+              {/* 결정 기록을 payload 원문보다 위로 올렸다 — 닫힌 항목에서 먼저 찾는 것은 '무엇으로 정했나' 이고 원문은 그 근거다. */}
+              {row.decision && Object.keys(row.decision).length > 0 ? (
+                <VerbatimBlock label="결정 기록" text={fmtJson(row.decision)} />
+              ) : null}
+              <VerbatimBlock label="payload 원문" text={fmtJson(row.payload)} />
+            </SectionCard>
+          );
+        })}
     </>
   );
 }

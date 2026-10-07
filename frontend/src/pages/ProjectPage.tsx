@@ -1,4 +1,4 @@
-// 과제 화면 — 머리말·구역 탭 4개(심사·요구·정의·성격·사전)·소스 카드 3장·스냅샷 동결·스냅샷 목록·dims·iface-ledger·성격 프로파일·유사 과제(계획 §8.2.4 ProjectPage 행). ?snapshot= 이면 같은 화면에 SnapshotPage 를 그린다.
+// 과제 화면 — 머리말·구역 탭 4개(심사 · 요구·정의 · 성격·유사 · 사전)·소스 카드 3장·스냅샷 동결·스냅샷 목록·dims·iface-ledger·성격 프로파일·유사 과제(계획 §8.2.4 ProjectPage 행). ?snapshot= 이면 같은 화면에 SnapshotPage 를 그린다.
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { ChevronRight, Link2, Plus, Snowflake, Trash2, X } from "lucide-react";
@@ -29,6 +29,7 @@ import {
   Select,
   SubPanel,
   TabBar,
+  TabPanel,
 } from "../ui/primitives";
 import { fmtCounts, fmtEpoch, fmtNum } from "../format";
 import { FACET_ORDER } from "../types";
@@ -78,6 +79,14 @@ const STATEMENT_LAYERS: Array<{ status: CharacterStatement["status"]; label: str
  * 미측정·미입력은 실패가 아니고, 그 사실 자체가 정보다(앱 제1 규율).
  */
 const UNKNOWN = <span className="text-muted-foreground">—</span>;
+
+/**
+ * 서버가 **재서** '없다' 고 말한 자리. UNKNOWN(모름)과 반드시 구분한다 —
+ * 측정 안 된 것과 측정해서 아니었던 것을 한 기호로 그리면 제1 규율이 거꾸로 선다.
+ */
+function NONE() {
+  return <span className="text-muted-foreground">없음</span>;
+}
 
 /**
  * 과제 화면의 구역 묶음 4개.
@@ -150,7 +159,14 @@ function SourceCard({
           rows={[
             { label: "어댑터", hint: "app_key", value: source.app_key ?? UNKNOWN },
             { label: "참조", hint: "ref", value: source.ref ?? UNKNOWN },
-            { label: "브리지 선언", hint: "bridge_declared", value: source.bridge_declared ? "true" : "false" },
+            {
+              label: "브리지 선언",
+              hint: "bridge_declared",
+              // null·undefined 를 "false" 로 단정하지 않는다 — 안 적힌 것과 아니라고 적힌 것은 다르다.
+              value: source.bridge_declared === undefined || source.bridge_declared === null
+                ? UNKNOWN
+                : source.bridge_declared ? "true" : "false",
+            },
             {
               label: "도달 측정",
               hint: "probe",
@@ -433,11 +449,11 @@ function RequirementsCard({ projectId, predecessorId }: { projectId: string; pre
   }
 
   const columns: Array<Column<Requirement>> = [
-    { key: "kind", header: "종류", cell: (r) => r.kind, nowrap: true },
-    { key: "name", header: "이름", cell: (r) => r.name },
-    { key: "op", header: "비교", cell: (r) => r.op ?? UNKNOWN, nowrap: true },
-    { key: "value", header: "값", cell: (r) => JSON.stringify(r.value_json ?? null) },
-    { key: "unit", header: "단위", cell: (r) => r.unit ?? UNKNOWN, nowrap: true },
+    { key: "kind", header: "종류", hint: "kind", cell: (r) => r.kind, nowrap: true },
+    { key: "name", header: "이름", hint: "name", cell: (r) => r.name },
+    { key: "op", header: "비교", hint: "op", cell: (r) => r.op ?? UNKNOWN, nowrap: true },
+    { key: "value", header: "값", hint: "value", cell: (r) => JSON.stringify(r.value_json ?? null) },
+    { key: "unit", header: "단위", hint: "unit", cell: (r) => r.unit ?? UNKNOWN, nowrap: true },
     { key: "status", header: "status", cell: (r) => <StatusBadge value={r.status} />, nowrap: true },
     { key: "waive_reason", header: "사유", cell: (r) => r.waive_reason ?? UNKNOWN },
     {
@@ -921,6 +937,8 @@ export default function ProjectPage() {
 
   /** 방금 건 동결 잡. 끝나면 §8.2.4 대로 `?snapshot=` 을 열어 준다. */
   const [pendingJob, setPendingJob] = useState<string | null>(null);
+  /** 방금 동결돼 열린 스냅샷 id. 탭을 뺏는 대신 이것으로 알린다. 사용자가 닫으면 사라진다. */
+  const [frozen, setFrozen] = useState<string | null>(null);
   useEffect(() => {
     if (pendingJob === null || !detail.data) return;
     const job = detail.data.jobs.find((j) => j.id === pendingJob);
@@ -932,23 +950,27 @@ export default function ProjectPage() {
       null,
     );
     if (newest) {
+      // 스냅샷은 열어 두되 **탭은 뺏지 않는다.** 이 effect 는 5초 폴링이 깨우므로, 탭을 옮기면
+      // 사용자가 아무것도 누르지 않았는데 보던 화면이 바뀐다. 다른 탭에서 입력 중이었다면
+      // 그 입력이 눈앞에서 사라지는 것으로 보인다. 동결이 끝났다는 사실은 아래 배너로 말한다.
       setParams({ snapshot: newest.id });
-      // 스냅샷 화면은 '심사' 탭에 그려진다 — 잡이 도는 동안 다른 탭에 가 있었어도 열린 것이 보여야 한다.
-      setTab("review");
+      setFrozen(newest.id);
     }
   }, [pendingJob, detail.data, setParams]);
 
   const snapshotColumns: Column<SnapshotHeader>[] = [
-    { key: "id", header: "스냅샷", cell: (s) => <Mono>{s.id}</Mono>, nowrap: true },
-    { key: "label", header: "이름", cell: (s) => s.label ?? UNKNOWN },
+    { key: "id", header: "스냅샷", hint: "snapshot_id", cell: (s) => <Mono>{s.id}</Mono>, nowrap: true },
+    { key: "label", header: "이름", hint: "label", cell: (s) => s.label ?? UNKNOWN },
     { key: "hash", header: "ir_hash", cell: (s) => <Mono>{s.ir_hash}</Mono>, nowrap: true },
     { key: "kinds", header: "소스", cell: (s) => s.kinds.join(" · "), nowrap: true },
-    { key: "at", header: "동결 시각", cell: (s) => fmtEpoch(s.captured_at), nowrap: true },
+    { key: "at", header: "동결 시각", hint: "captured_at", cell: (s) => fmtEpoch(s.captured_at), nowrap: true },
     { key: "counts", header: "집계", cell: (s) => fmtCounts(s.counts) },
     {
       key: "degraded",
       header: "degraded",
-      cell: (s) => (s.degraded ? <Badge tone="warn">degraded</Badge> : UNKNOWN),
+      // `degraded: boolean` 은 서버가 **재서** 아니라고 말한 값이다 — UNKNOWN(모름) 을 쓰면
+      // 측정 안 된 것과 측정해서 아니었던 것이 한 기호로 합쳐진다. 그건 이 앱 제1 규율의 반대다.
+      cell: (s) => (s.degraded ? <Badge tone="warn">degraded</Badge> : <NONE />),
       nowrap: true,
     },
   ];
@@ -956,23 +978,23 @@ export default function ProjectPage() {
   const targetColumns: Column<TargetHeader>[] = [
     {
       key: "key",
-      header: "타깃",
+      header: "타깃", hint: "target_key",
       nowrap: true,
       cell: (t) => <Link to={`/targets/${encodeURIComponent(t.target_key)}`}>{t.target_key}</Link>,
     },
-    { key: "kind", header: "종류", cell: (t) => t.kind, nowrap: true },
-    { key: "level", header: "level", cell: (t) => <LevelBadge value={t.level} />, nowrap: true },
+    { key: "kind", header: "종류", hint: "kind", cell: (t) => t.kind, nowrap: true },
+    { key: "level", header: "완결 레벨", hint: "level", cell: (t) => <LevelBadge value={t.level} />, nowrap: true },
     {
       key: "verdict",
-      header: "verdict",
+      header: "판정", hint: "verdict_final",
       cell: (t) => <StatusBadge value={t.verdict_final ?? "undetermined"} />,
       nowrap: true,
     },
     { key: "unseated", header: "착석", cell: (t) => <UnseatedBadge n={t.unseated_n} />, nowrap: true },
-    { key: "sync", header: "반영", cell: (t) => <ExternalSyncBadge sync={t.external_sync} />, nowrap: true },
+    { key: "sync", header: "반영", hint: "external_sync", cell: (t) => <ExternalSyncBadge sync={t.external_sync} />, nowrap: true },
     {
       key: "superseded",
-      header: "대체됨",
+      header: "대체됨", hint: "superseded_by",
       nowrap: true,
       cell: (t) =>
         t.superseded_by ? (
@@ -984,8 +1006,8 @@ export default function ProjectPage() {
   ];
 
   const jobColumns: Column<JobHeader>[] = [
-    { key: "id", header: "잡", cell: (j) => <Mono>{j.id}</Mono>, nowrap: true },
-    { key: "kind", header: "종류", cell: (j) => j.kind, nowrap: true },
+    { key: "id", header: "잡", hint: "job_id", cell: (j) => <Mono>{j.id}</Mono>, nowrap: true },
+    { key: "kind", header: "종류", hint: "kind", cell: (j) => j.kind, nowrap: true },
     { key: "state", header: "상태", cell: (j) => <JobStateBadge value={j.state} />, nowrap: true },
     {
       key: "progress",
@@ -1004,7 +1026,8 @@ export default function ProjectPage() {
         );
       },
     },
-    { key: "error", header: "오류", cell: (j) => j.error ?? UNKNOWN },
+    // error 가 null 인 것은 '오류가 없었다' 는 확정 사실이다(모름이 아니다).
+    { key: "error", header: "오류", cell: (j) => j.error ?? <NONE /> },
   ];
 
   /** 상위 화면으로 돌아가는 길 — 상세 화면은 id 로 들어오므로 늘 보여야 한다. */
@@ -1044,12 +1067,32 @@ export default function ProjectPage() {
         actions={detail.data ? <ExternalSyncBadge sync={detail.data.project.external_sync ?? null} /> : null}
       />
 
-      <TabBar tabs={PROJECT_TABS} value={tab} onChange={setTab} label="과제 구역 탭" />
+      {/* 과제 조회 실패는 **탭 밖**에서 말한다. 탭 안에 두면 다른 탭에서는 경고도 재시도 버튼도 없이
+          머리말이 그냥 "과제" 로 조용히 그려진다 — 사라진 것이 값이 아니라 경고라 더 나쁘다. */}
+      <ErrorBanner error={detail.error} onRetry={detail.reload} />
 
-      {tab === "review" ? (
-        <>
+      {/* 동결이 끝났다는 사실은 여기서 말한다 — 폴링이 사용자의 탭을 옮기지 않기 위해서다. */}
+      {frozen && tab !== "review" ? (
+        <Banner tone="info" title="동결이 끝났습니다." detail="새 스냅샷이 '심사' 탭에 열려 있습니다.">
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => {
+              setTab("review");
+              setFrozen(null);
+            }}
+          >
+            보러 가기
+          </Button>
+        </Banner>
+      ) : null}
+
+      <TabBar idPrefix="proj" tabs={PROJECT_TABS} value={tab} onChange={setTab} label="과제 구역 탭" />
+
+      {/* 탭은 **보이는 것만** 바꾼다 — 조건부 렌더로 쓰면 iface-ledger 의 저장 전 행처럼
+          서버에서 다시 읽을 경로가 없는 입력이 탭 전환만으로 사라진다(TabPanel 주석 참조). */}
+      <TabPanel active={tab === "review"} tab="review" idPrefix="proj">
           <SectionCard title="과제 개요">
-            <ErrorBanner error={detail.error} onRetry={detail.reload} />
             {detail.loading && !detail.data ? <LoadingBlock /> : null}
             {detail.data ? (
               // 라벨은 사람 말로, 원시 필드명은 hint 로 접어 둔다(D35 — 화면이 엔지니어 덤프가 되지 않게 하되
@@ -1163,11 +1206,9 @@ export default function ProjectPage() {
               empty="열린 타깃이 없습니다."
             />
           </SectionCard>
-        </>
-      ) : null}
+      </TabPanel>
 
-      {tab === "spec" ? (
-        <>
+      <TabPanel active={tab === "spec"} tab="spec" idPrefix="proj">
           <RequirementsCard
             projectId={projectId}
             predecessorId={(detail.data as ProjectDetail | null)?.project?.predecessor_project_id ?? null}
@@ -1180,18 +1221,17 @@ export default function ProjectPage() {
           <SectionCard title="iface-ledger" subtitle="확정 원장은 앱 DB 에만 저장합니다.">
             <IfaceLedgerEditor projectId={projectId} />
           </SectionCard>
-        </>
-      ) : null}
+      </TabPanel>
 
-      {tab === "context" ? (
-        <>
-          <CharacterCard projectId={projectId} />
-          <SimilarCard projectId={projectId} />
-        </>
-      ) : null}
+      <TabPanel active={tab === "context"} tab="context" idPrefix="proj">
+        <CharacterCard projectId={projectId} />
+        <SimilarCard projectId={projectId} />
+      </TabPanel>
 
       {/* 사전은 과제가 아니라 전사 자산이다 — 과제 구역과 섞이지 않게 탭을 따로 둔다. */}
-      {tab === "vocab" ? <VocabCard /> : null}
+      <TabPanel active={tab === "vocab"} tab="vocab" idPrefix="proj">
+        <VocabCard />
+      </TabPanel>
     </>
   );
 }

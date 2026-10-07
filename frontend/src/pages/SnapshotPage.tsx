@@ -1,6 +1,7 @@
 // 스냅샷 화면 — 개요·강등 플래그·게이트·노드/엣지·롤업·dims·rule_hits·character_seed·warnings·호출 로그(계획 §8.2.4 SnapshotPage 행). ProjectPage 가 ?snapshot= 일 때 그린다.
 import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
+import { ExternalLink, Plus } from "lucide-react";
 import { isNotReady, riskApi } from "../api/risk.api";
 import { useAsync } from "../hooks/useAsync";
 import { SectionCard, VerbatimBlock } from "../components/SectionCard";
@@ -9,6 +10,7 @@ import { DataTable, KeyValueTable } from "../components/DataTable";
 import { EmptyBlock, ErrorBanner, LoadingBlock, NotReadyBlock } from "../components/StateBlocks";
 import { Badge, SeverityBadge, StatusBadge } from "../components/Badge";
 import { GateBanner, GateTable, isGateFailing } from "../components/GateBanner";
+import { Banner, Button, Input, Mono, PageHeader } from "../ui/primitives";
 import { fmtCell, fmtCounts, fmtEpoch, fmtJson, fmtNum } from "../format";
 import type { DimNamed, Gate, IrEdge, IrNode, IrWarning, JsonObject, RuleHit, SnapshotCall } from "../types";
 
@@ -64,6 +66,9 @@ const ROLLUP_COLUMNS: Array<{ key: string; header: string; align?: "right" }> = 
   { key: "orphan_leaf", header: "orphan_leaf", align: "right" },
 ];
 
+/** 배지 여러 개를 한 줄로 흘리는 묶음(기존 `.rr-badge-group`). 이 화면에서만 쓰므로 지역 상수로 둔다. */
+const BADGE_GROUP = "inline-flex flex-wrap items-center gap-1";
+
 function NodeTable({ nodes }: { nodes: IrNode[] }) {
   const [q, setQ] = useState("");
   const filtered = useMemo(() => {
@@ -84,7 +89,7 @@ function NodeTable({ nodes }: { nodes: IrNode[] }) {
       key: "flags",
       header: "flags",
       cell: (n) => (
-        <span className="rr-badge-group">
+        <span className={BADGE_GROUP}>
           {n.flags.map((f) => (
             <Badge key={f} tone="neutral">
               {f}
@@ -97,14 +102,14 @@ function NodeTable({ nodes }: { nodes: IrNode[] }) {
 
   return (
     <>
-      <div className="rr-row">
-        <input
-          className="rr-input"
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <Input
+          className="max-w-xs"
           placeholder="nid · name · ckey · dn 검색"
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
-        <span className="rr-muted">
+        <span className="text-sm text-muted-foreground">
           {filtered.length} / {nodes.length} 개
         </span>
       </div>
@@ -189,9 +194,9 @@ function CallTable({ calls }: { calls: SnapshotCall[] }) {
 
 /** 강등·결측 플래그 칩. 뜻은 사전에서 붙이고 값 자체는 서버 문자열 그대로다. */
 function FlagList({ flags }: { flags: string[] }) {
-  if (flags.length === 0) return <p className="rr-muted">강등·결측 플래그가 없습니다.</p>;
+  if (flags.length === 0) return <p className="m-0 text-sm text-muted-foreground">강등·결측 플래그가 없습니다.</p>;
   return (
-    <span className="rr-badge-group">
+    <span className={BADGE_GROUP}>
       {flags.map((f) => (
         <Badge key={f} tone="warn" title={FLAG_LABEL[f] ?? "사전에 없는 코드입니다."}>
           {f}
@@ -208,14 +213,14 @@ function GateSupplement({ gates }: { gates: Gate[] }) {
   const notJudged = SNAP_GATE_IDS.filter((id) => !seen.has(id));
   const unknown = gates.filter((g) => g.value === null).map((g) => g.id);
   return (
-    <ul className="rr-list">
-      <li className="rr-muted">
+    <ul className="m-0 list-disc pl-5 text-sm [&>li]:mb-1">
+      <li className="text-muted-foreground">
         {SNAP_GATE_IDS.map((id) => `${id} ${GATE_LABEL[id]}`).join(" · ")}
       </li>
       {notJudged.length > 0 ? (
         <li>
           이번 응답에 오지 않은 게이트 —{" "}
-          <span className="rr-badge-group">
+          <span className={BADGE_GROUP}>
             {notJudged.map((id) => (
               <Badge key={id} tone="muted" title={GATE_LABEL[id]}>
                 {id}
@@ -227,10 +232,10 @@ function GateSupplement({ gates }: { gates: Gate[] }) {
       {unknown.length > 0 ? (
         <li>
           값이 비어 있는 게이트 — <code>{unknown.join(" · ")}</code>{" "}
-          <span className="rr-muted">이 게이트의 값이 비어 있습니다.</span>
+          <span className="text-muted-foreground">이 게이트의 값이 비어 있습니다.</span>
         </li>
       ) : null}
-      <li className="rr-muted">G7 {GATE_LABEL.G7} 은 두 스냅샷을 비교할 때만 나옵니다.</li>
+      <li className="text-muted-foreground">G7 {GATE_LABEL.G7} 은 두 스냅샷을 비교할 때만 나옵니다.</li>
     </ul>
   );
 }
@@ -252,7 +257,7 @@ function RollupBlock({ rollups }: { rollups: JsonObject }) {
     cell: (row: JsonObject) => fmtCell(row[c.key]),
   }));
   return (
-    <div className="rr-stack">
+    <div className="mt-3 flex flex-col gap-2">
       <DataTable
         columns={columns}
         rows={rows}
@@ -317,54 +322,117 @@ export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
     }
   }
 
+  /** 돌아갈 과제. id 는 IR 응답에만 있으므로 아직 오지 않았으면 링크를 만들지 않는다(없는 주소를 지어내지 않는다). */
+  const projectId = ir.data?.project_id ?? null;
+
   return (
     <>
-      <SectionCard
-        title="스냅샷 개요"
-        subtitle={`snapshot_id ${snapshotId}`}
+      <PageHeader
+        // 이 화면은 독립 라우트가 아니라 ProjectPage 안에 `?snapshot=` 으로 끼워 그려진다
+        // (ProjectPage.tsx `<SnapshotPage snapshotId=… />`). h1 로 두면 과제 화면의 문서 제목이
+        // '스냅샷' 으로 바뀐다 — 품고 있는 쪽이 h1 이어야 한다.
+        as="h2"
+        crumb={
+          projectId ? (
+            <Link to={`/projects/${encodeURIComponent(projectId)}`} className="hover:underline">
+              과제
+            </Link>
+          ) : (
+            <span>과제</span>
+          )
+        }
+        title="스냅샷"
+        subtitle={
+          // id 는 제목이 아니라 보조 사실이다 — 사람이 읽는 이름은 '스냅샷' 이고 id 는 서버와 대조할 때 쓴다.
+          <span className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+            {/* 원시 필드명을 지우지 않는다 — 다른 라벨은 전부 hint 로 남겼는데 여기만 예외일 이유가 없다. */}
+            <span>
+              <span className="font-mono opacity-60">snapshot_id</span> <Mono>{snapshotId}</Mono>
+            </span>
+            {ir.data ? <span>동결 {fmtEpoch(ir.data.captured_at)}</span> : null}
+            {ir.data && ir.data.kinds.length > 0 ? <span>소스 {ir.data.kinds.join(" · ")}</span> : null}
+          </span>
+        }
         actions={
           <>
-            <button type="button" className="rr-btn" onClick={openSingleReview}>
+            <Button type="button" variant="outline" onClick={openSingleReview}>
+              {/* 새 창에서 열린다는 사실을 아이콘이 말한다. */}
+              <ExternalLink aria-hidden="true" />
               단발 심사 열기
-            </button>
-            <button
+            </Button>
+            <Button
               type="button"
-              className="rr-btn rr-btn-primary"
               onClick={createTarget}
               disabled={busy || blocked}
               title={blocked ? "G6 fail 인 스냅샷은 타깃을 만들 수 없습니다." : undefined}
             >
+              <Plus aria-hidden="true" />
               타깃 만들기
-            </button>
+            </Button>
           </>
         }
-      >
-        <ErrorBanner error={actionError} />
-        {notice ? <p className="rr-muted">{notice}</p> : null}
+      />
+
+      {/* 두 버튼이 머리말로 올라갔으니 그 결과(오류·안내)도 버튼 옆에서 말한다 — 아래 카드에 두면 눌린 자리와 멀어진다. */}
+      <ErrorBanner error={actionError} />
+      {notice ? <p className="mb-3 text-sm text-muted-foreground">{notice}</p> : null}
+
+      {/* 순서를 바꿨다 — 게이트를 첫 카드로 올렸다. G6 fail 하나가 '타깃 만들기' 를 막으므로 이 화면에서
+          사람이 가장 먼저 알아야 할 판정이고, 예전에는 세 번째 카드에 묻혀 있었다. 아래 카드들은 그대로다. */}
+      <SectionCard title="게이트" subtitle="G1~G6 판정은 서버가 계산한 값입니다(G7 은 비교 전용).">
+        {isNotReady(state.error) ? (
+          <NotReadyBlock what="게이트 판정" />
+        ) : (
+          <ErrorBanner error={state.error} onRetry={state.reload} />
+        )}
+        {state.loading && !state.data ? <LoadingBlock /> : null}
+        {state.data ? (
+          <>
+            {blocked ? (
+              <Banner
+                title="blocked — G6 fail."
+                detail="diff 생성과 타깃 만들기가 409 로 막힙니다. 소스를 고쳐 새 스냅샷을 만들어야 합니다."
+              />
+            ) : null}
+            <GateBanner gates={gates} />
+            <GateTable gates={gates} />
+            <GateSupplement gates={gates} />
+          </>
+        ) : null}
+      </SectionCard>
+
+      <SectionCard title="스냅샷 개요">
         {isNotReady(ir.error) ? <NotReadyBlock what="스냅샷 IR" /> : <ErrorBanner error={ir.error} onRetry={ir.reload} />}
         {ir.loading && !ir.data ? <LoadingBlock /> : null}
         {needsReparse ? (
-          <div className="rr-banner rr-banner-info" role="alert">
-            <span className="rr-banner-title">재파싱이 필요합니다.</span>
-            <span className="rr-banner-detail">volume · material 값이 비어 있습니다.</span>
-            <a href="/apps/step_forge/" target="_blank" rel="noreferrer">
+          <Banner tone="info" title="재파싱이 필요합니다." detail="volume · material 값이 비어 있습니다.">
+            <a
+              href="/apps/step_forge/"
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex items-center gap-1 text-sm"
+            >
+              <ExternalLink className="size-4" aria-hidden="true" />
               StepForge 열기
             </a>
-          </div>
+          </Banner>
         ) : null}
         {ir.data ? (
+          // 라벨은 사람 말로 쓰고 원시 필드명은 hint 로 접어 둔다 — 서버와 대조할 이름을 지우지 않으면서
+          // 화면이 엔지니어 덤프로 읽히지 않게 한다(D35). 값과 순서는 그대로다.
           <KeyValueTable
             rows={[
-              { label: "ir_hash", value: <code>{ir.data.ir_hash}</code> },
-              { label: "ir_version", value: ir.data.ir_version },
-              { label: "소스", value: ir.data.kinds.join(" · ") || "-" },
-              { label: "captured_at", value: fmtEpoch(ir.data.captured_at) },
-              { label: "counts", value: fmtCounts(ir.data.counts) },
+              { label: "IR 해시", hint: "ir_hash", value: <code>{ir.data.ir_hash}</code> },
+              { label: "IR 버전", hint: "ir_version", value: ir.data.ir_version },
+              { label: "소스", hint: "kinds", value: ir.data.kinds.join(" · ") || "-" },
+              { label: "동결 시각", hint: "captured_at", value: fmtEpoch(ir.data.captured_at) },
+              { label: "항목 수", hint: "counts", value: fmtCounts(ir.data.counts) },
               {
-                label: "노드 · 엣지 · dims_named",
+                label: "노드 · 엣지 · 명명 치수",
+                hint: "nodes · edges · dims_named",
                 value: `${nodes.length} · ${edges.length} · ${dims.length}`,
               },
-              { label: "경고", value: `${warnings.length}건` },
+              { label: "경고", hint: "warnings", value: `${warnings.length}건` },
             ]}
           />
         ) : null}
@@ -377,40 +445,16 @@ export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
         {ir.data ? <FlagList flags={missing} /> : ir.loading ? <LoadingBlock /> : null}
       </SectionCard>
 
-      <SectionCard title="게이트" subtitle="G1~G6 판정은 서버가 계산한 값입니다(G7 은 비교 전용).">
-        {isNotReady(state.error) ? (
-          <NotReadyBlock what="게이트 판정" />
-        ) : (
-          <ErrorBanner error={state.error} onRetry={state.reload} />
-        )}
-        {state.loading && !state.data ? <LoadingBlock /> : null}
-        {state.data ? (
-          <>
-            {blocked ? (
-              <div className="rr-banner rr-banner-error" role="alert">
-                <span className="rr-banner-title">blocked — G6 fail.</span>
-                <span className="rr-banner-detail">
-                  diff 생성과 타깃 만들기가 409 로 막힙니다. 소스를 고쳐 새 스냅샷을 만들어야 합니다.
-                </span>
-              </div>
-            ) : null}
-            <GateBanner gates={gates} />
-            <GateTable gates={gates} />
-            <GateSupplement gates={gates} />
-          </>
-        ) : null}
-      </SectionCard>
-
       <SectionCard title="요약 · 신호 · 성격 seed" subtitle="코드가 만든 원문을 그대로 보입니다.">
         {state.data ? (
           <>
             <VerbatimBlock text={state.data.summary_text} label="summary_text" />
-            <div className="rr-stack">
-              <h3 className="rr-subhead">신호</h3>
+            <div className="mt-3 flex flex-col gap-2">
+              <h3 className="m-0 text-sm text-muted-foreground">신호</h3>
               {state.data.signals.length === 0 ? (
-                <p className="rr-muted">신호가 없습니다.</p>
+                <p className="m-0 text-sm text-muted-foreground">신호가 없습니다.</p>
               ) : (
-                <ul className="rr-list">
+                <ul className="m-0 list-disc pl-5 text-sm [&>li]:mb-1">
                   {state.data.signals.map((s) => (
                     <li key={s.key}>
                       <code>{s.key}</code> {s.text} {s.ref ? <code>{s.ref}</code> : null}
@@ -418,11 +462,11 @@ export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
                   ))}
                 </ul>
               )}
-              <h3 className="rr-subhead">character_seed</h3>
+              <h3 className="m-0 text-sm text-muted-foreground">character_seed</h3>
               {state.data.character_seed.length === 0 ? (
-                <p className="rr-muted">seed 가 없습니다.</p>
+                <p className="m-0 text-sm text-muted-foreground">seed 가 없습니다.</p>
               ) : (
-                <span className="rr-badge-group">
+                <span className={BADGE_GROUP}>
                   {state.data.character_seed.map((c, i) => (
                     <Badge key={`${c.tag}#${i}`} tone="info" title={`${c.rule} · ${c.text}`}>
                       {c.tag}

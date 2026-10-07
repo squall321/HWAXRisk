@@ -7,6 +7,7 @@ import { DataTable } from "./DataTable";
 import { ErrorBanner, LoadingBlock, NotReadyBlock } from "./StateBlocks";
 import { Badge, StatusBadge } from "./Badge";
 import { GateTable } from "./GateBanner";
+import { Banner, Button, FormField, Select } from "../ui/primitives";
 import { fmtNum } from "../format";
 import type { Gate, SameAsDecision, SameAsPair } from "../types";
 
@@ -134,31 +135,34 @@ export function SameAsResolver({
       key: "act",
       header: "확정",
       nowrap: true,
+      // 표 한 칸이라 size="sm" 으로 둔다 — 기본 높이면 행이 두 배로 두꺼워진다.
       cell: (p) => (
-        <span className="rr-row">
-          <button
+        <span className="flex flex-wrap items-center gap-2">
+          <Button
             type="button"
-            className="rr-btn"
+            variant="outline"
+            size="sm"
             disabled={busy}
             onClick={() => decide([{ a: p.a, b: p.b, decision: "confirm", scope: "pair" }])}
           >
             confirm
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            className="rr-btn"
+            variant="outline"
+            size="sm"
             disabled={busy}
             onClick={() => decide([{ a: p.a, b: p.b, decision: "reject", scope: "pair" }])}
           >
             reject
-          </button>
+          </Button>
         </span>
       ),
     },
   ];
 
   return (
-    <>
+    <div className="flex flex-col gap-3">
       <ErrorBanner error={error} />
       {isNotReady(sameas.error) ? (
         <NotReadyBlock what="same-as 매칭" />
@@ -168,24 +172,25 @@ export function SameAsResolver({
       {sameas.loading && !sameas.data ? <LoadingBlock /> : null}
       {sameas.data ? (
         <>
-          <div className="rr-row">
+          {/* 미확정·충돌 건수가 이 구역의 판정이다 — 일괄 수용 버튼과 한 줄에 둬서 '무엇이 남았나 → 무엇을 누르나' 가 이어진다. */}
+          <div className="flex flex-wrap items-center gap-2">
             <Badge tone={sameas.data.pending_n > 0 ? "warn" : "ok"}>미확정 {sameas.data.pending_n}</Badge>
             {conflictN > 0 ? <Badge tone="bad">충돌 {conflictN}</Badge> : null}
-            <button
+            <Button
               type="button"
-              className="rr-btn"
+              variant="outline"
               disabled={busy || bulkCandidates.length === 0}
               onClick={() =>
                 decide(bulkCandidates.map((p) => ({ a: p.a, b: p.b, decision: "confirm", scope: "pair" })))
               }
             >
               자동 매칭 전부 수용 (score ≥ {BULK_SCORE}, {bulkCandidates.length}건)
-            </button>
+            </Button>
           </div>
 
-          <div className="rr-row">
-            <span className="rr-muted">사다리 단계</span>
-            <span className="rr-badge-group">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm text-muted-foreground">사다리 단계</span>
+            <span className="inline-flex flex-wrap items-center gap-1">
               {METHODS.map((m) => (
                 <Badge key={m.method} tone={byMethod[m.method] ? "info" : "muted"} title={m.method}>
                   {m.label} {byMethod[m.method] ?? 0}
@@ -200,24 +205,22 @@ export function SameAsResolver({
           </div>
 
           {conflictN > 0 ? (
-            <div className="rr-banner rr-banner-info" role="alert">
-              <span className="rr-banner-title">충돌 {conflictN}건.</span>
-              <span className="rr-banner-detail">
-                한 클러스터에 같은 도메인 노드가 둘 이상입니다. 한 쌍을 reject 하면 풀립니다.
-              </span>
-            </div>
+            <Banner
+              tone="info"
+              title={`충돌 ${conflictN}건.`}
+              detail="한 클러스터에 같은 도메인 노드가 둘 이상입니다. 한 쌍을 reject 하면 풀립니다."
+            />
           ) : null}
 
-          <label className="rr-field">
-            <span>보기</span>
-            <select className="rr-select" value={filter} onChange={(e) => setFilter(e.target.value as Filter)}>
+          <FormField label="보기" className="max-w-xs">
+            <Select value={filter} onChange={(e) => setFilter(e.target.value as Filter)}>
               {FILTERS.map((f) => (
                 <option key={f.value} value={f.value}>
                   {f.label}
                 </option>
               ))}
-            </select>
-          </label>
+            </Select>
+          </FormField>
 
           {sameas.data.G2 ? <GateTable gates={[sameas.data.G2]} /> : null}
           <DataTable
@@ -228,6 +231,6 @@ export function SameAsResolver({
           />
         </>
       ) : null}
-    </>
+    </div>
   );
 }

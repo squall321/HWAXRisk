@@ -26,10 +26,13 @@
     border-color: hsl(var(--border));
   }
 
+  /* `border: 0` 이 아니라 `border-width: 0` 이다 — 축약을 쓰면 style 이 `none` 으로 **되돌아간다.**
+     이 규칙이 위 `:where(*)` 보다 뒤에 오므로, 축약을 쓰면 버튼·입력에 한해 테두리가 다시 죽는다
+     (역검토가 빌드 CSS 로 잡았다 — outline 버튼과 모든 입력칸에 선이 없었다). */
   :where(button, [type="button"], [type="submit"]) {
     appearance: none;
     background: transparent;
-    border: 0;
+    border-width: 0;
     padding: 0;
     font: inherit;
     color: inherit;
@@ -42,7 +45,7 @@
   :where(input:not([type="checkbox"]):not([type="radio"]), textarea, select) {
     appearance: none;
     background: transparent;
-    border: 0;
+    border-width: 0;
     font: inherit;
     color: inherit;
   }
