@@ -736,6 +736,26 @@ def test_run_panel_engine_error_returns_seats_to_pending(risk_store, tmp_path):
     assert "merge_panel" not in recorder
 
 
+def test_a_panel_that_ran_without_a_portal_conversation_is_flagged(risk_store, tmp_path):
+    """포털 대화를 못 만든 채 돈 패널은 품질 플래그에 남는다 — 그 패널의 발언이 포털에 없다."""
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)
+
+    class NoConversationEngine(FakePanelEngine):
+        def run(self, delib_opts, *, owner_sub=None):
+            return {**super().run(delib_opts, owner_sub=owner_sub), "conv_id": None, "conv_missing": True}
+
+    recorder: dict = {}
+    out = runner.run_panel(risk_store, cfg, NoConversationEngine(), runner.claim_next_job(risk_store, cfg),
+                           narrative_mod=fake_narrative(recorder), registry_mod=fake_registry(recorder))
+    # 대화가 있는 패널에는 붙지 않는다 — 그쪽은 플래그 집합을 통째로 견주는 시험들이 본다.
+    assert out["status"] == "done" and "conversation_absent" in out["quality_flags"]
+    row = risk_store.query_one("SELECT conv_id, quality_json FROM rr_panels WHERE id = ?", (out["panel_id"],))
+    assert row["conv_id"] is None and "conversation_absent" in json.loads(row["quality_json"])["flags"]
+
+
 def test_run_panel_without_pending_completes_job(risk_store, tmp_path):
     target_key = seeded(risk_store, {"mech": 1})
     give_credential(risk_store)

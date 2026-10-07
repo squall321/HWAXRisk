@@ -341,6 +341,42 @@ def test_heartbeat_pings_do_not_change_the_result(tmp_path):
     assert {k: result[k] for k in plain} == plain
 
 
+def test_conversation_creation_waits_for_a_slow_portal_but_not_a_dead_one(tmp_path):
+    """대화 생성은 응답을 30초까지 기다린다(5초였다). 죽은 포털은 connect 10초가 잡는다."""
+    _service_pat(tmp_path)
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/agent/conversations":
+            seen.append(dict(request.extensions["timeout"]))
+            return httpx.Response(200, json={"id": "c"})
+        return httpx.Response(200, text=STREAM, headers={"content-type": "text/event-stream"})
+
+    _engine(tmp_path, handler).run({"question": "q"})
+    _engine(tmp_path, handler, risk_portal_call_timeout_s=45).run({"question": "q"})
+    assert seen == [{"connect": 10.0, "read": 30.0, "write": 30.0, "pool": 30.0},
+                    {"connect": 10.0, "read": 45.0, "write": 45.0, "pool": 45.0}]
+
+
+def test_a_conversation_that_cannot_be_created_is_said_out_loud(tmp_path, caplog):
+    """대화 생성이 한도를 넘기면 로그가 값과 손잡이를 말하고, 결과에 '대화 없이 돌았다' 가 실린다.
+
+    그 패널의 발언은 포털에 남지 않는다 — 끊겼을 때 부분 결과가 남는 자리가 거기뿐이라 조용히 넘길 일이 아니다.
+    """
+    _service_pat(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/agent/conversations":
+            raise httpx.ReadTimeout("slow portal", request=request)
+        return httpx.Response(200, text=STREAM, headers={"content-type": "text/event-stream"})
+
+    with caplog.at_level("WARNING", logger="hwax_risk.engine"):
+        result = _engine(tmp_path, handler).run({"question": "q"})
+    assert result["conv_id"] is None and result["conv_missing"] is True
+    assert "대화 생성 30초 초과(HWAXRISK_PORTAL_CALL_TIMEOUT_S, ReadTimeout)" in caplog.text
+    assert "포털 대화 없이 돈다" in caplog.text
+
+
 def test_a_user_pat_must_outlive_the_panel_wall_clock(tmp_path):
     """사용자 PAT 는 남은 수명이 패널 자격 여유(벽시계 + 대기 + 600초)를 넘을 때만 쓴다 — 러너와 같은 규칙이다.
 

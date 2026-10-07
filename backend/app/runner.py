@@ -1138,6 +1138,9 @@ def _complete_panel(
             quality["escalated_clusters"] = escalated
         if result.get("call_groups"):
             quality["call_groups"] = list(result["call_groups"])
+        # 포털 대화를 못 만든 채 돌았다 — 포털에 이 패널의 발언이 남지 않았다(끊겼다면 부분 결과도 없다).
+        if result.get("conv_missing"):
+            quality["flags"].append("conversation_absent")
         store.execute(
             "UPDATE rr_panels SET quality_json = ?, llm_calls = ? WHERE id = ?",
             (canonical_json(quality), llm_calls, panel["id"]),

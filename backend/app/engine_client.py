@@ -32,10 +32,9 @@ CONVERSATION_SOURCE = "web"
 CONVERSATION_TITLE_MAX = 200
 
 CONNECT_TIMEOUT_S = 10.0               # 죽은 포털 감지 — 짧게 둔다
-CONV_TIMEOUT_S = 5.0
 HEALTH_TIMEOUT_S = 2.0
 # 스트림의 쓰기·풀 대기. 읽기(줄 사이 침묵) 한도를 물려받지 않는다 — 그 값은 15시간이라, 물려주면 본문 송신이
-# 막힌 것도 15시간을 기다린다. 읽기 한도는 설정이다(config.DEFAULT_ENGINE_READ_TIMEOUT_S).
+# 막힌 것도 15시간을 기다린다. 읽기 한도와 대화 생성 한도는 설정이다(config.DEFAULT_ENGINE_READ_TIMEOUT_S 외).
 WRITE_TIMEOUT_S = 30.0
 POOL_TIMEOUT_S = 30.0
 DEFAULT_AGENT_URL = "http://127.0.0.1:9009"
@@ -248,13 +247,22 @@ class PortalPanelEngine:
 
     # -- 4단계 대화 생성(비치명) ------------------------------------------------
     def create_conversation(self, pat: str, title: str) -> str | None:
-        """포털 대화 1건. 4xx·연결 실패면 None 이고 패널은 그대로 진행한다(plan §6.7.2 4단계)."""
+        """포털 대화 1건. 4xx·연결 실패면 None 이고 패널은 그대로 진행한다(plan §6.7.2 4단계).
+
+        한도는 5초였다 — 부하 걸린 포털이 그 안에 답하지 못하면 패널이 대화 없이 돌아, 몇 시간짜리 심의의 발언이
+        포털에 한 줄도 남지 않았다(끊겼을 때 부분 결과가 남는 자리는 거기뿐이다). 죽은 포털은 connect 가 잡는다.
+        """
         body = {"title": str(title)[:CONVERSATION_TITLE_MAX], "kind": CONVERSATION_KIND,
                 "source": CONVERSATION_SOURCE}
+        limit = float(getattr(self.settings, "risk_portal_call_timeout_s", config.DEFAULT_PORTAL_CALL_TIMEOUT_S))
         try:
-            with self._client(CONV_TIMEOUT_S) as client:
+            with self._client(httpx.Timeout(limit, connect=CONNECT_TIMEOUT_S)) as client:
                 r = client.post(self._base() + CONVERSATIONS_PATH, json=body,
                                 headers={"Authorization": f"Bearer {pat}"})
+        except httpx.TimeoutException as exc:
+            log.warning("대화 생성 %g초 초과(HWAXRISK_PORTAL_CALL_TIMEOUT_S, %s) — 이 패널은 포털 대화 없이 돈다",
+                        limit, type(exc).__name__)
+            return None
         except httpx.HTTPError as exc:
             log.warning("대화 생성 실패(비치명): %s", type(exc).__name__)
             return None
@@ -354,6 +362,8 @@ class PortalPanelEngine:
             raise EngineError(f"포털 /agent/chat 호출 실패({type(exc).__name__})") from exc
 
         result["conv_id"] = conv_id
+        if conv_id is None:
+            result["conv_missing"] = True
         result["call_path"] = "portal"
         result["credential"] = credential["kind"]
         if credential["groups"]:
