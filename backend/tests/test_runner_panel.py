@@ -379,7 +379,8 @@ def test_build_delib_opts_shape_and_forbidden_keys(risk_store):
     # E0 바로 뒤가 좌석 계약표(E0c)이고, 사용자 메모는 마지막 슬롯이다.
     assert opts["evidence"][1]["source"] == "seat_contract"
     assert opts["evidence"][1]["tool"] == "seat-contract.v1"
-    assert opts["evidence"][-1] == {"source": "user_memo", "tool": "note", "result": "사용자 메모"}
+    assert opts["evidence"][-1] == {"source": "user_memo", "tool": "note", "result": "사용자 메모", "key": "M"}
+    assert opts["evidence"][1]["key"] == "E0c"
     assert recorder["prior_evidence"] == {"target_key": target_key, "user_memo": "사용자 메모"}
 
     for forbidden in ("human_note", "continue_summary", "non_negotiables", "search_sources",
@@ -409,6 +410,7 @@ def test_delib_opts_turn_off_the_engines_automatic_voc_recall(risk_store, tmp_pa
 def test_seat_contract_evidence_budget():
     item = runner.seat_contract_evidence(["mech", "mech", "sim", "없는도메인"])
     assert item["source"] == "seat_contract" and item["args"] == "mech,sim,없는도메인"
+    assert item["key"] == "E0c"
     lines = item["result"].splitlines()
     assert len(lines) == 2                                        # 없는 도메인 줄은 실리지 않는다
     assert all(len(line) <= runner.SEAT_CONTRACT_LINE_MAX for line in lines)
@@ -725,3 +727,31 @@ def test_second_panel_reports_only_the_changed_brief_keys(risk_store):
     assert second["brief_drift"] == ["rr_state"]         # 달라진 항목 키만 실린다
     assert second["brief_hash"] != first["brief_hash"]
     assert runner.load_brief(risk_store, "pan2")["evidence"] == changed
+
+
+def test_item_keys_alone_are_not_brief_drift(risk_store):
+    """항목에 키(E0·E1 …)가 붙기 전에 동결한 패널과 견줘도, 내용이 같으면 달라진 항목은 없다.
+
+    키는 항목의 이름표이지 내용이 아니다 — 해시에 넣으면 키를 싣기 시작한 뒤 첫 패널이 전 항목을 drift 로 적는다.
+    """
+    target_key = seeded(risk_store)
+    now = now_epoch()
+    panels = []
+    for no in (1, 2, 3):
+        panel_id = f"pan{no}"
+        risk_store.execute(
+            "INSERT INTO rr_panels(id, target_key, owner_sub, panel_no, seats_json, status, created_at)"
+            " VALUES (?, ?, ?, ?, '[]', 'planned', ?)", (panel_id, target_key, OWNER, no, now))
+        panels.append({"id": panel_id, "target_key": target_key, "owner_sub": OWNER})
+
+    before = [{"source": "rr_scope", "tool": "rr_targets", "args": target_key, "result": "G1 pass"},
+              {"source": "rr_diff", "tool": "summary_text", "args": target_key, "result": "변경 3건"}]
+    runner.freeze_brief(risk_store, panels[0], before)
+
+    keyed = [{**before[0], "key": "E0"}, {**before[1], "key": "E1"}]
+    assert runner.freeze_brief(risk_store, panels[1], keyed)["brief_drift"] == []
+    # 동결본에는 키가 그대로 남는다 — 패널이 실제로 받은 것이 정본이다.
+    assert runner.load_brief(risk_store, "pan2")["evidence"] == keyed
+
+    moved = [{**keyed[0], "result": "G1 fail"}, keyed[1]]
+    assert runner.freeze_brief(risk_store, panels[2], moved)["brief_drift"] == ["rr_scope"]

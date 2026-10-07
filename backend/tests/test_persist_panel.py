@@ -348,7 +348,8 @@ def test_prior_evidence_appends_user_memo(seeded, monkeypatch):
                         lambda *a, **kw: {"keys": ["E0"], "evidence": [{"source": "scope", "result": "E0"}]})
     items = narrative.prior_evidence(seeded, TARGET, user_memo="사용자 메모")
 
-    assert items[-1] == {"source": "user_memo", "tool": "note", "args": TARGET, "result": "사용자 메모"}
+    assert items[-1] == {"source": "user_memo", "tool": "note", "args": TARGET, "result": "사용자 메모",
+                         "key": "M"}
 
 
 def test_prior_evidence_runs_on_real_store(seeded):

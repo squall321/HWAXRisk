@@ -219,6 +219,7 @@ def seat_contract_evidence(domains: Sequence[str]) -> dict:
         "tool": "seat-contract.v1",
         "args": ",".join(seen),
         "result": "\n".join(lines),
+        "key": "E0c",
     }
 
 
@@ -293,7 +294,8 @@ def build_delib_opts(
     # E0(스코프·게이트) 바로 뒤가 E0c 좌석 계약표다.
     evidence.insert(1 if evidence else 0, seat_contract_evidence([s["domain"] for s in seats]))
     if user_memo and not any(e.get("source") == "user_memo" for e in evidence):
-        evidence.append({"source": "user_memo", "tool": "note", "result": str(user_memo)[:USER_MEMO_MAX]})
+        evidence.append({"source": "user_memo", "tool": "note", "result": str(user_memo)[:USER_MEMO_MAX],
+                         "key": "M"})
 
     return {
         "chair_template": planner.CHAIR_TEMPLATE,
@@ -319,11 +321,15 @@ def build_delib_opts(
 
 # ---------------------------------------------------------------- 패널 실행 원문·브리프 동결(plan §6.7.2 7단계·§5.6.1)
 def brief_hashes(evidence: Sequence[Mapping[str, Any]], keys: Sequence[str] | None = None) -> dict:
-    """브리프 항목별 해시 표 `{키: sha256[:12]}` — 다음 패널의 brief_drift 비교 기준이다."""
+    """브리프 항목별 해시 표 `{키: sha256[:12]}` — 다음 패널의 brief_drift 비교 기준이다.
+
+    항목의 `key`(E0·E1 …)는 해시에 넣지 않는다. 이름표이지 내용이 아니다 — 넣으면 키를 싣기 전에 동결한
+    패널과 견줄 때 내용이 그대로인데도 전 항목이 달라진 것으로 적힌다.
+    """
     out: dict[str, str] = {}
     for index, item in enumerate(evidence):
         key = str((keys or [])[index]) if keys and index < len(keys) else str(item.get("source") or index)
-        out[key] = sha256_hex(canonical_json(dict(item)))[:12]
+        out[key] = sha256_hex(canonical_json({k: v for k, v in dict(item).items() if k != "key"}))[:12]
     return out
 
 

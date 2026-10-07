@@ -238,7 +238,8 @@ def test_build_brief_orders_items_and_stays_in_budget(risk_store):
     assert out["keys"] == list(brief.ITEM_ORDER)
     assert len(out["evidence"]) == len(out["keys"]) <= brief.EVIDENCE_MAX_ITEMS
     for key, item in zip(out["keys"], out["evidence"]):
-        assert set(item) == {"source", "tool", "args", "result"}
+        assert set(item) == {"source", "tool", "args", "result", "key"}
+        assert item["key"] == key
         assert len(brief.evidence_line(item)) <= brief.CAPS[key], key
         assert len(item["result"]) <= brief.CLAMP_RESULT
         assert len(item["source"]) <= brief.CLAMP_SOURCE
@@ -248,6 +249,25 @@ def test_build_brief_orders_items_and_stays_in_budget(risk_store):
     assert total == out["meta"]["budget_used"] <= brief.ENGINE_BUDGET
     assert out["meta"]["dropped"] == 0
     assert out["meta"]["caps_sum"] == 10600
+
+
+def test_engine_line_with_item_keys_stays_inside_the_js_budget():
+    """엔진은 줄마다 `[e:N|KEY] ` 를 앞에 붙여 예산에 센다 — 키를 실어도 12항목이 11,000자 안이어야 드롭이 0 이다.
+
+    `evidence_line` 은 그 접두를 모델링하지 않고, E0c 는 브리프가 잰 것이 아니라 러너가 다시 끼운 것이 간다
+    (`runner.seat_contract_evidence` — CAPS['E0c'] 를 조금 넘는다). 그래서 최악값을 실제 자산으로 다시 잰다.
+    """
+    import itertools
+
+    from app import runner, taxonomy
+
+    domains = [d for d in taxonomy.load_json("seat-contract")["contract"] if d != "_common"]
+    seat_n = 5                                           # 패널 좌석 primary 4 + counter 1(planner.ROSTER_SEATS)
+    worst_e0c = max(len(brief.evidence_line(runner.seat_contract_evidence(list(combo))))
+                    for combo in itertools.combinations(domains, seat_n))
+    lines = sum(cap for key, cap in brief.CAPS.items() if key != "E0c") + worst_e0c
+    prefix = sum(len(f"[e:{n}|{key}] ") for n, key in enumerate(brief.ITEM_ORDER, start=1))
+    assert lines + prefix <= brief.ENGINE_BUDGET, (lines, prefix)
 
 
 def test_every_item_declares_its_source_table(risk_store):

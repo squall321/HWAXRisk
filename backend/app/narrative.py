@@ -1427,7 +1427,7 @@ def prior_evidence(store, target_key: str, *, user_memo: str | None = None,
     items = [item for item, key in zip(built["evidence"], built["keys"]) if key != "E0c"]
     if user_memo and not any(str(i.get("source")) == "user_memo" for i in items):
         items.append({"source": "user_memo", "tool": "note", "args": target_key,
-                      "result": str(user_memo)[:2000]})
+                      "result": str(user_memo)[:2000], "key": "M"})
     return items
 
 

@@ -1291,7 +1291,10 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
         raise AppError("E500", f"브리프 판단어 린터 위반 {len(lint['violations'])}건", http_status=500)
     return {
         "target_key": target_key,
-        "evidence": [{k: i[k] for k in ("source", "tool", "args", "result")} for i in items],
+        # 항목 키(E0~E9·E0c·M)를 다섯 번째 필드로 남긴다 — 엔진이 줄 머리를 `[e:N|E3]` 으로 찍어 좌석이 번호뿐
+        # 아니라 항목 이름으로 근거를 가리킨다(종전에는 여기서 떼어 `[e:N]` 뿐이었다). `evidence_line` 은 키를
+        # 세지 않는다 — 접두가 늘어도 예산 안이라는 것은 시험(test_brief)이 실제 자산으로 지킨다.
+        "evidence": [{k: i[k] for k in ("source", "tool", "args", "result", "key")} for i in items],
         "keys": [i["key"] for i in items],
         "refs": collect_refs(items),
         "meta": {

@@ -98,6 +98,9 @@ def test_run_panel_completes_with_real_modules(risk_store, tmp_path):
     assert engine.owner_subs == [OWNER]
     # 벽시계 상한 40분이 delib_opts 에 실린다(plan §6.10.2).
     assert engine.calls[0]["timeout_s"] == runner.PANEL_TIMEOUT_S == 2400
+    # 근거 항목마다 키가 엔진까지 간다 — 러너가 다시 끼우는 E0c 도 빠지지 않는다(엔진이 `[e:N|E3]` 으로 찍는다).
+    assert [e["key"] for e in engine.calls[0]["evidence"]] == [
+        "E0", "E0c", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9"]
 
     panel = risk_store.query_one(
         "SELECT status, risk_spec_parsed, quality_json FROM rr_panels WHERE id = ?", (out["panel_id"],))
