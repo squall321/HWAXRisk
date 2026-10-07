@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -89,16 +89,27 @@ def _cut(value: Any, limit: int = FIELD_MAX) -> str | None:
 
 
 class _StreamWatch:
-    """스트림 한 건이 어디까지 왔나 — 끊을 때 경과·마지막 단계·conv_id 를 말한다."""
+    """스트림 한 건이 어디까지 왔나 — 끊을 때 경과·마지막 단계·conv_id 를 말하고, 도는 동안 러너에 신호를 넘긴다."""
 
-    def __init__(self, conv_id: str | None) -> None:
+    def __init__(self, conv_id: str | None, on_progress: Callable[[Mapping[str, Any]], None] | None = None) -> None:
         self.conv_id = conv_id
         self.started = now_epoch()
+        self.frames = 0
         self.last_step = ""
+        self.last_event_at: int | None = None
+        self._on_progress = on_progress
 
     def frame(self, name: str, data: Mapping[str, Any]) -> None:
-        if name == "status" and data.get("step"):
-            self.last_step = str(data["step"])[:FIELD_MAX]
+        """프레임 하나를 센다. ping 은 연결이 살아 있다는 신호일 뿐 심의가 나아간 것이 아니다."""
+        now = now_epoch()
+        self.frames += 1
+        if name != "ping":
+            self.last_event_at = now
+            if name == "status" and data.get("step"):
+                self.last_step = str(data["step"])[:FIELD_MAX]
+        if self._on_progress is not None:
+            self._on_progress({"last_frame_at": now, "last_event_at": self.last_event_at,
+                               "last_step": self.last_step, "frames": self.frames})
 
     def lost(self, code: str, message: str) -> EngineStreamLost:
         """앱이 스트림을 놓았다는 예외 — 어느 사유든 '엔진은 계속 돌 수 있다' 와 그 심의의 대화를 같이 말한다."""
@@ -123,7 +134,7 @@ def _within_wall_clock(lines: Iterable[str], wall_s: int, watch: _StreamWatch) -
 
 
 def _watched(frames: Iterable[tuple[str, dict]], watch: _StreamWatch) -> Iterator[tuple[str, dict]]:
-    """프레임마다 마지막 단계를 적는다. 포털이 침묵 한도로 구독을 끊었다는 error 프레임은 엔진 실패와 갈라 올린다."""
+    """프레임마다 진행을 적는다. 포털이 침묵 한도로 구독을 끊었다는 error 프레임은 엔진 실패와 갈라 올린다."""
     for name, data in frames:
         if name == "error" and str(data.get("code") or "") == PORTAL_STREAM_IDLE_CODE:
             raise watch.lost("engine_silent", f"{PORTAL_STREAM_IDLE_CODE}: {data.get('message') or ''}".strip())
@@ -303,7 +314,8 @@ class PortalPanelEngine:
         }
 
     # -- 6·7단계 엔진 호출·SSE 캡처 ---------------------------------------------
-    def run(self, delib_opts: Mapping[str, Any], *, owner_sub: str | None = None) -> dict:
+    def run(self, delib_opts: Mapping[str, Any], *, owner_sub: str | None = None,
+            on_progress: Callable[[Mapping[str, Any]], None] | None = None) -> dict:
         """패널 1건을 돌리고 {decision_text, turns, conv_id, events, …} 를 돌려준다.
 
         429(포털 agent_semaphore 초과)는 `EngineBusy` 라 러너가 대기 후 재시도하고, 연결 실패·error 프레임은
@@ -322,7 +334,7 @@ class PortalPanelEngine:
         timeout = httpx.Timeout(connect=CONNECT_TIMEOUT_S, read=read_s or None,
                                 write=WRITE_TIMEOUT_S, pool=POOL_TIMEOUT_S)
         wall_s = config.panel_timeout_s(self.settings)
-        watch = _StreamWatch(conv_id)
+        watch = _StreamWatch(conv_id, on_progress)
         streaming = False
         body: dict[str, Any] = {
             "message": DELIBERATE_TRIGGER + question,

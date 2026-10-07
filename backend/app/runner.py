@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gzip
+import inspect
 import json
 import logging
 import re
@@ -39,6 +40,7 @@ SEAT_CONTRACT_TOTAL_MAX = 1000     # E0c 합 ≤1000자(plan §5.6.1 예산표)
 USER_MEMO_MAX = 2000
 # 앱이 스트림을 놓은 사유(EngineStreamLost.code) — 패널 벽시계 · 줄 사이 침묵 · 중간 절단. 엔진·좌석의 실패가 아니다.
 STREAM_LOST_CODES: tuple[str, ...] = ("panel_timeout", "engine_silent", "engine_stream_cut")
+PROGRESS_WRITE_INTERVAL_S = 60     # 도는 패널의 '마지막 신호' 를 잡 행에 적는 간격 — 줄마다 적으면 15초 ping 이 DB 를 두드린다
 
 # 러너 정본 경로가 부르는 모듈 함수(없으면 잡을 집지 않고 error 로 강등한다 — 반쪽 저장 방지).
 REQUIRED_NARRATIVE = ("prior_evidence", "parse_risk_spec", "persist_panel_result")
@@ -53,6 +55,8 @@ class PanelEngine(Protocol):
       · events = 압축 로그 [{kind: 'status'|'evidence'|'personas'|'turn'|'warning'|'error', step?, tool?, source?, personas?}]
                  (None 이면 좌석 귀속 불가 — tool_calls_ok·used_tool 은 null 로 남는다)
     선택 메서드 health() -> {model, vllm?, engine_rev?, endpoint_host?} 가 있으면 D6 model_json 을 채운다.
+    선택 인자 run(..., on_progress=) 를 받는 엔진에는 러너가 콜백을 준다 — 프레임이 올 때마다
+    {last_frame_at, last_event_at, last_step, frames} 로 부르면 러너가 잡 행에 '마지막 신호' 를 적는다.
     포털 429 는 EngineBusy, 앱이 스트림을 놓은 것은 EngineStreamLost, 그 밖의 실패는 EngineError 로 올린다.
     """
 
@@ -942,9 +946,13 @@ def run_panel(
     # 자격으로 집혔으면 요청자를 넘긴다 — 늘 타깃 owner 를 넘기던 동안 잡 행은 '요청자 자격' 이라 적고 엔진은
     # owner(없으면 서비스) PAT 로 돌았다.
     credential_sub = params.get("requester") if job.get("credential") == "requester" else job.get("owner_sub")
+    optional: dict = {}
+    if "on_progress" in _run_parameters(engine):
+        optional["on_progress"] = _progress_writer(store, job, panel)
+        optional["on_progress"]({})                 # 첫 줄이 오기 전부터 '시작했고 아직 신호가 없다' 가 보인다
     for attempt in range(ENGINE_BUSY_MAX_RETRY):
         try:
-            result = engine.run(delib_opts, owner_sub=credential_sub)
+            result = engine.run(delib_opts, owner_sub=credential_sub, **optional)
             break
         except EngineBusy:
             if stop is not None and stop.wait(ENGINE_BUSY_WAIT_S):
@@ -1010,6 +1018,38 @@ def _close_panel_stream_lost(store: Any, panel: Mapping[str, Any], job: Mapping[
         _set_job(store, job["id"], "paused", by=f"code:{lost.code}",
                  error=f"{error} — 잡을 멈췄다(좌석 재시도는 차감하지 않았다). 재개하면 이어 돈다")
     return {"panel_id": panel["id"], "status": "error", "error": error}
+
+
+def _run_parameters(engine: Any) -> Mapping[str, Any]:
+    """`engine.run` 이 받는 인자 이름 — 선택 인자(on_progress)를 받는 엔진에만 그것을 넘기려고 본다."""
+    try:
+        return inspect.signature(engine.run).parameters
+    except (TypeError, ValueError):
+        return {}
+
+
+def _progress_writer(store: Any, job: Mapping[str, Any], panel: Mapping[str, Any]):
+    """도는 패널의 '마지막 신호' 를 `rr_jobs.progress_json` 에 적는 콜백(PROGRESS_WRITE_INTERVAL_S 간격).
+
+    패널 벽시계가 몇 시간이라 `status='running'` 과 시작 시각만으로는 도는 것과 멈춘 것을 가를 수 없다.
+    `last_frame_at` 은 ping 을 포함한 아무 프레임(연결이 살아 있다), `last_event_at`·`last_step` 은 ping 이 아닌
+    프레임(심의가 나아가고 있다)이다. 적는 데 실패해도 패널은 계속 돈다.
+    """
+    head = {"panel_id": panel["id"], "panel_no": panel.get("panel_no"), "started_at": now_epoch()}
+    last: dict = {"written_at": None}
+
+    def note(frame: Mapping[str, Any]) -> None:
+        now = now_epoch()
+        if last["written_at"] is not None and now - last["written_at"] < PROGRESS_WRITE_INTERVAL_S:
+            return
+        last["written_at"] = now
+        body = {**head, "last_frame_at": None, "last_event_at": None, "last_step": "", "frames": 0, **frame}
+        try:
+            store.execute("UPDATE rr_jobs SET progress_json = ? WHERE id = ?", (canonical_json(body), job["id"]))
+        except Exception:  # noqa: BLE001 — 진행 표시를 못 적었다고 몇 시간짜리 패널을 버리지 않는다.
+            log.exception("패널 %s 진행 기록 실패(비치명)", panel["id"])
+
+    return note
 
 
 def _complete_panel(

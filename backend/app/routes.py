@@ -2192,11 +2192,16 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
     summary = planner.coverage_summary(store, target_key)
     level = registry_module.close_level(store, target_key, persist=False)
     job = store.query_one(
-        "SELECT id, tier, state, pause_reason, panels_done, panels_total, error FROM rr_jobs"
+        "SELECT id, tier, state, pause_reason, panels_done, panels_total, error, progress_json FROM rr_jobs"
         " WHERE target_key = ? ORDER BY created_at DESC LIMIT 1", (target_key,))
+    if job is not None:
+        job = dict(job)
+        # 도는 패널의 마지막 신호(러너가 1분 간격으로 적는다) — 벽시계가 몇 시간이라, 이것이 없으면 진행판에서
+        # 도는 패널과 멈춘 패널이 똑같이 'running' 이다. {panel_id, started_at, last_frame_at, last_event_at, last_step}.
+        job["signal"] = _loads(job.pop("progress_json"), {}) or None
     return {
         "target_key": target_key,
-        "job": dict(job) if job is not None else None,
+        "job": job,
         "roster_size": summary["roster_size"],
         "by_domain": summary["by_domain"],
         "by_status": summary["by_status"],

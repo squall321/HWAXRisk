@@ -341,6 +341,45 @@ def test_heartbeat_pings_do_not_change_the_result(tmp_path):
     assert {k: result[k] for k in plain} == plain
 
 
+def test_the_runner_is_told_of_every_frame_and_pings_are_not_progress(tmp_path):
+    """러너에 넘기는 신호에서 `last_frame_at` 은 ping 으로도 가고 `last_event_at`·`last_step` 은 진짜 프레임에서만 간다.
+
+    ping 은 연결이 살아 있다는 신호일 뿐 심의가 나아간 것이 아니다 — 둘을 가르지 않으면 멈춘 심의가 ping 만으로
+    '진행 중' 으로 보인다.
+    """
+    from app import common
+
+    _service_pat(tmp_path)
+    now = {"t": common.now_epoch()}
+    start = now["t"]
+
+    def body():
+        yield 'event: status\ndata: {"step": "1라운드"}\n\n'.encode()
+        now["t"] += 15
+        yield PING.encode()
+        now["t"] += 15
+        yield PING.encode()
+        yield 'event: delib\ndata: {"kind": "decision", "text": "결정문"}\n\nevent: done\ndata: {}\n\n'.encode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/agent/conversations":
+            return httpx.Response(200, json={"id": "c"})
+        return httpx.Response(200, content=body(), headers={"content-type": "text/event-stream"})
+
+    signals: list[dict] = []
+    previous = common.set_clock(lambda: now["t"])
+    try:
+        result = _engine(tmp_path, handler).run({"question": "q"}, on_progress=lambda s: signals.append(dict(s)))
+    finally:
+        common.set_clock(previous)
+    assert result["decision_text"] == "결정문" and [e["kind"] for e in result["events"]] == ["status"]
+    assert signals[:3] == [
+        {"last_frame_at": start, "last_event_at": start, "last_step": "1라운드", "frames": 1},
+        {"last_frame_at": start + 15, "last_event_at": start, "last_step": "1라운드", "frames": 2},
+        {"last_frame_at": start + 30, "last_event_at": start, "last_step": "1라운드", "frames": 3},
+    ]
+
+
 def test_conversation_creation_waits_for_a_slow_portal_but_not_a_dead_one(tmp_path):
     """대화 생성은 응답을 30초까지 기다린다(5초였다). 죽은 포털은 connect 10초가 잡는다."""
     _service_pat(tmp_path)

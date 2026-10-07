@@ -736,6 +736,61 @@ def test_run_panel_engine_error_returns_seats_to_pending(risk_store, tmp_path):
     assert "merge_panel" not in recorder
 
 
+def test_a_running_panel_leaves_its_last_signal_on_the_job_row(risk_store, tmp_path, monkeypatch):
+    """도는 패널의 마지막 신호가 잡 행(progress_json)에 1분 간격으로 남는다 — 진행판이 그것을 읽는다.
+
+    패널 벽시계가 12시간이라 `status='running'` 과 시작 시각만으로는 도는 패널과 멈춘 패널을 가를 수 없었다.
+    """
+    from app import common, routes
+
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+    job = runner.claim_next_job(risk_store, cfg)
+    now = {"t": now_epoch()}
+    start = now["t"]
+    seen: list[dict | None] = []
+
+    def signal() -> dict | None:
+        row = risk_store.query_one("SELECT progress_json FROM rr_jobs WHERE id = ?", (job_id,))
+        return json.loads(row["progress_json"]) if row["progress_json"] else None
+
+    class StreamingEngine(FakePanelEngine):
+        def run(self, delib_opts, *, owner_sub=None, on_progress=None):
+            seen.append(signal())                       # 첫 줄이 오기 전 — 시작했고 아직 신호가 없다
+            for step, elapsed in (("1라운드", 10), ("2라운드", 30), ("3라운드", 70)):
+                now["t"] = start + elapsed
+                on_progress({"last_frame_at": now["t"], "last_event_at": now["t"], "last_step": step,
+                             "frames": len(seen)})
+                seen.append(signal())
+            return super().run(delib_opts, owner_sub=owner_sub)
+
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    assert routes.coverage_payload(target_key)["job"]["signal"] is None       # 아직 돈 패널이 없다
+    recorder: dict = {}
+    previous = common.set_clock(lambda: now["t"])
+    try:
+        out = runner.run_panel(risk_store, cfg, StreamingEngine(), job,
+                               narrative_mod=fake_narrative(recorder), registry_mod=fake_registry(recorder))
+    finally:
+        common.set_clock(previous)
+    assert out["status"] == "done"
+    head = {"panel_id": out["panel_id"], "panel_no": 1, "started_at": start}
+    waiting = {**head, "last_frame_at": None, "last_event_at": None, "last_step": "", "frames": 0}
+    # 10초·30초의 신호는 간격(60초) 안이라 적지 않고, 70초의 신호에서 다시 적는다.
+    assert runner.PROGRESS_WRITE_INTERVAL_S == 60
+    assert seen == [waiting, waiting, waiting,
+                    {**head, "last_frame_at": start + 70, "last_event_at": start + 70, "last_step": "3라운드",
+                     "frames": 3}]
+    # 진행판(GET /targets/{key}/coverage 의 본체)이 그 신호를 싣는다.
+    payload_job = routes.coverage_payload(target_key)["job"]
+    assert payload_job["signal"] == seen[-1] and "progress_json" not in payload_job
+
+    # on_progress 를 받지 않는 엔진에는 넘기지 않는다(대역·MCP 길의 엔진은 그대로 돈다).
+    assert "on_progress" not in runner._run_parameters(FakePanelEngine())
+
+
 def test_a_panel_that_ran_without_a_portal_conversation_is_flagged(risk_store, tmp_path):
     """포털 대화를 못 만든 채 돈 패널은 품질 플래그에 남는다 — 그 패널의 발언이 포털에 없다."""
     target_key = seeded(risk_store)
