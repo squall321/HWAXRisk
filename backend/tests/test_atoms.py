@@ -346,6 +346,49 @@ def test_engine_evidence_marker_is_never_read_as_an_ir_edge(ctx, marker):
     assert evidence_grade_from_cites(beside, ctx) == "도구예측"
 
 
+def test_engine_marker_key_is_capped_at_24_characters(ctx):
+    """표지의 키는 24자까지다 — 25자 키가 붙은 `e:N|…` 은 표지가 아니라 모양이 틀린 참조(dangling)다.
+
+    엔진은 24자를 넘는 키를 찍지 않는다(`_EVID_KEY_MAX`). 경계가 어긋나면 한쪽은 엔진이 찍은 표지를 지어낸
+    참조로 세고, 다른 쪽은 엔진이 찍을 수 없는 글자열을 표지로 봐 준다.
+    """
+    from app import narrative
+
+    for marker in ("e:3|" + "K" * 24, "[e:3|" + "K" * 24 + "]"):
+        assert narrative._ENGINE_MARKER_RE.match(marker)
+        only = resolve_cites([{"ref": marker, "quote": ""}], ctx)
+        assert only["cites"][0]["dangling_reason"] == narrative.ENGINE_MARKER and only["dangling"] == []
+    for marker in ("e:3|" + "K" * 25, "[e:3|" + "K" * 25 + "]", "e:3|"):
+        assert narrative._ENGINE_MARKER_RE.match(marker) is None
+        only = resolve_cites([{"ref": marker, "quote": ""}], ctx)
+        assert only["cites"][0]["dangling_reason"] == "malformed" and only["dangling"] == [marker]
+
+
+def test_engine_marker_key_cap_matches_the_engine():
+    """앱이 표지로 받는 키 길이가 엔진의 `_EVID_KEY_MAX` 와 같다 — 엔진 리포가 곁에 있을 때 그쪽 소스와 직접 견준다.
+
+    환경변수 HWAX_AGENT_SERVER_REPO 가 먼저고, 없으면 형제 리포(../HWAXAgentServer)다. 없는 박스(앱 SIF 빌드
+    등)에서는 건너뛴다 — 그때는 위의 경계값 시험만 돈다.
+    """
+    import os
+    import re
+    from pathlib import Path
+
+    from app import narrative
+    from tests.conftest import REPO_ROOT
+
+    engine = Path(os.environ.get("HWAX_AGENT_SERVER_REPO") or REPO_ROOT.parent / "HWAXAgentServer") / "deliberation.py"
+    if not engine.is_file():
+        pytest.skip("엔진 리포가 곁에 없다(HWAX_AGENT_SERVER_REPO 또는 ../HWAXAgentServer)")
+    found = re.search(r"^_EVID_KEY_MAX\s*=\s*(\d+)\s*$", engine.read_text(encoding="utf-8"), re.M)
+    assert found, "엔진 deliberation.py 에서 _EVID_KEY_MAX 를 찾지 못했다 — 이름이 바뀌었으면 이 시험을 같이 고친다"
+    limit = int(found.group(1))
+    assert narrative._ENGINE_MARKER_RE.match("e:3|" + "K" * limit), \
+        f"엔진은 {limit}자 키까지 찍는데 앱이 표지로 받지 않는다"
+    assert narrative._ENGINE_MARKER_RE.match("e:3|" + "K" * (limit + 1)) is None, \
+        f"엔진 상한은 {limit}자인데 앱은 그보다 긴 키도 표지로 받는다"
+
+
 def test_claimed_grade_is_lowered_but_never_raised(ctx):
     higher = first_finding(make_spec(findings=[make_finding(evidence_grade="측정")]), ctx)
     assert higher["evidence_grade"] == "도구예측"
