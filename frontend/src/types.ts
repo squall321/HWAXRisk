@@ -181,7 +181,8 @@ export type ProjectSource = {
   kind: SourceKind;
   app_key: string | null;
   status: SourceStatus;
-  ref?: string | null;
+  /** 서버가 파싱해 보내는 객체다 — 문자열이 아니다(`SourceRef` 주석 참조). */
+  ref?: SourceRef | null;
   bridge_declared?: boolean | null;
   probe?: SourceProbe | null;
 };
@@ -201,14 +202,24 @@ export type ProjectCard = {
 
 export type ProjectList = { projects: ProjectCard[] };
 
+/**
+ * 과제 상세의 스냅샷 한 줄(`GET /projects/{id}` → `snapshots[]`).
+ *
+ * **서버 열 이름 그대로 둔다.** 여기에 서버에 없는 이름(`label`·`captured_at`·`kinds`)을 적어
+ * 두었더니 `tsc` 가 통과하고 화면은 런타임에 깨졌다 — `s.kinds.join()` 이 undefined 를 불렀다.
+ * 타입이 거짓이면 타입검사는 거짓을 지켜 준다.
+ */
 export type SnapshotHeader = {
   id: string;
-  label: string | null;
+  ir_version: string;
   ir_hash: string;
-  kinds: SourceKind[];
-  captured_at: number;
+  /** 서버는 JSON **문자열**로 준다(`kinds_json` 을 변환 없이 내보낸다). 쓰는 쪽에서 파싱한다. */
+  kinds_json: string;
+  node_count: number;
+  edge_count: number;
+  warnings_n: number;
   degraded: boolean;
-  counts?: Record<string, number> | null;
+  created_at: number;
 };
 
 export type TargetHeader = {
@@ -242,9 +253,18 @@ export type ProjectDetail = {
 export type SourceCreate = {
   kind: SourceKind;
   app_key: string;
+  /** 보낼 때는 문자열이다(사람이 입력란에 적은 값). 받을 때는 아래 `SourceRef` 로 파싱돼 온다. */
   ref: string;
   bridge_declared?: boolean;
 };
+
+/**
+ * 연결된 소스의 `ref` — 서버는 `_loads(row["ref_json"], {})` 로 **파싱한 객체**를 준다
+ * (routes.py `_project_sources`). 전에 `ref: string` 이라 적어 두어 화면이 이 객체를 React
+ * 자식으로 그리다 통째로 백지가 됐다(React error #31). 모양은 kind 마다 다르다 —
+ * mcad 는 `{stepforge_project_id, detect_job_id}`, dyna 는 `{session_id, file_id, sha256}`.
+ */
+export type SourceRef = Record<string, string | number | boolean | null>;
 
 export type SourceProbe = { reachable: boolean; detail: string; capture_mode: string };
 export type SourceCreated = { ok: boolean; probe: SourceProbe };

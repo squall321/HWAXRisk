@@ -31,7 +31,7 @@ import {
   TabBar,
   TabPanel,
 } from "../ui/primitives";
-import { fmtCounts, fmtEpoch, fmtNum } from "../format";
+import { fmtEpoch, fmtNum } from "../format";
 import { FACET_ORDER } from "../types";
 import type {
   VocabBump,
@@ -45,6 +45,7 @@ import type {
   JobHeader,
   ProjectDetail,
   SnapshotHeader,
+  SourceRef,
   SourceKind,
   TargetHeader,
 } from "../types";
@@ -79,6 +80,33 @@ const STATEMENT_LAYERS: Array<{ status: CharacterStatement["status"]; label: str
  * 미측정·미입력은 실패가 아니고, 그 사실 자체가 정보다(앱 제1 규율).
  */
 const UNKNOWN = <span className="text-muted-foreground">—</span>;
+
+/** 서버가 문자열로 주는 `kinds_json` 을 푼다. 깨진 값은 빈 목록이다(화면을 터뜨리지 않는다). */
+function parseKinds(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const v: unknown = JSON.parse(raw);
+    return Array.isArray(v) ? v.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** 소스 `ref` 객체를 키=값 줄로 편다 — 모양이 kind 마다 달라 고정 필드로 못 적는다. */
+function RefPairs({ ref_ }: { ref_: SourceRef }) {
+  const pairs = Object.entries(ref_);
+  if (pairs.length === 0) return UNKNOWN;
+  return (
+    <span className="flex flex-col gap-0.5">
+      {pairs.map(([k, v]) => (
+        <span key={k} className="flex flex-wrap items-baseline gap-1">
+          <span className="font-mono text-xs opacity-60">{k}</span>
+          <Mono>{String(v)}</Mono>
+        </span>
+      ))}
+    </span>
+  );
+}
 
 /**
  * 서버가 **재서** '없다' 고 말한 자리. UNKNOWN(모름)과 반드시 구분한다 —
@@ -158,7 +186,13 @@ function SourceCard({
           columns={1}
           rows={[
             { label: "어댑터", hint: "app_key", value: source.app_key ?? UNKNOWN },
-            { label: "참조", hint: "ref", value: source.ref ?? UNKNOWN },
+            {
+              label: "참조",
+              hint: "ref",
+              // 서버는 파싱된 객체를 준다(`{stepforge_project_id: …}` 등). 그대로 그리면 React 가
+              // 터져 화면이 통째로 백지가 된다 — 실제로 그랬다. 키=값 줄로 편다.
+              value: source.ref ? <RefPairs ref_={source.ref} /> : UNKNOWN,
+            },
             {
               label: "브리지 선언",
               hint: "bridge_declared",
@@ -946,7 +980,7 @@ export default function ProjectPage() {
     setPendingJob(null);
     if (!job || job.state !== "done") return;
     const newest = detail.data.snapshots.reduce<SnapshotHeader | null>(
-      (best, s) => (best === null || s.captured_at > best.captured_at ? s : best),
+      (best, s) => (best === null || s.created_at > best.created_at ? s : best),
       null,
     );
     if (newest) {
@@ -960,11 +994,16 @@ export default function ProjectPage() {
 
   const snapshotColumns: Column<SnapshotHeader>[] = [
     { key: "id", header: "스냅샷", hint: "snapshot_id", cell: (s) => <Mono>{s.id}</Mono>, nowrap: true },
-    { key: "label", header: "이름", hint: "label", cell: (s) => s.label ?? UNKNOWN },
-    { key: "hash", header: "ir_hash", cell: (s) => <Mono>{s.ir_hash}</Mono>, nowrap: true },
-    { key: "kinds", header: "소스", cell: (s) => s.kinds.join(" · "), nowrap: true },
-    { key: "at", header: "동결 시각", hint: "captured_at", cell: (s) => fmtEpoch(s.captured_at), nowrap: true },
-    { key: "counts", header: "집계", cell: (s) => fmtCounts(s.counts) },
+    { key: "hash", header: "IR 해시", hint: "ir_hash", cell: (s) => <Mono>{s.ir_hash}</Mono>, nowrap: true },
+    // 서버는 `kinds_json` 을 **문자열 그대로** 준다(routes.py 가 변환하지 않는다). 여기서 푼다.
+    { key: "kinds", header: "소스", hint: "kinds_json", cell: (s) => parseKinds(s.kinds_json).join(" · "), nowrap: true },
+    { key: "at", header: "동결 시각", hint: "created_at", cell: (s) => fmtEpoch(s.created_at), nowrap: true },
+    {
+      key: "counts",
+      header: "집계",
+      hint: "node_count · edge_count",
+      cell: (s) => `노드 ${fmtNum(s.node_count)} · 엣지 ${fmtNum(s.edge_count)}`,
+    },
     {
       key: "degraded",
       header: "degraded",
