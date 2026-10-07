@@ -675,8 +675,12 @@ def apply_seat_results(
     return {"seats": outcome, "by_status": by_status}
 
 
-def fail_panel_seats(store: Any, panel_id: str, *, reason: str = "engine_fail") -> dict:
-    """패널 error — 좌석 전부 pending(retry+1), retry > 2 면 skipped(reason)."""
+def fail_panel_seats(store: Any, panel_id: str, *, reason: str = "engine_fail", charge: bool = True) -> dict:
+    """패널 error — 좌석 전부 pending(retry+1), retry > 2 면 skipped(reason).
+
+    `charge=False` 는 좌석 탓이 아닌 중단이다(앱이 스트림을 놓았다) — retry 를 올리지 않고 pending 으로만 되돌린다.
+    차감하면 좌석과 무관한 시간 한도 세 번에 그 좌석이 skipped 로 굳는다.
+    """
     panel, seats = _panel_seat_keys(store, panel_id)
     now = now_epoch()
     outcome: list[dict] = []
@@ -688,7 +692,7 @@ def fail_panel_seats(store: Any, panel_id: str, *, reason: str = "engine_fail") 
             ).fetchone()
             if row is None or row["status"] not in ACTIVE_STATUSES:
                 continue
-            retry = int(row["retry"] or 0) + 1
+            retry = int(row["retry"] or 0) + (1 if charge else 0)
             final = "pending" if retry <= MAX_SEAT_RETRY else "skipped"
             conn.execute(
                 "UPDATE rr_coverage SET status = ?, retry = ?, reason = ?, panel_id = NULL, origin = NULL,"

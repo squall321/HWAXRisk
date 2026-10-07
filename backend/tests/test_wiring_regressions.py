@@ -364,11 +364,12 @@ def test_the_whole_request_body_is_accepted_by_the_portal_model(risk_store, tmp_
     assert verdict["dropped"] == []
 
 
-def test_a_panel_past_its_wall_clock_is_closed_as_an_error(risk_store, tmp_path):
-    """벽시계를 넘긴 패널은 error 로 닫히고 좌석은 다음 편성으로 돌아간다(plan §6.10.2 · §6.7.2 9단계).
+def test_a_panel_past_its_wall_clock_is_closed_without_charging_the_seats(risk_store, tmp_path):
+    """벽시계를 넘긴 패널은 error 로 닫히되 좌석 재시도를 차감하지 않고 잡을 멈춘다(plan §6.10.2 · §6.7.2 9단계).
 
     엔진이 줄을 계속 보내는 한 읽기 타임아웃은 걸리지 않는다 — 벽시계를 앱이 재지 않으면 패널 하나가
-    러너 자리와 그 타깃의 직렬 순서를 끝없이 붙든다.
+    러너 자리와 그 타깃의 직렬 순서를 끝없이 붙든다. 다만 끊어도 엔진은 그 심의를 끝까지 돌린다 — 종전에는
+    5초 뒤 같은 좌석을 다시 편성해 같은 심의가 엔진에 겹쳤고, 좌석은 제 탓이 아닌 일로 재시도를 잃었다.
     """
     target_key = _seed(risk_store)
     cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
@@ -385,15 +386,84 @@ def test_a_panel_past_its_wall_clock_is_closed_as_an_error(risk_store, tmp_path)
     try:
         out = runner.run_panel(risk_store, cfg, _portal_engine(risk_store, cfg, {}, slow_stream),
                                runner.claim_next_job(risk_store, cfg))
+        assert out["status"] == "error" and out["error"].startswith("panel_timeout: 패널이 43200초"), out
+        panel = risk_store.query_one(
+            "SELECT status, error, conv_id, retry FROM rr_panels WHERE id = ?", (out["panel_id"],))
+        assert panel["status"] == "error" and "HWAXRISK_PANEL_TIMEOUT_S" in panel["error"]
+        # 엔진에서 계속 돌 수 있는 그 심의의 대화가 패널 행에 남는다 — 끊긴 뒤의 발언은 거기에만 있다.
+        assert panel["conv_id"] == "conv-1" and "conv_id=conv-1" in panel["error"] and panel["retry"] == 0
+        seats = risk_store.query("SELECT status, retry FROM rr_coverage WHERE target_key = ?", (target_key,))
+        assert {(r["status"], r["retry"]) for r in seats} == {("pending", 0)}
+        job = risk_store.query_one("SELECT state, pause_reason, error, state_by FROM rr_jobs WHERE id = ?", (job_id,))
+        assert (job["state"], job["pause_reason"], job["state_by"]) == ("paused", None, "code:panel_timeout")
+        assert job["error"] == panel["error"] + " — 잡을 멈췄다(좌석 재시도는 차감하지 않았다). 재개하면 이어 돈다"
+        # 멈춘 잡은 다시 편성되지 않는다 — 엔진에 같은 심의가 겹치지 않는다. 사람이 재개하면 이어 돈다.
+        assert runner.claim_next_job(risk_store, cfg) is None
+        assert runner.resume_job(risk_store, job_id, by=OWNER)["state"] == "queued"
+        resumed = runner.claim_next_job(risk_store, cfg)
+        assert resumed["id"] == job_id and resumed["state"] == "running"
+        assert risk_store.query_one("SELECT error FROM rr_jobs WHERE id = ?", (job_id,))["error"] is None
     finally:
         common.set_clock(previous)
 
-    assert out["status"] == "error" and "panel_timeout" in out["error"], out
-    panel = risk_store.query_one("SELECT status, error FROM rr_panels WHERE id = ?", (out["panel_id"],))
-    assert panel["status"] == "error" and "HWAXRISK_PANEL_TIMEOUT_S" in panel["error"]
-    assert {r["status"] for r in risk_store.query(
-        "SELECT status FROM rr_coverage WHERE target_key = ?", (target_key,))} == {"pending"}
-    assert risk_store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))["state"] == "running"
+
+def test_lost_streams_do_not_count_toward_the_engine_fail_streak(risk_store, tmp_path):
+    """앱이 스트림을 놓은 패널은 연속 실패에 세지 않는다 — 진짜 엔진 실패 세 번이라야 잡이 죽는다."""
+    target_key = _seed(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+
+    class Engine:
+        def __init__(self) -> None:
+            self.errors: list[Exception] = []
+
+        def run(self, delib_opts, *, owner_sub=None):
+            raise self.errors.pop(0)
+
+    engine = Engine()
+    engine.errors = [runner.EngineError("연결 끊김"),
+                     runner.EngineStreamLost("engine_stream_cut", "스트림이 중간에 끊겼다", conv_id="conv-7"),
+                     runner.EngineStreamLost("engine_silent", "포털 스트림이 조용했다" + " 긴 사유" * 400),
+                     runner.EngineError("연결 끊김"), runner.EngineError("연결 끊김")]
+    states = []
+    for _ in range(5):
+        job = runner.claim_next_job(risk_store, cfg)
+        out = runner.run_panel(risk_store, cfg, engine, job)
+        assert out["status"] == "error"
+        row = risk_store.query_one("SELECT state, error FROM rr_jobs WHERE id = ?", (job_id,))
+        worst = risk_store.query_one(
+            "SELECT MAX(retry) AS n FROM rr_coverage WHERE target_key = ?", (target_key,))["n"]
+        states.append((row["state"], (row["error"] or "").split(":")[0], worst))
+        if row["state"] == "paused":
+            # 사유가 아무리 길어도 '멈췄고 차감하지 않았다' 는 말이 잘리지 않는다.
+            assert len(out["error"]) <= 400 and row["error"].endswith("재개하면 이어 돈다")
+            runner.resume_job(risk_store, job_id, by=OWNER)
+
+    # 진짜 실패 1 → 놓친 스트림 2(멈춤) → 진짜 실패 2·3 에서야 engine_fail_streak. 셋째 값은 좌석 재시도의
+    # 최댓값이다 — 놓친 스트림에서는 오르지 않는다(올랐다면 셋째 패널에서 좌석이 skipped 로 굳었다).
+    assert states == [("running", "", 1), ("paused", "engine_stream_cut", 1), ("paused", "engine_silent", 1),
+                      ("running", "", 2), ("failed", "engine_fail_streak", 3)]
+    lost = risk_store.query_one(
+        "SELECT conv_id, retry FROM rr_panels WHERE target_key = ? AND error LIKE 'engine_stream_cut%'", (target_key,))
+    assert (lost["conv_id"], lost["retry"]) == ("conv-7", 0)
+
+
+def test_a_cancel_made_while_the_stream_was_lost_is_not_overwritten(risk_store, tmp_path):
+    """패널이 도는 사이 사람이 취소했으면 스트림을 놓쳐도 잡을 paused 로 덮지 않는다 — 다음 편성에서 cancelled 다."""
+    target_key = _seed(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+
+    class Engine:
+        def run(self, delib_opts, *, owner_sub=None):
+            runner.cancel_job(risk_store, job_id, by=OWNER)
+            raise runner.EngineStreamLost("panel_timeout", "패널이 벽시계를 넘겼다")
+
+    job = runner.claim_next_job(risk_store, cfg)
+    assert runner.run_panel(risk_store, cfg, Engine(), job)["status"] == "error"
+    assert risk_store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))["state"] == "cancelling"
+    assert runner.claim_next_job(risk_store, cfg) is None
+    assert risk_store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))["state"] == "cancelled"
 
 
 # ---------------------------------------------------------------- MCP 경로(plan §6.11)

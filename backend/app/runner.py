@@ -68,8 +68,9 @@ class EngineError(Exception):
 class EngineStreamLost(EngineError):
     """앱이 스트림을 놓았다 — 패널 벽시계·줄 사이 침묵·중간 절단(`code` ∈ STREAM_LOST_CODES).
 
-    엔진이 실패한 것이 아니다. 엔진은 심의를 분리 태스크로 돌려 구독이 끊겨도 끝까지 간다. `conv_id` 는
-    그 심의의 포털 대화다(끊긴 뒤의 발언은 거기에만 남는다).
+    엔진이 실패한 것이 아니다. 엔진은 심의를 분리 태스크로 돌려 구독이 끊겨도 끝까지 간다 — 그래서 패널은
+    error 로 닫되 좌석 재시도와 연속 실패에 세지 않고 잡을 멈춘다(run_panel). `conv_id` 는 그 심의의 포털
+    대화다(끊긴 뒤의 발언은 거기에만 남는다).
     """
 
     def __init__(self, code: str, message: str, *, conv_id: str | None = None) -> None:
@@ -570,7 +571,8 @@ def create_job(
 
 def _set_job(store: Any, job_id: str, state: str, *, reason: str | None = None, error: str | None = None,
              by: str | None = None) -> dict:
-    """잡 상태 전이 1건. `by` 는 주체다 — 사람은 email, 자동 정지는 'code:diminishing'·'code:daily_cap'(plan §0.6)."""
+    """잡 상태 전이 1건. `by` 는 주체다 — 사람은 email, 자동 정지는 'code:diminishing'·'code:daily_cap'(plan §0.6),
+    앱이 스트림을 놓아 멈춘 것은 'code:<STREAM_LOST_CODES 의 사유>' 다."""
     now = now_epoch()
     actor = by or (f"code:{reason}" if reason in ("diminishing", "daily_cap") else None)
     if actor:
@@ -820,15 +822,29 @@ def _diminishing(store: Any, target_key: str) -> bool:
     return True
 
 
+def _stream_lost_code(error: Any) -> str | None:
+    """패널 error 문구가 '앱이 스트림을 놓았다' 는 사유면 그 코드(STREAM_LOST_CODES), 아니면 None."""
+    code = str(error or "").split(":", 1)[0].strip()
+    return code if code in STREAM_LOST_CODES else None
+
+
 def _error_streak(store: Any, target_key: str) -> int:
+    """가장 최근부터 연속으로 error 로 닫힌 패널 수(ENGINE_FAIL_STREAK 에서 멈춘다).
+
+    앱이 스트림을 놓은 패널은 세지 않고 건너뛴다 — 엔진이 실패한 것이 아니라서, 그 패널 때문에 진짜 실패
+    두 번이 세 번으로 세져 잡이 죽으면 안 된다.
+    """
     streak = 0
     for row in store.query(
-        "SELECT status FROM rr_panels WHERE target_key = ? ORDER BY panel_no DESC LIMIT ?",
-        (target_key, ENGINE_FAIL_STREAK),
+        "SELECT status, error FROM rr_panels WHERE target_key = ? ORDER BY panel_no DESC", (target_key,)
     ):
         if row["status"] != "error":
             break
+        if _stream_lost_code(row["error"]):
+            continue
         streak += 1
+        if streak >= ENGINE_FAIL_STREAK:
+            break
     return streak
 
 
@@ -907,6 +923,8 @@ def run_panel(
             out = _close_panel_error(store, panel, job, f"pat_unavailable: {exc}", settings)
             _set_job(store, job["id"], "failed", error="pat_unavailable")
             return {**out, "error": "pat_unavailable"}
+        except EngineStreamLost as exc:
+            return _close_panel_stream_lost(store, panel, job, exc)
         except EngineError as exc:
             error = f"engine_error: {exc}"
             break
@@ -932,6 +950,29 @@ def _close_panel_error(store: Any, panel: Mapping[str, Any], job: Mapping[str, A
     )
     if _error_streak(store, panel["target_key"]) >= ENGINE_FAIL_STREAK:
         _set_job(store, job["id"], "failed", error="engine_fail_streak")
+    return {"panel_id": panel["id"], "status": "error", "error": error}
+
+
+def _close_panel_stream_lost(store: Any, panel: Mapping[str, Any], job: Mapping[str, Any],
+                             lost: EngineStreamLost) -> dict:
+    """앱이 스트림을 놓은 패널을 닫는다 — 좌석 재시도와 연속 실패에 세지 않고 잡을 멈춘다.
+
+    엔진은 구독이 끊겨도 심의를 끝까지 돌린다. 종전에는 이 패널도 엔진 실패로 세어 5초 뒤 같은 좌석을 다시
+    편성했다 — 같은 심의가 엔진에 겹쳐 돌아 공유 LLM 부하가 배가 되고(연속 3패널이면 잡이 죽으니 셋까지),
+    좌석은 제 탓이 아닌 일로 세 번째에 skipped 로 굳었다. 그래서 좌석은 차감 없이 pending 으로 돌리고 잡을
+    멈춘다. 사유는 잡의 error 에 적는다(pause_reason 은 CHECK 로 세 값만 받는다). 사람이 재개하면 이어 돈다.
+    """
+    error = str(lost)[:400]
+    planner.fail_panel_seats(store, panel["id"], reason="engine_fail", charge=False)
+    store.execute(
+        "UPDATE rr_panels SET status = 'error', error = ?, conv_id = ?, ended_at = ? WHERE id = ?",
+        (error, lost.conv_id, now_epoch(), panel["id"]),
+    )
+    # 그 사이 사람이 취소했으면(cancelling) 그 전이를 덮지 않는다 — 다음 편성에서 cancelled 가 된다.
+    row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job["id"],))
+    if row is not None and row["state"] == "running":
+        _set_job(store, job["id"], "paused", by=f"code:{lost.code}",
+                 error=f"{error} — 잡을 멈췄다(좌석 재시도는 차감하지 않았다). 재개하면 이어 돈다")
     return {"panel_id": panel["id"], "status": "error", "error": error}
 
 

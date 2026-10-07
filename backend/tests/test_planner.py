@@ -483,6 +483,25 @@ def test_fail_panel_seats_returns_seats_to_pending(risk_store):
     assert (row["status"], row["reason"]) == ("skipped", "engine_fail")
 
 
+def test_fail_panel_seats_can_release_without_charging_a_retry(risk_store):
+    """좌석 탓이 아닌 중단(`charge=False`)은 retry 를 올리지 않는다 — 마지막 재시도에 걸려 있던 좌석도 굳지 않는다."""
+    target_key = seeded(risk_store, {"mech": 1, "sim": 1, "rel": 1})
+    panel = planner.plan_next_panel(risk_store, target_key, "A")
+    planner.start_panel_seats(risk_store, panel["id"])
+    key = panel["seats"][0]["key"]
+    risk_store.execute(
+        "UPDATE rr_coverage SET retry = ? WHERE target_key = ? AND agent_key = ?",
+        (planner.MAX_SEAT_RETRY, target_key, key),
+    )
+    out = planner.fail_panel_seats(risk_store, panel["id"], charge=False)
+    assert {s["status"] for s in out["seats"]} == {"pending"}
+    rows = coverage(risk_store, target_key)
+    assert rows[key]["retry"] == planner.MAX_SEAT_RETRY and rows[key]["status"] == "pending"
+    assert all(rows[s["key"]]["panel_id"] is None for s in panel["seats"])
+    assert sorted(rows[s["key"]]["retry"] for s in panel["seats"]) == [0, 0, planner.MAX_SEAT_RETRY]
+    assert planner.check_invariants(risk_store, target_key) == []
+
+
 # ---------------------------------------------------------------- 사용자 조작 전이
 def test_skip_seat_requires_reason_and_rejects_terminal(risk_store):
     target_key = seeded(risk_store, {"mech": 2})
