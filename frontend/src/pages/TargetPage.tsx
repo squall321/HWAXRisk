@@ -833,11 +833,22 @@ function BriefTokens({ panels }: { panels: BriefPanel[] }) {
 }
 
 
-function RecallPreview({ targetKey }: { targetKey: string }) {
+/**
+ * `active` 가 왜 필요한가. `GET /targets/{key}/brief` 는 **읽기가 아니다** — 서버가 그 자리에서
+ * `issue_brief_token` 으로 패널마다 새 토큰을 발급하고 `brief_token_hash` 를 덮어쓴다
+ * (routes.py `get_brief` → `issue_brief_token`). 그래서 이 호출이 한 번 더 나갈 때마다 사용자가
+ * 이미 복사해 둔 토큰이 조용히 무효가 된다.
+ *
+ * 탭을 `TabPanel` 로 바꿔 재마운트는 막았지만 그것만으로는 모자랐다 — 마운트가 유지되니
+ * **타깃 화면에 들어가기만 해도** 브리프 탭을 한 번도 안 열고 토큰이 발급됐다(띄워 보고 잡았다).
+ * 그 탭을 실제로 보고 있을 때만 부른다.
+ */
+function RecallPreview({ targetKey, active }: { targetKey: string; active: boolean }) {
   const [tier, setTier] = useState<string>("");
   const brief = useAsync(
     (signal) => riskApi.getBrief(targetKey, tier === "" ? undefined : tier, { signal }),
     [targetKey, tier],
+    active,
   );
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
 
@@ -1111,7 +1122,8 @@ export default function TargetPage() {
         <ConsolidatedReportCard level={coverage.data?.level ?? null} sync={sync} />
       </TabPanel>
       <TabPanel active={tab === "brief"} tab="brief" idPrefix="tgt">
-        <RecallPreview targetKey={targetKey} />
+        {/* active 를 넘긴다 — 이 호출은 서버에서 토큰을 **발급**하므로 보고 있을 때만 나가야 한다. */}
+        <RecallPreview targetKey={targetKey} active={tab === "brief"} />
       </TabPanel>
       <TabPanel active={tab === "quality"} tab="quality" idPrefix="tgt">
         <QualityCard />
