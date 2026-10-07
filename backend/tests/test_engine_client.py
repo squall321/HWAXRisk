@@ -171,6 +171,51 @@ def test_run_maps_429_to_engine_busy_and_connect_error_to_engine_error(tmp_path)
         _engine(tmp_path, broken).run({"question": "q"})
 
 
+def test_run_cuts_a_stream_that_outlives_the_panel_wall_clock(tmp_path):
+    """줄이 계속 와도 패널 벽시계 상한(plan §6.10.2, 40분)을 넘기면 끊는다 — 읽기 타임아웃은 줄 사이 침묵만 잰다.
+
+    엔진의 `timeout_s` 는 LLM 호출 한 번의 타임아웃이라 패널 전체를 재 주는 쪽이 없다. 앱이 재지 않으면
+    상태 줄만 계속 보내는 심의 하나가 러너 자리를 끝없이 붙든다.
+    """
+    from app import common, runner
+
+    (tmp_path / "secrets.env").write_text("HWAXRISK_PORTAL_PAT=svc-pat\n", encoding="utf-8")
+    (tmp_path / "secrets.env").chmod(0o600)
+    assert engine_client.PANEL_TIMEOUT_S == runner.PANEL_TIMEOUT_S == 2400
+    now = {"t": common.now_epoch()}
+    sent: list[str] = []
+
+    def stream(elapsed: int):
+        def frames():
+            yield 'event: status\ndata: {"step": "시작"}\n\n'.encode()
+            now["t"] += elapsed
+            sent.append("late")
+            yield 'event: delib\ndata: {"kind": "decision", "text": "결정문"}\n\n'.encode()
+            sent.append("end")
+            yield b"event: done\ndata: {}\n\n"
+        return frames()
+
+    def handler_for(elapsed: int):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/agent/conversations":
+                return httpx.Response(200, json={"id": "c"})
+            return httpx.Response(200, content=stream(elapsed), headers={"content-type": "text/event-stream"})
+        return handler
+
+    previous = common.set_clock(lambda: now["t"])
+    try:
+        # 상한 안에서 끝난 스트림은 그대로 받는다(경계값 포함).
+        inside = _engine(tmp_path, handler_for(engine_client.PANEL_TIMEOUT_S)).run({"question": "q"})
+        assert inside["decision_text"] == "결정문"
+        sent.clear()
+        with pytest.raises(EngineError, match="panel_timeout"):
+            _engine(tmp_path, handler_for(engine_client.PANEL_TIMEOUT_S + 1)).run({"question": "q"})
+    finally:
+        common.set_clock(previous)
+    # 상한을 넘긴 뒤의 줄은 읽지 않는다 — 끝까지 받고 나서 버리는 것이 아니다.
+    assert sent == ["late"]
+
+
 def test_health_reads_agent_server(tmp_path):
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/health"

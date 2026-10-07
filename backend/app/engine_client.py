@@ -13,7 +13,7 @@ from app import config, identity
 from app.common import now_epoch
 
 # 프로토콜·예외의 정본은 러너다(러너가 이 모듈을 import 하지 않으므로 순환이 없다).
-from app.runner import CREDENTIAL_MARGIN_S, EngineBusy, EngineError, PanelEngine, PatUnavailable
+from app.runner import CREDENTIAL_MARGIN_S, PANEL_TIMEOUT_S, EngineBusy, EngineError, PanelEngine, PatUnavailable
 
 log = logging.getLogger("hwax_risk.engine")
 
@@ -34,7 +34,7 @@ CONVERSATION_TITLE_MAX = 200
 CONNECT_TIMEOUT_S = 10.0
 CONV_TIMEOUT_S = 5.0
 HEALTH_TIMEOUT_S = 2.0
-DEFAULT_ENGINE_TIMEOUT_S = 1800.0      # delib_opts.timeout_s 가 없을 때의 엔진 상한
+DEFAULT_ENGINE_TIMEOUT_S = 1800.0      # timeout_s 가 없을 때(러너는 싣지 않는다) 가정하는 호출당 타임아웃 — 엔진이 받는 최대값
 STREAM_MARGIN_S = 60.0                 # 읽기 타임아웃 = timeout_s + 60(plan §6.7.2 6단계)
 DEFAULT_AGENT_URL = "http://127.0.0.1:9009"
 
@@ -82,6 +82,20 @@ def _cut(value: Any, limit: int = FIELD_MAX) -> str | None:
     if value is None:
         return None
     return str(value)[:limit]
+
+
+def _within_wall_clock(lines: Iterable[str], deadline: int) -> Iterator[str]:
+    """줄이 올 때마다 벽시계를 본다 — `deadline`(epoch 초)을 넘겼으면 `EngineError` 로 끊는다(plan §6.10.2).
+
+    읽기 타임아웃은 줄 사이 침묵만 잰다. 엔진이 상태 줄을 계속 보내는 한 걸리지 않아서, 벽시계를 따로 재지
+    않으면 패널 하나가 러너 자리와 그 타깃의 직렬 순서를 끝없이 붙든다. 엔진에는 패널 전체를 재는 손잡이가
+    없다(`timeout_s` 는 LLM 호출 한 번의 타임아웃이다) — 그래서 앱이 잰다. 줄이 오지 않는 동안은 볼 수 없다.
+    그 구간은 읽기 타임아웃이 끊는다.
+    """
+    for line in lines:
+        if now_epoch() > deadline:
+            raise EngineError(f"panel_timeout: 패널 벽시계 상한 {PANEL_TIMEOUT_S}초를 넘겼습니다")
+        yield line
 
 
 def collect_stream(frames: Iterable[tuple[str, dict]]) -> dict:
@@ -259,6 +273,7 @@ class PortalPanelEngine:
 
         timeout_s = float(opts.get("timeout_s") or DEFAULT_ENGINE_TIMEOUT_S)
         timeout = httpx.Timeout(timeout_s + STREAM_MARGIN_S, connect=CONNECT_TIMEOUT_S)
+        deadline = now_epoch() + PANEL_TIMEOUT_S
         body: dict[str, Any] = {
             "message": DELIBERATE_TRIGGER + question,
             "history": [],
@@ -280,7 +295,7 @@ class PortalPanelEngine:
                     if response.status_code >= 400:
                         response.read()
                         raise EngineError(f"포털이 심의를 거부했습니다 — HTTP {response.status_code}")
-                    result = collect_stream(parse_sse(response.iter_lines()))
+                    result = collect_stream(parse_sse(_within_wall_clock(response.iter_lines(), deadline)))
         except PatUnavailable:
             raise
         except httpx.HTTPError as exc:

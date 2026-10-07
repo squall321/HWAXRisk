@@ -3,10 +3,16 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
+import httpx
 import pytest
 
-from app import common, config, identity, narrative, planner, registry, routes, runner
+from app import common, config, engine_client, identity, narrative, planner, registry, routes, runner
+from tests.conftest import REPO_ROOT
 
 def _enc(pat: str) -> str:
     """저장 열 portal_pat_enc 는 Fernet 암호문이다(plan §8.2.7) — 픽스처도 같은 형식으로 넣는다."""
@@ -96,8 +102,9 @@ def test_run_panel_completes_with_real_modules(risk_store, tmp_path):
     assert out["coverage"] == {"done": 5}
     # 러너 자격 (b) — 잡 owner 가 엔진까지 간다(plan §6.7 3단계).
     assert engine.owner_subs == [OWNER]
-    # 벽시계 상한 40분이 delib_opts 에 실린다(plan §6.10.2).
-    assert engine.calls[0]["timeout_s"] == runner.PANEL_TIMEOUT_S == 2400
+    # 벽시계 상한 40분(plan §6.10.2)은 delib_opts 에 싣지 않는다 — 엔진의 timeout_s 는 LLM 호출 한 번의
+    # 타임아웃이고 포털은 1800 초과를 422 로 막는다. 벽시계는 엔진 클라이언트가 스트림에서 잰다.
+    assert "timeout_s" not in engine.calls[0] and runner.PANEL_TIMEOUT_S == 2400
     # 근거 항목마다 키가 엔진까지 간다 — 러너가 다시 끼우는 E0c 도 빠지지 않는다(엔진이 `[e:N|E3]` 으로 찍는다).
     assert [e["key"] for e in engine.calls[0]["evidence"]] == [
         "E0", "E0c", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9"]
@@ -205,6 +212,124 @@ def test_daily_cap_applies_under_a_fixed_clock(risk_store, tmp_path):
         assert (row["state"], row["pause_reason"]) == ("paused", "daily_cap")
     finally:
         common.set_clock(previous)
+
+
+# ---------------------------------------------------------------- 앱 → 포털 본문 계약(plan §6.7.1 (A))
+def _sse(*frames: tuple[str, dict]) -> str:
+    return "".join(f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n" for name, data in frames)
+
+
+def _portal_engine(store, cfg, seen: dict, stream):
+    """실 엔진 클라이언트(PortalPanelEngine)를 가짜 포털에 물린다 — 앱이 `/agent/chat` 에 보내는 본문을 붙잡는다."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == engine_client.CONVERSATIONS_PATH:
+            return httpx.Response(200, json={"id": "conv-1"})
+        if request.url.path != engine_client.CHAT_PATH:
+            return httpx.Response(200, json={"model": "glm-fake"})          # agent-server /health
+        seen["body"] = json.loads(request.content.decode())
+        return httpx.Response(200, content=stream() if callable(stream) else stream,
+                              headers={"content-type": "text/event-stream"})
+
+    return engine_client.PortalPanelEngine(store, cfg, transport=httpx.MockTransport(handler))
+
+
+def _panel_body(risk_store, tmp_path) -> dict:
+    """러너 한 바퀴를 실모듈로 돌려, 포털이 실제로 받는 요청 본문을 돌려준다."""
+    target_key = _seed(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg, user_memo="이 계면을 먼저 보라")
+    seen: dict = {}
+    engine = _portal_engine(risk_store, cfg, seen, _sse(("delib", {"kind": "decision", "text": DECISION}),
+                                                         ("done", {})))
+    out = runner.run_panel(risk_store, cfg, engine, runner.claim_next_job(risk_store, cfg))
+    assert out["status"] == "done", out
+    return seen["body"]
+
+
+def _portal_backend() -> Path | None:
+    """포털 리포의 backend/ — 환경변수 HWAX_PORTAL_REPO 가 먼저고, 없으면 형제 리포(../HWAXPortal)다."""
+    backend = Path(os.environ.get("HWAX_PORTAL_REPO") or REPO_ROOT.parent / "HWAXPortal") / "backend"
+    return backend if (backend / "app" / "agent" / "routes.py").is_file() else None
+
+
+# 포털의 요청 모델(ChatRequest · DelibOpts)로 본문을 검증한다. 선언 안 된 키는 포털이 에러 없이 버리므로
+# (model_dump(exclude_none=True)) 통과 여부와 함께 '무엇이 떨어졌나' 도 돌려받는다.
+_PORTAL_VALIDATE = """
+import json, sys
+from pydantic import ValidationError
+from app.agent.routes import ChatRequest
+body = json.load(sys.stdin)
+try:
+    request = ChatRequest.model_validate(body)
+except ValidationError as exc:
+    print(json.dumps({"errors": [[".".join(str(x) for x in e["loc"]), e["msg"]] for e in exc.errors()]}))
+else:
+    kept = request.delib_opts.model_dump(exclude_none=True)
+    print(json.dumps({"errors": [], "dropped": sorted(set(body["delib_opts"]) - set(kept))}))
+"""
+
+
+def test_runner_never_sends_a_per_call_timeout_as_the_panel_wall_clock(risk_store, tmp_path):
+    """포털 리포가 곁에 없어도 도는 판 — 문서로 적힌 경계만 본다(포털 `DelibOpts.timeout_s` 는 10~1800, 엔진도 같다).
+
+    러너는 패널 벽시계 40분(2400)을 `timeout_s` 로 실어 보냈다. 포털은 그 값을 422 로 거절하므로 앱 → 포털
+    길의 패널은 하나도 돌지 못하고 세 번째에 잡이 `engine_fail_streak` 로 죽는다.
+    """
+    opts = _panel_body(risk_store, tmp_path)["delib_opts"]
+    assert "timeout_s" not in opts
+    assert "question" not in opts and opts["chair_template"] == planner.CHAIR_TEMPLATE
+
+
+def test_the_whole_request_body_is_accepted_by_the_portal_model(risk_store, tmp_path):
+    """러너가 보내는 본문 전체를 포털의 실제 요청 모델에 넣어 본다 — 하나라도 경계를 넘으면 패널이 전부 422 다.
+
+    포털 모델은 이 리포 것이 아니라 형제 리포에서 불러온다(같은 venv, 별도 프로세스 — 두 리포 다 최상위
+    패키지 이름이 `app` 이다). 형제 리포가 없는 박스(앱 SIF 빌드 등)에서는 건너뛴다.
+    """
+    backend = _portal_backend()
+    if backend is None:
+        pytest.skip("포털 리포가 곁에 없다(HWAX_PORTAL_REPO 또는 ../HWAXPortal) — 문서 경계 시험만 돈다")
+    body = _panel_body(risk_store, tmp_path)
+    r = subprocess.run([sys.executable, "-c", _PORTAL_VALIDATE], input=json.dumps(body), cwd=backend,
+                       env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        pytest.skip(f"포털 모델을 이 venv 로 불러오지 못했다 — {r.stderr.strip()[-300:]}")
+    verdict = json.loads(r.stdout)
+    assert verdict["errors"] == [], f"포털이 러너 본문을 422 로 거절한다 — {verdict['errors']}"
+    # 통과해도 선언 안 된 키는 포털이 말없이 버린다 — 러너가 실은 손잡이가 엔진까지 가는지도 같이 본다.
+    assert verdict["dropped"] == []
+
+
+def test_a_panel_past_its_wall_clock_is_closed_as_an_error(risk_store, tmp_path):
+    """벽시계 40분을 넘긴 패널은 error 로 닫히고 좌석은 다음 편성으로 돌아간다(plan §6.10.2 · §6.7.2 9단계).
+
+    엔진이 줄을 계속 보내는 한 읽기 타임아웃은 걸리지 않는다 — 벽시계를 앱이 재지 않으면 패널 하나가
+    러너 자리와 그 타깃의 직렬 순서를 끝없이 붙든다.
+    """
+    target_key = _seed(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+    now = {"t": common.now_epoch()}
+    previous = common.set_clock(lambda: now["t"])
+
+    def slow_stream():
+        yield _sse(("status", {"step": "심의 시작"})).encode()
+        now["t"] += runner.PANEL_TIMEOUT_S + 1          # 40분이 지났고, 엔진은 여전히 줄을 보낸다
+        yield _sse(("status", {"step": "아직 도는 중"})).encode()
+        yield _sse(("delib", {"kind": "decision", "text": DECISION}), ("done", {})).encode()
+
+    try:
+        out = runner.run_panel(risk_store, cfg, _portal_engine(risk_store, cfg, {}, slow_stream),
+                               runner.claim_next_job(risk_store, cfg))
+    finally:
+        common.set_clock(previous)
+
+    assert out["status"] == "error" and "panel_timeout" in out["error"], out
+    panel = risk_store.query_one("SELECT status, error FROM rr_panels WHERE id = ?", (out["panel_id"],))
+    assert panel["status"] == "error" and "panel_timeout" in panel["error"]
+    assert {r["status"] for r in risk_store.query(
+        "SELECT status FROM rr_coverage WHERE target_key = ?", (target_key,))} == {"pending"}
+    assert risk_store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))["state"] == "running"
 
 
 # ---------------------------------------------------------------- MCP 경로(plan §6.11)
