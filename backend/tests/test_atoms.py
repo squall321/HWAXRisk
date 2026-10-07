@@ -333,14 +333,16 @@ def test_engine_evidence_marker_is_never_read_as_an_ir_edge(ctx, marker):
     # 표지의 번호가 claim 의 수치 토큰으로 잡히면 quote 에 없는 숫자로 몰려 quote_mismatch 가 된다.
     assert narrative._number_tokens(f"min_gap 0.018 mm 다 {marker}") == ["0.018"]
 
-    # risk_spec cites 에 적힌 표지 — 버리지 않고 dangling 으로 보존하되 등급에는 세지 않는다.
+    # risk_spec cites 에 적힌 표지 — 버리지 않고 행으로 보존하되 등급에도 dangling 에도 세지 않는다.
+    # 지어낸 참조가 아니라 엔진이 적으라고 시킨 번호라서다(모양이 틀린 참조 `x:1` 은 여전히 dangling 이다).
     alone = resolve_cites([{"ref": marker, "quote": ""}], ctx)
     assert [(row["ref_type"], row["ok"], row["dangling_reason"]) for row in alone["cites"]] == \
-        [("unknown", False, "malformed")]
-    assert alone["dangling"] == [marker]
+        [("unknown", False, narrative.ENGINE_MARKER)]
+    assert alone["dangling"] == []
     assert evidence_grade_from_cites(alone, ctx) == "경험칙"
-    beside = resolve_cites([{"ref": marker, "quote": ""}, {"ref": EDGE_TIED, "quote": ""}], ctx)
-    assert beside["dangling"] == [marker] and beside["resolved_refs"] == [EDGE_TIED]
+    beside = resolve_cites([{"ref": marker, "quote": ""}, {"ref": EDGE_TIED, "quote": ""},
+                            {"ref": "x:1", "quote": ""}], ctx)
+    assert beside["dangling"] == ["x:1"] and beside["resolved_refs"] == [EDGE_TIED]
     assert evidence_grade_from_cites(beside, ctx) == "도구예측"
 
 

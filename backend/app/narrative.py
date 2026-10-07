@@ -577,11 +577,18 @@ def canonical_text_for(ref: str, ctx: SpecContext) -> str | None:
     return None
 
 
+# 심의 엔진의 근거 항목 표지 — `[e:N]`, 호출자 키가 가면 `[e:N|E3]`(엔진 `_EV_CITE_RE` 와 같은 모양이고, 대괄호는
+# JSON 필드 안에서 빠질 수 있다). §0.2.1 의 참조가 아니다 — IR 엣지는 `e:<12hex>` 라 `parse_ref` 가 먼저 가른다.
+_ENGINE_MARKER_RE = re.compile(r"^\[?e:\d+(?:\|[A-Za-z0-9_.-]{1,24})?\]?$")
+ENGINE_MARKER = "engine_marker"
+
+
 def _resolve_one(ref: str, ctx: SpecContext, raised_by: Sequence[str]) -> dict:
     """참조 하나의 존재 검증. {ok, reason, payload, verified}. verified=False 는 채널 부재(강등 아님)."""
     info = parse_ref(ref)
     if info is None:
-        return {"ok": False, "reason": "malformed", "payload": None, "verified": True}
+        reason = ENGINE_MARKER if _ENGINE_MARKER_RE.match(ref) else "malformed"
+        return {"ok": False, "reason": reason, "payload": None, "verified": True}
     kind = info["kind"]
     if kind == "p":
         node = ctx.node(info["ref"])
@@ -697,7 +704,12 @@ def resolve_cites(cites: Sequence[dict], ctx: SpecContext, *, claim: str = "", w
         if info and info["kind"] == "req" and isinstance(outcome.get("payload"), Mapping):
             row["req_kind"] = str(outcome["payload"].get("kind") or "")
         if not outcome["ok"]:
-            dangling.append(ref)
+            # 엔진의 근거 표지는 dangling 으로 세지 않는다. dangling 은 '실재하지 않는 것을 가리켰다' 는 표시인데
+            # (§0.2.1 (2)) 표지는 엔진이 브리프 항목에 붙이고 결정문에 적으라고 시킨 번호다 — 세면 그 지시를 따른
+            # 패널마다 dangling 이 오르고 진짜 지어낸 참조가 그 속에 묻힌다. 참조가 아니므로 등급에도 세지 않는다
+            # (아래 grade_ok 는 그대로 False 다).
+            if outcome["reason"] != ENGINE_MARKER:
+                dangling.append(ref)
         else:
             if not outcome["verified"]:
                 unverified.append(ref)
@@ -1729,7 +1741,9 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
             )
             for cite in atom.get("_resolved_cites") or ():
                 ref = str(cite.get("ref") or "")
-                if not ref:
+                # 엔진의 근거 표지는 역색인에 앉히지 않는다 — 참조가 아니고, 같은 번호가 패널마다 다른 항목을
+                # 가리킨다. 앉히면 dangling=1 인 행으로 남아 '지어낸 참조' 로 세어진다(원문은 finding_json.cites 에 있다).
+                if not ref or cite.get("dangling_reason") == ENGINE_MARKER:
                     continue
                 store.execute(
                     "INSERT OR REPLACE INTO rr_claim_refs(claim_uid, ref_type, ref, quote, owner_sub, target_key,"

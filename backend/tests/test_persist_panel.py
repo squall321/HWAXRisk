@@ -235,6 +235,41 @@ def test_persist_writes_claim_refs_and_character(seeded):
     assert chars[0]["first_target_key"] == TARGET
 
 
+def test_engine_evidence_marker_in_cites_is_not_counted_as_a_dangling_reference(seeded):
+    """의장이 엔진의 근거 표지(`[e:N]` · `[e:N|KEY]`)를 risk_spec cites 에 옮겨 적어도 dangling 으로 세지 않는다.
+
+    dangling 은 '실재하지 않는 것을 가리켰다' 는 표시다(§0.2.1 (2) — 지어낸 참조). 표지는 엔진이 브리프 항목에
+    붙이고 결정문에 적으라고 시킨 번호다. 그걸 dangling 으로 세면 지시를 따른 패널마다 `dangling_n` 이 오르고
+    (P3 통과 기준은 dangling 0 이다) 진짜 지어낸 참조가 그 속에 묻힌다.
+    """
+    spec = _spec()
+    spec["findings"][0]["cites"] = [{"ref": NID, "quote": QUOTE}, {"ref": "[e:3|E3]", "quote": ""}]
+    spec["gains"][0]["cites"] = [{"ref": "e:2", "quote": ""}, {"ref": "p:ffffffffffff", "quote": ""}]
+    narrative.persist_panel_result(seeded, PANEL, decision_text=_decision_text(spec), spec=spec, turns=_turns(),
+                                   attribution={"seats": {}, "extra_seats": []})
+
+    rows = {r["claim_uid"]: r for r in seeded.query(
+        "SELECT claim_uid, dangling, evidence_grade, finding_json FROM rr_findings WHERE panel_id = ?", (PANEL,))}
+    f1, g1 = rows[f"{PANEL}#F1"], rows[f"{PANEL}#G1"]
+    assert f1["dangling"] == 0 and json.loads(f1["finding_json"])["dangling"] == []
+    assert f1["evidence_grade"] == "도구예측"            # 등급은 종전대로 진짜 참조(p:)만 센다
+    # 버리지 않는다 — 의장이 적은 그대로 남는다.
+    assert {"ref": "[e:3|E3]", "quote": ""} in json.loads(f1["finding_json"])["cites"]
+    # 실재하지 않는 참조는 여전히 dangling 이다. 빠지는 것은 표지뿐이다.
+    assert g1["dangling"] == 1 and json.loads(g1["finding_json"])["dangling"] == ["p:ffffffffffff"]
+    assert g1["evidence_grade"] == "경험칙"              # 표지만으로는 등급이 오르지 않는다
+
+    quality = {r["agent_key"]: json.loads(r["quality_json"]) for r in seeded.query(
+        "SELECT agent_key, quality_json FROM rr_seat_opinions WHERE panel_id = ?", (PANEL,))}
+    assert quality["mech-housing-structure"]["dangling_n"] == 0
+    assert quality["sim-drop-impact"]["dangling_n"] == 1
+
+    # 표지는 참조가 아니라서 역색인에 앉지 않는다 — 같은 번호가 패널마다 다른 항목을 가리킨다.
+    refs = seeded.query("SELECT claim_uid, ref, dangling FROM rr_claim_refs ORDER BY claim_uid, ref")
+    assert [(r["claim_uid"], r["ref"], r["dangling"]) for r in refs] == [
+        (f"{PANEL}#F1", NID, 0), (f"{PANEL}#G1", "p:ffffffffffff", 1)]
+
+
 def test_persist_writes_seat_opinions(seeded):
     out = _persist(seeded)
 
