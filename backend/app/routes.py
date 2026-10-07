@@ -2633,6 +2633,25 @@ def _check_events(events: list[dict] | None) -> tuple[list[dict] | None, bool]:
     return checked[:EVENTS_MAX], len(checked) > EVENTS_MAX
 
 
+def _omitted_lines(items: list[dict] | None) -> list[str]:
+    """MCP 오케스트레이터가 신고한 '좌석에 못 간 근거' `[{source, text}]` 를 `engine_withheld` 줄로 옮긴다.
+
+    줄 모양은 웹 러너가 엔진 카드를 옮겨 적는 것(`runner.withheld_by_engine`)과 같다 — `<source> — <text>`.
+    길이는 그 길과 같은 상한에서 자르고 거절하지 않는다. 이 신고는 결과 제출에 얹혀 오므로, 사유 문장이
+    길다고 422 를 내면 패널 결과가 통째로 원장에 못 들어간다.
+    """
+    lines: list[str] = []
+    for item in items or ():
+        if not isinstance(item, dict):
+            continue
+        source = str(item.get("source") or "").strip()[:EVENT_FIELD_MAX]
+        note = str(item.get("text") or "").strip()[:EVENT_FIELD_MAX]
+        line = f"{source} — {note}" if source and note else source or note
+        if line and line not in lines:
+            lines.append(line)
+    return lines
+
+
 def _seat_contract_rev() -> str:
     """seat-contract.v1.json 의 sha256[:12](D6 model_json.seat_contract_rev)."""
     return sha256_hex(taxonomy.asset_path("seat-contract").read_bytes())[:12]
@@ -2642,11 +2661,15 @@ def complete_panel(panel_id: str, *, engine: str, decision_text: str, turns: lis
                    report_id: Any = None, conv_id: str | None = None,
                    events: list[dict] | None = None, model: str | None = None,
                    actor: str | None = None, actor_verified: bool = False,
-                   owner_sub: str | None = None) -> dict:
+                   owner_sub: str | None = None, evidence_omitted: list[dict] | None = None) -> dict:
     """`POST /api/panels/{id}/complete` 본체 — MCP `risk_submit_panel_result` 와 같은 함수.
 
     파서는 앱 단일 구현(`narrative.parse_risk_spec`)이고 병합은 `registry.merge` 다. `owner_sub` 는 패널 행을
     승계한다 — `actor`(게이트웨이 신고 이메일)로 소유자를 바꾸지 않는다(§6.11).
+
+    `evidence_omitted` 는 MCP 길의 것이다 — 심의가 좌석에 주지 못한 근거를 오케스트레이터가 `[{source, text}]` 로
+    신고한다. `events` 에 섞어 받지 않는다. events[] 가 오면 좌석 귀속을 다시 세므로, 좌석 도구 경로가 없는
+    그 길의 `used_tool` 이 '모름(null)' 에서 '안 썼다(false)' 로 바뀐다.
     """
     if engine not in ("mcp", "web"):
         raise AppError("E100", f"engine 은 mcp|web 여야 합니다 — {engine!r}.", 422)
@@ -2706,6 +2729,7 @@ def complete_panel(panel_id: str, *, engine: str, decision_text: str, turns: lis
         flags.remove("spec_parse_failed")           # 보정 재제출로 해결됐다.
     # 엔진이 좌석에 주지 않았다고 알린 근거 — 러너 경로와 같은 표기로 남긴다. events[] 없는 재제출은 지우지 않는다.
     withheld = runner.withheld_by_engine(checked)
+    withheld += [line for line in _omitted_lines(evidence_omitted) if line not in withheld]
     if withheld:
         quality["engine_withheld"] = withheld
         if "engine_withheld" not in flags:

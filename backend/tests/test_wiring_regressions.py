@@ -372,6 +372,61 @@ def test_mcp_submit_rejects_other_owner(risk_store, monkeypatch):
         "SELECT status FROM rr_panels WHERE id = ?", (panel["id"],))["status"] == "planned"
 
 
+def test_mcp_submit_records_the_evidence_that_never_reached_the_seats(risk_store, monkeypatch):
+    """MCP 오케스트레이터(hwax-risk-review.js)가 '좌석에 못 간 근거' 를 제출에 실어 보내면 패널에 남는다.
+
+    자리는 웹 러너가 엔진 카드를 옮겨 적는 곳과 같다(`quality_json.engine_withheld` · 같은 이름의 플래그).
+    종전엔 도구에 받을 인자가 없어 그 목록이 워크플로 반환값에만 있었다 — 원장을 보는 사람은 그 패널의 좌석이
+    브리프 일부만 보고 판정했다는 것을 알 길이 없었고, 모르는 인자를 얹어 보내면 도구가 말없이 버렸다.
+    """
+    import asyncio
+
+    import app.mcp_server as srv
+
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    target_key = _seed(risk_store)
+    panel = planner.plan_next_panel(risk_store, target_key, "B")
+    counted = "본문이 있는 근거 14건 중 뒤쪽 2건은 건수 상한(12건)을 넘겨 좌석에 주지 않았다."
+    args = {
+        "panel_id": panel["id"], "engine": "mcp", "decision_text": DECISION, "report_id": None, "actor": OWNER,
+        "turns": [{"round": 1, "persona": s["key"], "say": "발언"} for s in panel["seats"]],
+        # 워크플로가 돌려받는 모양 그대로다 — [{source, count, text}].
+        "evidence_omitted": [
+            {"source": "사전 근거 건수 초과", "count": 2, "text": counted},
+            {"source": "사전 근거 예산 초과", "count": 1, "text": "가" * (routes.EVENT_FIELD_MAX + 100)},
+        ],
+    }
+
+    def quality() -> dict:
+        return json.loads(risk_store.query_one(
+            "SELECT quality_json FROM rr_panels WHERE id = ?", (panel["id"],))["quality_json"])
+
+    # 게이트웨이가 부르는 길(MCP 프로토콜)로 낸다 — 도구 스키마가 그 인자를 받아야 한다.
+    asyncio.run(srv.mcp.call_tool("risk_submit_panel_result", args))
+    assert risk_store.query_one("SELECT status FROM rr_panels WHERE id = ?", (panel["id"],))["status"] == "done"
+    assert quality()["engine_withheld"] == [
+        f"사전 근거 건수 초과 — {counted}",
+        # 긴 사유는 거절하지 않고 러너 길과 같은 상한에서 자른다 — 사유 문장 때문에 패널 결과가 못 들어가면 안 된다.
+        "사전 근거 예산 초과 — " + "가" * routes.EVENT_FIELD_MAX,
+    ]
+    assert quality()["flags"].count("engine_withheld") == 1
+    # 이 신고는 events[] 가 아니다. events[] 로 읽으면 좌석 귀속을 다시 세어, 도구 경로가 없는 이 길의
+    # used_tool 이 '모름(null)' 에서 '안 썼다(false)' 로 바뀐다.
+    assert "attribution_rate" not in quality()
+    assert {json.loads(r["quality_json"])["used_tool"] for r in risk_store.query(
+        "SELECT quality_json FROM rr_seat_opinions WHERE panel_id = ?", (panel["id"],))} == {None}
+
+    # 같은 카드를 REST events[] 로 낸 것과 줄 모양이 같다(표기는 한 벌이다).
+    assert quality()["engine_withheld"][0] == runner.withheld_by_engine(
+        [{"kind": "evidence", "source": "사전 근거 건수 초과", "included": False, "note": counted}])[0]
+
+    # 인자 없이 다시 내도 지워지지 않는다.
+    again = srv.risk_submit_panel_result(panel_id=panel["id"], engine="mcp", decision_text=DECISION,
+                                         turns=args["turns"], report_id=None, actor=OWNER)
+    assert "error" not in again, again
+    assert len(quality()["engine_withheld"]) == 2 and quality()["flags"].count("engine_withheld") == 1
+
+
 # ---------------------------------------------------------------- 재제출(plan §8.2.3·§6.11)
 def test_resubmit_without_events_keeps_attribution_and_engine(risk_store, monkeypatch):
     """events[] 가 없으면 귀속 값과 기존 engine·tool_mode 를 그대로 둔다."""

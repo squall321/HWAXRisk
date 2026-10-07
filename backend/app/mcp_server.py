@@ -188,11 +188,15 @@ def risk_submit_panel_result(
     *,
     actor: str,
     model: str | None = None,
+    evidence_omitted: list[dict] | None = None,
 ) -> dict:
-    """패널 결과 제출(REST POST /api/panels/{id}/complete 와 같은 함수, actor 는 미검증 표기)."""
+    """패널 결과 제출(REST POST /api/panels/{id}/complete 와 같은 함수, actor 는 미검증 표기, evidence_omitted=[{source,text}] 는 좌석에 못 간 근거)."""
     return _guarded(
         routes.complete_panel, panel_id, engine=engine, decision_text=decision_text, turns=list(turns or []),
         report_id=report_id, conv_id=None, events=None, model=model,
+        # 심의가 좌석에 주지 못한 근거(본문 없음 · 건수 · 예산 초과). 종전엔 받을 자리가 없어 오케스트레이터의
+        # 반환값에만 남았고, 얹어 보내도 말없이 버려졌다. 웹 러너가 엔진 카드를 적는 자리에 같이 남긴다.
+        evidence_omitted=evidence_omitted,
         # actor 는 게이트웨이 신고값이라 owner_sub 를 바꾸지 않고 quality_json 표기로만 남는다(§6.11).
         # 다만 소유권 검사에는 쓴다 — 아무나 남의 panel_id 를 종결하면 원장이 오염된다.
         actor=actor, actor_verified=False, owner_sub=_owner(actor),

@@ -99,8 +99,11 @@ def test_signatures_follow_plan():
     assert set(props("risk_get_coverage")) == {"target_key", "with_seats", "domain"}
     assert set(props("risk_similar_projects")) == {"project_id", "k"}
     submit = props("risk_submit_panel_result")
-    assert set(submit) == {"panel_id", "engine", "decision_text", "turns", "report_id", "actor", "model"}
+    assert set(submit) == {"panel_id", "engine", "decision_text", "turns", "report_id", "actor", "model",
+                           "evidence_omitted"}
     assert submit["model"]["default"] is None
+    # 좌석에 못 간 근거 — hwax-risk-review.js 가 이 이름으로 싣는다. 선택 인자다(안 실어도 종전과 같다).
+    assert submit["evidence_omitted"]["default"] is None
     # §8.2.5 표 — report_id 는 선택(`report_id?`)이다.
     assert set(tools["risk_submit_panel_result"].inputSchema["required"]) == {
         "panel_id", "engine", "decision_text", "turns", "actor"}
