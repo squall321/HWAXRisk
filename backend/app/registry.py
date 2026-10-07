@@ -1164,11 +1164,15 @@ def _minutes_lines(store: RiskStore, target_key: str, panels: list[dict], covera
     out = ["[패널]"]
     for p in panels:
         spec = _loads(p["risk_spec_json"], {})
-        quality = _loads(p["quality_json"], {})
         seats = _loads(p["seats_json"], [])
+        # 좌석 키는 seats_json 의 `key` 다(편성이 그렇게 적는다). `agent_key` 를 읽던 동안 이 줄의 좌석은 전부 None 이었다.
         seat_keys = ",".join(
-            str(s.get("agent_key") if isinstance(s, dict) else s) for s in seats
+            str(s.get("key") if isinstance(s, dict) else s) for s in seats
         )
+        # tool_calls_ok 합(§4.7.3)은 좌석 의견에 있다. 패널 quality 에는 그 키를 쓰는 곳이 없어 늘 None 이 찍혔다.
+        # 좌석 도구를 세지 못한 패널(MCP evidence_only)은 전부 NULL 이라 합도 None 이다 — 0 이 아니라 '모름' 이다.
+        tool_ok = store.query_one(
+            "SELECT SUM(tool_calls_ok) AS n FROM rr_seat_opinions WHERE panel_id = ?", (p["id"],))["n"]
         rejected = sum(
             1 for f in store.query(
                 "SELECT finding_json FROM rr_findings WHERE panel_id = ? ORDER BY finding_id", (p["id"],)
@@ -1178,7 +1182,7 @@ def _minutes_lines(store: RiskStore, target_key: str, panels: list[dict], covera
         out.append(
             f"panel_no={p['panel_no']} tier={p['tier']} status={p['status']} engine={p['engine']}/{p['tool_mode']} "
             f"conv_id={p['conv_id']} report_id={p['report_id']} seats=[{seat_keys}] "
-            f"tool_calls_ok={quality.get('tool_calls_ok')} 반대석기각={rejected} verdict={spec.get('verdict')}"
+            f"tool_calls_ok={tool_ok} 반대석기각={rejected} verdict={spec.get('verdict')}"
         )
     if len(out) == 1:
         out.append("(패널 없음)")

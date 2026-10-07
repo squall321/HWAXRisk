@@ -121,6 +121,39 @@ def test_run_panel_completes_with_real_modules(risk_store, tmp_path):
     assert risk_store.query_one("SELECT panels_done FROM rr_jobs WHERE id = ?", (job_id,))["panels_done"] == 1
 
 
+def test_report_panel_line_names_the_seats_and_sums_their_tool_results(risk_store, tmp_path):
+    """통합 보고서 [패널] 줄에 좌석 키와 tool_calls_ok 합이 실린다(plan §4.7.3 minutes 행).
+
+    좌석은 seats_json 의 `key` 인데 `agent_key` 를 읽었고, tool_calls_ok 는 쓰는 곳이 없는 패널 quality 키에서
+    읽었다. 그래서 패널이 몇 건이 돌든 이 줄은 `seats=[None,None,…] tool_calls_ok=None` 이었다 — 사람이 보는
+    보고서에서 어느 좌석이 앉았고 도구 근거가 몇 건인지가 통째로 비어 있었다.
+    """
+    target_key = _seed(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)
+    out = runner.run_panel(risk_store, cfg, RealEngine(), runner.claim_next_job(risk_store, cfg))
+
+    seats = [s["key"] for s in json.loads(risk_store.query_one(
+        "SELECT seats_json FROM rr_panels WHERE id = ?", (out["panel_id"],))["seats_json"])]
+    minutes = "\n".join(registry.build_report(risk_store, target_key)["blocks"]["minutes"]).split("\n")
+    line = next(row for row in minutes if row.startswith("panel_no=1 "))
+    assert len(seats) == 5 and f"seats=[{','.join(seats)}] " in line
+    assert "tool_calls_ok=5 " in line                    # RealEngine — 좌석 다섯이 한 번씩 조회에 성공했다
+
+
+def test_report_panel_line_says_unknown_when_the_seats_have_no_tool_ledger(risk_store, monkeypatch):
+    """MCP 길(evidence_only)은 좌석 도구 호출을 세지 못한다 — 합을 0 으로 적으면 '안 썼다' 로 읽힌다."""
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    target_key = _seed(risk_store)
+    panel = planner.plan_next_panel(risk_store, target_key, "B")
+    routes.complete_panel(panel["id"], engine="mcp", decision_text=DECISION, actor=OWNER, owner_sub=OWNER,
+                          turns=[{"round": 1, "persona": s["key"], "say": "발언"} for s in panel["seats"]])
+
+    minutes = "\n".join(registry.build_report(risk_store, target_key)["blocks"]["minutes"]).split("\n")
+    line = next(row for row in minutes if row.startswith(f"panel_no={panel['panel_no']} "))
+    assert "tool_calls_ok=None " in line and "seats=[None" not in line
+
+
 def test_long_job_memo_reaches_the_seats_cut_and_the_panel_says_so(risk_store, tmp_path):
     """잡 메모가 M 상한을 넘으면 좌석은 앞부분만 받는다 — 그 사실이 잡 생성 응답과 패널 quality 에 남는다.
 
