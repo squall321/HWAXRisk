@@ -253,6 +253,16 @@
   (§5.6 (4)) — 인용된 선례에 후속 `claim_uid` 를 누적해야 '선례가 실제로 쓰였는지' 의 원자료가 된다 ·
   ④ 등록부 `subject_ckeys` 를 `resolve_ckey()` 로 해석하는지(§5.9.1) — 이름이 다를 수 있어 의미 대조가 필요하다.
   ①②는 어댑터 픽스처가 선행이고 ③④는 원자·별칭 경로를 건드려 한 번에 하지 않았다.
+- [x] **UX 전환 2c — 남은 상세 화면 다섯** (2026-10-07, context-notes D37) — Project·Snapshot·Target·
+  Compare·CurationQueue(3,464줄)를 Report Archive 스택으로 옮겼다. 공유 층(SectionCard·Badge·
+  DataTable·StateBlocks·GateBanner + primitives 12종)을 먼저 확정해 방언을 막고, 화면마다 한
+  에이전트가 전환한 뒤 **다른 눈이 diff 를 직접 보고** 역검토했다(33건 중 실질 11건 수정).
+  레거시 `rr-*` 실사용 0 · `index.css` 666 → 227줄 · **preflight 켬**(공존 계획의 종점).
+  띄워 보기 전에 안 보이던 것 다섯을 브라우저로 잡았다 — `border-*` 유틸 전체 무효 · 그 수정을
+  되돌리던 `border: 0` 축약 · Tailwind 스캐너가 못 본 Select 화살표 · 제목·문단 UA margin ·
+  **앱 전체 가로 밀림**(flex 자식에 `w-full`, 전환 이전부터 있던 결함).
+  **그리고 타입이 서버와 달라 `tsc` 가 거짓을 지켜 주고 있었다** — 배포본이 백지였고, 선언을
+  서버 열 이름에 맞추자 호출처 9곳이 드러났다.
 - [ ] 골든 `backend/tests/golden/sif-e2e.ir.json` 부재 — 선행 B2(골든 프로젝트 재파싱)가 닫혀야 만들 수 있다(↓ 2장).
 
 ## 2. 실환경 실측 대기 — 자격·선행 조건이 필요한 것
