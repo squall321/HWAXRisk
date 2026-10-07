@@ -10,7 +10,7 @@ import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
-from app import config, planner, taxonomy
+from app import brief, config, planner, taxonomy
 from app.common import canonical_json, new_uuid, now_epoch, sha256_hex
 from app.errors import AppError
 
@@ -267,6 +267,23 @@ def panel_question(store: Any, target_key: str) -> str:
     )
 
 
+def fit_evidence_slots(evidence: Sequence[Mapping[str, Any]]) -> tuple[list, list[str]]:
+    """근거를 MAX_EVIDENCE 칸에 맞춘다 — (실을 것, 빠진 항목의 키).
+
+    종전에는 `evidence[:12]` 가 13번째부터를 말없이 버렸다. 좌석 계약(E0c)은 브리프를 재고 난 뒤에 끼우고
+    사용자 메모는 맨 끝에 붙으므로, 한 칸만 넘쳐도 가장 먼저 떨어지는 것이 사람이 직접 쓴 메모였다. 메모는
+    12번째 칸의 주인이다(plan §6.6.3) — 넘치면 메모 앞의 항목이 뒤에서부터 빠지고, 빠진 키를 돌려준다.
+    """
+    items = list(evidence)
+    if len(items) <= planner.MAX_EVIDENCE:
+        return items, []
+    memo = next((e for e in items if e.get("source") == "user_memo"), None)
+    rest = [e for e in items if e is not memo]
+    room = planner.MAX_EVIDENCE - (0 if memo is None else 1)
+    return rest[:room] + ([] if memo is None else [memo]), \
+        [str(e.get("key") or e.get("source") or "?") for e in rest[room:]]
+
+
 def build_delib_opts(
     store: Any,
     settings: Any | None,
@@ -275,10 +292,14 @@ def build_delib_opts(
     evidence: Sequence[Mapping[str, Any]] | None = None,
     user_memo: str | None = None,
     narrative_mod: Any | None = None,
+    loss: dict | None = None,
 ) -> dict:
     """패널 1건의 delib_opts(plan §6.6.4). human_note·continue_summary·non_negotiables·search_sources·
     stop_after_round·build_plan 은 절대 싣지 않는다(불변식 extra_seats == ∅ 의 전제). voc 는 반대로
-    항상 'off' 로 싣는다 — 빼면 엔진 기본값 'auto' 가 되살아난다."""
+    항상 'off' 로 싣는다 — 빼면 엔진 기본값 'auto' 가 되살아난다.
+
+    `loss` 를 주면 좌석에 못 간 것을 거기 적는다 — `evidence_dropped`(12칸을 넘겨 빠진 항목 키)와
+    `user_memo_cut`(메모를 다 못 실었을 때 `{chars, kept}`). 없으면 비어 있다. 호출자가 패널에 남긴다."""
     seats = panel["seats"]
     if evidence is None:
         module = narrative_mod
@@ -296,6 +317,13 @@ def build_delib_opts(
     if user_memo and not any(e.get("source") == "user_memo" for e in evidence):
         evidence.append({"source": "user_memo", "tool": "note", "result": str(user_memo)[:USER_MEMO_MAX],
                          "key": "M"})
+    evidence, dropped = fit_evidence_slots(evidence)
+    if loss is not None:
+        if dropped:
+            loss["evidence_dropped"] = dropped
+        cut = brief.memo_cut(next((e for e in evidence if e.get("source") == "user_memo"), None))
+        if cut:
+            loss["user_memo_cut"] = cut
 
     return {
         "chair_template": planner.CHAIR_TEMPLATE,
@@ -312,7 +340,7 @@ def build_delib_opts(
         # `voc:` 인용은 거기 실린 것만 해석되므로(§0.2.1) 환기가 따로 넣은 VOC 는 인용해도 dangling 이고,
         # 소급 심사에서는 그 뒤에 생긴 이슈가 새어 든다.
         "voc": "off",
-        "evidence": evidence[:planner.MAX_EVIDENCE],
+        "evidence": evidence,
         # 벽시계 상한 40분(plan §6.10.2). 엔진 기본값(30분)에 기대지 않고 계약값을 실어 보낸다.
         "timeout_s": PANEL_TIMEOUT_S,
         "question": panel_question(store, panel["target_key"]),
@@ -491,13 +519,18 @@ def create_job(
         (job_id, target_key, owner_sub, tier, max(1, min(int(concurrency), int(cfg.risk_concurrency))),
          canonical_json(params), credential.get("email"), row["panels"], now, now),
     )
-    return {
+    out = {
         "job_id": job_id,
         "panels_planned": row["panels"],
         "llm_calls_estimate": {"low": row["llm_calls_low"], "high": row["llm_calls_high"]},
         "credential": credential["kind"],
         "credential_email": credential.get("email"),
     }
+    # 메모가 M 상한(또는 위 2,000자)을 넘으면 좌석은 앞부분만 받는다 — 패널이 돌기 전에, 쓴 사람에게 알린다.
+    cut = brief.memo_cut({"result": brief.memo_result(target_key, user_memo)}) if user_memo else None
+    if cut:
+        out["user_memo_cut"] = cut
+    return out
 
 
 def _set_job(store: Any, job_id: str, state: str, *, reason: str | None = None, error: str | None = None,
@@ -807,11 +840,12 @@ def run_panel(
     try:
         model_json = snapshot_model(engine)
         store.execute("UPDATE rr_panels SET model_json = ? WHERE id = ?", (canonical_json(model_json), panel["id"]))
+        loss: dict = {}
         delib_opts = build_delib_opts(
-            store, settings, panel, user_memo=params.get("user_memo"), narrative_mod=narrative_mod
+            store, settings, panel, user_memo=params.get("user_memo"), narrative_mod=narrative_mod, loss=loss
         )
         # 브리프는 시변 조립물이라 이 패널이 실제로 받은 전문을 동결한다(§5.6.1).
-        frozen = freeze_brief(store, panel, delib_opts["evidence"])
+        frozen = {**freeze_brief(store, panel, delib_opts["evidence"]), **loss}
     except Exception as exc:  # noqa: BLE001 — 브리프 조립 실패도 좌석을 pending 으로 되돌리고 닫는다.
         log.exception("패널 %s 브리프 조립 실패", panel["id"])
         return _close_panel_error(store, panel, job, f"brief_error: {type(exc).__name__}: {exc}", settings)
@@ -970,6 +1004,11 @@ def _complete_panel(
             quality["brief_drift"] = list(frozen_brief["brief_drift"])
         if frozen_brief and frozen_brief.get("brief_hash"):
             quality["brief_hash"] = frozen_brief["brief_hash"]
+        # 12칸을 넘겨 빠진 근거와 다 못 실은 메모 — 좌석은 받은 것이 전부라고 믿고 판정했으므로 패널에 남긴다.
+        for lost in ("evidence_dropped", "user_memo_cut"):
+            if frozen_brief and frozen_brief.get(lost):
+                quality[lost] = frozen_brief[lost]
+                quality["flags"].append(lost)
         if escalated and "registry_escalated" not in quality["flags"]:
             # 사람이 닫았던 행이 더 강한 근거로 재제기됐다 — 사람이 다시 볼 자리다(plan §4.7.1).
             quality["flags"].append("registry_escalated")

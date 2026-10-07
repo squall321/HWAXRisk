@@ -114,6 +114,63 @@ def test_run_panel_completes_with_real_modules(risk_store, tmp_path):
     assert risk_store.query_one("SELECT panels_done FROM rr_jobs WHERE id = ?", (job_id,))["panels_done"] == 1
 
 
+def test_long_job_memo_reaches_the_seats_cut_and_the_panel_says_so(risk_store, tmp_path):
+    """잡 메모가 M 상한을 넘으면 좌석은 앞부분만 받는다 — 그 사실이 잡 생성 응답과 패널 quality 에 남는다.
+
+    실모듈 한 바퀴다. 브리프 10항목 + 좌석 계약 + 메모가 12칸을 정확히 채우므로 지금 편성으로는
+    칸을 넘겨 빠지는 항목이 없다는 것도 같이 본다.
+    """
+    from app import brief
+
+    target_key = _seed(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    memo = "배터리 모서리 간극부터 보라. " + "나" * 1483
+    created = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg, user_memo=memo)
+    job = runner.claim_next_job(risk_store, cfg)
+
+    engine = RealEngine()
+    out = runner.run_panel(risk_store, cfg, engine, job)
+    sent = engine.calls[0]["evidence"]
+    assert [e["key"] for e in sent] == list(brief.ITEM_ORDER) and len(sent) == planner.MAX_EVIDENCE
+    assert "배터리 모서리 간극부터 보라." in sent[-1]["result"]
+
+    quality = json.loads(risk_store.query_one(
+        "SELECT quality_json FROM rr_panels WHERE id = ?", (out["panel_id"],))["quality_json"])
+    assert quality["user_memo_cut"]["chars"] == 1500 and 200 < quality["user_memo_cut"]["kept"] < 1500
+    assert "user_memo_cut" in quality["flags"] and "user_memo_cut" in out["quality_flags"]
+    assert "evidence_dropped" not in quality["flags"] and "evidence_dropped" not in quality
+    # 메모를 쓴 사람에게는 잡을 만드는 그 자리에서 알린다.
+    assert created["user_memo_cut"] == quality["user_memo_cut"]
+
+
+def test_short_job_memo_leaves_no_cut_record(risk_store, tmp_path):
+    target_key = _seed(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    created = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg,
+                                user_memo="이 계면을 먼저 보라")
+    out = runner.run_panel(risk_store, cfg, RealEngine(), runner.claim_next_job(risk_store, cfg))
+    quality = json.loads(risk_store.query_one(
+        "SELECT quality_json FROM rr_panels WHERE id = ?", (out["panel_id"],))["quality_json"])
+    assert "user_memo_cut" not in created and "user_memo_cut" not in quality
+    assert "user_memo_cut" not in quality["flags"]
+
+
+def test_brief_payload_names_what_did_not_fit_the_slots(risk_store, monkeypatch):
+    """REST·MCP 브리프도 칸을 넘겨 빠진 항목을 그 패널 옆에 적는다 — 호출자가 받은 근거를 전부라고 읽지 않게."""
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    target_key = _seed(risk_store)
+
+    whole = routes.brief_payload(target_key, "B", owner_sub=OWNER)["panels"][0]
+    assert "evidence_dropped" not in whole                      # 지금 편성으로는 12칸 안이다
+    assert len(whole["delib_opts"]["evidence"]) == 11           # 브리프 10 + 좌석 계약(이 타깃에는 메모가 없다)
+
+    monkeypatch.setattr(planner, "MAX_EVIDENCE", 10)
+    tight = routes.brief_payload(target_key, "B", owner_sub=OWNER)["panels"][0]
+    assert tight["evidence_dropped"] == ["E9"]
+    assert [e["key"] for e in tight["delib_opts"]["evidence"]] == [
+        "E0", "E0c", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8"]
+
+
 def test_run_panel_rolls_seats_back_when_interface_is_missing(risk_store, tmp_path, monkeypatch):
     """결손 인터페이스로는 잡을 집지 않는다 — 패널 running·좌석 running 고착이 생기지 않는다."""
     target_key = _seed(risk_store)

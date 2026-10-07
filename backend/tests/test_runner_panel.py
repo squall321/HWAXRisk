@@ -407,6 +407,68 @@ def test_delib_opts_turn_off_the_engines_automatic_voc_recall(risk_store, tmp_pa
     assert engine.calls[0]["voc"] == "off"
 
 
+# ---------------------------------------------------------------- 근거 12칸(planner.MAX_EVIDENCE)
+def _keyed(keys: list[str]) -> list[dict]:
+    return [{"source": f"src_{k}", "tool": "t", "args": "a", "result": f"{k} 본문", "key": k} for k in keys]
+
+
+BRIEF_PLUS_TWO = ["E0", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9", "X1", "X2"]
+
+
+def test_evidence_past_the_slot_cap_is_named_and_the_memo_keeps_its_slot(risk_store):
+    """12칸을 넘는 근거는 무엇이 빠졌는지 남기고, 넘칠 때 빠지는 것은 사용자 메모가 아니다.
+
+    종전에는 `evidence[:12]` 가 13번째부터를 말없이 버렸다. 좌석 계약(E0c)은 브리프를 재고 난 뒤에 끼우고
+    메모는 맨 끝에 붙으므로, 한 칸만 넘쳐도 가장 먼저 떨어지는 것이 사람이 직접 쓴 메모였다.
+    """
+    target_key = seeded(risk_store)
+    panel = planner.plan_next_panel(risk_store, target_key, "A")
+
+    loss: dict = {}
+    opts = runner.build_delib_opts(risk_store, config.settings, panel, evidence=_keyed(BRIEF_PLUS_TWO),
+                                   user_memo="이 계면을 먼저 보라", loss=loss)
+    assert [e["key"] for e in opts["evidence"]] == [
+        "E0", "E0c", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9", "M"]
+    assert "이 계면을 먼저 보라" in opts["evidence"][-1]["result"]
+    assert loss == {"evidence_dropped": ["X1", "X2"]}
+
+    # 메모가 없으면 뒤에서부터 빠진다. 키 없는 항목은 source 로 적는다.
+    loss = {}
+    unkeyed = _keyed(BRIEF_PLUS_TWO[:-1]) + [{"source": "caller_note", "tool": "", "args": "", "result": "키 없음"}]
+    opts = runner.build_delib_opts(risk_store, config.settings, panel, evidence=unkeyed, loss=loss)
+    assert len(opts["evidence"]) == planner.MAX_EVIDENCE and opts["evidence"][-1]["key"] == "X1"
+    assert loss == {"evidence_dropped": ["caller_note"]}
+
+    # 12칸 안이면 남길 것이 없다.
+    loss = {}
+    runner.build_delib_opts(risk_store, config.settings, panel, evidence=_keyed(BRIEF_PLUS_TWO[:10]),
+                            user_memo="메모", loss=loss)
+    assert loss == {}
+
+
+def test_run_panel_records_dropped_evidence_on_the_panel(risk_store, tmp_path):
+    """빠진 근거의 키가 그 패널의 quality 에 남는다 — 좌석은 받은 것이 전부라고 믿고 판정했다."""
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg, user_memo="이 계면을 먼저 보라")
+    job = runner.claim_next_job(risk_store, cfg)
+
+    recorder: dict = {}
+    crowded = fake_narrative(recorder)
+    crowded.prior_evidence = lambda store, key, **kwargs: _keyed(BRIEF_PLUS_TWO)
+    engine = FakePanelEngine()
+    out = runner.run_panel(risk_store, cfg, engine, job,
+                           narrative_mod=crowded, registry_mod=fake_registry(recorder))
+
+    assert out["status"] == "done" and out["quality_flags"] == ["evidence_dropped"]
+    quality = json.loads(risk_store.query_one(
+        "SELECT quality_json FROM rr_panels WHERE id = ?", (out["panel_id"],))["quality_json"])
+    assert quality["evidence_dropped"] == ["X1", "X2"] and "evidence_dropped" in quality["flags"]
+    sent = engine.calls[0]["evidence"]
+    assert len(sent) == planner.MAX_EVIDENCE and "이 계면을 먼저 보라" in sent[-1]["result"]
+
+
 def test_seat_contract_evidence_budget():
     item = runner.seat_contract_evidence(["mech", "mech", "sim", "없는도메인"])
     assert item["source"] == "seat_contract" and item["args"] == "mech,sim,없는도메인"

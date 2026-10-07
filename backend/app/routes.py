@@ -2574,12 +2574,16 @@ def brief_payload(target_key: str, tier: str = "B", *, owner_sub: str | None = N
 
     out_panels = []
     for panel in panels:
+        loss: dict = {}
         item = {
             "panel_id": panel["id"],
             "panel_no": panel["panel_no"],
             "seats_json": panel["seats_json"],
-            "delib_opts": runner.build_delib_opts(store, config.settings, panel, evidence=engine_evidence),
+            "delib_opts": runner.build_delib_opts(store, config.settings, panel, evidence=engine_evidence,
+                                                  loss=loss),
         }
+        # 칸을 넘겨 빠진 항목·다 못 실은 메모는 그 패널 옆에 적는다 — 호출자가 받은 근거를 전부라고 읽지 않게.
+        item.update(loss)
         if issue_token:
             # L2 오케스트레이터가 게이트웨이 MCP 로 같은 브리프를 다시 받을 유일한 열쇠다(§8.2.5).
             item["brief_token"] = issue_brief_token(store, panel["id"])
