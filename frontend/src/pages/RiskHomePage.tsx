@@ -6,7 +6,7 @@ import { useAsync } from "../hooks/useAsync";
 import { CardGrid, SectionCard } from "../components/SectionCard";
 import { EmptyBlock, ErrorBanner, LoadingBlock } from "../components/StateBlocks";
 import { Badge, LevelBadge, VerdictBadge } from "../components/Badge";
-import { Banner, Chip, TabBar } from "../ui/primitives";
+import { Banner, Button, Chip, FormField, FormGrid, Input, Select, TabBar } from "../ui/primitives";
 import { DataTable } from "../components/DataTable";
 import type { Column } from "../components/DataTable";
 import { fmtDay, fmtEpoch, fmtPct } from "../format";
@@ -149,48 +149,45 @@ function ProjectForm({ options, onCreated }: { options: ProjectCard[]; onCreated
   }
 
   return (
-    <form className="rr-form" onSubmit={submit}>
+    <form className="mb-4 flex flex-col gap-3" onSubmit={submit}>
       <ErrorBanner error={error} />
-      {notice ? <p className="rr-muted">{notice}</p> : null}
-      <div className="rr-form-grid">
-        <label className="rr-field">
-          <span>code (≤40)</span>
-          <input className="rr-input" maxLength={40} value={code} onChange={(e) => setCode(e.target.value)} />
-        </label>
-        <label className="rr-field">
-          <span>name (≤200)</span>
-          <input className="rr-input" maxLength={200} value={name} onChange={(e) => setName(e.target.value)} />
-        </label>
-        <label className="rr-field">
-          <span>stage (pre · dv · pv · pra · mp + 1/2/3/r)</span>
-          <input className="rr-input" value={stage} onChange={(e) => setStage(e.target.value)} />
-          {stageInvalid ? <span className="rr-error-text">형식이 맞지 않습니다.</span> : null}
-        </label>
-        <label className="rr-field">
-          <span>predecessor_project_id (선택)</span>
-          <select className="rr-select" value={predecessor} onChange={(e) => setPredecessor(e.target.value)}>
+      {/* 등록 성공은 끼어들어 읽힐 일이 아니다 — status 로 둔다. */}
+      {notice ? <Banner tone="info" live="status" title={notice} /> : null}
+      <FormGrid>
+        <FormField label="code (≤40)">
+          <Input maxLength={40} value={code} onChange={(e) => setCode(e.target.value)} />
+        </FormField>
+        <FormField label="name (≤200)">
+          <Input maxLength={200} value={name} onChange={(e) => setName(e.target.value)} />
+        </FormField>
+        <FormField
+          label="stage (pre · dv · pv · pra · mp + 1/2/3/r)"
+          error={stageInvalid ? "형식이 맞지 않습니다." : undefined}
+        >
+          <Input value={stage} onChange={(e) => setStage(e.target.value)} />
+        </FormField>
+        <FormField label="predecessor_project_id (선택)">
+          <Select value={predecessor} onChange={(e) => setPredecessor(e.target.value)}>
             <option value="">없음</option>
             {options.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.code} · {p.name}
               </option>
             ))}
-          </select>
-        </label>
-        <label className="rr-field">
-          <span>adh_scope.team</span>
-          <input className="rr-input" value={team} onChange={(e) => setTeam(e.target.value)} />
-        </label>
-        <label className="rr-field">
-          <span>adh_scope.group</span>
-          <input className="rr-input" value={group} onChange={(e) => setGroup(e.target.value)} />
-        </label>
-      </div>
-      <div className="rr-row">
-        <button type="submit" className="rr-btn rr-btn-primary" disabled={!canSubmit}>
+          </Select>
+        </FormField>
+        <FormField label="adh_scope.team">
+          <Input value={team} onChange={(e) => setTeam(e.target.value)} />
+        </FormField>
+        <FormField label="adh_scope.group">
+          <Input value={group} onChange={(e) => setGroup(e.target.value)} />
+        </FormField>
+      </FormGrid>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button type="submit" disabled={!canSubmit}>
           과제 등록
-        </button>
-        <span className="rr-muted">adh_scope 는 자동으로 채우지 않습니다.</span>
+        </Button>
+        <span className="text-sm text-muted-foreground">adh_scope 는 자동으로 채우지 않습니다.</span>
       </div>
     </form>
   );
@@ -225,9 +222,9 @@ export default function RiskHomePage() {
           title="과제"
           subtitle="설계 리스크 심사의 시작점입니다."
           actions={
-            <button type="button" className="rr-btn" onClick={() => setFormOpen((v) => !v)}>
+            <Button type="button" variant="outline" onClick={() => setFormOpen((v) => !v)}>
               {formOpen ? "등록 폼 닫기" : "과제 등록"}
-            </button>
+            </Button>
           }
         >
           {formOpen ? <ProjectForm options={cards} onCreated={projects.reload} /> : null}
@@ -238,9 +235,9 @@ export default function RiskHomePage() {
               title="아직 과제가 없습니다."
               hint="소스(StepForge · DynaForge · ODB)를 연결할 과제를 먼저 등록하세요."
               action={
-                <button type="button" className="rr-btn rr-btn-primary" onClick={() => setFormOpen(true)}>
+                <Button type="button" onClick={() => setFormOpen(true)}>
                   과제 등록
-                </button>
+                </Button>
               }
             />
           ) : null}
@@ -330,7 +327,11 @@ function TargetsTab() {
       align: "right",
       nowrap: true,
       cell: (t) =>
-        t.coverage_pct === null ? <span className="rr-muted">편성 전</span> : `${fmtPct(t.coverage_pct)} / ${t.roster_size}석`,
+        t.coverage_pct === null ? (
+          <span className="text-muted-foreground">편성 전</span>
+        ) : (
+          `${fmtPct(t.coverage_pct)} / ${t.roster_size}석`
+        ),
     },
     {
       key: "verdict",
@@ -343,7 +344,10 @@ function TargetsTab() {
       header: "보고서",
       align: "right",
       nowrap: true,
-      cell: (t) => (t.report_ids.length ? String(t.report_ids.length) : <span className="rr-muted">-</span>),
+      // `report_ids: string[]` 은 서버가 **센** 값이다 — 빈 배열은 '아직 없다' 는 확정 사실이고
+      // '모름' 이 아니다. 그래서 — 가 아니라 0 을 흐리게 그린다(§ 미측정과 0 을 섞지 않는다).
+      cell: (t) =>
+        t.report_ids.length ? String(t.report_ids.length) : <span className="text-muted-foreground">0</span>,
     },
     {
       key: "state",
@@ -358,7 +362,7 @@ function TargetsTab() {
       title="타깃"
       subtitle={list.data ? `${list.data.total}건 — 최신순` : undefined}
       actions={
-        <label className="rr-row">
+        <label className="flex flex-wrap items-center gap-2 text-sm">
           <input type="checkbox" checked={withClosed} onChange={(e) => setWithClosed(e.target.checked)} />
           닫힌 타깃 포함
         </label>
@@ -401,7 +405,13 @@ function ReportsTab() {
       header: "RA 반영",
       nowrap: true,
       cell: (r) =>
-        r.ra_state ? <Badge tone={r.ra_state === "synced" ? "ok" : "warn"}>{r.ra_state}</Badge> : <span className="rr-muted">-</span>,
+        // `ra_state: string | null` — null 은 서버가 '아니다' 라고 한 게 아니라 **아직 모르는** 것이다.
+        // 0 이나 '-' 로 그리면 '반영 안 됨' 이라는 없는 판정이 생긴다.
+        r.ra_state ? (
+          <Badge tone={r.ra_state === "synced" ? "ok" : "warn"}>{r.ra_state}</Badge>
+        ) : (
+          <span className="text-muted-foreground">모름</span>
+        ),
     },
     { key: "updated", header: "갱신", cell: (r) => fmtEpoch(r.updated_at), nowrap: true },
   ];
@@ -416,7 +426,7 @@ function ReportsTab() {
         />
       ) : null}
       {rows.length > 0 ? <DataTable columns={columns} rows={rows} rowKey={(r) => r.ref} /> : null}
-      <p className="rr-muted">전문은 Report Archive 가 갖습니다 — 앱은 사본을 두지 않습니다.</p>
+      <p className="text-sm text-muted-foreground">전문은 Report Archive 가 갖습니다 — 앱은 사본을 두지 않습니다.</p>
     </SectionCard>
   );
 }

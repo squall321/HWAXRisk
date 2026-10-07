@@ -7,7 +7,7 @@ import { KeyValueTable } from "../components/DataTable";
 import { ErrorBanner, EmptyBlock, LoadingBlock, NotReadyBlock } from "../components/StateBlocks";
 import { Badge } from "../components/Badge";
 import { Clock, KeyRound, ShieldAlert, ShieldCheck } from "lucide-react";
-import { Chip, Field, Mono } from "../ui/primitives";
+import { Banner, Button, Chip, Field, FormField, Input, Mono } from "../ui/primitives";
 import { cn } from "../lib/cn";
 import { fmtEpoch } from "../format";
 import type { PortalPatSummary } from "../types";
@@ -73,12 +73,7 @@ function PatErrorBanner({ error }: { error: unknown }) {
   if (error === null || error === undefined) return null;
   const known = isApiError(error) ? PAT_ERRORS[error.code] : undefined;
   if (!known) return <ErrorBanner error={error} />;
-  return (
-    <div className="rr-banner rr-banner-error" role="alert">
-      <span className="rr-banner-title">{known.title}</span>
-      <span className="rr-banner-detail">{known.detail}</span>
-    </div>
-  );
+  return <Banner title={known.title} detail={known.detail} />;
 }
 
 /**
@@ -232,17 +227,18 @@ function PatSection({ summary, onChanged }: { summary: PortalPatSummary | null; 
   return (
     <>
       <PatErrorBanner error={error} />
+      {/* 등록·삭제 성공은 하던 말을 끊을 일이 아니다 — status 로 둔다. */}
       {notice ? (
-        <div className="rr-banner rr-banner-info" role="status">
-          <span className="rr-banner-title">{notice}</span>
-          <span className="rr-banner-detail">PAT 값 자체는 저장 뒤 어디에도 다시 표시되지 않습니다.</span>
-        </div>
+        <Banner
+          tone="info"
+          live="status"
+          title={notice}
+          detail="PAT 값 자체는 저장 뒤 어디에도 다시 표시되지 않습니다."
+        />
       ) : null}
       <PatStatus summary={shown} />
-      <label className="rr-field">
-        <span>포털 PAT</span>
-        <input
-          className="rr-input"
+      <FormField label="포털 PAT">
+        <Input
           type="password"
           autoComplete="off"
           spellCheck={false}
@@ -250,33 +246,36 @@ function PatSection({ summary, onChanged }: { summary: PortalPatSummary | null; 
           value={pat}
           onChange={(e) => setPat(e.target.value)}
         />
-      </label>
-      <div className="rr-row">
-        <button type="button" className="rr-btn rr-btn-primary" onClick={mintAndSave} disabled={busy}>
+      </FormField>
+      <div className="flex flex-wrap items-center gap-2">
+        <Button type="button" onClick={mintAndSave} disabled={busy}>
           {busy ? "처리 중." : "포털에서 발급해 등록"}
-        </button>
-        <button
+        </Button>
+        <Button
           type="button"
-          className="rr-btn"
+          variant="outline"
           onClick={() => save(pat.trim())}
           disabled={busy || pat.trim() === ""}
         >
           붙여넣은 값으로 등록
-        </button>
-        <button type="button" className="rr-btn" onClick={() => save(null)} disabled={busy || !shown?.registered}>
+        </Button>
+        <Button type="button" variant="outline" onClick={() => save(null)} disabled={busy || !shown?.registered}>
           삭제
-        </button>
+        </Button>
         <a href="/tokens" target="_blank" rel="noreferrer">
           포털 토큰 화면
         </a>
       </div>
-      <p className="rr-muted">
+      <p className="text-sm text-muted-foreground">
         '포털에서 발급해 등록' 은 이 브라우저의 포털 세션으로 <code>scopes ['read']</code> ·{" "}
         <code>aud mcp-gateway</code> · ttl 90일 PAT 을 만들어 그대로 등록합니다 — 값이 화면에 보이지 않습니다.
         포털이 토큰 발급 권한(<code>feat:api-token</code>)을 요구하면 관리자에게 그 권한을 먼저 받으세요.
       </p>
-      <p className="rr-muted">직접 발급할 때의 조건 — aud 에 mcp-gateway 포함 · scope api · ttl 365일 이하.</p>
-      <p className="rr-consent">{CONSENT_TEXT}</p>
+      <p className="text-sm text-muted-foreground">직접 발급할 때의 조건 — aud 에 mcp-gateway 포함 · scope api · ttl 365일 이하.</p>
+      {/* index.css `.rr-consent` 와 같은 값 — 왼쪽 굵은 선 3px · 연한 배경 · 작은 글씨. */}
+      <p className="mt-2 rounded-md border-l-[3px] border-border bg-muted/40 p-3 text-sm text-muted-foreground">
+        {CONSENT_TEXT}
+      </p>
     </>
   );
 }
@@ -298,11 +297,11 @@ function RunnerSection({ pat, secretsValid }: { pat: PortalPatSummary | null; se
           },
         ]}
       />
-      <p className="rr-muted">
+      <p className="text-sm text-muted-foreground">
         실제로 어떤 자격이 쓰였는지는 잡 생성 응답의 credential 과 각 패널의 quality.credential 에서 봅니다.
       </p>
       <NotReadyBlock what="러너 큐 상태(대기·동시 실행 수)" />
-      <p className="rr-muted">진행 중인 잡은 해당 타깃 화면에서 상태·진행률로 봅니다.</p>
+      <p className="text-sm text-muted-foreground">진행 중인 잡은 해당 타깃 화면에서 상태·진행률로 봅니다.</p>
     </>
   );
 }
@@ -359,10 +358,10 @@ export default function SettingsPage() {
         {me.data ? (
           <>
             {me.data.box.secrets_valid ? null : (
-              <div className="rr-banner rr-banner-error" role="alert">
-                <span className="rr-banner-title">이 박스의 자격이 없습니다.</span>
-                <span className="rr-banner-detail">저장된 비밀이 이 호스트에서 풀리지 않습니다.</span>
-              </div>
+              <Banner
+                title="이 박스의 자격이 없습니다."
+                detail="저장된 비밀이 이 호스트에서 풀리지 않습니다."
+              />
             )}
             <KeyValueTable
               rows={[
@@ -385,12 +384,12 @@ export default function SettingsPage() {
                   value: me.data.box.portal_base ? (
                     <code>{me.data.box.portal_base}</code>
                   ) : (
-                    <span className="rr-muted">서버가 알려 주지 않았습니다.</span>
+                    <span className="text-sm text-muted-foreground">서버가 알려 주지 않았습니다.</span>
                   ),
                 },
               ]}
             />
-            <p className="rr-muted">
+            <p className="text-sm text-muted-foreground">
               portal_base 는 앱이 포털을 부르는 주소입니다. 이 값이 실제 포털 오리진(nginx)이 아니면 PAT 등록과
               무인 패널이 모두 실패하고, 그 실패는 토큰 탓처럼 보입니다.
             </p>
