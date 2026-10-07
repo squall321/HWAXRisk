@@ -151,7 +151,9 @@ def test_parse_ref_reads_every_scheme(text, expected):
 @pytest.mark.parametrize(
     "text",
     ["", "그냥 문장", "x:1", "p:", "p:ZZZZZZZZZZZZ", "p:0123", "name:BRACKET", "reg:snap:s1", "gate:six",
-     "tool:conv:cv1", "tool:conv:cv1#x"],
+     "tool:conv:cv1", "tool:conv:cv1#x",
+     # 심의 엔진의 근거 항목 표지 — 접두는 엣지(`e:`)와 같지만 이 앱의 참조가 아니다.
+     "e:3", "[e:3]", "e:3|E3", "[e:12|M]"],
 )
 def test_parse_ref_returns_none_for_non_refs(text):
     assert parse_ref(text) is None

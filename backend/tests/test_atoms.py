@@ -317,6 +317,33 @@ def test_evidence_grade_without_usable_cites_is_heuristic(ctx):
     assert evidence_grade_from_cites(dangling, ctx) == "경험칙"
 
 
+@pytest.mark.parametrize("marker", ["e:3", "[e:3]", "e:3|E3", "[e:3|E3]", "[e:2|E0c]", "[e:12|M]"])
+def test_engine_evidence_marker_is_never_read_as_an_ir_edge(ctx, marker):
+    """엔진은 브리프 항목 줄 머리에 `[e:N]`(키가 가면 `[e:N|E3]`)을 찍고 좌석에게 그 표지를 적으라 한다.
+
+    이 앱에서 `e:` 는 IR 엣지(`e:<12hex>`)라 접두가 겹친다 — 갈리는 것은 모양뿐이다(항목 번호는 12자리
+    16진수가 못 된다). 표지를 엣지로 읽으면 IR 인용률과 도구예측 등급이 근거 없이 오른다.
+    """
+    from app import narrative
+    from app.common import parse_ref
+
+    assert parse_ref(marker) is None
+    # 좌석 발언 — 표지는 인용으로 세지 않고, 같은 문장의 진짜 엣지 참조는 그대로 읽는다.
+    assert narrative.cited_refs_in(f"간극이 좁다 {marker} 근거는 [{EDGE_TIED}] 다") == [EDGE_TIED]
+    # 표지의 번호가 claim 의 수치 토큰으로 잡히면 quote 에 없는 숫자로 몰려 quote_mismatch 가 된다.
+    assert narrative._number_tokens(f"min_gap 0.018 mm 다 {marker}") == ["0.018"]
+
+    # risk_spec cites 에 적힌 표지 — 버리지 않고 dangling 으로 보존하되 등급에는 세지 않는다.
+    alone = resolve_cites([{"ref": marker, "quote": ""}], ctx)
+    assert [(row["ref_type"], row["ok"], row["dangling_reason"]) for row in alone["cites"]] == \
+        [("unknown", False, "malformed")]
+    assert alone["dangling"] == [marker]
+    assert evidence_grade_from_cites(alone, ctx) == "경험칙"
+    beside = resolve_cites([{"ref": marker, "quote": ""}, {"ref": EDGE_TIED, "quote": ""}], ctx)
+    assert beside["dangling"] == [marker] and beside["resolved_refs"] == [EDGE_TIED]
+    assert evidence_grade_from_cites(beside, ctx) == "도구예측"
+
+
 def test_claimed_grade_is_lowered_but_never_raised(ctx):
     higher = first_finding(make_spec(findings=[make_finding(evidence_grade="측정")]), ctx)
     assert higher["evidence_grade"] == "도구예측"
