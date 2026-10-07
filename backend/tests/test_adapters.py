@@ -237,6 +237,70 @@ def _principal(portal: str | None = "portal-pat", service: str | None = "service
     return Principal(owner_sub=OWNER, portal_pat=portal, service_pat=service)
 
 
+# ---------------------------------------------------------------- 소스 호출 한도(HWAXRISK_SOURCE_CALL_TIMEOUT_S)
+def test_source_calls_wait_120s_for_a_reply_and_10s_for_a_connection(tmp_path):
+    """소스 호출은 응답 침묵 120초·연결 10초다 — 캡처 채널 둘(게이트웨이 MCP·소스 앱 REST)이 그 값으로 만들어진다.
+
+    30초였다. 소스 앱 REST 직결에서는 그 값이 실제 상한이라 큰 형상의 호출이 잘려 부분 IR 이 됐고, 패널은
+    그 불완전한 스냅샷을 심사했다.
+    """
+    import types
+
+    assert adapters_base.source_timeout(types.SimpleNamespace()) == httpx.Timeout(120.0, connect=10.0)
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen[request.url.host] = dict(request.extensions["timeout"])
+        if request.url.host == "heax.test":
+            return httpx.Response(200, json={})
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {"structuredContent": {}}},
+                              headers={"mcp-session-id": "s"})
+
+    settings = types.SimpleNamespace(gateway_mcp="https://gw.test/mcp", heax_base="https://heax.test",
+                                     data_dir=tmp_path, risk_source_call_timeout_s=300)
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    adapters_registry.reset_discovery_cache()
+    channels = adapters_registry.clients_from_settings(
+        settings, {"HWAXRISK_PORTAL_PAT": "pat", "HWAXRISK_HEAX_SERVICE_PAT": "service-pat"}, http_client=client)
+    channels["mcp"].call("project_tree", {})
+    channels["rest"].get("/apps/step_forge/api/projects/x")
+    adapters_registry.reset_discovery_cache()
+    # 같은 클라이언트로 나가는 /tools-map 발견(죽은 게이트웨이 감지, 10초)은 이 손잡이를 따르지 않는다.
+    waits = {"connect": 10.0, "read": 300.0, "write": 300.0, "pool": 300.0}
+    assert (seen["gw.test"], seen["heax.test"]) == (waits, waits)
+
+
+def test_a_source_call_that_times_out_names_the_limit_and_the_knob():
+    """침묵 한도에 걸린 호출은 호출 행에 값과 손잡이를 남긴다 — 'transport_error' 만으로는 어느 한도인지 모른다."""
+    def silent(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("no bytes", request=request)
+
+    def refused(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("refused", request=request)
+
+    def recorder(handler) -> CallRecorder:
+        client = httpx.Client(transport=httpx.MockTransport(handler))
+        limit = adapters_base.source_timeout()
+        return CallRecorder(
+            "cafe0000deadbeef",
+            mcp=McpHttpClient("https://gw.test/mcp", client=client, timeout=limit),
+            rest=RestGetClient("https://heax.test", "service-pat", client=client, timeout=limit))
+
+    late = recorder(silent)
+    for channel, tool, logged in (("rest", "/apps/step_forge/api/projects/x", "GET /apps/step_forge/api/projects/x"),
+                                  ("mcp", "project_tree", "project_tree")):
+        reply = late.call(channel, tool, {}, source_kind="mcad")
+        assert reply["ok"] is False
+        assert reply["error"] == (
+            f"transport_error: 소스 {logged} 가 120초 동안 응답이 없었다(HWAXRISK_SOURCE_CALL_TIMEOUT_S)")
+    assert [c["error"] for c in late.calls] == [late.calls[0]["error"], late.calls[1]["error"]]
+    assert all("HWAXRISK_SOURCE_CALL_TIMEOUT_S" in c["error"] for c in late.calls)
+    # 시간 초과가 아닌 실패는 종전 문구 그대로다.
+    down = recorder(refused)
+    assert down.call("rest", "/x", {}, source_kind="mcad")["error"] == "transport_error: ConnectError"
+    assert down.call("mcp", "project_tree", {}, source_kind="mcad")["error"] == "transport_error"
+
+
 # ---------------------------------------------------------------- 게이트웨이 발견(§2.13.2)
 def _tools_map_client(body: dict, seen: list | None = None) -> httpx.Client:
     def handler(request: httpx.Request) -> httpx.Response:

@@ -68,6 +68,8 @@ CREDENTIAL_SLACK_S = 600
 # 패널 전 포털 대화 생성 호출(HWAXRISK_PORTAL_CALL_TIMEOUT_S). 죽은 포털은 connect 10초가 잡는다 — 이 값은 느린
 # 응답을 기다리는 몫이고, 놓치면 그 패널의 발언이 포털에 남지 않는다.
 DEFAULT_PORTAL_CALL_TIMEOUT_S = 30
+# 스냅샷 소스 호출 1건의 응답 침묵 한도(HWAXRISK_SOURCE_CALL_TIMEOUT_S) — 게이트웨이 MCP 도구와 소스 앱 REST GET.
+DEFAULT_SOURCE_CALL_TIMEOUT_S = 120
 
 
 def resolve_data_dir(env: Mapping[str, str] | None = None) -> Path:
@@ -135,6 +137,7 @@ class Settings:
     # 0 이면 벽시계에서 유도한다(credential_margin_s).
     risk_credential_margin_s: int
     risk_portal_call_timeout_s: int
+    risk_source_call_timeout_s: int
     adh_team: str | None
     adh_group: str | None
     app_id: str = APP_ID
@@ -206,6 +209,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         risk_engine_read_timeout_s=int(env.get("HWAXRISK_ENGINE_READ_TIMEOUT_S", str(DEFAULT_ENGINE_READ_TIMEOUT_S))),
         risk_credential_margin_s=int(env.get("HWAXRISK_CREDENTIAL_MARGIN_S", "0")),
         risk_portal_call_timeout_s=int(env.get("HWAXRISK_PORTAL_CALL_TIMEOUT_S", str(DEFAULT_PORTAL_CALL_TIMEOUT_S))),
+        risk_source_call_timeout_s=int(env.get("HWAXRISK_SOURCE_CALL_TIMEOUT_S", str(DEFAULT_SOURCE_CALL_TIMEOUT_S))),
         adh_team=env.get("HWAXRISK_ADH_TEAM") or None,
         adh_group=env.get("HWAXRISK_ADH_GROUP") or None,
     )

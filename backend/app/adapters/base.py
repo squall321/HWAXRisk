@@ -7,8 +7,19 @@ from typing import Any, Mapping, Protocol, Sequence, TypedDict
 
 import httpx
 
-# 소스 호출 타임아웃. 게이트웨이 GATEWAY_CALL_TIMEOUT(120 s) 아래로 잡는다.
-DEFAULT_TIMEOUT = 30.0
+from app import config
+
+# 소스 호출 1건의 응답 침묵 한도(초). 30초였다 — 소스 앱 REST 직결에서는 이 값이 실제 상한이라 큰 형상의 호출이
+# 잘려 부분 IR 이 됐고, 패널은 그 불완전한 스냅샷을 심사했다. 게이트웨이 경유 MCP 호출에서는 게이트웨이가 15초마다
+# ping 을 흘려 이 값이 호출 길이를 자르지 않고 죽은 게이트웨이만 잡는다(호출 길이는 게이트웨이 GATEWAY_CALL_TIMEOUT 몫).
+DEFAULT_TIMEOUT = float(config.DEFAULT_SOURCE_CALL_TIMEOUT_S)
+CONNECT_TIMEOUT = 10.0             # 죽은 상대 감지 — 짧게 둔다
+
+
+def source_timeout(settings: Any | None = None) -> httpx.Timeout:
+    """소스 호출 한도 — 응답 침묵은 `HWAXRISK_SOURCE_CALL_TIMEOUT_S`, 연결은 10초."""
+    cfg = config.settings if settings is None else settings
+    return httpx.Timeout(float(getattr(cfg, "risk_source_call_timeout_s", DEFAULT_TIMEOUT)), connect=CONNECT_TIMEOUT)
 
 
 @dataclass(frozen=True)
@@ -93,7 +104,7 @@ class RestGetClient:
     """
 
     def __init__(self, base_url: str, token: str | None, *, client: httpx.Client | None = None,
-                 timeout: float = DEFAULT_TIMEOUT) -> None:
+                 timeout: float | httpx.Timeout = DEFAULT_TIMEOUT) -> None:
         self.base_url = (base_url or "").rstrip("/")
         self._token = token or ""
         self._client = client
@@ -214,6 +225,12 @@ class CallRecorder:
         call_id = self._next_call_id()
         ok = bool(reply.get("ok"))
         error = None if ok else str(reply.get("error") or "unknown_error")
+        if not ok and "ReadTimeout" in f"{error} {reply.get('detail') or ''}":
+            # 침묵 한도에 걸렸다 — 값과 손잡이를 호출 행에 적는다('transport_error' 만으로는 어느 한도인지 모른다).
+            limit = getattr(self.rest if channel == "rest" else self.mcp, "timeout", None)
+            seconds = getattr(limit, "read", limit)
+            waited = f"{seconds:g}초" if isinstance(seconds, (int, float)) else "침묵 한도"
+            error = f"transport_error: 소스 {logged_tool} 가 {waited} 동안 응답이 없었다(HWAXRISK_SOURCE_CALL_TIMEOUT_S)"
         # 응답 계약 검사(§2.13.1) — 위반은 예외가 아니라 행에 남는 표기다.
         # 계약표는 맨이름 키다 — 실이름으로 찾으면 전부 '계약 없는 도구' 가 되어 검사가 조용히 꺼진다.
         contract = check_contract(tool, reply.get("result")) if ok else {

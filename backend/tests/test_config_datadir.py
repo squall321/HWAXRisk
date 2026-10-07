@@ -19,7 +19,7 @@ _ENV_KEYS = ("HWAXRISK_DATA_DIR", "HEAX_DATA_DIR", "ROOT_PATH", "PORT", "HOST",
              "HWAXRISK_PRIOR_INCLUDE_HUMAN", "HWAXRISK_SUSPECT_TEXT_BLOCK",
              "HWAXRISK_RECALL_REQUIRE_VERIFIED_ACTOR", "HWAXRISK_NEG_PRECEDENT_LINES",
              "HWAXRISK_CLUSTER_DUP_SCAN", "HWAXRISK_PANEL_TIMEOUT_S", "HWAXRISK_ENGINE_READ_TIMEOUT_S",
-             "HWAXRISK_CREDENTIAL_MARGIN_S", "HWAXRISK_PORTAL_CALL_TIMEOUT_S")
+             "HWAXRISK_CREDENTIAL_MARGIN_S", "HWAXRISK_PORTAL_CALL_TIMEOUT_S", "HWAXRISK_SOURCE_CALL_TIMEOUT_S")
 
 
 @pytest.fixture
@@ -133,6 +133,7 @@ def test_defaults_follow_plan(tmp_path, reload_config):
     assert s.risk_engine_read_timeout_s == 54000
     assert s.risk_credential_margin_s == 0                    # 0 = 벽시계에서 유도
     assert s.risk_portal_call_timeout_s == 30
+    assert s.risk_source_call_timeout_s == 120
 
 
 def test_time_limits_are_layered_and_follow_their_knobs(tmp_path, reload_config):
@@ -163,6 +164,8 @@ def test_time_limits_are_layered_and_follow_their_knobs(tmp_path, reload_config)
     assert mod.credential_margin_s(mod.settings) == 7200
     mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path), HWAXRISK_PORTAL_CALL_TIMEOUT_S="45")
     assert mod.settings.risk_portal_call_timeout_s == 45
+    mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path), HWAXRISK_SOURCE_CALL_TIMEOUT_S="300")
+    assert mod.settings.risk_source_call_timeout_s == 300
 
 
 def test_env_overrides_with_hwaxrisk_prefix(tmp_path, reload_config):

@@ -11,12 +11,12 @@ from app import config, ir_builder
 from app.adapters import dyna as dyna_adapter
 from app.adapters import ecad_stub, mcad
 from app.adapters.base import (
-    DEFAULT_TIMEOUT,
     CallRecorder,
     IrAdapter,
     Principal,
     Probe,
     RestGetClient,
+    source_timeout,
     tool_matches,
 )
 from app.common import new_uuid, now_epoch
@@ -323,7 +323,7 @@ def capture_all(*, sources: Sequence[Mapping[str, Any]], principal: Principal,
 def clients_from_settings(settings, secrets: Mapping[str, str] | None = None, *,
                           portal_pat: str | None = None, heax_token: str | None = None,
                           http_client: httpx.Client | None = None,
-                          timeout: float = DEFAULT_TIMEOUT) -> dict:
+                          timeout: float | httpx.Timeout | None = None) -> dict:
     """Settings·secrets.env 로 캡처 채널을 만든다 — 게이트웨이 MCP(포털 PAT)와 heax REST.
 
     포털 PAT 가 없으면 mcp_client 는 None 이다. REST 채널의 자격은 두 갈래다 —
@@ -334,6 +334,8 @@ def clients_from_settings(settings, secrets: Mapping[str, str] | None = None, *,
     """
     from app.ra_client import McpHttpClient  # noqa: PLC0415 — 순환 임포트를 피하려 지연 임포트한다.
 
+    if timeout is None:
+        timeout = source_timeout(settings)
     secrets = dict(secrets or {})
     token = portal_pat or secrets.get("HWAXRISK_PORTAL_PAT")
     service_pat = secrets.get("HWAXRISK_HEAX_SERVICE_PAT") or (heax_token or None)
