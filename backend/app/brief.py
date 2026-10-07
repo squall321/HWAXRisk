@@ -1181,13 +1181,14 @@ def memo_cut(item: Mapping[str, Any] | None) -> dict | None:
 
 
 def _item_memo(store, target_key: str, user_memo: str | None = None) -> dict | None:
-    """M — `user_memo` 는 지금 도는 잡의 메모다(러너가 넘긴다). 없으면 그 타깃의 가장 최근 잡 메모를 읽는다.
+    """M — `user_memo` 는 지금 도는 잡의 메모다(러너가 넘긴다). None 이면 그 타깃의 가장 최근 잡 메모를 읽는다.
 
     조회는 잡이 없는 미리보기·MCP 경로를 위한 것이다. 러너 경로까지 조회에 맡기면 한 타깃에 잡이 둘일 때
-    앞 잡의 패널이 뒤 잡의 메모를 받고 제 메모는 말없이 사라진다.
+    앞 잡의 패널이 뒤 잡의 메모를 받고 제 메모는 말없이 사라진다. 빈 문자열은 '이 잡에는 메모가 없다' 다 —
+    None 과 같이 다루면 메모 없이 만든 잡이 같은 타깃의 다른 잡 메모를 빌려 온다.
     """
     memo = user_memo
-    if not memo:
+    if memo is None:
         row = store.query_one(
             "SELECT params_json FROM rr_jobs WHERE target_key = ? ORDER BY created_at DESC, id DESC LIMIT 1",
             (target_key,),

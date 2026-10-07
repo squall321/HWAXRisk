@@ -162,6 +162,37 @@ def test_short_job_memo_leaves_no_cut_record(risk_store, tmp_path):
     assert "user_memo_cut" not in quality["flags"]
 
 
+def test_a_job_without_a_memo_does_not_borrow_another_jobs_memo(risk_store, tmp_path):
+    """메모 없이 만든 잡의 패널에는 M 이 실리지 않는다 — 같은 타깃의 다른 잡 메모를 빌려 오지 않는다.
+
+    러너가 '메모 없음' 을 None 으로 넘기면 브리프는 그것을 잡이 없는 길(미리보기·MCP)로 읽어 그 타깃의 가장
+    최근 잡 메모를 찾는다. 앞 잡이 도는 중에 메모를 단 잡을 하나 더 만들면, 앞 잡의 좌석이 남의 메모를 받았다.
+    """
+    from app import brief
+
+    target_key = _seed(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    now = {"t": common.now_epoch()}
+    previous = common.set_clock(lambda: now["t"])
+    try:
+        first = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+        now["t"] += 60
+        runner.create_job(risk_store, target_key, "B", owner_sub=OWNER, settings=cfg, user_memo="뒤에 만든 잡의 메모")
+        job = runner.claim_next_job(risk_store, cfg)
+        assert job["id"] == first and job["params"]["user_memo"] is None
+        engine = RealEngine()
+        out = runner.run_panel(risk_store, cfg, engine, job)
+    finally:
+        common.set_clock(previous)
+
+    assert out["status"] == "done"
+    assert "user_memo" not in [e["source"] for e in engine.calls[0]["evidence"]]
+    assert "뒤에 만든 잡의 메모" not in json.dumps(engine.calls[0]["evidence"], ensure_ascii=False)
+    # 잡이 없는 미리보기·MCP 길은 종전대로 그 타깃의 최근 잡 메모를 읽는다.
+    preview = brief.build_brief(risk_store, target_key)
+    assert "뒤에 만든 잡의 메모" in preview["evidence"][preview["keys"].index("M")]["result"]
+
+
 def test_brief_payload_names_what_did_not_fit_the_slots(risk_store, monkeypatch):
     """REST·MCP 브리프도 칸을 넘겨 빠진 항목을 그 패널 옆에 적는다 — 호출자가 받은 근거를 전부라고 읽지 않게."""
     monkeypatch.setattr(routes, "get_store", lambda: risk_store)

@@ -863,7 +863,9 @@ def run_panel(
         store.execute("UPDATE rr_panels SET model_json = ? WHERE id = ?", (canonical_json(model_json), panel["id"]))
         loss: dict = {}
         delib_opts = build_delib_opts(
-            store, settings, panel, user_memo=params.get("user_memo"), narrative_mod=narrative_mod, loss=loss
+            # 메모 없는 잡은 None 이 아니라 빈 문자열로 넘긴다 — None 은 '잡이 없는 길' 이라 브리프가 그 타깃의
+            # 최근 잡 메모를 찾아 싣는다(같은 타깃에 메모를 단 잡이 또 있으면 그 메모가 이 패널에 실린다).
+            store, settings, panel, user_memo=params.get("user_memo") or "", narrative_mod=narrative_mod, loss=loss
         )
         # 브리프는 시변 조립물이라 이 패널이 실제로 받은 전문을 동결한다(§5.6.1).
         frozen = {**freeze_brief(store, panel, delib_opts["evidence"]), **loss}
