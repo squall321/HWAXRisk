@@ -1011,6 +1011,31 @@ def test_merge_folds_findings_through_a_human_alias(risk_store, clock):
     assert registry.merge(risk_store, "T1", owner_sub=OWNER)["clusters"] == 2
 
 
+# ================================================================ §4.7.3 통합 보고서 — minutes 의 [품질 플래그]
+
+
+def test_report_minutes_carry_the_panel_quality_flags(risk_store, clock):
+    """패널 quality.flags 가 통합 보고서 [품질 플래그] 에 실린다(§6.5.5 '기준 미달 패널은 minutes 에 표로 나온다').
+
+    쓰는 쪽(러너·MCP 회수)은 `flags`(복수)인데 보고서는 `flag`(단수)를 읽어, 이 줄에는 파싱 실패 말고는 한 번도
+    실린 적이 없었다. 빠진 근거·잘린 메모처럼 같은 이름의 상세가 있는 플래그는 그 상세까지 적는다.
+    """
+    _target(risk_store)
+    _panel(risk_store, "T1", "PA1", 1, quality={
+        "flags": ["low_tool_use", "evidence_dropped", "user_memo_cut"],
+        "evidence_dropped": ["E9", "X1"], "user_memo_cut": {"chars": 1500, "kept": 266}})
+    _panel(risk_store, "T1", "PA2", 2, parsed=0, quality={"flags": ["spec_parse_failed"]})
+    _panel(risk_store, "T1", "PA3", 3, quality={"flags": []})
+
+    minutes = "\n".join(registry.build_report(risk_store, "T1")["blocks"]["minutes"])
+    assert minutes.split("[품질 플래그]\n")[1].split("\n") == [
+        "panel_no=1 low_tool_use",
+        'panel_no=1 evidence_dropped ["E9","X1"]',
+        'panel_no=1 user_memo_cut {"chars":1500,"kept":266}',
+        "panel_no=2 spec_parse_failed",                  # flags 와 risk_spec_parsed 가 같은 말을 두 번 하지 않는다
+    ]
+
+
 def test_error_codes_use_the_canonical_spelling():
     """오류 코드는 계약이다 — 클라이언트가 문자열로 분기한다(정본 §8.2.3 통과 기준 15 · §4.3.2 13).
 

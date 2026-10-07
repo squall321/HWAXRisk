@@ -1198,10 +1198,14 @@ def _minutes_lines(store: RiskStore, target_key: str, panels: list[dict], covera
     flags: list[str] = []
     for p in panels:
         quality = _loads(p["quality_json"], {})
-        flag = quality.get("flag")
-        for value in _as_list(flag):
-            flags.append(f"panel_no={p['panel_no']} {value}")
-        if not p["risk_spec_parsed"] and p["status"] in ("done", "error"):
+        # 쓰는 쪽(러너·MCP 회수)은 `flags`(복수)다. 여기서 `flag` 를 읽던 동안 이 줄에는 아래 파싱 실패 말고는
+        # 한 번도 실린 적이 없었다 — 기준 미달 패널이 minutes 에 나온다는 §6.5.5 가 죽어 있었다.
+        listed = [str(value) for value in _as_list(quality.get("flags"))]
+        for value in listed:
+            # 같은 이름의 상세(evidence_dropped 의 키 목록·user_memo_cut 의 자수)가 있으면 함께 적는다.
+            detail = quality.get(value)
+            flags.append(f"panel_no={p['panel_no']} {value}" + (f" {common.canonical_json(detail)}" if detail else ""))
+        if not p["risk_spec_parsed"] and p["status"] in ("done", "error") and "spec_parse_failed" not in listed:
             flags.append(f"panel_no={p['panel_no']} spec_parse_failed")
     out.extend(flags or ["(없음)"])
     return out
