@@ -2704,6 +2704,12 @@ def complete_panel(panel_id: str, *, engine: str, decision_text: str, turns: lis
         flags.append("spec_parse_failed")           # §6.5.5 — 파싱 실패는 플래그로 남는다(§6.9 C2 차단 조건).
     if parsed and "spec_parse_failed" in flags:
         flags.remove("spec_parse_failed")           # 보정 재제출로 해결됐다.
+    # 엔진이 좌석에 주지 않았다고 알린 근거 — 러너 경로와 같은 표기로 남긴다. events[] 없는 재제출은 지우지 않는다.
+    withheld = runner.withheld_by_engine(checked)
+    if withheld:
+        quality["engine_withheld"] = withheld
+        if "engine_withheld" not in flags:
+            flags.append("engine_withheld")
     quality["flags"] = flags
 
     # 상태 전이·서술 저장·좌석 회계·등록부 병합은 한 트랜잭션이다 — 중간 실패의 반쪽 저장을 막는다.

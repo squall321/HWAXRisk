@@ -116,8 +116,13 @@ def collect_stream(frames: Iterable[tuple[str, dict]]) -> dict:
                 })
                 add({"kind": "turn", "persona": _cut(data.get("persona")), "round": data.get("round")})
             elif kind == "evidence":
-                add({"kind": "evidence", "source": _cut(data.get("source")) or "",
-                     "included": bool(data.get("included"))})
+                item = {"kind": "evidence", "source": _cut(data.get("source")) or "",
+                        "included": bool(data.get("included"))}
+                # 엔진이 좌석에 주지 않았다고 알린 카드는 사유 문장을 같이 남긴다 — 러너가 패널에 옮겨 적는다
+                # (runner.withheld_by_engine). 실린 근거의 본문은 싣지 않는다 — events[] 는 압축 로그다.
+                if not item["included"] and data.get("text"):
+                    item["note"] = _cut(data.get("text"))
+                add(item)
             elif kind == "personas":
                 add({"kind": "personas", "personas": [
                     {"key": _cut(p.get("key")), "origin": _cut(p.get("origin"))}

@@ -272,6 +272,25 @@ def test_resubmit_without_events_keeps_attribution_and_engine(risk_store, monkey
     assert quality["attribution_rate"] == 1.0 and quality["extra_seats"] == []
 
 
+def test_submitted_events_relay_what_the_engine_withheld(risk_store, monkeypatch):
+    """회수 경로(REST)도 같다 — events[] 에 실려 온 '좌석에 주지 않았다' 카드를 패널에 남기고, 재제출이 지우지 않는다."""
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    target_key = _seed(risk_store)
+    panel = planner.plan_next_panel(risk_store, target_key, "B")
+    events = [{"kind": "evidence", "source": "사전 근거 건수 초과", "included": False,
+               "note": "근거 14건 중 12건만 실었다."}]
+
+    routes.complete_panel(panel["id"], engine="mcp", decision_text=DECISION, turns=[],
+                          events=events, actor=OWNER, owner_sub=OWNER)
+    routes.complete_panel(panel["id"], engine="mcp", decision_text=DECISION, turns=[],
+                          events=None, actor=OWNER, owner_sub=OWNER)
+
+    quality = json.loads(risk_store.query_one(
+        "SELECT quality_json FROM rr_panels WHERE id = ?", (panel["id"],))["quality_json"])
+    assert quality["engine_withheld"] == ["사전 근거 건수 초과 — 근거 14건 중 12건만 실었다."]
+    assert quality["flags"].count("engine_withheld") == 1
+
+
 def test_spec_parse_failure_sets_flag(risk_store, monkeypatch):
     monkeypatch.setattr(routes, "get_store", lambda: risk_store)
     target_key = _seed(risk_store)

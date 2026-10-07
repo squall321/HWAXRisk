@@ -70,6 +70,26 @@ def test_collect_stream_builds_runner_contract():
     assert attribution["extra_seats"] == []
 
 
+def test_collect_stream_keeps_what_the_engine_says_it_withheld():
+    """엔진이 '좌석에 주지 않았다' 고 알린 카드(evidence.included=false)는 사유 문장까지 남겨 러너가 옮겨 적는다."""
+    from app.runner import withheld_by_engine
+
+    notice = "근거 12건 중 뒤쪽 10건은 예산(2,000자)을 넘겨 좌석에 주지 않았다."
+    stream = (
+        'event: delib\ndata: {"kind": "evidence", "source": "챗 정리 · rr_scope", "text": "E0 본문", "included": true}\n\n'
+        'event: delib\ndata: {"kind": "evidence", "source": "사전 근거 예산 초과", "text": "%s", "included": false}\n\n'
+        'event: delib\ndata: {"kind": "evidence", "source": "xd-a0 · 자유 조회 실패", "text": "timeout", "included": false}\n\n'
+        'event: delib\ndata: {"kind": "decision", "text": "결정문"}\n\n'
+        "event: done\ndata: {}\n\n"
+    ) % notice
+    events = engine_client.collect_stream(engine_client.parse_sse(stream.splitlines()))["events"]
+
+    # 좌석 귀속 카드(`<key> · …`)는 빼고, 엔진이 패널 전체에 대해 알린 것만 고른다.
+    assert withheld_by_engine(events) == [f"사전 근거 예산 초과 — {notice}"]
+    # 좌석에 실린 근거의 본문은 싣지 않는다 — events[] 는 압축 로그다.
+    assert events[0] == {"kind": "evidence", "source": "챗 정리 · rr_scope", "included": True}
+
+
 def test_collect_stream_raises_on_error_frame():
     stream = 'event: error\ndata: {"code": "gateway_unavailable", "message": "게이트웨이 불통"}\n\n'
     with pytest.raises(EngineError):

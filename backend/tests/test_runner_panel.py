@@ -469,6 +469,37 @@ def test_run_panel_records_dropped_evidence_on_the_panel(risk_store, tmp_path):
     assert len(sent) == planner.MAX_EVIDENCE and "이 계면을 먼저 보라" in sent[-1]["result"]
 
 
+def test_run_panel_relays_what_the_engine_withheld(risk_store, tmp_path):
+    """엔진이 근거를 좌석에 못 줬다고 띄운 카드가 패널 quality 에 남는다 — 배치 러너의 스트림은 아무도 안 본다."""
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)
+    job = runner.claim_next_job(risk_store, cfg)
+    notice = {"kind": "evidence", "source": "사전 근거 예산 초과", "included": False,
+              "note": "근거 12건 중 뒤쪽 10건은 예산(2,000자)을 넘겨 좌석에 주지 않았다."}
+
+    class StarvedEngine(FakePanelEngine):
+        def run(self, delib_opts, *, owner_sub=None):
+            result = dict(super().run(delib_opts, owner_sub=owner_sub))
+            seat = delib_opts["personas"][0]["key"]
+            result["events"] = list(result["events"]) + [
+                notice, dict(notice),                                    # 같은 알림이 두 번 와도 한 번만 적는다
+                {"kind": "evidence", "source": f"{seat} · 자유 조회 실패", "included": False, "note": "timeout"},
+            ]
+            return result
+
+    recorder: dict = {}
+    out = runner.run_panel(risk_store, cfg, StarvedEngine(), job,
+                           narrative_mod=fake_narrative(recorder), registry_mod=fake_registry(recorder))
+
+    assert out["quality_flags"] == ["engine_withheld"]
+    quality = json.loads(risk_store.query_one(
+        "SELECT quality_json FROM rr_panels WHERE id = ?", (out["panel_id"],))["quality_json"])
+    assert quality["engine_withheld"] == [
+        "사전 근거 예산 초과 — 근거 12건 중 뒤쪽 10건은 예산(2,000자)을 넘겨 좌석에 주지 않았다."]
+
+
 def test_seat_contract_evidence_budget():
     item = runner.seat_contract_evidence(["mech", "mech", "sim", "없는도메인"])
     assert item["source"] == "seat_contract" and item["args"] == "mech,sim,없는도메인"

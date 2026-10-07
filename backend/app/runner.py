@@ -149,6 +149,25 @@ def attribute_events(
     }
 
 
+def withheld_by_engine(events: Sequence[Mapping[str, Any]] | None) -> list[str]:
+    """엔진이 화면 카드로만 띄우고 좌석에는 주지 않은 것 — `evidence.included=false` 중 좌석 귀속이 아닌 카드.
+
+    엔진은 사전 근거를 예산·건수 초과나 빈 본문 때문에 못 실으면 그 사실을 카드 한 장으로 알린다(`source` 가
+    무엇을, `note` 가 몇 건을). 배치 러너의 스트림은 아무도 보고 있지 않다 — 패널에 옮겨 적지 않으면 그 카드는
+    누구에게도 닿지 않는다. 좌석 귀속 카드(`<key> · …`)는 여기서 다루지 않는다.
+    """
+    out: list[str] = []
+    for event in events or ():
+        source = str(event.get("source") or "")
+        if str(event.get("kind") or "") != "evidence" or event.get("included") is not False \
+                or not source or EVIDENCE_SEP in source:
+            continue
+        line = f"{source} — {event['note']}" if event.get("note") else source
+        if line not in out:
+            out.append(line)
+    return out
+
+
 # ---------------------------------------------------------------- 러너 자격(plan §6.7 3단계)
 def _usable_credential(store: Any, email: str | None) -> dict | None:
     """그 사람이 등록한 포털 PAT 가 실제로 쓸 수 있으면 자격 행, 아니면 None(plan §8.2.7).
@@ -1009,6 +1028,11 @@ def _complete_panel(
             if frozen_brief and frozen_brief.get(lost):
                 quality[lost] = frozen_brief[lost]
                 quality["flags"].append(lost)
+        # 엔진이 좌석에 주지 않았다고 카드로 알린 것(예산·건수 초과 등)도 같은 자리에 옮겨 적는다.
+        withheld = withheld_by_engine(events)
+        if withheld:
+            quality["engine_withheld"] = withheld
+            quality["flags"].append("engine_withheld")
         if escalated and "registry_escalated" not in quality["flags"]:
             # 사람이 닫았던 행이 더 강한 근거로 재제기됐다 — 사람이 다시 볼 자리다(plan §4.7.1).
             quality["flags"].append("registry_escalated")
