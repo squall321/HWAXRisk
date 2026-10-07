@@ -1147,6 +1147,39 @@ def _item_e9(ctx) -> dict:
 
 
 # ---------------------------------------------------------------- M 사용자 메모
+# 메모를 다 싣지 못했을 때 줄 끝에 붙는 표지. 쓰는 쪽(`memo_result`)과 읽는 쪽(`memo_cut`)이 같은 꼴을 본다 —
+# «…» 밖에 서므로 메모 원문이 흉내 낼 수 없다(위생이 원문 안의 « » 를 지운다).
+_MEMO_CUT_FMT = " …(메모 {chars}자 중 {kept}자)"
+_MEMO_CUT_RE = re.compile(re.escape(render.QUOTE_CLOSE) + r" …\(메모 (\d+)자 중 (\d+)자\)$")
+
+
+def memo_result(target_key: str, memo: Any) -> str:
+    """M 항목의 result — 프레이밍 줄 + 메모 한 줄. CAPS['M'] 에 안 들어가면 들어가는 만큼만 싣고 그 사실을 적는다.
+
+    메모는 한 줄이라 넘치면 `clip_lines` 가 그 줄을 통째로 빼고 `…(1줄 생략)` 만 남겼다. 잡 API 는 2,000자까지
+    받는데 약 290자부터 좌석은 메모를 한 글자도 못 봤고, 그 사실은 어디에도 남지 않았다(S26U 실사용 피드백 3-3 을
+    재현하다 찾았다). 인젝션 어휘에 걸려 자리표시자로 바뀐 메모(§3.4.1)도 '좌석에 안 갔다' 이므로 0자로 적는다.
+    """
+    source, tool = _SOURCES["M"]
+    room = CAPS["M"] - line_overhead({"source": source, "tool": tool, "args": _s(target_key)[:CLAMP_ARGS]}) \
+        - len(_framing(source)) - 1
+    chars = len(_s(memo))
+    quoted = _q(memo, "memo")
+    inner = quoted[1:-1]
+    if inner.startswith("[suspect_text "):
+        return _body(source, [quoted + _MEMO_CUT_FMT.format(chars=chars, kept=0)])
+    if len(quoted) <= room:
+        return _body(source, [quoted])
+    kept = max(0, room - 2 - len(_MEMO_CUT_FMT.format(chars=chars, kept=chars)))
+    return _body(source, [render.quote_source(inner[:kept]) + _MEMO_CUT_FMT.format(chars=chars, kept=kept)])
+
+
+def memo_cut(item: Mapping[str, Any] | None) -> dict | None:
+    """M 항목이 메모를 다 싣지 못했으면 `{chars, kept}`, 다 실었으면 None(`memo_result` 가 적은 표지를 읽는다)."""
+    found = _MEMO_CUT_RE.search(_s((item or {}).get("result")))
+    return {"chars": int(found.group(1)), "kept": int(found.group(2))} if found else None
+
+
 def _item_memo(store, target_key: str, user_memo: str | None = None) -> dict | None:
     """M — `user_memo` 는 지금 도는 잡의 메모다(러너가 넘긴다). 없으면 그 타깃의 가장 최근 잡 메모를 읽는다.
 
@@ -1162,7 +1195,7 @@ def _item_memo(store, target_key: str, user_memo: str | None = None) -> dict | N
         memo = _j(row["params_json"], {}).get("user_memo") if row is not None else None
     if not memo:
         return None
-    return {"key": "M", "args": target_key, "result": _body("user_memo", [_q(memo, "memo")])}
+    return {"key": "M", "args": target_key, "result": memo_result(target_key, memo)}
 
 
 # ---------------------------------------------------------------- 참조 수집·린터
@@ -1309,6 +1342,8 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
             "budget": ENGINE_BUDGET,
             "caps_sum": sum(CAPS[i["key"]] for i in items),
             "dropped": 0,
+            # 메모를 다 못 실었으면 {chars, kept} — 미리보기·MCP 호출자가 여기서 본다(패널에는 러너가 남긴다).
+            "user_memo_cut": memo_cut(next((i for i in items if i["key"] == "M"), None)),
             "excluded": sorted(excluded),
             "external_search": "available" if external_ok else "unavailable",
             "lint": lint,

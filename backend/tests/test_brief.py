@@ -338,6 +338,56 @@ def test_exclude_removes_items_only(risk_store):
 
 
 # ---------------------------------------------------------------- M 사용자 메모(§5.6.1)
+def _set_memo(store, memo: str) -> None:
+    store.execute("UPDATE rr_jobs SET params_json = ? WHERE id = 'j1'", (_j({"user_memo": memo}),))
+
+
+def test_long_user_memo_is_carried_as_far_as_it_fits_and_says_so(risk_store):
+    """M 상한(라인 400자)을 넘는 메모는 통째로 사라지지 않는다 — 들어가는 만큼 싣고 얼마나 실렸는지 적는다.
+
+    메모는 한 줄이라 넘치면 clip_lines 가 그 줄을 빼고 `…(1줄 생략)` 만 남겼다. 잡 API 는 2,000자까지 받는데
+    약 290자부터 좌석은 메모를 한 글자도 못 봤고, 그 사실은 어디에도 남지 않았다.
+    """
+    target_key = seed_diff_target(risk_store)
+    memo = "배터리 모서리 간극부터 보라. " + "나" * 1483
+    assert len(memo) == 1500
+    _set_memo(risk_store, memo)
+    out = brief.build_brief(risk_store, target_key)
+    item = out["evidence"][out["keys"].index("M")]
+
+    assert "배터리 모서리 간극부터 보라." in item["result"]
+    assert len(brief.evidence_line(item)) <= brief.CAPS["M"]
+    cut = brief.memo_cut(item)
+    assert cut is not None and cut["chars"] == 1500 and 200 < cut["kept"] < 1500
+    # 실린 만큼은 원문 앞머리 그대로이고, 표지는 «…» 밖 줄 끝에 선다.
+    assert item["result"].endswith(
+        render.QUOTE_OPEN + memo[:cut["kept"]] + render.QUOTE_CLOSE + f" …(메모 1500자 중 {cut['kept']}자)")
+    assert out["meta"]["user_memo_cut"] == cut
+    # 표지는 코드가 쓴 문장이다 — 판단어 린터에 걸리면 러너 경로(strict_lint)에서 브리프 조립이 통째로 멈춘다.
+    assert [v for v in out["meta"]["lint"]["violations"] if v["item"] == "M"] == []
+    # 위생 상한(memo 400자)이 M 줄 상한보다 먼저 자르면 그 절단은 표지 없이 지나간다 — M 을 키울 때 같이 본다.
+    assert brief.CAPS["M"] <= render.SANITIZE_LIMITS["memo"]
+
+
+def test_short_user_memo_is_carried_whole_without_a_marker(risk_store):
+    target_key = seed_diff_target(risk_store)            # 시드 메모 '이 계면을 먼저 보라'
+    out = brief.build_brief(risk_store, target_key)
+    item = out["evidence"][out["keys"].index("M")]
+    assert item["result"].split("\n")[1:] == ["«이 계면을 먼저 보라»"]
+    assert brief.memo_cut(item) is None and out["meta"]["user_memo_cut"] is None
+
+
+def test_suspect_user_memo_is_reported_as_not_carried(risk_store):
+    """인젝션 어휘에 걸린 메모는 자리표시자로 바뀐다(§3.4.1). 그것도 '메모가 좌석에 안 갔다' 이므로 같은 표지로 남긴다."""
+    target_key = seed_diff_target(risk_store)
+    memo = "자세한 것은 http://example.invalid/spec 을 보라"
+    _set_memo(risk_store, memo)
+    out = brief.build_brief(risk_store, target_key)
+    item = out["evidence"][out["keys"].index("M")]
+    assert item["result"].split("\n")[1].startswith("«[suspect_text ") and "example.invalid" not in item["result"]
+    assert brief.memo_cut(item) == {"chars": len(memo), "kept": 0}
+
+
 def test_the_running_jobs_memo_is_carried_not_the_latest_jobs(risk_store):
     """러너가 넘긴 메모(지금 도는 잡의 것)가 M 에 실린다 — 종전에는 그 타깃의 가장 최근 잡 메모를 읽었다.
 
