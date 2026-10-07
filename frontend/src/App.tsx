@@ -105,7 +105,12 @@ function Shell() {
           </NavLink>
         ))}
       </nav>
-      <main className="mx-auto flex w-full max-w-[1180px] flex-col gap-4 px-4 pb-10 pt-14 sm:pt-6">
+      {/* `w-full` 은 셸 **전체** 폭(100%)이라 사이드바(w-56) 옆에 놓이면 그 폭만큼 오른쪽으로 밀려
+          페이지가 통째로 가로 스크롤된다(실측 scrollWidth 1230 > clientWidth 1006). flex 자식은
+          `w-full` 이 아니라 `min-w-0 flex-1` 로 남는 자리를 받아야 한다 — `min-w-0` 이 없으면
+          내용(넓은 표)이 자식을 밀어 같은 증상이 난다. */}
+      <main className="mx-auto flex min-w-0 flex-1 flex-col gap-4 px-4 pb-10 pt-14 sm:pt-6">
+        <div className="mx-auto flex w-full max-w-[1180px] min-w-0 flex-col gap-4">
         <Routes>
           <Route path="/" element={<RiskHomePage />} />
           <Route path="/projects/:id" element={<ProjectPage />} />
@@ -116,6 +121,7 @@ function Shell() {
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Routes>
+        </div>
       </main>
     </div>
   );
