@@ -15,7 +15,7 @@ from app import config, engine_client, identity
 from app.errors import AppError
 from app.mcp_server import mcp
 from app.risk_store import close_store, get_store
-from app.routes import router as api_router
+from app.routes import PAT_MIN_REMAINING_S, router as api_router
 from app.runner import RiskRunner
 
 _INDEX_HTML = Path(__file__).resolve().parent / "static" / "index.html"
@@ -46,11 +46,26 @@ def _write_origin(data_dir: Path, hostname: str, schema_version: int) -> None:
     (data_dir / ORIGIN_FILENAME).write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def check_credential_chain(settings) -> None:
+    """자격 사슬 — 패널 자격 여유는 PAT 등록 하한보다 작아야 한다. 아니면 기동을 막는다.
+
+    뒤집히면 등록 화면이 받아 준 PAT(남은 수명 ≥ 하한)가 패널에서는 수명 부족으로 거절된다 — 방금 등록한
+    토큰으로 잡이 서비스 계정 시야로 도는데, 설정을 고치기 전에는 어떤 PAT 를 다시 발급해도 낫지 않는다.
+    """
+    margin = config.credential_margin_s(settings)
+    if margin >= PAT_MIN_REMAINING_S:
+        raise RuntimeError(
+            f"패널 자격 여유 {margin}초가 PAT 등록 하한 {PAT_MIN_REMAINING_S}초 이상입니다 — 여유는 패널 벽시계"
+            f"(HWAXRISK_PANEL_TIMEOUT_S {config.panel_timeout_s(settings)}) + 대기 + 600초로 정해집니다. 벽시계를"
+            " 내리거나 HWAXRISK_CREDENTIAL_MARGIN_S 로 여유를 하한보다 작게 정하세요.")
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     settings = config.settings
     # ① 데이터 루트 결정·mkdir·W_OK(실패 = 예외로 기동 중단).
     config.ensure_data_dir(settings.data_dir)
+    check_credential_chain(settings)
     hostname = socket.gethostname()
     prev_hostname = _read_origin_hostname(settings.data_dir)
     # ② RiskStore 생성·MIGRATIONS 적용·살림 표(get_store 가 open()+migrate() 를 수행한다).

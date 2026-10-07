@@ -13,7 +13,7 @@ from app import config, identity
 from app.common import now_epoch
 
 # 프로토콜·예외의 정본은 러너다(러너가 이 모듈을 import 하지 않으므로 순환이 없다).
-from app.runner import CREDENTIAL_MARGIN_S, EngineBusy, EngineError, EngineStreamLost, PanelEngine, PatUnavailable
+from app.runner import EngineBusy, EngineError, EngineStreamLost, PanelEngine, PatUnavailable
 
 log = logging.getLogger("hwax_risk.engine")
 
@@ -208,8 +208,9 @@ def collect_stream(frames: Iterable[tuple[str, dict]]) -> dict:
 class PortalPanelEngine:
     """앱 → 포털 `POST {HWAXRISK_PORTAL_BASE}/agent/chat`(SSE) — plan §6.7.1 확정 경로 (A).
 
-    자격은 (b) 타깃 owner 가 등록한 포털 PAT → (a) 서비스 계정 PAT 순이고(runner.resolve_credential 과 같은 규칙),
-    둘 다 없으면 `PatUnavailable` 이다. 좌석 도구 스코핑은 포털이 검증한 PAT 의 groups 로 강제된다 — 앱은 그룹을 자칭하지 않는다.
+    자격은 러너가 넘긴 사람(잡이 요청자 자격으로 집혔으면 요청자, 아니면 타깃 owner)이 등록한 포털 PAT →
+    (a) 서비스 계정 PAT 순이고(runner.resolve_credential 과 같은 규칙·같은 수명 여유), 둘 다 없으면
+    `PatUnavailable` 이다. 좌석 도구 스코핑은 포털이 검증한 PAT 의 groups 로 강제된다 — 앱은 그룹을 자칭하지 않는다.
     """
 
     def __init__(self, store: Any, settings: Any, *, transport: httpx.BaseTransport | None = None,
@@ -226,7 +227,7 @@ class PortalPanelEngine:
             row = self.store.get_credential(owner_sub)
             # 복호는 identity 가 한다 — 키 없음·폐기 표기·손상은 None 이고 그때는 자격 (a) 로 강등한다(§8.2.7).
             pat = identity.credential_pat(row)
-            if pat and int(row.get("pat_exp") or 0) > now_epoch() + CREDENTIAL_MARGIN_S:
+            if pat and int(row.get("pat_exp") or 0) > now_epoch() + config.credential_margin_s(self.settings):
                 try:
                     groups = json.loads(row.get("pat_groups_json") or "[]")
                 except ValueError:

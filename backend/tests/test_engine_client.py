@@ -341,6 +341,39 @@ def test_heartbeat_pings_do_not_change_the_result(tmp_path):
     assert {k: result[k] for k in plain} == plain
 
 
+def test_a_user_pat_must_outlive_the_panel_wall_clock(tmp_path):
+    """사용자 PAT 는 남은 수명이 패널 자격 여유(벽시계 + 대기 + 600초)를 넘을 때만 쓴다 — 러너와 같은 규칙이다.
+
+    여유가 1800초 고정이던 동안 벽시계(2400초)보다 작아, 패널 도중에 만료될 토큰으로도 시작했다.
+    """
+    from app.common import now_epoch
+
+    _service_pat(tmp_path)
+    margin = config.credential_margin_s(_settings(tmp_path))
+    assert margin == 47400
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen[request.url.path] = request.headers.get("authorization")
+        if request.url.path == "/agent/conversations":
+            return httpx.Response(200, json={"id": "c"})
+        return httpx.Response(200, text=STREAM, headers={"content-type": "text/event-stream"})
+
+    def owner(left: int) -> _Store:
+        return _Store({"portal_pat": _enc("owner-pat"), "pat_email": "me@example.com",
+                       "pat_groups_json": "[]", "pat_exp": now_epoch() + left})
+
+    # 종전 여유(1800초)는 넘지만 패널을 감싸지 못하는 수명 — 서비스 계정으로 내려간다.
+    short = _engine(tmp_path, handler, owner(margin - 60)).run({"question": "q"}, owner_sub="me@example.com")
+    assert short["credential"] == "service" and seen["/agent/chat"] == "Bearer svc-pat"
+    enough = _engine(tmp_path, handler, owner(margin + 60)).run({"question": "q"}, owner_sub="me@example.com")
+    assert enough["credential"] == "owner" and seen["/agent/chat"] == "Bearer owner-pat"
+    # 손잡이로 여유를 따로 정하면 그 값을 쓴다.
+    eased = _engine(tmp_path, handler, owner(7200), risk_credential_margin_s=3600).run(
+        {"question": "q"}, owner_sub="me@example.com")
+    assert eased["credential"] == "owner"
+
+
 def test_health_reads_agent_server(tmp_path):
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == "/health"

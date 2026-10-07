@@ -39,6 +39,30 @@ def test_health_reports_backup_unencrypted_without_an_age_key(client, monkeypatc
     assert "warnings" not in client.get("/api/health").json()
 
 
+def test_boot_refuses_a_credential_margin_at_or_above_the_registration_floor():
+    """패널 자격 여유가 PAT 등록 하한 이상이면 기동을 막는다 — 등록이 받아 준 PAT 를 패널이 거절하게 된다.
+
+    문구가 값과 손잡이 둘, 고치는 길을 말한다.
+    """
+    import dataclasses
+
+    import pytest
+
+    from app import main, routes
+
+    main.check_credential_chain(config.settings)                              # 기본값은 통과한다(47400 < 86400)
+    assert config.credential_margin_s(config.settings) < routes.PAT_MIN_REMAINING_S == 86400
+    day_long = dataclasses.replace(config.settings, risk_panel_timeout_s=86400)
+    with pytest.raises(RuntimeError) as exc:
+        main.check_credential_chain(day_long)
+    assert "패널 자격 여유 90600초가 PAT 등록 하한 86400초 이상" in str(exc.value)
+    assert "HWAXRISK_PANEL_TIMEOUT_S 86400" in str(exc.value) and "HWAXRISK_CREDENTIAL_MARGIN_S" in str(exc.value)
+    # 여유를 하한 아래로 따로 정하면 긴 벽시계로도 뜬다. 하한과 같은 값은 안 된다(등록 직후의 PAT 가 거절된다).
+    main.check_credential_chain(dataclasses.replace(day_long, risk_credential_margin_s=86399))
+    with pytest.raises(RuntimeError):
+        main.check_credential_chain(dataclasses.replace(day_long, risk_credential_margin_s=86400))
+
+
 def test_mcp_initialize_with_session_header(client):
     r = client.post(
         "/mcp",

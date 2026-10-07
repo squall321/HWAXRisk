@@ -26,7 +26,9 @@ EVIDENCE_SEP = " · "
 
 ENGINE_BUSY_WAIT_S = 30.0          # 포털 /agent/chat 429(세마포어 초과)는 error 가 아니라 대기 후 재시도
 ENGINE_BUSY_MAX_RETRY = 10
-CREDENTIAL_MARGIN_S = 1800         # (b) 사용자 PAT 는 timeout_s 만큼 남아 있어야 쓴다
+# 짧은 호출(스냅샷 캡처·필드 근거·명단 조회)에 사용자 PAT 를 쓰려면 남아 있어야 하는 수명. 패널은 이 값이 아니라
+# config.credential_margin_s(패널 벽시계에서 유도)를 쓴다 — 이 값 하나로 패널까지 재던 동안 여유가 벽시계보다 작았다.
+CREDENTIAL_MARGIN_S = 1800
 ENGINE_FAIL_STREAK = 3             # 연속 3패널 error → 잡 failed
 DIMINISHING_WINDOW = 3             # 최근 3패널이 신규 클러스터 <1 이면 수확 체감 정지
 QUALITY_TOOL_USE_MIN = 0.8
@@ -184,19 +186,52 @@ def withheld_by_engine(events: Sequence[Mapping[str, Any]] | None) -> list[str]:
 
 
 # ---------------------------------------------------------------- 러너 자격(plan §6.7 3단계)
-def _usable_credential(store: Any, email: str | None) -> dict | None:
-    """그 사람이 등록한 포털 PAT 가 실제로 쓸 수 있으면 자격 행, 아니면 None(plan §8.2.7).
+_CREDENTIAL_FALLBACK = {"owner": "타깃 소유자의 PAT 로 돈다", "service": "서비스 계정으로 돈다",
+                        None: "쓸 자격이 없어 패널을 시작하지 않는다"}
 
-    복호되지 않는 자격(키 없음·폐기 표기·손상)과 만료 임박은 엔진이 쓸 수 없으므로 후보로 세지 않는다.
-    """
+
+def _registered_pat(store: Any, email: str | None) -> tuple[dict | None, int]:
+    """그 사람이 등록한 포털 PAT 의 (자격 행, 남은 수명 초). 복호되지 않으면(키 없음·폐기 표기·손상) 행은 None 이다."""
     if not email:
-        return None
+        return None, 0
     from app import identity  # noqa: PLC0415 — identity 는 config 만 읽으므로 지연 import 로 순환을 피한다.
 
     row = store.get_credential(email)
-    if row and identity.credential_pat(row) and int(row.get("pat_exp") or 0) > now_epoch() + CREDENTIAL_MARGIN_S:
-        return row
-    return None
+    if not (row and identity.credential_pat(row)):
+        return None, 0
+    return row, int(row.get("pat_exp") or 0) - now_epoch()
+
+
+def resolve_credential_with_note(store: Any, settings: Any | None, owner_sub: str | None,
+                                 requester_sub: str | None = None) -> tuple[dict | None, str | None]:
+    """`resolve_credential` 의 본체 — (자격, 건너뛴 사유). 사유는 등록된 사용자 PAT 를 수명 때문에 못 썼을 때만 있다.
+
+    사용자 PAT 는 남은 수명이 `config.credential_margin_s`(패널 벽시계 + 429 대기 + 600초)를 넘을 때만 쓴다 —
+    패널 도중에 만료될 토큰으로는 시작하지 않는다. 종전에는 여유가 1800초 고정이라 벽시계(2400초)보다 작았고,
+    모자라면 말없이 다음 자격으로 내려가 잡이 서비스 계정 시야로 도는데 만든 사람은 까닭을 몰랐다.
+    """
+    cfg = config.settings if settings is None else settings
+    margin = config.credential_margin_s(cfg)
+    short: tuple[str, int] | None = None
+
+    def note(kind: str | None) -> str | None:
+        if short is None:
+            return None
+        return (f"{short[0]} 의 PAT 남은 수명 {max(short[1], 0) / 3600:.1f}시간이 필요 {margin / 3600:.1f}시간"
+                f"(HWAXRISK_CREDENTIAL_MARGIN_S = 패널 벽시계 + 대기 + 600초)에 못 미쳐 {_CREDENTIAL_FALLBACK[kind]}"
+                " — 포털에서 PAT 를 다시 발급해 등록하라")
+
+    order = [("requester", requester_sub)] if requester_sub and requester_sub != owner_sub else []
+    for kind, email in (*order, ("owner", owner_sub)):
+        row, left = _registered_pat(store, email)
+        if row is None:
+            continue
+        if left > margin:
+            return {"kind": kind, "email": row.get("pat_email") or email}, note(kind)
+        short = short or (str(email), left)
+    if config.load_secrets(cfg.data_dir).get("HWAXRISK_PORTAL_PAT"):
+        return {"kind": "service", "email": "service"}, note("service")
+    return None, note(None)
 
 
 def resolve_credential(store: Any, settings: Any | None, owner_sub: str | None,
@@ -207,18 +242,7 @@ def resolve_credential(store: Any, settings: Any | None, owner_sub: str | None,
     email 을 `rr_jobs.credential_email` 에 적어 진행판·감사가 그 사실을 본다(plan §0.1.6·§6.7 3단계).
     시크릿 값은 돌려주지 않는다(엔진 클라이언트가 같은 규칙으로 다시 읽는다). 반환은 {kind, email?}.
     """
-    cfg = config.settings if settings is None else settings
-    if requester_sub and requester_sub != owner_sub:
-        row = _usable_credential(store, requester_sub)
-        if row is not None:
-            return {"kind": "requester", "email": row.get("pat_email") or requester_sub}
-    row = _usable_credential(store, owner_sub)
-    if row is not None:
-        return {"kind": "owner", "email": row.get("pat_email") or owner_sub}
-    secrets = config.load_secrets(cfg.data_dir)
-    if secrets.get("HWAXRISK_PORTAL_PAT"):
-        return {"kind": "service", "email": "service"}
-    return None
+    return resolve_credential_with_note(store, settings, owner_sub, requester_sub)[0]
 
 
 # ---------------------------------------------------------------- delib_opts 조립(plan §6.6.4)
@@ -533,9 +557,10 @@ def create_job(
         raise AppError("E100", f"모르는 tier — {tier!r}. 허용 {list(planner.TIERS)}.", 422)
     if tier == "C" and not consent:
         raise AppError("E100", "Tier C 는 consent:true 명시 승인이 필요합니다.", 422)
-    credential = resolve_credential(store, cfg, owner_sub, requester_sub)
+    credential, credential_note = resolve_credential_with_note(store, cfg, owner_sub, requester_sub)
     if credential is None:
-        raise AppError("pat_unavailable", "러너 자격이 없습니다 — 포털 PAT 를 등록하거나 서비스 PAT 를 설정하세요.", 422)
+        raise AppError("pat_unavailable", credential_note or
+                       "러너 자격이 없습니다 — 포털 PAT 를 등록하거나 서비스 PAT 를 설정하세요.", 422)
 
     plan = planner.tier_plan(store, target_key, settings=cfg)
     row = next(t for t in plan["tiers"] if t["tier"] == tier)
@@ -562,6 +587,9 @@ def create_job(
         "credential": credential["kind"],
         "credential_email": credential.get("email"),
     }
+    # 등록한 PAT 가 있는데 수명 때문에 다른 자격으로 돈다 — 만든 사람에게 그 자리에서 알린다.
+    if credential_note:
+        out["credential_note"] = credential_note
     # 메모가 M 상한(또는 위 2,000자)을 넘으면 좌석은 앞부분만 받는다 — 패널이 돌기 전에, 쓴 사람에게 알린다.
     cut = brief.memo_cut({"result": brief.memo_result(target_key, user_memo)}) if user_memo else None
     if cut:
@@ -652,10 +680,12 @@ def claim_next_job(store: Any, settings: Any | None = None) -> dict | None:
         if _panels_today(store, job["target_key"]) >= int(cfg.risk_daily_panel_cap):
             _set_job(store, job["id"], "paused", reason="daily_cap")
             continue
-        credential = resolve_credential(store, cfg, job["owner_sub"], _params(row).get("requester"))
+        credential, credential_note = resolve_credential_with_note(
+            store, cfg, job["owner_sub"], _params(row).get("requester"))
         if credential is None:
             store.execute(
-                "UPDATE rr_jobs SET error = 'pat_unavailable', updated_at = ? WHERE id = ?", (now_epoch(), job["id"])
+                "UPDATE rr_jobs SET error = ?, updated_at = ? WHERE id = ?",
+                ("pat_unavailable" + (f": {credential_note}" if credential_note else ""), now_epoch(), job["id"])
             )
             continue
         if job["state"] != "running":
@@ -664,7 +694,10 @@ def claim_next_job(store: Any, settings: Any | None = None) -> dict | None:
         job["params"] = _params(row)
         job["credential"] = credential["kind"]
         job["credential_email"] = credential.get("email")
-        store.execute("UPDATE rr_jobs SET credential_email = ? WHERE id = ?", (credential.get("email"), job["id"]))
+        # 사용자 PAT 를 수명 때문에 건너뛰었으면 그 사유를 잡 행에 남긴다(진행판의 '오류' 줄) — 말없이 서비스
+        # 계정으로 내려가면 좌석이 누구 시야로 조회했는지 아무도 모른다. 건너뛴 것이 없으면 지난 사유를 지운다.
+        store.execute("UPDATE rr_jobs SET credential_email = ?, error = ? WHERE id = ?",
+                      (credential.get("email"), credential_note, job["id"]))
         return job
     return None
 
@@ -905,10 +938,13 @@ def run_panel(
 
     result: Mapping[str, Any] | None = None
     error: str | None = None
+    # 러너 자격 (b)(c) 사용자 PAT 를 쓰려면 그 사람의 sub 가 엔진까지 가야 한다(plan §6.7 3단계). 잡이 요청자
+    # 자격으로 집혔으면 요청자를 넘긴다 — 늘 타깃 owner 를 넘기던 동안 잡 행은 '요청자 자격' 이라 적고 엔진은
+    # owner(없으면 서비스) PAT 로 돌았다.
+    credential_sub = params.get("requester") if job.get("credential") == "requester" else job.get("owner_sub")
     for attempt in range(ENGINE_BUSY_MAX_RETRY):
         try:
-            # 러너 자격 (b) 사용자 PAT 를 쓰려면 잡의 owner_sub 가 엔진까지 가야 한다(plan §6.7 3단계).
-            result = engine.run(delib_opts, owner_sub=job.get("owner_sub"))
+            result = engine.run(delib_opts, owner_sub=credential_sub)
             break
         except EngineBusy:
             if stop is not None and stop.wait(ENGINE_BUSY_WAIT_S):
@@ -1065,10 +1101,14 @@ def _complete_panel(
         escalated = list((merged or {}).get("escalated") or ())
 
         llm_calls = len(turns) + attribution["lookups"] * 3 + len(panel["tools"]) + 3
+        # 실제로 어느 자격으로 돌았는지는 엔진이 안다 — 잡의 사전 판정은 폴백값이다. 다만 엔진은 넘겨받은 사람의
+        # PAT 를 'owner' 로만 부르므로, 러너가 요청자를 넘겼으면 그것은 요청자 자격이다.
+        credential = str(result.get("credential") or job.get("credential") or "service")
+        if credential == "owner" and job.get("credential") == "requester":
+            credential = "requester"
         quality = _quality(
             panel, attribution, extracted,
-            # 실제로 어느 자격으로 돌았는지는 엔진이 안다 — 잡의 사전 판정은 폴백값이다.
-            credential=str(result.get("credential") or job.get("credential") or "service"),
+            credential=credential,
             call_path=str(result.get("call_path") or "portal"),
             new_clusters=new_clusters,
             llm_calls=llm_calls,

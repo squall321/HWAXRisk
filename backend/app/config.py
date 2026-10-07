@@ -47,6 +47,7 @@ _DEFAULT_MCAD_DOMAINS = "mech,cam,xd,disp,sh"
 # 박스는 전부 이 값으로 돈다. 20석 안팎 패널이 공유 LLM 에 줄을 서면 패널 하나가 몇 시간을 가므로, 진행 중인 것을
 # 자르지 않을 만큼 크게 잡고 안쪽 한도가 바깥보다 작게 둔다. 한쪽만 바꾸면 순서가 뒤집히니 이웃을 같이 본다.
 #   누적 시간 — LLM 논리 호출 1회(엔진 2×DELIB_TIMEOUT_S+8 = 3608, 요청 상한이면 28808) < 패널 벽시계
+#               < 자격 여유(벽시계 + 429 대기 + 600) < PAT 등록 하한(routes.PAT_MIN_REMAINING_S 86400)
 #   줄 사이 침묵 — 엔진 ping 15 < 포털 릴레이 AGENT_STREAM_IDLE_TIMEOUT_S(46800)
 #               < nginx NGINX_AGENT_READ_TIMEOUT(50400) < 이 앱의 읽기 한도(아래 54000)
 # 패널 1건의 벽시계(HWAXRISK_PANEL_TIMEOUT_S, 0 = 끔). 앱이 SSE 스트림에서 잰다 — 엔진에는 패널 전체를 재는 손잡이가
@@ -58,6 +59,12 @@ DEFAULT_PANEL_TIMEOUT_S = 43200
 # 살아 있는 심의에서는 걸리지 않는 마지막 그물이다. 침묵 한도 셋 중 가장 바깥이라 포털·nginx 보다 커야 안쪽의
 # 구체적인 문구가 먼저 온다.
 DEFAULT_ENGINE_READ_TIMEOUT_S = 54000
+# 자격 여유를 셈할 때 429(포털 동시 실행 자리 없음) 대기 몫으로 잡는 시간. 러너가 실제로 기다리는 것은 지금
+# 30초 × 10회 = 300초(runner.ENGINE_BUSY_*)이고, 이 몫은 그 대기를 1시간 예산으로 늘릴 때도 여유가 모자라지
+# 않게 미리 잡은 값이다 — 대기를 그보다 길게 하려면 이 값을 같이 올린다.
+ENGINE_BUSY_ALLOWANCE_S = 3600
+# 자격 여유에 얹는 고정 여분(대화 생성·마지막 저장).
+CREDENTIAL_SLACK_S = 600
 
 
 def resolve_data_dir(env: Mapping[str, str] | None = None) -> Path:
@@ -122,6 +129,8 @@ class Settings:
     risk_pat_revocation_poll_s: int
     risk_panel_timeout_s: int
     risk_engine_read_timeout_s: int
+    # 0 이면 벽시계에서 유도한다(credential_margin_s).
+    risk_credential_margin_s: int
     adh_team: str | None
     adh_group: str | None
     app_id: str = APP_ID
@@ -191,6 +200,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         risk_pat_revocation_poll_s=int(env.get("HWAXRISK_PAT_REVOCATION_POLL_S", "60")),
         risk_panel_timeout_s=int(env.get("HWAXRISK_PANEL_TIMEOUT_S", str(DEFAULT_PANEL_TIMEOUT_S))),
         risk_engine_read_timeout_s=int(env.get("HWAXRISK_ENGINE_READ_TIMEOUT_S", str(DEFAULT_ENGINE_READ_TIMEOUT_S))),
+        risk_credential_margin_s=int(env.get("HWAXRISK_CREDENTIAL_MARGIN_S", "0")),
         adh_team=env.get("HWAXRISK_ADH_TEAM") or None,
         adh_group=env.get("HWAXRISK_ADH_GROUP") or None,
     )
@@ -200,6 +210,21 @@ def panel_timeout_s(cfg: object | None = None) -> int:
     """패널 벽시계(초). 0 이면 끈 것이다 — 그때 패널을 끊는 것은 줄 사이 침묵 한도뿐이다."""
     cfg = settings if cfg is None else cfg
     return max(0, int(getattr(cfg, "risk_panel_timeout_s", DEFAULT_PANEL_TIMEOUT_S)))
+
+
+def credential_margin_s(cfg: object | None = None) -> int:
+    """사용자 포털 PAT 로 패널을 시작하려면 남아 있어야 하는 수명(초).
+
+    규칙 — 남은 수명이 (패널 벽시계 + 429 대기 + 600초)를 넘을 때만 그 PAT 로 패널을 시작한다. 자격은 누적
+    시간 한도라 감싸는 실행보다 길어야 하는데, 종전 값은 1800초 고정이라 벽시계 2400초보다 작았다(뒤집혀
+    있었다). 벽시계를 끈 박스(0)에서는 기본 벽시계로 셈한다 — 끝없는 실행을 감쌀 여유는 없다.
+    `HWAXRISK_CREDENTIAL_MARGIN_S` 로 덮어쓸 수 있고, PAT 등록 하한보다 작은지는 기동 때 본다(main._lifespan).
+    """
+    cfg = settings if cfg is None else cfg
+    override = int(getattr(cfg, "risk_credential_margin_s", 0) or 0)
+    if override > 0:
+        return override
+    return (panel_timeout_s(cfg) or DEFAULT_PANEL_TIMEOUT_S) + ENGINE_BUSY_ALLOWANCE_S + CREDENTIAL_SLACK_S
 
 
 def load_secrets(data_dir: Path) -> dict[str, str]:

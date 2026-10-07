@@ -227,6 +227,15 @@ def test_resolve_credential_prefers_owner_then_service(risk_store, tmp_path):
     # 만료가 코앞이면 (b) 를 쓰지 않는다.
     risk_store.upsert_credential(OWNER, _enc("pat"), "sub-1", "u@x", "[]", now_epoch() + 60)
     assert runner.resolve_credential(risk_store, cfg, OWNER) is None
+    # 패널을 감싸지 못하는 수명도 쓰지 않는다 — 여유는 패널 벽시계 + 대기 + 600초다(종전 1800초 고정은
+    # 벽시계보다 작아, 패널 도중에 만료될 토큰으로도 시작했다).
+    margin = config.credential_margin_s(cfg)
+    assert margin == 43200 + 3600 + 600
+    risk_store.upsert_credential(OWNER, _enc("pat"), "sub-1", "u@x", "[]", now_epoch() + margin - 60)
+    assert runner.resolve_credential(risk_store, cfg, OWNER) is None
+    risk_store.upsert_credential(OWNER, _enc("pat"), "sub-1", "u@x", "[]", now_epoch() + margin + 60)
+    assert runner.resolve_credential(risk_store, cfg, OWNER) == {"kind": "owner", "email": "u@x"}
+    risk_store.upsert_credential(OWNER, _enc("pat"), "sub-1", "u@x", "[]", now_epoch() + 60)
 
     secrets = tmp_path / "secrets.env"
     secrets.write_text("HWAXRISK_PORTAL_PAT=svc-pat\n", encoding="utf-8")
@@ -254,6 +263,91 @@ def test_resolve_credential_tries_the_requester_before_the_target_owner(risk_sto
     # 요청자 자격이 만료되면 타깃 owner 로 내려간다.
     risk_store.upsert_credential(peer, _enc("pat-peer"), "sub-2", peer, "[]", now_epoch() + 60)
     assert runner.resolve_credential(risk_store, cfg, OWNER, peer) == {"kind": "owner", "email": "u@x"}
+
+
+def test_a_pat_too_short_for_a_panel_is_passed_over_with_a_reason(risk_store, tmp_path):
+    """수명이 모자란 사용자 PAT 는 건너뛰되 까닭을 남긴다 — 손잡이와 필요한 수명, 무엇을 하면 되는지.
+
+    종전에는 말없이 다음 자격으로 내려갔다. 잡은 서비스 계정 시야로 도는데 만든 사람은 그 사실도 까닭도 몰랐다.
+    """
+    target_key = seeded(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    peer = "peer@x"
+    hour = 3600
+
+    def register(email: str, hours: float) -> None:
+        risk_store.upsert_credential(email, _enc(f"pat-{email}"), "sub", email, "[]", now_epoch() + int(hours * hour))
+
+    # 쓸 수 있는 PAT 로 돌면 남길 사유가 없다.
+    register(OWNER, 24)
+    assert runner.resolve_credential_with_note(risk_store, cfg, OWNER) == ({"kind": "owner", "email": OWNER}, None)
+
+    # 등록은 됐는데 수명이 모자라고 다른 자격도 없다 — 패널을 시작하지 않고, 무엇이 모자란지 말한다.
+    register(OWNER, 6)
+    credential, note = runner.resolve_credential_with_note(risk_store, cfg, OWNER)
+    assert credential is None
+    assert note == ("u@x 의 PAT 남은 수명 6.0시간이 필요 13.2시간(HWAXRISK_CREDENTIAL_MARGIN_S = 패널 벽시계 + 대기"
+                    " + 600초)에 못 미쳐 쓸 자격이 없어 패널을 시작하지 않는다 — 포털에서 PAT 를 다시 발급해 등록하라")
+    with pytest.raises(AppError) as exc:
+        runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)
+    assert (exc.value.code, exc.value.http_status, exc.value.message) == ("pat_unavailable", 422, note)
+
+    # 요청자 PAT 가 모자라면 타깃 소유자의 것으로 내려가고, 만든 사람이 그 자리에서 안다.
+    register(OWNER, 24)
+    register(peer, 6)
+    credential, note = runner.resolve_credential_with_note(risk_store, cfg, OWNER, peer)
+    assert credential == {"kind": "owner", "email": OWNER}
+    assert note.startswith("peer@x 의 PAT 남은 수명 6.0시간이") and "타깃 소유자의 PAT 로 돈다" in note
+    out = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg, requester_sub=peer)
+    assert (out["credential"], out["credential_note"]) == ("owner", note)
+
+    # 집을 때마다 다시 판정하고 사유를 잡 행에 남긴다 — 둘 다 모자라면 서비스 계정이다.
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("HWAXRISK_PORTAL_PAT=svc-pat\n", encoding="utf-8")
+    secrets.chmod(0o600)
+    register(OWNER, 6)
+    job = runner.claim_next_job(risk_store, cfg)
+    row = risk_store.query_one("SELECT state, credential_email, error FROM rr_jobs WHERE id = ?", (out["job_id"],))
+    assert (job["credential"], row["state"], row["credential_email"]) == ("service", "running", "service")
+    assert row["error"].startswith("peer@x 의 PAT 남은 수명 6.0시간이") and "서비스 계정으로 돈다" in row["error"]
+
+    # 서비스 PAT 마저 없으면 잡은 서 있고, 그 까닭이 pat_unavailable 뒤에 붙는다.
+    secrets.unlink()
+    assert runner.claim_next_job(risk_store, cfg) is None
+    row = risk_store.query_one("SELECT state, error FROM rr_jobs WHERE id = ?", (out["job_id"],))
+    assert row["state"] == "running" and row["error"].startswith("pat_unavailable: peer@x 의 PAT 남은 수명")
+    # PAT 를 다시 등록하면 다음 편성에서 그 자격으로 돌고 지난 사유는 지워진다.
+    register(peer, 24)
+    assert runner.claim_next_job(risk_store, cfg)["credential"] == "requester"
+    assert risk_store.query_one("SELECT error FROM rr_jobs WHERE id = ?", (out["job_id"],))["error"] is None
+
+
+def test_the_engine_is_given_the_person_the_job_was_claimed_for(risk_store, tmp_path):
+    """잡이 요청자 자격으로 집혔으면 엔진에 요청자를 넘기고, 패널에도 요청자 자격으로 적는다.
+
+    러너는 늘 타깃 owner 를 넘겼다 — 잡 행은 '요청자 자격' 이라 적는데 엔진은 owner(없으면 서비스) PAT 로 돌았다.
+    """
+    target_key = seeded(risk_store)
+    peer = "peer@x"
+    risk_store.upsert_credential(peer, _enc("pat-peer"), "sub-2", peer, "[]", now_epoch() + 30 * 86400)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg, requester_sub=peer)
+    job = runner.claim_next_job(risk_store, cfg)
+    assert job["credential"] == "requester"
+
+    class UserPatEngine(FakePanelEngine):
+        def run(self, delib_opts, *, owner_sub=None):
+            # 실 엔진 클라이언트는 넘겨받은 사람의 PAT 를 'owner' 로만 부른다.
+            return {**super().run(delib_opts, owner_sub=owner_sub), "credential": "owner"}
+
+    recorder: dict = {}
+    engine = UserPatEngine()
+    out = runner.run_panel(risk_store, cfg, engine, job,
+                           narrative_mod=fake_narrative(recorder), registry_mod=fake_registry(recorder))
+    assert out["status"] == "done" and engine.owner_subs == [peer]
+    quality = json.loads(risk_store.query_one(
+        "SELECT quality_json FROM rr_panels WHERE id = ?", (out["panel_id"],))["quality_json"])
+    assert quality["credential"] == "requester"
 
 
 def test_create_job_records_the_credential_email(risk_store, tmp_path):
