@@ -1131,6 +1131,10 @@ class SnapshotBody(BaseModel):
     allow_large: bool = False
 
 
+# 스냅샷 캡처의 시간 예산(초) — 잡 행(budget_s)에 적는 기대치이지 상한이 아니다. 캡처는 이 값에서 끊기지 않는다
+# (risk_snapshot_budget_s 180 도 같다). 집행하면 지금 완주하는 큰 캡처가 잘린다 — 실제로 걸리는 것은 소스 호출
+# 1건의 침묵 한도(HWAXRISK_SOURCE_CALL_TIMEOUT_S)와 프록시의 요청 한도(nginx /apps/ 600 s)다. 그래서 초과 안내
+# 문구에 '예산 600 s' 를 적지 않는다 — 600초에 끊긴다고 읽혔다.
 LARGE_BUDGET_S = 600
 
 
@@ -1151,7 +1155,7 @@ def _check_model_size(captured: dict, allow_large: bool) -> None:
     raise AppError(
         "model_too_large",
         f"모델이 상한을 넘습니다 — 리프 {leaves}/{max_leaf} · 계면 {interfaces}/{max_iface}."
-        " 그래도 동결하려면 allow_large=true 로 다시 보내세요(예산 600 s).",
+        " 그래도 동결하려면 allow_large=true 로 다시 보내세요.",
         409,
         detail={"leaf": leaves, "interfaces": interfaces, "max_leaf": max_leaf,
                 "max_interfaces": max_iface, "budget_s": LARGE_BUDGET_S},

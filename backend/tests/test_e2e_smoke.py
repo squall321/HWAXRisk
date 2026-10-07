@@ -719,6 +719,9 @@ def test_snapshot_job_records_its_state_and_guards_the_model_size(wired, ident, 
     with pytest.raises(AppError) as exc:
         routes.create_snapshot(project_id, routes.SnapshotBody(label="DV2"), ident=ident)
     assert (exc.value.code, exc.value.http_status) == ("model_too_large", 409)
+    # 시간 예산은 집행하지 않으므로 문구에 적지 않는다 — '예산 600 s' 는 600초에 끊긴다고 읽혔다.
+    assert "allow_large=true" in exc.value.message and "예산" not in exc.value.message
+    assert exc.value.detail["budget_s"] == routes.LARGE_BUDGET_S
     failed = store.query_one(
         "SELECT id, state, snapshot_id, error_json FROM rr_snapshot_jobs WHERE state = 'failed'")
     assert failed is not None and failed["snapshot_id"] is None
