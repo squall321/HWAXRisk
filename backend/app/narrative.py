@@ -1407,8 +1407,9 @@ def prior_evidence(store, target_key: str, *, user_memo: str | None = None,
     """다음 패널의 `delib_opts.evidence` 를 §5.6.1 예산표대로 조립한다(항목 본체는 `brief.build_brief`).
 
     E0c(좌석 계약)는 `runner.build_delib_opts` 가 다시 끼우므로 여기서는 빼고 돌려준다 — 같은 조립 결과를
-    웹 러너는 delib_opts 로, MCP L2 는 `risk_get_brief` 응답으로 받는다(§5.6). user_memo 는 브리프가
-    rr_jobs 에서 이미 싣지만, 잡 밖에서 부른 경우를 위해 없으면 마지막 슬롯에 붙인다.
+    웹 러너는 delib_opts 로, MCP L2 는 `risk_get_brief` 응답으로 받는다(§5.6). user_memo(지금 도는 잡의
+    메모)는 브리프에 그대로 넘겨 M 으로 싣는다 — 브리프가 rr_jobs 에서 찾게 두면 그 타깃의 최근 잡 메모가
+    실린다. M 이 빠진 채 돌아온 경우(제외)에만 마지막 슬롯에 붙인다.
     """
     from app import brief as brief_module  # noqa: PLC0415 — 순환 import 회피(brief 는 narrative 를 쓴다).
 
@@ -1419,7 +1420,8 @@ def prior_evidence(store, target_key: str, *, user_memo: str | None = None,
     field = field_source.for_target(store, target_key)
     try:
         built = brief_module.build_brief(store, target_key, seats=seats, panel_id=panel_id,
-                                        exclude=tuple(exclude), field=field, strict_lint=True)
+                                        exclude=tuple(exclude), field=field, strict_lint=True,
+                                        user_memo=user_memo)
     finally:
         # 채널은 자기 httpx.Client 를 소유한다 — 닫지 않으면 브리프 조립마다 소켓이 샌다.
         if field is not None:

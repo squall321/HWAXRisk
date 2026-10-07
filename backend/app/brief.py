@@ -1147,14 +1147,19 @@ def _item_e9(ctx) -> dict:
 
 
 # ---------------------------------------------------------------- M 사용자 메모
-def _item_memo(store, target_key: str) -> dict | None:
-    row = store.query_one(
-        "SELECT params_json FROM rr_jobs WHERE target_key = ? ORDER BY created_at DESC, id DESC LIMIT 1",
-        (target_key,),
-    )
-    if row is None:
-        return None
-    memo = _j(row["params_json"], {}).get("user_memo")
+def _item_memo(store, target_key: str, user_memo: str | None = None) -> dict | None:
+    """M — `user_memo` 는 지금 도는 잡의 메모다(러너가 넘긴다). 없으면 그 타깃의 가장 최근 잡 메모를 읽는다.
+
+    조회는 잡이 없는 미리보기·MCP 경로를 위한 것이다. 러너 경로까지 조회에 맡기면 한 타깃에 잡이 둘일 때
+    앞 잡의 패널이 뒤 잡의 메모를 받고 제 메모는 말없이 사라진다.
+    """
+    memo = user_memo
+    if not memo:
+        row = store.query_one(
+            "SELECT params_json FROM rr_jobs WHERE target_key = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+            (target_key,),
+        )
+        memo = _j(row["params_json"], {}).get("user_memo") if row is not None else None
     if not memo:
         return None
     return {"key": "M", "args": target_key, "result": _body("user_memo", [_q(memo, "memo")])}
@@ -1226,11 +1231,13 @@ def _seats_of_panel(store, target_key: str, panel_id: str | None) -> list[dict]:
 
 def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | None = None,
                 panel_id: str | None = None, exclude: Sequence[str] = (), owner_sub: str | None = None,
-                adh=None, ra=None, field=None, strict_lint: bool = False) -> dict:
+                adh=None, ra=None, field=None, strict_lint: bool = False,
+                user_memo: str | None = None) -> dict:
     """타깃·패널을 받아 E0~E9 를 delib_opts.evidence 형식으로 조립한다(plan §5.6.2, 결정론).
 
     항목마다 라인 길이를 CAP 안으로 먼저 강제하므로 엔진 예산 11000 에서 드롭이 0 이다.
     `exclude` 는 항목 키(E6·E8 …)의 제외만 받는다 — 추가·편집은 없다(§5.7 RecallPreview).
+    `user_memo` 는 지금 도는 잡의 메모다 — 안 주면 M 은 그 타깃의 최근 잡 메모를 읽는다(`_item_memo`).
     """
     ctx = _target_context(store, target_key)
     if owner_sub is None:
@@ -1257,7 +1264,7 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
             _item_e8(store, ctx),
             _item_e9(ctx),
         ]
-        memo = _item_memo(store, target_key)
+        memo = _item_memo(store, target_key, user_memo)
         if memo is not None:
             raw.append(memo)
     finally:

@@ -337,6 +337,29 @@ def test_exclude_removes_items_only(risk_store):
     assert kept["E5"] == dict(zip(full["keys"], full["evidence"]))["E5"]
 
 
+# ---------------------------------------------------------------- M 사용자 메모(§5.6.1)
+def test_the_running_jobs_memo_is_carried_not_the_latest_jobs(risk_store):
+    """러너가 넘긴 메모(지금 도는 잡의 것)가 M 에 실린다 — 종전에는 그 타깃의 가장 최근 잡 메모를 읽었다.
+
+    한 타깃에 잡이 둘 걸려 있으면(앞 잡이 도는 중에 뒤 잡을 만들면) 앞 잡의 패널이 뒤 잡의 메모를 받았고
+    제 메모는 말없이 사라졌다.
+    """
+    target_key = seed_diff_target(risk_store)            # j1(created_at 880) 메모 '이 계면을 먼저 보라'
+    risk_store.execute(
+        "INSERT INTO rr_jobs(id, target_key, owner_sub, tier, state, params_json, created_at, updated_at)"
+        " VALUES (?,?,?,?,?,?,?,?)",
+        ("j2", target_key, OWNER, "C", "queued", _j({"user_memo": "뒤에 만든 잡의 메모"}), 890, 890))
+
+    items = narrative.prior_evidence(risk_store, target_key, user_memo="이 계면을 먼저 보라",
+                                     seats=SEATS, panel_id="pan1")
+    memo = [i for i in items if i["source"] == "user_memo"]
+    assert len(memo) == 1 and "이 계면을 먼저 보라" in memo[0]["result"]
+    assert "뒤에 만든 잡의 메모" not in memo[0]["result"]
+    # 잡이 없는 미리보기·MCP 경로는 종전대로 그 타깃의 최근 잡 메모를 읽는다.
+    preview = brief.build_brief(risk_store, target_key)
+    assert "뒤에 만든 잡의 메모" in preview["evidence"][preview["keys"].index("M")]["result"]
+
+
 def test_missing_target_raises_e404(risk_store):
     with pytest.raises(AppError) as exc:
         brief.build_brief(risk_store, "diff:nope")
