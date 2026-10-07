@@ -42,6 +42,23 @@ _DEFAULT_ECAD_DOMAINS = "pcb,pwr,rf,soc,passive,mem"
 # mcad_absent 일 때 대표 1석만 남기고 deferred 로 내리는 도메인(plan §3.2.4).
 _DEFAULT_MCAD_DOMAINS = "mech,cam,xd,disp,sh"
 
+# ---------------------------------------------------------------- 시간 한도의 코드 기본값(초)
+# 넉넉해야 하는 쪽이 코드다 — HEAXHub SIF 는 cleanenv 라 env 가 매니페스트 launch.env 로만 닿고, 거기 적지 않은
+# 박스는 전부 이 값으로 돈다. 20석 안팎 패널이 공유 LLM 에 줄을 서면 패널 하나가 몇 시간을 가므로, 진행 중인 것을
+# 자르지 않을 만큼 크게 잡고 안쪽 한도가 바깥보다 작게 둔다. 한쪽만 바꾸면 순서가 뒤집히니 이웃을 같이 본다.
+#   누적 시간 — LLM 논리 호출 1회(엔진 2×DELIB_TIMEOUT_S+8 = 3608, 요청 상한이면 28808) < 패널 벽시계
+#   줄 사이 침묵 — 엔진 ping 15 < 포털 릴레이 AGENT_STREAM_IDLE_TIMEOUT_S(46800)
+#               < nginx NGINX_AGENT_READ_TIMEOUT(50400) < 이 앱의 읽기 한도(아래 54000)
+# 패널 1건의 벽시계(HWAXRISK_PANEL_TIMEOUT_S, 0 = 끔). 앱이 SSE 스트림에서 잰다 — 엔진에는 패널 전체를 재는 손잡이가
+# 없다. 죽은 스트림은 침묵 한도가 잡으므로 이 값은 끝없이 말하는 스트림만 막으면 된다. 3라운드 패널은 LLM 단계가
+# 직렬로 약 15번 이어져 단계마다 제 한도(1800초) 안에서 성공해도 7.5시간이다 — 그래서 12시간이다. 러너는 호출당
+# timeout_s 를 싣지 않으므로, 엔진 박스의 DELIB_TIMEOUT_S 를 21596초 넘게 올리면(2×T+8 > 43200) 이 값도 올린다.
+DEFAULT_PANEL_TIMEOUT_S = 43200
+# 포털 /agent/chat SSE 의 줄 사이 침묵 한도(HWAXRISK_ENGINE_READ_TIMEOUT_S, 0 = 끔). 엔진이 15초마다 ping 을 흘리므로
+# 살아 있는 심의에서는 걸리지 않는 마지막 그물이다. 침묵 한도 셋 중 가장 바깥이라 포털·nginx 보다 커야 안쪽의
+# 구체적인 문구가 먼저 온다.
+DEFAULT_ENGINE_READ_TIMEOUT_S = 54000
+
 
 def resolve_data_dir(env: Mapping[str, str] | None = None) -> Path:
     """데이터 루트를 정한다 — HWAXRISK_DATA_DIR > HEAX_DATA_DIR(HEAX 러너가 bind 하는 영구 경로) > <리포>/data.
@@ -103,6 +120,8 @@ class Settings:
     risk_brief_token_ttl_s: int
     risk_pat_require_read_only: bool
     risk_pat_revocation_poll_s: int
+    risk_panel_timeout_s: int
+    risk_engine_read_timeout_s: int
     adh_team: str | None
     adh_group: str | None
     app_id: str = APP_ID
@@ -170,9 +189,17 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         risk_brief_token_ttl_s=int(env.get("HWAXRISK_BRIEF_TOKEN_TTL_S", "900")),
         risk_pat_require_read_only=_bool(env.get("HWAXRISK_PAT_REQUIRE_READ_ONLY", ""), True),
         risk_pat_revocation_poll_s=int(env.get("HWAXRISK_PAT_REVOCATION_POLL_S", "60")),
+        risk_panel_timeout_s=int(env.get("HWAXRISK_PANEL_TIMEOUT_S", str(DEFAULT_PANEL_TIMEOUT_S))),
+        risk_engine_read_timeout_s=int(env.get("HWAXRISK_ENGINE_READ_TIMEOUT_S", str(DEFAULT_ENGINE_READ_TIMEOUT_S))),
         adh_team=env.get("HWAXRISK_ADH_TEAM") or None,
         adh_group=env.get("HWAXRISK_ADH_GROUP") or None,
     )
+
+
+def panel_timeout_s(cfg: object | None = None) -> int:
+    """패널 벽시계(초). 0 이면 끈 것이다 — 그때 패널을 끊는 것은 줄 사이 침묵 한도뿐이다."""
+    cfg = settings if cfg is None else cfg
+    return max(0, int(getattr(cfg, "risk_panel_timeout_s", DEFAULT_PANEL_TIMEOUT_S)))
 
 
 def load_secrets(data_dir: Path) -> dict[str, str]:

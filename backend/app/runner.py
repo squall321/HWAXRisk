@@ -35,7 +35,8 @@ QUALITY_ADVERSARY_OVERREJECT = 0.6
 SEAT_CONTRACT_LINE_MAX = 200       # E0c 도메인당 ≤200자
 SEAT_CONTRACT_TOTAL_MAX = 1000     # E0c 합 ≤1000자(plan §5.6.1 예산표)
 USER_MEMO_MAX = 2000
-PANEL_TIMEOUT_S = 2400             # 패널 벽시계 상한 40분(plan §6.10.2) — 엔진 클라이언트가 스트림에서 잰다(delib_opts 에는 안 싣는다)
+# 앱이 스트림을 놓은 사유(EngineStreamLost.code) — 패널 벽시계 · 줄 사이 침묵 · 중간 절단. 엔진·좌석의 실패가 아니다.
+STREAM_LOST_CODES: tuple[str, ...] = ("panel_timeout", "engine_silent", "engine_stream_cut")
 
 # 러너 정본 경로가 부르는 모듈 함수(없으면 잡을 집지 않고 error 로 강등한다 — 반쪽 저장 방지).
 REQUIRED_NARRATIVE = ("prior_evidence", "parse_risk_spec", "persist_panel_result")
@@ -50,7 +51,7 @@ class PanelEngine(Protocol):
       · events = 압축 로그 [{kind: 'status'|'evidence'|'personas'|'turn'|'warning'|'error', step?, tool?, source?, personas?}]
                  (None 이면 좌석 귀속 불가 — tool_calls_ok·used_tool 은 null 로 남는다)
     선택 메서드 health() -> {model, vllm?, engine_rev?, endpoint_host?} 가 있으면 D6 model_json 을 채운다.
-    포털 429 는 EngineBusy, 그 밖의 실패는 EngineError 로 올린다.
+    포털 429 는 EngineBusy, 앱이 스트림을 놓은 것은 EngineStreamLost, 그 밖의 실패는 EngineError 로 올린다.
     """
 
     def run(self, delib_opts: Mapping[str, Any], *, owner_sub: str | None = None) -> Mapping[str, Any]: ...
@@ -62,6 +63,19 @@ class EngineBusy(Exception):
 
 class EngineError(Exception):
     """엔진 호출이 실패했다(연결·타임아웃·error 이벤트). 패널은 error 로 닫힌다."""
+
+
+class EngineStreamLost(EngineError):
+    """앱이 스트림을 놓았다 — 패널 벽시계·줄 사이 침묵·중간 절단(`code` ∈ STREAM_LOST_CODES).
+
+    엔진이 실패한 것이 아니다. 엔진은 심의를 분리 태스크로 돌려 구독이 끊겨도 끝까지 간다. `conv_id` 는
+    그 심의의 포털 대화다(끊긴 뒤의 발언은 거기에만 남는다).
+    """
+
+    def __init__(self, code: str, message: str, *, conv_id: str | None = None) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.conv_id = conv_id
 
 
 class PatUnavailable(Exception):
@@ -361,9 +375,9 @@ def build_delib_opts(
         "voc": "off",
         "evidence": evidence,
         # timeout_s 는 싣지 않는다. 엔진에서 그 값은 패널 벽시계가 아니라 **LLM 호출 한 번**의 타임아웃이고
-        # (10~1800초로 다시 죈다) 포털 스키마는 1800 초과를 422 로 막는다 — 벽시계 40분(2400)을 여기 실어 보내던
-        # 동안 앱 → 포털 길의 패널은 전부 'HTTP 422' 로 닫혔다. 호출당 타임아웃은 박스 설정(DELIB_TIMEOUT_S)의
-        # 몫이고, 벽시계 40분(PANEL_TIMEOUT_S)은 엔진 클라이언트가 스트림에서 잰다.
+        # (엔진이 제 상한으로 다시 죈다) 포털 스키마는 상한 초과를 422 로 막는다 — 그때의 벽시계 40분(2400)을 여기
+        # 실어 보내던 동안(상한은 1800초였다) 앱 → 포털 길의 패널은 전부 'HTTP 422' 로 닫혔다. 호출당 타임아웃은
+        # 박스 설정(DELIB_TIMEOUT_S)의 몫이고, 패널 벽시계(HWAXRISK_PANEL_TIMEOUT_S)는 엔진 클라이언트가 스트림에서 잰다.
         "question": panel_question(store, panel["target_key"]),
     }
 

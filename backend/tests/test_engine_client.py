@@ -7,13 +7,13 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from app import engine_client, identity
+from app import config, engine_client, identity
 
 def _enc(pat: str) -> str:
     """저장 열 portal_pat_enc 는 Fernet 암호문이다(plan §8.2.7) — 픽스처도 같은 형식으로 넣는다."""
     return identity.encrypt_pat(pat).decode("ascii")
 
-from app.runner import EngineBusy, EngineError
+from app.runner import EngineBusy, EngineError, EngineStreamLost
 
 # agent-server 실제 프레임 규약 — `event: <name>\ndata: <json>\n\n`(deliberation.py `_sse`/`_delib`).
 STREAM = (
@@ -30,9 +30,9 @@ STREAM = (
 )
 
 
-def _settings(tmp_path):
+def _settings(tmp_path, **limits):
     return SimpleNamespace(data_dir=tmp_path, portal_base="http://portal.test",
-                           agent_url="http://agent.test")
+                           agent_url="http://agent.test", **limits)
 
 
 class _Store:
@@ -96,9 +96,14 @@ def test_collect_stream_raises_on_error_frame():
         engine_client.collect_stream(engine_client.parse_sse(stream.splitlines()))
 
 
-def _engine(tmp_path, handler, store=None):
-    return engine_client.PortalPanelEngine(store or _Store(), _settings(tmp_path),
+def _engine(tmp_path, handler, store=None, **limits):
+    return engine_client.PortalPanelEngine(store or _Store(), _settings(tmp_path, **limits),
                                            transport=httpx.MockTransport(handler))
+
+
+def _service_pat(tmp_path) -> None:
+    (tmp_path / "secrets.env").write_text("HWAXRISK_PORTAL_PAT=svc-pat\n", encoding="utf-8")
+    (tmp_path / "secrets.env").chmod(0o600)
 
 
 def test_run_posts_deliberation_trigger_and_returns_contract(tmp_path):
@@ -172,16 +177,17 @@ def test_run_maps_429_to_engine_busy_and_connect_error_to_engine_error(tmp_path)
 
 
 def test_run_cuts_a_stream_that_outlives_the_panel_wall_clock(tmp_path):
-    """줄이 계속 와도 패널 벽시계 상한(plan §6.10.2, 40분)을 넘기면 끊는다 — 읽기 타임아웃은 줄 사이 침묵만 잰다.
+    """줄이 계속 와도 패널 벽시계(plan §6.10.2)를 넘기면 끊는다 — 읽기 타임아웃은 줄 사이 침묵만 잰다.
 
     엔진의 `timeout_s` 는 LLM 호출 한 번의 타임아웃이라 패널 전체를 재 주는 쪽이 없다. 앱이 재지 않으면
-    상태 줄만 계속 보내는 심의 하나가 러너 자리를 끝없이 붙든다.
+    상태 줄만 계속 보내는 심의 하나가 러너 자리를 끝없이 붙든다. 벽시계는 12시간이다 — 40분(2400초)이던 동안
+    20석 안팎 패널은 공유 LLM 에 줄만 서다가 잘렸다.
     """
-    from app import common, runner
+    from app import common
 
-    (tmp_path / "secrets.env").write_text("HWAXRISK_PORTAL_PAT=svc-pat\n", encoding="utf-8")
-    (tmp_path / "secrets.env").chmod(0o600)
-    assert engine_client.PANEL_TIMEOUT_S == runner.PANEL_TIMEOUT_S == 2400
+    _service_pat(tmp_path)
+    wall_s = config.panel_timeout_s(_settings(tmp_path))
+    assert wall_s == config.DEFAULT_PANEL_TIMEOUT_S == 43200
     now = {"t": common.now_epoch()}
     sent: list[str] = []
 
@@ -204,16 +210,135 @@ def test_run_cuts_a_stream_that_outlives_the_panel_wall_clock(tmp_path):
 
     previous = common.set_clock(lambda: now["t"])
     try:
-        # 상한 안에서 끝난 스트림은 그대로 받는다(경계값 포함).
-        inside = _engine(tmp_path, handler_for(engine_client.PANEL_TIMEOUT_S)).run({"question": "q"})
+        # 상한 안에서 끝난 스트림은 그대로 받는다(경계값 포함) — 종전 상한 2400초를 한참 넘긴 것도 받는다.
+        inside = _engine(tmp_path, handler_for(wall_s)).run({"question": "q"})
         assert inside["decision_text"] == "결정문"
         sent.clear()
-        with pytest.raises(EngineError, match="panel_timeout"):
-            _engine(tmp_path, handler_for(engine_client.PANEL_TIMEOUT_S + 1)).run({"question": "q"})
+        with pytest.raises(EngineStreamLost) as lost:
+            _engine(tmp_path, handler_for(wall_s + 1)).run({"question": "q"})
+        # 상한을 넘긴 뒤의 줄은 읽지 않는다 — 끝까지 받고 나서 버리는 것이 아니다.
+        assert sent == ["late"]
+        # 문구가 값·손잡이·경과·마지막 단계와, 엔진에서 계속 돌 수 있는 그 심의의 대화를 말한다.
+        assert lost.value.code == "panel_timeout" and lost.value.conv_id == "c"
+        assert str(lost.value) == (
+            "panel_timeout: 패널이 43200초(HWAXRISK_PANEL_TIMEOUT_S)를 넘겼다 — 경과 43201초, 마지막 단계 시작."
+            " 엔진 쪽 심의는 계속 돌 수 있다(conv_id=c)")
+
+        # 손잡이를 내리면 그 값에서 끊고, 0 이면 재지 않는다.
+        with pytest.raises(EngineStreamLost, match=r"패널이 100초\(HWAXRISK_PANEL_TIMEOUT_S\)"):
+            _engine(tmp_path, handler_for(101), risk_panel_timeout_s=100).run({"question": "q"})
+        unbounded = _engine(tmp_path, handler_for(30 * 86400), risk_panel_timeout_s=0).run({"question": "q"})
+        assert unbounded["decision_text"] == "결정문"
     finally:
         common.set_clock(previous)
-    # 상한을 넘긴 뒤의 줄은 읽지 않는다 — 끝까지 받고 나서 버리는 것이 아니다.
-    assert sent == ["late"]
+
+
+def test_stream_timeouts_are_a_liveness_net_not_a_per_call_guess(tmp_path):
+    """스트림의 읽기 한도는 줄 사이 침묵 15시간이고 쓰기·풀은 그것을 물려받지 않는다.
+
+    종전 값은 '엔진 호출당 타임아웃 1800 + 60' = 1860초였다 — LLM 시도 한 번만 가정한 값이라 엔진이 재시도하거나
+    박스 한도를 올리면 건강한 패널을 끊었다. 침묵 한도 셋(포털 46800 < nginx 50400 < 여기) 중 가장 바깥이다.
+    """
+    _service_pat(tmp_path)
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen[request.url.path] = dict(request.extensions["timeout"])
+        if request.url.path == "/agent/conversations":
+            return httpx.Response(200, json={"id": "c"})
+        return httpx.Response(200, text=STREAM, headers={"content-type": "text/event-stream"})
+
+    # 본문에 호출당 timeout_s 가 실려 와도 읽기 한도를 거기서 유도하지 않는다.
+    _engine(tmp_path, handler).run({"question": "q", "timeout_s": 600})
+    assert seen["/agent/chat"] == {"connect": 10.0, "read": 54000.0, "write": 30.0, "pool": 30.0}
+    _engine(tmp_path, handler, risk_engine_read_timeout_s=7200).run({"question": "q"})
+    assert seen["/agent/chat"]["read"] == 7200.0
+    _engine(tmp_path, handler, risk_engine_read_timeout_s=0).run({"question": "q"})
+    assert seen["/agent/chat"]["read"] is None                     # 0 = 끔
+
+
+def test_a_lost_stream_is_told_apart_from_an_engine_failure(tmp_path):
+    """앱이 스트림을 놓은 것(침묵·중간 절단)은 `EngineStreamLost` 로 가르고, 손잡이와 원인을 말한다.
+
+    종전에는 전부 '포털 /agent/chat 호출 실패(ReadTimeout)' 한 줄이었다 — 값도 손잡이도 없고, 엔진이 그 심의를
+    계속 돌리는 경우와 연결조차 못 한 경우가 같은 말이었다.
+    """
+    _service_pat(tmp_path)
+
+    def chat(body):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/agent/conversations":
+                return httpx.Response(200, json={"id": "conv-9"})
+            return httpx.Response(200, content=body(request), headers={"content-type": "text/event-stream"})
+        return handler
+
+    def silent(request):
+        yield 'event: status\ndata: {"step": "1라운드"}\n\n'.encode()
+        raise httpx.ReadTimeout("idle", request=request)
+
+    with pytest.raises(EngineStreamLost) as lost:
+        _engine(tmp_path, chat(silent)).run({"question": "q"})
+    assert lost.value.code == "engine_silent" and lost.value.conv_id == "conv-9"
+    assert "포털 스트림이 54000초 동안 조용했다(HWAXRISK_ENGINE_READ_TIMEOUT_S)" in str(lost.value)
+    assert "마지막 단계 1라운드" in str(lost.value) and "conv_id=conv-9" in str(lost.value)
+
+    def cut(request):
+        yield 'event: status\ndata: {"step": "2라운드"}\n\n'.encode()
+        raise httpx.RemoteProtocolError("peer closed connection", request=request)
+
+    with pytest.raises(EngineStreamLost) as lost:
+        _engine(tmp_path, chat(cut)).run({"question": "q"})
+    assert lost.value.code == "engine_stream_cut"
+    assert "NGINX_AGENT_READ_TIMEOUT 또는 포털·에이전트 서버 재기동" in str(lost.value)
+
+    # 포털 릴레이가 제 침묵 한도로 구독을 끊으며 보내는 error 프레임도 같은 사정이다(엔진 실패가 아니다).
+    idle = ('event: error\ndata: {"code": "agent_stream_idle", "message": "에이전트 서버가 46800초 동안 조용했다"}\n\n'
+            "event: done\ndata: {}\n\n")
+    with pytest.raises(EngineStreamLost) as lost:
+        _engine(tmp_path, chat(lambda request: idle.encode())).run({"question": "q"})
+    assert lost.value.code == "engine_silent" and "agent_stream_idle: 에이전트 서버가 46800초" in str(lost.value)
+
+    # 응답이 흐르기 전의 실패는 엔진까지 가지 못한 것이다 — 놓친 스트림이 아니라 엔진 호출 실패다.
+    def refused(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/agent/conversations":
+            return httpx.Response(200, json={"id": "c"})
+        raise httpx.RemoteProtocolError("Server disconnected without sending a response", request=request)
+
+    with pytest.raises(EngineError) as failed:
+        _engine(tmp_path, refused).run({"question": "q"})
+    assert not isinstance(failed.value, EngineStreamLost)
+    # 엔진이 알린 다른 error 프레임도 그대로 엔진 실패다.
+    other = 'event: error\ndata: {"code": "gateway_unavailable", "message": "게이트웨이 불통"}\n\n'
+    with pytest.raises(EngineError) as failed:
+        _engine(tmp_path, chat(lambda request: other.encode())).run({"question": "q"})
+    assert not isinstance(failed.value, EngineStreamLost)
+
+
+PING = 'event: ping\ndata: {"idle_s": 15, "ts": 1}\n\n'
+
+
+def test_heartbeat_pings_do_not_change_the_result(tmp_path):
+    """엔진이 15초마다 흘리는 `event: ping` 이 섞여도 결과는 같다 — events[] 400칸을 먹지 않는다.
+
+    침묵 한도 셋이 살아 있는 심의를 끊지 않는 것은 이 ping 덕이다. 이름이 status 였다면 12시간 패널의 ping
+    2,880개가 events[] 를 채워 좌석 귀속에 쓸 진짜 이벤트가 밀려났다.
+    """
+    frames = STREAM.split("\n\n")
+    with_pings = PING + "".join(f"{frame}\n\n{PING * 3}" for frame in frames if frame)
+    plain = engine_client.collect_stream(engine_client.parse_sse(STREAM.splitlines()))
+    assert engine_client.collect_stream(engine_client.parse_sse(with_pings.splitlines())) == plain
+    flood = PING * (engine_client.EVENTS_MAX + 10) + STREAM
+    assert engine_client.collect_stream(engine_client.parse_sse(flood.splitlines())) == plain
+
+    _service_pat(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/agent/conversations":
+            return httpx.Response(200, json={"id": "c"})
+        return httpx.Response(200, text=flood, headers={"content-type": "text/event-stream"})
+
+    result = _engine(tmp_path, handler).run({"question": "q"})
+    assert {k: result[k] for k in plain} == plain
 
 
 def test_health_reads_agent_server(tmp_path):

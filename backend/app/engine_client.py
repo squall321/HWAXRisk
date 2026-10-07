@@ -13,7 +13,7 @@ from app import config, identity
 from app.common import now_epoch
 
 # 프로토콜·예외의 정본은 러너다(러너가 이 모듈을 import 하지 않으므로 순환이 없다).
-from app.runner import CREDENTIAL_MARGIN_S, PANEL_TIMEOUT_S, EngineBusy, EngineError, PanelEngine, PatUnavailable
+from app.runner import CREDENTIAL_MARGIN_S, EngineBusy, EngineError, EngineStreamLost, PanelEngine, PatUnavailable
 
 log = logging.getLogger("hwax_risk.engine")
 
@@ -31,11 +31,13 @@ CONVERSATION_KIND = "deliberation"
 CONVERSATION_SOURCE = "web"
 CONVERSATION_TITLE_MAX = 200
 
-CONNECT_TIMEOUT_S = 10.0
+CONNECT_TIMEOUT_S = 10.0               # 죽은 포털 감지 — 짧게 둔다
 CONV_TIMEOUT_S = 5.0
 HEALTH_TIMEOUT_S = 2.0
-DEFAULT_ENGINE_TIMEOUT_S = 1800.0      # timeout_s 가 없을 때(러너는 싣지 않는다) 가정하는 호출당 타임아웃 — 엔진이 받는 최대값
-STREAM_MARGIN_S = 60.0                 # 읽기 타임아웃 = timeout_s + 60(plan §6.7.2 6단계)
+# 스트림의 쓰기·풀 대기. 읽기(줄 사이 침묵) 한도를 물려받지 않는다 — 그 값은 15시간이라, 물려주면 본문 송신이
+# 막힌 것도 15시간을 기다린다. 읽기 한도는 설정이다(config.DEFAULT_ENGINE_READ_TIMEOUT_S).
+WRITE_TIMEOUT_S = 30.0
+POOL_TIMEOUT_S = 30.0
 DEFAULT_AGENT_URL = "http://127.0.0.1:9009"
 
 SAY_MAX = 2000                         # seat_opinion.turns[].say_excerpt 상한(plan §6.7.2 7단계)
@@ -43,6 +45,9 @@ EVENTS_MAX = 400                       # events[] 상한(plan §8.2.3 POST /pane
 FIELD_MAX = 200                        # events[] 문자열 필드 상한
 # 자격 강등 경고 — 계획 문구(_pat_degraded)와 agent-server 실제 코드(credential_degraded) 둘 다 받는다.
 PAT_DEGRADED_CODES = ("_pat_degraded", "credential_degraded")
+# 포털 릴레이가 에이전트 서버의 침묵 한도(AGENT_STREAM_IDLE_TIMEOUT_S)로 구독을 끊으며 보내는 error 코드.
+# 침묵 한도 셋 중 가장 안쪽이라 이것이 먼저 온다 — 앱이 재는 침묵과 같은 사정이다(엔진은 계속 돌 수 있다).
+PORTAL_STREAM_IDLE_CODE = "agent_stream_idle"
 
 
 # PatUnavailable 의 정본도 러너다 — 자격 (a)(b) 부재와 포털 401/403 이 같은 처리로 모인다(plan §6.7.1 폴백 규칙).
@@ -84,18 +89,47 @@ def _cut(value: Any, limit: int = FIELD_MAX) -> str | None:
     return str(value)[:limit]
 
 
-def _within_wall_clock(lines: Iterable[str], deadline: int) -> Iterator[str]:
-    """줄이 올 때마다 벽시계를 본다 — `deadline`(epoch 초)을 넘겼으면 `EngineError` 로 끊는다(plan §6.10.2).
+class _StreamWatch:
+    """스트림 한 건이 어디까지 왔나 — 끊을 때 경과·마지막 단계·conv_id 를 말한다."""
+
+    def __init__(self, conv_id: str | None) -> None:
+        self.conv_id = conv_id
+        self.started = now_epoch()
+        self.last_step = ""
+
+    def frame(self, name: str, data: Mapping[str, Any]) -> None:
+        if name == "status" and data.get("step"):
+            self.last_step = str(data["step"])[:FIELD_MAX]
+
+    def lost(self, code: str, message: str) -> EngineStreamLost:
+        """앱이 스트림을 놓았다는 예외 — 어느 사유든 '엔진은 계속 돌 수 있다' 와 그 심의의 대화를 같이 말한다."""
+        return EngineStreamLost(
+            code, f"{message} — 경과 {now_epoch() - self.started}초, 마지막 단계 {self.last_step or '없음'}."
+                  f" 엔진 쪽 심의는 계속 돌 수 있다(conv_id={self.conv_id or '없음'})", conv_id=self.conv_id)
+
+
+def _within_wall_clock(lines: Iterable[str], wall_s: int, watch: _StreamWatch) -> Iterator[str]:
+    """줄이 올 때마다 벽시계를 본다 — 시작에서 `wall_s` 초를 넘겼으면 `EngineStreamLost` 로 끊는다(plan §6.10.2).
 
     읽기 타임아웃은 줄 사이 침묵만 잰다. 엔진이 상태 줄을 계속 보내는 한 걸리지 않아서, 벽시계를 따로 재지
     않으면 패널 하나가 러너 자리와 그 타깃의 직렬 순서를 끝없이 붙든다. 엔진에는 패널 전체를 재는 손잡이가
     없다(`timeout_s` 는 LLM 호출 한 번의 타임아웃이다) — 그래서 앱이 잰다. 줄이 오지 않는 동안은 볼 수 없다.
-    그 구간은 읽기 타임아웃이 끊는다.
+    그 구간은 읽기 타임아웃이 끊는다(엔진이 15초마다 ping 을 흘리므로 살아 있는 스트림은 15초마다 본다).
+    `wall_s` 가 0 이면 재지 않는다.
     """
     for line in lines:
-        if now_epoch() > deadline:
-            raise EngineError(f"panel_timeout: 패널 벽시계 상한 {PANEL_TIMEOUT_S}초를 넘겼습니다")
+        if wall_s and now_epoch() > watch.started + wall_s:
+            raise watch.lost("panel_timeout", f"패널이 {wall_s}초(HWAXRISK_PANEL_TIMEOUT_S)를 넘겼다")
         yield line
+
+
+def _watched(frames: Iterable[tuple[str, dict]], watch: _StreamWatch) -> Iterator[tuple[str, dict]]:
+    """프레임마다 마지막 단계를 적는다. 포털이 침묵 한도로 구독을 끊었다는 error 프레임은 엔진 실패와 갈라 올린다."""
+    for name, data in frames:
+        if name == "error" and str(data.get("code") or "") == PORTAL_STREAM_IDLE_CODE:
+            raise watch.lost("engine_silent", f"{PORTAL_STREAM_IDLE_CODE}: {data.get('message') or ''}".strip())
+        watch.frame(name, data)
+        yield name, data
 
 
 def collect_stream(frames: Iterable[tuple[str, dict]]) -> dict:
@@ -263,17 +297,24 @@ class PortalPanelEngine:
     def run(self, delib_opts: Mapping[str, Any], *, owner_sub: str | None = None) -> dict:
         """패널 1건을 돌리고 {decision_text, turns, conv_id, events, …} 를 돌려준다.
 
-        429(포털 agent_semaphore 초과)는 `EngineBusy` 라 러너가 대기 후 재시도하고, 연결·타임아웃·error 프레임은
-        `EngineError` 다. 자격이 없으면 `PatUnavailable` 이다.
+        429(포털 agent_semaphore 초과)는 `EngineBusy` 라 러너가 대기 후 재시도하고, 연결 실패·error 프레임은
+        `EngineError` 다. 앱이 스트림을 놓은 것(패널 벽시계·줄 사이 침묵·중간 절단)은 `EngineStreamLost` 로
+        가른다 — 그때 엔진은 심의를 계속 돌릴 수 있다. 자격이 없으면 `PatUnavailable` 이다.
         """
         opts = {k: v for k, v in dict(delib_opts).items() if k != "question"}
         question = str(delib_opts.get("question") or "")
         credential = self._credential(owner_sub if owner_sub is not None else self.owner_sub)
         conv_id = self.create_conversation(credential["pat"], f"[리스크심사] {question[:160]}")
 
-        timeout_s = float(opts.get("timeout_s") or DEFAULT_ENGINE_TIMEOUT_S)
-        timeout = httpx.Timeout(timeout_s + STREAM_MARGIN_S, connect=CONNECT_TIMEOUT_S)
-        deadline = now_epoch() + PANEL_TIMEOUT_S
+        # 줄 사이 침묵 한도. 종전에는 '엔진 호출당 타임아웃 1800 + 60' 으로 유도했다 — LLM 시도 한 번만 가정한 값이라
+        # 엔진이 SDK 재시도를 하거나 박스의 호출 한도를 올리면 건강한 패널을 끊었다. 이제는 죽은 스트림만 잡는
+        # 마지막 그물이다(엔진이 15초마다 ping 을 흘린다). 0 이면 끈다.
+        read_s = float(getattr(self.settings, "risk_engine_read_timeout_s", config.DEFAULT_ENGINE_READ_TIMEOUT_S))
+        timeout = httpx.Timeout(connect=CONNECT_TIMEOUT_S, read=read_s or None,
+                                write=WRITE_TIMEOUT_S, pool=POOL_TIMEOUT_S)
+        wall_s = config.panel_timeout_s(self.settings)
+        watch = _StreamWatch(conv_id)
+        streaming = False
         body: dict[str, Any] = {
             "message": DELIBERATE_TRIGGER + question,
             "history": [],
@@ -295,10 +336,20 @@ class PortalPanelEngine:
                     if response.status_code >= 400:
                         response.read()
                         raise EngineError(f"포털이 심의를 거부했습니다 — HTTP {response.status_code}")
-                    result = collect_stream(parse_sse(_within_wall_clock(response.iter_lines(), deadline)))
+                    streaming = True
+                    result = collect_stream(_watched(
+                        parse_sse(_within_wall_clock(response.iter_lines(), wall_s, watch)), watch))
         except PatUnavailable:
             raise
+        except httpx.ReadTimeout as exc:
+            raise watch.lost(
+                "engine_silent", f"포털 스트림이 {read_s:g}초 동안 조용했다(HWAXRISK_ENGINE_READ_TIMEOUT_S)") from exc
         except httpx.HTTPError as exc:
+            # 응답이 흐르던 중의 끊김은 엔진까지 간 심의다 — 연결조차 못 한 것(아래 EngineError)과 가른다.
+            if streaming and isinstance(exc, (httpx.RemoteProtocolError, httpx.ReadError)):
+                raise watch.lost(
+                    "engine_stream_cut", f"스트림이 중간에 끊겼다({type(exc).__name__}, nginx"
+                    " NGINX_AGENT_READ_TIMEOUT 또는 포털·에이전트 서버 재기동)") from exc
             raise EngineError(f"포털 /agent/chat 호출 실패({type(exc).__name__})") from exc
 
         result["conv_id"] = conv_id

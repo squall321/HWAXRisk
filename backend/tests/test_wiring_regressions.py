@@ -102,9 +102,9 @@ def test_run_panel_completes_with_real_modules(risk_store, tmp_path):
     assert out["coverage"] == {"done": 5}
     # 러너 자격 (b) — 잡 owner 가 엔진까지 간다(plan §6.7 3단계).
     assert engine.owner_subs == [OWNER]
-    # 벽시계 상한 40분(plan §6.10.2)은 delib_opts 에 싣지 않는다 — 엔진의 timeout_s 는 LLM 호출 한 번의
-    # 타임아웃이고 포털은 1800 초과를 422 로 막는다. 벽시계는 엔진 클라이언트가 스트림에서 잰다.
-    assert "timeout_s" not in engine.calls[0] and runner.PANEL_TIMEOUT_S == 2400
+    # 패널 벽시계(plan §6.10.2)는 delib_opts 에 싣지 않는다 — 엔진의 timeout_s 는 LLM 호출 한 번의
+    # 타임아웃이고 포털은 상한 초과를 422 로 막는다. 벽시계는 엔진 클라이언트가 스트림에서 잰다.
+    assert "timeout_s" not in engine.calls[0] and config.panel_timeout_s(cfg) == 43200
     # 근거 항목마다 키가 엔진까지 간다 — 러너가 다시 끼우는 E0c 도 빠지지 않는다(엔진이 `[e:N|E3]` 으로 찍는다).
     assert [e["key"] for e in engine.calls[0]["evidence"]] == [
         "E0", "E0c", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9"]
@@ -365,7 +365,7 @@ def test_the_whole_request_body_is_accepted_by_the_portal_model(risk_store, tmp_
 
 
 def test_a_panel_past_its_wall_clock_is_closed_as_an_error(risk_store, tmp_path):
-    """벽시계 40분을 넘긴 패널은 error 로 닫히고 좌석은 다음 편성으로 돌아간다(plan §6.10.2 · §6.7.2 9단계).
+    """벽시계를 넘긴 패널은 error 로 닫히고 좌석은 다음 편성으로 돌아간다(plan §6.10.2 · §6.7.2 9단계).
 
     엔진이 줄을 계속 보내는 한 읽기 타임아웃은 걸리지 않는다 — 벽시계를 앱이 재지 않으면 패널 하나가
     러너 자리와 그 타깃의 직렬 순서를 끝없이 붙든다.
@@ -378,7 +378,7 @@ def test_a_panel_past_its_wall_clock_is_closed_as_an_error(risk_store, tmp_path)
 
     def slow_stream():
         yield _sse(("status", {"step": "심의 시작"})).encode()
-        now["t"] += runner.PANEL_TIMEOUT_S + 1          # 40분이 지났고, 엔진은 여전히 줄을 보낸다
+        now["t"] += config.panel_timeout_s(cfg) + 1     # 12시간이 지났고, 엔진은 여전히 줄을 보낸다
         yield _sse(("status", {"step": "아직 도는 중"})).encode()
         yield _sse(("delib", {"kind": "decision", "text": DECISION}), ("done", {})).encode()
 
@@ -390,7 +390,7 @@ def test_a_panel_past_its_wall_clock_is_closed_as_an_error(risk_store, tmp_path)
 
     assert out["status"] == "error" and "panel_timeout" in out["error"], out
     panel = risk_store.query_one("SELECT status, error FROM rr_panels WHERE id = ?", (out["panel_id"],))
-    assert panel["status"] == "error" and "panel_timeout" in panel["error"]
+    assert panel["status"] == "error" and "HWAXRISK_PANEL_TIMEOUT_S" in panel["error"]
     assert {r["status"] for r in risk_store.query(
         "SELECT status FROM rr_coverage WHERE target_key = ?", (target_key,))} == {"pending"}
     assert risk_store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))["state"] == "running"

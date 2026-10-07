@@ -18,7 +18,7 @@ _ENV_KEYS = ("HWAXRISK_DATA_DIR", "HEAX_DATA_DIR", "ROOT_PATH", "PORT", "HOST",
              "HWAXRISK_ADMIN_ROLES", "HWAXRISK_EXPORT_ALLOWED_GROUPS", "HWAXRISK_EXPORT_RETAIN_DAYS",
              "HWAXRISK_PRIOR_INCLUDE_HUMAN", "HWAXRISK_SUSPECT_TEXT_BLOCK",
              "HWAXRISK_RECALL_REQUIRE_VERIFIED_ACTOR", "HWAXRISK_NEG_PRECEDENT_LINES",
-             "HWAXRISK_CLUSTER_DUP_SCAN")
+             "HWAXRISK_CLUSTER_DUP_SCAN", "HWAXRISK_PANEL_TIMEOUT_S", "HWAXRISK_ENGINE_READ_TIMEOUT_S")
 
 
 @pytest.fixture
@@ -127,6 +127,29 @@ def test_defaults_follow_plan(tmp_path, reload_config):
     assert s.risk_brief_token_ttl_s == 900
     assert s.risk_pat_require_read_only is True
     assert s.risk_pat_revocation_poll_s == 60
+    # 시간 한도 — 코드 기본값이 넉넉한 값이어야 한다(SIF 는 cleanenv 라 env 가 매니페스트로만 닿는다).
+    assert s.risk_panel_timeout_s == 43200
+    assert s.risk_engine_read_timeout_s == 54000
+
+
+def test_time_limits_are_layered_and_follow_their_knobs(tmp_path, reload_config):
+    """안쪽 한도가 바깥보다 작고, 손잡이가 실제로 읽힌다.
+
+    이웃 리포의 값은 여기 숫자로 적는다 — 한쪽만 바꾸면 순서가 뒤집힌다(포털 AGENT_STREAM_IDLE_TIMEOUT_S 46800 ·
+    nginx NGINX_AGENT_READ_TIMEOUT 50400 · 엔진 2×DELIB_TIMEOUT_S+8 = 3608, 요청 상한 2×DELIB_TIMEOUT_MAX_S+8 = 28808).
+    """
+    mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path))
+    s = mod.settings
+    assert 3608 < 28808 < mod.panel_timeout_s(s) == 43200
+    assert mod.panel_timeout_s(s) < 46800 < 50400 < s.risk_engine_read_timeout_s
+
+    mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path), HWAXRISK_PANEL_TIMEOUT_S="21600",
+                        HWAXRISK_ENGINE_READ_TIMEOUT_S="60000")
+    s = mod.settings
+    assert (mod.panel_timeout_s(s), s.risk_engine_read_timeout_s) == (21600, 60000)
+    # 벽시계를 끄면(0) 재지 않는다.
+    mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path), HWAXRISK_PANEL_TIMEOUT_S="0")
+    assert mod.panel_timeout_s(mod.settings) == 0
 
 
 def test_env_overrides_with_hwaxrisk_prefix(tmp_path, reload_config):
