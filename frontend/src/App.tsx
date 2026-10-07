@@ -1,6 +1,7 @@
 // 앱 셸 — 사이드바·커맨드 팔레트(⌘K)·HashRouter 라우트 7개. 딥링크는 /apps/hwax_risk/#/targets/<key> 형식이라 새로고침에 안전하다(계획 §8.2.4).
 import { HashRouter, Link, NavLink, Route, Routes, useParams } from "react-router-dom";
 import { FileDiff, LayoutGrid, ListChecks, Settings as SettingsIcon } from "lucide-react";
+import { Button } from "./ui/primitives";
 import { CommandPalette } from "./ui/CommandPalette";
 import { cn } from "./lib/cn";
 import RiskHomePage from "./pages/RiskHomePage";
@@ -42,9 +43,9 @@ function NotFoundPage() {
         title="이 주소에 해당하는 화면이 없습니다."
         hint="딥링크는 #/projects/<id> · #/snapshots/<id> · #/compare · #/targets/<key> · #/curation · #/settings 형식입니다."
         action={
-          <Link className="rr-btn rr-btn-primary" to="/">
-            과제 목록으로
-          </Link>
+          <Button asChild>
+            <Link to="/">과제 목록으로</Link>
+          </Button>
         }
       />
     </SectionCard>

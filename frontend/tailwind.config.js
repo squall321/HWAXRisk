@@ -2,13 +2,16 @@
 // shadcn/ui 토큰 계약 — 값은 Report Archive(사내 웹)와 같게 둔다. 사용자가 "그 느낌" 이라 한 것이
 // 이 스택의 언어이고, 같은 값을 쓰면 두 앱을 오가는 사람이 조작법을 다시 배우지 않는다.
 //
-// ⚠ preflight 를 끈다. 기존 index.css(608줄, `rr-*`)가 아직 화면 대부분을 그리는데 Tailwind 의
-// base reset 이 들어오면 그 스타일이 한꺼번에 무너진다. 유틸리티만 켜서 새 컴포넌트부터 쓰고,
-// 화면을 옮겨 가며 `rr-*` 를 걷어낸 뒤 그때 preflight 를 켠다(점진 도입의 표준 경로).
+// preflight 를 켰다(2026-10-07). 도입 당시에는 기존 `rr-*` 608줄이 화면 대부분을 그리고 있어
+// base reset 이 들어오면 한꺼번에 무너졌으므로 꺼 두고 시작했다. 화면 일곱을 모두 옮겨 레거시
+// 클래스의 마지막 사용자가 사라져 이제 켠다 — 점진 도입의 예정된 종점이다.
+//
+// 켜지 않고 둔 대가가 작지 않았다. preflight 가 주는 `border-style: solid` 가 없어 앱의
+// `border-*` 유틸이 **전부 무효**였고(선이 하나도 안 그려졌다), <h2>·<p> 의 UA margin 이 살아
+// 있어 카드 머리말이 헐거웠다. 둘 다 조용한 결함이라 띄워 보기 전에는 드러나지 않았다.
 export default {
   darkMode: ["class", '[data-theme="dark"]'],
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
-  corePlugins: { preflight: false },
   theme: {
     container: { center: true, padding: "2rem", screens: { "2xl": "1400px" } },
     extend: {
