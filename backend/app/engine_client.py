@@ -342,8 +342,8 @@ class PortalPanelEngine:
         429(포털 agent_semaphore 초과)는 `EngineBusy` 라 러너가 대기 후 다시 묻는다 — 그때 러너는 그 예외의
         `conversation`(대화 id, 만든 자격)을 되돌려 주고, 같은 자격이면 그 대화를 다시 쓴다. 연결 실패·error 프레임은
         `EngineError` 다. 앱이 스트림을 놓은 것(패널 벽시계·줄 사이 침묵·중간 절단, 그리고 `should_stop` 이 알린
-        취소·정지)은 `EngineStreamLost` 로 가른다 — 그때 엔진은 심의를 계속 돌릴 수 있다. 의장이 결정문을 못 낸 것은 `EngineNoDecision` 이고
-        그 심의의 대화를 실어 올린다. 자격이 없으면 `PatUnavailable` 이다.
+        취소·정지)은 `EngineStreamLost` 로 가른다 — 그때 엔진은 심의를 계속 돌릴 수 있다. 의장이 결정문을 못 낸 것은
+        `EngineNoDecision` 이고 그 심의의 대화를 실어 올린다. 자격이 없으면 `PatUnavailable` 이다.
         """
         opts = {k: v for k, v in dict(delib_opts).items() if k != "question"}
         question = str(delib_opts.get("question") or "")
