@@ -5,9 +5,11 @@ import json
 
 import pytest
 
-from app import brief, common, field_source, narrative, render
+from app import brief, common, field_source, ir_builder, narrative, render, state
+from app.adapters import ecad_stub
 from app.errors import AppError
 from app.ra_client import empty_sync
+from tests.conftest import FIXTURES_DIR
 
 OWNER = "me@example.com"
 
@@ -39,6 +41,16 @@ def _add_snapshot(store, snapshot_id: str, project_id: str, ir: dict) -> None:
          _j(["mcad"]), 3, 2, _j([]), 1, None, _j({"mcad": "1.0"}), 300))
 
 
+# rule_hits 는 손으로 쓰지 않는다 — 간섭 1건이 auto 로 남은 최소 IR 을 `state.evaluate_rules` 에 넣어 나온 것을 싣는다.
+# 손으로 쓴 행(`rule_id`·`found` 목록·`pass=True` 가 '걸렸다')은 state.py 가 한 번도 쓴 적 없는 모양이었고, 브리프가
+# 그 모양만 읽어서 실제 행에서는 통과한 규칙을 싣고 발화한 규칙을 건너뛰었다.
+RULE_IR = {
+    "sources": [{"kind": "mcad", "degraded": []}], "missing": {}, "nodes": [], "warnings": [],
+    "edges": [{"eid": "e:0123456789ab", "kind": "interference", "kind_family": "iface", "status": "auto",
+               "a": "p:aaaaaaaaaaaa", "b": "p:bbbbbbbbbbbb", "attrs": {}}],
+}
+
+
 def _add_state(store, snapshot_id: str, summary: str, *, feature: dict | None = None) -> None:
     store.execute(
         "INSERT INTO rr_states(snapshot_id, owner_sub, state_json, feature_json, rule_hits_json,"
@@ -46,8 +58,7 @@ def _add_state(store, snapshot_id: str, summary: str, *, feature: dict | None = 
         " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (snapshot_id, OWNER, _j({}),
          _j(feature or {"names": ["n_parts", "n_iface"], "values": [10.0, 4.0], "known": [True, True]}),
-         _j([{"rule_id": "R-001", "severity": "중대", "pass": True, "found": ["e:0123456789ab"],
-              "why_it_matters": "간섭이 auto 로 남아 있다"}]),
+         common.canonical_json(state.evaluate_rules(RULE_IR)),
          _j({}), _j({"G1": {"pass": True}, "G2": {"pass": False}}), summary, "ok", 0, 400))
 
 
@@ -163,6 +174,32 @@ def seed_snap_target(store) -> str:
         ("snap:s_tgt", OWNER, "snap", "s_tgt", "p_now", None, "h_s_tgt", "C0",
          _j(empty_sync()), 610, 610))
     return "snap:s_tgt"
+
+
+def seed_real_snap_target(store, *, dyna: bool = False) -> str:
+    """실제 경로(`freeze_snapshot` → `state.save_state`)가 쓴 행 위의 snap 타깃. target_key 를 돌려준다.
+
+    손으로 쓴 행은 쓰는 쪽과 읽는 쪽이 어긋나도 통과한다 — 스냅샷·상태 행을 앱이 실제로 저장한 모양 그대로 읽게
+    한다. 소스는 어댑터 결과 픽스처이고 ecad 는 계약 스텁의 `capture()` 결과다(지금 운영이 싣는 그대로).
+    """
+    def load(name: str) -> dict:
+        return json.loads((FIXTURES_DIR / "ir" / name).read_text(encoding="utf-8"))
+
+    store.execute("INSERT INTO rr_projects(id, owner_sub, code, created_at, updated_at) VALUES (?,?,?,?,?)",
+                  ("p_real", OWNER, "RV1", 100, 100))
+    results = [load("adapter_mcad_basic.json")]
+    if dyna:
+        results += [load("adapter_dyna_basic.json"), load("adapter_dyna_result.json")]
+    results.append(ecad_stub.EcadStubAdapter().capture({}, None, None))
+    frozen = ir_builder.freeze_snapshot(store, project_id="p_real", owner_sub=OWNER, label="RV1",
+                                        adapter_results=results, captured_at=1756600000)
+    target_key = f"snap:{frozen['snapshot_id']}"
+    store.execute(
+        "INSERT INTO rr_targets(target_key, owner_sub, kind, ref_id, project_id, base_project_id,"
+        " ir_hash, level, external_sync_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (target_key, OWNER, "snap", frozen["snapshot_id"], "p_real", None, frozen["ir_hash"], "C0",
+         _j(empty_sync()), 620, 620))
+    return target_key
 
 
 class FakeAdh:
@@ -451,6 +488,50 @@ def test_empty_ledger_falls_back_to_missing_sentences(risk_store):
         assert len(line) <= brief.FRAMING_MAX          # 결측 문구는 80자 이하다
 
 
+# ---------------------------------------------------------------- E9 규칙 줄(§5.6.1 · §3.2.6)
+def _e9_rule_lines(built: dict) -> list[str]:
+    e9 = dict(zip(built["keys"], built["evidence"]))["E9"]["result"]
+    return [line for line in e9.split("\n") if line.startswith("rule:")]
+
+
+def test_e9_lists_the_rules_that_fired_with_their_ids(risk_store):
+    """E9 의 규칙 줄은 **발화한** 규칙이다 — `pass=false` 인 행을 id·건수·참조와 함께 싣는다.
+
+    state.py 는 `{rule, pass=(not fired), found{count, refs, text}}` 를 쓰는데 브리프는 `rule_id`·`found` 목록·
+    `pass=True` 를 '걸렸다' 로 읽었다. 그래서 통과한 규칙이 id 없이(`rule: 중대 found={'count': 0, …}`) 실리고
+    정작 발화한 규칙은 건너뛰었다 — 좌석은 '이 규칙들이 걸렸다' 고 읽는데 실제로는 그 반대였다.
+    """
+    lines = _e9_rule_lines(brief.build_brief(risk_store, seed_diff_target(risk_store)))
+    hits = {h["rule"]: h for h in state.evaluate_rules(RULE_IR)}
+    assert hits["R-001"]["pass"] is False and hits["R-002"]["pass"] is True     # 픽스처의 전제
+
+    fired = [line for line in lines if line.startswith("rule:R-001 ")]
+    assert len(fired) == 1, lines
+    assert fired[0].startswith("rule:R-001 중대 found=1건 e:0123456789ab «")
+    assert fired[0].endswith("»")
+    # 통과한 규칙은 싣지 않는다 — 실리면 좌석이 '걸린 규칙' 으로 읽는다.
+    passed = [rid for rid, h in hits.items() if h["pass"] is True]
+    assert passed and not [line for line in lines if line.split(" ")[0][len("rule:"):] in passed], lines
+    # 검문하지 못한 규칙은 통과로도 발화로도 세지 않고 그 사실을 적는다(요구가 없는 과제의 R-007).
+    assert "rule:R-007 평가 불가(source_absent)" in lines
+    # 줄마다 id 가 있다 — `rule:` 뒤가 비면 어느 규칙인지 모른다.
+    assert all(line.split(" ")[0] in {f"rule:{rid}" for rid in hits} for line in lines), lines
+
+
+def test_e9_reads_the_rule_hits_a_frozen_snapshot_really_stored(risk_store):
+    """손으로 심은 행이 아니라 `freeze_snapshot` 이 저장한 `rule_hits_json` 을 그대로 읽어도 같은 뜻이어야 한다."""
+    target_key = seed_real_snap_target(risk_store)
+    stored = json.loads(risk_store.query_one(
+        "SELECT rule_hits_json FROM rr_states WHERE snapshot_id = ?", (target_key.split(":", 1)[1],)
+    )["rule_hits_json"])
+    fired = sorted(h["rule"] for h in stored if h["pass"] is False)
+    assert fired == ["R-001"], stored                    # 픽스처의 간섭 1건이 auto 로 남아 있다
+
+    lines = _e9_rule_lines(brief.build_brief(risk_store, target_key, seats=SEATS))
+    assert [line.split(" ")[0] for line in lines if "평가 불가" not in line] == ["rule:R-001"], lines
+    assert lines[0].startswith("rule:R-001 중대 found=1건 e:")
+
+
 # ---------------------------------------------------------------- E7 고정 슬롯(§5.6.3)
 def test_e7_fixed_slots_stay_inside_seat_budget(risk_store):
     target_key = seed_diff_target(risk_store)
@@ -501,7 +582,7 @@ def test_collect_refs_tracks_five_schemes_in_order(risk_store):
     target_key = seed_diff_target(risk_store)
     out = brief.build_brief(risk_store, target_key)
     assert out["refs"] == ["c:5b0e11aa22bb", "c:aa11bb22cc33", "d:utg_edge_gap",
-                           "reg:diff:d0#clu1", "narr:ch1", "narr:op0#pan0#F1", "rule:R-001"]
+                           "reg:diff:d0#clu1", "narr:ch1", "narr:op0#pan0#F1", "rule:R-001", "rule:R-007"]
     assert len(out["refs"]) == len(set(out["refs"]))
     assert all(ref.split(":")[0] in brief._TRACKED_SCHEMES for ref in out["refs"])
 
@@ -623,7 +704,7 @@ def test_precedents_returns_panel_payload(risk_store):
     assert out["clusters"][0]["reg_ref"] == "reg:diff:d0#clu1"
     assert out["clusters"][0]["project_code"] == "DV1"
     assert out["clusters"][0]["path"] == "subject"
-    assert out["rule_hits"][0]["rule_id"] == "R-001"
+    assert out["rule_hits"][0]["rule"] == "R-001"
     assert out["pattern_candidates"] == [{"pattern_id": "P-017", "status": "known",
                                           "n_projects": 5, "precision": 0.71}]
 

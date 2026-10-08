@@ -1128,19 +1128,23 @@ def _item_e9(ctx) -> dict:
     for hit in hits if isinstance(hits, list) else []:
         if not isinstance(hit, dict):
             continue
+        # 행은 `state.evaluate_rules` 가 쓴 모양 그대로 읽는다 — id 는 `rule`, `pass` 는 **발화하지 않았다**,
+        # `found` 는 `{count, refs, text}` 다. 종전에는 `rule_id`·`found` 목록·`pass=True` 를 '걸렸다' 로 읽어
+        # 통과한 규칙을 id 없이 싣고 발화한 규칙을 건너뛰었다(시험이 손으로 쓴 행만 넣어 가려져 있었다).
+        rule_id = _s(hit.get("rule"))
         if hit.get("evaluable") is False or hit.get("pass") is None:
             # 결측을 '이상 없음' 으로 읽히게 두지 않는다(plan §3.2.6·§5.6.1 E9).
-            lines.append(f"rule:{_s(hit.get('rule_id') or hit.get('rule'))} "
-                         f"평가 불가({_s(hit.get('not_evaluable_reason'), 'unknown')})")
+            lines.append(f"rule:{rule_id} 평가 불가({_s(hit.get('not_evaluable_reason'), 'unknown')})")
             continue
-        if not hit.get("pass"):
+        if hit.get("pass"):
             continue
-        found = hit.get("found") or []
-        found_text = ",".join(str(x) for x in found[:3]) if isinstance(found, list) else _s(found)
-        lines.append(
-            f"rule:{_s(hit.get('rule_id'))} {_s(hit.get('severity'), '-')} found={found_text} "
-            f"{_cut(hit.get('why_it_matters'), 350)}"
-        )
+        found = hit.get("found") if isinstance(hit.get("found"), dict) else {}
+        # 참조는 공백으로 띄운다 — 쉼표로 붙이면 `d:a,req:b` 가 참조 하나로 읽힌다(collect_refs). R-007 의 참조에는
+        # 사람이 지은 요구 이름이 들어 있어 E3 의 `[d:<name>]` 과 같은 위생을 거친다.
+        refs = [_ref_name(x) for x in (found.get("refs") or [])[:3]]
+        parts = [f"rule:{rule_id}", _s(hit.get("severity"), "-"), f"found={_s(found.get('count'), '?')}건", *refs,
+                 _cut(hit.get("why_it_matters"), 350)]
+        lines.append(" ".join(p for p in parts if p))
     if not lines:
         lines = ["[warnings 0 · rule_hits 0]"]
     return {"key": "E9", "args": _s(ctx["snapshot_id"]), "result": _body(source, lines)}
