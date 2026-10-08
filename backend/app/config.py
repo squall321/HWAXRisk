@@ -73,6 +73,12 @@ CREDENTIAL_SLACK_S = 600
 DEFAULT_PORTAL_CALL_TIMEOUT_S = 30
 # 스냅샷 소스 호출 1건의 응답 침묵 한도(HWAXRISK_SOURCE_CALL_TIMEOUT_S) — 게이트웨이 MCP 도구와 소스 앱 REST GET.
 DEFAULT_SOURCE_CALL_TIMEOUT_S = 120
+# 패널 시작 때의 E10 필드 근거 호출(get_top_issues·search_scholar) 1건의 벽시계 기한(HWAXRISK_FIELD_TIMEOUT_S).
+# 침묵 한도가 아니라 기한이다 — 게이트웨이가 15초마다 ping 을 흘려 15초를 넘는 침묵 한도는 호출 길이를 자르지 못한다
+# (ra_client.McpHttpClient 가 줄마다 경과를 본다, 넘겨 듣는 폭은 ping 한 칸). 5초 리터럴이던 동안 부하 걸린 박스의
+# 문헌 검색이 그 줄을 놓치면 몇 시간짜리 패널이 필드 근거 없이 돌았다. 브리프 한 번의 최악은 도구 지도 10초 +
+# 4×(20+15) = 150초라 MCP 길의 risk_get_brief(게이트웨이 600초) 안에 든다.
+DEFAULT_FIELD_TIMEOUT_S = 20
 
 
 def resolve_data_dir(env: Mapping[str, str] | None = None) -> Path:
@@ -143,6 +149,7 @@ class Settings:
     risk_source_call_timeout_s: int
     risk_engine_busy_wait_s: int
     risk_engine_busy_max_wait_s: int
+    risk_field_timeout_s: int
     adh_team: str | None
     adh_group: str | None
     app_id: str = APP_ID
@@ -217,6 +224,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         risk_source_call_timeout_s=int(env.get("HWAXRISK_SOURCE_CALL_TIMEOUT_S", str(DEFAULT_SOURCE_CALL_TIMEOUT_S))),
         risk_engine_busy_wait_s=int(env.get("HWAXRISK_ENGINE_BUSY_WAIT_S", str(DEFAULT_ENGINE_BUSY_WAIT_S))),
         risk_engine_busy_max_wait_s=int(env.get("HWAXRISK_ENGINE_BUSY_MAX_WAIT_S", str(ENGINE_BUSY_ALLOWANCE_S))),
+        risk_field_timeout_s=int(env.get("HWAXRISK_FIELD_TIMEOUT_S", str(DEFAULT_FIELD_TIMEOUT_S))),
         adh_team=env.get("HWAXRISK_ADH_TEAM") or None,
         adh_group=env.get("HWAXRISK_ADH_GROUP") or None,
     )

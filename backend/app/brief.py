@@ -741,10 +741,6 @@ def _item_e5(store, ctx, similar: Mapping[str, Any], owner_sub: str | None, fiel
     return {"key": "E5", "args": _s(ctx["target"]["target_key"]), "result": _body(source, lines)}
 
 
-# E10 실호출 데드라인(plan §5.6.2 — 호출마다 개별, 초과·오류는 그 줄만 빠진다).
-FIELD_CALL_TIMEOUT_S = 5.0
-# 저장 원문 재사용 창(§5.6.2 — VOC 는 하루 단위로 바뀐다).
-FIELD_REUSE_S = 24 * 3600
 FIELD_TOOLS: tuple[str, ...] = ("get_top_issues", "search_scholar")
 _VOC_CATEGORY, _VOC_EXCERPT, _PAPER_TITLE, _PAPER_EXCERPT = 40, 80, 60, 80
 # get_top_issues 조회 창(plan §5.6.2 — 90d)과 카테고리 수(§5.6.2 "상위 카테고리 3")·문헌 수(상위 2).
@@ -856,7 +852,8 @@ def _field_evidence_lines(store, ctx, field=None) -> list[str]:
     `field` 는 게이트웨이 MCP 채널이다(없으면 조회 없이 결측 문구 한 줄). 호출 원문은 `rr_brief_calls` 에
     남아 `voc:`·`paper:` 참조의 해석 원장이 되고 같은 타깃은 24 h 안이면 그 원문을 재사용한다.
     실패한 호출은 그 줄만 빠지고 블록 끝에 `[조회 불가: <tool>]` 한 줄이 남는다 — '실패' 는 판단어
-    린터(L14)에 걸려 브리프 조립이 통째로 죽으므로 상태 서술로 적는다(context-notes D18).
+    린터(L14)에 걸려 브리프 조립이 통째로 죽으므로 상태 서술로 적는다(context-notes D18). 기한을 넘겨 못 받은
+    줄은 한도와 손잡이를 같이 적는다 — 그 줄이 없는 까닭이 '자료 없음' 이 아니라 '느렸다' 이고 올릴 값이 있다.
     """
     project_id = _s(ctx["target"]["project_id"])
     codes, inherited = product_keys(store, project_id)
@@ -889,7 +886,9 @@ def _field_evidence_lines(store, ctx, field=None) -> list[str]:
 
     lines = lines[: max(1, int(getattr(config.settings, "risk_field_evidence_lines", 5)))]
     # 줄 수 상한(정본 "합쳐 최대 5줄")은 근거 줄에만 걸고 `[조회 불가]` 는 그 밖이다(정본은 그 줄을 따로 적는다).
-    tail = [f"[조회 불가: {tool}]" for tool in unreachable]
+    late = getattr(field, "timed_out", ())
+    limit = f" — {float(getattr(field, 'timeout', 0)):g}초 초과(HWAXRISK_FIELD_TIMEOUT_S)"
+    tail = [f"[조회 불가: {tool}{limit if tool in late else ''}]" for tool in unreachable]
     # 문자 상한(E5_FIELD_CAP)은 여기서 걸어야 한다 — 걸지 않으면 E5 항목 전체가 실효 한도를 넘고
     # clip_lines 가 **뒤에서부터** 버려 E10 이 통째로 사라진다(D18 이 340 을 계산한 이유이자, 그 값을
     # 적용하지 않아 D18 이 막으려던 실패가 그대로 살아 있던 자리다). 꼬리 길이를 먼저 떼어 두어

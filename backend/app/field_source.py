@@ -11,9 +11,8 @@ from app.common import canonical_json, now_epoch, sha256_hex
 
 # 게이트웨이에서 이 도구를 여는 백엔드(2026-09-04 실측 — VOC 5종 signalforge · 문헌 2종 heax-web_research_mcp).
 # 이름은 발견으로 풀지 않는다 — E10 은 probe 없이 돌고 백엔드 키는 호출 인자가 아니라 기록용이다.
-# 호출마다 개별 데드라인(plan §5.6.2) — 초과는 그 줄만 빠지고 블록 끝에 조회 불가 한 줄이 남는다.
-FIELD_TIMEOUT_S = 5.0
-
+# 호출마다 개별 데드라인(plan §5.6.2) — 초과는 그 줄만 빠지고 블록 끝에 조회 불가 한 줄이 남는다. 값은 설정이다
+# (config.DEFAULT_FIELD_TIMEOUT_S · HWAXRISK_FIELD_TIMEOUT_S).
 APP_KEY_BY_TOOL: dict[str, str] = {
     "get_top_issues": "signalforge",
     "query_voc": "signalforge",
@@ -31,7 +30,9 @@ class FieldSource:
     def __init__(self, mcp: Any, *, timeout: float | None = None, reuse_s: int | None = None,
                  tool_names: Sequence[str] = ()) -> None:
         self.mcp = mcp
-        self.timeout = float(timeout if timeout is not None else 5.0)
+        self.timeout = float(timeout if timeout is not None else config.DEFAULT_FIELD_TIMEOUT_S)
+        # 기한을 넘겨 못 받은 도구들 — 브리프가 그 줄에 한도와 손잡이를 적는다(다른 사유의 조회 불가와 가른다).
+        self.timed_out: set[str] = set()
         self.reuse_s = int(reuse_s if reuse_s is not None else 24 * 3600)
         # 게이트웨이 실이름들(§2.13.2). E10 은 probe 없이 돌아 이름 접두에 특히 취약하다.
         self.tool_names = tuple(tool_names)
@@ -59,6 +60,8 @@ class FieldSource:
             return None
         ok = bool(reply.get("ok")) if isinstance(reply, Mapping) else False
         result = reply.get("result") if isinstance(reply, Mapping) else None
+        if not ok and _error_of(reply) == "deadline_exceeded":
+            self.timed_out.add(tool)
         self._record(store, target_key, owner_sub, tool, args, args_hash, result,
                      ok=ok, error=None if ok else _error_of(reply), started=started)
         return result if ok else None
@@ -112,10 +115,13 @@ def from_settings(settings=None, *, portal_pat: str | None = None, http_client: 
         return None
     from app.adapters.registry import gateway_tool_names  # noqa: PLC0415 — 순환 import 회피.
 
+    # 침묵 한도와 벽시계 기한에 같은 값을 건다 — 침묵 한도만으로는 15초마다 ping 을 흘리는 게이트웨이의 호출을
+    # 자르지 못한다. 종전 5초는 ping 보다 짧아서 걸렸을 뿐이고, 그래서 5초를 넘는 조회는 전부 놓쳤다.
+    deadline = float(getattr(cfg, "risk_field_timeout_s", config.DEFAULT_FIELD_TIMEOUT_S))
     return FieldSource(McpHttpClient(getattr(cfg, "gateway_mcp", ""),
                                      headers={"Authorization": f"Bearer {token}"},
-                                     client=http_client, timeout=FIELD_TIMEOUT_S),
-                       timeout=FIELD_TIMEOUT_S,
+                                     client=http_client, timeout=deadline, deadline_s=deadline),
+                       timeout=deadline,
                        tool_names=gateway_tool_names(token=token, client=http_client))
 
 

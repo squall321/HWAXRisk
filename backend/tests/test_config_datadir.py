@@ -20,7 +20,7 @@ _ENV_KEYS = ("HWAXRISK_DATA_DIR", "HEAX_DATA_DIR", "ROOT_PATH", "PORT", "HOST",
              "HWAXRISK_RECALL_REQUIRE_VERIFIED_ACTOR", "HWAXRISK_NEG_PRECEDENT_LINES",
              "HWAXRISK_CLUSTER_DUP_SCAN", "HWAXRISK_PANEL_TIMEOUT_S", "HWAXRISK_ENGINE_READ_TIMEOUT_S",
              "HWAXRISK_CREDENTIAL_MARGIN_S", "HWAXRISK_PORTAL_CALL_TIMEOUT_S", "HWAXRISK_SOURCE_CALL_TIMEOUT_S",
-             "HWAXRISK_ENGINE_BUSY_WAIT_S", "HWAXRISK_ENGINE_BUSY_MAX_WAIT_S")
+             "HWAXRISK_ENGINE_BUSY_WAIT_S", "HWAXRISK_ENGINE_BUSY_MAX_WAIT_S", "HWAXRISK_FIELD_TIMEOUT_S")
 
 
 @pytest.fixture
@@ -137,6 +137,7 @@ def test_defaults_follow_plan(tmp_path, reload_config):
     assert s.risk_source_call_timeout_s == 120
     assert s.risk_engine_busy_wait_s == 30
     assert s.risk_engine_busy_max_wait_s == 3600
+    assert s.risk_field_timeout_s == 20
 
 
 def test_time_limits_are_layered_and_follow_their_knobs(tmp_path, reload_config):
@@ -175,6 +176,8 @@ def test_time_limits_are_layered_and_follow_their_knobs(tmp_path, reload_config)
     assert mod.settings.risk_portal_call_timeout_s == 45
     mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path), HWAXRISK_SOURCE_CALL_TIMEOUT_S="300")
     assert mod.settings.risk_source_call_timeout_s == 300
+    mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path), HWAXRISK_FIELD_TIMEOUT_S="45")
+    assert mod.settings.risk_field_timeout_s == 45
 
 
 def test_env_overrides_with_hwaxrisk_prefix(tmp_path, reload_config):

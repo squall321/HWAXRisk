@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any, Mapping, Sequence
 
 import httpx
@@ -26,17 +27,27 @@ SYNC_CHANNELS = ("ra", "adh")
 
 
 # ---------------------------------------------------------------- MCP streamable-http 전송
+class _DeadlineExceeded(httpx.ReadTimeout):
+    """호출에 정해 둔 벽시계 기한이 지났다 — 상대가 조용했던 것(침묵 한도)과 가른다. 올릴 손잡이가 서로 다르다."""
+
+
 class McpHttpClient:
     """streamable-http MCP 엔드포인트에 JSON-RPC 로 tools/call 하는 최소 클라이언트.
 
     httpx.Client 를 주입받는다 — 테스트는 MockTransport 를 실은 Client 를 넣어 실제 네트워크 없이 돈다.
     어떤 실패도 예외로 올리지 않고 {'ok': False, 'error': …} 로 돌려준다(외부 반영은 비치명이다).
+
+    `timeout` 은 바이트 사이 침묵 한도다. 게이트웨이는 도구가 도는 동안 15초마다 ping 주석 줄을 흘리므로, 15초를
+    넘는 값은 죽은 게이트웨이만 잡고 호출 길이는 자르지 못한다. 호출 길이를 묶으려면 `deadline_s`(POST 한 건의
+    벽시계 기한, 초)를 준다 — 넘기면 `error` 가 'deadline_exceeded' 다. None 이면 기한 없이 종전 길로 간다.
     """
 
     def __init__(self, endpoint: str, *, headers: Mapping[str, str] | None = None,
-                 client: httpx.Client | None = None, timeout: float = DEFAULT_TIMEOUT) -> None:
+                 client: httpx.Client | None = None, timeout: float = DEFAULT_TIMEOUT,
+                 deadline_s: float | None = None) -> None:
         self.endpoint = endpoint
         self.timeout = timeout
+        self.deadline_s = deadline_s
         self._headers = dict(headers or {})
         self._client = client
         self._owns_client = client is None
@@ -65,10 +76,8 @@ class McpHttpClient:
         return headers
 
     @staticmethod
-    def _decode(response: httpx.Response) -> dict | None:
+    def _decode(text: str, content_type: str) -> dict | None:
         """application/json 과 text/event-stream 을 모두 받아 마지막 JSON-RPC 객체를 돌려준다."""
-        text = response.text
-        content_type = response.headers.get("content-type", "")
         if "text/event-stream" in content_type:
             last = None
             for line in text.splitlines():
@@ -85,20 +94,52 @@ class McpHttpClient:
             return None
 
     def _post(self, payload: dict) -> dict:
-        response = self._http().post(self.endpoint, headers=self._base_headers(),
-                                     content=canonical_json(payload).encode("utf-8"),
-                                     timeout=self.timeout)
+        """JSON-RPC 한 건을 보낸다. 기한(`deadline_s`)이 걸려 있으면 응답을 스트림으로 읽으며 줄마다 경과를 본다.
+
+        httpx 의 한도는 침묵만 재서, ping 을 흘리는 게이트웨이에서는 한도 20초로 34초짜리 호출이 그대로 돌아온다
+        (실측). 그래서 기한이 걸린 호출은 줄(ping 주석 줄 포함)이 올 때마다 시계를 본다 — 넘겨 듣는 폭은 ping 한 칸
+        (15초)이다. 침묵 한도도 남은 기한을 넘지 않게 줄여, ping 조차 없는 상대는 기한에 맞춰 끊는다.
+        """
+        content = canonical_json(payload).encode("utf-8")
+        deadline = None if self.deadline_s is None else time.monotonic() + self.deadline_s
+        if deadline is None:
+            response = self._http().post(self.endpoint, headers=self._base_headers(), content=content,
+                                         timeout=self.timeout)
+            return self._reply(response, response.text)
+        left = deadline - time.monotonic()
+        idle = httpx.Timeout(self.timeout)
+        within = httpx.Timeout(connect=left if idle.connect is None else min(idle.connect, left),
+                               read=left if idle.read is None else min(idle.read, left),
+                               write=idle.write, pool=idle.pool)
+        try:
+            with self._http().stream("POST", self.endpoint, headers=self._base_headers(), content=content,
+                                     timeout=within) as response:
+                lines: list[str] = []
+                for line in response.iter_lines():
+                    if time.monotonic() >= deadline:
+                        raise _DeadlineExceeded("호출 기한 초과", request=response.request)
+                    lines.append(line)
+                return self._reply(response, "\n".join(lines))
+        except _DeadlineExceeded:
+            raise
+        except httpx.TimeoutException as exc:
+            # 줄인 침묵 한도가 기한과 함께 걸렸다 — 기한이 남았으면 그것은 죽은 상대다(그대로 올린다).
+            if time.monotonic() < deadline:
+                raise
+            raise _DeadlineExceeded(f"호출 기한 초과({type(exc).__name__})") from exc
+
+    def _reply(self, response: httpx.Response, text: str) -> dict:
         session_id = response.headers.get("mcp-session-id")
         if session_id:
             self._session_id = session_id
         if response.status_code >= 400:
             return {"ok": False, "error": f"http_{response.status_code}",
-                    "detail": response.text[:500], "status": response.status_code}
+                    "detail": text[:500], "status": response.status_code}
         if response.status_code == 202:
             return {"ok": True, "result": {}}
-        message = self._decode(response)
+        message = self._decode(text, response.headers.get("content-type", ""))
         if message is None:
-            return {"ok": False, "error": "unparsable_response", "detail": response.text[:500]}
+            return {"ok": False, "error": "unparsable_response", "detail": text[:500]}
         if isinstance(message, dict) and message.get("error"):
             return {"ok": False, "error": "rpc_error", "detail": message["error"]}
         return {"ok": True, "result": (message or {}).get("result") or {}}
@@ -148,6 +189,8 @@ class McpHttpClient:
                 "jsonrpc": "2.0", "id": self._rpc_id(), "method": "tools/call",
                 "params": {"name": name, "arguments": dict(arguments or {})},
             })
+        except _DeadlineExceeded as exc:
+            return {"ok": False, "error": "deadline_exceeded", "detail": str(exc)}
         except httpx.HTTPError as exc:
             return {"ok": False, "error": "transport_error", "detail": f"{type(exc).__name__}: {exc}"}
         if not reply["ok"]:
