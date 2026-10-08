@@ -24,6 +24,8 @@ MCP_IFACE_LIMIT = 500
 REST_IFACE_LIMIT = 5000
 # REST /parts 도 limit 를 받고 **기본값이 500** 이다 — 안 주면 501번째 파트부터 조용히 사라진다(소스 상한 5000).
 REST_PARTS_LIMIT = 5000
+# MCP part_mesh_map 은 limit 기본이 **100** 이고 상한이 500 이다(StepForge MAX_ROWS) — 안 주면 PID 101번부터 브리지가 없다.
+MCP_MESH_LIMIT = 500
 # tol_config 를 못 읽었을 때 detect 잡 params 에서 읽는 4키(plan §2.2 tol_known_keys).
 JOB_TOL_KEYS: tuple[str, ...] = ("tied_gap", "clearance_gap", "tied_area", "tied_width")
 # tree.json 노드 kind → IR 노드 kind. 소스 어휘는 core/model.py 의 5종뿐이고(step-file·assembly·instance +
@@ -525,8 +527,17 @@ class McadAdapter(SourceAdapter):
 
         # ⑤b part_mesh 표 → 브리지 엣지(정본 MCP 3 예산의 두 번째 호출, §2.13.3).
         # 표가 없으면 브리지 0건이고 그 사실만 남는다 — 추정으로 잇지 않는다(오결선이 가짜 의미 이벤트를 만든다).
-        mesh_reply = mcp("part_mesh_map", {"project_id": project_id})
+        mesh_reply = mcp("part_mesh_map", {"project_id": project_id, "limit": MCP_MESH_LIMIT})
         if mesh_reply["ok"]:
+            mesh = mesh_reply["result"] if isinstance(mesh_reply["result"], Mapping) else {}
+            if mesh.get("truncated"):
+                # 소스가 잘랐다고 말한다(`truncated`·`omitted`) — 안 읽으면 뒤 파트의 브리지가 '없는' 것으로 굳는다.
+                # degraded 어휘에는 mesh 코드가 없어 아래 `part_mesh_unreadable` 처럼 경고로만 남긴다.
+                got = len(_rows(mesh, "parts"))
+                warnings.append(_warn(
+                    "part_mesh_truncated",
+                    f"part_mesh 표가 잘렸다 — {mesh.get('total')}행 중 {got}행만 받았다({mesh.get('omitted')}행 생략).",
+                    None))
             edges.extend(_bridge_edges(
                 _rows(mesh_reply["result"], "parts"), project_name=project_name,
                 canon_keys={n["canon_key"] for n in nodes}, rest_channel=tree is not None,

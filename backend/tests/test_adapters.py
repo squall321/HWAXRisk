@@ -1137,6 +1137,25 @@ def test_the_part_mesh_call_passes_its_response_contract():
     assert row["ok"] is True and row["contract_ok"] is True and row["contract_missing"] == []
 
 
+def test_part_mesh_map_asks_for_every_row_and_says_when_the_table_was_cut():
+    """`part_mesh_map` 은 `limit` 기본이 100 이고 상한이 500 이다 — 상한을 청하고, 그래도 잘렸으면 그 사실을 남긴다.
+
+    안 주면 PID 순으로 앞 100행만 온다. 응답은 `truncated`·`omitted` 로 그 사실을 말하는데 어댑터가 읽지
+    않으면 101번째 파트부터는 브리지가 '없는' 것으로 굳는다 — 잘린 표는 오류가 아니라 없는 연결을 만든다.
+    """
+    seen: list = []
+    result, _ = _capture_mcad(mcp_seen=seen)
+    assert mcad.MCP_MESH_LIMIT == 500                    # StepForge MAX_ROWS(app/mcp_server.py)
+    assert next(args for name, args in seen if name == "part_mesh_map") == {
+        "project_id": SF_PROJECT, "limit": mcad.MCP_MESH_LIMIT}
+    assert "part_mesh_truncated" not in {w["code"] for w in result["warnings"]}
+
+    cut = dict(PART_MESH, total=620, truncated=True, omitted=618)
+    result, _ = _capture_mcad(tools=dict(MCP_TOOLS_FULL, part_mesh_map=cut))
+    warning = next(w for w in result["warnings"] if w["code"] == "part_mesh_truncated")
+    assert warning["message"] == "part_mesh 표가 잘렸다 — 620행 중 2행만 받았다(618행 생략)."
+
+
 def test_the_join_key_prefix_records_which_key_resolved_it():
     """조인 키는 행에 `source_path` 가 있고 REST 가 열렸을 때만 `path:` 이고, 아니면 `file+name:` 이다(§2.5.1).
 
