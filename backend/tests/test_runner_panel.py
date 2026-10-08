@@ -855,20 +855,113 @@ def test_run_panel_pauses_the_job_when_returns_diminish(risk_store, tmp_path):
     assert (row["state"], row["pause_reason"]) == ("paused", "diminishing")
 
 
+def _cut_by_restart(store, tmp_path):
+    """패널이 도는 중에 앱이 죽은 모양을 만든다 — 잡 running · 패널 running · 좌석 running."""
+    target_key = seeded(store)
+    give_credential(store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = runner.create_job(store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+    return target_key, cfg, job_id, _seat_a_panel(store, cfg, target_key)
+
+
+def _seat_a_panel(store, cfg, target_key) -> dict:
+    assert runner.claim_next_job(store, cfg) is not None
+    panel = planner.plan_next_panel(store, target_key, "A", settings=cfg)
+    planner.start_panel_seats(store, panel["id"])
+    return panel
+
+
 def test_recover_running_panels_after_restart(risk_store, tmp_path):
+    """재기동이 끊은 패널은 좌석 재시도에 세지 않고, 그 잡은 다시 줄 세우지 않고 멈춘다(plan §6.7.2 끝 문단).
+
+    앱만 다시 떴으면 엔진은 그 심의를 분리 태스크로 끝까지 돌리고 있다. 종전에는 좌석을 차감하고 잡을 queued 로
+    돌려, 기동 0.4초 뒤 같은 좌석이 엔진에 다시 갔다 — 몇 시간짜리 심의가 공유 LLM 에 겹쳐 돌았고, 좌석은 제 탓이
+    아닌 재배포 세 번에 skipped 로 굳었다. 벽시계가 12시간이 되면서 패널 도중의 재기동이 가장 흔한 절단이 됐다.
+    """
+    target_key, cfg, job_id, panel = _cut_by_restart(risk_store, tmp_path)
+
+    assert runner.recover_running_panels(risk_store) == {"recovered": 1, "paused": 1}
+    row = risk_store.query_one("SELECT status, error, retry FROM rr_panels WHERE id = ?", (panel["id"],))
+    assert (row["status"], row["error"], row["retry"]) == ("error", "restart", 0)
+    assert {(r["status"], r["retry"]) for r in coverage(risk_store, target_key).values()} == {("pending", 0)}
+    job = risk_store.query_one("SELECT state, pause_reason, state_by, error FROM rr_jobs WHERE id = ?", (job_id,))
+    assert (job["state"], job["pause_reason"], job["state_by"]) == ("paused", None, "code:restart")
+    assert job["error"].startswith("restart: ") and "엔진 쪽 심의는 계속 돌 수 있다" in job["error"]
+    assert job["error"].endswith("잡을 멈췄다(좌석 재시도는 차감하지 않았다). 재개하면 이어 돈다")
+    # 멈춘 잡은 집히지 않는다 — 같은 심의가 엔진에 겹치지 않는다. 사람이 재개하면 이어 돈다.
+    assert runner.claim_next_job(risk_store, cfg) is None
+    assert runner.resume_job(risk_store, job_id, by=OWNER)["state"] == "queued"
+    assert runner.claim_next_job(risk_store, cfg)["id"] == job_id
+
+
+def test_restarts_never_skip_a_seat_or_feed_the_engine_fail_streak(risk_store, tmp_path):
+    """재기동 세 번에도 좌석은 pending·retry 0 이고, 재기동 두 번 뒤의 진짜 엔진 실패 한 번은 한 번으로 세진다."""
+    target_key, cfg, job_id, _panel = _cut_by_restart(risk_store, tmp_path)
+    for n in range(3):
+        if n:
+            _seat_a_panel(risk_store, cfg, target_key)
+        runner.recover_running_panels(risk_store)
+        runner.resume_job(risk_store, job_id, by=OWNER)
+    assert {(r["status"], r["retry"]) for r in coverage(risk_store, target_key).values()} == {("pending", 0)}
+    assert runner._error_streak(risk_store, target_key) == 0
+
+    rec: dict = {}
+    out = runner.run_panel(risk_store, cfg, FakePanelEngine(raise_error=runner.EngineError("연결 끊김")),
+                           runner.claim_next_job(risk_store, cfg),
+                           narrative_mod=fake_narrative(rec), registry_mod=fake_registry(rec))
+    assert out["status"] == "error" and runner._error_streak(risk_store, target_key) == 1
+    # 종전에는 재기동 둘이 실패로 세져 이 한 번에 잡이 engine_fail_streak 로 죽었다.
+    assert risk_store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))["state"] == "running"
+
+
+def test_restart_between_panels_requeues_the_job(risk_store, tmp_path):
+    """패널 사이에 있던 잡(running 인데 도는 패널이 없다)은 겹칠 심의가 없다 — 멈추지 않고 다시 줄 세운다."""
     target_key = seeded(risk_store)
     give_credential(risk_store)
     cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
     job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
-    runner.claim_next_job(risk_store, cfg)
-    panel = planner.plan_next_panel(risk_store, target_key, "A", settings=cfg)
-    planner.start_panel_seats(risk_store, panel["id"])
+    assert runner.claim_next_job(risk_store, cfg)["state"] == "running"
 
-    assert runner.recover_running_panels(risk_store) == {"recovered": 1}
-    row = risk_store.query_one("SELECT status, error, retry FROM rr_panels WHERE id = ?", (panel["id"],))
-    assert (row["status"], row["error"], row["retry"]) == ("error", "restart", 1)
-    assert {r["status"] for r in coverage(risk_store, target_key).values()} == {"pending"}
-    assert risk_store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))["state"] == "queued"
+    assert runner.recover_running_panels(risk_store) == {"recovered": 0, "paused": 0}
+    job = risk_store.query_one("SELECT state, state_by, error FROM rr_jobs WHERE id = ?", (job_id,))
+    assert (job["state"], job["state_by"], job["error"]) == ("queued", None, None)
+
+
+def test_restart_does_not_overwrite_a_cancel(risk_store, tmp_path):
+    """패널이 도는 중에 취소한 잡(cancelling)은 재기동 복구가 건드리지 않는다 — 다음 편성에서 cancelled 가 된다."""
+    target_key, cfg, job_id, _panel = _cut_by_restart(risk_store, tmp_path)
+    runner.cancel_job(risk_store, job_id, by=OWNER)
+
+    assert runner.recover_running_panels(risk_store) == {"recovered": 1, "paused": 0}
+    assert risk_store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))["state"] == "cancelling"
+    assert runner.claim_next_job(risk_store, cfg) is None
+    assert risk_store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))["state"] == "cancelled"
+    assert {(r["status"], r["retry"]) for r in coverage(risk_store, target_key).values()} == {("pending", 0)}
+
+
+def test_the_first_tick_after_boot_does_not_resend_the_cut_panel(risk_store, tmp_path, monkeypatch):
+    """실제 `RiskRunner.start()` 의 기동 복구 뒤 첫 틱 — 끊긴 패널의 좌석을 엔진에 다시 보내지 않는다.
+
+    루프 스레드는 띄우지 않고(틱을 손으로 한 번 부른다) 기동 복구 배선만 실물로 탄다 — 시간을 기다려 '안 갔다' 를
+    보면 느린 박스에서는 고장 난 코드도 통과한다.
+    """
+    target_key, cfg, job_id, _panel = _cut_by_restart(risk_store, tmp_path)
+    monkeypatch.setattr(runner, "_LOOPS", ())
+    engine, rec = FakePanelEngine(), {}
+    rr = runner.RiskRunner(risk_store, cfg, engine=engine, narrative_mod=fake_narrative(rec),
+                           registry_mod=fake_registry(rec))
+    rr.start()
+    try:
+        rr._panel_tick()
+        for worker in list(rr._workers):
+            worker.join(timeout=30)
+    finally:
+        rr.stop()
+    assert engine.calls == [] and rr._workers == []
+    assert [(r["status"], r["error"]) for r in risk_store.query(
+        "SELECT status, error FROM rr_panels WHERE target_key = ? ORDER BY panel_no", (target_key,))
+    ] == [("error", "restart")]
+    assert risk_store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))["state"] == "paused"
 
 
 # ---------------------------------------------------------------- 모델 출처 스냅샷(plan §6.7.2 1단계 · §0.9 P1-13)

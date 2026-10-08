@@ -40,6 +40,11 @@ SEAT_CONTRACT_TOTAL_MAX = 1000     # E0c 합 ≤1000자(plan §5.6.1 예산표)
 USER_MEMO_MAX = 2000
 # 앱이 스트림을 놓은 사유(EngineStreamLost.code) — 패널 벽시계 · 줄 사이 침묵 · 중간 절단. 엔진·좌석의 실패가 아니다.
 STREAM_LOST_CODES: tuple[str, ...] = ("panel_timeout", "engine_silent", "engine_stream_cut")
+# 앱이 재기동해 닫은 패널의 error 문구. 스트림을 놓은 것과 같은 부류다 — 엔진·좌석의 실패가 아니고, 앱만 다시 떴으면
+# 엔진 쪽 심의는 분리 태스크로 계속 돈다.
+RESTART_CODE = "restart"
+# 좌석 재시도와 연속 실패(ENGINE_FAIL_STREAK)에 세지 않는 패널 error 코드 — 엔진도 좌석도 실패하지 않은 중단이다.
+UNCHARGED_CODES: tuple[str, ...] = (*STREAM_LOST_CODES, RESTART_CODE)
 PROGRESS_WRITE_INTERVAL_S = 60     # 도는 패널의 '마지막 신호' 를 잡 행에 적는 간격 — 줄마다 적으면 15초 ping 이 DB 를 두드린다
 
 # 러너 정본 경로가 부르는 모듈 함수(없으면 잡을 집지 않고 error 로 강등한다 — 반쪽 저장 방지).
@@ -604,7 +609,7 @@ def create_job(
 def _set_job(store: Any, job_id: str, state: str, *, reason: str | None = None, error: str | None = None,
              by: str | None = None) -> dict:
     """잡 상태 전이 1건. `by` 는 주체다 — 사람은 email, 자동 정지는 'code:diminishing'·'code:daily_cap'(plan §0.6),
-    앱이 스트림을 놓아 멈춘 것은 'code:<STREAM_LOST_CODES 의 사유>' 다."""
+    엔진·좌석 탓이 아닌 중단으로 멈춘 것은 'code:<UNCHARGED_CODES 의 사유>' 다."""
     now = now_epoch()
     actor = by or (f"code:{reason}" if reason in ("diminishing", "daily_cap") else None)
     if actor:
@@ -708,17 +713,36 @@ def claim_next_job(store: Any, settings: Any | None = None) -> dict | None:
 
 # ---------------------------------------------------------------- 재기동 복구(plan §6.7.2 끝 문단)
 def recover_running_panels(store: Any) -> dict:
-    """이전 기동이 남긴 running 패널을 error(retry+1) 로 닫고 좌석을 pending 으로 되돌린다."""
-    rows = store.query("SELECT id, target_key, retry FROM rr_panels WHERE status = 'running' ORDER BY created_at ASC")
+    """이전 기동이 남긴 running 패널을 error('restart') 로 닫고 좌석을 차감 없이 pending 으로 되돌린다.
+
+    재기동은 좌석 탓도 엔진 탓도 아니다. 앱만 다시 떴으면 엔진은 그 심의를 분리 태스크로 끝까지 돌리고 있다 —
+    그래서 스트림을 놓은 패널(_close_panel_stream_lost)과 같이 다룬다. 종전에는 좌석 retry 를 올리고 잡을 곧바로
+    queued 로 돌려, 기동 직후 첫 틱이 같은 좌석을 엔진에 다시 보냈다(같은 심의가 공유 LLM 에 겹쳐 돈다). 재배포
+    세 번이면 좌석이 skipped 로 굳었다 — 벽시계가 12시간이라 패널 도중의 재기동은 드문 일이 아니다.
+    패널이 끊긴 잡은 멈춘다(사람이 재개하면 이어 돈다). 패널 사이에 있던 잡(running 인데 도는 패널이 없다)은
+    겹칠 심의가 없으니 queued 로 돌린다. cancelling 은 건드리지 않는다 — 다음 편성에서 cancelled 가 된다.
+    """
+    rows = store.query("SELECT id, target_key FROM rr_panels WHERE status = 'running' ORDER BY created_at ASC")
     now = now_epoch()
+    cut_targets: set[str] = set()
     for row in rows:
-        planner.fail_panel_seats(store, row["id"], reason="engine_fail")
+        planner.fail_panel_seats(store, row["id"], reason="engine_fail", charge=False)
         store.execute(
-            "UPDATE rr_panels SET status = 'error', error = 'restart', retry = ?, ended_at = ? WHERE id = ?",
-            (int(row["retry"] or 0) + 1, now, row["id"]),
+            "UPDATE rr_panels SET status = 'error', error = ?, ended_at = ? WHERE id = ?",
+            (RESTART_CODE, now, row["id"]),
         )
-    store.execute("UPDATE rr_jobs SET state = 'queued', updated_at = ? WHERE state = 'running'", (now,))
-    return {"recovered": len(rows)}
+        cut_targets.add(row["target_key"])
+    paused = 0
+    for job in store.query("SELECT id, target_key FROM rr_jobs WHERE state = 'running'"):
+        if job["target_key"] in cut_targets:
+            # 사유는 잡의 error 에 적는다(pause_reason 은 CHECK 로 세 값만 받는다).
+            _set_job(store, job["id"], "paused", by=f"code:{RESTART_CODE}",
+                     error=f"{RESTART_CODE}: 앱이 재기동해 도는 패널을 닫았다 — 엔진 쪽 심의는 계속 돌 수 있다."
+                           " 잡을 멈췄다(좌석 재시도는 차감하지 않았다). 재개하면 이어 돈다")
+            paused += 1
+        else:
+            _set_job(store, job["id"], "queued")
+    return {"recovered": len(rows), "paused": paused}
 
 
 # ---------------------------------------------------------------- 패널 1건(plan §6.7.2 1~12단계)
@@ -859,17 +883,17 @@ def _diminishing(store: Any, target_key: str) -> bool:
     return True
 
 
-def _stream_lost_code(error: Any) -> str | None:
-    """패널 error 문구가 '앱이 스트림을 놓았다' 는 사유면 그 코드(STREAM_LOST_CODES), 아니면 None."""
+def _uncharged_code(error: Any) -> str | None:
+    """패널 error 문구가 엔진·좌석 탓이 아닌 중단(스트림을 놓았다 · 재기동)이면 그 코드(UNCHARGED_CODES), 아니면 None."""
     code = str(error or "").split(":", 1)[0].strip()
-    return code if code in STREAM_LOST_CODES else None
+    return code if code in UNCHARGED_CODES else None
 
 
 def _error_streak(store: Any, target_key: str) -> int:
     """가장 최근부터 연속으로 error 로 닫힌 패널 수(ENGINE_FAIL_STREAK 에서 멈춘다).
 
-    앱이 스트림을 놓은 패널은 세지 않고 건너뛴다 — 엔진이 실패한 것이 아니라서, 그 패널 때문에 진짜 실패
-    두 번이 세 번으로 세져 잡이 죽으면 안 된다.
+    앱이 스트림을 놓았거나 재기동이 끊은 패널은 세지 않고 건너뛴다 — 엔진이 실패한 것이 아니라서, 그 패널
+    때문에 진짜 실패 두 번이 세 번으로 세져 잡이 죽으면 안 된다.
     """
     streak = 0
     for row in store.query(
@@ -877,7 +901,7 @@ def _error_streak(store: Any, target_key: str) -> int:
     ):
         if row["status"] != "error":
             break
-        if _stream_lost_code(row["error"]):
+        if _uncharged_code(row["error"]):
             continue
         streak += 1
         if streak >= ENGINE_FAIL_STREAK:
