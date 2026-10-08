@@ -292,11 +292,29 @@ def test_a_lost_stream_is_told_apart_from_an_engine_failure(tmp_path):
     assert "NGINX_AGENT_READ_TIMEOUT 또는 포털·에이전트 서버 재기동" in str(lost.value)
 
     # 포털 릴레이가 제 침묵 한도로 구독을 끊으며 보내는 error 프레임도 같은 사정이다(엔진 실패가 아니다).
-    idle = ('event: error\ndata: {"code": "agent_stream_idle", "message": "에이전트 서버가 46800초 동안 조용했다"}\n\n'
-            "event: done\ndata: {}\n\n")
-    with pytest.raises(EngineStreamLost) as lost:
-        _engine(tmp_path, chat(lambda request: idle.encode())).run({"question": "q"})
-    assert lost.value.code == "engine_silent" and "agent_stream_idle: 에이전트 서버가 46800초" in str(lost.value)
+    # 그 프레임은 늘 패널 벽시계(43200초)를 넘긴 뒤에 온다 — 포털은 46800초를 조용히 기다린 끝에야 보낸다. 벽시계를
+    # 먼저 보면 원인이 13시간 침묵인데 문구는 '벽시계를 넘겼다(HWAXRISK_PANEL_TIMEOUT_S)' 가 되고, 그 손잡이를
+    # 올려도 낫지 않는다. 그래서 시계를 실제 순서대로 돌린다(경과 0 에서 보내면 이 순서가 시험되지 않는다).
+    from app import common
+
+    now = {"t": common.now_epoch()}
+
+    def idle(request):
+        yield 'event: status\ndata: {"step": "1라운드"}\n\n'.encode()
+        now["t"] += 46800 + 1
+        yield ('event: error\ndata: {"code": "agent_stream_idle", "message": "에이전트 서버가 46800초 동안 조용했다'
+               '(AGENT_STREAM_IDLE_TIMEOUT_S)"}\n\nevent: done\ndata: {}\n\n').encode()
+
+    assert config.panel_timeout_s(_settings(tmp_path)) < 46800
+    previous = common.set_clock(lambda: now["t"])
+    try:
+        with pytest.raises(EngineStreamLost) as lost:
+            _engine(tmp_path, chat(idle)).run({"question": "q"})
+    finally:
+        common.set_clock(previous)
+    assert lost.value.code == "engine_silent" and str(lost.value).startswith(
+        "engine_silent: agent_stream_idle: 에이전트 서버가 46800초 동안 조용했다(AGENT_STREAM_IDLE_TIMEOUT_S) — 경과 46801초")
+    assert "HWAXRISK_PANEL_TIMEOUT_S" not in str(lost.value)
 
     # 응답이 흐르기 전의 실패는 엔진까지 가지 못한 것이다 — 놓친 스트림이 아니라 엔진 호출 실패다.
     def refused(request: httpx.Request) -> httpx.Response:

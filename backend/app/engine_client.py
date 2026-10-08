@@ -118,26 +118,25 @@ class _StreamWatch:
                   f" 엔진 쪽 심의는 계속 돌 수 있다(conv_id={self.conv_id or '없음'})", conv_id=self.conv_id)
 
 
-def _within_wall_clock(lines: Iterable[str], wall_s: int, watch: _StreamWatch) -> Iterator[str]:
-    """줄이 올 때마다 벽시계를 본다 — 시작에서 `wall_s` 초를 넘겼으면 `EngineStreamLost` 로 끊는다(plan §6.10.2).
+def _watched(frames: Iterable[tuple[str, dict]], wall_s: int, watch: _StreamWatch) -> Iterator[tuple[str, dict]]:
+    """프레임마다 진행을 적고 패널 벽시계를 본다 — 시작에서 `wall_s` 초를 넘겼으면 `EngineStreamLost` 로 끊는다(plan §6.10.2).
 
     읽기 타임아웃은 줄 사이 침묵만 잰다. 엔진이 상태 줄을 계속 보내는 한 걸리지 않아서, 벽시계를 따로 재지
     않으면 패널 하나가 러너 자리와 그 타깃의 직렬 순서를 끝없이 붙든다. 엔진에는 패널 전체를 재는 손잡이가
-    없다(`timeout_s` 는 LLM 호출 한 번의 타임아웃이다) — 그래서 앱이 잰다. 줄이 오지 않는 동안은 볼 수 없다.
+    없다(`timeout_s` 는 LLM 호출 한 번의 타임아웃이다) — 그래서 앱이 잰다. 프레임이 오지 않는 동안은 볼 수 없다.
     그 구간은 읽기 타임아웃이 끊는다(엔진이 15초마다 ping 을 흘리므로 살아 있는 스트림은 15초마다 본다).
     `wall_s` 가 0 이면 재지 않는다.
+
+    포털이 침묵 한도로 구독을 끊었다는 error 프레임은 **벽시계보다 먼저** 가려 엔진 실패와 갈라 올린다. 그 프레임은
+    포털이 46800초를 조용히 기다린 뒤에야 오므로 늘 벽시계(43200초)를 넘긴 뒤다 — 벽시계를 줄 단계에서 먼저 보던
+    동안에는 이 갈래에 닿지 못했고, 13시간 조용했던 엔진이 '패널이 벽시계를 넘겼다' 로 적혀 올려도 낫지 않는
+    손잡이(HWAXRISK_PANEL_TIMEOUT_S)를 가리켰다. 그 밖의 늦은 프레임(결정문·다른 error)은 그대로 벽시계 초과다.
     """
-    for line in lines:
-        if wall_s and now_epoch() > watch.started + wall_s:
-            raise watch.lost("panel_timeout", f"패널이 {wall_s}초(HWAXRISK_PANEL_TIMEOUT_S)를 넘겼다")
-        yield line
-
-
-def _watched(frames: Iterable[tuple[str, dict]], watch: _StreamWatch) -> Iterator[tuple[str, dict]]:
-    """프레임마다 진행을 적는다. 포털이 침묵 한도로 구독을 끊었다는 error 프레임은 엔진 실패와 갈라 올린다."""
     for name, data in frames:
         if name == "error" and str(data.get("code") or "") == PORTAL_STREAM_IDLE_CODE:
             raise watch.lost("engine_silent", f"{PORTAL_STREAM_IDLE_CODE}: {data.get('message') or ''}".strip())
+        if wall_s and now_epoch() > watch.started + wall_s:
+            raise watch.lost("panel_timeout", f"패널이 {wall_s}초(HWAXRISK_PANEL_TIMEOUT_S)를 넘겼다")
         watch.frame(name, data)
         yield name, data
 
@@ -358,8 +357,7 @@ class PortalPanelEngine:
                         response.read()
                         raise EngineError(f"포털이 심의를 거부했습니다 — HTTP {response.status_code}")
                     streaming = True
-                    result = collect_stream(_watched(
-                        parse_sse(_within_wall_clock(response.iter_lines(), wall_s, watch)), watch))
+                    result = collect_stream(_watched(parse_sse(response.iter_lines()), wall_s, watch))
         except PatUnavailable:
             raise
         except httpx.ReadTimeout as exc:
