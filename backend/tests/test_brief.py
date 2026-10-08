@@ -532,6 +532,33 @@ def test_e9_reads_the_rule_hits_a_frozen_snapshot_really_stored(risk_store):
     assert lines[0].startswith("rule:R-001 중대 found=1건 e:")
 
 
+def test_a_long_warning_list_does_not_push_the_fired_rules_out_of_e9(risk_store):
+    """경고가 많아도 발화한 규칙 줄은 남는다 — 줄 수가 정해지지 않은 쪽이 뒤에서 잘린다.
+
+    E9 는 warnings 를 먼저 쌓고 규칙을 뒤에 붙였다. E9 의 본문 자리는 약 460자라 경고가 다섯 건만 넘어도
+    `clip_lines` 가 그 뒤를 통째로 버렸고, 발화한 규칙은 `…(n줄 생략)` 안으로 사라졌다 — 실제 어셈블리는
+    자동 이름·형상 없음 경고만으로 그 수를 넘는다. 규칙은 많아야 시드 일곱이라 앞에 둔다.
+    """
+    _seed_projects(risk_store)
+    warnings = [{"code": "auto_named", "severity": "WARNING", "ref": f"a_stack.step#PART_{i}",
+                 "message": f"이름이 자동 생성됐다 — PART_{i} 는 원본 STEP 에 이름이 없는 인스턴스다."}
+                for i in range(12)]
+    _add_snapshot(risk_store, "s_warn", "p_now", {"warnings": warnings})
+    _add_state(risk_store, "s_warn", "[개요] 경고가 많은 스냅샷")
+    risk_store.execute(
+        "INSERT INTO rr_targets(target_key, owner_sub, kind, ref_id, project_id, ir_hash, level,"
+        " external_sync_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+        ("snap:s_warn", OWNER, "snap", "s_warn", "p_now", "h_s_warn", "C0", _j(empty_sync()), 1, 1))
+    built = brief.build_brief(risk_store, "snap:s_warn", seats=SEATS)
+    e9 = dict(zip(built["keys"], built["evidence"]))["E9"]["result"]
+
+    assert e9.endswith("줄 생략)"), "경고 12건이 다 들어갔다면 이 시험은 아무것도 보지 않는다"
+    lines = _e9_rule_lines(built)
+    assert [line.split(" ")[0] for line in lines] == ["rule:R-001", "rule:R-007"], e9
+    # 경고도 남은 자리만큼은 실린다 — 규칙이 경고를 지우는 것이 아니다.
+    assert "warn:auto_named#a_stack.step#PART_0 " in e9
+
+
 # ---------------------------------------------------------------- E7 고정 슬롯(§5.6.3)
 def test_e7_fixed_slots_stay_inside_seat_budget(risk_store):
     target_key = seed_diff_target(risk_store)

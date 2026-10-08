@@ -1125,6 +1125,7 @@ def _item_e9(ctx) -> dict:
     hits = _j(ctx["state"]["rule_hits_json"], []) if ctx["state"] is not None else []
     if isinstance(hits, dict):
         hits = hits.get("hits") or []
+    rules: list[str] = []
     for hit in hits if isinstance(hits, list) else []:
         if not isinstance(hit, dict):
             continue
@@ -1134,7 +1135,7 @@ def _item_e9(ctx) -> dict:
         rule_id = _s(hit.get("rule"))
         if hit.get("evaluable") is False or hit.get("pass") is None:
             # 결측을 '이상 없음' 으로 읽히게 두지 않는다(plan §3.2.6·§5.6.1 E9).
-            lines.append(f"rule:{rule_id} 평가 불가({_s(hit.get('not_evaluable_reason'), 'unknown')})")
+            rules.append(f"rule:{rule_id} 평가 불가({_s(hit.get('not_evaluable_reason'), 'unknown')})")
             continue
         if hit.get("pass"):
             continue
@@ -1144,7 +1145,10 @@ def _item_e9(ctx) -> dict:
         refs = [_ref_name(x) for x in (found.get("refs") or [])[:3]]
         parts = [f"rule:{rule_id}", _s(hit.get("severity"), "-"), f"found={_s(found.get('count'), '?')}건", *refs,
                  _cut(hit.get("why_it_matters"), 350)]
-        lines.append(" ".join(p for p in parts if p))
+        rules.append(" ".join(p for p in parts if p))
+    # 규칙 줄을 앞에 둔다 — 규칙은 많아야 시드 일곱이지만 warnings 는 수가 정해져 있지 않다. 뒤에 붙였을 때는 경고가
+    # 다섯 건만 넘어도 발화한 규칙이 상한에 통째로 잘렸다(`clip_lines` 는 넘치는 줄부터 뒤를 전부 버린다).
+    lines = rules + lines
     if not lines:
         lines = ["[warnings 0 · rule_hits 0]"]
     return {"key": "E9", "args": _s(ctx["snapshot_id"]), "result": _body(source, lines)}
