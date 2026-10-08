@@ -611,6 +611,140 @@ def test_retries_after_429_reuse_the_one_portal_conversation(risk_store, tmp_pat
         "SELECT conv_id FROM rr_panels WHERE id = ?", (out["panel_id"],))["conv_id"] == "conv-1"
 
 
+# ---------------------------------------------------------------- 취소·정지가 도는 패널에 닿는다(plan §6.7.2 · §0.6)
+class _EndlessPings(httpx.SyncByteStream):
+    """끝나지 않는 심의의 스트림 — ping 만 흘린다. 닫히면 그치고, 닫지 않아도 PINGS_MAX 에서 그친다(시험의 안전판)."""
+
+    PINGS_MAX = 3000
+
+    def __init__(self) -> None:
+        self.sent = 0
+        self.flowing = threading.Event()
+        self.closed = threading.Event()
+
+    def __iter__(self):
+        while self.sent < self.PINGS_MAX and not self.closed.is_set():
+            self.sent += 1
+            if self.sent >= 3:
+                self.flowing.set()
+            time.sleep(0.005)
+            yield b'event: ping\ndata: {"idle_s": 15}\n\n'
+
+    def close(self) -> None:
+        self.closed.set()
+
+
+def _streaming_runner(store, tmp_path, monkeypatch):
+    """실 러너 + 실 엔진 클라이언트를, ping 만 흘리는 가짜 포털에 물린다(동시 2). 취소는 프레임마다 묻게 한다."""
+    monkeypatch.setattr(runner, "STOP_POLL_INTERVAL_S", 0)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path, risk_concurrency=2)
+    streams: list[_EndlessPings] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == engine_client.CONVERSATIONS_PATH:
+            return httpx.Response(200, json={"id": "conv-9"})
+        if request.url.path != engine_client.CHAT_PATH:
+            return httpx.Response(200, json={"model": "glm-fake"})          # agent-server /health
+        streams.append(_EndlessPings())
+        return httpx.Response(200, stream=streams[-1], headers={"content-type": "text/event-stream"})
+
+    engine = engine_client.PortalPanelEngine(store, cfg, transport=httpx.MockTransport(handler))
+    return runner.RiskRunner(store, cfg, engine), cfg, streams
+
+
+def _free_slots(rr) -> int:
+    held = 0
+    while rr._sem.acquire(blocking=False):
+        held += 1
+    for _ in range(held):
+        rr._sem.release()
+    return held
+
+
+@pytest.mark.parametrize("action", ["cancel", "pause"])
+def test_cancel_or_pause_closes_the_panel_that_is_streaming(risk_store, tmp_path, monkeypatch, action):
+    """취소·일시정지는 도는 패널의 스트림을 닫는다 — 러너 자리와 그 타깃의 직렬 순서가 곧바로 풀린다.
+
+    종전에는 둘 다 패널 경계에서만 들었다. 벽시계가 12시간이 되면서, 잘못 낸 잡을 취소해도 그 패널이 최대 12시간
+    러너 자리 하나와 타깃 순서를 붙들었다 — 같은 타깃의 새 잡은 그동안 집히지 않고, 그런 패널 둘이면 모든 타깃이
+    선다. 닫힌 패널은 좌석 탓이 아니므로 차감하지 않는다. 엔진 쪽 심의는 계속 돌 수 있다(그 대화를 패널이 가리킨다).
+    """
+    target_key = _seed(risk_store)
+    rr, cfg, streams = _streaming_runner(risk_store, tmp_path, monkeypatch)
+    job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+    try:
+        rr._panel_tick()
+        worker = rr._workers[0]
+        for _ in range(6000):                                   # 워커가 대화를 만들고 스트림을 열 때까지
+            if streams:
+                break
+            time.sleep(0.01)
+        assert streams and streams[0].flowing.wait(60), "패널이 스트림까지 가지 못했다"
+        assert _free_slots(rr) == 1
+
+        (runner.cancel_job if action == "cancel" else runner.pause_job)(risk_store, job_id, by=OWNER)
+        worker.join(60)
+        assert not worker.is_alive(), "취소·정지 뒤에도 워커가 스트림을 읽고 있다"
+        # 스트림을 끝까지 읽고 끝난 것이 아니라 닫았다.
+        assert streams[0].closed.is_set() and streams[0].sent < _EndlessPings.PINGS_MAX
+    finally:
+        for stream in streams:
+            stream.closed.set()
+        rr.stop()
+
+    panel = risk_store.query_one(
+        "SELECT status, error, retry, conv_id FROM rr_panels WHERE target_key = ?", (target_key,))
+    assert (panel["status"], panel["retry"], panel["conv_id"]) == ("error", 0, "conv-9")
+    said = "취소했다" if action == "cancel" else "일시정지했다"
+    assert panel["error"].startswith(f"cancelled: 사용자가 잡을 {said} — 진행 중 패널을 닫았다 — 경과 ")
+    assert "엔진 쪽 심의는 계속 돌 수 있다(conv_id=conv-9)" in panel["error"]
+    seats = risk_store.query("SELECT status, retry FROM rr_coverage WHERE target_key = ?", (target_key,))
+    assert {(r["status"], r["retry"]) for r in seats} == {("pending", 0)}
+    assert _free_slots(rr) == 2 and runner._error_streak(risk_store, target_key) == 0
+
+    job = risk_store.query_one("SELECT state, pause_reason FROM rr_jobs WHERE id = ?", (job_id,))
+    if action == "cancel":
+        # 닫으면서 사람의 취소를 덮지 않는다 — 다음 편성에서 cancelled 가 되고, 같은 타깃의 새 잡이 바로 집힌다.
+        # (새 잡은 앞 잡이 cancelled 가 된 뒤에 만든다 — 같은 초에 만든 두 잡의 순서는 id 라 정해지지 않는다.)
+        assert job["state"] == "cancelling" and runner.claim_next_job(risk_store, cfg) is None
+        assert risk_store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))["state"] == "cancelled"
+        again = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+        assert runner.claim_next_job(risk_store, cfg)["id"] == again
+    else:
+        assert (job["state"], job["pause_reason"]) == ("paused", "user")
+        assert runner.claim_next_job(risk_store, cfg) is None
+        runner.resume_job(risk_store, job_id, by=OWNER)
+        assert runner.claim_next_job(risk_store, cfg)["id"] == job_id
+
+
+def test_a_cancel_is_heard_while_waiting_for_an_engine_slot(risk_store, tmp_path, monkeypatch):
+    """엔진 자리를 기다리는 중의 취소도 듣는다 — 한 시간 예산을 다 기다린 뒤가 아니다. 좌석은 차감하지 않는다."""
+    clock = _Clock()
+    monkeypatch.setattr(runner, "time", clock)
+    target_key = _seed(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+
+    class Engine(_NoSlot):
+        def run(self, delib_opts, *, owner_sub=None):
+            if self.calls == 2:
+                runner.cancel_job(risk_store, job_id, by=OWNER)
+            super().run(delib_opts, owner_sub=owner_sub)
+
+    engine = Engine()
+    out = runner.run_panel(risk_store, cfg, engine, runner.claim_next_job(risk_store, cfg))
+    assert out["status"] == "error" and out["error"].startswith("cancelled: 사용자가 잡을 취소했다"), out
+    assert engine.calls == 3 and clock.slept == [30, 30]          # 취소한 뒤로는 기다리지도 다시 묻지도 않는다
+    panel = risk_store.query_one("SELECT status, retry FROM rr_panels WHERE id = ?", (out["panel_id"],))
+    assert (panel["status"], panel["retry"]) == ("error", 0)
+    seats = risk_store.query("SELECT status, retry FROM rr_coverage WHERE target_key = ?", (target_key,))
+    assert {(r["status"], r["retry"]) for r in seats} == {("pending", 0)}
+    # 사람의 취소를 paused(engine_busy)로 덮지 않는다.
+    assert risk_store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))["state"] == "cancelling"
+    assert runner.claim_next_job(risk_store, cfg) is None
+    assert risk_store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))["state"] == "cancelled"
+
+
 CHAIR_KNOB = "DELIB_TIMEOUT_S · 요청 timeout_s(상한 DELIB_TIMEOUT_MAX_S) · 의장 재호출 DELIB_CHAIR_RETRIES"
 NO_DECISION_TEXT = "■ 의장 결정문 없음 — 좌석별 마지막 입장.\n• mech-a000: 간극이 좁다"
 

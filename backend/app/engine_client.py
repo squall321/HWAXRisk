@@ -120,7 +120,8 @@ class _StreamWatch:
                   f" 엔진 쪽 심의는 계속 돌 수 있다(conv_id={self.conv_id or '없음'})", conv_id=self.conv_id)
 
 
-def _watched(frames: Iterable[tuple[str, dict]], wall_s: int, watch: _StreamWatch) -> Iterator[tuple[str, dict]]:
+def _watched(frames: Iterable[tuple[str, dict]], wall_s: int, watch: _StreamWatch,
+             should_stop: Callable[[], str | None] | None = None) -> Iterator[tuple[str, dict]]:
     """프레임마다 진행을 적고 패널 벽시계를 본다 — 시작에서 `wall_s` 초를 넘겼으면 `EngineStreamLost` 로 끊는다(plan §6.10.2).
 
     읽기 타임아웃은 줄 사이 침묵만 잰다. 엔진이 상태 줄을 계속 보내는 한 걸리지 않아서, 벽시계를 따로 재지
@@ -133,12 +134,19 @@ def _watched(frames: Iterable[tuple[str, dict]], wall_s: int, watch: _StreamWatc
     포털이 46800초를 조용히 기다린 뒤에야 오므로 늘 벽시계(43200초)를 넘긴 뒤다 — 벽시계를 줄 단계에서 먼저 보던
     동안에는 이 갈래에 닿지 못했고, 13시간 조용했던 엔진이 '패널이 벽시계를 넘겼다' 로 적혀 올려도 낫지 않는
     손잡이(HWAXRISK_PANEL_TIMEOUT_S)를 가리켰다. 그 밖의 늦은 프레임(결정문·다른 error)은 그대로 벽시계 초과다.
+
+    `should_stop` 은 러너가 준 물음이다 — 사람이 그 잡을 취소·정지했으면 사유를 돌려준다. 그때 여기서 올린 예외가
+    `with client.stream(...)` 을 빠져나가며 응답을 닫는다. 벽시계가 12시간이라, 이 물음이 없으면 취소가 그만큼
+    늦게 닿는다.
     """
     for name, data in frames:
         if name == "error" and str(data.get("code") or "") == PORTAL_STREAM_IDLE_CODE:
             raise watch.lost("engine_silent", f"{PORTAL_STREAM_IDLE_CODE}: {data.get('message') or ''}".strip())
         if wall_s and now_epoch() > watch.started + wall_s:
             raise watch.lost("panel_timeout", f"패널이 {wall_s}초(HWAXRISK_PANEL_TIMEOUT_S)를 넘겼다")
+        why = should_stop() if should_stop is not None else None
+        if why:
+            raise watch.lost("cancelled", f"{why} — 진행 중 패널을 닫았다")
         watch.frame(name, data)
         yield name, data
 
@@ -327,13 +335,14 @@ class PortalPanelEngine:
     # -- 6·7단계 엔진 호출·SSE 캡처 ---------------------------------------------
     def run(self, delib_opts: Mapping[str, Any], *, owner_sub: str | None = None,
             on_progress: Callable[[Mapping[str, Any]], None] | None = None,
-            conversation: tuple[str, str] | None = None) -> dict:
+            conversation: tuple[str, str] | None = None,
+            should_stop: Callable[[], str | None] | None = None) -> dict:
         """패널 1건을 돌리고 {decision_text, turns, conv_id, events, …} 를 돌려준다.
 
         429(포털 agent_semaphore 초과)는 `EngineBusy` 라 러너가 대기 후 다시 묻는다 — 그때 러너는 그 예외의
         `conversation`(대화 id, 만든 자격)을 되돌려 주고, 같은 자격이면 그 대화를 다시 쓴다. 연결 실패·error 프레임은
-        `EngineError` 다. 앱이 스트림을 놓은 것(패널 벽시계·줄 사이 침묵·중간 절단)은 `EngineStreamLost` 로
-        가른다 — 그때 엔진은 심의를 계속 돌릴 수 있다. 의장이 결정문을 못 낸 것은 `EngineNoDecision` 이고
+        `EngineError` 다. 앱이 스트림을 놓은 것(패널 벽시계·줄 사이 침묵·중간 절단, 그리고 `should_stop` 이 알린
+        취소·정지)은 `EngineStreamLost` 로 가른다 — 그때 엔진은 심의를 계속 돌릴 수 있다. 의장이 결정문을 못 낸 것은 `EngineNoDecision` 이고
         그 심의의 대화를 실어 올린다. 자격이 없으면 `PatUnavailable` 이다.
         """
         opts = {k: v for k, v in dict(delib_opts).items() if k != "question"}
@@ -380,7 +389,7 @@ class PortalPanelEngine:
                         response.read()
                         raise EngineError(f"포털이 심의를 거부했습니다 — HTTP {response.status_code}")
                     streaming = True
-                    result = collect_stream(_watched(parse_sse(response.iter_lines()), wall_s, watch))
+                    result = collect_stream(_watched(parse_sse(response.iter_lines()), wall_s, watch, should_stop))
         except PatUnavailable:
             raise
         except EngineNoDecision as exc:

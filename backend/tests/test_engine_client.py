@@ -417,6 +417,42 @@ def test_a_lost_stream_is_told_apart_from_an_engine_failure(tmp_path):
     assert not isinstance(failed.value, EngineStreamLost)
 
 
+def test_a_stream_is_closed_when_the_runner_says_the_job_was_stopped(tmp_path):
+    """러너가 준 `should_stop` 이 사유를 돌려주면 그 프레임에서 스트림을 닫는다 — 남은 프레임은 읽지 않는다.
+
+    프레임이 올 때마다 묻는다. 엔진이 15초마다 ping 을 흘리므로 살아 있는 스트림은 그 간격 안에 듣는다.
+    """
+    _service_pat(tmp_path)
+    sent: list[str] = []
+    asked: list[int] = []
+
+    def body():
+        for step in ("1라운드", "2라운드", "3라운드", "의장"):
+            sent.append(step)
+            yield ('event: status\ndata: {"step": "%s"}\n\n' % step).encode()
+        yield 'event: delib\ndata: {"kind": "decision", "text": "결정문"}\n\nevent: done\ndata: {}\n\n'.encode()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/agent/conversations":
+            return httpx.Response(200, json={"id": "conv-3"})
+        return httpx.Response(200, content=body(), headers={"content-type": "text/event-stream"})
+
+    def should_stop():
+        asked.append(1)
+        return "사용자가 잡을 취소했다" if len(asked) >= 3 else None
+
+    with pytest.raises(EngineStreamLost) as lost:
+        _engine(tmp_path, handler).run({"question": "q"}, should_stop=should_stop)
+    assert lost.value.code == "cancelled" and lost.value.conv_id == "conv-3"
+    assert str(lost.value).startswith("cancelled: 사용자가 잡을 취소했다 — 진행 중 패널을 닫았다 — 경과 ")
+    assert "마지막 단계 2라운드" in str(lost.value) and "엔진 쪽 심의는 계속 돌 수 있다(conv_id=conv-3)" in str(lost.value)
+    assert sent == ["1라운드", "2라운드", "3라운드"] and len(asked) == 3
+
+    # 멈추라는 말이 없으면 끝까지 받는다.
+    sent.clear()
+    assert _engine(tmp_path, handler).run({"question": "q"}, should_stop=lambda: None)["decision_text"] == "결정문"
+
+
 PING = 'event: ping\ndata: {"idle_s": 15, "ts": 1}\n\n'
 
 

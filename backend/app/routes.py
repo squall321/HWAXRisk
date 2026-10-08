@@ -2128,7 +2128,8 @@ JOB_ACTIONS = {"pause": runner.pause_job, "resume": runner.resume_job, "cancel":
 
 @router.post("/jobs/{job_id}/{action}")
 def job_action(job_id: str, action: str, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """일시정지·재개·취소(패널 경계에서 반영). 주체는 rr_jobs.state_by 에 남는다(plan §0.6)."""
+    """일시정지·재개·취소. 취소·일시정지는 도는 패널의 스트림을 닫는다(패널 경계까지 기다리지 않는다 — 벽시계가
+    12시간이다). 주체는 rr_jobs.state_by 에 남는다(plan §0.6)."""
     owner_sub = _require_user(ident)
     if action not in JOB_ACTIONS:
         raise AppError("E404", f"모르는 잡 조작입니다 — {action}.", 404)

@@ -36,8 +36,15 @@ QUALITY_ADVERSARY_OVERREJECT = 0.6
 SEAT_CONTRACT_LINE_MAX = 200       # E0c 도메인당 ≤200자
 SEAT_CONTRACT_TOTAL_MAX = 1000     # E0c 합 ≤1000자(plan §5.6.1 예산표)
 USER_MEMO_MAX = 2000
-# 앱이 스트림을 놓은 사유(EngineStreamLost.code) — 패널 벽시계 · 줄 사이 침묵 · 중간 절단. 엔진·좌석의 실패가 아니다.
-STREAM_LOST_CODES: tuple[str, ...] = ("panel_timeout", "engine_silent", "engine_stream_cut")
+# 앱이 스트림을 놓은 사유(EngineStreamLost.code) — 패널 벽시계 · 줄 사이 침묵 · 중간 절단 · 사람의 취소·정지.
+# 엔진·좌석의 실패가 아니다.
+STREAM_LOST_CODES: tuple[str, ...] = ("panel_timeout", "engine_silent", "engine_stream_cut", "cancelled")
+# 도는 패널이 잡의 취소·정지를 듣는 간격(초) — 프레임마다 잡 행을 읽으면 15초 ping 이 DB 를 두드린다. 한도가 아니라 주기다.
+STOP_POLL_INTERVAL_S = 5
+# 도는 패널을 닫게 하는 잡 상태와 패널에 적는 말. 패널이 도는 동안 이 상태로 가는 길은 사람의 조작뿐이다
+# (자동 정지는 패널이 닫힌 뒤에 일어난다).
+STOP_JOB_STATES: dict[str, str] = {"cancelling": "사용자가 잡을 취소했다", "cancelled": "사용자가 잡을 취소했다",
+                                   "paused": "사용자가 잡을 일시정지했다"}
 # 앱이 재기동해 닫은 패널의 error 문구. 스트림을 놓은 것과 같은 부류다 — 엔진·좌석의 실패가 아니고, 앱만 다시 떴으면
 # 엔진 쪽 심의는 분리 태스크로 계속 돈다.
 RESTART_CODE = "restart"
@@ -67,6 +74,8 @@ class PanelEngine(Protocol):
     {last_frame_at, last_event_at, last_step, frames} 로 부르면 러너가 잡 행에 '마지막 신호' 를 적는다.
     선택 인자 run(..., conversation=) 를 받는 엔진에는 러너가 429 뒤의 재시도에 `EngineBusy.conversation` 을
     되돌려 준다 — 앞 시도가 만든 포털 대화를 다시 쓰라는 뜻이다.
+    선택 인자 run(..., should_stop=) 를 받는 엔진에는 러너가 물음 함수를 준다 — 프레임마다 불러 사유(문자열)가
+    돌아오면 스트림을 닫고 EngineStreamLost('cancelled') 로 올린다(사람이 그 잡을 취소·정지했다).
     포털 429 는 EngineBusy, 앱이 스트림을 놓은 것은 EngineStreamLost, 의장이 결정문을 못 낸 것은 EngineNoDecision,
     그 밖의 실패는 EngineError 로 올린다.
     """
@@ -92,7 +101,7 @@ class EngineError(Exception):
 
 
 class EngineStreamLost(EngineError):
-    """앱이 스트림을 놓았다 — 패널 벽시계·줄 사이 침묵·중간 절단(`code` ∈ STREAM_LOST_CODES).
+    """앱이 스트림을 놓았다 — 패널 벽시계·줄 사이 침묵·중간 절단·사람의 취소·정지(`code` ∈ STREAM_LOST_CODES).
 
     엔진이 실패한 것이 아니다. 엔진은 심의를 분리 태스크로 돌려 구독이 끊겨도 끝까지 간다 — 그래서 패널은
     error 로 닫되 좌석 재시도와 연속 실패에 세지 않고 잡을 멈춘다(run_panel). `conv_id` 는 그 심의의 포털
@@ -659,7 +668,8 @@ def _set_job(store: Any, job_id: str, state: str, *, reason: str | None = None, 
 
 
 def pause_job(store: Any, job_id: str, *, reason: str = "user", by: str | None = None) -> dict:
-    """패널 경계에서 반영되는 일시정지(reason ∈ diminishing|daily_cap|user)."""
+    """일시정지(reason ∈ diminishing|daily_cap|user). 도는 패널이 있으면 그 스트림을 닫는다(`_stop_reader`) —
+    패널 경계까지 기다리지 않는다. 닫힌 패널의 좌석은 차감 없이 pending 으로 돌아가고 재개하면 다시 편성된다."""
     row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))
     if row is None:
         raise AppError("E404", f"잡이 없습니다: {job_id}", 404)
@@ -678,7 +688,11 @@ def resume_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
 
 
 def cancel_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
-    """진행 중 패널은 끝까지 가고 그 다음 패널 경계에서 cancelled 가 된다."""
+    """취소. 도는 잡은 cancelling 이 되고, 도는 패널이 그것을 듣고 스트림을 닫은 뒤 다음 편성에서 cancelled 가 된다.
+
+    종전에는 패널이 끝까지 갔다 — 벽시계가 12시간이라 취소한 잡의 패널이 러너 자리와 그 타깃의 직렬 순서를 최대
+    12시간 붙들었다. 닫는 것은 앱의 구독이다. 엔진 쪽 심의는 분리 태스크라 끝까지 돌 수 있다.
+    """
     row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))
     if row is None:
         raise AppError("E404", f"잡이 없습니다: {job_id}", 404)
@@ -1016,6 +1030,10 @@ def run_panel(
     # 일이 드물지 않아, 한 번도 앉아 보지 못한 좌석이 skipped 로 굳고 잡이 engine_fail_streak 로 죽었다.
     busy_wait_s, busy_budget_s = config.engine_busy_wait_s(settings), config.engine_busy_max_wait_s(settings)
     busy_n, busy_until = 0, 0.0
+    # 사람이 이 잡을 취소·정지했는가 — 스트림을 읽는 엔진과 아래 대기 루프가 같은 물음을 쓴다.
+    should_stop = _stop_reader(store, job)
+    if "should_stop" in run_params:
+        optional["should_stop"] = should_stop
     while True:
         try:
             result = engine.run(delib_opts, owner_sub=credential_sub, **optional)
@@ -1025,6 +1043,13 @@ def run_panel(
             if busy_n == 1:
                 busy_until = time.monotonic() + busy_budget_s
             conv_id = busy.conversation[0] if busy.conversation else None
+            why = should_stop()
+            if why:
+                # 자리를 기다리는 중의 취소·정지 — 예산(기본 한 시간)을 다 기다린 뒤에 듣지 않는다. 잡은 사람이
+                # 이미 옮겼으므로 건드리지 않는다.
+                return _close_panel_unstarted(
+                    store, panel, job, "cancelled", conv_id=conv_id, pause=False,
+                    error=f"cancelled: {why} — 엔진 자리를 기다리던 패널을 닫았다(심의는 시작되지 않았다)")
             left = busy_until - time.monotonic()
             if left <= 0:
                 return _close_panel_unstarted(
@@ -1106,7 +1131,9 @@ def _close_panel_stream_lost(store: Any, panel: Mapping[str, Any], job: Mapping[
 
 def _close_panel_unstarted(store: Any, panel: Mapping[str, Any], job: Mapping[str, Any], code: str, *,
                            error: str, conv_id: str | None, pause: bool) -> dict:
-    """엔진이 받아 주지 않아 시작도 못 한 패널을 닫는다(`code` ∈ UNSTARTED_CODES) — 좌석 재시도와 연속 실패에 세지 않는다.
+    """엔진이 받아 주지 않아 시작도 못 한 패널을 닫는다 — 좌석 재시도와 연속 실패에 세지 않는다.
+
+    `code` 는 UNSTARTED_CODES 이거나, 자리를 기다리던 중에 사람이 잡을 취소·정지했으면 'cancelled' 다.
 
     좌석은 차감 없이 pending 으로 돌린다. `pause` 면 잡을 멈춘다 — 자리가 한 시간째 안 나는 포털에 곧바로 다시
     편성해 봐야 같은 대기를 되풀이할 뿐이다(사람이 재개하면 이어 돈다). 앱이 내려가며 그친 대기는 멈추지 않는다 —
@@ -1161,6 +1188,32 @@ def _run_parameters(engine: Any) -> Mapping[str, Any]:
         return inspect.signature(engine.run).parameters
     except (TypeError, ValueError):
         return {}
+
+
+def _stop_reader(store: Any, job: Mapping[str, Any]):
+    """도는 패널이 '사람이 이 잡을 취소·정지했나' 를 묻는 함수 — 그랬으면 패널에 적을 말을, 아니면 None 을 돌려준다.
+
+    잡 행이 정본이다(따로 깃발을 두지 않는다 — cancel_job·pause_job 은 행만 고친다). 잡 행은
+    STOP_POLL_INTERVAL_S 간격으로만 읽는다. 엔진은 프레임마다 묻고 프레임은 ping 덕에 15초 안에 오므로, 취소는
+    15초 + 이 간격 안에 닿는다(heartbeat 가 없는 옛 엔진에서는 다음 줄이 올 때다). 읽지 못하면 None 이다 —
+    조회 한 번이 실패했다고 몇 시간짜리 패널을 닫지 않는다.
+    """
+    last: dict = {"read_at": None, "why": None}
+
+    def should_stop() -> str | None:
+        now = time.monotonic()
+        if last["read_at"] is not None and now - last["read_at"] < STOP_POLL_INTERVAL_S:
+            return last["why"]
+        last["read_at"] = now
+        try:
+            row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job["id"],))
+        except Exception:  # noqa: BLE001 — 위 설명대로다.
+            log.exception("잡 %s 상태 조회 실패(비치명) — 패널은 계속 돈다", job.get("id"))
+            return last["why"]
+        last["why"] = STOP_JOB_STATES.get(row["state"]) if row is not None else None
+        return last["why"]
+
+    return should_stop
 
 
 def _progress_writer(store: Any, job: Mapping[str, Any], panel: Mapping[str, Any]):
