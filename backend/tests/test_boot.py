@@ -57,6 +57,13 @@ def test_boot_refuses_a_credential_margin_at_or_above_the_registration_floor():
         main.check_credential_chain(day_long)
     assert "패널 자격 여유 90600초가 PAT 등록 하한 86400초 이상" in str(exc.value)
     assert "HWAXRISK_PANEL_TIMEOUT_S 86400" in str(exc.value) and "HWAXRISK_CREDENTIAL_MARGIN_S" in str(exc.value)
+    # 어디에 적는지도 말한다 — SIF 가 cleanenv 라, 문구를 보고 셸에서 export 하거나 .env 에 적으면 아무 일도 없다.
+    assert "매니페스트(.portal/manifest.yaml) launch.env" in str(exc.value) and "cleanenv" in str(exc.value)
+    # 엔진 자리 대기 예산도 여유에 든다 — 그것만 올려도 막히고, 문구가 그 손잡이를 값과 함께 말한다.
+    with pytest.raises(RuntimeError) as exc:
+        main.check_credential_chain(dataclasses.replace(config.settings, risk_engine_busy_max_wait_s=43200))
+    assert "패널 자격 여유 87000초" in str(exc.value) and "HWAXRISK_ENGINE_BUSY_MAX_WAIT_S 43200" in str(exc.value)
+    assert "HWAXRISK_PANEL_TIMEOUT_S 43200" in str(exc.value)
     # 여유를 하한 아래로 따로 정하면 긴 벽시계로도 뜬다. 하한과 같은 값은 안 된다(등록 직후의 PAT 가 거절된다).
     main.check_credential_chain(dataclasses.replace(day_long, risk_credential_margin_s=86399))
     with pytest.raises(RuntimeError):

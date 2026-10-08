@@ -50,6 +50,9 @@ _DEFAULT_MCAD_DOMAINS = "mech,cam,xd,disp,sh"
 #               < 자격 여유(벽시계 + 429 대기 예산 + 600) < PAT 등록 하한(routes.PAT_MIN_REMAINING_S 86400)
 #   줄 사이 침묵 — 엔진 ping 15 < 포털 릴레이 AGENT_STREAM_IDLE_TIMEOUT_S(46800)
 #               < nginx NGINX_AGENT_READ_TIMEOUT(50400) < 이 앱의 읽기 한도(아래 54000)
+# 이 손잡이들을 적는 자리 — 기동 문구가 이 말을 붙인다. 만료 문구를 보고 셸에서 export 하거나 .env 에 적으면 아무 일도
+# 일어나지 않는다(런처가 넘기는 것은 매니페스트의 launch.env 뿐이다). 등록 사본(HEAXHub integrations/hwax-risk)도 같이 고친다.
+KNOB_HOME = "매니페스트(.portal/manifest.yaml) launch.env — SIF 가 cleanenv 라 셸 export·.env 는 닿지 않는다"
 # 패널 1건의 벽시계(HWAXRISK_PANEL_TIMEOUT_S, 0 = 끔). 앱이 SSE 스트림에서 잰다 — 엔진에는 패널 전체를 재는 손잡이가
 # 없다. 죽은 스트림은 침묵 한도가 잡으므로 이 값은 끝없이 말하는 스트림만 막으면 된다. 3라운드 패널은 LLM 단계가
 # 직렬로 약 15번 이어져 단계마다 제 한도(1800초) 안에서 성공해도 7.5시간이다 — 그래서 12시간이다. 러너는 호출당
