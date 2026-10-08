@@ -6,7 +6,10 @@ from typing import Any, Mapping, Sequence
 from app.adapters.base import AdapterResult, CallRecorder, Principal, Probe, SourceAdapter
 from app.common import canonical_json, now_epoch, sha256_hex
 
-ADAPTER_VERSION = "1.0"
+# 1.1 — 해석 파트의 `size`·`size_sorted` 를 bbox 에서 낸다(1.0 은 없는 칸을 읽어 늘 None 이었다). 싣는 내용이
+# 바뀌었으므로 세대를 올린다 — 같은 값이면 1.0 스냅샷과의 비교에서 `size: 없음 → 값`·기하 지문·브리지가 설계
+# 변경으로 읽히고, 다르면 diff 가 `parser_differs` 로 표시한다(plan §2.2 adapter_versions · §3.3.6 adapter_parity).
+ADAPTER_VERSION = "1.1"
 KIND = "dyna"
 # 전사 집계 호출의 원장 kind — 소스 캡처와 섞이지 않게 별도 값이다(§2.2 "소스 캡처가 아니다").
 CONTEXT_KIND = "context"

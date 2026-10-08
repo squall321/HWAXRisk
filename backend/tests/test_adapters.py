@@ -631,6 +631,22 @@ def test_dyna_part_size_comes_from_its_bbox():
             assert node["attrs"]["size"] is None and node["attrs"]["size_sorted"] is None
 
 
+def test_a_snapshot_from_before_the_size_fix_is_compared_as_another_parser_generation():
+    """어댑터가 싣는 내용이 바뀌면 세대가 올라간다(plan §2.2 `adapter_versions` — 매핑표가 바뀌면 올린다).
+
+    해석 파트의 `size`·`size_sorted`·기하 지문과 브리지는 1.0 세대 스냅샷에는 없다. 세대가 같게 찍히면 그
+    스냅샷과의 비교에서 `size: 없음 → [50, 40, 1.2]` 와 브리지 추가가 **설계 변경**으로 읽힌다 — 세대가 다르면
+    diff 가 항목과 이벤트에 `parser_differs` 를 붙이고 등급을 한 단계 내린다(§3.3.6 adapter_parity).
+    """
+    from app import diff as diff_module
+
+    _mcad, now = _bridge_ir()
+    assert now["versions"]["adapter_versions"]["dyna"] == dyna_adapter.ADAPTER_VERSION
+    before = json.loads(json.dumps(now))
+    before["versions"]["adapter_versions"]["dyna"] = "1.0"       # 크기를 싣지 못하던 세대가 찍던 값
+    assert diff_module.comparability(before, now)["adapter_parity"] is False
+
+
 def test_mcad_and_dyna_parts_are_matched_by_their_dimensions():
     """CAD 파트와 해석 파트가 **치수로** 묶인다(same-as 4단계, §2.6.2) — 이름이 달라도 형상이 같으면 같은 부재다.
 
