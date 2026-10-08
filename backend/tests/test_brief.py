@@ -36,9 +36,11 @@ def _add_snapshot(store, snapshot_id: str, project_id: str, ir: dict) -> None:
         " kinds_json, node_count, edge_count, missing_json, warnings_n, degraded, adapter_versions_json,"
         " created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (snapshot_id, project_id, OWNER, "ir-1", "h_" + snapshot_id, _j(ir),
-         _j([{"kind": "mcad", "app_key": "step_forge", "ref": {"project_id": "42"},
-              "tol_params": {"gap": 0.05}}]),
-         _j(["mcad"]), 3, 2, _j([]), 1, None, _j({"mcad": "1.0"}), 300))
+         # 행 모양은 `ir_builder.freeze_snapshot` 이 쓰는 그대로다 — 소스 행 6키, missing 은 플래그 dict.
+         _j([{"kind": "mcad", "app_key": "step_forge", "ref": {"stepforge_project_id": "42"},
+              "hash": "sha-mcad", "adapter_version": "1.0", "tol_config_hash": "tol-a"}]),
+         _j(["mcad"]), 3, 2, _j({"mcad_absent": False, "dyna_absent": True, "ecad_absent": True}),
+         1, None, _j({"mcad": "1.0"}), 300))
 
 
 # rule_hits 는 손으로 쓰지 않는다 — 간섭 1건이 auto 로 남은 최소 IR 을 `state.evaluate_rules` 에 넣어 나온 것을 싣는다.
@@ -343,6 +345,82 @@ def test_e0_reports_external_search_availability(risk_store):
     on = brief.build_brief(risk_store, target_key, adh=FakeAdh())
     assert on["meta"]["external_search"] == "available"
     assert "외부 검색 가용=true" in on["evidence"][0]["result"]
+
+
+# ---------------------------------------------------------------- E0 스코프 줄(§5.6.1)
+E0_TAIL = ("missing=", "외부 검색 가용=", "adapter_version=", "소스 ")
+
+
+def _e0(built: dict) -> dict:
+    return dict(zip(built["keys"], built["evidence"]))["E0"]
+
+
+@pytest.mark.parametrize("dyna", [False, True])
+def test_e0_of_a_real_snapshot_keeps_its_four_tail_lines(risk_store, dyna):
+    """실제로 동결한 스냅샷의 E0 는 결측·소스 id·잣대/어댑터·외부 검색 네 줄을 잃지 않는다.
+
+    저장된 행을 그대로 쏟으면 E0 본문이 1,000자를 넘는다 — `missing` 은 플래그 12개의 dict(대부분 false,
+    343자), 소스 줄은 ref 전체(step 파일 목록·sha256 까지 300~570자)였다. 상한 500 에서는 `missing` 줄이
+    남은 자리에 못 들어가고, `clip_lines` 는 넘치는 줄부터 뒤를 전부 버리므로 네 줄이 통째로 `…(4줄 생략)`
+    이 됐다. 좌석은 무엇이 결측인지·어느 소스 id 로 도구를 부를지를 E0 에서 받지 못했다.
+    """
+    built = brief.build_brief(risk_store, seed_real_snap_target(risk_store, dyna=dyna), seats=SEATS)
+    lines = _e0(built)["result"].split("\n")
+
+    assert "줄 생략" not in lines[-1], lines
+    tail = {head: next((line for line in lines if line.startswith(head) or f" {head}" in line), None)
+            for head in E0_TAIL}
+    assert all(tail.values()), tail
+    # 선 플래그만 적는다 — false 인 플래그 열 개가 자리를 먹지 않는다.
+    assert "false" not in tail["missing="] and '"ecad_absent"' in tail["missing="]
+    assert ('"dyna_absent"' in tail["missing="]) is (not dyna)
+    # 소스 줄은 그 소스를 가리키는 id 만 싣는다(step 파일 목록·해시는 싣지 않는다).
+    source = tail["소스 "]
+    assert "mcad «heax-step_forge» stepforge_project_id=«001a02ba21cd51064a68c35»" in source
+    assert "step_files" not in source and "sha256" not in source and "unit_system" not in source
+    # ecad 는 계약 스텁뿐이다 — 행이 있어도 absent 다(E1 첫 줄과 같은 근거).
+    assert source.endswith("ecad absent") and "ecad «" not in source
+    if dyna:
+        assert "dyna «heax-kooremapper_mcp» file_id=«01JFIL» session_id=«01JSES»" in source
+        assert "dyna_result «heax-kooremapper_mcp» report_ids=«['01JRPT']»" in source
+    # 줄 수는 그대로다 — 줄여서 넣은 것이지 뺀 것이 아니다.
+    assert len(lines) == 9
+
+
+def test_e0_borrows_only_the_room_the_other_items_left_unused(risk_store, monkeypatch):
+    """E0 가 제 상한 500 을 넘겨 쓰는 것은 **이번 브리프에서 다른 항목이 남긴 자리만큼**이다.
+
+    E0 의 본문은 신원·게이트 다섯 줄만으로 330자라 500 으로는 뒤 네 줄이 다 들어가지 않는다. 그런데 표의
+    어느 항목도 '늘 비는' 항목이 아니어서(원장이 차면 전부 상한에 닿는다) 고정으로 떼어 올 자리가 없다.
+    그래서 합의 보장(Σ 라인 ≤ Σ CAPS ≤ 11000)은 그대로 두고, 남은 자리가 있을 때만 그만큼 빌린다 —
+    다른 항목이 전부 찬 브리프에서는 E0 가 500 으로 돌아가고 꼬리 줄은 생략 표지와 함께 잘린다.
+    E0c 가 남긴 자리는 빌리지 않는다 — 러너가 그 칸을 제 좌석 계약표로 갈아 끼운다.
+    """
+    target_key = seed_real_snap_target(risk_store, dyna=True)
+    roomy = brief.build_brief(risk_store, target_key, seats=SEATS)
+    lines = {key: len(brief.evidence_line(item)) for key, item in zip(roomy["keys"], roomy["evidence"])}
+
+    assert lines["E0"] > brief.CAPS["E0"], "이 스냅샷의 E0 가 500 안에 들어가면 이 시험은 아무것도 보지 않는다"
+    spare = sum(brief.CAPS[k] - n for k, n in lines.items() if k not in ("E0", "E0c"))
+    assert lines["E0"] <= brief.CAPS["E0"] + spare
+    assert sum(lines.values()) == roomy["meta"]["budget_used"] <= roomy["meta"]["caps_sum"] <= brief.ENGINE_BUDGET
+    for key, n in lines.items():
+        if key != "E0":
+            assert n <= brief.CAPS[key], key
+
+    # 다른 항목이 전부 제 상한에 닿은 브리프 — 빌릴 자리가 0 이면 E0 는 제 상한으로 돌아간다.
+    # E0c 만은 남은 자리(100자 이상)를 그대로 둔다 — 그 자리를 빌리면 러너가 E0c 를 갈아 끼운 뒤 합이 넘는다.
+    full = dict(brief.CAPS, **{k: n for k, n in lines.items() if k not in ("E0", "E0c")})
+    assert full["E0c"] - lines["E0c"] >= 100
+    monkeypatch.setattr(brief, "CAPS", full)
+    tight = brief.build_brief(risk_store, target_key, seats=SEATS)
+    e0 = _e0(tight)
+    assert len(brief.evidence_line(e0)) <= full["E0"] == 500
+    assert e0["result"].endswith("줄 생략)")
+    # 그때 남는 것은 짧고 E0 에만 있는 줄이다 — 가장 긴 소스 id 줄이 뒤에 서서 먼저 잘린다.
+    kept = e0["result"].split("\n")
+    assert any(line.startswith("missing=") for line in kept) and "외부 검색 가용=false" in kept
+    assert not any(line.startswith("소스 ") for line in kept)
 
 
 def test_build_brief_is_deterministic(risk_store):

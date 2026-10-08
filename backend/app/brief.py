@@ -21,6 +21,10 @@ EVIDENCE_MAX_ITEMS = 12
 # 항목별 라인 상한. 합 10600 ≤ 11000 이라 드롭 0 이 산술로 보장된다(plan §5.6.1).
 # E5 는 세 블록(E5+ 700 · E5− 300 · E10 500)이라 1500 이고, 그 500 은 E1(−250)·E6(−150)·E9(−100)
 # 재배분으로 낸다 — 합 10600 은 그대로다(plan §5.6.1 '부정 선례').
+# E0 의 500 은 **바닥**이다. 신원·게이트 다섯 줄만으로 본문 330자를 쓰므로 500 으로는 결측·소스·잣대·외부 검색
+# 네 줄이 다 들어가지 않는데, 떼어 올 '늘 비는' 항목이 표에 없다(원장이 차면 전부 제 상한에 닿는다). 그래서
+# 표는 그대로 두고 `build_brief` 가 E0 에 **그 브리프에서 다른 항목이 남긴 자리**를 얹는다 — 라인 합은 여전히
+# Σ CAPS 이하라 드롭 0 의 산술은 바뀌지 않는다.
 CAPS: dict[str, int] = {
     "E0": 500, "E0c": 1000, "E1": 1650, "E2": 1100, "E3": 700, "E4": 600,
     "E5": 1500, "E6": 650, "E7": 1400, "E8": 500, "E9": 600, "M": 400,
@@ -329,8 +333,23 @@ def _gates_lines(gates: Any) -> str:
     return " · ".join(parts) if parts else "게이트 기록 없음"
 
 
-def _source_apps(snapshot) -> str:
-    """E0 의 소스 앱 id 줄 — `stepforge project_id=… · dynaforge session_id=… · ecad absent`."""
+# E0 소스 줄에 싣는 ref 키 — 그 소스를 가리키는 id 만이다(plan §5.6.1 `stepforge project_id=… · dynaforge
+# session_id=… file_id=… report_ids=[…]`). ref 를 통째로 실으면 step 파일 목록·sha256·단위계까지 따라와 이 한 줄이
+# 300~570자가 되고 그 뒤 줄이 상한에 전부 잘렸다. 여기 없는 kind 는 ref 를 그대로 싣는다 — 새 어댑터의 id 가
+# 말없이 빠지는 것보다 줄이 긴 편이 낫다.
+_SOURCE_ID_KEYS: dict[str, tuple[str, ...]] = {
+    "mcad": ("stepforge_project_id",),
+    "dyna": ("file_id", "session_id"),
+    "dyna_result": ("report_ids",),
+}
+
+
+def _source_apps(snapshot, absent: Sequence[str] = ()) -> str:
+    """E0 의 소스 앱 id 줄 — `stepforge project_id=… · dynaforge session_id=… · ecad absent`.
+
+    `absent` 는 그 스냅샷에 선 결측 플래그다. 소스 행이 있어도 `<kind>_absent` 가 섰으면 `absent` 로 적는다 —
+    ecad 계약 스텁은 행만 남기므로 행을 그대로 옮기면 `ecad «»` 가 된다(요약 첫 줄의 `ecad=present` 와 같은 자리).
+    """
     if snapshot is None:
         return "소스 기록 없음"
     items = _j(snapshot["source_ids_json"], [])
@@ -344,10 +363,13 @@ def _source_apps(snapshot) -> str:
             kinds.add(kind)
             ref = item.get("ref")
             if isinstance(ref, dict):
-                detail = " ".join(f"{k}={_q(v)}" for k, v in sorted(ref.items()) if v is not None)
+                keys = _SOURCE_ID_KEYS.get(kind, sorted(ref))
+                detail = " ".join(f"{k}={_q(ref[k])}" for k in keys if ref.get(k) is not None)
             else:
-                detail = _q(ref)
-            parts.append(f"{kind} {_q(item.get('app_key'))} {detail}".strip())
+                detail = _q(ref) if ref is not None else ""
+            words = [kind, _q(item["app_key"]) if item.get("app_key") else "", detail,
+                     "absent" if f"{kind}_absent" in absent else ""]
+            parts.append(" ".join(w for w in words if w))
     if "ecad" not in kinds:
         parts.append("ecad absent")
     return " · ".join(parts) if parts else "소스 기록 없음"
@@ -387,8 +409,13 @@ def _item_e0(store, ctx, external_ok: bool, model: str = "unknown") -> dict:
     gates = _j(diff["gates_json"], {}) if diff is not None else (
         _j(ctx["state"]["gates_json"], {}) if ctx["state"] is not None else {})
     missing = _j(snapshot["missing_json"], []) if snapshot is not None else []
+    if isinstance(missing, dict):
+        # 저장된 행은 플래그 12개의 dict 이고 대부분 false 다 — 선 것만 적는다(통째로 실으면 이 한 줄이 343자다).
+        missing = sorted(k for k, v in missing.items() if v)
     adapters = _j(snapshot["adapter_versions_json"], {}) if snapshot is not None else {}
     base_code = _project_code(store, target["base_project_id"]) if target["base_project_id"] else "-"
+    # 뒤 네 줄은 짧고 E0 에만 있는 것부터 선다 — `clip_lines` 는 넘치는 줄부터 뒤를 전부 버리므로, 가장 길고
+    # 패널 질문(`runner.panel_question`)에도 실리는 소스 id 줄을 맨 뒤에 둬야 자리가 모자랄 때 그 줄만 잘린다.
     lines = [
         f"kind={target['kind']} target_key={target['target_key']} level={_s(target['level'], 'C0')} "
         f"model={model}",
@@ -396,9 +423,9 @@ def _item_e0(store, ctx, external_ok: bool, model: str = "unknown") -> dict:
         f"snapshot_id={_s(ctx['snapshot_id'], '-')} ir_hash={_s(target['ir_hash'])}",
         f"게이트 {_gates_lines(gates)}",
         f"missing={json.dumps(missing, ensure_ascii=False, sort_keys=True) if missing else '[]'}",
-        f"소스 {_source_apps(snapshot)}",
-        f"{_tol_params(snapshot)} adapter_version={json.dumps(adapters, ensure_ascii=False, sort_keys=True)}",
         f"외부 검색 가용={'true' if external_ok else 'false'}",
+        f"{_tol_params(snapshot)} adapter_version={json.dumps(adapters, ensure_ascii=False, sort_keys=True)}",
+        f"소스 {_source_apps(snapshot, missing)}",
     ]
     return {"key": "E0", "args": target["target_key"], "result": _body("rr_scope", lines)}
 
@@ -1277,7 +1304,8 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
                 user_memo: str | None = None) -> dict:
     """타깃·패널을 받아 E0~E9 를 delib_opts.evidence 형식으로 조립한다(plan §5.6.2, 결정론).
 
-    항목마다 라인 길이를 CAP 안으로 먼저 강제하므로 엔진 예산 11000 에서 드롭이 0 이다.
+    항목마다 라인 길이를 CAP 안으로 먼저 강제하므로 엔진 예산 11000 에서 드롭이 0 이다(E0 만 다른 항목이
+    남긴 자리를 빌려 제 CAP 을 넘길 수 있다 — 그래도 라인 합은 Σ CAP 이하다).
     `exclude` 는 항목 키(E6·E8 …)의 제외만 받는다 — 추가·편집은 없다(§5.7 RecallPreview).
     `user_memo` 는 지금 도는 잡의 메모다 — 안 주면 M 은 그 타깃의 최근 잡 메모를 읽는다(`_item_memo`).
     """
@@ -1331,6 +1359,13 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
         assert len(evidence_line(item)) <= cap, f"{entry['key']} 라인이 CAP {cap} 을 넘었습니다."
         item["key"] = entry["key"]
         items.append(item)
+
+    if items and items[0]["key"] == "E0":
+        # E0 는 다른 항목이 이번 브리프에서 남긴 자리를 빌려 다시 맞춘다(CAPS 주석). 라인 합은 Σ CAPS 를 넘지 않는다.
+        # E0c 가 남긴 자리는 세지 않는다 — 러너가 그 칸을 제 좌석 계약표(`runner.seat_contract_evidence`)로 갈아 끼운다.
+        e0 = items[0]
+        spare = sum(CAPS[i["key"]] - len(evidence_line(i)) for i in items[1:] if i["key"] != "E0c")
+        e0["result"] = clip_lines(raw[0]["result"], min(CLAMP_RESULT, CAPS["E0"] + spare - line_overhead(e0)))
 
     total = sum(len(evidence_line(i)) for i in items)
     assert total <= ENGINE_BUDGET and len(items) <= EVIDENCE_MAX_ITEMS
