@@ -430,6 +430,34 @@ def test_gate_three_valued_pass_and_reason(case):
             assert record[field] == value, f"{case} {key}.{field}"
 
 
+@pytest.mark.parametrize("case", NULL_CASES)
+def test_gate_summary_signal_keeps_not_judged_apart_from_fail(case):
+    """`sig:gates.summary` 는 검문하지 못한 게이트(pass=null)를 fail 로 적지 않는다(plan §3.2.3 `pass/fail/n_a/ack`).
+
+    신호는 `bool(pass)` 로 접어서 null 이 false 가 됐고, 표기도 `G3 fail(None, ack 없음)` 이었다. 입력이 없어
+    검문하지 못한 것과 검문해서 걸린 것이 같은 글자라, 이 신호를 인용한 좌석은 없는 위반을 본다.
+    """
+    bundle = load_case(case)
+    ir = bundle["ir"] if "ir" in bundle else build_ir(bundle)
+    gates = st.compute_gates(ir)
+    signal = st.compute_signals(ir, gates)["gates.summary"]
+    unjudged = [key for key in GATE_KEYS if gates[key]["pass"] is None]
+    assert unjudged, "이 케이스에 pass=null 게이트가 없으면 아무것도 보지 않는다"
+
+    words = dict(part.split(" ", 1) for part in signal["text"].split(" · "))
+    for key in GATE_KEYS:
+        gate, row = gates[key], signal["value"][key]
+        assert row["pass"] is gate["pass"], f"{case} {key}"          # 3값 그대로 — null 은 null 이다
+        assert row["count"] == gate["count"]
+        if key in unjudged:
+            assert words[key] == f"n/a({gate['reason']})", signal["text"]
+        elif gate["pass"]:
+            assert words[key] == "pass"
+        else:
+            assert words[key].startswith("fail(")
+    assert "None" not in signal["text"], signal["text"]
+
+
 def test_g6_unknown_blocking_blocks_without_being_a_fail():
     """pass=null 인데도 차단이다 — '계산 불가면 pass' 가 유일한 차단 게이트를 무력화하던 자리(§2.12)."""
     gates, blocked, hits = _gates_of(load_case("gate_f8_unit_unknown"))

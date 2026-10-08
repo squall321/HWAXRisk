@@ -567,12 +567,15 @@ def compute_signals(ir: Mapping[str, Any], gates: Mapping[str, Mapping[str, Any]
                                f"{(' ' + d['unit']) if d['value'] is not None else ''}"
                                for d in dims) or "dims_named 없음"))
 
+    # pass 는 3값 그대로 싣는다 — `bool()` 로 접으면 검문하지 못한 게이트(null)가 false 가 되어 표기까지
+    # `fail(None, ack 없음)` 으로 나갔다. 표기는 사유(`n/a(<reason>)`)가 있는 게이트 원본에서 만든다(plan §2.12).
     summary = {
-        key: {"pass": bool(g["pass"]), "count": g["count"], "ack": bool(g.get("ack_by"))}
+        key: {"pass": None if g["pass"] is None else bool(g["pass"]), "count": g["count"],
+              "ack": bool(g.get("ack_by"))}
         for key, g in sorted(gates.items())
     }
     put("gates.summary", _rec("table", summary, None, [f"gate:{k}" for k in sorted(gates)],
-                              " · ".join(f"{k} {_gate_word(v)}" for k, v in summary.items())))
+                              " · ".join(f"{k} {_gate_word(g)}" for k, g in sorted(gates.items()))))
     return signals
 
 
