@@ -263,7 +263,9 @@ RESPONSE_CONTRACT: dict[str, dict[str, str]] = {
     "list_parts": {"/parts": "array"},
     "list_interfaces": {"/interfaces": "array"},
     "interface_graph": {"/edges": "array"},
-    "part_mesh_map": {"/rows": "array"},
+    # 봉투 키는 `parts` 다(StepForge app/mcp_server.py part_mesh_map 의 `{counts, parts, total, truncated, omitted}`).
+    # `/rows` 로 적혀 있어 실제 응답은 늘 계약 위반(contract_ok=0)으로 적혔고 어댑터도 같은 키를 읽어 브리지가 0건이었다.
+    "part_mesh_map": {"/parts": "array"},
     "report_summary": {"/id": "any"},
 }
 _TYPE_OF = {"object": dict, "array": list, "string": str, "number": (int, float), "boolean": bool}

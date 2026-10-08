@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import httpx
 import pytest
+from jsonschema import Draft7Validator
 
 from app import ir_builder
 from app.adapters import dyna as dyna_adapter
@@ -211,17 +213,25 @@ REST_ROUTES = {
     f"{BASE}/parts": PARTS_REST,
     f"{BASE}/interfaces": IFACE_REST,
 }
-# part_mesh 표(plan §2.5.1) — REST 판은 `source_path`·`spec` 을 더 준다. pid 는 dyna INSPECT_FILE 의 1·2 와 짝이다.
-PART_MESH = {"rows": [
-    {"step_file": "a_stack.step", "source_name": "STACK_ASM/PLATE_1",
-     "source_path": "/sif-e2e/a_stack.step/STACK_ASM/PLATE_1", "worked_name": "PLATE_1_w",
-     "kind": "solid", "status": "done", "pid": 1, "node_start": 1, "node_count": 6000,
-     "elem_start": 1, "elem_count": 5000, "note": None},
-    {"step_file": "a_stack.step", "source_name": "STACK_ASM/PLATE_2",
-     "source_path": "/sif-e2e/a_stack.step/STACK_ASM/PLATE_2", "worked_name": "PLATE_2_w",
-     "kind": "shell", "status": "done", "pid": 2, "node_start": 6001, "node_count": 6000,
-     "elem_start": 5001, "elem_count": 4800, "note": None},
-]}
+# part_mesh 표(plan §2.5.1) — StepForge MCP `part_mesh_map` 이 **실제로 내는** 봉투와 행이다
+# (StepForge app/mcp_server.py part_mesh_map · core/data/disclosure.yaml 의 같은 이름 표).
+# 봉투는 `{counts, parts, total, truncated, omitted}` 이고 행은 `parts` 에 온다 — 예전 픽스처는 `rows` 였고
+# 어댑터도 `rows` 를 읽어, 시험은 통과하는데 실제 응답에서는 브리지가 늘 0건이었다.
+# 행은 11칸이다. `source_path` 는 없고(REST `/part-mesh` 만 `source_path`·`spec` 을 더 준다) `source_name` 은
+# STEP 인스턴스 이름 하나다(경로가 아니다). `status` 는 meshed|substituted|surface|shell|skipped|failed 이고
+# `kind` 는 구운 전략(hex·tet·shell …)이다. pid 는 dyna INSPECT_FILE 의 1·2 와 짝이다.
+PART_MESH = {
+    "counts": {"meshed": 2},
+    "parts": [
+        {"step_file": "a_stack.step", "source_name": "PLATE_1", "worked_name": "PLATE_1", "kind": "hex",
+         "status": "meshed", "pid": 1, "node_start": 1, "node_count": 6000, "elem_start": 1,
+         "elem_count": 5000, "note": "[압출] 5층"},
+        {"step_file": "a_stack.step", "source_name": "PLATE_2", "worked_name": "PLATE_2", "kind": "hex",
+         "status": "meshed", "pid": 2, "node_start": 6001, "node_count": 6000, "elem_start": 5001,
+         "elem_count": 4800, "note": "[압출] 4층"},
+    ],
+    "total": 2, "truncated": False, "omitted": 0,
+}
 
 MCP_TOOLS_FULL = {
     "job_status": JOB_STATUS_DONE,
@@ -1100,19 +1110,54 @@ def test_part_mesh_map_builds_bridge_edges_between_mcad_parts_and_dyna_pids():
     for edge in bridges:
         assert by_nid[edge["a"]]["domain"] == "mcad" and by_nid[edge["a"]]["kind"] == "part"
         assert by_nid[edge["b"]]["domain"] == "dyna" and by_nid[edge["b"]]["kind"] == "pid"
-    # REST 가 열려 있으면 조인 키는 `path:` 다(§2.5.1 — 어느 쪽을 썼는지 접두로 남긴다).
-    keys = sorted(e["attrs"]["dyna"]["bridge"]["join_key"] for e in bridges)
-    assert all(k.startswith("path:") for k in keys), keys
+    # 어느 파트가 어느 pid 에 묶였나 — 이름이 같은 쌍이어야 한다(PLATE_1↔pid 1 · PLATE_2↔pid 2).
+    pairs = sorted((by_nid[e["a"]]["label"], by_nid[e["b"]]["local_key"]) for e in bridges)
+    assert pairs == [("PLATE_1", "1"), ("PLATE_2", "2")]
     assert ir["edges"] and all(e["kind_family"] == "bridge" for e in bridges)
+    # 메시 상태는 엣지 status 가 아니라 attrs 에 선다 — status 는 계면 확정 어휘(auto·confirmed …)라
+    # 표의 `meshed` 를 그대로 옮기면 봉투가 rr_ir.v1 스키마 밖으로 나간다.
+    assert {e["status"] for e in bridges} == {"auto"}
+    assert {e["attrs"]["dyna"]["bridge"]["mesh_status"] for e in bridges} == {"meshed"}
+    schema = json.loads((Path(ir_builder.__file__).parent / "schemas" / "rr_ir.v1.json").read_text(encoding="utf-8"))
+    edge_errors = [f"{list(e.absolute_path)}: {e.message}" for e in Draft7Validator(schema).iter_errors(ir)
+                   if e.absolute_path and e.absolute_path[0] == "edges"]
+    assert edge_errors == []
 
 
-def test_the_join_key_prefix_records_which_channel_resolved_it():
-    """MCP 폴백에는 `source_path` 가 없다 — 그때는 `file+name:` 이고 그 사실이 엣지에 남는다."""
-    _mcad, ir = _bridge_ir(rest_token=None)
-    bridges = [e for e in ir["edges"] if e["kind"] == "bridge"]
+def test_the_part_mesh_call_passes_its_response_contract():
+    """호출 원장의 `contract_ok` 가 실제 응답 모양에서 참이다 — 계약표가 `/rows` 를 요구해 늘 위반으로 적혔다."""
+    assert adapters_base.check_contract("part_mesh_map", PART_MESH) == {
+        "contract_ok": True, "missing": [], "type_mismatch": []}
+    assert adapters_base.check_contract("part_mesh_map", {"rows": []})["missing"] == ["/parts"]
 
-    assert bridges, "MCP 폴백에서 브리지가 통째로 사라졌다"
-    assert all(e["attrs"]["dyna"]["bridge"]["join_key"].startswith("file+name:") for e in bridges)
+    recorder = CallRecorder("cafe0000deadbeef", mcp=_mcp(MCP_TOOLS_FULL), rest=_rest(REST_ROUTES))
+    mcad.McadAdapter(APP_KEY).capture({"stepforge_project_id": SF_PROJECT, "detect_job_id": "01JDET"},
+                                      _principal(), recorder)
+    row = next(c for c in recorder.calls if c["tool"] == "part_mesh_map")
+    assert row["ok"] is True and row["contract_ok"] is True and row["contract_missing"] == []
+
+
+def test_the_join_key_prefix_records_which_key_resolved_it():
+    """조인 키는 행에 `source_path` 가 있고 REST 가 열렸을 때만 `path:` 이고, 아니면 `file+name:` 이다(§2.5.1).
+
+    MCP `part_mesh_map` 행에는 `source_path` 가 없다 — 그래서 지금은 REST 가 열려 있어도 `file+name:` 으로
+    잇는다(인스턴스 이름을 경로 꼬리로 대조해 푼다). 어느 쪽을 썼는지는 엣지에 접두로 남는다.
+    """
+    for rest_token in ("service-pat", None):
+        _mcad, ir = _bridge_ir(rest_token=rest_token)
+        bridges = [e for e in ir["edges"] if e["kind"] == "bridge"]
+        assert len(bridges) == 2, f"브리지가 통째로 사라졌다(rest_token={rest_token!r})"
+        assert all(e["attrs"]["dyna"]["bridge"]["join_key"].startswith("file+name:") for e in bridges)
+
+    # 행이 `source_path` 를 실어 오면(REST `/part-mesh` 의 행 모양) REST 가 열린 캡처는 그 경로로 잇는다.
+    with_path = dict(PART_MESH, parts=[
+        dict(row, source_path=f"/sif-e2e/a_stack.step/STACK_ASM/{row['source_name']}") for row in PART_MESH["parts"]])
+    _mcad, ir = _bridge_ir(mesh=with_path)
+    keys = [e["attrs"]["dyna"]["bridge"]["join_key"] for e in ir["edges"] if e["kind"] == "bridge"]
+    assert len(keys) == 2 and all(k.startswith("path:") for k in keys), keys
+    _mcad, ir = _bridge_ir(mesh=with_path, rest_token=None)
+    keys = [e["attrs"]["dyna"]["bridge"]["join_key"] for e in ir["edges"] if e["kind"] == "bridge"]
+    assert len(keys) == 2 and all(k.startswith("file+name:") for k in keys), keys
 
 
 def test_an_ambiguous_join_key_makes_no_bridge_and_says_so():
@@ -1121,11 +1166,11 @@ def test_an_ambiguous_join_key_makes_no_bridge_and_says_so():
     어느 행이 맞는지 모르는 채 이으면 mcad 파트와 엉뚱한 dyna pid 가 한 부재로 묶이고, 그 오결선이
     same-as 2단계를 타고 가짜 의미 이벤트를 만든다 — 오류 없이 틀린 답이 되는 쪽이다.
     """
-    dup = {"rows": [
-        dict(PART_MESH["rows"][0]),
-        dict(PART_MESH["rows"][0], pid=7, worked_name="PLATE_1_w2"),   # 같은 키, 다른 pid
-        dict(PART_MESH["rows"][1]),
-    ]}
+    dup = dict(PART_MESH, parts=[
+        dict(PART_MESH["parts"][0]),
+        dict(PART_MESH["parts"][0], pid=7, worked_name="PLATE_1#2"),   # 같은 키, 다른 pid
+        dict(PART_MESH["parts"][1]),
+    ])
     mcad_result, ir = _bridge_ir(mesh=dup)
 
     bridges = [e for e in ir["edges"] if e["kind"] == "bridge"]
@@ -1138,8 +1183,7 @@ def test_an_ambiguous_join_key_makes_no_bridge_and_says_so():
 
 def test_a_mesh_row_for_an_unknown_part_makes_no_bridge():
     """표에 있는데 이 스냅샷 노드에 없는 파트 — 이으면 없는 노드를 가리키는 엣지가 된다."""
-    stray = {"rows": [dict(PART_MESH["rows"][0], source_name="STACK_ASM/GHOST",
-                           source_path="/sif-e2e/a_stack.step/STACK_ASM/GHOST")]}
+    stray = dict(PART_MESH, parts=[dict(PART_MESH["parts"][0], source_name="GHOST")])
     mcad_result, ir = _bridge_ir(mesh=stray)
 
     assert [e for e in ir["edges"] if e["kind"] == "bridge"] == []
@@ -1148,7 +1192,7 @@ def test_a_mesh_row_for_an_unknown_part_makes_no_bridge():
 
 def test_a_mesh_row_for_a_missing_pid_makes_no_bridge():
     """dyna 에 그 pid 가 없으면 브리지를 만들지 않고 끝점 미해결로 남는다(추정으로 잇지 않는다)."""
-    ghost_pid = {"rows": [dict(PART_MESH["rows"][0], pid=99)]}
+    ghost_pid = dict(PART_MESH, parts=[dict(PART_MESH["parts"][0], pid=99)])
     _mcad, ir = _bridge_ir(mesh=ghost_pid)
 
     assert [e for e in ir["edges"] if e["kind"] == "bridge"] == []
@@ -1185,4 +1229,4 @@ def test_the_real_bridge_carries_its_stale_verdict_and_blocks_pid_map_until_chec
                if r["method"] == "pid_map"]
     assert len(records) == 2, records
     assert all(r["score"] == 1.0 and r["status"] == "auto" for r in records)
-    assert records[0]["evidence"]["bridge"]["join_key"].startswith("path:")
+    assert records[0]["evidence"]["bridge"]["join_key"].startswith("file+name:")

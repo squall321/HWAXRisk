@@ -175,9 +175,11 @@ def _bridge_edges(rows: Sequence[Mapping[str, Any]], *, project_name: str | None
                   warnings: list[dict]) -> list[dict]:
     """part_mesh 표 → `kind='bridge'` 엣지(mcad part ↔ dyna pid)(plan §2.5.1 · §2.6.2 2단계 입력).
 
-    조인 키는 두 갈래다 — REST 가 열려 있으면 `path:<source_path>`, MCP 폴백이면
+    조인 키는 두 갈래다 — 행에 `source_path` 가 있고 REST 가 열려 있으면 `path:<source_path>`, 아니면
     `file+name:<step_file>/<source_name>`. `mesh_key` 는 응답에 없다(소스 DB 컬럼으로만 존재하므로
     무수정 원칙상 쓸 수 없다). 어느 쪽을 썼는지 `attrs.dyna.bridge.join_key` 접두로 남긴다.
+    ⚠ MCP `part_mesh_map` 행에는 `source_path` 가 없다(REST `/part-mesh` 만 준다) — 이 어댑터는 MCP 를 부르므로
+    지금은 REST 가 열려 있어도 뒤쪽으로 잇는다(`source_name` 은 인스턴스 이름이라 경로 꼬리로 대조해 푼다).
 
     **같은 `(step_file, source_name)` 이 2행 이상이면 그 키의 브리지를 만들지 않고 `ambiguous_bridge_key`**
     를 남긴다 — 어느 행이 맞는지 모르는 채 이으면 mcad 파트와 엉뚱한 dyna pid 가 한 부재로 묶이고,
@@ -234,11 +236,14 @@ def _bridge_edges(rows: Sequence[Mapping[str, Any]], *, project_name: str | None
         edges.append({
             "kind": "bridge",
             "domain": KIND,
-            "status": _s(row.get("status")) or "auto",
+            # 엣지 status 는 계면 확정 어휘(auto·confirmed·manual…)다. 표의 `status` 는 메시 상태
+            # (meshed·substituted…)라 그대로 옮기면 봉투가 rr_ir.v1 스키마 밖으로 나간다 — attrs 에 둔다(§2.4 `mesh_status`).
+            "status": "auto",
             "a_canon_key": canon,
             "b_pid": str(pid),
             "attrs": {"dyna": {"bridge": {
                 "join_key": join_key,
+                "mesh_status": _s(row.get("status")) or None,
                 # 정본 표기는 `bridge_stale` 이고 자리는 `attrs.dyna.bridge` 다(§2.5.1) — same-as 2단계가
                 # 이 값을 보고 건너뛴다. kfile 항을 못 봤다는 사실을 함께 남긴다(사유 없는 true 가 아니다).
                 "stale": stale,
@@ -523,7 +528,7 @@ class McadAdapter(SourceAdapter):
         mesh_reply = mcp("part_mesh_map", {"project_id": project_id})
         if mesh_reply["ok"]:
             edges.extend(_bridge_edges(
-                _rows(mesh_reply["result"], "rows"), project_name=project_name,
+                _rows(mesh_reply["result"], "parts"), project_name=project_name,
                 canon_keys={n["canon_key"] for n in nodes}, rest_channel=tree is not None,
                 app_key=app_key, call_id=mesh_reply["call_id"], captured_at=captured_at, warnings=warnings))
         else:
