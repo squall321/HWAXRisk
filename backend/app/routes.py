@@ -2030,11 +2030,11 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
     # 로스터 원천 — 본문 agents 가 있으면 그것이 우선이고, 없으면 게이트웨이를 조회한다(자격이 없으면 unavailable).
     # 게이트웨이 호출은 트랜잭션 밖에서 끝낸다(DB 락을 네트워크 대기 동안 잡지 않는다).
     agents: list[dict] = [dict(a) for a in (body.agents or [])]
-    roster_source = roster_module.SOURCE_BODY if agents else roster_module.SOURCE_UNAVAILABLE
+    fetched: dict | None = None
     if not agents:
         fetched = roster_module.fetch_for_target(store, kind=body.kind, ref_id=body.ref_id,
                                                  owner_sub=owner_sub)
-        agents, roster_source = fetched["agents"], fetched["source"]
+        agents = fetched["agents"]
     # 타깃 행과 로스터 고정은 한 트랜잭션이다 — 고정이 실패하면 roster_size 0 인 타깃만 남아 재생성이 409 로 막힌다.
     with store.tx():
         store.execute(
@@ -2059,9 +2059,27 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
         "deferred": roster["deferred"],
         "tier_plan": plan["tiers"] if plan else None,
         "cost_estimate": plan["cost_estimate"] if plan else None,
-        # 로스터 원천 — body.agents(호출자 제공) · gateway(list_agents+recommend_agents) · unavailable(자격·게이트웨이 부재).
-        "roster_source": roster_source,
+        **_roster_report(fetched),
     }
+
+
+def _roster_report(fetched: dict | None) -> dict:
+    """타깃 응답에 싣는 로스터 조회 결과(`fetched` 가 None 이면 본문 agents 를 썼다).
+
+    `roster_source` — body.agents(호출자 제공) · gateway(list_agents+recommend_agents) · unavailable(자격·게이트웨이 부재).
+    `relevance_source` 가 'unavailable' 이면 추천을 못 받아 좌석 순위를 키 순서로 매긴 것이고, `domains_failed` 의
+    도메인은 좌석이 통째로 없다. 순위 1번이 Tier A 대표석이고 고정된 순위는 다시 매기지 않는다 — 종전 응답은
+    `roster_source` 뿐이라, 조회가 반쯤 실패한 채 열린 타깃이 온전한 것과 똑같이 보였다.
+    `roster_notice` 는 조회가 기한(HWAXRISK_ROSTER_DEADLINE_S)을 넘겼을 때만 있다.
+    """
+    if fetched is None:
+        return {"roster_source": roster_module.SOURCE_BODY, "relevance_source": roster_module.SOURCE_BODY,
+                "domains_failed": []}
+    out = {"roster_source": fetched["source"], "relevance_source": fetched["relevance_source"],
+           "domains_failed": list(fetched["domains_failed"])}
+    if fetched.get("notice"):
+        out["roster_notice"] = fetched["notice"]
+    return out
 
 
 class RosterBody(BaseModel):
@@ -2075,23 +2093,24 @@ def refresh_roster(target_key: str, body: RosterBody = RosterBody(),
 
     본문 없는 호출도 받는다(plan §0.5.1·§8.2.3 — 인자 없이 `{added_pending}`). 본문 agents 가 있으면 그것이 우선이고,
     없으면 게이트웨이 `list_agents`·`recommend_agents` 를 조회한다(자격이 없으면 갱신 0건 + roster_source='unavailable').
+    조회가 어떻게 끝났는지는 타깃 생성과 같은 칸으로 싣는다(`_roster_report`).
     """
     owner_sub = _require_user(ident)
     target = _target_row(target_key, owner_sub)
     store = get_store()
     agents: list[dict] = [dict(a) for a in ((body or RosterBody()).agents or [])]
-    roster_source = roster_module.SOURCE_BODY if agents else roster_module.SOURCE_UNAVAILABLE
+    fetched: dict | None = None
     if not agents:
         fetched = roster_module.fetch_for_target(store, kind=target["kind"], ref_id=target["ref_id"],
                                                  owner_sub=owner_sub)
-        agents, roster_source = fetched["agents"], fetched["source"]
+        agents = fetched["agents"]
     if agents and target["roster_frozen_at"] is None:
         # 고정된 적이 없는 타깃(생성 때 게이트웨이가 불통이었다)은 덧붙이기가 아니라 최초 고정이다 —
         # ECAD 부재 반영과 roster_frozen_at 갱신이 여기서 같이 일어나야 로스터 0 짜리 타깃이 남지 않는다.
         frozen = planner.freeze_roster(store, target_key, owner_sub, agents,
                                        ecad_absent=_ecad_absent_for_target(store, target))
-        return {"added_pending": frozen["roster_size"], "roster_source": roster_source}
-    return {**planner.refresh_roster(store, target_key, agents), "roster_source": roster_source}
+        return {"added_pending": frozen["roster_size"], **_roster_report(fetched)}
+    return {**planner.refresh_roster(store, target_key, agents), **_roster_report(fetched)}
 
 
 # ================================================================ 잡

@@ -7,7 +7,7 @@ import types
 import httpx
 import pytest
 
-from app import config, identity, planner, roster, routes
+from app import config, identity, planner, ra_client, roster, routes
 
 OWNER = "roster@example.com"
 
@@ -102,7 +102,8 @@ def test_without_credential_no_call_goes_out_and_source_is_unavailable():
     assert source.available is False
     out = source.fetch(DOMAINS, "요약")
     assert out == {"source": "unavailable", "reason": "no_credential", "agents": [],
-                   "relevance_source": "unavailable", "domains_ok": [], "domains_failed": []}
+                   "relevance_source": "unavailable", "domains_ok": [], "domains_failed": [],
+                   "deadline_exceeded": False}
 
 
 def test_fetch_collects_pool_per_domain_and_attaches_relevance():
@@ -164,6 +165,136 @@ def test_transport_error_is_not_raised():
 
     out = roster.RosterSource(GATEWAY, "pat", client=_client(refused)).fetch(DOMAINS, "요약")
     assert out["source"] == "unavailable" and out["reason"] == "gateway_error"
+
+
+# ---------------------------------------------------------------- 조회 전체의 기한(HWAXRISK_ROSTER_DEADLINE_S)
+class _Clock:
+    """`roster.time`·`ra_client.time` 을 대신한다 — monotonic 은 가짜 게이트웨이가 민다(시험은 기다리지 않는다)."""
+
+    def __init__(self) -> None:
+        self.now = 9000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch) -> _Clock:
+    fake = _Clock()
+    monkeypatch.setattr(roster, "time", fake)
+    monkeypatch.setattr(ra_client, "time", fake)
+    return fake
+
+
+class _PingsForever(httpx.SyncByteStream):
+    """도구가 끝나지 않는 호출의 응답 — 15초마다 ping 주석 줄만 흘린다. 닫지 않고 끝까지 읽으면 시험이 실패한다."""
+
+    def __init__(self, clock: _Clock) -> None:
+        self.clock = clock
+        self.closed = False
+
+    def __iter__(self):
+        for _ in range(4000):                                   # 60000초 — 기한(540)을 한참 넘는다
+            self.clock.now += 15
+            yield b": ping - 2026-10-08 00:00:00+00:00\r\n\r\n"
+        raise AssertionError("기한이 걸리지 않았다 — ping 만 흐르는 응답을 끝없이 읽는다")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_one_stuck_call_cannot_outlive_the_roster_deadline(clock):
+    """호출 하나가 ping 만 흘리며 끝나지 않아도 기한에서 놓는다 — 그 뒤로는 게이트웨이를 더 부르지 않는다.
+
+    침묵 한도(60·120초)는 게이트웨이의 15초 ping 이 되감아 호출 길이를 자르지 못한다 — 호출 하나가 게이트웨이
+    한도(600초)까지 가고, 16번이면 한 요청이 그 합까지 간다. 이 조회는 nginx /apps/(600초) 안의 동기 요청이라
+    프록시가 먼저 504 를 내면 사용자는 빈 504 를 받고, 앱은 뒤늦게 타깃을 만들어 다시 누른 요청이 409 가 된다.
+    기한은 호출 사이에서만 보면 모자라서 호출 안에서도 본다.
+    """
+    calls: list[dict] = []
+    streams: list[_PingsForever] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode())
+        if payload["method"] != "tools/call":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {}})
+        calls.append(payload["params"])
+        streams.append(_PingsForever(clock))
+        return httpx.Response(200, stream=streams[-1], headers={"content-type": "text/event-stream"})
+
+    started = clock.now
+    out = roster.RosterSource(GATEWAY, "pat", client=_client(handler)).fetch(DOMAINS, "요약", deadline_s=540)
+
+    assert out["deadline_exceeded"] is True and (out["source"], out["reason"]) == ("unavailable", "deadline")
+    assert out["relevance_source"] == "unavailable" and out["domains_failed"] == list(DOMAINS)
+    # recommend_agents 한 번에서 기한을 다 썼다 — list_agents 는 한 번도 나가지 않았고, 붙든 응답은 닫았다.
+    assert [c["name"] for c in calls] == [roster.RECOMMEND_AGENTS] and streams[0].closed
+    assert clock.now - started == 540                           # 넘겨 듣는 폭은 ping 한 칸(15초)을 넘지 않는다
+
+
+def test_a_call_past_its_deadline_is_not_sent(clock):
+    """기한이 지난 호출은 게이트웨이에 보내지도 않는다 — 여러 호출이 한 기한을 나눠 쓸 때 남은 호출이 그렇게 끝난다."""
+    sent: list[httpx.Request] = []
+    mcp = ra_client.McpHttpClient(GATEWAY, client=_client(
+        lambda request: sent.append(request) or httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {}})))
+
+    reply = mcp.call(roster.LIST_AGENTS, {"domain": "mech"}, deadline=clock.now)
+    assert (reply["ok"], reply["error"]) == (False, "deadline_exceeded") and sent == []
+    # 기한이 남았으면 그대로 간다(핸드셰이크 둘 + 호출 하나).
+    assert mcp.call(roster.LIST_AGENTS, {"domain": "mech"}, deadline=clock.now + 1)["ok"] is True and len(sent) == 3
+
+
+def test_a_spent_budget_stops_asking_and_names_the_domains_it_skipped(clock):
+    """느린 호출이 쌓여 기한을 다 쓰면 남은 도메인은 묻지 않고 `domains_failed` 에 싣는다 — 받은 것은 그대로 쓴다."""
+    domains = ("mech", "sim", "xd", "cam", "rel", "soc", "disp", "pcb")
+    calls: list[dict] = []
+    inner = _gateway_handler(calls)
+
+    def slow(request: httpx.Request) -> httpx.Response:
+        if json.loads(request.content.decode())["method"] == "tools/call":
+            clock.now += 100                                    # 호출마다 100초 — 게이트웨이가 바쁘다
+        return inner(request)
+
+    out = roster.RosterSource(GATEWAY, "pat", client=_client(slow)).fetch(domains, "요약", deadline_s=540)
+
+    # 추천 100 · 도메인 넷 500 · 다섯째가 600 에 답해 기한(540)을 넘겼다 — 그 답은 버리고 나머지 셋은 묻지 않는다.
+    assert out["source"] == "gateway" and out["relevance_source"] == "recommend_agents"
+    assert out["domains_ok"] == ["mech", "sim", "xd", "cam"]
+    assert out["domains_failed"] == ["rel", "soc", "disp", "pcb"] and out["deadline_exceeded"] is True
+    assert [c["name"] for c in calls] == [roster.RECOMMEND_AGENTS] + [roster.LIST_AGENTS] * 5
+    assert [a["key"] for a in out["agents"]][:2] == ["mech-frame", "mech-surface-treatment"]
+
+    # 기한 안에 끝난 조회는 종전과 같다.
+    calls.clear()
+    quick = roster.RosterSource(GATEWAY, "pat", client=_client(_gateway_handler(calls))).fetch(
+        DOMAINS, "요약", deadline_s=540)
+    assert quick["deadline_exceeded"] is False and quick["domains_failed"] == [] and len(calls) == 4
+
+
+def test_the_target_lookup_takes_its_limits_from_the_knobs(risk_store, tmp_path, clock, monkeypatch):
+    """타깃 조회는 호출당 침묵 한도를 소스 호출 손잡이(120초, 연결 10초)에서, 전체 기한을 명단 손잡이(540초)에서 받는다."""
+    (tmp_path / config.SECRETS_FILENAME).write_text("HWAXRISK_PORTAL_PAT=service-pat\n", encoding="utf-8")
+    (tmp_path / config.SECRETS_FILENAME).chmod(0o600)
+    assert config.DEFAULT_ROSTER_DEADLINE_S == 540
+
+    source = roster.source_for(risk_store, OWNER, settings=_settings(tmp_path))
+    assert source._mcp.timeout == httpx.Timeout(120.0, connect=10.0)
+    tuned = types.SimpleNamespace(**vars(_settings(tmp_path)), risk_source_call_timeout_s=300)
+    assert roster.source_for(risk_store, OWNER, settings=tuned)._mcp.timeout == httpx.Timeout(300.0, connect=10.0)
+
+    seen: list[float | None] = []
+    monkeypatch.setattr(roster.RosterSource, "fetch",
+                        lambda self, domains, text="", *, deadline_s=None: seen.append(deadline_s) or {
+                            "source": "gateway", "reason": None, "relevance_source": "unavailable",
+                            "agents": [{"key": "mech-frame", "domain": "mech", "relevance": 0.0}],
+                            "domains_ok": ["mech"], "domains_failed": ["sim", "xd"], "deadline_exceeded": True})
+    out = roster.fetch_for_target(risk_store, kind="snap", ref_id="s1", owner_sub=OWNER, settings=_settings(tmp_path))
+    short = types.SimpleNamespace(**vars(_settings(tmp_path)), risk_roster_deadline_s=90)
+    roster.fetch_for_target(risk_store, kind="snap", ref_id="s1", owner_sub=OWNER, settings=short)
+    assert seen == [540, 90]
+    # 기한을 넘겼으면 값·손잡이·못 받은 도메인·순위가 어떻게 매겨졌는지를 한 줄로 말한다.
+    assert out["notice"] == ("전문가 명단 조회가 540초 안에 끝나지 않았다(HWAXRISK_ROSTER_DEADLINE_S)"
+                             " — 못 받은 도메인 sim·xd, 좌석 순위는 키 순서로 매겼다")
 
 
 # ---------------------------------------------------------------- planner 연결(§6.3 rank 규칙)
@@ -277,6 +408,57 @@ def test_create_target_uses_the_gateway_when_body_agents_are_absent(wired, ident
     assert [t["tier"] for t in out["tier_plan"]] == ["A", "B", "C"]
     assert wired.query_one("SELECT COUNT(*) AS n FROM rr_coverage WHERE target_key = ?",
                            ("snap:s1",))["n"] == 5
+    # 이 스냅샷에는 요약문이 없어 추천을 묻지 않았다 — 그것도 응답이 말한다(순위는 키 순서다).
+    assert (out["relevance_source"], out["domains_failed"]) == ("no_query", [])
+    assert "roster_notice" not in out
+
+
+def _state_summary(store) -> None:
+    """스냅샷 s1 의 요약문 — 있어야 `recommend_agents` 를 묻는다(질의문이 비면 건너뛴다)."""
+    store.execute(
+        "INSERT INTO rr_states(snapshot_id, owner_sub, state_json, feature_json, gates_json,"
+        " summary_text, summary_status, computed_at) VALUES (?,?,?,?,?,?,?,?)",
+        ("s1", OWNER, "{}", "{}", "{}", "[대상] 스냅샷 요약", "ok", 100))
+
+
+def test_the_target_response_says_how_the_roster_was_degraded(wired, ident, gateway_transport):
+    """추천이 실패하면 좌석 순위가 키 순서로 떨어지고, 도메인 조회가 실패하면 그 도메인 좌석이 통째로 없다 — 응답이 말한다.
+
+    종전 응답에는 `roster_source: "gateway"` 뿐이었다. 순위 1번이 Tier A 대표석이고 고정된 순위는 다시 매기지
+    않으므로, 추천이 한 번 실패하면 도메인마다 키가 사전순으로 가장 앞선 전문가가 몇 시간짜리 패널에 앉는데
+    그 사실이 어디에도 남지 않았다.
+    """
+    _snapshot(wired)
+    _state_summary(wired)
+    wired.upsert_credential(OWNER, _enc("owner-pat"), "sub", OWNER, "[]", 2_000_000_000)
+    gateway_transport(_gateway_handler(fail={roster.RECOMMEND_AGENTS}, fail_domains={"sim"}))
+
+    out = routes.create_target(routes.TargetBody(kind="snap", ref_id="s1", consent=True), ident=ident)
+    assert (out["roster_source"], out["roster_size"]) == ("gateway", 3)
+    assert (out["relevance_source"], out["domains_failed"]) == ("unavailable", ["sim"])
+    assert "roster_notice" not in out                         # 기한을 넘긴 것은 아니다
+    assert routes.refresh_roster("snap:s1", routes.RosterBody(), ident=ident) == {
+        "added_pending": 0, "roster_source": "gateway", "relevance_source": "unavailable", "domains_failed": ["sim"]}
+
+
+def test_the_target_response_carries_the_deadline_notice(wired, ident, gateway_transport, clock):
+    """명단 조회가 기한을 넘기면 타깃은 받은 만큼으로 열리고, 응답이 기한·손잡이·못 받은 도메인을 말한다."""
+    _snapshot(wired)
+    _state_summary(wired)
+    wired.upsert_credential(OWNER, _enc("owner-pat"), "sub", OWNER, "[]", 2_000_000_000)
+    inner = _gateway_handler()
+
+    def slow(request: httpx.Request) -> httpx.Response:
+        if json.loads(request.content.decode())["method"] == "tools/call":
+            clock.now += 250                                  # 추천 250 · mech 500 · sim 750(기한 540 을 넘긴다)
+        return inner(request)
+
+    gateway_transport(slow)
+    out = routes.create_target(routes.TargetBody(kind="snap", ref_id="s1", consent=True), ident=ident)
+    assert (out["roster_source"], out["roster_size"]) == ("gateway", 2)
+    assert (out["relevance_source"], out["domains_failed"]) == ("recommend_agents", ["sim", "xd"])
+    assert out["roster_notice"] == ("전문가 명단 조회가 540초 안에 끝나지 않았다(HWAXRISK_ROSTER_DEADLINE_S)"
+                                    " — 못 받은 도메인 sim·xd")
 
 
 def test_create_target_prefers_body_agents_over_the_gateway(wired, ident, gateway_transport):
@@ -288,6 +470,7 @@ def test_create_target_prefers_body_agents_over_the_gateway(wired, ident, gatewa
         routes.TargetBody(kind="snap", ref_id="s1", consent=True,
                           agents=[{"key": "mech-frame", "domain": "mech", "relevance": 1.0}]), ident=ident)
     assert out["roster_source"] == "body.agents" and out["roster_size"] == 1
+    assert (out["relevance_source"], out["domains_failed"]) == ("body.agents", [])
 
 
 def test_create_target_without_credential_degrades_to_empty_roster(wired, ident, gateway_transport):
@@ -308,7 +491,8 @@ def test_refresh_roster_fetches_the_gateway_and_appends_only_new_keys(wired, ide
     gateway_transport(_gateway_handler())
 
     out = routes.refresh_roster("snap:s1", routes.RosterBody(), ident=ident)
-    assert out == {"added_pending": 4, "roster_source": "gateway"}
+    assert out == {"added_pending": 4, "roster_source": "gateway", "relevance_source": "no_query",
+                   "domains_failed": []}
     rows = wired.query("SELECT agent_key, rank_in_domain FROM rr_roster WHERE target_key = ? AND domain = 'mech'"
                        " ORDER BY rank_in_domain", ("snap:s1",))
     assert [(r["agent_key"], r["rank_in_domain"]) for r in rows] == [
@@ -319,7 +503,7 @@ def test_refresh_roster_without_credential_reports_unavailable(wired, ident, gat
     _target(wired, "snap:s1", kind="snap", ref_id="s1")
     gateway_transport(_boom)
     assert routes.refresh_roster("snap:s1", routes.RosterBody(), ident=ident) == {
-        "added_pending": 0, "roster_source": "unavailable"}
+        "added_pending": 0, "roster_source": "unavailable", "relevance_source": "unavailable", "domains_failed": []}
 
 
 # ------------------------------------------------- §4.8 스냅샷 변경 시 무효화 배선

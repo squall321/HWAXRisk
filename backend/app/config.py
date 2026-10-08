@@ -79,6 +79,12 @@ DEFAULT_SOURCE_CALL_TIMEOUT_S = 120
 # 문헌 검색이 그 줄을 놓치면 몇 시간짜리 패널이 필드 근거 없이 돌았다. 브리프 한 번의 최악은 도구 지도 10초 +
 # 4×(20+15) = 150초라 MCP 길의 risk_get_brief(게이트웨이 600초) 안에 든다.
 DEFAULT_FIELD_TIMEOUT_S = 20
+# 타깃을 열 때의 전문가 명단 조회 전체(recommend_agents 1 + 도메인마다 list_agents)의 벽시계 기한
+# (HWAXRISK_ROSTER_DEADLINE_S). 이 조회는 nginx /apps/(proxy_read_timeout 600초, 포털 시험이 고정) 안의 동기 요청이다 —
+# 넘겨 듣는 폭(게이트웨이 ping 한 칸 15초)을 더해도 600 보다 작아야, 프록시가 빈 504 를 내기 전에 앱이 받은 만큼으로
+# 답한다. 호출당 침묵 한도(HWAXRISK_SOURCE_CALL_TIMEOUT_S)는 ping 이 되감아 호출 길이를 자르지 못한다 — 게이트웨이
+# 호출 한도가 600초가 된 뒤로는 호출 하나가 프록시 한도와 같은 길이까지 간다.
+DEFAULT_ROSTER_DEADLINE_S = 540
 
 
 def resolve_data_dir(env: Mapping[str, str] | None = None) -> Path:
@@ -150,6 +156,7 @@ class Settings:
     risk_engine_busy_wait_s: int
     risk_engine_busy_max_wait_s: int
     risk_field_timeout_s: int
+    risk_roster_deadline_s: int
     adh_team: str | None
     adh_group: str | None
     app_id: str = APP_ID
@@ -225,6 +232,7 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         risk_engine_busy_wait_s=int(env.get("HWAXRISK_ENGINE_BUSY_WAIT_S", str(DEFAULT_ENGINE_BUSY_WAIT_S))),
         risk_engine_busy_max_wait_s=int(env.get("HWAXRISK_ENGINE_BUSY_MAX_WAIT_S", str(ENGINE_BUSY_ALLOWANCE_S))),
         risk_field_timeout_s=int(env.get("HWAXRISK_FIELD_TIMEOUT_S", str(DEFAULT_FIELD_TIMEOUT_S))),
+        risk_roster_deadline_s=int(env.get("HWAXRISK_ROSTER_DEADLINE_S", str(DEFAULT_ROSTER_DEADLINE_S))),
         adh_team=env.get("HWAXRISK_ADH_TEAM") or None,
         adh_group=env.get("HWAXRISK_ADH_GROUP") or None,
     )

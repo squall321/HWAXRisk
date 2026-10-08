@@ -9,8 +9,11 @@ import httpx
 
 from app.common import canonical_json, now_epoch
 
-# 게이트웨이 호출 타임아웃(GATEWAY_CALL_TIMEOUT 120 s) 아래로 잡는다.
+# 응답 침묵 한도다 — 호출 길이의 상한이 아니다. 게이트웨이가 도구가 도는 동안 15초마다 ping 을 흘리므로 이 값은
+# 죽은 게이트웨이만 잡고, 호출 길이는 게이트웨이의 GATEWAY_CALL_TIMEOUT 이 정한다(호출 길이를 묶으려면 기한을 준다).
 DEFAULT_TIMEOUT = 60.0
+# `call()` 이 기한 초과에 돌려주는 error 값.
+DEADLINE_EXCEEDED = "deadline_exceeded"
 # MCP streamable-http 프로토콜 버전(mcp>=1.10 서버가 받는 값).
 PROTOCOL_VERSION = "2025-06-18"
 
@@ -39,7 +42,8 @@ class McpHttpClient:
 
     `timeout` 은 바이트 사이 침묵 한도다. 게이트웨이는 도구가 도는 동안 15초마다 ping 주석 줄을 흘리므로, 15초를
     넘는 값은 죽은 게이트웨이만 잡고 호출 길이는 자르지 못한다. 호출 길이를 묶으려면 `deadline_s`(POST 한 건의
-    벽시계 기한, 초)를 준다 — 넘기면 `error` 가 'deadline_exceeded' 다. None 이면 기한 없이 종전 길로 간다.
+    벽시계 기한, 초)를 주거나 `call(..., deadline=)` 에 여러 호출이 나눠 쓰는 기한(monotonic 시각)을 준다 —
+    넘기면 `error` 가 'deadline_exceeded' 다. 둘 다 없으면 기한 없이 종전 길로 간다.
     """
 
     def __init__(self, endpoint: str, *, headers: Mapping[str, str] | None = None,
@@ -93,20 +97,23 @@ class McpHttpClient:
         except ValueError:
             return None
 
-    def _post(self, payload: dict) -> dict:
-        """JSON-RPC 한 건을 보낸다. 기한(`deadline_s`)이 걸려 있으면 응답을 스트림으로 읽으며 줄마다 경과를 본다.
+    def _post(self, payload: dict, deadline: float | None = None) -> dict:
+        """JSON-RPC 한 건을 보낸다. 기한이 걸려 있으면 응답을 스트림으로 읽으며 줄마다 경과를 본다.
 
         httpx 의 한도는 침묵만 재서, ping 을 흘리는 게이트웨이에서는 한도 20초로 34초짜리 호출이 그대로 돌아온다
         (실측). 그래서 기한이 걸린 호출은 줄(ping 주석 줄 포함)이 올 때마다 시계를 본다 — 넘겨 듣는 폭은 ping 한 칸
         (15초)이다. 침묵 한도도 남은 기한을 넘지 않게 줄여, ping 조차 없는 상대는 기한에 맞춰 끊는다.
         """
         content = canonical_json(payload).encode("utf-8")
-        deadline = None if self.deadline_s is None else time.monotonic() + self.deadline_s
+        if deadline is None and self.deadline_s is not None:
+            deadline = time.monotonic() + self.deadline_s
         if deadline is None:
             response = self._http().post(self.endpoint, headers=self._base_headers(), content=content,
                                          timeout=self.timeout)
             return self._reply(response, response.text)
         left = deadline - time.monotonic()
+        if left <= 0:
+            raise _DeadlineExceeded("호출 기한 초과(보내지 않았다)")
         idle = httpx.Timeout(self.timeout)
         within = httpx.Timeout(connect=left if idle.connect is None else min(idle.connect, left),
                                read=left if idle.read is None else min(idle.read, left),
@@ -144,20 +151,20 @@ class McpHttpClient:
             return {"ok": False, "error": "rpc_error", "detail": message["error"]}
         return {"ok": True, "result": (message or {}).get("result") or {}}
 
-    def _handshake(self) -> dict:
+    def _handshake(self, deadline: float | None = None) -> dict:
         if self._session_id is not None:
             return {"ok": True, "result": {}}
         reply = self._post({
             "jsonrpc": "2.0", "id": self._rpc_id(), "method": "initialize",
             "params": {"protocolVersion": PROTOCOL_VERSION, "capabilities": {},
                        "clientInfo": {"name": "hwax_risk", "version": "1"}},
-        })
+        }, deadline)
         if not reply["ok"]:
             return reply
         # 세션 헤더를 주지 않는 서버(단순 JSON-RPC)에서도 재핸드셰이크를 반복하지 않게 표시만 남긴다.
         if self._session_id is None:
             self._session_id = ""
-        self._post({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}})
+        self._post({"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}}, deadline)
         return {"ok": True, "result": {}}
 
     @staticmethod
@@ -179,18 +186,22 @@ class McpHttpClient:
         return result
 
     # -- 공개 ---------------------------------------------------------------
-    def call(self, name: str, arguments: Mapping[str, Any] | None = None) -> dict:
-        """도구 하나를 부른다. 성공 {'ok': True, 'result': …}, 실패 {'ok': False, 'error': …}."""
+    def call(self, name: str, arguments: Mapping[str, Any] | None = None, *,
+             deadline: float | None = None) -> dict:
+        """도구 하나를 부른다. 성공 {'ok': True, 'result': …}, 실패 {'ok': False, 'error': …}.
+
+        `deadline` 은 이 호출이 끝나야 하는 monotonic 시각이다 — 여러 호출이 한 기한을 나눠 쓸 때 준다(명단 조회).
+        """
         try:
-            handshake = self._handshake()
+            handshake = self._handshake(deadline)
             if not handshake["ok"]:
                 return handshake
             reply = self._post({
                 "jsonrpc": "2.0", "id": self._rpc_id(), "method": "tools/call",
                 "params": {"name": name, "arguments": dict(arguments or {})},
-            })
+            }, deadline)
         except _DeadlineExceeded as exc:
-            return {"ok": False, "error": "deadline_exceeded", "detail": str(exc)}
+            return {"ok": False, "error": DEADLINE_EXCEEDED, "detail": str(exc)}
         except httpx.HTTPError as exc:
             return {"ok": False, "error": "transport_error", "detail": f"{type(exc).__name__}: {exc}"}
         if not reply["ok"]:

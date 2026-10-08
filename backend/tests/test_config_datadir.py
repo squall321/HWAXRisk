@@ -20,7 +20,8 @@ _ENV_KEYS = ("HWAXRISK_DATA_DIR", "HEAX_DATA_DIR", "ROOT_PATH", "PORT", "HOST",
              "HWAXRISK_RECALL_REQUIRE_VERIFIED_ACTOR", "HWAXRISK_NEG_PRECEDENT_LINES",
              "HWAXRISK_CLUSTER_DUP_SCAN", "HWAXRISK_PANEL_TIMEOUT_S", "HWAXRISK_ENGINE_READ_TIMEOUT_S",
              "HWAXRISK_CREDENTIAL_MARGIN_S", "HWAXRISK_PORTAL_CALL_TIMEOUT_S", "HWAXRISK_SOURCE_CALL_TIMEOUT_S",
-             "HWAXRISK_ENGINE_BUSY_WAIT_S", "HWAXRISK_ENGINE_BUSY_MAX_WAIT_S", "HWAXRISK_FIELD_TIMEOUT_S")
+             "HWAXRISK_ENGINE_BUSY_WAIT_S", "HWAXRISK_ENGINE_BUSY_MAX_WAIT_S", "HWAXRISK_FIELD_TIMEOUT_S",
+             "HWAXRISK_ROSTER_DEADLINE_S")
 
 
 @pytest.fixture
@@ -138,6 +139,7 @@ def test_defaults_follow_plan(tmp_path, reload_config):
     assert s.risk_engine_busy_wait_s == 30
     assert s.risk_engine_busy_max_wait_s == 3600
     assert s.risk_field_timeout_s == 20
+    assert s.risk_roster_deadline_s == 540
 
 
 def test_time_limits_are_layered_and_follow_their_knobs(tmp_path, reload_config):
@@ -152,6 +154,9 @@ def test_time_limits_are_layered_and_follow_their_knobs(tmp_path, reload_config)
     assert 3608 < 28808 < mod.panel_timeout_s(s) == 43200
     assert mod.panel_timeout_s(s) < 46800 < 50400 < s.risk_engine_read_timeout_s
     assert mod.panel_timeout_s(s) < mod.credential_margin_s(s) == 47400 < 86400
+    # 명단 조회는 nginx /apps/ (proxy_read_timeout 600초) 안의 동기 요청이다 — 넘겨 듣는 폭(게이트웨이 ping 한 칸
+    # 15초)을 더해도 프록시보다 먼저 스스로 끝나야 한다.
+    assert 15 < s.risk_roster_deadline_s == 540 and s.risk_roster_deadline_s + 15 < 600
 
     mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path), HWAXRISK_PANEL_TIMEOUT_S="21600",
                         HWAXRISK_ENGINE_READ_TIMEOUT_S="60000")
@@ -178,6 +183,8 @@ def test_time_limits_are_layered_and_follow_their_knobs(tmp_path, reload_config)
     assert mod.settings.risk_source_call_timeout_s == 300
     mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path), HWAXRISK_FIELD_TIMEOUT_S="45")
     assert mod.settings.risk_field_timeout_s == 45
+    mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path), HWAXRISK_ROSTER_DEADLINE_S="300")
+    assert mod.settings.risk_roster_deadline_s == 300
 
 
 def test_env_overrides_with_hwaxrisk_prefix(tmp_path, reload_config):
