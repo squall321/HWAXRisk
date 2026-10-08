@@ -6,6 +6,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 
 import httpx
@@ -446,6 +448,167 @@ def test_lost_streams_do_not_count_toward_the_engine_fail_streak(risk_store, tmp
     lost = risk_store.query_one(
         "SELECT conv_id, retry FROM rr_panels WHERE target_key = ? AND error LIKE 'engine_stream_cut%'", (target_key,))
     assert (lost["conv_id"], lost["retry"]) == ("conv-7", 0)
+
+
+# ---------------------------------------------------------------- 포털 429(동시 실행 자리 없음) 대기(plan §6.7.2 6단계)
+class _Clock:
+    """러너의 `time` 을 대신하는 가짜 시계 — sleep 은 자지 않고 monotonic 만 민다(대기 예산은 monotonic 으로 잰다)."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.slept: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
+
+    def __getattr__(self, name: str):
+        return getattr(time, name)                  # 그 밖(localtime·time …)은 진짜 시계다
+
+
+class _NoSlot:
+    """자리가 끝내 나지 않는 엔진 — 부를 때마다 429 다."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def run(self, delib_opts, *, owner_sub=None):
+        self.calls += 1
+        raise runner.EngineBusy("포털 agent_semaphore 초과(429)")
+
+
+BUSY_ERROR = ("engine_busy: 포털 동시 실행 자리(MAX_CONCURRENT_CHATS)를 3600초 기다렸지만 나지 않았다"
+              "(HWAXRISK_ENGINE_BUSY_MAX_WAIT_S)")
+
+
+def test_a_panel_that_never_got_an_engine_slot_pauses_the_job_without_charging(risk_store, tmp_path, monkeypatch):
+    """포털이 429 만 주면 대기 예산(3600초)까지 기다리고, 다 쓰면 좌석을 차감하지 않고 잡을 멈춘다.
+
+    429 는 '자리가 없다' 는 빠르고 분명한 답이다 — 좌석도 엔진도 실패하지 않았고 심의는 한 줄도 돌지 않았다.
+    종전에는 30초 × 10회 = 5분 만에 `engine_busy` 를 엔진 실패로 닫아 좌석을 차감했다. 심의가 SSE 자리를 몇 시간씩
+    쥐는 지금은 5분 넘게 자리가 안 나는 일이 드물지 않은데, 그런 패널 셋이면 한 번도 앉아 보지 못한 좌석이
+    skipped 로 굳고 잡이 engine_fail_streak 로 죽었다. 예산은 자격 여유가 429 몫으로 잡아 둔 시간과 같은 값이다.
+    """
+    clock = _Clock()
+    monkeypatch.setattr(runner, "time", clock)
+    target_key = _seed(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+    engine = _NoSlot()
+
+    for _ in range(3):
+        out = runner.run_panel(risk_store, cfg, engine, runner.claim_next_job(risk_store, cfg))
+        assert (out["status"], out["error"]) == ("error", BUSY_ERROR), out
+        panel = risk_store.query_one("SELECT status, error, retry FROM rr_panels WHERE id = ?", (out["panel_id"],))
+        assert (panel["status"], panel["error"], panel["retry"]) == ("error", BUSY_ERROR, 0)
+        seats = risk_store.query("SELECT status, retry FROM rr_coverage WHERE target_key = ?", (target_key,))
+        assert {(r["status"], r["retry"]) for r in seats} == {("pending", 0)}
+        job = risk_store.query_one("SELECT state, pause_reason, error, state_by FROM rr_jobs WHERE id = ?", (job_id,))
+        assert (job["state"], job["pause_reason"], job["state_by"]) == ("paused", None, "code:engine_busy")
+        assert job["error"] == BUSY_ERROR + " — 잡을 멈췄다(좌석 재시도는 차감하지 않았다). 재개하면 이어 돈다"
+        # 멈춘 잡은 집히지 않는다 — 사람이 재개해야 다시 자리를 묻는다.
+        assert runner.claim_next_job(risk_store, cfg) is None
+        runner.resume_job(risk_store, job_id, by=OWNER)
+
+    # 패널마다 30초씩 정확히 예산만큼 기다렸다 — 마지막 물음 뒤에 한 번 더 자지 않는다(종전 루프는 잤다).
+    assert set(clock.slept) == {30} and sum(clock.slept) == 3 * 3600 and engine.calls == 3 * 121
+    assert runner._error_streak(risk_store, target_key) == 0
+    # 기다리는 예산이 곧 자격 여유가 429 몫으로 잡은 시간이다 — 둘이 따로 놀면 기다리는 사이 PAT 가 만료된다.
+    assert config.engine_busy_max_wait_s(cfg) == 3600
+    assert config.credential_margin_s(cfg) == config.panel_timeout_s(cfg) + 3600 + config.CREDENTIAL_SLACK_S
+    assert not hasattr(runner, "ENGINE_BUSY_MAX_RETRY")
+
+
+def test_the_engine_slot_wait_follows_its_knobs_and_shows_on_the_board(risk_store, tmp_path, monkeypatch):
+    """간격·예산은 손잡이를 따르고, 기다리는 동안 진행판(잡 행의 마지막 신호)에 '엔진 자리 대기 n회째' 가 보인다.
+
+    종전에는 기다리는 내내 패널이 running 으로만 보였다 — 도는 것인지 자리를 기다리는 것인지 알 수 없었다.
+    """
+    clock = _Clock()
+    monkeypatch.setattr(runner, "time", clock)
+    target_key = _seed(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path, risk_engine_busy_wait_s=7,
+                              risk_engine_busy_max_wait_s=20)
+    job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+    assert config.credential_margin_s(cfg) == config.panel_timeout_s(cfg) + 20 + config.CREDENTIAL_SLACK_S
+
+    # 자리가 끝내 안 나면 예산(20초)에서 그친다 — 마지막 대기는 남은 만큼만이다.
+    out = runner.run_panel(risk_store, cfg, _NoSlot(), runner.claim_next_job(risk_store, cfg))
+    assert out["error"].startswith("engine_busy: 포털 동시 실행 자리(MAX_CONCURRENT_CHATS)를 20초 기다렸지만"), out
+    assert clock.slept == [7, 7, 6]
+    runner.resume_job(risk_store, job_id, by=OWNER)
+    clock.slept.clear()
+    seen: list[str] = []
+
+    class Engine(RealEngine):
+        def run(self, delib_opts, *, owner_sub=None, on_progress=None):
+            signal = json.loads(risk_store.query_one(
+                "SELECT progress_json FROM rr_jobs WHERE id = ?", (job_id,))["progress_json"])
+            seen.append(signal["last_step"])
+            if len(seen) <= 2:
+                raise runner.EngineBusy("포털 agent_semaphore 초과(429)")
+            return super().run(delib_opts, owner_sub=owner_sub)
+
+    out = runner.run_panel(risk_store, cfg, Engine(), runner.claim_next_job(risk_store, cfg))
+    assert out["status"] == "done", out
+    assert seen == ["", "엔진 자리 대기 1회째", "엔진 자리 대기 2회째"] and clock.slept == [7, 7]
+
+
+def test_a_shutdown_during_the_engine_slot_wait_does_not_charge_the_seats(risk_store, tmp_path):
+    """자리를 기다리던 중에 앱이 내려가면 그 패널은 시작도 못 한 것이다 — 좌석을 차감하지 않고 잡도 멈추지 않는다."""
+    target_key = _seed(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+    stop = threading.Event()
+    stop.set()
+
+    out = runner.run_panel(risk_store, cfg, _NoSlot(), runner.claim_next_job(risk_store, cfg), stop=stop)
+    assert out["status"] == "error" and out["error"].startswith("stopped: "), out
+    panel = risk_store.query_one("SELECT status, retry FROM rr_panels WHERE id = ?", (out["panel_id"],))
+    assert (panel["status"], panel["retry"]) == ("error", 0)
+    seats = risk_store.query("SELECT status, retry FROM rr_coverage WHERE target_key = ?", (target_key,))
+    assert {(r["status"], r["retry"]) for r in seats} == {("pending", 0)}
+    assert runner._error_streak(risk_store, target_key) == 0
+    # 겹칠 심의가 없으니 멈추지 않는다 — 다시 뜨면 기동 복구가 이 잡을 줄 세운다(도는 패널이 없는 running 잡).
+    assert risk_store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))["state"] == "running"
+    assert runner.recover_running_panels(risk_store) == {"recovered": 0, "paused": 0}
+    assert risk_store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))["state"] == "queued"
+
+
+def test_retries_after_429_reuse_the_one_portal_conversation(risk_store, tmp_path, monkeypatch):
+    """429 뒤의 재시도는 앞 시도가 만든 포털 대화를 다시 쓴다 — 패널 하나가 빈 대화를 시도 수만큼 남기지 않는다.
+
+    엔진 클라이언트는 본문을 보내기 전에 대화부터 만든다. 종전에는 시도마다 새로 만들어, 429 를 열 번 받은 패널이
+    빈 '[리스크심사] …' 대화 열 개를 남겼고 패널 행은 그중 어느 것도 가리키지 않았다. 예산이 한 시간이면 120개다.
+    """
+    monkeypatch.setattr(runner, "time", _Clock())
+    target_key = _seed(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)
+    created: list[str] = []
+    chats: list[str | None] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == engine_client.CONVERSATIONS_PATH:
+            created.append(f"conv-{len(created) + 1}")
+            return httpx.Response(200, json={"id": created[-1]})
+        if request.url.path != engine_client.CHAT_PATH:
+            return httpx.Response(200, json={"model": "glm-fake"})          # agent-server /health
+        chats.append(json.loads(request.content.decode()).get("conversation_id"))
+        if len(chats) <= 2:
+            return httpx.Response(429, text="too many")
+        return httpx.Response(200, content=_sse(("delib", {"kind": "decision", "text": DECISION}), ("done", {})),
+                              headers={"content-type": "text/event-stream"})
+
+    engine = engine_client.PortalPanelEngine(risk_store, cfg, transport=httpx.MockTransport(handler))
+    out = runner.run_panel(risk_store, cfg, engine, runner.claim_next_job(risk_store, cfg))
+    assert out["status"] == "done", out
+    assert created == ["conv-1"] and chats == ["conv-1", "conv-1", "conv-1"]
+    assert risk_store.query_one(
+        "SELECT conv_id FROM rr_panels WHERE id = ?", (out["panel_id"],))["conv_id"] == "conv-1"
 
 
 CHAIR_KNOB = "DELIB_TIMEOUT_S · 요청 timeout_s(상한 DELIB_TIMEOUT_MAX_S) · 의장 재호출 DELIB_CHAIR_RETRIES"

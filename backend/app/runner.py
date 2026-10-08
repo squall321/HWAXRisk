@@ -25,8 +25,6 @@ _LOOPS: tuple[tuple[str, float], ...] = (("panel_loop", 5.0), ("sync_loop", 60.0
 STATUS_LOOKUP_RE = re.compile(r"^(?P<key>\S+) 조회: (?P<tool>\S+)$")
 EVIDENCE_SEP = " · "
 
-ENGINE_BUSY_WAIT_S = 30.0          # 포털 /agent/chat 429(세마포어 초과)는 error 가 아니라 대기 후 재시도
-ENGINE_BUSY_MAX_RETRY = 10
 # 짧은 호출(스냅샷 캡처·필드 근거·명단 조회)에 사용자 PAT 를 쓰려면 남아 있어야 하는 수명. 패널은 이 값이 아니라
 # config.credential_margin_s(패널 벽시계에서 유도)를 쓴다 — 이 값 하나로 패널까지 재던 동안 여유가 벽시계보다 작았다.
 CREDENTIAL_MARGIN_S = 1800
@@ -45,9 +43,11 @@ STREAM_LOST_CODES: tuple[str, ...] = ("panel_timeout", "engine_silent", "engine_
 RESTART_CODE = "restart"
 # 엔진이 라운드를 다 돌리고도 결정문을 내지 못해 error 로 끝낸 사유(error 프레임의 code) — 좌석은 전부 발언했다.
 NO_DECISION_CODES: tuple[str, ...] = ("chair_failed",)
-# 좌석 재시도와 연속 실패(ENGINE_FAIL_STREAK)에 세지 않는 패널 error 코드 — 좌석 탓이 아니고, 곧바로 다시 편성하면
-# 같은 심의가 엔진에 겹치거나 같은 한도에 다시 걸리는 중단이다.
-UNCHARGED_CODES: tuple[str, ...] = (*STREAM_LOST_CODES, RESTART_CODE, *NO_DECISION_CODES)
+# 엔진이 받아 주지 않아 시작도 못 한 패널의 사유 — 포털 429 대기 예산 소진 · 그 대기 중의 앱 종료. 심의는 한 줄도 돌지 않았다.
+UNSTARTED_CODES: tuple[str, ...] = ("engine_busy", "stopped")
+# 좌석 재시도와 연속 실패(ENGINE_FAIL_STREAK)에 세지 않는 패널 error 코드 — 좌석 탓이 아닌 중단이다. 세면 좌석과
+# 무관한 일 세 번에 그 좌석이 skipped 로 굳고 잡이 죽는다.
+UNCHARGED_CODES: tuple[str, ...] = (*STREAM_LOST_CODES, RESTART_CODE, *NO_DECISION_CODES, *UNSTARTED_CODES)
 PROGRESS_WRITE_INTERVAL_S = 60     # 도는 패널의 '마지막 신호' 를 잡 행에 적는 간격 — 줄마다 적으면 15초 ping 이 DB 를 두드린다
 
 # 러너 정본 경로가 부르는 모듈 함수(없으면 잡을 집지 않고 error 로 강등한다 — 반쪽 저장 방지).
@@ -65,6 +65,8 @@ class PanelEngine(Protocol):
     선택 메서드 health() -> {model, vllm?, engine_rev?, endpoint_host?} 가 있으면 D6 model_json 을 채운다.
     선택 인자 run(..., on_progress=) 를 받는 엔진에는 러너가 콜백을 준다 — 프레임이 올 때마다
     {last_frame_at, last_event_at, last_step, frames} 로 부르면 러너가 잡 행에 '마지막 신호' 를 적는다.
+    선택 인자 run(..., conversation=) 를 받는 엔진에는 러너가 429 뒤의 재시도에 `EngineBusy.conversation` 을
+    되돌려 준다 — 앞 시도가 만든 포털 대화를 다시 쓰라는 뜻이다.
     포털 429 는 EngineBusy, 앱이 스트림을 놓은 것은 EngineStreamLost, 의장이 결정문을 못 낸 것은 EngineNoDecision,
     그 밖의 실패는 EngineError 로 올린다.
     """
@@ -73,7 +75,16 @@ class PanelEngine(Protocol):
 
 
 class EngineBusy(Exception):
-    """엔진 슬롯이 없다(포털 agent_semaphore 429). 패널 카운트를 올리지 않고 대기 후 재시도한다."""
+    """엔진 슬롯이 없다(포털 agent_semaphore 429). 러너가 대기 후 다시 묻는다 — 엔진도 좌석도 실패한 것이 아니다.
+
+    대기 예산(`HWAXRISK_ENGINE_BUSY_MAX_WAIT_S`)을 다 쓰면 좌석 재시도와 연속 실패에 세지 않고 잡을 멈춘다
+    (run_panel). `conversation` 은 그 시도가 만든 포털 대화 (대화 id, 만든 자격 표기)다 — 러너가 재시도에 그대로
+    되돌려 준다. 다시 쓰지 않으면 패널 하나가 빈 대화를 시도 수만큼 남긴다. 대화를 못 만들었으면 None 이다.
+    """
+
+    def __init__(self, *args: Any, conversation: tuple[str, str] | None = None) -> None:
+        super().__init__(*args)
+        self.conversation = conversation
 
 
 class EngineError(Exception):
@@ -908,7 +919,7 @@ def _diminishing(store: Any, target_key: str) -> bool:
 
 
 def _uncharged_code(error: Any) -> str | None:
-    """패널 error 문구가 좌석 재시도·연속 실패에 세지 않는 중단(스트림을 놓았다 · 재기동 · 결정문 없음)이면
+    """패널 error 문구가 좌석 재시도·연속 실패에 세지 않는 중단(스트림을 놓았다 · 재기동 · 결정문 없음 · 시작 못 함)이면
     그 코드(UNCHARGED_CODES), 아니면 None."""
     code = str(error or "").split(":", 1)[0].strip()
     return code if code in UNCHARGED_CODES else None
@@ -917,8 +928,8 @@ def _uncharged_code(error: Any) -> str | None:
 def _error_streak(store: Any, target_key: str) -> int:
     """가장 최근부터 연속으로 error 로 닫힌 패널 수(ENGINE_FAIL_STREAK 에서 멈춘다).
 
-    앱이 스트림을 놓았거나 재기동이 끊었거나 의장만 결정문을 못 낸 패널은 세지 않고 건너뛴다 — 그 패널 때문에
-    진짜 실패 두 번이 세 번으로 세져 잡이 죽으면 안 된다.
+    앱이 스트림을 놓았거나 재기동이 끊었거나 의장만 결정문을 못 냈거나 엔진 자리가 없어 시작도 못 한 패널은 세지
+    않고 건너뛴다 — 그 패널 때문에 진짜 실패 두 번이 세 번으로 세져 잡이 죽으면 안 된다.
     """
     streak = 0
     for row in store.query(
@@ -996,21 +1007,43 @@ def run_panel(
     # owner(없으면 서비스) PAT 로 돌았다.
     credential_sub = params.get("requester") if job.get("credential") == "requester" else job.get("owner_sub")
     optional: dict = {}
-    if "on_progress" in _run_parameters(engine):
+    run_params = _run_parameters(engine)
+    if "on_progress" in run_params:
         optional["on_progress"] = _progress_writer(store, job, panel)
         optional["on_progress"]({})                 # 첫 줄이 오기 전부터 '시작했고 아직 신호가 없다' 가 보인다
-    for attempt in range(ENGINE_BUSY_MAX_RETRY):
+    # 포털 429(동시 실행 자리 없음)는 간격을 두고 다시 묻되 총 예산까지만 기다린다. 종전에는 30초 × 10회(5분)였고
+    # 다 쓰면 엔진 실패로 닫아 좌석을 차감했다 — 심의가 SSE 자리를 몇 시간씩 쥐는 지금은 5분 넘게 자리가 안 나는
+    # 일이 드물지 않아, 한 번도 앉아 보지 못한 좌석이 skipped 로 굳고 잡이 engine_fail_streak 로 죽었다.
+    busy_wait_s, busy_budget_s = config.engine_busy_wait_s(settings), config.engine_busy_max_wait_s(settings)
+    busy_n, busy_until = 0, 0.0
+    while True:
         try:
             result = engine.run(delib_opts, owner_sub=credential_sub, **optional)
             break
-        except EngineBusy:
-            if stop is not None and stop.wait(ENGINE_BUSY_WAIT_S):
-                error = "stopped"
-                break
+        except EngineBusy as busy:
+            busy_n += 1
+            if busy_n == 1:
+                busy_until = time.monotonic() + busy_budget_s
+            conv_id = busy.conversation[0] if busy.conversation else None
+            left = busy_until - time.monotonic()
+            if left <= 0:
+                return _close_panel_unstarted(
+                    store, panel, job, "engine_busy", conv_id=conv_id, pause=True,
+                    error=f"engine_busy: 포털 동시 실행 자리(MAX_CONCURRENT_CHATS)를 {busy_budget_s}초 기다렸지만"
+                          " 나지 않았다(HWAXRISK_ENGINE_BUSY_MAX_WAIT_S)")
+            if "conversation" in run_params:
+                optional["conversation"] = busy.conversation  # 앞 시도가 만든 대화를 다시 쓴다(시도마다 만들지 않는다)
+            if "on_progress" in optional:
+                # 기다리는 동안 패널은 running 으로만 보인다 — 도는 것과 자리를 기다리는 것이 진행판에서 갈리게 한다.
+                optional["on_progress"]({"last_step": f"엔진 자리 대기 {busy_n}회째"}, force=True)
+            # 남은 예산보다 길게 자지 않는다 — 마지막 물음이 예산의 끝에 온다.
             if stop is None:
-                time.sleep(ENGINE_BUSY_WAIT_S)
-            if attempt == ENGINE_BUSY_MAX_RETRY - 1:
-                error = "engine_busy"
+                time.sleep(min(busy_wait_s, left))
+            elif stop.wait(min(busy_wait_s, left)):
+                return _close_panel_unstarted(
+                    store, panel, job, "stopped", conv_id=conv_id, pause=False,
+                    error="stopped: 엔진 자리를 기다리던 중에 앱이 내려갔다 — 심의는 시작되지 않았다"
+                          "(좌석 재시도는 차감하지 않았다)")
         except PatUnavailable as exc:
             # 자격 문제는 폴백·재시도 대상이 아니다 — 잡을 멈추고 좌석을 되돌린다(plan §6.7.1).
             out = _close_panel_error(store, panel, job, f"pat_unavailable: {exc}", settings)
@@ -1071,6 +1104,28 @@ def _close_panel_stream_lost(store: Any, panel: Mapping[str, Any], job: Mapping[
     return {"panel_id": panel["id"], "status": "error", "error": error}
 
 
+def _close_panel_unstarted(store: Any, panel: Mapping[str, Any], job: Mapping[str, Any], code: str, *,
+                           error: str, conv_id: str | None, pause: bool) -> dict:
+    """엔진이 받아 주지 않아 시작도 못 한 패널을 닫는다(`code` ∈ UNSTARTED_CODES) — 좌석 재시도와 연속 실패에 세지 않는다.
+
+    좌석은 차감 없이 pending 으로 돌린다. `pause` 면 잡을 멈춘다 — 자리가 한 시간째 안 나는 포털에 곧바로 다시
+    편성해 봐야 같은 대기를 되풀이할 뿐이다(사람이 재개하면 이어 돈다). 앱이 내려가며 그친 대기는 멈추지 않는다 —
+    겹칠 심의가 없으니 다시 뜨면 기동 복구가 그 잡을 줄 세운다. `conv_id` 는 대기 중에 만들어 둔 빈 대화다.
+    """
+    planner.fail_panel_seats(store, panel["id"], reason="engine_fail", charge=False)
+    store.execute(
+        "UPDATE rr_panels SET status = 'error', error = ?, conv_id = ?, ended_at = ? WHERE id = ?",
+        (error[:500], conv_id, now_epoch(), panel["id"]),
+    )
+    if pause:
+        # 그 사이 사람이 취소했으면(cancelling) 그 전이를 덮지 않는다 — 다음 편성에서 cancelled 가 된다.
+        row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job["id"],))
+        if row is not None and row["state"] == "running":
+            _set_job(store, job["id"], "paused", by=f"code:{code}",
+                     error=f"{error} — 잡을 멈췄다(좌석 재시도는 차감하지 않았다). 재개하면 이어 돈다")
+    return {"panel_id": panel["id"], "status": "error", "error": error}
+
+
 def _close_panel_no_decision(store: Any, panel: Mapping[str, Any], job: Mapping[str, Any],
                              failed: EngineNoDecision) -> dict:
     """의장이 결정문을 못 낸 패널을 닫는다 — 좌석 재시도와 연속 실패에 세지 않고, 엔진이 남긴 것을 적고 잡을 멈춘다.
@@ -1118,11 +1173,14 @@ def _progress_writer(store: Any, job: Mapping[str, Any], panel: Mapping[str, Any
     head = {"panel_id": panel["id"], "panel_no": panel.get("panel_no"), "started_at": now_epoch()}
     last: dict = {"written_at": None}
 
-    def note(frame: Mapping[str, Any]) -> None:
+    def note(frame: Mapping[str, Any], *, force: bool = False) -> None:
         now = now_epoch()
-        if last["written_at"] is not None and now - last["written_at"] < PROGRESS_WRITE_INTERVAL_S:
-            return
-        last["written_at"] = now
+        # `force` 는 러너가 직접 적는 줄이다(엔진 자리 대기) — 간격을 건너뛰고, 간격 셈도 건드리지 않는다. 건드리면
+        # 자리가 난 뒤 첫 프레임이 '방금 적었다' 에 걸려, 도는 패널이 최대 1분 '대기' 로 보인다.
+        if not force:
+            if last["written_at"] is not None and now - last["written_at"] < PROGRESS_WRITE_INTERVAL_S:
+                return
+            last["written_at"] = now
         body = {**head, "last_frame_at": None, "last_event_at": None, "last_step": "", "frames": 0, **frame}
         try:
             store.execute("UPDATE rr_jobs SET progress_json = ? WHERE id = ?", (canonical_json(body), job["id"]))

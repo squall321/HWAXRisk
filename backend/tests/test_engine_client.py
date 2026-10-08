@@ -218,6 +218,49 @@ def test_run_maps_429_to_engine_busy_and_connect_error_to_engine_error(tmp_path)
         _engine(tmp_path, broken).run({"question": "q"})
 
 
+def test_a_429_hands_back_its_conversation_and_the_retry_reuses_it(tmp_path):
+    """429 는 그 시도가 만든 대화를 `EngineBusy.conversation` 으로 돌려주고, 그것을 되받은 재시도는 새로 만들지 않는다.
+
+    다만 그 사이 자격이 바뀌었으면(사용자 PAT 수명이 여유 밑으로 내려가 서비스 계정으로 강등) 새로 만든다 —
+    포털은 남의 대화에 저장하는 것을 말없이 건너뛰므로, 그대로 쓰면 그 패널의 발언이 포털에 한 줄도 남지 않는다.
+    """
+    from app.common import now_epoch
+
+    _service_pat(tmp_path)
+    owner = {"portal_pat": _enc("owner-pat"), "pat_email": "me@example.com", "pat_groups_json": "[]",
+             "pat_exp": now_epoch() + 30 * 86400}
+    created: list[str] = []
+    chats: list[tuple[str | None, str | None]] = []
+    busy = {"on": True}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/agent/conversations":
+            created.append(f"conv-{len(created) + 1}")
+            return httpx.Response(200, json={"id": created[-1]})
+        chats.append((json.loads(request.content.decode()).get("conversation_id"), request.headers["authorization"]))
+        if busy["on"]:
+            return httpx.Response(429, text="too many")
+        return httpx.Response(200, text=STREAM, headers={"content-type": "text/event-stream"})
+
+    store = _Store(owner)
+    engine = _engine(tmp_path, handler, store)
+    with pytest.raises(EngineBusy) as first:
+        engine.run({"question": "q"}, owner_sub="me@example.com")
+    assert first.value.conversation == ("conv-1", "owner:me@example.com")
+
+    # 같은 자격으로 다시 묻는다 — 대화를 새로 만들지 않는다.
+    with pytest.raises(EngineBusy) as second:
+        engine.run({"question": "q"}, owner_sub="me@example.com", conversation=first.value.conversation)
+    assert created == ["conv-1"] and second.value.conversation == first.value.conversation
+
+    # 그 사이 사용자 PAT 를 못 쓰게 됐다 — 서비스 계정으로 내려가며 대화를 새로 만든다.
+    store.row = None
+    busy["on"] = False
+    result = engine.run({"question": "q"}, owner_sub="me@example.com", conversation=second.value.conversation)
+    assert created == ["conv-1", "conv-2"] and result["conv_id"] == "conv-2" and result["credential"] == "service"
+    assert chats == [("conv-1", "Bearer owner-pat"), ("conv-1", "Bearer owner-pat"), ("conv-2", "Bearer svc-pat")]
+
+
 def test_run_cuts_a_stream_that_outlives_the_panel_wall_clock(tmp_path):
     """줄이 계속 와도 패널 벽시계(plan §6.10.2)를 넘기면 끊는다 — 읽기 타임아웃은 줄 사이 침묵만 잰다.
 

@@ -19,7 +19,8 @@ _ENV_KEYS = ("HWAXRISK_DATA_DIR", "HEAX_DATA_DIR", "ROOT_PATH", "PORT", "HOST",
              "HWAXRISK_PRIOR_INCLUDE_HUMAN", "HWAXRISK_SUSPECT_TEXT_BLOCK",
              "HWAXRISK_RECALL_REQUIRE_VERIFIED_ACTOR", "HWAXRISK_NEG_PRECEDENT_LINES",
              "HWAXRISK_CLUSTER_DUP_SCAN", "HWAXRISK_PANEL_TIMEOUT_S", "HWAXRISK_ENGINE_READ_TIMEOUT_S",
-             "HWAXRISK_CREDENTIAL_MARGIN_S", "HWAXRISK_PORTAL_CALL_TIMEOUT_S", "HWAXRISK_SOURCE_CALL_TIMEOUT_S")
+             "HWAXRISK_CREDENTIAL_MARGIN_S", "HWAXRISK_PORTAL_CALL_TIMEOUT_S", "HWAXRISK_SOURCE_CALL_TIMEOUT_S",
+             "HWAXRISK_ENGINE_BUSY_WAIT_S", "HWAXRISK_ENGINE_BUSY_MAX_WAIT_S")
 
 
 @pytest.fixture
@@ -134,6 +135,8 @@ def test_defaults_follow_plan(tmp_path, reload_config):
     assert s.risk_credential_margin_s == 0                    # 0 = 벽시계에서 유도
     assert s.risk_portal_call_timeout_s == 30
     assert s.risk_source_call_timeout_s == 120
+    assert s.risk_engine_busy_wait_s == 30
+    assert s.risk_engine_busy_max_wait_s == 3600
 
 
 def test_time_limits_are_layered_and_follow_their_knobs(tmp_path, reload_config):
@@ -162,6 +165,12 @@ def test_time_limits_are_layered_and_follow_their_knobs(tmp_path, reload_config)
     # 여유를 따로 정하면 유도값 대신 그 값이다.
     mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path), HWAXRISK_CREDENTIAL_MARGIN_S="7200")
     assert mod.credential_margin_s(mod.settings) == 7200
+    # 429 대기 예산을 올리면 자격 여유가 같은 폭으로 따라간다 — 여유가 그 몫을 따로 적어 두던 동안에는
+    # 기다리는 시간만 늘어 대기 중에 PAT 가 만료될 수 있었다.
+    mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path), HWAXRISK_ENGINE_BUSY_MAX_WAIT_S="7200",
+                        HWAXRISK_ENGINE_BUSY_WAIT_S="10")
+    assert (mod.engine_busy_wait_s(mod.settings), mod.engine_busy_max_wait_s(mod.settings)) == (10, 7200)
+    assert mod.credential_margin_s(mod.settings) == 43200 + 7200 + 600
     mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path), HWAXRISK_PORTAL_CALL_TIMEOUT_S="45")
     assert mod.settings.risk_portal_call_timeout_s == 45
     mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path), HWAXRISK_SOURCE_CALL_TIMEOUT_S="300")

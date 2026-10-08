@@ -56,8 +56,9 @@ def check_credential_chain(settings) -> None:
     if margin >= PAT_MIN_REMAINING_S:
         raise RuntimeError(
             f"패널 자격 여유 {margin}초가 PAT 등록 하한 {PAT_MIN_REMAINING_S}초 이상입니다 — 여유는 패널 벽시계"
-            f"(HWAXRISK_PANEL_TIMEOUT_S {config.panel_timeout_s(settings)}) + 대기 + 600초로 정해집니다. 벽시계를"
-            " 내리거나 HWAXRISK_CREDENTIAL_MARGIN_S 로 여유를 하한보다 작게 정하세요.")
+            f"(HWAXRISK_PANEL_TIMEOUT_S {config.panel_timeout_s(settings)}) + 엔진 자리 대기 예산"
+            f"(HWAXRISK_ENGINE_BUSY_MAX_WAIT_S {config.engine_busy_max_wait_s(settings)}) + 600초로 정해집니다."
+            " 벽시계나 대기 예산을 내리거나 HWAXRISK_CREDENTIAL_MARGIN_S 로 여유를 하한보다 작게 정하세요.")
 
 
 @asynccontextmanager

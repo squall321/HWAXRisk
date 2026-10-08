@@ -47,7 +47,7 @@ _DEFAULT_MCAD_DOMAINS = "mech,cam,xd,disp,sh"
 # 박스는 전부 이 값으로 돈다. 20석 안팎 패널이 공유 LLM 에 줄을 서면 패널 하나가 몇 시간을 가므로, 진행 중인 것을
 # 자르지 않을 만큼 크게 잡고 안쪽 한도가 바깥보다 작게 둔다. 한쪽만 바꾸면 순서가 뒤집히니 이웃을 같이 본다.
 #   누적 시간 — LLM 논리 호출 1회(엔진 2×DELIB_TIMEOUT_S+8 = 3608, 요청 상한이면 28808) < 패널 벽시계
-#               < 자격 여유(벽시계 + 429 대기 + 600) < PAT 등록 하한(routes.PAT_MIN_REMAINING_S 86400)
+#               < 자격 여유(벽시계 + 429 대기 예산 + 600) < PAT 등록 하한(routes.PAT_MIN_REMAINING_S 86400)
 #   줄 사이 침묵 — 엔진 ping 15 < 포털 릴레이 AGENT_STREAM_IDLE_TIMEOUT_S(46800)
 #               < nginx NGINX_AGENT_READ_TIMEOUT(50400) < 이 앱의 읽기 한도(아래 54000)
 # 패널 1건의 벽시계(HWAXRISK_PANEL_TIMEOUT_S, 0 = 끔). 앱이 SSE 스트림에서 잰다 — 엔진에는 패널 전체를 재는 손잡이가
@@ -59,9 +59,12 @@ DEFAULT_PANEL_TIMEOUT_S = 43200
 # 살아 있는 심의에서는 걸리지 않는 마지막 그물이다. 침묵 한도 셋 중 가장 바깥이라 포털·nginx 보다 커야 안쪽의
 # 구체적인 문구가 먼저 온다.
 DEFAULT_ENGINE_READ_TIMEOUT_S = 54000
-# 자격 여유를 셈할 때 429(포털 동시 실행 자리 없음) 대기 몫으로 잡는 시간. 러너가 실제로 기다리는 것은 지금
-# 30초 × 10회 = 300초(runner.ENGINE_BUSY_*)이고, 이 몫은 그 대기를 1시간 예산으로 늘릴 때도 여유가 모자라지
-# 않게 미리 잡은 값이다 — 대기를 그보다 길게 하려면 이 값을 같이 올린다.
+# 포털이 429(동시 실행 자리 없음)를 줄 때 다시 묻는 간격(HWAXRISK_ENGINE_BUSY_WAIT_S).
+DEFAULT_ENGINE_BUSY_WAIT_S = 30
+# 429 를 기다리는 총 예산의 기본값(HWAXRISK_ENGINE_BUSY_MAX_WAIT_S). 429 는 빠르고 분명한 답이라 그것을 기다리는 것은
+# 멈춤이 아니다 — 심의가 SSE 자리를 몇 시간씩 쥐므로 종전의 30초 × 10회(5분)로는 모자랐다. 자격 여유는 이 예산을
+# 그대로 429 몫으로 잡는다(credential_margin_s) — 종전에는 러너의 대기(횟수 리터럴)와 여유의 몫(이 상수)이 따로
+# 적혀 있어, 한쪽만 늘리면 기다리는 사이 PAT 가 만료될 수 있었다.
 ENGINE_BUSY_ALLOWANCE_S = 3600
 # 자격 여유에 얹는 고정 여분(대화 생성·마지막 저장).
 CREDENTIAL_SLACK_S = 600
@@ -138,6 +141,8 @@ class Settings:
     risk_credential_margin_s: int
     risk_portal_call_timeout_s: int
     risk_source_call_timeout_s: int
+    risk_engine_busy_wait_s: int
+    risk_engine_busy_max_wait_s: int
     adh_team: str | None
     adh_group: str | None
     app_id: str = APP_ID
@@ -210,6 +215,8 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
         risk_credential_margin_s=int(env.get("HWAXRISK_CREDENTIAL_MARGIN_S", "0")),
         risk_portal_call_timeout_s=int(env.get("HWAXRISK_PORTAL_CALL_TIMEOUT_S", str(DEFAULT_PORTAL_CALL_TIMEOUT_S))),
         risk_source_call_timeout_s=int(env.get("HWAXRISK_SOURCE_CALL_TIMEOUT_S", str(DEFAULT_SOURCE_CALL_TIMEOUT_S))),
+        risk_engine_busy_wait_s=int(env.get("HWAXRISK_ENGINE_BUSY_WAIT_S", str(DEFAULT_ENGINE_BUSY_WAIT_S))),
+        risk_engine_busy_max_wait_s=int(env.get("HWAXRISK_ENGINE_BUSY_MAX_WAIT_S", str(ENGINE_BUSY_ALLOWANCE_S))),
         adh_team=env.get("HWAXRISK_ADH_TEAM") or None,
         adh_group=env.get("HWAXRISK_ADH_GROUP") or None,
     )
@@ -221,19 +228,32 @@ def panel_timeout_s(cfg: object | None = None) -> int:
     return max(0, int(getattr(cfg, "risk_panel_timeout_s", DEFAULT_PANEL_TIMEOUT_S)))
 
 
+def engine_busy_wait_s(cfg: object | None = None) -> int:
+    """포털 429 뒤에 다시 묻기까지 쉬는 간격(초). 1초 밑으로는 내려가지 않는다 — 0 이면 예산 내내 포털을 두드린다."""
+    cfg = settings if cfg is None else cfg
+    return max(1, int(getattr(cfg, "risk_engine_busy_wait_s", DEFAULT_ENGINE_BUSY_WAIT_S)))
+
+
+def engine_busy_max_wait_s(cfg: object | None = None) -> int:
+    """포털 429 를 기다리는 총 예산(초). 다 쓰면 러너가 좌석을 차감하지 않고 잡을 멈춘다. 0 이면 기다리지 않는다."""
+    cfg = settings if cfg is None else cfg
+    return max(0, int(getattr(cfg, "risk_engine_busy_max_wait_s", ENGINE_BUSY_ALLOWANCE_S)))
+
+
 def credential_margin_s(cfg: object | None = None) -> int:
     """사용자 포털 PAT 로 패널을 시작하려면 남아 있어야 하는 수명(초).
 
-    규칙 — 남은 수명이 (패널 벽시계 + 429 대기 + 600초)를 넘을 때만 그 PAT 로 패널을 시작한다. 자격은 누적
+    규칙 — 남은 수명이 (패널 벽시계 + 429 대기 예산 + 600초)를 넘을 때만 그 PAT 로 패널을 시작한다. 자격은 누적
     시간 한도라 감싸는 실행보다 길어야 하는데, 종전 값은 1800초 고정이라 벽시계 2400초보다 작았다(뒤집혀
-    있었다). 벽시계를 끈 박스(0)에서는 기본 벽시계로 셈한다 — 끝없는 실행을 감쌀 여유는 없다.
+    있었다). 벽시계를 끈 박스(0)에서는 기본 벽시계로 셈한다 — 끝없는 실행을 감쌀 여유는 없다. 429 몫은 러너가
+    실제로 기다리는 예산(`HWAXRISK_ENGINE_BUSY_MAX_WAIT_S`)을 그대로 쓴다 — 그 손잡이를 올리면 여유가 따라간다.
     `HWAXRISK_CREDENTIAL_MARGIN_S` 로 덮어쓸 수 있고, PAT 등록 하한보다 작은지는 기동 때 본다(main._lifespan).
     """
     cfg = settings if cfg is None else cfg
     override = int(getattr(cfg, "risk_credential_margin_s", 0) or 0)
     if override > 0:
         return override
-    return (panel_timeout_s(cfg) or DEFAULT_PANEL_TIMEOUT_S) + ENGINE_BUSY_ALLOWANCE_S + CREDENTIAL_SLACK_S
+    return (panel_timeout_s(cfg) or DEFAULT_PANEL_TIMEOUT_S) + engine_busy_max_wait_s(cfg) + CREDENTIAL_SLACK_S
 
 
 def load_secrets(data_dir: Path) -> dict[str, str]:

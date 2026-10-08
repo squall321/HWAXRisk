@@ -326,10 +326,12 @@ class PortalPanelEngine:
 
     # -- 6·7단계 엔진 호출·SSE 캡처 ---------------------------------------------
     def run(self, delib_opts: Mapping[str, Any], *, owner_sub: str | None = None,
-            on_progress: Callable[[Mapping[str, Any]], None] | None = None) -> dict:
+            on_progress: Callable[[Mapping[str, Any]], None] | None = None,
+            conversation: tuple[str, str] | None = None) -> dict:
         """패널 1건을 돌리고 {decision_text, turns, conv_id, events, …} 를 돌려준다.
 
-        429(포털 agent_semaphore 초과)는 `EngineBusy` 라 러너가 대기 후 재시도하고, 연결 실패·error 프레임은
+        429(포털 agent_semaphore 초과)는 `EngineBusy` 라 러너가 대기 후 다시 묻는다 — 그때 러너는 그 예외의
+        `conversation`(대화 id, 만든 자격)을 되돌려 주고, 같은 자격이면 그 대화를 다시 쓴다. 연결 실패·error 프레임은
         `EngineError` 다. 앱이 스트림을 놓은 것(패널 벽시계·줄 사이 침묵·중간 절단)은 `EngineStreamLost` 로
         가른다 — 그때 엔진은 심의를 계속 돌릴 수 있다. 의장이 결정문을 못 낸 것은 `EngineNoDecision` 이고
         그 심의의 대화를 실어 올린다. 자격이 없으면 `PatUnavailable` 이다.
@@ -337,7 +339,14 @@ class PortalPanelEngine:
         opts = {k: v for k, v in dict(delib_opts).items() if k != "question"}
         question = str(delib_opts.get("question") or "")
         credential = self._credential(owner_sub if owner_sub is not None else self.owner_sub)
-        conv_id = self.create_conversation(credential["pat"], f"[리스크심사] {question[:160]}")
+        # 429 뒤의 재시도는 앞 시도가 만든 대화를 다시 쓴다 — 시도마다 만들면 패널 하나가 빈 대화를 시도 수만큼 남긴다.
+        # 다만 그 사이 자격이 바뀌었으면(사용자 PAT 수명이 여유 밑으로 내려가 서비스 계정으로 강등) 새로 만든다 —
+        # 포털은 남의 대화에 저장하는 것을 말없이 건너뛰어, 그대로 쓰면 이 패널의 발언이 포털에 남지 않는다.
+        made_by = f"{credential['kind']}:{credential['email'] or ''}"
+        if conversation and conversation[1] == made_by:
+            conv_id: str | None = conversation[0]
+        else:
+            conv_id = self.create_conversation(credential["pat"], f"[리스크심사] {question[:160]}")
 
         # 줄 사이 침묵 한도. 종전에는 '엔진 호출당 타임아웃 1800 + 60' 으로 유도했다 — LLM 시도 한 번만 가정한 값이라
         # 엔진이 SDK 재시도를 하거나 박스의 호출 한도를 올리면 건강한 패널을 끊었다. 이제는 죽은 스트림만 잡는
@@ -361,7 +370,8 @@ class PortalPanelEngine:
             with self._client(timeout) as client:
                 with client.stream("POST", self._base() + CHAT_PATH, json=body, headers=headers) as response:
                     if response.status_code == 429:
-                        raise EngineBusy("포털 agent_semaphore 초과(429)")
+                        raise EngineBusy("포털 agent_semaphore 초과(429)",
+                                         conversation=(conv_id, made_by) if conv_id else None)
                     if response.status_code in (401, 403):
                         response.read()
                         # 자격 문제라 폴백하지 않는다 — 잡을 pat_unavailable 로 멈춘다(plan §6.7.1 폴백 규칙).
