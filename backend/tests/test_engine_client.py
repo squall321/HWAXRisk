@@ -13,7 +13,7 @@ def _enc(pat: str) -> str:
     """저장 열 portal_pat_enc 는 Fernet 암호문이다(plan §8.2.7) — 픽스처도 같은 형식으로 넣는다."""
     return identity.encrypt_pat(pat).decode("ascii")
 
-from app.runner import EngineBusy, EngineError, EngineStreamLost
+from app.runner import EngineBusy, EngineError, EngineNoDecision, EngineStreamLost
 
 # agent-server 실제 프레임 규약 — `event: <name>\ndata: <json>\n\n`(deliberation.py `_sse`/`_delib`).
 STREAM = (
@@ -94,6 +94,48 @@ def test_collect_stream_raises_on_error_frame():
     stream = 'event: error\ndata: {"code": "gateway_unavailable", "message": "게이트웨이 불통"}\n\n'
     with pytest.raises(EngineError):
         engine_client.collect_stream(engine_client.parse_sse(stream.splitlines()))
+
+
+CHAIR_KNOB = "DELIB_TIMEOUT_S · 요청 timeout_s(상한 DELIB_TIMEOUT_MAX_S) · 의장 재호출 DELIB_CHAIR_RETRIES"
+NO_DECISION_TEXT = "■ 의장 결정문 없음 — 좌석별 마지막 입장.\n• xd-a0: 간극이 좁다"
+# 의장이 끝내 결정문을 못 냈을 때 엔진이 내는 순서 그대로다(HWAXAgentServer deliberation.py 끝 —
+# decision{chair_failed} → outcome → token → result → error{code, message, knob} → done). 설정 이름은 글이 아니라 knob 에 온다.
+CHAIR_FAILED_STREAM = (
+    'event: delib\ndata: {"kind": "turn", "round": 1, "persona": "xd-a0", "say": "간극이 좁다", "stance": "oppose"}\n\n'
+    'event: delib\ndata: {"kind": "turn", "round": 3, "persona": "xd-a0", "say": "여전히 좁다", "stance": "oppose"}\n\n'
+    + 'event: delib\ndata: %s\n\n' % json.dumps({"kind": "decision", "text": NO_DECISION_TEXT, "chair_failed": True},
+                                                 ensure_ascii=False)
+    + 'event: delib\ndata: {"kind": "outcome", "report_id": 4242, "tally": {"oppose": 1, "total": 1}}\n\n'
+    + 'event: result\ndata: %s\n\n' % json.dumps({"type": "text", "content": NO_DECISION_TEXT}, ensure_ascii=False)
+    + 'event: error\ndata: %s\n\n' % json.dumps(
+        {"code": "chair_failed", "knob": CHAIR_KNOB,
+         "message": "의장이 결정문을 내지 못했다 — LLM 호출이 1,800초 안에 끝나지 않았다 (의장 호출 2번)."
+                    " 라운드 발언은 버리지 않았다"}, ensure_ascii=False)
+    + "event: done\ndata: {}\n\n"
+)
+
+
+def test_a_chair_that_never_decided_is_told_apart_and_keeps_what_the_engine_returned():
+    """라운드를 다 돌리고 의장만 결정문을 못 낸 것(`chair_failed`)은 엔진 실패와 갈라, 받은 것을 실어 올린다.
+
+    종전에는 error 프레임을 전부 `'<code>: <message>'` 한 줄의 EngineError 로 접었다 — 그 앞에 받은 발언과 보고서
+    번호가 예외와 함께 사라졌고, 엔진이 따로 실어 보낸 설정 이름(knob)은 읽지도 않아 어느 값을 올릴지 알 수 없었다.
+    """
+    with pytest.raises(EngineError) as failed:
+        engine_client.collect_stream(engine_client.parse_sse(CHAIR_FAILED_STREAM.splitlines()))
+    exc = failed.value
+    assert isinstance(exc, EngineNoDecision) and not isinstance(exc, EngineStreamLost)
+    assert (exc.code, exc.report_id, exc.knob) == ("chair_failed", 4242, CHAIR_KNOB)
+    assert [t["round"] for t in exc.turns] == [1, 3] and exc.decision_text == NO_DECISION_TEXT
+    assert str(exc).startswith("chair_failed: 의장이 결정문을 내지 못했다")
+
+    # 다른 error 프레임은 종전대로 엔진 실패다. 다만 knob 이 실려 오면 문구 끝에 붙인다(만료 문구는 손잡이를 말한다).
+    other = ('event: error\ndata: {"code": "gateway_unavailable", "message": "게이트웨이 불통",'
+             ' "knob": "MCP_CALL_TIMEOUT_S"}\n\n')
+    with pytest.raises(EngineError) as failed:
+        engine_client.collect_stream(engine_client.parse_sse(other.splitlines()))
+    assert not isinstance(failed.value, EngineNoDecision)
+    assert str(failed.value) == "gateway_unavailable: 게이트웨이 불통 — 설정 MCP_CALL_TIMEOUT_S"
 
 
 def _engine(tmp_path, handler, store=None, **limits):

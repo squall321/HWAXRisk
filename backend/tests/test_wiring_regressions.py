@@ -448,6 +448,90 @@ def test_lost_streams_do_not_count_toward_the_engine_fail_streak(risk_store, tmp
     assert (lost["conv_id"], lost["retry"]) == ("conv-7", 0)
 
 
+CHAIR_KNOB = "DELIB_TIMEOUT_S · 요청 timeout_s(상한 DELIB_TIMEOUT_MAX_S) · 의장 재호출 DELIB_CHAIR_RETRIES"
+NO_DECISION_TEXT = "■ 의장 결정문 없음 — 좌석별 마지막 입장.\n• mech-a000: 간극이 좁다"
+
+
+def test_a_chair_that_never_decided_pauses_the_job_and_keeps_the_pointers(risk_store, tmp_path):
+    """의장이 끝내 결정문을 못 낸 패널 — 좌석은 차감하지 않고, 엔진이 남긴 것을 패널에 적고, 잡을 멈춘다.
+
+    좌석은 전부 발언했고 실패한 것은 맨 끝의 의장 호출(대개 LLM 호출 한도)이다. 종전에는 엔진 실패로 세어 5초 뒤
+    같은 좌석을 다시 편성했다 — 몇 시간짜리 패널이 같은 한도로 세 번 돌고 좌석은 skipped 로 굳어 잡이 죽는데,
+    패널 행에는 대화도 보고서도 설정 이름도 남지 않았다. 러너는 timeout_s 를 싣지 않으므로 고칠 값은 엔진 박스의
+    설정 하나다.
+    """
+    target_key = _seed(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+    chats: list[int] = []
+
+    def stream() -> str:
+        chats.append(1)
+        # 엔진이 실제로 내는 순서다 — 발언 … decision{chair_failed} → outcome → result → error{code, message, knob} → done.
+        return _sse(
+            ("delib", {"kind": "turn", "round": 3, "persona": "mech-a000", "say": "간극이 좁다", "stance": "oppose"}),
+            ("delib", {"kind": "decision", "text": NO_DECISION_TEXT, "chair_failed": True}),
+            ("delib", {"kind": "outcome", "report_id": 4242}),
+            ("result", {"type": "text", "content": NO_DECISION_TEXT}),
+            ("error", {"code": "chair_failed", "knob": CHAIR_KNOB,
+                       "message": "의장이 결정문을 내지 못했다 — LLM 호출이 1,800초 안에 끝나지 않았다. " + "긴 사유 " * 200}),
+            ("done", {}))
+
+    out = runner.run_panel(risk_store, cfg, _portal_engine(risk_store, cfg, {}, stream),
+                           runner.claim_next_job(risk_store, cfg))
+    assert out["status"] == "error", out
+    panel = risk_store.query_one(
+        "SELECT status, error, conv_id, report_id, retry, decision_text FROM rr_panels WHERE id = ?", (out["panel_id"],))
+    # 사유가 아무리 길어도 손잡이 이름은 잘리지 않고 끝에 남는다. 코드가 맨 앞이라야 연속 실패 셈이 건너뛴다.
+    assert panel["error"].startswith("chair_failed: 의장이 결정문을 내지 못했다") and len(panel["error"]) <= 400
+    assert panel["error"].endswith(f" — 설정 {CHAIR_KNOB}")
+    # 그 심의의 발언 전부는 포털 대화와 엔진이 저장한 보고서에 있다 — 패널이 둘 다 가리킨다.
+    assert (panel["status"], panel["conv_id"], panel["report_id"], panel["retry"]) == ("error", "conv-1", 4242, 0)
+    assert panel["decision_text"] == NO_DECISION_TEXT
+    seats = risk_store.query("SELECT status, retry FROM rr_coverage WHERE target_key = ?", (target_key,))
+    assert {(r["status"], r["retry"]) for r in seats} == {("pending", 0)}
+    job = risk_store.query_one("SELECT state, pause_reason, error, state_by FROM rr_jobs WHERE id = ?", (job_id,))
+    assert (job["state"], job["pause_reason"], job["state_by"]) == ("paused", None, "code:chair_failed")
+    assert job["error"] == panel["error"] + (" — 잡을 멈췄다(좌석 재시도는 차감하지 않았다)."
+                                              " 엔진 박스의 그 설정을 올린 뒤 재개하면 이어 돈다")
+    # 멈춘 잡은 다시 편성되지 않는다 — 같은 몇 시간짜리 패널이 같은 한도로 곧바로 다시 돌지 않는다.
+    assert runner.claim_next_job(risk_store, cfg) is None and len(chats) == 1
+    assert runner.resume_job(risk_store, job_id, by=OWNER)["state"] == "queued"
+
+
+def test_chair_failures_do_not_count_toward_the_engine_fail_streak(risk_store, tmp_path):
+    """결정문 없이 끝난 패널은 연속 실패에 세지 않는다 — 그 앞뒤의 진짜 엔진 실패 셋이라야 잡이 죽는다."""
+    target_key = _seed(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+
+    class Engine:
+        def __init__(self) -> None:
+            self.errors: list[Exception] = []
+
+        def run(self, delib_opts, *, owner_sub=None):
+            raise self.errors.pop(0)
+
+    engine = Engine()
+    engine.errors = [runner.EngineError("연결 끊김"),
+                     runner.EngineNoDecision("chair_failed", "의장이 결정문을 내지 못했다"),
+                     runner.EngineError("연결 끊김"), runner.EngineError("연결 끊김")]
+    states = []
+    for _ in range(4):
+        out = runner.run_panel(risk_store, cfg, engine, runner.claim_next_job(risk_store, cfg))
+        assert out["status"] == "error"
+        row = risk_store.query_one("SELECT state, error FROM rr_jobs WHERE id = ?", (job_id,))
+        worst = risk_store.query_one(
+            "SELECT MAX(retry) AS n FROM rr_coverage WHERE target_key = ?", (target_key,))["n"]
+        states.append((row["state"], (row["error"] or "").split(":")[0], worst))
+        if row["state"] == "paused":
+            # 엔진이 설정 이름을 싣지 않았으면(옛 엔진) 없는 설정을 가리키지 않는다.
+            assert row["error"].endswith("잡을 멈췄다(좌석 재시도는 차감하지 않았다). 재개하면 이어 돈다")
+            runner.resume_job(risk_store, job_id, by=OWNER)
+    assert states == [("running", "", 1), ("paused", "chair_failed", 1), ("running", "", 2),
+                      ("failed", "engine_fail_streak", 3)]
+
+
 def test_a_cancel_made_while_the_stream_was_lost_is_not_overwritten(risk_store, tmp_path):
     """패널이 도는 사이 사람이 취소했으면 스트림을 놓쳐도 잡을 paused 로 덮지 않는다 — 다음 편성에서 cancelled 다."""
     target_key = _seed(risk_store)

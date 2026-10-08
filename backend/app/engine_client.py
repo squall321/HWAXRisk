@@ -13,7 +13,9 @@ from app import config, identity
 from app.common import now_epoch
 
 # 프로토콜·예외의 정본은 러너다(러너가 이 모듈을 import 하지 않으므로 순환이 없다).
-from app.runner import EngineBusy, EngineError, EngineStreamLost, PanelEngine, PatUnavailable
+from app.runner import (
+    NO_DECISION_CODES, EngineBusy, EngineError, EngineNoDecision, EngineStreamLost, PanelEngine, PatUnavailable,
+)
 
 log = logging.getLogger("hwax_risk.engine")
 
@@ -144,7 +146,8 @@ def _watched(frames: Iterable[tuple[str, dict]], wall_s: int, watch: _StreamWatc
 def collect_stream(frames: Iterable[tuple[str, dict]]) -> dict:
     """심의 SSE 프레임을 러너 계약 dict 로 모은다(plan §6.7.2 7단계 표).
 
-    반환 {decision_text, turns, events, report_id, pat_degraded}. `error` 프레임은 EngineError 로 올린다.
+    반환 {decision_text, turns, events, report_id, pat_degraded}. `error` 프레임은 EngineError 로 올린다 — 의장이
+    결정문을 못 낸 것(NO_DECISION_CODES)은 그때까지 받은 것을 실은 EngineNoDecision 으로 가른다.
     """
     decision_text = ""
     result_text = ""
@@ -153,6 +156,8 @@ def collect_stream(frames: Iterable[tuple[str, dict]]) -> dict:
     report_id: Any = None
     pat_degraded = False
     error: str | None = None
+    error_code = ""
+    error_knob: str | None = None
 
     def add(event: Mapping[str, Any]) -> None:
         if len(events) < EVENTS_MAX:
@@ -198,12 +203,19 @@ def collect_stream(frames: Iterable[tuple[str, dict]]) -> dict:
                 pat_degraded = True
             add({"kind": "warning", "code": _cut(code)})
         elif name == "error":
-            error = f"{data.get('code') or 'error'}: {data.get('message') or ''}".strip()
+            error_code = str(data.get("code") or "error")
+            error = str(data.get("message") or "")
+            # 엔진은 화면에 뜨는 글에 설정 이름을 넣지 않고 knob 으로 따로 싣는다 — 버리면 어느 값을 올릴지 모른다.
+            error_knob = _cut(data.get("knob"))
         elif name == "done":
             break
 
-    if error:
-        raise EngineError(error)
+    if error is not None:
+        if error_code in NO_DECISION_CODES:
+            # 이 프레임은 맨 끝에 온다 — 발언·보고서 번호·결정문 자리의 글(좌석별 마지막 입장)을 다 받은 뒤다.
+            raise EngineNoDecision(error_code, error, knob=error_knob, report_id=report_id, turns=turns,
+                                   decision_text=decision_text or result_text)
+        raise EngineError(f"{error_code}: {error}".strip() + (f" — 설정 {error_knob}" if error_knob else ""))
     return {
         "decision_text": decision_text or result_text,
         "turns": turns,
@@ -319,7 +331,8 @@ class PortalPanelEngine:
 
         429(포털 agent_semaphore 초과)는 `EngineBusy` 라 러너가 대기 후 재시도하고, 연결 실패·error 프레임은
         `EngineError` 다. 앱이 스트림을 놓은 것(패널 벽시계·줄 사이 침묵·중간 절단)은 `EngineStreamLost` 로
-        가른다 — 그때 엔진은 심의를 계속 돌릴 수 있다. 자격이 없으면 `PatUnavailable` 이다.
+        가른다 — 그때 엔진은 심의를 계속 돌릴 수 있다. 의장이 결정문을 못 낸 것은 `EngineNoDecision` 이고
+        그 심의의 대화를 실어 올린다. 자격이 없으면 `PatUnavailable` 이다.
         """
         opts = {k: v for k, v in dict(delib_opts).items() if k != "question"}
         question = str(delib_opts.get("question") or "")
@@ -359,6 +372,9 @@ class PortalPanelEngine:
                     streaming = True
                     result = collect_stream(_watched(parse_sse(response.iter_lines()), wall_s, watch))
         except PatUnavailable:
+            raise
+        except EngineNoDecision as exc:
+            exc.conv_id = conv_id                  # 그 심의의 발언 전부가 남은 포털 대화다
             raise
         except httpx.ReadTimeout as exc:
             raise watch.lost(

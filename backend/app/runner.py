@@ -43,8 +43,11 @@ STREAM_LOST_CODES: tuple[str, ...] = ("panel_timeout", "engine_silent", "engine_
 # 앱이 재기동해 닫은 패널의 error 문구. 스트림을 놓은 것과 같은 부류다 — 엔진·좌석의 실패가 아니고, 앱만 다시 떴으면
 # 엔진 쪽 심의는 분리 태스크로 계속 돈다.
 RESTART_CODE = "restart"
-# 좌석 재시도와 연속 실패(ENGINE_FAIL_STREAK)에 세지 않는 패널 error 코드 — 엔진도 좌석도 실패하지 않은 중단이다.
-UNCHARGED_CODES: tuple[str, ...] = (*STREAM_LOST_CODES, RESTART_CODE)
+# 엔진이 라운드를 다 돌리고도 결정문을 내지 못해 error 로 끝낸 사유(error 프레임의 code) — 좌석은 전부 발언했다.
+NO_DECISION_CODES: tuple[str, ...] = ("chair_failed",)
+# 좌석 재시도와 연속 실패(ENGINE_FAIL_STREAK)에 세지 않는 패널 error 코드 — 좌석 탓이 아니고, 곧바로 다시 편성하면
+# 같은 심의가 엔진에 겹치거나 같은 한도에 다시 걸리는 중단이다.
+UNCHARGED_CODES: tuple[str, ...] = (*STREAM_LOST_CODES, RESTART_CODE, *NO_DECISION_CODES)
 PROGRESS_WRITE_INTERVAL_S = 60     # 도는 패널의 '마지막 신호' 를 잡 행에 적는 간격 — 줄마다 적으면 15초 ping 이 DB 를 두드린다
 
 # 러너 정본 경로가 부르는 모듈 함수(없으면 잡을 집지 않고 error 로 강등한다 — 반쪽 저장 방지).
@@ -62,7 +65,8 @@ class PanelEngine(Protocol):
     선택 메서드 health() -> {model, vllm?, engine_rev?, endpoint_host?} 가 있으면 D6 model_json 을 채운다.
     선택 인자 run(..., on_progress=) 를 받는 엔진에는 러너가 콜백을 준다 — 프레임이 올 때마다
     {last_frame_at, last_event_at, last_step, frames} 로 부르면 러너가 잡 행에 '마지막 신호' 를 적는다.
-    포털 429 는 EngineBusy, 앱이 스트림을 놓은 것은 EngineStreamLost, 그 밖의 실패는 EngineError 로 올린다.
+    포털 429 는 EngineBusy, 앱이 스트림을 놓은 것은 EngineStreamLost, 의장이 결정문을 못 낸 것은 EngineNoDecision,
+    그 밖의 실패는 EngineError 로 올린다.
     """
 
     def run(self, delib_opts: Mapping[str, Any], *, owner_sub: str | None = None) -> Mapping[str, Any]: ...
@@ -88,6 +92,26 @@ class EngineStreamLost(EngineError):
         super().__init__(f"{code}: {message}")
         self.code = code
         self.conv_id = conv_id
+
+
+class EngineNoDecision(EngineError):
+    """엔진이 라운드를 끝까지 돌렸는데 의장이 결정문을 내지 못했다(`code` ∈ NO_DECISION_CODES).
+
+    좌석은 전부 발언했다 — 실패한 것은 맨 끝의 의장 호출(대개 LLM 호출 한도)이다. 엔진은 좌석별 마지막 입장을
+    결과로 내리고 회의록을 보고서로 저장한 뒤 error 로 끝낸다. 그래서 패널은 error 로 닫되 좌석 재시도와 연속
+    실패에 세지 않고, 엔진이 남긴 것(`conv_id`·`report_id`·`decision_text`)을 패널에 적고 잡을 멈춘다(run_panel).
+    `knob` 은 엔진이 알린 설정 이름이다 — 엔진은 화면에 뜨는 글(message)에 이름을 넣지 않고 따로 싣는다.
+    """
+
+    def __init__(self, code: str, message: str, *, knob: str | None = None, conv_id: str | None = None,
+                 report_id: Any = None, turns: Sequence[Mapping[str, Any]] = (), decision_text: str = "") -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.knob = knob
+        self.conv_id = conv_id
+        self.report_id = report_id
+        self.turns = list(turns)
+        self.decision_text = decision_text
 
 
 class PatUnavailable(Exception):
@@ -884,7 +908,8 @@ def _diminishing(store: Any, target_key: str) -> bool:
 
 
 def _uncharged_code(error: Any) -> str | None:
-    """패널 error 문구가 엔진·좌석 탓이 아닌 중단(스트림을 놓았다 · 재기동)이면 그 코드(UNCHARGED_CODES), 아니면 None."""
+    """패널 error 문구가 좌석 재시도·연속 실패에 세지 않는 중단(스트림을 놓았다 · 재기동 · 결정문 없음)이면
+    그 코드(UNCHARGED_CODES), 아니면 None."""
     code = str(error or "").split(":", 1)[0].strip()
     return code if code in UNCHARGED_CODES else None
 
@@ -892,8 +917,8 @@ def _uncharged_code(error: Any) -> str | None:
 def _error_streak(store: Any, target_key: str) -> int:
     """가장 최근부터 연속으로 error 로 닫힌 패널 수(ENGINE_FAIL_STREAK 에서 멈춘다).
 
-    앱이 스트림을 놓았거나 재기동이 끊은 패널은 세지 않고 건너뛴다 — 엔진이 실패한 것이 아니라서, 그 패널
-    때문에 진짜 실패 두 번이 세 번으로 세져 잡이 죽으면 안 된다.
+    앱이 스트림을 놓았거나 재기동이 끊었거나 의장만 결정문을 못 낸 패널은 세지 않고 건너뛴다 — 그 패널 때문에
+    진짜 실패 두 번이 세 번으로 세져 잡이 죽으면 안 된다.
     """
     streak = 0
     for row in store.query(
@@ -993,6 +1018,8 @@ def run_panel(
             return {**out, "error": "pat_unavailable"}
         except EngineStreamLost as exc:
             return _close_panel_stream_lost(store, panel, job, exc)
+        except EngineNoDecision as exc:
+            return _close_panel_no_decision(store, panel, job, exc)
         except EngineError as exc:
             error = f"engine_error: {exc}"
             break
@@ -1041,6 +1068,35 @@ def _close_panel_stream_lost(store: Any, panel: Mapping[str, Any], job: Mapping[
     if row is not None and row["state"] == "running":
         _set_job(store, job["id"], "paused", by=f"code:{lost.code}",
                  error=f"{error} — 잡을 멈췄다(좌석 재시도는 차감하지 않았다). 재개하면 이어 돈다")
+    return {"panel_id": panel["id"], "status": "error", "error": error}
+
+
+def _close_panel_no_decision(store: Any, panel: Mapping[str, Any], job: Mapping[str, Any],
+                             failed: EngineNoDecision) -> dict:
+    """의장이 결정문을 못 낸 패널을 닫는다 — 좌석 재시도와 연속 실패에 세지 않고, 엔진이 남긴 것을 적고 잡을 멈춘다.
+
+    종전에는 엔진 실패로 세어 5초 뒤 같은 좌석을 다시 편성했다 — 몇 시간짜리 패널이 같은 호출 한도로 세 번 돌고
+    (끝마다 의장 대기 최대 2×(2×DELIB_TIMEOUT_S+8)초), 좌석은 제 탓이 아닌 일로 skipped 로 굳어 잡이 죽었다.
+    엔진이 저장한 보고서와 대화는 패널 어디에도 적히지 않았다. 러너는 timeout_s 를 싣지 않으므로 고칠 값은 엔진
+    박스의 설정 하나다 — 그 이름(knob)을 문구 끝에 잘리지 않게 붙인다. error 는 코드로 시작해야 한다
+    (`_error_streak` 이 맨 앞의 코드로 가른다).
+    """
+    tail = f" — 설정 {failed.knob}" if failed.knob else ""
+    error = str(failed)[:400 - len(tail)] + tail
+    planner.fail_panel_seats(store, panel["id"], reason="engine_fail", charge=False)
+    # 발언 전부는 포털 대화(conv_id)와 엔진이 저장한 보고서(report_id)에 있다 — 패널에는 그 둘과, 엔진이 결정문
+    # 자리에 내린 글(좌석별 마지막 입장)을 남긴다. 발언을 담을 열은 없다(스트림을 놓은 패널도 같다).
+    store.execute(
+        "UPDATE rr_panels SET status = 'error', error = ?, conv_id = ?, report_id = ?, decision_text = ?,"
+        " ended_at = ? WHERE id = ?",
+        (error, failed.conv_id, failed.report_id, failed.decision_text or None, now_epoch(), panel["id"]),
+    )
+    # 그 사이 사람이 취소했으면(cancelling) 그 전이를 덮지 않는다 — 다음 편성에서 cancelled 가 된다.
+    row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job["id"],))
+    if row is not None and row["state"] == "running":
+        how = "엔진 박스의 그 설정을 올린 뒤 재개하면 이어 돈다" if failed.knob else "재개하면 이어 돈다"
+        _set_job(store, job["id"], "paused", by=f"code:{failed.code}",
+                 error=f"{error} — 잡을 멈췄다(좌석 재시도는 차감하지 않았다). {how}")
     return {"panel_id": panel["id"], "status": "error", "error": error}
 
 
