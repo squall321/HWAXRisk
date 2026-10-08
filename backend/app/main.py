@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import time
 from contextlib import asynccontextmanager
@@ -17,6 +18,8 @@ from app.mcp_server import mcp
 from app.risk_store import close_store, get_store
 from app.routes import PAT_MIN_REMAINING_S, router as api_router
 from app.runner import RiskRunner
+
+log = logging.getLogger("hwax_risk.main")
 
 _INDEX_HTML = Path(__file__).resolve().parent / "static" / "index.html"
 # Vite 빌드 산출물(frontend/dist). 있을 때만 '/' 에 마운트하고, 없으면 GET / 가 플레이스홀더를 준다(테스트는 dist 없이 통과).
@@ -62,12 +65,39 @@ def check_credential_chain(settings) -> None:
             f" 손잡이를 적는 자리는 {config.KNOB_HOME}.")
 
 
+def warn_stream_limits_off(settings) -> None:
+    """패널 스트림을 끊는 한도를 꺼 둔 박스에서, 기동 때 그 결과를 로그로 말한다. 막지는 않는다 — 0 은 허용된 값이다.
+
+    패널 벽시계는 프레임이 올 때만 본다(engine_client._watched). 줄 사이 침묵 한도(HWAXRISK_ENGINE_READ_TIMEOUT_S)를
+    0 으로 끄면, 닫히지 않은 채 조용해진 연결(상대가 끊었다는 말 없이 사라졌다)에서는 프레임도 읽기 타임아웃도
+    오지 않는다 — 벽시계가 켜져 있어도 그 패널은 러너 자리와 타깃의 직렬 순서를 재기동 때까지 붙들고, 취소도
+    닿지 않는다(취소 역시 프레임이 올 때 듣는다). 엔진은 제 한도를 끄면 기동 로그에 적는데 이 앱에는 그 말이
+    없어, 끈 사람은 '벽시계가 있으니 괜찮다' 고 믿었다. 벽시계만 끈 박스는 조용히 지나간다 — 죽은 스트림은
+    침묵 한도가 잡는다.
+    """
+    read_s = int(getattr(settings, "risk_engine_read_timeout_s", config.DEFAULT_ENGINE_READ_TIMEOUT_S) or 0)
+    if read_s > 0:
+        return
+    wall_s = config.panel_timeout_s(settings)
+    held = "러너 자리와 그 타깃의 직렬 순서를 재기동 때까지 붙든다"
+    back = f"기본값은 {config.DEFAULT_ENGINE_READ_TIMEOUT_S} 이다. 손잡이를 적는 자리는 {config.KNOB_HOME}"
+    if wall_s > 0:
+        log.warning(
+            "HWAXRISK_ENGINE_READ_TIMEOUT_S=0 — 줄 사이 침묵 한도가 꺼져 있다. 패널 벽시계(HWAXRISK_PANEL_TIMEOUT_S %s)는"
+            " 프레임이 올 때만 보므로, 닫히지 않은 채 조용해진 연결의 패널은 %s. %s.", wall_s, held, back)
+    else:
+        log.error(
+            "HWAXRISK_ENGINE_READ_TIMEOUT_S=0 · HWAXRISK_PANEL_TIMEOUT_S=0 — 패널을 끊는 한도가 하나도 없다. 조용해진"
+            " 연결이든 끝없이 말하는 스트림이든 그 패널은 %s. %s.", held, back)
+
+
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     settings = config.settings
     # ① 데이터 루트 결정·mkdir·W_OK(실패 = 예외로 기동 중단).
     config.ensure_data_dir(settings.data_dir)
     check_credential_chain(settings)
+    warn_stream_limits_off(settings)
     hostname = socket.gethostname()
     prev_hostname = _read_origin_hostname(settings.data_dir)
     # ② RiskStore 생성·MIGRATIONS 적용·살림 표(get_store 가 open()+migrate() 를 수행한다).

@@ -60,7 +60,8 @@ KNOB_HOME = "매니페스트(.portal/manifest.yaml) launch.env — SIF 가 clean
 DEFAULT_PANEL_TIMEOUT_S = 43200
 # 포털 /agent/chat SSE 의 줄 사이 침묵 한도(HWAXRISK_ENGINE_READ_TIMEOUT_S, 0 = 끔). 엔진이 15초마다 ping 을 흘리므로
 # 살아 있는 심의에서는 걸리지 않는 마지막 그물이다. 침묵 한도 셋 중 가장 바깥이라 포털·nginx 보다 커야 안쪽의
-# 구체적인 문구가 먼저 온다.
+# 구체적인 문구가 먼저 온다. 0 으로 끄면 닫히지 않은 채 조용해진 연결을 끊는 것이 없다 — 벽시계는 프레임이 올 때만
+# 보므로 벽시계가 켜져 있어도 그렇다(기동 때 main.warn_stream_limits_off 가 그렇게 적는다).
 DEFAULT_ENGINE_READ_TIMEOUT_S = 54000
 # 포털이 429(동시 실행 자리 없음)를 줄 때 다시 묻는 간격(HWAXRISK_ENGINE_BUSY_WAIT_S).
 DEFAULT_ENGINE_BUSY_WAIT_S = 30

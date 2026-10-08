@@ -70,6 +70,84 @@ def test_boot_refuses_a_credential_margin_at_or_above_the_registration_floor():
         main.check_credential_chain(dataclasses.replace(day_long, risk_credential_margin_s=86400))
 
 
+def test_boot_says_so_when_the_stream_silence_limit_is_off(caplog):
+    """줄 사이 침묵 한도를 0 으로 끈 박스는 기동 때 그 결과를 듣는다 — 값은 막지 않는다(0 은 허용된 값이다).
+
+    패널 벽시계는 프레임이 올 때만 본다. 침묵 한도가 꺼져 있으면, 닫히지 않은 채 조용해진 연결에서는 프레임도 읽기
+    타임아웃도 오지 않아 벽시계가 켜져 있어도 그 패널이 러너 자리와 타깃 순서를 재기동 때까지 붙든다(실소켓
+    재현 — 벽시계 3초를 다섯 배 넘겨도 그대로였다). 엔진은 제 한도를 끄면 기동 로그에 적는데 이 앱에는 그 말이 없었다.
+    """
+    import dataclasses
+    import logging
+
+    from app import main
+
+    def boot(**limits) -> list[logging.LogRecord]:
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="hwax_risk.main"):
+            main.warn_stream_limits_off(dataclasses.replace(config.settings, **limits))
+        return [r for r in caplog.records if r.name == "hwax_risk.main"]
+
+    # 기본값과, 벽시계만 끈 박스는 조용하다 — 죽은 스트림은 침묵 한도가 잡는다.
+    assert boot() == [] and boot(risk_panel_timeout_s=0) == []
+    # 침묵 한도만 껐다 — 경고 한 줄이 손잡이·벽시계 값·결과·기본값·적는 자리를 말한다.
+    (record,) = boot(risk_engine_read_timeout_s=0)
+    text = record.getMessage()
+    assert record.levelno == logging.WARNING
+    assert "HWAXRISK_ENGINE_READ_TIMEOUT_S=0" in text and "HWAXRISK_PANEL_TIMEOUT_S 43200" in text
+    assert "재기동" in text and "54000" in text and "launch.env" in text
+    # 둘 다 껐다 — 패널을 끊는 것이 하나도 없다.
+    (record,) = boot(risk_engine_read_timeout_s=0, risk_panel_timeout_s=0)
+    assert record.levelno == logging.ERROR
+    assert "HWAXRISK_ENGINE_READ_TIMEOUT_S=0" in record.getMessage() and "HWAXRISK_PANEL_TIMEOUT_S=0" in record.getMessage()
+
+
+def test_the_lifespan_runs_the_stream_limit_warning(tmp_path, monkeypatch, caplog, risk_store):
+    """기동 절차(lifespan)가 실제로 그 경고를 낸다 — 함수만 있고 부르는 곳이 없으면 운영자는 끝내 못 본다.
+
+    lifespan 은 한 프로세스에서 한 번만 돌 수 있어(MCP 세션 매니저) 그 부분과 러너만 대역으로 바꾸고 나머지는 실물로 돈다.
+    """
+    import asyncio
+    import contextlib
+    import dataclasses
+    import logging
+    import types
+
+    from app import main
+
+    class _Mcp:
+        class session_manager:
+            @staticmethod
+            @contextlib.asynccontextmanager
+            async def run():
+                yield
+
+    class _Runner:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(config, "settings", dataclasses.replace(
+        config.settings, data_dir=tmp_path, risk_engine_read_timeout_s=0))
+    monkeypatch.setattr(main, "mcp", _Mcp)
+    monkeypatch.setattr(main, "RiskRunner", _Runner)
+    monkeypatch.setattr(main, "get_store", lambda: risk_store)
+    monkeypatch.setattr(main, "close_store", lambda: None)
+
+    async def boot() -> None:
+        async with main._lifespan(types.SimpleNamespace(state=types.SimpleNamespace())):
+            pass
+
+    with caplog.at_level(logging.WARNING, logger="hwax_risk.main"):
+        asyncio.run(boot())
+    assert [r.levelname for r in caplog.records if r.name == "hwax_risk.main"] == ["WARNING"]
+
+
 def test_mcp_initialize_with_session_header(client):
     r = client.post(
         "/mcp",
