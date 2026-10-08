@@ -751,6 +751,7 @@ def test_a_running_panel_leaves_its_last_signal_on_the_job_row(risk_store, tmp_p
     now = {"t": now_epoch()}
     start = now["t"]
     seen: list[dict | None] = []
+    board: list[dict | None] = []
 
     def signal() -> dict | None:
         row = risk_store.query_one("SELECT progress_json FROM rr_jobs WHERE id = ?", (job_id,))
@@ -764,6 +765,10 @@ def test_a_running_panel_leaves_its_last_signal_on_the_job_row(risk_store, tmp_p
                 on_progress({"last_frame_at": now["t"], "last_event_at": now["t"], "last_step": step,
                              "frames": len(seen)})
                 seen.append(signal())
+            # 패널이 도는 중에 진행판을 본다 — 방금 신호가 왔을 때와, 그 뒤로 ping 만 5분 흐른 뒤에.
+            board.append(routes.coverage_payload(target_key)["job"]["signal"])
+            now["t"] = start + 370
+            board.append(routes.coverage_payload(target_key)["job"]["signal"])
             return super().run(delib_opts, owner_sub=owner_sub)
 
     monkeypatch.setattr(routes, "get_store", lambda: risk_store)
@@ -783,9 +788,15 @@ def test_a_running_panel_leaves_its_last_signal_on_the_job_row(risk_store, tmp_p
     assert seen == [waiting, waiting, waiting,
                     {**head, "last_frame_at": start + 70, "last_event_at": start + 70, "last_step": "3라운드",
                      "frames": 3}]
-    # 진행판(GET /targets/{key}/coverage 의 본체)이 그 신호를 싣는다.
+    # 진행판(GET /targets/{key}/coverage 의 본체)이 그 신호를 싣고, 얼마나 지났는지를 서버 시계로 같이 준다 —
+    # 시각만 주면 읽는 쪽(브라우저·MCP 호출자)의 시계에 기대야 '몇 분 전' 을 말할 수 있다.
+    assert board == [{**seen[-1], "frame_idle_s": 0, "event_idle_s": 0},
+                     {**seen[-1], "frame_idle_s": 300, "event_idle_s": 300}]
+    # 패널이 닫힌 뒤에는 싣지 않는다. 잡 행의 신호는 지워지지 않고 잡은 패널 사이에도 running 이라, 그대로 실으면
+    # 다음 패널 자리를 기다리는 멀쩡한 잡이 진행판에서 '몇 시간째 신호 없음' 으로 읽힌다.
     payload_job = routes.coverage_payload(target_key)["job"]
-    assert payload_job["signal"] == seen[-1] and "progress_json" not in payload_job
+    assert payload_job["state"] == "running" and signal() == seen[-1]
+    assert payload_job["signal"] is None and "progress_json" not in payload_job
 
     # on_progress 를 받지 않는 엔진에는 넘기지 않는다(대역·MCP 길의 엔진은 그대로 돈다).
     assert "on_progress" not in runner._run_parameters(FakePanelEngine())

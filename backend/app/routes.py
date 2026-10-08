@@ -2219,7 +2219,7 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
         job = dict(job)
         # 도는 패널의 마지막 신호(러너가 1분 간격으로 적는다) — 벽시계가 몇 시간이라, 이것이 없으면 진행판에서
         # 도는 패널과 멈춘 패널이 똑같이 'running' 이다. {panel_id, started_at, last_frame_at, last_event_at, last_step}.
-        job["signal"] = _loads(job.pop("progress_json"), {}) or None
+        job["signal"] = _live_signal(store, job["state"], _loads(job.pop("progress_json"), {}))
     return {
         "target_key": target_key,
         "job": job,
@@ -2231,6 +2231,24 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
         "level": level["level"],
         "close_level": level["close_level"],
     }
+
+
+def _live_signal(store, state: str, signal: Any) -> dict | None:
+    """잡 행에 적힌 마지막 신호 — 그 패널이 지금 도는 동안에만 싣는다. 아니면 None 이다.
+
+    `progress_json` 은 패널이 닫혀도 지워지지 않고, 잡은 패널 사이에도 running 이다. 닫힌 패널의 신호를 그대로 실으면
+    다음 패널 자리를 기다리는 멀쩡한 잡이 '몇 시간째 신호 없음' 으로 읽힌다. `frame_idle_s`·`event_idle_s` 는 그 시각에서
+    지금까지의 초다(서버 시계) — 시각만 주면 읽는 쪽의 시계에 기대야 '몇 분 전' 을 말할 수 있다. 러너가 1분
+    간격으로 적으므로(runner.PROGRESS_WRITE_INTERVAL_S) 건강한 패널에서도 `frame_idle_s` 는 80초 안팎까지 간다 —
+    '신호 없음' 은 그 간격의 몇 배를 넘겼을 때 말한다.
+    """
+    if state != "running" or not isinstance(signal, dict) or not signal.get("panel_id"):
+        return None
+    if store.query_one("SELECT id FROM rr_panels WHERE id = ? AND status = 'running'", (signal["panel_id"],)) is None:
+        return None
+    now = now_epoch()
+    return {**signal, **{f"{key}_idle_s": None if signal.get(f"last_{key}_at") is None
+                         else max(0, now - int(signal[f"last_{key}_at"])) for key in ("frame", "event")}}
 
 
 def seats_payload(target_key: str, domain: str | None = None, *, owner_sub: str | None = None) -> dict:
