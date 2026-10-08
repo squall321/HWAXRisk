@@ -1271,6 +1271,7 @@ def create_snapshot(project_id: str, body: SnapshotBody,
     `rr_snapshot_jobs` 상태기계(queued→running→done|partial|failed)는 그대로 남긴다 — 실패해도 행이 남아
     무엇이 왜 실패했는지가 보이고, 그 잡의 호출 행은 `snapshot_id IS NULL` 로 원문을 지킨다(§2.11.3).
     반환은 `{snapshot_id, ir_hash, reused, partial, blocked, gates_summary, degraded, job_id, job_state}` 다.
+    `gates_summary` 의 값은 true·false·null 이다 — null 은 그 게이트를 검문할 입력이 없었다는 뜻이고 위반이 아니다.
     """
     owner_sub = _require_user(ident)
     _project_row(project_id, owner_sub)

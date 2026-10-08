@@ -1341,6 +1341,15 @@ def load_ir(store, snapshot_id: str) -> dict:
     return json.loads(row["ir_json"])
 
 
+def _gates_summary(gates: Mapping[str, Any] | None) -> dict:
+    """게이트별 pass 를 3값 그대로 싣는다 — null(검문할 입력이 없었다)은 null 이다(plan §2.12).
+
+    `bool()` 로 접으면 검문하지 못한 게이트가 false 로 나가, 응답만 읽는 호출자가 없는 위반을 적는다
+    (`sig:gates.summary` 가 같은 까닭으로 3값이 됐다 — state.compute_signals).
+    """
+    return {k: (None if v.get("pass") is None else bool(v.get("pass"))) for k, v in (gates or {}).items()}
+
+
 def freeze_snapshot(
     store,
     *,
@@ -1417,7 +1426,7 @@ def freeze_snapshot(
             "partial": bool(frozen.get("partial")),
             # 차단은 계획 식이다 — pass=false 뿐 아니라 unknown_blocking(pass=null·unit_unknown)도 차단이다(§2.12).
             "blocked": state_module.is_blocked(frozen.get("gates") or {}),
-            "gates_summary": {k: bool(v.get("pass")) for k, v in (frozen.get("gates") or {}).items()},
+            "gates_summary": _gates_summary(frozen.get("gates")),
             "degraded": sorted({d for s in frozen.get("sources") or [] for d in s.get("degraded") or []}),
             # 전사 집계는 시변인데 스냅샷은 불변이다 — ir_json 을 갱신하지 않으므로(§2.1) 얼어 있는 값은
             # 첫 캡처 시점 값이다. 이번에 받은 값을 버리지 않고 함께 돌려주고, 언제 얼었는지와 달라졌는지를
@@ -1507,7 +1516,7 @@ def freeze_snapshot(
         "reused": False,
         "partial": bool(ir["partial"]),
         "blocked": blocked_module.is_blocked(gates),
-        "gates_summary": {k: bool(v.get("pass")) for k, v in gates.items()},
+        "gates_summary": _gates_summary(gates),
         "degraded": degraded,
         # 새로 언 스냅샷이라 얼어 있는 값이 곧 이번 값이다 — 재사용 분기와 키를 맞춘다.
         "context": dict(ir.get("context") or {}),

@@ -933,6 +933,29 @@ def test_freeze_snapshot_can_skip_state(risk_store, mcad_result):
     assert ib.load_ir(risk_store, result["snapshot_id"])["gates"] == {}
 
 
+@pytest.mark.parametrize("case", ("gate_f7_capture_partial", "gate_f8_unit_unknown"))
+def test_freeze_snapshot_summary_keeps_an_unjudged_gate_null(risk_store, case):
+    """동결 응답의 `gates_summary` 는 검문하지 못한 게이트(pass=null)를 false 로 접지 않는다(plan §2.12).
+
+    `sig:gates.summary` 는 7e21f68 에서 3값이 됐는데 이 응답은 `bool()` 로 접고 있었다 — 입력이 없어 G3 를 못 본
+    스냅샷이 `G3: false` 로 나가, 응답만 읽는 호출자는 검문하지도 않은 게이트를 위반으로 적는다. 같은 스냅샷의
+    state 와 응답이 서로 다른 말을 한 것이다. 새로 얼린 분기와 재사용 분기를 둘 다 본다.
+    """
+    from app import state as st
+
+    bundle = json.loads((IR_FIXTURES / "gates" / f"{case}.json").read_text(encoding="utf-8"))
+    frozen = dict(project_id=PROJECT, owner_sub=OWNER, adapter_results=bundle["adapter_results"],
+                  iface_ledger=bundle.get("iface_ledger") or (), captured_at=1756600000)
+    first = ib.freeze_snapshot(risk_store, label="DV1", **frozen)
+    gates = st.load_state(risk_store, first["snapshot_id"])["gates"]
+    # 픽스처가 바뀌어 null 게이트가 없어지면 이 시험은 아무것도 묻지 않는다 — 그때는 여기서 걸린다.
+    assert [k for k, g in gates.items() if g["pass"] is None]
+    assert first["reused"] is False
+    assert first["gates_summary"] == {k: g["pass"] for k, g in gates.items()}
+    again = ib.freeze_snapshot(risk_store, label="다시", **frozen)
+    assert again["reused"] is True and again["gates_summary"] == first["gates_summary"]
+
+
 def test_fixture_directory_is_shipped():
     assert (IR_FIXTURES / "adapter_mcad_basic.json").exists()
     assert sorted(p.name for p in (IR_FIXTURES / "gates").glob("*.json")) == [

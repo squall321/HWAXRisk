@@ -318,7 +318,7 @@ def test_e2e_full_flow(wired, ident, monkeypatch, tmp_path):
     # ── 4. state 게이트 — 동결이 rr_states 를 함께 쓴다(G1~G6 판정 + 요약문).
     state = state_module.load_state(store, first["snapshot_id"])
     assert set(state["gates"]) == {"G1", "G2", "G3", "G4", "G5", "G6"}
-    assert first["gates_summary"] == {k: bool(v["pass"]) for k, v in state["gates"].items()}
+    assert first["gates_summary"] == {k: v["pass"] for k, v in state["gates"].items()}
     # 소스가 단위(mm)를 주고 계면이 confirmed 라 차단은 없다.
     assert state["gates"]["G6"]["pass"] is True
     assert state["blocked"] is False and state["summary_text"].startswith("[대상]")
