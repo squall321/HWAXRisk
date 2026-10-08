@@ -435,6 +435,41 @@ def test_unresolvable_edge_endpoint_is_dropped_with_a_warning(mcad_result):
     assert warning["severity"] == "WARNING"
 
 
+def _with_bridges(mcad_result: dict, pids) -> dict:
+    """mcad 결과에 어댑터가 내는 모양의 브리지 원시 엣지(`a_canon_key`·`b_pid`)를 얹는다."""
+    out = copy.deepcopy(mcad_result)
+    for canon, pid in zip((PLATE_1, PLATE_2, BRACKET), pids):
+        out["edges"].append({"kind": "bridge", "domain": "mcad", "status": "auto", "a_canon_key": canon,
+                             "b_pid": str(pid), "attrs": {"dyna": {"bridge": {"join_key": f"file+name:{canon}"}}}})
+    return out
+
+
+def test_bridges_without_any_dyna_pid_leave_one_note_not_one_warning_per_row(mcad_result):
+    """dyna pid 가 하나도 없는 스냅샷에서는 브리지를 잇지 않고 **한 줄**만 남긴다.
+
+    part_mesh 표는 StepForge 가 주므로 K파일을 싣지 않은 스냅샷(mcad 만)에도 메시 행 수만큼 브리지 후보가
+    온다. 그 행마다 `ambiguous_edge_endpoint` 를 남기면 파트 수만큼 같은 경고가 쌓여, 코드 순으로 맨 앞에
+    서는 그 경고가 좌표·단위 경고를 화면과 브리프에서 밀어낸다. 이을 상대가 없다는 사실은 하나다.
+    """
+    ir = build([_with_bridges(mcad_result, (1, 2, 3))])
+
+    assert [e for e in ir["edges"] if e["kind"] == "bridge"] == []
+    assert not [w for w in ir["warnings"] if w["code"] == "ambiguous_edge_endpoint"], ir["warnings"]
+    notes = [w for w in ir["warnings"] if w["code"] == "bridge_without_dyna"]
+    assert len(notes) == 1 and notes[0]["severity"] == "INFO" and notes[0]["source_kind"] == "ir_builder"
+    assert "3건" in notes[0]["message"]
+
+
+def test_a_bridge_to_a_pid_the_kfile_lacks_still_warns_per_row(mcad_result, dyna_result):
+    """dyna 는 있는데 그 pid 만 없으면 행마다 남긴다 — 그건 메시 표와 K파일이 어긋났다는 신호다."""
+    ir = build([_with_bridges(mcad_result, (1, 2, 99)), dyna_result])
+
+    assert len([e for e in ir["edges"] if e["kind"] == "bridge"]) == 2
+    unresolved = [w for w in ir["warnings"] if w["code"] == "ambiguous_edge_endpoint"]
+    assert len(unresolved) == 1 and "pid:99" in unresolved[0]["message"]
+    assert not [w for w in ir["warnings"] if w["code"] == "bridge_without_dyna"]
+
+
 def test_scope_hyperedge_keeps_members(mcad_result, dyna_result):
     hyper = copy.deepcopy(dyna_result)
     hyper["nodes"].append({

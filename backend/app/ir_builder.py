@@ -922,6 +922,7 @@ def build_ir(
     # K파일 sha 를 모르므로 `dyna:<sha8>:<pid>` 를 스스로 만들 수 없고 `b_pid` 로만 넘긴다(§2.5.1).
     dyna_by_pid = {str(n.get("local_key")): n for n in nodes
                    if n.get("domain") == "dyna" and n.get("kind") == "pid" and n.get("local_key") is not None}
+    bridges_without_dyna = 0
     for raw in raw_edges:
         kind = str(raw.get("kind") or "")
         family = kind_family_of(kind)
@@ -930,8 +931,14 @@ def build_ir(
         a_nid = a if isinstance(a, str) and a.startswith("p:") else (by_canon.get(a or "") or {}).get("nid")
         b_nid = b if isinstance(b, str) and b.startswith("p:") else (by_canon.get(b or "") or {}).get("nid")
         if b_nid is None and raw.get("b_pid") is not None:
+            if not dyna_by_pid:
+                # dyna pid 가 하나도 없는 스냅샷(K파일 미지정·자격 없음)에는 이을 상대가 없다. part_mesh 표는
+                # StepForge 가 주므로 그런 스냅샷에도 메시 행 수만큼 후보가 온다 — 행마다 경고를 남기면 파트
+                # 수만큼 같은 줄이 쌓이므로 건수만 세어 아래에서 한 줄로 남긴다.
+                bridges_without_dyna += 1
+                continue
             pid_node = dyna_by_pid.get(str(raw["b_pid"]))
-            # dyna 소스가 없거나 그 pid 가 없으면 브리지를 만들지 않는다 — 아래 공통 경로가
+            # dyna 는 있는데 그 pid 가 없으면 브리지를 만들지 않는다 — 아래 공통 경로가
             # `ambiguous_edge_endpoint` 로 남긴다(없는 노드를 가리키는 엣지를 만들지 않는다).
             b = pid_node["canon_key"] if pid_node else f"pid:{raw['b_pid']}"
             b_nid = pid_node["nid"] if pid_node else None
@@ -983,6 +990,12 @@ def build_ir(
                     })
         edges.append(edge)
 
+    if bridges_without_dyna:
+        warnings.append({
+            "severity": "INFO", "code": "bridge_without_dyna",
+            "message": f"part_mesh 표의 브리지 {bridges_without_dyna}건은 이 스냅샷에 dyna pid 가 없어 잇지 않았다.",
+            "ref": None, "source_kind": "ir_builder",
+        })
     for pair in sorted(set(ledger_by_pair) - used_pairs):
         warnings.append({
             "severity": "INFO", "code": "ledger_pair_absent",
