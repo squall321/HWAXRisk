@@ -133,14 +133,17 @@ INSPECT_FILE = {"meta": {
     "truncated_scan": False, "includes": [],
     "modelmeta": {
         "conventions": {"unit": "mm-kg-ms"},
+        # 파트 행은 KooRemapper `modelmeta` 가 쓰는 칸 그대로다(src/commands/modelmeta.cpp) — 크기는 `bbox_min`·
+        # `bbox_max` 로만 오고 **`size` 칸은 없다**(`size` 는 위 파일 단위 `info` 결과에만 있다). 예전 픽스처는
+        # 파트에도 `size` 를 지어 넣어, 어댑터가 없는 칸을 읽는데도 치수 대조 시험이 통과했다.
         "parts": [
             {"pid": 1, "title": "Stack\\PLATE_1", "elem_class": "solid", "n_elems": 5000,
-             "bbox_min": [0, 0, 0], "bbox_max": [50, 40, 1.2], "size": [50, 40, 1.2], "area_ext": 4120.0,
+             "bbox_min": [0, 0, 0], "bbox_max": [50, 40, 1.2], "area_ext": 4120.0,
              "volume": 2400.0, "proj": {"x": 2000.0, "y": 60.0, "z": 48.0},
              "material": {"mid": 1, "kfile": {"keyword": "*MAT_ELASTIC", "name": "AL", "E": 70000.0},
                           "db": {"match_basis": "name-mat", "db_mid": 3, "name": "AL6061", "tag": "AL6061"}}},
             {"pid": 2, "title": "Stack\\SHIELD", "elem_class": "shell", "n_elems": 4800,
-             "bbox_min": [0, 0, 1.2], "bbox_max": [50, 40, 1.4], "size": [50, 40, 0.2], "area_ext": 3800.0,
+             "bbox_min": [0, 0, 1.2], "bbox_max": [50, 40, 1.4], "area_ext": 3800.0,
              "volume": 0, "proj": {"x": 2000.0, "y": 10.0, "z": 8.0},
              "material": {"mid": 2, "kfile": {"keyword": "*MAT_PIECEWISE_LINEAR_PLASTICITY"}, "db": None}},
         ],
@@ -598,6 +601,51 @@ def test_dyna_capture_builds_pid_nodes_contacts_and_scope():
     assert "context" not in result["source"]
     assert result["source"]["stats"]["size"] == [50, 40, 2.2]
     assert "detect_absent" in result["source"]["degraded"]
+
+
+def test_dyna_part_size_comes_from_its_bbox():
+    """파트 크기는 `bbox_max − bbox_min` 이다 — modelmeta 는 파트에 `size` 칸을 내지 않는다.
+
+    어댑터가 `part.get('size')` 를 읽어 실제 응답에서는 `size`·`size_sorted` 가 늘 None 이었다. 그러면 dyna pid 의
+    기하 지문(geom_fp)도 없고, mcad↔dyna 치수 대조(same-as 4단계)는 3축이 없어 한 번도 돌지 않는다.
+    """
+    result = dyna_adapter.DynaAdapter(DYNA_APP_KEY).capture(
+        {"session_id": "01JSES", "file_id": "01JFIL", "sha256": KSHA}, _principal(),
+        CallRecorder("cafe0000deadbeef", mcp=_mcp({"inspect_file": INSPECT_FILE})))
+    assert all("size" not in part for part in INSPECT_FILE["meta"]["modelmeta"]["parts"])   # 픽스처의 전제
+    pids = {n["local_key"]: n["attrs"] for n in result["nodes"] if n["kind"] == "pid"}
+
+    assert pids["1"]["size"] == [50.0, 40.0, 1.2] and pids["1"]["size_sorted"] == [50.0, 40.0, 1.2]
+    assert pids["2"]["size"] == pytest.approx([50.0, 40.0, 0.2])
+    assert pids["2"]["size_sorted"] == pytest.approx([50.0, 40.0, 0.2])
+
+    # bbox 가 없거나 3수가 아니면 크기도 없다 — 0 으로 메우지 않는다(null≠0).
+    broken = json.loads(json.dumps(INSPECT_FILE))
+    broken["meta"]["modelmeta"]["parts"][0].pop("bbox_max")
+    broken["meta"]["modelmeta"]["parts"][1]["bbox_min"] = [0, 0]
+    result = dyna_adapter.DynaAdapter(DYNA_APP_KEY).capture(
+        {"session_id": "01JSES", "file_id": "01JFIL", "sha256": KSHA}, _principal(),
+        CallRecorder("cafe0000deadbeef", mcp=_mcp({"inspect_file": broken})))
+    for node in result["nodes"]:
+        if node["kind"] == "pid":
+            assert node["attrs"]["size"] is None and node["attrs"]["size_sorted"] is None
+
+
+def test_mcad_and_dyna_parts_are_matched_by_their_dimensions():
+    """CAD 파트와 해석 파트가 **치수로** 묶인다(same-as 4단계, §2.6.2) — 이름이 달라도 형상이 같으면 같은 부재다.
+
+    해석 파트의 3축 크기가 없으면 이 단계는 건너뛰고 이름 일치(5단계)만 남는다. 해석 덱의 파트 이름은
+    CAD 이름과 다르기 일쑤라, 그 경우 형상과 해석 결과가 서로 남이 된다.
+    """
+    _mcad, ir = _bridge_ir()
+    by_nid = {n["nid"]: n for n in ir["nodes"]}
+    plate = next(n for n in ir["nodes"] if n["domain"] == "dyna" and n["local_key"] == "1")
+    assert plate["geom_fp"], "해석 파트에 기하 지문이 없다"
+    records = [r for r in ir["same_as"]
+               if {by_nid[r["a"]]["domain"], by_nid[r["b"]]["domain"]} == {"mcad", "dyna"}]
+    assert [(r["method"], r["status"]) for r in records] == [("fingerprint", "auto")], records
+    assert records[0]["evidence"] == {"size_rel_max": 0.0, "volume_penalty": 0.0}
+    assert {by_nid[records[0]["a"]]["label"], by_nid[records[0]["b"]]["label"]} == {"PLATE_1", "Stack\\PLATE_1"}
 
 
 def test_corpus_context_merges_four_tools_in_the_canonical_order():

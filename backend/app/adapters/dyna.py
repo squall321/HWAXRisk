@@ -47,6 +47,14 @@ def _as_float(value: Any) -> float | None:
         return None
 
 
+def _bbox_size(lo: Any, hi: Any) -> list[float] | None:
+    """`bbox_min`·`bbox_max` → 3축 크기. 어느 쪽이든 3수가 아니면 None 이다(null≠0)."""
+    if not all(isinstance(v, Sequence) and not isinstance(v, (str, bytes)) and len(v) == 3 for v in (lo, hi)):
+        return None
+    pairs = [(_as_float(a), _as_float(b)) for a, b in zip(lo, hi)]
+    return None if any(a is None or b is None for a, b in pairs) else [b - a for a, b in pairs]
+
+
 def _rows(payload: Any, key: str | None = None) -> list[dict]:
     if isinstance(payload, Mapping) and key is not None:
         payload = payload.get(key)
@@ -279,7 +287,9 @@ def _pid_nodes(modelmeta: Mapping[str, Any], *, sha256: str, app_key: str | None
         if elem_class == "shell" and volume == 0:
             volume = None
             flags.append("shell_volume_zero")
-        size = part.get("size")
+        # modelmeta 는 파트마다 `bbox_min`·`bbox_max` 만 낸다 — `size` 칸은 파일 단위(`info`)에만 있다
+        # (KooRemapper src/commands/modelmeta.cpp). 없는 칸을 읽어 크기가 늘 None 이었고 mcad↔dyna 치수 대조가 죽었다.
+        size = _bbox_size(part.get("bbox_min"), part.get("bbox_max"))
         nodes.append({
             "canon_key": _canon(sha256, str(part.get("pid"))),
             "domain": KIND, "kind": "pid", "label": title, "local_key": str(part.get("pid")),
@@ -287,8 +297,7 @@ def _pid_nodes(modelmeta: Mapping[str, Any], *, sha256: str, app_key: str | None
             "attrs": {
                 "title": title, "elem_class": elem_class or None, "n_elems": part.get("n_elems"),
                 "bbox_min": part.get("bbox_min"), "bbox_max": part.get("bbox_max"), "size": size,
-                "size_sorted": sorted((float(v) for v in size), reverse=True) if isinstance(size, Sequence)
-                and not isinstance(size, (str, bytes)) else None,
+                "size_sorted": None if size is None else sorted(size, reverse=True),
                 "area_ext": _as_float(part.get("area_ext")), "volume": volume, "proj": part.get("proj"),
                 "material": dict(part.get("material") or {}), "secid": None,
                 "section_hint": part.get("section_hint"), "bridge": None,
