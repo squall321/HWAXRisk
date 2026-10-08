@@ -1002,10 +1002,16 @@ def _summary_lines(ir: Mapping[str, Any], state: Mapping[str, Any]) -> list[str]
         return record.get("text") if record else ""
 
     sources = {s["kind"]: s for s in ir.get("sources") or []}
-    source_line = " ".join(
-        f"{kind}={'absent' if kind not in sources else (sources[kind].get('source_hash') or 'present')}"
-        for kind in ("mcad", "dyna", "dyna_result", "ecad")
-    )
+    absent = ir.get("missing") or {}
+
+    def source_word(kind: str) -> str:
+        # 소스 행이 있다고 실린 것이 아니다 — ecad 계약 스텁(0.0-stub)과 자격 없이 닫힌 dyna 는 행만 남기고
+        # `<kind>_absent` 로 닫는다. 행만 보고 `present` 라 적으면 같은 요약의 [결측] 줄과 반대말이 된다.
+        if kind not in sources or absent.get(f"{kind}_absent"):
+            return "absent"
+        return sources[kind].get("source_hash") or "present"
+
+    source_line = " ".join(f"{kind}={source_word(kind)}" for kind in ("mcad", "dyna", "dyna_result", "ecad"))
     gate_line = " · ".join(f"{key} {_gate_word(g)}" for key, g in sorted(gates.items()))
     dyna_line = "[Dyna] absent"
     if not (ir.get("missing") or {}).get("dyna_absent", True):

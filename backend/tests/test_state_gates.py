@@ -10,6 +10,8 @@ import pytest
 from app import diff as diff_module
 from app import ir_builder as ib
 from app import state as st
+from app.adapters import dyna as dyna_adapter
+from app.adapters import ecad_stub
 from tests.conftest import FIXTURES_DIR
 
 GATE_FIXTURES = FIXTURES_DIR / "ir" / "gates"
@@ -307,6 +309,33 @@ def test_save_and_load_state_round_trip(risk_store):
     assert again["gates"] == loaded["gates"]
     assert risk_store.query_one("SELECT COUNT(*) AS n FROM rr_states", ())["n"] == 1
     assert st.load_state(risk_store, "0" * 32) is None
+
+
+def test_summary_source_line_says_absent_for_a_source_row_that_carried_nothing():
+    """요약 첫 줄의 소스 표기는 같은 요약의 `[결측]` 줄과 같은 사실을 말한다(plan §3.2.7 1행 `ecad=absent`).
+
+    ecad 는 계약 스텁이 **소스 행은 남기고** 노드 0건·`ecad_absent` 로 닫는다. 첫 줄은 '행이 있나' 만 봐서
+    `ecad=present` 라 적고 마지막 줄은 `ecad_absent` 라 적었다 — 한 요약 안에서 서로 반대말이라 좌석은
+    보드 정보가 실렸다고 읽는다. 자격이 없어 호출 없이 닫힌 dyna 행도 같은 모양이다.
+    """
+    mcad = json.loads((FIXTURES_DIR / "ir" / "adapter_mcad_basic.json").read_text(encoding="utf-8"))
+    # 둘 다 어댑터가 실제로 내는 결과다 — 손으로 쓴 소스 행이 아니다.
+    stub = ecad_stub.EcadStubAdapter().capture({}, None, None)
+    no_credential = dyna_adapter.DynaAdapter("heax-kooremapper_mcp").capture(
+        {"session_id": "01JSES", "file_id": "01JFIL"}, None, None)
+    assert stub["source"]["adapter_version"] == "0.0-stub" and stub["source"]["degraded"] == ["ecad_absent"]
+
+    ir = ib.build_ir(project_id=PROJECT, owner_sub=OWNER, label="스텁만 있는 ecad",
+                     adapter_results=[mcad, no_credential, stub], snapshot_id="0" * 32, captured_at=1756600000)
+    assert [s["kind"] for s in ir["sources"]] == ["mcad", "dyna", "ecad"]      # 소스 행은 셋 다 있다
+    lines = st.build_state(ir, computed_at=1756600001)["summary_text"].split("\n")
+
+    head = lines[0]
+    assert "ecad=absent" in head and "ecad=present" not in head, head
+    assert "dyna=absent" in head and "dyna_result=absent" in head, head
+    assert "mcad=sha-mcad" in head, head                 # 실린 소스는 그대로 지문을 적는다
+    missing = next(line for line in lines if line.startswith("[결측]"))
+    assert "ecad_absent" in missing and "dyna_absent" in missing
 
 
 # ---------------------------------------------------------------- G7(pair 전용, plan §2.12·§3.3.6)

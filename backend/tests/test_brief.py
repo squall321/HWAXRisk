@@ -488,6 +488,18 @@ def test_empty_ledger_falls_back_to_missing_sentences(risk_store):
         assert len(line) <= brief.FRAMING_MAX          # 결측 문구는 80자 이하다
 
 
+def test_e1_of_a_real_snapshot_does_not_call_the_ecad_stub_present(risk_store):
+    """snap 타깃의 E1 은 rr_state 요약이다 — ecad 가 계약 스텁뿐이면 첫 줄도 결측 줄도 '없다' 고 적는다.
+
+    종전에는 같은 E1 안에서 첫 줄이 `ecad=present`, 마지막 줄이 `ecad_absent` 였다.
+    """
+    built = brief.build_brief(risk_store, seed_real_snap_target(risk_store), seats=SEATS)
+    e1 = dict(zip(built["keys"], built["evidence"]))["E1"]["result"].split("\n")
+    head = next(line for line in e1 if line.startswith("[대상]"))
+    assert "ecad=absent" in head and "present" not in head, head
+    assert "ecad_absent" in next(line for line in e1 if line.startswith("[결측]"))
+
+
 # ---------------------------------------------------------------- E9 규칙 줄(§5.6.1 · §3.2.6)
 def _e9_rule_lines(built: dict) -> list[str]:
     e9 = dict(zip(built["keys"], built["evidence"]))["E9"]["result"]
