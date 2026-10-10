@@ -36,8 +36,6 @@ DIMINISHING_WINDOW = 3             # 최근 3패널이 신규 클러스터 <1 �
 QUALITY_TOOL_USE_MIN = 0.8
 QUALITY_IR_CITE_MIN = 0.5
 QUALITY_ADVERSARY_OVERREJECT = 0.6
-SEAT_CONTRACT_LINE_MAX = 200       # E0c 도메인당 ≤200자
-SEAT_CONTRACT_TOTAL_MAX = 1000     # E0c 합 ≤1000자(plan §5.6.1 예산표)
 USER_MEMO_MAX = 2000
 # 앱이 스트림을 놓은 사유(EngineStreamLost.code) — 패널 벽시계 · 줄 사이 침묵 · 중간 절단 · 사람의 취소·정지.
 # 엔진·좌석의 실패가 아니다.
@@ -325,28 +323,43 @@ def _delib_apps() -> list[str]:
     return keys[:planner.MAX_APPS]
 
 
-def seat_contract_evidence(domains: Sequence[str]) -> dict:
-    """E0c — 이번 패널 착석 도메인의 좌석 계약 행(도메인당 ≤200자, 합 ≤1000자). 대화 기록·MCP 경로 이중화."""
+_CONTRACT_CUT_FMT = " …({chars}자 중 {kept}자)"
+
+
+def seat_contract_evidence(domains: Sequence[str], cap: int | None = None) -> dict:
+    """E0c — 이번 패널 착석 도메인의 좌석 계약 행. 대화 기록·MCP 경로 이중화.
+
+    라인 전체(`brief.evidence_line`)가 E0c 상한(`cap`, 안 주면 바닥 표의 값) 안이다 — 브리프가 그 칸의 자리를 이 표의
+    몫으로 비워 둔다. 행은 하나도 빼지 않는다. 다 안 들어가면 긴 행부터 같은 몫으로 줄이고 줄인 행 끝에 원문 길이를
+    적는다(WP1 R-18 — 종전에는 행마다 200자에서 말없이 끊고, 합이 1,000자를 넘는 다섯째 도메인 행을 통째로 뺐다).
+    """
     contract = taxonomy.load_json("seat-contract").get("contract", {})
     seen: list[str] = []
     for dom in domains:
         if dom not in seen:
             seen.append(dom)
+    rows = [(dom, str(contract.get(dom) or "")) for dom in seen]
+    rows = [(dom, row) for dom, row in rows if row]
+    item = {"source": "seat_contract", "tool": "seat-contract.v1", "args": ",".join(seen), "result": "", "key": "E0c"}
+    room = (brief.CAPS["E0c"] if cap is None else cap) - brief.line_overhead(item) - max(0, len(rows) - 1)
+    kept_len = {dom: len(row) for dom, row in rows}
+    if sum(kept_len.values()) > room:
+        # 짧은 행은 통째로 두고 남은 자리를 긴 행들이 같은 몫으로 나눈다(물 채우기). 표식 길이는 그 몫 안이다.
+        left = max(0, room)
+        for index, (dom, row) in enumerate(sorted(rows, key=lambda r: len(r[1]))):
+            share = left // (len(rows) - index)
+            kept_len[dom] = min(len(row), share)
+            left -= kept_len[dom]
     lines: list[str] = []
-    total = 0
-    for dom in seen:
-        line = str(contract.get(dom) or "")[:SEAT_CONTRACT_LINE_MAX]
-        if not line or total + len(line) + 1 > SEAT_CONTRACT_TOTAL_MAX:
+    for dom, row in rows:
+        if kept_len[dom] >= len(row):
+            lines.append(row)
             continue
-        lines.append(line)
-        total += len(line) + 1
-    return {
-        "source": "seat_contract",
-        "tool": "seat-contract.v1",
-        "args": ",".join(seen),
-        "result": "\n".join(lines),
-        "key": "E0c",
-    }
+        mark = _CONTRACT_CUT_FMT.format(chars=len(row), kept=kept_len[dom])
+        body = max(0, kept_len[dom] - len(mark))
+        lines.append(row[:body] + _CONTRACT_CUT_FMT.format(chars=len(row), kept=body))
+    item["result"] = "\n".join(lines)
+    return item
 
 
 def panel_question(store: Any, target_key: str) -> str:
@@ -419,6 +432,7 @@ def build_delib_opts(
     user_memo: str | None = None,
     narrative_mod: Any | None = None,
     loss: dict | None = None,
+    profile: Any | None = None,
 ) -> dict:
     """패널 1건의 delib_opts(plan §6.6.4). human_note·continue_summary·non_negotiables·search_sources·
     stop_after_round·build_plan 은 절대 싣지 않는다(불변식 extra_seats == ∅ 의 전제). voc 는 반대로
@@ -426,7 +440,9 @@ def build_delib_opts(
 
     `loss` 를 주면 좌석에 못 간 것을 거기 적는다 — `evidence_dropped`(12칸을 넘겨 빠진 항목 키)와
     `user_memo_cut`(메모를 다 못 실었을 때 `{chars, kept}`), `brief_shielded`(판단어·인젝션에 걸려 «» 로 싸거나
-    자리표시자로 바꾼 줄), `brief_clipped`(항목마다 상한에 잘린 줄 수). 없으면 비어 있다. 호출자가 패널에 남긴다."""
+    자리표시자로 바꾼 줄), `brief_clipped`(항목마다 상한에 잘린 줄 수). 없으면 비어 있다. 호출자가 패널에 남긴다.
+    `profile` 은 브리프의 크기다(`brief.web_profile` · `brief.PROFILE_MCP`, 안 주면 바닥) — 좌석 계약표(E0c)도 그 상한에 맞춘다."""
+    profile = profile or brief.PROFILE_LEGACY
     seats = panel["seats"]
     if evidence is None:
         module = narrative_mod
@@ -437,7 +453,7 @@ def build_delib_opts(
             raise AppError("not_implemented", "narrative.prior_evidence 가 없습니다 — 브리프를 조립할 수 없습니다.", 501)
         brief_meta: dict = {}
         evidence = list(build(store, panel["target_key"], user_memo=user_memo,
-                              seats=seats, panel_id=panel["id"], meta_out=brief_meta))
+                              seats=seats, panel_id=panel["id"], meta_out=brief_meta, profile=profile))
         if loss is not None and brief_meta.get("shielded"):
             loss["brief_shielded"] = list(brief_meta["shielded"])
         # E0c 는 아래에서 제 좌석 계약표로 갈아 끼운다 — 브리프 쪽 E0c 의 절단은 좌석이 받은 것이 아니라 옮기지 않는다.
@@ -447,10 +463,11 @@ def build_delib_opts(
     else:
         evidence = list(evidence)
     # E0(스코프·게이트) 바로 뒤가 E0c 좌석 계약표다.
-    evidence.insert(1 if evidence else 0, seat_contract_evidence([s["domain"] for s in seats]))
+    evidence.insert(1 if evidence else 0, seat_contract_evidence([s["domain"] for s in seats], profile.cap("E0c")))
     if user_memo and not any(e.get("source") == "user_memo" for e in evidence):
-        evidence.append({"source": "user_memo", "tool": "note", "result": str(user_memo)[:USER_MEMO_MAX],
-                         "key": "M"})
+        # 브리프가 M 을 빼고 돌아온 경우의 폴백 — 같은 조립(`memo_result`)으로 그 상한까지 싣고 잘렸으면 원문 길이를 적는다.
+        evidence.append({"source": "user_memo", "tool": "note", "args": panel["target_key"],
+                         "result": brief.memo_result(panel["target_key"], user_memo, profile.cap("M")), "key": "M"})
     evidence, dropped = fit_evidence_slots(evidence)
     if loss is not None:
         if dropped:
@@ -870,6 +887,8 @@ def snapshot_model(engine: Any) -> dict:
         # 안 보내면 null 이다(앱에는 원문이 없어 스스로 계산하지 못한다, §6.7.2 1단계).
         "chair_rev": info.get("chair_rev"),
         "seat_contract_rev": seat_contract_rev(),
+        # 엔진이 제 모델 창에서 유도한 근거 예산(자) — 러너가 브리프 크기를 정한다(`brief.web_profile`). 옛 엔진은 null.
+        "evid_budget": info.get("evid_budget"),
     }
 
 
@@ -1040,12 +1059,17 @@ def run_panel(
     planner.start_panel_seats(store, panel["id"])
     try:
         model_json = snapshot_model(engine)
+        # 브리프 크기는 엔진이 이 패널을 시작할 때 알려 준 근거 예산에서 정한다(WP1 S9) — 패널마다 다시 읽으므로 엔진 창이
+        # 바뀌거나 창을 아직 못 물어본 가정값이 바로잡히면 다음 패널부터 따라간다.
+        profile = brief.web_profile(model_json.get("evid_budget"))
+        model_json["brief_profile"] = {"name": profile.name, "budget": profile.budget}
         store.execute("UPDATE rr_panels SET model_json = ? WHERE id = ?", (canonical_json(model_json), panel["id"]))
         loss: dict = {}
         delib_opts = build_delib_opts(
             # 메모 없는 잡은 None 이 아니라 빈 문자열로 넘긴다 — None 은 '잡이 없는 길' 이라 브리프가 그 타깃의
             # 최근 잡 메모를 찾아 싣는다(같은 타깃에 메모를 단 잡이 또 있으면 그 메모가 이 패널에 실린다).
-            store, settings, panel, user_memo=params.get("user_memo") or "", narrative_mod=narrative_mod, loss=loss
+            store, settings, panel, user_memo=params.get("user_memo") or "", narrative_mod=narrative_mod, loss=loss,
+            profile=profile,
         )
         # 브리프는 시변 조립물이라 이 패널이 실제로 받은 전문을 동결한다(§5.6.1).
         frozen = {**freeze_brief(store, panel, delib_opts["evidence"]), **loss}

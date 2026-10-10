@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 import threading
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
@@ -12,11 +13,16 @@ from app.common import canonical_json, new_uuid, now_epoch, parse_ref, seat_key
 from app.errors import AppError
 
 # ---------------------------------------------------------------- 공유 상수(plan §0.6·§5.6.1)
-# 엔진 클램프(deliberation.py `_resolve_opts` :464-467 / hwax-deliberate.js :128-130).
-CLAMP_SOURCE, CLAMP_TOOL, CLAMP_ARGS, CLAMP_RESULT = 120, 80, 400, 2000
-# 엔진 누적 예산(PY :2165 / JS :131). 항목마다 라인 길이를 재고 넘는 항목부터 통째로 드롭한다.
+# 근거 곁 필드 상한 — 엔진 `_resolve_opts`(출처 200 · 도구 80 · 인자 DELIB_EVID_ARGS_MAX 1,200)와 hwax-deliberate.js
+# (EV_SRC_MAX·EV_TOOL_MAX·EV_ARGS_MAX)가 같은 값·같은 표식으로 끊는다. 여기서는 그 안으로 들게 만들어 보낸다(`_clamp`).
+# CLAMP_RESULT 는 바닥 프로파일(작은 창)의 항목 result 상한이다 — 넓은 창의 상한은 프로파일이 정한다.
+CLAMP_SOURCE, CLAMP_TOOL, CLAMP_ARGS, CLAMP_RESULT = 200, 80, 1200, 2000
+# 바닥 예산 — 작은 창(16K·엔진 예산을 모를 때) 시절의 엔진·JS 예산이다. 항목마다 라인 길이를 재고 넘는 항목부터
+# 통째로 드롭하던 그 값이라, 이 아래로는 내려가지 않는다(종전 동작). 넓은 창은 `BriefProfile` 이 이 위로 키운다.
 ENGINE_BUDGET = 11000
 EVIDENCE_MAX_ITEMS = 12
+# 엔진 항목 하나의 천장(DELIB_EVID_ITEM_MAX 기본) — 넘으면 엔진이 줄여 싣고 카드로 알린다. 브리프 항목은 그 안에 둔다.
+ENGINE_ITEM_MAX = 150_000
 
 # 항목별 라인 상한. 합 10600 ≤ 11000 이라 드롭 0 이 산술로 보장된다(plan §5.6.1).
 # E5 는 세 블록(E5+ 700 · E5− 300 · E10 500)이라 1500 이고, 그 500 은 E1(−250)·E6(−150)·E9(−100)
@@ -41,11 +47,83 @@ E5_POSITIVE_CAP, E5_NEGATIVE_CAP, E5_FIELD_CAP = 700, 300, 340
 E5_STRUCTURAL = 159
 ITEM_ORDER: tuple[str, ...] = ("E0", "E0c", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9", "M")
 
-# E7 고정 슬롯(plan §5.6.3) — 좌석당 줄 220자, 좌석 합 1100자. 다른 항목이 비어도 늘리지 않는다.
+# E7 좌석 줄 상한(plan §5.6.3 — 바닥 220자, 프로파일 배수로 는다). 좌석 줄의 합은 E7 항목 상한이 줄 단위로 묶는다.
 E7_SEAT_LINE = 220
-E7_SEAT_TOTAL = 1100
 # 프레이밍 줄 상한(plan §5.6.1) — 결측 문구도 80자 이하다.
 FRAMING_MAX = 80
+
+
+
+# ---------------------------------------------------------------- 예산 프로파일(WP1 S9 · R-21·R-50·R-51)
+@dataclass(frozen=True)
+class BriefProfile:
+    """브리프 한 벌의 크기 — 이름·라인 합 상한(자)·항목 수 상한·항목 result 상한.
+
+    항목 상한(CAPS)과 안쪽 블록 상한(E5 세 블록·E7 좌석 줄)은 바닥 예산(11,000자)에서 표 그대로이고, 그 위에서는
+    `budget / 11,000` 배로 함께 는다 — Σ 상한 ≤ budget 이 배수와 무관하게 서고(드롭 0), 1백만 토큰 창(엔진 근거 예산
+    500,000자)에서 표의 어느 칸도 16K 시절 값에 묶이지 않는다(사용자 지침 — HWAXPortal docs/risk-review-redesign D-21).
+    남는 자리는 `build_brief` 가 잘린 항목에 빌려준다.
+    """
+    name: str               # 'web' | 'web-legacy' | 'mcp'
+    budget: int
+    max_items: int
+    item_result_max: int
+
+    def _scaled(self, n: int) -> int:
+        return n if self.budget <= ENGINE_BUDGET else int(n * self.budget / ENGINE_BUDGET)
+
+    def cap(self, key: str) -> int:
+        """항목 라인 상한. 모듈의 CAPS 를 부를 때마다 읽는다(시험이 표를 바꿔 끼운다)."""
+        return self._scaled(CAPS[key])
+
+    def inner(self, n: int) -> int:
+        """항목 안쪽 상한(E5 블록·E7 좌석 줄)을 같은 배수로 키운다."""
+        return self._scaled(n)
+
+
+# 엔진 예산을 모를 때(옛 엔진 · /health 불통)의 웹 프로파일 — 종전과 같은 크기다.
+PROFILE_LEGACY = BriefProfile("web-legacy", ENGINE_BUDGET, EVIDENCE_MAX_ITEMS, CLAMP_RESULT)
+
+# MCP 보충 경로(hwax-risk-review.js → hwax-deliberate.js)의 근거 상한. 그 길의 좌석은 Claude 서브에이전트라 창은 GLM 이
+# 아니라 args.ctxTokens(기본 200,000 토큰)이고, JS 가 그 창에서 상한을 유도한다 — 합계 = (창 − 출력 32,000) × 0.3(바닥
+# 11,000) · 항목 = × 0.09(바닥 2,000) · 건수 = 바닥 위면 120. 아래 값이 그 식의 기본 창 결과다(시험 test_parity 가 JS 소스를
+# 읽어 대조한다). ctxTokens 를 기본보다 작게 주고 돌리면 JS 가 뒤 항목을 빼고 그 사실을 evidenceOmitted 로 알린다.
+JS_CTX_TOKENS_DEFAULT, JS_OUTPUT_RESERVE = 200_000, 32_000
+JS_EV_BUDGET_SHARE, JS_EV_ITEM_SHARE = 0.3, 0.09
+
+
+def _js_share(share: float, floor: int) -> int:
+    return max(floor, int((JS_CTX_TOKENS_DEFAULT - JS_OUTPUT_RESERVE) * share))
+
+
+PROFILE_MCP = BriefProfile("mcp", _js_share(JS_EV_BUDGET_SHARE, ENGINE_BUDGET),
+                           120 if _js_share(JS_EV_BUDGET_SHARE, ENGINE_BUDGET) > ENGINE_BUDGET else EVIDENCE_MAX_ITEMS,
+                           _js_share(JS_EV_ITEM_SHARE, CLAMP_RESULT))
+
+
+def web_profile(engine_budget: Any) -> BriefProfile:
+    """웹 러너 경로의 프로파일 — 엔진 `/health` 의 `evid_budget`(그 박스 모델 창에서 유도한 근거 예산)을 그대로 쓴다.
+
+    낮은 고정 천장을 두지 않는다(권고였던 24,000자 천장은 버렸다 — 사용자 지침). 바닥은 11,000자다 — 작은 창(16K,
+    엔진 예산 2,000자)에서도 브리프는 종전 크기로 나가고 엔진이 넘친 뒤 항목을 빼며 알린다(종전 동작). 값을 모르면
+    (`None` · 정수가 아님 — 옛 엔진, /health 불통) 바닥 프로파일이다. 엔진은 줄마다 `[e:N|KEY] ` 를 붙여 예산에 세는데,
+    Σ 상한이 예산의 10600/11000 이라 남는 3.6%(바닥에서 400자)가 그 머리(12항목 × 12자 남짓)를 덮는다.
+    """
+    if isinstance(engine_budget, bool) or not isinstance(engine_budget, int) or engine_budget <= 0:
+        return PROFILE_LEGACY
+    budget = max(ENGINE_BUDGET, engine_budget)
+    return BriefProfile("web", budget, EVIDENCE_MAX_ITEMS, min(budget, ENGINE_ITEM_MAX))
+
+
+def _clamp(value: Any, n: int) -> str:
+    """곁 필드를 n 자 안에 둔다 — 넘으면 원문 길이를 표식으로 남기되 표식까지 n 자 안이다(엔진이 다시 끊지 않게)."""
+    text = _s(value)
+    if len(text) <= n:
+        return text
+    mark = f" …[{len(text):,}자 중 앞 {{kept:,}}자]"
+    kept = max(0, n - len(mark.format(kept=n)))
+    return text[:kept].rstrip() + mark.format(kept=kept)
+
 
 # 항목 키 → (source, 원천 표 이름). args 는 항목마다 따로 만든다.
 _SOURCES: dict[str, tuple[str, str]] = {
@@ -479,10 +557,11 @@ def _item_e0c(seats: Sequence[Mapping[str, Any]]) -> dict:
         domain = _s(seat.get("domain"))
         if domain and domain not in domains:
             domains.append(domain)
-    lines = [_cut(contract.get("_common"), 200)] if contract.get("_common") else []
+    # 행을 자르지 않는다 — 넘치면 항목 상한이 줄 단위로 자르고 `…(n줄 생략)` 과 meta.clipped 로 밝힌다(종전 200자 말없이).
+    lines = [_s(contract.get("_common"))] if contract.get("_common") else []
     for domain in domains:
         row = contract.get(domain)
-        lines.append(_cut(row, 200) if row else f"[{domain}] 계약 행 없음")
+        lines.append(_s(row) if row else f"[{domain}] 계약 행 없음")
     return {"key": "E0c", "args": ",".join(domains), "result": _body("seat_contract", lines)}
 
 
@@ -618,14 +697,14 @@ def _e2_tail(counts: Mapping[str, Any], kept: int, omitted: int) -> str:
     return f"[전체 {counts['total']}건 — 실림 {kept} · 생략 {omitted} | {' · '.join(parts)}]"
 
 
-def _item_e2(store, ctx, names: Mapping[str, str], *, cap: int, item_result_max: int) -> dict:
-    """변경 목록 — `event_order` 순으로 들어가는 데까지 싣고 꼬리가 전체·실림·생략 건수를 말한다.
+def _item_e2(store, ctx, names: Mapping[str, str]) -> dict:
+    """변경 목록 — 전 이벤트를 `event_order` 순으로 싣고 꼬리가 전체·실림·생략 건수를 말한다.
 
-    자리는 `build_brief` 의 절단과 같은 식(`min(item_result_max, cap − line_overhead)`)으로 먼저 세고, 꼬리는 본문을 채우기
-    전에 최악 길이로 떼어 둔다. 넘치는 줄부터 뒤는 싣지 않는다 — `…(n줄 생략)` 표식 대신 꼬리가 건수를 말하고, 무엇을
-    얼마나 뺐는지는 반환의 `clipped`(종류별 생략 수)로 meta 에 남는다.
+    상한에 맞추는 것은 `build_brief` 다(`_fit_e2`) — 넘치는 줄부터 뒤는 싣지 않고 꼬리를 다시 써서 실린 수와 생략 수를
+    말한다. 조립을 상한 밖에 두어야 남는 자리를 빌려 다시 맞출 수 있다(1백만 토큰 창에서는 수백 건이 다 실린다).
+    무엇을 얼마나 뺐는지는 `_fit_e2` 가 meta.clipped(종류별 생략 수)로 남긴다.
     """
-    source, tool = _SOURCES["E2"]
+    source, _tool = _SOURCES["E2"]
     if ctx["kind"] != "diff" or ctx["diff"] is None:
         return {"key": "E2", "args": _s(ctx["target"]["target_key"]),
                 "result": _body(source, ["[pair 전용 — 해당 없음]"])}
@@ -641,24 +720,44 @@ def _item_e2(store, ctx, names: Mapping[str, str], *, cap: int, item_result_max:
         return {"key": "E2", "args": args, "result": _body(source, [_e2_empty_line(ctx)])}
     ordered = event_order(rows)
     counts = event_counts(ordered)
-    limit = min(item_result_max, cap - line_overhead({"source": source, "tool": tool, "args": args[:CLAMP_ARGS]}))
-    room = limit - len(_framing(source)) - 1 - len(_e2_tail(counts, counts["total"], counts["total"]))
-    lines: list[str] = []
+    lines = [e2_line(row, names) for row in ordered]
+    return {"key": "E2", "args": args, "result": _body(source, [*lines, _e2_tail(counts, len(lines), 0)]),
+            "e2": {"kinds": [_event_kind(row) for row in ordered], "counts": counts}}
+
+
+def _fit_e2(entry: Mapping[str, Any], limit: int) -> tuple[str, dict | None]:
+    """E2 를 result 상한 `limit` 에 맞춘다 — (글, 절단 기록). 줄 수는 방패를 건 뒤에도 같다(줄마다 감싸기만 한다).
+
+    꼬리는 본문을 채우기 전에 최악 길이로 떼어 두고, 들어가는 데까지 이벤트 줄을 실은 뒤 실린 수로 다시 쓴다. 꼬리조차
+    안 들어가는 자리면 줄 단위 절단(`…(n줄 생략)`)으로 떨어진다 — 어느 쪽이든 조용히 빼지 않는다.
+    """
+    text = _s(entry["result"])
+    info = entry.get("e2")
+    if not info:
+        out, dropped = clip_lines_n(text, limit)
+        return out, ({"lines": len(text.split("\n")) - 1, "kept": len(text.split("\n")) - 1 - dropped,
+                      "omitted": dropped} if dropped else None)
+    counts = info["counts"]
+    if len(text) <= limit:
+        return text, None
+    parts = text.split("\n")
+    head, body = parts[0], parts[1:-1]
+    room = limit - len(head) - 1 - len(_e2_tail(counts, counts["total"], counts["total"]))
+    kept: list[str] = []
     used = 0
-    for row in ordered:
-        line = e2_line(row, names)
+    for line in body:
         if used + len(line) + 1 > room:
             break
-        lines.append(line)
+        kept.append(line)
         used += len(line) + 1
-    kept, omitted = len(lines), counts["total"] - len(lines)
-    out = {"key": "E2", "args": args, "result": _body(source, [*lines, _e2_tail(counts, kept, omitted)])}
-    if omitted:
-        by_kind: dict[str, int] = {}
-        for row in ordered[kept:]:
-            by_kind[_event_kind(row)] = by_kind.get(_event_kind(row), 0) + 1
-        out["clipped"] = {"lines": counts["total"], "kept": kept, "omitted": omitted, "omitted_by_kind": by_kind}
-    return out
+    omitted = counts["total"] - len(kept)
+    out = "\n".join([head, *kept, _e2_tail(counts, len(kept), omitted)])
+    if len(out) > limit:
+        out = clip_lines_n(out, limit)[0]
+    by_kind: dict[str, int] = {}
+    for kind in info["kinds"][len(kept):]:
+        by_kind[kind] = by_kind.get(kind, 0) + 1
+    return out, {"lines": counts["total"], "kept": len(kept), "omitted": omitted, "omitted_by_kind": by_kind}
 
 
 def diff_lines(store, diff_id: str, *, owner_sub: str, change_kind: str | None = None, q: str | None = None,
@@ -937,12 +1036,14 @@ def _e5_prefix(row, target_key: str = "") -> str:
     return head
 
 
-def _item_e5(store, ctx, similar: Mapping[str, Any], owner_sub: str | None, field=None) -> dict:
+def _item_e5(store, ctx, similar: Mapping[str, Any], owner_sub: str | None, field=None,
+             profile: "BriefProfile | None" = None) -> dict:
     """E5 세 블록 — E5+(살아 있는 선례) · E5−(기각·반증 선례) · E10(필드·문헌 근거)(plan §5.6.1).
 
     기각 선례는 두 번째 블록에만 실린다 — 살아 있는 선례로 되돌아오지 않게 하고, 동시에 '과거에
-    기각됐다' 는 사실이 발화될 자리를 만든다.
+    기각됐다' 는 사실이 발화될 자리를 만든다. 블록 상한은 프로파일 배수로 는다(바닥에서는 700·300·340).
     """
+    profile = profile or PROFILE_LEGACY
     source = _SOURCES["E5"][0]
     target_key = _s(ctx["target"]["target_key"])
     positive = [_e5_prefix(row, target_key) + _registry_line(row, path)
@@ -952,13 +1053,13 @@ def _item_e5(store, ctx, similar: Mapping[str, Any], owner_sub: str | None, fiel
     neg_max = int(getattr(config.settings, "risk_neg_precedent_lines", 6) or 6)
 
     lines = ["[E5+ 살아 있는 선례]"]
-    lines += (clip_lines("\n".join(positive), E5_POSITIVE_CAP).split("\n") if positive
+    lines += (clip_lines("\n".join(positive), profile.inner(E5_POSITIVE_CAP)).split("\n") if positive
               else ["[선행 등록부 없음 — 이 과제 계보·유사 과제 0건]"])
     lines.append("[E5− 기각·반증 선례]")
-    lines += (clip_lines("\n".join(negative[:neg_max]), E5_NEGATIVE_CAP).split("\n") if negative
+    lines += (clip_lines("\n".join(negative[:neg_max]), profile.inner(E5_NEGATIVE_CAP)).split("\n") if negative
               else ["[기각된 선례 없음 — 이 조합에서 기각 0건]"])
     lines.append("[E10 필드·VOC·문헌 근거]")
-    lines += _field_evidence_lines(store, ctx, field)
+    lines += _field_evidence_lines(store, ctx, field, cap=profile.inner(E5_FIELD_CAP))
     return {"key": "E5", "args": _s(ctx["target"]["target_key"]), "result": _body(source, lines)}
 
 
@@ -1067,7 +1168,7 @@ def field_evidence_line(item: Mapping[str, Any], kind: str, *, product_code: str
     return f"paper:{pid} | {title} | {excerpt}"
 
 
-def _field_evidence_lines(store, ctx, field=None) -> list[str]:
+def _field_evidence_lines(store, ctx, field=None, cap: int = E5_FIELD_CAP) -> list[str]:
     """E10 블록(plan §5.6.1·§5.6.2).
 
     `field` 는 게이트웨이 MCP 채널이다(없으면 조회 없이 결측 문구 한 줄). 호출 원문은 `rr_brief_calls` 에
@@ -1116,7 +1217,7 @@ def _field_evidence_lines(store, ctx, field=None) -> list[str]:
     # 조회 불가 사실이 예산 때문에 지워지지 않게 한다 — 그게 지워지면 '조회했는데 0건' 과 구별되지 않는다.
     tail_len = sum(len(t) + 1 for t in tail)
     if lines:
-        clipped = clip_lines("\n".join(lines), max(0, E5_FIELD_CAP - tail_len))
+        clipped = clip_lines("\n".join(lines), max(0, cap - tail_len))
         lines = clipped.split("\n") if clipped else []
     return (lines + tail) or ["[필드·문헌 근거 없음 — VOC 0건]"]
 
@@ -1223,12 +1324,13 @@ _EXCERPT_CUT_FMT = " …(발췌 {chars}자 중 {kept}자)"
 
 
 def _quoted_excerpt(text: Any, room: int) -> str:
-    """앞 패널 LLM 이 쓴 발췌를 «» 안에 싣는다(인젝션 방어 안). 자리(room)나 위생의 종류별 상한을 넘으면 들어가는 만큼 싣고
-    원문 길이를 밝힌다 — 조용히 자르지 않는다(`memo_result` 와 같은 꼴). 원문 길이는 위생과 같은 정규화 뒤의 길이다."""
+    """앞 패널 LLM 이 쓴 발췌를 «» 안에 싣는다(인젝션 방어 안). 자리(room)를 넘으면 들어가는 만큼 싣고 원문 길이를
+    밝힌다 — 조용히 자르지 않는다(`memo_result` 와 같은 꼴). 원문 길이는 위생과 같은 정규화 뒤의 길이다."""
     chars = len(render.norm_quote(text))
-    quoted = _q(text, "memo")
+    # 위생 상한(memo 400자)은 걸지 않는다 — 자리를 여기서 재고 잘린 길이를 표식으로 밝힌다.
+    quoted = render.sanitize_source_text(text, "memo", on_suspect=_on_suspect, limit=0)
     inner = quoted[1:-1]
-    if inner.startswith("[suspect_text ") or (len(quoted) <= room and len(inner) >= chars):
+    if inner.startswith("[suspect_text ") or len(quoted) <= room:
         return quoted
     kept = min(len(inner), room - 2 - len(_EXCERPT_CUT_FMT.format(chars=chars, kept=chars)))
     if kept <= 0:
@@ -1238,17 +1340,21 @@ def _quoted_excerpt(text: Any, room: int) -> str:
     return render.quote_source(inner[:kept]) + _EXCERPT_CUT_FMT.format(chars=chars, kept=kept)
 
 
-def _seat_line(store, row, excerpt: str) -> str:
-    """좌석 줄 — `narr:<opinion_id>#<finding_id> | <agent_key> | <과제코드>/<target 앞12> | «<발췌>»` ≤ E7_SEAT_LINE 자."""
+def _seat_line(store, row, excerpt: str, line_max: int = E7_SEAT_LINE) -> str:
+    """좌석 줄 — `narr:<opinion_id>#<finding_id> | <agent_key> | <과제코드>/<target 앞12> | «<발췌>»` ≤ line_max 자."""
     findings = _j(row["raised_finding_ids_json"], [])
     finding_id = str(findings[0]) if isinstance(findings, list) and findings else ""
     project_code = _project_code(store, row["project_id"] if "project_id" in row.keys() else None)
     prefix = (f"narr:{row['opinion_id']}#{finding_id} | {row['agent_key']} | "
               f"{project_code}/{_s(row['target_key'])[:12]} | ")
-    return prefix + _quoted_excerpt(excerpt, max(0, E7_SEAT_LINE - len(prefix)))
+    return prefix + _quoted_excerpt(excerpt, max(0, line_max - len(prefix)))
 
 
-def _item_e7(store, ctx, seats: Sequence[Mapping[str, Any]], adh) -> dict:
+def _item_e7(store, ctx, seats: Sequence[Mapping[str, Any]], adh, profile: "BriefProfile | None" = None) -> dict:
+    """좌석 기억 — 좌석마다 한 줄(줄 상한은 프로파일 배수로 는다). 항목 상한을 넘는 좌석 줄은 `build_brief` 의 줄 단위
+    절단이 `…(n줄 생략)` 과 meta.clipped 로 밝힌다 — 종전에는 합 1,100자에서 말없이 멈춰 뒤 좌석은 줄 자체가 없었다."""
+    profile = profile or PROFILE_LEGACY
+    line_max = profile.inner(E7_SEAT_LINE)
     source = _SOURCES["E7"][0]
     target_key = _s(ctx["target"]["target_key"])
     lineage = set(_lineage_project_ids(store, ctx["target"]["project_id"]))
@@ -1256,21 +1362,15 @@ def _item_e7(store, ctx, seats: Sequence[Mapping[str, Any]], adh) -> dict:
     # 좌석 dict 의 키는 `key` 가 정본이다(편성기·seats_json) — 종전에는 `agent_key` 만 읽어 편성기 좌석이 한 번도 실리지
     # 않았다(WP1 R-14). 읽는 곳은 `common.seat_key` 하나다.
     agent_keys = [seat_key(s) for s in seats if _s(s.get("origin")) in ("primary", "counter") and seat_key(s)]
-    lines: list[str] = []
-    used = 0
-    for agent_key in agent_keys:
-        line = _seat_memory_line(store, agent_key, target_key, lineage, subjects, adh, ctx)
-        if used + len(line) + (1 if lines else 0) > E7_SEAT_TOTAL:
-            break
-        used += len(line) + (1 if lines else 0)
-        lines.append(line)
+    lines = [_seat_memory_line(store, agent_key, target_key, lineage, subjects, adh, ctx, line_max)
+             for agent_key in agent_keys]
     if not lines:
         lines = ["[착석 좌석 없음]"]
     return {"key": "E7", "args": ",".join(agent_keys), "result": _body(source, lines)}
 
 
 def _seat_memory_line(store, agent_key: str, target_key: str, lineage: set[str],
-                      subjects: set[str], adh, ctx) -> str:
+                      subjects: set[str], adh, ctx, line_max: int = E7_SEAT_LINE) -> str:
     rows = store.query(
         "SELECT o.opinion_id, o.agent_key, o.target_key, o.raised_finding_ids_json, o.excerpt_for_rag, "
         "o.created_at, t.project_id FROM rr_seat_opinions AS o "
@@ -1288,8 +1388,8 @@ def _seat_memory_line(store, agent_key: str, target_key: str, lineage: set[str],
                 overlap = 0 if finding_subjects & subjects else 1
             return (in_lineage, overlap, -(row["created_at"] or 0), _s(row["opinion_id"]))
         best = sorted(rows, key=rank)[0]
-        return _seat_line(store, best, _s(best["excerpt_for_rag"]))
-    hit = _adh_seat_memory(adh, agent_key, ctx)
+        return _seat_line(store, best, _s(best["excerpt_for_rag"]), line_max)
+    hit = _adh_seat_memory(adh, agent_key, ctx, line_max)
     if hit is not None:
         return hit
     return f"[{agent_key}: 이전 발언 없음]"
@@ -1305,7 +1405,7 @@ def _finding_subjects(store, finding_ids: Any) -> set[str]:
     return {_s(r["subject_key"]) for r in rows if r["subject_key"]}
 
 
-def _adh_seat_memory(adh, agent_key: str, ctx) -> str | None:
+def _adh_seat_memory(adh, agent_key: str, ctx, line_max: int = E7_SEAT_LINE) -> str | None:
     """2차 경로 — AIDataHub 의사 에이전트 `risk-review-memory` 회수(plan §5.6.3 2). 미가용이면 None."""
     if adh is None or not getattr(adh, "available", False):
         return None
@@ -1334,7 +1434,7 @@ def _adh_seat_memory(adh, agent_key: str, ctx) -> str | None:
         return None
     prefix = f"narr:{opinion_id}#{finding_id} | {agent_key} | adh/{_s(hit.get('record_id'))[:12]} | "
     body = _s(hit.get("summary") or hit.get("text") or hit.get("title"))
-    return prefix + _quoted_excerpt(body, max(0, E7_SEAT_LINE - len(prefix)))
+    return prefix + _quoted_excerpt(body, max(0, line_max - len(prefix)))
 
 
 # ---------------------------------------------------------------- E8 변경-델타 선례
@@ -1433,24 +1533,28 @@ _MEMO_CUT_FMT = " …(메모 {chars}자 중 {kept}자)"
 _MEMO_CUT_RE = re.compile(re.escape(render.QUOTE_CLOSE) + r" …\(메모 (\d+)자 중 (\d+)자\)$")
 
 
-def memo_result(target_key: str, memo: Any) -> str:
+def memo_result(target_key: str, memo: Any, cap: int | None = None) -> str:
     """M 항목의 result — 프레이밍 줄 + 메모 한 줄. CAPS['M'] 에 안 들어가면 들어가는 만큼만 싣고 그 사실을 적는다.
 
     메모는 한 줄이라 넘치면 `clip_lines` 가 그 줄을 통째로 빼고 `…(1줄 생략)` 만 남겼다. 잡 API 는 2,000자까지
     받는데 약 290자부터 좌석은 메모를 한 글자도 못 봤고, 그 사실은 어디에도 남지 않았다(S26U 실사용 피드백 3-3 을
     재현하다 찾았다). 인젝션 어휘에 걸려 자리표시자로 바뀐 메모(§3.4.1)도 '좌석에 안 갔다' 이므로 0자로 적는다.
+    `cap` 은 M 의 라인 상한이다(안 주면 바닥 표의 값). 위생의 종류별 상한(memo)도 자리와 같이 밝힌다 — 다 실렸는지는
+    위생과 같은 정규화 뒤의 길이로 견준다(그 상한이 자리보다 먼저 자르면 표지 없이 지나갔다).
     """
     source, tool = _SOURCES["M"]
-    room = CAPS["M"] - line_overhead({"source": source, "tool": tool, "args": _s(target_key)[:CLAMP_ARGS]}) \
+    room = (CAPS["M"] if cap is None else cap) \
+        - line_overhead({"source": source, "tool": tool, "args": _clamp(target_key, CLAMP_ARGS)}) \
         - len(_framing(source)) - 1
     chars = len(_s(memo))
-    quoted = _q(memo, "memo")
+    # 위생 상한(memo 400자)은 걸지 않는다 — 자리를 여기서 재고 잘린 길이를 표지로 밝힌다.
+    quoted = render.sanitize_source_text(memo, "memo", on_suspect=_on_suspect, limit=0)
     inner = quoted[1:-1]
     if inner.startswith("[suspect_text "):
         return _body(source, [quoted + _MEMO_CUT_FMT.format(chars=chars, kept=0)])
     if len(quoted) <= room:
         return _body(source, [quoted])
-    kept = max(0, room - 2 - len(_MEMO_CUT_FMT.format(chars=chars, kept=chars)))
+    kept = min(len(inner), max(0, room - 2 - len(_MEMO_CUT_FMT.format(chars=chars, kept=chars))))
     return _body(source, [render.quote_source(inner[:kept]) + _MEMO_CUT_FMT.format(chars=chars, kept=kept)])
 
 
@@ -1460,7 +1564,7 @@ def memo_cut(item: Mapping[str, Any] | None) -> dict | None:
     return {"chars": int(found.group(1)), "kept": int(found.group(2))} if found else None
 
 
-def _item_memo(store, target_key: str, user_memo: str | None = None) -> dict | None:
+def _item_memo(store, target_key: str, user_memo: str | None = None, cap: int | None = None) -> dict | None:
     """M — `user_memo` 는 지금 도는 잡의 메모다(러너가 넘긴다). None 이면 그 타깃의 가장 최근 잡 메모를 읽는다.
 
     조회는 잡이 없는 미리보기·MCP 경로를 위한 것이다. 러너 경로까지 조회에 맡기면 한 타깃에 잡이 둘일 때
@@ -1476,7 +1580,7 @@ def _item_memo(store, target_key: str, user_memo: str | None = None) -> dict | N
         memo = _j(row["params_json"], {}).get("user_memo") if row is not None else None
     if not memo:
         return None
-    return {"key": "M", "args": target_key, "result": memo_result(target_key, memo)}
+    return {"key": "M", "args": target_key, "result": memo_result(target_key, memo, cap)}
 
 
 # ---------------------------------------------------------------- 참조 수집·린터
@@ -1586,14 +1690,20 @@ def _seats_of_panel(store, target_key: str, panel_id: str | None) -> list[dict]:
     return [s for s in seats if isinstance(s, dict)] if isinstance(seats, list) else []
 
 
+# 남는 자리를 빌려줄 차례 — E0 가 먼저(신원·게이트 줄이 바닥 상한 500 에 늘 넘친다), 그다음이 변경 목록·치수·결과다.
+# E0c 는 빌려주지도 빌리지도 않는다 — 러너가 그 칸을 제 좌석 계약표로 갈아 끼운다(그 자리는 그 표의 몫이다).
+LEND_ORDER: tuple[str, ...] = ("E0", "E2", "E3", "E4", "E5", "E7", "E9", "E8", "E6", "E1", "M")
+
+
 def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | None = None,
                 panel_id: str | None = None, exclude: Sequence[str] = (), owner_sub: str | None = None,
                 adh=None, ra=None, field=None, strict_lint: bool = False, shield_lint: bool = False,
-                user_memo: str | None = None) -> dict:
+                user_memo: str | None = None, profile: BriefProfile | None = None) -> dict:
     """타깃·패널을 받아 E0~E9 를 delib_opts.evidence 형식으로 조립한다(plan §5.6.2, 결정론).
 
-    항목마다 라인 길이를 CAP 안으로 먼저 강제하므로 엔진 예산 11000 에서 드롭이 0 이다(E0 만 다른 항목이
-    남긴 자리를 빌려 제 CAP 을 넘길 수 있다 — 그래도 라인 합은 Σ CAP 이하다).
+    크기는 `profile` 이 정한다 — 웹 러너는 엔진이 알려 준 근거 예산(`web_profile`), MCP·REST 는 JS 파이프라인의 상한
+    (`PROFILE_MCP`), 안 주면 바닥(`PROFILE_LEGACY`, 종전 11,000자). 항목마다 라인 길이를 상한 안으로 먼저 맞추므로 드롭이
+    0 이고, 그러고 남은 자리를 잘린 항목에 `LEND_ORDER` 차례로 빌려준다(라인 합은 여전히 Σ 상한 이하다).
     `exclude` 는 항목 키(E6·E8 …)의 제외만 받는다 — 추가·편집은 없다(§5.7 RecallPreview).
     `user_memo` 는 지금 도는 잡의 메모다 — 안 주면 M 은 그 타깃의 최근 잡 메모를 읽는다(`_item_memo`).
 
@@ -1601,6 +1711,7 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
     걸린 줄을 «» 로 싸서 싣고 예외를 내지 않는다(운영 경로 — 이름 하나로 그 타깃의 패널이 다 죽지 않게, WP1 S5-c).
     무엇을 쌌는지는 `meta.shielded` 에 남는다. `strict_lint` 는 방패를 건 뒤에도 위반이 남으면 E500 이다(시험·미리보기).
     """
+    profile = profile or PROFILE_LEGACY
     ctx = _target_context(store, target_key)
     if owner_sub is None:
         owner_sub = _s(ctx["target"]["owner_sub"]) or None
@@ -1619,16 +1730,16 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
             _item_e0(store, ctx, external_ok, _panel_model(store, target_key, panel_id)),
             _item_e0c(seats),
             _item_e1(ctx),
-            _item_e2(store, ctx, names, cap=CAPS["E2"], item_result_max=CLAMP_RESULT),
+            _item_e2(store, ctx, names),
             _item_e3(ctx),
             _item_e4(ctx, names),
-            _item_e5(store, ctx, similar, owner_sub, field),
+            _item_e5(store, ctx, similar, owner_sub, field, profile),
             _item_e6(store, similar, ctx),
-            _item_e7(store, ctx, seats, adh),
+            _item_e7(store, ctx, seats, adh, profile),
             _item_e8(store, ctx),
             _item_e9(ctx),
         ]
-        memo = _item_memo(store, target_key, user_memo)
+        memo = _item_memo(store, target_key, user_memo, cap=profile.cap("M"))
         if memo is not None:
             raw.append(memo)
         # 방패는 줄 단위 절단보다 먼저다 — 글자를 늘리므로 절단 뒤에 걸면 항목이 CAP 을 넘는다.
@@ -1648,17 +1759,20 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
     raw = sorted([i for i in raw if i["key"] not in excluded], key=lambda i: order[i["key"]])
 
     # 절단 원장(WP1 R-19) — 항목마다 줄 단위로 버린 수. 프레이밍 줄은 세지 않는다. E2 는 제 꼬리와 같은 값(종류별 생략 수
-    # 포함)을 스스로 낸다. 원장에는 '…(N줄 생략)' 글 덩어리만 남던 것을 구조로 남겨 러너가 패널 품질에 옮긴다.
+    # 포함)을 낸다. 원장에는 '…(N줄 생략)' 글 덩어리만 남던 것을 구조로 남겨 러너가 패널 품질에 옮긴다.
     clipped: dict[str, dict] = {}
 
-    def clip(entry: Mapping[str, Any], text: str, limit: int) -> str:
-        out, dropped = clip_lines_n(text, limit)
-        clipped.pop(entry["key"], None)
-        if entry.get("clipped"):
-            clipped[entry["key"]] = dict(entry["clipped"])
-        elif dropped:
+    def fit(entry: Mapping[str, Any], limit: int) -> str:
+        if entry.get("e2"):
+            out, info = _fit_e2(entry, limit)
+        else:
+            text = _s(entry["result"])
+            out, dropped = clip_lines_n(text, limit)
             lines_n = len(text.split("\n")) - 1
-            clipped[entry["key"]] = {"lines": lines_n, "kept": lines_n - dropped, "omitted": dropped}
+            info = {"lines": lines_n, "kept": lines_n - dropped, "omitted": dropped} if dropped else None
+        clipped.pop(entry["key"], None)
+        if info:
+            clipped[entry["key"]] = info
         return out
 
     items: list[dict] = []
@@ -1666,26 +1780,32 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
         source, tool = _SOURCES[entry["key"]]
         source, tool = entry.get("source") or source, entry.get("tool") or tool
         item = {
-            "source": source[:CLAMP_SOURCE],
-            "tool": tool[:CLAMP_TOOL],
-            "args": _s(entry["args"])[:CLAMP_ARGS],
+            "source": _clamp(source, CLAMP_SOURCE),
+            "tool": _clamp(tool, CLAMP_TOOL),
+            "args": _clamp(entry["args"], CLAMP_ARGS),
             "result": entry["result"],
         }
-        cap = CAPS[entry["key"]]
-        item["result"] = clip(entry, item["result"], min(CLAMP_RESULT, cap - line_overhead(item)))
-        assert len(evidence_line(item)) <= cap, f"{entry['key']} 라인이 CAP {cap} 을 넘었습니다."
+        cap = profile.cap(entry["key"])
+        item["result"] = fit(entry, min(profile.item_result_max, cap - line_overhead(item)))
+        assert len(evidence_line(item)) <= cap, f"{entry['key']} 라인이 상한 {cap} 을 넘었습니다."
         item["key"] = entry["key"]
         items.append(item)
 
-    if items and items[0]["key"] == "E0":
-        # E0 는 다른 항목이 이번 브리프에서 남긴 자리를 빌려 다시 맞춘다(CAPS 주석). 라인 합은 Σ CAPS 를 넘지 않는다.
-        # E0c 가 남긴 자리는 세지 않는다 — 러너가 그 칸을 제 좌석 계약표(`runner.seat_contract_evidence`)로 갈아 끼운다.
-        e0 = items[0]
-        spare = sum(CAPS[i["key"]] - len(evidence_line(i)) for i in items[1:] if i["key"] != "E0c")
-        e0["result"] = clip(raw[0], raw[0]["result"], min(CLAMP_RESULT, CAPS["E0"] + spare - line_overhead(e0)))
+    # 남은 자리를 잘린 항목에 빌려준다(E0 는 늘 — 신원 줄이 바닥 상한에 넘친다). 라인 합은 Σ 상한을 넘지 않는다.
+    # E0c 가 남긴 자리는 세지 않는다 — 러너가 그 칸을 제 좌석 계약표(`runner.seat_contract_evidence`)로 갈아 끼운다.
+    by_key = {i["key"]: (i, e) for i, e in zip(items, raw)}
+    pool = sum(profile.cap(i["key"]) - len(evidence_line(i)) for i in items if i["key"] != "E0c")
+    for key in LEND_ORDER:
+        if pool <= 0 or key not in by_key or (key != "E0" and key not in clipped):
+            continue
+        item, entry = by_key[key]
+        before = len(evidence_line(item))
+        item["result"] = fit(entry, min(profile.item_result_max, before + pool - line_overhead(item)))
+        pool -= len(evidence_line(item)) - before
 
     total = sum(len(evidence_line(i)) for i in items)
-    assert total <= ENGINE_BUDGET and len(items) <= EVIDENCE_MAX_ITEMS
+    caps_sum = sum(profile.cap(i["key"]) for i in items)
+    assert total <= caps_sum <= profile.budget and len(items) <= profile.max_items
 
     lint = lint_items(items)
     if strict_lint and lint["ok"] is False:
@@ -1699,9 +1819,10 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
         "keys": [i["key"] for i in items],
         "refs": collect_refs(items),
         "meta": {
+            "profile": profile.name,
             "budget_used": total,
-            "budget": ENGINE_BUDGET,
-            "caps_sum": sum(CAPS[i["key"]] for i in items),
+            "budget": profile.budget,
+            "caps_sum": caps_sum,
             # 항목 통째 탈락 수(조립 단계에서는 0 이다). 줄 단위 절단은 clipped 가 맡는다.
             "dropped": 0,
             "clipped": clipped,

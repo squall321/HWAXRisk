@@ -684,3 +684,47 @@ def test_three_panels_of_a_synthetic_many_change_target_close_done(risk_store, t
     assert [o["status"] for o in outs] == ["done", "done", "done"], outs
     assert all(not _panel(risk_store, o["panel_id"])["error"] for o in outs)
     assert planner.check_invariants(risk_store, synth.target_key) == []
+
+
+class _BudgetEngine(LedgerEngine):
+    """엔진 /health 가 근거 예산을 알려 주는 대역 — 받은 delib_opts 를 남긴다."""
+
+    def __init__(self, evid_budget, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.evid_budget = evid_budget
+        self.opts: list[dict] = []
+
+    def health(self) -> dict:
+        info = super().health()
+        if self.evid_budget is not None:
+            info["evid_budget"] = self.evid_budget
+        return info
+
+    def run(self, delib_opts, *, owner_sub=None):
+        self.opts.append(dict(delib_opts))
+        return super().run(delib_opts, owner_sub=owner_sub)
+
+
+def test_panel_brief_is_sized_from_the_engine_budget(risk_store, tmp_path, no_network):
+    """웹 러너는 패널마다 엔진 /health 의 evid_budget 으로 브리프 크기를 정하고 그 프로파일을 model_json 에 남긴다 —
+    1백만 토큰 창(500,000자)이면 변경 전부가 좌석에 가고, 예산을 모르는 옛 엔진이면 종전 크기(11,000자)다(WP1 S9)."""
+    from app import brief
+
+    synth = factories.make_diff_target(risk_store, 40, agents=factories.agents(("mech", "sim", "xd", "rel", "cam"), 3))
+    lg = _diff_ledger(risk_store, tmp_path, synth.target_key)
+    _job(lg)
+    wide, old = _BudgetEngine(500_000), _BudgetEngine(None)
+    first, second = _run(lg, wide), _run(lg, old)
+    assert first["status"] == second["status"] == "done", (first, second)
+    models = [json.loads(risk_store.query_one("SELECT model_json FROM rr_panels WHERE id = ?",
+                                              (o["panel_id"],))["model_json"]) for o in (first, second)]
+    assert models[0]["evid_budget"] == 500_000 and models[0]["brief_profile"] == {"name": "web", "budget": 500_000}
+    assert models[1]["evid_budget"] is None
+    assert models[1]["brief_profile"] == {"name": "web-legacy", "budget": brief.ENGINE_BUDGET}
+    n_events = len(synth.diff["semantic"]["events"])
+    tail = next(e["result"] for e in wide.opts[0]["evidence"] if e["key"] == "E2").split("\n")[-1]
+    assert tail.startswith(f"[전체 {n_events}건 — 실림 {n_events} · 생략 0 |"), tail
+    assert sum(len(brief.evidence_line(e)) for e in wide.opts[0]["evidence"]) <= 500_000
+    assert sum(len(brief.evidence_line(e)) for e in old.opts[0]["evidence"]) <= brief.ENGINE_BUDGET
+    quality = json.loads(_panel(risk_store, first["panel_id"])["quality_json"])
+    assert "E2" not in (quality.get("brief_clipped") or {}), quality.get("brief_clipped")

@@ -330,6 +330,10 @@ class PortalPanelEngine:
             "chair_rev": info.get("chair_rev"),
             "sampling": info.get("sampling"),
             "vllm": vllm,
+            # 엔진이 제 모델 창에서 유도한 근거 예산(자, 1백만 토큰 창이면 천장 500,000) — 브리프 크기의 원천이다(WP1 S9).
+            # 정수가 아니면(옛 엔진) None — 러너가 바닥 프로파일로 떨어진다.
+            "evid_budget": (info.get("evid_budget") if isinstance(info.get("evid_budget"), int)
+                            and not isinstance(info.get("evid_budget"), bool) else None),
         }
 
     # -- 6·7단계 엔진 호출·SSE 캡처 ---------------------------------------------

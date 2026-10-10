@@ -165,7 +165,8 @@ def suspect_placeholder(text: Any) -> str:
 
 def sanitize_source_text(text: Any, kind: str = DEFAULT_SANITIZE_KIND, *,
                          block: bool | None = None,
-                         on_suspect: Callable[[dict], None] | None = None) -> str:
+                         on_suspect: Callable[[dict], None] | None = None,
+                         limit: int | None = None) -> str:
     """원천 문자열을 표기층에 넣기 직전에 위생 처리한다(plan §0.6·§3.4.1).
 
     NFC → 제어·zero-width·양방향 제어 제거 → 개행·탭을 공백 1개로 → 연속 공백 압축 → 종류별 상한 → `«…»`.
@@ -173,6 +174,7 @@ def sanitize_source_text(text: Any, kind: str = DEFAULT_SANITIZE_KIND, *,
     `on_suspect({sha1, raw, lexicon_id, lexicon_version})` 을 부른다(호출자가 rr_curation_queue 에 올린다).
 
     표기층 전용이다 — `rr_snapshots.ir_json` 원본과 `ir_hash` 는 이 함수로 바뀌지 않는다.
+    `limit` 은 종류별 상한을 덮는다 — 0 이면 자르지 않는다(자리를 스스로 재고 잘린 길이를 밝히는 호출자가 쓴다).
     """
     raw = "" if text is None else str(text)
     s = unicodedata.normalize("NFC", raw)
@@ -180,8 +182,10 @@ def sanitize_source_text(text: Any, kind: str = DEFAULT_SANITIZE_KIND, *,
     s = _CONTROL_RE.sub("", s)
     s = _STRIP_RE.sub("", s)
     s = _SPACES_RE.sub(" ", s).strip()
-    limit = SANITIZE_LIMITS.get(kind, SANITIZE_LIMITS[DEFAULT_SANITIZE_KIND])
-    s = s[:limit]
+    if limit is None:
+        limit = SANITIZE_LIMITS.get(kind, SANITIZE_LIMITS[DEFAULT_SANITIZE_KIND])
+    if limit > 0:
+        s = s[:limit]
     if block is None:
         block = _suspect_block_setting()
     # 위생 통과본과 원문을 함께 본다 — X10(제어문자)처럼 위생이 지워 버리는 표지도 '의심' 의 근거다(§3.4.1).

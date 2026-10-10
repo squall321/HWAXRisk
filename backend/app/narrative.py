@@ -1445,7 +1445,7 @@ def cited_refs_in(text: Any) -> list[str]:
 
 def prior_evidence(store, target_key: str, *, user_memo: str | None = None,
                    seats: Sequence[dict] | None = None, panel_id: str | None = None,
-                   exclude: Sequence[str] = (), meta_out: dict | None = None) -> list[dict]:
+                   exclude: Sequence[str] = (), meta_out: dict | None = None, profile: Any = None) -> list[dict]:
     """다음 패널의 `delib_opts.evidence` 를 §5.6.1 예산표대로 조립한다(항목 본체는 `brief.build_brief`).
 
     E0c(좌석 계약)는 `runner.build_delib_opts` 가 다시 끼우므로 여기서는 빼고 돌려준다 — 같은 조립 결과를
@@ -1453,6 +1453,7 @@ def prior_evidence(store, target_key: str, *, user_memo: str | None = None,
     메모)는 브리프에 그대로 넘겨 M 으로 싣는다 — 브리프가 rr_jobs 에서 찾게 두면 그 타깃의 최근 잡 메모가
     실린다. M 이 빠진 채 돌아온 경우(제외)에만 마지막 슬롯에 붙인다.
     `meta_out` 을 주면 조립의 meta(무엇을 «» 로 쌌는지 `shielded` 등)를 거기 채운다 — 러너가 패널 품질에 옮긴다.
+    `profile` 은 브리프 크기(`brief.BriefProfile`)다 — 러너가 엔진이 알려 준 근거 예산에서 정해 넘긴다(안 주면 바닥).
     """
     from app import brief as brief_module  # noqa: PLC0415 — 순환 import 회피(brief 는 narrative 를 쓴다).
 
@@ -1465,7 +1466,7 @@ def prior_evidence(store, target_key: str, *, user_memo: str | None = None,
     try:
         built = brief_module.build_brief(store, target_key, seats=seats, panel_id=panel_id,
                                         exclude=tuple(exclude), field=field, shield_lint=True,
-                                        user_memo=user_memo)
+                                        user_memo=user_memo, profile=profile)
     finally:
         # 채널은 자기 httpx.Client 를 소유한다 — 닫지 않으면 브리프 조립마다 소켓이 샌다.
         if field is not None:
@@ -1474,8 +1475,10 @@ def prior_evidence(store, target_key: str, *, user_memo: str | None = None,
         meta_out.update(built.get("meta") or {})          # 대역이 meta 없이 돌려줄 수 있다
     items = [item for item, key in zip(built["evidence"], built["keys"]) if key != "E0c"]
     if user_memo and not any(str(i.get("source")) == "user_memo" for i in items):
+        # M 을 뺀 조립의 폴백 — 같은 조립(`memo_result`)으로 그 상한까지 싣고 잘렸으면 원문 길이를 적는다(종전 2,000자 말없이).
+        cap = profile.cap("M") if profile is not None else None
         items.append({"source": "user_memo", "tool": "note", "args": target_key,
-                      "result": str(user_memo)[:2000], "key": "M"})
+                      "result": brief_module.memo_result(target_key, user_memo, cap), "key": "M"})
     return items
 
 

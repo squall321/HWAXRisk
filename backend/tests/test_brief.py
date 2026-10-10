@@ -243,8 +243,10 @@ def test_caps_table_matches_plan_budget():
     assert sum(brief.CAPS.values()) == 10600
     assert sum(brief.CAPS.values()) <= brief.ENGINE_BUDGET == 11000
     assert len(brief.ITEM_ORDER) == brief.EVIDENCE_MAX_ITEMS == 12
+    # 곁 필드 상한은 엔진(`_resolve_opts`)·JS(EV_SRC_MAX·EV_TOOL_MAX·EV_ARGS_MAX)와 같은 값이다 — 종전 120·400 은 옛 엔진 사본이라
+    # 좌석 기억(E7)의 좌석 목록 인자가 400자에서 말없이 잘렸다. 항목 result 의 2,000 은 바닥 프로파일의 값이다.
     assert (brief.CLAMP_SOURCE, brief.CLAMP_TOOL, brief.CLAMP_ARGS, brief.CLAMP_RESULT) == \
-        (120, 80, 400, 2000)
+        (200, 80, 1200, 2000)
 
 
 # ---------------------------------------------------------------- 절단 규칙(§5.6.2)
@@ -438,8 +440,10 @@ def test_oversized_summary_is_clipped_inside_e1_cap(risk_store):
     target_key = seed_diff_target(risk_store, summary=long_summary)
     out = brief.build_brief(risk_store, target_key)
     e1 = out["evidence"][out["keys"].index("E1")]
-    assert len(brief.evidence_line(e1)) <= brief.CAPS["E1"]
+    # 다른 항목이 남긴 자리를 빌려 제 상한(1,650)보다 더 싣지만 라인 합은 Σ 상한을 넘지 않고, 넘친 줄은 표식과 원장에 남는다.
     assert e1["result"].endswith("줄 생략)")
+    assert out["meta"]["clipped"]["E1"]["omitted"] > 0
+    assert out["meta"]["budget_used"] <= out["meta"]["caps_sum"] <= brief.ENGINE_BUDGET
     assert out["meta"]["dropped"] == 0
 
 
@@ -634,7 +638,7 @@ def test_a_long_warning_list_does_not_push_the_fired_rules_out_of_e9(risk_store)
     _seed_projects(risk_store)
     warnings = [{"code": "auto_named", "severity": "WARNING", "ref": f"a_stack.step#PART_{i}",
                  "message": f"이름이 자동 생성됐다 — PART_{i} 는 원본 STEP 에 이름이 없는 인스턴스다."}
-                for i in range(12)]
+                for i in range(80)]
     _add_snapshot(risk_store, "s_warn", "p_now", {"warnings": warnings})
     _add_state(risk_store, "s_warn", "[개요] 경고가 많은 스냅샷")
     risk_store.execute(
@@ -644,7 +648,8 @@ def test_a_long_warning_list_does_not_push_the_fired_rules_out_of_e9(risk_store)
     built = brief.build_brief(risk_store, "snap:s_warn", seats=SEATS)
     e9 = dict(zip(built["keys"], built["evidence"]))["E9"]["result"]
 
-    assert e9.endswith("줄 생략)"), "경고 12건이 다 들어갔다면 이 시험은 아무것도 보지 않는다"
+    # 남는 자리를 빌려도 넘치는 수다(경고 80건) — 다 들어갔다면 이 시험은 아무것도 보지 않는다.
+    assert e9.endswith("줄 생략)"), "경고 80건이 다 들어갔다면 이 시험은 아무것도 보지 않는다"
     lines = _e9_rule_lines(built)
     assert [line.split(" ")[0] for line in lines] == ["rule:R-001", "rule:R-007"], e9
     # 경고도 남은 자리만큼은 실린다 — 규칙이 경고를 지우는 것이 아니다.
@@ -660,7 +665,7 @@ def test_e7_fixed_slots_stay_inside_seat_budget(risk_store):
 
     assert len(seat_lines) == len(SEATS)
     assert all(len(line) <= brief.E7_SEAT_LINE for line in seat_lines)
-    assert sum(len(line) for line in seat_lines) + len(seat_lines) - 1 <= brief.E7_SEAT_TOTAL
+    assert sum(len(line) for line in seat_lines) + len(seat_lines) - 1 <= brief.CAPS["E7"]
     assert seat_lines[0].startswith("narr:op0#pan0#F1 | mech-housing-structure | DV1/diff:d0 | ")
     assert seat_lines[1:] == [f"[{s['agent_key']}: 이전 발언 없음]" for s in SEATS[1:]]
     assert e7["args"] == ",".join(s["agent_key"] for s in SEATS)
@@ -1809,6 +1814,8 @@ def test_e2_tail_counts_every_event_even_when_nothing_is_cut(risk_store):
 def test_e2_order_survives_a_tight_cap(risk_store, monkeypatch):
     """상한을 이벤트 두 줄만 들어가게 죄어도 종류가 섞이고 설계 무관 줄은 빠지며, 꼬리가 무엇이 빠졌는지 센다."""
     target_key = _six_change_pair(risk_store)
+    # 남는 자리를 E2 에 빌려주면 상한을 죄어도 줄이 늘어난다 — 이 시험은 순서만 보므로 빌려주기를 E0 로 묶는다.
+    monkeypatch.setattr(brief, "LEND_ORDER", ("E0",))
     kept = None
     for cap in range(300, 1100, 5):
         monkeypatch.setitem(brief.CAPS, "E2", cap)
@@ -1843,7 +1850,7 @@ def test_clipped_lines_are_reported_in_meta(risk_store):
     assert len(_e2_lines(built)) == clipped["kept"]
     tail = _item(built, "E2").split("\n")[-1]
     assert tail.startswith(f"[전체 {n_rows}건 — 실림 {clipped['kept']} · 생략 {clipped['omitted']} | "), tail
-    assert len(brief.evidence_line(built["evidence"][built["keys"].index("E2")])) <= brief.CAPS["E2"]
+    assert built["meta"]["budget_used"] <= built["meta"]["caps_sum"] <= brief.ENGINE_BUDGET
 
 
 # ---------------------------------------------------------------- E3·E4 — 생산자가 쓴 자리와 필드(WP1 S7 · R-10 · R-12 · R-40)
@@ -1916,11 +1923,12 @@ def test_e7_excerpt_is_quoted_and_says_when_cut(risk_store, monkeypatch):
     monkeypatch.setattr(brief, "E7_SEAT_LINE", 74)
     line = _item(brief.build_brief(risk_store, target_key), "E7").split("\n")[1]
     assert len(line) <= 74 and line.endswith("| …(발췌 20자 중 0자)"), line
-    # 자리가 넉넉해도 위생의 종류별 상한(memo 400자)에 걸리면 그 사실을 밝힌다.
+    # 자리가 넉넉하면 위생의 종류별 상한(memo 400자)에 묶이지 않고 다 싣는다 — 종전에는 400자에서 끊었다(사용자 지침 가).
     monkeypatch.setattr(brief, "E7_SEAT_LINE", 2000)
     risk_store.execute("UPDATE rr_seat_opinions SET excerpt_for_rag = ? WHERE opinion_id = 'op0'", ("간극 " * 300,))
-    line = _item(brief.build_brief(risk_store, target_key), "E7").split("\n")[1]
-    assert line.endswith("» …(발췌 899자 중 400자)"), line[-40:]
+    built = brief.build_brief(risk_store, target_key, profile=brief.web_profile(500_000))
+    line = _item(built, "E7").split("\n")[1]
+    assert line.endswith("| «" + ("간극 " * 300).strip() + "»"), line[-40:]
 
 
 def test_e9_warnings_rank_by_severity_vocabulary(risk_store):

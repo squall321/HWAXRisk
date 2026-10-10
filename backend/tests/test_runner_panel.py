@@ -7,7 +7,7 @@ import types
 
 import pytest
 
-from app import config, identity, planner, runner
+from app import brief, config, identity, planner, runner
 
 def _enc(pat: str) -> str:
     """저장 열 portal_pat_enc 는 Fernet 암호문이다(plan §8.2.7) — 픽스처도 같은 형식으로 넣는다."""
@@ -124,8 +124,9 @@ class FakePanelEngine:
 def fake_narrative(recorder: dict) -> types.SimpleNamespace:
     """narrative 대역 — 러너가 부르는 세 함수만 갖춘다(실물은 배선 담당이 채운다)."""
 
-    def prior_evidence(store, target_key, *, user_memo=None, seats=None, panel_id=None, exclude=(), meta_out=None):
-        recorder["prior_evidence"] = {"target_key": target_key, "user_memo": user_memo}
+    def prior_evidence(store, target_key, *, user_memo=None, seats=None, panel_id=None, exclude=(), meta_out=None,
+                       profile=None):
+        recorder["prior_evidence"] = {"target_key": target_key, "user_memo": user_memo, "profile": profile}
         return [{"source": "rr_state", "tool": "gates", "args": target_key, "result": "G1 pass"}]
 
     def parse_risk_spec(text):
@@ -473,9 +474,12 @@ def test_build_delib_opts_shape_and_forbidden_keys(risk_store):
     # E0 바로 뒤가 좌석 계약표(E0c)이고, 사용자 메모는 마지막 슬롯이다.
     assert opts["evidence"][1]["source"] == "seat_contract"
     assert opts["evidence"][1]["tool"] == "seat-contract.v1"
-    assert opts["evidence"][-1] == {"source": "user_memo", "tool": "note", "result": "사용자 메모", "key": "M"}
+    # 브리프가 M 없이 돌아온 폴백도 같은 조립(`memo_result` — 프레이밍·«»)이다. 종전에는 날글을 2,000자에서 말없이 끊어 실었다.
+    assert opts["evidence"][-1] == {"source": "user_memo", "tool": "note", "args": target_key,
+                                    "result": brief.memo_result(target_key, "사용자 메모"), "key": "M"}
     assert opts["evidence"][1]["key"] == "E0c"
-    assert recorder["prior_evidence"] == {"target_key": target_key, "user_memo": "사용자 메모"}
+    assert recorder["prior_evidence"] == {"target_key": target_key, "user_memo": "사용자 메모",
+                                          "profile": brief.PROFILE_LEGACY}
 
     for forbidden in ("human_note", "continue_summary", "non_negotiables", "search_sources",
                       "stop_after_round", "build_plan"):
@@ -600,8 +604,7 @@ def test_seat_contract_evidence_budget():
     assert item["key"] == "E0c"
     lines = item["result"].splitlines()
     assert len(lines) == 2                                        # 없는 도메인 줄은 실리지 않는다
-    assert all(len(line) <= runner.SEAT_CONTRACT_LINE_MAX for line in lines)
-    assert len(item["result"]) <= runner.SEAT_CONTRACT_TOTAL_MAX
+    assert len(brief.evidence_line(item)) <= brief.CAPS["E0c"]
 
 
 # ---------------------------------------------------------------- 패널 1건 완주(plan §6.7.2)

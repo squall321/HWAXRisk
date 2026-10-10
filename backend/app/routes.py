@@ -2604,9 +2604,16 @@ def brief_by_token(target_key: str, brief_token: str | None, tier: str = "B") ->
     """MCP `risk_get_brief` 본체 — caller 판정 대신 brief_token 대조로 연다(plan §8.2.5).
 
     토큰은 UI·REST `GET /targets/{key}/brief` 가 그 패널 1건·`risk_brief_token_ttl_s` 동안만 위임한 열쇠다.
+    이 조립이 L2 오케스트레이터가 좌석에 싣는 것이라 **그 토큰의 패널**에 여기서 동결한다(WP1 P-09 · R-21) — 화면이 토큰을
+    낸 시각의 조립을 동결하면 몇 분~몇 시간 뒤 좌석이 받는 조립(E5·E7·E10 은 시변이다)과 어긋난다. 동결본이 있어야 저장 때
+    `narr:`·`reg:` 인용을 그 패널이 받은 브리프로 대조하고 원문을 재현한다. REST 미리보기는 동결하지 않는다.
     """
     panel = resolve_brief_token(target_key, brief_token)
-    return brief_payload(target_key, tier, owner_sub=panel["owner_sub"])
+    payload = brief_payload(target_key, tier, owner_sub=panel["owner_sub"])
+    for item in payload["panels"]:
+        if item["panel_id"] == panel["id"]:
+            item["brief_frozen"] = runner.freeze_brief(get_store(), panel, item["delib_opts"]["evidence"])
+    return payload
 
 
 def brief_payload(target_key: str, tier: str = "B", *, owner_sub: str | None = None,
@@ -2640,8 +2647,12 @@ def brief_payload(target_key: str, tier: str = "B", *, owner_sub: str | None = N
     # 자격은 (b) 타깃 owner → (a) 서비스 순이다 — 서비스 시야로만 부르면 빈 응답이 'VOC 0건' 으로 굳는다.
     field = field_source.for_target(store, target_key)
     try:
+        # 크기는 MCP 보충 경로의 JS 파이프라인 상한(`PROFILE_MCP`)이다 — 웹 러너와 같은 방패 모드로 조립한다(이름에 판단어가
+        # 든 부품 하나로 그 타깃의 MCP 브리프가 E500 으로 죽지 않게, 무엇을 쌌는지는 meta.shielded). E7 은 첫 패널 좌석
+        # 기준 한 벌을 전 패널에 싣는다(P-09 — 오케스트레이터가 패널별 근거를 코드로 집게 된 뒤에 가른다).
         brief = brief_module.build_brief(store, target_key, seats=seats, panel_id=panel_id,
-                                        exclude=exclude, owner_sub=target["owner_sub"], field=field)
+                                        exclude=exclude, owner_sub=target["owner_sub"], field=field,
+                                        shield_lint=True, profile=brief_module.PROFILE_MCP)
     finally:
         # 채널은 자기 httpx.Client 를 소유한다 — 미리보기 요청마다 소켓이 새지 않게 닫는다.
         if field is not None:
@@ -2657,8 +2668,14 @@ def brief_payload(target_key: str, tier: str = "B", *, owner_sub: str | None = N
             "panel_no": panel["panel_no"],
             "seats_json": panel["seats_json"],
             "delib_opts": runner.build_delib_opts(store, config.settings, panel, evidence=engine_evidence,
-                                                  loss=loss),
+                                                  loss=loss, profile=brief_module.PROFILE_MCP),
         }
+        # 브리프가 상한에 잘랐거나 «» 로 싼 줄 — 웹 러너가 패널 품질에 남기는 것과 같은 값이다(E0c 는 이 패널의 계약표로 간다).
+        clipped = {k: v for k, v in (brief["meta"].get("clipped") or {}).items() if k != "E0c"}
+        if clipped:
+            loss["brief_clipped"] = clipped
+        if brief["meta"].get("shielded"):
+            loss["brief_shielded"] = list(brief["meta"]["shielded"])
         # 칸을 넘겨 빠진 항목·다 못 실은 메모는 그 패널 옆에 적는다 — 호출자가 받은 근거를 전부라고 읽지 않게.
         item.update(loss)
         if issue_token:

@@ -76,3 +76,49 @@ def test_strings_identical_in_py_js_json(engine_files):
     for key, text in contract.items():
         assert _dict_value(tree, "_RISK_SEAT_CONTRACT", key) == text, f"PY 좌석 계약 불일치: {key}"
         assert text in js_text, f"JS 좌석 계약 불일치: {key}"
+
+
+# ---------------------------------------------------------------- MCP 브리프 예산 ↔ JS 파이프라인(WP1 S9 · R-51)
+def _js_number(js_text: str, pattern: str) -> float:
+    import re
+
+    found = re.search(pattern, js_text)
+    if found is None:
+        pytest.fail(f"hwax-deliberate.js 에서 근거 상한 식을 찾지 못했다({pattern}) — 식이 바뀌었으면 이 시험과 "
+                    "brief.PROFILE_MCP 를 같이 고친다")
+    return float(found.group(1))
+
+
+def test_mcp_profile_is_the_js_pipeline_limits(engine_files):
+    """MCP 보충 경로의 브리프 크기(`brief.PROFILE_MCP`)가 JS 가 기본 창에서 유도하는 근거 상한과 같다.
+
+    JS 가 창(ctxTokens)·출력 몫·비율·바닥을 바꾸면 이 시험이 붉어진다 — 앱이 옛 크기로 보내면 JS 가 뒤 항목을 통째로 빼거나
+    (앱이 더 크다) 좌석이 받을 수 있는 것을 앱이 미리 잘라 버린다(앱이 더 작다). 실제 JS 소스에서 식의 수를 읽는다.
+    """
+    from app import brief
+
+    _, _, js, _, _ = engine_files
+    text = js.read_text(encoding="utf-8")
+    ctx = _js_number(text, r"const CTX_TOKENS = Math\.max\(16384, Math\.round\(Number\(A\.ctxTokens\) \|\| (\d+)\)\)")
+    reserve = _js_number(text, r"const PROMPT_ROOM = Math\.max\(0, CTX_TOKENS - (\d+)\)")
+    share, floor = (_js_number(text, r"const EV_BUDGET = roomShare\(([\d.]+), \d+\)"),
+                    _js_number(text, r"const EV_BUDGET = roomShare\([\d.]+, (\d+)\)"))
+    item_share, item_floor = (_js_number(text, r"const EV_ITEM_MAX = roomShare\(([\d.]+), \d+\)"),
+                              _js_number(text, r"const EV_ITEM_MAX = roomShare\([\d.]+, (\d+)\)"))
+    wide, narrow = (_js_number(text, r"const EV_MAX_ITEMS = EV_BUDGET > \d+ \? (\d+) : \d+"),
+                    _js_number(text, r"const EV_MAX_ITEMS = EV_BUDGET > \d+ \? \d+ : (\d+)"))
+    room = max(0, ctx - reserve)
+    ev_budget = max(floor, int(room * share))
+    ev_item = max(item_floor, int(room * item_share))
+    ev_items = wide if ev_budget > floor else narrow
+    assert (brief.PROFILE_MCP.budget, brief.PROFILE_MCP.item_result_max, brief.PROFILE_MCP.max_items) == \
+        (ev_budget, ev_item, ev_items)
+    # 바닥은 앱과 JS 가 같은 값이다(작은 창의 종전 크기).
+    assert (floor, item_floor, narrow) == (brief.ENGINE_BUDGET, brief.CLAMP_RESULT, brief.EVIDENCE_MAX_ITEMS)
+    # JS 는 줄마다 `[e:N|KEY] ` 를 붙여 예산에 센다 — 12항목의 그 머리까지 더해도 넘지 않는다(Σ 상한 = 예산 × 10600/11000).
+    caps = sum(brief.PROFILE_MCP.cap(k) for k in brief.ITEM_ORDER)
+    heads = sum(len(f"[e:{n}|{key}] ") for n, key in enumerate(brief.ITEM_ORDER, start=1))
+    assert caps + heads <= ev_budget
+    # 곁 필드 상한도 같은 값이다(앱이 그 안으로 만들어 보내면 JS 가 다시 끊지 않는다).
+    assert "const EV_SRC_MAX = 200, EV_TOOL_MAX = 80, EV_ARGS_MAX = 1200" in text
+    assert (brief.CLAMP_SOURCE, brief.CLAMP_TOOL, brief.CLAMP_ARGS) == (200, 80, 1200)

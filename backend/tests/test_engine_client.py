@@ -595,9 +595,18 @@ def test_health_reads_agent_server(tmp_path):
                                          "version": "eng-1", "chair_rev": "c9f1"})
 
     info = _engine(tmp_path, handler).health()
-    # chair_rev·sampling·vllm 은 엔진만 아는 값이라 그대로 옮긴다(§6.7.2 1단계).
+    # chair_rev·sampling·vllm 은 엔진만 아는 값이라 그대로 옮긴다(§6.7.2 1단계). 근거 예산이 없는 옛 엔진은 None 이다.
     assert info == {"model": "glm-4.6", "provider": "vllm", "endpoint_host": "vllm.box", "engine_rev": "eng-1",
-                    "chair_rev": "c9f1", "sampling": None, "vllm": "http://vllm.box:8000/v1"}
+                    "chair_rev": "c9f1", "sampling": None, "vllm": "http://vllm.box:8000/v1", "evid_budget": None}
+
+
+def test_health_carries_the_engine_evidence_budget(tmp_path):
+    """엔진 /health 의 `evid_budget`(모델 창에서 유도한 근거 예산)을 옮긴다 — 정수가 아니면 None 이다(WP1 S9)."""
+    for given, expect in ((500_000, 500_000), (17_967, 17_967), ("500000", None), (True, None), (None, None)):
+        def handler(request: httpx.Request, given=given) -> httpx.Response:
+            return httpx.Response(200, json={"model": "glm-5.2", "evid_budget": given})
+
+        assert _engine(tmp_path, handler).health()["evid_budget"] == expect, given
 
 
 class FakePanelEngine:
