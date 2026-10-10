@@ -8,6 +8,9 @@ from pathlib import Path
 
 import pytest
 
+# 건너뜀 예산 — 훅은 tests/skip_budget.py 에 있고 여기서 이름으로 들인다(그 파일만 -p 로 따로 시험할 수 있게).
+from tests.skip_budget import pytest_runtest_logreport, pytest_sessionfinish, pytest_terminal_summary  # noqa: F401
+
 # backend/tests/ → backend/ → 리포 루트. 매니페스트·docs 는 리포 루트, app/·fixtures 는 backend/ 기준이다.
 BACKEND_DIR = Path(__file__).resolve().parent.parent
 REPO_ROOT = BACKEND_DIR.parent

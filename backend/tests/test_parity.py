@@ -1,4 +1,4 @@
-# 엔진 파리티(plan §8.3.1) — env HWAX_PORTAL_REPO 와 deliberation.py 의 _CHAIR_ITEMS['risk-review'] 가 있을 때만 PY/JS/JSON 문자열 동일 검사, 아니면 skip
+# 엔진 파리티(plan §8.3.1) — 포털 리포(env HWAX_PORTAL_REPO, 없으면 형제 ../HWAXPortal)가 곁에 있으면 PY/JS/JSON 문자열 동일 검사, 없을 때만 skip
 from __future__ import annotations
 
 import ast
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import BACKEND_DIR
+from tests.conftest import BACKEND_DIR, REPO_ROOT
 
 SEAT_CONTRACT = BACKEND_DIR / "app" / "assets" / "seat-contract.v1.json"
 DOC_TITLE = "리스크 심사 보고서"
@@ -32,27 +32,31 @@ def _dict_value(tree: ast.Module, name: str, key: str) -> str | None:
 
 @pytest.fixture(scope="module")
 def engine_files():
-    portal = os.environ.get("HWAX_PORTAL_REPO")
-    if not portal:
-        pytest.skip("HWAX_PORTAL_REPO 미설정 — P0 엔진 additive 미착수")
-    portal = Path(portal)
+    """포털·엔진 리포의 파리티 대상 파일. 리포가 곁에 없을 때만 건너뛴다.
+
+    형제가 곁에 있는데 파일·상수를 못 찾으면 건너뛰지 않고 실패한다 — 이름이 바뀐 것이고, 건너뛰면 좌석 계약만 고친
+    리스크 리포 커밋이 이 리포의 시험으로는 영영 잡히지 않는다(WP5b 2.6절). 같은 폴백을 `test_wiring_regressions` 가 쓴다.
+    """
+    portal = Path(os.environ.get("HWAX_PORTAL_REPO") or REPO_ROOT.parent / "HWAXPortal")
+    if not portal.is_dir():
+        pytest.skip(f"포털 리포가 곁에 없다(HWAX_PORTAL_REPO 또는 ../HWAXPortal) — {portal}")
     py = portal.parent / "HWAXAgentServer" / "deliberation.py"
     js = portal / "infra" / "pipeline" / "hwax-deliberate.js"
     if not py.is_file() or not js.is_file():
-        pytest.skip(f"엔진 파일 없음({py} · {js}) — P0 엔진 additive 미착수")
+        pytest.fail(f"포털 리포는 곁에 있는데 엔진 파일이 없다({py} · {js}) — 경로가 바뀌었으면 이 시험을 같이 고친다")
     tree = ast.parse(py.read_text(encoding="utf-8"))
     items = _dict_value(tree, "_CHAIR_ITEMS", "risk-review")
     if not items:
-        pytest.skip("deliberation.py 에 _CHAIR_ITEMS['risk-review'] 없음 — P0 엔진 additive 미착수")
+        pytest.fail("deliberation.py 에 _CHAIR_ITEMS['risk-review'] 가 없다 — 이름이 바뀌었으면 이 시험을 같이 고친다")
     return portal, py, js, tree, items
 
 
 def test_chair_parity_script_if_present(engine_files):
-    """포털 scripts/check_chair_parity.py 가 있으면 그것이 정본 검사다(exit 0)."""
+    """포털 scripts/check_chair_parity.py 가 정본 검사다(exit 0). 포털이 곁에 있는데 검사기가 없으면 실패다."""
     portal, py, js, _, _ = engine_files
     script = portal / "scripts" / "check_chair_parity.py"
     if not script.is_file():
-        pytest.skip("scripts/check_chair_parity.py 미작성 — P0 엔진 additive 미착수")
+        pytest.fail(f"포털 리포에 파리티 검사기가 없다 — {script}")
     r = subprocess.run([sys.executable, str(script), "--py", str(py), "--js", str(js), "--contract", str(SEAT_CONTRACT)],
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 0, r.stdout + r.stderr
