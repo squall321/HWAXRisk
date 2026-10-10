@@ -5,7 +5,7 @@ import hashlib
 import math
 import re
 import unicodedata
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Callable, Collection, Iterable, Mapping, Sequence
 
 __all__ = [
     "LEXICON_VERSION",
@@ -145,9 +145,11 @@ INJECTION_LEXICON: tuple[dict, ...] = (
 _INJECTION_COMPILED = tuple((item["id"], re.compile(item["pattern"])) for item in INJECTION_LEXICON)
 
 
-def injection_hit(text: str) -> str | None:
-    """인젝션 어휘에 걸린 첫 항목 id(없으면 None). 위생 통과본을 대상으로 검사한다(§3.4.1)."""
+def injection_hit(text: str, only: Collection[str] | None = None) -> str | None:
+    """인젝션 어휘에 걸린 첫 항목 id(없으면 None). 위생 통과본을 대상으로 검사한다(§3.4.1). `only` 를 주면 그 항목만 본다."""
     for lexicon_id, pattern in _INJECTION_COMPILED:
+        if only is not None and lexicon_id not in only:
+            continue
         if pattern.search(text or ""):
             return lexicon_id
     return None

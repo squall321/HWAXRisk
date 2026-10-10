@@ -1531,36 +1531,51 @@ def _subject_keys(store, snapshot_id: str | None) -> set[str]:
 _EXCERPT_CUT_FMT = " …(발췌 {chars}자 중 {kept}자)"
 
 
-def _quoted_excerpt(text: Any, room: int) -> str:
+def _quoted_excerpt(text: Any, room: int) -> tuple[str, str | None]:
     """앞 패널 LLM 이 쓴 발췌를 «» 안에 싣는다(인젝션 방어 안). 자리(room)를 넘으면 들어가는 만큼 싣고 원문 길이를
-    밝힌다 — 조용히 자르지 않는다(`memo_result` 와 같은 꼴). 원문 길이는 위생과 같은 정규화 뒤의 길이다."""
-    chars = len(render.norm_quote(text))
-    # 위생 상한(memo 400자)은 걸지 않는다 — 자리를 여기서 재고 잘린 길이를 표식으로 밝힌다.
-    quoted = render.sanitize_source_text(text, "memo", on_suspect=_on_suspect, limit=0)
-    inner = quoted[1:-1]
-    if inner.startswith("[suspect_text ") or len(quoted) <= room:
-        return quoted
-    kept = min(len(inner), room - 2 - len(_EXCERPT_CUT_FMT.format(chars=chars, kept=chars)))
-    if kept <= 0:
-        # 표식조차 «» 와 함께 들어가지 않는 자리 — 발췌 없이 표식만 싣는다(그것도 안 들어가면 비운다).
-        mark = _EXCERPT_CUT_FMT.format(chars=chars, kept=0).strip()
-        return mark if len(mark) <= room else ""
-    return render.quote_source(inner[:kept]) + _EXCERPT_CUT_FMT.format(chars=chars, kept=kept)
+    밝힌다 — 조용히 자르지 않는다(`memo_result` 와 같은 꼴). 원문 길이는 위생과 같은 정규화 뒤의 길이다.
+
+    인젝션 검사는 실제로 싣는 부분에만 건다(BQ-3) — 발췌는 앞 패널 좌석의 전 라운드 발언(수천 자)이라, 싣지도 않는 뒤쪽 문장
+    하나(URL·코드펜스)가 줄 전체를 자리표시자로 지웠다. 싣지 않는 부분은 모델에 닿지 않으니 방어가 약해지지 않는다. 제어문자(X10)만
+    원문 전체에서 본다 — 위생이 지워 버리는 표지라 실린 부분에는 보이지 않는다. 반환은 (글, 자리표시자로 바꿨으면 그 어휘 id) —
+    호출자가 meta.shielded 에 남긴다.
+    """
+    raw = _s(text)
+    chars = len(render.norm_quote(raw))
+    # 위생 상한(memo 400자)은 걸지 않는다 — 자리를 여기서 재고 잘린 길이를 표식으로 밝힌다. 막는 판정은 아래에서 실을 부분으로 한다.
+    inner = render.sanitize_source_text(raw, "memo", block=False, limit=0)[1:-1]
+    shown, mark = inner, ""
+    if len(inner) + 2 > room:
+        kept = min(len(inner), room - 2 - len(_EXCERPT_CUT_FMT.format(chars=chars, kept=chars)))
+        if kept <= 0:
+            # 표식조차 «» 와 함께 들어가지 않는 자리 — 발췌 없이 표식만 싣는다(그것도 안 들어가면 비운다).
+            only_mark = _EXCERPT_CUT_FMT.format(chars=chars, kept=0).strip()
+            return (only_mark if len(only_mark) <= room else ""), None
+        shown, mark = inner[:kept], _EXCERPT_CUT_FMT.format(chars=chars, kept=kept)
+    hit = render.injection_hit(shown) or render.injection_hit(raw, only=("X10",))
+    if hit is not None and _suspect_setting():
+        _on_suspect({"sha1": render.source_sha1(raw), "raw": raw, "lexicon_id": hit,
+                     "lexicon_version": render.INJECTION_VERSION})
+        return render.suspect_placeholder(raw), hit
+    return render.quote_source(shown) + mark, None
 
 
-def _seat_line(store, row, excerpt: str, line_max: int = E7_SEAT_LINE) -> str:
-    """좌석 줄 — `narr:<opinion_id>#<finding_id> | <agent_key> | <과제코드>/<target 앞12> | «<발췌>»` ≤ line_max 자."""
+def _seat_line(store, row, excerpt: str, line_max: int = E7_SEAT_LINE) -> tuple[str, str | None]:
+    """좌석 줄 — `narr:<opinion_id>#<finding_id> | <agent_key> | <과제코드>/<target 앞12> | «<발췌>»` ≤ line_max 자.
+    (줄, 발췌를 자리표시자로 바꿨으면 그 어휘 id)."""
     findings = _j(row["raised_finding_ids_json"], [])
     finding_id = str(findings[0]) if isinstance(findings, list) and findings else ""
     project_code = _project_code(store, row["project_id"] if "project_id" in row.keys() else None)
     prefix = (f"narr:{row['opinion_id']}#{finding_id} | {row['agent_key']} | "
               f"{project_code}/{_s(row['target_key'])[:12]} | ")
-    return prefix + _quoted_excerpt(excerpt, max(0, line_max - len(prefix)))
+    quoted, hit = _quoted_excerpt(excerpt, max(0, line_max - len(prefix)))
+    return prefix + quoted, hit
 
 
 def _item_e7(store, ctx, seats: Sequence[Mapping[str, Any]], adh, profile: "BriefProfile | None" = None) -> dict:
     """좌석 기억 — 좌석마다 한 줄(줄 상한은 프로파일 배수로 는다). 항목 상한을 넘는 좌석 줄은 `build_brief` 의 줄 단위
-    절단이 `…(n줄 생략)` 과 meta.clipped 로 밝힌다 — 종전에는 합 1,100자에서 말없이 멈춰 뒤 좌석은 줄 자체가 없었다."""
+    절단이 `…(n줄 생략)` 과 meta.clipped 로 밝힌다 — 종전에는 합 1,100자에서 말없이 멈춰 뒤 좌석은 줄 자체가 없었다.
+    발췌를 인젝션 자리표시자로 바꾼 줄은 `shielded` 로 돌려준다 — `build_brief` 가 meta.shielded 에 싣는다(BQ-3)."""
     profile = profile or PROFILE_LEGACY
     line_max = profile.inner(E7_SEAT_LINE)
     source = _SOURCES["E7"][0]
@@ -1570,15 +1585,17 @@ def _item_e7(store, ctx, seats: Sequence[Mapping[str, Any]], adh, profile: "Brie
     # 좌석 dict 의 키는 `key` 가 정본이다(편성기·seats_json) — 종전에는 `agent_key` 만 읽어 편성기 좌석이 한 번도 실리지
     # 않았다(WP1 R-14). 읽는 곳은 `common.seat_key` 하나다.
     agent_keys = [seat_key(s) for s in seats if _s(s.get("origin")) in ("primary", "counter") and seat_key(s)]
-    lines = [_seat_memory_line(store, agent_key, target_key, lineage, subjects, adh, ctx, line_max)
-             for agent_key in agent_keys]
-    if not lines:
-        lines = ["[착석 좌석 없음]"]
-    return {"key": "E7", "args": ",".join(agent_keys), "result": _body(source, lines)}
+    memory = [_seat_memory_line(store, agent_key, target_key, lineage, subjects, adh, ctx, line_max)
+              for agent_key in agent_keys]
+    lines = [line for line, _hit in memory] or ["[착석 좌석 없음]"]
+    # 줄 번호는 result 안의 자리다 — 1번은 프레이밍 줄이라 좌석 줄은 2번부터다(`_shield_entry` 와 같은 셈).
+    shielded = [{"item": "E7", "line_no": index + 2, "ids": [], "tokens": [], "suspect": hit}
+                for index, (_line, hit) in enumerate(memory) if hit]
+    return {"key": "E7", "args": ",".join(agent_keys), "result": _body(source, lines), "shielded": shielded}
 
 
 def _seat_memory_line(store, agent_key: str, target_key: str, lineage: set[str],
-                      subjects: set[str], adh, ctx, line_max: int = E7_SEAT_LINE) -> str:
+                      subjects: set[str], adh, ctx, line_max: int = E7_SEAT_LINE) -> tuple[str, str | None]:
     rows = store.query(
         "SELECT o.opinion_id, o.agent_key, o.target_key, o.raised_finding_ids_json, o.excerpt_for_rag, "
         "o.created_at, t.project_id FROM rr_seat_opinions AS o "
@@ -1597,10 +1614,10 @@ def _seat_memory_line(store, agent_key: str, target_key: str, lineage: set[str],
             return (in_lineage, overlap, -(row["created_at"] or 0), _s(row["opinion_id"]))
         best = sorted(rows, key=rank)[0]
         return _seat_line(store, best, _s(best["excerpt_for_rag"]), line_max)
-    hit = _adh_seat_memory(adh, agent_key, ctx, line_max)
-    if hit is not None:
-        return hit
-    return f"[{agent_key}: 이전 발언 없음]"
+    recalled = _adh_seat_memory(adh, agent_key, ctx, line_max)
+    if recalled is not None:
+        return recalled
+    return f"[{agent_key}: 이전 발언 없음]", None
 
 
 def _finding_subjects(store, finding_ids: Any) -> set[str]:
@@ -1613,8 +1630,9 @@ def _finding_subjects(store, finding_ids: Any) -> set[str]:
     return {_s(r["subject_key"]) for r in rows if r["subject_key"]}
 
 
-def _adh_seat_memory(adh, agent_key: str, ctx, line_max: int = E7_SEAT_LINE) -> str | None:
-    """2차 경로 — AIDataHub 의사 에이전트 `risk-review-memory` 회수(plan §5.6.3 2). 미가용이면 None."""
+def _adh_seat_memory(adh, agent_key: str, ctx, line_max: int = E7_SEAT_LINE) -> tuple[str, str | None] | None:
+    """2차 경로 — AIDataHub 의사 에이전트 `risk-review-memory` 회수(plan §5.6.3 2). 미가용이면 None.
+    (줄, 발췌를 자리표시자로 바꿨으면 그 어휘 id)."""
     if adh is None or not getattr(adh, "available", False):
         return None
     summary = ""
@@ -1642,7 +1660,8 @@ def _adh_seat_memory(adh, agent_key: str, ctx, line_max: int = E7_SEAT_LINE) -> 
         return None
     prefix = f"narr:{opinion_id}#{finding_id} | {agent_key} | adh/{_s(hit.get('record_id'))[:12]} | "
     body = _s(hit.get("summary") or hit.get("text") or hit.get("title"))
-    return prefix + _quoted_excerpt(body, max(0, line_max - len(prefix)))
+    quoted, suspect = _quoted_excerpt(body, max(0, line_max - len(prefix)))
+    return prefix + quoted, suspect
 
 
 # ---------------------------------------------------------------- E8 변경-델타 선례
@@ -1957,8 +1976,9 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
         memo = _item_memo(store, target_key, user_memo, cap=profile.cap("M"))
         if memo is not None:
             raw.append(memo)
-        # 방패는 줄 단위 절단보다 먼저다 — 글자를 늘리므로 절단 뒤에 걸면 항목이 CAP 을 넘는다.
-        shielded: list[dict] = []
+        # 방패는 줄 단위 절단보다 먼저다 — 글자를 늘리므로 절단 뒤에 걸면 항목이 CAP 을 넘는다. 좌석 기억(E7)은 발췌를 조립하며
+        # 자리표시자로 바꾼 줄을 스스로 돌려준다(BQ-3).
+        shielded: list[dict] = [record for entry in raw for record in entry.pop("shielded", ())]
         for entry in raw:
             if _SOURCES[entry["key"]][0] in _QUOTED_SOURCES:
                 continue

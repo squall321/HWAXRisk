@@ -1945,6 +1945,34 @@ def test_e7_excerpt_is_quoted_and_says_when_cut(risk_store, monkeypatch):
     assert line.endswith("| «" + ("간극 " * 300).strip() + "»"), line[-40:]
 
 
+def test_e7_checks_only_what_it_carries_and_records_a_placeholder(risk_store):
+    """좌석 기억 발췌는 앞 패널 좌석의 전 라운드 발언이다(수천 자). 인젝션 검사는 실제로 싣는 부분에만 건다 — 싣지도 않는 뒤쪽
+    문장 하나(URL·코드펜스)가 그 좌석 기억 줄 전체를 자리표시자로 지우지 않는다(BQ-3). 제어문자(X10)는 원문 전체에서 본다 — 위생이
+    지워 버리는 표지다. 실은 부분이 걸려 자리표시자로 바꿨으면 meta.shielded 에 남긴다(러너가 패널 품질 brief_shielded 로 옮긴다) —
+    종전에는 E1 만 기록해 좌석 기억 줄이 아무 흔적 없이 비었다."""
+    target_key = seed_diff_target(risk_store)
+    first = "1라운드 — 하우징 계면 간극이 0.42 mm 로 좁아졌다. " * 40
+    tail = "\n3라운드 — 참고 규격은 https://example.com/spec 이다."
+    risk_store.execute("UPDATE rr_seat_opinions SET excerpt_for_rag = ? WHERE opinion_id = 'op0'", (first + tail,))
+
+    narrow = brief.build_brief(risk_store, target_key)                       # 바닥 — 좌석 줄 220자
+    line = _item(narrow, "E7").split("\n")[1]
+    assert "[suspect_text " not in line and "…(발췌 " in line, line
+    assert [s for s in narrow["meta"]["shielded"] if s["item"] == "E7"] == []
+    assert risk_store.query("SELECT id FROM rr_curation_queue WHERE kind = 'suspect_text'") == []
+
+    wide = brief.build_brief(risk_store, target_key, profile=brief.web_profile(500_000))   # 그 문장까지 실린다
+    line = _item(wide, "E7").split("\n")[1]
+    assert line.endswith(render.suspect_placeholder(first + tail)), line[-60:]
+    assert [s for s in wide["meta"]["shielded"] if s["item"] == "E7"] == [
+        {"item": "E7", "line_no": 2, "ids": [], "tokens": [], "suspect": "X08"}]
+
+    risk_store.execute("UPDATE rr_seat_opinions SET excerpt_for_rag = ? WHERE opinion_id = 'op0'", (first + "\x07",))
+    control = brief.build_brief(risk_store, target_key)
+    assert render.suspect_placeholder(first + "\x07") in _item(control, "E7").split("\n")[1]
+    assert [s["suspect"] for s in control["meta"]["shielded"] if s["item"] == "E7"] == ["X10"]
+
+
 def test_e9_warnings_rank_by_severity_vocabulary(risk_store):
     """IR 경고의 어휘는 WARNING·INFO 다 — 순위표가 그 어휘를 읽어 WARNING 이 INFO 보다 먼저 선다(R-17)."""
     from tests import factories
