@@ -1,13 +1,14 @@
-# hwax-risk MCP 서버 — 도구 14종(발견 7 + 원장 7)은 REST 와 같은 함수를 부르는 접점이다(§6.11, LLM 을 부르지 않는다)
+# hwax-risk MCP 서버 — 도구 25종(발견 7 + 원장 7 + Claude 입구 11)은 REST 와 같은 함수를 부르는 접점이다(§6.11, LLM 을 부르지 않는다)
 from __future__ import annotations
 
 import logging
 from typing import Any
 
+import anyio
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from app import routes
+from app import entry, routes
 from app.errors import AppError
 
 log = logging.getLogger("hwax_risk.mcp")
@@ -22,7 +23,13 @@ _INSTRUCTIONS = """HWAX Risk Review — 설계 리스크 심사 앱의 MCP 서�
       risk_claims_for_ref · risk_get_coverage(진행판·좌석) · risk_list_panels · risk_get_panel_transcript
 어휘: risk_taxonomy — severity·judgement·direction 의 허용값(추측해서 넣으면 422 다)
 심사: risk_get_brief(열쇠는 brief_token, tier 'A' 는 웹 전용) · risk_submit_panel_result(engine='mcp' 는
-      evidence_only 등급) · risk_add_finding(actor 는 미검증 표기)"""
+      evidence_only 등급) · risk_add_finding(actor 는 미검증 표기)
+
+입구(Claude 에서 과제를 올리고 심사를 시작한다 — 심사는 앱 러너가 돌리고 결과는 웹에 그대로 보인다): risk_next_step 부터.
+어디까지 왔고 무엇이 막혔고(고칠 곳 포함) 다음에 무엇을 부르나를 한 번에 준다. 쓰기는 risk_create_project · risk_add_source ·
+risk_capture_snapshot · risk_ack_gate · risk_decide_sameas · risk_create_diff · risk_open_target · risk_start_job ·
+risk_job_action 이고, 무엇을 어디에 쓸지 사용자에게 확인한 뒤 부른다. 같은 호출을 두 번 해도 같은 행이다. 신원은 도달한
+자격이 정한다(자칭 actor 없음). PAT 는 인자로 받지 않는다 — 러너 자격은 웹 설정 화면에서 등록한다."""
 
 # loopback 바인드 + Caddy 경계 전제로 Host 검증(DNS rebinding 보호)은 끈다(LaminateAnalyzerMCP 선례).
 # streamable_http_path 는 기본 '/mcp' — main.py 가 streamable_http_app() 의 Route('/mcp') 를 메인 라우터에 이식해
@@ -49,22 +56,33 @@ def _owner(actor: str | None) -> str:
     return str(actor or "").strip().lower()
 
 
+def _request() -> Any:
+    """이번 /mcp 요청(starlette Request). 요청 밖(직접 함수 호출·테스트)이면 None 이다."""
+    try:
+        return mcp.get_context().request_context.request
+    except (AttributeError, LookupError, ValueError):
+        return None
+
+
 def _caller() -> dict:
     """이번 /mcp 요청의 caller(§8.2.5 ①) — 도달한 Authorization 만 신원이고 자칭 `actor` 는 신원이 아니다."""
-    try:
-        request = mcp.get_context().request_context.request
-    except (AttributeError, LookupError, ValueError):
-        # 요청 밖(직접 함수 호출·테스트)에서는 열지 않는다 — service 는 조직 공개 과제만 본다.
-        request = None
-    return routes.mcp_caller(request)
+    # 요청 밖에서는 열지 않는다 — service 는 조직 공개 과제만 본다.
+    return routes.mcp_caller(_request())
 
 
 def _guarded(fn, *args: Any, **kwargs: Any) -> dict:
-    """REST 와 같은 함수를 부르고 AppError 는 dict 오류로 눕힌다(MCP 도구는 예외 대신 JSON 을 돌려준다)."""
+    """REST 와 같은 함수를 부르고 AppError 는 dict 오류로 눕힌다(MCP 도구는 예외 대신 JSON 을 돌려준다).
+
+    `detail` 은 REST 본문이 최상위에 싣는 기계 판독 칸이다(409 gate_blocked 의 {gates, reason} · model_too_large 의
+    크기 · gates_hash_stale 의 현재 해시 · 입구의 고칠 곳 `fix`). 종전에는 버려 MCP 호출자가 '왜' 를 몰랐다.
+    """
     try:
         return fn(*args, **kwargs)
     except AppError as exc:
-        return {"error": exc.code, "message": exc.message}
+        out = {"error": exc.code, "message": exc.message}
+        if exc.detail:
+            out["detail"] = exc.detail
+        return out
     except Exception:  # noqa: BLE001 — 게이트웨이 세션을 끊지 않는다.
         # 상세(SQL 문·경로·다른 사용자 키)는 로그에만 남긴다 — 응답은 인증 경계 밖으로 나간다.
         log.exception("MCP 도구 실패: %s", getattr(fn, "__name__", fn))
@@ -78,6 +96,22 @@ def _scoped(kind: str, key: str, fn, *args: Any, **kwargs: Any) -> dict:
         return fn(*args, owner_sub=owner_sub, **kwargs)
 
     return _guarded(call)
+
+
+async def _entry(fn, **kwargs: Any) -> dict:
+    """입구 11종 공통 — 이 요청의 신원으로 `entry` 본체를 부르되, 본체는 스레드에서 돈다.
+
+    FastMCP 는 동기 도구를 이벤트 루프 위에서 그대로 부른다(mcp 1.29 func_metadata). 캡처(수십 초~수 분)·명단 조회
+    (최대 540초)가 루프를 붙들면 그동안 /api/health·REST·다른 MCP 호출이 멎고, HEAXHub 의 2초 헬스 검사가 앱을 다시
+    띄운다(작업 지시서 A-13). 요청 객체만 루프에서 집고 신원 해석부터 스레드에서 한다.
+    """
+    request = _request()
+
+    def call() -> dict:
+        return fn(routes.mcp_identity(request), **kwargs)
+
+    call.__name__ = getattr(fn, "__name__", "entry")
+    return await anyio.to_thread.run_sync(lambda: _guarded(call))
 
 
 @mcp.tool()
@@ -231,3 +265,87 @@ def risk_add_finding(
     ident = routes.identity.Identity(email=email, display_name=email, role="user", organization=None,
                                      anonymous=not email, source="mcp")
     return _guarded(routes.create_human_finding, target_key, body, ident=ident)
+
+
+# ================================================================ Claude 입구(PLAN M1 · context-notes D-23)
+# 실사용 팀은 Claude 에서 MCP 로 심의를 돌린다. 위 14종은 읽기와 결과 제출뿐이라 Claude 에서는 과제를 올리거나 심사를 시작할
+# 수 없었고, 그래서 Claude 로 돈 심사가 원장에 한 건도 없었다. 아래 11종은 웹 화면이 부르는 REST 라우트를 같은 신원으로
+# 감싼다(남의 과제는 라우트의 소유권 검사가 막는다). 심사는 앱의 러너가 돌리고 Claude 는 시작하고 지켜본다.
+# 신원은 도달한 자격(게이트웨이 위임 단언·개인 Bearer)이고 자칭 actor 는 없다. 비밀(PAT)은 인자로 받지 않는다.
+# 같은 호출을 두 번 해도 같은 행이다 — 게이트웨이의 사람별 길은 실패하면 한 번 더 부른다.
+@mcp.tool()
+async def risk_next_step(project_id: str | None = None) -> dict:
+    """Claude 입구의 길잡이(읽기 전용) — 과제가 어느 단계(소스·캡처·리비전·same-as·비교·심사 대상·명단·잡·결과)이고 무엇이 막혔는지(고칠 곳 fix)와 다음에 부를 도구·인자(next)를 한 번에 준다, project_id 없이 부르면 내 과제 목록이고 acting_as 는 이 호출이 누구로 해석됐는지다."""
+    return await _entry(entry.next_step, project_id=project_id)
+
+
+@mcp.tool()
+async def risk_create_project(code: str, name: str, classification: str, stage: str | None = None,
+                              predecessor_project_id: str | None = None, product_code: str | None = None,
+                              adh_scope: dict | None = None) -> dict:
+    """심사 과제 만들기 — 쓰기: 사용자에게 과제 코드·이름·등급(classification=internal|confidential, 반출 경계)을 확인한 뒤 부른다, 웹 POST /api/projects 와 같은 함수이고 호출자 소유라 그 사람의 웹 과제 목록에 그대로 뜬다, 같은 code 를 다시 보내면 기존 과제를 돌려준다(created:false), 새 리비전이 소스 앱의 다른 프로젝트면 predecessor_project_id 로 앞 과제를 잇는다."""
+    return await _entry(entry.create_project, code=code, name=name, classification=classification, stage=stage,
+                        predecessor_project_id=predecessor_project_id, product_code=product_code,
+                        adh_scope=adh_scope)
+
+
+@mcp.tool()
+async def risk_add_source(project_id: str, kind: str, ref: dict, app_key: str | None = None,
+                          bridge_declared: bool = False) -> dict:
+    """과제에 소스 연결 — 쓰기: 어느 과제에 어떤 소스를 붙일지 사용자에게 확인한 뒤 부른다, kind=mcad ref={stepforge_project_id, detect_job_id?}(StepForge) · dyna ref={session_id, file_id}(DynaForge, 본인 세션) · dyna_result ref={report_ids[]}, 같은 소스는 기존 행을 돌려주고 같은 kind 의 다른 소스는 거절한다(캡처는 종류마다 하나만 읽고 소스는 지울 수 없다)."""
+    return await _entry(entry.add_source, project_id=project_id, kind=kind, ref=ref, app_key=app_key,
+                        bridge_declared=bridge_declared)
+
+
+@mcp.tool()
+async def risk_capture_snapshot(project_id: str, label: str | None = None, kinds: list[str] | None = None,
+                                report_ids: list[int] | None = None, detect_result_file_id: str | None = None,
+                                allow_large: bool = False) -> dict:
+    """소스를 읽어 스냅샷 동결 — 쓰기: 어느 과제를 캡처할지 사용자에게 확인한 뒤 부른다, 수십 초~수 분 걸리고 같은 내용이면 기존 스냅샷을 돌려준다(reused), 게이트 결과(blocked·gates_summary)를 함께 준다, 게이트웨이 시간 한도에 끊기면 다시 부르지 말고 risk_next_step 으로 확인한다."""
+    return await _entry(entry.capture_snapshot, project_id=project_id, label=label, kinds=kinds,
+                        report_ids=report_ids, detect_result_file_id=detect_result_file_id, allow_large=allow_large)
+
+
+@mcp.tool()
+async def risk_ack_gate(snapshot_id: str, gate: str, reason: str, gates_hash: str | None = None) -> dict:
+    """실패한 비차단 게이트(G1~G5·G7)에 사유 남기기 — 쓰기: 사유를 사용자에게 확인한 뒤 부른다, 진행을 막지 않는 표기라 판정 pass 는 그대로이고 G6(단위·크기)은 차단이라 ack 할 수 없다(소스를 고쳐 재캡처), 같은 ack 는 한 행이다."""
+    return await _entry(entry.ack_gate, snapshot_id=snapshot_id, gate=gate, reason=reason, gates_hash=gates_hash)
+
+
+@mcp.tool()
+async def risk_get_sameas(base_snapshot_id: str, target_snapshot_id: str) -> dict:
+    """두 스냅샷 사이 같은 부품 대응표(읽기 전용) — 정하지 못한(pending)·충돌·퍼지 매칭 행과 a_stable·b_stable 을 준다, risk_decide_sameas 전에 읽어 사용자에게 보인다."""
+    return await _entry(entry.get_sameas, base_snapshot_id=base_snapshot_id, target_snapshot_id=target_snapshot_id)
+
+
+@mcp.tool()
+async def risk_decide_sameas(base_snapshot_id: str, target_snapshot_id: str, decisions: list[dict]) -> dict:
+    """same-as 확정 — 쓰기: 어느 대응을 confirm|reject 할지 사용자에게 확인한 뒤 부른다, decisions=[{a_stable, b_stable, decision}] 이고 열쇠(scope·pair_key)는 도구가 채운다, 변경 비교를 만들기 전에 해야 그 비교에 반영된다, 같은 결정은 다시 보내도 한 행이다."""
+    return await _entry(entry.decide_sameas, base_snapshot_id=base_snapshot_id,
+                        target_snapshot_id=target_snapshot_id, decisions=decisions)
+
+
+@mcp.tool()
+async def risk_create_diff(base_snapshot_id: str, target_snapshot_id: str) -> dict:
+    """두 스냅샷의 변경 비교 만들기 — 쓰기: 어느 두 스냅샷(base=이전 리비전·target=새 리비전)을 비교할지 사용자에게 확인한 뒤 부른다, 같은 쌍이면 저장된 비교를 돌려주고(created:false) G6 으로 막힌 스냅샷이면 gate_blocked 다."""
+    return await _entry(entry.create_diff, base_snapshot_id=base_snapshot_id, target_snapshot_id=target_snapshot_id)
+
+
+@mcp.tool()
+async def risk_open_target(kind: str, ref_id: str, consent: bool = False) -> dict:
+    """심사 대상 열기 — 쓰기: 무엇을 심사할지 사용자에게 확인한 뒤 부른다(동의를 받아 consent=true), kind=diff(변경 심사, ref_id=diff_id)|snap(현황 심사, ref_id=snapshot_id), 전문가 명단을 고정하고 Tier 별 패널 수를 준다, 이미 연 내 대상이면 그것을 돌려주고 명단이 비었으면 그 자리에서 다시 받는다."""
+    return await _entry(entry.open_target, kind=kind, ref_id=ref_id, consent=consent)
+
+
+@mcp.tool()
+async def risk_start_job(target_key: str, tier: str, consent: bool = False, modifiers: list[str] | None = None,
+                         user_memo: str | None = None, concurrency: int = 1) -> dict:
+    """심사 잡 시작 — 쓰기: Tier 와 비용(패널 수·LLM 호출 추정)을 사용자에게 확인한 뒤 부른다(Tier C 는 consent=true), 심사는 앱 러너가 돌리고 결과는 웹에 그대로 보인다, Tier 는 누적이다(A 도메인 대표 → B → C 전원), 같은 대상·같은 Tier 의 살아 있는 잡이 있으면 그것을 돌려주고, 러너 자격이 없으면 웹 설정 화면에서 등록하라는 fix 로 답한다."""
+    return await _entry(entry.start_job, target_key=target_key, tier=tier, consent=consent, modifiers=modifiers,
+                        user_memo=user_memo, concurrency=concurrency)
+
+
+@mcp.tool()
+async def risk_job_action(job_id: str, action: str) -> dict:
+    """심사 잡 일시정지·재개·취소(action=pause|resume|cancel) — 쓰기: 사용자에게 확인한 뒤 부른다(취소는 되돌릴 수 없다), 이미 그 상태면 그대로 돌려주고(changed:false), 앱 재기동으로 멈춘 잡은 resume 해야 이어 돈다."""
+    return await _entry(entry.job_action, job_id=job_id, action=action)

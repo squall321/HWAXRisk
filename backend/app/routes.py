@@ -341,17 +341,23 @@ def _panel_row(panel_id: str, owner_sub: str | None) -> dict:
 
 
 # ================================================================ MCP 읽기 범위(plan §5.1 원칙 9 · §8.2.5)
-# 읽기 4종의 범위는 자칭 `actor` 가 아니라 /mcp 에 실제로 도달한 Authorization 이 정한다. 게이트웨이는 호출자
-# 토큰을 downstream 으로 넘기지 않고 자기 백엔드 헤더로 갈아 끼우므로 그 경로의 caller 는 언제나 service 이고,
-# 사람이 개인 heax_pat 로 앱 MCP 를 직접 등록해 부른 경우에만 그 사람의 범위가 열린다. 해석 실패는 service 다(닫힘).
+# 읽기 4종의 범위는 자칭 `actor` 가 아니라 /mcp 에 실제로 도달한 자격이 정한다. 게이트웨이는 사람별 위임(per_user_sso)
+# 으로 그 사람의 서명 단언(X-Heax-Sso-Assertion)을 실어 보내고, 사람이 개인 heax_pat 로 앱 MCP 를 직접 등록해 부르면
+# Bearer 가 그 사람이다. 둘 다 없으면 service 다. 해석 실패도 service 다(닫힘).
 SERVICE_CALLER: dict[str, Any] = {"kind": "service", "email": None}
+
+
+def mcp_identity(request: Any) -> identity.Identity:
+    """이번 /mcp 요청의 신원 — 입구 쓰기 도구가 REST 와 같은 라우트 함수에 그대로 넘긴다(같은 소유권 검사를 지난다).
+
+    요청 밖(직접 함수 호출)·토큰 없음·서명 불일치·401 은 익명이고, 라우트의 `_require_user` 가 401 로 막는다.
+    """
+    return identity.ANONYMOUS if request is None else identity.current(request)
 
 
 def mcp_caller(request: Any) -> dict:
     """이번 /mcp 요청의 caller — 신원이 해석되면 `user`, 토큰 없음·401·불통은 `service`."""
-    if request is None:
-        return dict(SERVICE_CALLER)
-    ident = identity.current(request)
+    ident = mcp_identity(request)
     if ident.anonymous or not ident.email:
         return dict(SERVICE_CALLER)
     return {"kind": "user", "email": ident.email}

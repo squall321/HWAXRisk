@@ -26,9 +26,23 @@ TOOL_NAMES = [
     "risk_get_brief",
     "risk_submit_panel_result",
     "risk_add_finding",
+    # Claude 입구 11종(2026-10-10, PLAN M1 'Claude 입구'·D-23) — 길잡이가 먼저, 그 뒤가 웹 화면의 순서다.
+    "risk_next_step",
+    "risk_create_project",
+    "risk_add_source",
+    "risk_capture_snapshot",
+    "risk_ack_gate",
+    "risk_get_sameas",
+    "risk_decide_sameas",
+    "risk_create_diff",
+    "risk_open_target",
+    "risk_start_job",
+    "risk_job_action",
 ]
+ENTRY_TOOLS = TOOL_NAMES[TOOL_NAMES.index("risk_next_step"):]
 # 도구별 대표 인자와, 빈 원장에서 기대하는 오류 코드(없으면 None = 정상 응답).
 # 읽기 4종은 범위 밖 id 의 존재를 숨겨 not_visible 이고, 브리프는 caller 가 아니라 brief_token 대조다(§8.2.5).
+# 입구 11종은 요청 밖(신원 없음)에서 전부 unauthorized 다 — 인자가 틀렸든 맞든 신원 검사가 먼저다.
 CALLS = [
     # 발견·조회 — 빈 원장에서 목록은 정상 응답(빈 배열), 단일 id 는 존재를 숨긴다.
     ("risk_list_projects", {}, None),
@@ -48,8 +62,32 @@ CALLS = [
     ("risk_add_finding", {"target_key": "diff:d1", "claim": "간극이 좁다",
                           "cites": [{"ref": "p:0123456789ab", "quote": "«PLATE_1»"}],
                           "actor": "someone@example.com"}, "E404"),
+    ("risk_next_step", {}, "unauthorized"),
+    ("risk_next_step", {"project_id": "p1"}, "unauthorized"),
+    ("risk_create_project", {"code": "PRJ-1", "name": "과제", "classification": "internal"}, "unauthorized"),
+    ("risk_add_source", {"project_id": "p1", "kind": "mcad", "ref": {"stepforge_project_id": "sf1"}},
+     "unauthorized"),
+    ("risk_capture_snapshot", {"project_id": "p1"}, "unauthorized"),
+    ("risk_ack_gate", {"snapshot_id": "s1", "gate": "G3", "reason": "확인함"}, "unauthorized"),
+    ("risk_get_sameas", {"base_snapshot_id": "s0", "target_snapshot_id": "s1"}, "unauthorized"),
+    ("risk_decide_sameas", {"base_snapshot_id": "s0", "target_snapshot_id": "s1",
+                            "decisions": [{"a_stable": "a", "b_stable": "b", "decision": "confirm"}]},
+     "unauthorized"),
+    ("risk_create_diff", {"base_snapshot_id": "s0", "target_snapshot_id": "s1"}, "unauthorized"),
+    ("risk_open_target", {"kind": "diff", "ref_id": "d1", "consent": True}, "unauthorized"),
+    ("risk_start_job", {"target_key": "diff:d1", "tier": "B"}, "unauthorized"),
+    ("risk_job_action", {"job_id": "j1", "action": "pause"}, "unauthorized"),
 ]
 _HANGUL = re.compile(r"[가-힣]")
+# 인자 이름에 비밀이 오면 게이트웨이·포털 절차·클라이언트 대화 기록에 값이 남는다(작업 지시서 A-11) — 포털 절차의
+# SECRET_KEY 와 같은 낱말 목록이다. 기존 risk_get_brief 의 brief_token 은 일회성 열쇠라 입구 도구에만 건다.
+_SECRET_ARG = re.compile(r"token|secret|password|authorization|api_key|cookie|pat", re.I)
+
+
+def _direct(name: str, args: dict) -> dict:
+    """도구 함수를 직접 부른다 — 입구 도구는 async(본문을 스레드로 넘긴다)라 코루틴을 끝까지 돌린다."""
+    out = getattr(srv, name)(**args)
+    return asyncio.run(out) if asyncio.iscoroutine(out) else out
 
 
 def _call_via_mcp(name: str, args: dict | None = None) -> dict:
@@ -109,10 +147,48 @@ def test_signatures_follow_plan():
         "panel_id", "engine", "decision_text", "turns", "actor"}
 
 
+def test_entry_tool_signatures():
+    """입구 11종 — 신원은 도달한 자격이 정하므로 actor 가 없고, 비밀(PAT·토큰)을 인자로 받지 않는다."""
+    tools = {t.name: t for t in asyncio.run(srv.mcp.list_tools())}
+    props = lambda n: set(tools[n].inputSchema["properties"])  # noqa: E731
+    required = lambda n: set(tools[n].inputSchema.get("required") or [])  # noqa: E731
+    for name in ENTRY_TOOLS:
+        assert "actor" not in props(name), name
+        assert not [p for p in props(name) if _SECRET_ARG.search(p)], (name, props(name))
+    assert props("risk_next_step") == {"project_id"} and required("risk_next_step") == set()
+    assert props("risk_create_project") == {"code", "name", "classification", "stage", "predecessor_project_id",
+                                            "product_code", "adh_scope"}
+    # 등급은 반출 경계라 사람이 고른다 — 스키마가 필수로 못박아 Claude 가 빼먹지 못한다.
+    assert required("risk_create_project") == {"code", "name", "classification"}
+    assert props("risk_add_source") == {"project_id", "kind", "ref", "app_key", "bridge_declared"}
+    assert required("risk_add_source") == {"project_id", "kind", "ref"}
+    assert props("risk_capture_snapshot") == {"project_id", "label", "kinds", "report_ids",
+                                              "detect_result_file_id", "allow_large"}
+    assert props("risk_ack_gate") == {"snapshot_id", "gate", "reason", "gates_hash"}
+    assert props("risk_get_sameas") == {"base_snapshot_id", "target_snapshot_id"}
+    assert props("risk_decide_sameas") == {"base_snapshot_id", "target_snapshot_id", "decisions"}
+    assert props("risk_create_diff") == {"base_snapshot_id", "target_snapshot_id"}
+    assert props("risk_open_target") == {"kind", "ref_id", "consent"}
+    assert props("risk_start_job") == {"target_key", "tier", "consent", "modifiers", "user_memo", "concurrency"}
+    assert props("risk_job_action") == {"job_id", "action"}
+
+
+def test_write_tool_descriptions_ask_for_confirmation_first():
+    """쓰기 도구는 설명 앞머리(게이트웨이 검색이 보이는 220자) 안에 '사용자 확인 뒤 부른다' 를 싣는다(허브 규칙 5)."""
+    tools = {t.name: t for t in asyncio.run(srv.mcp.list_tools())}
+    readers = {"risk_next_step", "risk_get_sameas"}
+    for name in ENTRY_TOOLS:
+        head = tools[name].description.strip()[:220]
+        if name in readers:
+            assert "읽기 전용" in head, name
+        else:
+            assert "사용자에게" in head and "확인한 뒤 부른다" in head, (name, head)
+
+
 @pytest.mark.parametrize("name,args,error_code", CALLS, ids=[c[0] for c in CALLS])
 def test_each_tool_answers_with_json_not_exception(name, args, error_code):
     """빈 원장에서도 도구는 예외를 올리지 않고 dict 를 돌려주며, MCP 경유 호출과 직접 호출이 같다."""
-    direct = getattr(srv, name)(**args)
+    direct = _direct(name, args)
     assert isinstance(direct, dict)
     assert direct.get("error") == error_code
     assert _call_via_mcp(name, args) == direct
