@@ -704,6 +704,36 @@ def fail_panel_seats(store: Any, panel_id: str, *, reason: str = "engine_fail", 
     return {"seats": outcome}
 
 
+def reclaim_panel_seats(store: Any, panel_id: str) -> dict:
+    """error 로 닫힌 패널의 좌석을 그 패널로 되찾는다(running) — 전원이 pending·panel_id NULL 일 때만(WP1 R-5).
+
+    반환 {reclaimed: [키…], moved: [{agent_key, status, panel_id}…]}. moved 가 있으면 아무것도 하지 않고 reclaimed 는
+    빈 목록이다 — 일부만 되찾아 저장하면 다른 패널로 간 좌석의 의견이 이 패널 이름으로 들어가, 그 좌석이 새 패널에서
+    끝낼 때 같은 회차에 걸린다. 차감은 되돌리지 않는다(retry 그대로).
+    """
+    panel, seats = _panel_seat_keys(store, panel_id)
+    now = now_epoch()
+    moved: list[dict] = []
+    with store.tx() as conn:
+        for seat in seats:
+            row = conn.execute(
+                "SELECT status, panel_id FROM rr_coverage WHERE target_key = ? AND agent_key = ?",
+                (panel["target_key"], seat["key"]),
+            ).fetchone()
+            if row is None or row["status"] != "pending" or row["panel_id"] is not None:
+                moved.append({"agent_key": seat["key"], "status": row["status"] if row else None,
+                              "panel_id": row["panel_id"] if row else None})
+        if moved:
+            return {"reclaimed": [], "moved": moved}
+        for seat in seats:
+            conn.execute(
+                "UPDATE rr_coverage SET status = 'running', panel_id = ?, origin = ?, started_at = ?, updated_at = ?"
+                " WHERE target_key = ? AND agent_key = ? AND status = 'pending'",
+                (panel_id, seat.get("origin") or "primary", now, now, panel["target_key"], seat["key"]),
+            )
+    return {"reclaimed": [seat["key"] for seat in seats], "moved": []}
+
+
 def skip_seat(store: Any, target_key: str, agent_key: str, reason: str, *, decided_by: str | None = None) -> dict:
     """사용자 조작 — 비종결 좌석을 skipped(reason 필수)로 닫는다.
 

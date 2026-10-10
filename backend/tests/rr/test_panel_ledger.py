@@ -254,3 +254,239 @@ def test_a_passing_brief_failure_retries_and_pauses_on_the_third(ledger, monkeyp
     monkeypatch.undo()                                                     # 장애가 풀렸다 — 재개하면 이어 돈다
     runner.resume_job(ledger.store, job_id, by=OWNER)
     assert _run(ledger, engine)["status"] == "done"
+
+
+# ---------------------------------------------------------------- S2 — 결과 선저장 · persist_error · 다시 저장 · 재기동 복구(WP1 R-2 · R-5 · P-05 · P-18)
+def _panel(store, panel_id: str) -> dict:
+    return dict(store.query_one(
+        "SELECT status, error, decision_text, conv_id, report_id, result_gz, result_hash, quality_json"
+        " FROM rr_panels WHERE id = ?", (panel_id,)))
+
+
+def _seats_of(store, panel_id: str) -> list[str]:
+    return [s["key"] for s in json.loads(store.query_one(
+        "SELECT seats_json FROM rr_panels WHERE id = ?", (panel_id,))["seats_json"])]
+
+
+def _seat_rows(store, target_key: str, keys) -> dict[str, tuple]:
+    return {k: (r["status"], r["retry"], r["panel_id"]) for k in keys for r in [store.query_one(
+        "SELECT status, retry, panel_id FROM rr_coverage WHERE target_key = ? AND agent_key = ?", (target_key, k))]}
+
+
+@pytest.fixture
+def merge_breaks(monkeypatch):
+    """등록부 병합이 터진다(디스크·잠금 같은 저장 단계의 실패 자리) — 되돌리면 낫는다."""
+    from app import registry
+
+    real = registry.merge_panel
+    state = {"broken": True}
+
+    def merge_panel(store, panel_id):
+        if state["broken"]:
+            raise RuntimeError("디스크가 찼다")
+        return real(store, panel_id)
+
+    monkeypatch.setattr(registry, "merge_panel", merge_panel)
+    return state
+
+
+def test_a_save_that_fails_closes_the_panel_and_keeps_the_engine_result(ledger, merge_breaks):
+    """저장이 터져도 패널은 running 에 굳지 않는다 — 엔진 결과는 패널에 먼저 저장되고, 좌석은 깎이지 않고, 잡은 멈춘다."""
+    job_id = _job(ledger)
+    out = _run(ledger, LedgerEngine())
+    assert out["status"] == "error" and out["error"].startswith("persist_error: RuntimeError: 디스크가 찼다"), out
+    panel = _panel(ledger.store, out["panel_id"])
+    assert panel["status"] == "error" and panel["result_gz"] is not None and len(panel["result_hash"]) == 12
+    assert panel["decision_text"] == DECISION and panel["conv_id"] == "conv-1" and panel["report_id"] == 1
+    keys = _seats_of(ledger.store, out["panel_id"])
+    assert set(_seat_rows(ledger.store, ledger.target_key, keys).values()) == {("pending", 0, None)}
+    # 반쪽 저장이 없다 — 의견·원자는 한 트랜잭션이라 같이 물러났다.
+    assert ledger.store.query_one("SELECT COUNT(*) AS n FROM rr_seat_opinions WHERE panel_id = ?",
+                                  (out["panel_id"],))["n"] == 0
+    job = _job_row(ledger.store, job_id)
+    assert job["state"] == "paused" and job["state_by"] == "code:persist_error"
+    assert f"/api/panels/{out['panel_id']}/repersist" in job["error"] and "차감하지 않았다" in job["error"]
+    stored = json.loads(__import__("gzip").decompress(panel["result_gz"]))
+    assert stored["job_id"] == job_id and stored["decision_text"] == DECISION and len(stored["turns"]) == 12
+    assert stored["model_json"]["model"] == "glm-fake" and "brief_hash" in stored["frozen"]
+
+
+def test_repersist_after_the_cause_is_fixed_closes_the_panel_done(ledger, merge_breaks):
+    """원인을 고친 뒤 다시 저장하면 처음 저장과 같은 길(귀속·원장·등록부·품질)로 done 이 된다. 잡 상태는 건드리지 않는다."""
+    job_id = _job(ledger)
+    out = _run(ledger, LedgerEngine())
+    merge_breaks["broken"] = False
+    again = runner.repersist_panel(ledger.store, ledger.cfg, out["panel_id"])
+    assert again["status"] == "done" and again["panel_id"] == out["panel_id"]
+    panel = _panel(ledger.store, out["panel_id"])
+    assert panel["status"] == "done" and panel["error"] is None
+    assert json.loads(panel["quality_json"])["brief_hash"]
+    keys = _seats_of(ledger.store, out["panel_id"])
+    assert {s for s, _, _ in _seat_rows(ledger.store, ledger.target_key, keys).values()} <= {"done", "done_weak"}
+    assert _opinions(ledger.store, ledger.target_key, ADVERSARY) == [(1, 100001, "adversary", 2)]
+    job = dict(ledger.store.query_one("SELECT state, panels_done FROM rr_jobs WHERE id = ?", (job_id,)))
+    assert job == {"state": "paused", "panels_done": 1}
+    assert planner.check_invariants(ledger.store, ledger.target_key) == []
+
+
+def test_a_repersist_that_fails_again_leaves_the_seats_free(ledger, merge_breaks):
+    """다시 저장이 또 터지면 좌석 재점유까지 같이 물러난다 — 좌석이 running 에 굳어 편성기가 못 집는 일이 없다(P-05)."""
+    _job(ledger)
+    out = _run(ledger, LedgerEngine())
+    with pytest.raises(AppError) as exc:
+        runner.repersist_panel(ledger.store, ledger.cfg, out["panel_id"])
+    assert exc.value.code == "persist_failed" and exc.value.http_status == 422 and "디스크가 찼다" in exc.value.message
+    keys = _seats_of(ledger.store, out["panel_id"])
+    assert set(_seat_rows(ledger.store, ledger.target_key, keys).values()) == {("pending", 0, None)}
+    assert _panel(ledger.store, out["panel_id"])["status"] == "error"
+
+
+def test_repersist_refuses_when_the_seats_have_moved_on(ledger, merge_breaks):
+    """좌석이 다른 패널로 간 뒤에는 다시 저장하지 않는다 — 그 좌석의 의견이 남의 패널 이름으로 들어간다(R-5)."""
+    job_id = _job(ledger)
+    out = _run(ledger, LedgerEngine())
+    merge_breaks["broken"] = False
+    runner.resume_job(ledger.store, job_id, by=OWNER)
+    engine = LedgerEngine()
+    assert _run(ledger, engine)["status"] == "done"
+    with pytest.raises(AppError) as exc:
+        runner.repersist_panel(ledger.store, ledger.cfg, out["panel_id"])
+    assert exc.value.code == "seats_moved" and exc.value.http_status == 409
+    assert {m["agent_key"] for m in exc.value.detail["moved"]} & set(engine.calls[0])
+    assert _panel(ledger.store, out["panel_id"])["result_gz"] is not None
+
+
+def test_repersist_needs_an_error_panel_with_a_saved_result_on_an_idle_target(ledger, merge_breaks):
+    _job(ledger)
+    out = _run(ledger, LedgerEngine())
+    merge_breaks["broken"] = False
+    busy = factories.plan_panel(ledger.store, ledger.target_key, "C")
+    planner.start_panel_seats(ledger.store, busy["id"])
+    with pytest.raises(AppError) as exc:
+        runner.repersist_panel(ledger.store, ledger.cfg, out["panel_id"])
+    assert (exc.value.code, exc.value.http_status) == ("target_busy", 409)
+    planner.fail_panel_seats(ledger.store, busy["id"], charge=False)
+    ledger.store.execute("UPDATE rr_panels SET status = 'error', error = 'engine_error: 시험' WHERE id = ?",
+                         (busy["id"],))
+    with pytest.raises(AppError) as exc:
+        runner.repersist_panel(ledger.store, ledger.cfg, busy["id"])
+    assert (exc.value.code, exc.value.http_status) == ("result_absent", 404)
+    assert runner.repersist_panel(ledger.store, ledger.cfg, out["panel_id"])["status"] == "done"
+    with pytest.raises(AppError) as exc:
+        runner.repersist_panel(ledger.store, ledger.cfg, out["panel_id"])
+    assert (exc.value.code, exc.value.http_status) == ("not_error", 409)
+
+
+class _Crash(BaseException):
+    """프로세스가 저장 도중에 죽었다(재기동 전의 마지막 순간)."""
+
+
+def test_a_restart_during_the_save_does_not_run_the_panel_again(ledger, monkeypatch):
+    """엔진은 이미 끝났다 — 결과가 저장된 running 패널은 다시 돌리지 않고 persist_error 로 닫아 다시 저장을 기다린다."""
+    job_id = _job(ledger)
+
+    def crash(*_args, **_kwargs):
+        raise _Crash()
+
+    monkeypatch.setattr(runner, "_complete_panel", crash)
+    with pytest.raises(_Crash):
+        _run(ledger, LedgerEngine())
+    monkeypatch.undo()
+    panel_id = ledger.store.query_one("SELECT id FROM rr_panels WHERE status = 'running'")["id"]
+    assert _panel(ledger.store, panel_id)["result_gz"] is not None
+
+    runner.recover_running_panels(ledger.store)
+    panel = _panel(ledger.store, panel_id)
+    assert panel["status"] == "error" and panel["error"].startswith("persist_error: restart")
+    job = _job_row(ledger.store, job_id)
+    assert job["state"] == "paused" and f"/api/panels/{panel_id}/repersist" in job["error"]
+    assert set(_seat_retries(ledger.store, ledger.target_key).values()) == {0}
+    assert runner.repersist_panel(ledger.store, ledger.cfg, panel_id)["status"] == "done"
+
+
+def test_a_failure_after_the_commit_leaves_the_done_panel_alone(ledger, monkeypatch):
+    """저장이 커밋된 뒤의 예외로 done 패널을 error 로 뒤집지 않는다 — 좌석은 이미 종결이다(P-18)."""
+    from app import registry
+
+    job_id = _job(ledger)
+    real_close = registry.close_level
+    monkeypatch.setattr(registry, "close_level", lambda store, key, **kw: {**real_close(store, key, **kw),
+                                                                          "level": "C1"})
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("수확 체감 판정이 터졌다")
+
+    monkeypatch.setattr(runner, "_diminishing", broken)
+    out = _run(ledger, LedgerEngine())
+    assert out["status"] == "done", out
+    panel = _panel(ledger.store, out["panel_id"])
+    assert panel["status"] == "done" and panel["error"] is None
+    keys = _seats_of(ledger.store, out["panel_id"])
+    assert {s for s, _, _ in _seat_rows(ledger.store, ledger.target_key, keys).values()} <= {"done", "done_weak"}
+    job = _job_row(ledger.store, job_id)
+    assert job["state"] == "paused" and "수확 체감 판정이 터졌다" in job["error"]
+
+
+def test_resubmitting_an_error_panel_updates_the_ledger(ledger):
+    """error 로 닫힌 패널을 다시 제출하면 좌석을 그 패널로 되찾아 원장을 고친다 — 종전에는 원장은 그대로이고
+    coverage_updated 만 참이었다(R-5). 좌석이 다른 패널로 갔으면 409 다."""
+    from app import routes
+
+    _job(ledger)
+    first = _run(ledger, LedgerEngine(fail_first=runner.EngineError("엔진이 끊겼다")))
+    keys = _seats_of(ledger.store, first["panel_id"])
+    assert {s for s, _, _ in _seat_rows(ledger.store, ledger.target_key, keys).values()} == {"pending"}
+    turns = [{"round": r, "persona": k, "say": f"{k} 라운드 {r} 발언"} for r in (1, 2) for k in keys]
+    with factories.routes_store(ledger.store):
+        out = routes.complete_panel(first["panel_id"], engine="mcp", decision_text=DECISION, turns=turns,
+                                    actor=OWNER, owner_sub=OWNER)
+        assert out["coverage_updated"] is True
+        assert {s for s, _, _ in _seat_rows(ledger.store, ledger.target_key, keys).values()} <= {"done", "done_weak"}
+        again = routes.complete_panel(first["panel_id"], engine="mcp", decision_text=DECISION, turns=turns,
+                                      actor=OWNER, owner_sub=OWNER)
+        assert again["coverage_updated"] is False                     # 이미 종결 — 원장은 바뀌지 않았다
+    assert planner.check_invariants(ledger.store, ledger.target_key) == []
+
+
+def test_resubmitting_an_error_panel_whose_seats_moved_is_refused(ledger):
+    from app import routes
+
+    _job(ledger)
+    engine = LedgerEngine(fail_first=runner.EngineError("엔진이 끊겼다"))
+    first = _run(ledger, engine)
+    assert _run(ledger, engine)["status"] == "done"
+    keys = _seats_of(ledger.store, first["panel_id"])
+    with factories.routes_store(ledger.store), pytest.raises(AppError) as exc:
+        routes.complete_panel(first["panel_id"], engine="mcp", decision_text=DECISION,
+                              turns=[{"round": 1, "persona": k, "say": "늦은 발언"} for k in keys],
+                              actor=OWNER, owner_sub=OWNER)
+    assert (exc.value.code, exc.value.http_status) == ("seats_moved", 409)
+
+
+def test_the_repersist_route_needs_an_editor_and_leaves_an_audit_row(ledger, merge_breaks):
+    from app import routes
+
+    _job(ledger)
+    out = _run(ledger, LedgerEngine())
+    merge_breaks["broken"] = False
+    assert any(getattr(r, "path", "") == "/api/panels/{panel_id}/repersist" for r in routes.router.routes)
+    with factories.routes_store(ledger.store):
+        with pytest.raises(AppError) as exc:
+            routes.post_panel_repersist(out["panel_id"], ident=factories.ident("stranger@example.com"))
+        assert exc.value.http_status == 404
+        body = routes.post_panel_repersist(out["panel_id"], ident=factories.ident(OWNER))
+    assert body["status"] == "done" and body["panel_id"] == out["panel_id"] and "findings_n" in body
+    audit = ledger.store.query_one("SELECT actor, scope, action FROM rr_audit WHERE subject_id = ?", (out["panel_id"],))
+    assert dict(audit) == {"actor": OWNER, "scope": "panel", "action": "panel.repersist"}
+
+
+def test_the_export_leaves_the_engine_result_behind(ledger, merge_breaks):
+    """엔진 결과 원문은 반출 묶음에 싣지 않는다 — 받은 쪽은 다시 저장할 일이 없다(P-19)."""
+    from app import export
+
+    _job(ledger)
+    out = _run(ledger, LedgerEngine())
+    rows = [json.loads(line) for line in export.iter_lines(ledger.store, OWNER)][1:]
+    panels = [r["row"] for r in rows if r["table"] == "rr_panels"]
+    assert [p["id"] for p in panels] == [out["panel_id"]]
+    assert "result_gz" not in panels[0] and panels[0]["result_hash"]

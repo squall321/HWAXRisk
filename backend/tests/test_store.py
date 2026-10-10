@@ -50,7 +50,7 @@ def test_v2_adds_the_brief_call_ledger_and_keeps_v1_data(tmp_path):
     """v2 는 CREATE TABLE 하나다(허용 연산) — 기존 v1 DB 는 데이터를 유지한 채 올라간다."""
     from app.risk_store import MIGRATIONS as MIG
 
-    assert [v for v, _ in MIG] == [1, 2]
+    assert [v for v, _ in MIG][:2] == [1, 2]
     # 허용 연산만 쓴다(plan §5.2.5 (6)) — ALTER 로 CHECK 를 고치는 문장이 없다.
     for _, statements in MIG[1:]:
         for sql in statements:
@@ -71,11 +71,11 @@ def test_v2_adds_the_brief_call_ledger_and_keeps_v1_data(tmp_path):
     again.open()
     again.migrate()
     try:
-        assert again.query_one("PRAGMA user_version")["user_version"] == 2
+        assert again.query_one("PRAGMA user_version")["user_version"] == LATEST
         assert again.query_one("SELECT COUNT(*) AS n FROM rr_projects")["n"] == 1
         assert again.query("SELECT name FROM sqlite_master WHERE name = 'rr_brief_calls'", ())
         assert [r["version"] for r in again.query(
-            "SELECT version FROM _schema_migrations ORDER BY version", ())] == [1, 2]
+            "SELECT version FROM _schema_migrations ORDER BY version", ())] == [v for v, _ in MIG]
     finally:
         again.close()
 
@@ -231,6 +231,7 @@ def test_credential_value_lives_only_in_portal_pat_enc(risk_store, tmp_path):
 PUSHED_DDL_SHA256 = {
     1: "95298128f33e533a21a9bbdfb4aab46a9f0af096585f1e5932cc035887e09492",
     2: "162c36361ed98a7fb6d8cc195ab0e1c0fabe1ef448ec7e785f2311e2843bfea5",
+    3: "a20f49f302e0c92292d7792a9a990b4d8c809b1f3eb0dce9b609bb0879b35e39",
 }
 SHARED_TABLES = {"rr_dim_vocab", "rr_delta_priors", "rr_rules", "rr_metrics"}
 
@@ -424,3 +425,35 @@ def test_no_room_for_the_copy_stops_before_raising(tmp_path, monkeypatch):
     finally:
         store.close()
     assert not list(tmp_path.glob("risk_review.db.pre-migrate-*"))
+
+
+def test_v3_is_the_three_panel_result_columns_and_a_v2_db_rises_to_it(tmp_path):
+    """v3 는 rr_panels 의 세 열뿐이다(PLAN 4절 C-2) — 행이 든 v2 DB 가 옛 행을 그대로 둔 채 오르고, 출발 버전 사본이 하나 남는다."""
+    from app import risk_store as store_module
+
+    assert [v for v, _ in MIGRATIONS] == [1, 2, 3]
+    assert MIGRATIONS[2][1] == [s for s in MIGRATIONS[2][1] if s.upper().startswith("ALTER TABLE RR_PANELS ADD COLUMN")]
+    db = tmp_path / "risk_review.db"
+    v2 = RiskStore(db)
+    v2.open()
+    original = store_module.MIGRATIONS
+    try:
+        store_module.MIGRATIONS = original[:2]
+        assert v2.migrate() == 2
+        v2.execute("INSERT INTO rr_projects(id, owner_sub, code, name, created_at, updated_at)"
+                   " VALUES ('P1','u','F7','F7',1,1)")
+    finally:
+        store_module.MIGRATIONS = original
+        v2.close()
+    assert "result_gz" not in _columns(db, "rr_panels")
+
+    v3 = RiskStore(db)
+    v3.open()
+    try:
+        assert v3.migrate() == 3
+        assert v3.query_one("SELECT COUNT(*) AS n FROM rr_projects")["n"] == 1
+    finally:
+        v3.close()
+    assert {"result_gz", "result_hash", "result_saved_at"} <= _columns(db, "rr_panels")
+    copies = [p.name for p in tmp_path.glob("risk_review.db.pre-migrate-*")]
+    assert len(copies) == 1 and copies[0].startswith("risk_review.db.pre-migrate-v2-")

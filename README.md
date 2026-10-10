@@ -74,6 +74,10 @@ env 접두는 `HWAXRISK_`(plan §8.2.6). 데이터 루트 우선순위 `HWAXRISK
 이행 전체는 데이터 디렉터리의 `migrate.lock` 안에서 돈다(겹쳐 뜬 둘째 프로세스는 기다렸다가 다시 읽은 버전으로 판정한다).
 같은 출발 버전의 사본이 있고 그 뒤로 DB 가 바뀌지 않았으면 다시 뜨지 않고, 여유 공간이 DB × 1.2 보다 작으면 이행하지 않는다.
 `pre-migrate-*`·`pre-merge-*` 사본은 기동마다 갈래별로 가장 새것 둘만 남긴다.
+스키마 v3 는 `rr_panels` 의 세 열(`result_gz`·`result_hash`·`result_saved_at` — 엔진 결과 원문, 반출 제외)이다.
+되돌리기 — v3 로 오른 DB 는 옛 SIF(v2 코드)가 열지 못한다(기동 거부). 옛 SIF 로 내리려면 `risk_review.db.pre-migrate-v2-<ts>`
+를 되돌려야 하고 그 뒤에 쓴 것은 잃는다. 그래서 첫 배포는 도는 잡이 없을 때(`rr_jobs.state='running'` 0건) 하고 그 사본의
+시각을 배포 기록에 남긴다 — 인스턴스 교체는 도는 패널을 끊고, 엔진 쪽 심의는 주인 없이 끝까지 돈다.
 확장자 `.db` 는 HEAXHub `appdata-to-drive.sh` 의 `sqlite3 .backup` 원자 스냅샷 조건이다. 로컬 실행 시 리포 `data/` 는
 `.gitignore` 로 `*.db*` 를 제외한다.
 

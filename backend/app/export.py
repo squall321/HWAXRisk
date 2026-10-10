@@ -78,6 +78,11 @@ _SINCE_COLS: dict[str, tuple[str, ...]] = {
 }
 
 
+# 반출에 싣지 않는 열 — 패널의 엔진 결과 원문(v3)은 그 박스에서 다시 저장할 때만 쓴다. 받은 쪽은 다시 저장할 일이 없고,
+# 그 원문에는 좌석이 받은 근거 글이 그대로 들어 있다(WP1 P-19). 들여오기는 빠진 열을 INSERT 에서 뺀다.
+_EXPORT_SKIP_COLUMNS: dict[str, tuple[str, ...]] = {"rr_panels": ("result_gz",)}
+
+
 def _human_rank(table: str, row: dict) -> int:
     """사람이 확정한 행이면 1, 자동·후보면 0.
 
@@ -172,6 +177,7 @@ def _select(store: RiskStore, table: str, owner_sub: str, since: int,
     `project_id` 를 가진 표는 회수·코퍼스 제외 과제를 기본으로 뺀다(plan §5.2.6 (ii)).
     """
     cols, pks = _table_meta(store, table)
+    cols = [c for c in cols if c not in _EXPORT_SKIP_COLUMNS.get(table, ())]
     sql = f"SELECT {', '.join(_quote(c) for c in cols)} FROM {table}"
     where: list[str] = []
     params: list[Any] = []

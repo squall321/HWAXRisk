@@ -2801,6 +2801,13 @@ def complete_panel(panel_id: str, *, engine: str, decision_text: str, turns: lis
 
     # 상태 전이·서술 저장·좌석 회계·등록부 병합은 한 트랜잭션이다 — 중간 실패의 반쪽 저장을 막는다.
     with store.tx():
+        if panel["status"] == "error":
+            # error 로 닫힌 패널의 좌석은 pending·panel_id NULL 이라 원장 갱신(apply_seat_results)이 건너뛴다 — 먼저
+            # 그 패널로 되찾는다. 한 석이라도 다른 데 가 있으면 다시 앉히지 않는다(WP1 R-5).
+            reclaimed = planner.reclaim_panel_seats(store, panel_id)
+            if reclaimed["moved"]:
+                raise AppError("seats_moved", "좌석이 이미 다른 데 가 있다 — 이 패널의 결과로 다시 앉히지 않는다.", 409,
+                               detail={"moved": reclaimed["moved"]})
         store.execute(
             "UPDATE rr_panels SET status = 'done', engine = ?, tool_mode = ?, decision_text = ?, risk_spec_json = ?,"
             " risk_spec_parsed = ?, conv_id = COALESCE(?, conv_id), report_id = COALESCE(?, report_id),"
@@ -2826,9 +2833,10 @@ def complete_panel(panel_id: str, *, engine: str, decision_text: str, turns: lis
                 "used_tool": attr.get("used_tool"), "cited_refs_n": int(seat.get("cited_refs_n") or 0),
                 "abstained": bool(seat.get("abstained")),
             })
-        planner.apply_seat_results(store, panel_id, seat_results, decision_ok=bool(decision_text),
-                                   model=model_json.get("model"))
-        coverage_updated = True
+        applied = planner.apply_seat_results(store, panel_id, seat_results, decision_ok=bool(decision_text),
+                                             model=model_json.get("model"))
+        # 원장이 실제로 바뀐 좌석이 있을 때만 참이다 — 이미 종결된 패널을 다시 내면 거짓이다(종전에는 늘 참이었다).
+        coverage_updated = any(item.get("updated") for item in applied["seats"])
 
         # 미검증 actor(MCP 경로)가 낸 원자는 회수에서 격리한다 — 이 타깃 등록부·보고서에는 그대로 남고
         # 다른 과제 브리프의 E5·E6·E7 후보에서만 빠진다(plan §3.4.1 회수 격리·§6.11).
@@ -2872,6 +2880,28 @@ def post_panel_complete(panel_id: str, body: PanelCompleteBody,
     return complete_panel(panel_id, engine=body.engine, decision_text=body.decision_text, turns=body.turns,
                           report_id=body.report_id, conv_id=body.conv_id, events=body.events,
                           model=body.model, actor=owner_sub, actor_verified=True, owner_sub=owner_sub)
+
+
+@router.post("/panels/{panel_id}/repersist")
+def post_panel_repersist(panel_id: str, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """persist_error 로 닫힌 패널을 저장된 엔진 결과로 다시 앉힌다(과제 editor 이상, WP1 R-2).
+
+    200 {panel_id, status:'done', level, coverage, findings_n, …} · 404 result_absent · 409 not_error · target_busy ·
+    seats_moved({moved:[…]}) · 422 persist_failed. 본체는 runner.repersist_panel 이고 rr_audit 에 한 행이 남는다.
+    """
+    email = _require_user(ident)
+    store = get_store()
+    row = store.query_one(
+        "SELECT p.id, t.project_id FROM rr_panels p JOIN rr_targets t ON t.target_key = p.target_key WHERE p.id = ?",
+        (panel_id,))
+    if row is None:
+        raise AppError("E404", f"패널을 찾을 수 없습니다 — {panel_id}.", 404)
+    if not _is_admin(ident):
+        require_role(row["project_id"], email, "editor")
+    out = runner.repersist_panel(store, config.settings, panel_id)
+    _audit(store, email, scope="panel", subject_id=panel_id, project_id=row["project_id"], action="panel.repersist",
+           after={"status": out["status"], "level": out.get("level"), "findings_n": out.get("findings_n")})
+    return out
 
 
 # ================================================================ 성격·유사·참조

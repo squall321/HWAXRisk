@@ -564,9 +564,21 @@ CREATE INDEX IF NOT EXISTS ix_rr_brief_calls_reuse ON rr_brief_calls(target_key,
 """
 _DDL_V2: list[str] = _split_statements(_DDL_V2_SQL)
 
+# v3 — 엔진이 돌려준 패널 결과 원문(WP1 R-2). 종전에는 결정문·발언·이벤트가 원장 저장과 같은 트랜잭션 안에서만 적혀,
+# 저장이 한 번 터지면 몇 시간짜리 엔진 결과가 메모리와 함께 사라졌다. 러너는 엔진이 끝난 직후 이 세 열에 먼저 적고
+# (`runner.save_panel_result`), 저장이 실패하면 패널을 persist_error 로 닫아 `POST /api/panels/{id}/repersist` 로 다시
+# 앉힌다. 모양은 `{"v": 1, "job_id", "job_credential", <엔진 결과 키>, "frozen", "model_json"}` 의 canonical_json gzip 이다.
+# 반출에는 싣지 않는다(export._EXPORT_SKIP_COLUMNS — 받은 쪽은 다시 저장할 일이 없다).
+_DDL_V3_SQL = """
+ALTER TABLE rr_panels ADD COLUMN result_gz BLOB;            -- 엔진 결과 원문의 canonical_json gzip(위 모양)
+ALTER TABLE rr_panels ADD COLUMN result_hash TEXT;          -- 해제본 sha256[:12]
+ALTER TABLE rr_panels ADD COLUMN result_saved_at INTEGER;   -- 적은 시각(epoch 초)
+"""
+_DDL_V3: list[str] = _split_statements(_DDL_V3_SQL)
+
 # 버전 오름차순. 한 버전 = 한 트랜잭션. 허용 연산은 CREATE TABLE IF NOT EXISTS · ADD COLUMN · CREATE INDEX IF NOT EXISTS 뿐(plan §5.2.5 (6)).
 # 한 번 나간 버전의 문장은 고치지 않는다 — tests/test_store.py 가 버전마다 DDL 해시를 못 박는다.
-MIGRATIONS: list[tuple[int, list[str]]] = [(1, _DDL_V1), (2, _DDL_V2)]
+MIGRATIONS: list[tuple[int, list[str]]] = [(1, _DDL_V1), (2, _DDL_V2), (3, _DDL_V3)]
 
 # ---------------------------------------------------------------- 이행 안전(WP5a R3 · 반대 검토 X2-01·X2-02)
 # 이행 전체(버전 읽기 → 사본 → 버전별 트랜잭션 → 사본 정리)를 감싸는 파일 잠금. 기다린다 — HEAXHub 는 헬스가 안 오면 같은

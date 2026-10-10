@@ -63,10 +63,13 @@ BRIEF_ERROR_CODE = "brief_error"
 BRIEF_RETRY_CODE = "brief_retry"
 BRIEF_RETRY_MAX = 3
 BRIEF_TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (sqlite3.OperationalError, httpx.HTTPError, OSError)
+# 엔진은 끝났는데 그 결과를 원장에 앉히지 못한 패널(WP1 R-2). 결과 원문은 패널(rr_panels.result_gz)에 먼저 적혀 있어
+# `POST /api/panels/{id}/repersist` 로 다시 앉힌다 — 좌석·엔진 탓이 아니다. 재기동이 저장 도중을 끊었으면 'persist_error: restart'.
+PERSIST_ERROR_CODE = "persist_error"
 # 좌석 재시도와 연속 실패(ENGINE_FAIL_STREAK)에 세지 않는 패널 error 코드 — 좌석 탓이 아닌 중단이다. 세면 좌석과
 # 무관한 일 세 번에 그 좌석이 skipped 로 굳고 잡이 죽는다.
 UNCHARGED_CODES: tuple[str, ...] = (*STREAM_LOST_CODES, RESTART_CODE, *NO_DECISION_CODES, *UNSTARTED_CODES,
-                                    BRIEF_ERROR_CODE, BRIEF_RETRY_CODE)
+                                    BRIEF_ERROR_CODE, BRIEF_RETRY_CODE, PERSIST_ERROR_CODE)
 PROGRESS_WRITE_INTERVAL_S = 60     # 도는 패널의 '마지막 신호' 를 잡 행에 적는 간격 — 줄마다 적으면 15초 ping 이 DB 를 두드린다
 
 # 러너 정본 경로가 부르는 모듈 함수(없으면 잡을 집지 않고 error 로 강등한다 — 반쪽 저장 방지).
@@ -773,6 +776,11 @@ def claim_next_job(store: Any, settings: Any | None = None) -> dict | None:
 
 
 # ---------------------------------------------------------------- 재기동 복구(plan §6.7.2 끝 문단)
+def _repersist_hint(panel_id: str) -> str:
+    """다시 저장하는 길 — 화면에 그 버튼이 생기기 전까지 사람이 부를 수 있는 REST 경로를 문구에 적는다."""
+    return f"'다시 저장'(POST /api/panels/{panel_id}/repersist)"
+
+
 def recover_running_panels(store: Any) -> dict:
     """이전 기동이 남긴 running 패널을 error('restart') 로 닫고 좌석을 차감 없이 pending 으로 되돌린다.
 
@@ -780,26 +788,37 @@ def recover_running_panels(store: Any) -> dict:
     그래서 스트림을 놓은 패널(_close_panel_stream_lost)과 같이 다룬다. 종전에는 좌석 retry 를 올리고 잡을 곧바로
     queued 로 돌려, 기동 직후 첫 틱이 같은 좌석을 엔진에 다시 보냈다(같은 심의가 공유 LLM 에 겹쳐 돈다). 재배포
     세 번이면 좌석이 skipped 로 굳었다 — 벽시계가 12시간이라 패널 도중의 재기동은 드문 일이 아니다.
+    엔진 결과가 이미 패널에 저장된(result_gz) running 패널은 저장 도중에 끊긴 것이다 — 엔진은 끝났으므로 다시 돌리지
+    않고 'persist_error: restart' 로 닫아 다시 저장을 기다린다(WP1 R-2).
     패널이 끊긴 잡은 멈춘다(사람이 재개하면 이어 돈다). 패널 사이에 있던 잡(running 인데 도는 패널이 없다)은
     겹칠 심의가 없으니 queued 로 돌린다. cancelling 은 건드리지 않는다 — 다음 편성에서 cancelled 가 된다.
     """
-    rows = store.query("SELECT id, target_key FROM rr_panels WHERE status = 'running' ORDER BY created_at ASC")
+    rows = store.query(
+        "SELECT id, target_key, result_gz IS NOT NULL AS has_result FROM rr_panels WHERE status = 'running'"
+        " ORDER BY created_at ASC")
     now = now_epoch()
-    cut_targets: set[str] = set()
+    cut_targets: dict[str, list[str]] = {}
     for row in rows:
         planner.fail_panel_seats(store, row["id"], reason="engine_fail", charge=False)
-        store.execute(
-            "UPDATE rr_panels SET status = 'error', error = ?, ended_at = ? WHERE id = ?",
-            (RESTART_CODE, now, row["id"]),
-        )
-        cut_targets.add(row["target_key"])
+        if row["has_result"]:
+            error = (f"{PERSIST_ERROR_CODE}: {RESTART_CODE} — 앱이 결과를 원장에 앉히던 중에 재기동했다. 엔진 결과는 패널에"
+                     f" 저장돼 있다 — {_repersist_hint(row['id'])} 로 다시 앉힌다")
+        else:
+            error = RESTART_CODE
+        store.execute("UPDATE rr_panels SET status = 'error', error = ?, ended_at = ? WHERE id = ?",
+                      (error, now, row["id"]))
+        saved = cut_targets.setdefault(row["target_key"], [])
+        if row["has_result"]:
+            saved.append(row["id"])
     paused = 0
     for job in store.query("SELECT id, target_key FROM rr_jobs WHERE state = 'running'"):
         if job["target_key"] in cut_targets:
+            saved = cut_targets[job["target_key"]]
+            tail = "".join(f". 엔진 결과가 저장된 패널 {pid} 은 {_repersist_hint(pid)} 로 다시 앉힌다" for pid in saved)
             # 사유는 잡의 error 에 적는다(pause_reason 은 CHECK 로 세 값만 받는다).
             _set_job(store, job["id"], "paused", by=f"code:{RESTART_CODE}",
                      error=f"{RESTART_CODE}: 앱이 재기동해 도는 패널을 닫았다 — 엔진 쪽 심의는 계속 돌 수 있다."
-                           " 잡을 멈췄다(좌석 재시도는 차감하지 않았다). 재개하면 이어 돈다")
+                           " 잡을 멈췄다(좌석 재시도는 차감하지 않았다). 재개하면 이어 돈다" + tail)
             paused += 1
         else:
             _set_job(store, job["id"], "queued")
@@ -1100,10 +1119,144 @@ def run_panel(
 
     if result is None:
         return _close_panel_error(store, panel, job, error or "engine_error", settings)
-    return _complete_panel(
-        store, settings, panel, job, result, model_json,
-        narrative_mod=narrative_mod, registry_mod=registry_mod, engine=engine, frozen_brief=frozen,
-    )
+    # 엔진 결과를 원장에 앉히기 전에 패널에 먼저 적는다 — 저장이 터져도 몇 시간짜리 결과가 메모리와 함께 사라지지 않는다.
+    saved = save_panel_result(store, panel, job, result, frozen=frozen, model_json=model_json)
+    try:
+        return _complete_panel(
+            store, settings, panel, job, result, model_json,
+            narrative_mod=narrative_mod, registry_mod=registry_mod, engine=engine, frozen_brief=frozen,
+        )
+    except Exception as exc:  # noqa: BLE001 — 저장 실패는 패널만 persist_error 로 닫고 러너는 계속 돈다.
+        log.exception("패널 %s 저장 실패", panel["id"])
+        return _close_panel_persist_error(store, panel, job, exc, result_saved=saved, result=result)
+
+
+def save_panel_result(store: Any, panel: Mapping[str, Any], job: Mapping[str, Any], result: Mapping[str, Any], *,
+                      frozen: Mapping[str, Any] | None = None, model_json: Mapping[str, Any] | None = None) -> bool:
+    """엔진이 돌려준 결과 원문을 패널(rr_panels.result_gz)에 적는다 — 자기 트랜잭션이다. 적었으면 True.
+
+    원장 저장(_complete_panel)이 실패해도 이 원문으로 다시 앉힌다(repersist_panel). 그때 처음 저장과 같은 길을 가려면
+    러너의 지역 값이던 것 — 잡 id·자격, 브리프 동결의 손실 기록(frozen), 시작 때의 모델 스냅샷 — 도 같이 둔다(P-05).
+    적지 못해도 패널은 계속 간다(로그를 남기고 False — 저장이 실패하면 잡 문구가 포털 대화를 가리킨다).
+    """
+    payload = {"v": 1, "job_id": job.get("id"), "job_credential": job.get("credential"), **dict(result),
+               "frozen": dict(frozen or {}), "model_json": dict(model_json or {})}
+    try:
+        text = canonical_json(payload)
+        store.execute(
+            "UPDATE rr_panels SET result_gz = ?, result_hash = ?, result_saved_at = ? WHERE id = ?",
+            (gzip.compress(text.encode("utf-8")), sha256_hex(text)[:12], now_epoch(), panel["id"]))
+        return True
+    except Exception:  # noqa: BLE001 — 위 설명대로다.
+        log.exception("패널 %s 엔진 결과를 패널에 적지 못했다", panel["id"])
+        return False
+
+
+def load_panel_result(store: Any, panel_id: str) -> dict | None:
+    """save_panel_result 가 적은 원문(없으면 None)."""
+    row = store.query_one("SELECT result_gz FROM rr_panels WHERE id = ?", (panel_id,))
+    if row is None or row["result_gz"] is None:
+        return None
+    return json.loads(gzip.decompress(row["result_gz"]).decode("utf-8"))
+
+
+def _pause_running_job(store: Any, job: Mapping[str, Any], code: str, error: str) -> None:
+    """잡이 아직 running 이면 멈춘다 — 그 사이 사람이 취소했으면(cancelling) 그 전이를 덮지 않는다."""
+    row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job["id"],))
+    if row is not None and row["state"] == "running":
+        _set_job(store, job["id"], "paused", by=f"code:{code}", error=error)
+
+
+def _close_panel_persist_error(store: Any, panel: Mapping[str, Any], job: Mapping[str, Any], exc: Exception, *,
+                               result_saved: bool, result: Mapping[str, Any]) -> dict:
+    """엔진 결과를 원장에 앉히지 못한 패널을 닫는다 — 좌석은 차감 없이 pending, 잡은 멈춘다(WP1 R-2).
+
+    저장은 한 트랜잭션이라 실패하면 반쪽 없이 물러나 있다. 패널에는 결정문·대화·보고서 번호를 적어 두고, 엔진 결과
+    원문(result_gz)이 있으면 원인을 고친 뒤 다시 저장한다. 커밋이 끝난 뒤의 예외면(패널이 이미 done) 패널과 좌석을
+    건드리지 않는다 — 좌석은 이미 종결이라 뒤집으면 다시 저장도 영영 409 다(P-18). 그때는 잡만 멈춘다.
+    """
+    why = f"{type(exc).__name__}: {exc}"
+    row = store.query_one("SELECT status FROM rr_panels WHERE id = ?", (panel["id"],))
+    if row is not None and row["status"] == "done":
+        log.error("패널 %s 는 저장됐지만 그 뒤 처리에서 멈췄다 — %s", panel["id"], why)
+        _pause_running_job(store, job, PERSIST_ERROR_CODE,
+                           f"{PERSIST_ERROR_CODE}: 패널 {panel['id']} 은 원장에 저장됐지만 그 뒤 처리에서 멈췄다({why})."
+                           " 잡을 멈췄다 — 재개하면 이어 돈다")
+        return {"panel_id": panel["id"], "status": "done", "error": f"{PERSIST_ERROR_CODE}: {why}"}
+    planner.fail_panel_seats(store, panel["id"], reason="engine_fail", charge=False)
+    error = f"{PERSIST_ERROR_CODE}: {why}"
+    store.execute(
+        "UPDATE rr_panels SET status = 'error', error = ?, decision_text = ?, conv_id = ?, report_id = ?,"
+        " ended_at = ? WHERE id = ?",
+        (error, str(result.get("decision_text") or "") or None, result.get("conv_id"), result.get("report_id"),
+         now_epoch(), panel["id"]))
+    if result_saved:
+        kept = f"엔진 결과는 패널에 저장돼 있다 — 원인을 고친 뒤 {_repersist_hint(panel['id'])} 로 다시 앉힌다"
+    else:
+        kept = f"엔진 결과를 패널에 저장하지 못했다 — 포털 대화 {result.get('conv_id')} 에 발언이 남아 있다"
+    _pause_running_job(store, job, PERSIST_ERROR_CODE,
+                       f"{PERSIST_ERROR_CODE}: 패널 결과를 원장에 앉히지 못했다({why}). {kept}."
+                       " 잡을 멈췄다(좌석 재시도는 차감하지 않았다)")
+    return {"panel_id": panel["id"], "status": "error", "error": error}
+
+
+def repersist_panel(store: Any, settings: Any, panel_id: str, *, narrative_mod: Any | None = None,
+                    registry_mod: Any | None = None) -> dict:
+    """persist_error 로 닫힌 패널을 저장된 엔진 결과로 다시 앉힌다 — `POST /api/panels/{id}/repersist` 의 본체.
+
+    처음 저장과 같은 길(_complete_panel — 귀속·원장·등록부·품질)을 가되 셋이 다르다(P-05). 좌석 재점유와 저장을 바깥
+    트랜잭션 하나로 묶어, 또 실패하면 재점유까지 물러난다(422 persist_failed — 좌석이 running 에 굳지 않는다). 잡 상태는
+    건드리지 않는다(panels_done 만 올린다 — 멈춘 잡이 되살아나거나 도는 패널이 '사용자 일시정지' 로 끊기지 않는다).
+    엔진에 모델을 다시 묻지 않는다(며칠 뒤의 모델을 '도중 변경' 으로 적지 않는다).
+    오류 — 404 E404(패널 없음)·result_absent(저장된 결과 없음) · 409 not_error · target_busy(그 타깃에 도는 패널) ·
+    seats_moved({moved:[{agent_key, status, panel_id}]}) · 422 persist_failed.
+    """
+    row = store.query_one(
+        "SELECT id, target_key, owner_sub, panel_no, tier, seats_json, budget_json, status, result_gz IS NOT NULL AS"
+        " has_result FROM rr_panels WHERE id = ?", (panel_id,))
+    if row is None:
+        raise AppError("E404", f"패널을 찾을 수 없습니다 — {panel_id}.", 404)
+    if row["status"] != "error":
+        raise AppError("not_error", f"패널이 error 가 아니다 — {row['status']}.", 409)
+    if not row["has_result"]:
+        raise AppError("result_absent", "이 패널에는 저장된 엔진 결과가 없다 — 다시 저장할 것이 없다.", 404)
+    busy = store.query_one("SELECT id FROM rr_panels WHERE target_key = ? AND status = 'running' LIMIT 1",
+                           (row["target_key"],))
+    if busy is not None:
+        raise AppError("target_busy", f"이 타깃에 도는 패널({busy['id']})이 있다 — 끝난 뒤 다시 저장한다.", 409)
+    stored = load_panel_result(store, panel_id) or {}
+    try:
+        budget = json.loads(row["budget_json"] or "{}")
+    except ValueError:
+        budget = {}
+    panel = {"id": row["id"], "target_key": row["target_key"], "owner_sub": row["owner_sub"],
+             "panel_no": row["panel_no"], "tier": row["tier"],
+             "seats": [s for s in json.loads(row["seats_json"] or "[]") if isinstance(s, dict)],
+             "tools": list((budget or {}).get("tools_planned") or [])}
+    job_row = store.query_one("SELECT id, target_key, owner_sub, tier, params_json FROM rr_jobs WHERE id = ?",
+                              (stored.get("job_id"),))
+    job = {**(dict(job_row) if job_row is not None else {"id": stored.get("job_id")}),
+           "credential": stored.get("job_credential")}
+    result = {k: v for k, v in stored.items() if k not in ("v", "job_id", "job_credential", "frozen", "model_json")}
+    try:
+        with store.tx():
+            reclaimed = planner.reclaim_panel_seats(store, panel_id)
+            if reclaimed["moved"]:
+                raise AppError("seats_moved", "좌석이 이미 다른 데 가 있다 — 이 패널의 결과로 다시 앉히지 않는다"
+                               " (엔진 결과는 패널에 그대로 남는다).", 409, detail={"moved": reclaimed["moved"]})
+            out = _complete_panel(store, settings, panel, job, result, dict(stored.get("model_json") or {}),
+                                  narrative_mod=narrative_mod, registry_mod=registry_mod, engine=None,
+                                  frozen_brief=stored.get("frozen") or None, touch_job=False)
+            store.execute("UPDATE rr_panels SET error = NULL WHERE id = ?", (panel_id,))
+    except AppError as exc:
+        if exc.code == "seats_moved":
+            raise
+        raise AppError("persist_failed", f"다시 저장하지 못했다 — {exc.code}: {exc.message}", 422) from exc
+    except Exception as exc:  # noqa: BLE001 — 무엇이 터졌든 바깥 트랜잭션이 재점유까지 물렸다.
+        log.exception("패널 %s 다시 저장 실패", panel_id)
+        raise AppError("persist_failed", f"다시 저장하지 못했다 — {type(exc).__name__}: {exc}", 422) from exc
+    findings = store.query_one("SELECT COUNT(*) AS n FROM rr_findings WHERE panel_id = ?", (panel_id,))
+    return {**out, "findings_n": int(findings["n"] or 0)}
 
 
 def _close_panel_error(store: Any, panel: Mapping[str, Any], job: Mapping[str, Any], error: str, settings: Any) -> dict:
@@ -1301,7 +1454,10 @@ def _complete_panel(
     registry_mod: Any | None,
     engine: Any,
     frozen_brief: Mapping[str, Any] | None = None,
+    touch_job: bool = True,
 ) -> dict:
+    """엔진 결과를 원장에 앉힌다(plan §6.7.2 7~12단계). `touch_job=False` 는 다시 저장(repersist_panel)의 길이다 —
+    잡의 panels_done 만 올리고 상태(수확 체감 정지)는 건드리지 않는다. `engine=None` 이면 모델을 다시 묻지 않는다."""
     if narrative_mod is None:
         from app import narrative as narrative_mod  # noqa: PLC0415
     if registry_mod is None:
@@ -1323,7 +1479,7 @@ def _complete_panel(
     # 종료 직후 model 스냅샷 재확인(D6 — 시작값이 정본, 재실행 없음).
     model_final = dict(model_json)
     model_changed = False
-    if model_json.get("captured") == "health_snapshot":
+    if engine is not None and model_json.get("captured") == "health_snapshot":
         after = snapshot_model(engine)
         if after.get("captured") == "health_snapshot" and (
             after.get("model") != model_json.get("model") or after.get("vllm") != model_json.get("vllm")
@@ -1433,7 +1589,7 @@ def _complete_panel(
     # 연속 2패널 over_budget 이면 이후 패널을 rounds 2 로(적응은 앞으로만) — budget_json 에 남긴다.
     if "over_budget" in quality["flags"]:
         log.info("패널 %s over_budget(llm_calls=%s)", panel["id"], llm_calls)
-    if level.get("level") not in (None, "C0") and _diminishing(store, panel["target_key"]):
+    if touch_job and level.get("level") not in (None, "C0") and _diminishing(store, panel["target_key"]):
         _set_job(store, job["id"], "paused", reason="diminishing")
 
     return {
