@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 from app import brief, config, devseed, metrics, planner, render, runner
 from tests import factories
@@ -140,3 +141,38 @@ def test_part_names_in_the_digest_pass_the_source_text_guard(risk_store):
     digest = brief.change_digest(risk_store, key)
     assert "«HOOK LATCH 2» 두께 감소" in digest["text"] and "HOOK LATCH 2" in digest["plain"]
     assert "\t" not in digest["plain"] and "\u200b" not in digest["text"] + digest["plain"]
+
+
+_BARE_NID = re.compile(r"p:[0-9a-f]{12}")
+
+
+def test_digest_names_the_parts_the_change_lines_name(risk_store):
+    """계면·접촉·엣지 파라메트릭·결과 이벤트는 subject.names 에 대표 nid(p:<12hex>)를 싣는다 — 요지는 그것을 브리프 E2 와 같은
+    색인(`name_index`)으로 부품 이름으로 바꿔 싣는다(BQ-1).
+
+    종전에는 nid 를 그대로 실어 질문에 «p:5fece7c982c4↔p:cd16ca7ae17a» 가 서고(같은 변경을 E2 는 이름으로 적어 좌석이 둘을 잇지
+    못했다) 지식카드 검색어 낱말의 40% 남짓이 카드에 없는 hex 였다. 이름은 E2·`risk_get_diff(part='lines')` 줄에 글자 그대로
+    들어 있어야 한다 — 계면 두 이름을 오름차순(fmt_iface)으로 붙이면 생산자 순서로 적은 줄과 갈린다.
+    """
+    synth = factories.make_diff_target(risk_store, 150)
+    digest = brief.change_digest(risk_store, synth.target_key, max_chars=10**7)
+    assert digest["shown"] == digest["n_events"] > 100
+    assert _BARE_NID.findall(digest["text"]) == [] and _BARE_NID.findall(digest["plain"]) == []
+    lines = brief.diff_lines(risk_store, synth.diff_id, owner_sub=factories.OWNER)["lines"]
+    names = re.findall("«([^»]*)»", digest["text"])
+    assert len(names) == digest["n_events"]
+    assert [name for name in names if name not in lines] == []
+    # 바닥 프로파일의 질문과 검색어도 같다(러너가 실제로 싣는 것).
+    panel = planner.plan_next_panel(risk_store, synth.target_key, "A")
+    opts = runner.build_delib_opts(risk_store, config.settings, panel, evidence=[])
+    assert _BARE_NID.findall(opts["knowledge_query"]) == []
+    assert _BARE_NID.findall(runner.panel_question(risk_store, synth.target_key)) == []
+
+
+def test_a_nid_without_a_name_stays_in_the_text_but_not_in_the_search_words(risk_store, monkeypatch):
+    """이름을 못 찾은 nid 는 질문 글에는 남고(무엇을 가리키는지 지우지 않는다) 검색어 낱말에서는 빠진다 — 카드에 없는 낱말이다."""
+    synth = factories.make_diff_target(risk_store, 40)
+    monkeypatch.setattr(brief, "name_index", lambda store, ids: {})
+    digest = brief.change_digest(risk_store, synth.target_key, max_chars=10**7)
+    assert _BARE_NID.search(digest["text"]), "이 대본에 nid 로 실리는 이벤트가 없다 — 시험 전제가 깨졌다"
+    assert _BARE_NID.findall(digest["plain"]) == []

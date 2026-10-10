@@ -815,8 +815,14 @@ def _digest_phrase(code: str, magnitude: Any) -> str:
     return phrase
 
 
-def _digest_items_diff(diff_json: Mapping[str, Any]) -> list[tuple[str, str, str]]:
-    """설계 관련 의미 이벤트를 `event_order` 순으로 — [(이름, 구절, 값)]. 제외 사유가 붙은 이벤트(모른다)는 뺀다."""
+def _digest_items_diff(diff_json: Mapping[str, Any], names_of: Mapping[str, str]) -> list[tuple[str, str, str]]:
+    """설계 관련 의미 이벤트를 `event_order` 순으로 — [(이름, 구절, 값)]. 제외 사유가 붙은 이벤트(모른다)는 뺀다.
+
+    계면·접촉·엣지 파라메트릭·결과 이벤트의 subject.names 는 대표 nid(p:<12hex>)다 — E2 줄과 같은 색인(`names_of` =
+    `name_index(base, target)`)과 같은 함수(`render.humanize_refs`)로 부품 이름으로 바꾸고, 계면 두 이름은 이벤트 글과 같은
+    생산자 순서로 잇는다(BQ-1 — 종전에는 nid 를 그대로 실어 좌석이 E2 의 이름과 잇지 못했고, 오름차순(fmt_iface)으로 붙이면
+    E2·`risk_get_diff(part='lines')` 줄에 글자 그대로 없는 이름이 생긴다).
+    """
     rows = []
     for event in (diff_json.get("semantic") or {}).get("events") or ():
         if not isinstance(event, Mapping) or event.get("excluded_reason") or event.get("design_relevant") is False:
@@ -827,8 +833,8 @@ def _digest_items_diff(diff_json: Mapping[str, Any]) -> list[tuple[str, str, str
     out: list[tuple[str, str, str]] = []
     for row in event_order(rows):
         event = row["_event"]
-        names = [str(n) for n in ((event.get("subject") or {}).get("names") or ()) if n]
-        name = render.fmt_iface(names[0], names[1]) if len(names) >= 2 else (names[0] if names else "")
+        subject = [str(n) for n in ((event.get("subject") or {}).get("names") or ()) if n]
+        name = render.humanize_refs("↔".join(subject[:2]), names_of)
         before, after = event.get("before"), event.get("after")
         unit = (event.get("magnitude") or {}).get("unit") if isinstance(event.get("magnitude"), Mapping) else None
         value = ""
@@ -856,18 +862,22 @@ def _digest_items_snap(state_json: Mapping[str, Any]) -> list[tuple[str, str, st
     return out
 
 
+_NID_WORD = re.compile(r"p:[0-9a-f]{12}")
+
+
 def _digest_name(name: str) -> tuple[str, list[str]]:
     """요지의 이름 칸 — 원천 이름(계면이면 '↔' 양쪽)은 브리프 E2 와 같은 위생·인젝션 방어(`_q`)를 거친다. 자르지 않는다.
 
     (질문 줄의 «…» 표기, 검색어 낱말). 인젝션 어휘에 걸린 이름은 «[suspect_text …]» 로 서고 검색어에서는 빠진다(BQ-5 —
-    종전에는 «» 만 씌운 원문이 개행·인젝션 문구째 질문과 검색어에 실렸다).
+    종전에는 «» 만 씌운 원문이 개행·인젝션 문구째 질문과 검색어에 실렸다). 이름을 못 찾아 nid(p:<12hex>)로 남은 칸도 질문 글에는
+    서되 검색어 낱말에서는 빠진다 — 지식카드에 없는 낱말이다(BQ-1).
     """
     shown: list[str] = []
     words: list[str] = []
     for part in name.split("↔"):
         body = _q(part, "label", limit=0)[1:-1]
         shown.append(body)
-        if body and not body.startswith("[suspect_text "):
+        if body and not body.startswith("[suspect_text ") and not _NID_WORD.fullmatch(body):
             words.append(body)
     return render.quote_source("↔".join(shown)), words
 
@@ -883,7 +893,7 @@ def change_digest(store, target_key: str, *, max_chars: int = DIGEST_CHARS) -> d
     by_kind: dict[str, int] = {}
     if ctx["kind"] == "diff" and ctx["diff"] is not None:
         diff_json = _j(ctx["diff"]["diff_json"], {})
-        items = _digest_items_diff(diff_json)
+        items = _digest_items_diff(diff_json, name_index(store, (ctx["base_snapshot_id"], ctx["snapshot_id"])))
         for event in (diff_json.get("semantic") or {}).get("events") or ():
             if isinstance(event, Mapping) and not event.get("excluded_reason") and event.get("design_relevant") is not False:
                 kind = _s(event.get("change_kind")) if _s(event.get("change_kind")) in KIND_PRIORITY else "none"
