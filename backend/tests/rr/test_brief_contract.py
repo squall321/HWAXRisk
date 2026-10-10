@@ -14,7 +14,7 @@ import re
 
 import pytest
 
-from app import brief
+from app import brief, render
 from app.risk_store import RiskStore
 from tests import factories
 
@@ -93,10 +93,9 @@ def test_e7_reads_the_seats_the_planner_wrote(contract):
     assert [k for k in contract["seat_keys"] if k not in e7] == []
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="WP1 S7(R-10) — E3 이 diff_json 최상위 dims_delta 를 base·target 키로 읽는데 생산자는"
-                          " parametric 아래 before·after 로 쓴다")
 def test_e3_carries_every_changed_named_dimension(contract):
+    """WP1 S7(R-10) 이 고친 것 — E3 이 diff_json 최상위 dims_delta 를 base·target 키로 읽는데 생산자는 parametric 아래
+    before·after 로 쓴다."""
     changed = [d for d in contract["diff"]["parametric"]["dims_delta"] if d["flag"] == "changed"]
     _require(bool(changed), "명명 치수 변화가 없다")
     e3 = contract["items"]["E3"]
@@ -105,15 +104,19 @@ def test_e3_carries_every_changed_named_dimension(contract):
         assert _number_in(e3, d["before"]) and _number_in(e3, d["after"]), (d, e3)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="WP1 S7(R-12) — E4 가 diff_json 최상위 result_delta 를 name 키로 읽는데 생산자는"
-                          " parametric 아래 dn·metric·before·after 로 쓴다")
 def test_e4_carries_every_changed_result_metric(contract):
+    """WP1 S7(R-12) 이 고친 것 — E4 가 diff_json 최상위 result_delta 를 name 키로 읽는데 생산자는 parametric 아래
+    dn·metric·before·after 로 쓴다.
+
+    값은 생산자가 쓴 정규 표기의 자릿수로 견준다 — 응력은 정수로 표기한다(§2.11). 줄 몸통이 정규 표기라야 좌석의 인용이
+    대조를 통과한다(R-40). 주어(dn)는 브리프가 부품 이름으로 바꾸므로 지표 이후만 본다.
+    """
     changed = [r for r in contract["diff"]["parametric"]["result_delta"] if r["flag"] == "changed"]
     _require(len(changed) >= 2, "결과 지표 변화가 둘 미만이다")
     e4 = contract["items"]["E4"]
     for r in changed:
-        assert r["metric"] in e4 and _number_in(e4, r["before"]) and _number_in(e4, r["after"]), (r, e4)
+        shown = render.split_trailing_refs(r["text"])[0].split(" ", 1)[1]
+        assert r["metric"] in e4 and shown in e4, (r, e4)
 
 
 def test_e2_keeps_the_largest_decrease(contract):

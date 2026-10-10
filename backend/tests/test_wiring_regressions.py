@@ -4,6 +4,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -1134,3 +1135,65 @@ def test_model_changed_midrun_is_flagged(risk_store, tmp_path):
     model = json.loads(row["model_json"])
     assert model["model"] == "glm-1" and model["model_end"] == "glm-2"
     assert model["seat_contract_rev"] == runner.seat_contract_rev()
+
+
+# ---------------------------------------------------------------- 브리프 줄 ↔ 인용 대조의 정규 표기(WP1 R-40 브리프 쪽 · P-16)
+def _quote_pair(store):
+    """조립법 — base 의 라벨은 'Plate-1', target 은 'PLATE_1'(같은 nid). 두께·간극·결과가 바뀌고 명명 치수가 하나 있다."""
+    from tests import factories
+
+    project_id = factories.make_project(store)
+    factories.make_dim(store, project_id, "plate1_t", "node[asm=a_stack/stack_asm/plate_1].attrs.min_dim")
+    results = factories.fixture_adapter_results()
+    base_results = json.loads(json.dumps(results))
+    next(n for n in base_results[0]["nodes"] if n.get("label") == "PLATE_1")["label"] = "Plate-1"
+    mcad, _dyna, result = results
+    by_label = {n["label"]: n for n in mcad["nodes"]}
+    by_label["PLATE_1"]["attrs"]["min_dim"] *= 0.7
+    mcad["edges"][0]["attrs"]["min_gap"] = 0.018
+    result["results"]["part_risk"][0]["worst_stress"]["value"] *= 0.8
+    base = factories.make_snapshot(store, project_id, base_results, label="DV1")
+    target = factories.make_snapshot(store, project_id, results, label="DV2", captured_at=factories.CAPTURED_AT + 86400)
+    diff = factories.make_diff(store, base["snapshot_id"], target["snapshot_id"])
+    target_key = factories.make_target(store, "diff", diff["diff_id"], agents=factories.agents())
+    return target_key, factories.plan_panel(store, target_key, "A")
+
+
+def test_quoting_a_brief_line_passes_the_quote_check(risk_store):
+    """좌석이 E2·E3·E4 줄의 «» 안을 그대로 옮겨 인용하면 그 참조의 정규 표기 안에 있다 — 줄을 만드는 곳과 대조하는 곳이
+    같은 함수(이름 색인 · 참조 떼기)를 쓴다. 스코프는 저장 경로가 만드는 `_panel_scope` 의 것이다."""
+    from app import brief
+
+    target_key, panel = _quote_pair(risk_store)
+    built = brief.build_brief(risk_store, target_key, seats=panel["seats"], panel_id=panel["id"])
+    ctx = narrative._panel_scope(risk_store, panel["id"])[3]
+    items = dict(zip(built["keys"], (e["result"] for e in built["evidence"])))
+    checked = []
+    for key in ("E2", "E3", "E4"):
+        for line in items[key].split("\n")[1:]:
+            head = re.match(r"^\[((?:c|d):[^\]]+)\] (?:\S+ )?«([^»]*)»", line)
+            if head is None:
+                continue
+            ref, quote = head.groups()
+            canonical = narrative.canonical_text_for(ref, ctx)
+            assert canonical is not None and quote in canonical, (key, ref, quote, canonical)
+            checked.append((key, ref))
+    assert {k for k, _ in checked} == {"E2", "E3", "E4"}, checked
+    gap = next(ln for ln in items["E2"].split("\n") if " iface.gap_changed " in ln)
+    assert "PLATE_2↔PLATE_1" in gap, gap                    # target 의 표기(P-16 — 뒤 스냅샷이 이긴다)
+
+
+def test_a_diff_dim_reads_the_change_not_the_base_snapshot():
+    """diff 타깃의 `d:` 는 변화(dims_delta)가 정규 표기다 — 스코프에 스냅샷의 dims_named 가 실려도 base 값을 읽지 않는다(P-02)."""
+    from app import diff as diff_module
+
+    base_ir = {"dims_named": [{"name": "gap_a", "value": 0.35, "unit": "mm", "method": "iface_min_gap"}]}
+    target_ir = {"dims_named": [{"name": "gap_a", "value": 0.18, "unit": "mm", "method": "iface_min_gap"}]}
+    item = diff_module._dims_delta(base_ir, target_ir, {})[0]
+    scope = {"s_base": {"dims_named": {"gap_a": base_ir["dims_named"][0]}},
+             "s_tgt": {"dims_named": {"gap_a": target_ir["dims_named"][0]}}}
+    ctx = narrative.SpecContext(kind="diff", snapshot_ids=("s_base", "s_tgt"), irs=scope,
+                                diff={"parametric": {"dims_delta": [item]}})
+    assert narrative.canonical_text_for("d:gap_a", ctx) == item["text"]
+    ctx = narrative.SpecContext(kind="diff", snapshot_ids=("s_base", "s_tgt"), irs=scope, diff={})
+    assert narrative.canonical_text_for("d:gap_a", ctx) == "gap_a=0.180 mm"     # 변화가 없으면 target 의 값

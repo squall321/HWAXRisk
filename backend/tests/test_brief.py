@@ -7,6 +7,7 @@ import re
 import pytest
 
 from app import brief, common, field_source, ir_builder, narrative, render, state
+from app import diff as diff_module
 from app.adapters import ecad_stub
 from app.errors import AppError
 from app.ra_client import empty_sync
@@ -92,11 +93,11 @@ def seed_diff_target(store, *, summary: str = "[의미] 배치가 바뀌었다 [
         " VALUES (?,?,?,?,?,?,?,?)",
         ("s_tgt", "e1", OWNER, "interference", "iface", "n1", "n1", SUBJECT))
 
-    diff_json = {
-        "dims_delta": [{"name": "utg_edge_gap", "base": 0.5, "target": 0.42, "unit": "mm",
-                        "rel": -16.0, "method": "edge"}],
-        "result_delta": [{"name": "max_stress", "base": 100, "target": 120, "unit": "MPa", "rel": 20.0}],
-    }
+    # 명명 치수 변화는 생산자(`diff._dims_delta`)가 쓴 모양이다. 종전에는 최상위에 base·target 키로 손으로 써서 브리프가
+    # 같은 자리를 잘못 읽는 결함(WP1 R-10)이 가려졌다.
+    diff_json = {"parametric": {"dims_delta": diff_module._dims_delta(
+        {"dims_named": [{"name": "utg_edge_gap", "value": 0.5, "unit": "mm", "method": "edge"}]},
+        {"dims_named": [{"name": "utg_edge_gap", "value": 0.42, "unit": "mm", "method": "edge"}]}, {})}}
     store.execute(
         "INSERT INTO rr_diffs(id, owner_sub, base_snapshot_id, target_snapshot_id, base_project_id,"
         " target_project_id, pair_kind, diff_version, diff_json, summary_text, summary_status, stats_json,"
@@ -1843,3 +1844,60 @@ def test_clipped_lines_are_reported_in_meta(risk_store):
     tail = _item(built, "E2").split("\n")[-1]
     assert tail.startswith(f"[전체 {n_rows}건 — 실림 {clipped['kept']} · 생략 {clipped['omitted']} | "), tail
     assert len(brief.evidence_line(built["evidence"][built["keys"].index("E2")])) <= brief.CAPS["E2"]
+
+
+# ---------------------------------------------------------------- E3·E4 — 생산자가 쓴 자리와 필드(WP1 S7 · R-10 · R-12 · R-40)
+def test_e3_diff_target_lists_named_dims(risk_store):
+    """diff 타깃의 E3 는 `parametric.dims_delta` 의 정규 표기 몸통이다 — 종전에는 최상위를 읽어 늘 '명명 치수 없음' 이었다."""
+    from tests import factories
+
+    project_id = factories.make_project(risk_store)
+    factories.make_dim(risk_store, project_id, "plate1_t", "node[asm=a_stack/stack_asm/plate_1].attrs.min_dim")
+    factories.make_dim(risk_store, project_id, "plate2_t", "node[asm=a_stack/stack_asm/plate_2].attrs.min_dim")
+    results = factories.fixture_adapter_results()
+    revised = json.loads(json.dumps(results))
+    next(n for n in revised[0]["nodes"] if n.get("label") == "PLATE_1")["attrs"]["min_dim"] *= 0.7
+    base = factories.make_snapshot(risk_store, project_id, results, label="DV1")
+    target = factories.make_snapshot(risk_store, project_id, revised, label="DV2",
+                                     captured_at=factories.CAPTURED_AT + 86400)
+    diff = factories.make_diff(risk_store, base["snapshot_id"], target["snapshot_id"])
+    key = factories.make_target(risk_store, "diff", diff["diff_id"], agents=factories.agents())
+    dims = {d["name"]: d for d in diff["parametric"]["dims_delta"]}
+    assert dims["plate1_t"]["flag"] == "changed" and dims["plate2_t"]["flag"] == "noise"
+
+    built = brief.build_brief(risk_store, key, owner_sub=factories.OWNER, strict_lint=True)
+    e3 = _item(built, "E3").split("\n")[1:]
+    body1 = render.split_trailing_refs(dims["plate1_t"]["text"])[0]
+    body2 = render.split_trailing_refs(dims["plate2_t"]["text"])[0]
+    assert e3 == [f"[d:plate1_t] «{body1}» method=«{dims['plate1_t']['method']}»",          # 바뀐 것이 먼저
+                  f"[d:plate2_t] «{body2}» method=«{dims['plate2_t']['method']}» flag=noise"], e3
+    assert "(−30.0%)" in body1
+    assert {"d:plate1_t", "d:plate2_t"} <= set(built["refs"])
+
+
+def test_e4_diff_target_lists_result_deltas(risk_store):
+    """diff 타깃의 E4 는 `parametric.result_delta` 의 정규 표기 몸통이고 주어는 부품 이름이다(R-12 · R-8)."""
+    built = brief.build_brief(risk_store, _six_change_pair(risk_store), owner_sub="syn@example.com")
+    e4 = _item(built, "E4").split("\n")[1:]
+    assert re.match(r"^\[c:[0-9a-f]{12}\] «PLATE_1 worst_stress 231→185 MPa \(−20\.0%\)»", e4[0]), e4
+    assert not any(re.search(r"(?<![\[\w:])p:[0-9a-f]{12}", re.sub(r"\[[a-z]+:[^\]]*\]", "", ln)) for ln in e4), e4
+    changed = [i for i, ln in enumerate(e4) if "flag=" not in ln]
+    assert changed == list(range(len(changed))), e4                       # 바뀐 지표가 먼저, 잡음은 뒤
+    assert "[dyna_result 부재]" not in e4
+
+
+def test_e3_snap_line_is_the_canonical_text(risk_store):
+    """snap 타깃의 E3 몸통은 `d:` 의 snap 정규 표기(`<이름>=<값 단위>`)와 같다(R-40)."""
+    from app import ir_builder
+    from tests import factories
+
+    project_id = factories.make_project(risk_store)
+    factories.make_dim(risk_store, project_id, "plate1_t", "node[asm=a_stack/stack_asm/plate_1].attrs.min_dim")
+    snap = factories.make_snapshot(risk_store, project_id, factories.fixture_adapter_results(), label="DV1")
+    key = factories.make_target(risk_store, "snap", snap["snapshot_id"], agents=factories.agents())
+    row = next(d for d in ir_builder.load_ir(risk_store, snap["snapshot_id"])["dims_named"] if d["name"] == "plate1_t")
+    ctx = narrative.SpecContext(kind="snap", snapshot_ids=(snap["snapshot_id"],),
+                                irs={snap["snapshot_id"]: {"dims_named": {"plate1_t": row}}})
+
+    e3 = _item(brief.build_brief(risk_store, key, owner_sub=factories.OWNER), "E3").split("\n")[1:]
+    assert e3 == [f"[d:plate1_t] «{narrative.canonical_text_for('d:plate1_t', ctx)}» method=«{row['method']}»"], e3

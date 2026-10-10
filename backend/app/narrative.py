@@ -220,6 +220,7 @@ class SpecContext:
     rollup_prefixes: dict = field(default_factory=dict)  # path_prefix -> asm_key
     seats: tuple = ()                                    # 이번 패널 착석 키
     versions: dict = field(default_factory=dict)         # taxonomy_version·rule_version·ir_version·diff_version·planner_version
+    _names: dict | None = field(default=None, repr=False, compare=False)   # part_names() 의 한 번 읽은 값
 
     # ------------------------------------------------ 조회
     def field_evidence(self, kind: str, key: str, product_code: str | None = None) -> dict | None:
@@ -260,6 +261,18 @@ class SpecContext:
 
     def _scope_ids(self) -> tuple[str, ...]:
         return tuple(sid for sid in self.snapshot_ids if sid)
+
+    def part_names(self) -> dict[str, str]:
+        """{nid: 부품 이름} — 브리프와 같은 함수(`brief.name_index`)·같은 우선순위(뒤 스냅샷이 이긴다, WP1 P-16).
+
+        `node()` 는 스코프 순서(base 먼저)로 돌려주므로 이름을 거기서 읽으면 표기만 다른 이름(`Plate-1`·`PLATE_1`)에서
+        브리프 줄과 정규 표기가 갈린다. 한 번만 읽는다.
+        """
+        if self._names is None:
+            from app import brief as brief_module  # noqa: PLC0415 — 순환 import 회피(brief 는 narrative 를 쓴다).
+
+            self._names = brief_module.name_index(self.store, self._scope_ids()) if self.store is not None else {}
+        return self._names
 
     def node(self, nid: str) -> dict | None:
         """스코프 스냅샷의 IR 노드. 없으면 None."""
@@ -365,16 +378,28 @@ class SpecContext:
         return None
 
     def dim(self, name: str) -> dict | None:
-        """명명 치수 — IR dims_named 또는 diff dims_delta."""
-        for sid in self._scope_ids():
-            dims = ((self.irs.get(sid) or {}).get("dims_named")) or {}
-            if name in dims:
-                entry = dims[name]
-                return entry if isinstance(entry, dict) else {"value": entry, "name": name}
-        for item in ((self.diff or {}).get("parametric") or {}).get("dims_delta") or ():
-            if isinstance(item, dict) and item.get("name") == name:
-                return item
-        return None
+        """명명 치수 — diff 타깃은 변화(diff dims_delta)가 먼저이고 없으면 **target** 스냅샷의 dims_named 다.
+
+        snap 타깃은 스코프 스냅샷의 dims_named 다. diff 타깃에서 스코프 순서(base 먼저)로 dims_named 를 보면 스냅샷 뷰가
+        실리는 순간 브리프 E3 줄(변화 표기)을 옮긴 인용이 base 값과 견줘져 전부 불일치가 된다(WP1 P-02).
+        """
+        def from_irs(sids: Sequence[str]) -> dict | None:
+            for sid in sids:
+                dims = ((self.irs.get(sid) or {}).get("dims_named")) or {}
+                if name in dims:
+                    entry = dims[name]
+                    return entry if isinstance(entry, dict) else {"value": entry, "name": name}
+            return None
+
+        def from_diff() -> dict | None:
+            for item in ((self.diff or {}).get("parametric") or {}).get("dims_delta") or ():
+                if isinstance(item, dict) and item.get("name") == name:
+                    return item
+            return None
+
+        if self.kind == "diff":
+            return from_diff() or from_irs(self._scope_ids()[-1:])
+        return from_irs(self._scope_ids()) or from_diff()
 
     def signal(self, key: str) -> dict | None:
         for state in self.states.values():
@@ -506,7 +531,9 @@ def canonical_text_for(ref: str, ctx: SpecContext) -> str | None:
         item = ctx.diff_item(info["ref"]) or ctx.diff_item(info["id"])
         if item is None:
             return None
-        return render.event_text(item) if item.get("code") else render.param_text(item)
+        # 저장된 글의 주어는 nid 다 — 브리프 줄과 같은 이름 색인으로 바꿔 대조한다(WP1 R-40 · P-16).
+        text = render.event_text(item) if item.get("code") else render.param_text(item)
+        return render.humanize_refs(text, ctx.part_names())
     if kind == "sig":
         signal = ctx.signal(info["key"])
         return render.signal_text(info["key"], signal) if signal is not None else None

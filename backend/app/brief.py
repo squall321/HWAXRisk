@@ -647,22 +647,41 @@ def _item_e2(store, ctx, names: Mapping[str, str], *, cap: int, item_result_max:
     return out
 
 
-# ---------------------------------------------------------------- E3 명명 치수
+# ---------------------------------------------------------------- E3·E4 파라메트릭(WP1 S7)
+def _param_order(item: Mapping[str, Any]) -> tuple:
+    """바뀐 것(flag='changed'·제외 사유 없음)이 먼저, 그 안은 |rel_delta| 내림차순(없으면 뒤), 동률은 이름·cid."""
+    rel = _num_or_none(item.get("rel_delta"))
+    changed = item.get("flag") == "changed" and not item.get("excluded_reason")
+    return (0 if changed else 1, 0 if rel is not None else 1, -abs(rel) if rel is not None else 0.0,
+            _s(item.get("name")), _s(item.get("cid")))
+
+
+def _param_tail(item: Mapping[str, Any]) -> str:
+    """정규 표기에 없는 분류 — 허용오차 안의 변화(`flag=noise`)·한쪽 미측정·제외 사유. 바뀐 것은 붙이지 않는다."""
+    flag = _s(item.get("flag"))
+    tail = f" flag={flag}" if flag and flag != "changed" else ""
+    reason = _s(item.get("excluded_reason"))
+    return tail + (f" excluded_reason={reason}" if reason and reason != flag else "")
+
+
 def _item_e3(ctx) -> dict:
+    """명명 치수 — 줄 몸통은 `d:` 의 정규 표기다(좌석이 «» 안을 옮기면 인용 대조를 통과한다, R-40).
+
+    diff 타깃은 생산자가 쓴 `diff_json.parametric.dims_delta`(before·after·rel_delta·text)를 읽는다 — 종전에는 최상위의
+    `dims_delta` 를 base·target 키로 읽어 늘 '명명 치수 없음' 이었다(R-10). 바뀐 치수가 먼저다.
+    """
     source = _SOURCES["E3"][0]
     lines: list[str] = []
     if ctx["kind"] == "diff" and ctx["diff"] is not None:
         args = f"diff:{ctx['diff']['id']}"
-        for item in _j(ctx["diff"]["diff_json"], {}).get("dims_delta") or []:
-            if not isinstance(item, dict):
-                continue
-            rel = item.get("rel")
-            rel_text = f" ({rel}%)" if rel is not None else ""
-            lines.append(
-                f"[d:{_ref_name(item.get('name'))}] {_s(item.get('base'), '미측정')}"
-                f"→{_s(item.get('target'), '미측정')} "
-                f"{_q(item.get('unit'))}{rel_text} method={_q(item.get('method') or '-')}"
-            )
+        items = ((_j(ctx["diff"]["diff_json"], {}).get("parametric") or {}).get("dims_delta")) or []
+        for item in sorted((i for i in items if isinstance(i, dict)), key=_param_order):
+            name = _s(item.get("name"))
+            text = _s(item.get("text"))
+            body = render.split_trailing_refs(text)[0] if text else \
+                f"{name} " + render.fmt_change(item.get("before"), item.get("after"), item.get("unit") or "mm")
+            lines.append(f"[d:{_ref_name(name)}] {_q(body, 'note')} method={_q(item.get('method') or '-')}"
+                         f"{_param_tail(item)}")
     else:
         args = f"snap:{_s(ctx['snapshot_id'])}"
         ir = _j(ctx["snapshot"]["ir_json"], {}) if ctx["snapshot"] is not None else {}
@@ -673,15 +692,18 @@ def _item_e3(ctx) -> dict:
             value = item.get("value") if isinstance(item, dict) else item
             unit = item.get("unit") if isinstance(item, dict) else ""
             method = item.get("method") if isinstance(item, dict) else None
-            lines.append(f"[d:{_ref_name(name)}] {_s(value, '미측정')} {_q(unit)} "
-                         f"method={_q(method or '-')}")
+            # snap 의 `d:` 정규 표기와 같은 몸통(`narrative.canonical_text_for`).
+            body = f"{_s(name)}={render.fmt_value(value, unit or 'mm')}"
+            lines.append(f"[d:{_ref_name(name)}] {_q(body, 'note')} method={_q(method or '-')}")
     if not lines:
         lines = ["[명명 치수 없음 — rr_dim_defs 0건]"]
     return {"key": "E3", "args": args, "result": _body(source, lines)}
 
 
-# ---------------------------------------------------------------- E4 결과 delta
-def _item_e4(ctx) -> dict:
+def _item_e4(ctx, names: Mapping[str, str]) -> dict:
+    """결과 delta — diff 타깃은 `diff_json.parametric.result_delta` 를 읽는다(R-12). 항목에는 `name` 이 없고 주어는 dn 이다 —
+    정규 표기 몸통의 맨 nid 를 부품 이름으로 바꿔 싣는다(브리프·인용 대조가 같은 이름 색인을 쓴다). 바뀐 지표가 먼저다.
+    """
     source = _SOURCES["E4"][0]
     lines: list[str] = []
     if ctx["kind"] == "diff" and ctx["diff"] is not None:
@@ -690,14 +712,13 @@ def _item_e4(ctx) -> dict:
         if comparability.get("result_parity") is False:
             lines = ["[result_parity=false — 정성만]"]
         else:
-            for item in _j(ctx["diff"]["diff_json"], {}).get("result_delta") or []:
-                if not isinstance(item, dict):
-                    continue
-                lines.append(
-                    f"{_q(item.get('name'))} {_s(item.get('base'), '미측정')}"
-                    f"→{_s(item.get('target'), '미측정')} "
-                    f"{_q(item.get('unit'))} rel={_s(item.get('rel'), '-')}"
-                )
+            items = ((_j(ctx["diff"]["diff_json"], {}).get("parametric") or {}).get("result_delta")) or []
+            for item in sorted((i for i in items if isinstance(i, dict)), key=_param_order):
+                cid = _s(item.get("cid"))
+                ref = cid if cid.startswith("c:") else f"c:{cid}"
+                body = render.split_trailing_refs(render.humanize_refs(render.param_text(item), names))[0]
+                case = f" case={_q(item['case_key_after'])}" if item.get("case_key_after") else ""
+                lines.append(f"[{ref}] {_q(body, 'note')}{case}{_param_tail(item)}")
     else:
         args = f"snap:{_s(ctx['snapshot_id'])}"
         ir = _j(ctx["snapshot"]["ir_json"], {}) if ctx["snapshot"] is not None else {}
@@ -1509,7 +1530,7 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
     # 조립하는 동안 원천 문자열 위생(§3.4.1)의 suspect_text 적재 대상을 이 스레드에 걸어 둔다.
     begin_suspect_queue(store, owner_sub)
     try:
-        # 맨 nid 를 부품 이름으로 바꾸는 표(E1·E2 — 뒤 스냅샷이 이긴다, WP1 P-16).
+        # 맨 nid 를 부품 이름으로 바꾸는 표(E1·E2·E4 — 뒤 스냅샷이 이긴다, WP1 P-16).
         names = name_index(store, (ctx["base_snapshot_id"], ctx["snapshot_id"]))
         raw: list[dict] = [
             _item_e0(store, ctx, external_ok, _panel_model(store, target_key, panel_id)),
@@ -1517,7 +1538,7 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
             _item_e1(ctx),
             _item_e2(store, ctx, names, cap=CAPS["E2"], item_result_max=CLAMP_RESULT),
             _item_e3(ctx),
-            _item_e4(ctx),
+            _item_e4(ctx, names),
             _item_e5(store, ctx, similar, owner_sub, field),
             _item_e6(store, similar, ctx),
             _item_e7(store, ctx, seats, adh),

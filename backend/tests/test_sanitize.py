@@ -92,7 +92,7 @@ def test_clean_names_stay_readable_and_refs_survive(risk_store):
     target_key = seed_diff_target(risk_store)
     built = brief.build_brief(risk_store, target_key, owner_sub=OWNER)
     e3 = "\n".join(_lines(built, "E3"))
-    assert "[d:utg_edge_gap]" in e3 and "«mm»" in e3
+    assert "[d:utg_edge_gap] «utg_edge_gap 0.500→0.420 mm (−16.0%)»" in e3
     assert "d:utg_edge_gap" in built["refs"]
 
 
