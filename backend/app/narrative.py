@@ -1789,7 +1789,9 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
                     (atom.get("detectability") or {}).get("tool"), atom.get("evidence_grade"),
                     atom.get("precedent"), 1 if atom.get("dangling") else 0, atom.get("cluster_key"),
                     json.dumps(atom, ensure_ascii=False, sort_keys=True),
-                    0 if suspect is not None else 1, "open",
+                    # 상태 열은 정규화가 보존한 원자의 상태다(open | rejected_in_panel) — 병합은 이 열로 기각을 센다.
+                    # 'open' 을 박던 동안 패널의 기각이 등록부에 한 번도 닿지 않았다(WP4 2.2 ②).
+                    0 if suspect is not None else 1, str(atom.get("status") or "open"),
                     atom.get("taxonomy_version"), versions["rule_version"], versions["ir_version"],
                     versions["diff_version"], now, now,
                 ),

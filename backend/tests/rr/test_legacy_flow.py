@@ -143,6 +143,30 @@ def test_the_queued_job_runs_through_the_runner(frozen, no_network, tmp_path):
     assert frozen.query_one("SELECT state FROM rr_jobs WHERE id = ?", (target["job_id"],))["state"] == "completed"
 
 
+def test_a_finding_the_panel_rejected_reaches_the_registry_as_rejected(frozen, no_network):
+    """패널이 기각한 원자는 rr_findings.status 열에 기각으로 앉아 등록부가 센다(WP4 0a) — 종전에는 열이 'open' 고정이었다."""
+    target = MANIFEST["targets"]["planned"]
+    panel = frozen.query_one("SELECT seats_json FROM rr_panels WHERE id = ?", (target["panel_id"],))
+    seats = [s["key"] for s in json.loads(panel["seats_json"])]
+    spec = legacy.spec_builder(frozen, target["target_key"], planner.domain_of)(seats)
+    rejected = spec["findings"][0]
+    rejected.update({"status": "rejected_in_panel", "contested_by": [planner.ADVERSARY_KEY],
+                     "contest_note": "기준선 대비 변화가 측정 오차 안이다."})
+
+    routes.complete_panel(
+        target["panel_id"], engine="mcp", decision_text=legacy.decision_text(spec),
+        turns=[{"round": r, "persona": k, "say": f"{k} 라운드 {r} 발언"} for r in (1, 2) for k in seats],
+        actor=OWNER, owner_sub=OWNER)
+
+    stored = {r["claim_uid"].rsplit("#", 1)[-1]: r["status"] for r in frozen.query(
+        "SELECT claim_uid, status FROM rr_findings WHERE panel_id = ?", (target["panel_id"],))}
+    assert stored == {"F1": "rejected_in_panel", "F2": "open", "G1": "open"}
+    rows = {json.loads(r["merged_json"])["claim"]: r for r in frozen.query(
+        "SELECT merged_json, rejected, status FROM rr_registry WHERE target_key = ?", (target["target_key"],))}
+    assert rows[rejected["claim"]]["rejected"] == 1 and rows[rejected["claim"]]["status"] == "rejected_in_panel"
+    assert all(r["rejected"] == 0 and r["status"] == "open" for c, r in rows.items() if c != rejected["claim"])
+
+
 def test_a_second_panel_on_the_done_target_saves_beside_the_old_adversary_row(frozen, no_network):
     """옛 코드가 회차 1 로 남긴 반대석 의견 행이 있는 DB 에서 같은 타깃의 두 번째 패널이 저장된다(WP1 R-1 의 옛 DB 쪽).
 
