@@ -308,3 +308,78 @@ def test_render_summary_ok_path(state):
     assert got["summary_status"] == "ok"
     assert got["violations"] == []
     assert got["summary_text"].startswith("[대상]")
+
+
+# ---------------------------------------------------------------- 표기 공용 함수(WP1 S4 — 줄을 만드는 곳과 대조하는 곳이 같은 함수)
+@pytest.fixture
+def synth_diff(risk_store):
+    """합성 다건 변경 타깃(생산자 경유) — 이벤트 글·명명 치수 글은 `diff.create_diff` 가 쓴 그대로다."""
+    from tests import factories
+
+    return factories.make_diff_target(risk_store, 40)
+
+
+def test_split_trailing_refs_on_real_diff_texts(synth_diff):
+    texts = [e["text"] for e in synth_diff.diff["semantic"]["events"]]
+    texts += [d["text"] for d in synth_diff.diff["parametric"]["dims_delta"]]
+    assert len(texts) > 30
+    for text in texts:
+        body, refs = render.split_trailing_refs(text)
+        assert refs and body + " " + refs == text, text
+        assert "[c:" not in body, text
+        assert refs.startswith("[c:"), text
+    assert render.split_trailing_refs("참조 없는 글 ") == ("참조 없는 글", "")
+
+
+def test_humanize_refs_replaces_bare_nids_only(risk_store, synth_diff):
+    from app import brief
+
+    names = brief.name_index(risk_store, (synth_diff.base_snapshot_id, synth_diff.target_snapshot_id))
+    events = [e for e in synth_diff.diff["semantic"]["events"] if e["code"] == "iface.gap_changed"]
+    assert events
+    for event in events:
+        dn_a, dn_b = event["subject"]["dns"]
+        assert event["text"].startswith(f"{dn_a}↔{dn_b} ")       # 생산자는 지금 nid 로 적는다(R-8)
+        out = render.humanize_refs(event["text"], names)
+        assert out.startswith(f"{names[dn_a]}↔{names[dn_b]} "), out
+        assert not re.search(r"(?<![\[\w:])p:[0-9a-f]{12}", render.split_trailing_refs(out)[0]), out
+    assert render.humanize_refs("[p:8051c8e0492d] 그대로", {"p:8051c8e0492d": "PLATE_2"}) == "[p:8051c8e0492d] 그대로"
+    assert render.humanize_refs("p:0123456789ab↔p:8051c8e0492d", {"p:8051c8e0492d": "PLATE_2"}) == \
+        "p:0123456789ab↔PLATE_2"
+    assert render.humanize_refs("p:8051c8e0492d", {"p:8051c8e0492d": ""}) == "p:8051c8e0492d"
+
+
+@pytest.mark.parametrize("name", ["HOOK_L", "PLATE  1​", "줄\n바꿈\t탭 이름", "강화유리 «창» BRACKET",
+                                  "  앞뒤 공백  ", "Stack\\PLATE_1"])
+def test_norm_quote_makes_a_sanitized_line_a_substring(name):
+    shown = render.sanitize_source_text(name, "note")
+    assert render.norm_quote(shown) in render.norm_quote(name)
+    assert render.norm_quote(f"«{name}» 0.400→0.220 mm (−45.0%)").endswith("0.400→0.220 mm (−45.0%)")
+
+
+@pytest.mark.parametrize("lexicon_id", LEXICON_IDS)
+def test_shield_line_cleans_every_lexicon_entry(lexicon_id):
+    from app import brief
+
+    sentence = dict((i, s) for i, s, _ in LEXICON_CASES)[lexicon_id]
+    line = f"[의미] [c:5b0e11aa22bb] {sentence} reg:diff:d0#clu1"
+    assert lint_text(line)["ok"] is False
+    shielded, n = render.shield_line(line)
+    assert lint_text(shielded)["ok"] is True, shielded
+    assert n >= 1
+    assert render.shield_line(shielded) == (shielded, 0)
+    assert brief._REF_TOKEN.findall(shielded) == brief._REF_TOKEN.findall(line)
+    assert shielded.startswith("[의미] [c:5b0e11aa22bb] ")
+
+
+def test_shield_line_leaves_a_clean_line_alone():
+    line = "[의미] PLATE_1 min_dim 1.200→1.000 mm (−16.7%) [c:5b0e11aa22bb]"
+    assert render.shield_line(line) == (line, 0)
+
+
+def test_shield_line_falls_back_to_the_whole_tail():
+    """토큰 하나가 참조와 붙어 있어 낱말만 감쌀 수 없으면 줄 머리 태그 뒤를 통째로 싼다."""
+    line = "[재료] HOOK[c:aaaaaaaaaaaa] 강화«유리» 이름"
+    shielded, n = render.shield_line(line)
+    assert lint_text(shielded)["ok"] is True and n == 1
+    assert shielded.startswith("[재료] «") and shielded.endswith("»")

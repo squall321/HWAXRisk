@@ -279,3 +279,17 @@ def test_tx_yields_the_connection(risk_store):
         assert conn is risk_store.conn
         conn.execute("INSERT INTO rr_dim_vocab(name, kind) VALUES (?, ?)", ("direct", "gap"))
     assert _vocab(risk_store, "direct") is not None
+
+
+# ---------------------------------------------------------------- 좌석 키(계약 C-4 — 정본은 'key')
+def test_seat_key_reads_planner_seats(risk_store):
+    from app.common import seat_key
+    from tests import factories
+
+    synth = factories.make_diff_target(risk_store, 3)
+    panel = factories.plan_panel(risk_store, synth.target_key, "A")
+    assert panel and panel["seats"]
+    assert all(seat_key(s) == s["key"] != "" for s in panel["seats"])
+    assert seat_key({"agent_key": "x"}) == "x"
+    assert seat_key({"key": " y "}) == "y"
+    assert seat_key({}) == ""

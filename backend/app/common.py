@@ -8,7 +8,7 @@ import re
 import time
 import uuid
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 import httpx
 
@@ -24,6 +24,7 @@ __all__ = [
     "REF_SCHEMES",
     "make_ref",
     "parse_ref",
+    "seat_key",
 ]
 
 
@@ -309,3 +310,13 @@ def make_ref(kind: str, **parts: Any) -> str:
     if parse_ref(ref) is None:
         raise ValueError(f"make_ref({kind!r}): 만들어진 참조를 되읽을 수 없습니다 — {ref!r}.")
     return ref
+
+
+# ---------------------------------------------------------------- 좌석 키(계약 C-4)
+def seat_key(seat: Mapping[str, Any]) -> str:
+    """좌석 dict 의 전문가 키 — 정본은 'key'(편성기·seats_json). 옛 호출자의 'agent_key' 도 받는다.
+
+    'agent_key' 는 원장 표의 열 이름이다. 좌석 dict 를 읽는 곳이 둘 중 하나만 보면 다른 쪽 모양의 좌석이 말없이 빠진다
+    (WP1 R-14 — 브리프 E7 이 편성기 좌석을 한 번도 읽지 못했다).
+    """
+    return str(seat.get("key") or seat.get("agent_key") or "").strip()

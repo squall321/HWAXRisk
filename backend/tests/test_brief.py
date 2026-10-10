@@ -1457,3 +1457,36 @@ def test_the_stale_prefix_stacks_with_the_existing_two(risk_store):
     line = next(ln for ln in body.split("\n") if "#clu_both" in ln)
 
     assert line.startswith("[변경 주체 — 재검증 대상] [재검토·사람 제기] reg:")
+
+
+# ---------------------------------------------------------------- 이름 색인(WP1 S4 · P-16 — 뒤 스냅샷이 이긴다)
+def test_name_index_prefers_the_target_snapshot(risk_store):
+    """표기만 다른 같은 이름(`Plate-1`·`PLATE_1`)은 nid 가 같다 — 색인은 target 스냅샷의 이름을 쓴다."""
+    import copy
+
+    from tests import factories
+
+    project_id = factories.make_project(risk_store)
+    results = factories.fixture_adapter_results()
+    base_results = copy.deepcopy(results)
+    next(n for n in base_results[0]["nodes"] if n.get("label") == "PLATE_1")["label"] = "Plate-1"
+    target_results = copy.deepcopy(results)
+    mcad = target_results[0]
+    next(n for n in mcad["nodes"] if n.get("label") == "PLATE_1")["attrs"]["min_dim"] = 1.2
+    mcad["nodes"] = [n for n in mcad["nodes"] if n.get("label") != "BRACKET_L"]
+    mcad["edges"] = [e for e in mcad["edges"] if "BRACKET_L" not in e["a"] + e["b"]]
+    base = factories.make_snapshot(risk_store, project_id, base_results, label="DV1")
+    target = factories.make_snapshot(risk_store, project_id, target_results, label="DV2",
+                                     captured_at=factories.CAPTURED_AT + 86400)
+
+    def nid_of(snapshot_id: str, name: str) -> str:
+        return risk_store.query_one("SELECT nid FROM rr_ir_nodes WHERE snapshot_id = ? AND name = ?",
+                                    (snapshot_id, name))["nid"]
+
+    plate = nid_of(target["snapshot_id"], "PLATE_1")
+    assert nid_of(base["snapshot_id"], "Plate-1") == plate
+    names = brief.name_index(risk_store, (base["snapshot_id"], target["snapshot_id"]))
+    assert names[plate] == "PLATE_1"
+    assert names[nid_of(base["snapshot_id"], "BRACKET_L")] == "BRACKET_L"
+    assert brief.name_index(risk_store, (target["snapshot_id"], base["snapshot_id"]))[plate] == "Plate-1"
+    assert brief.name_index(risk_store, (None, "")) == {}

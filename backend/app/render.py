@@ -5,7 +5,7 @@ import hashlib
 import math
 import re
 import unicodedata
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 __all__ = [
     "LEXICON_VERSION",
@@ -24,6 +24,10 @@ __all__ = [
     "mask_neutral",
     "lint_text",
     "assert_clean",
+    "split_trailing_refs",
+    "humanize_refs",
+    "norm_quote",
+    "shield_line",
     "MINUS",
     "fmt_num",
     "fmt_signed",
@@ -250,6 +254,95 @@ def assert_clean(text: str, section: str = "") -> str:
     if not result["ok"]:
         raise JudgementLintError(result["violations"], result["lexicon_version"])
     return text
+
+
+# ---------------------------------------------------------------- 표기 공용 함수(WP1 S4)
+# 변경 줄을 만드는 곳(브리프 E1~E4)과 인용을 대조하는 곳(`narrative.canonical_text_for`)이 같은 함수를 쓴다 — 둘이 갈리면
+# 좌석이 읽은 글을 그대로 옮겨도 불일치가 된다(voc·paper 줄이 같은 원리로 고쳐졌다).
+_TRAILING_REFS = re.compile(r"(?:\s*\[[a-z]+:[^\]]*\])+\s*$")
+_BARE_NID = re.compile(r"(?<![\[\w:])p:[0-9a-f]{12}(?![0-9a-f\]])")
+_TOKEN_RE = re.compile(r"\S+")
+_HEAD_TAGS = re.compile(r"^(?:\[[^\]]*\]\s)+")
+
+
+def split_trailing_refs(text: str) -> tuple[str, str]:
+    """줄 끝의 참조 묶음을 뗀다 — 'A min_dim 1.200→1.000 mm (−16.7%) [c:44…] [d:x]' → ('A min_dim … (−16.7%)', '[c:44…] [d:x]').
+
+    참조가 없으면 (text.strip(), '').
+    """
+    s = text or ""
+    found = _TRAILING_REFS.search(s)
+    if found is None:
+        return s.strip(), ""
+    return s[:found.start()].strip(), s[found.start():].strip()
+
+
+def humanize_refs(text: str, name_of: Mapping[str, str] | None) -> str:
+    """대괄호 밖의 맨 `p:<12hex>` 를 이름으로 바꾼다. 이름을 모르거나 빈 문자열이면 그대로 둔다.
+
+    동결된 이벤트 글은 고치지 않고 표시·대조 시점에만 바꾼다 — 옛 diff 에도 듣고 `diff_hash` 가 흔들리지 않는다.
+    """
+    def name(m: re.Match) -> str:
+        found = name_of.get(m.group(0)) if name_of else None
+        return str(found) if found else m.group(0)
+
+    return _BARE_NID.sub(name, text or "")
+
+
+def norm_quote(text: str) -> str:
+    """인용 대조용 정규화 — «» 제거 → NFC → 개행·탭을 공백으로 → 제어·zero-width·양방향 제거 → 연속 공백 접기 → strip.
+
+    `sanitize_source_text` 와 같은 순서라 브리프 줄(위생 통과본)을 옮긴 인용이 원문 정규화의 부분 문자열이 된다.
+    «» 를 먼저 지우는 까닭은 위생이 원문 안의 «» 를 지운 뒤에 공백을 접기 때문이다. 상한·인젝션 검사는 하지 않는다.
+    부호(−)와 화살표(→)는 건드리지 않는다.
+    """
+    s = ("" if text is None else str(text)).replace(QUOTE_OPEN, "").replace(QUOTE_CLOSE, "")
+    s = unicodedata.normalize("NFC", s)
+    s = _WHITESPACE_RE.sub(" ", s)
+    s = _CONTROL_RE.sub("", s)
+    s = _STRIP_RE.sub("", s)
+    return _SPACES_RE.sub(" ", s).strip()
+
+
+def _wrap(text: str) -> str:
+    """«…» 로 감싼다 — `quote_source` 와 달리 이미 «» 로 시작·끝나는 글도 안쪽 «» 를 지우고 다시 싼다."""
+    return QUOTE_OPEN + text.replace(QUOTE_OPEN, "").replace(QUOTE_CLOSE, "") + QUOTE_CLOSE
+
+
+def shield_line(line: str) -> tuple[str, int]:
+    """판단어에 걸린 줄을 «» 로 싼다. (고친 줄, 감싼 자리 수).
+
+    1) 깨끗하면 (line, 0).
+    2) 공백으로 갈린 토큰마다 — 린터 제외 구간이 한 글자도 덮지 않은 토큰이고 그 토큰이 린터에 걸리면 «토큰».
+    3) 그래도 걸리면 줄 머리의 `[…] ` 태그들만 남기고 뒤를 통째로 싼다.
+    4) 그래도 걸리면 줄 전체를 싼다(«» 중립 패턴이 줄 전체를 덮어 반드시 깨끗하다).
+    참조 토큰은 3·4단계에서도 «» 안에 글자 그대로 남는다(참조 수집은 «» 안도 읽는다).
+    """
+    if lint_text(line)["ok"]:
+        return line, 0
+    masked = mask_neutral(line)
+    parts: list[str] = []
+    wrapped = 0
+    last = 0
+    for m in _TOKEN_RE.finditer(line):
+        token = m.group(0)
+        parts.append(line[last:m.start()])
+        if masked[m.start():m.end()] == token and not lint_text(token)["ok"]:
+            parts.append(_wrap(token))
+            wrapped += 1
+        else:
+            parts.append(token)
+        last = m.end()
+    parts.append(line[last:])
+    out = "".join(parts)
+    if lint_text(out)["ok"]:
+        return out, wrapped
+    head = _HEAD_TAGS.match(line)
+    if head is not None and line[head.end():].strip():
+        out = line[:head.end()] + _wrap(line[head.end():])
+        if lint_text(out)["ok"]:
+            return out, 1
+    return _wrap(line), 1
 
 
 # ---------------------------------------------------------------- 정규 표기 원자(plan §3.4.1)

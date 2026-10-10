@@ -305,6 +305,25 @@ def _state_row(store, snapshot_id: str | None):
     )
 
 
+def name_index(store, snapshot_ids: Sequence[str | None]) -> dict[str, str]:
+    """{nid: 이름} — rr_ir_nodes(snapshot_id, nid, name). 같은 nid 가 여러 스냅샷에 있으면 목록의 **뒤 스냅샷(target)** 이 이긴다.
+
+    nid 는 정규화한 이름 경로의 해시라 표기만 다른 이름(`Plate-1`·`PLATE_1`)이 같은 nid 를 갖는다. 브리프와 인용 대조가
+    이 함수 하나로 이름을 읽어 우선순위가 갈리지 않게 한다(WP1 P-16). 조회 1회. 빈 이름은 넣지 않는다.
+    """
+    ids = [str(s) for s in snapshot_ids if s]
+    if not ids:
+        return {}
+    rank = {sid: i for i, sid in enumerate(ids)}
+    marks = ",".join("?" for _ in ids)
+    rows = store.query(f"SELECT snapshot_id, nid, name FROM rr_ir_nodes WHERE snapshot_id IN ({marks})", ids)
+    out: dict[str, str] = {}
+    for row in sorted(rows, key=lambda r: rank.get(r["snapshot_id"], -1)):
+        if row["name"]:
+            out[str(row["nid"])] = str(row["name"])
+    return out
+
+
 def _project_code(store, project_id: str | None) -> str:
     if not project_id:
         return "-"
