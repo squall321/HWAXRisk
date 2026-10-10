@@ -438,13 +438,18 @@ def _rest_channel_absent(project_id: str) -> dict:
         _fix_gate_blocked(state_module.UNKNOWN_BLOCKING_REASON, project_id))
 
 
+# 동의는 사람이 하는 것이다 — 길잡이가 consent 를 채워 주면 next 를 그대로 따르는 에이전트가 묻지 않고 동의한 것이 되고, 원장에는
+# 웹과 똑같이 '동의함' 이 남는다(SEC-4). 그래서 args 에 넣지 않고 why 로 받으라고만 말한다.
+_CONSENT_WHY = " 동의는 사용자에게 받은 뒤에만 consent=true 를 더해 부른다(길잡이는 채워 주지 않는다)."
+
+
 def _job_step(target_key: str, tier: str, plan_tiers: list[dict]) -> dict:
     row = next((t for t in plan_tiers if t["tier"] == tier), {})
     args: dict[str, Any] = {"target_key": target_key, "tier": tier}
-    if tier == "C":
-        args["consent"] = True
     why = (f"Tier {tier} — 패널 {row.get('panels')}건 · LLM 호출 {row.get('llm_calls_low')}~{row.get('llm_calls_high')}회 추정."
            " Tier 는 누적이다(A 도메인 대표 → B → C 전원). 비용을 사용자에게 보이고 확인받은 뒤 부른다.")
+    if tier == "C":
+        why += _CONSENT_WHY
     return _step("risk_start_job", args, why)
 
 
@@ -554,8 +559,8 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
                     "risk_capture_snapshot", {"project_id": project_id},
                     "변경 심사에는 두 리비전이 필요하다 — 소스 앱에 새 리비전을 올린 뒤 같은 과제를 다시 캡처한다. 소스 앱의"
                     " 프로젝트가 바뀌었으면 risk_create_project(predecessor_project_id=이 과제) 로 새 과제를 만든다.")]),
-                _step("risk_open_target", {"kind": "snap", "ref_id": latest["id"], "consent": True},
-                      "변경 없이 지금 설계를 심사한다(현황 심사). 동의를 사용자에게 받은 뒤 부른다."),
+                _step("risk_open_target", {"kind": "snap", "ref_id": latest["id"]},
+                      "변경 없이 지금 설계를 심사한다(현황 심사)." + _CONSENT_WHY),
             ])
     else:
         facts["pair"] = {"base_snapshot_id": base["id"], "target_snapshot_id": latest["id"]}
@@ -592,8 +597,8 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
         live = [t["target_key"] for t in targets if t["superseded_by"] is None]
         if live:
             notes.append(f"살아 있는 대상 {', '.join(live)} 은 새 대상을 열면 닫힌다(superseded) — 등록부는 변경에 따라 승계된다.")
-        return answer("target", [_step("risk_open_target", {"kind": kind, "ref_id": ref_id, "consent": True},
-                                       "심사 대상을 열고 전문가 명단을 고정한다. 동의를 사용자에게 받은 뒤 부른다.")])
+        return answer("target", [_step("risk_open_target", {"kind": kind, "ref_id": ref_id},
+                                       "심사 대상을 열고 전문가 명단을 고정한다." + _CONSENT_WHY)])
     web.update(web_paths(project_id=project_id, target_key=target_key))
     facts["target"] = target
 
@@ -605,8 +610,8 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
         fix = (fix_register_pat() + " 그 뒤 risk_open_target 을 같은 인자로 다시 부르면 명단을 받는다." if not creds["roster"]
                else "게이트웨이 전문가 조회가 비어 돌아왔다 — risk_open_target 을 같은 인자로 다시 부르면 명단을 다시 받는다.")
         blocked.append(_blocked("roster_empty", "전문가 명단이 비어 잡을 만들 수 없다.", fix))
-        return answer("roster", [_step("risk_open_target", {"kind": kind, "ref_id": ref_id, "consent": True},
-                                       "명단을 다시 받는다(이미 연 대상이면 그것을 돌려주고 명단만 고정한다).")])
+        return answer("roster", [_step("risk_open_target", {"kind": kind, "ref_id": ref_id},
+                                       "명단을 다시 받는다(이미 연 대상이면 그것을 돌려주고 명단만 고정한다)." + _CONSENT_WHY)])
     plan_tiers = planner.tier_plan(store, target_key)["tiers"]
     facts["tier_plan"] = plan_tiers
 

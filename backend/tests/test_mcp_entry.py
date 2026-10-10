@@ -11,7 +11,7 @@ import pytest
 from starlette.requests import Request
 
 import app.mcp_server as srv
-from app import config, identity, ir_builder, roster, routes, sameas
+from app import config, entry, identity, ir_builder, roster, routes, sameas
 from app import state as state_module
 from app.adapters import registry as adapters_registry
 from app.adapters.base import RestGetClient
@@ -106,6 +106,17 @@ def first_next(out: dict) -> dict:
     return out["next"][0]
 
 
+def consent_left_to_the_user(out: dict) -> None:
+    """길잡이는 동의 인자를 채워 주지 않는다 — next 를 그대로 따르면 사람에게 묻지 않고 동의한 것이 된다(SEC-4).
+
+    동의가 필요한 단계는 why 가 '사용자에게 받은 뒤 consent=true' 라고 말한다.
+    """
+    for step in out["next"]:
+        assert "consent" not in step["args"], step
+        if step["tool"] == "risk_open_target" or (step["tool"] == "risk_start_job" and step["args"].get("tier") == "C"):
+            assert "consent=true" in step["why"], step
+
+
 # ---------------------------------------------------------------- 한 바퀴 — Claude 로 올린 과제가 웹 원장에 그대로 있다
 def test_claude_entry_runs_from_project_to_job_and_lands_in_the_web_ledger(box):
     act_as(box, OWNER)
@@ -160,6 +171,7 @@ def test_claude_entry_runs_from_project_to_job_and_lands_in_the_web_ledger(box):
     out = call("risk_next_step", project_id=pid)
     assert out["where"] == "revision"
     assert {n["tool"] for n in out["next"]} >= {"risk_capture_snapshot", "risk_open_target"}
+    consent_left_to_the_user(out)
 
     apps.revise()
     second = call("risk_capture_snapshot", project_id=pid, label="DV2")
@@ -177,14 +189,15 @@ def test_claude_entry_runs_from_project_to_job_and_lands_in_the_web_ledger(box):
 
     # 5. 심사 대상 — 동의 없이는 열지 않는다. 러너 자격이 없으면 명단을 못 받고, 그 사실과 고칠 곳을 말한다.
     out = call("risk_next_step", project_id=pid)
-    assert out["where"] == "target" and first_next(out)["args"] == {
-        "kind": "diff", "ref_id": diff["diff_id"], "consent": True}
+    assert out["where"] == "target" and first_next(out)["args"] == {"kind": "diff", "ref_id": diff["diff_id"]}
+    consent_left_to_the_user(out)
     assert call("risk_open_target", kind="diff", ref_id=diff["diff_id"])["error"] == "E100"
     opened = call("risk_open_target", kind="diff", ref_id=diff["diff_id"], consent=True)
     target_key = opened["target_key"]
     assert opened["created"] is True and opened["roster_size"] == 0 and opened["roster_source"] == "unavailable"
     out = call("risk_next_step", project_id=pid)
     assert out["where"] == "roster"
+    consent_left_to_the_user(out)
     blocked = {b["code"]: b for b in out["blocked"]}
     assert "#/settings" in blocked["roster_empty"]["fix"] and "포털에서 발급해 등록" in blocked["roster_empty"]["fix"]
 
@@ -232,6 +245,14 @@ def test_claude_entry_runs_from_project_to_job_and_lands_in_the_web_ledger(box):
     assert [t["target_key"] for t in page["targets"]] == [target_key]
     assert [j["id"] for j in page["jobs"]] == [job["job_id"]]
     assert [t["target_key"] for t in routes.list_targets(ident=web_ident(OWNER))["targets"]] == [target_key]
+
+
+def test_the_tier_c_step_leaves_consent_to_the_user():
+    """Tier C(전원 좌석)는 동의가 필요한 비싼 잡이다 — 길잡이가 consent 를 채워 주면 사람의 동의가 모델이 채운 값이 된다(SEC-4)."""
+    plan = [{"tier": "C", "panels": 7, "llm_calls_low": 70, "llm_calls_high": 140}]
+    step = entry._job_step("diff:d1", "C", plan)
+    assert step["tool"] == "risk_start_job" and step["args"] == {"target_key": "diff:d1", "tier": "C"}
+    consent_left_to_the_user({"next": [step]})
 
 
 # ---------------------------------------------------------------- 남의 과제에는 쓰지 못한다
