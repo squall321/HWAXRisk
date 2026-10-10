@@ -169,21 +169,30 @@ class McpHttpClient:
 
     @staticmethod
     def _unwrap(result: Mapping[str, Any]) -> Any:
-        """tools/call 결과에서 구조화 값을 꺼낸다 — structuredContent > text(JSON) > text 원문."""
+        """tools/call 결과에서 구조화 값을 꺼낸다 — structuredContent > text(JSON) > text 원문.
+
+        text 블록이 여럿이면(목록을 돌려주는 도구를 항목마다 블록 하나로 내는 서버) 전부 읽는다 — 블록마다 JSON 이면 그
+        값들의 목록, 아니면 글을 줄바꿈으로 잇는다. 종전에는 첫 블록만 읽어 목록의 둘째 항목부터 말없이 버렸다.
+        """
         if not isinstance(result, Mapping):
             return result
         if result.get("structuredContent") is not None:
             return result["structuredContent"]
         content = result.get("content")
-        if isinstance(content, list) and content:
-            first = content[0]
-            if isinstance(first, Mapping) and first.get("type") == "text":
-                text = first.get("text")
-                try:
-                    return json.loads(text)
-                except (TypeError, ValueError):
-                    return text
-        return result
+        texts = [b.get("text") for b in content if isinstance(b, Mapping) and b.get("type") == "text"] \
+            if isinstance(content, list) else []
+        if not texts:
+            return result
+        parsed = []
+        for text in texts:
+            try:
+                parsed.append(json.loads(text))
+            except (TypeError, ValueError):
+                parsed = None
+                break
+        if len(texts) == 1:
+            return parsed[0] if parsed is not None else texts[0]
+        return parsed if parsed is not None else "\n".join(str(t) for t in texts)
 
     # -- 공개 ---------------------------------------------------------------
     def call(self, name: str, arguments: Mapping[str, Any] | None = None, *,
