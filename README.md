@@ -70,7 +70,10 @@ Vite `base: './'` 로 서브패스에서 그대로 동작한다.
 env 접두는 `HWAXRISK_`(plan §8.2.6). 데이터 루트 우선순위 `HWAXRISK_DATA_DIR` > `HEAX_DATA_DIR` > `<리포>/data`. 첫 기동 시 디렉터리를
 만들고 쓸 수 없으면 기동을 중단하며, `<data>/risk_review.db` 에 v1 DDL 을 적용하고(멱등, 버전 정본은 `PRAGMA user_version`, 이력은
 `_schema_migrations`) `origin.json{hostname, app_version, schema_version, written_at}` 을 쓴다. 기존 DB 의 `user_version` 이 목표보다
-낮으면 적용 직전 `risk_review.db.pre-migrate-<ts>` 사본을 남기고, 코드보다 높으면 기동을 실패시킨다.
+낮으면 적용 직전 `risk_review.db.pre-migrate-v<출발 버전>-<ts>` 사본을 남기고, 코드보다 높으면 기동을 실패시킨다.
+이행 전체는 데이터 디렉터리의 `migrate.lock` 안에서 돈다(겹쳐 뜬 둘째 프로세스는 기다렸다가 다시 읽은 버전으로 판정한다).
+같은 출발 버전의 사본이 있고 그 뒤로 DB 가 바뀌지 않았으면 다시 뜨지 않고, 여유 공간이 DB × 1.2 보다 작으면 이행하지 않는다.
+`pre-migrate-*`·`pre-merge-*` 사본은 기동마다 갈래별로 가장 새것 둘만 남긴다.
 확장자 `.db` 는 HEAXHub `appdata-to-drive.sh` 의 `sqlite3 .backup` 원자 스냅샷 조건이다. 로컬 실행 시 리포 `data/` 는
 `.gitignore` 로 `*.db*` 를 제외한다.
 

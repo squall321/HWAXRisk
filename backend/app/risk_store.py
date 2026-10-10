@@ -1,6 +1,10 @@
 # 앱 DB(SQLite) 저장소 — RiskStore(stdlib sqlite3 + Lock), PRAGMA user_version 마이그레이션(v1 = plan §5.2.2 rr_* 41표 DDL 전문), 살림 표 _schema_migrations·_user_credentials
 from __future__ import annotations
 
+import fcntl
+import logging
+import os
+import re
 import shutil
 import sqlite3
 import threading
@@ -12,6 +16,8 @@ from typing import Any, Iterator
 
 from app import config
 from app.errors import AppError
+
+log = logging.getLogger("hwax_risk.store")
 
 # owner_sub 컬럼의 값은 heax 사용자 이메일(소문자)이다. 원천은 identity.py 의 heax `GET /api/v1/auth/me` 되묻기(plan §5.2.1·§8.2.8)이며
 # X-Heax-User-* 헤더는 service 모드 앱에 복사되지 않고 위조 가능하므로 원천으로 쓰지 않는다.
@@ -559,7 +565,80 @@ CREATE INDEX IF NOT EXISTS ix_rr_brief_calls_reuse ON rr_brief_calls(target_key,
 _DDL_V2: list[str] = _split_statements(_DDL_V2_SQL)
 
 # 버전 오름차순. 한 버전 = 한 트랜잭션. 허용 연산은 CREATE TABLE IF NOT EXISTS · ADD COLUMN · CREATE INDEX IF NOT EXISTS 뿐(plan §5.2.5 (6)).
+# 한 번 나간 버전의 문장은 고치지 않는다 — tests/test_store.py 가 버전마다 DDL 해시를 못 박는다.
 MIGRATIONS: list[tuple[int, list[str]]] = [(1, _DDL_V1), (2, _DDL_V2)]
+
+# ---------------------------------------------------------------- 이행 안전(WP5a R3 · 반대 검토 X2-01·X2-02)
+# 이행 전체(버전 읽기 → 사본 → 버전별 트랜잭션 → 사본 정리)를 감싸는 파일 잠금. 기다린다 — HEAXHub 는 헬스가 안 오면 같은
+# 데이터 디렉터리 위에 서버를 하나 더 띄우는데, 둘째가 첫째의 이행이 끝나기 전에 같은 버전을 다시 돌리면 ADD COLUMN 이
+# `duplicate column` 으로 죽고 DB 전체 사본을 하나 더 뜬다. 러너 잠금(runner.lock)과 다른 파일이다 — 러너는 기다리지 않는다.
+MIGRATE_LOCK_FILENAME = "migrate.lock"
+# 사본은 갈래(pre-migrate · pre-merge)마다 가장 새것 둘만 남긴다. pre-merge 는 cae00 의 appdata-merge-from-drive.sh 가
+# update-all 마다 `<db>.pre-merge-<UTC 시각>` 으로 남기고 지우지 않는 사본이다 — 앱이 제 데이터 디렉터리를 정리한다.
+BACKUP_KEEP = 2
+# 사본을 뜨기 전 여유 공간 ≥ DB 크기 × 이 값. 모자라면 복사도 이행도 하지 않는다(반쯤 쓴 사본으로 디스크를 채우지 않는다).
+BACKUP_SPACE_FACTOR = 1.2
+# 같은 출발 버전의 사본이 있고 그 뒤로 DB 가 바뀌지 않았으면(크기 같고 수정 시각이 이만큼 안) 다시 뜨지 않는다. 실패하는
+# 이행을 허브가 45초마다 다시 띄워도 사본이 하나로 남는다. 파일시스템의 시각 단위가 굵어도 같게 보도록 2초를 준다.
+BACKUP_SAME_MTIME_NS = 2_000_000_000
+_PRE_MIGRATE_RE = re.compile(r"\.pre-migrate-(?:v(?P<version>\d+)-)?(?P<stamp>\d+)$")
+_PRE_MERGE_RE = re.compile(r"\.pre-merge-(?P<stamp>[0-9TZ:-]+)$")
+
+
+@contextmanager
+def _file_lock(path: Path) -> Iterator[None]:
+    """`path` 를 fcntl.flock(LOCK_EX) 으로 잡는다(기다린다). 닫으면 풀린다 — 파일은 지우지 않는다(지우면 다음 프로세스가
+    새 inode 를 잡아 둘이 동시에 쥔다)."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def _backups(db_path: Path) -> dict[str, list[tuple[Any, int | None, Path]]]:
+    """그 DB 의 사본을 갈래별로 — [(정렬 열쇠, 출발 버전 또는 None, 경로)] 오래된 것부터."""
+    out: dict[str, list[tuple[Any, int | None, Path]]] = {"pre-migrate": [], "pre-merge": []}
+    head = db_path.name
+    for path in db_path.parent.glob(f"{head}.pre-*"):
+        tail = path.name[len(head):]
+        migrate = _PRE_MIGRATE_RE.fullmatch(tail)
+        if migrate is not None:
+            version = migrate.group("version")
+            out["pre-migrate"].append((int(migrate.group("stamp")), int(version) if version else None, path))
+            continue
+        merge = _PRE_MERGE_RE.fullmatch(tail)
+        if merge is not None:
+            out["pre-merge"].append((merge.group("stamp"), None, path))
+    for items in out.values():
+        items.sort(key=lambda item: (item[0], item[2].name))
+    return out
+
+
+def prune_backups(db_path: Path | str, *, keep: int = BACKUP_KEEP, protect_version: int | None = None) -> list[str]:
+    """`<db>.pre-migrate-*` · `<db>.pre-merge-*` 를 갈래마다 가장 새것 keep 개만 남기고 지운다. 지운 파일 이름을 돌려준다.
+
+    `protect_version` 을 주면 그 버전에서 출발한 pre-migrate 사본은 몇 개든 지우지 않는다 — 이제 막 그 버전을 올리려는
+    참이라 그 사본이 유일하게 옛 코드와 맞는 것이다. 다 쓰지 못한 사본(`.pre-migrate-*.tmp`)은 죽은 복사의 찌꺼기라 지운다
+    (부르는 곳은 migrate.lock 안이라 쓰는 중인 다른 복사가 없다). 지우지 못한 것은 건너뛴다 — 기동을 막지 않는다.
+    """
+    db_path = Path(db_path)
+    removed: list[str] = []
+    doomed = list(db_path.parent.glob(f"{db_path.name}.pre-migrate-*.tmp"))
+    for items in _backups(db_path).values():
+        survivors = {path for _, _, path in (items[-keep:] if keep > 0 else [])}
+        doomed += [path for _, version, path in items
+                   if path not in survivors and not (protect_version is not None and version == protect_version)]
+    for path in doomed:
+        try:
+            path.unlink()
+            removed.append(path.name)
+        except OSError as exc:
+            log.warning("사본 %s 를 지우지 못했다(건너뛴다): %s", path.name, exc)
+    if removed:
+        log.info("오래된 DB 사본 %d개를 지웠다 — %s", len(removed), ", ".join(sorted(removed)))
+    return removed
 
 # 살림 표 2개 — rr_ 접두가 아니고 export 대상이 아니다(plan §5.2.5 (6)·§8.2.7). 버전 밖에서 항상 CREATE TABLE IF NOT EXISTS.
 # _user_credentials 열 정의는 plan §8.2.7 전문 그대로다 — 평문 열 portal_pat 은 폐기고 값은 portal_pat_enc(BLOB) 하나에만 있다.
@@ -608,10 +687,12 @@ class RiskStore:
     def migrate(self) -> int:
         """PRAGMA user_version(정본) 보다 높은 버전만 순서대로 적용한다(멱등). 이력은 _schema_migrations 에 남긴다.
 
-        기존 DB 에 적용할 버전이 있으면 적용 직전 `risk_review.db.pre-migrate-<ts>` 사본을 남기고(plan §5.2.5 (6)),
-        DB 버전이 코드 최대 버전보다 높으면 예외(기동 실패). 적용 후 살림 표 2개를 만들고 버전을 돌려준다.
+        전체를 데이터 디렉터리의 migrate.lock 안에서 돈다 — 겹쳐 뜬 둘째 프로세스는 첫째가 끝날 때까지 기다렸다가 다시
+        읽은 버전으로 판정한다. 기존 DB 에 적용할 버전이 있으면 적용 직전 `<db>.pre-migrate-v<출발 버전>-<ts>` 사본을
+        남긴다(plan §5.2.5 (6)). 같은 출발 버전의 사본이 있고 그 뒤로 DB 가 바뀌지 않았으면 다시 뜨지 않는다(X2-01).
+        DB 버전이 코드 최대 버전보다 높으면 예외(기동 실패). 끝나면 사본을 갈래마다 둘만 남기고 살림 표 2개를 만든다.
         """
-        with self._lock:
+        with self._lock, _file_lock(self.db_path.parent / MIGRATE_LOCK_FILENAME):
             conn = self.conn
             current = self._schema_version_unlocked()
             latest = MIGRATIONS[-1][0]
@@ -621,14 +702,20 @@ class RiskStore:
                     f"DB 스키마 버전({current})이 앱 코드({latest})보다 높습니다 — 앱을 갱신하세요.",
                 )
             if self._existed and current < latest:
-                self._backup_unlocked(f"pre-migrate-{int(time.time())}")
+                prune_backups(self.db_path, protect_version=current)
+                self._backup_once_unlocked(current)
             conn.execute(_HOUSEKEEPING_DDL[0])
             conn.commit()
             for version, statements in MIGRATIONS:
                 if version <= current:
                     continue
                 try:
-                    conn.execute("BEGIN")
+                    # IMMEDIATE 로 쓰기 잠금을 먼저 잡고 그 안에서 버전을 다시 읽는다 — 파일 잠금이 듣지 않는 자리
+                    # (다른 박스의 같은 NFS 디렉터리 등)에서도 이미 올라간 버전을 두 번 돌리지 않는다.
+                    conn.execute("BEGIN IMMEDIATE")
+                    if self._schema_version_unlocked() >= version:
+                        conn.rollback()
+                        continue
                     for sql in statements:
                         conn.execute(sql)
                     conn.execute(
@@ -643,13 +730,45 @@ class RiskStore:
             for sql in _HOUSEKEEPING_DDL:
                 conn.execute(sql)
             conn.commit()
+            prune_backups(self.db_path)
             return self._schema_version_unlocked()
 
-    def _backup_unlocked(self, suffix: str) -> Path:
-        """WAL 을 체크포인트한 뒤 DB 파일을 `<db>.<suffix>` 로 복사한다."""
+    def _backup_once_unlocked(self, current: int) -> Path:
+        """출발 버전 `current` 의 이행 전 사본을 뜬다 — 이미 같은 내용의 사본이 있으면 그것을 돌려준다.
+
+        WAL 을 체크포인트한 뒤 `<사본>.tmp` 로 복사하고 다 쓰면 이름을 바꾼다(반쯤 쓴 사본이 완성본처럼 남지 않는다).
+        여유 공간이 DB 크기 × BACKUP_SPACE_FACTOR 보다 작거나 복사가 실패하면 E300 이다 — 이행하지 않는다.
+        """
         self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-        target = self.db_path.with_name(f"{self.db_path.name}.{suffix}")
-        shutil.copy2(self.db_path, target)
+        live = self.db_path.stat()
+        for _, version, path in reversed(_backups(self.db_path)["pre-migrate"]):
+            if version != current:
+                continue
+            try:
+                copy = path.stat()
+            except OSError:
+                continue
+            if copy.st_size == live.st_size and abs(copy.st_mtime_ns - live.st_mtime_ns) < BACKUP_SAME_MTIME_NS:
+                log.info("이행 전 사본 %s 가 이미 있다(그 뒤로 DB 가 바뀌지 않았다) — 다시 뜨지 않는다", path.name)
+                return path
+        wal = self.db_path.with_name(f"{self.db_path.name}-wal")
+        need = int((live.st_size + (wal.stat().st_size if wal.is_file() else 0)) * BACKUP_SPACE_FACTOR)
+        free = shutil.disk_usage(self.db_path.parent).free
+        if free < need:
+            raise AppError(
+                "E300",
+                f"이행 전 사본을 뜰 여유 공간이 없다 — 남은 {free}바이트 < 필요 {need}바이트(DB × {BACKUP_SPACE_FACTOR})."
+                f" v{current} 에서 올리지 않고 기동을 멈춘다. 데이터 디렉터리({self.db_path.parent})를 비운 뒤 다시 띄운다.",
+            )
+        target = self.db_path.with_name(f"{self.db_path.name}.pre-migrate-v{current}-{int(time.time())}")
+        tmp = target.with_name(target.name + ".tmp")
+        try:
+            shutil.copy2(self.db_path, tmp)
+            os.replace(tmp, target)
+        except OSError as exc:
+            tmp.unlink(missing_ok=True)
+            raise AppError("E300", f"이행 전 사본을 뜨지 못했다({exc}) — v{current} 에서 올리지 않고 기동을 멈춘다.") from exc
+        log.info("이행 전 사본 %s 를 떴다(v%s)", target.name, current)
         return target
 
     def _schema_version_unlocked(self) -> int:
