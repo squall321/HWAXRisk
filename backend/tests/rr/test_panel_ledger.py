@@ -555,3 +555,30 @@ def test_a_report_that_cannot_be_built_does_not_undo_the_panel(all_domains, monk
     assert "report_build_failed" in quality["flags"] and "보고서 조립이 터졌다" in quality["report_build_error"]
     assert all_domains.store.query_one("SELECT level FROM rr_targets WHERE target_key = ?",
                                        (all_domains.target_key,))["level"] == "C1"
+
+
+def test_a_claude_submission_that_fails_to_save_leaves_the_planned_panel_planned(ledger, monkeypatch):
+    """Claude(MCP) 회수 길도 저장이 터지면 반쪽 없이 물러난다 — 미리 편성된 패널은 planned·좌석 assigned 그대로라 다시 낼 수
+    있다. 종전에는 좌석을 running 으로 옮기는 일이 트랜잭션 밖이라 패널·좌석이 running 에 굳어 그 타깃이 재기동까지 멈췄다."""
+    from app import registry, routes
+
+    panel = factories.plan_panel(ledger.store, ledger.target_key, "C")
+    keys = [s["key"] for s in panel["seats"]]
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("디스크가 찼다")
+
+    monkeypatch.setattr(registry, "merge", broken)
+    turns = [{"round": r, "persona": k, "say": f"{k} 라운드 {r} 발언"} for r in (1, 2) for k in keys]
+    with factories.routes_store(ledger.store), pytest.raises(RuntimeError):
+        routes.complete_panel(panel["id"], engine="mcp", decision_text=DECISION, turns=turns,
+                              actor=OWNER, owner_sub=OWNER)
+    assert _panel(ledger.store, panel["id"])["status"] == "planned"
+    assert {s for s, _, _ in _seat_rows(ledger.store, ledger.target_key, keys).values()} == {"assigned"}
+
+    monkeypatch.undo()
+    with factories.routes_store(ledger.store):
+        out = routes.complete_panel(panel["id"], engine="mcp", decision_text=DECISION, turns=turns,
+                                    actor=OWNER, owner_sub=OWNER)
+    assert out["coverage_updated"] is True and _panel(ledger.store, panel["id"])["status"] == "done"
+    assert planner.check_invariants(ledger.store, ledger.target_key) == []

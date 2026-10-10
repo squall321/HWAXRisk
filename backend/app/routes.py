@@ -2755,10 +2755,6 @@ def complete_panel(panel_id: str, *, engine: str, decision_text: str, turns: lis
     store = get_store()
     now = now_epoch()
 
-    # planned 패널은 좌석이 assigned 다 — 종결 전에 running 으로 이어 원장 상태를 맞춘다(§6.8.2 전이표).
-    if panel["status"] == "planned":
-        planner.start_panel_seats(store, panel_id)
-
     # engine·tool_mode — MCP 경로는 좌석 도구 호출 경로가 없어 evidence_only 등급이다(§6.11).
     # 재제출은 기존 engine·tool_mode 를 유지한다(§6.11 재제출 행).
     engine_stored = str(panel["engine"] or engine) if resubmit else engine
@@ -2801,6 +2797,10 @@ def complete_panel(panel_id: str, *, engine: str, decision_text: str, turns: lis
 
     # 상태 전이·서술 저장·좌석 회계·등록부 병합은 한 트랜잭션이다 — 중간 실패의 반쪽 저장을 막는다.
     with store.tx():
+        # planned 패널은 좌석이 assigned 다 — 종결 전에 running 으로 이어 원장 상태를 맞춘다(§6.8.2 전이표). 이 전이도
+        # 같은 트랜잭션이다 — 밖에서 커밋하면 저장이 터졌을 때 패널·좌석이 running 에 굳어 그 타깃이 멈춘다.
+        if panel["status"] == "planned":
+            planner.start_panel_seats(store, panel_id)
         if panel["status"] == "error":
             # error 로 닫힌 패널의 좌석은 pending·panel_id NULL 이라 원장 갱신(apply_seat_results)이 건너뛴다 — 먼저
             # 그 패널로 되찾는다. 한 석이라도 다른 데 가 있으면 다시 앉히지 않는다(WP1 R-5).
