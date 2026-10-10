@@ -13,6 +13,7 @@ import json
 import re
 import shutil
 import sqlite3
+from copy import deepcopy
 from pathlib import Path
 
 import httpx
@@ -165,6 +166,38 @@ def test_a_finding_the_panel_rejected_reaches_the_registry_as_rejected(frozen, n
         "SELECT merged_json, rejected, status FROM rr_registry WHERE target_key = ?", (target["target_key"],))}
     assert rows[rejected["claim"]]["rejected"] == 1 and rows[rejected["claim"]]["status"] == "rejected_in_panel"
     assert all(r["rejected"] == 0 and r["status"] == "open" for c, r in rows.items() if c != rejected["claim"])
+
+
+def test_a_rejected_atom_mixed_with_a_surviving_one_leaves_c2_open_and_the_fail_standing(frozen, no_network):
+    """반대석이 기각시킨 원자와 같은 클러스터(기전·대상·변화 종류)에 다른 좌석의 살아남은 원자가 섞이면, 등록부 행은 살아남은
+    쪽만 지지·이의로 센다(contested 0 · rejected 1). 그 기각은 패널이 이미 받아들였다 — C2 의 '반대석 기각이 등록부에
+    표기됐는가' 가 그 원자를 다시 찾아 영구히 거짓이 되면 안 된다(RR-ADV-2). 살아남은 FAIL 은 no-go 그대로다 — contested 를
+    기각 원자까지 세면 contested 1 · support 1 이 되어 그 FAIL 이 '반대석 기각' 으로 읽혀 숨는다."""
+    target = MANIFEST["targets"]["planned"]
+    panel = frozen.query_one("SELECT seats_json FROM rr_panels WHERE id = ?", (target["panel_id"],))
+    seats = [s["key"] for s in json.loads(panel["seats_json"])]
+    spec = legacy.spec_builder(frozen, target["target_key"], planner.domain_of)(seats)
+    rejected = spec["findings"][0]
+    rejected.update({"judgement": "FAIL", "status": "rejected_in_panel", "contested_by": [planner.ADVERSARY_KEY],
+                     "contest_note": "기준선 대비 변화가 측정 오차 안이다."})
+    spec["findings"].append({**deepcopy(rejected), "id": "F9", "raised_by": [seats[1]], "status": "open",
+                             "contested_by": [], "contest_note": ""})
+
+    routes.complete_panel(
+        target["panel_id"], engine="mcp", decision_text=legacy.decision_text(spec),
+        turns=[{"round": r, "persona": k, "say": f"{k} 라운드 {r} 발언"} for r in (1, 2) for k in seats],
+        actor=OWNER, owner_sub=OWNER)
+
+    mixed = [dict(r) for r in frozen.query(
+        "SELECT support, contested, rejected, status, merged_json FROM rr_registry WHERE target_key = ?",
+        (target["target_key"],)) if json.loads(r["merged_json"])["claim"] == rejected["claim"]]
+    assert [(r["support"], r["contested"], r["rejected"], r["status"]) for r in mixed] == [(1, 0, 1, "open")]
+    # 반대석의 기각 사유는 섞인 행에도 남는다 — 기각 원자 이름으로(지지·이의 수는 살아남은 원자만 센다).
+    notes = json.loads(mixed[0]["merged_json"])["contest_notes"]
+    assert [n["note"] for n in notes] == ["기준선 대비 변화가 측정 오차 안이다."]
+    level = registry.close_level(frozen, target["target_key"], persist=False)
+    assert level["detail"]["contested_marked"] is True
+    assert registry.verdict_candidate(frozen, target["target_key"])["verdict"] == "no-go"
 
 
 def test_the_report_and_the_domain_filter_read_the_keys_the_schema_writes(frozen, no_network):

@@ -220,14 +220,21 @@ def _merge_cluster(target_key: str, stored_key: str, base_key: str, bucket: str,
     weak_subject = False
     w_det = 1.0
 
+    # 이의 사유는 기각 원자 것까지 모은다 — 살아남은 원자와 섞인 클러스터에서 반대석이 왜 그 원자를 기각시켰는지가 사라지지
+    # 않게(RR-ADV-2). 이의 수(contested)는 살아남은 원자만 센다 — 기각 원자까지 세면 살아남은 FAIL 이 '반대석 기각' 으로
+    # 읽혀(verdict_candidate 의 contested < support) no-go 가 숨고 우선순위에 ×0.8 이 붙는다.
+    for m in all_members:
+        fj = m["_json"]
+        contested_by = [str(x) for x in _as_list(fj.get("contested_by"))]
+        if contested_by:
+            note = _clean_str(fj.get("contest_note"))
+            contest_notes.append({"finding_id": m["finding_id"], "by": sorted(set(contested_by)), "note": note})
+
     for m in members:
         fj = m["_json"]
         contested_by = [str(x) for x in _as_list(fj.get("contested_by"))]
         if ADVERSARY_KEY in contested_by:
             contested += 1
-        if contested_by:
-            note = _clean_str(fj.get("contest_note"))
-            contest_notes.append({"finding_id": m["finding_id"], "by": sorted(set(contested_by)), "note": note})
         for key in _as_list(fj.get("raised_by")):
             if str(key) not in raised_by:
                 raised_by.append(str(key))
@@ -872,7 +879,12 @@ def _panel_rows(store: RiskStore, target_key: str) -> list[dict]:
 
 
 def _contested_marking_done(store: RiskStore, target_key: str) -> bool:
-    """반대석이 기각을 요구한 finding 이 전부 등록부 contested 로 표기됐는지(plan §6.9 C2 조건)."""
+    """반대석이 기각을 요구한 finding 이 전부 등록부 contested 로 표기됐는지(plan §6.9 C2 조건).
+
+    패널이 기각을 받아들인 원자(status='rejected_in_panel')는 건너뛴다 — 등록부는 그것을 contested 가 아니라 rejected 와
+    merged.rejected_refs 로 표기한다. 살아남은 원자와 같은 클러스터에 섞이면 그 행의 contested 는 살아남은 원자만 세어 0 일 수
+    있고, 그 원자를 여기서 다시 찾으면 C2 가 말없이 영구히 거짓이 됐다(RR-ADV-2).
+    """
     contested_clusters = {
         strip_improvement_suffix(_clean_str(r["cluster_key"]))
         for r in store.query(
@@ -880,8 +892,11 @@ def _contested_marking_done(store: RiskStore, target_key: str) -> bool:
         )
     }
     for row in store.query(
-        "SELECT cluster_key, finding_json FROM rr_findings WHERE target_key = ? ORDER BY finding_id", (target_key,)
+        "SELECT cluster_key, finding_json, status FROM rr_findings WHERE target_key = ? ORDER BY finding_id",
+        (target_key,)
     ):
+        if _clean_str(row["status"]) == "rejected_in_panel":
+            continue
         fj = _loads(row["finding_json"], {})
         if ADVERSARY_KEY in [str(x) for x in _as_list(fj.get("contested_by"))]:
             if strip_improvement_suffix(_clean_str(row["cluster_key"])) not in contested_clusters:
