@@ -124,7 +124,7 @@ class FakePanelEngine:
 def fake_narrative(recorder: dict) -> types.SimpleNamespace:
     """narrative 대역 — 러너가 부르는 세 함수만 갖춘다(실물은 배선 담당이 채운다)."""
 
-    def prior_evidence(store, target_key, *, user_memo=None, seats=None, panel_id=None, exclude=()):
+    def prior_evidence(store, target_key, *, user_memo=None, seats=None, panel_id=None, exclude=(), meta_out=None):
         recorder["prior_evidence"] = {"target_key": target_key, "user_memo": user_memo}
         return [{"source": "rr_state", "tool": "gates", "args": target_key, "result": "G1 pass"}]
 

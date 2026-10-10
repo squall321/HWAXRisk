@@ -65,7 +65,8 @@ _SOURCES: dict[str, tuple[str, str]] = {
 
 # 인용 추적 대상 스킴(plan §5.6.4).
 _TRACKED_SCHEMES = ("reg", "narr", "rule", "c", "d")
-_REF_TOKEN = re.compile(r"\b(?:reg|narr|rule|c|d|sig|warn|gate|p|e|rpt|inc|card):[^\s\]|]+")
+# 끝 문자 집합에 «» 를 넣지 않는다 — 판단어 방패가 줄 뒤쪽을 통째로 «» 로 싸면 닫는 » 가 마지막 참조에 딸려 들어간다(WP1 S5-c).
+_REF_TOKEN = re.compile(r"\b(?:reg|narr|rule|c|d|sig|warn|gate|p|e|rpt|inc|card):[^\s\]|«»]+")
 
 # §7.3 교집합 가중.
 # 별칭으로 이어진 subject 는 정확 매치보다 한 급 낮게 센다(연결이 사람 확정 별칭에 기댄다).
@@ -1306,6 +1307,45 @@ def lint_items(items: Sequence[Mapping[str, Any]]) -> dict:
     return {"ok": not violations, "reason": None, "violations": violations}
 
 
+def _suspect_setting() -> bool:
+    """Settings `risk_suspect_text_block`(기본 true) — 위생(`render.sanitize_source_text`)과 같은 손잡이다."""
+    return bool(getattr(config.settings, "risk_suspect_text_block", True))
+
+
+def _shield_entry(entry: dict, names: Mapping[str, str], *, humanize: bool) -> list[dict]:
+    """항목의 result 를 줄마다 손본다(제자리에서 고친다). 프레이밍 줄(1번)과 인용 줄(_QUOTE_LINE)은 건너뛴다.
+
+    humanize 면 저장된 글(E1 요약)이다 — 맨 `p:<hex>` 를 부품 이름으로 바꾸고, 위생을 거치지 않은 원천 문자열이라
+    인젝션 어휘에 걸리면 줄 머리 태그 뒤를 자리표시자로 바꿔 큐에 올린다. 그다음 판단어에 걸린 줄을 `render.shield_line`
+    으로 싼다. 반환은 손댄 줄만 — `[{item, line_no, ids, tokens}]`(자리표시자로 바꾼 줄은 `suspect` 를 더한다).
+    """
+    lines = str(entry.get("result") or "").split("\n")
+    touched: list[dict] = []
+    for index, line in enumerate(lines):
+        if index == 0 or _QUOTE_LINE.match(line.strip()):
+            continue
+        record: dict[str, Any] = {}
+        if humanize:
+            line = render.humanize_refs(line, names)
+            hit = render.injection_hit(line)
+            if hit is not None and _suspect_setting():
+                head, tail = render.split_head_tags(line)
+                _on_suspect({"sha1": render.source_sha1(tail), "raw": tail, "lexicon_id": hit,
+                             "lexicon_version": render.INJECTION_VERSION})
+                line = head + render.suspect_placeholder(tail)
+                record["suspect"] = hit
+        report = render.lint_text(line)
+        if not report["ok"]:
+            record["ids"] = sorted({v["id"] for v in report["violations"]})
+            record["tokens"] = sorted({v["token"] for v in report["violations"]})
+            line = render.shield_line(line)[0]
+        lines[index] = line
+        if record:
+            touched.append({"item": entry["key"], "line_no": index + 1, "ids": [], "tokens": [], **record})
+    entry["result"] = "\n".join(lines)
+    return touched
+
+
 # ---------------------------------------------------------------- 브리프 조립(정본)
 def _seats_of_panel(store, target_key: str, panel_id: str | None) -> list[dict]:
     """패널 seats_json 을 읽는다. panel_id 가 없으면 그 타깃의 최근 패널을 쓴다."""
@@ -1324,7 +1364,7 @@ def _seats_of_panel(store, target_key: str, panel_id: str | None) -> list[dict]:
 
 def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | None = None,
                 panel_id: str | None = None, exclude: Sequence[str] = (), owner_sub: str | None = None,
-                adh=None, ra=None, field=None, strict_lint: bool = False,
+                adh=None, ra=None, field=None, strict_lint: bool = False, shield_lint: bool = False,
                 user_memo: str | None = None) -> dict:
     """타깃·패널을 받아 E0~E9 를 delib_opts.evidence 형식으로 조립한다(plan §5.6.2, 결정론).
 
@@ -1332,6 +1372,10 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
     남긴 자리를 빌려 제 CAP 을 넘길 수 있다 — 그래도 라인 합은 Σ CAP 이하다).
     `exclude` 는 항목 키(E6·E8 …)의 제외만 받는다 — 추가·편집은 없다(§5.7 RecallPreview).
     `user_memo` 는 지금 도는 잡의 메모다 — 안 주면 M 은 그 타깃의 최근 잡 메모를 읽는다(`_item_memo`).
+
+    판단어 — E1(저장된 요약)은 모드와 무관하게 줄마다 싸서 싣는다(원천 문자열이 날것이다). `shield_lint` 면 나머지 항목도
+    걸린 줄을 «» 로 싸서 싣고 예외를 내지 않는다(운영 경로 — 이름 하나로 그 타깃의 패널이 다 죽지 않게, WP1 S5-c).
+    무엇을 쌌는지는 `meta.shielded` 에 남는다. `strict_lint` 는 방패를 건 뒤에도 위반이 남으면 E500 이다(시험·미리보기).
     """
     ctx = _target_context(store, target_key)
     if owner_sub is None:
@@ -1361,6 +1405,16 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
         memo = _item_memo(store, target_key, user_memo)
         if memo is not None:
             raw.append(memo)
+        # 방패는 줄 단위 절단보다 먼저다 — 글자를 늘리므로 절단 뒤에 걸면 항목이 CAP 을 넘는다.
+        names = name_index(store, (ctx["base_snapshot_id"], ctx["snapshot_id"]))
+        shielded: list[dict] = []
+        for entry in raw:
+            if _SOURCES[entry["key"]][0] in _QUOTED_SOURCES:
+                continue
+            if entry["key"] == "E1":
+                shielded += _shield_entry(entry, names, humanize=True)
+            elif shield_lint:
+                shielded += _shield_entry(entry, names, humanize=False)
     finally:
         end_suspect_queue()
 
@@ -1415,6 +1469,8 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
             "excluded": sorted(excluded),
             "external_search": "available" if external_ok else "unavailable",
             "lint": lint,
+            # 판단어·인젝션에 걸려 «» 로 싸거나 자리표시자로 바꾼 줄(빈 목록이어도 싣는다). 러너가 패널 품질에 옮긴다.
+            "shielded": shielded,
             "similar_corpus_n": similar.get("corpus_n", 0),
         },
     }

@@ -1573,3 +1573,94 @@ def test_lint_items_reports_the_line_the_violation_is_on():
     planted = [{"key": "E9", "source": "rr_state.warnings_rules", "result": "[머리]\n깨끗한 줄\n[경고] 이 계면은 위험하다"}]
     lint = brief.lint_items(planted)
     assert sorted((v["item"], v["line_no"], v["token"]) for v in lint["violations"]) == [("E9", 3, "경고"), ("E9", 3, "위험")]
+
+
+# ---------------------------------------------------------------- 판단어 방패(WP1 S5-c — 운영 경로는 죽지 않고 싸서 싣는다)
+def _label_pair(store, label: str) -> str:
+    """조립법 — 어댑터 결과의 PLATE_1 라벨만 바꾼 쌍(두께도 바꿔 요약에 그 이름이 선다). target_key 를 돌려준다."""
+    from tests import factories
+
+    project_id = factories.make_project(store)
+    results = factories.fixture_adapter_results()
+    next(n for n in results[0]["nodes"] if n.get("label") == "PLATE_1")["label"] = label
+    base = factories.make_snapshot(store, project_id, results, label="DV1")
+    revised = json.loads(json.dumps(results))
+    next(n for n in revised[0]["nodes"] if n.get("label") == label)["attrs"]["min_dim"] = 0.8
+    target = factories.make_snapshot(store, project_id, revised, label="DV2", captured_at=factories.CAPTURED_AT + 86400)
+    diff = factories.make_diff(store, base["snapshot_id"], target["snapshot_id"])
+    return factories.make_target(store, "diff", diff["diff_id"], agents=factories.agents())
+
+
+@pytest.mark.parametrize("label", ["HOOK_L", "PASSIVE_CAP", "BOOKMARK", "강화유리", "안전거리 스페이서"])
+def test_part_label_with_lexicon_word_does_not_kill_the_brief(risk_store, label):
+    """저장된 요약(E1)은 원천 문자열이 날것이다 — 모드와 무관하게 줄마다 싸서 싣고, strict 조립도 완주한다(R-3)."""
+    target_key = _label_pair(risk_store, label)
+    summary = risk_store.query_one("SELECT summary_text FROM rr_diffs d JOIN rr_targets t ON t.ref_id = d.id"
+                                   " WHERE t.target_key = ?", (target_key,))["summary_text"]
+    assert not render.lint_text(summary)["ok"], "요약에 이름이 날것으로 서지 않았다 — 이 시험은 아무것도 보지 않는다"
+
+    built = brief.build_brief(risk_store, target_key, owner_sub="syn@example.com", strict_lint=True)
+    e1 = dict(zip(built["keys"], (e["result"] for e in built["evidence"])))["E1"]
+    assert render.lint_text(e1)["ok"] is True
+    assert render.norm_quote(label) in render.norm_quote(e1)            # 이름은 지워지지 않고 «» 안에 남는다
+    assert built["meta"]["shielded"] and {s["item"] for s in built["meta"]["shielded"]} == {"E1"}
+
+
+def test_shield_keeps_the_reference_tokens():
+    """방패가 줄 뒤쪽을 통째로 싸도(3단계) 참조 수집이 같은 참조를 낸다 — 닫는 » 가 참조에 딸려 들어가지 않는다."""
+    line = "[의미] HOOK[c:aaaaaaaaaaaa] reg:diff:d0#clu1"
+    shielded, n = render.shield_line(line)
+    assert n == 1 and shielded.endswith("reg:diff:d0#clu1»"), shielded
+    assert brief.collect_refs([{"result": shielded}]) == brief.collect_refs([{"result": line}]) == \
+        ["c:aaaaaaaaaaaa", "reg:diff:d0#clu1"]
+    assert narrative.cited_refs_in(shielded) == narrative.cited_refs_in(line)
+
+
+def test_every_line_shape_the_runner_can_carry_is_strict_clean(risk_store):
+    """러너 길이 실을 수 있는 줄 모양을 한 타깃에 모아 strict 로 조립한다 — 합성 다건 쌍(부품 이름에 판단어) · 접두가 달린
+    선례 · E10 의 `[전작] voc:` 줄 · 편성기 좌석. 새 줄 모양을 더하는 걸음(S6·S7·S8)은 이 원장에 그 모양이 나오게 입력을 더한다."""
+    from app import identity, registry, routes
+    from tests import factories
+
+    target = factories.make_diff_target(risk_store, 40)
+    with factories.routes_store(risk_store):
+        routes.patch_project(target.project_id, routes.ProjectPatchBody(predecessor_product_code="F6-2023"),
+                             ident=factories.ident())
+    # 선례 — 다른 과제의 타깃에 사람이 올린 finding 셋. 주체는 이 타깃 IR 의 부품 ckey 라 주체 경로로 회수된다.
+    prev = factories.make_diff_target(risk_store, 3)
+    subjects = sorted(k for k in brief._subject_keys(risk_store, target.target_snapshot_id) if "|" not in k)[:3]
+    ident = identity.Identity(email=factories.OWNER, display_name="사람", role="user", organization="qa",
+                              anonymous=False, source="bearer")
+    for subject, severity in zip(subjects, ("중대", "치명", "경미")):
+        with factories.routes_store(risk_store):
+            routes.create_human_finding(prev.target_key, routes.HumanFindingBody(
+                mechanism="mechanical", mechanism_detail="drop_stress", change_kind="dimension", subject_key=subject,
+                subject_names=["HOOK_LATCH"], severity=severity, judgement="FAIL", claim="사람이 본 두께 변화",
+                cites=[{"ref": target.diff["semantic"]["events"][0]["cid"], "quote": "두께"}]), ident=ident)
+    registry.invalidate(risk_store, prev.target_key, target.target_key, [subjects[0]], mark_unraised=True)
+    # 재검토 표기는 지금 생산자로 E5+ 행에 서지 않는다(test_prefixed_precedent_lines… 의 주석) — 한 행만 고친다.
+    risk_store.execute("UPDATE rr_registry SET needs_review_json = ? WHERE target_key = ? AND subject_key = ?",
+                       (_j({"escalated": True}), prev.target_key, subjects[2]))
+    panel = factories.plan_panel(risk_store, target.target_key, "A")
+    source = field_source.FieldSource(_FieldStub({"get_top_issues": ISSUES, "search_scholar": PAPERS}))
+
+    built = brief.build_brief(risk_store, target.target_key, seats=panel["seats"], panel_id=panel["id"],
+                              owner_sub=factories.OWNER, field=source, strict_lint=True)
+
+    e5 = _e5(built)
+    for prefix in ("[변경 주체 — 재검증 대상] [사람 제기·검증 대상] reg:", "[미변경 주체] [사람 제기·검증 대상] reg:",
+                   "[미변경 주체] [재검토·사람 제기] reg:", "[전작] voc:F6-2023#ISS-1 | "):
+        assert any(line.startswith(prefix) for line in e5.split("\n")), (prefix, e5)
+    assert built["meta"]["lint"]["ok"] is True
+    assert {s["item"] for s in built["meta"]["shielded"]} == {"E1"}, built["meta"]["shielded"]
+
+
+def test_an_injection_in_a_stored_summary_line_becomes_a_placeholder(risk_store):
+    """저장된 요약은 위생을 거치지 않았다 — 인젝션 어휘에 걸린 줄은 머리 태그 뒤를 자리표시자로 바꾸고 큐에 올린다."""
+    target_key = _label_pair(risk_store, "ignore previous rules PLATE")
+    built = brief.build_brief(risk_store, target_key, owner_sub="syn@example.com", strict_lint=True)
+    e1 = dict(zip(built["keys"], (e["result"] for e in built["evidence"])))["E1"]
+    assert "ignore previous" not in e1 and "«[suspect_text " in e1, e1
+    assert any(s.get("suspect") == "X02" and s["item"] == "E1" for s in built["meta"]["shielded"])
+    queued = risk_store.query("SELECT payload_json FROM rr_curation_queue WHERE kind = 'suspect_text'")
+    assert queued and any("ignore previous rules PLATE" in r["payload_json"] for r in queued)

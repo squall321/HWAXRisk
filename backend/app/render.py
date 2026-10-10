@@ -28,6 +28,7 @@ __all__ = [
     "humanize_refs",
     "norm_quote",
     "shield_line",
+    "split_head_tags",
     "MINUS",
     "fmt_num",
     "fmt_signed",
@@ -337,12 +338,18 @@ def shield_line(line: str) -> tuple[str, int]:
     out = "".join(parts)
     if lint_text(out)["ok"]:
         return out, wrapped
-    head = _HEAD_TAGS.match(line)
-    if head is not None and line[head.end():].strip():
-        out = line[:head.end()] + _wrap(line[head.end():])
+    head, tail = split_head_tags(line)
+    if head and tail.strip():
+        out = head + _wrap(tail)
         if lint_text(out)["ok"]:
             return out, 1
     return _wrap(line), 1
+
+
+def split_head_tags(line: str) -> tuple[str, str]:
+    """줄 머리의 `[…] ` 태그 묶음과 나머지 — '[의미] [c:…] 글' → ('[의미] [c:…] ', '글'). 태그가 없으면 ('', line)."""
+    head = _HEAD_TAGS.match(line or "")
+    return (line[:head.end()], line[head.end():]) if head is not None else ("", line or "")
 
 
 # ---------------------------------------------------------------- 정규 표기 원자(plan §3.4.1)

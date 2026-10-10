@@ -1372,8 +1372,8 @@ def _profile_mismatch(claimed: dict, computed: dict) -> bool:
 
 # ================================================================ 브리프 조립·패널 결과 저장(plan §5.6.2·§6.7.2 8단계)
 
-# 좌석 발언·의장 산문에서 뽑는 참조 토큰(§0.2.1 문법, brief._REF_TOKEN 과 같은 식).
-CITED_REF_RE = re.compile(r"\b(?:reg|narr|rule|c|d|sig|warn|gate|p|e|rpt|inc|card):[^\s\]|]+")
+# 좌석 발언·의장 산문에서 뽑는 참조 토큰(§0.2.1 문법, brief._REF_TOKEN 과 같은 식 — 끝 문자에 «» 를 넣지 않는다).
+CITED_REF_RE = re.compile(r"\b(?:reg|narr|rule|c|d|sig|warn|gate|p|e|rpt|inc|card):[^\s\]|«»]+")
 # IR·상태층을 가리키는 스킴 — quality.ir_cite_rate 의 분자다(§6.5.5).
 IR_REF_KINDS = frozenset({"p", "e", "c", "d", "sig", "warn", "gate", "rule"})
 EXCERPT_FOR_RAG_MAX = 1500          # rr_seat_opinions.excerpt_for_rag 상한(§5.2.2 F)
@@ -1418,29 +1418,33 @@ def cited_refs_in(text: Any) -> list[str]:
 
 def prior_evidence(store, target_key: str, *, user_memo: str | None = None,
                    seats: Sequence[dict] | None = None, panel_id: str | None = None,
-                   exclude: Sequence[str] = ()) -> list[dict]:
+                   exclude: Sequence[str] = (), meta_out: dict | None = None) -> list[dict]:
     """다음 패널의 `delib_opts.evidence` 를 §5.6.1 예산표대로 조립한다(항목 본체는 `brief.build_brief`).
 
     E0c(좌석 계약)는 `runner.build_delib_opts` 가 다시 끼우므로 여기서는 빼고 돌려준다 — 같은 조립 결과를
     웹 러너는 delib_opts 로, MCP L2 는 `risk_get_brief` 응답으로 받는다(§5.6). user_memo(지금 도는 잡의
     메모)는 브리프에 그대로 넘겨 M 으로 싣는다 — 브리프가 rr_jobs 에서 찾게 두면 그 타깃의 최근 잡 메모가
     실린다. M 이 빠진 채 돌아온 경우(제외)에만 마지막 슬롯에 붙인다.
+    `meta_out` 을 주면 조립의 meta(무엇을 «» 로 쌌는지 `shielded` 등)를 거기 채운다 — 러너가 패널 품질에 옮긴다.
     """
     from app import brief as brief_module  # noqa: PLC0415 — 순환 import 회피(brief 는 narrative 를 쓴다).
 
     from app import field_source  # noqa: PLC0415 — 선택 채널이라 지연 import 한다.
 
-    # 조립 경로는 strict_lint 다 — 판단어가 섞인 브리프를 엔진에 보내느니 E500 으로 멈춘다(plan §5.6.2).
-    # E10 조회 채널은 없으면 None 이다(그 블록만 결측 문구가 되고 조립은 완주한다).
+    # 조립 경로는 방패 모드다 — 판단어에 걸린 줄은 «» 로 싸서 싣고 meta.shielded 에 남긴다. 종전에는 strict 라 부품
+    # 이름·과제 코드 하나로 그 타깃의 모든 패널이 brief_error 로 닫혔다(WP1 R-3·S5-c). 코드가 쓴 문장의 판단어는 시험이
+    # strict 로 잡는다(test_brief). E10 조회 채널은 없으면 None 이다(그 블록만 결측 문구가 되고 조립은 완주한다).
     field = field_source.for_target(store, target_key)
     try:
         built = brief_module.build_brief(store, target_key, seats=seats, panel_id=panel_id,
-                                        exclude=tuple(exclude), field=field, strict_lint=True,
+                                        exclude=tuple(exclude), field=field, shield_lint=True,
                                         user_memo=user_memo)
     finally:
         # 채널은 자기 httpx.Client 를 소유한다 — 닫지 않으면 브리프 조립마다 소켓이 샌다.
         if field is not None:
             field.close()
+    if meta_out is not None:
+        meta_out.update(built.get("meta") or {})          # 대역이 meta 없이 돌려줄 수 있다
     items = [item for item, key in zip(built["evidence"], built["keys"]) if key != "E0c"]
     if user_memo and not any(str(i.get("source")) == "user_memo" for i in items):
         items.append({"source": "user_memo", "tool": "note", "args": target_key,

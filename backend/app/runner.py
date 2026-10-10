@@ -425,7 +425,8 @@ def build_delib_opts(
     항상 'off' 로 싣는다 — 빼면 엔진 기본값 'auto' 가 되살아난다.
 
     `loss` 를 주면 좌석에 못 간 것을 거기 적는다 — `evidence_dropped`(12칸을 넘겨 빠진 항목 키)와
-    `user_memo_cut`(메모를 다 못 실었을 때 `{chars, kept}`). 없으면 비어 있다. 호출자가 패널에 남긴다."""
+    `user_memo_cut`(메모를 다 못 실었을 때 `{chars, kept}`), `brief_shielded`(판단어·인젝션에 걸려 «» 로 싸거나
+    자리표시자로 바꾼 줄). 없으면 비어 있다. 호출자가 패널에 남긴다."""
     seats = panel["seats"]
     if evidence is None:
         module = narrative_mod
@@ -434,8 +435,11 @@ def build_delib_opts(
         build = getattr(module, "prior_evidence", None)
         if not callable(build):
             raise AppError("not_implemented", "narrative.prior_evidence 가 없습니다 — 브리프를 조립할 수 없습니다.", 501)
+        brief_meta: dict = {}
         evidence = list(build(store, panel["target_key"], user_memo=user_memo,
-                              seats=seats, panel_id=panel["id"]))
+                              seats=seats, panel_id=panel["id"], meta_out=brief_meta))
+        if loss is not None and brief_meta.get("shielded"):
+            loss["brief_shielded"] = list(brief_meta["shielded"])
     else:
         evidence = list(evidence)
     # E0(스코프·게이트) 바로 뒤가 E0c 좌석 계약표다.
@@ -1555,8 +1559,9 @@ def _complete_panel(
             quality["brief_drift"] = list(frozen_brief["brief_drift"])
         if frozen_brief and frozen_brief.get("brief_hash"):
             quality["brief_hash"] = frozen_brief["brief_hash"]
-        # 12칸을 넘겨 빠진 근거와 다 못 실은 메모 — 좌석은 받은 것이 전부라고 믿고 판정했으므로 패널에 남긴다.
-        for lost in ("evidence_dropped", "user_memo_cut"):
+        # 12칸을 넘겨 빠진 근거와 다 못 실은 메모, 판단어로 «» 에 싸인 줄 — 좌석은 받은 것이 전부라고 믿고 판정했으므로
+        # 패널에 남긴다.
+        for lost in ("evidence_dropped", "user_memo_cut", "brief_shielded"):
             if frozen_brief and frozen_brief.get(lost):
                 quality[lost] = frozen_brief[lost]
                 quality["flags"].append(lost)

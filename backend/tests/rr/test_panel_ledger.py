@@ -582,3 +582,64 @@ def test_a_claude_submission_that_fails_to_save_leaves_the_planned_panel_planned
                                     actor=OWNER, owner_sub=OWNER)
     assert out["coverage_updated"] is True and _panel(ledger.store, panel["id"])["status"] == "done"
     assert planner.check_invariants(ledger.store, ledger.target_key) == []
+
+
+# ---------------------------------------------------------------- S5 — 판단어 방패가 러너 길에서 패널 품질까지(WP1 S5-c · P-03)
+def _diff_ledger(store, tmp_path, target_key: str) -> SimpleNamespace:
+    store.upsert_credential(OWNER, identity.encrypt_pat("pat-secret").decode("ascii"), "sub-1", OWNER, "[]",
+                            common.now_epoch() + 30 * 86400)
+    return SimpleNamespace(store=store, target_key=target_key,
+                           cfg=dataclasses.replace(config.settings, data_dir=tmp_path))
+
+
+def test_brief_shielded_reaches_panel_quality(risk_store, tmp_path, no_network):
+    """부품 이름에 판단어가 든 합성 타깃 — 러너 길의 브리프가 죽지 않고, 무엇을 «» 로 쌌는지 패널 품질에 남는다."""
+    synth = factories.make_diff_target(risk_store, 3, agents=factories.agents(("mech", "sim", "xd", "rel", "cam"), 3))
+    lg = _diff_ledger(risk_store, tmp_path, synth.target_key)
+    _job(lg)
+    out = _run(lg, LedgerEngine())
+    assert out["status"] == "done", out
+    quality = json.loads(_panel(lg.store, out["panel_id"])["quality_json"])
+    assert "brief_shielded" in quality["flags"]
+    assert quality["brief_shielded"] and {s["item"] for s in quality["brief_shielded"]} == {"E1"}
+    assert all(s["ids"] and s["line_no"] >= 2 for s in quality["brief_shielded"])
+
+
+def test_second_target_of_the_same_project_runs_its_panel(risk_store, tmp_path, no_network):
+    """같은 과제의 다음 리비전 — 새 타깃이 앞 타깃의 등록부 행에 stale 을 적고(`_supersede_previous_target`), 그 행이
+    `[변경 주체 — 재검증 대상]` 접두를 달고 E5 에 실려도 패널이 brief_error 없이 끝난다(P-03)."""
+    from tests.rr import legacy_build as legacy
+
+    project_id = factories.make_project(risk_store)
+    base_results, target_results = legacy.adapter_pair()
+    s1 = factories.make_snapshot(risk_store, project_id, base_results, label="DV1")
+    s2 = factories.make_snapshot(risk_store, project_id, target_results, label="DV2",
+                                 captured_at=factories.CAPTURED_AT + 86400)
+    roster = factories.agents(("mech", "sim", "xd", "rel", "cam"), 3)
+    first = factories.make_target(risk_store, "diff", factories.make_diff(risk_store, s1["snapshot_id"],
+                                                                          s2["snapshot_id"])["diff_id"], agents=roster)
+    lg = _diff_ledger(risk_store, tmp_path, first)
+    first_job = _job(lg)
+    out = _run(lg, legacy.LegacyEngine(legacy.spec_builder(risk_store, first, planner.domain_of)))
+    assert out["status"] == "done", out
+    runner.cancel_job(risk_store, first_job, by=OWNER)                 # 다음 집기가 앞 타깃의 남은 패널을 집지 않게
+    assert risk_store.query("SELECT 1 FROM rr_registry WHERE target_key = ? AND status = 'open'", (first,))
+
+    third = json.loads(json.dumps(target_results))
+    by_label = {n["label"]: n for n in third[0]["nodes"]}
+    by_label["PLATE_2"]["attrs"]["min_dim"] = 1.8
+    by_label["PLATE_1"]["attrs"]["material"] = "AL6061"
+    s3 = factories.make_snapshot(risk_store, project_id, third, label="DV3", captured_at=factories.CAPTURED_AT + 2 * 86400)
+    second = factories.make_target(risk_store, "diff", factories.make_diff(risk_store, s2["snapshot_id"],
+                                                                           s3["snapshot_id"])["diff_id"], agents=roster)
+    stale = [r for r in risk_store.query("SELECT stale_json FROM rr_registry WHERE target_key = ?", (first,))
+             if (json.loads(r["stale_json"] or "{}").get(second) or {}).get("stale")]
+    assert stale, "앞 타깃의 등록부에 stale 이 서지 않았다 — 이 시험은 P-03 을 보지 않는다"
+
+    lg2 = SimpleNamespace(store=risk_store, target_key=second, cfg=lg.cfg)
+    runner.create_job(risk_store, second, "C", owner_sub=OWNER, consent=True, settings=lg.cfg)
+    engine = legacy.LegacyEngine(legacy.spec_builder(risk_store, second, planner.domain_of))
+    out = _run(lg2, engine)
+    assert out["status"] == "done" and not _panel(risk_store, out["panel_id"])["error"], out
+    e5 = next(e["result"] for e in engine.calls[0]["evidence"] if e.get("key") == "E5")
+    assert "[변경 주체 — 재검증 대상] reg:" in e5, e5

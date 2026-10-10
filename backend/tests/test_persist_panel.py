@@ -394,3 +394,29 @@ def test_prior_evidence_runs_on_real_store(seeded):
     assert items and all({"source", "tool", "result"} <= set(i) for i in items)
     assert not any(str(i.get("source")).startswith("좌석 계약") for i in items)
     assert all(len(str(i.get("result") or "")) <= 2000 for i in items)
+
+
+def test_prior_evidence_shields_instead_of_raising(seeded, monkeypatch):
+    """운영 경로(러너)는 판단어에 걸린 줄을 «» 로 싸서 싣고 무엇을 쌌는지 남긴다 — 이름 하나로 패널이 죽지 않는다(WP1 S5-c).
+    방패가 린터를 없애지 않는다 — 같은 독으로 strict 조립은 여전히 E500 이다."""
+    from app import brief as brief_module
+
+    original = brief_module._item_e9
+
+    def poisoned(*args, **kwargs):
+        item = original(*args, **kwargs)
+        item["result"] = item["result"].split("\n")[0] + "\n[경고] 이 계면은 위험하다"
+        return item
+
+    monkeypatch.setattr(brief_module, "_item_e9", poisoned)
+    meta: dict = {}
+    items = narrative.prior_evidence(seeded, TARGET, panel_id=PANEL, meta_out=meta)
+
+    e9 = next(i for i in items if i.get("key") == "E9")
+    assert "위험" in e9["result"]                                      # 지우지 않고 싼다
+    assert meta["shielded"] and meta["shielded"][0]["item"] == "E9"
+    assert set(meta["shielded"][0]["ids"]) == {"L01", "L09"}
+    assert meta["lint"]["ok"] is True
+    with pytest.raises(AppError) as exc:
+        brief_module.build_brief(seeded, TARGET, panel_id=PANEL, strict_lint=True)
+    assert exc.value.code == "E500"
