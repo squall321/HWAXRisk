@@ -1,11 +1,13 @@
 # 의장 결정문 서술 처리 — parse_risk_spec·정규화(§4.2)·cites 검증(§4.4)·원자 펼침(§4.3·§4.6)·좌석 의견 추출(§4.5)
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
 import logging
 import re
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -192,6 +194,10 @@ def _dom_of(agent_key: str) -> str:
 
 
 # ================================================================ 스코프 해석기(plan §4.4.1 검증 스코프)
+# 신호 표 밖이지만 `sig:` 로 가리키는 상태 봉투 칸 — render 요약의 섹션 기본 참조가 쓴다.
+_ENVELOPE_SIGNALS = ("ir_hash", "character_seed")
+
+
 @dataclass
 class SpecContext:
     """risk_spec 정규화·cites 검증이 보는 스코프. 없는 채널은 None·빈 값으로 두면 강등 플래그로 표기된다."""
@@ -406,6 +412,22 @@ class SpecContext:
             signal = (state.get("signals") or {}).get(key)
             if isinstance(signal, dict):
                 return signal
+        # 옛 snap 요약의 `[sig:counts.*]`(한 줄에 여러 개수를 실은 줄의 참조) — 그 접두의 신호가 있으면 가족 전체로 푼다.
+        if key.endswith(".*"):
+            prefix = key[:-1]
+            for state in self.states.values():
+                family = {k: v for k, v in (state.get("signals") or {}).items() if k.startswith(prefix)}
+                if family:
+                    return {"value": sorted(family), "known": True, "family": True}
+        # 요약 줄의 섹션 기본 참조(`[sig:ir_hash]`·`[sig:character_seed]`) — 신호 표가 아니라 상태 봉투의 최상위 칸이다. 브리프
+        # E1 이 그 줄을 싣는데 저장 스코프가 못 풀어 좌석이 옮긴 인용이 dangling 이 됐다(R-38). 뒤(target) 스냅샷이 이긴다.
+        if key in _ENVELOPE_SIGNALS:
+            for state in reversed(list(self.states.values())):
+                if key in state:
+                    value = state[key]
+                    text = " · ".join(str(s.get("tag") or "") for s in value if isinstance(s, Mapping)) \
+                        if isinstance(value, list) else str(value)
+                    return {"value": value, "known": True, "text": f"{key}={text}"}
         return None
 
     def gate(self, name: str) -> dict | None:
@@ -440,6 +462,39 @@ class SpecContext:
             item = self.activity[idx]
             return item if isinstance(item, dict) else {"result_preview": str(item)}
         return None
+
+
+def _flat_ir_item(obj: Mapping[str, Any]) -> dict:
+    """rr_ir 의 노드·엣지 하나를 평평하게 편다 — attrs 를 위로 올린다(`_row_to_node` 와 같은 규칙)."""
+    out = {k: v for k, v in obj.items() if k != "attrs"}
+    out.update(obj.get("attrs") or {})
+    return out
+
+
+def scope_ir(raw: Mapping[str, Any] | None, *, light: bool = False) -> dict:
+    """rr_ir 원본(목록 모양)을 `SpecContext.irs` 가 보는 모양으로 편다(WP1 R-39).
+
+    {nodes: {nid: 평평한 노드}, edges: {eid: 평평한 엣지}, dims_named: {name: 행}, warnings: [...]}. 이미 사전 모양이면
+    그대로 둔다. `light` 면 노드·엣지를 펴지 않는다 — 저장 스코프는 그 둘을 DB 색인으로 찾는다(큰 IR 을 메모리에 펴지
+    않는다). 종전에는 원본을 그대로 넣어 목록에 `.get` 을 불렀고(AttributeError) `name in dims` 는 늘 거짓이었다.
+    """
+    raw = raw or {}
+
+    def keyed(items: Any, key: str, flat: bool) -> dict:
+        if isinstance(items, Mapping):
+            return dict(items)
+        out: dict = {}
+        for item in items or ():
+            if isinstance(item, Mapping) and item.get(key):
+                out[str(item[key])] = _flat_ir_item(item) if flat else dict(item)
+        return out
+
+    view = {"dims_named": keyed(raw.get("dims_named"), "name", False),
+            "warnings": [w for w in (raw.get("warnings") or ()) if isinstance(w, Mapping)]}
+    if not light:
+        view["nodes"] = keyed(raw.get("nodes"), "nid", True)
+        view["edges"] = keyed(raw.get("edges"), "eid", True)
+    return view
 
 
 def _row_to_node(row: Any) -> dict:
@@ -536,7 +591,9 @@ def canonical_text_for(ref: str, ctx: SpecContext) -> str | None:
         return render.humanize_refs(text, ctx.part_names())
     if kind == "sig":
         signal = ctx.signal(info["key"])
-        return render.signal_text(info["key"], signal) if signal is not None else None
+        if signal is None or signal.get("family"):
+            return None                                     # 가족 참조(`counts.*`)는 대조할 한 줄이 없다
+        return render.signal_text(info["key"], signal)
     if kind == "d":
         entry = ctx.dim(info["name"])
         if entry is None:
@@ -700,6 +757,23 @@ def _number_tokens(text: str) -> list[str]:
     return [m.group(1) for m in _NUMBER_TOKEN_RE.finditer(masked)]
 
 
+def _as_decimal(token: str) -> Decimal | None:
+    try:
+        return abs(Decimal(token.replace(render.MINUS, "-"))).normalize()
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _numbers_in(text: str) -> set:
+    """글 안의 수를 값으로 — 부호(−·-·+)를 접고 자릿수를 정규화한다('1.2' = '1.200', '−16.7' = '-16.7'). R-41."""
+    return {value for value in (_as_decimal(t) for t in _number_tokens(text)) if value is not None}
+
+
+def _quote_ok(quote: str, canonical: str) -> bool:
+    """인용문 대조 — 정규화(«» · 줄바꿈 · 겹친 공백 · 제어문자)한 뒤의 부분 문자열(R-40). 브리프 줄을 옮긴 인용이 통과한다."""
+    return render.norm_quote(quote) in render.norm_quote(canonical)
+
+
 def resolve_cites(cites: Sequence[dict], ctx: SpecContext, *, claim: str = "", warrant: str = "",
                   raised_by: Sequence[str] = ()) -> dict:
     """cites 를 존재 검증(§4.4.1)·quote 대조(§4.4.2)한다. 버리지 않고 플래그로 보존한다."""
@@ -746,7 +820,7 @@ def resolve_cites(cites: Sequence[dict], ctx: SpecContext, *, claim: str = "", w
             resolved_refs.append(str(outcome.get("resolved") or ref))
             canonical = canonical_text_for(ref, ctx)
             row["canonical"] = canonical
-            if canonical is not None and quote and quote not in canonical:
+            if canonical is not None and quote and not _quote_ok(quote, canonical):
                 row["quote_mismatch"] = True
                 quote_mismatch.append(ref)
             else:
@@ -755,9 +829,9 @@ def resolve_cites(cites: Sequence[dict], ctx: SpecContext, *, claim: str = "", w
         row["payload"] = outcome.get("payload")
         rows.append(row)
 
-    # (1) claim·warrant 의 수치 토큰이 quote 안에 문자 그대로 있어야 한다.
-    quotes = " ".join(row["quote"] for row in rows)
-    unquoted = sorted({token for token in _number_tokens(f"{claim} {warrant}") if token not in quotes})
+    # (1) claim·warrant 의 수치가 quote 안에 같은 값으로 있어야 한다 — 부분 문자열로 보면 '5' 가 '0.15' 에 걸려 통과했다.
+    quoted = _numbers_in(" ".join(row["quote"] for row in rows))
+    unquoted = sorted({token for token in _number_tokens(f"{claim} {warrant}") if _as_decimal(token) not in quoted})
     if unquoted and rows:
         for row in rows:
             if row["ok"] and not row["quote_mismatch"]:
@@ -781,9 +855,13 @@ def evidence_grade_from_cites(resolved: dict, ctx: SpecContext | None = None) ->
     # `req:` 중 kind='standard' 는 측정이 아니다 — 정본 §2.8b 는 "`standard` kind 만 예외이며 등급은
     # 측정이 아니라 문헌·규격, `source_ref` 종류를 따른다" 고 적는다. 규격 번호를 인용한 것은 실측이
     # 아니라 문헌이다. 이 예외가 없으면 요구 행 하나만 등록돼 있어도 전 클러스터가 측정으로 오른다.
+    # 확인 못 한 인용(`verified=False` — 외부 확인 채널이 없는 inc:·rpt:·card:, 동결본 없는 narr:·reg:)은 세지 않는다(R-36).
+    # 버리지는 않는다(unverified_refs 에 남는다). 지어낸 `inc:` 번호 하나로 '측정' 이, 지어낸 `card:` 로 '문헌·규격' 이 붙던
+    # 구멍이다. 키가 없는 행(저장된 cites 로 읽을 때 다시 내는 과제 성격 등급 — character.evidence_grade_of)은 종전대로
+    # 센다 — 엄격해진 규칙을 이미 저장된 것에 소급하지 않는다(사용자 결정 D-19).
     standards: list[str] = []
     for row in resolved.get("cites") or ():
-        if not row.get("ok") or not row.get("grade_ok"):
+        if not row.get("ok") or not row.get("grade_ok") or row.get("verified") is False:
             continue
         if str(row.get("ref_type")) == "req" and str(row.get("req_kind") or "") == "standard":
             standards.append(str(row.get("ref")))
@@ -1543,12 +1621,50 @@ def _panel_scope(store, panel_id: str) -> tuple[dict, dict, list[dict], SpecCont
         seats = []
     seats = [s for s in seats if isinstance(s, dict)]
 
+    # IR 의 가벼운 뷰(명명 치수·경고)와 서브어셈블리 접두·판 — 브리프 E3 의 `[d:]`·E9 의 `warn:` 이 저장 때 해석된다(R-38·R-42).
+    # 노드·엣지는 DB 색인으로 찾으므로 펴지 않는다.
+    irs: dict = {}
+    rollup_prefixes: dict = {}
+    versions: dict = {}
+    for sid in snapshot_ids:
+        row = store.query_one("SELECT ir_json FROM rr_snapshots WHERE id = ?", (sid,))
+        try:
+            raw = json.loads(row["ir_json"] or "{}") if row is not None else {}
+        except ValueError:
+            raw = {}
+        if not isinstance(raw, dict):
+            continue
+        irs[sid] = scope_ir(raw, light=True)
+        for item in (raw.get("rollups") or {}).get("by_assembly") or ():
+            if isinstance(item, Mapping) and item.get("path_prefix"):
+                rollup_prefixes[str(item["path_prefix"])] = str(item["path_prefix"])
+        for key in ("ir_version", "taxonomy_version"):
+            value = raw.get(key) or (raw.get("versions") or {}).get(key)
+            if value:
+                versions[key] = value                      # 뒤(target) 스냅샷이 이긴다
+    # 이 패널이 받은 브리프의 동결본 — 있으면 `narr:`·`reg:` 를 그 참조로 대조한다(없으면 종전대로 미검증).
+    brief_refs: frozenset = frozenset()
+    brief_known = False
+    frozen = store.query_one("SELECT brief_gz FROM rr_panels WHERE id = ?", (panel_id,))
+    if frozen is not None and frozen["brief_gz"] is not None:
+        from app import brief as brief_module  # noqa: PLC0415 — 순환 import 회피(brief 는 narrative 를 쓴다).
+
+        try:
+            items = json.loads(gzip.decompress(frozen["brief_gz"]).decode("utf-8"))
+        except (OSError, ValueError):
+            items = None
+        if isinstance(items, list):
+            brief_refs = frozenset(brief_module.collect_refs([i for i in items if isinstance(i, Mapping)]))
+            brief_known = True
+
     ctx = SpecContext(
         panel_id=str(panel["id"]), target_key=str(target["target_key"]),
         project_id=str(target["project_id"] or ""), owner_sub=str(panel["owner_sub"] or ""),
         kind=str(target["kind"]), snapshot_ids=snapshot_ids, diff_id=diff_id,
         ir_hash=str(target["ir_hash"] or ""), store=store, states=states, diff=diff,
         conv_id=str(panel["conv_id"] or ""), seats=tuple(str(s.get("key")) for s in seats),
+        irs=irs, rollup_prefixes=rollup_prefixes, versions=versions,
+        brief_refs=brief_refs, brief_known=brief_known,
     )
     return dict(panel), dict(target), seats, ctx
 

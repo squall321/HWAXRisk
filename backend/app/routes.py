@@ -3105,7 +3105,7 @@ def get_ref(ref: str, snapshot_id: str | None = None, diff_id: str | None = None
         if snapshot_id:
             _snapshot_row(snapshot_id, owner_sub)
             ctx.snapshot_ids = (snapshot_id,)
-            ctx.irs = {snapshot_id: ir_builder.load_ir(store, snapshot_id)}
+            ctx.irs = {snapshot_id: narrative.scope_ir(ir_builder.load_ir(store, snapshot_id))}
             ctx.states = {snapshot_id: state_module.load_state(store, snapshot_id) or {}}
         if diff_id:
             ctx.diff_id = diff_id
