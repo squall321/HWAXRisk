@@ -116,9 +116,8 @@ def test_e4_carries_every_changed_result_metric(contract):
         assert r["metric"] in e4 and _number_in(e4, r["before"]) and _number_in(e4, r["after"]), (r, e4)
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="WP1 S6(R-6) — E2 가 부호 있는 크기순이라 감소가 뒤로 밀려 상한에서 잘린다")
 def test_e2_keeps_the_largest_decrease(contract):
+    """WP1 S6(R-6) 이 고친 것 — E2 가 부호 있는 크기순이라 감소가 뒤로 밀려 상한에서 잘렸다."""
     events = contract["diff"]["semantic"]["events"]
     decreases = [e for e in events if e["design_relevant"] and e["magnitude"]["rel"] is not None
                  and (e["magnitude"]["value"] or 0) < 0]

@@ -270,8 +270,8 @@ def _target_context(store, target_key: str) -> dict:
     if target["kind"] == "diff":
         diff = store.query_one(
             "SELECT id, base_snapshot_id, target_snapshot_id, base_project_id, target_project_id, "
-            "pair_kind, diff_json, summary_text, summary_status, comparability_json, gates_json "
-            "FROM rr_diffs WHERE id = ?",
+            "pair_kind, diff_version, diff_json, summary_text, summary_status, stats_json, comparability_json, "
+            "gates_json FROM rr_diffs WHERE id = ?",
             (target["ref_id"],),
         )
         ctx["diff"] = diff
@@ -488,42 +488,112 @@ def _item_e1(ctx) -> dict:
 
 
 # ---------------------------------------------------------------- E2 이벤트 표
-_LAYER_ORDER = {"semantic": 0, "structural": 1, "parametric": 2}
+# 종류 우선순위(WP1 R-6) — 변경 목록·변경 요지·`risk_get_diff` 줄이 같은 순서를 쓴다. 여기 없는 종류는 'none' 이다.
+KIND_PRIORITY: tuple[str, ...] = ("topology", "type", "count", "material", "dimension", "placement",
+                                  "contact_type", "parameter", "result", "consistency", "discretization", "none")
 
 
-def _item_e2(store, ctx) -> dict:
+def _num_or_none(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _design_relevant(row: Mapping[str, Any]) -> bool:
+    """설계 관련 — `design_relevant` 가 0·False 가 아닌 행(메시 밀도 같은 이산화 변화가 0 이다)."""
+    return row["design_relevant"] not in (0, False)
+
+
+def _event_kind(row: Mapping[str, Any]) -> str:
+    kind = _s(row["change_kind"])
+    return kind if kind in KIND_PRIORITY else "none"
+
+
+def _event_key(row: Mapping[str, Any]) -> tuple:
+    """묶음 안 순서 — (정성 먼저, 크기 내림차순, 감소 먼저, cid).
+
+    정성은 상대 변화가 없는 행(추가·삭제·종류 변경·0 에서 생긴 간극·이동)이고 크기는 |magnitude| 다. 수치 행의 크기는
+    |rel| 이다 — magnitude 는 `after − before` 라 단위(mm·mm2·MPa·요소 수)가 섞이고 부호가 있어, 그대로 세우면 얇아짐·
+    간극 축소가 맨 뒤로 가 상한에서 먼저 잘렸다. 감소 먼저는 크기가 같을 때만 듣는다.
+    """
+    rel = _num_or_none(row["rel"])
+    magnitude = _num_or_none(row["magnitude"])
+    qualitative = rel is None
+    size = abs(magnitude) if qualitative and magnitude is not None else (abs(rel) if rel is not None else 0.0)
+    return (0 if qualitative else 1, -size, 0 if magnitude is not None and magnitude < 0 else 1, _s(row["cid"]))
+
+
+def event_order(rows: Sequence[Mapping[str, Any]]) -> list:
+    """변경 목록의 순서(WP1 R-6) — 설계 관련 전부가 앞, 설계 무관(메시 밀도 등)이 뒤다.
+
+    각 무리 안에서 change_kind 로 묶어 `_event_key` 로 세우고, 묶음들을 KIND_PRIORITY 순으로 한 건씩 돌아가며 뽑는다 —
+    상한에서 한 종류가 통째로 사라지지 않게 한다. 입력 순서와 무관하다(동률은 cid 로 가른다).
+    """
+    def round_robin(group: list) -> list:
+        buckets: dict[str, list] = {kind: [] for kind in KIND_PRIORITY}
+        for row in group:
+            buckets[_event_kind(row)].append(row)
+        queues = [sorted(buckets[kind], key=_event_key) for kind in KIND_PRIORITY if buckets[kind]]
+        out: list = []
+        while queues:
+            out.extend(queue.pop(0) for queue in queues)
+            queues = [queue for queue in queues if queue]
+        return out
+
+    rows = list(rows)
+    return round_robin([r for r in rows if _design_relevant(r)]) + \
+        round_robin([r for r in rows if not _design_relevant(r)])
+
+
+def e2_line(row: Mapping[str, Any], names: Mapping[str, str]) -> str:
+    """변경 목록 한 줄 — `[c:<id>] <code> «<몸통>» conf=<confidence>[ unconfirmed | excluded_reason=<r>][ design_relevant=0]`.
+
+    몸통은 이벤트 글에서 맨 nid 를 부품 이름으로 바꾸고(R-8) 끝의 `[c:…]` 를 뗀 것이다 — 머리에 cid 를 따로 적으므로 한 줄에
+    cid 가 두 번 찍히지 않는다(R-7). 이름 치환은 표시 시점에만 한다(저장된 글·diff_hash 는 그대로다).
+    """
+    text = _s(row["text"])
+    body = render.split_trailing_refs(render.humanize_refs(text, names))[0] if text else \
+        f"{_s(row['subject_key'])} {_s(row['change_kind'])}"
+    cid = _s(row["cid"])
+    ref = cid if cid.startswith("c:") else f"c:{cid}"
+    tail = ""
+    if row["unconfirmed"]:
+        tail = " unconfirmed"
+    elif row["excluded_reason"]:
+        tail = f" excluded_reason={row['excluded_reason']}"
+    if not _design_relevant(row):
+        tail += " design_relevant=0"
+    # 이벤트 정규 표기는 소스 앱 부품명을 그대로 담는다(render.fmt_label 은 감싸지 않는다) — 여기서 «…» 로 넣는다.
+    return f"[{ref}] {_s(row['code'])} {_q(body, 'note')} conf={_s(row['confidence'], '-')}{tail}"
+
+
+def _e2_empty_line(ctx) -> str:
+    """이벤트 0건의 문구 — 의미층이 막혀 만들지 않은 것과 변화가 없는 것을 같은 글자로 쓰지 않는다(R-9)."""
+    diff = ctx["diff"]
+    blocked = (_j(diff["diff_json"], {}).get("semantic") or {}).get("blocked_by")
+    if not blocked:
+        return "[의미 이벤트 0건]"
+    stats = _j(diff["stats_json"], {})
+
+    def n(key: str) -> int:
+        value = stats.get(key)
+        return int(value) if isinstance(value, (int, float)) else 0
+
+    return (f"[의미 이벤트 생성 안 함 — gate:{blocked} · 구조 +{n('nodes_added') + n('edges_added')} "
+            f"−{n('nodes_removed') + n('edges_removed')} · 파라메트릭 변경 {n('params_changed')}건]")
+
+
+def _item_e2(store, ctx, names: Mapping[str, str]) -> dict:
     source, tool = _SOURCES["E2"]
     if ctx["kind"] != "diff" or ctx["diff"] is None:
         return {"key": "E2", "args": _s(ctx["target"]["target_key"]),
                 "result": _body(source, ["[pair 전용 — 해당 없음]"])}
     diff_id = ctx["diff"]["id"]
     rows = store.query(
-        "SELECT cid, layer, code, change_kind, subject_key, magnitude, unit, rel, confidence, "
+        "SELECT cid, layer, code, change_kind, subject_key, magnitude, unit, rel, confidence, design_relevant, "
         "unconfirmed, excluded_reason, text FROM rr_diff_events "
         "WHERE diff_id = ? AND layer IN ('semantic','structural')",
         (diff_id,),
     )
-    ordered = sorted(
-        rows,
-        key=lambda r: (_LAYER_ORDER.get(_s(r["layer"]), 9),
-                       -(r["magnitude"] if isinstance(r["magnitude"], (int, float)) else 0.0),
-                       _s(r["cid"])),
-    )
-    lines = []
-    for row in ordered:
-        tail = ""
-        if row["unconfirmed"]:
-            tail = " unconfirmed"
-        elif row["excluded_reason"]:
-            tail = f" excluded_reason={row['excluded_reason']}"
-        # 이벤트 정규 표기는 소스 앱 부품명을 그대로 담는다(render.fmt_label 은 감싸지 않는다) — 여기서 «…» 로 넣는다.
-        text = _q(_s(row["text"]) or f"{_s(row['subject_key'])} {_s(row['change_kind'])}", "note")
-        # §3.3.2 의 cid 는 'c:' 접두를 포함한 값이고 §5.6.1 의 표기는 `[c:<cid>]` 다 — 접두를 두 번 붙이지 않는다.
-        cid = _s(row["cid"])
-        ref = cid if cid.startswith("c:") else f"c:{cid}"
-        lines.append(f"[{ref}] {_s(row['code'])} {text} conf={_s(row['confidence'], '-')}{tail}")
-    if not lines:
-        lines = ["[의미·구조 이벤트 0건]"]
+    lines = [e2_line(row, names) for row in event_order(rows)] or [_e2_empty_line(ctx)]
     return {"key": "E2", "args": f"diff:{diff_id}", "result": _body(source, lines)}
 
 
@@ -1389,11 +1459,13 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
     # 조립하는 동안 원천 문자열 위생(§3.4.1)의 suspect_text 적재 대상을 이 스레드에 걸어 둔다.
     begin_suspect_queue(store, owner_sub)
     try:
+        # 맨 nid 를 부품 이름으로 바꾸는 표(E1·E2 — 뒤 스냅샷이 이긴다, WP1 P-16).
+        names = name_index(store, (ctx["base_snapshot_id"], ctx["snapshot_id"]))
         raw: list[dict] = [
             _item_e0(store, ctx, external_ok, _panel_model(store, target_key, panel_id)),
             _item_e0c(seats),
             _item_e1(ctx),
-            _item_e2(store, ctx),
+            _item_e2(store, ctx, names),
             _item_e3(ctx),
             _item_e4(ctx),
             _item_e5(store, ctx, similar, owner_sub, field),
@@ -1406,7 +1478,6 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
         if memo is not None:
             raw.append(memo)
         # 방패는 줄 단위 절단보다 먼저다 — 글자를 늘리므로 절단 뒤에 걸면 항목이 CAP 을 넘는다.
-        names = name_index(store, (ctx["base_snapshot_id"], ctx["snapshot_id"]))
         shielded: list[dict] = []
         for entry in raw:
             if _SOURCES[entry["key"]][0] in _QUOTED_SOURCES:
