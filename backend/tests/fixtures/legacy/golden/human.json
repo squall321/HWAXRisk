@@ -1,0 +1,150 @@
+{
+ "close_level": {
+  "c1": false,
+  "c2": false,
+  "c3": false,
+  "close_level": "C2",
+  "detail": {
+   "depth": {
+    "mech": {
+     "deferred": 0,
+     "have": 0,
+     "need": 2,
+     "roster": 2
+    },
+    "pcb": {
+     "deferred": 1,
+     "have": 0,
+     "need": 1,
+     "roster": 2
+    },
+    "rel": {
+     "deferred": 0,
+     "have": 0,
+     "need": 2,
+     "roster": 2
+    },
+    "sim": {
+     "deferred": 0,
+     "have": 0,
+     "need": 2,
+     "roster": 2
+    },
+    "xd": {
+     "deferred": 0,
+     "have": 0,
+     "need": 2,
+     "roster": 2
+    }
+   },
+   "domains_terminal": {
+    "cam": 0,
+    "disp": 0,
+    "material": 0,
+    "mech": 0,
+    "mem": 0,
+    "passive": 0,
+    "pcb": 1,
+    "pwr": 0,
+    "rel": 0,
+    "rf": 0,
+    "sh": 0,
+    "sim": 0,
+    "soc": 0,
+    "std": 0,
+    "xd": 0
+   },
+   "done_weak": 0,
+   "failed": 0,
+   "skipped": 0,
+   "skipped_ratio": 0.0,
+   "spec_parse_failed": 0,
+   "strong": 0,
+   "strong_ratio": 0.0,
+   "tier_a_done": 0
+  },
+  "level": "C0",
+  "roster_size": 10,
+  "status_counts": {
+   "deferred": 1,
+   "pending": 9
+  },
+  "unseated_n": 9
+ },
+ "coverage": {
+  "by_domain": {
+   "mech": {
+    "pending": 2
+   },
+   "pcb": {
+    "deferred": 1,
+    "pending": 1
+   },
+   "rel": {
+    "pending": 2
+   },
+   "sim": {
+    "pending": 2
+   },
+   "xd": {
+    "pending": 2
+   }
+  },
+  "by_status": {
+   "abstain": 0,
+   "assigned": 0,
+   "carried": 0,
+   "deferred": 1,
+   "done": 0,
+   "done_weak": 0,
+   "failed": 0,
+   "pending": 9,
+   "running": 0,
+   "skipped": 0
+  },
+  "close_level": "C2",
+  "job": null,
+  "level": "C0",
+  "roster_size": 10,
+  "strong": {
+   "done": 0,
+   "done_weak": 0,
+   "ratio": null
+  },
+  "unseated_n": 9
+ },
+ "registry": [
+  {
+   "cluster_key": "724d0ced2c40",
+   "contested": 0,
+   "direction": "risk",
+   "evidence_grade": "경험칙",
+   "human_refs": [
+    "diff:d0f8cd698f4f420083f48a0641b6dd84#H1"
+   ],
+   "judgement": "WARNING",
+   "member_ids": [
+    "diff:d0f8cd698f4f420083f48a0641b6dd84#H1"
+   ],
+   "severity": "중대",
+   "status": "open",
+   "support": 0
+  }
+ ],
+ "report": {
+  "block_keys": [
+   "background",
+   "minutes",
+   "recommendation",
+   "results"
+  ],
+  "block_lines": {
+   "background": 20,
+   "minutes": 10,
+   "recommendation": 2,
+   "results": 22
+  },
+  "level": "C0",
+  "version": "v1"
+ }
+}

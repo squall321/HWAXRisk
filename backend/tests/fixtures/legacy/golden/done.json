@@ -1,0 +1,186 @@
+{
+ "close_level": {
+  "c1": false,
+  "c2": false,
+  "c3": false,
+  "close_level": "C2",
+  "detail": {
+   "depth": {
+    "mech": {
+     "deferred": 0,
+     "have": 1,
+     "need": 2,
+     "roster": 2
+    },
+    "pcb": {
+     "deferred": 1,
+     "have": 1,
+     "need": 1,
+     "roster": 2
+    },
+    "rel": {
+     "deferred": 0,
+     "have": 1,
+     "need": 2,
+     "roster": 2
+    },
+    "sim": {
+     "deferred": 0,
+     "have": 1,
+     "need": 2,
+     "roster": 2
+    },
+    "xd": {
+     "deferred": 0,
+     "have": 1,
+     "need": 2,
+     "roster": 2
+    }
+   },
+   "domains_terminal": {
+    "cam": 0,
+    "disp": 0,
+    "material": 0,
+    "mech": 1,
+    "mem": 0,
+    "passive": 0,
+    "pcb": 2,
+    "pwr": 0,
+    "rel": 1,
+    "rf": 0,
+    "sh": 0,
+    "sim": 1,
+    "soc": 0,
+    "std": 0,
+    "xd": 1
+   },
+   "done_weak": 0,
+   "failed": 0,
+   "skipped": 0,
+   "skipped_ratio": 0.0,
+   "spec_parse_failed": 0,
+   "strong": 5,
+   "strong_ratio": 1.0,
+   "tier_a_done": 1
+  },
+  "level": "C0",
+  "roster_size": 10,
+  "status_counts": {
+   "deferred": 1,
+   "done": 5,
+   "pending": 4
+  },
+  "unseated_n": 4
+ },
+ "coverage": {
+  "by_domain": {
+   "mech": {
+    "done": 1,
+    "pending": 1
+   },
+   "pcb": {
+    "deferred": 1,
+    "done": 1
+   },
+   "rel": {
+    "done": 1,
+    "pending": 1
+   },
+   "sim": {
+    "done": 1,
+    "pending": 1
+   },
+   "xd": {
+    "done": 1,
+    "pending": 1
+   }
+  },
+  "by_status": {
+   "abstain": 0,
+   "assigned": 0,
+   "carried": 0,
+   "deferred": 1,
+   "done": 5,
+   "done_weak": 0,
+   "failed": 0,
+   "pending": 4,
+   "running": 0,
+   "skipped": 0
+  },
+  "close_level": "C2",
+  "job": {
+   "panels_done": 1,
+   "panels_total": 1,
+   "state": "completed",
+   "tier": "A"
+  },
+  "level": "C0",
+  "roster_size": 10,
+  "strong": {
+   "done": 5,
+   "done_weak": 0,
+   "ratio": 1.0
+  },
+  "unseated_n": 4
+ },
+ "registry": [
+  {
+   "cluster_key": "724d0ced2c40",
+   "contested": 0,
+   "direction": "risk",
+   "evidence_grade": "도구예측",
+   "human_refs": [],
+   "judgement": "WARNING",
+   "member_ids": [
+    "08910bb5c8de4c9999c99659ddba8020#F1"
+   ],
+   "severity": "중대",
+   "status": "open",
+   "support": 1
+  },
+  {
+   "cluster_key": "db42c4b1b018",
+   "contested": 0,
+   "direction": "risk",
+   "evidence_grade": "도구예측",
+   "human_refs": [],
+   "judgement": "WARNING",
+   "member_ids": [
+    "08910bb5c8de4c9999c99659ddba8020#F2"
+   ],
+   "severity": "중대",
+   "status": "open",
+   "support": 1
+  },
+  {
+   "cluster_key": "724d0ced2c40.imp",
+   "contested": 0,
+   "direction": "improvement",
+   "evidence_grade": "도구예측",
+   "human_refs": [],
+   "judgement": "OK",
+   "member_ids": [
+    "08910bb5c8de4c9999c99659ddba8020#G1"
+   ],
+   "severity": "경미",
+   "status": "open",
+   "support": 1
+  }
+ ],
+ "report": {
+  "block_keys": [
+   "background",
+   "minutes",
+   "recommendation",
+   "results"
+  ],
+  "block_lines": {
+   "background": 20,
+   "minutes": 12,
+   "recommendation": 3,
+   "results": 23
+  },
+  "level": "C0",
+  "version": "v1"
+ }
+}

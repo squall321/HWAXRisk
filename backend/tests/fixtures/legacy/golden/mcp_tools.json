@@ -1,0 +1,16 @@
+[
+ "risk_list_projects",
+ "risk_get_coverage",
+ "risk_list_panels",
+ "risk_get_panel_transcript",
+ "risk_taxonomy",
+ "risk_get_precedents",
+ "risk_similar_projects",
+ "risk_get_snapshot",
+ "risk_get_diff",
+ "risk_get_registry",
+ "risk_claims_for_ref",
+ "risk_get_brief",
+ "risk_submit_panel_result",
+ "risk_add_finding"
+]

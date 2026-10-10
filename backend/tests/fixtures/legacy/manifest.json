@@ -1,0 +1,36 @@
+{
+ "frozen_commit": "7248651",
+ "owner": "legacy@example.com",
+ "schema_version": 2,
+ "targets": {
+  "done": {
+   "base_snapshot_id": "89c0326b8ad945eeaa06ba38d76206ee",
+   "diff_id": "b631dcfc5fe8406ab0b53e0e164a1d63",
+   "job_id": "13ef366e00f4429b842501d2930c5eba",
+   "project_id": "f5bf47d2f448423a88ff5e3dba4b38cb",
+   "target_key": "diff:b631dcfc5fe8406ab0b53e0e164a1d63",
+   "target_snapshot_id": "ddb51cab680b41b084fca5def1242023"
+  },
+  "human": {
+   "acked": {
+    "gate": "G3",
+    "snapshot_id": "df26102d92d8452c9963e5833f9333e4"
+   },
+   "base_snapshot_id": "df26102d92d8452c9963e5833f9333e4",
+   "diff_id": "d0f8cd698f4f420083f48a0641b6dd84",
+   "finding_id": "diff:d0f8cd698f4f420083f48a0641b6dd84#H1",
+   "project_id": "6b912be1d145438386dbcff91f26f7ca",
+   "target_key": "diff:d0f8cd698f4f420083f48a0641b6dd84",
+   "target_snapshot_id": "3c97ecdf99f847f7a16921d7f42f541c"
+  },
+  "planned": {
+   "base_snapshot_id": "ad0af225797f4204a0561d4a56f644ee",
+   "diff_id": "12b1733714634da7b87aa48aff6b1652",
+   "job_id": "c74ede258a5f4873a698bae7d4fb07c4",
+   "panel_id": "cc6ffef9be68480897d42d87803acdb7",
+   "project_id": "3ff92b864f224d6ba142e67e08083f5d",
+   "target_key": "diff:12b1733714634da7b87aa48aff6b1652",
+   "target_snapshot_id": "5a2b10a2fd7643348c85084bdaf88e09"
+  }
+ }
+}
