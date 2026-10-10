@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 from collections import Counter
 from contextlib import contextmanager
@@ -17,11 +18,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
+import httpx
 from jsonschema import validators
 
-from app import devseed, identity, ir_builder, planner, routes
+from app import config, devseed, engine_client, identity, ir_builder, planner, routes, runner
 from app import diff as diff_module
-from app.common import canonical_json, sha256_hex
+from app.common import canonical_json, now_epoch, sha256_hex
 
 OWNER = "syn@example.com"
 CAPTURED_AT = 1756600000
@@ -190,6 +192,72 @@ def make_diff_target(store, size: int = 40, *, seed: int | None = None, owner: s
                        target_snapshot_id=second["snapshot_id"], diff_id=diff["diff_id"], target_key=target_key,
                        diff=diff, manifest=tuple(records), base=base, target=target)
 
+
+
+# ---------------------------------------------------------------- 러너가 포털에 보내는 패널 본문(세 리포 사슬 시험 EX1)
+_PANEL_DECISION = "판정 본문.\n```json\n{\"schema\": \"risk_spec\"}\n```"
+
+
+@dataclass(frozen=True)
+class PanelBody:
+    body: dict            # 러너가 포털 `POST /agent/chat` 에 실제로 보낸 요청 본문
+    target: SynthTarget
+    run: dict             # `runner.run_panel` 의 반환
+
+
+@contextmanager
+def no_network() -> Iterator[None]:
+    """주입한 대역(`httpx.MockTransport`) 밖의 HTTP 를 연결 오류로 막는다 — 브리프의 필드 근거·도구 이름 조회가 그 박스의
+    실 게이트웨이에 닿지 않게. 시험 파일들의 `no_network` 픽스처와 같은 것이고, 픽스처를 못 쓰는 별도 프로세스가 쓴다."""
+    real = httpx.HTTPTransport.handle_request
+
+    def refused(_self, request):
+        raise httpx.ConnectError("공장은 외부를 부르지 않는다.", request=request)
+
+    httpx.HTTPTransport.handle_request = refused
+    try:
+        yield
+    finally:
+        httpx.HTTPTransport.handle_request = real
+
+
+def portal_panel_body(store, data_dir: Path | str, size: int = 40, *, seed: int | None = None,
+                      engine_budget: int | None = None, owner: str = OWNER,
+                      roster: Sequence[Mapping[str, Any]] | None = None) -> PanelBody:
+    """합성 다건 변경 타깃에서 러너 한 바퀴를 실모듈로 돌려, 포털이 받는 `/agent/chat` 본문을 돌려준다.
+
+    러너·편성기·브리프·엔진 클라이언트(`PortalPanelEngine`)는 진짜이고 포털과 에이전트 서버만 대역이다 — 에이전트 서버
+    `/health` 는 `engine_budget` 을 `evid_budget` 으로 알려 주고(None 이면 옛 엔진처럼 싣지 않는다), 포털은 결정문
+    하나로 답한다. 자격은 타깃 owner 가 등록한 포털 PAT 라 좌석이 그 diff 를 열 수 있다 — 질문에 `diff_id=` 가 실린다.
+    에이전트 서버 리포의 사슬 시험(tests/test_risk_panel_body_chain.py)이 이 본문을 포털 중계와 엔진에 넣는다.
+    """
+    synth = make_diff_target(store, size, seed=seed, owner=owner,
+                             agents=roster or _default_agents(("mech", "sim", "xd", "rel", "cam"), 3))
+    store.upsert_credential(owner, identity.encrypt_pat("pat-synth").decode("ascii"), "sub-synth", owner, "[]",
+                            now_epoch() + 30 * 86400)
+    cfg = dataclasses.replace(config.settings, data_dir=Path(data_dir))
+    runner.create_job(store, synth.target_key, "C", owner_sub=owner, consent=True, settings=cfg)
+    seen: dict = {}
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.path == engine_client.CONVERSATIONS_PATH:
+            return httpx.Response(200, json={"id": "conv-synth"})
+        if request.url.path == engine_client.CHAT_PATH:
+            seen["body"] = json.loads(request.content.decode())
+            frames = [("delib", {"kind": "decision", "text": _PANEL_DECISION}), ("done", {})]
+            sse = "".join(f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n" for name, data in frames)
+            return httpx.Response(200, content=sse, headers={"content-type": "text/event-stream"})
+        info: dict = {"model": "glm-synth"}                                    # 에이전트 서버 /health
+        if engine_budget is not None:
+            info["evid_budget"] = engine_budget
+        return httpx.Response(200, json=info)
+
+    engine = engine_client.PortalPanelEngine(store, cfg, transport=httpx.MockTransport(answer))
+    with no_network():
+        out = runner.run_panel(store, cfg, engine, runner.claim_next_job(store, cfg))
+    if out.get("status") != "done" or "body" not in seen:
+        raise RuntimeError(f"러너 한 바퀴가 포털에 본문을 보내고 끝나지 못했다 — {out}")
+    return PanelBody(body=seen["body"], target=synth, run=out)
 
 # ---------------------------------------------------------------- 생산자가 못 만드는 행
 # 손으로 심는 JSON 열은 그 열의 스키마로 먼저 검증한다(규칙 R4) — 스키마를 일부러 어기는 시험만 validate=False 를 준다.

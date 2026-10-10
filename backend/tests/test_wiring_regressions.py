@@ -14,7 +14,8 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app import common, config, engine_client, identity, narrative, planner, registry, routes, runner
+from app import brief, common, config, engine_client, identity, narrative, planner, registry, routes, runner
+from tests import factories
 from tests.conftest import REPO_ROOT
 
 def _enc(pat: str) -> str:
@@ -365,6 +366,22 @@ def test_the_whole_request_body_is_accepted_by_the_portal_model(risk_store, tmp_
     assert verdict["errors"] == [], f"포털이 러너 본문을 422 로 거절한다 — {verdict['errors']}"
     # 통과해도 선언 안 된 키는 포털이 말없이 버린다 — 러너가 실은 손잡이가 엔진까지 가는지도 같이 본다.
     assert verdict["dropped"] == []
+
+
+def test_the_synthetic_panel_body_factory_returns_what_the_runner_sent(risk_store, tmp_path):
+    """세 리포 사슬 시험(에이전트 서버 tests/test_risk_panel_body_chain.py)이 쓰는 공장 — 합성 다건 변경 타깃에서 러너가
+    포털에 실제로 보낸 본문이다. 질문에 그 타깃의 diff_id 가, 검색어가 포털 상한 안으로, 1백만 토큰 창의 근거 예산이면
+    변경 목록이 전부 실린다."""
+    made = factories.portal_panel_body(risk_store, tmp_path, 40, engine_budget=416_787)
+    assert made.run["status"] == "done"
+    body, n = made.body, len(made.target.diff["semantic"]["events"])
+    assert body["message"].startswith(engine_client.DELIBERATE_TRIGGER)
+    assert f"diff_id={made.target.diff_id}" in body["message"]
+    opts = body["delib_opts"]
+    assert opts["chair_template"] == planner.CHAIR_TEMPLATE
+    assert 0 < len(opts["knowledge_query"]) <= brief.KNOWLEDGE_QUERY_MAX
+    e2 = next(e["result"] for e in opts["evidence"] if e["key"] == "E2")
+    assert f"[전체 {n}건 — 실림 {n} · 생략 0 |" in e2, e2.splitlines()[-1]
 
 
 def test_a_panel_past_its_wall_clock_is_closed_without_charging_the_seats(risk_store, tmp_path):
