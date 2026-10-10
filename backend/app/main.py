@@ -17,6 +17,7 @@ from app.errors import AppError
 from app.mcp_server import mcp
 from app.risk_store import close_store, get_store
 from app.routes import PAT_MIN_REMAINING_S, router as api_router
+from app.runlock import RunnerLock
 from app.runner import RiskRunner
 
 log = logging.getLogger("hwax_risk.main")
@@ -100,6 +101,11 @@ async def _lifespan(app: FastAPI):
     warn_stream_limits_off(settings)
     hostname = socket.gethostname()
     prev_hostname = _read_origin_hostname(settings.data_dir)
+    # ①-b 러너 잠금 — 저장소를 열기 전에 잡아 본다(WP5a R2 · 반대 검토 P-12). 허브가 같은 데이터 디렉터리에 띄운 둘째는
+    # 못 쥔다 — 기동은 하지만(REST·MCP) 러너 루프와 재기동 복구는 돌지 않는다. 이행은 migrate.lock 이 따로 줄 세운다.
+    runner_lock = RunnerLock(settings.data_dir)
+    runner_lock.acquire()
+    app.state.runner_lock = runner_lock
     # ② RiskStore 생성·MIGRATIONS 적용·살림 표(get_store 가 open()+migrate() 를 수행한다).
     store = get_store()
     # ③ origin.json 갱신.
@@ -115,7 +121,7 @@ async def _lifespan(app: FastAPI):
     identity.reset_cache()
     # ⑥ 이식한 MCP Route 의 세션 매니저는 자동 기동되지 않으므로 직접 구동한다(MaterialTwinWeb·ThermalShockMCP 와 동일).
     # ⑦ 러너 스레드. 엔진은 주입식이라 러너 자체는 LLM 을 부르지 않는다(plan §6.7.1 (A) 경로).
-    runner = RiskRunner(store, settings, engine=engine_client.build_engine(store, settings))
+    runner = RiskRunner(store, settings, engine=engine_client.build_engine(store, settings), lock=runner_lock)
     app.state.runner = runner
     try:
         async with mcp.session_manager.run():
@@ -126,6 +132,7 @@ async def _lifespan(app: FastAPI):
                 runner.stop()
     finally:
         close_store()
+        runner_lock.release()
 
 
 app = FastAPI(
@@ -165,7 +172,8 @@ _LAST_STORE_WARNINGS: dict[str, bool] = {"vocab_recompute_pending": False}
 
 
 def health_warnings() -> list[str]:
-    """헬스 경고 코드 목록 — 백업 평문 사본(§5.2.5 (3a))과 사전 메이저 승급 후 재계산 미실행(§2.7.1).
+    """헬스 경고 코드 목록 — 백업 평문 사본(§5.2.5 (3a)) · 러너 잠금을 다른 프로세스가 쥠(runner_lock_held, WP5a R2) ·
+    사전 메이저 승급 후 재계산 미실행(§2.7.1).
 
     사전 경고는 저장소를 읽는다 — 락을 기다리지 않고 잡아 보고(try_lock), 못 잡으면 직전 값을 낸다(반대 검토 P-11).
     """
@@ -174,6 +182,10 @@ def health_warnings() -> list[str]:
     warnings: list[str] = []
     if not config.backup_key():
         warnings.append("backup_unencrypted")
+    # 같은 데이터 디렉터리의 다른 프로세스가 러너 잠금을 쥐고 있다 — 이 프로세스는 REST·MCP 만 연다(WP5a R2).
+    lock = getattr(app.state, "runner_lock", None)
+    if lock is not None and not lock.held():
+        warnings.append("runner_lock_held")
     try:
         store = get_store()
         with store.try_lock() as got:

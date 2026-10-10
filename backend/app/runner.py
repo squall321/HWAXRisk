@@ -1676,12 +1676,17 @@ class RiskRunner:
         narrative_mod: Any | None = None,
         registry_mod: Any | None = None,
         external_sync_send: Any | None = None,
+        lock: Any | None = None,
     ) -> None:
         self.store = store
         self.settings = settings
         self.engine = engine
         self.narrative_mod = narrative_mod
         self.registry_mod = registry_mod
+        # 데이터 디렉터리 러너 잠금(runlock.RunnerLock). None 이면 잠금 없이 돈다(시험·단독 실행). 운영 배선(main.py)은
+        # 늘 준다 — 같은 데이터 디렉터리에 프로세스가 둘 떠도 러너·재기동 복구는 쥔 하나만 돈다(WP5a R2).
+        self.lock = lock
+        self._begin_lock = threading.Lock()
         self._stop = threading.Event()
         self._threads: list[threading.Thread] = []
         self._workers: list[threading.Thread] = []
@@ -1771,32 +1776,65 @@ class RiskRunner:
 
     # ------------------------------------------------------------ 수명
     def start(self) -> None:
+        """러너 잠금을 쥐면 재기동 복구와 루프를 시작한다. 못 쥐면 REST·MCP 만 열린 채로 두고 runlock.RETRY_S 마다
+        다시 잡아 본다 — 쥔 프로세스가 죽으면 커널이 잠금을 풀어 이어받는다. 못 쥔 프로세스가 복구를 돌리면 쥔
+        프로세스가 돌리는 패널을 닫고 좌석을 되돌려 같은 좌석이 두 번 돈다."""
         if self._threads:
             return
         self._stop.clear()
-        if self.store is not None:
-            try:
-                recover_running_panels(self.store)
-                # 스냅샷 잡도 같은 자리에서 마감한다 — running 인 채 남으면 영영 진행판에 걸린다(§2.11.3).
-                from app import routes as routes_module  # noqa: PLC0415 — routes 는 runner 를 import 한다.
+        if self.lock is None or self.lock.acquire():
+            self._begin()
+            return
+        from app import runlock  # noqa: PLC0415 — 재시도 간격은 부를 때 읽는다(시험이 줄인다).
 
-                routes_module.close_stale_snapshot_jobs(self.store)
-            except Exception:  # noqa: BLE001 — 복구 실패가 기동을 막지 않는다.
-                log.exception("재기동 복구 실패")
-        for name, interval in _LOOPS:
-            t = threading.Thread(target=self._loop, args=(name, interval), name=name, daemon=True)
-            t.start()
-            self._threads.append(t)
+        log.warning("러너 잠금(%s)을 다른 프로세스가 쥐고 있다(%s) — 이 프로세스는 REST·MCP 만 연다. 러너 루프와 재기동"
+                    " 복구는 돌지 않고 %s초마다 다시 잡아 본다.", self.lock.path, self.lock.holder(), runlock.RETRY_S)
+        waiter = threading.Thread(target=self._await_lock, name="runner_lock", daemon=True)
+        waiter.start()
+        self._threads.append(waiter)
+
+    def _await_lock(self) -> None:
+        from app import runlock  # noqa: PLC0415
+
+        while not self._stop.wait(runlock.RETRY_S):
+            if self.lock.acquire():
+                log.info("러너 잠금을 이어받았다 — 재기동 복구와 러너 루프를 시작한다")
+                self._begin()
+                return
+
+    def _begin(self) -> None:
+        """재기동 복구 → 루프 스레드. 잠금을 쥔 뒤에만 부른다(기동 때 또는 이어받을 때)."""
+        with self._begin_lock:
+            if self._stop.is_set():
+                return
+            if self.store is not None:
+                try:
+                    recover_running_panels(self.store)
+                    # 스냅샷 잡도 같은 자리에서 마감한다 — running 인 채 남으면 영영 진행판에 걸린다(§2.11.3).
+                    from app import routes as routes_module  # noqa: PLC0415 — routes 는 runner 를 import 한다.
+
+                    routes_module.close_stale_snapshot_jobs(self.store)
+                except Exception:  # noqa: BLE001 — 복구 실패가 기동을 막지 않는다.
+                    log.exception("재기동 복구 실패")
+            for name, interval in _LOOPS:
+                t = threading.Thread(target=self._loop, args=(name, interval), name=name, daemon=True)
+                t.start()
+                self._threads.append(t)
 
     def stop(self) -> None:
-        """Event 를 세우고 스레드당 최대 2 s(패널 워커는 5 s)만 join 한다."""
+        """Event 를 세우고 스레드당 최대 2 s(패널 워커는 5 s)만 join 한 뒤 러너 잠금을 놓는다(파일은 지우지 않는다)."""
         self._stop.set()
-        for t in self._threads:
-            t.join(timeout=2.0)
+        with self._begin_lock:
+            threads = list(self._threads)
+        for t in threads:
+            if t is not threading.current_thread():
+                t.join(timeout=2.0)
         for t in self._workers:
             t.join(timeout=5.0)
         self._threads = []
         self._workers = [t for t in self._workers if t.is_alive()]
+        if self.lock is not None:
+            self.lock.release()
 
     def status(self) -> dict:
         """{threads: [{name, alive, last_tick}]} — /api/health 에는 싣지 않는다(형식 고정)."""
