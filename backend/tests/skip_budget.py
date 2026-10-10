@@ -5,8 +5,9 @@
 
 - 형제 리포(`../HWAXPortal` · `../HWAXAgentServer`)가 곁에 있으면 엄격하다 — 허용 목록 밖의 건너뜀이 하나라도 있으면
   종료 코드가 1 이다. 없으면(SIF 빌드 등) 경고만 찍는다. `RR_STRICT_SKIPS=0|1` 이 이 판정을 덮는다.
-- xfail 은 세지 않는다. pytest 는 기대한 실패(xfail)도 `report.skipped` 로 넘기는데(`wasxfail` 이 붙는다), 그것을 세면
-  재현 시험(xfail strict)을 넣는 순간 전체가 붉어진다(반대 검토 P-01).
+- strict 인 xfail 은 세지 않는다. pytest 는 기대한 실패(xfail)도 `report.skipped` 로 넘기는데(`wasxfail` 이 붙는다), 그것을
+  세면 재현 시험(xfail strict)을 넣는 순간 전체가 붉어진다(반대 검토 P-01). 다만 strict 아닌 표식과 `pytest.xfail()` 호출은
+  건너뜀으로 센다 — 건너뛰던 자리를 그것으로 바꾸면 이 가드를 같은 모양으로 비켜 간다(R-FLOOR-2).
 """
 from __future__ import annotations
 
@@ -23,7 +24,9 @@ ALLOWED_SKIPS: tuple[tuple[str, str, str], ...] = (
     ("tests/test_client_contract.py", "프런트엔드", "frontend/ 는 다른 세션이 개발한다 — 파일이 옮겨지는 날 백엔드가 붉어지지 않게"),
     ("tests/test_p6_routes.py", "프런트엔드", "같은 까닭(화면 파일)"),
     ("tests/test_wiring_regressions.py", "이 venv 로 불러오지 못했다",
-     "포털이 새 의존을 들이면 리스크 venv 로 포털 모델을 못 연다 — 계약 위반이 아니라 환경이다(사유가 끝줄에 찍힌다)"),
+     "포털이 새 서드파티 의존을 들이면 리스크 venv 로 포털 모델을 못 연다 — 계약 위반이 아니라 환경이다(사유가 끝줄에 찍힌다)."
+     " 하위 프로세스가 포털 밖 모듈의 ModuleNotFoundError 일 때만 이 사유로 건너뛴다 — 이름이 없다·포털 안 모듈이 없다·"
+     "검증 중 예외는 건너뛰지 않고 붉다(R-FLOOR-2)"),
     ("tests/rr/test_no_internal_ips.py", "git 체크아웃이 아니다", "git archive·SIF 사본에는 추적 목록이 없다"),
 )
 # 형제 리포가 없을 때만 건너뛰는 자리 — 형제가 곁에 있는데 건너뛰면 허용 목록 밖이라 붉다.
@@ -31,6 +34,7 @@ SIBLING_ONLY: tuple[str, ...] = ("tests/test_parity.py", "tests/test_atoms.py", 
                                  "tests/test_stream_attribution.py")
 
 _skipped: list[tuple[str, str]] = []
+_strict_xfail: set[str] = set()      # strict 인 xfail 표식이 붙은 시험(nodeid) — 이것만 건너뜀으로 세지 않는다
 
 
 def _reason(report) -> str:
@@ -51,9 +55,20 @@ def unallowed(skipped: list[tuple[str, str]]) -> list[tuple[str, str]]:
             if not any(nodeid.startswith(prefix) and fragment in reason for prefix, fragment, _ in ALLOWED_SKIPS)]
 
 
+def pytest_collection_modifyitems(session, config, items):
+    for item in items:
+        mark = item.get_closest_marker("xfail")
+        if mark is not None and mark.kwargs.get("strict", config.getini("xfail_strict")):
+            _strict_xfail.add(item.nodeid)
+
+
 def pytest_runtest_logreport(report):
-    if report.skipped and not hasattr(report, "wasxfail") and report.when in ("setup", "call"):
+    if not report.skipped or report.when not in ("setup", "call"):
+        return
+    if not hasattr(report, "wasxfail"):
         _skipped.append((report.nodeid, _reason(report)))
+    elif report.nodeid not in _strict_xfail:
+        _skipped.append((report.nodeid, f"strict 아닌 xfail — {report.wasxfail}"))
 
 
 def pytest_sessionfinish(session, exitstatus):

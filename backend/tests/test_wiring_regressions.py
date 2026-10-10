@@ -322,10 +322,19 @@ def _portal_backend() -> Path | None:
 
 # 포털의 요청 모델(ChatRequest · DelibOpts)로 본문을 검증한다. 선언 안 된 키는 포털이 에러 없이 버리므로
 # (model_dump(exclude_none=True)) 통과 여부와 함께 '무엇이 떨어졌나' 도 돌려받는다.
+# 포털의 서드파티 의존이 이 venv 에 없을 때(포털 밖 모듈의 ModuleNotFoundError)만 그 모듈 이름을 싣고 따로 끝낸다 — 그것만
+# 환경이다. 포털 안 모듈이 없다·이름이 없다·검증 중 예외는 계약이 깨진 것이라 그대로 터진다(R-FLOOR-2).
+_PORTAL_DEPENDENCY_MISSING = 3
 _PORTAL_VALIDATE = """
 import json, sys
-from pydantic import ValidationError
-from app.agent.routes import ChatRequest
+try:
+    from pydantic import ValidationError
+    from app.agent.routes import ChatRequest
+except ModuleNotFoundError as exc:
+    if not exc.name or exc.name.split(".")[0] == "app":
+        raise
+    print(json.dumps({"missing_module": exc.name}))
+    sys.exit(__MISSING_RC__)
 body = json.load(sys.stdin)
 try:
     request = ChatRequest.model_validate(body)
@@ -334,7 +343,8 @@ except ValidationError as exc:
 else:
     kept = request.delib_opts.model_dump(exclude_none=True)
     print(json.dumps({"errors": [], "dropped": sorted(set(body["delib_opts"]) - set(kept))}))
-"""
+""".replace(
+    "__MISSING_RC__", str(_PORTAL_DEPENDENCY_MISSING))
 
 
 def test_runner_never_sends_a_per_call_timeout_as_the_panel_wall_clock(risk_store, tmp_path):
@@ -360,8 +370,11 @@ def test_the_whole_request_body_is_accepted_by_the_portal_model(risk_store, tmp_
     body = _panel_body(risk_store, tmp_path)
     r = subprocess.run([sys.executable, "-c", _PORTAL_VALIDATE], input=json.dumps(body), cwd=backend,
                        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, capture_output=True, text=True, timeout=120)
-    if r.returncode != 0:
-        pytest.skip(f"포털 모델을 이 venv 로 불러오지 못했다 — {r.stderr.strip()[-300:]}")
+    if r.returncode == _PORTAL_DEPENDENCY_MISSING:
+        missing = json.loads(r.stdout)["missing_module"]
+        pytest.skip(f"포털 모델을 이 venv 로 불러오지 못했다 — 포털의 서드파티 의존 {missing!r} 이 이 venv 에 없다")
+    # 그 밖의 실패는 건너뛰지 않는다 — 포털이 모델을 옮겼거나 러너 본문에서 검증기가 터진 것이다(운영에서는 패널마다 500).
+    assert r.returncode == 0, f"포털 모델로 러너 본문을 검증하지 못했다(rc={r.returncode}) — {r.stderr.strip()[-2000:]}"
     verdict = json.loads(r.stdout)
     assert verdict["errors"] == [], f"포털이 러너 본문을 422 로 거절한다 — {verdict['errors']}"
     # 통과해도 선언 안 된 키는 포털이 말없이 버린다 — 러너가 실은 손잡이가 엔진까지 가는지도 같이 본다.
