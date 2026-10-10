@@ -2913,6 +2913,12 @@ def complete_panel(panel_id: str, *, engine: str, decision_text: str, turns: lis
 
     quality = _loads(panel["quality_json"], {})
     quality.update({"actor": actor, "actor_verified": bool(actor_verified)})
+    # 근거 등급 규칙의 판(BQ-6 · 사용자 결정 D-19) — 처음 저장하는 패널은 지금 판이고, 이미 저장된(done) 패널을 다시 내면 그 패널이
+    # 처음 저장된 판이다. 판 표식이 없는 done 패널은 업그레이드 전에 저장된 것이라 그때 규칙으로 다시 낸다 — 엄격해진 규칙이 소급되면
+    # 사람이 확정한 판정 옆의 등급이 움직인다. error 패널은 저장된 원자가 없어 처음 저장이다.
+    grade_rules = (str(quality.get("grade_rules") or narrative.GRADE_RULES_LEGACY) if panel["status"] == "done"
+                   else narrative.GRADE_RULES)
+    quality["grade_rules"] = grade_rules
     # events[] 가 없으면 귀속 값은 건드리지 않는다 — 재제출이 기존 attribution_rate·extra_seats 를 지우면 안 된다(§8.2.3).
     if checked is not None:
         quality["attribution_rate"] = attribution["attribution_rate"]
@@ -2960,7 +2966,7 @@ def complete_panel(panel_id: str, *, engine: str, decision_text: str, turns: lis
         )
 
         persisted = persist(store, panel_id, decision_text=decision_text, spec=spec, turns=turns,
-                            attribution=attribution, actor=actor)
+                            attribution=attribution, actor=actor, grade_rules=grade_rules)
         seat_results = []
         turns_by_seat: dict[str, int] = {}
         for turn in turns:

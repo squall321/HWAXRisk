@@ -116,6 +116,85 @@ def test_stored_character_grades_are_not_recomputed_with_the_stricter_rule():
     assert character.evidence_grade_of([{"ref": "inc:obj1"}]) == "측정"
 
 
+def _card_decision(target_key: str, seat_key: str) -> str:
+    """확인 채널이 없는 `card:` 하나를 인용하고 '문헌·규격' 을 주장하는 finding 한 건의 결정문."""
+    from tests.test_project_patch import _finding_spec
+
+    spec = _finding_spec(target_key, seat_key)
+    spec["findings"][0].update(cites=[{"ref": "card:REC-1", "quote": ""}], evidence_grade="문헌·규격")
+    return "F1 낙하 시 상단 리브에 응력이 집중된다.\n\n```json\n" + json.dumps(spec, ensure_ascii=False) + "\n```\n"
+
+
+def _panel_grades(store, panel_id: str, target_key: str) -> tuple[list[str], list[str]]:
+    findings = store.query("SELECT evidence_grade FROM rr_findings WHERE panel_id = ?", (panel_id,))
+    clusters = store.query("SELECT evidence_grade FROM rr_registry WHERE target_key = ?", (target_key,))
+    return [r["evidence_grade"] for r in findings], [r["evidence_grade"] for r in clusters]
+
+
+def test_resubmitting_a_panel_saved_before_the_stricter_rule_keeps_its_grades(risk_store, monkeypatch):
+    """업그레이드 전에 done 으로 저장된 패널을 다시 제출해도(파싱 보정 등) 엄격해진 등급 규칙(확인 못 한 card:·inc:·rpt: 는
+    세지 않는다 — R-36)이 그 패널에 소급되지 않는다(사용자 결정 D-19 · BQ-6). 종전에는 재제출의 저장이 새 규칙으로 등급을 다시
+    내 '문헌·규격' 이 '경험칙' 으로 내려가고, 병합이 클러스터 등급을 다시 계산해 사람이 확정한 판정 옆의 숫자가 움직였다."""
+    from app import planner
+
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    synth = factories.make_diff_target(risk_store, 3)
+    panel = planner.plan_next_panel(risk_store, synth.target_key, "B")
+    decision = _card_decision(synth.target_key, panel["seats"][0]["key"])
+    turns = [{"round": 1, "persona": s["key"], "say": "발언"} for s in panel["seats"]]
+
+    def submit() -> None:
+        routes.complete_panel(panel["id"], engine="mcp", decision_text=decision, turns=turns, actor="syn",
+                              owner_sub=factories.OWNER)
+
+    # 업그레이드 전의 저장 — 그때 규칙(확인 못 한 인용도 셌다)으로 등급을 내고, 품질에는 규칙 판 표식이 없다.
+    real = narrative.evidence_grade_from_cites
+    with monkeypatch.context() as patch:
+        patch.setattr(narrative, "evidence_grade_from_cites", lambda resolved, ctx=None: real(
+            {**resolved, "cites": [{k: v for k, v in row.items() if k != "verified"} for row in resolved["cites"]]},
+            ctx))
+        submit()
+    quality = json.loads(risk_store.query_one("SELECT quality_json FROM rr_panels WHERE id = ?",
+                                              (panel["id"],))["quality_json"])
+    quality.pop("grade_rules", None)
+    risk_store.execute("UPDATE rr_panels SET quality_json = ? WHERE id = ?", (json.dumps(quality), panel["id"]))
+    before = _panel_grades(risk_store, panel["id"], synth.target_key)
+    assert before == (["문헌·규격"], ["문헌·규격"]), before
+
+    submit()
+    assert _panel_grades(risk_store, panel["id"], synth.target_key) == before
+    stamped = json.loads(risk_store.query_one("SELECT quality_json FROM rr_panels WHERE id = ?",
+                                              (panel["id"],))["quality_json"])
+    assert stamped["grade_rules"] == narrative.GRADE_RULES_LEGACY        # 다음 재제출도 그 판이다
+
+
+def test_a_panel_first_saved_now_keeps_the_current_rule_on_resubmit(risk_store, monkeypatch):
+    """지금 처음 저장하는 패널은 지금 규칙이고 그 판을 품질에 남긴다 — 다시 내도 같은 규칙이다(판 표식이 있으면 옛 규칙으로
+    되돌아가지 않는다)."""
+    from app import planner
+
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    synth = factories.make_diff_target(risk_store, 3)
+    panel = planner.plan_next_panel(risk_store, synth.target_key, "B")
+    decision = _card_decision(synth.target_key, panel["seats"][0]["key"])
+    turns = [{"round": 1, "persona": s["key"], "say": "발언"} for s in panel["seats"]]
+    for _ in range(2):
+        routes.complete_panel(panel["id"], engine="mcp", decision_text=decision, turns=turns, actor="syn",
+                              owner_sub=factories.OWNER)
+        assert _panel_grades(risk_store, panel["id"], synth.target_key) == (["경험칙"], ["경험칙"])
+        quality = json.loads(risk_store.query_one("SELECT quality_json FROM rr_panels WHERE id = ?",
+                                                  (panel["id"],))["quality_json"])
+        assert quality["grade_rules"] == narrative.GRADE_RULES
+
+
+def test_the_web_runner_stamps_the_grade_rule_it_saved_with(risk_store, tmp_path):
+    """웹 러너가 저장한 패널도 등급 규칙 판을 품질에 남긴다 — 없으면 그 패널을 다시 낼 때 업그레이드 전 패널로 읽힌다."""
+    run = factories.portal_panel_body(risk_store, tmp_path, 3).run
+    quality = json.loads(risk_store.query_one("SELECT quality_json FROM rr_panels WHERE id = ?",
+                                              (run["panel_id"],))["quality_json"])
+    assert quality["grade_rules"] == narrative.GRADE_RULES
+
+
 def test_number_tokens_match_by_value_not_substring():
     """수치 대조는 값으로 한다 — '5' 가 '0.15' 의 부분 문자열이라 통과하던 것을 막고, '1.2' 와 '1.200', '-16.7' 과 '−16.7' 은
     같은 수로 본다(R-41)."""

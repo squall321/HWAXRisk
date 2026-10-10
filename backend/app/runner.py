@@ -1726,6 +1726,9 @@ def _complete_panel(
         )
         if model_changed and "model_changed_midrun" not in quality["flags"]:
             quality["flags"].append("model_changed_midrun")
+        # 이 저장이 쓴 근거 등급 규칙의 판 — 이 패널을 다시 낼 때 같은 판으로 등급을 낸다(BQ-6 · D-19). 없으면 업그레이드 전 패널로 읽힌다.
+        if getattr(narrative_mod, "GRADE_RULES", None):
+            quality["grade_rules"] = narrative_mod.GRADE_RULES
         if frozen_brief and frozen_brief.get("brief_drift"):
             quality["brief_drift"] = list(frozen_brief["brief_drift"])
         if frozen_brief and frozen_brief.get("brief_hash"):

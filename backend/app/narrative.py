@@ -198,6 +198,14 @@ def _dom_of(agent_key: str) -> str:
 _ENVELOPE_SIGNALS = ("ir_hash", "character_seed")
 
 
+# 근거 등급 규칙의 판(BQ-6 · 사용자 결정 D-19) — 패널을 처음 저장할 때 패널 품질(quality_json.grade_rules)에 남기고, 이미 저장된
+# 패널을 다시 제출하면 그 판으로 등급을 낸다. 'cites-2' 는 확인 못 한 인용(verified=False)을 세지 않는 지금 규칙(R-36)이고
+# 'cites-1' 은 그 앞 규칙이다 — 판 표식이 없는 done 패널은 업그레이드 전에 저장된 것이라 'cites-1' 로 다시 낸다(엄격해진 규칙을
+# 이미 저장된 패널에 소급하지 않는다 — 소급하면 사람이 확정한 판정 옆의 등급이 움직인다).
+GRADE_RULES = "cites-2"
+GRADE_RULES_LEGACY = "cites-1"
+
+
 @dataclass
 class SpecContext:
     """risk_spec 정규화·cites 검증이 보는 스코프. 없는 채널은 None·빈 값으로 두면 강등 플래그로 표기된다."""
@@ -226,6 +234,7 @@ class SpecContext:
     rollup_prefixes: dict = field(default_factory=dict)  # path_prefix -> asm_key
     seats: tuple = ()                                    # 이번 패널 착석 키
     versions: dict = field(default_factory=dict)         # taxonomy_version·rule_version·ir_version·diff_version·planner_version
+    grade_rules: str = GRADE_RULES                       # 근거 등급 규칙의 판(재제출이면 그 패널이 처음 저장된 판)
     _names: dict | None = field(default=None, repr=False, compare=False)   # part_names() 의 한 번 읽은 값
 
     # ------------------------------------------------ 조회
@@ -858,10 +867,12 @@ def evidence_grade_from_cites(resolved: dict, ctx: SpecContext | None = None) ->
     # 확인 못 한 인용(`verified=False` — 외부 확인 채널이 없는 inc:·rpt:·card:, 동결본 없는 narr:·reg:)은 세지 않는다(R-36).
     # 버리지는 않는다(unverified_refs 에 남는다). 지어낸 `inc:` 번호 하나로 '측정' 이, 지어낸 `card:` 로 '문헌·규격' 이 붙던
     # 구멍이다. 키가 없는 행(저장된 cites 로 읽을 때 다시 내는 과제 성격 등급 — character.evidence_grade_of)은 종전대로
-    # 센다 — 엄격해진 규칙을 이미 저장된 것에 소급하지 않는다(사용자 결정 D-19).
+    # 센다 — 엄격해진 규칙을 이미 저장된 것에 소급하지 않는다(사용자 결정 D-19). 같은 까닭으로 업그레이드 전에 저장된 패널을
+    # 다시 낼 때(ctx.grade_rules 가 옛 판)도 종전대로 센다(BQ-6).
+    strict = ctx is None or ctx.grade_rules != GRADE_RULES_LEGACY
     standards: list[str] = []
     for row in resolved.get("cites") or ():
-        if not row.get("ok") or not row.get("grade_ok") or row.get("verified") is False:
+        if not row.get("ok") or not row.get("grade_ok") or (strict and row.get("verified") is False):
             continue
         if str(row.get("ref_type")) == "req" and str(row.get("req_kind") or "") == "standard":
             standards.append(str(row.get("ref")))
@@ -1794,17 +1805,21 @@ def _release_ledger_cycles(store, target_key: str, panel_id: str, keys: Sequence
 
 def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec: Mapping[str, Any] | None = None,
                          turns: Sequence[Mapping[str, Any]] = (), attribution: Mapping[str, Any] | None = None,
-                         actor: str | None = None) -> dict:
+                         actor: str | None = None, grade_rules: str | None = None) -> dict:
     """패널 1건의 서술을 앱 DB 에 앉힌다(plan §6.7.2 8단계) — rr_seat_opinions·rr_findings·rr_claim_refs·rr_character.
 
     파싱 실패(`spec is None`)면 findings 없이 좌석 의견만 저장한다. 같은 패널을 다시 제출하면 그 패널이 만든
     행을 지우고 다시 앉히므로 멱등이다. 반환은 러너·라우트가 커버리지·품질에 쓰는 요약이다 —
     `{seats[{agent_key, opinion_id, turns_n, cited_refs_n, cited_ir, abstained}], findings_total,
       adversary_rejects, grade_dist, header_mismatch, coverage_mismatch, parse_warnings}`.
+    `grade_rules` 는 근거 등급 규칙의 판이다(`GRADE_RULES` — 안 주면 지금 판). 이미 저장된 패널을 다시 낼 때 호출자가 그 패널이
+    처음 저장된 판을 준다(BQ-6 · D-19).
     """
     from app import planner  # noqa: PLC0415 — 반대석 키 상수(planner 는 narrative 를 import 하지 않는다).
 
     panel, target, seats, ctx = _panel_scope(store, panel_id)
+    if grade_rules:
+        ctx.grade_rules = grade_rules
     attribution = dict(attribution or {"seats": {}, "extra_seats": []})
     attr_seats = dict(attribution.get("seats") or {})
     grouped = _seat_turns(turns)
