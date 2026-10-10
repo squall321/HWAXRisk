@@ -17,6 +17,7 @@ from app.adapters import registry as adapters_registry
 from app.adapters.base import RestGetClient
 from app.common import now_epoch
 from tests.test_e2e_smoke import FakeSourceApps, no_network, seeded_discovery  # noqa: F401 — autouse 픽스처
+from tests import factories
 from tests import test_adapters as recon
 from tests.test_roster import _gateway_handler
 
@@ -38,10 +39,13 @@ def call(tool: str, /, **kwargs) -> dict:
 
 
 def _request_as(email: str | None) -> Request:
-    """게이트웨이 위임과 같은 모양의 /mcp 요청 — 사용자 자격은 서명된 단언 헤더로 온다."""
+    """게이트웨이 위임과 같은 모양의 /mcp 요청 — 사용자 자격은 서명된 단언 헤더로 온다.
+
+    단언은 앱의 실제 발급 함수가 게이트웨이의 위임 헤더(X-Hwax-Delegate-Email)로 만든 것이다 — 쓰기 도구는 그 단언만 받는다.
+    """
     headers = []
     if email:
-        token = identity.mint_sso_assertion(email, ttl_s=900, secret=SSO_SECRET)
+        token = factories.delegated_assertion(email)
         headers.append((identity.SSO_HEADER.encode(), token.encode()))
     return Request({"type": "http", "method": "POST", "path": "/mcp", "headers": headers, "query_string": b""})
 
@@ -112,6 +116,7 @@ def test_claude_entry_runs_from_project_to_job_and_lands_in_the_web_ledger(box):
     # 0. 과제가 없으면 과제 만들기부터 — 누구로 해석됐는지를 늘 말한다.
     out = call("risk_next_step")
     assert out["acting_as"]["email"] == OWNER and out["acting_as"]["source"] == "sso"
+    assert out["acting_as"]["delegated"] is True and out["blocked"] == []
     assert out["projects"] == [] and first_next(out)["tool"] == "risk_create_project"
 
     # 1. 과제 — 같은 code 를 다시 보내면 같은 과제다(게이트웨이는 같은 호출을 한 번 더 보낼 수 있다).
@@ -447,14 +452,16 @@ def test_the_identity_that_reached_mcp_owns_what_the_tool_writes(client, box):
             "name": "risk_create_project",
             "arguments": {"code": code, "name": "HTTP 경로", "classification": "internal"}}}, headers)
 
-    token = identity.mint_sso_assertion(OWNER, ttl_s=900, secret=SSO_SECRET)
+    # 게이트웨이가 위임 헤더를 실어 받아 온 단언 — 앱의 실제 발급 경로(/api/auth/sso)로 만든다.
+    r = client.post("/api/auth/sso", headers={"X-Heax-Gateway-Secret": SSO_SECRET, "X-Hwax-Delegate-Email": OWNER})
+    token = r.json()["access_token"]
     made = create(session({identity.SSO_HEADER: token}), "HTTP-1")
-    assert made["created"] is True and made["acting_as"] == {"email": OWNER, "source": "sso",
+    assert made["created"] is True and made["acting_as"] == {"email": OWNER, "source": "sso", "delegated": True,
                                                             "note": made["acting_as"]["note"]}
     assert box.store.query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (made["id"],))["owner_sub"] == OWNER
-    # 단언이 없으면(서비스 계정 호출) 쓰지 않는다.
-    assert create(session({}), "HTTP-2")["error"] == "unauthorized"
+    # 단언이 없으면(서비스 계정 호출) 쓰지 않고, 신원이 없어서라고 말한다.
+    assert create(session({}), "HTTP-2")["error"] == "delegation_required"
     # 위조 단언도 마찬가지다 — 서명이 틀리면 익명이다.
-    forged = identity.mint_sso_assertion(OWNER, ttl_s=900, secret="not-the-secret")
-    assert create(session({identity.SSO_HEADER: forged}), "HTTP-3")["error"] == "unauthorized"
+    forged = identity.mint_sso_assertion(OWNER, ttl_s=900, secret="not-the-secret", delegated=True)
+    assert create(session({identity.SSO_HEADER: forged}), "HTTP-3")["error"] == "delegation_required"
     assert box.store.query_one("SELECT COUNT(*) AS n FROM rr_projects")["n"] == 1

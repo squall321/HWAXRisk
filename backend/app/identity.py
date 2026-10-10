@@ -47,10 +47,15 @@ class Identity:
     # 읽는 데만 쓴다 — 별도 서비스 PAT 없이도 REST 채널이 살아난다(plan §2.13.2 의 대안 경로).
     # to_dict 에서 빼서 응답·로그로 새지 않게 한다. 무인 배치(러너)는 이 값이 없어 서비스 PAT 를 쓴다.
     token: str | None = None
+    # 게이트웨이 위임으로 확인된 사람인가 — 단언이 X-Hwax-Delegate-Email 로 발급됐을 때만 참이다(서명 안의 클레임 `d`).
+    # 종전 헤더(X-Heax-User-Email)로 발급된 단언은 HEAXHub Caddy 가 그 이메일을 게이트웨이 서비스 토큰의 주인으로 덮은
+    # 것일 수 있어 누가 부르는지 가르지 못한다 — MCP 쓰기 도구는 이 값이 참일 때만 쓴다(entry.require_delegate).
+    delegated: bool = False
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d.pop("token", None)      # 신원 응답에 토큰을 절대 싣지 않는다.
+        d.pop("delegated", None)  # MCP 쓰기 문(entry.require_delegate)의 표지일 뿐이다 — 웹 신원 응답(GET /me)의 계약은 그대로다.
         return d
 
 
@@ -150,17 +155,24 @@ def _unb64u(text: str) -> bytes:
     return base64.urlsafe_b64decode(text + "=" * (-len(text) % 4))
 
 
-def mint_sso_assertion(email: str, *, ttl_s: int, secret: str, now: float | None = None) -> str:
-    """`rrsso_<payload>.<서명>` — 이메일과 만료만 담아 HMAC-SHA256 으로 봉인한다(저장하지 않는다)."""
+def mint_sso_assertion(email: str, *, ttl_s: int, secret: str, now: float | None = None,
+                       delegated: bool = False) -> str:
+    """`rrsso_<payload>.<서명>` — 이메일과 만료(그리고 위임 확인 표지 `d`)를 담아 HMAC-SHA256 으로 봉인한다(저장하지 않는다).
+
+    `delegated` 는 게이트웨이가 진짜 호출자를 X-Hwax-Delegate-Email 로 실어 보냈을 때만 참이다(`routes.post_auth_sso`).
+    """
     ttl = max(60, min(int(ttl_s), _SSO_MAX_TTL_S))
     exp = int((time.time() if now is None else now) + ttl)
-    body = _b64u(json.dumps({"e": email, "x": exp}, separators=(",", ":")).encode("utf-8"))
+    claims: dict[str, Any] = {"e": email, "x": exp}
+    if delegated:
+        claims["d"] = 1
+    body = _b64u(json.dumps(claims, separators=(",", ":")).encode("utf-8"))
     sig = hmac.new(secret.encode("utf-8"), body.encode("ascii"), hashlib.sha256).digest()
     return f"{SSO_PREFIX}{body}.{_b64u(sig)}"
 
 
-def _verify_sso_assertion(token: str) -> str | None:
-    """단언이 이 앱의 시크릿으로 서명됐고 아직 안 만료됐으면 이메일, 아니면 None(사유는 남기지 않는다)."""
+def _verify_sso_assertion(token: str) -> tuple[str, bool] | None:
+    """단언이 이 앱의 시크릿으로 서명됐고 아직 안 만료됐으면 (이메일, 위임 확인 여부), 아니면 None(사유는 남기지 않는다)."""
     secret = config.heax_gateway_secret()
     if not secret or not token.startswith(SSO_PREFIX):
         return None
@@ -181,7 +193,7 @@ def _verify_sso_assertion(token: str) -> str | None:
     email = str(claims.get("e") or "").strip().lower()
     if not isinstance(claims.get("x"), int) or claims["x"] <= time.time() or "@" not in email:
         return None
-    return email
+    return email, claims.get("d") == 1
 
 
 def current(request: Request) -> Identity:
@@ -193,13 +205,14 @@ def current(request: Request) -> Identity:
     if token is None:
         return ANONYMOUS
     if source == "sso" or token.startswith(SSO_PREFIX):
-        email = _verify_sso_assertion(token)
-        if not email:
+        verified = _verify_sso_assertion(token)
+        if not verified:
             return ANONYMOUS
+        email, delegated = verified
         # 역할·부서는 단언에 없다 — 관리자 권한이 필요한 경로는 SSO 호출자에게 닫힌다(의도).
         # token 도 싣지 않는다. 소스 앱(StepForge 등) REST 는 heax 토큰을 원하므로 이 값은 거기서 쓸모가 없다.
         return Identity(email=email, display_name=None, role=None, organization=None,
-                        anonymous=False, source="sso", token=None)
+                        anonymous=False, source="sso", token=None, delegated=delegated)
     user = _lookup(token)
     if not user or not user.get("email"):
         return ANONYMOUS

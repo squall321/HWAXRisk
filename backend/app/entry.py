@@ -2,7 +2,9 @@
 """입구는 둘(웹 화면·Claude)이고 원장은 하나다.
 
 여기 함수는 전부 첫 인자로 /mcp 에 도달한 자격의 `Identity` 를 받아 REST 와 같은 라우트 함수에 그대로 넘긴다 —
-소유권·역할 검사는 라우트의 것을 지난다(남의 과제는 E404). 도구가 따로 하는 일은 셋뿐이다.
+소유권·역할 검사는 라우트의 것을 지난다(남의 과제는 E404). 쓰기는 그 신원이 게이트웨이 위임으로 확인됐을 때만 한다
+(`require_delegate` — 위임 헤더 없이 접힌 단언·게이트웨이 서비스 세션의 Bearer·신원 없음은 까닭을 말하며 거절한다).
+도구가 따로 하는 일은 셋뿐이다.
 
 - 멱등 — 게이트웨이는 같은 호출을 한 번 더 보낼 수 있고(사람별 길의 1회 재시도) Claude 도 되묻는다. 같은 과제 코드·같은
   소스·같은 쌍·같은 대상·같은 Tier 의 살아 있는 잡이면 기존 것을 돌려준다(`created: false`).
@@ -56,13 +58,61 @@ def fix_register_pat() -> str:
             " 읽기 전용 PAT 를 발급해 이 앱에 등록한다. PAT 는 도구 인자로 받지 않는다(게이트웨이·대화 기록에 남는다).")
 
 
+def _delegated(ident: identity.Identity) -> bool:
+    return ident.source == "sso" and ident.delegated and bool(ident.email) and not ident.anonymous
+
+
 def acting_as(ident: identity.Identity) -> dict:
-    """이 호출이 누구로 해석됐나 — 웹 목록은 소유자 것만 보여 주므로, 쓴 것이 누구의 웹 화면에 뜨는지가 이것이다."""
-    out = {"email": ident.email, "source": ident.source}
+    """이 호출이 누구로 해석됐나 — 웹 목록은 소유자 것만 보여 주므로, 쓴 것이 누구의 웹 화면에 뜨는지가 이것이다.
+
+    `delegated` 가 참일 때만 쓰기 도구가 쓴다(`require_delegate`).
+    """
+    out = {"email": ident.email, "source": ident.source, "delegated": _delegated(ident)}
     if ident.source == "sso":
-        out["note"] = ("게이트웨이 위임 신원이다 — 이 이메일이 지금 쓰는 사람이 아니면 위임이 다른 계정으로 접힌 것이니 쓰기 도구를"
-                       " 부르지 말고 운영자에게 알린다(그대로 쓰면 그 계정의 웹 목록에 올라간다).")
+        out["note"] = ("게이트웨이 위임으로 확인된 신원이다 — 쓰기 도구는 이 사람으로 쓰고 이 사람의 웹 목록에 뜬다." if out["delegated"]
+                       else "위임 헤더 없이 발급된 단언이라 이 이메일이 지금 부르는 사람인지 확인할 수 없다 — 읽기는 이 이메일의 시야로"
+                       " 돌고 쓰기 도구는 거절한다(blocked 의 delegation_required).")
     return out
+
+
+def _delegation_refusal(ident: identity.Identity) -> tuple[str, dict]:
+    """쓰기를 거절하는 까닭(문구)과 기계 판독 칸 — 무엇이 없어서인지를 가른다. 관리자·서비스 계정으로 떨어지지 않는다."""
+    if ident.anonymous or not ident.email:
+        why = ("이 호출에는 확인된 신원이 없다 — 게이트웨이가 사람별 위임 단언(X-Heax-Sso-Assertion)을 싣지 않았거나(사람별 위임 없이"
+               " 부른 서비스 세션 · 이 앱의 per_user_sso 가 설정되지 않은 박스) 단언의 서명·만료가 맞지 않는다.")
+    elif ident.source == "sso":
+        why = (f"이 호출의 단언({ident.email})은 게이트웨이가 위임 헤더(X-Hwax-Delegate-Email) 없이 받아 온 것이다 — 그 헤더를 보내지"
+               " 않는 옛 게이트웨이면 HEAXHub Caddy 가 이메일을 게이트웨이 서비스 토큰의 주인(heax 첫 관리자)으로 덮어, 누가 부르든"
+               " 같은 계정이 된다.")
+    else:
+        why = (f"이 호출은 Bearer 토큰({ident.email})으로 왔다 — 사람별 위임 없이 부른 게이트웨이 서비스 세션도 이 모양(게이트웨이 heax"
+               " 토큰 = heax 첫 관리자 PAT)이라 누가 부르는지 가를 수 없다.")
+    root = str(getattr(config.settings, "root_path", "") or "").rstrip("/")
+    detail = {"identity": {"email": ident.email, "source": ident.source, "delegated": bool(ident.delegated)},
+              "fix": ("운영자가 게이트웨이를 사람별 위임에 X-Hwax-Delegate-Email 을 싣는 판으로 올리고, 이 앱의 per_user_sso"
+                      "(token_header=X-Heax-Sso-Assertion)가 설정됐는지 본다. 그 전에는 웹 리스크 앱"
+                      f"({root}/)에서 같은 일을 한다.")}
+    return why + " 쓰기 도구는 게이트웨이 위임으로 확인된 신원으로만 쓴다(그 계정으로 대신 쓰지 않는다).", detail
+
+
+def require_delegate(ident: identity.Identity) -> str:
+    """쓰기 도구의 문 — 게이트웨이 위임(X-Hwax-Delegate-Email 로 발급된 단언)으로 확인된 사람의 이메일. 아니면 `delegation_required`.
+
+    읽기는 지금 규칙대로 도달한 신원의 시야로 돈다. 쓰기만 막는 까닭은 접힌 신원으로 쓴 것이 남의 웹 목록에 오르고, 남의 잡을
+    되돌릴 수 없게 취소하며, 남의 PAT 로 잡을 돌리기 때문이다(SEC-1·SEC-2).
+    """
+    if _delegated(ident):
+        return str(ident.email)
+    why, detail = _delegation_refusal(ident)
+    raise AppError("delegation_required", why, 403, detail=detail)
+
+
+def _delegation_block(ident: identity.Identity) -> dict | None:
+    """길잡이의 막힘 — 쓰기가 거절될 신원이면 그 까닭과 고칠 곳(위임 확인된 신원이면 None)."""
+    if _delegated(ident):
+        return None
+    why, detail = _delegation_refusal(ident)
+    return _blocked("delegation_required", why, detail["fix"], identity=detail["identity"])
 
 
 def _body(model: type[BaseModel], **fields: Any) -> Any:
@@ -90,7 +140,7 @@ def create_project(ident: identity.Identity, *, code: str, name: str, classifica
                    stage: str | None = None, predecessor_project_id: str | None = None,
                    product_code: str | None = None, adh_scope: dict | None = None) -> dict:
     """`POST /api/projects`. 같은 소유자의 같은 code 는 `UNIQUE(owner_sub, code)` 라 기존 과제를 돌려준다."""
-    owner = routes._require_user(ident)
+    owner = require_delegate(ident)
     body = _body(routes.ProjectBody, code=code, name=name, classification=classification, stage=stage,
                  predecessor_project_id=predecessor_project_id, product_code=product_code, adh_scope=adh_scope)
     created = True
@@ -117,7 +167,7 @@ def add_source(ident: identity.Identity, *, project_id: str, kind: str, ref: dic
     캡처는 kind 마다 첫 행만 쓰고(`capture_all`, `ORDER BY kind, id` — id 는 uuid) 소스를 지우는 REST 가 없다. 둘째 행이
     생기면 어느 쪽이 캡처될지 uuid 순서가 정하고 되돌릴 길이 없다.
     """
-    owner = routes._require_user(ident)
+    owner = require_delegate(ident)
     routes._project_row(project_id, owner)
     if kind not in routes.SOURCE_KINDS:
         raise AppError("E100", f"kind 는 {list(routes.SOURCE_KINDS)} 중 하나여야 합니다 — {kind!r}.", 422)
@@ -160,7 +210,7 @@ def capture_snapshot(ident: identity.Identity, *, project_id: str, label: str | 
                      kinds: list[str] | None = None, report_ids: list[int] | None = None,
                      detect_result_file_id: str | None = None, allow_large: bool = False) -> dict:
     """`POST /api/projects/{id}/snapshots`(동기 캡처). 같은 내용이면 앱이 기존 스냅샷을 돌려준다(reused)."""
-    owner = routes._require_user(ident)
+    owner = require_delegate(ident)
     routes._project_row(project_id, owner)
     body = _body(routes.SnapshotBody, label=label, kinds=list(kinds or []), report_ids=report_ids,
                  detect_result_file_id=detect_result_file_id, allow_large=allow_large)
@@ -180,7 +230,7 @@ def capture_snapshot(ident: identity.Identity, *, project_id: str, label: str | 
 def ack_gate(ident: identity.Identity, *, snapshot_id: str, gate: str, reason: str,
              gates_hash: str | None = None) -> dict:
     """`POST /api/snapshots/{id}/gates/{gate}/ack` — upsert 라 같은 ack 는 한 행이다."""
-    routes._require_user(ident)
+    require_delegate(ident)
     return routes.post_gate_ack(snapshot_id, gate, _body(routes.GateAckBody, reason=reason, gates_hash=gates_hash),
                                 ident=ident)
 
@@ -198,7 +248,7 @@ def decide_sameas(ident: identity.Identity, *, base_snapshot_id: str, target_sna
     `diff.create_diff`·`get_sameas` 는 `('pair', 정렬한 두 project_id 를 '|' 로 이은 것)` 으로 원장을 읽는다. 호출자가 그
     열쇠를 손으로 짓게 두면 한 글자만 어긋나도 결정이 아무 비교에도 닿지 않는다(오류 없이).
     """
-    owner = routes._require_user(ident)
+    owner = require_delegate(ident)
     base = routes._snapshot_row(base_snapshot_id, owner)
     target = routes._snapshot_row(target_snapshot_id, owner)
     pair_key = "|".join(sorted([str(base["project_id"]), str(target["project_id"])]))
@@ -217,7 +267,7 @@ def decide_sameas(ident: identity.Identity, *, base_snapshot_id: str, target_sna
 
 def create_diff(ident: identity.Identity, *, base_snapshot_id: str, target_snapshot_id: str) -> dict:
     """`POST /api/diffs` — 같은 쌍은 저장된 비교를 돌려준다(앱이 원래 멱등이다)."""
-    owner = routes._require_user(ident)
+    owner = require_delegate(ident)
     existed = routes.get_store().query_one(
         "SELECT id FROM rr_diffs WHERE base_snapshot_id = ? AND target_snapshot_id = ? AND owner_sub = ?",
         (base_snapshot_id, target_snapshot_id, owner)) is not None
@@ -240,7 +290,7 @@ def open_target(ident: identity.Identity, *, kind: str, ref_id: str, consent: bo
     라우트는 kind·동의·참조 소유·G6 을 먼저 보고 '이미 열린 타깃' 409 를 마지막에 낸다 — 그래서 기존 대상을 돌려주는
     갈래도 같은 검사를 다 지난 뒤다. 명단이 비는 것은 자격이 없어 게이트웨이를 못 물었을 때다(roster_source unavailable).
     """
-    owner = routes._require_user(ident)
+    owner = require_delegate(ident)
     body = _body(routes.TargetBody, kind=kind, ref_id=ref_id, consent=consent)
     try:
         out = {**routes.create_target(body, ident=ident), "created": True}
@@ -264,7 +314,7 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str, consent: 
     라우트는 부를 때마다 잡 행을 하나 더 만든다(중복 검사 없음). 역할 검사는 라우트와 같은 함수로 먼저 한다 — 살아 있는
     잡을 돌려주는 갈래가 남의 대상의 잡을 흘리지 않게.
     """
-    email = routes._require_user(ident)
+    email = require_delegate(ident)
     store = routes.get_store()
     target = store.query_one("SELECT owner_sub, project_id FROM rr_targets WHERE target_key = ?", (target_key,))
     if target is None:
@@ -295,7 +345,7 @@ _ALREADY = {"pause": ("paused",), "resume": ("queued", "running")}
 
 def job_action(ident: identity.Identity, *, job_id: str, action: str) -> dict:
     """`POST /api/jobs/{id}/{action}`(pause|resume|cancel). 이미 그 상태면 그대로 돌려준다(`changed: false`)."""
-    routes._require_user(ident)
+    require_delegate(ident)
     store = routes.get_store()
     before = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))
     try:
@@ -403,6 +453,8 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
     owner = routes._require_user(ident)
     store = routes.get_store()
     head = {"acting_as": acting_as(ident)}
+    # 쓰기가 거절될 신원이면 그것이 첫 막힘이다 — next 의 쓰기 단계를 따라가도 delegation_required 로 막힌다.
+    refusal = _delegation_block(ident)
     if not project_id:
         projects = [dict(r) for r in store.query(
             "SELECT id, code, name, stage, created_at FROM rr_projects WHERE owner_sub = ?"
@@ -412,7 +464,7 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
         steps.append(_step("risk_create_project", {"code": "<과제 코드>", "name": "<과제 이름>",
                                                    "classification": "<internal|confidential>"},
                            "새 과제 — 코드·이름·등급(반출 경계)을 사용자에게 받아 만든다."))
-        return {**head, "projects": projects, "web": web_paths(), "next": steps}
+        return {**head, "projects": projects, "web": web_paths(), "blocked": [refusal] if refusal else [], "next": steps}
 
     project = routes._project_row(project_id, owner)
     sources = routes._project_sources(project_id)
@@ -420,7 +472,7 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
     creds = _credentials(store, ident, owner)
     facts: dict[str, Any] = {"sources": sources, "snapshots": snapshots,
                              "snapshot_jobs": _snapshot_jobs(store, project_id), "credentials": creds}
-    blocked: list[dict] = []
+    blocked: list[dict] = [refusal] if refusal else []
     notes: list[str] = []
     web = web_paths(project_id=project_id)
 

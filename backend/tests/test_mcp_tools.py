@@ -42,7 +42,8 @@ TOOL_NAMES = [
 ENTRY_TOOLS = TOOL_NAMES[TOOL_NAMES.index("risk_next_step"):]
 # 도구별 대표 인자와, 빈 원장에서 기대하는 오류 코드(없으면 None = 정상 응답).
 # 읽기 4종은 범위 밖 id 의 존재를 숨겨 not_visible 이고, 브리프는 caller 가 아니라 brief_token 대조다(§8.2.5).
-# 입구 11종은 요청 밖(신원 없음)에서 전부 unauthorized 다 — 인자가 틀렸든 맞든 신원 검사가 먼저다.
+# 쓰기 도구(입구 9종 + 결과 제출·사람 finding)는 요청 밖(신원 없음)에서 전부 delegation_required 다 — 게이트웨이 위임으로
+# 확인된 신원만 쓴다. 읽기 입구 둘(길잡이·same-as 표)은 unauthorized 다. 인자가 틀렸든 맞든 신원 검사가 먼저다.
 CALLS = [
     # 발견·조회 — 빈 원장에서 목록은 정상 응답(빈 배열), 단일 id 는 존재를 숨긴다.
     ("risk_list_projects", {}, None),
@@ -58,25 +59,25 @@ CALLS = [
     ("risk_claims_for_ref", {"ref": "e:0123456789ab"}, None),
     ("risk_get_brief", {"target_key": "snap:s1", "brief_token": "nope"}, "brief_token_invalid"),
     ("risk_submit_panel_result", {"panel_id": "p1", "engine": "mcp", "decision_text": "…", "turns": [],
-                                  "report_id": None, "actor": "someone@example.com"}, "E404"),
+                                  "report_id": None, "actor": "someone@example.com"}, "delegation_required"),
     ("risk_add_finding", {"target_key": "diff:d1", "claim": "간극이 좁다",
                           "cites": [{"ref": "p:0123456789ab", "quote": "«PLATE_1»"}],
-                          "actor": "someone@example.com"}, "E404"),
+                          "actor": "someone@example.com"}, "delegation_required"),
     ("risk_next_step", {}, "unauthorized"),
     ("risk_next_step", {"project_id": "p1"}, "unauthorized"),
-    ("risk_create_project", {"code": "PRJ-1", "name": "과제", "classification": "internal"}, "unauthorized"),
+    ("risk_create_project", {"code": "PRJ-1", "name": "과제", "classification": "internal"}, "delegation_required"),
     ("risk_add_source", {"project_id": "p1", "kind": "mcad", "ref": {"stepforge_project_id": "sf1"}},
-     "unauthorized"),
-    ("risk_capture_snapshot", {"project_id": "p1"}, "unauthorized"),
-    ("risk_ack_gate", {"snapshot_id": "s1", "gate": "G3", "reason": "확인함"}, "unauthorized"),
+     "delegation_required"),
+    ("risk_capture_snapshot", {"project_id": "p1"}, "delegation_required"),
+    ("risk_ack_gate", {"snapshot_id": "s1", "gate": "G3", "reason": "확인함"}, "delegation_required"),
     ("risk_get_sameas", {"base_snapshot_id": "s0", "target_snapshot_id": "s1"}, "unauthorized"),
     ("risk_decide_sameas", {"base_snapshot_id": "s0", "target_snapshot_id": "s1",
                             "decisions": [{"a_stable": "a", "b_stable": "b", "decision": "confirm"}]},
-     "unauthorized"),
-    ("risk_create_diff", {"base_snapshot_id": "s0", "target_snapshot_id": "s1"}, "unauthorized"),
-    ("risk_open_target", {"kind": "diff", "ref_id": "d1", "consent": True}, "unauthorized"),
-    ("risk_start_job", {"target_key": "diff:d1", "tier": "B"}, "unauthorized"),
-    ("risk_job_action", {"job_id": "j1", "action": "pause"}, "unauthorized"),
+     "delegation_required"),
+    ("risk_create_diff", {"base_snapshot_id": "s0", "target_snapshot_id": "s1"}, "delegation_required"),
+    ("risk_open_target", {"kind": "diff", "ref_id": "d1", "consent": True}, "delegation_required"),
+    ("risk_start_job", {"target_key": "diff:d1", "tier": "B"}, "delegation_required"),
+    ("risk_job_action", {"job_id": "j1", "action": "pause"}, "delegation_required"),
 ]
 _HANGUL = re.compile(r"[가-힣]")
 # 인자 이름에 비밀이 오면 게이트웨이·포털 절차·클라이언트 대화 기록에 값이 남는다(작업 지시서 A-11) — 포털 절차의
@@ -351,10 +352,12 @@ def test_http_tools_list_over_mcp_route(client):
 def test_add_finding_via_mcp_writes_the_same_row_as_rest(risk_store, monkeypatch):
     """같은 입력이면 MCP 도구와 REST 라우트가 식별자만 다른 같은 행을 만든다."""
     from app import routes
+    from tests import factories
     from tests.test_project_patch import _human_body, _ident, _seeded_target
 
     target_key = _seeded_target(risk_store, monkeypatch)
     rest = routes.create_human_finding(target_key, _human_body(), ident=_ident("owner@example.com"))
+    factories.act_as_delegate(monkeypatch, "owner@example.com")   # 작성자는 도달한 위임 신원이다(actor 는 신원이 아니다)
     tool = srv.risk_add_finding(
         target_key=target_key, claim="조립 시 간극이 부족해 보인다",
         cites=[{"ref": "p:0123456789ab", "quote": "«PLATE_1»"}], actor="owner@example.com",

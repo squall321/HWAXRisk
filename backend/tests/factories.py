@@ -37,6 +37,35 @@ def ident(owner: str = OWNER) -> identity.Identity:
                              source="bearer")
 
 
+TEST_GATEWAY_SECRET = "factories-gateway-secret"
+
+
+def delegated_assertion(email: str) -> str:
+    """게이트웨이가 사람별 위임으로 받아 오는 단언 — 앱의 실제 발급 함수(`routes.post_auth_sso`)에 위임 헤더를 실어 만든다.
+
+    시크릿은 호출자가 이미 정한 것(`config.heax_gateway_secret`)을 쓴다 — 정하지 않았으면 `act_as_delegate` 가 정한다.
+    """
+    from starlette.requests import Request  # noqa: PLC0415 — 시험 공장만 쓴다.
+
+    headers = [(b"x-heax-gateway-secret", config.heax_gateway_secret().encode()),
+               (b"x-hwax-delegate-email", email.encode())]
+    request = Request({"type": "http", "method": "POST", "path": "/api/auth/sso", "headers": headers,
+                       "query_string": b""})
+    return routes.post_auth_sso(request)["access_token"]
+
+
+def act_as_delegate(monkeypatch, email: str) -> None:
+    """이번 시험의 /mcp 요청을 게이트웨이 위임으로 확인된 그 사람으로 만든다 — MCP 쓰기 도구는 이 신원으로만 쓴다."""
+    import app.mcp_server as srv  # noqa: PLC0415 — 순환을 피한다.
+    from starlette.requests import Request  # noqa: PLC0415
+
+    if not config.heax_gateway_secret():
+        monkeypatch.setattr(config, "heax_gateway_secret", lambda *a, **k: TEST_GATEWAY_SECRET)
+    headers = [(identity.SSO_HEADER.encode(), delegated_assertion(email).encode())]
+    request = Request({"type": "http", "method": "POST", "path": "/mcp", "headers": headers, "query_string": b""})
+    monkeypatch.setattr(srv, "_request", lambda: request)
+
+
 @contextmanager
 def routes_store(store) -> Iterator[None]:
     """라우트 본문이 이 저장소를 보게 한다(라우트는 모듈 전역 `get_store` 를 부른다)."""

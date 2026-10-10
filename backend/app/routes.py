@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import gzip
 import hmac
 import json
@@ -156,7 +157,10 @@ def post_auth_sso(request: Request) -> dict:
     email = (delegate if delegate is not None else request.headers.get("x-heax-user-email") or "").strip().lower()
     if "@" not in email:
         raise AppError("bad_email", f"{header} 이 이메일 형식이 아닙니다.", 401)
-    token = identity.mint_sso_assertion(email, ttl_s=config.settings.sso_ttl_s, secret=secret)
+    # 종전 헤더로 발급한 단언에는 위임 확인 표지(d)를 넣지 않는다 — 읽기 도구는 지금 규칙대로 그 이메일로 돌지만, MCP 쓰기
+    # 도구는 그 단언을 받지 않는다(그 이메일은 Caddy 가 덮은 서비스 토큰 주인, 곧 heax 첫 관리자일 수 있다).
+    token = identity.mint_sso_assertion(email, ttl_s=config.settings.sso_ttl_s, secret=secret,
+                                        delegated=delegate is not None)
     # 단언은 저장하지 않으므로 회수도 없다 — 게이트웨이 캐시가 이 수명보다 길면 만료 단언으로 부르게 되니
     # expires_in 을 함께 준다(게이트웨이는 실패 시 1회 재발급하므로 어긋나도 자가 복구된다).
     return {"access_token": token, "token_type": "bearer", "expires_in": config.settings.sso_ttl_s}
@@ -343,16 +347,22 @@ def _panel_row(panel_id: str, owner_sub: str | None) -> dict:
 # ================================================================ MCP 읽기 범위(plan §5.1 원칙 9 · §8.2.5)
 # 읽기 4종의 범위는 자칭 `actor` 가 아니라 /mcp 에 실제로 도달한 자격이 정한다. 게이트웨이는 사람별 위임(per_user_sso)
 # 으로 그 사람의 서명 단언(X-Heax-Sso-Assertion)을 실어 보내고, 사람이 개인 heax_pat 로 앱 MCP 를 직접 등록해 부르면
-# Bearer 가 그 사람이다. 둘 다 없으면 service 다. 해석 실패도 service 다(닫힘).
+# Bearer 가 그 사람이다. 단언도 Authorization 도 없거나 해석에 실패하면 service 다(닫힘).
+# 주의 — 사람별 위임 없이 오는 게이트웨이 호출(서비스 세션)은 service 가 아니다. 게이트웨이는 그때 Authorization: Bearer
+# <게이트웨이 heax 토큰> 을 싣고, 그 토큰은 provision 이 '가장 먼저 만든 heax 관리자' 에게 발급한 PAT 라 heax 되묻기가 그
+# 관리자로 푼다. 위임 헤더(X-Hwax-Delegate-Email)를 보내지 않는 옛 게이트웨이의 단언도 Caddy 가 덮은 그 관리자 이메일이다.
+# 읽기는 이 규칙 그대로 두고, 쓰기 도구는 게이트웨이 위임으로 확인된 신원만 받는다(entry.require_delegate).
 SERVICE_CALLER: dict[str, Any] = {"kind": "service", "email": None}
 
 
 def mcp_identity(request: Any) -> identity.Identity:
-    """이번 /mcp 요청의 신원 — 입구 쓰기 도구가 REST 와 같은 라우트 함수에 그대로 넘긴다(같은 소유권 검사를 지난다).
+    """이번 /mcp 요청의 신원 — 입구 도구가 REST 와 같은 라우트 함수에 그대로 넘긴다(같은 소유권 검사를 지난다).
 
-    요청 밖(직접 함수 호출)·토큰 없음·서명 불일치·401 은 익명이고, 라우트의 `_require_user` 가 401 로 막는다.
+    요청 밖(직접 함수 호출)·토큰 없음·서명 불일치·401 은 익명이다. 역할은 뗀다 — MCP 길에는 관리자 우회(`_is_admin`)가 없다.
+    게이트웨이 서비스 세션의 Bearer 가 heax 첫 관리자(role=admin)로 풀려 남의 타깃에 잡을 세우던 길이다(SEC-2).
     """
-    return identity.ANONYMOUS if request is None else identity.current(request)
+    ident = identity.ANONYMOUS if request is None else identity.current(request)
+    return dataclasses.replace(ident, role=None) if ident.role else ident
 
 
 def mcp_caller(request: Any) -> dict:

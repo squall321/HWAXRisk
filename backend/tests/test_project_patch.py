@@ -9,6 +9,7 @@ import pytest
 
 from app import common, config, ra_client, routes, runner
 from app.errors import AppError
+from tests import factories
 
 OWNER = "owner@example.com"
 EDITOR = "editor@example.com"
@@ -257,6 +258,7 @@ def test_unverified_actor_findings_are_excluded_from_recall(risk_store, monkeypa
     decision = ("F1 낙하 시 상단 리브에 응력이 집중된다.\n\n```json\n"
                 + json.dumps(spec, ensure_ascii=False) + "\n```\n")
 
+    factories.act_as_delegate(monkeypatch, OWNER)     # 쓰기 도구는 게이트웨이 위임으로 확인된 신원으로만 쓴다
     out = srv.risk_submit_panel_result(
         panel_id=panel["id"], engine="mcp", decision_text=decision,
         turns=[{"round": 1, "persona": s["key"], "say": "발언"} for s in panel["seats"]],
@@ -348,6 +350,7 @@ def _next_panel(store, target_key: str):
 def test_web_and_mcp_paths_write_the_same_finding_row(risk_store, monkeypatch):
     """식별자 4열과 recall_eligible 을 뺀 나머지 열은 두 경로가 같다(plan §0.9 P3-9)."""
     target_key = _seeded_target(risk_store, monkeypatch, extra="diff:d2")
+    factories.act_as_delegate(monkeypatch, OWNER)
     web = _submit(risk_store, _next_panel(risk_store, target_key), "web", target_key)
     mcp = _submit(risk_store, _next_panel(risk_store, "diff:d2"), "mcp", "diff:d2")
 
@@ -363,6 +366,7 @@ def test_recall_isolation_can_be_turned_off_by_settings(risk_store, monkeypatch)
     target_key = _seeded_target(risk_store, monkeypatch)
     monkeypatch.setattr(config, "settings",
                         dataclasses.replace(config.settings, risk_recall_require_verified_actor=False))
+    factories.act_as_delegate(monkeypatch, OWNER)
     panel = _next_panel(risk_store, target_key)
     assert _submit(risk_store, panel, "mcp", target_key)["recall_eligible"] == 1
 

@@ -876,6 +876,7 @@ def test_mcp_submit_closes_a_planned_panel(risk_store, monkeypatch):
     panel = planner.plan_next_panel(risk_store, target_key, "B")
     assert panel is not None and panel["status"] == "planned"
 
+    factories.act_as_delegate(monkeypatch, OWNER)     # 쓰기 도구는 게이트웨이 위임으로 확인된 신원으로만 쓴다
     out = srv.risk_submit_panel_result(
         panel_id=panel["id"], engine="mcp", decision_text=DECISION,
         turns=[{"round": 1, "persona": s["key"], "say": "발언"} for s in panel["seats"]],
@@ -893,15 +894,16 @@ def test_mcp_submit_closes_a_planned_panel(risk_store, monkeypatch):
 
 
 def test_mcp_submit_rejects_other_owner(risk_store, monkeypatch):
-    """actor 가 패널 owner 가 아니면 남의 원장을 닫을 수 없다."""
+    """도달한 위임 신원이 패널 owner 가 아니면 남의 원장을 닫을 수 없다 — actor 에 owner 를 적어도 마찬가지다(SEC-5)."""
     import app.mcp_server as srv
 
     monkeypatch.setattr(routes, "get_store", lambda: risk_store)
     target_key = _seed(risk_store)
     panel = planner.plan_next_panel(risk_store, target_key, "B")
+    factories.act_as_delegate(monkeypatch, OTHER)
     assert srv.risk_submit_panel_result(
         panel_id=panel["id"], engine="mcp", decision_text=DECISION, turns=[],
-        report_id=None, actor=OTHER)["error"] == "E404"
+        report_id=None, actor=OWNER)["error"] == "E404"
     assert risk_store.query_one(
         "SELECT status FROM rr_panels WHERE id = ?", (panel["id"],))["status"] == "planned"
 
@@ -935,6 +937,7 @@ def test_mcp_submit_records_the_evidence_that_never_reached_the_seats(risk_store
         return json.loads(risk_store.query_one(
             "SELECT quality_json FROM rr_panels WHERE id = ?", (panel["id"],))["quality_json"])
 
+    factories.act_as_delegate(monkeypatch, OWNER)
     # 게이트웨이가 부르는 길(MCP 프로토콜)로 낸다 — 도구 스키마가 그 인자를 받아야 한다.
     asyncio.run(srv.mcp.call_tool("risk_submit_panel_result", args))
     assert risk_store.query_one("SELECT status FROM rr_panels WHERE id = ?", (panel["id"],))["status"] == "done"

@@ -23,13 +23,14 @@ _INSTRUCTIONS = """HWAX Risk Review — 설계 리스크 심사 앱의 MCP 서�
       risk_claims_for_ref · risk_get_coverage(진행판·좌석) · risk_list_panels · risk_get_panel_transcript
 어휘: risk_taxonomy — severity·judgement·direction 의 허용값(추측해서 넣으면 422 다)
 심사: risk_get_brief(열쇠는 brief_token, tier 'A' 는 웹 전용) · risk_submit_panel_result(engine='mcp' 는
-      evidence_only 등급) · risk_add_finding(actor 는 미검증 표기)
+      evidence_only 등급) · risk_add_finding — 둘 다 쓰기라 아래 신원 규칙을 따르고 actor 는 신원이 아니다(표기)
 
 입구(Claude 에서 과제를 올리고 심사를 시작한다 — 심사는 앱 러너가 돌리고 결과는 웹에 그대로 보인다): risk_next_step 부터.
 어디까지 왔고 무엇이 막혔고(고칠 곳 포함) 다음에 무엇을 부르나를 한 번에 준다. 쓰기는 risk_create_project · risk_add_source ·
 risk_capture_snapshot · risk_ack_gate · risk_decide_sameas · risk_create_diff · risk_open_target · risk_start_job ·
 risk_job_action 이고, 무엇을 어디에 쓸지 사용자에게 확인한 뒤 부른다. 같은 호출을 두 번 해도 같은 행이다. 신원은 도달한
-자격이 정한다(자칭 actor 없음). PAT 는 인자로 받지 않는다 — 러너 자격은 웹 설정 화면에서 등록한다."""
+자격이 정한다(자칭 actor 없음) — 쓰기는 게이트웨이 위임으로 확인된 신원일 때만 하고, 아니면 delegation_required 로 까닭을 말한다.
+PAT 는 인자로 받지 않는다 — 러너 자격은 웹 설정 화면에서 등록한다."""
 
 # loopback 바인드 + Caddy 경계 전제로 Host 검증(DNS rebinding 보호)은 끈다(LaminateAnalyzerMCP 선례).
 # streamable_http_path 는 기본 '/mcp' — main.py 가 streamable_http_app() 의 Route('/mcp') 를 메인 라우터에 이식해
@@ -46,15 +47,6 @@ NODE_LIMIT = 500
 EVENT_LIMIT = 500
 REGISTRY_LIMIT = 200
 CLAIM_LIMIT = 100
-
-
-def _owner(actor: str | None) -> str:
-    """게이트웨이 신고 `actor`(이메일)를 쓰기 도구의 소유권 검사 키로 쓴다(§6.11).
-
-    actor 가 없으면 어떤 행에도 맞지 않는 빈 문자열이라 쓰기가 E404 다 — 최종 사용자를 해석할 수 없는 호출에
-    남의 원장을 고치게 두지 않는다. 읽기 범위는 이 값으로 정하지 않는다(§5.1 원칙 9 — `_caller()` 를 쓴다).
-    """
-    return str(actor or "").strip().lower()
 
 
 def _request() -> Any:
@@ -228,17 +220,21 @@ def risk_submit_panel_result(
     model: str | None = None,
     evidence_omitted: list[dict] | None = None,
 ) -> dict:
-    """패널 결과 제출(REST POST /api/panels/{id}/complete 와 같은 함수, actor 는 미검증 표기, evidence_omitted=[{source,text}] 는 좌석에 못 간 근거)."""
-    return _guarded(
-        routes.complete_panel, panel_id, engine=engine, decision_text=decision_text, turns=list(turns or []),
-        report_id=report_id, conv_id=None, events=None, model=model,
-        # 심의가 좌석에 주지 못한 근거(본문 없음 · 건수 · 예산 초과). 종전엔 받을 자리가 없어 오케스트레이터의
-        # 반환값에만 남았고, 얹어 보내도 말없이 버려졌다. 웹 러너가 엔진 카드를 적는 자리에 같이 남긴다.
-        evidence_omitted=evidence_omitted,
-        # actor 는 게이트웨이 신고값이라 owner_sub 를 바꾸지 않고 quality_json 표기로만 남는다(§6.11).
-        # 다만 소유권 검사에는 쓴다 — 아무나 남의 panel_id 를 종결하면 원장이 오염된다.
-        actor=actor, actor_verified=False, owner_sub=_owner(actor),
-    )
+    """패널 결과 제출(REST POST /api/panels/{id}/complete 와 같은 함수, 게이트웨이 위임으로 확인된 그 패널 소유자만 낸다, actor 는 미검증 표기, evidence_omitted=[{source,text}] 는 좌석에 못 간 근거)."""
+    def call() -> dict:
+        # 소유권은 도달한 위임 신원이 정한다 — 자칭 actor 를 열쇠로 쓰면 남이 actor=<소유자> 로 남의 패널을 종결한다(SEC-5).
+        owner_sub = entry.require_delegate(routes.mcp_identity(_request()))
+        return routes.complete_panel(
+            panel_id, engine=engine, decision_text=decision_text, turns=list(turns or []),
+            report_id=report_id, conv_id=None, events=None, model=model,
+            # 심의가 좌석에 주지 못한 근거(본문 없음 · 건수 · 예산 초과). 종전엔 받을 자리가 없어 오케스트레이터의
+            # 반환값에만 남았고, 얹어 보내도 말없이 버려졌다. 웹 러너가 엔진 카드를 적는 자리에 같이 남긴다.
+            evidence_omitted=evidence_omitted,
+            # actor 는 호출자 신고값이라 quality_json 표기로만 남고 회수 격리(actor_verified=false)도 종전 그대로다(§6.11).
+            actor=actor, actor_verified=False, owner_sub=owner_sub,
+        )
+
+    return _guarded(call)
 
 
 @mcp.tool()
@@ -259,23 +255,28 @@ def risk_add_finding(
     judgement: str | None = None,
     warrant: str | None = None,
 ) -> dict:
-    """사람 finding 등록(REST POST /api/targets/{key}/findings 와 같은 함수, 인용 0건은 422)."""
+    """사람 finding 등록(REST POST /api/targets/{key}/findings 와 같은 함수, 작성자는 게이트웨이 위임으로 확인된 신원이고 actor 는 신원이 아니다, 인용 0건은 422)."""
     body = routes.HumanFindingBody(
         direction=direction, domain=domain, mechanism=mechanism, mechanism_detail=mechanism_detail,
         change_kind=change_kind, subject_key=subject_key, subject_names=list(subject_names or []),
         severity=severity, judgement=judgement, claim=claim, warrant=warrant, cites=list(cites or []),
     )
-    email = _owner(actor)
-    ident = routes.identity.Identity(email=email, display_name=email, role="user", organization=None,
-                                     anonymous=not email, source="mcp")
-    return _guarded(routes.create_human_finding, target_key, body, ident=ident)
+
+    def call() -> dict:
+        # 작성자·소유권은 도달한 위임 신원이다 — actor 는 옛 계약이라 받지만 쓰지 않는다(SEC-5).
+        ident = routes.mcp_identity(_request())
+        entry.require_delegate(ident)
+        return routes.create_human_finding(target_key, body, ident=ident)
+
+    return _guarded(call)
 
 
 # ================================================================ Claude 입구(PLAN M1 · context-notes D-23)
 # 실사용 팀은 Claude 에서 MCP 로 심의를 돌린다. 위 14종은 읽기와 결과 제출뿐이라 Claude 에서는 과제를 올리거나 심사를 시작할
 # 수 없었고, 그래서 Claude 로 돈 심사가 원장에 한 건도 없었다. 아래 11종은 웹 화면이 부르는 REST 라우트를 같은 신원으로
 # 감싼다(남의 과제는 라우트의 소유권 검사가 막는다). 심사는 앱의 러너가 돌리고 Claude 는 시작하고 지켜본다.
-# 신원은 도달한 자격(게이트웨이 위임 단언·개인 Bearer)이고 자칭 actor 는 없다. 비밀(PAT)은 인자로 받지 않는다.
+# 신원은 도달한 자격(게이트웨이 위임 단언·개인 Bearer)이고 자칭 actor 는 없다. 쓰기는 그 가운데 게이트웨이 위임으로 확인된
+# 단언(X-Hwax-Delegate-Email 로 발급)일 때만 한다(entry.require_delegate). 비밀(PAT)은 인자로 받지 않는다.
 # 같은 호출을 두 번 해도 같은 행이다 — 게이트웨이의 사람별 길은 실패하면 한 번 더 부른다.
 @mcp.tool()
 async def risk_next_step(project_id: str | None = None) -> dict:

@@ -166,6 +166,12 @@ def test_sso_endpoint_reads_the_delegate_header_that_caddy_does_not_strip(client
     assert r.status_code == 200
     token = r.json()["access_token"]
     assert client.get("/api/me", headers={identity.SSO_HEADER: token}).json()["email"] == "dave@example.com"
+    # 위임 헤더로 발급한 단언만 '위임으로 확인된' 신원이다 — MCP 쓰기 도구는 이것만 받는다(SEC-1). 종전 헤더로 발급한 단언은
+    # 읽기용으로 그대로 나가되 그 표지가 없다(그 이메일은 Caddy 가 덮은 서비스 토큰 주인일 수 있다).
+    assert identity.current(_request({identity.SSO_HEADER: token})).delegated is True
+    old = client.post("/api/auth/sso", headers={k: v for k, v in headers.items() if k != "X-Hwax-Delegate-Email"})
+    folded = identity.current(_request({identity.SSO_HEADER: old.json()["access_token"]}))
+    assert folded.email == "service-owner@example.com" and folded.delegated is False
     # 위임 헤더가 왔는데 이메일 꼴이 아니면 거절한다 — 종전 헤더(서비스 토큰 주인)로 조용히 내려가지 않는다.
     r = client.post("/api/auth/sso", headers={**headers, "X-Hwax-Delegate-Email": "not-an-email"})
     assert r.status_code == 401
