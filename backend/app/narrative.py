@@ -1481,7 +1481,6 @@ def _profile_mismatch(claimed: dict, computed: dict) -> bool:
 CITED_REF_RE = re.compile(r"\b(?:reg|narr|rule|c|d|sig|warn|gate|p|e|rpt|inc|card):[^\s\]|«»]+")
 # IR·상태층을 가리키는 스킴 — quality.ir_cite_rate 의 분자다(§6.5.5).
 IR_REF_KINDS = frozenset({"p", "e", "c", "d", "sig", "warn", "gate", "rule"})
-EXCERPT_FOR_RAG_MAX = 1500          # rr_seat_opinions.excerpt_for_rag 상한(§5.2.2 F)
 # seat_opinion.character_sentences — 성격을 드러낸 문장만 발췌한다(plan §4.5, ≤5문장·각 ≤240자).
 CHARACTER_SENTENCES_MAX = 5
 CHARACTER_SENTENCE_MAX = 240
@@ -1489,11 +1488,16 @@ _CHARACTER_RE = re.compile(r"성격|성향|철학|경향|의도")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?。])\s+|[\n]+")
 
 
+def _say_of(row: Mapping[str, Any]) -> str:
+    """발언 원문 — 화면용 발췌(say_excerpt)를 줄였으면 원문은 say 에 있다(줄이지 않은 발언·옛 행은 발췌가 곧 원문)."""
+    return str(row.get("say") or row.get("say_excerpt") or "")
+
+
 def _character_sentences(rows: Sequence[Mapping[str, Any]]) -> list[str]:
     """좌석 발언에서 성격·성향·철학·경향·의도를 말한 문장만 뽑는다(§5.6.3 E7 좌석 개인 기억의 입력)."""
     out: list[str] = []
     for row in rows:
-        for sentence in _SENTENCE_SPLIT_RE.split(str(row.get("say_excerpt") or "")):
+        for sentence in _SENTENCE_SPLIT_RE.split(_say_of(row)):
             text = sentence.strip()
             if not text or not _CHARACTER_RE.search(text):
                 continue
@@ -1503,7 +1507,8 @@ def _character_sentences(rows: Sequence[Mapping[str, Any]]) -> list[str]:
             if len(out) >= CHARACTER_SENTENCES_MAX:
                 return out
     return out
-SAY_EXCERPT_MAX = 2000              # seat_opinion.turns[].say_excerpt 상한(§6.7.2 7단계)
+SAY_EXCERPT_MAX = 2000              # seat_opinion.turns[].say_excerpt 상한(§6.7.2 7단계) — 화면용 발췌다. 원문은 say 에 남는다
+_SAY_CUT_FMT = " …(발언 {chars}자 중 {kept}자)"
 ABSTAIN_PREFIX = "판정 불가"        # §6.8.2 — 최종 발언이 이 말로 시작하면 abstain 이다.
 _STANCES = ("agree", "conditional", "oppose", "abstain")
 
@@ -1678,14 +1683,21 @@ def _seat_turns(turns: Sequence[Mapping[str, Any]]) -> dict[str, list[dict]]:
         if not key:
             continue
         stance = str(turn.get("stance") or "")
-        grouped.setdefault(key, []).append({
+        say = str(turn.get("say") or "")
+        row = {
             "round": int(turn.get("round") or (len(grouped.get(key, [])) + 1)),
-            "say_excerpt": str(turn.get("say") or "")[:SAY_EXCERPT_MAX],
+            "say_excerpt": say,
             "position": str(turn.get("position") or ""),
             "stance": stance if stance in _STANCES else "conditional",
             "non_negotiable": "",
             "_seq": index,
-        })
+        }
+        if len(say) > SAY_EXCERPT_MAX:
+            # 화면용 발췌는 줄이되 원문 길이를 밝히고, 원문은 say 로 같이 남긴다 — 인용 수·좌석 기억은 원문에서 센다(R-63).
+            kept = SAY_EXCERPT_MAX - len(_SAY_CUT_FMT.format(chars=len(say), kept=SAY_EXCERPT_MAX))
+            row["say_excerpt"] = say[:kept] + _SAY_CUT_FMT.format(chars=len(say), kept=kept)
+            row["say"] = say
+        grouped.setdefault(key, []).append(row)
     return grouped
 
 
@@ -1693,7 +1705,7 @@ def _final_stance(rows: Sequence[Mapping[str, Any]]) -> str:
     if not rows:
         return "abstain"
     last = rows[-1]
-    say = str(last.get("say_excerpt") or "").lstrip()
+    say = _say_of(last).lstrip()
     if say.startswith(ABSTAIN_PREFIX):
         return "abstain"
     return str(last.get("stance") or "conditional")
@@ -1841,7 +1853,7 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
 
         refs: list[str] = []
         for row in rows:
-            for ref in cited_refs_in(row.get("say_excerpt")):
+            for ref in cited_refs_in(_say_of(row)):
                 if ref not in refs:
                     refs.append(ref)
         for atom in my_atoms:
@@ -1867,8 +1879,9 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
             "tool_calls": list(state.get("tool_calls") or []),
             "tool_calls_n": state.get("tool_calls_n"),
             "tool_calls_ok": state.get("tool_calls_ok"),
-            # 지식 카드 적중을 세는 원천이 아직 없다 — 0 이라고 적으면 '없었다' 로 읽히므로 미측정(null)으로 둔다.
-            "knowledge_hits_n": None,
+            # 좌석 프롬프트에 실린 지식카드 줄 수 — 엔진 상태줄의 집계다(R-43). 보고가 없던 좌석(옛 엔진·지식카드 끔)은
+            # 0 이 아니라 미측정(null)이다 — 0 은 '찾았는데 없었다' 다.
+            "knowledge_hits_n": state.get("knowledge_hits_n"),
             "model": panel_model,
             "cited_refs": refs, "cited_refs_resolved": resolved_refs, "cited_ckeys": cited_ckeys,
             "quality": {
@@ -1876,17 +1889,21 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
                 "grade_min": (sorted(grades, key=lambda g: _GRADE_RANK.get(g, 0))[0] if grades else None),
                 "dangling_n": dangling_n,
                 "actor": actor, "actor_verified": False if actor else None,
+                **({"knowledge_degraded": state["knowledge_degraded"]} if state.get("knowledge_degraded") is not None
+                   else {}),
             },
             "raised_finding_ids": sorted(set(raised_by_seat.get(agent_key) or ())),
             "contested_finding_ids": sorted(set(contested_by_seat.get(agent_key) or ())),
             "character_sentences": _character_sentences(rows),
-            "excerpt_for_rag": "\n".join(str(r.get("say_excerpt") or "") for r in rows)[:EXCERPT_FOR_RAG_MAX],
+            # 전 라운드 원문 — 종전에는 앞 1,500자라 1라운드 관점이 거의 다 먹고 최종 입장이 빠졌다(다음 브리프 E7 의 재료).
+            # E7 은 자리를 재고 잘리면 원문 길이를 밝힌다.
+            "excerpt_for_rag": "\n".join(_say_of(r) for r in rows),
         }
         opinion_rows.append((
             opinion_id, target_key, panel_id, owner_sub, agent_key, domain,
             origin if origin in ("primary", "counter", "adversary", "new") else "new", cycle,
             canonical_json(opinion),
-            final_stance, state.get("tool_calls_n"), state.get("tool_calls_ok"), None,
+            final_stance, state.get("tool_calls_n"), state.get("tool_calls_ok"), state.get("knowledge_hits_n"),
             json.dumps(refs, ensure_ascii=False), json.dumps(opinion["quality"], ensure_ascii=False),
             json.dumps(opinion["raised_finding_ids"], ensure_ascii=False),
             opinion["excerpt_for_rag"], now,

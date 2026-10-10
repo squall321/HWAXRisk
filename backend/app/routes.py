@@ -2321,8 +2321,11 @@ def panel_transcript_payload(panel_id: str, *, owner_sub: str | None = None) -> 
         for turn in _loads(row["opinion_json"], {}).get("turns") or ():
             if not isinstance(turn, dict):
                 continue
+            # say 는 원문이다 — 화면용 발췌(say_excerpt, 2,000자)는 줄였으면 원문 길이를 밝히고, 보충 회차가 중복 제기를
+            # 막으려 읽는 글은 원문이어야 한다(T4). 옛 행은 발췌가 곧 그때 받은 글이다.
             turns.append({"seat": row["agent_key"], "round": int(turn.get("round") or 0),
                           "say_excerpt": str(turn.get("say_excerpt") or ""),
+                          "say": str(turn.get("say") or turn.get("say_excerpt") or ""),
                           "position": turn.get("position") or None,
                           "stance": turn.get("stance") or None})
     turns.sort(key=lambda t: (t["round"], t["seat"]))

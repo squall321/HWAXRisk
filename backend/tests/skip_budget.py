@@ -27,7 +27,8 @@ ALLOWED_SKIPS: tuple[tuple[str, str, str], ...] = (
     ("tests/rr/test_no_internal_ips.py", "git 체크아웃이 아니다", "git archive·SIF 사본에는 추적 목록이 없다"),
 )
 # 형제 리포가 없을 때만 건너뛰는 자리 — 형제가 곁에 있는데 건너뛰면 허용 목록 밖이라 붉다.
-SIBLING_ONLY: tuple[str, ...] = ("tests/test_parity.py", "tests/test_atoms.py", "tests/test_wiring_regressions.py")
+SIBLING_ONLY: tuple[str, ...] = ("tests/test_parity.py", "tests/test_atoms.py", "tests/test_wiring_regressions.py",
+                                 "tests/test_stream_attribution.py")
 
 _skipped: list[tuple[str, str]] = []
 

@@ -749,3 +749,37 @@ def test_runner_question_carries_the_digest_and_the_diff_mark(risk_store, tmp_pa
     assert opts["knowledge_query"] and len(opts["knowledge_query"]) <= brief.KNOWLEDGE_QUERY_MAX
     quality = json.loads(_panel(risk_store, out["panel_id"])["quality_json"])
     assert "knowledge_query_cut" in quality["flags"] and quality["knowledge_query_cut"]["kept"] == len(opts["knowledge_query"])
+
+
+class _KnowledgeEngine(_BudgetEngine):
+    """첫 좌석에 지식카드 3줄을 실었다고 알리는 엔진 — 검색어는 질문으로 찾았다고 한다(옛 포털이 키를 버린 경우)."""
+
+    def run(self, delib_opts, *, owner_sub=None):
+        result = dict(super().run(delib_opts, owner_sub=owner_sub))
+        seat = delib_opts["personas"][0]["key"]
+        result["events"] = list(result["events"]) + [
+            {"kind": "status", "step": f"지식카드 1/5 — {seat} 확보",
+             "knowledge": {"persona": seat, "hits": 3, "degraded": False, "query": "question"}},
+            {"kind": "evidence", "source": f"{seat} · 지식카드", "included": True}]
+        return result
+
+
+def test_knowledge_hits_reach_the_seat_opinion_and_a_dropped_query_is_flagged(risk_store, tmp_path, no_network):
+    """좌석별 지식카드 적중 수가 의견 행에 서고(종전 늘 null), 카드를 받은 것이 도구 사용으로 세지지 않으며, 앱이 검색어를
+    보냈는데 엔진이 질문으로 찾았으면 패널 품질에 남는다(WP1 S13 · R-43 · R-44 · workorder-c 5절 1)."""
+    synth = factories.make_diff_target(risk_store, 40, agents=factories.agents(("mech", "sim", "xd", "rel", "cam"), 3))
+    lg = _diff_ledger(risk_store, tmp_path, synth.target_key)
+    _job(lg)
+    engine = _KnowledgeEngine(None)
+    out = _run(lg, engine)
+    assert out["status"] == "done", out
+    seat = engine.opts[0]["personas"][0]["key"]
+    row = risk_store.query_one("SELECT knowledge_hits_n, tool_calls_ok, opinion_json FROM rr_seat_opinions"
+                               " WHERE panel_id = ? AND agent_key = ?", (out["panel_id"], seat))
+    assert row["knowledge_hits_n"] == json.loads(row["opinion_json"])["knowledge_hits_n"] == 3
+    assert row["tool_calls_ok"] == 0
+    others = risk_store.query("SELECT knowledge_hits_n FROM rr_seat_opinions WHERE panel_id = ? AND agent_key <> ?",
+                              (out["panel_id"], seat))
+    assert others and all(r["knowledge_hits_n"] is None for r in others)
+    quality = json.loads(_panel(risk_store, out["panel_id"])["quality_json"])
+    assert quality["knowledge_query_ignored"] == [seat] and "knowledge_query_ignored" in quality["flags"]

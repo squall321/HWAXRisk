@@ -27,6 +27,9 @@ _LOOPS: tuple[tuple[str, float], ...] = (("panel_loop", 5.0), ("sync_loop", 60.0
 # 좌석 귀속 정규식(plan §0.2.3·§6.7 7단계). SSE 스트림과 POST /api/panels/{id}/complete 의 events[] 에 같은 식을 쓴다.
 STATUS_LOOKUP_RE = re.compile(r"^(?P<key>\S+) 조회: (?P<tool>\S+)$")
 EVIDENCE_SEP = " · "
+# 엔진 근거 카드의 source 중 좌석 근거가 아닌 것 — 브리프 항목의 메아리(`챗 정리 · <원천>`)와 지식카드 주입(`<키> · 지식카드`).
+ENGINE_ECHO_PREFIX = "챗 정리"
+KNOWLEDGE_SOURCE = "지식카드"
 
 # 짧은 호출(스냅샷 캡처·필드 근거·명단 조회)에 사용자 PAT 를 쓰려면 남아 있어야 하는 수명. 패널은 이 값이 아니라
 # config.credential_margin_s(패널 벽시계에서 유도)를 쓴다 — 이 값 하나로 패널까지 재던 동안 여유가 벽시계보다 작았다.
@@ -160,23 +163,31 @@ def attribute_events(
 ) -> dict:
     """status/evidence/personas/turn 이벤트를 좌석에 귀속한다.
 
-    status.step 이 '<key> 조회: <tool>' 이면 시도(tool_calls_n), evidence.source 의 ' · ' 앞이 좌석 키면 성공(tool_calls_ok).
+    status.step 이 '<key> 조회: <tool>' 이면 시도(tool_calls_n). evidence.source 의 ' · ' 앞이 좌석 키면 —
+    `<key> · 지식카드` 는 받았다는 표시(knowledge_seen)일 뿐 도구 성공이 아니고, `included` 가 False 면 실패
+    (tool_calls_failed — `<key> · 자유 조회 실패` 등), True 거나 키가 없으면 성공(tool_calls_ok, 종전). 엔진이 브리프 항목을
+    되울리는 `챗 정리 · <원천>` 은 좌석 근거가 아니라 귀속 셈에 넣지 않는다(WP1 R-44·R-45·P-10). 지식카드 상태줄의 집계
+    (status.knowledge)는 좌석의 knowledge_hits_n·knowledge_degraded 가 된다(R-43) — 보고가 없던 좌석은 None(미측정)이다.
     events 가 None 이면 귀속 불가 — 좌석마다 tool_calls_n/ok·used_tool 을 None 으로 둔다(C2 strong 비율 분모 제외).
     """
     known = set(seat_keys) | {adversary_key}
-    seats: dict[str, dict] = {
-        key: {"tool_calls_n": 0, "tool_calls_ok": 0, "used_tool": False, "turns_n": 0, "tool_calls": []}
-        for key in list(seat_keys) + [adversary_key]
-    }
+
+    def fresh() -> dict:
+        return {"tool_calls_n": 0, "tool_calls_ok": 0, "tool_calls_failed": 0, "used_tool": False, "turns_n": 0,
+                "tool_calls": [], "knowledge_seen": False, "knowledge_hits_n": None}
+
+    seats: dict[str, dict] = {key: fresh() for key in list(seat_keys) + [adversary_key]}
     if events is None:
         for key in seats:
-            seats[key].update({"tool_calls_n": None, "tool_calls_ok": None, "used_tool": None})
+            seats[key].update({"tool_calls_n": None, "tool_calls_ok": None, "tool_calls_failed": None,
+                               "used_tool": None})
         return {"seats": seats, "extra_seats": [], "personas_seen": [], "attribution_rate": None,
-                "attributable": 0, "attributed": 0, "lookups": 0}
+                "attributable": 0, "attributed": 0, "lookups": 0, "knowledge_queries": {}}
 
     personas_seen: list[str] = []
     attributable = attributed = lookups = 0
     activity_idx = 0
+    knowledge_queries: dict[str, str] = {}
     for event in events:
         kind = str(event.get("kind") or event.get("event") or "")
         if kind == "personas":
@@ -191,6 +202,16 @@ def attribute_events(
                 seats[key]["turns_n"] += 1
             continue
         if kind == "status":
+            knowledge = event.get("knowledge")
+            if isinstance(knowledge, Mapping) and knowledge.get("persona"):
+                key = str(knowledge["persona"])
+                if key in known:
+                    seat = seats.setdefault(key, fresh())
+                    hits = knowledge.get("hits")
+                    seat["knowledge_hits_n"] = int(hits) if isinstance(hits, int) and not isinstance(hits, bool) else None
+                    seat["knowledge_degraded"] = bool(knowledge.get("degraded"))
+                    knowledge_queries[key] = str(knowledge.get("query") or "")
+                continue
             match = STATUS_LOOKUP_RE.match(str(event.get("step") or ""))
             if not match:
                 continue
@@ -201,8 +222,7 @@ def attribute_events(
             activity_idx += 1
             if key in known:
                 attributed += 1
-                seats.setdefault(key, {"tool_calls_n": 0, "tool_calls_ok": 0, "used_tool": False, "turns_n": 0,
-                                       "tool_calls": []})
+                seats.setdefault(key, fresh())
                 seats[key]["tool_calls_n"] += 1
                 seats[key]["tool_calls"].append({"tool": tool or event.get("tool"), "activity_idx": idx})
             continue
@@ -210,13 +230,19 @@ def attribute_events(
             source = str(event.get("source") or "")
             if EVIDENCE_SEP not in source:
                 continue                                  # E0~E9·지정 도구 주입은 좌석 귀속 없음(공용)
+            key, rest = (part.strip() for part in source.split(EVIDENCE_SEP, 1))
+            if key == ENGINE_ECHO_PREFIX:
+                continue                                  # 엔진의 브리프 메아리 — 좌석 근거가 아니다(R-45)
             attributable += 1
-            key = source.split(EVIDENCE_SEP, 1)[0].strip()
             if key in known:
                 attributed += 1
-                seats.setdefault(key, {"tool_calls_n": 0, "tool_calls_ok": 0, "used_tool": False, "turns_n": 0,
-                                       "tool_calls": []})
-                seats[key]["tool_calls_ok"] += 1
+                seat = seats.setdefault(key, fresh())
+                if rest == KNOWLEDGE_SOURCE:
+                    seat["knowledge_seen"] = True         # 받았다는 표시 — 좌석이 도구를 부른 것이 아니다(R-44)
+                elif event.get("included") is False:
+                    seat["tool_calls_failed"] += 1
+                else:
+                    seat["tool_calls_ok"] += 1
     for state in seats.values():
         if state["tool_calls_ok"] is not None:
             state["used_tool"] = state["tool_calls_ok"] >= 1
@@ -229,6 +255,8 @@ def attribute_events(
         "attributable": attributable,
         "attributed": attributed,
         "lookups": lookups,
+        # 좌석별 지식카드 검색어의 출처('caller' · 'question') — 앱이 검색어를 보냈는데 'question' 이면 옛 포털이 키를 버렸다.
+        "knowledge_queries": knowledge_queries,
     }
 
 
@@ -246,6 +274,8 @@ def withheld_by_engine(events: Sequence[Mapping[str, Any]] | None) -> list[str]:
                 or not source or EVIDENCE_SEP in source:
             continue
         line = f"{source} — {event['note']}" if event.get("note") else source
+        if event.get("knob"):
+            line += f" (설정 {event['knob']})"      # 엔진은 어느 값을 올리라는 말을 사유가 아니라 knob 으로 따로 싣는다
         if line not in out:
             out.append(line)
     return out
@@ -1125,7 +1155,9 @@ def run_panel(
             profile=profile, diff_ref=diff_ref,
         )
         # 브리프는 시변 조립물이라 이 패널이 실제로 받은 전문을 동결한다(§5.6.1).
-        frozen = {**freeze_brief(store, panel, delib_opts["evidence"]), **loss}
+        frozen = {**freeze_brief(store, panel, delib_opts["evidence"]), **loss,
+                  # 검색어를 실어 보냈는가 — 엔진 상태줄이 '질문으로 찾았다' 고 하면 중간(옛 포털)이 키를 버린 것이다.
+                  "knowledge_query_sent": bool(delib_opts.get("knowledge_query"))}
     except Exception as exc:  # noqa: BLE001 — 브리프 조립 실패도 좌석을 pending 으로 되돌리고 닫는다.
         log.exception("패널 %s 브리프 조립 실패", panel["id"])
         return _close_panel_brief_failed(store, panel, job, exc)
@@ -1646,6 +1678,11 @@ def _complete_panel(
             if frozen_brief and frozen_brief.get(lost):
                 quality[lost] = frozen_brief[lost]
                 quality["flags"].append(lost)
+        # 앱이 지식카드 검색어를 실어 보냈는데 엔진이 질문으로 찾았다 — 옛 포털과 섞였을 때의 유일한 신호다(workorder-c 5절 1).
+        ignored = sorted(k for k, q in (attribution.get("knowledge_queries") or {}).items() if q == "question")
+        if frozen_brief and frozen_brief.get("knowledge_query_sent") and ignored:
+            quality["knowledge_query_ignored"] = ignored
+            quality["flags"].append("knowledge_query_ignored")
         # 엔진이 좌석에 주지 않았다고 카드로 알린 것(예산·건수 초과 등)도 같은 자리에 옮겨 적는다.
         withheld = withheld_by_engine(events)
         if withheld:

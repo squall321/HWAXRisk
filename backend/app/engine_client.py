@@ -41,9 +41,7 @@ WRITE_TIMEOUT_S = 30.0
 POOL_TIMEOUT_S = 30.0
 DEFAULT_AGENT_URL = "http://127.0.0.1:9009"
 
-SAY_MAX = 2000                         # seat_opinion.turns[].say_excerpt 상한(plan §6.7.2 7단계)
-EVENTS_MAX = 400                       # events[] 상한(plan §8.2.3 POST /panels/{id}/complete)
-FIELD_MAX = 200                        # events[] 문자열 필드 상한
+FIELD_MAX = 200                        # 진행판에 싣는 마지막 단계 글의 상한(화면 표시 — 저장 경로는 자르지 않는다)
 # 자격 강등 경고 — 계획 문구(_pat_degraded)와 agent-server 실제 코드(credential_degraded) 둘 다 받는다.
 PAT_DEGRADED_CODES = ("_pat_degraded", "credential_degraded")
 # 포털 릴레이가 에이전트 서버의 침묵 한도(AGENT_STREAM_IDLE_TIMEOUT_S)로 구독을 끊으며 보내는 error 코드.
@@ -84,10 +82,8 @@ def _payload(text: str) -> dict:
     return value if isinstance(value, dict) else {"value": value}
 
 
-def _cut(value: Any, limit: int = FIELD_MAX) -> str | None:
-    if value is None:
-        return None
-    return str(value)[:limit]
+def _text(value: Any) -> str | None:
+    return None if value is None else str(value)
 
 
 class _StreamWatch:
@@ -156,6 +152,11 @@ def collect_stream(frames: Iterable[tuple[str, dict]]) -> dict:
 
     반환 {decision_text, turns, events, report_id, pat_degraded}. `error` 프레임은 EngineError 로 올린다 — 의장이
     결정문을 못 낸 것(NO_DECISION_CODES)은 그때까지 받은 것을 실은 EngineNoDecision 으로 가른다.
+
+    자르지 않는다(WP1 S13 · 사용자 지침 가). 발언은 엔진이 줄이기 전의 원문(`say_full`)을 받는다 — `say` 는 회의 버블용으로
+    줄인 글이라 뒤쪽 인용이 좌석 원장에서 사라졌다(R-63). 엔진이 '못 실었다' 고 알린 사유와 고칠 설정(`knob`)도 통째로
+    남긴다(종전 200자 · knob 버림). events 는 건수 상한(400)에서 말없이 멈추지 않는다 — 뒤 좌석의 도구 사용이 0 으로 세졌다.
+    지식카드 상태줄의 집계(`knowledge` — 좌석·실은 줄 수·강등·검색어 출처)를 남겨 좌석 귀속이 읽는다(R-43).
     """
     decision_text = ""
     result_text = ""
@@ -168,34 +169,41 @@ def collect_stream(frames: Iterable[tuple[str, dict]]) -> dict:
     error_knob: str | None = None
 
     def add(event: Mapping[str, Any]) -> None:
-        if len(events) < EVENTS_MAX:
-            events.append(dict(event))
+        events.append(dict(event))
 
     for name, data in frames:
         if name == "status":
-            add({"kind": "status", "step": _cut(data.get("step")) or "", "tool": _cut(data.get("tool"))})
+            item = {"kind": "status", "step": _text(data.get("step")) or "", "tool": _text(data.get("tool"))}
+            knowledge = data.get("knowledge")
+            if isinstance(knowledge, Mapping) and knowledge.get("persona"):
+                item["knowledge"] = {k: knowledge.get(k) for k in ("persona", "hits", "degraded", "query")}
+            add(item)
         elif name == "delib":
             kind = str(data.get("kind") or "")
             if kind == "turn":
+                full = data.get("say_full")
                 turns.append({
                     "round": data.get("round"),
                     "persona": data.get("persona"),
-                    "say": str(data.get("say") or "")[:SAY_MAX],
+                    "say": str(full if isinstance(full, str) and full else (data.get("say") or "")),
                     "stance": data.get("stance"),
                     "position": data.get("position"),
                 })
-                add({"kind": "turn", "persona": _cut(data.get("persona")), "round": data.get("round")})
+                add({"kind": "turn", "persona": _text(data.get("persona")), "round": data.get("round")})
             elif kind == "evidence":
-                item = {"kind": "evidence", "source": _cut(data.get("source")) or "",
-                        "included": bool(data.get("included"))}
-                # 엔진이 좌석에 주지 않았다고 알린 카드는 사유 문장을 같이 남긴다 — 러너가 패널에 옮겨 적는다
+                # included 는 세 값이다 — 엔진은 늘 싣지만 없는 근거(REST·MCP 로 들어온 옛 events)를 실패로 읽지 않게 그대로 둔다.
+                item = {"kind": "evidence", "source": _text(data.get("source")) or "",
+                        "included": data.get("included") if isinstance(data.get("included"), bool) else None}
+                # 엔진이 좌석에 주지 않았다고 알린 카드는 사유 문장과 고칠 설정을 같이 남긴다 — 러너가 패널에 옮겨 적는다
                 # (runner.withheld_by_engine). 실린 근거의 본문은 싣지 않는다 — events[] 는 압축 로그다.
-                if not item["included"] and data.get("text"):
-                    item["note"] = _cut(data.get("text"))
+                if item["included"] is False and data.get("text"):
+                    item["note"] = _text(data.get("text"))
+                if item["included"] is False and data.get("knob"):
+                    item["knob"] = _text(data.get("knob"))
                 add(item)
             elif kind == "personas":
                 add({"kind": "personas", "personas": [
-                    {"key": _cut(p.get("key")), "origin": _cut(p.get("origin"))}
+                    {"key": _text(p.get("key")), "origin": _text(p.get("origin"))}
                     for p in (data.get("personas") or ()) if isinstance(p, Mapping)
                 ]})
             elif kind == "decision":
@@ -209,12 +217,16 @@ def collect_stream(frames: Iterable[tuple[str, dict]]) -> dict:
             code = str(data.get("code") or "")
             if code in PAT_DEGRADED_CODES:
                 pat_degraded = True
-            add({"kind": "warning", "code": _cut(code)})
+            warning = {"kind": "warning", "code": code}
+            for key in ("message", "knob"):
+                if data.get(key):
+                    warning[key] = _text(data.get(key))
+            add(warning)
         elif name == "error":
             error_code = str(data.get("code") or "error")
             error = str(data.get("message") or "")
             # 엔진은 화면에 뜨는 글에 설정 이름을 넣지 않고 knob 으로 따로 싣는다 — 버리면 어느 값을 올릴지 모른다.
-            error_knob = _cut(data.get("knob"))
+            error_knob = _text(data.get("knob"))
         elif name == "done":
             break
 

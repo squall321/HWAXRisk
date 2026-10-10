@@ -28,6 +28,7 @@
         "properties": {
           "round": {"type": "integer", "minimum": 1},
           "say_excerpt": {"type": "string", "maxLength": 2000},
+          "say": {"type": "string"},
           "position": {"type": "string"},
           "stance": {"$ref": "#/definitions/stance"},
           "non_negotiable": {"type": "string"}
@@ -69,7 +70,7 @@
     "contested_finding_ids": {"type": "array", "items": {"$ref": "#/definitions/global_finding_id"}},
     "character_sentences": {"type": "array", "maxItems": 5, "items": {"type": "string", "maxLength": 240}},
     "model": {"type": ["string", "null"]},
-    "excerpt_for_rag": {"type": "string", "maxLength": 1500}
+    "excerpt_for_rag": {"type": "string"}
   },
   "definitions": {
     "hex32": {"type": "string", "pattern": "^[0-9a-f]{32}$"},

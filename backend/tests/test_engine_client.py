@@ -64,9 +64,10 @@ def test_collect_stream_builds_runner_contract():
     from app.runner import attribute_events
 
     attribution = attribute_events(result["events"], ["xd-a0"])
-    assert attribution["seats"]["xd-a0"] == {"tool_calls_n": 1, "tool_calls_ok": 1, "used_tool": True,
-                                             "turns_n": 1, "tool_calls": [{"tool": "list_interfaces",
-                                                                           "activity_idx": 0}]}
+    assert attribution["seats"]["xd-a0"] == {"tool_calls_n": 1, "tool_calls_ok": 1, "tool_calls_failed": 0,
+                                             "used_tool": True, "turns_n": 1, "tool_calls": [{"tool": "list_interfaces",
+                                                                                               "activity_idx": 0}],
+                                             "knowledge_seen": False, "knowledge_hits_n": None}
     assert attribution["extra_seats"] == []
 
 
@@ -457,7 +458,7 @@ PING = 'event: ping\ndata: {"idle_s": 15, "ts": 1}\n\n'
 
 
 def test_heartbeat_pings_do_not_change_the_result(tmp_path):
-    """엔진이 15초마다 흘리는 `event: ping` 이 섞여도 결과는 같다 — events[] 400칸을 먹지 않는다.
+    """엔진이 15초마다 흘리는 `event: ping` 이 섞여도 결과는 같다 — events[] 에 들지 않는다.
 
     침묵 한도 셋이 살아 있는 심의를 끊지 않는 것은 이 ping 덕이다. 이름이 status 였다면 12시간 패널의 ping
     2,880개가 events[] 를 채워 좌석 귀속에 쓸 진짜 이벤트가 밀려났다.
@@ -466,7 +467,7 @@ def test_heartbeat_pings_do_not_change_the_result(tmp_path):
     with_pings = PING + "".join(f"{frame}\n\n{PING * 3}" for frame in frames if frame)
     plain = engine_client.collect_stream(engine_client.parse_sse(STREAM.splitlines()))
     assert engine_client.collect_stream(engine_client.parse_sse(with_pings.splitlines())) == plain
-    flood = PING * (engine_client.EVENTS_MAX + 10) + STREAM
+    flood = PING * 410 + STREAM                       # 종전 events[] 상한(400)을 넘는 수 — ping 은 그 자리를 먹지 않는다
     assert engine_client.collect_stream(engine_client.parse_sse(flood.splitlines())) == plain
 
     _service_pat(tmp_path)
