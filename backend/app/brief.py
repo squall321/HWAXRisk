@@ -285,27 +285,42 @@ def _on_suspect(payload: Mapping[str, Any]) -> None:
     )
 
 
-def _q(value: Any, kind: str = "label") -> str:
-    """외부 출처 문자열 한 칸 → 위생 통과본을 «…» 로 감싼 표기(적중은 `«[suspect_text …]»`)."""
-    return render.sanitize_source_text(value, kind, on_suspect=_on_suspect)
+# 이번 조립의 프로파일 배수(`begin_assembly_scale`) — 위생의 종류별 길이 상한이 같은 배수로 는다. 조립 밖(대조·`lines`)은 1 이다.
+_assembly_scale = threading.local()
+_FIELD_CUT_FMT = " …({chars}자 중 {kept}자)"
+
+
+def _q(value: Any, kind: str = "label", *, limit: int | None = None) -> str:
+    """외부 출처 문자열 한 칸 → 위생 통과본을 «…» 로 감싼 표기(적중은 `«[suspect_text …]»`).
+
+    위생의 종류별 길이 상한(render.SANITIZE_LIMITS — 주장 160 · 진술 200 · 경고 350 …)은 이번 조립의 프로파일 배수로 는다 —
+    바닥(작은 창)에서는 종전 값이고 1백만 토큰 창에서는 묶이지 않는다. 잘렸으면 «» 밖에 원문 길이를 밝힌다(종전 말없이 —
+    선례 주장이 160자에서 끊겨도 좌석은 그것이 전부인 줄 알았다). `limit` 을 주면 그 값이다(0 은 자르지 않음).
+    """
+    if limit is None:
+        base = render.SANITIZE_LIMITS.get(kind, render.SANITIZE_LIMITS[render.DEFAULT_SANITIZE_KIND])
+        scale = float(getattr(_assembly_scale, "value", 1.0) or 1.0)
+        limit = base if scale <= 1 else int(base * scale)
+    quoted = render.sanitize_source_text(value, kind, on_suspect=_on_suspect, limit=limit)
+    inner = quoted[1:-1]
+    if limit and not inner.startswith("[suspect_text "):
+        chars = len(render.norm_quote(value))
+        if len(inner) < chars:
+            return quoted + _FIELD_CUT_FMT.format(chars=chars, kept=len(inner))
+    return quoted
 
 
 def _ref_name(value: Any, kind: str = "label") -> str:
-    """참조 토큰 자리(`[d:<name>]`)의 이름 — 위생만 하고 «…» 는 벗긴다(토큰이 기계 판독 가능해야 한다).
+    """참조 토큰 자리(`[d:<name>]`)의 이름 — 위생만 하고 «…» 는 벗긴다(토큰이 기계 판독 가능해야 한다). 자르지 않는다 —
+    잘린 이름의 토큰은 아무것도 가리키지 않는다.
 
     인젝션 어휘에 걸리면 이름 대신 `suspect_text-<sha1[:12]>` 가 토큰이 되고 원문은 큐로 간다.
     """
-    quoted = _q(value, kind)
+    quoted = _q(value, kind, limit=0)
     inner = quoted[1:-1] if quoted.startswith(render.QUOTE_OPEN) and quoted.endswith(render.QUOTE_CLOSE) else quoted
     if inner.startswith("[suspect_text "):
         return "suspect_text-" + inner[len("[suspect_text "):-1]
     return inner
-
-
-def _cut(text: Any, n: int) -> str:
-    """한 필드를 n 자로 자른다(줄바꿈은 공백으로 접어 한 줄 규약을 지킨다)."""
-    s = " ".join(_s(text).split())
-    return s if len(s) <= n else s[:n]
 
 
 def _resolve_ckey(store, ckey: str) -> str:
@@ -660,7 +675,9 @@ def e2_line(row: Mapping[str, Any], names: Mapping[str, str]) -> str:
     if not _design_relevant(row):
         tail += " design_relevant=0"
     # 이벤트 정규 표기는 소스 앱 부품명을 그대로 담는다(render.fmt_label 은 감싸지 않는다) — 여기서 «…» 로 넣는다.
-    return f"[{ref}] {_s(row['code'])} {_q(body, 'note')} conf={_s(row['confidence'], '-')}{tail}"
+    # 몸통은 자르지 않는다 — 코드가 만든 정규 표기(이름·값)라 길이가 정해져 있고, 조립 밖의 `risk_get_diff(part='lines')` 와
+    # 글자까지 같아야 한다(프로파일 배수는 조립 안에만 있다).
+    return f"[{ref}] {_s(row['code'])} {_q(body, 'note', limit=0)} conf={_s(row['confidence'], '-')}{tail}"
 
 
 def _e2_empty_line(ctx) -> str:
@@ -1057,7 +1074,8 @@ def _negative_line(row) -> str:
     notes = merged.get("contest_notes") or []
     excerpt = ""
     if isinstance(notes, list) and notes:
-        excerpt = _s((notes[0] or {}).get("note") if isinstance(notes[0], dict) else notes[0])
+        # 기각 사유는 전부 잇는다 — 종전에는 첫 건만 실어 두 번째 기각 사유부터 좌석이 몰랐다.
+        excerpt = " / ".join(t for t in (_s(n.get("note") if isinstance(n, dict) else n) for n in notes) if t)
     source = _s(row["status_source"], "code") if "status_source" in row.keys() else "code"
     return (
         f"reg:{row['target_key']}#{row['cluster_key']} | "
@@ -1189,17 +1207,34 @@ def _item_e5(store, ctx, similar: Mapping[str, Any], owner_sub: str | None, fiel
                 for path, row in _e5_candidates(store, ctx, similar, owner_sub, E5_POSITIVE_STATUSES)]
     negative = [_negative_line(row)
                 for _path, row in _e5_candidates(store, ctx, similar, owner_sub, E5_NEGATIVE_STATUSES)]
-    neg_max = int(getattr(config.settings, "risk_neg_precedent_lines", 6) or 6)
+    # 기각 선례 줄 수(HWAXRISK_NEG_PRECEDENT_LINES, 기본 6)는 바닥이다 — 프로파일 배수로 는다. 넘친 수는 블록 절단과 함께 센다.
+    neg_max = profile.inner(int(getattr(config.settings, "risk_neg_precedent_lines", 6) or 6))
+    omitted = {}
+
+    def block(rows: list[str], cap: int, label: str) -> list[str]:
+        text, dropped = clip_lines_n("\n".join(rows), cap)
+        if dropped:
+            omitted[label] = omitted.get(label, 0) + dropped
+        return text.split("\n") if text else []
 
     lines = ["[E5+ 살아 있는 선례]"]
-    lines += (clip_lines("\n".join(positive), profile.inner(E5_POSITIVE_CAP)).split("\n") if positive
+    lines += (block(positive, profile.inner(E5_POSITIVE_CAP), "E5+") if positive
               else ["[선행 등록부 없음 — 이 과제 계보·유사 과제 0건]"])
     lines.append("[E5− 기각·반증 선례]")
-    lines += (clip_lines("\n".join(negative[:neg_max]), profile.inner(E5_NEGATIVE_CAP)).split("\n") if negative
-              else ["[기각된 선례 없음 — 이 조합에서 기각 0건]"])
+    if negative:
+        if len(negative) > neg_max:
+            omitted["E5−"] = len(negative) - neg_max
+        lines += block(negative[:neg_max], profile.inner(E5_NEGATIVE_CAP), "E5−")
+        if len(negative) > neg_max:
+            lines.append(f"[기각 선례 {len(negative)}건 중 앞 {neg_max}건 — HWAXRISK_NEG_PRECEDENT_LINES]")
+    else:
+        lines.append("[기각된 선례 없음 — 이 조합에서 기각 0건]")
     lines.append("[E10 필드·VOC·문헌 근거]")
     lines += _field_evidence_lines(store, ctx, field, cap=profile.inner(E5_FIELD_CAP))
-    return {"key": "E5", "args": _s(ctx["target"]["target_key"]), "result": _body(source, lines)}
+    out = {"key": "E5", "args": _s(ctx["target"]["target_key"]), "result": _body(source, lines)}
+    if omitted:
+        out["inner_omitted"] = omitted          # 블록 안에서 뺀 선례 줄 — build_brief 가 meta.clipped 에 함께 남긴다
+    return out
 
 
 FIELD_TOOLS: tuple[str, ...] = ("get_top_issues", "search_scholar")
@@ -1292,19 +1327,27 @@ def field_evidence_line(item: Mapping[str, Any], kind: str, *, product_code: str
     응답의 자유 문자열은 전부 위생을 거쳐 «…» 안에 둔다 — 밖에 두면 판단어 린터에 그대로 노출돼 남의
     VOC 문구 하나가 브리프 조립을 통째로 죽인다(§3.4.1). `render.sanitize_source_text` 를 직접 부르지
     않고 `_q` 를 쓴다 — 직접 부르면 `on_suspect` 가 빠져 인젝션 적중이 자리표시자로만 가려지고
-    `rr_curation_queue` 에 안 올라간다(사람이 주입 시도를 영영 모른다). `_cut` 은 줄바꿈을 접는다 —
+    `rr_curation_queue` 에 안 올라간다(사람이 주입 시도를 영영 모른다). `_field` 는 줄바꿈을 접는다 —
     접지 않으면 남의 VOC 한 줄이 두 줄이 되어 줄 수 상한을 우회한다.
     기간은 응답이 아니라 내가 보낸 인자로 적는다(외부 문자열을 하나 줄인다).
     """
     if kind == "voc":
-        cat = _q(_cut(item.get("category"), _VOC_CATEGORY), "voc")
-        excerpt = _q(_cut(item.get("text"), _VOC_EXCERPT), "voc")
+        cat = _field(item.get("category"), _VOC_CATEGORY, "voc")
+        excerpt = _field(item.get("text"), _VOC_EXCERPT, "voc")
         return (f"voc:{product_code}#{_s(item.get('issue_key'))} | {cat} | n={_int(item.get('n'))} |"
                 f" {VOC_WINDOW_DAYS}d | {excerpt}")
     pid = _s(item.get("record_id")) or _s(item.get("doi"))
-    title = _q(_cut(item.get("title"), _PAPER_TITLE), "paper")
-    excerpt = _q(_cut(item.get("abstract"), _PAPER_EXCERPT), "paper")
+    title = _field(item.get("title"), _PAPER_TITLE, "paper")
+    excerpt = _field(item.get("abstract"), _PAPER_EXCERPT, "paper")
     return f"paper:{pid} | {title} | {excerpt}"
+
+
+def _field(value: Any, n: int, kind: str) -> str:
+    """E10 한 칸 — n 자로 줄이되 줄였으면 «» 밖에 원문 길이를 밝힌다(종전 말없이). 이 줄은 `voc:`·`paper:` 인용 대조의
+    정규 표기라 조립과 대조가 같은 글을 내야 한다 — 프로파일 배수를 타지 않는 고정 길이다."""
+    text = " ".join(_s(value).split())
+    quoted = _q(text[:n], kind, limit=0)
+    return quoted + _FIELD_CUT_FMT.format(chars=len(text), kept=n) if len(text) > n else quoted
 
 
 def _field_evidence_lines(store, ctx, field=None, cap: int = E5_FIELD_CAP) -> list[str]:
@@ -1378,7 +1421,9 @@ def _rows_of(payload, key: str) -> list:
 
 
 # ---------------------------------------------------------------- E6 유사 과제 성격
-def _item_e6(store, similar: Mapping[str, Any], ctx) -> dict:
+def _item_e6(store, similar: Mapping[str, Any], ctx, profile: "BriefProfile | None" = None) -> dict:
+    """유사 과제의 성격 진술 — 확정·지지 많은 순으로 바닥 3건(프로파일 배수로 는다). 넘친 수는 꼬리 줄로 센다."""
+    profile = profile or PROFILE_LEGACY
     source = _SOURCES["E6"][0]
     corpus = _corpus_ids(store)
     project_ids = [str(e.get("project_id")) for e in (similar.get("merged") or [])
@@ -1392,11 +1437,12 @@ def _item_e6(store, similar: Mapping[str, Any], ctx) -> dict:
             "AND (status = 'confirmed' OR (status = 'panel' AND support_panels >= 2))",
             project_ids,
         )
-        ordered = sorted(
+        ranked = sorted(
             rows,
             key=lambda r: (0 if r["status"] == "confirmed" else 1,
                            -(r["support_panels"] or 0), _s(r["id"])),
-        )[:3]
+        )
+        ordered = ranked[:profile.inner(3)]
         for row in ordered:
             by = _j(row["by_json"], [])
             by_text = ",".join(str(x) for x in by) if isinstance(by, list) else _s(by)
@@ -1405,9 +1451,11 @@ def _item_e6(store, similar: Mapping[str, Any], ctx) -> dict:
                          if str(e.get("project_id")) == row["project_id"]] or [])
             lines.append(
                 f"narr:{row['id']} | {_project_code(store, row['project_id'])} | {_s(row['facet'])} | "
-                f"{_s(row['tag'], '-')} | {_q(row['statement'], 'statement')} | by {_cut(by_text, 40)} | "
+                f"{_s(row['tag'], '-')} | {_q(row['statement'], 'statement')} | by {_clamp(by_text, profile.inner(40))} | "
                 f"[{status}·경로 {paths}]"
             )
+        if len(ranked) > len(ordered):
+            lines.append(f"[성격 진술 {len(ranked)}건 중 {len(ordered)}건 — 나머지는 risk_similar_projects 로 본다]")
     if not lines:
         lines = [f"[유사 과제 성격 진술 없음 — 코퍼스 n_projects={len(corpus)}]"]
     return {"key": "E6", "args": _s(ctx["target"]["target_key"]), "result": _body(source, lines)}
@@ -1621,7 +1669,8 @@ def _item_e8(store, ctx) -> dict:
 _SEVERITY_RANK = {"ERROR": 0, "치명": 0, "WARNING": 1, "WARN": 1, "중대": 1, "INFO": 2, "경미": 2}
 
 
-def _item_e9(ctx) -> dict:
+def _item_e9(ctx, profile: "BriefProfile | None" = None) -> dict:
+    profile = profile or PROFILE_LEGACY
     source = _SOURCES["E9"][0]
     lines: list[str] = []
     ir = _j(ctx["snapshot"]["ir_json"], {}) if ctx["snapshot"] is not None else {}
@@ -1653,9 +1702,14 @@ def _item_e9(ctx) -> dict:
         found = hit.get("found") if isinstance(hit.get("found"), dict) else {}
         # 참조는 공백으로 띄운다 — 쉼표로 붙이면 `d:a,req:b` 가 참조 하나로 읽힌다(collect_refs). R-007 의 참조에는
         # 사람이 지은 요구 이름이 들어 있어 E3 의 `[d:<name>]` 과 같은 위생을 거친다.
-        refs = [_ref_name(x) for x in (found.get("refs") or [])[:3]]
+        # 참조는 바닥 3개(프로파일 배수로 는다) — 넘친 수를 밝힌다(found=N건 이 전체 수다).
+        all_refs = list(found.get("refs") or [])
+        cap = profile.inner(3)
+        refs = [_ref_name(x) for x in all_refs[:cap]]
+        if len(all_refs) > cap:
+            refs.append(f"외 {len(all_refs) - cap}건")
         parts = [f"rule:{rule_id}", _s(hit.get("severity"), "-"), f"found={_s(found.get('count'), '?')}건", *refs,
-                 _cut(hit.get("why_it_matters"), 350)]
+                 _clamp(" ".join(_s(hit.get("why_it_matters")).split()), profile.inner(350))]
         rules.append(" ".join(p for p in parts if p))
     # 규칙 줄을 앞에 둔다 — 규칙은 많아야 시드 일곱이지만 warnings 는 수가 정해져 있지 않다. 뒤에 붙였을 때는 경고가
     # 다섯 건만 넘어도 발화한 규칙이 상한에 통째로 잘렸다(`clip_lines` 는 넘치는 줄부터 뒤를 전부 버린다).
@@ -1860,8 +1914,9 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
         bool(ra is not None and getattr(ra, "available", False))
     similar = similar_projects(store, _s(ctx["target"]["project_id"]), adh=adh, ra=ra, owner_sub=owner_sub)
 
-    # 조립하는 동안 원천 문자열 위생(§3.4.1)의 suspect_text 적재 대상을 이 스레드에 걸어 둔다.
+    # 조립하는 동안 원천 문자열 위생(§3.4.1)의 suspect_text 적재 대상과 위생 길이 상한의 배수를 이 스레드에 걸어 둔다.
     begin_suspect_queue(store, owner_sub)
+    _assembly_scale.value = max(1.0, profile.budget / ENGINE_BUDGET)
     try:
         # 맨 nid 를 부품 이름으로 바꾸는 표(E1·E2·E4 — 뒤 스냅샷이 이긴다, WP1 P-16).
         names = name_index(store, (ctx["base_snapshot_id"], ctx["snapshot_id"]))
@@ -1873,10 +1928,10 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
             _item_e3(ctx),
             _item_e4(ctx, names),
             _item_e5(store, ctx, similar, owner_sub, field, profile),
-            _item_e6(store, similar, ctx),
+            _item_e6(store, similar, ctx, profile),
             _item_e7(store, ctx, seats, adh, profile),
             _item_e8(store, ctx),
-            _item_e9(ctx),
+            _item_e9(ctx, profile),
         ]
         memo = _item_memo(store, target_key, user_memo, cap=profile.cap("M"))
         if memo is not None:
@@ -1892,6 +1947,7 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
                 shielded += _shield_entry(entry, names, humanize=False)
     finally:
         end_suspect_queue()
+        _assembly_scale.value = 1.0
 
     excluded = {str(x) for x in exclude}
     order = {key: i for i, key in enumerate(ITEM_ORDER)}
@@ -1909,6 +1965,10 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
             out, dropped = clip_lines_n(text, limit)
             lines_n = len(text.split("\n")) - 1
             info = {"lines": lines_n, "kept": lines_n - dropped, "omitted": dropped} if dropped else None
+        if entry.get("inner_omitted"):
+            info = {**(info or {"lines": len(_s(entry["result"]).split("\n")) - 1, "kept":
+                                len(_s(entry["result"]).split("\n")) - 1, "omitted": 0}),
+                    "inner_omitted": dict(entry["inner_omitted"])}
         clipped.pop(entry["key"], None)
         if info:
             clipped[entry["key"]] = info
