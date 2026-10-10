@@ -616,9 +616,11 @@ def test_unknown_facet_gets_the_ecad_absent_statement(ctx):
     assert auto[0]["tags"] == ["char:analysis:ecad_absent"]
 
 
-def test_one_liner_is_capped_at_140(ctx):
+def test_one_liner_over_140_is_kept_and_reported(ctx):
+    """스키마 상한(140)을 넘는 한 줄 성격도 자르지 않고 저장한다 — 넘었다는 사실은 parse_warnings 에 남는다(절단 전수 조사 N5)."""
     out = normalize_risk_spec(make_spec(character={"one_liner": "가" * 200, "facets": []}), ctx)
-    assert len(out["spec"]["character"]["one_liner"]) == 140
+    assert len(out["spec"]["character"]["one_liner"]) == 200
+    assert any("character/one_liner: 200자" in w for w in out["parse_warnings"])
 
 
 def test_vocabulary_violation_moves_the_tag_to_free_space(ctx):

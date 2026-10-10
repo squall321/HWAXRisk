@@ -1076,6 +1076,18 @@ def _normalize_mechanism(finding: dict, path: str, warnings: list[str], curation
     curation.append({"kind": "unclassified_code", "payload": {"axis": "mechanism", "value": original, "path": path}})
 
 
+def _keep_whole(value: Any, limit: int, where: str, warnings: list[str]) -> str:
+    """스키마(risk_spec.v1)의 길이 상한을 넘는 의장 글 — 자르지 않고 저장하고 그 사실을 parse_warnings 에 남긴다.
+
+    종전에는 정규화가 말없이 끊었다(trigger_text 120 · one_liner 140 · statement 240 · path 400 · question 200) — 저장된
+    성격 진술이 다음 브리프 E6 에, 교차 영역 경로·열린 항목이 통합 보고서에 잘린 채 실렸고 그 사실은 어디에도 없었다.
+    """
+    text = str(value or "")
+    if len(text) > limit:
+        warnings.append(f"{where}: {len(text)}자 — 스키마 상한 {limit}자를 넘었다(자르지 않고 저장했다).")
+    return text
+
+
 def _normalize_finding(finding: dict, path: str, ctx: SpecContext, *, is_gain: bool,
                        invalid: list[dict], warnings: list[str], curation: list[dict]) -> dict:
     finding = dict(finding)
@@ -1095,7 +1107,8 @@ def _normalize_finding(finding: dict, path: str, ctx: SpecContext, *, is_gain: b
         invalid.append({"path": path, "field": "trigger_condition", "value": finding.get("trigger_condition")})
         finding["trigger_condition"] = "none"
         if trigger:
-            finding["trigger_text"] = str(finding.get("trigger_text") or trigger)[:120]
+            finding["trigger_text"] = _keep_whole(finding.get("trigger_text") or trigger, 120, f"{path}/trigger_text",
+                                                  warnings)
 
     # 3. severity ↔ judgement 정합.
     finding["severity"] = _fix_enum(finding.get("severity"), "severity", path, invalid)
@@ -1191,7 +1204,7 @@ def _normalize_character(character: dict, spec: dict, ctx: SpecContext, *,
                          invalid: list[dict], warnings: list[str], curation: list[dict]) -> dict:
     """§4.6 — facet 8종 보충·태그 보정·na_reason 자동 부여."""
     character = dict(character or {})
-    character["one_liner"] = str(character.get("one_liner") or "")[:140]
+    character["one_liner"] = _keep_whole(character.get("one_liner"), 140, "character/one_liner", warnings)
     given = {}
     for facet in character.get("facets") or ():
         if isinstance(facet, dict) and facet.get("facet") in FACETS:
@@ -1264,7 +1277,7 @@ def _normalize_statement(statement: dict, facet: str, path: str, ctx: SpecContex
                          invalid: list[dict], warnings: list[str], curation: list[dict]) -> dict:
     statement = dict(statement)
     statement["facet"] = facet
-    statement["text"] = str(statement.get("text") or "")[:240]
+    statement["text"] = _keep_whole(statement.get("text"), 240, f"{path}/text", warnings)
     statement["polarity"] = _fix_enum(statement.get("polarity"), "polarity", path, invalid)
     statement["confidence"] = _fix_enum(statement.get("confidence"), "confidence", path, invalid)
     statement["by"] = [str(b) for b in (statement.get("by") or []) if str(b)] or ["chair"]
@@ -1358,7 +1371,7 @@ def normalize_risk_spec(spec: dict, ctx: SpecContext | None = None, *, prose: st
         item = dict(item)
         if item.get("from_domain") == item.get("to_domain"):
             warnings.append(f"cross_domain/{index}: from_domain 과 to_domain 이 같다.")
-        item["path"] = str(item.get("path") or "")[:400]
+        item["path"] = _keep_whole(item.get("path"), 400, f"cross_domain/{index}/path", warnings)
         resolved = resolve_cites(item.get("cites") or (), ctx, claim=item["path"],
                                  raised_by=[str(k) for k in item.get("raised_by") or ()])
         item["dangling"] = resolved["dangling"]
@@ -1372,7 +1385,7 @@ def normalize_risk_spec(spec: dict, ctx: SpecContext | None = None, *, prose: st
         if not isinstance(item, dict):
             continue
         item = dict(item)
-        item["question"] = str(item.get("question") or "")[:200]
+        item["question"] = _keep_whole(item.get("question"), 200, f"open_items/{index}/question", warnings)
         check = dict(item.get("resolving_check") or {})
         if check.get("kind") not in ("tool", "sim", "test", "field"):
             invalid.append({"path": f"open_items/{index}/resolving_check", "field": "kind", "value": check.get("kind")})
