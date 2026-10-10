@@ -119,12 +119,13 @@ def test_signatures_follow_plan():
     tools = {t.name: t for t in asyncio.run(srv.mcp.list_tools())}
     props = lambda n: tools[n].inputSchema["properties"]  # noqa: E731
     # 읽기 4종에는 actor 가 없다 — 범위는 도달한 Authorization 이 정하고 자칭 문자열은 신원이 아니다(§8.2.5).
-    assert set(props("risk_get_snapshot")) == {"snapshot_id", "part"}
+    # 상한(500·200·100) 뒤를 이어 받는 offset 은 선택 인자다(절단 전수 조사 M1).
+    assert set(props("risk_get_snapshot")) == {"snapshot_id", "part", "offset"}
     # 변경 줄(part='lines')의 거름·이어 받기는 선택 인자다 — 종전 두 인자만 줘도 같은 응답이다(WP1 S14).
     assert set(props("risk_get_diff")) == {"diff_id", "part", "change_kind", "q", "offset", "limit"}
     assert set(tools["risk_get_diff"].inputSchema["required"]) == {"diff_id", "part"}
-    assert set(props("risk_get_registry")) == {"target_key", "status", "severity", "domain"}
-    assert set(props("risk_claims_for_ref")) == {"ref"}
+    assert set(props("risk_get_registry")) == {"target_key", "status", "severity", "domain", "offset"}
+    assert set(props("risk_claims_for_ref")) == {"ref", "offset"}
     assert set(props("risk_get_brief")) == {"target_key", "brief_token", "tier"}
     assert props("risk_get_brief")["tier"]["default"] == "B"
     assert set(tools["risk_get_brief"].inputSchema["required"]) == {"target_key", "brief_token"}

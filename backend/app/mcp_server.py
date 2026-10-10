@@ -40,8 +40,8 @@ mcp = FastMCP(
     transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
 )
 
-# 조회 상한(plan §8.2.5 표) — nodes/edges 500 · diff events 500 · 등록부 200 · 주장 100. 한 번에 주는 양이다 — diff events 는
-# offset 으로 나머지를 받는다(diff lines 는 상한 없이 거른 것 전부다).
+# 조회 상한(plan §8.2.5 표) — nodes/edges 500 · diff events 500 · 등록부 200 · 주장 100. 한 번에 주는 양이다 — 넘치면
+# next_offset 을 offset 으로 주어 나머지를 받는다(diff lines 는 상한 없이 거른 것 전부다).
 NODE_LIMIT = 500
 EVENT_LIMIT = 500
 REGISTRY_LIMIT = 200
@@ -175,10 +175,10 @@ def risk_similar_projects(project_id: str, k: int = 5) -> dict:
 
 
 @mcp.tool()
-def risk_get_snapshot(snapshot_id: str, part: str) -> dict:
-    """스냅샷 조회(part ∈ ir|state|nodes|edges|calls|rule_hits, nodes·edges 는 상위 500 + truncated)."""
+def risk_get_snapshot(snapshot_id: str, part: str, offset: int = 0) -> dict:
+    """스냅샷 조회(part ∈ ir|state|nodes|edges|calls|rule_hits, nodes·edges 는 한 번에 500 + truncated 이고 next_offset 을 offset 으로 주면 이어 받는다)."""
     limit = NODE_LIMIT if part in ("nodes", "edges") else None
-    return _scoped("snapshot", snapshot_id, routes.snapshot_part, snapshot_id, part, limit=limit)
+    return _scoped("snapshot", snapshot_id, routes.snapshot_part, snapshot_id, part, limit=limit, offset=offset)
 
 
 @mcp.tool()
@@ -193,18 +193,18 @@ def risk_get_diff(diff_id: str, part: str, change_kind: str | None = None, q: st
 
 @mcp.tool()
 def risk_get_registry(target_key: str, status: str | None = None, severity: str | None = None,
-                      domain: str | None = None) -> dict:
-    """타깃 등록부(rr_registry 행 ≤200 + verdict 후보) 조회, status·severity·domain 으로 거른다."""
+                      domain: str | None = None, offset: int = 0) -> dict:
+    """타깃 등록부(rr_registry 행 한 번에 200 + verdict 후보) 조회, status·severity·domain 으로 거르고 next_offset 을 offset 으로 주면 이어 받는다."""
     return _scoped("target", target_key, routes.registry_payload, target_key, status=status,
-                   severity=severity, domain=domain, limit=REGISTRY_LIMIT)
+                   severity=severity, domain=domain, limit=REGISTRY_LIMIT, offset=offset)
 
 
 @mcp.tool()
-def risk_claims_for_ref(ref: str) -> dict:
-    """참조(ref 문법 §0.2.1)에 앵커된 주장 목록(rr_claim_refs 조인 ≤100) 조회."""
+def risk_claims_for_ref(ref: str, offset: int = 0) -> dict:
+    """참조(ref 문법 §0.2.1)에 앵커된 주장 목록(rr_claim_refs 조인 한 번에 100) 조회, next_offset 을 offset 으로 주면 이어 받는다."""
     # 단일 id 가 아니라 역색인이라 문지기 대신 caller 가 보는 과제 집합으로 결과를 좁힌다(§8.2.5 ②).
     return _guarded(lambda: routes.claims_for_ref(
-        ref, limit=CLAIM_LIMIT, projects=routes.visible_projects(_caller())))
+        ref, limit=CLAIM_LIMIT, projects=routes.visible_projects(_caller()), offset=offset))
 
 
 @mcp.tool()

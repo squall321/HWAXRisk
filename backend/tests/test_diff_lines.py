@@ -133,3 +133,21 @@ def test_mcp_events_page_past_the_cap(risk_store, monkeypatch):
     assert first["next_offset"] == 7 and second["events"][0]["cid"] != first["events"][0]["cid"]
     assert [e["cid"] for e in first["events"] + second["events"]][:14] == \
         [e["cid"] for e in srv.risk_get_diff(synth.diff_id, "events", limit=14)["events"]]
+
+
+def test_mcp_snapshot_nodes_and_registry_page_past_their_caps(risk_store, monkeypatch):
+    """nodes·edges(500)·등록부(200)·주장(100)의 상한은 한 번에 주는 양이다 — next_offset 으로 나머지를 받는다(M1)."""
+    synth = factories.make_diff_target(risk_store, 40)
+    risk_store.execute("UPDATE rr_projects SET mcp_visibility = 'org'")
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    monkeypatch.setattr(srv, "NODE_LIMIT", 10)
+    first = srv.risk_get_snapshot(synth.target_snapshot_id, "nodes")
+    second = srv.risk_get_snapshot(synth.target_snapshot_id, "nodes", offset=first["next_offset"])
+    every = [n["nid"] for n in routes.snapshot_part(synth.target_snapshot_id, "nodes", owner_sub=factories.OWNER)["nodes"]]
+    assert first["truncated"] is True and first["next_offset"] == 10
+    assert [n["nid"] for n in first["nodes"] + second["nodes"]] == every[:20]
+    with factories.routes_store(risk_store):
+        reg = routes.registry_payload(synth.target_key, owner_sub=factories.OWNER, limit=0)
+        refs = routes.claims_for_ref(synth.diff["semantic"]["events"][0]["cid"], owner_sub=factories.OWNER, limit=0)
+    assert reg["total"] == len(routes.registry_payload(synth.target_key, owner_sub=factories.OWNER)["rows"])
+    assert "next_offset" not in refs or refs["next_offset"] == 0

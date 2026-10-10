@@ -1516,8 +1516,12 @@ SNAPSHOT_PARTS = ("ir", "state", "nodes", "edges", "calls", "rule_hits")
 
 
 def snapshot_part(snapshot_id: str, part: str, *, owner_sub: str | None = None,
-                  limit: int | None = None) -> dict:
-    """`GET /api/snapshots/{id}?part=` 본체 — MCP `risk_get_snapshot` 과 같은 함수."""
+                  limit: int | None = None, offset: int = 0) -> dict:
+    """`GET /api/snapshots/{id}?part=` 본체 — MCP `risk_get_snapshot` 과 같은 함수.
+
+    nodes·edges 는 `limit` 을 주면 그만큼만 주고 `next_offset` 으로 나머지를 가리킨다 — 종전에는 상한(MCP 500) 뒤를 받을
+    길이 없었다(절단 전수 조사 M1).
+    """
     if part not in SNAPSHOT_PARTS:
         raise AppError("E100", f"part 는 {list(SNAPSHOT_PARTS)} 중 하나여야 합니다 — {part!r}.", 422)
     header = _snapshot_row(snapshot_id, owner_sub)
@@ -1549,12 +1553,13 @@ def snapshot_part(snapshot_id: str, part: str, *, owner_sub: str | None = None,
         sql = ("SELECT eid, kind, kind_family, a, b, ck_a, ck_b, subject_key, status, attrs_json"
                " FROM rr_ir_edges WHERE snapshot_id = ? ORDER BY eid")
         key = "edges"
+    start = max(0, int(offset or 0))
     if limit is not None:
-        rows = store.query(sql + " LIMIT ?", (snapshot_id, int(limit) + 1))
+        rows = store.query(sql + " LIMIT ? OFFSET ?", (snapshot_id, int(limit) + 1, start))
         truncated = len(rows) > int(limit)
         rows = rows[: int(limit)]
     else:
-        rows = store.query(sql, (snapshot_id,))
+        rows = store.query(sql + " LIMIT -1 OFFSET ?", (snapshot_id, start))
         truncated = False
     items = []
     for row in rows:
@@ -1564,7 +1569,10 @@ def snapshot_part(snapshot_id: str, part: str, *, owner_sub: str | None = None,
         if "attrs_json" in item:
             item["attrs"] = _loads(item.pop("attrs_json"), {})
         items.append(item)
-    return {"snapshot_id": snapshot_id, "ir_hash": header["ir_hash"], key: items, "truncated": truncated}
+    out = {"snapshot_id": snapshot_id, "ir_hash": header["ir_hash"], key: items, "truncated": truncated}
+    if truncated:
+        out["next_offset"] = start + len(items)
+    return out
 
 
 @router.get("/snapshots/{snapshot_id}")
@@ -2336,8 +2344,8 @@ def panel_transcript_payload(panel_id: str, *, owner_sub: str | None = None) -> 
 
 def registry_payload(target_key: str, *, owner_sub: str | None = None, status: str | None = None,
                      severity: str | None = None, domain: str | None = None,
-                     limit: int | None = None) -> dict:
-    """`GET /api/targets/{key}/registry` 본체 — MCP `risk_get_registry` 와 같은 함수."""
+                     limit: int | None = None, offset: int = 0) -> dict:
+    """`GET /api/targets/{key}/registry` 본체 — MCP `risk_get_registry` 와 같은 함수. 상한 뒤는 `next_offset` 으로 받는다."""
     _target_row(target_key, owner_sub)
     store = get_store()
     rows = registry_module.registry_rows(store, target_key)
@@ -2350,11 +2358,15 @@ def registry_payload(target_key: str, *, owner_sub: str | None = None, status: s
         # 동안 이 필터(와 MCP risk_get_registry 의 domain)는 늘 0행이었다(WP4 2.2 ⑤).
         rows = [r for r in rows if domain in (r.get("merged") or {}).get("domains", ())
                 or str((r.get("merged") or {}).get("owner_domain") or "") == domain]
+    start = max(0, int(offset or 0))
+    total = len(rows)
+    rows = rows[start:]
     truncated = limit is not None and len(rows) > int(limit)
     if limit is not None:
         rows = rows[: int(limit)]
     target = store.query_one("SELECT verdict_final FROM rr_targets WHERE target_key = ?", (target_key,))
-    return {"target_key": target_key, "rows": rows, "truncated": truncated,
+    extra = {"next_offset": start + len(rows)} if truncated else {}
+    return {"target_key": target_key, "rows": rows, "truncated": truncated, "total": total, **extra,
             "verdict_candidate": registry_module.verdict_candidate(store, target_key),
             # 후보는 코드가 내고 확정은 사람이 낸다(§8.2.4) — 화면 헤더가 둘을 한 응답에서 읽는다.
             "verdict_final": target["verdict_final"] if target is not None else None}
@@ -3069,7 +3081,7 @@ def _tool_call_payload(row: Any) -> dict:
 
 
 def claims_for_ref(ref: str, *, owner_sub: str | None = None, limit: int = 100,
-                   projects: list[str] | None = None) -> dict:
+                   projects: list[str] | None = None, offset: int = 0) -> dict:
     """참조 1건에 앵커된 주장 목록 — MCP `risk_claims_for_ref` 와 같은 함수(rr_claim_refs 역색인, §4.4.4).
 
     `projects` 를 주면 그 과제에 속한 타깃의 주장만 돌려준다 — MCP 읽기의 범위 판정이 쓰는 갈래로,
@@ -3093,10 +3105,14 @@ def claims_for_ref(ref: str, *, owner_sub: str | None = None, limit: int = 100,
         holes = ", ".join("?" for _ in projects) or "NULL"
         sql += f" AND r.target_key IN (SELECT target_key FROM rr_targets WHERE project_id IN ({holes}))"
         params.extend(projects)
-    rows = get_store().query(sql + " ORDER BY r.claim_uid LIMIT ?", (*params, int(limit) + 1))
+    start = max(0, int(offset or 0))
+    rows = get_store().query(sql + " ORDER BY r.claim_uid LIMIT ? OFFSET ?", (*params, int(limit) + 1, start))
     truncated = len(rows) > int(limit)
-    return {"ref": info["ref"], "ref_type": info["kind"],
-            "claims": [dict(r) for r in rows[: int(limit)]], "truncated": truncated}
+    out = {"ref": info["ref"], "ref_type": info["kind"],
+           "claims": [dict(r) for r in rows[: int(limit)]], "truncated": truncated}
+    if truncated:
+        out["next_offset"] = start + int(limit)        # 상한 뒤를 이어 받는다(절단 전수 조사 M1)
+    return out
 
 
 @router.get("/refs/{ref:path}")
