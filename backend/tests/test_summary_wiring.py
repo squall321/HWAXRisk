@@ -6,7 +6,7 @@ import re
 
 import pytest
 
-from app import render
+from app import brief, render
 from tests import factories
 
 DIFF_SECTIONS = ["대상", "비교가능성", "구조", "의미", "치수", "재료", "결과", "씨앗"]
@@ -97,6 +97,45 @@ def test_result_rows_beyond_five_are_counted():
     shown = line.count("worst_stress")
     folded = re.search(r"… 외 (\d+)건", line)
     assert shown + (int(folded.group(1)) if folded else 0) == len(rows), line
+
+
+def _summary_line(diff: dict, tag: str) -> str:
+    return next(line for line in render.diff_summary_text(diff)[0].split("\n") if line.startswith(f"[{tag}]"))
+
+
+def test_semantic_groups_follow_the_change_list_order_and_count_events(risk_store):
+    """[의미] 묶음은 변경 목록(E2)·변경 요지와 같은 순서다 — 종류는 KIND_PRIORITY, 묶음 안은 event_order(정성 먼저·크기
+    내림차순·감소 먼저). 섹션 상한에서 접은 묶음은 그 안의 이벤트 수로 센다(BQ-4).
+
+    종전에는 종류 알파벳순·코드순 앞 5건이라 합성 150건에서 consistency·count 두 묶음만 실리고 topology·dimension(얇아짐·간극
+    축소 포함)이 통째로 접혔으며, '… 외 8건' 의 8 은 접힌 종류 수였다 — 실제로 빠진 이벤트는 144건이었다.
+    """
+    synth = factories.make_diff_target(risk_store, 150)
+    diff = json.loads(_diff_row(risk_store, synth.diff_id)["diff_json"])
+    events = [e for e in diff["semantic"]["events"] if not e.get("excluded_reason")]
+    body = _summary_line(diff, "의미")[len("[의미] "):]
+    groups = [part for part in body.split(" | ") if not part.startswith("… 외 ")]
+    kinds = [part.split(": ", 1)[0] for part in groups]
+    present = [k for k in brief.KIND_PRIORITY if any(e.get("change_kind") == k for e in events)]
+    assert kinds == present[:len(kinds)] and kinds[0] == "topology", kinds
+    in_groups = sum(int(n) for n in re.findall(r" · … 외 (\d+)건", body))
+    folded = re.search(r"\| … 외 (\d+)건", body)
+    assert body.count("[c:") + in_groups + (int(folded.group(1)) if folded else 0) == len(events), body
+
+
+def test_result_line_carries_only_changed_rows_and_counts_the_unchanged(risk_store):
+    """[결과] 는 바뀐 행(flag='changed')만 싣고 허용오차 안의 행은 '변화 없음 N건' 으로 센다([치수] 와 같은 규칙, BQ-4). 접은 수는
+    바뀐 행만 센다 — 종전에는 바뀐 결과가 4건뿐인데 noise 행까지 세어 '… 외 217건' 이라 결과 변화가 219건인 것처럼 읽혔다."""
+    synth = factories.make_diff_target(risk_store, 150)
+    diff = json.loads(_diff_row(risk_store, synth.diff_id)["diff_json"])
+    rows = [i for i in diff["parametric"]["result_delta"] if not i.get("excluded_reason")]
+    changed = [i for i in rows if i.get("flag") == "changed"]
+    assert 0 < len(changed) < len(rows)
+    line = _summary_line(diff, "결과")
+    assert f"변화 없음 {len(rows) - len(changed)}건" in line, line
+    folded = re.search(r"… 외 (\d+)건", line)
+    assert line.count("[c:") + (int(folded.group(1)) if folded else 0) == len(changed), line
+    assert all(i["cid"] not in line for i in rows if i.get("flag") != "changed")
 
 
 @pytest.mark.xfail(strict=True, reason="render._summarize_state 는 실제 build_state 의 신호 모양에서 dict 원문을 찍는다 — "

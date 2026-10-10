@@ -529,8 +529,12 @@ def event_text(event: dict | None) -> str:
 
 # ---------------------------------------------------------------- 섹션 조립
 def _render_section(tag: str, items: Sequence[str], limit: int, sep: str = " · ", ref: str = "",
-                    omitted: int = 0) -> str:
-    """섹션 한 줄. 상한을 넘으면 '… 외 N건' 으로 접는다 — `omitted` 는 총량 맞춤(`_fit_total`)이 이미 뺀 항목 수라 N 에 더한다."""
+                    omitted: int = 0, weights: Sequence[int] | None = None) -> str:
+    """섹션 한 줄. 상한을 넘으면 '… 외 N건' 으로 접는다 — `omitted` 는 총량 맞춤(`_fit_total`)이 이미 뺀 건수라 N 에 더한다.
+
+    `weights` 를 주면 항목 하나가 세는 건수다 — 묶음 항목(종류별 이벤트 묶음)은 그 안의 이벤트 수, 건수가 아닌 머리 항목('변화 없음
+    N건')은 0 이다. 안 주면 항목마다 1건이다(종전).
+    """
     head = f"[{tag}] "
     kept: list[str] = []
     used = len(head)
@@ -541,7 +545,8 @@ def _render_section(tag: str, items: Sequence[str], limit: int, sep: str = " · 
             continue
         add = (len(sep) if kept else 0) + len(text)
         if kept and used + add > limit:
-            line = head + sep.join(kept) + f"{sep}… 외 {len(items) - index + omitted}건"
+            rest = sum(weights[index:]) if weights is not None else len(items) - index
+            line = head + sep.join(kept) + f"{sep}… 외 {rest + omitted}건"
             break
         kept.append(text)
         used += add
@@ -566,18 +571,21 @@ def _with_ref(line: str, ref: str) -> str:
 def _fit_total(sections: list[tuple], budget: int) -> str:
     """섹션을 조립하고 총량이 budget 을 넘으면 뒤 섹션의 항목부터 접는다(결정론).
 
-    섹션 튜플은 `(tag, items, limit, sep)` 또는 `(tag, items, limit, sep, ref)` 다. `ref` 는 그 줄에
-    항목발 참조가 하나도 없을 때만 붙는 기본 참조이고, 항목이 접혀도 사라지지 않는다.
+    섹션 튜플은 `(tag, items, limit, sep)` 또는 `(tag, items, limit, sep, ref)` 또는 `(…, ref, weights)` 다. `ref` 는 그 줄에
+    항목발 참조가 하나도 없을 때만 붙는 기본 참조이고, 항목이 접혀도 사라지지 않는다. `weights` 는 항목마다 세는 건수다
+    (`_render_section`) — 접은 수가 묶음 수가 아니라 그 안의 건수가 된다.
     """
     work = [(s[0], list(s[1]), s[2], s[3], s[4] if len(s) > 4 else "") for s in sections]
-    total_n = [len(section[1]) for section in work]
+    weights = [list(s[5]) if len(s) > 5 else [1] * len(s[1]) for s in sections]
+    total_n = [sum(w) for w in weights]
 
-    def render(section: tuple, n: int) -> str:
+    def render(section: tuple, w: list[int], n: int) -> str:
         # 총량 맞춤이 뺀 항목도 '… 외 N건' 에 센다 — 종전에는 뺀 수가 줄에 남지 않아 조용히 사라졌다.
-        return _render_section(*section, omitted=n - len(section[1]))
+        shown = w[:len(section[1])]
+        return _render_section(*section, omitted=n - sum(shown), weights=shown)
 
     for _ in range(4000):
-        lines = [render(section, n) for section, n in zip(work, total_n)]
+        lines = [render(section, w, n) for section, w, n in zip(work, weights, total_n)]
         text = "\n".join(lines)
         if len(text) <= budget:
             return text
@@ -588,7 +596,7 @@ def _fit_total(sections: list[tuple], budget: int) -> str:
         else:
             # 섹션마다 한 항목만 남았는데도 넘친다 — 글자로 끊지 않고 줄 경계에서 뒤 섹션을 빼며 그 수를 남긴다.
             return fit_lines(lines, budget)
-    return fit_lines([render(section, n) for section, n in zip(work, total_n)], budget)
+    return fit_lines([render(section, w, n) for section, w, n in zip(work, weights, total_n)], budget)
 
 
 def _first(values: Iterable[Any], default: Any = None) -> Any:
@@ -845,21 +853,33 @@ def _summarize_diff(diff: dict, context: dict) -> str:
         f" {_cid_ref(parametric.get('rollup_delta') or (), lambda r: True)}".strip(),
     ]
 
-    by_kind: dict[str, list[str]] = {}
+    # 의미 이벤트는 브리프 변경 목록(E2)·변경 요지·`risk_get_diff(part='lines')` 와 같은 순서다(BQ-4) — 정본은 `brief.event_order`
+    # (종류는 KIND_PRIORITY, 묶음 안은 정성 먼저·크기 내림차순·감소 먼저). 종전에는 종류 알파벳순·diff 의 코드순 앞 5건이라 상한에서
+    # topology·dimension 이 통째로 접혔다. brief 가 이 모듈을 들이므로 여기서 늦게 들인다.
+    from app import brief as brief_module  # noqa: PLC0415
+    rows = []
     for event in events:
         if event.get("excluded_reason"):
             continue
+        magnitude = event.get("magnitude") if isinstance(event.get("magnitude"), dict) else {}
+        rows.append({"change_kind": event.get("change_kind"), "design_relevant": 0 if event.get("design_relevant") is False else 1,
+                     "rel": magnitude.get("rel"), "magnitude": magnitude.get("value"), "cid": event.get("cid"), "_event": event})
+    by_kind: dict[str, list[str]] = {}
+    for row in brief_module.event_order(rows):
+        event = row["_event"]
         kind = str(event.get("change_kind") or "none")
         line = _src_line(event_text(event))
         if event.get("confidence") == "low":
             line += " (confidence=low)"
         by_kind.setdefault(kind, []).append(line)
-    semantic_items = []
-    for kind in sorted(by_kind):
-        texts = by_kind[kind][:5]
-        extra = len(by_kind[kind]) - len(texts)
+    # 묶음은 event_order 의 첫 등장 순(dict 는 넣은 순서다)이고, 섹션 상한에서 접힌 묶음은 그 안의 이벤트 수로 센다(종전 묶음 수).
+    semantic_items, semantic_weights = [], []
+    for kind, lines in by_kind.items():
+        texts = lines[:5]
+        extra = len(lines) - len(texts)
         body = " · ".join(texts) + (f" · … 외 {extra}건" if extra > 0 else "")
         semantic_items.append(f"{kind}: {body}")
+        semantic_weights.append(len(lines))
 
     # 치수는 바뀐 것과 한쪽만 잰 것만 싣는다 — 변하지 않았거나 양쪽 다 못 잰 치수까지 실으면 섹션 상한을 그 줄들이 먹는다.
     dims_all = [item for item in parametric.get("dims_delta") or () if isinstance(item, dict)]
@@ -886,11 +906,19 @@ def _summarize_diff(diff: dict, context: dict) -> str:
     if not material_items:
         material_items = ["변경 0"]
 
+    result_weights: list[int] | None = None
     if comparability.get("result_parity") is True:
-        result_rows = [i for i in parametric.get("result_delta") or () if isinstance(i, dict) and not i.get("excluded_reason")]
-        # 다 넘긴다 — 섹션 상한이 넘치는 뒤쪽을 '… 외 N건' 으로 센다(종전 앞 5건에서 말없이 끊었다).
-        result_rows = sorted(result_rows, key=lambda i: (-abs(_num(i.get("rel_delta"))), str(i.get("cid"))))
-        result_items = [_src_line(param_text(item)) for item in result_rows] or ["변경 0"]
+        result_all = [i for i in parametric.get("result_delta") or () if isinstance(i, dict) and not i.get("excluded_reason")]
+        # 바뀐 행(flag=changed)만 싣고 다 넘긴다 — 섹션 상한이 넘치는 뒤쪽을 '… 외 N건' 으로 센다(종전 앞 5건에서 말없이 끊었다).
+        # 허용오차 안의 행(noise)은 '변화 없음 N건' 으로 맨 앞에 센다([치수] 와 같은 규칙, BQ-4) — 맨 앞이라 접히지 않고, 접은 수는
+        # 바뀐 행만 센다. 종전에는 noise 까지 실어 '… 외 217건' 이라 결과 변화가 수백 건인 것처럼 읽혔다.
+        result_rows = sorted((i for i in result_all if i.get("flag") == "changed"),
+                             key=lambda i: (-abs(_num(i.get("rel_delta"))), str(i.get("cid"))))
+        unchanged = len(result_all) - len(result_rows)
+        result_items = ([f"변화 없음 {unchanged}건"] if unchanged else []) + [_src_line(param_text(item)) for item in result_rows]
+        result_weights = ([0] if unchanged else []) + [1] * len(result_rows)
+        if not result_items:
+            result_items, result_weights = ["변경 0"], [0]
     else:
         reason = _first(
             (i.get("excluded_reason") for i in parametric.get("result_delta") or () if isinstance(i, dict) and i.get("excluded_reason")),
@@ -905,10 +933,11 @@ def _summarize_diff(diff: dict, context: dict) -> str:
             ("대상", target, 220, " ", "sig:ir_hash"),
             ("비교가능성", comparability_items, 200, " · ", "gate:G7"),
             ("구조", structure_items, 260, " · ", "sig:counts.edges.total"),
-            ("의미", semantic_items, 700, " | ", "gate:G2"),
+            ("의미", semantic_items, 700, " | ", "gate:G2", semantic_weights),
             ("치수", dims_items, 420, " · ", "sig:dims_named"),
             ("재료", material_items, 100, " · ", "sig:counts.materials_distinct"),
-            ("결과", result_items, 160, " · ", "sig:results.part_risk_top"),
+            ("결과", result_items, 160, " · ", "sig:results.part_risk_top",
+             result_weights if result_weights is not None else [1] * len(result_items)),
             ("씨앗", seeds, 60, " · ", "sig:character_seed"),
         ],
         SUMMARY_MAX,
