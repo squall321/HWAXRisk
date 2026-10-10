@@ -669,6 +669,8 @@ def test_brief_clipped_reaches_panel_quality(risk_store, tmp_path, no_network):
     assert "brief_clipped" in quality["flags"]
     e2 = quality["brief_clipped"]["E2"]
     assert e2["omitted"] > 0 and e2["kept"] + e2["omitted"] == e2["lines"] == len(synth.diff["semantic"]["events"])
+    # E0c 는 러너가 제 좌석 계약표로 갈아 끼운다 — 브리프 쪽 E0c 의 절단은 좌석이 받은 것이 아니다.
+    assert "E0c" not in quality["brief_clipped"], quality["brief_clipped"]
 
 
 def test_three_panels_of_a_synthetic_many_change_target_close_done(risk_store, tmp_path, no_network):

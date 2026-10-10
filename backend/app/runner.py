@@ -440,8 +440,10 @@ def build_delib_opts(
                               seats=seats, panel_id=panel["id"], meta_out=brief_meta))
         if loss is not None and brief_meta.get("shielded"):
             loss["brief_shielded"] = list(brief_meta["shielded"])
-        if loss is not None and brief_meta.get("clipped"):
-            loss["brief_clipped"] = dict(brief_meta["clipped"])
+        # E0c 는 아래에서 제 좌석 계약표로 갈아 끼운다 — 브리프 쪽 E0c 의 절단은 좌석이 받은 것이 아니라 옮기지 않는다.
+        clipped = {k: v for k, v in (brief_meta.get("clipped") or {}).items() if k != "E0c"}
+        if loss is not None and clipped:
+            loss["brief_clipped"] = clipped
     else:
         evidence = list(evidence)
     # E0(스코프·게이트) 바로 뒤가 E0c 좌석 계약표다.
