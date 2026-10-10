@@ -8,6 +8,7 @@ from typing import Any, Mapping, Protocol, Sequence, TypedDict
 import httpx
 
 from app import config
+from app.common import http_client
 
 # 소스 호출 1건의 응답 침묵 한도(초). 30초였다 — 소스 앱 REST 직결에서는 이 값이 실제 상한이라 큰 형상의 호출이
 # 잘려 부분 IR 이 됐고, 패널은 그 불완전한 스냅샷을 심사했다. 게이트웨이 경유 MCP 호출에서는 게이트웨이가 15초마다
@@ -118,7 +119,7 @@ class RestGetClient:
 
     def _http(self) -> httpx.Client:
         if self._client is None:
-            self._client = httpx.Client(timeout=self.timeout)
+            self._client = http_client(timeout=self.timeout)
         return self._client
 
     def get(self, path: str, params: Mapping[str, Any] | None = None) -> dict:

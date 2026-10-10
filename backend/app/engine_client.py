@@ -10,7 +10,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from app import config, identity
-from app.common import now_epoch
+from app.common import http_client, now_epoch
 
 # 프로토콜·예외의 정본은 러너다(러너가 이 모듈을 import 하지 않으므로 순환이 없다).
 from app.runner import (
@@ -273,7 +273,7 @@ class PortalPanelEngine:
         return str(self.settings.portal_base).rstrip("/")
 
     def _client(self, timeout: httpx.Timeout | float) -> httpx.Client:
-        return httpx.Client(transport=self.transport, timeout=timeout)
+        return http_client(transport=self.transport, timeout=timeout)
 
     # -- 4단계 대화 생성(비치명) ------------------------------------------------
     def create_conversation(self, pat: str, title: str) -> str | None:

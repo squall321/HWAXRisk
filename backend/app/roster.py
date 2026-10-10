@@ -9,7 +9,7 @@ import httpx
 
 from app import config, identity
 from app.adapters.base import source_timeout
-from app.common import now_epoch
+from app.common import http_client, now_epoch
 from app.ra_client import DEADLINE_EXCEEDED, DEFAULT_TIMEOUT, McpHttpClient
 from app.runner import CREDENTIAL_MARGIN_S
 
@@ -237,7 +237,7 @@ def fetch_for_target(store: Any, *, kind: str, ref_id: str, owner_sub: str | Non
     cfg = _cfg(settings)
     owned: httpx.Client | None = None
     if client is None and mcp is None and _gateway_transport is not None:
-        owned = client = httpx.Client(transport=_gateway_transport, timeout=source_timeout(cfg))
+        owned = client = http_client(transport=_gateway_transport, timeout=source_timeout(cfg))
     source = source_for(store, owner_sub, settings=cfg, client=client, mcp=mcp)
     # 이 조회는 타깃을 여는 HTTP 요청 안에서 동기로 돈다 — nginx /apps/(600초)가 빈 504 를 내기 전에 스스로 끝낸다.
     # 종전에는 기한이 없어, 프록시가 먼저 끊으면 앱은 뒤늦게 타깃을 만들고 다시 누른 요청이 409 가 됐다.

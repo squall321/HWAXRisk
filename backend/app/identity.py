@@ -17,6 +17,7 @@ from cryptography.fernet import Fernet, InvalidToken
 from fastapi import Request
 
 from app import config
+from app.common import http_client
 from app.errors import AppError
 
 log = logging.getLogger("hwax_risk.identity")
@@ -88,7 +89,7 @@ def _token_from(request: Request) -> tuple[str | None, str]:
 def _fetch_me(token: str) -> dict | None:
     """heax /api/v1/auth/me — 200 이면 사용자 dict, 401/403 이면 None, 그 밖(5xx·불통)은 예외."""
     url = f"{config.settings.heax_api.rstrip('/')}/api/v1/auth/me"
-    with httpx.Client(transport=_transport, timeout=HEAX_TIMEOUT_S) as client:
+    with http_client(transport=_transport, timeout=HEAX_TIMEOUT_S) as client:
         r = client.get(url, headers={"Authorization": f"Bearer {token}"})
     if r.status_code in (401, 403):
         return None

@@ -15,7 +15,7 @@ from typing import Any, Protocol
 import httpx
 
 from app import brief, config, planner, taxonomy
-from app.common import canonical_json, new_uuid, now_epoch, sha256_hex
+from app.common import canonical_json, http_client, new_uuid, now_epoch, sha256_hex
 from app.errors import AppError
 
 log = logging.getLogger("hwax_risk.runner")
@@ -1623,13 +1623,11 @@ _revoked_transport: Any | None = None
 
 def fetch_revoked_jtis(settings) -> list[str] | None:
     """포털 `GET /auth/pat/revoked.json` → `{"revoked":[jti…]}`. 형식이 아니거나 실패면 None(직전 목록 유지)."""
-    import httpx  # noqa: PLC0415 — 러너 정본 경로가 아니라 이 함수에서만 쓴다.
-
     base = str(getattr(settings, "portal_base", "") or "").rstrip("/")
     if not base:
         return None
     try:
-        with httpx.Client(transport=_revoked_transport, timeout=REVOKED_TIMEOUT_S) as client:
+        with http_client(transport=_revoked_transport, timeout=REVOKED_TIMEOUT_S) as client:
             r = client.get(base + REVOKED_PATH)
         if r.status_code != 200:
             log.warning("PAT 폐기 목록 조회 실패(HTTP %s) — 직전 목록을 유지한다.", r.status_code)

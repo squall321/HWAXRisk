@@ -7,7 +7,7 @@ from typing import Any, Mapping, Sequence
 
 import httpx
 
-from app.common import canonical_json, now_epoch
+from app.common import canonical_json, http_client, now_epoch
 
 # 응답 침묵 한도다 — 호출 길이의 상한이 아니다. 게이트웨이가 도구가 도는 동안 15초마다 ping 을 흘리므로 이 값은
 # 죽은 게이트웨이만 잡고, 호출 길이는 게이트웨이의 GATEWAY_CALL_TIMEOUT 이 정한다(호출 길이를 묶으려면 기한을 준다).
@@ -61,7 +61,7 @@ class McpHttpClient:
     # -- 내부 ---------------------------------------------------------------
     def _http(self) -> httpx.Client:
         if self._client is None:
-            self._client = httpx.Client(timeout=self.timeout)
+            self._client = http_client(timeout=self.timeout)
         return self._client
 
     def _rpc_id(self) -> int:

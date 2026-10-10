@@ -10,7 +10,10 @@ import uuid
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Callable
 
+import httpx
+
 __all__ = [
+    "http_client",
     "canonical_json",
     "sha256_hex",
     "R",
@@ -22,6 +25,20 @@ __all__ = [
     "make_ref",
     "parse_ref",
 ]
+
+
+# ---------------------------------------------------------------- 발신 HTTP 클라이언트(WP5a R10)
+# 루프백 주소는 프록시를 타지 않는다. HEAXHub 는 앱 컨테이너에 프록시 변수 여덟을 물려주는데 이 앱이 부르는 포털·에이전트
+# 서버·AIDataHub·게이트웨이·heax 는 같은 박스의 루프백이다 — NO_PROXY 에 기대면 그 값이 빠진 박스에서 루프백 호출이 사내
+# 프록시로 나가 실패한다. trust_env=False 는 허브가 넣어 준 사내 CA(SSL_CERT_FILE)까지 꺼서 https 대상(RA)을 깨므로 쓰지
+# 않고(반대 검토 P-17), 루프백만 프록시 경로에서 뺀다 — None 은 '이 클라이언트의 기본 전송(프록시 없음)' 이다.
+# 앱의 모든 httpx.Client 는 이 함수로 만든다(tests/test_loopback_proxy.py 가 맨 httpx.Client 를 막는다).
+LOOPBACK_NO_PROXY: dict[str, None] = {"all://127.0.0.1": None, "all://localhost": None, "all://[::1]": None}
+
+
+def http_client(**kwargs: Any) -> httpx.Client:
+    """httpx.Client — 인자는 그대로 넘기고 루프백 주소만 프록시에서 뺀다. 주입한 transport(시험)는 그대로 쓰인다."""
+    return httpx.Client(mounts=dict(LOOPBACK_NO_PROXY), **kwargs)
 
 
 # ---------------------------------------------------------------- 정규 직렬화·해시(plan §2.11.1)

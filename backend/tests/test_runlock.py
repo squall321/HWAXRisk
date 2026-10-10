@@ -16,7 +16,6 @@ import time
 from pathlib import Path
 
 import httpx
-import pytest
 
 from app import planner, runner
 from app.risk_store import RiskStore

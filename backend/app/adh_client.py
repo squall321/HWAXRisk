@@ -5,6 +5,7 @@ from typing import Any, Mapping, Sequence
 
 import httpx
 
+from app.common import http_client
 from app.ra_client import DEFAULT_TIMEOUT, McpHttpClient
 
 # 레코드에 붙는 범위 태그(plan §8.2.5 ②) — 소유자와 가시성. 조직 검색은 `hwax:vis:org` 만 본다.
@@ -95,7 +96,7 @@ class AdhClient:
 
     def _http(self) -> httpx.Client:
         if self._client is None:
-            self._client = httpx.Client(timeout=self.timeout)
+            self._client = http_client(timeout=self.timeout)
         return self._client
 
     def _post_json(self, path: str, payload: Mapping[str, Any], *,

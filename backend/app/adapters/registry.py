@@ -19,7 +19,7 @@ from app.adapters.base import (
     source_timeout,
     tool_matches,
 )
-from app.common import new_uuid, now_epoch
+from app.common import http_client, new_uuid, now_epoch
 from app.errors import AppError
 
 # P0 고정 목록. 게이트웨이 /tools-map 도구명 집합으로 kind 를 바인딩하는 발견 로직(plan §8.2.11)은 GatewayRegistry 가 한다.
@@ -164,7 +164,7 @@ class GatewayRegistry:
 
     def _http(self) -> httpx.Client:
         if self._client is None:
-            self._client = httpx.Client(timeout=self.timeout)
+            self._client = http_client(timeout=self.timeout)
         return self._client
 
     def load(self) -> dict[str, str]:

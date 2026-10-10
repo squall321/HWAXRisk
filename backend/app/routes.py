@@ -26,7 +26,7 @@ from app.adapters import base as adapters_base
 from app.adapters import registry as adapters_registry
 from app.adapters.dyna import CONTEXT_KIND as CONTEXT_CALL_KIND
 from app import field_source
-from app.common import canonical_json, new_uuid, now_epoch, parse_ref, sha256_hex
+from app.common import canonical_json, http_client, new_uuid, now_epoch, parse_ref, sha256_hex
 from app.errors import AppError
 from app.risk_store import get_store
 
@@ -124,7 +124,7 @@ def _verify_with_portal(pat: str) -> None:
     base = config.settings.portal_base.rstrip("/")
     url = f"{base}/agent/conversations?limit=1"
     try:
-        with httpx.Client(transport=_portal_transport, timeout=PORTAL_TIMEOUT_S) as client:
+        with http_client(transport=_portal_transport, timeout=PORTAL_TIMEOUT_S) as client:
             r = client.get(url, headers={"Authorization": f"Bearer {pat}"})
     except httpx.HTTPError as exc:
         raise AppError(
