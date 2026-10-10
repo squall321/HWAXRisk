@@ -1916,3 +1916,54 @@ def test_e7_excerpt_is_quoted_and_says_when_cut(risk_store, monkeypatch):
     monkeypatch.setattr(brief, "E7_SEAT_LINE", 74)
     line = _item(brief.build_brief(risk_store, target_key), "E7").split("\n")[1]
     assert len(line) <= 74 and line.endswith("| …(발췌 20자 중 0자)"), line
+
+
+def test_e9_warnings_rank_by_severity_vocabulary(risk_store):
+    """IR 경고의 어휘는 WARNING·INFO 다 — 순위표가 그 어휘를 읽어 WARNING 이 INFO 보다 먼저 선다(R-17)."""
+    from tests import factories
+
+    project_id = factories.make_project(risk_store)
+    results = factories.fixture_adapter_results()
+    results[0]["warnings"] = [{"severity": "INFO", "code": "aa_info", "message": "정보"},
+                              {"severity": "warning", "code": "zz_warn", "message": "경고 코드"}]
+    snap = factories.make_snapshot(risk_store, project_id, results, label="DV1")
+    key = factories.make_target(risk_store, "snap", snap["snapshot_id"], agents=factories.agents())
+    warns = [ln.split(" ")[0] for ln in _item(brief.build_brief(risk_store, key, owner_sub=factories.OWNER),
+                                             "E9").split("\n") if ln.startswith("warn:")]
+    assert warns.index("warn:zz_warn") < warns.index("warn:aa_info"), warns
+
+
+def test_e8_sorted_by_evidence_weight(risk_store):
+    """E8 은 근거가 많은 조합(타깃 수)이 먼저다 — 이름순이면 상한에서 뒤쪽 종류가 먼저 잘린다(R-16)."""
+    from app import identity, routes
+    from tests import factories
+
+    target_key = _six_change_pair(risk_store)
+    ident = identity.Identity(email=factories.OWNER, display_name="사람", role="user", organization="qa",
+                              anonymous=False, source="bearer")
+    priors = [factories.make_diff_target(risk_store, 3) for _ in range(2)]
+    for prior, combos in zip(priors, ([("thermal", "warp"), ("electrical", "short")], [("thermal", "warp")])):
+        for mechanism, detail in combos:
+            with factories.routes_store(risk_store):
+                routes.create_human_finding(prior.target_key, routes.HumanFindingBody(
+                    mechanism=mechanism, mechanism_detail=detail, change_kind="dimension", subject_key="ck:000000000001",
+                    severity="경미", claim="사람이 본 변화",
+                    cites=[{"ref": prior.diff["semantic"]["events"][0]["cid"], "quote": "변화"}]), ident=ident)
+    e8 = [ln for ln in _item(brief.build_brief(risk_store, target_key, owner_sub=factories.OWNER), "E8").split("\n")[1:]]
+    assert [ln.split(" ")[1] for ln in e8] == ["thermal.warp", "electrical.short"], e8
+    assert "n_targets=2" in e8[0] and "n_targets=1" in e8[1]
+
+
+def test_e0_states_change_volume(risk_store):
+    """E0 에 변경의 전체 규모 한 줄 — 좌석이 실린 줄과 생략 줄을 더하지 않고도 안다(R-20). snap 타깃에는 없다."""
+    from tests import factories
+
+    built = brief.build_brief(risk_store, _six_change_pair(risk_store), owner_sub="syn@example.com", strict_lint=True)
+    e0 = _item(built, "E0").split("\n")
+    assert "변경 이벤트 6건(설계 관련 5) · dimension 3 · result 1 · consistency 1" in e0, e0
+    assert e0.index("변경 이벤트 6건(설계 관련 5) · dimension 3 · result 1 · consistency 1") == \
+        next(i for i, ln in enumerate(e0) if ln.startswith("게이트 ")) + 1
+    snap = factories.make_snapshot(risk_store, factories.make_project(risk_store), factories.fixture_adapter_results(),
+                                   label="DV1")
+    key = factories.make_target(risk_store, "snap", snap["snapshot_id"], agents=factories.agents())
+    assert not any(ln.startswith("변경 이벤트") for ln in _item(brief.build_brief(risk_store, key), "E0").split("\n"))

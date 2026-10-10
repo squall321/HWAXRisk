@@ -427,6 +427,19 @@ def _panel_model(store, target_key: str, panel_id: str | None) -> str:
     return _s(name) or "unknown"
 
 
+def _change_volume(store, diff) -> list[str]:
+    """diff 타깃의 변경 규모 한 줄 — `변경 이벤트 312건(설계 관련 282) · topology 88 · dimension 140 · …`(R-20).
+
+    좌석은 실린 줄과 생략 줄을 더하지 않고도 전체 규모를 안다. 종류별 수는 설계 관련 건수다(E2 꼬리와 같은 셈).
+    """
+    if diff is None:
+        return []
+    counts = event_counts(store.query(
+        "SELECT change_kind, design_relevant FROM rr_diff_events WHERE diff_id = ?", (diff["id"],)))
+    parts = "".join(f" · {kind} {n}" for kind, n in counts["by_kind"].items())
+    return [f"변경 이벤트 {counts['total']}건(설계 관련 {counts['design']}){parts}"]
+
+
 def _item_e0(store, ctx, external_ok: bool, model: str = "unknown") -> dict:
     target = ctx["target"]
     snapshot = ctx["snapshot"]
@@ -449,6 +462,7 @@ def _item_e0(store, ctx, external_ok: bool, model: str = "unknown") -> dict:
         f"과제 base={_q(base_code)} target={_q(_project_code(store, target['project_id']))}",
         f"snapshot_id={_s(ctx['snapshot_id'], '-')} ir_hash={_s(target['ir_hash'])}",
         f"게이트 {_gates_lines(gates)}",
+        *_change_volume(store, diff),
         f"missing={json.dumps(missing, ensure_ascii=False, sort_keys=True) if missing else '[]'}",
         f"외부 검색 가용={'true' if external_ok else 'false'}",
         f"{_tol_params(snapshot)} adapter_version={json.dumps(adapters, ensure_ascii=False, sort_keys=True)}",
@@ -1299,7 +1313,10 @@ def _item_e8(store, ctx) -> dict:
             f"FROM rr_delta_priors WHERE change_kind IN ({marks})",
             kinds,
         )
-        for row in sorted(rows, key=lambda r: (_s(r["change_kind"]), _s(r["mechanism"]),
+        # 근거가 많은 조합이 먼저다(타깃 수 → 판정 수) — 이름순이면 상한에서 알파벳 뒤쪽 종류가 먼저 잘렸다(WP1 R-16).
+        for row in sorted(rows, key=lambda r: (-(r["n_targets"] or 0),
+                                               -((r["n_verified"] or 0) + (r["n_dismissed"] or 0)),
+                                               _s(r["change_kind"]), _s(r["mechanism"]),
                                                _s(r["mechanism_detail"]))):
             verified, dismissed = row["n_verified"] or 0, row["n_dismissed"] or 0
             total = verified + dismissed
@@ -1316,7 +1333,9 @@ def _item_e8(store, ctx) -> dict:
 
 
 # ---------------------------------------------------------------- E9 warnings·rule_hits
-_SEVERITY_RANK = {"치명": 0, "중대": 1, "경미": 2}
+# IR 경고의 어휘는 WARNING·INFO 다(어댑터·ir_builder) — 등록부 어휘(치명·중대·경미)만 두면 전부 같은 순위가 되어 코드
+# 이름순만 남았다(WP1 R-17). 대문자로 접어 본다. 모르는 값은 3 이다.
+_SEVERITY_RANK = {"ERROR": 0, "치명": 0, "WARNING": 1, "WARN": 1, "중대": 1, "INFO": 2, "경미": 2}
 
 
 def _item_e9(ctx) -> dict:
@@ -1327,7 +1346,7 @@ def _item_e9(ctx) -> dict:
     if isinstance(warnings, list):
         for warning in sorted(
                 [w for w in warnings if isinstance(w, dict)],
-                key=lambda w: (_SEVERITY_RANK.get(_s(w.get("severity")), 9), _s(w.get("code")))):
+                key=lambda w: (_SEVERITY_RANK.get(_s(w.get("severity")).upper(), 3), _s(w.get("code")))):
             ref_to = _s(warning.get("ref"))
             ref = f"warn:{_s(warning.get('code'))}" + (f"#{ref_to}" if ref_to else "")
             lines.append(f"{ref} {_q(warning.get('message'), 'message')}")
