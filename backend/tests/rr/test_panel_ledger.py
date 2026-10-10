@@ -669,3 +669,16 @@ def test_brief_clipped_reaches_panel_quality(risk_store, tmp_path, no_network):
     assert "brief_clipped" in quality["flags"]
     e2 = quality["brief_clipped"]["E2"]
     assert e2["omitted"] > 0 and e2["kept"] + e2["omitted"] == e2["lines"] == len(synth.diff["semantic"]["events"])
+
+
+def test_three_panels_of_a_synthetic_many_change_target_close_done(risk_store, tmp_path, no_network):
+    """M1 나갈 기준(dev) — 부품 이름에 판단어가 든 합성 다건 변경 타깃에서 패널 셋이 brief_error 없이 연속 done 이다
+    (변경 목록의 이름·값·순서는 tests/test_brief.py 의 E2 시험이 본다)."""
+    synth = factories.make_diff_target(risk_store, 40, agents=factories.agents(("mech", "sim", "xd", "rel", "cam"), 3))
+    lg = _diff_ledger(risk_store, tmp_path, synth.target_key)
+    _job(lg)
+    engine = LedgerEngine()
+    outs = [_run(lg, engine) for _ in range(3)]
+    assert [o["status"] for o in outs] == ["done", "done", "done"], outs
+    assert all(not _panel(risk_store, o["panel_id"])["error"] for o in outs)
+    assert planner.check_invariants(risk_store, synth.target_key) == []
