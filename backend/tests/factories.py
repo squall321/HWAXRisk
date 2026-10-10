@@ -257,13 +257,15 @@ def portal_panel_body(store, data_dir: Path | str, size: int = 40, *, seed: int 
 
     러너·편성기·브리프·엔진 클라이언트(`PortalPanelEngine`)는 진짜이고 포털과 에이전트 서버만 대역이다 — 에이전트 서버
     `/health` 는 `engine_budget` 을 `evid_budget` 으로 알려 주고(None 이면 옛 엔진처럼 싣지 않는다), 포털은 결정문
-    하나로 답한다. 자격은 타깃 owner 가 등록한 포털 PAT 라 좌석이 그 diff 를 열 수 있다 — 질문에 `diff_id=` 가 실린다.
+    하나로 답한다. 자격은 타깃 owner 가 등록한 포털 PAT 이고 이 박스의 게이트웨이는 위임 헤더를 싣는 판이라(사람별 단언 발급을
+    받아 봤다) 좌석이 owner 로 보여 그 diff 를 열 수 있다 — 질문에 `diff_id=` 가 실린다(runner.diff_ref_withheld · SEC-3).
     에이전트 서버 리포의 사슬 시험(tests/test_risk_panel_body_chain.py)이 이 본문을 포털 중계와 엔진에 넣는다.
     """
     synth = make_diff_target(store, size, seed=seed, owner=owner,
                              agents=roster or _default_agents(("mech", "sim", "xd", "rel", "cam"), 3))
     store.upsert_credential(owner, identity.encrypt_pat("pat-synth").decode("ascii"), "sub-synth", owner, "[]",
                             now_epoch() + 30 * 86400)
+    runner.note_gateway_mint(store, delegated=True)
     cfg = dataclasses.replace(config.settings, data_dir=Path(data_dir))
     runner.create_job(store, synth.target_key, "C", owner_sub=owner, consent=True, settings=cfg)
     seen: dict = {}

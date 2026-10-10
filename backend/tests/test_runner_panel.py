@@ -49,6 +49,9 @@ def make_target(store, target_key: str = "t1", *, kind: str = "diff", report_ids
 
 def seeded(store, sizes: dict[str, int] | None = None) -> str:
     make_project(store)
+    make_project(store, "p0", "PRJ-0")        # diff 의 기준 과제 — 없으면 좌석이 그 diff 를 못 열어 패널 품질에 까닭이 선다
+    # 이 박스의 게이트웨이는 위임 헤더를 싣는 판이다(사람별 단언 발급을 받아 봤다) — 좌석이 잡 자격의 사람으로 보인다(SEC-3).
+    runner.note_gateway_mint(store, delegated=True)
     target_key = make_target(store)
     store.execute(
         "INSERT INTO rr_diffs(id, target_project_id, base_project_id, target_snapshot_id, base_snapshot_id,"

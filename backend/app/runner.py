@@ -391,28 +391,80 @@ def seat_contract_evidence(domains: Sequence[str], cap: int | None = None) -> di
     return item
 
 
-def seats_can_read_diff(store: Any, diff_id: str, credential_kind: str | None, email: str | None) -> bool:
-    """좌석이 이 패널 자격으로 `risk_get_diff` 를 열 수 있는가 — 게이트웨이가 그 자격의 시야로 앱을 부른다(WP1 P-06).
+# ---------------------------------------------------------------- 좌석이 그 diff 를 여는가(WP1 P-06 · SEC-3)
+# 좌석은 게이트웨이를 거쳐 이 앱을 부르고, 게이트웨이는 잡 자격의 이메일로 사람별 단언을 받아 온다(`routes.post_auth_sso`).
+# 위임 헤더(X-Hwax-Delegate-Email)를 보내지 않는 옛 게이트웨이면 HEAXHub Caddy 가 그 이메일을 게이트웨이 서비스 토큰의 주인
+# (heax 첫 관리자)으로 덮어, 좌석은 누구 자격이든 그 관리자로 보인다. 앱은 게이트웨이의 판을 물을 길이 없으므로 발급 요청이 위임
+# 헤더를 실었는지를 받을 때마다 적고 마지막 것을 지금 게이트웨이의 판으로 읽는다. 자리는 rr_metrics 다 — period 'live' 는 지표
+# 재계산(같은 period 의 옛 자리를 지운다, 기본 'all')이 건드리지 않고, 품질 카드의 지표 표에 그대로 보인다.
+GATEWAY_MINT_ROW = ("live", "global", "gateway_sso", "sso_mint_delegated")
 
-    MCP 문지기(`routes.mcp_scope_owner`)와 같은 규칙이다 — diff 의 두 과제가 모두 보여야 한다. 사람 자격(owner·requester)은
-    자기 소유 · 멤버 · 조직 공개, 서비스 자격은 조직 공개만 본다. 못 여는 자격에 diff_id 를 실으면 엔진이 그 도구를 맨 앞에
-    세우고 안내하는데 좌석의 호출은 not_visible 로 떨어진다.
+
+def note_gateway_mint(store: Any, *, delegated: bool) -> None:
+    """게이트웨이의 단언 발급 요청 1건을 적는다 — value 는 마지막 요청이 위임 헤더를 실었나(1·0), n 은 받은 수다."""
+    store.execute(
+        "INSERT INTO rr_metrics(period, dimension, key, metric, value, n, computed_at) VALUES (?, ?, ?, ?, ?, 1, ?)"
+        " ON CONFLICT(period, dimension, key, metric) DO UPDATE SET value = excluded.value, n = n + 1,"
+        " computed_at = excluded.computed_at",
+        (*GATEWAY_MINT_ROW, 1.0 if delegated else 0.0, now_epoch()))
+
+
+def gateway_delegates(store: Any) -> bool | None:
+    """마지막으로 받은 게이트웨이 발급 요청이 위임 헤더를 실었나 — 한 번도 받지 않았으면 None."""
+    row = store.query_one(
+        "SELECT value FROM rr_metrics WHERE period = ? AND dimension = ? AND key = ? AND metric = ?", GATEWAY_MINT_ROW)
+    return None if row is None or row["value"] is None else bool(row["value"])
+
+
+# 좌석이 그 diff 를 못 여는 까닭 — 패널 품질 `diff_ref_withheld` 에 그대로 남는다.
+DIFF_REF_WHY = {
+    "diff_absent": "diff 나 그 과제가 원장에 없다.",
+    "service_credential": ("잡이 서비스 계정 자격으로 돈다 — 좌석은 조직 공개(mcp_visibility='org') 과제만 연다. 소유자나 잡을 만든"
+                           " 사람이 웹 설정에서 포털 PAT 를 등록하면 그 사람 자격으로 돈다."),
+    "not_member": "잡 자격의 사람이 이 과제의 소유자도 구성원도 아니다.",
+    "gateway_unseen": ("이 앱이 게이트웨이의 사람별 단언 발급(POST /api/auth/sso)을 아직 받은 적이 없다 — 좌석이 잡 자격의 사람으로"
+                       " 보일지 모른다(게이트웨이에 per_user_sso.hwax_risk 가 없으면 좌석은 서비스 세션의 heax 첫 관리자로 보인다)."
+                       " 좌석이나 Claude 가 이 앱 도구를 한 번 부르면 다음 패널부터 판정한다."),
+    "gateway_folded": ("게이트웨이가 위임 헤더(X-Hwax-Delegate-Email)를 보내지 않는 옛 판이다 — HEAXHub Caddy 가 좌석의 이메일을"
+                       " 게이트웨이 서비스 토큰의 주인(heax 첫 관리자)으로 덮어, 좌석이 이 과제를 not_visible 로 받는다. 게이트웨이를"
+                       " 그 헤더를 싣는 판으로 올리면 다음 발급부터 열린다."),
+}
+
+
+def diff_ref_withheld(store: Any, diff_id: str, credential_kind: str | None, email: str | None) -> dict | None:
+    """좌석이 이 패널 자격으로 `risk_get_diff` 를 못 여는 까닭 `{reason, why}` — 열 수 있으면 None(WP1 P-06 · SEC-3).
+
+    MCP 문지기(`routes.mcp_scope_owner`)와 같은 규칙이다 — diff 의 두 과제가 모두 보여야 한다. 조직 공개 과제는 좌석이 누구로
+    보이든 열린다. 아니면 좌석이 사람 자격(owner·requester)의 이메일로 보여야 하고 그 사람이 소유자·구성원이어야 한다 — 좌석이
+    그 이메일로 보이는 것은 게이트웨이가 위임 헤더를 싣는 판일 때뿐이다(위 절). 못 여는 자격에 diff_id 를 실으면 엔진이 그 도구를
+    맨 앞에 세우고 안내하는데 좌석의 호출은 not_visible 로 떨어진다(isError 가 아니라 게이트웨이 감사에도 실패로 남지 않는다).
     """
+    def withheld(reason: str) -> dict:
+        return {"reason": reason, "why": DIFF_REF_WHY[reason]}
+
     row = store.query_one("SELECT base_project_id, target_project_id FROM rr_diffs WHERE id = ?", (diff_id,))
     if row is None:
-        return False
+        return withheld("diff_absent")
+    private = False
     for project_id in {row["base_project_id"], row["target_project_id"]}:
         project = store.query_one("SELECT owner_sub, mcp_visibility FROM rr_projects WHERE id = ?", (project_id,))
         if project is None:
-            return False
+            return withheld("diff_absent")
         if project["mcp_visibility"] == "org":
             continue
         if credential_kind == "service" or not email:
-            return False
+            return withheld("service_credential")
         if project["owner_sub"] != email and store.query_one(
                 "SELECT 1 FROM rr_project_members WHERE project_id = ? AND email = ?", (project_id, email)) is None:
-            return False
-    return True
+            return withheld("not_member")
+        private = True
+    if private:
+        delegates = gateway_delegates(store)
+        if delegates is None:
+            return withheld("gateway_unseen")
+        if not delegates:
+            return withheld("gateway_folded")
+    return None
 
 
 def panel_question(store: Any, target_key: str, *, digest: Mapping[str, Any] | None = None,
@@ -1144,11 +1196,16 @@ def run_panel(
         profile = brief.web_profile(model_json.get("evid_budget"))
         model_json["brief_profile"] = {"name": profile.name, "budget": profile.budget}
         target = store.query_one("SELECT kind, ref_id FROM rr_targets WHERE target_key = ?", (job["target_key"],))
-        diff_ref = bool(target is not None and target["kind"] == "diff" and seats_can_read_diff(
-            store, target["ref_id"], job.get("credential"),
-            params.get("requester") if job.get("credential") == "requester" else job.get("owner_sub")))
-        store.execute("UPDATE rr_panels SET model_json = ? WHERE id = ?", (canonical_json(model_json), panel["id"]))
         loss: dict = {}
+        if target is not None and target["kind"] == "diff":
+            withheld = diff_ref_withheld(
+                store, target["ref_id"], job.get("credential"),
+                params.get("requester") if job.get("credential") == "requester" else job.get("owner_sub"))
+            if withheld:
+                # 질문에 diff_id 표식이 없는 까닭 — 변경 목록(E2)은 그대로 실리지만 '변경 전체 보기' 가 왜 없었는지를 패널에 남긴다.
+                loss["diff_ref_withheld"] = withheld
+        diff_ref = bool(target is not None and target["kind"] == "diff" and "diff_ref_withheld" not in loss)
+        store.execute("UPDATE rr_panels SET model_json = ? WHERE id = ?", (canonical_json(model_json), panel["id"]))
         delib_opts = build_delib_opts(
             # 메모 없는 잡은 None 이 아니라 빈 문자열로 넘긴다 — None 은 '잡이 없는 길' 이라 브리프가 그 타깃의
             # 최근 잡 메모를 찾아 싣는다(같은 타깃에 메모를 단 잡이 또 있으면 그 메모가 이 패널에 실린다).
@@ -1673,9 +1730,10 @@ def _complete_panel(
             quality["brief_drift"] = list(frozen_brief["brief_drift"])
         if frozen_brief and frozen_brief.get("brief_hash"):
             quality["brief_hash"] = frozen_brief["brief_hash"]
-        # 12칸을 넘겨 빠진 근거와 다 못 실은 메모, 판단어로 «» 에 싸인 줄, 상한에 잘린 줄 — 좌석은 받은 것이 전부라고 믿고
-        # 판정했으므로 패널에 남긴다.
-        for lost in ("evidence_dropped", "user_memo_cut", "brief_shielded", "brief_clipped", "knowledge_query_cut"):
+        # 12칸을 넘겨 빠진 근거와 다 못 실은 메모, 판단어로 «» 에 싸인 줄, 상한에 잘린 줄, 좌석이 못 열어 싣지 않은 diff_id 표식 —
+        # 좌석은 받은 것이 전부라고 믿고 판정했으므로 패널에 남긴다.
+        for lost in ("evidence_dropped", "user_memo_cut", "brief_shielded", "brief_clipped", "knowledge_query_cut",
+                     "diff_ref_withheld"):
             if frozen_brief and frozen_brief.get(lost):
                 quality[lost] = frozen_brief[lost]
                 quality["flags"].append(lost)

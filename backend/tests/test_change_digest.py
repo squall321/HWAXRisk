@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from app import brief, config, devseed, planner, render, runner
+from app import brief, config, devseed, metrics, planner, render, runner
 from tests import factories
 
 
@@ -72,15 +72,29 @@ def test_knowledge_query_rides_in_delib_opts_inside_the_portal_limit(risk_store)
 
 
 def test_diff_id_mark_rides_only_when_the_seats_can_open_the_diff(risk_store):
-    """`diff_id=<id>` 는 좌석 자격으로 그 diff 가 보일 때만 싣는다 — 사람 자격(소유자)은 보이고, 서비스 자격은 과제가 조직
-    공개일 때만이다. 못 여는 자격에 실으면 엔진이 도구를 앞세우고 안내한 호출이 not_visible 로 떨어진다(P-06)."""
+    """`diff_id=<id>` 는 좌석 자격으로 그 diff 가 보일 때만 싣는다 — 사람 자격(소유자)은 게이트웨이가 위임 헤더를 싣는 판일 때만
+    보이고(옛 판이면 좌석이 Caddy 가 덮은 heax 첫 관리자로 보인다 — SEC-3), 서비스 자격은 과제가 조직 공개일 때만이다. 못 여는
+    자격에 실으면 엔진이 도구를 앞세우고 안내한 호출이 not_visible 로 떨어진다(P-06). 못 여는 까닭은 이름으로 가른다."""
     synth = factories.make_diff_target(risk_store, 3)
     mark = f"diff_id={synth.diff_id}"
-    assert runner.seats_can_read_diff(risk_store, synth.diff_id, "owner", factories.OWNER)
-    assert not runner.seats_can_read_diff(risk_store, synth.diff_id, "service", None)
-    assert not runner.seats_can_read_diff(risk_store, synth.diff_id, "requester", "stranger@example.com")
+
+    def reason(kind: str, email: str | None) -> str | None:
+        return (runner.diff_ref_withheld(risk_store, synth.diff_id, kind, email) or {}).get("reason")
+
+    # 게이트웨이의 사람별 단언 발급을 받아 본 적이 없다 — 좌석이 소유자로 보일지 모른다.
+    assert reason("owner", factories.OWNER) == "gateway_unseen"
+    runner.note_gateway_mint(risk_store, delegated=False)                 # 위임 헤더 없는 옛 게이트웨이
+    assert reason("owner", factories.OWNER) == "gateway_folded"
+    runner.note_gateway_mint(risk_store, delegated=True)                  # 그 헤더를 싣는 판으로 올랐다 — 마지막 발급이 판정이다
+    assert reason("owner", factories.OWNER) is None
+    metrics.recompute(risk_store)                                         # 야간 지표 재계산은 period 'all' 의 옛 자리만 지운다
+    assert runner.gateway_delegates(risk_store) is True and reason("owner", factories.OWNER) is None
+    assert reason("service", None) == "service_credential"
+    assert reason("requester", "stranger@example.com") == "not_member"
     risk_store.execute("UPDATE rr_projects SET mcp_visibility = 'org' WHERE id = ?", (synth.project_id,))
-    assert runner.seats_can_read_diff(risk_store, synth.diff_id, "service", None)
+    assert reason("service", None) is None
+    runner.note_gateway_mint(risk_store, delegated=False)                 # 조직 공개 과제는 좌석이 누구로 보이든 열린다
+    assert reason("owner", factories.OWNER) is None and reason("service", None) is None
     assert mark in runner.panel_question(risk_store, synth.target_key, diff_ref=True)
     assert "diff_id=" not in runner.panel_question(risk_store, synth.target_key)
 

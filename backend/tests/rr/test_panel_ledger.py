@@ -741,6 +741,8 @@ def test_runner_question_carries_the_digest_and_the_diff_mark(risk_store, tmp_pa
     synth = factories.make_diff_target(risk_store, 40, agents=factories.agents(("mech", "sim", "xd", "rel", "cam"), 3))
     lg = _diff_ledger(risk_store, tmp_path, synth.target_key)
     _job(lg)
+    # 이 박스의 게이트웨이는 위임 헤더를 싣는 판이다(사람별 단언 발급을 받아 봤다) — 좌석이 소유자로 보여 그 diff 를 연다(SEC-3).
+    runner.note_gateway_mint(risk_store, delegated=True)
     engine = _BudgetEngine(None)
     out = _run(lg, engine)
     assert out["status"] == "done", out
@@ -783,3 +785,74 @@ def test_knowledge_hits_reach_the_seat_opinion_and_a_dropped_query_is_flagged(ri
     assert others and all(r["knowledge_hits_n"] is None for r in others)
     quality = json.loads(_panel(risk_store, out["panel_id"])["quality_json"])
     assert quality["knowledge_query_ignored"] == [seat] and "knowledge_query_ignored" in quality["flags"]
+
+
+# ---------------------------------------------------------------- SEC-3 — diff_id 표식은 좌석이 게이트웨이를 거쳐 그 diff 를 열 때만
+# 게이트웨이 heax 토큰의 주인 — provision 이 '가장 먼저 만든 heax 관리자' 에게 발급한 PAT 다. HEAXHub Caddy 의 forward_auth 는
+# 앱으로 가는 X-Heax-User-Email 을 지우고 이 이메일로 다시 싣는다(proxy_manager `_forward_auth_handler(copy_identity=True)`).
+FIRST_ADMIN = "first-admin@example.com"
+GATEWAY_SECRET = "panel-ledger-gateway-secret"
+
+
+def _gateway_assertion(delegate: str | None) -> str:
+    """게이트웨이 → HEAXHub Caddy → 앱 `POST /api/auth/sso` 를 지금 배선 그대로 — 앱의 실제 발급 함수가 단언을 만든다.
+
+    Caddy 가 X-Heax-User-Email 을 첫 관리자로 덮은 뒤다. `delegate=None` 은 위임 헤더(X-Hwax-Delegate-Email)를 보내지 않는
+    옛 게이트웨이다."""
+    from starlette.requests import Request
+
+    from app import routes
+
+    headers = [(b"x-heax-gateway-secret", GATEWAY_SECRET.encode()), (b"x-heax-user-email", FIRST_ADMIN.encode())]
+    if delegate is not None:
+        headers.append((b"x-hwax-delegate-email", delegate.encode()))
+    request = Request({"type": "http", "method": "POST", "path": "/api/auth/sso", "headers": headers, "query_string": b""})
+    return routes.post_auth_sso(request)["access_token"]
+
+
+def _seat_reads_diff(monkeypatch, assertion: str, diff_id: str) -> dict:
+    """좌석의 `risk_get_diff` — 게이트웨이는 받아 온 단언을 X-Heax-Sso-Assertion 에 실어 앱 /mcp 를 부른다."""
+    from starlette.requests import Request
+
+    import app.mcp_server as srv
+
+    request = Request({"type": "http", "method": "POST", "path": "/mcp",
+                       "headers": [(identity.SSO_HEADER.encode(), assertion.encode())], "query_string": b""})
+    monkeypatch.setattr(srv, "_request", lambda: request)
+    return srv.risk_get_diff(diff_id=diff_id, part="lines")
+
+
+def test_the_diff_mark_rides_only_when_the_seat_identity_opens_the_diff(risk_store, tmp_path, no_network, monkeypatch):
+    """좌석은 게이트웨이를 거쳐 잡 자격의 이메일로 `risk_get_diff` 를 부른다. 위임 헤더를 보내지 않는 옛 게이트웨이면 그 이메일이
+    HEAXHub Caddy 에서 heax 첫 관리자로 덮여 소유자의 private 과제가 not_visible 이다 — 질문의 `diff_id=` 는 그 호출이 열릴 때만
+    싣고, 못 실은 까닭은 패널 품질에 남긴다(SEC-3). 종전에는 소유자 자격이면 늘 실어, 엔진이 좌석마다 맨 앞에 세운 호출이 말없이
+    not_visible 로 버려졌다."""
+    from app import routes
+
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    monkeypatch.setattr(config, "heax_gateway_secret", lambda *a, **k: GATEWAY_SECRET)
+    synth = factories.make_diff_target(risk_store, 3, agents=factories.agents(("mech", "sim", "xd", "rel", "cam"), 3))
+    lg = _diff_ledger(risk_store, tmp_path, synth.target_key)          # 러너 자격은 소유자가 등록한 포털 PAT 다
+    _job(lg)
+    engine = _BudgetEngine(None)
+    mark = f"diff_id={synth.diff_id}"
+
+    # 옛 게이트웨이 — 좌석이 받은 단언은 첫 관리자의 것이고, 그 신원으로는 소유자의 private 과제를 못 연다.
+    folded = _gateway_assertion(None)
+    out = _run(lg, engine)
+    assert out["status"] == "done", out
+    assert _seat_reads_diff(monkeypatch, folded, synth.diff_id).get("error") == "not_visible"
+    assert mark not in engine.opts[0]["question"]
+    quality = json.loads(_panel(risk_store, out["panel_id"])["quality_json"])
+    assert quality["diff_ref_withheld"]["reason"] == "gateway_folded", quality.get("diff_ref_withheld")
+    assert "X-Hwax-Delegate-Email" in quality["diff_ref_withheld"]["why"] and "diff_ref_withheld" in quality["flags"]
+
+    # 새 게이트웨이 — 위임 헤더로 좌석이 소유자 자신으로 보인다. 다음 패널부터 표식이 실리고 그 호출이 열린다.
+    delegated = _gateway_assertion(OWNER)
+    out = _run(lg, engine)
+    assert out["status"] == "done", out
+    assert mark in engine.opts[1]["question"]
+    seat = _seat_reads_diff(monkeypatch, delegated, synth.diff_id)
+    assert "error" not in seat and seat["total"] > 0 and seat["lines"], seat
+    quality = json.loads(_panel(risk_store, out["panel_id"])["quality_json"])
+    assert "diff_ref_withheld" not in quality and "diff_ref_withheld" not in quality["flags"]
