@@ -1916,6 +1916,11 @@ def test_e7_excerpt_is_quoted_and_says_when_cut(risk_store, monkeypatch):
     monkeypatch.setattr(brief, "E7_SEAT_LINE", 74)
     line = _item(brief.build_brief(risk_store, target_key), "E7").split("\n")[1]
     assert len(line) <= 74 and line.endswith("| …(발췌 20자 중 0자)"), line
+    # 자리가 넉넉해도 위생의 종류별 상한(memo 400자)에 걸리면 그 사실을 밝힌다.
+    monkeypatch.setattr(brief, "E7_SEAT_LINE", 2000)
+    risk_store.execute("UPDATE rr_seat_opinions SET excerpt_for_rag = ? WHERE opinion_id = 'op0'", ("간극 " * 300,))
+    line = _item(brief.build_brief(risk_store, target_key), "E7").split("\n")[1]
+    assert line.endswith("» …(발췌 899자 중 400자)"), line[-40:]
 
 
 def test_e9_warnings_rank_by_severity_vocabulary(risk_store):

@@ -1179,14 +1179,14 @@ _EXCERPT_CUT_FMT = " …(발췌 {chars}자 중 {kept}자)"
 
 
 def _quoted_excerpt(text: Any, room: int) -> str:
-    """앞 패널 LLM 이 쓴 발췌를 «» 안에 싣는다(인젝션 방어 안). 자리(room)를 넘으면 들어가는 만큼 싣고 원문 길이를 밝힌다 —
-    조용히 자르지 않는다(`memo_result` 와 같은 꼴)."""
-    chars = len(" ".join(_s(text).split()))
+    """앞 패널 LLM 이 쓴 발췌를 «» 안에 싣는다(인젝션 방어 안). 자리(room)나 위생의 종류별 상한을 넘으면 들어가는 만큼 싣고
+    원문 길이를 밝힌다 — 조용히 자르지 않는다(`memo_result` 와 같은 꼴). 원문 길이는 위생과 같은 정규화 뒤의 길이다."""
+    chars = len(render.norm_quote(text))
     quoted = _q(text, "memo")
     inner = quoted[1:-1]
-    if inner.startswith("[suspect_text ") or len(quoted) <= room:
+    if inner.startswith("[suspect_text ") or (len(quoted) <= room and len(inner) >= chars):
         return quoted
-    kept = room - 2 - len(_EXCERPT_CUT_FMT.format(chars=chars, kept=chars))
+    kept = min(len(inner), room - 2 - len(_EXCERPT_CUT_FMT.format(chars=chars, kept=chars)))
     if kept <= 0:
         # 표식조차 «» 와 함께 들어가지 않는 자리 — 발췌 없이 표식만 싣는다(그것도 안 들어가면 비운다).
         mark = _EXCERPT_CUT_FMT.format(chars=chars, kept=0).strip()
