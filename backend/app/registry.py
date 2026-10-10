@@ -1099,8 +1099,10 @@ def _registry_table(rows: list[dict]) -> list[str]:
     out = [header, "-" * len(header)]
     for row in rows:
         merged = _loads(row.get("merged_json"), {})
-        claim = _clean_str(merged.get("claim"))[:160]
-        cites = " ".join(f"[{c.get('ref')}]" for c in merged.get("cites", [])[:3] if isinstance(c, dict))
+        # 주장·인용을 자르지 않는다 — 보고서는 사람이 읽는 최종 산출물이다(종전 주장 160자·인용 3개에서 말없이 끊었다).
+        # 긴 줄은 RA 블록 상한에 맞춰 나눠 싣는다(split_rich_text — 버리지 않는다).
+        claim = _clean_str(merged.get("claim"))
+        cites = " ".join(f"[{c.get('ref')}]" for c in merged.get("cites", []) if isinstance(c, dict))
         subject = ", ".join(merged.get("names", [])) or _clean_str(row["subject_key"])
         domains = ",".join(merged.get("domains", []))
         out.append(
@@ -1135,7 +1137,7 @@ def _character_lines(store: RiskStore, project_id: str) -> list[str]:
         if not items:
             out.append(f"[{facet}] (없음)")
             continue
-        for it in items[:2]:
+        for it in items[:2]:                       # 각 facet 상위 둘(plan §4.7.3) — 나머지는 수를 남긴다
             by = ",".join(str(x) for x in _loads(it["by_json"], []))
             cites = " ".join(
                 f"[{c.get('ref')}]" for c in _loads(it["cites_json"], []) if isinstance(c, dict) and c.get("ref")
@@ -1145,6 +1147,8 @@ def _character_lines(store: RiskStore, project_id: str) -> list[str]:
                 f"[{facet}] {it['status']}({it['support_panels']}) «{_clean_str(it['statement'])}» "
                 f"by={by} tags={tags} {cites}".rstrip()
             )
+        if len(items) > 2:
+            out.append(f"[{facet}] … 외 {len(items) - 2}건(과제 성격 프로파일에서 전부 본다)")
     return out
 
 
