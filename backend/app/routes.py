@@ -2621,11 +2621,61 @@ def resolve_brief_token(target_key: str, brief_token: str | None) -> dict:
     row = None
     if token:
         row = get_store().query_one(
-            "SELECT id, target_key, owner_sub, brief_token_exp FROM rr_panels"
+            "SELECT id, target_key, owner_sub, status, brief_token_exp FROM rr_panels"
             " WHERE target_key = ? AND brief_token_hash = ?", (target_key, brief_token_hash(token)))
     if row is None or int(row["brief_token_exp"] or 0) < now_epoch():
         raise AppError("brief_token_invalid", "브리프 토큰이 없거나 만료됐습니다 — 앱 화면에서 다시 받으세요.", 401)
     return dict(row)
+
+
+# MCP 길(Claude Code)의 응답에서 빼는 것 — 최상위 근거 사본·키·참조는 토큰 패널의 delib_opts.evidence 와 같은 글이고 JS 는 쓰지
+# 않는다(와이어의 절반이었다). meta.shielded 는 패널의 brief_shielded 와 같은 목록이다. 이 길은 Claude Code 의 MCP 결과 상한
+# (MAX_MCP_OUTPUT_TOKENS 기본 25,000토큰)에 묶이고 받은 근거를 에이전트가 다시 적는다(검토 GA-1·X-2·P-1).
+_MCP_BRIEF_DROP = ("evidence", "keys", "refs")
+# 브리프가 좌석에 다 싣지 못한 것 — 웹 러너가 패널 품질에 옮기는 칸과 같은 이름이다(runner.run_panel). knowledge_query_cut 은
+# 넣지 않는다 — JS 길은 지식카드 검색어를 엔진에 보내지 않아(BRIEF_SCHEMA 에 없다) 그 절단이 이 패널의 좌석에 닿지 않는다.
+_BRIEF_LOSS_KEYS = ("evidence_dropped", "user_memo_cut", "brief_shielded", "brief_clipped")
+
+
+def _keep_brief_loss(store: Any, panel_id: str, item: dict[str, Any]) -> None:
+    """MCP 길 패널의 품질에 그 브리프가 잘린 것을 남긴다 — 웹 러너가 패널 품질에 남기는 것과 같은 칸·깃발이다.
+
+    hwax-risk-review.js 는 응답 칸 가운데 일부(evidence_dropped·user_memo_cut)만 옮겨 적어 결과와 함께 낸다. 옛 한도에 잘린 줄
+    (brief_clipped)은 그 길로는 원장에 닿지 않았다. 결과 제출(complete_panel)은 이 품질을 이어받는다 — 웹 화면에 그대로 보인다.
+    토큰으로 다시 받으면 그때의 조립으로 고쳐 쓴다(동결도 그때의 것이다).
+    """
+    row = store.query_one("SELECT quality_json FROM rr_panels WHERE id = ?", (panel_id,))
+    quality = _loads(row["quality_json"] if row is not None else None, {})
+    flags = [f for f in (quality.get("flags") or []) if f not in _BRIEF_LOSS_KEYS]
+    for key in _BRIEF_LOSS_KEYS:
+        quality.pop(key, None)
+        if item.get(key):
+            quality[key] = item[key]
+            flags.append(key)
+    quality["flags"] = flags
+    store.execute("UPDATE rr_panels SET quality_json = ? WHERE id = ?", (canonical_json(quality), panel_id))
+
+
+def _mcp_brief_notice(item: dict[str, Any]) -> str | None:
+    """옛 한도에 잘린 것을 사람이 읽는 한 줄로 — 무엇이 몇 줄 중 몇 줄만 실렸는가. 잘린 것이 없으면 None."""
+    parts: list[str] = []
+    for key, info in (item.get("brief_clipped") or {}).items():
+        if info.get("omitted"):
+            parts.append(f"{key} {int(info['lines']):,}줄 중 {int(info['kept']):,}줄")
+        for block, n in (info.get("inner_omitted") or {}).items():
+            parts.append(f"{block} 선례 {int(n):,}줄 생략")
+    if item.get("evidence_dropped"):
+        parts.append("칸을 넘겨 빠진 항목 " + "·".join(str(k) for k in item["evidence_dropped"]))
+    cut = item.get("user_memo_cut")
+    if cut:
+        parts.append(f"사용자 메모 {int(cut['chars']):,}자 중 {int(cut['kept']):,}자")
+    if not parts:
+        return None
+    profile = brief_module.PROFILE_MCP
+    return (f"이 브리프는 Claude Code 가 MCP 결과로 받아 옮겨 적을 수 있는 옛 한도(합 {profile.budget:,}자 · "
+            f"{profile.max_items}항목 · 항목 {profile.item_result_max:,}자)로 조립했다 — 잘린 것: {' · '.join(parts)}. "
+            "잘린 근거는 좌석에 가지 않는다(항목 끝의 '생략' 표식 · 이 패널 품질의 brief_clipped). "
+            "근거를 다 싣는 길은 웹 러너다(앱 화면의 심사 시작 또는 risk_start_job).")
 
 
 def brief_by_token(target_key: str, brief_token: str | None, tier: str = "B") -> dict:
@@ -2635,21 +2685,47 @@ def brief_by_token(target_key: str, brief_token: str | None, tier: str = "B") ->
     이 조립이 L2 오케스트레이터가 좌석에 싣는 것이라 **그 토큰의 패널**에 여기서 동결한다(WP1 P-09 · R-21) — 화면이 토큰을
     낸 시각의 조립을 동결하면 몇 분~몇 시간 뒤 좌석이 받는 조립(E5·E7·E10 은 시변이다)과 어긋난다. 동결본이 있어야 저장 때
     `narr:`·`reg:` 인용을 그 패널이 받은 브리프로 대조하고 원문을 재현한다. REST 미리보기는 동결하지 않는다.
+
+    응답은 Claude Code 의 MCP 결과 상한 안에 든다(검토 GA-1·X-2·P-1) — 토큰의 패널 1건과 근거 한 벌만 싣는다(다른 planned
+    패널은 동결되지 않아 돌려도 인용 대조가 안 된다). 근거 항목마다 `result_chars`(앞뒤 공백을 뗀 result 의 글자 수)를 실어
+    에이전트가 옮겨 적은 근거를 JS 가 대조하게 한다 — 동결본에는 그 칸이 없다. 옛 한도에 잘린 것은 응답 칸(brief_clipped 등)과
+    한 줄 `brief_notice`, 패널 품질에 남는다. 토큰의 패널이 이미 planned 가 아니면(다른 실행이 집었다) 409 `brief_panel_not_planned`.
     """
+    store = get_store()
     panel = resolve_brief_token(target_key, brief_token)
-    payload = brief_payload(target_key, tier, owner_sub=panel["owner_sub"])
-    for item in payload["panels"]:
-        if item["panel_id"] == panel["id"]:
-            item["brief_frozen"] = runner.freeze_brief(get_store(), panel, item["delib_opts"]["evidence"])
-    return payload
+
+    def not_planned(status: str) -> AppError:
+        return AppError("brief_panel_not_planned",
+                        f"이 브리프 토큰의 패널은 이미 '{status}' 다 — 다른 실행이 집었다. 앱 화면에서 새 토큰을 받는다.", 409,
+                        detail={"panel_id": panel["id"], "status": status})
+
+    if panel["status"] != "planned":
+        raise not_planned(str(panel["status"]))
+    payload = brief_payload(target_key, tier, owner_sub=panel["owner_sub"], panel_id=panel["id"])
+    item = next((p for p in payload["panels"] if p["panel_id"] == panel["id"]), None)
+    if item is None:                                     # 확인과 조립 사이에 다른 실행이 집었다
+        row = store.query_one("SELECT status FROM rr_panels WHERE id = ?", (panel["id"],))
+        raise not_planned(str(row["status"]) if row is not None else "absent")
+    evidence = item["delib_opts"]["evidence"]
+    item["brief_frozen"] = runner.freeze_brief(store, panel, evidence)
+    _keep_brief_loss(store, panel["id"], item)
+    item["delib_opts"]["evidence"] = [{**e, "result_chars": len(str(e.get("result") or "").strip())} for e in evidence]
+    out = {k: v for k, v in payload.items() if k not in _MCP_BRIEF_DROP}
+    out["panels"] = [item]
+    out["meta"] = {k: v for k, v in payload["meta"].items() if k != "shielded"}
+    notice = _mcp_brief_notice(item)
+    if notice:
+        out["brief_notice"] = notice
+    return out
 
 
 def brief_payload(target_key: str, tier: str = "B", *, owner_sub: str | None = None,
                   actor: str | None = None, exclude: tuple[str, ...] = (),
-                  issue_token: bool = False) -> dict:
+                  issue_token: bool = False, panel_id: str | None = None) -> dict:
     """`GET /api/targets/{key}/brief?tier=` 본체 — MCP `risk_get_brief` 와 같은 함수.
 
     Tier A 대표 패널은 웹 러너 전용이라 여기서 막는다(§6.11). 패널이 없으면 결정론 편성으로 `planned` 1건을 만든다.
+    `panel_id` 를 주면 그 planned 패널 하나로만 조립하고 새로 편성하지 않는다(MCP 토큰 길 — 좌석 기억 E7 도 그 패널 좌석이다).
     """
     if tier not in planner.TIERS:
         raise AppError("E100", f"tier 는 {list(planner.TIERS)} 중 하나여야 합니다 — {tier!r}.", 422)
@@ -2662,7 +2738,9 @@ def brief_payload(target_key: str, tier: str = "B", *, owner_sub: str | None = N
         "SELECT id, target_key, owner_sub, panel_no, tier, seats_json, modifiers_json, rounds, budget_json,"
         " status FROM rr_panels WHERE target_key = ? AND status = 'planned' ORDER BY panel_no", (target_key,))
     panels = [_planned_panel(r) for r in rows]
-    if not panels:
+    if panel_id is not None:
+        panels = [p for p in panels if p["id"] == panel_id]
+    elif not panels:
         # 편성은 결정론이라 멱등이다(§8.2.5 risk_get_brief 주석).
         fresh = planner.plan_next_panel(store, target_key, tier)
         if fresh is not None:

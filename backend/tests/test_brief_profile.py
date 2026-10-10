@@ -1,4 +1,4 @@
-# 브리프 예산 프로파일 — 웹은 엔진이 알려 준 근거 예산, MCP 는 JS 파이프라인 상한, 1백만 토큰 창에서 상한표가 묶이지 않는다(WP1 S9)
+# 브리프 예산 프로파일 — 웹은 엔진이 알려 준 근거 예산, MCP 는 JS 파이프라인의 옛 상한(바깥 한도), 1백만 토큰 창에서 상한표가 묶이지 않는다(WP1 S9)
 from __future__ import annotations
 
 import itertools
@@ -90,7 +90,7 @@ def test_seat_contract_evidence_keeps_every_seated_domain():
 
 def test_mcp_brief_is_shielded_sized_for_js_and_frozen_for_the_token_panel(risk_store, monkeypatch):
     """MCP 브리프(`risk_get_brief`) — 이름에 판단어가 든 부품으로도 E500 이 아니라 방패를 싸서 싣고(웹과 같은 모드),
-    크기는 JS 상한이며, 토큰의 패널에 그 조립을 동결한다(P-09). REST 미리보기는 동결하지 않는다."""
+    크기는 JS 의 옛 상한이며, 토큰의 패널에 그 조립을 동결한다(P-09). REST 미리보기는 동결하지 않는다."""
     from tests.test_brief import legacy_summary
 
     synth = factories.make_diff_target(risk_store, 40, agents=factories.agents(("mech", "sim", "xd", "rel", "cam"), 3))
@@ -107,7 +107,8 @@ def test_mcp_brief_is_shielded_sized_for_js_and_frozen_for_the_token_panel(risk_
     out = routes.brief_by_token(synth.target_key, panel["brief_token"], "B")
     frozen = runner.load_brief(risk_store, panel["panel_id"])
     item = next(p for p in out["panels"] if p["panel_id"] == panel["panel_id"])
-    assert frozen["evidence"] == item["delib_opts"]["evidence"]
+    # 응답 근거는 동결본에 옮겨 적기 대조용 원문 길이(result_chars)만 더한 것이다(test_mcp_brief_relay).
+    assert frozen["evidence"] == [{k: v for k, v in e.items() if k != "result_chars"} for e in item["delib_opts"]["evidence"]]
     assert item["brief_frozen"]["brief_hash"] == frozen["brief_hash"]
     e0c = next(e for e in item["delib_opts"]["evidence"] if e["key"] == "E0c")
     assert len(brief.evidence_line(e0c)) <= brief.PROFILE_MCP.cap("E0c")

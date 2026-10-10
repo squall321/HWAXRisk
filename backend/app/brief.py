@@ -84,21 +84,15 @@ class BriefProfile:
 # 엔진 예산을 모를 때(옛 엔진 · /health 불통)의 웹 프로파일 — 종전과 같은 크기다.
 PROFILE_LEGACY = BriefProfile("web-legacy", ENGINE_BUDGET, EVIDENCE_MAX_ITEMS, CLAMP_RESULT)
 
-# MCP 보충 경로(hwax-risk-review.js → hwax-deliberate.js)의 근거 상한. 그 길의 좌석은 Claude 서브에이전트라 창은 GLM 이
-# 아니라 args.ctxTokens(기본 200,000 토큰)이고, JS 가 그 창에서 상한을 유도한다 — 합계 = (창 − 출력 32,000) × 0.3(바닥
-# 11,000) · 항목 = × 0.09(바닥 2,000) · 건수 = 바닥 위면 120. 아래 값이 그 식의 기본 창 결과다(시험 test_parity 가 JS 소스를
-# 읽어 대조한다). ctxTokens 를 기본보다 작게 주고 돌리면 JS 가 뒤 항목을 빼고 그 사실을 evidenceOmitted 로 알린다.
-JS_CTX_TOKENS_DEFAULT, JS_OUTPUT_RESERVE = 200_000, 32_000
-JS_EV_BUDGET_SHARE, JS_EV_ITEM_SHARE = 0.3, 0.09
-
-
-def _js_share(share: float, floor: int) -> int:
-    return max(floor, int((JS_CTX_TOKENS_DEFAULT - JS_OUTPUT_RESERVE) * share))
-
-
-PROFILE_MCP = BriefProfile("mcp", _js_share(JS_EV_BUDGET_SHARE, ENGINE_BUDGET),
-                           120 if _js_share(JS_EV_BUDGET_SHARE, ENGINE_BUDGET) > ENGINE_BUDGET else EVIDENCE_MAX_ITEMS,
-                           _js_share(JS_EV_ITEM_SHARE, CLAMP_RESULT))
+# MCP 보충 경로(hwax-risk-review.js → hwax-deliberate.js)의 근거 상한 — JS 파이프라인의 옛 상수(바닥) 그대로다: 합 11,000자 ·
+# 12항목 · 항목 2,000자. 권고값이다(HWAXPortal docs/risk-review-redesign/context-notes.md '권고값으로 정한 것' — MCP 보충 경로의
+# 옛 한도는 올리지 않는다). 이 길의 브리프는 GLM 창이 아니라 바깥 한도에 묶인다 — Claude 서브에이전트가 risk_get_brief 를 MCP
+# 결과로 받고(Claude Code 의 MAX_MCP_OUTPUT_TOKENS 기본 25,000토큰 — 넘으면 본문 대신 '파일로 저장했다' 는 안내가 간다) 받은
+# 근거를 구조화 출력으로 다시 적는다. 좌석 창(JS ctxTokens)에서 유도해 50,400자로 키웠더니 변경 100건 남짓부터 응답이 늘 그
+# 상한을 넘었다(검토 GA-1·BQ-2·X-2). JS 는 기본 창에서 이보다 큰 예산을 쓰므로 아무것도 빼지 않는다(test_parity 가 JS 소스로
+# 대조한다). 이 한도에 잘린 것은 줄 안의 표식·응답 칸(brief_clipped·brief_notice)·패널 품질로 남는다(routes.brief_by_token).
+# 근거를 다 싣는 길은 웹 러너다(엔진 예산에서 유도한 `web_profile`).
+PROFILE_MCP = BriefProfile("mcp", ENGINE_BUDGET, EVIDENCE_MAX_ITEMS, CLAMP_RESULT)
 
 
 def web_profile(engine_budget: Any) -> BriefProfile:
@@ -1921,9 +1915,9 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
                 user_memo: str | None = None, profile: BriefProfile | None = None) -> dict:
     """타깃·패널을 받아 E0~E9 를 delib_opts.evidence 형식으로 조립한다(plan §5.6.2, 결정론).
 
-    크기는 `profile` 이 정한다 — 웹 러너는 엔진이 알려 준 근거 예산(`web_profile`), MCP·REST 는 JS 파이프라인의 상한
-    (`PROFILE_MCP`), 안 주면 바닥(`PROFILE_LEGACY`, 종전 11,000자). 항목마다 라인 길이를 상한 안으로 먼저 맞추므로 드롭이
-    0 이고, 그러고 남은 자리를 잘린 항목에 `LEND_ORDER` 차례로 빌려준다(라인 합은 여전히 Σ 상한 이하다).
+    크기는 `profile` 이 정한다 — 웹 러너는 엔진이 알려 준 근거 예산(`web_profile`), MCP·REST 는 JS 파이프라인의 옛 상한
+    (`PROFILE_MCP` — 바깥 한도에 묶인 길), 안 주면 바닥(`PROFILE_LEGACY`, 종전 11,000자). 항목마다 라인 길이를 상한 안으로
+    먼저 맞추므로 드롭이 0 이고, 그러고 남은 자리를 잘린 항목에 `LEND_ORDER` 차례로 빌려준다(라인 합은 여전히 Σ 상한 이하다).
     `exclude` 는 항목 키(E6·E8 …)의 제외만 받는다 — 추가·편집은 없다(§5.7 RecallPreview).
     `user_memo` 는 지금 도는 잡의 메모다 — 안 주면 M 은 그 타깃의 최근 잡 메모를 읽는다(`_item_memo`).
 
