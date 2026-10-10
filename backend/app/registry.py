@@ -1013,6 +1013,9 @@ def close_level(store: RiskStore, target_key: str, *, persist: bool = True) -> d
         "target_key": target_key,
         "level": level,
         "previous_level": stored,
+        # 이 계산으로 레벨이 오르는가(persist=False 여도 같은 뜻) — 러너는 이것을 보고 통합 보고서를 조립한다. 이 키가
+        # 없던 동안 그 분기는 죽어 있었다(시험 대역만 돌려줬다, WP1 R-47).
+        "raised": LEVEL_ORDER.get(level, 0) > LEVEL_ORDER.get(stored, 0),
         "close_level": target_close,
         "roster_size": roster_size,
         "status_counts": status_counts,

@@ -1584,7 +1584,16 @@ def _complete_panel(
 
         level = registry_mod.close_level(store, panel["target_key"])
         if level.get("raised"):
-            registry_mod.build_consolidated_report(store, panel["target_key"], level["level"])
+            # 보고서는 원장에서 다시 만들 수 있는 파생물이다 — 조립이 터져도 패널 저장을 무르지 않고 패널에 표를 남긴다.
+            # (조립은 읽기뿐이라 트랜잭션 안에서 받아도 반쪽 쓰기가 없다.)
+            try:
+                registry_mod.build_consolidated_report(store, panel["target_key"], level["level"])
+            except Exception as exc:  # noqa: BLE001 — 위 설명대로다.
+                log.exception("패널 %s 뒤 통합 보고서 조립 실패(%s)", panel["id"], level["level"])
+                quality["flags"].append("report_build_failed")
+                quality["report_build_error"] = f"{type(exc).__name__}: {exc}"
+                store.execute("UPDATE rr_panels SET quality_json = ? WHERE id = ?",
+                              (canonical_json(quality), panel["id"]))
 
     # 연속 2패널 over_budget 이면 이후 패널을 rounds 2 로(적응은 앞으로만) — budget_json 에 남긴다.
     if "over_budget" in quality["flags"]:

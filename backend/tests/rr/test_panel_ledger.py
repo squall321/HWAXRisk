@@ -62,17 +62,21 @@ def no_network(monkeypatch):
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", _refused)
 
 
+def _make_ledger(store, tmp_path, domains, per_domain: int) -> SimpleNamespace:
+    project_id = factories.make_project(store)
+    snapshot = factories.make_snapshot(store, project_id, factories.fixture_adapter_results(), label="DV1")
+    target_key = factories.make_target(store, "snap", snapshot["snapshot_id"],
+                                       agents=factories.agents(domains, per_domain=per_domain))
+    store.upsert_credential(OWNER, identity.encrypt_pat("pat-secret").decode("ascii"), "sub-1", OWNER, "[]",
+                            common.now_epoch() + 30 * 86400)
+    return SimpleNamespace(store=store, target_key=target_key,
+                           cfg=dataclasses.replace(config.settings, data_dir=tmp_path))
+
+
 @pytest.fixture
 def ledger(risk_store, tmp_path, no_network):
     """과제 → 스냅샷 → 타깃(로스터 15명) → 러너 자격. 반환 (store, target_key, cfg)."""
-    project_id = factories.make_project(risk_store)
-    snapshot = factories.make_snapshot(risk_store, project_id, factories.fixture_adapter_results(), label="DV1")
-    target_key = factories.make_target(risk_store, "snap", snapshot["snapshot_id"],
-                                       agents=factories.agents(("mech", "sim", "xd", "rel", "cam"), per_domain=3))
-    risk_store.upsert_credential(OWNER, identity.encrypt_pat("pat-secret").decode("ascii"), "sub-1", OWNER, "[]",
-                                 common.now_epoch() + 30 * 86400)
-    return SimpleNamespace(store=risk_store, target_key=target_key,
-                           cfg=dataclasses.replace(config.settings, data_dir=tmp_path))
+    return _make_ledger(risk_store, tmp_path, ("mech", "sim", "xd", "rel", "cam"), 3)
 
 
 def _job(ledger) -> str:
@@ -490,3 +494,48 @@ def test_the_export_leaves_the_engine_result_behind(ledger, merge_breaks):
     panels = [r["row"] for r in rows if r["table"] == "rr_panels"]
     assert [p["id"] for p in panels] == [out["panel_id"]]
     assert "result_gz" not in panels[0] and panels[0]["result_hash"]
+
+
+
+# ---------------------------------------------------------------- S15 — 완결 레벨이 오르면 통합 보고서를 조립한다(R-47 · raised 분기만)
+@pytest.fixture
+def all_domains(risk_store, tmp_path, no_network, monkeypatch):
+    """로스터 15 영역 × 2명. ECAD 영역도 보류하지 않게 해 Tier A 대표 패널 셋으로 C1 이 서게 한다(C1 = 전 영역 종결 + A 셋)."""
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_ecad_domains=()))
+    return _make_ledger(risk_store, tmp_path, config.settings.risk_roster_domains, 2)
+
+
+def test_a_level_raise_builds_the_consolidated_report(all_domains, monkeypatch):
+    """close_level 이 '올랐다' 를 말해야 러너가 통합 보고서를 조립한다 — 그 키가 없어 분기가 죽어 있었다."""
+    from app import registry
+
+    calls: list[tuple] = []
+    real = registry.build_consolidated_report
+
+    def spy(store, target_key, level=None):
+        calls.append((target_key, level))
+        return real(store, target_key, level)
+
+    monkeypatch.setattr(registry, "build_consolidated_report", spy)
+    runner.create_job(all_domains.store, all_domains.target_key, "A", owner_sub=OWNER, settings=all_domains.cfg)
+    outs = [_run(all_domains, LedgerEngine()) for _ in range(3)]
+    assert [o["level"] for o in outs] == ["C0", "C0", "C1"], outs
+    assert calls == [(all_domains.target_key, "C1")]
+    assert registry.close_level(all_domains.store, all_domains.target_key, persist=False)["raised"] is False
+
+
+def test_a_report_that_cannot_be_built_does_not_undo_the_panel(all_domains, monkeypatch):
+    """보고서는 원장에서 다시 만들 수 있는 파생물이다 — 조립이 터져도 패널·좌석·레벨은 그대로 앉고 패널에 표가 남는다."""
+    from app import registry
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("보고서 조립이 터졌다")
+
+    monkeypatch.setattr(registry, "build_consolidated_report", broken)
+    runner.create_job(all_domains.store, all_domains.target_key, "A", owner_sub=OWNER, settings=all_domains.cfg)
+    outs = [_run(all_domains, LedgerEngine()) for _ in range(3)]
+    assert [(o["status"], o["level"]) for o in outs] == [("done", "C0"), ("done", "C0"), ("done", "C1")], outs
+    quality = json.loads(_panel(all_domains.store, outs[-1]["panel_id"])["quality_json"])
+    assert "report_build_failed" in quality["flags"] and "보고서 조립이 터졌다" in quality["report_build_error"]
+    assert all_domains.store.query_one("SELECT level FROM rr_targets WHERE target_key = ?",
+                                       (all_domains.target_key,))["level"] == "C1"
