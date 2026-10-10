@@ -147,26 +147,42 @@ def health() -> dict:
 
     경고가 있을 때만 `warnings[]` 를 더한다 — 지금은 `backup_unencrypted` 하나뿐이고, 그 상태에서도
     백업 자체는 막지 않는다(백업 없음이 더 나쁘다, plan §5.2.5 (3a) ③).
+
+    저장소 락을 잡지 않는다(WP5a R1) — 허브는 45초마다 2초 탐침을 하고 넷 다 실패하면 같은 데이터 디렉터리에 서버를
+    하나 더 띄운다. 반출·병합이 락을 몇 초 쥐는 동안 헬스가 그 뒤에 서면 그 일이 일어난다. 버전은 이행 때 담아 둔 값이다.
     """
-    out = {"ok": True, "app_version": config.APP_VERSION, "schema_version": get_store().schema_version()}
+    store = get_store()
+    version = store.known_version if store.known_version is not None else store.schema_version()
+    out = {"ok": True, "app_version": config.APP_VERSION, "schema_version": version}
     warnings = health_warnings()
     if warnings:
         out["warnings"] = warnings
     return out
 
 
+# 저장소를 읽어야 하는 경고의 직전 값 — 락을 못 잡은 순간에는 이 값을 낸다('못 읽었다' 를 '경고 없음' 으로 바꾸지 않는다).
+_LAST_STORE_WARNINGS: dict[str, bool] = {"vocab_recompute_pending": False}
+
+
 def health_warnings() -> list[str]:
-    """헬스 경고 코드 목록 — 백업 평문 사본(§5.2.5 (3a))과 사전 메이저 승급 후 재계산 미실행(§2.7.1)."""
+    """헬스 경고 코드 목록 — 백업 평문 사본(§5.2.5 (3a))과 사전 메이저 승급 후 재계산 미실행(§2.7.1).
+
+    사전 경고는 저장소를 읽는다 — 락을 기다리지 않고 잡아 보고(try_lock), 못 잡으면 직전 값을 낸다(반대 검토 P-11).
+    """
     from app import routes  # noqa: PLC0415 — routes 는 main 을 import 하지 않는다.
 
     warnings: list[str] = []
     if not config.backup_key():
         warnings.append("backup_unencrypted")
     try:
-        if routes.vocab_recompute_pending(get_store()):
-            warnings.append("vocab_recompute_pending")
+        store = get_store()
+        with store.try_lock() as got:
+            if got:
+                _LAST_STORE_WARNINGS["vocab_recompute_pending"] = bool(routes.vocab_recompute_pending(store))
     except Exception:  # noqa: BLE001 — 헬스는 저장소 문제로 500 이 되지 않는다.
         pass
+    if _LAST_STORE_WARNINGS["vocab_recompute_pending"]:
+        warnings.append("vocab_recompute_pending")
     return warnings
 
 

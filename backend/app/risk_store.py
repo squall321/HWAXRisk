@@ -581,6 +581,9 @@ BACKUP_SPACE_FACTOR = 1.2
 # 같은 출발 버전의 사본이 있고 그 뒤로 DB 가 바뀌지 않았으면(크기 같고 수정 시각이 이만큼 안) 다시 뜨지 않는다. 실패하는
 # 이행을 허브가 45초마다 다시 띄워도 사본이 하나로 남는다. 파일시스템의 시각 단위가 굵어도 같게 보도록 2초를 준다.
 BACKUP_SAME_MTIME_NS = 2_000_000_000
+# 같은 DB 를 다른 프로세스가 쓰는 순간의 대기(초) — 허브가 같은 데이터 디렉터리에 서버를 하나 더 띄우면 두 연결이 같은
+# 파일을 쓴다. 파이썬 기본(5초)이면 둘째의 짧은 쓰기 하나가 첫째의 패널 저장을 `database is locked` 로 떨어뜨린다(WP5a R1).
+BUSY_TIMEOUT_S = 30
 _PRE_MIGRATE_RE = re.compile(r"\.pre-migrate-(?:v(?P<version>\d+)-)?(?P<stamp>\d+)$")
 _PRE_MERGE_RE = re.compile(r"\.pre-merge-(?P<stamp>[0-9TZ:-]+)$")
 
@@ -660,6 +663,8 @@ class RiskStore:
         self._conn: sqlite3.Connection | None = None
         self._existed = False
         self._tx_depth = 0
+        # 마지막 migrate() 가 본 버전 — 헬스가 락 없이 읽는다(이행은 기동 때만 일어난다). None = 아직 이행 전.
+        self.known_version: int | None = None
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -673,7 +678,7 @@ class RiskStore:
             return
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._existed = self.db_path.is_file() and self.db_path.stat().st_size > 0
-        conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
+        conn = sqlite3.connect(str(self.db_path), check_same_thread=False, timeout=BUSY_TIMEOUT_S)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA foreign_keys=OFF")
@@ -731,7 +736,8 @@ class RiskStore:
                 conn.execute(sql)
             conn.commit()
             prune_backups(self.db_path)
-            return self._schema_version_unlocked()
+            self.known_version = self._schema_version_unlocked()
+            return self.known_version
 
     def _backup_once_unlocked(self, current: int) -> Path:
         """출발 버전 `current` 의 이행 전 사본을 뜬다 — 이미 같은 내용의 사본이 있으면 그것을 돌려준다.
@@ -778,6 +784,17 @@ class RiskStore:
         """PRAGMA user_version 의 스키마 버전(미적용이면 0, plan §5.2.5 (6))."""
         with self._lock:
             return self._schema_version_unlocked()
+
+    @contextmanager
+    def try_lock(self) -> Iterator[bool]:
+        """저장소 락을 기다리지 않고 잡아 본다 — 잡았으면 True 를 내고(블록 안의 query 는 같은 스레드라 곧바로 돈다)
+        블록이 끝나면 놓는다. 다른 스레드가 쥐고 있으면 False 다. 헬스처럼 늦어지면 안 되는 읽기가 쓴다."""
+        got = self._lock.acquire(blocking=False)
+        try:
+            yield got
+        finally:
+            if got:
+                self._lock.release()
 
     def tables(self) -> list[str]:
         """rr_ 접두 표 이름(정렬)."""

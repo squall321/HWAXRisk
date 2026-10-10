@@ -39,6 +39,71 @@ def test_health_reports_backup_unencrypted_without_an_age_key(client, monkeypatc
     assert "warnings" not in client.get("/api/health").json()
 
 
+def test_health_answers_while_another_thread_holds_the_store(client):
+    """헬스는 저장소 락을 잡지 않는다 — 반출·병합이 락을 몇 초 쥐어도 허브의 2초 탐침이 실패하지 않는다(WP5a R1·P-11)."""
+    import threading
+    import time
+
+    from app.risk_store import get_store
+
+    store = get_store()
+    holding, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with store.tx():
+            holding.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert holding.wait(5)
+    try:
+        t0 = time.monotonic()
+        r = client.get("/api/health")
+        elapsed = time.monotonic() - t0
+    finally:
+        release.set()
+        holder.join(5)
+    assert r.status_code == 200 and r.json()["schema_version"] == LATEST_SCHEMA
+    assert elapsed < 0.2, f"헬스가 저장소 락을 {elapsed:.2f}초 기다렸다"
+
+
+def test_health_keeps_the_last_vocab_warning_while_the_store_is_busy(client, monkeypatch):
+    """락을 못 잡은 순간의 경고는 직전 값이다 — '못 읽었다' 를 '경고 없음' 으로 바꾸지 않는다."""
+    import threading
+
+    from app import main, routes
+    from app.risk_store import get_store
+
+    monkeypatch.setattr(config, "backup_key", lambda *a, **k: "age1examplerecipient")
+    monkeypatch.setattr(routes, "vocab_recompute_pending", lambda store: True)
+    assert main.health_warnings() == ["vocab_recompute_pending"]
+
+    store = get_store()
+    holding, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with store.tx():
+            holding.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert holding.wait(5)
+    try:
+        monkeypatch.setattr(routes, "vocab_recompute_pending", lambda store: False)
+        assert main.health_warnings() == ["vocab_recompute_pending"]
+    finally:
+        release.set()
+        holder.join(5)
+    assert main.health_warnings() == []
+
+
+def test_store_connections_wait_for_another_writer(risk_store):
+    """같은 DB 를 다른 프로세스가 쓸 수 있다(허브가 겹쳐 띄운 둘째) — 기본 5초 대신 30초 기다린다."""
+    assert risk_store.conn.execute("PRAGMA busy_timeout").fetchone()[0] == 30000
+
+
 def test_boot_refuses_a_credential_margin_at_or_above_the_registration_floor():
     """패널 자격 여유가 PAT 등록 하한 이상이면 기동을 막는다 — 등록이 받아 준 PAT 를 패널이 거절하게 된다.
 
