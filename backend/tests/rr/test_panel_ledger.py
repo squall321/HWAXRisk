@@ -369,9 +369,8 @@ def test_repersist_needs_an_error_panel_with_a_saved_result_on_an_idle_target(le
     with pytest.raises(AppError) as exc:
         runner.repersist_panel(ledger.store, ledger.cfg, out["panel_id"])
     assert (exc.value.code, exc.value.http_status) == ("target_busy", 409)
-    planner.fail_panel_seats(ledger.store, busy["id"], charge=False)
-    ledger.store.execute("UPDATE rr_panels SET status = 'error', error = 'engine_error: 시험' WHERE id = ?",
-                         (busy["id"],))
+    runner.recover_running_panels(ledger.store)                      # 도는 패널을 닫는 생산자 — 결과 없는 error 패널이 된다
+    assert _panel(ledger.store, busy["id"])["status"] == "error"
     with pytest.raises(AppError) as exc:
         runner.repersist_panel(ledger.store, ledger.cfg, busy["id"])
     assert (exc.value.code, exc.value.http_status) == ("result_absent", 404)
