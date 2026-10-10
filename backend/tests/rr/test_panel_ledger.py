@@ -197,3 +197,60 @@ def test_an_opinion_the_ledger_already_took_is_not_overwritten(ledger):
     assert exc.value.code == "seat_opinion_conflict" and exc.value.http_status == 409
     assert any(key in exc.value.message for key in engine.calls[0])
     assert {key: _opinions(ledger.store, ledger.target_key, key) for key in engine.calls[0]} == taken
+
+
+# ---------------------------------------------------------------- S3 — 브리프 조립 실패는 좌석 탓이 아니다(WP1 R-4 · P-13)
+def _job_row(store, job_id: str) -> dict:
+    return dict(store.query_one("SELECT state, state_by, error FROM rr_jobs WHERE id = ?", (job_id,)))
+
+
+def _seat_retries(store, target_key: str) -> dict[str, int]:
+    return {r["agent_key"]: int(r["retry"] or 0) for r in store.query(
+        "SELECT agent_key, retry FROM rr_coverage WHERE target_key = ? AND status != 'deferred'", (target_key,))}
+
+
+def test_a_brief_that_cannot_be_built_pauses_the_job_without_charging(ledger, monkeypatch):
+    """브리프 조립은 결정론이다 — 같은 입력이면 같은 자리에서 다시 멈춘다. 좌석을 깎지 않고 잡을 멈춘다(사람이 고친 뒤 재개)."""
+    from app.errors import AppError as _AppError
+
+    def lint_fails(*_args, **_kwargs):
+        raise _AppError("E500", "브리프 판단어 린터 위반 1건", http_status=500)
+
+    monkeypatch.setattr(narrative, "prior_evidence", lint_fails)
+    job_id = _job(ledger)
+    engine = LedgerEngine()
+    for attempt in range(3):
+        out = _run(ledger, engine)
+        assert out["status"] == "error" and out["error"].startswith("brief_error: AppError"), out
+        job = _job_row(ledger.store, job_id)
+        assert job["state"] == "paused" and job["state_by"] == "code:brief_error", job
+        assert "결정론" in job["error"]
+        assert runner.claim_next_job(ledger.store, ledger.cfg) is None       # 멈춘 잡은 집지 않는다
+        runner.resume_job(ledger.store, job_id, by=OWNER)
+    assert set(_seat_retries(ledger.store, ledger.target_key).values()) == {0}
+    assert engine.calls == []                                              # 엔진은 한 번도 불리지 않았다
+    assert planner.check_invariants(ledger.store, ledger.target_key) == []
+
+
+def test_a_passing_brief_failure_retries_and_pauses_on_the_third(ledger, monkeypatch):
+    """잠금·연결 같은 일시 장애는 멈추지 않고 다시 편성한다 — 좌석은 깎지 않고, 같은 타깃에서 세 번 이어지면 그때 멈춘다."""
+    import sqlite3
+
+    def locked(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(narrative, "prior_evidence", locked)
+    job_id = _job(ledger)
+    engine = LedgerEngine()
+    states = []
+    for attempt in range(3):
+        out = _run(ledger, engine)
+        assert out["status"] == "error" and out["error"].startswith("brief_retry: OperationalError"), out
+        states.append(_job_row(ledger.store, job_id)["state"])
+    assert states == ["running", "running", "paused"]
+    assert _job_row(ledger.store, job_id)["state_by"] == "code:brief_retry"
+    assert set(_seat_retries(ledger.store, ledger.target_key).values()) == {0}
+
+    monkeypatch.undo()                                                     # 장애가 풀렸다 — 재개하면 이어 돈다
+    runner.resume_job(ledger.store, job_id, by=OWNER)
+    assert _run(ledger, engine)["status"] == "done"

@@ -6,10 +6,13 @@ import inspect
 import json
 import logging
 import re
+import sqlite3
 import threading
 import time
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
+
+import httpx
 
 from app import brief, config, planner, taxonomy
 from app.common import canonical_json, new_uuid, now_epoch, sha256_hex
@@ -52,9 +55,18 @@ RESTART_CODE = "restart"
 NO_DECISION_CODES: tuple[str, ...] = ("chair_failed",)
 # 엔진이 받아 주지 않아 시작도 못 한 패널의 사유 — 포털 429 대기 예산 소진 · 그 대기 중의 앱 종료. 심의는 한 줄도 돌지 않았다.
 UNSTARTED_CODES: tuple[str, ...] = ("engine_busy", "stopped")
+# 브리프를 조립하지 못해 엔진에 보내지도 못한 패널의 사유(WP1 R-4 · P-13). 좌석 탓이 아니다 — 종전에는 좌석을 차감해,
+# 결정론인 조립 실패(같은 입력이면 같은 자리에서 다시 멈춘다) 세 번에 좌석이 skipped 로 굳고 잡이 engine_fail_streak 로 죽었다.
+# brief_error = 결정론(린터·단언·키·형) → 잡을 멈춘다. brief_retry = 일시 장애(DB 잠금·연결·파일) → 다시 편성하되 같은 타깃에서
+# BRIEF_RETRY_MAX 번 이어지면 멈춘다.
+BRIEF_ERROR_CODE = "brief_error"
+BRIEF_RETRY_CODE = "brief_retry"
+BRIEF_RETRY_MAX = 3
+BRIEF_TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (sqlite3.OperationalError, httpx.HTTPError, OSError)
 # 좌석 재시도와 연속 실패(ENGINE_FAIL_STREAK)에 세지 않는 패널 error 코드 — 좌석 탓이 아닌 중단이다. 세면 좌석과
 # 무관한 일 세 번에 그 좌석이 skipped 로 굳고 잡이 죽는다.
-UNCHARGED_CODES: tuple[str, ...] = (*STREAM_LOST_CODES, RESTART_CODE, *NO_DECISION_CODES, *UNSTARTED_CODES)
+UNCHARGED_CODES: tuple[str, ...] = (*STREAM_LOST_CODES, RESTART_CODE, *NO_DECISION_CODES, *UNSTARTED_CODES,
+                                    BRIEF_ERROR_CODE, BRIEF_RETRY_CODE)
 PROGRESS_WRITE_INTERVAL_S = 60     # 도는 패널의 '마지막 신호' 를 잡 행에 적는 간격 — 줄마다 적으면 15초 ping 이 DB 를 두드린다
 
 # 러너 정본 경로가 부르는 모듈 함수(없으면 잡을 집지 않고 error 로 강등한다 — 반쪽 저장 방지).
@@ -1012,7 +1024,7 @@ def run_panel(
         frozen = {**freeze_brief(store, panel, delib_opts["evidence"]), **loss}
     except Exception as exc:  # noqa: BLE001 — 브리프 조립 실패도 좌석을 pending 으로 되돌리고 닫는다.
         log.exception("패널 %s 브리프 조립 실패", panel["id"])
-        return _close_panel_error(store, panel, job, f"brief_error: {type(exc).__name__}: {exc}", settings)
+        return _close_panel_brief_failed(store, panel, job, exc)
 
     result: Mapping[str, Any] | None = None
     error: str | None = None
@@ -1151,6 +1163,40 @@ def _close_panel_unstarted(store: Any, panel: Mapping[str, Any], job: Mapping[st
             _set_job(store, job["id"], "paused", by=f"code:{code}",
                      error=f"{error} — 잡을 멈췄다(좌석 재시도는 차감하지 않았다). 재개하면 이어 돈다")
     return {"panel_id": panel["id"], "status": "error", "error": error}
+
+
+def _brief_retry_streak(store: Any, target_key: str) -> int:
+    """가장 최근부터 연속으로 brief_retry 로 닫힌 패널 수 — 닫힌 패널(done·error)만 본다(지금 닫는 패널은 running 이다)."""
+    streak = 0
+    for row in store.query(
+        "SELECT status, error FROM rr_panels WHERE target_key = ? AND status IN ('done', 'error')"
+        " ORDER BY panel_no DESC", (target_key,)
+    ):
+        if row["status"] != "error" or _uncharged_code(row["error"]) != BRIEF_RETRY_CODE:
+            break
+        streak += 1
+    return streak
+
+
+def _close_panel_brief_failed(store: Any, panel: Mapping[str, Any], job: Mapping[str, Any], exc: Exception) -> dict:
+    """브리프 조립이 실패한 패널을 닫는다 — 엔진에 보내지도 않았으므로 좌석 재시도와 연속 실패에 세지 않는다(WP1 R-4 · P-13).
+
+    브리프 조립은 결정론이라 그대로 다시 돌리면 같은 자리에서 멈춘다 — 린터 위반·단언·키·형 오류는 `brief_error` 로
+    닫고 잡을 멈춘다(사람이 원인을 고친 뒤 재개한다). DB 잠금·연결·파일 같은 일시 장애는 `brief_retry` 로 닫고 멈추지 않는다
+    (5초 뒤 다시 편성돼 저절로 넘어간다). 같은 타깃에서 BRIEF_RETRY_MAX 번 이어지면 그때 멈춘다 — 밤새 같은 장애를 돌지 않는다.
+    """
+    why = f"{type(exc).__name__}: {exc}"
+    if isinstance(exc, BRIEF_TRANSIENT_ERRORS):
+        streak = _brief_retry_streak(store, panel["target_key"]) + 1
+        pause = streak >= BRIEF_RETRY_MAX
+        tail = (f" — 같은 타깃에서 {streak}번 이어졌다" if pause
+                else f" — 일시 장애로 보고 다시 편성한다({streak}/{BRIEF_RETRY_MAX})")
+        return _close_panel_unstarted(store, panel, job, BRIEF_RETRY_CODE, conv_id=None, pause=pause,
+                                      error=f"{BRIEF_RETRY_CODE}: {why}{tail}")
+    return _close_panel_unstarted(
+        store, panel, job, BRIEF_ERROR_CODE, conv_id=None, pause=True,
+        error=f"{BRIEF_ERROR_CODE}: {why} — 브리프 조립은 결정론이라 그대로 다시 돌리면 같은 자리에서 멈춘다."
+              " 원인을 고친 뒤 재개한다")
 
 
 def _close_panel_no_decision(store: Any, panel: Mapping[str, Any], job: Mapping[str, Any],
