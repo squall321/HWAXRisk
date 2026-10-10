@@ -111,7 +111,8 @@ class JudgementLintError(Exception):
 
 
 # ---------------------------------------------------------------- 표기층 위생(plan §0.6 '표기층 위생' 행·§3.4.1)
-INJECTION_VERSION = "inj-1.0"
+# inj-1.1 — X01 이 지시를 가리키는 명사와 함께일 때만 걸린다(BQ-3). 큐 payload 의 lexicon_version 으로 어느 판이 걸었는지 남는다.
+INJECTION_VERSION = "inj-1.1"
 
 # 종류별 상한(plan §0.6). 상한 뒤에 «…» 로 감싸므로 실제 라인은 +2자다.
 SANITIZE_LIMITS: dict[str, int] = {
@@ -130,8 +131,11 @@ _SPACES_RE = re.compile(r" {2,}")
 
 # 저장형 프롬프트 인젝션 어휘(plan §3.4.1 시드 X01~X10). 항목은 {id, pattern}.
 INJECTION_LEXICON: tuple[dict, ...] = (
-    # X01 은 plan 시드에 어순 하나를 더한다 — '이전 지시를 무시하고' 처럼 목적어가 앞에 오는 형태가 실제로 온다.
-    {"id": "X01", "pattern": r"무시(하고|하라|해라|해)?\s*(위|이전|앞)|(위|이전|앞)\s*\S{0,10}\s*무시"},
+    # X01 은 plan 시드에 어순 하나를 더한다 — '이전 지시를 무시하고' 처럼 목적어가 앞에 오는 형태가 실제로 온다. 두 어순 모두
+    # 지시를 가리키는 명사(지시·지침·명령·규칙·프롬프트)가 있어야 걸린다(BQ-3) — 종전 '(위|이전|앞) 뒤 한 낱말 안의 무시' 는
+    # '이 간섭 위험을 무시할 수 없다'('위험' 의 '위')·'에이전트에 무시됐다'('이전') 같은 좌석 발언을 잡고 '위의 지시를 무시하라' 는 놓쳤다.
+    {"id": "X01", "pattern": r"(위|이전|앞)(의|에서)?\s*(모든\s*)?(지시|지침|명령|규칙|프롬프트)\S{0,3}\s*무시"
+                             r"|무시(하고|하라|해라|해)?\s*(위|이전|앞)(의|에서)?\s*(모든\s*)?(지시|지침|명령|규칙|프롬프트)"},
     {"id": "X02", "pattern": r"(?i)ignore\s+(all\s+)?(previous|prior|above)"},
     {"id": "X03", "pattern": r"(?i)(system|developer)\s*(prompt|message|instruction)"},
     {"id": "X04", "pattern": r"(?i)너는\s*이제|당신은\s*이제|from now on"},
