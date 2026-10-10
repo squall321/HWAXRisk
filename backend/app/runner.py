@@ -362,8 +362,39 @@ def seat_contract_evidence(domains: Sequence[str], cap: int | None = None) -> di
     return item
 
 
-def panel_question(store: Any, target_key: str) -> str:
-    """질문 문자열(plan §6.6.4) — 과제코드·target_key·소스 id·요약 첫 줄. 좌석 agent_search(q=question) 의 문맥이다."""
+def seats_can_read_diff(store: Any, diff_id: str, credential_kind: str | None, email: str | None) -> bool:
+    """좌석이 이 패널 자격으로 `risk_get_diff` 를 열 수 있는가 — 게이트웨이가 그 자격의 시야로 앱을 부른다(WP1 P-06).
+
+    MCP 문지기(`routes.mcp_scope_owner`)와 같은 규칙이다 — diff 의 두 과제가 모두 보여야 한다. 사람 자격(owner·requester)은
+    자기 소유 · 멤버 · 조직 공개, 서비스 자격은 조직 공개만 본다. 못 여는 자격에 diff_id 를 실으면 엔진이 그 도구를 맨 앞에
+    세우고 안내하는데 좌석의 호출은 not_visible 로 떨어진다.
+    """
+    row = store.query_one("SELECT base_project_id, target_project_id FROM rr_diffs WHERE id = ?", (diff_id,))
+    if row is None:
+        return False
+    for project_id in {row["base_project_id"], row["target_project_id"]}:
+        project = store.query_one("SELECT owner_sub, mcp_visibility FROM rr_projects WHERE id = ?", (project_id,))
+        if project is None:
+            return False
+        if project["mcp_visibility"] == "org":
+            continue
+        if credential_kind == "service" or not email:
+            return False
+        if project["owner_sub"] != email and store.query_one(
+                "SELECT 1 FROM rr_project_members WHERE project_id = ? AND email = ?", (project_id, email)) is None:
+            return False
+    return True
+
+
+def panel_question(store: Any, target_key: str, *, digest: Mapping[str, Any] | None = None,
+                   diff_ref: bool = False) -> str:
+    """질문 문자열(plan §6.6.4) — 과제코드·target_key·소스 id·변경 요지. 좌석 조회 단계의 문맥이다.
+
+    변경 요지(`brief.change_digest`)가 있으면 그것을 싣는다 — 종전에는 요약 앞 200자(식별자뿐인 [대상] 줄)라 좌석이 무엇이
+    바뀌었는지 모른 채 도구를 골랐다(WP1 R-24). 요지가 비면(이벤트 0건) 종전 문장이고 요약 첫 줄을 자르지 않는다.
+    `diff_ref` 면 diff 타깃 문장에 `diff_id=<id>` 를 싣는다 — 엔진은 이 표식(`_RISK_DIFF_MARK`)이 있을 때만 좌석 도구에
+    `risk_get_diff` 를 앞세우고 변경 전체를 보라고 안내한다(P-06). 좌석 자격이 그 diff 를 못 열면 싣지 않는다.
+    """
     target = store.query_one(
         "SELECT target_key, kind, ref_id, project_id, base_project_id FROM rr_targets WHERE target_key = ?",
         (target_key,),
@@ -380,10 +411,13 @@ def panel_question(store: Any, target_key: str) -> str:
     if target["kind"] == "diff":
         row = store.query_one("SELECT summary_text FROM rr_diffs WHERE id = ?", (target["ref_id"],))
         head = "기준 %s 대비 변경" % code_of(target["base_project_id"])
+        if diff_ref:
+            head += f"(diff_id={target['ref_id']})"
     else:
         row = store.query_one("SELECT summary_text FROM rr_states WHERE snapshot_id = ?", (target["ref_id"],))
         head = "현황"
-    summary = (row["summary_text"] if row and row["summary_text"] else "")[:200]
+    if digest is None:
+        digest = brief.change_digest(store, target_key)
 
     parts: list[str] = []
     for source in store.query(
@@ -399,10 +433,14 @@ def panel_question(store: Any, target_key: str) -> str:
         if pairs:
             parts.append(f"{source['kind']} {pairs}")
 
+    if digest.get("text"):
+        tail = f"변경 요지: {digest['text']}"
+    else:
+        summary = (row["summary_text"] if row and row["summary_text"] else "").split("\n", 1)[0]
+        tail = f"{'diff' if target['kind'] == 'diff' else '현황'} 요약 첫 줄: {summary}"
     return (
         f"[리스크심사 {code_of(target['project_id'])} {target_key}] {head}이 각 도메인에서 어떤 리스크와 개선을 "
-        f"낳는가를 도구 근거로 판정하라. 소스 {'; '.join(parts) if parts else '(등록된 소스 없음)'}. "
-        f"{'diff' if target['kind'] == 'diff' else '현황'} 요약 첫 줄: {summary}"
+        f"낳는가를 도구 근거로 판정하라. 소스 {'; '.join(parts) if parts else '(등록된 소스 없음)'}. {tail}"
     )
 
 
@@ -433,6 +471,7 @@ def build_delib_opts(
     narrative_mod: Any | None = None,
     loss: dict | None = None,
     profile: Any | None = None,
+    diff_ref: bool = False,
 ) -> dict:
     """패널 1건의 delib_opts(plan §6.6.4). human_note·continue_summary·non_negotiables·search_sources·
     stop_after_round·build_plan 은 절대 싣지 않는다(불변식 extra_seats == ∅ 의 전제). voc 는 반대로
@@ -441,7 +480,9 @@ def build_delib_opts(
     `loss` 를 주면 좌석에 못 간 것을 거기 적는다 — `evidence_dropped`(12칸을 넘겨 빠진 항목 키)와
     `user_memo_cut`(메모를 다 못 실었을 때 `{chars, kept}`), `brief_shielded`(판단어·인젝션에 걸려 «» 로 싸거나
     자리표시자로 바꾼 줄), `brief_clipped`(항목마다 상한에 잘린 줄 수). 없으면 비어 있다. 호출자가 패널에 남긴다.
-    `profile` 은 브리프의 크기다(`brief.web_profile` · `brief.PROFILE_MCP`, 안 주면 바닥) — 좌석 계약표(E0c)도 그 상한에 맞춘다."""
+    `profile` 은 브리프의 크기다(`brief.web_profile` · `brief.PROFILE_MCP`, 안 주면 바닥) — 좌석 계약표(E0c)도 그 상한에 맞춘다.
+    질문과 지식카드 검색어(`knowledge_query`)는 같은 변경 요지에서 나온다(WP1 S11) — 요지의 길이는 프로파일 배수로 는다.
+    검색어가 포털 상한(600자)을 넘어 잘렸으면 `loss["knowledge_query_cut"]` 에 남는다. `diff_ref` 는 `panel_question` 의 것이다."""
     profile = profile or brief.PROFILE_LEGACY
     seats = panel["seats"]
     if evidence is None:
@@ -476,7 +517,11 @@ def build_delib_opts(
         if cut:
             loss["user_memo_cut"] = cut
 
-    return {
+    digest = brief.change_digest(store, panel["target_key"], max_chars=profile.inner(brief.DIGEST_CHARS))
+    knowledge_query, query_cut = brief.knowledge_query_of(digest)
+    if loss is not None and query_cut:
+        loss["knowledge_query_cut"] = query_cut
+    opts = {
         "chair_template": planner.CHAIR_TEMPLATE,
         "modifiers": list(panel["modifiers"]),
         "rounds": int(panel["rounds"]),
@@ -496,8 +541,12 @@ def build_delib_opts(
         # (엔진이 제 상한으로 다시 죈다) 포털 스키마는 상한 초과를 422 로 막는다 — 그때의 벽시계 40분(2400)을 여기
         # 실어 보내던 동안(상한은 1800초였다) 앱 → 포털 길의 패널은 전부 'HTTP 422' 로 닫혔다. 호출당 타임아웃은
         # 박스 설정(DELIB_TIMEOUT_S)의 몫이고, 패널 벽시계(HWAXRISK_PANEL_TIMEOUT_S)는 엔진 클라이언트가 스트림에서 잰다.
-        "question": panel_question(store, panel["target_key"]),
+        "question": panel_question(store, panel["target_key"], digest=digest, diff_ref=diff_ref),
     }
+    # 좌석 지식카드 검색어 — 안 주면 엔진이 질문 전체로 찾는다(종전). 변경이 없으면 키를 싣지 않는다.
+    if knowledge_query:
+        opts["knowledge_query"] = knowledge_query
+    return opts
 
 
 # ---------------------------------------------------------------- 패널 실행 원문·브리프 동결(plan §6.7.2 7단계·§5.6.1)
@@ -1063,13 +1112,17 @@ def run_panel(
         # 바뀌거나 창을 아직 못 물어본 가정값이 바로잡히면 다음 패널부터 따라간다.
         profile = brief.web_profile(model_json.get("evid_budget"))
         model_json["brief_profile"] = {"name": profile.name, "budget": profile.budget}
+        target = store.query_one("SELECT kind, ref_id FROM rr_targets WHERE target_key = ?", (job["target_key"],))
+        diff_ref = bool(target is not None and target["kind"] == "diff" and seats_can_read_diff(
+            store, target["ref_id"], job.get("credential"),
+            params.get("requester") if job.get("credential") == "requester" else job.get("owner_sub")))
         store.execute("UPDATE rr_panels SET model_json = ? WHERE id = ?", (canonical_json(model_json), panel["id"]))
         loss: dict = {}
         delib_opts = build_delib_opts(
             # 메모 없는 잡은 None 이 아니라 빈 문자열로 넘긴다 — None 은 '잡이 없는 길' 이라 브리프가 그 타깃의
             # 최근 잡 메모를 찾아 싣는다(같은 타깃에 메모를 단 잡이 또 있으면 그 메모가 이 패널에 실린다).
             store, settings, panel, user_memo=params.get("user_memo") or "", narrative_mod=narrative_mod, loss=loss,
-            profile=profile,
+            profile=profile, diff_ref=diff_ref,
         )
         # 브리프는 시변 조립물이라 이 패널이 실제로 받은 전문을 동결한다(§5.6.1).
         frozen = {**freeze_brief(store, panel, delib_opts["evidence"]), **loss}
@@ -1589,7 +1642,7 @@ def _complete_panel(
             quality["brief_hash"] = frozen_brief["brief_hash"]
         # 12칸을 넘겨 빠진 근거와 다 못 실은 메모, 판단어로 «» 에 싸인 줄, 상한에 잘린 줄 — 좌석은 받은 것이 전부라고 믿고
         # 판정했으므로 패널에 남긴다.
-        for lost in ("evidence_dropped", "user_memo_cut", "brief_shielded", "brief_clipped"):
+        for lost in ("evidence_dropped", "user_memo_cut", "brief_shielded", "brief_clipped", "knowledge_query_cut"):
             if frozen_brief and frozen_brief.get(lost):
                 quality[lost] = frozen_brief[lost]
                 quality["flags"].append(lost)

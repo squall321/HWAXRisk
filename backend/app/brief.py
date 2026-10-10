@@ -760,6 +760,145 @@ def _fit_e2(entry: Mapping[str, Any], limit: int) -> tuple[str, dict | None]:
     return out, {"lines": counts["total"], "kept": len(kept), "omitted": omitted, "omitted_by_kind": by_kind}
 
 
+# ---------------------------------------------------------------- 변경 요지(WP1 S11 · R-24·R-26) — 질문·지식카드 검색어의 재료
+# 변화 구절(설계서 부록 A). `{증감}` 은 magnitude 가 양수면 '증가', 음수면 '감소', 없으면 '변경' 이다. 질문과 검색어에만
+# 쓰인다(브리프 항목이 아니다). 표에 없는 코드는 코드 문자열을 그대로 쓴다 — 시험이 diff.py 가 내는 코드 전부를 본다.
+CHANGE_PHRASES: dict[str, str] = {
+    "part.added": "부품 추가", "part.removed": "부품 삭제", "part.replaced": "부품 교체", "part.split": "부품 분할",
+    "part.merged": "부품 병합", "part.tree_moved": "조립 위치 이동", "part.thickness_changed": "두께 {증감}",
+    "part.resized": "크기 {증감}", "part.moved": "위치 이동", "part.rotated": "자세 변화",
+    "part.material_changed": "재료 변경", "mesh.density_changed": "메시 밀도 변화",
+    "cross.bridge_stale": "해석 모델 미반영", "dim.named_changed": "명명 치수 {증감}",
+    "dim.named_unmeasured": "명명 치수 미측정", "asm.rollup_changed": "조립 단위 계면 수 변화",
+    "result.part_metric_shift": "해석 결과 {증감}", "iface.added": "계면 추가", "iface.removed": "계면 삭제",
+    "iface.clearance_appeared": "간극 생김", "iface.clearance_cleared": "간극 사라짐",
+    "iface.interference_new": "간섭 신규", "iface.interference_cleared": "간섭 해소",
+    "iface.rank_up": "계면 종류 상승", "iface.rank_down": "계면 종류 하강", "iface.gap_changed": "간극 {증감}",
+    "iface.band_area_changed": "밴드 면적 {증감}", "iface.penetration_changed": "관통 깊이 {증감}",
+    "contact.added": "접촉 정의 추가", "contact.removed": "접촉 정의 삭제", "contact.type_changed": "접촉 종류 변경",
+    "contact.scope_changed": "접촉 범위 변경", "contact.friction_changed": "마찰 계수 {증감}",
+    # 설계서 표 밖이지만 스키마(rr_diff.v1 event.code)가 허용하는 코드 — 하중 경로·회로.
+    "loadpath.edge_added": "하중 경로 추가", "loadpath.edge_removed": "하중 경로 삭제",
+    "loadpath.work_shift": "하중 경로 일 {증감}", "ecad.net_changed": "회로 넷 변경",
+    "ecad.component_moved": "회로 부품 이동", "ecad.stackup_changed": "적층 구성 변경",
+}
+# 질문에 싣는 변경 요지의 바닥(작은 창·엔진 예산을 모를 때) — 넓은 창은 브리프 프로파일 배수로 는다(러너가 넘긴다).
+# 종전 질문은 요약 앞 200자([대상] 줄의 식별자)였다.
+DIGEST_CHARS = 600
+# 지식카드 검색어(delib_opts.knowledge_query) 값 하나의 상한 — 포털 DelibOpts 가 그보다 긴 값을 받으면 요청 전체를 422 로
+# 거절하고(패널이 통째로 닫힌다) 엔진도 같은 값(_KNOWLEDGE_Q_MAX)에서 끊는다. 외부 한도라 넘을 때만 자르고 그 사실을 남긴다.
+KNOWLEDGE_QUERY_MAX = 600
+
+
+def _digest_phrase(code: str, magnitude: Any) -> str:
+    phrase = CHANGE_PHRASES.get(code, code)
+    if "{증감}" in phrase:
+        value = _num_or_none(magnitude)
+        phrase = phrase.replace("{증감}", "증가" if value and value > 0 else ("감소" if value and value < 0 else "변경"))
+    return phrase
+
+
+def _digest_items_diff(diff_json: Mapping[str, Any]) -> list[tuple[str, str, str]]:
+    """설계 관련 의미 이벤트를 `event_order` 순으로 — [(이름, 구절, 값)]. 제외 사유가 붙은 이벤트(모른다)는 뺀다."""
+    rows = []
+    for event in (diff_json.get("semantic") or {}).get("events") or ():
+        if not isinstance(event, Mapping) or event.get("excluded_reason") or event.get("design_relevant") is False:
+            continue
+        magnitude = event.get("magnitude") if isinstance(event.get("magnitude"), Mapping) else {}
+        rows.append({"change_kind": event.get("change_kind"), "design_relevant": 1, "rel": magnitude.get("rel"),
+                     "magnitude": magnitude.get("value"), "cid": event.get("cid"), "_event": event})
+    out: list[tuple[str, str, str]] = []
+    for row in event_order(rows):
+        event = row["_event"]
+        names = [str(n) for n in ((event.get("subject") or {}).get("names") or ()) if n]
+        name = render.fmt_iface(names[0], names[1]) if len(names) >= 2 else (names[0] if names else "")
+        before, after = event.get("before"), event.get("after")
+        unit = (event.get("magnitude") or {}).get("unit") if isinstance(event.get("magnitude"), Mapping) else None
+        value = ""
+        if _num_or_none(before) is not None and _num_or_none(after) is not None and unit:
+            value = render.fmt_change(before, after, unit)
+        out.append((name, _digest_phrase(_s(event.get("code")), row["magnitude"]), value))
+    return out
+
+
+def _digest_items_snap(state_json: Mapping[str, Any]) -> list[tuple[str, str, str]]:
+    """snap 타깃 — 상위 간섭·근접 간극 신호(그 글의 항목)와 발화한 규칙."""
+    signals = state_json.get("signals") or {}
+    out: list[tuple[str, str, str]] = []
+    for key, phrase, attr in (("top.interference", "간섭", "penetration_depth"),
+                              ("top.tight_clearance", "근접 간극", "min_gap")):
+        record = signals.get(key) if isinstance(signals.get(key), Mapping) else {}
+        for row in record.get("value") or ():
+            if isinstance(row, Mapping) and row.get("names"):
+                value = row.get(attr)
+                out.append((_s(row["names"]), phrase, f"{attr}={value} mm" if value is not None else ""))
+    for hit in state_json.get("rule_hits") or ():
+        if isinstance(hit, Mapping) and hit.get("pass") is False:
+            found = hit.get("found") if isinstance(hit.get("found"), Mapping) else {}
+            out.append(("", f"규칙 {_s(hit.get('rule'))}", f"found={_s(found.get('count'), '?')}건"))
+    return out
+
+
+def change_digest(store, target_key: str, *, max_chars: int = DIGEST_CHARS) -> dict:
+    """타깃의 변경 요지(결정론, LLM 없음) — 질문과 지식카드 검색어가 같은 글에서 출발한다(WP1 S11 · R-24·R-26).
+
+    반환 {text, plain, n_events, shown, by_kind, source}. `text` 는 좌석이 읽는 글이고 원천 이름은 «» 안이다 — `max_chars`
+    까지 잇고 남은 것은 '… 외 N건(종류별)' 으로 센다(조용히 버리지 않는다). `plain` 은 검색어용 낱말 나열(이름·구절, 전부)이다.
+    `source` 는 'rr_diff' | 'rr_state' | 'empty' 다.
+    """
+    ctx = _target_context(store, target_key)
+    by_kind: dict[str, int] = {}
+    if ctx["kind"] == "diff" and ctx["diff"] is not None:
+        diff_json = _j(ctx["diff"]["diff_json"], {})
+        items = _digest_items_diff(diff_json)
+        for event in (diff_json.get("semantic") or {}).get("events") or ():
+            if isinstance(event, Mapping) and not event.get("excluded_reason") and event.get("design_relevant") is not False:
+                kind = _s(event.get("change_kind")) if _s(event.get("change_kind")) in KIND_PRIORITY else "none"
+                by_kind[kind] = by_kind.get(kind, 0) + 1
+        source = "rr_diff"
+    elif ctx["state"] is not None:
+        state_row = store.query_one("SELECT state_json FROM rr_states WHERE snapshot_id = ?", (ctx["snapshot_id"],))
+        items = _digest_items_snap(_j(state_row["state_json"] if state_row else None, {}))
+        source = "rr_state"
+    else:
+        items, source = [], "empty"
+    if not items:
+        return {"text": "", "plain": "", "n_events": 0, "shown": 0, "by_kind": {}, "source": "empty"}
+
+    lines = [" ".join(x for x in (render.quote_source(name) if name else "", phrase, value) if x) for name, phrase, value in items]
+    kinds = "".join(f" · {k} {n}" for k, n in sorted(by_kind.items(), key=lambda kv: KIND_PRIORITY.index(kv[0])))
+    shown: list[str] = []
+    for index, line in enumerate(lines):
+        rest = len(lines) - index
+        tail = f"; … 외 {rest}건" + (f"({kinds[3:]})" if kinds else "")
+        if shown and len("; ".join([*shown, line])) + len(tail) > max_chars:
+            break
+        shown.append(line)
+    text = "; ".join(shown)
+    if len(shown) < len(lines):
+        text += f"; … 외 {len(lines) - len(shown)}건" + (f"({kinds[3:]})" if kinds else "")
+    words: list[str] = []
+    for name, phrase, _value in items:
+        for word in [*name.split("↔"), phrase]:
+            if word and word not in words:
+                words.append(word)
+    return {"text": text, "plain": " ".join(words), "n_events": len(lines), "shown": len(shown), "by_kind": by_kind,
+            "source": source}
+
+
+def knowledge_query_of(digest: Mapping[str, Any]) -> tuple[str, dict | None]:
+    """지식카드 검색어 — 변경 요지의 낱말 나열을 `KNOWLEDGE_QUERY_MAX` 안으로(낱말 경계). (검색어, 잘랐으면 {chars, kept}).
+
+    낱말은 변경 목록과 같은 순서(설계 관련 먼저, 종류를 돌아가며)라 앞쪽이 가장 앞선 변경이다. 넘으면 포털이 요청을
+    통째로 거절하므로 자르되, 원문 길이를 돌려 호출자가 패널 품질에 남긴다.
+    """
+    plain = _s(digest.get("plain")).strip()
+    if len(plain) <= KNOWLEDGE_QUERY_MAX:
+        return plain, None
+    cut = plain[:KNOWLEDGE_QUERY_MAX + 1].rsplit(" ", 1)[0].strip() or plain[:KNOWLEDGE_QUERY_MAX]
+    return cut, {"chars": len(plain), "kept": len(cut)}
+
+
 def diff_lines(store, diff_id: str, *, owner_sub: str, change_kind: str | None = None, q: str | None = None,
                offset: int = 0, limit: int | None = None) -> dict:
     """`risk_get_diff(part='lines')` 본체 — E2 와 같은 줄을 `event_order` 순으로 준다(WP1 S14 · R-30).

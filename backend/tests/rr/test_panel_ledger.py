@@ -731,3 +731,21 @@ def test_panel_brief_is_sized_from_the_engine_budget(risk_store, tmp_path, no_ne
     assert sum(len(brief.evidence_line(e)) for e in old.opts[0]["evidence"]) <= brief.ENGINE_BUDGET
     quality = json.loads(_panel(risk_store, first["panel_id"])["quality_json"])
     assert "E2" not in (quality.get("brief_clipped") or {}), quality.get("brief_clipped")
+
+
+def test_runner_question_carries_the_digest_and_the_diff_mark(risk_store, tmp_path, no_network):
+    """웹 러너 — 소유자 자격으로 도는 패널의 질문에 변경 요지와 `diff_id=<id>` 가 실리고 지식카드 검색어가 같이 간다.
+    검색어가 포털 상한에 잘렸으면 패널 품질에 남는다(WP1 S11)."""
+    from app import brief
+
+    synth = factories.make_diff_target(risk_store, 40, agents=factories.agents(("mech", "sim", "xd", "rel", "cam"), 3))
+    lg = _diff_ledger(risk_store, tmp_path, synth.target_key)
+    _job(lg)
+    engine = _BudgetEngine(None)
+    out = _run(lg, engine)
+    assert out["status"] == "done", out
+    opts = engine.opts[0]
+    assert f"diff_id={synth.diff_id}" in opts["question"] and "변경 요지: «" in opts["question"]
+    assert opts["knowledge_query"] and len(opts["knowledge_query"]) <= brief.KNOWLEDGE_QUERY_MAX
+    quality = json.loads(_panel(risk_store, out["panel_id"])["quality_json"])
+    assert "knowledge_query_cut" in quality["flags"] and quality["knowledge_query_cut"]["kept"] == len(opts["knowledge_query"])

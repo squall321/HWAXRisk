@@ -122,3 +122,21 @@ def test_mcp_profile_is_the_js_pipeline_limits(engine_files):
     # 곁 필드 상한도 같은 값이다(앱이 그 안으로 만들어 보내면 JS 가 다시 끊지 않는다).
     assert "const EV_SRC_MAX = 200, EV_TOOL_MAX = 80, EV_ARGS_MAX = 1200" in text
     assert (brief.CLAMP_SOURCE, brief.CLAMP_TOOL, brief.CLAMP_ARGS) == (200, 80, 1200)
+
+
+def test_question_carries_the_engines_diff_mark(engine_files, risk_store):
+    """앱 질문의 `diff_id=<id>` 가 엔진이 찾는 표식(`deliberation._RISK_DIFF_MARK`)과 글자까지 같다 — 한쪽만 바꾸면 엔진의
+    `risk_get_diff` 고정과 변경 전체 안내가 말없이 꺼진다(WP1 S11 · workorder-c 5절 4). 엔진 소스의 실제 상수를 읽는다."""
+    from app import runner
+    from tests import factories
+
+    _, py, _, tree, _ = engine_files
+    found = [node.value for node in tree.body
+             if isinstance(node, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "_RISK_DIFF_MARK"
+                                                     for t in node.targets)]
+    if not found or not isinstance(found[0], ast.Constant) or not isinstance(found[0].value, str):
+        pytest.fail(f"{py} 에 문자열 상수 _RISK_DIFF_MARK 가 없다 — 이름이 바뀌었으면 이 시험과 runner.panel_question 을 같이 고친다")
+    mark = found[0].value
+    synth = factories.make_diff_target(risk_store, 3)
+    question = runner.panel_question(risk_store, synth.target_key, diff_ref=True)
+    assert f"{mark}{synth.diff_id}" in question
