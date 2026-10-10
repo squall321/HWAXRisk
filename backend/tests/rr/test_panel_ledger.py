@@ -57,11 +57,19 @@ class LedgerEngine:
 
 @pytest.fixture
 def no_network(monkeypatch):
-    """브리프의 필드 근거 호출이 dev 박스의 실 게이트웨이에 닿지 않게 연결 오류로 답한다."""
+    """브리프의 필드 근거 호출이 dev 박스의 실 게이트웨이에 닿지 않게 연결 오류로 답한다.
+
+    막은 요청의 URL 을 돌려준다 — 가드가 시험 끝까지 서 있었는지 시험이 본다. 이 가드는 같은 함수 범위의 monkeypatch 라
+    `monkeypatch.undo()` 한 번에 함께 풀린다 — 스텁 하나를 걷을 때는 `monkeypatch.context()` 나 원래 함수를 다시 앉힌다.
+    """
+    refused: list[str] = []
+
     def _refused(*args, **_kwargs):
+        refused.append(str(args[-1].url))
         raise httpx.ConnectError("시험은 외부를 부르지 않는다.", request=args[-1])
 
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", _refused)
+    return refused
 
 
 def _make_ledger(store, tmp_path, domains, per_domain: int) -> SimpleNamespace:
@@ -253,28 +261,32 @@ def test_a_brief_that_cannot_be_built_pauses_the_job_without_charging(ledger, mo
     assert planner.check_invariants(ledger.store, ledger.target_key) == []
 
 
-def test_a_passing_brief_failure_retries_and_pauses_on_the_third(ledger, monkeypatch):
+def test_a_passing_brief_failure_retries_and_pauses_on_the_third(ledger, monkeypatch, no_network):
     """잠금·연결 같은 일시 장애는 멈추지 않고 다시 편성한다 — 좌석은 깎지 않고, 같은 타깃에서 세 번 이어지면 그때 멈춘다."""
     import sqlite3
 
     def locked(*_args, **_kwargs):
         raise sqlite3.OperationalError("database is locked")
 
-    monkeypatch.setattr(narrative, "prior_evidence", locked)
     job_id = _job(ledger)
     engine = LedgerEngine()
     states = []
-    for attempt in range(3):
-        out = _run(ledger, engine)
-        assert out["status"] == "error" and out["error"].startswith("brief_retry: OperationalError"), out
-        states.append(_job_row(ledger.store, job_id)["state"])
+    # 장애 스텁만 걷는다 — monkeypatch.undo() 는 같은 범위의 no_network 가드까지 풀어 마지막 패널이 실 게이트웨이를 불렀다.
+    with monkeypatch.context() as patch:
+        patch.setattr(narrative, "prior_evidence", locked)
+        for attempt in range(3):
+            out = _run(ledger, engine)
+            assert out["status"] == "error" and out["error"].startswith("brief_retry: OperationalError"), out
+            states.append(_job_row(ledger.store, job_id)["state"])
     assert states == ["running", "running", "paused"]
     assert _job_row(ledger.store, job_id)["state_by"] == "code:brief_retry"
     assert set(_seat_retries(ledger.store, ledger.target_key).values()) == {0}
 
-    monkeypatch.undo()                                                     # 장애가 풀렸다 — 재개하면 이어 돈다
+    # 장애가 풀렸다 — 재개하면 이어 돈다.
     runner.resume_job(ledger.store, job_id, by=OWNER)
     assert _run(ledger, engine)["status"] == "done"
+    # 브리프의 필드 근거가 게이트웨이 도구 지도를 물었다 — 그 요청은 가드에 막혀야 한다(시험 PAT 로 실 게이트웨이를 부르지 않는다).
+    assert any(url.endswith("/tools-map") for url in no_network), no_network
 
 
 # ---------------------------------------------------------------- S2 — 결과 선저장 · persist_error · 다시 저장 · 재기동 복구(WP1 R-2 · R-5 · P-05 · P-18)
@@ -408,10 +420,9 @@ def test_a_restart_during_the_save_does_not_run_the_panel_again(ledger, monkeypa
     def crash(*_args, **_kwargs):
         raise _Crash()
 
-    monkeypatch.setattr(runner, "_complete_panel", crash)
-    with pytest.raises(_Crash):
+    with monkeypatch.context() as patch, pytest.raises(_Crash):    # 스텁만 걷는다 — undo() 는 no_network 까지 푼다
+        patch.setattr(runner, "_complete_panel", crash)
         _run(ledger, LedgerEngine())
-    monkeypatch.undo()
     panel_id = ledger.store.query_one("SELECT id FROM rr_panels WHERE status = 'running'")["id"]
     assert _panel(ledger.store, panel_id)["result_gz"] is not None
 
@@ -568,15 +579,15 @@ def test_a_claude_submission_that_fails_to_save_leaves_the_planned_panel_planned
     def broken(*_args, **_kwargs):
         raise RuntimeError("디스크가 찼다")
 
-    monkeypatch.setattr(registry, "merge", broken)
     turns = [{"round": r, "persona": k, "say": f"{k} 라운드 {r} 발언"} for r in (1, 2) for k in keys]
-    with factories.routes_store(ledger.store), pytest.raises(RuntimeError):
+    # 스텁만 걷는다 — undo() 는 no_network 가드까지 푼다.
+    with monkeypatch.context() as patch, factories.routes_store(ledger.store), pytest.raises(RuntimeError):
+        patch.setattr(registry, "merge", broken)
         routes.complete_panel(panel["id"], engine="mcp", decision_text=DECISION, turns=turns,
                               actor=OWNER, owner_sub=OWNER)
     assert _panel(ledger.store, panel["id"])["status"] == "planned"
     assert {s for s, _, _ in _seat_rows(ledger.store, ledger.target_key, keys).values()} == {"assigned"}
 
-    monkeypatch.undo()
     with factories.routes_store(ledger.store):
         out = routes.complete_panel(panel["id"], engine="mcp", decision_text=DECISION, turns=turns,
                                     actor=OWNER, owner_sub=OWNER)
