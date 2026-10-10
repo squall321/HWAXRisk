@@ -643,3 +643,16 @@ def test_second_target_of_the_same_project_runs_its_panel(risk_store, tmp_path, 
     assert out["status"] == "done" and not _panel(risk_store, out["panel_id"])["error"], out
     e5 = next(e["result"] for e in engine.calls[0]["evidence"] if e.get("key") == "E5")
     assert "[변경 주체 — 재검증 대상] reg:" in e5, e5
+
+
+def test_brief_clipped_reaches_panel_quality(risk_store, tmp_path, no_network):
+    """변경이 상한보다 많은 타깃 — 잘린 줄 수가 패널 품질에 구조로 남는다(WP1 R-19)."""
+    synth = factories.make_diff_target(risk_store, 40, agents=factories.agents(("mech", "sim", "xd", "rel", "cam"), 3))
+    lg = _diff_ledger(risk_store, tmp_path, synth.target_key)
+    _job(lg)
+    out = _run(lg, LedgerEngine())
+    assert out["status"] == "done", out
+    quality = json.loads(_panel(lg.store, out["panel_id"])["quality_json"])
+    assert "brief_clipped" in quality["flags"]
+    e2 = quality["brief_clipped"]["E2"]
+    assert e2["omitted"] > 0 and e2["kept"] + e2["omitted"] == e2["lines"] == len(synth.diff["semantic"]["events"])

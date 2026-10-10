@@ -426,7 +426,7 @@ def build_delib_opts(
 
     `loss` 를 주면 좌석에 못 간 것을 거기 적는다 — `evidence_dropped`(12칸을 넘겨 빠진 항목 키)와
     `user_memo_cut`(메모를 다 못 실었을 때 `{chars, kept}`), `brief_shielded`(판단어·인젝션에 걸려 «» 로 싸거나
-    자리표시자로 바꾼 줄). 없으면 비어 있다. 호출자가 패널에 남긴다."""
+    자리표시자로 바꾼 줄), `brief_clipped`(항목마다 상한에 잘린 줄 수). 없으면 비어 있다. 호출자가 패널에 남긴다."""
     seats = panel["seats"]
     if evidence is None:
         module = narrative_mod
@@ -440,6 +440,8 @@ def build_delib_opts(
                               seats=seats, panel_id=panel["id"], meta_out=brief_meta))
         if loss is not None and brief_meta.get("shielded"):
             loss["brief_shielded"] = list(brief_meta["shielded"])
+        if loss is not None and brief_meta.get("clipped"):
+            loss["brief_clipped"] = dict(brief_meta["clipped"])
     else:
         evidence = list(evidence)
     # E0(스코프·게이트) 바로 뒤가 E0c 좌석 계약표다.
@@ -1559,9 +1561,9 @@ def _complete_panel(
             quality["brief_drift"] = list(frozen_brief["brief_drift"])
         if frozen_brief and frozen_brief.get("brief_hash"):
             quality["brief_hash"] = frozen_brief["brief_hash"]
-        # 12칸을 넘겨 빠진 근거와 다 못 실은 메모, 판단어로 «» 에 싸인 줄 — 좌석은 받은 것이 전부라고 믿고 판정했으므로
-        # 패널에 남긴다.
-        for lost in ("evidence_dropped", "user_memo_cut", "brief_shielded"):
+        # 12칸을 넘겨 빠진 근거와 다 못 실은 메모, 판단어로 «» 에 싸인 줄, 상한에 잘린 줄 — 좌석은 받은 것이 전부라고 믿고
+        # 판정했으므로 패널에 남긴다.
+        for lost in ("evidence_dropped", "user_memo_cut", "brief_shielded", "brief_clipped"):
             if frozen_brief and frozen_brief.get(lost):
                 quality[lost] = frozen_brief[lost]
                 quality["flags"].append(lost)

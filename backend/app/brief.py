@@ -105,11 +105,16 @@ def clip_lines(text: str, limit: int) -> str:
 
     한 줄이 남은 자리를 넘으면 그 줄부터 통째로 뺀다 — 참조 id 가 잘린 채 실리지 않게 한다.
     """
+    return clip_lines_n(text, limit)[0]
+
+
+def clip_lines_n(text: str, limit: int) -> tuple[str, int]:
+    """`clip_lines` 와 같고 버린 줄 수를 함께 돌려준다 — (자른 글, 버린 줄 수). 절단 원장(meta.clipped)의 재료다."""
     text = "" if text is None else str(text)
     if limit <= 0:
-        return ""
+        return "", (len(text.split("\n")) if text else 0)
     if len(text) <= limit:
-        return text
+        return text, 0
     lines = text.split("\n")
     reserve = 1 + len(_ellipsis(len(lines)))  # 줄바꿈 + 최악(전부 생략) 길이
     kept: list[str] = []
@@ -123,11 +128,11 @@ def clip_lines(text: str, limit: int) -> str:
             break
     dropped = len(lines) - len(kept)
     if dropped <= 0:
-        return "\n".join(kept)
+        return "\n".join(kept), 0
     marker = _ellipsis(dropped)
     if not kept:
-        return marker if len(marker) <= limit else ""
-    return "\n".join(kept) + "\n" + marker
+        return (marker if len(marker) <= limit else ""), dropped
+    return "\n".join(kept) + "\n" + marker, dropped
 
 
 def _framing(source: str) -> str:
@@ -581,20 +586,65 @@ def _e2_empty_line(ctx) -> str:
             f"−{n('nodes_removed') + n('edges_removed')} · 파라메트릭 변경 {n('params_changed')}건]")
 
 
-def _item_e2(store, ctx, names: Mapping[str, str]) -> dict:
+def event_counts(rows: Sequence[Mapping[str, Any]]) -> dict:
+    """{"total", "design", "irrelevant", "by_kind": {종류: 설계 관련 건수 — KIND_PRIORITY 순, 0 은 뺀다}}."""
+    rows = list(rows)
+    design = [r for r in rows if _design_relevant(r)]
+    by_kind = {kind: sum(1 for r in design if _event_kind(r) == kind) for kind in KIND_PRIORITY}
+    return {"total": len(rows), "design": len(design), "irrelevant": len(rows) - len(design),
+            "by_kind": {kind: n for kind, n in by_kind.items() if n}}
+
+
+def _e2_tail(counts: Mapping[str, Any], kept: int, omitted: int) -> str:
+    """꼬리 — `[전체 312건 — 실림 41 · 생략 271 | topology 88 · … · 설계 무관 30]`. 좌석이 실린 줄과 생략 줄을 더하지 않고도
+    전체 규모와 무엇이 빠졌는지 안다(R-19)."""
+    parts = [f"{kind} {n}" for kind, n in counts["by_kind"].items()]
+    if counts["irrelevant"]:
+        parts.append(f"설계 무관 {counts['irrelevant']}")
+    return f"[전체 {counts['total']}건 — 실림 {kept} · 생략 {omitted} | {' · '.join(parts)}]"
+
+
+def _item_e2(store, ctx, names: Mapping[str, str], *, cap: int, item_result_max: int) -> dict:
+    """변경 목록 — `event_order` 순으로 들어가는 데까지 싣고 꼬리가 전체·실림·생략 건수를 말한다.
+
+    자리는 `build_brief` 의 절단과 같은 식(`min(item_result_max, cap − line_overhead)`)으로 먼저 세고, 꼬리는 본문을 채우기
+    전에 최악 길이로 떼어 둔다. 넘치는 줄부터 뒤는 싣지 않는다 — `…(n줄 생략)` 표식 대신 꼬리가 건수를 말하고, 무엇을
+    얼마나 뺐는지는 반환의 `clipped`(종류별 생략 수)로 meta 에 남는다.
+    """
     source, tool = _SOURCES["E2"]
     if ctx["kind"] != "diff" or ctx["diff"] is None:
         return {"key": "E2", "args": _s(ctx["target"]["target_key"]),
                 "result": _body(source, ["[pair 전용 — 해당 없음]"])}
     diff_id = ctx["diff"]["id"]
+    args = f"diff:{diff_id}"
     rows = store.query(
         "SELECT cid, layer, code, change_kind, subject_key, magnitude, unit, rel, confidence, design_relevant, "
         "unconfirmed, excluded_reason, text FROM rr_diff_events "
         "WHERE diff_id = ? AND layer IN ('semantic','structural')",
         (diff_id,),
     )
-    lines = [e2_line(row, names) for row in event_order(rows)] or [_e2_empty_line(ctx)]
-    return {"key": "E2", "args": f"diff:{diff_id}", "result": _body(source, lines)}
+    if not rows:
+        return {"key": "E2", "args": args, "result": _body(source, [_e2_empty_line(ctx)])}
+    ordered = event_order(rows)
+    counts = event_counts(ordered)
+    limit = min(item_result_max, cap - line_overhead({"source": source, "tool": tool, "args": args[:CLAMP_ARGS]}))
+    room = limit - len(_framing(source)) - 1 - len(_e2_tail(counts, counts["total"], counts["total"]))
+    lines: list[str] = []
+    used = 0
+    for row in ordered:
+        line = e2_line(row, names)
+        if used + len(line) + 1 > room:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    kept, omitted = len(lines), counts["total"] - len(lines)
+    out = {"key": "E2", "args": args, "result": _body(source, [*lines, _e2_tail(counts, kept, omitted)])}
+    if omitted:
+        by_kind: dict[str, int] = {}
+        for row in ordered[kept:]:
+            by_kind[_event_kind(row)] = by_kind.get(_event_kind(row), 0) + 1
+        out["clipped"] = {"lines": counts["total"], "kept": kept, "omitted": omitted, "omitted_by_kind": by_kind}
+    return out
 
 
 # ---------------------------------------------------------------- E3 명명 치수
@@ -1465,7 +1515,7 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
             _item_e0(store, ctx, external_ok, _panel_model(store, target_key, panel_id)),
             _item_e0c(seats),
             _item_e1(ctx),
-            _item_e2(store, ctx, names),
+            _item_e2(store, ctx, names, cap=CAPS["E2"], item_result_max=CLAMP_RESULT),
             _item_e3(ctx),
             _item_e4(ctx),
             _item_e5(store, ctx, similar, owner_sub, field),
@@ -1493,6 +1543,20 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
     order = {key: i for i, key in enumerate(ITEM_ORDER)}
     raw = sorted([i for i in raw if i["key"] not in excluded], key=lambda i: order[i["key"]])
 
+    # 절단 원장(WP1 R-19) — 항목마다 줄 단위로 버린 수. 프레이밍 줄은 세지 않는다. E2 는 제 꼬리와 같은 값(종류별 생략 수
+    # 포함)을 스스로 낸다. 원장에는 '…(N줄 생략)' 글 덩어리만 남던 것을 구조로 남겨 러너가 패널 품질에 옮긴다.
+    clipped: dict[str, dict] = {}
+
+    def clip(entry: Mapping[str, Any], text: str, limit: int) -> str:
+        out, dropped = clip_lines_n(text, limit)
+        clipped.pop(entry["key"], None)
+        if entry.get("clipped"):
+            clipped[entry["key"]] = dict(entry["clipped"])
+        elif dropped:
+            lines_n = len(text.split("\n")) - 1
+            clipped[entry["key"]] = {"lines": lines_n, "kept": lines_n - dropped, "omitted": dropped}
+        return out
+
     items: list[dict] = []
     for entry in raw:
         source, tool = _SOURCES[entry["key"]]
@@ -1504,7 +1568,7 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
             "result": entry["result"],
         }
         cap = CAPS[entry["key"]]
-        item["result"] = clip_lines(item["result"], min(CLAMP_RESULT, cap - line_overhead(item)))
+        item["result"] = clip(entry, item["result"], min(CLAMP_RESULT, cap - line_overhead(item)))
         assert len(evidence_line(item)) <= cap, f"{entry['key']} 라인이 CAP {cap} 을 넘었습니다."
         item["key"] = entry["key"]
         items.append(item)
@@ -1514,7 +1578,7 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
         # E0c 가 남긴 자리는 세지 않는다 — 러너가 그 칸을 제 좌석 계약표(`runner.seat_contract_evidence`)로 갈아 끼운다.
         e0 = items[0]
         spare = sum(CAPS[i["key"]] - len(evidence_line(i)) for i in items[1:] if i["key"] != "E0c")
-        e0["result"] = clip_lines(raw[0]["result"], min(CLAMP_RESULT, CAPS["E0"] + spare - line_overhead(e0)))
+        e0["result"] = clip(raw[0], raw[0]["result"], min(CLAMP_RESULT, CAPS["E0"] + spare - line_overhead(e0)))
 
     total = sum(len(evidence_line(i)) for i in items)
     assert total <= ENGINE_BUDGET and len(items) <= EVIDENCE_MAX_ITEMS
@@ -1534,7 +1598,9 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
             "budget_used": total,
             "budget": ENGINE_BUDGET,
             "caps_sum": sum(CAPS[i["key"]] for i in items),
+            # 항목 통째 탈락 수(조립 단계에서는 0 이다). 줄 단위 절단은 clipped 가 맡는다.
             "dropped": 0,
+            "clipped": clipped,
             # 메모를 다 못 실었으면 {chars, kept} — 미리보기·MCP 호출자가 여기서 본다(패널에는 러너가 남긴다).
             "user_memo_cut": memo_cut(next((i for i in items if i["key"] == "M"), None)),
             "excluded": sorted(excluded),

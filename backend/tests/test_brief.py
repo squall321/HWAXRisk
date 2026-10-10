@@ -1786,3 +1786,60 @@ def test_event_order_properties(risk_store):
     shuffled = rows[:]
     random.Random(3).shuffle(shuffled)
     assert [r["cid"] for r in brief.event_order(shuffled)] == [r["cid"] for r in ordered]
+
+
+# ---------------------------------------------------------------- E2 꼬리와 절단 원장(WP1 S6 · R-19)
+def test_clip_lines_n_counts_what_it_dropped():
+    text = "\n".join(f"줄{i}" * 10 for i in range(6))
+    out, dropped = brief.clip_lines_n(text, 120)
+    assert out == brief.clip_lines(text, 120)
+    assert dropped == 6 - (len(out.split("\n")) - 1) > 0
+    assert brief.clip_lines_n("짧다", 100) == ("짧다", 0)
+
+
+def test_e2_tail_counts_every_event_even_when_nothing_is_cut(risk_store):
+    built = brief.build_brief(risk_store, _six_change_pair(risk_store), owner_sub="syn@example.com")
+    e2 = _item(built, "E2").split("\n")
+    assert e2[-1] == "[전체 6건 — 실림 6 · 생략 0 | dimension 3 · result 1 · consistency 1 · 설계 무관 1]", e2
+    assert "E2" not in built["meta"]["clipped"]
+    assert render.lint_text(e2[-1])["ok"]
+
+
+def test_e2_order_survives_a_tight_cap(risk_store, monkeypatch):
+    """상한을 이벤트 두 줄만 들어가게 죄어도 종류가 섞이고 설계 무관 줄은 빠지며, 꼬리가 무엇이 빠졌는지 센다."""
+    target_key = _six_change_pair(risk_store)
+    kept = None
+    for cap in range(300, 1100, 5):
+        monkeypatch.setitem(brief.CAPS, "E2", cap)
+        lines = _e2_lines(brief.build_brief(risk_store, target_key, owner_sub="syn@example.com"))
+        if len(lines) == 2:
+            kept = lines
+            break
+    assert kept is not None, "두 줄만 실리는 상한을 찾지 못했다"
+    built = brief.build_brief(risk_store, target_key, owner_sub="syn@example.com")
+    codes = [ln.split(" ")[1] for ln in kept]
+    kinds = {"iface.gap_changed": "dimension", "part.thickness_changed": "dimension", "result.part_metric_shift": "result",
+             "cross.bridge_stale": "consistency", "mesh.density_changed": "discretization"}
+    assert len({kinds[c] for c in codes}) == 2 and "mesh.density_changed" not in codes, kept
+    assert not any("(+20.0%)" in ln for ln in kept) and any("(−20.0%)" in ln for ln in kept), kept
+    tail = _item(built, "E2").split("\n")[-1]
+    assert tail == "[전체 6건 — 실림 2 · 생략 4 | dimension 3 · result 1 · consistency 1 · 설계 무관 1]", tail
+    assert built["meta"]["clipped"]["E2"] == {"lines": 6, "kept": 2, "omitted": 4,
+                                             "omitted_by_kind": {"dimension": 2, "consistency": 1, "discretization": 1}}
+    assert "줄 생략)" not in _item(built, "E2")                              # 꼬리가 건수를 말한다 — 표식은 쓰지 않는다
+
+
+def test_clipped_lines_are_reported_in_meta(risk_store):
+    """합성 다건에서 잘린 줄의 수가 meta 와 꼬리에 같은 값으로 남는다 — 원장에는 '…(N줄 생략)' 뿐이던 것(R-19)."""
+    from tests import factories
+
+    target = factories.make_diff_target(risk_store, 40)
+    built = brief.build_brief(risk_store, target.target_key, owner_sub=factories.OWNER)
+    clipped = built["meta"]["clipped"]["E2"]
+    n_rows = risk_store.query_one("SELECT COUNT(*) AS n FROM rr_diff_events WHERE diff_id = ?", (target.diff_id,))["n"]
+    assert clipped["kept"] + clipped["omitted"] == clipped["lines"] == n_rows
+    assert clipped["omitted"] > 0 and sum(clipped["omitted_by_kind"].values()) == clipped["omitted"]
+    assert len(_e2_lines(built)) == clipped["kept"]
+    tail = _item(built, "E2").split("\n")[-1]
+    assert tail.startswith(f"[전체 {n_rows}건 — 실림 {clipped['kept']} · 생략 {clipped['omitted']} | "), tail
+    assert len(brief.evidence_line(built["evidence"][built["keys"].index("E2")])) <= brief.CAPS["E2"]
