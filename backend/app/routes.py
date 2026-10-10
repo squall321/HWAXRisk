@@ -2734,15 +2734,16 @@ def _omitted_lines(items: list[dict] | None) -> list[str]:
     """MCP 오케스트레이터가 신고한 '좌석에 못 간 근거' `[{source, text}]` 를 `engine_withheld` 줄로 옮긴다.
 
     줄 모양은 웹 러너가 엔진 카드를 옮겨 적는 것(`runner.withheld_by_engine`)과 같다 — `<source> — <text>`.
-    길이는 그 길과 같은 상한에서 자르고 거절하지 않는다. 이 신고는 결과 제출에 얹혀 오므로, 사유 문장이
-    길다고 422 를 내면 패널 결과가 통째로 원장에 못 들어간다.
+    자르지도 거절하지도 않는다 — 웹 러너 길도 엔진 사유를 통째로 옮긴다. 이 신고는 결과 제출에 얹혀 오므로, 사유
+    문장이 길다고 422 를 내면 패널 결과가 통째로 원장에 못 들어간다. 종전에는 200자에서 말없이 끊어 사유 뒤쪽(무엇을
+    몇 건 · 어느 설정)이 사라졌다.
     """
     lines: list[str] = []
     for item in items or ():
         if not isinstance(item, dict):
             continue
-        source = str(item.get("source") or "").strip()[:EVENT_FIELD_MAX]
-        note = str(item.get("text") or "").strip()[:EVENT_FIELD_MAX]
+        source = str(item.get("source") or "").strip()
+        note = str(item.get("text") or "").strip()
         line = f"{source} — {note}" if source and note else source or note
         if line and line not in lines:
             lines.append(line)
@@ -2827,6 +2828,11 @@ def complete_panel(panel_id: str, *, engine: str, decision_text: str, turns: lis
         quality["engine_withheld"] = withheld
         if "engine_withheld" not in flags:
             flags.append("engine_withheld")
+    # events 상한(EVENTS_MAX)을 넘겨 뒤를 버렸다 — 응답에만 알리면 원장에는 흔적이 없고 뒤 좌석의 도구 사용이 0 으로 세진다.
+    if truncated:
+        quality["events_truncated"] = {"received": len(events or ()), "kept": len(checked or ())}
+        if "events_truncated" not in flags:
+            flags.append("events_truncated")
     quality["flags"] = flags
 
     # 상태 전이·서술 저장·좌석 회계·등록부 병합은 한 트랜잭션이다 — 중간 실패의 반쪽 저장을 막는다.

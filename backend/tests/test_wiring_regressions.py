@@ -438,8 +438,9 @@ def test_lost_streams_do_not_count_toward_the_engine_fail_streak(risk_store, tmp
             "SELECT MAX(retry) AS n FROM rr_coverage WHERE target_key = ?", (target_key,))["n"]
         states.append((row["state"], (row["error"] or "").split(":")[0], worst))
         if row["state"] == "paused":
-            # 사유가 아무리 길어도 '멈췄고 차감하지 않았다' 는 말이 잘리지 않는다.
-            assert len(out["error"]) <= 400 and row["error"].endswith("재개하면 이어 돈다")
+            # 사유가 아무리 길어도 '멈췄고 차감하지 않았다' 는 말이 잘리지 않고, 사유 자체도 자르지 않는다(사용자 지침 가).
+            assert row["error"].endswith("재개하면 이어 돈다")
+            assert "긴 사유" not in out["error"] or out["error"].count(" 긴 사유") == 400
             runner.resume_job(risk_store, job_id, by=OWNER)
 
     # 진짜 실패 1 → 놓친 스트림 2(멈춤) → 진짜 실패 2·3 에서야 engine_fail_streak. 셋째 값은 좌석 재시도의
@@ -780,8 +781,8 @@ def test_a_chair_that_never_decided_pauses_the_job_and_keeps_the_pointers(risk_s
     assert out["status"] == "error", out
     panel = risk_store.query_one(
         "SELECT status, error, conv_id, report_id, retry, decision_text FROM rr_panels WHERE id = ?", (out["panel_id"],))
-    # 사유가 아무리 길어도 손잡이 이름은 잘리지 않고 끝에 남는다. 코드가 맨 앞이라야 연속 실패 셈이 건너뛴다.
-    assert panel["error"].startswith("chair_failed: 의장이 결정문을 내지 못했다") and len(panel["error"]) <= 400
+    # 사유가 아무리 길어도 손잡이 이름은 끝에 남고 사유도 자르지 않는다. 코드가 맨 앞이라야 연속 실패 셈이 건너뛴다.
+    assert panel["error"].startswith("chair_failed: 의장이 결정문을 내지 못했다") and panel["error"].count("긴 사유") == 200
     assert panel["error"].endswith(f" — 설정 {CHAIR_KNOB}")
     # 그 심의의 발언 전부는 포털 대화와 엔진이 저장한 보고서에 있다 — 패널이 둘 다 가리킨다.
     assert (panel["status"], panel["conv_id"], panel["report_id"], panel["retry"]) == ("error", "conv-1", 4242, 0)
@@ -922,8 +923,9 @@ def test_mcp_submit_records_the_evidence_that_never_reached_the_seats(risk_store
     assert risk_store.query_one("SELECT status FROM rr_panels WHERE id = ?", (panel["id"],))["status"] == "done"
     assert quality()["engine_withheld"] == [
         f"사전 근거 건수 초과 — {counted}",
-        # 긴 사유는 거절하지 않고 러너 길과 같은 상한에서 자른다 — 사유 문장 때문에 패널 결과가 못 들어가면 안 된다.
-        "사전 근거 예산 초과 — " + "가" * routes.EVENT_FIELD_MAX,
+        # 긴 사유는 거절하지도 자르지도 않는다 — 러너 길도 엔진 사유를 통째로 옮긴다. 사유 문장 때문에 패널 결과가 못
+        # 들어가면 안 된다.
+        "사전 근거 예산 초과 — " + "가" * (routes.EVENT_FIELD_MAX + 100),
     ]
     assert quality()["flags"].count("engine_withheld") == 1
     # 이 신고는 events[] 가 아니다. events[] 로 읽으면 좌석 귀속을 다시 세어, 도구 경로가 없는 이 길의
@@ -1197,3 +1199,43 @@ def test_a_diff_dim_reads_the_change_not_the_base_snapshot():
     assert narrative.canonical_text_for("d:gap_a", ctx) == item["text"]
     ctx = narrative.SpecContext(kind="diff", snapshot_ids=("s_base", "s_tgt"), irs=scope, diff={})
     assert narrative.canonical_text_for("d:gap_a", ctx) == "gap_a=0.180 mm"     # 변화가 없으면 target 의 값
+
+
+def test_a_long_job_memo_is_stored_whole_and_reaches_a_wide_panel_whole(risk_store, tmp_path):
+    """잡 메모는 저장에서 자르지 않는다 — 좌석에 갈 때 그 패널의 상한이 정한다. 종전에는 저장에서 2,000자로 말없이 끊어
+    1백만 토큰 창의 패널도 앞 2,000자만 받았다(절단 전수 조사 R4·T7)."""
+    target_key = _seed(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    memo = "배터리 모서리 간극부터 보라. " + "나" * 4983
+    runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg, user_memo=memo)
+    stored = json.loads(risk_store.query_one("SELECT params_json FROM rr_jobs WHERE target_key = ?",
+                                             (target_key,))["params_json"])
+    assert stored["user_memo"] == memo
+
+    class Wide(RealEngine):
+        def health(self):
+            return {"model": "glm-5.2", "evid_budget": 500_000}
+
+    engine = Wide()
+    out = runner.run_panel(risk_store, cfg, engine, runner.claim_next_job(risk_store, cfg))
+    m = next(e for e in engine.calls[0]["evidence"] if e.get("key") == "M")
+    assert memo in m["result"] and "user_memo_cut" not in json.loads(risk_store.query_one(
+        "SELECT quality_json FROM rr_panels WHERE id = ?", (out["panel_id"],))["quality_json"])
+
+
+def test_mcp_submit_beyond_the_event_cap_leaves_a_mark_on_the_panel(risk_store, monkeypatch):
+    """REST·MCP 제출의 events 상한(400)을 넘긴 뒤쪽은 응답에만 알리던 것을 패널 품질에도 남긴다 — 원장에 흔적이 없으면
+    뒤 좌석의 도구 사용이 0 으로 세진 까닭을 알 수 없다(T2)."""
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    target_key = _seed(risk_store)
+    panel = planner.plan_next_panel(risk_store, target_key, "B")
+    events = [{"kind": "status", "step": "s"}] * (routes.EVENTS_MAX + 5)
+    out = routes.complete_panel(
+        panel["id"], engine="web", decision_text=DECISION, events=events,
+        turns=[{"round": 1, "persona": s["key"], "say": "발언"} for s in panel["seats"]],
+        report_id=None, actor=OWNER, owner_sub=OWNER)
+    assert out.get("events_truncated") is True, out
+    quality = json.loads(risk_store.query_one("SELECT quality_json FROM rr_panels WHERE id = ?",
+                                              (panel["id"],))["quality_json"])
+    assert quality["events_truncated"] == {"received": routes.EVENTS_MAX + 5, "kept": routes.EVENTS_MAX}
+    assert "events_truncated" in quality["flags"]

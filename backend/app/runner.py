@@ -39,7 +39,6 @@ DIMINISHING_WINDOW = 3             # 최근 3패널이 신규 클러스터 <1 �
 QUALITY_TOOL_USE_MIN = 0.8
 QUALITY_IR_CITE_MIN = 0.5
 QUALITY_ADVERSARY_OVERREJECT = 0.6
-USER_MEMO_MAX = 2000
 # 앱이 스트림을 놓은 사유(EngineStreamLost.code) — 패널 벽시계 · 줄 사이 침묵 · 중간 절단 · 사람의 취소·정지.
 # 엔진·좌석의 실패가 아니다.
 STREAM_LOST_CODES: tuple[str, ...] = ("panel_timeout", "engine_silent", "engine_stream_cut", "cancelled")
@@ -741,7 +740,9 @@ def create_job(
     params = {
         "tier": tier,
         "modifiers": list(planner.resolve_modifiers(modifiers)),
-        "user_memo": (str(user_memo)[:USER_MEMO_MAX] if user_memo else None),
+        # 메모는 자르지 않고 저장한다 — 좌석에 갈 때 브리프 M 이 그 패널의 상한에 맞추고 잘렸으면 원문 길이를 밝힌다.
+        # 종전에는 저장에서 2,000자로 말없이 끊어 넓은 창의 패널도 앞 2,000자만 받았다.
+        "user_memo": (str(user_memo) if user_memo else None),
         "consent": bool(consent),
         "credential": credential["kind"],
         "requester": requester_sub,
@@ -1381,7 +1382,7 @@ def _close_panel_error(store: Any, panel: Mapping[str, Any], job: Mapping[str, A
     now = now_epoch()
     store.execute(
         "UPDATE rr_panels SET status = 'error', error = ?, retry = retry + 1, ended_at = ? WHERE id = ?",
-        (error[:500], now, panel["id"]),
+        (error, now, panel["id"]),
     )
     if _error_streak(store, panel["target_key"]) >= ENGINE_FAIL_STREAK:
         _set_job(store, job["id"], "failed", error="engine_fail_streak")
@@ -1397,7 +1398,7 @@ def _close_panel_stream_lost(store: Any, panel: Mapping[str, Any], job: Mapping[
     좌석은 제 탓이 아닌 일로 세 번째에 skipped 로 굳었다. 그래서 좌석은 차감 없이 pending 으로 돌리고 잡을
     멈춘다. 사유는 잡의 error 에 적는다(pause_reason 은 CHECK 로 세 값만 받는다). 사람이 재개하면 이어 돈다.
     """
-    error = str(lost)[:400]
+    error = str(lost)
     planner.fail_panel_seats(store, panel["id"], reason="engine_fail", charge=False)
     store.execute(
         "UPDATE rr_panels SET status = 'error', error = ?, conv_id = ?, ended_at = ? WHERE id = ?",
@@ -1424,7 +1425,7 @@ def _close_panel_unstarted(store: Any, panel: Mapping[str, Any], job: Mapping[st
     planner.fail_panel_seats(store, panel["id"], reason="engine_fail", charge=False)
     store.execute(
         "UPDATE rr_panels SET status = 'error', error = ?, conv_id = ?, ended_at = ? WHERE id = ?",
-        (error[:500], conv_id, now_epoch(), panel["id"]),
+        (error, conv_id, now_epoch(), panel["id"]),
     )
     if pause:
         # 그 사이 사람이 취소했으면(cancelling) 그 전이를 덮지 않는다 — 다음 편성에서 cancelled 가 된다.
@@ -1476,11 +1477,11 @@ def _close_panel_no_decision(store: Any, panel: Mapping[str, Any], job: Mapping[
     종전에는 엔진 실패로 세어 5초 뒤 같은 좌석을 다시 편성했다 — 몇 시간짜리 패널이 같은 호출 한도로 세 번 돌고
     (끝마다 의장 대기 최대 2×(2×DELIB_TIMEOUT_S+8)초), 좌석은 제 탓이 아닌 일로 skipped 로 굳어 잡이 죽었다.
     엔진이 저장한 보고서와 대화는 패널 어디에도 적히지 않았다. 러너는 timeout_s 를 싣지 않으므로 고칠 값은 엔진
-    박스의 설정 하나다 — 그 이름(knob)을 문구 끝에 잘리지 않게 붙인다. error 는 코드로 시작해야 한다
+    박스의 설정 하나다 — 그 이름(knob)을 문구 끝에 붙인다(엔진 사유도 자르지 않는다). error 는 코드로 시작해야 한다
     (`_error_streak` 이 맨 앞의 코드로 가른다).
     """
     tail = f" — 설정 {failed.knob}" if failed.knob else ""
-    error = str(failed)[:400 - len(tail)] + tail
+    error = str(failed) + tail
     planner.fail_panel_seats(store, panel["id"], reason="engine_fail", charge=False)
     # 발언 전부는 포털 대화(conv_id)와 엔진이 저장한 보고서(report_id)에 있다 — 패널에는 그 둘과, 엔진이 결정문
     # 자리에 내린 글(좌석별 마지막 입장)을 남긴다. 발언을 담을 열은 없다(스트림을 놓은 패널도 같다).
