@@ -162,6 +162,8 @@ class AdhClient:
         """유사 서술 경로 (c) — summary_text 앞 300자로 찾는다(plan §5.4.7·§7.3 3단계).
 
         e5 코사인은 절대값을 비교하지 않고 상대 순위만 쓴다(무관한 문장도 0.89 가 정상이다).
+        `tags`·`exclude_tags` 는 지금 AIDataHub 도구가 받지 않아 말없이 버려질 수 있다(WP1 R-15, 미확인) — 적중의 범위를
+        믿으려면 호출자가 적중의 tags 로 거른다.
         """
         args: dict[str, Any] = {"q": q, "top_k": top_k}
         if data_types:
@@ -179,7 +181,12 @@ class AdhClient:
     def agent_search(self, agent_type: str, q: str, *, mode: str = "hybrid",
                      required_tags: Sequence[str] | None = None, top_k: int = 3,
                      exclude_tags: Sequence[str] | None = None) -> dict:
-        """좌석 개인 기억 2차 경로 — 의사 에이전트 `risk-review-memory` 안에서만 찾는다(§5.6.3 2)."""
+        """좌석 개인 기억 2차 경로 — 의사 에이전트 `risk-review-memory` 안에서만 찾는다(§5.6.3 2).
+
+        `required_tags`·`exclude_tags`·`retrieval_config` 는 지금 AIDataHub 도구(`agent_search(agent_type, q, mode)`)가
+        받지 않아 말없이 버려질 수 있다(WP1 R-15, 미확인) — 남의 기억이 섞일 수 있으니 호출자가 적중의 tags 로 거른다.
+        브리프의 호출자는 아직 adh 를 넘기지 않아 이 경로가 운영에서 닿지 않는다(WP1 P-12).
+        """
         args: dict[str, Any] = {"agent_type": agent_type, "q": q, "mode": mode}
         if required_tags:
             args["required_tags"] = list(required_tags)

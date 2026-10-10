@@ -643,6 +643,19 @@ def test_second_target_of_the_same_project_runs_its_panel(risk_store, tmp_path, 
     assert out["status"] == "done" and not _panel(risk_store, out["panel_id"])["error"], out
     e5 = next(e["result"] for e in engine.calls[0]["evidence"] if e.get("key") == "E5")
     assert "[변경 주체 — 재검증 대상] reg:" in e5, e5
+    # 좌석 기억(E7, WP1 S8 · R-14) — 앞 타깃에서 finding 을 올린 좌석이 이번 패널에도 앉았으면 그 발언이 «» 안에 실린다.
+    raisers = {r["agent_key"] for r in risk_store.query(
+        "SELECT agent_key FROM rr_seat_opinions WHERE target_key = ? AND raised_finding_ids_json <> '[]'", (first,))}
+    seated = [p["key"] for p in engine.calls[0]["personas"] if p["origin"] in ("primary", "counter")]
+    again = sorted(raisers & set(seated))
+    assert again, "앞 타깃의 제기 좌석이 이번 패널에 없다 — 이 단언은 아무것도 보지 않는다"
+    e7 = next(e["result"] for e in engine.calls[0]["evidence"] if e.get("key") == "E7").split("\n")[1:]
+    for key in seated:
+        line = next(ln for ln in e7 if f" | {key} | " in ln or ln == f"[{key}: 이전 발언 없음]")
+        assert line.startswith("narr:") == (key in again) and (key not in again or "| «" in line), (key, e7)
+    # 이 브리프의 줄 모양(접두 달린 선례 · 좌석 기억 · 변경 규모 · 꼬리) 어느 것도 방패에 걸리지 않았다 — strict 로도 깨끗하다.
+    quality = json.loads(_panel(risk_store, out["panel_id"])["quality_json"])
+    assert "brief_shielded" not in quality["flags"], quality.get("brief_shielded")
 
 
 def test_brief_clipped_reaches_panel_quality(risk_store, tmp_path, no_network):

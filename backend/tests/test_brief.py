@@ -1901,3 +1901,18 @@ def test_e3_snap_line_is_the_canonical_text(risk_store):
 
     e3 = _item(brief.build_brief(risk_store, key, owner_sub=factories.OWNER), "E3").split("\n")[1:]
     assert e3 == [f"[d:plate1_t] «{narrative.canonical_text_for('d:plate1_t', ctx)}» method=«{row['method']}»"], e3
+
+
+# ---------------------------------------------------------------- E7·E8·E9·E0(WP1 S8 · R-14 · R-16 · R-17 · R-20)
+def test_e7_excerpt_is_quoted_and_says_when_cut(risk_store, monkeypatch):
+    """좌석 기억의 발췌는 앞 패널 LLM 의 글이다 — «» 안에 싣고(인젝션 방어 안), 자리를 넘으면 원문 길이를 밝힌다."""
+    target_key = seed_diff_target(risk_store)
+    line = _item(brief.build_brief(risk_store, target_key), "E7").split("\n")[1]
+    assert line == "narr:op0#pan0#F1 | mech-housing-structure | DV1/diff:d0 | «전작에서 같은 계면의 간극을 지적했다»", line
+
+    monkeypatch.setattr(brief, "E7_SEAT_LINE", 79)
+    line = _item(brief.build_brief(risk_store, target_key), "E7").split("\n")[1]
+    assert len(line) <= 79 and line.endswith("| «전작에» …(발췌 20자 중 3자)"), line
+    monkeypatch.setattr(brief, "E7_SEAT_LINE", 74)
+    line = _item(brief.build_brief(risk_store, target_key), "E7").split("\n")[1]
+    assert len(line) <= 74 and line.endswith("| …(발췌 20자 중 0자)"), line

@@ -1,9 +1,9 @@
-# 브리프 모양 계약(WP5b C2 가드 C) — 생산자가 낸 diff·좌석을 브리프가 실제로 읽는지 본다. 지금 코드에서 넷 다 붉다(재현 시험)
+# 브리프 모양 계약(WP5b C2 가드 C) — 생산자가 낸 diff·좌석을 브리프가 실제로 읽는지 본다(재현 시험 — WP1 S6·S7·S8 이 고쳤다)
 """입력은 전부 공장(`tests/factories.py`)을 거친 생산자 산출이다 — 기존 어댑터 픽스처 셋에 변경을 준 작은 다건 쌍,
 명명 치수 정의 1건, 편성기가 낸 Tier A 좌석. 손으로 쓴 diff_json·좌석 dict 는 없다(규칙 R1).
 
-시험 넷은 지금 코드에서 실패한다(2.3절 실례 #1·#2). `xfail(strict=True, raises=AssertionError)` 로 넣고 WP1 의 수리 커밋이
-표식을 지운다 — 고쳐지면 xpass 가 strict 로 깨져 표식을 지우게 만든다. 공장·조립은 모듈 픽스처라 그쪽 예외는 xfail 이
+시험 다섯은 7248651 에서 실패했다(2.3절 실례 #1·#2). `xfail(strict=True, raises=AssertionError)` 로 넣고 WP1 의 수리 커밋이
+표식을 지웠다 — 고쳐지면 xpass 가 strict 로 깨져 표식을 지우게 만든다. 공장·조립은 모듈 픽스처라 그쪽 예외는 xfail 이
 아니라 error 로 뜬다(반대 검토 P-02). 픽스처의 전제 확인은 AssertionError 가 아니라 RuntimeError 로 낸다 — xfail 은
 setup 단계의 AssertionError 도 삼킨다.
 """
@@ -27,7 +27,9 @@ EXPECTED_PLACEHOLDERS = {
     "[선례 없음": "코퍼스에 이 조합이 처음이다",
     "[유사 과제 성격 진술 없음": "코퍼스에 과제가 하나뿐이다",
     "[필드·문헌 근거 없음": "과제에 제품 연결(product_code)을 등록하지 않았다",
+    "[<좌석>: 이전 발언 없음": "첫 심사다 — 좌석마다 이전 발언이 없다(E7 은 좌석 키를 줄 머리에 적는다)",
 }
+SEAT_PLACEHOLDER = re.compile(r"^\[[a-z0-9-]+: 이전 발언 없음$")
 DIM_NAME = "plate1_t"
 
 
@@ -85,9 +87,8 @@ def _number_in(text: str, value: float) -> bool:
     return any(form in text for form in {f"{value:g}", f"{value}", f"{value:.1f}", f"{value:.3f}"})
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="WP1 S8(R-14) — brief._item_e7 이 좌석 dict 의 agent_key 를 읽는데 편성기는 key 로 쓴다")
 def test_e7_reads_the_seats_the_planner_wrote(contract):
+    """WP1 S8(R-14) 이 고친 것 — brief._item_e7 이 좌석 dict 의 agent_key 를 읽는데 편성기는 key 로 쓴다."""
     e7 = contract["items"]["E7"]
     assert "[착석 좌석 없음]" not in e7
     assert [k for k in contract["seat_keys"] if k not in e7] == []
@@ -129,9 +130,9 @@ def test_e2_keeps_the_largest_decrease(contract):
     assert top["cid"] in contract["items"]["E2"], top
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError,
-                   reason="WP1 S7·S8 — 값이 있는데도 '[명명 치수 없음 …]'·'[dyna_result 부재]'·'[착석 좌석 없음]' 이 나온다")
 def test_only_registered_placeholders_appear(contract):
+    """WP1 S7·S8 이 고친 것 — 값이 있는데도 '[명명 치수 없음 …]'·'[dyna_result 부재]'·'[착석 좌석 없음]' 이 나왔다."""
     heads = {p[:-1].split(" — ")[0] for p in PLACEHOLDER.findall(contract["text"])}
+    heads = {"[<좌석>: 이전 발언 없음" if SEAT_PLACEHOLDER.match(h) else h for h in heads}
     assert sorted(heads - set(EXPECTED_PLACEHOLDERS)) == []
     assert sorted(set(EXPECTED_PLACEHOLDERS) - heads) == []

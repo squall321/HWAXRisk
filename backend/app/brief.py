@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
 from app import config, render, taxonomy
-from app.common import canonical_json, new_uuid, now_epoch, parse_ref
+from app.common import canonical_json, new_uuid, now_epoch, parse_ref, seat_key
 from app.errors import AppError
 
 # ---------------------------------------------------------------- 공유 상수(plan §0.6·§5.6.1)
@@ -1161,14 +1161,33 @@ def _subject_keys(store, snapshot_id: str | None) -> set[str]:
     return {k for k in out if k}
 
 
+_EXCERPT_CUT_FMT = " …(발췌 {chars}자 중 {kept}자)"
+
+
+def _quoted_excerpt(text: Any, room: int) -> str:
+    """앞 패널 LLM 이 쓴 발췌를 «» 안에 싣는다(인젝션 방어 안). 자리(room)를 넘으면 들어가는 만큼 싣고 원문 길이를 밝힌다 —
+    조용히 자르지 않는다(`memo_result` 와 같은 꼴)."""
+    chars = len(" ".join(_s(text).split()))
+    quoted = _q(text, "memo")
+    inner = quoted[1:-1]
+    if inner.startswith("[suspect_text ") or len(quoted) <= room:
+        return quoted
+    kept = room - 2 - len(_EXCERPT_CUT_FMT.format(chars=chars, kept=chars))
+    if kept <= 0:
+        # 표식조차 «» 와 함께 들어가지 않는 자리 — 발췌 없이 표식만 싣는다(그것도 안 들어가면 비운다).
+        mark = _EXCERPT_CUT_FMT.format(chars=chars, kept=0).strip()
+        return mark if len(mark) <= room else ""
+    return render.quote_source(inner[:kept]) + _EXCERPT_CUT_FMT.format(chars=chars, kept=kept)
+
+
 def _seat_line(store, row, excerpt: str) -> str:
-    """좌석 줄 — `narr:<opinion_id>#<finding_id> | <agent_key> | <과제코드>/<target 앞12> | <발췌>` ≤220자."""
+    """좌석 줄 — `narr:<opinion_id>#<finding_id> | <agent_key> | <과제코드>/<target 앞12> | «<발췌>»` ≤ E7_SEAT_LINE 자."""
     findings = _j(row["raised_finding_ids_json"], [])
     finding_id = str(findings[0]) if isinstance(findings, list) and findings else ""
     project_code = _project_code(store, row["project_id"] if "project_id" in row.keys() else None)
     prefix = (f"narr:{row['opinion_id']}#{finding_id} | {row['agent_key']} | "
               f"{project_code}/{_s(row['target_key'])[:12]} | ")
-    return prefix + _cut(excerpt, max(0, E7_SEAT_LINE - len(prefix)))
+    return prefix + _quoted_excerpt(excerpt, max(0, E7_SEAT_LINE - len(prefix)))
 
 
 def _item_e7(store, ctx, seats: Sequence[Mapping[str, Any]], adh) -> dict:
@@ -1176,8 +1195,9 @@ def _item_e7(store, ctx, seats: Sequence[Mapping[str, Any]], adh) -> dict:
     target_key = _s(ctx["target"]["target_key"])
     lineage = set(_lineage_project_ids(store, ctx["target"]["project_id"]))
     subjects = _subject_keys(store, ctx["snapshot_id"])
-    agent_keys = [_s(s.get("agent_key")) for s in seats
-                  if _s(s.get("origin")) in ("primary", "counter") and s.get("agent_key")]
+    # 좌석 dict 의 키는 `key` 가 정본이다(편성기·seats_json) — 종전에는 `agent_key` 만 읽어 편성기 좌석이 한 번도 실리지
+    # 않았다(WP1 R-14). 읽는 곳은 `common.seat_key` 하나다.
+    agent_keys = [seat_key(s) for s in seats if _s(s.get("origin")) in ("primary", "counter") and seat_key(s)]
     lines: list[str] = []
     used = 0
     for agent_key in agent_keys:
@@ -1256,7 +1276,7 @@ def _adh_seat_memory(adh, agent_key: str, ctx) -> str | None:
         return None
     prefix = f"narr:{opinion_id}#{finding_id} | {agent_key} | adh/{_s(hit.get('record_id'))[:12]} | "
     body = _s(hit.get("summary") or hit.get("text") or hit.get("title"))
-    return prefix + _cut(body, max(0, E7_SEAT_LINE - len(prefix)))
+    return prefix + _quoted_excerpt(body, max(0, E7_SEAT_LINE - len(prefix)))
 
 
 # ---------------------------------------------------------------- E8 변경-델타 선례
