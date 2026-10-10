@@ -856,10 +856,26 @@ def _digest_items_snap(state_json: Mapping[str, Any]) -> list[tuple[str, str, st
     return out
 
 
+def _digest_name(name: str) -> tuple[str, list[str]]:
+    """요지의 이름 칸 — 원천 이름(계면이면 '↔' 양쪽)은 브리프 E2 와 같은 위생·인젝션 방어(`_q`)를 거친다. 자르지 않는다.
+
+    (질문 줄의 «…» 표기, 검색어 낱말). 인젝션 어휘에 걸린 이름은 «[suspect_text …]» 로 서고 검색어에서는 빠진다(BQ-5 —
+    종전에는 «» 만 씌운 원문이 개행·인젝션 문구째 질문과 검색어에 실렸다).
+    """
+    shown: list[str] = []
+    words: list[str] = []
+    for part in name.split("↔"):
+        body = _q(part, "label", limit=0)[1:-1]
+        shown.append(body)
+        if body and not body.startswith("[suspect_text "):
+            words.append(body)
+    return render.quote_source("↔".join(shown)), words
+
+
 def change_digest(store, target_key: str, *, max_chars: int = DIGEST_CHARS) -> dict:
     """타깃의 변경 요지(결정론, LLM 없음) — 질문과 지식카드 검색어가 같은 글에서 출발한다(WP1 S11 · R-24·R-26).
 
-    반환 {text, plain, n_events, shown, by_kind, source}. `text` 는 좌석이 읽는 글이고 원천 이름은 «» 안이다 — `max_chars`
+    반환 {text, plain, n_events, shown, by_kind, source}. `text` 는 좌석이 읽는 글이고 원천 이름은 위생을 거쳐 «» 안이다 — `max_chars`
     까지 잇고 남은 것은 '… 외 N건(종류별)' 으로 센다(조용히 버리지 않는다). `plain` 은 검색어용 낱말 나열(이름·구절, 전부)이다.
     `source` 는 'rr_diff' | 'rr_state' | 'empty' 다.
     """
@@ -882,7 +898,8 @@ def change_digest(store, target_key: str, *, max_chars: int = DIGEST_CHARS) -> d
     if not items:
         return {"text": "", "plain": "", "n_events": 0, "shown": 0, "by_kind": {}, "source": "empty"}
 
-    lines = [" ".join(x for x in (render.quote_source(name) if name else "", phrase, value) if x) for name, phrase, value in items]
+    names = {name: _digest_name(name) for name, _phrase, _value in items if name}
+    lines = [" ".join(x for x in (names[name][0] if name else "", phrase, value) if x) for name, phrase, value in items]
     kinds = "".join(f" · {k} {n}" for k, n in sorted(by_kind.items(), key=lambda kv: KIND_PRIORITY.index(kv[0])))
     shown: list[str] = []
     for index, line in enumerate(lines):
@@ -896,7 +913,7 @@ def change_digest(store, target_key: str, *, max_chars: int = DIGEST_CHARS) -> d
         text += f"; … 외 {len(lines) - len(shown)}건" + (f"({kinds[3:]})" if kinds else "")
     words: list[str] = []
     for name, phrase, _value in items:
-        for word in [*name.split("↔"), phrase]:
+        for word in [*(names[name][1] if name else []), phrase]:
             if word and word not in words:
                 words.append(word)
     return {"text": text, "plain": " ".join(words), "n_events": len(lines), "shown": len(shown), "by_kind": by_kind,
