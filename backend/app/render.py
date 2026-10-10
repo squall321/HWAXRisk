@@ -522,7 +522,9 @@ def event_text(event: dict | None) -> str:
 
 
 # ---------------------------------------------------------------- 섹션 조립
-def _render_section(tag: str, items: Sequence[str], limit: int, sep: str = " · ", ref: str = "") -> str:
+def _render_section(tag: str, items: Sequence[str], limit: int, sep: str = " · ", ref: str = "",
+                    omitted: int = 0) -> str:
+    """섹션 한 줄. 상한을 넘으면 '… 외 N건' 으로 접는다 — `omitted` 는 총량 맞춤(`_fit_total`)이 이미 뺀 항목 수라 N 에 더한다."""
     head = f"[{tag}] "
     kept: list[str] = []
     used = len(head)
@@ -533,12 +535,14 @@ def _render_section(tag: str, items: Sequence[str], limit: int, sep: str = " · 
             continue
         add = (len(sep) if kept else 0) + len(text)
         if kept and used + add > limit:
-            line = head + sep.join(kept) + f"{sep}… 외 {len(items) - index}건"
+            line = head + sep.join(kept) + f"{sep}… 외 {len(items) - index + omitted}건"
             break
         kept.append(text)
         used += add
     else:
         line = head + sep.join(kept) if kept else head + "없음"
+        if omitted:
+            line += f"{sep}… 외 {omitted}건"
     return _with_ref(line, ref)
 
 
@@ -560,8 +564,14 @@ def _fit_total(sections: list[tuple], budget: int) -> str:
     항목발 참조가 하나도 없을 때만 붙는 기본 참조이고, 항목이 접혀도 사라지지 않는다.
     """
     work = [(s[0], list(s[1]), s[2], s[3], s[4] if len(s) > 4 else "") for s in sections]
+    total_n = [len(section[1]) for section in work]
+
+    def render(section: tuple, n: int) -> str:
+        # 총량 맞춤이 뺀 항목도 '… 외 N건' 에 센다 — 종전에는 뺀 수가 줄에 남지 않아 조용히 사라졌다.
+        return _render_section(*section, omitted=n - len(section[1]))
+
     for _ in range(4000):
-        lines = [_render_section(*section) for section in work]
+        lines = [render(section, n) for section, n in zip(work, total_n)]
         text = "\n".join(lines)
         if len(text) <= budget:
             return text
@@ -570,8 +580,9 @@ def _fit_total(sections: list[tuple], budget: int) -> str:
                 work[index][1].pop()
                 break
         else:
-            return text[:budget]
-    return "\n".join(_render_section(*section) for section in work)[:budget]
+            # 섹션마다 한 항목만 남았는데도 넘친다 — 글자로 끊지 않고 줄 경계에서 뒤 섹션을 빼며 그 수를 남긴다.
+            return fit_lines(lines, budget)
+    return fit_lines([render(section, n) for section, n in zip(work, total_n)], budget)
 
 
 def _first(values: Iterable[Any], default: Any = None) -> Any:
@@ -623,6 +634,8 @@ def _indexed_signals(state: dict, prefix: str, limit: int) -> list[tuple[str, di
     return out
 
 
+# ⚠ 배선 금지 — 실제 `state.build_state` 의 신호 모양(top.* 의 값이 dict)에서 dict 원문을 찍는다(WP1 S10 · R-23). snap 요약의
+# 정본은 `state._summary_lines` 다. 시험 `test_summarize_state_on_real_build_state_output` 이 xfail(strict) 로 그 사실을 잡는다.
 def _summarize_state(state: dict, context: dict) -> str:
     missing = state.get("missing") or {}
     gates = state.get("gates") or {}
@@ -769,9 +782,11 @@ def _summarize_diff(diff: dict, context: dict) -> str:
     stats = diff.get("stats") or {}
     sources = context.get("sources") or {}
 
+    # 스냅샷 라벨은 사람이 지은 글이다 — «» 안에 싣는다(WP1 S10 · R-3 의 생성 쪽).
     target = [
-        f"base {base.get('label') or ''} {str(base.get('snapshot_id') or '')[:8]} ir={str(base.get('ir_hash') or '')[:12]}",
-        f"→ target {target_side.get('label') or ''} {str(target_side.get('snapshot_id') or '')[:8]}"
+        f"base {_src_label(base.get('label'))} {str(base.get('snapshot_id') or '')[:8]}"
+        f" ir={str(base.get('ir_hash') or '')[:12]}",
+        f"→ target {_src_label(target_side.get('label'))} {str(target_side.get('snapshot_id') or '')[:8]}"
         f" ir={str(target_side.get('ir_hash') or '')[:12]}",
     ]
     for kind in ("mcad", "dyna", "dyna_result", "ecad"):
@@ -829,7 +844,7 @@ def _summarize_diff(diff: dict, context: dict) -> str:
         if event.get("excluded_reason"):
             continue
         kind = str(event.get("change_kind") or "none")
-        line = event_text(event)
+        line = _src_line(event_text(event))
         if event.get("confidence") == "low":
             line += " (confidence=low)"
         by_kind.setdefault(kind, []).append(line)
@@ -840,7 +855,13 @@ def _summarize_diff(diff: dict, context: dict) -> str:
         body = " · ".join(texts) + (f" · … 외 {extra}건" if extra > 0 else "")
         semantic_items.append(f"{kind}: {body}")
 
-    dims_items = [param_text(item) for item in parametric.get("dims_delta") or () if isinstance(item, dict)]
+    # 치수는 바뀐 것과 한쪽만 잰 것만 싣는다 — 변하지 않았거나 양쪽 다 못 잰 치수까지 실으면 섹션 상한을 그 줄들이 먹는다.
+    dims_all = [item for item in parametric.get("dims_delta") or () if isinstance(item, dict)]
+    dims_shown = [item for item in dims_all if item.get("flag") == "changed"
+                  or (item.get("before") is None) != (item.get("after") is None)]
+    dims_items = [_src_line(param_text(item)) for item in dims_shown]
+    if len(dims_all) > len(dims_shown):
+        dims_items.append(f"변화 없음 {len(dims_all) - len(dims_shown)}건")
     node_params = [i for i in parametric.get("node_params") or () if isinstance(i, dict) and i.get("flag") == "changed"]
     edge_params = [i for i in parametric.get("edge_params") or () if isinstance(i, dict) and i.get("flag") == "changed"]
     changed = node_params + edge_params
@@ -852,17 +873,18 @@ def _summarize_diff(diff: dict, context: dict) -> str:
             merged.append(item)
     if merged:
         dims_items.append("절대·상대 상위: " + " · ".join(
-            f"{param_text(item)}{_size_pct(item)}" for item in merged
+            f"{_src_line(param_text(item))}{_size_pct(item)}" for item in merged
         ))
 
-    material_items = [param_text(item) for item in parametric.get("materials") or () if isinstance(item, dict)]
+    material_items = [_src_line(param_text(item)) for item in parametric.get("materials") or () if isinstance(item, dict)]
     if not material_items:
         material_items = ["변경 0"]
 
     if comparability.get("result_parity") is True:
         result_rows = [i for i in parametric.get("result_delta") or () if isinstance(i, dict) and not i.get("excluded_reason")]
-        result_rows = sorted(result_rows, key=lambda i: (-abs(_num(i.get("rel_delta"))), str(i.get("cid"))))[:5]
-        result_items = [param_text(item) for item in result_rows] or ["변경 0"]
+        # 다 넘긴다 — 섹션 상한이 넘치는 뒤쪽을 '… 외 N건' 으로 센다(종전 앞 5건에서 말없이 끊었다).
+        result_rows = sorted(result_rows, key=lambda i: (-abs(_num(i.get("rel_delta"))), str(i.get("cid"))))
+        result_items = [_src_line(param_text(item)) for item in result_rows] or ["변경 0"]
     else:
         reason = _first(
             (i.get("excluded_reason") for i in parametric.get("result_delta") or () if isinstance(i, dict) and i.get("excluded_reason")),
@@ -885,6 +907,59 @@ def _summarize_diff(diff: dict, context: dict) -> str:
         ],
         SUMMARY_MAX,
     )
+
+
+def _src_label(label: Any) -> str:
+    return sanitize_source_text(label, "label", limit=0) if label else ""
+
+
+def _src_line(text: str) -> str:
+    """정규 표기 한 줄의 몸통(부품·재료·접촉 이름이 든 원천 글)을 «» 안에 넣고 끝의 참조는 밖에 둔다.
+
+    `«PLATE_1 min_dim 1.200→1.000 mm (−16.7%)» [c:44…]`. 위생의 길이 상한은 걸지 않는다 — 섹션 상한이 항목을 통째로
+    접고 '… 외 N건' 으로 센다.
+    """
+    body, refs = split_trailing_refs(text or "")
+    if not body:
+        return refs
+    return sanitize_source_text(body, "note", limit=0) + (f" {refs}" if refs else "")
+
+
+def settle_summary(text: str) -> tuple[str, str]:
+    """저장할 요약과 상태 — 판단어에 걸린 줄만 `shield_line` 으로 싸서 돌려준다(WP1 P-17). 상태는 늘 'ok' 다.
+
+    스냅샷·diff 는 불변이라 요약도 다시 만들어지지 않는다 — 감싸지 못한 원천 글 하나로 빈 글(lint_failed)을 남기면 그
+    요약이 영구히 빈다(폴백보다 못하다). 싼 뒤의 글은 린터가 깨끗하므로 'ok' 가 사실이고, 싼 자리는 글의 «» 로 보인다.
+    'shielded' 라는 상태를 따로 두지 않는 까닭은 저장 열의 CHECK(ok|lint_failed)다 — 이행은 표 생성·열 추가·인덱스 생성만
+    허용해 CHECK 를 넓힐 수 없다. 브리프 E1 은 줄마다 다시 싼다.
+    """
+    if lint_text(text)["ok"]:
+        return text, "ok"
+    return "\n".join(shield_line(line)[0] for line in text.split("\n")), "ok"
+
+
+def fit_lines(lines: Sequence[str], budget: int) -> str:
+    """줄 경계에서 budget 안으로 맞추고 뺀 줄 수를 `…(이하 N줄 생략)` 으로 남긴다 — 글자 단위로 끊으면 «…» 한가운데가
+    잘려 닫히지 않은 « 뒤가 린터에 드러나고(P-17), 무엇이 빠졌는지 남지 않았다."""
+    lines = [str(line) for line in lines]
+    text = "\n".join(lines)
+    if len(text) <= budget:
+        return text
+    kept: list[str] = []
+    used = 0
+    for index, line in enumerate(lines):
+        mark = f"…(이하 {len(lines) - index}줄 생략)"
+        if used + len(line) + 1 + len(mark) > budget:
+            return "\n".join([*kept, mark])
+        kept.append(line)
+        used += len(line) + 1
+    return "\n".join(kept)
+
+
+def diff_summary_text(diff: dict, context: dict | None = None) -> tuple[str, str]:
+    """`diff.py` 가 찾는 정본 생성기(WP1 S10 · R-22) — (summary_text, summary_status). 종전에는 이 이름이 없어 늘 폴백이
+    돌았다(의미 이벤트를 코드 이름순 앞 5건만, 변하지 않은 치수까지 전부, 2,000자에서 표식 없이 끊었다)."""
+    return settle_summary(_summarize_diff(diff or {}, dict(context or {})))
 
 
 def _json_word(value: Any) -> str:

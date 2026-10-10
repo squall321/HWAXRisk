@@ -1012,7 +1012,7 @@ def _summary_lines(ir: Mapping[str, Any], state: Mapping[str, Any]) -> list[str]
         # `<kind>_absent` 로 닫는다. 행만 보고 `present` 라 적으면 같은 요약의 [결측] 줄과 반대말이 된다.
         if kind not in sources or absent.get(f"{kind}_absent"):
             return "absent"
-        return sources[kind].get("source_hash") or "present"
+        return str(sources[kind].get("source_hash") or "present")[:12]
 
     source_line = " ".join(f"{kind}={source_word(kind)}" for kind in ("mcad", "dyna", "dyna_result", "ecad"))
     gate_line = " · ".join(f"{key} {_gate_word(g)}" for key, g in sorted(gates.items()))
@@ -1022,6 +1022,7 @@ def _summary_lines(ir: Mapping[str, Any], state: Mapping[str, Any]) -> list[str]
     rules_line = " · ".join(f"{h['rule']} {_rule_word(h)} [rule:{h['rule']}]" for h in state["rule_hits"])
     missing_line = " · ".join(k for k, v in sorted((ir.get("missing") or {}).items()) if v) or "없음"
     return [
+        # 소스 해시는 앞 12자만 싣는다(WP1 S10) — 64자리 넷이 [대상] 줄을 채웠다. 전체 해시는 IR 의 sources 에 있다.
         f"[대상] 스냅샷 {ir['snapshot_id'][:8]} ir_hash={ir['ir_hash'][:12]} 소스 {source_line}",
         f"[게이트] {gate_line}",
         f"[구조] 파일 {value('counts.files')} · 리프 {value('counts.leaf')} · 어셈블리 {value('counts.assemblies')} · "
@@ -1039,16 +1040,17 @@ def _summary_lines(ir: Mapping[str, Any], state: Mapping[str, Any]) -> list[str]
 
 
 def _summary_text(ir: Mapping[str, Any], state: Mapping[str, Any]) -> tuple[str, str]:
-    """summary_text 와 summary_status. render.py 가 있으면 그 생성기·린터를 쓴다(정본은 §3.4)."""
+    """summary_text 와 summary_status(WP1 S10 · R-23 · P-17).
+
+    정본은 이 모듈의 줄 조립(`_summary_lines`)이다 — render 의 `_summarize_state` 는 실제 state 모양에서 dict 원문을 찍어
+    배선하지 않는다. 글 전체를 2,000자에서 끊지 않는다 — 줄마다 신호의 상위 _TOP_K 건이라 길이가 정해져 있고, 종전 글자
+    절단은 맨 뒤의 [규칙]·[결측] 줄을 먼저 지웠다(결측이 '없음' 으로 읽힌다 — 사용자 지침 가). 좁은 창에서는 브리프 E1 이
+    줄 단위로 자르고 그 사실을 남긴다. 판단어 린터를 실제로 돌린다 — 종전에는 render 에 없는 이름을 찾아 한 번도 돌지
+    않았다. 걸린 줄은 «» 로 싸서 남긴다(스냅샷은 불변이라 빈 글로 굳히면 영구히 빈다).
+    """
     render = _render()
-    generator = getattr(render, "state_summary_text", None) if render else None
-    text = str(generator(state, ir)) if generator else "\n".join(_summary_lines(ir, state))
-    text = text[:2000]
-    linter = getattr(render, "lint", None) if render else None
-    status = "ok"
-    if linter is not None:
-        status = "ok" if linter(text) else "lint_failed"
-    return text, status
+    text = "\n".join(_summary_lines(ir, state))
+    return render.settle_summary(text) if render is not None else (text, "ok")
 
 
 # ---------------------------------------------------------------- 봉투 조립·저장

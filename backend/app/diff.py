@@ -1605,27 +1605,41 @@ def _summary_text(diff: Mapping[str, Any]) -> tuple[str, str]:
         f"[구조] +{stats['nodes_added']}파트 −{stats['nodes_removed']}파트 · 계면 +{stats['edges_added']}"
         f" −{stats['edges_removed']} · kind 변경 {stats['edges_kind_changed']}",
     ]
-    for event in diff["semantic"]["events"][:5]:
+    # 폴백(render 를 못 읽을 때만) — 원천 글은 «» 안에, 치수는 바뀐 것·한쪽만 잰 것만, 한도는 줄 경계에서 표식과 함께.
+    events = diff["semantic"]["events"]
+    for event in events[:5]:
         suffix = " (confidence=low)" if event["confidence"] == "low" else ""
-        lines.append(f"[의미] {event['text']}{suffix}")
+        lines.append(f"[의미] «{event['text']}»{suffix}")
+    if len(events) > 5:
+        lines.append(f"[의미] … 외 {len(events) - 5}건")
     if diff["semantic"]["blocked_by"]:
         lines.append(f"[의미] 생성 차단 [gate:{diff['semantic']['blocked_by']}]")
-    for item in diff["parametric"]["dims_delta"]:
-        lines.append(f"[치수] {item['text']}")
+    dims = diff["parametric"]["dims_delta"]
+    shown = [i for i in dims if i.get("flag") == "changed" or (i.get("before") is None) != (i.get("after") is None)]
+    for item in shown:
+        lines.append(f"[치수] «{item['text']}»")
+    if len(dims) > len(shown):
+        lines.append(f"[치수] 변화 없음 {len(dims) - len(shown)}건")
     for item in diff["parametric"]["materials"]:
-        lines.append(f"[재료] {item['text']}")
+        lines.append(f"[재료] «{item['text']}»")
     if comp["result_parity"]:
-        for item in diff["parametric"]["result_delta"][:5]:
+        for item in diff["parametric"]["result_delta"]:
             if item["flag"] == "changed":
-                lines.append(f"[결과] {item['text']}")
+                lines.append(f"[결과] «{item['text']}»")
     elif comp["result_reason"]:
         lines.append(f"[결과] 결과 비교 제외({comp['result_reason']})")
     for reason, count in (stats.get("excluded_by_reason") or {}).items():
         lines.append(f"[제외] {reason} {count}건")
     for seed in diff["character_seed"]:
         lines.append(f"[씨앗] {seed['tag']}")
-    text = "\n".join(lines)
-    return (text[:2000], "ok")
+    kept: list[str] = []
+    for index, line in enumerate(lines):
+        mark = f"…(이하 {len(lines) - index}줄 생략)"
+        if sum(len(x) + 1 for x in kept) + len(line) + 1 + len(mark) > 2000:
+            kept.append(mark)
+            break
+        kept.append(line)
+    return ("\n".join(kept), "ok")
 
 
 # ---------------------------------------------------------------- 저장(§3.1 · §5.2.2)

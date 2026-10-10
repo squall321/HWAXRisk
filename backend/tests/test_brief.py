@@ -1598,12 +1598,25 @@ def _label_pair(store, label: str) -> str:
     return factories.make_target(store, "diff", diff["diff_id"], agents=factories.agents())
 
 
+def legacy_summary(store, target_key: str) -> str:
+    """WP1 S10 이전에 저장된 요약 — 원천 글(부품 이름)을 «» 없이 날것으로 실었다. 지금 생산자는 그렇게 만들지 않고 스냅샷·diff 는
+    불변이라 옛 요약은 그대로 남는다(브리프 E1 이 줄마다 싸는 까닭). 생산자가 만든 요약에서 «» 만 걷어 그 모양을 되살린다."""
+    row = store.query_one("SELECT d.id, d.summary_text FROM rr_diffs d JOIN rr_targets t ON t.ref_id = d.id"
+                          " WHERE t.target_key = ?", (target_key,))
+    old = row["summary_text"].replace(render.QUOTE_OPEN, "").replace(render.QUOTE_CLOSE, "")
+    store.execute("UPDATE rr_diffs SET summary_text = ? WHERE id = ?", (old, row["id"]))
+    return old
+
+
 @pytest.mark.parametrize("label", ["HOOK_L", "PASSIVE_CAP", "BOOKMARK", "강화유리", "안전거리 스페이서"])
 def test_part_label_with_lexicon_word_does_not_kill_the_brief(risk_store, label):
-    """저장된 요약(E1)은 원천 문자열이 날것이다 — 모드와 무관하게 줄마다 싸서 싣고, strict 조립도 완주한다(R-3)."""
+    """저장된 요약(E1)은 원천 문자열이 날것일 수 있다(S10 이전 요약) — 모드와 무관하게 줄마다 싸서 싣고, strict 조립도
+    완주한다(R-3). 지금 생산자가 만든 요약은 이름을 «» 안에 싣고 린터가 깨끗하다(S10 · P-17)."""
     target_key = _label_pair(risk_store, label)
     summary = risk_store.query_one("SELECT summary_text FROM rr_diffs d JOIN rr_targets t ON t.ref_id = d.id"
                                    " WHERE t.target_key = ?", (target_key,))["summary_text"]
+    assert render.lint_text(summary)["ok"] and render.QUOTE_OPEN + label in summary, summary
+    summary = legacy_summary(risk_store, target_key)
     assert not render.lint_text(summary)["ok"], "요약에 이름이 날것으로 서지 않았다 — 이 시험은 아무것도 보지 않는다"
 
     built = brief.build_brief(risk_store, target_key, owner_sub="syn@example.com", strict_lint=True)
@@ -1659,7 +1672,8 @@ def test_every_line_shape_the_runner_can_carry_is_strict_clean(risk_store):
                    "[미변경 주체] [재검토·사람 제기] reg:", "[전작] voc:F6-2023#ISS-1 | "):
         assert any(line.startswith(prefix) for line in e5.split("\n")), (prefix, e5)
     assert built["meta"]["lint"]["ok"] is True
-    assert {s["item"] for s in built["meta"]["shielded"]} == {"E1"}, built["meta"]["shielded"]
+    # 요약은 이제 원천 글을 «» 로 싸서 저장한다(S10) — 방패를 걸 줄이 어느 항목에도 없다.
+    assert built["meta"]["shielded"] == [], built["meta"]["shielded"]
 
 
 def test_an_injection_in_a_stored_summary_line_becomes_a_placeholder(risk_store):

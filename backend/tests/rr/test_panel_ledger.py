@@ -594,7 +594,10 @@ def _diff_ledger(store, tmp_path, target_key: str) -> SimpleNamespace:
 
 def test_brief_shielded_reaches_panel_quality(risk_store, tmp_path, no_network):
     """부품 이름에 판단어가 든 합성 타깃 — 러너 길의 브리프가 죽지 않고, 무엇을 «» 로 쌌는지 패널 품질에 남는다."""
+    from tests.test_brief import legacy_summary
+
     synth = factories.make_diff_target(risk_store, 3, agents=factories.agents(("mech", "sim", "xd", "rel", "cam"), 3))
+    legacy_summary(risk_store, synth.target_key)            # S10 이전 요약 — 이름이 «» 밖에 날것으로 선다
     lg = _diff_ledger(risk_store, tmp_path, synth.target_key)
     _job(lg)
     out = _run(lg, LedgerEngine())

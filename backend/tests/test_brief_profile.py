@@ -91,7 +91,10 @@ def test_seat_contract_evidence_keeps_every_seated_domain():
 def test_mcp_brief_is_shielded_sized_for_js_and_frozen_for_the_token_panel(risk_store, monkeypatch):
     """MCP 브리프(`risk_get_brief`) — 이름에 판단어가 든 부품으로도 E500 이 아니라 방패를 싸서 싣고(웹과 같은 모드),
     크기는 JS 상한이며, 토큰의 패널에 그 조립을 동결한다(P-09). REST 미리보기는 동결하지 않는다."""
+    from tests.test_brief import legacy_summary
+
     synth = factories.make_diff_target(risk_store, 40, agents=factories.agents(("mech", "sim", "xd", "rel", "cam"), 3))
+    legacy_summary(risk_store, synth.target_key)            # S10 이전 요약 — 이름이 «» 밖에 날것으로 선다
     monkeypatch.setattr(routes, "get_store", lambda: risk_store)
     monkeypatch.setattr(routes.field_source, "for_target", lambda *a, **k: None)
     preview = routes.brief_payload(synth.target_key, "B", owner_sub=factories.OWNER, issue_token=True)
