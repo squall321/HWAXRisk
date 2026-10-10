@@ -27,8 +27,9 @@ class LedgerEngine:
     """
 
     def __init__(self, *, silent_first: bool = False, decisions: list[str] | None = None,
-                 fail_first: Exception | None = None) -> None:
+                 fail_first: Exception | None = None, turn_events: bool = False) -> None:
         self.silent_first = silent_first
+        self.turn_events = turn_events
         self.decisions = list(decisions or [])
         self.fail_first = fail_first
         self.calls: list[list[str]] = []
@@ -47,7 +48,8 @@ class LedgerEngine:
         return {
             "decision_text": decision,
             "turns": [{"round": r, "persona": k, "say": f"{k} 라운드 {r} 발언"} for r in (1, 2) for k in speakers],
-            "events": [{"kind": "personas", "personas": [{"key": k} for k in keys + [ADVERSARY]]}],
+            "events": [{"kind": "personas", "personas": [{"key": k} for k in keys + [ADVERSARY]]}]
+            + ([{"kind": "turn", "persona": k, "round": r} for r in (1, 2) for k in keys] if self.turn_events else []),
             "conv_id": f"conv-{len(self.calls)}", "report_id": len(self.calls), "call_path": "portal",
             "credential": "owner",
         }
@@ -132,6 +134,21 @@ def test_a_ledger_seat_that_never_spoke_sits_again_and_saves(ledger):
     assert _opinions(ledger.store, ledger.target_key, silent) == [(2, 1, "primary", 2)]
     cov = _coverage(ledger.store, ledger.target_key, silent)
     assert cov["status"] in ("done", "done_weak") and cov["retry"] == 1
+    assert planner.check_invariants(ledger.store, ledger.target_key) == []
+
+
+def test_a_seat_the_stream_heard_speak_keeps_its_opinion_row(ledger):
+    """발언 글(turns)이 비어도 스트림이 그 좌석의 발언 프레임을 봤으면 원장은 종결로 읽는다 — 그 좌석은 의견 행을 갖는다
+    (종결 좌석에 opinion_id 가 없으면 원장 불변식 (3) 이 깨진다)."""
+    _job(ledger)
+    engine = LedgerEngine(silent_first=True, turn_events=True)
+    first = _run(ledger, engine)
+    quiet = engine.calls[0][0]
+    assert first["status"] == "done"
+    cov = _coverage(ledger.store, ledger.target_key, quiet)
+    # 발언 글이 없으니 마지막 입장도 없다 — 종전처럼 기권(abstain)으로 종결된다.
+    assert cov["status"] == "abstain" and cov["opinion_id"]
+    assert _opinions(ledger.store, ledger.target_key, quiet) == [(1, 1, "primary", 0)]
     assert planner.check_invariants(ledger.store, ledger.target_key) == []
 
 

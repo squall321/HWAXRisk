@@ -1678,14 +1678,15 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
         ledger_seat = origin in ("primary", "counter")
         cycle = cycles.get(agent_key, 1) if ledger_seat else nonledger_cycle
         rows = grouped.get(agent_key) or []
-        if ledger_seat and not rows:
+        state = dict(attr_seats.get(agent_key) or {})
+        if ledger_seat and not rows and not int(state.get("turns_n") or 0):
             # 한 마디도 못 한 원장 좌석은 의견을 내지 않았다 — 행을 만들지 않는다(WP1 P-01). 좌석 원장은 이 좌석을 실패로
             # 읽어 같은 회차로 pending 에 되돌리므로, 행을 남기면 다음 패널에서 다시 앉아 저장할 때 그 회차에 걸린다.
+            # 발언 글이 없어도 스트림이 그 좌석의 발언 프레임을 셌으면(귀속 turns_n) 원장은 종결로 읽으므로 행을 둔다.
             out_seats.append({"agent_key": agent_key, "opinion_id": None, "turns_n": 0, "cited_refs_n": 0,
                               "cited_ir": False, "abstained": False})
             continue
         opinion_id = _opinion_id(panel_id, agent_key, cycle)
-        state = dict(attr_seats.get(agent_key) or {})
         my_atoms = [a for a in atoms if str(a.get("claim_uid")) in set(raised_by_seat.get(agent_key) or ())]
 
         refs: list[str] = []
