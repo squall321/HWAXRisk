@@ -375,10 +375,14 @@ def test_a_repersist_that_fails_again_leaves_the_seats_free(ledger, merge_breaks
 
 
 def test_repersist_refuses_when_the_seats_have_moved_on(ledger, merge_breaks):
-    """좌석이 다른 패널로 간 뒤에는 다시 저장하지 않는다 — 그 좌석의 의견이 남의 패널 이름으로 들어간다(R-5)."""
+    """좌석이 다른 패널로 간 뒤에는 다시 저장하지 않는다 — 그 좌석의 의견이 남의 패널 이름으로 들어간다(R-5).
+
+    좌석은 다시 저장을 포기한 뒤에야 다른 패널로 간다 — 그 전에는 재개해도 그 타깃을 편성하지 않는다(RR-ADV-1).
+    """
     job_id = _job(ledger)
     out = _run(ledger, LedgerEngine())
     merge_breaks["broken"] = False
+    runner.abandon_repersist(ledger.store, out["panel_id"])
     runner.resume_job(ledger.store, job_id, by=OWNER)
     engine = LedgerEngine()
     assert _run(ledger, engine)["status"] == "done"
@@ -387,6 +391,133 @@ def test_repersist_refuses_when_the_seats_have_moved_on(ledger, merge_breaks):
     assert exc.value.code == "seats_moved" and exc.value.http_status == 409
     assert {m["agent_key"] for m in exc.value.detail["moved"]} & set(engine.calls[0])
     assert _panel(ledger.store, out["panel_id"])["result_gz"] is not None
+
+
+# ---------------------------------------------------------------- 다시 저장을 기다리는 타깃은 편성하지 않는다(RR-ADV-1)
+def test_another_job_on_the_target_waits_for_the_repersist(ledger, merge_breaks):
+    """같은 타깃의 다른 잡이 그 좌석을 가져가면 저장해 둔 결과는 영영 다시 앉지 못한다(seats_moved) — 다시 저장(또는 포기)
+    전에는 그 타깃의 잡을 집지 않는다. 잡은 queued 로 남고(완료로 닫지 않는다) 까닭이 잡 행에 적힌다. 다시 저장하면 이어 돈다."""
+    _job(ledger)
+    out = _run(ledger, LedgerEngine())
+    second = _job(ledger)                                            # 웹의 잡 만들기에는 중복 검사가 없다
+    merge_breaks["broken"] = False                                   # 원인은 고쳤고 사람은 아직 다시 저장하지 않았다
+    assert runner.claim_next_job(ledger.store, ledger.cfg) is None
+    waiting = _job_row(ledger.store, second)
+    assert waiting["state"] == "queued" and waiting["error"].startswith("repersist_pending"), waiting
+    assert f"/api/panels/{out['panel_id']}/repersist" in waiting["error"] and "discard=1" in waiting["error"]
+
+    assert runner.repersist_panel(ledger.store, ledger.cfg, out["panel_id"])["status"] == "done"
+    engine = LedgerEngine()
+    assert _run(ledger, engine)["status"] == "done"
+    assert not set(engine.calls[0]) & set(_seats_of(ledger.store, out["panel_id"]))   # 다시 앉은 좌석은 다시 돌지 않는다
+    assert _job_row(ledger.store, second)["error"] is None                            # 집으면 기다린 까닭을 지운다
+
+
+def test_after_a_restart_a_queued_job_on_the_target_waits_for_the_repersist(ledger, monkeypatch):
+    """재기동 복구는 running 잡만 멈춘다 — 같은 타깃에 줄 서 있던 잡이 곧바로 그 좌석을 가져가면 안 된다. 복구 문구도
+    '재개하면 이어 돈다' 가 아니라 다시 저장(또는 포기) 먼저다."""
+    jobs = (_job(ledger), _job(ledger))
+
+    def crash(*_args, **_kwargs):
+        raise _Crash()
+
+    with monkeypatch.context() as patch, pytest.raises(_Crash):
+        patch.setattr(runner, "_complete_panel", crash)
+        _run(ledger, LedgerEngine())
+    runner.recover_running_panels(ledger.store)
+    panel_id = ledger.store.query_one("SELECT id FROM rr_panels WHERE error LIKE 'persist_error%'")["id"]
+    assert runner.claim_next_job(ledger.store, ledger.cfg) is None
+    rows = {job_id: _job_row(ledger.store, job_id) for job_id in jobs}
+    assert sorted(r["state"] for r in rows.values()) == ["paused", "queued"]
+    paused = next(r for r in rows.values() if r["state"] == "paused")
+    assert "재개하면 이어 돈다" not in paused["error"] and "다시 저장(또는 포기) 먼저" in paused["error"], paused
+    assert f"/api/panels/{panel_id}/repersist" in paused["error"]
+
+    assert runner.repersist_panel(ledger.store, ledger.cfg, panel_id)["status"] == "done"
+    assert _run(ledger, LedgerEngine())["status"] == "done"          # 다시 저장한 뒤에는 줄 선 잡이 이어 돈다
+
+
+def test_resuming_before_the_repersist_does_not_take_the_seats(ledger, merge_breaks):
+    """화면의 복구 버튼(재개)이나 잡 문구대로 재개해도 결과를 잃지 않는다 — 잡은 줄에서 기다리고, 다시 저장하면 이어 돈다."""
+    job_id = _job(ledger)
+    out = _run(ledger, LedgerEngine())
+    assert "다시 저장(또는 포기) 먼저" in _job_row(ledger.store, job_id)["error"]
+    merge_breaks["broken"] = False
+    runner.resume_job(ledger.store, job_id, by=OWNER)
+    assert runner.claim_next_job(ledger.store, ledger.cfg) is None
+    assert runner.repersist_panel(ledger.store, ledger.cfg, out["panel_id"])["status"] == "done"
+    assert _run(ledger, LedgerEngine())["status"] == "done"
+
+
+def test_abandoning_the_repersist_frees_the_target_and_keeps_the_result(ledger, merge_breaks):
+    """같은 결과로 다시 저장이 되풀이해 실패하면 사람이 포기할 길이 있어야 한다 — 없으면 그 타깃은 영영 멈춘다.
+    포기는 error 를 'persist_abandoned' 로 바꾸고 감사 행을 남긴다. 엔진 결과는 패널에 남고, 좌석은 다음 패널에서 다시 돈다."""
+    from app import routes
+
+    job_id = _job(ledger)
+    out = _run(ledger, LedgerEngine())
+    with pytest.raises(AppError) as exc:
+        runner.repersist_panel(ledger.store, ledger.cfg, out["panel_id"])      # 원인이 그대로라 또 실패한다
+    assert exc.value.code == "persist_failed"
+    with factories.routes_store(ledger.store):
+        with pytest.raises(AppError) as exc:
+            routes.post_panel_repersist(out["panel_id"], discard=True, ident=factories.ident("stranger@example.com"))
+        assert exc.value.http_status == 404
+        body = routes.post_panel_repersist(out["panel_id"], discard=True, ident=factories.ident(OWNER))
+    assert body["status"] == "error" and body["abandoned"] is True
+    assert body["error"].startswith("persist_abandoned:") and "디스크가 찼다" in body["error"]
+    panel = _panel(ledger.store, out["panel_id"])
+    assert panel["error"] == body["error"] and panel["result_gz"] is not None and panel["decision_text"] == DECISION
+    audit = ledger.store.query_one("SELECT actor, scope, action FROM rr_audit WHERE subject_id = ?", (out["panel_id"],))
+    assert dict(audit) == {"actor": OWNER, "scope": "panel", "action": "panel.repersist_discard"}
+    assert runner._uncharged_code(body["error"]) == "persist_abandoned"        # 좌석·엔진 탓이 아니다(연속 실패에 세지 않는다)
+    with pytest.raises(AppError) as exc:
+        runner.abandon_repersist(ledger.store, out["panel_id"])               # 이미 포기했다
+    assert (exc.value.code, exc.value.http_status) == ("not_awaiting_repersist", 409)
+
+    merge_breaks["broken"] = False
+    runner.resume_job(ledger.store, job_id, by=OWNER)
+    engine = LedgerEngine()
+    assert _run(ledger, engine)["status"] == "done"
+    assert set(engine.calls[0]) == set(_seats_of(ledger.store, out["panel_id"]))   # 같은 좌석이 다시 돌았다
+    assert planner.check_invariants(ledger.store, ledger.target_key) == []
+
+
+def test_the_brief_preview_does_not_plan_over_a_result_that_awaits_repersist(ledger, merge_breaks):
+    """웹 브리프 탭(GET /targets/{key}/brief)은 planned 패널이 없으면 그 자리에서 편성한다 — 그 편성이 다시 저장을 기다리는
+    패널의 좌석을 가져가면 탭을 열기만 해도 결과를 잃는다. 기다리는 동안은 편성하지 않고 그 까닭을 싣는다."""
+    from app import routes
+
+    _job(ledger)
+    out = _run(ledger, LedgerEngine())
+    merge_breaks["broken"] = False
+    with factories.routes_store(ledger.store):
+        brief = routes.get_brief(ledger.target_key, tier="C", ident=factories.ident(OWNER))
+    assert brief["panels"] == []
+    assert [p["panel_id"] for p in brief["repersist_pending"]] == [out["panel_id"]]
+    assert runner.repersist_panel(ledger.store, ledger.cfg, out["panel_id"])["status"] == "done"
+
+
+def test_the_guide_says_repersist_first_while_a_result_waits(ledger, merge_breaks):
+    """길잡이(risk_next_step)가 '재개하면 이어 돈다' 만 말하면 그대로 따른 사람이 결과를 잃었다 — 다시 저장(또는 포기)
+    먼저이고 그 전에는 재개해도 이 타깃은 기다린다고 말하고, 다시 저장하는 길을 막힘에 싣는다(MCP 도구는 아직 없다)."""
+    from app import entry, routes
+
+    job_id = _job(ledger)
+    out = _run(ledger, LedgerEngine())
+    project_id = ledger.store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?",
+                                        (ledger.target_key,))["project_id"]
+    with factories.routes_store(ledger.store):
+        routes.add_source(project_id, routes.SourceBody(kind="mcad", ref={"stepforge_project_id": "SF-1"}),
+                          ident=factories.ident(OWNER))
+        guide = entry.next_step(factories.ident(OWNER), project_id=project_id)
+    assert guide["where"] == "paused", guide
+    step = guide["next"][0]
+    assert step["tool"] == "risk_job_action" and step["args"] == {"job_id": job_id, "action": "resume"}
+    assert "다시 저장(또는 포기) 먼저" in step["why"] and "재개해도 이 타깃은 기다린다" in step["why"], step
+    blocked = {b["code"]: b for b in guide["blocked"]}
+    assert f"/api/panels/{out['panel_id']}/repersist" in blocked["repersist_pending"]["fix"]
+    assert blocked["repersist_pending"]["panels"] == [out["panel_id"]]
 
 
 def test_repersist_needs_an_error_panel_with_a_saved_result_on_an_idle_target(ledger, merge_breaks):

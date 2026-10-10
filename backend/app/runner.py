@@ -65,11 +65,16 @@ BRIEF_RETRY_MAX = 3
 BRIEF_TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (sqlite3.OperationalError, httpx.HTTPError, OSError)
 # 엔진은 끝났는데 그 결과를 원장에 앉히지 못한 패널(WP1 R-2). 결과 원문은 패널(rr_panels.result_gz)에 먼저 적혀 있어
 # `POST /api/panels/{id}/repersist` 로 다시 앉힌다 — 좌석·엔진 탓이 아니다. 재기동이 저장 도중을 끊었으면 'persist_error: restart'.
+# 그런 패널이 남은 타깃은 다시 저장하거나 포기하기 전까지 새 패널을 편성하지 않는다(awaiting_repersist, RR-ADV-1).
 PERSIST_ERROR_CODE = "persist_error"
+# 사람이 다시 저장을 포기한 패널(`…/repersist?discard=1`) — 엔진 결과는 패널에 남고 좌석은 다음 패널에서 다시 돈다.
+PERSIST_ABANDONED_CODE = "persist_abandoned"
 # 좌석 재시도와 연속 실패(ENGINE_FAIL_STREAK)에 세지 않는 패널 error 코드 — 좌석 탓이 아닌 중단이다. 세면 좌석과
 # 무관한 일 세 번에 그 좌석이 skipped 로 굳고 잡이 죽는다.
 UNCHARGED_CODES: tuple[str, ...] = (*STREAM_LOST_CODES, RESTART_CODE, *NO_DECISION_CODES, *UNSTARTED_CODES,
-                                    BRIEF_ERROR_CODE, BRIEF_RETRY_CODE, PERSIST_ERROR_CODE)
+                                    BRIEF_ERROR_CODE, BRIEF_RETRY_CODE, PERSIST_ERROR_CODE, PERSIST_ABANDONED_CODE)
+# 다시 저장을 기다리는 타깃의 잡이 줄에서 기다리는 까닭(잡 행 error) — 집으면 지운다.
+REPERSIST_PENDING_CODE = "repersist_pending"
 PROGRESS_WRITE_INTERVAL_S = 60     # 도는 패널의 '마지막 신호' 를 잡 행에 적는 간격 — 줄마다 적으면 15초 ping 이 DB 를 두드린다
 
 # 러너 정본 경로가 부르는 모듈 함수(없으면 잡을 집지 않고 error 로 강등한다 — 반쪽 저장 방지).
@@ -895,10 +900,11 @@ def claim_next_job(store: Any, settings: Any | None = None) -> dict | None:
             _set_job(store, row["id"], "queued")
 
     for row in store.query(
-        "SELECT id, target_key, owner_sub, tier, state, params_json, panels_done, panels_total"
+        "SELECT id, target_key, owner_sub, tier, state, params_json, panels_done, panels_total, error"
         " FROM rr_jobs WHERE state IN ('queued', 'running', 'cancelling') ORDER BY created_at ASC, id ASC"
     ):
         job = dict(row)
+        last_error = job.pop("error")
         if job["state"] == "cancelling":
             _set_job(store, job["id"], "cancelled")
             continue
@@ -906,6 +912,14 @@ def claim_next_job(store: Any, settings: Any | None = None) -> dict | None:
             "SELECT id FROM rr_panels WHERE target_key = ? AND status = 'running' LIMIT 1", (job["target_key"],)
         )
         if busy is not None:
+            continue
+        waiting = awaiting_repersist(store, job["target_key"])
+        if waiting:
+            # 다시 저장을 기다리는 패널의 좌석은 pending 으로 돌아와 있다 — 이 잡이 편성하면 그 좌석을 가져가 저장해 둔
+            # 결과가 영영 다시 앉지 못한다(seats_moved). 잡은 queued 그대로 건너뛰고(완료로 닫지 않는다) 까닭을 잡 행에 적는다.
+            note = repersist_pending_note(waiting)
+            if last_error != note:
+                store.execute("UPDATE rr_jobs SET error = ?, updated_at = ? WHERE id = ?", (note, now_epoch(), job["id"]))
             continue
         if _panels_today(store, job["target_key"]) >= int(cfg.risk_daily_panel_cap):
             _set_job(store, job["id"], "paused", reason="daily_cap")
@@ -934,8 +948,56 @@ def claim_next_job(store: Any, settings: Any | None = None) -> dict | None:
 
 # ---------------------------------------------------------------- 재기동 복구(plan §6.7.2 끝 문단)
 def _repersist_hint(panel_id: str) -> str:
-    """다시 저장하는 길 — 화면에 그 버튼이 생기기 전까지 사람이 부를 수 있는 REST 경로를 문구에 적는다."""
-    return f"'다시 저장'(POST /api/panels/{panel_id}/repersist)"
+    """다시 저장하는 길 — 화면에 그 버튼이 생기기 전까지 사람이 부를 수 있는 REST 경로를 문구에 적는다(포기하는 길과 함께)."""
+    return f"'다시 저장'(POST /api/panels/{panel_id}/repersist — 포기하려면 같은 경로에 ?discard=1)"
+
+
+# 다시 저장 전에 재개하거나 다른 잡을 세운 사람에게 하는 말 — 그 타깃은 편성되지 않고 기다린다.
+REPERSIST_FIRST = "다시 저장(또는 포기) 먼저 — 그 전에는 재개해도 이 타깃은 기다린다"
+
+
+def awaiting_repersist(store: Any, target_key: str) -> list[dict]:
+    """다시 저장을 기다리는 패널 — 엔진 결과가 패널에 있고(result_gz) persist_error 로 닫혔다. `repersist_panel` 의 전제다.
+
+    이런 패널이 남은 타깃은 새 패널을 편성하지 않는다(러너 집기·브리프 미리보기). 그 패널은 좌석을 차감 없이 pending 으로
+    돌려놓았으므로 새 패널이 그 좌석을 가져가면 다시 저장이 영영 seats_moved 로 거절되고, 몇 시간짜리 결과를 버린 채 같은
+    좌석을 다시 돌린다(RR-ADV-1). 좌석 하나하나를 후보에서 빼지 않고 타깃을 기다리게 한다 — 남은 좌석이 전부 묶이면
+    편성기가 None 을 내 잡이 좌석이 pending 인 채 completed 로 닫힌다. 막힘은 다시 저장이나 포기(abandon_repersist)로 풀린다.
+    """
+    rows = store.query(
+        "SELECT id, panel_no, error FROM rr_panels WHERE target_key = ? AND status = 'error' AND result_gz IS NOT NULL"
+        " ORDER BY panel_no", (target_key,))
+    return [dict(r) for r in rows if _uncharged_code(r["error"]) == PERSIST_ERROR_CODE]
+
+
+def repersist_pending_note(waiting: Sequence[Mapping[str, Any]]) -> str:
+    """다시 저장을 기다리는 타깃의 잡이 줄에서 기다리는 까닭 — 잡 행 error 와 길잡이 막힘이 같은 글을 쓴다."""
+    panels = " · ".join(f"패널 {p['id']}(#{p['panel_no']}) 은 {_repersist_hint(p['id'])} 로 다시 앉힌다" for p in waiting)
+    return (f"{REPERSIST_PENDING_CODE}: 이 타깃에는 엔진 결과가 다시 저장을 기다리는 패널이 있다 — {panels}."
+            " 그 전에는 이 타깃에 새 패널을 편성하지 않는다(잡은 줄에서 기다린다)")
+
+
+def abandon_repersist(store: Any, panel_id: str) -> dict:
+    """다시 저장을 포기한다 — `POST /api/panels/{id}/repersist?discard=1` 의 본체.
+
+    error 를 'persist_abandoned: …' 로 바꿔(앞 사유는 뒤에 남긴다) 그 타깃이 다시 편성되게 한다. 엔진 결과(result_gz)·결정문·
+    대화 번호는 패널에 그대로 남고, 좌석은 이미 차감 없이 pending 이라 다음 패널에서 다시 돈다. 같은 결과로 다시 저장이
+    되풀이해 실패할 때(persist_failed)의 탈출구다 — 이 길이 없으면 그 타깃은 영영 멈춘다.
+    오류 — 404 E404·result_absent · 409 not_awaiting_repersist(persist_error 로 닫힌 패널이 아니다 — 이미 포기·저장했다).
+    """
+    row = store.query_one("SELECT status, error, result_gz IS NOT NULL AS has_result FROM rr_panels WHERE id = ?",
+                          (panel_id,))
+    if row is None:
+        raise AppError("E404", f"패널을 찾을 수 없습니다 — {panel_id}.", 404)
+    if not row["has_result"]:
+        raise AppError("result_absent", "이 패널에는 저장된 엔진 결과가 없다 — 다시 저장을 기다리는 패널이 아니다.", 404)
+    if row["status"] != "error" or _uncharged_code(row["error"]) != PERSIST_ERROR_CODE:
+        raise AppError("not_awaiting_repersist", f"다시 저장을 기다리는 패널이 아니다 — {row['status']}"
+                       + (f": {row['error']}" if row["error"] else "") + ".", 409)
+    error = (f"{PERSIST_ABANDONED_CODE}: 사람이 다시 저장을 포기했다 — 엔진 결과는 패널에 남고 좌석은 다음 패널에서 다시 돈다."
+             f" 앞 사유 — {row['error']}")
+    store.execute("UPDATE rr_panels SET error = ? WHERE id = ? AND status = 'error'", (error, panel_id))
+    return {"panel_id": panel_id, "status": "error", "error": error, "abandoned": True}
 
 
 def recover_running_panels(store: Any) -> dict:
@@ -946,9 +1008,11 @@ def recover_running_panels(store: Any) -> dict:
     queued 로 돌려, 기동 직후 첫 틱이 같은 좌석을 엔진에 다시 보냈다(같은 심의가 공유 LLM 에 겹쳐 돈다). 재배포
     세 번이면 좌석이 skipped 로 굳었다 — 벽시계가 12시간이라 패널 도중의 재기동은 드문 일이 아니다.
     엔진 결과가 이미 패널에 저장된(result_gz) running 패널은 저장 도중에 끊긴 것이다 — 엔진은 끝났으므로 다시 돌리지
-    않고 'persist_error: restart' 로 닫아 다시 저장을 기다린다(WP1 R-2).
-    패널이 끊긴 잡은 멈춘다(사람이 재개하면 이어 돈다). 패널 사이에 있던 잡(running 인데 도는 패널이 없다)은
-    겹칠 심의가 없으니 queued 로 돌린다. cancelling 은 건드리지 않는다 — 다음 편성에서 cancelled 가 된다.
+    않고 'persist_error: restart' 로 닫아 다시 저장을 기다린다(WP1 R-2). 그 타깃은 다시 저장(또는 포기)하기 전까지
+    편성되지 않는다(awaiting_repersist) — 같은 타깃에 줄 선 잡도 그 좌석을 가져가지 않는다.
+    패널이 끊긴 잡은 멈춘다(사람이 재개하면 이어 돈다 — 결과가 저장된 패널이 있으면 다시 저장이 먼저다). 패널 사이에 있던
+    잡(running 인데 도는 패널이 없다)은 겹칠 심의가 없으니 queued 로 돌린다. cancelling 은 건드리지 않는다 — 다음 편성에서
+    cancelled 가 된다.
     """
     rows = store.query(
         "SELECT id, target_key, result_gz IS NOT NULL AS has_result FROM rr_panels WHERE status = 'running'"
@@ -971,11 +1035,14 @@ def recover_running_panels(store: Any) -> dict:
     for job in store.query("SELECT id, target_key FROM rr_jobs WHERE state = 'running'"):
         if job["target_key"] in cut_targets:
             saved = cut_targets[job["target_key"]]
-            tail = "".join(f". 엔진 결과가 저장된 패널 {pid} 은 {_repersist_hint(pid)} 로 다시 앉힌다" for pid in saved)
+            # 결과가 저장된 패널이 있으면 '재개하면 이어 돈다' 를 말하지 않는다 — 그대로 따른 사람이 다시 저장 전에 재개해
+            # 그 좌석이 새 패널로 가면 결과를 잃었다(지금은 재개해도 다시 저장 전에는 편성되지 않는다).
+            tail = (" " + " ".join(f"엔진 결과가 저장된 패널 {pid} 은 {_repersist_hint(pid)} 로 다시 앉힌다." for pid in saved)
+                    + f" {REPERSIST_FIRST}") if saved else " 재개하면 이어 돈다"
             # 사유는 잡의 error 에 적는다(pause_reason 은 CHECK 로 세 값만 받는다).
             _set_job(store, job["id"], "paused", by=f"code:{RESTART_CODE}",
                      error=f"{RESTART_CODE}: 앱이 재기동해 도는 패널을 닫았다 — 엔진 쪽 심의는 계속 돌 수 있다."
-                           " 잡을 멈췄다(좌석 재시도는 차감하지 않았다). 재개하면 이어 돈다" + tail)
+                           " 잡을 멈췄다(좌석 재시도는 차감하지 않았다)." + tail)
             paused += 1
         else:
             _set_job(store, job["id"], "queued")
@@ -1367,11 +1434,13 @@ def _close_panel_persist_error(store: Any, panel: Mapping[str, Any], job: Mappin
          now_epoch(), panel["id"]))
     if result_saved:
         kept = f"엔진 결과는 패널에 저장돼 있다 — 원인을 고친 뒤 {_repersist_hint(panel['id'])} 로 다시 앉힌다"
+        then = f". {REPERSIST_FIRST}"
     else:
         kept = f"엔진 결과를 패널에 저장하지 못했다 — 포털 대화 {result.get('conv_id')} 에 발언이 남아 있다"
+        then = ""
     _pause_running_job(store, job, PERSIST_ERROR_CODE,
                        f"{PERSIST_ERROR_CODE}: 패널 결과를 원장에 앉히지 못했다({why}). {kept}."
-                       " 잡을 멈췄다(좌석 재시도는 차감하지 않았다)")
+                       " 잡을 멈췄다(좌석 재시도는 차감하지 않았다)" + then)
     return {"panel_id": panel["id"], "status": "error", "error": error}
 
 

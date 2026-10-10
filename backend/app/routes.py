@@ -2738,9 +2738,12 @@ def brief_payload(target_key: str, tier: str = "B", *, owner_sub: str | None = N
         "SELECT id, target_key, owner_sub, panel_no, tier, seats_json, modifiers_json, rounds, budget_json,"
         " status FROM rr_panels WHERE target_key = ? AND status = 'planned' ORDER BY panel_no", (target_key,))
     panels = [_planned_panel(r) for r in rows]
+    # 다시 저장을 기다리는 패널이 있으면 새로 편성하지 않는다 — 그 패널이 pending 으로 돌려놓은 좌석을 이 편성이 가져가면
+    # 브리프 탭을 열기만 해도 저장해 둔 결과가 영영 다시 앉지 못한다(RR-ADV-1). 막힘과 푸는 길은 응답의 repersist_pending 이다.
+    waiting = runner.awaiting_repersist(store, target_key) if panel_id is None and not panels else []
     if panel_id is not None:
         panels = [p for p in panels if p["id"] == panel_id]
-    elif not panels:
+    elif not panels and not waiting:
         # 편성은 결정론이라 멱등이다(§8.2.5 risk_get_brief 주석).
         fresh = planner.plan_next_panel(store, target_key, tier)
         if fresh is not None:
@@ -2801,6 +2804,10 @@ def brief_payload(target_key: str, tier: str = "B", *, owner_sub: str | None = N
     # §6.11 — actor 가 타깃 owner 로 해석되지 않으면 이유를 남긴다(게이트웨이 신고값은 미검증).
     if actor is not None and actor != target["owner_sub"]:
         payload["reason"] = "caller_unresolved"
+    if waiting:
+        payload["repersist_pending"] = [{"panel_id": p["id"], "panel_no": p["panel_no"], "error": p["error"]}
+                                        for p in waiting]
+        payload["repersist_notice"] = runner.repersist_pending_note(waiting)
     return payload
 
 
@@ -3032,21 +3039,31 @@ def post_panel_complete(panel_id: str, body: PanelCompleteBody,
 
 
 @router.post("/panels/{panel_id}/repersist")
-def post_panel_repersist(panel_id: str, ident: identity.Identity = Depends(identity.current)) -> dict:
+def post_panel_repersist(panel_id: str, discard: bool = False,
+                         ident: identity.Identity = Depends(identity.current)) -> dict:
     """persist_error 로 닫힌 패널을 저장된 엔진 결과로 다시 앉힌다(과제 editor 이상, WP1 R-2).
 
     200 {panel_id, status:'done', level, coverage, findings_n, …} · 404 result_absent · 409 not_error · target_busy ·
     seats_moved({moved:[…]}) · 422 persist_failed. 본체는 runner.repersist_panel 이고 rr_audit 에 한 행이 남는다.
+
+    `?discard=1` 은 다시 저장을 포기한다(RR-ADV-1) — 다시 저장을 기다리는 패널이 남은 타깃은 편성되지 않으므로, 같은 결과로
+    다시 저장이 되풀이해 실패하면 이것이 그 타깃을 푸는 길이다. 200 {panel_id, status:'error', error:'persist_abandoned: …',
+    abandoned:true} · 409 not_awaiting_repersist. 엔진 결과는 패널에 남는다. 본체는 runner.abandon_repersist.
     """
     email = _require_user(ident)
     store = get_store()
     row = store.query_one(
-        "SELECT p.id, t.project_id FROM rr_panels p JOIN rr_targets t ON t.target_key = p.target_key WHERE p.id = ?",
-        (panel_id,))
+        "SELECT p.id, p.error, t.project_id FROM rr_panels p JOIN rr_targets t ON t.target_key = p.target_key"
+        " WHERE p.id = ?", (panel_id,))
     if row is None:
         raise AppError("E404", f"패널을 찾을 수 없습니다 — {panel_id}.", 404)
     if not _is_admin(ident):
         require_role(row["project_id"], email, "editor")
+    if discard:
+        out = runner.abandon_repersist(store, panel_id)
+        _audit(store, email, scope="panel", subject_id=panel_id, project_id=row["project_id"],
+               action="panel.repersist_discard", before={"error": row["error"]}, after={"error": out["error"]})
+        return out
     out = runner.repersist_panel(store, config.settings, panel_id)
     _audit(store, email, scope="panel", subject_id=panel_id, project_id=row["project_id"], action="panel.repersist",
            after={"status": out["status"], "level": out.get("level"), "findings_n": out.get("findings_n")})

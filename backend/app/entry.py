@@ -618,6 +618,17 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
     # 8. 잡
     job = coverage["job"]
     facts["job"] = job
+    # 엔진 결과가 다시 저장을 기다리는 패널 — 그 전에는 재개해도·새 잡을 세워도 이 타깃은 편성되지 않는다(RR-ADV-1).
+    # 다시 저장은 아직 MCP 도구도 화면 버튼도 없어 REST 경로를 고칠 곳으로 준다.
+    waiting = runner.awaiting_repersist(store, target_key)
+    if waiting:
+        paths = " · ".join(f"POST /api/panels/{p['id']}/repersist" for p in waiting)
+        blocked.append(_blocked(
+            runner.REPERSIST_PENDING_CODE,
+            f"엔진 결과가 다시 저장을 기다리는 패널이 {len(waiting)}건 있다 — {runner.REPERSIST_FIRST}(새 잡도 기다린다).",
+            f"원인을 고친 뒤 {paths} 로 다시 앉힌다(지금은 REST 로만 된다). 같은 결과로 다시 저장이 되풀이해 실패하면 같은"
+            " 경로에 ?discard=1 로 포기한다 — 엔진 결과는 패널에 남고 좌석은 다음 패널에서 다시 돈다.",
+            panels=[p["id"] for p in waiting]))
     jobs = [dict(r) for r in store.query(
         "SELECT tier, state FROM rr_jobs WHERE target_key = ? ORDER BY created_at DESC, rowid DESC", (target_key,))]
     done_tiers = {j["tier"] for j in jobs if j["state"] == "completed"}
@@ -638,6 +649,9 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
         why = {"restart": "앱이 재기동해 도는 패널을 닫고 잡을 멈췄다 — 재개하면 이어 돈다.",
                "diminishing": "최근 패널이 새 리스크를 거의 내지 않아 멈췄다 — 더 돌릴지 사용자에게 묻는다."}.get(
             reason, "멈춘 잡이다 — 재개하면 이어 돈다.")
+        if waiting:
+            # 종전에는 '재개하면 이어 돈다' 만 말해 그대로 따르면 다른 패널이 그 좌석을 가져가 결과를 잃었다.
+            why = f"멈춘 잡이다 — {runner.REPERSIST_FIRST}(blocked 의 {runner.REPERSIST_PENDING_CODE})."
         return answer("paused", [_step("risk_job_action", {"job_id": job["id"], "action": "resume"}, why), *watch])
     if job is not None and job["state"] == "completed" and next_tier is None:
         return answer("done", [
