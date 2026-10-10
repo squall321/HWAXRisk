@@ -167,6 +167,33 @@ def test_a_finding_the_panel_rejected_reaches_the_registry_as_rejected(frozen, n
     assert all(r["rejected"] == 0 and r["status"] == "open" for c, r in rows.items() if c != rejected["claim"])
 
 
+def test_the_report_and_the_domain_filter_read_the_keys_the_schema_writes(frozen, no_network):
+    """보고서 조립은 risk_spec 스키마의 키(cross_domain 의 from_domain·to_domain·path, open_items 의 question)를 읽고,
+    등록부의 영역 필터는 병합이 쓰는 키(domains·owner_domain)를 읽는다(WP4 0d). 종전에는 각각 빈칸·0행이었다."""
+    target = MANIFEST["targets"]["planned"]
+    panel = frozen.query_one("SELECT seats_json FROM rr_panels WHERE id = ?", (target["panel_id"],))
+    seats = [s["key"] for s in json.loads(panel["seats_json"])]
+    spec = legacy.spec_builder(frozen, target["target_key"], planner.domain_of)(seats)
+    domain = spec["findings"][0]["domain"]
+    spec["cross_domain"] = [{"id": "X1", "from_domain": domain, "to_domain": "rel", "path": "두께 감소가 접합부 피로 수명을 줄인다",
+                             "cites": [], "raised_by": [seats[0]]}]
+    spec["open_items"] = [{"id": "O1", "question": "접합부 피로 시험을 다시 할 것인가",
+                           "resolving_check": {"kind": "test", "ref": "접합부 피로 시험"}, "owner_domain": "rel"}]
+
+    routes.complete_panel(
+        target["panel_id"], engine="mcp", decision_text=legacy.decision_text(spec),
+        turns=[{"round": r, "persona": k, "say": f"{k} 라운드 {r} 발언"} for r in (1, 2) for k in seats],
+        actor=OWNER, owner_sub=OWNER)
+
+    report = registry.build_report(frozen, target["target_key"])
+    results = "\n".join(report["blocks"]["results"])
+    assert f"{domain}→rel" in results and "«두께 감소가 접합부 피로 수명을 줄인다»" in results
+    assert "open_item: 접합부 피로 시험을 다시 할 것인가" in report["blocks"]["recommendation"]
+    filtered = routes.registry_payload(target["target_key"], owner_sub=OWNER, domain=domain)["rows"]
+    assert filtered and all(domain in r["merged"]["domains"] for r in filtered)
+    assert routes.registry_payload(target["target_key"], owner_sub=OWNER, domain="rf")["rows"] == []
+
+
 def test_a_second_panel_on_the_done_target_saves_beside_the_old_adversary_row(frozen, no_network):
     """옛 코드가 회차 1 로 남긴 반대석 의견 행이 있는 DB 에서 같은 타깃의 두 번째 패널이 저장된다(WP1 R-1 의 옛 DB 쪽).
 

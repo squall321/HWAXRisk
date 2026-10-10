@@ -2329,7 +2329,10 @@ def registry_payload(target_key: str, *, owner_sub: str | None = None, status: s
     if severity:
         rows = [r for r in rows if r["severity"] == severity]
     if domain:
-        rows = [r for r in rows if str((r.get("merged") or {}).get("domain") or "") == domain]
+        # 병합 행에는 domain 이 없다 — 제기 원자들의 영역(domains)과 대표의 소유 영역(owner_domain)이 있다. domain 을 읽던
+        # 동안 이 필터(와 MCP risk_get_registry 의 domain)는 늘 0행이었다(WP4 2.2 ⑤).
+        rows = [r for r in rows if domain in (r.get("merged") or {}).get("domains", ())
+                or str((r.get("merged") or {}).get("owner_domain") or "") == domain]
     truncated = limit is not None and len(rows) > int(limit)
     if limit is not None:
         rows = rows[: int(limit)]

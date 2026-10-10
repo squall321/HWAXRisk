@@ -1146,17 +1146,21 @@ def _character_lines(store: RiskStore, project_id: str) -> list[str]:
 
 
 def _cross_domain_lines(panels: list[dict]) -> list[str]:
-    """패널 risk_spec 의 cross_domain 항목을 패널 순서대로 모은다(plan §4.7.3 results (d))."""
+    """패널 risk_spec 의 cross_domain 항목을 패널 순서대로 모은다(plan §4.7.3 results (d)).
+
+    키는 risk_spec 스키마의 것이다 — `from_domain`·`to_domain`·`path`. 종전에는 `claim`·`text`·`domains` 를 읽어 모든 줄이
+    '패널 1 ·  · «»' 였다(WP4 2.2 ④). 옛 키도 받는다. 글은 자르지 않는다(스키마가 path 를 400자로 묶는다)."""
     out: list[str] = []
     for p in panels:
         spec = _loads(p["risk_spec_json"], {})
         for item in _as_list(spec.get("cross_domain")):
             if isinstance(item, dict):
-                text = _clean_str(item.get("claim")) or _clean_str(item.get("text"))
-                pair = "↔".join(str(d) for d in _as_list(item.get("domains")))
-                out.append(f"패널 {p['panel_no']} · {pair} · «{text[:160]}»")
+                text = _clean_str(item.get("path")) or _clean_str(item.get("claim")) or _clean_str(item.get("text"))
+                ends = [d for d in (_clean_str(item.get("from_domain")), _clean_str(item.get("to_domain"))) if d]
+                pair = "→".join(ends) if ends else "↔".join(str(d) for d in _as_list(item.get("domains")))
+                out.append(f"패널 {p['panel_no']} · {pair} · «{text}»")
             else:
-                out.append(f"패널 {p['panel_no']} · «{_clean_str(item)[:160]}»")
+                out.append(f"패널 {p['panel_no']} · «{_clean_str(item)}»")
     return out or ["(항목 없음)"]
 
 
@@ -1294,7 +1298,8 @@ def build_report(store: RiskStore, target_key: str) -> dict:
             if text and text not in conditions:
                 conditions.append(text)
         for item in _as_list(spec.get("open_items")):
-            text = _clean_str(item if not isinstance(item, dict) else item.get("text"))
+            # 스키마의 키는 question 이다 — text 를 읽던 동안 열린 항목이 보고서에서 통째로 빠졌다(WP4 2.2 ④).
+            text = _clean_str(item if not isinstance(item, dict) else (item.get("question") or item.get("text")))
             if text and text not in open_items:
                 open_items.append(text)
 
