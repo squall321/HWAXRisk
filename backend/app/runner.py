@@ -956,8 +956,15 @@ def _repersist_hint(panel_id: str) -> str:
 REPERSIST_FIRST = "다시 저장(또는 포기) 먼저 — 그 전에는 재개해도 이 타깃은 기다린다"
 
 
+def awaits_repersist(panel: Mapping[str, Any]) -> bool:
+    """패널 행 하나({status, error, has_result})가 다시 저장을 기다리는가 — `repersist_panel` 의 전제다(결과 없는 패널은 다시
+    저장할 것이 없다). 등록부의 C2 셈도 이 술어를 쓴다."""
+    return (panel["status"] == "error" and bool(panel["has_result"])
+            and _uncharged_code(panel["error"]) == PERSIST_ERROR_CODE)
+
+
 def awaiting_repersist(store: Any, target_key: str) -> list[dict]:
-    """다시 저장을 기다리는 패널 — 엔진 결과가 패널에 있고(result_gz) persist_error 로 닫혔다. `repersist_panel` 의 전제다.
+    """다시 저장을 기다리는 패널 — 엔진 결과가 패널에 있고(result_gz) persist_error 로 닫혔다(awaits_repersist).
 
     이런 패널이 남은 타깃은 새 패널을 편성하지 않는다(러너 집기·브리프 미리보기). 그 패널은 좌석을 차감 없이 pending 으로
     돌려놓았으므로 새 패널이 그 좌석을 가져가면 다시 저장이 영영 seats_moved 로 거절되고, 몇 시간짜리 결과를 버린 채 같은
@@ -965,9 +972,9 @@ def awaiting_repersist(store: Any, target_key: str) -> list[dict]:
     편성기가 None 을 내 잡이 좌석이 pending 인 채 completed 로 닫힌다. 막힘은 다시 저장이나 포기(abandon_repersist)로 풀린다.
     """
     rows = store.query(
-        "SELECT id, panel_no, error FROM rr_panels WHERE target_key = ? AND status = 'error' AND result_gz IS NOT NULL"
-        " ORDER BY panel_no", (target_key,))
-    return [dict(r) for r in rows if _uncharged_code(r["error"]) == PERSIST_ERROR_CODE]
+        "SELECT id, panel_no, status, error, result_gz IS NOT NULL AS has_result FROM rr_panels"
+        " WHERE target_key = ? AND status = 'error' AND result_gz IS NOT NULL ORDER BY panel_no", (target_key,))
+    return [{"id": r["id"], "panel_no": r["panel_no"], "error": r["error"]} for r in rows if awaits_repersist(r)]
 
 
 def repersist_pending_note(waiting: Sequence[Mapping[str, Any]]) -> str:

@@ -873,7 +873,8 @@ def _roster_rows(store: RiskStore, target_key: str) -> list[dict]:
 def _panel_rows(store: RiskStore, target_key: str) -> list[dict]:
     return [dict(r) for r in store.query(
         "SELECT id, panel_no, tier, status, engine, tool_mode, conv_id, report_id, seats_json, "
-        "risk_spec_json, risk_spec_parsed, quality_json FROM rr_panels WHERE target_key = ? ORDER BY panel_no",
+        "risk_spec_json, risk_spec_parsed, quality_json, error, result_gz IS NOT NULL AS has_result "
+        "FROM rr_panels WHERE target_key = ? ORDER BY panel_no",
         (target_key,),
     )]
 
@@ -905,10 +906,21 @@ def _contested_marking_done(store: RiskStore, target_key: str) -> bool:
 
 
 def _unresolved_parse_failures(panels: list[dict]) -> int:
-    """미해결 spec_parse_failed 패널 수 — 재제출로 파싱됐거나 사람이 '제외' 표기한 패널은 빼고 센다."""
+    """미해결 spec_parse_failed 패널 수 — 재제출로 파싱됐거나 사람이 '제외' 표기한 패널은 빼고 센다.
+
+    결정문을 원장에 앉힌 패널(done)이 파싱에 실패한 것만 센다(설계 '패널은 done 으로 남되 risk_spec_parsed=false').
+    결정문 없이 닫힌 error 패널(일시 장애·엔진 실패·재기동·자리 없음·의장 실패·다시 저장 포기)은 그 좌석이 다음 패널에서 다시
+    돌므로 파싱 실패가 아니다 — 세면 그 패널 하나로 C2 가 영원히 거짓이었다(RR-ADV-3). 다시 저장을 기다리는 패널은 결정문이
+    아직 원장에 앉지 않았으니 센다 — 그 결과 없이 C2 로 마감되지 않게. 다시 저장하면 그 결과로, 포기하면 빠진다.
+    """
+    from app import runner  # noqa: PLC0415 — 순환 import 회피(러너가 이 모듈을 부른다).
+
     n = 0
     for p in panels:
-        if p["status"] not in ("done", "error"):
+        if p["status"] == "error":
+            n += 1 if runner.awaits_repersist(p) else 0
+            continue
+        if p["status"] != "done":
             continue
         if p["risk_spec_parsed"]:
             continue
@@ -1235,7 +1247,9 @@ def _minutes_lines(store: RiskStore, target_key: str, panels: list[dict], covera
             # 같은 이름의 상세(evidence_dropped 의 키 목록·user_memo_cut 의 자수)가 있으면 함께 적는다.
             detail = quality.get(value)
             flags.append(f"panel_no={p['panel_no']} {value}" + (f" {common.canonical_json(detail)}" if detail else ""))
-        if not p["risk_spec_parsed"] and p["status"] in ("done", "error") and "spec_parse_failed" not in listed:
+        # 파싱 실패는 결정문을 앉힌 패널(done)의 것이다 — 결정문 없이 닫힌 error 패널을 여기 적으면 일시 장애 하나가 보고서에
+        # 파싱 실패로 남는다(RR-ADV-3, C2 셈과 같은 정의).
+        if not p["risk_spec_parsed"] and p["status"] == "done" and "spec_parse_failed" not in listed:
             flags.append(f"panel_no={p['panel_no']} spec_parse_failed")
     out.extend(flags or ["(없음)"])
     return out

@@ -654,6 +654,51 @@ def test_the_export_leaves_the_engine_result_behind(ledger, merge_breaks):
     assert "result_gz" not in panels[0] and panels[0]["result_hash"]
 
 
+# ---------------------------------------------------------------- C2 의 파싱 실패 셈(RR-ADV-3)
+def test_a_panel_closed_without_a_decision_is_not_a_parse_failure(ledger, monkeypatch):
+    """일시 장애(brief_retry)·엔진 실패로 결정문 없이 닫힌 error 패널은 파싱 실패가 아니다 — 그 좌석은 다음 패널에서 다시 돈다.
+    C2 의 '미해결 spec_parse_failed 0' 에 세면 그 패널 하나로 C2 가 영원히 거짓이다(푸는 '제외' 표기를 쓰는 길도 없다).
+    통합 보고서의 품질 플래그도 그 패널을 파싱 실패로 적지 않는다."""
+    import sqlite3
+
+    from app import registry
+
+    real = narrative.prior_evidence
+    calls: list[int] = []
+
+    def locked_once(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise sqlite3.OperationalError("database is locked")
+        return real(*args, **kwargs)
+
+    _job(ledger)
+    engine = LedgerEngine(fail_first=runner.EngineError("엔진이 끊겼다"))
+    with monkeypatch.context() as patch:
+        patch.setattr(narrative, "prior_evidence", locked_once)
+        assert _run(ledger, engine)["error"].startswith("brief_retry")
+        assert _run(ledger, engine)["error"].startswith("engine_error")
+        assert _run(ledger, engine)["status"] == "done"
+    assert [(r["status"], r["risk_spec_parsed"]) for r in ledger.store.query(
+        "SELECT status, risk_spec_parsed FROM rr_panels WHERE target_key = ? ORDER BY panel_no", (ledger.target_key,))
+    ] == [("error", 0), ("error", 0), ("done", 1)]
+    assert registry.close_level(ledger.store, ledger.target_key, persist=False)["detail"]["spec_parse_failed"] == 0
+    minutes = registry.build_report(ledger.store, ledger.target_key)["blocks"]["minutes"]
+    assert not [line for line in minutes if "spec_parse_failed" in line], minutes
+
+
+def test_a_result_that_awaits_repersist_holds_c2_until_it_is_saved_or_abandoned(ledger, merge_breaks):
+    """다시 저장을 기다리는 패널은 결정문이 아직 원장에 앉지 않았다 — 그동안은 C2 를 막고(그 결과 없이 마감되지 않게),
+    포기하면 빠진다(좌석은 다음 패널에서 다시 돈다)."""
+    from app import registry
+
+    _job(ledger)
+    out = _run(ledger, LedgerEngine())
+    assert registry.close_level(ledger.store, ledger.target_key, persist=False)["detail"]["spec_parse_failed"] == 1
+    runner.abandon_repersist(ledger.store, out["panel_id"])
+    assert registry.close_level(ledger.store, ledger.target_key, persist=False)["detail"]["spec_parse_failed"] == 0
+
+
 
 # ---------------------------------------------------------------- S15 — 완결 레벨이 오르면 통합 보고서를 조립한다(R-47 · raised 분기만)
 @pytest.fixture
