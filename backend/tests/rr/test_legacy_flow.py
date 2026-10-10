@@ -143,6 +143,35 @@ def test_the_queued_job_runs_through_the_runner(frozen, no_network, tmp_path):
     assert frozen.query_one("SELECT state FROM rr_jobs WHERE id = ?", (target["job_id"],))["state"] == "completed"
 
 
+def test_a_second_panel_on_the_done_target_saves_beside_the_old_adversary_row(frozen, no_network):
+    """옛 코드가 회차 1 로 남긴 반대석 의견 행이 있는 DB 에서 같은 타깃의 두 번째 패널이 저장된다(WP1 R-1 의 옛 DB 쪽).
+
+    러너 길은 이 DB 에서 브리프가 WP1 P-03 에 먼저 걸려(③b 의 xfail) 저장까지 오지 못한다 — 편성기가 연 패널을
+    회수 경로(complete_panel)로 닫는다. 그 길도 반대석을 귀속 좌석으로 더해 의견 행을 쓴다.
+    """
+    target = MANIFEST["targets"]["done"]
+    old = frozen.query("SELECT cycle FROM rr_seat_opinions WHERE target_key = ? AND agent_key = ?",
+                       (target["target_key"], planner.ADVERSARY_KEY))
+    assert [r["cycle"] for r in old] == [1]
+    panel = planner.plan_next_panel(frozen, target["target_key"], "C")
+    assert panel is not None and panel["panel_no"] == 2
+    seats = [s["key"] for s in panel["seats"]]
+    spec_for = legacy.spec_builder(frozen, target["target_key"], planner.domain_of)
+
+    out = routes.complete_panel(
+        panel["id"], engine="mcp", decision_text=legacy.decision_text(spec_for(seats)),
+        turns=[{"round": r, "persona": k, "say": f"{k} 라운드 {r} 발언"} for r in (1, 2) for k in seats],
+        actor=OWNER, owner_sub=OWNER)
+
+    assert out["parsed"] is True
+    assert frozen.query_one("SELECT status FROM rr_panels WHERE id = ?", (panel["id"],))["status"] == "done"
+    rows = frozen.query("SELECT o.cycle, p.panel_no FROM rr_seat_opinions o JOIN rr_panels p ON p.id = o.panel_id"
+                        " WHERE o.target_key = ? AND o.agent_key = ? ORDER BY p.panel_no",
+                        (target["target_key"], planner.ADVERSARY_KEY))
+    assert [(r["cycle"], r["panel_no"]) for r in rows] == [(1, 1), (100002, 2)]
+    assert planner.check_invariants(frozen, target["target_key"]) == []
+
+
 # ---------------------------------------------------------------- ⑤ MCP 도구 이름과 순서
 def test_mcp_tools_keep_their_names_and_order():
     golden = json.loads((legacy.LEGACY_DIR / "golden" / "mcp_tools.json").read_text(encoding="utf-8"))

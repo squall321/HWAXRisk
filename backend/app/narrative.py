@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -15,6 +16,8 @@ from app import render
 from app.common import canonical_json, now_epoch, parse_ref
 from app.errors import AppError
 from app.taxonomy import load_taxonomy
+
+log = logging.getLogger("hwax_risk.narrative")
 
 SCHEMA_PATH = Path(__file__).resolve().parent / "schemas" / "risk_spec.v1.json"
 
@@ -1445,6 +1448,13 @@ def prior_evidence(store, target_key: str, *, user_memo: str | None = None,
     return items
 
 
+# 원장(rr_coverage)에 행이 없는 좌석 — 반대석(adversary)과 엔진이 더 앉힌 좌석(new) — 의 의견 회차. 이 좌석들은 패널마다 다시
+# 앉으므로 회차를 좌석 원장에서 읽을 수 없다. 종전에는 1 로 두어 같은 타깃의 두 번째 패널이 UNIQUE(target_key, agent_key,
+# cycle) 에 걸려 저장 전체가 롤백됐다(WP1 R-1). 그 제약은 이행으로 풀 수 없어(허용 연산 셋) 원장 회차와 부딪치지 않는
+# 값으로 채운다 — NONLEDGER_CYCLE_BASE + panel_no. seat_opinion.v1 은 cycle ≥ 1 만 요구한다.
+NONLEDGER_CYCLE_BASE = 100000
+
+
 def _opinion_id(panel_id: str, agent_key: str, cycle: int) -> str:
     """결정론 opinion_id(hex32) — 같은 패널·좌석·cycle 이면 재제출해도 같은 id 다(seat_opinion.v1 pattern)."""
     return hashlib.sha256(f"{panel_id}|{agent_key}|{cycle}".encode("utf-8")).hexdigest()[:32]
@@ -1571,6 +1581,42 @@ def suspect_hit(atom: Mapping[str, Any]) -> dict | None:
     return None
 
 
+def _release_ledger_cycles(store, target_key: str, panel_id: str, keys: Sequence[tuple[str, int]]) -> None:
+    """이 패널이 쓰려는 (좌석, 회차) 를 다른 패널의 행이 쥐고 있으면 비킨다 — 좌석 원장이 받지 않은 행만.
+
+    좌석 원장이 그 행을 그 좌석의 결과로 받았으면(rr_coverage.opinion_id 가 그 행) 진짜 중복이다 — 좌석 이름이 든
+    `seat_opinion_conflict`(409)로 멈춘다. 받지 않은 행은 앞 패널에서 실패로 돌아간 좌석의 것이다.
+    - 발언이 없는 행(7248651 이 발언 0 원장 좌석에도 남기던 것)은 지운다 — 담긴 것이 없다(WP1 P-01).
+    - 발언이 있는 행(결정문 없이 끝난 패널의 좌석 · 옛 코드가 엔진이 더한 좌석에 원장 회차를 준 행)은 그 패널의 원장 밖
+      회차(NONLEDGER_CYCLE_BASE + panel_no)로 옮긴다 — 발언은 그 패널의 기록으로 남고 원장 회차만 빈다.
+    """
+    for agent_key, cycle in keys:
+        row = store.query_one(
+            "SELECT o.opinion_id, o.panel_id, o.opinion_json, p.panel_no FROM rr_seat_opinions o"
+            " LEFT JOIN rr_panels p ON p.id = o.panel_id"
+            " WHERE o.target_key = ? AND o.agent_key = ? AND o.cycle = ? AND o.panel_id != ?",
+            (target_key, agent_key, cycle, panel_id))
+        if row is None:
+            continue
+        accepted = store.query_one(
+            "SELECT 1 FROM rr_coverage WHERE target_key = ? AND agent_key = ? AND opinion_id = ?",
+            (target_key, agent_key, row["opinion_id"]))
+        if accepted is not None:
+            raise AppError("seat_opinion_conflict",
+                           f"{agent_key} 는 이 타깃의 cycle {cycle} 의견을 패널 {row['panel_id']} 에서 이미 냈다.", 409)
+        try:
+            spoke = bool((json.loads(row["opinion_json"] or "{}") or {}).get("turns"))
+        except (TypeError, ValueError):
+            spoke = True                                # 읽지 못하면 지우지 않는다
+        if not spoke:
+            store.execute("DELETE FROM rr_seat_opinions WHERE opinion_id = ?", (row["opinion_id"],))
+            continue
+        moved = NONLEDGER_CYCLE_BASE + int(row["panel_no"] or 0)
+        log.info("좌석 %s 의 회차 %s 를 비킨다 — 패널 %s 의 받지 않은 의견을 원장 밖 회차 %s 로 옮긴다",
+                 agent_key, cycle, row["panel_id"], moved)
+        store.execute("UPDATE rr_seat_opinions SET cycle = ? WHERE opinion_id = ?", (moved, row["opinion_id"]))
+
+
 def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec: Mapping[str, Any] | None = None,
                          turns: Sequence[Mapping[str, Any]] = (), attribution: Mapping[str, Any] | None = None,
                          actor: str | None = None) -> dict:
@@ -1624,13 +1670,21 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
         r["agent_key"]: int(r["cycle"] or 1)
         for r in store.query("SELECT agent_key, cycle FROM rr_coverage WHERE target_key = ?", (target_key,))
     }
+    nonledger_cycle = NONLEDGER_CYCLE_BASE + int(panel["panel_no"] or 0)
 
     out_seats: list[dict] = []
     opinion_rows: list[tuple] = []
     for agent_key, domain, origin in roster:
-        cycle = cycles.get(agent_key, 1)
-        opinion_id = _opinion_id(panel_id, agent_key, cycle)
+        ledger_seat = origin in ("primary", "counter")
+        cycle = cycles.get(agent_key, 1) if ledger_seat else nonledger_cycle
         rows = grouped.get(agent_key) or []
+        if ledger_seat and not rows:
+            # 한 마디도 못 한 원장 좌석은 의견을 내지 않았다 — 행을 만들지 않는다(WP1 P-01). 좌석 원장은 이 좌석을 실패로
+            # 읽어 같은 회차로 pending 에 되돌리므로, 행을 남기면 다음 패널에서 다시 앉아 저장할 때 그 회차에 걸린다.
+            out_seats.append({"agent_key": agent_key, "opinion_id": None, "turns_n": 0, "cited_refs_n": 0,
+                              "cited_ir": False, "abstained": False})
+            continue
+        opinion_id = _opinion_id(panel_id, agent_key, cycle)
         state = dict(attr_seats.get(agent_key) or {})
         my_atoms = [a for a in atoms if str(a.get("claim_uid")) in set(raised_by_seat.get(agent_key) or ())]
 
@@ -1695,6 +1749,7 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
 
     with store.tx():
         store.execute("DELETE FROM rr_seat_opinions WHERE panel_id = ?", (panel_id,))
+        _release_ledger_cycles(store, target_key, panel_id, [(row[4], row[7]) for row in opinion_rows])
         store.executemany(
             "INSERT INTO rr_seat_opinions(opinion_id, target_key, panel_id, owner_sub, agent_key, domain, origin,"
             " cycle, opinion_json, final_stance, tool_calls_n, tool_calls_ok, knowledge_hits_n, cited_refs_json,"
@@ -1709,7 +1764,7 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
             store.executemany("DELETE FROM rr_claim_refs WHERE claim_uid = ?", [(uid,) for uid in old])
         store.execute("DELETE FROM rr_findings WHERE panel_id = ?", (panel_id,))
 
-        opinion_of = {s["agent_key"]: s["opinion_id"] for s in out_seats}
+        opinion_of = {s["agent_key"]: s["opinion_id"] for s in out_seats if s["opinion_id"]}
         for atom in atoms:
             uid = str(atom.get("claim_uid") or "")
             raised = [str(k) for k in (atom.get("raised_by") or ())]
