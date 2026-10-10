@@ -438,7 +438,9 @@ def _item_e0(store, ctx, external_ok: bool, model: str = "unknown") -> dict:
     lines = [
         f"kind={target['kind']} target_key={target['target_key']} level={_s(target['level'], 'C0')} "
         f"model={model}",
-        f"과제 base={base_code} target={_project_code(store, target['project_id'])}",
+        # 과제 코드는 사람이 지은 40자 자유 문자열이다(`BOOK`·`개선`·`강화` 가 흔하다) — «» 안에 싣는다(WP1 P-04).
+        # 요구 이름을 이 항목에 실을 때는 `[req:<name>]` 토큰으로 싣는다(참조 토큰은 린터 제외 구간이다).
+        f"과제 base={_q(base_code)} target={_q(_project_code(store, target['project_id']))}",
         f"snapshot_id={_s(ctx['snapshot_id'], '-')} ir_hash={_s(target['ir_hash'])}",
         f"게이트 {_gates_lines(gates)}",
         f"missing={json.dumps(missing, ensure_ascii=False, sort_keys=True) if missing else '[]'}",
@@ -1269,7 +1271,10 @@ def collect_refs(items: Sequence[Mapping[str, Any]]) -> list[str]:
     return out
 
 
-_QUOTE_PREFIX = ("reg:", "narr:", "rule:", "warn:")
+# 인용 줄 — 원장·규칙·경고를 가리키는 줄이다. 줄 머리에 코드가 붙인 `[…] ` 접두(E5+ 의 `[변경 주체 — 재검증 대상] `·
+# `[사람 제기·검증 대상] ` · E10 의 `[전작] ` …)가 0개 이상 와도 같다 — 접두만 보고 검사하면 그 줄이 싣는 등록부의
+# `{severity}/{judgement}`(`중대/WARNING`)가 판단어로 걸려 같은 과제의 두 번째 리비전 브리프가 죽었다(WP1 P-03).
+_QUOTE_LINE = re.compile(r"^(?:\[[^\]]*\]\s)*(?:reg|narr|rule|warn):")
 # 자산 원문을 그대로 싣는 항목 — 좌석 계약은 사람이 쓴 계약문이라 인용이지 코드 산문이 아니다(plan §3.4.3).
 _QUOTED_SOURCES = ("seat_contract",)
 
@@ -1292,11 +1297,12 @@ def lint_items(items: Sequence[Mapping[str, Any]]) -> dict:
         if str(item.get("source") or "") in _QUOTED_SOURCES:
             continue
         for line_no, line in enumerate(str(item.get("result") or "").split("\n"), start=1):
-            if line.strip().startswith(_QUOTE_PREFIX):
+            if _QUOTE_LINE.match(line.strip()):
                 continue
             report = lint(line)
             for violation in (report or {}).get("violations") or []:
-                violations.append({"item": item.get("key"), "line_no": line_no, **violation})
+                # 린터는 한 줄을 받아 늘 line_no=1 을 낸다 — 항목 안의 줄 번호가 덮이지 않게 뒤에 둔다.
+                violations.append({**violation, "item": item.get("key"), "line_no": line_no})
     return {"ok": not violations, "reason": None, "violations": violations}
 
 

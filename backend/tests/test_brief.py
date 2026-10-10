@@ -1490,3 +1490,86 @@ def test_name_index_prefers_the_target_snapshot(risk_store):
     assert names[nid_of(base["snapshot_id"], "BRACKET_L")] == "BRACKET_L"
     assert brief.name_index(risk_store, (target["snapshot_id"], base["snapshot_id"]))[plate] == "Plate-1"
     assert brief.name_index(risk_store, (None, "")) == {}
+
+
+# ---------------------------------------------------------------- 판단어 검사의 자리(WP1 S5-a·S5-b · P-03 · P-04)
+def _prefix_stale(store, target_key: str) -> None:
+    """새 타깃이 옛 타깃의 주체를 바꿨다 — `_supersede_previous_target` 이 부르는 그 생산자다."""
+    from app import registry
+
+    registry.invalidate(store, "diff:d0", target_key, ["ck:bbbb2222cccc"])
+
+
+def _prefix_unraised(store, target_key: str) -> None:
+    from app import registry
+
+    registry.invalidate(store, "diff:d0", target_key, [], mark_unraised=True)
+
+
+def _prefix_escalated(store, target_key: str) -> None:
+    # 행을 손으로 고친다 — 지금 생산자로는 E5+ 상태(open·verified)에 escalated 가 서지 않는다(`_flag_escalations` 는
+    # dismissed 행에만 적고 `set_status` 는 표기를 지운다). 옛 DB·사람이 다시 연 행을 흉내 낸다.
+    store.execute("UPDATE rr_registry SET needs_review_json = ? WHERE target_key = 'diff:d0' AND cluster_key = 'clu1'",
+                  (_j({"escalated": True}),))
+
+
+def _prefix_human(store, target_key: str) -> None:
+    """사람이 직접 올린 finding — 라우트(`create_human_finding`)가 병합까지 돈다."""
+    from app import identity, routes
+    from tests import factories
+
+    ident = identity.Identity(email=OWNER, display_name="사람", role="user", organization="qa", anonymous=False,
+                              source="bearer")
+    with factories.routes_store(store):
+        routes.create_human_finding("diff:d0", routes.HumanFindingBody(
+            mechanism="interface", mechanism_detail="interference", change_kind="placement", subject_key=SUBJECT,
+            subject_names=["HOUSING"], severity="중대", judgement="FAIL", claim="사람이 본 간극",
+            cites=[{"ref": "c:5b0e11aa22bb", "quote": "배치"}]), ident=ident)
+
+
+@pytest.mark.parametrize("make, prefix", [
+    (_prefix_stale, "[변경 주체 — 재검증 대상] reg:"),
+    (_prefix_unraised, "[미변경 주체] reg:"),
+    (_prefix_escalated, "[재검토] reg:"),
+    (_prefix_human, "[사람 제기·검증 대상] reg:"),
+], ids=["stale", "unraised", "escalated", "human"])
+def test_prefixed_precedent_lines_do_not_kill_the_brief(risk_store, make, prefix):
+    """접두가 달린 선례 줄도 인용 줄이다 — 같은 과제의 두 번째 리비전이 정확히 이 경우다(P-03)."""
+    target_key = seed_diff_target(risk_store)
+    make(risk_store, target_key)
+    built = brief.build_brief(risk_store, target_key, owner_sub=OWNER, strict_lint=True)
+    lines = _e5(built).split("\n")
+    hit = [ln for ln in lines if ln.startswith(prefix)]
+    assert hit, _e5(built)
+    assert any(word in hit[0] for word in ("중대/", "경미/", "치명/"))     # 판단어가 줄에 그대로 있다 — 지우지 않았다
+    assert built["meta"]["lint"]["ok"] is True
+
+
+@pytest.mark.parametrize("code", ["GALAXY_BOOK5", "S25_개선형", "안전모", "PASSIVE", "강화형", "YOKE_V1"])
+@pytest.mark.parametrize("side", ["base", "target"])
+def test_project_code_with_lexicon_word_does_not_kill_the_brief(risk_store, code, side):
+    """과제 코드는 사람이 지은 40자 자유 문자열이다 — E0 에 «» 로 싣는다(P-04)."""
+    from tests import factories
+
+    base_pid = factories.make_project(risk_store, code=code if side == "base" else "BASE-1")
+    target_pid = factories.make_project(risk_store, code=code if side == "target" else "TGT-1")
+    results = factories.fixture_adapter_results()
+    base = factories.make_snapshot(risk_store, base_pid, results, label="DV1")
+    revised = json.loads(json.dumps(results))
+    next(n for n in revised[0]["nodes"] if n.get("label") == "PLATE_1")["attrs"]["min_dim"] = 1.2
+    target = factories.make_snapshot(risk_store, target_pid, revised, label="DV2",
+                                     captured_at=factories.CAPTURED_AT + 86400)
+    diff = factories.make_diff(risk_store, base["snapshot_id"], target["snapshot_id"])
+    target_key = factories.make_target(risk_store, "diff", diff["diff_id"], agents=factories.agents())
+
+    built = brief.build_brief(risk_store, target_key, owner_sub=factories.OWNER, strict_lint=True)
+    e0 = built["evidence"][0]["result"]
+    want = f"과제 base=«{code}» target=«TGT-1»" if side == "base" else f"과제 base=«BASE-1» target=«{code}»"
+    assert want in e0.split("\n"), e0
+
+
+def test_lint_items_reports_the_line_the_violation_is_on():
+    """위반의 줄 번호는 항목 result 안의 줄 번호다 — 린터에 한 줄씩 넣어 늘 1 이 덮어쓰던 것을 막는다."""
+    planted = [{"key": "E9", "source": "rr_state.warnings_rules", "result": "[머리]\n깨끗한 줄\n[경고] 이 계면은 위험하다"}]
+    lint = brief.lint_items(planted)
+    assert sorted((v["item"], v["line_no"], v["token"]) for v in lint["violations"]) == [("E9", 3, "경고"), ("E9", 3, "위험")]

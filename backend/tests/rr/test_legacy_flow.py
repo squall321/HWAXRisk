@@ -116,12 +116,12 @@ def test_the_planned_panel_closes_done(frozen, no_network):
     assert planner.check_invariants(frozen, target["target_key"]) == []
 
 
-@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
-    "7248651 의 결함(WP1 P-03 · S5-a) — 같은 원장의 human 타깃(비슷한 과제)에 사람 finding 이 있어 이 타깃 브리프의 E5 에"
-    " '[사람 제기·검증 대상]' 접두 줄이 실리고, 그 줄의 '중대' 가 판단어 린터 L15 에 걸려 brief_error 로 닫힌다."
-    " 수리 뒤 xpass 가 strict 로 깨지면 이 표식을 지운다"))
 def test_the_queued_job_runs_through_the_runner(frozen, no_network, tmp_path):
-    """얼린 queued 잡을 러너가 집어(claim_next_job) 패널을 끝내고 잡을 닫는다 — 옛 잡도 러너를 지난다."""
+    """얼린 queued 잡을 러너가 집어(claim_next_job) 패널을 끝내고 잡을 닫는다 — 옛 잡도 러너를 지난다.
+
+    7248651 에서는 같은 원장의 human 타깃(비슷한 과제)에 사람 finding 이 있어 이 타깃 브리프의 E5 에 '[사람 제기·검증 대상]'
+    접두 줄이 실리고, 그 줄의 '중대' 가 판단어 린터 L15 에 걸려 brief_error 로 닫혔다(WP1 P-03 — S5-a 가 고쳤다).
+    """
     target = MANIFEST["targets"]["planned"]
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -197,8 +197,8 @@ def test_the_report_and_the_domain_filter_read_the_keys_the_schema_writes(frozen
 def test_a_second_panel_on_the_done_target_saves_beside_the_old_adversary_row(frozen, no_network):
     """옛 코드가 회차 1 로 남긴 반대석 의견 행이 있는 DB 에서 같은 타깃의 두 번째 패널이 저장된다(WP1 R-1 의 옛 DB 쪽).
 
-    러너 길은 이 DB 에서 브리프가 WP1 P-03 에 먼저 걸려(③b 의 xfail) 저장까지 오지 못한다 — 편성기가 연 패널을
-    회수 경로(complete_panel)로 닫는다. 그 길도 반대석을 귀속 좌석으로 더해 의견 행을 쓴다.
+    편성기가 연 패널을 회수 경로(complete_panel)로 닫는다(이 시험을 쓸 때 러너 길은 브리프가 WP1 P-03 에 먼저 걸려
+    저장까지 오지 못했다 — 러너 길은 ③b 가 본다). 그 길도 반대석을 귀속 좌석으로 더해 의견 행을 쓴다.
     """
     target = MANIFEST["targets"]["done"]
     old = frozen.query("SELECT cycle FROM rr_seat_opinions WHERE target_key = ? AND agent_key = ?",
