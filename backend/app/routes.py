@@ -147,9 +147,15 @@ def post_auth_sso(request: Request) -> dict:
     got = request.headers.get("x-heax-gateway-secret", "")
     if not hmac.compare_digest(got, secret):
         raise AppError("unauthorized", "게이트웨이 시크릿이 맞지 않습니다.", 401)
-    email = (request.headers.get("x-heax-user-email") or "").strip().lower()
+    # 진짜 호출자는 X-Hwax-Delegate-Email 이 먼저다. HEAXHub Caddy 의 forward_auth 가 이 경로의 X-Heax-User-Email 을
+    # 지우고 authz 가 준 이메일(게이트웨이 서비스 토큰의 주인)로 다시 싣기 때문에, 그 헤더만 읽으면 게이트웨이를 거친
+    # 모든 사람이 한 사람으로 접힌다. 위임 헤더를 믿는 근거는 위의 시크릿 대조다 — 시크릿을 쥔 쪽은 원래 아무 이메일의
+    # 단언이나 받을 수 있다. 위임 헤더가 왔는데 틀렸으면 종전 헤더로 내려가지 않는다(접힌 이메일로 조용히 발급하지 않는다).
+    delegate = request.headers.get("x-hwax-delegate-email")
+    header = "X-Hwax-Delegate-Email" if delegate is not None else "X-Heax-User-Email"
+    email = (delegate if delegate is not None else request.headers.get("x-heax-user-email") or "").strip().lower()
     if "@" not in email:
-        raise AppError("bad_email", "X-Heax-User-Email 이 이메일 형식이 아닙니다.", 401)
+        raise AppError("bad_email", f"{header} 이 이메일 형식이 아닙니다.", 401)
     token = identity.mint_sso_assertion(email, ttl_s=config.settings.sso_ttl_s, secret=secret)
     # 단언은 저장하지 않으므로 회수도 없다 — 게이트웨이 캐시가 이 수명보다 길면 만료 단언으로 부르게 되니
     # expires_in 을 함께 준다(게이트웨이는 실패 시 1회 재발급하므로 어긋나도 자가 복구된다).

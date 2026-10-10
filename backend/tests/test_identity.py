@@ -155,6 +155,25 @@ def test_sso_endpoint_mints_only_with_secret(client, sso):
     assert client.get("/api/me", headers={"Authorization": f"Bearer {token}"}).json()["email"] == "bob@example.com"
 
 
+def test_sso_endpoint_reads_the_delegate_header_that_caddy_does_not_strip(client, sso):
+    """HEAXHub Caddy 의 forward_auth 는 클라이언트가 보낸 X-Heax-User-Email 을 지우고 authz 가 준 이메일(게이트웨이
+    서비스 토큰의 주인)로 다시 싣는다(proxy_manager `_forward_auth_handler(copy_identity=True)`). 그 값으로 단언을 만들면
+    게이트웨이를 거친 모든 사람이 한 사람이 된다 — 진짜 호출자는 Caddy 가 건드리지 않는 X-Hwax-Delegate-Email 로 받는다.
+    """
+    headers = {"X-Heax-Gateway-Secret": SSO_SECRET, "X-Heax-User-Email": "service-owner@example.com",
+               "X-Hwax-Delegate-Email": "Dave@Example.com"}
+    r = client.post("/api/auth/sso", headers=headers)
+    assert r.status_code == 200
+    token = r.json()["access_token"]
+    assert client.get("/api/me", headers={identity.SSO_HEADER: token}).json()["email"] == "dave@example.com"
+    # 위임 헤더가 왔는데 이메일 꼴이 아니면 거절한다 — 종전 헤더(서비스 토큰 주인)로 조용히 내려가지 않는다.
+    r = client.post("/api/auth/sso", headers={**headers, "X-Hwax-Delegate-Email": "not-an-email"})
+    assert r.status_code == 401
+    # 시크릿이 틀리면 위임 헤더도 아무것도 아니다.
+    r = client.post("/api/auth/sso", headers={**headers, "X-Heax-Gateway-Secret": "wrong"})
+    assert r.status_code == 401
+
+
 def test_sso_endpoint_is_404_without_secret(client, monkeypatch):
     """시크릿 미설정 박스에서는 존재 자체를 알리지 않는다."""
     from app import config
