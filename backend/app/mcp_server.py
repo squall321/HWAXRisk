@@ -19,7 +19,7 @@ _INSTRUCTIONS = """HWAX Risk Review — 설계 리스크 심사 앱의 MCP 서�
 인자로 받는데, 그 id 를 알아낼 길이 이것뿐이다.
 
 발견: risk_list_projects(과제·타깃·최근 스냅샷 id) · risk_similar_projects · risk_get_precedents(선례)
-조회: risk_get_snapshot(part=ir|state|nodes|edges|calls|rule_hits) · risk_get_diff · risk_get_registry ·
+조회: risk_get_snapshot(part=ir|state|nodes|edges|calls|rule_hits) · risk_get_diff(part=lines 는 변경 줄 전부) · risk_get_registry ·
       risk_claims_for_ref · risk_get_coverage(진행판·좌석) · risk_list_panels · risk_get_panel_transcript
 어휘: risk_taxonomy — severity·judgement·direction 의 허용값(추측해서 넣으면 422 다)
 심사: risk_get_brief(열쇠는 brief_token, tier 'A' 는 웹 전용) · risk_submit_panel_result(engine='mcp' 는
@@ -40,7 +40,8 @@ mcp = FastMCP(
     transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
 )
 
-# 조회 상한(plan §8.2.5 표) — nodes/edges 500 · diff events 500 · 등록부 200 · 주장 100.
+# 조회 상한(plan §8.2.5 표) — nodes/edges 500 · diff events 500 · 등록부 200 · 주장 100. 한 번에 주는 양이다 — diff events 는
+# offset 으로 나머지를 받는다(diff lines 는 상한 없이 거른 것 전부다).
 NODE_LIMIT = 500
 EVENT_LIMIT = 500
 REGISTRY_LIMIT = 200
@@ -181,10 +182,13 @@ def risk_get_snapshot(snapshot_id: str, part: str) -> dict:
 
 
 @mcp.tool()
-def risk_get_diff(diff_id: str, part: str) -> dict:
-    """diff 조회(part ∈ diff|summary|events, events 는 ≤500 + truncated)."""
-    limit = EVENT_LIMIT if part == "events" else None
-    return _scoped("diff", diff_id, routes.diff_part, diff_id, part, limit=limit)
+def risk_get_diff(diff_id: str, part: str, change_kind: str | None = None, q: str | None = None,
+                  offset: int = 0, limit: int | None = None) -> dict:
+    """diff 조회(part ∈ diff|summary|events|lines) — lines 는 브리프 변경 목록과 같은 줄 전부, change_kind(쉼표로 여럿)·q(이름·코드)로 거르고 offset 은 0 부터, events 는 한 번에 ≤500 이고 next_offset 으로 이어 받는다."""
+    if part == "events" and limit is None:
+        limit = EVENT_LIMIT
+    return _scoped("diff", diff_id, routes.diff_part, diff_id, part, limit=limit, offset=offset,
+                   change_kind=change_kind, q=q)
 
 
 @mcp.tool()

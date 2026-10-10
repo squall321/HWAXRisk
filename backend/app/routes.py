@@ -1739,18 +1739,31 @@ def create_diff(body: DiffBody, ident: identity.Identity = Depends(identity.curr
             "comparability": result.get("comparability") or {}}
 
 
-DIFF_PARTS = ("diff", "summary", "events")
+DIFF_PARTS = ("diff", "summary", "events", "lines")
 
 
-def diff_part(diff_id: str, part: str, *, owner_sub: str | None = None, limit: int | None = None) -> dict:
-    """`GET /api/diffs/{id}?part=` 본체 — MCP `risk_get_diff` 와 같은 함수."""
+def diff_part(diff_id: str, part: str, *, owner_sub: str | None = None, limit: int | None = None,
+              offset: int = 0, change_kind: str | None = None, q: str | None = None) -> dict:
+    """`GET /api/diffs/{id}?part=` 본체 — MCP `risk_get_diff` 와 같은 함수.
+
+    `lines` 는 브리프 E2 와 같은 줄을 같은 순서로 준다(`brief.diff_lines` — 거름 `change_kind`·`q`). `events` 는 `limit` 을
+    주면 그만큼만 주되 `total`·`next_offset` 으로 나머지를 가리킨다 — 종전에는 상한 뒤를 받을 길이 없었다.
+    """
     if part not in DIFF_PARTS:
         raise AppError("E100", f"part 는 {list(DIFF_PARTS)} 중 하나여야 합니다 — {part!r}.", 422)
     # owner_sub 를 행에서 되읽어 되먹이지 않는다 — 그 우회는 소유권 검사를 통째로 무력화한다.
+    if part == "lines":
+        return brief_module.diff_lines(get_store(), diff_id, owner_sub=owner_sub or "", change_kind=change_kind,
+                                       q=q, offset=offset, limit=limit)
     payload = diff_module.get_diff(get_store(), diff_id, owner_sub=owner_sub or "", part=part)
-    if part == "events" and limit is not None:
+    if part == "events" and (limit is not None or offset):
         events = payload.get("events") or []
-        payload = {**payload, "events": events[: int(limit)], "truncated": len(events) > int(limit)}
+        start = max(0, int(offset or 0))
+        page = events[start:] if limit is None else events[start:start + max(0, int(limit))]
+        payload = {**payload, "events": page, "truncated": start + len(page) < len(events),
+                   "total": len(events), "offset": start}
+        if payload["truncated"]:
+            payload["next_offset"] = start + len(page)
     return payload
 
 
@@ -1872,10 +1885,11 @@ def list_reports(project_id: str | None = None, limit: int = LIST_LIMIT_DEFAULT,
 
 
 @router.get("/diffs/{diff_id}")
-def get_diff(diff_id: str, part: str = "diff",
+def get_diff(diff_id: str, part: str = "diff", change_kind: str | None = None, q: str | None = None,
+             offset: int = 0, limit: int | None = None,
              ident: identity.Identity = Depends(identity.current)) -> dict:
     owner_sub = _require_user(ident)
-    return diff_part(diff_id, part, owner_sub=owner_sub)
+    return diff_part(diff_id, part, owner_sub=owner_sub, change_kind=change_kind, q=q, offset=offset, limit=limit)
 
 
 @router.get("/precedents")

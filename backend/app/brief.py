@@ -661,6 +661,50 @@ def _item_e2(store, ctx, names: Mapping[str, str], *, cap: int, item_result_max:
     return out
 
 
+def diff_lines(store, diff_id: str, *, owner_sub: str, change_kind: str | None = None, q: str | None = None,
+               offset: int = 0, limit: int | None = None) -> dict:
+    """`risk_get_diff(part='lines')` 본체 — E2 와 같은 줄을 `event_order` 순으로 준다(WP1 S14 · R-30).
+
+    좌석은 브리프 E2 에서 상한에 걸려 빠진 변경을 이 줄로 이어 받는다 — 줄 모양·순서가 E2 와 글자까지 같아 옮겨 적은
+    줄이 인용 대조를 그대로 통과한다. `change_kind` 는 쉼표로 여럿, `q` 는 줄 글(이름으로 바꾼 뒤)의 부분 문자열이다
+    (대소문자 무시). `offset` 은 거른 목록 안의 자리다. `limit` 을 안 주면 거른 것 전부다 — 작은 창 시절처럼 한 번에
+    몇 줄로 묶지 않는다(사용자 지침, 1백만 토큰 창). 잘라 줬으면 `truncated`·`next_offset` 이 나머지를 가리킨다.
+    """
+    diff = store.query_one(
+        "SELECT id, base_snapshot_id, target_snapshot_id, diff_json, stats_json FROM rr_diffs"
+        " WHERE id = ? AND owner_sub = ?", (diff_id, owner_sub))
+    if diff is None:
+        raise AppError("E404", f"diff 가 없습니다 — {diff_id}.", 404)
+    rows = store.query(
+        "SELECT cid, layer, code, change_kind, subject_key, magnitude, unit, rel, confidence, design_relevant, "
+        "unconfirmed, excluded_reason, text FROM rr_diff_events WHERE diff_id = ? AND owner_sub = ? "
+        "AND layer IN ('semantic','structural')", (diff_id, owner_sub))
+    ordered = event_order(rows)
+    counts = event_counts(ordered)
+    kinds = {k.strip() for k in (change_kind or "").split(",") if k.strip()}
+    needle = (q or "").strip().casefold()
+    names = name_index(store, (diff["base_snapshot_id"], diff["target_snapshot_id"]))
+    matched: list[str] = []
+    for row in ordered:
+        if kinds and _event_kind(row) not in kinds and _s(row["change_kind"]) not in kinds:
+            continue
+        line = e2_line(row, names)
+        if needle and needle not in line.casefold():
+            continue
+        matched.append(line)
+    start = max(0, int(offset or 0))
+    end = len(matched) if limit is None else start + max(0, int(limit))
+    page = matched[start:end]
+    out = {"diff_id": diff["id"], "part": "lines", "total": counts["total"], "matched": len(matched),
+           "offset": start, "returned": len(page), "truncated": start + len(page) < len(matched),
+           "by_kind": counts["by_kind"], "irrelevant": counts["irrelevant"], "lines": "\n".join(page)}
+    if out["truncated"]:
+        out["next_offset"] = start + len(page)
+    if not rows:
+        out["note"] = _e2_empty_line({"diff": diff})
+    return out
+
+
 # ---------------------------------------------------------------- E3·E4 파라메트릭(WP1 S7)
 def _param_order(item: Mapping[str, Any]) -> tuple:
     """바뀐 것(flag='changed'·제외 사유 없음)이 먼저, 그 안은 |rel_delta| 내림차순(없으면 뒤), 동률은 이름·cid."""
