@@ -1,4 +1,4 @@
-# hwax-risk MCP 서버 — 도구 25종(발견 7 + 원장 7 + Claude 입구 11)은 REST 와 같은 함수를 부르는 접점이다(§6.11, LLM 을 부르지 않는다)
+# hwax-risk MCP 서버 — 도구 26종(발견 7 + 원장 7 + Claude 입구 12)은 REST 와 같은 함수를 부르는 접점이다(§6.11, LLM 을 부르지 않는다)
 from __future__ import annotations
 
 import logging
@@ -28,7 +28,7 @@ _INSTRUCTIONS = """HWAX Risk Review — 설계 리스크 심사 앱의 MCP 서�
 입구(Claude 에서 과제를 올리고 심사를 시작한다 — 심사는 앱 러너가 돌리고 결과는 웹에 그대로 보인다): risk_next_step 부터.
 어디까지 왔고 무엇이 막혔고(고칠 곳 포함) 다음에 무엇을 부르나를 한 번에 준다. 쓰기는 risk_create_project · risk_add_source ·
 risk_capture_snapshot · risk_ack_gate · risk_decide_sameas · risk_create_diff · risk_open_target · risk_start_job ·
-risk_job_action 이고, 무엇을 어디에 쓸지 사용자에게 확인한 뒤 부른다. 같은 호출을 두 번 해도 같은 행이다. 신원은 도달한
+risk_job_action · risk_repersist_panel 이고, 무엇을 어디에 쓸지 사용자에게 확인한 뒤 부른다. 같은 호출을 두 번 해도 같은 행이다. 신원은 도달한
 자격이 정한다(자칭 actor 없음) — 쓰기는 게이트웨이 위임으로 확인된 신원일 때만 하고, 아니면 delegation_required 로 까닭을 말한다.
 동의 인자(consent)는 사용자에게 받은 뒤에만 true 로 준다 — risk_next_step 의 next 는 그것을 채워 주지 않는다.
 PAT 는 인자로 받지 않는다 — 러너 자격은 웹 설정 화면에서 등록한다."""
@@ -93,7 +93,7 @@ def _scoped(kind: str, key: str, fn, *args: Any, **kwargs: Any) -> dict:
 
 
 async def _entry(fn, **kwargs: Any) -> dict:
-    """입구 11종 공통 — 이 요청의 신원으로 `entry` 본체를 부르되, 본체는 스레드에서 돈다.
+    """입구 12종 공통 — 이 요청의 신원으로 `entry` 본체를 부르되, 본체는 스레드에서 돈다.
 
     FastMCP 는 동기 도구를 이벤트 루프 위에서 그대로 부른다(mcp 1.29 func_metadata). 캡처(수십 초~수 분)·명단 조회
     (최대 540초)가 루프를 붙들면 그동안 /api/health·REST·다른 MCP 호출이 멎고, HEAXHub 의 2초 헬스 검사가 앱을 다시
@@ -281,7 +281,7 @@ def risk_add_finding(
 
 # ================================================================ Claude 입구(PLAN M1 · context-notes D-23)
 # 실사용 팀은 Claude 에서 MCP 로 심의를 돌린다. 위 14종은 읽기와 결과 제출뿐이라 Claude 에서는 과제를 올리거나 심사를 시작할
-# 수 없었고, 그래서 Claude 로 돈 심사가 원장에 한 건도 없었다. 아래 11종은 웹 화면이 부르는 REST 라우트를 같은 신원으로
+# 수 없었고, 그래서 Claude 로 돈 심사가 원장에 한 건도 없었다. 아래 12종은 웹 화면이 부르는 REST 라우트를 같은 신원으로
 # 감싼다(남의 과제는 라우트의 소유권 검사가 막는다). 심사는 앱의 러너가 돌리고 Claude 는 시작하고 지켜본다.
 # 신원은 도달한 자격(게이트웨이 위임 단언·개인 Bearer)이고 자칭 actor 는 없다. 쓰기는 그 가운데 게이트웨이 위임으로 확인된
 # 단언(X-Hwax-Delegate-Email 로 발급)일 때만 한다(entry.require_delegate). 비밀(PAT)은 인자로 받지 않는다.
@@ -362,3 +362,9 @@ async def risk_start_job(target_key: str, tier: str, consent: bool = False, modi
 async def risk_job_action(job_id: str, action: str) -> dict:
     """심사 잡 일시정지·재개·취소(action=pause|resume|cancel) — 쓰기: 사용자에게 확인한 뒤 부른다(취소는 되돌릴 수 없다), 이미 그 상태면 그대로 돌려주고(changed:false), 앱 재기동으로 멈춘 잡은 resume 해야 이어 돈다."""
     return await _entry(entry.job_action, job_id=job_id, action=action)
+
+
+@mcp.tool()
+async def risk_repersist_panel(panel_id: str, discard: bool = False) -> dict:
+    """저장 실패한 패널 다시 저장 — 쓰기: 사용자에게 확인한 뒤 부른다, 엔진 결과는 남았는데 원장에 앉히지 못해 persist_error 로 닫힌 패널을 그 결과로 다시 앉힌다(risk_next_step 의 blocked repersist_pending 이 panel_id 를 준다), 그 전에는 재개해도 이 대상에 새 패널이 편성되지 않는다, 같은 결과로 되풀이해 실패하면 discard=true 로 포기한다(엔진 결과는 패널에 남고 좌석은 다음 패널에서 다시 돈다)."""
+    return await _entry(entry.repersist_panel, panel_id=panel_id, discard=discard)

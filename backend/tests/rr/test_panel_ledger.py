@@ -500,7 +500,8 @@ def test_the_brief_preview_does_not_plan_over_a_result_that_awaits_repersist(led
 
 def test_the_guide_says_repersist_first_while_a_result_waits(ledger, merge_breaks):
     """길잡이(risk_next_step)가 '재개하면 이어 돈다' 만 말하면 그대로 따른 사람이 결과를 잃었다 — 다시 저장(또는 포기)
-    먼저이고 그 전에는 재개해도 이 타깃은 기다린다고 말하고, 다시 저장하는 길을 막힘에 싣는다(MCP 도구는 아직 없다)."""
+    먼저이고 그 전에는 재개해도 이 타깃은 기다린다고 말한다. 다음 걸음의 맨 앞은 다시 저장(risk_repersist_panel)이고
+    막힘의 고칠 곳에 그 도구와 웹 REST 경로를 함께 싣는다."""
     from app import entry, routes
 
     job_id = _job(ledger)
@@ -512,12 +513,32 @@ def test_the_guide_says_repersist_first_while_a_result_waits(ledger, merge_break
                           ident=factories.ident(OWNER))
         guide = entry.next_step(factories.ident(OWNER), project_id=project_id)
     assert guide["where"] == "paused", guide
-    step = guide["next"][0]
+    first, step = guide["next"][:2]
+    assert first["tool"] == "risk_repersist_panel" and first["args"] == {"panel_id": out["panel_id"]} and first["write"]
     assert step["tool"] == "risk_job_action" and step["args"] == {"job_id": job_id, "action": "resume"}
     assert "다시 저장(또는 포기) 먼저" in step["why"] and "재개해도 이 타깃은 기다린다" in step["why"], step
     blocked = {b["code"]: b for b in guide["blocked"]}
+    assert "risk_repersist_panel" in blocked["repersist_pending"]["fix"]
     assert f"/api/panels/{out['panel_id']}/repersist" in blocked["repersist_pending"]["fix"]
     assert blocked["repersist_pending"]["panels"] == [out["panel_id"]]
+
+
+def test_claude_entry_repersists_the_waiting_panel_as_the_delegate(ledger, merge_breaks):
+    """다시 저장이 REST 뿐이라 Claude 로 돌린 심사는 저장이 한 번 실패하면 Claude 에서 풀 수 없었다(10-11 dev 실주행 —
+    7B 의장 출력의 모양 오류로 첫 패널이 persist_error). 입구 도구는 위임 신원으로만 쓰고 REST 와 같은 함수를 부른다."""
+    from app import entry
+
+    _job(ledger)
+    out = _run(ledger, LedgerEngine())
+    merge_breaks["broken"] = False
+    delegate = dataclasses.replace(factories.ident(OWNER), source="sso", delegated=True)
+    with factories.routes_store(ledger.store):
+        with pytest.raises(AppError) as exc:
+            entry.repersist_panel(factories.ident(OWNER), panel_id=out["panel_id"])
+        assert exc.value.code == "delegation_required"
+        done = entry.repersist_panel(delegate, panel_id=out["panel_id"])
+    assert done["status"] == "done"
+    assert runner.awaiting_repersist(ledger.store, ledger.target_key) == []
 
 
 def test_repersist_needs_an_error_panel_with_a_saved_result_on_an_idle_target(ledger, merge_breaks):

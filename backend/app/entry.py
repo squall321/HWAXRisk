@@ -368,6 +368,16 @@ def job_action(ident: identity.Identity, *, job_id: str, action: str) -> dict:
     return {**out, "changed": before is None or out.get("state") != before["state"]}
 
 
+def repersist_panel(ident: identity.Identity, *, panel_id: str, discard: bool = False) -> dict:
+    """`POST /api/panels/{id}/repersist`(discard=1 이면 포기) — 원장에 앉히지 못해 엔진 결과가 패널에 남은 패널을 다시 앉힌다.
+
+    다시 저장을 기다리는 패널이 남은 타깃은 새 패널을 편성하지 않는다(RR-ADV-1). 이 길이 REST 뿐이라 Claude 로 돌린 심사는
+    저장이 한 번 실패하면 Claude 에서 풀 수 없었다(10-11 dev 실주행 — 7B 의장 출력의 모양 오류로 첫 패널이 persist_error).
+    """
+    require_delegate(ident)
+    return routes.post_panel_repersist(panel_id, discard=discard, ident=ident)
+
+
 # ---------------------------------------------------------------- 길잡이 — 어디까지 왔고 무엇이 막혔고 다음에 무엇을 부르나
 def _credentials(store: Any, ident: identity.Identity, owner: str) -> dict:
     """자격 현황 — 값은 싣지 않고 있음·쓸 수 있음·남은 수명만. 규칙은 각 소비처의 것을 그대로 부른다."""
@@ -628,15 +638,19 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
     job = coverage["job"]
     facts["job"] = job
     # 엔진 결과가 다시 저장을 기다리는 패널 — 그 전에는 재개해도·새 잡을 세워도 이 타깃은 편성되지 않는다(RR-ADV-1).
-    # 다시 저장은 아직 MCP 도구도 화면 버튼도 없어 REST 경로를 고칠 곳으로 준다.
+    # 다시 저장은 risk_repersist_panel(MCP) 이고 웹 REST 경로도 함께 적는다(화면 버튼은 아직 없다).
     waiting = runner.awaiting_repersist(store, target_key)
+    repersist_steps = [
+        _step("risk_repersist_panel", {"panel_id": p["id"]},
+              f"패널 #{p['panel_no']} 의 엔진 결과를 다시 앉힌다 — 원인을 고친 뒤에(같은 결과로 되풀이해 실패하면 discard=true 로 포기).")
+        for p in waiting]
     if waiting:
         paths = " · ".join(f"POST /api/panels/{p['id']}/repersist" for p in waiting)
         blocked.append(_blocked(
             runner.REPERSIST_PENDING_CODE,
             f"엔진 결과가 다시 저장을 기다리는 패널이 {len(waiting)}건 있다 — {runner.REPERSIST_FIRST}(새 잡도 기다린다).",
-            f"원인을 고친 뒤 {paths} 로 다시 앉힌다(지금은 REST 로만 된다). 같은 결과로 다시 저장이 되풀이해 실패하면 같은"
-            " 경로에 ?discard=1 로 포기한다 — 엔진 결과는 패널에 남고 좌석은 다음 패널에서 다시 돈다.",
+            f"원인을 고친 뒤 risk_repersist_panel(panel_id) 로 다시 앉힌다(웹 REST 는 {paths}). 같은 결과로 다시 저장이"
+            " 되풀이해 실패하면 discard=true(REST 는 ?discard=1)로 포기한다 — 엔진 결과는 패널에 남고 좌석은 다음 패널에서 다시 돈다.",
             panels=[p["id"] for p in waiting]))
     jobs = [dict(r) for r in store.query(
         "SELECT tier, state FROM rr_jobs WHERE target_key = ? ORDER BY created_at DESC, rowid DESC", (target_key,))]
@@ -649,7 +663,7 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
         if str(job.get("error") or "").startswith("pat_unavailable"):
             blocked.append(_blocked("pat_unavailable", "러너가 이 잡을 돌릴 자격이 없어 줄에서 집지 않는다.", fix_register_pat(),
                                     job_id=job["id"]))
-        return answer("running", watch)
+        return answer("running", [*repersist_steps, *watch])
     if job is not None and job["state"] == "paused":
         reason = job.get("pause_reason")
         if reason == "daily_cap":
@@ -661,7 +675,8 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
         if waiting:
             # 종전에는 '재개하면 이어 돈다' 만 말해 그대로 따르면 다른 패널이 그 좌석을 가져가 결과를 잃었다.
             why = f"멈춘 잡이다 — {runner.REPERSIST_FIRST}(blocked 의 {runner.REPERSIST_PENDING_CODE})."
-        return answer("paused", [_step("risk_job_action", {"job_id": job["id"], "action": "resume"}, why), *watch])
+        return answer("paused", [*repersist_steps, _step("risk_job_action", {"job_id": job["id"], "action": "resume"}, why),
+                                 *watch])
     if job is not None and job["state"] == "completed" and next_tier is None:
         return answer("done", [
             _step("risk_get_registry", {"target_key": target_key}, "판정 등록부 — 웹 대상 화면과 같은 원장이다.", write=False),

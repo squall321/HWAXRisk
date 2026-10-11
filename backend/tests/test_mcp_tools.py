@@ -26,7 +26,8 @@ TOOL_NAMES = [
     "risk_get_brief",
     "risk_submit_panel_result",
     "risk_add_finding",
-    # Claude 입구 11종(2026-10-10, PLAN M1 'Claude 입구'·D-23) — 길잡이가 먼저, 그 뒤가 웹 화면의 순서다.
+    # Claude 입구 12종(2026-10-10, PLAN M1 'Claude 입구'·D-23) — 길잡이가 먼저, 그 뒤가 웹 화면의 순서다.
+    # risk_repersist_panel 은 10-11 dev 실주행에서 저장 실패를 Claude 에서 풀 수 없던 것을 메운다.
     "risk_next_step",
     "risk_create_project",
     "risk_add_source",
@@ -38,6 +39,7 @@ TOOL_NAMES = [
     "risk_open_target",
     "risk_start_job",
     "risk_job_action",
+    "risk_repersist_panel",
 ]
 ENTRY_TOOLS = TOOL_NAMES[TOOL_NAMES.index("risk_next_step"):]
 # 도구별 대표 인자와, 빈 원장에서 기대하는 오류 코드(없으면 None = 정상 응답).
@@ -79,6 +81,7 @@ CALLS = [
     ("risk_open_target", {"kind": "diff", "ref_id": "d1", "consent": True}, "delegation_required"),
     ("risk_start_job", {"target_key": "diff:d1", "tier": "B"}, "delegation_required"),
     ("risk_job_action", {"job_id": "j1", "action": "pause"}, "delegation_required"),
+    ("risk_repersist_panel", {"panel_id": "pn1"}, "delegation_required"),
 ]
 _HANGUL = re.compile(r"[가-힣]")
 # 인자 이름에 비밀이 오면 게이트웨이·포털 절차·클라이언트 대화 기록에 값이 남는다(작업 지시서 A-11) — 포털 절차의
@@ -153,7 +156,7 @@ def test_signatures_follow_plan():
 
 
 def test_entry_tool_signatures():
-    """입구 11종 — 신원은 도달한 자격이 정하므로 actor 가 없고, 비밀(PAT·토큰)을 인자로 받지 않는다."""
+    """입구 12종 — 신원은 도달한 자격이 정하므로 actor 가 없고, 비밀(PAT·토큰)을 인자로 받지 않는다."""
     tools = {t.name: t for t in asyncio.run(srv.mcp.list_tools())}
     props = lambda n: set(tools[n].inputSchema["properties"])  # noqa: E731
     required = lambda n: set(tools[n].inputSchema.get("required") or [])  # noqa: E731
@@ -176,6 +179,7 @@ def test_entry_tool_signatures():
     assert props("risk_open_target") == {"kind", "ref_id", "consent"}
     assert props("risk_start_job") == {"target_key", "tier", "consent", "modifiers", "user_memo", "concurrency"}
     assert props("risk_job_action") == {"job_id", "action"}
+    assert props("risk_repersist_panel") == {"panel_id", "discard"} and required("risk_repersist_panel") == {"panel_id"}
 
 
 def test_write_tool_descriptions_ask_for_confirmation_first():
