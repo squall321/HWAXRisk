@@ -97,9 +97,109 @@ def make_dim(store, project_id: str, name: str, extractor: str, *, kind: str = "
                               ident=ident(owner))
 
 
+class AdapterShapeError(RuntimeError):
+    """공장 입력이 실제 어댑터가 낼 수 없는 모양이다(R-FLOOR-1).
+
+    AssertionError 가 아니다 — xfail(raises=AssertionError) 시험이 공장의 실패를 삼키지 않게 한다(반대 검토 P-02).
+    """
+
+
+def check_adapter_shape(adapter_results: Sequence[Mapping[str, Any]]) -> None:
+    """실제 mcad 어댑터만 낼 수 있는 모양인지 본다 — 둘은 어댑터가 한 곳에서만 만든다(adapters/mcad.py).
+
+    - 부품의 min_dim 은 min(size_def) 다(`_shape_attrs`). min_dim 만 바꾼 손 픽스처는 이 모양이 아니라, 짝 있는 부품의 실제 두께
+      변경이 내는 거짓 part.moved·part.rotated 를 바닥의 시험이 보지 못했다. 두께는 `set_thickness` 로 바꾼다.
+    - 계면의 관통 깊이는 부울 경로가 부피를 냈을 때만 하한이 아니다(`penetration_depth_is_lower_bound = penetration_volume is None`).
+
+    min_dim 이 없는(한쪽 미측정) 부품은 보지 않는다.
+    """
+    bad = []
+    for result in adapter_results:
+        if (result.get("source") or {}).get("kind") != "mcad":
+            continue
+        for node in result.get("nodes") or ():
+            attrs = node.get("attrs") or {}
+            if node.get("kind") != "part" or attrs.get("min_dim") is None or not attrs.get("size_def"):
+                continue
+            if abs(float(attrs["min_dim"]) - min(float(x) for x in attrs["size_def"])) > 1e-9:
+                bad.append(f"{node.get('label')} min_dim {attrs['min_dim']} ≠ min(size_def) {min(attrs['size_def'])}")
+        for edge in result.get("edges") or ():
+            attrs = edge.get("attrs") or {}
+            if "penetration_depth_is_lower_bound" not in attrs:
+                continue
+            if bool(attrs["penetration_depth_is_lower_bound"]) != (attrs.get("penetration_volume") is None):
+                bad.append(f"{edge.get('kind')} {edge.get('a')}↔{edge.get('b')} is_lower_bound "
+                           f"{attrs['penetration_depth_is_lower_bound']} · penetration_volume {attrs.get('penetration_volume')}")
+    if bad:
+        raise AdapterShapeError("어댑터가 낼 수 없는 mcad 모양이다 — 실제 어댑터는 min_dim 을 min(size_def) 로, 관통 깊이의 하한 여부를"
+                                " penetration_volume 의 유무로 낸다. 두께는 factories.set_thickness 로 바꾼다: " + "; ".join(bad))
+
+
+_SHAPE_KEYS = ("bbox_def", "size_def", "size_sorted", "bbox_world", "centroid_def", "centroid_world", "volume", "min_dim")
+
+
+def set_thickness(adapter_results: Sequence[dict], label: str, thickness: float, *, twin: str | None = None) -> None:
+    """mcad 부품 하나의 판 두께(가장 얇은 축)를 실제 어댑터가 내는 모양으로 바꾼다(R-FLOOR-1) — 제자리에서 고친다.
+
+    모양 칸(bbox·size·centroid·min_dim)은 어댑터 함수(`adapters.mcad._shape_attrs` · `adapters.dyna._bbox_size`)가 다시 낸다.
+    부피는 두께에 비례한다. 짝 dyna pid(`twin` 라벨, 없으면 '<묶음>\\<label>' 꼴의 같은 이름)도 같은 두께로 다시 만든다 —
+    K 파일도 고친 정상 개정이다.
+    짝 있는 부품을 K 파일 그대로 두께만 바꾸는 것(cross.bridge_stale)은 지금 생산자가 거짓 이동·회전을 덧붙이는 길이라
+    (devseed.PRODUCER_GAPS) 합성기의 재현 시험 한 곳에만 둔다. 회전한 부품(bbox_world 크기 ≠ bbox_def 크기)은 받지 않는다.
+    """
+    from app.adapters import dyna as dyna_adapter  # noqa: PLC0415 — 이 공장만 쓴다.
+    from app.adapters import mcad as mcad_adapter  # noqa: PLC0415
+
+    mcad = next(r for r in adapter_results if (r.get("source") or {}).get("kind") == "mcad")
+    attrs = next(n for n in mcad["nodes"] if n.get("kind") == "part" and n.get("label") == label)["attrs"]
+    bbox = [float(x) for x in attrs["bbox_def"]]
+    world = [float(x) for x in attrs["bbox_world"]]
+    size = [bbox[i + 3] - bbox[i] for i in range(3)]
+    if any(abs((world[i + 3] - world[i]) - size[i]) > 1e-9 for i in range(3)):
+        raise AdapterShapeError(f"{label} 은 조립 좌표에서 회전해 있다 — 이 공장은 회전하지 않은 부품의 두께만 바꾼다")
+    axis = size.index(min(size))
+    old = size[axis]
+    move = [world[i] - bbox[i] for i in range(3)]
+    transform = [[1.0, 0.0, 0.0, move[0]], [0.0, 1.0, 0.0, move[1]], [0.0, 0.0, 1.0, move[2]], [0.0, 0.0, 0.0, 1.0]]
+    bbox[axis + 3] = bbox[axis] + thickness
+    centroid = None
+    if attrs.get("centroid_def") is not None:
+        centroid = [float(x) for x in attrs["centroid_def"]]
+        centroid[axis] = bbox[axis] + thickness / 2.0
+    volume = None if attrs.get("volume") is None else float(attrs["volume"]) * thickness / old
+    shape = mcad_adapter._shape_attrs({"kind": attrs.get("shape_kind"), "bbox": bbox, "centroid": centroid,
+                                       "volume": volume}, depth=attrs.get("depth"), transform=transform,
+                                      color=None, step_file=None, shape_def_id=None)
+    attrs.update({key: shape[key] for key in _SHAPE_KEYS})
+    for result in adapter_results:
+        if (result.get("source") or {}).get("kind") != "dyna":
+            continue
+        for node in result.get("nodes") or ():
+            name = str(node.get("label", ""))
+            if node.get("kind") != "pid" or (name != twin if twin else name.rsplit("\\", 1)[-1] != label):
+                continue
+            pid = node["attrs"]
+            lo, hi = [float(x) for x in pid["bbox_min"]], [float(x) for x in pid["bbox_max"]]
+            before = dyna_adapter._bbox_size(lo, hi)
+            hi[axis] = lo[axis] + thickness
+            pid["bbox_max"] = hi
+            pid["size"] = dyna_adapter._bbox_size(lo, hi)
+            pid["size_sorted"] = sorted(pid["size"], reverse=True)
+            # 외곽 면적·부피는 K 파일 도구가 낸다 — 판 두께만 바뀐 상자의 변화량으로 옮긴다.
+            if pid.get("area_ext") is not None:
+                rim = sum(x for i, x in enumerate(before) if i != axis)
+                pid["area_ext"] = float(pid["area_ext"]) + 2.0 * rim * (thickness - before[axis])
+            if pid.get("volume") is not None:
+                pid["volume"] = float(pid["volume"]) * thickness / before[axis]
+
+
 def make_snapshot(store, project_id: str, adapter_results: Sequence[Mapping[str, Any]], *, label: str,
                   owner: str = OWNER, captured_at: int = CAPTURED_AT, **build_kwargs: Any) -> dict:
-    """`ir_builder.freeze_snapshot` 을 그대로 부른다. 반환은 그 함수의 반환이다."""
+    """`ir_builder.freeze_snapshot` 을 그대로 부른다. 반환은 그 함수의 반환이다.
+
+    실제 어댑터가 낼 수 없는 mcad 부품 모양은 받지 않는다(`check_adapter_shape`) — 손 픽스처·합성기 둘 다 이 길을 지난다.
+    """
+    check_adapter_shape(adapter_results)
     return ir_builder.freeze_snapshot(store, project_id=project_id, owner_sub=owner, label=label,
                                       adapter_results=adapter_results, captured_at=captured_at, **build_kwargs)
 

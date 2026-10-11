@@ -802,6 +802,9 @@ def test_second_target_of_the_same_project_runs_its_panel(risk_store, tmp_path, 
 
     project_id = factories.make_project(risk_store)
     base_results, target_results = legacy.adapter_pair()
+    # 옛 원장 빌더의 개정본은 PLATE_2 의 min_dim 만 바꾼다(7248651 에서 얼린 DB 의 모양이라 그대로 둔다) — 새 스냅샷은 실제
+    # 어댑터가 내는 모양(bbox·size_def·짝 dyna 까지)으로 고쳐 쓴다(R-FLOOR-1).
+    factories.set_thickness(target_results, "PLATE_2", 1.4)
     s1 = factories.make_snapshot(risk_store, project_id, base_results, label="DV1")
     s2 = factories.make_snapshot(risk_store, project_id, target_results, label="DV2",
                                  captured_at=factories.CAPTURED_AT + 86400)
@@ -817,9 +820,23 @@ def test_second_target_of_the_same_project_runs_its_panel(risk_store, tmp_path, 
 
     third = json.loads(json.dumps(target_results))
     by_label = {n["label"]: n for n in third[0]["nodes"]}
-    by_label["PLATE_2"]["attrs"]["min_dim"] = 1.8
+    factories.set_thickness(third, "PLATE_2", 1.8)
     by_label["PLATE_1"]["attrs"]["material"] = "AL6061"
     s3 = factories.make_snapshot(risk_store, project_id, third, label="DV3", captured_at=factories.CAPTURED_AT + 2 * 86400)
+    # 두께가 바뀐 PLATE_2 는 리비전마다 계산 ckey(부피 버킷)가 달라진다. 자동 승계(§2.7.3 sameas.inherit_ckeys)는 지금 파이프라인
+    # 어디에서도 부르지 않아(생산자 결함 — test_sameas 의 xfail 재현), 오늘 앞 타깃 행이 stale 로 서고 E5 에 subject 로 실리는
+    # 길은 사람의 키 병합(POST /api/sameas/decide merge_key) 뿐이다 — 그 길로 DV2·DV3 의 키를 DV1 키에 앉힌다. 종전 입력(min_dim
+    # 만)은 버킷이 그대로라 이것을 가렸다(R-FLOOR-1).
+    from app import routes
+
+    def plate2_ckey(snapshot_id: str) -> str:
+        return risk_store.query_one("SELECT ckey FROM rr_ir_nodes WHERE snapshot_id = ? AND name = 'PLATE_2'",
+                                    (snapshot_id,))["ckey"]
+
+    with factories.routes_store(risk_store):
+        routes.post_sameas_decide([{"decision": "merge_key", "ckey": plate2_ckey(snapshot["snapshot_id"]),
+                                    "ckey_into": plate2_ckey(s1["snapshot_id"])} for snapshot in (s2, s3)],
+                                  ident=factories.ident())
     second = factories.make_target(risk_store, "diff", factories.make_diff(risk_store, s2["snapshot_id"],
                                                                            s3["snapshot_id"])["diff_id"], agents=roster)
     stale = [r for r in risk_store.query("SELECT stale_json FROM rr_registry WHERE target_key = ?", (first,))

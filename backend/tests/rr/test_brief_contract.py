@@ -37,14 +37,14 @@ def _revise(results: list[dict]) -> list[dict]:
     """개정본 — 두께 감소·증가, 설계 무관 요소 수, 계면 간극·관통, 결과 지표 증감(어댑터 결과 수준에서만 바꾼다)."""
     out = copy.deepcopy(results)
     mcad, dyna, result = out
-    by_label = {n["label"]: n for n in mcad["nodes"]}
-    by_label["PLATE_1"]["attrs"]["min_dim"] = 0.84               # −30%
-    by_label["PLATE_2"]["attrs"]["min_dim"] = 1.2                # +20%
+    factories.set_thickness(out, "PLATE_1", 0.84)                # −30%(K 파일도 다시 만든 개정 — 어댑터 모양)
+    factories.set_thickness(out, "PLATE_2", 1.2)                 # +20%
     dyna["nodes"][0]["attrs"]["n_elems"] = 11250                 # +125%, 설계 무관
     tied, interference = mcad["edges"][0], mcad["edges"][1]
     tied["attrs"]["min_gap"] = 0.018                             # 0 에서 생긴 간극
     interference["attrs"]["penetration_depth"] = 0.02            # −60%(한쪽이 하한이 아니라 비교된다)
-    interference["attrs"]["penetration_depth_is_lower_bound"] = False
+    interference["attrs"]["penetration_depth_is_lower_bound"] = False   # 부울 경로가 부피를 냈다(어댑터는 그때만 하한이 아니다)
+    interference["attrs"]["penetration_volume"] = 0.6
     risk = result["results"]["part_risk"]
     risk[0]["worst_stress"]["value"] = 185.1                     # −20%
     risk[0]["worst_g"] = 100.0

@@ -37,7 +37,7 @@ def test_refs_shown_in_the_brief_resolve_at_persist(risk_store, no_field):
                                    "message": "이름이 자동 생성됐다"}]
         base = factories.make_snapshot(risk_store, project_id, results, label="DV1")
         revised = json.loads(json.dumps(results))
-        next(n for n in revised[0]["nodes"] if n.get("label") == "PLATE_1")["attrs"]["min_dim"] *= 0.7
+        factories.set_thickness(revised, "PLATE_1", 0.84)                     # 1.2 → 0.84(−30%)
         target = factories.make_snapshot(risk_store, project_id, revised, label="DV2",
                                          captured_at=factories.CAPTURED_AT + 86400)
         ref_id = (factories.make_diff(risk_store, base["snapshot_id"], target["snapshot_id"])["diff_id"]

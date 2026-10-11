@@ -76,7 +76,7 @@ def test_a_different_seed_gives_a_different_diff(tmp_path_factory):
 def test_syn40_runs_every_code_the_producer_emits(built):
     codes = {e["code"] for e in built[40].diff["semantic"]["events"]}
     assert codes == EMITTED_CODES - set(_gap_codes())
-    assert len(codes) == 32
+    assert len(codes) == 31
 
 
 def test_syn40_carries_the_shapes_downstream_must_handle(built):
@@ -90,6 +90,9 @@ def test_syn40_carries_the_shapes_downstream_must_handle(built):
     assert {e["code"] for e in events if not e["subject"]["ckeys"]} == {
         "dim.named_changed", "dim.named_unmeasured", "asm.rollup_changed", "contact.scope_changed"}
     assert [e["code"] for e in events if e["design_relevant"] is False] == ["mesh.density_changed"]
+    # 짝 있는 부품의 판 두께(K 파일도 다시 만든 개정)가 바닥에 든다 — 운영에서 짝 있는 부품 두께 변경의 정상 모양이다(R-FLOOR-1).
+    assert any(r.op == "part.thickness_changed" and target.base.parts[r.subjects[0]].pid is not None
+               for r in target.manifest)
     boundary = [r for r in target.manifest if "boundary" in r.flags]
     assert len(boundary) >= 2 and {target.base.parts.get(n, target.target.parts.get(n)).asm
                                    for r in boundary for n in r.subjects[:2]} != set()
@@ -144,6 +147,36 @@ def test_the_factory_refuses_a_pair_that_misses_the_script(tmp_path_factory):
         factories.make_diff_target(_store(tmp_path_factory, "refuse"), 3, script=[("contact.type_changed", {})])
 
 
+def test_the_factory_refuses_a_shape_the_adapter_cannot_make(tmp_path_factory):
+    """공장은 실제 어댑터가 낼 수 없는 mcad 모양을 받지 않는다 — min_dim 만 바꾼 부품, 부피 없이 하한이 아닌 관통 깊이(R-FLOOR-1).
+
+    실제 mcad 어댑터가 낸 결과는 같은 검사를 지난다(검사가 어댑터보다 엄하지 않다). AssertionError 가 아니다(xfail 이 삼키지 않게).
+    """
+    from tests.test_adapters import _capture_mcad
+
+    captured, _ = _capture_mcad()
+    factories.check_adapter_shape([captured])
+    store = _store(tmp_path_factory, "shape")
+    project_id = factories.make_project(store)
+    local = factories.fixture_adapter_results()
+    next(n for n in local[0]["nodes"] if n["label"] == "PLATE_1")["attrs"]["min_dim"] = 0.84
+    with pytest.raises(factories.AdapterShapeError, match="PLATE_1 min_dim 0.84"):
+        factories.make_snapshot(store, project_id, local, label="DV1")
+    unbounded = factories.fixture_adapter_results()
+    next(e for e in unbounded[0]["edges"] if e["kind"] == "interference")["attrs"][
+        "penetration_depth_is_lower_bound"] = False
+    with pytest.raises(factories.AdapterShapeError, match="is_lower_bound False"):
+        factories.make_snapshot(store, project_id, unbounded, label="DV1")
+    shaped = factories.fixture_adapter_results()
+    factories.set_thickness(shaped, "PLATE_1", 0.84)
+    plate = next(n for n in shaped[0]["nodes"] if n["label"] == "PLATE_1")["attrs"]
+    twin = next(n for n in shaped[1]["nodes"] if n["label"] == "Stack\\PLATE_1")["attrs"]
+    assert (plate["size_def"], plate["bbox_world"], plate["min_dim"]) == ([50, 40, 0.84], [0, 0, 0, 50, 40, 0.84], 0.84)
+    assert twin["size"] == [50, 40, 0.84] and twin["bbox_max"] == [50, 40, 0.84]
+    factories.make_snapshot(store, project_id, shaped, label="DV1")
+    store.close()
+
+
 def _gap_codes() -> list[str]:
     return [key for key in devseed.PRODUCER_GAPS if "(" not in key]
 
@@ -159,10 +192,11 @@ def test_a_contact_type_change_is_an_event(tmp_path_factory):
 
 @pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
     "생산자 결함(WP1 목록) — diff._parametric 이 같은 dn 의 mcad·dyna 노드 값을 같은 cid 로 by_dn 에 덮어, 짝 있는 부품의 "
-    "판 두께 변화(bbox 까지)가 part.moved·part.rotated 를 덧붙인다. 짝 없는 부품의 같은 변화는 두께 하나만 낸다"))
+    "두께 변화(K 파일 그대로)가 part.moved·part.rotated 를 덧붙인다. 실제 어댑터는 두께와 함께 bbox·size_def 를 바꾸므로 "
+    "짝 있는 부품의 두께 변경 전부가 이 길이다(R-FLOOR-1). 짝 없는 부품·K 파일도 다시 만든 개정은 두께 하나만 낸다"))
 def test_a_twinned_plate_thickness_change_is_not_read_as_a_move(tmp_path_factory):
     target = factories.make_diff_target(_store(tmp_path_factory, "twin-plate"), 3,
-                                        script=[("cross.bridge_stale", {"local": False})], check=False)
+                                        script=[("cross.bridge_stale", {})], check=False)
     assert factories.synth_mismatch(target.diff, target.manifest) == []
 
 

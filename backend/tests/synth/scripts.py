@@ -3,9 +3,10 @@
 
 - syn3 — 부품 12. 두께 감소 · 재질 교체 · 경계 계면 간극 감소. 셋 다 이름에 판단어가 든 부품이다
   (계면 이벤트의 글은 지금 생산자가 부품 이름 대신 nid 로 적는다 — WP1 R-8).
-- syn40 — 부품 60. 생산자가 내는 코드 31종 각 1건 + 감소 변형 3 · 부품 키 없는 이벤트 2 · 경계 계면 2 · 단위 섞기 2.
-  33종 가운데 `asm.rollup_changed` 는 계면 증감이 끌고 오는 파생이고 `contact.type_changed` 는 지금 생산자가 내지 못해
-  (devseed.PRODUCER_GAPS) 따로 시험한다.
+- syn40 — 부품 60. 생산자가 내는 코드 30종 각 1건 + 짝 있는 부품의 판 두께(K 파일도 다시 만든 개정) 1 + 감소 변형 3 ·
+  부품 키 없는 이벤트 2 · 경계 계면 2 · 단위 섞기 2. 33종 가운데 `asm.rollup_changed` 는 계면 증감이 끌고 오는 파생이고
+  `contact.type_changed` 는 지금 생산자가 내지 못하며, `cross.bridge_stale`(짝 있는 부품의 두께 변경, K 파일 그대로)은 지금
+  생산자가 거짓 이동·회전을 덧붙인다(devseed.PRODUCER_GAPS) — 둘 다 따로 시험한다.
 - syn150 — 부품 180 · 조립 단위 16. 이동 · 크기 · 간극이 많은 쏠린 분포, 한 조립 단위(MAIN_ASM)에 60건, 변경 1건짜리
   조립 단위 12개, 경계 계면 20, 이벤트가 없는 변화(잡음 · 한쪽 미측정 · 상태만 바뀜) 10.
 """
@@ -22,7 +23,7 @@ HEAVY_ASM = SYN150_ASMS[0]
 SPREAD_ASMS = SYN150_ASMS[1:4]
 SINGLE_ASMS = SYN150_ASMS[4:]
 
-# syn40 의 기본 31종 — 생산자가 내는 의미 이벤트 코드마다 연산 하나(파생인 asm.rollup_changed 와 PRODUCER_GAPS 는 뺀다).
+# syn40 의 기본 30종 — 생산자가 내는 의미 이벤트 코드마다 연산 하나(파생인 asm.rollup_changed 와 PRODUCER_GAPS 는 뺀다).
 SYN40_KINDS = (
     "part.added", "part.removed", "part.replaced", "part.split", "part.merged", "part.tree_moved",
     "iface.added", "iface.removed", "iface.clearance_appeared", "iface.clearance_cleared", "iface.rank_up",
@@ -30,7 +31,7 @@ SYN40_KINDS = (
     "iface.band_area_changed", "iface.penetration_changed",
     "contact.added", "contact.removed", "contact.friction_changed", "contact.scope_changed",
     "part.thickness_changed", "part.resized", "part.moved", "part.rotated", "mesh.density_changed",
-    "part.material_changed", "cross.bridge_stale", "dim.named_changed", "dim.named_unmeasured",
+    "part.material_changed", "dim.named_changed", "dim.named_unmeasured",
     "result.part_metric_shift",
 )
 
@@ -56,6 +57,7 @@ def script_for(size: int, seed: int = SEED) -> list[tuple[str, dict]]:
         named = {"part.material_changed": "강화유리 WINDOW", "part.moved": "PASSIVE_PAD"}
         base = [(kind, {"subject": named[kind]} if kind in named else {}) for kind in SYN40_KINDS]
         extra = [
+            ("part.thickness_changed", {"twin": True}),                            # 짝 있는 부품의 판 두께(K 파일도 다시 만듦)
             ("part.thickness_changed", {"sign": -1, "subject": "HOOK_LATCH"}),      # 감소 변형 셋
             ("iface.gap_changed", {"sign": -1}),
             ("result.part_metric_shift", {"sign": -1, "metric": "worst_g"}),
@@ -86,7 +88,7 @@ def _syn150() -> list[tuple[str, dict]]:
               + ["iface.removed"] * 3 + ["iface.clearance_appeared"] * 2 + ["iface.clearance_cleared"] * 2
               + ["iface.interference_new", "iface.interference_cleared"] + ["iface.band_area_changed"] * 3
               + ["iface.penetration_changed", "part.replaced", "part.split", "part.merged", "part.tree_moved"]
-              + ["part.rotated"] * 2 + ["mesh.density_changed"] * 3 + ["cross.bridge_stale"]
+              + ["part.rotated"] * 2 + ["mesh.density_changed"] * 3 + ["part.thickness_changed"]
               + ["result.part_metric_shift"] * 4 + ["contact.added", "contact.removed", "contact.friction_changed",
                                                     "contact.scope_changed", "dim.named_changed",
                                                     "dim.named_unmeasured"])

@@ -1595,7 +1595,7 @@ def _label_pair(store, label: str, *, result_shift: bool = False) -> str:
     next(n for n in results[0]["nodes"] if n.get("label") == "PLATE_1")["label"] = label
     base = factories.make_snapshot(store, project_id, results, label="DV1")
     revised = json.loads(json.dumps(results))
-    next(n for n in revised[0]["nodes"] if n.get("label") == label)["attrs"]["min_dim"] = 0.8
+    factories.set_thickness(revised, label, 0.8, twin="Stack\\PLATE_1")     # 라벨을 바꿔 짝은 이름으로 못 찾는다
     if result_shift:
         # 결과 행은 dyna pid 노드(Stack\PLATE_1)의 nid 로 매겨진다 — 브리지가 그것을 이름 바꾼 mcad 부품으로 잇는다.
         nid = store.query_one("SELECT nid FROM rr_ir_nodes WHERE snapshot_id = ? AND name = ?",
@@ -1697,24 +1697,27 @@ def test_an_injection_in_a_stored_summary_line_becomes_a_placeholder(risk_store)
 
 
 # ---------------------------------------------------------------- E2 변경 목록 — 순서·한 줄 모양·이름·빈 경우(WP1 S6 · R-6~R-9)
-def _six_change_pair(store) -> str:
-    """조립법 — 두께 −20%·+20%, 설계 무관 요소 수 +125%, 0 에서 생긴 간극, 결과 응력 −20%(의미 이벤트 여섯)."""
+def _five_change_pair(store) -> str:
+    """조립법 — 두께 −20%·+20%, 설계 무관 요소 수 +125%, 0 에서 생긴 간극, 결과 응력 −20%(의미 이벤트 다섯).
+
+    두 판은 dyna 짝이 있고 두께는 실제 어댑터 모양(K 파일도 다시 만든 개정)으로 바꾼다 — cross.bridge_stale 은 나지 않는다.
+    종전의 여섯째 이벤트(PLATE_2 의 cross.bridge_stale)는 min_dim 만 바꾼, 운영에서 생기지 않는 입력이 낸 것이었다(R-FLOOR-1).
+    """
     from tests import factories
 
     project_id = factories.make_project(store)
     results = factories.fixture_adapter_results()
     revised = json.loads(json.dumps(results))
     mcad, dyna, result = revised
-    by_label = {n["label"]: n for n in mcad["nodes"]}
-    by_label["PLATE_1"]["attrs"]["min_dim"] *= 0.8
-    by_label["PLATE_2"]["attrs"]["min_dim"] *= 1.2
+    factories.set_thickness(revised, "PLATE_1", 0.96)                       # 1.2 → 0.96(−20%)
+    factories.set_thickness(revised, "PLATE_2", 1.2)                        # 1.0 → 1.2(+20%)
     dyna["nodes"][0]["attrs"]["n_elems"] = round(dyna["nodes"][0]["attrs"]["n_elems"] * 2.25)
     mcad["edges"][0]["attrs"]["min_gap"] = 0.018
     result["results"]["part_risk"][0]["worst_stress"]["value"] *= 0.8
     base = factories.make_snapshot(store, project_id, results, label="DV1")
     target = factories.make_snapshot(store, project_id, revised, label="DV2", captured_at=factories.CAPTURED_AT + 86400)
     diff = factories.make_diff(store, base["snapshot_id"], target["snapshot_id"])
-    assert len(diff["semantic"]["events"]) == 6, [e["code"] for e in diff["semantic"]["events"]]
+    assert len(diff["semantic"]["events"]) == 5, [e["code"] for e in diff["semantic"]["events"]]
     return factories.make_target(store, "diff", diff["diff_id"], agents=factories.agents())
 
 
@@ -1727,7 +1730,7 @@ def _e2_lines(built: dict) -> list[str]:
 
 
 def test_e2_puts_decreases_up_front(risk_store):
-    built = brief.build_brief(risk_store, _six_change_pair(risk_store), owner_sub="syn@example.com")
+    built = brief.build_brief(risk_store, _five_change_pair(risk_store), owner_sub="syn@example.com")
     lines = _e2_lines(built)
     thickness = [i for i, ln in enumerate(lines) if " part.thickness_changed " in ln]
     assert "PLATE_1 min_dim" in lines[thickness[0]] and "(−20.0%)" in lines[thickness[0]], lines
@@ -1738,13 +1741,13 @@ def test_e2_puts_decreases_up_front(risk_store):
 
 
 def test_e2_line_carries_cid_once(risk_store):
-    lines = _e2_lines(brief.build_brief(risk_store, _six_change_pair(risk_store), owner_sub="syn@example.com"))
-    assert len(lines) == 6
+    lines = _e2_lines(brief.build_brief(risk_store, _five_change_pair(risk_store), owner_sub="syn@example.com"))
+    assert len(lines) == 5
     assert all(ln.count("[c:") == 1 for ln in lines), lines
 
 
 def test_e2_iface_events_show_part_names(risk_store):
-    lines = _e2_lines(brief.build_brief(risk_store, _six_change_pair(risk_store), owner_sub="syn@example.com"))
+    lines = _e2_lines(brief.build_brief(risk_store, _five_change_pair(risk_store), owner_sub="syn@example.com"))
     gap = next(ln for ln in lines if " iface.gap_changed " in ln)
     assert "PLATE_2↔PLATE_1 min_gap 0.000→0.018 mm" in gap, gap
     for ln in lines:
@@ -1759,7 +1762,7 @@ def test_e2_says_blocked_when_semantic_layer_is_blocked(risk_store):
     results = factories.fixture_adapter_results()
     partial = json.loads(json.dumps(results))
     partial[0]["source"]["scope"] = {"subtree": "STACK_ASM"}
-    next(n for n in partial[0]["nodes"] if n.get("label") == "PLATE_2")["attrs"]["min_dim"] = 1.4
+    factories.set_thickness(partial, "PLATE_2", 1.4)
     base = factories.make_snapshot(risk_store, project_id, results, label="DV1")
     target = factories.make_snapshot(risk_store, project_id, partial, label="DV2",
                                      captured_at=factories.CAPTURED_AT + 86400)
@@ -1827,16 +1830,16 @@ def test_clip_lines_n_counts_what_it_dropped():
 
 
 def test_e2_tail_counts_every_event_even_when_nothing_is_cut(risk_store):
-    built = brief.build_brief(risk_store, _six_change_pair(risk_store), owner_sub="syn@example.com")
+    built = brief.build_brief(risk_store, _five_change_pair(risk_store), owner_sub="syn@example.com")
     e2 = _item(built, "E2").split("\n")
-    assert e2[-1] == "[전체 6건 — 실림 6 · 생략 0 | dimension 3 · result 1 · consistency 1 · 설계 무관 1]", e2
+    assert e2[-1] == "[전체 5건 — 실림 5 · 생략 0 | dimension 3 · result 1 · 설계 무관 1]", e2
     assert "E2" not in built["meta"]["clipped"]
     assert render.lint_text(e2[-1])["ok"]
 
 
 def test_e2_order_survives_a_tight_cap(risk_store, monkeypatch):
     """상한을 이벤트 두 줄만 들어가게 죄어도 종류가 섞이고 설계 무관 줄은 빠지며, 꼬리가 무엇이 빠졌는지 센다."""
-    target_key = _six_change_pair(risk_store)
+    target_key = _five_change_pair(risk_store)
     # 남는 자리를 E2 에 빌려주면 상한을 죄어도 줄이 늘어난다 — 이 시험은 순서만 보므로 빌려주기를 E0 로 묶는다.
     monkeypatch.setattr(brief, "LEND_ORDER", ("E0",))
     kept = None
@@ -1850,13 +1853,13 @@ def test_e2_order_survives_a_tight_cap(risk_store, monkeypatch):
     built = brief.build_brief(risk_store, target_key, owner_sub="syn@example.com")
     codes = [ln.split(" ")[1] for ln in kept]
     kinds = {"iface.gap_changed": "dimension", "part.thickness_changed": "dimension", "result.part_metric_shift": "result",
-             "cross.bridge_stale": "consistency", "mesh.density_changed": "discretization"}
+             "mesh.density_changed": "discretization"}
     assert len({kinds[c] for c in codes}) == 2 and "mesh.density_changed" not in codes, kept
     assert not any("(+20.0%)" in ln for ln in kept) and any("(−20.0%)" in ln for ln in kept), kept
     tail = _item(built, "E2").split("\n")[-1]
-    assert tail == "[전체 6건 — 실림 2 · 생략 4 | dimension 3 · result 1 · consistency 1 · 설계 무관 1]", tail
-    assert built["meta"]["clipped"]["E2"] == {"lines": 6, "kept": 2, "omitted": 4,
-                                             "omitted_by_kind": {"dimension": 2, "consistency": 1, "discretization": 1}}
+    assert tail == "[전체 5건 — 실림 2 · 생략 3 | dimension 3 · result 1 · 설계 무관 1]", tail
+    assert built["meta"]["clipped"]["E2"] == {"lines": 5, "kept": 2, "omitted": 3,
+                                             "omitted_by_kind": {"dimension": 2, "discretization": 1}}
     assert "줄 생략)" not in _item(built, "E2")                              # 꼬리가 건수를 말한다 — 표식은 쓰지 않는다
 
 
@@ -1886,7 +1889,7 @@ def test_e3_diff_target_lists_named_dims(risk_store):
     factories.make_dim(risk_store, project_id, "plate2_t", "node[asm=a_stack/stack_asm/plate_2].attrs.min_dim")
     results = factories.fixture_adapter_results()
     revised = json.loads(json.dumps(results))
-    next(n for n in revised[0]["nodes"] if n.get("label") == "PLATE_1")["attrs"]["min_dim"] *= 0.7
+    factories.set_thickness(revised, "PLATE_1", 0.84)                       # 1.2 → 0.84(−30%)
     base = factories.make_snapshot(risk_store, project_id, results, label="DV1")
     target = factories.make_snapshot(risk_store, project_id, revised, label="DV2",
                                      captured_at=factories.CAPTURED_AT + 86400)
@@ -1907,7 +1910,7 @@ def test_e3_diff_target_lists_named_dims(risk_store):
 
 def test_e4_diff_target_lists_result_deltas(risk_store):
     """diff 타깃의 E4 는 `parametric.result_delta` 의 정규 표기 몸통이고 주어는 부품 이름이다(R-12 · R-8)."""
-    built = brief.build_brief(risk_store, _six_change_pair(risk_store), owner_sub="syn@example.com")
+    built = brief.build_brief(risk_store, _five_change_pair(risk_store), owner_sub="syn@example.com")
     e4 = _item(built, "E4").split("\n")[1:]
     assert re.match(r"^\[c:[0-9a-f]{12}\] «PLATE_1 worst_stress 231→185 MPa \(−20\.0%\)»", e4[0]), e4
     assert not any(re.search(r"(?<![\[\w:])p:[0-9a-f]{12}", re.sub(r"\[[a-z]+:[^\]]*\]", "", ln)) for ln in e4), e4
@@ -2002,7 +2005,7 @@ def test_e8_sorted_by_evidence_weight(risk_store):
     from app import identity, routes
     from tests import factories
 
-    target_key = _six_change_pair(risk_store)
+    target_key = _five_change_pair(risk_store)
     ident = identity.Identity(email=factories.OWNER, display_name="사람", role="user", organization="qa",
                               anonymous=False, source="bearer")
     priors = [factories.make_diff_target(risk_store, 3) for _ in range(2)]
@@ -2022,10 +2025,10 @@ def test_e0_states_change_volume(risk_store):
     """E0 에 변경의 전체 규모 한 줄 — 좌석이 실린 줄과 생략 줄을 더하지 않고도 안다(R-20). snap 타깃에는 없다."""
     from tests import factories
 
-    built = brief.build_brief(risk_store, _six_change_pair(risk_store), owner_sub="syn@example.com", strict_lint=True)
+    built = brief.build_brief(risk_store, _five_change_pair(risk_store), owner_sub="syn@example.com", strict_lint=True)
     e0 = _item(built, "E0").split("\n")
-    assert "변경 이벤트 6건(설계 관련 5) · dimension 3 · result 1 · consistency 1" in e0, e0
-    assert e0.index("변경 이벤트 6건(설계 관련 5) · dimension 3 · result 1 · consistency 1") == \
+    assert "변경 이벤트 5건(설계 관련 4) · dimension 3 · result 1" in e0, e0
+    assert e0.index("변경 이벤트 5건(설계 관련 4) · dimension 3 · result 1") == \
         next(i for i, ln in enumerate(e0) if ln.startswith("게이트 ")) + 1
     snap = factories.make_snapshot(risk_store, factories.make_project(risk_store), factories.fixture_adapter_results(),
                                    label="DV1")

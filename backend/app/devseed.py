@@ -79,7 +79,6 @@ class Part:
     origin: list[float]               # bbox_def 최소 꼭짓점(정의 좌표 = 조립 좌표)
     size: list[float]                 # x · y · z(z 가 얇은 축)
     material: str
-    min_dim: float | None = None      # None 이면 min(size)
     shift: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])   # 조립 좌표 이동
     rotated: bool = False             # 조립 좌표에서 z 축 90° 회전(bbox_world 의 x·y 길이가 바뀐다)
     min_dim_known: bool = True
@@ -97,7 +96,7 @@ class Iface:
     min_gap: float | None = 0.0
     area: float | None = None
     penetration: float | None = None
-    penetration_lb: bool = True
+    penetration_volume: float | None = None    # 부울 경로가 낸 관통 부피 — 없으면 깊이는 하한값이다(어댑터와 같다)
 
 
 @dataclass
@@ -178,7 +177,7 @@ def _iface(rng: random.Random, kind: str) -> Iface:
         return Iface(kind=kind, min_gap=0.0, area=round(rng.uniform(40.0, 200.0), 1))
     if kind == "clearance":
         return Iface(kind=kind, min_gap=round(rng.uniform(0.25, 0.6), 3), area=None)
-    return Iface(kind="interference", min_gap=0.0, area=None, penetration=0.05, penetration_lb=True)
+    return Iface(kind="interference", min_gap=0.0, area=None, penetration=0.05)
 
 
 def _key(a: str, b: str) -> tuple[str, str]:
@@ -250,7 +249,7 @@ def _attrs_mcad(p: Part) -> dict:
     w_lo = [round(w_center[i] - world_size[i] / 2.0, 4) for i in range(3)]
     w_hi = [round(w_center[i] + world_size[i] / 2.0, 4) for i in range(3)]
     volume = round(p.size[0] * p.size[1] * p.size[2], 4)
-    min_dim = (p.min_dim if p.min_dim is not None else min(p.size)) if p.min_dim_known else None
+    min_dim = min(p.size) if p.min_dim_known else None
     return {
         "shape_kind": "solid", "bbox_def": [*lo, *hi], "size_def": list(p.size),
         "size_sorted": sorted(p.size, reverse=True), "bbox_world": [*w_lo, *w_hi],
@@ -303,7 +302,8 @@ def to_adapter_results(d: Design, *, captured_at: int = CAPTURED_AT) -> list[dic
             "a": _mcad_canon(d.parts[a]), "b": _mcad_canon(d.parts[b]),
             "attrs": {"min_gap": iface.min_gap, "contact_area_est": iface.area, "band_width": 0.05,
                       "normal_align": None, "penetration_depth": iface.penetration,
-                      "penetration_depth_is_lower_bound": iface.penetration_lb, "penetration_volume": None,
+                      "penetration_depth_is_lower_bound": iface.penetration_volume is None,
+                      "penetration_volume": iface.penetration_volume,
                       "cross_file": False, "face_pairs_count": None, "note": None, "tol_config_hash": "tol-a"},
             "provenance": {"adapter": "mcad", "tool": "list_interfaces", "call_id": "syn-mcad-002",
                            "detected_at": None, "params_hash": "tol-a"},
@@ -489,8 +489,10 @@ Apply = Callable[[Design, dict], ChangeRecord]
 
 
 def _prep_node(twin: bool | None = False, orphan: bool | None = None, plain_name: bool = False) -> Prepare:
+    """대본 인자 `twin` 이 있으면 그것으로 짝(dyna pid) 있는 부품·없는 부품을 고른다."""
     def prepare(base: Design, rng: random.Random, params: dict) -> dict:
-        return {**params, "name": _take(base, rng, params, twin=twin, orphan=orphan, plain_name=plain_name)}
+        name = _take(base, rng, params, twin=params.get("twin", twin), orphan=orphan, plain_name=plain_name)
+        return {**params, "name": name}
     return prepare
 
 
@@ -499,14 +501,16 @@ def _sign(plan: Mapping[str, Any]) -> int:
 
 
 def _thickness(t: Design, plan: dict, *, op: str = "part.thickness_changed") -> ChangeRecord:
-    """두께를 바꾼다 — 기본은 판 두께(z 축과 bbox 가 같이 바뀐다), `local` 이면 국부 최소 두께(min_dim)만 바뀐다."""
+    """판 두께(z 축)를 바꾼다 — bbox·부피·min_dim 이 같이 바뀐다.
+
+    실제 어댑터는 min_dim 을 size_def 의 최솟값으로만 낸다(adapters/mcad.py `_shape_attrs`) — min_dim 만 바뀌고 크기는 그대로인
+    '국부 두께' 는 운영에서 생기지 않는 모양이라 두지 않는다(R-FLOOR-1). 짝 있는 부품이면 dyna pid 도 같은 크기로 다시 만든다
+    (`dyna_box` 가 없으면 dyna 가 mcad 를 따른다 — K 파일도 고친 정상 개정).
+    """
     p = t.parts[plan["name"]]
     sign = _sign(plan)
     factor = 0.75 if sign < 0 else 1.3
-    if plan.get("local"):
-        p.min_dim = round(min(p.size) * factor, 3)
-    else:
-        p.size[2] = round(p.size[2] * factor, 3)
+    p.size[2] = round(p.size[2] * factor, 3)
     return _rec(op, ("part.thickness_changed",), (p.name,), sign=sign, unit="mm",
                 flags=(["decrease"] if sign < 0 else []) + _hazard([p.name]))
 
@@ -569,9 +573,9 @@ def _result(t: Design, plan: dict) -> ChangeRecord:
 
 
 def _prep_bridge(base: Design, rng: random.Random, params: dict) -> dict:
-    """mcad 치수만 바뀌고 같은 묶음의 dyna pid 는 그대로인 부품 — 기본은 국부 두께(min_dim)만 바꾼다(`local`).
+    """mcad 판 두께만 바뀌고 같은 묶음의 dyna pid(K 파일)는 그대로인 부품.
 
-    판 두께(bbox 까지)를 바꾸면 지금 생산자가 이동·회전을 덧붙인다(PRODUCER_GAPS) — 그 경우는 따로 시험한다.
+    지금 생산자는 이 변화에 이동·회전을 덧붙인다(PRODUCER_GAPS) — 크기별·무작위 대본에 넣지 않고 재현 시험 한 곳에만 둔다.
 
     지금 생산자는 묶음의 대표 노드를 nid 순서로 고른다 — dyna pid 의 nid 가 mcad 보다 앞이면 이 이벤트가 사라진다
     (diff._semantic 의 `node_t`). 그 조건을 피하는 부품을 고른다. 결함은 기록에 남긴다(WP1 목록).
@@ -587,7 +591,7 @@ def _prep_bridge(base: Design, rng: random.Random, params: dict) -> dict:
         pool = [made.name] if mcad_first(made.name) else []
     name = params.get("subject") or rng.choice(pool)
     base.claimed.add(name)
-    return {"local": True, **params, "name": name}
+    return {**params, "name": name}
 
 
 def _bridge(t: Design, plan: dict) -> ChangeRecord:
@@ -771,7 +775,7 @@ def _prep_iface(kind: str, **extra: Any) -> Prepare:
         key = _pair(base, rng, params)
         base.ifaces[key] = Iface(kind=kind, min_gap=extra.get("min_gap", 0.0 if kind != "clearance" else 0.4),
                                  area=extra.get("area"), penetration=extra.get("penetration"),
-                                 penetration_lb=extra.get("penetration_lb", True))
+                                 penetration_volume=extra.get("penetration_volume"))
         return {**params, "key": key}
     return prepare
 
@@ -800,7 +804,7 @@ def _kind_change(to: str, code: str, *, status: str = "confirmed", sign: int = 0
         iface = t.ifaces[key]
         iface.kind, iface.status = to, status
         if to == "interference":
-            iface.area, iface.penetration, iface.penetration_lb = None, 0.05, True
+            iface.area, iface.penetration, iface.penetration_volume = None, 0.05, None
         elif to in ("tied", "touching"):
             iface.penetration = None
             iface.area = iface.area or 70.0
@@ -828,7 +832,8 @@ def _band(t: Design, plan: dict) -> ChangeRecord:
 def _penetration(t: Design, plan: dict) -> ChangeRecord:
     key = plan["key"]
     iface = t.ifaces[key]
-    iface.penetration, iface.penetration_lb = 0.02, False       # 한쪽이 하한이 아니어야 견준다(둘 다 하한이면 incomparable).
+    # 부울 경로가 부피를 냈다 — 그때만 깊이가 하한이 아니다(어댑터 mcad.py). 한쪽이 하한이 아니어야 견준다(둘 다 하한이면 incomparable).
+    iface.penetration, iface.penetration_volume = 0.02, 0.6
     return _rec("iface.penetration_changed", ("iface.penetration_changed",), key, sign=-1, unit="mm",
                 flags=["lower_bound", "decrease"] + _boundary(t, key))
 
@@ -959,8 +964,9 @@ OPS: dict[str, tuple[Prepare, Apply]] = {
 # 지금 생산자가 내지 못하는 연산 — 크기별·무작위 대본에 넣지 않는다(따로 시험한다).
 PRODUCER_GAPS: dict[str, str] = {
     "contact.type_changed": "diff._edge_change 는 엣지 kind 만 견준다 — contact_type 속성이 바뀌어도 이벤트가 없다",
-    "cross.bridge_stale(local=False)": "diff._parametric 이 같은 dn 의 mcad·dyna 노드 값을 같은 cid 로 by_dn 에 덮는다 —"
-                                       " dyna 크기가 mcad bbox 변화를 가려 판 두께 변화가 part.moved·part.rotated 를 덧붙인다",
+    # 실제 어댑터는 두께를 바꾸면 bbox·size_def·min_dim 을 같이 바꾼다 — 짝 있는 부품의 두께 변경(K 파일 그대로)은 전부 이 길이다.
+    "cross.bridge_stale": "diff._parametric 이 같은 dn 의 mcad·dyna 노드 값을 같은 cid 로 by_dn 에 덮는다 — dyna 크기가"
+                          " mcad bbox 변화를 가려 짝 있는 부품의 두께 변화(K 파일 그대로)가 part.moved·part.rotated 를 덧붙인다",
 }
 
 
@@ -1026,7 +1032,7 @@ _RANDOM_WEIGHTS: tuple[tuple[str, int], ...] = (
     ("iface.clearance_cleared", 2), ("iface.rank_up", 2), ("iface.rank_down", 2), ("iface.interference_new", 1),
     ("iface.interference_cleared", 1), ("iface.band_area_changed", 2), ("iface.penetration_changed", 1),
     ("part.added", 2), ("part.removed", 2), ("part.replaced", 1), ("part.split", 1), ("part.merged", 1),
-    ("part.tree_moved", 1), ("part.rotated", 2), ("mesh.density_changed", 3), ("cross.bridge_stale", 1),
+    ("part.tree_moved", 1), ("part.rotated", 2), ("mesh.density_changed", 3),
     ("result.part_metric_shift", 4), ("contact.added", 1), ("contact.removed", 1), ("contact.friction_changed", 1),
     ("contact.scope_changed", 1), ("dim.named_changed", 1), ("dim.named_unmeasured", 1), ("part.noise", 2),
     ("iface.status_changed", 1),

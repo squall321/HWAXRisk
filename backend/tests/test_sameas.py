@@ -454,6 +454,33 @@ def test_inherit_ckeys_merges_on_same_project_revision(risk_store):
     assert sameas.resolve_ckey(risk_store, target_ckey, OWNER) == base_ckey
 
 
+@pytest.mark.xfail(strict=True, raises=AssertionError, reason=(
+    "생산자 결함 — 자동 승계(§2.7.3, sameas.inherit_ckeys)를 파이프라인 어디에서도 부르지 않는다. 실제 어댑터 모양의 두께 변경은 "
+    "부피 버킷을 옮겨 다음 스냅샷의 계산 ckey 가 달라지고, 앞 타깃 등록부 행의 stale·좌석 carried 판정(§4.8)이 그 부품을 놓친다. "
+    "min_dim 만 바꾼 손 픽스처는 버킷이 그대로라 이것을 가렸다(R-FLOOR-1)"))
+def test_a_revised_thickness_keeps_the_part_key_through_the_pipeline(risk_store):
+    """같은 과제의 다음 리비전에서 두께만 바뀐 부품은 앞 스냅샷의 유효 ckey 를 승계한다 — 입력은 공장(생산자 경로)이다."""
+    from tests import factories
+
+    project_id = factories.make_project(risk_store)
+    base = factories.fixture_adapter_results()
+    revised = json.loads(json.dumps(base))
+    factories.set_thickness(revised, "PLATE_2", 1.4)
+    first = factories.make_snapshot(risk_store, project_id, base, label="DV1")
+    second = factories.make_snapshot(risk_store, project_id, revised, label="DV2",
+                                     captured_at=factories.CAPTURED_AT + 86400)
+    factories.make_diff(risk_store, first["snapshot_id"], second["snapshot_id"])
+
+    def ckey(snapshot_id: str) -> str:
+        return risk_store.query_one("SELECT ckey FROM rr_ir_nodes WHERE snapshot_id = ? AND name = 'PLATE_2'",
+                                    (snapshot_id,))["ckey"]
+
+    before, after = ckey(first["snapshot_id"]), ckey(second["snapshot_id"])
+    if before == after:                    # 전제(AssertionError 가 아니다 — xfail 이 삼키지 않게)
+        raise RuntimeError("두께 변경이 계산 ckey 를 옮기지 않았다 — 이 시험은 승계를 보지 않는다")
+    assert sameas.resolve_ckey(risk_store, after, factories.OWNER) == before
+
+
 def test_inherit_ckeys_ignores_non_deterministic_and_human_rows(risk_store):
     base = [mcad("b1", "/x/film", "film", (10.0, 5.0, 0.08), 4.0)]
     target = [mcad("t1", "/x/film", "film", (10.0, 5.0, 0.06), 3.0)]

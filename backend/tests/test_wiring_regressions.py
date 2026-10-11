@@ -1183,8 +1183,7 @@ def _quote_pair(store):
     base_results = json.loads(json.dumps(results))
     next(n for n in base_results[0]["nodes"] if n.get("label") == "PLATE_1")["label"] = "Plate-1"
     mcad, _dyna, result = results
-    by_label = {n["label"]: n for n in mcad["nodes"]}
-    by_label["PLATE_1"]["attrs"]["min_dim"] *= 0.7
+    factories.set_thickness(results, "PLATE_1", 0.84)                       # 1.2 → 0.84(−30%)
     mcad["edges"][0]["attrs"]["min_gap"] = 0.018
     result["results"]["part_risk"][0]["worst_stress"]["value"] *= 0.8
     base = factories.make_snapshot(store, project_id, base_results, label="DV1")
