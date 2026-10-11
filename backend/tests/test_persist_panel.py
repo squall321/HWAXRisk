@@ -195,6 +195,45 @@ def test_finding_json_carries_registry_merge_keys(seeded):
     assert fj["feature_snapshot"][NID]["min_gap"] == 0.4   # §4.3.4 인용 원천 동결
 
 
+def test_모양이_틀린_의장_spec_도_저장되고_한_개짜리는_글자로_쪼개지_않는다(seeded):
+    """10-11 dev 실주행(qwen 7B) 의장 출력 그대로의 모양 — coverage.seats 에 좌석 수, raised_by·by 에 문자열 하나,
+    resolving_check 에 문장. 종전에는 `for s in 4` 로 저장이 죽었고, 죽지 않은 자리는 raised_by 가 글자로 쪼개졌다."""
+    spec = _spec()
+    spec["coverage"]["seats"] = 2
+    spec["findings"][0]["raised_by"] = "mech-housing-structure"
+    spec["findings"][0]["resolving_check"] = "工具预测"
+    spec["character"]["facets"][0]["statements"][0]["by"] = "mech-housing-structure"
+    out = narrative.persist_panel_result(
+        seeded, PANEL, decision_text=_decision_text(spec), spec=spec, turns=_turns(),
+        attribution={"seats": {}, "extra_seats": []}, actor=None)
+
+    assert out["findings_total"] == 2
+    row = seeded.query_one("SELECT finding_json FROM rr_findings WHERE claim_uid = ?", (f"{PANEL}#F1",))
+    assert json.loads(row["finding_json"])["raised_by"] == ["mech-housing-structure"]
+    shapes = {i["path"]: i["value"] for i in out["normalized"]["invalid_enum"] if i["field"] == "shape"}
+    assert shapes == {"coverage/seats": 2, "findings/0/resolving_check": "工具预测"}
+    facets = {f["facet"]: f for f in out["normalized"]["spec"]["character"]["facets"]}
+    statement = facets["vulnerability"]["statements"][0]
+    assert statement["by"] == ["mech-housing-structure"]
+
+
+@pytest.mark.parametrize("bad", [7, "F1 하나", True])
+def test_목록_자리에_다른_모양이_오면_빈_목록으로_읽고_원래_값을_남긴다(bad):
+    spec = _spec()
+    spec["findings"] = bad
+    out = narrative.normalize_risk_spec(spec, narrative.SpecContext())
+    assert out["spec"]["findings"] == []
+    assert {"path": "findings", "field": "shape", "value": bad} in out["invalid_enum"]
+
+
+def test_객체_하나를_목록_대신_쓰면_한_항목_목록으로_읽는다():
+    spec = _spec()
+    spec["findings"] = spec["findings"][0]
+    out = narrative.normalize_risk_spec(spec, narrative.SpecContext())
+    assert [f["id"] for f in out["spec"]["findings"]] == ["F1"]
+    assert not [i for i in out["invalid_enum"] if i["field"] == "shape"]
+
+
 def test_registry_merge_consumes_persisted_findings(seeded):
     _persist(seeded)
     merged = registry.merge(seeded, TARGET)

@@ -88,6 +88,65 @@ def validate_risk_spec(obj: dict) -> list[str]:
     return out
 
 
+@lru_cache(maxsize=1)
+def _spec_schema() -> dict:
+    return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+
+
+def _shape_node(node: Any) -> dict:
+    """스키마 마디의 $ref·allOf 를 풀어 type·properties·items 만 남긴다(모양 맞추기용 — 값 검사는 validate_risk_spec 몫)."""
+    node = dict(node) if isinstance(node, Mapping) else {}
+    ref = node.pop("$ref", None)
+    if ref:
+        node = {**_shape_node(_spec_schema()["definitions"][ref.rsplit("/", 1)[-1]]), **node}
+    for part in node.pop("allOf", None) or ():
+        part = _shape_node(part)
+        node.setdefault("type", part.get("type"))
+        node.setdefault("items", part.get("items"))
+        node["properties"] = {**(part.get("properties") or {}), **(node.get("properties") or {})}
+        for key, sub in (part.get("properties") or {}).items():    # 앞 조각(정의)의 type 이 이긴다 — 뒤 조각은 pattern·const 만 얹는다
+            if "type" in sub or "$ref" in sub:
+                node["properties"][key] = sub
+    return node
+
+
+def _coerce_shapes(value: Any, node: Any, path: str, invalid: list[dict], warnings: list[str]) -> Any:
+    """의장 risk_spec 의 목록·객체 자리를 계약(risk_spec.v1)의 모양으로 맞춘다 — 정규화가 모양을 믿고 돌기 전에.
+
+    모델은 모양을 틀린다(dev 7B 가 coverage.seats 에 좌석 수 4 를 써 `for s in 4` 로 저장이 죽었다 — 10-11 실주행).
+    한 개를 목록 대신 그대로 쓴 것(문자열 하나·객체 하나)은 한 항목 목록으로 읽는다 — 그대로 두면 문자열은 글자로
+    쪼개져 raised_by=["c","h","a","i","r"] 가 조용히 남는다. 그 밖에 모양이 다른 값은 빈 값으로 읽고 원래 값을
+    invalid_enum 에 field='shape' 로 남긴다(버리지 않는다). None 은 건드리지 않는다(각 자리의 기본값이 따로 있다).
+    """
+    node = _shape_node(node)
+    kind = node.get("type")
+    if value is None or not isinstance(kind, str):
+        return value
+    where = path or "(root)"
+    if kind == "object":
+        if not isinstance(value, dict):
+            invalid.append({"path": where, "field": "shape", "value": value})
+            warnings.append(f"{where} 는 계약이 객체인데 {type(value).__name__} 이다 — 빈 객체로 읽는다(원래 값은 invalid_enum).")
+            return {}
+        props = node.get("properties") or {}
+        return {k: _coerce_shapes(v, props[k], f"{path}/{k}" if path else k, invalid, warnings) if k in props else v
+                for k, v in value.items()}
+    if kind == "array":
+        items = node.get("items") or {}
+        if not isinstance(value, list):
+            first = _shape_node(items[0] if isinstance(items, list) and items else items).get("type")
+            if (first == "string" and isinstance(value, str)) or (first == "object" and isinstance(value, dict)):
+                warnings.append(f"{where} 는 계약이 목록인데 한 개만 썼다 — 한 항목 목록으로 읽는다.")
+                value = [value]
+            else:
+                invalid.append({"path": where, "field": "shape", "value": value})
+                warnings.append(f"{where} 는 계약이 목록인데 {type(value).__name__} 이다 — 빈 목록으로 읽는다(원래 값은 invalid_enum).")
+                return []
+        return [_coerce_shapes(v, (items[i] if i < len(items) else {}) if isinstance(items, list) else items,
+                               f"{where}/{i}", invalid, warnings) for i, v in enumerate(value)]
+    return value
+
+
 # ================================================================ 상수(plan §4.2.2 · §4.3 · §4.6)
 NORMALIZE_VERSION = "risk_spec-norm-1.0"
 
@@ -1358,6 +1417,7 @@ def normalize_risk_spec(spec: dict, ctx: SpecContext | None = None, *, prose: st
     warnings: list[str] = []
     curation: list[dict] = []
     flags: list[str] = []
+    spec = _coerce_shapes(spec, _spec_schema(), "", invalid, warnings)
 
     scope = dict(spec.get("scope") or {})
     target_key = str(scope.get("target_key") or ctx.target_key or "")
