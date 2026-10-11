@@ -256,7 +256,7 @@ class SynthTarget:
     base_snapshot_id: str
     target_snapshot_id: str
     diff_id: str
-    target_key: str
+    target_key: str | None          # open_target=False 면 None — 심사 대상은 부른 쪽이 연다(dev 주입)
     diff: dict
     manifest: tuple[devseed.ChangeRecord, ...]
     base: devseed.Design
@@ -297,15 +297,19 @@ def diff_fingerprint(diff: Mapping[str, Any]) -> str:
 def make_diff_target(store, size: int = 40, *, seed: int | None = None, owner: str = OWNER,
                      agents: Sequence[Mapping[str, Any]] | None = None,
                      script: Sequence[tuple[str, Mapping[str, Any]]] | None = None,
-                     spec: devseed.SynthSpec | None = None, check: bool = True) -> SynthTarget:
-    """합성 다건 변경 타깃 — 대본 → 어댑터 결과 쌍 → 실제 생산자(명명 치수·스냅샷 둘·diff·타깃)."""
+                     spec: devseed.SynthSpec | None = None, check: bool = True,
+                     project: Mapping[str, Any] | None = None, open_target: bool = True) -> SynthTarget:
+    """합성 다건 변경 타깃 — 대본 → 어댑터 결과 쌍 → 실제 생산자(명명 치수·스냅샷 둘·diff·타깃).
+
+    `project` 는 make_project 의 code·name 이고, `open_target=False` 면 diff 까지만 만든다(dev 주입 — 명단은 실제 입구가 받는다).
+    """
     from tests.synth import scripts  # noqa: PLC0415 — 대본은 시험 쪽 모듈이다.
 
     seed = scripts.SEED if seed is None else seed
     spec = spec or scripts.spec_for(size, seed)
     script = list(script if script is not None else scripts.script_for(size, seed))
     base, target, records = devseed.apply_script(devseed.build_design(spec), script, seed)
-    project_id = make_project(store, owner=owner)
+    project_id = make_project(store, owner=owner, **dict(project or {}))
     for dim in devseed.dim_defs(base):
         make_dim(store, project_id, dim["name"], dim["extractor"], kind=dim["kind"], unit=dim["unit"], owner=owner)
     first = make_snapshot(store, project_id, devseed.to_adapter_results(base), label="DV1", owner=owner)
@@ -317,7 +321,8 @@ def make_diff_target(store, size: int = 40, *, seed: int | None = None, owner: s
         problems = synth_mismatch(diff, records)
         if problems:
             raise SynthMismatch("합성 쌍이 대본과 다르다 — " + " | ".join(problems))
-    target_key = make_target(store, "diff", diff["diff_id"], agents=agents or _default_agents(), owner=owner)
+    target_key = (make_target(store, "diff", diff["diff_id"], agents=agents or _default_agents(), owner=owner)
+                  if open_target else None)
     return SynthTarget(project_id=project_id, base_snapshot_id=first["snapshot_id"],
                        target_snapshot_id=second["snapshot_id"], diff_id=diff["diff_id"], target_key=target_key,
                        diff=diff, manifest=tuple(records), base=base, target=target)
