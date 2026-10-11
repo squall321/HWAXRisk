@@ -438,9 +438,14 @@ DIFF_REF_WHY = {
     "service_credential": ("잡이 서비스 계정 자격으로 돈다 — 좌석은 조직 공개(mcp_visibility='org') 과제만 연다. 소유자나 잡을 만든"
                            " 사람이 웹 설정에서 포털 PAT 를 등록하면 그 사람 자격으로 돈다."),
     "not_member": "잡 자격의 사람이 이 과제의 소유자도 구성원도 아니다.",
-    "gateway_unseen": ("이 앱이 게이트웨이의 사람별 단언 발급(POST /api/auth/sso)을 아직 받은 적이 없다 — 좌석이 잡 자격의 사람으로"
-                       " 보일지 모르지만 diff_id 는 싣는다(게이트웨이에 per_user_sso.hwax_risk 가 없으면 좌석은 서비스 세션의 heax"
-                       " 첫 관리자로 보여 그 호출이 not_visible 일 수 있다). 좌석의 첫 호출이 발급을 일으켜 다음 패널부터 판정한다."),
+    "gateway_sso_off": ("이 앱에 게이트웨이 SSO 시크릿(HWAXRISK_HEAX_GATEWAY_SECRET)이 없다 — 사람별 단언 발급(POST /api/auth/sso)이"
+                        " 404 이고 단언도 검증되지 않아, 좌석은 늘 서비스 세션(heax 첫 관리자)으로 보여 이 과제를 not_visible 로 받는다."
+                        " 운영자가 게이트웨이의 사람별 위임(per_user_sso.hwax_risk)과 이 앱의 같은 시크릿을 설정하면 다음 패널부터"
+                        " 싣는다."),
+    "gateway_unseen": ("이 앱에 게이트웨이 시크릿은 있지만 사람별 단언 발급(POST /api/auth/sso)을 아직 받은 적이 없다 — 좌석이 잡"
+                       " 자격의 사람으로 보일지 모르지만 diff_id 는 싣는다(게이트웨이 쪽에 per_user_sso.hwax_risk 가 없거나 시크릿이"
+                       " 다르면 좌석은 서비스 세션의 heax 첫 관리자로 보여 그 호출이 not_visible 일 수 있다). 좌석의 첫 호출이 발급을"
+                       " 일으켜 다음 패널부터 판정한다."),
     "gateway_folded_stale": ("마지막 발급 기록은 위임 헤더 없는 옛 판이었지만 단언 수명보다 오래됐다 — 게이트웨이가 그 단언을 이미 버려"
                              " 좌석의 다음 호출이 새로 발급받으므로, 지금의 판을 모른 채 diff_id 를 싣는다. 그 발급이 다음 패널부터"
                              " 판정한다."),
@@ -459,7 +464,8 @@ def diff_ref_withheld(store: Any, diff_id: str, credential_kind: str | None, ema
     맨 앞에 세우고 안내하는데 좌석의 호출은 not_visible 로 떨어진다(isError 가 아니라 게이트웨이 감사에도 실패로 남지 않는다).
 
     발급 기록이 없거나 단언 수명보다 오래된 옛 판 기록이면 열릴지 모르는 것이라 막지 않는다 — `shipped: True` 를 단 까닭을 돌려주고
-    러너는 diff_id 를 싣되 패널 품질 `gateway_unverified` 로 남긴다(RV-3).
+    러너는 diff_id 를 싣되 패널 품질 `gateway_unverified` 로 남긴다(RV-3). 다만 앱의 게이트웨이 시크릿이 비면 발급 길이 닫혀
+    기록이 영영 생기지 않으므로 '아직 모른다' 가 아니라 '못 연다'(gateway_sso_off)로 막는다(3차 검토 발견 3).
     """
     def withheld(reason: str) -> dict:
         return {"reason": reason, "why": DIFF_REF_WHY[reason]}
@@ -485,6 +491,10 @@ def diff_ref_withheld(store: Any, diff_id: str, credential_kind: str | None, ema
             return withheld("not_member")
         private = True
     if private:
+        # 시크릿이 비면 /api/auth/sso 가 404 이고 단언 검증도 실패한다 — 좌석은 늘 서비스 세션이고 발급 기록은 생길 수 없다. 기록
+        # 없음(gateway_unseen)으로 읽어 실으면 개인 과제 diff 패널마다 좌석의 호출이 not_visible 로 떨어진다(3차 검토 발견 3).
+        if not config.heax_gateway_secret():
+            return withheld("gateway_sso_off")
         seen = gateway_mint_seen(store)
         if seen is None:
             return unverified("gateway_unseen")

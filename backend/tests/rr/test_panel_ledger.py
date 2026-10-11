@@ -937,7 +937,7 @@ def test_panel_brief_is_sized_from_the_engine_budget(risk_store, tmp_path, no_ne
     assert "E2" not in (quality.get("brief_clipped") or {}), quality.get("brief_clipped")
 
 
-def test_runner_question_carries_the_digest_and_the_diff_mark(risk_store, tmp_path, no_network):
+def test_runner_question_carries_the_digest_and_the_diff_mark(risk_store, tmp_path, no_network, monkeypatch):
     """웹 러너 — 소유자 자격으로 도는 패널의 질문에 변경 요지와 `diff_id=<id>` 가 실리고 지식카드 검색어가 같이 간다.
     검색어가 포털 상한에 잘렸으면 패널 품질에 남는다(WP1 S11)."""
     from app import brief
@@ -946,6 +946,8 @@ def test_runner_question_carries_the_digest_and_the_diff_mark(risk_store, tmp_pa
     lg = _diff_ledger(risk_store, tmp_path, synth.target_key)
     _job(lg)
     # 이 박스의 게이트웨이는 위임 헤더를 싣는 판이다(사람별 단언 발급을 받아 봤다) — 좌석이 소유자로 보여 그 diff 를 연다(SEC-3).
+    # 발급을 받아 봤으니 앱에 게이트웨이 시크릿이 있다(비면 gateway_sso_off 로 막는다 · 3차 검토 발견 3).
+    monkeypatch.setattr(config, "heax_gateway_secret", lambda *a, **k: GATEWAY_SECRET)
     runner.note_gateway_mint(risk_store, delegated=True)
     engine = _BudgetEngine(None)
     out = _run(lg, engine)
@@ -1131,3 +1133,49 @@ def test_a_failure_to_note_the_mint_does_not_fail_the_assertion(risk_store, monk
     monkeypatch.setattr(runner, "note_gateway_mint", locked)
     token = _gateway_assertion(OWNER)
     assert identity._verify_sso_assertion(token) == (OWNER, True)
+
+
+def test_a_box_without_the_gateway_secret_withholds_the_diff_mark(risk_store, tmp_path, no_network, monkeypatch):
+    """앱의 게이트웨이 시크릿이 비면(게이트웨이에 per_user_sso.hwax_risk 가 없는 박스) /api/auth/sso 가 404 라 발급 기록이 영영
+    생기지 않고, 단언 검증도 그 시크릿으로 하므로 좌석은 늘 서비스 세션(heax 첫 관리자)으로 보인다. 그 박스에서 기록 없음을
+    gateway_unseen 으로 읽어 diff_id 를 실으면 개인 과제 diff 패널마다 좌석이 risk_get_diff 를 불러 not_visible 을 영구히
+    받는다 — 막고 까닭을 gateway_sso_off 로 남긴다. 시크릿이 있는데 기록이 없을 때만 지금처럼 gateway_unverified 로 싣는다
+    (3차 검토 발견 3)."""
+    from app import routes
+
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    secret = {"value": ""}
+    monkeypatch.setattr(config, "heax_gateway_secret", lambda *a, **k: secret["value"])
+    synth = factories.make_diff_target(risk_store, 3, agents=factories.agents(("mech", "sim", "xd", "rel", "cam"), 3))
+    lg = _diff_ledger(risk_store, tmp_path, synth.target_key)
+    _job(lg)
+    engine = _BudgetEngine(None)
+    mark = f"diff_id={synth.diff_id}"
+
+    def quality_of(out: dict) -> dict:
+        assert out["status"] == "done", out
+        return json.loads(_panel(risk_store, out["panel_id"])["quality_json"])
+
+    # (a) 시크릿이 없다 — 발급 길이 닫혀 있어 기록이 생길 수 없다. 표식을 막고 까닭을 남긴다.
+    with pytest.raises(AppError) as closed:
+        _gateway_assertion(OWNER)
+    assert closed.value.http_status == 404 and _mint_row(risk_store) is None
+    quality = quality_of(_run(lg, engine))
+    assert mark not in engine.opts[0]["question"]
+    assert quality["diff_ref_withheld"]["reason"] == "gateway_sso_off" and "gateway_unverified" not in quality
+    assert "diff_ref_withheld" in quality["flags"] and "HWAXRISK_HEAX_GATEWAY_SECRET" in quality["diff_ref_withheld"]["why"]
+
+    # (b) 시크릿이 생겼지만 아직 발급이 없다 — 좌석의 첫 호출이 발급을 일으키니 막지 않고 싣는다(RV-3 그대로).
+    secret["value"] = GATEWAY_SECRET
+    quality = quality_of(_run(lg, engine))
+    assert mark in engine.opts[1]["question"]
+    assert quality["gateway_unverified"]["reason"] == "gateway_unseen" and "diff_ref_withheld" not in quality
+
+    # (c) 위임 판으로 발급한 뒤 시크릿을 지웠다 — 남은 기록은 위임이라 말하지만 그 단언은 더 이상 검증되지 않는다.
+    token = _gateway_assertion(OWNER)
+    assert runner.gateway_delegates(risk_store) is True
+    secret["value"] = ""
+    assert identity._verify_sso_assertion(token) is None
+    quality = quality_of(_run(lg, engine))
+    assert mark not in engine.opts[2]["question"]
+    assert quality["diff_ref_withheld"]["reason"] == "gateway_sso_off"

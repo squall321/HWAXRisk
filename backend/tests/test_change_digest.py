@@ -72,7 +72,7 @@ def test_knowledge_query_rides_in_delib_opts_inside_the_portal_limit(risk_store)
     assert "knowledge_query" not in empty
 
 
-def test_diff_id_mark_rides_only_when_the_seats_can_open_the_diff(risk_store):
+def test_diff_id_mark_rides_only_when_the_seats_can_open_the_diff(risk_store, monkeypatch):
     """`diff_id=<id>` 는 좌석 자격으로 그 diff 가 보일 때만 싣는다 — 사람 자격(소유자)은 게이트웨이가 위임 헤더를 싣는 판일 때만
     보이고(옛 판이면 좌석이 Caddy 가 덮은 heax 첫 관리자로 보인다 — SEC-3), 서비스 자격은 과제가 조직 공개일 때만이다. 못 여는
     자격에 실으면 엔진이 도구를 앞세우고 안내한 호출이 not_visible 로 떨어진다(P-06). 못 여는 까닭은 이름으로 가른다."""
@@ -82,7 +82,12 @@ def test_diff_id_mark_rides_only_when_the_seats_can_open_the_diff(risk_store):
     def reason(kind: str, email: str | None) -> str | None:
         return (runner.diff_ref_withheld(risk_store, synth.diff_id, kind, email) or {}).get("reason")
 
-    # 게이트웨이의 사람별 단언 발급을 받아 본 적이 없다 — 좌석이 소유자로 보일지 모르지만 막지는 않는다(싣고 품질에 남긴다 · RV-3).
+    # 앱에 게이트웨이 시크릿이 없다 — 발급 길이 닫혀 기록이 생길 수 없고 좌석은 늘 서비스 세션이다. 막는다(3차 검토 발견 3).
+    monkeypatch.setattr(config, "heax_gateway_secret", lambda *a, **k: "")
+    assert reason("owner", factories.OWNER) == "gateway_sso_off"
+    assert "shipped" not in runner.diff_ref_withheld(risk_store, synth.diff_id, "owner", factories.OWNER)
+    monkeypatch.setattr(config, "heax_gateway_secret", lambda *a, **k: factories.TEST_GATEWAY_SECRET)
+    # 시크릿은 있지만 사람별 단언 발급을 받아 본 적이 없다 — 좌석이 소유자로 보일지 모르지만 막지는 않는다(싣고 품질에 남긴다 · RV-3).
     assert reason("owner", factories.OWNER) == "gateway_unseen"
     assert runner.diff_ref_withheld(risk_store, synth.diff_id, "owner", factories.OWNER)["shipped"] is True
     runner.note_gateway_mint(risk_store, delegated=False)                 # 위임 헤더 없는 옛 게이트웨이(단언 수명 안)

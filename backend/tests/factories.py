@@ -385,8 +385,16 @@ def portal_panel_body(store, data_dir: Path | str, size: int = 40, *, seed: int 
         return httpx.Response(200, json=info)
 
     engine = engine_client.PortalPanelEngine(store, cfg, transport=httpx.MockTransport(answer))
-    with no_network():
-        out = runner.run_panel(store, cfg, engine, runner.claim_next_job(store, cfg))
+    # 발급을 받아 본 박스라면 앱에 게이트웨이 시크릿이 있다 — 비면 러너가 diff_id 를 막는다(gateway_sso_off · 3차 검토 발견 3).
+    # 이 공장은 monkeypatch 없는 하위 프로세스(에이전트 서버 사슬 시험)에서도 불리므로 한 바퀴 동안만 바꾸고 되돌린다.
+    real_secret = config.heax_gateway_secret
+    if not real_secret():
+        config.heax_gateway_secret = lambda *a, **k: TEST_GATEWAY_SECRET
+    try:
+        with no_network():
+            out = runner.run_panel(store, cfg, engine, runner.claim_next_job(store, cfg))
+    finally:
+        config.heax_gateway_secret = real_secret
     if out.get("status") != "done" or "body" not in seen:
         raise RuntimeError(f"러너 한 바퀴가 포털에 본문을 보내고 끝나지 못했다 — {out}")
     return PanelBody(body=seen["body"], target=synth, run=out)

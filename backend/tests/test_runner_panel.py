@@ -20,6 +20,13 @@ OWNER = "u@x"
 ADVERSARY = planner.ADVERSARY_KEY
 
 
+@pytest.fixture(autouse=True)
+def _gateway_secret(monkeypatch):
+    """`seeded` 는 게이트웨이 발급을 받아 본 박스다 — 그런 박스의 앱에는 게이트웨이 시크릿이 있다(비면 러너가 diff_id 를
+    gateway_sso_off 로 막는다 · 3차 검토 발견 3)."""
+    monkeypatch.setattr(config, "heax_gateway_secret", lambda *a, **k: "runner-panel-gateway-secret")
+
+
 # ---------------------------------------------------------------- 원장 준비
 def agents(sizes: dict[str, int]) -> list[dict]:
     return [
