@@ -86,7 +86,8 @@
   쓰기 도구의 `actor` 인자는 그대로 미검증 표기다.
 - Claude 연결 경로 둘(§6.11). 게이트웨이(`:9110`)를 붙인 세션은 백엔드 `heax-hwax_risk` 로 `risk_*` 14종을 그대로 본다.
   앱만 직접 붙이려면 `claude mcp add --transport http hwax-risk <포털베이스>/apps/hwax_risk/mcp --header "Authorization: Bearer heax_pat_…"`
-  (로컬 dev 는 리포의 `.mcp.json` 과 같은 `http://127.0.0.1:8000/mcp`).
+  (로컬 dev 는 리포의 `.mcp.json` 과 같은 `http://127.0.0.1:8000/mcp`). 직접 등록은 **읽기 전용**이다 — 쓰기·결과 제출·사람 finding·
+  브리프 수신은 게이트웨이 위임으로 확인된 신원만 받아(`entry.require_delegate`) 게이트웨이(hwax) 경유로만 된다(RV-6).
 - 실행 등급 둘 — L1 단발은 `hwax-deliberate` 에 `chairTemplate:'risk-review'`(원장 미연동), L2 는 포털 워크플로 `hwax-risk-review`
   (`{targetKey, tier, panels?, actor?, model?}`)가 `risk_get_brief` → 패널별 심의 → `risk_submit_panel_result` 로 돈다. 자세한 표는 `README.md`.
   Tier A 대표 패널과 무인 배치는 웹 러너 전용이라 `risk_get_brief(target_key, tier:'A')` 는 `{error:'tier_a_web_only'}` 다.

@@ -250,3 +250,37 @@ def test_the_brief_refuses_an_identity_that_could_not_submit_before_freezing(cli
     out = srv.risk_get_brief(synth.target_key, token)
     assert [p["panel_id"] for p in out["panels"]] == [panel_id], out
     assert _panel_state(box, panel_id)["brief_gz"] is not None
+
+
+# ---------------------------------------------------------------- RV-6 — 거절의 고칠 곳은 원인을 따른다
+PERSONAL_PAT = "heax_pat_owner_personal"     # 사람이 앱 MCP 를 직접 등록할 때 싣는 개인 heax PAT(README '포털 경유' 예시)
+FOLDED_FIX = "X-Hwax-Delegate-Email 을 싣는 판으로 올"
+
+
+def test_the_refusal_names_the_fix_for_its_cause(client, box):
+    """직접 등록(개인 PAT Bearer) 길은 쓰기가 막혔는데(SEC-1) 거절 문구는 원인과 무관하게 '운영자가 게이트웨이를 X-Hwax-Delegate-Email
+    을 싣는 판으로 올린다' 를 줬다 — 게이트웨이를 거치지 않는 사용자에게 틀린 처방이고, 운영자가 게이트웨이를 올려도 이 사용자는 계속
+    거절된다(RV-6). Bearer 는 '직접 등록이면 게이트웨이(hwax) MCP 로 부른다(직접 등록은 읽기 전용)' 를 먼저 말하고, 접힌 단언(옛
+    게이트웨이)은 운영자의 게이트웨이 판 올리기를 말한다. 길잡이의 막힘도 같은 고칠 곳이다."""
+    box.monkeypatch.setattr(identity, "_fetch_me", lambda token: (
+        {"email": OWNER, "role": "user", "display_name": "소유자"} if token == PERSONAL_PAT else None))
+    identity.reset_cache()
+    try:
+        act_with(box, {"Authorization": f"Bearer {PERSONAL_PAT}"})
+        direct = call("risk_create_project", code="P1", name="과제", classification="internal")
+        assert direct.get("error") == "delegation_required", direct
+        assert direct["detail"]["identity"] == {"email": OWNER, "source": "bearer", "delegated": False}
+        assert "직접 등록" in direct["message"]
+        fix = direct["detail"]["fix"]
+        assert "게이트웨이(hwax) MCP" in fix and "읽기 전용" in fix and FOLDED_FIX not in fix, fix
+        assert call("risk_next_step")["blocked"][0]["fix"] == fix
+        # 읽기는 그 사람의 시야로 그대로 돈다 — 직접 등록이 읽기 전용이라는 안내와 맞는다.
+        assert call("risk_list_projects").get("error") is None
+    finally:
+        identity.reset_cache()
+
+    act_with(box, {identity.SSO_HEADER: assertion_from_gateway(client, None)})
+    folded = call("risk_create_project", code="P1", name="과제", classification="internal")
+    assert folded["error"] == "delegation_required"
+    assert FOLDED_FIX in folded["detail"]["fix"] and "직접 등록" not in folded["detail"]["fix"], folded["detail"]["fix"]
+    assert counts(box)["rr_projects"] == 0

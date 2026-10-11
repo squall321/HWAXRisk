@@ -76,22 +76,31 @@ def acting_as(ident: identity.Identity) -> dict:
 
 
 def _delegation_refusal(ident: identity.Identity) -> tuple[str, dict]:
-    """쓰기를 거절하는 까닭(문구)과 기계 판독 칸 — 무엇이 없어서인지를 가른다. 관리자·서비스 계정으로 떨어지지 않는다."""
+    """쓰기를 거절하는 까닭(문구)과 기계 판독 칸 — 무엇이 없어서인지를 가르고, 고칠 곳(`fix`)도 그 원인을 따른다(RV-6).
+
+    관리자·서비스 계정으로 떨어지지 않는다. Bearer 는 앱 MCP 를 개인 PAT 로 직접 등록한 사람과 사람별 위임 없이 부른 게이트웨이
+    서비스 세션이 같은 모양이라 둘을 함께 말하되, 사람이 스스로 고칠 수 있는 직접 등록을 먼저 말한다.
+    """
+    root = str(getattr(config.settings, "root_path", "") or "").rstrip("/")
+    web = f"그 전에는 웹 리스크 앱({root}/)에서 같은 일을 한다."
     if ident.anonymous or not ident.email:
         why = ("이 호출에는 확인된 신원이 없다 — 게이트웨이가 사람별 위임 단언(X-Heax-Sso-Assertion)을 싣지 않았거나(사람별 위임 없이"
                " 부른 서비스 세션 · 이 앱의 per_user_sso 가 설정되지 않은 박스) 단언의 서명·만료가 맞지 않는다.")
+        fix = ("운영자가 게이트웨이의 사람별 위임(per_user_sso.hwax_risk, token_header=X-Heax-Sso-Assertion)과 이 앱의 게이트웨이"
+               f" 시크릿이 맞는지 본다. {web}")
     elif ident.source == "sso":
         why = (f"이 호출의 단언({ident.email})은 게이트웨이가 위임 헤더(X-Hwax-Delegate-Email) 없이 받아 온 것이다 — 그 헤더를 보내지"
                " 않는 옛 게이트웨이면 HEAXHub Caddy 가 이메일을 게이트웨이 서비스 토큰의 주인(heax 첫 관리자)으로 덮어, 누가 부르든"
                " 같은 계정이 된다.")
+        fix = f"운영자가 게이트웨이를 사람별 위임에 X-Hwax-Delegate-Email 을 싣는 판으로 올린다. {web}"
     else:
-        why = (f"이 호출은 Bearer 토큰({ident.email})으로 왔다 — 사람별 위임 없이 부른 게이트웨이 서비스 세션도 이 모양(게이트웨이 heax"
-               " 토큰 = heax 첫 관리자 PAT)이라 누가 부르는지 가를 수 없다.")
-    root = str(getattr(config.settings, "root_path", "") or "").rstrip("/")
-    detail = {"identity": {"email": ident.email, "source": ident.source, "delegated": bool(ident.delegated)},
-              "fix": ("운영자가 게이트웨이를 사람별 위임에 X-Hwax-Delegate-Email 을 싣는 판으로 올리고, 이 앱의 per_user_sso"
-                      "(token_header=X-Heax-Sso-Assertion)가 설정됐는지 본다. 그 전에는 웹 리스크 앱"
-                      f"({root}/)에서 같은 일을 한다.")}
+        why = (f"이 호출은 Bearer 토큰({ident.email})으로 왔다 — 앱 MCP 를 개인 PAT 로 직접 등록했거나(claude mcp add …"
+               " /apps/hwax_risk/mcp --header 'Authorization: Bearer …') 사람별 위임 없이 부른 게이트웨이 서비스 세션(게이트웨이 heax"
+               " 토큰 = heax 첫 관리자 PAT)이다. 둘 다 같은 모양이라 누가 부르는지 가를 수 없다.")
+        fix = ("직접 등록이면 쓰기·결과 제출은 게이트웨이(hwax) MCP 로 부른다 — 직접 등록은 읽기 전용이다(운영자가 게이트웨이를"
+               " 올려도 직접 등록한 길은 계속 거절된다). 게이트웨이를 거쳤는데 이렇다면 운영자가 게이트웨이의 사람별 위임"
+               f"(per_user_sso.hwax_risk)이 이 앱에 걸렸는지 본다. {web}")
+    detail = {"identity": {"email": ident.email, "source": ident.source, "delegated": bool(ident.delegated)}, "fix": fix}
     return why + " 쓰기 도구는 게이트웨이 위임으로 확인된 신원으로만 쓴다(그 계정으로 대신 쓰지 않는다).", detail
 
 

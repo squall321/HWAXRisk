@@ -83,6 +83,8 @@ def test_source_and_mcp(manifest):
     assert mcp["transport"] == "streamable_http"
     assert mcp["allowed_groups"] == []
     assert "risk_get_brief" in mcp["description"] and "risk_submit_panel_result" in mcp["description"]
+    # 직접 등록(개인 PAT Bearer)은 쓰기·결과 제출·브리프 수신이 거절된다 — 등록 예를 보이는 곳은 그 길이 읽기 전용임을 말한다(RV-6).
+    assert "직접 등록은 읽기 전용" in mcp["description"]
 
 
 def test_description_mentions_tools_and_paths(manifest):
@@ -91,5 +93,6 @@ def test_description_mentions_tools_and_paths(manifest):
                   "risk_submit_panel_result", "/apps/hwax_risk/mcp", "/api/health", "/apps/hwax_risk/api",
                   "risk_review.db", "HWAXRISK_DATA_DIR"):
         assert token in desc, f"description 에 {token} 이 없다"
+    assert "직접 등록은 읽기 전용" in desc, "등록 예 곁에 직접 등록이 읽기 전용이라는 말이 없다(RV-6)"
     for stale in ("risk_health", "risk_get_taxonomy", "risk_get_meta", "HWAX_RISK_", "/api/v1", "hwax_risk.db"):
         assert stale not in desc, f"description 에 옛 표기 {stale} 가 남아 있다"

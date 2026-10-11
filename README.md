@@ -117,13 +117,16 @@ context-notes D6).
 # 로컬 dev (리포의 .mcp.json 과 동일)
 claude mcp add --transport http hwax-risk http://127.0.0.1:8000/mcp
 
-# 포털 경유 (Caddy forward_auth 뒤, heax PAT 필요)
+# 포털 경유 (Caddy forward_auth 뒤, heax PAT 필요) — 읽기 전용
 claude mcp add --transport http hwax-risk <포털베이스>/apps/hwax_risk/mcp --header "Authorization: Bearer heax_pat_…"
 ```
 
 직접 등록은 선택이다. 게이트웨이(`:9110`)가 heax `GET /api/v1/mcp/servers` 폴링으로 이 앱을 백엔드
 `heax-hwax_risk` 로 자동 흡수하므로, 게이트웨이를 이미 붙여 둔 Claude Code 세션은 `risk_*` 7종을
-그대로 본다. 위 두 줄은 게이트웨이 없이 앱만 직접 붙일 때 쓴다.
+그대로 본다. 위 두 줄은 게이트웨이 없이 앱만 직접 붙일 때 쓰고 **읽기 전용**이다 — 쓰기(입구 9종)·결과 제출
+(`risk_submit_panel_result`)·사람 finding·브리프 수신(`risk_get_brief`)은 게이트웨이 위임으로 확인된 신원만 받으므로
+게이트웨이(hwax) MCP 경유로만 된다. 개인 PAT Bearer 는 게이트웨이 서비스 세션과 모양이 같아 누가 부르는지 가를 수 없어
+`delegation_required` 로 거절되고, 그 `detail.fix` 가 이 길을 말한다(운영자가 게이트웨이를 올려도 직접 등록한 길은 계속 거절된다).
 
 ## Claude Code 에서 심사 돌리기
 
