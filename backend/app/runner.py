@@ -814,7 +814,8 @@ def create_job(
 
     `requester_sub` 는 잡을 만든 사람이다(동료 editor 일 수 있다) — 자격은 요청자 → 타깃 owner → 서비스 순이고
     첫 적중의 email 이 `rr_jobs.credential_email` 에 남는다(plan §0.1.6).
-    `consent_source` 는 동의가 들어온 입구다 — 'web'(웹 화면) · 'mcp'(Claude, 게이트웨이 위임 단언) · 'close_level'(C3 자동 후속).
+    `consent_source` 는 동의가 들어온 입구다 — 'web'(웹 화면) · 'mcp'(Claude, 게이트웨이 위임 단언) · 'api'(개인 heax PAT Bearer 로
+    부른 REST) · 'close_level'(C3 자동 후속).
     동의가 없으면 params 에는 None 으로 남는다(RV-7).
     """
     cfg = config.settings if settings is None else settings

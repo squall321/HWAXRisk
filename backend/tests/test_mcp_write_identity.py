@@ -294,7 +294,8 @@ def _job_params(box, job_id: str) -> dict:
 def test_a_job_records_where_its_consent_came_from(client, box):
     """SEC-4 고침은 길잡이가 consent 를 미리 채우지 않게만 했다 — 에이전트가 묻지 않고 consent=true 를 넣어 Tier C 잡을 세워도 잡
     params 에는 웹 화면 동의와 구별되지 않는 consent:true 만 남았다(RV-7). 동의의 출처(consent_source)를 남긴다 — Claude 길(게이트웨이
-    위임 단언)은 'mcp', 웹은 'web', 동의 없는 잡은 None 이다. 타깃 행은 이미 principal_json.source 로 갈린다."""
+    위임 단언)은 'mcp', 웹은 'web', 동의 없는 잡은 None 이다. 타깃 행은 이미 principal_json.source 로 갈린다. 개인 heax PAT(Bearer)로
+    REST 에서 세운 잡은 웹 화면 동의가 아니다 — 'api' 로 가른다(3차 검토 발견 4)."""
     target_key = _seed(box.store, owner=OWNER)
 
     act_with(box, {identity.SSO_HEADER: assertion_from_gateway(client, OWNER)})
@@ -307,6 +308,18 @@ def test_a_job_records_where_its_consent_came_from(client, box):
     assert _job_params(box, web["job_id"])["consent_source"] == "web"
     unasked = routes.create_job(target_key, routes.JobBody(tier="A"), ident=web_ident(OWNER))
     assert _job_params(box, unasked["job_id"])["consent_source"] is None
+
+    # 개인 heax PAT 를 Bearer 로 실어 REST 를 직접 부른 잡 — 신원은 실제 identity.current 가 heax /auth/me 로 푼다.
+    box.monkeypatch.setattr(identity, "_fetch_me", lambda token: (
+        {"email": OWNER, "role": "user", "display_name": "소유자"} if token == PERSONAL_PAT else None))
+    identity.reset_cache()
+    try:
+        bearer = identity.current(act_with(box, {"Authorization": f"Bearer {PERSONAL_PAT}"}))
+        assert bearer.source == "bearer" and bearer.email == OWNER
+        api = routes.create_job(target_key, routes.JobBody(tier="B", consent=True), ident=bearer)
+        assert _job_params(box, api["job_id"])["consent_source"] == "api"
+    finally:
+        identity.reset_cache()
 
     # 닫힘 레벨 C3 이 Tier B 뒤에 세우는 Tier C 는 사람이 아니라 그 정책이 동의한 것이다.
     box.store.execute("UPDATE rr_targets SET close_level = 'C3' WHERE target_key = ?", (target_key,))

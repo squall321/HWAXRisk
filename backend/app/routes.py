@@ -2175,6 +2175,10 @@ class JobBody(BaseModel):
     consent: bool = False
 
 
+# 잡 동의가 들어온 입구 — 신원 출처(identity._token_from)에서 정한다(RV-7 · 3차 검토 발견 4).
+CONSENT_SOURCES = {"cookie": "web", "sso": "mcp", "bearer": "api"}
+
+
 @router.post("/targets/{target_key}/jobs")
 def create_job(target_key: str, body: JobBody,
                ident: identity.Identity = Depends(identity.current)) -> dict:
@@ -2190,8 +2194,9 @@ def create_job(target_key: str, body: JobBody,
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
     if not _is_admin(ident):
         require_role(row["project_id"], email, "editor")
-    # 게이트웨이 위임 단언(sso)은 게이트웨이만 받아 오므로 Claude 길이다(MCP 입구 risk_start_job · rest_call) — 웹 화면은 쿠키·Bearer 다.
-    consent_source = "mcp" if ident.source == "sso" else "web"
+    # 게이트웨이 위임 단언(sso)은 게이트웨이만 받아 오므로 Claude 길이다(MCP 입구 risk_start_job · rest_call). 웹 화면은 쿠키다.
+    # Bearer 는 개인 heax PAT 로 REST 를 직접 부른 것이라 웹 화면 동의가 아니다(3차 검토 발견 4). 그 밖의 출처는 그 값 그대로 남긴다.
+    consent_source = CONSENT_SOURCES.get(ident.source, ident.source)
     return runner.create_job(get_store(), target_key, body.tier, owner_sub=row["owner_sub"],
                              modifiers=body.modifiers, user_memo=body.user_memo,
                              concurrency=body.concurrency, consent=body.consent, requester_sub=email,
