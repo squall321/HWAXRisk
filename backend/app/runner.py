@@ -798,11 +798,14 @@ def create_job(
     consent: bool = False,
     settings: Any | None = None,
     requester_sub: str | None = None,
+    consent_source: str | None = None,
 ) -> dict:
     """배치 잡 1건을 만든다(POST /api/targets/{key}/jobs). Tier C 는 consent 필수, 러너 자격이 없으면 422.
 
     `requester_sub` 는 잡을 만든 사람이다(동료 editor 일 수 있다) — 자격은 요청자 → 타깃 owner → 서비스 순이고
     첫 적중의 email 이 `rr_jobs.credential_email` 에 남는다(plan §0.1.6).
+    `consent_source` 는 동의가 들어온 입구다 — 'web'(웹 화면) · 'mcp'(Claude, 게이트웨이 위임 단언) · 'close_level'(C3 자동 후속).
+    동의가 없으면 params 에는 None 으로 남는다(RV-7).
     """
     cfg = config.settings if settings is None else settings
     if tier not in planner.TIERS:
@@ -825,6 +828,8 @@ def create_job(
         # 종전에는 저장에서 2,000자로 말없이 끊어 넓은 창의 패널도 앞 2,000자만 받았다.
         "user_memo": (str(user_memo) if user_memo else None),
         "consent": bool(consent),
+        # 동의가 어느 입구에서 왔나 — consent:true 만으로는 사람이 웹에서 누른 것과 에이전트가 넣은 것이 갈리지 않았다(RV-7).
+        "consent_source": consent_source if consent else None,
         "credential": credential["kind"],
         "requester": requester_sub,
     }
@@ -1195,7 +1200,7 @@ def _finish_job(store: Any, job: Mapping[str, Any], settings: Any) -> dict:
             store, job["target_key"], "C", owner_sub=job["owner_sub"],
             modifiers=(job.get("params") or {}).get("modifiers"),
             user_memo=(job.get("params") or {}).get("user_memo"),
-            consent=True, settings=settings,
+            consent=True, settings=settings, consent_source="close_level",
         )
         return {"job_state": "completed", "next_job": follow["job_id"]}
     return {"job_state": "completed", "next_job": None}

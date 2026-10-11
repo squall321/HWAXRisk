@@ -16,7 +16,8 @@ EDITOR = "editor@example.com"
 
 
 def _ident(email: str | None = OWNER, role: str | None = None):
-    return type("I", (), {"anonymous": email is None, "email": email, "role": role,
+    # 웹 화면 신원(쿠키)의 모양 — 잡 생성은 source 로 동의의 입구를 가른다(RV-7).
+    return type("I", (), {"anonymous": email is None, "email": email, "role": role, "source": "cookie",
                           "to_dict": lambda self: {"email": email}})()
 
 

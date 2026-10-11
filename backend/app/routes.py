@@ -2190,9 +2190,12 @@ def create_job(target_key: str, body: JobBody,
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
     if not _is_admin(ident):
         require_role(row["project_id"], email, "editor")
+    # 게이트웨이 위임 단언(sso)은 게이트웨이만 받아 오므로 Claude 길이다(MCP 입구 risk_start_job · rest_call) — 웹 화면은 쿠키·Bearer 다.
+    consent_source = "mcp" if ident.source == "sso" else "web"
     return runner.create_job(get_store(), target_key, body.tier, owner_sub=row["owner_sub"],
                              modifiers=body.modifiers, user_memo=body.user_memo,
-                             concurrency=body.concurrency, consent=body.consent, requester_sub=email)
+                             concurrency=body.concurrency, consent=body.consent, requester_sub=email,
+                             consent_source=consent_source)
 
 
 JOB_ACTIONS = {"pause": runner.pause_job, "resume": runner.resume_job, "cancel": runner.cancel_job}

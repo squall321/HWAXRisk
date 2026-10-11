@@ -7,7 +7,7 @@ import pytest
 from starlette.requests import Request
 
 import app.mcp_server as srv
-from app import identity, planner, routes
+from app import config, identity, planner, routes, runner
 from tests.test_e2e_smoke import FakeSourceApps, no_network, seeded_discovery  # noqa: F401 — autouse 픽스처
 from tests import factories, test_mcp_entry
 from tests.test_mcp_entry import (OTHER, OWNER, SOURCE_REFS, SSO_SECRET, call, register_pat, web_ident, wire_sources,
@@ -284,3 +284,32 @@ def test_the_refusal_names_the_fix_for_its_cause(client, box):
     assert folded["error"] == "delegation_required"
     assert FOLDED_FIX in folded["detail"]["fix"] and "직접 등록" not in folded["detail"]["fix"], folded["detail"]["fix"]
     assert counts(box)["rr_projects"] == 0
+
+
+# ---------------------------------------------------------------- RV-7 — 잡의 동의가 어느 입구에서 왔는지 원장에 남는다
+def _job_params(box, job_id: str) -> dict:
+    return json.loads(box.store.query_one("SELECT params_json FROM rr_jobs WHERE id = ?", (job_id,))["params_json"])
+
+
+def test_a_job_records_where_its_consent_came_from(client, box):
+    """SEC-4 고침은 길잡이가 consent 를 미리 채우지 않게만 했다 — 에이전트가 묻지 않고 consent=true 를 넣어 Tier C 잡을 세워도 잡
+    params 에는 웹 화면 동의와 구별되지 않는 consent:true 만 남았다(RV-7). 동의의 출처(consent_source)를 남긴다 — Claude 길(게이트웨이
+    위임 단언)은 'mcp', 웹은 'web', 동의 없는 잡은 None 이다. 타깃 행은 이미 principal_json.source 로 갈린다."""
+    target_key = _seed(box.store, owner=OWNER)
+
+    act_with(box, {identity.SSO_HEADER: assertion_from_gateway(client, OWNER)})
+    claude = call("risk_start_job", target_key=target_key, tier="C", consent=True)
+    assert claude.get("created") is True, claude
+    assert _job_params(box, claude["job_id"])["consent"] is True
+    assert _job_params(box, claude["job_id"])["consent_source"] == "mcp"
+
+    web = routes.create_job(target_key, routes.JobBody(tier="B", consent=True), ident=web_ident(OWNER))
+    assert _job_params(box, web["job_id"])["consent_source"] == "web"
+    unasked = routes.create_job(target_key, routes.JobBody(tier="A"), ident=web_ident(OWNER))
+    assert _job_params(box, unasked["job_id"])["consent_source"] is None
+
+    # 닫힘 레벨 C3 이 Tier B 뒤에 세우는 Tier C 는 사람이 아니라 그 정책이 동의한 것이다.
+    box.store.execute("UPDATE rr_targets SET close_level = 'C3' WHERE target_key = ?", (target_key,))
+    job = dict(box.store.query_one("SELECT id, target_key, tier, owner_sub FROM rr_jobs WHERE id = ?", (web["job_id"],)))
+    follow = runner._finish_job(box.store, {**job, "params": _job_params(box, web["job_id"])}, config.settings)["next_job"]
+    assert _job_params(box, follow)["consent_source"] == "close_level"
