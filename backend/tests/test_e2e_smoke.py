@@ -411,9 +411,16 @@ def test_e2e_full_flow(wired, ident, monkeypatch, tmp_path):
     assert token and store.query_one(
         "SELECT brief_token_hash FROM rr_panels WHERE id = ?", (panel_id,))["brief_token_hash"] == \
         routes.brief_token_hash(token)
+    # 브리프는 결과를 낼 수 있는 신원(게이트웨이 위임으로 확인된 패널 소유자)에게만 열린다(RV-1) — 신원 없는 호출은 토큰이 맞아도
+    # 동결 전에 거절된다. 아래 읽기 4종은 다시 신원 없는(service) 호출로 본다.
+    from tests import factories
+
+    assert mcp_server.risk_get_brief(target_key, token)["error"] == "delegation_required"
+    factories.act_as_delegate(monkeypatch, OWNER)
     assert mcp_server.risk_get_brief(target_key, token)["panels"][0]["panel_id"] == panel_id
     assert mcp_server.risk_get_brief(target_key, token + "x")["error"] == "brief_token_invalid"
     assert mcp_server.risk_get_brief(target_key, "")["error"] == "brief_token_invalid"
+    monkeypatch.setattr(mcp_server, "_request", lambda: None)
     # 과제가 mcp_visibility='private'(기본값)이라 읽기 4종은 존재를 숨긴다(§5.1 원칙 9).
     assert mcp_server.risk_get_snapshot(first["snapshot_id"], "ir")["error"] == "not_visible"
     assert mcp_server.risk_get_registry(target_key)["error"] == "not_visible"

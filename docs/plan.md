@@ -74,7 +74,8 @@
   `risk_submit_panel_result(panel_id, engine, decision_text, turns, report_id, actor, model=None)` · `risk_add_finding`(P3 REST 를 감싼다).
 - 읽기 4종은 `mcp_caller` → `routes.visible_projects(caller)` 로 범위를 거르고 밖이면 `{error:'not_visible'}` 다 — 서비스 신원에는
   `mcp_visibility='org'` 과제만, 개인 PAT 에는 멤버십 범위까지 열린다(§5.1 원칙 9). `risk_get_brief` 는 `actor` 만으로는 열리지 않고
-  `GET /targets/{key}/brief` 가 발급한 `brief_token` 으로만 200 이다.
+  `GET /targets/{key}/brief` 가 발급한 `brief_token` 으로만 200 이다. 그 토큰의 쓰임은 결과 제출뿐이라, 제출을 받을 수 있는 신원
+  (게이트웨이 위임으로 확인된 그 패널 소유자)에게만 열고 그 밖은 동결·패널 품질 쓰기 전에 `delegation_required`·`E404` 다(RV-1).
 - 게이트웨이 경유 호출도 **사용자 신원으로 온다**(2026-09-07). `POST /api/auth/sso` 가 공유 시크릿
   (`secrets.env` 의 `HWAXRISK_HEAX_GATEWAY_SECRET`, 없으면 404)을 받고 이메일·만료만 담은 무상태 HMAC 단언
   `rrsso_…`(기본 900 s)을 내주며, 게이트웨이는 그것을 `X-Heax-Sso-Assertion` 헤더로 실어 부른다.

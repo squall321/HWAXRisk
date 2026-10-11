@@ -2678,8 +2678,11 @@ def _mcp_brief_notice(item: dict[str, Any]) -> str | None:
             "근거를 다 싣는 길은 웹 러너다(앱 화면의 심사 시작 또는 risk_start_job).")
 
 
-def brief_by_token(target_key: str, brief_token: str | None, tier: str = "B") -> dict:
+def brief_by_token(target_key: str, brief_token: str | None, tier: str = "B", *, owner_sub: str | None = None) -> dict:
     """MCP `risk_get_brief` 본체 — caller 판정 대신 brief_token 대조로 연다(plan §8.2.5).
+
+    `owner_sub` 를 주면(MCP 도구는 게이트웨이 위임으로 확인된 이메일을 준다) 토큰의 패널이 그 사람 것일 때만 연다 — 결과 제출이
+    패널 소유자만 받으므로(complete_panel 의 `_panel_row`), 낼 수 없는 신원에게 동결·품질 쓰기를 하지 않고 E404 로 답한다(RV-1).
 
     토큰은 UI·REST `GET /targets/{key}/brief` 가 그 패널 1건·`risk_brief_token_ttl_s` 동안만 위임한 열쇠다.
     이 조립이 L2 오케스트레이터가 좌석에 싣는 것이라 **그 토큰의 패널**에 여기서 동결한다(WP1 P-09 · R-21) — 화면이 토큰을
@@ -2693,6 +2696,9 @@ def brief_by_token(target_key: str, brief_token: str | None, tier: str = "B") ->
     """
     store = get_store()
     panel = resolve_brief_token(target_key, brief_token)
+    if owner_sub is not None and panel["owner_sub"] != owner_sub:
+        raise AppError("E404", f"이 브리프 토큰의 패널을 {owner_sub} 으로 찾을 수 없습니다 — 결과 제출은 패널 소유자만 하므로,"
+                       " 토큰을 받은 그 사람의 Claude(게이트웨이 위임)로 부릅니다.", 404)
 
     def not_planned(status: str) -> AppError:
         return AppError("brief_panel_not_planned",

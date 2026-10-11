@@ -9,7 +9,7 @@ from starlette.requests import Request
 import app.mcp_server as srv
 from app import identity, planner, routes
 from tests.test_e2e_smoke import FakeSourceApps, no_network, seeded_discovery  # noqa: F401 — autouse 픽스처
-from tests import test_mcp_entry
+from tests import factories, test_mcp_entry
 from tests.test_mcp_entry import (OTHER, OWNER, SOURCE_REFS, SSO_SECRET, call, register_pat, web_ident, wire_sources,
                                   write_secrets)
 from tests.test_wiring_regressions import DECISION, _seed
@@ -203,3 +203,50 @@ def test_the_old_write_tools_take_ownership_from_the_reached_identity_not_actor(
     assert "error" not in added, added
     assert box.store.query_one("SELECT author_sub FROM rr_findings WHERE finding_id = ?",
                                (added["finding_id"],))["author_sub"] == OWNER
+
+
+# ---------------------------------------------------------------- RV-1 — 낼 수 없는 신원에게는 브리프를 동결해 주지 않는다
+def _panel_state(box, panel_id: str) -> dict:
+    """브리프 수신이 패널에 남기는 것 전부 — 상태·품질(brief_clipped 등)·동결본(brief_gz·해시)."""
+    row = box.store.query_one(
+        "SELECT status, quality_json, brief_gz, brief_hash, brief_item_hashes_json FROM rr_panels WHERE id = ?",
+        (panel_id,))
+    return dict(row)
+
+
+def test_the_brief_refuses_an_identity_that_could_not_submit_before_freezing(client, box, heax_admin):
+    """risk_get_brief 는 brief_token 만 대조해 브리프를 동결하고 패널 품질까지 쓴 뒤 정상 응답을 줬다 — 그 신원이 결과 제출에서
+    delegation_required(접힌 단언·Bearer·신원 없음)나 E404(패널 소유자가 아님)로 거절될 사람이어도 몇 시간 심의를 돌린 뒤에야
+    알았다. 브리프 토큰의 쓰임은 그 신원의 제출뿐이라, 제출이 거절될 신원은 동결·품질 쓰기 전에 제출과 같은 코드로 거절한다."""
+    box.monkeypatch.setattr(routes.field_source, "for_target", lambda *a, **k: None)
+    synth = factories.make_diff_target(box.store, 40, owner=OWNER)
+    issued = routes.brief_payload(synth.target_key, "B", owner_sub=OWNER, issue_token=True)["panels"][0]
+    panel_id, token = issued["panel_id"], issued["brief_token"]
+    before = _panel_state(box, panel_id)
+    assert before["status"] == "planned" and before["brief_gz"] is None
+
+    refusals = (
+        ({identity.SSO_HEADER: assertion_from_gateway(client, None)}, "delegation_required"),   # 옛 게이트웨이 — 접힘
+        ({"Authorization": f"Bearer {GATEWAY_HEAX_PAT}"}, "delegation_required"),              # 서비스 세션·직접 등록
+        ({}, "delegation_required"),                                                            # 신원 없음
+        ({identity.SSO_HEADER: assertion_from_gateway(client, OTHER)}, "E404"),                 # 위임됐지만 소유자가 아니다
+    )
+    for headers, code in refusals:
+        act_with(box, headers)
+        out = srv.risk_get_brief(synth.target_key, token)
+        assert out.get("error") == code, (headers.keys(), out)
+        # 제출도 같은 코드로 거절된다 — 브리프만 열리면 심의를 다 돌린 뒤에야 안다.
+        submitted = srv.risk_submit_panel_result(panel_id=panel_id, engine="mcp", decision_text=DECISION, turns=[],
+                                                 report_id=None, actor=OWNER)
+        assert submitted.get("error") == code, submitted
+        assert _panel_state(box, panel_id) == before, "거절한 호출이 패널을 동결했거나 품질을 썼다"
+    act_with(box, {identity.SSO_HEADER: assertion_from_gateway(client, None)})
+    folded = srv.risk_get_brief(synth.target_key, token)
+    assert "X-Hwax-Delegate-Email" in folded["message"] and folded["detail"]["fix"]
+
+    # 위임으로 확인된 패널 소유자면 지금처럼 그 패널을 동결해 준다 — 틀린 토큰은 여전히 brief_token_invalid 다.
+    act_with(box, {identity.SSO_HEADER: assertion_from_gateway(client, OWNER)})
+    assert srv.risk_get_brief(synth.target_key, token + "x")["error"] == "brief_token_invalid"
+    out = srv.risk_get_brief(synth.target_key, token)
+    assert [p["panel_id"] for p in out["panels"]] == [panel_id], out
+    assert _panel_state(box, panel_id)["brief_gz"] is not None

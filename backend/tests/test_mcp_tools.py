@@ -41,7 +41,8 @@ TOOL_NAMES = [
 ]
 ENTRY_TOOLS = TOOL_NAMES[TOOL_NAMES.index("risk_next_step"):]
 # 도구별 대표 인자와, 빈 원장에서 기대하는 오류 코드(없으면 None = 정상 응답).
-# 읽기 4종은 범위 밖 id 의 존재를 숨겨 not_visible 이고, 브리프는 caller 가 아니라 brief_token 대조다(§8.2.5).
+# 읽기 4종은 범위 밖 id 의 존재를 숨겨 not_visible 이다. 브리프는 brief_token 대조이되(§8.2.5) 결과를 낼 수 있는 신원에게만
+# 열려(RV-1) 요청 밖에서는 토큰을 보기 전에 delegation_required 다.
 # 쓰기 도구(입구 9종 + 결과 제출·사람 finding)는 요청 밖(신원 없음)에서 전부 delegation_required 다 — 게이트웨이 위임으로
 # 확인된 신원만 쓴다. 읽기 입구 둘(길잡이·same-as 표)은 unauthorized 다. 인자가 틀렸든 맞든 신원 검사가 먼저다.
 CALLS = [
@@ -57,7 +58,7 @@ CALLS = [
     ("risk_get_diff", {"diff_id": "d1", "part": "summary"}, "not_visible"),
     ("risk_get_registry", {"target_key": "snap:s1"}, "not_visible"),
     ("risk_claims_for_ref", {"ref": "e:0123456789ab"}, None),
-    ("risk_get_brief", {"target_key": "snap:s1", "brief_token": "nope"}, "brief_token_invalid"),
+    ("risk_get_brief", {"target_key": "snap:s1", "brief_token": "nope"}, "delegation_required"),
     ("risk_submit_panel_result", {"panel_id": "p1", "engine": "mcp", "decision_text": "…", "turns": [],
                                   "report_id": None, "actor": "someone@example.com"}, "delegation_required"),
     ("risk_add_finding", {"target_key": "diff:d1", "claim": "간극이 좁다",
@@ -257,12 +258,15 @@ def test_get_brief_needs_a_matching_unexpired_token(risk_store, monkeypatch):
     """brief_token 은 없거나·다르거나·만료면 brief_token_invalid 이고 맞으면 그 패널 브리프가 열린다(§8.2.5)."""
     from app import common, routes
 
+    from tests import factories
+
     _seed_private_target(risk_store, monkeypatch)
     now = common.now_epoch()
     risk_store.execute(
         "INSERT INTO rr_panels(id, target_key, owner_sub, panel_no, tier, seats_json, rounds, status, created_at)"
         " VALUES ('pan9', 'snap:s9', 'owner@a', 1, 'B', '[]', 2, 'planned', ?)", (now,))
     token = routes.issue_brief_token(risk_store, "pan9")
+    factories.act_as_delegate(monkeypatch, "owner@a")    # 브리프는 결과를 낼 신원에게만 열린다(RV-1) — 그다음이 토큰 대조다
 
     assert srv.risk_get_brief("snap:s9", "")["error"] == "brief_token_invalid"
     assert srv.risk_get_brief("snap:s9", token + "x")["error"] == "brief_token_invalid"

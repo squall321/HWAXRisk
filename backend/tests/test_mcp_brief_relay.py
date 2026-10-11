@@ -24,9 +24,13 @@ _DOMAINS = ("mech", "sim", "xd", "rel", "cam")
 
 
 def _target(store, monkeypatch, size: int = 40, *, script=None):
-    """합성 다건 변경 타깃 + 라우트가 이 저장소를 보고 필드 근거 채널은 끈다(브리프가 바깥에 닿지 않게)."""
+    """합성 다건 변경 타깃 + 라우트가 이 저장소를 보고 필드 근거 채널은 끈다(브리프가 바깥에 닿지 않게).
+
+    /mcp 호출은 게이트웨이 위임으로 확인된 타깃 소유자다 — 브리프는 결과를 낼 수 있는 그 신원에게만 열린다(RV-1).
+    """
     monkeypatch.setattr(routes, "get_store", lambda: store)
     monkeypatch.setattr(routes.field_source, "for_target", lambda *a, **k: None)
+    factories.act_as_delegate(monkeypatch, factories.OWNER)
     kwargs = {"seed": 7, "script": script, "check": False} if script is not None else {}
     return factories.make_diff_target(store, size, agents=factories.agents(_DOMAINS, 3), **kwargs)
 

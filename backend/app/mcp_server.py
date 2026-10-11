@@ -22,7 +22,7 @@ _INSTRUCTIONS = """HWAX Risk Review — 설계 리스크 심사 앱의 MCP 서�
 조회: risk_get_snapshot(part=ir|state|nodes|edges|calls|rule_hits) · risk_get_diff(part=lines 는 변경 줄 전부 — 크면 limit·offset 으로 나눠) ·
       risk_get_registry · risk_claims_for_ref · risk_get_coverage(진행판·좌석) · risk_list_panels · risk_get_panel_transcript
 어휘: risk_taxonomy — severity·judgement·direction 의 허용값(추측해서 넣으면 422 다)
-심사: risk_get_brief(열쇠는 brief_token, tier 'A' 는 웹 전용) · risk_submit_panel_result(engine='mcp' 는
+심사: risk_get_brief(열쇠는 brief_token, tier 'A' 는 웹 전용 — 결과를 낼 신원에게만 연다) · risk_submit_panel_result(engine='mcp' 는
       evidence_only 등급) · risk_add_finding — 둘 다 쓰기라 아래 신원 규칙을 따르고 actor 는 신원이 아니다(표기)
 
 입구(Claude 에서 과제를 올리고 심사를 시작한다 — 심사는 앱 러너가 돌리고 결과는 웹에 그대로 보인다): risk_next_step 부터.
@@ -202,11 +202,18 @@ def risk_claims_for_ref(ref: str, offset: int = 0) -> dict:
 
 @mcp.tool()
 def risk_get_brief(target_key: str, brief_token: str, tier: str = "B") -> dict:
-    """토큰의 패널 브리프 1건 조회(panels[0].delib_opts.evidence 가 근거 E0~E9 이고 항목의 result_chars 는 옮겨 적기 대조용 원문 길이, 옛 한도에 잘린 것은 brief_clipped·brief_notice) — 열쇠는 brief_token 이고 tier='A' 는 웹 전용."""
+    """토큰의 패널 브리프 1건 조회(panels[0].delib_opts.evidence 가 근거 E0~E9 이고 항목의 result_chars 는 옮겨 적기 대조용 원문 길이, 옛 한도에 잘린 것은 brief_clipped·brief_notice) — 열쇠는 brief_token 이고 결과를 낼 수 있는 신원(게이트웨이 위임으로 확인된 그 패널 소유자)에게만 열며 tier='A' 는 웹 전용."""
     if tier == "A":
         return {"error": "tier_a_web_only"}
-    # caller 판정이 아니라 UI·REST 가 발급한 토큰 대조다 — 불일치·만료는 {error:'brief_token_invalid'}(§8.2.5).
-    return _guarded(routes.brief_by_token, target_key, brief_token, tier)
+
+    def call() -> dict:
+        # 토큰의 쓰임은 이 신원의 결과 제출(risk_submit_panel_result)뿐이다 — 제출이 거절될 신원이면 동결·패널 품질을 쓰기 전에
+        # 제출과 같은 코드로 거절한다. 종전에는 토큰만 대조해 브리프를 내주고, 몇 시간 심의 뒤 제출에서야 거절됐다(RV-1).
+        owner_sub = entry.require_delegate(routes.mcp_identity(_request()))
+        # 그다음은 UI·REST 가 발급한 토큰 대조다 — 불일치·만료는 {error:'brief_token_invalid'}(§8.2.5), 남의 패널 토큰은 E404.
+        return routes.brief_by_token(target_key, brief_token, tier, owner_sub=owner_sub)
+
+    return _guarded(call)
 
 
 @mcp.tool()
