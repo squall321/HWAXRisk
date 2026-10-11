@@ -2,7 +2,8 @@
 """입력은 `app/devseed.py` 가 만든 어댑터 결과뿐이고 IR·대응·diff 는 실제 생산자가 만든다(`tests/factories.make_diff_target`).
 
 기대는 대본에서 나온다 — 연산마다 적은 `expect_codes` 와, 설계 모형에서 센 조립 단위 롤업. 어긋나면 생성기와 생산자 가운데
-한쪽이 틀린 것이고 출력에 맞춰 기대를 고치지 않는다. 지금 생산자가 못 내는 것 둘은 따로 재현 시험으로 둔다(xfail strict).
+한쪽이 틀린 것이고 출력에 맞춰 기대를 고치지 않는다. 지금 생산자가 못 내는 것(PRODUCER_GAPS)과 틀리게 내는 것(PRODUCER_MISREADS)은
+따로 재현 시험으로 둔다(xfail strict). 틀리게 내는 코드는 운영에서 나므로 그 렌더링을 통과 시험이 본다(RV-5).
 """
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ from collections import Counter
 
 import pytest
 
-from app import devseed
+from app import brief, devseed
 from app.risk_store import RiskStore
 from tests import factories
 from tests.conftest import BACKEND_DIR
@@ -74,8 +75,10 @@ def test_a_different_seed_gives_a_different_diff(tmp_path_factory):
 
 
 def test_syn40_runs_every_code_the_producer_emits(built):
+    """syn40 은 생산자가 내는 코드를 다 끈다 — 틀리게 내는 코드(PRODUCER_MISREADS)는 덧붙음이 바닥을 흐리지 않게 빼고, 그 코드의
+    렌더링은 아래 통과 시험(test_a_twinned_plate_thickness_change_reaches_the_brief_digest_and_summary)이 본다."""
     codes = {e["code"] for e in built[40].diff["semantic"]["events"]}
-    assert codes == EMITTED_CODES - set(_gap_codes())
+    assert codes == EMITTED_CODES - set(_gap_codes()) - set(devseed.PRODUCER_MISREADS)
     assert len(codes) == 31
 
 
@@ -178,6 +181,7 @@ def test_the_factory_refuses_a_shape_the_adapter_cannot_make(tmp_path_factory):
 
 
 def _gap_codes() -> list[str]:
+    """생산자가 내지 못하는 코드 — 운영에서도 나지 않으니 커버리지 셈에서 뺀다. 틀리게 내는 코드는 운영에서 나므로 넣지 않는다(RV-5)."""
     return [key for key in devseed.PRODUCER_GAPS if "(" not in key]
 
 
@@ -197,7 +201,40 @@ def test_a_contact_type_change_is_an_event(tmp_path_factory):
 def test_a_twinned_plate_thickness_change_is_not_read_as_a_move(tmp_path_factory):
     target = factories.make_diff_target(_store(tmp_path_factory, "twin-plate"), 3,
                                         script=[("cross.bridge_stale", {})], check=False)
+    # 이 시험은 생산자의 덧붙음만 재현한다 — 이벤트 자체가 사라진 회귀는 xfail 이 삼키지 않게 AssertionError 가 아닌 실패로 낸다.
+    if "cross.bridge_stale" not in {e["code"] for e in target.diff["semantic"]["events"]}:
+        pytest.fail("cross.bridge_stale 이 나지 않았다 — 덧붙음 재현의 전제가 깨졌다")
     assert factories.synth_mismatch(target.diff, target.manifest) == []
+
+
+def test_a_twinned_plate_thickness_change_reaches_the_brief_digest_and_summary(tmp_path_factory):
+    """cross.bridge_stale 은 운영에서 난다 — 짝 있는 부품의 두께를 K 파일 그대로 바꿀 때마다다. R-FLOOR-1 이 이 연산을 크기별·무작위
+    대본에서 뺀 뒤 이 코드를 끄는 시험이 위 strict xfail 하나뿐이었고 그 시험은 synth_mismatch 에서 멈춰, 이 줄의 렌더링이 회귀해도
+    바닥은 초록이었다(RV-5). 브리프 E2 줄과 꼬리 셈, 변경 요지의 라벨, 요약의 [의미] consistency 묶음에 실리는지 본다.
+
+    생산자의 알려진 덧붙음(part.moved·part.rotated)은 PRODUCER_MISREADS 에 묶인 기대다 — 생산자를 고쳐 덧붙음이 사라지면 이 셈과
+    위 xfail 이 함께 알린다."""
+    store = _store(tmp_path_factory, "twin-plate-render")
+    target = factories.make_diff_target(store, 3, script=[("cross.bridge_stale", {})], check=False)
+    events = target.diff["semantic"]["events"]
+    expected = Counter(devseed.expected_codes(target.manifest))
+    expected.update(devseed.PRODUCER_MISREADS["cross.bridge_stale"]["extra"])
+    assert Counter(e["code"] for e in events) == expected
+    bridge = next(e for e in events if e["code"] == "cross.bridge_stale")
+    assert bridge["change_kind"] == "consistency" and bridge["subject"]["names"] == list(target.manifest[0].subjects)
+    tag, body = f"[{bridge['cid']}]", bridge["text"].removesuffix(f" [{bridge['cid']}]")     # 글 끝의 [c:…] 는 줄 머리로 간다
+
+    built = brief.build_brief(store, target.target_key, owner_sub=factories.OWNER)
+    e2 = str(built["evidence"][built["keys"].index("E2")]["result"]).split("\n")
+    assert f"{tag} cross.bridge_stale «{body}» conf=medium" in e2, e2
+    assert "consistency 1" in e2[-1], e2[-1]
+    digest = brief.change_digest(store, target.target_key)
+    label = brief.CHANGE_PHRASES["cross.bridge_stale"]
+    assert label == "해석 모델 미반영"
+    assert f"«{bridge['subject']['names'][0]}» {label}" in digest["text"] and label in digest["plain"]
+    summary = store.query_one("SELECT summary_text FROM rr_diffs WHERE id = ?", (target.diff_id,))["summary_text"]
+    semantic = [line for line in summary.split("\n") if line.startswith("[의미]")]
+    assert len(semantic) == 1 and f"consistency: «{body}» {tag}" in semantic[0], semantic
 
 
 def test_production_modules_do_not_import_devseed():

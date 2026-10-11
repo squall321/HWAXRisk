@@ -575,7 +575,8 @@ def _result(t: Design, plan: dict) -> ChangeRecord:
 def _prep_bridge(base: Design, rng: random.Random, params: dict) -> dict:
     """mcad 판 두께만 바뀌고 같은 묶음의 dyna pid(K 파일)는 그대로인 부품.
 
-    지금 생산자는 이 변화에 이동·회전을 덧붙인다(PRODUCER_GAPS) — 크기별·무작위 대본에 넣지 않고 재현 시험 한 곳에만 둔다.
+    지금 생산자는 이 변화에 이동·회전을 덧붙인다(PRODUCER_MISREADS) — 크기별·무작위 대본에 넣지 않는다. 이벤트 자체는 운영에서
+    나므로 그 렌더링은 통과 시험이 보고, 덧붙음은 strict xfail 재현 한 곳이 본다(RV-5).
 
     지금 생산자는 묶음의 대표 노드를 nid 순서로 고른다 — dyna pid 의 nid 가 mcad 보다 앞이면 이 이벤트가 사라진다
     (diff._semantic 의 `node_t`). 그 조건을 피하는 부품을 고른다. 결함은 기록에 남긴다(WP1 목록).
@@ -961,12 +962,20 @@ OPS: dict[str, tuple[Prepare, Apply]] = {
     "part.noise": (_prep_node(), _noise),
     "part.min_dim_unknown": (_prep_node(), _null_one_side),
 }
-# 지금 생산자가 내지 못하는 연산 — 크기별·무작위 대본에 넣지 않는다(따로 시험한다).
+# 생산자 결함 둘은 뜻이 다르다(RV-5) — 커버리지 셈은 '내지 못한다' 만 운영 코드에서 뺀다. 둘 다 크기별·무작위 대본에 넣지 않는다.
+# 지금 생산자가 내지 못하는 연산 — 그 코드는 운영에서도 나지 않는다(strict xfail 로 재현한다).
 PRODUCER_GAPS: dict[str, str] = {
     "contact.type_changed": "diff._edge_change 는 엣지 kind 만 견준다 — contact_type 속성이 바뀌어도 이벤트가 없다",
+}
+# 지금 생산자가 틀리게 내는 연산 — 그 코드는 운영에서 나지만 `extra` 를 덧붙인다. 코드의 렌더링은 통과 시험이, 덧붙음은 strict
+# xfail 이 본다. 덧붙음을 대본 기대(expect_codes)에 넣지 않는다 — 넣으면 생산자를 고쳐도 기대가 결함을 붙든다.
+PRODUCER_MISREADS: dict[str, dict] = {
     # 실제 어댑터는 두께를 바꾸면 bbox·size_def·min_dim 을 같이 바꾼다 — 짝 있는 부품의 두께 변경(K 파일 그대로)은 전부 이 길이다.
-    "cross.bridge_stale": "diff._parametric 이 같은 dn 의 mcad·dyna 노드 값을 같은 cid 로 by_dn 에 덮는다 — dyna 크기가"
-                          " mcad bbox 변화를 가려 짝 있는 부품의 두께 변화(K 파일 그대로)가 part.moved·part.rotated 를 덧붙인다",
+    "cross.bridge_stale": {
+        "extra": ("part.moved", "part.rotated"),
+        "why": "diff._parametric 이 같은 dn 의 mcad·dyna 노드 값을 같은 cid 로 by_dn 에 덮는다 — dyna 크기가 mcad bbox 변화를"
+               " 가려 짝 있는 부품의 두께 변화(K 파일 그대로)가 part.moved·part.rotated 를 덧붙인다",
+    },
 }
 
 

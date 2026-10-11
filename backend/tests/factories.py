@@ -145,7 +145,8 @@ def set_thickness(adapter_results: Sequence[dict], label: str, thickness: float,
     부피는 두께에 비례한다. 짝 dyna pid(`twin` 라벨, 없으면 '<묶음>\\<label>' 꼴의 같은 이름)도 같은 두께로 다시 만든다 —
     K 파일도 고친 정상 개정이다.
     짝 있는 부품을 K 파일 그대로 두께만 바꾸는 것(cross.bridge_stale)은 지금 생산자가 거짓 이동·회전을 덧붙이는 길이라
-    (devseed.PRODUCER_GAPS) 합성기의 재현 시험 한 곳에만 둔다. 회전한 부품(bbox_world 크기 ≠ bbox_def 크기)은 받지 않는다.
+    (devseed.PRODUCER_MISREADS) 합성기의 시험 두 곳(렌더링 통과·덧붙음 재현)에만 둔다. 회전한 부품(bbox_world 크기 ≠
+    bbox_def 크기)은 받지 않는다.
     """
     from app.adapters import dyna as dyna_adapter  # noqa: PLC0415 — 이 공장만 쓴다.
     from app.adapters import mcad as mcad_adapter  # noqa: PLC0415
