@@ -5,7 +5,7 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-from app import common, learning, ra_client, registry
+from app import common, learning, ra_client, registry, runner
 from app.errors import AppError
 from app.risk_store import RiskStore
 
@@ -1136,12 +1136,17 @@ def _badge_rows(out: list, store: RiskStore, per_target: Mapping[str, dict],
             "label_auto_ingest": wired}
 
 
+# 이 계산의 소관이 아닌 자리 — 지표가 아니라 상태 기록이다. 러너가 좌석 diff 표식을 판정하는 게이트웨이 발급 기록(period 'live')은
+# 지우면 판정이 처음(gateway_unseen)으로 되돌아간다. period 는 호출자가 고르므로 period 가 무엇이든 지우지 않는다(RV-3).
+KEPT_ROWS = {(runner.GATEWAY_MINT_ROW[1], runner.GATEWAY_MINT_ROW[2], runner.GATEWAY_MINT_ROW[3])}
+
+
 def _drop_stale(store: RiskStore, period: str, computed: set[tuple[str, str, str]]) -> int:
     """이번 계산이 내지 않은 같은 period 의 옛 자리를 지운다 — 자격을 잃은 행이 현재 값처럼 조회되면
-    지표가 '내려가는' 사건을 화면이 못 본다. 야간 살림 지표(`nightly_*`)는 이 계산의 소관이 아니다."""
+    지표가 '내려가는' 사건을 화면이 못 본다. 야간 살림 지표(`nightly_*`)와 상태 기록(`KEPT_ROWS`)은 이 계산의 소관이 아니다."""
     stale = [(period, _s(r["dimension"]), _s(r["key"]), _s(r["metric"])) for r in store.query(
         "SELECT dimension, key, metric FROM rr_metrics WHERE period = ? AND metric NOT LIKE 'nightly_%'",
-        (period,)) if (_s(r["dimension"]), _s(r["key"]), _s(r["metric"])) not in computed]
+        (period,)) if (_s(r["dimension"]), _s(r["key"]), _s(r["metric"])) not in computed | KEPT_ROWS]
     if stale:
         store.executemany(
             "DELETE FROM rr_metrics WHERE period = ? AND dimension = ? AND key = ? AND metric = ?", stale)

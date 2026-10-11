@@ -82,10 +82,12 @@ def test_diff_id_mark_rides_only_when_the_seats_can_open_the_diff(risk_store):
     def reason(kind: str, email: str | None) -> str | None:
         return (runner.diff_ref_withheld(risk_store, synth.diff_id, kind, email) or {}).get("reason")
 
-    # 게이트웨이의 사람별 단언 발급을 받아 본 적이 없다 — 좌석이 소유자로 보일지 모른다.
+    # 게이트웨이의 사람별 단언 발급을 받아 본 적이 없다 — 좌석이 소유자로 보일지 모르지만 막지는 않는다(싣고 품질에 남긴다 · RV-3).
     assert reason("owner", factories.OWNER) == "gateway_unseen"
-    runner.note_gateway_mint(risk_store, delegated=False)                 # 위임 헤더 없는 옛 게이트웨이
+    assert runner.diff_ref_withheld(risk_store, synth.diff_id, "owner", factories.OWNER)["shipped"] is True
+    runner.note_gateway_mint(risk_store, delegated=False)                 # 위임 헤더 없는 옛 게이트웨이(단언 수명 안)
     assert reason("owner", factories.OWNER) == "gateway_folded"
+    assert "shipped" not in runner.diff_ref_withheld(risk_store, synth.diff_id, "owner", factories.OWNER)
     runner.note_gateway_mint(risk_store, delegated=True)                  # 그 헤더를 싣는 판으로 올랐다 — 마지막 발급이 판정이다
     assert reason("owner", factories.OWNER) is None
     metrics.recompute(risk_store)                                         # 야간 지표 재계산은 period 'all' 의 옛 자리만 지운다

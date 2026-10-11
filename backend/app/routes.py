@@ -6,6 +6,7 @@ import dataclasses
 import gzip
 import hmac
 import json
+import logging
 import secrets
 import sqlite3
 import time
@@ -32,6 +33,7 @@ from app.errors import AppError
 from app.risk_store import get_store
 
 router = APIRouter(prefix="/api")
+log = logging.getLogger("hwax_risk.routes")
 
 PORTAL_TIMEOUT_S = 3.0
 PAT_MIN_REMAINING_S = 86400
@@ -159,7 +161,11 @@ def post_auth_sso(request: Request) -> dict:
         raise AppError("bad_email", f"{header} 이 이메일 형식이 아닙니다.", 401)
     # 게이트웨이가 위임 헤더를 싣는 판인지 적는다 — 러너는 좌석(게이트웨이를 거쳐 오는 잡 자격)이 그 사람으로 보일지를 이것으로
     # 판단해 질문에 diff_id 를 싣는다(runner.diff_ref_withheld · SEC-3). 옛 판이면 좌석은 누구 자격이든 Caddy 가 덮은 계정이다.
-    runner.note_gateway_mint(get_store(), delegated=delegate is not None)
+    # 기록은 러너의 판정 자료일 뿐이라 그 쓰기가 실패해도(잠김 등) 게이트웨이가 받을 단언 발급을 실패시키지 않는다(RV-3).
+    try:
+        runner.note_gateway_mint(get_store(), delegated=delegate is not None)
+    except Exception:  # noqa: BLE001
+        log.warning("게이트웨이 발급 기록을 남기지 못했다 — 단언은 그대로 낸다", exc_info=True)
     # 종전 헤더로 발급한 단언에는 위임 확인 표지(d)를 넣지 않는다 — 읽기 도구는 지금 규칙대로 그 이메일로 돌지만, MCP 쓰기
     # 도구는 그 단언을 받지 않는다(그 이메일은 Caddy 가 덮은 서비스 토큰 주인, 곧 heax 첫 관리자일 수 있다).
     token = identity.mint_sso_assertion(email, ttl_s=config.settings.sso_ttl_s, secret=secret,

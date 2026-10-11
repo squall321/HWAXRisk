@@ -1060,3 +1060,74 @@ def test_the_diff_mark_rides_only_when_the_seat_identity_opens_the_diff(risk_sto
     assert "error" not in seat and seat["total"] > 0 and seat["lines"], seat
     quality = json.loads(_panel(risk_store, out["panel_id"])["quality_json"])
     assert "diff_ref_withheld" not in quality and "diff_ref_withheld" not in quality["flags"]
+
+
+def _mint_row(store) -> dict | None:
+    row = store.query_one("SELECT value, n, computed_at FROM rr_metrics WHERE period = ? AND dimension = ? AND key = ?"
+                          " AND metric = ?", runner.GATEWAY_MINT_ROW)
+    return None if row is None else dict(row)
+
+
+def test_an_unverified_gateway_does_not_withhold_the_diff_mark_and_its_record_heals(risk_store, tmp_path, no_network,
+                                                                                    monkeypatch):
+    """좌석 diff 표식 판정은 '마지막 단언 발급' 기록 하나에 기댄다(SEC-3). 그 기록은 좌석이 사람별로 이 앱을 불러야 생기는데,
+    표식을 빼면 좌석이 이 앱을 부를 계기가 거의 없다 — 기록이 없는 박스는 개인 과제의 diff 패널이 영영 gateway_unseen 이었고,
+    옛 판 시절의 folded 는 게이트웨이를 올려도 풀리지 않았으며, 지표 재계산(period 'live')이 그 행을 지워 처음으로 되돌렸다(RV-3).
+
+    기록이 없거나 단언 수명보다 오래된 folded 는 막지 않는다 — 표식을 싣고 패널 품질에 gateway_unverified 로 남긴다(좌석의 첫
+    호출이 발급을 일으켜 다음 패널부터 판정된다). 수명 안의 folded 만 지금처럼 막는다. 재계산은 그 행을 지우지 않는다."""
+    from app import metrics, routes
+
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    monkeypatch.setattr(config, "heax_gateway_secret", lambda *a, **k: GATEWAY_SECRET)
+    synth = factories.make_diff_target(risk_store, 3, agents=factories.agents(("mech", "sim", "xd", "rel", "cam"), 3))
+    lg = _diff_ledger(risk_store, tmp_path, synth.target_key)
+    _job(lg)
+    engine = _BudgetEngine(None)
+    mark = f"diff_id={synth.diff_id}"
+
+    def quality_of(out: dict) -> dict:
+        assert out["status"] == "done", out
+        return json.loads(_panel(risk_store, out["panel_id"])["quality_json"])
+
+    # (a) 발급 기록이 없는 박스 — 막지 않고 싣되, 좌석이 그 사람으로 보일지 확인하지 못했다는 것을 품질에 남긴다.
+    assert _mint_row(risk_store) is None
+    quality = quality_of(_run(lg, engine))
+    assert mark in engine.opts[0]["question"]
+    assert "diff_ref_withheld" not in quality, quality.get("diff_ref_withheld")
+    assert quality["gateway_unverified"]["reason"] == "gateway_unseen" and "gateway_unverified" in quality["flags"]
+
+    # (b) 옛 판(위임 헤더 없음)으로 방금 발급했다 — 단언 수명 안이면 좌석은 그 접힌 신원이라 지금처럼 막는다.
+    _gateway_assertion(None)
+    quality = quality_of(_run(lg, engine))
+    assert mark not in engine.opts[1]["question"]
+    assert quality["diff_ref_withheld"]["reason"] == "gateway_folded" and "gateway_unverified" not in quality
+    # 수명이 지난 folded 는 지금의 판을 말하지 못한다 — 게이트웨이를 올렸어도 아무도 이 앱을 사람별로 부르지 않으면 영영 남았다.
+    risk_store.execute("UPDATE rr_metrics SET computed_at = computed_at - ? WHERE period = ? AND dimension = ? AND key = ?"
+                       " AND metric = ?", (config.settings.sso_ttl_s + 1, *runner.GATEWAY_MINT_ROW))
+    quality = quality_of(_run(lg, engine))
+    assert mark in engine.opts[2]["question"]
+    assert quality["gateway_unverified"]["reason"] == "gateway_folded_stale" and "diff_ref_withheld" not in quality
+
+    # (c) 로그인한 누구나 부르는 지표 재계산(period 'live')이 그 기록을 지우지 않는다.
+    _gateway_assertion(OWNER)
+    kept = _mint_row(risk_store)
+    metrics.recompute(risk_store, period="live")
+    assert _mint_row(risk_store) == kept and runner.gateway_delegates(risk_store) is True
+
+
+def test_a_failure_to_note_the_mint_does_not_fail_the_assertion(risk_store, monkeypatch):
+    """발급 기록은 러너의 판정 자료일 뿐이다 — 그 쓰기가 실패해도(잠김 등) 게이트웨이가 받을 단언 발급은 실패하지 않는다(RV-3)."""
+    import sqlite3
+
+    from app import routes
+
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    monkeypatch.setattr(config, "heax_gateway_secret", lambda *a, **k: GATEWAY_SECRET)
+
+    def locked(*_a, **_k):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(runner, "note_gateway_mint", locked)
+    token = _gateway_assertion(OWNER)
+    assert identity._verify_sso_assertion(token) == (OWNER, True)
