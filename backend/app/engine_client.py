@@ -1,15 +1,16 @@
 # 심의 엔진 클라이언트 — 포털 /agent/chat 의 SSE 를 러너 계약 {decision_text, turns, conv_id, events} 로 옮기고, 카드 대조는 대화 없이 /agent/card-review/* 를 부른다(plan §6.7.1 (A) · m2-wp3b S7)
 from __future__ import annotations
 
+import copy
 import json
 import logging
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 
-from app import config, identity, review_ops
+from app import cardpack, config, identity, review_ops, taxonomy
 from app.common import http_client, now_epoch
 
 # 프로토콜·예외의 정본은 러너다(러너가 이 모듈을 import 하지 않으므로 순환이 없다).
@@ -24,6 +25,7 @@ __all__ = [
     "PanelEngine", "PortalPanelEngine", "PatUnavailable",
     "build_engine", "parse_sse", "collect_stream",
     "ReviewEngine", "PortalReviewEngine", "build_review_engine", "collect_review_stream", "review_outcome",
+    "run_body", "review_domains", "review_mechanisms",
 ]
 
 # agent-server 는 '/심의 ' 로 시작하는 message 만 심의 파이프라인으로 보낸다(deliberation.DELIBERATE_TRIGGERS).
@@ -708,6 +710,58 @@ class PortalReviewEngine(PortalPanelEngine):
         """패널 health() 에 카드 대조 칸 `card_review{capable, active, limit, limit_reason, request_worst_s, error}` 를 더한다."""
         info = self._health_info()
         return {**self._health_view(info), "card_review": _review_health(info)}
+
+
+# ---------------------------------------------------------------- 카드 대조 요청 본문(M2.md 4.3 — 엔진 요청 모델의 안쪽 항목 모양)
+# 엔진은 안쪽 항목까지 선언 밖 칸을 422 unknown_fields 로 거절한다(RB-4). 원장·택소노미의 행을 그대로 실으면 칸 이름이 다르다
+# (택소노미 영역은 code·ecad_dependent, 메커니즘은 description·status… — 엔진은 {key, label}·{code, label} 만 받는다). 그래서 모양은
+# 여기 한 곳에서 짓는다. 고르는 것(어느 카드·단위·이미 낸 판정을 실을지)은 검토 루프 몫이다. 단위(`units.review_payload`)·목록 쪽
+# (`units.manifest_items`)·카드(`cardpack.cards_for`)는 생산자 출력 그대로 싣는다 — 줄이거나 칸을 걸러 맞추지 않는다(C7 시험이
+# 엔진의 검증기로 본다).
+def review_domains(cfg: Any = None) -> list[dict]:
+    """`extra.domains` — 로스터 영역(`HWAXRISK_ROSTER_DOMAINS`, 기본 15개)을 택소노미 라벨과 함께 `{key, label}` 로. 택소노미의
+    `code` 를 `key` 로 보낸다(엔진 DomainItem — h 줄의 `to` 가 고르는 닫힌 집합). 택소노미에 없는 영역은 라벨 없이 싣는다."""
+    cfg = config.settings if cfg is None else cfg
+    labels = {str(d.get("code")): d.get("label") for d in taxonomy.load_taxonomy()["axes"]["domain"]}
+    return [{"key": code, **({"label": str(labels[code])} if labels.get(code) else {})}
+            for code in getattr(cfg, "risk_roster_domains", ())]
+
+
+def review_mechanisms() -> list[dict]:
+    """`extra.mechanisms` — 택소노미 메커니즘 가운데 active 인 것을 `{code, label}` 로(f 줄 mech·m 줄 seen 이 고르는 닫힌 집합)."""
+    return [{"code": str(m["code"]), "label": str(m.get("label") or "")}
+            for m in taxonomy.load_taxonomy()["axes"]["mechanism"] if m.get("status", "active") == "active"]
+
+
+def run_body(kind: str, *, target_key: str, pack: cardpack.FrozenPack, cards: Sequence[str] = (),
+             variant: str | None = None, digest: Sequence[str] = (), unit: Mapping[str, Any] | None = None,
+             manifest: Sequence[Mapping[str, Any]] = (), known: Sequence[Mapping[str, Any]] = (),
+             expect: Mapping[str, Any] | None = None, cfg: Any = None) -> dict:
+    """카드 대조 run 요청 하나(M2.md 4.3). 신원 칸 넷은 싣지 않는다(포털이 덮어쓴다).
+
+    - `pack` — 얼린 팩. `expert` 는 그 팩의 {agent_key, name, domain, role}, `cards` 는 별칭 순서대로 팩 항목 그대로
+      (`cardpack.cards_for` — rev 도 뒤집지 않는다, 엔진이 뒤집는다), `digest` 는 별칭의 {alias, type, title, record_id, card_id}.
+    - `unit` 은 `units.review_payload` 의 출력, `manifest` 는 `units.manifest_items` 의 한 쪽이다 — 둘 다 그대로 싣는다.
+    - `known` 은 이미 낸 판정 행에서 {alias, judgement, why} 만(엔진 KnownItem), `extra.domains`·`mechanisms` 는 위 둘이다.
+    - `expect` 는 준 것만 싣는다(엔진은 실린 판만 견준다).
+    """
+    body: dict[str, Any] = {
+        "kind": kind, "variant": variant, "target_key": target_key,
+        "expert": {"key": pack.agent_key, "name": str(pack.raw.get("name") or ""),
+                   "domain": str(pack.raw.get("domain") or ""), "role": pack.role},
+        "cards": cardpack.cards_for(pack, cards),
+        "digest": [{"alias": alias, "type": _text(pack.cards[alias].get("type")),
+                    "title": _text(pack.cards[alias].get("title")), "record_id": _text(pack.cards[alias].get("record_id")),
+                    "card_id": _text(pack.cards[alias].get("card_id"))} for alias in digest],
+        "unit": copy.deepcopy(dict(unit)) if unit is not None else None,
+        "manifest": [copy.deepcopy(dict(item)) for item in manifest],
+        "extra": {"domains": review_domains(cfg), "mechanisms": review_mechanisms(),
+                  "known": [{"alias": str(row.get("alias") or ""), "judgement": _text(row.get("judgement")),
+                             "why": _text(row.get("why"))} for row in known]},
+    }
+    if expect:
+        body["expect"] = {k: expect[k] for k in ("prompt_rev", "limits_rev") if expect.get(k) is not None}
+    return body
 
 
 def build_review_engine(store: Any, settings: Any) -> PortalReviewEngine:

@@ -32,7 +32,7 @@ ALLOWED_SKIPS: tuple[tuple[str, str, str], ...] = (
 # 형제 리포가 없을 때만 건너뛰는 자리 — 형제가 곁에 있는데 건너뛰면 허용 목록 밖이라 붉다.
 SIBLING_ONLY: tuple[str, ...] = ("tests/test_parity.py", "tests/test_atoms.py", "tests/test_wiring_regressions.py",
                                  "tests/test_stream_attribution.py", "tests/test_card_contract_copies.py",
-                                 "tests/test_review_verify.py")
+                                 "tests/test_review_verify.py", "tests/test_card_review_request_contract.py")
 
 _skipped: list[tuple[str, str]] = []
 _strict_xfail: set[str] = set()      # strict 인 xfail 표식이 붙은 시험(nodeid) — 이것만 건너뜀으로 세지 않는다
