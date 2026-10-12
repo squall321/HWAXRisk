@@ -5,7 +5,9 @@
 """
 from __future__ import annotations
 
+import asyncio
 import dataclasses
+import json
 import time
 
 import pytest
@@ -14,6 +16,7 @@ import app.mcp_server as srv
 from app import config, routes, units
 from app.errors import AppError
 from tests import factories
+from tests.test_mcp_brief_relay import CLAUDE_MCP_RESULT_CHARS
 
 OWNER = factories.OWNER
 OTHER = "other@example.com"
@@ -166,16 +169,21 @@ def test_a_persist_failure_still_opens_the_target_on_panels(store, review_on, mo
 
 # ---------------------------------------------------------------- MCP risk_get_units
 def test_risk_get_units_pages_what_rest_returns_and_hides_other_projects(store, review_on, monkeypatch):
-    """MCP 도구는 REST 와 같은 함수다 — 목록·단위 하나를 글자 예산으로 나눠 주고 next_offset 으로 다 받으면 REST 와 같다.
-    남의 대상은 not_visible, 인자 짝이 틀리면 E100 이다."""
+    """MCP 도구는 REST 와 같은 함수다 — 목록·단위 하나를 나눠 주고 next_offset 으로 다 받으면 REST 와 같다. 쪽마다 FastMCP 가
+    실제로 내는 글(들여쓰기 2 JSON text 블록)이 Claude Code 의 MCP 결과 상한(25,000자) 안이다(RC-2 — 압축 JSON 으로 센 예산
+    20,000자의 첫 쪽이 와이어로는 25,977자였다). 남의 대상은 not_visible, 인자 짝이 틀리면 E100 이다."""
     synth = factories.make_diff_target(store, 150, open_target=False)
     key = _open("diff", synth.diff_id, "cells")["target_key"]
     factories.act_as_delegate(monkeypatch, OWNER)
+    sizes: list[int] = []
 
     def gather(**kwargs) -> tuple[dict, list[dict]]:
         pages, offset = [], 0
         while offset is not None:
-            page = srv.risk_get_units(key, offset=offset, **kwargs)
+            blocks = asyncio.run(srv.mcp.call_tool("risk_get_units", {"target_key": key, "offset": offset, **kwargs}))
+            assert isinstance(blocks, list) and len(blocks) == 1, blocks
+            sizes.append(len(blocks[0].text))
+            page = json.loads(blocks[0].text)
             assert "error" not in page, page
             pages.append(page)
             offset = page.get("next_offset")
@@ -183,15 +191,15 @@ def test_risk_get_units_pages_what_rest_returns_and_hides_other_projects(store, 
 
     rest = routes.get_units(key, ident=factories.ident(OWNER))
     head, pages = gather()
-    assert [u for p in pages for u in p["units"]] == rest["units"]
+    assert len(pages) > 1 and [u for p in pages for u in p["units"]] == rest["units"]
     assert {k: head[k] for k in ("flow", "rev", "status", "total")} == {k: rest[k] for k in ("flow", "rev", "status", "total")}
-    assert all(len(str(p["units"])) <= srv.UNITS_PAGE_CHARS * 2 for p in pages)
     unit = max(rest["units"], key=lambda u: u["evidence_chars"] or 0)
     for part, fields in (("lines", ("lines", "context")), ("evidence", ("evidence",))):
         whole = routes.get_target_unit(key, unit["unit_id"], part, ident=factories.ident(OWNER))
         _head, got = gather(unit_id=unit["unit_id"], part=part)
         for field in fields:
             assert [x for p in got for x in p[field]] == whole[field], (part, field)
+    assert sizes and max(sizes) <= CLAUDE_MCP_RESULT_CHARS, f"risk_get_units 와이어 {max(sizes):,}자"
     assert srv.risk_get_units(key, part="summary")["error"] == "E100"
     assert srv.risk_get_units(key, unit_id=unit["unit_id"])["error"] == "E100"
     assert srv.risk_get_units(key, unit_id=unit["unit_id"], part="nope")["error"] == "E100"

@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from typing import Any
 
 import anyio
+import pydantic_core
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
@@ -49,8 +51,12 @@ NODE_LIMIT = 500
 EVENT_LIMIT = 500
 REGISTRY_LIMIT = 200
 CLAIM_LIMIT = 100
-# 검토 단위 조회 한 번의 글자 예산 — Claude Code 의 MCP 결과 상한(약 25,000토큰)을 넘지 않게 나눈다. 자르지 않는다(next_offset).
+# 검토 단위 조회 한 번의 글자 예산(항목의 압축 JSON 으로 센 첫 값) — 자르지 않고 나눈다(next_offset). 실제로 나가는 글은 FastMCP
+# 가 들여쓰기 2 JSON 으로 낸 것이라 압축 셈보다 약 1.3배 길다 — _fit_wire 가 그 글을 재서 MCP_RESULT_CHARS 안에 들 때까지 줄인다.
 UNITS_PAGE_CHARS = 20000
+# Claude Code 가 MCP 결과로 받는 글의 상한(약 25,000토큰)을 글자로 보수 환산한 값 — 넘으면 본문 대신 'result exceeds maximum
+# allowed tokens' 를 받는다(tests/test_mcp_brief_relay.py 의 CLAUDE_MCP_RESULT_CHARS 와 같은 값).
+MCP_RESULT_CHARS = 25_000
 
 
 def _request() -> Any:
@@ -375,17 +381,38 @@ async def risk_repersist_panel(panel_id: str, discard: bool = False) -> dict:
 
 
 # ================================================================ 검토 단위(재설계 M2 U5 — 카드 대조의 단위, 읽기)
+def _wire_chars(out: Any) -> int:
+    """FastMCP 가 이 결과로 실제로 내는 글의 글자 수 — 구조화 출력이 없는 도구의 dict 는 들여쓰기 2 JSON text 블록 하나다
+    (mcp.server.fastmcp.utilities.func_metadata._convert_to_content 와 같은 직렬화)."""
+    return len(pydantic_core.to_json(out, fallback=str, indent=2).decode())
+
+
+def _fit_wire(page: Callable[[int], dict]) -> dict:
+    """`page(글자 예산)` 의 와이어 글이 MCP_RESULT_CHARS 안에 들 때까지 예산을 줄여 다시 나눈다(RC-2) — 머리 칸(stats·invariants)과
+    들여쓰기까지 실제로 나가는 글로 잰다. 자르지 않는다 — 항목 하나가 혼자 넘으면 그 하나는 싣는다(예산 1 은 한 항목 쪽이다)."""
+    budget = UNITS_PAGE_CHARS
+    out = page(budget)
+    size = _wire_chars(out)
+    while size > MCP_RESULT_CHARS and budget > 1:
+        budget = max(1, budget * MCP_RESULT_CHARS // size - 1)
+        out = page(budget)
+        size = _wire_chars(out)
+    return out
+
+
 @mcp.tool()
 def risk_get_units(target_key: str, unit_id: str | None = None, part: str = "manifest", offset: int = 0) -> dict:
     """검토 단위 조회(카드 대조가 전문가마다 도는 단위) — part='manifest' 는 활성 빌드의 단위 목록(seq·종류·제목·목록 글·변경 줄 수), unit_id 와 part ∈ summary|lines|evidence 는 그 단위의 요약 글·변경 줄(소유 + 문맥)·동결 근거이고, 한 번에 약 2만 자씩 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다), 단위가 없는 대상은 status 'none' 이다."""
     def manifest(key: str, *, owner_sub: str) -> dict:
         if unit_id:
             raise AppError("E100", "unit_id 를 주면 part 는 summary|lines|evidence 중 하나다.", 422)
-        return routes.units_payload(key, owner_sub=owner_sub, offset=offset, budget_chars=UNITS_PAGE_CHARS)
+        return _fit_wire(lambda budget: routes.units_payload(key, owner_sub=owner_sub, offset=offset,
+                                                             budget_chars=budget))
 
     def one(key: str, *, owner_sub: str) -> dict:
         if not unit_id:
             raise AppError("E100", f"part={part!r} 는 unit_id 가 필요하다 — 목록은 part='manifest' 다.", 422)
-        return routes.unit_payload(key, unit_id, part, owner_sub=owner_sub, offset=offset, budget_chars=UNITS_PAGE_CHARS)
+        return _fit_wire(lambda budget: routes.unit_payload(key, unit_id, part, owner_sub=owner_sub, offset=offset,
+                                                            budget_chars=budget))
 
     return _scoped("target", target_key, manifest if part == "manifest" else one, target_key)
