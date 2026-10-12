@@ -228,6 +228,61 @@ def test_both_sides_human_confirmed_and_different_goes_to_conflicts(seeded, empt
     assert row["kind_override"] == "clearance"     # 마지막 쓰기 승리 없음
 
 
+# ---------------------------------------------------------------- v4(재설계 M2) — 검토 단위·셀 원장
+V4_EXPORTED = ("rr_unit_builds", "rr_units", "rr_expert_reports", "rr_review_cells", "rr_card_verdicts",
+               "rr_review_calls")
+
+
+def test_v4_tables_ride_the_export_except_the_local_card_packs(seeded, empty_store):
+    """새 표 여섯은 반출 표 목록 끝에 붙고 since 열이 실제 열이다. 카드 묶음은 박스 지역 사본이라 목록에 없다.
+    새 표가 빈 v4 원장도 빈 DB 로 왕복해 같은 행 수·해시다(행이 든 왕복은 C2 의 생산자가 생긴 뒤 본다)."""
+    assert export.LOCAL_ONLY_TABLES == {"rr_card_packs"}
+    assert export.TABLE_ORDER[-len(V4_EXPORTED):] == V4_EXPORTED
+    assert "rr_card_packs" not in export.TABLE_ORDER
+    for table in V4_EXPORTED:
+        cols, _ = export._table_meta(seeded, table)
+        assert export._SINCE_COLS[table] and set(export._SINCE_COLS[table]) <= set(cols), table
+        assert "owner_sub" in cols, table
+    assert export._EXPORT_SKIP_COLUMNS["rr_review_calls"] == ("result_gz",)
+
+    body = "".join(export.iter_lines(seeded, ALICE, 0))
+    assert json.loads(body.splitlines()[0])["schema_version"] == LATEST_SCHEMA == 4
+    assert not any(json.loads(ln)["table"] == "rr_card_packs" for ln in body.splitlines()[1:])
+    export.import_jsonl(empty_store, ALICE, body)
+    here, there = export.row_digest(empty_store, ALICE), export.row_digest(seeded, ALICE)
+    assert "rr_card_packs" not in here
+    assert {t: here[t] for t in V4_EXPORTED} == {t: there[t] for t in V4_EXPORTED}
+    assert all(here[t][0] == 0 for t in V4_EXPORTED)
+
+
+def test_card_pack_lines_are_refused_on_import(empty_store):
+    """카드 묶음 줄은 들여오지 않는다 — 반출이 싣지 않는 표라 손으로 만든 줄이면 '알 수 없는 표' 다."""
+    head = json.dumps(export.header_line(empty_store))
+    row = {"agent_key": "a", "pack_hash": "h", "norm_rev": "n", "role_sha": "r", "cards_total": 0, "checkable_n": 0,
+           "chars_total": 0, "manifest_json": "[]", "pack_gz": {"__b64__": ""}, "source": "x", "fetched_at": 1}
+    with pytest.raises(AppError) as exc:
+        export.import_jsonl(empty_store, ALICE, head + "\n" + json.dumps({"table": "rr_card_packs", "row": row}) + "\n")
+    assert exc.value.http_status == 422 and "rr_card_packs" in exc.value.message
+    assert empty_store.query("SELECT agent_key FROM rr_card_packs") == []
+
+
+def test_export_cuts_a_card_quote_to_200_chars_and_keeps_its_length():
+    """판정 행의 카드 인용은 판정당 200자만 나가고 원문 길이가 cq_chars 에 실린다(사용자 결정 2026-10-12).
+    한 번 줄인 행을 다시 내보내도 원래 길이가 남는다. 200자 안의 인용과 다른 표는 그대로다."""
+    quote = "온도 사이클 1000회 뒤 솔더 접합부 균열 길이가 접합 폭의 25%를 넘으면 불합격으로 판정한다. " * 8
+    assert len(quote) > export.EXPORT_CQ_MAX == 200
+    row = {"record_id": "r1", "variant": "fwd", "cq": quote, "cq_chars": None, "why": "근거"}
+    out = export._export_view("rr_card_verdicts", row)
+    assert out["cq"] == quote[:200] and out["cq_chars"] == len(quote)
+    assert {k: v for k, v in out.items() if k not in ("cq", "cq_chars")} == {
+        k: v for k, v in row.items() if k not in ("cq", "cq_chars")}
+    assert row["cq"] == quote                                   # 원장 행(입력)은 건드리지 않는다
+    assert export._export_view("rr_card_verdicts", out) == out  # 다시 내보내도 같다
+    for short in ({**row, "cq": quote[:200]}, {**row, "cq": None}, {**row, "cq": ""}):
+        assert export._export_view("rr_card_verdicts", short) == short
+    assert export._export_view("rr_findings", {"cq": quote}) == {"cq": quote}
+
+
 def test_unknown_table_is_422(seeded, empty_store):
     head = json.dumps(export.header_line(empty_store))
     body = head + "\n" + json.dumps({"table": "rr_nope", "row": {"id": "x"}}) + "\n"

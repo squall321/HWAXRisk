@@ -807,6 +807,14 @@ TRANSFER_DERIVED: tuple[tuple[str, str], ...] = (
     ("rr_registry_status_log", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_claim_refs", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_delta_contrib", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    # v4(재설계 M2) — 검토 단위와 셀 원장. 빠뜨리면 이양 뒤 새 소유자의 반출에서 사라진다. 카드 묶음(rr_card_packs)은
+    # 소유자가 없는 박스 지역 사본이라 옮길 것이 없다.
+    ("rr_unit_builds", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_units", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_expert_reports", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_review_cells", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_card_verdicts", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_review_calls", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
 )
 MEMBER_ROLES = ("viewer", "editor")
 RUNNING_JOB_STATES = ("queued", "running", "paused", "cancelling")
@@ -1006,6 +1014,25 @@ PURGE_BLANK_SQL: tuple[tuple[str, str], ...] = (
     # 반출 JSONL 에 남는다 — rr_panel_calls.result_gz 와 같은 성질의 열이다.
     ("rr_brief_calls", "UPDATE rr_brief_calls SET result_gz = NULL"
                        " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    # v4(재설계 M2) — 단위의 원천 글(부품·재질 이름이 든 제목·목록 글·줄·요약·동결 발췌)과 검토 원장의 원문 열.
+    # 셀·머리의 선점(lease_owner)도 같은 트랜잭션에서 비운다 — 폐기 뒤에 늦게 끝난 호출의 쓰기가 0행이 된다(m-10).
+    # 카드 묶음(rr_card_packs)은 과제 자료가 아니라 사내 카드의 사본이라 지우지 않는다.
+    ("rr_units", "UPDATE rr_units SET title = '', digest = '', scope_key = NULL, context_json = NULL,"
+                 " flags_json = NULL, lines_gz = NULL, summary_gz = NULL, evidence_gz = NULL, evidence_json = NULL"
+                 " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_unit_builds", "UPDATE rr_unit_builds SET error = NULL"
+                       " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_expert_reports", "UPDATE rr_expert_reports SET report_gz = NULL, summary_md = NULL, sweep_json = NULL,"
+                          " lease_owner = NULL"
+                          " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_review_cells", "UPDATE rr_review_cells SET extras_json = NULL, route_json = NULL, mechs_json = NULL,"
+                        " handoffs_json = NULL, error = NULL, decide_note = NULL, lease_owner = NULL"
+                        " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_card_verdicts", "UPDATE rr_card_verdicts SET cq = NULL, why = NULL, need = NULL, path = NULL,"
+                         " mech_free = NULL, check_text = NULL, conds_json = NULL, checks_json = NULL"
+                         " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_review_calls", "UPDATE rr_review_calls SET result_gz = NULL, quality_json = NULL"
+                        " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
 )
 
 

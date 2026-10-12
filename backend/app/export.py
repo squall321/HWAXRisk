@@ -82,12 +82,34 @@ _SINCE_COLS: dict[str, tuple[str, ...]] = {
     "rr_metrics": ("computed_at",),
     "rr_curation_queue": ("created_at",),
     "rr_id_map": ("ra_synced_at", "adh_synced_at"),
+    # v4(재설계 M2) — 단위 둘은 한 번 쓰고 고치지 않는다. 셀·머리는 고쳐 쓰는 행이라 updated_at 이 먼저다.
+    "rr_unit_builds": ("built_at",),
+    "rr_units": ("created_at",),
+    "rr_expert_reports": ("updated_at", "created_at"),
+    "rr_review_cells": ("updated_at", "created_at"),
+    "rr_card_verdicts": ("created_at",),
+    "rr_review_calls": ("started_at",),
 }
 
 
 # 반출에 싣지 않는 열 — 패널의 엔진 결과 원문(v3)은 그 박스에서 다시 저장할 때만 쓴다. 받은 쪽은 다시 저장할 일이 없고,
 # 그 원문에는 좌석이 받은 근거 글이 그대로 들어 있다(WP1 P-19). 들여오기는 빠진 열을 INSERT 에서 뺀다.
-_EXPORT_SKIP_COLUMNS: dict[str, tuple[str, ...]] = {"rr_panels": ("result_gz",)}
+# 검토 호출의 result 프레임(v4)도 같다 — 카드 인용 원문이 판정당 상한 없이 들어 있다.
+_EXPORT_SKIP_COLUMNS: dict[str, tuple[str, ...]] = {"rr_panels": ("result_gz",), "rr_review_calls": ("result_gz",)}
+
+# 판정 행의 카드 인용(cq)은 판정당 이만큼만 박스 밖으로 나간다(사용자 결정 2026-10-12 — 재설계 M2.md 2절). 원문 길이는
+# cq_chars 에 적는다. 이미 적힌 값은 그대로 둔다 — 들여온 행을 다시 내보내도 원래 길이가 남는다.
+EXPORT_CQ_MAX = 200
+
+
+def _export_view(table: str, row: dict) -> dict:
+    """반출 줄 하나 — 표마다 박스 밖으로 내보낼 모양으로 바꾼다(지금은 판정 행의 인용 자르기 하나다)."""
+    if table == "rr_card_verdicts":
+        cq = row.get("cq")
+        if isinstance(cq, str) and len(cq) > EXPORT_CQ_MAX:
+            chars = row.get("cq_chars")
+            return {**row, "cq": cq[:EXPORT_CQ_MAX], "cq_chars": len(cq) if chars is None else chars}
+    return row
 
 
 def _human_rank(table: str, row: dict) -> int:
@@ -210,7 +232,7 @@ def _select(store: RiskStore, table: str, owner_sub: str, since: int,
     order = pks or cols
     sql += " ORDER BY " + ", ".join(_quote(c) for c in order)
     for row in store.query(sql, tuple(params)):
-        yield {c: _encode(row[c]) for c in cols}
+        yield _export_view(table, {c: _encode(row[c]) for c in cols})
 
 
 def iter_lines(store: RiskStore, owner_sub: str, since: int = 0, data_dir: Path | None = None,
@@ -436,5 +458,5 @@ def row_digest(store: RiskStore, owner_sub: str) -> dict[str, tuple[int, str]]:
     return out
 
 
-__all__ = ["TABLE_ORDER", "GLOBAL_TABLES", "LOCAL_ONLY_TABLES", "header_line", "iter_lines", "write_export_file",
-           "import_jsonl", "row_digest", "read_origin", "EXPORTS_DIRNAME"]
+__all__ = ["TABLE_ORDER", "GLOBAL_TABLES", "LOCAL_ONLY_TABLES", "EXPORT_CQ_MAX", "header_line", "iter_lines",
+           "write_export_file", "import_jsonl", "row_digest", "read_origin", "EXPORTS_DIRNAME"]
