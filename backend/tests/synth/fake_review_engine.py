@@ -17,6 +17,7 @@
   cut_n            앞 run N 번은 status 한 장 뒤 연결이 끊긴다(done 없음)
   delay_s          result 앞에서 이만큼 잔다(실제 시간)
   limits_delay_s   limits 응답 앞에서 이만큼 잔다(실제 시간 — 포털 → 에이전트 서버 왕복이 루프의 탐침 한도를 넘는 박스, R3A-3)
+  limits_error     (상태, 본문) — limits 가 이 오류로 답한다(포털이 중계한 agent_unreachable 따위 — 창 조회 실패, R3A-10)
   credential_expired  포털이 PAT 를 401 로 거절한다(모든 경로)
   ctx_source       limits 의 창 출처(server·env·fallback)
   ctx_unknown      창 조회 실패 중 — limits 는 ctx_retrying, plan·run 은 503 ctx_unknown
@@ -214,6 +215,7 @@ class FakeReviewEngine:
         self.cut_n = 0
         self.delay_s = 0.0
         self.limits_delay_s = 0.0
+        self.limits_error: tuple[int, dict[str, Any]] | None = None
         self.credential_expired = False
         self.ctx_source = str(self.base_limits.get("ctx_source") or "server")
         self.ctx_unknown = False
@@ -279,6 +281,8 @@ class FakeReviewEngine:
         if route == "limits" and request.method == "GET":
             if self.limits_delay_s > 0:
                 time.sleep(float(self.limits_delay_s))
+            if self.limits_error is not None:
+                return httpx.Response(int(self.limits_error[0]), json=copy.deepcopy(self.limits_error[1]))
             return httpx.Response(200, json=self.limits())
         if request.method != "POST" or route not in ("pack", "plan", "run"):
             return httpx.Response(404, json={"detail": "Not Found"})

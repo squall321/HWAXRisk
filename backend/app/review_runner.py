@@ -282,6 +282,9 @@ KNOWN_CTX_SOURCES = ("server", "env")          # 창 출처가 이것이면 서�
 CREDENTIAL_FIX = "포털에서 PAT 를 다시 발급해 등록하고 재개한다 — 서비스 계정으로 내려가지 않는다"
 CTX_KNOB = "LLM_CONTEXT_TOKENS"
 DISABLED = "review_disabled"          # 이 박스의 검토 스위치(HWAXRISK_REVIEW_ENABLED)가 꺼져 있다 — 새 선점·새 호출을 내지 않는다
+LOOP_WAIT = "loop"                    # 진행판 waiting.source — 루프(창 조회·스위치)가 적은 기다림. 창이 통과하면 루프가 지운다(R3A-10)
+# 표지가 생기기 전에 적힌 진행판의 루프 기다림(사유로 가른다).
+_LEGACY_LOOP_WAITS = ("portal_unreachable", DISABLED)
 _ENGINE_ERRORS = (EngineBusy, PatUnavailable, EngineRejected, EngineStreamLost)
 _CALL_STATE = {review_ops.INFRA: "infra_fail", review_ops.CONTENT: "content_fail", review_ops.WAIT: "wait"}
 _BASIS_OF_PACK = {cardpack.CARD_BASIS_CARDS: "cards", cardpack.CARD_BASIS_BACKGROUND: "background",
@@ -398,8 +401,10 @@ class JobProgress:
     모양 {mode, phase, packs{total, todo, ok, empty, error, blocked}, experts{total, by_state}, cells{total, by_state, by_basis,
     in_scope, out_of_scope_pending, failed}, calls{ok, infra_fail, content_fail, wait, aborted, last_ok_at, avg_ok_s},
     workers[{agent_key, purpose, unit_id, call_kind, variant, deck_id, started_at, last_frame_at, last_event_at, last_step}],
-    breaker{state, trips, hold_until, since}, waiting{reason, since, retry_at, note?} | None, server{active, limit},
+    breaker{state, trips, hold_until, since}, waiting{reason, since, retry_at, note?, source?} | None, server{active, limit},
     quality(S11 의 QUALITY_HOOK) | None}.
+    waiting.source 는 루프(창 조회·검토 스위치)가 적은 기다림이면 'loop' 이고 창이 통과하면 루프가 지운다. 워커의 자리 기다림(엔진
+    review_busy 따위)에는 없고 그 워커가 지운다.
     원장을 다시 세는 것은 PROGRESS_INTERVAL_S 마다와 강제(단계·차단기·끝) 때뿐이다. 워커의 시작·끝·호출 바뀜은 센 값을 둔 채 곧바로
     적고, 프레임마다의 신호는 PROGRESS_INTERVAL_S 간격으로 적는다. 끝난 잡의 행은 고치지 않는다(늦은 워커가 끝난 진행판을 덮지 않게).
     """
@@ -1670,8 +1675,9 @@ class ReviewLoop:
             self._resume(job, clear=False)
 
     def _waiting(self, jobs: Sequence[Mapping[str, Any]], waiting: Mapping[str, Any] | None) -> None:
+        """루프가 적는 기다림 — `source='loop'` 표지를 단다(워커의 자리 기다림과 가른다)."""
         for job in jobs:
-            self.progress(job["id"]).set(waiting=dict(waiting) if waiting else None)
+            self.progress(job["id"]).set(waiting={**dict(waiting), "source": LOOP_WAIT} if waiting else None)
 
     def _window_ok(self, jobs: list[dict], now: int) -> list[dict]:
         """창 확인 — 새 호출을 내도 되는 잡 목록. 잡마다 그 잡의 자격(이메일)으로 물은 답만 본다 — 다른 잡의 오류나 다른 사람의
@@ -1742,9 +1748,11 @@ class ReviewLoop:
             return []
         self._fallback_since.pop(email, None)
         for job in live:
+            # 창이 통과했다 — 루프가 적은 기다림은 사유와 상관없이 지운다(agent_unreachable·engine_busy 따위로 창 조회가 실패했다
+            # 회복한 잡이 도는데도 '기다림' 으로 보이지 않게, R3A-10). 워커의 자리 기다림(표지 없음)은 그 워커가 지운다.
             waiting = self.progress(job["id"]).body.get("waiting") or {}
-            if str(waiting.get("reason") or "").startswith("ctx_") or waiting.get("reason") in ("portal_unreachable",
-                                                                                                 DISABLED):
+            reason = str(waiting.get("reason") or "")
+            if waiting.get("source") == LOOP_WAIT or reason.startswith("ctx_") or reason in _LEGACY_LOOP_WAITS:
                 self.progress(job["id"]).set(waiting=None)
         return live
 
@@ -1896,7 +1904,7 @@ class ReviewLoop:
             for job in self._jobs(("queued", "running")):
                 progress = self.progress(job["id"])
                 if (progress.body.get("waiting") or {}).get("reason") != DISABLED:
-                    progress.set(waiting={"reason": DISABLED, "since": now, "retry_at": None,
+                    progress.set(waiting={"reason": DISABLED, "since": now, "retry_at": None, "source": LOOP_WAIT,
                                           "note": "이 박스의 검토 스위치가 꺼져 있다 — $DATA_DIR/knobs.env 에"
                                                   " HWAXRISK_REVIEW_ENABLED=1 을 적고 앱을 다시 띄우면 이어 돈다"})
             return {"jobs": len(jobs), "running": 0, "started": 0}

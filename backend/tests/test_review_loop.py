@@ -551,6 +551,34 @@ def test_a_frozen_pack_missing_on_this_box_is_fetched_again(store, monkeypatch):
 
 
 # ---------------------------------------------------------------- 창
+def test_a_window_outage_that_recovers_leaves_no_stale_waiting_on_a_running_job(store, monkeypatch):
+    """반대 검토 R3A-10 — 창 조회가 포털이 중계한 agent_unreachable 로 실패하는 동안 진행판은 waiting{reason:'agent_unreachable',
+    source:'loop'} 이고 새 호출을 내지 않는다. 회복해 워커가 도는 동안에는 그 기다림이 진행판에 남지 않는다(도는 잡이 '기다림' 으로
+    보이지 않게)."""
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    fake.limits_error = (502, {"code": "agent_unreachable", "message": "에이전트 서버에 연결하지 못했다(가짜)"})
+    gate = threading.Event()
+    fake.hold_runs = {2: gate}
+    r = rig.Rig(store, fake)
+    r.tick()
+    down = rig.progress(store, job_id)["waiting"]
+    assert (down["reason"], down["source"]) == ("agent_unreachable", "loop") and fake.calls("pack") == []
+    fake.limits_error = None
+    r.clock.advance(61)
+    r.tick()                                                # 묶음
+    r.tick(wait=False)                                      # 세션 — 둘째 run 에서 선다
+    rig.wait_for(lambda: fake.runs == 2)
+    board = rig.progress(store, job_id)
+    assert board["waiting"] is None and len(board["workers"]) == 1
+    gate.set()
+    r.loop.join(30)
+    r.finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+
+
 def test_a_fallback_window_waits_and_after_600_seconds_holds_ctx_unknown_until_the_server_knows(store, monkeypatch):
     """창 출처 fallback — 새 호출을 내지 않고 기다리며(progress.waiting ctx_fallback) 600초가 이어지면 ctx_unknown 으로 멈춘다(무엇을
     적을지 — 에이전트 서버의 창 설정). 창이 server 로 돌아오면 스스로 재개해 끝까지 간다."""
@@ -562,7 +590,8 @@ def test_a_fallback_window_waits_and_after_600_seconds_holds_ctx_unknown_until_t
     start = r.clock()
     r.tick()
     assert rig.state(store, job_id) == "running" and fake.runs == 0
-    assert rig.progress(store, job_id)["waiting"] == {"reason": "ctx_fallback", "since": start, "retry_at": start + 600}
+    assert rig.progress(store, job_id)["waiting"] == {"reason": "ctx_fallback", "since": start, "retry_at": start + 600,
+                                                      "source": "loop"}
     r.clock.advance(599)
     r.tick()
     assert rig.state(store, job_id) == "running" and fake.runs == 0
