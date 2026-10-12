@@ -276,20 +276,24 @@ def test_a_pack_with_cards_is_ok(risk_store, pack_ok):
 
 def test_zero_cards_once_is_not_empty_and_twice_is(risk_store, pack_empty):
     first = cardpack.judge_pack(risk_store, AGENT, http_status=200, body=pack_empty)
-    assert (first.status, first.code, first.zero_streak) == ("error", "suspect_empty", 1)
+    assert (first.status, first.code, first.zero_streak, first.was_nonempty) == ("error", "suspect_empty", 1, False)
     second = cardpack.judge_pack(risk_store, AGENT, http_status=200, body=pack_empty,
                                  zero_streak_before=first.zero_streak)
-    assert (second.status, second.code, second.zero_streak) == ("empty", None, 2)
+    assert (second.status, second.code, second.zero_streak, second.was_nonempty) == ("empty", None, 2, False)
     out = review_ops.classify(first.code)
     assert (out.klass, out.charge, out.fail_code) == ("pack", False, "pack_unavailable")
 
 
-def test_zero_cards_after_a_pack_that_had_cards_stays_suspect(risk_store, pack_ok, pack_empty):
-    """앞선 묶음(어느 타깃이든)에 카드가 있던 전문가의 0장은 몇 번이 와도 empty 로 굳지 않는다(P-08 — 복원 창)."""
+def test_zero_cards_after_a_pack_that_had_cards_needs_three_and_says_so(risk_store, pack_ok, pack_empty):
+    """앞선 묶음(어느 타깃이든)에 카드가 있던 전문가의 0장은 두 번으로는 empty 가 아니고(P-08 — 복원 창), 세 번 연달으면 empty 에
+    was_nonempty 를 단다 — 카드를 정말 다 잃은 전문가가 팩 재시도 끝에 failed(pack_unavailable)로 굳지 않는다(앞으로의 위험 5)."""
     cardpack.freeze_pack(risk_store, pack_ok, agent_key=AGENT)
-    for streak in (0, 1, 5):
+    for streak in (0, 1):
         verdict = cardpack.judge_pack(risk_store, AGENT, http_status=200, body=pack_empty, zero_streak_before=streak)
-        assert (verdict.status, verdict.code) == ("error", "suspect_empty")
+        assert (verdict.status, verdict.code, verdict.was_nonempty) == ("error", "suspect_empty", True)
+    for streak in (2, 5):
+        verdict = cardpack.judge_pack(risk_store, AGENT, http_status=200, body=pack_empty, zero_streak_before=streak)
+        assert (verdict.status, verdict.code, verdict.zero_streak, verdict.was_nonempty) == ("empty", None, streak + 1, True)
 
 
 def test_zero_then_thirty_is_ok(risk_store, pack_ok, pack_empty):

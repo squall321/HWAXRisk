@@ -9,8 +9,9 @@
   (반대 검토 C2a RC-3) — 그래서 열쇠가 아니라 기록 열로만 남긴다. 검토 머리(`rr_expert_reports.pack_hash`)는 `pack_key` 를 가리킨다.
   같은 팩을 두 번·두 타깃에서 얼려도 행은 하나다(INSERT OR IGNORE).
 - 문제가 있는 팩은 얼리지 않는다 — 얼린 것이 며칠 동안 정본이 되므로 들어올 때 한 번 본다(`check_pack`).
-- '0장' 과 '못 받았다' 를 섞지 않는다(P-08 · X1-25) — 0장 응답은 두 번 연달아이고 그 전문가의 앞선 묶음에도 카드가 없을 때만
-  `empty` 다(`judge_pack`).
+- '0장' 과 '못 받았다' 를 섞지 않는다(P-08 · X1-25) — 0장 응답은 두 번 연달아이고 그 전문가의 앞선 묶음에도 카드가 없을 때
+  `empty` 다. 앞선 묶음에 카드가 있던 전문가는 세 번 연달아야 `empty` 이고 `was_nonempty` 를 단다(`judge_pack` — 카드를 정말
+  다 잃은 전문가가 팩 재시도 끝에 failed 로 굳지 않고 역할만으로 돈다).
 
 엔진 팩의 개수 칸 — `cards_total` 은 그릴 수 있는 카드(`cards`) 수, `listed_total` 은 목록에 있던 전부(`cards` + 본문 없는
 `unrenderable`)다(HWAXAgentServer `card_review.build_pack`). 설계서의 '`cards_total == len(cards) + len(unrenderable)`' 은 엔진의
@@ -45,6 +46,7 @@ PACK_ERROR = "error"
 SUSPECT_EMPTY = "suspect_empty"         # 0장인데 아직 두 번 연달아가 아니거나 앞선 묶음에 카드가 있었다
 PACK_INVALID = "pack_invalid"           # check_pack 이 문제를 찾았다 — 얼리지 않는다
 EMPTY_CONFIRMATIONS = 2                 # 0장 응답이 이만큼 연달아야 empty 다
+EMPTY_CONFIRMATIONS_AFTER_CARDS = 3     # 앞선 묶음(어느 타깃이든)에 카드가 있던 전문가는 이만큼 — empty 에 was_nonempty 를 단다
 # 팩의 내용 주소(pack_key)에서 빼는 칸 — 같은 카드를 다시 받아도 바뀌는 값(받은 시각·쓴 자격·조회 길)이다. 나머지 칸은 전부 든다.
 PACK_VOLATILE: tuple[str, ...] = ("fetched_at", "credential", "source")
 
@@ -188,6 +190,8 @@ class PackVerdict:
       `suspect_empty`·`pack_invalid` 다. 다음 할 일(팩 재시도·잡 보류·기다림)은 `review_ops.classify(code)` 가 정한다.
     - `zero_streak` — 이번 응답까지 연달은 0장 응답 수. 0장이 아니면 0 이다. 러너가 그 전문가 머리에 들고 있다가 다음
       `judge_pack` 의 `zero_streak_before` 로 넘긴다.
+    - `was_nonempty` — 0장 응답인데 그 전문가의 앞선 묶음에는 카드가 있었다. `empty` 와 같이 오면 카드를 다 잃은 것으로 받아들인
+      것이라 러너가 머리·보고서에 그 사실을 적는다(조용히 '카드 결손 전문가' 로 읽히지 않게).
     """
 
     status: str
@@ -195,6 +199,7 @@ class PackVerdict:
     problems: tuple[str, ...] = ()
     cards_n: int = 0
     zero_streak: int = 0
+    was_nonempty: bool = False
 
 
 def had_cards_before(store: Any, agent_key: str) -> bool:
@@ -207,8 +212,10 @@ def judge_pack(store: Any, agent_key: str, *, http_status: int, body: Any, zero_
     """팩 응답(상태·본문)을 ok·empty·error 로 가른다(m2-wp3b S3).
 
     - 200 · 카드 ≥1 · 확인 통과 → ok. 확인에 걸리면 error(`pack_invalid`)이고 얼리지 않는다.
-    - 200 · 0장 → 이번까지 0장이 두 번 연달았고 그 전문가의 앞선 묶음에도 카드가 없을 때만 empty, 아니면
-      error(`suspect_empty`)다 — 복원 창에 받은 '0장' 이 타깃 끝까지 '카드 결손 전문가' 로 굳지 않게(P-08).
+    - 200 · 0장 → 이번까지 0장이 두 번 연달았고 그 전문가의 앞선 묶음에도 카드가 없으면 empty, 앞선 묶음에 카드가 있었으면
+      세 번 연달아야 empty(`was_nonempty`)이고, 모자라면 error(`suspect_empty`)다 — 복원 창에 받은 '0장' 이 타깃 끝까지 '카드 결손
+      전문가' 로 굳지 않게(P-08) 하되, 카드를 정말 다 잃은 전문가가 팩 재시도(약 1시간) 끝에 failed(pack_unavailable)로 끝나 역할만으로
+      도는 길(role_only)을 잃지 않게 한다(반대 검토 C2a 앞으로의 위험 5).
     - 그 밖의 상태 → error. 코드는 본문의 `code`, 없으면 상태로 정한 이름이다(`review_ops.classify`).
     통신 실패(응답이 없다)는 이 함수를 지나지 않는다 — 부른 쪽이 그 오류 코드로 `review_ops.classify` 를 바로 부른다.
     """
@@ -224,9 +231,10 @@ def judge_pack(store: Any, agent_key: str, *, http_status: int, body: Any, zero_
     if cards_n:
         return PackVerdict(status=PACK_OK, cards_n=cards_n)
     zero = max(int(zero_streak_before), 0) + 1
-    if zero >= EMPTY_CONFIRMATIONS and not had_cards_before(store, agent_key):
-        return PackVerdict(status=PACK_EMPTY, zero_streak=zero)
-    return PackVerdict(status=PACK_ERROR, code=SUSPECT_EMPTY, zero_streak=zero)
+    had = had_cards_before(store, agent_key)
+    if zero >= (EMPTY_CONFIRMATIONS_AFTER_CARDS if had else EMPTY_CONFIRMATIONS):
+        return PackVerdict(status=PACK_EMPTY, zero_streak=zero, was_nonempty=had)
+    return PackVerdict(status=PACK_ERROR, code=SUSPECT_EMPTY, zero_streak=zero, was_nonempty=had)
 
 
 # ---------------------------------------------------------------- 얼리기
