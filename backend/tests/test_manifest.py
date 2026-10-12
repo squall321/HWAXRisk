@@ -89,7 +89,7 @@ def test_source_and_mcp(manifest):
 
 def test_description_mentions_tools_and_paths(manifest):
     desc = manifest["description"]
-    for token in ("risk_get_snapshot", "risk_get_diff", "risk_get_registry", "risk_claims_for_ref", "risk_get_brief",
+    for token in ("risk_get_snapshot", "risk_get_diff", "risk_get_units", "MCP 도구 27종", "risk_get_registry", "risk_claims_for_ref", "risk_get_brief",
                   "risk_submit_panel_result", "/apps/hwax_risk/mcp", "/api/health", "/apps/hwax_risk/api",
                   "risk_review.db", "HWAXRISK_DATA_DIR", "knobs.env", "HWAXRISK_REVIEW_ENABLED", "/api/meta/runtime"):
         assert token in desc, f"description 에 {token} 이 없다"

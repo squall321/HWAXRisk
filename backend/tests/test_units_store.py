@@ -181,7 +181,8 @@ def test_failed_builds_are_kept_but_never_become_the_active_build(risk_store, sy
     assert units.summary_of(risk_store, synth40.target_key) == {"rev": 1, "status": "failed",
                                                                  "error": "snap_not_supported"}
     listed = units.manifest(risk_store, synth40.target_key)
-    assert (listed["status"], listed["error"], listed["units"]) == ("failed", "snap_not_supported", [])
+    assert (listed["status"], listed["build_error"], listed["units"]) == ("failed", "snap_not_supported", [])
+    assert "error" not in listed
     assert units.load_units(risk_store, synth40.target_key) == [] == units.manifest_items(risk_store, synth40.target_key)
 
     ok = units.build_units(risk_store, synth40.target_key, built_by=OWNER)

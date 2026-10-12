@@ -210,10 +210,11 @@ def make_diff(store, base_snapshot_id: str, target_snapshot_id: str, *, owner: s
     return diff_module.create_diff(store, base_snapshot_id, target_snapshot_id, owner_sub=owner)
 
 
-def make_target(store, kind: str, ref_id: str, *, agents: Sequence[Mapping[str, Any]], owner: str = OWNER) -> str:
-    """`routes.create_target` — 로스터 동결까지. 반환은 target_key."""
+def make_target(store, kind: str, ref_id: str, *, agents: Sequence[Mapping[str, Any]], owner: str = OWNER,
+                flow: str = "panels") -> str:
+    """`routes.create_target` — 로스터 동결까지(flow='cells' 면 검토 단위까지). 반환은 target_key."""
     with routes_store(store):
-        out = routes.create_target(routes.TargetBody(kind=kind, ref_id=ref_id, consent=True,
+        out = routes.create_target(routes.TargetBody(kind=kind, ref_id=ref_id, consent=True, flow=flow,
                                                       agents=[dict(a) for a in agents]), ident=ident(owner))
     return out["target_key"]
 

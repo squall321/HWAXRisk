@@ -10,7 +10,7 @@ import logging
 import secrets
 import sqlite3
 import time
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, Query, Request
@@ -23,6 +23,7 @@ from app import export as export_module
 from app import identity, ir_builder, learning, metrics, narrative, planner, ra_client, requirements, runner, sameas, taxonomy
 from app import roster as roster_module
 from app import state as state_module
+from app import units as units_module
 from app import registry as registry_module
 from app.adapters import base as adapters_base
 from app.adapters import registry as adapters_registry
@@ -354,7 +355,7 @@ def _target_row(target_key: str, owner_sub: str | None) -> dict:
     row = get_store().query_one(
         "SELECT target_key, owner_sub, kind, ref_id, project_id, base_project_id, ir_hash, level,"
         " close_level, verdict_candidate, verdict_final, verdict_note, external_sync_json,"
-        " superseded_by, report_ids_json, roster_frozen_at, created_at FROM rr_targets WHERE target_key = ?",
+        " superseded_by, report_ids_json, roster_frozen_at, flow, created_at FROM rr_targets WHERE target_key = ?",
         (target_key,),
     )
     if row is None or (owner_sub is not None and row["owner_sub"] != owner_sub):
@@ -1905,7 +1906,7 @@ def list_targets(project_id: str | None = None, include_superseded: bool = False
     total = store.query_one(f"SELECT COUNT(*) AS n FROM rr_targets WHERE {clause}", tuple(params))["n"]
     rows = store.query(
         "SELECT target_key, kind, ref_id, project_id, base_project_id, ir_hash, level, close_level,"
-        " verdict_candidate, verdict_final, superseded_by, report_ids_json, roster_frozen_at,"
+        " verdict_candidate, verdict_final, superseded_by, report_ids_json, roster_frozen_at, flow,"
         " created_at, updated_at"
         f" FROM rr_targets WHERE {clause} ORDER BY created_at DESC, target_key LIMIT ? OFFSET ?",
         (*params, take, skip))
@@ -2002,6 +2003,9 @@ class TargetBody(BaseModel):
     consent: bool = False
     # 로스터 원천 — `list_agents`+`recommend_agents` 결과를 호출자가 실어 준다(planner.freeze_roster 계약).
     agents: list[dict] | None = None
+    # 심사 방식(D-24) — panels(영역을 섞은 패널 3라운드, 기본) | cells(전문가별 카드 대조, 재설계 M2). cells 는 검토 단위가 서야
+    # 그 방식으로 열리고, 안 서면 panels 로 열며 까닭을 flow_fallback 에 싣는다(PLAN 4절 '흐름 결정').
+    flow: Literal["panels", "cells"] = "panels"
 
 
 def _supersede_previous_target(store: Any, *, project_id: str, new_target_key: str,
@@ -2086,6 +2090,8 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
         raise AppError("E100", f"kind 는 snap|diff 여야 합니다 — {body.kind!r}.", 422)
     if body.consent is not True:
         raise AppError("E100", "consent:true 가 필요합니다.", 422)
+    if body.flow == "cells":
+        require_review_enabled()
     store = get_store()
     blocked_snapshots: list[str] = []
     if body.kind == "snap":
@@ -2126,6 +2132,13 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
     target_key = f"{body.kind}:{body.ref_id}"
     if store.query_one("SELECT target_key FROM rr_targets WHERE target_key = ?", (target_key,)) is not None:
         raise AppError("E409", f"이미 열린 타깃입니다 — {target_key}.", 409)
+    # cells 로 열면 검토 단위를 로스터 조회 앞에서 센다(읽기·계산만, ms 단위라 로스터 기한을 먹지 않는다). 단위가 서지 않으면
+    # (현황 대상·IR 없음·검토 대상 0·계산 실패) 옛 흐름(panels)으로 열고 까닭을 싣는다 — 대상을 못 여는 일은 없다(W2-05).
+    flow, flow_fallback, built = body.flow, None, None
+    if flow == "cells":
+        built = units_module.compute(store, body.kind, body.ref_id, owner_sub=owner_sub)
+        if built["status"] not in units_module.OPEN_STATUSES:
+            flow, flow_fallback = "panels", {"from": "cells", "reason": built["error"] or built["status"]}
     now = now_epoch()
     roster = {"roster_size": 0, "deferred": 0, "frozen_at": None}
     # 로스터 원천 — 본문 agents 가 있으면 그것이 우선이고, 없으면 게이트웨이를 조회한다(자격이 없으면 unavailable).
@@ -2140,11 +2153,11 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
     with store.tx():
         store.execute(
             "INSERT INTO rr_targets(target_key, owner_sub, kind, ref_id, project_id, base_project_id, ir_hash,"
-            " principal_json, consent_at, level, close_level, external_sync_json, created_at, updated_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,'C0',?,?,?,?)",
+            " principal_json, consent_at, level, close_level, external_sync_json, flow, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?,'C0',?,?,?,?,?)",
             (target_key, owner_sub, body.kind, body.ref_id, project_id, base_project_id, ir_hash,
              canonical_json(ident.to_dict()), now, config.settings.risk_default_close_level,
-             canonical_json(ra_client.empty_sync()), now, now),
+             canonical_json(ra_client.empty_sync()), flow, now, now),
         )
         if agents:
             roster = planner.freeze_roster(store, target_key, owner_sub, agents, ecad_absent=ecad_absent)
@@ -2152,8 +2165,26 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
         superseded = _supersede_previous_target(
             store, project_id=project_id, new_target_key=target_key,
             new_snapshot_id=str(snapshot["id"]), owner_sub=owner_sub, now=now)
+    units_out = None
+    if flow == "cells":
+        # 타깃·로스터 트랜잭션이 닫힌 뒤 제 트랜잭션에서 단위를 얹는다. 던지면 아직 아무것도 안 돌았으니 옛 흐름으로 되돌리고
+        # 실패한 빌드 행을 남긴다(W2-24) — 대상은 그대로 열려 있다.
+        try:
+            units_out = _units_opened(units_module.persist(store, target_key, owner_sub, built, built_by=owner_sub,
+                                                           reason="target_open"))
+        except Exception as exc:  # noqa: BLE001
+            log.exception("대상 %s 의 단위를 얹지 못해 panels 로 연다", target_key)
+            flow, flow_fallback = "panels", {"from": "cells", "reason": "persist_error"}
+            store.execute("UPDATE rr_targets SET flow = 'panels', updated_at = ? WHERE target_key = ?",
+                          (now_epoch(), target_key))
+            failed = {**built, "status": "failed", "error": "persist_error", "error_detail": f"{type(exc).__name__}: {exc}",
+                      "units": [], "unit_ids": [], "evidence": {}, "suspects": []}
+            try:
+                units_module.persist(store, target_key, owner_sub, failed, built_by=owner_sub, reason="target_open")
+            except Exception:  # noqa: BLE001 — 실패 기록마저 못 쓰면 로그에만 남는다(대상은 panels 로 열렸다).
+                log.exception("대상 %s 의 실패한 단위 빌드 행도 쓰지 못했다", target_key)
     plan = planner.tier_plan(store, target_key) if roster["roster_size"] else None
-    return {
+    out = {
         "target_key": target_key,
         "superseded": superseded,
         "roster_size": roster["roster_size"],
@@ -2161,7 +2192,32 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
         "tier_plan": plan["tiers"] if plan else None,
         "cost_estimate": plan["cost_estimate"] if plan else None,
         **_roster_report(fetched),
+        "flow": flow,
     }
+    if flow_fallback is not None:
+        out["flow_fallback"] = flow_fallback
+    if units_out is not None:
+        out["units"] = units_out
+    return out
+
+
+def require_review_enabled() -> None:
+    """새 흐름(flow='cells')의 문 — 이 박스에서 꺼져 있으면 409 review_disabled 와 켜는 자리(knobs.env)를 말한다."""
+    if not config.review_enabled():
+        raise AppError("review_disabled", "카드 대조 검토(flow='cells')가 이 박스에서 꺼져 있습니다 — 데이터 디렉터리의"
+                       f" knobs.env 에 HWAXRISK_REVIEW_ENABLED=1 을 적고 앱을 다시 띄웁니다({config.REVIEW_KNOB_HOME}).", 409,
+                       detail={"knob": "HWAXRISK_REVIEW_ENABLED", "where": config.REVIEW_KNOB_HOME})
+
+
+def _units_opened(persisted: dict) -> dict:
+    """대상을 cells 로 열 때 응답에 싣는 단위 빌드 요약 — {rev, status, blocked_by, n, reviewable_n, lines_total, by_kind,
+    excluded_by_reason}."""
+    stats = persisted.get("stats") or {}
+    return {"rev": persisted["rev"], "status": persisted["status"], "blocked_by": persisted["blocked_by"],
+            "n": persisted["units_n"], "reviewable_n": persisted["reviewable_n"],
+            "lines_total": stats.get("lines_total"),
+            "by_kind": {k: v for k, v in (stats.get("units") or {}).items() if k in units_module.UNIT_KINDS},
+            "excluded_by_reason": stats.get("excluded_by_reason") or {}}
 
 
 def _roster_report(fetched: dict | None) -> dict:
@@ -2212,6 +2268,63 @@ def refresh_roster(target_key: str, body: RosterBody = RosterBody(),
                                        ecad_absent=_ecad_absent_for_target(store, target))
         return {"added_pending": frozen["roster_size"], **_roster_report(fetched)}
     return {**planner.refresh_roster(store, target_key, agents), **_roster_report(fetched)}
+
+
+# ================================================================ 검토 단위(재설계 M2 U5)
+class UnitsBody(BaseModel):
+    reason: str | None = Field(default=None, max_length=300)
+
+
+def _editable_target(target_key: str, ident: identity.Identity) -> tuple[str, dict]:
+    """쓰기 문 — 잡을 세울 수 있는 사람(그 과제의 editor 이상, 관리자 우회)과 같다. (호출자 이메일, 타깃 행)."""
+    email = _require_user(ident)
+    row = get_store().query_one(
+        "SELECT target_key, owner_sub, project_id, kind, ref_id, flow FROM rr_targets WHERE target_key = ?", (target_key,))
+    if row is None:
+        raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
+    if not _is_admin(ident):
+        require_role(row["project_id"], email, "editor")
+    return email, dict(row)
+
+
+@router.post("/targets/{target_key}/units")
+def post_units(target_key: str, body: UnitsBody = UnitsBody(),
+               ident: identity.Identity = Depends(identity.current)) -> dict:
+    """검토 단위를 (다시) 세운다(editor) — 활성 빌드와 입력이 같으면 쓰지 않는다(`changed: false`). 검토 잡이 선 대상의 다른
+    입력 재빌드는 409 units_in_use 다. 패널 대상도 부를 수 있다(단위 수·줄 분포를 재는 길 — M0-c). {rev, status, changed,
+    blocked_by, stats, invariants}."""
+    email, _row = _editable_target(target_key, ident)
+    return units_module.build_units(get_store(), target_key, built_by=email, reason=body.reason)
+
+
+def units_payload(target_key: str, *, owner_sub: str | None = None, offset: int = 0, limit: int | None = None,
+                  budget_chars: int | None = None) -> dict:
+    """`GET /targets/{key}/units` 본체 — MCP `risk_get_units(part='manifest')` 와 같은 함수(그쪽은 글자 예산으로 나눈다)."""
+    _target_row(target_key, owner_sub)
+    if limit is not None:
+        limit = max(1, int(limit))
+    return units_module.manifest(get_store(), target_key, offset=offset, limit=limit, budget_chars=budget_chars)
+
+
+def unit_payload(target_key: str, unit_id: str, part: str = "summary", *, owner_sub: str | None = None,
+                 offset: int = 0, budget_chars: int | None = None) -> dict:
+    """`GET /targets/{key}/units/{unit_id}?part=` 본체 — MCP `risk_get_units(unit_id=…, part=…)` 와 같은 함수."""
+    _target_row(target_key, owner_sub)
+    return units_module.get_unit(get_store(), target_key, unit_id, part, offset=offset, budget_chars=budget_chars)
+
+
+@router.get("/targets/{target_key}/units")
+def get_units(target_key: str, offset: int = 0, limit: int | None = None,
+              ident: identity.Identity = Depends(identity.current)) -> dict:
+    """활성 빌드의 검토 단위 목록(seq 순) — 단위가 없는 대상은 `{status:'none'}` 이다."""
+    return units_payload(target_key, owner_sub=_require_user(ident), offset=offset, limit=limit)
+
+
+@router.get("/targets/{target_key}/units/{unit_id}")
+def get_target_unit(target_key: str, unit_id: str, part: str = "summary",
+                    ident: identity.Identity = Depends(identity.current)) -> dict:
+    """단위 하나 — part ∈ summary(요약 글) · lines(소유 줄 + 문맥 줄) · evidence(동결 근거)."""
+    return unit_payload(target_key, unit_id, part, owner_sub=_require_user(ident))
 
 
 # ================================================================ 잡
@@ -2316,8 +2429,9 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
     """`GET /targets/{key}/coverage` 본체 — MCP `risk_get_coverage` 와 같은 함수.
 
     좌석 행까지 함께 준다(웹은 카운트만 5초 폴링하고 드릴다운을 따로 부르지만, MCP 는 왕복이
-    비싸고 '더 돌려야 하나' 판단에 미착석 좌석이 바로 필요하다)."""
-    _target_row(target_key, owner_sub)
+    비싸고 '더 돌려야 하나' 판단에 미착석 좌석이 바로 필요하다). `flow` 는 심사 방식, `units` 는 검토 단위 빌드 한 줄이다
+    (`{rev, status, reviewable_n}` · 실패만 있으면 `error` · 없으면 `{status:'none'}`)."""
+    target = _target_row(target_key, owner_sub)
     store = get_store()
     summary = planner.coverage_summary(store, target_key)
     level = registry_module.close_level(store, target_key, persist=False)
@@ -2339,6 +2453,8 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
         "unseated_n": summary["unseated_n"],
         "level": level["level"],
         "close_level": level["close_level"],
+        "flow": target["flow"],
+        "units": units_module.summary_of(store, target_key),
     }
 
 

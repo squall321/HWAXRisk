@@ -2031,7 +2031,7 @@ def build_units(store, target_key: str, *, built_by: str | None, reason: str | N
 
     검토 잡이 하나라도 선 타깃에서 입력이 달라지는 재빌드는 409 `units_in_use` 다(M2.md 5절 #6 — 셀이 가리키는 단위를 바꾸지
     않는다. force·셀 비우기는 M3). 실패한 빌드도 rev 를 하나 쓰지만 활성 빌드를 바꾸지 않는다.
-    반환 {rev, status, changed, blocked_by, stats, invariants, error?}.
+    반환 {rev, status, changed, blocked_by, stats, invariants, build_error?}.
     """
     target = store.query_one("SELECT owner_sub, kind, ref_id FROM rr_targets WHERE target_key = ?", (target_key,))
     if target is None:
@@ -2050,7 +2050,7 @@ def build_units(store, target_key: str, *, built_by: str | None, reason: str | N
     result = {"rev": out["rev"], "status": out["status"], "changed": True, "blocked_by": out["blocked_by"],
               "stats": out["stats"], "invariants": out["invariants"]}
     if out["error"]:
-        result["error"] = out["error"]
+        result["build_error"] = out["error"]
     return result
 
 
@@ -2133,7 +2133,7 @@ def manifest(store, target_key: str, *, offset: int = 0, limit: int | None = Non
     out.update({"rev": shown["rev"], "status": shown["status"], "blocked_by": shown["blocked_by"],
                 "stats": shown["stats"], "invariants": shown["invariants"]})
     if build is None:
-        out["error"] = shown["error"]
+        out["build_error"] = shown["error"]          # 최상위 `error` 는 MCP 도구가 실패를 알리는 칸이라 쓰지 않는다
     ids = _active_ids(build)
     rows = _unit_rows(store, target_key, ids)
     items = []
@@ -2192,8 +2192,10 @@ def get_unit(store, target_key: str, unit_id: str, part: str = "summary", *, off
     else:
         ev = _evidence_of(row)
         page, next_offset = _page(ev["evidence"], offset, None, budget_chars)
+        # 근거의 실패 까닭은 `evidence_error` 다 — 최상위 `error` 는 MCP 도구가 실패를 알리는 칸이라 쓰지 않는다.
         out.update({"evidence": page, "evidence_total": len(ev["evidence"]), "evidence_status": ev["status"],
-                    "error": ev["error"], "notes": ev["notes"], "evidence_sha": ev["sha"], "evidence_chars": ev["chars"]})
+                    "evidence_error": ev["error"], "notes": ev["notes"], "evidence_sha": ev["sha"],
+                    "evidence_chars": ev["chars"]})
     if next_offset is not None:
         out["next_offset"] = next_offset
     return out

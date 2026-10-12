@@ -1,4 +1,4 @@
-# hwax-risk MCP 서버 — 도구 26종(발견 7 + 원장 7 + Claude 입구 12)은 REST 와 같은 함수를 부르는 접점이다(§6.11, LLM 을 부르지 않는다)
+# hwax-risk MCP 서버 — 도구 27종(발견 7 + 원장 7 + Claude 입구 12 + 검토 단위 1)은 REST 와 같은 함수를 부르는 접점이다(§6.11, LLM 을 부르지 않는다)
 from __future__ import annotations
 
 import logging
@@ -20,7 +20,8 @@ _INSTRUCTIONS = """HWAX Risk Review — 설계 리스크 심사 앱의 MCP 서�
 
 발견: risk_list_projects(과제·타깃·최근 스냅샷 id) · risk_similar_projects · risk_get_precedents(선례)
 조회: risk_get_snapshot(part=ir|state|nodes|edges|calls|rule_hits) · risk_get_diff(part=lines 는 변경 줄 전부 — 크면 limit·offset 으로 나눠) ·
-      risk_get_registry · risk_claims_for_ref · risk_get_coverage(진행판·좌석) · risk_list_panels · risk_get_panel_transcript
+      risk_get_registry · risk_claims_for_ref · risk_get_coverage(진행판·좌석) · risk_list_panels · risk_get_panel_transcript ·
+      risk_get_units(카드 대조의 검토 단위 — 목록·요약·줄·동결 근거, 크면 next_offset 으로 나눠)
 어휘: risk_taxonomy — severity·judgement·direction 의 허용값(추측해서 넣으면 422 다)
 심사: risk_get_brief(열쇠는 brief_token, tier 'A' 는 웹 전용 — 결과를 낼 신원에게만 연다) · risk_submit_panel_result(engine='mcp' 는
       evidence_only 등급) · risk_add_finding — 둘 다 쓰기라 아래 신원 규칙을 따르고 actor 는 신원이 아니다(표기)
@@ -48,6 +49,8 @@ NODE_LIMIT = 500
 EVENT_LIMIT = 500
 REGISTRY_LIMIT = 200
 CLAIM_LIMIT = 100
+# 검토 단위 조회 한 번의 글자 예산 — Claude Code 의 MCP 결과 상한(약 25,000토큰)을 넘지 않게 나눈다. 자르지 않는다(next_offset).
+UNITS_PAGE_CHARS = 20000
 
 
 def _request() -> Any:
@@ -368,3 +371,20 @@ async def risk_job_action(job_id: str, action: str) -> dict:
 async def risk_repersist_panel(panel_id: str, discard: bool = False) -> dict:
     """저장 실패한 패널 다시 저장 — 쓰기: 사용자에게 확인한 뒤 부른다, 엔진 결과는 남았는데 원장에 앉히지 못해 persist_error 로 닫힌 패널을 그 결과로 다시 앉힌다(risk_next_step 의 blocked repersist_pending 이 panel_id 를 준다), 그 전에는 재개해도 이 대상에 새 패널이 편성되지 않는다, 같은 결과로 되풀이해 실패하면 discard=true 로 포기한다(엔진 결과는 패널에 남고 좌석은 다음 패널에서 다시 돈다)."""
     return await _entry(entry.repersist_panel, panel_id=panel_id, discard=discard)
+
+
+# ================================================================ 검토 단위(재설계 M2 U5 — 카드 대조의 단위, 읽기)
+@mcp.tool()
+def risk_get_units(target_key: str, unit_id: str | None = None, part: str = "manifest", offset: int = 0) -> dict:
+    """검토 단위 조회(카드 대조가 전문가마다 도는 단위) — part='manifest' 는 활성 빌드의 단위 목록(seq·종류·제목·목록 글·변경 줄 수), unit_id 와 part ∈ summary|lines|evidence 는 그 단위의 요약 글·변경 줄(소유 + 문맥)·동결 근거이고, 한 번에 약 2만 자씩 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다), 단위가 없는 대상은 status 'none' 이다."""
+    def manifest(key: str, *, owner_sub: str) -> dict:
+        if unit_id:
+            raise AppError("E100", "unit_id 를 주면 part 는 summary|lines|evidence 중 하나다.", 422)
+        return routes.units_payload(key, owner_sub=owner_sub, offset=offset, budget_chars=UNITS_PAGE_CHARS)
+
+    def one(key: str, *, owner_sub: str) -> dict:
+        if not unit_id:
+            raise AppError("E100", f"part={part!r} 는 unit_id 가 필요하다 — 목록은 part='manifest' 다.", 422)
+        return routes.unit_payload(key, unit_id, part, owner_sub=owner_sub, offset=offset, budget_chars=UNITS_PAGE_CHARS)
+
+    return _scoped("target", target_key, manifest if part == "manifest" else one, target_key)

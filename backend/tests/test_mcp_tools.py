@@ -40,8 +40,10 @@ TOOL_NAMES = [
     "risk_start_job",
     "risk_job_action",
     "risk_repersist_panel",
+    # 검토 단위 1종(재설계 M2 U5) — 카드 대조의 단위를 읽는다. 새 도구는 뒤에 붙는다(옛 도구의 이름·순서는 그대로).
+    "risk_get_units",
 ]
-ENTRY_TOOLS = TOOL_NAMES[TOOL_NAMES.index("risk_next_step"):]
+ENTRY_TOOLS = TOOL_NAMES[TOOL_NAMES.index("risk_next_step"):TOOL_NAMES.index("risk_repersist_panel") + 1]
 # 도구별 대표 인자와, 빈 원장에서 기대하는 오류 코드(없으면 None = 정상 응답).
 # 읽기 4종은 범위 밖 id 의 존재를 숨겨 not_visible 이다. 브리프는 brief_token 대조이되(§8.2.5) 결과를 낼 수 있는 신원에게만
 # 열려(RV-1) 요청 밖에서는 토큰을 보기 전에 delegation_required 다.
@@ -82,6 +84,8 @@ CALLS = [
     ("risk_start_job", {"target_key": "diff:d1", "tier": "B"}, "delegation_required"),
     ("risk_job_action", {"job_id": "j1", "action": "pause"}, "delegation_required"),
     ("risk_repersist_panel", {"panel_id": "pn1"}, "delegation_required"),
+    ("risk_get_units", {"target_key": "snap:s1"}, "not_visible"),
+    ("risk_get_units", {"target_key": "snap:s1", "unit_id": "u-0123456789ab", "part": "lines"}, "not_visible"),
 ]
 _HANGUL = re.compile(r"[가-힣]")
 # 인자 이름에 비밀이 오면 게이트웨이·포털 절차·클라이언트 대화 기록에 값이 남는다(작업 지시서 A-11) — 포털 절차의
@@ -137,8 +141,12 @@ def test_signatures_follow_plan():
     for name in ("risk_get_snapshot", "risk_get_diff", "risk_get_registry", "risk_claims_for_ref",
                  "risk_get_brief", "risk_list_projects", "risk_get_coverage", "risk_list_panels",
                  "risk_get_panel_transcript", "risk_taxonomy", "risk_get_precedents",
-                 "risk_similar_projects"):
+                 "risk_similar_projects", "risk_get_units"):
         assert "actor" not in set(props(name))
+    # 검토 단위 — 대상 하나에 목록·단위 하나를 고르고, 나머지는 offset 으로 이어 받는다.
+    assert set(props("risk_get_units")) == {"target_key", "unit_id", "part", "offset"}
+    assert set(tools["risk_get_units"].inputSchema["required"]) == {"target_key"}
+    assert props("risk_get_units")["part"]["default"] == "manifest"
     # 발견·조회는 인자가 최소여야 한다 — id 를 모르는 클라이언트가 첫 호출로 쓴다.
     assert set(props("risk_list_projects")) == set()
     assert set(props("risk_taxonomy")) == set()
