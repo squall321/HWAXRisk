@@ -403,3 +403,17 @@ def test_a_person_pausing_a_review_job_holds_it_and_resume_or_cancel_clears_the_
     runner.pause_job(store, review_id, by=OWNER)
     runner.cancel_job(store, review_id, by=OWNER)
     assert hold() == ("cancelled", None, None, None, 0)
+
+
+@C2B_REVIEW_JOBS
+def test_purging_a_project_cancels_its_review_jobs_and_clears_the_hold(store):
+    """과제 폐기의 일괄 취소도 사람의 취소처럼 검토 잡의 보류 열 셋을 비운다(RC-8) — 취소된 잡에 보류 코드·재개 시각이 남으면
+    자동 재개나 진행판이 '보류 중' 으로 읽는다."""
+    synth = factories.make_diff_target(store, 40, agents=NO_ECAD)
+    routes.post_units(synth.target_key, routes.UnitsBody(), ident=factories.ident(OWNER))
+    review_id = _create_review_job(store, synth.target_key)
+    runner.pause_job(store, review_id, by=OWNER)
+    code = store.query_one("SELECT code FROM rr_projects WHERE id = ?", (synth.project_id,))["code"]
+    routes.purge_project(synth.project_id, routes.PurgeBody(code=code, reason="정리"), ident=factories.ident(OWNER))
+    row = store.query_one("SELECT state, hold_code, hold_until, hold_n FROM rr_jobs WHERE id = ?", (review_id,))
+    assert tuple(row) == ("cancelled", None, None, 0)

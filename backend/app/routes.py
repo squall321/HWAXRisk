@@ -1101,8 +1101,11 @@ def purge_project(project_id: str, body: PurgeBody,
         blanked: dict[str, int] = {}
         for table, sql in PURGE_BLANK_SQL:
             blanked[table] = int(store.execute(sql, (project_id,)) or 0)
+        # 검토 잡의 보류 열은 사람의 취소(runner.cancel_job)처럼 비운다(P-10 · X4-25) — 취소된 잡에 llm_outage·재개 시각이
+        # 남으면 자동 재개나 진행판이 '보류 중' 으로 읽는다. 패널 잡은 그 열이 늘 NULL·0 이라 문장 뜻이 바뀌지 않는다.
         cancelled_n = store.execute(
-            "UPDATE rr_jobs SET state = 'cancelled', state_by = ?, state_at = ?"
+            "UPDATE rr_jobs SET state = 'cancelled', state_by = ?, state_at = ?,"
+            " hold_code = NULL, hold_until = NULL, hold_n = 0"
             " WHERE state IN ('queued','running','paused','cancelling')"
             " AND target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)",
             (actor, now, project_id))
