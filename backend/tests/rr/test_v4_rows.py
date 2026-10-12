@@ -1,18 +1,19 @@
 # v4 새 표의 이양·폐기 등록과 행 단위 반출·이양·폐기(재설계 M2 C1) — 행은 C2 의 생산자로만 만든다(손 INSERT 금지)
-"""C1 은 표와 등록만 넣었다. 단위 행의 생산자(`units.compute`·`units.persist`)는 C2a 에 섰고 셀 원장의 생산자(잡·루프)는 C2b 다.
-
-생산자가 아직 없는 행의 시험은 자리표시로 두어 생산자가 생기면 스스로 붉어지게 한다 — 전제(생산자 함수)가 없을 때만 기대한
-실패이고, 전제가 서면 몸통의 어떤 실패도 그대로 실패다. 통과하면 strict 라 XPASS 로 붉으니 표식을 지운다.
+"""C1 은 표와 등록만 넣었다. 단위 행의 생산자(`units.compute`·`units.persist`)는 C2a 에 섰고, 셀·전문가 머리의 생산자(검토 잡 만들기
+`review_runner.create_review_job` → `review_cells.plan_cells` · 선점 · 호출 결과 쓰기)는 S5 에 섰다. 판정·호출 원장 행의 반출 왕복과
+cq 200자는 그 행의 생산자(검토 루프 S8)가 선 뒤에 본다.
 """
 from __future__ import annotations
 
 import ast
+import dataclasses
 import gzip
 import json
 import re
 from pathlib import Path
 
-from app import export, routes, units
+from app import config, export, identity, review_cells, review_ops, review_runner, routes, runner, units
+from app.common import now_epoch
 from app.risk_store import RiskStore
 from tests import factories
 
@@ -255,5 +256,112 @@ def test_imported_rows_never_let_an_older_rev_become_the_active_build(risk_store
         there = units.active_build(risk_store, synth.target_key)
         assert here["rev"] == 2 and here["unit_ids"] == there["unit_ids"]
         assert units.load_units(dest, synth.target_key) == units.load_units(risk_store, synth.target_key)
+    finally:
+        dest.close()
+
+
+# ---------------------------------------------------------------- 셀·전문가 머리 행(S5 의 생산자 — 잡 만들기·선점·호출 결과 쓰기)
+SEAL = "mech-test-seal"
+NO_ECAD = [{"key": SEAL, "domain": "mech", "relevance": 0.99}, *factories.agents(("mech", "sim"), 2)]
+
+
+def _review_target(store: RiskStore, monkeypatch, tmp_path) -> tuple[factories.SynthTarget, str]:
+    """카드 대조 대상(flow='cells' — 단위까지) 과 그 소유자의 포털 PAT."""
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, data_dir=tmp_path,
+                                                               risk_review_enabled=True))
+    synth = factories.make_diff_target(store, 40, open_target=False)
+    with factories.routes_store(store):
+        key = routes.create_target(routes.TargetBody(kind="diff", ref_id=synth.diff_id, consent=True, flow="cells",
+                                                     agents=NO_ECAD), ident=factories.ident(OWNER))["target_key"]
+    store.upsert_credential(OWNER, identity.encrypt_pat("pat").decode("ascii"), "sub", OWNER, "[]",
+                            now_epoch() + 30 * 86400)
+    return synth, key
+
+
+def test_cell_and_head_rows_move_with_the_owner_and_a_purge_blanks_them_and_drops_late_writes(risk_store, monkeypatch,
+                                                                                            tmp_path):
+    """셀·머리 행 — 이양이 owner_sub 를 옮기고, 폐기가 모델·사람이 쓴 글 열과 선점을 비운다. 폐기 뒤 늦게 끝난 호출(옛 선점)의
+    쓰기는 0행이다(m-10). 행은 잡 만들기 → 선점 → 셀 시작 → 호출 결과 쓰기로 만든다."""
+    synth, key = _review_target(risk_store, monkeypatch, tmp_path)
+    job = review_runner.create_review_job(risk_store, key, owner_sub=OWNER, scope={"agents": [SEAL]}, consent=True,
+                                          settings=config.settings)
+    runner._set_job(risk_store, job["job_id"], "running")
+    lease = review_cells.claim_next_expert(risk_store, {"id": job["job_id"]}, boot_id="boot", purpose="pack")["lease_owner"]
+    unit_id = units.load_units(risk_store, key)[0]["unit_id"]
+    assert review_cells.start_cell(risk_store, key, unit_id, SEAL, lease_owner=lease, input_hash="h1")
+    text = {"extras_json": json.dumps({"offcard": [{"q": "모델이 쓴 카드 밖 리스크"}]}, ensure_ascii=False),
+            "mechs_json": json.dumps({"raised": ["M01"]}), "handoffs_json": json.dumps([{"note": "넘김 글"}],
+                                                                                        ensure_ascii=False),
+            "route_json": json.dumps({"sweep": {"why": "훑기 까닭"}}, ensure_ascii=False)}
+    sweep = {"call_id": "rc-sweep", "kind": "sweep", "state": "ok", "cards_json": "[]"}
+    assert review_cells.write_call_result(risk_store, key, SEAL, lease_owner=lease, call=sweep,
+                                          head={"sweep_json": json.dumps({"why": "훑기 글"}, ensure_ascii=False)})["written"]
+    fail = {"call_id": "rc-off", "kind": "offcard", "unit_id": unit_id, "state": "content_fail", "cards_json": "[]",
+            "error": "엔진이 낸 사유 글"}
+    assert review_cells.write_call_result(risk_store, key, SEAL, lease_owner=lease, call=fail, cell=text,
+                                          outcome=review_ops.classify("no_rows"))["cell_state"] == "pending"
+    assert review_cells.start_cell(risk_store, key, unit_id, SEAL, lease_owner=lease, input_hash="h1")
+    cell = risk_store.query_one("SELECT * FROM rr_review_cells WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+                                (key, unit_id, SEAL))
+    assert cell["error"] == "엔진이 낸 사유 글" and cell["lease_owner"] == lease and cell["extras_json"]
+
+    # 이양은 살아 있는 잡이 있으면 거절한다 — 사람이 잡을 멈추고 취소한다(워커가 쥔 선점은 그대로다 — 늦은 쓰기의 자리).
+    runner.pause_job(risk_store, job["job_id"], by=OWNER)
+    runner.cancel_job(risk_store, job["job_id"], by=OWNER)
+    code = risk_store.query_one("SELECT code FROM rr_projects WHERE id = ?", (synth.project_id,))["code"]
+    with factories.routes_store(risk_store):
+        routes.transfer_project(synth.project_id, routes.TransferBody(to_email=HEIR, reason="담당 교체"),
+                                ident=factories.ident(OWNER))
+        for table in ("rr_expert_reports", "rr_review_cells"):
+            rows = risk_store.query(f"SELECT DISTINCT owner_sub FROM {table} WHERE target_key = ?", (key,))
+            assert [r["owner_sub"] for r in rows] == [HEIR], table
+        routes.purge_project(synth.project_id, routes.PurgeBody(code=code, reason="정리"), ident=factories.ident(HEIR))
+    blanked = ("extras_json", "route_json", "mechs_json", "handoffs_json", "error", "decide_note", "lease_owner")
+    after = risk_store.query_one(f"SELECT {', '.join(blanked)} FROM rr_review_cells WHERE target_key = ? AND unit_id = ?"
+                                 " AND agent_key = ?", (key, unit_id, SEAL))
+    assert tuple(after) == (None,) * len(blanked)
+    head = risk_store.query_one("SELECT sweep_json, report_gz, summary_md, lease_owner FROM rr_expert_reports"
+                                " WHERE target_key = ? AND agent_key = ?", (key, SEAL))
+    assert tuple(head) == (None, None, None, None)
+    assert risk_store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job["job_id"],))["state"] == "cancelled"
+
+    snapshot = [tuple(r) for r in risk_store.query("SELECT * FROM rr_review_cells WHERE target_key = ?", (key,))]
+    late = {"call_id": "rc-late", "kind": "offcard", "unit_id": unit_id, "state": "ok", "cards_json": "[]"}
+    assert review_cells.write_call_result(risk_store, key, SEAL, lease_owner=lease, call=late, cell=text) == {
+        "written": False, "call_id": "rc-late"}
+    assert review_cells.settle_cell(risk_store, key, unit_id, SEAL, lease_owner=lease)["written"] is False
+    assert [tuple(r) for r in risk_store.query("SELECT * FROM rr_review_cells WHERE target_key = ?", (key,))] == snapshot
+    assert risk_store.query_one("SELECT COUNT(*) AS n FROM rr_review_calls WHERE call_id = 'rc-late'")["n"] == 0
+
+
+def test_a_since_export_carries_the_cell_and_head_rows_changed_after_it(risk_store, monkeypatch, tmp_path):
+    """반출의 since 열 — 셀·머리는 고쳐 쓰는 행이라 updated_at 이다. 잡을 만든 뒤(T1) 셀 하나를 시작하면(T2) T2 반출에는 그 셀과 그
+    전문가 머리만 실리고, since 0 은 격자 전부다. 빈 DB 로 들여오면 셀·머리 행이 같은 해시다."""
+    _synth, key = _review_target(risk_store, monkeypatch, tmp_path)
+    monkeypatch.setattr(review_runner, "now_epoch", lambda: T1)
+    job = review_runner.create_review_job(risk_store, key, owner_sub=OWNER, scope={"agents": [SEAL]}, consent=True,
+                                          settings=config.settings)
+    runner._set_job(risk_store, job["job_id"], "running")
+    lease = review_cells.claim_next_expert(risk_store, {"id": job["job_id"]}, boot_id="boot", now=T2,
+                                           purpose="pack")["lease_owner"]
+    unit_id = units.load_units(risk_store, key)[0]["unit_id"]
+    assert review_cells.start_cell(risk_store, key, unit_id, SEAL, lease_owner=lease, input_hash="h1", now=T2)
+
+    later = _exported(risk_store, T2)
+    assert [(r["unit_id"], r["agent_key"]) for r in later["rr_review_cells"]] == [(unit_id, SEAL)]
+    assert [r["agent_key"] for r in later["rr_expert_reports"]] == [SEAL]
+    everything = _exported(risk_store, 0)
+    assert len(everything["rr_review_cells"]) == job["cells_total"]
+    assert len(everything["rr_expert_reports"]) == len(NO_ECAD)
+
+    dest = RiskStore(tmp_path / "dest" / "risk_review.db")
+    dest.open()
+    dest.migrate()
+    try:
+        export.import_jsonl(dest, OWNER, "".join(export.iter_lines(risk_store, OWNER, 0)))
+        here, there = export.row_digest(dest, OWNER), export.row_digest(risk_store, OWNER)
+        assert {t: here[t] for t in ("rr_expert_reports", "rr_review_cells")} == {
+            t: there[t] for t in ("rr_expert_reports", "rr_review_cells")}
+        assert review_cells.review_summary(dest, key) == review_cells.review_summary(risk_store, key)
     finally:
         dest.close()
