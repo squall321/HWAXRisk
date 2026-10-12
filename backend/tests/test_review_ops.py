@@ -6,7 +6,7 @@ import pytest
 from app import review_ops as ops
 
 # M2.md §4.4 의 표를 옮겨 적은 것이다(코드에서 뽑지 않는다 — 둘이 같이 틀리면 통과하는 일치 시험을 피한다).
-WAIT_CODES = ["review_busy", "engine_busy", "draining"]
+WAIT_CODES = ["review_busy", "engine_busy", "draining", "ctx_unknown"]   # ctx_unknown — 엔진의 503(창 조회 실패 중)
 INFRA_CODES = ["llm_unreachable", "llm_timeout", "llm_error",
                "agent_unreachable", "agent_5xx", "agent_timeout", "agent_stream_idle", "portal_unreachable", "portal_5xx",
                "engine_stream_cut", "engine_silent", "restart", "store_write_failed", "busy"]
@@ -16,7 +16,6 @@ HOLDS = {
     "llm_misconfigured": "llm_misconfigured",
     "context_overflow": "ctx_too_small", "over_budget": "ctx_too_small", "ctx_too_small": "ctx_too_small",
     "oversize": "ctx_too_small",
-    "ctx_unknown": "ctx_unknown",
     "credential_rejected": "credential", "credential_missing": "credential", "credential_expired": "credential",
     "pat_unavailable": "credential",
     "agent_outdated": "agent_outdated", "unknown_fields": "contract", "rev_mismatch": "contract",

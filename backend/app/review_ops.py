@@ -97,7 +97,9 @@ class Outcome:
 # ---------------------------------------------------------------- 분류표(M2.md §4.4)
 # 표의 정본 이름 밖에서 실제로 오가거나 단계 C 계획(m2-wp3b S2·S7)이 쓰는 이름은 같은 부류로 받는다(RA-10) — 전송·계약
 # 문제가 '내용 탓' 으로 떨어져 셀을 깎고 failed(<code>) 로 굳지 않게. `draining`(기동 정리 중)은 기다림, `busy` 는 인프라.
-_WAIT_CODES = frozenset({"review_busy", "engine_busy", "draining"})
+# `ctx_unknown` 은 엔진이 창 조회가 실패하는 동안 내는 503(곧 다시) 이다 — 잡을 멈추지 않고 기다린다. 앱이 창 출처 fallback 을
+# CTX_FALLBACK_HOLD_S 동안 보고 거는 보류(HOLD_CODES["ctx_unknown"])는 러너가 직접 걸고 이 표를 지나지 않는다.
+_WAIT_CODES = frozenset({"review_busy", "engine_busy", "draining", "ctx_unknown"})
 _INFRA_CODES = frozenset({
     "llm_unreachable", "llm_timeout", "llm_error",
     "agent_unreachable", "agent_5xx", "agent_timeout", "agent_stream_idle", "portal_unreachable", "portal_5xx",
@@ -111,7 +113,6 @@ _HOLD_BY_CODE: dict[str, str] = {
     "llm_misconfigured": "llm_misconfigured",
     "context_overflow": "ctx_too_small", "over_budget": "ctx_too_small", "ctx_too_small": "ctx_too_small",
     "oversize": "ctx_too_small",                      # plan 의 oversize — 앱이 ctx_too_small 로 멈춘다
-    "ctx_unknown": "ctx_unknown",                     # 창 출처 fallback 이 CTX_FALLBACK_HOLD_S 이어졌다(앱)
     "credential_rejected": "credential", "credential_missing": "credential", "credential_expired": "credential",
     "pat_unavailable": "credential",
     "agent_outdated": "agent_outdated",               # 404 — 에이전트 서버·포털에 카드 대조 경로가 없다
