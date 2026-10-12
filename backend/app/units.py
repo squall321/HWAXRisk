@@ -16,7 +16,7 @@ import hashlib
 import json
 import re
 from dataclasses import asdict, dataclass
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 from . import brief, render
 from .common import canonical_json, sha256_hex
@@ -75,7 +75,6 @@ _SECTION_LABEL = {"dims": "명명 치수", "rollup": "롤업", "scope": "접촉 
                   "other": "부품 미상"}
 _FMT_KIND = {"mm": "length", "mm2": "area", "mm3": "volume", "MPa": "stress", "G": "acceleration", "rank": "rank"}
 _SAFE_WORD = re.compile(r"^[A-Za-z0-9_.#:\[\]\-]+$")
-_NID = re.compile(r"p:[0-9a-f]{12}")
 _GROUP_MIN = 4                 # 동형 묶음 표기 — 한 단위 안에서 같은 변화가 이만큼이면 요약 렌더에서 접는다(3.6.3)
 _GROUP_ROW = 8                 # 접은 줄의 한 줄당 참조 수
 
@@ -162,18 +161,6 @@ def _non_change(item: Mapping[str, Any]) -> bool:
 
 
 # ---------------------------------------------------------------- 항목 수집(설계서 3.4.1)
-def _strings(value: Any) -> Iterator[str]:
-    """한 값에 든 문자열 전부(인젝션 이름 찾기용)."""
-    if isinstance(value, str):
-        yield value
-    elif isinstance(value, Mapping):
-        for v in value.values():
-            yield from _strings(v)
-    elif isinstance(value, (list, tuple)):
-        for v in value:
-            yield from _strings(v)
-
-
 def _item(ref: str, layer: str, bucket: str, code: str, change_kind: str, src: Mapping[str, Any], **extra: Any) -> dict:
     item = {
         "ref": ref, "layer": layer, "bucket": bucket, "code": code, "change_kind": change_kind,
@@ -242,7 +229,7 @@ def _collect(diff_obj: Mapping[str, Any]) -> tuple[list[dict], dict]:
         node_cids.add(src["cid"])
         op = _s(src.get("op"))
         items.append(_item(src["cid"], "structural", "node_changes", f"node.{op}", _NODE_OP_KIND.get(op, "topology"),
-                           src, op=op, anchors_raw=[src.get("dn")], names_raw=list(_strings(src.get("label")))))
+                           src, op=op, anchors_raw=[src.get("dn")], names_raw=brief.source_strings(src.get("label"))))
     for src in rows(structural.get("edge_changes")):
         family, op = _s(src.get("kind_family")), _s(src.get("op"))
         # hier(part_of) 항목은 자식 부품의 원자에 싣는다 — 조립 노드↔부품 쌍이 경계 단위를 만들지 않게(W2-02).
@@ -279,12 +266,12 @@ def _collect(diff_obj: Mapping[str, Any]) -> tuple[list[dict], dict]:
         field = _s(src.get("field"))
         items.append(_item(src["cid"], "parametric", "materials", f"param.material.{field}", "material", src,
                            attr=f"material.{field}", anchors_raw=[src.get("dn")],
-                           names_raw=list(_strings([src.get("before"), src.get("after")]))))
+                           names_raw=brief.source_strings([src.get("before"), src.get("after")])))
     for src in rows(parametric.get("dims_delta")):
         if skip(src):
             continue
         items.append(_item(src["cid"], "parametric", "dims_delta", "param.dim", "dimension", src,
-                           attr=_s(src.get("name")), section="dims", names_raw=list(_strings(src.get("name")))))
+                           attr=_s(src.get("name")), section="dims", names_raw=brief.source_strings(src.get("name"))))
     for src in rows(parametric.get("result_delta")):
         if skip(src):
             continue
@@ -305,16 +292,14 @@ def _collect(diff_obj: Mapping[str, Any]) -> tuple[list[dict], dict]:
                            before=before, after=after, asm=prefix, section="rollup", names_raw=[prefix], text=text))
     for src in rows(semantic.get("events")):
         magnitude = src.get("magnitude") if isinstance(src.get("magnitude"), Mapping) else {}
-        subject = src.get("subject") if isinstance(src.get("subject"), Mapping) else {}
-        dns = [str(x) for x in (subject.get("dns") or ()) if x is not None]
+        names_raw, dns = brief.event_name_sources(src)       # E2 줄이 쓰는 후보와 같다(몸통이 글자까지 같게)
         code = _s(src.get("code"))
         asm = dns[0][len("asm:"):] if dns and dns[0].startswith("asm:") else None
         section = ("dims" if code.startswith("dim.") else "scope" if code == "contact.scope_changed"
                    else "rollup" if asm is not None else "other")
         item = _item(src["cid"], "semantic", "events", code, _s(src.get("change_kind")) or "none", src,
                      delta=magnitude.get("value"), rel=magnitude.get("rel"), unit=magnitude.get("unit"),
-                     anchors_raw=dns, asm=asm, section=section,
-                     names_raw=list(_strings([subject.get("names"), src.get("before"), src.get("after")])))
+                     anchors_raw=dns, asm=asm, section=section, names_raw=names_raw)
         if not item["design_relevant"]:
             item["nd_reason"] = "not_design_relevant"
         items.append(item)
@@ -327,7 +312,7 @@ def _collect(diff_obj: Mapping[str, Any]) -> tuple[list[dict], dict]:
                 if path not in _KNOWN_BUCKETS and not skip(value):
                     layer, rest = path[0], ".".join(path[1:]) or path[0]
                     items.append(_item(cid, layer, rest, f"{layer}.{rest}", "none", value, section="unknown",
-                                       bucket_unknown=True, names_raw=list(_strings(value.get("text")))))
+                                       bucket_unknown=True, names_raw=brief.source_strings(value.get("text"))))
                 elif path == ("structural", "hierarchy_moves") and cid not in node_cids:
                     items.append(_item(cid, "structural", "hierarchy_moves", "node.moved_in_tree", "topology", value,
                                        op="moved_in_tree", anchors_raw=[value.get("dn")]))
@@ -521,29 +506,13 @@ def _neighbors(view: Mapping[str, Any], nodes: _Nodes) -> tuple[dict[str, set[st
 
 # ---------------------------------------------------------------- 줄 몸통(브리프 E2 와 같은 식)
 def _clean_body(item: Mapping[str, Any], names: Mapping[str, str], suspects: dict[str, dict]) -> tuple[str, bool]:
-    """(위생 통과 몸통 — «» 없이, 이름 칸만 자리표시자로 다시 조립했나). 몸통 식은 `brief.e2_line` 과 같다.
-
-    인젝션 어휘에 걸리면 그 줄만 다시 조립한다 — 걸린 원천 문자열(이름) 자리만 `[suspect_text <sha1>]` 이고 속성·
-    before→after·단위는 코드가 쓴 글로 남는다(지금 E2 는 줄 전체가 자리표시자다, 설계서 3.6.2). 걸린 원문은 `suspects` 에 모인다.
-    """
-    text = item["text"]
-    body = render.split_trailing_refs(render.humanize_refs(text, names))[0] if text else item["code"]
-    inner = render.sanitize_source_text(body, "note", limit=0)[1:-1]
-    if not inner.startswith("[suspect_text "):
-        return inner, False
-
+    """(위생 통과 몸통 — «» 없이, 이름 칸만 자리표시자로 다시 조립했나). `brief.line_body` 그대로다 — E2·`risk_get_diff` 줄과
+    같은 함수라 두 몸통이 글자까지 같다(인젝션에 걸린 줄도, RA-3). 걸린 원문은 `suspects` 에 모인다."""
     def note(payload: Mapping[str, Any]) -> None:
         suspects.setdefault(str(payload.get("sha1")), dict(payload))
 
-    candidates = set(item.get("names_raw") or ())
-    candidates.update(str(names[nid]) for nid in _NID.findall(text or "") if names.get(nid))
-    candidates.update(str(names[a]) for a in item.get("anchors_raw") or () if isinstance(a, str) and names.get(a))
-    rebuilt = body
-    for name in sorted((c for c in candidates if c), key=lambda c: (-len(c), c)):
-        clean = render.sanitize_source_text(name, "label", limit=0, on_suspect=note)
-        if clean.startswith(render.QUOTE_OPEN + "[suspect_text ") and name in rebuilt:
-            rebuilt = rebuilt.replace(name, clean[1:-1])
-    return render.sanitize_source_text(rebuilt, "note", limit=0, on_suspect=note)[1:-1], True
+    return brief.line_body(item["text"], names, fallback=item["code"],
+                           sources=lambda: (item.get("names_raw") or (), item.get("anchors_raw") or ()), on_suspect=note)
 
 
 def _direction(item: Mapping[str, Any]) -> str | None:
@@ -893,25 +862,47 @@ def _clean_lines(lines: Sequence[str]) -> tuple[list[str], int]:
     return out, fallback
 
 
-def _line_tail(line: Mapping[str, Any]) -> str:
+def _bare(value: Any) -> str:
+    """엔진 몫 글(payload)의 어휘 칸 — `_word` 와 같은 글이되 «» 없이(엔진이 감싼다)."""
+    text = _s(value)
+    return text if text and _SAFE_WORD.match(text) else _q(text)[1:-1]
+
+
+def _line_tail(line: Mapping[str, Any], word=_word) -> str:
+    """줄의 표지 꼬리 — 방향 · conf · unconfirmed · lower_bound · 단서/제외 사유 · 원자료(어느 이벤트의) · 부품의 고아 전이.
+
+    요약 렌더와 엔진 payload 가 이 함수 하나로 같은 표지를 싣는다(RA-3). `brief.e2_line` 의 꼬리(conf · unconfirmed ·
+    excluded_reason · design_relevant=0)는 여기서 conf · unconfirmed · 단서=/제외=<사유>로 다 실린다 — E2 는 unconfirmed 면
+    excluded_reason 을 숨기지만 여기는 둘 다 싣는다(더 많은 쪽). `word` 는 어휘 칸 표기 — 요약은 `_word`, payload 는 `_bare` 다.
+    """
     parts = []
     if line.get("direction") == "decrease":
         parts.append("감소")
     elif line.get("direction") == "increase":
         parts.append("증가")
     if line.get("conf"):
-        parts.append(f"conf={_word(line['conf'])}")
+        parts.append(f"conf={word(line['conf'])}")
     if line.get("unconfirmed"):
         parts.append("unconfirmed")
     if line.get("lower_bound"):
         parts.append("lower_bound")
     if line.get("klass") == "caveat":
-        parts.append(f"단서={_word(line['caveat'])}")
+        parts.append(f"단서={word(line['caveat'])}")
     elif line.get("klass") in ("excluded", "non_design"):
-        parts.append(f"제외={_word(line['caveat'])}")
+        parts.append(f"제외={word(line['caveat'])}")
     elif line.get("caveat"):
-        parts.append(f"caveat={_word(line['caveat'])}")
+        parts.append(f"caveat={word(line['caveat'])}")
+    if line.get("derived_of"):
+        parts.append(f"원자료({line['derived_of']})")
+    parts.extend(line.get("part_marks") or ())
     return (" " + " ".join(parts)) if parts else ""
+
+
+def _context_tail(line: Mapping[str, Any], word=_word) -> str:
+    """문맥 줄의 꼬리 — 참고(제외 항목) 줄이면 그 사유."""
+    if not line.get("reason"):
+        return ""
+    return " — 설계 변경 아님" if line["reason"] in _NOT_DESIGN else f" — 제외 사유={word(line['reason'])}"
 
 
 def _scope_label(unit: Mapping[str, Any]) -> str:
@@ -960,7 +951,7 @@ def _render(unit: Mapping[str, Any]) -> tuple[str, int]:
             for i in range(0, len(cells), _GROUP_ROW):
                 out.append("  ↳ " + " · ".join(cells[i:i + _GROUP_ROW]))
         elif line.get("derived_of"):
-            out.append(f"  ↳ [{line['ref']}] 원자료 «{line['text']}»{_line_tail(line)}")
+            out.append(f"  ↳ [{line['ref']}] «{line['text']}»{_line_tail(line)}")
         else:
             n += 1
             label = _word(line["code"]) if line["layer"] == "semantic" else f"(이벤트 없음) {_word(line['code'])}"
@@ -971,9 +962,7 @@ def _render(unit: Mapping[str, Any]) -> tuple[str, int]:
         out.append("[문맥]")
         role_label = {"boundary": "경계", "reference": "참고", "rollup": "롤업"}
         for line in context:
-            tail = ""
-            if line.get("reason"):
-                tail = " — 설계 변경 아님" if line["reason"] in _NOT_DESIGN else f" — 제외 사유={_word(line['reason'])}"
+            tail = _context_tail(line)
             out.append(f"{role_label.get(line['role'], line['role'])} [{line['ref']}] {_word(line['code'])} "
                        f"«{line['text']}»{tail} (소유 {line['owner_unit']})")
     cleaned, fallback = _clean_lines(out)
@@ -1268,6 +1257,11 @@ def _make_unit(skeleton: Mapping[str, Any], atoms: Mapping[tuple, Sequence[dict]
         for dn in orphans.get(key) or ():
             if dn in alias:
                 status_of.setdefault(str(dn), set()).add(label)
+    # 부품의 고아 전이는 그 부품에 걸린 줄마다 표지로 싣는다 — 엔진 payload 에는 [부품] 표가 없다(RA-3, W2-20).
+    for line in lines:
+        line["part_marks"] = [f"{label}({'·'.join(hit)})" for label in ("고아됨", "고아 벗어남")
+                              for hit in [[alias[dn] for dn in line["_item"]["_anchors"]
+                                           if label in status_of.get(dn, ())]] if hit]
     parts = [{"dn": dn, "alias": alias[dn], "name": nodes.name(dn), "asm": nodes.asm(dn), "source": nodes.source(dn),
               "status": "·".join(sorted(status_of.get(dn) or {"유지"})),
               "material_before": nodes.material(dn, "base"), "material_after": nodes.material(dn, "target"),
@@ -1734,13 +1728,15 @@ def refs_of(unit: Mapping[str, Any], evidence: Mapping[str, Any] | None = None) 
 def payload_of(unit: Mapping[str, Any], evidence: Mapping[str, Any] | None = None) -> dict:
     """카드 대조 요청의 `unit`(M2.md 4.3) 가운데 단위가 정하는 칸. `missing[]`·`input_gaps` 는 타깃·전문가 수준이라 단계 C 가 더한다.
 
-    lines·context·evidence 의 text 는 «» 없이 위생을 거친 글이다(엔진이 감싼다). 줄이지 않는다.
+    lines·context·evidence 의 text 는 «» 없이 위생을 거친 글이다(엔진이 감싼다). 줄이지 않는다. 줄 글은 몸통(`risk_get_diff` 줄의
+    «» 안과 같은 글) 뒤에 요약 렌더와 같은 표지 꼬리(`_line_tail` — conf · unconfirmed · 단서/제외 사유 · 원자료(c:…) · 고아 전이)
+    를 붙인 것이다(RA-3). 엔진은 이 꼬리로 비교 잣대가 확인되지 않은 수치·미확정 간섭·이벤트의 원자료를 보통 변경과 가른다.
     """
     evidence = evidence or {}
     return {
         "unit_id": unit["unit_id"], "kind": unit["kind"], "title": unit["title"], "summary": unit["synopsis"],
-        "lines": [{"ref": line["ref"], "text": line["text"]} for line in unit["lines"]],
-        "context": [{"ref": line["ref"], "text": line["text"], "owner_unit": line["owner_unit"]}
+        "lines": [{"ref": line["ref"], "text": line["text"] + _line_tail(line, _bare)} for line in unit["lines"]],
+        "context": [{"ref": line["ref"], "text": line["text"] + _context_tail(line, _bare), "owner_unit": line["owner_unit"]}
                     for line in unit["context"]["lines"]],
         "evidence": [{"ref": row["ref"], "text": row["text"]} for row in evidence.get("evidence") or ()],
         "notes": " ".join(x for x in [*unit.get("notices", ()), evidence.get("notes") or ""] if x),

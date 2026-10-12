@@ -650,16 +650,84 @@ def event_order(rows: Sequence[Mapping[str, Any]]) -> list:
         round_robin([r for r in rows if not _design_relevant(r)])
 
 
-def e2_line(row: Mapping[str, Any], names: Mapping[str, str]) -> str:
+_NID_RE = re.compile(r"p:[0-9a-f]{12}")
+
+
+def source_strings(value: Any) -> list[str]:
+    """한 값에 든 문자열 전부(깊이 우선) — 인젝션에 걸린 몸통에서 이름 칸을 찾는 후보다. 문자열 하나는 글자로 쪼개지 않는다."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, Mapping):
+        return [x for v in value.values() for x in source_strings(v)]
+    if isinstance(value, (list, tuple)):
+        return [x for v in value for x in source_strings(v)]
+    return []
+
+
+def event_name_sources(event: Mapping[str, Any]) -> tuple[list[str], list[str]]:
+    """의미 이벤트(diff_json) 하나의 (원천 이름 후보, 앵커 dn) — `line_body` 가 인젝션 적중 줄을 다시 조립할 때 쓴다.
+    E2·`risk_get_diff` 줄과 검토 단위 줄이 같은 후보를 써야 두 몸통이 글자까지 같다."""
+    subject = event.get("subject") if isinstance(event.get("subject"), Mapping) else {}
+    dns = subject.get("dns")
+    dns = [dns] if isinstance(dns, str) else dns
+    return (source_strings([subject.get("names"), event.get("before"), event.get("after")]),
+            [str(x) for x in (dns or ()) if x is not None])
+
+
+def line_body(text: Any, names: Mapping[str, str], *, fallback: str, sources=None,
+              on_suspect=None) -> tuple[str, bool]:
+    """변경 줄의 몸통 — (위생을 거친 글 «» 없이, 이름 칸만 자리표시자로 다시 조립했나). E2·`risk_get_diff(part='lines')` 와
+    검토 단위(units)가 이 함수 하나를 쓴다 — 두 줄의 몸통이 글자까지 같다.
+
+    몸통은 글에서 맨 nid 를 부품 이름으로 바꾸고(R-8) 끝의 참조 꼬리를 뗀 것이다(R-7). 인젝션 어휘에 걸리면 줄 전체가 아니라
+    걸린 원천 문자열(이름) 자리만 `[suspect_text <sha1>]` 로 두고 속성·before→after·단위는 코드가 쓴 글로 남긴다(설계서 3.6.2).
+    이름 후보는 글 안 nid 의 이름, 그리고 `sources()`(부르면 (원천 이름 후보, 앵커 dn) — 걸린 줄에서만 부른다)다. 걸린 원문은
+    `on_suspect` 로 간다. 다시 조립해도 걸리면(이름이 아닌 자리) 그 몸통 전체가 자리표시자다.
+    """
+    text = _s(text)
+    body = render.split_trailing_refs(render.humanize_refs(text, names))[0] if text else fallback
+    inner = render.sanitize_source_text(body, "note", limit=0)[1:-1]
+    if not inner.startswith("[suspect_text "):
+        return inner, False
+    raw_names, anchors = sources() if sources is not None else ((), ())
+    candidates = {str(c) for c in raw_names or () if c}
+    candidates.update(str(names[nid]) for nid in _NID_RE.findall(text) if names.get(nid))
+    candidates.update(str(names[a]) for a in anchors or () if isinstance(a, str) and names.get(a))
+    rebuilt = body
+    for name in sorted(candidates, key=lambda c: (-len(c), c)):
+        clean = render.sanitize_source_text(name, "label", limit=0, on_suspect=on_suspect)
+        if clean.startswith(render.QUOTE_OPEN + "[suspect_text ") and name in rebuilt:
+            rebuilt = rebuilt.replace(name, clean[1:-1])
+    return render.sanitize_source_text(rebuilt, "note", limit=0, on_suspect=on_suspect)[1:-1], True
+
+
+class _EventSources:
+    """diff_json 의 의미 이벤트를 cid 로 찾는 게으른 색인 — 인젝션에 걸린 줄이 있을 때만 diff_json 을 읽는다."""
+
+    def __init__(self, diff_json: Any) -> None:
+        self._raw = diff_json
+        self._index: dict[str, tuple[list[str], list[str]]] | None = None
+
+    def get(self, cid: str) -> tuple[list[str], list[str]]:
+        if self._index is None:
+            obj = _j(self._raw, {}) if isinstance(self._raw, (str, bytes)) else (self._raw or {})
+            events = (obj.get("semantic") or {}).get("events") if isinstance(obj, Mapping) else None
+            self._index = {str(e["cid"]): event_name_sources(e) for e in events or ()
+                           if isinstance(e, Mapping) and e.get("cid")}
+        return self._index.get(cid, ([], []))
+
+
+def e2_line(row: Mapping[str, Any], names: Mapping[str, str], sources: _EventSources | None = None) -> str:
     """변경 목록 한 줄 — `[c:<id>] <code> «<몸통>» conf=<confidence>[ unconfirmed | excluded_reason=<r>][ design_relevant=0]`.
 
-    몸통은 이벤트 글에서 맨 nid 를 부품 이름으로 바꾸고(R-8) 끝의 `[c:…]` 를 뗀 것이다 — 머리에 cid 를 따로 적으므로 한 줄에
-    cid 가 두 번 찍히지 않는다(R-7). 이름 치환은 표시 시점에만 한다(저장된 글·diff_hash 는 그대로다).
+    몸통은 `line_body` 다 — 이벤트 글에서 맨 nid 를 부품 이름으로 바꾸고(R-8) 끝의 `[c:…]` 를 뗀 것이고(머리에 cid 를 따로
+    적으므로 한 줄에 cid 가 두 번 찍히지 않는다, R-7), 인젝션에 걸리면 이름 칸만 자리표시자다(검토 단위 줄과 같은 몸통, RA-3).
+    `sources` 는 그 다시 조립의 이름 후보(diff_json 이벤트)다. 이름 치환은 표시 시점에만 한다(저장된 글·diff_hash 는 그대로다).
     """
-    text = _s(row["text"])
-    body = render.split_trailing_refs(render.humanize_refs(text, names))[0] if text else \
-        f"{_s(row['subject_key'])} {_s(row['change_kind'])}"
     cid = _s(row["cid"])
+    inner, _rebuilt = line_body(row["text"], names, fallback=f"{_s(row['subject_key'])} {_s(row['change_kind'])}",
+                                sources=(lambda: sources.get(cid)) if sources is not None else None,
+                                on_suspect=_on_suspect)
     ref = cid if cid.startswith("c:") else f"c:{cid}"
     tail = ""
     if row["unconfirmed"]:
@@ -671,7 +739,8 @@ def e2_line(row: Mapping[str, Any], names: Mapping[str, str]) -> str:
     # 이벤트 정규 표기는 소스 앱 부품명을 그대로 담는다(render.fmt_label 은 감싸지 않는다) — 여기서 «…» 로 넣는다.
     # 몸통은 자르지 않는다 — 코드가 만든 정규 표기(이름·값)라 길이가 정해져 있고, 조립 밖의 `risk_get_diff(part='lines')` 와
     # 글자까지 같아야 한다(프로파일 배수는 조립 안에만 있다).
-    return f"[{ref}] {_s(row['code'])} {_q(body, 'note', limit=0)} conf={_s(row['confidence'], '-')}{tail}"
+    return (f"[{ref}] {_s(row['code'])} {render.QUOTE_OPEN}{inner}{render.QUOTE_CLOSE} "
+            f"conf={_s(row['confidence'], '-')}{tail}")
 
 
 def _e2_empty_line(ctx) -> str:
@@ -731,7 +800,8 @@ def _item_e2(store, ctx, names: Mapping[str, str]) -> dict:
         return {"key": "E2", "args": args, "result": _body(source, [_e2_empty_line(ctx)])}
     ordered = event_order(rows)
     counts = event_counts(ordered)
-    lines = [e2_line(row, names) for row in ordered]
+    sources = _EventSources(ctx["diff"]["diff_json"])
+    lines = [e2_line(row, names, sources) for row in ordered]
     return {"key": "E2", "args": args, "result": _body(source, [*lines, _e2_tail(counts, len(lines), 0)]),
             "e2": {"kinds": [_event_kind(row) for row in ordered], "counts": counts}}
 
@@ -961,10 +1031,11 @@ def diff_lines(store, diff_id: str, *, owner_sub: str, change_kind: str | None =
     needle = (q or "").strip().casefold()
     names = name_index(store, (diff["base_snapshot_id"], diff["target_snapshot_id"]))
     matched: list[str] = []
+    sources = _EventSources(diff["diff_json"])
     for row in ordered:
         if kinds and _event_kind(row) not in kinds and _s(row["change_kind"]) not in kinds:
             continue
-        line = e2_line(row, names)
+        line = e2_line(row, names, sources)
         if needle and needle not in line.casefold():
             continue
         matched.append(line)

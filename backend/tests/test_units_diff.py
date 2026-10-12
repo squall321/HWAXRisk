@@ -231,15 +231,21 @@ def test_xu9_decreases_keep_the_minus_sign_and_the_word(synth):
 
 
 # ---------------------------------------------------------------- 줄 몸통 == risk_get_diff(part='lines') 몸통(XU6 갈음)
+def _diff_lines(case) -> dict[str, tuple[str, str]]:
+    """risk_get_diff(part='lines') 의 줄 → {cid: («» 안 몸통, » 뒤 꼬리)}."""
+    out = brief.diff_lines(case.store, case.target.diff_id, owner_sub=factories.OWNER)
+    found = {}
+    for line in out["lines"].split("\n"):
+        match = re.match(r"^\[(c:[0-9a-f]{12})\] \S+ «([^»]*)»( conf=.*)$", line)
+        assert match, line
+        found[match.group(1)] = (match.group(2), match.group(3))
+    return found
+
+
 @pytest.mark.parametrize("size", (40, 150))
 def test_line_bodies_are_the_risk_get_diff_line_bodies(synth, size):
     case = synth[size]
-    out = brief.diff_lines(case.store, case.target.diff_id, owner_sub=factories.OWNER)
-    bodies = {}
-    for line in out["lines"].split("\n"):
-        found = re.match(r"^\[(c:[0-9a-f]{12})\] \S+ «([^»]*)» conf=", line)
-        assert found, line
-        bodies[found.group(1)] = found.group(2)
+    bodies = {cid: body for cid, (body, _tail) in _diff_lines(case).items()}
     seen = 0
     for unit in case.built["units"]:
         for line in unit["lines"]:
@@ -655,6 +661,66 @@ def test_an_injected_name_becomes_a_placeholder_only_in_its_name_cell(hazards):
         assert INJECTED not in unit["summary"] and INJECTED not in unit["digest"]
 
 
+def test_an_injected_line_has_the_same_body_in_risk_get_diff(hazards):
+    """인젝션에 걸린 줄도 단위 몸통과 risk_get_diff 몸통이 글자까지 같다 — 둘 다 이름 칸만 자리표시자다(RA-3, 종전 E2 는 줄 전체가
+    자리표시자라 두 몸통이 갈렸다). 속성·before→after 는 E2 에도 남는다."""
+    bodies = {cid: body for cid, (body, _tail) in _diff_lines(hazards).items()}
+    suspect = 0
+    for unit in hazards.built["units"]:
+        for line in unit["lines"]:
+            if line["layer"] == "semantic":
+                assert line["text"] == bodies[line["ref"]], (line["text"], bodies[line["ref"]])
+                suspect += "[suspect_text " in line["text"]
+    assert suspect
+    thickness = next(body for body in bodies.values() if "[suspect_text " in body and "min_dim" in body)
+    assert "→" in thickness and INJECTED not in thickness
+
+
+@pytest.mark.parametrize("size", (40, 150))
+def test_payload_lines_carry_the_summary_and_e2_markers(synth, size):
+    """엔진에 가는 줄 글은 몸통 + 요약 렌더와 같은 표지 꼬리다(RA-3) — 단서·제외 사유, conf, unconfirmed, 어느 이벤트의 원자료인지,
+    부품의 고아 전이. risk_get_diff 줄의 꼬리(conf · unconfirmed · excluded_reason · design_relevant=0)도 다 실린다."""
+    case = synth[size]
+    e2 = _diff_lines(case)
+    orphan_marks = derived = caveats = 0
+    for unit in case.built["units"]:
+        payload = units.payload_of(unit)
+        status = {p["alias"]: p["status"] for p in unit["parts"]}
+        shown_groups: set[str] = set()
+        for line, sent in zip(unit["lines"], payload["lines"]):
+            assert sent["ref"] == line["ref"] and sent["text"].startswith(line["text"])
+            tail = sent["text"][len(line["text"]):]
+            if not line["group"] or line["group"] not in shown_groups:      # 접힌 무리는 첫 줄만 요약에 글이 선다
+                shown_groups.add(line["group"])
+                assert f"«{line['text']}»{tail}" in unit["summary"], (line["ref"], tail)
+            if line["klass"] != "active":
+                assert (f"단서={line['caveat']}" if line["klass"] == "caveat" else f"제외={line['caveat']}") in tail
+                caveats += 1
+            if line["derived_of"]:
+                assert f"원자료({line['derived_of']})" in tail
+                derived += 1
+            for alias in line["alias"].split("↔") if line["alias"] else ():
+                for label in ("고아됨", "고아 벗어남"):
+                    if label in status[alias].split("·"):
+                        assert f"{label}(" in tail and alias in tail.split(f"{label}(")[1].split(")")[0], (tail, alias)
+                        orphan_marks += 1
+            if line["layer"] == "semantic":
+                e2_tail = e2[line["ref"]][1].split()
+                for token in e2_tail:
+                    key, _, value = token.partition("=")
+                    if key == "conf" and value != "-":
+                        assert f"conf={value}" in tail.split()
+                    elif key == "unconfirmed":
+                        assert "unconfirmed" in tail.split()
+                    elif key == "excluded_reason":
+                        assert f"단서={value}" in tail.split() or f"제외={value}" in tail.split()
+                    elif key == "design_relevant":
+                        assert any(t.startswith("제외=") for t in tail.split())
+        for x, sent in zip(unit["context"]["lines"], payload["context"]):
+            assert sent["text"].startswith(x["text"]) and (x["reason"] is None or x["reason"] in sent["text"])
+    assert derived and caveats and orphan_marks, (derived, caveats, orphan_marks)
+
+
 # ---------------------------------------------------------------- 단계 C 가 감쌀 투영
 def test_payload_has_the_contract_fields_and_never_an_empty_unit(synth):
     for case in synth.values():
@@ -664,6 +730,7 @@ def test_payload_has_the_contract_fields_and_never_an_empty_unit(synth):
             payload = units.payload_of(unit)
             assert {"unit_id", "kind", "title", "summary", "lines", "context", "evidence", "notes"} <= set(payload)
             assert payload["lines"] and all(set(x) == {"ref", "text"} for x in payload["lines"])
+            assert not any("«" in x["text"] or "»" in x["text"] for x in payload["lines"] + payload["context"])
             assert all(set(x) == {"ref", "text", "owner_unit"} for x in payload["context"])
             assert units.refs_of(unit) == {x["ref"] for x in payload["lines"]}
             assert not units.refs_of(unit) & {x["ref"] for x in payload["context"]}
