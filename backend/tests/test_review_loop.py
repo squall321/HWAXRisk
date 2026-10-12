@@ -1156,3 +1156,146 @@ def test_a_revision_change_mid_job_replans_and_carries_on_and_a_real_mismatch_ho
     assert {(c["state"], c["reopened_n"]) for c in _cells(store, key, SEAL)} == {("reviewed", 1)}
     head = _head(store, key, SEAL)
     assert (head["prompt_rev"], head["limits_rev"]) == (review_runner.prompt_key(fake.limits()), fake.limits_rev)
+
+
+# ---------------------------------------------------------------- 반대 검토 R3A-5 — 나갈 기준을 지키는 갈래가 변이를 견디지 않게
+def test_a_new_attempt_clears_the_old_attempts_verdicts_and_asks_the_engine_again(store, monkeypatch):
+    """R3A-5(M18 · M24) — 첫 시도에서 K01 의 fwd(OK)와 rev(FAIL)가 갈려 단독 재질의가 FAIL 을 남겼는데, 그 시도가 정산에서 내용
+    탓(카드 밖 답이 꼬리를 잃은 채 끝났다 — output_truncated)으로 끝난다. 새 시도는 앞 시도의 판정 행을 지우고(앞 시도의 단독 FAIL
+    이 새 시도의 실효를 덮지 않는다) 판정 호출을 엔진에 다시 낸다(요청 캐시의 열쇠에 시도가 있어 앞 시도의 답을 받지 않는다). 새
+    시도에서 fwd·rev 가 OK 로 같으면 단독을 묻지 않고 실효는 OK 다."""
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    unit_id = _unit_ids(store, key)[0]
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [unit_id]})
+    pack = fre.load("pack_ok.json")
+    record_id = next(c["record_id"] for c in pack["cards"] if c["alias"] == "K01")
+    fake = FakeReviewEngine({SEAL: pack})
+    fake.rev_verdicts = {record_id: ("yes", "FAIL")}
+    fake.solo_verdicts = {record_id: ("yes", "FAIL")}
+    fake.truncate = {("offcard", None, unit_id): "length"}
+    r = rig.Rig(store, fake)
+    r.tick()                                                # 묶음
+    r.tick()                                                # 첫 시도 — 정산에서 내용 탓
+    cell = next(c for c in _cells(store, key, SEAL) if c["unit_id"] == unit_id)
+    assert (cell["state"], cell["charged"], cell["error_code"]) == ("pending", 1, "output_truncated")
+    solo = store.query_one("SELECT judgement FROM rr_card_verdicts WHERE target_key = ? AND unit_id = ? AND record_id = ?"
+                           " AND variant = 'solo'", (key, unit_id, record_id))
+    assert solo is not None and solo["judgement"] == "FAIL"
+    fwd_before = len(_calls(store, job_id, kind="verdict", variant="fwd"))
+
+    fake.rev_verdicts, fake.solo_verdicts = {}, {}           # 새 시도에서는 fwd·rev 가 같다
+    r.finish(job_id)
+    cell = next(c for c in _cells(store, key, SEAL) if c["unit_id"] == unit_id)
+    assert (cell["state"], cell["charged"]) == ("reviewed", 1)
+    rows = {(v["variant"], v["judgement"], v["is_effective"]) for v in store.query(
+        "SELECT variant, judgement, is_effective FROM rr_card_verdicts WHERE target_key = ? AND unit_id = ? AND record_id = ?",
+        (key, unit_id, record_id))}
+    assert rows == {("fwd", "OK", 1), ("rev", "OK", 0)}
+    assert len(_calls(store, job_id, kind="verdict", variant="fwd")) == 2 * fwd_before
+
+
+def test_more_than_five_quote_check_disagreements_hold_the_job_contract(store, monkeypatch):
+    """R3A-5(M26) — 엔진이 인용 대조를 ok 로 속이는 카드(lying_quote K01)는 앱의 재대조와 갈린다(check_disagree). 잡 단위로 다섯 건을
+    넘으면 contract 로 멈춘다(X1-21 · 나갈 기준 2 — 인용 정규화·대조 규칙이 어긋난 채 끝까지 돌지 않는다)."""
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    fake.lying_quote = {"K01"}
+    r = rig.Rig(store, fake)
+    r.run(lambda: rig.state(store, job_id) == "paused", ticks=10)
+    row = rig.job_row(store, job_id)
+    assert (row["hold_code"], row["hold_until"]) == ("contract", None) and "인용 대조" in row["error"]
+    total = store.query_one("SELECT SUM(json_extract(quality_json, '$.app.check_disagree')) AS n FROM rr_review_calls"
+                            " WHERE run_id = ? AND state = 'ok'", (job_id,))["n"]
+    assert total == review_ops.CHECK_DISAGREE_MAX + 1
+
+
+def test_a_window_whose_runnable_is_false_holds_ctx_too_small_without_a_ctx_too_small_block(store, monkeypatch):
+    """R3A-5(M14) — limits 의 runnable 하나가 거짓이면(ctx_too_small 칸이 없어도) 묶음도 run 도 부르지 않고 ctx_too_small 로
+    멈춘다(계약 예제 limits_ctx_too_small 은 두 칸을 함께 실어 runnable 갈래만으로는 지나지 않았다)."""
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    limits = fre.load("limits_1m.json")
+    limits["runnable"]["offcard"] = False
+    assert "ctx_too_small" not in limits
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")}, limits=limits)
+    rig.Rig(store, fake).tick()
+    row = rig.job_row(store, job_id)
+    assert (row["state"], row["hold_code"]) == ("paused", "ctx_too_small") and "'offcard': False" in row["error"]
+    assert fake.runs == 0 and fake.calls("pack") == []
+
+
+def test_a_pack_that_never_comes_fails_only_the_cells_in_the_jobs_scope(store, monkeypatch):
+    """R3A-5(M27) — 단위 범위가 좁은 잡에서 한 전문가의 카드 묶음이 6번 502(card_fetch_failed)면 그 잡의 범위 안 셀만
+    failed(pack_unavailable)이고 범위 밖 셀은 pending 으로 남는다(X1-27 — 범위는 셀을 덜 집는 것이다)."""
+    key = rig.target(store)
+    unit_ids = _unit_ids(store, key)
+    job_id = rig.job(store, key, scope={"agents": [SEAL, "xd-syn-1"], "unit_ids": unit_ids[:2]})
+    fake = FakeReviewEngine(rig.packs())
+    fake.pack_errors = {"xd-syn-1": _pack_error("card_fetch_failed")}
+    rig.Rig(store, fake).finish(job_id, step=2000)
+    assert rig.state(store, job_id) == "completed" and "pack_unavailable 2" in rig.job_row(store, job_id)["error"]
+    cells = {c["unit_id"]: (c["state"], c["error_code"]) for c in _cells(store, key, "xd-syn-1")}
+    assert {u: cells[u] for u in unit_ids[:2]} == {u: ("failed", "pack_unavailable") for u in unit_ids[:2]}
+    assert {cells[u] for u in unit_ids[2:]} == {("pending", None)}
+
+
+def test_an_off_card_call_carries_the_background_cards_the_sweep_hit_first(store, monkeypatch):
+    """R3A-5(M38) — 카드 밖 호출은 배경 카드를 전부 싣되 그 단위의 훑기 k 에 걸린 것을 먼저, 나머지는 팩 순서로 싣는다(P-03 ·
+    M2.md 5절 #10). 가짜의 훑기가 그 단위의 k 에 K09 하나만 실으면 그 단위의 카드 밖 cards 는 K09 로 시작한다."""
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    unit_id = _unit_ids(store, key)[0]
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [unit_id]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    fake.sweep_k = {unit_id: ["K09"]}
+    rig.Rig(store, fake).finish(job_id)
+    offcard = [b for b in _runs(fake) if b["kind"] == "offcard" and b["unit"]["unit_id"] == unit_id]
+    assert [c["alias"] for c in offcard[0]["cards"]] == ["K09", "K07", "K08", "K10"]
+
+
+def test_a_long_wait_hears_a_human_pause_between_slices(store, monkeypatch):
+    """R3A-5(M46) — 자리 없음(review_busy, retry_after_s 3600)의 기다림은 WAIT_SLICE_S 씩 쪼개 그 사이 잡 상태를 본다 — 둘째 조각에서
+    사람이 멈추면 그 세션은 곧바로 놓는다(3600초를 다 기다린 뒤가 아니라). 기다림은 아무것도 세지 않는다."""
+    from app import review_runner
+
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    r = rig.Rig(store, fake)
+    r.tick()                                                # 묶음
+    fake.busy_n = 1
+    fake.retry_after_s = 3600
+    slices: list[float] = []
+
+    def pause(seconds: float) -> bool:
+        slices.append(seconds)
+        if len(slices) == 2:
+            runner.pause_job(store, job_id, by=OWNER)
+        return False
+
+    r.loop._pause = pause
+    r.tick()
+    assert len(slices) == 2 and set(slices) == {review_runner.WAIT_SLICE_S}
+    assert rig.state(store, job_id) == "paused" and fake.runs == 1
+    assert {(c["state"], c["tries"], c["charged"]) for c in _cells(store, key, SEAL)} == {("pending", 0, 0)}
+
+
+def test_a_late_progress_write_does_not_overwrite_a_finished_jobs_board(store, monkeypatch):
+    """R3A-5(M49) — 끝난 잡(completed)의 진행판은 늦게 온 쓰기(워커의 칸·단계 바꿈)가 덮지 않는다 — S12 진행 응답과 길잡이가 끝난
+    잡을 도는 것으로 읽지 않게."""
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    r = rig.Rig(store, fake)
+    r.finish(job_id)
+    board = rig.job_row(store, job_id)["progress_json"]
+    assert json.loads(board)["phase"] == "completed"
+    late = r.loop.progress(job_id)                          # 늦게 끝난 워커가 쥔 진행판과 같은 길
+    late.worker("late-worker", agent_key=SEAL, purpose="review", started_at=r.clock())
+    late.set(phase="review", count=True)
+    assert rig.job_row(store, job_id)["progress_json"] == board

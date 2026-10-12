@@ -37,6 +37,8 @@
   hold_runs        n(1부터 센 run 차례) → threading.Event — 그 run 은 result 앞에서 그 사건을 기다린다(호출 중 재기동 시험)
   solo_verdicts    solo 변형에서만 쓰는 record_id → (applies, judgement) — 단독 재질의가 앞 판정을 뒤집는 카드(S11)
   sweep_rel        unit_id → 훑기 rel(yes·maybe·no) — 그 단위의 u 줄 rel 을 바꾼다(훑기 '무관' 비율, S11)
+  sweep_k          unit_id → 별칭 목록 — 그 단위의 u 줄 k 를 실은 카드 전부가 아니라 이것만으로 낸다(카드 밖 호출이 훑기 k 에 걸린
+                   배경 카드를 먼저 싣는지 — P-03, R3A-5)
   error_cells      (agent_key, unit_id) → error 프레임 — 그 셀의 run 은 늘 그 오류다(내용 탓이면 셀이 failed 로 간다, S11)
   truncate         (kind, variant, unit_id) → 'length' | 'repaired' | 'unknown' — 처음 맞는 run 한 번만: length 는 판정이면
                    truncated 처럼 마지막 판정 행을 빼고(행이 둘 이상인 호출에 건다 — 엔진은 남는 행이 0 이면 결과 대신
@@ -241,6 +243,7 @@ class FakeReviewEngine:
         self.hold_runs: dict[int, threading.Event] = {}
         self.solo_verdicts: dict[str, tuple[str, str]] = {}
         self.sweep_rel: dict[str, str] = {}
+        self.sweep_k: dict[str, list[str]] = {}
         self.error_cells: dict[tuple[str, str], dict[str, Any]] = {}
         self.truncate: dict[tuple[str, str | None, str | None], str] = {}
         self.queued_ms: int | None = None
@@ -483,9 +486,10 @@ class FakeReviewEngine:
             flagged = sum(1 for r in main if r["checks"]["quote"] != "ok")
             quality.update(expected=len(judge), ok=len(main) - flagged, flagged=flagged, missing=len(missing))
         elif kind == "sweep":
-            rows = [{"t": "u", "k": list(order), "u": u, "rel": self.sweep_rel.get(uid) or ("maybe" if order else "no"),
+            hit = {uid: [a for a in self.sweep_k.get(uid, order) if a in cards] for uid in units.values()}
+            rows = [{"t": "u", "k": hit[uid], "u": u, "rel": self.sweep_rel.get(uid) or ("maybe" if order else "no"),
                      "why": "카드의 적용 조건이 이 단위에 걸릴 수 있다", "unit_id": uid,
-                     "record_ids": [cards[a]["record_id"] for a in order], "from_attempt": 1,
+                     "record_ids": [cards[a]["record_id"] for a in hit[uid]], "from_attempt": 1,
                      "checks": {"why": "ok", "coerced": []}} for u, uid in units.items()]
             if self.handoff_to and units:
                 first = next(iter(units))
