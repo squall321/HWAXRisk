@@ -14,7 +14,7 @@ import httpx
 import pytest
 from jsonschema import Draft7Validator
 
-from app import common, config, expert_report, export, metrics, narrative, nightly, planner, registry, routes, runner, units
+from app import cardpack, common, config, expert_report, export, metrics, narrative, nightly, planner, registry, routes, runner, units
 from app.common import canonical_json
 from tests import factories
 from tests.rr import legacy_build as legacy
@@ -465,3 +465,54 @@ def test_a_purge_blanks_the_quotes_in_the_claim_index_card_quotes_included(store
                                           " ORDER BY claim_uid, ref_type, ref", (key,))]
     assert [(r["ref"], r["ref_type"]) for r in after] == [(r["ref"], r["ref_type"]) for r in refs]
     assert {r["quote"] for r in after} == {None}
+
+
+# ---------------------------------------------------------------- 큐레이션 큐(R3B-3)
+LINKED_SECTION = ("정적 접착 실링 부위의 유효 접착폭은 최악 공차 누적에서도 0.8 mm 이상을 남긴다. 근거 규격은 "
+                  "https://std.example.com/seal/IEC-60068-2-30 의 고온 고습 시험 조건을 따른다. "
+                  + "폭이 줄면 코너 R 도 함께 보고, 접착 계면의 박리 시작점을 시험 전후로 비교한다. " * 5)
+
+
+def test_a_card_quote_that_trips_the_lexicon_reaches_the_queue_clipped_and_a_purge_blanks_it(store, monkeypatch):
+    """카드 글에 링크(인젝션 어휘 X08)가 든 걸림 판정 — 마감이 올린 suspect_text 큐 항목의 원문 칸(raw = finding 근거 문장)에는 카드
+    인용이 처음부터 200자로 실리고 원래 길이가 raw_chars 에 있다(박스 안에서도 — 큐는 박스 밖으로 나간다, 사용자 결정 1). 반출 줄도
+    같고 카드 절 본문은 큐 어디에도 없다. 과제 폐기는 그 대상의 큐 원문 칸을 비운다(항목·결정 기록은 남는다)."""
+    key = rig.target(store)
+    first = _unit_ids(store, key)[0]
+    pack = json.loads(json.dumps(fre.load("pack_ok.json")))
+    card = pack["cards"][0]
+    card["sections"][0]["text"] = LINKED_SECTION
+    card["text_sha"] = cardpack.text_sha(card["sections"])
+    fake = FakeReviewEngine({**rig.packs(), SEAL: pack})
+    fake.verdicts = {card["record_id"]: ("yes", "FAIL")}
+    orig = FakeReviewEngine._verdict_row
+
+    def row(self, alias, c, own, lines, *, variant=None):
+        out = orig(self, alias, c, own, lines, variant=variant)
+        if alias == "K01":
+            out["cq"], out["checks"]["quote"] = LINKED_SECTION[:300], "ok"   # 카드 글 그대로 300자(엔진도 찾았다)
+        return out
+
+    monkeypatch.setattr(FakeReviewEngine, "_verdict_row", row)
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [first]})
+    rig.Rig(store, fake).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    (queued,) = [json.loads(r["payload_json"]) for r in store.query(
+        "SELECT payload_json FROM rr_curation_queue WHERE kind = 'suspect_text'")]
+    assert queued["source_kind"] == "card_review" and queued["field"] == "warrant" and queued["raw_chars"] == [300]
+    assert LINKED_SECTION[:201] not in queued["raw"] and f"«{LINKED_SECTION[:200]}»" in queued["raw"]
+    exported = [line["row"] for line in [json.loads(x) for x in export.iter_lines(store, OWNER)][1:]]
+    (line,) = [json.loads(r["payload_json"]) for r in exported if r.get("kind") == "suspect_text"]
+    assert line == queued and LINKED_SECTION[:201] not in json.dumps(exported, ensure_ascii=False)
+
+    project = store.query_one("SELECT p.id, p.code FROM rr_projects p JOIN rr_targets t ON t.project_id = p.id"
+                              " WHERE t.target_key = ?", (key,))
+    out = routes.purge_project(project["id"], routes.PurgeBody(code=project["code"], reason="정리"),
+                               ident=factories.ident(OWNER))
+    assert out["purge_report"]["layers"]["db"]["blanked"]["rr_curation_queue"] == store.query_one(
+        "SELECT COUNT(*) AS n FROM rr_curation_queue WHERE json_extract(payload_json, '$.target_key') = ?", (key,))["n"] >= 1
+    (after,) = [json.loads(r["payload_json"]) for r in store.query(
+        "SELECT payload_json FROM rr_curation_queue WHERE kind = 'suspect_text'")]
+    assert after["raw"] is None and after["sha1"] == queued["sha1"] and after["raw_chars"] == [300]
+    assert all(json.loads(r["payload_json"]).get("mechanism_free") is None for r in store.query(
+        "SELECT payload_json FROM rr_curation_queue WHERE kind = 'unclassified_code'"))

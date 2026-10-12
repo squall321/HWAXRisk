@@ -21,7 +21,7 @@ import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from app import cardpack, narrative, planner, render, review_cells, review_quality, review_verify, units
+from app import cardpack, export, narrative, planner, render, review_cells, review_quality, review_verify, units
 from app.common import canonical_json, now_epoch
 from app.errors import AppError
 
@@ -1072,10 +1072,11 @@ def _enqueue(store: Any, prepared: Prepared, *, now: int) -> dict:
         if suspect is None:
             continue
         # 같은 finding 의 같은 글은 한 번만 — 사람이 승인(done)한 뒤 다시 마감해도 다시 올리지 않는다(승인이 되돌린 회수 자격을
-        # 다시 마감이 건드리지 않는 것과 같은 까닭 — P-12).
-        if nightly.enqueue(store, "suspect_text", {**suspect, "claim_uid": finding["claim_uid"],
-                                                   "finding_id": finding["claim_uid"], "target_key": ledger.target_key,
-                                                   "source_kind": SOURCE_KIND}, owner_sub=owner, now=now,
+        # 다시 마감이 건드리지 않는 것과 같은 까닭 — P-12). 원문 칸(raw)의 «» 카드 인용은 처음부터 200자로 싣고 원래 길이를 raw_chars
+        # 에 적는다(R3B-3 — 큐는 박스 밖으로 나간다, 사용자 결정 1). sha1 은 줄이기 전 글의 것이라 같은 글은 같은 항목이다.
+        payload = export.clip_queue_payload({**suspect, "claim_uid": finding["claim_uid"], "finding_id": finding["claim_uid"],
+                                             "target_key": ledger.target_key, "source_kind": SOURCE_KIND})
+        if nightly.enqueue(store, "suspect_text", payload, owner_sub=owner, now=now,
                            dedupe=lambda p: (p.get("sha1"), p.get("claim_uid"))):
             suspects += 1
     return {"unclassified": unclassified, "suspect_text": suspects}

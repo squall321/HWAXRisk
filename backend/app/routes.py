@@ -1063,6 +1063,12 @@ PURGE_BLANK_SQL: tuple[tuple[str, str], ...] = (
                          " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_review_calls", "UPDATE rr_review_calls SET result_gz = NULL, quality_json = NULL"
                         " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    # 큐레이션 큐의 원문 칸 — 의심 문구가 걸린 finding 글(raw, 카드 대조 finding 이면 카드 인용 포함)·택소노미 밖 메커니즘 원문
+    # (mechanism_free). 그 대상의 항목(payload.target_key)만, 있는 칸만 null 로 바꾼다(R3B-3). 항목·결정 기록은 남는다.
+    ("rr_curation_queue", "UPDATE rr_curation_queue SET payload_json = json_replace(payload_json, '$.raw', NULL,"
+                          " '$.mechanism_free', NULL)"
+                          " WHERE json_extract(payload_json, '$.target_key') IN"
+                          " (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
 )
 
 

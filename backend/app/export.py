@@ -125,6 +125,21 @@ def _clip_json(text: Any, fix) -> Any:
     return text if fixed == value else json.dumps(fixed, ensure_ascii=False, sort_keys=True)
 
 
+def clip_quoted(text: str) -> tuple[str, list[int]]:
+    """글 안의 «» 인용(카드 대조 finding 의 근거 문장 — 카드 글을 그대로 옮겼다)을 하나마다 200자로 — (줄인 글, 줄인 인용의 원래
+    길이들). 줄인 것이 없으면 (글 그대로, [])."""
+    lengths: list[int] = []
+
+    def cut(m: re.Match) -> str:
+        if len(m.group(1)) <= EXPORT_CQ_MAX:
+            return m.group(0)
+        lengths.append(len(m.group(1)))
+        return "«" + m.group(1)[:EXPORT_CQ_MAX] + "»"
+
+    clipped = _QUOTED.sub(cut, text)
+    return (clipped, lengths) if lengths else (text, [])
+
+
 def _clip_finding(finding: Any) -> Any:
     """카드 대조 finding 의 카드 인용 — cites·_resolved_cites 의 card: 행 quote 와 warrant 의 «» 인용(원래 길이는 warrant_chars)."""
     if not isinstance(finding, dict):
@@ -136,19 +151,22 @@ def _clip_finding(finding: Any) -> Any:
                         for c in out[key]]
     warrant = out.get("warrant")
     if isinstance(warrant, str):
-        lengths: list[int] = []
-
-        def cut(m: re.Match) -> str:
-            if len(m.group(1)) <= EXPORT_CQ_MAX:
-                return m.group(0)
-            lengths.append(len(m.group(1)))
-            return "«" + m.group(1)[:EXPORT_CQ_MAX] + "»"
-
-        clipped = _QUOTED.sub(cut, warrant)
+        clipped, lengths = clip_quoted(warrant)
         if lengths:
             out["warrant"] = clipped
             out["warrant_chars"] = out.get("warrant_chars") or lengths
     return out
+
+
+def clip_queue_payload(payload: Any) -> Any:
+    """카드 대조 마감이 올린 큐 항목(payload.source_kind='card_review')의 원문 칸(raw — 의심 문구가 걸린 finding 글)의 «» 카드 인용을
+    200자로 줄이고 원래 길이를 raw_chars 에 적는다(R3B-3 — 큐도 박스 밖으로 나가는 카드 인용의 운반체다). 이미 적힌 값은 그대로다."""
+    if not isinstance(payload, dict) or payload.get("source_kind") != _CARD_REVIEW or not isinstance(payload.get("raw"), str):
+        return payload
+    clipped, lengths = clip_quoted(payload["raw"])
+    if not lengths:
+        return payload
+    return {**payload, "raw": clipped, "raw_chars": payload.get("raw_chars") or lengths}
 
 
 def _clip_extras(extras: Any) -> Any:
@@ -162,7 +180,7 @@ def _clip_extras(extras: Any) -> Any:
 
 def _export_view(table: str, row: dict) -> dict:
     """반출 줄 하나 — 표마다 박스 밖으로 내보낼 모양으로 바꾼다(카드 인용 200자 — 판정 행 cq·조건별 대조, 셀의 카드 밖 인용,
-    카드 대조 finding 의 인용·근거 문장, 인용 역색인의 card: 인용)."""
+    카드 대조 finding 의 인용·근거 문장, 인용 역색인의 card: 인용, 카드 대조 마감이 올린 큐 항목의 원문)."""
     if table == "rr_card_verdicts":
         cq = row.get("cq")
         if isinstance(cq, str) and len(cq) > EXPORT_CQ_MAX:
@@ -182,6 +200,9 @@ def _export_view(table: str, row: dict) -> dict:
         quote = row.get("quote")
         if isinstance(quote, str) and len(quote) > EXPORT_CQ_MAX:
             return {**row, "quote": quote[:EXPORT_CQ_MAX], "quote_chars": row.get("quote_chars") or len(quote)}
+    if table == "rr_curation_queue":
+        payload = _clip_json(row.get("payload_json"), clip_queue_payload)
+        return row if payload is row.get("payload_json") else {**row, "payload_json": payload}
     return row
 
 
