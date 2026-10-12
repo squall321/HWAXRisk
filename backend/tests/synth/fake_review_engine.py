@@ -22,8 +22,16 @@
   oversize_units   plan 이 oversize.units 에 싣는 단위
   pair_over_units  plan 이 모든 verdict 묶음과 짝지어 pair_over 에 싣는 단위
   verdicts         record_id → (applies, judgement). 없으면 ('yes', 'OK')
+  rev_verdicts     rev 변형에서만 쓰는 record_id → (applies, judgement) — fwd 와 rev 가 갈리는 카드(S8)
   offcard_findings offcard 의 f 줄 수(상한 findings_max 이면 more=yes)
-S8(검토 루프)과 WP5b C9 가 이 파일을 넓힌다.
+  busy_over        도는 run 이 이 수 이상이면 새 run 에 review_busy(관문 즉답 — S8 의 P-02(5))
+  pack_errors      agent_key → (상태, 본문) 하나(늘) 또는 목록(차례로 쓰고 다 쓰면 정상 팩) — 계약 예제 pack_errors.json 의 응답
+  pack_sequence    agent_key → 팩 목록(차례로 내고 마지막을 되풀이 — 0장 뒤 30장, P-08)
+  long_quote       이 별칭들의 인용을 카드에 없는 긴 글(LONG_QUOTE, 260자)로 낸다(엔진 checks.quote 는 정직하게 not_found)
+  hold_runs        n(1부터 센 run 차례) → threading.Event — 그 run 은 result 앞에서 그 사건을 기다린다(호출 중 재기동 시험)
+기록 — requests(받은 요청 전부), runs(받은 run 수), max_active(동시에 돈 run 의 최댓값).
+S8(검토 루프)과 WP5b C9 가 이 파일을 넓힌다. 시험이 쓰는 여러 전문가의 팩은 `derive_pack` 이 엔진 계약 예제(pack_ok·pack_empty)에서
+전문가 이름·카드 고르기만 바꿔 짓는다(카드 글·text_sha 는 엔진이 낸 그대로다).
 """
 from __future__ import annotations
 
@@ -71,6 +79,7 @@ PLAN_SHAPE: dict[str, frozenset[str]] = {
 PACK_SHAPE: dict[str, frozenset[str]] = {"": frozenset({"agent_key"}) | IDENT_FIELDS}
 
 INVENTED_QUOTE = "카드 어디에도 없는 지어낸 인용 문장으로 판정을 꾸몄다"
+LONG_QUOTE = ("카드 본문을 길게 옮겨 적었다고 주장하는 인용 — " * 12)[:260]
 WHY = "카드의 조건과 변경 줄을 맞대어 보니 판정이 이렇다"
 NEED = "변경 줄에 그 조건의 값이 없어 판정할 수 없다"
 
@@ -86,6 +95,39 @@ def alias_width(n: int) -> int:
 
 def _sha8(*parts: Any) -> str:
     return hashlib.sha256(json.dumps(parts, ensure_ascii=False, sort_keys=True).encode()).hexdigest()[:8]
+
+
+def derive_pack(base: Mapping[str, Any], agent_key: str, *, name: str | None = None, domain: str | None = None,
+                keep: str = "all", copies: int | None = None) -> dict:
+    """엔진 계약 예제 팩에서 다른 전문가의 팩을 짓는다 — 카드 글·절·text_sha 는 엔진이 낸 그대로다.
+
+    `keep` — all(그대로) · background(점검 카드를 빼고 배경 카드만 — 카드는 있는데 카드 대조 묶음이 0개) · none(0장).
+    `copies` — 카드를 차례로 되풀이해 이만큼 싣는다(별칭 K01… 과 record_id·card_id 꼬리를 새로 단다 — 30장 팩). 개수 칸
+    (cards_total·listed_total·checkable_n·chars_total)은 실린 카드로 다시 센다(엔진 build_pack 의 정의)."""
+    pack = copy.deepcopy(dict(base))
+    cards = list(pack.get("cards") or ())
+    if keep == "background":
+        cards = [c for c in cards if not c.get("checkable")]
+    elif keep == "none":
+        cards = []
+        pack["unrenderable"] = []
+    if copies is not None and cards:
+        source = list(cards)
+        width = alias_width(copies)
+        cards = []
+        for i in range(copies):
+            card = copy.deepcopy(source[i % len(source)])
+            card.update({"alias": f"K{i + 1:0{width}d}", "record_id": f"{card['record_id']}-{i + 1:03d}",
+                         "card_id": f"{card['card_id']}-{i + 1:03d}"})
+            cards.append(card)
+    elif keep == "background":
+        width = alias_width(len(cards))
+        cards = [dict(c, alias=f"K{i:0{width}d}") for i, c in enumerate(cards, 1)]
+    pack.update({"agent_key": agent_key, "name": name or pack.get("name"), "domain": domain or pack.get("domain"),
+                 "cards": cards, "cards_total": len(cards), "listed_total": len(cards) + len(pack.get("unrenderable") or ()),
+                 "checkable_n": sum(1 for c in cards if c.get("checkable")),
+                 "chars_total": sum(int(c.get("chars") or 0) for c in cards)})
+    return pack
 
 
 def shape_problems(body: Any, shape: Mapping[str, frozenset[str]]) -> list[str]:
@@ -153,10 +195,19 @@ class FakeReviewEngine:
         self.oversize_units: set[str] = set()
         self.pair_over_units: set[str] = set()
         self.verdicts: dict[str, tuple[str, str]] = {}
+        self.rev_verdicts: dict[str, tuple[str, str]] = {}
         self.offcard_findings = 1
+        self.busy_over: int | None = None
+        self.pack_errors: dict[str, Any] = {}
+        self.pack_sequence: dict[str, list[dict]] = {}
+        self.long_quote: set[str] = set()
+        self.hold_runs: dict[int, threading.Event] = {}
         # 기록
         self.requests: list[dict[str, Any]] = []
+        self.runs = 0
+        self.max_active = 0
         self.active = 0
+        self._reserved = 0          # 관문을 지나 result 를 흘리기 직전인 run(busy_over 의 자리 셈 — 동시에 온 요청이 둘 다 지나지 않게)
         self._lock = threading.Lock()
         self.transport = httpx.MockTransport(self.handle)
 
@@ -234,9 +285,20 @@ class FakeReviewEngine:
 
     def _pack(self, body: Mapping[str, Any]) -> httpx.Response:
         key = str(body.get("agent_key") or "")
-        if key not in self.packs:
+        with self._lock:
+            errors = self.pack_errors.get(key)
+            if isinstance(errors, list):
+                error = errors.pop(0) if errors else None
+            else:
+                error = errors
+            sequence = self.pack_sequence.get(key)
+            pack = (sequence.pop(0) if len(sequence) > 1 else sequence[0]) if sequence else self.packs.get(key)
+        if error is not None:
+            status, payload = error
+            return httpx.Response(int(status), json=copy.deepcopy(payload))
+        if pack is None:
             return self._reject(404, "agent_not_found", f"전문가 '{key}' 가 없다", agent_key=key)
-        return httpx.Response(200, json=copy.deepcopy(self.packs[key]))
+        return httpx.Response(200, json=copy.deepcopy(pack))
 
     def plan(self, body: Mapping[str, Any]) -> dict:
         """엔진 plan 의 모양 — 점검 카드를 팩 순서로 K 장씩, 훑기 묶음은 카드 전부 한 묶음, 목록 쪽은 쪽당 상한까지."""
@@ -267,14 +329,20 @@ class FakeReviewEngine:
                 "soft_over": {"units": [], "manifest": []}, "pair_over": pair_over}
 
     # -- run(SSE) -----------------------------------------------------------------------
+    def _busy(self) -> httpx.Response:
+        return self._stream(iter([_sse("error", {"code": "review_busy", "message": "카드 대조 자리가 없다(가짜)", "infra": True,
+                                                 "retryable": True,
+                                                 "knob": "CARD_REVIEW_CONCURRENCY · CARD_REVIEW_CONCURRENCY_WITH_DELIB",
+                                                 "reason": "normal", "retry_after_s": self.retry_after_s,
+                                                 "limit": self.gate_limit, "active": self.active}),
+                                  _sse("done", {})]))
+
     def _run(self, body: Mapping[str, Any]) -> httpx.Response:
+        with self._lock:
+            self.runs += 1
+            nth = self.runs
         if self._take("busy_n"):
-            frames = [_sse("error", {"code": "review_busy", "message": "카드 대조 자리가 없다(가짜)", "infra": True,
-                                     "retryable": True, "knob": "CARD_REVIEW_CONCURRENCY · CARD_REVIEW_CONCURRENCY_WITH_DELIB",
-                                     "reason": "normal", "retry_after_s": self.retry_after_s, "limit": self.gate_limit,
-                                     "active": self.active}),
-                      _sse("done", {})]
-            return self._stream(iter(frames))
+            return self._busy()
         if self._take("error_n"):
             return self._stream(iter([_sse("status", {"step": "attempt", "n": 1}),
                                       _sse("error", {**self.error, "attempt": 1}), _sse("done", {})]))
@@ -283,18 +351,28 @@ class FakeReviewEngine:
                 yield _sse("status", {"step": "attempt", "n": 1})
                 raise httpx.RemoteProtocolError("peer closed connection without sending complete message body")
             return self._stream(cut())
+        with self._lock:
+            # 자리 셈과 자리 잡기를 한 잠금 안에서 — 동시에 온 둘이 같이 관문을 지나지 않게(result 를 흘리기 시작하면 active 로 옮긴다).
+            if self.busy_over is not None and self.active + self._reserved >= self.busy_over:
+                return self._busy()
+            self._reserved += 1
         result = self.result(body)
         delay = float(self.delay_s)
+        gate = self.hold_runs.get(nth)
 
         def frames() -> Iterator[bytes]:
             # 도는 수(active)는 result 를 넘긴 뒤 done 앞에서 내린다 — 클라이언트는 done 에서 읽기를 멈춰 생성기가 끝까지
             # 돌지 않는다. 도중에 닫힌 스트림은 생성기가 거두어질 때 finally 가 내린다.
             with self._lock:
+                self._reserved -= 1
                 self.active += 1
+                self.max_active = max(self.max_active, self.active)
             try:
                 yield _sse("status", {"step": "attempt", "n": 1})
                 if delay > 0:
                     time.sleep(delay)
+                if gate is not None:
+                    gate.wait(30)
                 yield _sse("result", result)
             finally:
                 with self._lock:
@@ -326,7 +404,7 @@ class FakeReviewEngine:
         extras: dict[str, Any] = {"inj": []}
         if kind == "verdict":
             judge = order[::-1] if variant == "rev" else order
-            main = [self._verdict_row(a, cards[a], own, lines) for a in judge if a not in self.skip_cards]
+            main = [self._verdict_row(a, cards[a], own, lines, variant=variant) for a in judge if a not in self.skip_cards]
             if self.truncated and main:
                 main = main[:-1]
                 quality.update(truncated=True, tail_broken=True)
@@ -381,13 +459,18 @@ class FakeReviewEngine:
                 "quality": quality, "meta": meta}
 
     def _verdict_row(self, alias: str, card: Mapping[str, Any], own: Sequence[str],
-                     lines: Mapping[str, Mapping[str, Any]]) -> dict:
-        applies, judgement = self.verdicts.get(str(card.get("record_id")), ("yes", "OK"))
+                     lines: Mapping[str, Mapping[str, Any]], *, variant: str | None = None) -> dict:
+        record_id = str(card.get("record_id"))
+        applies, judgement = self.verdicts.get(record_id, ("yes", "OK"))
+        if variant == "rev" and record_id in self.rev_verdicts:
+            applies, judgement = self.rev_verdicts[record_id]
         quote, sid = quote_of(card)
         status = "ok" if quote else "empty"
         if alias in self.invented_quote or alias in self.lying_quote:
             quote, sid = INVENTED_QUOTE, ""
             status = "not_found"
+        if alias in self.long_quote:
+            quote, sid, status = LONG_QUOTE, "", "not_found"
         if alias in self.lying_quote:
             status, sid = "ok", "1"
         flagged = judgement in ("WARNING", "FAIL")
