@@ -2342,7 +2342,7 @@ AUDIT_CHANNELS = {"cookie": "web", "sso": "mcp", "bearer": "rest"}
 
 def _live_jobs(store: Any, target_key: str) -> list[dict]:
     rows = store.query(
-        f"SELECT id, tier, state, COALESCE(mode, 'panels') AS mode FROM rr_jobs WHERE target_key = ?"
+        "SELECT id, tier, state, COALESCE(mode, 'panels') AS mode FROM rr_jobs WHERE target_key = ?"
         f" AND state IN ({','.join('?' * len(RUNNING_JOB_STATES))}) ORDER BY created_at, id",
         (target_key, *RUNNING_JOB_STATES))
     return [dict(r) for r in rows]
