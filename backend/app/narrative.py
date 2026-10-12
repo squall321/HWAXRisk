@@ -1665,18 +1665,14 @@ def _opinion_id(panel_id: str, agent_key: str, cycle: int) -> str:
     return hashlib.sha256(f"{panel_id}|{agent_key}|{cycle}".encode("utf-8")).hexdigest()[:32]
 
 
-def _panel_scope(store, panel_id: str) -> tuple[dict, dict, list[dict], SpecContext]:
-    """패널 행·타깃 행·seats 와 cites 검증 스코프(SpecContext)를 만든다."""
-    panel = store.query_one(
-        "SELECT id, target_key, owner_sub, panel_no, tier, seats_json, conv_id, chair_template, model_json"
-        " FROM rr_panels WHERE id = ?", (panel_id,))
-    if panel is None:
-        raise AppError("E404", f"패널을 찾을 수 없습니다 — {panel_id}.", 404)
+def _target_scope(store, target_key: str) -> tuple[dict, dict]:
+    """타깃 행과 그 타깃의 검증 스코프 칸(스냅샷·diff·상태·IR 의 가벼운 뷰·서브어셈블리 접두·판) — 패널(`_panel_scope`)과
+    카드 대조 검토(`review_scope`)가 같이 쓴다. 반환 (타깃 행, SpecContext 키워드)."""
     target = store.query_one(
         "SELECT target_key, owner_sub, kind, ref_id, project_id, base_project_id, ir_hash"
-        " FROM rr_targets WHERE target_key = ?", (panel["target_key"],))
+        " FROM rr_targets WHERE target_key = ?", (target_key,))
     if target is None:
-        raise AppError("E404", f"타깃을 찾을 수 없습니다 — {panel['target_key']}.", 404)
+        raise AppError("E404", f"타깃을 찾을 수 없습니다 — {target_key}.", 404)
 
     snapshot_ids: tuple[str, ...] = ()
     diff_id = ""
@@ -1708,12 +1704,6 @@ def _panel_scope(store, panel_id: str) -> tuple[dict, dict, list[dict], SpecCont
         if isinstance(value, dict):
             states[sid] = value
 
-    try:
-        seats = json.loads(panel["seats_json"] or "[]")
-    except ValueError:
-        seats = []
-    seats = [s for s in seats if isinstance(s, dict)]
-
     # IR 의 가벼운 뷰(명명 치수·경고)와 서브어셈블리 접두·판 — 브리프 E3 의 `[d:]`·E9 의 `warn:` 이 저장 때 해석된다(R-38·R-42).
     # 노드·엣지는 DB 색인으로 찾으므로 펴지 않는다.
     irs: dict = {}
@@ -1735,6 +1725,30 @@ def _panel_scope(store, panel_id: str) -> tuple[dict, dict, list[dict], SpecCont
             value = raw.get(key) or (raw.get("versions") or {}).get(key)
             if value:
                 versions[key] = value                      # 뒤(target) 스냅샷이 이긴다
+    fields = dict(
+        target_key=str(target["target_key"]), project_id=str(target["project_id"] or ""),
+        kind=str(target["kind"]), snapshot_ids=snapshot_ids, diff_id=diff_id,
+        ir_hash=str(target["ir_hash"] or ""), store=store, states=states, diff=diff,
+        irs=irs, rollup_prefixes=rollup_prefixes, versions=versions,
+    )
+    return dict(target), fields
+
+
+def _panel_scope(store, panel_id: str) -> tuple[dict, dict, list[dict], SpecContext]:
+    """패널 행·타깃 행·seats 와 cites 검증 스코프(SpecContext)를 만든다."""
+    panel = store.query_one(
+        "SELECT id, target_key, owner_sub, panel_no, tier, seats_json, conv_id, chair_template, model_json"
+        " FROM rr_panels WHERE id = ?", (panel_id,))
+    if panel is None:
+        raise AppError("E404", f"패널을 찾을 수 없습니다 — {panel_id}.", 404)
+    target, fields = _target_scope(store, panel["target_key"])
+
+    try:
+        seats = json.loads(panel["seats_json"] or "[]")
+    except ValueError:
+        seats = []
+    seats = [s for s in seats if isinstance(s, dict)]
+
     # 이 패널이 받은 브리프의 동결본 — 있으면 `narr:`·`reg:` 를 그 참조로 대조한다(없으면 종전대로 미검증).
     brief_refs: frozenset = frozenset()
     brief_known = False
@@ -1751,15 +1765,11 @@ def _panel_scope(store, panel_id: str) -> tuple[dict, dict, list[dict], SpecCont
             brief_known = True
 
     ctx = SpecContext(
-        panel_id=str(panel["id"]), target_key=str(target["target_key"]),
-        project_id=str(target["project_id"] or ""), owner_sub=str(panel["owner_sub"] or ""),
-        kind=str(target["kind"]), snapshot_ids=snapshot_ids, diff_id=diff_id,
-        ir_hash=str(target["ir_hash"] or ""), store=store, states=states, diff=diff,
+        panel_id=str(panel["id"]), owner_sub=str(panel["owner_sub"] or ""),
         conv_id=str(panel["conv_id"] or ""), seats=tuple(str(s.get("key")) for s in seats),
-        irs=irs, rollup_prefixes=rollup_prefixes, versions=versions,
-        brief_refs=brief_refs, brief_known=brief_known,
+        brief_refs=brief_refs, brief_known=brief_known, **fields,
     )
-    return dict(panel), dict(target), seats, ctx
+    return dict(panel), target, seats, ctx
 
 
 def _seat_turns(turns: Sequence[Mapping[str, Any]]) -> dict[str, list[dict]]:
