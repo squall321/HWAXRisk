@@ -741,6 +741,43 @@ def test_a_portal_rejecting_the_users_pat_holds_credential_and_the_service_pat_i
     assert rig.state(store, job_id) == "completed"
 
 
+def test_a_credential_failure_that_would_fill_the_breaker_window_still_holds_credential(store, monkeypatch):
+    """반대 검토 R3A-8 — 내용 탓 다섯 · 성공 넷 뒤 아홉째 run 이 도는 사이 PAT 가 폐기돼 열째 호출이 자격 오류다. 그 호출이 차단기
+    창의 열째가 되어도 차단기를 먼저 보지 않는다 — 잡은 credential 이고 고칠 곳(포털에서 PAT 를 다시 발급해 등록) 문구를 싣는다.
+    차단기(content_fail_rate)가 먼저 걸린 뒤에 온 자격 오류도 그 보류를 덮는다. 사람의 정지는 덮지 않는다."""
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    fake.error_n = 5
+    fake.error = {"code": "no_rows", "message": "행이 없다(가짜)", "infra": False, "retryable": False}
+    gate = threading.Event()
+    fake.hold_runs = {9: gate}
+    r = rig.Rig(store, fake)
+    r.tick()
+    r.tick()
+    r.tick(wait=False)
+    rig.wait_for(lambda: fake.runs == 9)
+    store.delete_credential(OWNER)                              # 도는 사이 PAT 가 폐기됐다
+    gate.set()
+    r.loop.join(30)
+    classes = [c["outcome_class"] for c in _calls(store, job_id)]
+    assert classes == ["content"] * 5 + ["ok"] * 4 + ["job"]
+    assert review_ops.breaker_verdict(classes[::-1]) == "content_fail_rate"   # 차단기를 먼저 봤다면 걸렸을 창이다
+    row = rig.job_row(store, job_id)
+    assert (row["state"], row["hold_code"]) == ("paused", "credential")
+    assert row["error"].startswith("카드 대조 호출(mech-test-seal): pat_unavailable") and "PAT 를 다시 발급해 등록" in row["error"]
+
+    second = rig.job(store, rig.target(store, seed=3), scope={"agents": [SEAL]})
+    store.execute("UPDATE rr_jobs SET state = 'running' WHERE id = ?", (second,))
+    assert r.loop.hold(second, "content_fail_rate", "차단기(시험)", breaker=True)
+    assert r.loop.hold(second, "credential", "창 조회: pat_unavailable — 시험")
+    assert rig.job_row(store, second)["hold_code"] == "credential"
+    runner.pause_job(store, second, by=OWNER)
+    assert not r.loop.hold(second, "credential", "사람의 정지 위에는 걸지 않는다")
+    assert rig.job_row(store, second)["hold_code"] == "user"
+
+
 def test_a_pat_too_close_to_expiry_holds_credential_without_sending_anything(store, monkeypatch):
     """남은 수명이 검토 여유(호출 벽시계 + 600초) 이하인 PAT — 요청을 하나도 보내지 않고 credential 로 멈춘다(서비스 PAT 로 내려가지
     않는다 — 사용자 결정 3)."""

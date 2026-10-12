@@ -1022,7 +1022,9 @@ class _Session:
                                                  outcome=outcome, max_charged=self.max_charged, now=self.now())
         if not written["written"]:
             raise _Stop("lease", release=False)
-        if outcome.klass != review_ops.WAIT:
+        if outcome.klass in (review_ops.INFRA, review_ops.CONTENT):
+            # 차단기는 인프라·내용 탓만 본다. 잡 부류(자격·계약)는 _after_failure 가 곧바로 그 보류를 건다 — 그 호출이 차단기 창을
+            # 채워 content_fail_rate 가 먼저 걸리면 credential 보류와 고칠 곳 문구가 사라진다(R3A-8).
             self.loop.after_call(self.job_id, outcome.klass)
 
     def _after_failure(self, cell: _Cell | None, exc: BaseException, outcome: review_ops.Outcome) -> None:
@@ -1587,11 +1589,18 @@ class ReviewLoop:
     # -- 보류 · 차단기 ---------------------------------------------------------------------------
     def hold(self, job_id: str, code: str, message: str, *, breaker: bool = False) -> bool:
         """도는(queued·running) 검토 잡을 코드 보류로 멈춘다 — paused + hold_code, 자동 재개 코드면 hold_until = 지금 + 그 n 번째
-        간격(review_ops.hold_delay_s). 사람이 멈춘 잡(hold_code='user')·끝난 잡은 건드리지 않는다(사람의 정지가 이긴다 — P-10)."""
+        간격(review_ops.hold_delay_s). 사람이 멈춘 잡(hold_code='user')·끝난 잡은 건드리지 않는다(사람의 정지가 이긴다 — P-10).
+        credential 은 이미 걸린 다른 코드 보류(차단기 따위)를 덮는다 — 자격은 사람이 고쳐야 다시 돌 수 있으므로 그 보류와 고칠 곳
+        문구가 늘 이긴다(R3A-8)."""
         now = self.clock()
+        override = code == "credential"
         with self._hold_lock:
-            row = self.store.query_one("SELECT state, hold_n FROM rr_jobs WHERE id = ?", (job_id,))
-            if row is None or row["state"] not in ("queued", "running"):
+            row = self.store.query_one("SELECT state, hold_n, hold_code FROM rr_jobs WHERE id = ?", (job_id,))
+            if row is None:
+                return False
+            replace = (override and row["state"] == "paused" and row["hold_code"] is not None
+                       and row["hold_code"] not in ("user", "credential"))
+            if row["state"] not in ("queued", "running") and not replace:
                 return False
             n = int(row["hold_n"] or 0) + 1
             delay = review_ops.hold_delay_s(code, n)
@@ -1599,8 +1608,9 @@ class ReviewLoop:
             changed = self.store.execute(
                 "UPDATE rr_jobs SET state = 'paused', pause_reason = NULL, error = ?, hold_code = ?, hold_until = ?,"
                 " hold_n = ?, state_by = ?, state_at = ?, updated_at = ? WHERE id = ? AND mode = 'reviews'"
-                " AND state IN ('queued', 'running')",
-                (message, code, until, n, f"code:{code}", now, now, job_id))
+                " AND (state IN ('queued', 'running') OR (? AND state = 'paused' AND hold_code IS NOT NULL"
+                " AND hold_code NOT IN ('user', 'credential')))",
+                (message, code, until, n, f"code:{code}", now, now, job_id, int(override)))
         if not changed:
             return False
         log.warning("검토 잡 %s 보류 %s(%s번째, 재개 %s) — %s", job_id, code, n, until or "사람", message)
