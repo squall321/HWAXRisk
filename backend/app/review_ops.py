@@ -130,6 +130,9 @@ _PACK_CODES: dict[str, tuple[int, str]] = {
     "card_list_unstable": (PACK_RETRY_MAX, "pack_unavailable"),
     "tools_unavailable": (PACK_RETRY_MAX, "pack_unavailable"),
     "agent_not_found": (AGENT_NOT_FOUND_MAX, "agent_not_found"),
+    # 앱이 내는 둘(cardpack.judge_pack) — 0장 응답을 아직 믿지 않는다(P-08), 받은 팩이 확인(check_pack)에 걸렸다.
+    "suspect_empty": (PACK_RETRY_MAX, "pack_unavailable"),
+    "pack_invalid": (PACK_RETRY_MAX, "pack_unavailable"),
 }
 # 코드 없이 상태만 온 응답(본문이 JSON 이 아닌 502·429 등)의 코드.
 _CODE_BY_STATUS: dict[int, str] = {

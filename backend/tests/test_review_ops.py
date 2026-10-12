@@ -26,7 +26,9 @@ HOLDS = {
 }
 PACKS = {"card_fetch_failed": (6, "pack_unavailable"), "card_list_failed": (6, "pack_unavailable"),
          "card_list_unstable": (6, "pack_unavailable"), "tools_unavailable": (6, "pack_unavailable"),
-         "agent_not_found": (3, "agent_not_found")}
+         "agent_not_found": (3, "agent_not_found"),
+         # 앱이 내는 팩 오류(cardpack.judge_pack) — 0장을 아직 믿지 않음 · 확인에 걸린 팩.
+         "suspect_empty": (6, "pack_unavailable"), "pack_invalid": (6, "pack_unavailable")}
 
 
 # ---------------------------------------------------------------- 분류표
