@@ -129,6 +129,13 @@ def test_risk_get_expert_report_pages_fit_the_wire_and_join_to_the_whole_part(st
     assert narrowed["unit_id"] == unit and "error" not in narrowed
     assert _call("risk_get_expert_report", target_key=key, agent_key=rig.ZERO_CARDS)["error"] == "E404"
     assert _call("risk_get_expert_report", target_key=key, agent_key=SEAL, page=999)["error"] == "E100"
+    # 판 확인(R3B-13) — 첫 쪽의 version 을 주면 같은 판의 쪽이고, 그사이 판이 바뀌었으면 REST 와 같은 409 오류다.
+    first = _call("risk_get_expert_report", target_key=key, agent_key=SEAL, part="full")
+    again = _call("risk_get_expert_report", target_key=key, agent_key=SEAL, part="full", page=2, version=first["version"])
+    assert "error" not in again and again["version"] == first["version"]
+    moved = _call("risk_get_expert_report", target_key=key, agent_key=SEAL, part="full", page=2, version=first["version"] + 1)
+    assert (moved["error"], moved["detail"]) == ("report_version_moved", {"version": first["version"],
+                                                                          "asked": first["version"] + 1})
     factories.act_as_delegate(monkeypatch, OTHER)
     assert _call("risk_get_expert_report", target_key=key, agent_key=SEAL)["error"] == "not_visible"
 

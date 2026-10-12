@@ -2901,6 +2901,14 @@ def expert_report_source(target_key: str, agent_key: str, *, owner_sub: str | No
     return meta, json.loads(gzip.decompress(row["report_gz"]).decode("utf-8"))
 
 
+def check_report_version(meta: dict, version: int | None) -> None:
+    """`version` 을 주면 지금 판(revision)과 같아야 한다 — 쪽을 받는 사이에 다시 마감돼 판이 바뀌면 409 report_version_moved(처음 쪽부터
+    다시 받는다). REST 와 MCP(risk_get_expert_report)가 같은 규칙이다(R3B-13)."""
+    if version is not None and int(version) != meta["version"]:
+        raise AppError("report_version_moved", f"보고서 판이 {version} 에서 {meta['version']} 로 바뀌었다 — 처음 쪽부터 다시 받는다.",
+                       409, detail={"version": meta["version"], "asked": int(version)})
+
+
 def expert_report_render(report: dict, *, part: str, unit_id: str | None, page_chars: int) -> list[dict]:
     """보고서 쪽 목록(`expert_report.render_pages` — 자르지 않는다, 쪽을 다 이으면 그 part 의 마크다운이다). 보고서에 없는 단위는 E404."""
     if unit_id is not None and unit_id not in {u["unit_id"] for u in (report.get("scope") or {}).get("units") or ()}:
@@ -2930,9 +2938,7 @@ def expert_report_payload(target_key: str, agent_key: str, *, owner_sub: str | N
     if format not in REPORT_FORMATS:
         raise AppError("E100", f"format 은 {list(REPORT_FORMATS)} 가운데 하나다 — {format!r}.", 422)
     meta, report = expert_report_source(target_key, agent_key, owner_sub=owner_sub)
-    if version is not None and int(version) != meta["version"]:
-        raise AppError("report_version_moved", f"보고서 판이 {version} 에서 {meta['version']} 로 바뀌었다 — 처음 쪽부터 다시 받는다.",
-                       409, detail={"version": meta["version"], "asked": int(version)})
+    check_report_version(meta, version)
     if format == "json":
         given = [name for name, value in (("part", part), ("unit_id", unit_id), ("page", page)) if value is not None]
         if given:

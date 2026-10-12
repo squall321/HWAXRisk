@@ -528,10 +528,11 @@ def _report_page_chars(meta: dict, report: dict, *, part: str, unit_id: str | No
 
 @mcp.tool()
 def risk_get_expert_report(target_key: str, agent_key: str, part: str = "summary", unit_id: str | None = None,
-                           page: int = 1) -> dict:
-    """전문가 보고서 읽기(읽기 전용) — 카드 대조 검토가 마감 때 조립한 전문가 한 명의 보고서를 마크다운 쪽으로 준다, part=summary(머리·본 범위·올린 finding·검토 품질)|units(단위별 분석·카드 밖 지적·넘김·필요 정보·메커니즘)|cards(카드 점검표·배경 카드·판정 못 한 카드)|full, unit_id 로 한 단위만, 한 쪽은 약 2만 5천 자 안이고 next_page 를 page 로 주어 이어 받는다(본문을 자르지 않는다 — 쪽을 차례로 이으면 그 part 전체다), 카드 인용은 판정당 200자이고 원래 길이를 적는다."""
+                           page: int = 1, version: int | None = None) -> dict:
+    """전문가 보고서 읽기(읽기 전용) — 카드 대조 검토가 마감 때 조립한 전문가 한 명의 보고서를 마크다운 쪽으로 준다, part=summary(머리·본 범위·올린 finding·검토 품질)|units(단위별 분석·카드 밖 지적·넘김·필요 정보·메커니즘)|cards(카드 점검표·배경 카드·판정 못 한 카드)|full, unit_id 로 한 단위만, 한 쪽은 약 2만 5천 자 안이고 next_page 를 page 로 주어 이어 받는다(본문을 자르지 않는다 — 쪽을 차례로 이으면 그 part 전체다), 둘째 쪽부터는 첫 쪽 응답의 version 을 version 으로 주면 그사이 다시 마감돼 판이 바뀐 경우 report_version_moved 로 알려 다른 판의 쪽이 섞이지 않는다(그때는 처음 쪽부터 다시), 카드 인용은 판정당 200자이고 원래 길이를 적는다."""
     def report(key: str, *, owner_sub: str) -> dict:
         meta, body = routes.expert_report_source(key, agent_key, owner_sub=owner_sub)
+        routes.check_report_version(meta, version)
         chars = _report_page_chars(meta, body, part=part, unit_id=unit_id)
         pages = routes.expert_report_render(body, part=part, unit_id=unit_id, page_chars=chars)
         return routes.expert_report_envelope(meta, pages, page, part=part, unit_id=unit_id)

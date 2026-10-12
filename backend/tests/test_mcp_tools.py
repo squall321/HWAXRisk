@@ -156,7 +156,8 @@ def test_signatures_follow_plan():
     assert set(props("risk_get_cells")) == {"target_key", "agent_key", "unit_id", "state", "limit", "offset"}
     assert set(tools["risk_get_cells"].inputSchema["required"]) == {"target_key"}
     assert (props("risk_get_cells")["limit"]["default"], props("risk_get_cells")["offset"]["default"]) == (200, 0)
-    assert set(props("risk_get_expert_report")) == {"target_key", "agent_key", "part", "unit_id", "page"}
+    assert set(props("risk_get_expert_report")) == {"target_key", "agent_key", "part", "unit_id", "page", "version"}
+    assert props("risk_get_expert_report")["version"]["default"] is None             # REST 와 같은 판 확인(R3B-13)
     assert set(tools["risk_get_expert_report"].inputSchema["required"]) == {"target_key", "agent_key"}
     assert (props("risk_get_expert_report")["part"]["default"], props("risk_get_expert_report")["page"]["default"]) == (
         "summary", 1)
