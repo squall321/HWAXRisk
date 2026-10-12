@@ -576,9 +576,180 @@ ALTER TABLE rr_panels ADD COLUMN result_saved_at INTEGER;   -- 적은 시각(epo
 """
 _DDL_V3: list[str] = _split_statements(_DDL_V3_SQL)
 
+# v4 — 리스크 심사 재설계 M2 의 한 블록(PLAN 4절 C-2 — 마일스톤마다 버전 하나, M2.md 5절 #2). 검토 단위(WP2) 표 둘과
+# 타깃의 방식 열, 셀 원장(WP3b) 표 다섯과 잡의 보류 열 넷·finding 의 출처 열 넷이다. rr_roster.input_gaps_json 은 넣지
+# 않는다(M2 에 읽는 곳이 없다 — M3 의 v5). 어휘 열에는 제약을 걸지 않는다(C-3) — 허용 연산이 CREATE·ADD COLUMN·INDEX
+# 뿐이라 한 번 건 제약은 어휘를 늘릴 수 없게 만든다(rr_jobs.pause_reason 이 그 예다). 어휘는 열 옆 주석에 적고 코드
+# 상수·전이 함수가 지킨다. rr_card_packs 는 owner_sub 가 없는 박스 지역 사본이라 반출·들여오기에서 뺀다
+# (export.LOCAL_ONLY_TABLES). dev 리허설(M2 단계 D)이 끝날 때까지 main 에 올리지 않는다 — 그 전에는 이 블록을 고칠 수
+# 있고, 고치면 같은 커밋에서 tests/test_store.py 의 PUSHED_DDL_SHA256[4] 를 고친다.
+_DDL_V4_SQL = """
+CREATE TABLE IF NOT EXISTS rr_unit_builds (                   -- 검토 단위 빌드 머리. 한 번 쓰고 고치지 않는다 — 활성 빌드는 status 가 ok·empty·oversize 인 가장 큰 rev
+  target_key TEXT NOT NULL, rev INTEGER NOT NULL, owner_sub TEXT NOT NULL,
+  status TEXT NOT NULL,                         -- ok | empty | oversize | failed
+  builder_version TEXT NOT NULL DEFAULT '', input_hash TEXT NOT NULL DEFAULT '', source_hash TEXT NOT NULL DEFAULT '',
+  caps_json TEXT NOT NULL DEFAULT '{}',         -- 그 빌드의 단위 크기 상한(줄 수)
+  blocked_by TEXT,                              -- 'G2' | 'capture_partial' | NULL
+  stats_json TEXT NOT NULL DEFAULT '{}', invariants_json TEXT NOT NULL DEFAULT '{}',
+  unit_ids_json TEXT NOT NULL DEFAULT '[]',     -- 이 rev 의 [unit_id, seq] — 활성 단위와 순번은 여기서 읽는다
+  reason TEXT, error TEXT, built_by TEXT, built_at INTEGER NOT NULL,
+  PRIMARY KEY(target_key, rev));
+
+CREATE TABLE IF NOT EXISTS rr_units (                         -- 검토 단위. (target_key, unit_id) 내용 주소라 처음 쓴 것이 남고 고치지 않는다(M2.md 4.6.1)
+  target_key TEXT NOT NULL, unit_id TEXT NOT NULL, owner_sub TEXT NOT NULL, project_id TEXT NOT NULL,
+  rev_first INTEGER NOT NULL,                   -- 이 단위를 처음 쓴 빌드 rev
+  kind TEXT NOT NULL,                           -- bundle | boundary | global | excluded
+  reviewable INTEGER NOT NULL DEFAULT 1,        -- 0 = 제외 단위(검토하지 않는다 — 사유는 줄에 있다)
+  scope_key TEXT, title TEXT NOT NULL DEFAULT '',
+  digest TEXT NOT NULL DEFAULT '',              -- 목록 글(훑기 목록에 싣는다)
+  unit_hash TEXT NOT NULL, cids_json TEXT NOT NULL,           -- 소유 참조(정렬)
+  n_changes INTEGER NOT NULL DEFAULT 0, n_parts INTEGER NOT NULL DEFAULT 0,
+  context_json TEXT, flags_json TEXT,           -- 문맥(다른 단위가 소유한 줄·이웃) · 표지
+  lines_gz BLOB, summary_gz BLOB, summary_sha TEXT, summary_chars INTEGER,
+  evidence_gz BLOB, evidence_sha TEXT, evidence_chars INTEGER,  -- 동결 발췌(근거 줄) — 단위를 처음 쓸 때 함께 얼린다
+  evidence_status TEXT,                         -- ok | failed | none
+  evidence_json TEXT,
+  builder_version TEXT NOT NULL, created_at INTEGER NOT NULL,
+  PRIMARY KEY(target_key, unit_id));
+
+CREATE TABLE IF NOT EXISTS rr_expert_reports (                -- (타깃 × 전문가) 검토 머리와 전문가 보고서. 계획 때 만들고 마감 때 채운다
+  target_key TEXT NOT NULL, agent_key TEXT NOT NULL, owner_sub TEXT NOT NULL,
+  domain TEXT NOT NULL, rank_in_domain INTEGER, tier TEXT,
+  review_order INTEGER,                         -- planner.review_order 의 사본
+  review_id TEXT NOT NULL,                      -- hex32 합성 id — 의견·finding 의 패널 자리와 claim_uid 머리에 쓴다
+  state TEXT NOT NULL DEFAULT 'planned',        -- planned | running | ready | partial | blocked
+  lease_owner TEXT, claimed_at INTEGER,         -- 선점 '<boot_id>:<uuid>' — 선점마다 새 값이라 늦은 쓰기를 버린다
+  run_id TEXT,                                  -- rr_jobs.id
+  not_before INTEGER,                           -- 백오프 — 이 시각 전에는 다시 집지 않는다
+  pack_hash TEXT,                               -- rr_card_packs(agent_key, pack_hash) 결속
+  pack_status TEXT NOT NULL DEFAULT 'todo',     -- todo | ok | empty | error
+  pack_error TEXT, pack_attempts INTEGER NOT NULL DEFAULT 0, pack_frozen_at INTEGER,
+  card_basis TEXT,                              -- cards | background | none
+  plan_json TEXT, limits_rev TEXT,              -- 엔진 plan 응답과 그 판
+  sweep_state TEXT NOT NULL DEFAULT 'todo',     -- todo | done | skipped | failed
+  sweep_json TEXT,
+  cells_total INTEGER NOT NULL DEFAULT 0,
+  report_gz BLOB, report_hash TEXT, report_bytes INTEGER,     -- 보고서 JSON gzip · sha256[:12] · 바이트
+  summary_md TEXT,                              -- 1500자 안. 의견 행 excerpt_for_rag 의 원천
+  revision INTEGER NOT NULL DEFAULT 0,          -- 마감할 때마다 내용이 바뀌었으면 +1
+  opinion_id TEXT, findings_n INTEGER, coverage_status TEXT,  -- 마감이 원장에 적은 값의 사본
+  model TEXT, prompt_rev TEXT, norm_rev TEXT, verify_rev TEXT,
+  stats_json TEXT, error TEXT,
+  finalized_at INTEGER, created_at INTEGER, updated_at INTEGER,
+  PRIMARY KEY(target_key, agent_key));
+CREATE INDEX IF NOT EXISTS ix_rr_expert_reports_state ON rr_expert_reports(target_key, state, review_order);
+CREATE INDEX IF NOT EXISTS ix_rr_expert_reports_review ON rr_expert_reports(review_id);
+
+CREATE TABLE IF NOT EXISTS rr_review_cells (                  -- (타깃 × 단위 × 전문가) 셀 원장. 격자는 늘 로스터 × 검토 대상 단위다
+  target_key TEXT NOT NULL, unit_id TEXT NOT NULL, agent_key TEXT NOT NULL, owner_sub TEXT NOT NULL,
+  domain TEXT NOT NULL, unit_seq INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL DEFAULT 'pending',        -- pending | running | reviewed | na_irrelevant | no_input | failed | skipped
+  route TEXT, route_forced TEXT, route_json TEXT,              -- 훑기 뒤의 분류 · 강제 사유 · 그 신호값
+  basis TEXT,                                   -- cards | background | role_only — 이 셀을 무엇으로 봤나
+  run_id TEXT, lease_owner TEXT, heartbeat_at INTEGER, priority INTEGER NOT NULL DEFAULT 0,
+  tries INTEGER NOT NULL DEFAULT 0,             -- 낸 호출 수(기다림 제외)
+  charged INTEGER NOT NULL DEFAULT 0,           -- 내용 탓 실패 수(한도에 닿으면 failed)
+  infra_streak INTEGER NOT NULL DEFAULT 0,      -- 연속 인프라 실패(성공하면 0, 백오프 지수)
+  not_before INTEGER,                           -- 백오프 시각
+  error_code TEXT, error_class TEXT, error TEXT, knob TEXT, credential_kind TEXT, model TEXT,
+  llm_calls INTEGER NOT NULL DEFAULT 0, tokens_in INTEGER, tokens_out INTEGER, elapsed_ms INTEGER,
+  truncated INTEGER,                            -- 1 · 0 · NULL = 모름(0 으로 치지 않는다)
+  rows_expected INTEGER, rows_missing INTEGER, stamp INTEGER NOT NULL DEFAULT 0, soft_over INTEGER NOT NULL DEFAULT 0,
+  cards_expected INTEGER, cards_judged INTEGER, -- 점검 카드 수 · 실효 판정이 있는 카드 수
+  n_fail INTEGER NOT NULL DEFAULT 0, n_warning INTEGER NOT NULL DEFAULT 0, n_ok INTEGER NOT NULL DEFAULT 0,
+  n_na INTEGER NOT NULL DEFAULT 0, n_undetermined INTEGER NOT NULL DEFAULT 0, n_disputed INTEGER NOT NULL DEFAULT 0,
+  n_flipped INTEGER NOT NULL DEFAULT 0, n_offcard INTEGER NOT NULL DEFAULT 0,
+  offcard_state TEXT NOT NULL DEFAULT 'todo',   -- todo | done | none | skipped
+  offcard_capped INTEGER NOT NULL DEFAULT 0,
+  quote_ok INTEGER NOT NULL DEFAULT 0, quote_n INTEGER NOT NULL DEFAULT 0,   -- 카드 인용: 앱 재대조 통과 수 / 인용이 있던 행 수
+  refs_ok INTEGER NOT NULL DEFAULT 0, refs_n INTEGER NOT NULL DEFAULT 0,     -- 변경 줄 참조: 그 단위 소속 통과 수 / 참조가 있던 행 수
+  bg_full_n INTEGER NOT NULL DEFAULT 0, bg_title_only_n INTEGER NOT NULL DEFAULT 0,   -- 카드 밖 호출에 본문으로 · 제목만 실린 배경 카드 수
+  unit_hash TEXT, pack_hash TEXT,
+  input_hash TEXT,                              -- unit_hash | evidence_sha | pack_hash | prompt_rev | limits_rev 의 해시
+  prompt_rev TEXT, verify_rev TEXT,
+  extras_json TEXT, mechs_json TEXT, handoffs_json TEXT, sample_json TEXT,
+  status_source TEXT NOT NULL DEFAULT 'code',   -- code | human
+  decided_by TEXT, decided_at INTEGER, decide_note TEXT, reopened_n INTEGER NOT NULL DEFAULT 0,
+  started_at INTEGER, finished_at INTEGER, created_at INTEGER, updated_at INTEGER,
+  PRIMARY KEY(target_key, unit_id, agent_key));
+CREATE INDEX IF NOT EXISTS ix_rr_cells_state ON rr_review_cells(target_key, state);
+CREATE INDEX IF NOT EXISTS ix_rr_cells_agent ON rr_review_cells(target_key, agent_key, unit_seq);
+
+CREATE TABLE IF NOT EXISTS rr_card_verdicts (                 -- 카드 × 단위 판정. 한 (셀, 카드)에 변형마다 한 행이고 그중 하나가 실효다
+  target_key TEXT NOT NULL, unit_id TEXT NOT NULL, agent_key TEXT NOT NULL,
+  record_id TEXT NOT NULL, variant TEXT NOT NULL,             -- fwd | rev | solo
+  owner_sub TEXT NOT NULL,
+  alias TEXT NOT NULL, card_id TEXT, section_id TEXT, text_sha TEXT NOT NULL,
+  applies TEXT NOT NULL,                        -- yes | no | unknown
+  judgement TEXT NOT NULL,                      -- OK | WARNING | FAIL | undetermined | na
+  cq TEXT,                                      -- 카드 본문에서 복사한 문구(원문 그대로 — 얼린 팩으로 다시 대조한다)
+  cq_chars INTEGER,                             -- cq 원문의 글자 수. NULL 이면 cq 가 원문이다 — 반출이 cq 를 200자로 줄일 때 적는다
+  lines_json TEXT, refs_json TEXT,              -- 변경 줄 별칭 · 서버가 되돌린 참조
+  why TEXT, need TEXT,
+  sev TEXT, mech TEXT, mech_free TEXT, path TEXT, check_kind TEXT, check_text TEXT,   -- 단독 재질의가 채운다. sev: 경미 | 중대 | 치명
+  conds_json TEXT, checks_json TEXT,            -- 조건별 대조 줄 · 서버가 실어 준 검사 결과
+  quote_ok INTEGER,                             -- 앱이 얼린 팩으로 다시 대조한 값 — 1 실재 · 0 불일치 · NULL 인용 없음
+  refs_ok INTEGER,                              -- 참조가 전부 그 단위의 것인가 — NULL 참조 없음
+  check_disagree INTEGER NOT NULL DEFAULT 0,    -- 서버의 인용 검사와 앱의 재대조가 다르다
+  grade TEXT,                                   -- 문헌·규격 | 경험칙
+  is_effective INTEGER NOT NULL DEFAULT 0,
+  agree INTEGER,                                -- fwd ↔ rev 일치 — 1 · 0 · NULL 한쪽뿐
+  split INTEGER NOT NULL DEFAULT 0,             -- 변형 사이에 걸림·통과가 갈려 실효를 undetermined 로 둔 카드
+  revised_from TEXT,                            -- 엔진 보충이 (applies, judgement) 를 바꿨으면 첫 답
+  deck_id TEXT, call_id TEXT NOT NULL, created_at INTEGER,
+  PRIMARY KEY(target_key, unit_id, agent_key, record_id, variant));
+CREATE INDEX IF NOT EXISTS ix_rr_verdicts_eff ON rr_card_verdicts(target_key, agent_key, is_effective, judgement);
+CREATE INDEX IF NOT EXISTS ix_rr_verdicts_unit ON rr_card_verdicts(target_key, unit_id, is_effective);
+
+CREATE TABLE IF NOT EXISTS rr_card_packs (                    -- 전문가별 카드 묶음 동결본. 내용 주소이고 owner_sub 가 없는 박스 지역 사본이다(반출·들여오기 제외, C-9)
+  agent_key TEXT NOT NULL, pack_hash TEXT NOT NULL,           -- 엔진 pack 응답의 pack_hash
+  norm_rev TEXT NOT NULL, role_sha TEXT NOT NULL,
+  cards_total INTEGER NOT NULL, checkable_n INTEGER NOT NULL, chars_total INTEGER NOT NULL,
+  unrenderable_n INTEGER NOT NULL DEFAULT 0,
+  manifest_json TEXT NOT NULL,                  -- 본문을 뺀 카드 목록
+  pack_gz BLOB NOT NULL,                        -- pack 응답 전체(canonical_json gzip) — 호출마다 여기서 꺼내 그대로 보낸다
+  source TEXT NOT NULL, fetched_at INTEGER NOT NULL,
+  PRIMARY KEY(agent_key, pack_hash));
+
+CREATE TABLE IF NOT EXISTS rr_review_calls (                  -- 검토 호출 원장. 끝난 호출 하나가 한 행이고 서버의 result 프레임 전체를 남긴다
+  call_id TEXT PRIMARY KEY,
+  target_key TEXT NOT NULL, agent_key TEXT NOT NULL, unit_id TEXT, owner_sub TEXT NOT NULL,
+  run_id TEXT,                                  -- rr_jobs.id
+  kind TEXT NOT NULL,                           -- sweep | verdict | offcard
+  variant TEXT, deck_id TEXT, page_no INTEGER,
+  seq INTEGER NOT NULL DEFAULT 0,               -- 같은 논리 호출의 몇 번째 시도인가
+  state TEXT NOT NULL,                          -- running | ok | infra_fail | content_fail | aborted
+  outcome_class TEXT,                           -- wait | infra | content | job | cancelled
+  cards_json TEXT,                              -- 이 호출에 실은 별칭 목록
+  request_hash TEXT, input_sha TEXT,            -- 앱이 낸 본문의 해시 · 서버가 돌려준 meta.input_sha
+  prompt_chars INTEGER, tokens_in INTEGER, tokens_out INTEGER,
+  output_truncated INTEGER,                     -- 1 · 0 · NULL = 모름
+  finish_reason TEXT, soft_over INTEGER NOT NULL DEFAULT 0,
+  attempts INTEGER, queued_ms INTEGER, llm_ms INTEGER,        -- 서버 안 보충 횟수 · 자리 대기 · LLM 시간 합
+  rows_expected INTEGER, rows_missing INTEGER, bad_lines INTEGER, stamp INTEGER NOT NULL DEFAULT 0,
+  dropped_over_cap INTEGER, bg_dropped INTEGER,
+  model TEXT, prompt_rev TEXT, norm_rev TEXT, limits_rev TEXT, credential_kind TEXT,
+  result_gz BLOB, result_sha256 TEXT, quality_json TEXT,      -- result 프레임 gzip(반출 제외)
+  error_code TEXT, error_infra INTEGER, error_retryable INTEGER, error TEXT,
+  started_at INTEGER, duration_ms INTEGER);
+CREATE INDEX IF NOT EXISTS ix_rr_review_calls_cell ON rr_review_calls(target_key, agent_key, unit_id, started_at);
+CREATE INDEX IF NOT EXISTS ix_rr_review_calls_run ON rr_review_calls(run_id, started_at);
+
+ALTER TABLE rr_targets ADD COLUMN flow TEXT NOT NULL DEFAULT 'panels';   -- panels | cells(C-5). 옛 행은 panels 로 읽힌다
+ALTER TABLE rr_jobs ADD COLUMN mode TEXT;                   -- NULL = panels · panels · reviews
+ALTER TABLE rr_jobs ADD COLUMN hold_code TEXT;              -- 코드 보류의 사유(review_ops 보류 코드표)
+ALTER TABLE rr_jobs ADD COLUMN hold_until INTEGER;          -- 자동 재개 시각(NULL = 자동 재개 없음)
+ALTER TABLE rr_jobs ADD COLUMN hold_n INTEGER NOT NULL DEFAULT 0;      -- 연달은 보류 수(재개 간격의 지수)
+ALTER TABLE rr_findings ADD COLUMN unit_id TEXT;            -- 카드 대조가 올린 finding 의 검토 단위
+ALTER TABLE rr_findings ADD COLUMN source_kind TEXT;        -- NULL = 패널 · card_review
+ALTER TABLE rr_findings ADD COLUMN source_id TEXT;          -- 출처 id(카드 대조는 rr_expert_reports.review_id)
+ALTER TABLE rr_findings ADD COLUMN agent_key TEXT;          -- 그 finding 을 낸 전문가
+"""
+_DDL_V4: list[str] = _split_statements(_DDL_V4_SQL)
+
 # 버전 오름차순. 한 버전 = 한 트랜잭션. 허용 연산은 CREATE TABLE IF NOT EXISTS · ADD COLUMN · CREATE INDEX IF NOT EXISTS 뿐(plan §5.2.5 (6)).
 # 한 번 나간 버전의 문장은 고치지 않는다 — tests/test_store.py 가 버전마다 DDL 해시를 못 박는다.
-MIGRATIONS: list[tuple[int, list[str]]] = [(1, _DDL_V1), (2, _DDL_V2), (3, _DDL_V3)]
+MIGRATIONS: list[tuple[int, list[str]]] = [(1, _DDL_V1), (2, _DDL_V2), (3, _DDL_V3), (4, _DDL_V4)]
 
 # ---------------------------------------------------------------- 이행 안전(WP5a R3 · 반대 검토 X2-01·X2-02)
 # 이행 전체(버전 읽기 → 사본 → 버전별 트랜잭션 → 사본 정리)를 감싸는 파일 잠금. 기다린다 — HEAXHub 는 헬스가 안 오면 같은

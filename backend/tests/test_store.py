@@ -7,6 +7,7 @@ import sqlite3
 import pytest
 
 from app.errors import AppError
+from app.export import LOCAL_ONLY_TABLES, TABLE_ORDER
 from app.risk_store import MIGRATIONS, RiskStore, _DDL_V1_SQL
 
 LATEST = MIGRATIONS[-1][0]
@@ -14,6 +15,9 @@ LATEST = MIGRATIONS[-1][0]
 # plan §5.2.2 A~H 의 CREATE TABLE 이름 — 본문에 실린 표는 41개(A 계획 33표 + 소유·수명주기·사람 개입 4 + 계보·출처 2 + 입력·부분 실패 2).
 DDL_TABLES = re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", _DDL_V1_SQL)
 HOUSEKEEPING = {"_schema_migrations", "_user_credentials"}
+# v4(재설계 M2) 가 더한 표 — 검토 단위(WP2) 둘과 셀 원장(WP3b) 다섯(M2.md 5절 #2).
+V4_TABLES = {"rr_unit_builds", "rr_units", "rr_expert_reports", "rr_review_cells", "rr_card_verdicts",
+             "rr_card_packs", "rr_review_calls"}
 # §5.2 가 '41 표' 로 세는 근거 — 33 표 위에 v1 으로 더해진 8 표.
 ADDED_IN_41 = {"rr_project_members", "rr_gate_acks", "rr_registry_status_log", "rr_audit",
                "rr_panel_calls", "rr_cluster_alias", "rr_requirements", "rr_snapshot_jobs"}
@@ -85,10 +89,10 @@ def test_migrate_creates_v1_tables(risk_store, tmp_path):
     assert db_path.exists()
     tables = _tables(db_path)
     rr = {t for t in tables if t.startswith("rr_")}
-    # v1 표 41개는 정본 §5.2.2 전문 그대로이고, 뒤 버전이 더한 표(v2 rr_brief_calls)가 그 위에 붙는다.
+    # v1 표 41개는 정본 §5.2.2 전문 그대로이고, 뒤 버전이 더한 표(v2 rr_brief_calls · v4 재설계 M2 일곱)가 그 위에 붙는다.
     assert set(DDL_TABLES) <= rr
     assert len(DDL_TABLES) == 41
-    assert rr - set(DDL_TABLES) == {"rr_brief_calls"}
+    assert rr - set(DDL_TABLES) == {"rr_brief_calls"} | V4_TABLES
     assert HOUSEKEEPING <= tables
     assert tables - rr - HOUSEKEEPING <= {"sqlite_sequence"}
     assert _columns(db_path, "_schema_migrations") == {"version", "applied_at", "app_version"}
@@ -232,6 +236,9 @@ PUSHED_DDL_SHA256 = {
     1: "95298128f33e533a21a9bbdfb4aab46a9f0af096585f1e5932cc035887e09492",
     2: "162c36361ed98a7fb6d8cc195ab0e1c0fabe1ef448ec7e785f2311e2843bfea5",
     3: "a20f49f302e0c92292d7792a9a990b4d8c809b1f3eb0dce9b609bb0879b35e39",
+    # v4 는 아직 나가지 않았다 — 가지 m2-cells 에만 있고 dev 리허설(재설계 PLAN 4절 C-2, M2 단계 D)이 끝나야 main 에 오른다.
+    # 그때까지는 블록을 고칠 수 있고, 고치면 같은 커밋에서 이 값을 고친다. push 하는 날 이 값이 굳는다.
+    4: "606df0eea2badd7a71c3967d890e48c5917779b8b5458d436c3665926b17a64b",
 }
 SHARED_TABLES = {"rr_dim_vocab", "rr_delta_priors", "rr_rules", "rr_metrics"}
 
@@ -247,17 +254,24 @@ def test_every_version_keeps_the_ddl_it_shipped_with():
 
 
 def test_every_table_of_every_version_follows_the_conventions(risk_store, tmp_path):
-    """전 버전의 rr_ 표 — owner_sub 가 있거나 공용 표 넷 중 하나 · 전부 PK · v1 뒤에 더한 표에는 CHECK 가 없다."""
+    """전 버전의 rr_ 표 — owner_sub 가 있거나 공용 표 넷 · 박스 지역 표(반출 제외) 중 하나 · 전부 PK · v1 뒤에 더한 표에는
+    CHECK 가 없다. 박스 지역 표는 정말로 owner_sub 가 없고 반출 표 목록에 들지 않는다(면제가 넓어지지 않게)."""
     db_path = tmp_path / "risk_review.db"
     created = {v: re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", "\n".join(s)) for v, s in MIGRATIONS}
     tables = [t for names in created.values() for t in names]
     assert tables and len(tables) == len(set(tables))
+    assert LOCAL_ONLY_TABLES and LOCAL_ONLY_TABLES <= set(tables) and not LOCAL_ONLY_TABLES & SHARED_TABLES
     con = sqlite3.connect(db_path)
     try:
         for table in tables:
             info = con.execute(f"PRAGMA table_info({table})").fetchall()
+            cols = {row[1] for row in info}
             assert any(row[5] for row in info), f"{table} 에 PK 가 없다 — 들여오기가 500 이다"
-            assert table in SHARED_TABLES or "owner_sub" in {row[1] for row in info}, table
+            assert table in SHARED_TABLES or table in LOCAL_ONLY_TABLES or "owner_sub" in cols, table
+            if table in LOCAL_ONLY_TABLES:
+                assert "owner_sub" not in cols and table not in TABLE_ORDER, table
+            else:
+                assert table in TABLE_ORDER, f"{table} 이 반출 표 목록에 없다"
     finally:
         con.close()
     for version, statements in MIGRATIONS[1:]:
@@ -431,7 +445,7 @@ def test_v3_is_the_three_panel_result_columns_and_a_v2_db_rises_to_it(tmp_path):
     """v3 는 rr_panels 의 세 열뿐이다(PLAN 4절 C-2) — 행이 든 v2 DB 가 옛 행을 그대로 둔 채 오르고, 출발 버전 사본이 하나 남는다."""
     from app import risk_store as store_module
 
-    assert [v for v, _ in MIGRATIONS] == [1, 2, 3]
+    assert [v for v, _ in MIGRATIONS][:3] == [1, 2, 3]
     assert MIGRATIONS[2][1] == [s for s in MIGRATIONS[2][1] if s.upper().startswith("ALTER TABLE RR_PANELS ADD COLUMN")]
     db = tmp_path / "risk_review.db"
     v2 = RiskStore(db)
@@ -450,10 +464,148 @@ def test_v3_is_the_three_panel_result_columns_and_a_v2_db_rises_to_it(tmp_path):
     v3 = RiskStore(db)
     v3.open()
     try:
+        store_module.MIGRATIONS = original[:3]
         assert v3.migrate() == 3
         assert v3.query_one("SELECT COUNT(*) AS n FROM rr_projects")["n"] == 1
     finally:
+        store_module.MIGRATIONS = original
         v3.close()
     assert {"result_gz", "result_hash", "result_saved_at"} <= _columns(db, "rr_panels")
     copies = [p.name for p in tmp_path.glob("risk_review.db.pre-migrate-*")]
     assert len(copies) == 1 and copies[0].startswith("risk_review.db.pre-migrate-v2-")
+
+
+# ---------------------------------------------------------------- v4 — 재설계 M2 의 한 블록(M2.md 5절 #2)
+# 열 이름은 걸음 계획(m2-wp2 걸음 3 · m2-wp3b S1)의 것이다. 바꾸면 C2 의 생산자·소비자가 함께 바뀌어야 하므로 여기에 못 박는다.
+# cq_chars 는 걸음 계획의 열 목록에 없지만 '반출은 cq 를 200자로 줄이고 원래 길이를 적는다' 가 들여온 박스에 남으려면
+# 열이 있어야 한다(없으면 들여오기가 모르는 열로 422 다).
+V4_COLUMNS = {
+    "rr_unit_builds": {
+        "target_key", "rev", "owner_sub", "status", "builder_version", "input_hash", "source_hash", "caps_json",
+        "blocked_by", "stats_json", "invariants_json", "unit_ids_json", "reason", "error", "built_by", "built_at"},
+    "rr_units": {
+        "target_key", "unit_id", "owner_sub", "project_id", "rev_first", "kind", "reviewable", "scope_key", "title",
+        "digest", "unit_hash", "cids_json", "n_changes", "n_parts", "context_json", "flags_json", "lines_gz",
+        "summary_gz", "summary_sha", "summary_chars", "evidence_gz", "evidence_sha", "evidence_chars",
+        "evidence_status", "evidence_json", "builder_version", "created_at"},
+    "rr_expert_reports": {
+        "target_key", "agent_key", "owner_sub", "domain", "rank_in_domain", "tier", "review_order", "review_id",
+        "state", "lease_owner", "claimed_at", "run_id", "not_before", "pack_hash", "pack_status", "pack_error",
+        "pack_attempts", "pack_frozen_at", "card_basis", "plan_json", "limits_rev", "sweep_state", "sweep_json",
+        "cells_total", "report_gz", "report_hash", "report_bytes", "summary_md", "revision", "opinion_id",
+        "findings_n", "coverage_status", "model", "prompt_rev", "norm_rev", "verify_rev", "stats_json", "error",
+        "finalized_at", "created_at", "updated_at"},
+    "rr_review_cells": {
+        "target_key", "unit_id", "agent_key", "owner_sub", "domain", "unit_seq", "state", "route", "route_forced",
+        "route_json", "basis", "run_id", "lease_owner", "heartbeat_at", "priority", "tries", "charged",
+        "infra_streak", "not_before", "error_code", "error_class", "error", "knob", "credential_kind", "model",
+        "llm_calls", "tokens_in", "tokens_out", "elapsed_ms", "truncated", "rows_expected", "rows_missing", "stamp",
+        "soft_over", "cards_expected", "cards_judged", "n_fail", "n_warning", "n_ok", "n_na", "n_undetermined",
+        "n_disputed", "n_flipped", "n_offcard", "offcard_state", "offcard_capped", "quote_ok", "quote_n", "refs_ok",
+        "refs_n", "bg_full_n", "bg_title_only_n", "unit_hash", "pack_hash", "input_hash", "prompt_rev",
+        "verify_rev", "extras_json", "mechs_json", "handoffs_json", "sample_json", "status_source", "decided_by",
+        "decided_at", "decide_note", "reopened_n", "started_at", "finished_at", "created_at", "updated_at"},
+    "rr_card_verdicts": {
+        "target_key", "unit_id", "agent_key", "record_id", "variant", "owner_sub", "alias", "card_id", "section_id",
+        "text_sha", "applies", "judgement", "cq", "cq_chars", "lines_json", "refs_json", "why", "need", "sev",
+        "mech", "mech_free", "path", "check_kind", "check_text", "conds_json", "checks_json", "quote_ok", "refs_ok",
+        "check_disagree", "grade", "is_effective", "agree", "split", "revised_from", "deck_id", "call_id",
+        "created_at"},
+    "rr_card_packs": {
+        "agent_key", "pack_hash", "norm_rev", "role_sha", "cards_total", "checkable_n", "chars_total",
+        "unrenderable_n", "manifest_json", "pack_gz", "source", "fetched_at"},
+    "rr_review_calls": {
+        "call_id", "target_key", "agent_key", "unit_id", "owner_sub", "run_id", "kind", "variant", "deck_id",
+        "page_no", "seq", "state", "outcome_class", "cards_json", "request_hash", "input_sha", "prompt_chars",
+        "tokens_in", "tokens_out", "output_truncated", "finish_reason", "soft_over", "attempts", "queued_ms",
+        "llm_ms", "rows_expected", "rows_missing", "bad_lines", "stamp", "dropped_over_cap", "bg_dropped", "model",
+        "prompt_rev", "norm_rev", "limits_rev", "credential_kind", "result_gz", "result_sha256", "quality_json",
+        "error_code", "error_infra", "error_retryable", "error", "started_at", "duration_ms"},
+}
+V4_PRIMARY_KEYS = {
+    "rr_unit_builds": ["target_key", "rev"], "rr_units": ["target_key", "unit_id"],
+    "rr_expert_reports": ["target_key", "agent_key"], "rr_review_cells": ["target_key", "unit_id", "agent_key"],
+    "rr_card_verdicts": ["target_key", "unit_id", "agent_key", "record_id", "variant"],
+    "rr_card_packs": ["agent_key", "pack_hash"], "rr_review_calls": ["call_id"],
+}
+V4_ADDED_COLUMNS = {"rr_targets": {"flow"}, "rr_jobs": {"mode", "hold_code", "hold_until", "hold_n"},
+                    "rr_findings": {"unit_id", "source_kind", "source_id", "agent_key"}}
+V4_INDEXES = {
+    "ix_rr_expert_reports_state": ("rr_expert_reports", ["target_key", "state", "review_order"]),
+    "ix_rr_expert_reports_review": ("rr_expert_reports", ["review_id"]),
+    "ix_rr_cells_state": ("rr_review_cells", ["target_key", "state"]),
+    "ix_rr_cells_agent": ("rr_review_cells", ["target_key", "agent_key", "unit_seq"]),
+    "ix_rr_verdicts_eff": ("rr_card_verdicts", ["target_key", "agent_key", "is_effective", "judgement"]),
+    "ix_rr_verdicts_unit": ("rr_card_verdicts", ["target_key", "unit_id", "is_effective"]),
+    "ix_rr_review_calls_cell": ("rr_review_calls", ["target_key", "agent_key", "unit_id", "started_at"]),
+    "ix_rr_review_calls_run": ("rr_review_calls", ["run_id", "started_at"]),
+}
+
+
+def test_v4_is_the_m2_block_with_the_step_plans_column_names(risk_store, tmp_path):
+    """v4 하나에 단위 표 둘 · 셀 원장 표 다섯 · rr_targets.flow · rr_jobs 열 넷 · rr_findings 열 넷이 다 있고 그 밖은 없다.
+    rr_roster.input_gaps_json 은 v4 가 아니다(M3 의 v5)."""
+    assert [v for v, _ in MIGRATIONS] == [1, 2, 3, 4]
+    v4 = MIGRATIONS[3][1]
+    assert set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", "\n".join(v4))) == V4_TABLES == set(V4_COLUMNS)
+    altered: dict[str, set[str]] = {}
+    for sql in v4:
+        hit = re.match(r"ALTER TABLE (\w+) ADD COLUMN (\w+)", sql)
+        if hit:
+            altered.setdefault(hit.group(1), set()).add(hit.group(2))
+    assert altered == V4_ADDED_COLUMNS
+    assert set(re.findall(r"CREATE INDEX IF NOT EXISTS (\w+)", "\n".join(v4))) == set(V4_INDEXES)
+
+    db = tmp_path / "risk_review.db"
+    for table, cols in V4_COLUMNS.items():
+        assert _columns(db, table) == cols, table
+    con = sqlite3.connect(db)
+    try:
+        for table, keys in V4_PRIMARY_KEYS.items():
+            info = con.execute(f"PRAGMA table_info({table})").fetchall()
+            assert [r[1] for r in sorted((r for r in info if r[5]), key=lambda r: r[5])] == keys, table
+        for name, (table, cols) in V4_INDEXES.items():
+            assert [r[2] for r in con.execute(f"PRAGMA index_info({name})").fetchall()] == cols, name
+            assert con.execute("SELECT tbl_name FROM sqlite_master WHERE name = ?", (name,)).fetchone()[0] == table
+    finally:
+        con.close()
+    for table, cols in V4_ADDED_COLUMNS.items():
+        assert cols <= _columns(db, table)
+    assert "input_gaps_json" not in _columns(db, "rr_roster")
+
+
+def test_a_v3_db_rises_to_v4_once_with_one_v3_copy(tmp_path):
+    """행이 든 v3 DB 가 옛 행을 그대로 둔 채 v4 로 오르고 출발 버전 사본(pre-migrate-v3-*) 하나만 남는다. 두 번째 기동은
+    아무것도 하지 않는다. 실제 패널 결과가 든 v3 원장은 tests/rr/test_v4_upgrade.py 가 본다."""
+    from app import risk_store as store_module
+
+    db = tmp_path / "risk_review.db"
+    v3 = RiskStore(db)
+    v3.open()
+    original = store_module.MIGRATIONS
+    try:
+        store_module.MIGRATIONS = original[:3]
+        assert v3.migrate() == 3
+        v3.execute("INSERT INTO rr_projects(id, owner_sub, code, name, created_at, updated_at)"
+                   " VALUES ('P1','u','F7','F7',1,1)")
+    finally:
+        store_module.MIGRATIONS = original
+        v3.close()
+    assert not V4_TABLES & _tables(db) and "flow" not in _columns(db, "rr_targets")
+
+    for _ in range(2):
+        store = RiskStore(db)
+        store.open()
+        try:
+            assert store.migrate() == 4
+            assert store.query_one("SELECT COUNT(*) AS n FROM rr_projects")["n"] == 1
+        finally:
+            store.close()
+        copies = [p.name for p in tmp_path.glob("risk_review.db.pre-migrate-*")]
+        assert len(copies) == 1 and copies[0].startswith("risk_review.db.pre-migrate-v3-"), copies
+    assert V4_TABLES <= _tables(db) and "flow" in _columns(db, "rr_targets")
+    con = sqlite3.connect(tmp_path / copies[0])
+    try:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 3
+    finally:
+        con.close()

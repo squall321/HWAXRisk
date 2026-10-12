@@ -20,13 +20,20 @@ EXPORTS_DIRNAME = "exports"
 _CREATE_TABLE_RE = re.compile(r"CREATE TABLE IF NOT EXISTS\s+(rr_\w+)", re.IGNORECASE)
 
 
+# 박스 지역 표 — owner_sub 가 없는 내용 주소 사본이라 반출·들여오기에서 뺀다(TABLE_ORDER 에 들지 않으므로 그 표의 줄을
+# 들여오면 '알 수 없는 표' 422 다). rr_card_packs 는 사내 카드 원문의 동결본이고 과제 자료가 아니다(재설계 C-9, 사용자 결정
+# 2026-10-12 — 카드 원문은 앱 DB 에 복제하되 박스 밖으로는 판정당 인용 200자만 나간다). tests/test_store.py 의 표 규약이 같이 읽는다.
+LOCAL_ONLY_TABLES: frozenset[str] = frozenset({"rr_card_packs"})
+
+
 def _table_order() -> tuple[str, ...]:
-    """plan §5.2.2 A→H 표 순서 — MIGRATIONS 의 DDL 문장에 나온 차례 그대로다(별도 하드코딩 목록을 두지 않는다)."""
+    """plan §5.2.2 A→H 표 순서 — MIGRATIONS 의 DDL 문장에 나온 차례 그대로다(별도 하드코딩 목록을 두지 않는다).
+    박스 지역 표(LOCAL_ONLY_TABLES)는 뺀다."""
     out: list[str] = []
     for _version, statements in MIGRATIONS:
         for sql in statements:
             hit = _CREATE_TABLE_RE.search(sql)
-            if hit is not None and hit.group(1) not in out:
+            if hit is not None and hit.group(1) not in out and hit.group(1) not in LOCAL_ONLY_TABLES:
                 out.append(hit.group(1))
     return tuple(out)
 
@@ -429,5 +436,5 @@ def row_digest(store: RiskStore, owner_sub: str) -> dict[str, tuple[int, str]]:
     return out
 
 
-__all__ = ["TABLE_ORDER", "GLOBAL_TABLES", "header_line", "iter_lines", "write_export_file", "import_jsonl", "row_digest",
-           "read_origin", "EXPORTS_DIRNAME"]
+__all__ = ["TABLE_ORDER", "GLOBAL_TABLES", "LOCAL_ONLY_TABLES", "header_line", "iter_lines", "write_export_file",
+           "import_jsonl", "row_digest", "read_origin", "EXPORTS_DIRNAME"]
