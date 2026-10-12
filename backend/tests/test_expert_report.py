@@ -355,3 +355,18 @@ def test_the_quote_mark_says_why_a_quote_did_not_pass_and_never_calls_a_card_quo
     assert "엔진 검사는 찾았다고 했고 앱 재대조는 카드 글에서 찾지 못했다" in quote_lines[by_alias["K04"]]
     assert "앱 재대조·엔진 검사 둘 다 카드 글에서 찾았다" in quote_lines[by_alias["K05"]]
     assert "불일치" not in md and render.lint_text(md)["violations"] == []
+
+
+def test_a_verdict_that_needed_refs_and_gave_none_is_labelled_as_missing_refs(store):
+    """R3B-5 — applies=yes 인데 참조가 빈 행(refs_ok 0)은 '그 단위 밖 참조가 섞였다' 가 아니라 참조를 대지 않았다고 적는다. 참조가
+    필요 없는 행(해당 없음 — refs_ok NULL)은 '참조 없음', 그 단위 줄을 댄 행은 '그 단위 소속' 이다."""
+    key = rig.target(store)
+    first = _unit_ids(store, key)[0]
+    _run(store, key, scope={"agents": [SEAL], "unit_ids": [first]}, no_refs={"K02"}, verdicts={_rid("K05"): ("no", "na")})
+    report = expert_report.load_report(store, key, SEAL)
+    rows = {c["alias"]: c["rows"][0] for c in report["checklist"]}
+    assert (rows["K02"]["refs"], rows["K02"]["refs_ok"], rows["K05"]["refs_ok"], rows["K01"]["refs_ok"]) == ([], 0, None, 1)
+    md = expert_report.render_report_md(report, part="cards")
+    blocks = {c["alias"]: md.split(f"### {c['alias']} ", 1)[1].split("\n###", 1)[0] for c in report["checklist"]}
+    assert "참조가 필요한 행인데 판정에 쓴 변경 줄을 대지 않았다" in blocks["K02"] and "그 단위 밖" not in blocks["K02"]
+    assert "변경 줄 없음 — 참조 없음" in blocks["K05"] and "— 그 단위 소속" in blocks["K01"]

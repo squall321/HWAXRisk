@@ -1267,6 +1267,16 @@ def _quote_mark(state: Any, ok: Any, ref: str) -> str:
     return _QUOTE_STATE_LINE.get(str(state), _q(state)).format(section=f"(절 {section})" if section else "")
 
 
+def _refs_mark(refs: Sequence[Any], refs_ok: Any) -> str:
+    """변경 줄 참조의 대조 표기(R3B-5) — 참조가 있어야 하는 행(applies=yes 판정 · 카드 밖 리스크)이 비어 0 인 것을 '그 단위 밖 참조'
+    와 가른다(review_verify.refs_verdict 는 둘 다 0 이다)."""
+    if refs_ok == 1:
+        return "그 단위 소속"
+    if not refs:
+        return "참조가 필요한 행인데 판정에 쓴 변경 줄을 대지 않았다" if refs_ok == 0 else "참조 없음"
+    return "그 단위 밖 참조가 섞였다"
+
+
 def _quote_line(prefix: str, ref: str, quote: str | None, chars: int | None, ok: Any, *, word: str,
                 state: Any = None) -> str:
     if not quote:
@@ -1341,8 +1351,7 @@ def _md_check_row(row: Mapping[str, Any], card: Mapping[str, Any] | None = None)
            + (f" · {_sev(row['sev'])}" if _sev(row.get("sev")) else ""),
            "  - " + _quote_line("카드 인용", row["quote_ref"], row["cq"], row["cq_chars"], row["quote_ok"], word="cq",
                                 state=row.get("quote_state")),
-           f"  - 변경 줄 {_refs(row['lines'], row['refs']) or '없음'} — "
-           + {1: "그 단위 소속", 0: "그 단위 밖 참조가 섞였다"}.get(row["refs_ok"], "참조 없음")]
+           f"  - 변경 줄 {_refs(row['lines'], row['refs']) or '없음'} — {_refs_mark(row['refs'], row['refs_ok'])}"]
     if row.get("why"):
         out.append(f"  - 이유 {_q(row['why'])}")
     if row.get("need"):
@@ -1467,8 +1476,7 @@ def _md_off_card(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
                                                          f["quote_ok"], word="q", state=f.get("quote_state")))
         else:
             lines.append("  - 근거 경험칙 — 카드 근거 없음(코드가 원문과 대조할 수 없다)")
-        lines.append(f"  - 변경 줄 {_refs(f['lines'], f['refs']) or '없음'} — "
-                     + ("그 단위 소속" if f.get("refs_ok") == 1 else "그 단위 밖 참조가 섞였거나 참조가 없다"))
+        lines.append(f"  - 변경 줄 {_refs(f['lines'], f['refs']) or '없음'} — {_refs_mark(f['refs'], f.get('refs_ok'))}")
         lines.append(f"  - 닫는 확인 {_q(f.get('check_kind') or '')} {_q(f.get('check') or '')}"
                      + (f" · finding {_q(f['finding_id'])}" if f.get("finding_id") else ""))
         items.append("\n".join(lines))
