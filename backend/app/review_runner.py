@@ -889,8 +889,9 @@ class _Session:
                               for name, items in parts)
             self._hold("ctx_too_small", f"창이 모자라 한 호출에 실을 수 없는 것이 있다({self.agent} 계획의 oversize — {what}). 이 박스의"
                        f" 창은 {int(self.lim.get('ctx_tokens') or 0):,} 토큰({self.lim.get('ctx_source')})이다. 다시 쪼개지 않는다(D-22)"
-                       f" — 더 큰 창의 LLM 을 붙이거나({CTX_KNOB}·VLLM_MODEL) 단위 크기 손잡이(HWAXRISK_UNIT_MAX_LINES)를 줄여 단위를"
-                       " 다시 세운 뒤 재개한다")
+                       f" — 창이 그만큼 큰 LLM 을 붙인 박스에서 재개하거나({CTX_KNOB}·VLLM_MODEL), 단위 크기 손잡이"
+                       "(HWAXRISK_UNIT_MAX_LINES)를 줄여 새 대상을 연다. 검토 잡이 선 이 대상의 단위는 다시 세우지 않는다(409"
+                       " units_in_use — M2.md 5절 #6)")
             raise _Stop("ctx_too_small")
         return plan
 

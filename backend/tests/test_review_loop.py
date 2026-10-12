@@ -664,7 +664,9 @@ def test_a_fallback_window_waits_and_after_600_seconds_holds_ctx_unknown_until_t
 
 
 def test_an_oversize_unit_holds_ctx_too_small_and_is_never_split(store, monkeypatch):
-    """계획의 oversize — 다시 쪼개지 않고 ctx_too_small 로 멈춘다(D-22). 그 단위와 이 박스의 창을 적고, 시계로 재개하지 않는다."""
+    """계획의 oversize — 다시 쪼개지 않고 ctx_too_small 로 멈춘다(D-22). 그 단위와 이 박스의 창을 적고, 시계로 재개하지 않는다. 고칠
+    곳은 막히지 않은 길이다(반대 검토 R3A-12) — 창이 큰 LLM 의 박스에서 재개하거나 손잡이를 줄여 새 대상을 연다. 검토 잡이 선 이
+    대상의 단위 재빌드는 409 units_in_use 라 '단위를 다시 세운 뒤 재개' 를 권하지 않는다."""
     key = rig.target(store)
     unit_id = _unit_ids(store, key)[2]
     job_id = rig.job(store, key, scope={"agents": [SEAL]})
@@ -675,10 +677,16 @@ def test_an_oversize_unit_holds_ctx_too_small_and_is_never_split(store, monkeypa
     row = rig.job_row(store, job_id)
     assert (row["hold_code"], row["hold_until"]) == ("ctx_too_small", None)
     assert unit_id in row["error"] and "1,048,576" in row["error"]
+    assert "새 대상을 연다" in row["error"] and "LLM_CONTEXT_TOKENS" in row["error"] and "다시 세운 뒤" not in row["error"]
     assert fake.runs == 0 and {(c["state"], c["charged"]) for c in _cells(store, key, SEAL)} == {("pending", 0)}
     r.clock.advance(100_000)
     r.tick()
     assert rig.state(store, job_id) == "paused"
+    from app.errors import AppError
+    with pytest.raises(AppError) as refused:                # 손잡이를 줄여 이 대상을 다시 세우는 길은 막혀 있다
+        units.build_units(store, key, built_by=OWNER, reason="R3A-12",
+                          caps=units.UnitCaps(target_lines=10, max_lines=20, small_lines=5, units_max=60))
+    assert refused.value.code == "units_in_use"
 
 
 def test_a_window_too_small_for_any_call_holds_ctx_too_small_before_any_call(store, monkeypatch):
