@@ -1,4 +1,4 @@
-# hwax-risk MCP 서버 — 도구 27종(발견 7 + 원장 7 + Claude 입구 12 + 검토 단위 1)은 REST 와 같은 함수를 부르는 접점이다(§6.11, LLM 을 부르지 않는다)
+# hwax-risk MCP 서버 — 도구 29종(발견 7 + 원장 7 + Claude 입구 12 + 검토 단위 1 + 카드 대조 검토 2)은 REST 와 같은 함수를 부르는 접점이다(§6.11, LLM 을 부르지 않는다)
 from __future__ import annotations
 
 import logging
@@ -10,7 +10,7 @@ import pydantic_core
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from app import entry, routes
+from app import entry, expert_report, routes
 from app.errors import AppError
 
 log = logging.getLogger("hwax_risk.mcp")
@@ -23,7 +23,9 @@ _INSTRUCTIONS = """HWAX Risk Review — 설계 리스크 심사 앱의 MCP 서�
 발견: risk_list_projects(과제·타깃·최근 스냅샷 id) · risk_similar_projects · risk_get_precedents(선례)
 조회: risk_get_snapshot(part=ir|state|nodes|edges|calls|rule_hits) · risk_get_diff(part=lines 는 변경 줄 전부 — 크면 limit·offset 으로 나눠) ·
       risk_get_registry · risk_claims_for_ref · risk_get_coverage(진행판·좌석) · risk_list_panels · risk_get_panel_transcript ·
-      risk_get_units(카드 대조의 검토 단위 — 목록·요약·줄·동결 근거, 크면 next_offset 으로 나눠)
+      risk_get_units(카드 대조의 검토 단위 — 목록·요약·줄·동결 근거, 크면 next_offset 으로 나눠) ·
+      risk_get_cells(카드 대조 셀 격자 — 전문가 × 단위의 상태·판정 수, 크면 next_offset 으로 나눠) ·
+      risk_get_expert_report(전문가 보고서 — 마크다운 쪽, next_page 로 이어 받으며 쪽을 다 이으면 part='full' 과 같다)
 어휘: risk_taxonomy — severity·judgement·direction 의 허용값(추측해서 넣으면 422 다)
 심사: risk_get_brief(열쇠는 brief_token, tier 'A' 는 웹 전용 — 결과를 낼 신원에게만 연다) · risk_submit_panel_result(engine='mcp' 는
       evidence_only 등급) · risk_add_finding — 둘 다 쓰기라 아래 신원 규칙을 따르고 actor 는 신원이 아니다(표기)
@@ -34,6 +36,9 @@ risk_capture_snapshot · risk_ack_gate · risk_decide_sameas · risk_create_diff
 risk_job_action · risk_repersist_panel 이고, 무엇을 어디에 쓸지 사용자에게 확인한 뒤 부른다. 같은 호출을 두 번 해도 같은 행이다. 신원은 도달한
 자격이 정한다(자칭 actor 없음) — 쓰기는 게이트웨이 위임으로 확인된 신원일 때만 하고, 아니면 delegation_required 로 까닭을 말한다.
 동의 인자(consent)는 사용자에게 받은 뒤에만 true 로 준다 — risk_next_step 의 next 는 그것을 채워 주지 않는다.
+카드 대조(flow='cells') 대상의 검토는 risk_start_job(mode='reviews', scope={agents:[…]}) 하나로 세운다 — 범위의 전문가는
+risk_next_step 의 facts.review_order(영역·영역 안 순위·tier·입력 결손)를 보고 사용자가 고른다(코드가 고르지 않는다). 지켜보기는
+risk_get_coverage(review 칸) · risk_get_cells, 결과는 risk_get_expert_report 다.
 PAT 는 인자로 받지 않는다 — 러너 자격은 웹 설정 화면에서 등록한다."""
 
 # loopback 바인드 + Caddy 경계 전제로 Host 검증(DNS rebinding 보호)은 끈다(LaminateAnalyzerMCP 선례).
@@ -361,11 +366,12 @@ async def risk_open_target(kind: str, ref_id: str, consent: bool = False, flow: 
 
 
 @mcp.tool()
-async def risk_start_job(target_key: str, tier: str, consent: bool = False, modifiers: list[str] | None = None,
-                         user_memo: str | None = None, concurrency: int = 1) -> dict:
-    """심사 잡 시작 — 쓰기: Tier 와 비용(패널 수·LLM 호출 추정)을 사용자에게 확인한 뒤 부른다(Tier C 는 consent=true), 심사는 앱 러너가 돌리고 결과는 웹에 그대로 보인다, Tier 는 누적이다(A 도메인 대표 → B → C 전원), 같은 대상·같은 Tier 의 살아 있는 잡이 있으면 그것을 돌려주고, 러너 자격이 없으면 웹 설정 화면에서 등록하라는 fix 로 답한다."""
+async def risk_start_job(target_key: str, tier: str | None = None, consent: bool = False,
+                         modifiers: list[str] | None = None, user_memo: str | None = None, concurrency: int = 1,
+                         mode: str = "panels", scope: dict | None = None) -> dict:
+    """심사 잡 시작 — 쓰기: 범위와 비용(패널 수·LLM 호출 추정)을 사용자에게 확인한 뒤 부른다(Tier C 와 호출 추정이 큰 검토는 consent=true), mode=panels(기본 — tier 필수, Tier 는 누적이다 A 도메인 대표 → B → C 전원)|reviews(카드 대조 대상의 전문가별 카드 대조 — tier·modifiers·concurrency 없이 scope={agents·domains·tiers·unit_ids} 로 범위를 주고, 전문가는 risk_next_step 의 facts.review_order 를 보고 사용자가 고른다), 심사는 앱 러너가 돌리고 결과는 웹에 그대로 보인다, 같은 대상의 살아 있는 잡(panels 는 같은 Tier)이 있으면 그것을 돌려주고, 자격이 없으면 웹 설정 화면에서 등록하라는 fix 로 답한다."""
     return await _entry(entry.start_job, target_key=target_key, tier=tier, consent=consent, modifiers=modifiers,
-                        user_memo=user_memo, concurrency=concurrency)
+                        user_memo=user_memo, concurrency=concurrency, mode=mode, scope=scope)
 
 
 @mcp.tool()
@@ -416,3 +422,61 @@ def risk_get_units(target_key: str, unit_id: str | None = None, part: str = "man
                                                             budget_chars=budget))
 
     return _scoped("target", target_key, manifest if part == "manifest" else one, target_key)
+
+
+# ================================================================ 카드 대조 검토(재설계 M2 S12 — 셀 격자 · 전문가 보고서, 읽기)
+def _fit_rows(page: Callable[[int], dict], limit: int) -> dict:
+    """`page(행 수)` 의 와이어 글이 MCP_RESULT_CHARS 안에 들 때까지 행 수를 줄인다 — 줄인 만큼은 next_offset 으로 이어 받는다(자르지
+    않는다). 행 하나가 혼자 넘으면 그 하나는 싣는다."""
+    take = max(1, min(int(limit), routes.CELL_LIST_LIMIT_MAX))
+    out = page(take)
+    size = _wire_chars(out)
+    while size > MCP_RESULT_CHARS and len(out["rows"]) > 1:
+        n = len(out["rows"])
+        take = max(1, min(n - 1, n * MCP_RESULT_CHARS // size))
+        out = page(take)
+        size = _wire_chars(out)
+    return out
+
+
+@mcp.tool()
+def risk_get_cells(target_key: str, agent_key: str | None = None, unit_id: str | None = None, state: str | None = None,
+                   limit: int = 200, offset: int = 0) -> dict:
+    """카드 대조 셀 조회(읽기 전용) — 격자(전문가 × 검토 단위)의 셀마다 상태·무엇으로 봤나(basis)·판정 수(n_fail·n_warning…)·카드 수·절단·인용 대조·실패 까닭을 검토 순서로 준다, agent_key·unit_id·state 로 거르고, 한 번에 약 2만 자 안에서 limit 행까지 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다), 판정 행 자체는 risk_get_expert_report 가 준다."""
+    def cells(key: str, *, owner_sub: str) -> dict:
+        return _fit_rows(lambda take: routes.cells_payload(key, owner_sub=owner_sub, agent_key=agent_key, unit_id=unit_id,
+                                                           state=state, limit=take, offset=offset,
+                                                           columns=routes.CELL_BRIEF_COLUMNS), limit)
+
+    return _scoped("target", target_key, cells, target_key)
+
+
+def _page_fragments(page: dict) -> int:
+    return sum(len(texts) for texts in (page.get("blocks") or {}).values())
+
+
+def _report_page_chars(meta: dict, report: dict, *, part: str, unit_id: str | None) -> int:
+    """MCP 쪽의 글자 크기 — 이 보고서의 쪽 전부가 와이어(들여쓰기 2 JSON) MCP_RESULT_CHARS 안에 들 때까지 줄인다. 쪽 번호가 부르는
+    쪽마다 달라지지 않게 쪽 전부로 정한다(같은 보고서면 같은 크기). 조각 하나가 혼자 넘는 쪽은 자르지 않고 그대로 둔다."""
+    chars = expert_report.PAGE_CHARS
+    while True:
+        pages = routes.expert_report_render(report, part=part, unit_id=unit_id, page_chars=chars)
+        over = [size for n, page in enumerate(pages, start=1) if _page_fragments(page) > 1
+                and (size := _wire_chars(routes.expert_report_envelope(meta, pages, n, part=part, unit_id=unit_id)))
+                > MCP_RESULT_CHARS]
+        if not over or chars <= 1:
+            return chars
+        chars = max(1, min(chars - 1, chars * MCP_RESULT_CHARS // max(over) - 1))
+
+
+@mcp.tool()
+def risk_get_expert_report(target_key: str, agent_key: str, part: str = "summary", unit_id: str | None = None,
+                           page: int = 1) -> dict:
+    """전문가 보고서 읽기(읽기 전용) — 카드 대조 검토가 마감 때 조립한 전문가 한 명의 보고서를 마크다운 쪽으로 준다, part=summary(머리·본 범위·올린 finding·검토 품질)|units(단위별 분석·카드 밖 지적·넘김·필요 정보·메커니즘)|cards(카드 점검표·배경 카드·판정 못 한 카드)|full, unit_id 로 한 단위만, 한 쪽은 약 2만 5천 자 안이고 next_page 를 page 로 주어 이어 받는다(본문을 자르지 않는다 — 쪽을 차례로 이으면 그 part 전체다), 카드 인용은 판정당 200자이고 원래 길이를 적는다."""
+    def report(key: str, *, owner_sub: str) -> dict:
+        meta, body = routes.expert_report_source(key, agent_key, owner_sub=owner_sub)
+        chars = _report_page_chars(meta, body, part=part, unit_id=unit_id)
+        pages = routes.expert_report_render(body, part=part, unit_id=unit_id, page_chars=chars)
+        return routes.expert_report_envelope(meta, pages, page, part=part, unit_id=unit_id)
+
+    return _scoped("target", target_key, report, target_key)

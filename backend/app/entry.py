@@ -19,7 +19,7 @@ from urllib.parse import quote
 
 from pydantic import BaseModel, ValidationError
 
-from app import config, identity, planner, routes, runner
+from app import config, identity, planner, review_ops, review_runner, routes, runner
 from app import roster as roster_module
 from app import units as units_module
 from app import state as state_module
@@ -323,12 +323,13 @@ def open_target(ident: identity.Identity, *, kind: str, ref_id: str, consent: bo
     return {**out, "web": web_paths(project_id=row["project_id"], target_key=out["target_key"])}
 
 
-def start_job(ident: identity.Identity, *, target_key: str, tier: str, consent: bool = False,
-              modifiers: list[str] | None = None, user_memo: str | None = None, concurrency: int = 1) -> dict:
+def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = None, consent: bool = False,
+              modifiers: list[str] | None = None, user_memo: str | None = None, concurrency: int = 1,
+              mode: str = "panels", scope: dict | None = None) -> dict:
     """`POST /api/targets/{key}/jobs`. 같은 대상·같은 Tier 의 살아 있는 잡이 있으면 그것을 돌려준다.
 
     라우트는 부를 때마다 잡 행을 하나 더 만든다(중복 검사 없음). 역할 검사는 라우트와 같은 함수로 먼저 한다 — 살아 있는
-    잡을 돌려주는 갈래가 남의 대상의 잡을 흘리지 않게.
+    잡을 돌려주는 갈래가 남의 대상의 잡을 흘리지 않게. `mode='reviews'` 는 카드 대조 검토 잡이다(`_start_review_job`).
     """
     email = require_delegate(ident)
     store = routes.get_store()
@@ -338,6 +339,9 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str, consent: 
     if not routes._is_admin(ident):
         routes.require_role(target["project_id"], email, "editor")
     web = web_paths(project_id=target["project_id"], target_key=target_key)
+    if mode == "reviews":
+        return _start_review_job(ident, store, target_key, web, tier=tier, consent=consent, modifiers=modifiers,
+                                 user_memo=user_memo, concurrency=concurrency, scope=scope)
     live = store.query_one(
         "SELECT id, tier, state, pause_reason, panels_done, panels_total, error, credential_email FROM rr_jobs"
         f" WHERE target_key = ? AND tier = ? AND {runner.PANEL_JOBS_SQL}"
@@ -346,14 +350,44 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str, consent: 
     if live is not None:
         return {"job_id": live["id"], "created": False, **{k: live[k] for k in live.keys() if k != "id"}, "web": web}
     body = _body(routes.JobBody, tier=tier, concurrency=concurrency, modifiers=modifiers, user_memo=user_memo,
-                 consent=consent)
+                 consent=consent, mode=mode, **({"scope": scope} if scope is not None else {}))
+    return {**_create_job(ident, target_key, body), "created": True, "web": web}
+
+
+def _create_job(ident: identity.Identity, target_key: str, body: Any) -> dict:
+    """라우트로 잡을 세운다 — 자격이 없으면 웹 설정 화면의 고칠 곳(`fix`)을 붙인다."""
     try:
-        out = routes.create_job(target_key, body, ident=ident)
+        return routes.create_job(target_key, body, ident=ident)
     except AppError as exc:
         if exc.code == "pat_unavailable":
             raise AppError(exc.code, exc.message, exc.http_status, detail={**exc.detail, "fix": fix_register_pat()}) from exc
         raise
-    return {**out, "created": True, "web": web}
+
+
+def _start_review_job(ident: identity.Identity, store: Any, target_key: str, web: dict, *, tier: str | None,
+                      consent: bool, modifiers: list[str] | None, user_memo: str | None, concurrency: int,
+                      scope: dict | None) -> dict:
+    """검토 잡 — 같은 대상의 살아 있는 검토 잡이 있으면 그것을 돌려준다(`created: false` — 범위가 다르면 `differs: ['scope']`,
+    바꾸지 않는다). 패널 칸은 준 것만 본문에 싣는다 — 주면 본문 검증이 422 로 까닭을 말한다(조용히 버리지 않는다). 본문 검증은
+    살아 있는 잡을 돌려주기 전에 한다."""
+    fields: dict[str, Any] = {"mode": "reviews", "user_memo": user_memo, "consent": consent}
+    for name, value, unset in (("scope", scope, None), ("tier", tier, None), ("modifiers", modifiers, None),
+                               ("concurrency", concurrency, 1)):
+        if value != unset:
+            fields[name] = value
+    body = _body(routes.JobBody, **fields)
+    live = store.query_one(
+        "SELECT id, state, hold_code, hold_until, error, credential_email, params_json FROM rr_jobs"
+        f" WHERE target_key = ? AND mode = 'reviews' AND state IN ({','.join('?' for _ in LIVE_JOB_STATES)})"
+        " ORDER BY created_at DESC, rowid DESC LIMIT 1", (target_key, *LIVE_JOB_STATES))
+    if live is not None:
+        have = routes._loads(live["params_json"], {}).get("scope") or {}
+        out = {"job_id": live["id"], "created": False, "mode": "reviews", "scope": have,
+               **{k: live[k] for k in ("state", "hold_code", "hold_until", "error", "credential_email")}, "web": web}
+        if scope is not None and canonical_json(scope) != canonical_json(have):
+            out["differs"] = ["scope"]
+        return out
+    return {**_create_job(ident, target_key, body), "created": True, "web": web}
 
 
 # 이미 그 상태면 할 일이 없는 조작 — 러너는 이 경우 409 를 내지만 입구는 같은 호출을 두 번 받을 수 있다.
@@ -676,7 +710,8 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
             " 되풀이해 실패하면 discard=true(REST 는 ?discard=1)로 포기한다 — 엔진 결과는 패널에 남고 좌석은 다음 패널에서 다시 돈다.",
             panels=[p["id"] for p in waiting]))
     if target.get("flow") == "cells":
-        return _cells_answer(answer, target_key, project_id, coverage["units"], repersist_steps, facts, blocked, notes)
+        return _cells_answer(answer, store, ident, owner, target_key, project_id, coverage, repersist_steps, facts, blocked,
+                             notes)
     jobs = [dict(r) for r in store.query(
         f"SELECT tier, state FROM rr_jobs WHERE target_key = ? AND {runner.PANEL_JOBS_SQL}"
         " ORDER BY created_at DESC, rowid DESC", (target_key,))]
@@ -723,20 +758,120 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
     return answer("job", steps)
 
 
-def _cells_answer(answer, target_key: str, project_id: str, units_state: dict, repersist_steps: list[dict],
-                  facts: dict, blocked: list[dict], notes: list[str]) -> dict:
+# 검토 잡 보류(review_ops.HOLD_CODES)의 고칠 곳 — 길잡이가 막힘(blocked)의 fix 에 싣는다. 자동 재개 코드는 무엇을 기다리는지 말한다.
+REVIEW_HOLD_FIX: dict[str, str] = {
+    "ctx_too_small": "이 박스의 LLM 창이 한 호출에 실을 것보다 작다(앱은 단위를 다시 쪼개지 않는다 — D-22). 운영자가 에이전트 서버의"
+                     " LLM 창(LLM_CONTEXT_TOKENS·모델)을 키운 뒤 risk_job_action(action='resume') 으로 재개한다.",
+    "ctx_unknown": "에이전트 서버가 LLM 창 크기를 모른다(창 출처 fallback 이 600초 넘게 이어졌다). 운영자가 에이전트 서버에"
+                   " LLM_CONTEXT_TOKENS 를 적거나 LLM 서버가 창을 알리게 하면, 창 출처가 server·env 로 돌아오는 대로 저절로 재개한다.",
+    "agent_outdated": "에이전트 서버·포털에 카드 대조 경로(/agent/card-review/*)가 없다 — 운영자가 둘을 카드 대조가 든 판으로 올린다."
+                      " 300초마다 저절로 다시 본다.",
+    "contract": "앱과 엔진의 요청 계약이 어긋났다(판 어긋남·모르는 칸·서버와 앱의 인용 대조 불일치 상한) — 운영자가 에이전트 서버와"
+                " 리스크 앱의 판을 맞춘 뒤 risk_job_action(action='resume') 으로 재개한다. 무엇이 어긋났는지는 message 에 있다.",
+    "llm_misconfigured": "에이전트 서버의 LLM 설정(키·모델 이름)이 틀렸다 — 운영자가 고친 뒤 risk_job_action(action='resume') 으로"
+                         " 재개한다.",
+    "llm_outage": "LLM·에이전트 서버·포털이 불안정해 차단기가 열렸다 — hold_until 에 저절로 반쯤 열어 다시 본다(첫 호출이 성공하면"
+                  " 이어 돈다).",
+    "content_fail_rate": "최근 호출의 절반 이상이 내용 탓으로 실패해 차단기가 열렸다 — risk_get_cells(state='failed') 로 실패 까닭을"
+                         " 보고 고친 뒤 risk_job_action(action='resume') 으로 재개한다.",
+    "aidh_unreachable": "범위 안 전문가 모두 카드 묶음을 받지 못했다(AIDataHub·도구 서버) — hold_until 에 저절로 다시 본다.",
+}
+REVIEW_DISABLED_FIX = ("데이터 디렉터리의 knobs.env 에 HWAXRISK_REVIEW_ENABLED=1 을 적고 앱을 다시 띄운다 — 꺼져 있는 동안 검토 잡은"
+                       " 새 선점·새 호출을 내지 않는다(도는 호출은 끝까지 간다).")
+REVIEW_LIVE_STATES = ("queued", "running", "paused", "cancelling")
+REVIEW_FINALIZED = ("ready", "partial", "blocked")
+
+
+def _review_hold_fix(code: str | None) -> str:
+    if code == "credential":
+        return (fix_register_pat() + " 등록한 뒤 risk_job_action(action='resume') 으로 재개한다 — 카드 대조 검토는 사용자 PAT 로만 돌고"
+                " 서비스 계정으로 내려가지 않는다.")
+    return REVIEW_HOLD_FIX.get(str(code), "잡 error(message)의 까닭을 고친 뒤 risk_job_action(action='resume') 으로 재개한다.")
+
+
+def _review_start_step(target_key: str) -> dict:
+    """검토 잡 걸음 — 범위의 전문가는 사람이 고른다(M2.md 5절 #11 — 길잡이가 채우지 않는다). 동의도 채우지 않는다(SEC-4)."""
+    return _step("risk_start_job", {"target_key": target_key, "mode": "reviews", "scope": {"agents": ["<agent_key>", "…"]}},
+                 "카드 대조 검토 잡을 세운다 — 범위의 전문가는 facts.review_order(영역 · 영역 안 순위 · tier · 입력 결손 · 묶음을"
+                 " 얼린 뒤의 카드 수)를 보고 사용자가 고른다(M2 파일럿은 영역마다 대표 한 명 — 영역 안 순위 1 이고 input_gaps 가 빈"
+                 " 전문가). 입력 결손 전문가를 넣으면 422 input_gap_m3 다. 범위 밖 셀은 pending 으로 남아 다음 잡이 돌 수 있다. 잡을 만들면"
+                 " 호출 수 추정(calls_estimate)이 나오고 HWAXRISK_REVIEW_CONSENT_CALLS 를 넘으면 동의가 필요하다 — 범위와 비용을 사용자에게"
+                 " 보이고 확인받은 뒤 부른다." + _CONSENT_WHY)
+
+
+def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, target_key: str, project_id: str,
+                  coverage: dict, repersist_steps: list[dict], facts: dict, blocked: list[dict], notes: list[str]) -> dict:
     """카드 대조(flow='cells') 대상의 길잡이 — Tier 패널 잡은 받지 않는다(runner.panel_job_gate). 단위가 서 있지 않으면
-    `units_unbuildable` 이 막힘이다. 검토 잡 걸음은 카드 대조 러너(재설계 M2 단계 C2b)가 이 자리에 붙인다."""
+    `units_unbuildable` 이 막힘이다. 검토 순서(`facts.review_order` — 영역 · 영역 안 순위 · tier · 입력 결손 · 얼린 묶음의 카드 수)를
+    늘 싣고(M2.md 5절 #24), 검토 잡 전이면 risk_start_job(mode='reviews', scope) 걸음을, 검토 잡이 있으면 지켜볼 도구(진행판 review
+    칸 · 셀 격자 · 전문가 보고서)와 보류의 막힘·고칠 곳을 준다. `facts.review_job` 은 진행판의 review.job 이다."""
+    units_state = coverage["units"]
+    review = coverage.get("review") or {}
+    order = list(review.get("order") or [])
+    job = review.get("job")
     facts["units"] = units_state
+    facts["review_order"] = order
+    facts["review_job"] = job
     if units_state.get("status") not in units_module.OPEN_STATUSES:
         blocked.append(_blocked(
             "units_unbuildable", f"이 카드 대조 대상의 검토 단위가 서 있지 않다(빌드 {units_state.get('status')}).",
             f"웹 REST POST /api/targets/{target_key}/units 로 다시 세우거나, 검토 잡이 서기 전이면 risk_open_target 에"
             " flow='panels' 를 주어 패널 방식으로 되돌린다.", units=units_state))
-    notes.append("이 대상은 카드 대조(cells) 방식이다 — Tier 패널 잡(risk_start_job)은 받지 않는다. 카드 대조 검토 잡을 세우는"
-                 " 도구는 이 앱 판에 아직 없다.")
-    return answer("review", [
-        *repersist_steps,
-        _step("risk_get_units", {"target_key": target_key}, "검토 단위 목록(전문가가 카드로 대조할 변경 묶음).", write=False),
-        _step("risk_get_coverage", {"target_key": target_key, "with_seats": False}, "진행판(방식·단위·좌석).", write=False),
-        _step("risk_next_step", {"project_id": project_id}, "단계·막힘을 다시 본다.", write=False)])
+    notes.append("이 대상은 카드 대조(cells) 방식이다 — Tier 패널 잡은 받지 않는다. 검토 잡은 risk_start_job(mode='reviews', scope)"
+                 " 하나로 세운다.")
+    live = job is not None and job["state"] in REVIEW_LIVE_STATES
+    if not config.review_enabled():
+        blocked.append(_blocked("review_disabled", "카드 대조 검토가 이 박스에서 꺼져 있다(HWAXRISK_REVIEW_ENABLED) — "
+                                + ("검토 잡이 새 호출을 내지 않고 기다린다." if live else "검토 잡을 만들 수 없다."),
+                                REVIEW_DISABLED_FIX))
+    finalized = [r["agent_key"] for r in order if r.get("state") in REVIEW_FINALIZED]
+    watch = [_step("risk_get_coverage", {"target_key": target_key, "with_seats": False},
+                   "진행판의 review 칸 — 셀·전문가 상태, 카드 폭포, 품질 요약, 잡(단계·보류·도는 호출의 마지막 신호).", write=False),
+             _step("risk_get_cells", {"target_key": target_key},
+                   "셀 격자 — 전문가 × 단위의 상태·판정 수·실패 까닭(agent_key·state 로 거른다).", write=False)]
+    if finalized:
+        names = ", ".join(finalized[:9]) + (" …" if len(finalized) > 9 else "")
+        watch.append(_step("risk_get_expert_report", {"target_key": target_key, "agent_key": finalized[0]},
+                           f"마감한 전문가 {len(finalized)}명({names})의 보고서 — agent_key 를 바꿔 부른다. part='summary' 부터,"
+                           " part='full' 이 전부이고 next_page 로 이어 받는다.", write=False))
+    watch.append(_step("risk_next_step", {"project_id": project_id}, "단계·막힘을 다시 본다.", write=False))
+    if live:
+        if job["state"] == "paused":
+            code = job.get("hold_code")
+            if code == "user":
+                return answer("paused", [*repersist_steps, _step(
+                    "risk_job_action", {"job_id": job["id"], "action": "resume"},
+                    "사람이 멈춘 검토 잡이다 — 재개하면 끊긴 호출부터 차감 없이 이어 돈다."), *watch])
+            rule = review_ops.HOLD_CODES.get(str(code))
+            blocked.append(_blocked(str(code or "paused"), job.get("error") or f"검토 잡이 보류({code})로 멈췄다.",
+                                    _review_hold_fix(code), job_id=job["id"], hold_until=job.get("hold_until")))
+            if rule is not None and rule.auto:
+                notes.append(f"보류 {code} 는 저절로 재개한다" + (f"(hold_until {job['hold_until']})" if job.get("hold_until")
+                                                            else "(조건이 돌아오면)") + ".")
+                return answer("paused", [*repersist_steps, *watch])
+            return answer("paused", [*repersist_steps, _step(
+                "risk_job_action", {"job_id": job["id"], "action": "resume"},
+                "blocked 의 fix 를 고친 뒤 재개한다 — 고치지 않고 재개하면 같은 까닭으로 다시 멈춘다."), *watch])
+        waiting = job.get("waiting") or {}
+        if waiting.get("reason"):
+            notes.append(f"검토 잡이 기다린다 — {waiting['reason']}" + (f": {waiting['note']}" if waiting.get("note") else "") + ".")
+        return answer("running", [*repersist_steps, *watch])
+    steps = [*repersist_steps]
+    if job is not None:
+        notes.append(f"마지막 검토 잡 {job['id']} 는 {job['state']} 다" + (f" — {job['error']}" if job.get("error") else "") + ".")
+    if config.review_enabled() and units_state.get("status") in units_module.OPEN_STATUSES:
+        credential, why = review_runner.review_credential(store, None, owner, ident.email)
+        if credential is None:
+            blocked.append(_blocked("pat_unavailable", f"카드 대조 검토는 사용자 PAT 로만 돈다 — {why}.", fix_register_pat()))
+        runnable = [r["agent_key"] for r in order if not r.get("input_gaps")]
+        left = int(store.query_one(
+            f"SELECT COUNT(*) AS n FROM rr_review_cells WHERE target_key = ? AND state = 'pending'"
+            f" AND agent_key IN ({','.join('?' * len(runnable)) or 'NULL'})", (target_key, *runnable))["n"] or 0)
+        if job is None or left:
+            steps.append(_review_start_step(target_key))
+            if job is not None:
+                notes.append(f"범위 밖으로 남은 셀이 {left}개다(입력 결손이 아닌 전문가) — 범위를 넓혀 새 검토 잡으로 이어 돈다.")
+    if job is None:
+        steps.append(_step("risk_get_units", {"target_key": target_key},
+                           "검토 단위 목록(전문가가 카드로 대조할 변경 묶음).", write=False))
+    return answer("done" if job is not None and job["state"] == "completed" else "review", [*steps, *watch])

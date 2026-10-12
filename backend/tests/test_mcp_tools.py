@@ -42,6 +42,9 @@ TOOL_NAMES = [
     "risk_repersist_panel",
     # 검토 단위 1종(재설계 M2 U5) — 카드 대조의 단위를 읽는다. 새 도구는 뒤에 붙는다(옛 도구의 이름·순서는 그대로).
     "risk_get_units",
+    # 카드 대조 검토 2종(재설계 M2 S12) — 셀 격자와 전문가 보고서를 읽는다. 검토 잡은 risk_start_job(mode='reviews') 이다.
+    "risk_get_cells",
+    "risk_get_expert_report",
 ]
 ENTRY_TOOLS = TOOL_NAMES[TOOL_NAMES.index("risk_next_step"):TOOL_NAMES.index("risk_repersist_panel") + 1]
 # 도구별 대표 인자와, 빈 원장에서 기대하는 오류 코드(없으면 None = 정상 응답).
@@ -86,6 +89,8 @@ CALLS = [
     ("risk_repersist_panel", {"panel_id": "pn1"}, "delegation_required"),
     ("risk_get_units", {"target_key": "snap:s1"}, "not_visible"),
     ("risk_get_units", {"target_key": "snap:s1", "unit_id": "u-0123456789ab", "part": "lines"}, "not_visible"),
+    ("risk_get_cells", {"target_key": "snap:s1"}, "not_visible"),
+    ("risk_get_expert_report", {"target_key": "snap:s1", "agent_key": "mech-test-seal"}, "not_visible"),
 ]
 _HANGUL = re.compile(r"[가-힣]")
 # 인자 이름에 비밀이 오면 게이트웨이·포털 절차·클라이언트 대화 기록에 값이 남는다(작업 지시서 A-11) — 포털 절차의
@@ -141,12 +146,20 @@ def test_signatures_follow_plan():
     for name in ("risk_get_snapshot", "risk_get_diff", "risk_get_registry", "risk_claims_for_ref",
                  "risk_get_brief", "risk_list_projects", "risk_get_coverage", "risk_list_panels",
                  "risk_get_panel_transcript", "risk_taxonomy", "risk_get_precedents",
-                 "risk_similar_projects", "risk_get_units"):
+                 "risk_similar_projects", "risk_get_units", "risk_get_cells", "risk_get_expert_report"):
         assert "actor" not in set(props(name))
     # 검토 단위 — 대상 하나에 목록·단위 하나를 고르고, 나머지는 offset 으로 이어 받는다.
     assert set(props("risk_get_units")) == {"target_key", "unit_id", "part", "offset"}
     assert set(tools["risk_get_units"].inputSchema["required"]) == {"target_key"}
     assert props("risk_get_units")["part"]["default"] == "manifest"
+    # 카드 대조 검토 — 셀은 거름 셋과 나눠 받기, 보고서는 전문가 하나의 쪽(part 기본 summary · page 1).
+    assert set(props("risk_get_cells")) == {"target_key", "agent_key", "unit_id", "state", "limit", "offset"}
+    assert set(tools["risk_get_cells"].inputSchema["required"]) == {"target_key"}
+    assert (props("risk_get_cells")["limit"]["default"], props("risk_get_cells")["offset"]["default"]) == (200, 0)
+    assert set(props("risk_get_expert_report")) == {"target_key", "agent_key", "part", "unit_id", "page"}
+    assert set(tools["risk_get_expert_report"].inputSchema["required"]) == {"target_key", "agent_key"}
+    assert (props("risk_get_expert_report")["part"]["default"], props("risk_get_expert_report")["page"]["default"]) == (
+        "summary", 1)
     # 발견·조회는 인자가 최소여야 한다 — id 를 모르는 클라이언트가 첫 호출로 쓴다.
     assert set(props("risk_list_projects")) == set()
     assert set(props("risk_taxonomy")) == set()
@@ -186,7 +199,11 @@ def test_entry_tool_signatures():
     assert props("risk_create_diff") == {"base_snapshot_id", "target_snapshot_id"}
     assert props("risk_open_target") == {"kind", "ref_id", "consent", "flow", "reason"}
     assert required("risk_open_target") == {"kind", "ref_id"}
-    assert props("risk_start_job") == {"target_key", "tier", "consent", "modifiers", "user_memo", "concurrency"}
+    # 검토 잡은 새 도구가 아니라 mode·scope 다(M2.md 4.7) — tier 는 패널 잡에만 필요해 선택 인자가 됐다.
+    assert props("risk_start_job") == {"target_key", "tier", "consent", "modifiers", "user_memo", "concurrency", "mode",
+                                       "scope"}
+    assert required("risk_start_job") == {"target_key"}
+    assert tools["risk_start_job"].inputSchema["properties"]["mode"]["default"] == "panels"
     assert props("risk_job_action") == {"job_id", "action"}
     assert props("risk_repersist_panel") == {"panel_id", "discard"} and required("risk_repersist_panel") == {"panel_id"}
 

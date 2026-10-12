@@ -368,7 +368,8 @@ def _project_with_a_diff(store) -> factories.SynthTarget:
 
 def test_the_guide_shows_both_flows_before_a_target_opens_and_the_cells_branch_after(store):
     """대상을 열기 전 단계는 risk_open_target 두 걸음(패널 — 인자는 종전 그대로 · 카드 대조 — flow='cells')을 나란히 준다.
-    꺼진 박스는 카드 대조 걸음 대신 켜는 자리를 notes 에 적는다. cells 대상이 열리면 Tier 잡 걸음을 주지 않고 단위를 읽게 한다."""
+    꺼진 박스는 카드 대조 걸음 대신 켜는 자리를 notes 에 적는다. cells 대상이 열리면 Tier 잡 걸음 대신 검토 잡 걸음(mode='reviews' —
+    범위의 전문가는 사람이 고른다, S12)과 단위를 읽는 걸음을 준다."""
     synth = _project_with_a_diff(store)
     ident = factories.ident(OWNER)
     out = entry.next_step(ident, project_id=synth.project_id)
@@ -389,10 +390,12 @@ def test_the_guide_shows_both_flows_before_a_target_opens_and_the_cells_branch_a
     opened = entry.next_step(ident, project_id=synth.project_id)
     assert opened["where"] == "review" and opened["facts"]["target"]["flow"] == "cells"
     assert opened["facts"]["units"]["status"] == "ok"
-    assert [s["tool"] for s in opened["next"]] == ["risk_get_units", "risk_get_coverage", "risk_next_step"]
-    assert not any(s["tool"] == "risk_start_job" for s in opened["next"])
+    assert [s["tool"] for s in opened["next"]] == ["risk_start_job", "risk_get_units", "risk_get_coverage", "risk_get_cells",
+                                                   "risk_next_step"]
+    assert opened["next"][0]["args"] == {"target_key": key, "mode": "reviews", "scope": {"agents": ["<agent_key>", "…"]}}
+    assert not any("tier" in s["args"] for s in opened["next"])
     assert not [b for b in opened["blocked"] if b["code"] == "units_unbuildable"]
-    assert opened["next"][0]["args"] == {"target_key": key} and opened["next"][0]["write"] is False
+    assert opened["next"][1]["args"] == {"target_key": key} and opened["next"][1]["write"] is False
 
 
 # ---------------------------------------------------------------- 패널 경로는 패널 잡만 본다(재설계 M2 S6)

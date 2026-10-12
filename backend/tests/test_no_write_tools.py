@@ -61,3 +61,46 @@ def test_ra_write_tools_live_on_the_write_channel():
         text = (APP_DIR / name).read_text(encoding="utf-8")
         for tool in write_tools:
             assert tool not in text, f"{name} 이 RA 쓰기 도구 {tool} 을 부른다"
+
+
+# ---------------------------------------------------------------- MCP 쓰기 도구 목록(재설계 M2 S12 — 바뀌지 않는다)
+# 게이트웨이 위임 신원(entry.require_delegate)으로만 쓰는 도구. S12 의 검토 잡은 새 도구가 아니라 risk_start_job(mode='reviews')
+# 이고(M2.md 4.7), 새로 든 risk_get_cells·risk_get_expert_report 는 읽기다. risk_get_brief 는 읽기지만 결과를 낼 신원에게만 열어
+# 같은 문을 지난다(RV-1).
+MCP_WRITE_TOOLS = frozenset({
+    "risk_submit_panel_result", "risk_add_finding", "risk_create_project", "risk_add_source", "risk_capture_snapshot",
+    "risk_ack_gate", "risk_decide_sameas", "risk_create_diff", "risk_open_target", "risk_start_job", "risk_job_action",
+    "risk_repersist_panel"})
+DELEGATE_GATED_READS = frozenset({"risk_get_brief"})
+REVIEW_READERS = ("risk_get_units", "risk_get_cells", "risk_get_expert_report")
+
+
+def _calls_require_delegate(fn: ast.AST) -> bool:
+    return any(isinstance(n, ast.Call) and ((isinstance(n.func, ast.Name) and n.func.id == "require_delegate")
+                                            or (isinstance(n.func, ast.Attribute) and n.func.attr == "require_delegate"))
+               for n in ast.walk(fn))
+
+
+def _delegate_gated_tools() -> set[str]:
+    """MCP 도구 가운데 위임 문을 지나는 것 — 본문이 require_delegate 를 부르거나, 그 문을 지나는 entry 함수를 부른다."""
+    entry_tree = ast.parse((APP_DIR / "entry.py").read_text(encoding="utf-8"))
+    gated_entry = {f.name for f in ast.walk(entry_tree)
+                   if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef)) and _calls_require_delegate(f)}
+    out: set[str] = set()
+    for fn in ast.parse((APP_DIR / "mcp_server.py").read_text(encoding="utf-8")).body:
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if not any(isinstance(d, ast.Call) and isinstance(d.func, ast.Attribute) and d.func.attr == "tool"
+                   for d in fn.decorator_list):
+            continue
+        used = {n.attr for n in ast.walk(fn) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Name)
+                and n.value.id == "entry"}
+        if _calls_require_delegate(fn) or used & gated_entry:
+            out.add(fn.name)
+    return out
+
+
+def test_the_mcp_write_tools_are_the_same_and_the_review_readers_do_not_pass_the_write_door():
+    gated = _delegate_gated_tools()
+    assert gated == MCP_WRITE_TOOLS | DELEGATE_GATED_READS
+    assert not gated & set(REVIEW_READERS)
