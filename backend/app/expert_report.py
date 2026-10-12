@@ -18,6 +18,7 @@ import dataclasses
 import gzip
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -849,11 +850,11 @@ def summary_md(report: Mapping[str, Any]) -> str:
     """≤1500자 요약 — 의견 행 excerpt_for_rag 와 turns[0] 의 글. 코드가 쓰는 문장은 수와 참조뿐이고 전문가·카드의 글은 «» 로
     감싼다. 넘치면 원래 길이를 적고 줄인다(보고서 본문은 줄이지 않는다 — D-21)."""
     head, scope = report["head"], report["scope"]
-    name = f"{render.quote_source(head['name'])}({render.quote_source(head['agent_key'])})"
+    name = f"{_q(head['name'])}({_q(head['agent_key'])})"
     totals = scope["totals"]["by_state"]
     if head["state"] == "blocked":
         seen = totals.get("reviewed", 0)
-        lines = [f"{name} — 카드 묶음을 받지 못해({render.quote_source(head.get('pack_error') or '')}) "
+        lines = [f"{name} — 카드 묶음을 받지 못해({_q(head.get('pack_error') or '')}) "
                  + ("아무 단위도 보지 않았다" if not seen else f"이번 범위를 보지 않았다(앞서 검토한 단위 {seen}개)")
                  + f". 단위 {scope['totals']['units']}개 가운데 {len(scope['unseen'])}개가 보지 못한 것으로 남았다."]
         return _clip("\n".join(lines), SUMMARY_MAX, "요약")
@@ -866,9 +867,9 @@ def summary_md(report: Mapping[str, Any]) -> str:
     weight = {"FAIL": 0, "WARNING": 1}
     for f in sorted(report["findings"], key=lambda x: (weight.get(x.get("judgement_claimed") or "", 2), x["unit_seq"] or 0,
                                                       x["claim_uid"])):
-        cards = " · ".join(render.quote_source(c.get("card_id") or c["record_id"]) for c in f["cards"]) or "카드 밖"
+        cards = " · ".join(_q(c.get("card_id") or c["record_id"]) for c in f["cards"]) or "카드 밖"
         verdict = f"judgement={f['judgement_claimed']}" if f.get("judgement_claimed") else f"direction={f['direction']}"
-        lines.append(f"- 단위 {f['unit_seq']} {verdict} {cards} — {render.quote_source(f['claim'])}")
+        lines.append(f"- 단위 {f['unit_seq']} {verdict} {cards} — {_q(f['claim'])}")
     return _clip("\n".join(lines), SUMMARY_MAX, "요약")
 
 
@@ -1216,9 +1217,19 @@ _MISSING_LINE = {"no_verdict": "실효 판정 없음(점검표 칸이 비었다)
                  "unit_pack_absent": "이 단위를 본 카드 묶음이 이 박스에 없어 판정 대상이었는지 모른다"}
 
 
+# 마크다운에 펴는 글 안의 줄바꿈 — 카드 인용·모델 글은 여러 줄일 수 있다(엔진은 카드 글을 그대로 옮기라고 시킨다). 그대로 실으면
+# 둘째 줄의 '#'·'- '·'1. ' 이 보고서의 새 제목·목록이 된다(R3B-6). 펼 때만 줄바꿈 자리를 ⏎ 로 적어 한 줄로 접는다 — JSON 의 글은 그대로다.
+_LINE_BREAKS = re.compile(r"[ \t]*(?:\r\n|\r|\n|\u2028|\u2029|\x0b|\x0c|\x85)[ \t]*")
+LINE_BREAK_MARK = " ⏎ "
+
+
+def _one_line(text: str) -> str:
+    return _LINE_BREAKS.sub(LINE_BREAK_MARK, text)
+
+
 def _q(value: Any) -> str:
-    """전문가·카드·대상의 글은 «» 안에 둔다(판단어 린터 밖)."""
-    return render.quote_source(_s(value))
+    """전문가·카드·대상의 글은 «» 안에 둔다(판단어 린터 밖). 줄바꿈은 ⏎ 로 접는다(R3B-6)."""
+    return render.quote_source(_one_line(_s(value)))
 
 
 def _qv(value: Any) -> str:

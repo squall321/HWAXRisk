@@ -370,3 +370,37 @@ def test_a_verdict_that_needed_refs_and_gave_none_is_labelled_as_missing_refs(st
     blocks = {c["alias"]: md.split(f"### {c['alias']} ", 1)[1].split("\n###", 1)[0] for c in report["checklist"]}
     assert "참조가 필요한 행인데 판정에 쓴 변경 줄을 대지 않았다" in blocks["K02"] and "그 단위 밖" not in blocks["K02"]
     assert "변경 줄 없음 — 참조 없음" in blocks["K05"] and "— 그 단위 소속" in blocks["K01"]
+
+
+def test_line_breaks_inside_quotes_and_model_text_do_not_open_headings_or_lists(store, monkeypatch):
+    """R3B-6 — 카드 인용(카드 글 그대로 두 줄, 둘째 줄이 '## ' 로 시작)과 모델 글(이유 — '- ' 로 시작하는 둘째 줄)의 줄바꿈은 마크다운에
+    펼 때 ⏎ 로 접혀 새 제목·목록을 만들지 않는다. JSON 의 인용과 판정 행의 글은 그대로이고 인용은 재대조를 지난다."""
+    key = rig.target(store)
+    first = _unit_ids(store, key)[0]
+    pack = copy.deepcopy(fre.load("pack_ok.json"))
+    section = pack["cards"][0]["sections"][0]
+    section["text"] = "정적 접착 실링 부위의 유효 접착폭은 최악 공차 누적에서도 0.8 mm 이상을 남긴다.\n## 폭이 줄면 코너 R 도 함께 본다."
+    pack["cards"][0]["text_sha"] = cardpack.text_sha(pack["cards"][0]["sections"])
+    quote = "최악 공차 누적에서도 0.8 mm 이상을 남긴다.\n## 폭이 줄면 코너 R 도"
+    orig = FakeReviewEngine._verdict_row
+
+    def row(self, alias, card, own, lines, *, variant=None):
+        out = orig(self, alias, card, own, lines, variant=variant)
+        if alias == "K01":
+            out["cq"], out["checks"]["quote"] = quote, "ok"
+            out["why"] = "조건을 맞대었다.\n- 둘째 줄이 목록처럼 보인다"
+        return out
+
+    monkeypatch.setattr(FakeReviewEngine, "_verdict_row", row)
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [first]})
+    rig.Rig(store, FakeReviewEngine({**rig.packs(), SEAL: pack})).finish(job_id)
+    report = expert_report.load_report(store, key, SEAL)
+    k01 = next(c for c in report["checklist"] if c["alias"] == "K01")["rows"][0]
+    assert (k01["cq"], k01["quote_state"], k01["why"]) == (quote, "ok", "조건을 맞대었다.\n- 둘째 줄이 목록처럼 보인다")
+    for part in expert_report.PARTS:
+        md = expert_report.render_report_md(report, part=part)
+        assert not [line for line in md.split("\n") if line.startswith(("## 폭이", "- 둘째"))], part
+        assert render.lint_text(md)["violations"] == [], part
+    cards = expert_report.render_report_md(report, part="cards")
+    assert "«최악 공차 누적에서도 0.8 mm 이상을 남긴다. ⏎ ## 폭이 줄면 코너 R 도»" in cards
+    assert "«조건을 맞대었다. ⏎ - 둘째 줄이 목록처럼 보인다»" in cards
