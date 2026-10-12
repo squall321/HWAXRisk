@@ -2697,6 +2697,38 @@ def review_order_payload(store: Any, target_key: str) -> list[dict]:
             for row in planner.review_order(store, target_key)]
 
 
+# MCP 진행판·길잡이에 싣는 검토 순서 — 영역마다 영역 안 순위 1~이 값(R3B-1). 로스터 전원(359명이면 와이어 약 9만 자)을 실으면
+# risk_get_coverage·risk_next_step 이 MCP 결과 상한(25,000자)을 넘어 본문을 잃는다. 전부는 risk_get_coverage(order_offset=…) 쪽이다.
+REVIEW_ORDER_TOP = 3
+
+
+def review_order_brief(order: list[dict], *, top: int = REVIEW_ORDER_TOP) -> dict:
+    """MCP 의 검토 순서(R3B-1) — {order[영역 안 순위 1~top 인 행, 검토 순서 그대로 · 입력 결손 전문가도 싣는다], order_page{total,
+    shown, top_per_domain, input_gap_n, by_domain{영역: {total, input_gap_n}}, next_order_offset?}}. 행 모양은 REST 진행판의
+    `review.order` 행 그대로다. 싣지 않은 행이 있으면 `next_order_offset`(0)이 전부를 쪽으로 받는 자리다. REST 진행판은 전부를 싣는다."""
+    by_domain: dict[str, dict[str, int]] = {}
+    for row in order:
+        tally = by_domain.setdefault(str(row["domain"]), {"total": 0, "input_gap_n": 0})
+        tally["total"] += 1
+        tally["input_gap_n"] += 1 if row.get("input_gaps") else 0
+    rows = [row for row in order if isinstance(row.get("rank_in_domain"), int) and row["rank_in_domain"] <= top]
+    page = {"total": len(order), "shown": len(rows), "top_per_domain": top,
+            "input_gap_n": sum(1 for row in order if row.get("input_gaps")), "by_domain": dict(sorted(by_domain.items()))}
+    if len(rows) < len(order):
+        page["next_order_offset"] = 0
+    return {"order": rows, "order_page": page}
+
+
+def review_order_page(order: list[dict], offset: int, limit: int) -> dict:
+    """검토 순서 전부의 한 쪽(R3B-1) — {order[offset 부터 limit 행], order_page{total, offset, shown, next_order_offset?}}."""
+    skip = max(0, int(offset))
+    rows = order[skip:skip + max(1, int(limit))]
+    page = {"total": len(order), "offset": skip, "shown": len(rows)}
+    if skip + len(rows) < len(order):
+        page["next_order_offset"] = skip + len(rows)
+    return {"order": rows, "order_page": page}
+
+
 def _review_job_payload(job: dict) -> dict:
     """검토 잡 한 줄 — 행의 보류 열과 진행판(`rr_jobs.progress_json`, 루프가 60초마다 다시 센 값)을 그대로 옮긴다(여기서 원장을
     다시 세지 않는다). `signal.workers` 는 도는 호출마다의 마지막 신호이고 `*_idle_s` 는 그 시각에서 지금까지의 초다(서버 시계).

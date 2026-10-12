@@ -163,7 +163,10 @@ def test_signatures_follow_plan():
     # 발견·조회는 인자가 최소여야 한다 — id 를 모르는 클라이언트가 첫 호출로 쓴다.
     assert set(props("risk_list_projects")) == set()
     assert set(props("risk_taxonomy")) == set()
-    assert set(props("risk_get_coverage")) == {"target_key", "with_seats", "domain"}
+    # 진행판 — 검토 순서 전부(order_offset)와 좌석 행(seat_offset)은 와이어 한도 안에서 쪽으로 받는다(R3B-1).
+    assert set(props("risk_get_coverage")) == {"target_key", "with_seats", "domain", "order_offset", "seat_offset"}
+    assert (props("risk_get_coverage")["order_offset"]["default"], props("risk_get_coverage")["seat_offset"]["default"]) == (
+        None, 0)
     assert set(props("risk_similar_projects")) == {"project_id", "k"}
     submit = props("risk_submit_panel_result")
     assert set(submit) == {"panel_id", "engine", "decision_text", "turns", "report_id", "actor", "model",

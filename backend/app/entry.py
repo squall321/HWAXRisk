@@ -792,9 +792,10 @@ def _review_hold_fix(code: str | None) -> str:
 def _review_start_step(target_key: str) -> dict:
     """검토 잡 걸음 — 범위의 전문가는 사람이 고른다(M2.md 5절 #11 — 길잡이가 채우지 않는다). 동의도 채우지 않는다(SEC-4)."""
     return _step("risk_start_job", {"target_key": target_key, "mode": "reviews", "scope": {"agents": ["<agent_key>", "…"]}},
-                 "카드 대조 검토 잡을 세운다 — 범위의 전문가는 facts.review_order(영역 · 영역 안 순위 · tier · 입력 결손 · 묶음을"
-                 " 얼린 뒤의 카드 수)를 보고 사용자가 고른다(M2 파일럿은 영역마다 대표 한 명 — 영역 안 순위 1 이고 input_gaps 가 빈"
-                 " 전문가). 입력 결손 전문가를 넣으면 422 input_gap_m3 다. 범위 밖 셀은 pending 으로 남아 다음 잡이 돌 수 있다. 잡을 만들면"
+                 "카드 대조 검토 잡을 세운다 — 범위의 전문가는 facts.review_order(영역마다 영역 안 순위 1~3 — 영역 · 영역 안 순위 ·"
+                 " tier · 입력 결손 · 묶음을 얼린 뒤의 카드 수, 전부는 risk_get_coverage(order_offset=0) 가 쪽으로 준다)를 보고 사용자가"
+                 " 고른다(M2 파일럿은 영역마다 대표 한 명 — 영역 안 순위 1 이고 input_gaps 가 빈 전문가). 입력 결손 전문가를 넣으면 422"
+                 " input_gap_m3 다. 범위 밖 셀은 pending 으로 남아 다음 잡이 돌 수 있다. 잡을 만들면"
                  " 호출 수 추정(calls_estimate)이 나오고 HWAXRISK_REVIEW_CONSENT_CALLS 를 넘으면 동의가 필요하다 — 범위와 비용을 사용자에게"
                  " 보이고 확인받은 뒤 부른다." + _CONSENT_WHY)
 
@@ -802,15 +803,19 @@ def _review_start_step(target_key: str) -> dict:
 def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, target_key: str, project_id: str,
                   coverage: dict, repersist_steps: list[dict], facts: dict, blocked: list[dict], notes: list[str]) -> dict:
     """카드 대조(flow='cells') 대상의 길잡이 — Tier 패널 잡은 받지 않는다(runner.panel_job_gate). 단위가 서 있지 않으면
-    `units_unbuildable` 이 막힘이다. 검토 순서(`facts.review_order` — 영역 · 영역 안 순위 · tier · 입력 결손 · 얼린 묶음의 카드 수)를
-    늘 싣고(M2.md 5절 #24), 검토 잡 전이면 risk_start_job(mode='reviews', scope) 걸음을, 검토 잡이 있으면 지켜볼 도구(진행판 review
+    `units_unbuildable` 이 막힘이다. 검토 순서(`facts.review_order` — 영역마다 영역 안 순위 1~3 의 영역 · 순위 · tier · 입력 결손 ·
+    얼린 묶음의 카드 수, `facts.review_order_page` 가 전체 셈과 전부를 받는 자리)를 늘 싣고(M2.md 5절 #24 · R3B-1), 검토 잡 전이면 risk_start_job(mode='reviews', scope) 걸음을, 검토 잡이 있으면 지켜볼 도구(진행판 review
     칸 · 셀 격자 · 전문가 보고서)와 보류의 막힘·고칠 곳을 준다. `facts.review_job` 은 진행판의 review.job 이다."""
     units_state = coverage["units"]
     review = coverage.get("review") or {}
     order = list(review.get("order") or [])
     job = review.get("job")
     facts["units"] = units_state
-    facts["review_order"] = order
+    # 영역마다 앞 순위만 싣는다 — 로스터 전원을 실으면 359명 대상에서 이 답이 MCP 결과 상한을 넘는다(R3B-1). 전부는
+    # risk_get_coverage(order_offset=0) 쪽이다.
+    brief = routes.review_order_brief(order)
+    facts["review_order"] = brief["order"]
+    facts["review_order_page"] = brief["order_page"]
     facts["review_job"] = job
     if units_state.get("status") not in units_module.OPEN_STATUSES:
         blocked.append(_blocked(

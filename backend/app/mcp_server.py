@@ -37,7 +37,8 @@ risk_job_action · risk_repersist_panel 이고, 무엇을 어디에 쓸지 사�
 자격이 정한다(자칭 actor 없음) — 쓰기는 게이트웨이 위임으로 확인된 신원일 때만 하고, 아니면 delegation_required 로 까닭을 말한다.
 동의 인자(consent)는 사용자에게 받은 뒤에만 true 로 준다 — risk_next_step 의 next 는 그것을 채워 주지 않는다.
 카드 대조(flow='cells') 대상의 검토는 risk_start_job(mode='reviews', scope={agents:[…]}) 하나로 세운다 — 범위의 전문가는
-risk_next_step 의 facts.review_order(영역·영역 안 순위·tier·입력 결손)를 보고 사용자가 고른다(코드가 고르지 않는다). 지켜보기는
+risk_next_step 의 facts.review_order(영역마다 영역 안 순위 1~3 의 영역·순위·tier·입력 결손 — 전부는
+risk_get_coverage(order_offset=0) 쪽)를 보고 사용자가 고른다(코드가 고르지 않는다). 지켜보기는
 risk_get_coverage(review 칸) · risk_get_cells, 결과는 risk_get_expert_report 다.
 PAT 는 인자로 받지 않는다 — 러너 자격은 웹 설정 화면에서 등록한다."""
 
@@ -131,15 +132,39 @@ def risk_list_projects() -> dict:
 
 
 @mcp.tool()
-def risk_get_coverage(target_key: str, with_seats: bool = True, domain: str | None = None) -> dict:
-    """심사 진행판 — 도메인별 상태·미착석 수·완결 레벨·잡 상태와 좌석 행(with_seats=False 면 카운트만)."""
+def risk_get_coverage(target_key: str, with_seats: bool = True, domain: str | None = None,
+                      order_offset: int | None = None, seat_offset: int = 0) -> dict:
+    """심사 진행판 — 도메인별 상태·미착석 수·완결 레벨·잡 상태와 좌석 행(with_seats=False 면 카운트만, 좌석이 많으면 seat_offset 부터 한 번에 약 2만 5천 자씩 주고 next_seat_offset 으로 이어 받는다), 카드 대조 대상의 review 칸은 검토 순서를 영역마다 영역 안 순위 1~3 만 싣고(review.order_page 에 전체 셈) order_offset 을 주면 그 자리부터 검토 순서 전부를 쪽으로 준다(좌석 행 없이, next_order_offset 으로 이어 받는다)."""
     # '더 돌려야 하나, 끝났나' 의 근거. 등록부는 판정 행만 주고 좌석이 몇 개 비었는지는 말하지 않는다.
+    # 359명 로스터에서 검토 순서 전부(약 9만 자)·좌석 행 전부(약 12만 자)는 MCP 결과 상한을 넘어 본문을 잃는다(R3B-1) — 둘 다
+    # 자르지 않고 쪽으로 나눈다. REST 진행판은 전부를 싣는다.
     def call() -> dict:
         owner_sub = routes.mcp_scope_owner("target", target_key, _caller())
         out = routes.coverage_payload(target_key, owner_sub=owner_sub)
-        if with_seats:
-            out["seats"] = routes.seats_payload(target_key, domain, owner_sub=owner_sub)["seats"]
-        return out
+        review = out.get("review")
+        if order_offset is not None:
+            if review is None:
+                raise AppError("E100", "order_offset 은 카드 대조 대상의 검토 순서 쪽이다 — 이 대상에는 검토 순서가 없다.", 422)
+            full = list(review["order"])
+            return _fit_list(lambda take: {**out, "review": {**review, **routes.review_order_page(full, order_offset, take)}},
+                             len(full), lambda page: len(page["review"]["order"]))
+        if review is not None:
+            review.update(routes.review_order_brief(review["order"]))
+        if not with_seats:
+            return out
+        seats = routes.seats_payload(target_key, domain, owner_sub=owner_sub)["seats"]
+
+        def seat_page(take: int) -> dict:
+            skip = max(0, int(seat_offset))
+            rows = seats[skip:skip + take]
+            page = {**out, "seats": rows}
+            if skip or skip + len(rows) < len(seats):
+                page["seats_page"] = {"total": len(seats), "offset": skip, "shown": len(rows)}
+                if skip + len(rows) < len(seats):
+                    page["next_seat_offset"] = skip + len(rows)
+            return page
+
+        return _fit_list(seat_page, len(seats), lambda page: len(page["seats"]))
 
     return _guarded(call)
 
@@ -303,7 +328,7 @@ def risk_add_finding(
 @mcp.tool()
 async def risk_next_step(project_id: str | None = None) -> dict:
     """Claude 입구의 길잡이(읽기 전용) — 과제가 어느 단계(소스·캡처·리비전·same-as·비교·심사 대상·명단·잡·결과)이고 무엇이 막혔는지(고칠 곳 fix)와 다음에 부를 도구·인자(next)를 한 번에 준다, project_id 없이 부르면 내 과제 목록이고 acting_as 는 이 호출이 누구로 해석됐는지다."""
-    return await _entry(entry.next_step, project_id=project_id)
+    return _fit_guide(await _entry(entry.next_step, project_id=project_id))
 
 
 @mcp.tool()
@@ -436,6 +461,38 @@ def _fit_rows(page: Callable[[int], dict], limit: int) -> dict:
         take = max(1, min(n - 1, n * MCP_RESULT_CHARS // size))
         out = page(take)
         size = _wire_chars(out)
+    return out
+
+
+def _fit_list(page: Callable[[int], dict], total: int, shown: Callable[[dict], int]) -> dict:
+    """`page(행 수)` 의 와이어 글이 MCP_RESULT_CHARS 안에 들 때까지 행 수를 줄인다(R3B-1 — 진행판의 검토 순서 쪽·좌석 행). 줄인 만큼은
+    다음 offset 으로 이어 받는다(자르지 않는다). 행 하나가 혼자 넘으면 그 하나는 싣는다."""
+    take = max(1, int(total))
+    out = page(take)
+    size = _wire_chars(out)
+    while size > MCP_RESULT_CHARS and shown(out) > 1:
+        n = shown(out)
+        take = max(1, min(n - 1, n * MCP_RESULT_CHARS // size))
+        out = page(take)
+        size = _wire_chars(out)
+    return out
+
+
+def _fit_guide(out: dict) -> dict:
+    """길잡이 답이 MCP_RESULT_CHARS 를 넘으면 facts.review_order 를 영역마다 앞 순위 2명 → 1명으로 줄인다(R3B-1 — 영역이 많은
+    로스터). 줄인 셈은 facts.review_order_page 에 적고, 전부는 risk_get_coverage(order_offset=0) 쪽이다."""
+    facts = out.get("facts") if isinstance(out, dict) else None
+    if not isinstance(facts, dict) or not isinstance(facts.get("review_order"), list):
+        return out
+    rows, meta = facts["review_order"], dict(facts.get("review_order_page") or {})
+    top = int(meta.get("top_per_domain") or routes.REVIEW_ORDER_TOP)
+    while _wire_chars(out) > MCP_RESULT_CHARS and top > 1:
+        top -= 1
+        rows = [r for r in rows if isinstance(r.get("rank_in_domain"), int) and r["rank_in_domain"] <= top]
+        meta.update(shown=len(rows), top_per_domain=top)
+        if len(rows) < int(meta.get("total") or 0):
+            meta["next_order_offset"] = 0
+        out = {**out, "facts": {**facts, "review_order": rows, "review_order_page": meta}}
     return out
 
 

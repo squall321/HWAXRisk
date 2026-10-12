@@ -139,10 +139,75 @@ def test_risk_get_coverage_picks_up_the_review_block_and_the_readers_write_nothi
     factories.act_as_delegate(monkeypatch, OWNER)
     before = _digest(store)
     coverage = _call("risk_get_coverage", target_key=key, with_seats=False)
-    assert coverage["review"] == routes.coverage_payload(key, owner_sub=OWNER)["review"] and coverage["review"]["job"]
+    rest = routes.coverage_payload(key, owner_sub=OWNER)["review"]
+    assert coverage["review"] == {**rest, **routes.review_order_brief(rest["order"])} and coverage["review"]["job"]
     _call("risk_get_cells", target_key=key)
     _call("risk_get_expert_report", target_key=key, agent_key=SEAL, part="full")
     assert _digest(store) == before
+
+
+def _full_roster(n: int = 359) -> list[dict]:
+    """설정의 영역 열다섯에 고루 나눈 전원 로스터(파일럿 대상의 크기) — 로스터 원천 모양 그대로 입구(create_target)가 얼린다."""
+    domains = config.settings.risk_roster_domains
+    return [{"key": f"{domains[i % len(domains)]}-expert-{i:03d}", "domain": domains[i % len(domains)],
+             "relevance": round(0.99 - i / 1000, 4)} for i in range(n)]
+
+
+def test_a_359_expert_roster_keeps_the_coverage_and_the_guide_inside_the_wire_limit(store, monkeypatch):
+    """R3B-1 — 359명 로스터의 카드 대조 대상에서 진행판(좌석 행 있이·없이)과 길잡이가 와이어 25,000자 안이다. MCP 의 검토 순서는
+    영역마다 영역 안 순위 1~3 과 전체 셈(order_page)이고, order_offset 으로 이어 받은 쪽을 이으면 REST 진행판의 검토 순서 전부다.
+    좌석 행도 seat_offset 으로 이어 받으면 REST 좌석 행 전부다(자르지 않는다). REST 진행판은 전부를 싣는다."""
+    key = rig.target(store, roster=_full_roster())
+    project_id = _project_with_source(store, key)
+    rig.pat(store)
+    factories.act_as_delegate(monkeypatch, OWNER)
+    rest = routes.coverage_payload(key, owner_sub=OWNER)
+    full = rest["review"]["order"]
+    assert len(full) == 359 and srv._wire_chars(rest) > 4 * srv.MCP_RESULT_CHARS
+    domains = sorted({r["domain"] for r in full})
+
+    light = _call("risk_get_coverage", target_key=key, with_seats=False)
+    assert srv._wire_chars(light) <= srv.MCP_RESULT_CHARS and "seats" not in light
+    assert light["review"]["order"] == [r for r in full if r["rank_in_domain"] <= 3]
+    assert [r["domain"] for r in light["review"]["order"] if r["rank_in_domain"] == 1] == sorted(
+        domains, key=lambda d: next(r["order"] for r in full if r["domain"] == d))
+    page = light["review"]["order_page"]
+    assert (page["total"], page["shown"], page["top_per_domain"], page["next_order_offset"]) == (359, 3 * len(domains), 3, 0)
+    assert page["by_domain"] == {d: {"total": sum(1 for r in full if r["domain"] == d),
+                                     "input_gap_n": sum(1 for r in full if r["domain"] == d and r["input_gaps"])}
+                                 for d in domains}
+    assert page["input_gap_n"] == sum(1 for r in full if r["input_gaps"]) > 0
+
+    rows, offset, calls = [], 0, 0
+    while offset is not None:
+        out = _call("risk_get_coverage", target_key=key, order_offset=offset)
+        assert srv._wire_chars(out) <= srv.MCP_RESULT_CHARS and "seats" not in out
+        assert out["review"]["order_page"]["offset"] == offset
+        rows += out["review"]["order"]
+        calls += 1
+        offset = out["review"]["order_page"].get("next_order_offset")
+    assert rows == full and calls > 3
+
+    seats, offset, calls = [], 0, 0
+    while offset is not None:
+        out = _call("risk_get_coverage", target_key=key, seat_offset=offset)
+        assert srv._wire_chars(out) <= srv.MCP_RESULT_CHARS and out["seats_page"]["total"] == 359
+        seats += out["seats"]
+        calls += 1
+        offset = out.get("next_seat_offset")
+    assert seats == routes.seats_payload(key, owner_sub=OWNER)["seats"] and calls > 3
+
+    guide = _call("risk_next_step", project_id=project_id)
+    assert srv._wire_chars(guide) <= srv.MCP_RESULT_CHARS and guide["where"] == "review"
+    shown = guide["facts"]["review_order_page"]
+    assert guide["facts"]["review_order"] == [r for r in full if r["rank_in_domain"] <= shown["top_per_domain"]]
+    assert (shown["total"], shown["next_order_offset"]) == (359, 0)
+    assert "order_offset=0" in guide["next"][0]["why"]
+    small = rig.target(store)                                            # 작은 로스터의 좌석 행은 종전처럼 한 번에 전부다
+    assert "next_seat_offset" not in _call("risk_get_coverage", target_key=small) and "seats_page" not in _call(
+        "risk_get_coverage", target_key=small)
+    assert _call("risk_get_coverage", target_key=factories.make_diff_target(store, 3).target_key,
+                 order_offset=0)["error"] == "E100"
 
 
 # ---------------------------------------------------------------- 검토 잡 — risk_start_job(mode='reviews')
@@ -185,7 +250,8 @@ def test_the_guide_on_a_cells_target_shows_the_review_order_and_a_review_job_ste
     project_id = _project_with_source(store, key)
     out = entry.next_step(_delegate(), project_id=project_id)
     assert out["where"] == "review" and out["facts"]["review_job"] is None
-    assert out["facts"]["review_order"] == routes.coverage_payload(key, owner_sub=OWNER)["review"]["order"]
+    brief = routes.review_order_brief(routes.coverage_payload(key, owner_sub=OWNER)["review"]["order"])
+    assert (out["facts"]["review_order"], out["facts"]["review_order_page"]) == (brief["order"], brief["order_page"])
     assert [s["tool"] for s in out["next"]] == ["risk_start_job", "risk_get_units", "risk_get_coverage", "risk_get_cells",
                                                 "risk_next_step"]
     start = out["next"][0]
