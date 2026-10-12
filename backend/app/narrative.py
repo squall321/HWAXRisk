@@ -172,9 +172,10 @@ _SEV3: dict[str, int] = {"경미": 1, "중대": 2, "치명": 3}
 _SEV_JUDGEMENT: dict[str, tuple[str, ...]] = {"경미": ("OK", "WARNING"), "중대": ("WARNING", "FAIL"), "치명": ("FAIL",)}
 _SEV_DEFAULT_JUDGEMENT: dict[str, str] = {"경미": "OK", "중대": "WARNING", "치명": "FAIL"}
 _TRIGGER_RE = re.compile(r"^((env|load|time|mfg|use)\.[a-z_]+|none)$")
+# 택소노미 1.1 — diff 생산자가 내는 contact_type·parameter 를 더했다(R-32). 종전에는 그 줄을 인용한 finding 이 조용히 none 이 됐다.
 _CHANGE_KINDS: tuple[str, ...] = (
     "dimension", "placement", "topology", "material", "type", "count",
-    "discretization", "result", "load_path", "consistency", "electrical", "none",
+    "discretization", "result", "load_path", "consistency", "electrical", "contact_type", "parameter", "none",
 )
 
 # §4.3.4 feature_snapshot 복사 상한.

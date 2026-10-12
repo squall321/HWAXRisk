@@ -1,5 +1,5 @@
 {
-  "taxonomy_version": "1.0",
+  "taxonomy_version": "1.1",
   "axes": {
     "domain": [
       {"code": "xd", "label": "XD(외관·조립 설계)", "ecad_dependent": false},
@@ -70,6 +70,8 @@
       {"code": "load_path", "label": "하중 경로", "description": "에너지 흐름 엣지 변화."},
       {"code": "consistency", "label": "정합", "description": "치수 참조 소실·메시 미갱신 등 정합 신호."},
       {"code": "electrical", "label": "전기", "description": "넷·부품 배치·스택업 변화(ECAD)."},
+      {"code": "contact_type", "label": "접촉 종류", "description": "접촉 정의의 종류 변화(Dyna 접촉 카드)."},
+      {"code": "parameter", "label": "파라미터", "description": "해석 파라미터 변화(마찰 계수 등)."},
       {"code": "none", "label": "없음", "description": "snap 타깃의 기본값."}
     ],
     "trigger_condition": [

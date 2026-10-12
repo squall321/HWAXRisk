@@ -419,6 +419,30 @@ def test_a_cited_dyna_scope_change_resolves_at_persist(risk_store, monkeypatch):
     assert ctx.diff_item(cid) == scope[0]
 
 
+def test_a_finding_on_a_friction_change_keeps_change_kind_parameter(risk_store, monkeypatch):
+    """diff 생산자가 마찰 계수 변경에 붙이는 change_kind(parameter)를 그 이벤트를 인용한 finding 이 저장 뒤에도 갖는다 —
+    정규화의 허용 집합이 12종이라 none 으로 바뀌고 invalid_enum 에 올랐다(R-32, 택소노미 1.1)."""
+    from app import planner, routes
+    from tests import factories
+    from tests.test_project_patch import _finding_spec
+
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    synth = factories.make_diff_target(risk_store, 40)
+    event = next(e for e in synth.diff["semantic"]["events"] if e["code"] == "contact.friction_changed")
+    assert event["change_kind"] == "parameter"
+    panel = planner.plan_next_panel(risk_store, synth.target_key, "A")
+    spec = _finding_spec(synth.target_key, panel["seats"][0]["key"])
+    spec["findings"][0].update(change_kind=event["change_kind"],
+                               cites=[{"ref": event["cid"], "quote": event["text"].rsplit(" [", 1)[0]}])
+    decision = "F1 마찰 계수가 바뀌었다.\n\n```json\n" + json.dumps(spec, ensure_ascii=False) + "\n```\n"
+    routes.complete_panel(panel["id"], engine="mcp", decision_text=decision,
+                          turns=[{"round": 1, "persona": s["key"], "say": "발언"} for s in panel["seats"]],
+                          actor="syn", owner_sub=factories.OWNER)
+
+    row = risk_store.query_one("SELECT change_kind, finding_json FROM rr_findings WHERE panel_id = ?", (panel["id"],))
+    assert row["change_kind"] == "parameter" and json.loads(row["finding_json"])["change_kind"] == "parameter"
+
+
 # ---------------------------------------------------------------- 브리프 되먹임(§5.6)
 
 

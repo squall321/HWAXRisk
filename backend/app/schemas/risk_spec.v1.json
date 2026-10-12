@@ -115,7 +115,7 @@
         "mechanism_free": {"type": "string"},
         "change_kind": {
           "type": "string",
-          "enum": ["dimension", "placement", "topology", "material", "type", "count", "discretization", "result", "load_path", "consistency", "electrical", "none"]
+          "enum": ["dimension", "placement", "topology", "material", "type", "count", "discretization", "result", "load_path", "consistency", "electrical", "contact_type", "parameter", "none"]
         },
         "subject": {
           "type": "object",

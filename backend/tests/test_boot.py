@@ -288,7 +288,7 @@ def test_meta_taxonomy(client):
     r = client.get("/api/meta/taxonomy")
     assert r.status_code == 200
     body = r.json()
-    assert body["taxonomy_version"] == "1.0"
+    assert body["taxonomy_version"] == "1.1"                    # change_kind 두 종(contact_type·parameter, R-32)
     axes = body["axes"]
     assert {"mechanism", "change_kind", "trigger_condition", "severity_judgement",
             "detectability", "evidence_grade", "precedent", "direction", "status"} <= set(axes)

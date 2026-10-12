@@ -18,7 +18,7 @@ from app.narrative import (
     resolve_cites,
     resolve_subject,
 )
-from tests.conftest import FIXTURES_DIR
+from tests.conftest import BACKEND_DIR, FIXTURES_DIR
 
 PANEL_ID = "pnl00000000000000000000000000001"
 
@@ -516,6 +516,30 @@ def test_trigger_and_detectability_corrections(ctx):
 def test_change_kind_outside_the_axis_becomes_none(ctx):
     finding = first_finding(make_spec(findings=[make_finding(change_kind="색상")]), ctx)
     assert finding["change_kind"] == "none"
+
+
+def test_change_kind_axis_agrees_across_asset_normalizer_and_schemas():
+    """택소노미 축 == 정규화의 허용 집합 == risk_spec enum ⊇ diff 이벤트 enum(R-32, 택소노미 1.1) — diff 생산자가 내는
+    contact_type·parameter 를 정규화가 none 으로 바꾸지 않는다."""
+    from app import narrative, taxonomy
+
+    schemas = BACKEND_DIR / "app" / "schemas"
+    spec_enum = json.loads((schemas / "risk_spec.v1.json").read_text(encoding="utf-8"))[
+        "definitions"]["finding"]["properties"]["change_kind"]["enum"]
+    diff_enum = json.loads((schemas / "rr_diff.v1.json").read_text(encoding="utf-8"))[
+        "definitions"]["event"]["properties"]["change_kind"]["enum"]
+    doc = taxonomy.load_taxonomy()
+    axis = [row["code"] for row in doc["axes"]["change_kind"]]
+    assert axis == list(narrative._CHANGE_KINDS) == spec_enum
+    assert set(diff_enum) <= set(axis) and {"contact_type", "parameter"} <= set(axis)
+    assert doc["taxonomy_version"] == "1.1"
+
+
+@pytest.mark.parametrize("kind", ["contact_type", "parameter"])
+def test_producer_change_kinds_survive_normalization(ctx, kind):
+    out = normalize_risk_spec(make_spec(findings=[make_finding(change_kind=kind)]), ctx)
+    assert out["spec"]["findings"][0]["change_kind"] == kind
+    assert not [item for item in out.get("invalid_enum") or [] if item.get("field") == "change_kind"]
 
 
 def test_status_is_open_on_storage_except_a_panel_rejection(ctx):
