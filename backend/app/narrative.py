@@ -14,7 +14,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 
 from jsonschema import Draft7Validator
 
-from app import render
+from app import cardpack, render, review_verify
 from app.common import canonical_json, now_epoch, parse_ref
 from app.errors import AppError
 from app.taxonomy import load_taxonomy
@@ -295,6 +295,10 @@ class SpecContext:
     seats: tuple = ()                                    # 이번 패널 착석 키
     versions: dict = field(default_factory=dict)         # taxonomy_version·rule_version·ir_version·diff_version·planner_version
     grade_rules: str = GRADE_RULES                       # 근거 등급 규칙의 판(재제출이면 그 패널이 처음 저장된 판)
+    # 카드 대조 검토의 카드 갈래(m2-wp3b S4). None 이면 지금 동작 그대로다(card: 는 external_check, 수치는 quote 들과 대조).
+    card_pack: Mapping[str, Any] | None = None           # record_id → 얼린 카드(cardpack.FrozenPack.record_cards)
+    card_scope: frozenset | None = None                  # 이 스코프에 허용된 record_id. None 이면 묶음 전체
+    number_corpus: str | None = None                     # claim·warrant 수치 대조의 말뭉치. None 이면 quote 들
     _names: dict | None = field(default=None, repr=False, compare=False)   # part_names() 의 한 번 읽은 값
 
     # ------------------------------------------------ 조회
@@ -704,6 +708,15 @@ def canonical_text_for(ref: str, ctx: SpecContext) -> str | None:
             return None
         preview = item.get("result_preview")
         return str(preview) if preview is not None else None
+    if kind == "card":
+        # 얼린 묶음이 있을 때만 — 카드 글(절을 적었으면 그 절)이 대조 원문이다. 머리 줄(제목·종류)은 인용 대상이 아니다.
+        card = ctx.card_pack.get(info["record_id"]) if ctx.card_pack is not None else None
+        if card is None:
+            return None
+        if info.get("section_id") is None:
+            return cardpack.card_text(card)
+        section = _card_section(card, info["section_id"])
+        return None if section is None else str(section.get("text") or "")
     if kind in ("voc", "paper"):
         # 좌석이 읽은 것은 E10 줄 그 자체다 — 조립과 같은 함수로 줄을 만들어 대조한다. 분기가 없으면
         # quote 대조가 건너뛰어지고, **아무도 대조할 수 없는 외부 근거**라 지어낸 인용문이 가장 잘
@@ -800,6 +813,8 @@ def _resolve_one(ref: str, ctx: SpecContext, raised_by: Sequence[str]) -> dict:
             return {"ok": True, "reason": None, "payload": None, "verified": False}
         present = info["ref"] in ctx.brief_refs
         return {"ok": present, "reason": None if present else "not_in_brief", "payload": None, "verified": True}
+    if kind == "card" and ctx.card_pack is not None:
+        return _resolve_card(info, ctx)
     if kind in ("card", "rpt", "inc"):
         if ctx.external_check is None:
             return {"ok": True, "reason": None, "payload": None, "verified": False}
@@ -822,6 +837,31 @@ def _resolve_name(info: dict, ctx: SpecContext) -> dict:
     if edge is None:
         return {"ok": False, "reason": "not_in_scope", "payload": None, "verified": True}
     return {"ok": True, "reason": None, "payload": edge, "verified": True, "resolved": edge.get("eid")}
+
+
+def _card_section(card: Mapping[str, Any], section_id: str) -> Mapping[str, Any] | None:
+    return next((s for s in card.get("sections") or () if isinstance(s, Mapping) and str(s.get("sid")) == section_id),
+                None)
+
+
+def card_payload(card: Mapping[str, Any]) -> dict:
+    """card 인용의 해석 결과 — 카드 본문(절)을 싣지 않는다(P-06 — 얼린 카드 원문이 finding_json·반출로 새지 않게)."""
+    return {"record_id": str(card.get("record_id") or ""), "card_id": str(card.get("card_id") or ""),
+            "type": str(card.get("type") or ""), "confidence": str(card.get("confidence") or ""),
+            "grade": review_verify.card_grade(card)}
+
+
+def _resolve_card(info: dict, ctx: SpecContext) -> dict:
+    """card: 를 얼린 묶음에서 찾는다 — 없으면 not_in_pack, 묶음에는 있는데 스코프 밖이면 not_in_scope, 적은 절이 그 카드에
+    없으면 section_not_in_card. 있으면 확인한 것이다(verified)."""
+    card = ctx.card_pack.get(info["record_id"]) if ctx.card_pack is not None else None
+    if card is None:
+        return {"ok": False, "reason": "not_in_pack", "payload": None, "verified": True}
+    if ctx.card_scope is not None and info["record_id"] not in ctx.card_scope:
+        return {"ok": False, "reason": "not_in_scope", "payload": None, "verified": True}
+    if info.get("section_id") is not None and _card_section(card, info["section_id"]) is None:
+        return {"ok": False, "reason": "section_not_in_card", "payload": None, "verified": True}
+    return {"ok": True, "reason": None, "payload": card_payload(card), "verified": True}
 
 
 def _number_tokens(text: str) -> list[str]:
@@ -891,8 +931,17 @@ def resolve_cites(cites: Sequence[dict], ctx: SpecContext, *, claim: str = "", w
                 unverified.append(ref)
             resolved_refs.append(str(outcome.get("resolved") or ref))
             canonical = canonical_text_for(ref, ctx)
-            row["canonical"] = canonical
-            if canonical is not None and quote and not _quote_ok(quote, canonical):
+            card_row = ctx.card_pack is not None and row["ref_type"] == "card"
+            if card_row:
+                # 얼린 카드 글과 엔진과 같은 규칙으로 대조한다(nq + 15자·실질 10자 — review_verify). 원문은 행에 남기지 않는다
+                # (P-06 — canonical 은 카드 본문이다). 통과한 인용에만 카드 등급을 싣는다 — 등급 표가 이것만 센다.
+                mismatch = bool(quote.strip()) and review_verify.quote_status(quote, canonical or "") != "ok"
+                row["canonical"] = None
+                row["card_grade"] = (outcome["payload"] or {}).get("grade") if quote.strip() and not mismatch else None
+            else:
+                mismatch = canonical is not None and bool(quote) and not _quote_ok(quote, canonical)
+                row["canonical"] = canonical
+            if mismatch:
                 row["quote_mismatch"] = True
                 quote_mismatch.append(ref)
             else:
@@ -902,10 +951,18 @@ def resolve_cites(cites: Sequence[dict], ctx: SpecContext, *, claim: str = "", w
         rows.append(row)
 
     # (1) claim·warrant 의 수치가 quote 안에 같은 값으로 있어야 한다 — 부분 문자열로 보면 '5' 가 '0.15' 에 걸려 통과했다.
-    quoted = _numbers_in(" ".join(row["quote"] for row in rows))
-    unquoted = sorted({token for token in _number_tokens(f"{claim} {warrant}") if _as_decimal(token) not in quoted})
-    if unquoted and rows:
-        for row in rows:
+    if ctx.number_corpus is not None:
+        # 카드 대조 검토 — 말뭉치(인용한 카드 글 + 인용한 줄 글)의 수치 값 집합과 견준다. 없는 수치는 unquoted_numbers 에만
+        # 적고 통과한 인용 전부를 불일치로 만들지 않는다(P-05 — 그 finding 의 등급은 승격이 경험칙으로 묶는다).
+        corpus = _numbers_in(ctx.number_corpus)
+        unquoted = sorted({token for token in _number_tokens(f"{claim} {warrant}") if _as_decimal(token) not in corpus})
+        rows_to_flag: list[dict] = []
+    else:
+        quoted = _numbers_in(" ".join(row["quote"] for row in rows))
+        unquoted = sorted({token for token in _number_tokens(f"{claim} {warrant}") if _as_decimal(token) not in quoted})
+        rows_to_flag = rows
+    if unquoted and rows_to_flag:
+        for row in rows_to_flag:
             if row["ok"] and not row["quote_mismatch"]:
                 row["quote_mismatch"] = True
                 quote_mismatch.append(row["ref"])
@@ -936,6 +993,10 @@ def evidence_grade_from_cites(resolved: dict, ctx: SpecContext | None = None) ->
     standards: list[str] = []
     for row in resolved.get("cites") or ():
         if not row.get("ok") or not row.get("grade_ok") or (strict and row.get("verified") is False):
+            continue
+        # 얼린 묶음으로 대조한 card 행(card_grade 칸이 있다)은 인용이 통과한 카드가 문헌·규격일 때만 센다(m2-wp3b S4 — 카드의
+        # 7할이 heuristic 이다). 칸이 없는 행(묶음 없이 통과한 옛 길)은 종전대로 문헌·규격이다(D-19 — 소급 없음).
+        if str(row.get("ref_type")) == "card" and "card_grade" in row and row["card_grade"] != review_verify.GRADE_LITERATURE:
             continue
         if str(row.get("ref_type")) == "req" and str(row.get("req_kind") or "") == "standard":
             standards.append(str(row.get("ref")))
@@ -1770,6 +1831,59 @@ def _panel_scope(store, panel_id: str) -> tuple[dict, dict, list[dict], SpecCont
         brief_refs=brief_refs, brief_known=brief_known, **fields,
     )
     return dict(panel), target, seats, ctx
+
+
+def _evidence_call_ids(store, target_key: str) -> set[str]:
+    """그 타깃 단위들의 근거 꾸러미가 부른 호출 id — `rr_units.evidence_json` 의 `calls[].call_id`·`call_ids[]`(spec-wp2 의
+    두 모양). M2 의 근거(A 층)는 IR 동결본 발췌라 호출이 없고, B 층(M3)이 적는다."""
+    out: set[str] = set()
+    for row in store.query("SELECT evidence_json FROM rr_units WHERE target_key = ? AND evidence_json IS NOT NULL",
+                           (target_key,)):
+        try:
+            doc = json.loads(row["evidence_json"])
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(doc, Mapping):
+            continue
+        out.update(str(c["call_id"]) for c in doc.get("calls") or () if isinstance(c, Mapping) and c.get("call_id"))
+        out.update(str(c) for c in doc.get("call_ids") or () if isinstance(c, str) and c)
+    return out
+
+
+def review_scope(store, target_key: str, agent_key: str, review_id: str, pack: Any, *,
+                 number_corpus: str | None = None) -> SpecContext:
+    """카드 대조 검토 한 전문가의 인용 검증 스코프 — `_panel_scope` 와 같은 타깃 스코프(`_target_scope`)에 panel_id=review_id,
+    seats=(agent_key,), card_pack=얼린 묶음을 얹는다.
+
+    - `pack` — `cardpack.FrozenPack`(그 전문가의 얼린 묶음), 팩 dict, record_id → 카드 dict, 또는 None(카드 0장 — 그때 card:
+      인용은 전부 not_in_pack 이다. 묶음이 없는 전문가가 낸 카드 인용은 지어낸 것이다).
+    - `call_ids` = 그 타깃 스냅샷들의 `rr_snapshot_calls.call_id` ∪ 그 단위들의 근거 꾸러미 호출 id(P-07 — 코드가 조회해 실어
+      준 근거를 짚은 finding 이 dangling 이 되지 않게). `_panel_scope` 의 call_ids 는 M2 에서 건드리지 않는다(패널 경로 불변).
+    - `number_corpus` — finding 하나의 수치 대조 말뭉치(인용한 카드 글 + 인용한 줄 글). 승격이 finding 마다
+      `dataclasses.replace(ctx, number_corpus=…)` 로 바꿔 넣는다.
+    """
+    target, fields = _target_scope(store, target_key)
+    snapshot_ids = fields["snapshot_ids"]
+    call_ids: set[str] = set()
+    if snapshot_ids:
+        marks = ",".join("?" for _ in snapshot_ids)
+        call_ids.update(str(r["call_id"]) for r in store.query(
+            f"SELECT call_id FROM rr_snapshot_calls WHERE snapshot_id IN ({marks})", tuple(snapshot_ids)))
+    call_ids |= _evidence_call_ids(store, target_key)
+    if pack is None:
+        card_pack: Mapping[str, Any] = {}
+    elif isinstance(pack, cardpack.FrozenPack):
+        card_pack = pack.record_cards
+    elif isinstance(pack, Mapping) and isinstance(pack.get("cards"), list):
+        card_pack = cardpack.view_of(pack).record_cards
+    elif isinstance(pack, Mapping):
+        card_pack = dict(pack)
+    else:
+        raise TypeError("pack 은 cardpack.FrozenPack · 팩 dict · record_id → 카드 dict · None 가운데 하나다")
+    return SpecContext(
+        panel_id=str(review_id), owner_sub=str(target["owner_sub"] or ""), seats=(str(agent_key),),
+        call_ids=frozenset(call_ids), card_pack=card_pack, number_corpus=number_corpus, **fields,
+    )
 
 
 def _seat_turns(turns: Sequence[Mapping[str, Any]]) -> dict[str, list[dict]]:

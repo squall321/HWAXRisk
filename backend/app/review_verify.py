@@ -73,26 +73,39 @@ def _text(value: Any) -> str:
     return str(value)
 
 
-def quote_check(quote: Any, card: Mapping[str, Any]) -> tuple[str, str]:
-    """인용이 **그 카드**의 얼린 글에 있나 — (ok · short · not_found · empty, 맞은 첫 절의 sid). 두 절에 걸치면 sid 는 "".
-
-    15자 이상 · 실질 문자 10자 이상이어야 대조한다. 이스케이프를 푼 것도 보고, 인용을 감싼 따옴표는 떼고 본다. 머리 줄(제목)은
-    인용 원문이 아니다(엔진 `quote_check` 와 같은 규칙 — 공유 벡터가 지킨다)."""
+def _quote_match(quote: Any, text: str) -> tuple[str, str]:
+    """(상태, 맞은 정규화 인용) — 상태는 ok · short · not_found · empty."""
     q = _text(quote)
     if not q.strip():
         return "empty", ""
-    full = nq(cardpack.card_text(card))
+    full = nq(text)
     status = "short"
     for candidate in dict.fromkeys((q, _unescape(q))):
         n = nq(candidate).strip("\"' ")
         if len(n) < QUOTE_MIN or substantive(n) < QUOTE_SUBSTANTIVE_MIN:
             continue
         if n in full:
-            sid = next((str(s.get("sid")) for s in card.get("sections") or ()
-                        if isinstance(s, Mapping) and n in nq(s.get("text"))), "")
-            return "ok", sid
+            return "ok", n
         status = "not_found"
     return status, ""
+
+
+def quote_status(quote: Any, text: str) -> str:
+    """인용이 글(카드 전체 글 또는 절 하나)에 있나 — ok · short · not_found · empty(`quote_check` 와 같은 규칙)."""
+    return _quote_match(quote, text)[0]
+
+
+def quote_check(quote: Any, card: Mapping[str, Any]) -> tuple[str, str]:
+    """인용이 **그 카드**의 얼린 글에 있나 — (ok · short · not_found · empty, 맞은 첫 절의 sid). 두 절에 걸치면 sid 는 "".
+
+    15자 이상 · 실질 문자 10자 이상이어야 대조한다. 이스케이프를 푼 것도 보고, 인용을 감싼 따옴표는 떼고 본다. 머리 줄(제목)은
+    인용 원문이 아니다(엔진 `quote_check` 와 같은 규칙 — 공유 벡터가 지킨다)."""
+    status, matched = _quote_match(quote, cardpack.card_text(card))
+    if status != "ok":
+        return status, ""
+    sid = next((str(s.get("sid")) for s in card.get("sections") or ()
+                if isinstance(s, Mapping) and matched in nq(s.get("text"))), "")
+    return "ok", sid
 
 
 def card_grade(card: Mapping[str, Any]) -> str:
