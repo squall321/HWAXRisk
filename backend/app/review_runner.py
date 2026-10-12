@@ -265,7 +265,7 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
 # 엔진 호출은 늘 워커에서 한다(루프 스레드가 HTTP 를 붙들지 않는다 — m-04, 창·관문 조회는 짧게 기다리는 탐침 스레드다).
 HEALTH_CACHE_S = 30                 # 서버 관문 limit(/health) 캐시
 LIMITS_CACHE_S = 60                 # 창·판(/card-review/limits) 캐시
-PROBE_JOIN_S = 1.0                  # 틱이 탐침을 기다리는 한도 — 넘으면 지난 값으로 돈다(포털이 멈춰도 틱이 서지 않게)
+PROBE_JOIN_S = 1.0                  # 틱이 탐침을 기다리는 한도 — 넘으면 이번 틱은 새 호출을 내지 않고 기다린다(지난 답을 쓰지 않는다)
 PROGRESS_INTERVAL_S = 60            # progress_json 을 다시 세는 간격(단계·차단기·워커 변화는 즉시 적는다)
 STOP_POLL_S = 5                     # 도는 호출이 잡 행(취소·사람의 정지)을 읽는 간격
 WAIT_SLICE_S = 5                    # 기다림을 이만큼씩 쪼개 그 사이 잡 상태를 본다(코드 보류·취소가 기다림을 끊는다)
@@ -547,10 +547,11 @@ class JobProgress:
 # ---------------------------------------------------------------- 탐침(창·관문 조회 — 루프 스레드를 붙들지 않는다)
 @dataclass
 class _Probe:
+    """탐침 하나의 마지막 답. `at` 은 그 답이 끝난 시각이고, None 이면 쓸 답이 없다(새 탐침이 도는 중이거나 버렸다)."""
+
     value: Any = None
     error: BaseException | None = None
     at: int | None = None
-    key: Any = None
     thread: threading.Thread | None = None
 
 
@@ -1445,9 +1446,9 @@ class ReviewLoop:
         self._progress: dict[str, JobProgress] = {}
         self._served: dict[str, int] = {}
         self._served_n = 0
-        self._limits = _Probe()
+        self._limits: dict[str, _Probe] = {}            # 자격(이메일)마다 — 다른 사람의 자격으로 물은 답을 쓰지 않는다(R3A-3)
         self._health = _Probe()
-        self._fallback_since: int | None = None
+        self._fallback_since: dict[str, int] = {}
 
     # -- 바탕 ------------------------------------------------------------------------------
     def ready(self) -> bool:
@@ -1483,40 +1484,62 @@ class ReviewLoop:
             worker.thread.join(timeout)
 
     # -- 탐침 ---------------------------------------------------------------------------------
-    def _probe(self, probe: _Probe, fn: Callable[[], Any], max_age: int, key: Any = None) -> _Probe:
-        """캐시가 낡았으면 탐침 스레드로 다시 묻고 PROBE_JOIN_S 까지만 기다린다 — 답이 늦으면 지난 값(없으면 None)으로 돈다."""
+    def _probe(self, probe: _Probe, fn: Callable[[], Any], max_age: int) -> tuple[Any, BaseException | None] | None:
+        """`max_age` 초 안에 끝난 답이 있으면 그것을, 없으면 탐침 스레드로 새로 묻고 PROBE_JOIN_S 까지만 기다린다.
+
+        돌려주는 것은 (값, 오류) 또는 None 이다. None 은 새 탐침이 아직 끝나지 않았다는 뜻이고, 부른 쪽은 그것을 '모름 — 기다린다'
+        로 읽는다(보류하지 않는다). 새 탐침을 띄우는 순간 지난 답은 버린다 — 늦은 탐침이 지난 오류를 내놓아 사람이 고친 뒤 재개한 잡을
+        다시 멈추지 않게(반대 검토 R3A-3). `value` 칸은 남겨 둔다(관문 limit 표시 — `server()`)."""
         now = self.clock()
         with self._lock:
-            fresh = probe.at is not None and now - probe.at < max_age and probe.key == key
             busy = probe.thread is not None and probe.thread.is_alive()
-            if fresh or busy:
-                thread = probe.thread if busy else None
+            if not busy and probe.at is not None and now - probe.at < max_age:
+                return probe.value, probe.error
+            if busy:
+                thread = probe.thread
             else:
+                probe.at = None
+
                 def go() -> None:
                     try:
                         value, error = fn(), None
                     except Exception as exc:  # noqa: BLE001 — 탐침의 실패는 값으로 남긴다(틱이 가른다).
                         value, error = None, exc
                     with self._lock:
-                        probe.value, probe.error, probe.at, probe.key = value, error, self.clock(), key
+                        probe.value, probe.error, probe.at = value, error, self.clock()
 
                 thread = threading.Thread(target=go, name="review_probe", daemon=True)
                 probe.thread = thread
                 thread.start()
-        if thread is not None:
-            thread.join(self.probe_join_s)
-        return probe
+        assert thread is not None
+        thread.join(self.probe_join_s)
+        with self._lock:
+            if not thread.is_alive() and probe.at is not None:
+                return probe.value, probe.error
+        return None
+
+    def _limits_entry(self, email: str) -> _Probe:
+        with self._lock:
+            return self._limits.setdefault(email, _Probe())
+
+    def _forget_limits(self, email: str) -> None:
+        """그 자격의 창 답을 버린다 — 보류를 건 뒤(사람이 고치고 재개하면 새로 묻는다)."""
+        with self._lock:
+            probe = self._limits.get(email)
+            if probe is not None:
+                probe.at = None
 
     def limits_for(self, email: str, *, fresh: bool = False) -> dict:
-        """창·판(60초 캐시). 워커가 부른다 — 낡았으면 그 자리에서 다시 묻는다(워커는 HTTP 를 붙들어도 된다)."""
+        """창·판(그 자격으로 물은 성공한 답, 60초 캐시). 워커가 부른다 — 낡았으면 그 자리에서 다시 묻는다(워커는 HTTP 를 붙들어도 된다)."""
+        probe = self._limits_entry(email)
         now = self.clock()
         with self._lock:
-            if (not fresh and isinstance(self._limits.value, Mapping) and self._limits.at is not None
-                    and now - self._limits.at < LIMITS_CACHE_S):
-                return dict(self._limits.value)
+            if (not fresh and probe.error is None and isinstance(probe.value, Mapping) and probe.at is not None
+                    and now - probe.at < LIMITS_CACHE_S):
+                return dict(probe.value)
         value = dict(self.engine.limits(email=email))
         with self._lock:
-            self._limits.value, self._limits.error, self._limits.at = value, None, self.clock()
+            probe.value, probe.error, probe.at = value, None, self.clock()
         return value
 
     # -- 보류 · 차단기 ---------------------------------------------------------------------------
@@ -1614,9 +1637,10 @@ class ReviewLoop:
             "SELECT id, target_key, owner_sub, state, pause_reason, hold_code, hold_until, hold_n, params_json, created_at"
             f" FROM rr_jobs WHERE mode = 'reviews' AND state IN ({marks}) ORDER BY created_at ASC, id ASC", tuple(states))]
 
-    def _limits_probe(self, job: Mapping[str, Any]) -> _Probe:
+    def _limits_probe(self, job: Mapping[str, Any]) -> tuple[Any, BaseException | None] | None:
+        """그 잡의 자격(이메일)으로 물은 창 답 — `_probe` 의 (값, 오류) 또는 None(아직 모름)."""
         email = _credential_email(job) or ""
-        return self._probe(self._limits, lambda: dict(self.engine.limits(email=email)), LIMITS_CACHE_S)
+        return self._probe(self._limits_entry(email), lambda: dict(self.engine.limits(email=email)), LIMITS_CACHE_S)
 
     def _resume(self, job: Mapping[str, Any], *, clear: bool) -> None:
         now = self.clock()
@@ -1636,10 +1660,10 @@ class ReviewLoop:
         if rule is None or not rule.auto or code == "user" or job.get("pause_reason") == "user":
             return
         if rule.resume_on == "ctx_source":
-            probe = self._limits_probe(job)
-            lim = probe.value if isinstance(probe.value, Mapping) else None
+            seen = self._limits_probe(job)
+            lim = seen[0] if seen is not None and seen[1] is None and isinstance(seen[0], Mapping) else None
             if lim is not None and lim.get("ctx_source") in KNOWN_CTX_SOURCES and not lim.get("ctx_retrying"):
-                self._fallback_since = None
+                self._fallback_since.pop(_credential_email(job) or "", None)
                 self._resume(job, clear=True)
             return
         if job.get("hold_until") is not None and int(job["hold_until"]) <= now:
@@ -1650,32 +1674,41 @@ class ReviewLoop:
             self.progress(job["id"]).set(waiting=dict(waiting) if waiting else None)
 
     def _window_ok(self, jobs: list[dict], now: int) -> list[dict]:
-        """창 확인 — 새 호출을 내도 되는 잡 목록(창이 문제면 빈 목록). 자격이 없는 잡은 credential 로 멈추고 뺀다."""
-        live = list(jobs)
-        while live:
-            probe = self._limits_probe(live[0])
-            if isinstance(probe.error, PatUnavailable):
-                self.hold(live[0]["id"], "credential", credential_message("창 조회", probe.error))
-                with self._lock:
-                    self._limits.at = None             # 다음 잡의 자격으로 다시 묻는다
-                live = live[1:]
-                continue
-            break
-        if not live:
-            return []
-        probe = self._limits
-        lim = probe.value if isinstance(probe.value, Mapping) else None
+        """창 확인 — 새 호출을 내도 되는 잡 목록. 잡마다 그 잡의 자격(이메일)으로 물은 답만 본다 — 다른 잡의 오류나 다른 사람의
+        이메일로 멈추지 않는다(반대 검토 R3A-3). 새 탐침이 아직 끝나지 않은 자격의 잡은 이번 틱에 새 호출을 내지 않는다(모름 —
+        기다린다, 보류 없음). 자격이 없는 잡은 credential 로 멈춘다."""
+        groups: dict[str, list[dict]] = {}
+        for job in jobs:
+            groups.setdefault(_credential_email(job) or "", []).append(job)
+        allowed: list[dict] = []
+        for email, live in groups.items():
+            allowed.extend(self._window_group(email, live, now))
+        return allowed
+
+    def _window_group(self, email: str, live: list[dict], now: int) -> list[dict]:
+        """같은 자격의 잡들 — 그 자격으로 물은 창 답 하나로 가른다. 보류를 걸면 그 답을 버린다(재개 뒤에는 새로 묻는다)."""
+        seen = self._limits_probe(live[0])
+        if seen is None:
+            return []                                  # 새 답이 아직 없다 — 지난 답을 다시 쓰지 않고 다음 틱에 본다
+        value, error = seen
+        lim = value if error is None and isinstance(value, Mapping) else None
         if lim is None:
-            if probe.error is None:
-                return []                              # 첫 답이 아직 오지 않았다
-            outcome = (engine_client.review_outcome(probe.error) if isinstance(probe.error, _ENGINE_ERRORS)
+            if error is None:
+                return []
+            if isinstance(error, PatUnavailable):
+                for job in live:
+                    self.hold(job["id"], "credential", credential_message("창 조회", error))
+                self._forget_limits(email)
+                return []
+            outcome = (engine_client.review_outcome(error) if isinstance(error, _ENGINE_ERRORS)
                        else review_ops.classify("portal_unreachable"))
             if outcome.klass == review_ops.JOB:
                 for job in live:
-                    self.hold(job["id"], outcome.hold_code or "contract", f"창 조회: {probe.error}")
+                    self.hold(job["id"], outcome.hold_code or "contract", f"창 조회: {error}")
+                self._forget_limits(email)
             else:
                 self._waiting(live, {"reason": outcome.code, "since": now, "retry_at": now + LIMITS_CACHE_S,
-                                     "note": str(probe.error)})
+                                     "note": str(error)})
             return []
         runnable = lim.get("runnable") if isinstance(lim.get("runnable"), Mapping) else {}
         if lim.get("ctx_too_small") or (runnable and not all(runnable.values())):
@@ -1686,27 +1719,28 @@ class ReviewLoop:
                           f"({lim.get('ctx_source')})으로는 카드 대조 호출을 짤 수 없다(runnable {dict(runnable)})"
                           + (f" — 창이 {int(need):,} 토큰 이상인 LLM 이 필요하다" if need else "")
                           + f". 다시 쪼개지 않는다(D-22) — {CTX_KNOB}·VLLM_MODEL 을 고친 뒤 재개한다. {small.get('message') or ''}".rstrip())
+            self._forget_limits(email)
             return []
         if lim.get("ctx_retrying"):
             self._waiting(live, {"reason": "ctx_retrying", "since": now, "retry_at": now + LIMITS_CACHE_S})
             return []
         if lim.get("ctx_source") not in KNOWN_CTX_SOURCES:
-            if self._fallback_since is None:
-                seen = [(self.progress(j["id"]).body.get("waiting") or {}) for j in live]
-                old = [int(w["since"]) for w in seen if w.get("reason") == "ctx_fallback" and w.get("since") is not None]
-                self._fallback_since = min(old) if old else now
-            since = self._fallback_since
+            if email not in self._fallback_since:
+                seen_w = [(self.progress(j["id"]).body.get("waiting") or {}) for j in live]
+                old = [int(w["since"]) for w in seen_w if w.get("reason") == "ctx_fallback" and w.get("since") is not None]
+                self._fallback_since[email] = min(old) if old else now
+            since = self._fallback_since[email]
             if now - since >= review_ops.CTX_FALLBACK_HOLD_S:
                 for job in live:
                     self.hold(job["id"], "ctx_unknown", f"에이전트 서버가 LLM 창 크기를 모른다(ctx_source={lim.get('ctx_source')},"
                               f" {now - since}초 이어짐) — 에이전트 서버의 창 설정({CTX_KNOB})을 적거나 LLM 서버가 창 크기를 알리게"
                               " 하고 에이전트 서버를 다시 띄운다. 창 출처가 server·env 로 돌아오면 스스로 재개한다")
-                self._fallback_since = None
+                self._fallback_since.pop(email, None)
             else:
                 self._waiting(live, {"reason": "ctx_fallback", "since": since,
                                      "retry_at": since + review_ops.CTX_FALLBACK_HOLD_S})
             return []
-        self._fallback_since = None
+        self._fallback_since.pop(email, None)
         for job in live:
             waiting = self.progress(job["id"]).body.get("waiting") or {}
             if str(waiting.get("reason") or "").startswith("ctx_") or waiting.get("reason") in ("portal_unreachable",

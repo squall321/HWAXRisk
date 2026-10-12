@@ -704,6 +704,58 @@ def test_a_pat_too_close_to_expiry_holds_credential_without_sending_anything(sto
     assert [r_ for r_ in fake.requests if r_["path"] != "/health"] == []
 
 
+def test_a_slow_window_probe_never_reholds_a_resumed_job_with_its_old_credential_error(store, monkeypatch):
+    """반대 검토 R3A-3 (가) — PAT 가 사라져 credential 로 멈춘 잡을 사람이 PAT 를 다시 등록하고 재개했는데 창 조회 왕복이 탐침
+    한도를 넘는다. 틱은 지난 탐침의 오류를 다시 쓰지 않는다 — 잡은 running 그대로 이번 틱에 새 호출을 내지 않고(모름 — 기다린다),
+    새 답이 온 뒤 이어 돌아 completed 다. 사람은 재개를 한 번만 한다."""
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    r = rig.Rig(store, fake)
+    r.loop.probe_join_s = 0.05
+    store.delete_credential(OWNER)                              # PAT 가 사라졌다(폐기·삭제)
+    r.tick()
+    assert (rig.state(store, job_id), rig.job_row(store, job_id)["hold_code"]) == ("paused", "credential")
+    rig.pat(store)                                              # 사람이 PAT 를 다시 등록하고 재개한다
+    runner.resume_job(store, job_id, by=OWNER)
+    fake.limits_delay_s = 0.3                                   # 새 탐침이 탐침 한도(시험 0.05초 · 운영 1초)를 넘는다
+    r.clock.advance(5)
+    r.tick()
+    row = rig.job_row(store, job_id)
+    assert (row["state"], row["hold_code"], row["error"]) == ("running", None, None)
+    assert fake.calls("pack") == [] and len(fake.calls("limits")) == 1
+    fake.limits_delay_s = 0.0
+    r.finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+
+
+def test_a_job_is_never_held_with_another_jobs_credential_error(store, monkeypatch):
+    """반대 검토 R3A-3 (나) — 잡 둘, A 의 자격 사람(요청자)만 PAT 가 사라졌고 창 조회 왕복이 탐침 한도를 넘는다. A 는 자기 자격의
+    오류로 credential 이고, B 는 A 의 오류(다른 사람의 이메일이 든 글)로 멈추지 않고 제 자격으로 물은 답을 기다렸다가 completed 다."""
+    from app import review_runner
+
+    ghost = "ghost@example.com"
+    key_a, key_b = rig.target(store), rig.target(store, seed=7)
+    rig.pat(store, ghost)
+    job_a = review_runner.create_review_job(store, key_a, owner_sub=OWNER, requester_sub=ghost, scope={"agents": [SEAL]},
+                                            consent=True, consent_source="web", settings=config.settings)["job_id"]
+    job_b = rig.job(store, key_b, scope={"agents": [SEAL]})
+    assert json.loads(rig.job_row(store, job_a)["params_json"])["credential"]["email"] == ghost
+    store.delete_credential(ghost)
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    fake.limits_delay_s = 0.3
+    r = rig.Rig(store, fake)
+    r.loop.probe_join_s = 0.05
+    r.tick()
+    a, b = rig.job_row(store, job_a), rig.job_row(store, job_b)
+    assert (a["state"], a["hold_code"]) == ("paused", "credential") and ghost in a["error"]
+    assert (b["state"], b["hold_code"], b["error"]) == ("running", None, None)
+    fake.limits_delay_s = 0.0
+    r.finish(job_b)
+    b = rig.job_row(store, job_b)
+    assert b["state"] == "completed" and ghost not in (b["error"] or "") and ghost not in b["progress_json"]
+
+
 def test_two_live_jobs_take_turns(store, monkeypatch):
     """P-09 — 살아 있는 검토 잡이 둘이면 워커 자리를 번갈아 받는다(한 잡이 자리를 다 쓰지 않는다)."""
     _one(store, monkeypatch)
