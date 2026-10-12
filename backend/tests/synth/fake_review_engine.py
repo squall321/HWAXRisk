@@ -30,6 +30,8 @@
   long_quote       이 별칭들의 인용을 카드에 없는 긴 글(LONG_QUOTE, 260자)로 낸다(엔진 checks.quote 는 정직하게 not_found)
   cond_text        단독 재질의 c 줄의 조건 글(기본 COND — 긴 글로 바꾸면 반출의 조건 글 200자를 본다, S9)
   offcard_src·offcard_quote  카드 밖 f 줄이 근거로 댄 배경 카드 별칭과 그 인용(기본 exp · 빈 인용 — S9 의 카드 근거 카드 밖 줄)
+  handoff_to       이 영역으로 넘기는 h 줄을 훑기(첫 단위)와 카드 밖 호출에 하나씩 더한다(S10 의 넘김 절)
+  seen·need        카드 밖 m 줄의 따져 본 메커니즘 · need 줄의 글(S10 의 메커니즘·필요 정보 절)
   hold_runs        n(1부터 센 run 차례) → threading.Event — 그 run 은 result 앞에서 그 사건을 기다린다(호출 중 재기동 시험)
 기록 — requests(받은 요청 전부), runs(받은 run 수), max_active(동시에 돈 run 의 최댓값).
 S8(검토 루프)과 WP5b C9 가 이 파일을 넓힌다. 시험이 쓰는 여러 전문가의 팩은 `derive_pack` 이 엔진 계약 예제(pack_ok·pack_empty)에서
@@ -216,6 +218,9 @@ class FakeReviewEngine:
         self.cond_text = COND
         self.offcard_src = "exp"
         self.offcard_quote = ""
+        self.handoff_to: str | None = None
+        self.seen: list[str] = []
+        self.need: str | None = None
         self.hold_runs: dict[int, threading.Event] = {}
         # 기록
         self.requests: list[dict[str, Any]] = []
@@ -440,6 +445,10 @@ class FakeReviewEngine:
                      "why": "카드의 적용 조건이 이 단위에 걸릴 수 있다", "unit_id": uid,
                      "record_ids": [cards[a]["record_id"] for a in order], "from_attempt": 1,
                      "checks": {"why": "ok", "coerced": []}} for u, uid in units.items()]
+            if self.handoff_to and units:
+                first = next(iter(units))
+                rows.append({"t": "h", "u": first, "to": self.handoff_to, "why": "훑기가 다른 영역의 몫으로 본 단위",
+                             "unit_id": units[first], "from_attempt": 1, "checks": {"coerced": []}})
             missing = []
             extras["unmatched_cards"] = []
             quality.update(expected=len(units), ok=len(rows))
@@ -456,8 +465,13 @@ class FakeReviewEngine:
                                                                                                self.offcard_quote),
                                 "quote_sid": "", "coerced": []}} for i in range(1, n + 1)]
             more = "yes" if n >= cap else "no"
-            rows += [{"t": "m", "seen": [], "from_attempt": 1, "checks": {"coerced": []}},
+            rows += [{"t": "m", "seen": list(self.seen), "from_attempt": 1, "checks": {"coerced": []}},
                      {"t": "more", "more": more, "from_attempt": 1, "checks": {"coerced": []}}]
+            if self.handoff_to:
+                rows.append({"t": "h", "to": self.handoff_to, "why": "카드 밖 호출이 다른 영역의 몫으로 본 줄", "l": own[:1],
+                             "from_attempt": 1, "checks": {"coerced": []}})
+            if self.need:
+                rows.append({"t": "need", "what": self.need, "from_attempt": 1, "checks": {"coerced": []}})
             missing = []
             quality.update(expected=3, ok=n, maybe_more=more == "yes")
         prompt_rev = self.base_limits["prompt_rev"][kind]

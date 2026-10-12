@@ -741,13 +741,18 @@ class _Session:
         now = self.now()
         attempts = int(self._head_row().get("pack_attempts") or 0) + 1
         if attempts >= tries:
-            review_cells.record_pack(self.store, self.target_key, self.agent, lease_owner=self.lease, status="error",
-                                     error=code, not_before=None, now=now)
-            failed = review_cells.fail_open_cells(self.store, self.target_key, self.agent, code=fail_code,
-                                                  error=f"카드 묶음을 {attempts}번 받지 못했다({code}) — {message}",
-                                                  run_id=self.job_id, lease_owner=self.lease, now=now)
-            review_cells.block_expert(self.store, self.target_key, self.agent, lease_owner=self.lease,
-                                      error=f"{fail_code}: {code} {attempts}번 — 범위 안 셀 {failed}개를 failed 로 닫았다", now=now)
+            # 셀 닫기 · 보고서(blocked — 파일럿이 범위의 전문가마다 보고서 한 편을 갖게) · 머리 막기를 한 트랜잭션으로.
+            with self.store.tx():
+                review_cells.record_pack(self.store, self.target_key, self.agent, lease_owner=self.lease, status="error",
+                                         error=code, not_before=None, now=now)
+                failed = review_cells.fail_open_cells(self.store, self.target_key, self.agent, code=fail_code,
+                                                      error=f"카드 묶음을 {attempts}번 받지 못했다({code}) — {message}",
+                                                      run_id=self.job_id, lease_owner=self.lease, now=now)
+                why = f"{fail_code}: {code} {attempts}번 — 범위 안 셀 {failed}개를 failed 로 닫았다"
+                expert_report.write_blocked(self.store, self.target_key, self.agent, lease_owner=self.lease, why=why,
+                                            now=now)
+                review_cells.block_expert(self.store, self.target_key, self.agent, lease_owner=self.lease, error=why,
+                                          now=now)
             log.warning("검토 잡 %s: %s 의 카드 묶음을 %s번 받지 못해(%s) 범위 안 셀 %s개를 failed(%s)로 닫았다",
                         self.job_id, self.agent, attempts, code, failed, fail_code)
             raise _Stop("pack_blocked", release=False)
@@ -1057,7 +1062,7 @@ class _Session:
                 calls.append({"sent_aliases": aliases, "page_units": [i["unit_id"] for i in items],
                               "result": answer.result})
         accounting = review_verify.sweep_accounting(calls) if calls else {"units": {}, "units_error": [],
-                                                                          "cards_unseen": [], "dropped": []}
+                                                                          "cards_unseen": [], "handoffs": [], "dropped": []}
         self.sweep = {"key": key, "failed_pages": failed, **accounting}
         if not review_cells.write_head(self.store, self.target_key, self.agent, lease_owner=self.lease, now=self.now(),
                                        sets={"sweep_state": "failed" if failed else "done",

@@ -390,18 +390,21 @@ def sweep_accounting(calls: Sequence[Mapping[str, Any]]) -> dict:
     단위마다 rel 은 묶음들의 답 가운데 가장 넓은 것이다(yes > maybe > error > stamp > no) — 한 묶음이 no, 다른 묶음이 maybe 면
     maybe 다. 품질 `stamp` 가 선 호출의 no 는 믿지 않고 stamp 로 적는다. 그 쪽의 답에 없는 단위는 error 다(셀 분류에는 쓰지
     않는다 — M2 는 늘 대조로 간다). 실은 호출 어디에서도 어느 `u` 줄의 `k` 에 나오지 않은 카드가 `cards_unseen` 이다 — 훑기에서
-    그 카드가 읽혔다는 증거가 없다. 반환 {units{unit_id: {rel, k[], why[], missing_in}}, units_error[], cards_unseen[], dropped}.
+    그 카드가 읽혔다는 증거가 없다. 훑기가 다른 영역으로 넘긴 `h` 줄은 handoffs 에 모은다(전문가 보고서의 넘김 절).
+    반환 {units{unit_id: {rel, k[], why[], missing_in}}, units_error[], cards_unseen[], handoffs[], dropped}.
     """
     units: dict[str, dict] = {}
     sent_all: list[str] = []
     seen: set[str] = set()
     dropped: list[dict] = []
+    handoffs: list[dict] = []
     for call in calls:
         accepted = accept_rows(call["result"], kind="sweep", sent_aliases=call["sent_aliases"], pack={"cards": []},
                                page_units=call["page_units"])
         stamp = accepted["extras"]["stamp"]
         sent_all.extend(str(a) for a in call["sent_aliases"])
         dropped.extend(accepted["dropped"])
+        handoffs.extend(accepted["extras"]["handoffs"])
         for row in accepted["rows"]:
             rel = "stamp" if stamp and row["rel"] == "no" else row["rel"]
             entry = units.setdefault(row["unit_id"], {"rel": rel, "k": [], "why": [], "missing_in": 0})
@@ -417,7 +420,7 @@ def sweep_accounting(calls: Sequence[Mapping[str, Any]]) -> dict:
             if _REL_RANK["error"] > _REL_RANK[entry["rel"]]:
                 entry["rel"] = "error"
     return {"units": units, "units_error": sorted(u for u, e in units.items() if e["rel"] == "error"),
-            "cards_unseen": [a for a in dict.fromkeys(sent_all) if a not in seen], "dropped": dropped}
+            "cards_unseen": [a for a in dict.fromkeys(sent_all) if a not in seen], "handoffs": handoffs, "dropped": dropped}
 
 
 # ---------------------------------------------------------------- 실효 판정(설계서 §3.8.7 + X1-14)
