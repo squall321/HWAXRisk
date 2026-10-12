@@ -380,3 +380,103 @@ def test_meta_vocab_carries_the_promotable_axes(client):
     assert axes == sorted(axes) and "char:structure" in axes and "char:constraint" in axes
     # 값 목록이 없는 축은 선택지에 없다 — 서버 가드(axis_not_promotable)와 같은 판정이다.
     assert "char:interface" not in axes
+
+
+# ---------------------------------------------------------------- 카드 대조 검토의 시간 한도 사슬(재설계 M2.md 4.5)
+def test_boot_refuses_an_inverted_review_chain_and_names_the_knob():
+    """프레임 사이 침묵 한도가 호출 벽시계보다 길거나 검토 자격 여유(벽시계 + 600)가 PAT 등록 하한 이상이면 기동하지 않는다.
+
+    문구가 손잡이 이름과 값, 적는 자리(knobs.env)를 말한다. 0 은 끈 것이라 견주지 않는다.
+    """
+    import dataclasses
+
+    import pytest
+
+    from app import main
+
+    main.check_review_chain(config.settings)                                  # 기본값은 통과한다(300 ≤ 18000, 18600 < 86400)
+    with pytest.raises(RuntimeError) as exc:
+        main.check_review_chain(dataclasses.replace(config.settings, risk_review_read_timeout_s=20000))
+    text = str(exc.value)
+    assert "HWAXRISK_REVIEW_READ_TIMEOUT_S 20000" in text and "HWAXRISK_REVIEW_CALL_TIMEOUT_S 18000" in text
+    assert "knobs.env" in text
+    with pytest.raises(RuntimeError) as exc:
+        main.check_review_chain(dataclasses.replace(config.settings, risk_review_call_timeout_s=86000))
+    assert "검토 자격 여유 86600초가 PAT 등록 하한 86400초 이상" in str(exc.value)
+    assert "HWAXRISK_REVIEW_CALL_TIMEOUT_S 86000" in str(exc.value)
+    # 끈 한도(0)는 견주지 않는다 — 벽시계를 끄면 여유는 기본 벽시계로 셈한다.
+    main.check_review_chain(dataclasses.replace(config.settings, risk_review_call_timeout_s=0,
+                                                risk_review_read_timeout_s=20000))
+    main.check_review_chain(dataclasses.replace(config.settings, risk_review_read_timeout_s=0))
+    main.check_review_chain(dataclasses.replace(config.settings, risk_review_call_timeout_s=85799))
+
+
+def test_the_lifespan_refuses_to_start_on_an_inverted_review_chain(tmp_path, monkeypatch, risk_store):
+    """기동 절차가 실제로 그 검사를 부른다 — 함수만 있고 부르는 곳이 없으면 뒤집힌 박스가 그대로 뜬다."""
+    import asyncio
+    import contextlib
+    import dataclasses
+    import types
+
+    import pytest
+
+    from app import main
+
+    class _Mcp:
+        class session_manager:
+            @staticmethod
+            @contextlib.asynccontextmanager
+            async def run():
+                yield
+
+    monkeypatch.setattr(config, "settings", dataclasses.replace(
+        config.settings, data_dir=tmp_path, risk_review_read_timeout_s=99999))
+    monkeypatch.setattr(main, "mcp", _Mcp)
+    monkeypatch.setattr(main, "get_store", lambda: risk_store)
+    monkeypatch.setattr(main, "close_store", lambda: None)
+
+    async def boot() -> None:
+        async with main._lifespan(types.SimpleNamespace(state=types.SimpleNamespace())):
+            pass
+
+    with pytest.raises(RuntimeError) as exc:
+        asyncio.run(boot())
+    assert "HWAXRISK_REVIEW_READ_TIMEOUT_S 99999" in str(exc.value)
+    assert not (tmp_path / "runner.lock").exists()                           # 잠금을 쥐기 전에 멈춘다
+
+
+def test_meta_runtime_shows_the_knobs_and_their_sources_to_admins_only(tmp_path, monkeypatch):
+    """GET /api/meta/runtime — 관리자에게 손잡이 값·출처, 러너 잠금, 스키마·앱 판을 보인다. 관리자가 아니면 403 이다."""
+    import dataclasses
+    import types
+
+    import pytest
+
+    from app import identity, routes
+    from app.errors import AppError
+    from app.runlock import RunnerLock
+
+    (tmp_path / "knobs.env").write_text("HWAXRISK_REVIEW_ENABLED=1\n", encoding="utf-8")
+    loaded = config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path), "HWAXRISK_UNITS_MAX": "70"})
+    monkeypatch.setattr(config, "settings", dataclasses.replace(loaded, db_path=settings.db_path))
+    lock = RunnerLock(tmp_path)
+    assert lock.acquire()
+    request = types.SimpleNamespace(app=types.SimpleNamespace(state=types.SimpleNamespace(runner_lock=lock)))
+
+    def who(role: str | None) -> identity.Identity:
+        return identity.Identity(email="ops@example.com", display_name="운영", role=role, organization=None,
+                                 anonymous=False, source="cookie")
+    try:
+        body = routes.get_runtime(request, ident=who("admin"))
+        with pytest.raises(AppError) as exc:
+            routes.get_runtime(request, ident=who("user"))
+    finally:
+        lock.release()
+    assert exc.value.http_status == 403
+    assert body["knobs"]["HWAXRISK_REVIEW_ENABLED"] == {"value": True, "source": "knobs.env"}
+    assert body["knobs"]["HWAXRISK_UNITS_MAX"] == {"value": 70, "source": "env"}
+    assert body["knobs"]["HWAXRISK_REVIEW_CALL_TIMEOUT_S"] == {"value": 18000, "source": "default"}
+    assert set(body["knobs"]) == {k.env for k in config.REVIEW_KNOBS}
+    assert body["knobs_file"] == str(tmp_path / "knobs.env")
+    assert body["runner_lock"]["held"] is True and body["runner_lock"]["holder"]["boot_id"] == lock.boot_id
+    assert body["schema_version"] == LATEST_SCHEMA and body["app_version"] == settings.app_version

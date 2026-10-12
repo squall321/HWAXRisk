@@ -254,6 +254,27 @@ def get_vocab() -> dict:
             "promotable_axes": character.promotable_axes()}
 
 
+@router.get("/meta/runtime")
+def get_runtime(request: Request, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """이 박스가 기동 때 읽은 검토 손잡이와 출처(env · knobs.env · default), 러너 잠금, 스키마·앱 판(관리자 — M2.md 4.5).
+
+    박스마다 켜는 스위치(HWAXRISK_REVIEW_ENABLED)가 정말 들었는지를 화면·REST 로 보는 자리다. 비밀은 싣지 않는다.
+    """
+    _require_user(ident)
+    if not _is_admin(ident):
+        raise AppError("admin_only", "관리자만 볼 수 있습니다(HWAXRISK_ADMIN_ROLES).", 403)
+    store = get_store()
+    lock = getattr(request.app.state, "runner_lock", None)
+    return {
+        "knobs": config.review_knobs(),
+        "knobs_file": str(config.settings.data_dir / config.KNOBS_FILENAME),
+        "runner_lock": {"held": lock.held() if lock is not None else None,
+                        "holder": lock.holder() if lock is not None else None},
+        "schema_version": store.known_version if store.known_version is not None else store.schema_version(),
+        "app_version": config.APP_VERSION,
+    }
+
+
 METRICS_LIMIT_MAX = 2000
 
 

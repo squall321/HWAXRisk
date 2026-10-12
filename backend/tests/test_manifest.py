@@ -91,7 +91,7 @@ def test_description_mentions_tools_and_paths(manifest):
     desc = manifest["description"]
     for token in ("risk_get_snapshot", "risk_get_diff", "risk_get_registry", "risk_claims_for_ref", "risk_get_brief",
                   "risk_submit_panel_result", "/apps/hwax_risk/mcp", "/api/health", "/apps/hwax_risk/api",
-                  "risk_review.db", "HWAXRISK_DATA_DIR"):
+                  "risk_review.db", "HWAXRISK_DATA_DIR", "knobs.env", "HWAXRISK_REVIEW_ENABLED", "/api/meta/runtime"):
         assert token in desc, f"description 에 {token} 이 없다"
     assert "직접 등록은 읽기 전용" in desc, "등록 예 곁에 직접 등록이 읽기 전용이라는 말이 없다(RV-6)"
     for stale in ("risk_health", "risk_get_taxonomy", "risk_get_meta", "HWAX_RISK_", "/api/v1", "hwax_risk.db"):

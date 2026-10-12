@@ -66,6 +66,28 @@ def check_credential_chain(settings) -> None:
             f" 손잡이를 적는 자리는 {config.KNOB_HOME}.")
 
 
+def check_review_chain(settings) -> None:
+    """카드 대조 검토의 시간 한도 사슬(M2.md 4.5) — 뒤집혀 있으면 기동하지 않고 고칠 손잡이를 말한다.
+
+    - 프레임 사이 침묵 한도(HWAXRISK_REVIEW_READ_TIMEOUT_S) ≤ 호출 벽시계(HWAXRISK_REVIEW_CALL_TIMEOUT_S) — 안쪽이 먼저 걸려야
+      죽은 연결이 '호출이 길다' 로 읽히지 않는다. 0 은 끈 것이라 견주지 않는다.
+    - 검토 자격 여유(호출 벽시계 + 600) < PAT 등록 하한 — 아니면 방금 등록한 PAT 로도 검토 호출을 시작하지 못한다(검토는
+      서비스 계정으로 내려가지 않는다, 사용자 결정 2026-10-12).
+    """
+    call_s = config.review_call_timeout_s(settings)
+    read_s = config.review_read_timeout_s(settings)
+    problems: list[str] = []
+    if call_s > 0 and read_s > call_s:
+        problems.append(f"프레임 사이 침묵 한도(HWAXRISK_REVIEW_READ_TIMEOUT_S {read_s})가 호출 벽시계"
+                        f"(HWAXRISK_REVIEW_CALL_TIMEOUT_S {call_s})보다 깁니다 — 침묵 한도를 벽시계 이하로 내리세요.")
+    margin = config.review_credential_margin_s(settings)
+    if margin >= PAT_MIN_REMAINING_S:
+        problems.append(f"검토 자격 여유 {margin}초가 PAT 등록 하한 {PAT_MIN_REMAINING_S}초 이상입니다 — 여유는 호출 벽시계"
+                        f"(HWAXRISK_REVIEW_CALL_TIMEOUT_S {call_s}) + 600초입니다. 벽시계를 내리세요.")
+    if problems:
+        raise RuntimeError(" ".join(problems) + f" 손잡이를 적는 자리는 {config.REVIEW_KNOB_HOME}.")
+
+
 def warn_stream_limits_off(settings) -> None:
     """패널 스트림을 끊는 한도를 꺼 둔 박스에서, 기동 때 그 결과를 로그로 말한다. 막지는 않는다 — 0 은 허용된 값이다.
 
@@ -98,6 +120,7 @@ async def _lifespan(app: FastAPI):
     # ① 데이터 루트 결정·mkdir·W_OK(실패 = 예외로 기동 중단).
     config.ensure_data_dir(settings.data_dir)
     check_credential_chain(settings)
+    check_review_chain(settings)
     warn_stream_limits_off(settings)
     hostname = socket.gethostname()
     prev_hostname = _read_origin_hostname(settings.data_dir)

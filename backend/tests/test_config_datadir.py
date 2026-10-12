@@ -21,7 +21,7 @@ _ENV_KEYS = ("HWAXRISK_DATA_DIR", "HEAX_DATA_DIR", "ROOT_PATH", "PORT", "HOST",
              "HWAXRISK_CLUSTER_DUP_SCAN", "HWAXRISK_PANEL_TIMEOUT_S", "HWAXRISK_ENGINE_READ_TIMEOUT_S",
              "HWAXRISK_CREDENTIAL_MARGIN_S", "HWAXRISK_PORTAL_CALL_TIMEOUT_S", "HWAXRISK_SOURCE_CALL_TIMEOUT_S",
              "HWAXRISK_ENGINE_BUSY_WAIT_S", "HWAXRISK_ENGINE_BUSY_MAX_WAIT_S", "HWAXRISK_FIELD_TIMEOUT_S",
-             "HWAXRISK_ROSTER_DEADLINE_S")
+             "HWAXRISK_ROSTER_DEADLINE_S", *(k.env for k in config.REVIEW_KNOBS))
 
 
 @pytest.fixture
@@ -292,3 +292,67 @@ def test_cred_key_unwritable_dir_returns_none(tmp_path):
 
 def test_cred_key_defaults_to_settings_data_dir():
     assert config.cred_key_path() == Path(config.settings.data_dir) / "cred.key"
+
+
+# ---------------------------------------------------------------- 카드 대조 검토 손잡이(재설계 M2.md 4.5)
+REVIEW_DEFAULTS = {
+    "HWAXRISK_REVIEW_ENABLED": False, "HWAXRISK_UNIT_TARGET_LINES": 20, "HWAXRISK_UNIT_MAX_LINES": 40,
+    "HWAXRISK_UNITS_SMALL_LINES": 15, "HWAXRISK_UNITS_MAX": 60, "HWAXRISK_REVIEW_CONCURRENCY": 4,
+    "HWAXRISK_REVIEW_CALL_TIMEOUT_S": 18000, "HWAXRISK_REVIEW_READ_TIMEOUT_S": 300, "HWAXRISK_REVIEW_MAX_CHARGED": 2,
+    "HWAXRISK_REVIEW_CONSENT_CALLS": 1500, "HWAXRISK_REVIEW_MAX_CALLS": 30000,
+}
+
+
+def _knobs_file(data_dir: Path, text: str) -> None:
+    (data_dir / "knobs.env").write_text(text, encoding="utf-8")
+
+
+def test_review_knobs_default_to_the_plan_table(tmp_path, reload_config):
+    """손잡이 열한 개의 코드 기본값은 M2.md 4.5 표 그대로이고, 아무것도 적지 않은 박스는 출처가 전부 default 다."""
+    mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path))
+    knobs = mod.review_knobs(mod.settings)
+    assert {name: k["value"] for name, k in knobs.items()} == REVIEW_DEFAULTS
+    assert {k["source"] for k in knobs.values()} == {"default"}
+    assert mod.review_enabled(mod.settings) is False
+
+
+def test_knobs_env_overrides_the_default_and_the_environment_overrides_knobs_env(tmp_path, reload_config):
+    """순서는 환경변수 > $DATA_DIR/knobs.env > 코드 기본값이고 출처가 값마다 남는다. 빈 값은 적지 않은 것이다."""
+    _knobs_file(tmp_path, "# 박스마다 켠다\nHWAXRISK_REVIEW_ENABLED=1\nHWAXRISK_UNITS_MAX=80\n"
+                          "HWAXRISK_REVIEW_READ_TIMEOUT_S=600\nHWAXRISK_REVIEW_MAX_CALLS=\nOTHER=1\n")
+    mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path), HWAXRISK_UNITS_MAX="90", HWAXRISK_REVIEW_CONCURRENCY=" ")
+    s = mod.settings
+    assert (s.risk_review_enabled, s.risk_units_max, s.risk_review_read_timeout_s) == (True, 90, 600)
+    assert (s.risk_review_concurrency, s.risk_review_max_calls) == (4, 30000)
+    knobs = mod.review_knobs(s)
+    assert knobs["HWAXRISK_REVIEW_ENABLED"] == {"value": True, "source": "knobs.env"}
+    assert knobs["HWAXRISK_UNITS_MAX"] == {"value": 90, "source": "env"}
+    assert knobs["HWAXRISK_REVIEW_READ_TIMEOUT_S"] == {"value": 600, "source": "knobs.env"}
+    assert knobs["HWAXRISK_REVIEW_CONCURRENCY"]["source"] == "default"
+    assert knobs["HWAXRISK_REVIEW_MAX_CALLS"]["source"] == "default"
+    assert "OTHER" not in knobs
+    # 스위치는 다른 불리언과 같은 규칙 — 모르는 낱말은 기본값(꺼짐)이다.
+    _knobs_file(tmp_path, "HWAXRISK_REVIEW_ENABLED=maybe\n")
+    assert reload_config(HWAXRISK_DATA_DIR=str(tmp_path)).settings.risk_review_enabled is False
+
+
+def test_a_knob_that_is_not_an_integer_stops_the_boot_and_says_where(tmp_path, reload_config):
+    """정수 자리에 정수가 아닌 값이 있으면 기동을 막는다 — 조용히 기본값으로 돌면 박스에 적은 값이 안 듣는 것을 아무도 모른다."""
+    _knobs_file(tmp_path, "HWAXRISK_UNITS_MAX=sixty\n")
+    with pytest.raises(RuntimeError) as exc:
+        config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path)})
+    assert "HWAXRISK_UNITS_MAX" in str(exc.value) and "knobs.env" in str(exc.value)
+    with pytest.raises(RuntimeError) as exc:
+        config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path / "x"), "HWAXRISK_REVIEW_CALL_TIMEOUT_S": "5h"})
+    assert "HWAXRISK_REVIEW_CALL_TIMEOUT_S" in str(exc.value) and "환경변수" in str(exc.value)
+
+
+def test_review_time_accessors_follow_their_knobs(tmp_path, reload_config):
+    """검토 자격 여유는 호출 벽시계 + 600 이다(기다림은 호출마다 자격을 다시 골라 넣지 않는다). 벽시계를 끄면 기본 벽시계로 셈한다."""
+    mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path))
+    assert (mod.review_call_timeout_s(mod.settings), mod.review_read_timeout_s(mod.settings)) == (18000, 300)
+    assert mod.review_credential_margin_s(mod.settings) == 18600 < 86400
+    mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path), HWAXRISK_REVIEW_CALL_TIMEOUT_S="0")
+    assert mod.review_call_timeout_s(mod.settings) == 0 and mod.review_credential_margin_s(mod.settings) == 18600
+    mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path), HWAXRISK_REVIEW_CALL_TIMEOUT_S="7200")
+    assert mod.review_credential_margin_s(mod.settings) == 7800

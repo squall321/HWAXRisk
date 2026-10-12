@@ -9,6 +9,7 @@ import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger("hwax_risk.config")
 
@@ -35,6 +36,10 @@ SECRET_KEYS: tuple[str, ...] = (
 #   HEAXHub 의 gateway_shared_secret 을 재사용하지 않는다 — 그 값은 portal_auth 라우트에서 Caddy 가
 #   모든 요청에 주입하므로, 같은 값을 쓰면 로그인한 아무나 남의 이메일로 단언을 발급받을 수 있다.
 OPTIONAL_SECRET_KEYS: tuple[str, ...] = ("HWAXRISK_BACKUP_KEY", "HWAXRISK_HEAX_GATEWAY_SECRET")
+
+# 박스마다 다른 손잡이 파일(재설계 M2.md 4.5) — 데이터 디렉터리에 있어 재배포에 남고 추적 파일이 아니다. secrets.env 와 같은 꼴
+# (KEY=VALUE 줄, '#' 주석)이고 비밀이 아니다. 아래 REVIEW_KNOBS 만 읽는다.
+KNOBS_FILENAME = "knobs.env"
 
 # 로스터 15 도메인(plan §0.6 실측 순서).
 _DEFAULT_ROSTER_DOMAINS = "xd,sim,cam,rel,soc,disp,mech,pcb,rf,passive,pwr,sh,mem,std,material"
@@ -89,6 +94,39 @@ DEFAULT_FIELD_TIMEOUT_S = 20
 # 답한다. 호출당 침묵 한도(HWAXRISK_SOURCE_CALL_TIMEOUT_S)는 ping 이 되감아 호출 길이를 자르지 못한다 — 게이트웨이
 # 호출 한도가 600초가 된 뒤로는 호출 하나가 프록시 한도와 같은 길이까지 간다.
 DEFAULT_ROSTER_DEADLINE_S = 540
+
+# ---------------------------------------------------------------- 카드 대조 검토의 손잡이(재설계 M2.md 4.5 — 전부 선택)
+# 순서는 환경변수 > $DATA_DIR/knobs.env > 코드 기본값이다. 매니페스트 launch.env 에는 적지 않는다 — 거기 적으면 dev·cae00 이 같이
+# 바뀐다(켜기 스위치는 박스마다 켠다, P-07). 기동 때 한 번 읽는다 — 파일을 고친 뒤에는 앱을 다시 띄운다. GET /api/meta/runtime 이
+# 값과 출처를 보인다.
+REVIEW_KNOB_HOME = "$DATA_DIR/knobs.env(박스마다 — 데이터 디렉터리라 재배포에 남는다, 고친 뒤 앱을 다시 띄운다)"
+# 호출 하나의 벽시계(HWAXRISK_REVIEW_CALL_TIMEOUT_S, 0 = 끔). 엔진의 요청 최악(약 10,824초)보다 길어야 한다.
+DEFAULT_REVIEW_CALL_TIMEOUT_S = 18000
+
+
+@dataclass(frozen=True)
+class Knob:
+    """검토 손잡이 하나 — 환경변수 이름 · Settings 속성 · 코드 기본값 · 형(int|bool)."""
+
+    env: str
+    attr: str
+    default: int | bool
+    kind: str = "int"
+
+
+REVIEW_KNOBS: tuple[Knob, ...] = (
+    Knob("HWAXRISK_REVIEW_ENABLED", "risk_review_enabled", False, "bool"),   # 새 흐름(flow='cells')의 스위치
+    Knob("HWAXRISK_UNIT_TARGET_LINES", "risk_unit_target_lines", 20),          # 검토 단위 크기(줄 수) — 글자 상한은 없다
+    Knob("HWAXRISK_UNIT_MAX_LINES", "risk_unit_max_lines", 40),
+    Knob("HWAXRISK_UNITS_SMALL_LINES", "risk_units_small_lines", 15),
+    Knob("HWAXRISK_UNITS_MAX", "risk_units_max", 60),
+    Knob("HWAXRISK_REVIEW_CONCURRENCY", "risk_review_concurrency", 4),         # 앱의 검토 워커 수
+    Knob("HWAXRISK_REVIEW_CALL_TIMEOUT_S", "risk_review_call_timeout_s", DEFAULT_REVIEW_CALL_TIMEOUT_S),
+    Knob("HWAXRISK_REVIEW_READ_TIMEOUT_S", "risk_review_read_timeout_s", 300),  # 프레임 사이 침묵 한도(엔진 ping 15초)
+    Knob("HWAXRISK_REVIEW_MAX_CHARGED", "risk_review_max_charged", 2),         # 셀의 내용 탓 실패 한도
+    Knob("HWAXRISK_REVIEW_CONSENT_CALLS", "risk_review_consent_calls", 1500),  # 동의가 필요한 호출 추정
+    Knob("HWAXRISK_REVIEW_MAX_CALLS", "risk_review_max_calls", 30000),         # 넘으면 거절하는 상한
+)
 
 
 def resolve_data_dir(env: Mapping[str, str] | None = None) -> Path:
@@ -165,6 +203,19 @@ class Settings:
     adh_group: str | None
     app_id: str = APP_ID
     app_version: str = APP_VERSION
+    # 카드 대조 검토 손잡이(REVIEW_KNOBS) — 기본값은 표의 코드 기본값과 같다. knob_sources 는 (환경변수 이름, 출처) 쌍이다.
+    risk_review_enabled: bool = False
+    risk_unit_target_lines: int = 20
+    risk_unit_max_lines: int = 40
+    risk_units_small_lines: int = 15
+    risk_units_max: int = 60
+    risk_review_concurrency: int = 4
+    risk_review_call_timeout_s: int = DEFAULT_REVIEW_CALL_TIMEOUT_S
+    risk_review_read_timeout_s: int = 300
+    risk_review_max_charged: int = 2
+    risk_review_consent_calls: int = 1500
+    risk_review_max_calls: int = 30000
+    knob_sources: tuple[tuple[str, str], ...] = ()
 
 
 def _csv(raw: str) -> tuple[str, ...]:
@@ -189,7 +240,10 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     env = os.environ if env is None else env
     data_dir = resolve_data_dir(env)
     ensure_data_dir(data_dir)
+    knob_values, knob_sources = load_review_knobs(data_dir, env)
     return Settings(
+        **knob_values,
+        knob_sources=knob_sources,
         data_dir=data_dir,
         db_path=data_dir / DB_FILENAME,
         root_path=env.get("ROOT_PATH", ""),
@@ -287,6 +341,11 @@ def load_secrets(data_dir: Path) -> dict[str, str]:
     mode = stat.S_IMODE(path.stat().st_mode)
     if mode != 0o600:
         log.warning("secrets.env 권한이 0600 이 아닙니다(%s): %o", path, mode)
+    return _read_env_file(path, (*SECRET_KEYS, *OPTIONAL_SECRET_KEYS))
+
+
+def _read_env_file(path: Path, keys: tuple[str, ...]) -> dict[str, str]:
+    """KEY=VALUE 줄 파일에서 `keys` 의 값만 읽는다('#' 주석·빈 줄·값이 빈 줄은 건너뛴다). secrets.env·knobs.env 가 같이 쓴다."""
     out: dict[str, str] = {}
     for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
@@ -294,9 +353,76 @@ def load_secrets(data_dir: Path) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         key, value = key.strip(), value.strip()
-        if key in (*SECRET_KEYS, *OPTIONAL_SECRET_KEYS) and value:
+        if key in keys and value:
             out[key] = value
     return out
+
+
+def load_review_knobs(data_dir: Path, env: Mapping[str, str] | None = None) -> tuple[dict[str, Any], tuple]:
+    """검토 손잡이(REVIEW_KNOBS)를 환경변수 > `$DATA_DIR/knobs.env` > 코드 기본값 순으로 읽는다.
+
+    반환은 (Settings 속성 → 값, ((환경변수 이름, 출처 env|knobs.env|default), …)). 빈 값은 적지 않은 것으로 본다. 정수가 아닌
+    값은 기동을 막는다(어느 자리의 어느 손잡이인지 말한다) — 조용히 기본값으로 돌면 박스에 적은 값이 듣지 않는 것을 아무도 모른다.
+    불리언은 다른 스위치와 같은 규칙(`_bool` — 모르는 낱말은 기본값)이다.
+    """
+    env = os.environ if env is None else env
+    path = Path(data_dir) / KNOBS_FILENAME
+    from_file = _read_env_file(path, tuple(k.env for k in REVIEW_KNOBS)) if path.is_file() else {}
+    values: dict[str, Any] = {}
+    sources: list[tuple[str, str]] = []
+    for knob in REVIEW_KNOBS:
+        raw, source = (env.get(knob.env) or "").strip(), "env"
+        if not raw:
+            raw, source = from_file.get(knob.env, ""), KNOBS_FILENAME
+        if not raw:
+            values[knob.attr] = knob.default
+            sources.append((knob.env, "default"))
+            continue
+        if knob.kind == "bool":
+            values[knob.attr] = _bool(raw, bool(knob.default))
+        else:
+            try:
+                values[knob.attr] = int(raw)
+            except ValueError as exc:
+                where = f"{path}" if source == KNOBS_FILENAME else "환경변수"
+                raise RuntimeError(f"{knob.env}={raw!r} 은 정수가 아닙니다({where}) — 고치거나 지우면 기본값"
+                                   f" {knob.default} 로 돈다.") from exc
+        sources.append((knob.env, source))
+    return values, tuple(sources)
+
+
+def review_enabled(cfg: object | None = None) -> bool:
+    """새 흐름(flow='cells')의 스위치 — HWAXRISK_REVIEW_ENABLED. 꺼져 있으면 cells 로 열거나 바꾸는 요청이 409 review_disabled 다."""
+    cfg = settings if cfg is None else cfg
+    return bool(getattr(cfg, "risk_review_enabled", False))
+
+
+def review_call_timeout_s(cfg: object | None = None) -> int:
+    """카드 대조 호출 하나의 벽시계(초). 0 이면 끈 것이다."""
+    cfg = settings if cfg is None else cfg
+    return max(0, int(getattr(cfg, "risk_review_call_timeout_s", DEFAULT_REVIEW_CALL_TIMEOUT_S)))
+
+
+def review_read_timeout_s(cfg: object | None = None) -> int:
+    """카드 대조 스트림의 프레임 사이 침묵 한도(초). 0 이면 끈 것이다."""
+    cfg = settings if cfg is None else cfg
+    return max(0, int(getattr(cfg, "risk_review_read_timeout_s", 300)))
+
+
+def review_credential_margin_s(cfg: object | None = None) -> int:
+    """검토 잡이 사용자 PAT 로 호출을 내려면 남아 있어야 하는 수명(초) — 호출 벽시계 + 600(M2.md 4.5).
+
+    기다림(자리 없음)은 호출마다 자격을 다시 고르므로 넣지 않는다. 벽시계를 끈 박스(0)에서는 기본 벽시계로 셈한다.
+    """
+    return (review_call_timeout_s(cfg) or DEFAULT_REVIEW_CALL_TIMEOUT_S) + CREDENTIAL_SLACK_S
+
+
+def review_knobs(cfg: object | None = None) -> dict[str, dict]:
+    """GET /api/meta/runtime 의 `knobs` — {환경변수 이름: {value, source}}. 출처는 기동 때 읽은 것이다(비밀은 없다)."""
+    cfg = settings if cfg is None else cfg
+    sources = dict(getattr(cfg, "knob_sources", ()) or ())
+    return {knob.env: {"value": getattr(cfg, knob.attr, knob.default), "source": sources.get(knob.env, "default")}
+            for knob in REVIEW_KNOBS}
 
 
 def backup_key(data_dir: Path | None = None, env: Mapping[str, str] | None = None) -> str:

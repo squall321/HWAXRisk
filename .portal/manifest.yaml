@@ -30,6 +30,8 @@ description: |
     findings·curation·patterns·precedents·vocab·export/import), 전 핸들러가 heax 신원 되묻기를 거친다.
   - 헬스체크: /api/health → {ok, app_version, schema_version}. 웹 UI 는 / 의 Vite/React SPA(화면 6종 — 홈·과제·스냅샷·비교·타깃·설정).
   - 데이터 경로: HWAXRISK_DATA_DIR > HEAX_DATA_DIR > <리포>/data, DB 파일 <data>/risk_review.db(단일 진실 원천, PRAGMA user_version, rr_* 41표).
+  - 카드 대조 검토(심사 대상의 flow=cells, 재설계 M2)는 박스마다 켠다 — <data>/knobs.env 에 HWAXRISK_REVIEW_ENABLED=1 한 줄.
+    검토 손잡이는 환경변수 > knobs.env > 코드 기본값 순이고 값과 출처는 GET /api/meta/runtime(관리자)이 보인다. launch.env 에는 적지 않는다.
   fastapi_react 스택(backend/ + frontend/) 기본 entrypoint(uvicorn app.main:app --root-path $ROOT_PATH)를 그대로 사용하며,
   SIF 빌드 훅 backend/scripts/heaxhub-build.sh 가 PYTHONNOUSERSITE=1 로 런타임 의존성을 hermetic 하게 재설치한다.
   loopback 바인드 + Caddy 경계 전제로 MCP DNS-rebinding Host 검증은 비활성화되어 있다.
