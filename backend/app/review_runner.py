@@ -119,10 +119,27 @@ def calls_estimate(cells: int, experts: int) -> dict:
 
 
 # ---------------------------------------------------------------- 잡 만들기
+def in_flight(store: Any, *, job_id: str | None = None, target_key: str | None = None) -> dict:
+    """아직 도는(running) 전문가 머리·셀 수 — {heads, cells}. `job_id` 를 주면 그 잡의 것(run_id), `target_key` 를 주면 그 대상의
+    것 전부다. 코드 보류는 도는 호출을 닫지 않으므로(M2.md 5절 #13) 잡이 paused 여도 0 이 아닐 수 있다(R3A-1)."""
+    col, value = ("run_id", job_id) if job_id is not None else ("target_key", target_key)
+    row = store.query_one(
+        f"SELECT (SELECT COUNT(*) FROM rr_expert_reports WHERE {col} = ? AND state = 'running') AS heads,"
+        f" (SELECT COUNT(*) FROM rr_review_cells WHERE {col} = ? AND state = 'running') AS cells", (value, value))
+    return {"heads": int(row["heads"] or 0), "cells": int(row["cells"] or 0)}
+
+
+def close_progress(store: Any, job_id: str, state: str) -> None:
+    """루프를 거치지 않고 끝난 잡(도는 것이 없는 paused·queued 의 취소)의 진행판을 끝난 모양으로 적는다 — phase=state, 워커 없음,
+    기다림 없음, 원장을 다시 센 값(R3A-1 · R3A-11)."""
+    body = JobProgress(store, job_id, clock=now_epoch).finish(state)
+    store.execute("UPDATE rr_jobs SET progress_json = ? WHERE id = ?", (body, job_id))
+
+
 def _refuse_live_jobs(store: Any, target_key: str) -> None:
-    """살아 있는 검토 잡(409 review_job_exists)·패널 잡(409 panel_job_running)·다시 저장을 기다리는 패널(409
-    repersist_pending — 검토 마감이 그 패널이 pending 으로 돌려 둔 좌석을 닫으면 다시 저장이 seats_moved 로 영영 막힌다,
-    RR-ADV-1)이 있으면 거절한다."""
+    """살아 있는 검토 잡(409 review_job_exists)·아직 도는 카드 대조 호출(409 review_in_flight)·패널 잡(409 panel_job_running)·
+    다시 저장을 기다리는 패널(409 repersist_pending — 검토 마감이 그 패널이 pending 으로 돌려 둔 좌석을 닫으면 다시 저장이
+    seats_moved 로 영영 막힌다, RR-ADV-1)이 있으면 거절한다."""
     marks = ",".join("?" * len(LIVE_STATES))
     live = store.query_one(
         f"SELECT id, state FROM rr_jobs WHERE target_key = ? AND mode = 'reviews' AND state IN ({marks})"
@@ -130,6 +147,12 @@ def _refuse_live_jobs(store: Any, target_key: str) -> None:
     if live is not None:
         raise AppError("review_job_exists", f"이 대상에는 살아 있는 검토 잡({live['id']}, {live['state']})이 있다 — 그 잡을"
                        " 재개하거나 취소한 뒤 새로 만든다.", 409, detail={"job_id": live["id"], "state": live["state"]})
+    # 잡은 끝났는데 워커가 아직 쥔 전문가·셀이 있다 — 지금 범위를 찍으면 그 셀은 옛 잡 id 를 단 채 나중에 놓인다(R3A-1).
+    busy = in_flight(store, target_key=target_key)
+    if busy["heads"] or busy["cells"]:
+        raise AppError("review_in_flight", f"이 대상에는 아직 도는 카드 대조 호출이 있다(전문가 {busy['heads']}명 · 셀"
+                       f" {busy['cells']}개) — 앞 잡의 워커가 그 호출을 닫고 놓을 때까지 기다렸다가 다시 만든다.", 409,
+                       detail=busy)
     panel = store.query_one(
         f"SELECT id, state FROM rr_jobs WHERE target_key = ? AND {runner.PANEL_JOBS_SQL} AND state IN ({marks})"
         " ORDER BY created_at DESC LIMIT 1", (target_key, *LIVE_STATES))
@@ -149,8 +172,8 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
 
     범위는 `{tiers?, domains?, agents?, unit_ids?}`(칸끼리 AND, 빠진 칸은 전부)다. 격자는 범위와 상관없이 로스터 전원 × 검토
     대상 단위이고, 범위는 그 가운데 이 잡이 집을 셀이다(X1-27 — 범위 밖 셀은 pending 으로 남는다).
-    거절 — 409 review_disabled(HWAXRISK_REVIEW_ENABLED=0) · 404 E404 · 409 review_job_exists · 409 panel_job_running · 409
-    repersist_pending · 422 units_absent(활성 빌드가 ok·oversize 가 아니다) · 422 scope_invalid · 422 scope_empty · 422
+    거절 — 409 review_disabled(HWAXRISK_REVIEW_ENABLED=0) · 404 E404 · 409 review_job_exists · 409 review_in_flight(그 대상의
+    전문가·셀이 아직 running — 끝난 잡의 워커가 놓기를 기다린다) · 409 panel_job_running · 409 repersist_pending · 422 units_absent(활성 빌드가 ok·oversize 가 아니다) · 422 scope_invalid · 422 scope_empty · 422
     input_gap_m3(범위에 ECAD 에 기대는데 ECAD 가 없는 전문가 — 입력 결손 호출은 M3) · 409 review_too_large(높은 끝 추정이
     HWAXRISK_REVIEW_MAX_CALLS 초과) · 422 consent_required(HWAXRISK_REVIEW_CONSENT_CALLS 초과인데 consent 가 없다) · 422
     pat_unavailable(쓸 사용자 PAT 가 없다 — 포털에서 PAT 를 등록한다, 서비스 계정으로 내려가지 않는다).
@@ -1658,9 +1681,9 @@ class ReviewLoop:
             (job["target_key"], job["id"]))["n"] or 0)
 
     def _running_heads(self, job: Mapping[str, Any]) -> int:
-        return int(self.store.query_one(
-            "SELECT COUNT(*) AS n FROM rr_expert_reports WHERE target_key = ? AND run_id = ? AND state = 'running'",
-            (job["target_key"], job["id"]))["n"] or 0)
+        """그 잡의 도는 전문가 머리·셀 수(R3A-1 — 취소는 이것이 0 이 될 때 cancelled 다)."""
+        busy = in_flight(self.store, job_id=str(job["id"]))
+        return busy["heads"] + busy["cells"]
 
     def _finish(self, job: Mapping[str, Any], state: str, error: str | None) -> None:
         """잡을 닫는다 — completed 는 error 를 실패 셀 셈으로 바꿔 적고(없으면 비운다), cancelled 는 취소 전의 error 를 둔다."""
@@ -1678,13 +1701,17 @@ class ReviewLoop:
                 self._served.pop(job["id"], None)
 
     def _unfinalized(self, job: Mapping[str, Any]) -> int:
-        """범위 안 셀이 다 닫혔는데 마감되지 않은(planned 로 남은) 머리 수 — 마감 도중 결함·재기동 뒤의 것이다."""
+        """범위 안 셀이 다 닫혔는데 마감되지 않은(planned 로 남은) 머리 수 — 마감 도중 결함·재기동 뒤의 것이다. 닫힌 셀이 앞 잡의
+        것이어도 센다(R3A-1 — 마감 전에 멈춘 앞 잡의 전문가를 이 잡이 마감한다, `claim_next_expert(purpose='finalize')` 와 같은 조건)."""
         return int(self.store.query_one(
             "SELECT COUNT(*) AS n FROM rr_expert_reports e WHERE e.target_key = ? AND e.run_id = ? AND e.state = 'planned'"
-            " AND e.pack_status IN ('ok', 'empty') AND EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key ="
-            " e.target_key AND c.agent_key = e.agent_key AND c.run_id = e.run_id)", (job["target_key"], job["id"]))["n"] or 0)
+            " AND e.pack_status IN ('ok', 'empty') AND NOT EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key ="
+            " e.target_key AND c.agent_key = e.agent_key AND c.run_id = e.run_id AND c.state IN ('pending', 'running'))",
+            (job["target_key"], job["id"]))["n"] or 0)
 
     def _complete_or_phase(self, job: Mapping[str, Any]) -> str | None:
+        # 다른 잡이 쥐고 있다가 그 잡이 끝난 뒤 놓은 범위 안 셀을 먼저 거둔다 — 그러지 않으면 아래 셈이 그 셀을 못 보고 잡을 닫는다(R3A-1).
+        review_cells.adopt_released(self.store, str(job["id"]), now=self.clock())
         if (self._open_cells(job) == 0 and self._running_heads(job) == 0 and not self.workers(job["id"])
                 and self._unfinalized(job) == 0):
             failed = self.store.query(

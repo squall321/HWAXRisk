@@ -1031,14 +1031,30 @@ def cancel_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
 
     종전에는 패널이 끝까지 갔다 — 벽시계가 12시간이라 취소한 잡의 패널이 러너 자리와 그 타깃의 직렬 순서를 최대
     12시간 붙들었다. 닫는 것은 앱의 구독이다. 엔진 쪽 심의는 분리 태스크라 끝까지 돌 수 있다.
+
+    검토 잡은 보류 열 셋을 비우고, 그 잡의 전문가·셀이 아직 도는(running) 동안은 상태와 상관없이 cancelling 이다 — paused 라도
+    코드 보류는 도는 호출을 닫지 않는다(M2.md 5절 #13). 루프가 도는 것이 0 이 될 때 cancelled 로 닫고 진행판을 끝낸다. 그 사이
+    잡이 살아 있어 새 잡이 그 셀을 범위에서 잃지 않는다(반대 검토 R3A-1). 도는 것이 없으면 곧바로 cancelled 이고 진행판을 끝난
+    모양(phase cancelled · 워커 없음)으로 적는다.
     """
     row = _job_row(store, job_id)
     if row["state"] in ("cancelled", "completed", "failed"):
         return {"job_id": job_id, "state": row["state"], "pause_reason": None}
-    hold = _HOLD_CLEARED if row["mode"] != "panels" else None       # 검토 잡은 보류 열 셋을 비운다
-    if row["state"] == "running":
-        return _set_job(store, job_id, "cancelling", by=by, hold=hold)
-    return _set_job(store, job_id, "cancelled", by=by, hold=hold)
+    if row["mode"] == "panels":
+        return _set_job(store, job_id, "cancelling" if row["state"] == "running" else "cancelled", by=by)
+    from app import review_runner  # noqa: PLC0415 — review_runner 는 이 모듈을 import 한다.
+
+    with store.tx():
+        # 확인과 쓰기 사이에 루프가 전문가를 쥐지 않게(선점은 잡이 running 일 때만 서고 같은 트랜잭션 잠금을 쓴다) 한 트랜잭션으로.
+        row = _job_row(store, job_id)
+        if row["state"] in ("cancelled", "completed", "failed"):
+            return {"job_id": job_id, "state": row["state"], "pause_reason": None}
+        busy = review_runner.in_flight(store, job_id=job_id)
+        if busy["heads"] or busy["cells"]:
+            return _set_job(store, job_id, "cancelling", by=by, hold=_HOLD_CLEARED)
+        out = _set_job(store, job_id, "cancelled", by=by, hold=_HOLD_CLEARED)
+        review_runner.close_progress(store, job_id, "cancelled")
+        return out
 
 
 def _panels_today(store: Any, target_key: str) -> int:

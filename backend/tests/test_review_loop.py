@@ -341,6 +341,94 @@ def test_a_cancel_closes_the_running_call_and_the_job_ends_cancelled(store, monk
     assert review_cells.review_invariants(store, key) == []
 
 
+def test_a_cancel_of_a_held_job_with_a_call_in_flight_waits_for_it_and_the_next_job_reviews_every_cell(store, monkeypatch):
+    """반대 검토 R3A-1 — 코드 보류(llm_outage)는 도는 호출을 닫지 않으므로 paused 인 잡에도 워커가 쥔 전문가·셀이 있다. 그 잡의
+    취소는 곧바로 cancelled 가 아니라 cancelling 이고(살아 있는 잡이라 새 잡은 409 review_job_exists), 워커가 놓은 뒤 루프가
+    cancelled 로 닫는다 — 진행판은 phase cancelled · 워커 없음 · 기다림 없음이다. 곧이어 만든 새 잡은 범위의 셀을 하나도 잃지 않고
+    끝까지 돌아 completed 다(옛 길은 셀이 옛 잡 id 를 단 채 놓여 새 잡이 호출 0회로 completed 였다)."""
+    from app import review_runner
+    from app.errors import AppError
+
+    key, first, fake, r, gate = _stalled(store, monkeypatch, 3)
+    assert r.loop.hold(first, "llm_outage", "다른 워커의 인프라 실패로 차단기가 열렸다", breaker=True)
+    assert runner.cancel_job(store, first, by=OWNER)["state"] == "cancelling"
+    with pytest.raises(AppError) as refused:
+        rig.job(store, key, scope={"agents": [SEAL]})
+    assert (refused.value.code, refused.value.http_status) == ("review_job_exists", 409)
+    gate.set()
+    r.loop.join(30)
+    r.tick()
+    assert rig.state(store, first) == "cancelled"
+    board = rig.progress(store, first)
+    assert (board["phase"], board["workers"], board["waiting"]) == ("cancelled", [], None)
+    assert review_runner.in_flight(store, target_key=key) == {"heads": 0, "cells": 0}
+
+    second = rig.job(store, key, scope={"agents": [SEAL]})
+    r.finish(second)
+    assert rig.state(store, second) == "completed" and rig.job_row(store, second)["error"] is None
+    assert {(c["state"], c["run_id"]) for c in _cells(store, key, SEAL)} == {("reviewed", second)}
+    assert _head(store, key, SEAL)["state"] == "ready" and _calls(store, second)
+    assert review_cells.review_invariants(store, key) == []
+
+
+def test_a_job_closed_outside_the_loop_refuses_a_new_job_while_its_call_runs_and_released_cells_are_adopted(
+        store, monkeypatch):
+    """반대 검토 R3A-1 — 루프를 거치지 않고 닫힌 잡(과제 폐기처럼 잡 행을 곧바로 cancelled 로 쓰는 길)의 워커가 아직 셀을 쥐고
+    있으면 새 잡은 409 review_in_flight 다. 그 문을 지나 선 잡(문이 생기기 전의 경합과 같은 자리)이 있어도 옛 잡 id 를 단 채 나중에
+    놓인 범위 안 셀은 루프가 그 잡의 것으로 거둔다 — 새 잡은 셀을 다 돌아 completed 이고 호출 0회로 끝나지 않는다."""
+    from app import review_runner
+    from app.errors import AppError
+
+    key, first, fake, r, gate = _stalled(store, monkeypatch, 3)
+    store.execute("UPDATE rr_jobs SET state = 'cancelled' WHERE id = ?", (first,))
+    with pytest.raises(AppError) as refused:
+        rig.job(store, key, scope={"agents": [SEAL]})
+    assert (refused.value.code, refused.value.http_status) == ("review_in_flight", 409)
+    assert refused.value.detail == {"heads": 1, "cells": 5}
+
+    monkeypatch.setattr(review_runner, "_refuse_live_jobs", lambda store, target_key: None)
+    second = rig.job(store, key, scope={"agents": [SEAL]})
+    assert {c["run_id"] for c in _cells(store, key, SEAL)} == {first}      # 쥔 셀이라 범위가 찍히지 않았다
+    gate.set()
+    r.loop.join(30)
+    assert {(c["state"], c["run_id"]) for c in _cells(store, key, SEAL)} == {("pending", first)}
+    r.finish(second)
+    assert rig.state(store, second) == "completed" and rig.job_row(store, second)["error"] is None
+    assert {(c["state"], c["run_id"]) for c in _cells(store, key, SEAL)} == {("reviewed", second)}
+    assert _head(store, key, SEAL)["state"] == "ready"
+    assert review_cells.review_invariants(store, key) == []
+
+
+def test_a_job_that_takes_over_an_expert_whose_cells_closed_before_its_finalize_finalizes_it(store, monkeypatch):
+    """반대 검토 R3A-1 의 변형 — 셀을 다 닫고 마감(finalize_expert) 전에 멈춘 전문가(planned)를 그 잡이 취소된 뒤 새 잡이 범위에
+    넣으면, 새 잡은 셀이 앞 잡의 것이어도 그 전문가를 마감한다(호출 없이). 잡을 곧바로 닫는 취소(도는 것이 없다)도 진행판을 끝난
+    모양으로 적는다(R3A-11)."""
+    from app import review_runner
+
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    first = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    r = rig.Rig(store, fake)
+    real = review_runner.finalize_expert
+    monkeypatch.setattr(review_runner, "finalize_expert", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("마감 도중 결함")))
+    r.tick()                                                # 묶음
+    r.tick()                                                # 세션 — 셀을 다 닫고 마감에서 넘어진다
+    assert {c["state"] for c in _cells(store, key, SEAL)} == {"reviewed"}
+    assert (_head(store, key, SEAL)["state"], _head(store, key, SEAL)["error"]) == ("planned", "internal_error")
+    monkeypatch.setattr(review_runner, "finalize_expert", real)
+    assert runner.cancel_job(store, first, by=OWNER)["state"] == "cancelled"
+    board = rig.progress(store, first)
+    assert (board["phase"], board["workers"], board["waiting"]) == ("cancelled", [], None)
+    runs = fake.runs
+
+    second = rig.job(store, key, scope={"agents": [SEAL]})
+    r.finish(second)
+    assert rig.state(store, second) == "completed" and fake.runs == runs
+    assert _head(store, key, SEAL)["state"] == "ready"
+    assert review_cells.review_invariants(store, key) == []
+
+
 def test_a_human_pause_over_a_code_hold_stays_when_the_clock_passes(store, monkeypatch):
     """코드 보류(llm_outage) 위에 사람이 정지를 누르면 사람의 정지가 이긴다 — hold_code='user' 이고 재개 시각이 지나도 그대로다
     (P-10 · M2.md 5절 #23)."""

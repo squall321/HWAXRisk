@@ -12,8 +12,11 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+
 from app import config, export, identity, review_cells, review_ops, review_runner, routes, runner, units
 from app.common import now_epoch
+from app.errors import AppError
 from app.risk_store import RiskStore
 from tests import factories
 from tests.synth import fake_review_engine as fre
@@ -283,9 +286,20 @@ def _review_target(store: RiskStore, monkeypatch, tmp_path) -> tuple[factories.S
 def test_cell_and_head_rows_move_with_the_owner_and_a_purge_blanks_them_and_drops_late_writes(risk_store, monkeypatch,
                                                                                             tmp_path):
     """셀·머리 행 — 이양이 owner_sub 를 옮기고, 폐기가 모델·사람이 쓴 글 열과 선점을 비운다. 폐기 뒤 늦게 끝난 호출(옛 선점)의
-    쓰기는 0행이다(m-10). 행은 잡 만들기 → 선점 → 셀 시작 → 호출 결과 쓰기로 만든다."""
+    쓰기는 0행이다(m-10). 행은 격자 짓기 → 이양 → 잡 만들기 → 선점 → 셀 시작 → 호출 결과 쓰기로 만든다. 워커가 선점을 쥔 동안
+    사람의 취소는 cancelling 이라(반대 검토 R3A-1 — 도는 호출이 놓일 때까지 잡이 살아 있다) 그동안 이양은 409 다. 그래서 이양은
+    잡이 서기 전의 격자에서 보고, 선점을 쥔 채 맞는 것은 폐기다(폐기는 살아 있는 잡을 곧바로 닫는다)."""
     synth, key = _review_target(risk_store, monkeypatch, tmp_path)
-    job = review_runner.create_review_job(risk_store, key, owner_sub=OWNER, scope={"agents": [SEAL]}, consent=True,
+    review_cells.plan_cells(risk_store, key)
+    with factories.routes_store(risk_store):
+        routes.transfer_project(synth.project_id, routes.TransferBody(to_email=HEIR, reason="담당 교체"),
+                                ident=factories.ident(OWNER))
+    for table in ("rr_expert_reports", "rr_review_cells"):
+        rows = risk_store.query(f"SELECT DISTINCT owner_sub FROM {table} WHERE target_key = ?", (key,))
+        assert [r["owner_sub"] for r in rows] == [HEIR], table
+    risk_store.upsert_credential(HEIR, identity.encrypt_pat("pat").decode("ascii"), "sub", HEIR, "[]",
+                                 now_epoch() + 30 * 86400)
+    job = review_runner.create_review_job(risk_store, key, owner_sub=HEIR, scope={"agents": [SEAL]}, consent=True,
                                           settings=config.settings)
     runner._set_job(risk_store, job["job_id"], "running")
     lease = review_cells.claim_next_expert(risk_store, {"id": job["job_id"]}, boot_id="boot", purpose="pack")["lease_owner"]
@@ -307,16 +321,18 @@ def test_cell_and_head_rows_move_with_the_owner_and_a_purge_blanks_them_and_drop
                                 (key, unit_id, SEAL))
     assert cell["error"] == "엔진이 낸 사유 글" and cell["lease_owner"] == lease and cell["extras_json"]
 
-    # 이양은 살아 있는 잡이 있으면 거절한다 — 사람이 잡을 멈추고 취소한다(워커가 쥔 선점은 그대로다 — 늦은 쓰기의 자리).
-    runner.pause_job(risk_store, job["job_id"], by=OWNER)
-    runner.cancel_job(risk_store, job["job_id"], by=OWNER)
+    # 사람이 잡을 멈추고 취소한다 — 워커가 쥔 선점은 그대로라(늦은 쓰기의 자리) 잡은 cancelling 이고 이양은 거절된다.
+    runner.pause_job(risk_store, job["job_id"], by=HEIR)
+    assert runner.cancel_job(risk_store, job["job_id"], by=HEIR)["state"] == "cancelling"
+    assert {(r["owner_sub"], r["state"]) for r in risk_store.query(
+        "SELECT owner_sub, state FROM rr_review_cells WHERE target_key = ? AND lease_owner IS NOT NULL", (key,))} == {
+        (HEIR, "running")}
     code = risk_store.query_one("SELECT code FROM rr_projects WHERE id = ?", (synth.project_id,))["code"]
     with factories.routes_store(risk_store):
-        routes.transfer_project(synth.project_id, routes.TransferBody(to_email=HEIR, reason="담당 교체"),
-                                ident=factories.ident(OWNER))
-        for table in ("rr_expert_reports", "rr_review_cells"):
-            rows = risk_store.query(f"SELECT DISTINCT owner_sub FROM {table} WHERE target_key = ?", (key,))
-            assert [r["owner_sub"] for r in rows] == [HEIR], table
+        with pytest.raises(AppError) as refused:
+            routes.transfer_project(synth.project_id, routes.TransferBody(to_email=OWNER, reason="되돌림"),
+                                    ident=factories.ident(HEIR))
+        assert refused.value.code == "job_running"
         routes.purge_project(synth.project_id, routes.PurgeBody(code=code, reason="정리"), ident=factories.ident(HEIR))
     blanked = ("extras_json", "route_json", "mechs_json", "handoffs_json", "error", "decide_note", "lease_owner")
     after = risk_store.query_one(f"SELECT {', '.join(blanked)} FROM rr_review_cells WHERE target_key = ? AND unit_id = ?"

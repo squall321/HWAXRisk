@@ -16,7 +16,7 @@ from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-from app import planner, review_ops, review_verify, units
+from app import planner, review_ops, review_verify, runner, units
 from app.common import new_uuid, now_epoch, sha256_hex
 from app.errors import AppError
 
@@ -226,11 +226,54 @@ def assign_scope(store: Any, target_key: str, run_id: str, *, agents: Sequence[s
                 " LIMIT 1", (target_key, agent, run_id))
             if has_open is None:
                 continue
-            reopened += _move(store, "expert", ("ready", "partial"), "planned", where=_head_where(),
-                              params=(target_key, agent), now=now)
-            reopened += _move(store, "expert", "blocked", "planned", where=_head_where(), params=(target_key, agent),
-                              sets={"pack_attempts": 0, "not_before": None}, now=now)
+            reopened += _reopen(store, target_key, agent, now=now)
     return {"cells": cells, "experts": heads, "reopened": reopened}
+
+
+def _reopen(store: Any, target_key: str, agent_key: str, *, now: int) -> int:
+    """범위 안에 pending 셀이 생긴 전문가를 다시 연다 — ready·partial 은 planned 로, blocked 는 묶음 시도 수와 백오프를 비우고
+    planned 로. 옮긴 머리 수."""
+    return (_move(store, "expert", ("ready", "partial"), "planned", where=_head_where(), params=(target_key, agent_key),
+                  now=now)
+            + _move(store, "expert", "blocked", "planned", where=_head_where(), params=(target_key, agent_key),
+                    sets={"pack_attempts": 0, "not_before": None}, now=now))
+
+
+def adopt_released(store: Any, job_id: str, *, now: int | None = None) -> int:
+    """살아 있는 검토 잡이 제 범위 안에서 '죽은 잡의 표지' 를 단 채 놓인 pending 셀을 거둔다(반대 검토 R3A-1).
+
+    `assign_scope` 는 잡을 만드는 순간의 pending 셀만 찍는다 — 그때 다른 잡의 워커가 쥐고 있던(running) 셀은 옛 잡 id 를 단 채
+    나중에 pending 으로 놓이고, 선점·완료 셈이 그 잡 id 의 셀만 보므로 아무도 집지 않는다(새 잡이 호출 0회로 completed). 그런
+    셀(run_id 가 없거나 살아 있지 않은 잡의 것)을 이 잡의 범위 — 이 잡이 찍은 전문가(머리 run_id) × 잡 범위의 unit_ids(없으면
+    전부) — 안에서 이 잡 id 로 찍고, 그 전문가가 ready·partial·blocked 면 다시 연다. 범위 밖 셀은 손대지 않는다. 거둔 셀 수.
+    """
+    now = now_epoch() if now is None else now
+    job = store.query_one("SELECT target_key, params_json, state FROM rr_jobs WHERE id = ? AND mode = 'reviews'", (job_id,))
+    if job is None or job["state"] not in runner.LIVE_JOB_STATES:
+        return 0
+    try:
+        scope = (json.loads(job["params_json"] or "{}").get("scope") or {})
+    except (TypeError, ValueError, AttributeError):
+        scope = {}
+    units_in = set(scope.get("unit_ids") or ()) if isinstance(scope, Mapping) else set()
+    target_key = job["target_key"]
+    marks = ",".join("?" * len(runner.LIVE_JOB_STATES))
+    with store.tx():
+        rows = [dict(r) for r in store.query(
+            "SELECT c.unit_id, c.agent_key FROM rr_review_cells c JOIN rr_expert_reports e"
+            " ON e.target_key = c.target_key AND e.agent_key = c.agent_key"
+            " WHERE c.target_key = ? AND e.run_id = ? AND c.state = 'pending' AND (c.run_id IS NULL OR c.run_id NOT IN"
+            f" (SELECT id FROM rr_jobs WHERE mode = 'reviews' AND state IN ({marks})))",
+            (target_key, job_id, *runner.LIVE_JOB_STATES))]
+        rows = [r for r in rows if not units_in or r["unit_id"] in units_in]
+        if not rows:
+            return 0
+        adopted = int(store.executemany(
+            "UPDATE rr_review_cells SET run_id = ?, updated_at = ? WHERE target_key = ? AND unit_id = ? AND agent_key = ?"
+            " AND state = 'pending'", [(job_id, now, target_key, r["unit_id"], r["agent_key"]) for r in rows]) or 0)
+        for agent in sorted({r["agent_key"] for r in rows}):
+            _reopen(store, target_key, agent, now=now)
+    return adopted
 
 
 # ---------------------------------------------------------------- 선점
@@ -256,6 +299,8 @@ def claim_next_expert(store: Any, job: Mapping[str, Any] | None = None, *, boot_
     `purpose='review'` 는 카드 묶음이 `ok`·`empty` 이고 백오프가 지난 범위 안 `pending` 셀이 있는 전문가, `'pack'` 은 묶음이
     `todo`·`error` 이고 범위 안 `pending` 셀이 있는 전문가다(묶음 받기도 워커 자리에서 한다 — m-04). `'finalize'` 는 범위 안 셀이
     다 닫혔는데 마감되지 않은 전문가다(마감 도중 결함·재기동 — 마감은 머리를 ready·partial 로 옮기므로 planned 로 남은 것이 그것이다).
+    마감은 닫힌 셀이 이 잡의 것이기를 요구하지 않는다 — 앞 잡에서 셀을 다 닫고 마감 전에 멈춘(재기동·취소) 전문가를 다음 잡이
+    범위에 넣으면 그 잡이 마감한다(R3A-1, 머리의 run_id 가 이 잡이면 그 잡의 범위다).
     셋 다 `planned` 이고 머리의 백오프(`not_before`)가 지났어야 한다. 순서는 `review_order`(Tier A → B → C).
     `job` 을 주지 않으면 도는(`running`) 검토 잡을 돌아가며 — 도는 전문가가 가장 적은 잡부터 — 집는다(P-09). `job` 을 주어도
     그 잡이 지금 `running` 인 검토 잡이 아니면 None 이다. 선점은 `planned` 조건이 붙은 UPDATE 의 바뀐 행이 1 일 때만 선다.
@@ -269,9 +314,7 @@ def claim_next_expert(store: Any, job: Mapping[str, Any] | None = None, *, boot_
     cells_cond = (" AND EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key = e.target_key AND c.agent_key = e.agent_key"
                   f" AND c.run_id = e.run_id AND c.state = 'pending'{cell_cond})")
     if purpose == "finalize":
-        cells_cond = (" AND EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key = e.target_key"
-                      " AND c.agent_key = e.agent_key AND c.run_id = e.run_id)"
-                      " AND NOT EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key = e.target_key"
+        cells_cond = (" AND NOT EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key = e.target_key"
                       " AND c.agent_key = e.agent_key AND c.run_id = e.run_id AND c.state IN ('pending', 'running'))")
     with store.tx():
         if job is None:
