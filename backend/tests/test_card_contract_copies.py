@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -36,10 +37,19 @@ def differing(copies: Path, source: Path) -> list[str]:
 
 
 def test_copies_exist():
-    """사본 디렉터리가 비면 아래 대조가 0건을 훑고 통과한다 — 그 자체를 막는다."""
+    """사본 디렉터리가 비면 아래 대조가 0건을 훑고 통과한다 — 그 자체를 막는다.
+
+    엔진 클라이언트·가짜 엔진(S7)이 읽는 것 — 장면 색인(index.json)이 가리키는 요청·run 프레임·끝 결과 전부, 스트림 전 거절(rejects),
+    계획(plan·pair_over), 창 1백만 토큰과 창 부족의 limits.
+    """
     names = {p.name for p in COPIES.iterdir() if p.is_file()}
     assert {"pack_ok.json", "pack_empty.json", "pack_errors.json", "quote_vectors.json", "card_norm_vectors.json",
-            "result_verdict_ok.json", "req_verdict_fwd.json"} <= names, sorted(names)
+            "result_verdict_ok.json", "req_verdict_fwd.json", "rejects.json", "plan_ok.json", "plan_req.json",
+            "plan_pair_over.json", "plan_pair_over_req.json", "limits_1m.json", "limits_ctx_too_small.json"} <= names, \
+        sorted(names)
+    index = json.loads((COPIES / "index.json").read_text(encoding="utf-8"))
+    scenes = {name for scene in index.values() for name in (scene["request"], scene["frames"], scene["final"])}
+    assert scenes <= names, sorted(scenes - names)
 
 
 def test_copies_equal_the_engine_files_byte_for_byte():
