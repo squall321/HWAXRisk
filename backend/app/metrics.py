@@ -474,6 +474,8 @@ def panel_models(store: RiskStore, owner_sub: str | None = None) -> dict[str, st
         model = _s(_loads(row["model_json"], {}).get("model")).strip()
         if model:
             out[str(row["id"])] = model
+    # M2 에는 이 갈래를 읽는 곳이 없다(R3B-11) — 세 호출부가 card_review finding 을 거르고(#20) panel_id 로 찾는다. M3 의 등록부 병합
+    # (M2.md 5절 #7)이 검토 finding 을 source_id 로 찾아 모델을 층화할 때 읽는다.
     for row in store.query("SELECT review_id, model FROM rr_expert_reports" + where + " ORDER BY review_id", params):
         model = _s(row["model"]).strip()
         if model:
