@@ -607,6 +607,8 @@ def _checklist_row(ledger: Ledger, unit: Mapping[str, Any], eff: Mapping[str, An
                      for v in ("fwd", "rev", "solo") if v in variants],
         "cq": cq, "cq_chars": cq_chars, "quote_ref": f"card:{record_id}#{section}" if section else f"card:{record_id}",
         "quote_ok": eff.get("quote_ok"), "check_disagree": bool(eff.get("check_disagree")),
+        "quote_state": review_verify.quote_state(eff.get("cq"), eff.get("quote_ok"), eff.get("check_disagree"),
+                                                 checks.get("quote")),
         "lines": _json(eff.get("lines_json"), []), "refs": _json(eff.get("refs_json"), []), "refs_ok": eff.get("refs_ok"),
         "why": eff.get("why"), "need": eff.get("need"), "sev": src.get("sev"), "mech": src.get("mech"),
         "mech_free": src.get("mech_free"), "path": src.get("path"), "check_kind": src.get("check_kind"),
@@ -710,7 +712,10 @@ def _off_card_section(ledger: Ledger, finding_of: Mapping[tuple[str, str], str])
                 "src": row.get("src"), "record_id": record_id or None,
                 "q": q or None, "q_chars": q_chars,
                 "quote_ref": (f"card:{record_id}#{section}" if section else f"card:{record_id}") if record_id else None,
-                "quote_ok": row.get("quote_ok"), "mech": row.get("mech"), "mech_free": row.get("mech_free"),
+                "quote_ok": row.get("quote_ok"),
+                "quote_state": review_verify.quote_state(row.get("q"), row.get("quote_ok"), row.get("check_disagree"),
+                                                         (row.get("checks") or {}).get("quote")),
+                "mech": row.get("mech"), "mech_free": row.get("mech_free"),
                 "sev": row.get("sev"), "conf": row.get("conf"), "check_kind": row.get("check_kind"),
                 "check": row.get("check_text"), "basis": row.get("basis"), "grade": row.get("grade"),
                 "finding_id": finding_of.get((unit["unit_id"], f"off:{index}"))})
@@ -1240,12 +1245,34 @@ def _refs(lines: Sequence[Any], refs: Sequence[Any]) -> str:
     return " → ".join(p for p in parts if p)
 
 
-def _quote_line(prefix: str, ref: str, quote: str | None, chars: int | None, ok: Any, *, word: str) -> str:
+# 카드 인용 대조의 갈래(review_verify.quote_state) → 보고서 표기(R3B-4). 사람이 인용을 카드 원문과 견줄 때 이 줄을 읽는다 — 맞는
+# 인용을 '불일치' 로 적지 않는다(짧아서 대조하지 않은 것 · 앱만 찾은 것 · 둘이 갈린 것 · 둘 다 못 찾은 것을 가른다).
+_QUOTE_STATE_LINE = {
+    "ok": "앱 재대조·엔진 검사 둘 다 카드 글에서 찾았다",
+    "short": "인용이 대조 하한(15자 · 실질 글자 10자) 밑이라 대조하지 않았다",
+    "app_only": "앱 재대조는 카드 글에서 찾았고{section} 엔진 검사는 찾지 못했다",
+    "engine_only": "엔진 검사는 찾았다고 했고 앱 재대조는 카드 글에서 찾지 못했다 — 둘이 갈렸다",
+    "not_found": "카드 글에 없다 — 앱 재대조·엔진 검사 둘 다 찾지 못했다",
+    "unchecked": "댈 카드가 없어 대조하지 않았다",
+}
+
+
+def _quote_mark(state: Any, ok: Any, ref: str) -> str:
+    """대조 표기 — 갈래가 없는 보고서(이 판 앞)는 quote_ok 로만 적는다(1 이면 찾았다, 아니면 갈래를 모른다)."""
+    if state is None:
+        state = "ok" if ok == 1 else None
+    if state is None:
+        return "대조 갈래가 이 보고서에 없다(앞 판의 보고서)"
+    section = ref.split("#", 1)[1] if "#" in ref else ""
+    return _QUOTE_STATE_LINE.get(str(state), _q(state)).format(section=f"(절 {section})" if section else "")
+
+
+def _quote_line(prefix: str, ref: str, quote: str | None, chars: int | None, ok: Any, *, word: str,
+                state: Any = None) -> str:
     if not quote:
         return f"{prefix} 인용 없음"
     mark = f" …({word} {chars}자 중 {QUOTE_SHOW}자)" if chars else ""
-    check = {1: "앱 재대조 통과", 0: "앱 재대조 불일치 — 카드 원문과 대조가 필요한 인용"}.get(ok, "대조하지 않음")
-    return f"{prefix} {ref} {_q(quote)}{mark} — {check}"
+    return f"{prefix} {ref} {_q(quote)}{mark} — {_quote_mark(state, ok, ref)}"
 
 
 def _md_head(report: Mapping[str, Any]) -> list[str]:
@@ -1312,7 +1339,8 @@ def _md_check_row(row: Mapping[str, Any], card: Mapping[str, Any] | None = None)
     out = [f"- 단위 {row['unit_seq']} — {_jw(row['judgement'])} · applies={_q(row['applies'])} · 실효 변형 {row['variant']}"
            f"({agree}; {variants})" + (f" · 원래 {_jw(row['judgement_claimed'])}" if row.get("judgement_claimed") else "")
            + (f" · {_sev(row['sev'])}" if _sev(row.get("sev")) else ""),
-           "  - " + _quote_line("카드 인용", row["quote_ref"], row["cq"], row["cq_chars"], row["quote_ok"], word="cq"),
+           "  - " + _quote_line("카드 인용", row["quote_ref"], row["cq"], row["cq_chars"], row["quote_ok"], word="cq",
+                                state=row.get("quote_state")),
            f"  - 변경 줄 {_refs(row['lines'], row['refs']) or '없음'} — "
            + {1: "그 단위 소속", 0: "그 단위 밖 참조가 섞였다"}.get(row["refs_ok"], "참조 없음")]
     if row.get("why"):
@@ -1436,7 +1464,7 @@ def _md_off_card(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
                  + f" · conf {_q(f.get('conf') or '')} · 메커니즘 {_q(f.get('mech') or '')} {_q(f.get('mech_free') or '')}"]
         if f.get("record_id"):
             lines.append("  - 근거 배경 카드 " + _quote_line(_q(f.get("src")), f["quote_ref"], f["q"], f["q_chars"],
-                                                         f["quote_ok"], word="q"))
+                                                         f["quote_ok"], word="q", state=f.get("quote_state")))
         else:
             lines.append("  - 근거 경험칙 — 카드 근거 없음(코드가 원문과 대조할 수 없다)")
         lines.append(f"  - 변경 줄 {_refs(f['lines'], f['refs']) or '없음'} — "

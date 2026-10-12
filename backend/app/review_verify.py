@@ -93,6 +93,34 @@ def _quote_match(quote: Any, text: str) -> tuple[str, str]:
     return status, ""
 
 
+def quote_too_short(quote: Any) -> bool:
+    """인용이 대조 하한(15자 · 실질 문자 10자, 이스케이프를 푼 것도 본다) 밑이라 대조하지 않는 글인가 — `_quote_match` 의 short 와
+    같은 규칙이다(카드 글 없이 인용만으로 정한다). 빈 인용은 짧은 것이 아니라 없는 것이라 False 다."""
+    q = _text(quote)
+    if not q.strip():
+        return False
+    for candidate in dict.fromkeys((q, _unescape(q))):
+        n = nq(candidate).strip("\"' ")
+        if len(n) >= QUOTE_MIN and substantive(n) >= QUOTE_SUBSTANTIVE_MIN:
+            return False
+    return True
+
+
+def quote_state(quote: Any, quote_ok: Any, check_disagree: Any, engine_status: Any) -> str | None:
+    """저장된 대조 열에서 읽은 카드 인용의 갈래(보고서 표기 — R3B-4) — ok(엔진·앱 둘 다 찾았다) · short(하한 밑이라 대조하지
+    않았다) · app_only(앱 재대조는 찾았고 엔진은 못 찾았다) · engine_only(엔진은 찾았다 하고 앱 재대조는 못 찾았다) · not_found(둘 다
+    못 찾았다) · unchecked(인용은 있는데 댈 카드가 없었다) · None(인용 없음). `quote_ok = 0` 하나로 셋을 뭉개지 않는다."""
+    if not _text(quote).strip():
+        return None
+    if quote_ok is None:
+        return "unchecked"
+    if int(quote_ok) == 1:
+        return "ok"
+    if int(check_disagree or 0):
+        return "engine_only" if engine_status == "ok" else "app_only"
+    return "short" if quote_too_short(quote) else "not_found"
+
+
 def quote_status(quote: Any, text: str) -> str:
     """인용이 글(카드 전체 글 또는 절 하나)에 있나 — ok · short · not_found · empty(`quote_check` 와 같은 규칙)."""
     return _quote_match(quote, text)[0]

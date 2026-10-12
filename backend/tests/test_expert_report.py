@@ -320,3 +320,38 @@ def test_a_blocked_outcome_after_a_real_report_keeps_that_report_and_says_why_be
         expert_report.render_report_md(report, part=part)
     meta, _body = routes.expert_report_source(key, SEAL, owner_sub=OWNER)
     assert (meta["state"], meta["version"]) == ("blocked", before["revision"]) and "agent_not_found" in meta["state_why"]
+
+
+# ---------------------------------------------------------------- 인용 대조 표기(R3B-4)
+def test_the_quote_mark_says_why_a_quote_did_not_pass_and_never_calls_a_card_quote_a_mismatch(store, monkeypatch):
+    """quote_ok = 0 하나가 덮던 갈래를 가른다 — 카드 글 그대로지만 15자 밑(short), 앱 재대조는 찾고 엔진만 못 찾음(app_only — 그
+    절 번호를 단다), 엔진만 찾았다고 함(engine_only — 둘이 갈림), 둘 다 못 찾음(not_found), 둘 다 찾음(ok). 맞는 인용을 '불일치' 로
+    적지 않는다."""
+    key = rig.target(store)
+    first = _unit_ids(store, key)[0]
+    orig = FakeReviewEngine._verdict_row
+
+    def row(self, alias, card, own, lines, *, variant=None):
+        out = orig(self, alias, card, own, lines, variant=variant)
+        if alias == "K01":
+            out["cq"], out["checks"]["quote"], out["checks"]["quote_sid"] = str(card["sections"][0]["text"])[:12], "short", ""
+        if alias == "K03":
+            out["checks"]["quote"] = "not_found"                         # 카드 글 그대로인데 엔진 검사만 못 찾았다
+        return out
+
+    monkeypatch.setattr(FakeReviewEngine, "_verdict_row", row)
+    _run(store, key, scope={"agents": [SEAL], "unit_ids": [first]}, invented_quote={"K02"}, lying_quote={"K04"})
+    report = expert_report.load_report(store, key, SEAL)
+    states = {c["alias"]: c["rows"][0]["quote_state"] for c in report["checklist"]}
+    assert states == {"K01": "short", "K02": "not_found", "K03": "app_only", "K04": "engine_only", "K05": "ok", "K06": "ok"}
+    assert {c["alias"]: c["rows"][0]["quote_ok"] for c in report["checklist"]} == {
+        "K01": 0, "K02": 0, "K03": 0, "K04": 0, "K05": 1, "K06": 1}
+    md = expert_report.render_report_md(report, part="cards")
+    quote_lines = {line.split("card:", 1)[1].split(" ", 1)[0]: line for line in md.split("\n") if "  - 카드 인용 card:" in line}
+    by_alias = {c["alias"]: c["rows"][0]["quote_ref"][len("card:"):] for c in report["checklist"]}
+    assert "대조 하한(15자 · 실질 글자 10자) 밑이라 대조하지 않았다" in quote_lines[by_alias["K01"]]
+    assert "카드 글에 없다 — 앱 재대조·엔진 검사 둘 다 찾지 못했다" in quote_lines[by_alias["K02"]]
+    assert by_alias["K03"].endswith("#1") and "앱 재대조는 카드 글에서 찾았고(절 1) 엔진 검사는 찾지 못했다" in quote_lines[by_alias["K03"]]
+    assert "엔진 검사는 찾았다고 했고 앱 재대조는 카드 글에서 찾지 못했다" in quote_lines[by_alias["K04"]]
+    assert "앱 재대조·엔진 검사 둘 다 카드 글에서 찾았다" in quote_lines[by_alias["K05"]]
+    assert "불일치" not in md and render.lint_text(md)["violations"] == []
