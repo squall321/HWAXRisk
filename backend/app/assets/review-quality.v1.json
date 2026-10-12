@@ -1,0 +1,22 @@
+{
+  "policy_version": "rq-1",
+  "notes": [
+    "검토 품질 수치(app/review_quality.py)의 기준판이다 — 기준값과 표본 하한은 환경변수가 아니라 이 파일에 둔다(WP5b 3.11.1, SIF 는 cleanenv 라 환경이 매니페스트로만 닿고 기준은 리포에서 판이 바뀌어야 하는 정책이다).",
+    "열쇠는 compute() 결과의 수치 경로다. 괄호의 rv.* 는 WP5b 3.7.1 의 이름이다 — truncation.calls(rv.truncation) · citation.quote.flagged(rv.quote_pos) · citation.quote.clear(rv.quote_neg) · flips.order(rv.order) · flips.solo_neg_pos(rv.flip_neg_pos) · seconds.*.p95(rv.seconds.p95).",
+    "max·min 은 값(점추정)과, upper_max 는 95% 상한(audit.binom_upper)과 견준다. 표본이 min_n 에 못 미치면 값을 비우고 견주지 않는다(within=null).",
+    "뒤집힘(걸림 없음→걸림)의 WP5b 기준은 max(5%, 잡음 바닥 + 3%p) 다. 잡음 바닥(같은 물음 반복)은 M2 가 재지 않으므로 5% 만 건다.",
+    "WP5b 의 rv.repair · rv.unrecovered · rv.omit_first · rv.stage1_miss 는 M2 품질 수치(m2-wp3b S11)의 칸이 아니라 여기 적지 않는다."
+  ],
+  "thresholds": {
+    "truncation.calls": {"max": 0.0},
+    "citation.quote.flagged": {"min": 0.95},
+    "citation.quote.clear": {"min": 0.80},
+    "flips.order": {"max": 0.10},
+    "flips.solo_neg_pos": {"upper_max": 0.05},
+    "seconds.p95": {"max": 900}
+  },
+  "min_n": {
+    "flips.order": 30,
+    "flips.solo_neg_pos": 59
+  }
+}

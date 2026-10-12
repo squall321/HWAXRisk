@@ -33,6 +33,15 @@
   handoff_to       이 영역으로 넘기는 h 줄을 훑기(첫 단위)와 카드 밖 호출에 하나씩 더한다(S10 의 넘김 절)
   seen·need        카드 밖 m 줄의 따져 본 메커니즘 · need 줄의 글(S10 의 메커니즘·필요 정보 절)
   hold_runs        n(1부터 센 run 차례) → threading.Event — 그 run 은 result 앞에서 그 사건을 기다린다(호출 중 재기동 시험)
+  solo_verdicts    solo 변형에서만 쓰는 record_id → (applies, judgement) — 단독 재질의가 앞 판정을 뒤집는 카드(S11)
+  sweep_rel        unit_id → 훑기 rel(yes·maybe·no) — 그 단위의 u 줄 rel 을 바꾼다(훑기 '무관' 비율, S11)
+  error_cells      (agent_key, unit_id) → error 프레임 — 그 셀의 run 은 늘 그 오류다(내용 탓이면 셀이 failed 로 간다, S11)
+  truncate         (kind, variant, unit_id) → 'length' | 'unknown' — 처음 맞는 run 한 번만: length 는 truncated 처럼 마지막
+                   판정 행을 빼고(행이 둘 이상인 호출에 건다 — 엔진은 남는 행이 0 이면 결과 대신 truncated_empty 를 낸다),
+                   unknown 은 quality.truncated·finish_reason 을 null 로 낸다(절단 모름 — X1-22, S11)
+  queued_ms        정수면 meta.queued_ms 로 싣는다(자리 대기 — 엔진 예제에는 없는 칸이라 기본은 싣지 않는다, S11)
+  no_quote         이 별칭들의 판정 행에 인용을 싣지 않는다(cq 빈 글 · checks.quote empty — 인용 통과율의 분모, X1-06, S11)
+  no_refs          이 별칭들의 판정 행에 변경 줄을 싣지 않는다(l·refs 빈 목록 · checks.refs missing — 참조 통과율의 분모, S11)
 기록 — requests(받은 요청 전부), runs(받은 run 수), max_active(동시에 돈 run 의 최댓값).
 S8(검토 루프)과 WP5b C9 가 이 파일을 넓힌다. 시험이 쓰는 여러 전문가의 팩은 `derive_pack` 이 엔진 계약 예제(pack_ok·pack_empty)에서
 전문가 이름·카드 고르기만 바꿔 짓는다(카드 글·text_sha 는 엔진이 낸 그대로다).
@@ -222,6 +231,13 @@ class FakeReviewEngine:
         self.seen: list[str] = []
         self.need: str | None = None
         self.hold_runs: dict[int, threading.Event] = {}
+        self.solo_verdicts: dict[str, tuple[str, str]] = {}
+        self.sweep_rel: dict[str, str] = {}
+        self.error_cells: dict[tuple[str, str], dict[str, Any]] = {}
+        self.truncate: dict[tuple[str, str | None, str | None], str] = {}
+        self.queued_ms: int | None = None
+        self.no_quote: set[str] = set()
+        self.no_refs: set[str] = set()
         # 기록
         self.requests: list[dict[str, Any]] = []
         self.runs = 0
@@ -363,6 +379,10 @@ class FakeReviewEngine:
             nth = self.runs
         if self._take("busy_n"):
             return self._busy()
+        cell = (str((body.get("expert") or {}).get("key") or ""), str((body.get("unit") or {}).get("unit_id") or ""))
+        if cell in self.error_cells:
+            return self._stream(iter([_sse("status", {"step": "attempt", "n": 1}),
+                                      _sse("error", {**self.error_cells[cell], "attempt": 1}), _sse("done", {})]))
         if self._take("error_n"):
             return self._stream(iter([_sse("status", {"step": "attempt", "n": 1}),
                                       _sse("error", {**self.error, "attempt": 1}), _sse("done", {})]))
@@ -408,6 +428,8 @@ class FakeReviewEngine:
     def result(self, body: Mapping[str, Any]) -> dict:
         """요청 하나 → 엔진 result 프레임 모양(M2.md 4.3)."""
         kind, variant = body.get("kind"), body.get("variant")
+        with self._lock:
+            cut = self.truncate.pop((kind, variant, (body.get("unit") or {}).get("unit_id")), None)
         cards = {c["alias"]: c for c in body.get("cards") or ()}
         order = list(cards)
         digest = {d["alias"]: d for d in body.get("digest") or () if d["alias"] not in cards}
@@ -425,7 +447,7 @@ class FakeReviewEngine:
         if kind == "verdict":
             judge = order[::-1] if variant == "rev" else order
             main = [self._verdict_row(a, cards[a], own, lines, variant=variant) for a in judge if a not in self.skip_cards]
-            if self.truncated and main:
+            if (self.truncated or cut == "length") and main:
                 main = main[:-1]
                 quality.update(truncated=True, tail_broken=True)
             missing = [a for a in judge if a not in {r["k"] for r in main}]
@@ -441,7 +463,7 @@ class FakeReviewEngine:
             flagged = sum(1 for r in main if r["checks"]["quote"] != "ok")
             quality.update(expected=len(judge), ok=len(main) - flagged, flagged=flagged, missing=len(missing))
         elif kind == "sweep":
-            rows = [{"t": "u", "k": list(order), "u": u, "rel": "maybe" if order else "no",
+            rows = [{"t": "u", "k": list(order), "u": u, "rel": self.sweep_rel.get(uid) or ("maybe" if order else "no"),
                      "why": "카드의 적용 조건이 이 단위에 걸릴 수 있다", "unit_id": uid,
                      "record_ids": [cards[a]["record_id"] for a in order], "from_attempt": 1,
                      "checks": {"why": "ok", "coerced": []}} for u, uid in units.items()]
@@ -482,11 +504,17 @@ class FakeReviewEngine:
                 "prompt_chars": len(json.dumps(body, ensure_ascii=False)),
                 "usage": {"llm_calls": 1, "tokens_in": 1000, "tokens_out": 100,
                           "per_attempt": [{"n": 1, "tokens_in": 1000, "tokens_out": 100}]},
-                "finish_reason": "length" if self.truncated and kind == "verdict" else "stop", "llm_ms": [0],
+                "finish_reason": ("length" if (self.truncated or cut == "length") and kind == "verdict" else "stop"),
+                "llm_ms": [0],
                 "soft_over": False, "basis": "cards" if (order or digest) else "role_only", "bg_dropped": 0,
                 "order_effective": not (kind == "verdict" and variant == "rev" and len(order) < 2),
                 "aliases": {"cards": {a: cards[a]["record_id"] for a in order},
                             "lines": {a: x["ref"] for a, x in lines.items()}, "units": units}}
+        if cut == "unknown":
+            quality["truncated"] = None
+            meta["finish_reason"] = None
+        if self.queued_ms is not None:
+            meta["queued_ms"] = int(self.queued_ms)
         return {"kind": kind, "variant": variant, "rows": rows, "missing": missing, "extras": extras,
                 "quality": quality, "meta": meta}
 
@@ -496,6 +524,8 @@ class FakeReviewEngine:
         applies, judgement = self.verdicts.get(record_id, ("yes", "OK"))
         if variant == "rev" and record_id in self.rev_verdicts:
             applies, judgement = self.rev_verdicts[record_id]
+        if variant == "solo" and record_id in self.solo_verdicts:
+            applies, judgement = self.solo_verdicts[record_id]
         quote, sid = quote_of(card)
         status = "ok" if quote else "empty"
         if alias in self.invented_quote or alias in self.lying_quote:
@@ -505,8 +535,10 @@ class FakeReviewEngine:
             quote, sid, status = LONG_QUOTE, "", "not_found"
         if alias in self.lying_quote:
             status, sid = "ok", "1"
+        if alias in self.no_quote:
+            quote, sid, status = "", "", "empty"
         flagged = judgement in ("WARNING", "FAIL")
-        cited = list(own[:1]) if applies != "no" else []
+        cited = list(own[:1]) if applies != "no" and alias not in self.no_refs else []
         return {"t": "v", "l": cited, "k": alias, "applies": applies, "judgement": judgement, "cq": quote, "why": WHY,
                 "need": NEED if applies == "unknown" or judgement == "undetermined" else "",
                 "sev": "중대" if flagged else "", "path": "변경 줄 → 카드 조건" if flagged else "",

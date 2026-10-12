@@ -12,7 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app import config, engine_client, identity
+from app import config, engine_client, identity, review_quality, review_runner
 from app.errors import AppError
 from app.mcp_server import mcp
 from app.risk_store import close_store, get_store
@@ -159,6 +159,8 @@ async def _lifespan(app: FastAPI):
     identity.reset_cache()
     # ⑥ 이식한 MCP Route 의 세션 매니저는 자동 기동되지 않으므로 직접 구동한다(MaterialTwinWeb·ThermalShockMCP 와 동일).
     # ⑦ 러너 스레드. 엔진은 주입식이라 러너 자체는 LLM 을 부르지 않는다(plan §6.7.1 (A) 경로).
+    # 검토 잡 진행판의 품질 칸 — 진행판이 60초마다 불러 progress_json.quality 에 넣는다(M2.md 5절 #16, S11).
+    review_runner.QUALITY_HOOK = review_quality.progress_hook
     runner = RiskRunner(store, settings, engine=engine_client.build_engine(store, settings), lock=runner_lock,
                         review_engine=engine_client.build_review_engine(store, settings))
     app.state.runner = runner
