@@ -1,4 +1,4 @@
-# 심의 엔진 클라이언트 — 포털 /agent/chat 의 SSE 를 러너 계약 {decision_text, turns, conv_id, events} 로 옮긴다(plan §6.7.1 (A))
+# 심의 엔진 클라이언트 — 포털 /agent/chat 의 SSE 를 러너 계약 {decision_text, turns, conv_id, events} 로 옮기고, 카드 대조는 대화 없이 /agent/card-review/* 를 부른다(plan §6.7.1 (A) · m2-wp3b S7)
 from __future__ import annotations
 
 import json
@@ -9,12 +9,13 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from app import config, identity
+from app import config, identity, review_ops
 from app.common import http_client, now_epoch
 
 # 프로토콜·예외의 정본은 러너다(러너가 이 모듈을 import 하지 않으므로 순환이 없다).
 from app.runner import (
-    NO_DECISION_CODES, EngineBusy, EngineError, EngineNoDecision, EngineStreamLost, PanelEngine, PatUnavailable,
+    NO_DECISION_CODES, EngineBusy, EngineError, EngineNoDecision, EngineRejected, EngineStreamLost, PanelEngine,
+    PatUnavailable, ReviewEngine,
 )
 
 log = logging.getLogger("hwax_risk.engine")
@@ -22,6 +23,7 @@ log = logging.getLogger("hwax_risk.engine")
 __all__ = [
     "PanelEngine", "PortalPanelEngine", "PatUnavailable",
     "build_engine", "parse_sse", "collect_stream",
+    "ReviewEngine", "PortalReviewEngine", "build_review_engine", "collect_review_stream", "review_outcome",
 ]
 
 # agent-server 는 '/심의 ' 로 시작하는 message 만 심의 파이프라인으로 보낸다(deliberation.DELIBERATE_TRIGGERS).
@@ -117,8 +119,12 @@ class _StreamWatch:
 
 
 def _watched(frames: Iterable[tuple[str, dict]], wall_s: int, watch: _StreamWatch,
-             should_stop: Callable[[], str | None] | None = None) -> Iterator[tuple[str, dict]]:
+             should_stop: Callable[[], str | None] | None = None, *, wall_code: str = "panel_timeout",
+             wall_knob: str = "HWAXRISK_PANEL_TIMEOUT_S", what: str = "패널") -> Iterator[tuple[str, dict]]:
     """프레임마다 진행을 적고 패널 벽시계를 본다 — 시작에서 `wall_s` 초를 넘겼으면 `EngineStreamLost` 로 끊는다(plan §6.10.2).
+
+    벽시계의 코드·손잡이·무엇이 넘겼나(`wall_code`·`wall_knob`·`what`)는 부르는 쪽이 정한다 — 기본값이 패널 것이고(문구 한 글자도
+    바뀌지 않는다), 카드 대조 호출은 `review_timeout`·`HWAXRISK_REVIEW_CALL_TIMEOUT_S`·'카드 대조 호출' 을 준다.
 
     읽기 타임아웃은 줄 사이 침묵만 잰다. 엔진이 상태 줄을 계속 보내는 한 걸리지 않아서, 벽시계를 따로 재지
     않으면 패널 하나가 러너 자리와 그 타깃의 직렬 순서를 끝없이 붙든다. 엔진에는 패널 전체를 재는 손잡이가
@@ -139,10 +145,10 @@ def _watched(frames: Iterable[tuple[str, dict]], wall_s: int, watch: _StreamWatc
         if name == "error" and str(data.get("code") or "") == PORTAL_STREAM_IDLE_CODE:
             raise watch.lost("engine_silent", f"{PORTAL_STREAM_IDLE_CODE}: {data.get('message') or ''}".strip())
         if wall_s and now_epoch() > watch.started + wall_s:
-            raise watch.lost("panel_timeout", f"패널이 {wall_s}초(HWAXRISK_PANEL_TIMEOUT_S)를 넘겼다")
+            raise watch.lost(wall_code, f"{what}이 {wall_s}초({wall_knob})를 넘겼다")
         why = should_stop() if should_stop is not None else None
         if why:
-            raise watch.lost("cancelled", f"{why} — 진행 중 패널을 닫았다")
+            raise watch.lost("cancelled", f"{why} — 진행 중 {what}을 닫았다")
         watch.frame(name, data)
         yield name, data
 
@@ -319,6 +325,10 @@ class PortalPanelEngine:
     # -- 1단계 model 스냅샷 ----------------------------------------------------
     def health(self) -> dict:
         """agent-server `GET /health` — runner.snapshot_model 이 D6 model_json 을 채운다. 불통이면 예외."""
+        return self._health_view(self._health_info())
+
+    def _health_info(self) -> dict:
+        """agent-server `GET /health` 의 본문 그대로(객체). 불통이면 예외."""
         base = str(getattr(self.settings, "agent_url", "") or DEFAULT_AGENT_URL).rstrip("/")
         with self._client(HEALTH_TIMEOUT_S) as client:
             r = client.get(base + "/health")
@@ -326,6 +336,11 @@ class PortalPanelEngine:
         info = r.json()
         if not isinstance(info, dict):
             raise EngineError("agent-server /health 응답이 객체가 아닙니다.")
+        return info
+
+    @staticmethod
+    def _health_view(info: Mapping[str, Any]) -> dict:
+        """/health 본문 → 패널 model_json 의 칸."""
         vllm = info.get("vllm")
         endpoint_host = None
         if isinstance(vllm, str) and "://" in vllm:
@@ -435,3 +450,266 @@ class PortalPanelEngine:
 def build_engine(store: Any, settings: Any) -> PortalPanelEngine:
     """main.py lifespan 이 러너에 주입하는 기본 엔진(경로 (A))."""
     return PortalPanelEngine(store, settings)
+
+
+# ---------------------------------------------------------------- 카드 대조(M2.md 4.2~4.4 · m2-wp3b S7) — 대화 없이 card-review 넷
+REVIEW_PATH = "/agent/card-review"
+# 단발 셋(limits·pack·plan)의 읽기 한도 — 포털 단발 한도(AGENT_UNARY_TIMEOUT_S 600초)보다 조금 크게 둬 포털의 504 agent_timeout 이
+# 먼저 온다(그쪽이 고칠 손잡이를 말한다). 이 한도에 걸린 것은 포털이 멈춘 것이다.
+REVIEW_UNARY_READ_S = 660.0
+REVIEW_WHAT = "카드 대조 호출"
+REVIEW_WALL_CODE = "review_timeout"
+REVIEW_WALL_KNOB = "HWAXRISK_REVIEW_CALL_TIMEOUT_S"
+REVIEW_READ_KNOB = "HWAXRISK_REVIEW_READ_TIMEOUT_S"
+
+
+class _ReviewWatch(_StreamWatch):
+    """카드 대조 스트림 한 건 — 대화가 없고, 닫으면 엔진이 그 LLM 호출을 거둔다(분리 태스크가 아니다)."""
+
+    def __init__(self, on_progress: Callable[[Mapping[str, Any]], None] | None = None) -> None:
+        super().__init__(None, on_progress)
+
+    def frame(self, name: str, data: Mapping[str, Any]) -> None:
+        # 엔진의 status 는 {step:"attempt", n} 이다 — 몇 번째 시도인지까지 마지막 단계로 적는다(보충 시도가 보이게).
+        if name == "status" and data.get("step") and data.get("n") is not None:
+            data = {**data, "step": f"{data['step']} {data['n']}"}
+        super().frame(name, data)
+
+    def lost(self, code: str, message: str) -> EngineStreamLost:
+        return EngineStreamLost(
+            code, f"{message} — 경과 {now_epoch() - self.started}초, 마지막 단계 {self.last_step or '없음'}."
+                  " 스트림을 닫았으므로 엔진은 그 LLM 호출을 거둔다")
+
+
+def _flag(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _review_error(code: str | None, message: str, data: Mapping[str, Any], *, status: int | None = None,
+                  retry_after: Any = None) -> Exception:
+    """거절 하나(스트림 전 응답 또는 error 프레임) → 예외. 이름은 `review_ops.classify` 가 정한다(코드가 없으면 상태로).
+
+    기다림 부류는 `EngineBusy`(retry_after_s 는 classify 가 묶은 값), `credential` 보류는 `PatUnavailable`(서비스 계정으로 내려가지
+    않는다), 나머지는 `EngineRejected` 다 — 받은 코드 원문·엔진의 infra·retryable 비트·knob·본문을 그대로 싣는다.
+    """
+    wait = data.get("retry_after_s", retry_after)
+    outcome = review_ops.classify(code, http_status=status, retry_after_s=wait)
+    text = message or (f"HTTP {status}" if status is not None else "")
+    if outcome.klass == review_ops.WAIT:
+        return EngineBusy(f"{outcome.code}: {text}", retry_after_s=outcome.retry_after_s, code=outcome.code)
+    if outcome.hold_code == "credential":
+        return PatUnavailable(f"{outcome.code}: {text}", code=outcome.code)
+    detail = {**dict(data), **({"http_status": status} if status is not None else {})}
+    return EngineRejected(outcome.code, text, infra=_flag(data.get("infra")), retryable=_flag(data.get("retryable")),
+                          knob=_text(data.get("knob")), detail=detail)
+
+
+def _review_rejection(response: httpx.Response) -> Exception:
+    """200 이 아닌 응답(본문까지 읽은 것) → 예외. 본문의 `code` 가 정본이다(최상위, 또는 FastAPI `detail` 객체 안).
+
+    포털 403(권한 문)·401(PAT 거절)과 옛 포털의 404 는 본문이 `{detail: 글}` 이라 코드가 없다 — 상태로 가른다(D-28 ·
+    `review_ops.classify` 의 상태표: 401 credential_rejected · 403 denied · 404 agent_outdated · 5xx portal_5xx).
+    """
+    try:
+        body: Any = response.json()
+    except ValueError:
+        body = None
+    if isinstance(body, Mapping) and isinstance(body.get("detail"), Mapping):
+        body = body["detail"]
+    data = dict(body) if isinstance(body, Mapping) else {}
+    raw = data.get("code")
+    code = raw.strip() if isinstance(raw, str) and raw.strip() else None
+    message = data.get("message") or data.get("detail")
+    return _review_error(code, str(message) if message else "", data, status=response.status_code,
+                         retry_after=response.headers.get("retry-after"))
+
+
+def collect_review_stream(frames: Iterable[tuple[str, dict]]) -> dict:
+    """카드 대조 run 의 SSE 프레임 → result 프레임 그대로(M2.md 4.3). 줄이거나 고치지 않는다 — 행 회계는 review_verify 몫이다.
+
+    status·ping 은 진행 신호일 뿐이다(`_watched` 가 센다). 첫 `error` 프레임이 결말이다(`_review_error` — 스트림의 `review_busy` 는
+    기다림). `done` 없이 끝난 스트림은 `engine_stream_cut`(인프라 — 같은 호출을 다시 낸다), `done` 까지 왔는데 result 가 없거나
+    `rows` 가 목록이 아니면 `review_parse_failed`(내용 탓)다.
+    """
+    result: Any = None
+    error: Mapping[str, Any] | None = None
+    done = False
+    for name, data in frames:
+        if name == "result" and result is None and error is None:
+            result = data
+        elif name == "error" and error is None:
+            error = data
+        elif name == "done":
+            done = True
+            break
+    if error is not None:
+        code = error.get("code")
+        raise _review_error(str(code).strip() if code else None, str(error.get("message") or ""), error)
+    if not done:
+        raise EngineStreamLost("engine_stream_cut", "카드 대조 스트림이 done 프레임 없이 끝났다(포털·에이전트 서버 재기동 또는"
+                                                    " 연결 끊김) — 같은 호출을 다시 낸다")
+    if not isinstance(result, dict) or not isinstance(result.get("rows"), list):
+        raise EngineRejected("review_parse_failed", "done 까지 왔는데 result 프레임이 없거나 rows 가 목록이 아니다",
+                             detail={"result": result})
+    return result
+
+
+def review_outcome(exc: BaseException, *, timeouts_before: int = 0) -> review_ops.Outcome:
+    """검토 엔진 예외 → `review_ops.classify` 의 부류(셀·잡이 할 일). 검토 러너는 이것 하나로 가른다.
+
+    `timeouts_before` 는 같은 호출이 앞서 호출 벽시계(`review_timeout`)에 걸린 횟수다 — 두 번째부터 내용 탓이다.
+    """
+    if isinstance(exc, EngineBusy):
+        return review_ops.classify(exc.code or "engine_busy", retry_after_s=exc.retry_after_s)
+    if isinstance(exc, PatUnavailable):
+        return review_ops.classify(exc.code)
+    if isinstance(exc, EngineRejected):
+        return review_ops.classify(exc.code, knob=exc.knob, timeouts_before=timeouts_before)
+    if isinstance(exc, EngineStreamLost):
+        return review_ops.classify(exc.code, timeouts_before=timeouts_before)
+    raise TypeError(f"카드 대조 엔진 예외가 아니다 — {type(exc).__name__}")
+
+
+def _int_or_none(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _review_health(info: Mapping[str, Any]) -> dict:
+    """/health 의 카드 대조 칸(M2.md 4.1 — `review_active` · `capabilities:["card_review"]` · `card_review{…}`) → 러너가 보는 것.
+
+    `capable` 이 거짓이면 그 에이전트 서버에 카드 대조가 없다(옛 판이거나 모듈을 못 붙였다 — 사유는 `error`). `limit` 은 서버 관문의
+    지금 상한(심의가 돌면 줄어든다), `active` 는 지금 도는 카드 대조 호출 수다. 모르면 None 이다(0 으로 치지 않는다).
+    """
+    caps = info.get("capabilities")
+    block = info.get("card_review")
+    block = block if isinstance(block, Mapping) else {}
+    return {"capable": isinstance(caps, list) and "card_review" in caps,
+            "active": _int_or_none(info.get("review_active")),
+            "limit": _int_or_none(block.get("limit")),
+            "limit_reason": _text(block.get("limit_reason")),
+            "request_worst_s": _int_or_none(block.get("request_worst_s")),
+            "error": _text(block.get("error"))}
+
+
+class PortalReviewEngine(PortalPanelEngine):
+    """앱 → 포털 `/agent/card-review/{limits,pack,plan,run}` — 카드 대조(M2.md 4.2~4.4). 포털 대화를 만들지 않는다(나갈 기준 3).
+
+    자격은 부를 때마다 `email` 의 사람이 등록한 포털 PAT 하나다(`_review_credential`). 패널 경로(`_credential`)와 달리 서비스
+    PAT 로 내려가지 않는다(사용자 결정 3) — 없거나 남은 수명이 여유 밑이면 `PatUnavailable` 이고 요청을 하나도 보내지 않는다.
+    포털이 그 PAT 로 신원 칸 넷(groups·user_email·user_pat·entitlements)을 덮어쓴다 — 앱은 신원을 자칭하지 않는다.
+    """
+
+    # -- 자격 -----------------------------------------------------------------
+    def _review_credential(self, email: str | None) -> dict:
+        """그 사람이 등록한 포털 PAT — 없거나 폐기·복호 실패면 `pat_unavailable`, 남은 수명이 `review_credential_margin_s`
+        (호출 벽시계 + 600초) 이하면 `credential_expired` 다. 둘 다 `PatUnavailable` 이고 서비스 PAT 를 보지 않는다."""
+        row = self.store.get_credential(email) if email and self.store is not None else None
+        pat = identity.credential_pat(row)
+        if not pat:
+            raise PatUnavailable(f"카드 대조 자격이 없습니다 — {email or '(이메일 없음)'} 이 등록한 포털 PAT 가 없거나 쓸 수 없습니다."
+                                 " 포털에서 PAT 를 다시 발급해 등록하고 재개합니다(서비스 계정으로 내려가지 않습니다).",
+                                 code="pat_unavailable")
+        left = int(row.get("pat_exp") or 0) - now_epoch()
+        margin = config.review_credential_margin_s(self.settings)
+        if left <= margin:
+            raise PatUnavailable(f"카드 대조 자격의 남은 수명 {max(left, 0)}초가 여유 {margin}초(HWAXRISK_REVIEW_CALL_TIMEOUT_S"
+                                 " + 600) 이하입니다 — 호출 하나가 도는 사이 만료될 수 있습니다. 포털에서 PAT 를 다시 발급해"
+                                 " 등록하고 재개합니다(서비스 계정으로 내려가지 않습니다).", code="credential_expired")
+        return {"pat": pat, "email": row.get("pat_email") or email}
+
+    def _review_url(self, route: str) -> str:
+        return f"{self._base()}{REVIEW_PATH}/{route}"
+
+    # -- 단발 셋 -----------------------------------------------------------------
+    def _unary(self, method: str, route: str, body: Mapping[str, Any] | None, email: str) -> dict:
+        credential = self._review_credential(email)
+        timeout = httpx.Timeout(REVIEW_UNARY_READ_S, connect=CONNECT_TIMEOUT_S, write=WRITE_TIMEOUT_S, pool=POOL_TIMEOUT_S)
+        where = f"{REVIEW_PATH}/{route}"
+        try:
+            with self._client(timeout) as client:
+                r = client.request(method, self._review_url(route), headers={"Authorization": f"Bearer {credential['pat']}"},
+                                   json=dict(body) if body is not None else None)
+        except httpx.TimeoutException as exc:
+            raise EngineRejected("portal_unreachable", f"포털 {where} 가 답하지 않았다({type(exc).__name__}, 읽기 한도"
+                                 f" {REVIEW_UNARY_READ_S:g}초)", infra=True, retryable=True) from exc
+        except httpx.HTTPError as exc:
+            raise EngineRejected("portal_unreachable", f"포털 {where} 호출 실패({type(exc).__name__})",
+                                 infra=True, retryable=True) from exc
+        if r.status_code != 200:
+            raise _review_rejection(r)
+        try:
+            out = r.json()
+        except ValueError:
+            out = None
+        if not isinstance(out, dict):
+            raise EngineRejected("review_parse_failed", f"포털 {where} 의 200 응답이 JSON 객체가 아니다",
+                                 detail={"http_status": 200})
+        return out
+
+    def limits(self, *, email: str) -> dict:
+        """이 박스의 예산과 판(M2.md 4.2) — 응답 그대로."""
+        return self._unary("GET", "limits", None, email)
+
+    def pack(self, agent_key: str, *, email: str) -> dict:
+        """그 전문가의 지식카드 전부 → 정규 팩(응답 그대로 — 확인·동결은 cardpack 몫). 엔진은 이 사람의 PAT 로만 카드를 받는다."""
+        return self._unary("POST", "pack", {"agent_key": agent_key}, email)
+
+    def plan(self, body: Mapping[str, Any], *, email: str) -> dict:
+        """카드 묶음·목록 쪽 나누기. 요청은 `{cards[{alias, record_id, checkable, chars}], units[{unit_id, manifest_chars,
+        body_chars}], expect?}` 이다 — `agent_key` 를 싣지 않는다(엔진 요청 모델에 그 칸이 없어 422 unknown_fields 다).
+
+        응답에는 늘 `pair_over` 가 있다(M2.md 4.2 — 묶음째로는 창을 넘는 (묶음, 단위) 짝). 없으면 그 짝을 모르는 옛 에이전트
+        서버다 — 그대로 쓰면 그 짝의 run 이 over_budget 으로 잡을 멈추므로 `agent_outdated` 로 올린다.
+        """
+        out = self._unary("POST", "plan", body, email)
+        if not isinstance(out.get("pair_over"), list):
+            raise EngineRejected("agent_outdated", "plan 응답에 pair_over 가 없다 — 묶음째로 창을 넘는 짝을 알리지 않는 옛 에이전트"
+                                 " 서버다. 에이전트 서버를 카드 대조 판(cr-1, RB-7 이후)으로 올리고 다시 띄운다",
+                                 detail={"http_status": 200, "keys": sorted(out)})
+        return out
+
+    # -- 스트림 --------------------------------------------------------------------
+    def run(self, body: Mapping[str, Any], *, email: str,  # type: ignore[override] — 패널 run 과 다른 계약(ReviewEngine)
+            on_progress: Callable[[Mapping[str, Any]], None] | None = None,
+            should_stop: Callable[[], str | None] | None = None) -> dict:
+        """카드 대조 호출 한 건(SSE) → result 프레임 그대로. 대화를 만들지 않고 본문에 `conversation_id` 를 싣지 않는다.
+
+        줄 사이 침묵 한도는 `HWAXRISK_REVIEW_READ_TIMEOUT_S`(엔진 ping 15초 — 죽은 연결이 자리를 붙들지 않게), 호출 하나의
+        벽시계는 `HWAXRISK_REVIEW_CALL_TIMEOUT_S` 다(엔진의 요청 최악보다 길다). 둘 다 0 이면 재지 않는다.
+        """
+        credential = self._review_credential(email)
+        read_s = float(config.review_read_timeout_s(self.settings))
+        timeout = httpx.Timeout(connect=CONNECT_TIMEOUT_S, read=read_s or None, write=WRITE_TIMEOUT_S, pool=POOL_TIMEOUT_S)
+        wall_s = config.review_call_timeout_s(self.settings)
+        watch = _ReviewWatch(on_progress)
+        headers = {"Authorization": f"Bearer {credential['pat']}", "Accept": "text/event-stream"}
+        streaming = False
+        try:
+            with self._client(timeout) as client:
+                with client.stream("POST", self._review_url("run"), json=dict(body), headers=headers) as response:
+                    if response.status_code != 200:
+                        response.read()
+                        raise _review_rejection(response)
+                    streaming = True
+                    return collect_review_stream(_watched(
+                        parse_sse(response.iter_lines()), wall_s, watch, should_stop,
+                        wall_code=REVIEW_WALL_CODE, wall_knob=REVIEW_WALL_KNOB, what=REVIEW_WHAT))
+        except httpx.ReadTimeout as exc:
+            raise watch.lost("engine_silent", f"카드 대조 스트림이 {read_s:g}초 동안 조용했다({REVIEW_READ_KNOB})") from exc
+        except httpx.HTTPError as exc:
+            if streaming and isinstance(exc, (httpx.RemoteProtocolError, httpx.ReadError)):
+                raise watch.lost("engine_stream_cut", f"스트림이 중간에 끊겼다({type(exc).__name__} — 포털·에이전트 서버 재기동"
+                                                      " 또는 연결 끊김)") from exc
+            raise EngineRejected("portal_unreachable", f"포털 {REVIEW_PATH}/run 호출 실패({type(exc).__name__})",
+                                 infra=True, retryable=True) from exc
+
+    # -- 서버 관문 -------------------------------------------------------------------
+    def health(self) -> dict:
+        """패널 health() 에 카드 대조 칸 `card_review{capable, active, limit, limit_reason, request_worst_s, error}` 를 더한다."""
+        info = self._health_info()
+        return {**self._health_view(info), "card_review": _review_health(info)}
+
+
+def build_review_engine(store: Any, settings: Any) -> PortalReviewEngine:
+    """검토 러너(S8)에 주입하는 카드 대조 엔진 — 운영 코드에 가짜로 바꾸는 손잡이는 없다(D-15, 가짜는 tests/synth 에만)."""
+    return PortalReviewEngine(store, settings)

@@ -103,17 +103,52 @@ class PanelEngine(Protocol):
     def run(self, delib_opts: Mapping[str, Any], *, owner_sub: str | None = None) -> Mapping[str, Any]: ...
 
 
+class ReviewEngine(Protocol):
+    """카드 대조 엔진 클라이언트(m2-wp3b S7 · M2.md 4.2~4.4). 검토 러너가 부르는 넷과 서버 관문 조회 하나다. 포털 대화를 만들지 않는다.
+
+    자격은 부를 때마다 `email` 의 사람이 등록한 포털 PAT 하나다(사용자 결정 3 — 서비스 계정으로 내려가지 않는다).
+      · limits(email=)        -> GET /card-review/limits 응답(M2.md 4.2)
+      · pack(agent_key, email=) -> 그 전문가의 팩(cardpack.check_pack 이 보는 모양)
+      · plan(body, email=)    -> {limits_rev, verdict_decks, sweep_decks, manifest_pages, oversize, soft_over, pair_over}
+      · run(body, email=, on_progress=, should_stop=) -> result 프레임(M2.md 4.3) 그대로
+      · health()              -> 패널 health() 에 card_review{capable, active, limit, limit_reason, request_worst_s, error}
+    자리 없음(포털 429 engine_busy · 관문 review_busy · 503 ctx_unknown)은 EngineBusy(retry_after_s, code), 자격은
+    PatUnavailable(code), 앱이 스트림을 놓은 것(engine_silent · engine_stream_cut · review_timeout · cancelled)은
+    EngineStreamLost, 그 밖의 거절과 error 프레임은 EngineRejected(code) 다. 부류는 review_ops.classify 가 정한다.
+    on_progress 는 프레임마다 {last_frame_at, last_event_at, last_step, frames} 로 불리고, should_stop 이 사유를 돌려주면
+    스트림을 닫는다(닫으면 엔진이 그 LLM 호출을 거둔다).
+    """
+
+    def limits(self, *, email: str) -> Mapping[str, Any]: ...
+
+    def pack(self, agent_key: str, *, email: str) -> Mapping[str, Any]: ...
+
+    def plan(self, body: Mapping[str, Any], *, email: str) -> Mapping[str, Any]: ...
+
+    def run(self, body: Mapping[str, Any], *, email: str, on_progress: Any = None,
+            should_stop: Any = None) -> Mapping[str, Any]: ...
+
+    def health(self) -> Mapping[str, Any]: ...
+
+
 class EngineBusy(Exception):
     """엔진 슬롯이 없다(포털 agent_semaphore 429). 러너가 대기 후 다시 묻는다 — 엔진도 좌석도 실패한 것이 아니다.
 
     대기 예산(`HWAXRISK_ENGINE_BUSY_MAX_WAIT_S`)을 다 쓰면 좌석 재시도와 연속 실패에 세지 않고 잡을 멈춘다
     (run_panel). `conversation` 은 그 시도가 만든 포털 대화 (대화 id, 만든 자격 표기)다 — 러너가 재시도에 그대로
     되돌려 준다. 다시 쓰지 않으면 패널 하나가 빈 대화를 시도 수만큼 남긴다. 대화를 못 만들었으면 None 이다.
+
+    카드 대조 경로(ReviewEngine)의 자리 없음도 이 예외다 — 포털 429 `engine_busy`, 엔진 관문 `review_busy`(429·스트림의 error
+    프레임), 창 조회 중의 503 `ctx_unknown`. `retry_after_s` 는 그 응답이 알린 대기를 `review_ops.classify` 가 [1, 3600]초로 묶은
+    값이고 `code` 는 받은 코드다. 패널 경로는 둘 다 None 이다.
     """
 
-    def __init__(self, *args: Any, conversation: tuple[str, str] | None = None) -> None:
+    def __init__(self, *args: Any, conversation: tuple[str, str] | None = None, retry_after_s: int | None = None,
+                 code: str | None = None) -> None:
         super().__init__(*args)
         self.conversation = conversation
+        self.retry_after_s = retry_after_s
+        self.code = code
 
 
 class EngineError(Exception):
@@ -154,8 +189,37 @@ class EngineNoDecision(EngineError):
         self.decision_text = decision_text
 
 
+class EngineRejected(EngineError):
+    """카드 대조 엔진·포털 중계가 코드를 실어 거절했다 — 스트림 전 응답(4xx·5xx), 스트림의 error 프레임, 포털에 닿지 못한 것.
+
+    `code` 는 받은 코드 원문이다(코드가 없는 응답은 상태로 정한 이름 — `review_ops.classify`, 연결 실패는 `portal_unreachable`).
+    셀과 잡이 할 일은 `review_ops.classify(code)` 가 정한다 — `infra`·`retryable` 은 엔진이 실어 보낸 비트 그대로 남기되 분류에는
+    쓰지 않는다(표가 이긴다). `knob` 은 엔진이 알린 고칠 설정이고 `detail` 은 받은 본문이다(스트림 전 응답이면 HTTP 상태 `http_status` 를
+    더한다 — 엔진 error 프레임의 `status` 는 LLM 서버의 상태라 이름을 가른다).
+    """
+
+    def __init__(self, code: str, message: str, *, infra: bool | None = None, retryable: bool | None = None,
+                 knob: str | None = None, detail: Mapping[str, Any] | None = None) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
+        self.infra = infra
+        self.retryable = retryable
+        self.knob = knob
+        self.detail = dict(detail or {})
+
+
 class PatUnavailable(Exception):
-    """러너 자격 문제(자격 없음·포털 401/403). 폴백하지 않고 잡을 `error='pat_unavailable'` 로 멈춘다(plan §6.7.1)."""
+    """러너 자격 문제(자격 없음·포털 401/403). 폴백하지 않고 잡을 `error='pat_unavailable'` 로 멈춘다(plan §6.7.1).
+
+    `code` 는 카드 대조 경로가 싣는 사유다 — `pat_unavailable`(등록한 PAT 가 없다·폐기·복호 실패) · `credential_expired`(남은 수명이
+    `config.review_credential_margin_s` 이하) · `credential_rejected`·`credential_missing`(포털·엔진이 거절). 전부
+    `review_ops.classify` 의 `credential` 보류다(서비스 계정으로 내려가지 않는다 — 사용자 결정 3). 패널 경로는 기본값을 둔다.
+    """
+
+    def __init__(self, *args: Any, code: str = "pat_unavailable") -> None:
+        super().__init__(*args)
+        self.code = code
 
 
 # ---------------------------------------------------------------- 좌석 귀속(plan §6.7 7단계)
