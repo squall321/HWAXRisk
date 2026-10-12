@@ -351,14 +351,17 @@ def release_expert(store: Any, target_key: str, agent_key: str, *, lease_owner: 
                    error: str | None = None, now: int | None = None) -> dict:
     """쥔 전문가를 놓는다(running → planned). 그 선점으로 도는 셀은 차감 없이 `pending` 으로 돌아간다.
 
-    `not_before` 는 머리의 백오프(그 전에는 다시 집지 않는다), `error` 는 놓은 까닭이다. 선점을 이미 잃었으면 아무것도 바꾸지
-    않는다 — {released: False, cells: 0}.
+    `not_before` 는 머리의 백오프(그 전에는 다시 집지 않는다), `error` 는 놓은 까닭이다. `not_before` 를 주지 않으면(None) 머리에
+    이미 적힌 백오프를 지우지 않는다 — 세션이 놓기 전에 적은 묶음 백오프(record_pack) 따위가 남는다(반대 검토 R3A-9). 선점을 쥐는
+    순간 머리의 백오프는 지났으므로 남는 것은 이 세션이 적은 것뿐이다. 선점을 이미 잃었으면 아무것도 바꾸지 않는다 —
+    {released: False, cells: 0}.
     """
     now = now_epoch() if now is None else now
     with store.tx():
         head = _move(store, "expert", "running", "planned", where=f"{_head_where()} AND lease_owner = ?",
                      params=(target_key, agent_key, lease_owner),
-                     sets={"lease_owner": None, "not_before": not_before, "error": error}, now=now)
+                     sets={"lease_owner": None, "error": error,
+                           **({"not_before": not_before} if not_before is not None else {})}, now=now)
         if not head:
             return {"released": False, "cells": 0}
         cells = _move(store, "cell", "running", "pending", where="target_key = ? AND agent_key = ? AND lease_owner = ?",

@@ -1044,9 +1044,10 @@ class _Session:
                        else f"{what}: {exc}")
             raise _Stop(outcome.hold_code or "contract")
         if outcome.klass == review_ops.PACK:
+            until = self.now() + review_ops.pack_retry_s(1)
             review_cells.record_pack(self.store, self.target_key, self.agent, lease_owner=self.lease, status="error",
-                                     error=outcome.code, not_before=self.now() + review_ops.pack_retry_s(1), now=self.now())
-            raise _Stop(f"pack:{outcome.code}")
+                                     error=outcome.code, not_before=until, now=self.now())
+            raise _Stop(f"pack:{outcome.code}", not_before=until)       # 놓기가 그 백오프를 지우지 않게(R3A-9)
         raise _Stop("cancelled")
 
     def _limits_moved(self) -> bool:

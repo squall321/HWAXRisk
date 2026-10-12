@@ -495,6 +495,30 @@ def test_one_experts_pack_502_fails_only_their_cells_after_six_tries(store, monk
     assert review_cells.review_invariants(store, key) == []
 
 
+def test_a_pack_class_error_on_a_run_keeps_its_pack_backoff_through_the_release(store, monkeypatch):
+    """반대 검토 R3A-9 — 판정 호출이 묶음 부류 오류(card_fetch_failed)로 끝나면 머리에 묶음 백오프(60초)를 적고 놓는다. 놓기가 그
+    백오프를 지우지 않는다 — 시계가 그대로면 다음 틱이 다시 집지 않고, 60초 뒤 다시 받아 끝까지 간다."""
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    r = rig.Rig(store, fake)
+    r.tick()                                                # 묶음
+    fake.error_n = 1
+    fake.error = {"code": "card_fetch_failed", "message": "카드 조회 실패(가짜)", "infra": True, "retryable": True}
+    r.tick()
+    head = _head(store, key, SEAL)
+    assert (head["state"], head["pack_status"], head["pack_error"], head["error"]) == (
+        "planned", "error", "card_fetch_failed", "pack:card_fetch_failed")
+    assert head["not_before"] == r.clock() + review_ops.pack_retry_s(1)
+    runs = fake.runs
+    r.tick()
+    assert fake.runs == runs and fake.calls("pack")[1:] == []           # 백오프 안 — 다시 집지 않는다
+    r.clock.advance(review_ops.pack_retry_s(1))
+    r.finish(job_id)
+    assert rig.state(store, job_id) == "completed" and {c["state"] for c in _cells(store, key, SEAL)} == {"reviewed"}
+
+
 def test_pack_infra_failures_back_off_without_spending_the_pack_budget(store, monkeypatch):
     """반대 검토 R3A-7 — 카드 묶음 받기의 인프라 실패(포털이 중계한 502 agent_unreachable)는 묶음 재시도 한도(6)를 깎지 않는다.
     머리 백오프(연달은 수만큼 길어진다 — 여덟째는 상한 근처)로만 놓고 묶음 시도 수는 0 이다. 회복하면 셀이 실패 없이 끝난다(§4.4 의
