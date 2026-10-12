@@ -30,6 +30,7 @@ __all__ = [
     "check_invariants",
     "collect_diff_items",
     "digest_of",
+    "evidence_lines",
     "manifest_item",
     "partition",
     "payload_of",
@@ -341,19 +342,31 @@ def collect_diff_items(diff_obj: Mapping[str, Any]) -> list[dict]:
 
 # ---------------------------------------------------------------- 보기(IR 두 벌)
 def view_of(base_ir: Mapping[str, Any] | None, target_ir: Mapping[str, Any] | None, *,
-            names: Mapping[str, str] | None = None) -> dict:
-    """단위 빌드가 읽는 보기 — 두 스냅샷의 IR 노드·엣지와 이름 색인. 순수 함수다.
+            names: Mapping[str, str] | None = None,
+            base_rule_hits: Sequence[Mapping[str, Any]] | None = None,
+            target_rule_hits: Sequence[Mapping[str, Any]] | None = None,
+            base_degraded: Sequence[str] | None = None, target_degraded: Sequence[str] | None = None) -> dict:
+    """단위 빌드와 동결 발췌가 읽는 보기 — 두 스냅샷의 IR 노드·엣지·해석 결과, 규칙 적중, 강등 표지와 이름 색인. 순수 함수다.
 
     `names` 를 안 주면 IR 노드의 이름(label)으로 `brief.name_index` 와 같은 규칙(뒤 스냅샷이 이긴다)으로 만든다 —
-    `rr_ir_nodes.name` 이 노드 label 이라 저장소에서 읽은 색인과 같다.
+    `rr_ir_nodes.name` 이 노드 label 이라 저장소에서 읽은 색인과 같다. 강등 표지를 안 주면 IR 소스들의 `degraded` 합집합이다
+    (`rr_snapshots.degraded_json` 과 같은 규칙). IR 이 없으면(폐기 — `ir_json=''`) 그 쪽은 `present=False` 다.
     """
-    def side(ir: Mapping[str, Any] | None) -> dict:
+    def side(ir: Mapping[str, Any] | None, hits, degraded) -> dict:
         ir = ir or {}
         nodes = [dict(n) for n in (ir.get("nodes") or ()) if isinstance(n, Mapping) and n.get("nid")]
         edges = [dict(e) for e in (ir.get("edges") or ()) if isinstance(e, Mapping) and e.get("eid")]
-        return {"present": bool(ir) and bool(nodes or ir.get("sources")), "nodes": nodes, "edges": edges}
+        results = ir.get("results") if isinstance(ir.get("results"), Mapping) else {}
+        if degraded is None:
+            degraded = [x for source in (ir.get("sources") or ()) if isinstance(source, Mapping)
+                        for x in (source.get("degraded") or ())]
+        return {"present": bool(ir) and bool(nodes or ir.get("sources")), "nodes": nodes, "edges": edges,
+                "part_risk": [dict(r) for r in (results.get("part_risk") or ()) if isinstance(r, Mapping)],
+                "rule_hits": [dict(h) for h in (hits or ()) if isinstance(h, Mapping)],
+                "degraded": sorted({str(x) for x in degraded if x})}
 
-    base, target = side(base_ir), side(target_ir)
+    base = side(base_ir, base_rule_hits, base_degraded)
+    target = side(target_ir, target_rule_hits, target_degraded)
     if names is None:
         index: dict[str, str] = {}
         for node in sorted(base["nodes"], key=lambda n: str(n["nid"])) + sorted(target["nodes"], key=lambda n: str(n["nid"])):
@@ -373,15 +386,25 @@ def _json(text: Any, default: Any) -> Any:
 
 
 def _ir_view(store, base_sid: str | None, target_sid: str | None) -> dict:
-    """저장소에서 두 스냅샷의 IR(`rr_snapshots.ir_json`)과 이름 색인(`brief.name_index`)을 읽어 `view_of` 로 넘긴다. 읽기만 한다.
-    폐기된 IR(`ir_json=''`)은 없는 쪽으로 읽힌다."""
-    def load(sid: str | None) -> Mapping[str, Any] | None:
+    """저장소에서 두 스냅샷의 IR(`rr_snapshots.ir_json`)·강등 표지(`degraded_json`)·규칙 적중(`rr_states.rule_hits_json`)과
+    이름 색인(`brief.name_index`)을 읽어 `view_of` 로 넘긴다. 읽기만 한다. 폐기된 IR(`ir_json=''`)은 없는 쪽으로 읽힌다."""
+    def load(sid: str | None) -> tuple[Mapping[str, Any] | None, list, list | None]:
         if not sid:
-            return None
-        row = store.query_one("SELECT ir_json FROM rr_snapshots WHERE id = ?", (sid,))
-        return _json(row["ir_json"], None) if row is not None else None
+            return None, [], None
+        row = store.query_one("SELECT ir_json, degraded_json FROM rr_snapshots WHERE id = ?", (sid,))
+        state = store.query_one("SELECT rule_hits_json FROM rr_states WHERE snapshot_id = ?", (sid,))
+        hits = _json(state["rule_hits_json"], []) if state is not None else []
+        if row is None:
+            return None, hits if isinstance(hits, list) else [], None
+        degraded = _json(row["degraded_json"], [])
+        return (_json(row["ir_json"], None), hits if isinstance(hits, list) else [],
+                degraded if isinstance(degraded, list) else [])
 
-    return view_of(load(base_sid), load(target_sid), names=brief.name_index(store, (base_sid, target_sid)))
+    base_ir, base_hits, base_degraded = load(base_sid)
+    target_ir, target_hits, target_degraded = load(target_sid)
+    return view_of(base_ir, target_ir, names=brief.name_index(store, (base_sid, target_sid)),
+                   base_rule_hits=base_hits, target_rule_hits=target_hits,
+                   base_degraded=base_degraded, target_degraded=target_degraded)
 
 
 # ---------------------------------------------------------------- 노드 색인(diff 의 dn 이름공간)
@@ -1389,6 +1412,270 @@ def check_invariants(diff_obj: Mapping[str, Any], built: Mapping[str, Any], caps
                               if line["owner_unit"] == u["unit_id"]
                               or line["ref"] not in cids_of.get(line["owner_unit"], set())}),
     }
+
+
+# ---------------------------------------------------------------- 동결 발췌(근거 꾸러미 A 층, 설계서 3.8)
+_DEGRADED_NOTE = {
+    "interfaces_truncated": "계면 목록이 잘린 캡처다",
+    "interfaces_unreadable": "계면 목록을 읽지 못한 캡처다",
+    "tol_config_unknown": "공차 설정을 모르는 캡처다",
+    "schema_drift": "소스 스키마가 바뀐 캡처다",
+}
+_EDGE_RANK = {"interference": 0, "tied": 1, "touching": 1, "geometric": 1, "contact": 1, "scope": 1, "clearance": 2}
+_EDGE_FIELDS = (("min_gap", "min_gap", "mm", "length"), ("contact_area_est", "밴드 면적", "mm2", "area"),
+                ("penetration_depth", "관통 깊이", "mm", "length"), ("fs", "마찰", None, "fs"))
+_RESULT_FIELDS = (("worst_stress", "MPa", "stress"), ("worst_g", "G", "acceleration"), ("worst_disp", "mm", "length"),
+                  ("min_safety_factor", None, "ratio"))
+_EVIDENCE_HEADS = {"part": "부품 명세", "iface": "계면·접촉", "contact": "계면·접촉", "neighbor": "이웃",
+                   "result": "해석 결과", "rule": "규칙 적중"}
+
+
+def _change(before: Any, after: Any, unit: str | None, kind: str) -> str:
+    """값 하나의 두 스냅샷 표기 — 같으면 한 번, 다르면 before→after. 없으면 '미측정'."""
+    b, a = render.fmt_num(before, kind), render.fmt_num(after, kind)
+    tail = f" {unit}" if unit else ""
+    return f"{a}{tail}" if b == a else f"{b}→{a}{tail}"
+
+
+def _scalar(value: Any) -> Any:
+    return value.get("value") if isinstance(value, Mapping) else value
+
+
+def _attrs(node: Mapping[str, Any] | None) -> Mapping[str, Any]:
+    attrs = (node or {}).get("attrs")
+    return attrs if isinstance(attrs, Mapping) else {}
+
+
+def _seg(parts: Sequence[Any], *, quoted: bool, note) -> str:
+    """조각 → 글. ('src', 값) 조각은 원천 문자열이라 위생을 거친다 — quoted 면 «» 안, 아니면 «» 없이(엔진이 감싼다)."""
+    out = []
+    for part in parts:
+        if isinstance(part, tuple):
+            clean = render.sanitize_source_text(part[1], "label", limit=0, on_suspect=note)
+            out.append(clean if quoted else clean[1:-1])
+        else:
+            out.append(str(part))
+    return "".join(out)
+
+
+def _size_text(attrs_b: Mapping[str, Any], attrs_t: Mapping[str, Any], key: str) -> str | None:
+    def dims(attrs):
+        value = attrs.get(key)
+        return [render.fmt_num(v, "length") for v in value] if isinstance(value, (list, tuple)) and value else None
+
+    b, a = dims(attrs_b), dims(attrs_t)
+    if b is None and a is None:
+        return None
+    b_txt, a_txt = "×".join(b) if b else "미측정", "×".join(a) if a else "미측정"
+    return f"크기 {a_txt} mm" if b_txt == a_txt else f"크기 {b_txt}→{a_txt} mm"
+
+
+def _node_line(alias: str, before: Mapping[str, Any] | None, after: Mapping[str, Any] | None) -> list:
+    node = after or before or {}
+    ab, at = _attrs(before), _attrs(after)
+    parts: list[Any] = [f"{alias} " if alias else "", ("src", node.get("label") or node.get("nid")),
+                        f" {_s(node.get('domain'))} {_s(node.get('kind'))}"]
+    if node.get("domain") == "dyna" and node.get("kind") == "pid":
+        parts.append(f" · pid {_s(node.get('local_key'))}")
+        if ab.get("n_elems") is not None or at.get("n_elems") is not None:
+            parts.append(f" · 요소 {_change(ab.get('n_elems'), at.get('n_elems'), None, 'count')}")
+    size = _size_text(ab, at, "size_def") or _size_text(ab, at, "size")
+    if size:
+        parts.append(f" · {size}")
+    if ab.get("min_dim") is not None or at.get("min_dim") is not None:
+        parts.append(f" · 두께 {_change(ab.get('min_dim'), at.get('min_dim'), 'mm', 'length')}")
+    if ab.get("volume") is not None or at.get("volume") is not None:
+        parts.append(f" · 부피 {_change(ab.get('volume'), at.get('volume'), 'mm3', 'volume')}")
+    mat_b = _material_of(before) if before else None
+    mat_a = _material_of(after) if after else None
+    if mat_b or mat_a:
+        parts.append(" · 재질 ")
+        if mat_b and mat_a and mat_b != mat_a:
+            parts.extend([("src", mat_b), "→", ("src", mat_a)])
+        else:
+            parts.append(("src", mat_a or mat_b))
+    if node.get("asm_key"):
+        parts.extend([" · 조립 ", ("src", node["asm_key"])])
+    if before is None:
+        parts.append(" · 추가")
+    elif after is None:
+        parts.append(" · 삭제")
+    return parts
+
+
+def evidence_lines(unit: Mapping[str, Any], ir_view: Mapping[str, Any]) -> dict:
+    """단위 하나의 동결 근거(A 층) — 그 부품의 두 스냅샷 명세, 끼인 계면 전부(변경 없는 것 포함, clearance 는 '근접'),
+    1홉 이웃, 해석 결과 행(`results.part_risk`), 규칙 적중을 IR 동결본에서 뽑는다. 네트워크를 쓰지 않고 자르지 않는다.
+
+    반환 {unit_id, status(ok·failed·none), error, evidence[{ref, text, kind}], notes, text, sha, chars, suspects[]}.
+    `ref` 는 `p:`·`e:`·`rule:` 뿐이다(새 스킴 없음 — C-8). `text` 는 «» 없이 위생을 거친 글이고(엔진이 감싼다) 렌더(`text`)는
+    원천 문자열을 «» 안에 둔다. 줄 순서만 우선순위를 따른다 — 단위 부품 명세 → 바뀐 계면 → 바뀌지 않은 계면(간섭 → 접합·접촉 →
+    근접, 그 안은 |min_gap| 오름차순) → 이웃 → 해석 결과 → 규칙 적중. 제외 단위는 none, IR 이 폐기된 쪽이 있으면
+    failed(`ir_absent`)다. 같은 입력이면 `sha` 가 같다.
+    """
+    suspects: dict[str, dict] = {}
+
+    def note(payload: Mapping[str, Any]) -> None:
+        suspects.setdefault(str(payload.get("sha1")), dict(payload))
+
+    def done(status: str, error: str | None, rows: list[tuple[str, list, str]], notes: list[str]) -> dict:
+        evidence = [{"ref": ref, "text": _seg(parts, quoted=False, note=note), "kind": kind} for ref, parts, kind in rows]
+        out = [f"[근거 — 동결본 발췌 · 단위 {unit['unit_id']} · 검증 대상 · 결론 아님]"]
+        if error:
+            out.append(f"[근거 없음 — {error}]")
+        last = None
+        for (ref, parts, kind) in rows:
+            if _EVIDENCE_HEADS.get(kind, kind) != last:
+                last = _EVIDENCE_HEADS.get(kind, kind)
+                out.append(f"[{last}]")
+            out.append(f"[{ref}] {_seg(parts, quoted=True, note=note)}")
+        out.extend(f"[주의] {x}" for x in notes)
+        text = "\n".join(_clean_lines(out)[0])
+        body = {"evidence": [{"ref": r["ref"], "text": r["text"]} for r in evidence], "notes": " ".join(notes)}
+        return {"unit_id": unit["unit_id"], "status": status, "error": error, "evidence": evidence,
+                "notes": body["notes"], "text": text, "sha": sha256_hex(canonical_json(body)), "chars": len(text),
+                "suspects": [suspects[k] for k in sorted(suspects)]}
+
+    if not unit.get("reviewable", True):
+        return done("none", None, [], [])
+    if not (ir_view["base"]["present"] and ir_view["target"]["present"]):
+        return done("failed", "ir_absent", [], [])
+
+    nodes = {side: {str(n["nid"]): n for n in ir_view[side]["nodes"]} for side in ("base", "target")}
+    alias_of: dict[str, str] = {}
+    mine: set[str] = set()
+    rows: list[tuple[str, list, str]] = []
+    for part in unit.get("parts") or ():
+        nids_b, nids_t = list(part.get("nids_base") or ()), list(part.get("nids_target") or ())
+        mine.update(nids_b + nids_t)
+        for nid in nids_b + nids_t:
+            alias_of.setdefault(nid, part["alias"])
+        by_key: dict[tuple, tuple[list, list]] = {}
+        for side, nids in (("base", nids_b), ("target", nids_t)):
+            for nid in nids:
+                node = nodes[side].get(nid)
+                if node is not None:
+                    key = (_s(node.get("domain")), _s(node.get("kind")))
+                    by_key.setdefault(key, ([], []))[0 if side == "base" else 1].append(node)
+        for key in sorted(by_key):
+            befores, afters = by_key[key]
+            for i in range(max(len(befores), len(afters))):
+                before = befores[i] if i < len(befores) else None
+                after = afters[i] if i < len(afters) else None
+                rows.append((str((after or before)["nid"]), _node_line(part["alias"], before, after), "part"))
+
+    def label(nid: Any) -> str:
+        node = nodes["target"].get(str(nid)) or nodes["base"].get(str(nid)) or {}
+        return str(node.get("label") or nid or "")
+
+    edges: dict[str, list] = {}
+    for idx, side in enumerate(("base", "target")):
+        for edge in ir_view[side]["edges"]:
+            if str(edge.get("kind_family") or "") not in ("iface", "contact") or edge.get("status") == "rejected":
+                continue
+            ends = {str(edge.get("a") or ""), str(edge.get("b") or "")} | {str(m) for m in edge.get("members") or ()}
+            if ends & mine:
+                edges.setdefault(str(edge["eid"]), [None, None])[idx] = edge
+    edge_rows: list[tuple[tuple, str, list, str]] = []
+    neighbors: dict[str, bool] = {}
+    notes: list[str] = []
+    auto_interference = lower_bound = False
+    for eid, (before, after) in sorted(edges.items()):
+        edge = after or before
+        ab, at = _attrs(before), _attrs(after)
+        kind_b, kind_a = _s((before or {}).get("kind")), _s((after or {}).get("kind"))
+        kind = kind_a or kind_b
+        if kind == "scope":
+            members_b = len((before or {}).get("members") or ())
+            members_a = len((after or {}).get("members") or ())
+            parts = [("src", at.get("title") or ab.get("title") or label(edge.get("a"))),
+                     f" 접촉 범위 구성 {members_a}" if members_b == members_a else
+                     f" 접촉 범위 구성 {members_b}→{members_a}"]
+        else:
+            parts = ["근접 " if kind == "clearance" else "", ("src", label(edge.get("a"))), "↔",
+                     ("src", label(edge.get("b"))), " ", kind if kind_b == kind_a or not kind_b or not kind_a
+                     else f"{kind_b}→{kind_a}"]
+            for other in (edge.get("a"), edge.get("b")):
+                if other and str(other) not in mine:
+                    neighbors[str(other)] = neighbors.get(str(other), False) or kind != "clearance"
+        for key, word, unit_name, fmt in _EDGE_FIELDS:
+            if ab.get(key) is not None or at.get(key) is not None:
+                bound = " (하한)" if key == "penetration_depth" and (ab.get("penetration_depth_is_lower_bound")
+                                                                   or at.get("penetration_depth_is_lower_bound")) else ""
+                lower_bound = lower_bound or bool(bound)
+                parts.append(f" · {word} {_change(ab.get(key), at.get(key), unit_name, fmt)}{bound}")
+        status_b, status_a = _s((before or {}).get("status")), _s((after or {}).get("status"))
+        parts.append(f" · status={status_a or status_b}" if status_b == status_a or not (status_a and status_b)
+                     else f" · status={status_b}→{status_a}")
+        auto_interference = auto_interference or (kind == "interference" and (status_a or status_b) == "auto")
+        changed = before is None or after is None or _edge_state(before) != _edge_state(after)
+        state = "추가" if before is None else "삭제" if after is None else "바뀜" if changed else "변경 없음"
+        parts.append(f" · {state}")
+        gap = _num(at.get("min_gap") if after is not None else ab.get("min_gap"))
+        order = (0 if changed else 1, _EDGE_RANK.get(kind, 1), abs(gap) if gap is not None else float("inf"), eid)
+        edge_rows.append((order, "e:" + eid.split(":", 1)[-1] if not eid.startswith("e:") else eid, parts,
+                          "contact" if _s(edge.get("kind_family")) == "contact" else "iface"))
+    rows.extend((ref, parts, kind) for _order, ref, parts, kind in sorted(edge_rows, key=lambda r: r[0]))
+
+    for nid in sorted(neighbors, key=lambda n: (not neighbors[n], label(n), n)):
+        node = nodes["target"].get(nid) or nodes["base"].get(nid)
+        if node is None:
+            continue
+        parts = [("src", label(nid)), " 이웃" if neighbors[nid] else " 근접 이웃",
+                 f" · {_s(node.get('domain'))} {_s(node.get('kind'))}"]
+        material = _material_of(node)
+        if material:
+            parts.extend([" · 재질 ", ("src", material)])
+        if node.get("asm_key"):
+            parts.extend([" · 조립 ", ("src", node["asm_key"])])
+        rows.append((nid, parts, "neighbor"))
+
+    risk = {side: {str(r.get("nid")): r for r in ir_view[side]["part_risk"] if str(r.get("nid")) in mine}
+            for side in ("base", "target")}
+    for nid in sorted(set(risk["base"]) | set(risk["target"])):
+        before, after = risk["base"].get(nid), risk["target"].get(nid)
+        row = after or before
+        parts = [("src", label(nid)), f" 해석 결과 pid {_s(row.get('pid'))}"]
+        for key, unit_name, fmt in _RESULT_FIELDS:
+            vb, va = _scalar((before or {}).get(key)), _scalar((after or {}).get(key))
+            if vb is not None or va is not None:
+                parts.append(f" · {key} {_change(vb, va, unit_name, fmt)}")
+        if before is None or after is None:
+            parts.append(" · 추가" if before is None else " · 삭제")
+        rows.append((nid, parts, "result"))
+
+    related = {f"p:{n.split(':', 1)[-1]}" for n in mine} | {r[1] for r in edge_rows}
+    hits_seen: set[tuple] = set()
+    for side in ("base", "target"):
+        for hit in sorted(ir_view[side]["rule_hits"], key=lambda h: (_s(h.get("rule")), _s(h.get("payload_hash")))):
+            if hit.get("pass") is not False:
+                continue
+            found = hit.get("found") if isinstance(hit.get("found"), Mapping) else {}
+            refs = {str(r) for r in list(hit.get("refs") or ()) + list(found.get("refs") or ())}
+            touched = sorted(refs & related)
+            if not touched or (side, _s(hit.get("rule"))) in hits_seen:
+                continue
+            hits_seen.add((side, _s(hit.get("rule"))))
+            parts = [f"{side} {_word(hit.get('rule'))} pass=false · severity=", ("src", hit.get("severity") or "-"),
+                     " · ", ("src", found.get("text") or ""), f" · 이 단위에 걸린 참조 {len(touched)}건"]
+            rows.append((f"rule:{_s(hit.get('rule'))}", parts, "rule"))
+
+    for side in ("base", "target"):
+        for code in ir_view[side]["degraded"]:
+            notes.append(f"{side} 스냅샷 강등 표지 {_word(code)}" + (f" — {_DEGRADED_NOTE[code]}." if code in _DEGRADED_NOTE
+                                                                  else "."))
+    if auto_interference:
+        notes.append("interference 의 status=auto 는 미확정 초안이다.")
+    if lower_bound:
+        notes.append("관통 깊이의 (하한) 표기는 하한 추정치다.")
+    return done("ok", None, rows, notes)
+
+
+def _edge_state(edge: Mapping[str, Any]) -> tuple:
+    """계면이 바뀌었는지 견주는 열쇠 — 종류·상태·수치 칸·범위 구성원 수(동결본 그대로, 임계를 쓰지 않는다)."""
+    attrs = _attrs(edge)
+    return (edge.get("kind"), edge.get("status"), tuple(canonical_json(attrs.get(k)) for k, *_ in _EDGE_FIELDS),
+            len(edge.get("members") or ()))
 
 
 # ---------------------------------------------------------------- 단계 C 가 감쌀 투영(순수)
