@@ -21,7 +21,7 @@ import re
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any
 
-from app import cardpack, render
+from app import cardpack
 from app.common import canonical_json
 
 VERIFY_REV = "verify-1"
@@ -41,18 +41,21 @@ RELS = ("yes", "maybe", "no")
 _REL_RANK = {"yes": 4, "maybe": 3, "error": 2, "stamp": 1, "no": 0}
 
 _CURLY = str.maketrans({"“": '"', "”": '"', "„": '"', "‟": '"', "‘": "'", "’": "'", "‚": "'", "‛": "'"})
-_MARKS_RE = re.compile(r"[*`]")
+_MARKS_RE = re.compile(r"[*`«»]")
 _ANY_SPACE_RE = re.compile(r"\s+")
 _SUBSTANTIVE_RE = re.compile(r"[0-9A-Za-z가-힣]")
 
 
 # ---------------------------------------------------------------- 인용 정규화·대조(엔진 _nq·quote_check 와 같은 규칙)
 def nq(text: Any) -> str:
-    """인용 대조의 정규화 — 굽은 따옴표를 곧은 따옴표로, 마크다운 강조 기호(* · `)를 지운 뒤 `render.norm_quote`(«» · 개행 ·
-    제어·zero-width 문자 · 겹친 공백)를 건다. 마지막에 유니코드 공백(NBSP 등)도 한 칸으로 접는다 — 엔진 `_nq` 의 `\\s+` 와
-    같게. 양쪽(인용과 카드 글)에 같은 함수를 건다. 공유 벡터(`quote_vectors.json`)로 엔진과 묶여 있다."""
-    s = ("" if text is None else str(text)).translate(_CURLY)
-    return _ANY_SPACE_RE.sub(" ", render.norm_quote(_MARKS_RE.sub("", s))).strip()
+    """인용 대조의 정규화 — 엔진 `card_review._nq` 와 글자 하나까지 같다. 굽은 따옴표를 곧은 따옴표로, 강조 기호(* · `)와 인용
+    구간 기호(«»)를 지우고, 유니코드 공백(`\\s` — 개행·NBSP·U+3000 따위)을 한 칸으로 접는다. 양쪽(인용과 카드 글)에 같은 함수를 건다.
+
+    NFC·zero-width·제어·양방향 문자는 건드리지 않는다 — 엔진이 건드리지 않기 때문이다. 종전에는 `render.norm_quote` 로 그것들을
+    지워 엔진보다 느슨했고, 그런 글자가 든 카드나 인용은 행마다 앱 ok · 엔진 not_found 로 갈려 `check_disagree` 가 쌓였다(잡당
+    5건을 넘으면 contract 보류 — 반대 검토 C2a RC-4). 엔진의 실제 함수와의 동치는 시험이 엔진 venv 하위 프로세스로 본다."""
+    s = str(text or "").translate(_CURLY)
+    return _ANY_SPACE_RE.sub(" ", _MARKS_RE.sub("", s)).strip()
 
 
 def _unescape(text: str) -> str:

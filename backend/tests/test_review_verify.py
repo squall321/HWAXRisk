@@ -5,6 +5,7 @@ import copy
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -83,6 +84,72 @@ def test_quote_rules_match_the_engine_source():
     assert found, "엔진 card_review.py 의 인용 하한 줄을 찾지 못했다 — 이름이 바뀌었으면 이 시험을 같이 고친다"
     assert (int(found.group(1)), int(found.group(2))) == (rv.QUOTE_MIN, rv.QUOTE_SUBSTANTIVE_MIN)
     assert 're.sub(r"[*`«»]", "", s)' in source, "엔진 _nq 가 지우는 기호가 바뀌었다 — 앱 nq 와 같이 고친다"
+
+
+# 엔진의 실제 _nq·quote_check 를 엔진 venv 로 돌리는 하위 프로세스 — 이 앱 venv 로는 엔진 모듈을 들이지 않는다(의존이 다르다).
+# 입출력은 ASCII JSON 이다(-I 는 PYTHONIOENCODING 을 무시한다). 카드는 엔진 build_ctx 가 요청의 팩 카드로 만드는 모양 그대로다.
+_ENGINE_QUOTE_PROBE = r"""
+import json, sys
+sys.path.insert(0, sys.argv[1])
+import card_review as cr
+cases = json.loads(sys.stdin.buffer.read().decode("utf-8"))
+out = {"nq": [cr._nq(s) for s in cases["nq"]], "quote": []}
+for item in cases["quote"]:
+    card = item["card"]
+    runtime = {"text": cr.card_text(card), "sections": [(cr._str(x.get("sid")), cr._str(x.get("text")))
+                                                       for x in card["sections"] if isinstance(x, dict)]}
+    out["quote"].append(list(cr.quote_check(item["q"], runtime)))
+sys.stdout.buffer.write(json.dumps(out, ensure_ascii=True).encode("ascii"))
+"""
+# 정규화가 갈리기 쉬운 글자들 — zero-width·BOM, 양방향 표지, NBSP 무리와 유니코드 공백, 제어 문자, 굽은 따옴표 여덟, 강조 기호,
+# 분해형(NFD) 한글·악센트. 공유 벡터(quote_vectors.json)에는 이런 글자가 한 건도 없다(반대 검토 C2a RC-4).
+_TRICKY = ("a\u200bb\u200cc\u200dd\u2060e\ufefff", "\u202eabc\u202c \u2066x\u2069 \u200el\u200fr \u061c",
+           "nb\u00a0sp\u202fnarrow\u3000wide\u2028ls\u2029ps\x85nel", "c\x00t\x07rl\x1b[0m\x1c\x1d\x1e\x1f\x7f",
+           "\u201c\u201d\u201e\u201f\u2018\u2019\u201a\u201b", "**굵게** `코드` «구간» *기울*",
+           "\u1100\u1161\u11a8 e\u0301", "  \t\n 앞뒤 공백 \r\n ", "", None, 0)
+_CARD_TEXT = ("시험용 접착 실링의 유효 접착폭은 최악 공차 누적에서도 0.8 mm 이상을 남긴다.", "코너 R 은 1.2 mm 이상이다.")
+
+
+def _quote_cases() -> list[dict]:
+    base = _CARD_TEXT[0]
+    nfd = "\u1100\u1175\u11b7\u1109\u1173\u11bc 시험의 접착폭 기준은 0.8 mm 이상이다"   # '김승' 분해형 + 본문
+    cards = {
+        "plain": [{"sid": "1", "title": "규칙", "text": base}, {"sid": "2", "title": "적용", "text": _CARD_TEXT[1]}],
+        "zw_card": [{"sid": "1", "title": "규칙", "text": base.replace("접착폭", "접착\u200b폭")}],
+        "ctrl_card": [{"sid": "1", "title": "규칙", "text": base.replace("최악", "최\x07악")}],
+        "bidi_card": [{"sid": "1", "title": "규칙", "text": "\u202a" + base + "\u202c"}],
+        "nbsp_card": [{"sid": "1", "title": "규칙", "text": base.replace(" ", "\u00a0")}],
+        "nfd_card": [{"sid": "1", "title": "규칙", "text": nfd}],
+        "emph_card": [{"sid": "1", "title": "규칙", "text": base.replace("유효 접착폭", "**유효 접착폭**")}],
+    }
+    quotes = (base[:30], base[:30].replace("접착폭", "접착\u200b폭"), "\u202b" + base[:30] + "\u202c",
+              base[:30].replace("최악", "최\x07악"), base[:30].replace(" ", "\u00a0"), "\u201c" + base[:30] + "\u201d",
+              base[:30].replace(" ", "\n "), nfd[:25], "가각간갇갈" * 4, base[-20:] + "\n" + _CARD_TEXT[1][:12],
+              base[:30].replace("\n", "\\n"), "짧다", "")
+    return [{"name": f"{card}:{n}", "card": {"sections": sections}, "q": q}
+            for card, sections in cards.items() for n, q in enumerate(quotes)]
+
+
+def test_nq_and_quote_check_equal_the_engine_on_tricky_text():
+    """앱 nq·quote_check 가 엔진 card_review._nq·quote_check 와 글자 하나까지 같다(RC-4) — 형제 엔진의 실제 함수를 엔진 venv
+    하위 프로세스로 돌려 견준다. 둘이 다르면 그런 글자가 든 카드·인용은 행마다 check_disagree 가 되고(잡당 5건을 넘으면 contract
+    보류) 카드 내용 탓으로 사람이 멈춘 잡을 풀어야 한다. 엔진 리포가 곁에 있는데 들이지 못하면 건너뛰지 않고 실패다(P-22)."""
+    repo = Path(os.environ.get("HWAX_AGENT_SERVER_REPO") or REPO_ROOT.parent / "HWAXAgentServer")
+    if not repo.is_dir():
+        pytest.skip(f"엔진 리포가 곁에 없다(HWAX_AGENT_SERVER_REPO 또는 ../HWAXAgentServer) — {repo}")
+    python = repo / ".venv" / "bin" / "python"
+    if not python.is_file():
+        pytest.fail(f"엔진 리포는 곁에 있는데 그 venv 의 python 이 없다 — {python}")
+    cases = {"nq": list(_TRICKY), "quote": _quote_cases()}
+    done = subprocess.run([str(python), "-I", "-B", "-c", _ENGINE_QUOTE_PROBE, str(repo)], input=json.dumps(cases).encode(),
+                          capture_output=True, timeout=120, check=False)
+    if done.returncode != 0:
+        pytest.fail(f"엔진 card_review 를 들이거나 돌리지 못했다(rc {done.returncode}) — {done.stderr.decode(errors='replace')[-2000:]}")
+    engine = json.loads(done.stdout.decode("ascii"))
+    assert [rv.nq(s) for s in _TRICKY] == engine["nq"]
+    app = [list(rv.quote_check(c["q"], c["card"])) for c in cases["quote"]]
+    assert {c["name"]: a for c, a, e in zip(cases["quote"], app, engine["quote"]) if a != e} == {}
+    assert len(app) == len(engine["quote"]) and {e[0] for e in engine["quote"]} >= {"ok", "not_found", "short", "empty"}
 
 
 # ---------------------------------------------------------------- 받은 행의 회계(verdict)
