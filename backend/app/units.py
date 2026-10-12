@@ -109,15 +109,16 @@ def _sha1(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
-def _q(text: Any) -> str:
-    """원천 문자열 한 칸 → «위생 통과본»(자르지 않는다). 인젝션 어휘면 «[suspect_text …]»."""
-    return render.sanitize_source_text(text, "label", limit=0)
+def _q(text: Any, note=None) -> str:
+    """원천 문자열 한 칸 → «위생 통과본»(자르지 않는다). 인젝션 어휘면 «[suspect_text …]» 이고 `note` 가 걸린 원문을 받는다
+    (빌드의 suspects 로 모여 단계 C 가 큐에 올린다 — 부품 표의 재질·조립 이름처럼 줄 몸통에 안 나오는 문자열도, RA-7)."""
+    return render.sanitize_source_text(text, "label", limit=0, on_suspect=note)
 
 
-def _word(value: Any) -> str:
+def _word(value: Any, note=None) -> str:
     """코드가 «» 밖에 쓰는 어휘 칸(코드·사유·계면 종류) — 생산자 어휘 꼴이면 그대로, 아니면 위생을 거쳐 «» 안에 둔다."""
     text = _s(value)
-    return text if text and _SAFE_WORD.match(text) else _q(text)
+    return text if text and _SAFE_WORD.match(text) else _q(text, note)
 
 
 # ---------------------------------------------------------------- 독립 순회(U1 의 기준)
@@ -905,31 +906,40 @@ def _context_tail(line: Mapping[str, Any], word=_word) -> str:
     return " — 설계 변경 아님" if line["reason"] in _NOT_DESIGN else f" — 제외 사유={word(line['reason'])}"
 
 
-def _scope_label(unit: Mapping[str, Any]) -> str:
+def _scope_label(unit: Mapping[str, Any], note=None) -> str:
+    def q(text: Any) -> str:
+        return _q(text, note)
+
     scope = unit.get("scope_key") or ""
     if unit["kind"] in ("global", "excluded"):
         return scope
     if unit["kind"] == "boundary":
-        return f"경계 {_q(unit['path'])}" if unit.get("path") else "경계 최상위"
+        return f"경계 {q(unit['path'])}" if unit.get("path") else "경계 최상위"
     merged = (unit.get("flags") or {}).get("split", {}).get("merged")
     if merged:
-        return " · ".join(_q(x) for x in merged)
-    return _q(scope) if scope else "전체"
+        return " · ".join(q(x) for x in merged)
+    return q(scope) if scope else "전체"
 
 
-def _render(unit: Mapping[str, Any]) -> tuple[str, int]:
+def _render(unit: Mapping[str, Any], note=None) -> tuple[str, int]:
+    def q(text: Any) -> str:
+        return _q(text, note)
+
+    def w(value: Any) -> str:
+        return _word(value, note)
+
     lines = unit["lines"]
-    out = [(f"[검토 단위 · {unit['unit_id']} · {unit['kind']} · 범위 {_scope_label(unit)} · 변경 줄 {len(lines)} · "
+    out = [(f"[검토 단위 · {unit['unit_id']} · {unit['kind']} · 범위 {_scope_label(unit, note)} · 변경 줄 {len(lines)} · "
             f"부품 {len(unit['parts'])} · 계면 {unit['n_ifaces']}]"), f"[요약] {unit['synopsis']}"]
     out.extend(f"[주의] {note}" for note in unit["notices"])
     if unit["parts"]:
         out.append("[부품]")
         for part in unit["parts"]:
             before, after = part["material_before"], part["material_after"]
-            material = (_q(after or before) if before == after or not (before and after)
-                        else f"{_q(before)}→{_q(after)}") if (before or after) else "미상"
-            out.append(f"{part['alias']} [{part['dn']}] {_q(part['name'])} 재질={material} 조립={_q(part['asm'])} "
-                       f"소스={_word(part['source'])} 상태={part['status']}")
+            material = (q(after or before) if before == after or not (before and after)
+                        else f"{q(before)}→{q(after)}") if (before or after) else "미상"
+            out.append(f"{part['alias']} [{part['dn']}] {q(part['name'])} 재질={material} 조립={q(part['asm'])} "
+                       f"소스={w(part['source'])} 상태={part['status']}")
     out.append("[변경]")
     groups: dict[str, list[Mapping[str, Any]]] = {}
     for line in lines:
@@ -945,25 +955,25 @@ def _render(unit: Mapping[str, Any]) -> tuple[str, int]:
             emitted.add(group)
             members = groups[group]
             n += 1
-            out.append(f"C{n:02d} {_word(line['code'])} 같은 변화 {len(members)}건 — 첫 줄 «{line['text']}»"
-                       f"{_line_tail(line)}")
+            out.append(f"C{n:02d} {w(line['code'])} 같은 변화 {len(members)}건 — 첫 줄 «{line['text']}»"
+                       f"{_line_tail(line, w)}")
             cells = [f"{member['alias'] or '-'}[{member['ref']}]" for member in members]
             for i in range(0, len(cells), _GROUP_ROW):
                 out.append("  ↳ " + " · ".join(cells[i:i + _GROUP_ROW]))
         elif line.get("derived_of"):
-            out.append(f"  ↳ [{line['ref']}] «{line['text']}»{_line_tail(line)}")
+            out.append(f"  ↳ [{line['ref']}] «{line['text']}»{_line_tail(line, w)}")
         else:
             n += 1
-            label = _word(line["code"]) if line["layer"] == "semantic" else f"(이벤트 없음) {_word(line['code'])}"
+            label = w(line["code"]) if line["layer"] == "semantic" else f"(이벤트 없음) {w(line['code'])}"
             alias = f" {line['alias']}" if line.get("alias") else ""
-            out.append(f"C{n:02d} [{line['ref']}] {label}{alias} «{line['text']}»{_line_tail(line)}")
+            out.append(f"C{n:02d} [{line['ref']}] {label}{alias} «{line['text']}»{_line_tail(line, w)}")
     context = unit["context"]["lines"]
     if context:
         out.append("[문맥]")
         role_label = {"boundary": "경계", "reference": "참고", "rollup": "롤업"}
         for line in context:
-            tail = _context_tail(line)
-            out.append(f"{role_label.get(line['role'], line['role'])} [{line['ref']}] {_word(line['code'])} "
+            tail = _context_tail(line, w)
+            out.append(f"{role_label.get(line['role'], line['role'])} [{line['ref']}] {w(line['code'])} "
                        f"«{line['text']}»{tail} (소유 {line['owner_unit']})")
     overview = unit["context"].get("overview")
     if overview:
@@ -1024,21 +1034,30 @@ def _synopsis(lines: Sequence[Mapping[str, Any]]) -> str:
     return " · ".join(parts) + (" | " + " · ".join(extra) if extra else "")
 
 
-def digest_of(unit: Mapping[str, Any]) -> str:
+def digest_of(unit: Mapping[str, Any], *, on_suspect=None) -> str:
     """단위 목록 항목의 글(전수 훑기가 본다) — 범위·건수 · 종류별 건수와 방향 · 재질 · 수치 범위 · 계면 전이 · 부품 이름 전부.
 
-    고정 상한이 없다(설계서의 780자 상한은 D-21 로 뺐다). 이름 칸도 위생을 거쳐 «» 안이다(W2-19).
+    고정 상한이 없다(설계서의 780자 상한은 D-21 로 뺐다). 이름 칸도 위생을 거쳐 «» 안이다(W2-19). 인젝션에 걸린 원문은
+    `on_suspect` 가 받는다(RA-7).
     """
+    note = on_suspect
+
+    def q(text: Any) -> str:
+        return _q(text, note)
+
+    def w(value: Any) -> str:
+        return _word(value, note)
+
     lines = unit["lines"]
-    out = [f"범위 {_scope_label(unit)} · 변경 {len(lines)}줄 · 부품 {len(unit['parts'])} · 계면 {unit['n_ifaces']}",
+    out = [f"범위 {_scope_label(unit, note)} · 변경 {len(lines)}줄 · 부품 {len(unit['parts'])} · 계면 {unit['n_ifaces']}",
            unit["synopsis"]]
     materials = []
     for part in unit["parts"]:
         before, after = part["material_before"], part["material_after"]
         if before and after and before != after:
-            materials.append(f"{_q(before)}→{_q(after)}")
+            materials.append(f"{q(before)}→{q(after)}")
         elif before or after:
-            materials.append(_q(after or before))
+            materials.append(q(after or before))
     if materials:
         out.append("재질 " + " · ".join(sorted(set(materials))))
     ranges: dict[tuple, list[float]] = {}
@@ -1051,7 +1070,7 @@ def digest_of(unit: Mapping[str, Any]) -> str:
     for (attr, unit_name, caveat), values in sorted(ranges.items()):
         lo, hi = min(values), max(values)
         span = _fmt_delta(lo, unit_name, attr) + ("" if lo == hi else "~" + _fmt_delta(hi, unit_name, attr))
-        cells.append(f"{_word(attr) if attr else '값'} {span}{(' ' + unit_name) if unit_name else ''}"
+        cells.append(f"{w(attr) if attr else '값'} {span}{(' ' + unit_name) if unit_name else ''}"
                      + (" 단서" if caveat else ""))
     if cells:
         out.append("수치 " + " · ".join(cells))
@@ -1061,28 +1080,31 @@ def digest_of(unit: Mapping[str, Any]) -> str:
         if item["bucket"] != "edge_changes" or item.get("family") == "hier":
             continue
         if item.get("op") == "kind_changed":
-            key = f"{_word(item.get('kind_from'))}→{_word(item.get('kind_to'))}"
+            key = f"{w(item.get('kind_from'))}→{w(item.get('kind_to'))}"
         elif item.get("op") in ("added", "removed"):
-            key = f"{'추가' if item['op'] == 'added' else '삭제'} {_word(item.get('kind_to') or item.get('kind_from'))}"
+            key = f"{'추가' if item['op'] == 'added' else '삭제'} {w(item.get('kind_to') or item.get('kind_from'))}"
         else:
             continue
         transitions[key] = transitions.get(key, 0) + 1
     if transitions:
         out.append("계면 " + " · ".join(f"{k} {v}" for k, v in sorted(transitions.items())))
     if unit["parts"]:
-        out.append("부품 " + " · ".join(_q(part["name"]) for part in unit["parts"]))
+        out.append("부품 " + " · ".join(q(part["name"]) for part in unit["parts"]))
     return _clean_lines([" | ".join(out)])[0][0]
 
 
-def _title(unit: Mapping[str, Any]) -> str:
+def _title(unit: Mapping[str, Any], note=None) -> str:
+    def w(value: Any) -> str:
+        return _word(value, note)
+
     if unit["kind"] == "global":
         sections = sorted({line.get("section") or "other" for line in unit["lines"]},
                           key=lambda s: _SECTIONS.index(s) if s in _SECTIONS else len(_SECTIONS))
         title = "전역 — " + " · ".join(_SECTION_LABEL.get(s, "기타") for s in sections)
     elif unit["kind"] == "excluded":
-        title = "제외 — " + " · ".join(_word(r) for r in sorted({line["caveat"] or "-" for line in unit["lines"]}))
+        title = "제외 — " + " · ".join(w(r) for r in sorted({line["caveat"] or "-" for line in unit["lines"]}))
     else:
-        title = f"{_scope_label(unit)} — 부품 {len(unit['parts'])} · 계면 {unit['n_ifaces']}"
+        title = f"{_scope_label(unit, note)} — 부품 {len(unit['parts'])} · 계면 {unit['n_ifaces']}"
     return _clean_lines([title])[0][0]
 
 
@@ -1109,6 +1131,10 @@ def build_diff_units(diff_obj: Mapping[str, Any], view: Mapping[str, Any], *, ca
     nodes = _Nodes(diff_obj, view)
     adj, near = _neighbors(view, nodes)
     suspects: dict[str, dict] = {}
+
+    def note(payload: Mapping[str, Any]) -> None:
+        suspects.setdefault(str(payload.get("sha1")), dict(payload))
+
     for item in items:
         item["_anchors"] = sorted({a for a in item["anchors_raw"] if nodes.known(a)})
         item["_body"], item["_suspect"] = _clean_body(item, view["names"], suspects)
@@ -1221,7 +1247,7 @@ def build_diff_units(diff_obj: Mapping[str, Any], view: Mapping[str, Any], *, ca
             unit["context"]["overview"] = {"units": [[u["unit_id"], u["kind"], u["n_changes"]]
                                                      for u in sorted(reviewable, key=lambda u: u["unit_id"])],
                                            "lines_total": sum(u["n_changes"] for u in reviewable)}
-        _finish_unit(unit, diff_obj)
+        _finish_unit(unit, diff_obj, note)
 
     order = {kind: n for n, kind in enumerate(UNIT_KINDS)}
     units.sort(key=lambda u: (order[u["kind"]], u["scope_key"], u["unit_id"]))
@@ -1346,7 +1372,7 @@ def _attach_context(unit: dict, units: Sequence[dict], owner: Mapping[str, str],
     }
 
 
-def _finish_unit(unit: dict, diff_obj: Mapping[str, Any]) -> None:
+def _finish_unit(unit: dict, diff_obj: Mapping[str, Any], note) -> None:
     """[요약]·[주의]·제목·목록 글·요약 렌더와 해시."""
     unit["synopsis"] = _synopsis(unit["lines"])
     notices = []
@@ -1357,17 +1383,17 @@ def _finish_unit(unit: dict, diff_obj: Mapping[str, Any]) -> None:
             notices.append(f"의미층 차단 [gate:G2] — same-as 미확정 {pending}건. 아래는 구조·파라메트릭층 원자료다. "
                            "추가·삭제로 적힌 부품이 이름만 바뀐 같은 부품일 수 있다.")
         elif semantic.get("blocked_by"):
-            notices.append(f"의미층 차단({_word(semantic['blocked_by'])}) — 파라메트릭·계면 변경은 제외 단위에 있다.")
+            notices.append(f"의미층 차단({_word(semantic['blocked_by'], note)}) — 파라메트릭·계면 변경은 제외 단위에 있다.")
         caveat_lines = [line for line in unit["lines"] if line["klass"] == "caveat"]
         if caveat_lines:
-            reasons = ", ".join(_word(r) for r in sorted({line["caveat"] for line in caveat_lines if line["caveat"]}))
+            reasons = ", ".join(_word(r, note) for r in sorted({line["caveat"] for line in caveat_lines if line["caveat"]}))
             notices.append(f"단서 변경 {len(caveat_lines)}줄 — 비교 잣대가 확인되지 않은 수치다({reasons}).")
         if unit["flags"].get("bucket_unknown_n"):
             notices.append(f"모르는 버킷 항목 {unit['flags']['bucket_unknown_n']}줄 — 이 판의 단위 생성기가 모르는 diff 자리에서 왔다.")
     unit["notices"] = notices
-    unit["title"] = _title(unit)
-    unit["digest"] = digest_of(unit)
-    summary, fallback = _render(unit)
+    unit["title"] = _title(unit, note)
+    unit["digest"] = digest_of(unit, on_suspect=note)
+    summary, fallback = _render(unit, note)
     if fallback:
         unit["flags"]["lint_fallback"] = fallback
     unit["summary"] = summary
@@ -1705,13 +1731,13 @@ def evidence_lines(unit: Mapping[str, Any], ir_view: Mapping[str, Any]) -> dict:
             if not touched or (side, _s(hit.get("rule"))) in hits_seen:
                 continue
             hits_seen.add((side, _s(hit.get("rule"))))
-            parts = [f"{side} {_word(hit.get('rule'))} pass=false · severity=", ("src", hit.get("severity") or "-"),
+            parts = [f"{side} {_word(hit.get('rule'), note)} pass=false · severity=", ("src", hit.get("severity") or "-"),
                      " · ", ("src", found.get("text") or ""), f" · 이 단위에 걸린 참조 {len(touched)}건"]
             rows.append((f"rule:{_s(hit.get('rule'))}", parts, "rule"))
 
     for side in ("base", "target"):
         for code in ir_view[side]["degraded"]:
-            notes.append(f"{side} 스냅샷 강등 표지 {_word(code)}" + (f" — {_DEGRADED_NOTE[code]}." if code in _DEGRADED_NOTE
+            notes.append(f"{side} 스냅샷 강등 표지 {_word(code, note)}" + (f" — {_DEGRADED_NOTE[code]}." if code in _DEGRADED_NOTE
                                                                   else "."))
     if auto_interference:
         notes.append("interference 의 status=auto 는 미확정 초안이다.")
