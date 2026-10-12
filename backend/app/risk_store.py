@@ -697,6 +697,7 @@ CREATE TABLE IF NOT EXISTS rr_card_verdicts (                 -- 카드 × 단�
   split INTEGER NOT NULL DEFAULT 0,             -- 변형 사이에 걸림·통과가 갈려 실효를 undetermined 로 둔 카드
   revised_from TEXT,                            -- 엔진 보충이 (applies, judgement) 를 바꿨으면 첫 답
   deck_id TEXT, call_id TEXT NOT NULL, created_at INTEGER,
+  updated_at INTEGER,                           -- 행을 고쳐 쓴 시각(is_effective·agree·split 을 고칠 때마다 올린다 — since 반출이 본다). NULL 이면 created_at
   PRIMARY KEY(target_key, unit_id, agent_key, record_id, variant));
 CREATE INDEX IF NOT EXISTS ix_rr_verdicts_eff ON rr_card_verdicts(target_key, agent_key, is_effective, judgement);
 CREATE INDEX IF NOT EXISTS ix_rr_verdicts_unit ON rr_card_verdicts(target_key, unit_id, is_effective);

@@ -238,7 +238,7 @@ PUSHED_DDL_SHA256 = {
     3: "a20f49f302e0c92292d7792a9a990b4d8c809b1f3eb0dce9b609bb0879b35e39",
     # v4 는 아직 나가지 않았다 — 가지 m2-cells 에만 있고 dev 리허설(재설계 PLAN 4절 C-2, M2 단계 D)이 끝나야 main 에 오른다.
     # 그때까지는 블록을 고칠 수 있고, 고치면 같은 커밋에서 이 값을 고친다. push 하는 날 이 값이 굳는다.
-    4: "0614b6d6371fa8c1cd1fbe7f10c62baea3066b0d9286f81d5c9fc7f044d44938",
+    4: "a1c5dbe6c2d17d017c24b455b13f648e57b1cb1ea5f26f3e7fb92f552fc7fed4",
 }
 SHARED_TABLES = {"rr_dim_vocab", "rr_delta_priors", "rr_rules", "rr_metrics"}
 
@@ -510,7 +510,7 @@ V4_COLUMNS = {
         "text_sha", "applies", "judgement", "cq", "cq_chars", "lines_json", "refs_json", "why", "need", "sev",
         "mech", "mech_free", "path", "check_kind", "check_text", "conds_json", "checks_json", "quote_ok", "refs_ok",
         "check_disagree", "grade", "is_effective", "agree", "split", "revised_from", "deck_id", "call_id",
-        "created_at"},
+        "created_at", "updated_at"},
     "rr_card_packs": {
         "agent_key", "pack_key", "pack_hash", "norm_rev", "role_sha", "cards_total", "checkable_n", "chars_total",
         "unrenderable_n", "manifest_json", "pack_gz", "source", "fetched_at"},

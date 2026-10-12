@@ -6,8 +6,11 @@
 """
 from __future__ import annotations
 
+import ast
 import gzip
 import json
+import re
+from pathlib import Path
 
 from app import export, routes, units
 from app.risk_store import RiskStore
@@ -115,6 +118,70 @@ def test_every_exported_row_passes_through_the_export_view(risk_store, monkeypat
     lines = [json.loads(line) for line in list(export.iter_lines(risk_store, OWNER, 0))[1:]]
     assert {"rr_unit_builds", "rr_units"} <= {item["table"] for item in lines}
     assert [item["table"] for item in lines if item["row"].get("_viewed") != item["table"]] == []
+
+
+# ---------------------------------------------------------------- 판정 행을 고쳐 쓰면 updated_at 을 올린다(since 반출 — 앞으로의 위험 2)
+_VERDICT_UPDATE = re.compile(r"\bUPDATE\s+rr_card_verdicts\s+SET\b(?P<sets>.*)", re.I | re.S)
+_VERDICT_REWRITE = re.compile(r"\b(?:INSERT\s+OR\s+REPLACE|REPLACE)\s+INTO\s+rr_card_verdicts\b"
+                              r"|\bINTO\s+rr_card_verdicts\b.*\bON\s+CONFLICT\b.*\bDO\s+UPDATE\b", re.I | re.S)
+_RECOMPUTED = ("is_effective", "agree", "split")
+
+
+def verdict_rewrites_without_touch(sources: dict[str, str]) -> list[str]:
+    """판정 행의 is_effective·agree·split 을 고쳐 쓰는 SQL 가운데 updated_at 을 같이 쓰지 않는 것('파일:줄').
+
+    UPDATE 는 SET 절을 본다 — 그 셋 가운데 하나를 쓰거나 SET 절을 글로 볼 수 없으면(f-문자열 자리·'SET ' 뒤를 이어 붙인다)
+    updated_at 이 그 글에 있어야 한다. 행을 통째로 다시 쓰는 REPLACE·ON CONFLICT DO UPDATE 는 늘 있어야 한다. 처음 쓰는 INSERT 는
+    보지 않는다(updated_at NULL 이면 since 반출이 created_at 을 본다)."""
+    found: list[tuple[str, int]] = []
+    for name, text in sources.items():
+        tree = ast.parse(text)
+        inner = {id(v) for node in ast.walk(tree) if isinstance(node, ast.JoinedStr) for v in node.values}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str) and id(node) not in inner:
+                sql = node.value
+            elif isinstance(node, ast.JoinedStr):
+                sql = "".join(v.value if isinstance(v, ast.Constant) else "{}" for v in node.values)
+            else:
+                continue
+            hit = _VERDICT_UPDATE.search(sql)
+            if hit is not None:
+                sets = re.split(r"\bWHERE\b", hit.group("sets"), flags=re.I)[0]
+                rewrites = "{}" in sets or not sets.strip() or any(re.search(rf"\b{c}\b", sets) for c in _RECOMPUTED)
+                clause = sets
+            else:
+                rewrites, clause = _VERDICT_REWRITE.search(sql) is not None, sql
+            if rewrites and "updated_at" not in clause:
+                found.append((name, node.lineno))
+    return [f"{name}:{line}" for name, line in sorted(found)]
+
+
+def test_rewriting_a_verdict_row_bumps_its_updated_at():
+    """판정 행은 rev·solo 결과가 온 뒤 fwd 행의 is_effective·agree·split 을 고쳐 쓴다(C2b) — 그 문장은 updated_at 을 같이 올린다.
+    since 반출은 updated_at → created_at 순으로 보므로(export._SINCE_COLS) 올리지 않으면 고침이 반출에서 빠진다. 앱 소스 전부를
+    훑는다(트리거는 마이그레이션 허용 연산 밖이라 쓰지 않는다)."""
+    assert export._SINCE_COLS["rr_card_verdicts"] == ("updated_at", "created_at")
+    app_dir = Path(export.__file__).resolve().parent
+    sources = {p.relative_to(app_dir.parent).as_posix(): p.read_text(encoding="utf-8") for p in sorted(app_dir.rglob("*.py"))}
+    assert any("UPDATE rr_card_verdicts SET" in text for text in sources.values()), "폐기 문장을 못 찾았다 — 가드가 죽었다"
+    assert verdict_rewrites_without_touch(sources) == []
+
+
+def test_the_verdict_touch_guard_actually_catches_rewrites():
+    planted = {"planted.py": "\n".join((
+        'a = "UPDATE rr_card_verdicts SET is_effective = ?, split = ? WHERE target_key = ?"',
+        'b = "UPDATE rr_card_verdicts SET agree = ?, updated_at = ? WHERE target_key = ?"',
+        'c = f"UPDATE rr_card_verdicts SET {sets} WHERE target_key = ?"',
+        'd = "UPDATE rr_card_verdicts SET " + ", ".join(cols)',
+        'e = "UPDATE rr_card_verdicts SET cq = NULL WHERE split = 1"',
+        'f = "INSERT OR REPLACE INTO rr_card_verdicts(target_key) VALUES (?)"',
+        'g = ("INSERT INTO rr_card_verdicts(target_key) VALUES (?)"',
+        '     " ON CONFLICT(target_key) DO UPDATE SET is_effective = excluded.is_effective")',
+        'h = "INSERT INTO rr_card_verdicts(target_key, created_at) VALUES (?, ?)"',
+        'i = f"UPDATE rr_card_verdicts SET is_effective = {x}, updated_at = {now} WHERE k = ?"',
+    ))}
+    assert verdict_rewrites_without_touch(planted) == ["planted.py:1", "planted.py:3", "planted.py:4", "planted.py:6",
+                                                       "planted.py:7"]
 
 
 def _caps(monkeypatch, **values) -> None:

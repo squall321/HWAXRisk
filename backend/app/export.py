@@ -82,12 +82,13 @@ _SINCE_COLS: dict[str, tuple[str, ...]] = {
     "rr_metrics": ("computed_at",),
     "rr_curation_queue": ("created_at",),
     "rr_id_map": ("ra_synced_at", "adh_synced_at"),
-    # v4(재설계 M2) — 단위 둘은 한 번 쓰고 고치지 않는다. 셀·머리는 고쳐 쓰는 행이라 updated_at 이 먼저다.
+    # v4(재설계 M2) — 단위 둘은 한 번 쓰고 고치지 않는다. 셀·머리·판정은 고쳐 쓰는 행이라 updated_at 이 먼저다 — 판정은 rev·solo
+    # 결과가 온 뒤 fwd 행의 is_effective·agree·split 을 고쳐 쓴다(그때 updated_at 을 올린다 — tests/rr/test_v4_rows.py 의 가드).
     "rr_unit_builds": ("built_at",),
     "rr_units": ("created_at",),
     "rr_expert_reports": ("updated_at", "created_at"),
     "rr_review_cells": ("updated_at", "created_at"),
-    "rr_card_verdicts": ("created_at",),
+    "rr_card_verdicts": ("updated_at", "created_at"),
     "rr_review_calls": ("started_at",),
 }
 
