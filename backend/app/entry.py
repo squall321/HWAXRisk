@@ -21,6 +21,7 @@ from pydantic import BaseModel, ValidationError
 
 from app import config, identity, planner, routes, runner
 from app import roster as roster_module
+from app import units as units_module
 from app import state as state_module
 from app.adapters import registry as adapters_registry
 from app.common import canonical_json, now_epoch
@@ -293,14 +294,17 @@ def _target_summary(target_key: str) -> dict:
             "tier_plan": plan["tiers"] if plan else None, "cost_estimate": plan["cost_estimate"] if plan else None}
 
 
-def open_target(ident: identity.Identity, *, kind: str, ref_id: str, consent: bool = False) -> dict:
+def open_target(ident: identity.Identity, *, kind: str, ref_id: str, consent: bool = False, flow: str | None = None,
+                reason: str | None = None) -> dict:
     """`POST /api/targets`. 이미 연 내 대상이면 그것이고, 명단이 비었으면 그 자리에서 최초 고정을 다시 시도한다.
 
     라우트는 kind·동의·참조 소유·G6 을 먼저 보고 '이미 열린 타깃' 409 를 마지막에 낸다 — 그래서 기존 대상을 돌려주는
     갈래도 같은 검사를 다 지난 뒤다. 명단이 비는 것은 자격이 없어 게이트웨이를 못 물었을 때다(roster_source unavailable).
+    `flow` 는 심사 방식이다(D-24) — 새 대상은 그 방식으로 열고(없으면 panels), 이미 연 내 대상인데 방식이 다르면 웹과 같은
+    바꾸기 함수(`POST /targets/{key}/flow`)를 지난다(감사 channel mcp). None 이면 방식을 건드리지 않는다.
     """
     owner = require_delegate(ident)
-    body = _body(routes.TargetBody, kind=kind, ref_id=ref_id, consent=consent)
+    body = _body(routes.TargetBody, kind=kind, ref_id=ref_id, consent=consent, flow=flow or "panels")
     try:
         out = {**routes.create_target(body, ident=ident), "created": True}
     except AppError as exc:
@@ -308,7 +312,10 @@ def open_target(ident: identity.Identity, *, kind: str, ref_id: str, consent: bo
             raise
         key = f"{kind}:{ref_id}"
         row = routes._target_row(key, owner)
-        out = {"target_key": key, "created": False, "superseded_by": row["superseded_by"]}
+        out = {"target_key": key, "created": False, "superseded_by": row["superseded_by"], "flow": row["flow"]}
+        if flow is not None and flow != row["flow"]:
+            change = routes.post_target_flow(key, _body(routes.FlowBody, to=flow, reason=reason), ident=ident)
+            out.update({"flow": change["flow"], "flow_change": change})
         if planner.coverage_summary(routes.get_store(), key)["roster_size"] == 0:
             out["roster_refresh"] = routes.refresh_roster(key, routes.RosterBody(), ident=ident)
         out.update(_target_summary(key))
@@ -457,6 +464,11 @@ def _rest_channel_absent(project_id: str) -> dict:
         _fix_gate_blocked(state_module.UNKNOWN_BLOCKING_REASON, project_id))
 
 
+# 카드 대조(flow='cells')가 꺼진 박스의 길잡이 메모 — 대상을 열기 전 두 방식을 나란히 보이는 자리에서 cells 걸음 대신 쓴다.
+REVIEW_OFF_NOTE = ("카드 대조(flow='cells' — 전문가별로 자기 지식카드를 단위마다 대조)는 이 박스에서 꺼져 있다 — 데이터 디렉터리의"
+                   " knobs.env 에 HWAXRISK_REVIEW_ENABLED=1 을 적고 앱을 다시 띄우면 켜진다.")
+
+
 # 동의는 사람이 하는 것이다 — 길잡이가 consent 를 채워 주면 next 를 그대로 따르는 에이전트가 묻지 않고 동의한 것이 되고, 원장에는
 # 웹과 똑같이 '동의함' 이 남는다(SEC-4). 그래서 args 에 넣지 않고 why 로 받으라고만 말한다.
 _CONSENT_WHY = " 동의는 사용자에게 받은 뒤에만 consent=true 를 더해 부른다(길잡이는 채워 주지 않는다)."
@@ -566,7 +578,7 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
                            (project["predecessor_project_id"], owner)) is not None:
             base = next(iter(_snapshots(store, project["predecessor_project_id"])), None)
     targets = [dict(r) for r in store.query(
-        "SELECT target_key, kind, ref_id, superseded_by, roster_frozen_at, level, created_at FROM rr_targets"
+        "SELECT target_key, kind, ref_id, superseded_by, roster_frozen_at, level, flow, created_at FROM rr_targets"
         " WHERE project_id = ? AND owner_sub = ? ORDER BY created_at DESC, rowid DESC", (project_id, owner))]
     facts["targets"] = targets
     if base is None:
@@ -616,8 +628,18 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
         live = [t["target_key"] for t in targets if t["superseded_by"] is None]
         if live:
             notes.append(f"살아 있는 대상 {', '.join(live)} 은 새 대상을 열면 닫힌다(superseded) — 등록부는 변경에 따라 승계된다.")
-        return answer("target", [_step("risk_open_target", {"kind": kind, "ref_id": ref_id},
-                                       "심사 대상을 열고 전문가 명단을 고정한다." + _CONSENT_WHY)])
+        # 두 방식을 나란히 보인다(D-24) — 고르는 것은 사람이다. 패널 방식이 기본이라 첫 걸음의 인자는 종전 그대로다.
+        steps = [_step("risk_open_target", {"kind": kind, "ref_id": ref_id},
+                       "심사 대상을 열고 전문가 명단을 고정한다 — 방식은 panels(영역을 섞은 전문가 패널 3라운드, 기본)다."
+                       + _CONSENT_WHY)]
+        if kind == "diff":
+            if config.review_enabled():
+                steps.append(_step("risk_open_target", {"kind": kind, "ref_id": ref_id, "flow": "cells"},
+                                   "같은 대상을 cells(전문가별 카드 대조 — 변경을 단위로 나눠 전문가마다 자기 지식카드로 판정)로"
+                                   " 연다. 두 방식 가운데 사용자가 고른다." + _CONSENT_WHY))
+            else:
+                notes.append(REVIEW_OFF_NOTE)
+        return answer("target", steps)
     web.update(web_paths(project_id=project_id, target_key=target_key))
     facts["target"] = target
 
@@ -652,6 +674,8 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
             f"원인을 고친 뒤 risk_repersist_panel(panel_id) 로 다시 앉힌다(웹 REST 는 {paths}). 같은 결과로 다시 저장이"
             " 되풀이해 실패하면 discard=true(REST 는 ?discard=1)로 포기한다 — 엔진 결과는 패널에 남고 좌석은 다음 패널에서 다시 돈다.",
             panels=[p["id"] for p in waiting]))
+    if target.get("flow") == "cells":
+        return _cells_answer(answer, target_key, project_id, coverage["units"], repersist_steps, facts, blocked, notes)
     jobs = [dict(r) for r in store.query(
         "SELECT tier, state FROM rr_jobs WHERE target_key = ? ORDER BY created_at DESC, rowid DESC", (target_key,))]
     done_tiers = {j["tier"] for j in jobs if j["state"] == "completed"}
@@ -695,3 +719,22 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
         steps.insert(0, _step("risk_get_registry", {"target_key": target_key}, "지금까지의 판정 등록부.", write=False))
         return answer("done", steps)
     return answer("job", steps)
+
+
+def _cells_answer(answer, target_key: str, project_id: str, units_state: dict, repersist_steps: list[dict],
+                  facts: dict, blocked: list[dict], notes: list[str]) -> dict:
+    """카드 대조(flow='cells') 대상의 길잡이 — Tier 패널 잡은 받지 않는다(runner.panel_job_gate). 단위가 서 있지 않으면
+    `units_unbuildable` 이 막힘이다. 검토 잡 걸음은 카드 대조 러너(재설계 M2 단계 C2b)가 이 자리에 붙인다."""
+    facts["units"] = units_state
+    if units_state.get("status") not in units_module.OPEN_STATUSES:
+        blocked.append(_blocked(
+            "units_unbuildable", f"이 카드 대조 대상의 검토 단위가 서 있지 않다(빌드 {units_state.get('status')}).",
+            f"웹 REST POST /api/targets/{target_key}/units 로 다시 세우거나, 검토 잡이 서기 전이면 risk_open_target 에"
+            " flow='panels' 를 주어 패널 방식으로 되돌린다.", units=units_state))
+    notes.append("이 대상은 카드 대조(cells) 방식이다 — Tier 패널 잡(risk_start_job)은 받지 않는다. 카드 대조 검토 잡을 세우는"
+                 " 도구는 이 앱 판에 아직 없다.")
+    return answer("review", [
+        *repersist_steps,
+        _step("risk_get_units", {"target_key": target_key}, "검토 단위 목록(전문가가 카드로 대조할 변경 묶음).", write=False),
+        _step("risk_get_coverage", {"target_key": target_key, "with_seats": False}, "진행판(방식·단위·좌석).", write=False),
+        _step("risk_next_step", {"project_id": project_id}, "단계·막힘을 다시 본다.", write=False)])

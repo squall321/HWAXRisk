@@ -184,7 +184,8 @@ def test_entry_tool_signatures():
     assert props("risk_get_sameas") == {"base_snapshot_id", "target_snapshot_id"}
     assert props("risk_decide_sameas") == {"base_snapshot_id", "target_snapshot_id", "decisions"}
     assert props("risk_create_diff") == {"base_snapshot_id", "target_snapshot_id"}
-    assert props("risk_open_target") == {"kind", "ref_id", "consent"}
+    assert props("risk_open_target") == {"kind", "ref_id", "consent", "flow", "reason"}
+    assert required("risk_open_target") == {"kind", "ref_id"}
     assert props("risk_start_job") == {"target_key", "tier", "consent", "modifiers", "user_memo", "concurrency"}
     assert props("risk_job_action") == {"job_id", "action"}
     assert props("risk_repersist_panel") == {"panel_id", "discard"} and required("risk_repersist_panel") == {"panel_id"}

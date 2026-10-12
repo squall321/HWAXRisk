@@ -348,9 +348,10 @@ async def risk_create_diff(base_snapshot_id: str, target_snapshot_id: str) -> di
 
 
 @mcp.tool()
-async def risk_open_target(kind: str, ref_id: str, consent: bool = False) -> dict:
-    """심사 대상 열기 — 쓰기: 무엇을 심사할지 사용자에게 확인한 뒤 부른다(동의를 받아 consent=true), kind=diff(변경 심사, ref_id=diff_id)|snap(현황 심사, ref_id=snapshot_id), 전문가 명단을 고정하고 Tier 별 패널 수를 준다, 이미 연 내 대상이면 그것을 돌려주고 명단이 비었으면 그 자리에서 다시 받는다."""
-    return await _entry(entry.open_target, kind=kind, ref_id=ref_id, consent=consent)
+async def risk_open_target(kind: str, ref_id: str, consent: bool = False, flow: str | None = None,
+                           reason: str | None = None) -> dict:
+    """심사 대상 열기 — 쓰기: 무엇을 어느 방식으로 심사할지 사용자에게 확인한 뒤 부른다(동의를 받아 consent=true), kind=diff(변경 심사, ref_id=diff_id)|snap(현황 심사, ref_id=snapshot_id), flow=panels(영역을 섞은 패널 3라운드, 기본)|cells(전문가별 카드 대조 — 단위가 안 서면 panels 로 열고 flow_fallback 에 까닭), 전문가 명단을 고정하고 Tier 별 패널 수를 준다, 이미 연 내 대상이면 그것을 돌려주고(flow 가 다르면 방식을 바꾼다 — reason 은 감사에 남는다) 명단이 비었으면 그 자리에서 다시 받는다."""
+    return await _entry(entry.open_target, kind=kind, ref_id=ref_id, consent=consent, flow=flow, reason=reason)
 
 
 @mcp.tool()

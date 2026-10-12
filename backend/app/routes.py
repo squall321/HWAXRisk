@@ -2327,6 +2327,86 @@ def get_target_unit(target_key: str, unit_id: str, part: str = "summary",
     return unit_payload(target_key, unit_id, part, owner_sub=_require_user(ident))
 
 
+# ================================================================ 심사 방식 바꾸기(D-24 · M2.md 5절 #3)
+class FlowBody(BaseModel):
+    to: Literal["panels", "cells"]
+    reason: str | None = Field(default=None, max_length=300)
+
+
+# 감사 행의 입구 — 신원 출처(identity._token_from)에서 정한다. 웹 화면은 쿠키, Claude 는 게이트웨이 위임 단언, 그 밖은 REST 다.
+AUDIT_CHANNELS = {"cookie": "web", "sso": "mcp", "bearer": "rest"}
+
+
+def _live_jobs(store: Any, target_key: str) -> list[dict]:
+    rows = store.query(
+        f"SELECT id, tier, state, COALESCE(mode, 'panels') AS mode FROM rr_jobs WHERE target_key = ?"
+        f" AND state IN ({','.join('?' * len(RUNNING_JOB_STATES))}) ORDER BY created_at, id",
+        (target_key, *RUNNING_JOB_STATES))
+    return [dict(r) for r in rows]
+
+
+def _flow_lock(store: Any, target_key: str, to: str) -> AppError | None:
+    """방식을 `to` 로 바꾸지 못하게 막는 것 — panels→cells 는 살아 있는 잡(어느 mode 든), cells→panels 는 검토 잡이 한 번이라도
+    선 것(rr_jobs.mode='reviews', 상태 무관)이다. 없으면 None."""
+    if to == "cells":
+        live = _live_jobs(store, target_key)
+        if live:
+            return AppError("flow_locked", f"살아 있는 잡이 {len(live)}건 있다 — 잡이 끝나거나 취소된 뒤 바꾼다.", 409,
+                            detail={"reason": "job_live", "jobs": live})
+        return None
+    ran = int(store.query_one("SELECT COUNT(*) AS n FROM rr_jobs WHERE target_key = ? AND mode = 'reviews'",
+                              (target_key,))["n"] or 0)
+    if ran:
+        return AppError("flow_locked", f"이 대상에는 카드 대조 검토 잡이 {ran}건 섰다 — 검토가 한 번이라도 선 대상은 패널 방식으로"
+                        " 되돌리지 않는다(셀 원장이 이 방식에 묶여 있다). 패널로 보려면 새 대상을 연다.", 409,
+                        detail={"reason": "review_ran", "review_jobs": ran})
+    return None
+
+
+@router.post("/targets/{target_key}/flow")
+def post_target_flow(target_key: str, body: FlowBody, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """심사 방식 바꾸기(editor — 잡을 세울 수 있는 사람과 같다). {target_key, flow, changed, units?}.
+
+    - panels → cells: 스위치가 켜져 있고(아니면 409 review_disabled) 살아 있는 잡이 없을 때(409 flow_locked·job_live), 검토 단위가
+      ok·oversize 일 때만(없으면 그 자리에서 세운다, 안 서면 409 units_unbuildable). 이미 돈 패널·의견·등록부는 건드리지 않는다
+      — 패널을 돌린 대상에 카드 대조를 얹는 길이다(D-24 '비교', 파일럿 길).
+    - cells → panels: 검토 잡이 한 번도 없을 때만(409 flow_locked·review_ran).
+    바꾸면 rr_audit(scope='target', action='target.flow') 한 행을 남긴다. 같은 방식이면 아무것도 쓰지 않는다(changed:false).
+    """
+    email, target = _editable_target(target_key, ident)
+    store = get_store()
+    if target["flow"] == body.to:
+        return {"target_key": target_key, "flow": body.to, "changed": False}
+    if body.to == "cells":
+        require_review_enabled()
+        lock = _flow_lock(store, target_key, body.to)
+        if lock is not None:
+            raise lock
+        build = units_module.active_build(store, target_key)
+        if build is None or build["status"] not in units_module.OPEN_STATUSES:
+            units_module.build_units(store, target_key, built_by=email, reason=body.reason or "flow")
+            build = units_module.active_build(store, target_key)
+        if build is None or build["status"] not in units_module.OPEN_STATUSES:
+            state = units_module.summary_of(store, target_key)
+            raise AppError("units_unbuildable", "검토 단위가 서지 않아 카드 대조로 바꿀 수 없다"
+                           f"(빌드 {state.get('status')}" + (f" — {state['error']}" if state.get("error") else "") + ").",
+                           409, detail={"units": state})
+    with store.tx():
+        # 확인과 쓰기 사이에 잡이 서지 않게 트랜잭션 안에서 다시 본다(잡 만들기도 같은 트랜잭션 안에서 방식을 본다).
+        lock = _flow_lock(store, target_key, body.to)
+        if lock is not None:
+            raise lock
+        store.execute("UPDATE rr_targets SET flow = ?, updated_at = ? WHERE target_key = ?",
+                      (body.to, now_epoch(), target_key))
+        _audit(store, email, scope="target", subject_id=target_key, project_id=target["project_id"],
+               action="target.flow", before={"flow": target["flow"]}, after={"flow": body.to}, reason=body.reason,
+               channel=AUDIT_CHANNELS.get(ident.source, "rest"))
+    out = {"target_key": target_key, "flow": body.to, "changed": True}
+    if body.to == "cells":
+        out["units"] = units_module.summary_of(store, target_key)
+    return out
+
+
 # ================================================================ 잡
 class JobBody(BaseModel):
     tier: str
@@ -2916,6 +2996,11 @@ def brief_payload(target_key: str, tier: str = "B", *, owner_sub: str | None = N
     if tier == "A":
         raise AppError("tier_a_web_only", "Tier A 대표 패널은 웹 러너 전용입니다.", 422)
     target = _target_row(target_key, owner_sub)
+    if target["flow"] == "cells":
+        # 패널 브리프는 패널 방식의 것이다 — Claude Code 보충 회차(hwax-risk-review.js)는 panels 대상에서만 돈다(D-24). 토큰을
+        # 내지 않으므로 cells 대상의 risk_get_brief 도 여기서 막힌다(편성·동결을 쓰기 전에).
+        raise AppError("cells_flow_web_only", "이 대상은 카드 대조(flow='cells') 방식이라 패널 브리프를 내지 않는다 — 검토는 앱"
+                       " 러너가 돈다. 패널로 보려면 패널 방식 대상에서 연다.", 422, detail={"flow": "cells"})
     store = get_store()
 
     rows = store.query(

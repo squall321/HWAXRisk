@@ -821,6 +821,7 @@ def create_job(
     cfg = config.settings if settings is None else settings
     if tier not in planner.TIERS:
         raise AppError("E100", f"모르는 tier — {tier!r}. 허용 {list(planner.TIERS)}.", 422)
+    panel_job_gate(store, target_key, tier)
     if tier == "C" and not consent:
         raise AppError("E100", "Tier C 는 consent:true 명시 승인이 필요합니다.", 422)
     credential, credential_note = resolve_credential_with_note(store, cfg, owner_sub, requester_sub)
@@ -844,12 +845,16 @@ def create_job(
         "credential": credential["kind"],
         "requester": requester_sub,
     }
-    store.execute(
-        "INSERT INTO rr_jobs(id, target_key, owner_sub, tier, state, concurrency, params_json, credential_email,"
-        " panels_done, panels_total, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, 0, ?, ?, ?)",
-        (job_id, target_key, owner_sub, tier, max(1, min(int(concurrency), int(cfg.risk_concurrency))),
-         canonical_json(params), credential.get("email"), row["panels"], now, now),
-    )
+    with store.tx():
+        # 방식 바꾸기(routes.post_target_flow)와 겹치지 않게 같은 트랜잭션 안에서 문을 다시 본다 — 확인과 쓰기 사이에 대상이
+        # cells 로 바뀌면 패널 잡이 카드 대조 대상에 선다.
+        panel_job_gate(store, target_key, tier)
+        store.execute(
+            "INSERT INTO rr_jobs(id, target_key, owner_sub, tier, state, concurrency, params_json, credential_email,"
+            " panels_done, panels_total, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, 0, ?, ?, ?)",
+            (job_id, target_key, owner_sub, tier, max(1, min(int(concurrency), int(cfg.risk_concurrency))),
+             canonical_json(params), credential.get("email"), row["panels"], now, now),
+        )
     out = {
         "job_id": job_id,
         "panels_planned": row["panels"],
@@ -865,6 +870,22 @@ def create_job(
     if cut:
         out["user_memo_cut"] = cut
     return out
+
+
+# 카드 대조(flow='cells') 대상에서 막는 패널 Tier — 쟁점 패널(M3 의 tier 'I')은 그 대상에서 도는 것이라 막지 않는다(D-24).
+FLOW_GATED_TIERS: tuple[str, ...] = ("A", "B", "C")
+
+
+def panel_job_gate(store: Any, target_key: str, tier: str) -> None:
+    """패널 잡의 문지기 — 사용자 잡과 C3 자동 후속(_finish_job)이 둘 다 create_job 을 지나므로 여기 둔다(라우트가 아니라).
+
+    카드 대조 대상(flow='cells')의 Tier A·B·C 는 422 `flow_mismatch` 다.
+    """
+    row = store.query_one("SELECT flow FROM rr_targets WHERE target_key = ?", (target_key,))
+    if row is not None and row["flow"] == "cells" and tier in FLOW_GATED_TIERS:
+        raise AppError("flow_mismatch", f"이 대상은 카드 대조(flow='cells') 방식이다 — Tier {tier} 패널 잡을 세우지 않는다."
+                       f" 패널로 보려면 검토 잡이 서기 전에 방식을 panels 로 되돌린다(POST /api/targets/{target_key}/flow).", 422,
+                       detail={"flow": "cells", "tier": tier})
 
 
 def _set_job(store: Any, job_id: str, state: str, *, reason: str | None = None, error: str | None = None,
@@ -1207,14 +1228,26 @@ def _finish_job(store: Any, job: Mapping[str, Any], settings: Any) -> dict:
     target = store.query_one("SELECT owner_sub, close_level FROM rr_targets WHERE target_key = ?", (job["target_key"],))
     close_level = (target["close_level"] if target and target["close_level"] else settings.risk_default_close_level)
     if job["tier"] == "B" and close_level == "C3":
-        follow = create_job(
-            store, job["target_key"], "C", owner_sub=job["owner_sub"],
-            modifiers=(job.get("params") or {}).get("modifiers"),
-            user_memo=(job.get("params") or {}).get("user_memo"),
-            consent=True, settings=settings, consent_source="close_level",
-        )
+        try:
+            follow = create_job(
+                store, job["target_key"], "C", owner_sub=job["owner_sub"],
+                modifiers=(job.get("params") or {}).get("modifiers"),
+                user_memo=(job.get("params") or {}).get("user_memo"),
+                consent=True, settings=settings, consent_source="close_level",
+            )
+        except AppError as exc:
+            if exc.code not in FOLLOW_UP_REFUSALS:
+                raise
+            # 문지기가 자동 후속을 막았다 — 끝난 잡은 completed 그대로 두고 까닭을 그 잡에 적는다(조용히 사라지지 않게).
+            store.execute("UPDATE rr_jobs SET error = ? WHERE id = ?",
+                          (f"{exc.code}: C3 자동 후속 Tier C 를 세우지 않았다 — {exc.message}", job["id"]))
+            return {"job_state": "completed", "next_job": None, "next_job_refused": exc.code}
         return {"job_state": "completed", "next_job": follow["job_id"]}
     return {"job_state": "completed", "next_job": None}
+
+
+# C3 자동 후속을 막는 문지기의 코드 — 이것만 받아 잡을 completed 로 닫는다(그 밖의 실패는 종전대로 올린다).
+FOLLOW_UP_REFUSALS: tuple[str, ...] = ("flow_mismatch",)
 
 
 def _diminishing(store: Any, target_key: str) -> bool:
