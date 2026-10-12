@@ -129,6 +129,9 @@ def test_new_uuid_is_hex32():
         ("tool:1a2b3c4d-007", {"kind": "tool", "call_id": "1a2b3c4d-007"}),
         ("tool:conv:cv1#3", {"kind": "tool", "conv_id": "cv1", "idx": 3}),
         ("card:rec_88", {"kind": "card", "record_id": "rec_88"}),
+        # 카드 대조 판정이 원문 절을 짚는 표기(m2-wp3b S4) — record_id 에 '-' 가 든다.
+        ("card:DOC-CCT-MECH-2026-0000000101#2", {"kind": "card", "record_id": "DOC-CCT-MECH-2026-0000000101",
+                                                 "section_id": "2"}),
         ("narr:op1#F2", {"kind": "narr", "opinion_id": "op1", "finding_id": "F2"}),
         ("narr:ch7", {"kind": "narr", "character_id": "ch7"}),
         ("reg:snap:s1#0123456789ab", {"kind": "reg", "target_key": "snap:s1", "cluster_key": "0123456789ab"}),
@@ -151,7 +154,7 @@ def test_parse_ref_reads_every_scheme(text, expected):
 @pytest.mark.parametrize(
     "text",
     ["", "그냥 문장", "x:1", "p:", "p:ZZZZZZZZZZZZ", "p:0123", "name:BRACKET", "reg:snap:s1", "gate:six",
-     "tool:conv:cv1", "tool:conv:cv1#x",
+     "tool:conv:cv1", "tool:conv:cv1#x", "card:#2", "card:DOC-1#",
      # 심의 엔진의 근거 항목 표지 — 접두는 엣지(`e:`)와 같지만 이 앱의 참조가 아니다.
      "e:3", "[e:3]", "e:3|E3", "[e:12|M]"],
 )
@@ -171,6 +174,8 @@ def test_parse_ref_accepts_brackets_and_whitespace():
         ("tool", {"conv_id": "cv1", "idx": 3}, "tool:conv:cv1#3"),
         ("narr", {"opinion_id": "op1", "finding_id": "F2"}, "narr:op1#F2"),
         ("narr", {"character_id": "ch7"}, "narr:ch7"),
+        ("card", {"record_id": "DOC-1"}, "card:DOC-1"),
+        ("card", {"record_id": "DOC-1", "section_id": "2"}, "card:DOC-1#2"),
         ("reg", {"target_key": "diff:d1", "cluster_key": "0123456789ab"}, "reg:diff:d1#0123456789ab"),
         ("warn", {"code": "unit_mismatch"}, "warn:unit_mismatch"),
         ("gate", {"n": 7}, "gate:G7"),

@@ -159,7 +159,7 @@ def parse_ref(text: str) -> dict | None:
 
     산문 표기의 대괄호는 있어도 없어도 받는다. 결과에는 항상 `kind`(스킴)와 `ref`(대괄호 없는 정규 표기)가 있고,
     나머지 키는 스킴마다 다르다 — p·e·c 는 `id`, d 는 `name`, name 은 `a`·`b`, tool 은 `call_id` 또는
-    `conv_id`·`idx`, card 는 `record_id`, narr 은 `opinion_id`·`finding_id` 또는 `character_id`,
+    `conv_id`·`idx`, card 는 `record_id`(절을 적었으면 `section_id` 도), narr 은 `opinion_id`·`finding_id` 또는 `character_id`,
     reg 는 `target_key`·`cluster_key`, warn 은 `code`·`ref_to`, gate 는 `gate`·`n`, sig 는 `key`,
     rule 은 `rule_id`, rpt 는 `report_id`, inc 는 `object_id` 다.
     존재 검증은 하지 않는다 — 실재하지 않는 참조는 호출자가 dangling 으로 표기한다(§0.2.1 규칙 (2)).
@@ -199,6 +199,12 @@ def parse_ref(text: str) -> dict | None:
             return {"kind": "tool", "conv_id": conv_id, "idx": int(idx), "ref": f"tool:conv:{conv_id}#{idx}"}
         return {"kind": "tool", "call_id": rest, "ref": f"tool:{rest}"}
     if scheme == "card":
+        # `card:<record_id>#<section_id>` — 카드 대조 판정이 사람에게 원문 절을 짚어 준다(m2-wp3b S4). 절 없는 표기는 카드 전체.
+        if "#" in rest:
+            record_id, section_id = rest.split("#", 1)
+            if not record_id or not section_id:
+                return None
+            return {"kind": "card", "record_id": record_id, "section_id": section_id, "ref": f"card:{rest}"}
         return {"kind": "card", "record_id": rest, "ref": f"card:{rest}"}
     if scheme == "narr":
         if "#" in rest:
@@ -280,7 +286,8 @@ def make_ref(kind: str, **parts: Any) -> str:
         else:
             ref = f"tool:{need('call_id')}"
     elif kind == "card":
-        ref = f"card:{need('record_id')}"
+        section_id = parts.get("section_id")
+        ref = f"card:{need('record_id')}" + (f"#{section_id}" if section_id not in (None, "") else "")
     elif kind == "narr":
         if "character_id" in parts:
             ref = f"narr:{need('character_id')}"
