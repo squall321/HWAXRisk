@@ -215,6 +215,86 @@ def test_panel_briefs_and_their_tokens_are_refused_on_cells_targets(store, monke
     assert "error" not in srv.risk_get_brief(panels, token)
 
 
+def _issued(store, monkeypatch) -> tuple[str, dict]:
+    """화면이 브리프 토큰을 낸 패널 대상(GET /targets/{key}/brief — 동결하지 않는다)과 그 패널. 호출은 소유자의 Claude 다."""
+    monkeypatch.setattr(config, "heax_gateway_secret", lambda *a, **k: factories.TEST_GATEWAY_SECRET)
+    key = factories.make_diff_target(store, 3).target_key
+    issued = routes.get_brief(key, "B", ident=factories.ident(OWNER))["panels"][0]
+    factories.act_as_delegate(monkeypatch, OWNER)
+    return key, issued
+
+
+def _submit(panel_id: str) -> dict:
+    return srv.risk_submit_panel_result(panel_id=panel_id, engine="mcp", decision_text="판정 본문.", turns=[],
+                                        actor="claude")
+
+
+def _panel(store, panel_id: str) -> tuple:
+    row = store.query_one("SELECT status, brief_gz IS NOT NULL AS frozen FROM rr_panels WHERE id = ?", (panel_id,))
+    return row["status"], bool(row["frozen"])
+
+
+def test_the_switch_waits_for_a_claude_round_that_took_its_brief(store, monkeypatch):
+    """L2 보충 회차는 잡을 세우지 않는다 — 토큰으로 브리프를 받아 간(동결된) planned 패널이 있으면 panels → cells 는 409
+    flow_locked(panel_in_flight)이고, 그 회차가 결과를 낸 뒤에는 바뀐다(RC-1)."""
+    key, issued = _issued(store, monkeypatch)
+    assert "error" not in srv.risk_get_brief(key, issued["brief_token"])
+    assert _panel(store, issued["panel_id"]) == ("planned", True)
+    assert store.query("SELECT id FROM rr_jobs WHERE target_key = ?", (key,)) == []
+    refused = _refused(_switch, key, "cells")
+    assert (refused.code, refused.http_status, refused.detail["reason"]) == ("flow_locked", 409, "panel_in_flight")
+    assert refused.detail["panels"] == [{"id": issued["panel_id"], "panel_no": 1, "status": "planned"}]
+    assert _flow(store, key) == "panels" and _audits(store, key) == []
+    assert "error" not in _submit(issued["panel_id"])
+    assert _panel(store, issued["panel_id"])[0] == "done"
+    assert _switch(key, "cells")["changed"] is True
+
+
+def test_a_late_panel_result_does_not_land_on_a_target_that_became_cells(store, monkeypatch):
+    """토큰만 받고 브리프를 열기 전에 대상이 cells 로 바뀌었다 — 늦게 온 결과(risk_submit_panel_result)는 422 flow_mismatch 로
+    거절되고 패널·좌석·의견은 그대로다. 방식을 panels 로 되돌리면(검토 잡이 서기 전) 같은 결과가 앉는다."""
+    key, issued = _issued(store, monkeypatch)
+    _switch(key, "cells")
+    before = _ledger(store, key)
+    refused = _submit(issued["panel_id"])
+    assert refused["error"] == "flow_mismatch"
+    assert _ledger(store, key) == before and _panel(store, issued["panel_id"]) == ("planned", False)
+    _switch(key, "panels")
+    assert "error" not in _submit(issued["panel_id"])
+    assert _panel(store, issued["panel_id"])[0] == "done"
+
+
+def test_a_switch_racing_a_brief_freeze_leaves_no_frozen_panel_on_a_cells_target(store, monkeypatch):
+    """확인과 쓰기 사이의 경합 두 방향(RC-1) — (1) 브리프를 조립하는 사이 대상이 cells 로 바뀌면 토큰 길은 얼리지 않고
+    cells_flow_web_only 다. (2) 바꾸기의 첫 확인 뒤 트랜잭션 전에 브리프가 얼면 트랜잭션 안의 재확인이 panel_in_flight 로 막는다."""
+    key, issued = _issued(store, monkeypatch)
+    real_payload = routes.brief_payload
+
+    def switched_while_assembling(*args, **kwargs):
+        out = real_payload(*args, **kwargs)
+        _switch(key, "cells")
+        return out
+
+    monkeypatch.setattr(routes, "brief_payload", switched_while_assembling)
+    assert srv.risk_get_brief(key, issued["brief_token"])["error"] == "cells_flow_web_only"
+    assert _flow(store, key) == "cells" and _panel(store, issued["panel_id"]) == ("planned", False)
+    monkeypatch.setattr(routes, "brief_payload", real_payload)
+
+    _switch(key, "panels")
+    real_build = units.active_build
+    froze = []
+
+    def frozen_before_the_write(*args, **kwargs):
+        if not froze:
+            froze.append(srv.risk_get_brief(key, issued["brief_token"]))
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(units, "active_build", frozen_before_the_write)
+    refused = _refused(_switch, key, "cells")
+    assert "error" not in froze[0] and (refused.code, refused.detail["reason"]) == ("flow_locked", "panel_in_flight")
+    assert _flow(store, key) == "panels" and _panel(store, issued["panel_id"]) == ("planned", True)
+
+
 # ---------------------------------------------------------------- Claude 입구 — risk_open_target(flow=…)
 def test_claude_opens_a_target_in_either_flow_and_switches_an_open_one(store, monkeypatch):
     """새 대상은 flow 로 열고(없으면 panels), 이미 연 내 대상에 다른 flow 를 주면 웹과 같은 바꾸기 함수를 지난다(감사 channel

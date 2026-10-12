@@ -2351,14 +2351,29 @@ def _live_jobs(store: Any, target_key: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _panels_in_flight(store: Any, target_key: str) -> list[dict]:
+    """브리프를 받아 간 채 끝나지 않은 패널 — Claude Code 보충 회차(L2)가 도는 중이다. 그 회차는 rr_jobs 를 만들지 않는다
+    (risk_get_brief(token) 이 planned 패널에 브리프를 얼리고, 몇 시간 뒤 risk_submit_panel_result 로 결과를 낸다)."""
+    rows = store.query(
+        "SELECT id, panel_no, status FROM rr_panels WHERE target_key = ? AND status IN ('planned', 'running')"
+        " AND brief_gz IS NOT NULL ORDER BY panel_no", (target_key,))
+    return [dict(r) for r in rows]
+
+
 def _flow_lock(store: Any, target_key: str, to: str) -> AppError | None:
-    """방식을 `to` 로 바꾸지 못하게 막는 것 — panels→cells 는 살아 있는 잡(어느 mode 든), cells→panels 는 검토 잡이 한 번이라도
-    선 것(rr_jobs.mode='reviews', 상태 무관)이다. 없으면 None."""
+    """방식을 `to` 로 바꾸지 못하게 막는 것 — panels→cells 는 살아 있는 잡(어느 mode 든)과 브리프를 받아 간 채 끝나지 않은 패널
+    (L2 보충 회차), cells→panels 는 검토 잡이 한 번이라도 선 것(rr_jobs.mode='reviews', 상태 무관)이다. 없으면 None."""
     if to == "cells":
         live = _live_jobs(store, target_key)
         if live:
             return AppError("flow_locked", f"살아 있는 잡이 {len(live)}건 있다 — 잡이 끝나거나 취소된 뒤 바꾼다.", 409,
                             detail={"reason": "job_live", "jobs": live})
+        flying = _panels_in_flight(store, target_key)
+        if flying:
+            # 토큰만 받고 브리프를 열지 않은 패널은 막지 않는다 — 바꾼 뒤 그 토큰은 cells_flow_web_only 로 열리지 않는다.
+            return AppError("flow_locked", f"Claude Code 보충 회차가 브리프를 받아 간 패널이 {len(flying)}건 있다 — 그 회차가"
+                            " 결과를 낸(risk_submit_panel_result) 뒤 바꾼다. 같은 대상의 두 방식이 같은 좌석·LLM 을 동시에 쓰지"
+                            " 않게 한다.", 409, detail={"reason": "panel_in_flight", "panels": flying})
         return None
     ran = int(store.query_one("SELECT COUNT(*) AS n FROM rr_jobs WHERE target_key = ? AND mode = 'reviews'",
                               (target_key,))["n"] or 0)
@@ -2943,6 +2958,16 @@ def _mcp_brief_notice(item: dict[str, Any]) -> str | None:
             "근거를 다 싣는 길은 웹 러너다(앱 화면의 심사 시작 또는 risk_start_job).")
 
 
+def _target_flow(store: Any, target_key: str) -> str | None:
+    row = store.query_one("SELECT flow FROM rr_targets WHERE target_key = ?", (target_key,))
+    return str(row["flow"]) if row is not None else None
+
+
+def _cells_flow_web_only() -> AppError:
+    return AppError("cells_flow_web_only", "이 대상은 카드 대조(flow='cells') 방식이라 패널 브리프를 내지 않는다 — 검토는 앱"
+                    " 러너가 돈다. 패널로 보려면 패널 방식 대상에서 연다.", 422, detail={"flow": "cells"})
+
+
 def brief_by_token(target_key: str, brief_token: str | None, tier: str = "B", *, owner_sub: str | None = None) -> dict:
     """MCP `risk_get_brief` 본체 — caller 판정 대신 brief_token 대조로 연다(plan §8.2.5).
 
@@ -2978,8 +3003,13 @@ def brief_by_token(target_key: str, brief_token: str | None, tier: str = "B", *,
         row = store.query_one("SELECT status FROM rr_panels WHERE id = ?", (panel["id"],))
         raise not_planned(str(row["status"]) if row is not None else "absent")
     evidence = item["delib_opts"]["evidence"]
-    item["brief_frozen"] = runner.freeze_brief(store, panel, evidence)
-    _keep_brief_loss(store, panel["id"], item)
+    with store.tx():
+        # 방식 바꾸기(post_target_flow)와 겹치지 않게 동결은 트랜잭션 안에서 방식을 다시 본다 — 조립하는 사이(근거 채널은 수십 초)
+        # 대상이 cells 로 바뀌었으면 얼리지 않는다. 바꾸기는 그 트랜잭션 안에서 얼린 패널을 보고 막는다(RC-1).
+        if _target_flow(store, target_key) == "cells":
+            raise _cells_flow_web_only()
+        item["brief_frozen"] = runner.freeze_brief(store, panel, evidence)
+        _keep_brief_loss(store, panel["id"], item)
     item["delib_opts"]["evidence"] = [{**e, "result_chars": len(str(e.get("result") or "").strip())} for e in evidence]
     out = {k: v for k, v in payload.items() if k not in _MCP_BRIEF_DROP}
     out["panels"] = [item]
@@ -3006,8 +3036,7 @@ def brief_payload(target_key: str, tier: str = "B", *, owner_sub: str | None = N
     if target["flow"] == "cells":
         # 패널 브리프는 패널 방식의 것이다 — Claude Code 보충 회차(hwax-risk-review.js)는 panels 대상에서만 돈다(D-24). 토큰을
         # 내지 않으므로 cells 대상의 risk_get_brief 도 여기서 막힌다(편성·동결을 쓰기 전에).
-        raise AppError("cells_flow_web_only", "이 대상은 카드 대조(flow='cells') 방식이라 패널 브리프를 내지 않는다 — 검토는 앱"
-                       " 러너가 돈다. 패널로 보려면 패널 방식 대상에서 연다.", 422, detail={"flow": "cells"})
+        raise _cells_flow_web_only()
     store = get_store()
 
     rows = store.query(
@@ -3229,6 +3258,13 @@ def complete_panel(panel_id: str, *, engine: str, decision_text: str, turns: lis
 
     # 상태 전이·서술 저장·좌석 회계·등록부 병합은 한 트랜잭션이다 — 중간 실패의 반쪽 저장을 막는다.
     with store.tx():
+        # 패널 결과는 패널 방식 대상에만 앉는다 — 방식 바꾸기와 같은 트랜잭션 순서로 본다(RC-1). 토큰을 받은 뒤 대상이 cells 로
+        # 바뀌었으면 늦게 온 결과(MCP L2 회차)가 그 대상의 좌석·의견·등록부를 조용히 바꾸지 않는다(D-24 — 비교 중 등록부 고정).
+        if _target_flow(store, panel["target_key"]) == "cells":
+            raise AppError("flow_mismatch", "이 패널의 대상은 그 사이 카드 대조(flow='cells') 방식으로 바뀌었다 — 패널 결과를 앉히지"
+                           " 않는다. 결과를 살리려면 검토 잡이 서기 전에 방식을 panels 로 되돌린(POST /api/targets/"
+                           f"{panel['target_key']}/flow) 뒤 다시 낸다.", 422,
+                           detail={"flow": "cells", "panel_id": panel_id})
         # planned 패널은 좌석이 assigned 다 — 종결 전에 running 으로 이어 원장 상태를 맞춘다(§6.8.2 전이표). 이 전이도
         # 같은 트랜잭션이다 — 밖에서 커밋하면 저장이 터졌을 때 패널·좌석이 running 에 굳어 그 타깃이 멈춘다.
         if panel["status"] == "planned":
