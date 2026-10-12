@@ -842,14 +842,14 @@ class _Session:
         return {"prompt_rev": revs.get(kind), "limits_rev": self.lim.get("limits_rev")}
 
     def _plan(self) -> dict:
-        """그 전문가의 묶음·목록 쪽 계획 — 머리에 얼린 계획이 같은 묶음·같은 창 판이면 그것을 쓰고, 아니면 엔진에 다시 받는다
-        (`limits_rev` 가 바뀌면 다시 짜고 입력 지문이 바뀐 셀만 처음부터 돈다). `oversize` 가 비지 않으면 다시 쪼개지 않고 잡을
-        ctx_too_small 로 멈춘다(D-22) — 그 단위·카드·목록 쪽과 이 박스의 창을 적는다."""
+        """그 전문가의 묶음·목록 쪽 계획 — 머리에 얼린 계획이 같은 묶음·같은 창 판·같은 프롬프트 판이면 그것을 쓰고, 아니면 엔진에
+        다시 받는다(`limits_rev` 나 `prompt_rev` 가 바뀌면 다시 짜고 입력 지문이 바뀐 셀만 처음부터 돈다 — R3A-6). `oversize` 가 비지
+        않으면 다시 쪼개지 않고 잡을 ctx_too_small 로 멈춘다(D-22) — 그 단위·카드·목록 쪽과 이 박스의 창을 적는다."""
         assert self.pack is not None
         head = self._head_row()
         frozen = _json(head.get("plan_json"), {})
-        if (head.get("limits_rev") == self.lim.get("limits_rev") and frozen.get("pack_key") == self.pack.pack_key
-                and isinstance(frozen.get("plan"), dict)):
+        if (head.get("limits_rev") == self.lim.get("limits_rev") and head.get("prompt_rev") == prompt_key(self.lim)
+                and frozen.get("pack_key") == self.pack.pack_key and isinstance(frozen.get("plan"), dict)):
             plan = frozen["plan"]
         else:
             manifest = units.manifest_items(self.store, self.target_key)
@@ -1025,7 +1025,7 @@ class _Session:
                 1, salt=f"{self.target_key}|{self.agent}|sweep"))
         if outcome.klass == review_ops.JOB:
             if outcome.code == "rev_mismatch" and self._limits_moved():
-                raise _Stop("limits_rev_changed")       # 판이 바뀌었다 — 놓고 다음 세션이 계획을 다시 받는다(보류하지 않는다)
+                raise _Stop("limits_rev_changed")       # 창·프롬프트 판이 바뀌었다 — 놓고 다음 세션이 계획을 다시 받는다(보류 없음)
             what = f"카드 대조 호출({self.agent})"
             self._hold(outcome.hold_code or "contract", credential_message(what, exc) if outcome.hold_code == "credential"
                        else f"{what}: {exc}")
@@ -1037,11 +1037,13 @@ class _Session:
         raise _Stop("cancelled")
 
     def _limits_moved(self) -> bool:
+        """엔진의 rev_mismatch 가 판이 바뀐 탓인가 — 새로 받은 limits 의 limits_rev 나 종류별 prompt_rev 가 이 세션의 것과 다르면
+        참이다. 에이전트 서버가 프롬프트 판만 올리면 limits_rev 는 그대로라(그 원천에 PROMPT_REV 가 없다) 둘 다 본다(R3A-6)."""
         try:
             fresh = self.loop.limits_for(self.email, fresh=True)
         except _ENGINE_ERRORS:
             return False
-        return fresh.get("limits_rev") != self.lim.get("limits_rev")
+        return fresh.get("limits_rev") != self.lim.get("limits_rev") or prompt_key(fresh) != prompt_key(self.lim)
 
     def _note(self, cell: _Cell | None, kind: str, variant: str | None, aliases: Sequence[str], result: Mapping[str, Any],
               accepted: Mapping[str, Any]) -> None:

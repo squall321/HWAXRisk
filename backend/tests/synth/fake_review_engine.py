@@ -306,6 +306,14 @@ class FakeReviewEngine:
         if want not in (None, self.limits_rev):
             return self._reject(409, "rev_mismatch", f"요청이 기대한 limits_rev({want})가 이 서버의 판({self.limits_rev})과"
                                 " 다르다", limits_rev=self.limits_rev, expect=body.get("expect"))
+        if route == "run":
+            # 엔진 prepare 처럼 run 은 종류별 prompt_rev 도 견준다(limits_rev 의 원천에 PROMPT_REV 는 없다 — R3A-6).
+            want_prompt = (body.get("expect") or {}).get("prompt_rev")
+            have_prompt = (self.base_limits.get("prompt_rev") or {}).get(body.get("kind"))
+            if want_prompt not in (None, have_prompt):
+                return self._reject(409, "rev_mismatch", f"요청이 기대한 판(prompt_rev={want_prompt})이 이 서버의 판"
+                                    f"(prompt_rev={have_prompt})과 다르다", prompt_rev=have_prompt,
+                                    limits_rev=self.limits_rev, expect=body.get("expect"))
         if route == "plan":
             return httpx.Response(200, json=self.plan(body))
         return self._run(body)

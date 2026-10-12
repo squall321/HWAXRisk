@@ -1027,3 +1027,34 @@ def test_a_code_hold_lets_the_running_call_finish_and_starts_no_next_call(store,
     assert fake.runs == 3 and _calls(store, job_id, state="aborted") == []
     assert {(c["charged"], c["lease_owner"]) for c in _cells(store, key, SEAL)} == {(0, None)}
     assert rig.state(store, job_id) == "paused" and _head(store, key, SEAL)["state"] == "planned"
+
+
+@pytest.mark.parametrize("change", ["prompt", "limits", "none"])
+def test_a_revision_change_mid_job_replans_and_carries_on_and_a_real_mismatch_holds_contract(store, monkeypatch, change):
+    """반대 검토 R3A-6 — 도는 잡 도중 에이전트 서버가 판을 올리면(프롬프트 판만 — limits_rev 는 그대로 — 이거나 창 판) 다음 호출의
+    409 rev_mismatch 는 보류가 아니다. 세션이 놓고 다음 세션이 limits 를 다시 받아 계획을 다시 짜고, 입력 지문이 바뀐 셀은 처음부터
+    돌아 completed 다(사람 손 없음). 판이 그대로인데 rev_mismatch 가 오면(앱이 계약을 어겼다) 종전대로 contract 로 멈춘다."""
+    from app import review_runner
+
+    key, job_id, fake, r, gate = _stalled(store, monkeypatch, 3)
+    if change == "prompt":
+        fake.base_limits["prompt_rev"]["verdict"] = "cr-verdict-2"
+    elif change == "limits":
+        fake.limits_rev = "limits-rev-2"
+    else:
+        fake.error_n = 1
+        fake.error = {"code": "rev_mismatch", "message": "판이 다르다(가짜)", "infra": False, "retryable": False}
+    gate.set()
+    r.loop.join(30)
+    r.finish(job_id)
+    row = rig.job_row(store, job_id)
+    if change == "none":
+        assert (row["state"], row["hold_code"]) == ("paused", "contract") and "rev_mismatch" in row["error"]
+        return
+    assert (row["state"], row["hold_code"], row["hold_n"], row["error"]) == ("completed", None, 0, None)
+    mismatched = _calls(store, job_id, error_code="rev_mismatch")
+    assert [(c["state"], c["outcome_class"]) for c in mismatched] == [("aborted", "job")]
+    assert len(fake.calls("plan")) == 2
+    assert {(c["state"], c["reopened_n"]) for c in _cells(store, key, SEAL)} == {("reviewed", 1)}
+    head = _head(store, key, SEAL)
+    assert (head["prompt_rev"], head["limits_rev"]) == (review_runner.prompt_key(fake.limits()), fake.limits_rev)
