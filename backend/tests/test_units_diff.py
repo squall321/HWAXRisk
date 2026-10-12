@@ -766,8 +766,113 @@ def test_every_placeholder_in_the_build_is_a_queued_suspect(hazards, tmp_path_fa
         case.store.close()
 
 
+# ---------------------------------------------------------------- 침묵 손실 오라클(RA-4 — 변이가 초록으로 지나던 자리)
+def _source_body(src: dict, names: dict) -> str:
+    """diff 원천 항목의 글 → 줄 몸통 오라클 — 참조 꼬리를 떼고 nid 를 이름으로 바꾼 뒤 위생(자르지 않음)을 거친 글."""
+    body = render.split_trailing_refs(render.humanize_refs(src["text"], names))[0]
+    return render.sanitize_source_text(body, "note", limit=0)[1:-1]
+
+
+def test_every_owned_line_is_its_diff_item_text_byte_for_byte(synth, randoms, pairs):
+    """층 구분 없이 모든 소유 줄의 글이 그 diff 원천 항목 글과 같다 — 줄 몸통 대조가 의미층(risk_get_diff)에만 있어 구조·
+    파라메트릭 줄을 80자에서 잘라도 초록이었다(RA-4 M1b). 오라클은 diff 를 all_cids 로 훑어 항목을 찾는다. 롤업 줄은 단위가 짓는
+    몸통이라 따로 본다(test_rollup_lines_name_the_fields_that_changed)."""
+    layers: dict[str, int] = {}
+    for case in _every(synth, randoms, pairs):
+        found = all_cids(case.diff)
+        names = case.view["names"]
+        for unit in case.built["units"]:
+            for line in unit["lines"]:
+                if line["code"] == "param.rollup":
+                    continue
+                sources = [d for d in found[line["ref"]] if isinstance(d.get("text"), str) and d["text"]]
+                assert sources, line["ref"]
+                assert line["text"] in {_source_body(d, names) for d in sources}, (case.name, line["ref"], line["text"])
+                layers[line["layer"]] = layers.get(line["layer"], 0) + 1
+    assert set(layers) == {"semantic", "structural", "parametric"} and min(layers.values()) > 50, layers
+
+
+def test_the_digest_names_every_part_of_its_unit(synth, randoms):
+    """목록 글(전수 훑기가 보는 글)에는 그 단위의 부품 이름이 전부 «» 안에 있다(RA-4 M7 — 둘만 실어도 초록이었다)."""
+    seen = 0
+    for case in [*synth.values(), *randoms]:
+        for unit in case.built["units"]:
+            for part in unit["parts"]:
+                assert render.sanitize_source_text(part["name"], "label", limit=0) in unit["digest"], part["name"]
+                seen += 1
+            assert len(unit["parts"]) < 3 or unit["digest"].count("«") >= len(unit["parts"])
+    assert seen > 100
+
+
+def test_material_changes_show_both_sides_in_the_parts_table(synth):
+    """[부품] 표의 재질은 앞→뒤 둘 다다 — 오라클은 diff 의 재질 변경 항목(field=name)이다(RA-4 M22 — 앞값을 버려도 초록이었다)."""
+    seen = 0
+    for case in synth.values():
+        changed = {m["dn"]: (m["before"], m["after"]) for m in case.diff["parametric"]["materials"]
+                   if m["field"] == "name" and m["before"] and m["after"]}
+        for unit in case.built["units"]:
+            for part in unit["parts"]:
+                if part["dn"] not in changed:
+                    continue
+                before, after = changed[part["dn"]]
+                q = lambda x: render.sanitize_source_text(x, "label", limit=0)  # noqa: E731
+                row = next(x for x in unit["summary"].split("\n") if x.startswith(f"{part['alias']} [{part['dn']}]"))
+                assert f"재질={q(before)}→{q(after)}" in row, row
+                seen += 1
+    assert seen
+
+
+def test_reviewed_parts_see_the_rollup_of_their_assembly_as_context(synth):
+    """전역 단위가 소유한 롤업(조립 접두) 항목은 그 조립의 부품을 가진 검토 단위마다 '롤업' 문맥 줄로 보인다(RA-4 M8 — 롤업 문맥을
+    통째로 빼도 초록이었다). 오라클은 diff 의 롤업 행·롤업 이벤트의 조립 접두다."""
+    seen = 0
+    for size in (40, 150):
+        built = synth[size].built
+        found = all_cids(synth[size].diff)
+        asm_of: dict[str, str] = {}
+        for unit in built["units"]:
+            if unit["kind"] != "global":
+                continue
+            for line in unit["lines"]:
+                for src in found[line["ref"]]:
+                    if src.get("path_prefix"):
+                        asm_of[line["ref"]] = src["path_prefix"]
+                    dns = (src.get("subject") or {}).get("dns") or []
+                    if dns and str(dns[0]).startswith("asm:"):
+                        asm_of[line["ref"]] = str(dns[0])[len("asm:"):]
+        assert asm_of
+        for unit in built["units"]:
+            if not unit["reviewable"] or unit["kind"] == "global":
+                continue
+            rollups = {x["ref"] for x in unit["context"]["lines"] if x["role"] == "rollup"}
+            asms = {part["asm"] for part in unit["parts"]}
+            want = {ref for ref, asm in asm_of.items() if asm in asms}
+            assert rollups == want, (unit["unit_id"], sorted(want - rollups), sorted(rollups - want))
+            seen += len(want)
+    assert seen > 10
+
+
+def test_unit_hash_moves_with_the_text_and_the_excluded_reason(synth):
+    """unit_hash 는 값뿐 아니라 줄 글·제외 사유만 바뀌어도 달라진다(RA-4 M24·M25 — 그 둘을 빼도 초록이었다). 생산자 diff 를
+    복사해 그 칸만 바꾼다 — 제외 사유는 단서 사유(tol_unknown)라 같은 단위에 남아 unit_id 는 그대로다."""
+    case = synth[40]
+    base = {u["unit_id"]: u["unit_hash"] for u in case.built["units"]}
+    target = next(p for p in case.diff["parametric"]["node_params"]
+                  if p["flag"] == "changed" and not p["excluded_reason"] and p["design_relevant"])
+    holder = next(u["unit_id"] for u in case.built["units"] if target["cid"] in u["cids"])
+    for field, value in (("text", target["text"].replace(" [", " (다시 잼) [", 1)), ("excluded_reason", "tol_unknown")):
+        diff_obj = copy.deepcopy(case.diff)
+        item = next(p for p in diff_obj["parametric"]["node_params"] if p["cid"] == target["cid"])
+        assert item[field] != value
+        item[field] = value
+        rebuilt = {u["unit_id"]: u["unit_hash"] for u in units.build_diff_units(diff_obj, case.view)["units"]}
+        assert holder in rebuilt and rebuilt[holder] != base[holder], field
+        assert {k: v for k, v in rebuilt.items() if k != holder} == {k: v for k, v in base.items() if k != holder}
+
+
 # ---------------------------------------------------------------- 단계 C 가 감쌀 투영
 def test_payload_has_the_contract_fields_and_never_an_empty_unit(synth):
+    with_context = 0
     for case in synth.values():
         for unit in case.built["units"]:
             if not unit["reviewable"]:
@@ -777,11 +882,16 @@ def test_payload_has_the_contract_fields_and_never_an_empty_unit(synth):
             assert payload["lines"] and all(set(x) == {"ref", "text"} for x in payload["lines"])
             assert not any("«" in x["text"] or "»" in x["text"] for x in payload["lines"] + payload["context"])
             assert all(set(x) == {"ref", "text", "owner_unit"} for x in payload["context"])
+            # 문맥 줄이 전부 같은 순서로 실린다(RA-4 M10 — 빈 목록이면 all(...) 이 참이라 통째로 빼도 초록이었다).
+            assert [(x["ref"], x["owner_unit"]) for x in payload["context"]] == \
+                [(x["ref"], x["owner_unit"]) for x in unit["context"]["lines"]]
+            with_context += bool(payload["context"])
             assert units.refs_of(unit) == {x["ref"] for x in payload["lines"]}
             assert not units.refs_of(unit) & {x["ref"] for x in payload["context"]}
             item = units.manifest_item_of(unit)
             assert item == {"unit_id": unit["unit_id"], "kind": unit["kind"], "title": unit["title"],
                             "text": unit["digest"]}
+    assert with_context > 5, with_context
 
 
 def test_the_build_is_plain_json(synth):

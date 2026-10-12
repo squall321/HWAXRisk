@@ -57,27 +57,66 @@ def _part_nids(case: Case, dn: str) -> set[str]:
     return nids
 
 
-def _iface_eids(case: Case, nids: set[str]) -> set[str]:
+def _edge_eids(case: Case, nids: set[str], family: str) -> set[str]:
+    """그 부품(nid)이 끼인 계면·접촉 엣지 — scope 하이퍼엣지는 `members` 로 끼인다. rr_ir_edges 에는 members 가 없어 IR 동결본
+    (`rr_snapshots.ir_json`)의 엣지를 SQL(json_each)로 직접 센다."""
     sids = (case.target.base_snapshot_id, case.target.target_snapshot_id)
     marks = ",".join("?" for _ in nids)
     rows = case.store.query(
-        f"SELECT eid FROM rr_ir_edges WHERE snapshot_id IN (?, ?) AND kind_family = 'iface' AND status != 'rejected'"
-        f" AND (a IN ({marks}) OR b IN ({marks}))", (*sids, *nids, *nids))
+        "SELECT DISTINCT json_extract(e.value, '$.eid') AS eid FROM rr_snapshots s, json_each(s.ir_json, '$.edges') e"
+        " WHERE s.id IN (?, ?) AND json_extract(e.value, '$.kind_family') = ?"
+        " AND coalesce(json_extract(e.value, '$.status'), '') != 'rejected'"
+        f" AND (json_extract(e.value, '$.a') IN ({marks}) OR json_extract(e.value, '$.b') IN ({marks})"
+        f" OR EXISTS (SELECT 1 FROM json_each(e.value, '$.members') m WHERE m.value IN ({marks})))",
+        (*sids, family, *nids, *nids, *nids))
     return {r["eid"] for r in rows}
 
 
 def test_every_interface_of_a_unit_part_is_in_its_evidence(synth):
-    """그 부품이 끼인 계면 전부(변경 없는 것 포함)가 근거 줄에 있다 — 오라클은 rr_ir_edges 를 직접 센다."""
-    unchanged = 0
+    """그 부품이 끼인 계면·접촉 전부(변경 없는 것, scope 구성원으로 끼인 것 포함)가 근거 줄에 있다 — 오라클은 IR 동결본을 SQL 로
+    직접 센다. 종전 오라클은 iface 가족과 a·b 만 세어 접촉을 빼거나 members 를 안 봐도 초록이었다(RA-4 M2·M3·M28)."""
+    unchanged = {"iface": 0, "contact": 0}
+    via_members = 0
     for case in synth.values():
         for unit in case.reviewable():
             nids = set().union(*(_part_nids(case, p["dn"]) for p in unit["parts"])) if unit["parts"] else set()
-            want = _iface_eids(case, nids) if nids else set()
             rows = case.evidence[unit["unit_id"]]["evidence"]
-            got = {row["ref"] for row in rows if row["kind"] == "iface"}
-            assert got == want, (unit["unit_id"], sorted(want - got), sorted(got - want))
-            unchanged += sum(1 for row in rows if row["kind"] == "iface" and row["text"].endswith("변경 없음"))
-    assert unchanged > 0
+            for family in ("iface", "contact"):
+                want = _edge_eids(case, nids, family) if nids else set()
+                got = {row["ref"] for row in rows if row["kind"] == family}
+                assert got == want, (unit["unit_id"], family, sorted(want - got), sorted(got - want))
+                unchanged[family] += sum(1 for row in rows if row["kind"] == family and "변경 없음" in row["text"])
+            via_members += sum(1 for row in rows if row["kind"] == "contact" and "접촉 범위 구성" in row["text"])
+    assert unchanged["iface"] and unchanged["contact"] and via_members, (unchanged, via_members)
+
+
+def test_neighbors_are_every_one_hop_part(synth):
+    """1홉 이웃 줄은 그 단위 부품과 계면·접촉(scope 제외)으로 닿은, 단위 밖의 노드 전부다 — 오라클은 rr_ir_edges 를 센다(RA-4
+    M12 — 이웃 줄을 하나도 안 내도 초록이었다). clearance 로만 닿으면 '근접 이웃' 이다."""
+    seen = near = 0
+    for case in synth.values():
+        sids = (case.target.base_snapshot_id, case.target.target_snapshot_id)
+        for unit in case.reviewable():
+            nids = set().union(*(_part_nids(case, p["dn"]) for p in unit["parts"])) if unit["parts"] else set()
+            if not nids:
+                continue
+            marks = ",".join("?" for _ in nids)
+            edges = case.store.query(
+                "SELECT a, b, kind FROM rr_ir_edges WHERE snapshot_id IN (?, ?) AND kind_family IN ('iface', 'contact')"
+                f" AND status != 'rejected' AND kind != 'scope' AND (a IN ({marks}) OR b IN ({marks}))",
+                (*sids, *nids, *nids))
+            want: dict[str, bool] = {}
+            for edge in edges:
+                for other in (edge["a"], edge["b"]):
+                    if other and other not in nids:
+                        want[other] = want.get(other, False) or edge["kind"] != "clearance"
+            rows = [row for row in case.evidence[unit["unit_id"]]["evidence"] if row["kind"] == "neighbor"]
+            assert {row["ref"] for row in rows} == set(want), unit["unit_id"]
+            for row in rows:
+                assert (" 근접 이웃" not in row["text"]) == want[row["ref"]], row["text"]
+            seen += len(rows)
+            near += sum(1 for touching in want.values() if not touching)
+    assert seen > 10 and near, (seen, near)
 
 
 def test_clearance_is_listed_as_near(synth):
