@@ -209,6 +209,9 @@ def test_the_quality_section_comes_from_the_quality_module(store):
                                  "text": want["text"]}
     assert report["quality"]["json"]["grid"]["expert_states"] is None
     assert want["text"] in expert_report.render_report_md(report, part="summary")
+    # 요약 첫 줄(의견 행 excerpt_for_rag)도 검토 수 옆에 '형식만 채운 칸' 을 단다(WP5b 3.11.3 규칙 3 — R3B-10).
+    form = review_quality.fmt_rate(report["quality"]["json"]["grid"]["form_only"])
+    assert f"검토 1(형식만 채운 칸 {form})" in _head(store, key, SEAL)["summary_md"].split("\n")[0]
 
 
 def test_the_export_carries_the_report_with_card_quotes_at_200_and_the_summary_within_1500(store):

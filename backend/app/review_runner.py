@@ -874,6 +874,8 @@ class _Session:
             if not review_cells.write_head(self.store, self.target_key, self.agent, lease_owner=self.lease, now=self.now(),
                                            sets={"plan_json": canonical_json({"pack_key": self.pack.pack_key,
                                                                               "limits_rev": self.lim.get("limits_rev"),
+                                                                              # K(판정 묶음당 카드 상한) — 품질 머리가 찍는다(R3B-10)
+                                                                              "k": (self.lim.get("verdict") or {}).get("k"),
                                                                               "plan": plan}),
                                                  "limits_rev": self.lim.get("limits_rev"),
                                                  "prompt_rev": prompt_key(self.lim),

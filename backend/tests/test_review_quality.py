@@ -188,6 +188,10 @@ def test_every_metric_of_the_full_grid_equals_the_hand_count(store):
     assert (res["policy_version"], res["model"], res["limits_rev"]) == ("rq-1", "fake-glm", "21349c51")
     assert res["prompt_rev"] == "offcard=cr-offcard-1,sweep=cr-sweep-1,verdict=cr-verdict-1"
     assert res["revs"]["mixed"] is False
+    # K — 엔진 limits 의 verdict.k(계약 예제 8)를 계획이 머리에 얼린 값. 묶음을 받아 계획을 짠 전문가마다 센다(R3B-10).
+    planned = sum(1 for r in store.query("SELECT plan_json FROM rr_expert_reports WHERE target_key = ?", (key,))
+                  if r["plan_json"])
+    assert res["k"] == fre.load("limits_1m.json")["verdict"]["k"] == 8 and res["revs"]["k"] == [{"value": 8, "experts": planned}]
 
     # 격자 — 6 × 5 = 30칸, 실패 셀 하나, 검토 29 를 바탕별로(카드 대조 4×5−1 · 배경뿐 5 · 역할만 5 — X1-04).
     grid = res["grid"]
@@ -490,6 +494,7 @@ def _assert_text_is_the_json(block: dict) -> None:
     head = text.split("\n")[0]
     assert head.startswith(f"[검토 품질 — 코드 계측 · 기준판 {res['policy_version']} · 모델 «{res['model']}»")
     assert f"원장 «{res['ledger_hash']}»" in head
+    assert f" · K {res['k']} · 창 판 " in head                     # 판정 묶음당 카드 상한(WP5b 3.11.3 규칙 6 — R3B-10)
 
 
 def test_the_block_text_carries_the_json_numbers_and_passes_the_linter(store, monkeypatch):

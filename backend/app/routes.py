@@ -2774,7 +2774,7 @@ def review_payload(store: Any, target_key: str, flow: str | None) -> dict | None
     """진행판의 `review` 칸 — 셀 원장이 없는 패널 방식 대상은 None(패널 대상 응답은 이 칸만 더해진다 — D-24). 카드 대조 대상은 검토
     잡 전에도 낸다(검토 순서를 보고 범위를 고른다 — #24).
 
-    {units, cells{total, by_state, by_basis, in_scope, out_of_scope_pending, failed_open}, experts{total, by_state},
+    {units, cells{total, by_state, by_basis, in_scope, out_of_scope_pending, failed_open, form_only}, experts{total, by_state},
     cards(카드 폭포 | None), quality(요약 | None), order[…], job(가장 최근 검토 잡 | None)}. 셀·전문가 셈은 활성 단위로 센 원장 값,
     카드 폭포·품질은 그 잡의 진행판(`progress_json.quality`)에서 읽는다(5초 폴링이 원장을 다시 세지 않는다)."""
     has_cells = store.query_one("SELECT 1 FROM rr_review_cells WHERE target_key = ? LIMIT 1", (target_key,)) is not None
@@ -2787,7 +2787,11 @@ def review_payload(store: Any, target_key: str, flow: str | None) -> dict | None
     job = dict(job) if job is not None else None
     quality = _loads(job["progress_json"], {}).get("quality") if job is not None else None
     cards = (quality.get("json") or {}).get("cards") if isinstance(quality, dict) else None
-    return {"units": summary["units"], "cells": summary["cells"], "experts": summary["experts"], "cards": cards,
+    # 칸 집계 옆에 '형식만 채운 칸' 을 같이 싣는다 — 검토 수만 따로 인용할 수 있는 칸을 두지 않는다(WP5b 3.11.3 규칙 3, R3B-10).
+    # 값은 품질 블록과 같은 계산(60초마다 센 진행판의 품질 json)이고, 품질을 아직 세지 않았으면 None(미측정)이다.
+    grid = (quality.get("json") or {}).get("grid") if isinstance(quality, dict) else None
+    cells = {**summary["cells"], "form_only": (grid or {}).get("form_only")}
+    return {"units": summary["units"], "cells": cells, "experts": summary["experts"], "cards": cards,
             "quality": _quality_summary(quality), "order": review_order_payload(store, target_key),
             "job": _review_job_payload(job) if job is not None else None}
 

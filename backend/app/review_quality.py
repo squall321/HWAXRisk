@@ -176,7 +176,7 @@ def _load(store: Any, target_key: str, agent_key: str | None) -> dict:
         " json_extract(quality_json, '$.app.check_disagree') AS check_disagree FROM rr_review_calls"
         f" WHERE target_key = ?{extra} ORDER BY call_id", [target_key, *params])
         if r["unit_id"] is None or r["unit_id"] in alive]
-    heads = _rows(store, "SELECT agent_key, state, pack_hash, pack_status, sweep_json FROM rr_expert_reports"
+    heads = _rows(store, "SELECT agent_key, state, pack_hash, pack_status, sweep_json, plan_json FROM rr_expert_reports"
                          f" WHERE target_key = ?{extra} ORDER BY agent_key", [target_key, *params])
     keys = sorted({(r["agent_key"], r["pack_hash"]) for r in (*cells, *heads) if r.get("pack_hash")})
     packs: dict[tuple[str, str], dict] = {}
@@ -198,9 +198,26 @@ def _ledger_hash(data: Mapping[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------- 칸별 셈
-def _stamps(calls: Sequence[Mapping[str, Any]]) -> dict:
-    """판 — 모델·창 판은 받은(ok) 호출의 값, 프롬프트 판은 종류별 값. 한 값이면 그 글, 여럿이면 None 이고 `revs` 에 호출 수와
-    함께 전부 싣는다(판이 섞인 대상 — 수는 판을 가르지 않고 합했다는 것을 문면이 말한다)."""
+def _deck_k(heads: Sequence[Mapping[str, Any]]) -> list[dict]:
+    """K(판정 묶음당 카드 상한 — 엔진 limits 의 verdict.k) — 전문가 머리의 계획(plan_json.k)에서 값마다 전문가 수. 계획 전이거나 이
+    칸을 적기 전의 계획이면 세지 않는다."""
+    counts: Counter = Counter()
+    for head in heads:
+        try:
+            k = (json.loads(head.get("plan_json") or "{}") or {}).get("k")
+        except (TypeError, ValueError):
+            k = None
+        if isinstance(k, int) and not isinstance(k, bool):
+            counts[k] += 1
+    return [{"value": k, "experts": n} for k, n in sorted(counts.items())]
+
+
+def _stamps(calls: Sequence[Mapping[str, Any]], heads: Sequence[Mapping[str, Any]] = ()) -> dict:
+    """판 — 모델·창 판은 받은(ok) 호출의 값, 프롬프트 판은 종류별 값, K 는 전문가 머리의 계획 값. 한 값이면 그 글, 여럿이면 None 이고
+    `revs` 에 호출 수(K 는 전문가 수)와 함께 전부 싣는다.
+
+    판이 섞인 대상(도중에 모델·프롬프트·창이 바뀌었다)은 '판 섞임' 으로 적고 판마다 호출 수를 단다 — 수치를 판마다 따로 다시 세지
+    않는다(M2 의 선택, R3B-10). 파일럿 한 잡은 한 판으로 돌고, 판마다 다시 세는 일은 판을 바꿔 가며 견주는 M3 의 몫이다."""
     ok = [c for c in calls if c["state"] == "ok"]
 
     def tally(values: Iterable[Any]) -> list[dict]:
@@ -212,13 +229,15 @@ def _stamps(calls: Sequence[Mapping[str, Any]]) -> dict:
     prompts = {kind: tally(c["prompt_rev"] for c in ok if c["kind"] == kind)
                for kind in sorted({c["kind"] for c in ok})}
     prompts = {k: v for k, v in prompts.items() if v}
-    mixed = len(models) > 1 or len(limits) > 1 or any(len(v) > 1 for v in prompts.values())
+    ks = _deck_k(heads)
+    mixed = len(models) > 1 or len(limits) > 1 or any(len(v) > 1 for v in prompts.values()) or len(ks) > 1
     single_prompt = (",".join(f"{k}={v[0]['value']}" for k, v in prompts.items())
                      if prompts and all(len(v) == 1 for v in prompts.values()) else None)
     return {"model": models[0]["value"] if len(models) == 1 else None,
             "prompt_rev": single_prompt,
             "limits_rev": limits[0]["value"] if len(limits) == 1 else None,
-            "revs": {"model": models, "prompt_rev": prompts, "limits_rev": limits, "mixed": mixed}}
+            "k": ks[0]["value"] if len(ks) == 1 else None,
+            "revs": {"model": models, "prompt_rev": prompts, "limits_rev": limits, "k": ks, "mixed": mixed}}
 
 
 def _grid(data: Mapping[str, Any], policy: Mapping[str, Any]) -> dict:
@@ -497,15 +516,15 @@ def _bounds(node: Any, path: str = "") -> tuple[list[str], list[str]]:
 
 def compute(store: Any, target_key: str, *, agent_key: str | None = None) -> dict:
     """대상(또는 그 대상의 전문가 한 명)의 검토 품질 수치. 같은 원장이면 같은 dict 다(시각을 싣지 않는다 — S10 보고서의 바이트가
-    같게). 반환 {policy_version, target_key, agent_key, model, prompt_rev, limits_rev, revs, ledger_hash, grid, cards,
+    같게). 반환 {policy_version, target_key, agent_key, model, prompt_rev, limits_rev, k, revs, ledger_hash, grid, cards,
     truncation, citation, flips, seconds, pilot, out_of_bounds[], unchecked[]}."""
     policy = load_policy()
     data = _load(store, target_key, agent_key)
     effective = _effective(data)
-    stamps = _stamps(data["calls"])
+    stamps = _stamps(data["calls"], data["heads"])
     result: dict[str, Any] = {
         "policy_version": policy.get("policy_version"), "target_key": target_key, "agent_key": agent_key,
-        "model": stamps["model"], "prompt_rev": stamps["prompt_rev"], "limits_rev": stamps["limits_rev"],
+        "model": stamps["model"], "prompt_rev": stamps["prompt_rev"], "limits_rev": stamps["limits_rev"], "k": stamps["k"],
         "revs": stamps["revs"], "ledger_hash": _ledger_hash(data),
         "grid": _grid(data, policy), "cards": _cards(data, policy), "truncation": _truncation(data, policy),
         "citation": _citation(data, effective, policy), "flips": _flips(data, effective, policy),
@@ -569,9 +588,13 @@ def _stamp_text(result: Mapping[str, Any]) -> str:
         return f"{name} " + " · ".join(f"{_q(v['value'])}({_n(v['calls'])}회)" for v in values)
 
     prompts = [{"value": f"{k}={v['value']}", "calls": v["calls"]} for k, items in revs["prompt_rev"].items() for v in items]
-    parts = [one("모델", result["model"], revs["model"]), one("프롬프트 판", result["prompt_rev"], prompts),
+    ks = revs.get("k") or []
+    k_text = (f"K {_n(result['k'])}" if result.get("k") is not None else
+              "K " + " · ".join(f"{_n(v['value'])}({_n(v['experts'])}명)" for v in ks) if ks else "K 미측정")
+    parts = [one("모델", result["model"], revs["model"]), one("프롬프트 판", result["prompt_rev"], prompts), k_text,
              one("창 판", result["limits_rev"], revs["limits_rev"])]
     if revs["mixed"]:
+        # 판마다 따로 다시 세지 않는다 — 판마다 호출 수만 단다(M2 의 선택, _stamps 참조).
         parts.append("판 섞임 — 수는 판을 가르지 않고 합했다")
     return " · ".join(parts)
 

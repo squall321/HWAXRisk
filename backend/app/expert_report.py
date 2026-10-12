@@ -882,7 +882,10 @@ def summary_md(report: Mapping[str, Any]) -> str:
         return _clip("\n".join(lines), SUMMARY_MAX, "요약")
     counts = {j: sum((u["counts"] or {}).get(j, 0) for u in scope["units"]) for j in _JUDGE_ORDER}
     offcard = sum(u["offcard_n"] for u in scope["units"])
-    lines = [f"{name} 카드 대조 요약 — 단위 {scope['totals']['units']}개 가운데 검토 {totals.get('reviewed', 0)}"
+    # 검토 수는 '형식만 채운 칸' 과 같은 줄에 단다(WP5b 3.11.3 규칙 3 — 이 요약이 의견 행 excerpt_for_rag 가 된다, R3B-10).
+    form_only = (((report.get("quality") or {}).get("json") or {}).get("grid") or {}).get("form_only")
+    form = f"(형식만 채운 칸 {review_quality.fmt_rate(form_only)})" if isinstance(form_only, Mapping) else ""
+    lines = [f"{name} 카드 대조 요약 — 단위 {scope['totals']['units']}개 가운데 검토 {totals.get('reviewed', 0)}{form}"
              f" · 미완 {totals.get('failed', 0)} · 대기 {totals.get('pending', 0)}.",
              f"실효 판정 judgement=FAIL {counts['FAIL']} · judgement=WARNING {counts['WARNING']} · 보류 {counts['undetermined']}"
              f" · 걸림 없음 {counts['OK']} · 해당 없음 {counts['na']}, 카드 밖 지적 {offcard}건, finding {len(report['findings'])}건."]

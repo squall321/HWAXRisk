@@ -29,7 +29,7 @@ OTHER = "other@example.com"
 PANEL_COVERAGE_KEYS = {"target_key", "job", "roster_size", "by_domain", "by_status", "strong", "unseated_n", "level",
                        "close_level", "flow", "units"}                      # S12 전 진행판 칸 — 그대로다(D-24)
 REVIEW_KEYS = {"units", "cells", "experts", "cards", "quality", "order", "job"}
-REVIEW_CELLS_KEYS = {"total", "by_state", "by_basis", "in_scope", "out_of_scope_pending", "failed_open"}
+REVIEW_CELLS_KEYS = {"total", "by_state", "by_basis", "in_scope", "out_of_scope_pending", "failed_open", "form_only"}
 REVIEW_EXPERTS_KEYS = {"total", "by_state"}
 ORDER_KEYS = {"order", "agent_key", "domain", "rank_in_domain", "tier", "deferred", "input_gaps", "state", "cards_total",
               "checkable_n"}
@@ -119,7 +119,7 @@ def test_a_cells_target_shows_the_review_order_before_any_job(store):
     assert set(review) == REVIEW_KEYS
     assert set(review["cells"]) == REVIEW_CELLS_KEYS and set(review["experts"]) == REVIEW_EXPERTS_KEYS
     assert (review["units"], review["cells"]["total"], review["experts"]["total"]) == (5, 0, 0)
-    assert (review["job"], review["cards"], review["quality"]) == (None, None, None)
+    assert (review["job"], review["cards"], review["quality"], review["cells"]["form_only"]) == (None, None, None, None)
     assert all(set(row) == ORDER_KEYS for row in review["order"])
     assert [(r["agent_key"], r["domain"], r["rank_in_domain"], r["tier"]) for r in review["order"]] == [
         (SEAL, "mech", 1, "A"), (rig.BACKGROUND_ONLY, "sim", 1, "A"), ("xd-syn-0", "xd", 1, "A"),
@@ -147,6 +147,8 @@ def test_after_a_job_the_review_block_reads_the_progress_board_without_counting_
     assert (review["cells"]["total"], review["cells"]["by_state"]["reviewed"], review["cells"]["out_of_scope_pending"]) == (
         30, 10, 20)
     assert review["cells"]["in_scope"]["job_id"] == job_id
+    # 칸 집계 옆의 '형식만 채운 칸' 은 품질 블록과 같은 값이다(WP5b 3.11.3 규칙 3 — R3B-10).
+    assert review["cells"]["form_only"] == board["json"]["grid"]["form_only"] and review["cells"]["form_only"]["den"] == 10
     seal = next(r for r in review["order"] if r["agent_key"] == SEAL)
     assert (seal["state"], seal["cards_total"], seal["checkable_n"]) == ("ready", 10, 6)
     assert {(r["state"], r["cards_total"]) for r in review["order"] if r["agent_key"] not in (SEAL, "mech-syn-0")} == {
