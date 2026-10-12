@@ -46,12 +46,14 @@ def all_cids(obj) -> dict[str, list[dict]]:
 
 
 def _is_change(d: dict) -> bool:
-    """판정 표지(flag)가 붙은 항목은 noise 이거나 양쪽 값이 같으면 변화가 아니다. 롤업처럼 before·after 쌍을 품은 행은
-    쌍이 하나라도 다르면 변화다. 표지가 없는 항목(노드·엣지 변경·의미 이벤트)은 늘 변화다."""
+    """설계서 문장 그대로 쓴다 — 임계 밑(flag='noise')만 뺀다(XU1 '`all_cids − noise` == 단위 참조 합집합'). 표지가 붙은 그 밖의
+    항목은 값이 같아도(비교 불가 하한 둘·양쪽 미측정) 항목이다 — 제외 단위가 소유해야 한다(RA-9, 구현과 같은 예외를 품지 않는다).
+    롤업처럼 before·after 쌍을 품은 행은 쌍이 하나라도 다를 때만 항목이다(설계서 3.4.1 — 바뀐 칸이 있는 롤업 행).
+    표지가 없는 항목(노드·엣지 변경·의미 이벤트)은 늘 변화다."""
     if d.get("flag") == "noise":
         return False
     if "flag" in d:
-        return d.get("before") != d.get("after")
+        return True
     nested = [v for v in d.values() if isinstance(v, dict) and "before" in v and "after" in v]
     return not nested or any(v["before"] != v["after"] for v in nested)
 
@@ -155,15 +157,56 @@ def test_every_line_is_one_item_and_lines_are_never_cut(synth):
 
 
 # ---------------------------------------------------------------- XU8 — 자기 비교
-def test_xu8_self_diff_has_no_units_and_is_empty(synth):
+def test_xu8_self_diff_has_no_reviewable_units_and_is_empty(synth):
+    """자기 비교는 검토 대상 단위 0 이다. 값이 같은 비교 불가(관통 깊이 하한 둘)는 자기 비교에도 표지가 붙어 나오므로 제외 단위에
+    사유와 함께 남는다(RA-9) — 그래도 빌드는 empty 다."""
     case = synth[40]
     self_diff = factories.make_diff(case.store, case.target.base_snapshot_id, case.target.base_snapshot_id)
     built = units.build_diff_units(self_diff, units._ir_view(case.store, case.target.base_snapshot_id,
                                                              case.target.base_snapshot_id))
-    assert built["status"] == "empty" and built["units"] == [] and built["mode"] == "none"
-    assert built["stats"]["items_total"] == 0
+    assert built["status"] == "empty" and built["mode"] == "none", built["status"]
+    assert [u for u in built["units"] if u["reviewable"]] == []
+    assert {line["caveat"] for u in built["units"] for line in u["lines"]} <= {"incomparable_same", "null_both"}
+    assert set(owned(built)) == changed_cids(self_diff)
+    assert built["invariants"]["U1_unassigned"] == []
     fixture_self = _pair_case("self", _pair("base"), _pair("base"))
-    assert fixture_self.built["status"] == "empty" and fixture_self.built["units"] == []
+    assert fixture_self.built["status"] == "empty"
+    assert [u for u in fixture_self.built["units"] if u["reviewable"]] == []
+    assert set(owned(fixture_self.built)) == changed_cids(fixture_self.diff)
+
+
+def test_same_value_flagged_items_go_to_the_excluded_unit_with_their_reason(tmp_path_factory, synth):
+    """값이 같은 비교 불가·양쪽 미측정도 어느 단위엔가 있다(RA-9) — 제외 단위가 `incomparable_same`·`null_both` 로 소유한다.
+    양쪽 미측정은 실제 생산자로 만든다 — 어느 부품에도 걸리지 않는 명명 치수를 정의하면 두 스냅샷의 dims_named 값이 둘 다 None 이다."""
+    incomparable = [d for found in all_cids(synth[40].diff).values() for d in found
+                    if d.get("flag") == "incomparable" and d.get("before") == d.get("after")]
+    assert incomparable
+    store = _store(tmp_path_factory, "null-both")
+    spec = devseed.SynthSpec(seed=5, n_parts=12, asms=("A_ASM", "B_ASM", "C_ASM"), named_dims=1)
+    base, target, _records = devseed.apply_script(devseed.build_design(spec),
+                                                  [("part.thickness_changed", {"sign": -1})], 5)
+    project_id = factories.make_project(store)
+    factories.make_dim(store, project_id, "ghost_t", "node[asm=no_such_part].attrs.min_dim")
+    first = factories.make_snapshot(store, project_id, devseed.to_adapter_results(base), label="DV1")
+    later = factories.CAPTURED_AT + 86400
+    second = factories.make_snapshot(store, project_id, devseed.to_adapter_results(target, captured_at=later),
+                                     label="DV2", captured_at=later)
+    null_diff = factories.make_diff(store, first["snapshot_id"], second["snapshot_id"])
+    ghost = next(d for d in null_diff["parametric"]["dims_delta"] if d["name"] == "ghost_t")
+    assert (ghost["before"], ghost["after"], ghost["flag"]) == (None, None, "null_one_side")
+    null_case = Case("null-both", null_diff, units._ir_view(store, first["snapshot_id"], second["snapshot_id"]))
+    for case, refs, reason in ((synth[40], {d["cid"] for d in incomparable}, "incomparable_same"),
+                               (null_case, {ghost["cid"]}, "null_both")):
+        assert case.built["status"] == "ok" and case.built["invariants"]["U1_unassigned"] == []
+        assert set(owned(case.built)) == changed_cids(case.diff)
+        for ref in refs:
+            holder = next(u for u in case.built["units"] if ref in u["cids"])
+            line = next(line for line in holder["lines"] if line["ref"] == ref)
+            if holder["kind"] == "excluded":
+                assert line["klass"] == "excluded"
+            assert line["caveat"] == reason, (ref, line["caveat"])
+        assert case.built["stats"][f"{reason}_n"] == len(refs) == case.built["stats"]["excluded_by_reason"][reason]
+    store.close()
 
 
 # ---------------------------------------------------------------- XU9 — 감소가 남는다
@@ -480,7 +523,8 @@ def test_capture_partial_sends_parametric_and_interface_changes_to_the_excluded_
     assert case.built["blocked_by"] == "capture_partial"
     assert set(owned(case.built)) == changed_cids(case.diff)
     excluded = [line for u in case.built["units"] if u["kind"] == "excluded" for line in u["lines"]]
-    assert excluded and {line["caveat"] for line in excluded} == {"capture_partial"}
+    # 값이 같은 표지 항목은 바뀐 것이 없어 제 사유(incomparable_same·null_both)로 남는다 — 그 밖은 전부 capture_partial 이다.
+    assert excluded and {line["caveat"] for line in excluded} - {"incomparable_same", "null_both"} == {"capture_partial"}
 
 
 def test_tol_unknown_changes_stay_in_the_bundle_as_caveat_lines():

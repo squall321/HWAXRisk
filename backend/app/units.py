@@ -140,12 +140,16 @@ def walk_cids(diff_obj: Mapping[str, Any]) -> dict[str, list[str]]:
     return {cid: sorted(paths) for cid, paths in sorted(out.items())}
 
 
+def _same_value(item: Mapping[str, Any]) -> bool:
+    """값이 같은데 표지가 붙은 항목 — 양쪽 다 미측정(`null_one_side` 인데 둘 다 None), 값이 같은 비교 불가(관통 깊이 하한 둘)."""
+    return item.get("flag") in ("null_one_side", "incomparable") and item.get("before") == item.get("after")
+
+
 def _non_change(item: Mapping[str, Any]) -> bool:
-    """변화가 아닌 cid 항목 — 임계 밑(noise), 양쪽 다 미측정, 양쪽 값이 같은 비교 불가(관통 깊이 하한 둘), 수치가 하나도 안 바뀐
-    롤업 행. 단위에 싣지 않고 회계에만 센다(자기 비교는 단위 0 — XU8)."""
+    """단위에 싣지 않는 cid 항목 — 임계 밑(noise)과 수치가 하나도 안 바뀐 롤업 행(설계서 3.4.1 — 롤업은 바뀐 칸이 있는 행만
+    항목이다). 회계에만 센다. 값이 같은 표지 항목(`_same_value`)은 여기 들지 않는다 — 제외 단위가 `incomparable_same`·
+    `null_both` 사유로 소유한다(설계서 3.4.1 의 klass 표, RA-9 — 어느 단위에도 없는 cid 를 두지 않는다)."""
     if item.get("flag") == "noise":
-        return True
-    if item.get("flag") in ("null_one_side", "incomparable") and item.get("before") == item.get("after"):
         return True
     pairs = [v for v in item.values() if isinstance(v, Mapping) and set(v) == {"before", "after"}]
     return bool(pairs) and "before" not in item and all(p["before"] == p["after"] for p in pairs)
@@ -196,6 +200,8 @@ def _param_kind(attr: str) -> str:
 
 def _klass(item: Mapping[str, Any]) -> tuple[str, str | None]:
     """(klass, 사유) — active · caveat · excluded · non_design(설계서 3.4.1 표)."""
+    if _same_value(item):                                  # 바뀐 값이 없다 — 검토할 것이 없고 제외 단위에 사유와 함께 남는다
+        return "excluded", "incomparable_same" if item.get("flag") == "incomparable" else "null_both"
     if not item["design_relevant"]:
         return "non_design", item.get("nd_reason") or "not_design_relevant"
     reason = item.get("excluded_reason")
@@ -203,7 +209,7 @@ def _klass(item: Mapping[str, Any]) -> tuple[str, str | None]:
         if reason in EXCLUDED_POLICY["none"]:
             return "excluded", str(reason)
         return "caveat", str(reason)                     # caveat 목록 또는 모르는 사유
-    if item.get("flag") == "incomparable":                 # 값이 같은 비교 불가는 항목이 아니다(_non_change)
+    if item.get("flag") == "incomparable":                 # 값이 다른 비교 불가 — 값이 같으면 위에서 제외로 갔다
         return "caveat", "incomparable"
     return "active", None
 
@@ -214,14 +220,12 @@ def _collect(diff_obj: Mapping[str, Any]) -> tuple[list[dict], dict]:
     parametric = diff_obj.get("parametric") or {}
     semantic = diff_obj.get("semantic") or {}
     items: list[dict] = []
-    skipped = {"noise": 0, "null_both": 0, "incomparable_same": 0, "rollup_unchanged": 0}
+    skipped = {"noise": 0, "rollup_unchanged": 0}
 
     def skip(src: Mapping[str, Any]) -> bool:
         if not _non_change(src):
             return False
-        key = {"noise": "noise", "null_one_side": "null_both", "incomparable": "incomparable_same"}.get(
-            _s(src.get("flag")), "rollup_unchanged")
-        skipped[key] += 1
+        skipped["noise" if src.get("flag") == "noise" else "rollup_unchanged"] += 1
         return True
 
     def rows(bucket: Any) -> list[Mapping[str, Any]]:
@@ -336,7 +340,7 @@ def _collect(diff_obj: Mapping[str, Any]) -> tuple[list[dict], dict]:
 
 
 def collect_diff_items(diff_obj: Mapping[str, Any]) -> list[dict]:
-    """diff 세 층을 한 가지 모양의 항목 목록으로 편다(noise·양쪽 미측정·바뀌지 않은 롤업은 뺀다). 결정적 순서다."""
+    """diff 세 층을 한 가지 모양의 항목 목록으로 편다(noise·바뀌지 않은 롤업만 뺀다). 결정적 순서다."""
     return _collect(diff_obj)[0]
 
 
@@ -1357,8 +1361,10 @@ def _stats(items: Sequence[Mapping[str, Any]], skipped: Mapping[str, int], units
     return {
         "items_total": len(items), "by_layer": dict(sorted(by_layer.items())),
         "by_klass": dict(sorted(by_klass.items())),
-        "noise_n": skipped["noise"], "null_both_n": skipped["null_both"],
-        "incomparable_same_n": skipped["incomparable_same"], "rollup_unchanged_n": skipped["rollup_unchanged"],
+        # 값이 같은 표지 항목은 이제 제외 단위의 줄이다 — 셈은 그 줄의 사유에서 낸다(excluded_by_reason 에도 같은 수가 있다).
+        "noise_n": skipped["noise"], "null_both_n": sum(1 for i in items if i["reason"] == "null_both"),
+        "incomparable_same_n": sum(1 for i in items if i["reason"] == "incomparable_same"),
+        "rollup_unchanged_n": skipped["rollup_unchanged"],
         "dup_cid_n": len(dup_refs),
         # 이벤트 없는 활성 원자료 — 지금 패널 흐름에서 좌석에 가지 않던 변화의 크기다.
         "lower_only_n": sum(1 for i in items if i["layer"] != "semantic" and i["klass"] == "active"
@@ -1383,7 +1389,7 @@ def _stats(items: Sequence[Mapping[str, Any]], skipped: Mapping[str, int], units
 def check_invariants(diff_obj: Mapping[str, Any], built: Mapping[str, Any], caps: UnitCaps | None = None) -> dict:
     """{U1_unassigned[], U2_double_owned[], U3_oversize[], U4_lint, U5_clipped, U6_context[]} — 빈 목록·0 이 정상이다.
 
-    U1 은 독립 순회(`walk_cids`)의 cid 가 단위 소유 참조 ∪ 변화 아님(noise·양쪽 미측정·바뀌지 않은 롤업)에 다 드는지,
+    U1 은 독립 순회(`walk_cids`)의 cid 가 단위 소유 참조 ∪ 변화 아님(noise·바뀌지 않은 롤업)에 다 드는지,
     U2 는 참조마다 소유 단위가 하나인지, U3 는 검토 단위의 줄 수가 max_lines 안이거나 부품 원자 하나짜리(`atom_oversize`)인지,
     U4 는 린터 대체 뒤의 위반 수, U5 는 원천 문자열 절단 수(limit=0 이라 늘 0), U6 은 문맥 줄 참조가 다른 단위 소유인지다.
     """
