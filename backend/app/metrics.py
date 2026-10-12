@@ -130,7 +130,8 @@ _FINDING_COLUMNS = (
 
 
 def _finding_row(store: RiskStore, finding_id: str) -> dict:
-    row = store.query_one(f"SELECT {_FINDING_COLUMNS} FROM rr_findings WHERE finding_id = ?", (finding_id,))
+    row = store.query_one(f"SELECT {_FINDING_COLUMNS} FROM rr_findings WHERE finding_id = ?"
+                          " AND COALESCE(source_kind, '') <> 'card_review'", (finding_id,))
     if row is None:
         raise AppError("E404", f"finding 을 찾을 수 없습니다 — {finding_id}.", 404)
     return dict(row)
@@ -464,17 +465,19 @@ def is_counted_label(label: Mapping[str, Any], queue_status: Mapping[str, str]) 
 
 
 def panel_models(store: RiskStore, owner_sub: str | None = None) -> dict[str, str]:
-    """panel_id → rr_panels.model_json.model. 표를 늘리지 않고 조회 시 조인으로 층화한다."""
-    sql = "SELECT id, model_json FROM rr_panels"
-    params: tuple = ()
-    if owner_sub is not None:
-        sql += " WHERE owner_sub = ?"
-        params = (owner_sub,)
+    """출처 id → 모델 — panel_id → rr_panels.model_json.model 에 카드 대조 검토의 review_id → rr_expert_reports.model 을 합친다
+    (검토 finding 은 panel_id 가 없고 source_id 가 review_id 다 — 설계서 §3.4.4, 빠뜨리면 그 모델이 전부 unknown 이다).
+    표를 늘리지 않고 조회 시 조인으로 층화한다."""
+    where, params = (" WHERE owner_sub = ?", (owner_sub,)) if owner_sub is not None else ("", ())
     out: dict[str, str] = {}
-    for row in store.query(sql + " ORDER BY id", params):
+    for row in store.query("SELECT id, model_json FROM rr_panels" + where + " ORDER BY id", params):
         model = _s(_loads(row["model_json"], {}).get("model")).strip()
         if model:
             out[str(row["id"])] = model
+    for row in store.query("SELECT review_id, model FROM rr_expert_reports" + where + " ORDER BY review_id", params):
+        model = _s(row["model"]).strip()
+        if model:
+            out.setdefault(str(row["review_id"]), model)
     return out
 
 
@@ -490,6 +493,7 @@ def precedents_by_model(store: RiskStore, *, owner_sub: str, change_kind: str,
         "f.direction AS direction, f.status AS status FROM rr_findings f "
         "JOIN rr_projects p ON p.id = f.project_id "
         "WHERE f.owner_sub = ? AND f.change_kind = ? AND f.mechanism = ? AND f.mechanism_detail = ? "
+        "AND COALESCE(f.source_kind, '') <> 'card_review' "
         "AND p.status = 'active' AND p.corpus_excluded = 0 ORDER BY f.finding_id",
         (owner_sub, change_kind, mechanism, mechanism_detail),
     )
@@ -527,7 +531,8 @@ def distinct_models(store: RiskStore, *, owner_sub: str, cluster_key_norm: str) 
     """
     models = panel_models(store, owner_sub)
     rows = store.query(
-        "SELECT panel_id, status, cluster_key FROM rr_findings WHERE owner_sub = ? ORDER BY finding_id",
+        "SELECT panel_id, status, cluster_key FROM rr_findings WHERE owner_sub = ?"
+        " AND COALESCE(source_kind, '') <> 'card_review' ORDER BY finding_id",
         (owner_sub,),
     )
     cache: dict[str, str] = {}
@@ -633,7 +638,8 @@ def _load_atoms(store: RiskStore) -> list[dict]:
 
     cache: dict[str, str] = {}
     atoms: list[dict] = []
-    for row in store.query(f"SELECT {_FINDING_COLUMNS} FROM rr_findings ORDER BY finding_id", ()):
+    for row in store.query(f"SELECT {_FINDING_COLUMNS} FROM rr_findings WHERE COALESCE(source_kind, '') <> 'card_review'"
+                           " ORDER BY finding_id", ()):
         atom = dict(row)
         if _s(atom["project_id"]) not in corpus:
             continue
@@ -1246,7 +1252,8 @@ def sync_labels(store: RiskStore, *, incidents: Sequence[Mapping[str, Any]] | No
         incidents = list(fetch() or ())
     rows = store.query(
         "SELECT finding_id, project_id, mechanism, subject_key, ckeys_json, owner_sub, status"
-        " FROM rr_findings WHERE status IN ('open','verified','dismissed') ORDER BY finding_id", ())
+        " FROM rr_findings WHERE status IN ('open','verified','dismissed') AND COALESCE(source_kind, '') <> 'card_review'"
+        " ORDER BY finding_id", ())
     labeled = auto = queued = 0
     for incident in incidents:
         best: tuple[float, dict, dict] | None = None

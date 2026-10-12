@@ -51,6 +51,7 @@ _ATOM_SQL = (
     "SELECT finding_id, target_key, project_id, panel_id, opinion_id, origin, owner_sub, mechanism, "
     "mechanism_detail, change_kind, subject_key, cluster_key, direction, severity, sev3, finding_json, "
     "created_at FROM rr_findings WHERE status <> 'rejected_in_panel' AND recall_eligible = 1"
+    " AND COALESCE(source_kind, '') <> 'card_review'"
 )
 _ATOM_ORDER = " ORDER BY created_at, finding_id"
 
@@ -58,6 +59,7 @@ _LABEL_SQL = (
     "SELECT l.id AS label_id, l.finding_id, l.source, l.outcome, l.matched_by, l.match_score, "
     "l.labeled_at, l.occurred_at, l.owner_sub, f.target_key, f.cluster_key, f.change_kind, f.mechanism, "
     "f.mechanism_detail FROM rr_labels AS l JOIN rr_findings AS f ON f.finding_id = l.finding_id"
+    " AND COALESCE(f.source_kind, '') <> 'card_review'"
 )
 _LABEL_ORDER = " ORDER BY l.labeled_at, l.id"
 
@@ -469,7 +471,8 @@ def on_label(store: RiskStore, label_id: str, *, now: int | None = None) -> dict
     now = common.now_epoch() if now is None else now
     row = store.query_one(
         "SELECT l.id AS label_id, l.finding_id, f.cluster_key, f.change_kind, f.mechanism, f.mechanism_detail "
-        "FROM rr_labels AS l JOIN rr_findings AS f ON f.finding_id = l.finding_id WHERE l.id = ?",
+        "FROM rr_labels AS l JOIN rr_findings AS f ON f.finding_id = l.finding_id"
+        " AND COALESCE(f.source_kind, '') <> 'card_review' WHERE l.id = ?",
         (label_id,),
     )
     if row is None:
@@ -611,7 +614,8 @@ def _queue(store: RiskStore, owner_sub: str, payload: Mapping[str, Any], now: in
 def _sample_claims(store: RiskStore, atoms: Sequence[Mapping[str, Any]], limit: int = 5) -> list[dict]:
     out: list[dict] = []
     for atom in atoms[:limit]:
-        row = store.query_one("SELECT finding_json FROM rr_findings WHERE finding_id = ?", (atom["finding_id"],))
+        row = store.query_one("SELECT finding_json FROM rr_findings WHERE finding_id = ?"
+                              " AND COALESCE(source_kind, '') <> 'card_review'", (atom["finding_id"],))
         claim = _s(_loads(row["finding_json"], {}).get("claim")) if row is not None else ""
         out.append({"finding_id": atom["finding_id"], "target_key": atom["target_key"], "claim": claim})
     return out
@@ -654,7 +658,8 @@ def mine_patterns(store: RiskStore, *, owner_sub: str | None = None, now: int | 
                     continue
                 pattern_id = _next_pattern_id(store)
                 owner = owner_sub or _s(store.query_one(
-                    "SELECT owner_sub FROM rr_findings WHERE finding_id = ?", (atoms[0]["finding_id"],))["owner_sub"])
+                    "SELECT owner_sub FROM rr_findings WHERE finding_id = ? AND COALESCE(source_kind, '') <> 'card_review'",
+                    (atoms[0]["finding_id"],))["owner_sub"])
                 store.execute(
                     "INSERT INTO rr_patterns (id, owner_sub, visibility, cluster_key_norm, mechanism, "
                     "mechanism_detail, change_kind, subject_class, status, n_findings, n_targets, n_projects, "

@@ -74,9 +74,11 @@ def test_six_experts_over_every_unit_finish_with_every_card_read_and_no_conversa
     assert all(c["cards_judged"] == c["cards_expected"] == 6 for c in cells if c["basis"] == "cards")
     assert review_cells.review_invariants(store, key) == []
     assert {_head(store, key, a)["state"] for a in packs} == {"ready"}
-    # 원장(rr_coverage)은 S9 가 의견 행과 함께 닫는다 — S8 은 그대로 둔다.
-    assert {r_["status"] for r_ in store.query("SELECT status FROM rr_coverage WHERE target_key = ?", (key,))} <= {
-        "pending", "deferred"}
+    # 원장(rr_coverage)은 마감(S9)이 의견 행과 함께 닫는다 — 카드로 검증된 근거가 있으면 done, 배경 카드뿐·0장은 done_weak.
+    ledger = {r_["agent_key"]: (r_["status"], r_["reason"]) for r_ in store.query(
+        "SELECT agent_key, status, reason FROM rr_coverage WHERE target_key = ?", (key,))}
+    assert ledger == {**{a: ("done", None) for a in rig.CARD_EXPERTS},
+                      rig.BACKGROUND_ONLY: ("done_weak", "no_verified_cite"), rig.ZERO_CARDS: ("done_weak", "no_cards")}
 
     calls = _calls(store, job_id)
     assert {c["state"] for c in calls} == {"ok"}

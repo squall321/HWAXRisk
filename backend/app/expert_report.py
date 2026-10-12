@@ -1,0 +1,849 @@
+# 카드 대조 검토의 전문가 마감 — finding 승격·의견 행·원장 마감(m2-wp3b S9)과 전문가 보고서의 조립(S10, LLM 0회)
+"""전문가 한 명의 범위 안 열린 셀이 0 이 되면 검토 루프(`review_runner.finalize_expert`)가 선점을 쥔 채 이 모듈을 부른다.
+
+- `prepare` 는 읽기만 한다 — 원장(셀·판정 행·얼린 팩·단위)에서 finding·보고서·요약·의견 행을 지어 둔다. 무거운 정규화와 조립을
+  쓰기 트랜잭션 밖에서 한다(저장소는 연결 하나를 잠금으로 나눠 쓰므로 트랜잭션 안의 읽기가 다른 워커를 붙든다).
+- `commit` 은 그것을 한 트랜잭션 안에서 쓴다 — finding(코드가 정하는 열만 고친다, P-12)·인용 역색인·큐레이션 큐·의견 행·원장 마감
+  (`planner.close_review_seat`). 같은 원장이면 같은 id 에 같은 값이라 다시 마감해도 같은 자리다.
+
+finding 의 원천은 셋이다 — 실효 FAIL·WARNING(카드 근거), 실효 undetermined 이면서 split=1(변형 하나라도 걸림 — X1-14),
+카드 밖 `f` 줄. 셋 다 패널 finding 과 같은 정규화(`narrative._normalize_finding`)를 지나 메커니즘·주체·인용 검증·등급·
+cluster_key 가 같은 코드로 정해지고, 한 셀(단위) 안에서 (cluster_key, direction) 으로 접는다. 정책은 hold 하나다(사용자 결정 2) —
+등록부로 갈 판정은 WARNING 까지, 심각도는 중대까지이고 원래 값은 judgement_claimed·severity_claimed 에 남는다. M2 에서는 등록부에
+병합하지 않는다(M2.md 5절 #7 — 패널 경로는 source_kind='card_review' 를 읽지 않는다, #20). 회수 자격은 0 이다(#9).
+"""
+from __future__ import annotations
+
+import dataclasses
+import hashlib
+import json
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from app import cardpack, narrative, planner, render, review_cells, review_verify, units
+from app.common import canonical_json, now_epoch
+from app.errors import AppError
+
+SOURCE_KIND = "card_review"                 # rr_findings.source_kind — 패널 경로가 거르는 값(M2.md 5절 #20)
+REPORT_REV = "expert-report-1"
+QUOTE_SHOW = 200                            # 보고서 표시·반출의 카드 인용 — 판정당 200자(사용자 결정 1)
+SUMMARY_MAX = 1500                          # summary_md — 의견 행 excerpt_for_rag 의 원천
+_SEV_RANK = {"경미": 1, "중대": 2, "치명": 3}
+_GRADE_RANK = {"경험칙": 1, "도구예측": 2, "문헌·규격": 3, "측정": 4}
+_DETECT = {"tool": "sim-detectable", "sim": "sim-detectable", "test": "test-only", "field": "field-only"}
+_DETECT_TOOL_MAX = 80                       # 설계서 §3.10.2 — detectability.tool 은 닫는 확인 글의 앞 80자(글 전체는 resolving_check)
+_JUDGE_ORDER = ("FAIL", "WARNING", "undetermined", "OK", "na")
+
+
+def _s(value: Any) -> str:
+    return value if isinstance(value, str) else ("" if value is None else str(value))
+
+
+def _json(text: Any, default: Any) -> Any:
+    if not text:
+        return default
+    try:
+        value = json.loads(text)
+    except (TypeError, ValueError):
+        return default
+    return value if isinstance(value, type(default)) else default
+
+
+# ================================================================ 원장 읽기
+@dataclasses.dataclass
+class Ledger:
+    """한 전문가의 검토 원장 — 마감·보고서가 읽는 것 전부(쓰지 않는다)."""
+
+    target_key: str
+    agent_key: str
+    head: dict
+    target: dict
+    order: dict                              # planner.review_order 의 그 전문가 행(영역·순위·tier)
+    pack: cardpack.FrozenPack | None
+    units: list[dict]                        # 활성 빌드의 검토 대상 단위(seq 순)
+    cells: dict[str, dict]                   # unit_id → 셀 행
+    rows: dict[str, list[dict]]              # unit_id → 판정 행 전부(변형별)
+    payloads: dict[str, dict] = dataclasses.field(default_factory=dict)   # unit_id → units.review_payload(검토한 셀만)
+
+    @property
+    def review_id(self) -> str:
+        return str(self.head["review_id"])
+
+    def reviewed(self) -> list[dict]:
+        """검토한(reviewed) 셀의 단위 — seq 순."""
+        return [u for u in self.units if (self.cells.get(u["unit_id"]) or {}).get("state") == "reviewed"]
+
+    def effective(self, unit_id: str) -> dict[str, dict]:
+        """record_id → 실효 판정(실효 변형 행의 열 + effective_rows 의 표기). applies·judgement 는 실효 규칙의 값이다 — 변형이 갈린
+        카드(split)는 행에 적힌 변형의 판정이 아니라 undetermined 다(X1-14). 행의 원래 값은 row_applies·row_judgement 에 둔다."""
+        rows = self.rows.get(unit_id) or []
+        marks = review_verify.effective_rows(rows) if rows else {}
+        out: dict[str, dict] = {}
+        for row in rows:
+            if row["is_effective"]:
+                mark = marks[str(row["record_id"])]
+                out[str(row["record_id"])] = {**row, "row_applies": row["applies"], "row_judgement": row["judgement"],
+                                              **{k: mark[k] for k in ("applies", "judgement", "claimed", "flipped",
+                                                                      "disputed")}}
+        return out
+
+    def alias_rank(self, alias: str) -> int:
+        order = self.pack.order if self.pack is not None else ()
+        return order.index(alias) if alias in order else len(order)
+
+
+def load_ledger(store: Any, target_key: str, agent_key: str) -> Ledger:
+    """그 전문가의 원장을 읽는다. 얼린 묶음을 가리키는데 이 박스에 없으면 cardpack.PackMissing 이다(조용히 '카드 없음' 으로 읽지
+    않는다 — 마감은 묶음을 얼린 박스에서만 돈다)."""
+    head = store.query_one("SELECT * FROM rr_expert_reports WHERE target_key = ? AND agent_key = ?", (target_key, agent_key))
+    target = store.query_one("SELECT target_key, owner_sub, kind, project_id, flow FROM rr_targets WHERE target_key = ?",
+                             (target_key,))
+    if head is None or target is None:
+        raise AppError("E404", f"검토 머리가 없습니다 — {target_key}:{agent_key}.", 404)
+    order = next((r for r in planner.review_order(store, target_key) if r["agent_key"] == agent_key), None) or {}
+    unit_rows = units.load_units(store, target_key, reviewable_only=True)
+    active = {u["unit_id"] for u in unit_rows}
+    cells = {r["unit_id"]: dict(r) for r in store.query(
+        "SELECT * FROM rr_review_cells WHERE target_key = ? AND agent_key = ?", (target_key, agent_key))
+        if r["unit_id"] in active}
+    rows: dict[str, list[dict]] = {}
+    for r in store.query("SELECT * FROM rr_card_verdicts WHERE target_key = ? AND agent_key = ?"
+                         " ORDER BY unit_id, record_id, variant", (target_key, agent_key)):
+        if r["unit_id"] in active:
+            rows.setdefault(str(r["unit_id"]), []).append(dict(r))
+    ledger = Ledger(target_key=target_key, agent_key=agent_key, head=dict(head), target=dict(target), order=dict(order),
+                    pack=cardpack.load_for(store, target_key, agent_key), units=unit_rows, cells=cells, rows=rows)
+    for unit in ledger.reviewed():
+        ledger.payloads[unit["unit_id"]] = units.review_payload(store, target_key, unit["unit_id"], agent_key)
+    return ledger
+
+
+# ================================================================ finding 승격(S9)
+def _mech_parts(mech: Any, mech_free: Any) -> tuple[str, str, str]:
+    """(mechanism, mechanism_detail, mechanism_free) — 엔진의 `mech` 는 택소노미 code(`interface.seal_compression`) 또는 'free'.
+    택소노미 밖이면 원문을 detail 자리에 두어 정규화가 unclassified 로 내리며 원문을 mechanism_free 에 남기게 한다."""
+    code, free = _s(mech).strip(), _s(mech_free).strip()
+    if code and code != "free":
+        head, _, tail = code.partition(".")
+        return head, tail, free
+    return "", free, free
+
+
+def _hold(direction: str, weight: int, claimed: str | None, sev: str | None) -> tuple[str, str]:
+    """hold 정책(사용자 결정 2)의 (severity, judgement) — 등록부로 갈 판정은 WARNING 까지, 심각도는 중대까지다. 치명은 FAIL 과만
+    짝이라 정규화가 판정을 FAIL 로 고쳐 버리기 때문이다(설계서 §3.10.3). `weight` 는 구성원 가운데 가장 무거운 걸림이다 —
+    3 실효 FAIL · 2 실효 WARNING 이나 카드 밖 지적 · 1 변형이 갈려 실효가 undetermined 인 카드(그대로 undetermined, X1-14)."""
+    if direction == "improvement":
+        return "경미", "OK"
+    capped = "중대" if sev in ("중대", "치명") else "경미"
+    if weight >= 3:
+        return "중대", "WARNING"
+    if weight == 2:
+        return capped, "WARNING"
+    return ("중대" if claimed == "FAIL" else capped), "undetermined"
+
+
+def _detect(check_kind: Any, check_text: Any) -> tuple[dict, dict | None]:
+    kind, text = _s(check_kind).strip(), _s(check_text).strip()
+    level = _DETECT.get(kind, "unknown")
+    tool = text[:_DETECT_TOOL_MAX] if level == "sim-detectable" else ""
+    return {"level": level, "tool": tool}, ({"kind": kind or "unknown", "ref": text} if text else None)
+
+
+def _ref_rank(ref: str, layers: Mapping[str, str]) -> tuple[int, str]:
+    """주체를 뽑는 참조의 차례 — 의미 이벤트 → 구조·파라메트릭 항목 → e: → p: → d: → 그 밖, 같은 급이면 참조 문자열 순."""
+    layer = layers.get(ref)
+    if layer == "semantic":
+        return 0, ref
+    if layer in ("structural", "parametric") or ref.startswith("c:"):
+        return 1, ref
+    return {"e": 2, "p": 3, "d": 4}.get(ref.split(":", 1)[0], 5), ref
+
+
+def _subject_of(ref: str, ctx: narrative.SpecContext) -> dict | None:
+    """참조 하나가 가리키는 항목의 주체 — ckeys(subject.ckeys · ckey · ckey_a/ckey_b · 노드 ckey · 엣지 ck_a/ck_b) 또는 이름
+    (dim:·asm:). 쓸 것이 없으면 None."""
+    kind = ref.split(":", 1)[0]
+    if kind == "d":
+        return {"names": [f"dim:{ref.split(':', 1)[1]}"]}
+    item: Mapping[str, Any] | None = None
+    if kind == "c":
+        item = ctx.diff_item(ref)
+    elif kind == "p":
+        item = ctx.node(ref)
+    elif kind == "e":
+        item = ctx.edge(ref)
+    if not isinstance(item, Mapping):
+        return None
+    subject = item.get("subject") if isinstance(item.get("subject"), Mapping) else {}
+    ckeys = [str(c) for c in subject.get("ckeys") or () if c]
+    if not ckeys and item.get("ckey"):
+        ckeys = [str(item["ckey"])]
+    for a, b in (("ckey_a", "ckey_b"), ("ck_a", "ck_b")):
+        if not ckeys and item.get(a) and item.get(b):
+            ckeys = [str(item[a]), str(item[b])]
+    if ckeys:
+        return {"ckeys": ckeys}
+    key = _s(item.get("subject_key"))
+    if key.startswith(("dim:", "asm:")):
+        return {"names": [key]}
+    if item.get("asm_key"):
+        return {"names": [f"asm:{item['asm_key']}"]}
+    return None
+
+
+def _unit_scope_subject(unit: Mapping[str, Any]) -> dict:
+    """참조로 주체를 못 정할 때의 바닥 — 묶음 단위의 범위(조립 접두)·경계 단위의 조립. 그 밖(전역)은 빈 주체다."""
+    scope = _s(unit.get("scope_key"))
+    if unit.get("kind") == "bundle" and scope:
+        return {"names": [f"asm:{scope}"]}
+    if unit.get("kind") == "boundary" and scope.startswith("boundary:"):
+        return {"names": [f"asm:{scope[len('boundary:'):].split('#', 1)[0]}"]}
+    return {}
+
+
+@dataclasses.dataclass
+class _Member:
+    """접히기 전 finding 후보 하나 — 카드 판정 한 장 또는 카드 밖 줄 하나."""
+
+    unit_id: str
+    raw: dict                                  # risk_spec finding 모양(정규화 전)
+    direction: str
+    weight: int                                # 걸림의 무게 — 3 FAIL · 2 WARNING·카드 밖 · 1 split(_hold)
+    sev_rank: int
+    passed: bool                               # 카드 인용이 재대조를 지났나(대표 고르기)
+    alias_rank: int
+    grade: str                                 # 주장 등급(카드 등급 또는 경험칙)
+    claimed: str | None
+    sev_claimed: str | None
+    nums: list[str]
+    card: dict | None = None                   # finding.cards[] 한 줄
+    off_index: int | None = None               # 그 셀 카드 밖 줄의 자리
+    cites: list[tuple[bool, dict]] = dataclasses.field(default_factory=list)
+    corpus_cards: list[str] = dataclasses.field(default_factory=list)
+    split: bool = False
+    weak_subject: bool = False
+    conf: str | None = None
+
+
+def _unit_layers(ledger: Ledger, unit_id: str) -> dict[str, str]:
+    unit = next((u for u in ledger.units if u["unit_id"] == unit_id), None) or {}
+    return {str(line["ref"]): str(line.get("layer") or "") for line in unit.get("lines") or ()}
+
+
+def _unit_refs(payload: Mapping[str, Any]) -> set[str]:
+    return {str(x["ref"]) for key in ("lines", "evidence") for x in payload.get(key) or () if isinstance(x, Mapping)}
+
+
+def _subject(ledger: Ledger, unit_id: str, refs: Sequence[str], ctx: narrative.SpecContext,
+             items: Mapping[str, Mapping[str, Any]]) -> tuple[dict, str, bool]:
+    """(subject, change_kind, weak) — 통과한 참조를 `_ref_rank` 차례로 세워 주체를 낼 수 있는 첫 항목의 주체와 그 항목의
+    change_kind(없으면 none, snap 대상은 늘 none). 쓸 참조가 없으면 단위의 범위로 내리고 weak 이다."""
+    layers = _unit_layers(ledger, unit_id)
+    ranked = sorted(dict.fromkeys(refs), key=lambda r: _ref_rank(r, layers))
+
+    def kind_of(ref: str | None) -> str:
+        if ledger.target.get("kind") != "diff" or ref is None:
+            return "none"
+        return _s((items.get(ref) or {}).get("change_kind")) or "none"
+
+    for ref in ranked:
+        subject = _subject_of(ref, ctx)
+        if subject is not None:
+            return subject, kind_of(ref), False
+    unit = next((u for u in ledger.units if u["unit_id"] == unit_id), {})
+    return _unit_scope_subject(unit), kind_of(next(iter(ranked), None)), True
+
+
+def _card_members(ledger: Ledger, unit_id: str, ctx: narrative.SpecContext,
+                  items: Mapping[str, Mapping[str, Any]]) -> list[_Member]:
+    """그 셀의 실효 FAIL·WARNING 과 split 인 undetermined → 후보. 메커니즘·심각도·닫는 확인은 단독 재질의 행에서 읽는다."""
+    assert ledger.pack is not None
+    payload = ledger.payloads[unit_id]
+    unit_refs = _unit_refs(payload)
+    variants: dict[str, dict[str, dict]] = {}
+    for row in ledger.rows.get(unit_id) or ():
+        variants.setdefault(str(row["record_id"]), {})[str(row["variant"])] = row
+    out: list[_Member] = []
+    for record_id, eff in sorted(ledger.effective(unit_id).items(), key=lambda kv: ledger.alias_rank(kv[1]["alias"])):
+        flagged = eff["judgement"] in review_verify.FLAGGED
+        split = eff["judgement"] == "undetermined" and int(eff["split"] or 0) == 1
+        if not (flagged or split):
+            continue
+        solo = variants[record_id].get("solo") or eff
+        claimed = str(eff["claimed"])
+        weight = 3 if eff["judgement"] == "FAIL" else 2 if flagged else 1
+        sev_claimed = next((s for s in (_s(solo.get("sev")), _s(eff.get("sev"))) if s in _SEV_RANK), None)
+        severity, judgement = _hold("risk", weight, claimed, sev_claimed)
+        mechanism, detail, free = _mech_parts(solo.get("mech") or eff.get("mech"), solo.get("mech_free") or eff.get("mech_free"))
+        detectability, resolving = _detect(solo.get("check_kind") or eff.get("check_kind"),
+                                           solo.get("check_text") or eff.get("check_text"))
+        refs = [str(r) for r in _json(eff.get("refs_json"), [])]
+        for cond in _json(solo.get("conds_json"), []):
+            refs.extend(str(r) for r in cond.get("refs") or () if isinstance(cond, Mapping))
+        refs = list(dict.fromkeys(refs))
+        passed = eff.get("quote_ok") == 1
+        cites = [(passed, {"ref": f"card:{record_id}", "quote": _s(eff.get("cq"))})]
+        cites += [(ref in unit_refs, {"ref": ref, "quote": ""}) for ref in refs]
+        subject, change_kind, weak = _subject(ledger, unit_id, [r for r in refs if r in unit_refs], ctx, items)
+        checks = _json(eff.get("checks_json"), {})
+        nums = sorted({_s(n) for n in checks.get("nums_unsourced") or () if _s(n)})
+        grade = _s(eff.get("grade")) if passed and eff.get("grade") else "경험칙"
+        if nums:
+            grade = "경험칙"
+        raw = {
+            "direction": "risk", "domain": ledger.head["domain"], "owner_domain": ledger.head["domain"],
+            "raised_by": [ledger.agent_key], "mechanism": mechanism, "mechanism_detail": detail,
+            "mechanism_free": free, "subject": subject,
+            "change_kind": change_kind,
+            "trigger_condition": "none", "severity": severity, "judgement": judgement,
+            "detectability": detectability, "resolving_check": resolving, "evidence_grade": grade,
+            "claim": _s(eff.get("why")),
+            "warrant": f"근거 카드 [card:{record_id}] " + render.quote_source(_s(eff.get("cq"))),
+        }
+        card = {"record_id": record_id, "card_id": eff.get("card_id"), "alias": eff["alias"],
+                "judgement": eff["judgement"], "claimed": claimed, "variant": eff["variant"], "agree": eff["agree"],
+                "flipped": bool(eff["flipped"]), "split": split}
+        out.append(_Member(unit_id=unit_id, raw=raw, direction="risk", weight=weight,
+                           sev_rank=_SEV_RANK.get(sev_claimed or "", 0),
+                           passed=passed, alias_rank=ledger.alias_rank(eff["alias"]), grade=grade, claimed=claimed,
+                           sev_claimed=sev_claimed, nums=nums, card=card, cites=cites, corpus_cards=[record_id],
+                           split=split, weak_subject=weak))
+    return out
+
+
+def offcard_rows(cell: Mapping[str, Any]) -> tuple[list[dict], dict]:
+    """셀의 카드 밖 결과 — (f 줄들, 나머지{need, seen, handoffs, known_dropped, none, more})."""
+    extras = _json(cell.get("extras_json"), {})
+    off = extras.get("offcard") if isinstance(extras.get("offcard"), Mapping) else {}
+    rows = [dict(f) for f in off.get("findings") or () if isinstance(f, Mapping)]
+    return rows, {k: v for k, v in off.items() if k != "findings"}
+
+
+def _offcard_members(ledger: Ledger, unit_id: str, ctx: narrative.SpecContext,
+                     items: Mapping[str, Mapping[str, Any]]) -> list[_Member]:
+    payload = ledger.payloads[unit_id]
+    unit_refs = _unit_refs(payload)
+    out: list[_Member] = []
+    rows, _rest = offcard_rows(ledger.cells[unit_id])
+    for index, row in enumerate(rows):
+        direction = "improvement" if row.get("dir") == "improvement" else "risk"
+        sev_claimed = _s(row.get("sev")) if _s(row.get("sev")) in _SEV_RANK else None
+        severity, judgement = _hold(direction, 2, None, sev_claimed)
+        mechanism, detail, free = _mech_parts(row.get("mech"), row.get("mech_free"))
+        detectability, resolving = _detect(row.get("check_kind"), row.get("check_text"))
+        refs = list(dict.fromkeys(str(r) for r in row.get("refs") or ()))
+        record_id = _s(row.get("record_id"))
+        card = (ledger.pack.record_cards.get(record_id) if ledger.pack is not None and record_id else None)
+        passed = row.get("quote_ok") == 1
+        cites = ([(passed, {"ref": f"card:{record_id}", "quote": _s(row.get("q"))})] if card is not None else [])
+        cites += [(ref in unit_refs, {"ref": ref, "quote": ""}) for ref in refs]
+        subject, change_kind, weak = _subject(ledger, unit_id, [r for r in refs if r in unit_refs], ctx, items)
+        grade = _s(row.get("grade")) if card is not None and passed and row.get("grade") else "경험칙"
+        raw = {
+            "direction": direction, "domain": ledger.head["domain"], "owner_domain": ledger.head["domain"],
+            "raised_by": [ledger.agent_key], "mechanism": mechanism, "mechanism_detail": detail,
+            "mechanism_free": free, "subject": subject,
+            "change_kind": change_kind,
+            "trigger_condition": "none", "severity": severity, "judgement": judgement,
+            "detectability": detectability, "resolving_check": resolving, "evidence_grade": grade,
+            "claim": _s(row.get("title")), "warrant": _s(row.get("path")),
+        }
+        out.append(_Member(unit_id=unit_id, raw=raw, direction=direction, weight=2,
+                           sev_rank=_SEV_RANK.get(sev_claimed or "", 0), passed=passed, alias_rank=1 << 20, grade=grade,
+                           claimed=None, sev_claimed=sev_claimed, nums=[], off_index=index, cites=cites,
+                           corpus_cards=[record_id] if card is not None else [], weak_subject=weak,
+                           conf=_s(row.get("conf")) or None))
+    return out
+
+
+def _corpus(ledger: Ledger, unit_id: str, record_ids: Sequence[str]) -> str:
+    """수치 대조 말뭉치 — 인용한 카드들의 글(얼린 묶음) + 그 단위 요청에 실린 줄 글 전부(소유 줄·문맥·근거)."""
+    parts: list[str] = []
+    if ledger.pack is not None:
+        parts += [cardpack.card_text(ledger.pack.record_cards[r]) for r in dict.fromkeys(record_ids)
+                  if r in ledger.pack.record_cards]
+    payload = ledger.payloads.get(unit_id) or {}
+    parts += [_s(x.get("text")) for key in ("lines", "context", "evidence") for x in payload.get(key) or ()
+              if isinstance(x, Mapping)]
+    return "\n".join(parts)
+
+
+def claim_uid_of(review_id: str, direction: str, cluster_key: str, unit_id: str) -> str:
+    """finding id — 내용에서 나온다(m-06, 12 hex). 다시 마감해 집합이 바뀌어도 남은 finding 의 id 는 그대로다."""
+    tail = int(hashlib.sha1(f"{cluster_key}|{unit_id}".encode("utf-8")).hexdigest()[:12], 16)
+    return f"{review_id}#{'G' if direction == 'improvement' else 'F'}{tail}"
+
+
+def _normalize(raw: Mapping[str, Any], ctx: narrative.SpecContext, path: str, *, warnings: list[str],
+               curation: list[dict]) -> dict:
+    return narrative._normalize_finding(dict(raw), path, ctx, is_gain=raw["direction"] == "improvement", invalid=[],
+                                        warnings=warnings, curation=curation)
+
+
+def _fold(ledger: Ledger, members: Sequence[_Member], ctx: narrative.SpecContext, *, warnings: list[str],
+          curation: list[dict]) -> dict:
+    """한 셀 안에서 (cluster_key, direction) 이 같은 후보들 → finding 하나. 대표는 걸림이 무거운 순 → 심각도 높은 순 → 인용이 통과한
+    순 → 별칭 순(카드 밖 줄은 카드 뒤) → 자리 순이고, 인용은 구성원 전부의 합집합에서 통과한 것 먼저다(상한 없음 — D-21)."""
+    ordered = sorted(members, key=lambda m: (-m.weight, -m.sev_rank, not m.passed, m.alias_rank,
+                                             m.off_index if m.off_index is not None else -1))
+    rep = ordered[0]
+    unit_id = rep.unit_id
+    seen: dict[str, tuple[bool, dict]] = {}
+    for member in ordered:
+        for passed, cite in member.cites:
+            prior = seen.get(cite["ref"])
+            if prior is None or (passed and not prior[0]):
+                seen[cite["ref"]] = (passed, cite)
+    cites = [c for p, c in seen.values() if p] + [c for p, c in seen.values() if not p]
+    claimed = next((m.claimed for m in ordered if m.claimed), None)
+    sevs = sorted((m.sev_claimed for m in ordered if m.sev_claimed), key=lambda x: -_SEV_RANK[x])
+    sev_claimed = sevs[0] if sevs else None
+    severity, judgement = _hold(rep.direction, rep.weight, claimed, sev_claimed)
+    raw = {**rep.raw, "cites": cites, "severity": severity, "judgement": judgement,
+           "evidence_grade": max((m.grade for m in ordered), key=lambda g: _GRADE_RANK.get(g, 0))}
+    record_ids = [r for m in ordered for r in m.corpus_cards]
+    local = dataclasses.replace(ctx, number_corpus=_corpus(ledger, unit_id, record_ids))
+    finding = _normalize(raw, local, f"{ledger.agent_key}/{unit_id}", warnings=warnings, curation=curation)
+    uid = claim_uid_of(ledger.review_id, finding["direction"], finding["cluster_key"], unit_id)
+    # 카드 행의 해석 결과에서 카드 글이 새지 않게 정규 글 자리를 뗀다(P-06 — card_payload 는 본문 없이 이미 줄여 둔 값이다).
+    finding["_resolved_cites"] = [{k: v for k, v in row.items() if not (row.get("ref_type") == "card" and k == "canonical")}
+                                  for row in finding.get("_resolved_cites") or ()]
+    finding.update({
+        "claim_uid": uid, "source": SOURCE_KIND, "review_id": ledger.review_id, "unit_ids": [unit_id],
+        "cards": sorted((dict(m.card) for m in ordered if m.card), key=lambda c: ledger.alias_rank(c["alias"])),
+        "off_card": all(m.off_index is not None for m in ordered),
+        "off_card_n": sum(1 for m in ordered if m.off_index is not None), "input_gap": False,
+        "conf": next((m.conf for m in ordered if m.conf), None), "judgement_claimed": claimed,
+        "severity_claimed": sev_claimed, "nums_missing": sorted({n for m in ordered for n in m.nums}), "doc_refs": [],
+        "split": any(m.split for m in ordered), "weak_subject": rep.weak_subject,
+        "members": [_member_key(m) for m in ordered],
+    })
+    return finding
+
+
+def _member_key(member: _Member) -> str:
+    """보고서가 판정 행·카드 밖 줄에서 그것이 들어간 finding 을 찾는 열쇠 — `card:<record_id>` · `off:<자리>`."""
+    return f"card:{member.card['record_id']}" if member.card else f"off:{member.off_index}"
+
+
+def build_findings(store: Any, ledger: Ledger) -> dict:
+    """검토한 셀에서 finding 을 짓는다(쓰지 않는다) — {findings[], curation[], warnings[]}. finding 은 claim_uid 순이다."""
+    ctx = narrative.review_scope(store, ledger.target_key, ledger.agent_key, ledger.review_id, ledger.pack)
+    items = ({str(i["ref"]): i for i in units.collect_diff_items(ctx.diff)} if ledger.target.get("kind") == "diff"
+             else {})
+    warnings: list[str] = []
+    curation: list[dict] = []
+    findings: list[dict] = []
+    for unit in ledger.reviewed():
+        unit_id = unit["unit_id"]
+        members = (_card_members(ledger, unit_id, ctx, items) if ledger.pack is not None else [])
+        members += _offcard_members(ledger, unit_id, ctx, items)
+        groups: dict[tuple[str, str], list[_Member]] = {}
+        for member in members:
+            probe = _normalize({**member.raw, "cites": [c for _p, c in member.cites]}, ctx,
+                               f"{ledger.agent_key}/{unit_id}", warnings=[], curation=[])
+            groups.setdefault((probe["cluster_key"], probe["direction"]), []).append(member)
+        for key in sorted(groups):
+            findings.append(_fold(ledger, groups[key], ctx, warnings=warnings, curation=curation))
+    findings.sort(key=lambda f: f["claim_uid"])
+    return {"findings": findings, "curation": curation, "warnings": warnings}
+
+
+# ================================================================ 보고서의 머리·범위·finding 절(요약과 의견 행의 원천)
+_STATE_WORD = {"pending": "대기", "running": "도는 중", "reviewed": "검토", "na_irrelevant": "해당 없음", "no_input": "입력 결손",
+               "failed": "미완", "skipped": "넘김"}
+
+
+def _head_section(ledger: Ledger, state: str, why: str | None) -> dict:
+    """머리 — 판번호·만든 시각은 싣지 않는다(m-07 — 같은 원장이면 같은 바이트, 둘은 행의 열에만 있다)."""
+    head, pack = ledger.head, ledger.pack
+    return {
+        "agent_key": ledger.agent_key, "name": _s((pack.raw if pack is not None else {}).get("name")) or ledger.agent_key,
+        "domain": head["domain"], "rank_in_domain": head["rank_in_domain"], "tier": head["tier"],
+        "review_id": ledger.review_id, "state": state, "why": why, "model": head["model"],
+        "prompt_rev": head["prompt_rev"], "norm_rev": head["norm_rev"], "verify_rev": head["verify_rev"],
+        "report_rev": REPORT_REV, "input_gaps": list(ledger.order.get("input_gaps") or ()),
+        "pack": None if pack is None else {
+            "pack_key": pack.pack_key, "pack_hash": pack.pack_hash, "card_basis": pack.card_basis,
+            "cards_total": len(pack.order), "checkable_n": len(pack.checkable), "background_n": len(pack.background),
+            "unrenderable_n": len(pack.unrenderable), "frozen_at": head["pack_frozen_at"]},
+        "pack_status": head["pack_status"], "pack_error": head["pack_error"],
+    }
+
+
+def _scope_section(ledger: Ledger, state: str) -> dict:
+    """본 범위 — 단위마다 상태·무엇으로 봤나·판정별 수, 끝에 보지 못한 것(미완·범위 밖 대기·묶음을 못 받아 못 본 것)."""
+    run_id = ledger.head.get("run_id")
+    rows: list[dict] = []
+    unseen: list[dict] = []
+    for unit in ledger.units:
+        cell = ledger.cells.get(unit["unit_id"]) or {"state": "pending"}
+        cell_state = str(cell["state"])
+        reviewed = cell_state == "reviewed"
+        rows.append({
+            "unit_id": unit["unit_id"], "unit_seq": unit["seq"], "kind": unit["kind"], "title": unit["title"],
+            "state": cell_state, "in_scope": cell.get("run_id") == run_id, "basis": cell.get("basis") if reviewed else None,
+            "counts": ({j: int(cell.get(f"n_{j.lower()}") or 0) for j in _JUDGE_ORDER} if reviewed else None),
+            "offcard_n": int(cell.get("n_offcard") or 0) if reviewed else 0,
+            "bg_full_n": int(cell.get("bg_full_n") or 0) if reviewed else 0,
+            "bg_title_only_n": int(cell.get("bg_title_only_n") or 0) if reviewed else 0,
+            "error_code": cell.get("error_code"), "tries": int(cell.get("tries") or 0),
+            "charged": int(cell.get("charged") or 0)})
+        if reviewed:
+            continue
+        if cell_state == "failed":
+            why = {"code": cell.get("error_code"), "text": cell.get("error")}
+        elif state == "blocked":
+            why = {"code": "pack_blocked", "text": ledger.head.get("error")}
+        elif cell.get("run_id") != run_id:
+            why = {"code": "out_of_scope", "text": None}
+        else:
+            why = {"code": cell_state, "text": None}
+        unseen.append({"unit_id": unit["unit_id"], "unit_seq": unit["seq"], "title": unit["title"], "state": cell_state,
+                       "why": why})
+    by_state: dict[str, int] = {}
+    for row in rows:
+        by_state[row["state"]] = by_state.get(row["state"], 0) + 1
+    by_basis: dict[str, int] = {}
+    for row in rows:
+        if row["basis"]:
+            by_basis[row["basis"]] = by_basis.get(row["basis"], 0) + 1
+    return {"units": rows, "totals": {"units": len(rows), "by_state": dict(sorted(by_state.items())),
+                                      "by_basis": dict(sorted(by_basis.items()))}, "unseen": unseen}
+
+
+def _findings_section(findings: Sequence[Mapping[str, Any]], ledger: Ledger) -> list[dict]:
+    seq = {u["unit_id"]: u["seq"] for u in ledger.units}
+    return [{"claim_uid": f["claim_uid"], "unit_id": f["unit_ids"][0], "unit_seq": seq.get(f["unit_ids"][0]),
+             "cluster_key": f["cluster_key"], "direction": f["direction"], "severity": f["severity"],
+             "judgement": f["judgement"], "judgement_claimed": f.get("judgement_claimed"),
+             "severity_claimed": f.get("severity_claimed"), "evidence_grade": f["evidence_grade"],
+             "mechanism": f"{f['mechanism']}.{f['mechanism_detail']}", "mechanism_free": f.get("mechanism_free") or None,
+             "subject_key": f.get("subject_key"), "weak_subject": bool(f.get("weak_subject")),
+             "cards": [{"record_id": c["record_id"], "card_id": c.get("card_id"), "alias": c["alias"],
+                        "judgement": c["judgement"]} for c in f.get("cards") or ()],
+             "off_card": bool(f.get("off_card")), "split": bool(f.get("split")), "claim": f.get("claim") or "",
+             "dangling": list(f.get("dangling") or ()), "quote_mismatch": list(f.get("quote_mismatch") or ()),
+             "unquoted_numbers": list(f.get("unquoted_numbers") or ())}
+            for f in findings]
+
+
+def _state_of(store: Any, ledger: Ledger, *, blocked: bool) -> tuple[str, str | None]:
+    """보고서에 싣는 마감 상태와 그 까닭 — blocked(묶음을 끝내 못 받았다) · partial(미완 셀·범위 밖 대기) · ready."""
+    if blocked:
+        return "blocked", _s(ledger.head.get("error")) or None
+    tally = review_cells.expert_tally(store, ledger.target_key, ledger.agent_key)
+    state = review_cells.closing_state(tally)
+    if state == "partial":
+        return state, f"미완 셀 {tally['failed']}개 · 아직 열린 셀 {tally['open']}개"
+    return state, None
+
+
+def build_report(store: Any, target_key: str, agent_key: str, *, ledger: Ledger | None = None,
+                 findings: Sequence[Mapping[str, Any]] | None = None, blocked: bool = False) -> dict:
+    """판정 행·셀·호출 원장·얼린 팩에서 전문가 보고서 JSON 을 조립한다(LLM 0회, 쓰지 않는다). 같은 원장이면 같은 바이트다.
+
+    `findings` 를 주지 않으면 여기서 짓는다(build_findings). `blocked` 는 카드 묶음을 끝내 받지 못한 전문가의 보고서다 — 아무
+    단위도 보지 않았다는 것을 '보지 못한 것' 이 말한다."""
+    ledger = ledger if ledger is not None else load_ledger(store, target_key, agent_key)
+    if findings is None:
+        findings = build_findings(store, ledger)["findings"] if not blocked else []
+    state, why = _state_of(store, ledger, blocked=blocked)
+    return {"report_rev": REPORT_REV, "target_key": target_key, "agent_key": agent_key,
+            "head": _head_section(ledger, state, why), "scope": _scope_section(ledger, state),
+            "findings": _findings_section(findings, ledger)}
+
+
+# ================================================================ 요약(의견 행 excerpt_for_rag · turns[0])
+def _clip(text: str, limit: int, word: str) -> str:
+    """글을 limit 자 안으로 — 줄였으면 원래 길이를 적는다(줄이지 않았으면 그대로)."""
+    if len(text) <= limit:
+        return text
+    mark = f" …({word} {len(text)}자 중 {{kept}}자)"
+    kept = limit - len(mark.format(kept=limit))
+    return text[:kept] + mark.format(kept=kept)
+
+
+def summary_md(report: Mapping[str, Any]) -> str:
+    """≤1500자 요약 — 의견 행 excerpt_for_rag 와 turns[0] 의 글. 코드가 쓰는 문장은 수와 참조뿐이고 전문가·카드의 글은 «» 로
+    감싼다. 넘치면 원래 길이를 적고 줄인다(보고서 본문은 줄이지 않는다 — D-21)."""
+    head, scope = report["head"], report["scope"]
+    name = f"{render.quote_source(head['name'])}({render.quote_source(head['agent_key'])})"
+    totals = scope["totals"]["by_state"]
+    if head["state"] == "blocked":
+        lines = [f"{name} — 카드 묶음을 받지 못해 아무 단위도 보지 않았다"
+                 f"({render.quote_source(head.get('pack_error') or '')}). 단위 {scope['totals']['units']}개가 보지 못한 것으로 남았다."]
+        return _clip("\n".join(lines), SUMMARY_MAX, "요약")
+    counts = {j: sum((u["counts"] or {}).get(j, 0) for u in scope["units"]) for j in _JUDGE_ORDER}
+    offcard = sum(u["offcard_n"] for u in scope["units"])
+    lines = [f"{name} 카드 대조 요약 — 단위 {scope['totals']['units']}개 가운데 검토 {totals.get('reviewed', 0)}"
+             f" · 미완 {totals.get('failed', 0)} · 대기 {totals.get('pending', 0)}.",
+             f"실효 판정 judgement=FAIL {counts['FAIL']} · judgement=WARNING {counts['WARNING']} · 보류 {counts['undetermined']}"
+             f" · 걸림 없음 {counts['OK']} · 해당 없음 {counts['na']}, 카드 밖 지적 {offcard}건, finding {len(report['findings'])}건."]
+    weight = {"FAIL": 0, "WARNING": 1}
+    for f in sorted(report["findings"], key=lambda x: (weight.get(x.get("judgement_claimed") or "", 2), x["unit_seq"] or 0,
+                                                      x["claim_uid"])):
+        cards = " · ".join(render.quote_source(c.get("card_id") or c["record_id"]) for c in f["cards"]) or "카드 밖"
+        verdict = f"judgement={f['judgement_claimed']}" if f.get("judgement_claimed") else f"direction={f['direction']}"
+        lines.append(f"- 단위 {f['unit_seq']} {verdict} {cards} — {render.quote_source(f['claim'])}")
+    return _clip("\n".join(lines), SUMMARY_MAX, "요약")
+
+
+# ================================================================ 의견 행(seat_opinion.v1)
+def _final_stance(ledger: Ledger, findings: Sequence[Mapping[str, Any]]) -> str:
+    """실효 FAIL → oppose, WARNING·카드 밖 지적·변형이 갈린 카드 → conditional, 적용 판정이 보류뿐이거나 검토한 셀이 없으면 abstain
+    (X1-15), 그 밖 → agree."""
+    reviewed = ledger.reviewed()
+    if not reviewed:
+        return "abstain"
+    effective = [row for unit in reviewed for row in ledger.effective(unit["unit_id"]).values()]
+    if any(row["judgement"] == "FAIL" for row in effective):
+        return "oppose"
+    if (any(row["judgement"] == "WARNING" for row in effective)
+            or any(f["direction"] == "risk" and (f.get("off_card_n") or f.get("split")) for f in findings)):
+        return "conditional"
+    applicable = [row["judgement"] for row in effective if row["applies"] != "no"]
+    if applicable and all(j == "undetermined" for j in applicable):
+        return "abstain"
+    return "agree"
+
+
+def _cited(ledger: Ledger) -> tuple[list[str], list[str], bool]:
+    """(cited_refs, cited_refs_resolved, cited_ir) — 검토한 셀의 실효 판정·카드 밖 줄이 짚은 카드·단위 참조와 그 가운데 대조를
+    지난 것(카드 인용은 재대조 통과, 단위 참조는 그 단위 소속)."""
+    cited: set[str] = set()
+    resolved: set[str] = set()
+    for unit in ledger.reviewed():
+        unit_id = unit["unit_id"]
+        unit_refs = _unit_refs(ledger.payloads[unit_id])
+        sources = [(f"card:{row['record_id']}" if row.get("cq") else None, row.get("quote_ok") == 1,
+                    _json(row.get("refs_json"), [])) for row in ledger.effective(unit_id).values()]
+        rows, _rest = offcard_rows(ledger.cells[unit_id])
+        sources += [(f"card:{row['record_id']}" if row.get("record_id") else None, row.get("quote_ok") == 1,
+                     list(row.get("refs") or ())) for row in rows]
+        for card_ref, card_ok, refs in sources:
+            if card_ref:
+                cited.add(card_ref)
+                if card_ok:
+                    resolved.add(card_ref)
+            for ref in refs:
+                cited.add(str(ref))
+                if str(ref) in unit_refs:
+                    resolved.add(str(ref))
+    cited_ir = any(ref.split(":", 1)[0] in narrative.IR_REF_KINDS for ref in resolved)
+    return sorted(cited), sorted(resolved), cited_ir
+
+
+def opinion_cycle(store: Any, target_key: str, agent_key: str) -> int:
+    """검토 의견의 회차 — 500 + 원장 회차(narrative.REVIEW_CYCLE_BASE, 원장 밖 좌석 100000 대역과 겹치지 않는다)."""
+    row = store.query_one("SELECT cycle FROM rr_coverage WHERE target_key = ? AND agent_key = ?", (target_key, agent_key))
+    return narrative.REVIEW_CYCLE_BASE + int((row["cycle"] if row is not None else None) or 1)
+
+
+def build_opinion(ledger: Ledger, findings: Sequence[Mapping[str, Any]], summary: str, *, cycle: int) -> dict:
+    """seat_opinion.v1 필수 칸 전부(contested_finding_ids·character_sentences 는 빈 목록 — m-11). 패널 자리는 review_id 다."""
+    stance = _final_stance(ledger, findings)
+    refs, resolved, cited_ir = _cited(ledger)
+    grades = sorted((str(f["evidence_grade"]) for f in findings if f.get("evidence_grade")),
+                    key=lambda g: _GRADE_RANK.get(g, 0))
+    knowledge = {row["record_id"] for unit in ledger.reviewed() for row in ledger.effective(unit["unit_id"]).values()}
+    return {
+        "opinion_id": narrative._opinion_id(ledger.review_id, ledger.agent_key, cycle),
+        "target_key": ledger.target_key, "panel_id": ledger.review_id, "agent_key": ledger.agent_key,
+        "domain": ledger.head["domain"], "origin": "primary", "cycle": cycle,
+        "turns": [{"round": 1, "say_excerpt": summary, "say": summary, "position": "", "stance": stance,
+                   "non_negotiable": ""}],
+        "final_stance": stance, "tool_calls": [], "tool_calls_n": None, "tool_calls_ok": None,
+        "knowledge_hits_n": len(knowledge), "model": ledger.head.get("model"),
+        "cited_refs": refs, "cited_refs_resolved": resolved,
+        "cited_ckeys": sorted({str(ck) for f in findings for ck in (f.get("subject") or {}).get("ckeys") or ()
+                               if str(ck).startswith("ck:") and len(str(ck)) == 15}),
+        "quality": {"used_tool": None, "cited_ir": cited_ir, "grade_min": grades[0] if grades else None,
+                    "dangling_n": sum(len(f.get("dangling") or ()) for f in findings)},
+        "raised_finding_ids": sorted(f["claim_uid"] for f in findings),
+        "contested_finding_ids": [], "character_sentences": [], "excerpt_for_rag": summary,
+    }
+
+
+# ================================================================ 마감(준비는 읽기만, 쓰기는 한 트랜잭션)
+@dataclasses.dataclass
+class Prepared:
+    """마감 한 번이 쓸 것 — `prepare` 가 읽기만으로 짓고 `commit` 이 한 트랜잭션에서 쓴다."""
+
+    ledger: Ledger
+    findings: list[dict]
+    curation: list[dict]
+    report: dict
+    summary: str
+    opinion: dict
+
+
+def prepare(store: Any, target_key: str, agent_key: str) -> Prepared:
+    ledger = load_ledger(store, target_key, agent_key)
+    built = build_findings(store, ledger)
+    report = build_report(store, target_key, agent_key, ledger=ledger, findings=built["findings"])
+    summary = summary_md(report)
+    opinion = build_opinion(ledger, built["findings"], summary, cycle=opinion_cycle(store, target_key, agent_key))
+    return Prepared(ledger=ledger, findings=built["findings"], curation=built["curation"], report=report, summary=summary,
+                    opinion=opinion)
+
+
+# finding 행에서 마감이 다시 정하는 열 — 사람·라벨·외부 반영이 쓰는 열(status*·recall_eligible·ra_entity_id·adh_record_id·
+# visibility·owner_sub·created_at)은 처음 넣을 때만 정하고 다시 마감해도 건드리지 않는다(P-12).
+_FINDING_CODE_COLUMNS: tuple[str, ...] = (
+    "claim_uid", "origin", "target_key", "panel_id", "opinion_id", "project_id", "snapshot_id", "diff_id", "direction",
+    "domain", "mechanism", "mechanism_detail", "mechanism_free", "change_kind", "subject_key", "ckeys_json",
+    "trigger_condition", "severity", "sev3", "judgement", "detectability", "detect_tool", "evidence_grade", "precedent",
+    "dangling", "cluster_key", "finding_json", "taxonomy_version", "rule_version", "ir_version", "diff_version",
+    "unit_id", "source_kind", "source_id", "agent_key",
+)
+
+
+def _finding_row(prepared: Prepared, finding: Mapping[str, Any], *, opinion_id: str, scope: Mapping[str, Any]) -> dict:
+    ledger = prepared.ledger
+    detect = finding.get("detectability") or {}
+    return {
+        "claim_uid": finding["claim_uid"], "origin": "llm", "target_key": ledger.target_key, "panel_id": None,
+        "opinion_id": opinion_id, "project_id": _s(ledger.target.get("project_id")),
+        "snapshot_id": scope["snapshot_id"], "diff_id": scope["diff_id"], "direction": finding["direction"],
+        "domain": _s(finding.get("domain")), "mechanism": finding.get("mechanism"),
+        "mechanism_detail": finding.get("mechanism_detail"), "mechanism_free": finding.get("mechanism_free"),
+        "change_kind": finding.get("change_kind"), "subject_key": finding.get("subject_key"),
+        "ckeys_json": json.dumps((finding.get("subject") or {}).get("ckeys") or [], ensure_ascii=False),
+        "trigger_condition": finding.get("trigger_condition"), "severity": finding.get("severity"),
+        "sev3": finding.get("sev3"), "judgement": finding.get("judgement"), "detectability": detect.get("level"),
+        "detect_tool": detect.get("tool"), "evidence_grade": finding.get("evidence_grade"),
+        "precedent": finding.get("precedent"), "dangling": 1 if finding.get("dangling") else 0,
+        "cluster_key": finding["cluster_key"], "finding_json": json.dumps(finding, ensure_ascii=False, sort_keys=True),
+        "taxonomy_version": finding.get("taxonomy_version"), "rule_version": finding.get("rule_version"),
+        "ir_version": finding.get("ir_version"), "diff_version": finding.get("diff_version"),
+        "unit_id": finding["unit_ids"][0], "source_kind": SOURCE_KIND, "source_id": ledger.review_id,
+        "agent_key": ledger.agent_key,
+    }
+
+
+def _write_findings(store: Any, prepared: Prepared, *, opinion_id: str, now: int) -> dict:
+    """finding 을 finding_id 로 넣거나(회수 자격 0 — M2.md 5절 #9) 코드가 정하는 열만 고치고, 새 집합에 없는 이 검토의 finding
+    과 그 인용 역색인을 지운다. 인용 역색인은 이 검토의 finding 전부를 다시 쓴다."""
+    ledger = prepared.ledger
+    target = store.query_one("SELECT kind, ref_id FROM rr_targets WHERE target_key = ?", (ledger.target_key,))
+    scope = {"snapshot_id": None, "diff_id": None}
+    if target is not None and target["kind"] == "diff":
+        diff = store.query_one("SELECT id, target_snapshot_id FROM rr_diffs WHERE id = ?", (target["ref_id"],))
+        if diff is not None:
+            scope = {"snapshot_id": diff["target_snapshot_id"], "diff_id": diff["id"]}
+    elif target is not None:
+        scope = {"snapshot_id": target["ref_id"], "diff_id": None}
+    owner = _s(ledger.head["owner_sub"])
+    old = [r["finding_id"] for r in store.query(
+        "SELECT finding_id FROM rr_findings WHERE target_key = ? AND source_kind = ? AND source_id = ?",
+        (ledger.target_key, SOURCE_KIND, ledger.review_id))]
+    new_ids = [f["claim_uid"] for f in prepared.findings]
+    stale = sorted(set(old) - set(new_ids))
+    touched = sorted(set(old) | set(new_ids))
+    if touched:
+        store.executemany("DELETE FROM rr_claim_refs WHERE claim_uid = ?", [(uid,) for uid in touched])
+    if stale:
+        store.executemany("DELETE FROM rr_findings WHERE finding_id = ?", [(uid,) for uid in stale])
+    inserted = updated = 0
+    for finding in prepared.findings:
+        row = _finding_row(prepared, finding, opinion_id=opinion_id, scope=scope)
+        have = store.query_one(f"SELECT {', '.join(_FINDING_CODE_COLUMNS)} FROM rr_findings WHERE finding_id = ?",
+                               (finding["claim_uid"],))
+        if have is None:
+            cols = ["finding_id", "owner_sub", "visibility", "recall_eligible", "status", "created_at", "updated_at", *row]
+            store.execute(f"INSERT INTO rr_findings({', '.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                          (finding["claim_uid"], owner, "private", 0, "open", now, now, *row.values()))
+            inserted += 1
+        elif any(have[c] != row[c] for c in _FINDING_CODE_COLUMNS):
+            store.execute(f"UPDATE rr_findings SET {', '.join(f'{c} = ?' for c in row)}, updated_at = ?"
+                          " WHERE finding_id = ?", (*row.values(), now, finding["claim_uid"]))
+            updated += 1
+        for cite in finding.get("_resolved_cites") or ():
+            ref = _s(cite.get("ref"))
+            if not ref or cite.get("dangling_reason") == narrative.ENGINE_MARKER:
+                continue
+            store.execute("INSERT OR REPLACE INTO rr_claim_refs(claim_uid, ref_type, ref, quote, owner_sub, target_key,"
+                          " dangling) VALUES (?,?,?,?,?,?,?)",
+                          (finding["claim_uid"], _s(cite.get("ref_type")) or "unknown", ref, _s(cite.get("quote")), owner,
+                           ledger.target_key, 0 if cite.get("ok") else 1))
+    return {"inserted": inserted, "updated": updated, "deleted": len(stale)}
+
+
+def _enqueue(store: Any, prepared: Prepared, *, now: int) -> dict:
+    """큐레이션 큐 — 택소노미 밖 메커니즘은 대상 안에서 같은 원문을 한 번만(전문가 수백 명이 같은 말을 수백 번 올리지 않게),
+    인젝션 어휘에 걸린 finding 글은 패널 저장과 같은 규칙으로(같은 sha1 이 열려 있으면 다시 넣지 않는다)."""
+    from app import nightly  # noqa: PLC0415 — 야간 잡 모듈은 학습·별칭 모듈을 끌고 온다(마감에서만 쓴다).
+
+    ledger = prepared.ledger
+    owner = _s(ledger.head["owner_sub"])
+    unclassified = suspects = 0
+    texts: dict[str, dict] = {}
+    for finding in prepared.findings:
+        free = _s(finding.get("mechanism_free")).strip()
+        if finding.get("mechanism_detail") == "unclassified" and free and free not in texts:
+            texts[free] = finding
+    for free, finding in sorted(texts.items()):
+        payload = {"finding_id": finding["claim_uid"], "mechanism_free": free, "target_key": ledger.target_key,
+                   "source_kind": SOURCE_KIND, "candidates": nightly._detail_candidates(_s(finding.get("mechanism")))}
+        if nightly.enqueue(store, "unclassified_code", payload, owner_sub=owner, now=now,
+                           dedupe=lambda p: (p.get("source_kind"), p.get("target_key"), p.get("mechanism_free"))):
+            unclassified += 1
+    for finding in prepared.findings:
+        suspect = narrative.suspect_hit(finding)
+        if suspect is None:
+            continue
+        # 같은 finding 의 같은 글은 한 번만 — 사람이 승인(done)한 뒤 다시 마감해도 다시 올리지 않는다(승인이 되돌린 회수 자격을
+        # 다시 마감이 건드리지 않는 것과 같은 까닭 — P-12).
+        if nightly.enqueue(store, "suspect_text", {**suspect, "claim_uid": finding["claim_uid"],
+                                                   "finding_id": finding["claim_uid"], "target_key": ledger.target_key,
+                                                   "source_kind": SOURCE_KIND}, owner_sub=owner, now=now,
+                           dedupe=lambda p: (p.get("sha1"), p.get("claim_uid"))):
+            suspects += 1
+    return {"unclassified": unclassified, "suspect_text": suspects}
+
+
+def _write_opinion(store: Any, prepared: Prepared, *, now: int) -> None:
+    """의견 행 — 이 검토의 자리(panel_id = review_id)를 지우고 다시 넣는다. 외부 반영 열(adh_record_id·ra_assessment_id)과 처음
+    넣은 시각은 옛 행에서 이어받는다(다시 마감해도 같은 자리다)."""
+    ledger, opinion = prepared.ledger, prepared.opinion
+    prev = store.query_one("SELECT adh_record_id, ra_assessment_id, created_at FROM rr_seat_opinions WHERE opinion_id = ?",
+                           (opinion["opinion_id"],))
+    persona = store.query_one("SELECT persona_rev FROM rr_roster WHERE target_key = ? AND agent_key = ?",
+                              (ledger.target_key, ledger.agent_key))
+    store.execute("DELETE FROM rr_seat_opinions WHERE panel_id = ?", (ledger.review_id,))
+    store.execute(
+        "INSERT INTO rr_seat_opinions(opinion_id, target_key, panel_id, owner_sub, agent_key, domain, persona_rev, origin,"
+        " cycle, opinion_json, final_stance, tool_calls_n, tool_calls_ok, knowledge_hits_n, cited_refs_json, quality_json,"
+        " raised_finding_ids_json, excerpt_for_rag, adh_record_id, ra_assessment_id, created_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (opinion["opinion_id"], ledger.target_key, ledger.review_id, _s(ledger.head["owner_sub"]), ledger.agent_key,
+         opinion["domain"], persona["persona_rev"] if persona is not None else None, "primary", opinion["cycle"],
+         canonical_json(opinion), opinion["final_stance"], None, None, opinion["knowledge_hits_n"],
+         json.dumps(opinion["cited_refs"], ensure_ascii=False), json.dumps(opinion["quality"], ensure_ascii=False),
+         json.dumps(opinion["raised_finding_ids"], ensure_ascii=False), opinion["excerpt_for_rag"],
+         prev["adh_record_id"] if prev is not None else None, prev["ra_assessment_id"] if prev is not None else None,
+         prev["created_at"] if prev is not None else now))
+
+
+def commit(store: Any, prepared: Prepared, *, lease_owner: str, now: int | None = None) -> dict | None:
+    """마감 쓰기 — finding·인용 역색인·큐레이션 큐·의견 행·원장 마감(`planner.close_review_seat`, flow='cells' 대상만)·머리 칸.
+    부른 쪽이 연 트랜잭션 안에서 돌고 선점을 먼저 본다 — 선점을 잃었으면 아무것도 쓰지 않고 None 이다(m-10)."""
+    ledger = prepared.ledger
+    now = now_epoch() if now is None else now
+    with store.tx():
+        if not review_cells._holds(store, ledger.target_key, ledger.agent_key, lease_owner):
+            return None
+        opinion_id = prepared.opinion["opinion_id"]
+        written = _write_findings(store, prepared, opinion_id=opinion_id, now=now)
+        queued = _enqueue(store, prepared, now=now)
+        _write_opinion(store, prepared, now=now)
+        seat = planner.close_review_seat(store, ledger.target_key, ledger.agent_key, review_id=ledger.review_id,
+                                         opinion_id=opinion_id, model=ledger.head.get("model"),
+                                         tier=ledger.head.get("tier"))
+        review_cells.write_head(store, ledger.target_key, ledger.agent_key, lease_owner=lease_owner, now=now,
+                                sets={"summary_md": prepared.summary, "opinion_id": opinion_id,
+                                      "findings_n": len(prepared.findings), "coverage_status": seat["status"],
+                                      "finalized_at": now})
+    return {"findings": written, "curation": queued, "opinion_id": opinion_id, "seat": seat}

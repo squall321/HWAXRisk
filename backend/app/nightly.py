@@ -369,7 +369,7 @@ def scan_unclassified(store: Any, *, now: int) -> dict:
     """mechanism_detail='unclassified' 로 저장된 finding 을 큐에 올린다(§7.1 — detail 이 목록 밖일 때)."""
     rows = store.query(
         "SELECT finding_id, owner_sub, mechanism, mechanism_free FROM rr_findings"
-        " WHERE mechanism_detail = 'unclassified' ORDER BY finding_id")
+        " WHERE mechanism_detail = 'unclassified' AND COALESCE(source_kind, '') <> 'card_review' ORDER BY finding_id")
     queued = 0
     for row in rows:
         payload = {"finding_id": str(row["finding_id"]),

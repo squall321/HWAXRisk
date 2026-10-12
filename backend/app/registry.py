@@ -163,7 +163,7 @@ def _load_findings(store: RiskStore, target_key: str) -> list[dict]:
         "mechanism, mechanism_detail, change_kind, subject_key, ckeys_json, severity, sev3, judgement, "
         "detectability, detect_tool, evidence_grade, precedent, cluster_key, finding_json, origin, "
         "author_sub, status, created_at "
-        "FROM rr_findings WHERE target_key = ? ORDER BY finding_id",
+        "FROM rr_findings WHERE target_key = ? AND COALESCE(source_kind, '') <> 'card_review' ORDER BY finding_id",
         (target_key,),
     )
     out: list[dict] = []
@@ -893,8 +893,8 @@ def _contested_marking_done(store: RiskStore, target_key: str) -> bool:
         )
     }
     for row in store.query(
-        "SELECT cluster_key, finding_json, status FROM rr_findings WHERE target_key = ? ORDER BY finding_id",
-        (target_key,)
+        "SELECT cluster_key, finding_json, status FROM rr_findings WHERE target_key = ?"
+        " AND COALESCE(source_kind, '') <> 'card_review' ORDER BY finding_id", (target_key,)
     ):
         if _clean_str(row["status"]) == "rejected_in_panel":
             continue
@@ -1213,7 +1213,8 @@ def _minutes_lines(store: RiskStore, target_key: str, panels: list[dict], covera
             "SELECT SUM(tool_calls_ok) AS n FROM rr_seat_opinions WHERE panel_id = ?", (p["id"],))["n"]
         rejected = sum(
             1 for f in store.query(
-                "SELECT finding_json FROM rr_findings WHERE panel_id = ? ORDER BY finding_id", (p["id"],)
+                "SELECT finding_json FROM rr_findings WHERE panel_id = ? AND COALESCE(source_kind, '') <> 'card_review'"
+                " ORDER BY finding_id", (p["id"],)
             )
             if ADVERSARY_KEY in [str(x) for x in _as_list(_loads(f["finding_json"], {}).get("contested_by"))]
         )

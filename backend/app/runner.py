@@ -1692,7 +1692,8 @@ def repersist_panel(store: Any, settings: Any, panel_id: str, *, narrative_mod: 
     except Exception as exc:  # noqa: BLE001 — 무엇이 터졌든 바깥 트랜잭션이 재점유까지 물렸다.
         log.exception("패널 %s 다시 저장 실패", panel_id)
         raise AppError("persist_failed", f"다시 저장하지 못했다 — {type(exc).__name__}: {exc}", 422) from exc
-    findings = store.query_one("SELECT COUNT(*) AS n FROM rr_findings WHERE panel_id = ?", (panel_id,))
+    findings = store.query_one("SELECT COUNT(*) AS n FROM rr_findings WHERE panel_id = ?"
+                               " AND COALESCE(source_kind, '') <> 'card_review'", (panel_id,))
     return {**out, "findings_n": int(findings["n"] or 0)}
 
 

@@ -1376,7 +1376,7 @@ def scholar_query(store, ctx) -> str:
         " ORDER BY support_panels DESC, id LIMIT 2", (project_id,))] if project_id else []
     mechs = [_s(r["mechanism"]) for r in store.query(
         "SELECT mechanism, COUNT(*) AS n FROM rr_findings WHERE target_key = ? AND mechanism IS NOT NULL"
-        " GROUP BY mechanism ORDER BY n DESC, mechanism LIMIT 1", (_s(ctx["target"]["target_key"]),))]
+        " AND COALESCE(source_kind, '') <> 'card_review' GROUP BY mechanism ORDER BY n DESC, mechanism LIMIT 1", (_s(ctx["target"]["target_key"]),))]
     parts = [t.split(":")[-1] for t in tags if t] + [m for m in mechs if m]
     return " ".join(parts)
 

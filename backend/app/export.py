@@ -98,18 +98,90 @@ _SINCE_COLS: dict[str, tuple[str, ...]] = {
 # 검토 호출의 result 프레임(v4)도 같다 — 카드 인용 원문이 판정당 상한 없이 들어 있다.
 _EXPORT_SKIP_COLUMNS: dict[str, tuple[str, ...]] = {"rr_panels": ("result_gz",), "rr_review_calls": ("result_gz",)}
 
-# 판정 행의 카드 인용(cq)은 판정당 이만큼만 박스 밖으로 나간다(사용자 결정 2026-10-12 — 재설계 M2.md 2절). 원문 길이는
-# cq_chars 에 적는다. 이미 적힌 값은 그대로 둔다 — 들여온 행을 다시 내보내도 원래 길이가 남는다.
+# 카드 인용은 판정당 이만큼만 박스 밖으로 나간다(사용자 결정 2026-10-12 — 재설계 M2.md 2절 · 5절 #18 · #21). 판정 행의 cq 는
+# cq_chars 에, 인용 역색인의 card: 인용은 quote_chars 에, JSON 열 안의 인용은 그 항목 옆 `<칸>_chars` 에 원래 길이를 적는다.
+# 이미 적힌 값은 그대로 둔다 — 들여온 행을 다시 내보내도 원래 길이가 남는다.
 EXPORT_CQ_MAX = 200
+_CARD_REVIEW = "card_review"
+_QUOTED = re.compile("«([^»]*)»")
+
+
+def _clip(item: dict, key: str) -> dict:
+    """JSON 항목 하나의 인용 칸 — 넘으면 200자로 줄이고 `<칸>_chars` 에 원래 길이(이미 있으면 그대로)."""
+    value = item.get(key)
+    if not isinstance(value, str) or len(value) <= EXPORT_CQ_MAX:
+        return item
+    return {**item, key: value[:EXPORT_CQ_MAX], f"{key}_chars": item.get(f"{key}_chars") or len(value)}
+
+
+def _clip_json(text: Any, fix) -> Any:
+    try:
+        value = json.loads(text) if isinstance(text, str) and text else None
+    except ValueError:
+        return text
+    if value is None:
+        return text
+    fixed = fix(value)
+    return text if fixed == value else json.dumps(fixed, ensure_ascii=False, sort_keys=True)
+
+
+def _clip_finding(finding: Any) -> Any:
+    """카드 대조 finding 의 카드 인용 — cites·_resolved_cites 의 card: 행 quote 와 warrant 의 «» 인용(원래 길이는 warrant_chars)."""
+    if not isinstance(finding, dict):
+        return finding
+    out = dict(finding)
+    for key in ("cites", "_resolved_cites"):
+        if isinstance(out.get(key), list):
+            out[key] = [_clip(c, "quote") if isinstance(c, dict) and str(c.get("ref") or "").startswith("card:") else c
+                        for c in out[key]]
+    warrant = out.get("warrant")
+    if isinstance(warrant, str):
+        lengths: list[int] = []
+
+        def cut(m: re.Match) -> str:
+            if len(m.group(1)) <= EXPORT_CQ_MAX:
+                return m.group(0)
+            lengths.append(len(m.group(1)))
+            return "«" + m.group(1)[:EXPORT_CQ_MAX] + "»"
+
+        clipped = _QUOTED.sub(cut, warrant)
+        if lengths:
+            out["warrant"] = clipped
+            out["warrant_chars"] = out.get("warrant_chars") or lengths
+    return out
+
+
+def _clip_extras(extras: Any) -> Any:
+    """셀 extras_json — 카드 밖 줄의 인용(q, 배경 카드에서 옮긴 글)."""
+    off = extras.get("offcard") if isinstance(extras, dict) else None
+    if not isinstance(off, dict) or not isinstance(off.get("findings"), list):
+        return extras
+    return {**extras, "offcard": {**off, "findings": [_clip(f, "q") if isinstance(f, dict) else f
+                                                      for f in off["findings"]]}}
 
 
 def _export_view(table: str, row: dict) -> dict:
-    """반출 줄 하나 — 표마다 박스 밖으로 내보낼 모양으로 바꾼다(지금은 판정 행의 인용 자르기 하나다)."""
+    """반출 줄 하나 — 표마다 박스 밖으로 내보낼 모양으로 바꾼다(카드 인용 200자 — 판정 행 cq·조건별 대조, 셀의 카드 밖 인용,
+    카드 대조 finding 의 인용·근거 문장, 인용 역색인의 card: 인용)."""
     if table == "rr_card_verdicts":
         cq = row.get("cq")
         if isinstance(cq, str) and len(cq) > EXPORT_CQ_MAX:
             chars = row.get("cq_chars")
-            return {**row, "cq": cq[:EXPORT_CQ_MAX], "cq_chars": len(cq) if chars is None else chars}
+            row = {**row, "cq": cq[:EXPORT_CQ_MAX], "cq_chars": len(cq) if chars is None else chars}
+        conds = _clip_json(row.get("conds_json"),
+                           lambda v: [_clip(c, "cond") if isinstance(c, dict) else c for c in v] if isinstance(v, list)
+                           else v)
+        return row if conds is row.get("conds_json") else {**row, "conds_json": conds}
+    if table == "rr_review_cells":
+        extras = _clip_json(row.get("extras_json"), _clip_extras)
+        return row if extras is row.get("extras_json") else {**row, "extras_json": extras}
+    if table == "rr_findings" and row.get("source_kind") == _CARD_REVIEW:
+        finding = _clip_json(row.get("finding_json"), _clip_finding)
+        return row if finding is row.get("finding_json") else {**row, "finding_json": finding}
+    if table == "rr_claim_refs" and row.get("ref_type") == "card":
+        quote = row.get("quote")
+        if isinstance(quote, str) and len(quote) > EXPORT_CQ_MAX:
+            return {**row, "quote": quote[:EXPORT_CQ_MAX], "quote_chars": row.get("quote_chars") or len(quote)}
     return row
 
 

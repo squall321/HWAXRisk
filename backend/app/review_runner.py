@@ -18,7 +18,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from app import cardpack, config, engine_client, planner, review_cells, review_ops, review_verify, runner, units
+from app import (cardpack, config, engine_client, expert_report, planner, review_cells, review_ops, review_verify, runner,
+                 units)
 from app.common import canonical_json, new_uuid, now_epoch, sha256_hex
 from app.errors import AppError
 from app.runner import EngineBusy, EngineRejected, EngineStreamLost, PatUnavailable
@@ -573,13 +574,19 @@ class _Cell:
 
 def finalize_expert(store: Any, job: Mapping[str, Any], head: Mapping[str, Any], *, lease_owner: str,
                     now: int | None = None) -> str | None:
-    """전문가 마감 — 범위 안 열린 셀이 0 이 된 세션의 끝에 부른다(선점을 쥔 채로). 옮긴 머리 상태(ready·partial) 또는 None.
+    """전문가 마감 — 범위 안 열린 셀이 0 이 된 세션의 끝에 부른다(선점을 쥔 채로). 옮긴 머리 상태(ready·partial) 또는 None(선점을
+    잃었다).
 
-    S9(finding 승격·의견 행·원장 마감 `planner.close_review_seat`)·S10(전문가 보고서)이 이 자리에서 같은 선점으로 쓴다 — 그 쓰기가
-    끝난 뒤 `review_cells.close_expert` 가 머리를 닫는다. M2 S8 은 머리만 닫는다(원장은 pending 그대로 — 의견 행이 없으면 닫지 않는다).
+    finding 승격·의견 행·원장 마감(S9)과 보고서(S10)는 `expert_report.prepare` 가 읽기만으로 짓고, 쓰기는 머리를 닫는
+    `review_cells.close_expert` 와 같은 트랜잭션이다 — 중간에 앱이 내려가면 아무것도 남지 않고, 그 머리는 재기동 복구 뒤
+    `finalize` 선점으로 다시 마감된다(같은 원장이면 같은 id 에 같은 값이다).
     """
-    return review_cells.close_expert(store, str(job["target_key"]), str(head["agent_key"]), lease_owner=lease_owner,
-                                     now=now)
+    target_key, agent = str(job["target_key"]), str(head["agent_key"])
+    prepared = expert_report.prepare(store, target_key, agent)
+    with store.tx():
+        if expert_report.commit(store, prepared, lease_owner=lease_owner, now=now) is None:
+            return None
+        return review_cells.close_expert(store, target_key, agent, lease_owner=lease_owner, now=now)
 
 
 # ---------------------------------------------------------------- 전문가 세션
@@ -1255,6 +1262,12 @@ class _Session:
             return
         raise _Stop("cells_left")
 
+    def finalize(self) -> None:
+        """마감만 — 범위 안 셀이 다 닫혔는데 마감이 끝나지 않은 머리(마감 도중 결함·재기동)를 다시 마감한다. 얼린 묶음이 이 박스에
+        없으면 다시 받는다(M2.md 5절 #22)."""
+        self.pack = self._load_pack()
+        self._close()
+
     def run(self) -> None:
         """전문가 세션 — 묶음 → 창 → 계획 → 셀 시작 → 훑기 → fwd(묶음 먼저 · 단위 나중) → 빠진 카드 재질의 → rev → 단독 → 카드 밖 →
         정산 → 마감 또는 놓기. 호출과 호출 사이마다 멈춤을 묻는다(`_gate`)."""
@@ -1649,8 +1662,16 @@ class ReviewLoop:
                 self._progress.pop(job["id"], None)
                 self._served.pop(job["id"], None)
 
+    def _unfinalized(self, job: Mapping[str, Any]) -> int:
+        """범위 안 셀이 다 닫혔는데 마감되지 않은(planned 로 남은) 머리 수 — 마감 도중 결함·재기동 뒤의 것이다."""
+        return int(self.store.query_one(
+            "SELECT COUNT(*) AS n FROM rr_expert_reports e WHERE e.target_key = ? AND e.run_id = ? AND e.state = 'planned'"
+            " AND e.pack_status IN ('ok', 'empty') AND EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key ="
+            " e.target_key AND c.agent_key = e.agent_key AND c.run_id = e.run_id)", (job["target_key"], job["id"]))["n"] or 0)
+
     def _complete_or_phase(self, job: Mapping[str, Any]) -> str | None:
-        if self._open_cells(job) == 0 and self._running_heads(job) == 0 and not self.workers(job["id"]):
+        if (self._open_cells(job) == 0 and self._running_heads(job) == 0 and not self.workers(job["id"])
+                and self._unfinalized(job) == 0):
             failed = self.store.query(
                 "SELECT error_code, COUNT(*) AS n FROM rr_review_cells WHERE target_key = ? AND run_id = ? AND state = 'failed'"
                 " GROUP BY error_code ORDER BY error_code", (job["target_key"], job["id"]))
@@ -1686,10 +1707,13 @@ class ReviewLoop:
             for job, phase in order:
                 if job.get("hold_code") and self.workers(job["id"]):
                     continue                            # 반쯤 연 재개 — 성공 하나까지 워커 하나
-                head = review_cells.claim_next_expert(self.store, {"id": job["id"]}, boot_id=self.boot_id, now=now,
-                                                      purpose=phase)
-                if head is not None:
-                    picked = (job, phase, head)
+                for purpose in (phase, "finalize") if phase == "review" else (phase,):
+                    head = review_cells.claim_next_expert(self.store, {"id": job["id"]}, boot_id=self.boot_id, now=now,
+                                                          purpose=purpose)
+                    if head is not None:
+                        picked = (job, purpose, head)
+                        break
+                if picked is not None:
                     break
             if picked is None:
                 break
@@ -1718,6 +1742,9 @@ class ReviewLoop:
             if purpose == "pack":
                 session.fetch_pack()
                 raise _Stop("pack_frozen")
+            if purpose == "finalize":
+                session.finalize()
+                return
             session.run()
         except _Stop as stop:
             if stop.release:

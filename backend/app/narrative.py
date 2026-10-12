@@ -1719,6 +1719,9 @@ def prior_evidence(store, target_key: str, *, user_memo: str | None = None,
 # cycle) 에 걸려 저장 전체가 롤백됐다(WP1 R-1). 그 제약은 이행으로 풀 수 없어(허용 연산 셋) 원장 회차와 부딪치지 않는
 # 값으로 채운다 — NONLEDGER_CYCLE_BASE + panel_no. seat_opinion.v1 은 cycle ≥ 1 만 요구한다.
 NONLEDGER_CYCLE_BASE = 100000
+# 카드 대조 검토(m2-wp3b S9)가 쓰는 의견의 회차 — 500 + 원장 회차. 원장 좌석(1부터)·원장 밖 좌석(100000 + panel_no)과 겹치지
+# 않아 같은 전문가의 패널 의견과 검토 의견이 UNIQUE(target_key, agent_key, cycle) 에 함께 든다(설계서 §3.4.2).
+REVIEW_CYCLE_BASE = 500
 
 
 def _opinion_id(panel_id: str, agent_key: str, cycle: int) -> str:
@@ -2143,7 +2146,8 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
         )
 
         old = [r["claim_uid"] for r in store.query(
-            "SELECT claim_uid FROM rr_findings WHERE panel_id = ?", (panel_id,))]
+            "SELECT claim_uid FROM rr_findings WHERE panel_id = ? AND COALESCE(source_kind, '') <> 'card_review'",
+            (panel_id,))]
         if old:
             store.executemany("DELETE FROM rr_claim_refs WHERE claim_uid = ?", [(uid,) for uid in old])
         store.execute("DELETE FROM rr_findings WHERE panel_id = ?", (panel_id,))

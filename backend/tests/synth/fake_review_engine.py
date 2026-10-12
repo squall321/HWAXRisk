@@ -28,6 +28,8 @@
   pack_errors      agent_key → (상태, 본문) 하나(늘) 또는 목록(차례로 쓰고 다 쓰면 정상 팩) — 계약 예제 pack_errors.json 의 응답
   pack_sequence    agent_key → 팩 목록(차례로 내고 마지막을 되풀이 — 0장 뒤 30장, P-08)
   long_quote       이 별칭들의 인용을 카드에 없는 긴 글(LONG_QUOTE, 260자)로 낸다(엔진 checks.quote 는 정직하게 not_found)
+  cond_text        단독 재질의 c 줄의 조건 글(기본 COND — 긴 글로 바꾸면 반출의 조건 글 200자를 본다, S9)
+  offcard_src·offcard_quote  카드 밖 f 줄이 근거로 댄 배경 카드 별칭과 그 인용(기본 exp · 빈 인용 — S9 의 카드 근거 카드 밖 줄)
   hold_runs        n(1부터 센 run 차례) → threading.Event — 그 run 은 result 앞에서 그 사건을 기다린다(호출 중 재기동 시험)
 기록 — requests(받은 요청 전부), runs(받은 run 수), max_active(동시에 돈 run 의 최댓값).
 S8(검토 루프)과 WP5b C9 가 이 파일을 넓힌다. 시험이 쓰는 여러 전문가의 팩은 `derive_pack` 이 엔진 계약 예제(pack_ok·pack_empty)에서
@@ -81,6 +83,7 @@ PACK_SHAPE: dict[str, frozenset[str]] = {"": frozenset({"agent_key"}) | IDENT_FI
 INVENTED_QUOTE = "카드 어디에도 없는 지어낸 인용 문장으로 판정을 꾸몄다"
 LONG_QUOTE = ("카드 본문을 길게 옮겨 적었다고 주장하는 인용 — " * 12)[:260]
 WHY = "카드의 조건과 변경 줄을 맞대어 보니 판정이 이렇다"
+COND = "카드가 요구하는 적용 조건"
 NEED = "변경 줄에 그 조건의 값이 없어 판정할 수 없다"
 
 
@@ -158,6 +161,15 @@ def _sse(event: str, data: Mapping[str, Any]) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode()
 
 
+def _offcard_quote(cards: Mapping[str, Mapping[str, Any]], src: str, quote: str) -> str:
+    """카드 밖 줄이 배경 카드를 댈 때 엔진의 인용 검사 — 그 카드 글에 인용이 있으면 ok, 없으면 not_found(정직한 엔진)."""
+    card = cards.get(src)
+    if card is None:
+        return "not_found"
+    text = "\n".join(str(s.get("text") or "") for s in card.get("sections") or ())
+    return "ok" if review_verify.quote_status(quote, text) == "ok" else "not_found"
+
+
 def quote_of(card: Mapping[str, Any]) -> tuple[str, str]:
     """카드에서 실제로 잘라 낸 인용과 그 절 번호 — 엔진 하한(15자·실질 10자)을 넘는 첫 절의 앞 40자."""
     for section in card.get("sections") or ():
@@ -201,6 +213,9 @@ class FakeReviewEngine:
         self.pack_errors: dict[str, Any] = {}
         self.pack_sequence: dict[str, list[dict]] = {}
         self.long_quote: set[str] = set()
+        self.cond_text = COND
+        self.offcard_src = "exp"
+        self.offcard_quote = ""
         self.hold_runs: dict[int, threading.Event] = {}
         # 기록
         self.requests: list[dict[str, Any]] = []
@@ -411,7 +426,7 @@ class FakeReviewEngine:
             missing = [a for a in judge if a not in {r["k"] for r in main}]
             rows = list(main)
             if variant == "solo":
-                rows += [{"t": "c", "l": r["l"], "cond": "카드가 요구하는 적용 조건", "met": "yes",
+                rows += [{"t": "c", "l": r["l"], "cond": self.cond_text, "met": "yes",
                           "note": "변경 줄에서 조건을 확인했다", "refs": r["refs"], "k": r["k"], "record_id": r["record_id"],
                           "from_attempt": 1, "checks": {"refs": "ok", "coerced": []}} for r in main]
             if self.unknown_alias:
@@ -432,11 +447,14 @@ class FakeReviewEngine:
             cap = int(self.base_limits["offcard"]["findings_max"])
             n = min(int(self.offcard_findings), cap)
             rows = [{"t": "f", "l": own[:1], "dir": "risk", "title": f"카드 밖 위험 {i}", "mech": "free",
-                     "mech_free": "계면 박리", "path": "변경 줄의 계면", "src": "exp", "q": "", "sev": "중대", "conf": "medium",
+                     "mech_free": "계면 박리", "path": "변경 줄의 계면", "src": self.offcard_src, "q": self.offcard_quote,
+                     "sev": "중대", "conf": "medium",
                      "check_kind": "test", "check": "고온 고습 시험으로 박리를 본다",
                      "refs": [lines[a]["ref"] for a in own[:1]], "basis": "경험칙", "from_attempt": 1,
-                     "checks": {"refs": "ok" if own else "missing", "src": "exp", "quote": "ok", "quote_sid": "",
-                                "coerced": []}} for i in range(1, n + 1)]
+                     "checks": {"refs": "ok" if own else "missing", "src": self.offcard_src,
+                                "quote": "ok" if self.offcard_src == "exp" else _offcard_quote(cards, self.offcard_src,
+                                                                                               self.offcard_quote),
+                                "quote_sid": "", "coerced": []}} for i in range(1, n + 1)]
             more = "yes" if n >= cap else "no"
             rows += [{"t": "m", "seen": [], "from_attempt": 1, "checks": {"coerced": []}},
                      {"t": "more", "more": more, "from_attempt": 1, "checks": {"coerced": []}}]

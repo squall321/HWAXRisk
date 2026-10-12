@@ -2742,7 +2742,8 @@ REGISTRY_LABEL_OUTCOME = {"verified": "confirmed", "dismissed": "refuted"}
 def _cluster_finding_ids(store: Any, cluster_key: str, owner_sub: str,
                          target_key: str | None) -> list[str]:
     """그 등록부 클러스터에 실린 finding id — 사람 확정 라벨의 대상."""
-    sql = "SELECT finding_id FROM rr_findings WHERE cluster_key = ? AND owner_sub = ?"
+    sql = ("SELECT finding_id FROM rr_findings WHERE cluster_key = ? AND owner_sub = ?"
+           " AND COALESCE(source_kind, '') <> 'card_review'")
     params: list[Any] = [cluster_key, owner_sub]
     if target_key:
         sql += " AND target_key = ?"
@@ -3795,7 +3796,8 @@ _SEV3_OF = {"경미": 1, "중대": 2, "치명": 3}
 def _next_human_claim_uid(store: Any, target_key: str) -> str:
     """`<target_key>#H<n>` — 그 타깃의 사람 finding 순번(plan §0.2.2)."""
     rows = store.query(
-        "SELECT claim_uid FROM rr_findings WHERE target_key = ? AND origin = 'human'", (target_key,))
+        "SELECT claim_uid FROM rr_findings WHERE target_key = ? AND origin = 'human'"
+        " AND COALESCE(source_kind, '') <> 'card_review'", (target_key,))
     used = []
     for row in rows:
         tail = str(row["claim_uid"]).rsplit("#H", 1)

@@ -238,7 +238,7 @@ PUSHED_DDL_SHA256 = {
     3: "a20f49f302e0c92292d7792a9a990b4d8c809b1f3eb0dce9b609bb0879b35e39",
     # v4 는 아직 나가지 않았다 — 가지 m2-cells 에만 있고 dev 리허설(재설계 PLAN 4절 C-2, M2 단계 D)이 끝나야 main 에 오른다.
     # 그때까지는 블록을 고칠 수 있고, 고치면 같은 커밋에서 이 값을 고친다. push 하는 날 이 값이 굳는다.
-    4: "a1c5dbe6c2d17d017c24b455b13f648e57b1cb1ea5f26f3e7fb92f552fc7fed4",
+    4: "f44b1630c19df06f0929485782c55253edf8a765858c1c30a824cb31b119c0b5",
 }
 SHARED_TABLES = {"rr_dim_vocab", "rr_delta_priors", "rr_rules", "rr_metrics"}
 
@@ -528,8 +528,9 @@ V4_PRIMARY_KEYS = {
     "rr_card_verdicts": ["target_key", "unit_id", "agent_key", "record_id", "variant"],
     "rr_card_packs": ["agent_key", "pack_key"], "rr_review_calls": ["call_id"],
 }
+# rr_claim_refs.quote_chars 는 cq_chars 와 같은 까닭이다 — 반출이 card: 인용을 200자로 줄일 때 원래 길이를 적을 자리(M2.md 5절 #18).
 V4_ADDED_COLUMNS = {"rr_targets": {"flow"}, "rr_jobs": {"mode", "hold_code", "hold_until", "hold_n"},
-                    "rr_findings": {"unit_id", "source_kind", "source_id", "agent_key"}}
+                    "rr_findings": {"unit_id", "source_kind", "source_id", "agent_key"}, "rr_claim_refs": {"quote_chars"}}
 V4_INDEXES = {
     "ix_rr_expert_reports_state": ("rr_expert_reports", ["target_key", "state", "review_order"]),
     "ix_rr_expert_reports_review": ("rr_expert_reports", ["review_id"]),

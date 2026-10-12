@@ -747,6 +747,7 @@ ALTER TABLE rr_findings ADD COLUMN unit_id TEXT;            -- 카드 대조가 
 ALTER TABLE rr_findings ADD COLUMN source_kind TEXT;        -- NULL = 패널 · card_review
 ALTER TABLE rr_findings ADD COLUMN source_id TEXT;          -- 출처 id(카드 대조는 rr_expert_reports.review_id)
 ALTER TABLE rr_findings ADD COLUMN agent_key TEXT;          -- 그 finding 을 낸 전문가
+ALTER TABLE rr_claim_refs ADD COLUMN quote_chars INTEGER;   -- 인용 원문 글자 수. NULL 이면 quote 가 원문이다 — 반출이 카드 인용을 200자로 줄일 때 적는다
 """
 _DDL_V4: list[str] = _split_statements(_DDL_V4_SQL)
 

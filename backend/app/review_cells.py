@@ -254,17 +254,25 @@ def claim_next_expert(store: Any, job: Mapping[str, Any] | None = None, *, boot_
     """전문가 한 명을 쥔다 — 쥔 머리(dict, `lease_owner` 포함) 또는 None.
 
     `purpose='review'` 는 카드 묶음이 `ok`·`empty` 이고 백오프가 지난 범위 안 `pending` 셀이 있는 전문가, `'pack'` 은 묶음이
-    `todo`·`error` 이고 범위 안 `pending` 셀이 있는 전문가다(묶음 받기도 워커 자리에서 한다 — m-04). 둘 다 `planned` 이고 머리의
-    백오프(`not_before`)가 지났어야 한다. 순서는 `review_order`(Tier A → B → C).
+    `todo`·`error` 이고 범위 안 `pending` 셀이 있는 전문가다(묶음 받기도 워커 자리에서 한다 — m-04). `'finalize'` 는 범위 안 셀이
+    다 닫혔는데 마감되지 않은 전문가다(마감 도중 결함·재기동 — 마감은 머리를 ready·partial 로 옮기므로 planned 로 남은 것이 그것이다).
+    셋 다 `planned` 이고 머리의 백오프(`not_before`)가 지났어야 한다. 순서는 `review_order`(Tier A → B → C).
     `job` 을 주지 않으면 도는(`running`) 검토 잡을 돌아가며 — 도는 전문가가 가장 적은 잡부터 — 집는다(P-09). `job` 을 주어도
     그 잡이 지금 `running` 인 검토 잡이 아니면 None 이다. 선점은 `planned` 조건이 붙은 UPDATE 의 바뀐 행이 1 일 때만 선다.
     """
-    if purpose not in ("review", "pack"):
+    if purpose not in ("review", "pack", "finalize"):
         raise ValueError(f"모르는 선점 목적 — {purpose!r}")
     now = now_epoch() if now is None else now
     lease = f"{boot_id}:{new_uuid()}"
-    pack_cond = "e.pack_status IN ('ok', 'empty')" if purpose == "review" else "e.pack_status IN ('todo', 'error')"
+    pack_cond = "e.pack_status IN ('todo', 'error')" if purpose == "pack" else "e.pack_status IN ('ok', 'empty')"
     cell_cond = " AND (c.not_before IS NULL OR c.not_before <= ?)" if purpose == "review" else ""
+    cells_cond = (" AND EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key = e.target_key AND c.agent_key = e.agent_key"
+                  f" AND c.run_id = e.run_id AND c.state = 'pending'{cell_cond})")
+    if purpose == "finalize":
+        cells_cond = (" AND EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key = e.target_key"
+                      " AND c.agent_key = e.agent_key AND c.run_id = e.run_id)"
+                      " AND NOT EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key = e.target_key"
+                      " AND c.agent_key = e.agent_key AND c.run_id = e.run_id AND c.state IN ('pending', 'running'))")
     with store.tx():
         if job is None:
             jobs = _live_review_jobs(store)
@@ -278,9 +286,7 @@ def claim_next_expert(store: Any, job: Mapping[str, Any] | None = None, *, boot_
                 params.append(now)
             candidates = store.query(
                 "SELECT e.agent_key FROM rr_expert_reports e WHERE e.target_key = ? AND e.run_id = ?"
-                f" AND e.state = 'planned' AND (e.not_before IS NULL OR e.not_before <= ?) AND {pack_cond}"
-                " AND EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key = e.target_key"
-                f" AND c.agent_key = e.agent_key AND c.run_id = e.run_id AND c.state = 'pending'{cell_cond})"
+                f" AND e.state = 'planned' AND (e.not_before IS NULL OR e.not_before <= ?) AND {pack_cond}{cells_cond}"
                 " ORDER BY e.review_order ASC, e.agent_key ASC", params)
             for cand in candidates:
                 moved = _move(store, "expert", "planned", "running", where=f"{_head_where()} AND run_id = ?",
@@ -341,12 +347,16 @@ def block_expert(store: Any, target_key: str, agent_key: str, *, lease_owner: st
                       params=(target_key, agent_key, lease_owner), sets={"lease_owner": None, "error": error}, now=now))
 
 
+def closing_state(tally: Mapping[str, Any]) -> str:
+    """마감이 머리에 적는 상태 — 열린 실패 셀이나 범위 밖 pending 이 남았으면 partial, 아니면 ready(P-04). 보고서가 같은 값을 싣는다."""
+    return "partial" if tally["failed"] or tally["open"] else "ready"
+
+
 def close_expert(store: Any, target_key: str, agent_key: str, *, lease_owner: str, now: int | None = None) -> str | None:
-    """쥔 전문가의 검토를 마감한다 — 열린 실패 셀이나 범위 밖 pending 이 남았으면 partial, 아니면 ready(P-04). 옮긴 상태 또는
-    None(선점을 잃었다). 승격·의견·원장·보고서(S9·S10)는 `review_runner.finalize_expert` 가 이 앞에서 쓴다."""
+    """쥔 전문가의 검토를 마감한다 — `closing_state` 로 partial 또는 ready. 옮긴 상태 또는 None(선점을 잃었다). 승격·의견·원장·
+    보고서(S9·S10)는 `review_runner.finalize_expert` 가 같은 트랜잭션에서 이 앞에 쓴다."""
     now = now_epoch() if now is None else now
-    tally = expert_tally(store, target_key, agent_key)
-    dst = "partial" if tally["failed"] or tally["open"] else "ready"
+    dst = closing_state(expert_tally(store, target_key, agent_key))
     moved = _move(store, "expert", "running", dst, where=f"{_head_where()} AND lease_owner = ?",
                   params=(target_key, agent_key, lease_owner), sets={"lease_owner": None, "error": None}, now=now)
     return dst if moved else None
