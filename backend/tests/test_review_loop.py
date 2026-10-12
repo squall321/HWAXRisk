@@ -408,6 +408,41 @@ def test_a_job_closed_outside_the_loop_refuses_a_new_job_while_its_call_runs_and
     assert review_cells.review_invariants(store, key) == []
 
 
+def test_a_real_purge_while_a_call_runs_refuses_a_new_job_until_the_worker_closes_and_then_its_rows_are_released(
+        store, monkeypatch):
+    """단계 D 리허설(실제 배선)에서 찾은 것 — 실제 과제 폐기(`routes.purge_project`)는 잡을 루프 밖에서 곧바로 cancelled 로 쓰고 셀·머리의
+    선점을 비운다(m-10 — 늦은 쓰기를 버린다). 그러면 워커의 호출 닫기·놓기도 선점이 맞지 않아 0행이라 머리·셀·호출이 재기동까지
+    running 으로 남고, 그 대상의 새 잡은 영영 409 review_in_flight 였다(문구는 '워커가 놓을 때까지 기다렸다가' 라고 말한다). 워커가 그
+    호출을 닫으면 제 잡의 주인 없는 행만 놓는다 — 상태만 옮기고 글 열은 쓰지 않는다(m-10 은 그대로다)."""
+    from app import review_runner, routes
+    from app.errors import AppError
+    from tests import factories
+
+    key, job_id, fake, r, gate = _stalled(store, monkeypatch, 3)
+    rig.wait_for(lambda: any(w.get("last_step") for w in r.loop.progress(job_id).payload()["workers"]))
+    project = store.query_one("SELECT p.id, p.code FROM rr_targets t JOIN rr_projects p ON p.id = t.project_id"
+                              " WHERE t.target_key = ?", (key,))
+    with factories.routes_store(store):
+        routes.purge_project(project["id"], routes.PurgeBody(code=project["code"], reason="정리"), ident=factories.ident(OWNER))
+    assert rig.state(store, job_id) == "cancelled"
+    with pytest.raises(AppError) as refused:                # 워커가 아직 그 호출을 쥐고 있다(R3A-1)
+        rig.job(store, key, scope={"agents": [SEAL]})
+    assert refused.value.code == "review_in_flight"
+
+    gate.set()
+    r.loop.join(30)
+    assert review_runner.in_flight(store, target_key=key) == {"heads": 0, "cells": 0}
+    calls = _calls(store, job_id)
+    assert "running" not in {c["state"] for c in calls}
+    assert [(c["outcome_class"], c["error_code"]) for c in calls if c["state"] == "aborted"] == [("cancelled", "cancelled")]
+    assert {(c["state"], c["charged"], c["lease_owner"]) for c in _cells(store, key, SEAL)} == {("pending", 0, None)}
+    # m-10 — 늦게 끝난 호출의 글은 적히지 않았다(폐기가 비운 그대로다).
+    assert {(c["extras_json"], c["route_json"], c["error"]) for c in _cells(store, key, SEAL)} == {(None, None, None)}
+    head = _head(store, key, SEAL)
+    assert (head["state"], head["lease_owner"], head["sweep_json"], head["report_gz"], head["summary_md"]) == (
+        "planned", None, None, None, None)
+
+
 def test_a_job_that_takes_over_an_expert_whose_cells_closed_before_its_finalize_finalizes_it(store, monkeypatch):
     """반대 검토 R3A-1 의 변형 — 셀을 다 닫고 마감(finalize_expert) 전에 멈춘 전문가(planned)를 그 잡이 취소된 뒤 새 잡이 범위에
     넣으면, 새 잡은 셀이 앞 잡의 것이어도 그 전문가를 마감한다(호출 없이). 잡을 곧바로 닫는 취소(도는 것이 없다)도 진행판을 끝난

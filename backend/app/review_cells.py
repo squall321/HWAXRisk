@@ -370,6 +370,29 @@ def release_expert(store: Any, target_key: str, agent_key: str, *, lease_owner: 
     return {"released": True, "cells": cells}
 
 
+def release_orphaned(store: Any, target_key: str, agent_key: str, *, run_id: str, now: int | None = None) -> dict:
+    """폐기가 선점을 비운(m-10) 그 잡의 행을 워커가 놓는다 — 머리 running → planned, 셀 running → pending, 호출 running →
+    aborted('cancelled'). 상태만 옮기고 글 열은 쓰지 않는다(늦은 쓰기를 버리는 m-10 은 그대로다).
+
+    선점이 NULL 인 채 running 이고 그 잡이 cancelled 인 행만이다. 선점을 상태와 따로 비우는 곳은 과제 폐기뿐이다(놓기·재기동 복구는
+    상태와 선점을 함께 옮긴다) — 다른 선점이 쥔 행은 건드리지 않는다. 이것이 없으면 그 행들이 재기동까지 running 이라 그 대상의 새 잡이
+    409 review_in_flight('워커가 놓을 때까지')로 끝없이 막혔다(단계 D 리허설). 반환 {experts, cells, calls}."""
+    now = now_epoch() if now is None else now
+    orphan = ("target_key = ? AND agent_key = ? AND run_id = ? AND lease_owner IS NULL"
+              " AND EXISTS (SELECT 1 FROM rr_jobs j WHERE j.id = ? AND j.state = 'cancelled')")
+    params = (target_key, agent_key, run_id, run_id)
+    with store.tx():
+        experts = _move(store, "expert", "running", "planned", where=orphan, params=params, now=now)
+        cells = _move(store, "cell", "running", "pending", where=orphan, params=params, sets={"heartbeat_at": None}, now=now)
+        calls = int(store.execute(
+            "UPDATE rr_review_calls SET state = 'aborted', outcome_class = ?, error_code = ?, error_infra = 0, error = ?"
+            " WHERE target_key = ? AND agent_key = ? AND run_id = ? AND state = 'running'"
+            " AND EXISTS (SELECT 1 FROM rr_jobs j WHERE j.id = ? AND j.state = 'cancelled')",
+            (review_ops.CANCELLED, review_ops.CANCELLED, "과제 폐기로 잡이 닫혀 이 호출을 닫았다(차감 없음)",
+             target_key, agent_key, run_id, run_id)) or 0)
+    return {"experts": experts, "cells": cells, "calls": calls}
+
+
 def write_head(store: Any, target_key: str, agent_key: str, *, lease_owner: str, sets: Mapping[str, Any],
                now: int | None = None) -> bool:
     """쥔 전문가 머리에 호출이 아닌 일의 결과(계획·창 판·묶음 확인 셈 따위)를 적는다 — 상태·선점·신원·잡 결속은 받지 않는다.

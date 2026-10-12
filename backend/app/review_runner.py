@@ -1935,6 +1935,11 @@ class ReviewLoop:
             review_cells.release_expert(self.store, target_key, agent, lease_owner=lease,
                                         not_before=self.clock() + INTERNAL_BACKOFF_S, error="internal_error", now=self.clock())
         finally:
+            try:
+                # 과제 폐기가 선점을 비웠으면(m-10) 위의 놓기·호출 닫기가 0행이다 — 제 잡의 주인 없는 행만 상태로 놓는다.
+                review_cells.release_orphaned(self.store, target_key, agent, run_id=str(job["id"]), now=self.clock())
+            except Exception:  # noqa: BLE001 — 놓기 실패가 워커 끝을 막지 않는다(재기동 복구가 마지막 그물이다).
+                log.exception("폐기 뒤 주인 없는 행 놓기 실패(job=%s, agent=%s)", job.get("id"), agent)
             if session is not None:
                 session.progress.worker_end(session.wkey)
 
