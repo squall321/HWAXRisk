@@ -389,6 +389,36 @@ def test_complete_panel_route_uses_real_persist(seeded, monkeypatch):
     assert seeded.query_one("SELECT COUNT(*) AS n FROM rr_findings WHERE panel_id = ?", (PANEL,))["n"] == 2
 
 
+def test_a_cited_dyna_scope_change_resolves_at_persist(risk_store, monkeypatch):
+    """좌석이 접촉 범위 변경(`structural.dyna.scope_changed`)의 cid 를 인용하면 그 항목으로 풀린다 — 구조층에서 dict 인 버킷
+    (dyna)의 안을 보지 않아 실재하는 변경의 인용이 dangling 이었다(m2-wp2 걸음 7). 대상·패널·저장은 전부 생산자 경로다."""
+    from app import planner, routes
+    from tests import factories
+    from tests.test_project_patch import _finding_spec
+
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    synth = factories.make_diff_target(risk_store, 40)                   # syn40 대본에 contact.scope_changed 가 있다
+    scope = synth.diff["structural"]["dyna"]["scope_changed"]
+    assert scope
+    cid = scope[0]["cid"]
+    quote = scope[0]["text"].rsplit(" [", 1)[0]
+    panel = planner.plan_next_panel(risk_store, synth.target_key, "A")
+    spec = _finding_spec(synth.target_key, panel["seats"][0]["key"])
+    spec["findings"][0]["cites"] = [{"ref": cid, "quote": quote}]
+    decision = "F1 접촉 범위가 바뀌었다.\n\n```json\n" + json.dumps(spec, ensure_ascii=False) + "\n```\n"
+    routes.complete_panel(panel["id"], engine="mcp", decision_text=decision,
+                          turns=[{"round": 1, "persona": s["key"], "say": "발언"} for s in panel["seats"]],
+                          actor="syn", owner_sub=factories.OWNER)
+
+    refs = risk_store.query("SELECT ref, dangling FROM rr_claim_refs WHERE claim_uid = ?", (f"{panel['id']}#F1",))
+    assert [(r["ref"], r["dangling"]) for r in refs] == [(cid, 0)]
+    finding = json.loads(risk_store.query_one("SELECT finding_json FROM rr_findings WHERE panel_id = ?",
+                                              (panel["id"],))["finding_json"])
+    assert finding["dangling"] == [] and finding["quote_mismatch"] == []
+    ctx = narrative._panel_scope(risk_store, panel["id"])[3]
+    assert ctx.diff_item(cid) == scope[0]
+
+
 # ---------------------------------------------------------------- 브리프 되먹임(§5.6)
 
 

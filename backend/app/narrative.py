@@ -430,9 +430,12 @@ class SpecContext:
         """rr_diff 의 어느 층에든 있는 cid 항목."""
         diff = self.diff or {}
         for bucket in (diff.get("structural") or {}).values():
-            for item in bucket if isinstance(bucket, list) else ():
-                if isinstance(item, dict) and item.get("cid") == cid:
-                    return item
+            # dict 인 버킷(dyna)은 그 안의 리스트까지 한 단계 더 본다 — `dyna.scope_changed` 의 cid 가 dangling 이었다.
+            inner = [v for v in bucket.values() if isinstance(v, list)] if isinstance(bucket, dict) else [bucket]
+            for items in inner:
+                for item in items if isinstance(items, list) else ():
+                    if isinstance(item, dict) and item.get("cid") == cid:
+                        return item
         for bucket in (diff.get("parametric") or {}).values():
             for item in bucket if isinstance(bucket, list) else ():
                 if isinstance(item, dict) and item.get("cid") == cid:
