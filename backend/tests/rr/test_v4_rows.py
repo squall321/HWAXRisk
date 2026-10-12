@@ -1,15 +1,13 @@
 # v4 새 표의 이양·폐기 등록과 행 단위 반출·이양·폐기(재설계 M2 C1) — 행은 C2 의 생산자로만 만든다(손 INSERT 금지)
-"""C1 은 표와 등록만 넣는다. 새 표에 행을 넣는 생산자(`units.compute`·`units.persist`, 셀 원장의 잡·루프)는 C2 가 짓는다.
+"""C1 은 표와 등록만 넣었다. 단위 행의 생산자(`units.compute`·`units.persist`)는 C2a 에 섰고 셀 원장의 생산자(잡·루프)는 C2b 다.
 
-행이 든 시험은 아래 자리표시처럼 생산자가 생기면 스스로 붉어지게 둔다 — 전제(생산자 함수)가 없을 때만 기대한 실패이고,
-전제가 서면 몸통의 어떤 실패도 그대로 실패다. 통과하면 strict 라 XPASS 로 붉으니 표식을 지운다.
+생산자가 아직 없는 행의 시험은 자리표시로 두어 생산자가 생기면 스스로 붉어지게 한다 — 전제(생산자 함수)가 없을 때만 기대한
+실패이고, 전제가 서면 몸통의 어떤 실패도 그대로 실패다. 통과하면 strict 라 XPASS 로 붉으니 표식을 지운다.
 """
 from __future__ import annotations
 
 import gzip
 import json
-
-import pytest
 
 from app import export, routes, units
 from app.risk_store import RiskStore
@@ -47,11 +45,7 @@ def test_v4_tables_are_registered_for_transfer_and_purge():
     assert "rr_card_packs" not in moved and "rr_card_packs" not in blanked
 
 
-# ---------------------------------------------------------------- 자리표시 — C2 의 생산자가 생기면 붉어진다
-C2_UNITS = pytest.mark.xfail(strict=True, raises=C2ProducerMissing,
-                             reason="C2 producer — units.compute·units.persist(m2-wp2 걸음 5)가 생기면 이 표식을 지운다")
-
-
+# ---------------------------------------------------------------- 단위 행(C2a 의 생산자 units.compute·units.persist)
 def _all_text(store: RiskStore, table: str, where: str, params: tuple) -> str:
     cols = [r["name"] for r in store.query(f"PRAGMA table_info({table})")]
     parts: list[str] = []
@@ -63,7 +57,6 @@ def _all_text(store: RiskStore, table: str, where: str, params: tuple) -> str:
     return "\n".join(parts)
 
 
-@C2_UNITS
 def test_unit_rows_round_trip_move_with_the_owner_and_purge_to_no_source_text(risk_store, tmp_path):
     """단위 행 — 반출 → 빈 DB 들여오기에서 BLOB 까지 같고, 이양이 소유자를 옮기며, 폐기 뒤 어느 열에도 부품·재질 이름이
     없다(W2-22). 행은 실제 빌드(units.compute → units.persist)로 만든다."""
@@ -105,3 +98,78 @@ def test_unit_rows_round_trip_move_with_the_owner_and_purge_to_no_source_text(ri
         assert [n for n in sorted(names) if n in text] == [], table
     assert json.loads(risk_store.query_one(
         "SELECT unit_ids_json FROM rr_unit_builds WHERE target_key = ?", scope[1])["unit_ids_json"])  # 정체는 남는다
+
+
+def _caps(monkeypatch, **values) -> None:
+    import dataclasses
+
+    from app import config
+
+    names = {"target_lines": "risk_unit_target_lines", "max_lines": "risk_unit_max_lines",
+             "small_lines": "risk_units_small_lines"}
+    monkeypatch.setattr(config, "settings", dataclasses.replace(
+        config.settings, **{names[k]: v for k, v in values.items()}))
+
+
+def _exported(store: RiskStore, since: int) -> dict[str, list[dict]]:
+    out: dict[str, list[dict]] = {}
+    for line in list(export.iter_lines(store, OWNER, since))[1:]:
+        item = json.loads(line)
+        out.setdefault(item["table"], []).append(item["row"])
+    return out
+
+
+T1, T2 = 1_900_000_000, 1_900_086_400          # 두 빌드의 시각 — 합성 과제의 다른 행(현재 시각·캡처 시각)보다 뒤다
+
+
+def test_a_since_export_carries_only_the_unit_rows_written_after_it(risk_store, monkeypatch):
+    """반출의 since 열 — 빌드 머리는 쓴 시각(built_at), 단위는 처음 쓴 시각(created_at)이다. 상한을 바꾼 둘째 빌드 뒤의 반출에는
+    둘째 rev 머리와 그때 처음 쓴 단위만 실리고, since 0 은 둘 다 싣는다."""
+    synth = factories.make_diff_target(risk_store, 40)
+    monkeypatch.setattr(units, "now_epoch", lambda: T1)
+    units.build_units(risk_store, synth.target_key, built_by=OWNER)
+    first = {uid for uid, _ in units.active_build(risk_store, synth.target_key)["unit_ids"]}
+    _caps(monkeypatch, target_lines=8, max_lines=12, small_lines=4)
+    monkeypatch.setattr(units, "now_epoch", lambda: T2)
+    units.build_units(risk_store, synth.target_key, built_by=OWNER)
+    second = {uid for uid, _ in units.active_build(risk_store, synth.target_key)["unit_ids"]}
+    assert first and second and not first & second
+
+    later = _exported(risk_store, T2)
+    assert [r["rev"] for r in later["rr_unit_builds"]] == [2]
+    assert {r["unit_id"] for r in later["rr_units"]} == second
+    everything = _exported(risk_store, 0)
+    assert [r["rev"] for r in everything["rr_unit_builds"]] == [1, 2]
+    assert {r["unit_id"] for r in everything["rr_units"]} == first | second
+
+
+def test_imported_rows_never_let_an_older_rev_become_the_active_build(risk_store, tmp_path, monkeypatch):
+    """활성 빌드는 '살아 있는 status 의 가장 큰 rev' 라 들여온 행이 옛 rev 를 되살리지 않는다(W2-13 e) — 옛 rev 만 있는 박스에
+    새 rev 를 들여오면 새 rev 가 활성이고, 그 뒤에 옛 반출을 다시 들여와도 그대로다. 들여온 박스의 단위·엔진 몫 unit 은 원본과 같다."""
+    synth = factories.make_diff_target(risk_store, 40)
+    monkeypatch.setattr(units, "now_epoch", lambda: T1)
+    units.build_units(risk_store, synth.target_key, built_by=OWNER)
+    old_export = "".join(export.iter_lines(risk_store, OWNER, 0))
+
+    dest = RiskStore(tmp_path / "dest" / "risk_review.db")
+    dest.open()
+    dest.migrate()
+    try:
+        export.import_jsonl(dest, OWNER, old_export)
+        assert units.active_build(dest, synth.target_key)["rev"] == 1
+
+        _caps(monkeypatch, target_lines=8, max_lines=12, small_lines=4)
+        monkeypatch.setattr(units, "now_epoch", lambda: T2)
+        units.build_units(risk_store, synth.target_key, built_by=OWNER)
+        result = export.import_jsonl(dest, OWNER, "".join(export.iter_lines(risk_store, OWNER, T2)))
+        assert result["conflicts"] == [] and result["inserted"] > 1
+        assert units.active_build(dest, synth.target_key)["rev"] == 2
+
+        again = export.import_jsonl(dest, OWNER, old_export)
+        assert again["inserted"] == 0 and again["conflicts"] == []
+        here = units.active_build(dest, synth.target_key)
+        there = units.active_build(risk_store, synth.target_key)
+        assert here["rev"] == 2 and here["unit_ids"] == there["unit_ids"]
+        assert units.load_units(dest, synth.target_key) == units.load_units(risk_store, synth.target_key)
+    finally:
+        dest.close()

@@ -8,36 +8,59 @@
   `risk_get_diff(part='lines')` 에서 옮긴 글과 글자까지 같다.
 - 소스 앱에서 온 문자열(부품명·재질·조립 키·치수 이름)은 요약·목록 글·제목 어디서나 `sanitize_source_text(…, limit=0)` 를
   거쳐 «» 안에 선다(W2-10). 린터 적중은 빌드 실패가 아니라 그 줄만 다시 감싼다(`flags.lint_fallback`).
-- 저장·REST·손잡이는 이 모듈 밖(M2 단계 C)이다. 여기 함수는 DB 에 쓰지 않는다 — `_ir_view` 만 읽는다.
+- 순수 핵심(빌드·렌더·근거)은 DB 에 쓰지 않는다 — `_ir_view` 만 읽는다. 저장·조회(`compute`·`persist`·`build_units` 와 읽기
+  함수들)는 맨 끝 절이고(M2 단계 C), REST·MCP 는 그것을 감싼다.
 """
 from __future__ import annotations
 
+import gzip
 import hashlib
 import json
+import logging
 import re
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Sequence
 
 from . import brief, render
 from . import diff as diff_module
-from .common import canonical_json, sha256_hex
+from .common import canonical_json, now_epoch, sha256_hex
+from .errors import AppError
+
+log = logging.getLogger("hwax_risk.units")
 
 __all__ = [
+    "ACTIVE_STATUSES",
     "BUILDER_VERSION",
     "EXCLUDED_POLICY",
+    "OPEN_STATUSES",
     "UNIT_KINDS",
+    "UNIT_PARTS",
     "UnitCaps",
+    "active_build",
     "build_diff_units",
+    "build_units",
+    "caps_from_settings",
     "check_invariants",
     "collect_diff_items",
+    "compute",
     "digest_of",
     "evidence_lines",
+    "get_unit",
+    "latest_build",
+    "load_units",
+    "manifest",
     "manifest_item_of",
+    "manifest_items",
     "partition",
     "payload_of",
+    "persist",
+    "ref_index",
     "render_unit",
+    "review_payload",
+    "summary_of",
     "unit_hash",
     "unit_lines",
+    "unit_refs",
     "refs_of",
     "view_of",
     "walk_cids",
@@ -82,7 +105,7 @@ _GROUP_ROW = 8                 # 접은 줄의 한 줄당 참조 수
 
 @dataclass(frozen=True)
 class UnitCaps:
-    """단위 크기(줄 수). 글자 수 상한은 없다(D-21). 손잡이 배선은 M2 단계 C 다 — 여기 값은 코드 기본값이다."""
+    """단위 크기(줄 수). 글자 수 상한은 없다(D-21). 여기 값은 코드 기본값이고 박스의 값은 손잡이에서 읽는다(`caps_from_settings`)."""
 
     target_lines: int = 20        # 형제 조립을 채워 넣는 목표 크기
     max_lines: int = 40           # 단위 하나의 변경 줄 상한(부품 원자 하나가 넘으면 쪼개지 않고 atom_oversize)
@@ -1827,3 +1850,444 @@ def payload_of(unit: Mapping[str, Any], evidence: Mapping[str, Any] | None = Non
         "unit_hash": unit["unit_hash"], "summary_sha": unit["summary_sha"],
         "evidence_sha": evidence.get("sha"), "evidence_status": evidence.get("status"),
     }
+
+
+# ================================================================ 저장·조회(M2 단계 C — m2-wp2 걸음 5)
+# 단위 행은 (target_key, unit_id) 내용 주소다 — 처음 쓴 행이 남고(INSERT OR IGNORE) 고치지 않는다(M2.md 4.6.1). 단위의 동결
+# 발췌(근거)도 그 첫 쓰기와 같은 행·같은 트랜잭션에서 언다 — 근거의 규칙 적중은 상태 재계산으로 바뀔 수 있어, 나중에 다시
+# 만들면 같은 unit_id 가 다른 근거를 뜻하게 된다. 빌드 머리(rr_unit_builds)는 rev 마다 한 행이고 한 번 쓰고 고치지 않는다.
+# 활성 빌드는 status 가 ACTIVE_STATUSES 인 가장 큰 rev 다(파생 — 실패한 빌드는 활성 빌드를 바꾸지 않는다).
+ACTIVE_STATUSES: tuple[str, ...] = ("ok", "empty", "oversize")
+OPEN_STATUSES: tuple[str, ...] = ("ok", "oversize")          # flow='cells' 로 열 수 있는 빌드
+UNIT_PARTS: tuple[str, ...] = ("summary", "lines", "evidence")
+# 원장에 따로 열이 없는 단위 칸 — lines_gz 에 함께 싣는다(부품 이름·재질이 든 칸이라 폐기가 lines_gz 를 비우면 함께 빈다).
+_BODY_KEYS: tuple[str, ...] = ("lines", "parts", "synopsis", "notices", "path", "n_ifaces")
+_BUILD_COLS = ("rev, status, builder_version, input_hash, source_hash, caps_json, blocked_by, stats_json, invariants_json,"
+               " unit_ids_json, reason, error, built_by, built_at")
+_UNIT_COLS = ("unit_id, rev_first, kind, reviewable, scope_key, title, digest, unit_hash, cids_json, n_changes, n_parts,"
+              " context_json, flags_json, lines_gz, summary_gz, summary_sha, summary_chars, evidence_gz, evidence_sha,"
+              " evidence_chars, evidence_status, evidence_json, builder_version, created_at")
+
+
+def caps_from_settings(cfg: Any = None) -> UnitCaps:
+    """박스의 단위 크기 손잡이(HWAXRISK_UNIT_TARGET_LINES · _MAX_LINES · HWAXRISK_UNITS_SMALL_LINES · HWAXRISK_UNITS_MAX)."""
+    from . import config  # noqa: PLC0415 — 순수 핵심은 설정을 읽지 않는다.
+
+    cfg = config.settings if cfg is None else cfg
+    base = UnitCaps()
+    return UnitCaps(target_lines=int(getattr(cfg, "risk_unit_target_lines", base.target_lines)),
+                    max_lines=int(getattr(cfg, "risk_unit_max_lines", base.max_lines)),
+                    small_lines=int(getattr(cfg, "risk_units_small_lines", base.small_lines)),
+                    units_max=int(getattr(cfg, "risk_units_max", base.units_max)))
+
+
+def _gz(value: Any) -> bytes:
+    text = value if isinstance(value, str) else canonical_json(value)
+    return gzip.compress(text.encode("utf-8"), mtime=0)
+
+
+def _ungz(blob: Any, default: Any) -> Any:
+    if blob is None:
+        return default
+    text = gzip.decompress(bytes(blob)).decode("utf-8")
+    return text if isinstance(default, str) else json.loads(text)
+
+
+def _input_hash(caps: UnitCaps, source_hash: str) -> str:
+    """같은 diff·같은 IR·같은 빌더 판·같은 상한이면 같은 값 — 활성 빌드와 같으면 다시 쓰지 않는다."""
+    return sha256_hex(canonical_json({"builder": BUILDER_VERSION, "caps": asdict(caps), "source": source_hash}))[:16]
+
+
+def compute(store, kind: str, ref_id: str, *, owner_sub: str, caps: UnitCaps | None = None) -> dict:
+    """심사 대상 하나의 단위 빌드 — 읽기와 계산만 한다(타깃 행이 서기 전에도 부른다). 예외는 `status='failed'` 로 접는다.
+
+    반환은 `build_diff_units` 의 결과에 {kind, ref_id, source_hash, input_hash, evidence{unit_id: evidence_lines(…)},
+    error_detail} 를 더한 것이다. 현황(snap) 대상은 `failed`·`snap_not_supported`, diff 가 없으면 `failed`·`diff_absent`,
+    계산이 던지면 `failed`·`compute_error`(까닭은 error_detail)다. `suspects[]` 는 빌드의 인젝션 적중이고 근거의 적중은
+    `evidence[*].suspects` 다 — 둘 다 `persist` 가 큐에 올린다.
+    diff 는 id 로 읽는다(`owner_sub` 는 호출자가 이미 확인한 타깃·diff 의 소유자다 — 이양은 rr_diffs 를 옮기지 않는다).
+    """
+    caps = caps or caps_from_settings()
+    head: dict[str, Any] = {"builder_version": BUILDER_VERSION, "kind": kind, "ref_id": ref_id, "mode": "none",
+                            "blocked_by": None, "caps": {**asdict(caps), "retargeted": False}, "units": [],
+                            "unit_ids": [], "stats": {}, "invariants": {}, "suspects": [], "evidence": {},
+                            "source_hash": "", "input_hash": "", "error_detail": None}
+
+    def failed(error: str, detail: str | None = None) -> dict:
+        return {**head, "status": "failed", "error": error, "error_detail": detail}
+
+    if kind != "diff":
+        return failed("snap_not_supported" if kind == "snap" else "kind_unknown")
+    try:
+        row = store.query_one("SELECT base_snapshot_id, target_snapshot_id, diff_json, diff_hash FROM rr_diffs WHERE id = ?",
+                              (ref_id,))
+        if row is None:
+            return failed("diff_absent")
+        hashes = {r["id"]: r["ir_hash"] for r in store.query(
+            "SELECT id, ir_hash FROM rr_snapshots WHERE id IN (?, ?)", (row["base_snapshot_id"], row["target_snapshot_id"]))}
+        head["source_hash"] = sha256_hex(canonical_json([row["diff_hash"], hashes.get(row["base_snapshot_id"]),
+                                                         hashes.get(row["target_snapshot_id"])]))[:16]
+        head["input_hash"] = _input_hash(caps, head["source_hash"])
+        diff_obj = json.loads(row["diff_json"])
+        view = _ir_view(store, row["base_snapshot_id"], row["target_snapshot_id"])
+        built = build_diff_units(diff_obj, view, caps=caps)
+        evidence = {unit["unit_id"]: evidence_lines(unit, view, diff_obj) for unit in built["units"]}
+    except Exception as exc:  # noqa: BLE001 — 단위가 안 서면 대상은 옛 흐름으로 연다(W2-05). 까닭은 로그와 error_detail 에 남긴다.
+        log.exception("단위 빌드 실패: %s:%s", kind, ref_id)
+        return failed("compute_error", f"{type(exc).__name__}: {exc}")
+    return {**head, **built, "evidence": evidence}
+
+
+def persist(store, target_key: str, owner_sub: str, built: Mapping[str, Any], *, built_by: str | None,
+            reason: str | None = None) -> dict:
+    """빌드 하나를 원장에 얹는다 — 한 트랜잭션. 빌드 머리 행을 새 rev 로 넣고, 단위 행은 내용 주소로 INSERT OR IGNORE 한다
+    (같은 unit_id 의 옛 행과 그 동결 근거가 남는다). 빌드와 근거의 인젝션 적중(suspects)은 같은 트랜잭션에서 큐레이션 큐에
+    올린다(`rr_curation_queue(kind='suspect_text')`, 열린 같은 sha1 은 한 번).
+
+    반환 {rev, status, error, blocked_by, units_n, reviewable_n, units_new, stats, invariants}.
+    """
+    target = store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (target_key,))
+    if target is None:
+        raise AppError("E404", f"타깃이 없습니다 — {target_key}.", 404)
+    now = now_epoch()
+    error = built.get("error")
+    if error and built.get("error_detail"):
+        error = f"{error}: {built['error_detail']}"
+    units = list(built.get("units") or ())
+    evidence = dict(built.get("evidence") or {})
+    suspects = [*(built.get("suspects") or ()), *(s for ev in evidence.values() for s in (ev.get("suspects") or ()))]
+    new_n = 0
+    with store.tx():
+        rev = int(store.query_one("SELECT COALESCE(MAX(rev), 0) AS n FROM rr_unit_builds WHERE target_key = ?",
+                                  (target_key,))["n"]) + 1
+        store.execute(
+            f"INSERT INTO rr_unit_builds(target_key, owner_sub, {_BUILD_COLS}) VALUES ({','.join('?' * 16)})",
+            (target_key, owner_sub, rev, built["status"], built.get("builder_version") or BUILDER_VERSION,
+             built.get("input_hash") or "", built.get("source_hash") or "", canonical_json(built.get("caps") or {}),
+             built.get("blocked_by"), canonical_json(built.get("stats") or {}),
+             canonical_json(built.get("invariants") or {}), canonical_json(built.get("unit_ids") or []), reason, error,
+             built_by, now))
+        for unit in units:
+            ev = evidence.get(unit["unit_id"]) or {}
+            rows = list(ev.get("evidence") or ())
+            by_kind: dict[str, int] = {}
+            for item in rows:
+                by_kind[str(item.get("kind"))] = by_kind.get(str(item.get("kind")), 0) + 1
+            new_n += int(store.execute(
+                f"INSERT OR IGNORE INTO rr_units(target_key, owner_sub, project_id, {_UNIT_COLS})"
+                f" VALUES ({','.join('?' * 27)})",
+                (target_key, owner_sub, target["project_id"], unit["unit_id"], rev, unit["kind"],
+                 1 if unit["reviewable"] else 0, unit.get("scope_key"), unit["title"], unit["digest"], unit["unit_hash"],
+                 canonical_json(unit["cids"]), unit["n_changes"], unit["n_parts"], canonical_json(unit["context"]),
+                 canonical_json(unit["flags"]), _gz({key: unit.get(key) for key in _BODY_KEYS}),
+                 _gz(unit["summary"]), unit["summary_sha"], unit["summary_chars"],
+                 _gz({"evidence": rows, "notes": ev.get("notes") or "", "text": ev.get("text") or ""}) if ev else None,
+                 ev.get("sha"), ev.get("chars"), ev.get("status"),
+                 canonical_json({"error": ev.get("error"), "n": len(rows), "by_kind": dict(sorted(by_kind.items()))}),
+                 built.get("builder_version") or BUILDER_VERSION, now)) or 0)
+        brief.begin_suspect_queue(store, owner_sub)
+        try:
+            for payload in suspects:
+                brief._on_suspect(payload)
+        finally:
+            brief.end_suspect_queue()
+    reviewable = [u for u in units if u["reviewable"]]
+    return {"rev": rev, "status": built["status"], "error": built.get("error"), "blocked_by": built.get("blocked_by"),
+            "units_n": len(units), "reviewable_n": len(reviewable), "units_new": new_n,
+            "stats": dict(built.get("stats") or {}), "invariants": dict(built.get("invariants") or {})}
+
+
+def _build_row(row: Any) -> dict | None:
+    if row is None:
+        return None
+    out = dict(row)
+    for key in ("caps_json", "stats_json", "invariants_json", "unit_ids_json"):
+        out[key[:-5]] = json.loads(out.pop(key) or ("[]" if key == "unit_ids_json" else "{}"))
+    return out
+
+
+def active_build(store, target_key: str) -> dict | None:
+    """활성 빌드 — status 가 ok·empty·oversize 인 가장 큰 rev(없으면 None)."""
+    return _build_row(store.query_one(
+        f"SELECT {_BUILD_COLS} FROM rr_unit_builds WHERE target_key = ? AND status IN ({','.join('?' * len(ACTIVE_STATUSES))})"
+        " ORDER BY rev DESC LIMIT 1", (target_key, *ACTIVE_STATUSES)))
+
+
+def latest_build(store, target_key: str) -> dict | None:
+    """가장 최근 빌드(실패 포함, 없으면 None)."""
+    return _build_row(store.query_one(
+        f"SELECT {_BUILD_COLS} FROM rr_unit_builds WHERE target_key = ? ORDER BY rev DESC LIMIT 1", (target_key,)))
+
+
+def _review_job_n(store, target_key: str) -> int:
+    """그 타깃의 검토 잡(rr_jobs.mode='reviews') 수 — 상태와 상관없이."""
+    return int(store.query_one("SELECT COUNT(*) AS n FROM rr_jobs WHERE target_key = ? AND mode = 'reviews'",
+                               (target_key,))["n"] or 0)
+
+
+def build_units(store, target_key: str, *, built_by: str | None, reason: str | None = None,
+                caps: UnitCaps | None = None) -> dict:
+    """그 타깃의 단위를 (다시) 세운다 — 활성 빌드와 input_hash 가 같으면 쓰지 않는다(`changed: false`).
+
+    검토 잡이 하나라도 선 타깃에서 입력이 달라지는 재빌드는 409 `units_in_use` 다(M2.md 5절 #6 — 셀이 가리키는 단위를 바꾸지
+    않는다. force·셀 비우기는 M3). 실패한 빌드도 rev 를 하나 쓰지만 활성 빌드를 바꾸지 않는다.
+    반환 {rev, status, changed, blocked_by, stats, invariants, error?}.
+    """
+    target = store.query_one("SELECT owner_sub, kind, ref_id FROM rr_targets WHERE target_key = ?", (target_key,))
+    if target is None:
+        raise AppError("E404", f"타깃이 없습니다 — {target_key}.", 404)
+    built = compute(store, target["kind"], target["ref_id"], owner_sub=target["owner_sub"], caps=caps)
+    active = active_build(store, target_key)
+    if active is not None and built["input_hash"] and active["input_hash"] == built["input_hash"]:
+        return {"rev": active["rev"], "status": active["status"], "changed": False, "blocked_by": active["blocked_by"],
+                "stats": active["stats"], "invariants": active["invariants"]}
+    jobs = _review_job_n(store, target_key)
+    if jobs:
+        raise AppError("units_in_use", f"이 대상에는 검토 잡이 {jobs}건 있다 — 셀이 가리키는 단위를 바꾸는 재빌드는 하지 않는다"
+                       " (단위 크기 손잡이나 빌더 판을 바꿨으면 되돌리거나 새 대상을 연다).", 409,
+                       detail={"rev": active["rev"] if active else None, "review_jobs": jobs})
+    out = persist(store, target_key, target["owner_sub"], built, built_by=built_by, reason=reason)
+    result = {"rev": out["rev"], "status": out["status"], "changed": True, "blocked_by": out["blocked_by"],
+              "stats": out["stats"], "invariants": out["invariants"]}
+    if out["error"]:
+        result["error"] = out["error"]
+    return result
+
+
+def summary_of(store, target_key: str) -> dict:
+    """진행판·목록용 한 줄 — {rev, status, reviewable_n} · 실패만 있으면 {rev, status:'failed', error} · 없으면 {status:'none'}."""
+    build = active_build(store, target_key)
+    if build is not None:
+        return {"rev": build["rev"], "status": build["status"],
+                "reviewable_n": int((build["stats"].get("units") or {}).get("reviewable") or 0)}
+    last = latest_build(store, target_key)
+    if last is None:
+        return {"status": "none"}
+    return {"rev": last["rev"], "status": last["status"], "error": last["error"]}
+
+
+def _unit_rows(store, target_key: str, unit_ids: Sequence[str] | None = None) -> dict[str, dict]:
+    rows = store.query(f"SELECT {_UNIT_COLS} FROM rr_units WHERE target_key = ?", (target_key,))
+    wanted = None if unit_ids is None else set(unit_ids)
+    return {r["unit_id"]: dict(r) for r in rows if wanted is None or r["unit_id"] in wanted}
+
+
+def _unit_of(row: Mapping[str, Any]) -> dict:
+    """원장 행 → 빌드가 낸 단위 dict(`payload_of`·`refs_of`·`manifest_item_of` 가 읽는 모양)."""
+    body = _ungz(row["lines_gz"], {}) or {}
+    return {"unit_id": row["unit_id"], "kind": row["kind"], "reviewable": bool(row["reviewable"]),
+            "scope_key": row["scope_key"], "title": row["title"], "digest": row["digest"], "unit_hash": row["unit_hash"],
+            "cids": json.loads(row["cids_json"] or "[]"), "n_changes": row["n_changes"], "n_parts": row["n_parts"],
+            "context": json.loads(row["context_json"]) if row["context_json"] else {"lines": [], "links": []},
+            "flags": json.loads(row["flags_json"]) if row["flags_json"] else {},
+            "lines": body.get("lines") or [], "parts": body.get("parts") or [], "synopsis": body.get("synopsis") or "",
+            "notices": body.get("notices") or [], "path": body.get("path") or "", "n_ifaces": body.get("n_ifaces") or 0,
+            "summary": _ungz(row["summary_gz"], ""), "summary_sha": row["summary_sha"],
+            "summary_chars": row["summary_chars"], "rev_first": row["rev_first"]}
+
+
+def _evidence_of(row: Mapping[str, Any]) -> dict:
+    """원장 행의 동결 근거 → `evidence_lines` 의 반환 모양(status·sha·chars 는 열에서)."""
+    frozen = _ungz(row["evidence_gz"], {}) or {}
+    meta = json.loads(row["evidence_json"]) if row["evidence_json"] else {}
+    return {"unit_id": row["unit_id"], "status": row["evidence_status"], "error": meta.get("error"),
+            "evidence": frozen.get("evidence") or [], "notes": frozen.get("notes") or "", "text": frozen.get("text") or "",
+            "sha": row["evidence_sha"], "chars": row["evidence_chars"]}
+
+
+def _active_ids(build: Mapping[str, Any] | None) -> list[str]:
+    return [str(uid) for uid, _seq in sorted((build or {}).get("unit_ids") or [], key=lambda pair: pair[1])]
+
+
+def _page(items: Sequence[Any], offset: int, limit: int | None, budget_chars: int | None) -> tuple[list, int | None]:
+    """offset 부터 limit 개 또는 글자 예산까지(한 항목은 예산을 넘어도 그 하나는 싣는다) — 자르지 않고 나눈다. (쪽, next_offset)."""
+    start = max(0, int(offset))
+    page: list = []
+    used = 0
+    for item in items[start:]:
+        size = len(item) if isinstance(item, str) else len(canonical_json(item))
+        if page and ((limit is not None and len(page) >= limit) or (budget_chars is not None and used + size > budget_chars)):
+            break
+        page.append(item)
+        used += size
+    end = start + len(page)
+    return page, (end if end < len(items) else None)
+
+
+def _flow(store, target_key: str) -> str:
+    row = store.query_one("SELECT flow FROM rr_targets WHERE target_key = ?", (target_key,))
+    return str(row["flow"]) if row is not None else "panels"
+
+
+def manifest(store, target_key: str, *, offset: int = 0, limit: int | None = None,
+             budget_chars: int | None = None) -> dict:
+    """`GET /targets/{key}/units` 본체 — 활성 빌드의 단위 목록(seq 순). 단위가 없는 대상은 {status:'none'} 이다(500 이 아니다).
+
+    `limit`(개수)·`budget_chars`(글자 — MCP 결과 상한 안에 들게)로 나눠 주고 뒤가 남으면 `next_offset` 을 싣는다. 자르지 않는다.
+    """
+    build = active_build(store, target_key)
+    shown = build or latest_build(store, target_key)
+    out: dict[str, Any] = {"target_key": target_key, "flow": _flow(store, target_key)}
+    if shown is None:
+        return {**out, "status": "none", "total": 0, "offset": 0, "returned": 0, "units": []}
+    out.update({"rev": shown["rev"], "status": shown["status"], "blocked_by": shown["blocked_by"],
+                "stats": shown["stats"], "invariants": shown["invariants"]})
+    if build is None:
+        out["error"] = shown["error"]
+    ids = _active_ids(build)
+    rows = _unit_rows(store, target_key, ids)
+    items = []
+    for seq, uid in enumerate(ids, start=1):
+        row = rows.get(uid)
+        if row is None:                     # 빌드 머리만 들여오고 단위 행이 없는 박스(반출 since 창) — 숨기지 않고 표시한다
+            items.append({"unit_id": uid, "seq": seq, "row_absent": True})
+            continue
+        context = json.loads(row["context_json"]) if row["context_json"] else {}
+        items.append({"unit_id": uid, "seq": seq, "kind": row["kind"], "reviewable": bool(row["reviewable"]),
+                      "scope_key": row["scope_key"], "title": row["title"], "digest": row["digest"],
+                      "n_changes": row["n_changes"], "n_parts": row["n_parts"], "summary_chars": row["summary_chars"],
+                      "evidence_chars": row["evidence_chars"], "evidence_status": row["evidence_status"],
+                      "unit_hash": row["unit_hash"], "links": context.get("links") or []})
+    page, next_offset = _page(items, offset, limit, budget_chars)
+    out.update({"total": len(items), "offset": max(0, int(offset)), "returned": len(page), "units": page})
+    if next_offset is not None:
+        out["next_offset"] = next_offset
+    return out
+
+
+def _row_of(store, target_key: str, unit_id: str) -> dict:
+    row = _unit_rows(store, target_key, [unit_id]).get(unit_id)
+    if row is None:
+        raise AppError("unit_not_found", f"이 대상에 그 단위가 없습니다 — {unit_id}.", 404)
+    return row
+
+
+def get_unit(store, target_key: str, unit_id: str, part: str = "summary", *, offset: int = 0,
+             budget_chars: int | None = None) -> dict:
+    """`GET /targets/{key}/units/{unit_id}?part=` 본체 — summary(요약 글) · lines(소유 줄 + 문맥 줄) · evidence(동결 근거).
+
+    `seq`·`total` 은 활성 빌드에서의 자리다(요약에는 순번을 박지 않는다 — n/N 은 읽을 때 붙인다, W2-13 c). 활성 빌드에 없는
+    옛 단위도 읽힌다(seq 가 None). `budget_chars` 를 주면 글자 예산으로 나눠 `next_offset` 을 싣는다(summary 는 줄, lines 는
+    소유 줄 다음 문맥 줄, evidence 는 근거 줄 단위) — 자르지 않는다.
+    """
+    if part not in UNIT_PARTS:
+        raise AppError("E100", f"part 는 {list(UNIT_PARTS)} 중 하나여야 합니다 — {part!r}.", 422)
+    row = _row_of(store, target_key, unit_id)
+    ids = _active_ids(active_build(store, target_key))
+    out: dict[str, Any] = {"target_key": target_key, "unit_id": unit_id, "part": part, "kind": row["kind"],
+                           "title": row["title"], "rev_first": row["rev_first"],
+                           "seq": ids.index(unit_id) + 1 if unit_id in ids else None, "total": len(ids),
+                           "offset": max(0, int(offset))}
+    if part == "summary":
+        lines = (_ungz(row["summary_gz"], "") or "").split("\n")
+        page, next_offset = _page(lines, offset, None, budget_chars)
+        out.update({"text": "\n".join(page), "lines_total": len(lines), "summary_chars": row["summary_chars"],
+                    "summary_sha": row["summary_sha"]})
+    elif part == "lines":
+        unit = _unit_of(row)
+        rows = [("lines", x) for x in unit["lines"]] + [("context", x) for x in unit["context"].get("lines") or []]
+        page, next_offset = _page(rows, offset, None, budget_chars)
+        out.update({"lines": [x for k, x in page if k == "lines"], "context": [x for k, x in page if k == "context"],
+                    "rows_total": len(rows)})
+    else:
+        ev = _evidence_of(row)
+        page, next_offset = _page(ev["evidence"], offset, None, budget_chars)
+        out.update({"evidence": page, "evidence_total": len(ev["evidence"]), "evidence_status": ev["status"],
+                    "error": ev["error"], "notes": ev["notes"], "evidence_sha": ev["sha"], "evidence_chars": ev["chars"]})
+    if next_offset is not None:
+        out["next_offset"] = next_offset
+    return out
+
+
+def load_units(store, target_key: str, *, reviewable_only: bool = True) -> list[dict]:
+    """활성 빌드의 단위 dict 전부(seq 순, `seq` 를 붙인다). 활성 빌드가 없으면 빈 목록이다."""
+    ids = _active_ids(active_build(store, target_key))
+    rows = _unit_rows(store, target_key, ids)
+    absent = [uid for uid in ids if uid not in rows]
+    if absent:
+        # 격자의 분모가 줄어든 채 돌지 않는다 — 빌드가 가리키는 단위 행이 없으면(반출 since 창으로 머리만 들여왔다) 멈춘다.
+        raise AppError("unit_rows_absent", f"활성 빌드가 가리키는 단위 행 {len(absent)}개가 이 박스에 없습니다 — 단위를 다시"
+                       f" 세우거나(POST /api/targets/{target_key}/units) 그 단위 행이 든 반출을 들여옵니다.", 409,
+                       detail={"unit_ids": absent})
+    out = []
+    for seq, uid in enumerate(ids, start=1):
+        unit = {**_unit_of(rows[uid]), "seq": seq}
+        if unit["reviewable"] or not reviewable_only:
+            out.append(unit)
+    return out
+
+
+def manifest_items(store, target_key: str) -> list[dict]:
+    """전수 훑기의 단위 목록 — 활성 빌드의 검토 대상 단위 전부를 `{unit_id, kind, title, text}` 로(글자 상한 없음, D-21)."""
+    return [manifest_item_of(unit) for unit in load_units(store, target_key, reviewable_only=True)]
+
+
+# 타깃 수준 결측(스냅샷 missing_json) → 엔진에 싣는 `missing[{kind, note}]`(M2.md 4.3). 코드가 쓴 글뿐이다.
+_MISSING_NOTES: tuple[tuple[str, str, str], ...] = (
+    ("ecad_absent", "ecad", "회로(ECAD) 소스가 없다 — 회로 변경은 이 비교에 없다"),
+    ("mcad_absent", "mcad", "형상(MCAD) 소스가 없다 — 부품 형상·계면 변경은 이 비교에 없다"),
+    ("dyna_absent", "dyna", "해석 모델(Dyna) 소스가 없다 — 해석 조건·결과 변경은 이 비교에 없다"),
+)
+
+
+def _target_missing(store, target_key: str, blocked_by: str | None) -> list[dict]:
+    """두 스냅샷(diff 면 base·target)의 결측 표지와 빌드의 의미층 차단 — 단위가 아니라 대상 수준이라 모든 단위에 같다."""
+    target = store.query_one("SELECT kind, ref_id FROM rr_targets WHERE target_key = ?", (target_key,))
+    sids: list[str] = []
+    if target is not None and target["kind"] == "diff":
+        row = store.query_one("SELECT base_snapshot_id, target_snapshot_id FROM rr_diffs WHERE id = ?", (target["ref_id"],))
+        if row is not None:
+            sids = [row["base_snapshot_id"], row["target_snapshot_id"]]
+    elif target is not None:
+        sids = [target["ref_id"]]
+    sides: dict[str, list[str]] = {}
+    for role, sid in zip(("base", "target") if len(sids) == 2 else ("target",), sids):
+        row = store.query_one("SELECT missing_json FROM rr_snapshots WHERE id = ?", (sid,))
+        missing = json.loads(row["missing_json"]) if row is not None and row["missing_json"] else {}
+        for key, _kind, _note in _MISSING_NOTES:
+            if missing.get(key):
+                sides.setdefault(key, []).append(role)
+    out = []
+    for key, kind, note in _MISSING_NOTES:
+        if key in sides:
+            where = "두 리비전 모두" if len(sides[key]) == 2 else ("앞 리비전" if sides[key] == ["base"] else
+                                                               "뒤 리비전" if len(sids) == 2 else "이 스냅샷")
+            out.append({"kind": kind, "note": f"{note}({where})."})
+    if blocked_by:
+        out.append({"kind": "semantic_blocked",
+                    "note": f"의미층 이벤트가 막힌 비교다(blocked_by={_bare(blocked_by)}) — 구조·파라메트릭 원자료로만 본다."})
+    return out
+
+
+def review_payload(store, target_key: str, unit_id: str, agent_key: str) -> dict:
+    """카드 대조 요청의 `unit`(M2.md 4.3) — `payload_of`(단위·동결 근거) + `missing[{kind, note}]`(대상 수준 결측과 빌드의 의미층
+    차단) + `input_gaps`(그 전문가의 입력 결손, `planner.review_order` 의 계산값). 줄이지 않는다(엔진에 그대로 간다).
+
+    그 전문가가 로스터에 없으면 404 `agent_not_in_roster` 다(입력 결손을 빈 목록으로 지어내지 않는다).
+    """
+    from . import planner  # noqa: PLC0415 — planner 는 routes 를 거쳐 무거운 import 를 끈다.
+
+    row = _row_of(store, target_key, unit_id)
+    order = next((r for r in planner.review_order(store, target_key) if r["agent_key"] == agent_key), None)
+    if order is None:
+        raise AppError("agent_not_in_roster", f"이 대상의 로스터에 없는 전문가입니다 — {agent_key}.", 404)
+    build = active_build(store, target_key) or latest_build(store, target_key)
+    payload = payload_of(_unit_of(row), _evidence_of(row))
+    payload["missing"] = _target_missing(store, target_key, (build or {}).get("blocked_by"))
+    payload["input_gaps"] = list(order["input_gaps"])
+    return payload
+
+
+def unit_refs(store, target_key: str, unit_id: str) -> set[str]:
+    """그 단위에서 판정이 인용할 수 있는 참조(`refs_of` — 소유 줄 + 동결 근거 줄, 문맥 줄은 뺀다). Q8 의 기준이다."""
+    row = _row_of(store, target_key, unit_id)
+    return refs_of(_unit_of(row), _evidence_of(row))
+
+
+def ref_index(store, target_key: str) -> dict[str, str]:
+    """활성 빌드에서 소유 참조 → 그것을 소유한 단위(참조 하나에 단위 하나 — U2)."""
+    out: dict[str, str] = {}
+    for unit in load_units(store, target_key, reviewable_only=False):
+        for ref in unit["cids"]:
+            out[str(ref)] = unit["unit_id"]
+    return out
