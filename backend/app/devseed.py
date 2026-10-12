@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
 from app import ir_builder
+from app.adapters import mcad as mcad_adapter
 
 ADAPTER_VERSION = "1.0"
 FILE_STEM = "syn_phone"
@@ -309,6 +310,11 @@ def to_adapter_results(d: Design, *, captured_at: int = CAPTURED_AT) -> list[dic
                            "detected_at": None, "params_hash": "tol-a"},
         })
     content = _digest([nodes, edges])
+    stats = {"files": 1, "leaf_instances": len(d.parts), "assemblies": len({p.asm for p in d.parts.values()}),
+             "interfaces": len(edges)}
+    # 실제 어댑터처럼 계면 뒤에 하이라키(part_of) 엣지를 싣는다 — 어댑터 함수를 그대로 부른다(생산자 그대로, W2-02).
+    # 노드에서 유도되는 엣지라 내용 해시·계면 수에는 넣지 않는다(실제 어댑터의 stats.interfaces 도 계면 행 수다).
+    edges.extend(mcad_adapter._part_of_edges(nodes))
     mcad = {
         "source": {"kind": "mcad", "app_key": "heax-step_forge", "adapter_version": ADAPTER_VERSION,
                    "channel": "rest+mcp",
@@ -318,9 +324,7 @@ def to_adapter_results(d: Design, *, captured_at: int = CAPTURED_AT) -> list[dic
                                            "schema_ap": "AUTOMOTIVE_DESIGN"}]},
                    "source_hash": f"sha-mcad-{content[:16]}", "tol_config_hash": "tol-a",
                    "tol_known_keys": ["tied_gap", "clearance_gap", "tied_area", "tied_width"], "scope": None,
-                   "stats": {"files": 1, "leaf_instances": len(d.parts), "assemblies": len({p.asm for p in d.parts.values()}),
-                             "interfaces": len(edges)},
-                   "degraded": []},
+                   "stats": stats, "degraded": []},
         "nodes": nodes, "edges": edges, "warnings": [], "degraded": [], "call_ids": ["syn-mcad-001", "syn-mcad-002"],
     }
     out = [mcad]
