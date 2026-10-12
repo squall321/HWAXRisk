@@ -606,7 +606,8 @@ def get_project(project_id: str, ident: identity.Identity = Depends(identity.cur
     jobs = [dict(r) for r in store.query(
         "SELECT j.id AS id, j.target_key AS target_key, j.tier AS tier, j.state AS state,"
         " j.pause_reason AS pause_reason, j.panels_done AS panels_done, j.panels_total AS panels_total,"
-        " j.error AS error, j.progress_json AS progress_json FROM rr_jobs j JOIN rr_targets t"
+        " j.error AS error, j.progress_json AS progress_json, COALESCE(j.mode, 'panels') AS mode"
+        " FROM rr_jobs j JOIN rr_targets t"
         " ON t.target_key = j.target_key WHERE t.project_id = ? AND j.owner_sub = ?"
         " ORDER BY j.created_at DESC LIMIT 50", (project_id, owner_sub))]
     tags = [dict(r) for r in store.query(
@@ -617,8 +618,10 @@ def get_project(project_id: str, ident: identity.Identity = Depends(identity.cur
         "sources": _project_sources(project_id),
         "snapshots": snapshots,
         "targets": targets,
+        # 거르지 않고 방식(mode)을 싣는다 — 검토 잡(reviews)도 이 과제의 잡이다(재설계 M2 S6).
         "jobs": [{"id": j["id"], "target_key": j["target_key"], "tier": j["tier"], "state": j["state"],
-                  "kind": "panel_batch", "error": j["error"],
+                  "kind": "panel_batch" if j["mode"] == "panels" else "review_batch", "mode": j["mode"],
+                  "error": j["error"],
                   "progress": {"done": j["panels_done"], "total": j["panels_total"],
                                **_loads(j["progress_json"], {})}} for j in jobs],
         "character_top_tags": tags,
@@ -2515,9 +2518,10 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
     store = get_store()
     summary = planner.coverage_summary(store, target_key)
     level = registry_module.close_level(store, target_key, persist=False)
+    # `job` 은 패널 잡이다(칸의 뜻 불변) — 카드 대조 검토 잡은 진행판의 제 칸(review)이 맡는다(재설계 M2 S6·S12).
     job = store.query_one(
         "SELECT id, tier, state, pause_reason, panels_done, panels_total, error, progress_json FROM rr_jobs"
-        " WHERE target_key = ? ORDER BY created_at DESC LIMIT 1", (target_key,))
+        f" WHERE target_key = ? AND {runner.PANEL_JOBS_SQL} ORDER BY created_at DESC LIMIT 1", (target_key,))
     if job is not None:
         job = dict(job)
         # 도는 패널의 마지막 신호(러너가 1분 간격으로 적는다) — 벽시계가 몇 시간이라, 이것이 없으면 진행판에서

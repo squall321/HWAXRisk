@@ -340,7 +340,8 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str, consent: 
     web = web_paths(project_id=target["project_id"], target_key=target_key)
     live = store.query_one(
         "SELECT id, tier, state, pause_reason, panels_done, panels_total, error, credential_email FROM rr_jobs"
-        f" WHERE target_key = ? AND tier = ? AND state IN ({','.join('?' for _ in LIVE_JOB_STATES)})"
+        f" WHERE target_key = ? AND tier = ? AND {runner.PANEL_JOBS_SQL}"
+        f" AND state IN ({','.join('?' for _ in LIVE_JOB_STATES)})"
         " ORDER BY created_at DESC, rowid DESC LIMIT 1", (target_key, tier, *LIVE_JOB_STATES))
     if live is not None:
         return {"job_id": live["id"], "created": False, **{k: live[k] for k in live.keys() if k != "id"}, "web": web}
@@ -677,7 +678,8 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
     if target.get("flow") == "cells":
         return _cells_answer(answer, target_key, project_id, coverage["units"], repersist_steps, facts, blocked, notes)
     jobs = [dict(r) for r in store.query(
-        "SELECT tier, state FROM rr_jobs WHERE target_key = ? ORDER BY created_at DESC, rowid DESC", (target_key,))]
+        f"SELECT tier, state FROM rr_jobs WHERE target_key = ? AND {runner.PANEL_JOBS_SQL}"
+        " ORDER BY created_at DESC, rowid DESC", (target_key,))]
     done_tiers = {j["tier"] for j in jobs if j["state"] == "completed"}
     next_tier = next((t["tier"] for t in plan_tiers if t["panels"] and t["tier"] not in done_tiers), None)
     watch = [_step("risk_get_coverage", {"target_key": target_key, "with_seats": False}, "진행판(좌석 상태·완결 레벨).",

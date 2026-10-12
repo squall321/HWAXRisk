@@ -874,55 +874,90 @@ def create_job(
 
 # 카드 대조(flow='cells') 대상에서 막는 패널 Tier — 쟁점 패널(M3 의 tier 'I')은 그 대상에서 도는 것이라 막지 않는다(D-24).
 FLOW_GATED_TIERS: tuple[str, ...] = ("A", "B", "C")
+# 살아 있는 잡의 상태(사람이 재개·취소할 수 있는 것까지).
+LIVE_JOB_STATES: tuple[str, ...] = ("queued", "running", "paused", "cancelling")
+# 패널 러너·진행판·브리프가 보는 잡 — mode 가 NULL(v4 전 행)이거나 panels 인 것. 검토 잡(reviews)은 그 러너의 것이다.
+PANEL_JOBS_SQL = "COALESCE(mode, 'panels') = 'panels'"
 
 
 def panel_job_gate(store: Any, target_key: str, tier: str) -> None:
     """패널 잡의 문지기 — 사용자 잡과 C3 자동 후속(_finish_job)이 둘 다 create_job 을 지나므로 여기 둔다(라우트가 아니라).
 
-    카드 대조 대상(flow='cells')의 Tier A·B·C 는 422 `flow_mismatch` 다.
+    카드 대조 대상(flow='cells')의 Tier A·B·C 는 422 `flow_mismatch`, 그 대상에 살아 있는 검토 잡이 있으면 409
+    `review_job_running` 이다(한 대상의 두 방식이 같은 좌석·LLM 을 동시에 쓰지 않게, 재설계 M2 S6).
     """
     row = store.query_one("SELECT flow FROM rr_targets WHERE target_key = ?", (target_key,))
     if row is not None and row["flow"] == "cells" and tier in FLOW_GATED_TIERS:
         raise AppError("flow_mismatch", f"이 대상은 카드 대조(flow='cells') 방식이다 — Tier {tier} 패널 잡을 세우지 않는다."
                        f" 패널로 보려면 검토 잡이 서기 전에 방식을 panels 로 되돌린다(POST /api/targets/{target_key}/flow).", 422,
                        detail={"flow": "cells", "tier": tier})
+    live = store.query_one(
+        f"SELECT id, state FROM rr_jobs WHERE target_key = ? AND mode = 'reviews' AND state IN ({','.join('?' * len(LIVE_JOB_STATES))})"
+        " ORDER BY created_at DESC LIMIT 1", (target_key, *LIVE_JOB_STATES))
+    if live is not None:
+        raise AppError("review_job_running", f"이 대상에는 살아 있는 카드 대조 검토 잡({live['id']}, {live['state']})이 있다 —"
+                       " 그 잡이 끝나거나 취소된 뒤 패널 잡을 세운다.", 409, detail={"job_id": live["id"], "state": live["state"]})
 
 
 def _set_job(store: Any, job_id: str, state: str, *, reason: str | None = None, error: str | None = None,
-             by: str | None = None) -> dict:
+             by: str | None = None, hold: Mapping[str, Any] | None = None) -> dict:
     """잡 상태 전이 1건. `by` 는 주체다 — 사람은 email, 자동 정지는 'code:diminishing'·'code:daily_cap'(plan §0.6),
-    엔진·좌석 탓이 아닌 중단으로 멈춘 것은 'code:<UNCHARGED_CODES 의 사유>' 다."""
+    엔진·좌석 탓이 아닌 중단으로 멈춘 것은 'code:<UNCHARGED_CODES 의 사유>' 다.
+
+    `hold` 는 검토 잡의 보류 열({code, until, n?}) — 주면 같은 문장에서 hold_code·hold_until(·hold_n)을 쓴다. 패널 잡은 주지
+    않는다(그 열을 건드리지 않는다 — 패널 경로의 문장은 종전 그대로다)."""
     now = now_epoch()
     actor = by or (f"code:{reason}" if reason in ("diminishing", "daily_cap") else None)
+    sets, params = ["state = ?", "pause_reason = ?", "error = ?"], [state, reason, error]
     if actor:
-        store.execute(
-            "UPDATE rr_jobs SET state = ?, pause_reason = ?, error = ?, state_by = ?, state_at = ?,"
-            " updated_at = ? WHERE id = ?", (state, reason, error, actor, now, now, job_id))
-    else:
-        store.execute(
-            "UPDATE rr_jobs SET state = ?, pause_reason = ?, error = ?, updated_at = ? WHERE id = ?",
-            (state, reason, error, now, job_id))
-    return {"job_id": job_id, "state": state, "pause_reason": reason, "state_by": actor, "state_at": now}
+        sets += ["state_by = ?", "state_at = ?"]
+        params += [actor, now]
+    if hold is not None:
+        sets += ["hold_code = ?", "hold_until = ?"]
+        params += [hold.get("code"), hold.get("until")]
+        if "n" in hold:
+            sets.append("hold_n = ?")
+            params.append(int(hold["n"]))
+    store.execute(f"UPDATE rr_jobs SET {', '.join(sets)}, updated_at = ? WHERE id = ?", (*params, now, job_id))
+    out = {"job_id": job_id, "state": state, "pause_reason": reason, "state_by": actor, "state_at": now}
+    if hold is not None:
+        out.update({"hold_code": hold.get("code"), "hold_until": hold.get("until")})
+    return out
+
+
+# 사람의 재개·취소가 검토 잡의 보류 열 셋을 비우는 값(P-10 · X4-25).
+_HOLD_CLEARED = {"code": None, "until": None, "n": 0}
+
+
+def _job_row(store: Any, job_id: str) -> Any:
+    row = store.query_one("SELECT state, COALESCE(mode, 'panels') AS mode, hold_code FROM rr_jobs WHERE id = ?", (job_id,))
+    if row is None:
+        raise AppError("E404", f"잡이 없습니다: {job_id}", 404)
+    return row
 
 
 def pause_job(store: Any, job_id: str, *, reason: str = "user", by: str | None = None) -> dict:
     """일시정지(reason ∈ diminishing|daily_cap|user). 도는 패널이 있으면 그 스트림을 닫는다(`_stop_reader`) —
-    패널 경계까지 기다리지 않는다. 닫힌 패널의 좌석은 차감 없이 pending 으로 돌아가고 재개하면 다시 편성된다."""
-    row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))
-    if row is None:
-        raise AppError("E404", f"잡이 없습니다: {job_id}", 404)
+    패널 경계까지 기다리지 않는다. 닫힌 패널의 좌석은 차감 없이 pending 으로 돌아가고 재개하면 다시 편성된다.
+
+    검토 잡은 사람의 정지가 보류 열을 hold_code='user'·hold_until=NULL 로 덮고, 코드가 멈춘(보류 코드가 사람이 아닌) paused
+    에도 듣는다 — 사람이 멈춘 잡은 자동 재개가 다시 줄에 세우지 않는다(재설계 M2 S6, P-10)."""
+    row = _job_row(store, job_id)
+    if row["mode"] != "panels":
+        if not (row["state"] in ("queued", "running") or (row["state"] == "paused" and row["hold_code"] != "user")):
+            raise AppError("E100", f"일시정지할 수 없는 상태입니다 — {row['state']}.", 409)
+        return _set_job(store, job_id, "paused", reason="user", by=by, hold={"code": "user", "until": None})
     if row["state"] not in ("queued", "running"):
         raise AppError("E100", f"일시정지할 수 없는 상태입니다 — {row['state']}.", 409)
     return _set_job(store, job_id, "paused", reason=reason, by=by)
 
 
 def resume_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
-    row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))
-    if row is None:
-        raise AppError("E404", f"잡이 없습니다: {job_id}", 404)
+    """재개 — 멈춘 잡을 줄에 다시 세운다. 검토 잡은 보류 열 셋(hold_code·hold_until·hold_n)을 비운다."""
+    row = _job_row(store, job_id)
     if row["state"] != "paused":
         raise AppError("E100", f"재개할 수 없는 상태입니다 — {row['state']}.", 409)
-    return _set_job(store, job_id, "queued", by=by)
+    return _set_job(store, job_id, "queued", by=by, hold=_HOLD_CLEARED if row["mode"] != "panels" else None)
 
 
 def cancel_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
@@ -931,14 +966,13 @@ def cancel_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
     종전에는 패널이 끝까지 갔다 — 벽시계가 12시간이라 취소한 잡의 패널이 러너 자리와 그 타깃의 직렬 순서를 최대
     12시간 붙들었다. 닫는 것은 앱의 구독이다. 엔진 쪽 심의는 분리 태스크라 끝까지 돌 수 있다.
     """
-    row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))
-    if row is None:
-        raise AppError("E404", f"잡이 없습니다: {job_id}", 404)
+    row = _job_row(store, job_id)
     if row["state"] in ("cancelled", "completed", "failed"):
         return {"job_id": job_id, "state": row["state"], "pause_reason": None}
+    hold = _HOLD_CLEARED if row["mode"] != "panels" else None       # 검토 잡은 보류 열 셋을 비운다
     if row["state"] == "running":
-        return _set_job(store, job_id, "cancelling", by=by)
-    return _set_job(store, job_id, "cancelled", by=by)
+        return _set_job(store, job_id, "cancelling", by=by, hold=hold)
+    return _set_job(store, job_id, "cancelled", by=by, hold=hold)
 
 
 def _panels_today(store: Any, target_key: str) -> int:
@@ -950,22 +984,31 @@ def _panels_today(store: Any, target_key: str) -> int:
 
 
 def claim_next_job(store: Any, settings: Any | None = None) -> dict | None:
-    """다음에 패널을 돌릴 잡 1건을 집는다. 타깃당 직렬·일일 상한·자격·취소를 여기서 판정한다."""
+    """다음에 패널을 돌릴 잡 1건을 집는다. 타깃당 직렬·일일 상한·자격·취소를 여기서 판정한다.
+
+    패널 잡만 본다(`rr_jobs.mode` 가 NULL·panels — 한 표에 카드 대조 검토 잡이 같이 산다, 재설계 M2 S6). 검토 잡은 그 러너가
+    집고 멈추고 취소를 닫는다. 그래도 패널 잡이 아닌 것이 집히면 패널 러너로 돌리지 않고 예외로 드러낸다.
+    """
     cfg = config.settings if settings is None else settings
     midnight = _local_midnight()
     for row in store.query(
         "SELECT id, target_key, owner_sub, tier, state, pause_reason, params_json, panels_done, updated_at"
-        " FROM rr_jobs WHERE state = 'paused' AND pause_reason = 'daily_cap' ORDER BY created_at ASC, id ASC"
+        f" FROM rr_jobs WHERE state = 'paused' AND pause_reason = 'daily_cap' AND {PANEL_JOBS_SQL}"
+        " ORDER BY created_at ASC, id ASC"
     ):
         if int(row["updated_at"] or 0) < midnight:
             _set_job(store, row["id"], "queued")
 
     for row in store.query(
-        "SELECT id, target_key, owner_sub, tier, state, params_json, panels_done, panels_total, error"
-        " FROM rr_jobs WHERE state IN ('queued', 'running', 'cancelling') ORDER BY created_at ASC, id ASC"
+        "SELECT id, target_key, owner_sub, tier, state, params_json, panels_done, panels_total, error,"
+        " COALESCE(mode, 'panels') AS mode"
+        f" FROM rr_jobs WHERE state IN ('queued', 'running', 'cancelling') AND {PANEL_JOBS_SQL}"
+        " ORDER BY created_at ASC, id ASC"
     ):
         job = dict(row)
         last_error = job.pop("error")
+        if job.pop("mode") != "panels":
+            raise RuntimeError(f"패널 러너가 패널 잡이 아닌 잡({job['id']})을 집었다 — claim_next_job 의 mode 거름을 본다.")
         if job["state"] == "cancelling":
             _set_job(store, job["id"], "cancelled")
             continue
@@ -1100,7 +1143,8 @@ def recover_running_panels(store: Any) -> dict:
         if row["has_result"]:
             saved.append(row["id"])
     paused = 0
-    for job in store.query("SELECT id, target_key FROM rr_jobs WHERE state = 'running'"):
+    # 패널 잡만 — 도는 검토 잡은 그 러너의 복구가 맡는다(여기서 queued 로 돌리면 선점한 셀과 어긋난다, 재설계 M2 S6).
+    for job in store.query(f"SELECT id, target_key FROM rr_jobs WHERE state = 'running' AND {PANEL_JOBS_SQL}"):
         if job["target_key"] in cut_targets:
             saved = cut_targets[job["target_key"]]
             # 결과가 저장된 패널이 있으면 '재개하면 이어 돈다' 를 말하지 않는다 — 그대로 따른 사람이 다시 저장 전에 재개해
@@ -1247,7 +1291,7 @@ def _finish_job(store: Any, job: Mapping[str, Any], settings: Any) -> dict:
 
 
 # C3 자동 후속을 막는 문지기의 코드 — 이것만 받아 잡을 completed 로 닫는다(그 밖의 실패는 종전대로 올린다).
-FOLLOW_UP_REFUSALS: tuple[str, ...] = ("flow_mismatch",)
+FOLLOW_UP_REFUSALS: tuple[str, ...] = ("flow_mismatch", "review_job_running")
 
 
 def _diminishing(store: Any, target_key: str) -> bool:

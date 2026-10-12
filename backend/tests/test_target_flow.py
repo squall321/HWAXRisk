@@ -278,6 +278,32 @@ def test_the_guide_shows_both_flows_before_a_target_opens_and_the_cells_branch_a
     assert opened["next"][0]["args"] == {"target_key": key} and opened["next"][0]["write"] is False
 
 
+# ---------------------------------------------------------------- 패널 경로는 패널 잡만 본다(재설계 M2 S6)
+def test_panel_job_transitions_leave_the_hold_columns_alone(store):
+    """패널 잡의 정지·재개·취소는 종전 그대로다 — 검토 잡의 보류 열(hold_code·hold_until·hold_n)을 건드리지 않고, mode 는 NULL
+    (v4 전 행과 같은 '패널') 그대로다. 진행판의 job 칸·과제 화면의 잡 목록은 그 잡을 패널 잡으로 보인다."""
+    _register_pat(store)
+    synth = factories.make_diff_target(store, 3)
+    job_id = routes.create_job(synth.target_key, routes.JobBody(tier="A"), ident=factories.ident(OWNER))["job_id"]
+
+    def row() -> dict:
+        return dict(store.query_one("SELECT state, pause_reason, mode, hold_code, hold_until, hold_n FROM rr_jobs"
+                                    " WHERE id = ?", (job_id,)))
+
+    assert row() == {"state": "queued", "pause_reason": None, "mode": None, "hold_code": None, "hold_until": None,
+                     "hold_n": 0}
+    paused = runner.pause_job(store, job_id, by=OWNER)
+    assert "hold_code" not in paused and row()["state"] == "paused" and row()["pause_reason"] == "user"
+    assert _refused(runner.pause_job, store, job_id, by=OWNER).http_status == 409
+    runner.resume_job(store, job_id, by=OWNER)
+    runner.cancel_job(store, job_id, by=OWNER)
+    assert row() == {"state": "cancelled", "pause_reason": None, "mode": None, "hold_code": None, "hold_until": None,
+                     "hold_n": 0}
+    assert routes.coverage_payload(synth.target_key, owner_sub=OWNER)["job"]["id"] == job_id
+    page = routes.get_project(synth.project_id, ident=factories.ident(OWNER))
+    assert [(j["id"], j["mode"], j["kind"]) for j in page["jobs"]] == [(job_id, "panels", "panel_batch")]
+
+
 # ---------------------------------------------------------------- 검토 잡이 있어야 보이는 규칙(C2b 의 생산자 자리표시)
 class C2bProducerMissing(Exception):
     """검토 잡의 생산자(review_runner.create_review_job, m2-wp3b S5)가 아직 없다 — 자리표시의 기대한 실패는 이것 하나다."""
@@ -291,12 +317,15 @@ def _create_review_job(store, target_key: str, *, user_memo: str | None = None) 
     if not hasattr(review_runner, "create_review_job"):
         raise C2bProducerMissing("app.review_runner.create_review_job")
     _register_pat(store)
-    out = review_runner.create_review_job(store, target_key, owner_sub=OWNER, requester_sub=OWNER, scope={},
-                                          user_memo=user_memo, consent=True, consent_source="web",
-                                          settings=config.settings)
+    # 범위는 ECAD 에 기대지 않는 영역 하나다 — M2 는 입력 결손(ECAD 부재) 전문가를 범위에 받지 않는다(422 input_gap_m3).
+    out = review_runner.create_review_job(store, target_key, owner_sub=OWNER, requester_sub=OWNER,
+                                          scope={"domains": ["mech"]}, user_memo=user_memo, consent=True,
+                                          consent_source="web", settings=config.settings)
     return out["job_id"]
 
 
+# 검토 잡 자리표시의 로스터 — ECAD 에 기대는 영역이 없다(합성 쌍에는 회로 소스가 없다).
+NO_ECAD = factories.agents(("mech", "sim", "xd"), 2)
 C2B_REVIEW_JOBS = pytest.mark.xfail(strict=True, raises=C2bProducerMissing,
                                     reason="C2b producer — review_runner.create_review_job(m2-wp3b S5)이 생기면 표식을 지운다")
 
@@ -306,7 +335,8 @@ def test_a_target_a_review_job_ever_stood_on_does_not_go_back_to_panels_or_rebui
     """cells → panels 는 검토 잡이 한 번도 없을 때만이다(409 flow_locked·review_ran, 잡을 취소해도 그대로). 검토 잡이 선 대상의
     다른 입력 재빌드는 409 units_in_use 다(M2.md 5절 #6) — 같은 입력은 그대로 no-op 이다."""
     synth = factories.make_diff_target(store, 40, open_target=False)
-    key = _open(store, "diff", synth.diff_id, "cells")["target_key"]
+    key = routes.create_target(routes.TargetBody(kind="diff", ref_id=synth.diff_id, consent=True, flow="cells",
+                                                 agents=NO_ECAD), ident=factories.ident(OWNER))["target_key"]
     job_id = _create_review_job(store, key)
     refused = _refused(_switch, key, "panels")
     assert (refused.code, refused.detail["reason"]) == ("flow_locked", "review_ran")
@@ -319,3 +349,57 @@ def test_a_target_a_review_job_ever_stood_on_does_not_go_back_to_panels_or_rebui
     assert _refused(units.build_units, store, key, built_by=OWNER).code == "units_in_use"
     assert _refused(routes.post_units, key, routes.UnitsBody(), ident=factories.ident(OWNER)).http_status == 409
 
+
+
+@C2B_REVIEW_JOBS
+def test_the_panel_path_never_picks_recovers_or_shows_a_review_job(store):
+    """한 rr_jobs 표에 두 종류가 산다 — 패널 러너는 검토 잡을 집지 않고(claim_next_job) 재기동 복구도 건드리지 않으며, 진행판의
+    job·패널 브리프의 최근 메모는 패널 잡의 것이다. 살아 있는 검토 잡이 있는 대상에는 패널 잡을 세우지 않는다(409
+    review_job_running). 과제 화면의 잡 목록은 거르지 않고 방식을 싣는다."""
+    from app import brief
+
+    _register_pat(store)
+    synth = factories.make_diff_target(store, 40, agents=NO_ECAD)
+    key = synth.target_key
+    panel_id = routes.create_job(key, routes.JobBody(tier="A", user_memo="패널 메모"), ident=factories.ident(OWNER))["job_id"]
+    runner.cancel_job(store, panel_id, by=OWNER)
+    routes.post_units(key, routes.UnitsBody(), ident=factories.ident(OWNER))
+    review_id = _create_review_job(store, key, user_memo="검토 메모")
+
+    def state(job_id: str) -> str:
+        return store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))["state"]
+
+    assert runner.claim_next_job(store, config.settings) is None and state(review_id) == "queued"
+    runner._set_job(store, review_id, "running")
+    assert runner.recover_running_panels(store) == {"recovered": 0, "paused": 0} and state(review_id) == "running"
+    assert routes.coverage_payload(key, owner_sub=OWNER)["job"]["id"] == panel_id
+    memo = brief._item_memo(store, key)["result"]
+    assert "패널 메모" in memo and "검토 메모" not in memo
+    refused = _refused(routes.create_job, key, routes.JobBody(tier="B"), ident=factories.ident(OWNER))
+    assert (refused.code, refused.http_status, refused.detail["job_id"]) == ("review_job_running", 409, review_id)
+    page = routes.get_project(synth.project_id, ident=factories.ident(OWNER))
+    assert {(j["id"], j["mode"]) for j in page["jobs"]} == {(panel_id, "panels"), (review_id, "reviews")}
+
+
+@C2B_REVIEW_JOBS
+def test_a_person_pausing_a_review_job_holds_it_and_resume_or_cancel_clears_the_hold(store):
+    """사람의 정지는 검토 잡의 보류를 hold_code='user'·hold_until=NULL 로 덮는다(자동 재개가 다시 줄에 세우지 않는다). 재개·취소는
+    보류 열 셋을 비운다(P-10 · X4-25)."""
+    synth = factories.make_diff_target(store, 40, agents=NO_ECAD)
+    routes.post_units(synth.target_key, routes.UnitsBody(), ident=factories.ident(OWNER))
+    review_id = _create_review_job(store, synth.target_key)
+
+    def hold() -> tuple:
+        row = store.query_one("SELECT state, pause_reason, hold_code, hold_until, hold_n FROM rr_jobs WHERE id = ?",
+                              (review_id,))
+        return tuple(row)
+
+    paused = runner.pause_job(store, review_id, by=OWNER)
+    assert (paused["state"], paused["hold_code"], paused["hold_until"]) == ("paused", "user", None)
+    assert hold() == ("paused", "user", "user", None, 0)
+    assert _refused(runner.pause_job, store, review_id, by=OWNER).http_status == 409
+    runner.resume_job(store, review_id, by=OWNER)
+    assert hold() == ("queued", None, None, None, 0)
+    runner.pause_job(store, review_id, by=OWNER)
+    runner.cancel_job(store, review_id, by=OWNER)
+    assert hold() == ("cancelled", None, None, None, 0)

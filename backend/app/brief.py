@@ -1877,8 +1877,10 @@ def _item_memo(store, target_key: str, user_memo: str | None = None, cap: int | 
     """
     memo = user_memo
     if memo is None:
+        # 패널 잡의 메모만 — 카드 대조 검토 잡의 메모가 패널 브리프에 실리지 않게(재설계 M2 S6).
         row = store.query_one(
-            "SELECT params_json FROM rr_jobs WHERE target_key = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+            "SELECT params_json FROM rr_jobs WHERE target_key = ? AND COALESCE(mode, 'panels') = 'panels'"
+            " ORDER BY created_at DESC, id DESC LIMIT 1",
             (target_key,),
         )
         memo = _j(row["params_json"], {}).get("user_memo") if row is not None else None
