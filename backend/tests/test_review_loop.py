@@ -795,6 +795,77 @@ def test_a_defect_in_a_session_releases_the_expert_with_a_pause_instead_of_stran
     assert rig.state(store, job_id) == "completed"
 
 
+def test_a_deterministic_defect_on_a_cell_is_charged_every_third_time_and_never_loops_forever(store, monkeypatch):
+    """반대 검토 R3A-2 — 받은 판정을 앱이 다루다 늘 같은 자리에서 넘어지는 결함(합성 — accept_rows 가 verdict 에서 늘 예외)이
+    한도 없이 60초마다 되풀이되지 않는다. 넘어질 때마다 원장에 running 으로 남은 호출 행을 aborted('internal_error')로 닫고(예외 글을
+    싣는다) 그 셀의 연달은 결함을 센다 — 셋째마다 내용 탓으로 차감해 둘째 차감에서 failed('internal_error')이고 잡은 completed 다.
+    엔진 호출은 훑기 하나와 판정 여섯(결함 셋 × 시도 둘)뿐이다."""
+    from app import review_verify
+
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    unit_id = _unit_ids(store, key)[0]
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [unit_id]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    real = review_verify.accept_rows
+
+    def broken(result, *, kind, **kwargs):
+        if kind == "verdict":
+            raise ValueError("결정적 결함(합성) — 같은 답이면 늘 같은 자리에서 난다")
+        return real(result, kind=kind, **kwargs)
+
+    monkeypatch.setattr(review_verify, "accept_rows", broken)
+    r = rig.Rig(store, fake)
+    r.finish(job_id, ticks=40)
+    assert rig.state(store, job_id) == "completed" and "internal_error 1" in rig.job_row(store, job_id)["error"]
+    cell = next(c for c in _cells(store, key, SEAL) if c["unit_id"] == unit_id)
+    assert (cell["state"], cell["error_code"], cell["error_class"], cell["charged"], cell["tries"]) == (
+        "failed", "internal_error", "content", 2, 6)
+    calls = _calls(store, job_id)
+    assert [c for c in calls if c["state"] == "running"] == []
+    aborted = [c for c in calls if c["error_code"] == "internal_error"]
+    assert len(aborted) == 6 and {(c["state"], c["outcome_class"]) for c in aborted} == {("aborted", "content")}
+    assert aborted[0]["error"].startswith("ValueError: 결정적 결함(합성)")
+    assert [b["kind"] for b in _runs(fake)] == ["sweep"] + ["verdict"] * 6
+    assert review_cells.review_invariants(store, key) == []
+
+
+def test_a_deterministic_defect_outside_any_cell_holds_the_job_contract_on_the_third(store, monkeypatch):
+    """반대 검토 R3A-2 — 셀 밖(머리 몫 — 여기서는 마감)에서 늘 넘어지는 결함은 셋째에 잡을 contract 로 멈추고 예외 글을 싣는다(자동
+    재개 없음). 그동안 엔진을 다시 부르지 않는다. 사람이 고치고 재개하면 이어 돌아 completed 다."""
+    from app import review_runner
+
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    r = rig.Rig(store, fake)
+    real = review_runner.finalize_expert
+    tries: list[int] = []
+
+    def broken(*args, **kwargs):
+        tries.append(1)
+        raise RuntimeError("마감 결함(합성)")
+
+    monkeypatch.setattr(review_runner, "finalize_expert", broken)
+    r.run(lambda: rig.state(store, job_id) == "paused", ticks=20)
+    row = rig.job_row(store, job_id)
+    assert (row["hold_code"], row["hold_until"], len(tries)) == ("contract", None, review_runner.INTERNAL_STRIKES)
+    assert "RuntimeError: 마감 결함(합성)" in row["error"]
+    assert {c["state"] for c in _cells(store, key, SEAL)} == {"reviewed"} and _head(store, key, SEAL)["state"] == "planned"
+    runs = fake.runs
+    for _ in range(3):
+        r.clock.advance(1000)
+        r.tick()
+    assert rig.state(store, job_id) == "paused" and len(tries) == review_runner.INTERNAL_STRIKES
+
+    monkeypatch.setattr(review_runner, "finalize_expert", real)
+    runner.resume_job(store, job_id, by=OWNER)
+    r.finish(job_id)
+    assert rig.state(store, job_id) == "completed" and fake.runs == runs
+    assert _head(store, key, SEAL)["state"] == "ready"
+
+
 def test_a_box_whose_review_switch_is_off_claims_nothing_new_and_lets_the_running_call_finish(store, monkeypatch):
     """HWAXRISK_REVIEW_ENABLED=0 로 뜬 박스(스위치가 꺼진 루프)는 새 전문가·셀을 집지 않는다 — 도는 호출은 끝까지 가 ok 로 적히고
     다음 호출은 나가지 않으며 셀은 차감 없이 pending 이다. 잡은 running 그대로이고 진행판은 waiting{reason:'review_disabled'} 다.

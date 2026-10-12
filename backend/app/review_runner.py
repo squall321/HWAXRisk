@@ -273,6 +273,7 @@ MISSING_REASKS = 2                  # 빠진 카드 재질의(fwd) — 셀마다
 SOLO_REASKS = 2                     # 단독 재질의가 그 카드를 빼먹었을 때 다시 묻는 수
 MORE_REASKS = 3                     # 카드 밖 줄이 findings_max 에 닿으면 '이것 말고 더' 를 다시 묻는 수(X1-16)
 INTERNAL_BACKOFF_S = 60             # 워커가 예기치 않은 예외로 끝난 전문가를 다시 집기 전의 대기
+INTERNAL_STRIKES = 3                # 같은 셀(또는 머리 몫)의 예기치 않은 예외가 잇달아 이만큼이면 셀을 차감하거나 잡을 멈춘다(R3A-2)
 CALL_CAP_FACTOR = 3                 # 셀당 호출 수 상한 = 3 × (2·묶음 수 + 점검 카드 수 + 4)(m-02)
 CALL_CAP_BASE = 4
 # 팩 502 가 범위 전원에게 이어지면 잡 보류 aidh_unreachable 다(카드 저장소·게이트웨이 쪽 문제 — 전문가를 하나씩 실패시키지 않는다).
@@ -649,6 +650,8 @@ class _Session:
         self.plan: dict = {}
         self.sweep: dict = {}
         self.payloads: dict[str, dict] = {}
+        self.focus: _Cell | None = None          # 지금 다루는 셀(없으면 머리 몫) — 예기치 않은 예외를 그 셀에 센다(R3A-2)
+        self.call: dict | None = None            # 원장에 running 으로 둔 채 아직 닫지 않은 호출 행(begin_call 의 바탕)
 
     # -- 바탕 ---------------------------------------------------------------------------
     def now(self) -> int:
@@ -855,6 +858,7 @@ class _Session:
     # -- 셀 시작 ----------------------------------------------------------------------------
     def _start_cells(self) -> list[_Cell]:
         assert self.pack is not None
+        self.focus = None
         now = self.now()
         rows = self.store.query(
             "SELECT unit_id FROM rr_review_cells WHERE target_key = ? AND agent_key = ? AND run_id = ? AND state = 'pending'"
@@ -930,6 +934,7 @@ class _Session:
         """호출 하나 — 답(새로 받은 것 또는 같은 시도에서 이미 받은 것), 또는 None(그 셀이 내용 탓 실패·호출 수 상한으로 끝났다 —
         훑기는 그 쪽이 실패했다). 기다림은 같은 자리에서 다시 내고(아무것도 세지 않는다), 인프라·잡 보류·취소·묶음은 `_Stop` 이다."""
         assert self.pack is not None
+        self.focus = cell
         request_hash = self._request_hash(cell, body, seq)
         cached = self._cached(cell, request_hash)
         if cached is not None:
@@ -950,6 +955,7 @@ class _Session:
             if not review_cells.begin_call(self.store, self.target_key, self.agent, lease_owner=self.lease,
                                            call=base, now=started):
                 raise _Stop("lease", release=False)
+            self.call = base
             self.progress.worker(self.wkey, unit_id=unit_id, call_kind=kind, variant=variant, deck_id=deck_id,
                                  started_at=started, last_frame_at=None, last_event_at=None, last_step="")
             tick = time.monotonic()
@@ -959,6 +965,7 @@ class _Session:
             except _ENGINE_ERRORS as exc:
                 outcome = engine_client.review_outcome(exc, timeouts_before=timeouts)
                 self._failed(cell, base, exc, outcome, int((time.monotonic() - tick) * 1000))
+                self.call = None
                 if outcome.klass == review_ops.WAIT:
                     self._sleep(outcome.retry_after_s, reason=outcome.code)
                     continue
@@ -1060,6 +1067,7 @@ class _Session:
                                                  max_charged=self.max_charged, now=self.now())
         if not written["written"]:
             raise _Stop("lease", release=False)
+        self.call = None
         self.loop.after_call(self.job_id, review_ops.OK, check_disagree=disagree)
 
     # -- 훑기 --------------------------------------------------------------------------------
@@ -1067,6 +1075,7 @@ class _Session:
         """훑기 — 묶음 × 목록 쪽. 답은 셀 분류에 쓰지 않는다(route='review' — M2 는 늘 대조로 간다). 내용 탓으로 실패한 쪽이 있으면
         sweep_state='failed' 로 두고 나아간다. 카드 밖 호출이 훑기 k 에 걸린 배경 카드를 먼저 싣는다."""
         assert self.pack is not None
+        self.focus = None
         head = self._head_row()
         key = {"pack_key": self.pack.pack_key, "limits_rev": self.lim.get("limits_rev")}
         done = _json(head.get("sweep_json"), {})
@@ -1106,6 +1115,7 @@ class _Session:
         return [a for a in self.pack.order if a not in sent]
 
     def _verdict_body(self, cell: _Cell, aliases: Sequence[str], variant: str) -> dict:
+        self.focus = cell
         return engine_client.run_body("verdict", variant=variant, target_key=self.target_key, pack=self.pack, cards=aliases,
                                       digest=self._others(aliases), unit=cell.payload, expect=self._expect("verdict"),
                                       cfg=self.settings)
@@ -1162,6 +1172,7 @@ class _Session:
         return out
 
     def _solos(self, cell: _Cell) -> None:
+        self.focus = cell
         decks = self._deck_of()
         for alias in self._solo_set(cell):
             for seq in range(SOLO_REASKS + 1):
@@ -1214,6 +1225,7 @@ class _Session:
         digest 는 나머지 카드의 제목, known 은 그 셀의 실효 판정(걸림 먼저). 카드 밖 줄 수가 findings_max 에 닿으면 받은 제목을 known
         에 더해 '이것 말고 더' 를 최대 MORE_REASKS 번 다시 묻는다(X1-16). 카드 0장 전문가는 역할만으로 부른다(role_only)."""
         assert self.pack is not None
+        self.focus = cell
         hits = set(((self.sweep.get("units") or {}).get(cell.unit_id) or {}).get("k") or ())
         background = list(self.pack.background)
         cards = [a for a in background if a in hits] + [a for a in background if a not in hits]
@@ -1275,6 +1287,7 @@ class _Session:
 
     # -- 정산 · 마감 ------------------------------------------------------------------------------
     def _settle(self, cell: _Cell) -> None:
+        self.focus = cell
         out = review_cells.settle_cell(self.store, self.target_key, cell.unit_id, self.agent, lease_owner=self.lease,
                                        samples_done=cell.samples_done, more_calls=False, max_charged=self.max_charged,
                                        now=self.now())
@@ -1288,6 +1301,7 @@ class _Session:
     def _close(self) -> None:
         """세션 끝 — 그 전문가의 범위 안 열린 셀이 0 이면 마감(`finalize_expert`), 아니면 놓는다(백오프 중인 셀·다음 시도의 셀은
         다음 틱이 다시 집는다)."""
+        self.focus = None
         open_n = self.store.query_one(
             "SELECT COUNT(*) AS n FROM rr_review_cells WHERE target_key = ? AND agent_key = ? AND run_id = ?"
             " AND state IN ('pending', 'running')", (self.target_key, self.agent, self.job_id))["n"]
@@ -1296,6 +1310,30 @@ class _Session:
                 raise _Stop("lease", release=False)
             return
         raise _Stop("cells_left")
+
+    def internal_failure(self, exc: BaseException) -> None:
+        """세션 안의 예기치 않은 예외(앱 결함·엔진 칸 모양 어긋남 따위 — 엔진 오류 부류가 아닌 것) 뒤(반대 검토 R3A-2).
+
+        원장에 running 으로 남은 호출 행을 aborted('internal_error')로 닫고, 그 셀(다루던 셀이 없으면 머리 몫)의 연달은 결함 수를
+        센다(`review_cells.note_internal`). 셀은 INTERNAL_STRIKES 번째마다 내용 탓(internal_error)으로 차감돼 한도에서
+        failed('internal_error') 이고, 머리 몫(계획·훑기·마감 따위)은 INTERNAL_STRIKES 번째에 잡을 contract 로 멈추고 예외 글을
+        싣는다 — 같은 결함을 60초마다 한도 없이 되풀이하며 엔진을 다시 부르지 않게. 닫은 호출은 내용 탓으로 차단기 창에 든다."""
+        text = f"{type(exc).__name__}: {exc}"[:500]
+        cell = self.focus
+        out = review_cells.note_internal(self.store, self.target_key, self.agent, lease_owner=self.lease,
+                                         unit_id=cell.unit_id if cell is not None else None,
+                                         call_id=(self.call or {}).get("call_id"), error=text,
+                                         strikes_max=INTERNAL_STRIKES, max_charged=self.max_charged, now=self.now())
+        self.call = None
+        if not out["written"]:
+            return
+        log.warning("검토 잡 %s: %s 의 예기치 않은 결함 %s번째(%s) — %s", self.job_id, self.agent, out["strikes"], out["key"],
+                    text)
+        if out["closed_call"]:
+            self.loop.after_call(self.job_id, review_ops.CONTENT)
+        if out["key"] == "head" and out["struck"]:
+            self._hold("contract", f"검토 세션({self.agent})의 예기치 않은 결함이 {INTERNAL_STRIKES}번 잇달았다 — {text}. 앱"
+                       " 로그(hwax_risk.review)를 보고 고친 뒤 재개한다")
 
     def finalize(self) -> None:
         """마감만 — 범위 안 셀이 다 닫혔는데 마감이 끝나지 않은 머리(마감 도중 결함·재기동)를 다시 마감한다. 얼린 묶음이 이 박스에
@@ -1347,6 +1385,7 @@ class _Session:
             for cell in live():
                 if (deck_id, cell.unit_id) in pair_over or deck_id not in cell.fwd_bodies:
                     continue
+                self.focus = cell
                 dual = review_verify.dual_plan(cell.fwd_bodies[deck_id], dual_rate=self.dual_rate,
                                                sample_key=(self.target_key, cell.unit_id, self.agent, deck_id), salt=self.salt)
                 if dual["rev"] is None:
@@ -1793,8 +1832,13 @@ class ReviewLoop:
                 review_cells.release_expert(self.store, target_key, agent, lease_owner=lease, not_before=stop.not_before,
                                             error=None if stop.why in ("pack_frozen", "cells_left", "no_cells") else stop.why,
                                             now=self.clock())
-        except Exception:  # noqa: BLE001 — 전문가 하나의 결함이 루프를 죽이지 않는다. 그 전문가는 잠시 쉬고 다시 집힌다.
+        except Exception as exc:  # noqa: BLE001 — 전문가 하나의 결함이 루프를 죽이지 않는다. 그 전문가는 잠시 쉬고 다시 집힌다.
             log.exception("검토 워커 실패(job=%s, agent=%s)", job.get("id"), agent)
+            if session is not None:
+                try:
+                    session.internal_failure(exc)            # 남은 호출 행을 닫고 연달은 결함을 센다(R3A-2)
+                except Exception:  # noqa: BLE001 — 기록 실패가 놓기를 막지 않는다.
+                    log.exception("검토 워커 결함 기록 실패(job=%s, agent=%s)", job.get("id"), agent)
             review_cells.release_expert(self.store, target_key, agent, lease_owner=lease,
                                         not_before=self.clock() + INTERNAL_BACKOFF_S, error="internal_error", now=self.clock())
         finally:

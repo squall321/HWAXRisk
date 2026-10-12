@@ -402,6 +402,9 @@ def close_expert(store: Any, target_key: str, agent_key: str, *, lease_owner: st
     dst = closing_state(expert_tally(store, target_key, agent_key))
     moved = _move(store, "expert", "running", dst, where=f"{_head_where()} AND lease_owner = ?",
                   params=(target_key, agent_key, lease_owner), sets={"lease_owner": None, "error": None}, now=now)
+    if moved:
+        head = _head(store, target_key, agent_key) or {}
+        _clear_internal(store, target_key, agent_key, None, head.get("stats_json"), now)   # 마감이 끝났다 — 머리 몫 결함 수를 지운다
     return dst if moved else None
 
 
@@ -558,7 +561,8 @@ def write_call_result(store: Any, target_key: str, agent_key: str, *, lease_owne
     - `verdicts` — `review_verify.accept_rows` 의 행(그 열 이름 그대로). 별칭이 그 호출의 `cards_json` 에 없으면 ValueError 다
       (저장된 판정의 카드는 그 호출에 실은 카드다 — 나갈 기준 2). 쓴 뒤 그 셀의 실효·셈을 다시 맞춘다.
     - `cell` · `head` — 그 셀·머리에 적을 칸(상태·선점·신원·잡 결속·셈은 받지 않는다).
-    - `outcome` — None 이면 성공이다(연속 인프라 실패를 0 으로). 실패는 `review_ops.classify` 의 결과로 셀을 옮긴다 —
+    - `outcome` — None 이면 성공이다(연속 인프라 실패를 0 으로, 그 셀·머리의 연달은 결함 수 `note_internal` 를 지운다). 실패는
+      `review_ops.classify` 의 결과로 셀을 옮긴다 —
       인프라는 차감 없이 `pending` + 백오프, 내용 탓은 `charged + 1`(한도 `max_charged` 에 닿으면 `failed(fail_code)`),
       잡 보류·취소·묶음은 차감 없이 `pending`, 기다림은 셀을 놓지 않는다(호출 수에도 세지 않는다).
     셀의 호출 수·토큰·시간은 호출 원장 행이 처음 끝날 때 한 번만 더한다(같은 call_id 를 다시 적어도 두 번 세지 않는다).
@@ -583,8 +587,8 @@ def write_call_result(store: Any, target_key: str, agent_key: str, *, lease_owne
         with store.tx():
             if not _holds(store, target_key, agent_key, lease_owner):
                 raise _LeaseLost
-            owner = store.query_one("SELECT owner_sub, run_id FROM rr_expert_reports WHERE target_key = ? AND agent_key = ?",
-                                    (target_key, agent_key))
+            owner = store.query_one("SELECT owner_sub, run_id, stats_json FROM rr_expert_reports WHERE target_key = ?"
+                                    " AND agent_key = ?", (target_key, agent_key))
             row = None
             if unit_id is not None:
                 row = _cell(store, *key)
@@ -608,6 +612,9 @@ def write_call_result(store: Any, target_key: str, agent_key: str, *, lease_owne
             if head_sets:
                 store.execute(f"UPDATE rr_expert_reports SET {', '.join(f'{c} = ?' for c in head_sets)}, updated_at = ?"
                               f" WHERE {_head_where()}", (*head_sets.values(), now, target_key, agent_key))
+            if outcome is None:
+                _clear_internal(store, target_key, agent_key, unit_id,
+                                head_sets.get("stats_json", owner["stats_json"]), now)
             state = None
             if row is not None:
                 state = _apply_cell_outcome(store, key, row, values, cell_sets, outcome, first_end=first_end,
@@ -724,6 +731,77 @@ def settle_cell(store: Any, target_key: str, unit_id: str, agent_key: str, *, le
         _move(store, "cell", "running", "pending", where=where, params=params, now=now,
               sets={**failure, "finished_at": None})
         return {"written": True, "state": "pending", "code": missing[0], "missing": missing}
+
+
+INTERNAL_CODE = "internal_error"
+_INTERNAL_KEY = "internal"          # 머리 stats_json 의 칸 — {<unit_id> | 'head': 연달은 결함 수}
+
+
+def note_internal(store: Any, target_key: str, agent_key: str, *, lease_owner: str, unit_id: str | None,
+                  call_id: str | None, error: str, strikes_max: int, max_charged: int = 2, now: int | None = None) -> dict:
+    """세션 안의 예기치 않은 예외 하나를 원장에 적는다(반대 검토 R3A-2) — 한 트랜잭션으로.
+
+    - 도는(running) 호출 행 `call_id` 가 남았으면 `aborted`(outcome_class content · error_code internal_error · 예외 글)로 닫고, 그
+      셀이 이 선점으로 running 이면 호출 수(tries)를 하나 올린다(재기동 복구가 원인을 'restart' 로 지우지 않게).
+    - 연달은 결함 수를 머리 `stats_json.internal` 에 센다 — 열쇠는 그 셀(이 선점으로 running 일 때) 아니면 'head' 다. 성공한 호출이
+      그 열쇠를 지운다(`write_call_result`). `strikes_max` 번째면 수를 비우고 struck 이다 — 셀이면 내용 탓으로 차감해(charged + 1)
+      한도에서 `failed('internal_error')`, 아니면 `pending` 으로 놓는다. 머리 몫의 struck 은 부른 쪽이 잡을 멈춘다.
+    반환 {written, key, strikes, struck, closed_call, cell_state}. 선점을 잃었으면 {written: False}.
+    """
+    now = now_epoch() if now is None else now
+    with store.tx():
+        if not _holds(store, target_key, agent_key, lease_owner):
+            return {"written": False}
+        cell = _cell(store, target_key, unit_id, agent_key) if unit_id is not None else None
+        usable = cell is not None and cell["state"] == "running" and cell["lease_owner"] == lease_owner
+        key = str(unit_id) if usable else "head"
+        head = _head(store, target_key, agent_key) or {}
+        try:
+            stats = json.loads(head.get("stats_json") or "{}")
+        except ValueError:
+            stats = {}
+        stats = stats if isinstance(stats, dict) else {}
+        counts = stats.get(_INTERNAL_KEY) if isinstance(stats.get(_INTERNAL_KEY), dict) else {}
+        strikes = int(counts.get(key) or 0) + 1
+        struck = strikes >= max(1, int(strikes_max))
+        counts = {k: v for k, v in counts.items() if k != key}
+        if not struck:
+            counts[key] = strikes
+        stats[_INTERNAL_KEY] = counts
+        store.execute("UPDATE rr_expert_reports SET stats_json = ?, updated_at = ? WHERE target_key = ? AND agent_key = ?",
+                      (json.dumps(stats, ensure_ascii=False, sort_keys=True), now, target_key, agent_key))
+        closed = bool(call_id) and bool(store.execute(
+            "UPDATE rr_review_calls SET state = 'aborted', outcome_class = ?, error_code = ?, error = ?"
+            " WHERE call_id = ? AND state = 'running'", (review_ops.CONTENT, INTERNAL_CODE, error, call_id)))
+        state = cell["state"] if cell is not None else None
+        key_cell = (target_key, str(unit_id), agent_key)
+        if usable and closed:
+            store.execute(f"UPDATE rr_review_cells SET tries = tries + 1, updated_at = ? WHERE {_cell_where()}",
+                          (now, *key_cell))
+        if usable and struck:
+            charged = int(cell["charged"] or 0) + 1
+            failure = {"lease_owner": None, "heartbeat_at": None, "charged": charged, "error_code": INTERNAL_CODE,
+                       "error_class": review_ops.CONTENT, "error": error}
+            state = "failed" if charged >= max(1, int(max_charged)) else "pending"
+            _move(store, "cell", "running", state, where=f"{_cell_where()} AND lease_owner = ?",
+                  params=(*key_cell, lease_owner), now=now,
+                  sets={**failure, "finished_at": now} if state == "failed" else failure)
+    return {"written": True, "key": key, "strikes": strikes, "struck": struck, "closed_call": closed, "cell_state": state}
+
+
+def _clear_internal(store: Any, target_key: str, agent_key: str, unit_id: str | None, stats_json: str | None,
+                    now: int) -> None:
+    """성공한 호출 뒤 — 그 셀과 머리의 연달은 결함 수를 지운다(`note_internal` 의 '연달은')."""
+    try:
+        stats = json.loads(stats_json or "{}")
+    except ValueError:
+        return
+    counts = stats.get(_INTERNAL_KEY) if isinstance(stats, dict) else None
+    if not isinstance(counts, dict) or not ({"head", str(unit_id)} & set(counts)):
+        return
+    stats[_INTERNAL_KEY] = {k: v for k, v in counts.items() if k not in ("head", str(unit_id))}
+    store.execute("UPDATE rr_expert_reports SET stats_json = ?, updated_at = ? WHERE target_key = ? AND agent_key = ?",
+                  (json.dumps(stats, ensure_ascii=False, sort_keys=True), now, target_key, agent_key))
 
 
 def fail_open_cells(store: Any, target_key: str, agent_key: str, *, code: str, error: str | None = None,
