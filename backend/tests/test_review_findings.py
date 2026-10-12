@@ -446,3 +446,22 @@ def test_the_export_clips_card_quotes_outside_the_verdict_rows_and_keeps_the_ori
     assert not [body for body in _card_bodies() if body in text]
     inside = store.query_one("SELECT quote FROM rr_claim_refs WHERE ref = ?", (f"card:{_rid('K01')}",))["quote"]
     assert inside == fre.LONG_QUOTE                                     # 박스 안 원문은 그대로
+
+
+# ---------------------------------------------------------------- 폐기(plan §5.2.6)
+def test_a_purge_blanks_the_quotes_in_the_claim_index_card_quotes_included(store):
+    """과제 폐기는 인용 역색인(rr_claim_refs)의 인용 글도 비운다 — 카드 대조 finding 의 card: 인용이 거기 원문 그대로 남아 있었다
+    (판정 행의 cq 는 비우는데 같은 글이 역색인에 남던 구멍, 패널 finding 의 인용도 같은 자리다). 행·참조·원래 길이 칸은 남는다."""
+    key, _job, _fake = _run(store, scope={"agents": [SEAL]}, verdicts={"K01": ("yes", "FAIL")}, long_quote={"K01"})
+    refs = [dict(r) for r in store.query("SELECT ref, ref_type, quote FROM rr_claim_refs WHERE target_key = ?"
+                                         " ORDER BY claim_uid, ref_type, ref", (key,))]
+    assert [r for r in refs if r["ref_type"] == "card" and r["quote"] == fre.LONG_QUOTE]
+    project = store.query_one("SELECT p.id, p.code FROM rr_projects p JOIN rr_targets t ON t.project_id = p.id"
+                              " WHERE t.target_key = ?", (key,))
+    out = routes.purge_project(project["id"], routes.PurgeBody(code=project["code"], reason="정리"),
+                               ident=factories.ident(OWNER))
+    assert out["purge_report"]["layers"]["db"]["blanked"]["rr_claim_refs"] == len(refs)
+    after = [dict(r) for r in store.query("SELECT ref, ref_type, quote FROM rr_claim_refs WHERE target_key = ?"
+                                          " ORDER BY claim_uid, ref_type, ref", (key,))]
+    assert [(r["ref"], r["ref_type"]) for r in after] == [(r["ref"], r["ref_type"]) for r in refs]
+    assert {r["quote"] for r in after} == {None}

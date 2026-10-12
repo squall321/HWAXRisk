@@ -1034,6 +1034,10 @@ PURGE_BLANK_SQL: tuple[tuple[str, str], ...] = (
     ("rr_seat_opinions", "UPDATE rr_seat_opinions SET opinion_json = '', excerpt_for_rag = NULL"
                          " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_findings", "UPDATE rr_findings SET finding_json = '' WHERE project_id = ?"),
+    # 인용 역색인의 인용 글 — finding_json 의 cites 와 같은 글이다(패널 finding 의 인용, 카드 대조 finding 의 card: 인용 — 카드 원문
+    # 그대로, M2.md 5절 #18). 행·참조·원래 길이(quote_chars)는 남는다.
+    ("rr_claim_refs", "UPDATE rr_claim_refs SET quote = NULL"
+                      " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_character", "UPDATE rr_character SET statement = '' WHERE project_id = ?"),
     # 브리프가 부른 외부 VOC·문헌 **원문**이다(§5.6.2). 비우지 않으면 폐기·코퍼스 제외 뒤에도 DB 와
     # 반출 JSONL 에 남는다 — rr_panel_calls.result_gz 와 같은 성질의 열이다.
