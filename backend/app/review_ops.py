@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -27,6 +28,7 @@ OK = "ok"                        # 성공한 호출의 부류(호출 원장 outc
 
 # ---------------------------------------------------------------- 상수(실측 M2 파일럿으로 다시 정한다)
 WAIT_DEFAULT_S = 30              # 자리 없음 응답에 retry_after_s 가 없을 때(엔진 CARD_REVIEW_RETRY_AFTER_S·포털 429 의 값)
+WAIT_MAX_S = 3600                # 받은 대기의 상한 — 10억 초 같은 값에 셀이 영영 서지 않게
 BACKOFF_BASE_S = 30              # 인프라 백오프 min(30·2^(n−1), 900)초
 BACKOFF_CAP_S = 900
 BACKOFF_SPREAD = 0.2             # ±20% — 해시로 정한다
@@ -93,13 +95,18 @@ class Outcome:
 
 
 # ---------------------------------------------------------------- 분류표(M2.md §4.4)
-_WAIT_CODES = frozenset({"review_busy", "engine_busy"})
+# 표의 정본 이름 밖에서 실제로 오가거나 단계 C 계획(m2-wp3b S2·S7)이 쓰는 이름은 같은 부류로 받는다(RA-10) — 전송·계약
+# 문제가 '내용 탓' 으로 떨어져 셀을 깎고 failed(<code>) 로 굳지 않게. `draining`(기동 정리 중)은 기다림, `busy` 는 인프라.
+_WAIT_CODES = frozenset({"review_busy", "engine_busy", "draining"})
 _INFRA_CODES = frozenset({
     "llm_unreachable", "llm_timeout", "llm_error",
     "agent_unreachable", "agent_5xx", "agent_timeout", "agent_stream_idle", "portal_unreachable", "portal_5xx",
-    "engine_stream_cut", "engine_silent", "restart", "store_write_failed",
+    "engine_stream_cut", "engine_silent", "restart", "store_write_failed", "busy",
 })
-_CONTENT_CODES = frozenset({"no_rows", "truncated_empty", "llm_rejected", "cards_unjudged", "review_parse_failed"})
+# `body_too_large`(포털 413 — 본문이 창 하나를 넘었다)와 `internal_error`(엔진 결함)는 내용 탓으로 센다 — 같은 셀을 같은
+# 본문으로 다시 내도 같은 결과라 한도(2)에서 멈춰야 한다. 표에 없는 코드도 이 부류다.
+_CONTENT_CODES = frozenset({"no_rows", "truncated_empty", "llm_rejected", "cards_unjudged", "review_parse_failed",
+                            "body_too_large", "internal_error"})
 _HOLD_BY_CODE: dict[str, str] = {
     "llm_misconfigured": "llm_misconfigured",
     "context_overflow": "ctx_too_small", "over_budget": "ctx_too_small", "ctx_too_small": "ctx_too_small",
@@ -108,8 +115,11 @@ _HOLD_BY_CODE: dict[str, str] = {
     "credential_rejected": "credential", "credential_missing": "credential", "credential_expired": "credential",
     "pat_unavailable": "credential",
     "agent_outdated": "agent_outdated",               # 404 — 에이전트 서버·포털에 카드 대조 경로가 없다
+    "review_unsupported": "agent_outdated",           # m2-wp3b S7 이름 — 엔진 판이 카드 대조를 모른다
     "unknown_fields": "contract", "rev_mismatch": "contract",
-    "denied": "contract", "bad_request": "contract", "empty_unit": "contract", "unsupported_unit_kind": "contract",
+    "denied": "contract", "forbidden": "contract",    # forbidden 은 denied 와 같다(권한 문 403)
+    "bad_request": "contract", "empty_unit": "contract", "unsupported_unit_kind": "contract",
+    "unsupported_kind": "contract",                   # 엔진 build_ctx — 앱이 이 판에 없는 호출 종류를 보냈다
     "deck_too_large": "contract",
 }
 # 카드 묶음 조회 실패 — 그 전문가 묶음만 다시 받는다(재시도 횟수, 다 쓰면 셀의 실패 코드).
@@ -127,12 +137,14 @@ _CODE_BY_STATUS: dict[int, str] = {
 }
 
 
-def classify(code: str | None, *, http_status: int | None = None, retry_after_s: int | float | None = None,
+def classify(code: str | None, *, http_status: int | None = None, retry_after_s: int | float | str | None = None,
              knob: str | None = None, timeouts_before: int = 0) -> Outcome:
     """오류 코드 하나를 부류로 옮긴다(M2.md §4.4 의 표).
 
     - `http_status` 는 코드가 비었을 때만 본다(5xx 는 `portal_5xx`, 표에 없는 상태는 `http_<상태>` 로 내용 탓).
-    - `retry_after_s` 는 기다림 부류에서만 쓰고, 없거나 0 이하면 `WAIT_DEFAULT_S` 다.
+    - `retry_after_s` 는 기다림 부류에서만 쓴다 — 정수·소수·수 글자(`Retry-After` 머리 그대로)를 받아 올림하고 [1, 3600]초로
+      자른다. 없거나 0 이하이거나 수가 아니면(NaN·무한·날짜 글 포함) `WAIT_DEFAULT_S` 다(RA-11 — 0.4 가 0 이 되어 대기 없이
+      관문을 다시 때리거나 글자가 TypeError 로 던지지 않게).
     - `knob` 은 오류 프레임이 알린 손잡이다. 없으면 앱이 내는 코드의 손잡이를 채운다.
     - `timeouts_before` 는 같은 호출이 앞서 앱의 호출 벽시계(`review_timeout`)에 걸린 횟수다. 처음은 인프라, 두 번째부터 내용 탓이다.
     """
@@ -146,8 +158,7 @@ def classify(code: str | None, *, http_status: int | None = None, retry_after_s:
     if name == "cancelled":
         return Outcome(code=name, klass=CANCELLED)
     if name in _WAIT_CODES:
-        wait = int(retry_after_s) if retry_after_s is not None and retry_after_s > 0 else WAIT_DEFAULT_S
-        return Outcome(code=name, klass=WAIT, retry_after_s=wait, knob=knob)
+        return Outcome(code=name, klass=WAIT, retry_after_s=_wait_s(retry_after_s), knob=knob)
     if name == "review_timeout":
         if timeouts_before >= 1:
             return Outcome(code=name, klass=CONTENT, charge=True, knob=knob, fail_code=name)
@@ -161,6 +172,19 @@ def classify(code: str | None, *, http_status: int | None = None, retry_after_s:
         return Outcome(code=name, klass=PACK, knob=knob, fail_code=fail_code, max_tries=tries)
     # 표에 있는 내용 탓 코드와 표에 없는 코드 — 원문을 남기고 셀에 센다.
     return Outcome(code=name, klass=CONTENT, charge=True, knob=knob, fail_code=name)
+
+
+def _wait_s(value: object) -> int:
+    """기다림 부류의 대기(초) — `classify` 의 `retry_after_s` 규칙."""
+    if value is None or isinstance(value, bool):
+        return WAIT_DEFAULT_S
+    try:
+        seconds = float(value)                     # type: ignore[arg-type] — 수 글자(앞뒤 공백 포함)도 float 가 받는다
+    except (TypeError, ValueError):
+        return WAIT_DEFAULT_S
+    if not math.isfinite(seconds) or seconds <= 0:
+        return WAIT_DEFAULT_S
+    return min(max(math.ceil(seconds), 1), WAIT_MAX_S)
 
 
 # ---------------------------------------------------------------- 백오프

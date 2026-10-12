@@ -6,11 +6,12 @@ import pytest
 from app import review_ops as ops
 
 # M2.md §4.4 의 표를 옮겨 적은 것이다(코드에서 뽑지 않는다 — 둘이 같이 틀리면 통과하는 일치 시험을 피한다).
-WAIT_CODES = ["review_busy", "engine_busy"]
+WAIT_CODES = ["review_busy", "engine_busy", "draining"]
 INFRA_CODES = ["llm_unreachable", "llm_timeout", "llm_error",
                "agent_unreachable", "agent_5xx", "agent_timeout", "agent_stream_idle", "portal_unreachable", "portal_5xx",
-               "engine_stream_cut", "engine_silent", "restart", "store_write_failed"]
-CONTENT_CODES = ["no_rows", "truncated_empty", "llm_rejected", "cards_unjudged", "review_parse_failed"]
+               "engine_stream_cut", "engine_silent", "restart", "store_write_failed", "busy"]
+CONTENT_CODES = ["no_rows", "truncated_empty", "llm_rejected", "cards_unjudged", "review_parse_failed",
+                 "body_too_large", "internal_error"]
 HOLDS = {
     "llm_misconfigured": "llm_misconfigured",
     "context_overflow": "ctx_too_small", "over_budget": "ctx_too_small", "ctx_too_small": "ctx_too_small",
@@ -21,6 +22,8 @@ HOLDS = {
     "agent_outdated": "agent_outdated", "unknown_fields": "contract", "rev_mismatch": "contract",
     "denied": "contract", "bad_request": "contract", "empty_unit": "contract", "unsupported_unit_kind": "contract",
     "deck_too_large": "contract",
+    # 표 밖 이름의 별칭(RA-10) — 엔진 build_ctx 의 unsupported_kind, m2-wp3b S7 의 review_unsupported·forbidden.
+    "unsupported_kind": "contract", "review_unsupported": "agent_outdated", "forbidden": "contract",
 }
 PACKS = {"card_fetch_failed": (6, "pack_unavailable"), "card_list_failed": (6, "pack_unavailable"),
          "card_list_unstable": (6, "pack_unavailable"), "tools_unavailable": (6, "pack_unavailable"),
@@ -34,6 +37,16 @@ def test_wait_codes_count_nothing_and_retry_after_the_given_seconds(code):
     assert (out.klass, out.charge, out.hold_code, out.retry_after_s) == ("wait", False, None, 45)
     assert ops.classify(code).retry_after_s == ops.WAIT_DEFAULT_S == 30          # 값이 없으면 엔진·포털의 기본 30초
     assert ops.classify(code, retry_after_s=0).retry_after_s == 30
+
+
+@pytest.mark.parametrize("given,expected", [
+    (45, 45), (0.4, 1), (1.2, 2), (29.0, 29), ("30", 30), (" 12 ", 12), ("2.5", 3), (1e9, 3600), ("99999", 3600),
+    (3600.5, 3600), (0, 30), (-5, 30), ("", 30), ("Wed, 21 Oct 2026 07:28:00 GMT", 30), ("abc", 30), (None, 30),
+    (float("nan"), 30), (float("inf"), 30), (True, 30), ([30], 30),
+])
+def test_retry_after_is_rounded_up_clamped_and_never_throws(given, expected):
+    """0.4 는 0 이 되어 대기 없이 관문을 다시 때렸고, 글자(Retry-After 머리)는 TypeError 로 던졌고, 10억 초도 받았다(RA-11)."""
+    assert ops.classify("review_busy", retry_after_s=given).retry_after_s == expected
 
 
 @pytest.mark.parametrize("code", INFRA_CODES)
