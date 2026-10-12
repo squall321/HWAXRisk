@@ -751,7 +751,8 @@ class _Session:
     # -- 카드 묶음 --------------------------------------------------------------------------
     def fetch_pack(self) -> cardpack.FrozenPack:
         """그 전문가의 카드 묶음을 받아 확인·동결하고 머리에 적는다(m2-wp3b S3 의 받은 결과 가르기). 실패는 그 전문가의 묶음
-        재시도(60초부터 두 배)·한도(404 3번 · 502 6번 → 범위 안 셀 failed)·범위 전원 502 면 잡 보류 aidh_unreachable 다."""
+        재시도(60초부터 두 배)·한도(404 3번 · 502 6번 → 범위 안 셀 failed)·범위 전원 502 면 잡 보류 aidh_unreachable 다. 인프라
+        실패는 한도를 깎지 않고 머리 백오프만 한다(R3A-7 — 머리 stats_json.pack.infra_streak, 받으면 지운다)."""
         head = self._head_row()
         stats = _json(head.get("stats_json"), {})
         packinfo = stats.get("pack") if isinstance(stats.get("pack"), dict) else {}
@@ -772,6 +773,16 @@ class _Session:
                     raise _Stop(outcome.hold_code or "contract") from exc
                 if outcome.klass == review_ops.CANCELLED:
                     raise _Stop("cancelled") from exc
+                if outcome.klass == review_ops.INFRA:
+                    # 인프라(포털·에이전트 서버 연결·시간 초과)는 묶음 탓이 아니다 — 묶음 시도 수를 깎지 않고 머리 백오프(연달은 수만큼
+                    # 길어진다)로만 놓는다(§4.4 '차감 없음 · 백오프', R3A-7). 묶음 한도는 묶음·내용 탓 코드에만 쓴다.
+                    streak = int(packinfo.get("infra_streak") or 0) + 1
+                    stats["pack"] = {**packinfo, "infra_streak": streak}
+                    if not review_cells.write_head(self.store, self.target_key, self.agent, lease_owner=self.lease,
+                                                   sets={"stats_json": canonical_json(stats)}, now=self.now()):
+                        raise _Stop("lease", release=False) from exc
+                    raise _Stop(f"infra:{outcome.code}", not_before=self.now() + review_ops.backoff_s(
+                        streak, salt=f"{self.target_key}|{self.agent}|pack")) from exc
                 tries, fail = ((outcome.max_tries, outcome.fail_code) if outcome.klass == review_ops.PACK
                                else (review_ops.PACK_RETRY_MAX, "pack_unavailable"))
                 self._pack_failed(outcome.code, int(tries or review_ops.PACK_RETRY_MAX), str(fail), str(exc))

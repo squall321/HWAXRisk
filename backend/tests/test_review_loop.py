@@ -493,6 +493,26 @@ def test_one_experts_pack_502_fails_only_their_cells_after_six_tries(store, monk
     assert review_cells.review_invariants(store, key) == []
 
 
+def test_pack_infra_failures_back_off_without_spending_the_pack_budget(store, monkeypatch):
+    """반대 검토 R3A-7 — 카드 묶음 받기의 인프라 실패(포털이 중계한 502 agent_unreachable)는 묶음 재시도 한도(6)를 깎지 않는다.
+    머리 백오프(연달은 수만큼 길어진다 — 여덟째는 상한 근처)로만 놓고 묶음 시도 수는 0 이다. 회복하면 셀이 실패 없이 끝난다(§4.4 의
+    인프라는 '차감 없음 · 백오프' — 실패 셀을 다시 여는 길이 M2 에는 없으므로 영구 실패가 되지 않게)."""
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    fake.pack_errors[SEAL] = [(502, {"code": "agent_unreachable", "message": "에이전트 서버 재기동 중(가짜)"})] * 8
+    r = rig.Rig(store, fake)
+    r.run(lambda: len(fake.calls("pack")) == 8, step=1000)
+    head = _head(store, key, SEAL)
+    assert (head["state"], head["pack_attempts"], head["error"]) == ("planned", 0, "infra:agent_unreachable")
+    assert head["not_before"] - r.clock() >= 720                      # backoff_s(8) — 30초에서 두 배씩, 900초 상한 ±20%
+    assert json.loads(head["stats_json"])["pack"]["infra_streak"] == 8
+    r.finish(job_id, step=1000)
+    assert rig.state(store, job_id) == "completed" and rig.job_row(store, job_id)["error"] is None
+    assert {(c["state"], c["error_code"]) for c in _cells(store, key, SEAL)} == {("reviewed", None)}
+    assert "infra_streak" not in json.loads(_head(store, key, SEAL)["stats_json"])["pack"]
+
+
 def test_every_expert_failing_the_pack_with_502_holds_the_job_aidh_unreachable(store, monkeypatch):
     """범위 안 전원의 카드 묶음이 502 면 전문가를 하나씩 실패시키지 않고 잡을 aidh_unreachable 로 멈춘다(300초 뒤 다시). 셀은
     차감·실패 없이 pending 이다."""
