@@ -318,6 +318,40 @@ def release_expert(store: Any, target_key: str, agent_key: str, *, lease_owner: 
     return {"released": True, "cells": cells}
 
 
+def write_head(store: Any, target_key: str, agent_key: str, *, lease_owner: str, sets: Mapping[str, Any],
+               now: int | None = None) -> bool:
+    """쥔 전문가 머리에 호출이 아닌 일의 결과(계획·창 판·묶음 확인 셈 따위)를 적는다 — 상태·선점·신원·잡 결속은 받지 않는다.
+    선점을 잃었으면 쓰지 않고 False 다(m-10)."""
+    values = _checked(store, "rr_expert_reports", sets, _HEAD_PROTECTED)
+    if not values:
+        return _holds(store, target_key, agent_key, lease_owner)
+    now = now_epoch() if now is None else now
+    return bool(store.execute(
+        f"UPDATE rr_expert_reports SET {', '.join(f'{c} = ?' for c in values)}, updated_at = ?"
+        f" WHERE {_head_where()} AND state = 'running' AND lease_owner = ?",
+        (*values.values(), now, target_key, agent_key, lease_owner)))
+
+
+def block_expert(store: Any, target_key: str, agent_key: str, *, lease_owner: str, error: str | None = None,
+                 now: int | None = None) -> bool:
+    """카드 묶음을 끝내 받지 못한 전문가를 쥔 채로 막는다(running → blocked, 선점을 지운다). 그 셀은 부른 쪽이 먼저
+    `fail_open_cells` 로 닫는다. 선점을 잃었으면 False 다."""
+    now = now_epoch() if now is None else now
+    return bool(_move(store, "expert", "running", "blocked", where=f"{_head_where()} AND lease_owner = ?",
+                      params=(target_key, agent_key, lease_owner), sets={"lease_owner": None, "error": error}, now=now))
+
+
+def close_expert(store: Any, target_key: str, agent_key: str, *, lease_owner: str, now: int | None = None) -> str | None:
+    """쥔 전문가의 검토를 마감한다 — 열린 실패 셀이나 범위 밖 pending 이 남았으면 partial, 아니면 ready(P-04). 옮긴 상태 또는
+    None(선점을 잃었다). 승격·의견·원장·보고서(S9·S10)는 `review_runner.finalize_expert` 가 이 앞에서 쓴다."""
+    now = now_epoch() if now is None else now
+    tally = expert_tally(store, target_key, agent_key)
+    dst = "partial" if tally["failed"] or tally["open"] else "ready"
+    moved = _move(store, "expert", "running", dst, where=f"{_head_where()} AND lease_owner = ?",
+                  params=(target_key, agent_key, lease_owner), sets={"lease_owner": None, "error": None}, now=now)
+    return dst if moved else None
+
+
 def record_pack(store: Any, target_key: str, agent_key: str, *, lease_owner: str, status: str,
                 pack_hash: str | None = None, card_basis: str | None = None, error: str | None = None,
                 not_before: int | None = None, now: int | None = None) -> bool:
@@ -372,6 +406,43 @@ def start_cell(store: Any, target_key: str, unit_id: str, agent_key: str, *, lea
             sets.update(_CELL_RESET, reopened_n=Expr("reopened_n + 1"), started_at=now)
         if _move(store, "cell", "pending", "running", where=_cell_where(), params=key, sets=sets, now=now) != 1:
             return None
+        return _cell(store, *key)
+
+
+# 새 시도(내용 탓으로 다시 도는 셀)를 시작할 때 비우는 판정 셈 — 호출 수·차감·토큰 같은 누적 비용은 남긴다.
+_ATTEMPT_RESET: dict[str, Any] = {
+    "truncated": None, "rows_expected": None, "rows_missing": None, "stamp": 0, "soft_over": 0, "basis": None,
+    "cards_expected": None, "cards_judged": None, "n_fail": 0, "n_warning": 0, "n_ok": 0, "n_na": 0,
+    "n_undetermined": 0, "n_disputed": 0, "n_flipped": 0, "n_offcard": 0, "offcard_state": "todo", "offcard_capped": 0,
+    "quote_ok": 0, "quote_n": 0, "refs_ok": 0, "refs_n": 0, "bg_full_n": 0, "bg_title_only_n": 0,
+    "extras_json": None, "mechs_json": None, "handoffs_json": None,
+}
+
+
+def begin_attempt(store: Any, target_key: str, unit_id: str, agent_key: str, *, lease_owner: str,
+                  now: int | None = None) -> dict | None:
+    """도는 셀의 시도 표지(`sample_json.attempt` = 지금 `charged`)를 맞춘다 — 표지가 다르면 내용 탓 실패 뒤의 새 시도라 그 셀의
+    판정 행과 판정 셈을 비우고 표지를 적는다(앞 시도의 단독 재질의 행이 새 시도의 실효를 덮지 않게). 같으면 아무것도 하지 않는다
+    (재기동·인프라 실패 뒤 같은 시도를 이어 돈다 — 끝난 호출의 판정이 남는다). 반환은 그 셀(dict) 또는 None(선점을 잃었다)."""
+    now = now_epoch() if now is None else now
+    key = (target_key, unit_id, agent_key)
+    with store.tx():
+        row = _cell(store, *key)
+        if row is None or row["state"] != "running" or row["lease_owner"] != lease_owner:
+            return None
+        try:
+            marker = json.loads(row["sample_json"] or "null")
+        except ValueError:
+            marker = None
+        marker = marker if isinstance(marker, dict) else {}
+        attempt = int(row["charged"] or 0)
+        if marker.get("attempt") == attempt:
+            return row
+        store.execute(f"DELETE FROM rr_card_verdicts WHERE {_cell_where()}", key)
+        store.execute(f"UPDATE rr_review_cells SET {', '.join(_assign(_ATTEMPT_RESET))}, sample_json = ?, updated_at = ?"
+                      f" WHERE {_cell_where()} AND lease_owner = ?",
+                      (*_args(_ATTEMPT_RESET), json.dumps({**marker, "attempt": attempt}, sort_keys=True), now, *key,
+                       lease_owner))
         return _cell(store, *key)
 
 

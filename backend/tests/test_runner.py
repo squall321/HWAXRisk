@@ -1,4 +1,4 @@
-# RiskRunner 골격 — start/stop·status() 의 스레드 3개(panel_loop·sync_loop·nightly_loop)·lifespan 배선
+# RiskRunner 골격 — start/stop·status() 의 스레드 4개(panel_loop·sync_loop·nightly_loop·review_loop)·lifespan 배선
 from __future__ import annotations
 
 import time
@@ -9,7 +9,7 @@ from app.risk_store import MIGRATIONS as _MIGRATIONS
 
 LATEST_SCHEMA = _MIGRATIONS[-1][0]
 
-THREADS = ["panel_loop", "sync_loop", "nightly_loop"]
+THREADS = ["panel_loop", "sync_loop", "nightly_loop", "review_loop"]
 
 
 def test_start_status_stop():

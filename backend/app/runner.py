@@ -21,8 +21,10 @@ from app.errors import AppError
 log = logging.getLogger("hwax_risk.runner")
 
 # (스레드명, 폴링 주기 초). sync_loop 은 PAT 폐기 대조(§8.2.7)를 돌리고 external_sync 재시도(§5.5.3)는 P4 배선,
-# nightly_loop(§7.7 야간 잡) 본문은 P6 에서 채운다.
-_LOOPS: tuple[tuple[str, float], ...] = (("panel_loop", 5.0), ("sync_loop", 60.0), ("nightly_loop", 60.0))
+# nightly_loop(§7.7 야간 잡) 본문은 P6 에서 채운다. review_loop 은 카드 대조 검토 잡의 틱이다(재설계 M2 · m2-wp3b S8 —
+# review_runner.ReviewLoop).
+_LOOPS: tuple[tuple[str, float], ...] = (("panel_loop", 5.0), ("sync_loop", 60.0), ("nightly_loop", 60.0),
+                                         ("review_loop", 2.0))
 
 # 좌석 귀속 정규식(plan §0.2.3·§6.7 7단계). SSE 스트림과 POST /api/panels/{id}/complete 의 events[] 에 같은 식을 쓴다.
 STATUS_LOOKUP_RE = re.compile(r"^(?P<key>\S+) 조회: (?P<tool>\S+)$")
@@ -2120,6 +2122,7 @@ class RiskRunner:
         registry_mod: Any | None = None,
         external_sync_send: Any | None = None,
         lock: Any | None = None,
+        review_engine: ReviewEngine | None = None,
     ) -> None:
         self.store = store
         self.settings = settings
@@ -2139,6 +2142,13 @@ class RiskRunner:
         self.external_sync_send = external_sync_send
         concurrency = int(getattr(settings, "risk_concurrency", 1) or 1) if settings is not None else 1
         self._sem = threading.Semaphore(max(1, concurrency))
+        # 카드 대조 검토 잡의 루프(주입식 엔진 — None 이면 틱이 아무것도 하지 않는다). 동시 수는 HWAXRISK_REVIEW_CONCURRENCY 와 서버
+        # 관문 limit 가운데 작은 것이고 패널 세마포어와 따로 센다. 선점 표지(lease_owner)의 머리는 러너 잠금의 boot_id 다.
+        from app import review_runner  # noqa: PLC0415 — review_runner 는 이 모듈을 import 한다.
+
+        self.review_engine = review_engine
+        self._review = review_runner.ReviewLoop(store, settings, review_engine, stop=self._stop,
+                                                boot_id=getattr(lock, "boot_id", None))
 
     # ------------------------------------------------------------ 루프
     def _loop(self, name: str, interval: float) -> None:
@@ -2158,6 +2168,11 @@ class RiskRunner:
                     self._external_sync_tick()
                 except Exception:  # noqa: BLE001 — 외부 반영 재시도 실패도 러너를 죽이지 않는다.
                     log.exception("sync_loop external_sync 재시도 실패")
+            elif name == "review_loop":
+                try:
+                    self._review.tick()
+                except Exception:  # noqa: BLE001 — 한 번의 실패가 스레드를 죽이지 않게 한다.
+                    log.exception("review_loop tick 실패")
             self._stop.wait(interval)
 
     def _revocation_tick(self) -> None:
@@ -2253,6 +2268,11 @@ class RiskRunner:
             if self.store is not None:
                 try:
                     recover_running_panels(self.store)
+                    # 카드 대조 검토도 같은 자리에서 — 셀 running → pending, 전문가 running → planned, 호출 running →
+                    # aborted('restart'). 차감·백오프 없이 검토 잡은 running 그대로 다음 틱이 이어 돈다(잠금을 쥔 프로세스만 — m2-wp3b S8).
+                    from app import review_cells  # noqa: PLC0415 — review_cells 는 planner 를 거쳐 무겁다.
+
+                    review_cells.recover_running(self.store)
                     # 스냅샷 잡도 같은 자리에서 마감한다 — running 인 채 남으면 영영 진행판에 걸린다(§2.11.3).
                     from app import routes as routes_module  # noqa: PLC0415 — routes 는 runner 를 import 한다.
 
@@ -2274,6 +2294,8 @@ class RiskRunner:
                 t.join(timeout=2.0)
         for t in self._workers:
             t.join(timeout=5.0)
+        # 검토 워커는 멈춤 물음(should_stop_review)이 러너 종료를 보고 스트림을 닫는다 — 셀은 차감 없이 pending 으로 돌아간다.
+        self._review.join(timeout=5.0)
         self._threads = []
         self._workers = [t for t in self._workers if t.is_alive()]
         if self.lock is not None:
