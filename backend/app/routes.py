@@ -15,12 +15,13 @@ from typing import Any, Literal
 import httpx
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app import brief as brief_module
 from app import character, config, diff as diff_module
 from app import export as export_module
 from app import identity, ir_builder, learning, metrics, narrative, planner, ra_client, requirements, runner, sameas, taxonomy
+from app import expert_report, review_cells, review_runner
 from app import roster as roster_module
 from app import state as state_module
 from app import units as units_module
@@ -2443,11 +2444,34 @@ def post_target_flow(target_key: str, body: FlowBody, ident: identity.Identity =
 
 # ================================================================ 잡
 class JobBody(BaseModel):
-    tier: str
+    """잡 본문 — `mode` 가 panels(기본 — Tier 패널 잡, tier 필수)·reviews(카드 대조 검토 잡, 재설계 M2 S12)를 가른다.
+
+    reviews 의 본문은 {mode, scope?, user_memo?, consent?} 다. 패널 칸(tier·modifiers·concurrency)을 주면 422 다 — 범위는
+    scope.tiers 로 주고, 동시 수는 박스 손잡이(HWAXRISK_REVIEW_CONCURRENCY)다. 패널 잡에 scope 를 주어도 422 다(조용히 버리지 않는다).
+    """
+
+    tier: str | None = None
     concurrency: int = 1
     modifiers: list[str] | None = None
     user_memo: str | None = None
     consent: bool = False
+    mode: Literal["panels", "reviews"] = "panels"
+    scope: dict[str, Any] | None = None            # {tiers?, domains?, agents?, unit_ids?} — review_runner.resolve_scope
+
+    @model_validator(mode="after")
+    def _fields_of_the_mode(self) -> "JobBody":
+        if self.mode == "panels":
+            if self.tier is None:
+                raise ValueError("tier 가 필요하다 — 패널 잡(mode='panels')은 Tier(A·B·C)를 받는다")
+            if self.scope is not None:
+                raise ValueError("scope 는 카드 대조 검토 잡(mode='reviews')의 칸이다 — 패널 잡은 tier 로 범위를 정한다")
+            return self
+        panel_only = sorted(k for k in ("tier", "modifiers", "concurrency")
+                            if k in self.model_fields_set and (k != "modifiers" or self.modifiers))
+        if panel_only:
+            raise ValueError(f"{', '.join(panel_only)} 는 패널 잡의 칸이다 — 검토 잡(mode='reviews')의 범위는"
+                             " scope{tiers, domains, agents, unit_ids} 로, 동시 수는 HWAXRISK_REVIEW_CONCURRENCY 로 정한다")
+        return self
 
 
 # 잡 동의가 들어온 입구 — 신원 출처(identity._token_from)에서 정한다(RV-7 · 3차 검토 발견 4).
@@ -2461,6 +2485,11 @@ def create_job(target_key: str, body: JobBody,
 
     소유자만이 아니라 그 과제의 editor 도 잡을 만든다 — 잡 행의 `owner_sub` 는 신원 앵커(타깃 소유자)를
     승계하고 실제로 쓰인 자격의 email 은 `credential_email` 에 남는다(plan §0.1.6·§5.2.1).
+
+    `mode='reviews'` 는 카드 대조 검토 잡이다 — `review_runner.create_review_job` 이 범위·자격(사용자 PAT 만)·호출 수 추정·동의를
+    보고(거절 코드는 그 함수의 것), 만든 잡은 rr_audit(scope='job', action='job.create') 한 행을 남긴다. 반환 {job_id, mode,
+    cells_total, cells_in_scope, experts_in_scope, units, calls_estimate{low, high}, credential{kind, email, exp},
+    credential_note?}.
     """
     email = _require_user(ident)
     row = get_store().query_one(
@@ -2472,6 +2501,19 @@ def create_job(target_key: str, body: JobBody,
     # 게이트웨이 위임 단언(sso)은 게이트웨이만 받아 오므로 Claude 길이다(MCP 입구 risk_start_job · rest_call). 웹 화면은 쿠키다.
     # Bearer 는 개인 heax PAT 로 REST 를 직접 부른 것이라 웹 화면 동의가 아니다(3차 검토 발견 4). 그 밖의 출처는 그 값 그대로 남긴다.
     consent_source = CONSENT_SOURCES.get(ident.source, ident.source)
+    if body.mode == "reviews":
+        store = get_store()
+        out = review_runner.create_review_job(store, target_key, owner_sub=row["owner_sub"], requester_sub=email,
+                                              scope=body.scope, user_memo=body.user_memo, consent=body.consent,
+                                              consent_source=consent_source)
+        params = _loads(store.query_one("SELECT params_json FROM rr_jobs WHERE id = ?", (out["job_id"],))["params_json"], {})
+        _audit(store, email, scope="job", subject_id=out["job_id"], project_id=row["project_id"], action="job.create",
+               after={"mode": out["mode"], "target_key": target_key, "scope": params.get("scope") or {},
+                      "cells_in_scope": out["cells_in_scope"], "experts_in_scope": out["experts_in_scope"],
+                      "calls_estimate": out["calls_estimate"], "consent": bool(body.consent),
+                      "consent_source": params.get("consent_source")},
+               channel=AUDIT_CHANNELS.get(ident.source, "rest"))
+        return out
     return runner.create_job(get_store(), target_key, body.tier, owner_sub=row["owner_sub"],
                              modifiers=body.modifiers, user_memo=body.user_memo,
                              concurrency=body.concurrency, consent=body.consent, requester_sub=email,
@@ -2544,7 +2586,8 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
 
     좌석 행까지 함께 준다(웹은 카운트만 5초 폴링하고 드릴다운을 따로 부르지만, MCP 는 왕복이
     비싸고 '더 돌려야 하나' 판단에 미착석 좌석이 바로 필요하다). `flow` 는 심사 방식, `units` 는 검토 단위 빌드 한 줄이다
-    (`{rev, status, reviewable_n}` · 실패만 있으면 `error` · 없으면 `{status:'none'}`)."""
+    (`{rev, status, reviewable_n}` · 실패만 있으면 `error` · 없으면 `{status:'none'}`). `review` 는 카드 대조 검토의 진행판이다
+    (`review_payload` — 셀 원장이 없는 패널 방식 대상은 None 이라 패널 대상의 응답은 이 칸 하나만 더해진다, D-24)."""
     target = _target_row(target_key, owner_sub)
     store = get_store()
     summary = planner.coverage_summary(store, target_key)
@@ -2570,6 +2613,7 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
         "close_level": level["close_level"],
         "flow": target["flow"],
         "units": units_module.summary_of(store, target_key),
+        "review": review_payload(store, target_key, target["flow"]),
     }
 
 
@@ -2589,6 +2633,298 @@ def _live_signal(store, state: str, signal: Any) -> dict | None:
     now = now_epoch()
     return {**signal, **{f"{key}_idle_s": None if signal.get(f"last_{key}_at") is None
                          else max(0, now - int(signal[f"last_{key}_at"])) for key in ("frame", "event")}}
+
+
+# ================================================================ 카드 대조 검토 — 진행판·셀·전문가·보고서(재설계 M2 S12)
+# 웹과 Claude 가 같은 함수로 검토를 지켜보고 보고서를 읽는다(D-23 — 입구 둘, 원장 하나). 전부 DB 읽기다(LLM·네트워크 없음).
+REVIEW_JOB_PROGRESS_KEYS: tuple[str, ...] = ("packs", "experts", "cells", "calls", "breaker", "server")
+CELL_LIST_LIMIT_DEFAULT, CELL_LIST_LIMIT_MAX = 500, 2000
+# 셀 목록 행에서 빼는 열 — 선점(내부 값)과 JSON 열(훑기·카드 밖 줄·메커니즘·넘김·표본 — 셀 하나 경로가 준다).
+CELL_LIST_HIDDEN: tuple[str, ...] = ("lease_owner", "route_json", "extras_json", "mechs_json", "handoffs_json", "sample_json")
+# MCP risk_get_cells 의 행 — 격자를 읽는 칸만(행이 짧아야 와이어 25,000자 안에 많이 싣는다). 이름은 S1 열 그대로다.
+CELL_BRIEF_COLUMNS: tuple[str, ...] = (
+    "unit_id", "unit_seq", "agent_key", "domain", "state", "basis", "run_id", "tries", "charged", "error_code",
+    "cards_expected", "cards_judged", "n_fail", "n_warning", "n_undetermined", "n_ok", "n_na", "n_offcard", "truncated",
+    "offcard_state", "quote_ok", "quote_n", "refs_ok", "refs_n", "updated_at")
+# 전문가 머리 목록에서 빼는 열 — 보고서 본문·계획·훑기·요약 글(보고서 경로가 준다)·선점.
+EXPERT_LIST_HIDDEN: tuple[str, ...] = ("report_gz", "plan_json", "sweep_json", "summary_md", "stats_json", "lease_owner")
+REPORT_FORMATS: tuple[str, ...] = ("md", "json")
+_PACK_COUNTS = ("cards_total", "checkable_n", "background_n", "unrenderable_n")
+
+
+def _table_columns(store: Any, table: str) -> list[str]:
+    """표의 열 이름(DDL 순서)."""
+    return [r["name"] for r in store.query(f"PRAGMA table_info({table})")]
+
+
+def _parsed_json_columns(row: dict) -> dict:
+    """`*_json` 열의 글을 값으로 편다(이름은 열 그대로). 읽지 못하는 글은 그대로 둔다."""
+    out = dict(row)
+    for key, value in row.items():
+        if key.endswith("_json") and isinstance(value, str) and value:
+            try:
+                out[key] = json.loads(value)
+            except ValueError:
+                pass
+    return out
+
+
+def _pack_counts(store: Any, heads: list[dict]) -> dict[str, dict]:
+    """전문가 → 얼린 카드 묶음의 카드 수 {cards_total(본문 있는 카드), checkable_n, background_n, unrenderable_n}. 묶음 전이면 없다."""
+    out: dict[str, dict] = {}
+    for head in heads:
+        if not head.get("pack_hash"):
+            continue
+        row = store.query_one("SELECT cards_total, checkable_n, unrenderable_n FROM rr_card_packs WHERE agent_key = ?"
+                              " AND pack_key = ?", (head["agent_key"], head["pack_hash"]))
+        if row is not None:
+            out[head["agent_key"]] = {"cards_total": int(row["cards_total"]), "checkable_n": int(row["checkable_n"]),
+                                      "background_n": int(row["cards_total"]) - int(row["checkable_n"]),
+                                      "unrenderable_n": int(row["unrenderable_n"])}
+    return out
+
+
+def review_order_payload(store: Any, target_key: str) -> list[dict]:
+    """검토 순서(`planner.review_order` — 영역 · 영역 안 순위 · tier · 입력 결손) + 머리 상태와 얼린 묶음의 카드 수(묶음 전이면 None).
+    파일럿의 영역 대표를 사람이 고르는 표다(M2.md 5절 #11 · #24 — 코드가 고르지 않는다)."""
+    heads = [dict(r) for r in store.query("SELECT agent_key, state, pack_hash FROM rr_expert_reports WHERE target_key = ?",
+                                          (target_key,))]
+    state_of = {h["agent_key"]: h["state"] for h in heads}
+    packs = _pack_counts(store, heads)
+    return [{**row, "state": state_of.get(row["agent_key"]),
+             "cards_total": (packs.get(row["agent_key"]) or {}).get("cards_total"),
+             "checkable_n": (packs.get(row["agent_key"]) or {}).get("checkable_n")}
+            for row in planner.review_order(store, target_key)]
+
+
+def _review_job_payload(job: dict) -> dict:
+    """검토 잡 한 줄 — 행의 보류 열과 진행판(`rr_jobs.progress_json`, 루프가 60초마다 다시 센 값)을 그대로 옮긴다(여기서 원장을
+    다시 세지 않는다). `signal.workers` 는 도는 호출마다의 마지막 신호이고 `*_idle_s` 는 그 시각에서 지금까지의 초다(서버 시계).
+    끝난 잡은 signal 이 None 이다."""
+    progress = _loads(job.get("progress_json"), {})
+    params = _loads(job.get("params_json"), {})
+    signal = None
+    if job["state"] in RUNNING_JOB_STATES:
+        now = now_epoch()
+        workers = [w for w in progress.get("workers") or [] if isinstance(w, dict)]
+        signal = {"workers": [{**w, **{f"{key}_idle_s": None if w.get(f"last_{key}_at") is None
+                                       else max(0, now - int(w[f"last_{key}_at"])) for key in ("frame", "event")}}
+                              for w in workers]}
+    return {"id": job["id"], "mode": review_runner.MODE, "state": job["state"], "hold_code": job["hold_code"],
+            "hold_until": job["hold_until"], "hold_n": int(job["hold_n"] or 0), "error": job["error"],
+            "credential_email": job["credential_email"], "scope": params.get("scope") or {},
+            "phase": progress.get("phase"), "progress": {k: progress.get(k) for k in REVIEW_JOB_PROGRESS_KEYS},
+            "waiting": progress.get("waiting"), "signal": signal}
+
+
+def _quality_summary(quality: Any) -> dict | None:
+    """진행판의 품질 블록(루프가 60초마다 `progress_json.quality` 에 넣는다 — M2.md 5절 #16) 요약 — 문면과 기준 밖 항목. 수치 전체는
+    문면 줄마다 같은 수다(review_quality.render_text). 카드 폭포는 `review.cards` 칸이다."""
+    if not isinstance(quality, dict):
+        return None
+    result = quality.get("json") if isinstance(quality.get("json"), dict) else {}
+    return {"job_id": quality.get("job_id"), "computed_at": quality.get("computed_at"), "title": quality.get("title"),
+            "text": quality.get("text"), "policy_version": result.get("policy_version"),
+            "ledger_hash": result.get("ledger_hash"), "out_of_bounds": result.get("out_of_bounds") or [],
+            "unchecked": result.get("unchecked") or []}
+
+
+def review_payload(store: Any, target_key: str, flow: str | None) -> dict | None:
+    """진행판의 `review` 칸 — 셀 원장이 없는 패널 방식 대상은 None(패널 대상 응답은 이 칸만 더해진다 — D-24). 카드 대조 대상은 검토
+    잡 전에도 낸다(검토 순서를 보고 범위를 고른다 — #24).
+
+    {units, cells{total, by_state, by_basis, in_scope, out_of_scope_pending, failed_open}, experts{total, by_state},
+    cards(카드 폭포 | None), quality(요약 | None), order[…], job(가장 최근 검토 잡 | None)}. 셀·전문가 셈은 활성 단위로 센 원장 값,
+    카드 폭포·품질은 그 잡의 진행판(`progress_json.quality`)에서 읽는다(5초 폴링이 원장을 다시 세지 않는다)."""
+    has_cells = store.query_one("SELECT 1 FROM rr_review_cells WHERE target_key = ? LIMIT 1", (target_key,)) is not None
+    if flow != "cells" and not has_cells:
+        return None
+    summary = review_cells.review_summary(store, target_key)
+    job = store.query_one(
+        "SELECT id, state, hold_code, hold_until, hold_n, error, credential_email, params_json, progress_json FROM rr_jobs"
+        " WHERE target_key = ? AND mode = ? ORDER BY created_at DESC, id DESC LIMIT 1", (target_key, review_runner.MODE))
+    job = dict(job) if job is not None else None
+    quality = _loads(job["progress_json"], {}).get("quality") if job is not None else None
+    cards = (quality.get("json") or {}).get("cards") if isinstance(quality, dict) else None
+    return {"units": summary["units"], "cells": summary["cells"], "experts": summary["experts"], "cards": cards,
+            "quality": _quality_summary(quality), "order": review_order_payload(store, target_key),
+            "job": _review_job_payload(job) if job is not None else None}
+
+
+def cells_payload(target_key: str, *, owner_sub: str | None = None, agent_key: str | None = None,
+                  unit_id: str | None = None, domain: str | None = None, state: str | None = None,
+                  limit: int = CELL_LIST_LIMIT_DEFAULT, offset: int = 0, columns: tuple[str, ...] | None = None) -> dict:
+    """`GET /targets/{key}/cells` 본체 — MCP `risk_get_cells` 와 같은 함수(그쪽은 `columns=CELL_BRIEF_COLUMNS` 로 행을 줄이고 와이어에
+    맞춰 limit 을 줄인다). 격자(활성 빌드의 검토 대상 단위)의 셀을 검토 순서(전문가) → 단위 순번으로 준다.
+    {target_key, total, limit, offset, next_offset?, rows[]} — 행 열은 S1 의 이름 그대로(JSON 열·선점은 셀 하나 경로가 준다)."""
+    _target_row(target_key, owner_sub)
+    if state is not None and state not in review_cells.CELL_STATES:
+        raise AppError("E100", f"state 는 {list(review_cells.CELL_STATES)} 가운데 하나다 — {state!r}.", 422)
+    store = get_store()
+    take, skip = max(1, min(int(limit), CELL_LIST_LIMIT_MAX)), max(0, int(offset))
+    cols = list(columns) if columns else [c for c in _table_columns(store, "rr_review_cells") if c not in CELL_LIST_HIDDEN]
+    active = review_cells.active_unit_ids(store, target_key)
+    out: dict[str, Any] = {"target_key": target_key, "total": 0, "limit": take, "offset": skip, "rows": []}
+    if not active:
+        return out
+    where = ["c.target_key = ?", f"c.unit_id IN ({','.join('?' * len(active))})"]
+    params: list[Any] = [target_key, *active]
+    for column, value in (("agent_key", agent_key), ("unit_id", unit_id), ("domain", domain), ("state", state)):
+        if value is not None:
+            where.append(f"c.{column} = ?")
+            params.append(value)
+    clause = " AND ".join(where)
+    out["total"] = int(store.query_one(f"SELECT COUNT(*) AS n FROM rr_review_cells c WHERE {clause}", tuple(params))["n"] or 0)
+    rows = store.query(
+        f"SELECT {', '.join('c.' + c for c in cols)} FROM rr_review_cells c LEFT JOIN rr_expert_reports h"
+        f" ON h.target_key = c.target_key AND h.agent_key = c.agent_key WHERE {clause}"
+        " ORDER BY COALESCE(h.review_order, 1 << 30), c.agent_key, c.unit_seq, c.unit_id LIMIT ? OFFSET ?",
+        (*params, take, skip))
+    out["rows"] = [dict(r) for r in rows]
+    if skip + len(out["rows"]) < out["total"]:
+        out["next_offset"] = skip + len(out["rows"])
+    return out
+
+
+def cell_payload(target_key: str, unit_id: str, agent_key: str, *, owner_sub: str | None = None) -> dict:
+    """`GET /targets/{key}/cells/{unit_id}/{agent_key}` — 셀 하나와 그 셀의 판정 행 전부(변형별)·호출 목록(result 본문 제외).
+    카드 인용은 보고서 표시·반출과 같은 모양이다(판정당 200자, 줄였으면 `<칸>_chars` 에 원래 길이 — 사용자 결정 1). `*_json` 열은
+    값으로 편다(이름은 열 그대로)."""
+    _target_row(target_key, owner_sub)
+    store = get_store()
+    where = "target_key = ? AND unit_id = ? AND agent_key = ?"
+    key = (target_key, unit_id, agent_key)
+    cell = store.query_one(f"SELECT * FROM rr_review_cells WHERE {where}", key)
+    if cell is None:
+        raise AppError("E404", f"셀을 찾을 수 없습니다 — {target_key} · {unit_id} · {agent_key}.", 404)
+    view = export_module._export_view("rr_review_cells", dict(cell))
+    view.pop("lease_owner", None)
+    verdicts = [_parsed_json_columns(export_module._export_view("rr_card_verdicts", dict(r))) for r in store.query(
+        f"SELECT * FROM rr_card_verdicts WHERE {where} ORDER BY record_id, variant", key)]
+    call_cols = [c for c in _table_columns(store, "rr_review_calls") if c != "result_gz"]
+    calls = [_parsed_json_columns(dict(r)) for r in store.query(
+        f"SELECT {', '.join(call_cols)} FROM rr_review_calls WHERE {where} ORDER BY started_at, call_id", key)]
+    return {"target_key": target_key, "unit_id": unit_id, "agent_key": agent_key, "cell": _parsed_json_columns(view),
+            "verdicts": verdicts, "calls": calls}
+
+
+def experts_payload(target_key: str, *, owner_sub: str | None = None, domain: str | None = None,
+                    state: str | None = None) -> dict:
+    """`GET /targets/{key}/experts` — 전문가 머리 목록(검토 순서). 행은 S1 의 열(보고서 본문·계획·훑기·요약 글·선점은 뺀다) + 얼린
+    묶음의 카드 수 `cards`(묶음 전이면 None) + 그 전문가 셀의 상태별 수 `cells{total, by_state}`(활성 단위)."""
+    _target_row(target_key, owner_sub)
+    if state is not None and state not in review_cells.EXPERT_STATES:
+        raise AppError("E100", f"state 는 {list(review_cells.EXPERT_STATES)} 가운데 하나다 — {state!r}.", 422)
+    store = get_store()
+    cols = [c for c in _table_columns(store, "rr_expert_reports") if c not in EXPERT_LIST_HIDDEN]
+    where, params = ["target_key = ?"], [target_key]
+    for column, value in (("domain", domain), ("state", state)):
+        if value is not None:
+            where.append(f"{column} = ?")
+            params.append(value)
+    heads = [dict(r) for r in store.query(
+        f"SELECT {', '.join(cols)} FROM rr_expert_reports WHERE {' AND '.join(where)}"
+        " ORDER BY COALESCE(review_order, 1 << 30), agent_key", tuple(params))]
+    packs = _pack_counts(store, heads)
+    active = set(review_cells.active_unit_ids(store, target_key))
+    tally: dict[str, dict[str, int]] = {}
+    for r in store.query("SELECT agent_key, unit_id, state FROM rr_review_cells WHERE target_key = ?", (target_key,)):
+        if r["unit_id"] in active:
+            by_state = tally.setdefault(r["agent_key"], {s: 0 for s in review_cells.CELL_STATES})
+            by_state[r["state"]] = by_state.get(r["state"], 0) + 1
+    experts = [{**h, "cards": packs.get(h["agent_key"]),
+                "cells": {"total": sum((tally.get(h["agent_key"]) or {}).values()),
+                          "by_state": tally.get(h["agent_key"]) or {s: 0 for s in review_cells.CELL_STATES}}}
+               for h in heads]
+    return {"target_key": target_key, "total": len(experts), "experts": experts}
+
+
+def expert_report_source(target_key: str, agent_key: str, *, owner_sub: str | None = None) -> tuple[dict, dict]:
+    """(머리 칸, 보고서 JSON) — 마감 때 얼린 보고서(rr_expert_reports.report_gz)를 머리와 한 번에 읽는다. 머리가 없거나 아직 마감하지
+    않았거나 폐기가 원문을 비웠으면 E404 다."""
+    _target_row(target_key, owner_sub)
+    row = get_store().query_one(
+        "SELECT state, revision, report_hash, finalized_at, coverage_status, opinion_id, review_id, report_gz"
+        " FROM rr_expert_reports WHERE target_key = ? AND agent_key = ?", (target_key, agent_key))
+    if row is None or row["report_gz"] is None:
+        raise AppError("E404", f"전문가 보고서가 없습니다 — {target_key}:{agent_key}(마감 전이거나 원문이 비었다).", 404)
+    meta = {"target_key": target_key, "agent_key": agent_key, "state": row["state"], "version": int(row["revision"] or 0),
+            "report_hash": row["report_hash"], "finalized_at": row["finalized_at"],
+            "coverage_status": row["coverage_status"], "opinion_id": row["opinion_id"], "review_id": row["review_id"]}
+    return meta, json.loads(gzip.decompress(row["report_gz"]).decode("utf-8"))
+
+
+def expert_report_render(report: dict, *, part: str, unit_id: str | None, page_chars: int) -> list[dict]:
+    """보고서 쪽 목록(`expert_report.render_pages` — 자르지 않는다, 쪽을 다 이으면 그 part 의 마크다운이다). 보고서에 없는 단위는 E404."""
+    if unit_id is not None and unit_id not in {u["unit_id"] for u in (report.get("scope") or {}).get("units") or ()}:
+        raise AppError("E404", f"이 보고서에 단위 {unit_id} 가 없습니다.", 404)
+    return expert_report.render_pages(report, page_chars, part=part, unit_id=unit_id)
+
+
+def expert_report_envelope(meta: dict, pages: list[dict], page_no: int, *, part: str, unit_id: str | None) -> dict:
+    """쪽 하나의 응답 — 머리 칸 + {format:'md', part, unit_id, pages_total, page_no, next_page?, page}."""
+    if not 1 <= int(page_no) <= len(pages):
+        raise AppError("E100", f"page 는 1 ~ {len(pages)} 가운데 하나다 — {page_no!r}.", 422, detail={"pages_total": len(pages)})
+    out = {**meta, "format": "md", "part": part, "unit_id": unit_id, "pages_total": len(pages), "page_no": int(page_no),
+           "page": pages[int(page_no) - 1]}
+    if int(page_no) < len(pages):
+        out["next_page"] = int(page_no) + 1
+    return out
+
+
+def expert_report_payload(target_key: str, agent_key: str, *, owner_sub: str | None = None, format: str = "md",
+                          part: str | None = None, unit_id: str | None = None, version: int | None = None,
+                          page: int | None = None, page_chars: int = expert_report.PAGE_CHARS) -> dict:
+    """`GET /targets/{key}/experts/{agent_key}/report` 본체(MCP `risk_get_expert_report` 는 같은 함수들을 쪽 크기만 와이어에 맞춰 부른다).
+
+    format=md(기본) — 쪽 하나(part 기본 summary, page 기본 1, `next_page` 로 이어 받는다). format=json — 보고서 JSON 전체(`report`)이고
+    part·unit_id·page 는 받지 않는다. `version` 을 주면 지금 판(revision)과 같아야 한다 — 쪽을 받는 사이에 다시 마감돼 판이 바뀌면
+    409 report_version_moved(처음 쪽부터 다시 받는다)."""
+    if format not in REPORT_FORMATS:
+        raise AppError("E100", f"format 은 {list(REPORT_FORMATS)} 가운데 하나다 — {format!r}.", 422)
+    meta, report = expert_report_source(target_key, agent_key, owner_sub=owner_sub)
+    if version is not None and int(version) != meta["version"]:
+        raise AppError("report_version_moved", f"보고서 판이 {version} 에서 {meta['version']} 로 바뀌었다 — 처음 쪽부터 다시 받는다.",
+                       409, detail={"version": meta["version"], "asked": int(version)})
+    if format == "json":
+        given = [name for name, value in (("part", part), ("unit_id", unit_id), ("page", page)) if value is not None]
+        if given:
+            raise AppError("E100", f"format=json 은 보고서 JSON 전체다 — {', '.join(given)} 는 format=md 의 칸이다.", 422)
+        return {**meta, "format": "json", "report": report}
+    part = part or "summary"
+    pages = expert_report_render(report, part=part, unit_id=unit_id, page_chars=page_chars)
+    return expert_report_envelope(meta, pages, 1 if page is None else page, part=part, unit_id=unit_id)
+
+
+@router.get("/targets/{target_key}/cells")
+def get_cells(target_key: str, agent_key: str | None = None, unit_id: str | None = None, domain: str | None = None,
+              state: str | None = None, limit: int = CELL_LIST_LIMIT_DEFAULT, offset: int = 0,
+              ident: identity.Identity = Depends(identity.current)) -> dict:
+    """카드 대조 셀 목록(limit 기본 500 · 최대 2000, next_offset 으로 이어 받는다)."""
+    return cells_payload(target_key, owner_sub=_require_user(ident), agent_key=agent_key, unit_id=unit_id, domain=domain,
+                         state=state, limit=limit, offset=offset)
+
+
+@router.get("/targets/{target_key}/cells/{unit_id}/{agent_key}")
+def get_cell(target_key: str, unit_id: str, agent_key: str, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """셀 하나 — 셀 행·판정 행 전부·호출 목록(result 본문 제외)."""
+    return cell_payload(target_key, unit_id, agent_key, owner_sub=_require_user(ident))
+
+
+@router.get("/targets/{target_key}/experts")
+def get_experts(target_key: str, domain: str | None = None, state: str | None = None,
+                ident: identity.Identity = Depends(identity.current)) -> dict:
+    """카드 대조 전문가 머리 목록(검토 순서)."""
+    return experts_payload(target_key, owner_sub=_require_user(ident), domain=domain, state=state)
+
+
+@router.get("/targets/{target_key}/experts/{agent_key}/report")
+def get_expert_report(target_key: str, agent_key: str, format: str = "md", part: str | None = None,
+                      unit_id: str | None = None, version: int | None = None, page: int | None = None,
+                      ident: identity.Identity = Depends(identity.current)) -> dict:
+    """전문가 보고서 — format=md 는 쪽(part·unit_id·page), format=json 은 보고서 JSON 전체."""
+    return expert_report_payload(target_key, agent_key, owner_sub=_require_user(ident), format=format, part=part,
+                                 unit_id=unit_id, version=version, page=page)
 
 
 def seats_payload(target_key: str, domain: str | None = None, *, owner_sub: str | None = None) -> dict:
