@@ -420,6 +420,119 @@ def test_the_reader_guard_sees_an_unfiltered_query():
     assert [(f, ok) for f, _line, ok in _findings_readers(source)] == [("a", False), ("b", True)]
 
 
+# rr_seat_opinions 를 읽는데 카드 대조 검토의 의견 행(panel_id = review_id)을 거르지 않는 자리와 그 까닭(R3B-9). 패널 경로의 판단
+# (좌석 승계·등록부·지표)에 검토 의견이 섞이지 않게 한다 — 까닭 없이 이 목록을 넓히지 않는다.
+OPINION_READERS: dict[tuple[str, str], str] = {
+    ("brief.py", "_seat_memory_line"): "E7 좌석 기억 — 다른 대상의 의견 행(검토 의견 포함)을 읽는다(계획이 남겨 둔 예외, _finding_subjects 와 같다)",
+    ("expert_report.py", "_write_opinion"): "검토 마감 자신의 의견 행(opinion_id 로 외부 반영 열을 이어받는다)",
+    ("learning.py", "collect_atoms"): "opinion_id → agent_key 지도 — 찾는 쪽이 이미 거른 finding(#20)의 opinion_id 라 검토 의견은 찾아지지 않는다",
+    ("metrics.py", "_load_atoms"): "opinion_id → agent_key 지도 — 찾는 쪽이 이미 거른 finding(#20)의 opinion_id 라 검토 의견은 찾아지지 않는다",
+    ("narrative.py", "_release_ledger_cycles"): "원장 회차(1~)로 찾는다 — 검토 의견은 500 대역이라 같은 회차가 아니다",
+    ("planner.py", "apply_carry_over"): "원장(rr_coverage.opinion_id)이 받은 의견만 — 패널 대상의 원장은 검토가 닫지 않는다(#8)",
+    ("registry.py", "_minutes_lines"): "panel_id = rr_panels 행의 id — 검토 id 는 패널 id 가 아니다",
+    ("routes.py", "_queue_visibility_retag"): "과제 가시성이 바뀌면 그 대상의 AIDataHub 레코드 전부(검토 의견 포함)에 태그를 다시 단다",
+    ("routes.py", "panel_transcript_payload"): "panel_id = rr_panels 행(문지기가 패널 행을 먼저 본다) — 검토 id 로는 부를 수 없다",
+}
+_OPINION_SQL = re.compile(r"\b(?:FROM|JOIN)\s+rr_seat_opinions\b", re.IGNORECASE)
+
+
+def _opinion_readers(source: str) -> list[tuple[str, int, bool]]:
+    """(함수, 줄, 검토 의견을 거르나) — SELECT 글 가운데 rr_seat_opinions 를 읽는 것. 거름은 panel_id 를 그 대상의 검토 id
+    (rr_expert_reports.review_id) 밖으로 두는 것이다."""
+    out: list[tuple[str, int, bool]] = []
+
+    class Visitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.where = ["<module>"]
+
+        def visit_FunctionDef(self, node: ast.AST) -> None:
+            self.where.append(node.name)
+            self.generic_visit(node)
+            self.where.pop()
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_JoinedStr(self, node: ast.JoinedStr) -> None:
+            self._check("".join(v.value for v in node.values if isinstance(v, ast.Constant) and isinstance(v.value, str)),
+                        node.lineno)
+
+        def visit_Constant(self, node: ast.Constant) -> None:
+            if isinstance(node.value, str):
+                self._check(node.value, node.lineno)
+
+        def _check(self, text: str, line: int) -> None:
+            if _OPINION_SQL.search(text) and re.search(r"\bSELECT\b", text, re.IGNORECASE):
+                filtered = bool(re.search(r"panel_id\s+NOT\s+IN\s*\(\s*SELECT\s+review_id\s+FROM\s+rr_expert_reports", text,
+                                          re.IGNORECASE))
+                out.append((self.where[-1], line, filtered))
+
+    Visitor().visit(ast.parse(source))
+    return out
+
+
+def test_every_panel_path_reader_of_seat_opinions_leaves_the_review_band_out():
+    """R3B-9 — #20 의 가드를 의견 행으로 넓힌다. rr_seat_opinions 를 읽는 SELECT 는 검토 의견(panel_id = review_id)을 거르거나 위
+    목록에 까닭과 함께 있다. 다음 리비전의 좌석 승계(_supersede_previous_target)는 거른다."""
+    found: dict[tuple[str, str], list[int]] = {}
+    filtered: set[tuple[str, str]] = set()
+    for path in sorted(APP.rglob("*.py")):
+        for function, line, ok in _opinion_readers(path.read_text(encoding="utf-8")):
+            (filtered.add((path.name, function)) if ok else found.setdefault((path.name, function), []).append(line))
+    assert sorted(found) == sorted(OPINION_READERS), found
+    assert ("routes.py", "_supersede_previous_target") in filtered
+    source = ('def a(store, k):\n    return store.query("SELECT agent_key FROM rr_seat_opinions WHERE target_key = ?", (k,))\n'
+              'def b(store, k):\n    return store.query("SELECT agent_key FROM rr_seat_opinions WHERE target_key = ? AND panel_id'
+              ' NOT IN (SELECT review_id FROM rr_expert_reports WHERE target_key = ?)", (k, k))\n'
+              'def c(store):\n    store.execute("DELETE FROM rr_seat_opinions WHERE panel_id = ?", ("p",))\n')
+    assert [(f, ok) for f, _line, ok in _opinion_readers(source)] == [("a", False), ("b", True)]
+
+
+def test_the_next_revision_carries_seats_over_on_panel_opinions_only(store, tmp_path, monkeypatch):
+    """R3B-9 — 패널을 돈 대상에 카드 대조를 얹으면 검토 의견(501)도 cited_ckeys(걸린 단위의 바뀐 부품)를 싣는다. 같은 과제의 다음
+    리비전을 열 때 좌석 승계(apply_carry_over)에 넘기는 인용 ckey 는 패널 의견의 것뿐이다 — 검토 의견의 ckey 가 섞이면 그 좌석이
+    바뀐 부품에 걸려 승계되지 않는다(패널 쪽 원장이 검토 때문에 바뀐다, D-24)."""
+    def refused(*args, **_kwargs):
+        raise httpx.ConnectError("시험은 외부를 부르지 않는다.", request=args[-1])
+
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", refused)
+    synth = factories.make_diff_target(store, 40, open_target=False)
+    key = routes.create_target(routes.TargetBody(kind="diff", ref_id=synth.diff_id, consent=True, flow="panels",
+                                                 agents=[dict(r) for r in rig.ROSTER]), ident=factories.ident(OWNER))["target_key"]
+    rig.pat(store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    runner.create_job(store, key, "C", owner_sub=OWNER, consent=True, settings=cfg)
+    engine = legacy.LegacyEngine(_panel_spec(store, key))
+    while (job := runner.claim_next_job(store, cfg)) is not None:
+        runner.run_panel(store, cfg, engine, job)
+    seated = sorted(r["agent_key"] for r in store.query("SELECT agent_key FROM rr_coverage WHERE target_key = ? AND panel_id"
+                                                        " IS NOT NULL", (key,)))
+    units.build_units(store, key, built_by=OWNER)
+    agent = SEAL if SEAL in seated else seated[0]
+    _run(store, key, scope={"agents": [agent]}, verdicts={"K01": ("yes", "FAIL")})
+
+    def ckeys(where: str) -> set[str]:
+        return {str(k) for r in store.query(f"SELECT opinion_json FROM rr_seat_opinions WHERE target_key = ? AND agent_key = ?"
+                                            f" AND {where}", (key, agent))
+                for k in json.loads(r["opinion_json"]).get("cited_ckeys") or ()}
+
+    review_id = _head(store, key, agent)["review_id"]
+    review_only = ckeys(f"panel_id = '{review_id}'") - ckeys(f"panel_id <> '{review_id}'")
+    assert review_only, "검토 의견이 패널 의견 밖의 ckey 를 싣지 않는다 — 이 시험은 아무것도 보지 않는다"
+    seen: dict = {}
+    real = planner.apply_carry_over
+
+    def spy(store_, target_key, prev_target_key, cited_ckeys, changed_ckeys, **kwargs):
+        seen.update(prev=prev_target_key, cited={a: set(v) for a, v in cited_ckeys.items()})
+        return real(store_, target_key, prev_target_key, cited_ckeys, changed_ckeys, **kwargs)
+
+    monkeypatch.setattr(planner, "apply_carry_over", spy)
+    back = factories.make_diff(store, synth.target_snapshot_id, synth.base_snapshot_id)     # 다음 리비전 — 앞 대상 스냅샷에서 이어진다
+    routes.create_target(routes.TargetBody(kind="diff", ref_id=back["diff_id"], consent=True, flow="panels",
+                                           agents=[dict(r) for r in rig.ROSTER]), ident=factories.ident(OWNER))
+    assert seen["prev"] == key
+    assert seen["cited"].get(agent, set()) == ckeys(f"panel_id <> '{review_id}'") and not seen["cited"].get(agent, set()) & review_only
+
+
 # ---------------------------------------------------------------- 반출(M2.md 5절 #18 · #21)
 def test_the_export_clips_card_quotes_outside_the_verdict_rows_and_keeps_the_original_length(store):
     """박스 밖으로 나가는 카드 인용은 판정 행 밖에서도 200자다 — 검토 finding 의 인용·근거 문장, 인용 역색인의 card: 인용, 단독

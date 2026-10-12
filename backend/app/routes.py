@@ -2065,10 +2065,13 @@ def _supersede_previous_target(store: Any, *, project_id: str, new_target_key: s
     out["changed_ckeys"] = len(changed)
     out["registry"] = registry_module.invalidate(store, prev_key, new_target_key, changed,
                                                 resolve_ckey=resolve)
-    # 좌석 carried — 인용 ckey 는 좌석 의견 본문(`cited_ckeys`)에 이미 있다(§6.8.2 네 조건의 입력).
+    # 좌석 carried — 인용 ckey 는 좌석 의견 본문(`cited_ckeys`)에 이미 있다(§6.8.2 네 조건의 입력). 카드 대조 검토의 의견 행
+    # (panel_id = review_id, 회차 500 대역)은 읽지 않는다 — 패널 대상에 얹은 검토가 다음 리비전의 좌석 승계를 바꾸면 두 방식의
+    # 비교 도중 패널 쪽 원장이 바뀐다(M2.md 5절 #20 · D-24, R3B-9).
     cited: dict[str, list[str]] = {}
     for row in store.query(
-            "SELECT agent_key, opinion_json FROM rr_seat_opinions WHERE target_key = ?", (prev_key,)):
+            "SELECT agent_key, opinion_json FROM rr_seat_opinions WHERE target_key = ?"
+            " AND panel_id NOT IN (SELECT review_id FROM rr_expert_reports WHERE target_key = ?)", (prev_key, prev_key)):
         keys = _loads(row["opinion_json"], {}).get("cited_ckeys") or []
         cited.setdefault(str(row["agent_key"]), []).extend(str(k) for k in keys)
     out["carried"] = planner.apply_carry_over(store, new_target_key, prev_key, cited_ckeys=cited,
