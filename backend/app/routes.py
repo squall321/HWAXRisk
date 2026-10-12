@@ -2214,9 +2214,10 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
     return out
 
 
-def require_review_enabled() -> None:
-    """새 흐름(flow='cells')의 문 — 이 박스에서 꺼져 있으면 409 review_disabled 와 켜는 자리(knobs.env)를 말한다."""
-    if not config.review_enabled():
+def require_review_enabled(cfg: Any = None) -> None:
+    """새 흐름(flow='cells')의 문 — 이 박스에서 꺼져 있으면 409 review_disabled 와 켜는 자리(knobs.env)를 말한다.
+    방식 바꾸기·대상 열기와 검토 잡 만들기(`review_runner.create_review_job` — 받은 설정 `cfg` 로 본다)가 같이 쓴다."""
+    if not config.review_enabled(cfg):
         raise AppError("review_disabled", "카드 대조 검토(flow='cells')가 이 박스에서 꺼져 있습니다 — 데이터 디렉터리의"
                        f" knobs.env 에 HWAXRISK_REVIEW_ENABLED=1 을 적고 앱을 다시 띄웁니다({config.REVIEW_KNOB_HOME}).", 409,
                        detail={"knob": "HWAXRISK_REVIEW_ENABLED", "where": config.REVIEW_KNOB_HOME})

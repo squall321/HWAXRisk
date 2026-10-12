@@ -45,7 +45,8 @@ ACTIVE_STATUSES: frozenset[str] = frozenset({"assigned", "running"})
 ALL_STATUSES: frozenset[str] = TERMINAL_STATUSES | OPEN_STATUSES
 # 허용 전이만 적는다(빈 집합 = 종결, 되돌리기는 carried 뿐).
 ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
-    "pending": frozenset({"assigned", "skipped"}),
+    # done·done_weak·abstain 은 카드 대조 검토 마감 전용이다(close_review_seat — 검토는 원장을 assigned·running 으로 옮기지 않는다).
+    "pending": frozenset({"assigned", "skipped", "done", "done_weak", "abstain"}),
     "assigned": frozenset({"running", "pending", "skipped"}),
     "running": frozenset({"done", "done_weak", "abstain", "failed", "pending", "skipped"}),
     "failed": frozenset({"pending", "skipped"}),
@@ -863,6 +864,79 @@ def apply_carry_over(
             if cur.rowcount:
                 carried.append({"agent_key": row["agent_key"], "carried_from_opinion_id": row["opinion_id"]})
     return {"carried": len(carried), "seats": carried}
+
+
+# ---------------------------------------------------------------- 카드 대조 검토 마감(재설계 M2 · m2-wp3b S5)
+REVIEW_CLOSE_STATUSES: tuple[str, ...] = ("done", "done_weak", "abstain")
+
+
+def review_rollup(tally: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    """한 전문가의 셀 셈(`review_cells.expert_tally`) → (원장 상태, 사유). 위에서 처음 맞는 줄이고, 상태가 None 이면 닫지 않는다.
+
+    | 셀 | 상태 | 사유 |
+    | 열린 셀(pending·running)이 있다 — 범위 밖 pending 포함 | 닫지 않는다 | open_cells |
+    | reviewed 0 — 남은 것이 실패·넘김·해당 없음뿐 | 닫지 않는다 | nothing_reviewed |
+    | reviewed ≥1 · 검증된 근거가 있다 | done(실패·넘김 셀이 있으면 done_weak) | — · partial:<n> |
+    | reviewed ≥1 · 검증된 근거가 없다 | done_weak | partial:<n> · no_cards · no_verified_cite |
+    '검증된 근거' 는 실효 판정 가운데 `applies='yes'` 이고 인용·참조 대조를 둘 다 지난 행이다(X1-05). 실패 셀이 남았으면 done 이
+    아니다(m-01). no_cards 는 reviewed 셀이 전부 역할만으로 본 것(카드 0장 전문가)이다.
+    """
+    if tally["open"]:
+        return None, "open_cells"
+    if not tally["reviewed"]:
+        return None, "nothing_reviewed"
+    unseen = int(tally["failed"]) + int(tally["skipped"])
+    if unseen:
+        return "done_weak", f"partial:{unseen}"
+    if tally["verified"]:
+        return "done", None
+    return "done_weak", "no_cards" if tally["role_only_only"] else "no_verified_cite"
+
+
+def close_review_seat(store: Any, target_key: str, agent_key: str, *, review_id: str, opinion_id: str,
+                      model: str | None = None, tier: str | None = None) -> dict:
+    """카드 대조 검토 마감이 원장 한 행을 닫는다 — 상태는 그 전문가의 셀 셈으로 정한다(`review_rollup`).
+
+    - 카드 대조 대상(`flow='cells'`)만 닫는다. 패널 대상에 얹은 검토는 보고서·의견·finding 만 쓰고 원장을 닫지 않는다(M2.md
+      5절 #8 — 다음 Tier 패널이 그 전문가를 앉히지 않으면 두 방식의 비교가 섞인다).
+    - 행이 pending 이면 그 값으로 닫는다. 이미 이 검토가 닫은 행(panel_id == review_id)이면 값을 다시 적는다. 그 밖(패널이 닫았거나
+      deferred·skipped·carried·도는 좌석)은 건드리지 않는다.
+    반환 {updated, status, reason, why?}. 함께 적는 열 — opinion_id · panel_id(= review_id) · origin('primary') · tier · model ·
+    finished_at.
+    """
+    from app import review_cells  # noqa: PLC0415 — review_cells 는 planner 를 import 한다.
+
+    if not str(opinion_id or "").strip():
+        raise AppError("E100", "검토 마감은 의견 행(opinion_id)이 있어야 원장을 닫는다.", 422)
+    target = store.query_one("SELECT flow FROM rr_targets WHERE target_key = ?", (target_key,))
+    row = store.query_one("SELECT status, panel_id, reason FROM rr_coverage WHERE target_key = ? AND agent_key = ?",
+                          (target_key, agent_key))
+    if target is None or row is None:
+        raise AppError("E404", f"원장 행이 없습니다: {target_key}:{agent_key}", 404)
+    current = {"updated": False, "status": row["status"], "reason": row["reason"]}
+    if target["flow"] != "cells":
+        return {**current, "why": "flow_panels"}
+    status, reason = review_rollup(review_cells.expert_tally(store, target_key, agent_key))
+    if status is None:
+        return {**current, "why": reason}
+    mine = row["panel_id"] == review_id and row["status"] in REVIEW_CLOSE_STATUSES
+    if row["status"] != "pending" and not mine:
+        return {**current, "why": "closed_elsewhere"}
+    if row["status"] == "pending":
+        _guard("pending", status)
+    if tier is None:
+        head = store.query_one("SELECT tier FROM rr_expert_reports WHERE target_key = ? AND agent_key = ?",
+                               (target_key, agent_key))
+        tier = head["tier"] if head is not None else None
+    now = now_epoch()
+    updated = store.execute(
+        "UPDATE rr_coverage SET status = ?, reason = ?, opinion_id = ?, panel_id = ?, origin = 'primary', tier = ?,"
+        " model = ?, finished_at = ?, updated_at = ?, status_source = 'code'"
+        " WHERE target_key = ? AND agent_key = ? AND (status = 'pending' OR (panel_id = ? AND status IN (?, ?, ?)))",
+        (status, reason, opinion_id, review_id, tier, model, now, now, target_key, agent_key, review_id,
+         *REVIEW_CLOSE_STATUSES))
+    return {"updated": bool(updated), "status": status if updated else row["status"],
+            "reason": reason if updated else row["reason"]}
 
 
 # ---------------------------------------------------------------- 회계 조회·불변식(plan §6.8.3)

@@ -2,20 +2,19 @@
 """두 방식(panels — 영역을 섞은 패널 3라운드 · cells — 전문가별 카드 대조)이 한 원장에 같이 산다. 아직 아무것도 안 돈 대상은
 양쪽으로 바꾸고, 패널을 돌린 대상에는 카드 대조를 얹으며(파일럿 길), cells 대상에서는 Tier 패널 잡과 L2 보충 회차(브리프 토큰)를
 막는다. 문지기는 라우트가 아니라 runner.create_job 에 있어 사용자 잡과 C3 자동 후속이 같이 막힌다.
-대상·잡·패널은 공장(make_diff_target · portal_panel_body)과 라우트·러너가 만든 것이다. 검토 잡(rr_jobs.mode='reviews')이 있어야
-보이는 규칙(cells → panels 의 review_ran)은 그 잡의 생산자(C2b create_review_job)가 생기면 붉어지는 자리표시로 둔다.
+대상·잡·패널은 공장(make_diff_target · portal_panel_body)과 라우트·러너가 만든 것이다. 검토 잡(rr_jobs.mode='reviews')은 그
+생산자(review_runner.create_review_job, m2-wp3b S5)로 세운다.
 """
 from __future__ import annotations
 
 import asyncio
 import dataclasses
-import importlib
 import json
 
 import pytest
 
 import app.mcp_server as srv
-from app import config, entry, identity, planner, routes, runner, units
+from app import config, entry, identity, planner, review_runner, routes, runner, units
 from app.common import now_epoch
 from app.errors import AppError
 from tests import factories
@@ -422,18 +421,8 @@ def test_panel_job_transitions_leave_the_hold_columns_alone(store):
     assert [(j["id"], j["mode"], j["kind"]) for j in page["jobs"]] == [(job_id, "panels", "panel_batch")]
 
 
-# ---------------------------------------------------------------- 검토 잡이 있어야 보이는 규칙(C2b 의 생산자 자리표시)
-class C2bProducerMissing(Exception):
-    """검토 잡의 생산자(review_runner.create_review_job, m2-wp3b S5)가 아직 없다 — 자리표시의 기대한 실패는 이것 하나다."""
-
-
+# ---------------------------------------------------------------- 검토 잡이 있어야 보이는 규칙(생산자 create_review_job)
 def _create_review_job(store, target_key: str, *, user_memo: str | None = None) -> str:
-    try:
-        review_runner = importlib.import_module("app.review_runner")
-    except ModuleNotFoundError as exc:
-        raise C2bProducerMissing("app.review_runner") from exc
-    if not hasattr(review_runner, "create_review_job"):
-        raise C2bProducerMissing("app.review_runner.create_review_job")
     _register_pat(store)
     # 범위는 ECAD 에 기대지 않는 영역 하나다 — M2 는 입력 결손(ECAD 부재) 전문가를 범위에 받지 않는다(422 input_gap_m3).
     out = review_runner.create_review_job(store, target_key, owner_sub=OWNER, requester_sub=OWNER,
@@ -442,13 +431,10 @@ def _create_review_job(store, target_key: str, *, user_memo: str | None = None) 
     return out["job_id"]
 
 
-# 검토 잡 자리표시의 로스터 — ECAD 에 기대는 영역이 없다(합성 쌍에는 회로 소스가 없다).
+# 검토 잡 시험의 로스터 — ECAD 에 기대는 영역이 없다(합성 쌍에는 회로 소스가 없다).
 NO_ECAD = factories.agents(("mech", "sim", "xd"), 2)
-C2B_REVIEW_JOBS = pytest.mark.xfail(strict=True, raises=C2bProducerMissing,
-                                    reason="C2b producer — review_runner.create_review_job(m2-wp3b S5)이 생기면 표식을 지운다")
 
 
-@C2B_REVIEW_JOBS
 def test_a_target_a_review_job_ever_stood_on_does_not_go_back_to_panels_or_rebuild(store):
     """cells → panels 는 검토 잡이 한 번도 없을 때만이다(409 flow_locked·review_ran, 잡을 취소해도 그대로). 검토 잡이 선 대상의
     다른 입력 재빌드는 409 units_in_use 다(M2.md 5절 #6) — 같은 입력은 그대로 no-op 이다."""
@@ -469,7 +455,6 @@ def test_a_target_a_review_job_ever_stood_on_does_not_go_back_to_panels_or_rebui
 
 
 
-@C2B_REVIEW_JOBS
 def test_a_review_job_made_while_units_are_computed_stops_the_rebuild(store, monkeypatch):
     """단위 재빌드의 units_in_use 확인은 persist 트랜잭션 안이다(앞으로의 위험 3) — 확인 뒤 쓰기 전에 검토 잡이 서면 새 rev 를
     쓰지 않고 409 units_in_use 다. 잡은 persist 가 트랜잭션을 열기 직전(시각을 읽을 때)에 세운다 — 종전처럼 확인이 트랜잭션 밖
@@ -492,7 +477,6 @@ def test_a_review_job_made_while_units_are_computed_stops_the_rebuild(store, mon
     assert made and [r["rev"] for r in store.query("SELECT rev FROM rr_unit_builds WHERE target_key = ?", (key,))] == [1]
 
 
-@C2B_REVIEW_JOBS
 def test_the_panel_path_never_picks_recovers_or_shows_a_review_job(store):
     """한 rr_jobs 표에 두 종류가 산다 — 패널 러너는 검토 잡을 집지 않고(claim_next_job) 재기동 복구도 건드리지 않으며, 진행판의
     job·패널 브리프의 최근 메모는 패널 잡의 것이다. 살아 있는 검토 잡이 있는 대상에는 패널 잡을 세우지 않는다(409
@@ -522,7 +506,6 @@ def test_the_panel_path_never_picks_recovers_or_shows_a_review_job(store):
     assert {(j["id"], j["mode"]) for j in page["jobs"]} == {(panel_id, "panels"), (review_id, "reviews")}
 
 
-@C2B_REVIEW_JOBS
 def test_a_person_pausing_a_review_job_holds_it_and_resume_or_cancel_clears_the_hold(store):
     """사람의 정지는 검토 잡의 보류를 hold_code='user'·hold_until=NULL 로 덮는다(자동 재개가 다시 줄에 세우지 않는다). 재개·취소는
     보류 열 셋을 비운다(P-10 · X4-25)."""
@@ -546,7 +529,6 @@ def test_a_person_pausing_a_review_job_holds_it_and_resume_or_cancel_clears_the_
     assert hold() == ("cancelled", None, None, None, 0)
 
 
-@C2B_REVIEW_JOBS
 def test_purging_a_project_cancels_its_review_jobs_and_clears_the_hold(store):
     """과제 폐기의 일괄 취소도 사람의 취소처럼 검토 잡의 보류 열 셋을 비운다(RC-8) — 취소된 잡에 보류 코드·재개 시각이 남으면
     자동 재개나 진행판이 '보류 중' 으로 읽는다."""
