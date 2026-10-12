@@ -331,9 +331,47 @@ def test_knobs_env_overrides_the_default_and_the_environment_overrides_knobs_env
     assert knobs["HWAXRISK_REVIEW_CONCURRENCY"]["source"] == "default"
     assert knobs["HWAXRISK_REVIEW_MAX_CALLS"]["source"] == "default"
     assert "OTHER" not in knobs
-    # 스위치는 다른 불리언과 같은 규칙 — 모르는 낱말은 기본값(꺼짐)이다.
+    # 줄 끝 주석은 떼고 읽는다 — 종전에는 '1  # 파일럿' 이 모르는 낱말이라 스위치가 조용히 꺼졌다(RC-5).
+    _knobs_file(tmp_path, "HWAXRISK_REVIEW_ENABLED=1  # 파일럿\nHWAXRISK_UNITS_MAX=80 # 9명\nHWAXRISK_REVIEW_MAX_CALLS=# 나중에\n")
+    s = reload_config(HWAXRISK_DATA_DIR=str(tmp_path)).settings
+    assert (s.risk_review_enabled, s.risk_units_max, s.risk_review_max_calls) == (True, 80, 30000)
+
+
+def test_a_switch_word_that_is_not_on_or_off_stops_the_boot_and_says_where(tmp_path):
+    """켜기 스위치에 켜기·끄기 낱말이 아닌 값이 있으면 기동을 막는다(RC-5) — 종전에는 모르는 낱말이 기본값(꺼짐)이라 오타 하나로
+    스위치가 조용히 꺼졌고, 환경변수의 오타가 파일의 true 를 덮어 껐다. 낱말은 대소문자를 가리지 않는다."""
     _knobs_file(tmp_path, "HWAXRISK_REVIEW_ENABLED=maybe\n")
-    assert reload_config(HWAXRISK_DATA_DIR=str(tmp_path)).settings.risk_review_enabled is False
+    with pytest.raises(RuntimeError) as exc:
+        config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path)})
+    assert "HWAXRISK_REVIEW_ENABLED='maybe'" in str(exc.value) and str(tmp_path / "knobs.env") in str(exc.value)
+    _knobs_file(tmp_path, "HWAXRISK_REVIEW_ENABLED=true\n")
+    with pytest.raises(RuntimeError) as exc:
+        config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path), "HWAXRISK_REVIEW_ENABLED": "enable"})
+    assert "HWAXRISK_REVIEW_ENABLED='enable'" in str(exc.value) and "환경변수" in str(exc.value)
+    for word, on in (("ON", True), ("Yes", True), ("off", False), ("0", False)):
+        got = config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path), "HWAXRISK_REVIEW_ENABLED": word})
+        assert got.risk_review_enabled is on, word
+
+
+@pytest.mark.parametrize("name,raw", [
+    ("HWAXRISK_UNIT_MAX_LINES", "0"), ("HWAXRISK_UNIT_TARGET_LINES", "-3"), ("HWAXRISK_UNITS_SMALL_LINES", "0"),
+    ("HWAXRISK_UNITS_MAX", "0"), ("HWAXRISK_REVIEW_CONCURRENCY", "0"), ("HWAXRISK_REVIEW_CALL_TIMEOUT_S", "-1"),
+    ("HWAXRISK_REVIEW_READ_TIMEOUT_S", "-5"), ("HWAXRISK_REVIEW_MAX_CHARGED", "0"), ("HWAXRISK_REVIEW_MAX_CALLS", "0"),
+    ("HWAXRISK_REVIEW_CONSENT_CALLS", "-1"),
+])
+def test_a_knob_below_its_floor_stops_the_boot_and_says_where(tmp_path, name, raw):
+    """정수 손잡이는 하한을 본다(RC-5) — 단위 크기·워커·한도·상한은 1 이상, 시간은 0(끔) 이상, 동의 기준은 0 이상. 종전에는
+    -1 초가 '끔' 으로 돌면서 /api/meta/runtime 에는 -1 로 보였고, 단위 크기 0 은 모든 빌드를 불변식 실패로 만들었다."""
+    _knobs_file(tmp_path, f"{name}={raw}\n")
+    with pytest.raises(RuntimeError) as exc:
+        config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path)})
+    assert f"{name}={raw!r}" in str(exc.value) and "이상이어야" in str(exc.value) and "knobs.env" in str(exc.value)
+
+
+def test_zero_still_turns_a_time_limit_off(tmp_path):
+    _knobs_file(tmp_path, "HWAXRISK_REVIEW_CALL_TIMEOUT_S=0\nHWAXRISK_REVIEW_READ_TIMEOUT_S=0\nHWAXRISK_REVIEW_CONSENT_CALLS=0\n")
+    got = config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path)})
+    assert (got.risk_review_call_timeout_s, got.risk_review_read_timeout_s, got.risk_review_consent_calls) == (0, 0, 0)
 
 
 def test_a_knob_that_is_not_an_integer_stops_the_boot_and_says_where(tmp_path, reload_config):

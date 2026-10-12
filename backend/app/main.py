@@ -67,16 +67,31 @@ def check_credential_chain(settings) -> None:
 
 
 def check_review_chain(settings) -> None:
-    """카드 대조 검토의 시간 한도 사슬(M2.md 4.5) — 뒤집혀 있으면 기동하지 않고 고칠 손잡이를 말한다.
+    """카드 대조 검토 손잡이 사이의 관계(M2.md 4.5 — 시간 한도 사슬과 단위 크기) — 뒤집혀 있으면 기동하지 않고 고칠 손잡이를 말한다.
 
     - 프레임 사이 침묵 한도(HWAXRISK_REVIEW_READ_TIMEOUT_S) ≤ 호출 벽시계(HWAXRISK_REVIEW_CALL_TIMEOUT_S) — 안쪽이 먼저 걸려야
       죽은 연결이 '호출이 길다' 로 읽히지 않는다. 0 은 끈 것이라 견주지 않는다.
     - 검토 자격 여유(호출 벽시계 + 600) < PAT 등록 하한 — 아니면 방금 등록한 PAT 로도 검토 호출을 시작하지 못한다(검토는
       서비스 계정으로 내려가지 않는다, 사용자 결정 2026-10-12).
+    - 시간 한도는 음수가 아니다 — 접근자(review_call_timeout_s)는 음수를 '끔'(0)으로 읽어 /api/meta/runtime 과 실제가 갈린다.
+    - 단위 크기 — 목표 ≤ 상한, 작은 묶음 ≤ 상한(HWAXRISK_UNIT_TARGET_LINES · HWAXRISK_UNITS_SMALL_LINES ≤ HWAXRISK_UNIT_MAX_LINES).
+      뒤집히면 모든 빌드가 불변식 U3(상한 넘는 단위)에 걸려 cells 로 열리는 대상이 하나도 없다(반대 검토 C2a RC-5·RC-6).
     """
     call_s = config.review_call_timeout_s(settings)
     read_s = config.review_read_timeout_s(settings)
     problems: list[str] = []
+    for env_name, attr in (("HWAXRISK_REVIEW_CALL_TIMEOUT_S", "risk_review_call_timeout_s"),
+                           ("HWAXRISK_REVIEW_READ_TIMEOUT_S", "risk_review_read_timeout_s")):
+        raw = int(getattr(settings, attr, 0) or 0)
+        if raw < 0:
+            problems.append(f"{env_name} {raw}: 음수입니다 — 0(끔) 이상으로 적으세요.")
+    max_lines = int(getattr(settings, "risk_unit_max_lines", 40))
+    for env_name, attr in (("HWAXRISK_UNIT_TARGET_LINES", "risk_unit_target_lines"),
+                           ("HWAXRISK_UNITS_SMALL_LINES", "risk_units_small_lines")):
+        lines = int(getattr(settings, attr, 0))
+        if lines > max_lines:
+            problems.append(f"{env_name} {lines} > HWAXRISK_UNIT_MAX_LINES {max_lines}: 단위 상한보다 크면 상한을 넘는 단위가"
+                            " 서서 모든 빌드가 불변식 U3 에 걸립니다. 상한 이하로 내리세요.")
     if call_s > 0 and read_s > call_s:
         problems.append(f"프레임 사이 침묵 한도(HWAXRISK_REVIEW_READ_TIMEOUT_S {read_s})가 호출 벽시계"
                         f"(HWAXRISK_REVIEW_CALL_TIMEOUT_S {call_s})보다 깁니다 — 침묵 한도를 벽시계 이하로 내리세요.")

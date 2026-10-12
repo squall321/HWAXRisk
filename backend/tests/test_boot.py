@@ -411,6 +411,31 @@ def test_boot_refuses_an_inverted_review_chain_and_names_the_knob():
     main.check_review_chain(dataclasses.replace(config.settings, risk_review_call_timeout_s=85799))
 
 
+def test_boot_refuses_negative_review_time_limits_and_inverted_unit_sizes():
+    """시간 한도는 음수가 아니고(접근자는 음수를 '끔' 으로 읽어 실제와 /api/meta/runtime 이 갈린다), 단위 목표·작은 묶음은 단위
+    상한 이하다 — 뒤집히면 모든 빌드가 불변식 U3 에 걸려 cells 로 열리는 대상이 없다(RC-5). 같은 값은 통과한다."""
+    import dataclasses
+
+    import pytest
+
+    from app import main
+
+    def refused(**values) -> str:
+        with pytest.raises(RuntimeError) as exc:
+            main.check_review_chain(dataclasses.replace(config.settings, **values))
+        return str(exc.value)
+
+    assert "HWAXRISK_REVIEW_CALL_TIMEOUT_S -1: 음수" in refused(risk_review_call_timeout_s=-1)
+    assert "HWAXRISK_REVIEW_READ_TIMEOUT_S -5: 음수" in refused(risk_review_read_timeout_s=-5)
+    text = refused(risk_unit_max_lines=10, risk_unit_target_lines=20, risk_units_small_lines=5)
+    assert "HWAXRISK_UNIT_TARGET_LINES 20 > HWAXRISK_UNIT_MAX_LINES 10" in text and "knobs.env" in text
+    assert "HWAXRISK_UNITS_SMALL_LINES" not in text
+    assert "HWAXRISK_UNITS_SMALL_LINES 30 > HWAXRISK_UNIT_MAX_LINES 25" in refused(risk_unit_max_lines=25,
+                                                                                    risk_units_small_lines=30)
+    main.check_review_chain(dataclasses.replace(config.settings, risk_unit_max_lines=20, risk_unit_target_lines=20,
+                                                risk_units_small_lines=20))
+
+
 def test_the_lifespan_refuses_to_start_on_an_inverted_review_chain(tmp_path, monkeypatch, risk_store):
     """기동 절차가 실제로 그 검사를 부른다 — 함수만 있고 부르는 곳이 없으면 뒤집힌 박스가 그대로 뜬다."""
     import asyncio

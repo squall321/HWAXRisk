@@ -106,27 +106,31 @@ DEFAULT_REVIEW_CALL_TIMEOUT_S = 18000
 
 @dataclass(frozen=True)
 class Knob:
-    """검토 손잡이 하나 — 환경변수 이름 · Settings 속성 · 코드 기본값 · 형(int|bool)."""
+    """검토 손잡이 하나 — 환경변수 이름 · Settings 속성 · 코드 기본값 · 형(int|bool) · 정수의 하한(그 밑은 기동을 막는다)."""
 
     env: str
     attr: str
     default: int | bool
     kind: str = "int"
+    minimum: int = 0
 
 
 REVIEW_KNOBS: tuple[Knob, ...] = (
     Knob("HWAXRISK_REVIEW_ENABLED", "risk_review_enabled", False, "bool"),   # 새 흐름(flow='cells')의 스위치
-    Knob("HWAXRISK_UNIT_TARGET_LINES", "risk_unit_target_lines", 20),          # 검토 단위 크기(줄 수) — 글자 상한은 없다
-    Knob("HWAXRISK_UNIT_MAX_LINES", "risk_unit_max_lines", 40),
-    Knob("HWAXRISK_UNITS_SMALL_LINES", "risk_units_small_lines", 15),
-    Knob("HWAXRISK_UNITS_MAX", "risk_units_max", 60),
-    Knob("HWAXRISK_REVIEW_CONCURRENCY", "risk_review_concurrency", 4),         # 앱의 검토 워커 수
-    Knob("HWAXRISK_REVIEW_CALL_TIMEOUT_S", "risk_review_call_timeout_s", DEFAULT_REVIEW_CALL_TIMEOUT_S),
-    Knob("HWAXRISK_REVIEW_READ_TIMEOUT_S", "risk_review_read_timeout_s", 300),  # 프레임 사이 침묵 한도(엔진 ping 15초)
-    Knob("HWAXRISK_REVIEW_MAX_CHARGED", "risk_review_max_charged", 2),         # 셀의 내용 탓 실패 한도
+    Knob("HWAXRISK_UNIT_TARGET_LINES", "risk_unit_target_lines", 20, minimum=1),   # 검토 단위 크기(줄 수) — 글자 상한은 없다
+    Knob("HWAXRISK_UNIT_MAX_LINES", "risk_unit_max_lines", 40, minimum=1),
+    Knob("HWAXRISK_UNITS_SMALL_LINES", "risk_units_small_lines", 15, minimum=1),
+    Knob("HWAXRISK_UNITS_MAX", "risk_units_max", 60, minimum=1),
+    Knob("HWAXRISK_REVIEW_CONCURRENCY", "risk_review_concurrency", 4, minimum=1),   # 앱의 검토 워커 수
+    Knob("HWAXRISK_REVIEW_CALL_TIMEOUT_S", "risk_review_call_timeout_s", DEFAULT_REVIEW_CALL_TIMEOUT_S),  # 0 = 끔
+    Knob("HWAXRISK_REVIEW_READ_TIMEOUT_S", "risk_review_read_timeout_s", 300),  # 프레임 사이 침묵 한도(엔진 ping 15초), 0 = 끔
+    Knob("HWAXRISK_REVIEW_MAX_CHARGED", "risk_review_max_charged", 2, minimum=1),   # 셀의 내용 탓 실패 한도
     Knob("HWAXRISK_REVIEW_CONSENT_CALLS", "risk_review_consent_calls", 1500),  # 동의가 필요한 호출 추정
-    Knob("HWAXRISK_REVIEW_MAX_CALLS", "risk_review_max_calls", 30000),         # 넘으면 거절하는 상한
+    Knob("HWAXRISK_REVIEW_MAX_CALLS", "risk_review_max_calls", 30000, minimum=1),   # 넘으면 거절하는 상한
 )
+# 손잡이 불리언의 낱말 — 그 밖의 값은 기동을 막는다(다른 스위치의 _bool 처럼 기본값으로 돌지 않는다).
+_KNOB_TRUE = ("1", "true", "yes", "on")
+_KNOB_FALSE = ("0", "false", "no", "off")
 
 
 def resolve_data_dir(env: Mapping[str, str] | None = None) -> Path:
@@ -361,13 +365,16 @@ def _read_env_file(path: Path, keys: tuple[str, ...]) -> dict[str, str]:
 def load_review_knobs(data_dir: Path, env: Mapping[str, str] | None = None) -> tuple[dict[str, Any], tuple]:
     """검토 손잡이(REVIEW_KNOBS)를 환경변수 > `$DATA_DIR/knobs.env` > 코드 기본값 순으로 읽는다.
 
-    반환은 (Settings 속성 → 값, ((환경변수 이름, 출처 env|knobs.env|default), …)). 빈 값은 적지 않은 것으로 본다. 정수가 아닌
-    값은 기동을 막는다(어느 자리의 어느 손잡이인지 말한다) — 조용히 기본값으로 돌면 박스에 적은 값이 듣지 않는 것을 아무도 모른다.
-    불리언은 다른 스위치와 같은 규칙(`_bool` — 모르는 낱말은 기본값)이다.
+    반환은 (Settings 속성 → 값, ((환경변수 이름, 출처 env|knobs.env|default), …)). 빈 값은 적지 않은 것으로 본다. knobs.env 의 줄
+    끝 주석(`KEY=1  # 파일럿`)은 떼고 읽는다(손잡이 값에는 '#' 이 들 일이 없다). 정수가 아니거나 하한(`Knob.minimum`) 밑인 값,
+    켜기·끄기 낱말(1·true·yes·on · 0·false·no·off)이 아닌 불리언은 기동을 막는다 — 어느 자리(파일 경로 또는 환경변수)의 어느
+    손잡이인지 말한다. 조용히 기본값으로 돌면 박스에 적은 값이 듣지 않는 것을 아무도 모른다(켜기 스위치가 오타·꼬리 주석에서
+    조용히 꺼지던 것 — 반대 검토 C2a RC-5). 손잡이 사이의 관계(단위 크기의 순서·시간 한도의 사슬)는 main.check_review_chain 이 본다.
     """
     env = os.environ if env is None else env
     path = Path(data_dir) / KNOBS_FILENAME
     from_file = _read_env_file(path, tuple(k.env for k in REVIEW_KNOBS)) if path.is_file() else {}
+    from_file = {key: value.split("#", 1)[0].strip() for key, value in from_file.items()}
     values: dict[str, Any] = {}
     sources: list[tuple[str, str]] = []
     for knob in REVIEW_KNOBS:
@@ -378,15 +385,23 @@ def load_review_knobs(data_dir: Path, env: Mapping[str, str] | None = None) -> t
             values[knob.attr] = knob.default
             sources.append((knob.env, "default"))
             continue
+        where = f"{path}" if source == KNOBS_FILENAME else "환경변수"
         if knob.kind == "bool":
-            values[knob.attr] = _bool(raw, bool(knob.default))
+            token = raw.lower()
+            if token not in _KNOB_TRUE + _KNOB_FALSE:
+                raise RuntimeError(f"{knob.env}={raw!r} 은 켜기·끄기 값이 아닙니다({where}) — 1·true·yes·on 이나"
+                                   f" 0·false·no·off 로 적거나 지우면 기본값 {int(bool(knob.default))} 로 돈다.")
+            values[knob.attr] = token in _KNOB_TRUE
         else:
             try:
-                values[knob.attr] = int(raw)
+                value = int(raw)
             except ValueError as exc:
-                where = f"{path}" if source == KNOBS_FILENAME else "환경변수"
                 raise RuntimeError(f"{knob.env}={raw!r} 은 정수가 아닙니다({where}) — 고치거나 지우면 기본값"
                                    f" {knob.default} 로 돈다.") from exc
+            if value < knob.minimum:
+                raise RuntimeError(f"{knob.env}={raw!r} 은 {knob.minimum} 이상이어야 합니다({where}) — 고치거나 지우면 기본값"
+                                   f" {knob.default} 로 돈다.")
+            values[knob.attr] = value
         sources.append((knob.env, source))
     return values, tuple(sources)
 
