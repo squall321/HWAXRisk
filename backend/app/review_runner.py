@@ -257,6 +257,7 @@ AIDH_CODES = frozenset({"card_fetch_failed", "card_list_failed", "card_list_unst
 KNOWN_CTX_SOURCES = ("server", "env")          # 창 출처가 이것이면 서버가 창을 안다(fallback 은 가정한 값)
 CREDENTIAL_FIX = "포털에서 PAT 를 다시 발급해 등록하고 재개한다 — 서비스 계정으로 내려가지 않는다"
 CTX_KNOB = "LLM_CONTEXT_TOKENS"
+DISABLED = "review_disabled"          # 이 박스의 검토 스위치(HWAXRISK_REVIEW_ENABLED)가 꺼져 있다 — 새 선점·새 호출을 내지 않는다
 _ENGINE_ERRORS = (EngineBusy, PatUnavailable, EngineRejected, EngineStreamLost)
 _CALL_STATE = {review_ops.INFRA: "infra_fail", review_ops.CONTENT: "content_fail", review_ops.WAIT: "wait"}
 _BASIS_OF_PACK = {cardpack.CARD_BASIS_CARDS: "cards", cardpack.CARD_BASIS_BACKGROUND: "background",
@@ -640,9 +641,12 @@ class _Session:
         return dict(row) if row is not None else {"state": None, "hold_code": None}
 
     def _gate(self) -> None:
-        """새 호출을 내도 되나 — 러너가 멈추거나 잡이 running 이 아니면(사람·코드의 보류·취소) 세션을 멈춘다."""
+        """새 호출을 내도 되나 — 러너가 멈추거나 이 박스의 검토 스위치가 꺼졌거나 잡이 running 이 아니면(사람·코드의 보류·취소)
+        세션을 멈춘다. 도는 호출은 이 물음 밖이라 끝까지 간다."""
         if self.loop.stop.is_set():
             raise _Stop("stopped")
+        if not config.review_enabled(self.loop.settings):
+            raise _Stop(DISABLED)
         state = self._job_row()["state"]
         if state != "running":
             raise _Stop(f"job_{state}")
@@ -1352,6 +1356,8 @@ class ReviewLoop:
     으로 옮긴다. ③ 창(limits, 60초 캐시)을 본다 — fallback 이면 새 호출을 내지 않고 기다리다 600초면 ctx_unknown, 창이 모자라면
     ctx_too_small. ④ 잡마다 단계(pack → review)를 정하고 범위 안 열린 셀이 0 이면 completed(실패 셀 수를 error 에). ⑤ 빈 자리 =
     min(HWAXRISK_REVIEW_CONCURRENCY, 서버 관문 limit(/health, 30초 캐시)) − 도는 워커만큼 워커를 띄운다(잡을 돌아가며 — P-09).
+    이 박스의 검토 스위치(HWAXRISK_REVIEW_ENABLED)가 꺼져 있으면 ②까지만 하고 새 전문가·셀을 집지 않는다 — 잡은 running 그대로,
+    진행판은 waiting{reason:'review_disabled'}, 도는 호출은 끝까지 가고 그 세션은 다음 호출 앞에서 놓는다.
 
     시험은 `clock`(정수 초)·`pause`(초 → 멈췄으면 참)·`poll_s` 를 주입한다. 운영은 now_epoch · stop.wait · 5초다.
     """
@@ -1638,7 +1644,8 @@ class ReviewLoop:
         self._fallback_since = None
         for job in live:
             waiting = self.progress(job["id"]).body.get("waiting") or {}
-            if str(waiting.get("reason") or "").startswith("ctx_") or waiting.get("reason") in ("portal_unreachable",):
+            if str(waiting.get("reason") or "").startswith("ctx_") or waiting.get("reason") in ("portal_unreachable",
+                                                                                                 DISABLED):
                 self.progress(job["id"]).set(waiting=None)
         return live
 
@@ -1775,6 +1782,16 @@ class ReviewLoop:
                 self._maybe_resume(job, now)
             elif job["state"] == "cancelling" and not self.workers(job["id"]) and self._running_heads(job) == 0:
                 self._finish(job, "cancelled", None)
+        if not config.review_enabled(self.settings):
+            # 스위치가 꺼진 채 다시 뜬 박스 — 잡은 그대로 두고(취소·끝내기 아님) 새 전문가·셀을 집지 않는다. 도는 호출은 끝까지 가고
+            # 그 세션은 다음 호출 앞에서 놓는다(_gate). 다시 켜고 앱을 띄우면 차감 없이 이어 돈다.
+            for job in self._jobs(("queued", "running")):
+                progress = self.progress(job["id"])
+                if (progress.body.get("waiting") or {}).get("reason") != DISABLED:
+                    progress.set(waiting={"reason": DISABLED, "since": now, "retry_at": None,
+                                          "note": "이 박스의 검토 스위치가 꺼져 있다 — $DATA_DIR/knobs.env 에"
+                                                  " HWAXRISK_REVIEW_ENABLED=1 을 적고 앱을 다시 띄우면 이어 돈다"})
+            return {"jobs": len(jobs), "running": 0, "started": 0}
         for job in self._jobs(("queued",)):
             self.store.execute("UPDATE rr_jobs SET state = 'running', updated_at = ? WHERE id = ? AND state = 'queued'",
                                (now, job["id"]))

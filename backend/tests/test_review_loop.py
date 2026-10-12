@@ -675,6 +675,29 @@ def test_a_defect_in_a_session_releases_the_expert_with_a_pause_instead_of_stran
     assert rig.state(store, job_id) == "completed"
 
 
+def test_a_box_whose_review_switch_is_off_claims_nothing_new_and_lets_the_running_call_finish(store, monkeypatch):
+    """HWAXRISK_REVIEW_ENABLED=0 로 뜬 박스(스위치가 꺼진 루프)는 새 전문가·셀을 집지 않는다 — 도는 호출은 끝까지 가 ok 로 적히고
+    다음 호출은 나가지 않으며 셀은 차감 없이 pending 이다. 잡은 running 그대로이고 진행판은 waiting{reason:'review_disabled'} 다.
+    다시 켜면 스스로 이어 돌아 completed 다(S8 열린 물음 b)."""
+    key, job_id, fake, r, gate = _stalled(store, monkeypatch, 3)
+    r.loop.settings = dataclasses.replace(r.loop.settings, risk_review_enabled=False)
+    gate.set()
+    r.loop.join(30)
+    third = _calls(store, job_id)[2]
+    assert (third["state"], third["outcome_class"]) == ("ok", "ok")
+    assert {(c["charged"], c["lease_owner"]) for c in _cells(store, key, SEAL)} == {(0, None)}
+    assert (_head(store, key, SEAL)["state"], _head(store, key, SEAL)["error"]) == ("planned", "review_disabled")
+    for _ in range(3):
+        r.tick()
+        r.clock.advance(61)
+    assert fake.runs == 3 and rig.state(store, job_id) == "running"
+    assert rig.progress(store, job_id)["waiting"]["reason"] == "review_disabled"
+    r.loop.settings = dataclasses.replace(r.loop.settings, risk_review_enabled=True)
+    r.finish(job_id)
+    assert rig.state(store, job_id) == "completed" and rig.progress(store, job_id)["waiting"] is None
+    assert {c["state"] for c in _cells(store, key, SEAL)} == {"reviewed"}
+
+
 def test_a_code_hold_lets_the_running_call_finish_and_starts_no_next_call(store, monkeypatch):
     """코드 보류는 도는 호출을 닫지 않는다(M2.md 5절 #13 · P-02(4)) — 셋째 run 이 도는 중에 차단기 보류(llm_outage)가 걸려도 그
     호출은 끝까지 가 ok 로 적히고, 다음 호출은 나가지 않으며 셀은 차감 없이 pending 으로 놓인다. 사람의 정지와 다르다."""
