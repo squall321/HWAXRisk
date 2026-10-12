@@ -1,0 +1,31 @@
+{
+ "frozen_commit": "5f07486",
+ "owner": "legacy@example.com",
+ "result_gz_n": 2,
+ "schema_version": 3,
+ "targets": {
+  "done": {
+   "base_snapshot_id": "8a8b688f3fbc4404a15d16c467347ffd",
+   "diff_id": "80b9a2403ffb41bb891721d0c97d13ea",
+   "job_ids": [
+    "b031fa587ef74aedbdb7e80301c40da6",
+    "cf093b40d5bc4a0e90cd461bba474e61"
+   ],
+   "panel_ids": [
+    "c30cde099f244dbca8fd9679e17dc6e7",
+    "2e4ab520dd3b4b5889aa94b3ed6f1c77"
+   ],
+   "project_id": "f9c3acfc107a472daf690077939e45b3",
+   "target_key": "diff:80b9a2403ffb41bb891721d0c97d13ea",
+   "target_snapshot_id": "06a9332636684ef1b4fce458fd39c4f7"
+  },
+  "queued": {
+   "base_snapshot_id": "5d4eebc5301241d6a6445db9901fc201",
+   "diff_id": "7ac74892dd9c401c8f7a07f067a471c1",
+   "job_id": "b4afb3b3815d411d94f37335c31fe8a9",
+   "project_id": "3600b91c4c864d4e919da51eb3a16caf",
+   "target_key": "diff:7ac74892dd9c401c8f7a07f067a471c1",
+   "target_snapshot_id": "5fd00f3ccedd4b28a2844af8940d60a0"
+  }
+ }
+}
