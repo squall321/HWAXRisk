@@ -823,6 +823,51 @@ def test_a_cell_that_reaches_the_call_cap_fails_call_cap(store, monkeypatch):
     assert "call_cap 1" in rig.job_row(store, job_id)["error"]
 
 
+@pytest.mark.parametrize(("kind", "variant", "cut", "charged", "cell_cut", "ledger_cut"), [
+    ("offcard", None, "repaired", 0, 0, 1),
+    ("offcard", None, "length", 1, 0, 1),
+    ("offcard", None, "unknown", 0, None, None),
+    ("verdict", "fwd", "length", 0, 0, 1),
+])
+def test_a_cut_counts_by_what_was_lost_and_an_off_card_answer_by_its_final_attempt(store, monkeypatch, kind, variant, cut,
+                                                                                  charged, cell_cut, ledger_cut):
+    """반대 검토 R3A-4 — 셀의 절단. 판정 호출이 잘려도 빠진 카드를 재질의로 다 받았으면 잃은 것이 없다(0). 카드 밖 호출은 마지막
+    시도로 가린다 — 첫 시도가 잘렸지만 보충이 끝까지 낸 답(repaired, 엔진 quality.truncated 는 참)은 잘리지 않은 것이라 새 시도 없이
+    reviewed 이고, 꼬리(more 줄)를 잃은 채 끝난 답(length)은 그 시도를 내용 탓으로 차감해 새 시도가 판정을 다시 낸다(그 시도의 답은
+    멀쩡하다). 절단을 모르는 답(unknown)은 NULL 이고 정산을 막지 않는다. 호출 원장의 output_truncated 는 어느 갈래든 엔진 값 그대로다."""
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    unit_id = _unit_ids(store, key)[0]
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [unit_id]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    fake.truncate = {(kind, variant, unit_id): cut}
+    rig.Rig(store, fake).finish(job_id)
+    assert rig.state(store, job_id) == "completed" and rig.job_row(store, job_id)["error"] is None
+    cell = next(c for c in _cells(store, key, SEAL) if c["unit_id"] == unit_id)
+    assert (cell["state"], cell["charged"], cell["truncated"]) == ("reviewed", charged, cell_cut)
+    decks = len(json.loads(_head(store, key, SEAL)["plan_json"])["plan"]["verdict_decks"])
+    assert len(_calls(store, job_id, kind="verdict", variant="fwd", seq=0)) == decks * (1 + charged)
+    assert _calls(store, job_id, kind=kind)[0]["output_truncated"] == ledger_cut
+
+
+def test_a_verdict_cut_whose_card_is_never_judged_leaves_the_cell_cut(store, monkeypatch):
+    """반대 검토 R3A-5(M3) — 판정 호출마다 출력 상한에 걸리고 그 호출에 실린 카드 하나를 어느 변형·재질의도 끝내 판정하지 못하면
+    셀의 절단은 1 이다 — 정산이 그 셀을 reviewed 로 세지 않고(나갈 기준 1 '절단 0'), 두 시도 뒤 failed 다. (잘린 판정이라도 그 카드를
+    rev·재질의가 받았으면 잃은 것이 없다 — 가짜의 rev 는 거꾸로 판정해 fwd 가 잃은 끝 카드를 받으므로 엔진이 늘 빼먹는 카드를 둔다.)"""
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    unit_id = _unit_ids(store, key)[0]
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [unit_id]})
+    pack = fre.load("pack_ok.json")
+    fake = FakeReviewEngine({SEAL: pack})
+    fake.truncated = True
+    fake.skip_cards = {next(c["alias"] for c in pack["cards"] if c.get("checkable"))}
+    rig.Rig(store, fake).finish(job_id)
+    cell = next(c for c in _cells(store, key, SEAL) if c["unit_id"] == unit_id)
+    assert (cell["state"], cell["truncated"], cell["charged"]) == ("failed", 1, 2)
+    assert cell["cards_judged"] < cell["cards_expected"]
+
+
 @pytest.mark.parametrize("variant", ["fwd", "solo"])
 def test_a_byte_identical_reask_goes_to_the_engine_not_the_request_cache(store, monkeypatch, variant):
     """재질의가 앞 호출과 바이트로 같은 본문이어도 엔진으로 간다 — 요청 캐시(request_hash)는 같은 시도의 같은 차례(seq)에서 이미

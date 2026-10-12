@@ -38,9 +38,13 @@
   solo_verdicts    solo 변형에서만 쓰는 record_id → (applies, judgement) — 단독 재질의가 앞 판정을 뒤집는 카드(S11)
   sweep_rel        unit_id → 훑기 rel(yes·maybe·no) — 그 단위의 u 줄 rel 을 바꾼다(훑기 '무관' 비율, S11)
   error_cells      (agent_key, unit_id) → error 프레임 — 그 셀의 run 은 늘 그 오류다(내용 탓이면 셀이 failed 로 간다, S11)
-  truncate         (kind, variant, unit_id) → 'length' | 'unknown' — 처음 맞는 run 한 번만: length 는 truncated 처럼 마지막
-                   판정 행을 빼고(행이 둘 이상인 호출에 건다 — 엔진은 남는 행이 0 이면 결과 대신 truncated_empty 를 낸다),
-                   unknown 은 quality.truncated·finish_reason 을 null 로 낸다(절단 모름 — X1-22, S11)
+  truncate         (kind, variant, unit_id) → 'length' | 'repaired' | 'unknown' — 처음 맞는 run 한 번만: length 는 판정이면
+                   truncated 처럼 마지막 판정 행을 빼고(행이 둘 이상인 호출에 건다 — 엔진은 남는 행이 0 이면 결과 대신
+                   truncated_empty 를 낸다), 카드 밖이면 꼬리(more 줄)를 잃은 채 끝난 답이다(missing ['more'] · maybe_more null ·
+                   finish_reason length). repaired 는 첫 시도가 잘렸지만 보충이 끝까지 낸 답이다 — 행은 다 있고 quality.truncated·
+                   tail_broken 참, attempts 2·repaired 참, 마지막 finish_reason stop(엔진 _truncated 는 '어느 시도든 length' 다 —
+                   계약 예제 result_verdict_truncated 의 모양, R3A-4). unknown 은 quality.truncated·finish_reason 을 null 로 낸다
+                   (절단 모름 — X1-22, S11)
   queued_ms        정수면 meta.queued_ms 로 싣는다(자리 대기 — 엔진 예제에는 없는 칸이라 기본은 싣지 않는다, S11)
   no_quote         이 별칭들의 판정 행에 인용을 싣지 않는다(cq 빈 글 · checks.quote empty — 인용 통과율의 분모, X1-06, S11)
   no_refs          이 별칭들의 판정 행에 변경 줄을 싣지 않는다(l·refs 빈 목록 · checks.refs missing — 참조 통과율의 분모, S11)
@@ -521,6 +525,17 @@ class FakeReviewEngine:
         if cut == "unknown":
             quality["truncated"] = None
             meta["finish_reason"] = None
+        if cut == "repaired":
+            quality.update(truncated=True, tail_broken=True, attempts=2, repaired=True)
+            meta["usage"] = {"llm_calls": 2, "tokens_in": 2000, "tokens_out": 200,
+                             "per_attempt": [{"n": 1, "tokens_in": 1000, "tokens_out": 100},
+                                             {"n": 2, "tokens_in": 1000, "tokens_out": 100}]}
+            meta["llm_ms"] = [0, 0]
+        if cut == "length" and kind == "offcard":
+            rows = [r for r in rows if r["t"] != "more"]
+            missing = ["more"]
+            quality.update(truncated=True, tail_broken=True, maybe_more=None)
+            meta["finish_reason"] = "length"
         if self.queued_ms is not None:
             meta["queued_ms"] = int(self.queued_ms)
         return {"kind": kind, "variant": variant, "rows": rows, "missing": missing, "extras": extras,

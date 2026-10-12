@@ -340,6 +340,28 @@ def _json(text: Any, default: Any) -> Any:
     return value if isinstance(value, type(default)) else default
 
 
+def offcard_cut(result: Mapping[str, Any]) -> bool | None:
+    """카드 밖 답이 잘린 채 끝났나 — 마지막 시도로 가린다(반대 검토 R3A-4).
+
+    엔진의 quality.truncated 는 '어느 시도든 finish_reason 이 length' 다 — 첫 시도가 잘리고 보충이 끝까지 낸 답도 참이다. 그래서
+    마지막 finish_reason 이 length 면 참, 잘린 시도가 없으면(truncated 거짓) 거짓, 마지막 finish_reason 을 모르면 None(모름 — 0 으로
+    치지 않는다, X1-22)이다. 마지막 시도가 length 가 아니게 끝났으면 꼭 있어야 하는 줄이 다 왔나(엔진 missing 이 비었고 more 줄을
+    읽어 maybe_more 가 null 이 아니다)로 가른다 — 다 왔으면 보충이 다 받은 답이라 거짓, 아니면 잘린 시도가 있었을 때 참·모를 때 None.
+    호출 원장의 output_truncated 는 엔진 값 그대로 남는다(품질 수치가 호출마다 센다)."""
+    quality = result.get("quality") if isinstance(result.get("quality"), Mapping) else {}
+    meta = result.get("meta") if isinstance(result.get("meta"), Mapping) else {}
+    final = meta.get("finish_reason")
+    if final == "length":
+        return True
+    if quality.get("truncated") is False:
+        return False
+    if not final:
+        return None
+    if not (result.get("missing") or ()) and quality.get("maybe_more") is not None:
+        return False
+    return True if quality.get("truncated") is True else None
+
+
 def _job_of(row: Mapping[str, Any]) -> dict:
     job = dict(row)
     job["params"] = _json(job.get("params_json"), {})
@@ -1027,7 +1049,9 @@ class _Session:
             return
         quality = result.get("quality") if isinstance(result.get("quality"), Mapping) else {}
         meta = result.get("meta") if isinstance(result.get("meta"), Mapping) else {}
-        cell.log.append({"kind": kind, "variant": variant, "aliases": list(aliases), "truncated": quality.get("truncated"),
+        # 판정 호출의 절단은 '빠진 카드를 끝내 못 받았나' 로 다시 가리므로 엔진 값 그대로, 카드 밖 호출은 마지막 시도로 가린다(R3A-4).
+        cut = offcard_cut(result) if kind == "offcard" else quality.get("truncated")
+        cell.log.append({"kind": kind, "variant": variant, "aliases": list(aliases), "truncated": cut,
                          "soft_over": bool(meta.get("soft_over")), "stamp": bool(quality.get("stamp")),
                          "expected": quality.get("expected"), "missing": len(accepted.get("missing") or ())})
         cell.inj.extend((accepted.get("extras") or {}).get("inj") or ())
@@ -1213,9 +1237,9 @@ class _Session:
         return 0
 
     def _truncation(self, cell: _Cell) -> int | None:
-        """셀의 절단 — 절단된 호출이 실은 카드가 끝내 실효 판정을 못 받았거나 마지막 카드 밖 답이 잘렸으면 1, 절단을 모르는(NULL)
-        호출이 있으면 NULL(모름 — 0 으로 치지 않는다, X1-22), 아니면 0. 잘린 호출의 빠진 카드를 재질의로 다 받았으면 잃은 것이 없다
-        (호출 원장의 output_truncated 는 그대로 남아 품질 수치가 센다)."""
+        """셀의 절단 — 절단된 호출이 실은 카드가 끝내 실효 판정을 못 받았거나 마지막 카드 밖 답이 잘린 채 끝났으면(`offcard_cut` —
+        보충으로 다 받은 답은 잘리지 않은 것이다) 1, 절단을 모르는(NULL) 호출이 있으면 NULL(모름 — 0 으로 치지 않는다, X1-22), 아니면
+        0. 잘린 호출의 빠진 카드를 재질의로 다 받았으면 잃은 것이 없다(호출 원장의 output_truncated 는 그대로 남아 품질 수치가 센다)."""
         judged = {r["alias"] for r in self._rows(cell) if r["is_effective"]}
         lost = any(e["truncated"] is True and e["kind"] == "verdict" and any(a not in judged for a in e["aliases"])
                    for e in cell.log)
