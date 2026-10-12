@@ -4,13 +4,14 @@
 """
 from __future__ import annotations
 
+import copy
 import json
 import random
 import time
 
 import pytest
 
-from app import brief, devseed, render, routes, units
+from app import brief, devseed, render, routes, sameas, units
 from app.common import parse_ref
 from app.risk_store import RiskStore
 from tests import factories
@@ -28,7 +29,7 @@ class Case:
         self.store, self.target = store, target
         self.view = units._ir_view(store, target.base_snapshot_id, target.target_snapshot_id)
         self.built = units.build_diff_units(target.diff, self.view)
-        self.evidence = {u["unit_id"]: units.evidence_lines(u, self.view) for u in self.built["units"]}
+        self.evidence = {u["unit_id"]: units.evidence_lines(u, self.view, target.diff) for u in self.built["units"]}
 
     def reviewable(self):
         return [u for u in self.built["units"] if u["reviewable"]]
@@ -153,6 +154,123 @@ def test_order_follows_the_priority(synth):
             assert near == sorted(near), evidence["unit_id"]
 
 
+# ---------------------------------------------------------------- 계면 상태는 diff 를 따른다(RA-1)
+def _state(row: dict) -> str:
+    return row["text"].rsplit(" · ", 1)[-1]
+
+
+def _diff_changed_eids(diff: dict) -> set[str]:
+    """diff 가 적은 계면 변경의 eid — 구조 변경과, noise·값이 같은 표지 항목을 뺀 수치 변경(설계서 3.4.1)."""
+    eids: set[str] = set()
+    for change in diff["structural"]["edge_changes"]:
+        eids |= {change["eid_base"], change["eid_target"]} - {None}
+    for param in diff["parametric"]["edge_params"]:
+        same = param["flag"] in ("incomparable", "null_one_side") and param["before"] == param["after"]
+        if param["flag"] != "noise" and not same:
+            eids |= {param["eid_base"], param["eid_target"]} - {None}
+    return eids
+
+
+def test_interface_state_follows_the_diff(synth):
+    """바뀜·추가·삭제는 diff 가 그 계면에 변경을 적었을 때만이다 — 오라클은 diff 항목이 적어 둔 eid(eid_base·eid_target)다."""
+    seen = {"changed": 0, "unchanged": 0, "scope": 0}
+    for case in synth.values():
+        eids = _diff_changed_eids(case.target.diff)
+        # 접촉 범위(scope) 구성 변경은 contact_index 로 적힌다 — 그 엣지의 contact_index 는 IR 표에서 읽는다.
+        sids = (case.target.base_snapshot_id, case.target.target_snapshot_id)
+        scope_index = {r["eid"]: json.loads(r["attrs_json"]).get("contact_index") for r in case.store.query(
+            "SELECT eid, attrs_json FROM rr_ir_edges WHERE snapshot_id IN (?, ?) AND kind = 'scope'", sids)}
+        moved = {s["contact_index"] for s in case.target.diff["structural"]["dyna"]["scope_changed"]}
+        for unit in case.reviewable():
+            for row in case.evidence[unit["unit_id"]]["evidence"]:
+                if row["kind"] not in ("iface", "contact"):
+                    continue
+                changed = _state(row) in ("바뀜", "추가", "삭제")
+                want = row["ref"] in eids or scope_index.get(row["ref"]) in moved
+                assert changed == want, (row["ref"], row["text"])
+                seen["changed" if changed else "unchanged"] += 1
+                seen["scope"] += row["ref"] in scope_index
+    assert seen["changed"] and seen["unchanged"] and seen["scope"], seen
+
+
+def _renamed_pair(tmp_path_factory, name: str, edit) -> tuple:
+    """devseed 설계에서 두께 하나를 바꾼 뒤 `edit(target, victim)` 으로 뒤 설계만 더 고쳐 실제 IR 빌더·diff 로 얼린다."""
+    store = _store(tmp_path_factory, name)
+    spec = devseed.SynthSpec(seed=5, n_parts=12, asms=("A_ASM", "B_ASM", "C_ASM"), named_dims=0, with_dyna=False,
+                             with_result=False, hazards=False)
+    base, target, _records = devseed.apply_script(devseed.build_design(spec),
+                                                  [("part.thickness_changed", {"sign": -1})], 5)
+    victim = next(n for n in target.parts if target.parts[n].size != base.parts[n].size)
+    target = copy.deepcopy(target)
+    edit(target, victim)
+    project_id = factories.make_project(store)
+    first = factories.make_snapshot(store, project_id, devseed.to_adapter_results(base), label="DV1")
+    later = factories.CAPTURED_AT + 86400
+    second = factories.make_snapshot(store, project_id, devseed.to_adapter_results(target, captured_at=later),
+                                     label="DV2", captured_at=later)
+    return store, project_id, first["snapshot_id"], second["snapshot_id"], victim
+
+
+def test_a_confirmed_rename_keeps_its_interfaces_unchanged(tmp_path_factory):
+    """사람이 같은 부품으로 확정한 이름 변경 — nid 가 달라 eid 도 다르지만 diff 는 dn 으로 접어 계면 변경 0건이다. 근거도 같은
+    계면을 '삭제'+'추가' 두 줄로 싣지 않고 '변경 없음' 한 줄로 싣고, 명세 줄에 옛 이름을 적는다(RA-1)."""
+    def rename(target, victim):
+        part = target.parts.pop(victim)
+        part.name = victim + "_R2"
+        target.parts[part.name] = part
+        target.ifaces = {tuple(part.name if x == victim else x for x in key): v for key, v in target.ifaces.items()}
+
+    store, project_id, base_sid, target_sid, victim = _renamed_pair(tmp_path_factory, "rename", rename)
+    irs = [json.loads(store.query_one("SELECT ir_json FROM rr_snapshots WHERE id = ?", (sid,))["ir_json"])
+           for sid in (base_sid, target_sid)]
+    old = next(n for n in irs[0]["nodes"] if n.get("label") == victim and n["kind"] == "part")
+    new = next(n for n in irs[1]["nodes"] if n.get("label") == victim + "_R2")
+    sameas.record_decision(store, {"decision": "confirm", "scope": "pair", "a": sameas.stable_key(old),
+                                   "b": sameas.stable_key(new), "pair_key": f"{project_id}|{project_id}"},
+                           owner_sub=factories.OWNER)
+    diff = factories.make_diff(store, base_sid, target_sid)
+    assert diff["correspondence"]["pending_n"] == 0 and diff["structural"]["edge_changes"] == []
+    assert any(m["nid_base"] == old["nid"] and m["nid_target"] == new["nid"] for m in diff["correspondence"]["matched"])
+    view = units._ir_view(store, base_sid, target_sid)
+    built = units.build_diff_units(diff, view)
+    holder = next(u for u in built["units"] if any(p["name"] == victim + "_R2" for p in u["parts"]))
+    rows = units.evidence_lines(holder, view, diff)["evidence"]
+    edges = [row for row in rows if row["kind"] in ("iface", "contact")]
+    assert edges and all(_state(row) == "변경 없음" for row in edges), [row["text"] for row in edges]
+    assert len({row["ref"] for row in edges}) == len(edges)
+    spec_row = next(row for row in rows if row["kind"] == "part" and row["ref"] == new["nid"])
+    assert f"옛 이름 {victim}" in spec_row["text"]
+    store.close()
+
+
+def test_sub_threshold_jitter_is_unchanged(tmp_path_factory):
+    """재캡처마다 생기는 임계 밑 흔들림(간극 +0.001mm·띠 면적 +0.3%)은 diff 가 noise 로 버린다 — 근거도 '바뀜' 이 아니라
+    '변경 없음(임계 밑 차이)' 로 바뀌지 않은 계면 무리에 선다(RA-1)."""
+    touched: list[tuple] = []
+
+    def jitter(target, victim):
+        for key, iface in target.ifaces.items():
+            if victim in key and iface.min_gap:
+                iface.min_gap = round(iface.min_gap + 0.001, 4)
+                touched.append(key)
+            if victim in key and iface.area:
+                iface.area = round(iface.area * 1.003, 3)
+                touched.append(key)
+
+    store, _project_id, base_sid, target_sid, victim = _renamed_pair(tmp_path_factory, "jitter", jitter)
+    assert touched
+    diff = factories.make_diff(store, base_sid, target_sid)
+    assert diff["structural"]["edge_changes"] == []
+    assert all(p["flag"] == "noise" for p in diff["parametric"]["edge_params"])
+    view = units._ir_view(store, base_sid, target_sid)
+    built = units.build_diff_units(diff, view)
+    holder = next(u for u in built["units"] if any(p["name"] == victim for p in u["parts"]))
+    edges = [row for row in units.evidence_lines(holder, view, diff)["evidence"] if row["kind"] in ("iface", "contact")]
+    assert edges and {_state(row) for row in edges} <= {"변경 없음", "변경 없음(임계 밑 차이)"}
+    assert any(_state(row) == "변경 없음(임계 밑 차이)" for row in edges)
+    store.close()
+
+
 # ---------------------------------------------------------------- 상태·결정론·형식
 def test_excluded_units_have_none_and_global_units_have_no_parts_to_cite(synth):
     for case in synth.values():
@@ -196,8 +314,9 @@ def test_the_same_input_gives_the_same_evidence_sha(synth):
     rng = random.Random(3)
     view = units.view_of(_shuffled(irs[0], rng), _shuffled(irs[1], rng), names=brief.name_index(case.store, sids),
                          base_rule_hits=_shuffled(hits[0], rng), target_rule_hits=_shuffled(hits[1], rng))
+    shuffled_diff = _shuffled(case.target.diff, rng)
     for unit in case.built["units"]:
-        again = units.evidence_lines(unit, view)
+        again = units.evidence_lines(unit, view, shuffled_diff)
         first = case.evidence[unit["unit_id"]]
         assert (again["sha"], again["text"], again["chars"]) == (first["sha"], first["text"], first["chars"])
 
@@ -228,7 +347,7 @@ def test_syn150_evidence_is_fast(synth):
     case = synth[150]
     started = time.perf_counter()
     for unit in case.built["units"]:
-        units.evidence_lines(unit, case.view)
+        units.evidence_lines(unit, case.view, case.target.diff)
     assert time.perf_counter() - started < 2.0
 
 
@@ -244,7 +363,7 @@ def test_a_purged_ir_is_failed_ir_absent(tmp_path_factory):
     view = units._ir_view(store, target.base_snapshot_id, target.target_snapshot_id)
     assert view["base"]["present"] is False and view["target"]["present"] is False
     for unit in built["units"]:
-        evidence = units.evidence_lines(unit, view)
+        evidence = units.evidence_lines(unit, view, target.diff)
         assert (evidence["status"], evidence["error"], evidence["evidence"]) == ("failed", "ir_absent", [])
     # 폐기 뒤 다시 세우는 빌드도 ok 가 아니다 — 노드 표가 비어 모든 항목이 전역 단위로 가던 빌드가 불변식을 다 지나 ok 였다(RA-8).
     assert built["status"] == "ok" and built["error"] is None
@@ -286,7 +405,7 @@ def test_degraded_codes_of_both_snapshots_go_to_the_notes(tmp_path_factory):
     assert any(unit["reviewable"] for unit in built["units"])
     for unit in built["units"]:
         if unit["reviewable"]:
-            evidence = units.evidence_lines(unit, view)
+            evidence = units.evidence_lines(unit, view, diff)
             assert "target 스냅샷 강등 표지 interfaces_truncated — 계면 목록이 잘린 캡처다." in evidence["notes"]
             assert "[주의] target 스냅샷 강등 표지" in evidence["text"]
             assert units.payload_of(unit, evidence)["notes"].endswith(evidence["notes"])
@@ -304,7 +423,7 @@ def test_source_strings_stay_inside_quotes_in_the_render(tmp_path_factory, monke
     built = units.build_diff_units(target.diff, view)
     texts = []
     for unit in built["units"]:
-        evidence = units.evidence_lines(unit, view)
+        evidence = units.evidence_lines(unit, view, target.diff)
         assert render.lint_text(evidence["text"])["ok"], evidence["text"]
         texts.append(evidence["text"])
         for row in evidence["evidence"]:

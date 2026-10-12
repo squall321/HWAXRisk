@@ -19,6 +19,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Sequence
 
 from . import brief, render
+from . import diff as diff_module
 from .common import canonical_json, sha256_hex
 
 __all__ = [
@@ -1550,6 +1551,8 @@ def _node_line(alias: str, before: Mapping[str, Any] | None, after: Mapping[str,
     ab, at = _attrs(before), _attrs(after)
     parts: list[Any] = [f"{alias} " if alias else "", ("src", node.get("label") or node.get("nid")),
                         f" {_s(node.get('domain'))} {_s(node.get('kind'))}"]
+    if before and after and before.get("label") and before.get("label") != after.get("label"):
+        parts.extend([" · 옛 이름 ", ("src", before["label"])])     # 같은 부품으로 대응된 이름 변경(sameas 확정·자동)
     if node.get("domain") == "dyna" and node.get("kind") == "pid":
         parts.append(f" · pid {_s(node.get('local_key'))}")
         if ab.get("n_elems") is not None or at.get("n_elems") is not None:
@@ -1578,9 +1581,15 @@ def _node_line(alias: str, before: Mapping[str, Any] | None, after: Mapping[str,
     return parts
 
 
-def evidence_lines(unit: Mapping[str, Any], ir_view: Mapping[str, Any]) -> dict:
+def evidence_lines(unit: Mapping[str, Any], ir_view: Mapping[str, Any], diff_obj: Mapping[str, Any]) -> dict:
     """단위 하나의 동결 근거(A 층) — 그 부품의 두 스냅샷 명세, 끼인 계면 전부(변경 없는 것 포함, clearance 는 '근접'),
     1홉 이웃, 해석 결과 행(`results.part_risk`), 규칙 적중을 IR 동결본에서 뽑는다. 네트워크를 쓰지 않고 자르지 않는다.
+
+    계면의 짝짓기와 '변경 상태' 는 그 단위를 만든 diff(`diff_obj`)를 따른다(RA-1) — 두 스냅샷의 엣지를 diff 와 같은 열쇠
+    (`diff._edge_key` — 대응한 부품을 dn 으로 접은 끝점)로 잇고, 바뀜·추가·삭제는 diff 가 그 열쇠에 구조 변경(`edge_changes`)이나
+    변화로 본 수치(`edge_params` — noise 와 값이 같은 표지 항목 제외)·접촉 범위 구성 변경(`dyna.scope_changed`)을 적었을 때만
+    쓴다. 그래서 이름이 바뀐 부품의 계면이 '삭제'+'추가' 로, 임계 밑 흔들림이 '바뀜' 으로 실리지 않는다 — 값만 다른 noise 는
+    '변경 없음(임계 밑 차이)' 다.
 
     반환 {unit_id, status(ok·failed·none), error, evidence[{ref, text, kind}], notes, text, sha, chars, suspects[]}.
     `ref` 는 `p:`·`e:`·`rule:` 뿐이다(새 스킴 없음 — C-8). `text` 는 «» 없이 위생을 거친 글이고(엔진이 감싼다) 렌더(`text`)는
@@ -1643,19 +1652,26 @@ def evidence_lines(unit: Mapping[str, Any], ir_view: Mapping[str, Any]) -> dict:
         node = nodes["target"].get(str(nid)) or nodes["base"].get(str(nid)) or {}
         return str(node.get("label") or nid or "")
 
-    edges: dict[str, list] = {}
+    dn_of = _Nodes(diff_obj, ir_view).dn_of
+    mine_dn = {str(part["dn"]) for part in unit.get("parts") or ()}
+    changed_keys, scope_changed = _diff_edge_changes(diff_obj)
+    groups: dict[tuple, tuple[list, list]] = {}
     for idx, side in enumerate(("base", "target")):
-        for edge in ir_view[side]["edges"]:
+        for edge in sorted(ir_view[side]["edges"], key=lambda e: str(e.get("eid"))):
             if str(edge.get("kind_family") or "") not in ("iface", "contact") or edge.get("status") == "rejected":
                 continue
-            ends = {str(edge.get("a") or ""), str(edge.get("b") or "")} | {str(m) for m in edge.get("members") or ()}
-            if ends & mine:
-                edges.setdefault(str(edge["eid"]), [None, None])[idx] = edge
+            ends = [edge.get("a"), edge.get("b"), *(edge.get("members") or ())]
+            if {dn_of.get(str(x), str(x)) for x in ends if x} & mine_dn:
+                groups.setdefault(diff_module._edge_key(edge, dn_of), ([], []))[idx].append(edge)
+    pairs: list[tuple[tuple, Mapping[str, Any] | None, Mapping[str, Any] | None]] = []
+    for edge_key, (befores, afters) in groups.items():
+        for i in range(max(len(befores), len(afters))):        # 한 열쇠에 둘 이상이면 eid 순으로 짝짓는다
+            pairs.append((edge_key, befores[i] if i < len(befores) else None, afters[i] if i < len(afters) else None))
     edge_rows: list[tuple[tuple, str, list, str]] = []
     neighbors: dict[str, bool] = {}
     notes: list[str] = []
     auto_interference = lower_bound = False
-    for eid, (before, after) in sorted(edges.items()):
+    for edge_key, before, after in pairs:
         edge = after or before
         ab, at = _attrs(before), _attrs(after)
         kind_b, kind_a = _s((before or {}).get("kind")), _s((after or {}).get("kind"))
@@ -1683,10 +1699,16 @@ def evidence_lines(unit: Mapping[str, Any], ir_view: Mapping[str, Any]) -> dict:
         parts.append(f" · status={status_a or status_b}" if status_b == status_a or not (status_a and status_b)
                      else f" · status={status_b}→{status_a}")
         auto_interference = auto_interference or (kind == "interference" and (status_a or status_b) == "auto")
-        changed = before is None or after is None or _edge_state(before) != _edge_state(after)
-        state = "추가" if before is None else "삭제" if after is None else "바뀜" if changed else "변경 없음"
+        if before is None or after is None:
+            state = "추가" if before is None else "삭제"
+        elif edge_key in changed_keys or (kind == "scope" and at.get("contact_index") in scope_changed):
+            state = "바뀜"
+        else:
+            state = "변경 없음(임계 밑 차이)" if _edge_state(before) != _edge_state(after) else "변경 없음"
+        changed = not state.startswith("변경 없음")
         parts.append(f" · {state}")
         gap = _num(at.get("min_gap") if after is not None else ab.get("min_gap"))
+        eid = str(edge["eid"])
         order = (0 if changed else 1, _EDGE_RANK.get(kind, 1), abs(gap) if gap is not None else float("inf"), eid)
         edge_rows.append((order, "e:" + eid.split(":", 1)[-1] if not eid.startswith("e:") else eid, parts,
                           "contact" if _s(edge.get("kind_family")) == "contact" else "iface"))
@@ -1746,8 +1768,27 @@ def evidence_lines(unit: Mapping[str, Any], ir_view: Mapping[str, Any]) -> dict:
     return done("ok", None, rows, notes)
 
 
+def _diff_edge_changes(diff_obj: Mapping[str, Any]) -> tuple[set[tuple], set[Any]]:
+    """diff 가 '바뀜' 으로 본 계면 — ({(kind_family, dn_a, dn_b)}, {바뀐 접촉 범위의 contact_index}).
+
+    구조 변경(`edge_changes` — 추가·삭제·종류·상태)과 변화로 본 수치(`edge_params` — noise 와 값이 같은 표지 항목은 뺀다)의
+    열쇠는 diff 가 엣지를 이은 열쇠(`diff._edge_key`) 그대로다. 접촉 범위 구성 변경은 contact_index 로 적힌다."""
+    structural = diff_obj.get("structural") or {}
+    keys: set[tuple] = set()
+    for change in structural.get("edge_changes") or ():
+        if isinstance(change, Mapping):
+            keys.add((_s(change.get("kind_family")), _s(change.get("dn_a")), _s(change.get("dn_b"))))
+    for param in (diff_obj.get("parametric") or {}).get("edge_params") or ():
+        if isinstance(param, Mapping) and not _non_change(param) and not _same_value(param):
+            keys.add((_s(param.get("kind_family")), _s(param.get("dn_a")), _s(param.get("dn_b"))))
+    scopes = {s.get("contact_index") for s in (structural.get("dyna") or {}).get("scope_changed") or ()
+              if isinstance(s, Mapping)}
+    return keys, scopes
+
+
 def _edge_state(edge: Mapping[str, Any]) -> tuple:
-    """계면이 바뀌었는지 견주는 열쇠 — 종류·상태·수치 칸·범위 구성원 수(동결본 그대로, 임계를 쓰지 않는다)."""
+    """계면의 동결본 값 열쇠 — 종류·상태·수치 칸·범위 구성원 수(임계를 쓰지 않는다). diff 가 바뀌지 않았다고 본 계면에서 값이
+    다른지(임계 밑 차이)를 가리는 데만 쓴다."""
     attrs = _attrs(edge)
     return (edge.get("kind"), edge.get("status"), tuple(canonical_json(attrs.get(k)) for k, *_ in _EDGE_FIELDS),
             len(edge.get("members") or ()))
