@@ -1950,6 +1950,9 @@ def persist(store, target_key: str, owner_sub: str, built: Mapping[str, Any], *,
     (같은 unit_id 의 옛 행과 그 동결 근거가 남는다). 빌드와 근거의 인젝션 적중(suspects)은 같은 트랜잭션에서 큐레이션 큐에
     올린다(`rr_curation_queue(kind='suspect_text')`, 열린 같은 sha1 은 한 번).
 
+    검토 잡이 하나라도 선 타깃이면 같은 트랜잭션 안에서 409 `units_in_use` 로 아무것도 쓰지 않는다(M2.md 5절 #6) — 확인과 쓰기
+    사이에 검토 잡이 서도 셀이 가리키는 단위가 바뀌지 않는다(반대 검토 C2a 앞으로의 위험 3).
+
     반환 {rev, status, error, blocked_by, units_n, reviewable_n, units_new, stats, invariants}.
     """
     target = store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (target_key,))
@@ -1964,6 +1967,7 @@ def persist(store, target_key: str, owner_sub: str, built: Mapping[str, Any], *,
     suspects = [*(built.get("suspects") or ()), *(s for ev in evidence.values() for s in (ev.get("suspects") or ()))]
     new_n = 0
     with store.tx():
+        _refuse_in_use(store, target_key)
         rev = int(store.query_one("SELECT COALESCE(MAX(rev), 0) AS n FROM rr_unit_builds WHERE target_key = ?",
                                   (target_key,))["n"]) + 1
         store.execute(
@@ -2031,6 +2035,16 @@ def _review_job_n(store, target_key: str) -> int:
                                (target_key,))["n"] or 0)
 
 
+def _refuse_in_use(store, target_key: str) -> None:
+    """검토 잡이 선 타깃의 새 빌드는 409 `units_in_use`(M2.md 5절 #6 — force·셀 비우기는 M3). persist 의 트랜잭션 안에서 부른다."""
+    jobs = _review_job_n(store, target_key)
+    if jobs:
+        active = active_build(store, target_key)
+        raise AppError("units_in_use", f"이 대상에는 검토 잡이 {jobs}건 있다 — 셀이 가리키는 단위를 바꾸는 재빌드는 하지 않는다"
+                       " (단위 크기 손잡이나 빌더 판을 바꿨으면 되돌리거나 새 대상을 연다).", 409,
+                       detail={"rev": active["rev"] if active else None, "review_jobs": jobs})
+
+
 def build_units(store, target_key: str, *, built_by: str | None, reason: str | None = None,
                 caps: UnitCaps | None = None) -> dict:
     """그 타깃의 단위를 (다시) 세운다 — 활성 빌드와 input_hash 가 같으면 쓰지 않는다(`changed: false`).
@@ -2047,12 +2061,7 @@ def build_units(store, target_key: str, *, built_by: str | None, reason: str | N
     if active is not None and built["input_hash"] and active["input_hash"] == built["input_hash"]:
         return {"rev": active["rev"], "status": active["status"], "changed": False, "blocked_by": active["blocked_by"],
                 "stats": active["stats"], "invariants": active["invariants"]}
-    jobs = _review_job_n(store, target_key)
-    if jobs:
-        raise AppError("units_in_use", f"이 대상에는 검토 잡이 {jobs}건 있다 — 셀이 가리키는 단위를 바꾸는 재빌드는 하지 않는다"
-                       " (단위 크기 손잡이나 빌더 판을 바꿨으면 되돌리거나 새 대상을 연다).", 409,
-                       detail={"rev": active["rev"] if active else None, "review_jobs": jobs})
-    out = persist(store, target_key, target["owner_sub"], built, built_by=built_by, reason=reason)
+    out = persist(store, target_key, target["owner_sub"], built, built_by=built_by, reason=reason)   # units_in_use 는 그 안에서
     result = {"rev": out["rev"], "status": out["status"], "changed": True, "blocked_by": out["blocked_by"],
               "stats": out["stats"], "invariants": out["invariants"]}
     if out["error"]:

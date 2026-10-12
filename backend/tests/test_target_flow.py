@@ -470,6 +470,29 @@ def test_a_target_a_review_job_ever_stood_on_does_not_go_back_to_panels_or_rebui
 
 
 @C2B_REVIEW_JOBS
+def test_a_review_job_made_while_units_are_computed_stops_the_rebuild(store, monkeypatch):
+    """단위 재빌드의 units_in_use 확인은 persist 트랜잭션 안이다(앞으로의 위험 3) — 확인 뒤 쓰기 전에 검토 잡이 서면 새 rev 를
+    쓰지 않고 409 units_in_use 다. 잡은 persist 가 트랜잭션을 열기 직전(시각을 읽을 때)에 세운다 — 종전처럼 확인이 트랜잭션 밖
+    (persist 앞)이면 이 자리의 잡을 못 보고 검토 잡이 선 뒤 단위가 다시 선다."""
+    synth = factories.make_diff_target(store, 40, open_target=False)
+    key = routes.create_target(routes.TargetBody(kind="diff", ref_id=synth.diff_id, consent=True, flow="cells",
+                                                 agents=NO_ECAD), ident=factories.ident(OWNER))["target_key"]
+    config.settings = dataclasses.replace(config.settings, risk_unit_max_lines=12, risk_unit_target_lines=8,
+                                          risk_units_small_lines=4)
+    real = units.now_epoch
+    made: list[str] = []
+
+    def job_meanwhile() -> int:
+        if not made:
+            made.append(_create_review_job(store, key))
+        return real()
+
+    monkeypatch.setattr(units, "now_epoch", job_meanwhile)
+    assert _refused(units.build_units, store, key, built_by=OWNER).code == "units_in_use"
+    assert made and [r["rev"] for r in store.query("SELECT rev FROM rr_unit_builds WHERE target_key = ?", (key,))] == [1]
+
+
+@C2B_REVIEW_JOBS
 def test_the_panel_path_never_picks_recovers_or_shows_a_review_job(store):
     """한 rr_jobs 표에 두 종류가 산다 — 패널 러너는 검토 잡을 집지 않고(claim_next_job) 재기동 복구도 건드리지 않으며, 진행판의
     job·패널 브리프의 최근 메모는 패널 잡의 것이다. 살아 있는 검토 잡이 있는 대상에는 패널 잡을 세우지 않는다(409
