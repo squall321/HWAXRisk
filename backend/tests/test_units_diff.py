@@ -504,6 +504,33 @@ def test_a_lower_layer_change_without_an_event_is_a_line(pairs):
     assert case.built["stats"]["lower_only_n"] >= 2
 
 
+ROLLUP_LABEL = {"n_leaf": "리프", "edges_internal": "내부 계면", "edges_external": "외부 계면", "orphan_leaf": "고아 리프"}
+
+
+def test_rollup_lines_name_the_fields_that_changed(synth, pairs):
+    """롤업 줄은 바뀐 칸만 '이름 앞값→뒤값' 으로 적는다 — 생산자 글 `asm:… 리프 7→7` 은 계면·고아 리프만 바뀐 행을 '바뀐 것 없는
+    변경' 으로 보였다(RA-5). 오라클은 diff 의 롤업 행(all_cids)에서 바뀐 칸을 직접 고른다. 의미층이 막힌(G2) 쌍도 본다."""
+    state = {"blocked": False, "gates": {"G2": {"key": "sameas_pending", "count": 2, "pass": False}}}
+    g2 = _pair_case("pair_kind", base_state=state)
+    seen = unchanged_leaf = 0
+    for case in (*synth.values(), *pairs.values(), g2):
+        found = all_cids(case.diff)
+        for unit in case.built["units"]:
+            for line in unit["lines"]:
+                if line["code"] != "param.rollup":
+                    continue
+                row = found[line["ref"]][0]
+                prefix = f"asm:{row['path_prefix']} "
+                assert line["text"].startswith(prefix), line["text"]
+                want = {f"{ROLLUP_LABEL[f]} {row[f]['before'] if row[f]['before'] is not None else '없음'}→"
+                        f"{row[f]['after'] if row[f]['after'] is not None else '없음'}"
+                        for f in ROLLUP_LABEL if row[f]["before"] != row[f]["after"]}
+                assert want and set(line["text"][len(prefix):].split(" · ")) == want, (line["text"], want)
+                seen += 1
+                unchanged_leaf += row["n_leaf"]["before"] == row["n_leaf"]["after"]
+    assert seen and unchanged_leaf, (seen, unchanged_leaf)       # 리프 수가 그대로인 롤업 행도 있었다
+
+
 def test_orphan_transitions_show_in_the_parts_table(synth):
     case = synth[40]
     orphans = case.diff["structural"]["orphans_delta"]

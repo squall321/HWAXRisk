@@ -68,6 +68,7 @@ _NODE_OP_KIND = {"added": "count", "removed": "count", "split": "count", "merged
 _PART_STATUS = {"added": "추가", "removed": "삭제", "replaced": "교체", "split": "분할", "merged": "병합",
                 "moved_in_tree": "조립 이동"}
 _ROLLUP_FIELDS = ("n_leaf", "edges_internal", "edges_external", "orphan_leaf")
+_ROLLUP_LABEL = {"n_leaf": "리프", "edges_internal": "내부 계면", "edges_external": "외부 계면", "orphan_leaf": "고아 리프"}
 # 전역 단위의 구획 순서(W2-01) — 명명 치수 → 롤업(최상위 접두별) → scope → 모르는 버킷 → 그 밖.
 _SECTIONS: tuple[str, ...] = ("dims", "rollup", "scope", "unknown", "other")
 _SECTION_LABEL = {"dims": "명명 치수", "rollup": "롤업", "scope": "접촉 범위", "unknown": "모르는 버킷",
@@ -98,6 +99,11 @@ def _num(value: Any) -> float | None:
 
 def _s(value: Any) -> str:
     return "" if value is None else str(value)
+
+
+def _count(value: Any) -> str:
+    """롤업 칸 값 — 그 조립이 한쪽 스냅샷에 없으면 None 이다('없음')."""
+    return "없음" if value is None else str(value)
 
 
 def _sha1(text: str) -> str:
@@ -291,8 +297,12 @@ def _collect(diff_obj: Mapping[str, Any]) -> tuple[list[dict], dict]:
         prefix = _s(src.get("path_prefix") or src.get("asm_key"))
         before = {f: src[f].get("before") for f in _ROLLUP_FIELDS if isinstance(src.get(f), Mapping)}
         after = {f: src[f].get("after") for f in _ROLLUP_FIELDS if isinstance(src.get(f), Mapping)}
+        # 몸통은 단위가 짓는다 — 생산자 글은 리프 수만 적어(`asm:… 리프 7→7`) 계면·고아 리프만 바뀐 행이 '바뀐 것 없는 변경' 으로
+        # 보였다(RA-5). 바뀐 칸만 적는다. 롤업은 의미 이벤트가 아니라 risk_get_diff 줄 대조 대상이 아니다.
+        text = f"asm:{prefix} " + " · ".join(f"{_ROLLUP_LABEL[f]} {_count(before[f])}→{_count(after[f])}"
+                                              for f in _ROLLUP_FIELDS if f in before and before[f] != after[f])
         items.append(_item(src["cid"], "parametric", "rollup_delta", "param.rollup", "topology", src,
-                           before=before, after=after, asm=prefix, section="rollup", names_raw=[prefix]))
+                           before=before, after=after, asm=prefix, section="rollup", names_raw=[prefix], text=text))
     for src in rows(semantic.get("events")):
         magnitude = src.get("magnitude") if isinstance(src.get("magnitude"), Mapping) else {}
         subject = src.get("subject") if isinstance(src.get("subject"), Mapping) else {}
