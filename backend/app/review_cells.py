@@ -395,18 +395,22 @@ def begin_call(store: Any, target_key: str, agent_key: str, *, lease_owner: str,
     return True
 
 
-def _rewrite_effective(store: Any, key: tuple[str, str, str]) -> dict:
-    """그 셀의 판정 행 전부에서 실효를 다시 고르고(`review_verify.mark_effective`) 셀의 판정 셈을 맞춘다. 셈 dict 를 돌려준다."""
+def _rewrite_effective(store: Any, key: tuple[str, str, str], *, now: int | None = None) -> dict:
+    """그 셀의 판정 행 전부에서 실효를 다시 고르고(`review_verify.mark_effective`) 셀의 판정 셈을 맞춘다. 셈 dict 를 돌려준다.
+
+    고쳐 쓴 행은 `updated_at` 을 같이 올린다 — since 반출이 `updated_at` → `created_at` 순으로 보므로 올리지 않으면 실효·일치·갈림의
+    고침이 반출에서 빠진다(tests/rr/test_v4_rows.py 의 소스 가드)."""
     rows = [dict(r) for r in store.query(
         "SELECT record_id, variant, applies, judgement, cq, quote_ok, refs_ok FROM rr_card_verdicts"
         f" WHERE {_cell_where()}", key)]
     if not rows:
         return {}
     marked = review_verify.mark_effective(rows)
+    stamp = now_epoch() if now is None else now
     store.executemany(
-        f"UPDATE rr_card_verdicts SET is_effective = ?, agree = ?, split = ? WHERE {_cell_where()}"
+        f"UPDATE rr_card_verdicts SET is_effective = ?, agree = ?, split = ?, updated_at = ? WHERE {_cell_where()}"
         " AND record_id = ? AND variant = ?",
-        [(r["is_effective"], r["agree"], r["split"], *key, r["record_id"], r["variant"]) for r in marked])
+        [(r["is_effective"], r["agree"], r["split"], stamp, *key, r["record_id"], r["variant"]) for r in marked])
     effective = [r for r in marked if r["is_effective"]]
     tally = review_verify.cell_tally(review_verify.effective_rows(rows))
     tally.update({
@@ -473,8 +477,10 @@ def write_call_result(store: Any, target_key: str, agent_key: str, *, lease_owne
                         "unit_id": unit_id, "call_id": values["call_id"],
                         "deck_id": verdict.get("deck_id") or values.get("deck_id"),
                         "created_at": verdict.get("created_at") or now}
-                store.execute(f"INSERT OR REPLACE INTO rr_card_verdicts({', '.join(item)})"
-                              f" VALUES ({','.join('?' * len(item))})", tuple(item.values()))
+                item.pop("updated_at", None)
+                # 행을 통째로 다시 쓰므로 updated_at 을 SQL 글에 못 박는다(since 반출 — 소스 가드가 이 글을 읽는다).
+                store.execute(f"INSERT OR REPLACE INTO rr_card_verdicts({', '.join(item)}, updated_at)"
+                              f" VALUES ({','.join('?' * len(item))}, ?)", (*item.values(), now))
             if head_sets:
                 store.execute(f"UPDATE rr_expert_reports SET {', '.join(f'{c} = ?' for c in head_sets)}, updated_at = ?"
                               f" WHERE {_head_where()}", (*head_sets.values(), now, target_key, agent_key))
@@ -494,7 +500,7 @@ def _apply_cell_outcome(store: Any, key: tuple[str, str, str], row: Mapping[str,
     """`write_call_result` 의 셀 몫 — 셈을 더하고 결말대로 옮긴다. 셀의 새 상태를 돌려준다."""
     sets: dict[str, Any] = dict(cell_sets)
     if rewrite:
-        sets.update(_rewrite_effective(store, key))
+        sets.update(_rewrite_effective(store, key, now=now))
     waiting = outcome is not None and outcome.klass == review_ops.WAIT
     if first_end and not waiting:
         sets.update({
