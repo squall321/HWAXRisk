@@ -55,7 +55,8 @@ def _rich(store, key: str, *, agents=(SEAL, rig.BACKGROUND_ONLY, rig.ZERO_CARDS)
          need="개스킷 홈 깊이 공차")
 
 
-SECTION_BLOCKS = {"# 전문가 보고서": "background", "## 본 범위": "background", "## 카드 점검표": "results",
+SECTION_BLOCKS = {"# 전문가 보고서": "background", "## 이 보고서를 읽는 법": "background", "## 본 범위": "background",
+                  "## 카드 점검표": "results",
                   "## 배경 카드": "results", "## 판정하지 못한 카드": "results", "## 단위별 분석": "results",
                   "## 카드 밖 지적": "results", "## 올린 finding": "results", "## 다른 영역으로 넘김": "recommendation",
                   "## 필요한 추가 정보": "recommendation", "## 따져 본 메커니즘": "minutes", "## 검토 품질": "minutes"}
@@ -447,3 +448,44 @@ def test_refinalizing_on_an_importing_box_keeps_the_original_length_of_clipped_q
         assert second_row["cq_chars"] is None and len(second_row["cq"]) < 200       # 이 박스에서 본 단위는 원문 그대로다
     finally:
         dest.close()
+
+
+# ---------------------------------------------------------------- 읽는 차례와 한 줄 행(R3B-12)
+def test_the_full_report_reads_findings_first_and_keeps_clear_rows_to_one_line(store):
+    """R3B-12 — full 은 머리 · '이 보고서를 읽는 법' · 올린 finding 이 먼저이고, 걸림(FAIL·WARNING)·보류는 인용 · 이유 · 필요 정보까지
+    자세히, 걸림 없음·해당 없음 행은 한 줄(별칭 · 판정 · 인용 대조)이다. cards 는 모든 행을 자세히 싣고 JSON 은 모든 칸을 싣는다.
+    쪽을 이으면 그 part 의 마크다운이다(자르지 않는다)."""
+    key = rig.target(store)
+    _rich(store, key, agents=(SEAL,))
+    report = expert_report.load_report(store, key, SEAL)
+    full = expert_report.render_report_md(report)
+    heads = [line for line in full.split("\n") if line.startswith("## ")]
+    assert [h.split(" — ")[0].split(" ")[1] for h in heads[:5]] == ["이", "올린", "본", "단위별", "카드"]
+    assert heads[0] == "## 이 보고서를 읽는 법" and heads[1].startswith("## 올린 finding")
+    lines = full.split("\n")
+    checklist = lines[lines.index(next(h for h in heads if h.startswith("## 카드 점검표"))):]
+    ok_rows = [i for i, line in enumerate(checklist) if line.startswith("- 단위 ") and "judgement=OK" in line.split(" · ")[0]]
+    assert ok_rows and all(not checklist[i + 1].startswith("  - ") for i in ok_rows)          # 한 줄
+    assert all("인용 둘 다 찾음" in checklist[i] for i in ok_rows)
+    fail_rows = [i for i, line in enumerate(checklist) if line.startswith("- 단위 ") and "judgement=FAIL" in line]
+    assert fail_rows and all(checklist[i + 1].startswith("  - 카드 인용 card:") for i in fail_rows)   # 걸림은 자세히
+    cards = expert_report.render_report_md(report, part="cards")
+    detailed = cards.split("\n")
+    ok_cards = [i for i, line in enumerate(detailed) if line.startswith("- 단위 ") and "judgement=OK" in line.split(" · ")[0]]
+    assert ok_cards and all(detailed[i + 1].startswith("  - 카드 인용 card:") for i in ok_cards)    # cards 는 모든 행 자세히
+    units_md = expert_report.render_report_md(report, part="units", unit_id=_unit_ids(store, key)[0])
+    hold = units_md.split("#### 보류 1장 — 필요 자료\n", 1)[1].split("\n####", 1)[0].split("\n")
+    assert hold[0].startswith("- K03 ") and hold[1].startswith("  - 필요 정보 «") and hold[2].startswith("  - 카드 인용 card:")
+    assert hold[3].startswith("  - 이유 «")
+    fail = units_md.split("#### judgement=FAIL 1장\n", 1)[1].split("\n")
+    assert fail[0].startswith("- K01 ") and fail[1].startswith("  - 카드 인용 card:")
+    clear = units_md.split("카드마다 한 줄(별칭 · 판정 · 인용 대조)\n", 1)[1].split("\n####", 1)[0].split("\n")
+    assert clear and all(line.startswith("- K0") and " · 인용 " in line for line in clear)
+    assert {r["why"] for c in report["checklist"] for r in c["rows"]} >= {fre.WHY}                # JSON 은 모든 칸
+    for part in expert_report.PARTS:
+        md = expert_report.render_report_md(report, part=part)
+        assert "\n".join(t for p in expert_report.render_pages(report, 3000, part=part)
+                         for b in expert_report.BLOCKS for t in p["blocks"][b]) == md
+        assert render.lint_text(md)["violations"] == [], part
+    summary = expert_report.render_report_md(report, part="summary")
+    assert summary.index("## 이 보고서를 읽는 법") < summary.index("## 올린 finding") < summary.index("## 본 범위")

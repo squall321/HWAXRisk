@@ -348,3 +348,27 @@ def test_the_guide_on_a_panels_target_carries_no_review_facts(store):
     assert set(out["facts"]["coverage"]) == {"roster_size", "by_status", "by_domain", "unseated_n", "strong", "level",
                                              "close_level"}
     assert not any(s["args"].get("mode") == "reviews" for s in out["next"])
+
+
+def test_the_guide_watches_the_cells_of_the_job_scope_and_points_at_the_failed_ones(store, monkeypatch):
+    """R3B-12 — 검토 잡이 있으면 길잡이의 셀 격자 걸음은 그 잡 범위의 셀(job_id)로 거르고, 범위 안에 실패한 셀이 있으면 그것만 보는
+    걸음(state='failed')을 더한다. risk_get_cells(job_id) 는 그 잡이 찍은 셀만 준다(REST get_cells 와 같은 거름)."""
+    key = rig.target(store)
+    project_id = _project_with_source(store, key)
+    job_id = rig.job(store, key, scope={"agents": [SEAL, "xd-syn-1"]})
+    fake = FakeReviewEngine(rig.packs())
+    fake.pack_errors = {"xd-syn-1": (502, fre.load("pack_errors.json")["card_fetch_failed"]["body"])}
+    rig.Rig(store, fake).finish(job_id, step=2000)
+    out = entry.next_step(_delegate(), project_id=project_id)
+    cells = [s for s in out["next"] if s["tool"] == "risk_get_cells"]
+    assert [s["args"] for s in cells] == [{"target_key": key, "job_id": job_id},
+                                          {"target_key": key, "job_id": job_id, "state": "failed"}]
+    assert "실패로 끝난 셀 5개" in cells[1]["why"]
+    factories.act_as_delegate(monkeypatch, OWNER)
+    scoped = _call("risk_get_cells", target_key=key, job_id=job_id)
+    assert scoped["total"] == 10 and {r["run_id"] for r in scoped["rows"]} == {job_id}
+    assert {r["agent_key"] for r in scoped["rows"]} == {SEAL, "xd-syn-1"}
+    failed = _call("risk_get_cells", target_key=key, job_id=job_id, state="failed")
+    assert failed["total"] == 5 and {(r["agent_key"], r["state"]) for r in failed["rows"]} == {("xd-syn-1", "failed")}
+    assert routes.get_cells(key, job_id=job_id, ident=factories.ident(OWNER))["total"] == 10
+    assert _call("risk_get_cells", target_key=key)["total"] == 30

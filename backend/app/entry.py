@@ -830,10 +830,18 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
                                 + ("검토 잡이 새 호출을 내지 않고 기다린다." if live else "검토 잡을 만들 수 없다."),
                                 REVIEW_DISABLED_FIX))
     finalized = [r["agent_key"] for r in order if r.get("state") in REVIEW_FINALIZED]
+    # 셀 격자는 로스터 전원 × 단위라(359명 × 60단위면 2만 칸) 거르지 않으면 앞 행이 범위 밖 전문가의 대기 칸이다 — 검토 잡이 있으면
+    # 그 잡 범위의 셀로 거르고, 실패한 셀이 있으면 그것만 보는 걸음을 더한다(R3B-12).
+    cells_args = {"target_key": target_key, **({"job_id": job["id"]} if job is not None else {})}
     watch = [_step("risk_get_coverage", {"target_key": target_key, "with_seats": False},
                    "진행판의 review 칸 — 셀·전문가 상태, 카드 폭포, 품질 요약, 잡(단계·보류·도는 호출의 마지막 신호).", write=False),
-             _step("risk_get_cells", {"target_key": target_key},
-                   "셀 격자 — 전문가 × 단위의 상태·판정 수·실패 까닭(agent_key·state 로 거른다).", write=False)]
+             _step("risk_get_cells", cells_args,
+                   "셀 격자 — " + ("이 검토 잡 범위의 " if job is not None else "") + "전문가 × 단위의 상태·판정 수·실패 까닭"
+                   "(agent_key·state 로 더 거른다).", write=False)]
+    scope_cells = ((review.get("cells") or {}).get("in_scope") or {}) if job is not None else {}
+    if int(((scope_cells.get("by_state") or {}).get("failed")) or 0):
+        watch.append(_step("risk_get_cells", {**cells_args, "state": "failed"},
+                           f"이 검토 잡 범위에서 실패로 끝난 셀 {scope_cells['by_state']['failed']}개와 그 까닭(error_code).", write=False))
     if finalized:
         names = ", ".join(finalized[:9]) + (" …" if len(finalized) > 9 else "")
         watch.append(_step("risk_get_expert_report", {"target_key": target_key, "agent_key": finalized[0]},

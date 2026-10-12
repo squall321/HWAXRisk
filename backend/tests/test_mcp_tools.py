@@ -153,7 +153,7 @@ def test_signatures_follow_plan():
     assert set(tools["risk_get_units"].inputSchema["required"]) == {"target_key"}
     assert props("risk_get_units")["part"]["default"] == "manifest"
     # 카드 대조 검토 — 셀은 거름 셋과 나눠 받기, 보고서는 전문가 하나의 쪽(part 기본 summary · page 1).
-    assert set(props("risk_get_cells")) == {"target_key", "agent_key", "unit_id", "state", "limit", "offset"}
+    assert set(props("risk_get_cells")) == {"target_key", "agent_key", "unit_id", "state", "limit", "offset", "job_id"}
     assert set(tools["risk_get_cells"].inputSchema["required"]) == {"target_key"}
     assert (props("risk_get_cells")["limit"]["default"], props("risk_get_cells")["offset"]["default"]) == (200, 0)
     assert set(props("risk_get_expert_report")) == {"target_key", "agent_key", "part", "unit_id", "page", "version"}

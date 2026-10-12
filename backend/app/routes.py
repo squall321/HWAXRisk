@@ -2798,9 +2798,11 @@ def review_payload(store: Any, target_key: str, flow: str | None) -> dict | None
 
 def cells_payload(target_key: str, *, owner_sub: str | None = None, agent_key: str | None = None,
                   unit_id: str | None = None, domain: str | None = None, state: str | None = None,
-                  limit: int = CELL_LIST_LIMIT_DEFAULT, offset: int = 0, columns: tuple[str, ...] | None = None) -> dict:
+                  limit: int = CELL_LIST_LIMIT_DEFAULT, offset: int = 0, columns: tuple[str, ...] | None = None,
+                  job_id: str | None = None) -> dict:
     """`GET /targets/{key}/cells` 본체 — MCP `risk_get_cells` 와 같은 함수(그쪽은 `columns=CELL_BRIEF_COLUMNS` 로 행을 줄이고 와이어에
-    맞춰 limit 을 줄인다). 격자(활성 빌드의 검토 대상 단위)의 셀을 검토 순서(전문가) → 단위 순번으로 준다.
+    맞춰 limit 을 줄인다). 격자(활성 빌드의 검토 대상 단위)의 셀을 검토 순서(전문가) → 단위 순번으로 준다. `job_id` 는 그 검토 잡의
+    범위에 든 셀(셀의 run_id)만이다 — 359명 격자에서 지켜볼 셀은 범위 안 셀이다(R3B-12).
     {target_key, total, limit, offset, next_offset?, rows[]} — 행 열은 S1 의 이름 그대로(JSON 열·선점은 셀 하나 경로가 준다)."""
     _target_row(target_key, owner_sub)
     if state is not None and state not in review_cells.CELL_STATES:
@@ -2814,7 +2816,8 @@ def cells_payload(target_key: str, *, owner_sub: str | None = None, agent_key: s
         return out
     where = ["c.target_key = ?", f"c.unit_id IN ({','.join('?' * len(active))})"]
     params: list[Any] = [target_key, *active]
-    for column, value in (("agent_key", agent_key), ("unit_id", unit_id), ("domain", domain), ("state", state)):
+    for column, value in (("agent_key", agent_key), ("unit_id", unit_id), ("domain", domain), ("state", state),
+                          ("run_id", job_id)):
         if value is not None:
             where.append(f"c.{column} = ?")
             params.append(value)
@@ -2951,11 +2954,11 @@ def expert_report_payload(target_key: str, agent_key: str, *, owner_sub: str | N
 
 @router.get("/targets/{target_key}/cells")
 def get_cells(target_key: str, agent_key: str | None = None, unit_id: str | None = None, domain: str | None = None,
-              state: str | None = None, limit: int = CELL_LIST_LIMIT_DEFAULT, offset: int = 0,
+              state: str | None = None, limit: int = CELL_LIST_LIMIT_DEFAULT, offset: int = 0, job_id: str | None = None,
               ident: identity.Identity = Depends(identity.current)) -> dict:
-    """카드 대조 셀 목록(limit 기본 500 · 최대 2000, next_offset 으로 이어 받는다)."""
+    """카드 대조 셀 목록(limit 기본 500 · 최대 2000, next_offset 으로 이어 받는다, job_id 는 그 검토 잡 범위의 셀만)."""
     return cells_payload(target_key, owner_sub=_require_user(ident), agent_key=agent_key, unit_id=unit_id, domain=domain,
-                         state=state, limit=limit, offset=offset)
+                         state=state, limit=limit, offset=offset, job_id=job_id)
 
 
 @router.get("/targets/{target_key}/cells/{unit_id}/{agent_key}")

@@ -1223,16 +1223,33 @@ PAGE_CHARS = 25_000            # 쪽 하나의 글자 — Claude Code 의 MCP �
 PARTS: tuple[str, ...] = ("summary", "units", "cards", "full")
 BLOCKS: tuple[str, ...] = ("background", "results", "recommendation", "minutes")   # WP4 통합 보고서 쪽의 블록 넷
 # 절 → 쪽 블록. 쪽은 블록이 바뀌는 자리에서도 끊어(한 쪽에 블록 하나) 쪽을 차례로 이으면 full 마크다운과 같다.
-_SECTION_BLOCK = {"head": "background", "scope": "background", "checklist": "results", "background": "results",
+_SECTION_BLOCK = {"head": "background", "guide": "background", "scope": "background", "checklist": "results",
+                  "background": "results",
                   "unjudged_cards": "results", "by_unit": "results", "off_card": "results", "handoff": "recommendation",
                   "needs_info": "recommendation", "mechanisms": "minutes", "findings": "results", "quality": "minutes"}
+# 읽는 차례(R3B-12) — 머리와 '읽는 법' 다음에 올린 finding 이 먼저 오고, 본 범위 → 단위별 분석(걸림·보류는 자세히) → 카드 밖 지적
+# → 필요한 정보·넘김 → 점검표 → 나머지 차례다. 파일럿 규모(단위 약 60)의 full 은 수십만 자라 사람이 앞 몇 쪽에서 걸린 것을 먼저 본다.
 _PART_SECTIONS = {
-    "summary": ("head", "scope", "findings", "quality"),
+    "summary": ("head", "guide", "findings", "scope", "quality"),
     "units": ("by_unit", "off_card", "handoff", "needs_info", "mechanisms"),
     "cards": ("checklist", "background", "unjudged_cards"),
-    "full": ("head", "scope", "checklist", "background", "unjudged_cards", "by_unit", "off_card", "handoff", "needs_info",
-             "mechanisms", "findings", "quality"),
+    "full": ("head", "guide", "findings", "scope", "by_unit", "off_card", "needs_info", "handoff", "checklist", "background",
+             "unjudged_cards", "mechanisms", "quality"),
 }
+# full 의 점검표는 걸림 없음·해당 없음 행을 한 줄로 싣는다 — cards 는 모든 행을 자세히 싣는다(인용을 카드 원문과 견주는 자리).
+_COMPACT_CHECKLIST_PARTS = ("full",)
+_GUIDE = (
+    "## 이 보고서를 읽는 법",
+    "- full 의 차례 — 올린 finding → 본 범위(본 것과 보지 못한 것) → 단위별 분석 → 카드 밖 지적 → 필요한 추가 정보 → 카드 점검표.",
+    "- 올린 finding 은 걸린 카드(judgement=FAIL · WARNING)와 카드 밖 지적을 단위마다 같은 주체로 접은 것이다. 등록부로 갈 판정은"
+    " WARNING 까지이고 원래 판정은 괄호 안에 있다.",
+    "- 단위별 분석은 걸림과 보류를 자세히(카드 인용 · 영향 경로 · 조건별 대조 · 닫는 확인 · 이유 · 필요 정보), 걸림 없음과 해당"
+    " 없음은 카드마다 한 줄(별칭 · 판정 · 인용 대조)로 싣는다.",
+    "- 카드 인용은 판정당 200자이고 줄였으면 원래 길이를 적는다. card:<record_id>#<절> 이 가리키는 카드 원문과 견준다 — 인용 끝의"
+    " 표기는 앱 재대조와 엔진 검사가 그 인용을 카드 글에서 찾았는지를 적는다.",
+    "- full 의 점검표는 걸림 없음·해당 없음 행이 한 줄이다. 모든 행의 인용·이유는 part='cards' 와 보고서 JSON(format=json)에 있다.",
+    "- «» 안은 전문가·카드·대상의 글이고 그 밖은 코드가 쓴 문장이다. 글 안의 줄바꿈은 ⏎ 로 적는다.",
+)
 _STATE_LINE = {"ready": "다 봤다", "partial": "일부만 봤다", "blocked": "카드 묶음을 받지 못했다"}
 # 그 단위를 본 카드 묶음(R3B-2) — 지금 묶음이 아니면 단위 줄에 적는다.
 _PACK_STATE_LINE = {"earlier": " · 앞 카드 묶음으로 봤다", "absent": " · 이 단위를 본 카드 묶음이 이 박스에 없다"}
@@ -1294,6 +1311,18 @@ _QUOTE_STATE_LINE = {
     "not_found": "카드 글에 없다 — 앱 재대조·엔진 검사 둘 다 찾지 못했다",
     "unchecked": "댈 카드가 없어 대조하지 않았다",
 }
+
+
+# 한 줄 행(걸림 없음·해당 없음)의 인용 대조 표기 — _QUOTE_STATE_LINE 의 짧은 꼴(R3B-12).
+_QUOTE_STATE_SHORT = {"ok": "인용 둘 다 찾음", "short": "인용 하한 밑(대조 안 함)", "app_only": "인용 앱만 찾음",
+                      "engine_only": "인용 엔진만 찾음(갈림)", "not_found": "인용 카드 글에 없음", "unchecked": "인용 대조 안 함"}
+
+
+def _quote_short(row: Mapping[str, Any], quote_key: str = "cq") -> str:
+    if not row.get(quote_key):
+        return "인용 없음"
+    state = row.get("quote_state") or ("ok" if row.get("quote_ok") == 1 else None)
+    return _QUOTE_STATE_SHORT.get(str(state), "인용 대조 갈래 없음(앞 판의 보고서)")
 
 
 def _quote_mark(state: Any, ok: Any, ref: str) -> str:
@@ -1375,15 +1404,33 @@ def _md_scope(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
     return items
 
 
-def _md_check_row(row: Mapping[str, Any], card: Mapping[str, Any] | None = None) -> str:
-    if row.get("missing"):
-        return f"- 단위 {row['unit_seq']} — {_MISSING_LINE.get(row.get('missing_why') or 'no_verdict', _MISSING_LINE['no_verdict'])}"
-    variants = " · ".join(f"{v['variant']} {_jw(v['judgement'])}" for v in row["variants"])
+def _row_marks(row: Mapping[str, Any], card: Mapping[str, Any] | None) -> list[str]:
+    """점검표 행의 표기 — 변형 갈림 · 뒤집힘 · 다툼 · 인용 대조 갈림 · 카드 글 바뀜 · 그때 별칭 · 근거 없는 수 · 엔진 보충."""
     marks = [m for m, on in (("변형 갈림", row["split"]), ("뒤집힘", row["flipped"]), ("다툼", row["disputed"]),
                              ("서버와 앱의 인용 대조 갈림", row["check_disagree"]),
                              ("카드 글이 바뀌었다 — 이 판정은 앞 글로 했다", row.get("card_changed"))) if on]
     if card is not None and row.get("alias") and row["alias"] != card.get("alias"):
         marks.append(f"그 단위를 본 묶음의 별칭 {row['alias']}")
+    if row.get("nums_missing"):
+        marks.append("근거 없는 수 " + " · ".join(_q(n) for n in row["nums_missing"]))
+    if row.get("revised_from"):
+        marks.append(f"엔진 보충 {_q(row['revised_from'])}")
+    return marks
+
+
+def _compact_row(head: str, row: Mapping[str, Any], marks: Sequence[str]) -> str:
+    """걸림 없음·해당 없음 행 한 줄(R3B-12) — 별칭 · 판정 · 인용 대조, 표기가 있으면 그 뒤에."""
+    return f"{head} {_jw(row['judgement'])} · {_quote_short(row)}" + (" · " + " · ".join(marks) if marks else "")
+
+
+def _md_check_row(row: Mapping[str, Any], card: Mapping[str, Any] | None = None, *, compact: bool = False) -> str:
+    if row.get("missing"):
+        return f"- 단위 {row['unit_seq']} — {_MISSING_LINE.get(row.get('missing_why') or 'no_verdict', _MISSING_LINE['no_verdict'])}"
+    marks = _row_marks(row, card)
+    if compact and row["judgement"] in ("OK", "na"):
+        alias = row.get("alias") or (card or {}).get("alias") or ""
+        return _compact_row(f"- 단위 {row['unit_seq']} — {alias}", row, marks)
+    variants = " · ".join(f"{v['variant']} {_jw(v['judgement'])}" for v in row["variants"])
     agree = {1: "fwd·rev 일치", 0: "fwd·rev 다름"}.get(row["agree"], "한 변형뿐")
     out = [f"- 단위 {row['unit_seq']} — {_jw(row['judgement'])} · applies={_q(row['applies'])} · 실효 변형 {row['variant']}"
            f"({agree}; {variants})" + (f" · 원래 {_jw(row['judgement_claimed'])}" if row.get("judgement_claimed") else "")
@@ -1395,10 +1442,6 @@ def _md_check_row(row: Mapping[str, Any], card: Mapping[str, Any] | None = None)
         out.append(f"  - 이유 {_q(row['why'])}")
     if row.get("need"):
         out.append(f"  - 필요 정보 {_q(row['need'])}")
-    if row.get("nums_missing"):
-        marks.append("근거 없는 수 " + " · ".join(_q(n) for n in row["nums_missing"]))
-    if row.get("revised_from"):
-        marks.append(f"엔진 보충 {_q(row['revised_from'])}")
     if marks:
         out.append("  - 표기 — " + " · ".join(marks))
     out.append(f"  - 등급 {_q(row.get('grade') or '경험칙')}" + (f" · finding {_q(row['finding_id'])}" if row.get("finding_id")
@@ -1406,10 +1449,11 @@ def _md_check_row(row: Mapping[str, Any], card: Mapping[str, Any] | None = None)
     return "\n".join(out)
 
 
-def _md_checklist(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
+def _md_checklist(report: Mapping[str, Any], unit_id: str | None, *, compact: bool = False) -> list[str]:
     cards = report["checklist"]
     n_units = len({r["unit_id"] for c in cards for r in c["rows"]})
-    items = [f"## 카드 점검표 — 점검 카드 {len(cards)}장 × 카드로 본 단위 {n_units}개"]
+    items = [f"## 카드 점검표 — 점검 카드 {len(cards)}장 × 카드로 본 단위 {n_units}개"
+             + (" · 걸림 없음·해당 없음은 한 줄(모든 행의 인용·이유는 part='cards')" if compact else "")]
     if not cards:
         items.append("- 점검 카드가 없다 — " + ("카드 묶음이 없다." if report["head"].get("pack") is None
                                               else "카드 묶음의 점검 카드가 0장이다."))
@@ -1417,7 +1461,7 @@ def _md_checklist(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
         items.append(f"### {card['alias']} {_qv(card['card_id'])} {_qv(card['title'])} — {_qv(card['type'])} ·"
                      f" {_qv(card['confidence'])} · 등급 {_qv(card['grade'])} · {card['ref']}"
                      + _CARD_SOURCE_LINE.get(card.get("source") or "", ""))
-        items += [_md_check_row(row, card) for row in card["rows"] if not unit_id or row["unit_id"] == unit_id]
+        items += [_md_check_row(row, card, compact=compact) for row in card["rows"] if not unit_id or row["unit_id"] == unit_id]
     return items
 
 
@@ -1466,7 +1510,10 @@ def _md_by_unit(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
                     items.append(f"- card:{key} — 점검표에 이 판정 행이 없다")
                     continue
                 card, row = hit
-                lines = [f"- {row.get('alias', card['alias'])} {_qv(card['card_id'])} {_qv(card['title'])} — {row['quote_ref']}"]
+                lines = [f"- {row.get('alias', card['alias'])} {_qv(card['card_id'])} {_qv(card['title'])} — {row['quote_ref']}"
+                         + (f" · 원래 {_jw(row['judgement_claimed'])}" if row.get("judgement_claimed") else ""),
+                         "  - " + _quote_line("카드 인용", row["quote_ref"], row["cq"], row["cq_chars"], row["quote_ok"],
+                                              word="cq", state=row.get("quote_state"))]
                 lines.append(f"  - 영향 경로 {_q(row.get('path') or '')}" + (f" · {_sev(row['sev'])}" if _sev(row.get("sev"))
                                                                           else "")
                              + f" · 메커니즘 {_q(row.get('mech') or row.get('mech_free') or 'unclassified')}")
@@ -1476,6 +1523,9 @@ def _md_by_unit(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
                                  f" ({_refs(cond['lines'], cond['refs']) or '참조 없음'})")
                 lines.append(f"  - 닫는 확인 {_q(row.get('check_kind') or '')} {_q(row.get('check') or '')}")
                 lines.append(f"  - 이유 {_q(row.get('why') or '')}")
+                marks = _row_marks(row, card)
+                if marks:
+                    lines.append("  - 표기 — " + " · ".join(marks))
                 items.append("\n".join(lines))
         items.append(f"#### 보류 {len(u['undetermined'])}장 — 필요 자료")
         for key in u["undetermined"]:
@@ -1484,14 +1534,22 @@ def _md_by_unit(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
                 items.append(f"- card:{key} — 점검표에 이 판정 행이 없다")
                 continue
             card, row = hit
-            items.append(f"- {row.get('alias', card['alias'])} {_qv(card['title'])} — 필요 정보 {_q(row.get('need') or '')}"
-                         + (" · 변형 갈림" if row["split"] else ""))
-        items.append(f"#### 걸림 없음 · 해당 없음 {len(u['OK']) + len(u['na'])}장")
+            lines = [f"- {row.get('alias', card['alias'])} {_qv(card['card_id'])} {_qv(card['title'])} — {row['quote_ref']}"
+                     + (f" · 원래 {_jw(row['judgement_claimed'])}" if row.get("judgement_claimed") else ""),
+                     f"  - 필요 정보 {_q(row.get('need') or '')}",
+                     "  - " + _quote_line("카드 인용", row["quote_ref"], row["cq"], row["cq_chars"], row["quote_ok"],
+                                          word="cq", state=row.get("quote_state")),
+                     f"  - 이유 {_q(row.get('why') or '')}"]
+            marks = _row_marks(row, card)
+            if marks:
+                lines.append("  - 표기 — " + " · ".join(marks))
+            items.append("\n".join(lines))
+        items.append(f"#### 걸림 없음 · 해당 없음 {len(u['OK']) + len(u['na'])}장 — 카드마다 한 줄(별칭 · 판정 · 인용 대조)")
         for judgement in ("OK", "na"):
             for key in u[judgement]:
                 hit = _unit_card(rows, u["unit_id"], key)
                 items.append(f"- card:{key} — {_jw(judgement)} · 점검표에 이 판정 행이 없다" if hit is None else
-                             f"- {hit[1].get('alias', hit[0]['alias'])} {_qv(hit[0]['title'])} — {_jw(judgement)}")
+                             _compact_row(f"- {hit[1].get('alias', hit[0]['alias'])}", hit[1], _row_marks(hit[1], hit[0])))
         items.append(f"#### 카드 밖 지적 {len(u['off_card'])}건 · direction=improvement {len(u['improvements'])}건")
         for n in u["off_card"] + u["improvements"]:
             f = report["off_card"][n]
@@ -1591,8 +1649,9 @@ def _md_items(report: Mapping[str, Any], *, part: str = "full", unit_id: str | N
     if part not in PARTS:
         raise AppError("E100", f"part 는 {list(PARTS)} 가운데 하나다 — {part!r}.", 422)
     render_of = {
-        "head": lambda: _md_head(report), "scope": lambda: _md_scope(report, unit_id),
-        "checklist": lambda: _md_checklist(report, unit_id), "background": lambda: _md_background(report),
+        "head": lambda: _md_head(report), "guide": lambda: ["\n".join(_GUIDE)], "scope": lambda: _md_scope(report, unit_id),
+        "checklist": lambda: _md_checklist(report, unit_id, compact=part in _COMPACT_CHECKLIST_PARTS),
+        "background": lambda: _md_background(report),
         "unjudged_cards": lambda: _md_unjudged(report), "by_unit": lambda: _md_by_unit(report, unit_id),
         "off_card": lambda: _md_off_card(report, unit_id), "handoff": lambda: _md_handoff(report, unit_id),
         "needs_info": lambda: _md_needs(report, unit_id), "mechanisms": lambda: _md_mechanisms(report, unit_id),
@@ -1602,8 +1661,10 @@ def _md_items(report: Mapping[str, Any], *, part: str = "full", unit_id: str | N
 
 
 def render_report_md(report: Mapping[str, Any], *, unit_id: str | None = None, part: str = "full") -> str:
-    """보고서 JSON → 마크다운(줄이지 않는다 — D-21). part ∈ summary(머리·범위·finding·품질) · units(단위별 분석·카드 밖·넘김·
-    필요 정보·메커니즘) · cards(점검표·배경·판정하지 못한 카드) · full. unit_id 를 주면 그 단위의 줄만 싣는다."""
+    """보고서 JSON → 마크다운(글을 자르지 않는다 — D-21). part ∈ summary(머리·읽는 법·finding·범위·품질) · units(단위별 분석·카드
+    밖·넘김·필요 정보·메커니즘) · cards(점검표 모든 행 자세히·배경·판정하지 못한 카드) · full(읽는 차례 — _PART_SECTIONS). units 와
+    full 은 걸림·보류·카드 밖 지적을 자세히, 걸림 없음·해당 없음을 행마다 한 줄로 싣는다(R3B-12 — JSON 은 모든 칸을 그대로 싣는다).
+    unit_id 를 주면 그 단위의 줄만 싣는다."""
     return "\n".join(text for _block, text in _md_items(report, part=part, unit_id=unit_id))
 
 

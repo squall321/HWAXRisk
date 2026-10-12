@@ -498,12 +498,12 @@ def _fit_guide(out: dict) -> dict:
 
 @mcp.tool()
 def risk_get_cells(target_key: str, agent_key: str | None = None, unit_id: str | None = None, state: str | None = None,
-                   limit: int = 200, offset: int = 0) -> dict:
-    """카드 대조 셀 조회(읽기 전용) — 격자(전문가 × 검토 단위)의 셀마다 상태·무엇으로 봤나(basis)·판정 수(n_fail·n_warning…)·카드 수·절단·인용 대조·실패 까닭을 검토 순서로 준다, agent_key·unit_id·state 로 거르고, 한 번에 약 2만 자 안에서 limit 행까지 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다), 판정 행 자체는 risk_get_expert_report 가 준다."""
+                   limit: int = 200, offset: int = 0, job_id: str | None = None) -> dict:
+    """카드 대조 셀 조회(읽기 전용) — 격자(전문가 × 검토 단위)의 셀마다 상태·무엇으로 봤나(basis)·판정 수(n_fail·n_warning…)·카드 수·절단·인용 대조·실패 까닭을 검토 순서로 준다, agent_key·unit_id·state·job_id(그 검토 잡 범위의 셀만 — 로스터 전원 격자에서 지켜볼 셀)로 거르고, 한 번에 약 2만 자 안에서 limit 행까지 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다), 판정 행 자체는 risk_get_expert_report 가 준다."""
     def cells(key: str, *, owner_sub: str) -> dict:
         return _fit_rows(lambda take: routes.cells_payload(key, owner_sub=owner_sub, agent_key=agent_key, unit_id=unit_id,
                                                            state=state, limit=take, offset=offset,
-                                                           columns=routes.CELL_BRIEF_COLUMNS), limit)
+                                                           columns=routes.CELL_BRIEF_COLUMNS, job_id=job_id), limit)
 
     return _scoped("target", target_key, cells, target_key)
 
