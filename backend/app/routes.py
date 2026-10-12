@@ -2395,8 +2395,9 @@ def _flow_lock(store: Any, target_key: str, to: str) -> AppError | None:
 def post_target_flow(target_key: str, body: FlowBody, ident: identity.Identity = Depends(identity.current)) -> dict:
     """심사 방식 바꾸기(editor — 잡을 세울 수 있는 사람과 같다). {target_key, flow, changed, units?}.
 
-    - panels → cells: 스위치가 켜져 있고(아니면 409 review_disabled) 살아 있는 잡이 없을 때(409 flow_locked·job_live), 검토 단위가
-      ok·oversize 일 때만(없으면 그 자리에서 세운다, 안 서면 409 units_unbuildable). 이미 돈 패널·의견·등록부는 건드리지 않는다
+    - panels → cells: 스위치가 켜져 있고(아니면 409 review_disabled) 살아 있는 잡도(409 flow_locked·job_live) 브리프를 받아 간 채
+      끝나지 않은 L2 보충 회차 패널도(409 flow_locked·panel_in_flight) 없을 때, 검토 단위가 ok·oversize 일 때만(없으면 그 자리에서
+      세운다, 안 서면 409 units_unbuildable — 까닭은 빌드 error). 이미 돈 패널·의견·등록부는 건드리지 않는다
       — 패널을 돌린 대상에 카드 대조를 얹는 길이다(D-24 '비교', 파일럿 길).
     - cells → panels: 검토 잡이 한 번도 없을 때만(409 flow_locked·review_ran).
     바꾸면 rr_audit(scope='target', action='target.flow') 한 행을 남긴다. 같은 방식이면 아무것도 쓰지 않는다(changed:false).
