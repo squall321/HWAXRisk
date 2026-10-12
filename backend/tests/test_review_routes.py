@@ -60,7 +60,7 @@ EXPERT_ROW_KEYS = [
     "updated_at", "cards", "cells"]
 PACK_COUNT_KEYS = {"cards_total", "checkable_n", "background_n", "unrenderable_n"}
 REPORT_META_KEYS = {"target_key", "agent_key", "state", "version", "report_hash", "finalized_at", "coverage_status",
-                    "opinion_id", "review_id"}
+                    "opinion_id", "review_id", "state_why"}
 REPORT_PAGE_KEYS = REPORT_META_KEYS | {"format", "part", "unit_id", "pages_total", "page_no", "page"}   # + next_page
 PAGE_KEYS = {"page_no", "kind", "title", "blocks"}
 REVIEW_JOB_KEYS = {"job_id", "mode", "cells_total", "cells_in_scope", "experts_in_scope", "units", "calls_estimate",

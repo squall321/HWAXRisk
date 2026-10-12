@@ -5,12 +5,13 @@
 from __future__ import annotations
 
 import base64
+import copy
 import gzip
 import json
 
 import pytest
 
-from app import common, expert_report, export, render, review_quality, units
+from app import cardpack, common, expert_report, export, render, review_quality, routes, units
 from app.common import canonical_json
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
@@ -111,7 +112,7 @@ def test_the_checklist_has_a_row_for_every_checkable_card_on_every_card_unit_wit
     assert all(r["quote_ref"] == f"card:{_rid('K01')}#1" and r["quote_ok"] == 1 and r["finding_id"] for r in k01)
     md = expert_report.render_report_md(report)
     assert "…(cq 260자 중 200자)" in md and fre.LONG_QUOTE not in md
-    assert [u["FAIL"] for u in report["by_unit"]] == [["K01"]] * len(_unit_ids(store, key))
+    assert [u["FAIL"] for u in report["by_unit"]] == [[_rid("K01")]] * len(_unit_ids(store, key))   # record_id 가 열쇠(R3B-2)
     assert {(h["source"], h["to"]) for h in report["handoff"]} == {("sweep", "rel"), ("off_card", "rel")}
     needs = {x["text"]: x["from"] for u in report["needs_info"] for x in u["items"]}
     assert set(needs) == {fre.NEED, "개스킷 홈 깊이 공차"} and needs["개스킷 홈 깊이 공차"] == ["off_card"]
@@ -224,3 +225,98 @@ def test_the_export_carries_the_report_with_card_quotes_at_200_and_the_summary_w
     text = json.dumps(report, ensure_ascii=False)
     bodies = [str(s["text"]) for c in fre.load("pack_ok.json")["cards"] for s in c["sections"] if len(str(s["text"])) > 40]
     assert not [b for b in bodies if b in text]
+
+
+# ---------------------------------------------------------------- 묶음이 바뀐 원장(R3B-2)
+def _dropped_pack(pack: dict) -> tuple[dict, dict]:
+    """첫 카드(K01)가 빠지고 나머지 별칭이 하나씩 당겨진 묶음 — 그사이 카드 저장소가 바뀐 박스. (새 묶음, 빠진 카드)."""
+    changed = copy.deepcopy(pack)
+    dropped = changed["cards"].pop(0)
+    width = fre.alias_width(len(changed["cards"]))
+    for i, card in enumerate(changed["cards"], 1):
+        card["alias"] = f"K{i:0{width}d}"
+    changed["cards_total"] = len(changed["cards"])
+    changed["listed_total"] = len(changed["cards"]) + len(changed.get("unrenderable") or ())
+    changed["checkable_n"] = sum(1 for c in changed["cards"] if c.get("checkable"))
+    changed["chars_total"] = sum(int(c.get("chars") or 0) for c in changed["cards"])
+    return changed, dropped
+
+
+def _imported(store) -> None:
+    """들여온 박스처럼 — 얼린 묶음이 없다(묶음은 반출하지 않는다, M2.md 5절 #22)."""
+    store.execute("DELETE FROM rr_card_packs WHERE agent_key = ?", (SEAL,))
+    cardpack.clear_cache()
+
+
+def _effective_n(store, key: str, agent: str) -> int:
+    return store.query_one("SELECT COUNT(*) AS n FROM rr_card_verdicts WHERE target_key = ? AND agent_key = ?"
+                           " AND is_effective = 1", (key, agent))["n"]
+
+
+@pytest.mark.parametrize("old_pack_kept", [False, True])
+def test_a_report_over_cells_judged_with_different_packs_keeps_every_verdict_under_its_own_card(store, old_pack_kept):
+    """R3B-2 — 단위 1 을 묶음 P1 로 K01=FAIL 로 본 뒤 묶음이 바뀌어(K01 이 빠지고 별칭이 당겨진 P2) 단위 2 를 P2 로 본다. 보고서는
+    판정 행의 카드를 그 셀을 본 묶음에서 record_id 로 찾는다 — 점검표 행 수 == 실효 판정 행 수, FAIL 은 제 카드(빠진 카드) 아래에,
+    같은 별칭(K01)을 받은 다른 카드 아래에 가지 않고, part 넷 모두 렌더된다. P1 이 이 박스에 남았으면 그 카드 머리를 P1 에서
+    읽고(unit_pack), 없으면 판정 행의 id 로 적는다(verdict)."""
+    key = rig.target(store)
+    first, second = _unit_ids(store, key)[:2]
+    pack = fre.load("pack_ok.json")
+    _run(store, key, scope={"agents": [SEAL], "unit_ids": [first]}, verdicts={_rid("K01"): ("yes", "FAIL")})
+    _imported(store)
+    changed, dropped = _dropped_pack(pack)
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [second]})
+    rig.Rig(store, FakeReviewEngine({**rig.packs(), SEAL: changed})).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    if old_pack_kept:
+        cardpack.freeze_pack(store, pack, agent_key=SEAL)                # 앞 묶음도 이 박스에 있다(같은 박스에서 묶음이 바뀐 경우)
+        prepared = expert_report.prepare(store, key, SEAL)
+        report = prepared.report
+    else:
+        report = expert_report.load_report(store, key, SEAL)
+    rows = [r for c in report["checklist"] for r in c["rows"] if not r.get("missing")]
+    assert len(rows) == _effective_n(store, key, SEAL) == 6 + 5
+    by_unit = {u["unit_id"]: u for u in report["by_unit"]}
+    assert by_unit[first]["FAIL"] == [dropped["record_id"]] and by_unit[second]["FAIL"] == []
+    gone = next(c for c in report["checklist"] if c["record_id"] == dropped["record_id"])
+    assert gone["source"] == ("unit_pack" if old_pack_kept else "verdict")
+    assert gone["title"] == (dropped["title"] if old_pack_kept else None)
+    assert [(r["unit_id"], r.get("judgement"), r.get("missing_why")) for r in gone["rows"]] == [
+        (first, "FAIL", None), (second, None, "not_in_unit_pack")]
+    now_k01 = next(c for c in report["checklist"] if c["alias"] == "K01")
+    assert now_k01["record_id"] == _rid("K02") and now_k01["source"] == "pack"
+    assert {r["unit_id"]: r["alias"] for r in now_k01["rows"]} == {first: "K02", second: "K01"}
+    assert {u["unit_id"]: u["pack_state"] for u in report["scope"]["units"] if u["state"] == "reviewed"} == {
+        first: "earlier" if old_pack_kept else "absent", second: "current"}
+    for part in expert_report.PARTS:
+        md = expert_report.render_report_md(report, part=part)
+        assert render.lint_text(md)["violations"] == [], part
+    units_md = expert_report.render_report_md(report, part="units", unit_id=first)
+    fail = units_md.split("#### judgement=FAIL 1장\n", 1)[1].split("\n", 1)[0]
+    assert f"card:{dropped['record_id']}" in fail and f"card:{_rid('K02')}" not in fail
+    cards_md = expert_report.render_report_md(report, part="cards")
+    assert "이 단위를 본 카드 묶음에서는 점검 카드가 아니었다" in cards_md and "그 단위를 본 묶음의 별칭 K02" in cards_md
+
+
+def test_a_blocked_outcome_after_a_real_report_keeps_that_report_and_says_why_beside_it(store):
+    """R3B-2 — 앞 잡이 얼린 실제 보고서(ready·partial)가 있는 전문가가 다음 잡에서 묶음을 끝내 받지 못하면(들여온 박스 · 404) 그 보고서를
+    점검표 0행 보고서로 덮지 않는다. 판은 그대로이고, 막힘은 머리의 상태(blocked)와 까닭(error → REST·MCP 의 state_why)으로 곁에
+    남는다. 그 보고서의 part 넷이 렌더된다."""
+    key = rig.target(store)
+    first, second = _unit_ids(store, key)[:2]
+    _run(store, key, scope={"agents": [SEAL], "unit_ids": [first]}, verdicts={_rid("K01"): ("yes", "FAIL")})
+    before = _head(store, key, SEAL)
+    _imported(store)
+    _run(store, key, scope={"agents": [SEAL, "mech-syn-0"], "unit_ids": [second]}, step=2000,
+         pack_errors={SEAL: (404, fre.load("pack_errors.json")["agent_not_found"]["body"])})
+    after = _head(store, key, SEAL)
+    assert after["state"] == "blocked" and "agent_not_found" in after["error"]
+    assert (after["revision"], after["report_hash"], after["report_gz"], after["summary_md"]) == (
+        before["revision"], before["report_hash"], before["report_gz"], before["summary_md"])
+    report = expert_report.load_report(store, key, SEAL)
+    assert report["head"]["state"] == "partial" and len(report["checklist"]) == 6        # 범위 밖 단위가 남은 앞 마감
+    assert next(u for u in report["by_unit"] if u["unit_id"] == first)["FAIL"] == [_rid("K01")]
+    for part in expert_report.PARTS:
+        expert_report.render_report_md(report, part=part)
+    meta, _body = routes.expert_report_source(key, SEAL, owner_sub=OWNER)
+    assert (meta["state"], meta["version"]) == ("blocked", before["revision"]) and "agent_not_found" in meta["state_why"]

@@ -2876,13 +2876,15 @@ def expert_report_source(target_key: str, agent_key: str, *, owner_sub: str | No
     않았거나 폐기가 원문을 비웠으면 E404 다."""
     _target_row(target_key, owner_sub)
     row = get_store().query_one(
-        "SELECT state, revision, report_hash, finalized_at, coverage_status, opinion_id, review_id, report_gz"
+        "SELECT state, revision, report_hash, finalized_at, coverage_status, opinion_id, review_id, error, report_gz"
         " FROM rr_expert_reports WHERE target_key = ? AND agent_key = ?", (target_key, agent_key))
     if row is None or row["report_gz"] is None:
         raise AppError("E404", f"전문가 보고서가 없습니다 — {target_key}:{agent_key}(마감 전이거나 원문이 비었다).", 404)
+    # 막힌 전문가의 앞 보고서는 덮지 않는다(R3B-2) — 머리 상태가 blocked 면 그 까닭을 보고서 곁(state_why)에 싣는다.
     meta = {"target_key": target_key, "agent_key": agent_key, "state": row["state"], "version": int(row["revision"] or 0),
             "report_hash": row["report_hash"], "finalized_at": row["finalized_at"],
-            "coverage_status": row["coverage_status"], "opinion_id": row["opinion_id"], "review_id": row["review_id"]}
+            "coverage_status": row["coverage_status"], "opinion_id": row["opinion_id"], "review_id": row["review_id"],
+            "state_why": row["error"] if row["state"] == "blocked" else None}
     return meta, json.loads(gzip.decompress(row["report_gz"]).decode("utf-8"))
 
 
