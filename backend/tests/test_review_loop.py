@@ -654,6 +654,38 @@ def test_a_cell_that_reaches_the_call_cap_fails_call_cap(store, monkeypatch):
     assert "call_cap 1" in rig.job_row(store, job_id)["error"]
 
 
+@pytest.mark.parametrize("variant", ["fwd", "solo"])
+def test_a_byte_identical_reask_goes_to_the_engine_not_the_request_cache(store, monkeypatch, variant):
+    """재질의가 앞 호출과 바이트로 같은 본문이어도 엔진으로 간다 — 요청 캐시(request_hash)는 같은 시도의 같은 차례(seq)에서 이미
+    받은 답만 돌려준다(재기동 뒤 이어 돌기). 차례가 빠지면 1장 묶음의 빠진 카드 재질의(fwd)와 단독 재질의(solo)가 앞 답(카드가
+    빠진 답)을 그대로 받아, 단독은 표본 미달로 차감되고 셀이 처음부터 다시 돈다(S11 이 찾았다).
+    fwd — 묶음 K=1 이라 첫 fwd 가 [K01] 하나이고 출력 상한에 걸려 그 행이 빠진다. solo — K01 이 FAIL 이라 단독으로 묻고 첫 단독이 잘린다."""
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    unit_id = _unit_ids(store, key)[0]
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [unit_id]})
+    pack = fre.load("pack_ok.json")
+    limits = fre.load("limits_1m.json")
+    if variant == "fwd":
+        limits["verdict"]["k"] = 1
+    fake = FakeReviewEngine({SEAL: pack}, limits=limits)
+    if variant == "solo":
+        fake.verdicts = {next(c["record_id"] for c in pack["cards"] if c["alias"] == "K01"): ("yes", "FAIL")}
+    fake.truncate = {("verdict", variant, unit_id): "length"}
+    rig.Rig(store, fake).finish(job_id)
+
+    assert rig.state(store, job_id) == "completed"
+    asked = [b for b in _runs(fake) if b["kind"] == "verdict" and b["variant"] == variant
+             and [c["alias"] for c in b["cards"]] == ["K01"]]
+    assert len(asked) == 2 and asked[0] == asked[1]                      # 같은 본문 두 번 — 둘째는 캐시가 아니라 엔진이 답했다
+    cell = next(c for c in _cells(store, key, SEAL) if c["unit_id"] == unit_id)
+    assert (cell["state"], cell["charged"], cell["error_code"]) == ("reviewed", 0, None)
+    assert [b["variant"] for b in _runs(fake) if b["kind"] == "verdict"].count("fwd") == (7 if variant == "fwd" else 1)
+    row = store.query_one("SELECT judgement FROM rr_card_verdicts WHERE target_key = ? AND unit_id = ? AND alias = 'K01'"
+                          " AND variant = ?", (key, unit_id, variant))
+    assert row is not None
+
+
 def test_a_defect_in_a_session_releases_the_expert_with_a_pause_instead_of_stranding_it(store, monkeypatch):
     """세션 코드의 결함(예기치 않은 예외)이 루프를 죽이거나 전문가를 running 으로 붙들지 않는다 — 놓고 잠시(INTERNAL_BACKOFF_S) 쉰
     뒤 다시 집힌다."""

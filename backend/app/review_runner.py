@@ -864,9 +864,12 @@ class _Session:
         return cells
 
     # -- 호출 하나 ----------------------------------------------------------------------------
-    def _request_hash(self, cell: _Cell | None, body: Mapping[str, Any]) -> str:
+    def _request_hash(self, cell: _Cell | None, body: Mapping[str, Any], seq: int = 0) -> str:
+        """같은 시도의 같은 차례(`seq` — 재질의 순번)에서 낸 같은 본문의 열쇠. 차례가 들어가야 앞 답과 바이트로 같은 재질의(1장
+        묶음의 빠진 카드 · 단독 재질의)가 캐시에서 그 앞 답(카드가 빠진 답)을 받지 않고 엔진으로 간다. 차례는 세션 차례가 정하므로
+        재기동 뒤의 세션도 같은 열쇠를 짓는다."""
         assert self.pack is not None
-        scope = (f"cell|{cell.row.get('input_hash')}|{cell.attempt}" if cell is not None
+        scope = (f"cell|{cell.row.get('input_hash')}|{cell.attempt}|{seq}" if cell is not None
                  else f"head|{self.pack.pack_key}|{self.lim.get('limits_rev')}|{prompt_key(self.lim)}")
         return sha256_hex(scope + "|" + canonical_json(body))
 
@@ -904,7 +907,7 @@ class _Session:
         """호출 하나 — 답(새로 받은 것 또는 같은 시도에서 이미 받은 것), 또는 None(그 셀이 내용 탓 실패·호출 수 상한으로 끝났다 —
         훑기는 그 쪽이 실패했다). 기다림은 같은 자리에서 다시 내고(아무것도 세지 않는다), 인프라·잡 보류·취소·묶음은 `_Stop` 이다."""
         assert self.pack is not None
-        request_hash = self._request_hash(cell, body)
+        request_hash = self._request_hash(cell, body, seq)
         cached = self._cached(cell, request_hash)
         if cached is not None:
             return _Answer(result=cached, call=None, cached=True)
