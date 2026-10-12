@@ -185,7 +185,8 @@ def _load(store: Any, target_key: str, agent_key: str | None) -> dict:
                               " AND pack_key = ?", (agent, key))
         if row is not None:
             packs[(agent, key)] = dict(row)
-    return {"agents": agents, "units": active, "cells": cells, "verdicts": verdicts, "calls": calls, "heads": heads,
+    return {"agent_key": agent_key, "agents": agents, "units": active, "cells": cells, "verdicts": verdicts, "calls": calls,
+            "heads": heads,
             "packs": packs, "job_id": _latest_review_job(store, target_key)}
 
 
@@ -246,8 +247,11 @@ def _grid(data: Mapping[str, Any], policy: Mapping[str, Any]) -> dict:
                               **({"unset": basis["unset"]} if basis.get("unset") else {})},
         "in_scope": in_scope, "out_of_scope_pending": pending_out,
         "failed_open": sum(1 for c in cells if c["state"] == "failed" and not c["decided_by"]),
-        "expert_states": {"total": sum(heads.values()),
-                          "by_state": {s: heads.get(s, 0) for s in review_cells.EXPERT_STATES}},
+        # 전문가 한 명 범위(보고서의 품질 절)에서는 머리 상태를 싣지 않는다 — 마감 순간에 running → ready·partial 로 바뀌어,
+        # 같은 원장으로 다시 조립한 보고서의 바이트가 달라진다(m-07). 대상 범위에서만 센다.
+        "expert_states": (None if data.get("agent_key") else
+                          {"total": sum(heads.values()),
+                           "by_state": {s: heads.get(s, 0) for s in review_cells.EXPERT_STATES}}),
         # 카드를 대조한 검토 칸 가운데 걸림 0 이고 대조를 지난 카드 인용도 0 인 칸(WP5b rv.form_only — 검토 수와 같은 줄에 단다).
         "form_only": rate(form_only, len(carded), policy=policy, key="grid.form_only"),
     }

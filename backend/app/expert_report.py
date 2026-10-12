@@ -17,13 +17,11 @@ from __future__ import annotations
 import dataclasses
 import gzip
 import hashlib
-import importlib.util
-import inspect
 import json
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from app import cardpack, narrative, planner, render, review_cells, review_verify, units
+from app import cardpack, narrative, planner, render, review_cells, review_quality, review_verify, units
 from app.common import canonical_json, now_epoch
 from app.errors import AppError
 
@@ -714,18 +712,10 @@ def _mechanisms_section(ledger: Ledger) -> list[dict]:
 
 
 def _quality_section(store: Any, target_key: str, agent_key: str) -> dict:
-    """검토 품질(S11 의 전문가 몫) — 품질 수치 모듈(`app/review_quality.py`)이 있으면 그 계산(`compute(…, agent_key=…)`)과 문면
-    (`block`)을 싣고, 없으면 미측정이라고 적는다(0 이나 빈 칸으로 채우지 않는다)."""
-    if importlib.util.find_spec("app.review_quality") is None:
-        return {"status": "pending", "reason": "review_quality_absent"}
-    from app import review_quality  # noqa: PLC0415 — 다른 걸음(S11)이 넣는 모듈이다.
-
-    out: dict[str, Any] = {"status": "measured", "json": review_quality.compute(store, target_key, agent_key=agent_key)}
-    block = getattr(review_quality, "block", None)
-    if callable(block) and "agent_key" in inspect.signature(block).parameters:
-        body = block(store, target_key, agent_key=agent_key)
-        out["text"] = body.get("text") if isinstance(body, Mapping) else None
-    return out
+    """검토 품질(S11 의 전문가 몫) — 품질 수치 모듈의 계산(`compute(…, agent_key=…)`)과 문면(`block`)이다. 표본이 모자란 값은 그
+    모듈이 0 이 아니라 '표본 수 미달(n=…)' 로 적는다."""
+    return {"status": "measured", "json": review_quality.compute(store, target_key, agent_key=agent_key),
+            "text": review_quality.block(store, target_key, agent_key=agent_key)["text"]}
 
 
 def _state_of(store: Any, ledger: Ledger, *, blocked: str | None) -> tuple[str, str | None]:
@@ -1386,10 +1376,7 @@ def _md_findings(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
 def _md_quality(report: Mapping[str, Any]) -> list[str]:
     quality = report.get("quality") or {}
     items = ["## 검토 품질"]
-    if quality.get("status") != "measured":
-        items.append("- 미측정 — 품질 수치 모듈(S11, review_quality)이 이 판에 없다. 그 모듈이 들어온 뒤 다시 마감하면 이 절이"
-                     " 채워진다.")
-    elif quality.get("text"):
+    if quality.get("text"):
         items.append(str(quality["text"]))
     else:
         items.append(f"- 수치 {_q(canonical_json(quality.get('json')))}")

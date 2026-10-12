@@ -7,12 +7,10 @@ from __future__ import annotations
 import base64
 import gzip
 import json
-import sys
-import types
 
 import pytest
 
-from app import common, expert_report, export, render, units
+from app import common, expert_report, export, render, review_quality, units
 from app.common import canonical_json
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
@@ -121,7 +119,9 @@ def test_the_checklist_has_a_row_for_every_checkable_card_on_every_card_unit_wit
     assert all(f["finding_id"] for f in report["off_card"])
     assert [u["record_id"] for u in report["unjudged_cards"]] == [fre.load("pack_ok.json")["unrenderable"][0]["record_id"]]
     assert [c["alias"] for c in report["background"]] == ["K07", "K08", "K09", "K10"]
-    assert report["quality"] == {"status": "pending", "reason": "review_quality_absent"}
+    quality = report["quality"]
+    assert quality["status"] == "measured" and quality["text"] == review_quality.block(store, key, agent_key=SEAL)["text"]
+    assert quality["json"] == review_quality.compute(store, key, agent_key=SEAL)
 
 
 def test_every_sentence_the_code_writes_passes_the_judgement_linter(store, monkeypatch):
@@ -196,27 +196,17 @@ def test_an_expert_whose_pack_never_came_still_gets_a_report_that_says_nothing_w
     assert expert_report.load_report(store, key, SEAL)["head"]["state"] == "ready"
 
 
-def test_the_quality_section_comes_from_the_quality_module_when_it_is_there(store, monkeypatch):
-    """품질 절은 S11 의 모듈이 있으면 그 계산(compute(…, agent_key=…))과 문면(block)을 싣고, 없으면 미측정이다(0 으로 채우지
-    않는다). 모듈은 다른 걸음이 넣는다 — 여기서는 그 자리에 시험용 모듈을 앉혀 배선만 본다."""
+def test_the_quality_section_comes_from_the_quality_module(store):
+    """품질 절은 품질 수치 모듈(S11)의 전문가 몫 계산(compute(…, agent_key=…))과 문면(block)이다 — 요약에도 그 문면이 실린다.
+    전문가 한 명 범위에서는 머리 상태(마감 순간에 바뀐다)를 싣지 않아 다시 조립해도 바이트가 같다(m-07)."""
     key = rig.target(store)
     _run(store, key, scope={"agents": [SEAL], "unit_ids": _unit_ids(store, key)[:1]})
-    assert expert_report.load_report(store, key, SEAL)["quality"]["status"] == "pending"
-    calls = []
-    stub = types.ModuleType("app.review_quality")
-    stub.compute = lambda store_, target_key, *, agent_key=None: calls.append((target_key, agent_key)) or {"cards": {
-        "value": 1.0, "num": 6, "den": 6}}
-    stub.block = lambda store_, target_key, *, agent_key=None: {"key": "quality", "title": "검토 품질",
-                                                                 "text": "[검토 품질 — 코드 계측] 시험 문면", "json": {}}
-    real = expert_report.importlib.util.find_spec
-    monkeypatch.setitem(sys.modules, "app.review_quality", stub)
-    monkeypatch.setattr(expert_report.importlib.util, "find_spec",
-                        lambda name, *a: object() if name == "app.review_quality" else real(name, *a))
-    report = expert_report.build_report(store, key, SEAL)
-    assert report["quality"] == {"status": "measured", "json": {"cards": {"value": 1.0, "num": 6, "den": 6}},
-                                 "text": "[검토 품질 — 코드 계측] 시험 문면"}
-    assert calls == [(key, SEAL)]
-    assert "[검토 품질 — 코드 계측] 시험 문면" in expert_report.render_report_md(report, part="summary")
+    report = expert_report.load_report(store, key, SEAL)
+    want = review_quality.block(store, key, agent_key=SEAL)
+    assert report["quality"] == {"status": "measured", "json": review_quality.compute(store, key, agent_key=SEAL),
+                                 "text": want["text"]}
+    assert report["quality"]["json"]["grid"]["expert_states"] is None
+    assert want["text"] in expert_report.render_report_md(report, part="summary")
 
 
 def test_the_export_carries_the_report_with_card_quotes_at_200_and_the_summary_within_1500(store):
