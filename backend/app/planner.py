@@ -367,6 +367,35 @@ def tier_plan(store: Any, target_key: str, *, settings: Any | None = None) -> di
     }
 
 
+def review_order(store: Any, target_key: str) -> list[dict]:
+    """카드 대조 검토가 전문가를 도는 순서 — 로스터 전원, Tier 는 범위가 아니라 순서다(m2-wp2 걸음 8).
+
+    정렬 키는 (tier A→B→C, rank_in_domain, domain, agent_key)이고 tier 는 `tier_rank_cap` 의 라벨이다(영역 크기는 로스터 전원).
+    `deferred` 는 그 좌석의 `rr_coverage.status` 가 `deferred` 인가다 — 걸러 내지 않는다(로스터 동결 규칙은 그대로).
+    `input_gaps` 는 저장하지 않고 센다 — ECAD 의존 영역이고 타깃에 ECAD 가 없으면 `['ecad_absent']` 다. M2 의 검토 격자는
+    `input_gaps` 가 빈 전문가만 받는다(입력 결손 호출은 M3). 같은 원장이면 같은 순서다.
+    """
+    from app import routes  # noqa: PLC0415 — routes 는 planner 를 import 한다.
+
+    target = store.query_one("SELECT kind, ref_id FROM rr_targets WHERE target_key = ?", (target_key,))
+    if target is None:
+        raise AppError("E404", f"타깃이 없습니다: {target_key}", 404)
+    rows = _roster_rows(store, target_key)
+    sizes = _domain_sizes(rows)
+    ecad_absent = routes._ecad_absent_for_target(store, dict(target))
+
+    def tier_of(row: Mapping[str, Any]) -> str:
+        return next(t for t in TIERS if _in_tier(row["rank_in_domain"], tier_rank_cap(t, sizes[row["domain"]])))
+
+    ranked = sorted(((tier_of(r), r) for r in rows),
+                    key=lambda pair: (TIERS.index(pair[0]), pair[1]["rank_in_domain"], pair[1]["domain"],
+                                      pair[1]["agent_key"]))
+    return [{"order": n, "agent_key": row["agent_key"], "domain": row["domain"],
+             "rank_in_domain": row["rank_in_domain"], "tier": tier, "deferred": row["status"] == "deferred",
+             "input_gaps": ["ecad_absent"] if row["ecad_dependent"] and ecad_absent else []}
+            for n, (tier, row) in enumerate(ranked, start=1)]
+
+
 # ---------------------------------------------------------------- 편성(plan §6.4.2)
 def _queues(rows: Sequence[Mapping[str, Any]], tier: str, sizes: Mapping[str, int]) -> dict[str, list[dict]]:
     """Tier 범위 안의 pending 행을 도메인별 큐(rank asc, agent_key asc)로 만든다."""

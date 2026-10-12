@@ -217,6 +217,64 @@ def test_tier_plan_requires_roster(risk_store):
     assert exc.value.code == "E404"
 
 
+# ---------------------------------------------------------------- 검토 순서(m2-wp2 걸음 8 — Tier 는 범위가 아니라 순서)
+def _plan_sized_target(store) -> str:
+    """plan §6.3 의 로스터 규모(합 359)를 실제 타깃 생성(`routes.create_target` → `freeze_roster`)으로 동결한다."""
+    from tests import factories
+
+    return factories.make_diff_target(store, 3, agents=agents(PLAN_SIZES)).target_key
+
+
+def test_review_order_walks_the_whole_roster_tier_by_tier(risk_store):
+    target_key = _plan_sized_target(risk_store)
+    order = planner.review_order(risk_store, target_key)
+    total = sum(PLAN_SIZES.values())
+    assert [row["order"] for row in order] == list(range(1, total + 1))
+    assert {row["agent_key"] for row in order} == {a["key"] for a in agents(PLAN_SIZES)}
+    tiers = [row["tier"] for row in order]
+    assert tiers == sorted(tiers)                                         # A 다 돌고 B, 그다음 C
+    # plan §6.4.1 의 경계 — A 15 · B 누적 114 · 전원 359.
+    assert tiers.count("A") == 15 and tiers.count("A") + tiers.count("B") == 114 and len(tiers) == total == 359
+    # A 는 영역마다 1순위 한 명이고 영역 이름 순이다. B 는 영역 안 순위가 ceil(0.3·크기) 안이다.
+    head = order[:15]
+    assert all(row["rank_in_domain"] == 1 for row in head)
+    assert [row["domain"] for row in head] == sorted(PLAN_SIZES)
+    assert all(row["rank_in_domain"] <= PLAN_B_CUT[row["domain"]] for row in order if row["tier"] == "B")
+    assert all(row["rank_in_domain"] > PLAN_B_CUT[row["domain"]] for row in order if row["tier"] == "C")
+    # 같은 tier 안에서는 순위가 먼저다(영역을 섞어 돈다).
+    b_ranks = [row["rank_in_domain"] for row in order if row["tier"] == "B"]
+    assert b_ranks == sorted(b_ranks)
+    assert planner.review_order(risk_store, target_key) == order          # 두 번 불러 같다
+
+
+def test_review_order_reports_input_gaps_and_deferral_without_dropping_anyone(risk_store):
+    target_key = _plan_sized_target(risk_store)                            # 합성 타깃에는 ECAD 가 없다
+    order = planner.review_order(risk_store, target_key)
+    ecad = set(config.settings.risk_ecad_domains)
+    gaps = {row["agent_key"] for row in order if row["input_gaps"]}
+    assert gaps == {row["agent_key"] for row in order if row["domain"] in ecad}
+    assert all(row["input_gaps"] == ["ecad_absent"] for row in order if row["agent_key"] in gaps)
+    assert len(gaps) == 110
+    deferred = {row["agent_key"] for row in order if row["deferred"]}
+    statuses = coverage(risk_store, target_key)
+    assert deferred == {k for k, v in statuses.items() if v["status"] == "deferred"}
+    assert len(deferred) == 104 and all(row["rank_in_domain"] != 1 for row in order if row["deferred"])
+
+
+def test_review_order_has_no_input_gaps_when_the_target_has_ecad(risk_store, monkeypatch):
+    from app import routes
+
+    target_key = _plan_sized_target(risk_store)
+    monkeypatch.setattr(routes, "_ecad_absent_for_target", lambda store, target: False)
+    assert all(row["input_gaps"] == [] for row in planner.review_order(risk_store, target_key))
+
+
+def test_review_order_requires_a_target(risk_store):
+    with pytest.raises(AppError) as exc:
+        planner.review_order(risk_store, "없는타깃")
+    assert exc.value.code == "E404"
+
+
 # ---------------------------------------------------------------- 지정 도구·예산(plan §6.10.2)
 def test_planned_tools_by_kind_and_reports(risk_store):
     diff0 = make_target(risk_store, "d0", kind="diff")
