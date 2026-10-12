@@ -1,7 +1,7 @@
 # v4 새 표의 이양·폐기 등록과 행 단위 반출·이양·폐기(재설계 M2 C1) — 행은 C2 의 생산자로만 만든다(손 INSERT 금지)
 """C1 은 표와 등록만 넣었다. 단위 행의 생산자(`units.compute`·`units.persist`)는 C2a 에 섰고, 셀·전문가 머리의 생산자(검토 잡 만들기
-`review_runner.create_review_job` → `review_cells.plan_cells` · 선점 · 호출 결과 쓰기)는 S5 에 섰다. 판정·호출 원장 행의 반출 왕복과
-cq 200자는 그 행의 생산자(검토 루프 S8)가 선 뒤에 본다.
+`review_runner.create_review_job` → `review_cells.plan_cells` · 선점 · 호출 결과 쓰기)는 S5 에 섰다. 판정·호출 원장 행은 검토 루프(S8 —
+가짜 엔진을 꽂은 `review_runner.ReviewLoop`, tests/synth/review_rig.py)가 만들고, 그 반출 왕복(cq 200자 · result_gz 빠짐)·이양·폐기를 본다.
 """
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ from app import config, export, identity, review_cells, review_ops, review_runne
 from app.common import now_epoch
 from app.risk_store import RiskStore
 from tests import factories
+from tests.synth import fake_review_engine as fre
+from tests.synth import review_rig
 
 OWNER = factories.OWNER
 HEIR = "heir@example.com"
@@ -365,3 +367,76 @@ def test_a_since_export_carries_the_cell_and_head_rows_changed_after_it(risk_sto
         assert review_cells.review_summary(dest, key) == review_cells.review_summary(risk_store, key)
     finally:
         dest.close()
+
+
+# ---------------------------------------------------------------- 판정·호출 원장 행(S8 의 생산자 — 검토 루프)
+def _reviewed(store: RiskStore, monkeypatch, tmp_path) -> tuple[str, str]:
+    """검토 루프로 한 전문가 × 한 단위를 끝까지 — 카드 K01 의 인용은 카드에 없는 260자 글이다(가짜 엔진 long_quote)."""
+    review_rig.configure(monkeypatch, store, tmp_path)
+    key = review_rig.target(store)
+    unit_id = units.load_units(store, key)[0]["unit_id"]
+    job_id = review_rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [unit_id]})
+    fake = fre.FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    fake.long_quote = {"K01"}
+    review_rig.Rig(store, fake).finish(job_id)
+    assert review_rig.state(store, job_id) == "completed"
+    return key, job_id
+
+
+def test_verdict_and_call_rows_leave_the_box_with_quotes_cut_to_200_and_without_result_frames(risk_store, monkeypatch,
+                                                                                              tmp_path):
+    """반출 — 판정 행의 cq 는 200자로 줄고 원래 길이가 cq_chars 에 실린다(200자 이하 인용은 그대로, cq_chars 없음). 호출 원장 행에는
+    result_gz 칸이 없다. 빈 DB 로 들여오면 행 수가 같고 판정은 줄인 인용·원래 길이를, 호출은 result_gz NULL 을 갖는다. 들여온 행을
+    다시 내보내도 원래 길이(260)가 남는다."""
+    key, job_id = _reviewed(risk_store, monkeypatch, tmp_path)
+    local = {r["alias"]: dict(r) for r in risk_store.query(
+        "SELECT alias, variant, cq, cq_chars FROM rr_card_verdicts WHERE target_key = ? AND variant = 'fwd'", (key,))}
+    assert local["K01"]["cq"] == fre.LONG_QUOTE and len(fre.LONG_QUOTE) == 260 and local["K01"]["cq_chars"] is None
+    calls_n = risk_store.query_one("SELECT COUNT(*) AS n FROM rr_review_calls WHERE run_id = ?", (job_id,))["n"]
+    assert calls_n and risk_store.query_one("SELECT COUNT(*) AS n FROM rr_review_calls WHERE result_gz IS NULL")["n"] == 0
+
+    lines = _exported(risk_store, 0)
+    out = {(r["alias"], r["variant"]): r for r in lines["rr_card_verdicts"]}
+    assert (out[("K01", "fwd")]["cq"], out[("K01", "fwd")]["cq_chars"]) == (fre.LONG_QUOTE[:200], 260)
+    short = out[("K02", "fwd")]
+    assert short["cq"] == local["K02"]["cq"] and len(short["cq"]) <= 200 and short["cq_chars"] is None
+    assert len(lines["rr_review_calls"]) == calls_n and all("result_gz" not in r for r in lines["rr_review_calls"])
+
+    dest = RiskStore(tmp_path / "dest" / "risk_review.db")
+    dest.open()
+    dest.migrate()
+    try:
+        export.import_jsonl(dest, OWNER, "".join(export.iter_lines(risk_store, OWNER, 0)))
+        row = dest.query_one("SELECT cq, cq_chars FROM rr_card_verdicts WHERE target_key = ? AND alias = 'K01'"
+                             " AND variant = 'fwd'", (key,))
+        assert (row["cq"], row["cq_chars"]) == (fre.LONG_QUOTE[:200], 260)
+        for table in ("rr_card_verdicts", "rr_review_calls"):
+            assert dest.query_one(f"SELECT COUNT(*) AS n FROM {table}")["n"] == risk_store.query_one(
+                f"SELECT COUNT(*) AS n FROM {table}")["n"], table
+        assert dest.query_one("SELECT COUNT(*) AS n FROM rr_review_calls WHERE result_gz IS NOT NULL")["n"] == 0
+        assert dest.query_one("SELECT COUNT(*) AS n FROM rr_card_packs")["n"] == 0          # 묶음은 반출하지 않는다
+        again = {(r["alias"], r["variant"]): r for r in _exported(dest, 0)["rr_card_verdicts"]}
+        assert (again[("K01", "fwd")]["cq"], again[("K01", "fwd")]["cq_chars"]) == (fre.LONG_QUOTE[:200], 260)
+    finally:
+        dest.close()
+
+
+def test_verdict_and_call_rows_move_with_the_owner_and_a_purge_blanks_their_text(risk_store, monkeypatch, tmp_path):
+    """이양 — 판정·호출 원장 행의 owner_sub 가 옮겨진다. 폐기 — 판정의 모델 글 열(cq·why·need·path·mech_free·check_text·conds_json·
+    checks_json)과 호출의 result_gz·quality_json 이 빈다. 카드 묶음(박스 지역 사본)은 그대로다."""
+    key, _job_id = _reviewed(risk_store, monkeypatch, tmp_path)
+    project_id = risk_store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (key,))["project_id"]
+    code = risk_store.query_one("SELECT code FROM rr_projects WHERE id = ?", (project_id,))["code"]
+    packs = risk_store.query_one("SELECT COUNT(*) AS n FROM rr_card_packs")["n"]
+    with factories.routes_store(risk_store):
+        routes.transfer_project(project_id, routes.TransferBody(to_email=HEIR, reason="담당 교체"), ident=factories.ident(OWNER))
+        for table in ("rr_card_verdicts", "rr_review_calls"):
+            rows = risk_store.query(f"SELECT DISTINCT owner_sub FROM {table} WHERE target_key = ?", (key,))
+            assert [r["owner_sub"] for r in rows] == [HEIR], table
+        routes.purge_project(project_id, routes.PurgeBody(code=code, reason="정리"), ident=factories.ident(HEIR))
+    text = ("cq", "why", "need", "path", "mech_free", "check_text", "conds_json", "checks_json")
+    left = risk_store.query(f"SELECT {', '.join(text)} FROM rr_card_verdicts WHERE target_key = ?", (key,))
+    assert left and {tuple(r) for r in left} == {(None,) * len(text)}
+    calls = risk_store.query("SELECT result_gz, quality_json FROM rr_review_calls WHERE target_key = ?", (key,))
+    assert calls and {tuple(r) for r in calls} == {(None, None)}
+    assert risk_store.query_one("SELECT COUNT(*) AS n FROM rr_card_packs")["n"] == packs
