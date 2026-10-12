@@ -3,7 +3,10 @@
 
 - 앱은 카드를 정규화하지 않는다. 정규화가 두 곳에 있으면 한쪽만 고쳐졌을 때 '모델이 본 글' 과 '대조하는 글' 이 갈린다.
   대신 얼린 것을 그대로 되보내고, 인용 대조도 그 얼린 글(`card_text`)로 한다. 며칠 도는 동안 카드가 고쳐져도 흔들리지 않는다.
-- `rr_card_packs` 는 (agent_key, pack_hash) 내용 주소이고 소유자가 없는 박스 지역 사본이다(반출·이양·폐기 제외 — C-9).
+- `rr_card_packs` 는 (agent_key, pack_key) 내용 주소이고 소유자가 없는 박스 지역 사본이다(반출·이양·폐기 제외 — C-9).
+  `pack_key` 는 앱이 센다 — 휘발 칸(`PACK_VOLATILE`)을 뺀 팩 본문 전체의 sha256 이다. 엔진의 `pack_hash` 는 카드 칸 일부만 담아
+  (`sources_n`·`tier`·`chars`·`unrenderable`·`norm_rev` 가 빠진다) 출처 수가 바뀐 팩이 같은 열쇠로 와 옛 팩이 영영 남았다
+  (반대 검토 C2a RC-3) — 그래서 열쇠가 아니라 기록 열로만 남긴다. 검토 머리(`rr_expert_reports.pack_hash`)는 `pack_key` 를 가리킨다.
   같은 팩을 두 번·두 타깃에서 얼려도 행은 하나다(INSERT OR IGNORE).
 - 문제가 있는 팩은 얼리지 않는다 — 얼린 것이 며칠 동안 정본이 되므로 들어올 때 한 번 본다(`check_pack`).
 - '0장' 과 '못 받았다' 를 섞지 않는다(P-08 · X1-25) — 0장 응답은 두 번 연달아이고 그 전문가의 앞선 묶음에도 카드가 없을 때만
@@ -42,6 +45,8 @@ PACK_ERROR = "error"
 SUSPECT_EMPTY = "suspect_empty"         # 0장인데 아직 두 번 연달아가 아니거나 앞선 묶음에 카드가 있었다
 PACK_INVALID = "pack_invalid"           # check_pack 이 문제를 찾았다 — 얼리지 않는다
 EMPTY_CONFIRMATIONS = 2                 # 0장 응답이 이만큼 연달아야 empty 다
+# 팩의 내용 주소(pack_key)에서 빼는 칸 — 같은 카드를 다시 받아도 바뀌는 값(받은 시각·쓴 자격·조회 길)이다. 나머지 칸은 전부 든다.
+PACK_VOLATILE: tuple[str, ...] = ("fetched_at", "credential", "source")
 
 
 class PackInvalid(ValueError):
@@ -66,6 +71,13 @@ def text_sha(sections: Sequence[Mapping[str, Any]]) -> str:
 def card_text(card: Mapping[str, Any]) -> str:
     """인용 대조의 원문 — 절 text 를 줄바꿈으로 이은 것. 머리 줄(종류·등급·제목)은 인용 대상이 아니다(엔진 `card_text`)."""
     return "\n".join(str(s.get("text") or "") for s in card.get("sections") or () if isinstance(s, Mapping))
+
+
+def pack_key(pack: Mapping[str, Any]) -> str:
+    """팩의 내용 주소 — 휘발 칸(`PACK_VOLATILE`)을 뺀 팩 본문의 sha256(canonical_json). 앱이 쓰는 칸(등급의 `sources_n`·
+    `standard_refs`·`confidence`, `tier`·`chars`·`unrenderable`·`norm_rev`·역할…)이 하나라도 다르면 다른 열쇠다."""
+    body = {key: value for key, value in pack.items() if key not in PACK_VOLATILE}
+    return hashlib.sha256(canonical_json(body).encode("utf-8")).hexdigest()
 
 
 def card_basis(pack: Mapping[str, Any]) -> str:
@@ -219,11 +231,12 @@ def judge_pack(store: Any, agent_key: str, *, http_status: int, body: Any, zero_
 
 # ---------------------------------------------------------------- 얼리기
 def freeze_pack(store: Any, pack: Mapping[str, Any], *, agent_key: str) -> dict:
-    """확인을 지난 팩을 rr_card_packs 에 INSERT OR IGNORE 로 얼린다(호출마다 한 번 커밋 — 전문가마다 따로).
+    """확인을 지난 팩을 rr_card_packs 에 (agent_key, pack_key) 로 INSERT OR IGNORE 해 얼린다(호출마다 한 번 커밋 — 전문가마다 따로).
 
-    문제가 있으면 `PackInvalid` 이고 행을 남기지 않는다. 반환 {pack_hash, cards_total, checkable_n, chars_total,
-    unrenderable_n, card_basis, inserted}. `pack_gz` 는 팩 전체의 canonical_json gzip(mtime 0 — 같은 팩이면 같은 바이트)이고
-    `manifest_json` 은 본문(절)을 뺀 카드 목록이다.
+    문제가 있으면 `PackInvalid` 이고 행을 남기지 않는다. 반환 {pack_key, pack_hash, cards_total, checkable_n, chars_total,
+    unrenderable_n, card_basis, inserted} — 검토 머리(`rr_expert_reports.pack_hash`)에는 `pack_key` 를 적는다(엔진 `pack_hash`
+    가 아니다). 같은 `pack_key` 면 휘발 칸 말고는 같은 팩이라 먼저 얼린 행이 남는다. `pack_gz` 는 팩 전체의 canonical_json
+    gzip(mtime 0 — 같은 팩이면 같은 바이트)이고 `manifest_json` 은 본문(절)을 뺀 카드 목록이다.
     """
     problems = check_pack(pack, agent_key=agent_key)
     if problems:
@@ -232,14 +245,16 @@ def freeze_pack(store: Any, pack: Mapping[str, Any], *, agent_key: str) -> dict:
     payload = canonical_json(pack)
     manifest = [{k: v for k, v in card.items() if k != "sections"} for card in cards]
     fetched = _int(pack.get("fetched_at"))
+    key = pack_key(pack)
     inserted = store.execute(
-        "INSERT OR IGNORE INTO rr_card_packs (agent_key, pack_hash, norm_rev, role_sha, cards_total, checkable_n,"
-        " chars_total, unrenderable_n, manifest_json, pack_gz, source, fetched_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        (agent_key, pack["pack_hash"], pack["norm_rev"], pack["role_sha"], len(cards), pack["checkable_n"],
+        "INSERT OR IGNORE INTO rr_card_packs (agent_key, pack_key, pack_hash, norm_rev, role_sha, cards_total,"
+        " checkable_n, chars_total, unrenderable_n, manifest_json, pack_gz, source, fetched_at)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (agent_key, key, pack["pack_hash"], pack["norm_rev"], pack["role_sha"], len(cards), pack["checkable_n"],
          pack["chars_total"], len(pack["unrenderable"]), canonical_json(manifest),
          gzip.compress(payload.encode("utf-8"), mtime=0), str(pack.get("source") or ""),
          fetched if fetched and fetched > 0 else now_epoch()))
-    return {"pack_hash": pack["pack_hash"], "cards_total": len(cards), "checkable_n": pack["checkable_n"],
+    return {"pack_key": key, "pack_hash": pack["pack_hash"], "cards_total": len(cards), "checkable_n": pack["checkable_n"],
             "chars_total": pack["chars_total"], "unrenderable_n": len(pack["unrenderable"]),
             "card_basis": card_basis(pack), "inserted": bool(inserted)}
 
@@ -249,12 +264,14 @@ def freeze_pack(store: Any, pack: Mapping[str, Any], *, agent_key: str) -> dict:
 class FrozenPack:
     """얼린 팩의 읽기 전용 뷰(프로세스 LRU 가 나눠 쓴다 — 고치지 않는다. 요청에 실을 때는 `cards_for` 가 복사본을 준다).
 
+    - `pack_key` — 앱의 내용 주소(얼린 행의 열쇠), `pack_hash` — 엔진이 낸 값(기록용).
     - `cards` — 별칭 → 카드(팩 항목 그대로), `order` — 팩의 별칭 순서.
     - `record_cards` — record_id → 카드. 인용 검증 스코프(`narrative.SpecContext.card_pack`)가 이것을 받는다.
     - `checkable`·`background` — 점검·배경 카드의 별칭(팩 순서), `unrenderable` — 본문 없는 카드(판정할 수 없다).
     """
 
     agent_key: str
+    pack_key: str
     pack_hash: str
     norm_rev: str
     role: str
@@ -278,7 +295,7 @@ def view_of(pack: Mapping[str, Any]) -> FrozenPack:
     cards = [c for c in pack.get("cards") or () if isinstance(c, Mapping)]
     by_alias = {str(c["alias"]): c for c in cards}
     return FrozenPack(
-        agent_key=str(pack.get("agent_key") or ""), pack_hash=str(pack.get("pack_hash") or ""),
+        agent_key=str(pack.get("agent_key") or ""), pack_key=pack_key(pack), pack_hash=str(pack.get("pack_hash") or ""),
         norm_rev=str(pack.get("norm_rev") or ""), role=str(pack.get("role") or ""),
         role_sha=str(pack.get("role_sha") or ""), raw=MappingProxyType(dict(pack)),
         cards=MappingProxyType(by_alias), order=tuple(by_alias),
@@ -294,33 +311,33 @@ _LRU: OrderedDict[tuple[str, str, str], FrozenPack] = OrderedDict()
 _LRU_LOCK = threading.Lock()
 
 
-def _cache_key(store: Any, agent_key: str, pack_hash: str) -> tuple[str, str, str]:
-    return (str(getattr(store, "db_path", id(store))), agent_key, pack_hash)
+def _cache_key(store: Any, agent_key: str, key: str) -> tuple[str, str, str]:
+    return (str(getattr(store, "db_path", id(store))), agent_key, key)
 
 
-def load_pack(store: Any, agent_key: str, pack_hash: str) -> FrozenPack:
-    """얼린 팩(프로세스 안 LRU 32 — DB 파일·전문가·pack_hash 가 열쇠). 행이 없으면 PackMissing."""
-    key = _cache_key(store, agent_key, pack_hash)
+def load_pack(store: Any, agent_key: str, key: str) -> FrozenPack:
+    """얼린 팩(프로세스 안 LRU 32 — DB 파일·전문가·pack_key 가 열쇠). `key` 는 freeze_pack 이 낸 pack_key 다. 행이 없으면 PackMissing."""
+    cache = _cache_key(store, agent_key, key)
     with _LRU_LOCK:
-        hit = _LRU.get(key)
+        hit = _LRU.get(cache)
         if hit is not None:
-            _LRU.move_to_end(key)
+            _LRU.move_to_end(cache)
             return hit
-    row = store.query_one("SELECT pack_gz FROM rr_card_packs WHERE agent_key = ? AND pack_hash = ?",
-                          (agent_key, pack_hash))
+    row = store.query_one("SELECT pack_gz FROM rr_card_packs WHERE agent_key = ? AND pack_key = ?", (agent_key, key))
     if row is None:
-        raise PackMissing(f"얼린 카드 묶음이 없다 — {agent_key} · {pack_hash}")
+        raise PackMissing(f"얼린 카드 묶음이 없다 — {agent_key} · {key}")
     view = view_of(json.loads(gzip.decompress(row["pack_gz"]).decode("utf-8")))
     with _LRU_LOCK:
-        _LRU[key] = view
-        _LRU.move_to_end(key)
+        _LRU[cache] = view
+        _LRU.move_to_end(cache)
         while len(_LRU) > LRU_SIZE:
             _LRU.popitem(last=False)
     return view
 
 
 def load_for(store: Any, target_key: str, agent_key: str) -> FrozenPack | None:
-    """그 타깃·전문가의 검토 머리가 가리키는 묶음. 아직 얼리지 않았으면 None, 가리키는데 행이 없으면 PackMissing."""
+    """그 타깃·전문가의 검토 머리가 가리키는 묶음(머리의 pack_hash 칸은 pack_key 다). 아직 얼리지 않았으면 None, 가리키는데 행이
+    없으면 PackMissing."""
     row = store.query_one("SELECT pack_hash FROM rr_expert_reports WHERE target_key = ? AND agent_key = ?",
                           (target_key, agent_key))
     if row is None or not row["pack_hash"]:
@@ -338,7 +355,7 @@ def cards_for(pack: FrozenPack, aliases: Sequence[str]) -> list[dict]:
     out: list[dict] = []
     for alias in aliases:
         if alias not in pack.cards:
-            raise KeyError(f"얼린 묶음에 없는 별칭 — {alias} ({pack.agent_key} · {pack.pack_hash})")
+            raise KeyError(f"얼린 묶음에 없는 별칭 — {alias} ({pack.agent_key} · {pack.pack_key})")
         out.append(copy.deepcopy(dict(pack.cards[alias])))
     return out
 

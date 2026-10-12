@@ -238,7 +238,7 @@ PUSHED_DDL_SHA256 = {
     3: "a20f49f302e0c92292d7792a9a990b4d8c809b1f3eb0dce9b609bb0879b35e39",
     # v4 는 아직 나가지 않았다 — 가지 m2-cells 에만 있고 dev 리허설(재설계 PLAN 4절 C-2, M2 단계 D)이 끝나야 main 에 오른다.
     # 그때까지는 블록을 고칠 수 있고, 고치면 같은 커밋에서 이 값을 고친다. push 하는 날 이 값이 굳는다.
-    4: "606df0eea2badd7a71c3967d890e48c5917779b8b5458d436c3665926b17a64b",
+    4: "0614b6d6371fa8c1cd1fbe7f10c62baea3066b0d9286f81d5c9fc7f044d44938",
 }
 SHARED_TABLES = {"rr_dim_vocab", "rr_delta_priors", "rr_rules", "rr_metrics"}
 
@@ -512,7 +512,7 @@ V4_COLUMNS = {
         "check_disagree", "grade", "is_effective", "agree", "split", "revised_from", "deck_id", "call_id",
         "created_at"},
     "rr_card_packs": {
-        "agent_key", "pack_hash", "norm_rev", "role_sha", "cards_total", "checkable_n", "chars_total",
+        "agent_key", "pack_key", "pack_hash", "norm_rev", "role_sha", "cards_total", "checkable_n", "chars_total",
         "unrenderable_n", "manifest_json", "pack_gz", "source", "fetched_at"},
     "rr_review_calls": {
         "call_id", "target_key", "agent_key", "unit_id", "owner_sub", "run_id", "kind", "variant", "deck_id",
@@ -526,7 +526,7 @@ V4_PRIMARY_KEYS = {
     "rr_unit_builds": ["target_key", "rev"], "rr_units": ["target_key", "unit_id"],
     "rr_expert_reports": ["target_key", "agent_key"], "rr_review_cells": ["target_key", "unit_id", "agent_key"],
     "rr_card_verdicts": ["target_key", "unit_id", "agent_key", "record_id", "variant"],
-    "rr_card_packs": ["agent_key", "pack_hash"], "rr_review_calls": ["call_id"],
+    "rr_card_packs": ["agent_key", "pack_key"], "rr_review_calls": ["call_id"],
 }
 V4_ADDED_COLUMNS = {"rr_targets": {"flow"}, "rr_jobs": {"mode", "hold_code", "hold_until", "hold_n"},
                     "rr_findings": {"unit_id", "source_kind", "source_id", "agent_key"}}

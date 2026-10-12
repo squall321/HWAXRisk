@@ -178,8 +178,8 @@ def _target_with_calls(store) -> tuple[str, list[str]]:
 def test_review_scope_is_the_target_scope_with_the_experts_pack(risk_store):
     key, snapshot_calls = _target_with_calls(risk_store)
     assert snapshot_calls
-    cardpack.freeze_pack(risk_store, PACK, agent_key=AGENT)
-    pack = cardpack.load_pack(risk_store, AGENT, PACK["pack_hash"])
+    frozen = cardpack.freeze_pack(risk_store, PACK, agent_key=AGENT)["pack_key"]
+    pack = cardpack.load_pack(risk_store, AGENT, frozen)
     ctx = narrative.review_scope(risk_store, key, AGENT, "a" * 32, pack)
     _, fields = narrative._target_scope(risk_store, key)
     assert {k: getattr(ctx, k) for k in fields if k != "store"} == {k: v for k, v in fields.items() if k != "store"}

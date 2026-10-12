@@ -621,7 +621,7 @@ CREATE TABLE IF NOT EXISTS rr_expert_reports (                -- (타깃 × 전�
   lease_owner TEXT, claimed_at INTEGER,         -- 선점 '<boot_id>:<uuid>' — 선점마다 새 값이라 늦은 쓰기를 버린다
   run_id TEXT,                                  -- rr_jobs.id
   not_before INTEGER,                           -- 백오프 — 이 시각 전에는 다시 집지 않는다
-  pack_hash TEXT,                               -- rr_card_packs(agent_key, pack_hash) 결속
+  pack_hash TEXT,                               -- 얼린 묶음 rr_card_packs(agent_key, pack_key) 의 pack_key(앱의 내용 주소 — 엔진 pack_hash 가 아니다)
   pack_status TEXT NOT NULL DEFAULT 'todo',     -- todo | ok | empty | error
   pack_error TEXT, pack_attempts INTEGER NOT NULL DEFAULT 0, pack_frozen_at INTEGER,
   card_basis TEXT,                              -- cards | background | none
@@ -702,14 +702,16 @@ CREATE INDEX IF NOT EXISTS ix_rr_verdicts_eff ON rr_card_verdicts(target_key, ag
 CREATE INDEX IF NOT EXISTS ix_rr_verdicts_unit ON rr_card_verdicts(target_key, unit_id, is_effective);
 
 CREATE TABLE IF NOT EXISTS rr_card_packs (                    -- 전문가별 카드 묶음 동결본. 내용 주소이고 owner_sub 가 없는 박스 지역 사본이다(반출·들여오기 제외, C-9)
-  agent_key TEXT NOT NULL, pack_hash TEXT NOT NULL,           -- 엔진 pack 응답의 pack_hash
+  agent_key TEXT NOT NULL,
+  pack_key TEXT NOT NULL,                       -- 앱의 내용 주소 — 휘발 칸(fetched_at·credential·source)을 뺀 팩 본문 canonical_json 의 sha256
+  pack_hash TEXT NOT NULL,                      -- 엔진 pack 응답의 pack_hash(엔진이 카드 칸 일부로 센 값이라 열쇠로 쓰지 않는다)
   norm_rev TEXT NOT NULL, role_sha TEXT NOT NULL,
   cards_total INTEGER NOT NULL, checkable_n INTEGER NOT NULL, chars_total INTEGER NOT NULL,
   unrenderable_n INTEGER NOT NULL DEFAULT 0,
   manifest_json TEXT NOT NULL,                  -- 본문을 뺀 카드 목록
   pack_gz BLOB NOT NULL,                        -- pack 응답 전체(canonical_json gzip) — 호출마다 여기서 꺼내 그대로 보낸다
   source TEXT NOT NULL, fetched_at INTEGER NOT NULL,
-  PRIMARY KEY(agent_key, pack_hash));
+  PRIMARY KEY(agent_key, pack_key));
 
 CREATE TABLE IF NOT EXISTS rr_review_calls (                  -- 검토 호출 원장. 끝난 호출 하나가 한 행이고 서버의 result 프레임 전체를 남긴다
   call_id TEXT PRIMARY KEY,

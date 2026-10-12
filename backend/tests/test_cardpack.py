@@ -38,8 +38,8 @@ def _fresh_cache():
 
 
 def _rows(store) -> list:
-    return store.query("SELECT agent_key, pack_hash, cards_total, checkable_n, chars_total, unrenderable_n"
-                       " FROM rr_card_packs ORDER BY agent_key, pack_hash")
+    return store.query("SELECT agent_key, pack_key, pack_hash, cards_total, checkable_n, chars_total, unrenderable_n"
+                       " FROM rr_card_packs ORDER BY agent_key, pack_key")
 
 
 # ---------------------------------------------------------------- 카드 글
@@ -123,9 +123,10 @@ def test_freezing_twice_keeps_one_row(risk_store, pack_ok):
     first = cardpack.freeze_pack(risk_store, pack_ok, agent_key=AGENT)
     again = cardpack.freeze_pack(risk_store, copy.deepcopy(pack_ok), agent_key=AGENT)
     assert first == dict(again, inserted=True) and first["inserted"] is True and again["inserted"] is False
-    assert first == {"pack_hash": pack_ok["pack_hash"], "cards_total": 10, "checkable_n": 6, "chars_total": 2042,
-                     "unrenderable_n": 1, "card_basis": "cards", "inserted": True}
-    assert [tuple(r) for r in _rows(risk_store)] == [(AGENT, pack_ok["pack_hash"], 10, 6, 2042, 1)]
+    key = cardpack.pack_key(pack_ok)
+    assert first == {"pack_key": key, "pack_hash": pack_ok["pack_hash"], "cards_total": 10, "checkable_n": 6,
+                     "chars_total": 2042, "unrenderable_n": 1, "card_basis": "cards", "inserted": True}
+    assert [tuple(r) for r in _rows(risk_store)] == [(AGENT, key, pack_ok["pack_hash"], 10, 6, 2042, 1)]
 
 
 def test_the_frozen_bytes_are_the_whole_pack_and_the_manifest_has_no_body(risk_store, pack_ok):
@@ -142,28 +143,67 @@ def test_the_frozen_bytes_are_the_whole_pack_and_the_manifest_has_no_body(risk_s
 
 
 def test_two_targets_pointing_at_one_pack_share_the_row(risk_store, pack_ok):
-    """같은 전문가의 같은 팩은 타깃이 둘이어도 행 하나다 — 두 검토 머리가 같은 pack_hash 를 가리킨다."""
-    cardpack.freeze_pack(risk_store, pack_ok, agent_key=AGENT)
+    """같은 전문가의 같은 팩은 타깃이 둘이어도 행 하나다 — 두 검토 머리가 같은 pack_key 를 가리킨다. 휘발 칸(받은 시각·자격·
+    조회 길)만 다른 다시 받은 팩도 같은 열쇠다."""
+    key = cardpack.freeze_pack(risk_store, pack_ok, agent_key=AGENT)["pack_key"]
+    refetched = dict(copy.deepcopy(pack_ok), fetched_at=86400, credential="service", source="search+get")
     for target in ("diff:t-one", "diff:t-two"):
-        _seed_head(risk_store, target, pack_ok["pack_hash"])
-        cardpack.freeze_pack(risk_store, pack_ok, agent_key=AGENT)
+        _seed_head(risk_store, target, key)
+        assert cardpack.freeze_pack(risk_store, refetched, agent_key=AGENT) == {
+            **cardpack.freeze_pack(risk_store, pack_ok, agent_key=AGENT), "pack_key": key}
     assert len(_rows(risk_store)) == 1
     one = cardpack.load_for(risk_store, "diff:t-one", AGENT)
     two = cardpack.load_for(risk_store, "diff:t-two", AGENT)
-    assert one is two and one.pack_hash == pack_ok["pack_hash"]
+    assert one is two and (one.pack_key, one.pack_hash) == (key, pack_ok["pack_hash"])
 
 
-def _seed_head(store, target_key: str, pack_hash: str | None) -> None:
+@pytest.mark.parametrize("change", ["sources_n", "standard_refs", "confidence", "tier", "chars", "unrenderable",
+                                    "norm_rev", "role"])
+def test_a_pack_that_differs_in_any_field_the_app_uses_is_its_own_row(risk_store, pack_ok, change):
+    """앱의 열쇠(pack_key)는 엔진 pack_hash 에 기대지 않는다 — 엔진 식은 카드 칸 일부만 담아 출처 수(sources_n)·tier·chars·
+    unrenderable·norm_rev 가 바뀐 팩도 같은 pack_hash 로 온다(계약 예제로 엔진 식을 재현해 확인, 반대 검토 C2a RC-3). 같은
+    pack_hash 로 와도 앱이 쓰는 칸 어느 하나가 다르면 새 행이고, 그 팩을 가리키는 머리는 새 팩으로 등급을 매긴다 — 옛 팩이 다른
+    타깃의 등급·조회를 대신하지 않는다."""
+    later = copy.deepcopy(pack_ok)
+    card = later["cards"][0]
+    if change == "sources_n":
+        card["sources_n"] = 3
+    elif change == "standard_refs":
+        card["standard_refs"] = []
+    elif change == "confidence":
+        card["confidence"] = "fact"
+    elif change == "tier":
+        card["tier"] = "edge"
+    elif change == "chars":
+        card["chars"] += 1
+        later["chars_total"] += 1
+    elif change == "unrenderable":
+        later["unrenderable"][0]["title"] = "다른 제목"
+    elif change == "norm_rev":
+        later["norm_rev"] = "cr-n2"
+    else:
+        later["role"] = "바뀐 역할"
+    assert later["pack_hash"] == pack_ok["pack_hash"] and cardpack.check_pack(later, agent_key=AGENT) == []
+    first = cardpack.freeze_pack(risk_store, pack_ok, agent_key=AGENT)
+    second = cardpack.freeze_pack(risk_store, later, agent_key=AGENT)
+    assert second["inserted"] is True and second["pack_key"] != first["pack_key"] and len(_rows(risk_store)) == 2
+    _seed_head(risk_store, "diff:t-old", first["pack_key"])
+    _seed_head(risk_store, "diff:t-new", second["pack_key"])
+    assert cardpack.load_for(risk_store, "diff:t-new", AGENT).raw == later
+    assert cardpack.load_for(risk_store, "diff:t-old", AGENT).raw == pack_ok
+
+
+def _seed_head(store, target_key: str, key: str | None) -> None:
     factories.seed_raw(store, "rr_expert_reports", {
         "target_key": target_key, "agent_key": AGENT, "owner_sub": factories.OWNER, "domain": "mech",
-        "review_id": "0" * 32, "pack_hash": pack_hash},
+        "review_id": "0" * 32, "pack_hash": key},
         reason="검토 머리의 생산자(S5 review_cells.plan_cells)가 이 걸음 뒤에 선다 — 머리가 묶음을 가리키는 열 하나만 본다")
 
 
 # ---------------------------------------------------------------- 꺼내기
 def test_load_pack_reads_the_frozen_view(risk_store, pack_ok):
-    cardpack.freeze_pack(risk_store, pack_ok, agent_key=AGENT)
-    view = cardpack.load_pack(risk_store, AGENT, pack_ok["pack_hash"])
+    key = cardpack.freeze_pack(risk_store, pack_ok, agent_key=AGENT)["pack_key"]
+    view = cardpack.load_pack(risk_store, AGENT, key)
     assert view.order == tuple(c["alias"] for c in pack_ok["cards"])
     assert view.checkable == tuple(c["alias"] for c in pack_ok["cards"] if c["checkable"])
     assert view.background == tuple(c["alias"] for c in pack_ok["cards"] if not c["checkable"])
@@ -171,16 +211,18 @@ def test_load_pack_reads_the_frozen_view(risk_store, pack_ok):
     assert view.by_record["DOC-CCT-MECH-2026-0000000101"] == "K01"
     assert [u["record_id"] for u in view.unrenderable] == [u["record_id"] for u in pack_ok["unrenderable"]]
     assert (view.role, view.norm_rev, view.card_basis) == (pack_ok["role"], "cr-n1", "cards")
-    assert cardpack.load_pack(risk_store, AGENT, pack_ok["pack_hash"]) is view            # 프로세스 LRU
+    assert view.pack_key == key and cardpack.load_pack(risk_store, AGENT, key) is view    # 프로세스 LRU
+    with pytest.raises(cardpack.PackMissing):                                              # 엔진 pack_hash 는 열쇠가 아니다
+        cardpack.load_pack(risk_store, AGENT, pack_ok["pack_hash"])
 
 
 def test_the_cache_is_bounded_and_keyed_by_the_db(risk_store, pack_ok, tmp_path):
-    cardpack.freeze_pack(risk_store, pack_ok, agent_key=AGENT)
-    view = cardpack.load_pack(risk_store, AGENT, pack_ok["pack_hash"])
+    key = cardpack.freeze_pack(risk_store, pack_ok, agent_key=AGENT)["pack_key"]
+    view = cardpack.load_pack(risk_store, AGENT, key)
     for n in range(cardpack.LRU_SIZE):
         cardpack._LRU[("other.db", AGENT, f"h{n}")] = view
     assert len(cardpack._LRU) == cardpack.LRU_SIZE + 1
-    cardpack.load_pack(risk_store, AGENT, pack_ok["pack_hash"])                           # 맞힌 것은 끝으로 간다
+    cardpack.load_pack(risk_store, AGENT, key)                                            # 맞힌 것은 끝으로 간다
     from app.risk_store import RiskStore
 
     other = RiskStore(tmp_path / "other" / "risk_review.db")
@@ -188,13 +230,13 @@ def test_the_cache_is_bounded_and_keyed_by_the_db(risk_store, pack_ok, tmp_path)
     other.migrate()
     try:
         with pytest.raises(cardpack.PackMissing):                                         # 다른 DB 의 행을 빌려 오지 않는다
-            cardpack.load_pack(other, AGENT, pack_ok["pack_hash"])
+            cardpack.load_pack(other, AGENT, key)
         cardpack.freeze_pack(other, pack_ok, agent_key=AGENT)
-        cardpack.load_pack(other, AGENT, pack_ok["pack_hash"])
+        cardpack.load_pack(other, AGENT, key)
     finally:
         other.close()
     assert len(cardpack._LRU) == cardpack.LRU_SIZE
-    assert (str(risk_store.db_path), AGENT, pack_ok["pack_hash"]) in cardpack._LRU
+    assert (str(risk_store.db_path), AGENT, key) in cardpack._LRU
 
 
 def test_load_for_is_none_before_freezing_and_loud_when_the_row_is_gone(risk_store, pack_ok):
@@ -207,8 +249,8 @@ def test_load_for_is_none_before_freezing_and_loud_when_the_row_is_gone(risk_sto
 
 
 def test_cards_for_returns_the_pack_items_byte_for_byte(risk_store, pack_ok):
-    cardpack.freeze_pack(risk_store, pack_ok, agent_key=AGENT)
-    view = cardpack.load_pack(risk_store, AGENT, pack_ok["pack_hash"])
+    key = cardpack.freeze_pack(risk_store, pack_ok, agent_key=AGENT)["pack_key"]
+    view = cardpack.load_pack(risk_store, AGENT, key)
     picked = cardpack.cards_for(view, ["K04", "K01"])
     by_alias = {c["alias"]: c for c in pack_ok["cards"]}
     assert [canonical_json(c) for c in picked] == [canonical_json(by_alias["K04"]), canonical_json(by_alias["K01"])]
