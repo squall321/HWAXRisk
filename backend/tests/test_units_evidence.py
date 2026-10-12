@@ -246,7 +246,21 @@ def test_a_purged_ir_is_failed_ir_absent(tmp_path_factory):
     for unit in built["units"]:
         evidence = units.evidence_lines(unit, view)
         assert (evidence["status"], evidence["error"], evidence["evidence"]) == ("failed", "ir_absent", [])
+    # 폐기 뒤 다시 세우는 빌드도 ok 가 아니다 — 노드 표가 비어 모든 항목이 전역 단위로 가던 빌드가 불변식을 다 지나 ok 였다(RA-8).
+    assert built["status"] == "ok" and built["error"] is None
+    again = units.build_diff_units(target.diff, view)
+    assert (again["status"], again["error"], again["units"], again["unit_ids"]) == ("failed", "ir_absent", [], [])
     store.close()
+
+
+def test_one_absent_side_is_enough_to_fail_the_build(synth):
+    """한쪽 IR 만 없어도(보기의 present 하나가 거짓) 빌드는 failed(ir_absent)다."""
+    case = synth[40]
+    ir = json.loads(case.store.query_one("SELECT ir_json FROM rr_snapshots WHERE id = ?",
+                                         (case.target.base_snapshot_id,))["ir_json"])
+    for view in (units.view_of(ir, None), units.view_of(None, ir)):
+        built = units.build_diff_units(case.target.diff, view)
+        assert (built["status"], built["error"], built["units"]) == ("failed", "ir_absent", [])
 
 
 def _pair_from_adapters(store, base_results, target_results) -> tuple[dict, dict, dict]:

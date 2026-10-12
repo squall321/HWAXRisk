@@ -1056,13 +1056,21 @@ def _title(unit: Mapping[str, Any]) -> str:
 def build_diff_units(diff_obj: Mapping[str, Any], view: Mapping[str, Any], *, caps: UnitCaps | None = None) -> dict:
     """diff 하나 → 검토 단위 빌드 결과. 순수 함수다(DB·네트워크 없음). 예외는 삼키지 않는다 — 접는 것은 호출자(단계 C) 몫이다.
 
-    반환 {builder_version, status(ok·empty·oversize·failed), mode(single·bundles·none), blocked_by, caps, units[seq 순],
-    unit_ids[[unit_id, seq]], stats, invariants, suspects[]}. 단위는 {unit_id, seq, kind, reviewable, scope_key, path, title,
-    digest, synopsis, cids, n_changes, n_parts, n_ifaces, lines[], context{lines, links, overview?}, parts[], notices[], flags,
-    summary, summary_sha, summary_chars, unit_hash} 이다. `status` 는 불변식 U1·U2·U3·U6 가 깨지면 failed, 검토 대상 단위가
-    0 이면 empty, units_max 를 넘으면 oversize(단위를 버리지 않는다)다.
+    반환 {builder_version, status(ok·empty·oversize·failed), error, mode(single·bundles·none), blocked_by, caps,
+    units[seq 순], unit_ids[[unit_id, seq]], stats, invariants, suspects[]}. 단위는 {unit_id, seq, kind, reviewable, scope_key,
+    path, title, digest, synopsis, cids, n_changes, n_parts, n_ifaces, lines[], context{lines, links, overview?}, parts[],
+    notices[], flags, summary, summary_sha, summary_chars, unit_hash} 이다. `status` 는 불변식 U1·U2·U3·U6 가 깨지면 failed,
+    검토 대상 단위가 0 이면 empty, units_max 를 넘으면 oversize(단위를 버리지 않는다)다.
+
+    두 스냅샷 가운데 하나라도 IR 이 없으면(폐기 — `view[side].present` 가 거짓) 단위를 세우지 않고 `failed`·`error='ir_absent'`
+    다. 노드 표가 비면 앵커가 전부 떨어져 모든 항목이 전역 단위로 가는데, 그 빌드도 불변식을 다 지나 `ok` 로 섰다(RA-8).
     """
     caps = caps or UnitCaps()
+    if not (view["base"]["present"] and view["target"]["present"]):
+        return {"builder_version": BUILDER_VERSION, "status": "failed", "error": "ir_absent", "mode": "none",
+                "blocked_by": (diff_obj.get("semantic") or {}).get("blocked_by"),
+                "caps": {**asdict(caps), "retargeted": False}, "units": [], "unit_ids": [], "stats": {},
+                "invariants": {}, "suspects": []}
     items, skipped = _collect(diff_obj)
     nodes = _Nodes(diff_obj, view)
     adj, near = _neighbors(view, nodes)
@@ -1186,7 +1194,7 @@ def build_diff_units(diff_obj: Mapping[str, Any], view: Mapping[str, Any], *, ca
     for seq, unit in enumerate(units, start=1):
         unit["seq"] = seq
     built = {
-        "builder_version": BUILDER_VERSION, "mode": mode,
+        "builder_version": BUILDER_VERSION, "error": None, "mode": mode,
         "blocked_by": (diff_obj.get("semantic") or {}).get("blocked_by"),
         "caps": {**asdict(caps), "retargeted": retargeted}, "units": units,
         "unit_ids": [[u["unit_id"], u["seq"]] for u in units],
