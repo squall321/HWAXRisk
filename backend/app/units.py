@@ -755,10 +755,14 @@ def partition(atoms: Mapping[tuple, Sequence[Mapping[str, Any]]], nodes: _Nodes,
                 break
             common.append(x)
         by_prefix.setdefault("/".join(common), []).append(key)
-    bundle_ids = [_unit_id("bundle", sorted({i["ref"] for k in s["atoms"] for i in atoms[k]})) for s in skeletons]
+    # 같은 두 묶음 사이의 쌍을 이어 세운다. 열쇠는 묶음의 범위 키다(해시 id 가 아니다) — 묶음 하나의 소유 참조가 바뀌어 그 id 가
+    # 바뀌어도 다른 경계 무리의 순서가 흔들리지 않는다(id 에 상한 지문을 넣은 RA-2 뒤로 해시 순서가 경계 분할 전체를 바꿨다).
+    # 범위 키가 같은 묶음(같은 무리의 형제 채움)은 첫 부품 키로 가른다.
+    bundle_keys = [(s["scope_key"], s["path"], min((nodes.dkey(p) for k in s["atoms"] if k[0] in ("P", "Q")
+                                                    for p in k[1:3]), default="")) for s in skeletons]
     for prefix in sorted(by_prefix):
         keys = sorted(by_prefix[prefix],
-                      key=lambda k: (tuple(sorted((bundle_ids[unit_of[k[1]]], bundle_ids[unit_of[k[2]]]))),
+                      key=lambda k: (tuple(sorted((bundle_keys[unit_of[k[1]]], bundle_keys[unit_of[k[2]]]))),
                                      tuple(sorted((nodes.dkey(k[1]), nodes.dkey(k[2])))), k))
         for i, group in enumerate(fill(keys)):
             skeletons.append({"kind": "boundary", "scope_key": f"boundary:{prefix}#{i}", "path": prefix,
@@ -778,9 +782,19 @@ def partition(atoms: Mapping[tuple, Sequence[Mapping[str, Any]]], nodes: _Nodes,
     return skeletons
 
 
-def _unit_id(kind: str, refs: Sequence[str]) -> str:
-    """'u-' + sha1(builder 판|종류|정렬한 소유 참조)[:12] — 참조 스킴처럼 보이지 않게 'u-' 다(W2-18)."""
-    return "u-" + _sha1(f"{BUILDER_VERSION}|{kind}|" + "\n".join(sorted(refs)))[:12]
+def _caps_key(caps: UnitCaps) -> str:
+    """분할 상한 넷의 지문 — sha1(canonical_json(asdict(caps)))[:8]. unit_id 에 든다."""
+    return _sha1(canonical_json(asdict(caps)))[:8]
+
+
+# 단계 C(m2-wp2 걸음 5 `units.persist`)는 단위 행을 (target_key, unit_id) 로 내용 주소 저장한다(INSERT OR IGNORE — 한 번 쓰고
+# 고치지 않는다). 그러려면 한 타깃 안에서 unit_id 가 단위의 전부를 정해야 한다. 소유 참조만으로는 모자라다 — 범위 키(BFS 조각
+# 번호)·문맥 줄의 소유 단위·링크·전역 단위 목록·요약 글은 다른 단위들이 어떻게 나뉘었는지에 기대고, 분할은 상한 넷(UnitCaps)과
+# 빌더 판에 기댄다(RA-2). 그래서 둘을 id 에 넣는다. 타깃의 diff·IR 은 불변이므로 같은 상한·같은 판이면 같은 단위가 같은 id 로
+# 다시 나오고, 상한을 바꾸면 모든 단위가 새 id 를 받는다(옛 행은 옛 rev 의 것으로 남고 활성 rev 의 문맥이 옛 행을 가리키지 않는다).
+def _unit_id(kind: str, refs: Sequence[str], caps: UnitCaps) -> str:
+    """'u-' + sha1(builder 판|상한 지문|종류|정렬한 소유 참조)[:12] — 참조 스킴처럼 보이지 않게 'u-' 다(W2-18)."""
+    return "u-" + _sha1(f"{BUILDER_VERSION}|{_caps_key(caps)}|{kind}|" + "\n".join(sorted(refs)))[:12]
 
 
 # ---------------------------------------------------------------- 줄 구조(설계서 3.6.2)
@@ -1180,7 +1194,7 @@ def build_diff_units(diff_obj: Mapping[str, Any], view: Mapping[str, Any], *, ca
         skeletons.append({"kind": "excluded", "scope_key": f"excluded#{n}", "path": "", "atoms": keys,
                           "rule": "reason", "merged": []})
 
-    units = [_make_unit(s, atoms, nodes, diff_obj) for s in skeletons]
+    units = [_make_unit(s, atoms, nodes, diff_obj, caps) for s in skeletons]
     owner = {ref: unit["unit_id"] for unit in units for ref in unit["cids"]}
     for unit in units:
         _attach_context(unit, units, owner, nodes, adj, near)
@@ -1222,7 +1236,7 @@ def build_diff_units(diff_obj: Mapping[str, Any], view: Mapping[str, Any], *, ca
 
 
 def _make_unit(skeleton: Mapping[str, Any], atoms: Mapping[tuple, Sequence[dict]], nodes: _Nodes,
-               diff_obj: Mapping[str, Any]) -> dict:
+               diff_obj: Mapping[str, Any], caps: UnitCaps) -> dict:
     kind = skeleton["kind"]
     items = [item for key in skeleton["atoms"] for item in atoms[key]]
     lines = unit_lines(items)
@@ -1261,7 +1275,7 @@ def _make_unit(skeleton: Mapping[str, Any], atoms: Mapping[tuple, Sequence[dict]
     if unknown:
         flags["bucket_unknown_n"] = unknown
     return {
-        "unit_id": _unit_id(kind, refs), "kind": kind, "reviewable": kind != "excluded",
+        "unit_id": _unit_id(kind, refs, caps), "kind": kind, "reviewable": kind != "excluded",
         "scope_key": skeleton["scope_key"], "path": skeleton.get("path") or "", "cids": refs,
         "n_changes": len(lines), "n_parts": len(parts),
         "n_ifaces": len({tuple(i["_anchors"]) for i in items if len(i["_anchors"]) == 2}),

@@ -311,6 +311,28 @@ def test_a_value_change_keeps_the_unit_id_and_changes_the_unit_hash(tmp_path_fac
     assert [u["unit_hash"] for u in one.built["units"]] != [u["unit_hash"] for u in other.built["units"]]
 
 
+def test_a_unit_id_names_one_content_across_cap_changes(synth):
+    """단계 C 는 단위 행을 (target_key, unit_id) 로 내용 주소 저장한다(INSERT OR IGNORE). 같은 diff 를 상한만 바꿔 다시 빌드해도
+    같은 unit_id 는 같은 내용(범위 키·제목·목록 글·요약·문맥 줄과 그 소유 단위)이어야 한다 — 소유 참조만으로 id 를 지으면 상한을
+    바꾼 재빌드가 같은 id 에 다른 문맥을 내고, 옛 행의 문맥이 새 빌드에 없는 단위를 가리켰다(RA-2)."""
+    case = synth[150]
+    seen: dict[str, str] = {}
+    for caps in (units.UnitCaps(), units.UnitCaps(target_lines=15), units.UnitCaps(target_lines=25),
+                 units.UnitCaps(max_lines=30), units.UnitCaps(small_lines=10), units.UnitCaps(units_max=5)):
+        built = units.build_diff_units(case.diff, case.view, caps=caps)
+        ids = {u["unit_id"] for u in built["units"]}
+        for unit in built["units"]:
+            assert {x["owner_unit"] for x in unit["context"]["lines"]} <= ids, unit["unit_id"]
+            content = canonical_json([unit["scope_key"], unit["title"], unit["digest"], unit["summary_sha"],
+                                      unit["context"], unit["unit_hash"]])
+            assert seen.setdefault(unit["unit_id"], content) == content, (caps, unit["unit_id"])
+    again = units.build_diff_units(case.diff, case.view, caps=units.UnitCaps(target_lines=15))
+    assert [u["unit_id"] for u in again["units"]] == [u["unit_id"] for u in units.build_diff_units(
+        case.diff, case.view, caps=units.UnitCaps(target_lines=15))["units"]]
+    default_ids = {u["unit_id"] for u in case.built["units"]}
+    assert not default_ids & {u["unit_id"] for u in again["units"]}      # 상한이 바뀌면 모든 단위가 새 id 다
+
+
 def test_one_more_change_moves_only_the_units_that_hold_it(tmp_path_factory, synth):
     """syn150 대본 끝에 이동 하나를 더하면 그 부품의 단위(와 롤업을 담은 단위)만 id 가 바뀐다 — 분할 전체가 흔들리지 않는다."""
     more = _synth_case(tmp_path_factory, "one-more", 150,
