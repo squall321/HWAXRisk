@@ -219,7 +219,7 @@ def test_payload_and_refs_carry_the_evidence(synth):
         payload = units.payload_of(unit, evidence)
         assert payload["evidence"] == [{"ref": row["ref"], "text": row["text"]} for row in evidence["evidence"]]
         assert payload["evidence_sha"] == evidence["sha"] and payload["evidence_status"] == "ok"
-        refs = units.unit_refs(unit, evidence)
+        refs = units.refs_of(unit, evidence)
         assert {row["ref"] for row in evidence["evidence"]} <= refs
         assert not refs & {x["ref"] for x in unit["context"]["lines"]} - {row["ref"] for row in evidence["evidence"]}
 

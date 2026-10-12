@@ -572,9 +572,9 @@ def test_payload_has_the_contract_fields_and_never_an_empty_unit(synth):
             assert {"unit_id", "kind", "title", "summary", "lines", "context", "evidence", "notes"} <= set(payload)
             assert payload["lines"] and all(set(x) == {"ref", "text"} for x in payload["lines"])
             assert all(set(x) == {"ref", "text", "owner_unit"} for x in payload["context"])
-            assert units.unit_refs(unit) == {x["ref"] for x in payload["lines"]}
-            assert not units.unit_refs(unit) & {x["ref"] for x in payload["context"]}
-            item = units.manifest_item(unit)
+            assert units.refs_of(unit) == {x["ref"] for x in payload["lines"]}
+            assert not units.refs_of(unit) & {x["ref"] for x in payload["context"]}
+            item = units.manifest_item_of(unit)
             assert item == {"unit_id": unit["unit_id"], "kind": unit["kind"], "title": unit["title"],
                             "text": unit["digest"]}
 

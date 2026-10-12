@@ -31,13 +31,13 @@ __all__ = [
     "collect_diff_items",
     "digest_of",
     "evidence_lines",
-    "manifest_item",
+    "manifest_item_of",
     "partition",
     "payload_of",
     "render_unit",
     "unit_hash",
     "unit_lines",
-    "unit_refs",
+    "refs_of",
     "view_of",
     "walk_cids",
 ]
@@ -1679,12 +1679,14 @@ def _edge_state(edge: Mapping[str, Any]) -> tuple:
 
 
 # ---------------------------------------------------------------- 단계 C 가 감쌀 투영(순수)
-def manifest_item(unit: Mapping[str, Any]) -> dict:
+# 저장소를 받는 계약 이름(`manifest_items(store, target_key)` · `unit_refs(store, target_key, unit_id)` ·
+# `review_payload(store, target_key, unit_id, agent_key)`)은 단계 C 몫이다 — 여기 셋은 단위 dict 를 받는 순수 투영이고 그쪽이 감싼다.
+def manifest_item_of(unit: Mapping[str, Any]) -> dict:
     """전수 훑기용 단위 목록 항목 `{unit_id, kind, title, text}` — text 는 목록 글(digest)이다. 글자 상한은 없다."""
     return {"unit_id": unit["unit_id"], "kind": unit["kind"], "title": unit["title"], "text": unit["digest"]}
 
 
-def unit_refs(unit: Mapping[str, Any], evidence: Mapping[str, Any] | None = None) -> set[str]:
+def refs_of(unit: Mapping[str, Any], evidence: Mapping[str, Any] | None = None) -> set[str]:
     """그 단위에서 판정이 인용할 수 있는 참조 — 소유 줄 + 근거 줄. 문맥 줄은 뺀다(다른 단위 소유라 Q8 에서 떨어진다)."""
     refs = {line["ref"] for line in unit["lines"]}
     refs.update(row["ref"] for row in ((evidence or {}).get("evidence") or ()))
