@@ -380,6 +380,8 @@ def test_a_job_closed_outside_the_loop_refuses_a_new_job_while_its_call_runs_and
     from app.errors import AppError
 
     key, first, fake, r, gate = _stalled(store, monkeypatch, 3)
+    # 워커가 첫 프레임(status)을 읽은 뒤에 잡 행을 닫는다 — 멈춤 물음은 프레임마다 묻고 다음 프레임은 문(gate)이 열려야 온다.
+    rig.wait_for(lambda: any(w.get("last_step") for w in r.loop.progress(first).payload()["workers"]))
     store.execute("UPDATE rr_jobs SET state = 'cancelled' WHERE id = ?", (first,))
     with pytest.raises(AppError) as refused:
         rig.job(store, key, scope={"agents": [SEAL]})
