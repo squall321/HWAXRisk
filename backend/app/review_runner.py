@@ -1962,6 +1962,12 @@ class ReviewLoop:
         running = self._jobs(("running",))
         if not running:
             return {"jobs": len(jobs), "running": 0, "started": 0}
+        for job in running:
+            # 보류 열이 빈 채 도는 잡의 차단기는 닫혀 있다 — 사람의 재개(resume_job)는 보류 열을 비우고 진행판을 건드리지 않으므로
+            # 여기서 맞춘다(R3A-11). 시계로 반쯤 연 재개는 보류 열을 첫 성공까지 두므로(half_open) 건드리지 않는다.
+            progress = self.progress(job["id"])
+            if job.get("hold_code") is None and progress.breaker().get("state") in ("open", "half_open"):
+                progress.set(breaker={**progress.breaker(), "state": "closed", "hold_until": None})
         active: list[tuple[dict, str]] = []
         for job in running:
             phase = self._complete_or_phase(job)

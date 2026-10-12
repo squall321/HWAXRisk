@@ -266,7 +266,9 @@ def test_an_infra_streak_opens_the_breaker_and_a_half_open_resume_finishes_witho
 
 
 def test_a_content_spike_opens_the_breaker_and_it_does_not_resume_by_itself(store, monkeypatch):
-    """내용 탓 실패가 절반을 넘으면 content_fail_rate 로 멈추고, 시계를 아무리 밀어도 스스로 돌아오지 않는다(사람이 재개한다)."""
+    """내용 탓 실패가 절반을 넘으면 content_fail_rate 로 멈추고, 시계를 아무리 밀어도 스스로 돌아오지 않는다(사람이 재개한다). 진행판의
+    차단기는 open 이고, 사람이 재개하면 첫 틱에 closed 로 돌아와 끝까지 closed 다(반대 검토 R3A-11 — 재개가 보류 열을 비워 반쯤 연
+    재개의 첫 성공이 닫을 자리가 없었다)."""
     key = rig.target(store)
     job_id = rig.job(store, key, scope={"agents": list(rig.CARD_EXPERTS)})
     fake = FakeReviewEngine(rig.packs())
@@ -281,11 +283,16 @@ def test_a_content_spike_opens_the_breaker_and_it_does_not_resume_by_itself(stor
         r.tick()
     assert rig.state(store, job_id) == "paused"
     assert {c["outcome_class"] for c in _calls(store, job_id)} <= {"content", "ok"}
+    assert rig.progress(store, job_id)["breaker"]["state"] == "open"
 
     runner.resume_job(store, job_id, by=OWNER)                      # 사람이 재개하면 이어 돈다
     fake.error_n = 0
+    r.tick()
+    assert rig.progress(store, job_id)["breaker"]["state"] == "closed"
     r.finish(job_id, step=1000)
     assert rig.state(store, job_id) == "completed"
+    breaker = rig.progress(store, job_id)["breaker"]
+    assert (breaker["state"], breaker["trips"], breaker["hold_until"]) == ("closed", 1, None)
 
 
 # ---------------------------------------------------------------- 사람의 손
