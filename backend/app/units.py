@@ -965,8 +965,25 @@ def _render(unit: Mapping[str, Any]) -> tuple[str, int]:
             tail = _context_tail(line)
             out.append(f"{role_label.get(line['role'], line['role'])} [{line['ref']}] {_word(line['code'])} "
                        f"«{line['text']}»{tail} (소유 {line['owner_unit']})")
+    overview = unit["context"].get("overview")
+    if overview:
+        out.append(f"[단위 목록] {_overview_head(overview)}")
+        out.extend(f"{uid} {kind} 변경 줄 {n}" for uid, kind, n in overview["units"])
     cleaned, fallback = _clean_lines(out)
     return "\n".join(cleaned), fallback
+
+
+def _overview_head(overview: Mapping[str, Any]) -> str:
+    return f"검토 단위 {len(overview['units'])} · 변경 줄 {overview['lines_total']}"
+
+
+def _overview_note(unit: Mapping[str, Any]) -> str:
+    """전역 단위의 단위 목록·총량을 엔진 몫 글로 — 묶음 사이 조합을 보는 자리다(W2-01·RA-6). 다른 단위에는 빈 글이다."""
+    overview = unit["context"].get("overview")
+    if not overview:
+        return ""
+    cells = " · ".join(f"{uid} {kind} {n}줄" for uid, kind, n in overview["units"])
+    return f"단위 목록({_overview_head(overview)}) — {cells}."
 
 
 def render_unit(unit: Mapping[str, Any]) -> str:
@@ -1739,7 +1756,7 @@ def payload_of(unit: Mapping[str, Any], evidence: Mapping[str, Any] | None = Non
         "context": [{"ref": line["ref"], "text": line["text"] + _context_tail(line, _bare), "owner_unit": line["owner_unit"]}
                     for line in unit["context"]["lines"]],
         "evidence": [{"ref": row["ref"], "text": row["text"]} for row in evidence.get("evidence") or ()],
-        "notes": " ".join(x for x in [*unit.get("notices", ()), evidence.get("notes") or ""] if x),
+        "notes": " ".join(x for x in [*unit.get("notices", ()), _overview_note(unit), evidence.get("notes") or ""] if x),
         "unit_hash": unit["unit_hash"], "summary_sha": unit["summary_sha"],
         "evidence_sha": evidence.get("sha"), "evidence_status": evidence.get("status"),
     }

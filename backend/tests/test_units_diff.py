@@ -444,6 +444,27 @@ def test_global_units_hold_only_unanchored_items_and_are_never_empty(synth):
                 assert unit["context"]["overview"]["units"]
 
 
+def test_the_global_unit_overview_reaches_the_summary_and_the_engine(synth):
+    """전역 단위의 단위 목록·총량은 세기만 하고 어디에도 보이지 않았다(RA-6) — 요약의 [단위 목록]과 엔진 payload 의 notes 에 검토
+    단위 전부(id·종류·줄 수)와 변경 줄 합이 선다. 다른 단위의 notes 에는 없다."""
+    for size in (40, 150):
+        built = synth[size].built
+        reviewable = [u for u in built["units"] if u["reviewable"]]
+        total = sum(u["n_changes"] for u in reviewable)
+        globals_ = [u for u in built["units"] if u["kind"] == "global"]
+        assert globals_
+        for unit in built["units"]:
+            notes = units.payload_of(unit)["notes"]
+            if unit["kind"] != "global":
+                assert "단위 목록" not in notes and "[단위 목록]" not in unit["summary"]
+                continue
+            assert f"검토 단위 {len(reviewable)} · 변경 줄 {total}" in notes
+            assert f"[단위 목록] 검토 단위 {len(reviewable)} · 변경 줄 {total}" in unit["summary"]
+            for other in reviewable:
+                assert f"{other['unit_id']} {other['kind']} {other['n_changes']}줄" in notes
+                assert f"\n{other['unit_id']} {other['kind']} 변경 줄 {other['n_changes']}" in unit["summary"]
+
+
 def test_excluded_unit_takes_noise_free_non_design_and_none_reasons(synth):
     built = synth[150].built
     excluded = [u for u in built["units"] if u["kind"] == "excluded"]
