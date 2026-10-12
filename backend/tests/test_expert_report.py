@@ -13,6 +13,7 @@ import pytest
 
 from app import cardpack, common, expert_report, export, render, review_quality, routes, units
 from app.common import canonical_json
+from app.risk_store import RiskStore
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
 from tests.synth.fake_review_engine import FakeReviewEngine
@@ -404,3 +405,42 @@ def test_line_breaks_inside_quotes_and_model_text_do_not_open_headings_or_lists(
     cards = expert_report.render_report_md(report, part="cards")
     assert "«최악 공차 누적에서도 0.8 mm 이상을 남긴다. ⏎ ## 폭이 줄면 코너 R 도»" in cards
     assert "«조건을 맞대었다. ⏎ - 둘째 줄이 목록처럼 보인다»" in cards
+
+
+# ---------------------------------------------------------------- 들여온 박스에서 다시 마감(R3B-7)
+def test_refinalizing_on_an_importing_box_keeps_the_original_length_of_clipped_quotes(store, monkeypatch, tmp_path):
+    """반출은 카드 인용을 200자로 줄이고 원래 길이를 적는다. 들여온 박스에서 같은 전문가의 남은 단위를 돌아 다시 마감하면(#22 — 묶음은
+    다시 받는다) 보고서 행·finding 인용·근거 문장·인용 역색인이 200자 글을 원문으로 여기지 않고 원래 길이(cq_chars → quote_chars ·
+    warrant_chars)를 이어받는다. 그 박스에서 다시 반출해도 길이가 남는다."""
+    key = rig.target(store)
+    first, second = _unit_ids(store, key)[:2]
+    _run(store, key, scope={"agents": [SEAL], "unit_ids": [first]}, verdicts={_rid("K01"): ("yes", "FAIL")},
+         long_quote={"K01"}, cond_text=("카드가 요구하는 적용 조건을 길게 옮긴 글 — " * 12)[:240])
+    dest = RiskStore(tmp_path / "dest" / "risk_review.db")
+    dest.open()
+    dest.migrate()
+    try:
+        export.import_jsonl(dest, OWNER, "".join(export.iter_lines(store, OWNER, 0)))
+        (tmp_path / "destdata").mkdir()
+        rig.configure(monkeypatch, dest, tmp_path / "destdata")
+        _run(dest, key, scope={"agents": [SEAL], "unit_ids": [second]}, verdicts={_rid("K01"): ("yes", "FAIL")})
+        rebuilt = expert_report.load_report(dest, key, SEAL)
+        k01 = next(c for c in rebuilt["checklist"] if c["alias"] == "K01")
+        row = next(r for r in k01["rows"] if r["unit_id"] == first)
+        assert (len(row["cq"]), row["cq_chars"]) == (200, 260)
+        assert {(len(c["cond"]), c["cond_chars"]) for c in row["conds"]} == {(200, 240)}
+        assert "…(cq 260자 중 200자)" in expert_report.render_report_md(rebuilt, part="cards", unit_id=first)
+        finding = json.loads(dest.query_one("SELECT finding_json FROM rr_findings WHERE source_kind = 'card_review'"
+                                            " AND unit_id = ?", (first,))["finding_json"])
+        assert [(len(c["quote"]), c.get("quote_chars")) for c in finding["cites"] if c["ref"].startswith("card:")] == [(200, 260)]
+        assert finding["warrant_chars"] == [260]
+        refs = [dict(r) for r in dest.query("SELECT quote, quote_chars FROM rr_claim_refs WHERE ref_type = 'card' AND claim_uid"
+                                            " IN (SELECT finding_id FROM rr_findings WHERE unit_id = ?)", (first,))]
+        assert [(len(r["quote"]), r["quote_chars"]) for r in refs] == [(200, 260)]
+        again = [json.loads(x) for x in export.iter_lines(dest, OWNER, 0)][1:]
+        out = [x["row"] for x in again if x["table"] == "rr_claim_refs" and x["row"]["ref_type"] == "card"]
+        assert {(len(r["quote"]), r["quote_chars"]) for r in out} >= {(200, 260)}
+        second_row = next(r for r in k01["rows"] if r["unit_id"] == second)
+        assert second_row["cq_chars"] is None and len(second_row["cq"]) < 200       # 이 박스에서 본 단위는 원문 그대로다
+    finally:
+        dest.close()

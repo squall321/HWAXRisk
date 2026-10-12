@@ -264,6 +264,7 @@ class _Member:
     split: bool = False
     weak_subject: bool = False
     conf: str | None = None
+    quote_chars: int | None = None             # 카드 인용이 이미 줄인 글일 때(들여온 원장)의 원래 길이 — R3B-7
 
 
 def _unit_layers(ledger: Ledger, unit_id: str) -> dict[str, str]:
@@ -327,7 +328,7 @@ def _card_members(ledger: Ledger, unit_id: str, ctx: narrative.SpecContext,
             refs.extend(str(r) for r in cond.get("refs") or () if isinstance(cond, Mapping))
         refs = list(dict.fromkeys(refs))
         passed = eff.get("quote_ok") == 1
-        cites = [(passed, {"ref": f"card:{record_id}", "quote": _s(eff.get("cq"))})]
+        cites = [(passed, _card_cite(record_id, eff.get("cq"), eff.get("cq_chars")))]
         cites += [(ref in unit_refs, {"ref": ref, "quote": ""}) for ref in refs]
         subject, change_kind, weak = _subject(ledger, unit_id, [r for r in refs if r in unit_refs], ctx, items)
         checks = _json(eff.get("checks_json"), {})
@@ -352,8 +353,23 @@ def _card_members(ledger: Ledger, unit_id: str, ctx: narrative.SpecContext,
                            sev_rank=_SEV_RANK.get(sev_claimed or "", 0),
                            passed=passed, alias_rank=ledger.alias_key(eff["alias"], unit_id), grade=grade, claimed=claimed,
                            sev_claimed=sev_claimed, nums=nums, card=card, cites=cites, corpus_cards=[record_id],
-                           split=split, weak_subject=weak))
+                           split=split, weak_subject=weak, quote_chars=_known_chars(eff.get("cq_chars"))))
     return out
+
+
+def _known_chars(value: Any) -> int | None:
+    """반출이 적어 둔 원래 길이 칸(cq_chars · q_chars · cond_chars) — 있으면 그 글은 이미 200자로 줄인 글이다(들여온 원장)."""
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) and value > 0 else None
+
+
+def _card_cite(record_id: str, quote: Any, chars: Any) -> dict:
+    """finding 의 카드 인용 한 줄 — 인용이 이미 줄인 글이면(들여온 박스에서 다시 마감) 원래 길이를 quote_chars 로 이어받는다(R3B-7 —
+    그 박스에서 다시 반출해도 원래 길이가 남는다)."""
+    cite = {"ref": f"card:{record_id}", "quote": _s(quote)}
+    known = _known_chars(chars)
+    if known is not None:
+        cite["quote_chars"] = known
+    return cite
 
 
 def offcard_rows(cell: Mapping[str, Any]) -> tuple[list[dict], dict]:
@@ -380,7 +396,7 @@ def _offcard_members(ledger: Ledger, unit_id: str, ctx: narrative.SpecContext,
         record_id = _s(row.get("record_id"))
         card = ledger.unit_cards(unit_id).get(record_id) if record_id else None
         passed = row.get("quote_ok") == 1
-        cites = ([(passed, {"ref": f"card:{record_id}", "quote": _s(row.get("q"))})] if card is not None else [])
+        cites = ([(passed, _card_cite(record_id, row.get("q"), row.get("q_chars")))] if card is not None else [])
         cites += [(ref in unit_refs, {"ref": ref, "quote": ""}) for ref in refs]
         subject, change_kind, weak = _subject(ledger, unit_id, [r for r in refs if r in unit_refs], ctx, items)
         grade = _s(row.get("grade")) if card is not None and passed and row.get("grade") else "경험칙"
@@ -461,6 +477,8 @@ def _fold(ledger: Ledger, members: Sequence[_Member], ctx: narrative.SpecContext
         "split": any(m.split for m in ordered), "weak_subject": rep.weak_subject,
         "members": [_member_key(m) for m in ordered],
     })
+    if rep.card is not None and rep.quote_chars is not None:
+        finding["warrant_chars"] = [rep.quote_chars]          # 근거 문장의 «» 인용이 이미 줄인 글이다(R3B-7)
     return finding
 
 
@@ -573,9 +591,13 @@ def _findings_section(findings: Sequence[Mapping[str, Any]], ledger: Ledger) -> 
 
 
 # ---------------------------------------------------------------- 보고서의 나머지 절(S10)
-def _clip_quote(text: Any) -> tuple[str, int | None]:
-    """보고서 표시의 카드 인용 — 판정당 200자, 줄였으면 (앞 200자, 원래 길이)(사용자 결정 1)."""
+def _clip_quote(text: Any, known: Any = None) -> tuple[str, int | None]:
+    """보고서 표시의 카드 인용 — 판정당 200자, 줄였으면 (앞 200자, 원래 길이)(사용자 결정 1). 행의 원래 길이 칸(`known` — 반출이 적는
+    cq_chars·q_chars·cond_chars)이 있으면 글은 이미 줄인 것이라 그 길이를 쓴다(R3B-7 — 들여온 박스에서 다시 마감해도 남는다)."""
     value = _s(text)
+    chars = _known_chars(known)
+    if chars is not None:
+        return value[:QUOTE_SHOW], chars
     return (value[:QUOTE_SHOW], len(value)) if len(value) > QUOTE_SHOW else (value, None)
 
 
@@ -589,13 +611,13 @@ def _checklist_row(ledger: Ledger, unit: Mapping[str, Any], eff: Mapping[str, An
     """점검표 한 행 — 실효 판정 하나와 그 대조 표기. 상세 칸(심각도·경로·닫는 확인·조건별 대조)은 단독 재질의 행에서 읽는다."""
     src = variants.get("solo") or eff
     record_id = str(eff["record_id"])
-    cq, cq_chars = _clip_quote(eff.get("cq"))
+    cq, cq_chars = _clip_quote(eff.get("cq"), eff.get("cq_chars"))
     checks = _json(eff.get("checks_json"), {})
     conds = []
     for cond in _json(src.get("conds_json"), []):
         if not isinstance(cond, Mapping):
             continue
-        text, chars = _clip_quote(cond.get("cond"))
+        text, chars = _clip_quote(cond.get("cond"), cond.get("cond_chars"))
         conds.append({"cond": text, "cond_chars": chars, "met": cond.get("met"), "note": cond.get("note"),
                       "lines": list(cond.get("l") or ()), "refs": list(cond.get("refs") or ()), "refs_ok": cond.get("refs_ok")})
     section = eff.get("section_id")
@@ -703,7 +725,7 @@ def _off_card_section(ledger: Ledger, finding_of: Mapping[tuple[str, str], str])
         unit_refs = _unit_refs(ledger.payloads[unit["unit_id"]])
         rows, _rest = offcard_rows(ledger.cells[unit["unit_id"]])
         for index, row in enumerate(rows):
-            q, q_chars = _clip_quote(row.get("q"))
+            q, q_chars = _clip_quote(row.get("q"), row.get("q_chars"))
             record_id, section = _s(row.get("record_id")), _s(row.get("section_id"))
             refs = [str(r) for r in row.get("refs") or ()]
             out.append({
@@ -1043,14 +1065,17 @@ def _write_findings(store: Any, prepared: Prepared, *, opinion_id: str, now: int
             store.execute(f"UPDATE rr_findings SET {', '.join(f'{c} = ?' for c in row)}, updated_at = ?"
                           " WHERE finding_id = ?", (*row.values(), now, finding["claim_uid"]))
             updated += 1
+        # 원래 길이 — 들여온 박스에서 다시 마감하면 인용은 이미 200자로 줄인 글이다(R3B-7). 그때만 칸을 채운다(NULL 은 원문이다).
+        known = {_s(c.get("ref")): c["quote_chars"] for c in finding.get("cites") or ()
+                 if isinstance(c, Mapping) and c.get("quote_chars")}
         for cite in finding.get("_resolved_cites") or ():
             ref = _s(cite.get("ref"))
             if not ref or cite.get("dangling_reason") == narrative.ENGINE_MARKER:
                 continue
             store.execute("INSERT OR REPLACE INTO rr_claim_refs(claim_uid, ref_type, ref, quote, owner_sub, target_key,"
-                          " dangling) VALUES (?,?,?,?,?,?,?)",
+                          " dangling, quote_chars) VALUES (?,?,?,?,?,?,?,?)",
                           (finding["claim_uid"], _s(cite.get("ref_type")) or "unknown", ref, _s(cite.get("quote")), owner,
-                           ledger.target_key, 0 if cite.get("ok") else 1))
+                           ledger.target_key, 0 if cite.get("ok") else 1, known.get(ref)))
     return {"inserted": inserted, "updated": updated, "deleted": len(stale)}
 
 
