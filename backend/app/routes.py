@@ -4430,13 +4430,16 @@ def put_curation(queue_id: str, body: CurationDecisionBody,
     applied: dict = {}
     with store.tx():
         if kind == "suspect_text" and body.decision == "approve":
-            # 승인은 원문 복원이다 — 자리표시자가 가리키던 sha1 의 원문을 돌려주고 그 finding 을 회수로 되돌린다.
+            # 승인은 원문 복원이다 — 자리표시자가 가리키던 sha1 의 원문을 돌려주고 그 finding 을 회수로 되돌린다. 카드 대조 finding 은
+            # 회수 자격을 올리지 않는다(M2.md 5절 #9 — 형식 승인 전 산출이 다른 과제의 선례·통계로 새지 않게, R3B-8). 그것을 여는 일은
+            # M3 의 형식 승인 뒤 일괄 절차다.
             claim_uid = str(payload.get("claim_uid") or "")
             restored = 0
             if claim_uid:
                 restored = int(store.execute(
                     "UPDATE rr_findings SET recall_eligible = 1, updated_at = ?"
-                    " WHERE claim_uid = ? AND owner_sub = ?", (now_epoch(), claim_uid, owner_sub)) or 0)
+                    " WHERE claim_uid = ? AND owner_sub = ? AND COALESCE(source_kind, '') <> 'card_review'",
+                    (now_epoch(), claim_uid, owner_sub)) or 0)
             applied = {"restored_text": payload.get("raw"), "sha1": payload.get("sha1"),
                        "findings_recalled": restored}
         if kind == "unclassified_code" and body.decision in ("map", "new"):
