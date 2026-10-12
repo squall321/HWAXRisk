@@ -15,7 +15,7 @@ import json
 import pytest
 
 import app.mcp_server as srv
-from app import config, entry, identity, routes, runner, units
+from app import config, entry, identity, planner, routes, runner, units
 from app.common import now_epoch
 from app.errors import AppError
 from tests import factories
@@ -148,6 +148,26 @@ def test_card_review_lays_over_a_target_whose_panels_already_ran(store, tmp_path
     assert _ledger(store, key) == before
 
 
+def test_a_job_made_between_the_switch_check_and_its_write_keeps_the_target_panels(store, monkeypatch):
+    """바꾸기의 첫 확인 뒤 트랜잭션 전에 패널 잡이 서면 트랜잭션 안의 재확인이 409 flow_locked(job_live)로 막는다(RC-7) —
+    그 재확인이 없으면 살아 있는 패널 잡을 둔 채 대상이 cells 가 된다."""
+    _register_pat(store)
+    key = factories.make_diff_target(store, 3).target_key
+    real = units.active_build
+    made: list[str] = []
+
+    def job_meanwhile(*args, **kwargs):
+        if not made:
+            made.append(routes.create_job(key, routes.JobBody(tier="A"), ident=factories.ident(OWNER))["job_id"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(units, "active_build", job_meanwhile)
+    refused = _refused(_switch, key, "cells")
+    assert (refused.code, refused.detail["reason"]) == ("flow_locked", "job_live")
+    assert [j["id"] for j in refused.detail["jobs"]] == made
+    assert _flow(store, key) == "panels" and _audits(store, key) == []
+
+
 # ---------------------------------------------------------------- 문지기 — Tier 잡과 C3 자동 후속
 def test_tier_jobs_are_refused_on_a_cells_target_through_every_entry(store, monkeypatch):
     """cells 대상의 Tier A·B·C 패널 잡은 422 flow_mismatch — 러너 함수·REST·Claude 입구 어디로 와도 같은 문을 지나고 잡 행이
@@ -163,6 +183,24 @@ def test_tier_jobs_are_refused_on_a_cells_target_through_every_entry(store, monk
     factories.act_as_delegate(monkeypatch, OWNER)
     assert asyncio.run(srv.risk_start_job(target_key=key, tier="A"))["error"] == "flow_mismatch"
     assert store.query("SELECT id FROM rr_jobs") == []
+
+
+def test_a_switch_between_the_job_check_and_its_write_leaves_no_panel_job_on_a_cells_target(store, monkeypatch):
+    """create_job 의 첫 문지기 뒤 잡 행을 쓰기 전에 대상이 cells 로 바뀌면 트랜잭션 안의 문지기가 422 flow_mismatch 로 막고 잡 행이
+    서지 않는다(RC-7) — 그 재확인이 없으면 카드 대조 대상에 Tier 패널 잡이 선다."""
+    _register_pat(store)
+    key = factories.make_diff_target(store, 3).target_key
+    real = planner.tier_plan
+
+    def switched_meanwhile(store_, target_key, **kwargs):
+        if _flow(store, target_key) == "panels":
+            _switch(target_key, "cells")
+        return real(store_, target_key, **kwargs)
+
+    monkeypatch.setattr(planner, "tier_plan", switched_meanwhile)
+    refused = _refused(runner.create_job, store, key, "A", owner_sub=OWNER, settings=config.settings)
+    assert (refused.code, refused.detail) == ("flow_mismatch", {"flow": "cells", "tier": "A"})
+    assert _flow(store, key) == "cells" and store.query("SELECT id FROM rr_jobs WHERE target_key = ?", (key,)) == []
 
 
 def test_the_c3_follow_up_is_refused_on_a_cells_target_and_says_why(store):

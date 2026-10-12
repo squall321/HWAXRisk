@@ -100,6 +100,23 @@ def test_unit_rows_round_trip_move_with_the_owner_and_purge_to_no_source_text(ri
         "SELECT unit_ids_json FROM rr_unit_builds WHERE target_key = ?", scope[1])["unit_ids_json"])  # 정체는 남는다
 
 
+def test_every_exported_row_passes_through_the_export_view(risk_store, monkeypatch):
+    """반출 줄은 전부 export._export_view 를 지난다(RC-7) — 판정 행 인용을 200자로 줄이는 규칙(M2.md 2절)이 그 한 함수에 걸려 있어,
+    _select 에서 그 호출이 빠지면 규칙이 조용히 꺼진다. 판정 행의 생산자(C2b)가 서기 전이라 단위 행으로 배선을 본다 — 표지를 다는
+    뷰로 바꿔 끼우면 모든 줄에 그 표의 표지가 있다(인용 줄이기의 왕복은 판정 행 생산자가 서는 커밋이 본다)."""
+    synth = factories.make_diff_target(risk_store, 40)
+    units.build_units(risk_store, synth.target_key, built_by=OWNER)
+    real = export._export_view
+
+    def marked(table: str, row: dict) -> dict:
+        return {**real(table, row), "_viewed": table}
+
+    monkeypatch.setattr(export, "_export_view", marked)
+    lines = [json.loads(line) for line in list(export.iter_lines(risk_store, OWNER, 0))[1:]]
+    assert {"rr_unit_builds", "rr_units"} <= {item["table"] for item in lines}
+    assert [item["table"] for item in lines if item["row"].get("_viewed") != item["table"]] == []
+
+
 def _caps(monkeypatch, **values) -> None:
     import dataclasses
 
