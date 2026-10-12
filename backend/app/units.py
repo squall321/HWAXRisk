@@ -1139,8 +1139,9 @@ def build_diff_units(diff_obj: Mapping[str, Any], view: Mapping[str, Any], *, ca
     반환 {builder_version, status(ok·empty·oversize·failed), error, mode(single·bundles·none), blocked_by, caps,
     units[seq 순], unit_ids[[unit_id, seq]], stats, invariants, suspects[]}. 단위는 {unit_id, seq, kind, reviewable, scope_key,
     path, title, digest, synopsis, cids, n_changes, n_parts, n_ifaces, lines[], context{lines, links, overview?}, parts[],
-    notices[], flags, summary, summary_sha, summary_chars, unit_hash} 이다. `status` 는 불변식 U1·U2·U3·U6 가 깨지면 failed,
-    검토 대상 단위가 0 이면 empty, units_max 를 넘으면 oversize(단위를 버리지 않는다)다.
+    notices[], flags, summary, summary_sha, summary_chars, unit_hash} 이다. `status` 는 불변식 U1·U2·U3·U6 가 깨지면 failed
+    (`error='invariants'`, `error_detail` 은 깨진 키와 건수 'U3_oversize=7'), 검토 대상 단위가 0 이면 empty, units_max 를 넘으면
+    oversize(단위를 버리지 않는다)다.
 
     두 스냅샷 가운데 하나라도 IR 이 없으면(폐기 — `view[side].present` 가 거짓) 단위를 세우지 않고 `failed`·`error='ir_absent'`
     다. 노드 표가 비면 앵커가 전부 떨어져 모든 항목이 전역 단위로 가는데, 그 빌드도 불변식을 다 지나 `ok` 로 섰다(RA-8).
@@ -1290,8 +1291,13 @@ def build_diff_units(diff_obj: Mapping[str, Any], view: Mapping[str, Any], *, ca
         for line in unit["lines"]:
             line.pop("_item", None)
     built["invariants"] = check_invariants(diff_obj, built, caps)
-    if any(built["invariants"][k] for k in ("U1_unassigned", "U2_double_owned", "U3_oversize", "U6_context")):
-        built["status"] = "failed"
+    broken = {k: len(built["invariants"][k]) for k in ("U1_unassigned", "U2_double_owned", "U3_oversize", "U6_context")
+              if built["invariants"][k]}
+    if broken:
+        # 어느 불변식이 몇 건 깨졌나를 싣는다 — 원장(persist 가 'invariants: U3_oversize=7' 로 적는다)·409 units_unbuildable·
+        # flow_fallback 이 까닭을 말한다(반대 검토 C2a RC-6 — 종전에는 error 가 비어 '빌드 failed' 로만 보였다).
+        built["status"], built["error"] = "failed", "invariants"
+        built["error_detail"] = ", ".join(f"{k}={n}" for k, n in broken.items())
     elif not reviewable:
         built["status"] = "empty"
     elif len(reviewable) > caps.units_max:

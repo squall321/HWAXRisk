@@ -2189,6 +2189,13 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
                 units_module.persist(store, target_key, owner_sub, failed, built_by=owner_sub, reason="target_open")
             except Exception:  # noqa: BLE001 — 실패 기록마저 못 쓰면 로그에만 남는다(대상은 panels 로 열렸다).
                 log.exception("대상 %s 의 실패한 단위 빌드 행도 쓰지 못했다", target_key)
+    elif built is not None and built["status"] == "failed":
+        # cells 로 열려다 단위가 안 서 panels 로 연 대상 — 실패한 빌드를 원장에 남겨 어느 까닭(불변식·현황·IR 없음·계산 실패)인지
+        # 보이게 한다(RC-6, 바꾸기 길과 같다). 실패 빌드는 활성 빌드가 되지 않는다. 기록마저 못 쓰면 로그에만 남는다.
+        try:
+            units_module.persist(store, target_key, owner_sub, built, built_by=owner_sub, reason="target_open")
+        except Exception:  # noqa: BLE001
+            log.exception("대상 %s 의 실패한 단위 빌드 행을 쓰지 못했다", target_key)
     plan = planner.tier_plan(store, target_key) if roster["roster_size"] else None
     out = {
         "target_key": target_key,

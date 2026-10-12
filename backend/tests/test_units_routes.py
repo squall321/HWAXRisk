@@ -119,27 +119,55 @@ def test_a_panels_target_never_computes_units_until_asked(store, review_on, monk
     assert routes.coverage_payload(key, owner_sub=OWNER)["units"]["status"] == "ok"
 
 
-@pytest.mark.parametrize("case", ["snap", "self_diff", "compute_error"])
+def _break_invariants(monkeypatch) -> None:
+    """실제 빌드에 불변식 위반 두 건(U3)을 얹는다 — 정상 상한의 빌더는 불변식을 깨지 않으므로 '깨졌을 때' 의 배선만 본다."""
+    real = units.check_invariants
+    monkeypatch.setattr(units, "check_invariants",
+                        lambda *a, **k: {**real(*a, **k), "U3_oversize": ["u-000000000001", "u-000000000002"]})
+
+
+@pytest.mark.parametrize("case", ["snap", "self_diff", "compute_error", "invariants"])
 def test_cells_opens_on_panels_when_the_units_do_not_stand(store, review_on, monkeypatch, case):
     """단위가 서지 않으면 panels 로 열고 까닭을 싣는다 — 현황 대상(snap_not_supported) · 자기 비교(검토 대상 0 — empty, XU8) ·
-    계산 실패(compute_error). 대상·로스터는 그대로 남고 빌드 행은 쓰지 않는다."""
+    계산 실패(compute_error) · 불변식 위반(invariants). 대상·로스터는 그대로 남는다. 실패한 빌드는 까닭과 함께 원장에 남고(RC-6 —
+    종전에는 어디에도 남지 않았다) 활성 빌드가 되지 않는다. 검토 대상 0(empty)은 실패가 아니라 빌드 행을 쓰지 않는다."""
     synth = factories.make_diff_target(store, 3, open_target=False)
     if case == "snap":
-        kind, ref_id, reason = "snap", synth.target_snapshot_id, "snap_not_supported"
+        kind, ref_id, reason, error = "snap", synth.target_snapshot_id, "snap_not_supported", "snap_not_supported"
     elif case == "self_diff":
-        kind, reason = "diff", "empty"
+        kind, reason, error = "diff", "empty", None
         ref_id = factories.make_diff(store, synth.base_snapshot_id, synth.base_snapshot_id)["diff_id"]
-    else:
-        kind, ref_id, reason = "diff", synth.diff_id, "compute_error"
+    elif case == "compute_error":
+        kind, ref_id, reason, error = "diff", synth.diff_id, "compute_error", "compute_error: RuntimeError: 빌더 결함"
 
         def boom(*_args, **_kwargs):
             raise RuntimeError("빌더 결함")
 
         monkeypatch.setattr(units, "build_diff_units", boom)
+    else:
+        kind, ref_id, reason, error = "diff", synth.diff_id, "invariants", "invariants: U3_oversize=2"
+        _break_invariants(monkeypatch)
     out = _open(kind, ref_id, "cells")
+    key = out["target_key"]
     assert out["flow"] == "panels" and out["flow_fallback"] == {"from": "cells", "reason": reason}
     assert "units" not in out and out["roster_size"] == len(factories.agents())
-    assert _flow(store, out["target_key"]) == "panels" and _builds(store, out["target_key"]) == []
+    assert _flow(store, key) == "panels" and units.active_build(store, key) is None
+    expected = [] if error is None else [{"rev": 1, "status": "failed", "error": error, "reason": "target_open"}]
+    assert _builds(store, key) == expected
+    if error is not None:
+        assert units.summary_of(store, key) == {"rev": 1, "status": "failed", "error": error}
+
+
+def test_a_switch_refused_for_broken_invariants_names_them(store, review_on, monkeypatch):
+    """바꾸기 길도 같은 까닭을 말한다 — 409 units_unbuildable 의 글과 detail 이 깨진 불변식과 건수를 싣는다(RC-6)."""
+    key = factories.make_diff_target(store, 3).target_key
+    _break_invariants(monkeypatch)
+    with pytest.raises(AppError) as exc:
+        routes.post_target_flow(key, routes.FlowBody(to="cells"), ident=factories.ident(OWNER))
+    assert (exc.value.code, exc.value.http_status) == ("units_unbuildable", 409)
+    assert "invariants: U3_oversize=2" in exc.value.message
+    assert exc.value.detail["units"] == {"rev": 1, "status": "failed", "error": "invariants: U3_oversize=2"}
+    assert _flow(store, key) == "panels"
 
 
 def test_a_persist_failure_still_opens_the_target_on_panels(store, review_on, monkeypatch):
