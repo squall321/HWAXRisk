@@ -236,8 +236,7 @@ PUSHED_DDL_SHA256 = {
     1: "95298128f33e533a21a9bbdfb4aab46a9f0af096585f1e5932cc035887e09492",
     2: "162c36361ed98a7fb6d8cc195ab0e1c0fabe1ef448ec7e785f2311e2843bfea5",
     3: "a20f49f302e0c92292d7792a9a990b4d8c809b1f3eb0dce9b609bb0879b35e39",
-    # v4 는 아직 나가지 않았다 — 가지 m2-cells 에만 있고 dev 리허설(재설계 PLAN 4절 C-2, M2 단계 D)이 끝나야 main 에 오른다.
-    # 그때까지는 블록을 고칠 수 있고, 고치면 같은 커밋에서 이 값을 고친다. push 하는 날 이 값이 굳는다.
+    # v4 — 리스크 심사 재설계 M2(dev 배선 리허설 통과 뒤 2026-10-12 push). 이제 고치지 않는다 — 바꿀 것은 v5 로.
     4: "f44b1630c19df06f0929485782c55253edf8a765858c1c30a824cb31b119c0b5",
 }
 SHARED_TABLES = {"rr_dim_vocab", "rr_delta_priors", "rr_rules", "rr_metrics"}

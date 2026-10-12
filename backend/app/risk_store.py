@@ -581,8 +581,8 @@ _DDL_V3: list[str] = _split_statements(_DDL_V3_SQL)
 # 않는다(M2 에 읽는 곳이 없다 — M3 의 v5). 어휘 열에는 제약을 걸지 않는다(C-3) — 허용 연산이 CREATE·ADD COLUMN·INDEX
 # 뿐이라 한 번 건 제약은 어휘를 늘릴 수 없게 만든다(rr_jobs.pause_reason 이 그 예다). 어휘는 열 옆 주석에 적고 코드
 # 상수·전이 함수가 지킨다. rr_card_packs 는 owner_sub 가 없는 박스 지역 사본이라 반출·들여오기에서 뺀다
-# (export.LOCAL_ONLY_TABLES). dev 리허설(M2 단계 D)이 끝날 때까지 main 에 올리지 않는다 — 그 전에는 이 블록을 고칠 수
-# 있고, 고치면 같은 커밋에서 tests/test_store.py 의 PUSHED_DDL_SHA256[4] 를 고친다.
+# (export.LOCAL_ONLY_TABLES). dev 배선 리허설(M2 단계 D)을 통과하고 2026-10-12 에 push 했다 — 이제 고치지 않는다(바꿀 것은
+# v5 로, tests/test_store.py 의 PUSHED_DDL_SHA256[4] 가 지킨다).
 _DDL_V4_SQL = """
 CREATE TABLE IF NOT EXISTS rr_unit_builds (                   -- 검토 단위 빌드 머리. 한 번 쓰고 고치지 않는다 — 활성 빌드는 status 가 ok·empty·oversize 인 가장 큰 rev
   target_key TEXT NOT NULL, rev INTEGER NOT NULL, owner_sub TEXT NOT NULL,
