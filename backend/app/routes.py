@@ -56,8 +56,11 @@ class PortalPatAutoBody(BaseModel):
 
 # ---------------------------------------------------------------- 포털 PAT 자동 등록(리스크 앱 사람 자격 R1 · U-1 · U-2)
 # 게이트웨이가 위임 단언을 받을 때 '이 사람의 PAT 를 바꿔 받아 달라' 는 명세다 — 게이트웨이는 이것을 그대로 포털 교환
-# (POST /auth/pat/exchange) 본문으로 쓰고 결과를 POST /api/auth/portal-pat 로 보낸다. 좁히기만 한다(읽기 전용·mcp-gateway).
-PORTAL_PAT_WANTED: dict[str, Any] = {"name": "hwax-risk", "audiences": ["mcp-gateway"], "scopes": ["read"], "ttl_days": 90}
+# (POST /auth/pat/exchange) 본문으로 쓰고 결과를 POST /api/auth/portal-pat 로 보낸다. 좁히기만 한다(읽기 전용).
+# 청중 step-forge 는 위임 캡처의 REST 다리(게이트웨이 /api/step-forge)가 요구한다 — 게이트웨이가 호출자 PAT 의 청중과 겹치는 것만
+# 교환에 싣으므로, 그 청중이 없는 옛 PAT 의 사람은 mcp-gateway 만 받고 다리는 capture_rest_note 가 까닭을 말한다(C-10).
+PORTAL_PAT_WANTED: dict[str, Any] = {"name": "hwax-risk", "audiences": ["mcp-gateway", "step-forge"], "scopes": ["read"],
+                                     "ttl_days": 90}
 PAT_SOURCES: tuple[str, ...] = ("web", "manual")       # PUT /api/me/portal-pat 가 받는 출처
 GATEWAY_PAT_SOURCE = "gateway-exchange"               # POST /api/auth/portal-pat 로 등록된 것
 AUTO_ERROR_CODE_MAX = 64

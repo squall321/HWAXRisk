@@ -133,7 +133,7 @@ def test_put_records_the_source_and_clears_the_last_auto_error(client, box):
 # ---------------------------------------------------------------- 단언의 portal_pat_wanted
 def test_a_delegated_mint_asks_for_a_pat_only_when_one_is_due(client, box):
     out = _mint(client, GW)
-    assert out["portal_pat_wanted"] == {"name": "hwax-risk", "audiences": ["mcp-gateway"], "scopes": ["read"],
+    assert out["portal_pat_wanted"] == {"name": "hwax-risk", "audiences": ["mcp-gateway", "step-forge"], "scopes": ["read"],
                                         "ttl_days": 90}
     assert set(out) == {"access_token", "token_type", "expires_in", "portal_pat_wanted"}
     _register(exp_in=config.pat_renew_before_s() + 3600)            # 갱신 문턱보다 넉넉하다 — 바라지 않는다
