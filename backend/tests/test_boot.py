@@ -199,6 +199,9 @@ def test_the_lifespan_runs_the_stream_limit_warning(tmp_path, monkeypatch, caplo
 
     monkeypatch.setattr(config, "settings", dataclasses.replace(
         config.settings, data_dir=tmp_path, risk_engine_read_timeout_s=0))
+    # 박스 자격은 갖춘 박스다 — 필수 키가 없으면 그 경고(박스 자격 missing_required)가 따로 하나 더 뜬다.
+    (tmp_path / "secrets.env").write_text("HWAXRISK_CRED_KEY=" + "k" * 43 + "=\n", encoding="utf-8")
+    (tmp_path / "secrets.env").chmod(0o600)
     monkeypatch.setattr(main, "mcp", _Mcp)
     monkeypatch.setattr(main, "RiskRunner", _Runner)
     monkeypatch.setattr(main, "get_store", lambda: risk_store)
@@ -211,6 +214,58 @@ def test_the_lifespan_runs_the_stream_limit_warning(tmp_path, monkeypatch, caplo
     with caplog.at_level(logging.WARNING, logger="hwax_risk.main"):
         asyncio.run(boot())
     assert [r.levelname for r in caplog.records if r.name == "hwax_risk.main"] == ["WARNING"]
+
+
+def test_the_lifespan_warns_when_the_cred_key_is_the_dev_fallback(tmp_path, monkeypatch, caplog, risk_store):
+    """cred.key 폴백은 동작하므로 화면만 보면 아무 일도 없다 — 기동 로그가 WARNING 으로 '같은 값을 secrets.env 로 옮기라' 와
+    그 명령을 말한다(값은 싣지 않는다). 판정은 secrets_valid 에도 그대로 간다."""
+    import asyncio
+    import contextlib
+    import dataclasses
+    import logging
+    import types
+
+    from app import main
+
+    class _Mcp:
+        class session_manager:
+            @staticmethod
+            @contextlib.asynccontextmanager
+            async def run():
+                yield
+
+    class _Runner:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.delenv("HWAXRISK_CRED_KEY", raising=False)
+    monkeypatch.delenv("HWAXRISK_CRED_KEY_PATH", raising=False)
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, data_dir=tmp_path))
+    key = config.load_cred_key(tmp_path)                    # 앱이 만든 개발용 폴백
+    monkeypatch.setattr(main, "mcp", _Mcp)
+    monkeypatch.setattr(main, "RiskRunner", _Runner)
+    monkeypatch.setattr(main, "get_store", lambda: risk_store)
+    monkeypatch.setattr(main, "close_store", lambda: None)
+    state = types.SimpleNamespace()
+
+    async def boot() -> None:
+        async with main._lifespan(types.SimpleNamespace(state=state)):
+            pass
+
+    with caplog.at_level(logging.INFO, logger="hwax_risk.main"):
+        asyncio.run(boot())
+    warned = [r for r in caplog.records if r.name == "hwax_risk.main" and r.levelno == logging.WARNING]
+    assert len(warned) == 1 and "cred_key_dev_fallback" in warned[0].getMessage()
+    text = warned[0].getMessage()
+    assert f"printf 'HWAXRISK_CRED_KEY=%s\\n' \"$(cat {tmp_path / 'cred.key'})\"" in text and "새 키를 만들어 넣으면" in text
+    assert key.decode() not in caplog.text
+    assert state.secrets_valid is False
 
 
 def test_mcp_initialize_with_session_header(client):

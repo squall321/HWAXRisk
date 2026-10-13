@@ -179,7 +179,12 @@ def post_auth_sso(request: Request) -> dict:
 
 @router.get("/me")
 def get_me(request: Request, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """{email, display_name, role, organization, anonymous, portal_pat|null, box{hostname, secrets_valid}}."""
+    """{email, display_name, role, organization, anonymous, portal_pat|null,
+    box{hostname, secrets_valid, cred_key_present, cred_key_source, reasons[], portal_base}}.
+
+    `box.secrets_valid` 는 필수가 갖춰졌다는 뜻이다(호스트 일치 · 자격 암호화 키 있음 · 그 키가 cred.key 폴백이 아님). 까닭은
+    `box.reasons` 가 코드별로 싣는다 — 기동 뒤에 cred.key 가 생기는 일이 있어(첫 PAT 등록) 요청 때 다시 판정한다.
+    """
     state = request.app.state
     payload = ident.to_dict()
     portal_pat = None
@@ -187,7 +192,9 @@ def get_me(request: Request, ident: identity.Identity = Depends(identity.current
     if not ident.anonymous and state.box_match:
         portal_pat = _pat_summary(get_store().get_credential(ident.email))
     payload["portal_pat"] = portal_pat
-    payload["box"] = {"hostname": state.hostname, "secrets_valid": state.secrets_valid,
+    box = config.box_assessment(box_match=bool(state.box_match))
+    payload["box"] = {"hostname": state.hostname, "secrets_valid": box["secrets_valid"],
+                      "cred_key_source": box["cred_key_source"], "reasons": box["reasons"],
                       # 부작용 없는 갈래로만 본다 — 여기서 키를 만들면 기존 암호문이 영구히 복호 불가가 된다.
                       "cred_key_present": config.load_cred_key(create=False) is not None,
                       # 앱이 포털을 부르는 주소를 화면이 볼 수 있게 낸다(비밀이 아니다). 이 값이 틀리면

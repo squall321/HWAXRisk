@@ -25,17 +25,34 @@ SECRETS_FILENAME = "secrets.env"
 # 사용자 포털 PAT 암복호(Fernet) 키의 로컬 개발 폴백 파일. 운영은 secrets.env 의 HWAXRISK_CRED_KEY 를 쓴다 —
 # 암호문(risk_review.db)과 같은 디렉터리에 키를 두면 Drive tar 한 벌로 모든 사용자 PAT 가 함께 나간다(plan §8.2.7).
 CRED_KEY_FILENAME = "cred.key"
-# secrets.env 에서 읽는 키 5종(plan §8.2.6·§8.2.7). 값은 어디에도 로그하지 않는다.
-# PORTAL_PAT 는 scopes ['read'] 전용이고, RA 객체·보고서 쓰기와 AIDataHub import 는 PORTAL_PAT_RW 만 쓴다(§5.1 원칙 10).
-SECRET_KEYS: tuple[str, ...] = (
-    "HWAXRISK_PORTAL_PAT", "HWAXRISK_PORTAL_PAT_RW", "HWAXRISK_HEAX_SERVICE_PAT",
-    "HWAXRISK_AIDH_API_KEY", "HWAXRISK_CRED_KEY",
-)
-# 있으면 읽지만 없어도 기동을 막지 않는 키(plan §5.2.5 (3a) ③ — 없으면 health warnings 에 backup_unencrypted).
-# HEAX_GATEWAY_SECRET: MCP 게이트웨이와만 나눠 갖는 이 앱 전용 값. 있어야 /auth/sso 가 열린다(없으면 404).
+# secrets.env 에서 읽는 키(plan §8.2.6·§8.2.7). 값은 어디에도 로그하지 않는다.
+# 필수는 자격 암호화 키 하나다 — 없으면 사용자 PAT 를 등록·복호하지 못해 사람 자격으로 도는 일이 전부 멈춘다(리스크 앱 사람
+# 자격 C-6). 나머지는 없으면 그 길만 닫히고 앱은 돈다(OPTIONAL_KEY_EFFECTS). 종전에는 다섯 키를 다 필수로 세어 쓰지 않는
+# 키(RA 쓰기·AIDataHub — 보내는 쪽이 아직 배선되지 않았다, M4)까지 모자라다고 해 어느 박스든 경고가 떴다.
+SECRET_KEYS: tuple[str, ...] = ("HWAXRISK_CRED_KEY",)
+# 있으면 읽지만 없어도 기동을 막지 않는 키. PORTAL_PAT 는 scopes ['read'] 전용이고, RA 객체·보고서 쓰기와 AIDataHub import 는
+# PORTAL_PAT_RW 만 쓴다(§5.1 원칙 10).
+# HEAX_GATEWAY_SECRET: MCP 게이트웨이와만 나눠 갖는 이 앱 전용 값. 있어야 /auth/sso·/auth/portal-pat 가 열린다(없으면 404).
 #   HEAXHub 의 gateway_shared_secret 을 재사용하지 않는다 — 그 값은 portal_auth 라우트에서 Caddy 가
 #   모든 요청에 주입하므로, 같은 값을 쓰면 로그인한 아무나 남의 이메일로 단언을 발급받을 수 있다.
-OPTIONAL_SECRET_KEYS: tuple[str, ...] = ("HWAXRISK_BACKUP_KEY", "HWAXRISK_HEAX_GATEWAY_SECRET")
+OPTIONAL_SECRET_KEYS: tuple[str, ...] = (
+    "HWAXRISK_PORTAL_PAT", "HWAXRISK_PORTAL_PAT_RW", "HWAXRISK_HEAX_SERVICE_PAT", "HWAXRISK_AIDH_API_KEY",
+    "HWAXRISK_BACKUP_KEY", "HWAXRISK_HEAX_GATEWAY_SECRET",
+)
+# 선택 키가 없으면 무엇이 안 되는가 — 설정 화면(GET /api/me 의 box.reasons missing_optional)이 그대로 싣는다.
+OPTIONAL_KEY_EFFECTS: dict[str, str] = {
+    "HWAXRISK_PORTAL_PAT": ("사람 자격이 없을 때의 짧은 조회(전문가 명단·현장 VOC·문헌 E10·캡처의 MCP 폴백)가 닫힌다 — 패널 잡은"
+                            " 이 키를 쓰지 않는다(사람 PAT 만)."),
+    "HWAXRISK_PORTAL_PAT_RW": "RA 쓰기 자격 — 보내는 쪽이 아직 배선되지 않아(M4) 지금은 없어도 달라지는 것이 없다.",
+    "HWAXRISK_HEAX_SERVICE_PAT": ("StepForge REST 의 마지막 자격 — 웹 로그인 토큰도 게이트웨이 경유 본인 PAT 도 없는 캡처는 mcad 를"
+                                  " MCP 폴백으로 읽어 G6 이 unit_unknown 으로 막힌다."),
+    "HWAXRISK_AIDH_API_KEY": "AIDataHub 반입 키 — 반입하는 쪽이 아직 배선되지 않아(M4) 지금은 없어도 달라지는 것이 없다.",
+    "HWAXRISK_BACKUP_KEY": "백업 암호화(age 공개키) — 없으면 백업이 평문이고 /api/health 에 backup_unencrypted 가 뜬다.",
+    "HWAXRISK_HEAX_GATEWAY_SECRET": ("게이트웨이 사람별 위임 — 없으면 /api/auth/sso·/api/auth/portal-pat 가 404 라 Claude 로 오는"
+                                     " 호출이 사람으로 보이지 않고(쓰기 도구 거절) PAT 자동 등록도 없다."),
+}
+# secrets.env 밖 환경변수로도 읽는 선택 키(backup_key·heax_gateway_secret 이 그렇게 읽는다). 나머지는 파일에서만 읽는다.
+_ENV_READ_OPTIONAL_KEYS: tuple[str, ...] = ("HWAXRISK_BACKUP_KEY", "HWAXRISK_HEAX_GATEWAY_SECRET")
 
 # 박스마다 다른 손잡이 파일(재설계 M2.md 4.5) — 데이터 디렉터리에 있어 재배포에 남고 추적 파일이 아니다. secrets.env 와 같은 꼴
 # (KEY=VALUE 줄, '#' 주석)이고 비밀이 아니다. 아래 REVIEW_KNOBS 만 읽는다.
@@ -335,7 +352,7 @@ def credential_margin_s(cfg: object | None = None) -> int:
 
 
 def load_secrets(data_dir: Path) -> dict[str, str]:
-    """$DATA_DIR/secrets.env 의 SECRET_KEYS 3종을 읽는다(KEY=VALUE 줄, '#' 주석, 따옴표 없음 — plan §8.2.7).
+    """$DATA_DIR/secrets.env 의 SECRET_KEYS·OPTIONAL_SECRET_KEYS 를 읽는다(KEY=VALUE 줄, '#' 주석, 따옴표 없음 — plan §8.2.7).
 
     파일이 없으면 빈 dict. 모드가 0600 이 아니면 경고만 낸다. 값은 절대 로그하지 않는다.
     """
@@ -460,20 +477,83 @@ def cred_key_path(data_dir: Path | None = None) -> Path:
     return (settings.data_dir if data_dir is None else data_dir) / CRED_KEY_FILENAME
 
 
-def cred_key_source(data_dir: Path | None = None, env: Mapping[str, str] | None = None) -> str | None:
-    """자격 암호화 키가 어디서 오는지 — 'env' · 'path' · 'data_dir' · None(없음).
+def cred_key_source(data_dir: Path | None = None, env: Mapping[str, str] | None = None) -> str:
+    """자격 암호화 키가 어디서 오는지 — `load_cred_key` 와 같은 순서로 'secrets' · 'env' · 'path' · 'dev_fallback' · 'absent'.
 
-    'data_dir' 은 암호키가 암호문과 같은 디렉터리에 앉은 로컬 개발 폴백이고, 그때 `secrets_valid` 는 내려간다
-    (HWAXRISK_CRED_KEY 가 SECRET_KEYS 에 있으므로 main.lifespan 의 all(...) 이 자동으로 False 가 된다).
+    'dev_fallback' 은 앱이 데이터 디렉터리에 만든 `cred.key`(로컬 개발 폴백)다 — 키가 암호문과 같은 디렉터리에 앉는다.
+    env·path 는 있는 것으로 센다(종전 판정은 secrets.env 파일만 봐서 env 로 준 키도 '없음' 이었다).
     """
     env = os.environ if env is None else env
     root = settings.data_dir if data_dir is None else data_dir
-    if (load_secrets(root).get("HWAXRISK_CRED_KEY") or env.get("HWAXRISK_CRED_KEY") or "").strip():
+    if (load_secrets(root).get("HWAXRISK_CRED_KEY") or "").strip():
+        return "secrets"
+    if (env.get("HWAXRISK_CRED_KEY") or "").strip():
         return "env"
     raw_path = (env.get("HWAXRISK_CRED_KEY_PATH") or "").strip()
     if raw_path and Path(raw_path).is_file():
         return "path"
-    return "data_dir" if cred_key_path(root).is_file() else None
+    return "dev_fallback" if cred_key_path(root).is_file() else "absent"
+
+
+def cred_key_move_fix(data_dir: Path | None = None) -> str:
+    """`cred.key` 폴백을 secrets.env 로 옮기는 절차 — **같은 값**을 옮긴다(값이 화면에 찍히지 않는 명령)."""
+    root = settings.data_dir if data_dir is None else data_dir
+    key_file, secrets_file = root / CRED_KEY_FILENAME, root / SECRETS_FILENAME
+    return (f"같은 값을 secrets.env 로 옮기고 앱을 다시 띄운다 — printf 'HWAXRISK_CRED_KEY=%s\\n' \"$(cat {key_file})\""
+            f" >> {secrets_file} && chmod 600 {secrets_file} (값이 화면에 찍히지 않는다). 새 키를 만들어 넣으면 이미 등록된"
+            " 사용자 PAT 가 전부 풀리지 않는다(모두 다시 등록해야 한다) — 반드시 cred.key 의 값을 그대로 옮긴다. 다시 띄운 뒤 설정"
+            " 화면의 키 출처가 secrets 이면 cred.key 는 지워도 된다(백업 한 벌에 키와 암호문이 함께 실리지 않게).")
+
+
+def box_assessment(*, box_match: bool, data_dir: Path | None = None, env: Mapping[str, str] | None = None) -> dict:
+    """박스 자격 판정 — `{secrets_valid, cred_key_source, reasons[{code, keys?, message, fix}]}`(GET /api/me 의 box).
+
+    코드는 넷이다 — host_mismatch(이관 직후) · missing_required(필수 키 없음) · cred_key_dev_fallback(키가 cred.key 폴백)
+    · missing_optional(그 길만 닫힌다, 앱은 돈다). `secrets_valid` 는 앞의 셋이 없을 때 참이다. 값은 싣지 않는다.
+    """
+    env = os.environ if env is None else env
+    root = settings.data_dir if data_dir is None else data_dir
+    secrets = load_secrets(root)
+    source = cred_key_source(root, env)
+    reasons: list[dict] = []
+    if not box_match:
+        reasons.append({
+            "code": "host_mismatch",
+            "message": "직전 기동의 호스트(origin.json)가 지금과 다르다 — 데이터 디렉터리를 다른 박스에서 옮겨 온 뒤 첫 기동이라 등록된"
+                       " PAT 를 이 기동 동안 보이지 않는다.",
+            "fix": "secrets.env 의 HWAXRISK_CRED_KEY 가 같은 값으로 옮겨 왔는지 확인하고 앱을 다시 띄운다(다음 기동부터 이 호스트가"
+                   " 기준이다). 키가 다르면 등록된 PAT 가 풀리지 않아 각자 다시 등록해야 한다.",
+        })
+    if source == "absent":
+        reasons.append({
+            "code": "missing_required", "keys": list(SECRET_KEYS),
+            "message": "자격 암호화 키(HWAXRISK_CRED_KEY)가 없다 — 사용자 PAT 를 저장할 때 앱이 데이터 디렉터리에 개발용 cred.key 를"
+                       " 만들어 쓰게 된다(암호문과 같은 디렉터리라 백업 한 벌에 키와 암호문이 함께 실린다).",
+            "fix": (f"운영 키를 secrets.env 에 넣고 앱을 다시 띄운다 — printf 'HWAXRISK_CRED_KEY=%s\\n' \"$(python3 -c 'from"
+                    f" cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')\" >> {root / SECRETS_FILENAME}"
+                    f" && chmod 600 {root / SECRETS_FILENAME} (값이 화면에 찍히지 않는다). 키를 잃으면 등록된 PAT 가 전부 풀리지 않으니"
+                    " secrets.env 와 같은 등급으로 따로 보관한다."),
+        })
+    elif source == "dev_fallback":
+        reasons.append({
+            "code": "cred_key_dev_fallback", "keys": list(SECRET_KEYS),
+            "message": (f"자격 암호화 키를 데이터 디렉터리의 {CRED_KEY_FILENAME}(앱이 만든 개발용 폴백)에서 읽는다 — 암호문"
+                        f"({DB_FILENAME})과 같은 디렉터리라 백업 한 벌에 키와 암호문이 함께 실리고, 이 파일을 모르고 옮기면 등록된"
+                        " PAT 가 전부 풀리지 않는다. 동작은 한다."),
+            "fix": cred_key_move_fix(root),
+        })
+    missing = [key for key in OPTIONAL_SECRET_KEYS
+               if not (secrets.get(key) or (key in _ENV_READ_OPTIONAL_KEYS and (env.get(key) or "").strip()))]
+    if missing:
+        reasons.append({
+            "code": "missing_optional", "keys": missing,
+            "message": "없는 선택 키 — 앱은 돌고 그 길만 닫힌다. " + " · ".join(f"{key}: {OPTIONAL_KEY_EFFECTS[key]}"
+                                                                       for key in missing),
+            "fix": f"필요한 길만 켠다 — {root / SECRETS_FILENAME} 에 KEY=값 줄을 넣고(0600) 앱을 다시 띄운다.",
+        })
+    blocking = {"host_mismatch", "missing_required", "cred_key_dev_fallback"}
+    return {"secrets_valid": not any(r["code"] in blocking for r in reasons), "cred_key_source": source,
+            "reasons": reasons}
 
 
 def load_cred_key(data_dir: Path | None = None, *, create: bool = True) -> bytes | None:
@@ -508,7 +588,8 @@ def load_cred_key(data_dir: Path | None = None, *, create: bool = True) -> bytes
             return _read_cred_key(path)
         with os.fdopen(fd, "wb") as fh:
             fh.write(key)
-        log.info("자격 암호화 키를 새로 만들었습니다: %s (0600, 백업 등급은 secrets.env 와 같다)", path)
+        # 경고다 — 이 순간부터 등록된 PAT 가 이 파일에 묶인다. 운영 박스라면 같은 값을 secrets.env 로 옮겨야 한다.
+        log.warning("자격 암호화 키를 새로 만들었습니다: %s (0600, 개발용 폴백) — %s", path, cred_key_move_fix(path.parent))
         return key
     except OSError as exc:
         log.warning("cred.key 를 읽거나 만들 수 없습니다(%s): %s", path, exc)

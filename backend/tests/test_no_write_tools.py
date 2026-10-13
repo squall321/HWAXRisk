@@ -23,11 +23,15 @@ def _sources() -> dict[str, str]:
             for p in APP_DIR.rglob("*.py")}
 
 
-def test_write_pat_key_is_declared_and_loadable():
-    """SECRET_KEYS 에 없으면 secrets.env 에 넣어도 로드되지 않아 RA 쓰기가 영구 실패한다."""
-    assert WRITE_KEY in config.SECRET_KEYS
-    assert READ_KEY in config.SECRET_KEYS
+def test_write_pat_key_is_declared_and_loadable(tmp_path):
+    """선언된 키(필수 SECRET_KEYS · 선택 OPTIONAL_SECRET_KEYS)가 아니면 secrets.env 에 넣어도 로드되지 않아 RA 쓰기가 영구 실패한다.
+    두 키는 선택 키다(없으면 그 길만 닫힌다 — 리스크 앱 사람 자격 R5)."""
+    assert WRITE_KEY in config.OPTIONAL_SECRET_KEYS and READ_KEY in config.OPTIONAL_SECRET_KEYS
     assert ra_client.WRITE_SECRET_KEY == WRITE_KEY
+    path = tmp_path / "secrets.env"
+    path.write_text(f"{READ_KEY}=fake-read\n{WRITE_KEY}=fake-rw\n", encoding="utf-8")
+    path.chmod(0o600)
+    assert config.load_secrets(tmp_path) == {READ_KEY: "fake-read", WRITE_KEY: "fake-rw"}
 
 
 def test_read_paths_never_reach_for_the_write_pat():

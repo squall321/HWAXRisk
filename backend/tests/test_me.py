@@ -74,7 +74,8 @@ def test_me_anonymous(client, wired):
     assert body["portal_pat"] is None
     # portal_base 는 진단값이다 — 이 주소가 틀리면 PAT 등록·패널이 전부 실패하는데 화면에 안 보이면
     # 사람이 토큰을 의심한다(2026-09-30 실측). 비밀이 아니므로 익명 응답에도 싣는다.
-    assert set(body["box"]) == {"hostname", "secrets_valid", "cred_key_present", "portal_base"}
+    assert set(body["box"]) == {"hostname", "secrets_valid", "cred_key_present", "cred_key_source", "reasons",
+                                "portal_base"}
     assert body["box"]["portal_base"].startswith("http")
     assert isinstance(body["box"]["hostname"], str) and body["box"]["secrets_valid"] is False
     assert set(body) == {"email", "display_name", "role", "organization", "anonymous", "source", "portal_pat", "box"}
@@ -275,3 +276,99 @@ def test_a_portal_that_rejects_the_pat_still_reports_pat_invalid(monkeypatch):
         routes._verify_with_portal("pat-value")
 
     assert (exc.value.code, exc.value.http_status) == ("pat_invalid", 422)
+
+
+# ---------------------------------------------------------------- 박스 자격(리스크 앱 사람 자격 R5)
+FERNET_KEY = base64.urlsafe_b64encode(b"k" * 32).decode()      # 시험용 고정 키(형식만 맞다)
+
+
+def _secrets_file(data_dir, **values: str) -> None:
+    path = data_dir / "secrets.env"
+    path.write_text("".join(f"{k}={v}\n" for k, v in values.items()), encoding="utf-8")
+    path.chmod(0o600)
+
+
+def _codes(box: dict) -> list[str]:
+    return [r["code"] for r in box["reasons"]]
+
+
+def test_box_needs_only_the_cred_key_and_says_what_each_missing_optional_key_closes(tmp_path):
+    """필수는 HWAXRISK_CRED_KEY 하나다 — 그것이 secrets.env 에 있으면 선택 키가 하나도 없어도 secrets_valid 다(종전에는 다섯 키를
+    다 필수로 세어 쓰지 않는 RA 쓰기·AIDataHub 키 때문에 어느 박스든 경고였다). 없는 선택 키는 정보로 남고 무엇이 닫히는지 말한다."""
+    _secrets_file(tmp_path, HWAXRISK_CRED_KEY=FERNET_KEY)
+    box = config.box_assessment(box_match=True, data_dir=tmp_path, env={})
+    assert box["secrets_valid"] is True and box["cred_key_source"] == "secrets"
+    assert _codes(box) == ["missing_optional"]
+    optional = box["reasons"][0]
+    assert optional["keys"] == list(config.OPTIONAL_SECRET_KEYS)
+    for key in config.OPTIONAL_SECRET_KEYS:
+        assert f"{key}: {config.OPTIONAL_KEY_EFFECTS[key]}" in optional["message"]
+    assert FERNET_KEY not in json.dumps(box)                       # 값은 싣지 않는다
+    # 선택 키를 다 넣으면 까닭이 없다. 게이트웨이 시크릿·백업 키는 환경변수로 줘도 있는 것이다(그렇게 읽는다).
+    _secrets_file(tmp_path, HWAXRISK_CRED_KEY=FERNET_KEY, HWAXRISK_PORTAL_PAT="p", HWAXRISK_PORTAL_PAT_RW="p",
+                  HWAXRISK_HEAX_SERVICE_PAT="p", HWAXRISK_AIDH_API_KEY="p")
+    env = {"HWAXRISK_BACKUP_KEY": "age1x", "HWAXRISK_HEAX_GATEWAY_SECRET": "s"}
+    assert config.box_assessment(box_match=True, data_dir=tmp_path, env=env)["reasons"] == []
+    # 파일에서만 읽는 키는 환경변수로 줘도 없는 것이다 — 앱이 그 값을 읽지 않는다.
+    _secrets_file(tmp_path, HWAXRISK_CRED_KEY=FERNET_KEY)
+    box = config.box_assessment(box_match=True, data_dir=tmp_path, env={"HWAXRISK_PORTAL_PAT": "p", **env})
+    assert box["reasons"][0]["keys"] == ["HWAXRISK_PORTAL_PAT", "HWAXRISK_PORTAL_PAT_RW", "HWAXRISK_HEAX_SERVICE_PAT",
+                                         "HWAXRISK_AIDH_API_KEY"]
+
+
+def test_a_cred_key_given_by_env_or_path_counts_as_present(tmp_path):
+    """env·path 로 준 키도 있는 것이다 — 종전 판정은 secrets.env 파일만 봐서 env 로 준 CRED_KEY 를 '없음' 으로 셌다."""
+    box = config.box_assessment(box_match=True, data_dir=tmp_path, env={"HWAXRISK_CRED_KEY": FERNET_KEY})
+    assert (box["secrets_valid"], box["cred_key_source"]) == (True, "env")
+    key_file = tmp_path / "outside.key"
+    key_file.write_text(FERNET_KEY, encoding="utf-8")
+    box = config.box_assessment(box_match=True, data_dir=tmp_path, env={"HWAXRISK_CRED_KEY_PATH": str(key_file)})
+    assert (box["secrets_valid"], box["cred_key_source"]) == (True, "path")
+    # 가리키는 파일이 없으면 path 가 아니다(load_cred_key 도 그 길을 건너뛴다).
+    box = config.box_assessment(box_match=True, data_dir=tmp_path, env={"HWAXRISK_CRED_KEY_PATH": str(tmp_path / "x")})
+    assert box["cred_key_source"] == "absent"
+
+
+def test_box_reasons_name_a_missing_cred_key_and_a_host_mismatch(tmp_path):
+    box = config.box_assessment(box_match=True, data_dir=tmp_path, env={})
+    assert box["secrets_valid"] is False and box["cred_key_source"] == "absent"
+    assert _codes(box)[:1] == ["missing_required"]
+    required = box["reasons"][0]
+    assert required["keys"] == ["HWAXRISK_CRED_KEY"]
+    assert "printf 'HWAXRISK_CRED_KEY=%s\\n'" in required["fix"] and str(tmp_path / "secrets.env") in required["fix"]
+    # 이관 직후 첫 기동 — 키가 있어도 secrets_valid 가 아니다.
+    _secrets_file(tmp_path, HWAXRISK_CRED_KEY=FERNET_KEY)
+    box = config.box_assessment(box_match=False, data_dir=tmp_path, env={})
+    assert box["secrets_valid"] is False and _codes(box)[0] == "host_mismatch"
+    assert "HWAXRISK_CRED_KEY" in box["reasons"][0]["fix"]
+
+
+def test_a_cred_key_fallback_is_a_reason_with_the_copy_the_same_value_fix(tmp_path):
+    """cred.key 폴백은 동작하지만 secrets_valid 가 아니다 — 고칠 곳은 '같은 값을 옮기라' 이고 그 명령은 값을 화면에 찍지 않는다.
+    새 키를 넣으면 등록된 PAT 가 풀리지 않는다는 말이 함께 있어야 한다(Fernet 키가 바뀌면 portal_pat_enc 가 안 풀린다)."""
+    key = config.load_cred_key(tmp_path)                            # 앱이 만드는 개발용 폴백
+    box = config.box_assessment(box_match=True, data_dir=tmp_path, env={})
+    assert box["secrets_valid"] is False and box["cred_key_source"] == "dev_fallback"
+    assert _codes(box)[0] == "cred_key_dev_fallback"
+    fix = box["reasons"][0]["fix"]
+    assert f"printf 'HWAXRISK_CRED_KEY=%s\\n' \"$(cat {tmp_path / 'cred.key'})\" >> {tmp_path / 'secrets.env'}" in fix
+    assert "새 키를 만들어 넣으면" in fix and "다시 띄운다" in fix
+    assert key.decode() not in json.dumps(box)
+    # 같은 값을 secrets.env 로 옮기면 출처가 secrets 이고 폴백 까닭이 사라진다 — 옮긴 키로 옛 암호문이 그대로 풀린다.
+    from cryptography.fernet import Fernet
+
+    old = Fernet(key).encrypt(FAKE_PAT.encode())
+    _secrets_file(tmp_path, HWAXRISK_CRED_KEY=key.decode())
+    box = config.box_assessment(box_match=True, data_dir=tmp_path, env={})
+    assert box["cred_key_source"] == "secrets" and "cred_key_dev_fallback" not in _codes(box)
+    assert box["secrets_valid"] is True
+    assert Fernet(config.load_cred_key(tmp_path, create=False)).decrypt(old).decode() == FAKE_PAT
+
+
+def test_me_box_carries_the_reasons_and_the_key_source(client, wired):
+    body = client.get("/api/me", headers=AUTH).json()
+    box = body["box"]
+    assert box["cred_key_source"] in ("secrets", "env", "path", "dev_fallback", "absent")
+    assert isinstance(box["reasons"], list) and all(set(r) >= {"code", "message", "fix"} for r in box["reasons"])
+    blocking = {"host_mismatch", "missing_required", "cred_key_dev_fallback"}
+    assert box["secrets_valid"] is not any(r["code"] in blocking for r in box["reasons"])
