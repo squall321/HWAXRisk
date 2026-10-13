@@ -36,6 +36,8 @@ class FieldSource:
         self.reuse_s = int(reuse_s if reuse_s is not None else 24 * 3600)
         # 게이트웨이 실이름들(§2.13.2). E10 은 probe 없이 돌아 이름 접두에 특히 취약하다.
         self.tool_names = tuple(tool_names)
+        # 묻는 자격 — 'user'(타깃 owner 의 포털 PAT) · 'service'(서비스 PAT) · None(모름). from_settings 가 정한다.
+        self.credential: str | None = None
 
     # ------------------------------------------------ 조회
     def fetch(self, store, target_key: str, owner_sub: str, tool: str,
@@ -118,11 +120,14 @@ def from_settings(settings=None, *, portal_pat: str | None = None, http_client: 
     # 침묵 한도와 벽시계 기한에 같은 값을 건다 — 침묵 한도만으로는 15초마다 ping 을 흘리는 게이트웨이의 호출을
     # 자르지 못한다. 종전 5초는 ping 보다 짧아서 걸렸을 뿐이고, 그래서 5초를 넘는 조회는 전부 놓쳤다.
     deadline = float(getattr(cfg, "risk_field_timeout_s", config.DEFAULT_FIELD_TIMEOUT_S))
-    return FieldSource(McpHttpClient(getattr(cfg, "gateway_mcp", ""),
-                                     headers={"Authorization": f"Bearer {token}"},
-                                     client=http_client, timeout=deadline, deadline_s=deadline),
-                       timeout=deadline,
-                       tool_names=gateway_tool_names(token=token, client=http_client))
+    source = FieldSource(McpHttpClient(getattr(cfg, "gateway_mcp", ""),
+                                       headers={"Authorization": f"Bearer {token}"},
+                                       client=http_client, timeout=deadline, deadline_s=deadline),
+                         timeout=deadline,
+                         tool_names=gateway_tool_names(token=token, client=http_client))
+    # 어느 자격으로 묻나 — 브리프 meta.field_credential 로 보인다(서비스 PAT 로 내려갔으면 'service', U-3).
+    source.credential = "user" if portal_pat else "service"
+    return source
 
 
 def for_target(store, target_key: str, *, settings=None, http_client: Any = None):

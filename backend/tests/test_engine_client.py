@@ -139,12 +139,24 @@ def test_a_chair_that_never_decided_is_told_apart_and_keeps_what_the_engine_retu
     assert str(failed.value) == "gateway_unavailable: 게이트웨이 불통 — 설정 MCP_CALL_TIMEOUT_S"
 
 
+OWNER_EMAIL = "me@example.com"
+
+
+def _owner_store() -> _Store:
+    """그 사람(me@example.com)이 등록한 넉넉한 포털 PAT — 패널의 유일한 자격이다(서비스 PAT 로 내려가지 않는다, U-3)."""
+    from app.common import now_epoch
+
+    return _Store({"portal_pat": _enc("owner-pat"), "pat_email": OWNER_EMAIL, "pat_groups_json": "[]",
+                   "pat_exp": now_epoch() + 30 * 86400})
+
+
 def _engine(tmp_path, handler, store=None, **limits):
-    return engine_client.PortalPanelEngine(store or _Store(), _settings(tmp_path, **limits),
-                                           transport=httpx.MockTransport(handler))
+    return engine_client.PortalPanelEngine(store or _owner_store(), _settings(tmp_path, **limits),
+                                           transport=httpx.MockTransport(handler), owner_sub=OWNER_EMAIL)
 
 
 def _service_pat(tmp_path) -> None:
+    """서비스 PAT 를 설정해 둔다 — 패널은 그것을 쓰지 않는다(U-3). 시험의 handler 에 svc-pat 가 보이면 그것이 결함이다."""
     (tmp_path / "secrets.env").write_text("HWAXRISK_PORTAL_PAT=svc-pat\n", encoding="utf-8")
     (tmp_path / "secrets.env").chmod(0o600)
 
@@ -165,9 +177,9 @@ def test_run_posts_deliberation_trigger_and_returns_contract(tmp_path):
     assert seen["/agent/chat"]["message"].startswith(engine_client.DELIBERATE_TRIGGER)
     assert seen["/agent/chat"]["conversation_id"] == "conv-1"
     assert "question" not in seen["/agent/chat"]["delib_opts"]     # question 은 message 로 간다
-    assert seen["/agent/chat:auth"] == "Bearer svc-pat"
+    assert seen["/agent/chat:auth"] == "Bearer owner-pat"          # 서비스 PAT 가 설정돼 있어도 사람의 PAT 다(U-3)
     assert result["conv_id"] == "conv-1"
-    assert result["credential"] == "service"
+    assert result["credential"] == "owner"
     assert result["call_path"] == "portal"
     assert result["decision_text"] == "결정문 본문"
 
@@ -195,9 +207,40 @@ def test_run_prefers_owner_pat_over_service(tmp_path):
 
 
 def test_run_without_any_credential_raises_pat_unavailable(tmp_path):
-    engine = _engine(tmp_path, lambda request: httpx.Response(200, text=""))
+    engine = _engine(tmp_path, lambda request: httpx.Response(200, text=""), _Store())
     with pytest.raises(engine_client.PatUnavailable):
         engine.run({"question": "q"})
+
+
+def test_a_panel_never_sends_the_service_pat_even_when_no_person_has_one(tmp_path):
+    """사람 자격이 없으면 서비스 PAT 가 설정돼 있어도 PatUnavailable 이고 포털에 요청을 하나도 보내지 않는다(U-3) — 종전에는 서비스
+    시야로 돌아 결과가 겉으로 정상이었다. 안내는 자동 등록과 그 사람의 마지막 자동 등록 실패를 말한다."""
+    from app.common import now_epoch
+
+    _service_pat(tmp_path)
+    seen: list[tuple[str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, request.headers.get("authorization")))
+        return httpx.Response(200, text=STREAM, headers={"content-type": "text/event-stream"})
+
+    class _PrefStore(_Store):
+        def get_user_prefs(self, owner_sub):
+            return {"portal_pat_auto": 1, "auto_error": "exchange-403: 원 PAT 가 기록되지 않았다"}
+
+    row = {"portal_pat": _enc("owner-pat"), "pat_email": OWNER_EMAIL, "pat_groups_json": "[]"}
+    cases = {"none": (_PrefStore(), OWNER_EMAIL), "nobody": (_PrefStore(), None),
+             "short": (_PrefStore({**row, "pat_exp": now_epoch() + 60}), OWNER_EMAIL),
+             "revoked": (_PrefStore({**row, "pat_exp": now_epoch() + 30 * 86400, "revoked_at": 1}), OWNER_EMAIL),
+             "undecryptable": (_PrefStore({**row, "portal_pat": "garbage", "pat_exp": now_epoch() + 30 * 86400}), OWNER_EMAIL)}
+    for name, (store, owner) in cases.items():
+        engine = engine_client.PortalPanelEngine(store, _settings(tmp_path), transport=httpx.MockTransport(handler))
+        with pytest.raises(engine_client.PatUnavailable) as exc:
+            engine.run({"question": "q"}, owner_sub=owner)
+        assert "서비스 계정으로 내려가지 않는다" in str(exc.value) and "자동으로 등록된다" in str(exc.value), name
+        # 그 사람의 마지막 자동 등록 실패를 함께 말한다(사람이 없으면 말할 사람도 없다).
+        assert ("마지막 자동 등록 실패: exchange-403" in str(exc.value)) is (owner is not None), name
+    assert seen == []
 
 
 def test_run_maps_429_to_engine_busy_and_connect_error_to_engine_error(tmp_path):
@@ -222,8 +265,8 @@ def test_run_maps_429_to_engine_busy_and_connect_error_to_engine_error(tmp_path)
 def test_a_429_hands_back_its_conversation_and_the_retry_reuses_it(tmp_path):
     """429 는 그 시도가 만든 대화를 `EngineBusy.conversation` 으로 돌려주고, 그것을 되받은 재시도는 새로 만들지 않는다.
 
-    다만 그 사이 자격이 바뀌었으면(사용자 PAT 수명이 여유 밑으로 내려가 서비스 계정으로 강등) 새로 만든다 —
-    포털은 남의 대화에 저장하는 것을 말없이 건너뛰므로, 그대로 쓰면 그 패널의 발언이 포털에 한 줄도 남지 않는다.
+    다만 그 사이 자격이 다른 사람의 것으로 바뀌었으면 새로 만든다 — 포털은 남의 대화에 저장하는 것을 말없이 건너뛰므로, 그대로
+    쓰면 그 패널의 발언이 포털에 한 줄도 남지 않는다. 사람 자격이 사라지면 서비스 계정으로 내려가지 않고 멈춘다(U-3).
     """
     from app.common import now_epoch
 
@@ -254,12 +297,17 @@ def test_a_429_hands_back_its_conversation_and_the_retry_reuses_it(tmp_path):
         engine.run({"question": "q"}, owner_sub="me@example.com", conversation=first.value.conversation)
     assert created == ["conv-1"] and second.value.conversation == first.value.conversation
 
-    # 그 사이 사용자 PAT 를 못 쓰게 됐다 — 서비스 계정으로 내려가며 대화를 새로 만든다.
+    # 그 사이 사용자 PAT 를 못 쓰게 됐다 — 서비스 계정으로 내려가지 않는다: 아무것도 보내지 않고 PatUnavailable 이다(U-3).
     store.row = None
     busy["on"] = False
-    result = engine.run({"question": "q"}, owner_sub="me@example.com", conversation=second.value.conversation)
-    assert created == ["conv-1", "conv-2"] and result["conv_id"] == "conv-2" and result["credential"] == "service"
-    assert chats == [("conv-1", "Bearer owner-pat"), ("conv-1", "Bearer owner-pat"), ("conv-2", "Bearer svc-pat")]
+    with pytest.raises(engine_client.PatUnavailable):
+        engine.run({"question": "q"}, owner_sub="me@example.com", conversation=second.value.conversation)
+    assert created == ["conv-1"] and len(chats) == 2
+    # 다른 사람의 자격으로 돌면(요청자 ↔ 소유자) 대화를 새로 만든다.
+    store.row = {**owner, "portal_pat": _enc("other-pat"), "pat_email": "other@example.com"}
+    result = engine.run({"question": "q"}, owner_sub="other@example.com", conversation=second.value.conversation)
+    assert created == ["conv-1", "conv-2"] and result["conv_id"] == "conv-2" and result["credential"] == "owner"
+    assert chats == [("conv-1", "Bearer owner-pat"), ("conv-1", "Bearer owner-pat"), ("conv-2", "Bearer other-pat")]
 
 
 def test_run_cuts_a_stream_that_outlives_the_panel_wall_clock(tmp_path):
@@ -578,9 +626,10 @@ def test_a_user_pat_must_outlive_the_panel_wall_clock(tmp_path):
         return _Store({"portal_pat": _enc("owner-pat"), "pat_email": "me@example.com",
                        "pat_groups_json": "[]", "pat_exp": now_epoch() + left})
 
-    # 종전 여유(1800초)는 넘지만 패널을 감싸지 못하는 수명 — 서비스 계정으로 내려간다.
-    short = _engine(tmp_path, handler, owner(margin - 60)).run({"question": "q"}, owner_sub="me@example.com")
-    assert short["credential"] == "service" and seen["/agent/chat"] == "Bearer svc-pat"
+    # 종전 여유(1800초)는 넘지만 패널을 감싸지 못하는 수명 — 서비스 계정으로 내려가지 않고 멈춘다(U-3).
+    with pytest.raises(engine_client.PatUnavailable):
+        _engine(tmp_path, handler, owner(margin - 60)).run({"question": "q"}, owner_sub="me@example.com")
+    assert seen == {}
     enough = _engine(tmp_path, handler, owner(margin + 60)).run({"question": "q"}, owner_sub="me@example.com")
     assert enough["credential"] == "owner" and seen["/agent/chat"] == "Bearer owner-pat"
     # 손잡이로 여유를 따로 정하면 그 값을 쓴다.

@@ -20,7 +20,7 @@ from app import config, planner, routes, runner
 from app.risk_store import MIGRATIONS, RiskStore
 from tests.rr import legacy_build as legacy
 from tests.rr import v3_build
-from tests.rr.test_legacy_flow import _IPV4, _SECRET_SHAPES, _all_text
+from tests.rr.test_legacy_flow import _IPV4, _SECRET_SHAPES, _all_text, register_job_person
 
 LATEST = MIGRATIONS[-1][0]
 V3_MANIFEST = json.loads((v3_build.V3_DIR / "manifest.json").read_text(encoding="utf-8"))
@@ -142,6 +142,8 @@ def test_the_queued_v3_job_runs_through_the_runner_after_the_rise(tmp_path, no_n
     cfg = dataclasses.replace(config.settings, data_dir=data_dir)
     engine = legacy.LegacyEngine(legacy.spec_builder(store, target["target_key"], planner.domain_of))
     try:
+        assert runner.claim_next_job(store, cfg) is None             # 서비스 PAT 만으로는 집지 않는다(U-3)
+        register_job_person(store, target["job_id"])
         job = runner.claim_next_job(store, cfg)
         assert job is not None and job["id"] == target["job_id"]
         out = runner.run_panel(store, cfg, engine, job)

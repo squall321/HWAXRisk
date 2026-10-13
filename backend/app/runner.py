@@ -352,8 +352,24 @@ def withheld_by_engine(events: Sequence[Mapping[str, Any]] | None) -> list[str]:
 
 
 # ---------------------------------------------------------------- 러너 자격(plan §6.7 3단계)
-_CREDENTIAL_FALLBACK = {"owner": "타깃 소유자의 PAT 로 돈다", "service": "서비스 계정으로 돈다",
-                        None: "쓸 자격이 없어 패널을 시작하지 않는다"}
+# 패널은 사람 자격으로만 돈다 — 요청자 → 타깃 owner 의 등록된 포털 PAT 이고 서비스 PAT 로 내려가지 않는다(리스크 앱 사람 자격 U-3,
+# 카드 대조 D-26 과 같은 규칙). 서비스 시야(조직 공개 과제만)로 돈 패널은 겉으로 정상인데 결과가 그 사람의 기대와 다르다.
+_CREDENTIAL_FALLBACK = {"owner": "타깃 소유자의 PAT 로 돈다", None: "쓸 자격이 없어 패널을 시작하지 않는다"}
+# 웹 설정 화면의 버튼 이름(entry.SETTINGS_BUTTON 과 같은 글자 — 러너는 entry 를 import 하지 않는다).
+_SETTINGS_BUTTON = "포털에서 발급해 등록"
+
+
+def pat_unavailable_guidance(store: Any, email: str | None) -> str:
+    """사람 자격이 없을 때의 안내 — 자동 등록이 어떻게 일어나는지 · 직접 등록하는 곳 · 그 사람의 마지막 자동 등록 실패(U-3 · R1)."""
+    text = ("패널은 사람 자격(포털 PAT)으로만 돈다 — 서비스 계정으로 내려가지 않는다. 웹에서 리스크 앱을 한 번 열거나 Claude 에서 다시"
+            f" 부르면 자동으로 등록된다. 설정 화면의 '{_SETTINGS_BUTTON}' 으로 직접 등록할 수도 있다.")
+    get_prefs = getattr(store, "get_user_prefs", None)
+    prefs = get_prefs(email) if email and callable(get_prefs) else None
+    if prefs and not prefs.get("portal_pat_auto"):
+        text += " 이 사람은 자동 등록을 꺼 두었다 — 설정에서 켜면 저절로 받는다."
+    if prefs and prefs.get("auto_error"):
+        text += f" 마지막 자동 등록 실패: {prefs['auto_error']}"
+    return text
 
 
 def _registered_pat(store: Any, email: str | None) -> tuple[dict | None, int]:
@@ -370,11 +386,12 @@ def _registered_pat(store: Any, email: str | None) -> tuple[dict | None, int]:
 
 def resolve_credential_with_note(store: Any, settings: Any | None, owner_sub: str | None,
                                  requester_sub: str | None = None) -> tuple[dict | None, str | None]:
-    """`resolve_credential` 의 본체 — (자격, 건너뛴 사유). 사유는 등록된 사용자 PAT 를 수명 때문에 못 썼을 때만 있다.
+    """`resolve_credential` 의 본체 — (자격, 사유). 자격이 있으면 사유는 요청자 PAT 를 수명 때문에 건너뛰었을 때만 있고, 자격이
+    없으면(None) 사유는 늘 있다 — 무엇이 모자라고 어떻게 받는지(`pat_unavailable_guidance`).
 
     사용자 PAT 는 남은 수명이 `config.credential_margin_s`(패널 벽시계 + 429 대기 + 600초)를 넘을 때만 쓴다 —
-    패널 도중에 만료될 토큰으로는 시작하지 않는다. 종전에는 여유가 1800초 고정이라 벽시계(2400초)보다 작았고,
-    모자라면 말없이 다음 자격으로 내려가 잡이 서비스 계정 시야로 도는데 만든 사람은 까닭을 몰랐다.
+    패널 도중에 만료될 토큰으로는 시작하지 않는다. 서비스 PAT 로는 내려가지 않는다(U-3) — 종전에는 모자라면 말없이 서비스 계정
+    시야로 돌아 만든 사람은 까닭을 몰랐다.
     """
     cfg = config.settings if settings is None else settings
     margin = config.credential_margin_s(cfg)
@@ -384,8 +401,7 @@ def resolve_credential_with_note(store: Any, settings: Any | None, owner_sub: st
         if short is None:
             return None
         return (f"{short[0]} 의 PAT 남은 수명 {max(short[1], 0) / 3600:.1f}시간이 필요 {margin / 3600:.1f}시간"
-                f"(HWAXRISK_CREDENTIAL_MARGIN_S = 패널 벽시계 + 대기 + 600초)에 못 미쳐 {_CREDENTIAL_FALLBACK[kind]}"
-                " — 포털에서 PAT 를 다시 발급해 등록하라")
+                f"(HWAXRISK_CREDENTIAL_MARGIN_S = 패널 벽시계 + 대기 + 600초)에 못 미쳐 {_CREDENTIAL_FALLBACK[kind]}")
 
     order = [("requester", requester_sub)] if requester_sub and requester_sub != owner_sub else []
     for kind, email in (*order, ("owner", owner_sub)):
@@ -393,16 +409,20 @@ def resolve_credential_with_note(store: Any, settings: Any | None, owner_sub: st
         if row is None:
             continue
         if left > margin:
-            return {"kind": kind, "email": row.get("pat_email") or email}, note(kind)
+            found = note(kind)
+            return ({"kind": kind, "email": row.get("pat_email") or email},
+                    found + " — 포털에서 PAT 를 다시 발급해 등록하라" if found else None)
         short = short or (str(email), left)
-    if config.load_secrets(cfg.data_dir).get("HWAXRISK_PORTAL_PAT"):
-        return {"kind": "service", "email": "service"}, note("service")
-    return None, note(None)
+    who = [e for _, e in (*order, ("owner", owner_sub)) if e]
+    why = note(None) or (f"{' · '.join(who) or '(사람 없음)'} 의 쓸 수 있는 포털 PAT 가 없어(등록 없음·폐기·복호 불가)"
+                         f" {_CREDENTIAL_FALLBACK[None]}")
+    return None, f"{why} — {pat_unavailable_guidance(store, who[0] if who else None)}"
 
 
 def resolve_credential(store: Any, settings: Any | None, owner_sub: str | None,
                        requester_sub: str | None = None) -> dict | None:
-    """(c) 잡을 만든 사람 → (b) 타깃 owner → (a) 서비스 계정 PAT 순으로 자격을 정한다. 셋 다 없으면 None.
+    """(c) 잡을 만든 사람 → (b) 타깃 owner 의 등록된 포털 PAT 순으로 자격을 정한다. 둘 다 없으면 None — 서비스 계정으로 내려가지
+    않는다(U-3).
 
     동료(editor)가 남의 과제에 잡을 만들 수 있게 되면서 '누구 자격으로 돌았나' 가 갈린다 — 첫 적중의
     email 을 `rr_jobs.credential_email` 에 적어 진행판·감사가 그 사실을 본다(plan §0.1.6·§6.7 3단계).
@@ -501,8 +521,9 @@ def gateway_delegates(store: Any) -> bool | None:
 # (gateway_unseen·gateway_folded_stale)은 패널 품질 `gateway_unverified` 로 간다(RV-3).
 DIFF_REF_WHY = {
     "diff_absent": "diff 나 그 과제가 원장에 없다.",
-    "service_credential": ("잡이 서비스 계정 자격으로 돈다 — 좌석은 조직 공개(mcp_visibility='org') 과제만 연다. 소유자나 잡을 만든"
-                           " 사람이 웹 설정에서 포털 PAT 를 등록하면 그 사람 자격으로 돈다."),
+    # 패널은 이제 서비스 계정으로 돌지 않는다(U-3) — 그 전에 서비스 자격으로 집힌 옛 잡·사람 없는 자격에서만 나온다.
+    "service_credential": ("잡 자격에 사람이 없다(서비스 계정 — 패널이 사람 자격으로만 돌기 전의 잡) — 좌석은 조직 공개"
+                           "(mcp_visibility='org') 과제만 연다. 소유자나 잡을 만든 사람의 포털 PAT 가 등록되면 그 사람 자격으로 돈다."),
     "not_member": "잡 자격의 사람이 이 과제의 소유자도 구성원도 아니다.",
     "gateway_sso_off": ("이 앱에 게이트웨이 SSO 시크릿(HWAXRISK_HEAX_GATEWAY_SECRET)이 없다 — 사람별 단언 발급(POST /api/auth/sso)이"
                         " 404 이고 단언도 검증되지 않아, 좌석은 늘 서비스 세션(heax 첫 관리자)으로 보여 이 과제를 not_visible 로 받는다."
@@ -683,6 +704,9 @@ def build_delib_opts(
                               seats=seats, panel_id=panel["id"], meta_out=brief_meta, profile=profile))
         if loss is not None and brief_meta.get("shielded"):
             loss["brief_shielded"] = list(brief_meta["shielded"])
+        # E10(현장 VOC·문헌)을 서비스 PAT 로 물었으면 그 패널 브리프에 남긴다 — 사람 자격이 없어 내려간 짧은 조회다(U-3).
+        if loss is not None and brief_meta.get("field_credential") == "service":
+            loss["field_credential"] = "service"
         # E0c 는 아래에서 제 좌석 계약표로 갈아 끼운다 — 브리프 쪽 E0c 의 절단은 좌석이 받은 것이 아니라 옮기지 않는다.
         clipped = {k: v for k, v in (brief_meta.get("clipped") or {}).items() if k != "E0c"}
         if loss is not None and clipped:
@@ -878,8 +902,8 @@ def create_job(
 ) -> dict:
     """배치 잡 1건을 만든다(POST /api/targets/{key}/jobs). Tier C 는 consent 필수, 러너 자격이 없으면 422.
 
-    `requester_sub` 는 잡을 만든 사람이다(동료 editor 일 수 있다) — 자격은 요청자 → 타깃 owner → 서비스 순이고
-    첫 적중의 email 이 `rr_jobs.credential_email` 에 남는다(plan §0.1.6).
+    `requester_sub` 는 잡을 만든 사람이다(동료 editor 일 수 있다) — 자격은 요청자 → 타깃 owner 의 포털 PAT 이고(서비스 계정으로
+    내려가지 않는다, U-3) 첫 적중의 email 이 `rr_jobs.credential_email` 에 남는다(plan §0.1.6).
     `consent_source` 는 동의가 들어온 입구다 — 'web'(웹 화면) · 'mcp'(Claude, 게이트웨이 위임 단언) · 'api'(개인 heax PAT Bearer 로
     부른 REST) · 'close_level'(C3 자동 후속).
     동의가 없으면 params 에는 None 으로 남는다(RV-7).
@@ -892,8 +916,7 @@ def create_job(
         raise AppError("E100", "Tier C 는 consent:true 명시 승인이 필요합니다.", 422)
     credential, credential_note = resolve_credential_with_note(store, cfg, owner_sub, requester_sub)
     if credential is None:
-        raise AppError("pat_unavailable", credential_note or
-                       "러너 자격이 없습니다 — 포털 PAT 를 등록하거나 서비스 PAT 를 설정하세요.", 422)
+        raise AppError("pat_unavailable", credential_note or pat_unavailable_guidance(store, requester_sub or owner_sub), 422)
 
     plan = planner.tier_plan(store, target_key, settings=cfg)
     row = next(t for t in plan["tiers"] if t["tier"] == tier)
@@ -1124,8 +1147,8 @@ def claim_next_job(store: Any, settings: Any | None = None) -> dict | None:
         job["params"] = _params(row)
         job["credential"] = credential["kind"]
         job["credential_email"] = credential.get("email")
-        # 사용자 PAT 를 수명 때문에 건너뛰었으면 그 사유를 잡 행에 남긴다(진행판의 '오류' 줄) — 말없이 서비스
-        # 계정으로 내려가면 좌석이 누구 시야로 조회했는지 아무도 모른다. 건너뛴 것이 없으면 지난 사유를 지운다.
+        # 요청자 PAT 를 수명 때문에 건너뛰고 타깃 owner 의 것으로 돌면 그 사유를 잡 행에 남긴다(진행판의 '오류' 줄) — 좌석이
+        # 누구 시야로 조회했는지 보이게 한다. 건너뛴 것이 없으면 지난 사유를 지운다.
         store.execute("UPDATE rr_jobs SET credential_email = ?, error = ? WHERE id = ?",
                       (credential.get("email"), credential_note, job["id"]))
         return job
@@ -1355,11 +1378,14 @@ def _finish_job(store: Any, job: Mapping[str, Any], settings: Any) -> dict:
     close_level = (target["close_level"] if target and target["close_level"] else settings.risk_default_close_level)
     if job["tier"] == "B" and close_level == "C3":
         try:
+            # 자격은 B 잡과 같은 사람 순서다(요청자 → 타깃 owner) — 서비스 계정으로 내려가지 않으므로(U-3) owner 만 넘기면
+            # 요청자 자격으로 돈 B 잡의 후속이 멈춘다.
             follow = create_job(
                 store, job["target_key"], "C", owner_sub=job["owner_sub"],
                 modifiers=(job.get("params") or {}).get("modifiers"),
                 user_memo=(job.get("params") or {}).get("user_memo"),
                 consent=True, settings=settings, consent_source="close_level",
+                requester_sub=(job.get("params") or {}).get("requester"),
             )
         except AppError as exc:
             if exc.code not in FOLLOW_UP_REFUSALS:
@@ -1372,8 +1398,9 @@ def _finish_job(store: Any, job: Mapping[str, Any], settings: Any) -> dict:
     return {"job_state": "completed", "next_job": None}
 
 
-# C3 자동 후속을 막는 문지기의 코드 — 이것만 받아 잡을 completed 로 닫는다(그 밖의 실패는 종전대로 올린다).
-FOLLOW_UP_REFUSALS: tuple[str, ...] = ("flow_mismatch", "review_job_running")
+# C3 자동 후속을 막는 문지기의 코드 — 이것만 받아 잡을 completed 로 닫는다(그 밖의 실패는 종전대로 올린다). 사람 자격이 없는
+# 것(pat_unavailable)도 그렇다 — 서비스 계정으로 내려가지 않으므로(U-3) 끝난 B 잡을 실패로 바꾸지 않고 까닭만 적는다.
+FOLLOW_UP_REFUSALS: tuple[str, ...] = ("flow_mismatch", "review_job_running", "pat_unavailable")
 
 
 def _diminishing(store: Any, target_key: str) -> bool:

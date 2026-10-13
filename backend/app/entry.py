@@ -54,9 +54,12 @@ def web_paths(*, project_id: str | None = None, target_key: str | None = None) -
 
 
 def fix_register_pat() -> str:
-    """러너·명단·dyna 캡처 자격이 없을 때의 고칠 곳 — 웹 설정 화면의 버튼 하나."""
-    return (f"웹 리스크 앱 설정 화면({web_paths()['settings']})에서 '{SETTINGS_BUTTON}' 을 누른다 — 그 브라우저의 포털 세션으로"
-            " 읽기 전용 PAT 를 발급해 이 앱에 등록한다. PAT 는 도구 인자로 받지 않는다(게이트웨이·대화 기록에 남는다).")
+    """러너·명단·dyna 캡처 자격이 없을 때의 고칠 곳 — 자동 등록(웹에서 앱 열기 · Claude 에서 다시 부르기)이 먼저, 안 되면 웹 설정
+    화면의 버튼 하나(리스크 앱 사람 자격 R1)."""
+    return ("포털 PAT 는 저절로 등록된다 — 웹에서 리스크 앱을 한 번 열거나 Claude 에서 다시 부르면(게이트웨이가 그 사람의 PAT 를 좁혀"
+            f" 받아 넘긴다) 된다. 안 되면 웹 리스크 앱 설정 화면({web_paths()['settings']})에서 '{SETTINGS_BUTTON}' 을 누른다 — 그"
+            " 브라우저의 포털 세션으로 읽기 전용 PAT 를 발급해 이 앱에 등록한다(자동 등록이 꺼져 있으면 거기서 켠다). PAT 는 도구 인자로"
+            " 받지 않는다(게이트웨이·대화 기록에 남는다).")
 
 
 def _delegated(ident: identity.Identity) -> bool:

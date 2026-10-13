@@ -228,7 +228,8 @@ def test_attribute_events_without_events_is_unattributable():
 
 
 # ---------------------------------------------------------------- 자격(plan §6.7 3단계)
-def test_resolve_credential_prefers_owner_then_service(risk_store, tmp_path):
+def test_resolve_credential_uses_the_owner_pat_and_never_the_service_pat(risk_store, tmp_path):
+    """패널 자격은 사람의 포털 PAT 뿐이다 — 서비스 PAT 가 설정돼 있어도 내려가지 않는다(리스크 앱 사람 자격 U-3)."""
     cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
     assert runner.resolve_credential(risk_store, cfg, OWNER) is None
 
@@ -251,12 +252,13 @@ def test_resolve_credential_prefers_owner_then_service(risk_store, tmp_path):
     secrets = tmp_path / "secrets.env"
     secrets.write_text("HWAXRISK_PORTAL_PAT=svc-pat\n", encoding="utf-8")
     secrets.chmod(0o600)
-    # 서비스 자격의 email 은 'service' 로 기록한다(rr_jobs.credential_email 이 사람 계정과 구분된다).
-    assert runner.resolve_credential(risk_store, cfg, OWNER) == {"kind": "service", "email": "service"}
+    # 서비스 PAT 가 있어도 None 이다 — 사유가 무엇이 모자라고 어떻게 받는지를 말한다.
+    credential, note = runner.resolve_credential_with_note(risk_store, cfg, OWNER)
+    assert credential is None and "서비스 계정으로 내려가지 않는다" in note and "자동으로 등록된다" in note
 
 
 def test_resolve_credential_tries_the_requester_before_the_target_owner(risk_store, tmp_path):
-    """(c) 요청자 → (b) 타깃 owner → (a) 서비스 3단이고 첫 적중의 email 이 정본이다(plan §0.1.6)."""
+    """(c) 요청자 → (b) 타깃 owner 2단이고 첫 적중의 email 이 정본이다(plan §0.1.6, 서비스로는 내려가지 않는다 — U-3)."""
     cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
     peer = "peer@x"
 
@@ -293,12 +295,12 @@ def test_a_pat_too_short_for_a_panel_is_passed_over_with_a_reason(risk_store, tm
     register(OWNER, 24)
     assert runner.resolve_credential_with_note(risk_store, cfg, OWNER) == ({"kind": "owner", "email": OWNER}, None)
 
-    # 등록은 됐는데 수명이 모자라고 다른 자격도 없다 — 패널을 시작하지 않고, 무엇이 모자란지 말한다.
+    # 등록은 됐는데 수명이 모자라고 다른 자격도 없다 — 패널을 시작하지 않고, 무엇이 모자란지와 어떻게 받는지를 말한다.
     register(OWNER, 6)
     credential, note = runner.resolve_credential_with_note(risk_store, cfg, OWNER)
     assert credential is None
     assert note == ("u@x 의 PAT 남은 수명 6.0시간이 필요 13.2시간(HWAXRISK_CREDENTIAL_MARGIN_S = 패널 벽시계 + 대기"
-                    " + 600초)에 못 미쳐 쓸 자격이 없어 패널을 시작하지 않는다 — 포털에서 PAT 를 다시 발급해 등록하라")
+                    " + 600초)에 못 미쳐 쓸 자격이 없어 패널을 시작하지 않는다 — " + runner.pat_unavailable_guidance(risk_store, OWNER))
     with pytest.raises(AppError) as exc:
         runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)
     assert (exc.value.code, exc.value.http_status, exc.value.message) == ("pat_unavailable", 422, note)
@@ -309,24 +311,22 @@ def test_a_pat_too_short_for_a_panel_is_passed_over_with_a_reason(risk_store, tm
     credential, note = runner.resolve_credential_with_note(risk_store, cfg, OWNER, peer)
     assert credential == {"kind": "owner", "email": OWNER}
     assert note.startswith("peer@x 의 PAT 남은 수명 6.0시간이") and "타깃 소유자의 PAT 로 돈다" in note
+    assert note.endswith("포털에서 PAT 를 다시 발급해 등록하라")
     out = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg, requester_sub=peer)
     assert (out["credential"], out["credential_note"]) == ("owner", note)
 
-    # 집을 때마다 다시 판정하고 사유를 잡 행에 남긴다 — 둘 다 모자라면 서비스 계정이다.
+    # 집을 때마다 다시 판정하고 사유를 잡 행에 남긴다 — 둘 다 모자라면 서비스 PAT 가 있어도 집지 않는다(U-3).
+    job = runner.claim_next_job(risk_store, cfg)
+    assert job["credential"] == "owner"
     secrets = tmp_path / "secrets.env"
     secrets.write_text("HWAXRISK_PORTAL_PAT=svc-pat\n", encoding="utf-8")
     secrets.chmod(0o600)
     register(OWNER, 6)
-    job = runner.claim_next_job(risk_store, cfg)
-    row = risk_store.query_one("SELECT state, credential_email, error FROM rr_jobs WHERE id = ?", (out["job_id"],))
-    assert (job["credential"], row["state"], row["credential_email"]) == ("service", "running", "service")
-    assert row["error"].startswith("peer@x 의 PAT 남은 수명 6.0시간이") and "서비스 계정으로 돈다" in row["error"]
-
-    # 서비스 PAT 마저 없으면 잡은 서 있고, 그 까닭이 pat_unavailable 뒤에 붙는다.
-    secrets.unlink()
     assert runner.claim_next_job(risk_store, cfg) is None
-    row = risk_store.query_one("SELECT state, error FROM rr_jobs WHERE id = ?", (out["job_id"],))
-    assert row["state"] == "running" and row["error"].startswith("pat_unavailable: peer@x 의 PAT 남은 수명")
+    row = risk_store.query_one("SELECT state, credential_email, error FROM rr_jobs WHERE id = ?", (out["job_id"],))
+    assert row["state"] == "running" and row["credential_email"] == OWNER          # 서비스로 바뀌지 않았다
+    assert row["error"].startswith("pat_unavailable: peer@x 의 PAT 남은 수명 6.0시간이")
+    assert "서비스 계정으로 내려가지 않는다" in row["error"] and "자동으로 등록된다" in row["error"]
     # PAT 를 다시 등록하면 다음 편성에서 그 자격으로 돌고 지난 사유는 지워진다.
     register(peer, 24)
     assert runner.claim_next_job(risk_store, cfg)["credential"] == "requester"
@@ -359,6 +359,38 @@ def test_the_engine_is_given_the_person_the_job_was_claimed_for(risk_store, tmp_
     quality = json.loads(risk_store.query_one(
         "SELECT quality_json FROM rr_panels WHERE id = ?", (out["panel_id"],))["quality_json"])
     assert quality["credential"] == "requester"
+
+
+def test_the_c3_follow_up_runs_as_the_same_people_and_never_falls_to_the_service_pat(risk_store, tmp_path):
+    """닫힘 레벨 C3 의 자동 후속 Tier C 는 B 잡과 같은 사람 순서(요청자 → 타깃 owner)로 자격을 고른다. 아무도 없으면 서비스 PAT 가
+    있어도 세우지 않고 끝난 B 잡에 까닭을 적는다 — B 잡은 completed 그대로다(U-3)."""
+    target_key = seeded(risk_store)
+    risk_store.execute("UPDATE rr_targets SET close_level = 'C3' WHERE target_key = ?", (target_key,))
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    peer = "peer@x"
+    risk_store.upsert_credential(peer, _enc("pat-peer"), "sub-2", peer, "[]", now_epoch() + 30 * 86400)
+
+    def finish(job_id: str) -> dict:
+        job = dict(risk_store.query_one("SELECT id, target_key, tier, owner_sub, params_json FROM rr_jobs WHERE id = ?",
+                                        (job_id,)))
+        job["params"] = json.loads(job.pop("params_json"))
+        return runner._finish_job(risk_store, job, cfg)
+
+    first = runner.create_job(risk_store, target_key, "B", owner_sub=OWNER, settings=cfg, requester_sub=peer)
+    out = finish(first["job_id"])
+    follow = risk_store.query_one("SELECT tier, credential_email, params_json FROM rr_jobs WHERE id = ?", (out["next_job"],))
+    assert (follow["tier"], follow["credential_email"]) == ("C", peer)
+    assert json.loads(follow["params_json"])["credential"] == "requester"
+
+    second = runner.create_job(risk_store, target_key, "B", owner_sub=OWNER, settings=cfg, requester_sub=peer)
+    risk_store.delete_credential(peer)
+    (tmp_path / "secrets.env").write_text("HWAXRISK_PORTAL_PAT=svc-pat\n", encoding="utf-8")
+    (tmp_path / "secrets.env").chmod(0o600)
+    out = finish(second["job_id"])
+    assert (out["next_job"], out["next_job_refused"]) == (None, "pat_unavailable")
+    row = risk_store.query_one("SELECT state, error FROM rr_jobs WHERE id = ?", (second["job_id"],))
+    assert row["state"] == "completed" and row["error"].startswith("pat_unavailable: C3 자동 후속 Tier C 를 세우지 않았다")
+    assert risk_store.query_one("SELECT COUNT(*) AS n FROM rr_jobs WHERE credential_email = 'service'")["n"] == 0
 
 
 def test_create_job_records_the_credential_email(risk_store, tmp_path):
@@ -415,9 +447,12 @@ def test_claim_next_job_marks_pat_unavailable_and_keeps_state(risk_store, tmp_pa
     job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
 
     risk_store.delete_credential(OWNER)                   # 자격이 사라졌다
+    risk_store.note_portal_pat_error(OWNER, "exchange-403: 원 PAT 가 기록되지 않았다")
     assert runner.claim_next_job(risk_store, cfg) is None
     row = risk_store.query_one("SELECT state, error FROM rr_jobs WHERE id = ?", (job_id,))
-    assert (row["state"], row["error"]) == ("queued", "pat_unavailable")
+    assert row["state"] == "queued" and row["error"].startswith("pat_unavailable: u@x 의 쓸 수 있는 포털 PAT 가 없어")
+    # 안내는 자동 등록이 어떻게 일어나는지와 그 사람의 마지막 자동 등록 실패를 함께 말한다.
+    assert "자동으로 등록된다" in row["error"] and "마지막 자동 등록 실패: exchange-403" in row["error"]
 
     give_credential(risk_store)                           # 자격이 생기면 다음 주기에 집는다
     job = runner.claim_next_job(risk_store, cfg)

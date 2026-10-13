@@ -1619,7 +1619,9 @@ def create_snapshot(project_id: str, body: SnapshotBody,
     if not out.get("reused"):
         store.execute("UPDATE rr_snapshots SET job_id = ?, capture_partial = ? WHERE id = ?",
                       (job_id, 1 if state == "partial" else 0, out["snapshot_id"]))
-    return {**out, "job_id": job_id, "job_state": state, "calls_reused": reused}
+    # 이 캡처가 어느 자격으로 읽었나 — MCP 는 user(본인 포털 PAT) · service(서비스 PAT — 짧은 캡처 호출이라 내려간다, U-3) · None.
+    credentials = {"mcp": "user" if portal_pat else ("service" if channels.get("portal_pat") else None)}
+    return {**out, "job_id": job_id, "job_state": state, "calls_reused": reused, "credentials": credentials}
 
 
 class DimBody(BaseModel):
@@ -2429,13 +2431,14 @@ def _roster_report(fetched: dict | None) -> dict:
     `relevance_source` 가 'unavailable' 이면 추천을 못 받아 좌석 순위를 키 순서로 매긴 것이고, `domains_failed` 의
     도메인은 좌석이 통째로 없다. 순위 1번이 Tier A 대표석이고 고정된 순위는 다시 매기지 않는다 — 종전 응답은
     `roster_source` 뿐이라, 조회가 반쯤 실패한 채 열린 타깃이 온전한 것과 똑같이 보였다.
-    `roster_notice` 는 조회가 기한(HWAXRISK_ROSTER_DEADLINE_S)을 넘겼을 때만 있다.
+    `roster_notice` 는 조회가 기한(HWAXRISK_ROSTER_DEADLINE_S)을 넘겼을 때만 있다. `roster_credential` 은 게이트웨이에 물은
+    자격이다 — user(타깃 owner 의 포털 PAT) · service(서비스 PAT — 사람 자격이 없어 내려갔다) · None(묻지 못했다, U-3).
     """
     if fetched is None:
         return {"roster_source": roster_module.SOURCE_BODY, "relevance_source": roster_module.SOURCE_BODY,
                 "domains_failed": []}
     out = {"roster_source": fetched["source"], "relevance_source": fetched["relevance_source"],
-           "domains_failed": list(fetched["domains_failed"])}
+           "domains_failed": list(fetched["domains_failed"]), "roster_credential": fetched.get("credential")}
     if fetched.get("notice"):
         out["roster_notice"] = fetched["notice"]
     return out

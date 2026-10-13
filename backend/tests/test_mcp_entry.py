@@ -212,8 +212,13 @@ def test_claude_entry_runs_from_project_to_job_and_lands_in_the_web_ledger(box):
     assert out["where"] == "job"
     blocked = {b["code"]: b for b in out["blocked"]}
     assert "포털에서 발급해 등록" in blocked["pat_unavailable"]["fix"]
+    # 서비스 PAT 가 설정돼 있어도 패널 잡은 그것으로 서지 않는다(U-3) — 안내는 자동 등록과 그 사람의 마지막 자동 등록 실패를 말한다.
+    write_secrets(box, HWAXRISK_HEAX_SERVICE_PAT="service-pat", HWAXRISK_PORTAL_PAT="svc-portal-pat")
+    box.store.note_portal_pat_error(OWNER, "exchange-403: 원 PAT 가 기록되지 않았다")
     refused = call("risk_start_job", target_key=target_key, tier="A")
     assert refused["error"] == "pat_unavailable" and "#/settings" in refused["detail"]["fix"]
+    assert "서비스 계정으로 내려가지 않는다" in refused["message"] and "자동으로 등록된다" in refused["message"]
+    assert "마지막 자동 등록 실패: exchange-403" in refused["message"]
     assert box.store.query("SELECT id FROM rr_jobs") == []
 
     # 7. 오래가는 PAT — 잡이 선다. Tier 는 누적이라 첫 잡은 도메인 대표석(A)이고, 길잡이도 그것을 권한다.

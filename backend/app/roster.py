@@ -188,15 +188,25 @@ class RosterSource:
 
 # ---------------------------------------------------------------- 자격·질의문
 def credential(store: Any, owner_sub: str | None, *, settings: Any | None = None) -> str:
-    """(b) 타깃 owner 의 포털 PAT → (a) 서비스 PAT 순(runner.resolve_credential 과 같은 규칙). 없으면 빈 문자열."""
+    """(b) 타깃 owner 의 포털 PAT → (a) 서비스 PAT 순. 없으면 빈 문자열.
+
+    명단 조회는 사람의 비공개 자료를 열지 않는 짧은 호출이라 서비스 PAT 로 내려간다(패널 잡과 다르다 — U-3). 무엇으로 돌았는지는
+    `credential_kind` 가 말하고 타깃 응답의 `roster_credential` 에 남는다.
+    """
+    return credential_with_kind(store, owner_sub, settings=settings)[0]
+
+
+def credential_with_kind(store: Any, owner_sub: str | None, *, settings: Any | None = None) -> tuple[str, str | None]:
+    """(PAT, 'user'·'service'·None) — `credential` 과 같은 순서이고 어느 자격인지를 함께 준다."""
     cfg = _cfg(settings)
     if owner_sub and store is not None:
         row = store.get_credential(owner_sub)
         # 복호는 identity 가 한다 — 키 없음·폐기 표기·손상은 None 이라 자격 (a) 로 내려간다(plan §8.2.7).
         pat = identity.credential_pat(row)
         if pat and int(row.get("pat_exp") or 0) > now_epoch() + CREDENTIAL_MARGIN_S:
-            return pat
-    return config.load_secrets(cfg.data_dir).get("HWAXRISK_PORTAL_PAT", "")
+            return pat, "user"
+    service = config.load_secrets(cfg.data_dir).get("HWAXRISK_PORTAL_PAT", "")
+    return service, ("service" if service else None)
 
 
 def query_text(store: Any, kind: str, ref_id: str) -> str:
@@ -246,6 +256,8 @@ def fetch_for_target(store: Any, *, kind: str, ref_id: str, owner_sub: str | Non
         fetched = source.fetch(cfg.risk_roster_domains, query_text(store, kind, ref_id), deadline_s=deadline_s)
         if fetched["deadline_exceeded"]:
             fetched["notice"] = _deadline_notice(fetched, deadline_s)
+        # 어느 자격으로 물었나(user · service · None) — 서비스 PAT 로 물었으면 타깃 응답에 그렇게 보인다(U-3).
+        fetched["credential"] = credential_with_kind(store, owner_sub, settings=cfg)[1] if source.available else None
         return fetched
     finally:
         source.close()

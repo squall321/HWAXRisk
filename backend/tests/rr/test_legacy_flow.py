@@ -19,12 +19,23 @@ from pathlib import Path
 import httpx
 import pytest
 
-from app import config, mcp_server, planner, registry, routes, runner
+from app import config, identity, mcp_server, planner, registry, routes, runner
+from app.common import now_epoch
 from app.risk_store import MIGRATIONS, RiskStore
 from tests.rr import legacy_build as legacy
 
 MANIFEST = json.loads((legacy.LEGACY_DIR / "manifest.json").read_text(encoding="utf-8"))
 OWNER = MANIFEST["owner"]
+
+
+def register_job_person(store, job_id: str) -> str:
+    """얼린 잡이 돌 사람(요청자 → 타깃 owner)의 포털 PAT 를 등록한다 — 패널은 사람 자격으로만 돈다(서비스 PAT 는 카나리로만 둔다,
+    리스크 앱 사람 자격 U-3). 등록한 이메일을 돌려준다."""
+    row = store.query_one("SELECT owner_sub, params_json FROM rr_jobs WHERE id = ?", (job_id,))
+    email = (json.loads(row["params_json"] or "{}").get("requester") or row["owner_sub"])
+    store.upsert_credential(email, identity.encrypt_pat(f"pat-{email}").decode("ascii"), "sub", email, "[]",
+                            now_epoch() + 30 * 86400)
+    return email
 
 
 def _thaw(directory: Path) -> Path:
@@ -131,9 +142,12 @@ def test_the_queued_job_runs_through_the_runner(frozen, no_network, tmp_path):
     secrets.chmod(0o600)
     cfg = dataclasses.replace(config.settings, data_dir=data_dir)
     engine = legacy.LegacyEngine(legacy.spec_builder(frozen, target["target_key"], planner.domain_of))
+    # 서비스 PAT 만으로는 집지 않는다(U-3) — 사람의 PAT 가 있어야 옛 잡도 돈다.
+    assert runner.claim_next_job(frozen, cfg) is None
+    person = register_job_person(frozen, target["job_id"])
 
     job = runner.claim_next_job(frozen, cfg)
-    assert job is not None and job["id"] == target["job_id"]
+    assert job is not None and job["id"] == target["job_id"] and job["credential_email"] == person
     out = runner.run_panel(frozen, cfg, engine, job)
     assert out["status"] == "done", out
     assert planner.check_invariants(frozen, target["target_key"]) == []

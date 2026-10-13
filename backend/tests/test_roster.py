@@ -438,7 +438,8 @@ def test_the_target_response_says_how_the_roster_was_degraded(wired, ident, gate
     assert (out["relevance_source"], out["domains_failed"]) == ("unavailable", ["sim"])
     assert "roster_notice" not in out                         # 기한을 넘긴 것은 아니다
     assert routes.refresh_roster("snap:s1", routes.RosterBody(), ident=ident) == {
-        "added_pending": 0, "roster_source": "gateway", "relevance_source": "unavailable", "domains_failed": ["sim"]}
+        "added_pending": 0, "roster_source": "gateway", "relevance_source": "unavailable", "domains_failed": ["sim"],
+        "roster_credential": "user"}
 
 
 def test_the_target_response_carries_the_deadline_notice(wired, ident, gateway_transport, clock):
@@ -492,7 +493,7 @@ def test_refresh_roster_fetches_the_gateway_and_appends_only_new_keys(wired, ide
 
     out = routes.refresh_roster("snap:s1", routes.RosterBody(), ident=ident)
     assert out == {"added_pending": 4, "roster_source": "gateway", "relevance_source": "no_query",
-                   "domains_failed": []}
+                   "domains_failed": [], "roster_credential": "user"}
     rows = wired.query("SELECT agent_key, rank_in_domain FROM rr_roster WHERE target_key = ? AND domain = 'mech'"
                        " ORDER BY rank_in_domain", ("snap:s1",))
     assert [(r["agent_key"], r["rank_in_domain"]) for r in rows] == [
@@ -503,7 +504,27 @@ def test_refresh_roster_without_credential_reports_unavailable(wired, ident, gat
     _target(wired, "snap:s1", kind="snap", ref_id="s1")
     gateway_transport(_boom)
     assert routes.refresh_roster("snap:s1", routes.RosterBody(), ident=ident) == {
-        "added_pending": 0, "roster_source": "unavailable", "relevance_source": "unavailable", "domains_failed": []}
+        "added_pending": 0, "roster_source": "unavailable", "relevance_source": "unavailable", "domains_failed": [],
+        "roster_credential": None}
+
+
+def test_a_roster_asked_with_the_service_pat_says_so(wired, ident, gateway_transport, tmp_path, monkeypatch):
+    """명단 조회는 사람 자격이 없으면 서비스 PAT 로 내려가는 짧은 호출이다(패널 잡과 다르다 — U-3) — 그때 응답이 그렇게 말한다."""
+    _target(wired, "snap:s1", kind="snap", ref_id="s1")
+    (tmp_path / "secrets.env").write_text("HWAXRISK_PORTAL_PAT=svc-pat\n", encoding="utf-8")
+    (tmp_path / "secrets.env").chmod(0o600)
+    monkeypatch.setattr(config, "settings", types.SimpleNamespace(**{**vars(config.settings), "data_dir": tmp_path}))
+    seen: list[str] = []
+    inner = _gateway_handler()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers.get("authorization"))
+        return inner(request)
+
+    gateway_transport(handler)
+    out = routes.refresh_roster("snap:s1", routes.RosterBody(), ident=ident)
+    assert out["roster_source"] == "gateway" and out["roster_credential"] == "service"
+    assert seen and set(seen) == {"Bearer svc-pat"}
 
 
 # ------------------------------------------------- §4.8 스냅샷 변경 시 무효화 배선

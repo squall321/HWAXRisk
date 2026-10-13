@@ -2143,6 +2143,8 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
             "user_memo_cut": memo_cut(next((i for i in items if i["key"] == "M"), None)),
             "excluded": sorted(excluded),
             "external_search": "available" if external_ok else "unavailable",
+            # E10 조회 자격 — user · service(사람 자격이 없어 서비스 PAT 로 물었다, U-3) · None(채널 없음).
+            "field_credential": getattr(field, "credential", None) if field is not None else None,
             "lint": lint,
             # 판단어·인젝션에 걸려 «» 로 싸거나 자리표시자로 바꾼 줄(빈 목록이어도 싣는다). 러너가 패널 품질에 옮긴다.
             "shielded": shielded,

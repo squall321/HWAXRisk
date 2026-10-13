@@ -1391,6 +1391,32 @@ def test_the_field_channel_uses_the_target_owners_credential(risk_store, monkeyp
     assert seen["portal_pat"] is None
 
 
+def test_the_field_channel_says_which_credential_it_asks_with(risk_store, monkeypatch, tmp_path):
+    """E10 은 사람 자격이 없으면 서비스 PAT 로 내려가는 짧은 조회다(패널 잡과 다르다 — U-3) — 브리프 meta.field_credential 이 그
+    사실을 말하고, 러너는 'service' 일 때 그 패널 브리프에 남긴다."""
+    import dataclasses
+
+    from app import adapters, config
+
+    monkeypatch.setattr(adapters.registry, "gateway_tool_names", lambda **kw: ())
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, data_dir=tmp_path))
+    assert field_source.from_settings(config.settings) is None                # 아무 자격도 없다
+    user = field_source.from_settings(config.settings, portal_pat="owner-pat")
+    assert user.credential == "user"
+    (tmp_path / "secrets.env").write_text("HWAXRISK_PORTAL_PAT=svc-pat\n", encoding="utf-8")
+    (tmp_path / "secrets.env").chmod(0o600)
+    service = field_source.from_settings(config.settings)
+    assert service.credential == "service"
+    for channel in (user, service):
+        channel.mcp.close()
+    _field_target(risk_store)
+    stub = field_source.FieldSource(_FieldStub({"get_top_issues": ISSUES, "search_scholar": PAPERS}))
+    stub.credential = "service"
+    built = brief.build_brief(risk_store, "snap:S1", field=stub, shield_lint=True)
+    assert built["meta"]["field_credential"] == "service"
+    assert brief.build_brief(risk_store, "snap:S1", shield_lint=True)["meta"]["field_credential"] is None
+
+
 def test_a_fabricated_quote_on_field_evidence_is_caught(risk_store):
     """§4.4.2 quote 대조 — 좌석이 읽은 것은 E10 줄 그 자체다.
 

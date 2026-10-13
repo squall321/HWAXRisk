@@ -16,7 +16,7 @@ from app.common import http_client, now_epoch
 # 프로토콜·예외의 정본은 러너다(러너가 이 모듈을 import 하지 않으므로 순환이 없다).
 from app.runner import (
     NO_DECISION_CODES, EngineBusy, EngineError, EngineNoDecision, EngineRejected, EngineStreamLost, PanelEngine,
-    PatUnavailable, ReviewEngine,
+    PatUnavailable, ReviewEngine, pat_unavailable_guidance,
 )
 
 log = logging.getLogger("hwax_risk.engine")
@@ -257,9 +257,9 @@ def collect_stream(frames: Iterable[tuple[str, dict]]) -> dict:
 class PortalPanelEngine:
     """앱 → 포털 `POST {HWAXRISK_PORTAL_BASE}/agent/chat`(SSE) — plan §6.7.1 확정 경로 (A).
 
-    자격은 러너가 넘긴 사람(잡이 요청자 자격으로 집혔으면 요청자, 아니면 타깃 owner)이 등록한 포털 PAT →
-    (a) 서비스 계정 PAT 순이고(runner.resolve_credential 과 같은 규칙·같은 수명 여유), 둘 다 없으면
-    `PatUnavailable` 이다. 좌석 도구 스코핑은 포털이 검증한 PAT 의 groups 로 강제된다 — 앱은 그룹을 자칭하지 않는다.
+    자격은 러너가 넘긴 사람(잡이 요청자 자격으로 집혔으면 요청자, 아니면 타깃 owner)이 등록한 포털 PAT 하나다
+    (runner.resolve_credential 과 같은 규칙·같은 수명 여유). 없으면 `PatUnavailable` 이고 요청을 하나도 보내지 않는다 — 서비스
+    계정 PAT 로 내려가지 않는다(U-3). 좌석 도구 스코핑은 포털이 검증한 PAT 의 groups 로 강제된다 — 앱은 그룹을 자칭하지 않는다.
     """
 
     def __init__(self, store: Any, settings: Any, *, transport: httpx.BaseTransport | None = None,
@@ -274,7 +274,7 @@ class PortalPanelEngine:
     def _credential(self, owner_sub: str | None) -> dict:
         if owner_sub and self.store is not None:
             row = self.store.get_credential(owner_sub)
-            # 복호는 identity 가 한다 — 키 없음·폐기 표기·손상은 None 이고 그때는 자격 (a) 로 강등한다(§8.2.7).
+            # 복호는 identity 가 한다 — 키 없음·폐기 표기·손상은 None 이다(§8.2.7).
             pat = identity.credential_pat(row)
             if pat and int(row.get("pat_exp") or 0) > now_epoch() + config.credential_margin_s(self.settings):
                 try:
@@ -283,11 +283,10 @@ class PortalPanelEngine:
                     groups = []
                 return {"kind": "owner", "pat": pat, "email": row.get("pat_email"),
                         "groups": groups if isinstance(groups, list) else []}
-        secrets = config.load_secrets(self.settings.data_dir)
-        pat = secrets.get("HWAXRISK_PORTAL_PAT")
-        if pat:
-            return {"kind": "service", "pat": pat, "email": None, "groups": []}
-        raise PatUnavailable("러너 자격이 없습니다 — 서비스 PAT 또는 owner 포털 PAT 를 등록하세요.")
+        # 서비스 PAT 가 설정돼 있어도 쓰지 않는다(U-3) — 서비스 시야로 돈 패널은 겉으로 정상인데 결과가 그 사람의 것이 아니다.
+        raise PatUnavailable(f"패널 자격이 없습니다 — {owner_sub or '(사람 없음)'} 의 포털 PAT 가 없거나 쓸 수 없거나 남은 수명이"
+                             f" 패널 여유 {config.credential_margin_s(self.settings)}초에 못 미칩니다. "
+                             + pat_unavailable_guidance(self.store, owner_sub))
 
     def _base(self) -> str:
         return str(self.settings.portal_base).rstrip("/")
@@ -382,7 +381,7 @@ class PortalPanelEngine:
         question = str(delib_opts.get("question") or "")
         credential = self._credential(owner_sub if owner_sub is not None else self.owner_sub)
         # 429 뒤의 재시도는 앞 시도가 만든 대화를 다시 쓴다 — 시도마다 만들면 패널 하나가 빈 대화를 시도 수만큼 남긴다.
-        # 다만 그 사이 자격이 바뀌었으면(사용자 PAT 수명이 여유 밑으로 내려가 서비스 계정으로 강등) 새로 만든다 —
+        # 다만 그 사이 자격이 바뀌었으면(그 사람이 PAT 를 다시 등록했다) 새로 만든다 —
         # 포털은 남의 대화에 저장하는 것을 말없이 건너뛰어, 그대로 쓰면 이 패널의 발언이 포털에 남지 않는다.
         made_by = f"{credential['kind']}:{credential['email'] or ''}"
         if conversation and conversation[1] == made_by:
