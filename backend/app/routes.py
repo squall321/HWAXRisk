@@ -1561,10 +1561,13 @@ def create_snapshot(project_id: str, body: SnapshotBody,
     portal_pat = identity.credential_pat(credential)
     if int(credential.get("pat_exp") or 0) <= now_epoch() + runner.CREDENTIAL_MARGIN_S:
         portal_pat = None
-    # 사람이 시작한 캡처다 — 서비스 PAT 가 없으면 호출자 본인의 heax 토큰으로 REST 를 읽는다.
+    # 사람이 시작한 캡처다 — REST 는 ① 웹 호출자의 heax 토큰 ② 게이트웨이 위임 호출이면 그 사람의 포털 PAT 로 게이트웨이 REST
+    # 다리 ③ 서비스 PAT 순이다(R2). 위임 신원은 heax 토큰이 없어 종전에는 서비스 PAT 가 없는 박스에서 늘 MCP 폴백이었다.
+    gateway_pat = (adapters_registry.gateway_rest_pat(credential, margin_s=runner.CREDENTIAL_MARGIN_S)[0]
+                   if ident.source == "sso" and ident.delegated else None)
     channels = adapters_registry.clients_from_settings(
         config.settings, config.load_secrets(config.settings.data_dir), portal_pat=portal_pat,
-        heax_token=ident.token)
+        heax_token=ident.token, gateway_pat=gateway_pat)
     principal = adapters_base.Principal(owner_sub=owner_sub, portal_pat=channels["portal_pat"],
                                         service_pat=channels["service_pat"])
     try:
@@ -1619,8 +1622,10 @@ def create_snapshot(project_id: str, body: SnapshotBody,
     if not out.get("reused"):
         store.execute("UPDATE rr_snapshots SET job_id = ?, capture_partial = ? WHERE id = ?",
                       (job_id, 1 if state == "partial" else 0, out["snapshot_id"]))
-    # 이 캡처가 어느 자격으로 읽었나 — MCP 는 user(본인 포털 PAT) · service(서비스 PAT — 짧은 캡처 호출이라 내려간다, U-3) · None.
-    credentials = {"mcp": "user" if portal_pat else ("service" if channels.get("portal_pat") else None)}
+    # 이 캡처가 어느 자격으로 읽었나 — MCP 는 user(본인 포털 PAT) · service(서비스 PAT — 짧은 캡처 호출이라 내려간다, U-3) · None,
+    # REST 는 caller_token · user_pat_gateway · service_pat · None(R2).
+    credentials = {"mcp": "user" if portal_pat else ("service" if channels.get("portal_pat") else None),
+                   "rest": channels.get("rest_credential")}
     return {**out, "job_id": job_id, "job_state": state, "calls_reused": reused, "credentials": credentials}
 
 

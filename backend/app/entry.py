@@ -431,15 +431,21 @@ def _credentials(store: Any, ident: identity.Identity, owner: str) -> dict:
     usable = row is not None and identity.credential_pat(row) is not None
     left = int(row.get("pat_exp") or 0) - now_epoch() if row is not None else None
     runner_credential, runner_note = runner.resolve_credential_with_note(store, None, owner, ident.email)
+    # 캡처의 REST 채널 — create_snapshot 과 같은 함수·같은 순서다(R2): caller_token(웹 호출자의 heax 토큰) · user_pat_gateway(게이트웨이
+    # 위임 호출이고 그 사람의 포털 PAT 로 게이트웨이 REST 다리) · service_pat · None.
+    gateway_pat, gateway_why = (adapters_registry.gateway_rest_pat(row, margin_s=runner.CREDENTIAL_MARGIN_S)
+                                if _delegated(ident) else (None, None))
+    capture_rest = adapters_registry.rest_channel_kind(
+        heax_token=ident.token, gateway_pat=gateway_pat, service_pat=secrets.get("HWAXRISK_HEAX_SERVICE_PAT"))
     return {
         "portal_pat": {"registered": row is not None, "usable": usable, "seconds_left": left,
                        "revoked_at": row.get("revoked_at") if row is not None else None},
         "runner": runner_credential,
         "runner_note": runner_note,
         "roster": bool(roster_module.credential(store, owner)),
-        # 캡처의 REST 채널(clients_from_settings) — 서비스 PAT 또는 호출자 본인의 heax 토큰. 게이트웨이 위임 신원은 토큰이 없다.
-        "capture_rest": ("service_pat" if secrets.get("HWAXRISK_HEAX_SERVICE_PAT")
-                         else "caller_token" if ident.token else None),
+        "capture_rest": capture_rest,
+        # 위임 호출인데 게이트웨이 REST 다리를 못 쓰는 까닭(쓰거나 위임 호출이 아니면 None).
+        "capture_rest_note": gateway_why if capture_rest != "user_pat_gateway" else None,
         # 캡처의 MCP 채널 — create_snapshot 과 같은 규칙(남은 수명 > CREDENTIAL_MARGIN_S 인 본인 PAT → 서비스 PAT).
         "capture_mcp": ("user_pat" if usable and left is not None and left > runner.CREDENTIAL_MARGIN_S
                         else "service_pat" if secrets.get("HWAXRISK_PORTAL_PAT") else None),
@@ -488,17 +494,21 @@ _CAPTURE_FIX = {
 
 def _fix_gate_blocked(reason: str | None, project_id: str) -> str:
     if reason == state_module.UNKNOWN_BLOCKING_REASON:
-        return (f"mcad 를 REST(/tree)로 읽지 못해 단위를 검문할 수 없었다 — 웹 과제 화면({web_paths(project_id=project_id)['project']})"
-                "에서 다시 캡처하거나(로그인 토큰으로 REST 를 읽는다), 운영자가 앱 secrets.env 에 HWAXRISK_HEAX_SERVICE_PAT 를"
-                " 넣은 뒤 risk_capture_snapshot 을 다시 부른다.")
+        return ("mcad 를 REST(/tree)로 읽지 못해 단위를 검문할 수 없었다 — Claude(게이트웨이 위임)로 캡처하면 그 사람의 등록된 포털"
+                " PAT 로 게이트웨이 REST(step-forge)를 읽는다. 그 PAT 는 남은 수명이 캡처 여유를 넘고 aud 에 step-forge 가 있어야 한다 —"
+                " 웹에서 리스크 앱을 한 번 열거나 Claude 에서 다시 부르면 자동으로 등록되고, 설정 화면에서 직접 등록할 수도 있다. 그 뒤"
+                f" risk_capture_snapshot 을 다시 부른다. 아니면 웹 과제 화면({web_paths(project_id=project_id)['project']})에서 다시"
+                " 캡처하거나(로그인 토큰으로 REST 를 읽는다), 운영자가 앱 secrets.env 에 HWAXRISK_HEAX_SERVICE_PAT 를 넣은 뒤"
+                " risk_capture_snapshot 을 다시 부른다.")
     return "소스 앱에서 단위를 mm 로 맞추거나 모델 크기 불일치를 고친 뒤 risk_capture_snapshot 을 다시 부른다. G6 은 ack 로 넘길 수 없다."
 
 
-def _rest_channel_absent(project_id: str) -> dict:
+def _rest_channel_absent(project_id: str, why: str | None = None) -> dict:
     return _blocked(
         "rest_channel_absent",
-        "이 박스에는 소스 앱 REST 를 읽을 서비스 자격이 없고, 게이트웨이를 거친 호출에는 로그인 토큰이 없다 — Claude 에서 캡처하면"
-        " mcad 가 MCP 폴백으로 읽혀 G6 이 unit_unknown 으로 막힌다.",
+        "이 호출에는 소스 앱 REST 를 읽을 자격이 없다 — 게이트웨이 REST 다리(그 사람의 포털 PAT)를 못 쓰고"
+        + (f"({why})" if why else "") + ", 게이트웨이를 거친 호출에는 웹 로그인 토큰이 없으며, 이 박스에는 서비스 자격"
+        "(HWAXRISK_HEAX_SERVICE_PAT)도 없다. Claude 에서 캡처하면 mcad 가 MCP 폴백으로 읽혀 G6 이 unit_unknown 으로 막힌다.",
         _fix_gate_blocked(state_module.UNKNOWN_BLOCKING_REASON, project_id))
 
 
@@ -575,7 +585,8 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
                                     source_id=source["id"]))
     if {"dyna", "dyna_result"} & set(kinds) and creds["capture_mcp"] != "user_pat":
         notes.append("dyna 는 사람별 세션이라 본인 PAT 가 있어야 읽힌다 — 없으면 dyna 가 빈 채 캡처된다. " + fix_register_pat())
-    capture_blockers = [_rest_channel_absent(project_id)] if "mcad" in kinds and creds["capture_rest"] is None else []
+    capture_blockers = ([_rest_channel_absent(project_id, creds["capture_rest_note"])]
+                        if "mcad" in kinds and creds["capture_rest"] is None else [])
 
     # 2. 캡처
     with _capturing_lock:

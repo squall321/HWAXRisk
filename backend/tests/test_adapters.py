@@ -283,6 +283,86 @@ def test_source_calls_wait_120s_for_a_reply_and_10s_for_a_connection(tmp_path):
     assert (seen["gw.test"], seen["heax.test"]) == (waits, waits)
 
 
+# ---------------------------------------------------------------- 캡처 REST 채널의 자격 순서(리스크 앱 사람 자격 R2)
+def _fake_pat(aud, *, exp_in: int = 30 * 86400) -> str:
+    """서명이 가짜인 포털 PAT 모양(aud 만 본다)."""
+    import base64
+    import time
+
+    payload = {"sub": "u", "email": "u@x", "aud": aud, "scope": "api", "scopes": ["read"], "jti": "j",
+               "exp": int(time.time()) + exp_in}
+    seg = lambda obj: base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")  # noqa: E731
+    return f"{seg({'alg': 'RS256'})}.{seg(payload)}.sig"
+
+
+@pytest.mark.parametrize("given,kind,host,path,auth", [
+    ({"heax_token": "web-token", "gateway_pat": "user-pat", "service": "service-pat"}, "caller_token",
+     "heax.test", "/apps/step_forge/api/projects/x/tree", "Bearer web-token"),
+    ({"gateway_pat": "user-pat", "service": "service-pat"}, "user_pat_gateway",
+     "gw.test", "/api/step-forge/api/projects/x/tree", "Bearer user-pat"),
+    ({"service": "service-pat"}, "service_pat", "heax.test", "/apps/step_forge/api/projects/x/tree", "Bearer service-pat"),
+    ({}, None, None, None, None),
+], ids=["caller_token", "user_pat_gateway", "service_pat", "none"])
+def test_the_capture_rest_channel_picks_caller_token_then_gateway_then_service(tmp_path, given, kind, host, path, auth):
+    """① 웹 호출자의 heax 토큰(소스 앱 곧바로) ② 위임 호출의 사람 PAT 로 게이트웨이 REST 다리(`/api/step-forge/…`) ③ 서비스 PAT ④ 없음 —
+    고른 자격은 rest_credential 로 돌아오고, 고르지 않은 자격은 어디에도 실리지 않는다. 다리는 GET 만 한다."""
+    import types
+
+    seen: list[tuple[str, str, str, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.method, request.url.host, request.url.path, request.headers.get("authorization")))
+        return httpx.Response(200, json={"ok": True})
+
+    settings = types.SimpleNamespace(gateway_mcp="https://gw.test/mcp", heax_base="https://heax.test", data_dir=tmp_path)
+    secrets = {"HWAXRISK_HEAX_SERVICE_PAT": given["service"]} if given.get("service") else {}
+    channels = adapters_registry.clients_from_settings(
+        settings, secrets, heax_token=given.get("heax_token"), gateway_pat=given.get("gateway_pat"),
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert channels["rest_credential"] == kind and channels["mcp"] is None
+    reply = channels["rest"].get("/apps/step_forge/api/projects/x/tree")
+    if kind is None:
+        assert channels["rest"].available is False and reply["error"] == "no_credential" and seen == []
+        return
+    assert reply["ok"] is True and seen == [("GET", host, path, auth)]
+
+
+def test_the_gateway_rest_bridge_maps_only_known_sites_and_keeps_a_path_prefix():
+    """게이트웨이 사이트가 없는 소스 앱 경로는 부르지 않는다. 게이트웨이 주소 앞의 경로(공개 오리진의 /mcp-gw)는 지킨다."""
+    import types
+
+    from app import config
+
+    seen: list[str] = []
+    client = httpx.Client(transport=httpx.MockTransport(lambda r: seen.append(str(r.url)) or httpx.Response(200, json={})))
+    base = config.gateway_rest_base(types.SimpleNamespace(gateway_mcp="https://host.test/mcp-gw/mcp"))
+    assert base == "https://host.test/mcp-gw"
+    assert config.gateway_rest_base(types.SimpleNamespace(gateway_mcp="http://127.0.0.1:9110/mcp/")) == "http://127.0.0.1:9110"
+    bridge = adapters_base.GatewayRestClient(base, "user-pat", client=client)
+    assert bridge.get("/apps/other_app/api/x") == {"ok": False, "error": "no_gateway_site", "http_status": None}
+    assert bridge.get("/elsewhere/x")["error"] == "no_gateway_site" and seen == []
+    assert bridge.get("/apps/step_forge/api/projects/p/parts", {"limit": 5})["ok"] is True
+    assert seen == ["https://host.test/mcp-gw/api/step-forge/api/projects/p/parts?limit=5"]
+
+
+def test_the_gateway_bridge_takes_only_a_usable_pat_that_names_the_site():
+    """다리에 싣는 사람 PAT — 풀리고, 남은 수명이 여유를 넘고, aud 에 step-forge 가 있어야 한다(게이트웨이는 aud 로 사이트를 연다)."""
+    from app import identity
+    from app.common import now_epoch
+
+    def row(pat: str, left: int, **extra) -> dict:
+        return {"portal_pat": identity.encrypt_pat(pat).decode("ascii"), "pat_exp": now_epoch() + left, **extra}
+
+    good = _fake_pat(["mcp-gateway", "step-forge"])
+    assert adapters_registry.gateway_rest_pat(row(good, 7200), margin_s=1800) == (good, None)
+    for bad, words in ((None, "등록된 포털 PAT 가 없다"), (row(good, 7200, revoked_at=1), "등록된 포털 PAT 가 없다"),
+                       (row(good, 1800), "캡처 여유 1800초 이하"),
+                       (row(_fake_pat(["mcp-gateway"]), 7200), "aud 에 게이트웨이 REST 사이트(step-forge)가 없다"),
+                       (row("not-a-jwt", 7200), "aud 에 게이트웨이 REST 사이트")):
+        pat, why = adapters_registry.gateway_rest_pat(bad, margin_s=1800)
+        assert pat is None and words in why, (bad, why)
+
+
 def test_a_source_call_that_times_out_names_the_limit_and_the_knob():
     """침묵 한도에 걸린 호출은 호출 행에 값과 손잡이를 남긴다 — 'transport_error' 만으로는 어느 한도인지 모른다."""
     def silent(request: httpx.Request) -> httpx.Response:

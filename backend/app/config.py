@@ -330,6 +330,15 @@ def load_settings(env: Mapping[str, str] | None = None) -> Settings:
     )
 
 
+def gateway_rest_base(cfg: object | None = None) -> str:
+    """게이트웨이 REST 다리의 뿌리 — `HWAXRISK_GATEWAY_MCP` 에서 끝의 `/mcp` 를 뗀 것(`http://127.0.0.1:9110/mcp` →
+    `http://127.0.0.1:9110`). 게이트웨이는 같은 앱에 `/api/<site>/<path>` 를 연다(HWAXMcpGateway rest_proxy). 앞에 경로가 붙은
+    공개 주소(`…/mcp-gw/mcp`)도 그 경로를 지킨다. 손잡이를 따로 두지 않는다 — 두 주소가 갈리면 MCP 는 되는데 REST 만 죽는다."""
+    cfg = settings if cfg is None else cfg
+    base = str(getattr(cfg, "gateway_mcp", "") or "").rstrip("/")
+    return base[: -len("/mcp")] if base.endswith("/mcp") else base
+
+
 def panel_timeout_s(cfg: object | None = None) -> int:
     """패널 벽시계(초). 0 이면 끈 것이다 — 그때 패널을 끊는 것은 줄 사이 침묵 한도뿐이다."""
     cfg = settings if cfg is None else cfg

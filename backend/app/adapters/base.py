@@ -122,11 +122,17 @@ class RestGetClient:
             self._client = http_client(timeout=self.timeout)
         return self._client
 
+    def _url(self, path: str) -> str | None:
+        """부를 주소 — 소스 앱 경로(`/apps/<slug>/api/…`) 그대로 heax Caddy 뒤에 붙인다. None 이면 이 채널로 못 부르는 경로다."""
+        return f"{self.base_url}{path}"
+
     def get(self, path: str, params: Mapping[str, Any] | None = None) -> dict:
         """GET {base}{path}. 성공 {'ok': True, 'result': …, 'http_status': 200}."""
         if not self.available:
             return {"ok": False, "error": "no_credential", "http_status": None}
-        url = f"{self.base_url}{path}"
+        url = self._url(path)
+        if url is None:
+            return {"ok": False, "error": "no_gateway_site", "http_status": None}
         try:
             response = self._http().get(
                 url, params=dict(params or {}), timeout=self.timeout,
@@ -146,6 +152,25 @@ class RestGetClient:
         if self._owns_client and self._client is not None:
             self._client.close()
             self._client = None
+
+
+# 게이트웨이 REST 다리의 사이트 — 소스 앱 경로 머리 `/apps/<slug>` → 게이트웨이 사이트 키. 게이트웨이 provision-config.sh 의
+# rest["step-forge"] 가 `<heax>/apps/step_forge` 로 가므로 `/apps/step_forge/api/…` 는 `{게이트웨이}/api/step-forge/api/…` 다.
+GATEWAY_REST_SITES: dict[str, str] = {"step_forge": "step-forge"}
+
+
+class GatewayRestClient(RestGetClient):
+    """게이트웨이 REST 다리(GET 전용)로 소스 앱 REST 를 **그 사람의 포털 PAT** 로 읽는다(리스크 앱 사람 자격 R2).
+
+    게이트웨이는 PAT(aud 에 사이트 키, scope=api, 폐기 아님)와 그 사람의 지금 권한을 보고 사이트의 서비스 자격을 실어 넘긴다 —
+    감사에는 그 사람으로 남는다. 다리에 없는 소스 앱 경로는 부르지 않고 `no_gateway_site` 로 답한다.
+    """
+
+    def _url(self, path: str) -> str | None:
+        parts = path.split("/", 3)            # ['', 'apps', '<slug>', '<나머지>']
+        if len(parts) < 4 or parts[0] or parts[1] != "apps" or parts[2] not in GATEWAY_REST_SITES:
+            return None
+        return f"{self.base_url}/api/{GATEWAY_REST_SITES[parts[2]]}/{parts[3]}"
 
 
 def tool_matches(name: str, want: str) -> bool:

@@ -304,6 +304,80 @@ def test_another_caller_cannot_write_to_my_project(box):
     assert [p["id"] for p in call("risk_next_step")["projects"]] == [theirs["id"]]
 
 
+# ---------------------------------------------------------------- 캡처 REST 채널의 자격(리스크 앱 사람 자격 R2)
+def jwt_pat(email: str, aud: list[str]) -> str:
+    """서명이 가짜인 포털 PAT 모양 — 앱은 aud 만 읽어 게이트웨이 REST 다리를 열 수 있는지 본다(검증은 게이트웨이 몫)."""
+    import base64
+
+    payload = {"sub": "s", "email": email, "aud": aud, "scope": "api", "scopes": ["read"], "jti": f"jti-{email}",
+               "exp": now_epoch() + 30 * 86400}
+    seg = lambda obj: base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")  # noqa: E731
+    return f"{seg({'alg': 'RS256'})}.{seg(payload)}.sig"
+
+
+def register_jwt(box, email: str, aud: list[str]) -> str:
+    pat = jwt_pat(email, aud)
+    box.store.upsert_credential(email, identity.encrypt_pat(pat).decode("ascii"), "sub", email, "[]", now_epoch() + 30 * 86400)
+    return pat
+
+
+def test_capture_rest_follows_caller_token_then_the_gateway_pat_then_the_service_pat(box):
+    """facts.credentials.capture_rest 는 create_snapshot 과 같은 순서다 — 웹 호출자의 heax 토큰 → 위임 호출의 사람 PAT 로 게이트웨이
+    REST 다리 → 서비스 PAT → 없음. 위임 호출이 다리를 못 쓰면 그 까닭(capture_rest_note)을 말한다."""
+    delegated = routes.mcp_identity(_request_as(OWNER))
+    assert delegated.delegated is True and delegated.token is None
+    creds = entry._credentials(box.store, delegated, OWNER)
+    assert creds["capture_rest"] is None and "등록된 포털 PAT 가 없다" in creds["capture_rest_note"]
+    write_secrets(box, HWAXRISK_HEAX_SERVICE_PAT="service-pat")
+    assert entry._credentials(box.store, delegated, OWNER)["capture_rest"] == "service_pat"
+    # aud 에 step-forge 가 없는 PAT 는 다리를 못 연다(게이트웨이가 aud 로 사이트를 연다) — 서비스 PAT 로 간다.
+    register_jwt(box, OWNER, ["mcp-gateway"])
+    creds = entry._credentials(box.store, delegated, OWNER)
+    assert creds["capture_rest"] == "service_pat" and "step-forge" in creds["capture_rest_note"]
+    register_jwt(box, OWNER, ["mcp-gateway", "step-forge"])
+    creds = entry._credentials(box.store, delegated, OWNER)
+    assert (creds["capture_rest"], creds["capture_rest_note"]) == ("user_pat_gateway", None)
+    # 웹 호출자는 제 로그인 토큰이 먼저다.
+    assert entry._credentials(box.store, web_ident(OWNER), OWNER)["capture_rest"] == "caller_token"
+
+
+def test_a_claude_capture_reads_rest_through_the_gateway_with_the_persons_pat(box):
+    """서비스 PAT 가 없는 박스에서도 위임 호출의 캡처가 그 사람의 PAT 로 게이트웨이 REST 다리를 읽어 G6 이 unit_unknown 으로 막히지
+    않는다. 웹 로그인 토큰은 없고(위임 신원), 고른 자격은 캡처 응답 credentials.rest 에 남는다."""
+    act_as(box, OWNER)
+    apps = FakeSourceApps()
+    seen: dict = {}
+
+    def channels(settings, secrets=None, *, portal_pat=None, heax_token=None, gateway_pat=None, **_):
+        seen.update(heax_token=heax_token, gateway_pat=gateway_pat)
+        out = apps.channels()
+        if not (heax_token or gateway_pat or (secrets or {}).get("HWAXRISK_HEAX_SERVICE_PAT")):
+            out["rest"].close()
+            out["rest"] = RestGetClient("https://heax.test", None)
+        out["rest_credential"] = adapters_registry.rest_channel_kind(
+            heax_token=heax_token, gateway_pat=gateway_pat, service_pat=(secrets or {}).get("HWAXRISK_HEAX_SERVICE_PAT"))
+        return out
+
+    box.monkeypatch.setattr(adapters_registry, "clients_from_settings", channels)
+    pid = call("risk_create_project", code="GWREST", name="게이트웨이 REST", classification="internal")["id"]
+    call("risk_add_source", project_id=pid, kind="mcad", ref=SOURCE_REFS["mcad"])
+    register_jwt(box, OWNER, ["mcp-gateway"])
+    out = call("risk_next_step", project_id=pid)
+    absent = {b["code"]: b for b in out["blocked"]}["rest_channel_absent"]
+    assert "step-forge" in absent["message"] and absent["fix"].index("게이트웨이 REST") < absent["fix"].index("웹 과제 화면")
+
+    pat = register_jwt(box, OWNER, ["mcp-gateway", "step-forge"])
+    out = call("risk_next_step", project_id=pid)
+    assert out["facts"]["credentials"]["capture_rest"] == "user_pat_gateway"
+    assert "rest_channel_absent" not in {b["code"] for b in out["blocked"]}
+    snap = call("risk_capture_snapshot", project_id=pid)
+    assert seen == {"heax_token": None, "gateway_pat": pat}
+    assert snap["credentials"]["rest"] == "user_pat_gateway" and snap["blocked"] is False
+    # 웹으로 캡처하면 제 로그인 토큰이 먼저이고 사람 PAT 는 다리에 싣지 않는다(위임 호출이 아니다).
+    web = routes.create_snapshot(pid, routes.SnapshotBody(), ident=web_ident(OWNER))
+    assert seen == {"heax_token": "heax-web-token", "gateway_pat": None} and web["credentials"]["rest"] == "caller_token"
+
+
 # ---------------------------------------------------------------- 게이트웨이 길에 REST 자격이 없는 박스
 def test_without_a_rest_credential_the_claude_capture_is_blocked_and_says_where_to_capture(box):
     """위임 신원에는 heax 토큰이 없다 — 서비스 PAT 가 없는 박스에서 mcad 는 MCP 폴백으로 읽혀 G6 이 unit_unknown 으로 막는다.

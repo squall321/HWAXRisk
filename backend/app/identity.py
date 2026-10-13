@@ -268,6 +268,21 @@ def decrypt_pat(blob: bytes | str | None) -> str | None:
         return None
 
 
+def unverified_claims(pat: str | None) -> dict:
+    """PAT(JWT) 의 payload — 서명은 보지 않는다(등록 때 포털이 확인했고 쓰는 쪽이 다시 확인한다). 읽지 못하면 빈 dict.
+
+    게이트웨이 REST 다리를 열 수 있는 PAT 인지(aud 에 사이트가 있는지) 보는 데만 쓴다. 값은 로그하지 않는다.
+    """
+    parts = str(pat or "").split(".")
+    if len(parts) != 3:
+        return {}
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4)))
+    except (ValueError, UnicodeDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def pat_scopes(claims: Mapping[str, Any]) -> list[str]:
     """PAT 클레임의 scopes 를 정규화한다. `risk_pat_require_read_only` 면 `['read']` 만 통과(422 `pat_scope_too_broad`).
 

@@ -7,11 +7,13 @@ from typing import Any, Mapping, Sequence
 
 import httpx
 
-from app import config, ir_builder
+from app import config, identity, ir_builder
 from app.adapters import dyna as dyna_adapter
 from app.adapters import ecad_stub, mcad
 from app.adapters.base import (
+    GATEWAY_REST_SITES,
     CallRecorder,
+    GatewayRestClient,
     IrAdapter,
     Principal,
     Probe,
@@ -320,17 +322,53 @@ def capture_all(*, sources: Sequence[Mapping[str, Any]], principal: Principal,
     return {"snapshot_id": sid, "results": results, "calls": recorder.calls, "context": context}
 
 
+# 캡처 REST 채널의 자격(리스크 앱 사람 자격 R2) — 앞의 것이 있으면 그것을 쓴다.
+#   caller_token     웹 호출자 본인의 heax 토큰으로 소스 앱(`/apps/step_forge/api/…`)을 곧바로 읽는다
+#   user_pat_gateway 게이트웨이 위임 호출이고 그 사람의 등록된 포털 PAT 가 쓸 만하면 게이트웨이 REST 다리
+#                    (`{게이트웨이}/api/step-forge/api/…`, GET 전용)로 그 사람 이름으로 읽는다
+#   service_pat      박스의 HWAXRISK_HEAX_SERVICE_PAT
+#   None             REST 를 읽을 자격이 없다 — mcad 는 MCP 폴백(mcp_degraded)으로 읽혀 G6 이 unit_unknown 이 된다
+REST_CHANNEL_KINDS: tuple[str, ...] = ("caller_token", "user_pat_gateway", "service_pat")
+
+
+def rest_channel_kind(*, heax_token: str | None, gateway_pat: str | None, service_pat: str | None) -> str | None:
+    """캡처 REST 채널이 고를 자격 — caller_token · user_pat_gateway · service_pat · None(REST_CHANNEL_KINDS 순서)."""
+    for kind, value in zip(REST_CHANNEL_KINDS, (heax_token, gateway_pat, service_pat)):
+        if value:
+            return kind
+    return None
+
+
+def gateway_rest_pat(row: Mapping[str, Any] | None, *, margin_s: int, now: int | None = None) -> tuple[str | None, str | None]:
+    """게이트웨이 REST 다리에 실을 그 사람의 포털 PAT — (PAT, None) 또는 (None, 못 쓰는 까닭).
+
+    등록된 PAT 가 풀리고(폐기·복호 실패 아님), 남은 수명이 `margin_s`(캡처의 사용자 PAT 여유와 같다)를 넘고, aud 에 게이트웨이
+    사이트 키(step-forge)가 있어야 한다 — 게이트웨이는 aud 로 그 사이트를 연다(HWAXMcpGateway rest_proxy `_verify`).
+    """
+    pat = identity.credential_pat(row)
+    if pat is None:
+        return None, "그 사람의 등록된 포털 PAT 가 없다(없음·폐기·복호 불가)"
+    left = int((row or {}).get("pat_exp") or 0) - (now_epoch() if now is None else int(now))
+    if left <= int(margin_s):
+        return None, f"그 사람의 포털 PAT 남은 수명 {max(left, 0)}초가 캡처 여유 {int(margin_s)}초 이하다"
+    aud = identity.unverified_claims(pat).get("aud")
+    sites = sorted(set(GATEWAY_REST_SITES.values()))
+    if not set(aud if isinstance(aud, list) else [aud]) & set(sites):
+        return None, f"그 사람의 포털 PAT 의 aud 에 게이트웨이 REST 사이트({'·'.join(sites)})가 없다"
+    return pat, None
+
+
 def clients_from_settings(settings, secrets: Mapping[str, str] | None = None, *,
                           portal_pat: str | None = None, heax_token: str | None = None,
+                          gateway_pat: str | None = None,
                           http_client: httpx.Client | None = None,
                           timeout: float | httpx.Timeout | None = None) -> dict:
-    """Settings·secrets.env 로 캡처 채널을 만든다 — 게이트웨이 MCP(포털 PAT)와 heax REST.
+    """Settings·secrets.env 로 캡처 채널을 만든다 — 게이트웨이 MCP(포털 PAT)와 소스 앱 REST.
 
-    포털 PAT 가 없으면 mcp_client 는 None 이다. REST 채널의 자격은 두 갈래다 —
-    서비스 PAT(`HWAXRISK_HEAX_SERVICE_PAT`, 무인 배치용)가 있으면 그것을 쓰고, 없으면 사람이 시작한
-    캡처에 한해 **호출자 본인의 heax 토큰**(`heax_token`)을 그대로 쓴다. 그래서 로그인한 사용자는
-    별도 자격 발급 없이도 REST 채널이 살아나고, 자격이 아무것도 없을 때만 mcp_degraded 로 간다.
-    소스 앱은 읽기 전용이고 StepForge 는 per-user 격리가 없으므로(정찰 실측) 대리 읽기의 권한 확대는 없다.
+    포털 PAT 가 없으면 mcp_client 는 None 이다. REST 채널의 자격은 `rest_channel_kind` 순서다 — ① 웹 호출자 본인의 heax 토큰
+    (`heax_token`) ② 게이트웨이 위임 호출이면 그 사람의 포털 PAT 로 게이트웨이 REST 다리(`gateway_pat` — 호출자가
+    `gateway_rest_pat` 로 고른다) ③ 서비스 PAT(`HWAXRISK_HEAX_SERVICE_PAT`) ④ 없음(mcp_degraded). 고른 자격은 `rest_credential`
+    로 돌려준다. 소스 앱은 읽기 전용이고 StepForge 는 per-user 격리가 없으므로(정찰 실측) 대리 읽기의 권한 확대는 없다.
     """
     from app.ra_client import McpHttpClient  # noqa: PLC0415 — 순환 임포트를 피하려 지연 임포트한다.
 
@@ -338,15 +376,21 @@ def clients_from_settings(settings, secrets: Mapping[str, str] | None = None, *,
         timeout = source_timeout(settings)
     secrets = dict(secrets or {})
     token = portal_pat or secrets.get("HWAXRISK_PORTAL_PAT")
-    service_pat = secrets.get("HWAXRISK_HEAX_SERVICE_PAT") or (heax_token or None)
+    service = secrets.get("HWAXRISK_HEAX_SERVICE_PAT") or None
+    rest_kind = rest_channel_kind(heax_token=heax_token, gateway_pat=gateway_pat, service_pat=service)
     mcp_client = None
     if token:
         mcp_client = McpHttpClient(getattr(settings, "gateway_mcp", ""),
                                    headers={"Authorization": f"Bearer {token}"},
                                    client=http_client, timeout=timeout)
-    rest_client = RestGetClient(getattr(settings, "heax_base", ""), service_pat,
-                                client=http_client, timeout=timeout)
+    if rest_kind == "user_pat_gateway":
+        rest_token = None
+        rest_client: RestGetClient = GatewayRestClient(config.gateway_rest_base(settings), gateway_pat,
+                                                       client=http_client, timeout=timeout)
+    else:
+        rest_token = heax_token if rest_kind == "caller_token" else service
+        rest_client = RestGetClient(getattr(settings, "heax_base", ""), rest_token, client=http_client, timeout=timeout)
     # 게이트웨이 실이름 목록(§2.13.2) — 자격이 있을 때만 받고 60 s 캐시를 탄다. 실패는 빈 튜플이다.
     names = gateway_tool_names(token=token, client=http_client) if mcp_client is not None else ()
-    return {"mcp": mcp_client, "rest": rest_client, "portal_pat": token, "service_pat": service_pat,
-            "tool_names": names}
+    return {"mcp": mcp_client, "rest": rest_client, "portal_pat": token, "service_pat": rest_token,
+            "rest_credential": rest_kind, "tool_names": names}
