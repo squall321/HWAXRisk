@@ -1,4 +1,4 @@
-# RiskStore — user_version==1·rr_ 표 전수(plan §5.2.2 DDL)+살림 2표·migrate 멱등·기존 DB pre-migrate 사본·코드보다 높은 user_version 예외
+# RiskStore — user_version==1·rr_ 표 전수(plan §5.2.2 DDL)+살림 3표·migrate 멱등·기존 DB pre-migrate 사본·코드보다 높은 user_version 예외
 from __future__ import annotations
 
 import re
@@ -14,7 +14,7 @@ LATEST = MIGRATIONS[-1][0]
 
 # plan §5.2.2 A~H 의 CREATE TABLE 이름 — 본문에 실린 표는 41개(A 계획 33표 + 소유·수명주기·사람 개입 4 + 계보·출처 2 + 입력·부분 실패 2).
 DDL_TABLES = re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", _DDL_V1_SQL)
-HOUSEKEEPING = {"_schema_migrations", "_user_credentials"}
+HOUSEKEEPING = {"_schema_migrations", "_user_credentials", "_user_prefs"}
 # v4(재설계 M2) 가 더한 표 — 검토 단위(WP2) 둘과 셀 원장(WP3b) 다섯(M2.md 5절 #2).
 V4_TABLES = {"rr_unit_builds", "rr_units", "rr_expert_reports", "rr_review_cells", "rr_card_verdicts",
              "rr_card_packs", "rr_review_calls"}
@@ -100,6 +100,9 @@ def test_migrate_creates_v1_tables(risk_store, tmp_path):
     assert _columns(db_path, "_user_credentials") == {
         "owner_sub", "portal_pat_enc", "pat_sub", "pat_email", "pat_groups_json", "pat_scopes_json",
         "pat_jti", "pat_exp", "revoked_at", "revoked_seen_at", "registered_at"}
+    # 자동 등록 스위치·기록(리스크 앱 사람 자격 R1) — 버전 밖 살림 표라 v4 지문(PUSHED_DDL_SHA256)은 그대로다.
+    assert _columns(db_path, "_user_prefs") == {
+        "owner_sub", "portal_pat_auto", "auto_source", "auto_at", "auto_error", "auto_error_at"}
     assert risk_store.schema_version() == LATEST
     # v1 표 41개는 그대로 있고 v2 가 더한 표가 뒤에 붙는다.
     assert set(DDL_TABLES) <= set(risk_store.tables())

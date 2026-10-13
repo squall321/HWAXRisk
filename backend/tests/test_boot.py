@@ -556,7 +556,8 @@ def test_meta_runtime_shows_the_knobs_and_their_sources_to_admins_only(tmp_path,
     assert body["knobs"]["HWAXRISK_REVIEW_ENABLED"] == {"value": True, "source": "knobs.env"}
     assert body["knobs"]["HWAXRISK_UNITS_MAX"] == {"value": 70, "source": "env"}
     assert body["knobs"]["HWAXRISK_REVIEW_CALL_TIMEOUT_S"] == {"value": 18000, "source": "default"}
-    assert set(body["knobs"]) == {k.env for k in config.REVIEW_KNOBS}
+    assert set(body["knobs"]) == {k.env for k in config.BOX_KNOBS}
+    assert body["knobs"]["HWAXRISK_PAT_RENEW_BEFORE_S"] == {"value": 7 * 86400, "source": "default"}
     assert body["knobs_file"] == str(tmp_path / "knobs.env")
     assert body["runner_lock"]["held"] is True and body["runner_lock"]["holder"]["boot_id"] == lock.boot_id
     assert body["schema_version"] == LATEST_SCHEMA and body["app_version"] == settings.app_version

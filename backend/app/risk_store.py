@@ -1,4 +1,4 @@
-# 앱 DB(SQLite) 저장소 — RiskStore(stdlib sqlite3 + Lock), PRAGMA user_version 마이그레이션(v1 = plan §5.2.2 rr_* 41표 DDL 전문), 살림 표 _schema_migrations·_user_credentials
+# 앱 DB(SQLite) 저장소 — RiskStore(stdlib sqlite3 + Lock), PRAGMA user_version 마이그레이션(v1 = plan §5.2.2 rr_* 41표 DDL 전문), 살림 표 _schema_migrations·_user_credentials·_user_prefs
 from __future__ import annotations
 
 import fcntl
@@ -830,14 +830,19 @@ def prune_backups(db_path: Path | str, *, keep: int = BACKUP_KEEP, protect_versi
         log.info("오래된 DB 사본 %d개를 지웠다 — %s", len(removed), ", ".join(sorted(removed)))
     return removed
 
-# 살림 표 2개 — rr_ 접두가 아니고 export 대상이 아니다(plan §5.2.5 (6)·§8.2.7). 버전 밖에서 항상 CREATE TABLE IF NOT EXISTS.
+# 살림 표 3개 — rr_ 접두가 아니고 export 대상이 아니다(plan §5.2.5 (6)·§8.2.7). 버전 밖에서 항상 CREATE TABLE IF NOT EXISTS.
 # _user_credentials 열 정의는 plan §8.2.7 전문 그대로다 — 평문 열 portal_pat 은 폐기고 값은 portal_pat_enc(BLOB) 하나에만 있다.
+# _user_prefs 는 사람별 포털 PAT 자동 등록의 스위치와 마지막 자동 등록·실패다(리스크 앱 사람 자격 R1) — 버전 밖이라 v5 가 필요 없다.
 _HOUSEKEEPING_DDL: list[str] = [
     "CREATE TABLE IF NOT EXISTS _schema_migrations(version INTEGER PRIMARY KEY, applied_at INTEGER, app_version TEXT)",
     "CREATE TABLE IF NOT EXISTS _user_credentials(owner_sub TEXT PRIMARY KEY, portal_pat_enc BLOB NOT NULL, "
     "pat_sub TEXT, pat_email TEXT, pat_groups_json TEXT, pat_scopes_json TEXT NOT NULL, pat_jti TEXT NOT NULL, "
     "pat_exp INTEGER, revoked_at INTEGER, revoked_seen_at INTEGER, registered_at INTEGER)",
+    "CREATE TABLE IF NOT EXISTS _user_prefs(owner_sub TEXT PRIMARY KEY, portal_pat_auto INTEGER NOT NULL DEFAULT 1, "
+    "auto_source TEXT, auto_at INTEGER, auto_error TEXT, auto_error_at INTEGER)",
 ]
+# 자동 등록 실패 글의 상한(자) — 게이트웨이가 보내는 글이라 길이를 그쪽이 정하지 않게 한다.
+AUTO_ERROR_MAX = 500
 
 
 class RiskStore:
@@ -882,7 +887,7 @@ class RiskStore:
         전체를 데이터 디렉터리의 migrate.lock 안에서 돈다 — 겹쳐 뜬 둘째 프로세스는 첫째가 끝날 때까지 기다렸다가 다시
         읽은 버전으로 판정한다. 기존 DB 에 적용할 버전이 있으면 적용 직전 `<db>.pre-migrate-v<출발 버전>-<ts>` 사본을
         남긴다(plan §5.2.5 (6)). 같은 출발 버전의 사본이 있고 그 뒤로 DB 가 바뀌지 않았으면 다시 뜨지 않는다(X2-01).
-        DB 버전이 코드 최대 버전보다 높으면 예외(기동 실패). 끝나면 사본을 갈래마다 둘만 남기고 살림 표 2개를 만든다.
+        DB 버전이 코드 최대 버전보다 높으면 예외(기동 실패). 끝나면 사본을 갈래마다 둘만 남기고 살림 표 셋을 만든다.
         """
         with self._lock, _file_lock(self.db_path.parent / MIGRATE_LOCK_FILENAME):
             conn = self.conn
@@ -1094,6 +1099,44 @@ class RiskStore:
             if self._tx_depth == 0:
                 self.conn.commit()
         return cur.rowcount
+
+    # ------------------------------------------------------------ 살림 표 _user_prefs(포털 PAT 자동 등록, 리스크 앱 사람 자격 R1)
+    def get_user_prefs(self, owner_sub: str) -> dict:
+        """owner_sub 의 자동 등록 설정 — 행이 없으면 기본값(자동 켜짐, 기록 없음)이다. 읽기는 행을 만들지 않는다."""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT owner_sub, portal_pat_auto, auto_source, auto_at, auto_error, auto_error_at FROM _user_prefs"
+                " WHERE owner_sub = ?", (owner_sub,)).fetchone()
+        if row is None:
+            return {"owner_sub": owner_sub, "portal_pat_auto": 1, "auto_source": None, "auto_at": None,
+                    "auto_error": None, "auto_error_at": None}
+        return dict(row)
+
+    def set_portal_pat_auto(self, owner_sub: str, enabled: bool) -> None:
+        """자동 등록 스위치(PUT /api/me/portal-pat-auto) — 기록 칸은 그대로 둔다."""
+        self._upsert_prefs(owner_sub, "portal_pat_auto = excluded.portal_pat_auto",
+                           (owner_sub, 1 if enabled else 0, None, None, None, None))
+
+    def note_portal_pat_registered(self, owner_sub: str, source: str, *, at: int | None = None) -> None:
+        """등록 성공 — 출처(web·manual·gateway-exchange)와 시각을 적고 지난 실패를 지운다(지난 글이 성공 뒤에도 남지 않게)."""
+        now = int(time.time()) if at is None else int(at)
+        self._upsert_prefs(owner_sub, "auto_source = excluded.auto_source, auto_at = excluded.auto_at,"
+                                      " auto_error = NULL, auto_error_at = NULL",
+                           (owner_sub, 1, str(source), now, None, None))
+
+    def note_portal_pat_error(self, owner_sub: str, error: str, *, at: int | None = None) -> None:
+        """자동 등록 실패 — 글은 AUTO_ERROR_MAX 자에서 자른다. 등록된 PAT·지난 성공 기록은 건드리지 않는다."""
+        now = int(time.time()) if at is None else int(at)
+        self._upsert_prefs(owner_sub, "auto_error = excluded.auto_error, auto_error_at = excluded.auto_error_at",
+                           (owner_sub, 1, None, None, str(error)[:AUTO_ERROR_MAX], now))
+
+    def _upsert_prefs(self, owner_sub: str, update_sql: str, values: tuple) -> None:
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO _user_prefs(owner_sub, portal_pat_auto, auto_source, auto_at, auto_error, auto_error_at)"
+                f" VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(owner_sub) DO UPDATE SET {update_sql}", values)
+            if self._tx_depth == 0:
+                self.conn.commit()
 
 
 # ---------------------------------------------------------------- 프로세스 단일 인스턴스

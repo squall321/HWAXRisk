@@ -15,6 +15,7 @@ from typing import Any, Literal
 import httpx
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, model_validator
 
 from app import brief as brief_module
@@ -45,6 +46,67 @@ _portal_transport: httpx.BaseTransport | None = None
 
 class PortalPatBody(BaseModel):
     pat: str | None
+    # 등록이 어디서 왔나 — web(화면의 자동 등록) · manual(사람이 누른 버튼, 기본). 성공하면 _user_prefs 에 적는다(R1).
+    source: str | None = None
+
+
+class PortalPatAutoBody(BaseModel):
+    enabled: bool
+
+
+# ---------------------------------------------------------------- 포털 PAT 자동 등록(리스크 앱 사람 자격 R1 · U-1 · U-2)
+# 게이트웨이가 위임 단언을 받을 때 '이 사람의 PAT 를 바꿔 받아 달라' 는 명세다 — 게이트웨이는 이것을 그대로 포털 교환
+# (POST /auth/pat/exchange) 본문으로 쓰고 결과를 POST /api/auth/portal-pat 로 보낸다. 좁히기만 한다(읽기 전용·mcp-gateway).
+PORTAL_PAT_WANTED: dict[str, Any] = {"name": "hwax-risk", "audiences": ["mcp-gateway"], "scopes": ["read"], "ttl_days": 90}
+PAT_SOURCES: tuple[str, ...] = ("web", "manual")       # PUT /api/me/portal-pat 가 받는 출처
+GATEWAY_PAT_SOURCE = "gateway-exchange"               # POST /api/auth/portal-pat 로 등록된 것
+AUTO_ERROR_CODE_MAX = 64
+
+
+def pat_due_reason(row: dict | None, *, now: int | None = None, cfg: Any | None = None) -> str | None:
+    """지금 포털 PAT 를 받아 등록해야 하는 까닭 — absent · revoked · undecryptable · expiring(남은 수명 < 갱신 문턱). 아니면 None."""
+    if row is None:
+        return "absent"
+    if row.get("revoked_at"):
+        return "revoked"
+    if identity.credential_pat(row) is None:
+        return "undecryptable"
+    left = int(row.get("pat_exp") or 0) - (now_epoch() if now is None else int(now))
+    return "expiring" if left < config.pat_renew_before_s(cfg) else None
+
+
+def portal_pat_auto(store: Any, email: str, row: dict | None) -> dict:
+    """GET /api/me 의 `portal_pat.auto` — {enabled, due, due_reason, last_source, last_at, last_error, last_error_at}.
+
+    화면은 `enabled && due` 면 지금 버튼이 하는 일(포털 /auth/pat 발급 → PUT /api/me/portal-pat, source 'web')을 조용히 한 번 한다.
+    """
+    prefs = store.get_user_prefs(email)
+    reason = pat_due_reason(row)
+    return {"enabled": bool(prefs["portal_pat_auto"]), "due": reason is not None, "due_reason": reason,
+            "last_source": prefs["auto_source"], "last_at": prefs["auto_at"],
+            "last_error": prefs["auto_error"], "last_error_at": prefs["auto_error_at"]}
+
+
+def portal_pat_wanted(store: Any, email: str, *, now: int | None = None) -> dict | None:
+    """위임 단언 발급에 실을 `portal_pat_wanted` — 자동이 켜져 있고, 지금 받아야 하고(due), 마지막 자동 실패가 쉼
+    (HWAXRISK_PAT_AUTO_RETRY_S)보다 오래됐을 때만. 아니면 None.
+
+    갱신(expiring)은 마지막 자동 등록도 쉼보다 오래됐을 때만 바란다 — 원 PAT 의 남은 수명이 문턱보다 짧으면 교환 PAT 도 그만큼이라
+    (만료 ≤ 원) 등록해도 곧바로 다시 expiring 이 된다. 그때 단언을 받을 때마다 교환을 걸지 않게 한다.
+    """
+    now = now_epoch() if now is None else int(now)
+    prefs = store.get_user_prefs(email)
+    if not prefs["portal_pat_auto"]:
+        return None
+    reason = pat_due_reason(store.get_credential(email), now=now)
+    if reason is None:
+        return None
+    retry = config.pat_auto_retry_s()
+    if prefs["auto_error_at"] and now - int(prefs["auto_error_at"]) < retry:
+        return None
+    if reason == "expiring" and prefs["auto_at"] and now - int(prefs["auto_at"]) < retry:
+        return None
+    return json.loads(json.dumps(PORTAL_PAT_WANTED))         # 사본 — 호출자가 고쳐도 상수가 바뀌지 않게
 
 
 def _pat_summary(row: dict | None) -> dict | None:
@@ -118,6 +180,44 @@ def _decode_jwt_payload(pat: str) -> dict:
     return payload
 
 
+def _register_portal_pat(store: Any, owner_sub: str, pat: str, *, source: str, read_only: bool = False) -> dict:
+    """포털 PAT 등록 — PUT /api/me/portal-pat 와 POST /api/auth/portal-pat 가 같은 검사를 지난다.
+
+    순서 — email(= owner_sub) → aud/scope → exp(≥ PAT_MIN_REMAINING_S) → (read_only 면 scopes ['read'] 를 설정과 무관하게) →
+    포털 실호출 → scopes·jti·Fernet(identity.credential_record). 성공하면 _user_prefs 에 출처·시각을 적는다. PAT 원문은 돌려주지
+    않고 로그에도 싣지 않는다.
+    """
+    claims = _decode_jwt_payload(pat)
+    email = str(claims.get("email") or "").strip().lower()
+    if email != owner_sub:
+        raise AppError("pat_email_mismatch", "PAT 의 email 이 현재 사용자와 다릅니다.", 422)
+    aud = claims.get("aud")
+    aud_list = aud if isinstance(aud, list) else [aud]
+    if "mcp-gateway" not in aud_list or claims.get("scope") != "api":
+        raise AppError("pat_audience", "PAT 의 aud 에 mcp-gateway 가 없거나 scope 가 api 가 아닙니다.", 422)
+    exp = claims.get("exp")
+    if not isinstance(exp, (int, float)) or exp - time.time() < PAT_MIN_REMAINING_S:
+        raise AppError("pat_expiring", "PAT 만료까지 24 시간 미만입니다.", 422)
+    if read_only:
+        raw = claims.get("scopes")
+        scopes = [str(x).strip().lower() for x in raw if str(x).strip()] if isinstance(raw, list) else []
+        if scopes != identity.READ_ONLY_SCOPES:
+            raise AppError("pat_scope_too_broad",
+                           "게이트웨이 교환으로는 scopes 가 ['read'] 인 PAT 만 받습니다(현재 %s)." % (scopes or "없음"), 422)
+    _verify_with_portal(pat)
+
+    groups = claims.get("groups") if isinstance(claims.get("groups"), list) else []
+    # 저장은 Fernet 암호문이다(plan §8.2.7) — scopes 검사·jti 추출·암호화를 identity 가 한 곳에서 한다.
+    rec = identity.credential_record(claims, pat)
+    store.upsert_credential(
+        owner_sub, rec["portal_pat_enc"].decode("ascii"), claims.get("sub"), email,
+        json.dumps(groups, ensure_ascii=False), int(exp),
+        pat_scopes_json=rec["pat_scopes_json"], pat_jti=rec["pat_jti"])
+    store.note_portal_pat_registered(owner_sub, source)
+    return {"registered": True, "email": email, "groups": groups, "exp": int(exp),
+            "scopes": rec["scopes"], "jti": rec["pat_jti"]}
+
+
 def _verify_with_portal(pat: str) -> None:
     """등록 전에 포털이 이 PAT 를 받는지 확인한다(§8.2.3).
 
@@ -146,12 +246,7 @@ def post_auth_sso(request: Request) -> dict:
 
     시크릿 미설정이면 404 다 — 열려 있지 않다는 사실 자체를 굳이 알리지 않는다(KooRemapper 와 같은 규약).
     """
-    secret = config.heax_gateway_secret()
-    if not secret:
-        raise AppError("not_found", "SSO 위임이 설정돼 있지 않습니다.", 404)
-    got = request.headers.get("x-heax-gateway-secret", "")
-    if not hmac.compare_digest(got, secret):
-        raise AppError("unauthorized", "게이트웨이 시크릿이 맞지 않습니다.", 401)
+    secret = _gateway_guard(request)
     # 진짜 호출자는 X-Hwax-Delegate-Email 이 먼저다. HEAXHub Caddy 의 forward_auth 가 이 경로의 X-Heax-User-Email 을
     # 지우고 authz 가 준 이메일(게이트웨이 서비스 토큰의 주인)로 다시 싣기 때문에, 그 헤더만 읽으면 게이트웨이를 거친
     # 모든 사람이 한 사람으로 접힌다. 위임 헤더를 믿는 근거는 위의 시크릿 대조다 — 시크릿을 쥔 쪽은 원래 아무 이메일의
@@ -174,7 +269,81 @@ def post_auth_sso(request: Request) -> dict:
                                         delegated=delegate is not None)
     # 단언은 저장하지 않으므로 회수도 없다 — 게이트웨이 캐시가 이 수명보다 길면 만료 단언으로 부르게 되니
     # expires_in 을 함께 준다(게이트웨이는 실패 시 1회 재발급하므로 어긋나도 자가 복구된다).
-    return {"access_token": token, "token_type": "bearer", "expires_in": config.settings.sso_ttl_s}
+    out: dict[str, Any] = {"access_token": token, "token_type": "bearer", "expires_in": config.settings.sso_ttl_s}
+    # 위임으로 확인된 사람의 포털 PAT 가 없거나·못 풀거나·폐기됐거나·갱신 문턱 밑이면 게이트웨이에 교환을 바란다(R1 · U-1).
+    # 종전 헤더(Caddy 가 덮은 이메일)로는 바라지 않는다 — 그 이메일은 허브 관리자일 수 있다. 판정 실패가 발급을 막지 않는다.
+    if delegate is not None:
+        try:
+            wanted = portal_pat_wanted(get_store(), email)
+        except Exception:  # noqa: BLE001
+            log.warning("포털 PAT 자동 등록 판정을 못 했다 — 단언은 그대로 낸다", exc_info=True)
+            wanted = None
+        if wanted:
+            out["portal_pat_wanted"] = wanted
+    return out
+
+
+def _gateway_guard(request: Request) -> str:
+    """게이트웨이 전용 문 — 시크릿 미설정이면 404(열려 있다는 사실도 알리지 않는다), 맞지 않으면 401. 맞으면 시크릿."""
+    secret = config.heax_gateway_secret()
+    if not secret:
+        raise AppError("not_found", "SSO 위임이 설정돼 있지 않습니다.", 404)
+    got = request.headers.get("x-heax-gateway-secret", "")
+    if not hmac.compare_digest(got.encode("utf-8"), secret.encode("utf-8")):
+        raise AppError("unauthorized", "게이트웨이 시크릿이 맞지 않습니다.", 401)
+    return secret
+
+
+@router.post("/auth/portal-pat")
+async def post_auth_portal_pat(request: Request) -> dict:
+    """게이트웨이 전용 — 포털 교환으로 받은 위임된 사람의 PAT 를 등록하거나(`{pat}`), 교환 실패를 적는다(`{error, message}`).
+
+    문은 `/auth/sso` 와 같다(시크릿 미설정 404 · 불일치 401). 사람은 **X-Hwax-Delegate-Email 로만** 정한다 — Caddy 를 거친
+    X-Heax-User-Email 은 허브 관리자로 덮여 올 수 있어 읽지 않는다(없으면 403 delegation_required). 본문은 문을 지난 뒤에 읽는다.
+    `{pat}` 은 PUT /api/me/portal-pat 와 같은 검사를 지나고(이메일 = 위임 이메일) scopes 는 설정과 무관하게 ['read'] 만 받는다 —
+    출처는 gateway-exchange 다. 검사에 걸리면 그 까닭을 마지막 자동 실패로도 적는다(쉼이 걸려 단언마다 다시 바라지 않게).
+    `{error}` 는 아무것도 등록하지 않는다. 그 사람이 자동을 껐으면 409 portal_pat_auto_off 이고 아무것도 쓰지 않는다.
+    """
+    _gateway_guard(request)
+    raw = request.headers.get("x-hwax-delegate-email")
+    if raw is None:
+        raise AppError("delegation_required",
+                       "X-Hwax-Delegate-Email 이 없습니다 — 이 문은 게이트웨이가 위임으로 확인한 사람의 PAT 만 받습니다"
+                       "(X-Heax-User-Email 은 HEAXHub Caddy 가 허브 관리자로 덮어 보낼 수 있어 읽지 않습니다).", 403)
+    email = raw.strip().lower()
+    if "@" not in email:
+        raise AppError("bad_email", "X-Hwax-Delegate-Email 이 이메일 형식이 아닙니다.", 401)
+    try:
+        body = json.loads((await request.body()) or b"null")
+    except ValueError as exc:
+        raise AppError("E100", "본문이 JSON 이 아닙니다 — {pat} 또는 {error, message} 를 보냅니다.", 422) from exc
+    return await run_in_threadpool(_gateway_portal_pat, email, body)
+
+
+def _gateway_portal_pat(email: str, body: Any) -> dict:
+    """`post_auth_portal_pat` 의 본체(스레드에서 돈다 — 포털 실호출이 이벤트 루프를 붙들지 않게)."""
+    if not isinstance(body, dict) or (body.get("pat") is None) == (body.get("error") is None):
+        raise AppError("E100", "본문은 {pat} 또는 {error, message} 둘 중 하나입니다.", 422)
+    store = get_store()
+    if not store.get_user_prefs(email)["portal_pat_auto"]:
+        raise AppError("portal_pat_auto_off", "이 사람은 포털 PAT 자동 등록을 껐습니다 — 등록하지도 적지도 않습니다.", 409)
+    if body.get("error") is not None:
+        code = str(body["error"]).strip()[:AUTO_ERROR_CODE_MAX] or "error"
+        message = str(body.get("message") or "").strip()
+        store.note_portal_pat_error(email, f"{code}: {message}" if message else code)
+        log.info("포털 PAT 자동 등록 실패를 적었다 — %s (%s)", email, code)
+        return {"registered": False, "recorded": True, "email": email}
+    pat = body.get("pat")
+    if not isinstance(pat, str) or not pat.strip():
+        raise AppError("pat_invalid", "pat 이 비었거나 문자열이 아닙니다.", 422)
+    try:
+        out = _register_portal_pat(store, email, pat.strip(), source=GATEWAY_PAT_SOURCE, read_only=True)
+    except AppError as exc:
+        store.note_portal_pat_error(email, f"register-{exc.code}: {exc.message}")
+        log.info("게이트웨이가 보낸 포털 PAT 를 등록하지 않았다 — %s (%s)", email, exc.code)
+        raise
+    log.info("포털 PAT 를 게이트웨이 교환으로 등록했다 — %s (exp %s, jti %s)", email, out["exp"], out["jti"])
+    return {"registered": True, "email": email, "exp": out["exp"], "jti": out["jti"]}
 
 
 @router.get("/me")
@@ -190,7 +359,11 @@ def get_me(request: Request, ident: identity.Identity = Depends(identity.current
     portal_pat = None
     # 박스 불일치(이관 직후)면 _user_credentials 전부 무효(plan §5.2.5 (5)).
     if not ident.anonymous and state.box_match:
-        portal_pat = _pat_summary(get_store().get_credential(ident.email))
+        store = get_store()
+        row = store.get_credential(ident.email)
+        # 등록이 없어도 객체다(registered false) — 자동 등록 칸(auto)이 '없음(absent)' 을 말해야 화면이 받아 등록한다(R1 · U-2).
+        portal_pat = _pat_summary(row) or {"registered": False, "email": None, "groups": [], "exp": None}
+        portal_pat["auto"] = portal_pat_auto(store, ident.email, row)
     payload["portal_pat"] = portal_pat
     box = config.box_assessment(box_match=bool(state.box_match))
     payload["box"] = {"hostname": state.hostname, "secrets_valid": box["secrets_valid"],
@@ -206,35 +379,28 @@ def get_me(request: Request, ident: identity.Identity = Depends(identity.current
 
 @router.put("/me/portal-pat")
 def put_portal_pat(body: PortalPatBody, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """사용자 포털 PAT 등록(러너 자격 (b)). null 은 삭제. 검증 순서 — email → aud/scope → exp → 포털 실호출."""
+    """사용자 포털 PAT 등록(러너 자격 (b)). null 은 삭제. 검증 순서 — email → aud/scope → exp → 포털 실호출.
+
+    `source` 는 web(화면의 자동 등록) · manual(기본 — 사람이 누른 버튼)이고 성공하면 자동 등록 기록(portal_pat.auto)에 남는다.
+    """
     owner_sub = _require_user(ident)
     store = get_store()
     if body.pat is None:
         store.delete_credential(owner_sub)
         return {"registered": False, "email": None, "groups": [], "exp": None}
+    source = body.source or "manual"
+    if source not in PAT_SOURCES:
+        raise AppError("E100", f"source 는 {list(PAT_SOURCES)} 중 하나입니다 — {source!r}.", 422)
+    return _register_portal_pat(store, owner_sub, body.pat, source=source)
 
-    claims = _decode_jwt_payload(body.pat)
-    email = str(claims.get("email") or "").strip().lower()
-    if email != owner_sub:
-        raise AppError("pat_email_mismatch", "PAT 의 email 이 현재 사용자와 다릅니다.", 422)
-    aud = claims.get("aud")
-    aud_list = aud if isinstance(aud, list) else [aud]
-    if "mcp-gateway" not in aud_list or claims.get("scope") != "api":
-        raise AppError("pat_audience", "PAT 의 aud 에 mcp-gateway 가 없거나 scope 가 api 가 아닙니다.", 422)
-    exp = claims.get("exp")
-    if not isinstance(exp, (int, float)) or exp - time.time() < PAT_MIN_REMAINING_S:
-        raise AppError("pat_expiring", "PAT 만료까지 24 시간 미만입니다.", 422)
-    _verify_with_portal(body.pat)
 
-    groups = claims.get("groups") if isinstance(claims.get("groups"), list) else []
-    # 저장은 Fernet 암호문이다(plan §8.2.7) — scopes 검사·jti 추출·암호화를 identity 가 한 곳에서 한다.
-    rec = identity.credential_record(claims, body.pat)
-    store.upsert_credential(
-        owner_sub, rec["portal_pat_enc"].decode("ascii"), claims.get("sub"), email,
-        json.dumps(groups, ensure_ascii=False), int(exp),
-        pat_scopes_json=rec["pat_scopes_json"], pat_jti=rec["pat_jti"])
-    return {"registered": True, "email": email, "groups": groups, "exp": int(exp),
-            "scopes": rec["scopes"], "jti": rec["pat_jti"]}
+@router.put("/me/portal-pat-auto")
+def put_portal_pat_auto(body: PortalPatAutoBody, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """포털 PAT 자동 등록 스위치 — 끄면 화면도 게이트웨이도 그 사람의 PAT 를 저절로 받지 않는다. 답은 portal_pat.auto 와 같은 꼴."""
+    owner_sub = _require_user(ident)
+    store = get_store()
+    store.set_portal_pat_auto(owner_sub, body.enabled)
+    return portal_pat_auto(store, owner_sub, store.get_credential(owner_sub))
 
 
 @router.get("/meta/taxonomy")
@@ -275,7 +441,8 @@ def get_runtime(request: Request, ident: identity.Identity = Depends(identity.cu
     store = get_store()
     lock = getattr(request.app.state, "runner_lock", None)
     return {
-        "knobs": config.review_knobs(),
+        # 검토 손잡이 + PAT 자동 등록 손잡이(HWAXRISK_PAT_RENEW_BEFORE_S · HWAXRISK_PAT_AUTO_RETRY_S) — 같은 knobs.env 에서 읽는다.
+        "knobs": {**config.review_knobs(), **config.pat_knobs()},
         "knobs_file": str(config.settings.data_dir / config.KNOBS_FILENAME),
         "runner_lock": {"held": lock.held() if lock is not None else None,
                         "holder": lock.holder() if lock is not None else None},

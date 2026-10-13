@@ -84,7 +84,8 @@ def test_me_anonymous(client, wired):
 def test_me_authenticated_without_pat(client, wired):
     body = client.get("/api/me", headers=AUTH).json()
     assert body["email"] == "bob@example.com" and body["anonymous"] is False and body["source"] == "bearer"
-    assert body["portal_pat"] is None
+    # 등록이 없어도 객체다 — 자동 등록 칸(auto)이 '없음' 을 말한다(리스크 앱 사람 자격 R1).
+    assert body["portal_pat"]["registered"] is False and body["portal_pat"]["auto"]["due_reason"] == "absent"
 
 
 def test_put_anonymous_is_401(client, wired):
@@ -148,7 +149,7 @@ def test_register_then_delete(client, wired):
     r = client.put("/api/me/portal-pat", json={"pat": None}, headers=AUTH)
     assert r.status_code == 200 and r.json() == {"registered": False, "email": None, "groups": [], "exp": None}
     assert _rows() == []
-    assert client.get("/api/me", headers=AUTH).json()["portal_pat"] is None
+    assert client.get("/api/me", headers=AUTH).json()["portal_pat"]["registered"] is False
 
 
 # ---------------------------------------------------------------- 자격 암호화(plan §8.2.7) — identity.* 단위

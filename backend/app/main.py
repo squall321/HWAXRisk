@@ -64,6 +64,15 @@ def check_credential_chain(settings) -> None:
             f"(HWAXRISK_ENGINE_BUSY_MAX_WAIT_S {config.engine_busy_max_wait_s(settings)}) + 600초로 정해집니다."
             " 벽시계나 대기 예산을 내리거나 HWAXRISK_CREDENTIAL_MARGIN_S 로 여유를 하한보다 작게 정하세요."
             f" 손잡이를 적는 자리는 {config.KNOB_HOME}.")
+    # 자동 갱신 문턱은 패널 자격 여유보다 커야 한다 — 아니면 자동 등록이 '아직 갱신할 때가 아니다' 라고 보는 PAT 로 패널이 수명
+    # 부족으로 멈추고(서비스 계정으로 내려가지 않는다), 그 사람이 앱을 열어도 Claude 로 불러도 새 PAT 를 받지 않는다.
+    renew = config.pat_renew_before_s(settings)
+    if renew <= margin:
+        raise RuntimeError(
+            f"PAT 자동 갱신 문턱(HWAXRISK_PAT_RENEW_BEFORE_S {renew}초)이 패널 자격 여유 {margin}초 이하입니다 — 자동 등록이"
+            " 갱신하지 않는 PAT 로 패널이 수명 부족으로 멈춥니다. 문턱을 여유보다 크게 올리세요(기본"
+            f" {config.DEFAULT_PAT_RENEW_BEFORE_S}). 문턱을 적는 자리는 {config.REVIEW_KNOB_HOME} 또는 환경변수, 여유의 손잡이를"
+            f" 적는 자리는 {config.KNOB_HOME}.")
 
 
 def check_review_chain(settings) -> None:

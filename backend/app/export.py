@@ -16,7 +16,7 @@ from app.errors import AppError
 from app.risk_store import MIGRATIONS, RiskStore
 
 EXPORTS_DIRNAME = "exports"
-# 살림 표 2개는 rr_ 접두가 아니라서 표 목록에 애초에 들어오지 않는다(plan §5.2.5 (6)·§8.2.3).
+# 살림 표(_schema_migrations·_user_credentials·_user_prefs)는 rr_ 접두가 아니라서 표 목록에 애초에 들어오지 않는다(plan §5.2.5 (6)·§8.2.3).
 _CREATE_TABLE_RE = re.compile(r"CREATE TABLE IF NOT EXISTS\s+(rr_\w+)", re.IGNORECASE)
 
 

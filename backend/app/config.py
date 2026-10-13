@@ -55,7 +55,7 @@ OPTIONAL_KEY_EFFECTS: dict[str, str] = {
 _ENV_READ_OPTIONAL_KEYS: tuple[str, ...] = ("HWAXRISK_BACKUP_KEY", "HWAXRISK_HEAX_GATEWAY_SECRET")
 
 # 박스마다 다른 손잡이 파일(재설계 M2.md 4.5) — 데이터 디렉터리에 있어 재배포에 남고 추적 파일이 아니다. secrets.env 와 같은 꼴
-# (KEY=VALUE 줄, '#' 주석)이고 비밀이 아니다. 아래 REVIEW_KNOBS 만 읽는다.
+# (KEY=VALUE 줄, '#' 주석)이고 비밀이 아니다. 아래 BOX_KNOBS(검토 손잡이 REVIEW_KNOBS · PAT 자동 등록 손잡이 PAT_KNOBS)만 읽는다.
 KNOBS_FILENAME = "knobs.env"
 
 # 로스터 15 도메인(plan §0.6 실측 순서).
@@ -145,6 +145,17 @@ REVIEW_KNOBS: tuple[Knob, ...] = (
     Knob("HWAXRISK_REVIEW_CONSENT_CALLS", "risk_review_consent_calls", 1500),  # 동의가 필요한 호출 추정
     Knob("HWAXRISK_REVIEW_MAX_CALLS", "risk_review_max_calls", 30000, minimum=1),   # 넘으면 거절하는 상한
 )
+# 포털 PAT 자동 등록의 손잡이(리스크 앱 사람 자격 R1 — 전부 선택). 갱신 문턱은 남은 수명이 이 밑이면 '지금 다시 받아야 한다'(due
+# expiring)는 뜻이고 패널 자격 여유(credential_margin_s)보다 커야 한다(main.check_credential_chain) — 아니면 자동 등록이 '아직
+# 괜찮다' 고 하는 PAT 로 패널이 수명 부족으로 멈춘다. 쉼은 자동 등록이 실패한 뒤 다시 바라기까지의 시간이다.
+DEFAULT_PAT_RENEW_BEFORE_S = 7 * 86400
+DEFAULT_PAT_AUTO_RETRY_S = 6 * 3600
+PAT_KNOBS: tuple[Knob, ...] = (
+    Knob("HWAXRISK_PAT_RENEW_BEFORE_S", "risk_pat_renew_before_s", DEFAULT_PAT_RENEW_BEFORE_S, minimum=1),
+    Knob("HWAXRISK_PAT_AUTO_RETRY_S", "risk_pat_auto_retry_s", DEFAULT_PAT_AUTO_RETRY_S),
+)
+# knobs.env 가 읽는 손잡이 전부 — 출처(env · knobs.env · default)와 검증이 같다.
+BOX_KNOBS: tuple[Knob, ...] = REVIEW_KNOBS + PAT_KNOBS
 # 손잡이 불리언의 낱말 — 그 밖의 값은 기동을 막는다(다른 스위치의 _bool 처럼 기본값으로 돌지 않는다).
 _KNOB_TRUE = ("1", "true", "yes", "on")
 _KNOB_FALSE = ("0", "false", "no", "off")
@@ -236,6 +247,8 @@ class Settings:
     risk_review_max_charged: int = 2
     risk_review_consent_calls: int = 1500
     risk_review_max_calls: int = 30000
+    risk_pat_renew_before_s: int = DEFAULT_PAT_RENEW_BEFORE_S
+    risk_pat_auto_retry_s: int = DEFAULT_PAT_AUTO_RETRY_S
     knob_sources: tuple[tuple[str, str], ...] = ()
 
 
@@ -380,7 +393,7 @@ def _read_env_file(path: Path, keys: tuple[str, ...]) -> dict[str, str]:
 
 
 def load_review_knobs(data_dir: Path, env: Mapping[str, str] | None = None) -> tuple[dict[str, Any], tuple]:
-    """검토 손잡이(REVIEW_KNOBS)를 환경변수 > `$DATA_DIR/knobs.env` > 코드 기본값 순으로 읽는다.
+    """박스 손잡이(BOX_KNOBS — 검토·PAT 자동 등록)를 환경변수 > `$DATA_DIR/knobs.env` > 코드 기본값 순으로 읽는다.
 
     반환은 (Settings 속성 → 값, ((환경변수 이름, 출처 env|knobs.env|default), …)). 빈 값은 적지 않은 것으로 본다. knobs.env 의 줄
     끝 주석(`KEY=1  # 파일럿`)은 떼고 읽는다(손잡이 값에는 '#' 이 들 일이 없다). 정수가 아니거나 하한(`Knob.minimum`) 밑인 값,
@@ -390,11 +403,11 @@ def load_review_knobs(data_dir: Path, env: Mapping[str, str] | None = None) -> t
     """
     env = os.environ if env is None else env
     path = Path(data_dir) / KNOBS_FILENAME
-    from_file = _read_env_file(path, tuple(k.env for k in REVIEW_KNOBS)) if path.is_file() else {}
+    from_file = _read_env_file(path, tuple(k.env for k in BOX_KNOBS)) if path.is_file() else {}
     from_file = {key: value.split("#", 1)[0].strip() for key, value in from_file.items()}
     values: dict[str, Any] = {}
     sources: list[tuple[str, str]] = []
-    for knob in REVIEW_KNOBS:
+    for knob in BOX_KNOBS:
         raw, source = (env.get(knob.env) or "").strip(), "env"
         if not raw:
             raw, source = from_file.get(knob.env, ""), KNOBS_FILENAME
@@ -455,6 +468,26 @@ def review_knobs(cfg: object | None = None) -> dict[str, dict]:
     sources = dict(getattr(cfg, "knob_sources", ()) or ())
     return {knob.env: {"value": getattr(cfg, knob.attr, knob.default), "source": sources.get(knob.env, "default")}
             for knob in REVIEW_KNOBS}
+
+
+def pat_knobs(cfg: object | None = None) -> dict[str, dict]:
+    """GET /api/meta/runtime 의 `knobs` 에 더하는 PAT 자동 등록 손잡이 — {환경변수 이름: {value, source}}."""
+    cfg = settings if cfg is None else cfg
+    sources = dict(getattr(cfg, "knob_sources", ()) or ())
+    return {knob.env: {"value": getattr(cfg, knob.attr, knob.default), "source": sources.get(knob.env, "default")}
+            for knob in PAT_KNOBS}
+
+
+def pat_renew_before_s(cfg: object | None = None) -> int:
+    """남은 수명이 이 밑이면 포털 PAT 를 다시 받아 등록해야 한다(GET /api/me 의 portal_pat.auto.due_reason 'expiring')."""
+    cfg = settings if cfg is None else cfg
+    return max(1, int(getattr(cfg, "risk_pat_renew_before_s", DEFAULT_PAT_RENEW_BEFORE_S)))
+
+
+def pat_auto_retry_s(cfg: object | None = None) -> int:
+    """자동 등록이 실패한 뒤 게이트웨이에 다시 바라기까지의 쉼(초). 0 이면 쉬지 않는다."""
+    cfg = settings if cfg is None else cfg
+    return max(0, int(getattr(cfg, "risk_pat_auto_retry_s", DEFAULT_PAT_AUTO_RETRY_S)))
 
 
 def backup_key(data_dir: Path | None = None, env: Mapping[str, str] | None = None) -> str:
