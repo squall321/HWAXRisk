@@ -11,8 +11,8 @@ from app.adh_client import (EXTERNAL_SOURCE, IMPORT_PATH, MEMORY_AGENT, AdhClien
 from app.ra_client import (RA_READ_TOOLS, RA_REPORT_TOOLS, RA_WRITE_TOOLS, SYNC_BASE_DELAY,
                            SYNC_CHANNELS, SYNC_MAX_ATTEMPTS, SYNC_MAX_DELAY, McpHttpClient, RaClient,
                            complete_sync_ops, empty_sync, load_external_sync, mark_unavailable,
-                           note_sync_failure, queue_sync_ops, resync, save_external_sync,
-                           set_sync_state, sync_badge)
+                           note_sync_failure, parse_external_sync, queue_sync_ops, resync, save_external_sync,
+                           set_sync_state, sync_badge, sync_summary)
 
 OWNER = "me@example.com"
 TARGET = "diff:d1"
@@ -138,6 +138,19 @@ def test_resync_restores_both_channels(target_store, frozen_clock):
         entry = _sync_json(target_store)[channel]
         assert entry["state"] == "pending"
         assert entry["attempts"] == 0 and entry["next_at"] == 0 and entry["last_error"] is None
+
+
+def test_the_external_sync_summary_says_nothing_is_sent_yet(target_store, frozen_clock):
+    """보내는 쪽(RA 쓰기·AIDataHub 반입)이 아직 배선되지 않았다 — 요약은 그 사유(sender_unwired)와 대기 건수, '보낸 것 없음' 을
+    말한다(리스크 앱 사람 자격 R3 · U-4). 종전에는 '대기' 로만 읽혀 언젠가 나가리라 오해했다."""
+    queue_sync_ops(target_store, TARGET, "ra", [{"op": "create_object", "n": 1}, {"op": "create_object", "n": 2}])
+    summary = sync_summary(load_external_sync(target_store, TARGET))
+    assert summary == {
+        "ra": {"state": "pending", "pending_ops": 2, "reason": "sender_unwired",
+               "message": "RA 반영 안 됨 — 보내는 쪽이 아직 배선되지 않았다(M4). 대기 2건, 보낸 것 없음."},
+        "adh": {"state": "pending", "pending_ops": 0, "reason": "sender_unwired",
+                "message": "AIDataHub 반영 안 됨 — 보내는 쪽이 아직 배선되지 않았다(M4). 대기 0건, 보낸 것 없음."}}
+    assert sync_summary(parse_external_sync("깨진 글")) == sync_summary(empty_sync())
 
 
 def test_set_sync_state_rejects_unknown_channel(target_store):

@@ -775,9 +775,12 @@ def get_project(project_id: str, ident: identity.Identity = Depends(identity.cur
         "SELECT id, ir_version, ir_hash, kinds_json, node_count, edge_count, warnings_n, degraded, created_at"
         " FROM rr_snapshots WHERE project_id = ? ORDER BY created_at DESC, id", (project_id,))]
     targets = [dict(r) for r in store.query(
-        "SELECT target_key, kind, ref_id, level, close_level, verdict_candidate, verdict_final, created_at"
-        " FROM rr_targets WHERE project_id = ? AND owner_sub = ? ORDER BY created_at DESC",
+        "SELECT target_key, kind, ref_id, level, close_level, verdict_candidate, verdict_final, created_at,"
+        " external_sync_json FROM rr_targets WHERE project_id = ? AND owner_sub = ? ORDER BY created_at DESC",
         (project_id, owner_sub))]
+    for target in targets:
+        # RA·AIDataHub 반영 요약 — 보내는 쪽이 아직 없다는 것까지 보인다(R3 · U-4).
+        target["external_sync"] = ra_client.sync_summary(ra_client.parse_external_sync(target.pop("external_sync_json")))
     jobs = [dict(r) for r in store.query(
         "SELECT j.id AS id, j.target_key AS target_key, j.tier AS tier, j.state AS state,"
         " j.pause_reason AS pause_reason, j.panels_done AS panels_done, j.panels_total AS panels_total,"
@@ -2105,13 +2108,14 @@ def list_targets(project_id: str | None = None, include_superseded: bool = False
     rows = store.query(
         "SELECT target_key, kind, ref_id, project_id, base_project_id, ir_hash, level, close_level,"
         " verdict_candidate, verdict_final, superseded_by, report_ids_json, roster_frozen_at, flow,"
-        " created_at, updated_at"
+        " created_at, updated_at, external_sync_json"
         f" FROM rr_targets WHERE {clause} ORDER BY created_at DESC, target_key LIMIT ? OFFSET ?",
         (*params, take, skip))
     targets = []
     for row in rows:
         item = dict(row)
         item["report_ids"] = _loads(item.pop("report_ids_json"), [])
+        item["external_sync"] = ra_client.sync_summary(ra_client.parse_external_sync(item.pop("external_sync_json")))
         # 진행판 요약 — 목록에서 '얼마나 됐나' 가 보이지 않으면 사람이 타깃마다 들어가 봐야 한다.
         summary = planner.coverage_summary(store, item["target_key"])
         item["roster_size"] = summary["roster_size"]
@@ -2805,6 +2809,8 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
         "flow": target["flow"],
         "units": units_module.summary_of(store, target_key),
         "review": review_payload(store, target_key, target["flow"]),
+        # RA·AIDataHub 반영 요약 — {ra|adh: {state, pending_ops, reason, message}}. 보내는 쪽이 아직 없다(sender_unwired, M4).
+        "external_sync": ra_client.sync_summary(ra_client.parse_external_sync(target["external_sync_json"])),
     }
 
 

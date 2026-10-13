@@ -351,7 +351,11 @@ def load_external_sync(store, target_key: str) -> dict:
     """rr_targets.external_sync_json 을 읽어 두 채널이 모두 있는 dict 로 정규화한다."""
     row = store.query_one(
         "SELECT external_sync_json FROM rr_targets WHERE target_key = ?", (target_key,))
-    raw = row["external_sync_json"] if row is not None else None
+    return parse_external_sync(row["external_sync_json"] if row is not None else None)
+
+
+def parse_external_sync(raw: Any) -> dict:
+    """external_sync_json 글 → 두 채널이 모두 있는 dict(깨진 글·빠진 채널은 초기값)."""
     try:
         parsed = json.loads(raw) if raw else {}
     except (TypeError, ValueError):
@@ -461,6 +465,27 @@ def resync(store, target_key: str) -> dict:
         entry["last_error"] = None
     save_external_sync(store, target_key, sync)
     return sync
+
+
+SYNC_LABELS = {"ra": "RA", "adh": "AIDataHub"}
+
+
+def sync_summary(sync: Mapping[str, Any]) -> dict:
+    """과제·대상 응답·진행판(risk_get_coverage)·길잡이(risk_next_step)가 싣는 반영 요약 — {ra|adh: {state, pending_ops, reason, message}}.
+
+    RA 쓰기·AIDataHub 반입을 보내는 쪽이 아직 배선되지 않았다(nightly.retry_external_sync 의 send 가 없다 — M4, 리스크 앱 사람
+    자격 U-4). 그래서 쌓인 일은 하나도 나가지 않는데, 종전에는 그 사실이 어디에도 보이지 않아 '반영 대기' 로만 읽혔다. 지금은
+    reason 이 늘 'sender_unwired' 이고 message 가 대기 건수와 '보낸 것 없음' 을 말한다. M4 가 배선하면 여기서 사유를 가른다.
+    `pending_ops` 는 건수다(op 본문은 GET /api/reports 의 ra_state·재동기 응답이 준다).
+    """
+    out: dict[str, dict] = {}
+    for channel in SYNC_CHANNELS:
+        entry = sync.get(channel) or {}
+        n = len(entry.get("pending_ops") or [])
+        out[channel] = {"state": str(entry.get("state") or "pending"), "pending_ops": n, "reason": "sender_unwired",
+                        "message": f"{SYNC_LABELS[channel]} 반영 안 됨 — 보내는 쪽이 아직 배선되지 않았다(M4). 대기 {n}건,"
+                                   " 보낸 것 없음."}
+    return out
 
 
 def sync_badge(sync: Mapping[str, Any]) -> str:

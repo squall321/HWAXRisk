@@ -104,10 +104,11 @@ def _refused(fn, *args, **kwargs) -> AppError:
 
 # ---------------------------------------------------------------- 진행판 review 칸
 def test_a_panels_target_gains_only_a_null_review(store):
-    """D-24 — 셀 원장이 없는 패널 방식 대상의 진행판은 S12 전의 칸 그대로에 review: null 하나만 더해진다."""
+    """D-24 — 셀 원장이 없는 패널 방식 대상의 진행판은 S12 전의 칸 그대로에 review: null 하나만 더해진다. 그 뒤 RA·AIDataHub 반영
+    요약(external_sync — 리스크 앱 사람 자격 R3 · U-4)이 방식과 무관하게 붙었다."""
     synth = factories.make_diff_target(store, 3)
     coverage = routes.coverage_payload(synth.target_key, owner_sub=OWNER)
-    assert set(coverage) == PANEL_COVERAGE_KEYS | {"review"} and coverage["review"] is None
+    assert set(coverage) == PANEL_COVERAGE_KEYS | {"review", "external_sync"} and coverage["review"] is None
     assert coverage["flow"] == "panels"
 
 

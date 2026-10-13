@@ -696,6 +696,8 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
     coverage = routes.coverage_payload(target_key, owner_sub=owner)
     facts["coverage"] = {k: coverage[k] for k in ("roster_size", "by_status", "by_domain", "unseated_n", "strong",
                                                   "level", "close_level")}
+    # RA·AIDataHub 로 아직 아무것도 보내지 않는다는 것(sender_unwired, M4) — 결과가 RA 에 있으리라 읽지 않게(R3 · U-4).
+    facts["external_sync"] = coverage["external_sync"]
     if coverage["roster_size"] == 0:
         fix = (fix_register_pat() + " 그 뒤 risk_open_target 을 같은 인자로 다시 부르면 명단을 받는다." if not creds["roster"]
                else "게이트웨이 전문가 조회가 비어 돌아왔다 — risk_open_target 을 같은 인자로 다시 부르면 명단을 다시 받는다.")

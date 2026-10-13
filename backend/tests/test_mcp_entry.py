@@ -197,6 +197,8 @@ def test_claude_entry_runs_from_project_to_job_and_lands_in_the_web_ledger(box):
     assert opened["created"] is True and opened["roster_size"] == 0 and opened["roster_source"] == "unavailable"
     out = call("risk_next_step", project_id=pid)
     assert out["where"] == "roster"
+    # RA 로 아직 아무것도 보내지 않는다는 것이 길잡이 사실에 있다(R3 · U-4).
+    assert out["facts"]["external_sync"]["ra"]["reason"] == "sender_unwired"
     consent_left_to_the_user(out)
     blocked = {b["code"]: b for b in out["blocked"]}
     assert "#/settings" in blocked["roster_empty"]["fix"] and "포털에서 발급해 등록" in blocked["roster_empty"]["fix"]

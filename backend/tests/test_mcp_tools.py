@@ -279,6 +279,25 @@ def test_read_tools_hide_projects_outside_the_caller_scope(risk_store, monkeypat
     assert risk_store.query("SELECT id FROM rr_panels") == []
 
 
+def test_the_external_sync_summary_rides_the_project_targets_coverage_and_mcp(risk_store, monkeypatch):
+    """RA·AIDataHub 반영 요약({state, pending_ops, reason, message})이 과제 화면의 타깃 · 타깃 목록 · 진행판(REST·MCP)에 같은 값으로
+    실린다 — 보내는 쪽이 아직 없다는 것(sender_unwired)을 재동기를 누르기 전에도 본다(R3 · U-4)."""
+    from app import identity, ra_client, routes
+
+    _seed_private_target(risk_store, monkeypatch)
+    risk_store.execute("UPDATE rr_projects SET mcp_visibility = 'org' WHERE id = 'p9'")
+    ra_client.queue_sync_ops(risk_store, "snap:s9", "ra", [{"op": "create_object"}])
+    want = ra_client.sync_summary(ra_client.load_external_sync(risk_store, "snap:s9"))
+    assert want["ra"]["pending_ops"] == 1 and want["ra"]["reason"] == "sender_unwired"
+    owner = identity.Identity(email="owner@a", display_name=None, role="user", organization=None, anonymous=False,
+                              source="cookie")
+    assert routes.coverage_payload("snap:s9", owner_sub="owner@a")["external_sync"] == want
+    assert routes.get_project("p9", ident=owner)["targets"][0]["external_sync"] == want
+    assert routes.list_targets(ident=owner)["targets"][0]["external_sync"] == want
+    assert srv.risk_get_coverage("snap:s9", with_seats=False)["external_sync"] == want
+    assert "external_sync_json" not in routes.get_project("p9", ident=owner)["targets"][0]
+
+
 def test_org_visibility_opens_the_same_ids(risk_store, monkeypatch):
     """소유자가 mcp_visibility='org' 로 토글하면 같은 id 가 열린다(§5.1 원칙 9)."""
     _seed_private_target(risk_store, monkeypatch)
