@@ -50,6 +50,10 @@ DENIED = "live_denied"
 INTERNAL_ERROR = "live_internal_error"      # 근거 꾸러미 워커의 예상 밖 결함이 여섯 번 — 그 단위를 얼린다(반대 검토 HIGH 4)
 GAP_CODES: tuple[str, ...] = (INFRA_EXHAUSTED, SCHEMA_MISMATCH, ERROR_BODY, DENIED, INTERNAL_ERROR)
 LIVE_HEAD = "실호출 근거(tool:b-…)는 지금 상태다 — 스냅샷 뒤에 바뀌었을 수 있다"
+# 폐기된 과제의 행은 쓰지 않는다(반대 검토 MEDIUM 14) — 폐기가 비운 근거 줄 · 호출 계획(재질명이 든다)을 늦게 끝난 ensure 가 다시
+# 채우지 않게. 쓰기 문장 하나에 조건으로 붙어 폐기의 트랜잭션과 엇갈리지 않는다.
+NOT_PURGED_SQL = (" AND NOT EXISTS (SELECT 1 FROM rr_targets t JOIN rr_projects p ON p.id = t.project_id"
+                  " WHERE t.target_key = rr_unit_live.target_key AND p.status = 'purged')")
 # 셀을 시작해도 되는 단위 — 행이 없거나(B 층 이전 원장) 얼었다. `c` 는 rr_review_cells 의 별칭이다.
 READY_SQL = (" AND NOT EXISTS (SELECT 1 FROM rr_unit_live l WHERE l.target_key = c.target_key AND l.unit_id = c.unit_id"
              " AND l.status IS NULL)")
@@ -316,15 +320,21 @@ def _q(text: Any, note: Callable[[dict], None] | None = None) -> str:
 
 # ---------------------------------------------------------------- 얼리기
 def ensure(store: Any, settings: Any, target_key: str, credential: Mapping[str, Any] | None, *,
-           deadline_s: float = ENSURE_DEADLINE_S, http_client: Any = None, now: int | None = None) -> dict:
-    """백오프가 지난 미동결 단위를 얼린다 — {frozen{status: n}, retry, calls, cached}.
+           deadline_s: float = ENSURE_DEADLINE_S, http_client: Any = None, now: int | None = None,
+           stop: Callable[[], str | None] | None = None) -> dict:
+    """백오프가 지난 미동결 단위를 얼린다 — {frozen{status: n}, retry, calls, cached} · 멈췄으면 aborted(까닭).
 
     `credential` 은 {kind:'user', email, pat} — 그 잡의 사용자 PAT 다(없으면 호출 없이 credential 로 올린다). 손잡이가 꺼져 있으면
-    남은 단위를 `none` 으로, 셀이 이미 시작된 단위는 `skipped` 로, 부를 것이 없는 단위는 `ok`(줄 없음)로 언다."""
+    남은 단위를 `none` 으로, 셀이 이미 시작된 단위는 `skipped` 로, 부를 것이 없는 단위는 `ok`(줄 없음)로 언다. 시작 · 호출마다 앞 ·
+    얼리기 앞에서 `stop`(잡의 취소 · 사람의 정지 · 앱 종료 — 까닭 글)과 과제 폐기를 보고, 걸리면 더 부르지 않고 아무것도 얼리지 않는다
+    (반대 검토 MEDIUM 14 — 다음 잡이 다시 하고, 이미 받은 답은 원장에서 다시 쓴다)."""
     now = now_epoch() if now is None else now
     out: dict[str, Any] = {"frozen": {}, "retry": 0, "calls": 0, "cached": 0}
     due = pending(store, target_key, now=now, due_only=True)
     if not due:
+        return out
+    if halted := _halted(store, target_key, stop):
+        out["aborted"] = halted
         return out
     if not enabled(settings):
         for unit_id in due:
@@ -354,6 +364,9 @@ def ensure(store: Any, settings: Any, target_key: str, credential: Mapping[str, 
                         timeout=float(getattr(cfg, "risk_field_timeout_s", config.DEFAULT_FIELD_TIMEOUT_S)),
                         deadline_s=CALL_DEADLINE_S)
     try:
+        if halted := _halted(store, target_key, stop):
+            out["aborted"] = halted
+            return out
         listed = mcp.list_tools(deadline=min(until, time.monotonic() + CALL_DEADLINE_S))
         outcomes: dict[str, dict] = {}
         if not listed["ok"]:
@@ -374,6 +387,9 @@ def ensure(store: Any, settings: Any, target_key: str, credential: Mapping[str, 
                 if gap is not None:
                     outcomes[key] = {"state": "content", "code": SCHEMA_MISMATCH, "note": gap}
                     continue
+                if halted := _halted(store, target_key, stop):
+                    out["aborted"] = halted
+                    return out
                 if time.monotonic() >= until:
                     outcomes[key] = {"state": "infra", "code": INFRA_EXHAUSTED, "note": "deadline_exceeded"}
                     continue
@@ -391,10 +407,23 @@ def ensure(store: Any, settings: Any, target_key: str, credential: Mapping[str, 
                                  "call_id": reply["call_id"]}
     finally:
         mcp.close()
+    if halted := _halted(store, target_key, stop):                 # 마지막 호출 도중에 멈췄다
+        out["aborted"] = halted
+        return out
     email = (credential or {}).get("email")
     for unit_id in work:
         _settle(store, target_key, unit_id, plan, outcomes, out, email=email, now=now)
     return out
+
+
+def _halted(store: Any, target_key: str, stop: Callable[[], str | None] | None) -> str | None:
+    """멈출 까닭 — `stop` 의 답(잡의 취소 · 사람의 정지 · 앱 종료)이나 과제 폐기. 없으면 None."""
+    why = stop() if stop is not None else None
+    if why:
+        return why
+    row = store.query_one("SELECT p.status FROM rr_targets t JOIN rr_projects p ON p.id = t.project_id WHERE t.target_key = ?",
+                          (target_key,))
+    return "과제가 폐기됐다" if row is not None and row["status"] == "purged" else None
 
 
 def note_failure(store: Any, target_key: str, *, note: str, now: int | None = None) -> dict:
@@ -454,7 +483,7 @@ def _settle(store: Any, target_key: str, unit_id: str, plan: Mapping[str, Any], 
     if infra and attempts + 1 < RETRY_MAX:
         changed = store.execute(
             "UPDATE rr_unit_live SET attempts = attempts + 1, not_before = ?, plan_json = ?, updated_at = ?"
-            " WHERE target_key = ? AND unit_id = ? AND status IS NULL AND attempts = ?",
+            " WHERE target_key = ? AND unit_id = ? AND status IS NULL AND attempts = ?" + NOT_PURGED_SQL,
             (now + RETRY_BASE_S * 2 ** attempts, canonical_json(entries), now, target_key, unit_id, attempts))
         out["retry"] += int(bool(changed))
         return
@@ -489,7 +518,7 @@ def _settle(store: Any, target_key: str, unit_id: str, plan: Mapping[str, Any], 
 def _freeze(store: Any, target_key: str, unit_id: str, status: str, out: dict, *, now: int,
             entries: Sequence[Mapping[str, Any]] = (), lines: Sequence[Mapping[str, Any]] = (),
             gaps: Sequence[Mapping[str, Any]] = (), email: str | None = None, attempts: int | None = None) -> bool:
-    """비교 후 쓰기 — status 가 NULL 인 행만 언다. 바뀐 행이 0 이면(다른 ensure 가 먼저) 버린다."""
+    """비교 후 쓰기 — status 가 NULL 인 행만 언다(폐기된 과제의 행은 쓰지 않는다). 바뀐 행이 0 이면(다른 ensure 가 먼저) 버린다."""
     body = {"lines": list(lines), "gaps": list(gaps)}
     sha = sha256_hex(canonical_json(body)) if (lines or gaps) else None
     chars = sum(len(str(line.get("text") or "")) for line in lines)
@@ -497,7 +526,7 @@ def _freeze(store: Any, target_key: str, unit_id: str, status: str, out: dict, *
     changed = store.execute(
         "UPDATE rr_unit_live SET status = ?, plan_json = ?, lines_gz = ?, live_sha = ?, live_chars = ?, credential_kind = ?,"
         " credential_email = ?, gaps_json = ?, attempts = COALESCE(?, attempts), frozen_at = ?, updated_at = ?"
-        " WHERE target_key = ? AND unit_id = ? AND status IS NULL",
+        " WHERE target_key = ? AND unit_id = ? AND status IS NULL" + NOT_PURGED_SQL,
         (status, canonical_json(list(entries)), gzip.compress(canonical_json(list(lines)).encode("utf-8"), mtime=0),
          sha, chars, CREDENTIAL_KIND if called else None, email if called else None,
          canonical_json(list(gaps)) if gaps else None, attempts, now, now, target_key, unit_id))

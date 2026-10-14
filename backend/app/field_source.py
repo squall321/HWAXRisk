@@ -126,6 +126,15 @@ class LiveSource(FieldSource):
     def key(self, args: Mapping[str, Any]) -> str:
         return sha256_hex(canonical_json({"args": dict(args), "credential": self.credential}))
 
+    def _record(self, store, target_key: str, *args: Any, **kwargs: Any) -> None:
+        # 과제 폐기와 엇갈린 늦은 답은 적지 않는다(반대 검토 MEDIUM 14) — 폐기가 비운 원문을 다시 채우지 않게. 확인과 쓰기가 한
+        # 트랜잭션이라 폐기의 트랜잭션과 엇갈리지 않는다.
+        with store.tx():
+            if store.query_one("SELECT 1 FROM rr_targets t JOIN rr_projects p ON p.id = t.project_id"
+                               " WHERE t.target_key = ? AND p.status = 'purged'", (target_key,)) is not None:
+                return
+            super()._record(store, target_key, *args, **kwargs)
+
     def call_id(self, target_key: str, tool: str, args: Mapping[str, Any]) -> str:
         return _call_id(target_key, tool, self.key(args))
 

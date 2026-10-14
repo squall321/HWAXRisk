@@ -2569,12 +2569,17 @@ class ReviewLoop:
                                                    f" 여유 {unit_live.ENSURE_DEADLINE_S + 600}초에 못 미친다")
             client = http_client(transport=self.live_transport) if self.live_transport is not None else None
             try:
+                # 호출 사이마다 잡을 새로 읽는다(poll_s=0) — 취소 · 사람의 정지 · 앱 종료면 더 부르지 않고 얼리지 않는다(MEDIUM 14).
                 out = unit_live.ensure(self.store, self.settings, target_key, {"kind": "user", "email": email, "pat": pat},
-                                       http_client=client, now=self.clock())
+                                       http_client=client, now=self.clock(),
+                                       stop=should_stop_review(self.store, job_id, self.stop, poll_s=0))
             finally:
                 if client is not None:
                     client.close()
-            if out["frozen"] or out["retry"]:
+            if out.get("aborted"):
+                log.info("검토 잡 %s: 근거 꾸러미 실호출을 멈췄다(%s) — 호출 %s(재사용 %s) · 부를 것 없이 얼림 %s", job_id,
+                         out["aborted"], out["calls"], out["cached"], out["frozen"])
+            elif out["frozen"] or out["retry"]:
                 log.info("검토 잡 %s: 근거 꾸러미 실호출 — 얼림 %s · 다시 %s · 호출 %s(재사용 %s)", job_id, out["frozen"],
                          out["retry"], out["calls"], out["cached"])
         except unit_live.CredentialRejected as exc:

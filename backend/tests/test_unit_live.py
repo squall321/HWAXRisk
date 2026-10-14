@@ -40,6 +40,7 @@ class Gateway:
         self.calls: list[dict] = []
         self.auth: list[str] = []
         self.delay_s = 0.0
+        self.on_call: Any = None                  # 도구 호출을 받는 순간 부를 것(이름) — 호출 도중의 취소 · 폐기를 흉내 낸다
         self.lock = threading.Lock()
         self.transport = httpx.MockTransport(self.handle)
 
@@ -59,6 +60,8 @@ class Gateway:
         name = body["params"]["name"]
         with self.lock:
             self.calls.append({"name": name, "arguments": body["params"]["arguments"]})
+        if self.on_call is not None:
+            self.on_call(name)
         if self.delay_s:
             time.sleep(self.delay_s)
         answer = self.answers.get(name)
@@ -462,3 +465,87 @@ def test_an_unexpected_failure_backs_off_and_finally_freezes_instead_of_retrying
     assert rig.state(store, job_id) == "completed" and len(calls) == unit_live.RETRY_MAX
     row = _row(store, key, unit_id)
     assert (row["status"], json.loads(row["gaps_json"])[0]["code"]) == ("partial", unit_live.INTERNAL_ERROR)
+
+
+def _two_calls(store, monkeypatch, key: str) -> dict:
+    """두 스냅샷 IR 의 보고서를 갈라 계획이 호출 둘(compare_reports · compare_materials)이 되게 한다 — 계획."""
+    real = unit_live._ir
+    target_sid = store.query_one("SELECT target_snapshot_id FROM rr_diffs d JOIN rr_targets t ON t.ref_id = d.id"
+                                 " WHERE t.target_key = ?", (key,))["target_snapshot_id"]
+
+    def later(store_, sid):
+        ir = real(store_, sid)
+        if ir is not None and sid == target_sid:
+            ir["results"]["report_ids"] = ["SYNRPT2"]
+        return ir
+
+    monkeypatch.setattr(unit_live, "_ir", later)
+    plan = unit_live.plan_calls(store, key)
+    assert len(plan["calls"]) == 2
+    return plan
+
+
+@pytest.mark.parametrize("how", ["cancel", "purge"])
+def test_a_cancel_or_purge_during_a_live_call_stops_the_calls_and_writes_nothing_after_it(store, monkeypatch, how):
+    """반대 검토 MEDIUM 14 — 근거 꾸러미 워커가 잡의 취소와 과제 폐기를 보지 않아, 첫 호출 도중에 취소돼도 남은 호출을 다 부르고 전
+    단위를 얼렸고, 폐기 뒤에도 그 답의 원문(rr_brief_calls)과 근거 줄 · 호출 계획(rr_unit_live — 재질명이 든다)을 다시 적었다. 이제
+    호출 사이와 얼리기 앞에서 잡 · 과제를 보고 멈춘다(아무것도 얼리지 않는다 — 다음 잡이 다시 한다). 취소면 이미 받은 답은 원장에
+    남아 다음 잡이 다시 부르지 않고 쓰고, 폐기면 그 답도 적지 않는다."""
+    from app import routes, runner
+    from tests import factories
+
+    key = _target(store)
+    plan = _two_calls(store, monkeypatch, key)
+    job_id = rig.job(store, key, scope={"agents": [rig.SEAL]})
+    project = store.query_one("SELECT p.id, p.code FROM rr_targets t JOIN rr_projects p ON p.id = t.project_id"
+                              " WHERE t.target_key = ?", (key,))
+    gw = Gateway()
+
+    def interrupt(_name: str) -> None:
+        if len(gw.calls) != 1:
+            return
+        if how == "cancel":
+            runner.cancel_job(store, job_id, by=OWNER)
+        else:
+            routes.purge_project(project["id"], routes.PurgeBody(code=project["code"], reason="정리"),
+                                 ident=factories.ident(OWNER))
+
+    gw.on_call = interrupt
+    r = rig.Rig(store, FakeReviewEngine(rig.packs()))
+    r.loop.live_transport = gw.transport
+    r.tick()
+    assert len(gw.calls) == 1                                                  # 다음 호출을 시작하지 않는다
+    assert {_row(store, key, u)["status"] for u in plan["by_unit"]} == {None}   # 얼리지 않는다
+    kept = store.query_one("SELECT COUNT(*) AS n FROM rr_brief_calls WHERE target_key = ? AND result_gz IS NOT NULL",
+                           (key,))["n"]
+    if how == "purge":
+        assert kept == 0
+        assert {(row["lines_gz"], row["plan_json"], row["gaps_json"]) for row in store.query(
+            "SELECT lines_gz, plan_json, gaps_json FROM rr_unit_live WHERE target_key = ?", (key,))} == {(None, "[]", None)}
+    else:
+        assert kept == 1 and rig.state(store, job_id) in ("cancelling", "cancelled")
+
+
+
+@pytest.mark.parametrize("answer", [COMPARISON, "http_503"])
+def test_a_purge_that_slips_past_the_checks_still_never_gets_its_rows_written(store, monkeypatch, answer):
+    """반대 검토 MEDIUM 14 — 확인과 쓰기 사이에 폐기가 끼어도(확인을 지나친 것으로 흉내 — `_halted` 를 늘 None 으로) 원문 기록
+    (rr_brief_calls) · 얼리기 · 인프라 다시 하기(호출 계획에 재질명이 든다)가 폐기된 과제의 행을 쓰지 않는다 — 쓰기 자체가 폐기를 본다."""
+    from app import routes
+    from tests import factories
+
+    key = _target(store)
+    unit_id = _material_unit(store, key)                       # 폐기 뒤에는 단위의 부품 글이 비어 계획이 서지 않는다
+    project = store.query_one("SELECT p.id, p.code FROM rr_targets t JOIN rr_projects p ON p.id = t.project_id"
+                              " WHERE t.target_key = ?", (key,))
+    gw = Gateway()
+    gw.answers["compare_materials"] = answer
+    gw.on_call = lambda _name: routes.purge_project(project["id"], routes.PurgeBody(code=project["code"], reason="정리"),
+                                                    ident=factories.ident(OWNER))
+    monkeypatch.setattr(unit_live, "_halted", lambda *args: None)
+    out = _ensure(store, key, gw)
+    assert len(gw.calls) == 1 and out["retry"] == 0 and "partial" not in out["frozen"]
+    assert _row(store, key, unit_id)["status"] is None
+    assert {(row["lines_gz"], row["plan_json"], row["gaps_json"], row["attempts"]) for row in store.query(
+        "SELECT lines_gz, plan_json, gaps_json, attempts FROM rr_unit_live WHERE target_key = ?", (key,))} == {(None, "[]", None, 0)}
+    assert store.query_one("SELECT COUNT(*) AS n FROM rr_brief_calls WHERE target_key = ?", (key,))["n"] == 0
