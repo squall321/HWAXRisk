@@ -1208,7 +1208,64 @@ def test_a_revision_change_mid_job_replans_and_carries_on_and_a_real_mismatch_ho
     assert len(fake.calls("plan")) == 2
     assert {(c["state"], c["reopened_n"]) for c in _cells(store, key, SEAL)} == {("reviewed", 1)}
     head = _head(store, key, SEAL)
-    assert (head["prompt_rev"], head["limits_rev"]) == (review_runner.prompt_key(fake.limits()), fake.limits_rev)
+    assert (head["prompt_rev"], head["limits_rev"]) == (review_runner.prompt_key(fake.limits(), review_runner.CARD_KINDS),
+                                                        fake.limits_rev)
+
+
+def test_a_summary_only_move_replans_without_restarting_any_cell(store, monkeypatch):
+    """#37 · RB3-6 — 엔진이 요약 손잡이·요약 판만 올리면(전역 limits_rev 와 종류별 summary 판 · summary prompt_rev 가 바뀌고 카드
+    전문가가 부르는 종류의 판은 그대로) 도는 호출은 rev_mismatch 로 한 번 닫히고 세션이 놓였다가 이어 돈다. 셀 지문·계획·훑기 열쇠는
+    그 셀이 부르는 종류의 판만 잇기 때문에 어느 셀도 처음부터 돌지 않고(reopened_n 0 · 입력 지문 그대로) 계획과 훑기를 다시 받지
+    않는다."""
+    from app import review_runner
+
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    fake.base_limits["limits_rev_by_kind"] = {k: f"{k}-rev-1" for k in fake.base_limits["kinds"]}
+    gate = threading.Event()
+    fake.hold_runs = {3: gate}
+    r = rig.Rig(store, fake)
+    r.tick()
+    r.tick(wait=False)
+    rig.wait_for(lambda: fake.runs == 3)
+    hashes = {c["unit_id"]: c["input_hash"] for c in _cells(store, key, SEAL)}
+    assert None not in hashes.values()
+    fake.limits_rev = "limits-rev-2"
+    fake.base_limits["limits_rev_by_kind"]["summary"] = "summary-rev-2"
+    fake.base_limits["prompt_rev"]["summary"] = "cr-summary-9"
+    gate.set()
+    r.loop.join(30)
+    r.finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    assert [c["outcome_class"] for c in _calls(store, job_id, error_code="rev_mismatch")] == ["job"]
+    assert {(c["state"], c["reopened_n"]) for c in _cells(store, key, SEAL)} == {("reviewed", 0)}
+    assert {c["unit_id"]: c["input_hash"] for c in _cells(store, key, SEAL)} == hashes
+    assert len(fake.calls("plan")) == 1
+    assert [b["kind"] for b in _runs(fake)].count("sweep") == len(json.loads(_head(store, key, SEAL)["plan_json"])["plan"]
+                                                                   ["manifest_pages"])
+    head = _head(store, key, SEAL)
+    assert head["limits_rev"] == review_runner.limits_key(fake.limits(), review_runner.CARD_KINDS)
+    assert head["limits_rev"] == "offcard=offcard-rev-1,sweep=sweep-rev-1,verdict=verdict-rev-1"
+    assert head["prompt_rev"] == review_runner.prompt_key(fake.limits(), review_runner.CARD_KINDS)
+
+
+def test_the_cell_keys_take_only_the_kinds_the_cell_calls_and_fall_back_to_the_global_rev():
+    """prompt_key·limits_key — 종류를 주면 그 종류만 잇는다. sweep·verdict·offcard 셋뿐인 엔진(M2)에서 카드 전문가의 prompt_key 는
+    종전(종류 전부)과 같고, 종류별 창 판이 없으면 전역 limits_rev 그대로다(M2 원장의 지문이 바뀌지 않는다). 표에 빠진 종류는 전역
+    판으로 메운다."""
+    from app import review_runner as rr
+
+    m2 = {"prompt_rev": {"sweep": "cr-sweep-1", "verdict": "cr-verdict-1", "offcard": "cr-offcard-1"}, "limits_rev": "g1"}
+    assert rr.prompt_key(m2, rr.CARD_KINDS) == rr.prompt_key(m2) == "offcard=cr-offcard-1,sweep=cr-sweep-1,verdict=cr-verdict-1"
+    assert rr.limits_key(m2, rr.CARD_KINDS) == rr.limits_key(m2) == "g1"
+    m3 = {"prompt_rev": {**m2["prompt_rev"], "noinput": "cr-noinput-1", "summary": "cr-summary-1"}, "limits_rev": "g2",
+          "limits_rev_by_kind": {"sweep": "s", "verdict": "v", "offcard": "o", "summary": "m"}}
+    assert rr.prompt_key(m3, rr.GAP_KINDS) == "noinput=cr-noinput-1,sweep=cr-sweep-1"
+    assert rr.limits_key(m3, rr.CARD_KINDS) == "offcard=o,sweep=s,verdict=v"
+    assert rr.limits_key(m3, rr.GAP_KINDS) == "noinput=g2,sweep=s"
+    assert rr.limits_key(m3) == "g2"
 
 
 # ---------------------------------------------------------------- 반대 검토 R3A-5 — 나갈 기준을 지키는 갈래가 변이를 견디지 않게

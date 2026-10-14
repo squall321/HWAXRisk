@@ -415,10 +415,27 @@ def manifest_size(item: Mapping[str, Any], lim: Mapping[str, Any]) -> int:
     return len(_s(item.get("kind"))) + len(_s(item.get("title"))) + len(_s(item.get("text"))) + int(head.get("overhead", 14))
 
 
-def prompt_key(lim: Mapping[str, Any]) -> str:
-    """셀 입력 지문의 prompt_rev 자리 — 종류별 판 셋을 한 글로(셋 가운데 하나가 바뀌어도 셀이 처음부터 돈다)."""
+CARD_KINDS: tuple[str, ...] = ("sweep", "verdict", "offcard")     # 카드 전문가의 셀이 부르는 종류
+GAP_KINDS: tuple[str, ...] = ("sweep", "noinput")                 # 입력 결손 전문가의 셀이 부르는 종류(재설계 M3 C3-3)
+
+
+def prompt_key(lim: Mapping[str, Any], kinds: Sequence[str] | None = None) -> str:
+    """셀 입력 지문의 prompt_rev 자리 — 그 셀이 부르는 종류(`kinds`)의 판만 한 글로 잇는다(#37 — `summary` 판이 올라도 셀은 다시
+    돌지 않는다). `kinds` 가 없으면 엔진이 내는 종류 전부다. 종류가 sweep·verdict·offcard 셋뿐인 엔진(M2)에서 카드 전문가의 값은
+    종전(종류 전부)과 같다."""
     revs = lim.get("prompt_rev") if isinstance(lim.get("prompt_rev"), Mapping) else {}
-    return ",".join(f"{k}={revs[k]}" for k in sorted(revs))
+    names = sorted(revs) if kinds is None else sorted(set(kinds))
+    return ",".join(f"{k}={revs.get(k)}" for k in names)
+
+
+def limits_key(lim: Mapping[str, Any], kinds: Sequence[str] | None = None) -> Any:
+    """셀 입력 지문·계획·훑기 열쇠의 limits_rev 자리 — 엔진이 종류별 창 판(`limits_rev_by_kind`)을 내면 그 셀이 부르는 종류의 것만
+    잇고(RB3-6 — 요약 손잡이만 바뀌어 전역 판이 올라도 도는 셀이 처음부터 돌지 않는다), 내지 않으면(또는 `kinds` 가 없으면) 전역
+    `limits_rev` 그대로다(M2 와 같은 값). 표에 없는 종류는 전역 판으로 메운다."""
+    by_kind = lim.get("limits_rev_by_kind")
+    if kinds is None or not isinstance(by_kind, Mapping):
+        return lim.get("limits_rev")
+    return ",".join(f"{k}={by_kind.get(k, lim.get('limits_rev'))}" for k in sorted(set(kinds)))
 
 
 def _json(text: Any, default: Any) -> Any:
@@ -773,6 +790,7 @@ class _Session:
         self.lim: dict = {}
         self.plan: dict = {}
         self.sweep: dict = {}
+        self.kinds: tuple[str, ...] = CARD_KINDS   # 이 전문가의 셀이 부르는 종류 — 입력 결손 전문가면 GAP_KINDS(run 이 정한다)
         self.payloads: dict[str, dict] = {}
         self.focus: _Cell | None = None          # 지금 다루는 셀(없으면 머리 몫) — 예기치 않은 예외를 그 셀에 센다(R3A-2)
         self.call: dict | None = None            # 원장에 running 으로 둔 채 아직 닫지 않은 호출 행(begin_call 의 바탕)
@@ -945,6 +963,8 @@ class _Session:
         return self.payloads[unit_id]
 
     def _expect(self, kind: str) -> dict:
+        """요청의 `expect` — 그 종류의 prompt_rev 와 전역 limits_rev(엔진이 지금 견주는 칸). 엔진이 종류별 expect 칸을 열면 그 종류의
+        창 판으로 바꾼다(RB3-6)."""
         revs = self.lim.get("prompt_rev") if isinstance(self.lim.get("prompt_rev"), Mapping) else {}
         return {"prompt_rev": revs.get(kind), "limits_rev": self.lim.get("limits_rev")}
 
@@ -955,7 +975,8 @@ class _Session:
         assert self.pack is not None
         head = self._head_row()
         frozen = _json(head.get("plan_json"), {})
-        if (head.get("limits_rev") == self.lim.get("limits_rev") and head.get("prompt_rev") == prompt_key(self.lim)
+        lkey, pkey = limits_key(self.lim, self.kinds), prompt_key(self.lim, self.kinds)
+        if (head.get("limits_rev") == lkey and head.get("prompt_rev") == pkey
                 and frozen.get("pack_key") == self.pack.pack_key and isinstance(frozen.get("plan"), dict)):
             plan = frozen["plan"]
         else:
@@ -973,8 +994,8 @@ class _Session:
                                                                               # K(판정 묶음당 카드 상한) — 품질 머리가 찍는다(R3B-10)
                                                                               "k": (self.lim.get("verdict") or {}).get("k"),
                                                                               "plan": plan}),
-                                                 "limits_rev": self.lim.get("limits_rev"),
-                                                 "prompt_rev": prompt_key(self.lim),
+                                                 "limits_rev": lkey,
+                                                 "prompt_rev": pkey,
                                                  "norm_rev": self.pack.norm_rev,
                                                  "verify_rev": review_verify.VERIFY_REV,
                                                  "model": self.lim.get("model")}):
@@ -1004,15 +1025,14 @@ class _Session:
             (self.target_key, self.agent, self.job_id, now))
         active = {u["unit_id"] for u in units.load_units(self.store, self.target_key)}
         cells: list[_Cell] = []
-        pkey = prompt_key(self.lim)
+        pkey, lkey = prompt_key(self.lim, self.kinds), limits_key(self.lim, self.kinds)
         for r in rows:
             unit_id = r["unit_id"]
             if unit_id not in active:
                 continue
             payload = self._payload(unit_id)
             digest = review_cells.cell_input_hash(unit_hash=payload.get("unit_hash"), evidence_sha=payload.get("evidence_sha"),
-                                                  pack_hash=self.pack.pack_key, prompt_rev=pkey,
-                                                  limits_rev=self.lim.get("limits_rev"))
+                                                  pack_hash=self.pack.pack_key, prompt_rev=pkey, limits_rev=lkey)
             started = review_cells.start_cell(self.store, self.target_key, unit_id, self.agent, lease_owner=self.lease,
                                               input_hash=digest, pack_hash=self.pack.pack_key, prompt_rev=pkey,
                                               verify_rev=review_verify.VERIFY_REV, now=now)
@@ -1035,7 +1055,7 @@ class _Session:
         재기동 뒤의 세션도 같은 열쇠를 짓는다."""
         assert self.pack is not None
         scope = (f"cell|{cell.row.get('input_hash')}|{cell.attempt}|{seq}" if cell is not None
-                 else f"head|{self.pack.pack_key}|{self.lim.get('limits_rev')}|{prompt_key(self.lim)}")
+                 else f"head|{self.pack.pack_key}|{limits_key(self.lim, self.kinds)}|{prompt_key(self.lim, self.kinds)}")
         reopened = int(cell.row.get("reopened_n") or 0) if cell is not None else 0
         if reopened:
             # 사람이 다시 연 셀(retry_cells — 시도 수가 0 으로 돌아간다)은 앞의 같은 시도에서 받은 답을 다시 쓰지 않는다 — 쓰면 같은
@@ -1155,13 +1175,17 @@ class _Session:
         raise _Stop("cancelled")
 
     def _limits_moved(self) -> bool:
-        """엔진의 rev_mismatch 가 판이 바뀐 탓인가 — 새로 받은 limits 의 limits_rev 나 종류별 prompt_rev 가 이 세션의 것과 다르면
-        참이다. 에이전트 서버가 프롬프트 판만 올리면 limits_rev 는 그대로라(그 원천에 PROMPT_REV 가 없다) 둘 다 본다(R3A-6)."""
+        """엔진의 rev_mismatch 가 판이 바뀐 탓인가 — 새로 받은 limits 의 limits_rev(전역 · 이 셀이 부르는 종류의 것)나 그 종류의
+        prompt_rev 가 이 세션의 것과 다르면 참이다. 에이전트 서버가 프롬프트 판만 올리면 limits_rev 는 그대로라(그 원천에 PROMPT_REV
+        가 없다) 둘 다 본다(R3A-6). 요청의 `expect` 는 아직 전역 판이라 요약 손잡이만 바뀌어도 rev_mismatch 가 온다 — 그때도 놓고
+        다시 계획하지만, 셀 지문은 종류별 판이라 도는 셀은 처음부터 돌지 않는다(RB3-6)."""
         try:
             fresh = self.loop.limits_for(self.email, fresh=True)
         except _ENGINE_ERRORS:
             return False
-        return fresh.get("limits_rev") != self.lim.get("limits_rev") or prompt_key(fresh) != prompt_key(self.lim)
+        return (fresh.get("limits_rev") != self.lim.get("limits_rev")
+                or limits_key(fresh, self.kinds) != limits_key(self.lim, self.kinds)
+                or prompt_key(fresh, self.kinds) != prompt_key(self.lim, self.kinds))
 
     def _note(self, cell: _Cell | None, kind: str, variant: str | None, aliases: Sequence[str], result: Mapping[str, Any],
               accepted: Mapping[str, Any]) -> None:
@@ -1228,7 +1252,7 @@ class _Session:
         assert self.pack is not None
         self.focus = None
         head = self._head_row()
-        key = {"pack_key": self.pack.pack_key, "limits_rev": self.lim.get("limits_rev")}
+        key = {"pack_key": self.pack.pack_key, "limits_rev": limits_key(self.lim, ("sweep",))}
         done = _json(head.get("sweep_json"), {})
         if head.get("sweep_state") in ("done", "failed") and done.get("key") == key:
             self.sweep = done
