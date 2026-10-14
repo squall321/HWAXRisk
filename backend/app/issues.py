@@ -706,7 +706,9 @@ def resolve_issue(store: RiskStore, panel_id: str, *, settings: Any = None) -> d
             sev3 = int(atom["sev3"] or 0)
             state = "resolved"
             outcome = "downgraded" if sev3 < base_sev3 else ("escalated" if sev3 > base_sev3 else "upheld")
-    chosen = (max(risk, key=lambda a: (int(a["sev3"] or 0), _str(a["finding_id"]))) if risk else None)
+    # 결과 칸의 원자는 결과·등록부(registry._apply_issue)와 같은 원자다 — (sev3, 판정, finding id). 종전에는 (sev3, finding id) 로
+    # 골라 같은 심각도의 OK·FAIL 원자가 섞이면 보고서 줄이 등록부와 어긋났다(review1 M2).
+    chosen = atom if risk else None
     outcome_json = {"panel_id": panel_id, "atom_finding_ids": [str(a["finding_id"]) for a in atoms],
                     "severity_after": _str(chosen["severity"]) if chosen else None,
                     "judgement_after": _str(chosen["judgement"]) if chosen else None,

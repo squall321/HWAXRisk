@@ -5,7 +5,8 @@
 대본(`script`) — 쟁점 id 또는 '*' → 결과 하나:
   {"severity": "치명"|"중대"|"경미", "judgement": "FAIL"|"WARNING"|"OK"|"undetermined",
    "direction": "risk"|"improvement", "status": "open"|"rejected_in_panel", "detail": None(닻 그대로)|"<다른 세부>",
-   "subject": None(닻 그대로)|"other" — 다른 이벤트의 주체(닻에 붙지 않는 원자)}
+   "subject": None(닻 그대로)|"other" — 다른 이벤트의 주체(닻에 붙지 않는 원자),
+   "also": [{"severity", "judgement"}, …] — 같은 닻에 원자를 더 낸다(F2… — 같은 주체·변경·인용, 판정만 다르다)}
   "unparseable" — 결정문에 JSON 이 없다(파싱 실패)
   예외 인스턴스 — 그대로 올린다(러너 실패 표 시험)
 `drain` 이 참이면 `drain_state()` 가 비우는 중이라 답한다. `calls` 는 받은 delib_opts 전부다.
@@ -98,7 +99,9 @@ class IssuePanelEngine:
             "scope": {"kind": "diff", "target_key": target_key, "project_refs": [target["project_id"]],
                       "ir_refs": [diff["base_snapshot_id"], diff["target_snapshot_id"]], "diff_ref": target["ref_id"],
                       "ir_hash": target["ir_hash"]},
-            "findings": [finding] if plan["direction"] == "risk" else [],
+            "findings": ([finding] + [{**finding, "id": f"F{i}", "severity": extra["severity"], "judgement": extra["judgement"]}
+                                      for i, extra in enumerate(plan.get("also") or (), start=2)]
+                         if plan["direction"] == "risk" else []),
             "gains": [finding] if plan["direction"] == "improvement" else [],
             "cross_domain": [], "open_items": [],
             # 성격 진술 하나 — 쟁점 패널은 이것을 앉히지 않는다(rr_character 무접촉, WP4 3.7).

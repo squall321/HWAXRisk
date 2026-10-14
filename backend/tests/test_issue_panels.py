@@ -492,6 +492,23 @@ def test_issue_panels_keep_the_ledger_invariants(store, monkeypatch, tmp_path):
     assert any("(8)" in p for p in planner.check_invariants(store, key))
 
 
+def test_the_issue_result_line_names_the_same_atom_as_the_outcome_and_the_registry(store, monkeypatch, tmp_path):
+    """M2 — 패널이 닻에 같은 심각도의 원자를 여럿 내면(중대 FAIL · 중대 OK …) 결과 칸(outcome_json 의 판정)도 등록부·결과처럼
+    (심각도, 판정) 순으로 고른다 — 종전에는 (심각도, finding id) 로 골라 보고서 줄이 등록부와 어긋났다."""
+    key, unit_ids = _ledger(store, units_n=2)
+    _select(store, monkeypatch, tmp_path, key, cap=2)
+    script = {"*": {"severity": "중대", "judgement": "FAIL",
+                    "also": [{"severity": "중대", "judgement": "OK"}] * 3 + [{"severity": "중대", "judgement": "undetermined"}]}}
+    _run_issues(store, config.settings, IssuePanelEngine(store, script), key)
+    registry.merge(store, key)
+    done = [r for r in issues.issue_rows(store, key) if r["state"] == "resolved"]
+    assert len(done) == 2
+    for issue in done:
+        outcome = json.loads(issue["outcome_json"])
+        row = _row(store, key, issue["anchor_cluster_key"])
+        assert (outcome["severity_after"], outcome["judgement_after"]) == ("중대", "FAIL") == (row["severity"], row["judgement"])
+
+
 def test_an_issue_panel_that_ends_after_a_purge_writes_nothing_back(store, monkeypatch, tmp_path):
     """L6(결정) — 폐기(purge) 뒤에 끝난 쟁점 패널의 결과는 버린다 — 패널 원문(결정문 · 결과 원문 · 도구 호출)도, 쟁점 패널 finding 도,
     쟁점의 결과도 쓰지 않는다(같은 트랜잭션에서 과제의 폐기 상태를 본다). 패널에는 까닭만 남는다."""
