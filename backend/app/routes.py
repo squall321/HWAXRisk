@@ -147,7 +147,8 @@ def pat_due_reason(row: dict | None, *, now: int | None = None, cfg: Any | None 
 
 def portal_pat_auto(store: Any, email: str, row: dict | None) -> dict:
     """GET /api/me 의 `portal_pat.auto` — {enabled, due, due_reason, last_source, last_at, last_error, last_error_kind,
-    last_error_at}. last_error_kind 는 transient(짧게 쉬고 다시 바란다) · final(사람이 고쳐야 한다) · None.
+    last_error_at, how_to_stop}. last_error_kind 는 transient(짧게 쉬고 다시 바란다) · final(사람이 고쳐야 한다) · None.
+    how_to_stop 은 켜져 있을 때만 있다 — 지우거나 폐기한 PAT 도 다시 만들어지므로 멈추는 길(설정의 스위치)을 말한다(D3).
 
     화면은 `enabled && due` 면 지금 버튼이 하는 일(포털 /auth/pat 발급 → PUT /api/me/portal-pat, source 'web')을 조용히 한 번 한다.
     """
@@ -156,7 +157,8 @@ def portal_pat_auto(store: Any, email: str, row: dict | None) -> dict:
     return {"enabled": bool(prefs["portal_pat_auto"]), "due": reason is not None, "due_reason": reason,
             "last_source": prefs["auto_source"], "last_at": prefs["auto_at"],
             "last_error": prefs["auto_error"], "last_error_kind": prefs["auto_error_kind"],
-            "last_error_at": prefs["auto_error_at"]}
+            "last_error_at": prefs["auto_error_at"],
+            "how_to_stop": runner.AUTO_STOP_HINT if prefs["portal_pat_auto"] else None}
 
 
 def portal_pat_wanted(store: Any, email: str, *, now: int | None = None) -> dict | None:

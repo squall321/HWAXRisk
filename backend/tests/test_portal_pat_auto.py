@@ -10,7 +10,7 @@ import time
 import httpx
 import pytest
 
-from app import config, identity, main, routes
+from app import config, identity, main, routes, runner
 from app.common import now_epoch
 from app.risk_store import get_store
 
@@ -96,7 +96,8 @@ def test_me_says_a_pat_is_due_when_none_is_registered(client, box):
     pat = client.get("/api/me", headers=AUTH).json()["portal_pat"]
     assert pat["registered"] is False and pat["email"] is None
     assert pat["auto"] == {"enabled": True, "due": True, "due_reason": "absent", "last_source": None, "last_at": None,
-                           "last_error": None, "last_error_kind": None, "last_error_at": None}
+                           "last_error": None, "last_error_kind": None, "last_error_at": None,
+                           "how_to_stop": runner.AUTO_STOP_HINT}
     # 익명에는 자동 칸이 없다(누구의 것도 아니다).
     assert client.get("/api/me").json()["portal_pat"] is None
 
@@ -555,3 +556,20 @@ def test_a_missing_audience_ranks_below_the_other_reasons(client, box, stronger)
     assert _auto(client)["due_reason"] == stronger
     wanted = routes.portal_pat_wanted(get_store(), EMAIL)
     assert wanted["reason"] == stronger and "require_audiences" not in wanted
+
+
+# ---------------------------------------------------------------- 자동 등록을 멈추는 길(D3)
+def test_a_revoked_pat_comes_back_while_auto_is_on_and_the_switch_is_how_to_stop_it(client, box):
+    """켜져 있는 동안은 폐기한 PAT 도 다시 바란다(의도 — Claude 만 쓰는 사람에게는 다시 켤 스위치가 없다). /api/me 의 auto 와
+    pat_unavailable 안내가 멈추는 길(설정의 자동 등록 스위치)을 말하고, 끄면 그 말 대신 켜는 길을 말한다."""
+    _register(exp_in=60 * 86400)
+    get_store().execute("UPDATE _user_credentials SET revoked_at = 1 WHERE owner_sub = ?", (EMAIL,))
+    assert _mint(client, GW)["portal_pat_wanted"]["reason"] == "revoked"
+    auto = _auto(client)
+    assert auto["due_reason"] == "revoked" and "설정에서 자동 등록을 끈다" in auto["how_to_stop"]
+    guidance = runner.pat_unavailable_guidance(get_store(), EMAIL)
+    assert runner.AUTO_STOP_HINT in guidance
+    client.put("/api/me/portal-pat-auto", json={"enabled": False}, headers=AUTH)
+    assert _auto(client)["how_to_stop"] is None and "portal_pat_wanted" not in _mint(client, GW)
+    guidance = runner.pat_unavailable_guidance(get_store(), EMAIL)
+    assert runner.AUTO_STOP_HINT not in guidance and "설정에서 켜면 저절로 받는다" in guidance
