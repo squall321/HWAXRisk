@@ -277,3 +277,62 @@ def test_the_order_flip_rate_counts_only_the_calibration_population_when_dual_is
     assert agreed[MECH1] > 0 and agreed[MECH2] > 0                       # 둘 다 견줄 행이 있다 — 모집단이 갈린다
     flips = review_quality.compute(store, key)["flips"]
     assert (flips["order_population"], flips["order"]["den"]) == ("calibration", agreed[MECH1])
+
+
+
+def test_a_solo_only_card_the_engine_marked_as_contested_gets_a_second_judgement(store):
+    """반대 검토 MEDIUM 9 — 묶음째로는 창을 넘어(pair_over) 단독으로만 본 카드의 단독 행에 엔진이 부딪침(다툼 · dup_conflict)을 알리면
+    그 카드는 두 번째 판정(그 카드 하나의 rev)을 받는다. 두 번째가 FAIL 이면 실효는 보류(split — '문제없음' 이 아니다)이고 finding 이
+    된다. 표지 없는 단독 카드는 한 번이다."""
+    fake = FakeReviewEngine(_packs())
+    key = rig.target(store, ROSTER)
+    unit_id = units.load_units(store, key)[0]["unit_id"]
+    fake.pair_over_units = {unit_id}
+    fake.solo_marks = {"K01": {"contested_by": {"verdict": ["yes", "FAIL"], "why": "다른 답은 걸렸다", "attempt": 1}}}
+    fake.rev_verdicts = {_record("K01"): ("yes", "FAIL")}
+    job_id = rig.job(store, key, scope={"agents": [MECH2], "unit_ids": [unit_id]})
+    rig.Rig(store, fake).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    revs = [[c["alias"] for c in b["cards"]] for b in _runs(fake, MECH2, "rev")]
+    assert revs == [["K01"]]
+    rows = [dict(r) for r in store.query("SELECT * FROM rr_card_verdicts WHERE target_key = ? AND agent_key = ? AND unit_id = ?"
+                                         " AND record_id = ?", (key, MECH2, unit_id, _record("K01")))]
+    eff = review_verify.effective_rows(rows)[_record("K01")]
+    assert (sorted(r["variant"] for r in rows), eff["judgement"], eff["split"]) == (["rev", "solo"], "undetermined", 1)
+    findings = [json.loads(r["finding_json"]) for r in store.query(
+        "SELECT finding_json FROM rr_findings WHERE target_key = ? AND source_kind = 'card_review'", (key,))]
+    assert findings                                                             # 보류(split)인 카드는 finding 후보다
+
+
+def test_a_contested_quote_on_a_verdict_row_keeps_the_200_character_cap(store):
+    """반대 검토 MEDIUM 11 — 판정 행에 실린 다툼(contested_by)의 cq 도 셀 하나 REST 와 반출에서 200자로 줄고 원래 길이가 실린다."""
+    from app import export, routes
+    from tests import factories
+
+    fake = FakeReviewEngine(_packs())
+    fake.verdicts = {_record("K02"): ("yes", "FAIL")}
+    fake.contested = {"K02": {"verdict": ["yes", "OK"], "cq": fre.LONG_QUOTE, "quote": "ok", "why": "철회", "attempt": 2}}
+    key, unit_id = _run(store, fake, agents=[MECH2])
+    rows = routes.get_cell(key, unit_id, MECH2, ident=factories.ident(rig.OWNER))["verdicts"]
+    marked = [r["checks_json"]["contested_by"] for r in rows if (r.get("checks_json") or {}).get("contested_by")]
+    assert marked and all((len(c["cq"]), c.get("cq_chars")) == (export.EXPORT_CQ_MAX, len(fre.LONG_QUOTE)) for c in marked)
+    assert fre.LONG_QUOTE not in "".join(export.iter_lines(store, rig.OWNER, 0))
+
+
+def test_card_quotes_in_the_registry_and_the_claim_index_keep_the_200_character_cap(store):
+    """반대 검토(셀 밖 — M2 S9 · S3-4, 사용자 결정) — 등록부(registry_payload — REST · MCP risk_get_registry)와 인용 역색인
+    (claims_for_ref — REST · MCP risk_claims_for_ref)도 카드 인용을 판정당 200자로 줄이고 원래 길이를 싣는다(C12 와 같은 규칙)."""
+    from app import export, registry, routes
+
+    fake = FakeReviewEngine(_packs())
+    fake.verdicts = {_record("K01"): ("yes", "FAIL")}
+    fake.long_quote = {"K01"}
+    key, _unit = _run(store, fake, agents=[MECH2])
+    registry.merge(store, key)
+    long = fre.LONG_QUOTE
+    reg = json.dumps(routes.registry_payload(key, owner_sub=rig.OWNER), ensure_ascii=False)
+    assert long not in reg and long[:export.EXPORT_CQ_MAX] in reg
+    claims = routes.claims_for_ref(f"card:{_record('K01')}", owner_sub=rig.OWNER)["claims"]
+    quoted = [c for c in claims if c.get("quote")]
+    assert quoted and all(len(c["quote"]) <= export.EXPORT_CQ_MAX for c in quoted)
+    assert any(c.get("quote_chars") == len(long) for c in quoted)

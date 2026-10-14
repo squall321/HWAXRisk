@@ -377,6 +377,9 @@ def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Ma
         unit_ids = [u for u in dict.fromkeys(c["unit_id"] for c in changed)]
         out.update({counted: len(changed), "not_failed": len(rows) - len(changed), "keys_total": len(keys),
                     "keys": keys[:DISPOSE_KEYS_MAX], "experts": len(agents), "changed": bool(changed)})
+        if action == "skip":
+            # 넘긴 셀이 이미 정산된 걸림을 실었다 — 그 걸림은 보고서 · finding 에 남는다(반대 검토 MEDIUM 8 — 사용자 결정)
+            out["hits"] = sum(review_cells.cell_hits(store, target_key, c["unit_id"], c["agent_key"]) for c in changed)
         if not changed:
             out.update({"job": {"action": "none"}, "audit_id": None})
             return out
@@ -664,6 +667,14 @@ def should_stop_review(store: Any, job_id: str, stop: threading.Event | None = N
         return why
 
     return ask
+
+
+# 입력 결손 q1 줄의 정체와 세기(반대 검토 HIGH 1) — 같은 정체의 줄이 다시 오면 더 센 영향만 남는다.
+_IMPACT_RANK = {"yes": 2, "unknown": 1, "no": 0}
+
+
+def _q1_identity(row: Mapping[str, Any]) -> tuple:
+    return (row.get("k"), row.get("path"), tuple(row.get("l") or ()), row.get("title"))
 
 
 # ---------------------------------------------------------------- 진행 신호(progress_json)
@@ -1223,17 +1234,22 @@ class _Session:
         scope = (f"cell|{cell.row.get('input_hash')}|{cell.attempt}|{seq}" if cell is not None
                  else f"head|{self.pack.pack_key}|{limits_key(self.lim, self.kinds)}|{prompt_key(self.lim, self.kinds)}")
         reopened = int(cell.row.get("reopened_n") or 0) if cell is not None else 0
-        if reopened:
+        if reopened and cell is not None and cell.row.get("route_forced") == review_cells.HUMAN_RETRY:
             # 사람이 다시 연 셀(retry_cells — 시도 수가 0 으로 돌아간다)은 앞의 같은 시도에서 받은 답을 다시 쓰지 않는다 — 쓰면 같은
-            # 답으로 같은 실패를 엔진을 부르지 않고 되풀이한다. 한 번도 다시 열리지 않은 셀의 열쇠는 그대로다(M2 원장과 같은 열쇠).
+            # 답으로 같은 실패를 엔진을 부르지 않고 되풀이한다. 그 밖의 다시 열기(입력 바뀜 · 넓힘 · 넘김 · 보충 표본)는 열쇠가 그대로다
+            # — 입력 바뀜은 입력 지문이 이미 열쇠에 들고, M2 원장의 열쇠가 바뀌지 않는다(반대 검토 LOW 18 · 사용자 결정).
             scope += f"|r{reopened}"
         return sha256_hex(scope + "|" + canonical_json(body))
 
     def _cached(self, cell: _Cell | None, request_hash: str) -> dict | None:
+        # 셀의 답은 그 셀이 지금 시작(started_at — 입력이 바뀌어 처음부터 돌면 새로 찍힌다)한 뒤에 받은 것만 다시 쓴다. 캐시는 같은
+        # 시도의 이어 돌기 몫이라 답의 판정 행이 원장에 남아 있어야 하는데(_commit 은 다시 쓴 답을 적지 않는다), 입력이 A → B → A 로
+        # 돌아온 셀은 A 의 앞 답이 같은 열쇠여도 그 행이 지워졌다(반대 검토 LOW 18 — 다시 연 횟수를 열쇠에서 뺀 입력 바뀜의 짝).
+        since = int(cell.row.get("started_at") or 0) if cell is not None else 0
         row = self.store.query_one(
             "SELECT result_gz FROM rr_review_calls WHERE target_key = ? AND agent_key = ? AND unit_id IS ? AND request_hash = ?"
-            " AND state = 'ok' AND result_gz IS NOT NULL ORDER BY started_at DESC LIMIT 1",
-            (self.target_key, self.agent, cell.unit_id if cell is not None else None, request_hash))
+            " AND state = 'ok' AND result_gz IS NOT NULL AND started_at >= ? ORDER BY started_at DESC LIMIT 1",
+            (self.target_key, self.agent, cell.unit_id if cell is not None else None, request_hash, since))
         if row is None:
             return None
         try:
@@ -1424,6 +1440,7 @@ class _Session:
         done = _json(head.get("sweep_json"), {})
         if head.get("sweep_state") in ("done", "failed") and done.get("key") == key:
             self.sweep = done
+            self._replay_handoffs()           # 적은 뒤 다시 열기 전에 죽었어도 재기동이 이어 한다(반대 검토 MEDIUM 10 — 멱등)
             return
         manifest = {m["unit_id"]: m for m in units.manifest_items(self.store, self.target_key)}
         # 입력 결손 전문가의 훑기에는 결측 블록(그 영역의 실마리를 단 unit.missing — 대상 수준이라 단위마다 같다)을 싣는다(C3-3).
@@ -1458,7 +1475,11 @@ class _Session:
                                        sets={"sweep_state": "failed" if failed else "done",
                                              "sweep_json": canonical_json(self.sweep)}):
             raise _Stop("lease", release=False)
-        # 늦은 넘김(C3-7) — 이 훑기가 넘긴 (단위, 영역)의 셀 가운데 이미 걸러진 것을 다시 연다(다시 분류되면 7번 줄로 검토다).
+        self._replay_handoffs()
+
+    def _replay_handoffs(self) -> None:
+        """늦은 넘김(C3-7) — 이 훑기가 넘긴 (단위, 영역)의 셀 가운데 이미 걸러진 것을 다시 연다(다시 분류되면 7번 줄로 검토다).
+        거른 셀만 여므로 멱등이다 — 훑기를 원장에서 다시 읽을 때도 부른다."""
         for handoff in self.sweep.get("handoffs") or ():
             if handoff.get("unit_id") and handoff.get("to"):
                 review_cells.reopen_filtered(self.store, self.target_key, via="handoff", domain=str(handoff["to"]),
@@ -1466,14 +1487,11 @@ class _Session:
 
     # -- 거르기 분류(재설계 M3 C3-6) ----------------------------------------------------------------
     def _handoffs_to(self, domain: str) -> dict[str, list[dict]]:
-        """다른 전문가의 훑기가 이 영역으로 넘긴 단위(`h` 줄 — 머리 sweep_json.handoffs, 분류 시점까지 온 것) → [{from, why}]."""
+        """다른 전문가가 이 영역으로 넘긴 단위(`h` 줄 — 훑기와 카드 밖 호출, 분류 시점까지 온 것 · 반대 검토 LOW 15) → [{from, why}]."""
         out: dict[str, list[dict]] = {}
-        for r in self.store.query(
-                "SELECT h.agent_key AS src, json_extract(x.value, '$.unit_id') AS unit_id, json_extract(x.value, '$.why') AS why"
-                " FROM rr_expert_reports h, json_each(h.sweep_json, '$.handoffs') x WHERE h.target_key = ? AND h.agent_key <> ?"
-                " AND h.sweep_json IS NOT NULL AND json_extract(x.value, '$.to') = ? ORDER BY h.agent_key, x.key",
-                (self.target_key, self.agent, domain)):
-            out.setdefault(str(r["unit_id"]), []).append({"from": r["src"], "why": r["why"] or ""})
+        for h in review_cells.handoffs(self.store, self.target_key):
+            if h["to"] == domain and h["from"] != self.agent:
+                out.setdefault(h["unit_id"], []).append({"from": h["from"], "why": h["why"]})
         return out
 
     def _tier_a_pending(self, active: set[str]) -> bool:
@@ -1632,6 +1650,15 @@ class _Session:
                     break
             else:
                 cell.samples_done = False
+                continue
+            # 단독으로만 본 카드(fwd · rev 없음 — pair_over 따위)의 단독 행에 엔진이 부딪침을 알렸으면 그 카드 하나의 rev 로 두 번째
+            # 판정을 받는다(반대 검토 MEDIUM 9 — 종전에는 fwd 행만 보아 한 번으로 끝났다). 갈리면 실효 규칙이 보류(split)로 둔다.
+            mine = [r for r in self._rows(cell) if r["alias"] == alias]
+            if (not any(r["variant"] in ("fwd", "rev") for r in mine)
+                    and any(r["variant"] == "solo" and review_verify.engine_conflict(r) for r in mine)):
+                if not cell.alive or not self._verdict(cell, [alias], "rev", self._verdict_body(cell, [alias], "rev"),
+                                                       deck_id=decks.get(alias)):
+                    return
 
     # -- 카드 밖 -------------------------------------------------------------------------------
     def _known(self, cell: _Cell) -> list[dict]:
@@ -1804,12 +1831,18 @@ class _Session:
             accepted = review_verify.accept_rows(answer.result, kind="noinput", sent_aliases=cards, pack=self.pack,
                                                  unit_refs=cell.refs)
             self._note(cell, "noinput", None, cards, answer.result, accepted)
-            titles = {r["title"] for r in q1}
+            seen = {_q1_identity(r): i for i, r in enumerate(q1)}
             asks = {(r["item"], r["needs"]) for r in q2}
             for row in accepted["rows"]:
-                if row["t"] == "q1" and row["title"] not in titles:
-                    titles.add(row["title"])
-                    q1.append(row)
+                if row["t"] == "q1":
+                    # 겹침은 엔진의 줄 정체(카드 · 경로 · 줄 · 제목)로 가른다 — 엔진은 제목이 같아도 경로가 다르면 둘 다 남긴다(RB3-2).
+                    # 같은 정체면 더 센 영향(있음 > 모름 > 없음)이 남는다 — 걸림 아닌 줄이 걸림을 가리지 않는다(반대 검토 HIGH 1).
+                    at = seen.get(_q1_identity(row))
+                    if at is None:
+                        seen[_q1_identity(row)] = len(q1)
+                        q1.append(row)
+                    elif _IMPACT_RANK.get(row["impact"], 0) > _IMPACT_RANK.get(q1[at]["impact"], 0):
+                        q1[at] = row
                 elif row["t"] == "q2" and (row["item"], row["needs"]) not in asks:
                     asks.add((row["item"], row["needs"]))
                     q2.append(row)
@@ -1843,48 +1876,46 @@ class _Session:
     # -- 정산 · 마감 ------------------------------------------------------------------------------
     def _settle(self, cell: _Cell) -> None:
         self.focus = cell
+        # 표본 · 그림자 셀의 결과는 정산과 같은 트랜잭션에 적는다 — 사이에서 죽으면 놓친 걸림(risk_miss)이 적히지 않아 넓힘 신호를
+        # 잃었다(반대 검토 MEDIUM 10). 넓힘의 다시 열기는 원장에서 유도되므로 잡 끝(_audit_topup 앞)이 빠진 것을 다시 한다.
+        sample = self._sample_results(cell)
+        results = {k: sample["outcome"] for k in sample.get("keys") or ()}
         if self.gaps:
             out = review_cells.settle_noinput(self.store, self.target_key, cell.unit_id, self.agent, lease_owner=self.lease,
                                               outcome=(cell.noinput or {}).get("outcome"), max_charged=self.max_charged,
-                                              now=self.now())
+                                              sample_results=results, now=self.now())
         else:
             out = review_cells.settle_cell(self.store, self.target_key, cell.unit_id, self.agent, lease_owner=self.lease,
                                            samples_done=cell.samples_done, more_calls=False, max_charged=self.max_charged,
-                                           now=self.now())
+                                           sample_results=results, now=self.now())
         if not out["written"]:
             raise _Stop("lease", release=False)
         cell.alive = False
-        if out["state"] in ("reviewed", "no_input"):
-            self._sample_outcome(cell)
+        if out["state"] in ("reviewed", "no_input") and sample.get("outcome") == "risk_miss":
+            widened = review_cells.widen(self.store, self.target_key, sample["domain"], now=self.now())
+            log.info("검토 잡 %s: %s×%s 의 %s 가 걸림을 놓쳤다 — 영역 %s 를 넓혔다(다시 연 셀 %s, 대상 전체 끔 %s)", self.job_id,
+                     cell.unit_id, self.agent, "·".join(sample["keys"]), sample["domain"], widened["reopened"], widened["off"])
         if out["state"] not in ("reviewed", "no_input"):
             log.info("검토 잡 %s: %s×%s 셀 정산 미달(%s) → %s", self.job_id, cell.unit_id, self.agent,
                      ", ".join(out.get("missing") or [out.get("code") or ""]), out["state"])
 
-    def _sample_outcome(self, cell: _Cell) -> None:
-        """정산이 끝난 표본·그림자 셀의 결과(재설계 M3 C3-7 — X1-13 의 넷)를 `sample_json` 에 적고, 걸림을 놓쳤으면(risk_miss) 그
-        영역을 그 대상에서 넓힌다. 카드 셀은 `review_verify.audit_outcome`(실효 판정 · 카드 밖 줄), 입력 결손 셀은 그 결과로 —
-        영향 있음 risk_miss · 모름·확인할 항목 undetermined · 없음 kept."""
-        row = self.store.query_one("SELECT domain, sample_json FROM rr_review_cells WHERE target_key = ? AND unit_id = ?"
-                                   " AND agent_key = ?", (self.target_key, cell.unit_id, self.agent))
+    def _sample_results(self, cell: _Cell) -> dict:
+        """표본·그림자 셀의 결과(재설계 M3 C3-7 — X1-13 의 넷) — {keys, outcome, domain}, 표본·그림자가 아니면 {}. 카드 셀은
+        `review_verify.audit_outcome`(실효 판정 · 카드 밖 줄), 입력 결손 셀은 그 결과로 — 영향 있음 risk_miss · 모름·확인할 항목
+        undetermined · 없음 kept. 정산이 같은 트랜잭션에 적는다(`settle_*` 의 sample_results)."""
+        row = self.store.query_one("SELECT domain, sample_json, extras_json FROM rr_review_cells WHERE target_key = ?"
+                                   " AND unit_id = ? AND agent_key = ?", (self.target_key, cell.unit_id, self.agent))
         sample = _json(row["sample_json"] if row is not None else None, {})
         keys = [k for k in review_cells.SAMPLE_RESULT_KEYS if isinstance(sample.get(k), Mapping)]
         if not keys:
-            return
+            return {}
         if self.gaps:
             outcome = _NOINPUT_AUDIT.get(str((cell.noinput or {}).get("outcome")), "undetermined")
         else:
             rows = self._rows(cell)
-            head = self.store.query_one("SELECT extras_json FROM rr_review_cells WHERE target_key = ? AND unit_id = ?"
-                                        " AND agent_key = ?", (self.target_key, cell.unit_id, self.agent))
-            offcard, _rest = expert_report.offcard_rows(dict(head) if head is not None else {})
+            offcard, _rest = expert_report.offcard_rows(dict(row) if row is not None else {})
             outcome = review_verify.audit_outcome(review_verify.effective_rows(rows) if rows else {}, offcard)
-        if not review_cells.note_sample_result(self.store, self.target_key, cell.unit_id, self.agent, lease_owner=self.lease,
-                                               results={k: outcome for k in keys}, now=self.now()):
-            raise _Stop("lease", release=False)
-        if outcome == "risk_miss":
-            out = review_cells.widen(self.store, self.target_key, str(row["domain"]), now=self.now())
-            log.info("검토 잡 %s: %s×%s 의 %s 가 걸림을 놓쳤다 — 영역 %s 를 넓혔다(다시 연 셀 %s, 대상 전체 끔 %s)", self.job_id,
-                     cell.unit_id, self.agent, "·".join(keys), row["domain"], out["reopened"], out["off"])
+        return {"keys": keys, "outcome": outcome, "domain": str(row["domain"])}
 
     def _close(self) -> None:
         """세션 끝 — 그 전문가의 범위 안 열린 셀이 0 이면 마감(`finalize_expert`), 아니면 놓는다(백오프 중인 셀·다음 시도의 셀은
@@ -2434,7 +2465,15 @@ class ReviewLoop:
             (job["target_key"], job["id"]))["n"] or 0)
 
     def _audit_topup(self, job: Mapping[str, Any]) -> int:
-        """잡 끝 보충 표본(C3-7) — 잡 거르기가 on 일 때 그 잡이 거른 셀을 표본 바닥(59건 · 영역당 1건)까지 다시 연다. 다시 연 셀 수."""
+        """잡 끝 보충 표본(C3-7) — 잡 거르기가 on 일 때 거른 셀을 표본 바닥(59건 · 영역당 1건)까지 다시 연다. 그 앞에 넓힌 영역의 남은
+        거른 셀을 거둔다(넓힘은 원장에서 유도된다 — 정산 뒤 넓힘 전에 죽었거나 분류와 엇갈린 셀, 반대 검토 MEDIUM 10 · LOW 16)
+        · 다른 전문가가 넘긴 단위 · 영역의 남은 거른 셀도(카드 밖 넘김 — LOW 15). 이 잡이 이어 돌 셀이 생겼으면 그 수(0 이 아니면
+        잡은 review 로 이어 돈다)."""
+        target_key = str(job["target_key"])
+        reaped = (review_cells.reopen_widened(self.store, target_key, now=self.clock())
+                  + review_cells.reopen_handed_off(self.store, target_key, now=self.clock()))
+        if reaped and self._open_cells(job):
+            return 1
         knobs = (job.get("params") or {}).get("knobs") or {}
         if knobs.get("filter") != "on":
             return 0
@@ -2544,18 +2583,27 @@ class ReviewLoop:
                                                    f" 여유 {unit_live.ENSURE_DEADLINE_S + 600}초에 못 미친다")
             client = http_client(transport=self.live_transport) if self.live_transport is not None else None
             try:
+                # 호출 사이마다 잡을 새로 읽는다(poll_s=0) — 취소 · 사람의 정지 · 앱 종료면 더 부르지 않고 얼리지 않는다(MEDIUM 14).
                 out = unit_live.ensure(self.store, self.settings, target_key, {"kind": "user", "email": email, "pat": pat},
-                                       http_client=client, now=self.clock())
+                                       http_client=client, now=self.clock(), clock=self.clock,
+                                       stop=should_stop_review(self.store, job_id, self.stop, poll_s=0))
             finally:
                 if client is not None:
                     client.close()
-            if out["frozen"] or out["retry"]:
+            if out.get("aborted"):
+                log.info("검토 잡 %s: 근거 꾸러미 실호출을 멈췄다(%s) — 호출 %s(재사용 %s) · 부를 것 없이 얼림 %s", job_id,
+                         out["aborted"], out["calls"], out["cached"], out["frozen"])
+            elif out["frozen"] or out["retry"]:
                 log.info("검토 잡 %s: 근거 꾸러미 실호출 — 얼림 %s · 다시 %s · 호출 %s(재사용 %s)", job_id, out["frozen"],
                          out["retry"], out["calls"], out["cached"])
         except unit_live.CredentialRejected as exc:
             self.hold(job_id, "credential", f"근거 꾸러미 실호출({target_key}): {exc} — {CREDENTIAL_FIX}")
-        except Exception:  # noqa: BLE001 — 근거 꾸러미 결함이 루프를 죽이지 않는다. 행은 아직(NULL)이라 다음 틱이 다시 한다.
+        except Exception as exc:  # noqa: BLE001 — 근거 꾸러미 결함이 루프를 죽이지 않는다. 백오프로 미루고 여섯 번째에 언다(HIGH 4).
             log.exception("근거 꾸러미 실호출 실패(job=%s, target=%s)", job_id, target_key)
+            try:
+                unit_live.note_failure(self.store, target_key, note=type(exc).__name__, now=self.clock())
+            except Exception:  # noqa: BLE001 — 기록 실패가 워커 끝을 막지 않는다.
+                log.exception("근거 꾸러미 실패 기록 실패(job=%s, target=%s)", job_id, target_key)
 
     def _start_worker(self, job: Mapping[str, Any], head: Mapping[str, Any], purpose: str) -> None:
         thread = threading.Thread(target=self._work, args=(dict(job), dict(head), purpose),

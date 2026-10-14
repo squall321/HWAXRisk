@@ -33,9 +33,13 @@
   long_quote       이 별칭들의 인용을 카드에 없는 긴 글(LONG_QUOTE, 260자)로 낸다(엔진 checks.quote 는 정직하게 not_found)
   cond_text        단독 재질의 c 줄의 조건 글(기본 COND — 긴 글로 바꾸면 반출의 조건 글 200자를 본다, S9)
   offcard_src·offcard_quote  카드 밖 f 줄이 근거로 댄 배경 카드 별칭과 그 인용(기본 exp · 빈 인용 — S9 의 카드 근거 카드 밖 줄)
-  handoff_to       이 영역으로 넘기는 h 줄을 훑기(첫 단위)와 카드 밖 호출에 하나씩 더한다(S10 의 넘김 절)
+  handoff_to       이 영역으로 넘기는 h 줄을 훑기(첫 단위)와 카드 밖 호출에 하나씩 더한다(S10 의 넘김 절). handoff_unit · handoff_from
+                   을 주면(거르기의 훑기 넘김 시험) 카드 밖 호출에는 더하지 않는다 — 카드 밖 h 줄도 넘김으로 세므로(반대 검토 LOW 15)
+                   모든 전문가의 카드 밖 넘김이 분류보다 먼저 오느냐가 시험의 흐름을 갈라서다. 카드 밖 넘김은 offcard_handoffs 로
   handoff_unit     훑기 h 줄이 넘기는 단위(unit_id) — 그 쪽에 그 단위가 없으면 h 줄을 내지 않는다(거르기 넘김 줄, 재설계 M3 C3-6)
   handoff_from     주면 이 전문가들의 훑기만 h 줄을 낸다(늦은 넘김 — 재설계 M3 C3-7)
+  offcard_handoffs (agent_key, unit_id) → 영역 — 그 전문가의 그 단위 카드 밖 호출만 그 영역으로 넘기는 h 줄을 낸다(훑기는 내지
+                   않는다 — 카드 밖 넘김도 거른 셀을 지키고 다시 여는지, 반대 검토 LOW 15)
   seen·need        카드 밖 m 줄의 따져 본 메커니즘 · need 줄의 글(S10 의 메커니즘·필요 정보 절)
   hold_runs        n(1부터 센 run 차례) → threading.Event — 그 run 은 result 앞에서 그 사건을 기다린다(호출 중 재기동 시험)
   solo_verdicts    solo 변형에서만 쓰는 record_id → (applies, judgement) — 단독 재질의가 앞 판정을 뒤집는 카드(S11)
@@ -47,15 +51,20 @@
                    차례로 대고(그 카드 글에서 자른 인용) 변경 줄 하나를 단다, no 줄은 카드·줄 없이 낸다(재설계 M3 C3-3)
   noinput_q2       unit_id → q2 줄의 항목 목록(빈 글 = 확인할 것 없음 — 까닭만, (항목, 필요한 자료) 쌍도 된다). 기본은 예제처럼
                    둘(첫째는 첫 카드를 댄다)
+  noinput_script   unit_id → 호출마다 차례로 쓸 q1 줄 목록([{impact, title?, path?, flipped_from?, contested_by?, k?}, …] — 다 쓰면 마지막 것을 되풀이).
+                   주면 noinput_q1 대신 이것이 그 호출의 q1 이다(같은 제목 · 다른 경로, 제목 없는 영향, 다시 물어 올린 영향)
   noinput_more     unit_id → more=yes 로 답할 횟수(답마다 하나씩 준다 — 그 동안 quality.maybe_more 참). 다시 물으면 q1 제목 번호가
                    받은 extra.known 수 뒤에서 이어진다
   noinput_same_titles  참이면 다시 물어도 q1 제목 번호를 1 부터 다시 매긴다(같은 영향을 되풀이하는 모델 — 앱이 한 번만 남기는지)
+  sweep_marks      unit_id → {contested_by?, flipped_from?, dup_conflict?} — 그 단위의 u 줄에 엔진의 부딪침 표지를 단다(거르기가 그
+                   표지를 믿지 않는지 — 반대 검토 HIGH 2)
   sweep_split      훑기 묶음 수(기본 1 — 카드 전부 한 묶음). 둘 이상이면 카드를 팩 순서로 나눈다
   sweep_error_aliases  이 별칭이 실린 훑기 묶음의 run 은 내용 탓 오류(no_rows)다 — 훑기 쪽 하나만 실패한 전문가(sweep_state failed)
   sweep_drop       훑기 답에서 뺄 unit_id(앱 회계가 그 단위를 error 로 적는다 — 거르기의 '답에 없는 단위', 재설계 M3 C3-6)
   sweep_k          unit_id → 별칭 목록 — 그 단위의 u 줄 k 를 실은 카드 전부가 아니라 이것만으로 낸다(카드 밖 호출이 훑기 k 에 걸린
                    배경 카드를 먼저 싣는지 — P-03, R3A-5)
   error_cells      (agent_key, unit_id) → error 프레임 — 그 셀의 run 은 늘 그 오류다(내용 탓이면 셀이 failed 로 간다, S11)
+  error_kinds      error_cells 를 이 종류(verdict · offcard · noinput)의 run 에만 건다(None 이면 전부 — 판정은 받고 카드 밖 호출만 실패)
   truncate         (kind, variant, unit_id) → 'length' | 'repaired' | 'unknown' — 처음 맞는 run 한 번만: length 는 판정이면
                    truncated 처럼 마지막 판정 행을 빼고(행이 둘 이상인 호출에 건다 — 엔진은 남는 행이 0 이면 결과 대신
                    truncated_empty 를 낸다), 카드 밖이면 꼬리(more 줄)를 잃은 채 끝난 답이다(missing ['more'] · maybe_more null ·
@@ -76,6 +85,7 @@
   search_states    카드 밖 호출이 extra.search 를 실었을 때 차례로 낼 meta.search.state(ok · empty_scope · no_hits · failed — 다 쓰면
                    마지막 것을 되풀이, 비면 meta.search 를 싣지 않는다 — M2 엔진처럼). ok 면 예제 result_offcard_search_ok 의 발췌
                    셋(D01~D03)을 실은 것으로 적고 D01 을 댄 카드 밖 줄 하나를 더한다(cr-offcard-2)
+  solo_marks       별칭 → {contested_by?, flipped_from?, dup_conflict?} — 그 단독(solo) 판정 행에 엔진의 부딪침 표지를 단다
   alias_words      별칭 → checks.alias(['칸:낱말', …]) — 그 fwd 판정 행에 엔진이 별칭표로 읽은 낱말을 단다(예제 result_verdict_alias 의
                    모양, 엔진 c4e4823)
   flipped          별칭 → flipped_from{verdict, attempt, raw?} — 그 fwd 판정 행에 보충이 갈아 낀 표지를 단다(raw 가 있으면 어휘 밖
@@ -284,6 +294,7 @@ class FakeReviewEngine:
         self.handoff_to: str | None = None
         self.handoff_unit: str | None = None
         self.handoff_from: set[str] | None = None
+        self.offcard_handoffs: dict[tuple[str, str], str] = {}
         self.seen: list[str] = []
         self.need: str | None = None
         self.hold_runs: dict[int, threading.Event] = {}
@@ -299,7 +310,10 @@ class FakeReviewEngine:
         self.noinput_q2: dict[str, list[str]] = {}
         self.noinput_more: dict[str, int] = {}
         self.noinput_same_titles = False
+        self.noinput_script: dict[str, list[list[dict[str, Any]]]] = {}
+        self.sweep_marks: dict[str, dict[str, Any]] = {}
         self.error_cells: dict[tuple[str, str], dict[str, Any]] = {}
+        self.error_kinds: set[str] | None = None
         self.truncate: dict[tuple[str, str | None, str | None], str] = {}
         self.queued_ms: int | None = None
         self.no_quote: set[str] = set()
@@ -310,6 +324,7 @@ class FakeReviewEngine:
         self.flipped: dict[str, dict[str, Any]] = {}
         self.search_states: list[str] = []
         self.alias_words: dict[str, list[str]] = {}
+        self.solo_marks: dict[str, dict[str, Any]] = {}
         self.inject = ""
         self.inject_kinds: set[str] | None = None
         # 기록
@@ -490,7 +505,7 @@ class FakeReviewEngine:
             return self._stream(iter([_sse("status", {"step": "attempt", "n": 1}),
                                       _sse("error", {"code": "no_rows", "message": "훑기 줄이 하나도 없다(가짜)", "infra": False,
                                                      "retryable": False, "attempt": 1}), _sse("done", {})]))
-        if cell in self.error_cells:
+        if cell in self.error_cells and (self.error_kinds is None or body.get("kind") in self.error_kinds):
             return self._stream(iter([_sse("status", {"step": "attempt", "n": 1}),
                                       _sse("error", {**self.error_cells[cell], "attempt": 1}), _sse("done", {})]))
         if self._take("error_n"):
@@ -569,6 +584,10 @@ class FakeReviewEngine:
                     row["checks"]["dup_conflict"] = True
                 if variant == "fwd" and row["k"] in self.alias_words:
                     row["checks"]["alias"] = list(self.alias_words[row["k"]])
+                if variant == "solo" and row["k"] in self.solo_marks:   # 단독 행의 부딪침 표지(반대 검토 MEDIUM 9)
+                    marks = self.solo_marks[row["k"]]
+                    row.update({k: copy.deepcopy(v) for k, v in marks.items() if k in ("contested_by", "flipped_from")})
+                    row["checks"]["dup_conflict"] = bool(marks.get("dup_conflict", True))
             if (self.truncated or cut == "length") and main:
                 main = main[:-1]
                 quality.update(truncated=True, tail_broken=True)
@@ -590,6 +609,11 @@ class FakeReviewEngine:
                      "why": "카드의 적용 조건이 이 단위에 걸릴 수 있다", "unit_id": uid,
                      "record_ids": [cards[a]["record_id"] for a in hit[uid]], "from_attempt": 1,
                      "checks": {"why": "ok", "coerced": []}} for u, uid in units.items() if uid not in self.sweep_drop]
+            for row in rows:                               # 엔진이 그 u 줄에 단 부딪침 표지(RB3-1 — dup_conflict · contested_by · flipped_from)
+                marks = self.sweep_marks.get(row["unit_id"])
+                if marks:
+                    row.update({k: copy.deepcopy(v) for k, v in marks.items() if k in ("contested_by", "flipped_from")})
+                    row["checks"]["dup_conflict"] = bool(marks.get("dup_conflict", True))
             first = (next((u for u, uid in units.items() if uid == self.handoff_unit), None) if self.handoff_unit
                      else next(iter(units), None))
             sender = str((body.get("expert") or {}).get("key") or "")
@@ -618,8 +642,13 @@ class FakeReviewEngine:
             more = "yes" if n >= cap else "no"
             rows += [{"t": "m", "seen": list(self.seen), "from_attempt": 1, "checks": {"coerced": []}},
                      {"t": "more", "more": more, "from_attempt": 1, "checks": {"coerced": []}}]
-            if self.handoff_to:
+            if self.handoff_to and self.handoff_unit is None and self.handoff_from is None:
                 rows.append({"t": "h", "to": self.handoff_to, "why": "카드 밖 호출이 다른 영역의 몫으로 본 줄", "l": own[:1],
+                             "from_attempt": 1, "checks": {"coerced": []}})
+            handed = self.offcard_handoffs.get((str((body.get("expert") or {}).get("key") or ""),
+                                                str((body.get("unit") or {}).get("unit_id") or "")))
+            if handed:
+                rows.append({"t": "h", "to": handed, "why": "카드 밖 호출이 다른 영역의 몫으로 본 줄", "l": own[:1],
                              "from_attempt": 1, "checks": {"coerced": []}})
             if self.need:
                 rows.append({"t": "need", "what": self.need, "from_attempt": 1, "checks": {"coerced": []}})
@@ -722,7 +751,12 @@ class FakeReviewEngine:
         base = 0 if self.noinput_same_titles else len(extra.get("known") or ())
         codes = [str(m.get("code")) for m in extra.get("mechanisms") or () if isinstance(m, Mapping)]
         q1: list[dict] = []
-        for i, impact in enumerate(self.noinput_q1.get(uid, ["yes", "yes"])):
+        script = self.noinput_script.get(uid)
+        spec: list[dict] = []
+        if script:
+            with self._lock:
+                spec = script.pop(0) if len(script) > 1 else script[0]
+        for i, impact in enumerate([s["impact"] for s in spec] if spec else self.noinput_q1.get(uid, ["yes", "yes"])):
             alias = order[i % len(order)] if order and impact != "no" else ""
             card = cards.get(alias) if alias else None
             quote, sid = quote_of(card) if card is not None else ("", "")
@@ -738,6 +772,8 @@ class FakeReviewEngine:
                 "refs": "ok" if cited or impact != "yes" else "missing", "quote": "ok", "quote_sid": sid,
                 "nums_unsourced": [], "coerced": [],
                 "mech": "no_list" if not codes else "missing" if impact == "yes" and not mech else "ok", "why": "ok"})
+            if spec:
+                row.update({k: v for k, v in spec[i].items() if k in ("title", "path", "flipped_from", "contested_by", "k", "cq")})
             if alias and alias in self.contested:
                 row["contested_by"] = copy.deepcopy(self.contested[alias])
                 row["checks"]["dup_conflict"] = True

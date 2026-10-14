@@ -5,10 +5,12 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import json
 
 import pytest
 
+import app.mcp_server as srv
 from app import closure, config, expert_report, identity, planner, review_cells, routes
 from app.errors import AppError
 from tests import factories
@@ -228,7 +230,8 @@ def test_skip_needs_a_reason_and_the_expert_closes_again_with_the_skip_in_the_re
     assert len(fake.calls("run")) == calls                                            # 마감 잡은 엔진을 부르지 않는다
     assert _head(store, key, PEER)["state"] == "ready" and _seat(store, key, PEER) == ("done_weak", "partial:1")
     report = expert_report.load_report(store, key, PEER)
-    assert [u["why"] for u in report["scope"]["unseen"]] == [{"code": "skipped", "text": "입력이 와야 본다", "by": OWNER}]
+    assert [u["why"] for u in report["scope"]["unseen"]] == [{"code": "skipped", "text": "입력이 와야 본다", "by": OWNER,
+                                                              "hits": 0}]
     assert routes.coverage_payload(key, owner_sub=OWNER)["review"]["dispositions"] == {"retried": 0, "skipped": 1}
     assert len(_audits(store, "cells.skip")) == 1
 
@@ -310,12 +313,33 @@ def test_risk_job_action_retries_and_skips_the_jobs_failed_cells_for_a_delegated
     assert _call("risk_job_action", job_id="no-such-job", action="retry_failed")["error"] == "not_visible"   # 남의 잡과 같은 답(C3-13)
 
 
+def test_risk_job_action_retry_carries_the_humans_consent_like_rest(store, monkeypatch):
+    """반대 검토 MEDIUM 13(사용자 결정) — Claude 의 다시가 세울 잡이 동의 문턱을 넘으면 consent_required 인데 동의를 실을 칸이 없어
+    길잡이가 내민 다시가 끝내 막혔다. risk_job_action 의 consent 는 REST 와 같은 뜻이다 — 없으면 아무것도 바꾸기 전에 거절, 있으면
+    잡이 서고 그 잡에 동의(consent_source mcp)가 남는다. 도구 설명은 사람이 동의한 뒤에만 true 라고 말하고, 길잡이는 채워 주지 않는다."""
+    key, job_id, unit_ids, _fake, _r = _failed_target(store)
+    factories.act_as_delegate(monkeypatch, OWNER)
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_consent_calls=0))
+    assert "consent" in inspect.signature(srv.risk_job_action).parameters
+    assert "consent=true" in (srv.risk_job_action.__doc__ or "")
+    assert _call("risk_job_action", job_id=job_id, action="retry_failed").get("error") == "consent_required"
+    for action, extra in (("skip_failed", {"reason": "동의는 넘김의 칸이 아니다"}), ("pause", {})):
+        assert _call("risk_job_action", job_id=job_id, action=action, consent=True, **extra).get("error") == "E100", action
+    assert _cells(store, key, PEER)[unit_ids[0]]["state"] == "failed" and _audits(store, "cells.retry") == []
+    out = _call("risk_job_action", job_id=job_id, action="retry_failed", consent=True)
+    assert (out.get("retried"), (out.get("job") or {}).get("action")) == (1, "created"), out
+    params = json.loads(rig.job_row(store, out["job"]["job_id"])["params_json"])
+    assert (params["consent"], params["consent_source"]) == (True, "mcp")
+
+
 def test_the_guide_offers_retry_and_skip_after_a_job_ends_with_failed_cells(store, monkeypatch):
     key, job_id, _unit_ids, _fake, _r = _failed_target(store)
     factories.act_as_delegate(monkeypatch, OWNER)
     steps = _call("risk_next_step", project_id=_project_with_source(store, key))["next"]
     actions = [(s["tool"], s["args"].get("action")) for s in steps if s["tool"] == "risk_job_action"]
     assert actions == [("risk_job_action", "retry_failed"), ("risk_job_action", "skip_failed")]
+    retry = next(s for s in steps if s["tool"] == "risk_job_action" and s["args"]["action"] == "retry_failed")
+    assert "consent" not in retry["args"] and "consent=true" in retry["why"]   # 동의는 사람이 — 길잡이는 채워 주지 않는다(MEDIUM 13)
 
 
 # ---------------------------------------------------------------- 원장 롤업(m3-cells 3.9 — 처음 맞는 줄)
@@ -352,3 +376,33 @@ def test_identity_source_of_the_audit_follows_the_entry(store):
     web = identity.Identity(email=OWNER, display_name="합성", role="user", organization="qa", anonymous=False, source="cookie")
     routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": job_id}, reason="웹 화면에서 넘긴다"), ident=web)
     assert [(a["channel"], a["actor_verified"]) for a in _audits(store, "cells.skip")] == [("web", 1)]
+
+
+def test_a_skipped_cell_keeps_its_settled_hits_in_the_report_and_findings(store):
+    """반대 검토 MEDIUM 8(사용자 결정) — 판정은 받았는데 카드 밖 호출이 끝내 실패한 셀을 넘겨도 이미 정산된 걸림(실효 FAIL)은 버리지
+    않는다 — 넘김 응답이 그 수(hits)를 말하고, 전문가 보고서 점검표에 '넘긴 셀 — 일부만 판정' 표지로, finding 으로 남는다."""
+    from app import expert_report
+
+    from app import units
+
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": unit_ids[:1]})
+    fake = FakeReviewEngine(rig.packs())
+    fail_record = str(fre.load("pack_ok.json")["cards"][0]["record_id"])
+    fake.verdicts = {fail_record: ("yes", "FAIL")}
+    fake.error_cells, fake.error_kinds = {(SEAL, unit_ids[0]): NO_ROWS}, {"offcard"}
+    rig.Rig(store, fake).finish(job_id)
+    cell = _cells(store, key, SEAL)[unit_ids[0]]
+    assert cell["state"] == "failed" and cell["n_fail"] >= 1
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": job_id}, reason="카드 밖 호출이 계속 실패"),
+                                 ident=ME)
+    assert (out["skipped"], out["hits"]) == (1, 1)
+    rig.Rig(store, fake).finish(out["job"]["job_id"])
+    report = expert_report.load_report(store, key, SEAL)
+    rows = [r for c in report["checklist"] for r in c["rows"] if r.get("unit_id") == unit_ids[0] and not r.get("missing")]
+    assert rows and all(r.get("partial_cell") for r in rows)
+    flagged = [r for r in rows if r["judgement"] == "FAIL"]
+    assert len(flagged) == 1 and flagged[0]["finding_id"]
+    assert any(f["unit_id"] == unit_ids[0] for f in report["findings"])
+    assert "넘긴 셀 — 일부만 판정" in expert_report.render_report_md(report)

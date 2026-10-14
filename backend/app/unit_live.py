@@ -8,8 +8,8 @@ A 층(`units.evidence_lines` — 스냅샷 IR 동결본 발췌)은 네트워크�
 폴백은 없다, W2-03 (b)) → 그 쌍이 든 단위에 붙인다. LLM 이 인자를 짜지 않는다.
 
 규칙.
-- 인자 키는 게이트웨이 `tools/list` 의 inputSchema 와 대조한다 — 도구가 없거나 모르는 키·빠진 필수 키면 계획에서 빼고
-  `live_schema_mismatch` 로 적는다(W2-03 (c)).
+- 인자 키는 게이트웨이 `tools/list` 의 inputSchema 와 대조한다 — 모르는 키·빠진 필수 키면 계획에서 빼고 `live_schema_mismatch` 로
+  적는다(W2-03 (c)). 도구가 사용자 PAT 시야의 목록에 아예 없으면 부르지 않고 `live_denied` 다(#55 — 반대 검토 LOW 20).
 - 자격은 그 잡의 사용자 PAT 하나다(사용자 결정 3 — 서비스 계정으로 내려가지 않는다). 401 은 잡의 credential 보류(`CredentialRejected`).
 - 실패를 둘로 가른다(W2-04 (c)) — 내용 탓(오류 본문 `error` 키 · 스키마 · 403 · 도구 오류)은 그 호출만 빠진 채 `partial` 로 얼린다.
   인프라 탓(연결 · 5xx · 기한)은 얼리지 않고 `attempts + 1` · `not_before`(60초부터 두 배)로 다시 하고, 여섯 번째에 그 호출을
@@ -47,8 +47,13 @@ INFRA_EXHAUSTED = "live_infra_exhausted"
 SCHEMA_MISMATCH = "live_schema_mismatch"
 ERROR_BODY = "live_error_body"
 DENIED = "live_denied"
-GAP_CODES: tuple[str, ...] = (INFRA_EXHAUSTED, SCHEMA_MISMATCH, ERROR_BODY, DENIED)
+INTERNAL_ERROR = "live_internal_error"      # 근거 꾸러미 워커의 예상 밖 결함이 여섯 번 — 그 단위를 얼린다(반대 검토 HIGH 4)
+GAP_CODES: tuple[str, ...] = (INFRA_EXHAUSTED, SCHEMA_MISMATCH, ERROR_BODY, DENIED, INTERNAL_ERROR)
 LIVE_HEAD = "실호출 근거(tool:b-…)는 지금 상태다 — 스냅샷 뒤에 바뀌었을 수 있다"
+# 폐기된 과제의 행은 쓰지 않는다(반대 검토 MEDIUM 14) — 폐기가 비운 근거 줄 · 호출 계획(재질명이 든다)을 늦게 끝난 ensure 가 다시
+# 채우지 않게. 쓰기 문장 하나에 조건으로 붙어 폐기의 트랜잭션과 엇갈리지 않는다.
+NOT_PURGED_SQL = (" AND NOT EXISTS (SELECT 1 FROM rr_targets t JOIN rr_projects p ON p.id = t.project_id"
+                  " WHERE t.target_key = rr_unit_live.target_key AND p.status = 'purged')")
 # 셀을 시작해도 되는 단위 — 행이 없거나(B 층 이전 원장) 얼었다. `c` 는 rr_review_cells 의 별칭이다.
 READY_SQL = (" AND NOT EXISTS (SELECT 1 FROM rr_unit_live l WHERE l.target_key = c.target_key AND l.unit_id = c.unit_id"
              " AND l.status IS NULL)")
@@ -211,19 +216,20 @@ def _pid_index(*irs: Mapping[str, Any] | None) -> dict[str, set[str]]:
 
 # ---------------------------------------------------------------- 스키마 대조
 def schema_gap(tool: str, args: Mapping[str, Any], schemas: Mapping[str, Mapping[str, Any]],
-               names: Sequence[str]) -> str | None:
-    """인자가 게이트웨이 inputSchema 와 맞지 않으면 그 까닭(글), 맞으면 None — 도구가 없음 · 모르는 키 · 빠진 필수 키."""
+               names: Sequence[str]) -> tuple[str, str] | None:
+    """부를 수 없으면 (까닭 코드, 글), 맞으면 None — 도구가 사용자 PAT 시야에 없음(live_denied — #55) · 모르는 키 · 빠진 필수 키
+    (live_schema_mismatch)."""
     real = field_source._real_name(tool, names)
     if real not in schemas:
-        return f"게이트웨이에 {tool} 이 없다(사용자 PAT 시야)"
+        return DENIED, f"게이트웨이에 {tool} 이 없다(사용자 PAT 시야)"
     schema = schemas[real] if isinstance(schemas[real], Mapping) else {}
     props = schema.get("properties") if isinstance(schema.get("properties"), Mapping) else None
     if props is not None:
         unknown = sorted(set(args) - set(props))
         if unknown:
-            return f"모르는 인자 {unknown}"
+            return SCHEMA_MISMATCH, f"모르는 인자 {unknown}"
     missing = sorted(set(schema.get("required") or ()) - set(args))
-    return f"빠진 필수 인자 {missing}" if missing else None
+    return (SCHEMA_MISMATCH, f"빠진 필수 인자 {missing}") if missing else None
 
 
 # ---------------------------------------------------------------- 응답 → 줄
@@ -315,19 +321,29 @@ def _q(text: Any, note: Callable[[dict], None] | None = None) -> str:
 
 # ---------------------------------------------------------------- 얼리기
 def ensure(store: Any, settings: Any, target_key: str, credential: Mapping[str, Any] | None, *,
-           deadline_s: float = ENSURE_DEADLINE_S, http_client: Any = None, now: int | None = None) -> dict:
-    """백오프가 지난 미동결 단위를 얼린다 — {frozen{status: n}, retry, calls, cached}.
+           deadline_s: float = ENSURE_DEADLINE_S, http_client: Any = None, now: int | None = None,
+           stop: Callable[[], str | None] | None = None, clock: Callable[[], int] | None = None) -> dict:
+    """백오프가 지난 미동결 단위를 얼린다 — {frozen{status: n}, retry, calls, cached} · 멈췄으면 aborted(까닭).
 
     `credential` 은 {kind:'user', email, pat} — 그 잡의 사용자 PAT 다(없으면 호출 없이 credential 로 올린다). 손잡이가 꺼져 있으면
-    남은 단위를 `none` 으로, 셀이 이미 시작된 단위는 `skipped` 로, 부를 것이 없는 단위는 `ok`(줄 없음)로 언다."""
+    남은 단위를 `none` 으로, 셀이 이미 시작된 단위는 `skipped` 로, 부를 것이 없는 단위는 `ok`(줄 없음)로 언다. 시작 · 호출마다 앞 ·
+    얼리기 앞에서 `stop`(잡의 취소 · 사람의 정지 · 앱 종료 — 까닭 글)과 과제 폐기를 보고, 걸리면 더 부르지 않고 아무것도 얼리지 않는다
+    (반대 검토 MEDIUM 14 — 다음 잡이 다시 하고, 이미 받은 답은 원장에서 다시 쓴다). `now` 는 시작 시각(백오프가 지났나 · 다음 시도
+    시각)이고, 얼린 행의 frozen_at · updated_at 은 적는 순간의 `clock()` 이다 — 호출이 길어도 since 반출이 그 행을 놓치지 않게
+    (반대 검토 LOW 19). `clock` 이 없으면 준 `now`(없으면 지금)다."""
+    if clock is None:
+        clock = now_epoch if now is None else (lambda: now)
     now = now_epoch() if now is None else now
     out: dict[str, Any] = {"frozen": {}, "retry": 0, "calls": 0, "cached": 0}
     due = pending(store, target_key, now=now, due_only=True)
     if not due:
         return out
+    if halted := _halted(store, target_key, stop):
+        out["aborted"] = halted
+        return out
     if not enabled(settings):
         for unit_id in due:
-            _freeze(store, target_key, unit_id, "none", out, now=now)
+            _freeze(store, target_key, unit_id, "none", out, now=clock())
         return out
     started = {str(r["unit_id"]) for r in store.query(
         "SELECT DISTINCT unit_id FROM rr_review_cells WHERE target_key = ? AND input_hash IS NOT NULL", (target_key,))}
@@ -335,9 +351,9 @@ def ensure(store: Any, settings: Any, target_key: str, credential: Mapping[str, 
     work: list[str] = []
     for unit_id in due:
         if unit_id in started:
-            _freeze(store, target_key, unit_id, "skipped", out, now=now)
+            _freeze(store, target_key, unit_id, "skipped", out, now=clock())
         elif not plan["by_unit"].get(unit_id):
-            _freeze(store, target_key, unit_id, "ok", out, now=now)
+            _freeze(store, target_key, unit_id, "ok", out, now=clock())
         else:
             work.append(unit_id)
     if not work:
@@ -353,6 +369,9 @@ def ensure(store: Any, settings: Any, target_key: str, credential: Mapping[str, 
                         timeout=float(getattr(cfg, "risk_field_timeout_s", config.DEFAULT_FIELD_TIMEOUT_S)),
                         deadline_s=CALL_DEADLINE_S)
     try:
+        if halted := _halted(store, target_key, stop):
+            out["aborted"] = halted
+            return out
         listed = mcp.list_tools(deadline=min(until, time.monotonic() + CALL_DEADLINE_S))
         outcomes: dict[str, dict] = {}
         if not listed["ok"]:
@@ -371,8 +390,11 @@ def ensure(store: Any, settings: Any, target_key: str, credential: Mapping[str, 
                 call = plan["calls"][key]
                 gap = schema_gap(call["tool"], call["args"], schemas, names)
                 if gap is not None:
-                    outcomes[key] = {"state": "content", "code": SCHEMA_MISMATCH, "note": gap}
+                    outcomes[key] = {"state": "content", "code": gap[0], "note": gap[1]}
                     continue
+                if halted := _halted(store, target_key, stop):
+                    out["aborted"] = halted
+                    return out
                 if time.monotonic() >= until:
                     outcomes[key] = {"state": "infra", "code": INFRA_EXHAUSTED, "note": "deadline_exceeded"}
                     continue
@@ -390,9 +412,45 @@ def ensure(store: Any, settings: Any, target_key: str, credential: Mapping[str, 
                                  "call_id": reply["call_id"]}
     finally:
         mcp.close()
+    if halted := _halted(store, target_key, stop):                 # 마지막 호출 도중에 멈췄다
+        out["aborted"] = halted
+        return out
     email = (credential or {}).get("email")
+    at = clock()
     for unit_id in work:
-        _settle(store, target_key, unit_id, plan, outcomes, out, email=email, now=now)
+        _settle(store, target_key, unit_id, plan, outcomes, out, email=email, now=now, at=at)
+    return out
+
+
+def _halted(store: Any, target_key: str, stop: Callable[[], str | None] | None) -> str | None:
+    """멈출 까닭 — `stop` 의 답(잡의 취소 · 사람의 정지 · 앱 종료)이나 과제 폐기. 없으면 None."""
+    why = stop() if stop is not None else None
+    if why:
+        return why
+    row = store.query_one("SELECT p.status FROM rr_targets t JOIN rr_projects p ON p.id = t.project_id WHERE t.target_key = ?",
+                          (target_key,))
+    return "과제가 폐기됐다" if row is not None and row["status"] == "purged" else None
+
+
+def note_failure(store: Any, target_key: str, *, note: str, now: int | None = None) -> dict:
+    """ensure 가 예상 밖 결함으로 빠져나갔다 — 백오프가 지난 미동결 단위마다 attempts + 1 · not_before(60초부터 두 배)로 미루고, 여섯
+    번째에 live_internal_error 로 partial 로 언다(틱마다 다시 부르며 단위를 영영 미동결로 두지 않는다). {retry, frozen}."""
+    now = now_epoch() if now is None else now
+    out: dict[str, Any] = {"frozen": {}, "retry": 0}
+    for unit_id in pending(store, target_key, now=now, due_only=True):
+        row = store.query_one("SELECT attempts FROM rr_unit_live WHERE target_key = ? AND unit_id = ? AND status IS NULL",
+                              (target_key, unit_id))
+        if row is None:
+            continue
+        attempts = int(row["attempts"] or 0)
+        if attempts + 1 < RETRY_MAX:
+            out["retry"] += int(bool(store.execute(
+                "UPDATE rr_unit_live SET attempts = attempts + 1, not_before = ?, updated_at = ?"
+                " WHERE target_key = ? AND unit_id = ? AND status IS NULL AND attempts = ?",
+                (now + RETRY_BASE_S * 2 ** attempts, now, target_key, unit_id, attempts))))
+        else:
+            _freeze(store, target_key, unit_id, "partial", out, now=now,
+                    gaps=[{"tool": "*", "code": INTERNAL_ERROR, "note": note}], attempts=attempts + 1)
     return out
 
 
@@ -417,7 +475,9 @@ def _gap_code(reply: Mapping[str, Any], kind: str) -> str:
 
 
 def _settle(store: Any, target_key: str, unit_id: str, plan: Mapping[str, Any], outcomes: Mapping[str, dict],
-            out: dict, *, email: str | None, now: int) -> None:
+            out: dict, *, email: str | None, now: int, at: int) -> None:
+    """호출 결과로 그 단위를 얼리거나(내용 탓 · 성공 · 여섯 번째 인프라) 다시 하기로 미룬다. `now` 는 ensure 의 시작 시각(다음
+    시도 not_before 의 기준), `at` 은 적는 시각(frozen_at · updated_at)이다."""
     keys = plan["by_unit"][unit_id]
     row = store.query_one("SELECT attempts FROM rr_unit_live WHERE target_key = ? AND unit_id = ? AND status IS NULL",
                           (target_key, unit_id))
@@ -431,8 +491,8 @@ def _settle(store: Any, target_key: str, unit_id: str, plan: Mapping[str, Any], 
     if infra and attempts + 1 < RETRY_MAX:
         changed = store.execute(
             "UPDATE rr_unit_live SET attempts = attempts + 1, not_before = ?, plan_json = ?, updated_at = ?"
-            " WHERE target_key = ? AND unit_id = ? AND status IS NULL AND attempts = ?",
-            (now + RETRY_BASE_S * 2 ** attempts, canonical_json(entries), now, target_key, unit_id, attempts))
+            " WHERE target_key = ? AND unit_id = ? AND status IS NULL AND attempts = ?" + NOT_PURGED_SQL,
+            (now + RETRY_BASE_S * 2 ** attempts, canonical_json(entries), at, target_key, unit_id, attempts))
         out["retry"] += int(bool(changed))
         return
     lines: list[dict] = []
@@ -451,7 +511,7 @@ def _settle(store: Any, target_key: str, unit_id: str, plan: Mapping[str, Any], 
         else:
             gaps.append({"tool": entry["tool"], "code": entry["code"] or INFRA_EXHAUSTED, "note": got.get("note") or ""})
     status = "partial" if gaps else "ok"
-    if _freeze(store, target_key, unit_id, status, out, now=now, entries=entries, lines=lines, gaps=gaps, email=email,
+    if _freeze(store, target_key, unit_id, status, out, now=at, entries=entries, lines=lines, gaps=gaps, email=email,
                attempts=attempts + int(bool(infra))) and suspects:
         # 응답에 든 주입 어휘(자리표시자로 실린 원문)는 큐레이션 큐로 — 단위 빌드의 suspects 와 같은 큐 · 같은 규칙(열린 같은 sha1 은 한 번)
         owner = store.query_one("SELECT owner_sub FROM rr_targets WHERE target_key = ?", (target_key,))
@@ -466,7 +526,7 @@ def _settle(store: Any, target_key: str, unit_id: str, plan: Mapping[str, Any], 
 def _freeze(store: Any, target_key: str, unit_id: str, status: str, out: dict, *, now: int,
             entries: Sequence[Mapping[str, Any]] = (), lines: Sequence[Mapping[str, Any]] = (),
             gaps: Sequence[Mapping[str, Any]] = (), email: str | None = None, attempts: int | None = None) -> bool:
-    """비교 후 쓰기 — status 가 NULL 인 행만 언다. 바뀐 행이 0 이면(다른 ensure 가 먼저) 버린다."""
+    """비교 후 쓰기 — status 가 NULL 인 행만 언다(폐기된 과제의 행은 쓰지 않는다). 바뀐 행이 0 이면(다른 ensure 가 먼저) 버린다."""
     body = {"lines": list(lines), "gaps": list(gaps)}
     sha = sha256_hex(canonical_json(body)) if (lines or gaps) else None
     chars = sum(len(str(line.get("text") or "")) for line in lines)
@@ -474,7 +534,7 @@ def _freeze(store: Any, target_key: str, unit_id: str, status: str, out: dict, *
     changed = store.execute(
         "UPDATE rr_unit_live SET status = ?, plan_json = ?, lines_gz = ?, live_sha = ?, live_chars = ?, credential_kind = ?,"
         " credential_email = ?, gaps_json = ?, attempts = COALESCE(?, attempts), frozen_at = ?, updated_at = ?"
-        " WHERE target_key = ? AND unit_id = ? AND status IS NULL",
+        " WHERE target_key = ? AND unit_id = ? AND status IS NULL" + NOT_PURGED_SQL,
         (status, canonical_json(list(entries)), gzip.compress(canonical_json(list(lines)).encode("utf-8"), mtime=0),
          sha, chars, CREDENTIAL_KIND if called else None, email if called else None,
          canonical_json(list(gaps)) if gaps else None, attempts, now, now, target_key, unit_id))

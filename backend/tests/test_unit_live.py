@@ -40,6 +40,7 @@ class Gateway:
         self.calls: list[dict] = []
         self.auth: list[str] = []
         self.delay_s = 0.0
+        self.on_call: Any = None                  # 도구 호출을 받는 순간 부를 것(이름) — 호출 도중의 취소 · 폐기를 흉내 낸다
         self.lock = threading.Lock()
         self.transport = httpx.MockTransport(self.handle)
 
@@ -59,6 +60,8 @@ class Gateway:
         name = body["params"]["name"]
         with self.lock:
             self.calls.append({"name": name, "arguments": body["params"]["arguments"]})
+        if self.on_call is not None:
+            self.on_call(name)
         if self.delay_s:
             time.sleep(self.delay_s)
         answer = self.answers.get(name)
@@ -66,8 +69,7 @@ class Gateway:
             return httpx.Response(int(answer[5:]), text="upstream failure")
         if answer == "error_body":
             answer = {"error": "비교하려면 유효한 재료 2개 이상 필요", "alternatives": []}
-        return self._rpc(body, {"content": [{"type": "text", "text": json.dumps(answer, ensure_ascii=False)}],
-                                "isError": False})
+        return self._rpc(body, {"content": [{"type": "text", "text": json.dumps(answer)}], "isError": False})
 
     @staticmethod
     def _rpc(body: dict, result: dict) -> httpx.Response:
@@ -206,12 +208,13 @@ def test_an_error_body_is_never_kept_as_success(store):
 @pytest.mark.parametrize("case, code, called", [
     ("http_403", unit_live.DENIED, 1),
     ("schema_key", unit_live.SCHEMA_MISMATCH, 0),
-    ("schema_tool", unit_live.SCHEMA_MISMATCH, 0),
+    ("schema_tool", unit_live.DENIED, 0),
     ("http_400", unit_live.ERROR_BODY, 1),
 ])
 def test_content_failures_freeze_partial_and_schema_mismatches_never_call(store, case, code, called):
-    """내용 탓 — 403(live_denied) · 4xx(live_error_body)는 그 호출만 빠진 채 얼고, 인자 키가 게이트웨이 inputSchema 에 없거나 도구가
-    없으면 계획에서 빼고 부르지 않는다(live_schema_mismatch — W2-03 (c))."""
+    """내용 탓 — 403(live_denied) · 4xx(live_error_body)는 그 호출만 빠진 채 얼고, 인자 키가 게이트웨이 inputSchema 에 없으면 계획에서
+    빼고 부르지 않는다(live_schema_mismatch — W2-03 (c)). 도구가 사용자 PAT 시야의 tools/list 에 아예 없으면 부르지 않고
+    live_denied 다(#55 — 반대 검토 LOW 20 · 사용자 결정)."""
     key = _target(store)
     gw = Gateway()
     if case.startswith("http_"):
@@ -443,3 +446,153 @@ def test_a_reply_kept_for_one_credential_kind_is_never_reused_for_another(store)
         client.close()
     assert (service["cached"], first["cached"], again["cached"]) == (False, False, True)
     assert service["call_id"] != first["call_id"] == again["call_id"] and len(gw.calls) == 2
+
+
+@pytest.mark.parametrize("bad", [float("nan"), "\ud800"])
+def test_an_unreadable_reply_freezes_the_unit_partial_instead_of_stalling_it(store, bad):
+    """반대 검토 HIGH 4 — 게이트웨이 답에 NaN · 홀로 선 서로게이트가 있으면 원문을 정규 JSON 으로 적을 수 없다. 예외로 ensure 를 빠져나가
+    단위가 영영 NULL(셀이 시작되지 않는다)로 남지 않고, 읽을 수 없는 답(내용 탓)으로 그 호출만 빠진 채 partial 로 언다."""
+    key = _target(store)
+    gw = Gateway()
+    gw.answers["compare_materials"] = {**COMPARISON, "n_shared": bad}
+    try:
+        _ensure(store, key, gw)
+    except ValueError as exc:                     # 원장에 적다가 빠져나가면 그 단위는 영영 미동결이다 — 단언으로 센다
+        raise AssertionError(f"읽을 수 없는 답이 ensure 를 빠져나갔다 — {exc}") from exc
+    row = _row(store, key, _material_unit(store, key))
+    gaps = json.loads(row["gaps_json"] or "[]")
+    assert (row["status"], [g["code"] for g in gaps]) == ("partial", [unit_live.ERROR_BODY])
+    assert unit_live.pending(store, key) == []
+
+
+def test_an_unexpected_failure_backs_off_and_finally_freezes_instead_of_retrying_every_tick(store, monkeypatch):
+    """반대 검토 HIGH 4 — 근거 꾸러미 워커의 예상 밖 결함은 틱마다 다시 하지 않는다. 미동결 단위의 attempts 를 올리고 60초부터 두 배로
+    미루며, 여섯 번째에 live_internal_error 로 partial 로 언다 — 그 단위의 셀이 돌고 잡이 끝난다."""
+    key = _target(store)
+    job_id = rig.job(store, key, scope={"agents": [rig.SEAL]})
+    calls: list[int] = []
+
+    def broken(*args, **kwargs):
+        calls.append(1)
+        raise RuntimeError("결함(가짜)")
+
+    monkeypatch.setattr(unit_live, "ensure", broken)
+    r = rig.Rig(store, FakeReviewEngine(rig.packs()))
+    r.loop.live_transport = Gateway().transport
+    r.tick()
+    unit_id = _material_unit(store, key)
+    row = _row(store, key, unit_id)
+    assert (row["status"], row["attempts"], row["not_before"]) == (None, 1, r.clock() + unit_live.RETRY_BASE_S)
+    r.tick()                                                          # 백오프 전 — 다시 부르지 않는다
+    assert len(calls) == 1
+    r.finish(job_id)
+    assert rig.state(store, job_id) == "completed" and len(calls) == unit_live.RETRY_MAX
+    row = _row(store, key, unit_id)
+    assert (row["status"], json.loads(row["gaps_json"])[0]["code"]) == ("partial", unit_live.INTERNAL_ERROR)
+
+
+def _two_calls(store, monkeypatch, key: str) -> dict:
+    """두 스냅샷 IR 의 보고서를 갈라 계획이 호출 둘(compare_reports · compare_materials)이 되게 한다 — 계획."""
+    real = unit_live._ir
+    target_sid = store.query_one("SELECT target_snapshot_id FROM rr_diffs d JOIN rr_targets t ON t.ref_id = d.id"
+                                 " WHERE t.target_key = ?", (key,))["target_snapshot_id"]
+
+    def later(store_, sid):
+        ir = real(store_, sid)
+        if ir is not None and sid == target_sid:
+            ir["results"]["report_ids"] = ["SYNRPT2"]
+        return ir
+
+    monkeypatch.setattr(unit_live, "_ir", later)
+    plan = unit_live.plan_calls(store, key)
+    assert len(plan["calls"]) == 2
+    return plan
+
+
+@pytest.mark.parametrize("at_call", [1, 2])
+@pytest.mark.parametrize("how", ["cancel", "purge"])
+def test_a_cancel_or_purge_during_a_live_call_stops_the_calls_and_writes_nothing_after_it(store, monkeypatch, how, at_call):
+    """반대 검토 MEDIUM 14 — 근거 꾸러미 워커가 잡의 취소와 과제 폐기를 보지 않아, 첫 호출 도중에 취소돼도 남은 호출을 다 부르고 전
+    단위를 얼렸고, 폐기 뒤에도 그 답의 원문(rr_brief_calls)과 근거 줄 · 호출 계획(rr_unit_live — 재질명이 든다)을 다시 적었다. 이제
+    호출 사이(첫 호출 도중)와 얼리기 앞(마지막 호출 도중)에서 잡 · 과제를 보고 멈춘다(아무것도 얼리지 않는다 — 다음 잡이 다시 한다).
+    취소면 이미 받은 답은 원장에 남아 다음 잡이 다시 부르지 않고 쓰고, 폐기면 그 답도 적지 않는다."""
+    from app import routes, runner
+    from tests import factories
+
+    key = _target(store)
+    plan = _two_calls(store, monkeypatch, key)
+    job_id = rig.job(store, key, scope={"agents": [rig.SEAL]})
+    project = store.query_one("SELECT p.id, p.code FROM rr_targets t JOIN rr_projects p ON p.id = t.project_id"
+                              " WHERE t.target_key = ?", (key,))
+    gw = Gateway()
+
+    def interrupt(_name: str) -> None:
+        if len(gw.calls) != at_call:
+            return
+        if how == "cancel":
+            runner.cancel_job(store, job_id, by=OWNER)
+        else:
+            routes.purge_project(project["id"], routes.PurgeBody(code=project["code"], reason="정리"),
+                                 ident=factories.ident(OWNER))
+
+    gw.on_call = interrupt
+    r = rig.Rig(store, FakeReviewEngine(rig.packs()))
+    r.loop.live_transport = gw.transport
+    r.tick()
+    assert len(gw.calls) == at_call                                            # 다음 호출을 시작하지 않는다
+    assert {_row(store, key, u)["status"] for u in plan["by_unit"]} == {None}   # 얼리지 않는다
+    kept = store.query_one("SELECT COUNT(*) AS n FROM rr_brief_calls WHERE target_key = ? AND result_gz IS NOT NULL",
+                           (key,))["n"]
+    if how == "purge":
+        assert kept == 0
+        assert {(row["lines_gz"], row["plan_json"], row["gaps_json"]) for row in store.query(
+            "SELECT lines_gz, plan_json, gaps_json FROM rr_unit_live WHERE target_key = ?", (key,))} == {(None, "[]", None)}
+    else:
+        assert kept == at_call and rig.state(store, job_id) in ("cancelling", "cancelled")
+
+
+
+@pytest.mark.parametrize("answer", [COMPARISON, "http_503"])
+def test_a_purge_that_slips_past_the_checks_still_never_gets_its_rows_written(store, monkeypatch, answer):
+    """반대 검토 MEDIUM 14 — 확인과 쓰기 사이에 폐기가 끼어도(확인을 지나친 것으로 흉내 — `_halted` 를 늘 None 으로) 원문 기록
+    (rr_brief_calls) · 얼리기 · 인프라 다시 하기(호출 계획에 재질명이 든다)가 폐기된 과제의 행을 쓰지 않는다 — 쓰기 자체가 폐기를 본다."""
+    from app import routes
+    from tests import factories
+
+    key = _target(store)
+    unit_id = _material_unit(store, key)                       # 폐기 뒤에는 단위의 부품 글이 비어 계획이 서지 않는다
+    project = store.query_one("SELECT p.id, p.code FROM rr_targets t JOIN rr_projects p ON p.id = t.project_id"
+                              " WHERE t.target_key = ?", (key,))
+    gw = Gateway()
+    gw.answers["compare_materials"] = answer
+    gw.on_call = lambda _name: routes.purge_project(project["id"], routes.PurgeBody(code=project["code"], reason="정리"),
+                                                    ident=factories.ident(OWNER))
+    monkeypatch.setattr(unit_live, "_halted", lambda *args: None)
+    out = _ensure(store, key, gw)
+    assert len(gw.calls) == 1 and out["retry"] == 0 and "partial" not in out["frozen"]
+    assert _row(store, key, unit_id)["status"] is None
+    assert {(row["lines_gz"], row["plan_json"], row["gaps_json"], row["attempts"]) for row in store.query(
+        "SELECT lines_gz, plan_json, gaps_json, attempts FROM rr_unit_live WHERE target_key = ?", (key,))} == {(None, "[]", None, 0)}
+    assert store.query_one("SELECT COUNT(*) AS n FROM rr_brief_calls WHERE target_key = ?", (key,))["n"] == 0
+
+
+def test_a_unit_frozen_after_a_long_call_carries_its_write_time_so_a_since_export_sees_it(store):
+    """반대 검토 LOW 19 — 얼린 행이 ensure 의 시작 시각을 달고 있으면 호출이 도는 사이에 돈 since 반출(그 뒤 시각부터)이 그 행을
+    영영 놓친다. 얼린 행의 frozen_at · updated_at 은 적는 순간의 시각이다(호출 전에 얼린 단위는 그 시각 그대로)."""
+    from app import export
+
+    key = _target(store)
+    unit_id = _material_unit(store, key)
+    rig.job(store, key, scope={"agents": [rig.SEAL]})
+    r = rig.Rig(store, FakeReviewEngine(rig.packs()))
+    gw = Gateway()
+    started = r.clock()
+    gw.on_call = lambda _name: r.clock.advance(600)                 # 호출 하나가 10분 걸렸다
+    r.loop.live_transport = gw.transport
+    r.tick()
+    row = _row(store, key, unit_id)
+    assert (row["status"], row["frozen_at"], row["updated_at"]) == ("ok", started + 600, started + 600)
+    other = next(u["unit_id"] for u in units.load_units(store, key) if u["unit_id"] != unit_id)
+    assert _row(store, key, other)["frozen_at"] == started                 # 부를 것이 없던 단위는 호출 전에 얼었다
+    since = [json.loads(line) for line in export.iter_lines(store, OWNER, started + 1)][1:]
+    assert [x["row"]["unit_id"] for x in since if x["table"] == "rr_unit_live"] == [unit_id]

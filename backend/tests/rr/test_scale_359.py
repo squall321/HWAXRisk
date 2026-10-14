@@ -94,6 +94,19 @@ def test_the_grid_board_closure_and_quality_stand_in_time(scale):
     assert quality["grid"]["experts"] == 359 and quality_s < 2.0, quality_s
 
 
+def _guide(store, key: str) -> dict:
+    """길잡이(risk_next_step) — 합성 과제는 소스 행 없이 스냅샷을 만들어 길잡이가 소스 단계에서 멈춘다. 소스를 잠시 붙여 대상
+    단계(셀 진행판 · 검토 잡 칸)까지 걷게 하고 뗀다(모듈 원장을 다른 시험과 나눈다)."""
+    project_id = store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (key,))["project_id"]
+    routes.add_source(project_id, routes.SourceBody(kind="mcad", ref={"stepforge_project_id": "sf-scale"}),
+                      ident=factories.ident(OWNER))
+    try:
+        return _call("risk_next_step", project_id=project_id)
+    finally:
+        store.execute("DELETE FROM rr_sources WHERE project_id = ? AND json_extract(ref_json, '$.stepforge_project_id') ="
+                      " 'sf-scale'", (project_id,))
+
+
 def _call(name: str, /, **kwargs) -> dict:
     out = getattr(srv, name)(**kwargs)
     return asyncio.run(out) if asyncio.iscoroutine(out) else out
@@ -123,8 +136,8 @@ def test_every_mcp_answer_fits_the_wire_and_its_pages_add_up(scale, monkeypatch)
         assert srv._wire_chars(page) <= limit
         seats += len(page.get("seats") or ())
         offset = page.get("next_seat_offset")
-    project_id = store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (key,))["project_id"]
-    assert srv._wire_chars(_call("risk_next_step", project_id=project_id)) <= limit
+    guide = _guide(store, key)
+    assert guide["where"] != "sources" and srv._wire_chars(guide) <= limit             # 대상 단계까지 걸은 길잡이
     rows, offset, total = 0, 0, None
     while offset is not None:
         page = _call("risk_get_cells", target_key=key, offset=offset)
@@ -171,3 +184,31 @@ def test_one_experts_pack_502_does_not_hold_the_others_reviews(tmp_path, monkeyp
     states = {c["state"] for c in risk_store.query("SELECT state FROM rr_review_cells WHERE target_key = ? AND agent_key = ?",
                                                     (key, "xd-syn-1"))}
     assert states == {"failed"}
+
+
+def test_a_running_all_agents_job_with_eight_workers_still_fits_the_wire(scale, monkeypatch):
+    """반대 검토 MEDIUM 12(사용자 결정) — 잡이 도는 중이면 진행판의 잡 칸에 범위(scope — 전문가 359명 이름)와 워커 여덟의 신호가
+    실린다. MCP 답(risk_get_coverage 기본 · risk_next_step)은 그 둘을 수와 앞 몇 이름으로 줄여 25,000자 안이다(REST 는 그대로다)."""
+    from app import review_runner as rr
+    from app import runner
+
+    store, key, _job, roster = scale
+    agents = [r["key"] for r in roster]
+    job_id = rig.job(store, key, scope={"agents": agents})
+    runner._set_job(store, job_id, "running")
+    progress = rr.JobProgress(store, job_id, clock=lambda: 1_000_000)
+    for n, agent in enumerate(agents[:8]):
+        progress.worker(f"w{n}", agent_key=agent, purpose="review", unit_id=f"u-{n:012d}", call_kind="verdict",
+                        variant="fwd", deck_id=f"d-{n}", started_at=1_000_000, last_frame_at=1_000_000,
+                        last_event_at=1_000_000, last_step="attempt 1 · 판정 묶음을 읽는 중 " * 3)
+    factories.act_as_delegate(monkeypatch, OWNER)
+    rest = routes.coverage_payload(key, owner_sub=OWNER)["review"]["job"]
+    assert len(rest["scope"]["agents"]) == 359 and len(rest["signal"]["workers"]) == 8      # REST 는 전부를 싣는다
+    coverage = _call("risk_get_coverage", target_key=key)
+    guide = _guide(store, key)
+    assert srv._wire_chars(coverage) <= srv.MCP_RESULT_CHARS, srv._wire_chars(coverage)
+    assert srv._wire_chars(guide) <= srv.MCP_RESULT_CHARS, srv._wire_chars(guide)        # 줄이지 않으면 27,921자였다
+    for job in (coverage["review"]["job"], guide["facts"]["review_job"]):
+        assert job["scope"].get("agents_n") == 359 and len(job["scope"]["agents"]) <= 5
+        assert job["signal"].get("workers_n") == 8 and len(job["signal"]["workers"]) <= 3
+    runner._set_job(store, job_id, "cancelled")

@@ -148,7 +148,8 @@ def test_risk_get_coverage_picks_up_the_review_block_and_the_readers_write_nothi
     before = _digest(store)
     coverage = _call("risk_get_coverage", target_key=key, with_seats=False)
     rest = routes.coverage_payload(key, owner_sub=OWNER)["review"]
-    assert coverage["review"] == {**rest, **routes.review_order_brief(rest["order"])} and coverage["review"]["job"]
+    assert coverage["review"] == {**rest, **routes.review_order_brief(rest["order"]), "job": routes.mcp_job_brief(rest["job"])}
+    assert coverage["review"]["job"]                                    # 잡 칸은 범위 · 워커를 수로 줄인 MCP 모양(MEDIUM 12)
     _call("risk_get_cells", target_key=key)
     _call("risk_get_expert_report", target_key=key, agent_key=SEAL, part="full")
     assert _digest(store) == before

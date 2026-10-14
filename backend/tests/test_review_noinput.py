@@ -247,3 +247,80 @@ def test_a_contested_impact_stands_and_the_report_names_the_retraction_and_its_p
     text = expert_report.render_report_md(report, part="units")
     assert ("검증된 철회가 이 영향을 다퉜다(영향은 선다) — «no» «결측 입력이 없어도 이 카드의 조건은 이 변경과 겹치지 않는다»"
             " · 경로 «보드 고정점 → 근접 계면»") in text
+
+
+def _one_gap_cell(store, script, *, more: int = 0) -> tuple[str, str, FakeReviewEngine]:
+    key = rig.target(store, ROSTER)
+    first = _units(store, key)[0]["unit_id"]
+    job_id = rig.job(store, key, scope={"agents": [MEM1], "unit_ids": [first]})
+    fake = FakeReviewEngine(_packs(ROSTER))
+    fake.noinput_script = {first: script}
+    fake.noinput_q2 = {first: [""]}
+    if more:
+        fake.noinput_more = {first: more}
+    rig.Rig(store, fake).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    return key, first, fake
+
+
+@pytest.mark.parametrize("script, more, kept", [
+    # ① 같은 제목 · 다른 경로 — 엔진은 둘 다 남긴다(RB3-2). 제목만으로 겹침을 가르면 뒤의 '영향 있음' 이 사라진다(둘 다 남는다)
+    ([[{"impact": "no", "title": "A", "path": "Y"}, {"impact": "yes", "title": "A", "path": "X"}]], 0, [("no", "A"), ("yes", "A")]),
+    # ② 다시 물었더니 같은 줄이 모름 → 영향 있음으로 올라갔다 — 걸림 아닌 앞 줄이 뒤의 걸림을 가리지 않는다
+    ([[{"impact": "unknown", "title": "A", "path": "X"}], [{"impact": "yes", "title": "A", "path": "X"}]], 1, [("yes", "A")]),
+    # ③ 제목 없는 영향 있음 — 엔진은 받는다(_check_q1 은 제목을 요구하지 않는다). 버리면 결과가 none 으로 떨어진다
+    ([[{"impact": "yes", "title": "", "path": "보드 고정점 → 근접 계면"}, {"impact": "no", "title": "B"}]], 0,
+     [("yes", "보드 고정점 → 근접 계면"), ("no", "B")]),
+    # ④ 다시 물었더니 같은 줄(같은 카드 · 경로 · 줄 · 제목)이 영향 있음 → 모름으로 왔다 — 약한 뒤 줄이 앞의 걸림을 갈아 끼우지 않는다
+    ([[{"impact": "yes", "title": "A", "path": "X"}], [{"impact": "unknown", "title": "A", "path": "X"}]], 1, [("yes", "A")]),
+])
+def test_an_impact_is_never_lost_to_a_same_title_row_a_reask_or_a_missing_title(store, script, more, kept):
+    """재설계 M3 반대 검토 HIGH 1 — 입력 결손 결과의 '영향 있음' 은 같은 제목의 다른 줄 · 다시 묻기 · 빈 제목 때문에 사라지지 않는다.
+    겹침은 엔진의 줄 정체(카드 · 경로 · 줄 · 제목)로 가르고, 같은 정체면 더 센 영향(있음 > 모름 > 없음)이 남는다. 제목 없는 영향은
+    경로로 제목을 대신한다. 셀은 impact 로 닫히고 finding 이 선다."""
+    key, first, _fake = _one_gap_cell(store, script, more=more)
+    cell = _cell(store, key, first, MEM1)
+    got = json.loads(cell["extras_json"])["noinput"]
+    assert (got["outcome"], cell["state"]) == ("impact", "reviewed")
+    assert [(r["impact"], r["title"]) for r in got["q1"]] == kept
+    hits = [r for r in got["q1"] if r["impact"] == "yes"]
+    assert len(hits) == 1 and hits[0]["title"]
+    findings = store.query("SELECT finding_json FROM rr_findings WHERE target_key = ? AND source_kind = 'card_review'", (key,))
+    assert len(findings) == 1
+
+
+
+def test_a_flipped_or_contested_non_hit_q1_is_kept_and_named_as_such(store):
+    """반대 검토 MEDIUM 5 — 보충이 앞 답(모름 — 걸림)을 '없음' 으로 갈아 끼운 q1(flipped_from · raw)은 그 표지가 셀 기록과 보고서에
+    남는다. 없음 줄에 실린 다툼은 '검증된 철회가 이 영향을 다퉜다' 가 아니라 '같은 카드의 다른 답이 이 줄과 부딪쳤다' 다."""
+    flipped = {"verdict": ["unknown"], "attempt": 1, "raw": "모르겠음"}
+    contested = {"verdict": ["yes"], "why": "다른 답은 영향 있음이라 했다", "attempt": 1}
+    key, first, _fake = _one_gap_cell(store, [[
+        {"impact": "no", "title": "A", "flipped_from": flipped},
+        {"impact": "no", "title": "B", "k": "K01", "contested_by": contested}]])
+    q1 = json.loads(_cell(store, key, first, MEM1)["extras_json"])["noinput"]["q1"]
+    assert q1[0]["checks"].get("flipped_from") == flipped and q1[1]["checks"].get("contested_by") == contested
+    text = expert_report.render_report_md(expert_report.load_report(store, key, MEM1), part="units")
+    assert "엔진 보충이 앞 답 «unknown» 을 갈아 끼웠다(앞 답은 어휘 밖 낱말 «모르겠음» 을 고친 값)" in text
+    assert "같은 카드의 다른 답이 이 줄과 부딪쳤다(이 줄이 선다) — «yes» «다른 답은 영향 있음이라 했다»" in text
+    assert "검증된 철회가 이 영향을 다퉜다" not in text
+
+
+def test_q1_and_contested_quotes_keep_the_200_character_cap_in_the_cell_payload_and_the_export(store):
+    """반대 검토 MEDIUM 11 — 카드 인용 200자 상한(사용자 결정 1)은 입력 결손 q1 의 cq 와 그 줄 · 판정 행에 실린 다툼(contested_by)의
+    cq 에도 걸린다 — 셀 하나 REST(cell_payload)와 반출에 원래 길이(<칸>_chars)와 함께 줄여 실린다."""
+    from app import export, routes
+    from tests import factories
+
+    long = fre.LONG_QUOTE
+    contested = {"verdict": ["no"], "cq": long, "why": "철회", "attempt": 2}
+    key, first, _fake = _one_gap_cell(store, [[{"impact": "yes", "title": "A", "cq": long, "contested_by": contested}]])
+    raw = json.loads(_cell(store, key, first, MEM1)["extras_json"])["noinput"]["q1"][0]
+    assert raw["cq"] == long and raw["checks"]["contested_by"]["cq"] == long          # 원장에는 원문 그대로다
+    payload = routes.get_cell(key, first, MEM1, ident=factories.ident(rig.OWNER))
+    shown = payload["cell"]["extras_json"]["noinput"]["q1"][0]
+    assert (len(shown["cq"]), shown.get("cq_chars")) == (export.EXPORT_CQ_MAX, len(long))
+    assert (len(shown["checks"]["contested_by"]["cq"]), shown["checks"]["contested_by"].get("cq_chars")) == (
+        export.EXPORT_CQ_MAX, len(long))
+    exported = "".join(export.iter_lines(store, rig.OWNER, 0))
+    assert long not in exported and long[:export.EXPORT_CQ_MAX] in exported

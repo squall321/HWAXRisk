@@ -402,13 +402,16 @@ _DISPOSE_ACTIONS = {"retry_failed": "retry", "skip_failed": "skip"}
 
 
 def job_action(ident: identity.Identity, *, job_id: str, action: str, reason: str | None = None,
-               filter: dict | None = None) -> dict:
+               filter: dict | None = None, consent: bool = False) -> dict:
     """`POST /api/jobs/{id}/{action}`(pause|resume|cancel). 이미 그 상태면 그대로 돌려준다(`changed: false`).
 
     `retry_failed`·`skip_failed` 는 그 검토 잡이 찍은(run_id) 셀 가운데 `failed` 를 다시 열거나 사유와 함께 넘긴다 — `filter`
     ({agent_key?, unit_id?, domain?, error_code?, state?})로 좁히고 job_id 는 이 잡으로 못 박는다. 응답은 REST 처분과 같다
-    (`review_runner.dispose_cells`). 넘김은 사유(4~300자)가 필수다. 쓰기다 — 위임 단언 없는 Bearer 는 delegation_required."""
+    (`review_runner.dispose_cells`). 넘김은 사유(4~300자)가 필수다. 다시의 `consent` 는 REST 와 같은 뜻이다(사람이 동의한 뒤에만
+    true — 반대 검토 MEDIUM 13). 쓰기다 — 위임 단언 없는 Bearer 는 delegation_required."""
     require_delegate(ident)
+    if consent and action != "retry_failed":
+        raise AppError("E100", "consent 는 retry_failed 의 칸이다(다시가 세울 잡의 동의).", 422)
     store = routes.get_store()
     if action in _DISPOSE_ACTIONS:
         job = store.query_one("SELECT target_key, mode FROM rr_jobs WHERE id = ?", (job_id,))
@@ -425,8 +428,8 @@ def job_action(ident: identity.Identity, *, job_id: str, action: str, reason: st
             raise AppError("cells_selector_invalid", "filter 는 객체다.", 422)
         selector = {**(filter or {}), "job_id": job_id}
         if _DISPOSE_ACTIONS[action] == "retry":
-            return routes.post_cells_retry(job["target_key"], routes.CellsRetryBody(filter=selector, reason=reason),
-                                           ident=ident)
+            return routes.post_cells_retry(job["target_key"],
+                                           routes.CellsRetryBody(filter=selector, reason=reason, consent=consent), ident=ident)
         return routes.post_cells_skip(job["target_key"], routes.CellsSkipBody(filter=selector, reason=reason or ""),
                                       ident=ident)
     if reason is not None or filter is not None:
@@ -908,7 +911,7 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
     brief = routes.review_order_brief(order)
     facts["review_order"] = brief["order"]
     facts["review_order_page"] = brief["order_page"]
-    facts["review_job"] = job
+    facts["review_job"] = routes.mcp_job_brief(job)       # 범위 · 워커는 수와 앞 몇(반대 검토 MEDIUM 12)
     # 완결 표기(캐시)와 사슬 — 지금 도는(없으면 마지막) 쟁점·종합 잡, 마지막 보고서 판의 머리(재설계 M3 S3-5 · 3.11).
     facts["level_label"] = coverage.get("level_label")
     for name in ("stage", "report"):
@@ -956,7 +959,8 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
         if job["state"] not in REVIEW_LIVE_STATES:
             # 끝난 잡의 실패 셀 — 사람이 처분한다(재설계 M3 C3-4). 다시는 범위를 잡은 검토 잡을 세우고, 넘김은 사유가 필수다.
             dispose = [_step("risk_job_action", {"job_id": job["id"], "action": "retry_failed"},
-                             f"실패 셀 {failed_n}개를 다시 연다(까닭을 고친 뒤 — 같은 까닭이면 같은 실패다). 그 셀들로 검토 잡이 선다."),
+                             f"실패 셀 {failed_n}개를 다시 연다(까닭을 고친 뒤 — 같은 까닭이면 같은 실패다). 그 셀들로 검토 잡이 선다"
+                             " — 호출 추정이 동의 문턱을 넘으면 consent_required 로 돌아온다." + _CONSENT_WHY),
                        _step("risk_job_action", {"job_id": job["id"], "action": "skip_failed", "reason": "<4~300자 사유>"},
                              "다시 돌리지 않을 실패 셀을 사유와 함께 넘긴다 — 그 전문가가 다시 마감되고 보고서에 '넘김 — 사유' 로 남는다.")]
     if finalized:

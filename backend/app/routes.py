@@ -2738,6 +2738,17 @@ class UnitsBody(BaseModel):
     reason: str | None = Field(default=None, max_length=300)
 
 
+def _target_editor(target_key: str, project_id: str, email: str) -> None:
+    """대상 쓰기의 권한 — 그 과제의 editor 이상. 구성원이 아니면 없는 대상과 같은 404 다(그 대상이 있다는 것과 과제 id 를 흘리지
+    않는다 — 반대 검토 LOW 17). 등급 미달은 그대로 403 role_insufficient 다(구성원은 대상이 있는 것을 안다)."""
+    try:
+        require_role(project_id, email, "editor")
+    except AppError as exc:
+        if exc.http_status != 404:
+            raise
+        raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404) from None
+
+
 def _editable_target(target_key: str, ident: identity.Identity) -> tuple[str, dict]:
     """쓰기 문 — 잡을 세울 수 있는 사람(그 과제의 editor 이상, 관리자 우회)과 같다. (호출자 이메일, 타깃 행)."""
     email = _require_user(ident)
@@ -2746,7 +2757,7 @@ def _editable_target(target_key: str, ident: identity.Identity) -> tuple[str, di
     if row is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
     if not _is_admin(ident):
-        require_role(row["project_id"], email, "editor")
+        _target_editor(target_key, row["project_id"], email)
     return email, dict(row)
 
 
@@ -3056,7 +3067,7 @@ def post_undefer(target_key: str, body: UndeferBody, ident: identity.Identity = 
     if row is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
     if not _is_admin(ident):
-        require_role(row["project_id"], email, "editor")
+        _target_editor(target_key, row["project_id"], email)
     reason = _human_reason(body.reason)
     live = _live_jobs(store, target_key)
     if live:
@@ -3101,7 +3112,7 @@ def _dispose(target_key: str, ident: identity.Identity, *, action: str, cells: l
     if row is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
     if not _is_admin(ident):
-        require_role(row["project_id"], email, "editor")
+        _target_editor(target_key, row["project_id"], email)
     note = _human_reason(reason) if (reason is not None or force or action == "skip") else None
     rows = review_cells.select_cells(store, target_key, cells=cells, filter=filter)
     channel = AUDIT_CHANNELS.get(ident.source, "rest")
@@ -3617,6 +3628,33 @@ def _review_job_payload(job: dict) -> dict:
             "waiting": progress.get("waiting"), "signal": signal}
 
 
+MCP_JOB_NAMES = 5          # MCP 답의 잡 범위 목록 칸마다 앞 몇 이름
+MCP_JOB_WORKERS = 3        # MCP 답의 워커 신호 앞 몇
+
+
+def mcp_job_brief(job: Any) -> Any:
+    """MCP 답의 검토 잡 칸(진행판 review.job · 길잡이 facts.review_job) — 범위(scope)의 목록 칸과 도는 워커 신호를 수와 앞 몇으로
+    줄인다(359명 전원 범위 · 워커 8 이면 와이어 25,000자를 넘었다 — 반대 검토 MEDIUM 12, 사용자 결정). REST 진행판은 전부를 싣는다."""
+    if not isinstance(job, dict):
+        return job
+    out = dict(job)
+    scope: dict[str, Any] = {}
+    for key, value in (job.get("scope") or {}).items():
+        if isinstance(value, list):
+            scope[key], scope[f"{key}_n"] = value[:MCP_JOB_NAMES], len(value)
+        else:
+            scope[key] = value
+    out["scope"] = scope
+    signal = job.get("signal")
+    if isinstance(signal, dict) and isinstance(signal.get("workers"), list):
+        workers = signal["workers"]
+        out["signal"] = {**signal, "workers_n": len(workers),
+                         "workers": [{k: w.get(k) for k in ("agent_key", "purpose", "unit_id", "call_kind", "frame_idle_s",
+                                                           "event_idle_s") if k in w}
+                                     for w in workers[:MCP_JOB_WORKERS] if isinstance(w, dict)]}
+    return out
+
+
 def _quality_summary(quality: Any) -> dict | None:
     """진행판의 품질 블록(루프가 60초마다 `progress_json.quality` 에 넣는다 — M2.md 5절 #16) 요약 — 문면과 기준 밖 항목. 수치 전체는
     문면 줄마다 같은 수다(review_quality.render_text). 카드 폭포는 `review.cards` 칸이다."""
@@ -3981,6 +4019,8 @@ def registry_payload(target_key: str, *, owner_sub: str | None = None, status: s
         rows = rows[: int(limit)]
     target = store.query_one("SELECT verdict_final FROM rr_targets WHERE target_key = ?", (target_key,))
     extra = {"next_offset": start + len(rows)} if truncated else {}
+    # 카드 인용은 판정당 200자(사용자 결정 1 — 반출과 같은 모양 규칙, 원래 길이는 <칸>_chars). REST · MCP 가 같은 답이다.
+    rows = [export_module._clip_card_text(export_module._export_view("rr_registry", dict(r))) for r in rows]
     return {"target_key": target_key, "rows": rows, "truncated": truncated, "total": total, **extra,
             "verdict_candidate": registry_module.verdict_candidate(store, target_key),
             # 후보는 코드가 내고 확정은 사람이 낸다(§8.2.4) — 화면 헤더가 둘을 한 응답에서 읽는다.
@@ -4865,8 +4905,9 @@ def claims_for_ref(ref: str, *, owner_sub: str | None = None, limit: int = 100,
     start = max(0, int(offset or 0))
     rows = get_store().query(sql + " ORDER BY r.claim_uid LIMIT ? OFFSET ?", (*params, int(limit) + 1, start))
     truncated = len(rows) > int(limit)
+    # card: 인용은 판정당 200자(사용자 결정 1 — 인용 역색인 반출과 같은 규칙, 원래 길이는 quote_chars)
     out = {"ref": info["ref"], "ref_type": info["kind"],
-           "claims": [dict(r) for r in rows[: int(limit)]], "truncated": truncated}
+           "claims": [export_module._export_view("rr_claim_refs", dict(r)) for r in rows[: int(limit)]], "truncated": truncated}
     if truncated:
         out["next_offset"] = start + int(limit)        # 상한 뒤를 이어 받는다(절단 전수 조사 M1)
     return out

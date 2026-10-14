@@ -199,12 +199,17 @@ def _clip_card_text(value: Any) -> Any:
 
 
 def _clip_extras(extras: Any) -> Any:
-    """셀 extras_json — 카드 밖 줄의 인용(q, 배경 카드에서 옮긴 글)."""
-    off = extras.get("offcard") if isinstance(extras, dict) else None
-    if not isinstance(off, dict) or not isinstance(off.get("findings"), list):
+    """셀 extras_json — 카드 밖 줄의 인용(q, 배경 카드에서 옮긴 글)과 입력 결손 q1 의 카드 인용(cq — 그 줄에 실린 다툼의 cq 까지,
+    반대 검토 MEDIUM 11)."""
+    if not isinstance(extras, dict):
         return extras
-    return {**extras, "offcard": {**off, "findings": [_clip(f, "q") if isinstance(f, dict) else f
-                                                      for f in off["findings"]]}}
+    out = dict(extras)
+    off = extras.get("offcard")
+    if isinstance(off, dict) and isinstance(off.get("findings"), list):
+        out["offcard"] = {**off, "findings": [_clip(f, "q") if isinstance(f, dict) else f for f in off["findings"]]}
+    if isinstance(extras.get("noinput"), dict):
+        out["noinput"] = _clip_card_text(extras["noinput"])
+    return out
 
 
 def _export_view(table: str, row: dict) -> dict:
@@ -219,7 +224,11 @@ def _export_view(table: str, row: dict) -> dict:
         conds = _clip_json(row.get("conds_json"),
                            lambda v: [_clip(c, "cond") if isinstance(c, dict) else c for c in v] if isinstance(v, list)
                            else v)
-        return row if conds is row.get("conds_json") else {**row, "conds_json": conds}
+        # 엔진이 단 다툼(contested_by)의 cq 도 같은 200자 규칙이다(반대 검토 MEDIUM 11 — checks 사본에 실린다)
+        checks = _clip_json(row.get("checks_json"), _clip_card_text)
+        if conds is not row.get("conds_json"):
+            row = {**row, "conds_json": conds}
+        return row if checks is row.get("checks_json") else {**row, "checks_json": checks}
     if table == "rr_review_cells":
         extras = _clip_json(row.get("extras_json"), _clip_extras)
         return row if extras is row.get("extras_json") else {**row, "extras_json": extras}

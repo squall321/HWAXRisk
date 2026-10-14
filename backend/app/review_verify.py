@@ -414,9 +414,11 @@ def _accept_noinput(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping
             _drop(dropped, "foreign_ref", raw)
             continue
         checks = raw.get("checks") if isinstance(raw.get("checks"), Mapping) else {}
-        if isinstance(raw.get("contested_by"), Mapping):
-            # 검증된 철회가 그 q1 을 다퉜다(엔진 RB3-1 — 영향 있음은 선다). 판정 행처럼 checks 사본에 남긴다(보고서가 싣는다).
-            checks = {**checks, "contested_by": raw["contested_by"]}
+        for mark in ("contested_by", "flipped_from"):
+            # 다툼(contested_by — 앞 줄이 선다) · 보충이 앞 답을 갈아 끼움(flipped_from — 고친 값이면 raw). 판정 행처럼 checks 사본에
+            # 남긴다(보고서가 싣는다 — 반대 검토 MEDIUM 5).
+            if isinstance(raw.get(mark), Mapping):
+                checks = {**checks, mark: raw[mark]}
         card = cards.get(alias) if alias else None
         base = {"t": t, "k": alias or None, "record_id": str(card["record_id"]) if card is not None else None,
                 "l": as_list(raw.get("l")), "refs": refs, "why": _text(raw.get("why")) or None, "checks": dict(checks)}
@@ -429,9 +431,11 @@ def _accept_noinput(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping
             _drop(dropped, "bad_enum", raw)
             continue
         title = _text(raw.get("title")).strip()
-        if impact == "yes" and not title:
-            _drop(dropped, "no_title", raw)
-            continue
+        untitled = impact == "yes" and not title
+        if untitled:
+            # 엔진은 제목 없는 영향 줄을 받는다(_check_q1 은 제목을 요구하지 않는다) — 버리면 '영향 있음' 이 결과에서 사라진다(반대 검토
+            # HIGH 1). 경로 · 이유로 제목을 대신하고 표지를 단다.
+            title = _text(raw.get("path")).strip() or _text(raw.get("why")).strip() or "제목 없는 영향"
         quote = (_quote_columns(raw.get("cq"), card, checks.get("quote")) if card is not None
                  else {"quote_ok": None, "check_disagree": 0, "section_id": None})
         rows.append({**base, "impact": impact, "title": title, "mech": _text(raw.get("mech")) or None,
@@ -440,7 +444,8 @@ def _accept_noinput(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping
                      "quote_ok": quote["quote_ok"], "check_disagree": quote["check_disagree"],
                      "section_id": quote["section_id"],
                      "grade": card_grade(card) if card is not None and quote["quote_ok"] == 1 else None,
-                     "refs_ok": refs_verdict(refs, unit_refs, required=impact == "yes")})
+                     "refs_ok": refs_verdict(refs, unit_refs, required=impact == "yes"),
+                     **({"title_fallback": True} if untitled else {})})
     have = {r["t"] for r in rows}
     return {"rows": rows, "missing": [t for t in ("q1", "q2") if t not in have], "dropped": dropped, "extras": out}
 
@@ -498,7 +503,9 @@ def _accept_sweep(raw_rows: list, sent: list[str], page_units: list[str], extras
         if outside:
             _drop(dropped, "alias_outside_call", {"unit_id": unit_id, "k": outside})
         picked[unit_id] = {"unit_id": unit_id, "rel": rel, "k": [a for a in dict.fromkeys(aliases) if a in sent_set],
-                           "why": _text(raw.get("why"))}
+                           "why": _text(raw.get("why")),
+                           # 엔진이 그 줄에 단 부딪침 표지(RB3-1) — 거르기는 표지가 선 '무관' 을 믿지 않는다(반대 검토 HIGH 2)
+                           "conflict": engine_conflict(raw)}
     seen = {a for row in picked.values() for a in row["k"]}
     rows = [picked[u] for u in page_units if u in picked]
     return {"rows": rows, "missing": [u for u in page_units if u not in picked], "dropped": dropped,
@@ -531,6 +538,8 @@ def sweep_accounting(calls: Sequence[Mapping[str, Any]]) -> dict:
             entry = units.setdefault(row["unit_id"], {"rel": rel, "k": [], "why": [], "missing_in": 0})
             if _REL_RANK[rel] > _REL_RANK[entry["rel"]]:
                 entry["rel"] = rel
+            if row.get("conflict"):
+                entry["conflict"] = True
             entry["k"] = sorted(set(entry["k"]) | set(row["k"]))
             if row["why"]:
                 entry["why"].append(row["why"])
@@ -722,7 +731,7 @@ def dual_neg_state(calib_rows: Sequence[Mapping[str, Any]], *, tier_a_closed: bo
 
 def engine_conflict(row: Mapping[str, Any]) -> bool:
     """엔진이 그 판정 행에 부딪침을 알렸나(RB3-1) — 같은 카드의 다른 판정과 부딪쳤거나(`checks.dup_conflict`) 보충이 판정을 갈아
-    끼웠다(`flipped_from`). 그런 행은 '문제없음' 으로 믿지 않고 걸린 것처럼 두 번째 판정을 받는다(rev 또는 단독). `checks_json`(원장
+    끼웠다(`flipped_from`) · 다툼이 실렸다(`contested_by`). 그런 행은 '문제없음' 으로 믿지 않고 걸린 것처럼 두 번째 판정을 받는다(rev 또는 단독). `checks_json`(원장
     행) 또는 `checks`(받은 행) 어느 쪽이든 읽는다."""
     checks = row.get("checks")
     if not isinstance(checks, Mapping):
@@ -731,7 +740,8 @@ def engine_conflict(row: Mapping[str, Any]) -> bool:
         except (TypeError, ValueError):
             checks = {}
     return isinstance(checks, Mapping) and (checks.get("dup_conflict") is True or bool(checks.get("flipped_from"))
-                                            or bool(row.get("flipped_from")))
+                                            or bool(row.get("flipped_from")) or bool(checks.get("contested_by"))
+                                            or bool(row.get("contested_by")))
 
 
 def _alias_order(alias: Any) -> tuple[int, str]:

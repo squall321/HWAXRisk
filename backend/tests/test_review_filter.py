@@ -14,7 +14,7 @@ import threading
 
 import pytest
 
-from app import config, relevance, review_cells, routes, units
+from app import config, relevance, review_cells, review_verify, routes, units
 from tests import factories
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
@@ -325,19 +325,22 @@ def test_a_sweep_that_does_not_say_unrelated_keeps_the_cell(store, monkeypatch, 
 
 
 def test_a_cell_a_person_reopened_is_never_classified_again(store, monkeypatch):
-    """사람이 force 로 다시 연 셀(route_forced human_retry)은 새 잡이 거를 셀로 볼 입력이어도 분류하지 않고 끝까지 본다."""
+    """사람이 force 로 다시 연 셀(route_forced human_retry)은 새 잡이 거를 셀로 볼 입력이어도 분류하지 않고 끝까지 본다. 표본 셀이면
+    그 표지 · 분류 기록은 남는다(반대 검토 HIGH 3 — 다시 돈 정산이 결과를 다시 적는다)."""
     _approve(monkeypatch)
     _knobs(monkeypatch, risk_filter_audit_pct=100)
     key, _job, fake, kinds = _run(store, SMALL)
     b = kinds["boundary"]
-    assert _cell(store, key, b, STD2)["route"] == "audit"
+    before = _cell(store, key, b, STD2)
+    assert before["route"] == "audit"
     _knobs(monkeypatch, risk_filter_audit_pct=0)                 # 새 잡이면 거를 셀이다
     out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[b, STD2]], force=True, reason="사람이 다시 본다"),
                                   ident=factories.ident(rig.OWNER))
     rig.Rig(store, fake).finish(out["job"]["job_id"])
     cell = _cell(store, key, b, STD2)
     assert (cell["state"], cell["route"], cell["route_forced"], cell["route_json"]) == (
-        "reviewed", None, review_cells.HUMAN_RETRY, None)
+        "reviewed", "audit", review_cells.HUMAN_RETRY, before["route_json"])         # 다시 분류하지 않았다
+    assert cell["sample_json"]["filter_audit"]["result"] in review_cells.AUDIT_RESULTS
 
 
 def test_a_classified_cell_keeps_its_route_when_the_inputs_move_before_it_settles(store, monkeypatch):
@@ -530,6 +533,77 @@ def test_a_late_handoff_reopens_a_filtered_cell_of_that_domain(store, monkeypatc
     assert order.index(STD2) < order.index("xd-syn-1")                     # 넘김이 거른 뒤에 왔다
 
 
+def _offcard_handoff_target(store, monkeypatch) -> tuple[str, FakeReviewEngine, dict[str, str], rig.Rig]:
+    """승인 · 표본 0% · 보충 표본 바닥 0(거른 셀이 잡 끝 표본으로 다시 열리지 않게) — 1순위 셋이 먼저 다 닫힌 원장."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 0)
+    monkeypatch.setattr(review_cells, "AUDIT_DOMAIN_FLOOR", 0)
+    key = rig.target(store, ROSTER)
+    fake = _fake(ROSTER)
+    kinds = _units(store, key)
+    _quiet(fake, kinds["boundary"], kinds["global"])
+    return key, fake, kinds, rig.Rig(store, fake)
+
+
+OFFCARD_WHY = "카드 밖 호출이 다른 영역의 몫으로 본 줄"
+
+
+def test_another_experts_offcard_handoff_keeps_the_cell_it_arrives_before(store, monkeypatch):
+    """반대 검토 LOW 15 — 카드 밖 호출의 h 줄(그 셀의 단위를 다른 영역으로 넘긴다)도 넘김이다(M3.md 4.9 의 h 줄은 훑기에 한정하지
+    않는다). mech 1순위의 카드 밖 호출이 경계 단위를 std 로 넘긴 뒤 std 2순위가 분류하면 7번 줄(handoff)로 검토에 남고
+    route_json.handoff 에 보낸 전문가가 있다(종전에는 걸러졌다)."""
+    key, fake, kinds, r = _offcard_handoff_target(store, monkeypatch)
+    b = kinds["boundary"]
+    fake.offcard_handoffs = {(MECH1, b): "std"}
+    r.finish(rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]}))
+    assert json.loads(_cell(store, key, b, MECH1)["handoffs_json"])[0]["to"] == "std"
+    r.finish(rig.job(store, key, scope={"agents": [STD2]}))
+    cell = _cell(store, key, b, STD2)
+    assert (cell["state"], cell["route"], cell["route_forced"]) == ("reviewed", "review", "handoff")
+    assert cell["route_json"]["handoff"] == [{"from": MECH1, "why": OFFCARD_WHY}]
+    assert review_cells.review_invariants(store, key) == []
+
+
+def test_a_late_offcard_handoff_reopens_the_filtered_cell_at_job_end(store, monkeypatch):
+    """반대 검토 LOW 15 — 거른 뒤에 온 카드 밖 넘김: std 2순위가 경계 단위를 거른 뒤 mech 2순위의 카드 밖 호출이 그 단위를 std 로
+    넘긴다. 잡 끝(보충 표본 앞)이 그 셀을 다시 연다(handoff — 셀의 잡 결속은 그대로라 거른 잡의 셀이다). 그 전문가를 다시 범위로
+    잡은 잡이 다시 분류하면 7번 줄로 검토다. 자기 넘김은 세지 않으므로 다시 열린 셀이 다시 걸러져 잡 끝이 되풀이되지 않는다."""
+    key, fake, kinds, r = _offcard_handoff_target(store, monkeypatch)
+    b = kinds["boundary"]
+    r.finish(rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]}))
+    r.finish(rig.job(store, key, scope={"agents": [STD2]}))
+    assert _cell(store, key, b, STD2)["state"] == "na_irrelevant"
+    fake.offcard_handoffs = {(MECH2, b): "std"}
+    sender = rig.job(store, key, scope={"agents": [MECH2]})
+    r.finish(sender)
+    assert rig.state(store, sender) == "completed"
+    cell = _cell(store, key, b, STD2)
+    assert (cell["state"], cell["route"], cell["route_forced"], cell["reopened_n"]) == ("pending", None, "handoff", 1)
+    r.finish(rig.job(store, key, scope={"agents": [STD2]}))
+    cell = _cell(store, key, b, STD2)
+    assert (cell["state"], cell["route"], cell["route_forced"]) == ("reviewed", "review", "handoff")
+    assert cell["route_json"]["handoff"] == [{"from": MECH2, "why": OFFCARD_WHY}]
+    assert review_cells.review_invariants(store, key) == []
+
+
+def test_an_experts_handoff_to_its_own_domain_never_reopens_its_own_filtered_cell_at_job_end(store, monkeypatch):
+    """반대 검토 LOW 15 의 짝 — 자기 훑기가 자기 영역으로 넘긴 줄은 7번 줄이 세지 않는다(그 셀은 걸러진다). 잡 끝의 넘김 거두기도
+    그 줄로 그 셀을 다시 열지 않는다 — 열면 다시 분류돼 또 걸러지고 잡 끝이 그것을 되풀이해 잡이 끝나지 않는다."""
+    key, fake, kinds, r = _offcard_handoff_target(store, monkeypatch)
+    b = kinds["boundary"]
+    r.finish(rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]}))
+    fake.handoff_to, fake.handoff_unit, fake.handoff_from = "std", b, {STD2}
+    job_id = rig.job(store, key, scope={"agents": [STD2]})
+    r.finish(job_id, ticks=60)
+    cell = _cell(store, key, b, STD2)
+    assert rig.state(store, job_id) == "completed"
+    assert (cell["state"], cell["route_json"]["decision"], cell["route_json"]["handoff"], cell["reopened_n"]) == (
+        "na_irrelevant", "filtered", [], 0)
+    assert review_cells.handoffs(store, key) == [{"from": STD2, "unit_id": b, "to": "std",
+                                                  "why": "훑기가 다른 영역의 몫으로 본 단위"}]
+
+
 # ---------------------------------------------------------------- 재기동
 def test_a_restart_keeps_the_classification_and_never_reclassifies(store, monkeypatch):
     """1순위가 먼저 다 닫힌 뒤 2순위 세션이 분류하고 판정 호출 도중 죽는다 — 재기동 복구 뒤 새 러너는 걸러진 셀을 다시 열지 않고
@@ -609,6 +683,12 @@ def test_a_low_floor_samples_one_cell_per_domain_and_a_later_miss_reopens_what_a
     assert (audit["n_audit"], audit["sampled"], audit["floor_met"]) == (4, 2, False)
 
     monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 3)               # 셋째 잡의 바닥 — 그 잡이 거른 b2 한 건을 다시 연다
+    # 보충 표본은 끝난 잡이 거른 셀(left)까지 표본 점수 순으로 고른다(반대 검토 MEDIUM 7) — 대상 열쇠마다 점수가 달라 b2 가 첫째가
+    # 되는 잡 소금을 고른다(잡이 만들 때 얼린다). 그러지 않으면 셋 가운데 무엇을 고르는지가 실행마다 바뀐다.
+    pool = [(c["unit_id"], c["agent_key"]) for c in left] + [(b2, MEM2)]
+    salt = next(f"s{i}" for i in range(500) if min(pool, key=lambda p, i=i: (review_verify.sample_score(
+        "filter_audit", key, *p, salt=f"s{i}"), p)) == (b2, MEM2))
+    monkeypatch.setattr(review_verify, "SAMPLE_SALT", salt)
     fake.noinput_q1[b2] = ["yes"]                                     # 끝까지 보니 영향 있음 — 거른 셀이 걸림을 놓쳤다
     done({"agents": [MEM2], "unit_ids": [b2]})
     audited = _cell(store, key, b2, MEM2)
@@ -632,3 +712,196 @@ def test_a_filtered_cell_without_its_classification_record_breaks_the_invariant(
     assert any("(G8)" in p for p in review_cells.closure_cells(store, key)["invariants"])
     gate.set()
     r.loop.join(30)
+
+
+
+@pytest.mark.parametrize("marks", [
+    {"contested_by": {"verdict": ["maybe"], "why": "걸릴 수도 있다", "attempt": 1, "raw": "애매"}, "dup_conflict": False},
+    {"flipped_from": {"verdict": ["maybe"], "attempt": 1, "raw": "애매"}, "dup_conflict": False},
+    {"dup_conflict": True},
+])
+def test_a_sweep_no_the_engine_marked_as_contested_never_filters_the_cell(store, monkeypatch, marks):
+    """반대 검토 HIGH 2 — 훑기 u 줄의 '무관'(rel no)에 엔진이 부딪침 표지(다툼 contested_by · 보충 flipped_from · dup_conflict)를 달았으면
+    그 '무관' 은 믿지 않는다(D-42 ④ · M3.md 4.13) — 훑기 신호는 unknown(engine_conflict)이고 셀은 거르지 않고 검토다. 분류 기록에
+    그 까닭이 남는다."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+
+    def setup(fake, kinds):
+        fake.sweep_marks = {kinds["boundary"]: marks}
+
+    key, _job, _fake, kinds = _run(store, SMALL, fake_setup=setup)
+    cell = _cell(store, key, kinds["boundary"], STD2)
+    assert cell["route_json"]["decision"] != "filtered" and cell["state"] == "reviewed"
+    assert (cell["route_json"]["sweep"]["verdict"], cell["route_json"]["sweep"]["reason"]) == ("unknown", "engine_conflict")
+
+
+def test_a_human_retry_keeps_the_sample_marker_so_a_rerun_miss_still_widens_and_a_widening_never_reverts(store, monkeypatch):
+    """반대 검토 HIGH 3 — 사람의 다시는 표본 · 그림자 표지를 지우지 않는다(결과만 비우고 앞 결과는 was 에 쌓는다). ① 실패한 보충 표본 셀을
+    다시 열어 이번에는 영향 있음(risk_miss)이 나오면 그 영역이 넓어져 남은 거른 셀이 다시 열린다. ② 넓힘의 원인 셀을 강제로 다시 열어도
+    넓힌 영역은 되돌아가지 않는다(넓힘은 앞 결과까지 본다)."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    key = rig.target(store, ROSTER)
+    us = units.load_units(store, key)
+    fake = _fake(ROSTER)
+    _quiet(fake, *(u["unit_id"] for u in us))
+    for u in us:
+        fake.noinput_q1[u["unit_id"]], fake.noinput_q2[u["unit_id"]] = ["no"], [""]
+    r = rig.Rig(store, fake)
+    first = rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]})
+    r.finish(first)
+    monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 1)
+    fake.error_cells = {(MEM2, u["unit_id"]): {"code": "no_rows", "message": "행이 없다(가짜)", "infra": False, "retryable": False}
+                        for u in us}
+    second = rig.job(store, key, scope={"agents": [MEM2]})
+    r.finish(second)
+    cells = {c["unit_id"]: c for c in _cells(store, key) if c["agent_key"] == MEM2}
+    failed = [u for u, c in cells.items() if c["state"] == "failed" and c["sample_json"] and "filter_audit" in c["sample_json"]]
+    left = [u for u, c in cells.items() if c["state"] == "na_irrelevant"]
+    assert len(failed) == 1 and len(left) >= 1
+    audit_unit = failed[0]
+    fake.error_cells = {}
+    fake.noinput_q1[audit_unit] = ["yes"]
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[audit_unit, MEM2]], reason="표본 셀을 다시 본다"),
+                                  ident=factories.ident(rig.OWNER))
+    retried = _cell(store, key, audit_unit, MEM2)
+    assert "filter_audit" in (retried["sample_json"] or {}) and retried["sample_json"]["filter_audit"]["result"] is None
+    r.finish(out["job"]["job_id"])
+    assert _cell(store, key, audit_unit, MEM2)["sample_json"]["filter_audit"]["result"] == "risk_miss"
+    assert "mem" in review_cells.widened_domains(store, key)
+    assert {(c["state"], c["route_forced"]) for c in (_cell(store, key, u, MEM2) for u in left)} == {("pending", "widened")}
+
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[audit_unit, MEM2]], force=True,
+                                                             reason="넓힘의 원인 셀을 다시 본다"), ident=factories.ident(rig.OWNER))
+    marker = _cell(store, key, audit_unit, MEM2)["sample_json"]["filter_audit"]
+    assert (marker["result"], marker["was"]) == (None, ["risk_miss"])
+    assert "mem" in review_cells.widened_domains(store, key)                       # 넓힘은 되돌아가지 않는다
+
+
+def test_an_audit_that_never_produced_a_result_does_not_meet_the_floor(store, monkeypatch):
+    """반대 검토 MEDIUM 6 — 표본 바닥(floor_met)은 결과를 낸 표본만 센다(전체와 영역마다). 거른 셀이 남은 대상에서 유일한 보충 표본이
+    끝내 실패하면 표본 0 이라 바닥에 못 미치고 완결의 '거름' 잔여가 막는다(종전에는 실패한 표본을 세어 floor_met 이 참, 95% 상한도
+    없어 막지 않았다). 그 표본은 '대기' 가 아니라 '실패' 로 센다."""
+    from app import closure
+
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    key = rig.target(store, ROSTER)
+    us = units.load_units(store, key)
+    bundles = [u["unit_id"] for u in us if u["kind"] == "bundle"]
+    fake = _fake(ROSTER)
+    _quiet(fake, *bundles)                                            # 회로(mem)만 걸러진다 — std 는 묶음에서 코드 신호가 관련이다
+    for u in us:
+        fake.noinput_q1[u["unit_id"]], fake.noinput_q2[u["unit_id"]] = ["no"], [""]
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]}))
+    monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 1)
+    fake.error_cells = {(MEM2, u): {"code": "no_rows", "message": "행이 없다(가짜)", "infra": False, "retryable": False}
+                        for u in bundles}
+    r.finish(rig.job(store, key, scope={"agents": [MEM2]}))
+    cells = [c for c in _cells(store, key) if c["agent_key"] == MEM2 and c["unit_id"] in bundles]
+    assert sorted(c["state"] for c in cells) == ["failed", "na_irrelevant", "na_irrelevant"]
+    audit = review_cells.closure_cells(store, key)["filtered"]["audit"]
+    assert (audit["sampled"], audit["pending"], audit["failed"], audit["n_audit"], audit["floor_met"]) == (0, 0, 1, 1, False)
+    residual = next(r for r in closure.residuals(store, key, closure.cell_counts(store, key)) if r["item"] == "filtered")
+    assert residual["blocking"] is True
+
+
+def test_the_job_end_top_up_reopens_cells_an_ended_job_filtered_and_stamps_them_with_its_own_job(store, monkeypatch):
+    """반대 검토 MEDIUM 7 — 잡 끝 보충 표본은 끝난(취소된) 잡이 거른 셀도 고른다 — 그 셀을 이 잡 id 로 찍어 이 잡이 끝까지 돌린다.
+    종전에는 제 잡이 거른 셀만 골라 앞 잡을 취소하면 거른 셀이 영영 거른 채였고(바닥 미달) 잔여가 확인 없이는 풀리지 않았다."""
+    from app import runner
+
+    key, first, kinds, r, gate, fake = _filtered_mid_job(store, monkeypatch)
+    b = kinds["boundary"]
+    runner.cancel_job(store, first, by=rig.OWNER)
+    gate.set()
+    r.loop.join(30)
+    r.finish(first)
+    assert rig.state(store, first) == "cancelled" and _cell(store, key, b, STD2)["state"] == "na_irrelevant"
+    second = rig.job(store, key, scope={"agents": [STD1]})
+    r.finish(second)
+    assert rig.state(store, second) == "completed"
+    cell = _cell(store, key, b, STD2)
+    assert (cell["state"], cell["route_forced"], cell["run_id"]) == ("reviewed", review_cells.FILTER_FLOOR, second)
+    assert review_cells.closure_cells(store, key)["filtered"]["audit"]["floor_met"] is True
+
+
+def test_a_crash_between_settling_a_sample_and_widening_loses_neither_the_result_nor_the_reopen(store, monkeypatch):
+    """반대 검토 MEDIUM 10 ① — 표본 셀의 결과(risk_miss)는 정산과 같은 트랜잭션에 적힌다. 넓힘(거른 셀 다시 열기) 직전에 죽어도 결과는
+    남고(불변식 G9 — 닫힌 표본 셀에 결과가 없으면 걸린다), 잡 끝이 넓힌 영역의 남은 거른 셀을 다시 연다."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    key = rig.target(store, ROSTER)
+    us = units.load_units(store, key)
+    bundles = [u["unit_id"] for u in us if u["kind"] == "bundle"]
+    fake = _fake(ROSTER)
+    _quiet(fake, *bundles)
+    for u in us:
+        fake.noinput_q1[u["unit_id"]], fake.noinput_q2[u["unit_id"]] = ["no"], [""]
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]}))
+    monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 1)
+    for u in bundles:
+        fake.noinput_q1[u] = ["yes"]                                  # 보충 표본이 끝까지 보면 영향 있음 — 놓친 걸림
+    real, crashed = review_cells.widen, []
+
+    def crash_once(*args, **kwargs):
+        if not crashed:
+            crashed.append(1)
+            raise RuntimeError("넓히기 직전에 죽었다(가짜)")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(review_cells, "widen", crash_once)
+    job_id = rig.job(store, key, scope={"agents": [MEM2]})
+    r.finish(job_id)
+    assert crashed and rig.state(store, job_id) == "completed"
+    cells = {c["unit_id"]: c for c in _cells(store, key) if c["agent_key"] == MEM2 and c["unit_id"] in bundles}
+    audited = [c for c in cells.values() if c["route_forced"] == review_cells.FILTER_FLOOR]
+    assert [c["sample_json"]["filter_audit"]["result"] for c in audited] == ["risk_miss"]
+    assert review_cells.review_invariants(store, key) == []
+    assert "mem" in review_cells.widened_domains(store, key)
+    assert {c["state"] for c in cells.values()} - {"reviewed"} <= {"pending"}            # 남은 거른 셀은 다시 열렸다
+    assert not any(c["state"] == "na_irrelevant" for c in cells.values())
+
+
+def test_a_closed_sample_cell_without_its_result_breaks_the_invariant(store, monkeypatch):
+    """불변식 G9(반대 검토 MEDIUM 10) — 닫힌(reviewed) 표본 셀에는 결과가 있다. 결과가 빠진 표본 셀(정산과 결과가 갈라진 원장)은
+    완결 몫의 불변식에 걸린다(넓힘 신호를 잃은 원장이 조용히 완결되지 않게)."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+
+    def setup(fake, kinds):
+        fake.noinput_q1 = {kinds["boundary"]: ["no"]}
+        fake.noinput_q2 = {kinds["boundary"]: [""]}
+
+    key, _job, _fake, _kinds = _run(store, fake_setup=setup)
+    audited = next(c for c in _cells(store, key) if c["route_forced"] == review_cells.FILTER_FLOOR)
+    assert audited["state"] in ("reviewed", "no_input") and audited["sample_json"]["filter_audit"]["result"]
+    store.execute("UPDATE rr_review_cells SET sample_json = json_set(sample_json, '$.filter_audit.result', json('null'))"
+                  " WHERE target_key = ? AND unit_id = ? AND agent_key = ?", (key, audited["unit_id"], audited["agent_key"]))
+    assert any("(G9)" in p for p in review_cells.review_invariants(store, key))
+
+
+def test_a_crash_between_writing_the_sweep_and_reopening_its_handoff_is_replayed_on_restart(store, monkeypatch):
+    """반대 검토 MEDIUM 10 ② — 훑기를 적은 뒤 그 넘김(h 줄)으로 거른 셀을 다시 열기 전에 죽어도, 다음 세션이 원장의 훑기를 다시 읽을 때
+    그 다시 열기를 이어 한다(거른 셀만 여므로 멱등)."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    roster = (*SMALL, {"key": "xd-syn-0", "domain": "xd", "relevance": 0.99}, {"key": "xd-syn-1", "domain": "xd", "relevance": 0.9})
+    real, crashed = review_cells.reopen_filtered, []
+
+    def crash_once(*args, **kwargs):
+        if kwargs.get("via") == "handoff" and not crashed:
+            crashed.append(1)
+            raise RuntimeError("넘김을 다시 열기 직전에 죽었다(가짜)")
+        return real(*args, **kwargs)
+
+    def setup(fake, kinds):
+        fake.handoff_to, fake.handoff_unit, fake.handoff_from = "std", kinds["boundary"], {"xd-syn-1"}
+        monkeypatch.setattr(review_cells, "reopen_filtered", crash_once)
+
+    key, _job, _fake, kinds = _run(store, roster, fake_setup=setup)
+    cell = _cell(store, key, kinds["boundary"], STD2)
+    assert crashed and (cell["state"], cell["route_forced"]) == ("reviewed", "handoff")
