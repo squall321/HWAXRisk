@@ -330,7 +330,8 @@ def test_q1_and_q2_rows_citing_a_context_line_are_kept_and_marked_never_dropped(
     assert store.query_one("SELECT COUNT(*) AS n FROM rr_findings WHERE target_key = ? AND source_kind = 'card_review'",
                            (key,))["n"] == 1
     text = expert_report.render_report_md(expert_report.load_report(store, key, MEM1), part="units")
-    assert "문맥 줄을 댔다" in text
+    assert "— 문맥 줄을 댔다(그 단위 소속 줄이 아니다)" in text                        # 영향 줄의 변경 줄 대조
+    assert "· 문맥 줄을 댔다(그 단위 소속 줄이 아니다)" in text                        # 확인할 것(q2) 줄
 
 
 def test_a_skipped_input_gap_cells_unknown_impact_goes_where_a_reviewed_cells_would(store):
