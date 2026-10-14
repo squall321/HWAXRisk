@@ -566,9 +566,10 @@ def test_another_experts_offcard_handoff_keeps_the_cell_it_arrives_before(store,
 
 
 def test_a_late_offcard_handoff_reopens_the_filtered_cell_at_job_end(store, monkeypatch):
-    """반대 검토 LOW 15 — 거른 뒤에 온 카드 밖 넘김: std 2순위가 경계 단위를 거른 뒤 mech 2순위의 카드 밖 호출이 그 단위를 std 로
-    넘긴다. 잡 끝(보충 표본 앞)이 그 셀을 다시 연다(handoff — 셀의 잡 결속은 그대로라 거른 잡의 셀이다). 그 전문가를 다시 범위로
-    잡은 잡이 다시 분류하면 7번 줄로 검토다. 자기 넘김은 세지 않으므로 다시 열린 셀이 다시 걸러져 잡 끝이 되풀이되지 않는다."""
+    """반대 검토 LOW 15 · 2차 MEDIUM 3 — 거른 뒤에 온 카드 밖 넘김: std 2순위가 경계 단위를 거른 뒤(앞 잡) mech 2순위의 카드 밖 호출이
+    그 단위를 std 로 넘긴다. 잡 끝(보충 표본 앞)이 그 셀을 다시 열고 셀과 그 전문가 머리를 지금 잡으로 찍는다 — 지금 잡이 그 셀을
+    다시 분류해 7번 줄로 검토한다(종전에는 거른 잡의 결속 그대로 pending 으로 남아 아무 잡도 돌리지 않았다). 자기 넘김은 세지 않으므로
+    다시 열린 셀이 다시 걸러져 잡 끝이 되풀이되지 않는다."""
     key, fake, kinds, r = _offcard_handoff_target(store, monkeypatch)
     b = kinds["boundary"]
     r.finish(rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]}))
@@ -579,11 +580,11 @@ def test_a_late_offcard_handoff_reopens_the_filtered_cell_at_job_end(store, monk
     r.finish(sender)
     assert rig.state(store, sender) == "completed"
     cell = _cell(store, key, b, STD2)
-    assert (cell["state"], cell["route"], cell["route_forced"], cell["reopened_n"]) == ("pending", None, "handoff", 1)
-    r.finish(rig.job(store, key, scope={"agents": [STD2]}))
-    cell = _cell(store, key, b, STD2)
-    assert (cell["state"], cell["route"], cell["route_forced"]) == ("reviewed", "review", "handoff")
+    assert (cell["state"], cell["run_id"], cell["route"], cell["route_forced"], cell["reopened_n"]) == (
+        "reviewed", sender, "review", "handoff", 1)
     assert cell["route_json"]["handoff"] == [{"from": MECH2, "why": OFFCARD_WHY}]
+    assert store.query_one("SELECT state, run_id FROM rr_expert_reports WHERE target_key = ? AND agent_key = ?",
+                           (key, STD2))["run_id"] == sender
     assert review_cells.review_invariants(store, key) == []
 
 
@@ -602,6 +603,13 @@ def test_an_experts_handoff_to_its_own_domain_never_reopens_its_own_filtered_cel
         "na_irrelevant", "filtered", [], 0)
     assert review_cells.handoffs(store, key) == [{"from": STD2, "unit_id": b, "to": "std",
                                                   "why": "훑기가 다른 영역의 몫으로 본 단위"}]
+    # 2차 MEDIUM 3 — 그 전문가의 다음 세션(다른 셀의 사람의 다시)이 원장의 훑기를 다시 읽어도 자기 넘김으로 제 셀을 다시 열지 않는다
+    other = next(c["unit_id"] for c in _cells(store, key) if c["agent_key"] == STD2 and c["state"] == "reviewed")
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[other, STD2]], force=True, reason="다른 셀을 다시 본다"),
+                                  ident=factories.ident(rig.OWNER))
+    r.finish(out["job"]["job_id"])
+    cell = _cell(store, key, b, STD2)
+    assert (cell["state"], cell["reopened_n"]) == ("na_irrelevant", 0)
 
 
 # ---------------------------------------------------------------- 재기동

@@ -1480,11 +1480,13 @@ class _Session:
 
     def _replay_handoffs(self) -> None:
         """늦은 넘김(C3-7) — 이 훑기가 넘긴 (단위, 영역)의 셀 가운데 이미 걸러진 것을 다시 연다(다시 분류되면 7번 줄로 검토다).
-        거른 셀만 여므로 멱등이다 — 훑기를 원장에서 다시 읽을 때도 부른다."""
+        거른 셀만 여므로 멱등이다 — 훑기를 원장에서 다시 읽을 때도 부른다. 제 셀은 빼고(자기 넘김은 7번 줄이 세지 않아 다시 걸러질
+        뿐이다), 다시 연 셀은 이 잡으로 찍는다(앞 잡의 셀이면 아무 잡도 돌리지 않는다 — 반대 검토 2차 MEDIUM 3)."""
         for handoff in self.sweep.get("handoffs") or ():
             if handoff.get("unit_id") and handoff.get("to"):
                 review_cells.reopen_filtered(self.store, self.target_key, via="handoff", domain=str(handoff["to"]),
-                                             unit_id=str(handoff["unit_id"]), now=self.now())
+                                             unit_id=str(handoff["unit_id"]), exclude_agent=self.agent, run_id=self.job_id,
+                                             now=self.now())
 
     # -- 거르기 분류(재설계 M3 C3-6) ----------------------------------------------------------------
     def _handoffs_to(self, domain: str) -> dict[str, list[dict]]:
@@ -2464,9 +2466,10 @@ class ReviewLoop:
         거른 셀을 거둔다(넓힘은 원장에서 유도된다 — 정산 뒤 넓힘 전에 죽었거나 분류와 엇갈린 셀, 반대 검토 MEDIUM 10 · LOW 16)
         · 다른 전문가가 넘긴 단위 · 영역의 남은 거른 셀도(카드 밖 넘김 — LOW 15). 이 잡이 이어 돌 셀이 생겼으면 그 수(0 이 아니면
         잡은 review 로 이어 돈다)."""
-        target_key = str(job["target_key"])
-        reaped = (review_cells.reopen_widened(self.store, target_key, now=self.clock())
-                  + review_cells.reopen_handed_off(self.store, target_key, now=self.clock()))
+        target_key, job_id = str(job["target_key"]), str(job["id"])
+        # 거둔 셀과 그 전문가 머리는 이 잡으로 찍는다 — 앞 잡의 결속 그대로면 아무 잡도 돌리지 않는다(반대 검토 2차 MEDIUM 3)
+        reaped = (review_cells.reopen_widened(self.store, target_key, run_id=job_id, now=self.clock())
+                  + review_cells.reopen_handed_off(self.store, target_key, run_id=job_id, now=self.clock()))
         if reaped and self._open_cells(job):
             return 1
         knobs = (job.get("params") or {}).get("knobs") or {}

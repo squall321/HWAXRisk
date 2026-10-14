@@ -614,10 +614,11 @@ def handoffs(store: Any, target_key: str) -> list[dict]:
             for r in rows if r["unit_id"] and r["dest"]]
 
 
-def reopen_handed_off(store: Any, target_key: str, *, now: int | None = None) -> int:
+def reopen_handed_off(store: Any, target_key: str, *, run_id: str | None = None, now: int | None = None) -> int:
     """다른 전문가가 넘긴(`h` 줄) 단위 · 영역의 남은 거른 셀을 다시 연다(handoff — 다시 분류되면 7번 줄로 검토다). 훑기의 늦은
     넘김은 훑기가 곧바로 다시 열지만 카드 밖 넘김은 잡 끝(보충 표본 앞)이 거둔다(반대 검토 LOW 15) — 원장에서 유도해 멱등이다.
-    자기 넘김은 세지 않는다(7번 줄이 세지 않으니 다시 걸러질 셀을 잡 끝마다 되풀이해 열지 않게). 다시 연 셀 수."""
+    자기 넘김은 세지 않는다(7번 줄이 세지 않으니 다시 걸러질 셀을 잡 끝마다 되풀이해 열지 않게). `run_id` 를 주면 다시 연 셀과 그
+    전문가 머리를 그 잡으로 찍는다(잡 끝의 거두기 — 지금 잡이 돌린다, 2차 MEDIUM 3). 다시 연 셀 수."""
     senders: dict[tuple[str, str], set[str]] = {}
     for h in handoffs(store, target_key):
         senders.setdefault((h["unit_id"], h["to"]), set()).add(h["from"])
@@ -626,7 +627,7 @@ def reopen_handed_off(store: Any, target_key: str, *, now: int | None = None) ->
     cells = [(r["unit_id"], r["agent_key"]) for r in store.query(
         "SELECT unit_id, agent_key, domain FROM rr_review_cells WHERE target_key = ? AND state = 'na_irrelevant'", (target_key,))
              if senders.get((r["unit_id"], r["domain"]), set()) - {r["agent_key"]}]
-    return len(reopen_filtered(store, target_key, via="handoff", cells=cells, now=now)) if cells else 0
+    return len(reopen_filtered(store, target_key, via="handoff", cells=cells, run_id=run_id, now=now)) if cells else 0
 
 
 def widened_domains(store: Any, target_key: str) -> list[str]:
@@ -666,7 +667,7 @@ def filter_off(store: Any, target_key: str) -> bool:
 def reopen_filtered(store: Any, target_key: str, *, via: str, domain: str | None = None, unit_id: str | None = None,
                     cells: Sequence[tuple[str, str]] | None = None, picked_by: Mapping[tuple[str, str], str] | None = None,
                     scores: Mapping[tuple[str, str], float] | None = None, run_id: str | None = None,
-                    now: int | None = None) -> list[tuple[str, str]]:
+                    exclude_agent: str | None = None, now: int | None = None) -> list[tuple[str, str]]:
     """거른 셀(na_irrelevant · route filtered)을 다시 연다(na_irrelevant → pending · reopened_n + 1) — 다시 연 (unit_id, agent_key).
 
     `via` — widened(그 영역의 표본·그림자가 걸림을 놓쳤다) · filter_off(넓힌 영역이 셋 이상) · handoff(늦게 온 넘김) 는 분류 칸
@@ -674,7 +675,8 @@ def reopen_filtered(store: Any, target_key: str, *, via: str, domain: str | None
     `route='audit'` · `route_forced='filter_floor'` 와 `sample_json.filter_audit{score, picked_by, result:null}` 을 적어 다시 분류하지
     않는다. 셀의 잡 결속(run_id)은 그대로다 — 그 잡이 살아 있으면 그 잡이 돌린다. `run_id` 를 주면 그 잡으로 셀과 그 전문가
     머리를 찍는다(잡 끝 보충 표본이 끝난 잡의 거른 셀을 제 잡으로 돌린다 — 반대 검토 MEDIUM 7). 그 전문가 머리 ready·partial 은 planned 로.
-    고르는 칸은 `domain`·`unit_id`·`cells` 가운데 준 것(AND)이다. 부른 쪽 트랜잭션에 들어간다."""
+    고르는 칸은 `domain`·`unit_id`·`cells` 가운데 준 것(AND)이고, `exclude_agent` 의 셀은 뺀다(자기 넘김 — 7번 줄이 세지 않는다,
+    반대 검토 2차 MEDIUM 3). 부른 쪽 트랜잭션에 들어간다."""
     if via not in REOPEN_VIAS:
         raise ValueError(f"via 는 {REOPEN_VIAS} 가운데 하나다 — {via!r}")
     now = now_epoch() if now is None else now
@@ -685,6 +687,9 @@ def reopen_filtered(store: Any, target_key: str, *, via: str, domain: str | None
     if unit_id is not None:
         where.append("unit_id = ?")
         params.append(unit_id)
+    if exclude_agent is not None:
+        where.append("agent_key <> ?")
+        params.append(exclude_agent)
     rows = [dict(r) for r in store.query(f"SELECT unit_id, agent_key, sample_json FROM rr_review_cells WHERE {' AND '.join(where)}"
                                          " ORDER BY agent_key, unit_seq", params)]
     if cells is not None:
@@ -720,13 +725,14 @@ def reopen_filtered(store: Any, target_key: str, *, via: str, domain: str | None
     return opened
 
 
-def reopen_widened(store: Any, target_key: str, *, now: int | None = None) -> int:
+def reopen_widened(store: Any, target_key: str, *, run_id: str | None = None, now: int | None = None) -> int:
     """넓힌 영역(대상 전체 끔이면 전부)의 남은 거른 셀을 다시 연다 — 넓힘은 원장에서 유도되므로 정산 뒤 widen 전에 죽었거나(반대
-    검토 MEDIUM 10) 분류와 넓힘이 엇갈려(LOW 16) 남은 셀을 잡 끝(보충 표본 앞)이 거둔다. 다시 연 셀 수."""
+    검토 MEDIUM 10) 분류와 넓힘이 엇갈려(LOW 16) 남은 셀을 잡 끝(보충 표본 앞)이 거둔다. `run_id` 를 주면 다시 연 셀과 그 전문가
+    머리를 그 잡으로 찍는다(2차 MEDIUM 3 — 앞 잡의 결속 그대로면 아무 잡도 돌리지 않는다). 다시 연 셀 수."""
     now = now_epoch() if now is None else now
     if filter_off(store, target_key):
-        return len(reopen_filtered(store, target_key, via="filter_off", now=now))
-    return sum(len(reopen_filtered(store, target_key, via="widened", domain=d, now=now))
+        return len(reopen_filtered(store, target_key, via="filter_off", run_id=run_id, now=now))
+    return sum(len(reopen_filtered(store, target_key, via="widened", domain=d, run_id=run_id, now=now))
                for d in widened_domains(store, target_key))
 
 
