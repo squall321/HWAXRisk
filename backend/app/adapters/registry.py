@@ -13,6 +13,7 @@ from app.adapters import ecad_stub, mcad
 from app.adapters.base import (
     GATEWAY_REST_SITES,
     CallRecorder,
+    FallbackRestClient,
     GatewayRestClient,
     IrAdapter,
     Principal,
@@ -393,9 +394,12 @@ def clients_from_settings(settings, secrets: Mapping[str, str] | None = None, *,
                                    headers={"Authorization": f"Bearer {token}"},
                                    client=http_client, timeout=timeout)
     if rest_kind == "user_pat_gateway":
+        # 다리가 그 호출을 못 읽으면 서비스 PAT(있으면)로 그 호출을 다시 읽는다(BEH-2) — 실제로 쓴 자격은 rest 의 used 가 안다.
         rest_token = None
-        rest_client: RestGetClient = GatewayRestClient(config.gateway_rest_base(settings), gateway_pat,
-                                                       client=http_client, timeout=timeout)
+        bridge = GatewayRestClient(config.gateway_rest_base(settings), gateway_pat, client=http_client, timeout=timeout)
+        fallback = (RestGetClient(getattr(settings, "heax_base", ""), service, client=http_client, timeout=timeout)
+                    if service else None)
+        rest_client: Any = FallbackRestClient(bridge, fallback)
     else:
         rest_token = heax_token if rest_kind == "caller_token" else service
         rest_client = RestGetClient(getattr(settings, "heax_base", ""), rest_token, client=http_client, timeout=timeout)

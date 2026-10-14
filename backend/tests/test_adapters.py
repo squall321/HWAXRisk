@@ -365,6 +365,66 @@ def test_the_gateway_bridge_takes_only_a_usable_pat_that_names_the_site():
         assert pat is None and words in why and got == code, (bad, why, got)
 
 
+def _bridge_box(tmp_path, *, bridge, service=200, service_pat: str | None = "service-pat"):
+    """다리(gw.test /api/step-forge)는 `bridge`(None 이면 연결 오류), 소스 앱(heax.test)은 `service` 로 답하는 캡처 채널."""
+    import types
+
+    seen: list[tuple[str, str | None]] = []
+    state = {"bridge": bridge, "service": service}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.host, request.headers.get("authorization")))
+        if request.url.host == "gw.test":
+            if state["bridge"] is None:
+                raise httpx.ConnectError("gateway down", request=request)
+            return httpx.Response(state["bridge"], json={"via": "bridge"})
+        return httpx.Response(state["service"], json={"via": "service"})
+
+    settings = types.SimpleNamespace(gateway_mcp="https://gw.test/mcp", heax_base="https://heax.test", data_dir=tmp_path)
+    secrets = {"HWAXRISK_HEAX_SERVICE_PAT": service_pat} if service_pat else {}
+    channels = adapters_registry.clients_from_settings(
+        settings, secrets, gateway_pat="user-pat", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert channels["rest_credential"] == "user_pat_gateway"
+    return channels["rest"], seen, state
+
+
+TREE = "/apps/step_forge/api/projects/x/tree"
+BRIDGE, SERVICE = ("gw.test", "Bearer user-pat"), ("heax.test", "Bearer service-pat")
+
+
+def test_a_bridge_call_that_fails_is_read_again_with_the_service_pat(tmp_path):
+    """② 다리가 2xx 가 아니면 그 호출을 ③ 서비스 PAT 로 다시 읽는다(BEH-2) — 종전에는 다리 하나뿐이라 다리가 거절하면 서비스 PAT 가
+    있어도 REST 가 통째로 죽었다. 쓴 자격의 순서(used)와 처음 실패한 다리의 HTTP 상태(bridge_failure)가 남는다."""
+    rest, seen, state = _bridge_box(tmp_path, bridge=403)
+    assert rest.get(TREE) == {"ok": True, "result": {"via": "service"}, "http_status": 200}
+    assert seen == [BRIDGE, SERVICE]
+    assert rest.used == ["user_pat_gateway", "service_pat"]
+    assert rest.bridge_failure == {"http_status": 403, "error": "http_403"}
+    # HTTP 거절은 호출마다 다시 묻는다(그 경로만의 거절일 수 있다) — 다리가 읽으면 다리로 읽는다.
+    state["bridge"] = 200
+    seen.clear()
+    assert rest.get(TREE)["result"] == {"via": "bridge"} and seen == [BRIDGE]
+    # 다리가 전송 오류면 그 캡처의 남은 호출은 다리를 건너뛴다 — 죽은 다리를 호출마다 기다리지 않는다. 처음 실패가 남는다.
+    state["bridge"] = None
+    seen.clear()
+    assert rest.get(TREE)["ok"] and rest.get(TREE)["ok"]
+    assert seen == [BRIDGE, SERVICE, SERVICE]
+    assert rest.bridge_failure == {"http_status": 403, "error": "http_403"}
+
+
+def test_a_bridge_failure_without_a_way_out_says_which_credential_failed(tmp_path):
+    """서비스 PAT 가 없으면 다리의 실패를 그대로 돌려주되 다리임을 말한다. 둘 다 실패하면 두 시도를 함께 말한다."""
+    rest, seen, _ = _bridge_box(tmp_path, bridge=403, service_pat=None)
+    reply = rest.get(TREE)
+    assert (reply["ok"], reply["http_status"], reply["error"]) == (False, 403, "user_pat_gateway http_403")
+    assert seen == [BRIDGE] and rest.used == ["user_pat_gateway"] and rest.available is True
+    rest, seen, _ = _bridge_box(tmp_path, bridge=502, service=401)
+    reply = rest.get(TREE)
+    assert (reply["ok"], reply["http_status"]) == (False, 401)
+    assert reply["error"] == "service_pat http_401 (앞서 user_pat_gateway http_502)"
+    assert seen == [BRIDGE, SERVICE] and rest.bridge_failure["http_status"] == 502
+
+
 def test_a_source_call_that_times_out_names_the_limit_and_the_knob():
     """침묵 한도에 걸린 호출은 호출 행에 값과 손잡이를 남긴다 — 'transport_error' 만으로는 어느 한도인지 모른다."""
     def silent(request: httpx.Request) -> httpx.Response:

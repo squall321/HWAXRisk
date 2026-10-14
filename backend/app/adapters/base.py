@@ -173,6 +173,64 @@ class GatewayRestClient(RestGetClient):
         return f"{self.base_url}/api/{GATEWAY_REST_SITES[parts[2]]}/{parts[3]}"
 
 
+class FallbackRestClient:
+    """② 게이트웨이 REST 다리를 먼저 부르고, 그 호출이 2xx 가 아니거나 전송 오류면 **그 호출을** ③ 서비스 PAT 로 다시 읽는다(리스크 앱
+    사람 자격 R2 · BEH-2). 종전에는 다리를 고르면 다리 하나뿐이라, 다리가 거절하면 서비스 PAT 가 있는 박스에서도 REST 가 통째로 죽어
+    G6 이 unit_unknown 이었다.
+
+    다리가 전송 오류(닿지 않음·시간 초과)를 내면 그 캡처의 남은 호출은 다리를 건너뛴다 — 죽은 다리를 호출마다 기다리면 실패 시간만
+    쌓인다. HTTP 거절은 호출마다 다시 묻는다(그 경로만의 404 일 수 있다). 넘어갈 곳이 없으면 다리의 실패를 그대로 돌려주되 호출 행의
+    error 앞에 다리임을 붙인다. 처음 실패한 다리 호출의 HTTP 상태·오류는 `bridge_failure` 에, 실제로 답을 받으러 간 자격의 순서는
+    `used` 에 남는다(캡처 응답 credentials.rest·rest_bridge, 캡처 잡의 error_json.rest_bridge).
+    """
+
+    def __init__(self, primary: RestGetClient, fallback: RestGetClient | None, *,
+                 primary_kind: str = "user_pat_gateway", fallback_kind: str = "service_pat") -> None:
+        self.primary = primary
+        self.fallback = fallback if fallback is not None and fallback.available else None
+        self.primary_kind, self.fallback_kind = primary_kind, fallback_kind
+        self.bridge_failure: dict | None = None
+        self.used: list[str] = []
+        self._skip_primary = False
+
+    @property
+    def available(self) -> bool:
+        return self.primary.available or self.fallback is not None
+
+    @property
+    def timeout(self) -> float | httpx.Timeout:
+        return self.primary.timeout
+
+    def _mark(self, kind: str) -> None:
+        if kind not in self.used:
+            self.used.append(kind)
+
+    def get(self, path: str, params: Mapping[str, Any] | None = None) -> dict:
+        bridge: dict | None = None
+        if not self._skip_primary:
+            self._mark(self.primary_kind)
+            bridge = self.primary.get(path, params)
+            if bridge.get("ok"):
+                return bridge
+            if self.bridge_failure is None:
+                self.bridge_failure = {"http_status": bridge.get("http_status"), "error": str(bridge.get("error"))}
+            if self.fallback is None:
+                return {**bridge, "error": f"{self.primary_kind} {bridge.get('error')}"}
+            if bridge.get("http_status") is None:
+                self._skip_primary = True          # 넘어갈 곳이 있을 때만 선다
+        self._mark(self.fallback_kind)
+        reply = self.fallback.get(path, params)
+        if reply.get("ok"):
+            return reply
+        before = (bridge or {}).get("error") or (self.bridge_failure or {}).get("error")
+        return {**reply, "error": f"{self.fallback_kind} {reply.get('error')} (앞서 {self.primary_kind} {before})"}
+
+    def close(self) -> None:
+        self.primary.close()
+        if self.fallback is not None:
+            self.fallback.close()
+
+
 def tool_matches(name: str, want: str) -> bool:
     """게이트웨이는 이름 충돌 시 `backend_key.replace('-','')+'_'` 접두를 양쪽에 붙인다 — suffix 로 맞춘다(recon §4 8항)."""
     return name == want or name.endswith(f"_{want}")

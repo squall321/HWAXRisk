@@ -503,11 +503,31 @@ FIX_BRIDGE_AUDIENCE = ("포털 토큰 화면에서 step-forge 를 포함한(모�
                        " 호출에서 이 앱에 등록된 PAT 가 저절로 바뀐다")
 
 
-def _fix_gate_blocked(reason: str | None, project_id: str, *, rest_code: str | None = None) -> str:
+def bridge_failure_text(bridge: dict) -> str:
+    """게이트웨이 REST 다리가 마지막 캡처에서 실패한 것 — HTTP 상태(전송 오류면 그 오류)와 무엇을 볼지."""
+    status = bridge.get("http_status")
+    got = f"HTTP {status} 으로 답했다" if status else f"닿지 못했다({bridge.get('error')})"
+    return (f"마지막 캡처에서 게이트웨이 REST 다리(step-forge)가 {got} — 401·403 이면 그 사람의 PAT·포털 권한을, 404 면 게이트웨이의"
+            " step-forge 사이트를, 5xx·전송 오류면 게이트웨이·StepForge 가 살아 있는지를 본다. 서비스 자격(HWAXRISK_HEAX_SERVICE_PAT)이"
+            " 있으면 그 호출은 그것으로 다시 읽는다")
+
+
+def last_bridge_failure(snapshot_jobs: list[dict], snapshot_id: str | None = None) -> dict | None:
+    """캡처 잡이 남긴 다리 실패(error_json.rest_bridge — REST 를 끝내 못 읽은 캡처만 남긴다). `snapshot_id` 를 주면 그 스냅샷을 낸
+    가장 최근 잡, 아니면 가장 최근 잡(실패한 캡처 포함)이다. `snapshot_jobs` 는 최신이 앞이다(_snapshot_jobs)."""
+    job = next((j for j in snapshot_jobs if snapshot_id is None or j.get("snapshot_id") == snapshot_id), None)
+    bridge = ((job or {}).get("error") or {}).get("rest_bridge")
+    return bridge if isinstance(bridge, dict) else None
+
+
+def _fix_gate_blocked(reason: str | None, project_id: str, *, rest_code: str | None = None,
+                      bridge: dict | None = None) -> str:
     """G6 차단의 고칠 곳. unit_unknown 이면 REST 를 읽을 길을 말한다 — `rest_code` 는 위임 호출이 게이트웨이 REST 다리를 못 쓰는
-    까닭(adapters.registry.GATEWAY_PAT_*)이고 그에 따라 고칠 길이 다르다."""
+    까닭(adapters.registry.GATEWAY_PAT_*)이고 그에 따라 고칠 길이 다르다. `bridge` 는 그 캡처에서 다리가 실패한 HTTP 상태다(BEH-2)."""
     if reason == state_module.UNKNOWN_BLOCKING_REASON:
-        if rest_code == adapters_registry.GATEWAY_PAT_NO_SITE_AUDIENCE:
+        if bridge:
+            how = bridge_failure_text(bridge) + ". 고친 뒤 risk_capture_snapshot 을 다시 부른다."
+        elif rest_code == adapters_registry.GATEWAY_PAT_NO_SITE_AUDIENCE:
             how = ("그 사람의 등록된 포털 PAT 에 step-forge 청중이 없어 게이트웨이 REST 다리가 닫혀 있다 — " + FIX_BRIDGE_AUDIENCE
                    + ". 그 뒤 risk_capture_snapshot 을 다시 부른다.")
         else:
@@ -575,6 +595,10 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
     creds = _credentials(store, ident, owner)
     facts: dict[str, Any] = {"sources": sources, "snapshots": snapshots,
                              "snapshot_jobs": _snapshot_jobs(store, project_id), "credentials": creds}
+    # 마지막 캡처에서 다리를 골랐는데 다리도 서비스 PAT 도 REST 를 못 읽었으면 그 HTTP 상태를 말한다(BEH-2).
+    last_bridge = last_bridge_failure(facts["snapshot_jobs"])
+    if last_bridge and creds["capture_rest"] == "user_pat_gateway":
+        creds["capture_rest_note"] = bridge_failure_text(last_bridge)
     blocked: list[dict] = [refusal] if refusal else []
     notes: list[str] = []
     web = web_paths(project_id=project_id)
@@ -629,7 +653,8 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
     latest = snapshots[0]
     if latest["blocked_reason"]:
         blocked.append(_blocked("gate_blocked", "최신 스냅샷이 G6(단위·크기)으로 막혔다 — 변경 비교도 심사 대상도 열리지 않는다.",
-                                _fix_gate_blocked(latest["blocked_reason"], project_id, rest_code=creds["capture_rest_code"]),
+                                _fix_gate_blocked(latest["blocked_reason"], project_id, rest_code=creds["capture_rest_code"],
+                                                  bridge=last_bridge_failure(facts["snapshot_jobs"], latest["id"])),
                                 reason=latest["blocked_reason"],
                                 snapshot_id=latest["id"]))
         blocked.extend(capture_blockers)
@@ -666,7 +691,8 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
         facts["pair"] = {"base_snapshot_id": base["id"], "target_snapshot_id": latest["id"]}
         if base["blocked_reason"]:
             blocked.append(_blocked("gate_blocked", "비교의 앞 스냅샷이 G6 으로 막혀 변경 비교를 만들 수 없다.",
-                                    _fix_gate_blocked(base["blocked_reason"], project_id, rest_code=creds["capture_rest_code"]),
+                                    _fix_gate_blocked(base["blocked_reason"], project_id, rest_code=creds["capture_rest_code"],
+                                                      bridge=last_bridge_failure(facts["snapshot_jobs"], base["id"])),
                                     reason=base["blocked_reason"], snapshot_id=base["id"]))
             return answer("diff", [])
         diff = store.query_one(

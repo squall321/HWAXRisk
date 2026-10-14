@@ -408,6 +408,71 @@ def test_a_bridge_closed_for_lack_of_step_forge_says_to_issue_a_new_pat_not_to_c
     assert "HWAXRISK_HEAX_SERVICE_PAT" in blocked["gate_blocked"]["fix"]
 
 
+def wire_bridge(box, apps: FakeSourceApps, bridge: dict) -> None:
+    """실제 clients_from_settings 로 채널을 만든다 — 게이트웨이 REST 다리(gw.test /api/step-forge)는 bridge["status"] 로 답하고,
+    소스 앱 REST 는 가짜 StepForge(서비스 PAT 만 받는다), MCP 폴백은 가짜 앱의 것이다."""
+    real = adapters_registry.clients_from_settings
+
+    def route(request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/api/step-forge/"):
+            bridge["seen"].append(request.headers.get("authorization"))
+            return httpx.Response(bridge["status"], json={"detail": "denied"})
+        return apps._rest_handler(request)
+
+    def channels(settings, secrets=None, *, portal_pat=None, heax_token=None, gateway_pat=None, **_):
+        out = real(settings, secrets, heax_token=heax_token, gateway_pat=gateway_pat,
+                   http_client=httpx.Client(transport=httpx.MockTransport(route)))
+        fake = apps.channels()
+        fake["rest"].close()
+        out["mcp"] = fake["mcp"]
+        return out
+
+    box.monkeypatch.setattr(adapters_registry, "clients_from_settings", channels)
+
+
+def test_a_rejected_bridge_call_falls_through_to_the_service_pat_and_the_capture_says_so(box):
+    """위임 캡처의 다리가 거절해도 서비스 PAT 가 있으면 그 호출을 서비스 PAT 로 읽어 G6 이 막히지 않는다(BEH-2). 캡처 응답은 두 시도를
+    잇고(user_pat_gateway→service_pat) 다리의 HTTP 상태를 싣는다."""
+    act_as(box, OWNER)
+    apps = FakeSourceApps()
+    bridge = {"status": 403, "seen": []}
+    wire_bridge(box, apps, bridge)
+    write_secrets(box, HWAXRISK_HEAX_SERVICE_PAT="service-pat")
+    pat = register_jwt(box, OWNER, ["mcp-gateway", "step-forge"])
+    pid = call("risk_create_project", code="FALL", name="다리 거절", classification="internal")["id"]
+    call("risk_add_source", project_id=pid, kind="mcad", ref=SOURCE_REFS["mcad"])
+    snap = call("risk_capture_snapshot", project_id=pid)
+    assert bridge["seen"] and set(bridge["seen"]) == {f"Bearer {pat}"}
+    assert snap["blocked"] is False and snap["credentials"]["rest"] == "user_pat_gateway→service_pat"
+    assert snap["credentials"]["rest_bridge"] == {"http_status": 403, "error": "http_403"}
+    out = call("risk_next_step", project_id=pid)
+    assert out["facts"]["credentials"]["capture_rest_note"] is None          # 끝내 읽었다 — 말할 실패가 없다
+
+
+def test_when_the_bridge_and_everything_after_it_fail_the_g6_fix_names_the_bridge_status(box):
+    """다리가 거절하고 넘어갈 서비스 PAT 도 없으면 mcad 가 MCP 폴백으로 읽혀 G6 이 unit_unknown 이다 — 그때 G6 고칠 곳과
+    capture_rest_note 가 다리의 HTTP 상태를 말한다(무엇을 볼지와 함께)."""
+    act_as(box, OWNER)
+    apps = FakeSourceApps()
+    bridge = {"status": 401, "seen": []}
+    wire_bridge(box, apps, bridge)
+    register_jwt(box, OWNER, ["mcp-gateway", "step-forge"])
+    pid = call("risk_create_project", code="NOWAY", name="다리 막힘", classification="internal")["id"]
+    call("risk_add_source", project_id=pid, kind="mcad", ref=SOURCE_REFS["mcad"])
+    snap = call("risk_capture_snapshot", project_id=pid)
+    assert snap["blocked"] is True and snap["credentials"]["rest"] == "user_pat_gateway"
+    assert snap["credentials"]["rest_bridge"]["http_status"] == 401
+    out = call("risk_next_step", project_id=pid)
+    assert out["facts"]["credentials"]["capture_rest"] == "user_pat_gateway"
+    note = out["facts"]["credentials"]["capture_rest_note"]
+    assert "HTTP 401" in note and "게이트웨이 REST 다리" in note
+    blocked = {b["code"]: b for b in out["blocked"]}
+    assert blocked["gate_blocked"]["reason"] == "unit_unknown" and "HTTP 401" in blocked["gate_blocked"]["fix"]
+    assert f"#/projects/{pid}" in blocked["gate_blocked"]["fix"]
+    job = box.store.query_one("SELECT error_json FROM rr_snapshot_jobs WHERE snapshot_id = ?", (snap["snapshot_id"],))
+    assert json.loads(job["error_json"])["rest_bridge"] == {"http_status": 401, "error": "http_401"}
+
+
 # ---------------------------------------------------------------- 게이트웨이 길에 REST 자격이 없는 박스
 def test_without_a_rest_credential_the_claude_capture_is_blocked_and_says_where_to_capture(box):
     """위임 신원에는 heax 토큰이 없다 — 서비스 PAT 가 없는 박스에서 mcad 는 MCP 폴백으로 읽혀 G6 이 unit_unknown 으로 막는다.

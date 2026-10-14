@@ -1715,8 +1715,10 @@ def create_snapshot(project_id: str, body: SnapshotBody,
             tool_names=channels.get("tool_names") or ())
     except AppError as exc:
         # 캡처가 통째로 실패해도 잡 행은 남는다 — 그 잡의 호출 원문은 snapshot_id NULL 로 보존된다.
-        _snapshot_job_finish(store, job_id, state="failed", started=started,
-                             error={"stage": "capture", "message": exc.message, "code": exc.code})
+        failure = {"stage": "capture", "message": exc.message, "code": exc.code}
+        if getattr(channels["rest"], "bridge_failure", None):
+            failure["rest_bridge"] = channels["rest"].bridge_failure
+        _snapshot_job_finish(store, job_id, state="failed", started=started, error=failure)
         raise
     finally:
         # 채널은 자기 httpx.Client 를 소유한다 — 닫지 않으면 스냅샷 요청마다 소켓이 샌다(roster.fetch_for_target 과 같은 처리).
@@ -1749,10 +1751,16 @@ def create_snapshot(project_id: str, body: SnapshotBody,
         context=captured.get("context"),
         snapshot_id=captured["snapshot_id"], derived_from=prior["id"] if prior else None)
     state = "partial" if (out.get("partial") or failed_calls) else "done"
+    # 게이트웨이 REST 다리가 실패하고 REST 호출도 끝내 실패했으면(서비스 PAT 로도 못 읽었다) 다리의 HTTP 상태를 잡 행에 남긴다 —
+    # 길잡이가 G6 고칠 곳·capture_rest_note 에 싣는다(BEH-2). 서비스 PAT 로 읽어 냈으면 캡처 응답에만 남는다.
+    bridge_failure = getattr(channels["rest"], "bridge_failure", None)
+    partial_error = None
+    if failed_calls:
+        partial_error = {"stage": "capture_partial", "failed_calls": [c.get("tool") for c in failed_calls]}
+        if bridge_failure and any(c.get("channel") == "rest" for c in failed_calls):
+            partial_error["rest_bridge"] = bridge_failure
     _snapshot_job_finish(store, job_id, state=state, snapshot_id=out["snapshot_id"], started=started,
-                         calls=len(calls), calls_failed=len(failed_calls),
-                         error={"stage": "capture_partial",
-                                "failed_calls": [c.get("tool") for c in failed_calls]} if failed_calls else None)
+                         calls=len(calls), calls_failed=len(failed_calls), error=partial_error)
     # 재사용이면 남의 스냅샷이다 — 이번 잡의 부분 여부를 거기에 덮어쓰면 완주했던 스냅샷이 부분으로 바뀐다.
     # 잡→스냅샷 연결은 rr_snapshot_jobs 에 이미 있고(여러 잡이 한 스냅샷을 재사용한다), 스냅샷의 job_id 는
     # 자기를 만든 잡을 가리켜야 한다.
@@ -1760,9 +1768,13 @@ def create_snapshot(project_id: str, body: SnapshotBody,
         store.execute("UPDATE rr_snapshots SET job_id = ?, capture_partial = ? WHERE id = ?",
                       (job_id, 1 if state == "partial" else 0, out["snapshot_id"]))
     # 이 캡처가 어느 자격으로 읽었나 — MCP 는 user(본인 포털 PAT) · service(서비스 PAT — 짧은 캡처 호출이라 내려간다, U-3) · None,
-    # REST 는 caller_token · user_pat_gateway · service_pat · None(R2).
+    # REST 는 caller_token · user_pat_gateway · service_pat · None(R2)이고, 다리가 실패해 서비스 PAT 로 넘어갔으면 두 시도를 잇는다
+    # (user_pat_gateway→service_pat). 다리가 실패했으면 rest_bridge{http_status, error} 가 함께 있다(BEH-2).
+    rest_used = getattr(channels["rest"], "used", None)
     credentials = {"mcp": "user" if portal_pat else ("service" if channels.get("portal_pat") else None),
-                   "rest": channels.get("rest_credential")}
+                   "rest": "→".join(rest_used) if rest_used else channels.get("rest_credential")}
+    if bridge_failure:
+        credentials["rest_bridge"] = bridge_failure
     return {**out, "job_id": job_id, "job_state": state, "calls_reused": reused, "credentials": credentials}
 
 
