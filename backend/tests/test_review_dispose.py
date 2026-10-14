@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from app import config, expert_report, identity, planner, review_cells, routes
+from app import closure, config, expert_report, identity, planner, review_cells, routes
 from app.errors import AppError
 from tests import factories
 from tests.synth import fake_review_engine as fre
@@ -214,8 +214,12 @@ def test_skip_needs_a_reason_and_the_expert_closes_again_with_the_skip_in_the_re
     for reason in ("", "짧다"):
         assert _refused(routes.post_cells_skip, key, routes.CellsSkipBody(filter={"job_id": job_id}, reason=reason),
                         ident=ME).code == "reason_required"
+    assert closure.cached(store, key) is None
     out = routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": job_id}, reason="입력이 와야 본다"), ident=ME)
     assert (out["skipped"], out["job"]["action"], out["job"]["calls_estimate"]["high"]) == (1, "created", 0)
+    # 처분은 완결 판정 캐시를 새로 쓴다 — 넘긴 셀이 셈과 잔여에 들어 있다(M3 병합 메모 3)
+    cached = closure.cached(store, key)
+    assert cached["status_counts"]["skipped"] == 1 and "skipped" in [q["item"] for q in cached["qualifiers"]]
     cell = _cells(store, key, PEER)[unit_ids[0]]
     assert (cell["state"], cell["decided_by"], cell["decide_note"]) == ("skipped", OWNER, "입력이 와야 본다")
     calls = len(fake.calls("run"))

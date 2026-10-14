@@ -349,6 +349,10 @@ def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Ma
                    "keys_sha": sha256_hex(canonical_json(keys))[:16], "keys": keys[:DISPOSE_AUDIT_KEYS],
                    "job": out["job"]},
             reason=note, channel=channel, actor_verified=actor_verified)
+    # 셀 상태가 바뀌었다 — 완결 판정 캐시(레벨·잔여 표기)를 새로 쓴다(M3 S3-8 · 병합 메모 3). 패널 대상이면 아무것도 쓰지 않는다.
+    from app import closure  # noqa: PLC0415 — closure 는 등록부·품질을 읽어 무겁다.
+
+    closure.refresh(store, target_key)
     return out
 
 

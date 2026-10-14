@@ -3056,6 +3056,8 @@ def post_undefer(target_key: str, body: UndeferBody, ident: identity.Identity = 
     channel = AUDIT_CHANNELS.get(ident.source, "rest")
     out = planner.undefer(store, target_key, decided_by=email, reason=reason, channel=channel,
                           actor_verified=channel != "mcp")
+    if out["undeferred"]:
+        closure_module.refresh(store, target_key)   # 카드 대조 대상이면 완결 캐시를 새로 쓴다(패널 대상은 아무것도 쓰지 않는다)
     level = registry_module.close_level(store, target_key, persist=False)
     return {"target_key": target_key, "undeferred": out["undeferred"], "agents": out["agents"][:UNDEFER_LIST_MAX],
             "agents_total": len(out["agents"]), "changed": bool(out["undeferred"]), "level": level["level"],
