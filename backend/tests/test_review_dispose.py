@@ -5,10 +5,12 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 import json
 
 import pytest
 
+import app.mcp_server as srv
 from app import closure, config, expert_report, identity, planner, review_cells, routes
 from app.errors import AppError
 from tests import factories
@@ -310,12 +312,33 @@ def test_risk_job_action_retries_and_skips_the_jobs_failed_cells_for_a_delegated
     assert _call("risk_job_action", job_id="no-such-job", action="retry_failed")["error"] == "not_visible"   # 남의 잡과 같은 답(C3-13)
 
 
+def test_risk_job_action_retry_carries_the_humans_consent_like_rest(store, monkeypatch):
+    """반대 검토 MEDIUM 13(사용자 결정) — Claude 의 다시가 세울 잡이 동의 문턱을 넘으면 consent_required 인데 동의를 실을 칸이 없어
+    길잡이가 내민 다시가 끝내 막혔다. risk_job_action 의 consent 는 REST 와 같은 뜻이다 — 없으면 아무것도 바꾸기 전에 거절, 있으면
+    잡이 서고 그 잡에 동의(consent_source mcp)가 남는다. 도구 설명은 사람이 동의한 뒤에만 true 라고 말하고, 길잡이는 채워 주지 않는다."""
+    key, job_id, unit_ids, _fake, _r = _failed_target(store)
+    factories.act_as_delegate(monkeypatch, OWNER)
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_consent_calls=0))
+    assert "consent" in inspect.signature(srv.risk_job_action).parameters
+    assert "consent=true" in (srv.risk_job_action.__doc__ or "")
+    assert _call("risk_job_action", job_id=job_id, action="retry_failed")["error"] == "consent_required"
+    for action, extra in (("skip_failed", {"reason": "동의는 넘김의 칸이 아니다"}), ("pause", {})):
+        assert _call("risk_job_action", job_id=job_id, action=action, consent=True, **extra)["error"] == "E100", action
+    assert _cells(store, key, PEER)[unit_ids[0]]["state"] == "failed" and _audits(store, "cells.retry") == []
+    out = _call("risk_job_action", job_id=job_id, action="retry_failed", consent=True)
+    assert (out["retried"], out["job"]["action"]) == (1, "created")
+    params = json.loads(rig.job_row(store, out["job"]["job_id"])["params_json"])
+    assert (params["consent"], params["consent_source"]) == (True, "mcp")
+
+
 def test_the_guide_offers_retry_and_skip_after_a_job_ends_with_failed_cells(store, monkeypatch):
     key, job_id, _unit_ids, _fake, _r = _failed_target(store)
     factories.act_as_delegate(monkeypatch, OWNER)
     steps = _call("risk_next_step", project_id=_project_with_source(store, key))["next"]
     actions = [(s["tool"], s["args"].get("action")) for s in steps if s["tool"] == "risk_job_action"]
     assert actions == [("risk_job_action", "retry_failed"), ("risk_job_action", "skip_failed")]
+    retry = next(s for s in steps if s["tool"] == "risk_job_action" and s["args"]["action"] == "retry_failed")
+    assert "consent" not in retry["args"] and "consent=true" in retry["why"]   # 동의는 사람이 — 길잡이는 채워 주지 않는다(MEDIUM 13)
 
 
 # ---------------------------------------------------------------- 원장 롤업(m3-cells 3.9 — 처음 맞는 줄)
