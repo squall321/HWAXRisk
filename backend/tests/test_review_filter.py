@@ -866,6 +866,24 @@ def test_a_crash_between_settling_a_sample_and_widening_loses_neither_the_result
     assert not any(c["state"] == "na_irrelevant" for c in cells.values())
 
 
+def test_a_closed_sample_cell_without_its_result_breaks_the_invariant(store, monkeypatch):
+    """불변식 G9(반대 검토 MEDIUM 10) — 닫힌(reviewed) 표본 셀에는 결과가 있다. 결과가 빠진 표본 셀(정산과 결과가 갈라진 원장)은
+    완결 몫의 불변식에 걸린다(넓힘 신호를 잃은 원장이 조용히 완결되지 않게)."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+
+    def setup(fake, kinds):
+        fake.noinput_q1 = {kinds["boundary"]: ["no"]}
+        fake.noinput_q2 = {kinds["boundary"]: [""]}
+
+    key, _job, _fake, _kinds = _run(store, fake_setup=setup)
+    audited = next(c for c in _cells(store, key) if c["route_forced"] == review_cells.FILTER_FLOOR)
+    assert audited["state"] in ("reviewed", "no_input") and audited["sample_json"]["filter_audit"]["result"]
+    store.execute("UPDATE rr_review_cells SET sample_json = json_set(sample_json, '$.filter_audit.result', json('null'))"
+                  " WHERE target_key = ? AND unit_id = ? AND agent_key = ?", (key, audited["unit_id"], audited["agent_key"]))
+    assert any("(G9)" in p for p in review_cells.review_invariants(store, key))
+
+
 def test_a_crash_between_writing_the_sweep_and_reopening_its_handoff_is_replayed_on_restart(store, monkeypatch):
     """반대 검토 MEDIUM 10 ② — 훑기를 적은 뒤 그 넘김(h 줄)으로 거른 셀을 다시 열기 전에 죽어도, 다음 세션이 원장의 훑기를 다시 읽을 때
     그 다시 열기를 이어 한다(거른 셀만 여므로 멱등)."""
