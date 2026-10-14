@@ -406,6 +406,8 @@ ECHOED = "\x1b[31m포털이 되울린 글 eyJhbGciOi.cGF5bG9hZA.sig\n\u202e이 �
     ("source_expiring", "Claude 에 넣은 PAT 가 곧 끝난다 — 포털 토큰 화면에서 새로 발급해 Claude 에 넣는다"),
     ("widen_audience", routes.AUTO_ERROR_TEMPLATES["widen_audience"]),
     ("timeout", routes.AUTO_ERROR_TEMPLATES["timeout"]),
+    ("gateway_misconfigured", "게이트웨이 설정에 이 앱의 PAT 명세가 없다 — 운영자가 게이트웨이 provision 을 다시 돌린다(포털"
+                              " docs/risk-credentials)"),
     ("http_503", routes.AUTO_ERROR_HTTP_5XX.format(status=503)),
     ("http_404", routes.AUTO_ERROR_HTTP.format(status=404)),
     ("some_new_code", routes.AUTO_ERROR_GENERIC),
@@ -429,7 +431,7 @@ def test_a_code_out_of_form_is_unknown(client, box, raw):
 def test_every_known_code_has_a_message_that_says_what_to_do():
     known = {"invalid_source", "account_disabled", "permission_denied", "source_not_exchangeable", "widen_audience",
              "widen_scopes", "bad_ttl", "bad_scope", "source_expiring", "too_many_children", "timeout", "unreachable",
-             "bad_response"}
+             "bad_response", "gateway_misconfigured"}
     assert set(routes.AUTO_ERROR_TEMPLATES) == known
     for text in (*routes.AUTO_ERROR_TEMPLATES.values(), routes.AUTO_ERROR_HTTP, routes.AUTO_ERROR_HTTP_5XX,
                  routes.AUTO_ERROR_GENERIC):
@@ -464,7 +466,7 @@ def _age_last_error(seconds: int) -> None:
 @pytest.mark.parametrize("code,kind", [
     ("timeout", "transient"), ("unreachable", "transient"), ("bad_response", "transient"), ("http_500", "transient"),
     ("http_503", "transient"), ("http_599", "transient"), ("http_404", "final"), ("source_expiring", "final"),
-    ("invalid_source", "final"), ("not a code", "final"),
+    ("invalid_source", "final"), ("not a code", "final"), ("gateway_misconfigured", "final"),
 ])
 def test_a_transient_exchange_failure_holds_the_ask_only_briefly(client, box, code, kind):
     """잠깐 안 닿은 것(timeout·unreachable·bad_response·http_5xx)은 짧게(AUTO_RETRY_TRANSIENT_S) 쉬고 다시 바란다 — 6시간 쉼은 사람이
