@@ -66,8 +66,7 @@ class Gateway:
             return httpx.Response(int(answer[5:]), text="upstream failure")
         if answer == "error_body":
             answer = {"error": "비교하려면 유효한 재료 2개 이상 필요", "alternatives": []}
-        return self._rpc(body, {"content": [{"type": "text", "text": json.dumps(answer, ensure_ascii=False)}],
-                                "isError": False})
+        return self._rpc(body, {"content": [{"type": "text", "text": json.dumps(answer)}], "isError": False})
 
     @staticmethod
     def _rpc(body: dict, result: dict) -> httpx.Response:
@@ -423,3 +422,43 @@ def test_a_reply_kept_for_one_credential_kind_is_never_reused_for_another(store)
         client.close()
     assert (service["cached"], first["cached"], again["cached"]) == (False, False, True)
     assert service["call_id"] != first["call_id"] == again["call_id"] and len(gw.calls) == 2
+
+
+@pytest.mark.parametrize("bad", [float("nan"), "\ud800"])
+def test_an_unreadable_reply_freezes_the_unit_partial_instead_of_stalling_it(store, bad):
+    """반대 검토 HIGH 4 — 게이트웨이 답에 NaN · 홀로 선 서로게이트가 있으면 원문을 정규 JSON 으로 적을 수 없다. 예외로 ensure 를 빠져나가
+    단위가 영영 NULL(셀이 시작되지 않는다)로 남지 않고, 읽을 수 없는 답(내용 탓)으로 그 호출만 빠진 채 partial 로 언다."""
+    key = _target(store)
+    gw = Gateway()
+    gw.answers["compare_materials"] = {**COMPARISON, "n_shared": bad}
+    _ensure(store, key, gw)
+    row = _row(store, key, _material_unit(store, key))
+    gaps = json.loads(row["gaps_json"] or "[]")
+    assert (row["status"], [g["code"] for g in gaps]) == ("partial", [unit_live.ERROR_BODY])
+    assert unit_live.pending(store, key) == []
+
+
+def test_an_unexpected_failure_backs_off_and_finally_freezes_instead_of_retrying_every_tick(store, monkeypatch):
+    """반대 검토 HIGH 4 — 근거 꾸러미 워커의 예상 밖 결함은 틱마다 다시 하지 않는다. 미동결 단위의 attempts 를 올리고 60초부터 두 배로
+    미루며, 여섯 번째에 live_internal_error 로 partial 로 언다 — 그 단위의 셀이 돌고 잡이 끝난다."""
+    key = _target(store)
+    job_id = rig.job(store, key, scope={"agents": [rig.SEAL]})
+    calls: list[int] = []
+
+    def broken(*args, **kwargs):
+        calls.append(1)
+        raise RuntimeError("결함(가짜)")
+
+    monkeypatch.setattr(unit_live, "ensure", broken)
+    r = rig.Rig(store, FakeReviewEngine(rig.packs()))
+    r.loop.live_transport = Gateway().transport
+    r.tick()
+    unit_id = _material_unit(store, key)
+    row = _row(store, key, unit_id)
+    assert (row["status"], row["attempts"], row["not_before"]) == (None, 1, r.clock() + unit_live.RETRY_BASE_S)
+    r.tick()                                                          # 백오프 전 — 다시 부르지 않는다
+    assert len(calls) == 1
+    r.finish(job_id)
+    assert rig.state(store, job_id) == "completed" and len(calls) == unit_live.RETRY_MAX
+    row = _row(store, key, unit_id)
+    assert (row["status"], json.loads(row["gaps_json"])[0]["code"]) == ("partial", unit_live.INTERNAL_ERROR)

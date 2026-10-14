@@ -146,6 +146,13 @@ class LiveSource(FieldSource):
         error = None if ok else _error_of(reply)
         if ok and isinstance(result, Mapping) and "error" in result:
             ok, error = False, "error_body"
+        if ok:
+            try:
+                # 정규 JSON 으로 적을 수 없는 답(NaN · 무한 · 홀로 선 서로게이트)은 읽을 수 없는 답이다(내용 탓) — 원장에 적다가 예외로
+                # 빠져나가 단위가 영영 미동결로 남지 않게(반대 검토 HIGH 4).
+                canonical_json(result).encode("utf-8")
+            except (ValueError, UnicodeError):
+                ok, error = False, "unreadable_reply"
         self._record(store, target_key, owner_sub, tool, args, args_hash, result if ok else None, ok=ok, error=error,
                      started=started)
         return {"ok": ok, "result": result if ok else None, "error": error,

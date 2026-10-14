@@ -2559,8 +2559,12 @@ class ReviewLoop:
                          out["retry"], out["calls"], out["cached"])
         except unit_live.CredentialRejected as exc:
             self.hold(job_id, "credential", f"근거 꾸러미 실호출({target_key}): {exc} — {CREDENTIAL_FIX}")
-        except Exception:  # noqa: BLE001 — 근거 꾸러미 결함이 루프를 죽이지 않는다. 행은 아직(NULL)이라 다음 틱이 다시 한다.
+        except Exception as exc:  # noqa: BLE001 — 근거 꾸러미 결함이 루프를 죽이지 않는다. 백오프로 미루고 여섯 번째에 언다(HIGH 4).
             log.exception("근거 꾸러미 실호출 실패(job=%s, target=%s)", job_id, target_key)
+            try:
+                unit_live.note_failure(self.store, target_key, note=type(exc).__name__, now=self.clock())
+            except Exception:  # noqa: BLE001 — 기록 실패가 워커 끝을 막지 않는다.
+                log.exception("근거 꾸러미 실패 기록 실패(job=%s, target=%s)", job_id, target_key)
 
     def _start_worker(self, job: Mapping[str, Any], head: Mapping[str, Any], purpose: str) -> None:
         thread = threading.Thread(target=self._work, args=(dict(job), dict(head), purpose),

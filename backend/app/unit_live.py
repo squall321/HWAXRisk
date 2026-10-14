@@ -47,7 +47,8 @@ INFRA_EXHAUSTED = "live_infra_exhausted"
 SCHEMA_MISMATCH = "live_schema_mismatch"
 ERROR_BODY = "live_error_body"
 DENIED = "live_denied"
-GAP_CODES: tuple[str, ...] = (INFRA_EXHAUSTED, SCHEMA_MISMATCH, ERROR_BODY, DENIED)
+INTERNAL_ERROR = "live_internal_error"      # 근거 꾸러미 워커의 예상 밖 결함이 여섯 번 — 그 단위를 얼린다(반대 검토 HIGH 4)
+GAP_CODES: tuple[str, ...] = (INFRA_EXHAUSTED, SCHEMA_MISMATCH, ERROR_BODY, DENIED, INTERNAL_ERROR)
 LIVE_HEAD = "실호출 근거(tool:b-…)는 지금 상태다 — 스냅샷 뒤에 바뀌었을 수 있다"
 # 셀을 시작해도 되는 단위 — 행이 없거나(B 층 이전 원장) 얼었다. `c` 는 rr_review_cells 의 별칭이다.
 READY_SQL = (" AND NOT EXISTS (SELECT 1 FROM rr_unit_live l WHERE l.target_key = c.target_key AND l.unit_id = c.unit_id"
@@ -393,6 +394,28 @@ def ensure(store: Any, settings: Any, target_key: str, credential: Mapping[str, 
     email = (credential or {}).get("email")
     for unit_id in work:
         _settle(store, target_key, unit_id, plan, outcomes, out, email=email, now=now)
+    return out
+
+
+def note_failure(store: Any, target_key: str, *, note: str, now: int | None = None) -> dict:
+    """ensure 가 예상 밖 결함으로 빠져나갔다 — 백오프가 지난 미동결 단위마다 attempts + 1 · not_before(60초부터 두 배)로 미루고, 여섯
+    번째에 live_internal_error 로 partial 로 언다(틱마다 다시 부르며 단위를 영영 미동결로 두지 않는다). {retry, frozen}."""
+    now = now_epoch() if now is None else now
+    out: dict[str, Any] = {"frozen": {}, "retry": 0}
+    for unit_id in pending(store, target_key, now=now, due_only=True):
+        row = store.query_one("SELECT attempts FROM rr_unit_live WHERE target_key = ? AND unit_id = ? AND status IS NULL",
+                              (target_key, unit_id))
+        if row is None:
+            continue
+        attempts = int(row["attempts"] or 0)
+        if attempts + 1 < RETRY_MAX:
+            out["retry"] += int(bool(store.execute(
+                "UPDATE rr_unit_live SET attempts = attempts + 1, not_before = ?, updated_at = ?"
+                " WHERE target_key = ? AND unit_id = ? AND status IS NULL AND attempts = ?",
+                (now + RETRY_BASE_S * 2 ** attempts, now, target_key, unit_id, attempts))))
+        else:
+            _freeze(store, target_key, unit_id, "partial", out, now=now,
+                    gaps=[{"tool": "*", "code": INTERNAL_ERROR, "note": note}], attempts=attempts + 1)
     return out
 
 
