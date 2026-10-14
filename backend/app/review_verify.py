@@ -296,9 +296,11 @@ def _accept_verdict(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping
             _drop(dropped, "inconsistent", raw)
             continue
         checks = raw.get("checks") if isinstance(raw.get("checks"), Mapping) else {}
-        if raw.get("flipped_from"):
-            # 엔진 보충이 앞 시도의 판정을 갈아 끼웠다(RB3-1 — 행의 flipped_from). 판정 표에 그 칸이 없어 checks 사본에 남긴다.
-            checks = {**checks, "flipped_from": raw.get("flipped_from")}
+        for mark in ("flipped_from", "contested_by"):
+            # 엔진 보충이 앞 시도의 판정을 갈아 끼웠다(flipped_from) · 검증된 철회가 그 걸림을 다퉜다(contested_by — 걸림은 선다,
+            # RB3-1). 판정 표에 그 칸이 없어 checks 사본에 남긴다.
+            if raw.get(mark):
+                checks = {**checks, mark: raw.get(mark)}
         lines = as_list(raw.get("l"))
         refs = as_list(raw.get("refs"))
         quote = _quote_columns(raw.get("cq"), card, checks.get("quote"))

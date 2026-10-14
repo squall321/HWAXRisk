@@ -66,6 +66,8 @@
   no_quote         이 별칭들의 판정 행에 인용을 싣지 않는다(cq 빈 글 · checks.quote empty — 인용 통과율의 분모, X1-06, S11)
   dup_conflict     (agent_key, 별칭) 또는 별칭 — 그 fwd 판정 행에 checks.dup_conflict 를 단다(엔진이 같은 카드의 다른 판정과
                    부딪친 줄을 남겼다는 표지 — RB3-1, 엔진 216650e. 앱은 걸린 것처럼 두 번째 판정을 준다 — 재설계 M3 C3-9)
+  contested        별칭 → contested_by{verdict, cq, quote, why, attempt} — 그 fwd 판정 행에 검증된 철회의 다툼을 싣고 dup_conflict 를
+                   단다(엔진 RB3-1 — 예제 result_verdict_contested 의 모양, 걸림은 선다)
   clipped          meta.clipped 로 낼 값 — 엔진이 몫에서 끊은 입력 {<입력>: {orig_chars, kept_chars}}(RB3-11, 기본 {})
   no_refs          이 별칭들의 판정 행에 변경 줄을 싣지 않는다(l·refs 빈 목록 · checks.refs missing — 참조 통과율의 분모, S11)
 기록 — requests(받은 요청 전부), runs(받은 run 수), max_active(동시에 돈 run 의 최댓값).
@@ -287,6 +289,7 @@ class FakeReviewEngine:
         self.no_refs: set[str] = set()
         self.dup_conflict: set[Any] = set()
         self.clipped: dict[str, Any] = {}
+        self.contested: dict[str, dict[str, Any]] = {}
         # 기록
         self.requests: list[dict[str, Any]] = []
         self.runs = 0
@@ -532,6 +535,9 @@ class FakeReviewEngine:
             agent = str((body.get("expert") or {}).get("key") or "")
             for row in main:
                 if variant == "fwd" and (row["k"] in self.dup_conflict or (agent, row["k"]) in self.dup_conflict):
+                    row["checks"]["dup_conflict"] = True
+                if variant == "fwd" and row["k"] in self.contested:
+                    row["contested_by"] = copy.deepcopy(self.contested[row["k"]])
                     row["checks"]["dup_conflict"] = True
             if (self.truncated or cut == "length") and main:
                 main = main[:-1]

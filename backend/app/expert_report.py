@@ -27,7 +27,7 @@ from app.common import canonical_json, now_epoch
 from app.errors import AppError
 
 SOURCE_KIND = "card_review"                 # rr_findings.source_kind — 패널 경로가 거르는 값(M2.md 5절 #20)
-REPORT_REV = "expert-report-1"
+REPORT_REV = "expert-report-2"                # M3 C3-8 — 거름·표본·입력 결손 절, 엔진이 알린 부딪침 표기(한 번만 올린다)
 QUOTE_SHOW = 200                            # 보고서 표시·반출의 카드 인용 — 판정당 200자(사용자 결정 1)
 SUMMARY_MAX = 1500                          # summary_md — 의견 행 excerpt_for_rag 의 원천
 _SEV_RANK = {"경미": 1, "중대": 2, "치명": 3}
@@ -584,7 +584,7 @@ def build_findings(store: Any, ledger: Ledger) -> dict:
 
 
 # ================================================================ 보고서의 머리·범위·finding 절(요약과 의견 행의 원천)
-_STATE_WORD = {"pending": "대기", "running": "도는 중", "reviewed": "검토", "na_irrelevant": "해당 없음", "no_input": "입력 결손",
+_STATE_WORD = {"pending": "대기", "running": "도는 중", "reviewed": "검토", "na_irrelevant": "거름", "no_input": "입력 결손",
                "failed": "미완", "skipped": "넘김"}
 
 
@@ -596,7 +596,7 @@ def _head_section(ledger: Ledger, state: str, why: str | None) -> dict:
         "domain": head["domain"], "rank_in_domain": head["rank_in_domain"], "tier": head["tier"],
         "review_id": ledger.review_id, "state": state, "why": why, "model": head["model"],
         "prompt_rev": head["prompt_rev"], "norm_rev": head["norm_rev"], "verify_rev": head["verify_rev"],
-        "report_rev": REPORT_REV, "input_gaps": list(ledger.order.get("input_gaps") or ()),
+        "report_rev": REPORT_REV, "input_gaps": list(ledger.order.get("input_gaps") or ()), "filter": _filter_head(ledger),
         "pack": None if pack is None else {
             "pack_key": pack.pack_key, "pack_hash": pack.pack_hash, "card_basis": pack.card_basis,
             "cards_total": len(pack.order), "checkable_n": len(pack.checkable), "background_n": len(pack.background),
@@ -606,10 +606,12 @@ def _head_section(ledger: Ledger, state: str, why: str | None) -> dict:
 
 
 def _scope_section(ledger: Ledger, state: str) -> dict:
-    """본 범위 — 단위마다 상태·무엇으로 봤나·판정별 수, 끝에 보지 못한 것(미완·범위 밖 대기·묶음을 못 받아 못 본 것)."""
+    """본 범위 — 단위마다 상태·무엇으로 봤나·판정별 수·거르기 분류의 길, 끝에 보지 못한 것(미완·범위 밖 대기·묶음을 못 받아 못 본
+    것)과 거른 것(재설계 M3 C3-8 — 보지 못한 것이 아니라 두 신호가 다 무관이라 판정하지 않은 것, 까닭 한 줄)."""
     run_id = ledger.head.get("run_id")
     rows: list[dict] = []
     unseen: list[dict] = []
+    filtered: list[dict] = []
     for unit in ledger.units:
         cell = ledger.cells.get(unit["unit_id"]) or {"state": "pending"}
         cell_state = str(cell["state"])
@@ -622,8 +624,13 @@ def _scope_section(ledger: Ledger, state: str) -> dict:
             "bg_full_n": int(cell.get("bg_full_n") or 0) if reviewed else 0,
             "bg_title_only_n": int(cell.get("bg_title_only_n") or 0) if reviewed else 0,
             "error_code": cell.get("error_code"), "tries": int(cell.get("tries") or 0),
-            "charged": int(cell.get("charged") or 0), "pack_state": ledger.pack_state(unit["unit_id"]) if reviewed else None})
+            "charged": int(cell.get("charged") or 0), "pack_state": ledger.pack_state(unit["unit_id"]) if reviewed else None,
+            "route": cell.get("route"), "route_forced": cell.get("route_forced"), "sample": _sample_marks(cell)})
         if reviewed:
+            continue
+        if cell_state == "na_irrelevant":
+            filtered.append({"unit_id": unit["unit_id"], "unit_seq": unit["seq"], "title": unit["title"],
+                             "reason": review_cells.filter_reason(cell.get("route_json"))})
             continue
         if cell_state == "failed":
             why = {"code": cell.get("error_code"), "text": cell.get("error")}
@@ -645,7 +652,28 @@ def _scope_section(ledger: Ledger, state: str) -> dict:
         if row["basis"]:
             by_basis[row["basis"]] = by_basis.get(row["basis"], 0) + 1
     return {"units": rows, "totals": {"units": len(rows), "by_state": dict(sorted(by_state.items())),
-                                      "by_basis": dict(sorted(by_basis.items()))}, "unseen": unseen}
+                                      "by_basis": dict(sorted(by_basis.items()))}, "unseen": unseen, "filtered": filtered}
+
+
+def _sample_marks(cell: Mapping[str, Any]) -> dict | None:
+    """그 셀의 표본·그림자(재설계 M3 C3-7) — {filter_audit?: {picked_by, result}, shadow?: {result}}. 둘 다 없으면 None."""
+    sample = _json(cell.get("sample_json"), {})
+    out = {}
+    if isinstance(sample.get("filter_audit"), Mapping):
+        out["filter_audit"] = {"picked_by": sample["filter_audit"].get("picked_by"), "result": sample["filter_audit"].get("result")}
+    if isinstance(sample.get("shadow"), Mapping):
+        out["shadow"] = {"result": sample["shadow"].get("result")}
+    return out or None
+
+
+def _filter_head(ledger: Ledger) -> dict:
+    """머리의 거르기 셈(재설계 M3 C3-8) — 그 전문가의 셀 가운데 거른 것 · 표본으로 끝까지 본 것 · 그림자 · 놓침(risk_miss)."""
+    cells = [c for u in ledger.units if (c := ledger.cells.get(u["unit_id"]))]
+    marks = [_sample_marks(c) or {} for c in cells]
+    results = [m[k].get("result") for m in marks for k in ("filter_audit", "shadow") if k in m]
+    return {"filtered": sum(1 for c in cells if c.get("state") == "na_irrelevant"),
+            "audited": sum(1 for m in marks if "filter_audit" in m), "shadow": sum(1 for m in marks if "shadow" in m),
+            "risk_miss": results.count("risk_miss")}
 
 
 def _findings_section(findings: Sequence[Mapping[str, Any]], ledger: Ledger) -> list[dict]:
@@ -712,7 +740,28 @@ def _checklist_row(ledger: Ledger, unit: Mapping[str, Any], eff: Mapping[str, An
         "check": src.get("check_text"), "conds": conds,
         "nums_missing": sorted({_s(n) for n in checks.get("nums_unsourced") or () if _s(n)}), "grade": eff.get("grade"),
         "revised_from": eff.get("revised_from"), "finding_id": finding_of.get((unit["unit_id"], f"card:{record_id}")),
+        # 엔진이 알린 부딪침(RB3-1) — 검증된 철회가 그 걸림을 다퉜다(걸림은 선다) · 같은 카드의 다른 판정과 부딪쳤다 · 보충이 앞
+        # 판정을 갈아 끼웠다(엔진이 스스로 고친 값을 바로잡은 것일 수 있다)
+        **_conflict_marks([_json(variants[v].get("checks_json"), {}) for v in ("fwd", "rev", "solo") if v in variants]
+                          + [checks]),
     }
+
+
+def _conflict_marks(checks: Sequence[Mapping[str, Any]]) -> dict:
+    """엔진이 알린 부딪침을 그 카드의 변형 전부(fwd 먼저)에서 모은다 — 실효가 단독 재질의여도 fwd 의 다툼이 사라지지 않게."""
+    contested = next((c.get("contested_by") for c in checks if isinstance(c.get("contested_by"), Mapping)), None)
+    flipped = next((c.get("flipped_from") for c in checks if isinstance(c.get("flipped_from"), Mapping)), None)
+    return {"contested": _contested(contested), "dup_conflict": any(c.get("dup_conflict") is True for c in checks),
+            "flipped_from": dict(flipped) if flipped is not None else None}
+
+
+def _contested(value: Any) -> dict | None:
+    """철회 다툼(contested_by) — 판정 · 이유 · 시도(카드 인용은 200자로 줄인다)."""
+    if not isinstance(value, Mapping):
+        return None
+    cq, cq_chars = _clip_quote(value.get("cq"))
+    return {"verdict": list(value.get("verdict") or ()), "why": _s(value.get("why")) or None, "cq": cq or None,
+            "cq_chars": cq_chars, "quote": value.get("quote"), "attempt": value.get("attempt")}
 
 
 def _card_head(card: Mapping[str, Any]) -> dict:
@@ -1503,6 +1552,10 @@ def _md_head(report: Mapping[str, Any]) -> list[str]:
                      f" {pack['background_n']}장 · 본문 없는 카드 {pack['unrenderable_n']}장 · 묶음 근거 {_q(pack['card_basis'])}")
     if h.get("input_gaps"):
         lines.append(f"- 입력 결손 {' · '.join(_q(g) for g in h['input_gaps'])}")
+    flt = h.get("filter") or {}
+    if any(flt.get(k) for k in ("filtered", "audited", "shadow")):
+        lines.append(f"- 거르기 — 거름 {flt['filtered']} · 표본으로 끝까지 봄 {flt['audited']} · 대표 그림자 {flt['shadow']}"
+                     f" · 표본·그림자가 놓친 걸림 {flt['risk_miss']}")
     return ["\n".join(lines)]
 
 
@@ -1524,6 +1577,12 @@ def _md_scope(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
             line += f" {_q(u['error_code'])} · 호출 {u['tries']}번 · 내용 탓 {u['charged']}번"
         if not u["in_scope"] and u["state"] != "reviewed":
             line += " · 이 검토 잡의 범위 밖"
+        sample = u.get("sample") or {}
+        if "filter_audit" in sample:
+            line += (f" · 거를 셀이었는데 표본으로 끝까지 봄({_q(sample['filter_audit']['picked_by'])})"
+                     f" — 결과 {_q(sample['filter_audit']['result'] or '정산 전')}")
+        if "shadow" in sample:
+            line += f" · 대표 그림자 — 결과 {_q(sample['shadow']['result'] or '정산 전')}"
         line += _PACK_STATE_LINE.get(u.get("pack_state") or "", "")
         items.append(line)
     unseen = [x for x in scope["unseen"] if not unit_id or x["unit_id"] == unit_id]
@@ -1535,6 +1594,10 @@ def _md_scope(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
         items.append(f"- 단위 {x['unit_seq']} {_q(x['title'])} — {text}" + (f" {_q(why['text'])}" if why.get("text") else ""))
     if not unseen:
         items.append("- 없음 — 이 전문가의 단위 전부를 검토했다.")
+    filtered = [x for x in scope.get("filtered") or () if not unit_id or x["unit_id"] == unit_id]
+    if filtered:
+        items.append(f"### 거름 {len(filtered)}개 — 두 신호(변경 코드 · 훑기)가 다 무관이라 판정하지 않았다")
+        items += [f"- 단위 {x['unit_seq']} {_q(x['title'])} — 거름 — {x['reason'] or '까닭 기록 없음'}" for x in filtered]
     return items
 
 
@@ -1549,6 +1612,15 @@ def _row_marks(row: Mapping[str, Any], card: Mapping[str, Any] | None) -> list[s
         marks.append("근거 없는 수 " + " · ".join(_q(n) for n in row["nums_missing"]))
     if row.get("revised_from"):
         marks.append(f"엔진 보충 {_q(row['revised_from'])}")
+    contested = row.get("contested")
+    if contested:
+        marks.append("검증된 철회가 이 걸림을 다퉜다(걸림은 선다) — " + "·".join(_q(v) for v in contested["verdict"])
+                     + (f" {_q(contested['why'])}" if contested.get("why") else ""))
+    elif row.get("dup_conflict"):
+        marks.append("엔진이 같은 카드의 다른 판정과 부딪쳤다고 알렸다")
+    flipped = row.get("flipped_from")
+    if flipped:
+        marks.append("엔진 보충이 앞 판정 " + "·".join(_q(v) for v in flipped.get("verdict") or ()) + " 을 갈아 끼웠다")
     return marks
 
 

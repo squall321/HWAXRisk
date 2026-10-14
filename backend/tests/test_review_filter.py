@@ -370,6 +370,60 @@ def test_a_classified_cell_keeps_its_route_when_the_inputs_move_before_it_settle
         "reviewed", "review", "tier_a_pending", before["route_json"])
 
 
+# ---------------------------------------------------------------- 보이기 — 다섯 곳이 같은 수(C3-8)
+def test_grid_board_report_quality_and_closure_show_the_same_filter_numbers(store, monkeypatch):
+    """한 원장에서 셀 격자 · 진행판(review.filter) · 전문가 보고서 머리 · 품질 수치 · 완결 몫(closure_cells)을 뽑아 견준다 — 거를 수
+    있던 셀 · 거른 셀 · 표본 · 놓침 넷 · 그림자가 다섯 곳에서 같다. 거른 셀의 까닭 한 줄은 판단어 린터를 지나고 훑기 글은 «» 안이다.
+    완결 몫의 불변식이 비고 표본 바닥을 채웠다."""
+    from app import closure as closure_mod
+    from app import expert_report, render, review_quality
+
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+
+    def setup(fake, kinds):
+        fake.noinput_q1 = {kinds["boundary"]: ["no"]}
+        fake.noinput_q2 = {kinds["boundary"]: [""]}
+
+    key, _job, _fake_, kinds = _run(store, fake_setup=setup)
+    cells = review_cells.closure_cells(store, key)
+    flt = cells["filtered"]
+    assert (flt["n"], flt["would_filter"], flt["audit"]["sampled"], flt["audit"]["n_audit"], flt["audit"]["floor_met"]) == (
+        0, 2, 2, 2, True)
+    assert {k: flt["audit"][k] for k in review_cells.AUDIT_RESULTS} == {"risk_miss": 0, "relevance_miss": 1,
+                                                                         "undetermined": 0, "kept": 1}
+    assert (flt["shadow"]["would_filter"], flt["shadow"]["sampled"], flt["shadow"]["risk_miss"]) == (2, 2, 0)
+    assert (flt["widened"], flt["off"], cells["invariants"]) == ([], False, [])
+    assert cells["by_state"]["pending"] + cells["by_state"]["running"] == 0
+    assert cells["grid"]["expected"] == cells["grid"]["actual"] == len(ROSTER) * 5
+
+    board = routes.coverage_payload(key, owner_sub=rig.OWNER)["review"]["filter"]
+    assert (board["mode"], board["would_filter"], board["filtered"], board["audited"]) == ("on", 2, 0, 2)
+    assert {k: board["audit"][k] for k in review_cells.AUDIT_RESULTS} == {k: flt["audit"][k] for k in review_cells.AUDIT_RESULTS}
+    assert board["shadow"] == flt["shadow"]
+
+    quality = review_quality.compute(store, key)["filter"]
+    assert (quality["would_filter"], quality["filtered"], quality["audit"]["sampled"], quality["shadow"]["sampled"]) == (
+        2, 0, 2, 2)
+    assert quality["audit"]["counts"] == {k: flt["audit"][k] for k in review_cells.AUDIT_RESULTS}
+    assert quality["audit"]["risk_miss"]["threshold"] == {"upper_max": 0.05} and quality["audit"]["risk_miss"]["min_n"] == 59
+    counts = closure_mod.cell_counts(store, key)["filter"]
+    assert (counts["n"], counts["audit"]["sampled"]) == (flt["n"], flt["audit"]["sampled"])
+
+    heads = [expert_report.load_report(store, key, r["key"])["head"]["filter"] for r in ROSTER]
+    assert sum(h["audited"] for h in heads) == 2 and sum(h["shadow"] for h in heads) == 2
+    assert sum(h["filtered"] for h in heads) == 0 and sum(h["risk_miss"] for h in heads) == 0
+
+    grid = routes.cells_payload(key, owner_sub=rig.OWNER, limit=2000)["rows"]
+    assert sum(1 for r in grid if r["route"] == "audit") == 2
+    reasons = [r["filter_reason"] for r in grid if r["filter_reason"]]
+    assert len(reasons) == flt["would_filter"]
+    for reason in reasons:
+        assert render.lint_text(reason)["ok"], reason
+        assert reason.startswith("코드 신호 무관(관련 영역 ") and "«" in reason
+    assert routes.cells_payload(key, owner_sub=rig.OWNER, route="audit")["total"] == 2
+
+
 # ---------------------------------------------------------------- 표본·그림자의 놓침 · 넓힘 · 늦은 넘김 · 보충 표본(C3-7)
 def test_a_shadow_that_missed_a_hit_widens_the_domain_and_its_cells_are_never_filtered(store, monkeypatch):
     """1순위의 그림자 셀(거를 셀이었을 셀)이 끝까지 보니 카드 밖 리스크(심각도 중대)를 냈다 — 놓침(risk_miss)이 sample_json 에

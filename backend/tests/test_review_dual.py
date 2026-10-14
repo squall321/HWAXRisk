@@ -201,3 +201,25 @@ def test_inputs_the_engine_clipped_are_counted_in_quality(store):
     quality = review_quality.compute(store, key, agent_key=MECH1)
     assert quality["truncation"]["clipped"] == {"calls": len(calls), "inputs": ["cards"]}
     assert f"몫에서 끊은 입력 {len(calls)}호출(«cards»)" in review_quality.block(store, key, agent_key=MECH1)["text"]
+
+
+def test_a_contested_hit_stands_and_the_report_says_who_contested_it(store):
+    """검증된 철회가 걸림을 다퉜다(엔진 contested_by — RB3-1): 걸림은 서고(실효 FAIL · 단독 재질의를 받는다), 보고서 점검표 행에
+    다툼의 판정·이유가 실리고 마크다운에 '검증된 철회가 이 걸림을 다퉜다' 가 남는다(«» 안의 이유)."""
+    from app import expert_report
+
+    fake = FakeReviewEngine(_packs())
+    fake.verdicts = {_record("K02"): ("yes", "FAIL")}
+    fake.contested = {"K02": {"verdict": ["yes", "OK"], "cq": "철회가 댄 카드 문장", "quote": "ok",
+                              "why": "카드의 조건과 변경 줄을 맞대어 보니 한계 안이다", "attempt": 2}}
+    key, unit_id = _run(store, fake, agents=[MECH2])
+    report = expert_report.load_report(store, key, MECH2)
+    card = next(c for c in report["checklist"] if c["alias"] == "K02")
+    row = next(r for r in card["rows"] if r["unit_id"] == unit_id)
+    assert (row["judgement"], row["dup_conflict"]) == ("FAIL", True)
+    assert row["contested"] == {"verdict": ["yes", "OK"], "why": "카드의 조건과 변경 줄을 맞대어 보니 한계 안이다",
+                                "cq": "철회가 댄 카드 문장", "cq_chars": None, "quote": "ok", "attempt": 2}
+    text = expert_report.render_report_md(report, part="cards")
+    assert "검증된 철회가 이 걸림을 다퉜다(걸림은 선다) — «yes»·«OK» «카드의 조건과 변경 줄을 맞대어 보니 한계 안이다»" in text
+    assert [c["alias"] for b in _runs(fake, MECH2, "solo") for c in b["cards"]] == ["K02"]
+

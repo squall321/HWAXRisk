@@ -186,7 +186,7 @@ def test_every_metric_of_the_full_grid_equals_the_hand_count(store):
     res = review_quality.compute(store, key)
 
     assert (res["policy_version"], res["model"], res["limits_rev"]) == (
-        "rq-1", "fake-glm", fre.load("limits_1m.json")["limits_rev"])           # 창 판은 계약 예제의 것이다
+        "rq-2", "fake-glm", fre.load("limits_1m.json")["limits_rev"])           # 창 판은 계약 예제의 것이다
     revs = fre.load("limits_1m.json")["prompt_rev"]                         # 판은 계약 예제의 것이다
     assert res["prompt_rev"] == f"offcard={revs['offcard']},sweep={revs['sweep']},verdict={revs['verdict']}"
     assert res["revs"]["mixed"] is False
@@ -263,7 +263,8 @@ def test_every_metric_of_the_full_grid_equals_the_hand_count(store):
     pilot = res["pilot"]
     assert _rd(pilot["calls_per_cell"]) == (107, 30) and pilot["calls_per_cell"]["value"] == round(107 / 30, 6)
     assert _rd(pilot["positive"]) == (19, 114)
-    assert _rd(pilot["sweep_irrelevant"]) == (5, 25) and pilot["sweep_irrelevant"]["used_for_routing"] is False
+    # 거르기 분류의 훑기 신호다(재설계 M3 C3-6) — 잡 거르기가 on(승인 전이라 거르지는 않는다)이면 분류에 쓴다
+    assert _rd(pilot["sweep_irrelevant"]) == (5, 25) and pilot["sweep_irrelevant"]["used_for_routing"] is True
     assert pilot["tokens"] == {"in": 110 * 1000, "out": 110 * 100, "calls": 110, "calls_unknown": 0}
     failed_cell = ("xd-syn-1", order[4])
     chars = _prompt_chars(fake, lambda b: (b["expert"]["key"], (b.get("unit") or {}).get("unit_id")) == failed_cell)
@@ -321,7 +322,7 @@ def test_the_expert_scope_counts_one_expert_and_the_experts_add_up_to_the_target
     hashes = {p["ledger_hash"] for p in parts} | {whole["ledger_hash"]}
     assert len(hashes) == len(parts) + 1 and all(re.fullmatch(r"[0-9a-f]{16}", h) for h in hashes)   # 범위마다 다른 원장
     text = review_quality.block(store, key, agent_key=SEAL)["text"]
-    assert text.startswith(f"[검토 품질 — 코드 계측 · 전문가 «{SEAL}» · 기준판 rq-1")
+    assert text.startswith(f"[검토 품질 — 코드 계측 · 전문가 «{SEAL}» · 기준판 rq-2")
     assert render.lint_text(text)["ok"]
 
 
@@ -413,6 +414,7 @@ _FRAG = re.compile(rf"(?P<pct>\d+\.\d)% \((?P<num>{_INT})/(?P<den>{_INT})(?:, 95
                    rf"|(?<![\d.])(?P<mean>\d+\.\d{{3}}) \((?P<mnum>{_INT})/(?P<mden>{_INT})"
                    rf"|미측정\(표본 0|표본 수 미달\(n=(?P<n>{_INT})")
 # 줄마다 문면에 나오는 비율·평균의 차례(json 경로). 격자 줄은 검토 수 옆에 형식만 채운 칸과 뒤집힘 상한을 단다(WP5b 규칙 3).
+CONDITIONAL_THRESHOLDS = ("filter.audit.risk_miss",)
 _LINE_PATHS = {
     "[격자]": ["grid.form_only", "flips.solo_neg_pos"],
     "[카드]": [f"cards.lines.{name}" for name in review_quality.WATERFALL],
@@ -420,7 +422,8 @@ _LINE_PATHS = {
              "truncation.soft_over"],
     "[인용]": ["citation.quote.flagged", "citation.quote.clear", "citation.quote.hold", "citation.quote.all",
              "citation.refs"],
-    "[뒤집힘]": ["flips.order", "flips.solo_pos_neg", "flips.solo_neg_pos", "flips.split"],
+    "[거름]": ["filter.audit.risk_miss", "filter.audit.conservative", "filter.shadow.risk_miss"],
+    "[뒤집힘]": ["flips.order", "flips.flagged_pos_neg", "flips.solo_pos_neg", "flips.solo_neg_pos", "flips.split"],
     "[실측]": ["pilot.calls_per_cell", "pilot.positive", "pilot.sweep_irrelevant", "pilot.chars_per_token"],
 }
 
@@ -459,7 +462,8 @@ def _assert_text_is_the_json(block: dict) -> None:
     text, res = block["text"], block["json"]
     assert render.lint_text(text)["ok"], render.lint_text(text)["violations"]
     lines = {line.split("]", 1)[0] + "]": line for line in text.split("\n")[1:]}
-    assert list(lines) == ["[격자]", "[카드]", "[절단]", "[인용]", "[뒤집힘]", "[호출 초]", "[실측]", "[기준]"]
+    assert list(lines) == ["[격자]", "[카드]", "[거름]", "[입력 결손]", "[절단]", "[인용]", "[뒤집힘]", "[호출 초]", "[실측]",
+                           "[기준]"]
     for tag, paths in _LINE_PATHS.items():
         want = [_expected(_at(res, p), mean=p in ("pilot.calls_per_cell", "pilot.chars_per_token")) for p in paths]
         assert _parsed(lines[tag]) == want, tag
@@ -509,7 +513,7 @@ def test_the_block_text_carries_the_json_numbers_and_passes_the_linter(store, mo
     _assert_text_is_the_json(block)
     lines = block["text"].split("\n")
     assert "뒤집힘(걸림 없음→걸림) 표본 수 미달(n=2)" in lines[1]
-    assert "순서(fwd·rev 다름) 표본 수 미달(n=10)" in lines[5]
+    assert "순서(fwd·rev 다름) 표본 수 미달(n=10)" in lines[7]
     assert lines[-1] == ("[기준] 밖 2항 — 절단(호출) 4.5% > 0.0% · 인용 대조(걸림 없음) 33.3% < 80.0% · 표본 미달로 견주지 못한"
                          " 기준 2항(순서(fwd·rev 다름), 뒤집힘(걸림 없음→걸림) 95% 상한)")
 
@@ -561,13 +565,19 @@ def test_the_app_lifespan_plugs_the_quality_hook(client):
 def test_the_policy_asset_names_only_metrics_compute_produces(store):
     """기준판의 열쇠는 compute 결과의 수치 경로다 — 이름이 어긋나면 기준이 조용히 안 걸린다."""
     policy = review_quality.load_policy()
-    assert policy["policy_version"] == "rq-1"
+    assert policy["policy_version"] == "rq-2"
     key, _job, _fake, _order = _full(store)
     res = review_quality.compute(store, key)
     for path in policy["thresholds"]:
+        if path in CONDITIONAL_THRESHOLDS:
+            # 거를 수 있던 칸이 있는 범위에서만 견준다(rq-2) — 거르기가 없던 이 원장에는 기준이 붙지 않는다(test_review_filter 가
+            # 거른 원장에서 기준과 표본 하한을 본다)
+            assert "threshold" not in _at(res, path) and _at(res, path)["den"] == 0, path
+            continue
         if path == "seconds.p95":
             assert all("threshold" in s["p95"] for s in [*res["seconds"]["kinds"].values(), res["seconds"]["all"]])
             continue
         assert _at(res, path)["threshold"] == policy["thresholds"][path], path
     for path, floor in policy["min_n"].items():
-        assert _at(res, path)["min_n"] == floor, path
+        if path not in CONDITIONAL_THRESHOLDS:
+            assert _at(res, path)["min_n"] == floor, path

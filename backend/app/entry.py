@@ -902,6 +902,18 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
     facts["review_order"] = brief["order"]
     facts["review_order_page"] = brief["order_page"]
     facts["review_job"] = job
+    # 거르기 · 실패 셀 · 입력 결손 — 목록이 아니라 셈이다(359명 대상에서도 답이 짧게, 재설계 M3 C3-8). 진행판 review 칸과 같은 수다.
+    flt = review.get("filter") or {}
+    if flt:
+        facts["filter"] = {k: flt.get(k) for k in ("mode", "approved", "would_filter", "filtered", "audited", "widened", "off")}
+        facts["filter"]["audit"] = {k: (flt.get("audit") or {}).get(k) for k in ("risk_miss", "upper95", "floor_met")}
+    failed = store.query("SELECT error_code, COUNT(*) AS n FROM rr_review_cells WHERE target_key = ? AND state = 'failed'"
+                         " GROUP BY error_code ORDER BY error_code", (target_key,))
+    if failed:
+        facts["failed_cells"] = {"n": sum(int(r["n"]) for r in failed),
+                                 "by_code": {str(r["error_code"] or "unknown"): int(r["n"]) for r in failed}}
+    if (review.get("noinput") or {}).get("cells"):
+        facts["no_input"] = dict(review["noinput"])
     if units_state.get("status") not in units_module.OPEN_STATUSES:
         blocked.append(_blocked(
             "units_unbuildable", f"이 카드 대조 대상의 검토 단위가 서 있지 않다(빌드 {units_state.get('status')}).",

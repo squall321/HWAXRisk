@@ -1158,7 +1158,7 @@ def expert_tally(store: Any, target_key: str, agent_key: str) -> dict:
 
 
 def _latest_review_job(store: Any, target_key: str) -> dict | None:
-    row = store.query_one("SELECT id, state FROM rr_jobs WHERE target_key = ? AND mode = 'reviews'"
+    row = store.query_one("SELECT id, state, params_json FROM rr_jobs WHERE target_key = ? AND mode = 'reviews'"
                           " ORDER BY created_at DESC, id DESC LIMIT 1", (target_key,))
     return dict(row) if row is not None else None
 
@@ -1295,6 +1295,119 @@ def review_summary(store: Any, target_key: str, *, job_id: str | None = None) ->
     }
 
 
+# ---------------------------------------------------------------- 거른 셀의 까닭 한 줄(재설계 M3 C3-8)
+FILTER_REASON_WHY = 80              # 훑기 까닭(LLM 글)의 앞 80자
+
+
+def filter_reason(route_json: Any) -> str | None:
+    """거른(거를 수 있던) 셀의 까닭 한 줄 — 두 신호가 다 무관(9번 줄)일 때만. 코드 신호가 관련이라고 본 영역과 훑기의 까닭(앞 80자 ·
+    위생 처리해 «» 안 — 주입 문구면 자리표시자)이다. 셀 격자·보고서가 같은 글을 싣는다. 그 밖의 셀은 None."""
+    from app import render  # noqa: PLC0415 — 표기층 위생은 쓸 때만.
+
+    if isinstance(route_json, str):
+        try:
+            route_json = json.loads(route_json)
+        except ValueError:
+            return None
+    if not isinstance(route_json, Mapping) or route_json.get("rule") != "both_unrelated":
+        return None
+    code = route_json.get("code") if isinstance(route_json.get("code"), Mapping) else {}
+    sweep = route_json.get("sweep") if isinstance(route_json.get("sweep"), Mapping) else {}
+    related = [str(d) for d in code.get("related_domains") or ()]
+    why = " ".join(str(w) for w in sweep.get("why") or () if w)
+    return (f"코드 신호 무관(관련 영역 {'·'.join(related) or '없음'}) · 훑기 무관"
+            + (f" {render.sanitize_source_text(why, limit=FILTER_REASON_WHY)}" if why.strip() else ""))
+
+
+# ---------------------------------------------------------------- 완결 몫(재설계 M3 C3-8 — m3-cells 3.10 · M3.md 4.10)
+CLOSURE_BASES: tuple[str, ...] = ("cards", "background", "role_only", "search_only", "noinput", "filtered")
+NOINPUT_OUTCOMES: tuple[str, ...] = ("impact", "unknown", "request", "none")
+AUDIT_RESULTS: tuple[str, ...] = ("risk_miss", "relevance_miss", "undetermined", "kept")
+
+
+def _rate_upper(k: int, n: int) -> float | None:
+    from app import audit  # noqa: PLC0415 — 감사 모듈은 무겁지 않지만 이 모듈의 머리를 가볍게 둔다.
+
+    value = audit.binom_upper(int(k), int(n))
+    return round(value, 6) if value is not None else None
+
+
+def closure_cells(store: Any, target_key: str) -> dict:
+    """셀 원장의 완결 몫(3.10) — 쟁점·종합 꾸러미의 완결 판정(`closure.closure_cells`)과 종합 보고서 머리, 진행판의 거르기 칸이
+    같은 수를 읽는다. 활성 단위만 센다.
+
+    {grid{roster, units, expected, actual}, by_state, by_basis(검토 셀의 바탕 + 거른 셀 filtered), failed{open, by_code},
+    skipped{n, experts, by_note[{note, n, by}]}, filtered{n, would_filter, by_domain{d: {filtered, audited}}, audit{sampled, pending,
+    n_audit, floor_met, risk_miss, relevance_miss, undetermined, kept, upper95, upper95_conservative}, shadow{would_filter, sampled,
+    risk_miss, upper95}, widened[], off}, no_input{experts, cells, by_outcome}, undetermined{rows, cells}, out_of_scope_pending,
+    invariants[]}. 표본 바닥(`n_audit = max(ceil(audit_pct% × N), min(N, 59))` · 영역마다 1건)의 비율은 가장 최근 검토 잡의 것이다."""
+    import math  # noqa: PLC0415
+
+    active = set(active_unit_ids(store, target_key))
+    roster = planner.review_order(store, target_key)
+    rows = [dict(r) for r in store.query(
+        "SELECT unit_id, agent_key, domain, state, basis, run_id, error_code, decided_by, decide_note,"
+        " json_extract(route_json, '$.rule') AS rule,"
+        " json_type(sample_json, '$.filter_audit') IS NOT NULL AS audited,"
+        " json_extract(sample_json, '$.filter_audit.result') AS audit_result,"
+        " json_type(sample_json, '$.shadow') IS NOT NULL AS shadowed,"
+        " json_extract(sample_json, '$.shadow.result') AS shadow_result,"
+        " json_extract(extras_json, '$.noinput.outcome') AS noinput_outcome"
+        " FROM rr_review_cells WHERE target_key = ?", (target_key,)) if r["unit_id"] in active]
+    by_state = Counter(r["state"] for r in rows)
+    by_basis = Counter(r["basis"] for r in rows if r["state"] == "reviewed")
+    failed_codes = Counter(r["error_code"] or "unknown" for r in rows if r["state"] == "failed")
+    skipped = [r for r in rows if r["state"] == "skipped"]
+    notes = Counter((r["decide_note"] or "", r["decided_by"] or "") for r in skipped)
+    filtered = [r for r in rows if r["state"] == "na_irrelevant"]
+    audited = [r for r in rows if r["audited"]]
+    settled = [r for r in audited if r["audit_result"] in AUDIT_RESULTS]
+    results = Counter(r["audit_result"] for r in settled)
+    shadows = [r for r in rows if r["shadowed"]]
+    shadow_done = [r for r in shadows if r["shadow_result"] in AUDIT_RESULTS]
+    shadow_miss = sum(1 for r in shadow_done if r["shadow_result"] == "risk_miss")
+    by_domain: dict[str, dict[str, int]] = {}
+    for r in filtered + audited:
+        cell = by_domain.setdefault(str(r["domain"]), {"filtered": 0, "audited": 0})
+        cell["filtered" if r["state"] == "na_irrelevant" else "audited"] += 1
+    job = _latest_review_job(store, target_key)
+    knobs = (json.loads(job["params_json"] or "{}").get("knobs") or {}) if job is not None and job.get("params_json") else {}
+    population = len(filtered) + len(audited)
+    pct = float(knobs.get("audit_pct") or 0)
+    n_audit = max(math.ceil(pct / 100.0 * population), min(population, AUDIT_MIN_N)) if population else 0
+    floor_met = len(audited) >= n_audit and all(v["audited"] >= AUDIT_DOMAIN_FLOOR for v in by_domain.values())
+    risk = results.get("risk_miss", 0)
+    gap = [r for r in rows if r["basis"] == NOINPUT and r["state"] in ("reviewed", "no_input")]
+    held = store.query(
+        "SELECT unit_id, agent_key FROM rr_card_verdicts WHERE target_key = ? AND is_effective = 1"
+        " AND (applies = 'unknown' OR judgement = 'undetermined')", (target_key,))
+    held = [r for r in held if r["unit_id"] in active]
+    job_id = job["id"] if job is not None else None
+    return {
+        "grid": {"roster": len(roster), "units": len(active), "expected": len(roster) * len(active), "actual": len(rows)},
+        "by_state": {s: by_state.get(s, 0) for s in CELL_STATES},
+        "by_basis": {**{b: by_basis.get(b, 0) for b in CLOSURE_BASES if b != "filtered"}, "filtered": len(filtered)},
+        "failed": {"open": by_state.get("failed", 0), "by_code": dict(sorted(failed_codes.items()))},
+        "skipped": {"n": len(skipped), "experts": len({r["agent_key"] for r in skipped}),
+                    "by_note": [{"note": note, "n": n, "by": by} for (note, by), n in sorted(notes.items())]},
+        "filtered": {
+            "n": len(filtered), "would_filter": sum(1 for r in rows if r["rule"] == "both_unrelated"),
+            "by_domain": dict(sorted(by_domain.items())),
+            "audit": {"sampled": len(settled), "pending": len(audited) - len(settled), "n_audit": n_audit,
+                      "floor_met": floor_met, **{k: results.get(k, 0) for k in AUDIT_RESULTS},
+                      "upper95": _rate_upper(risk, len(settled)),
+                      "upper95_conservative": _rate_upper(risk + results.get("undetermined", 0), len(settled))},
+            "shadow": {"would_filter": len(shadows), "sampled": len(shadow_done), "risk_miss": shadow_miss,
+                       "upper95": _rate_upper(shadow_miss, len(shadow_done))},
+            "widened": widened_domains(store, target_key), "off": filter_off(store, target_key)},
+        "no_input": {"experts": len({r["agent_key"] for r in gap}), "cells": len(gap),
+                     "by_outcome": {o: sum(1 for r in gap if r["noinput_outcome"] == o) for o in NOINPUT_OUTCOMES}},
+        "undetermined": {"rows": len(held), "cells": len({(r["unit_id"], r["agent_key"]) for r in held})},
+        "out_of_scope_pending": sum(1 for r in rows if r["state"] == "pending" and r["run_id"] != job_id),
+        "invariants": review_invariants(store, target_key),
+    }
+
+
 def review_invariants(store: Any, target_key: str) -> list[str]:
     """셀 원장의 불변식 위반 목록(빈 목록 = 통과). 셀이 하나도 없는 타깃은 검사할 것이 없다.
 
@@ -1308,11 +1421,14 @@ def review_invariants(store: Any, target_key: str) -> list[str]:
     (G5) 판정 행 — 그 행의 호출이 원장에 있고 그 호출에 실은 카드에 그 별칭이 있다(나갈 기준 2). 참조가 없는데 `applies` 가
          yes 가 아니면 `refs_ok` 는 NULL 이다(X1-05). 카드마다 실효 행이 하나다.
     (G6) failed 셀에는 까닭(error_code)이 있다.
+    (G7) skipped 셀에는 넘긴 사람(decided_by)과 사유(decide_note)가 있다(재설계 M3 C3-8 — 3.10).
+    (G8) na_irrelevant 셀은 거르기 분류가 거른 셀이다 — `route='filtered'` 이고 분류 기록(route_json.rule)이 있다.
     """
     problems: list[str] = []
     cells = [dict(r) for r in store.query(
         "SELECT unit_id, agent_key, state, lease_owner, basis, cards_expected, cards_judged, truncated, offcard_state,"
-        " error_code, json_extract(extras_json, '$.noinput.outcome') AS noinput_outcome FROM rr_review_cells"
+        " error_code, decided_by, decide_note, route, json_extract(route_json, '$.rule') AS route_rule,"
+        " json_extract(extras_json, '$.noinput.outcome') AS noinput_outcome FROM rr_review_cells"
         " WHERE target_key = ?", (target_key,))]
     heads = {r["agent_key"]: dict(r) for r in store.query(
         "SELECT agent_key, state, lease_owner FROM rr_expert_reports WHERE target_key = ?", (target_key,))}
@@ -1362,6 +1478,10 @@ def review_invariants(store: Any, target_key: str) -> list[str]:
                 problems.append(f"(G4) reviewed 셀 {name} 의 basis {c['basis']!r} 가 없다.")
         if c["state"] == "failed" and not c["error_code"]:
             problems.append(f"(G6) failed 셀 {name} 에 까닭이 없다.")
+        if c["state"] == "skipped" and not (c["decided_by"] and c["decide_note"]):
+            problems.append(f"(G7) skipped 셀 {name} 에 넘긴 사람이나 사유가 없다.")
+        if c["state"] == "na_irrelevant" and not (c["route"] == FILTERED and c["route_rule"]):
+            problems.append(f"(G8) na_irrelevant 셀 {name} 에 거르기 분류 기록(route filtered · route_json.rule)이 없다.")
     judged = Counter((r["unit_id"], r["agent_key"]) for r in store.query(
         "SELECT unit_id, agent_key FROM rr_card_verdicts WHERE target_key = ? AND is_effective = 1", (target_key,)))
     for c in cells:

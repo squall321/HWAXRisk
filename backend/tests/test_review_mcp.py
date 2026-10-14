@@ -80,7 +80,8 @@ def test_risk_get_cells_pages_the_grid_inside_the_wire_limit_and_matches_rest(st
     key, job_id, _fake = _reviewed(store)
     factories.act_as_delegate(monkeypatch, OWNER)
     rest = routes.get_cells(key, ident=factories.ident(OWNER))["rows"]
-    want = [{c: r[c] for c in routes.CELL_BRIEF_COLUMNS} for r in rest]
+    brief = [*routes.CELL_BRIEF_COLUMNS, "filter_reason"]               # 거른 셀의 까닭 한 줄(재설계 M3 C3-8)
+    want = [{c: r[c] for c in brief} for r in rest]
     one = _call("risk_get_cells", target_key=key)
     assert srv._wire_chars(one) <= srv.MCP_RESULT_CHARS
     monkeypatch.setattr(srv, "MCP_RESULT_CHARS", 5000)                  # 한도를 줄여 여러 번에 나눠 받게 한다
@@ -88,7 +89,7 @@ def test_risk_get_cells_pages_the_grid_inside_the_wire_limit_and_matches_rest(st
     while True:
         page = _call("risk_get_cells", target_key=key, offset=offset)
         calls += 1
-        assert srv._wire_chars(page) <= 5000 and all(list(r) == list(routes.CELL_BRIEF_COLUMNS) for r in page["rows"])
+        assert srv._wire_chars(page) <= 5000 and all(list(r) == brief for r in page["rows"])
         rows += page["rows"]
         if "next_offset" not in page:
             break

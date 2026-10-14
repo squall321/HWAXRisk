@@ -28,7 +28,8 @@ OTHER = "other@example.com"
 # ---------------------------------------------------------------- 응답 칸(스냅샷)
 PANEL_COVERAGE_KEYS = {"target_key", "job", "roster_size", "by_domain", "by_status", "strong", "unseated_n", "level",
                        "close_level", "flow", "units"}                      # S12 전 진행판 칸 — 그대로다(D-24)
-REVIEW_KEYS = {"units", "cells", "experts", "cards", "quality", "order", "dispositions", "job"}   # dispositions — 재설계 M3 C3-4
+# dispositions — 재설계 M3 C3-4 · filter·noinput — C3-8(완결 몫과 같은 수)
+REVIEW_KEYS = {"units", "cells", "experts", "cards", "quality", "order", "dispositions", "filter", "noinput", "job"}
 REVIEW_CELLS_KEYS = {"total", "by_state", "by_basis", "in_scope", "out_of_scope_pending", "failed_open", "form_only"}
 REVIEW_EXPERTS_KEYS = {"total", "by_state"}
 ORDER_KEYS = {"order", "agent_key", "domain", "rank_in_domain", "tier", "deferred", "input_gaps", "state", "cards_total",
@@ -49,7 +50,7 @@ CELL_ROW_KEYS = [
     "n_na", "n_undetermined", "n_disputed", "n_flipped", "n_offcard", "offcard_state", "offcard_capped", "quote_ok",
     "quote_n", "refs_ok", "refs_n", "bg_full_n", "bg_title_only_n", "unit_hash", "pack_hash", "input_hash", "prompt_rev",
     "verify_rev", "status_source", "decided_by", "decided_at", "decide_note", "reopened_n", "started_at", "finished_at",
-    "created_at", "updated_at"]
+    "created_at", "updated_at", "filter_reason"]       # filter_reason — 거른 셀의 까닭 한 줄(재설계 M3 C3-8)
 CELL_DETAIL_KEYS = {"target_key", "unit_id", "agent_key", "cell", "verdicts", "calls"}
 CELL_JSON_COLUMNS = {"route_json", "extras_json", "mechs_json", "handoffs_json", "sample_json"}   # 셀 하나에만 — 값으로 편다
 EXPERT_ROW_KEYS = [

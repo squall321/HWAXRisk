@@ -3469,7 +3469,8 @@ CELL_LIST_LIMIT_DEFAULT, CELL_LIST_LIMIT_MAX = 500, 2000
 CELL_LIST_HIDDEN: tuple[str, ...] = ("lease_owner", "route_json", "extras_json", "mechs_json", "handoffs_json", "sample_json")
 # MCP risk_get_cells 의 행 — 격자를 읽는 칸만(행이 짧아야 와이어 25,000자 안에 많이 싣는다). 이름은 S1 열 그대로다.
 CELL_BRIEF_COLUMNS: tuple[str, ...] = (
-    "unit_id", "unit_seq", "agent_key", "domain", "state", "basis", "run_id", "tries", "charged", "error_code",
+    "unit_id", "unit_seq", "agent_key", "domain", "state", "basis", "route", "route_forced", "run_id", "tries", "charged",
+    "error_code",
     "cards_expected", "cards_judged", "n_fail", "n_warning", "n_undetermined", "n_ok", "n_na", "n_offcard", "truncated",
     "offcard_state", "quote_ok", "quote_n", "refs_ok", "refs_n", "updated_at")
 # 전문가 머리 목록에서 빼는 열 — 보고서 본문·계획·훑기·요약 글(보고서 경로가 준다)·선점.
@@ -3592,7 +3593,9 @@ def review_payload(store: Any, target_key: str, flow: str | None) -> dict | None
     잡 전에도 낸다(검토 순서를 보고 범위를 고른다 — #24).
 
     {units, cells{total, by_state, by_basis, in_scope, out_of_scope_pending, failed_open, form_only}, experts{total, by_state},
-    cards(카드 폭포 | None), quality(요약 | None), order[…], dispositions{retried, skipped}, job(가장 최근 검토 잡 | None)}. 셀·전문가 셈은 활성 단위로 센 원장 값,
+    cards(카드 폭포 | None), quality(요약 | None), order[…], dispositions{retried, skipped}, filter{mode, approved, would_filter,
+    filtered, audited, audit{…}, shadow{…}, widened, off}, noinput{experts, cells, by_outcome}, job(가장 최근 검토 잡 | None)}.
+    셀·전문가 셈은 활성 단위로 센 원장 값,
     카드 폭포·품질은 그 잡의 진행판(`progress_json.quality`)에서 읽는다(5초 폴링이 원장을 다시 세지 않는다)."""
     has_cells = store.query_one("SELECT 1 FROM rr_review_cells WHERE target_key = ? LIMIT 1", (target_key,)) is not None
     if flow != "cells" and not has_cells:
@@ -3614,20 +3617,32 @@ def review_payload(store: Any, target_key: str, flow: str | None) -> dict | None
         "SELECT SUM(route_forced = ?) AS retried, SUM(state = 'skipped') AS skipped FROM rr_review_cells"
         f" WHERE target_key = ? AND unit_id IN ({','.join('?' * len(active)) or 'NULL'})",
         (review_cells.HUMAN_RETRY, target_key, *active))
+    closure = review_cells.closure_cells(store, target_key)
+    flt = closure["filtered"]
+    knobs = (_loads(job["params_json"], {}).get("knobs") or {}) if job is not None else {}
     return {"units": summary["units"], "cells": cells, "experts": summary["experts"], "cards": cards,
             "quality": _quality_summary(quality), "order": review_order_payload(store, target_key),
             "dispositions": {"retried": int(tally["retried"] or 0), "skipped": int(tally["skipped"] or 0)},
+            # 거르기(재설계 M3 C3-8) — 완결 몫(review_cells.closure_cells)과 같은 수다. mode 는 가장 최근 검토 잡이 얼린 손잡이.
+            "filter": {"mode": knobs.get("filter") or "off", "approved": knobs.get("routing_approved"),
+                       "would_filter": flt["would_filter"], "filtered": flt["n"], "audited": flt["audit"]["sampled"],
+                       "audit": {k: flt["audit"][k] for k in ("risk_miss", "relevance_miss", "undetermined", "kept", "upper95",
+                                                              "upper95_conservative", "n_audit", "floor_met", "pending")},
+                       "shadow": dict(flt["shadow"]), "widened": list(flt["widened"]), "off": flt["off"]},
+            "noinput": dict(closure["no_input"]),
             "job": _review_job_payload(job) if job is not None else None}
 
 
 def cells_payload(target_key: str, *, owner_sub: str | None = None, agent_key: str | None = None,
                   unit_id: str | None = None, domain: str | None = None, state: str | None = None,
                   limit: int = CELL_LIST_LIMIT_DEFAULT, offset: int = 0, columns: tuple[str, ...] | None = None,
-                  job_id: str | None = None) -> dict:
+                  job_id: str | None = None, route: str | None = None) -> dict:
     """`GET /targets/{key}/cells` 본체 — MCP `risk_get_cells` 와 같은 함수(그쪽은 `columns=CELL_BRIEF_COLUMNS` 로 행을 줄이고 와이어에
     맞춰 limit 을 줄인다). 격자(활성 빌드의 검토 대상 단위)의 셀을 검토 순서(전문가) → 단위 순번으로 준다. `job_id` 는 그 검토 잡의
-    범위에 든 셀(셀의 run_id)만이다 — 359명 격자에서 지켜볼 셀은 범위 안 셀이다(R3B-12).
-    {target_key, total, limit, offset, next_offset?, rows[]} — 행 열은 S1 의 이름 그대로(JSON 열·선점은 셀 하나 경로가 준다)."""
+    범위에 든 셀(셀의 run_id)만이다 — 359명 격자에서 지켜볼 셀은 범위 안 셀이다(R3B-12). `route` 는 거르기 분류의 길
+    (review · filtered · audit · noinput — 재설계 M3 C3-8)로 거른다.
+    {target_key, total, limit, offset, next_offset?, rows[]} — 행 열은 S1 의 이름 그대로(JSON 열·선점은 셀 하나 경로가 준다)에
+    거른 셀의 까닭 한 줄 `filter_reason`(두 신호가 다 무관이었던 셀만, 아니면 null)을 더한다."""
     _target_row(target_key, owner_sub)
     if state is not None and state not in review_cells.CELL_STATES:
         raise AppError("E100", f"state 는 {list(review_cells.CELL_STATES)} 가운데 하나다 — {state!r}.", 422)
@@ -3641,18 +3656,19 @@ def cells_payload(target_key: str, *, owner_sub: str | None = None, agent_key: s
     where = ["c.target_key = ?", f"c.unit_id IN ({','.join('?' * len(active))})"]
     params: list[Any] = [target_key, *active]
     for column, value in (("agent_key", agent_key), ("unit_id", unit_id), ("domain", domain), ("state", state),
-                          ("run_id", job_id)):
+                          ("run_id", job_id), ("route", route)):
         if value is not None:
             where.append(f"c.{column} = ?")
             params.append(value)
     clause = " AND ".join(where)
     out["total"] = int(store.query_one(f"SELECT COUNT(*) AS n FROM rr_review_cells c WHERE {clause}", tuple(params))["n"] or 0)
     rows = store.query(
-        f"SELECT {', '.join('c.' + c for c in cols)} FROM rr_review_cells c LEFT JOIN rr_expert_reports h"
-        f" ON h.target_key = c.target_key AND h.agent_key = c.agent_key WHERE {clause}"
+        f"SELECT {', '.join('c.' + c for c in cols)}, c.route_json AS _route_json FROM rr_review_cells c LEFT JOIN"
+        f" rr_expert_reports h ON h.target_key = c.target_key AND h.agent_key = c.agent_key WHERE {clause}"
         " ORDER BY COALESCE(h.review_order, 1 << 30), c.agent_key, c.unit_seq, c.unit_id LIMIT ? OFFSET ?",
         (*params, take, skip))
-    out["rows"] = [dict(r) for r in rows]
+    out["rows"] = [{**{k: v for k, v in dict(r).items() if k != "_route_json"},
+                    "filter_reason": review_cells.filter_reason(r["_route_json"])} for r in rows]
     if skip + len(out["rows"]) < out["total"]:
         out["next_offset"] = skip + len(out["rows"])
     return out
@@ -3676,7 +3692,8 @@ def cell_payload(target_key: str, unit_id: str, agent_key: str, *, owner_sub: st
     call_cols = [c for c in _table_columns(store, "rr_review_calls") if c != "result_gz"]
     calls = [_parsed_json_columns(dict(r)) for r in store.query(
         f"SELECT {', '.join(call_cols)} FROM rr_review_calls WHERE {where} ORDER BY started_at, call_id", key)]
-    return {"target_key": target_key, "unit_id": unit_id, "agent_key": agent_key, "cell": _parsed_json_columns(view),
+    return {"target_key": target_key, "unit_id": unit_id, "agent_key": agent_key,
+            "cell": {**_parsed_json_columns(view), "filter_reason": review_cells.filter_reason(cell["route_json"])},
             "verdicts": verdicts, "calls": calls}
 
 
@@ -3779,10 +3796,11 @@ def expert_report_payload(target_key: str, agent_key: str, *, owner_sub: str | N
 @router.get("/targets/{target_key}/cells")
 def get_cells(target_key: str, agent_key: str | None = None, unit_id: str | None = None, domain: str | None = None,
               state: str | None = None, limit: int = CELL_LIST_LIMIT_DEFAULT, offset: int = 0, job_id: str | None = None,
-              ident: identity.Identity = Depends(identity.current)) -> dict:
-    """카드 대조 셀 목록(limit 기본 500 · 최대 2000, next_offset 으로 이어 받는다, job_id 는 그 검토 잡 범위의 셀만)."""
+              route: str | None = None, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """카드 대조 셀 목록(limit 기본 500 · 최대 2000, next_offset 으로 이어 받는다, job_id 는 그 검토 잡 범위의 셀만, route 는 거르기
+    분류의 길 — review · filtered · audit · noinput)."""
     return cells_payload(target_key, owner_sub=_require_user(ident), agent_key=agent_key, unit_id=unit_id, domain=domain,
-                         state=state, limit=limit, offset=offset, job_id=job_id)
+                         state=state, limit=limit, offset=offset, job_id=job_id, route=route)
 
 
 @router.get("/targets/{target_key}/cells/{unit_id}/{agent_key}")
