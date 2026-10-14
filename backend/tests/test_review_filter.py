@@ -588,6 +588,24 @@ def test_a_late_offcard_handoff_reopens_the_filtered_cell_at_job_end(store, monk
     assert review_cells.review_invariants(store, key) == []
 
 
+def test_a_late_sweep_handoff_reopens_an_earlier_jobs_filtered_cell_into_the_running_job(store, monkeypatch):
+    """반대 검토 2차 MEDIUM 3 — 훑기의 늦은 넘김이 곧바로 다시 연 셀도 지금 잡으로 찍힌다. 앞 잡이 거른 셀(std 2순위 × 경계 단위)을
+    mech 2순위의 훑기가 std 로 넘기면 지금 잡이 그 셀을 돌린다 — 종전에는 앞 잡의 결속 그대로 pending 이라 잡 끝의 거두기(거른
+    셀만 본다)도 지나쳐 아무 잡도 돌리지 않았다."""
+    key, fake, kinds, r = _offcard_handoff_target(store, monkeypatch)
+    b = kinds["boundary"]
+    r.finish(rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]}))
+    r.finish(rig.job(store, key, scope={"agents": [STD2]}))
+    assert _cell(store, key, b, STD2)["state"] == "na_irrelevant"
+    fake.handoff_to, fake.handoff_unit, fake.handoff_from = "std", b, {MECH2}
+    sender = rig.job(store, key, scope={"agents": [MECH2]})
+    r.finish(sender)
+    cell = _cell(store, key, b, STD2)
+    assert (rig.state(store, sender), cell["state"], cell["run_id"], cell["route_forced"]) == (
+        "completed", "reviewed", sender, "handoff")
+    assert cell["route_json"]["handoff"] == [{"from": MECH2, "why": "훑기가 다른 영역의 몫으로 본 단위"}]
+
+
 def test_an_experts_handoff_to_its_own_domain_never_reopens_its_own_filtered_cell_at_job_end(store, monkeypatch):
     """반대 검토 LOW 15 의 짝 — 자기 훑기가 자기 영역으로 넘긴 줄은 7번 줄이 세지 않는다(그 셀은 걸러진다). 잡 끝의 넘김 거두기도
     그 줄로 그 셀을 다시 열지 않는다 — 열면 다시 분류돼 또 걸러지고 잡 끝이 그것을 되풀이해 잡이 끝나지 않는다."""
