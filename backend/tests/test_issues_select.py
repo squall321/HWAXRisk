@@ -14,6 +14,7 @@ from tests import factories
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
 from tests.synth.fake_review_engine import FakeReviewEngine
+from tests.test_registry_cells import _panel_target
 
 OWNER = rig.OWNER
 SEAL = rig.SEAL
@@ -158,9 +159,14 @@ def test_selection_beyond_the_cap_leaves_untried_rows_in_rank_order_whatever_the
     unit_ids = _units(store, key)[:4]
     _review(store, key, (SEAL,), unit_ids, verdicts={"K01": ("yes", "FAIL")})
     _review(store, key, ("mech-syn-0",), unit_ids[:2], verdicts={"K01": ("yes", "FAIL")})
+    _review(store, key, ("xd-syn-0",), unit_ids[3:4])                    # 그 단위 클러스터에 반대 측 하나(우선순위 × 1.1)
     registry.merge(store, key)
     found = issues.candidates(store, key)
     assert sum(c["p_class"] == "P1" for c in found) >= 4
+    # 같은 등급 안에서는 우선순위가 큰 것이 앞이다 — 반대 측이 붙은 클러스터가 P1 맨 앞이다.
+    p1 = [c for c in found if c["p_class"] == "P1"]
+    assert [c["priority"] for c in p1] == sorted((c["priority"] for c in p1), reverse=True)
+    assert p1[0]["priority"] > p1[-1]["priority"] and p1[0]["basis"]["opposers"]
     shuffled = found[:]
     random.Random(7).shuffle(shuffled)
     assert sorted(shuffled, key=issues.order_key) == found
@@ -192,11 +198,11 @@ def test_a_row_a_person_closed_is_not_a_candidate_and_its_waiting_issue_is_withd
                            (key, row["cluster_key"]))["issue_state"] == "withdrawn"
 
 
-def test_a_panels_target_has_no_issues(store):
-    """패널 대상에는 쟁점이 없다(3.5 끝) — 카드 대조를 얹어도(흐름 panels) 후보 0 이고 행을 만들지 않는다."""
-    synth = factories.make_diff_target(store, 40, open_target=False)
-    key = routes.create_target(routes.TargetBody(kind="diff", ref_id=synth.diff_id, consent=True, flow="panels",
-                                                 agents=[dict(r) for r in rig.ROSTER]), ident=factories.ident(OWNER))["target_key"]
+def test_a_panels_target_has_no_issues(store, tmp_path, monkeypatch):
+    """패널 대상에는 쟁점이 없다(3.5 끝) — 패널이 단독 중대 클러스터를 내고 카드 대조를 얹어도(흐름 panels) 후보 0 이고 행을
+    만들지 않는다."""
+    key, _old = _panel_target(store, tmp_path, monkeypatch)
+    assert any(r["support_experts"] == 1 and r["sev3"] >= 2 for r in registry.registry_rows(store, key))
     routes.post_units(key, routes.UnitsBody(reason="검토 얹기"), ident=factories.ident(OWNER))
     unit = _units(store, key)[0]
     _review(store, key, (SEAL,), [unit], verdicts={"K01": ("yes", "FAIL")})
