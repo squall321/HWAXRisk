@@ -78,6 +78,17 @@ class Ledger:
         """검토한(reviewed) 셀의 단위 — seq 순."""
         return [u for u in self.units if (self.cells.get(u["unit_id"]) or {}).get("state") == "reviewed"]
 
+    def partial(self) -> list[dict]:
+        """넘긴(skipped) 셀 가운데 이미 정산된 걸림을 실은 단위 — seq 순. 그 걸림은 보고서 · finding 에 남는다(반대 검토 MEDIUM 8 —
+        '넘긴 셀 — 일부만 판정')."""
+        return [u for u in self.units if (self.cells.get(u["unit_id"]) or {}).get("state") == "skipped"
+                and int((self.cells[u["unit_id"]]).get("_hits") or 0) > 0]
+
+    def judged(self) -> list[dict]:
+        """finding · 점검표가 읽는 단위 — 검토한 셀과 걸림을 실은 넘긴 셀(seq 순)."""
+        keep = {u["unit_id"] for u in self.reviewed()} | {u["unit_id"] for u in self.partial()}
+        return [u for u in self.units if u["unit_id"] in keep]
+
     def effective(self, unit_id: str) -> dict[str, dict]:
         """record_id → 실효 판정(실효 변형 행의 열 + effective_rows 의 표기). applies·judgement 는 실효 규칙의 값이다 — 변형이 갈린
         카드(split)는 행에 적힌 변형의 판정이 아니라 undetermined 다(X1-14). 행의 원래 값은 row_applies·row_judgement 에 둔다."""
@@ -147,7 +158,10 @@ def load_ledger(store: Any, target_key: str, agent_key: str, *, with_pack: bool 
     ledger = Ledger(target_key=target_key, agent_key=agent_key, head=dict(head), target=dict(target), order=dict(order),
                     pack=cardpack.load_for(store, target_key, agent_key) if with_pack else None, units=unit_rows,
                     cells=cells, rows=rows)
-    for unit in ledger.reviewed():
+    for unit_id, cell in cells.items():
+        if cell["state"] == "skipped":
+            cell["_hits"] = review_cells.cell_hits(store, target_key, unit_id, agent_key)
+    for unit in ledger.judged():
         ledger.payloads[unit["unit_id"]] = units.review_payload(store, target_key, unit["unit_id"], agent_key)
         key = _s(ledger.cells[unit["unit_id"]].get("pack_hash"))
         if key and key not in ledger.packs and (ledger.pack is None or key != ledger.pack.pack_key):
@@ -566,11 +580,14 @@ def build_findings(store: Any, ledger: Ledger) -> dict:
     warnings: list[str] = []
     curation: list[dict] = []
     findings: list[dict] = []
-    for unit in ledger.reviewed():
+    partial = {u["unit_id"] for u in ledger.partial()}
+    for unit in ledger.judged():
         unit_id = unit["unit_id"]
         # 카드 인용은 그 셀을 본 묶음의 글로 검증한다 — 묶음이 바뀐 대상에서 머리 묶음으로 보면 같은 record_id 의 다른 글에 댄다(R3B-2).
         local = dataclasses.replace(ctx, card_pack=ledger.unit_cards(unit_id))
-        members = (_card_members(ledger, unit_id, local, items) + _offcard_members(ledger, unit_id, local, items)
+        # 넘긴 셀은 이미 정산된 걸림(실효 판정 · 입력 결손 영향)만 — 끝내 못 받은 카드 밖 호출은 없다(반대 검토 MEDIUM 8)
+        members = (_card_members(ledger, unit_id, local, items)
+                   + ([] if unit_id in partial else _offcard_members(ledger, unit_id, local, items))
                    + _noinput_members(ledger, unit_id, local, items))
         groups: dict[tuple[str, str], list[_Member]] = {}
         for member in members:
@@ -636,7 +653,8 @@ def _scope_section(ledger: Ledger, state: str) -> dict:
         if cell_state == "failed":
             why = {"code": cell.get("error_code"), "text": cell.get("error")}
         elif cell_state == "skipped":
-            why = {"code": "skipped", "text": cell.get("decide_note"), "by": cell.get("decided_by")}   # 넘김 — 사유(C3-4)
+            why = {"code": "skipped", "text": cell.get("decide_note"), "by": cell.get("decided_by"),   # 넘김 — 사유(C3-4)
+                   "hits": int(cell.get("_hits") or 0)}       # 이미 정산된 걸림 — 보고서 · finding 에 남는다(MEDIUM 8)
         elif cell.get("run_id") != run_id:
             why = {"code": "out_of_scope", "text": None}
         elif state == "blocked":
@@ -756,6 +774,7 @@ def _checklist_row(ledger: Ledger, unit: Mapping[str, Any], eff: Mapping[str, An
         # 판정을 갈아 끼웠다(엔진이 스스로 고친 값을 바로잡은 것일 수 있다)
         **_conflict_marks([_json(variants[v].get("checks_json"), {}) for v in ("fwd", "rev", "solo") if v in variants]
                           + [checks]),
+        **({"partial_cell": True} if (ledger.cells.get(unit["unit_id"]) or {}).get("state") == "skipped" else {}),
     }
 
 
@@ -811,7 +830,8 @@ def _row_head(eff: Mapping[str, Any]) -> dict:
 
 def _card_units(ledger: Ledger) -> list[dict]:
     """카드로 본(basis='cards') 검토한 단위 — 점검표의 열."""
-    return [u for u in ledger.reviewed() if (ledger.cells[u["unit_id"]].get("basis")) == "cards"]
+    return [u for u in ledger.judged() if (ledger.cells[u["unit_id"]].get("basis")) == "cards"
+            or (u in ledger.partial() and ledger.rows.get(u["unit_id"]))]
 
 
 def _checklist_section(ledger: Ledger, finding_of: Mapping[tuple[str, str], str]) -> list[dict]:
@@ -1632,7 +1652,9 @@ def _md_scope(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
     for x in unseen:
         why = x["why"]
         text = why_word.get(why["code"]) or f"{_STATE_WORD.get(x['state'], _q(x['state']))} {_q(why['code'])}"
-        items.append(f"- 단위 {x['unit_seq']} {_q(x['title'])} — {text}" + (f" {_q(why['text'])}" if why.get("text") else ""))
+        items.append(f"- 단위 {x['unit_seq']} {_q(x['title'])} — {text}" + (f" {_q(why['text'])}" if why.get("text") else "")
+                     + (f" · 넘긴 셀 — 일부만 판정(이미 정산된 걸림 {why['hits']}건은 점검표 · finding 에 남겼다)"
+                        if why.get("hits") else ""))
     if not unseen:
         items.append("- 없음 — 이 전문가의 단위 전부를 검토했다.")
     filtered = [x for x in scope.get("filtered") or () if not unit_id or x["unit_id"] == unit_id]
@@ -1644,7 +1666,8 @@ def _md_scope(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
 
 def _row_marks(row: Mapping[str, Any], card: Mapping[str, Any] | None) -> list[str]:
     """점검표 행의 표기 — 변형 갈림 · 뒤집힘 · 다툼 · 인용 대조 갈림 · 카드 글 바뀜 · 그때 별칭 · 근거 없는 수 · 엔진 보충."""
-    marks = [m for m, on in (("변형 갈림", row["split"]), ("뒤집힘", row["flipped"]), ("다툼", row["disputed"]),
+    marks = [m for m, on in (("넘긴 셀 — 일부만 판정", row.get("partial_cell")),
+                             ("변형 갈림", row["split"]), ("뒤집힘", row["flipped"]), ("다툼", row["disputed"]),
                              ("서버와 앱의 인용 대조 갈림", row["check_disagree"]),
                              ("카드 글이 바뀌었다 — 이 판정은 앞 글로 했다", row.get("card_changed"))) if on]
     if card is not None and row.get("alias") and row["alias"] != card.get("alias"):

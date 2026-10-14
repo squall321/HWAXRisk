@@ -227,7 +227,8 @@ def test_skip_needs_a_reason_and_the_expert_closes_again_with_the_skip_in_the_re
     assert len(fake.calls("run")) == calls                                            # 마감 잡은 엔진을 부르지 않는다
     assert _head(store, key, PEER)["state"] == "ready" and _seat(store, key, PEER) == ("done_weak", "partial:1")
     report = expert_report.load_report(store, key, PEER)
-    assert [u["why"] for u in report["scope"]["unseen"]] == [{"code": "skipped", "text": "입력이 와야 본다", "by": OWNER}]
+    assert [u["why"] for u in report["scope"]["unseen"]] == [{"code": "skipped", "text": "입력이 와야 본다", "by": OWNER,
+                                                              "hits": 0}]
     assert routes.coverage_payload(key, owner_sub=OWNER)["review"]["dispositions"] == {"retried": 0, "skipped": 1}
     assert len(_audits(store, "cells.skip")) == 1
 
@@ -351,3 +352,33 @@ def test_identity_source_of_the_audit_follows_the_entry(store):
     web = identity.Identity(email=OWNER, display_name="합성", role="user", organization="qa", anonymous=False, source="cookie")
     routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": job_id}, reason="웹 화면에서 넘긴다"), ident=web)
     assert [(a["channel"], a["actor_verified"]) for a in _audits(store, "cells.skip")] == [("web", 1)]
+
+
+def test_a_skipped_cell_keeps_its_settled_hits_in_the_report_and_findings(store):
+    """반대 검토 MEDIUM 8(사용자 결정) — 판정은 받았는데 카드 밖 호출이 끝내 실패한 셀을 넘겨도 이미 정산된 걸림(실효 FAIL)은 버리지
+    않는다 — 넘김 응답이 그 수(hits)를 말하고, 전문가 보고서 점검표에 '넘긴 셀 — 일부만 판정' 표지로, finding 으로 남는다."""
+    from app import expert_report
+
+    from app import units
+
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": unit_ids[:1]})
+    fake = FakeReviewEngine(rig.packs())
+    fail_record = str(fre.load("pack_ok.json")["cards"][0]["record_id"])
+    fake.verdicts = {fail_record: ("yes", "FAIL")}
+    fake.error_cells, fake.error_kinds = {(SEAL, unit_ids[0]): NO_ROWS}, {"offcard"}
+    rig.Rig(store, fake).finish(job_id)
+    cell = _cells(store, key, SEAL)[unit_ids[0]]
+    assert cell["state"] == "failed" and cell["n_fail"] >= 1
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": job_id}, reason="카드 밖 호출이 계속 실패"),
+                                 ident=ME)
+    assert (out["skipped"], out["hits"]) == (1, 1)
+    rig.Rig(store, fake).finish(out["job"]["job_id"])
+    report = expert_report.load_report(store, key, SEAL)
+    rows = [r for c in report["checklist"] for r in c["rows"] if r.get("unit_id") == unit_ids[0] and not r.get("missing")]
+    assert rows and all(r.get("partial_cell") for r in rows)
+    flagged = [r for r in rows if r["judgement"] == "FAIL"]
+    assert len(flagged) == 1 and flagged[0]["finding_id"]
+    assert any(f["unit_id"] == unit_ids[0] for f in report["findings"])
+    assert "넘긴 셀 — 일부만 판정" in expert_report.render_report_md(report)

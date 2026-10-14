@@ -1291,6 +1291,22 @@ def retry_cells(store: Any, target_key: str, rows: Sequence[Mapping[str, Any]], 
     return changed
 
 
+def cell_hits(store: Any, target_key: str, unit_id: str, agent_key: str) -> int:
+    """그 셀에 이미 정산된 걸림 수(반대 검토 MEDIUM 8 — 넘긴 셀도 이것은 센다) — 실효 판정이 FAIL · WARNING 이거나 엔진이 부딪침 표지를
+    단 판정 행(카드마다 하나), 입력 결손 q1 의 영향 있음 · 모름."""
+    rows = [dict(r) for r in store.query(f"SELECT * FROM rr_card_verdicts WHERE {_cell_where()}", (target_key, unit_id, agent_key))]
+    effective = review_verify.effective_rows(rows) if rows else {}
+    marked = {str(r["record_id"]) for r in rows if review_verify.engine_conflict(r)}
+    hits = {rid for rid, mark in effective.items() if mark["judgement"] in review_verify.FLAGGED} | marked
+    cell = _cell(store, target_key, unit_id, agent_key)
+    try:
+        extras = json.loads((cell or {}).get("extras_json") or "{}")
+    except ValueError:
+        extras = {}
+    q1 = ((extras.get("noinput") or {}) if isinstance(extras, dict) else {}).get("q1") or ()
+    return len(hits) + sum(1 for r in q1 if isinstance(r, dict) and r.get("impact") in ("yes", "unknown"))
+
+
 def skip_cells(store: Any, target_key: str, rows: Sequence[Mapping[str, Any]], *, decided_by: str, note: str,
                now: int | None = None) -> list[dict]:
     """사람의 넘김 — `failed` 셀만 `skipped` 로(사유 필수 — 부른 쪽이 본다). 사람 표기 열을 적고, 그 전문가 머리 ready·partial·
