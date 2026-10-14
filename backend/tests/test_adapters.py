@@ -425,6 +425,46 @@ def test_a_bridge_failure_without_a_way_out_says_which_credential_failed(tmp_pat
     assert seen == [BRIDGE, SERVICE] and rest.bridge_failure["http_status"] == 502
 
 
+@pytest.mark.parametrize("service_pat", ["service-pat", None], ids=["service_pat", "no_service_pat"])
+@pytest.mark.parametrize("status", [502, 503, 504, None], ids=["http_502", "http_503", "http_504", "transport"])
+def test_a_dead_bridge_is_skipped_for_the_rest_of_the_capture(tmp_path, status, service_pat):
+    """다리의 502·503·504 는 게이트웨이가 상류 실패·시간 초과(한 번에 110초)로 내는 것이다 — 전송 오류처럼 그 캡처의 남은 호출은 다리를
+    건너뛴다(R2-3). 서비스 PAT 가 없는 박스(cae00)에서도 건너뛰고, 남은 호출은 다리를 부르지 않고 곧바로 실패를 돌려준다."""
+    rest, seen, _ = _bridge_box(tmp_path, bridge=status, service_pat=service_pat)
+    replies = [rest.get(TREE) for _ in range(5)]
+    assert seen.count(BRIDGE) == 1, seen
+    assert rest.bridge_failure["http_status"] == status
+    if service_pat:
+        assert all(r["ok"] for r in replies) and seen == [BRIDGE] + [SERVICE] * 5
+        assert rest.used == ["user_pat_gateway", "service_pat"]
+    else:
+        assert seen == [BRIDGE] and not any(r["ok"] for r in replies) and rest.used == ["user_pat_gateway"]
+        assert replies[0]["error"].startswith("user_pat_gateway ") and replies[0]["http_status"] == status
+        for reply in replies[1:]:
+            assert reply["http_status"] is None and reply["error"].startswith("user_pat_gateway 건너뜀"), reply
+
+
+@pytest.mark.parametrize("service_pat", ["service-pat", None], ids=["service_pat", "no_service_pat"])
+@pytest.mark.parametrize("status", [401, 403, 404])
+def test_a_refusing_bridge_is_asked_again_on_every_call(tmp_path, status, service_pat):
+    """401·403·404 는 그 경로·그 사람만의 거절일 수 있다 — 호출마다 다리에 다시 묻는다(넘어갈 곳이 있으면 그 호출만 넘어간다)."""
+    rest, seen, _ = _bridge_box(tmp_path, bridge=status, service_pat=service_pat)
+    replies = [rest.get(TREE) for _ in range(3)]
+    assert seen.count(BRIDGE) == 3, seen
+    assert all(r["ok"] for r in replies) is bool(service_pat)
+
+
+def test_the_skip_names_the_failure_that_killed_the_bridge_not_an_earlier_refusal(tmp_path):
+    """앞선 호출의 404(그 경로만의 거절) 뒤에 504 가 다리를 죽였으면, 건너뛴 호출은 504 를 말한다 — bridge_failure 는 처음 실패 그대로다."""
+    rest, seen, state = _bridge_box(tmp_path, bridge=404, service_pat=None)
+    rest.get(TREE)
+    state["bridge"] = 504
+    rest.get(TREE)
+    skipped = rest.get(TREE)
+    assert seen == [BRIDGE, BRIDGE] and "http_504" in skipped["error"] and "http_404" not in skipped["error"]
+    assert rest.bridge_failure == {"http_status": 404, "error": "http_404"}
+
+
 def test_a_source_call_that_times_out_names_the_limit_and_the_knob():
     """침묵 한도에 걸린 호출은 호출 행에 값과 손잡이를 남긴다 — 'transport_error' 만으로는 어느 한도인지 모른다."""
     def silent(request: httpx.Request) -> httpx.Response:
