@@ -307,6 +307,26 @@ def test_the_guide_says_the_issue_job_waits_for_a_pat(store, monkeypatch):
     assert pat["job_id"] == issue_job["id"] and out["where"] == "issues"
 
 
+def test_the_guide_shows_a_credential_hold_on_the_issue_job_with_how_to_register(store):
+    """review1 M1 — 쟁점 잡이 자격 실패로 보류 credential 에 멈추면 길잡이는 막힘 chain_paused(재개가 맨 앞)와 pat_unavailable(포털에서
+    PAT 를 등록하는 법)을 함께 준다. 사슬은 그동안 종합으로 넘어가지 않는다."""
+    from tests.test_review_mcp import _delegate, _project_with_source
+
+    key = rig.target(store)
+    project_id = _project_with_source(store, key)
+    _review(store, key)
+    issue_job = _one(_jobs(store, key, "issues"), "issues 잡")
+    engine = IssuePanelEngine(store, {"*": runner.PatUnavailable("koo@example.com 의 PAT 가 만료됐다(가짜)")})
+    runner.run_panel(store, config.settings, engine, runner.claim_next_job(store, config.settings, engine=engine))
+    out = entry.next_step(_delegate(), project_id=project_id)
+    codes = [b["code"] for b in out["blocked"]]
+    assert "chain_paused" in codes and "pat_unavailable" in codes and out["where"] == "issues"
+    pat = _one([b for b in out["blocked"] if b["code"] == "pat_unavailable"], "막힘 pat_unavailable")
+    assert pat["job_id"] == issue_job["id"] and "PAT" in pat["fix"]
+    assert out["next"][0] == {**out["next"][0], "tool": "risk_job_action", "args": {"job_id": issue_job["id"], "action": "resume"}}
+    assert chain.sweep(store)["made"] == [] and _jobs(store, key, "synth") == []
+
+
 def test_a_c2_target_chains_once_its_tier_b_scope_closes_even_with_other_cells_open(store):
     """마감 레벨 C2 대상(M2 때 연 cells 대상)의 마감 범위는 Tier B 범위(A·B)다 — 그 전문가만 돈 검토 잡이 끝나면 나머지 셀이 열려
     있어도 쟁점을 고르고 쟁점 잡을 세운다. 같은 범위를 C3 대상에서 돌면 판만 선다."""
