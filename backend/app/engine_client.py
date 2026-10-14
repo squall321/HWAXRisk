@@ -743,7 +743,7 @@ def run_body(kind: str, *, target_key: str, pack: cardpack.FrozenPack, cards: Se
       (`cardpack.cards_for` — rev 도 뒤집지 않는다, 엔진이 뒤집는다), `digest` 는 별칭의 {alias, type, title, record_id, card_id}.
     - `unit` 은 `units.review_payload` 의 출력, `manifest` 는 `units.manifest_items` 의 한 쪽이다 — 둘 다 그대로 싣는다.
     - `known` 은 이미 낸 판정 행에서 {alias, judgement, why} 만(엔진 KnownItem), `extra.domains`·`mechanisms` 는 위 둘이다.
-    - `expect` 는 준 것만 싣는다(엔진은 실린 판만 견준다).
+    - `expect` 는 준 것만 싣는다(엔진은 실린 판만 견준다 — run 은 그 종류의 판 `limits_rev_kind`, RB3-6).
     - `missing` 은 입력 결손 전문가의 훑기에만 싣는 전문가 단위 결측 `extra.missing[{kind, note}]`(cr-sweep-2 — 결측 입력이 와도
       무관한 단위만 no, 가릴 수 없으면 maybe. 재설계 M3 C3-3). 비면 칸을 싣지 않는다 — 엔진은 sweep 밖의 그 칸을 422 로 거절한다.
     """
@@ -764,7 +764,7 @@ def run_body(kind: str, *, target_key: str, pack: cardpack.FrozenPack, cards: Se
     if missing:
         body["extra"]["missing"] = [{"kind": _text(m.get("kind")), "note": _text(m.get("note"))} for m in missing]
     if expect:
-        body["expect"] = {k: expect[k] for k in ("prompt_rev", "limits_rev") if expect.get(k) is not None}
+        body["expect"] = {k: expect[k] for k in ("prompt_rev", "limits_rev", "limits_rev_kind") if expect.get(k) is not None}
     return body
 
 

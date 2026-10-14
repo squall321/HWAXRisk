@@ -93,7 +93,8 @@ def _bodies(store, target_key: str) -> dict[str, dict]:
         checkable, background = list(frozen.checkable), list(frozen.background)
 
         def body(kind: str, unit_id: str | None, **kw) -> dict:
-            expect = {"prompt_rev": limits["prompt_rev"][kind], "limits_rev": limits["limits_rev"]}
+            # 검토 루프가 run 에 싣는 기대 판 — 그 종류의 prompt_rev 와 그 종류의 창 판(RB3-6, review_runner._Session._expect)
+            expect = {"prompt_rev": limits["prompt_rev"][kind], "limits_rev_kind": limits["limits_rev_by_kind"][kind]}
             unit = units.review_payload(store, target_key, unit_id, agent) if unit_id else None
             return engine_client.run_body(kind, target_key=target_key, pack=frozen, unit=unit, expect=expect, **kw)
 

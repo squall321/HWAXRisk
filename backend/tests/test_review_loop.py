@@ -138,7 +138,9 @@ def test_an_expert_session_sweeps_then_runs_every_deck_over_every_unit_before_th
     assert seen == expected
     fwd = next(b for b in _runs(fake) if b["variant"] == "fwd")
     assert [d["alias"] for d in fwd["digest"]] == ["K05", "K06", *background]
-    assert fwd["expect"] == {"prompt_rev": limits["prompt_rev"]["verdict"], "limits_rev": limits["limits_rev"]}
+    # run 의 기대 판은 그 종류의 판이다(엔진 RunExpect — RB3-6)
+    assert fwd["expect"] == {"prompt_rev": limits["prompt_rev"]["verdict"],
+                             "limits_rev_kind": limits["limits_rev_by_kind"]["verdict"]}
     offcard = [b for b in _runs(fake) if b["kind"] == "offcard"][0]
     assert [d["alias"] for d in offcard["digest"]] == decks[0] + decks[1]
     assert [k["alias"] for k in offcard["extra"]["known"]] == decks[0] + decks[1]
@@ -1215,9 +1217,9 @@ def test_a_revision_change_mid_job_replans_and_carries_on_and_a_real_mismatch_ho
 
 def test_a_summary_only_move_replans_without_restarting_any_cell(store, monkeypatch):
     """#37 · RB3-6 — 엔진이 요약 손잡이·요약 판만 올리면(전역 limits_rev 와 종류별 summary 판 · summary prompt_rev 가 바뀌고 카드
-    전문가가 부르는 종류의 판은 그대로) 도는 호출은 rev_mismatch 로 한 번 닫히고 세션이 놓였다가 이어 돈다. 셀 지문·계획·훑기 열쇠는
-    그 셀이 부르는 종류의 판만 잇기 때문에 어느 셀도 처음부터 돌지 않고(reopened_n 0 · 입력 지문 그대로) 계획과 훑기를 다시 받지
-    않는다."""
+    전문가가 부르는 종류의 판은 그대로) 도는 잡은 아무 일 없이 이어 돈다 — run 의 expect 가 그 종류의 판이라 rev_mismatch 가 없고,
+    셀 지문·계획·훑기 열쇠도 그 셀이 부르는 종류의 판만 잇기 때문에 어느 셀도 처음부터 돌지 않으며(reopened_n 0 · 입력 지문 그대로)
+    계획과 훑기를 다시 받지 않는다."""
     from app import review_runner
 
     _one(store, monkeypatch)
@@ -1240,7 +1242,7 @@ def test_a_summary_only_move_replans_without_restarting_any_cell(store, monkeypa
     r.loop.join(30)
     r.finish(job_id)
     assert rig.state(store, job_id) == "completed"
-    assert [c["outcome_class"] for c in _calls(store, job_id, error_code="rev_mismatch")] == ["job"]
+    assert _calls(store, job_id, error_code="rev_mismatch") == []
     assert {(c["state"], c["reopened_n"]) for c in _cells(store, key, SEAL)} == {("reviewed", 0)}
     assert {c["unit_id"]: c["input_hash"] for c in _cells(store, key, SEAL)} == hashes
     assert len(fake.calls("plan")) == 1
@@ -1250,6 +1252,25 @@ def test_a_summary_only_move_replans_without_restarting_any_cell(store, monkeypa
     assert head["limits_rev"] == review_runner.limits_key(fake.limits(), review_runner.CARD_KINDS)
     assert head["limits_rev"] == "offcard=offcard-rev-1,sweep=sweep-rev-1,verdict=verdict-rev-1"
     assert head["prompt_rev"] == review_runner.prompt_key(fake.limits(), review_runner.CARD_KINDS)
+
+
+def test_an_engine_without_per_kind_revs_is_asked_with_the_global_rev(store, monkeypatch):
+    """종류별 판(limits_rev_by_kind)을 내지 않는 엔진(M2)에는 run 의 expect 가 전역 limits_rev 이고 머리·셀의 판 열쇠도 전역 판
+    그대로다(M2 원장과 같은 값)."""
+    from app import review_runner
+
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    unit_id = _unit_ids(store, key)[0]
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [unit_id]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    fake.base_limits.pop("limits_rev_by_kind")
+    rig.Rig(store, fake).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    fwd = next(b for b in _runs(fake) if b["kind"] == "verdict")
+    assert fwd["expect"] == {"prompt_rev": fake.base_limits["prompt_rev"]["verdict"], "limits_rev": fake.limits_rev}
+    assert _head(store, key, SEAL)["limits_rev"] == fake.limits_rev
+    assert review_runner.limits_key(fake.limits(), review_runner.CARD_KINDS) == fake.limits_rev
 
 
 def test_the_cell_keys_take_only_the_kinds_the_cell_calls_and_fall_back_to_the_global_rev():

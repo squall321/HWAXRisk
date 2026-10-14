@@ -973,9 +973,12 @@ class _Session:
         return self.payloads[unit_id]
 
     def _expect(self, kind: str) -> dict:
-        """요청의 `expect` — 그 종류의 prompt_rev 와 전역 limits_rev(엔진이 지금 견주는 칸). 엔진이 종류별 expect 칸을 열면 그 종류의
-        창 판으로 바꾼다(RB3-6)."""
+        """run 요청의 `expect` — 그 종류의 prompt_rev 와 그 종류의 창 판 `limits_rev_kind`(엔진 RunExpect — RB3-6: 요약 손잡이처럼 다른
+        종류에만 닿는 판 변경이 도는 셀을 흔들지 않는다). 종류별 판을 내지 않는 엔진(M2)에는 전역 limits_rev 를 보낸다."""
         revs = self.lim.get("prompt_rev") if isinstance(self.lim.get("prompt_rev"), Mapping) else {}
+        by_kind = self.lim.get("limits_rev_by_kind")
+        if isinstance(by_kind, Mapping) and by_kind.get(kind) is not None:
+            return {"prompt_rev": revs.get(kind), "limits_rev_kind": by_kind.get(kind)}
         return {"prompt_rev": revs.get(kind), "limits_rev": self.lim.get("limits_rev")}
 
     def _plan(self) -> dict:
@@ -1185,16 +1188,15 @@ class _Session:
         raise _Stop("cancelled")
 
     def _limits_moved(self) -> bool:
-        """엔진의 rev_mismatch 가 판이 바뀐 탓인가 — 새로 받은 limits 의 limits_rev(전역 · 이 셀이 부르는 종류의 것)나 그 종류의
-        prompt_rev 가 이 세션의 것과 다르면 참이다. 에이전트 서버가 프롬프트 판만 올리면 limits_rev 는 그대로라(그 원천에 PROMPT_REV
-        가 없다) 둘 다 본다(R3A-6). 요청의 `expect` 는 아직 전역 판이라 요약 손잡이만 바뀌어도 rev_mismatch 가 온다 — 그때도 놓고
-        다시 계획하지만, 셀 지문은 종류별 판이라 도는 셀은 처음부터 돌지 않는다(RB3-6)."""
+        """엔진의 rev_mismatch 가 판이 바뀐 탓인가 — 새로 받은 limits 에서 이 셀이 부르는 종류의 창 판(`limits_key` — 종류별 판이 없는
+        엔진이면 전역 판)이나 prompt_rev 가 이 세션의 것과 다르면 참이다. 에이전트 서버가 프롬프트 판만 올리면 창 판은 그대로라(그
+        원천에 PROMPT_REV 가 없다) 둘 다 본다(R3A-6). 다른 종류에만 닿은 변경은 run 의 expect 가 종류별 판이라 rev_mismatch 가 되지
+        않는다(RB3-6) — 그런데도 온 rev_mismatch 는 앱의 계약 어긋남이라 contract 보류다."""
         try:
             fresh = self.loop.limits_for(self.email, fresh=True)
         except _ENGINE_ERRORS:
             return False
-        return (fresh.get("limits_rev") != self.lim.get("limits_rev")
-                or limits_key(fresh, self.kinds) != limits_key(self.lim, self.kinds)
+        return (limits_key(fresh, self.kinds) != limits_key(self.lim, self.kinds)
                 or prompt_key(fresh, self.kinds) != prompt_key(self.lim, self.kinds))
 
     def _note(self, cell: _Cell | None, kind: str, variant: str | None, aliases: Sequence[str], result: Mapping[str, Any],
