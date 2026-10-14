@@ -158,6 +158,11 @@ def test_a_crash_between_the_review_and_the_next_job_is_filled_by_one_sweep(stor
     made = chain.sweep(store)["made"]
     assert [(m["after"], m["stage"]) for m in made] == [(job_id, "issues")]
     assert chain.sweep(store)["made"] == []
+    # 훅이 한 번 더 불려도(겹친 sweep) 앞 잡 하나에 다음 잡은 하나 — 살아 있는 쟁점 잡이 있어 세우지 않고, 직접 세우려 해도 그 잡이다.
+    again = chain.on_reviews_closed(store, rig.job_row(store, job_id))
+    assert (again["stage"], again["reason"], again["job_id"]) == (None, "issues_live", made[0]["job_id"])
+    twice = chain.create_stage_job(store, key, "issues", prev=rig.job_row(store, job_id), reason="sweep", round_no=1)
+    assert (twice["created"], twice["job_id"]) == (False, made[0]["job_id"])
     assert len(_jobs(store, key, "issues")) == 1
 
 
@@ -291,3 +296,54 @@ def test_the_guide_says_the_issue_job_waits_for_a_pat(store, monkeypatch):
     out = entry.next_step(_delegate(), project_id=project_id)
     (pat,) = [b for b in out["blocked"] if b["code"] == "pat_unavailable"]
     assert pat["job_id"] == issue_job["id"] and out["where"] == "issues"
+
+
+def test_a_c2_target_chains_once_its_tier_b_scope_closes_even_with_other_cells_open(store):
+    """마감 레벨 C2 대상(M2 때 연 cells 대상)의 마감 범위는 Tier B 범위(A·B)다 — 그 전문가만 돈 검토 잡이 끝나면 나머지 셀이 열려
+    있어도 쟁점을 고르고 쟁점 잡을 세운다. 같은 범위를 C3 대상에서 돌면 판만 선다."""
+    from app import planner
+
+    key = rig.target(store)
+    store.execute("UPDATE rr_targets SET close_level = 'C2' WHERE target_key = ?", (key,))   # M2 때 얼린 패널 손잡이 값
+    tier_b = [r["agent_key"] for r in planner.review_order(store, key) if r["tier"] in ("A", "B")]
+    assert 0 < len(tier_b) < len(rig.ROSTER)
+    _review(store, key, scope={"agents": tier_b})
+    assert chain.scope_open(store, key) == 0
+    assert store.query_one("SELECT COUNT(*) AS n FROM rr_review_cells WHERE target_key = ? AND state = 'pending'",
+                           (key,))["n"] > 0
+    assert len(_jobs(store, key, "issues") + _jobs(store, key, "synth")) == 1
+    other = rig.target(store, seed=7)
+    _review(store, other, scope={"agents": tier_b})
+    assert chain.scope_open(store, other) > 0 and _jobs(store, other, "issues") == _jobs(store, other, "synth") == []
+
+
+def test_a_review_that_closes_while_a_stage_waits_leaves_the_next_step_to_that_stage(store):
+    """살아 있는 단계가 있으면 사슬은 같은 일을 또 세우지 않는다 — 쟁점 잡이 줄에 있으면 새 쟁점 잡도 종합 잡도 없고(그 잡이 끝나면
+    종합을 잇는다), 종합 잡이 아직 집히지 않았으면 새 종합 잡이 없다. 끝내 종합 잡은 하나다."""
+    key = rig.target(store)
+    _review(store, key)
+    (issue_job,) = _jobs(store, key, "issues")
+    for issue in [i for i in issues.issue_rows(store, key) if i["state"] == "queued"]:
+        routes.put_issue(issue["issue_id"], routes.IssueActionBody(action="skip", reason="이번에는 넘긴다"),
+                         ident=factories.ident(OWNER))
+    retry = store.query_one("SELECT unit_id, agent_key, state FROM rr_review_cells WHERE target_key = ? AND agent_key = ?"
+                            " AND state = 'reviewed' LIMIT 1", (key, "xd-syn-1"))
+    from app import review_runner
+
+    made = review_runner.dispose_cells(store, key, action="retry", rows=[dict(retry)], decided_by=OWNER, owner_sub=OWNER,
+                                       note="다시 본다", force=True, start=True, consent=True, consent_source="web")
+    rig.Rig(store, _fake()).finish(made["job"]["job_id"])
+    assert [j["id"] for j in _jobs(store, key, "issues")] == [issue_job["id"]] and _jobs(store, key, "synth") == []
+    # 줄에 선 쟁점 잡이 이번 고르기의 지문을 받았다 — 쟁점을 다 그대로 둔 다시 고르기라도 쟁점 단계가 지금 지문으로 신선하다.
+    rearmed = _jobs(store, key, "issues")[0]["chain"]
+    assert (rearmed["rearmed_by"], rearmed["cells_hash"]) == (made["job"]["job_id"], closure.closing_hash(store, key))
+    assert closure.refresh(store, key)["detail"]["fresh"]["issues"] is True
+    _run_issue_jobs(store, IssuePanelEngine(store))
+    (synth_job,) = _jobs(store, key, "synth")
+    assert synth_job["chain"]["prev_job_id"] == issue_job["id"]
+    again = review_runner.dispose_cells(store, key, action="retry", rows=[dict(retry)], decided_by=OWNER,
+                                        owner_sub=OWNER, note="한 번 더", force=True, start=True, consent=True,
+                                        consent_source="web")
+    rig.Rig(store, _fake()).finish(again["job"]["job_id"])
+    assert [j["id"] for j in _jobs(store, key, "synth")] == [synth_job["id"]]
+    assert _jobs(store, key, "synth")[0]["chain"]["rearmed_by"] == again["job"]["job_id"]

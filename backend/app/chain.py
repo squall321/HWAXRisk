@@ -21,7 +21,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
-from app import closure, issues, registry, synth
+from app import closure, common, issues, registry, synth
 from app.risk_store import RiskStore
 
 log = logging.getLogger("hwax_risk.chain")
@@ -75,6 +75,21 @@ def _busy(store: RiskStore, target_key: str, stage: str) -> dict | None:
     row = store.query_one("SELECT id, mode, state FROM rr_jobs WHERE target_key = ? AND mode = 'synth' AND state = 'queued'"
                           " ORDER BY created_at DESC LIMIT 1", (target_key,))
     return dict(row) if row is not None else None
+
+
+def _rearm(store: RiskStore, target_key: str, job_id: str, *, by: str, round_no: int) -> dict:
+    """살아 있는 단계 잡이 지금 원장으로 돈다는 표지 — 그 잡의 chain_json 의 지문(cells_hash · registry_hash · reopened_n · round)을
+    지금 값으로 고치고 다시 세운 앞 잡(`rearmed_by`)을 적는다. 앞 잡·뿌리는 그대로다(멱등의 열쇠). 사슬 밖에서 선 잡(사람이 올린 쟁점의
+    잡)이면 지금 잡을 뿌리로 새로 적는다. 이것이 없으면 쟁점을 다 그대로 둔 다시 고르기는 지문을 어디에도 남기지 않아 '후속 낡음' 이
+    풀리지 않는다."""
+    row = store.query_one("SELECT mode, chain_json FROM rr_jobs WHERE id = ?", (job_id,))
+    chain = _loads(row["chain_json"]) or {"root_job_id": by, "prev_job_id": None, "stage": row["mode"], "scope_open": 0,
+                                          "reason": "rearmed"}
+    chain.update({"round": int(round_no), "cells_hash": closure.closing_hash(store, target_key),
+                  "registry_hash": synth.registry_hash(store, target_key),
+                  "reopened_n": closure.reopened_sum(store, target_key), "rearmed_by": by})
+    store.execute("UPDATE rr_jobs SET chain_json = ? WHERE id = ?", (common.canonical_json(chain), job_id))
+    return chain
 
 
 def _followed(store: RiskStore, job_id: str) -> str | None:
@@ -138,6 +153,7 @@ def on_reviews_closed(store: RiskStore, job: Mapping[str, Any]) -> dict:
     stage = "issues" if queued else "synth"
     live = _busy(store, key, stage)
     if live is not None:
+        _rearm(store, key, live["id"], by=str(job["id"]), round_no=round_no)
         out = {"stage": None, "reason": f"{live['mode']}_live", "job_id": live["id"], "report": report}
     else:
         out = {**create_stage_job(store, key, stage, prev=_job(store, str(job["id"])),
@@ -157,10 +173,11 @@ def on_issues_closed(store: RiskStore, job: Mapping[str, Any]) -> dict:
     registry.merge(store, key)
     report = synth.safe_assemble(store, key, trigger="issues_closed")
     live = _busy(store, key, "synth")
+    round_no = int(_loads(row["chain_json"]).get("round") or max(_next_round(store, key) - 1, 1))
     if live is not None:
+        _rearm(store, key, live["id"], by=str(row["id"]), round_no=round_no)
         out = {"stage": None, "reason": f"{live['mode']}_live", "job_id": live["id"], "report": report}
     else:
-        round_no = int(_loads(row["chain_json"]).get("round") or max(_next_round(store, key) - 1, 1))
         out = {**create_stage_job(store, key, "synth", prev=row, reason=f"issues_{row['state']}", round_no=round_no),
                "report": report}
     closure.refresh(store, key)

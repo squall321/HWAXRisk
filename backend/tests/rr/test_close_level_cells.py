@@ -242,3 +242,5 @@ def test_row13_a_cell_reopened_after_the_selection_makes_the_issue_stage_stale_u
     _issues(store)
     again = closure.refresh(store, key)
     assert (again["c2"], again["detail"]["fresh"]["issues"]) == (True, True) and "후속 낡음(재검토" not in again["level_label"]
+    _reopen(store, key, _cell(store, key, "mech-syn-0", state="reviewed"), start=False)  # 다시 고른 뒤의 재검토만 센다
+    assert "후속 낡음(재검토 1셀)" in closure.refresh(store, key)["level_label"]
