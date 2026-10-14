@@ -318,7 +318,9 @@ class FakeReviewEngine:
         self.max_active = 0
         self.active = 0
         self._reserved = 0          # 관문을 지나 result 를 흘리기 직전인 run(busy_over 의 자리 셈 — 동시에 온 요청이 둘 다 지나지 않게)
-        self._lock = threading.Lock()
+        # 다시 들어갈 수 있는 잠금이어야 한다 — 읽다 만 run 스트림의 생성기는 GC 가 아무 스레드에서나 거두며 finally 에서 이 잠금을 잡는다.
+        # 그 스레드가 마침 handle 의 잠금 안(요청 기록)이면 Lock 은 제 스레드와 교착한다(변이 검사 사본의 긴 묶음에서 걸렸다).
+        self._lock = threading.RLock()
         self.transport = httpx.MockTransport(self.handle)
 
     # -- 기록·계수 --------------------------------------------------------------------
