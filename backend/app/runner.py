@@ -2067,6 +2067,13 @@ def _progress_writer(store: Any, job: Mapping[str, Any], panel: Mapping[str, Any
     프레임(심의가 나아가고 있다)이다. 적는 데 실패해도 패널은 계속 돈다.
     """
     head = {"panel_id": panel["id"], "panel_no": panel.get("panel_no"), "started_at": now_epoch()}
+    if panel.get("kind") == "issue":
+        # 쟁점 패널의 수확 알림(issue_yield_low — 3.12)은 패널이 바뀌어도 진행판에 남는다(이 머리가 진행 줄마다 실린다).
+        from app import issues  # noqa: PLC0415 — issues 는 이 모듈을 쓴다.
+
+        advice = issues.yield_advice(store, panel["target_key"])
+        if advice:
+            head["advice"] = advice
     last: dict = {"written_at": None}
 
     def note(frame: Mapping[str, Any], *, force: bool = False) -> None:
@@ -2084,6 +2091,25 @@ def _progress_writer(store: Any, job: Mapping[str, Any], panel: Mapping[str, Any
             log.exception("패널 %s 진행 기록 실패(비치명)", panel["id"])
 
     return note
+
+
+def _note_issue_yield(store: Any, job: Mapping[str, Any], target_key: str) -> None:
+    """쟁점 패널이 끝날 때마다 잡 진행판의 `advice` 를 맞춘다 — 최근 다섯이 전부 기각·불명이면 issue_yield_low, 아니면 지운다.
+    잡을 멈추지 않는다(멈춤은 사람이 정한다 — 3.12)."""
+    from app import issues  # noqa: PLC0415 — issues 는 이 모듈을 쓴다.
+
+    advice = issues.yield_advice(store, target_key)
+    row = store.query_one("SELECT progress_json FROM rr_jobs WHERE id = ?", (job["id"],))
+    body = json.loads(row["progress_json"] or "{}") if row is not None else {}
+    if body.get("advice") == advice or (advice is None and "advice" not in body):
+        return
+    if advice:
+        body["advice"] = advice
+        log.warning("쟁점 잡 %s: 최근 쟁점 패널 %s건이 전부 기각·불명이다(issue_yield_low) — 멈춤은 사람이 정한다", job["id"],
+                    issues.YIELD_WINDOW)
+    else:
+        body.pop("advice", None)
+    store.execute("UPDATE rr_jobs SET progress_json = ? WHERE id = ?", (canonical_json(body), job["id"]))
 
 
 def _complete_panel(
@@ -2264,6 +2290,8 @@ def _complete_panel(
     if (touch_job and not issue_panel and level.get("level") not in (None, "C0")
             and _diminishing(store, panel["target_key"])):
         _set_job(store, job["id"], "paused", reason="diminishing")
+    if touch_job and issue_panel:
+        _note_issue_yield(store, job, panel["target_key"])
 
     return {
         "panel_id": panel["id"],

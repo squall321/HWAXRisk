@@ -196,3 +196,51 @@ def test_three_engine_errors_fail_the_issue_job_and_the_chain_still_reaches_synt
     (synth_job,) = _jobs(store, key, "synth")
     assert (synth_job["chain"]["prev_job_id"], synth_job["chain"]["reason"]) == (issue_job["id"], "issues_failed")
     assert _versions(store, key)[-1][1] == "issues_closed"
+
+
+@pytest.mark.parametrize("one_upheld", [False, True])
+def test_five_rejected_issue_panels_leave_a_low_yield_note_without_stopping_the_job(store, monkeypatch, tmp_path, one_upheld):
+    """최근 다섯 쟁점 패널이 전부 기각이면 쟁점 잡 진행판에 advice='issue_yield_low' 가 선다 — 잡은 멈추지 않는다(멈춤은 사람이
+    정한다, 3.12). 다섯 가운데 하나라도 유지면 알림이 없다."""
+    rig.configure(monkeypatch, store, tmp_path, risk_issue_panel_cap=48, risk_issue_panel_hard_cap=48)
+    key = rig.target(store)
+    _review(store, key)
+    queued = [i for i in issues.issue_rows(store, key) if i["state"] == "queued"]
+    assert len(queued) >= issues.YIELD_WINDOW
+    script: dict = {"*": {"status": "rejected_in_panel"}}
+    if one_upheld:
+        script[queued[-1]["issue_id"]] = {"severity": "중대", "judgement": "FAIL"}
+    _run_issue_jobs(store, IssuePanelEngine(store, script))
+    (issue_job,) = _jobs(store, key, "issues")
+    row = store.query_one("SELECT progress_json FROM rr_jobs WHERE id = ?", (issue_job["id"],))
+    progress = json.loads(row["progress_json"] or "{}")
+    assert issue_job["state"] == "completed"
+    assert progress.get("advice") == (None if one_upheld else "issue_yield_low")
+    assert issues.yield_advice(store, key) == (None if one_upheld else "issue_yield_low")
+
+
+class _ProgressEngine(IssuePanelEngine):
+    """진행 콜백을 받는 쟁점 패널 엔진 — 첫 프레임을 적게 한 뒤 그 순간의 잡 진행판을 기록한다(패널이 도는 동안 보이는 것)."""
+
+    def __init__(self, store, script) -> None:
+        super().__init__(store, script)
+        self.seen: list[dict] = []
+
+    def run(self, delib_opts, *, owner_sub=None, on_progress=None):
+        on_progress({"last_step": "좌석 발언"}, force=True)
+        row = self.store.query_one("SELECT progress_json FROM rr_jobs WHERE mode = 'issues' AND state = 'running'")
+        self.seen.append(json.loads(row["progress_json"] or "{}"))
+        return super().run(delib_opts, owner_sub=owner_sub)
+
+
+def test_the_low_yield_note_stays_on_the_board_while_the_next_issue_panel_runs(store, monkeypatch, tmp_path):
+    """알림은 다음 쟁점 패널이 도는 동안에도 진행판에 남는다 — 패널의 진행 줄이 진행판을 새로 쓸 때 머리에 실린다. 결정문을 못 읽은
+    패널도 불명이라 다섯이 차면 여섯째부터 보인다."""
+    rig.configure(monkeypatch, store, tmp_path, risk_issue_panel_cap=48, risk_issue_panel_hard_cap=48)
+    key = rig.target(store)
+    _review(store, key)
+    engine = _ProgressEngine(store, {"*": "unparseable"})
+    _run_issue_jobs(store, engine)
+    assert len(engine.seen) > issues.YIELD_WINDOW
+    assert [s.get("advice") for s in engine.seen] == [None] * issues.YIELD_WINDOW + ["issue_yield_low"] * (
+        len(engine.seen) - issues.YIELD_WINDOW)

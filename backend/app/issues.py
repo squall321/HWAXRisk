@@ -28,6 +28,10 @@ IN_FLIGHT_STATES: tuple[str, ...] = ("planned", "running")
 DONE_STATES: tuple[str, ...] = ("resolved", "inconclusive")
 REALLOCATED_STATES: tuple[str, ...] = ("queued", "untried_cap", "withdrawn")
 CAP_REASON = "cap"
+# 쟁점 패널의 수확 — 최근 YIELD_WINDOW 패널이 전부 기각·불명이면 잡 진행판에 알림을 적는다(멈춤은 사람이 정한다, 3.12 · M3.md 리스크 표).
+YIELD_WINDOW = 5
+YIELD_LOW_ADVICE = "issue_yield_low"
+YIELD_LOW_OUTCOMES: tuple[str, ...] = ("rejected", "undetermined")
 
 
 def issue_id_of(target_key: str, anchor_cluster_key: str) -> str:
@@ -409,6 +413,24 @@ def anchor_row(store: RiskStore, target_key: str, anchor: str) -> dict | None:
         if row["cluster_key"] == anchor:
             return row
     return None
+
+
+def yield_advice(store: RiskStore, target_key: str) -> str | None:
+    """최근 다섯 쟁점 패널(끝난 것 — 늦게 끝난 차례)이 전부 기각(rejected)·불명(undetermined · 결정문 파싱 실패)이면
+    `issue_yield_low`, 아니면 None. 다섯이 안 되면 None 이다. 수확 체감 정지(_diminishing)는 쟁점 패널에 걸지 않는다 — 알림만이다."""
+    rows = store.query("SELECT id, issue_id, risk_spec_parsed FROM rr_panels WHERE target_key = ? AND kind = 'issue'"
+                       " AND status = 'done' ORDER BY COALESCE(ended_at, 0) DESC, panel_no DESC LIMIT ?",
+                       (target_key, YIELD_WINDOW))
+    if len(rows) < YIELD_WINDOW:
+        return None
+    for row in rows:
+        if not row["risk_spec_parsed"]:
+            continue                                   # 결정문을 못 읽었다 — 그 패널은 불명이다
+        issue = store.query_one("SELECT outcome, outcome_json FROM rr_issues WHERE issue_id = ?", (row["issue_id"],))
+        decided = issue is not None and _loads(issue["outcome_json"], {}).get("panel_id") == row["id"]
+        if not (decided and _str(issue["outcome"]) in YIELD_LOW_OUTCOMES):
+            return None
+    return YIELD_LOW_ADVICE
 
 
 def create_issues_job(store: RiskStore, target_key: str, *, owner_sub: str, requester_sub: str | None = None,
