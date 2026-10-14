@@ -115,7 +115,7 @@ def test_the_request_is_the_engines_summary_body_and_rows_are_whole_quoted_and_w
     engine = FakeSummaryEngine()
     _drive(store, engine, key)
     mech = next(b for b in engine.requests if b["summary"]["scope"]["key"] == "mech")
-    assert mech["expert"] is None and mech["expect"] == {"prompt_rev": "cr-summary-1", "limits_rev_kind": "fake-sum-1"}
+    assert mech["expert"] is None and mech["expect"] == {"prompt_rev": "cr-summary-2", "limits_rev_kind": "fake-sum-1"}
     want = {f"reg:{r['cluster_key']}" for r in registry.registry_rows(store, key) if "mech" in r["merged"]["domains"]}
     assert {r["ref"] for r in mech["summary"]["rows"]} == want
     attention = {f"reg:{r['cluster_key']}": r["attention"] for r in registry.registry_rows(store, key)}

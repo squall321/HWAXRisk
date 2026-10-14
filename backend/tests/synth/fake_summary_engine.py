@@ -17,7 +17,7 @@ from typing import Any
 
 from app.runner import EngineRejected
 
-PROMPT_REV = "cr-summary-1"
+PROMPT_REV = "cr-summary-2"
 LIMITS_REV = "fake-sum-1"
 
 
