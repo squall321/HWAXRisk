@@ -400,3 +400,25 @@ def test_an_expert_whose_scope_units_all_wait_for_live_evidence_is_not_claimed_f
     head = store.query_one("SELECT state, pack_status FROM rr_expert_reports WHERE target_key = ? AND agent_key = ?",
                            (key, rig.SEAL))
     assert (head["state"], head["pack_status"], rig.state(store, job_id)) == ("planned", "ok", "running")
+
+
+def test_a_reply_kept_for_one_credential_kind_is_never_reused_for_another(store):
+    """재사용 열쇠에 자격 종류가 든다(W2-03 (d)) — 다른 자격으로 받은 원문(서비스 시야의 빈 결과 따위)을 사용자 자격의 근거로 다시
+    쓰지 않는다. 같은 자격이면 다시 쓴다(호출 0)."""
+    from app import field_source
+    from app.ra_client import McpHttpClient
+
+    key = _target(store)
+    gw = Gateway()
+    client = gw.client()
+    try:
+        mcp = McpHttpClient("http://gateway.test/mcp", client=client)
+        service = field_source.LiveSource(mcp, credential_kind="service").fetch_live(store, key, OWNER, "compare_materials",
+                                                                                     PAIR)
+        user = field_source.LiveSource(mcp, credential_kind="user")
+        first = user.fetch_live(store, key, OWNER, "compare_materials", PAIR)
+        again = user.fetch_live(store, key, OWNER, "compare_materials", PAIR)
+    finally:
+        client.close()
+    assert (service["cached"], first["cached"], again["cached"]) == (False, False, True)
+    assert service["call_id"] != first["call_id"] == again["call_id"] and len(gw.calls) == 2
