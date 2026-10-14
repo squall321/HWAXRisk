@@ -137,10 +137,12 @@ def _panel_spec(store, key: str):
     return legacy.spec_builder(store, key, lambda k: str(k).split("-", 1)[0])
 
 
-def test_a_target_switched_to_cells_merges_both_sources_and_the_panels_view_matches_the_old_registry(store, tmp_path,
-                                                                                                     monkeypatch):
-    """패널을 돌린 대상(flow='panels')을 cells 로 바꾸고 카드 대조를 얹으면 등록부가 두 출처를 한 장으로 합친다(카드 finding 행이
-    선다). `GET …/registry?source=panels` 는 저장 없이 패널 finding 만으로 다시 센 보기라 바꾸기 전 등록부의 옛 열과 같다."""
+# 병합이 다시 세는 옛 열(v5 의 새 일곱 칸 빼고) — 패널 finding 만으로 센 등록부를 견줄 때.
+M2_COLUMNS = [c for c in registry._MERGE_OWNED_COLUMNS if not c.startswith(("support_", "attention", "issue_"))]
+
+
+def _panel_target(store, tmp_path, monkeypatch) -> tuple[str, dict]:
+    """패널 대상 하나를 러너로 돌린다(가짜 패널 엔진) — (대상 키, 등록부 옛 열)."""
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request",
                         lambda *a, **_k: (_ for _ in ()).throw(httpx.ConnectError("외부 없음", request=a[-1])))
     synth = factories.make_diff_target(store, 40, open_target=False)
@@ -152,15 +154,40 @@ def test_a_target_switched_to_cells_merges_both_sources_and_the_panels_view_matc
     engine = legacy.LegacyEngine(_panel_spec(store, key))
     while (job := runner.claim_next_job(store, cfg)) is not None:
         runner.run_panel(store, cfg, engine, job)
-    columns = [c for c in registry._MERGE_OWNED_COLUMNS if not c.startswith(("support_", "attention", "issue_"))]
-    before = {r["cluster_key"]: {c: r[c] for c in columns if c in r} for r in registry.registry_rows(store, key)}
+    before = {r["cluster_key"]: {c: r[c] for c in M2_COLUMNS if c in r} for r in registry.registry_rows(store, key)}
     assert before
+    return key, before
+
+
+def test_a_review_layered_on_a_panels_target_leaves_its_registry_as_it_was(store, tmp_path, monkeypatch):
+    """패널 대상에 M2 방식으로 검토를 얹어도(흐름 panels 그대로 — M2 #3) 등록부는 패널 finding 만 센다(#7·#20) — 병합 뒤 행 집합과
+    옛 열이 얹기 전과 같고, 주장값이 실린 행이 없다."""
+    key, before = _panel_target(store, tmp_path, monkeypatch)
+    with factories.routes_store(store):
+        routes.post_units(key, routes.UnitsBody(reason="검토 얹기"), ident=factories.ident(OWNER))
+    unit = units.load_units(store, key)[0]["unit_id"]
+    _review(store, key, (SEAL, "xd-syn-0"), unit, verdict=("yes", "FAIL"))
+    assert store.query_one("SELECT COUNT(*) AS n FROM rr_findings WHERE target_key = ? AND source_kind = 'card_review'",
+                           (key,))["n"] >= 2
+    out = registry.merge(store, key)
+    assert out["flow"] == "panels"
+    rows = registry.registry_rows(store, key)
+    assert {r["cluster_key"]: {c: r[c] for c in M2_COLUMNS if c in r} for r in rows} == before
+    assert not any(r["merged"].get("claimed") for r in rows)
+
+
+def test_a_target_switched_to_cells_merges_both_sources_and_the_panels_view_matches_the_old_registry(store, tmp_path,
+                                                                                                     monkeypatch):
+    """패널을 돌린 대상(flow='panels')을 cells 로 바꾸고 카드 대조를 얹으면 등록부가 두 출처를 한 장으로 합친다(카드 finding 행이
+    선다). `GET …/registry?source=panels` 는 저장 없이 패널 finding 만으로 다시 센 보기라 바꾸기 전 등록부의 옛 열과 같다."""
+    key, before = _panel_target(store, tmp_path, monkeypatch)
     routes.post_target_flow(key, routes.FlowBody(to="cells", reason="카드 대조 얹기"), ident=factories.ident(OWNER))
     unit = units.load_units(store, key)[0]["unit_id"]
     _review(store, key, (SEAL,), unit, verdict=("yes", "FAIL"))
     registry.merge(store, key)
     merged = registry.registry_rows(store, key)
     assert any(r["merged"].get("claimed") for r in merged)                  # 카드 대조 finding 이 등록부에 들었다
+    assert all(r["support"] == r["support_experts"] for r in merged)       # cells 대상의 support 는 전문가 수다(m-16)
     view = routes.registry_payload(key, owner_sub=OWNER, source="panels")["rows"]
     got = {r["cluster_key"]: {c: r.get(c) for c in before.get(r["cluster_key"], {})} for r in view}
     assert got == before
