@@ -288,7 +288,7 @@ def test_the_guide_watches_a_running_review_job_and_reads_reports_once_it_is_don
     gate = threading.Event()
     fake.hold_runs = {2: gate}
     r = rig.Rig(store, fake)
-    r.tick()
+    r.tick(packs_only=True)
     r.tick(wait=False)
     rig.wait_for(lambda: fake.runs == 2)
     try:

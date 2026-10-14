@@ -181,7 +181,7 @@ def test_a_restart_in_the_middle_of_a_call_reruns_only_that_call_without_chargin
     gate = threading.Event()
     fake.hold_runs = {5: gate}
     first = rig.Rig(store, fake, boot_id="boot-a")
-    first.tick()                                           # 묶음 받기
+    first.tick(packs_only=True)                            # 묶음 받기
     first.tick(wait=False)                                 # 세션 — 다섯째 run 에서 선다
     rig.wait_for(lambda: fake.runs == 5)
     cut = store.query_one("SELECT call_id, unit_id FROM rr_review_calls WHERE state = 'running'")
@@ -359,7 +359,7 @@ def _stalled(store, monkeypatch, nth: int) -> tuple[str, str, FakeReviewEngine, 
     gate = threading.Event()
     fake.hold_runs = {nth: gate}
     r = rig.Rig(store, fake)
-    r.tick()
+    r.tick(packs_only=True)               # 묶음만 — 같은 틱에 검토가 집히면 그 틱이 붙들린 run 을 기다린다(C3-11 의 경합)
     r.tick(wait=False)
     rig.wait_for(lambda: fake.runs == nth)
     return key, job_id, fake, r, gate
@@ -711,7 +711,7 @@ def test_a_window_outage_that_recovers_leaves_no_stale_waiting_on_a_running_job(
     assert (down["reason"], down["source"]) == ("agent_unreachable", "loop") and fake.calls("pack") == []
     fake.limits_error = None
     r.clock.advance(61)
-    r.tick()                                                # 묶음
+    r.tick(packs_only=True)                                 # 묶음
     r.tick(wait=False)                                      # 세션 — 둘째 run 에서 선다
     rig.wait_for(lambda: fake.runs == 2)
     board = rig.progress(store, job_id)
@@ -926,7 +926,7 @@ def test_a_credential_failure_that_would_fill_the_breaker_window_still_holds_cre
     gate = threading.Event()
     fake.hold_runs = {9: gate}
     r = rig.Rig(store, fake)
-    r.tick()
+    r.tick(packs_only=True)
     r.tick()
     r.tick(wait=False)
     rig.wait_for(lambda: fake.runs == 9)
@@ -1310,7 +1310,7 @@ def test_a_summary_only_move_replans_without_restarting_any_cell(store, monkeypa
     gate = threading.Event()
     fake.hold_runs = {3: gate}
     r = rig.Rig(store, fake)
-    r.tick()
+    r.tick(packs_only=True)
     r.tick(wait=False)
     rig.wait_for(lambda: fake.runs == 3)
     hashes = {c["unit_id"]: c["input_hash"] for c in _cells(store, key, SEAL)}

@@ -354,7 +354,7 @@ def test_a_classified_cell_keeps_its_route_when_the_inputs_move_before_it_settle
     gate = threading.Event()
     fake.hold_runs = {3: gate}
     first = rig.Rig(store, fake, boot_id="boot-a")
-    first.tick()
+    first.tick(packs_only=True)
     first.tick(wait=False)
     rig.wait_for(lambda: fake.runs == 3)
     before = _cell(store, key, b, STD2)
@@ -458,7 +458,7 @@ def _filtered_mid_job(store, monkeypatch) -> tuple[str, str, dict, rig.Rig, thre
     gate = threading.Event()
     fake.hold_runs = {fake.runs + 3: gate}
     r = rig.Rig(store, fake)
-    r.tick()
+    r.tick(packs_only=True)
     r.tick(wait=False)
     rig.wait_for(lambda: fake.runs == max(fake.hold_runs))
     assert _cell(store, key, kinds["boundary"], STD2)["state"] == "na_irrelevant"

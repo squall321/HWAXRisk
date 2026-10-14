@@ -128,8 +128,16 @@ class Rig:
         self.loop = review_runner.ReviewLoop(store, config.settings, self.engine, stop=self.stop, clock=self.clock,
                                              pause=lambda seconds: self.stop.wait(0.001), boot_id=boot_id, poll_s=0)
 
-    def tick(self, *, wait: bool = True) -> dict:
-        out = self.loop.tick()
+    def tick(self, *, wait: bool = True, packs_only: bool = False) -> dict:
+        """틱 한 번 — `wait` 면 워커가 끝날 때까지 기다린다. `packs_only` 면 그 틱은 카드 묶음만 집는다 — 전문가 단위 단계(재설계 M3
+        C3-11)라 빨리 끝난 묶음의 전문가가 같은 틱에 검토로 집히는 경합을, '첫 틱은 묶음 · 다음 틱은 세션' 에 기대는 시험이 고정한다."""
+        saved = review_runner.SPAWN_PURPOSES
+        if packs_only:
+            review_runner.SPAWN_PURPOSES = ("pack",)
+        try:
+            out = self.loop.tick()
+        finally:
+            review_runner.SPAWN_PURPOSES = saved
         if wait:
             self.loop.join(60)
         return out
