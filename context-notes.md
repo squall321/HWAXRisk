@@ -1190,3 +1190,27 @@ git diff 를 직접 보고 역검토했다(자기 보고를 믿지 말라고 명
   `../HWAXPortal/docs/risk-review-redesign/M3.md`(3절 짓는 순서 · 3.2 파일 주인 · 4.2 v5 DDL)와 그 context-notes D-32~D-35 다.
 - **넣지 않는 것.** v4 주석이 v5 로 미뤘던 `rr_roster.input_gaps_json` 은 v5 에도 없다(M3.md 5절 #43 — 입력 결손은
   `rr_roster.ecad_dependent` 와 스냅샷 `missing.ecad_absent` 로 늘 같은 값이 계산된다).
+
+### D39. 단계 C 첫 묶음(S3-4 · S3-6 · S3-7 · S3-8) — 계획을 코드로 옮기며 정한 것 (2026-10-14)
+
+- **카드 대조 거름은 함수가 아니라 조각 하나다.** 설계서는 `finding_scope(store, target_key) -> (sql, params)` 였지만 대상 범위로
+  읽는 세 자리가 모두 `target_key = ?` 를 이미 걸고 있어, 흐름을 하위 질의로 가르는 상수 `registry.FINDING_SCOPE_SQL` 하나로
+  했다(패널 대상은 지금처럼 거르고 cells 대상은 전부). 나머지 열일곱 자리는 까닭 한 줄씩과 래칫 시험(`CARD_REVIEW_SITES`).
+- **패널 대상 바이트 동일은 얼린 원장 셋으로 본다**(`tests/rr/test_panel_registry_bytes.py`, 기준선은 S3-4 앞 커밋 344e772 의
+  코드가 만든 값). 그 원장에는 카드 대조가 얹힌 패널 대상이 없어 거름을 통째로 빼도 지나갔다 — 얹은 대상을 따로 시험한다.
+- **`PANEL_JOBS_SQL` 은 넓히지 않았다.** 진행판·길잡이·검토 잡 문지기가 그것을 '패널 Tier 잡' 으로 읽는다. 러너만 쓰는
+  `RUNNER_JOBS_SQL`(panels · issues)과 `PANEL_RUNNER_MODES` 를 따로 두었다.
+- **쟁점 상한의 '돌린 수'** = 끝난 쟁점 패널(`rr_panels.kind='issue'`, done) + 지금 편성·도는 쟁점, 등급별. 다시 고른 회차도
+  같은 누적이다. 엔진·스트림·재기동으로 닫힌 패널은 세지 않는다(쟁점 탓이 아니다 — 차감도 없다). 내용 탓(`charged`)은 결정문
+  파싱 실패뿐이다.
+- **비우기는 집는 자리에서 본다.** `claim_next_job(…, engine=)` 이 엔진의 `drain_state()`(`/health` 의 `drain.on` · `draining`)를
+  한 번 묻고, 비우는 중이면 범위와 상관없이 패널을 집지 않고 잡 행에 `draining: …` 을 적는다. 읽지 못하면 비우지 않는 것으로
+  본다(종전 동작).
+- **완결의 깊이는 카드로 본 전문가만 센다**(X1-04). 그래서 배경 카드뿐·0장 전문가만 있는 영역은 C2 깊이를 못 채운다 — 계획에
+  면제가 없어 그대로 두고 조정자에게 올렸다.
+- **완결의 품질 칸은 진행판의 값을 읽는다**(M2 #16 — 진행판을 읽는 동안 다시 세지 않는다). 진행판에 없을 때만 그 자리에서 센다.
+- **신선도** — 쟁점 단계는 선정한 쟁점의 `cells_hash` 또는 사슬 잡의 `chain_json.cells_hash` 가 지금 마감 범위 지문
+  (`closure.closing_hash`)과 같을 때, 보고서 판은 `trigger='synth_done'` 판의 `cells_hash` 가 같을 때다. 사슬(S3-5)과 종합(S3-9)이
+  서기 전에는 C2·C3 가 오르지 않는다.
+- **못 한 것.** 최근 쟁점 패널 다섯이 전부 기각·보류면 `advice='issue_yield_low'`(m3-synthesis 3.12) · MCP 재제출의
+  `issue_panel_web_only`(S3-10) · 2,000셀 원장의 refresh 실측(M2 루프로는 로스터 6 × 단위 5 가 최대 — 단계 D 리허설이 잰다).
