@@ -340,8 +340,8 @@ def rest_channel_kind(*, heax_token: str | None, gateway_pat: str | None, servic
     return None
 
 
-# 게이트웨이 REST 다리를 못 쓰는 까닭의 code — 고칠 길이 다르다. no_pat·short_life 는 자동 등록(웹에서 앱 열기·Claude 에서 다시
-# 부르기)이 고친다. no_site_audience 는 Claude 에서 다시 불러도 고쳐지지 않는다 — 게이트웨이는 Claude 에 넣은 PAT 의 청중을 넘는
+# 게이트웨이 REST 다리를 못 쓰는 까닭의 code — 고칠 길이 다르다. no_pat·short_life 는 자동 등록(Claude 에서 다시 부르기)이나 웹
+# 설정 화면의 버튼이 고친다. no_site_audience 는 Claude 에서 다시 불러도 고쳐지지 않는다 — 게이트웨이는 Claude 에 넣은 PAT 의 청중을 넘는
 # PAT 를 바꿔 받지 않으므로, 사람이 토큰 화면에서 step-forge 를 포함한 PAT 를 새로 발급해 Claude 에 넣어야 한다.
 GATEWAY_PAT_NO_PAT, GATEWAY_PAT_SHORT_LIFE, GATEWAY_PAT_NO_SITE_AUDIENCE = "no_pat", "short_life", "no_site_audience"
 

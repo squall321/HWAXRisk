@@ -725,10 +725,31 @@ def test_a_revoked_pat_comes_back_while_auto_is_on_and_the_switch_is_how_to_stop
     get_store().execute("UPDATE _user_credentials SET revoked_at = 1 WHERE owner_sub = ?", (EMAIL,))
     assert _mint(client, GW)["portal_pat_wanted"]["reason"] == "revoked"
     auto = _auto(client)
-    assert auto["due_reason"] == "revoked" and "설정에서 자동 등록을 끈다" in auto["how_to_stop"]
+    assert auto["due_reason"] == "revoked" and "PUT /api/me/portal-pat-auto {enabled:false}" in auto["how_to_stop"]
     guidance = runner.pat_unavailable_guidance(get_store(), EMAIL)
     assert runner.AUTO_STOP_HINT in guidance
     client.put("/api/me/portal-pat-auto", json={"enabled": False}, headers=AUTH)
     assert _auto(client)["how_to_stop"] is None and "portal_pat_wanted" not in _mint(client, GW)
     guidance = runner.pat_unavailable_guidance(get_store(), EMAIL)
-    assert runner.AUTO_STOP_HINT not in guidance and "설정에서 켜면 저절로 받는다" in guidance
+    assert runner.AUTO_STOP_HINT not in guidance and "PUT /api/me/portal-pat-auto {enabled:true}" in guidance
+
+
+def test_the_guidance_names_only_the_registration_paths_that_exist_now(box):
+    """웹 자동 등록과 자동 등록 스위치는 화면에 아직 없다 — 안내는 지금 되는 길만 말한다(R2-8). 등록은 Claude 에서 hwax_risk 도구를
+    부르기(게이트웨이 길)와 웹 설정 화면의 '포털에서 발급해 등록' 이고, 멈추기·다시 켜기는 곧 생길 스위치이며 그때까지는 운영자가 그
+    사람으로 PUT /api/me/portal-pat-auto 를 부른다. '웹에서 앱을 열면 자동 등록' 은 말하지 않는다."""
+    from app import entry, state as state_module
+
+    store = get_store()
+    on = runner.pat_unavailable_guidance(store, EMAIL)
+    store.set_portal_pat_auto(EMAIL, False)
+    off = runner.pat_unavailable_guidance(store, EMAIL)
+    texts = {"on": on, "off": off, "stop": runner.AUTO_STOP_HINT, "fix": entry.fix_register_pat(),
+             "g6": entry._fix_gate_blocked(state_module.UNKNOWN_BLOCKING_REASON, "p-1")}
+    for name, text in texts.items():
+        for claim in ("앱을 한 번 열", "앱을 열", "열거나", "켜면 저절로", "거기서 켠다", "설정에서 자동 등록을 끈다"):
+            assert claim not in text, (name, claim)
+    for text in (on, off, texts["fix"]):
+        assert "Claude 에서 hwax_risk 도구를" in text and "포털에서 발급해 등록" in text
+    assert runner.AUTO_STOP_HINT in on and "PUT /api/me/portal-pat-auto {enabled:false}" in runner.AUTO_STOP_HINT
+    assert "곧 생긴다" in runner.AUTO_STOP_HINT and "곧 생긴다" in off and "PUT /api/me/portal-pat-auto {enabled:true}" in off

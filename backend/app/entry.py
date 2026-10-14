@@ -54,12 +54,12 @@ def web_paths(*, project_id: str | None = None, target_key: str | None = None) -
 
 
 def fix_register_pat() -> str:
-    """러너·명단·dyna 캡처 자격이 없을 때의 고칠 곳 — 자동 등록(웹에서 앱 열기 · Claude 에서 다시 부르기)이 먼저, 안 되면 웹 설정
-    화면의 버튼 하나(리스크 앱 사람 자격 R1)."""
-    return ("포털 PAT 는 저절로 등록된다 — 웹에서 리스크 앱을 한 번 열거나 Claude 에서 다시 부르면(게이트웨이가 그 사람의 PAT 를 좁혀"
-            f" 받아 넘긴다) 된다. 안 되면 웹 리스크 앱 설정 화면({web_paths()['settings']})에서 '{SETTINGS_BUTTON}' 을 누른다 — 그"
-            " 브라우저의 포털 세션으로 읽기 전용 PAT 를 발급해 이 앱에 등록한다(자동 등록이 꺼져 있으면 거기서 켠다). PAT 는 도구 인자로"
-            " 받지 않는다(게이트웨이·대화 기록에 남는다).")
+    """러너·명단·dyna 캡처 자격이 없을 때의 고칠 곳 — 자동 등록(Claude 에서 다시 부르기)이 먼저, 안 되면 웹 설정 화면의 버튼 하나
+    (리스크 앱 사람 자격 R1). 웹 자동 등록·자동 등록 스위치는 화면에 아직 없어 말하지 않는다(R2-8)."""
+    return ("포털 PAT 는 Claude 에서 hwax_risk 도구를 다시 부르면 저절로 등록된다(게이트웨이가 그 사람의 PAT 를 좁혀 받아 넘긴다 —"
+            f" 자동 등록이 켜져 있을 때). 안 되면 웹 리스크 앱 설정 화면({web_paths()['settings']})에서 '{SETTINGS_BUTTON}' 을 누른다"
+            " — 그 브라우저의 포털 세션으로 읽기 전용 PAT 를 발급해 이 앱에 등록한다. PAT 는 도구 인자로 받지 않는다(게이트웨이·대화"
+            " 기록에 남는다).")
 
 
 def _delegated(ident: identity.Identity) -> bool:
@@ -532,8 +532,8 @@ def _fix_gate_blocked(reason: str | None, project_id: str, *, rest_code: str | N
                    + ". 그 뒤 risk_capture_snapshot 을 다시 부른다.")
         else:
             how = ("Claude(게이트웨이 위임)로 캡처하면 그 사람의 등록된 포털 PAT 로 게이트웨이 REST(step-forge)를 읽는다. 그 PAT 는 남은"
-                   " 수명이 캡처 여유를 넘고 aud 에 step-forge 가 있어야 한다 — 없거나 곧 끝나면 웹에서 리스크 앱을 한 번 열거나 Claude 에서"
-                   " 다시 부를 때 저절로 등록·갱신된다(설정 화면에서 직접 등록할 수도 있다). 다만 Claude 길로 받는 PAT 는 Claude 에 넣은 PAT"
+                   " 수명이 캡처 여유를 넘고 aud 에 step-forge 가 있어야 한다 — 없거나 곧 끝나면 Claude 에서 다시 부를 때 저절로"
+                   " 등록·갱신된다(웹 설정 화면에서 직접 등록할 수도 있다). 다만 Claude 길로 받는 PAT 는 Claude 에 넣은 PAT"
                    " 의 청중을 넘지 못한다 — 그 PAT 에 step-forge 가 없으면 " + FIX_BRIDGE_AUDIENCE + ". 그 뒤 risk_capture_snapshot 을"
                    " 다시 부른다.")
         return (f"mcad 를 REST(/tree)로 읽지 못해 단위를 검문할 수 없었다 — {how} 아니면 웹 과제 화면"
