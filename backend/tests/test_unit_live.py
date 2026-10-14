@@ -486,12 +486,13 @@ def _two_calls(store, monkeypatch, key: str) -> dict:
     return plan
 
 
+@pytest.mark.parametrize("at_call", [1, 2])
 @pytest.mark.parametrize("how", ["cancel", "purge"])
-def test_a_cancel_or_purge_during_a_live_call_stops_the_calls_and_writes_nothing_after_it(store, monkeypatch, how):
+def test_a_cancel_or_purge_during_a_live_call_stops_the_calls_and_writes_nothing_after_it(store, monkeypatch, how, at_call):
     """반대 검토 MEDIUM 14 — 근거 꾸러미 워커가 잡의 취소와 과제 폐기를 보지 않아, 첫 호출 도중에 취소돼도 남은 호출을 다 부르고 전
     단위를 얼렸고, 폐기 뒤에도 그 답의 원문(rr_brief_calls)과 근거 줄 · 호출 계획(rr_unit_live — 재질명이 든다)을 다시 적었다. 이제
-    호출 사이와 얼리기 앞에서 잡 · 과제를 보고 멈춘다(아무것도 얼리지 않는다 — 다음 잡이 다시 한다). 취소면 이미 받은 답은 원장에
-    남아 다음 잡이 다시 부르지 않고 쓰고, 폐기면 그 답도 적지 않는다."""
+    호출 사이(첫 호출 도중)와 얼리기 앞(마지막 호출 도중)에서 잡 · 과제를 보고 멈춘다(아무것도 얼리지 않는다 — 다음 잡이 다시 한다).
+    취소면 이미 받은 답은 원장에 남아 다음 잡이 다시 부르지 않고 쓰고, 폐기면 그 답도 적지 않는다."""
     from app import routes, runner
     from tests import factories
 
@@ -503,7 +504,7 @@ def test_a_cancel_or_purge_during_a_live_call_stops_the_calls_and_writes_nothing
     gw = Gateway()
 
     def interrupt(_name: str) -> None:
-        if len(gw.calls) != 1:
+        if len(gw.calls) != at_call:
             return
         if how == "cancel":
             runner.cancel_job(store, job_id, by=OWNER)
@@ -515,7 +516,7 @@ def test_a_cancel_or_purge_during_a_live_call_stops_the_calls_and_writes_nothing
     r = rig.Rig(store, FakeReviewEngine(rig.packs()))
     r.loop.live_transport = gw.transport
     r.tick()
-    assert len(gw.calls) == 1                                                  # 다음 호출을 시작하지 않는다
+    assert len(gw.calls) == at_call                                            # 다음 호출을 시작하지 않는다
     assert {_row(store, key, u)["status"] for u in plan["by_unit"]} == {None}   # 얼리지 않는다
     kept = store.query_one("SELECT COUNT(*) AS n FROM rr_brief_calls WHERE target_key = ? AND result_gz IS NOT NULL",
                            (key,))["n"]
@@ -524,7 +525,7 @@ def test_a_cancel_or_purge_during_a_live_call_stops_the_calls_and_writes_nothing
         assert {(row["lines_gz"], row["plan_json"], row["gaps_json"]) for row in store.query(
             "SELECT lines_gz, plan_json, gaps_json FROM rr_unit_live WHERE target_key = ?", (key,))} == {(None, "[]", None)}
     else:
-        assert kept == 1 and rig.state(store, job_id) in ("cancelling", "cancelled")
+        assert kept == at_call and rig.state(store, job_id) in ("cancelling", "cancelled")
 
 
 
