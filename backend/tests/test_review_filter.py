@@ -131,7 +131,7 @@ def test_a_cell_both_signals_call_unrelated_is_filtered_and_every_forcing_rule_k
         return c["state"], c["route"], c["route_forced"]
 
     assert route(b, STD1) == ("reviewed", "review", "rank1")
-    assert _cell(store, key, b, STD1)["sample_json"]["shadow"] == {"would_filter": True, "result": None}
+    assert _cell(store, key, b, STD1)["sample_json"].get("shadow") == {"would_filter": True, "result": None}
     assert route(g, STD2) == ("reviewed", "review", "global_unit")
     assert route(b, STD3) == ("reviewed", "review", "no_cards")
     assert route(b, MEM2)[:2] == ("na_irrelevant", "filtered")               # 결측 블록을 받은 훑기(cr-sweep-2)의 무관
@@ -162,7 +162,7 @@ def test_the_audit_rate_sends_the_cell_to_the_end_and_a_full_rate_filters_nothin
     cell = _cell(store, key, kinds["boundary"], STD2)
     assert (cell["state"], cell["route"], cell["route_forced"]) == ("reviewed", "audit", "filter_audit")
     assert cell["route_json"]["decision"] == "audit" and cell["route_json"]["audit"]["pct"] == 100
-    audit = cell["sample_json"]["filter_audit"]
+    audit = cell["sample_json"].get("filter_audit")
     assert audit == {"score": cell["route_json"]["audit"]["score"], "picked_by": "rate", "result": None}
     assert cell["sample_json"]["attempt"] == 0
     assert "offcard" in [x["kind"] for x in _unit_runs(fake, STD2, kinds["boundary"])]
@@ -178,7 +178,7 @@ def test_shadow_mode_reviews_every_cell_and_marks_the_ones_it_would_have_filtere
     assert (cell["state"], cell["route"], cell["route_forced"]) == ("reviewed", "review", None)
     assert (cell["route_json"]["rule"], cell["route_json"]["decision"], cell["route_json"]["filter"]) == (
         "both_unrelated", "review", "shadow")
-    assert cell["sample_json"]["shadow"] == {"would_filter": True, "result": None}
+    assert cell["sample_json"].get("shadow") == {"would_filter": True, "result": None}
     assert [c for c in _cells(store, key) if c["state"] == "na_irrelevant"] == []
 
 
@@ -231,6 +231,25 @@ def test_an_input_gap_sweep_on_the_old_rev_never_filters_the_gap_experts_cells(s
     assert sweeps[STD1] is None
     assert [m["kind"] for m in sweeps[MEM2]] == ["ecad"]
     assert sweeps[MEM2][0]["note"].endswith("이 영역이 볼 것 — 언더필·스택업.")
+
+
+def test_a_sweep_with_a_failed_deck_trusts_none_of_its_answers(store, monkeypatch):
+    """훑기 묶음 둘 가운데 하나가 내용 탓으로 실패하면(sweep_state failed) 다른 묶음이 '무관' 이라 해도 그 전문가의 셀은 훑기 신호가
+    모름이라 거르지 않는다 — 실패한 묶음의 카드가 그 단위를 봤는지 모른다."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+
+    def setup(fake, kinds):
+        fake.sweep_split = 2
+        fake.sweep_error_aliases = {"K10"}
+
+    key, _job, _fake, kinds = _run(store, SMALL, fake_setup=setup)
+    head = store.query_one("SELECT sweep_state, sweep_json FROM rr_expert_reports WHERE target_key = ? AND agent_key = ?",
+                           (key, STD2))
+    assert head["sweep_state"] == "failed" and json.loads(head["sweep_json"])["units"][kinds["boundary"]]["rel"] == "no"
+    cell = _cell(store, key, kinds["boundary"], STD2)
+    assert (cell["state"], cell["route"], cell["route_forced"]) == ("reviewed", "review", None)
+    assert (cell["route_json"]["sweep"]["verdict"], cell["route_json"]["sweep"]["reason"]) == ("unknown", "sweep_failed")
 
 
 # ---------------------------------------------------------------- 넘김 · 1순위 대기 · 훑기 관련

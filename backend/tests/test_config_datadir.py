@@ -362,20 +362,22 @@ def test_a_choice_knob_takes_only_its_words_and_says_where(tmp_path):
     for word, want in (("shadow", "shadow"), ("OFF", "off"), ("On", "on")):
         got = config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path), "HWAXRISK_REVIEW_FILTER": word})
         assert got.risk_review_filter == want, word
+    def boot_error(env: dict) -> str:
+        try:
+            config.load_settings(env=env)
+        except RuntimeError as exc:
+            return str(exc)
+        return ""                                     # 기동했다 — 아래 단언이 실패한다
+
     _knobs_file(tmp_path, "HWAXRISK_REVIEW_FILTER=shadows\n")
-    with pytest.raises(RuntimeError) as exc:
-        config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path)})
-    text = str(exc.value)
+    text = boot_error({"HWAXRISK_DATA_DIR": str(tmp_path)})
     assert "HWAXRISK_REVIEW_FILTER='shadows'" in text and str(tmp_path / "knobs.env") in text
     assert "off · shadow · on" in text
-    with pytest.raises(RuntimeError) as exc:
-        config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path / "x"), "HWAXRISK_REVIEW_FILTER": "1"})
-    assert "HWAXRISK_REVIEW_FILTER='1'" in str(exc.value) and "환경변수" in str(exc.value)
+    text = boot_error({"HWAXRISK_DATA_DIR": str(tmp_path / "x"), "HWAXRISK_REVIEW_FILTER": "1"})
+    assert "HWAXRISK_REVIEW_FILTER='1'" in text and "환경변수" in text
     assert config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path / "y"),
                                      "HWAXRISK_REVIEW_DUAL": "ALL"}).risk_review_dual == "all"
-    with pytest.raises(RuntimeError) as exc:
-        config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path / "y"), "HWAXRISK_REVIEW_DUAL": "flag"})
-    assert "flagged · all" in str(exc.value)
+    assert "flagged · all" in boot_error({"HWAXRISK_DATA_DIR": str(tmp_path / "y"), "HWAXRISK_REVIEW_DUAL": "flag"})
 
 
 @pytest.mark.parametrize("name,raw", [

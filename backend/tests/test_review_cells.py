@@ -74,9 +74,12 @@ def _running(store, job: dict) -> dict:
 
 
 def _refused(fn, *args, **kwargs) -> AppError:
-    with pytest.raises(AppError) as exc:
+    """거절(AppError)을 돌려준다 — 거절하지 않았으면 단언 실패다(변이 검사가 '죽음' 으로 세는 실패의 모양)."""
+    try:
         fn(*args, **kwargs)
-    return exc.value
+    except AppError as exc:
+        return exc
+    raise AssertionError(f"{getattr(fn, '__name__', fn)} 가 거절하지 않았다")
 
 
 def _cells(store, key: str) -> list[dict]:

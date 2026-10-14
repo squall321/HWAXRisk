@@ -68,7 +68,7 @@ def test_input_gap_cells_close_with_one_noinput_call_each_by_the_four_settle_row
     b0, b1, b2 = (u["unit_id"] for u in us if u["kind"] == "bundle")
     boundary, glob = (next(u["unit_id"] for u in us if u["kind"] == k) for k in ("boundary", "global"))
     fake.noinput_q1 = {b0: ["yes", "no"], b1: ["unknown", "no"], b2: ["no"], boundary: ["no"]}
-    fake.noinput_q2 = {b2: ["보드 고정점 주변 부품 배치"], boundary: [""]}
+    fake.noinput_q2 = {b2: ["보드 고정점 주변 부품 배치"], boundary: [("", "입력이 와도 같다")]}   # 까닭만(자료 칸이 차 있어도)
     fake.sweep_k = {b0: ["K08"]}                                   # 배경 카드 하나 — 입력 결손 호출이 먼저 싣는다
     rig.Rig(store, fake).finish(job_id)
     assert rig.state(store, job_id) == "completed"
@@ -199,15 +199,16 @@ def test_an_engine_that_does_not_know_noinput_holds_the_job_without_charging(sto
 
 def test_a_short_or_cut_answer_is_a_content_failure_charged_to_the_cell(store, monkeypatch):
     """q2 가 한 줄도 없는 답은 결과를 낼 수 없어 내용 탓 실패(noinput_incomplete)다 — 한도(2)에서 failed. 마지막 답이 잘린 채
-    끝났으면(finish_reason length · more 줄 없음) output_truncated 로 한 번 차감되고 다음 시도에서 닫힌다."""
+    끝났으면(finish_reason length · more 줄 없음) output_truncated 로 한 번 차감되고 다음 시도에서 닫힌다. 보충이 다 받아 낸 답은
+    잘린 것이 아니다."""
     monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_max_charged=2))
     roster = (ROSTER[1],)
     key = rig.target(store, roster)
     job_id = rig.job(store, key)
     fake = FakeReviewEngine(_packs(roster))
-    first, second = (u["unit_id"] for u in _units(store, key)[:2])
+    first, second, third = (u["unit_id"] for u in _units(store, key)[:3])
     fake.noinput_q2 = {first: []}
-    fake.truncate = {("noinput", None, second): "length"}
+    fake.truncate = {("noinput", None, second): "length", ("noinput", None, third): "repaired"}
     rig.Rig(store, fake).finish(job_id)
     short = _cell(store, key, first, MEM1)
     assert (short["state"], short["error_code"], short["charged"]) == ("failed", "noinput_incomplete", 2)
@@ -218,4 +219,7 @@ def test_a_short_or_cut_answer_is_a_content_failure_charged_to_the_cell(store, m
         "SELECT output_truncated FROM rr_review_calls WHERE target_key = ? AND unit_id = ? AND kind = 'noinput'"
         " ORDER BY started_at, rowid", (key, second))]
     assert states == [1, 0]
+    # 첫 시도가 잘렸지만 보충이 끝까지 낸 답(마지막 finish_reason stop · more 줄 있음)은 잘린 답이 아니다 — 차감 없이 닫힌다
+    repaired = _cell(store, key, third, MEM1)
+    assert (repaired["state"], repaired["charged"], repaired["truncated"]) == ("reviewed", 0, 0)
     assert review_cells.review_invariants(store, key) == []

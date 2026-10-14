@@ -273,3 +273,13 @@ def test_pages_put_back_together_are_the_whole(risk_store):
         got, _pages = gather(lambda o, p=part: units.get_unit(risk_store, synth.target_key, unit["unit_id"], p,
                                                                offset=o, budget_chars=400), key)
         assert got == full[key], (part, key)
+
+
+def test_the_domain_hint_goes_only_to_an_expert_with_the_ecad_gap():
+    """영역 실마리(input-gap.v1.json — 재설계 M3 C3-3)는 입력 결손(ecad_absent)인 전문가의 ecad 줄에만 붙는다 — 결손이 아닌 전문가는
+    실마리가 있는 영역이어도, 실마리가 없는 영역은 결손이어도 결측 블록이 그대로다. 다른 종류의 결측 줄은 건드리지 않는다."""
+    rows = [{"kind": "ecad", "note": "회로 소스가 없다."}, {"kind": "semantic_blocked", "note": "의미층이 막혔다."}]
+    assert units.gap_missing(rows, [], "pcb") == rows
+    assert units.gap_missing(rows, ["ecad_absent"], "mech") == rows
+    got = units.gap_missing(rows, ["ecad_absent"], "pcb")
+    assert got == [{"kind": "ecad", "note": "회로 소스가 없다. 이 영역이 볼 것 — 보드 고정점·지지 스팬·보드 근접 계면."}, rows[1]]

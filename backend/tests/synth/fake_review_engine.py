@@ -43,10 +43,13 @@
   sweep_rel        unit_id → 훑기 rel(yes·maybe·no) — 그 단위의 u 줄 rel 을 바꾼다(훑기 '무관' 비율, S11)
   noinput_q1       unit_id → q1 줄의 impact 목록(기본 yes 둘 — 계약 예제 result_noinput_ok 의 모양). yes·unknown 줄은 실린 카드를
                    차례로 대고(그 카드 글에서 자른 인용) 변경 줄 하나를 단다, no 줄은 카드·줄 없이 낸다(재설계 M3 C3-3)
-  noinput_q2       unit_id → q2 줄의 항목 목록(빈 글 = 확인할 것 없음 — 까닭만). 기본은 예제처럼 둘(첫째는 첫 카드를 댄다)
+  noinput_q2       unit_id → q2 줄의 항목 목록(빈 글 = 확인할 것 없음 — 까닭만, (항목, 필요한 자료) 쌍도 된다). 기본은 예제처럼
+                   둘(첫째는 첫 카드를 댄다)
   noinput_more     unit_id → more=yes 로 답할 횟수(답마다 하나씩 준다 — 그 동안 quality.maybe_more 참). 다시 물으면 q1 제목 번호가
                    받은 extra.known 수 뒤에서 이어진다
   noinput_same_titles  참이면 다시 물어도 q1 제목 번호를 1 부터 다시 매긴다(같은 영향을 되풀이하는 모델 — 앱이 한 번만 남기는지)
+  sweep_split      훑기 묶음 수(기본 1 — 카드 전부 한 묶음). 둘 이상이면 카드를 팩 순서로 나눈다
+  sweep_error_aliases  이 별칭이 실린 훑기 묶음의 run 은 내용 탓 오류(no_rows)다 — 훑기 쪽 하나만 실패한 전문가(sweep_state failed)
   sweep_drop       훑기 답에서 뺄 unit_id(앱 회계가 그 단위를 error 로 적는다 — 거르기의 '답에 없는 단위', 재설계 M3 C3-6)
   sweep_k          unit_id → 별칭 목록 — 그 단위의 u 줄 k 를 실은 카드 전부가 아니라 이것만으로 낸다(카드 밖 호출이 훑기 k 에 걸린
                    배경 카드를 먼저 싣는지 — P-03, R3A-5)
@@ -269,6 +272,8 @@ class FakeReviewEngine:
         self.sweep_rel: dict[str, str] = {}
         self.sweep_k: dict[str, list[str]] = {}
         self.sweep_drop: set[str] = set()
+        self.sweep_split = 1
+        self.sweep_error_aliases: set[str] = set()
         self.noinput_q1: dict[str, list[str]] = {}
         self.noinput_q2: dict[str, list[str]] = {}
         self.noinput_more: dict[str, int] = {}
@@ -418,7 +423,8 @@ class FakeReviewEngine:
 
         checkable = [c for c in cards if c.get("checkable")]
         verdict_decks = [deck("verdict", checkable[i:i + k]) for i in range(0, len(checkable), k)]
-        sweep_decks = [deck("sweep", cards)] if cards else []
+        size = -(-len(cards) // max(1, int(self.sweep_split))) if cards else 0
+        sweep_decks = [deck("sweep", cards[i:i + size]) for i in range(0, len(cards), size)] if cards else []
         fits = [u["unit_id"] for u in units if u["unit_id"] not in self.oversize_units]
         pages = [fits[i:i + per_page] for i in range(0, len(fits), per_page)]
         p_hard = int(self.base_limits["p_hard"])
@@ -448,6 +454,10 @@ class FakeReviewEngine:
         if self._take("busy_n"):
             return self._busy()
         cell = (str((body.get("expert") or {}).get("key") or ""), str((body.get("unit") or {}).get("unit_id") or ""))
+        if body.get("kind") == "sweep" and {c.get("alias") for c in body.get("cards") or ()} & self.sweep_error_aliases:
+            return self._stream(iter([_sse("status", {"step": "attempt", "n": 1}),
+                                      _sse("error", {"code": "no_rows", "message": "훑기 줄이 하나도 없다(가짜)", "infra": False,
+                                                     "retryable": False, "attempt": 1}), _sse("done", {})]))
         if cell in self.error_cells:
             return self._stream(iter([_sse("status", {"step": "attempt", "n": 1}),
                                       _sse("error", {**self.error_cells[cell], "attempt": 1}), _sse("done", {})]))
@@ -672,10 +682,12 @@ class FakeReviewEngine:
         q1 = q1[:cap]
         q2: list[dict] = []
         items = self.noinput_q2.get(uid, ["보드 고정점 주변 부품 배치", "근접 계면의 네트 경로"])
-        for i, item in enumerate(items):
+        for i, entry in enumerate(items):
+            # 항목 하나는 글(필요한 자료는 기본값) 또는 (항목, 필요한 자료) 쌍이다
+            item, needs = entry if isinstance(entry, tuple) else (entry, "ECAD 배치·스택업" if entry else "")
             alias = order[0] if order and i == 0 and item else ""
             card = cards.get(alias) if alias else None
-            row = {"t": "q2", "l": list(own[:1]), "item": item, "needs": "ECAD 배치·스택업" if item else "", "k": alias,
+            row = {"t": "q2", "l": list(own[:1]), "item": item, "needs": needs, "k": alias,
                    "why": "바뀐 보스 위치와 부품 간극을 대조해야 한다" if item else "결측 입력이 와도 이 단위에서 볼 것이 없다",
                    "refs": [lines[a]["ref"] for a in own[:1]]}
             if card is not None:

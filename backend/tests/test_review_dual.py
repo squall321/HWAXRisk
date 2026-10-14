@@ -73,11 +73,14 @@ def test_only_flagged_aliases_get_a_second_judgement_and_rank_one_calibrates_the
 
     revs = _runs(fake, MECH2, "rev")
     assert len(revs) == (1 if hits >= 2 else 0)
+    ledger = [json.loads(r["cards_json"]) for r in store.query(
+        "SELECT cards_json FROM rr_review_calls WHERE target_key = ? AND agent_key = ? AND variant = 'rev'", (key, MECH2))]
+    assert ledger == ([flagged] if hits >= 2 else [])                       # 호출 원장도 실은 별칭만 적는다
     if revs:
         assert [c["alias"] for c in revs[0]["cards"]] == flagged
         assert [d["alias"] for d in revs[0]["digest"]][:len(checkable) - hits] == [a for a in checkable if a not in flagged]
     assert sorted(c["alias"] for b in _runs(fake, MECH2, "solo") for c in b["cards"]) == flagged
-    assert _sample(store, key, MECH2)["dual_neg"] == {"on": False, "picked": False}
+    assert _sample(store, key, MECH2).get("dual_neg") == {"on": False, "picked": False}
 
     (calib,) = _runs(fake, MECH1, "rev")                                     # 1순위 — 보정용 묶음 전체
     assert [c["alias"] for c in calib["cards"]] == checkable
@@ -126,7 +129,7 @@ def test_random_reverse_turns_on_when_the_calibration_flips_more_than_five_perce
     key, _unit = _run(store, fake, agents=None if scope_rank1 else [MECH2], one_unit=False)
     on = state == "on"
     n_units = len(units.load_units(store, key))
-    samples = [json.loads(r["sample_json"])["dual_neg"] for r in store.query(
+    samples = [json.loads(r["sample_json"]).get("dual_neg") for r in store.query(
         "SELECT sample_json FROM rr_review_cells WHERE target_key = ? AND agent_key = ?", (key, MECH2))]
     assert samples == [{"on": on, "picked": on}] * n_units
     assert len(_runs(fake, MECH2, "rev")) == (n_units if on else 0)
@@ -137,6 +140,31 @@ def test_random_reverse_turns_on_when_the_calibration_flips_more_than_five_perce
     rows = [dict(r) for r in store.query("SELECT unit_id, agent_key, record_id, variant, judgement FROM rr_card_verdicts"
                                          " WHERE target_key = ? AND agent_key = ?", (key, MECH1))]
     assert review_verify.dual_neg_state(rows, tier_a_closed=scope_rank1)["state"] == state
+
+
+def test_random_reverse_waits_until_every_rank_one_cell_is_closed(store, monkeypatch):
+    """보정이 이미 5% 를 넘게 뒤집혔어도(1순위의 첫 단위) 1순위 셀이 대상에 아직 열려 있으면 미측정이라 켜지 않는다 — 분류의 1순위
+    대기(8번 줄)와 같은 때에 풀린다."""
+    import dataclasses
+
+    from app import config
+
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_dual_neg_pct=100))
+    fake = FakeReviewEngine(_packs())
+    fake.rev_verdicts = {_record("K01"): ("yes", "FAIL")}
+    key = rig.target(store, ROSTER)
+    first = units.load_units(store, key)[0]["unit_id"]
+    rig.Rig(store, fake).finish(rig.job(store, key, scope={"agents": [MECH1], "unit_ids": [first]}))
+    rows = [dict(r) for r in store.query("SELECT unit_id, agent_key, record_id, variant, judgement FROM rr_card_verdicts"
+                                         " WHERE target_key = ? AND agent_key = ?", (key, MECH1))]
+    assert review_verify.dual_neg_state(rows, tier_a_closed=True)["state"] == "on"      # 닫혔다면 켜졌을 비율이다
+    job_id = rig.job(store, key, scope={"agents": [MECH2]})
+    rig.Rig(store, fake).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    assert _runs(fake, MECH2, "rev") == []
+    assert {json.dumps(json.loads(r["sample_json"]).get("dual_neg"), sort_keys=True) for r in store.query(
+        "SELECT sample_json FROM rr_review_cells WHERE target_key = ? AND agent_key = ?", (key, MECH2))} == {
+        '{"on": false, "picked": false}'}
 
 
 # ---------------------------------------------------------------- 엔진이 알린 부딪침(RB3-1)

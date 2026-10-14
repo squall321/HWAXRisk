@@ -334,8 +334,8 @@ def test_an_engine_conflict_mark_survives_the_accounting_and_reads_back_from_the
     second["flipped_from"] = {"verdict": "FAIL", "attempt": 1}
     rows = {r["alias"]: r for r in _accept(result, fwd)["rows"]}
     a, b = first["k"], second["k"]
-    assert json.loads(rows[a]["checks_json"])["dup_conflict"] is True
-    assert json.loads(rows[b]["checks_json"])["flipped_from"] == {"verdict": "FAIL", "attempt": 1}
+    assert json.loads(rows[a]["checks_json"]).get("dup_conflict") is True
+    assert json.loads(rows[b]["checks_json"]).get("flipped_from") == {"verdict": "FAIL", "attempt": 1}
     assert rv.engine_conflict(rows[a]) and rv.engine_conflict(rows[b]) and rv.engine_conflict(second)
     assert not any(rv.engine_conflict(r) for k, r in rows.items() if k not in (a, b))
     assert not rv.engine_conflict({"checks_json": "not json"}) and not rv.engine_conflict({})

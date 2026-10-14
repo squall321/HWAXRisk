@@ -55,9 +55,12 @@ def _pack_error(name: str) -> tuple[int, dict]:
 
 
 def _refused(fn, *args, **kwargs) -> AppError:
-    with pytest.raises(AppError) as exc:
+    """거절(AppError)을 돌려준다 — 거절하지 않았으면 단언 실패다(변이 검사가 '죽음' 으로 세는 실패의 모양)."""
+    try:
         fn(*args, **kwargs)
-    return exc.value
+    except AppError as exc:
+        return exc
+    raise AssertionError(f"{getattr(fn, '__name__', fn)} 가 거절하지 않았다")
 
 
 def _failed_target(store):
@@ -117,6 +120,24 @@ def test_retry_reopens_only_the_failed_cell_and_the_job_it_makes_asks_the_engine
     again = routes.post_cells_retry(key, routes.CellsRetryBody(filter={"job_id": job_id}), ident=ME)
     assert (again["changed"], again["retried"], again["job"]) == (False, 0, {"action": "none"})
     assert len(_audits(store, "cells.retry")) == 1                                   # 바꾼 것이 없으면 감사도 없다
+
+
+def test_a_retried_cell_never_replays_the_answers_of_its_first_run(store):
+    """다시 연 셀은 시도 수가 0 으로 돌아가지만 요청 열쇠에 다시 연 횟수가 들어 앞 실행의 같은 시도 답(엔진이 카드 하나를 빼먹은 답 —
+    호출은 ok 라 원장에 남아 있다)을 다시 쓰지 않는다. 엔진이 고쳐진 뒤 다시 돌리면 reviewed 다(앞 답을 다시 썼다면 또 failed)."""
+    key = rig.target(store)
+    unit_id = review_cells.active_unit_ids(store, key)[0]
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [unit_id]})
+    fake = FakeReviewEngine(rig.packs())
+    fake.skip_cards = {"K02"}
+    r = rig.Rig(store, fake)
+    r.finish(job_id)
+    cell = _cells(store, key, SEAL)[unit_id]
+    assert (cell["state"], cell["error_code"]) == ("failed", "cards_unjudged")
+    fake.skip_cards = set()
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[unit_id, SEAL]]), ident=ME)
+    r.finish(out["job"]["job_id"])
+    assert _cells(store, key, SEAL)[unit_id]["state"] == "reviewed"
 
 
 def test_force_retry_reopens_reviewed_cells_with_a_reason_and_runs_them_on_the_new_revision(store):
