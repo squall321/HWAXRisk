@@ -563,7 +563,7 @@ def plan_issue_panel(store: RiskStore, target_key: str, *, job: Mapping[str, Any
             conn.execute(
                 "INSERT INTO rr_panels(id, target_key, owner_sub, panel_no, tier, seats_json, chair_template,"
                 " modifiers_json, rounds, engine, tool_mode, status, budget_json, llm_calls_planned, kind, issue_id,"
-                " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'web', 'evidence_only', 'planned', ?, ?, 'issue', ?, ?)",
+                " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'web', 'tools', 'planned', ?, ?, 'issue', ?, ?)",
                 (panel_id, target_key, target["owner_sub"], panel_no, ISSUE_TIER, seats_json, planner.CHAIR_TEMPLATE,
                  common.canonical_json(mods), ISSUE_ROUNDS, common.canonical_json(budget),
                  (len(seats) + 1) * ISSUE_ROUNDS + 3, issue["issue_id"], now))
