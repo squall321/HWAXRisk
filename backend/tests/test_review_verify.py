@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from app import cardpack, units
+from app import cardpack, engine_client, units
 from app import review_verify as rv
 from tests.conftest import FIXTURES_DIR, REPO_ROOT
 
@@ -487,3 +487,105 @@ def test_audit_outcome_reads_the_engine_offcard_rows_through_the_app_accounting(
     expected = ("risk_miss" if any(r["dir"] == "risk" and r["sev"] != "경미" for r in rows) else "relevance_miss")
     assert rv.audit_outcome(_eff(_NA), rows) == expected
     assert rv.audit_outcome(_eff(_NA), [dict(r, dir="improvement") for r in rows]) == "relevance_miss"
+
+
+# ---------------------------------------------------------------- 걸린 것만 이중 판정 · 1순위 보정 · 무작위 뒤집기(M3 C3-9 — #31 · #32)
+def _pack_with_digest(request: dict) -> cardpack.FrozenPack:
+    """요청의 전문 카드 + 제목만 실린 카드(digest)를 한 팩으로 — `run_body` 가 digest 를 팩에서 다시 짓게."""
+    stubs = [{**d, "sections": [], "checkable": False} for d in request["digest"]]
+    return cardpack.view_of({"agent_key": request["expert"]["key"], "cards": [*request["cards"], *stubs]})
+
+
+def test_two_or_more_flags_ask_rev_on_those_cards_only(fwd):
+    """걸린 별칭이 둘 이상이면 그 별칭만 실은 rev 한 번 — 카드는 fwd 순서(엔진이 뒤집는다), 빠진 묶음 카드는 제목 목록으로 내려
+    팩 순서로 선다. 같은 본문을 `engine_client.run_body` 가 짓는 것과 견준다(검토 루프가 rev 를 지을 그 함수)."""
+    before = copy.deepcopy(fwd)
+    plan = rv.dual_plan_flagged(fwd, ["K05", "K02", "K99"])     # 순서가 섞여 와도, 묶음 밖 별칭이 와도
+    assert (plan["reason"], plan["solo"], plan["aliases"]) == ("dual", [], ["K02", "K05"])
+    rev = plan["rev"]
+    assert rev["variant"] == "rev" and [c["alias"] for c in rev["cards"]] == ["K02", "K05"]
+    assert rev["cards"] == [c for c in fwd["cards"] if c["alias"] in ("K02", "K05")]
+    pack = _pack_with_digest(fwd)
+    oracle = engine_client.run_body("verdict", variant="rev", target_key=fwd["target_key"], pack=pack, cards=["K02", "K05"],
+                                    digest=[a for a in pack.order if a not in ("K02", "K05")], unit=fwd["unit"])
+    assert rev["cards"] == oracle["cards"]
+    keyed = ("alias", "type", "title", "record_id")
+    assert [{k: d.get(k) for k in keyed} for d in rev["digest"]] == [{k: d.get(k) for k in keyed} for d in oracle["digest"]]
+    assert {k: v for k, v in rev.items() if k not in ("variant", "cards", "digest")} == {
+        k: v for k, v in fwd.items() if k not in ("variant", "cards", "digest")}
+    assert rv.effective_body_sha(rev) != rv.effective_body_sha(fwd)
+    assert fwd == before                                        # 받은 요청은 그대로다
+
+
+def test_one_flag_is_judged_again_by_its_solo_and_no_flag_asks_nothing(fwd):
+    assert rv.dual_plan_flagged(fwd, ["K03"]) == {"rev": None, "solo": ["K03"], "reason": "single_flag", "aliases": [],
+                                                  "neg": {"on": False, "picked": False}}
+    assert rv.dual_plan_flagged(fwd, []) == {"rev": None, "solo": [], "reason": "none_flagged", "aliases": [],
+                                             "neg": {"on": False, "picked": False}}
+    assert rv.dual_plan_flagged(fwd, ["K42"])["reason"] == "none_flagged"     # 이 묶음에 없는 별칭은 걸림이 아니다
+
+
+def test_rank1_cells_calibrate_with_the_whole_deck(fwd):
+    """1순위 셀(보정 모집단)은 걸림과 상관없이 묶음 전체를 rev 한다 — M2 의 rev 요청(계약 예제)과 같다."""
+    for flagged in ([], ["K01"], ["K01", "K02"]):
+        plan = rv.dual_plan_flagged(fwd, flagged, calibrate=True)
+        assert (plan["reason"], plan["solo"]) == ("calib", [])
+        assert plan["rev"] == _load("req_verdict_rev.json") == rv.dual_plan(fwd)["rev"]
+        assert plan["aliases"] == [c["alias"] for c in fwd["cards"]]
+    one = dict(copy.deepcopy(fwd), cards=fwd["cards"][:1])
+    assert rv.dual_plan_flagged(one, [], calibrate=True) == {"rev": None, "solo": ["K01"], "reason": "same_body",
+                                                             "aliases": [], "neg": {"on": False, "picked": False}}
+
+
+def test_the_random_flip_takes_a_tenth_of_unflagged_decks_only_when_on(fwd):
+    keys = [("T", f"u{n}", "a", "d1") for n in range(300)]
+    off = [rv.dual_plan_flagged(fwd, [], neg_on=False, neg_pct=10, sample_key=k) for k in keys]
+    assert {p["reason"] for p in off} == {"none_flagged"} and {p["neg"]["on"] for p in off} == {False}
+    assert {rv.dual_plan_flagged(fwd, [], neg_on=True, neg_pct=0, sample_key=k)["reason"] for k in keys} == {"none_flagged"}
+    on = {k: rv.dual_plan_flagged(fwd, [], neg_on=True, neg_pct=10, sample_key=k) for k in keys}
+    picked = [k for k, p in on.items() if p["reason"] == "dual_neg"]
+    assert picked == [k for k in keys if rv.sample_score("dual_neg", *k) < 0.10] and 10 < len(picked) < 60
+    for k, plan in on.items():
+        assert plan["neg"] == {"on": True, "picked": k in picked}
+        if k in picked:
+            assert plan["rev"] == rv.dual_plan(fwd)["rev"] and plan["aliases"] == [c["alias"] for c in fwd["cards"]]
+    # 걸린 묶음은 무작위 뒤집기를 타지 않는다 — 걸린 길(rev 걸린 별칭 · 단독)이 먼저다.
+    for k in picked:
+        assert rv.dual_plan_flagged(fwd, ["K01"], neg_on=True, neg_pct=10, sample_key=k)["reason"] == "single_flag"
+        assert rv.dual_plan_flagged(fwd, ["K01", "K04"], neg_on=True, neg_pct=10, sample_key=k)["reason"] == "dual"
+    one = dict(copy.deepcopy(fwd), cards=fwd["cards"][:1])
+    assert rv.dual_plan_flagged(one, [], neg_on=True, neg_pct=100, sample_key=keys[0])["reason"] == "same_body"
+    with pytest.raises(ValueError):
+        rv.dual_plan_flagged(dict(fwd, variant="rev"), [])
+
+
+def _calib(*cards):
+    """[(unit, record, fwd, rev | None), …] → 보정 모집단의 판정 행."""
+    rows = []
+    for unit, record, fwd_j, rev_j in cards:
+        rows.append({"unit_id": unit, "agent_key": "mech-1", "record_id": record, "variant": "fwd", "judgement": fwd_j})
+        if rev_j is not None:
+            rows.append({"unit_id": unit, "agent_key": "mech-1", "record_id": record, "variant": "rev", "judgement": rev_j})
+    return rows
+
+
+def test_the_random_flip_switches_on_above_five_percent_of_calibrated_clears():
+    """분모 = fwd 가 걸림 없음(OK·na)이고 rev 가 있는 셀 × 카드, 분자 = 그 가운데 rev 가 걸림. 5% 를 **넘어야** 켠다."""
+    rows = _calib(("u1", "R1", "OK", "FAIL"), ("u1", "R2", "na", "na"), ("u2", "R1", "OK", "WARNING"),
+                  ("u2", "R3", "FAIL", "OK"),               # fwd 가 걸린 카드는 분모가 아니다
+                  ("u3", "R1", "OK", None))                 # rev 를 못 받은 카드는 잴 수 없다
+    assert rv.dual_neg_state(rows, tier_a_closed=True) == {"state": "on", "n": 3, "flips": 2, "rate": 2 / 3}
+    clears = [("u", f"R{i}", "OK", "OK") for i in range(19)]
+    assert rv.dual_neg_state(_calib(*clears, ("u", "R19", "na", "FAIL")), tier_a_closed=True)["state"] == "off"   # 1/20 = 5%
+    assert rv.dual_neg_state(_calib(*clears[:18], ("u", "R19", "na", "FAIL")), tier_a_closed=True)["state"] == "on"  # 1/19
+    assert rv.dual_neg_state(_calib(*clears), tier_a_closed=True) == {"state": "off", "n": 19, "flips": 0, "rate": 0.0}
+
+
+def test_the_random_flip_is_unmeasured_until_tier_a_closes_and_never_switches_off():
+    rows = _calib(("u1", "R1", "OK", "FAIL"))
+    assert rv.dual_neg_state(rows, tier_a_closed=False)["state"] == "unmeasured"
+    assert rv.dual_neg_state([], tier_a_closed=True) == {"state": "unmeasured", "n": 0, "flips": 0, "rate": None}
+    assert rv.dual_neg_state(_calib(("u1", "R1", "FAIL", "FAIL")), tier_a_closed=True)["state"] == "unmeasured"
+    clean = _calib(("u1", "R1", "OK", "OK"))
+    assert rv.dual_neg_state(clean, tier_a_closed=True, already_on=True)["state"] == "on"
+    assert rv.dual_neg_state(clean, tier_a_closed=False, already_on=True)["state"] == "on"

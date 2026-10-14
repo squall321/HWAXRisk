@@ -1265,3 +1265,20 @@ rebase 때 부딪치지 않게).
   방향이 빈 줄은 앱 회계의 기본값대로 리스크다.
 - **표의 순서가 정하는 칸 — `applies='yes'` 이면서 판정 보류인 행.** 표의 순서상 `relevance_miss` 다(보류보다 앞 줄). 보수 상한
   `(risk_miss + undetermined) / 표본` 에는 들지 않는다. 표를 그대로 따랐고 시험이 그 순서를 고정한다 — 바꾸려면 표부터 고친다.
+
+### M3C-5. 걸린 것만 이중 판정(`review_verify.dual_plan_flagged` · `dual_neg_state`) — 보정과 무작위 뒤집기를 한 계획 함수에
+- **한 함수가 묶음 하나의 rev 를 정한다.** m3-cells C3-9 는 `dual_plan_flagged(fwd_request, flagged_aliases)` 와 이유 넷(`dual` ·
+  `single_flag` · `none_flagged` · `same_body`)을 적었다. M3.md #31·#32 가 1순위 보정(묶음 전체)과 무작위 뒤집기를 더해, 인자
+  `calibrate`·`neg_on`·`neg_pct`·`sample_key` 와 이유 둘(`calib` · `dual_neg`)을 더했다. 처음 맞는 줄 — 보정 → 걸림 둘 이상 →
+  걸림 하나 → (걸림 없음이고 켜졌으면) 무작위 → 걸림 없음. 걸린 묶음은 무작위 길을 타지 않는다. 묶음 전체 rev 가 fwd 와 같은
+  본문(카드 1장)이면 `same_body` 로 단독에 보낸다(`dual_plan` 과 같다). `dual='all'`(M2)은 지금 `dual_plan` 그대로다.
+- **걸림 하나면 `solo` 에 그 별칭을 싣는다.** 단독 재질의가 그 카드의 두 번째 판정이라는 것을 계획에 드러낸다(`_solo_set` 의 '실효가
+  걸림' 갈래도 같은 카드를 고른다 — 겹쳐도 한 번이다). 반환 `aliases` 는 rev 에 실은 별칭이고 셀의 `dual_aliases` 가 된다.
+- **걸린 별칭만 실은 rev 본문.** 카드는 fwd 순서(엔진이 뒤집는다), 묶음에서 빠진 카드는 제목 목록(digest)으로 내려 팩 순서로
+  세운다. 팩 순서는 별칭 숫자 순서다(엔진 `assign_aliases` 가 팩 순서로 K01… 를 매긴다). 시험이 그 본문을
+  `engine_client.run_body(cards=걸린 별칭, digest=팩의 나머지)` 와 견준다. 엔진 검증기(형제 리포 서브프로세스)로 422 없이 받는지는
+  C3-9(루프 배선)에서 본다 — 지금 엔진 작업 트리는 다른 세션이 고치는 중이다.
+- **무작위 뒤집기의 켜짐(#32).** `dual_neg_state(1순위 셀 판정 행, tier_a_closed, already_on)` — 셀 × 카드마다 fwd 가 OK·na 이고
+  rev 행이 있는 것이 분모, 그 가운데 rev 가 FAIL·WARNING 인 것이 분자, 비율이 5% 를 **넘으면**(`>`) 켠다. 1순위 셀이 다 종결되기
+  전이거나 잴 카드가 0 이면 '미측정' 이다. 한 번 켜지면(그 대상의 셀에 `sample_json.dual_neg.on` 이 섰으면) 꺼지지 않는다 — 1순위
+  셀이 사람의 다시로 다시 돌아 비율이 내려가도 그대로다. 같은 카드라도 단위가 다르면 따로 센다.

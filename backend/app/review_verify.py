@@ -596,3 +596,92 @@ def audit_outcome(effective: Mapping[str, Mapping[str, Any]], offcard_rows: Sequ
     if any(str(e.get("applies")) == "unknown" or str(e.get("judgement")) == "undetermined" for e in rows):
         return "undetermined"
     return "kept"
+
+
+# ---------------------------------------------------------------- 걸린 것만 이중 판정 · 1순위 보정 · 무작위 뒤집기(M3 C3-9 — #31 · #32)
+DUAL_NEG_TRIGGER = 0.05             # 보정 모집단의 '걸림 없음 → 걸림' 비율이 이것을 넘으면 그 대상에서 무작위 뒤집기를 켠다(#32)
+DUAL_REASONS: tuple[str, ...] = ("dual", "single_flag", "none_flagged", "same_body", "calib", "dual_neg")
+
+
+def dual_neg_state(calib_rows: Sequence[Mapping[str, Any]], *, tier_a_closed: bool, already_on: bool = False) -> dict:
+    """무작위 뒤집기를 켜나(#32) — 원장에서 유도한다(저장하지 않는다). 반환 {state: on · off · unmeasured, n, flips, rate}.
+
+    `calib_rows` 는 보정 모집단(1순위 셀 — 묶음 전체를 rev 했다)의 판정 행 [{unit_id, agent_key, record_id, variant, judgement}].
+    셀 × 카드마다 fwd 가 걸림 없음(OK·na)이고 rev 행이 있는 것이 분모, 그 가운데 rev 가 걸림(FAIL·WARNING)인 것이 분자다.
+    한 번 켜지면 꺼지지 않는다(`already_on` — 그 대상의 셀 가운데 `sample_json.dual_neg.on` 이 선 것이 있다). 1순위 셀이 다
+    종결되기 전이거나(분류 8 번 줄이 풀리는 때와 같다) 잴 카드가 없으면 '미측정' 이고 켜지 않는다.
+    """
+    pairs: dict[tuple[str, str, str], dict[str, str]] = {}
+    for row in calib_rows:
+        key = (str(row.get("unit_id")), str(row.get("agent_key")), str(row.get("record_id")))
+        pairs.setdefault(key, {})[str(row.get("variant") or "fwd")] = str(row.get("judgement") or "")
+    measured = [p for p in pairs.values() if p.get("fwd") in CLEAR and "rev" in p]
+    flips = sum(1 for p in measured if p["rev"] in FLAGGED)
+    rate = flips / len(measured) if measured else None
+    if already_on:
+        state = "on"
+    elif not tier_a_closed or rate is None:
+        state = "unmeasured"
+    else:
+        state = "on" if rate > DUAL_NEG_TRIGGER else "off"
+    return {"state": state, "n": len(measured), "flips": flips, "rate": rate}
+
+
+def _alias_order(alias: Any) -> tuple[int, str]:
+    """팩 별칭(K01…)은 팩 순서로 매겨진다(엔진 `assign_aliases`) — 숫자 순서가 팩 순서다."""
+    text = str(alias or "")
+    return (int(text[1:]), text) if text[1:].isdigit() else (1 << 30, text)
+
+
+def _flagged_rev(fwd_request: Mapping[str, Any], flagged: Sequence[str]) -> dict:
+    """걸린 별칭만 실은 rev 요청 — 카드는 fwd 순서 그대로(엔진이 뒤집는다), 빠진 묶음 카드는 제목 목록(digest)으로 내려 팩 순서로
+    둔다. `engine_client.run_body('verdict', variant='rev', cards=걸린 별칭, digest=팩의 나머지)` 와 같은 본문이다."""
+    keep = set(flagged)
+    rev = dict(copy.deepcopy(dict(fwd_request)), variant="rev")
+    cards = list(rev.get("cards") or ())
+    rev["cards"] = [c for c in cards if str(c.get("alias")) in keep]
+    moved = [{k: (None if c.get(k) is None else str(c.get(k))) for k in ("alias", "type", "title", "record_id", "card_id")}
+             for c in cards if str(c.get("alias")) not in keep]
+    rev["digest"] = sorted([*(rev.get("digest") or ()), *moved], key=lambda d: _alias_order(d.get("alias")))
+    return rev
+
+
+def dual_plan_flagged(fwd_request: Mapping[str, Any], flagged_aliases: Collection[str], *, calibrate: bool = False,
+                      neg_on: bool = False, neg_pct: float = 0.0, sample_key: Sequence[str] = (),
+                      salt: str = SAMPLE_SALT) -> dict:
+    """fwd 판정 요청(묶음 하나)의 이중 판정 계획 — `knobs.dual='flagged'` 의 길. 반환 {rev, solo, reason, aliases, neg{on, picked}}.
+
+    `flagged_aliases` 는 그 셀 · 묶음에서 fwd 실효(빠진 카드 재질의 뒤)가 FAIL·WARNING 인 별칭이다. 처음 맞는 줄이다.
+
+    | 1순위 셀(`calibrate` — 보정 모집단) | 묶음 전체 rev — `calib` |
+    | 걸린 별칭 둘 이상 | 그 별칭만 실은 rev 한 번 — `dual` |
+    | 걸린 별칭 하나 | rev 없이 그 카드의 단독 재질의가 두 번째 판정 — `single_flag` |
+    | 걸림 없음 · 무작위 뒤집기가 켜졌고 `sample_score('dual_neg', T, u, a, 묶음) < neg_pct/100` | 묶음 전체 rev — `dual_neg` |
+    | 걸림 없음 | rev 없음 — `none_flagged` |
+
+    묶음 전체 rev 가 fwd 와 같은 본문이면(카드 1장 묶음) 부르지 않고 그 카드를 단독으로 보낸다(`same_body` — `dual_plan` 과 같다).
+    `aliases` 는 rev 에 실은 별칭(셀의 `dual_aliases` — 단독 재질의의 'rev 를 물었는데 rev 행이 없다' 갈래가 이것으로 판단한다).
+    """
+    if fwd_request.get("kind") != "verdict" or fwd_request.get("variant") != "fwd":
+        raise ValueError("dual_plan_flagged 는 verdict·fwd 요청만 받는다")
+    order = [str(c.get("alias")) for c in fwd_request.get("cards") or ()]
+    wanted = {str(a) for a in flagged_aliases}
+    flagged = [a for a in order if a in wanted]
+    neg = {"on": bool(neg_on) and neg_pct > 0, "picked": False}
+
+    def whole(reason: str) -> dict:
+        rev = dict(copy.deepcopy(dict(fwd_request)), variant="rev")
+        if effective_body_sha(rev) == effective_body_sha(fwd_request):
+            return {"rev": None, "solo": order, "reason": "same_body", "aliases": [], "neg": neg}
+        return {"rev": rev, "solo": [], "reason": reason, "aliases": order, "neg": neg}
+
+    if calibrate:
+        return whole("calib")
+    if len(flagged) >= 2:
+        return {"rev": _flagged_rev(fwd_request, flagged), "solo": [], "reason": "dual", "aliases": flagged, "neg": neg}
+    if len(flagged) == 1:
+        return {"rev": None, "solo": flagged, "reason": "single_flag", "aliases": [], "neg": neg}
+    if neg["on"] and sample_score("dual_neg", *sample_key, salt=salt) < neg_pct / 100.0:
+        neg["picked"] = True
+        return whole("dual_neg")
+    return {"rev": None, "solo": [], "reason": "none_flagged", "aliases": [], "neg": neg}
