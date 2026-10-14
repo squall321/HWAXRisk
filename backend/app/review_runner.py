@@ -1859,6 +1859,9 @@ class _Session:
             more = accepted["extras"].get("more")
             quality = answer.result.get("quality") if isinstance(answer.result.get("quality"), Mapping) else {}
             last = quality.get("maybe_more") is not True or seq >= NOINPUT_MORE_REASKS
+            # 마지막 다시 묻기 뒤에도 '더 있다' 면 상한에 닿은 것이다 — 셀에 적어 품질 · 보고서가 센다(카드 밖 offcard_capped 처럼,
+            # 반대 검토 2차 LOW 7 · D-46). 닿지 않은 셀의 기록은 종전 그대로다.
+            capped = quality.get("maybe_more") is True and seq >= NOINPUT_MORE_REASKS
             outcome = review_verify.noinput_outcome(q1, q2)
             meta = answer.result.get("meta") if isinstance(answer.result.get("meta"), Mapping) else {}
             bg_dropped = int(meta.get("bg_dropped") or 0)
@@ -1866,7 +1869,8 @@ class _Session:
                 "basis": review_cells.NOINPUT, "credential_kind": self.cred_kind, "model": meta.get("model"),
                 "bg_full_n": max(len(cards) - bg_dropped, 0), "bg_title_only_n": bg_dropped,
                 "extras_json": canonical_json({"inj": cell.inj, "noinput": {"q1": q1, "q2": q2, "more": more,
-                                                                            "asks": seq + 1, "outcome": outcome}}),
+                                                                            "asks": seq + 1, "outcome": outcome,
+                                                                            **({"capped": True} if capped else {})}}),
                 "mechs_json": canonical_json(sorted({str(r["mech"]) for r in q1 if r["impact"] == "yes" and r.get("mech")
                                                      and r["mech"] != "free"})),
             }

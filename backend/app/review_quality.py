@@ -169,7 +169,8 @@ def _load(store: Any, target_key: str, agent_key: str | None) -> dict:
         "SELECT unit_id, agent_key, state, basis, run_id, pack_hash, cards_expected, cards_judged, truncated, soft_over,"
         " offcard_capped, bg_full_n, bg_title_only_n, n_fail, n_warning, quote_ok, decided_by, route,"
         " json_extract(route_json, '$.rule') AS rule, sample_json,"
-        " json_extract(extras_json, '$.noinput.outcome') AS noinput_outcome FROM rr_review_cells"
+        " json_extract(extras_json, '$.noinput.outcome') AS noinput_outcome,"
+        " json_extract(extras_json, '$.noinput.capped') AS noinput_capped FROM rr_review_cells"
         f" WHERE target_key = ?{extra} ORDER BY agent_key, unit_id", [target_key, *params]) if r["unit_id"] in alive]
     for cell in cells:
         # 표본 · 그림자의 실효 결과 — 앞 결과의 놓침까지 센다(반대 검토 2차 LOW 6 · D-46 — 완결 몫 · 넓힘과 같은 셈)
@@ -377,6 +378,8 @@ def _truncation(data: Mapping[str, Any], policy: Mapping[str, Any]) -> dict:
         # 카드 밖 줄이 findings_max 에 닿은 칸과 닿은 횟수(X1-16), 엔진이 상한 밖이라 버린 줄.
         "offcard_capped": {"cells": sum(1 for c in data["cells"] if int(c["offcard_capped"] or 0) > 0),
                            "hits": sum(int(c["offcard_capped"] or 0) for c in data["cells"])},
+        # 입력 결손 호출이 마지막 다시 묻기 뒤에도 '더 있다' 고 한 칸(반대 검토 2차 LOW 7 — 카드 밖 상한과 같은 몫)
+        "noinput_capped": {"cells": sum(1 for c in data["cells"] if c.get("noinput_capped"))},
         "dropped_over_cap": {"rows": sum(int(c["dropped_over_cap"]) for c in ok if c["dropped_over_cap"] is not None),
                              "offcard_calls": len(offcard),
                              "offcard_calls_unknown": sum(1 for c in offcard if c["dropped_over_cap"] is None)},
@@ -764,6 +767,7 @@ def render_text(result: Mapping[str, Any]) -> str:
         f" · 검토 칸 {fmt_rate(trunc['cells'])} · 검토 칸 모름 {fmt_rate(trunc['cells_unknown'])}"
         f" · 품질 한도 넘김 호출 {fmt_rate(trunc['soft_over'])}"
         f" · 카드 밖 상한 닿음 {_n(cap['cells'])}칸({_n(cap['hits'])}번)"
+        f" · 입력 결손 다시 묻기 상한 닿음 {_n(trunc['noinput_capped']['cells'])}칸"
         f" · 상한 밖 버림 {_n(drop['rows'])}줄(카드 밖 호출 {_n(drop['offcard_calls'])} 가운데 모름 {_n(drop['offcard_calls_unknown'])})"
         f" · 몫에서 끊은 입력 {_n(clip['calls'])}호출" + (f"({', '.join(_q(x) for x in clip['inputs'])})" if clip["inputs"] else ""))
     quote = cite["quote"]

@@ -162,6 +162,24 @@ def test_maybe_more_asks_again_with_the_titles_so_far_at_most_three_more_times(s
     assert {len(_bodies(fake, MEM1, "noinput", u)) for u in others} == {1}
 
 
+def test_a_more_left_after_the_last_reask_is_marked_capped_in_quality_and_the_report(store):
+    """반대 검토 2차 LOW 7 · D-46 — 마지막 다시 묻기 뒤에도 엔진이 '더 있다'(maybe_more) 고 하면 그 셀에 noinput_capped 를 적고 품질
+    수치와 보고서의 품질 줄이 그 칸 수를 말한다(카드 밖 offcard_capped 처럼) — 종전에는 셀이 그대로 닫히고 아무 데도 남지 않았다."""
+    roster = (ROSTER[1],)
+    key = rig.target(store, roster)
+    job_id = rig.job(store, key)
+    fake = FakeReviewEngine(_packs(roster))
+    unit_id = _units(store, key)[0]["unit_id"]
+    fake.noinput_more = {unit_id: 9}
+    rig.Rig(store, fake).finish(job_id)
+    got = _cell(store, key, unit_id, MEM1)["extras"]["noinput"]
+    assert (got["asks"], got["more"], got.get("capped")) == (4, "yes", True)
+    assert not any((_cell(store, key, u["unit_id"], MEM1)["extras"].get("noinput") or {}).get("capped")
+                   for u in _units(store, key)[1:])
+    assert review_quality.compute(store, key)["truncation"].get("noinput_capped") == {"cells": 1}
+    assert "입력 결손 다시 묻기 상한 닿음 1칸" in expert_report.render_report_md(expert_report.load_report(store, key, MEM1))
+
+
 def test_the_same_impact_said_again_is_kept_once(store):
     """다시 물은 답이 앞 답의 영향을 같은 제목으로 되풀이하면 한 번만 남는다(받은 q1 제목 기준)."""
     roster = (ROSTER[1],)
