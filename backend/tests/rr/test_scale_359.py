@@ -12,7 +12,7 @@ import time
 import pytest
 
 import app.mcp_server as srv
-from app import review_cells, review_quality, routes
+from app import review_cells, review_quality, review_runner, routes
 from tests import factories
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
@@ -55,6 +55,7 @@ def scale(tmp_path_factory):
     store.migrate()
     caps = {"risk_unit_target_lines": 8, "risk_unit_max_lines": 15, "risk_units_small_lines": 6} if FULL else {}
     rig.configure(mp, store, tmp, risk_review_concurrency=4, **caps)
+    mp.setattr(review_runner, "QUALITY_HOOK", review_quality.progress_hook)     # main 의 lifespan 이 꽂는 그대로(진행판의 품질 칸)
     roster = _roster()
     assert len(roster) == 359 and sum(1 for r in roster if r["domain"] in ("pcb", "pwr", "rf", "soc", "passive", "mem")) == 110
     key = rig.target(store, roster)
@@ -104,7 +105,11 @@ def test_every_mcp_answer_fits_the_wire_and_its_pages_add_up(scale, monkeypatch)
     store, key, job_id, roster = scale
     factories.act_as_delegate(monkeypatch, OWNER)
     limit = srv.MCP_RESULT_CHARS
-    assert srv._wire_chars(_call("risk_get_coverage", target_key=key)) <= limit
+    assert rig.progress(store, job_id).get("quality")                            # 운영처럼 품질 칸이 실린 진행판
+    brief = _call("risk_get_coverage", target_key=key)
+    assert srv._wire_chars(brief) <= limit and brief["seats"]
+    assert brief["review"]["order_page"]["top_per_domain"] < 3                    # 줄여서 들었다(영역 15 × 앞 3명은 넘는다)
+    assert srv._wire_chars(_call("risk_get_coverage", target_key=key, with_seats=False)) <= limit
     order, offset = [], 0
     while offset is not None:
         page = _call("risk_get_coverage", target_key=key, order_offset=offset)

@@ -150,11 +150,7 @@ def risk_get_coverage(target_key: str, with_seats: bool = True, domain: str | No
             full = list(review["order"])
             return _fit_list(lambda take: {**out, "review": {**review, **routes.review_order_page(full, order_offset, take)}},
                              len(full), lambda page: len(page["review"]["order"]))
-        if review is not None:
-            review.update(routes.review_order_brief(review["order"]))
-        if not with_seats:
-            return out
-        seats = routes.seats_payload(target_key, domain, owner_sub=owner_sub)["seats"]
+        seats = routes.seats_payload(target_key, domain, owner_sub=owner_sub)["seats"] if with_seats else []
 
         def seat_page(take: int) -> dict:
             skip = max(0, int(seat_offset))
@@ -166,7 +162,17 @@ def risk_get_coverage(target_key: str, with_seats: bool = True, domain: str | No
                     page["next_seat_offset"] = skip + len(rows)
             return page
 
-        return _fit_list(seat_page, len(seats), lambda page: len(page["seats"]))
+        # 359명에서는 좌석을 한 줄로 줄여도 진행판의 나머지(검토 순서 요약 · 품질 칸)만으로 상한을 넘는다(재설계 M3 C3-11 — 운영처럼
+        # 품질 칸을 꽂은 규모 시험에서 26,579자) — 검토 순서 요약을 영역마다 앞 순위 3 → 2 → 1 명으로 줄인다(_fit_guide 와 같은
+        # 규칙, 전부는 order_offset 쪽).
+        full = list(review["order"]) if review is not None else []
+        for top in range(routes.REVIEW_ORDER_TOP, 0, -1):
+            if review is not None:
+                review.update(routes.review_order_brief(full, top=top))
+            page = _fit_list(seat_page, len(seats), lambda page: len(page["seats"])) if with_seats else out
+            if review is None or _wire_chars(page) <= MCP_RESULT_CHARS:
+                break
+        return page
 
     return _guarded(call)
 
