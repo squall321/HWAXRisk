@@ -827,6 +827,7 @@ def undefer(store: Any, target_key: str, *, decided_by: str, reason: str, agents
     """
     from app import routes  # noqa: PLC0415 — routes 는 무겁다(_audit · 과제 id).
 
+    _guard("deferred", "pending")                 # 보류를 여는 전이도 전이표를 지난다(재설계 M3 C3-2)
     wanted = None if agents is None else set(agents)
     allowed = None if reasons is None else set(reasons)
     now = now_epoch()
