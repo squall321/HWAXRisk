@@ -714,15 +714,15 @@ def audit_topup(store: Any, target_key: str, job_id: str, *, audit_pct: float, s
     if not filtered:
         return {"n": n, "n_audit": 0, "sampled": len(audited), "need": 0, "reopened": 0, "short": 0, "domains_short": []}
     n_audit = max(math.ceil(float(audit_pct) / 100.0 * n), min(n, AUDIT_MIN_N))
-    covered = {r["domain"] for r in audited}
+    have = Counter(r["domain"] for r in audited)
     mine = sorted((r for r in filtered if r["run_id"] == job_id),
                   key=lambda r: (review_verify.sample_score("filter_audit", target_key, r["unit_id"], r["agent_key"],
                                                             salt=salt), r["unit_id"], r["agent_key"]))
     picks: dict[tuple[str, str], str] = {}
-    for domain in sorted({r["domain"] for r in filtered} - covered):
-        first = next((r for r in mine if r["domain"] == domain), None)
-        if first is not None:
-            picks[(first["unit_id"], first["agent_key"])] = "domain_floor"
+    for domain in sorted({r["domain"] for r in filtered}):         # 영역 바닥(AUDIT_DOMAIN_FLOOR — 완결 몫 floor_met 과 같은 수)
+        for r in [r for r in mine if r["domain"] == domain][:max(0, AUDIT_DOMAIN_FLOOR - have[domain])]:
+            picks[(r["unit_id"], r["agent_key"])] = "domain_floor"
+            have[domain] += 1
     need = max(0, n_audit - len(audited) - len(picks))
     for r in mine:
         if need <= 0:
@@ -731,8 +731,7 @@ def audit_topup(store: Any, target_key: str, job_id: str, *, audit_pct: float, s
         if pair not in picks:
             picks[pair] = "floor"
             need -= 1
-    domains_short = sorted({r["domain"] for r in filtered} - covered
-                           - {r["domain"] for r in mine if (r["unit_id"], r["agent_key"]) in picks})
+    domains_short = sorted(d for d in {r["domain"] for r in filtered} if have[d] < AUDIT_DOMAIN_FLOOR)
     scores = {(r["unit_id"], r["agent_key"]): review_verify.sample_score("filter_audit", target_key, r["unit_id"],
                                                                          r["agent_key"], salt=salt) for r in mine}
     opened = reopen_filtered(store, target_key, via=FILTER_FLOOR, cells=list(picks), picked_by=picks, scores=scores,
