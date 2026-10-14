@@ -52,6 +52,8 @@
   noinput_more     unit_id → more=yes 로 답할 횟수(답마다 하나씩 준다 — 그 동안 quality.maybe_more 참). 다시 물으면 q1 제목 번호가
                    받은 extra.known 수 뒤에서 이어진다
   noinput_same_titles  참이면 다시 물어도 q1 제목 번호를 1 부터 다시 매긴다(같은 영향을 되풀이하는 모델 — 앱이 한 번만 남기는지)
+  sweep_marks      unit_id → {contested_by?, flipped_from?, dup_conflict?} — 그 단위의 u 줄에 엔진의 부딪침 표지를 단다(거르기가 그
+                   표지를 믿지 않는지 — 반대 검토 HIGH 2)
   sweep_split      훑기 묶음 수(기본 1 — 카드 전부 한 묶음). 둘 이상이면 카드를 팩 순서로 나눈다
   sweep_error_aliases  이 별칭이 실린 훑기 묶음의 run 은 내용 탓 오류(no_rows)다 — 훑기 쪽 하나만 실패한 전문가(sweep_state failed)
   sweep_drop       훑기 답에서 뺄 unit_id(앱 회계가 그 단위를 error 로 적는다 — 거르기의 '답에 없는 단위', 재설계 M3 C3-6)
@@ -302,6 +304,7 @@ class FakeReviewEngine:
         self.noinput_more: dict[str, int] = {}
         self.noinput_same_titles = False
         self.noinput_script: dict[str, list[list[dict[str, Any]]]] = {}
+        self.sweep_marks: dict[str, dict[str, Any]] = {}
         self.error_cells: dict[tuple[str, str], dict[str, Any]] = {}
         self.truncate: dict[tuple[str, str | None, str | None], str] = {}
         self.queued_ms: int | None = None
@@ -593,6 +596,11 @@ class FakeReviewEngine:
                      "why": "카드의 적용 조건이 이 단위에 걸릴 수 있다", "unit_id": uid,
                      "record_ids": [cards[a]["record_id"] for a in hit[uid]], "from_attempt": 1,
                      "checks": {"why": "ok", "coerced": []}} for u, uid in units.items() if uid not in self.sweep_drop]
+            for row in rows:                               # 엔진이 그 u 줄에 단 부딪침 표지(RB3-1 — dup_conflict · contested_by · flipped_from)
+                marks = self.sweep_marks.get(row["unit_id"])
+                if marks:
+                    row.update({k: copy.deepcopy(v) for k, v in marks.items() if k in ("contested_by", "flipped_from")})
+                    row["checks"]["dup_conflict"] = bool(marks.get("dup_conflict", True))
             first = (next((u for u, uid in units.items() if uid == self.handoff_unit), None) if self.handoff_unit
                      else next(iter(units), None))
             sender = str((body.get("expert") or {}).get("key") or "")

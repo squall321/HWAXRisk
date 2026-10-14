@@ -186,7 +186,8 @@ def sweep_signal(entry: Mapping[str, Any] | None, *, failed: bool = False) -> di
     """훑기 회계(`review_verify.sweep_accounting` 의 units[unit_id]) → {verdict, rel, k, why, stamp, reason}.
 
     `unrelated` 는 `rel == 'no'` 이고 `k` 가 빌 때뿐이다(도장 찍힌 no 는 회계가 이미 `stamp` 로 적었다). yes·maybe 와 k 가 달린
-    no 는 `related`, stamp·error·답에 없는 단위·훑기 실패는 `unknown` 이다 — 거르는 쪽에 서지 않는다.
+    no 는 `related`, stamp·error·답에 없는 단위·훑기 실패는 `unknown` 이다 — 거르는 쪽에 서지 않는다. 엔진이 부딪침 표지를 단 no 도
+    `unknown`(reason engine_conflict)이다.
     """
     if failed:
         return {"verdict": "unknown", "rel": None, "k": [], "why": [], "stamp": False, "reason": "sweep_failed"}
@@ -194,14 +195,18 @@ def sweep_signal(entry: Mapping[str, Any] | None, *, failed: bool = False) -> di
         return {"verdict": "unknown", "rel": None, "k": [], "why": [], "stamp": False, "reason": "no_answer"}
     rel = str(entry.get("rel") or "")
     k = [str(a) for a in entry.get("k") or ()]
-    if rel == "no" and not k:
+    reason = None
+    if rel == "no" and not k and entry.get("conflict"):
+        # 엔진이 그 '무관' 줄에 부딪침 표지(다툼 · 보충 · dup_conflict)를 달았다 — 믿지 않는다(D-42 ④ · 반대 검토 HIGH 2)
+        verdict, reason = "unknown", "engine_conflict"
+    elif rel == "no" and not k:
         verdict = "unrelated"
     elif rel in ("yes", "maybe", "no"):
         verdict = "related"
     else:
-        verdict = "unknown"
+        verdict, reason = "unknown", rel or None
     return {"verdict": verdict, "rel": rel or None, "k": k, "why": [str(w) for w in entry.get("why") or ()],
-            "stamp": rel == "stamp", "reason": rel if verdict == "unknown" else None}
+            "stamp": rel == "stamp", "reason": reason}
 
 
 def sweep_gap_aware(sent_missing: bool, prompt_rev: Any) -> bool:

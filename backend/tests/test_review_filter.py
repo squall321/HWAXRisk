@@ -632,3 +632,25 @@ def test_a_filtered_cell_without_its_classification_record_breaks_the_invariant(
     assert any("(G8)" in p for p in review_cells.closure_cells(store, key)["invariants"])
     gate.set()
     r.loop.join(30)
+
+
+
+@pytest.mark.parametrize("marks", [
+    {"contested_by": {"verdict": ["maybe"], "why": "걸릴 수도 있다", "attempt": 1, "raw": "애매"}, "dup_conflict": False},
+    {"flipped_from": {"verdict": ["maybe"], "attempt": 1, "raw": "애매"}, "dup_conflict": False},
+    {"dup_conflict": True},
+])
+def test_a_sweep_no_the_engine_marked_as_contested_never_filters_the_cell(store, monkeypatch, marks):
+    """반대 검토 HIGH 2 — 훑기 u 줄의 '무관'(rel no)에 엔진이 부딪침 표지(다툼 contested_by · 보충 flipped_from · dup_conflict)를 달았으면
+    그 '무관' 은 믿지 않는다(D-42 ④ · M3.md 4.13) — 훑기 신호는 unknown(engine_conflict)이고 셀은 거르지 않고 검토다. 분류 기록에
+    그 까닭이 남는다."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+
+    def setup(fake, kinds):
+        fake.sweep_marks = {kinds["boundary"]: marks}
+
+    key, _job, _fake, kinds = _run(store, SMALL, fake_setup=setup)
+    cell = _cell(store, key, kinds["boundary"], STD2)
+    assert cell["route_json"]["decision"] != "filtered" and cell["state"] == "reviewed"
+    assert (cell["route_json"]["sweep"]["verdict"], cell["route_json"]["sweep"]["reason"]) == ("unknown", "engine_conflict")

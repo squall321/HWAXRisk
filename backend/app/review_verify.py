@@ -501,7 +501,9 @@ def _accept_sweep(raw_rows: list, sent: list[str], page_units: list[str], extras
         if outside:
             _drop(dropped, "alias_outside_call", {"unit_id": unit_id, "k": outside})
         picked[unit_id] = {"unit_id": unit_id, "rel": rel, "k": [a for a in dict.fromkeys(aliases) if a in sent_set],
-                           "why": _text(raw.get("why"))}
+                           "why": _text(raw.get("why")),
+                           # 엔진이 그 줄에 단 부딪침 표지(RB3-1) — 거르기는 표지가 선 '무관' 을 믿지 않는다(반대 검토 HIGH 2)
+                           "conflict": engine_conflict(raw)}
     seen = {a for row in picked.values() for a in row["k"]}
     rows = [picked[u] for u in page_units if u in picked]
     return {"rows": rows, "missing": [u for u in page_units if u not in picked], "dropped": dropped,
@@ -534,6 +536,8 @@ def sweep_accounting(calls: Sequence[Mapping[str, Any]]) -> dict:
             entry = units.setdefault(row["unit_id"], {"rel": rel, "k": [], "why": [], "missing_in": 0})
             if _REL_RANK[rel] > _REL_RANK[entry["rel"]]:
                 entry["rel"] = rel
+            if row.get("conflict"):
+                entry["conflict"] = True
             entry["k"] = sorted(set(entry["k"]) | set(row["k"]))
             if row["why"]:
                 entry["why"].append(row["why"])
@@ -725,7 +729,7 @@ def dual_neg_state(calib_rows: Sequence[Mapping[str, Any]], *, tier_a_closed: bo
 
 def engine_conflict(row: Mapping[str, Any]) -> bool:
     """엔진이 그 판정 행에 부딪침을 알렸나(RB3-1) — 같은 카드의 다른 판정과 부딪쳤거나(`checks.dup_conflict`) 보충이 판정을 갈아
-    끼웠다(`flipped_from`). 그런 행은 '문제없음' 으로 믿지 않고 걸린 것처럼 두 번째 판정을 받는다(rev 또는 단독). `checks_json`(원장
+    끼웠다(`flipped_from`) · 다툼이 실렸다(`contested_by`). 그런 행은 '문제없음' 으로 믿지 않고 걸린 것처럼 두 번째 판정을 받는다(rev 또는 단독). `checks_json`(원장
     행) 또는 `checks`(받은 행) 어느 쪽이든 읽는다."""
     checks = row.get("checks")
     if not isinstance(checks, Mapping):
@@ -734,7 +738,8 @@ def engine_conflict(row: Mapping[str, Any]) -> bool:
         except (TypeError, ValueError):
             checks = {}
     return isinstance(checks, Mapping) and (checks.get("dup_conflict") is True or bool(checks.get("flipped_from"))
-                                            or bool(row.get("flipped_from")))
+                                            or bool(row.get("flipped_from")) or bool(checks.get("contested_by"))
+                                            or bool(row.get("contested_by")))
 
 
 def _alias_order(alias: Any) -> tuple[int, str]:
