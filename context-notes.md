@@ -1190,3 +1190,25 @@ git diff 를 직접 보고 역검토했다(자기 보고를 믿지 말라고 명
   `../HWAXPortal/docs/risk-review-redesign/M3.md`(3절 짓는 순서 · 3.2 파일 주인 · 4.2 v5 DDL)와 그 context-notes D-32~D-35 다.
 - **넣지 않는 것.** v4 주석이 v5 로 미뤘던 `rr_roster.input_gaps_json` 은 v5 에도 없다(M3.md 5절 #43 — 입력 결손은
   `rr_roster.ecad_dependent` 와 스냅샷 `missing.ecad_absent` 로 늘 같은 값이 계산된다).
+
+## 2026-10-14 — 재설계 M3 셀 확장(가지 `m3-cells`) 단계 A
+
+계획 정본은 포털 `docs/risk-review-redesign/M3.md`(3절 단계 A · 4절 계약 · 5절 #26~#62)와 `reference/m3-cells.md` 다.
+둘이 다르면 M3.md 가 이긴다. 이 절은 셀 꾸러미가 앱 리포에서 내린 결정만 적는다(번호 `M3C-n` — 형제 꾸러미의 `D` 번호와
+rebase 때 부딪치지 않게).
+
+### M3C-1. 시작 걸음(C3-0) — 닻은 그대로였고, 닻에 없던 사실이 둘 나왔다
+- **대조.** HEAD `3aea93b` 에서 m3-cells 2절의 닻을 문자열로 다시 찾았다. 앱 쪽은 전부 그대로다 — `create_review_job` 의
+  `input_gap_m3` 거절, 잡 `knobs = {dual_rate 1.0, sweep on, filter off}`, `CALLS_PER_CELL = (3, 14)`, `_Cell.dual_decks` 와
+  `_solo_set` 의 묶음 갈래, `prompt_key` 가 종류 판 전부를 잇는 것, `ALLOWED_TRANSITIONS["deferred"] = frozenset()`,
+  `review_rollup` 의 `nothing_reviewed`, `ir_builder.SEED_SYNONYMS`, `audit.binom_upper`, `review_verify.sample_score`.
+  엔진 HEAD `412edde` 도 그대로다(`UNSUPPORTED_KINDS = ("noinput", "cross")` · `_WITH_DELIB` 기본 `min(2, conc)` ·
+  `k = max(1, min(k_knob, k_out))`). 엔진 작업 트리에는 엔진 걸음을 짓는 다른 세션의 커밋 전 변경이 있다 — 셀 꾸러미는 엔진을
+  건드리지 않는다.
+- **닻에 없던 사실 ①.** 저장된 단위 줄에는 `change_kind` 가 없다 — `units` 빌드가 줄의 `_item` 을 끝에 떼어 낸다. 계약(M3.md
+  4.9)의 '`codes` 에 없으면 `change_kinds`' 는 줄이 그 칸을 실어 올 때만 듣는다. 그래서 변경 → 메커니즘 표가 생산자 코드를
+  `codes` 만으로 전부 풀게 짓고 시험이 그것을 지킨다(M3C-2).
+- **닻에 없던 사실 ②.** `rr_review_cells.sample_json` 에는 이미 M2 의 시도 표지(`attempt`)가 산다. C3-6·C3-7 이 표본·그림자·
+  `dual_neg` 칸을 더할 때 그 키를 덮지 않는다.
+- **하지 않은 것.** 'v5 는 재설계 M3 몫, 가지 `m3`, 블록 주인은 S3-1' 메모는 가지 `m3`(S3-0)가 쓴다 — 이 가지에도 두면 rebase 때
+  같은 자리에서 부딪친다.
