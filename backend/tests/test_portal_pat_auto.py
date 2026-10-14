@@ -305,7 +305,7 @@ def test_a_stale_replay_after_a_registration_that_went_through_is_not_wanted(cli
     box["portal"].clear()
     replay = _jwt(jti="jti-erin-2", pat_name="hwax-risk")
     r = client.post("/api/auth/portal-pat", headers=GW, json={"pat": replay})
-    assert (r.status_code, r.json()["error"]["code"]) == (409, "not_wanted")
+    assert r.status_code == 409 and r.json()["error"]["code"] == "not_wanted", r.text
     assert identity.credential_pat(get_store().get_credential(EMAIL)) == first and box["revoked"] == []
     assert box["portal"] == []                                       # 포털에 묻기도 전이다
     assert get_store().get_user_prefs(EMAIL) == before               # 실패로 적지 않는다 — 쉼이 걸리지 않는다
@@ -537,7 +537,7 @@ def test_no_refusal_before_storing_is_a_5xx(client, box, monkeypatch, case):
     assert 400 <= r.status_code < 500, (case, r.status_code, r.text)
     assert _credential_rows() == 0 and box["revoked"] == []
     if case == "portal_down":
-        assert (r.status_code, r.json()["error"]["code"]) == (424, "portal_unreachable")
+        assert r.status_code == 424 and r.json()["error"]["code"] == "portal_unreachable", r.text
         assert get_store().get_user_prefs(EMAIL)["auto_error_kind"] == "transient"     # 일시 오류로 센다(600초 쉼)
 
 
@@ -545,7 +545,7 @@ def test_the_web_registration_keeps_502_when_the_portal_is_unreachable(client, b
     """화면 계약은 그대로다 — 웹 PUT /api/me/portal-pat 는 포털에 못 닿으면 종전처럼 502 portal_unreachable 이다(424 는 게이트웨이 문만)."""
     box["portal_down"] = True
     r = client.put("/api/me/portal-pat", json={"pat": _jwt(), "source": "web"}, headers=AUTH)
-    assert (r.status_code, r.json()["error"]["code"]) == (502, "portal_unreachable")
+    assert r.status_code == 502 and r.json()["error"]["code"] == "portal_unreachable", r.text
     assert _credential_rows() == 0
 
 
