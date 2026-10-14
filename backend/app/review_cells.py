@@ -635,13 +635,15 @@ def filter_off(store: Any, target_key: str) -> bool:
 
 def reopen_filtered(store: Any, target_key: str, *, via: str, domain: str | None = None, unit_id: str | None = None,
                     cells: Sequence[tuple[str, str]] | None = None, picked_by: Mapping[tuple[str, str], str] | None = None,
-                    scores: Mapping[tuple[str, str], float] | None = None, now: int | None = None) -> list[tuple[str, str]]:
+                    scores: Mapping[tuple[str, str], float] | None = None, run_id: str | None = None,
+                    now: int | None = None) -> list[tuple[str, str]]:
     """거른 셀(na_irrelevant · route filtered)을 다시 연다(na_irrelevant → pending · reopened_n + 1) — 다시 연 (unit_id, agent_key).
 
     `via` — widened(그 영역의 표본·그림자가 걸림을 놓쳤다) · filter_off(넓힌 영역이 셋 이상) · handoff(늦게 온 넘김) 는 분류 칸
     (`route`)을 비워 세션이 다시 분류한다(6·7번 줄이 그 까닭을 `route_forced` 로 적는다). filter_floor(잡 끝 보충 표본)는
     `route='audit'` · `route_forced='filter_floor'` 와 `sample_json.filter_audit{score, picked_by, result:null}` 을 적어 다시 분류하지
-    않는다. 셀의 잡 결속(run_id)은 그대로다 — 그 잡이 살아 있으면 그 잡이 돌린다. 그 전문가 머리 ready·partial 은 planned 로.
+    않는다. 셀의 잡 결속(run_id)은 그대로다 — 그 잡이 살아 있으면 그 잡이 돌린다. `run_id` 를 주면 그 잡으로 셀과 그 전문가
+    머리를 찍는다(잡 끝 보충 표본이 끝난 잡의 거른 셀을 제 잡으로 돌린다 — 반대 검토 MEDIUM 7). 그 전문가 머리 ready·partial 은 planned 로.
     고르는 칸은 `domain`·`unit_id`·`cells` 가운데 준 것(AND)이다. 부른 쪽 트랜잭션에 들어간다."""
     if via not in REOPEN_VIAS:
         raise ValueError(f"via 는 {REOPEN_VIAS} 가운데 하나다 — {via!r}")
@@ -676,9 +678,14 @@ def reopen_filtered(store: Any, target_key: str, *, via: str, domain: str | None
                 sets.update(route="audit", route_forced=FILTER_FLOOR, sample_json=json.dumps(sample, sort_keys=True))
             else:
                 sets.update(route=None, route_forced=via)
+            if run_id is not None:
+                sets["run_id"] = run_id
             if _move(store, "cell", "na_irrelevant", "pending", where=_cell_where(), params=key, sets=sets, now=now) == 1:
                 opened.append((row["unit_id"], row["agent_key"]))
         for agent in sorted({a for _u, a in opened}):
+            if run_id is not None:
+                store.execute("UPDATE rr_expert_reports SET run_id = ?, updated_at = ? WHERE target_key = ? AND agent_key = ?"
+                              " AND state <> 'running'", (run_id, now, target_key, agent))
             _reopen(store, target_key, agent, now=now)
     return opened
 
@@ -737,7 +744,14 @@ def audit_topup(store: Any, target_key: str, job_id: str, *, audit_pct: float, s
         return {"n": n, "n_audit": 0, "sampled": len(audited), "need": 0, "reopened": 0, "short": 0, "domains_short": []}
     n_audit = max(math.ceil(float(audit_pct) / 100.0 * n), min(n, AUDIT_MIN_N))
     have = Counter(r["domain"] for r in audited)
-    mine = sorted((r for r in filtered if r["run_id"] == job_id),
+    # 이 잡이 거른 셀만이 아니라 끝난 잡(취소 · 실패 · 끝남)이 거른 셀도 고른다 — 이 잡으로 찍어 이 잡이 돌린다(반대 검토 MEDIUM 7).
+    # 살아 있는 다른 잡의 셀과 다른 잡이 쥔 전문가의 셀은 그 잡에 둔다.
+    live = {str(r["id"]) for r in store.query(
+        f"SELECT id FROM rr_jobs WHERE mode = 'reviews' AND state IN ({','.join('?' * len(runner.LIVE_JOB_STATES))})",
+        tuple(runner.LIVE_JOB_STATES))} - {job_id}
+    held = {str(r["agent_key"]) for r in store.query(
+        "SELECT agent_key FROM rr_expert_reports WHERE target_key = ? AND state = 'running' AND run_id <> ?", (target_key, job_id))}
+    mine = sorted((r for r in filtered if r["run_id"] not in live and r["agent_key"] not in held),
                   key=lambda r: (review_verify.sample_score("filter_audit", target_key, r["unit_id"], r["agent_key"],
                                                             salt=salt), r["unit_id"], r["agent_key"]))
     picks: dict[tuple[str, str], str] = {}
@@ -757,7 +771,7 @@ def audit_topup(store: Any, target_key: str, job_id: str, *, audit_pct: float, s
     scores = {(r["unit_id"], r["agent_key"]): review_verify.sample_score("filter_audit", target_key, r["unit_id"],
                                                                          r["agent_key"], salt=salt) for r in mine}
     opened = reopen_filtered(store, target_key, via=FILTER_FLOOR, cells=list(picks), picked_by=picks, scores=scores,
-                             now=now) if picks else []
+                             run_id=job_id, now=now) if picks else []
     return {"n": n, "n_audit": n_audit, "sampled": len(audited), "need": max(0, n_audit - len(audited)),
             "reopened": len(opened), "short": need, "domains_short": domains_short}
 

@@ -729,3 +729,23 @@ def test_an_audit_that_never_produced_a_result_does_not_meet_the_floor(store, mo
     assert (audit["sampled"], audit["pending"], audit["failed"], audit["n_audit"], audit["floor_met"]) == (0, 0, 1, 1, False)
     residual = next(r for r in closure.residuals(store, key, closure.cell_counts(store, key)) if r["item"] == "filtered")
     assert residual["blocking"] is True
+
+
+def test_the_job_end_top_up_reopens_cells_an_ended_job_filtered_and_stamps_them_with_its_own_job(store, monkeypatch):
+    """반대 검토 MEDIUM 7 — 잡 끝 보충 표본은 끝난(취소된) 잡이 거른 셀도 고른다 — 그 셀을 이 잡 id 로 찍어 이 잡이 끝까지 돌린다.
+    종전에는 제 잡이 거른 셀만 골라 앞 잡을 취소하면 거른 셀이 영영 거른 채였고(바닥 미달) 잔여가 확인 없이는 풀리지 않았다."""
+    from app import runner
+
+    key, first, kinds, r, gate, fake = _filtered_mid_job(store, monkeypatch)
+    b = kinds["boundary"]
+    runner.cancel_job(store, first, by=rig.OWNER)
+    gate.set()
+    r.loop.join(30)
+    r.finish(first)
+    assert rig.state(store, first) == "cancelled" and _cell(store, key, b, STD2)["state"] == "na_irrelevant"
+    second = rig.job(store, key, scope={"agents": [STD1]})
+    r.finish(second)
+    assert rig.state(store, second) == "completed"
+    cell = _cell(store, key, b, STD2)
+    assert (cell["state"], cell["route_forced"], cell["run_id"]) == ("reviewed", review_cells.FILTER_FLOOR, second)
+    assert review_cells.closure_cells(store, key)["filtered"]["audit"]["floor_met"] is True
