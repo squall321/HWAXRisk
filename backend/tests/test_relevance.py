@@ -3,9 +3,8 @@
 `units` 로 돌린다. 표가 풀어야 하는 코드의 독립 오라클은 diff 스키마(`rr_diff.v1.json`)의 열거와 `diff.PARAM_RULES` 다 — 표를
 읽어 기대를 만들지 않는다.
 
-택소노미 1.2(메커니즘 52 · 배정표 `mech-owners.v1.json`)는 형제 꾸러미 S3-2 의 몫이고 가지 m3 에 아직 없다. 그동안은
-`tax` 픽스처가 대역(`TaxonomyDouble` — m3-synthesis 3.4 초안 52행)을 준다. **가지 m3 로 rebase 하면** `tax` 픽스처가
-`app.taxonomy` 를 돌려주게 바꾸고 `TaxonomyDouble`·`tests/fixtures/relevance/mech_owners_draft.json` 을 지운다.
+택소노미 1.2(메커니즘 52 · 배정표 `mech-owners.v1.json`)는 형제 꾸러미 S3-2 가 낸 진짜를 쓴다(`tax` = `app.taxonomy`). 배정표가
+draft 인 동안 '승인 문이 열렸을 때' 는 승인 칸만 바꿔 보이는 `GateOf` 로 본다.
 """
 from __future__ import annotations
 
@@ -22,54 +21,37 @@ from tests import factories
 from tests.conftest import BACKEND_DIR, FIXTURES_DIR
 from tests.synth import scripts
 
-DRAFT = FIXTURES_DIR / "relevance" / "mech_owners_draft.json"
 SCHEMA = json.loads((BACKEND_DIR / "app" / "schemas" / "rr_diff.v1.json").read_text(encoding="utf-8"))["definitions"]
 PAIRS = ("pair_add", "pair_kind", "pair_mat", "pair_move", "pair_remove", "pair_thick")
 
 
-# ---------------------------------------------------------------- 택소노미 1.2 대역(rebase 하면 지운다)
-class TaxonomyDouble:
-    """`taxonomy.domains_for` · `mech_owners_meta` · `load_taxonomy` 셋의 대역 — 배정표 초안 52행 위에서 돈다. 영역·변경 종류
-    축은 지금 택소노미 그대로다(1.2 는 메커니즘만 더한다)."""
+# ---------------------------------------------------------------- 택소노미 1.2(진짜) · 승인 문만 연 사본
+class GateOf:
+    """`app.taxonomy` 그대로에 배정표 승인 칸만 바꿔 보인다 — 배정표가 draft 인 동안 '문이 열렸을 때' 의 코드 신호를 본다(표·영역·판은
+    진짜다). 사용자가 배정표를 승인한 뒤에도 같은 시험이 돈다."""
 
-    def __init__(self, review_status: str | None = None) -> None:
-        self.doc = json.loads(DRAFT.read_text(encoding="utf-8"))
-        if review_status is not None:
-            self.doc["review_status"] = review_status
-        self.rows = {r["code"]: r for r in self.doc["rows"]}
-        real = taxonomy.load_taxonomy()
-        mechanisms = [{"code": code, "status": "active"} for code in self.rows]
-        self._tax = {**real, "taxonomy_version": self.doc["taxonomy_version"],
-                     "axes": {**real["axes"], "mechanism": mechanisms}}
+    def __init__(self, review_status: str) -> None:
+        self.review_status = review_status
 
     def domains_for(self, codes):
-        out: dict[str, str] = {}
-        for code in codes:
-            row = self.rows.get(code)
-            if row is None:
-                continue
-            for domain in row["owners"]:
-                out[domain] = "owner"
-            for domain in row["related"]:
-                out.setdefault(domain, "related")
-        return out
+        return taxonomy.domains_for(codes)
 
     def mech_owners_meta(self):
-        return {"version": self.doc["mech_owners_version"], "review_status": self.doc["review_status"],
-                "reviewed_at": self.doc["reviewed_at"]}
+        return {**taxonomy.mech_owners_meta(), "review_status": self.review_status,
+                "approved": self.review_status == relevance.APPROVED}
 
     def load_taxonomy(self):
-        return self._tax
+        return taxonomy.load_taxonomy()
 
 
 @pytest.fixture(scope="module")
 def tax():
-    return TaxonomyDouble()
+    return taxonomy
 
 
 @pytest.fixture(scope="module")
 def approved_tax():
-    return TaxonomyDouble(review_status="approved")
+    return GateOf("approved")
 
 
 @pytest.fixture(scope="module")
@@ -139,7 +121,10 @@ def _signal(unit, tax, routing, *, approved=True):
 # ---------------------------------------------------------------- 표의 모양
 def test_the_routing_asset_is_a_draft_with_its_vocabulary(tax, routing):
     assert routing["version"] == "change-routing-1.0"
-    assert routing["review_status"] == "draft"                 # 사용자가 훑기 전이다(D-35) — 승인 문이 닫혀 있다
+    if routing["review_status"] == relevance.APPROVED:           # 사용자가 훑고 승인한 판 — 누가 언제 승인했는지가 적혔다
+        assert routing["reviewed_by"] and routing["reviewed_at"]
+    else:
+        assert routing["review_status"] == "draft"             # 사용자가 훑기 전이다(D-35) — 승인 문이 닫혀 있다
     matches = [entry["match"] for entry in routing["codes"]]
     assert len(matches) == len(set(matches))
     for match in matches:
@@ -315,9 +300,10 @@ def test_the_gate_keeps_every_domain_unknown_until_both_tables_are_approved(synt
     문을 연다."""
     unit = _reviewable(synth[40])[0]
     approved_routing = dict(copy.deepcopy(routing), review_status="approved")
-    for owners, table, opened in ((TaxonomyDouble(), routing, False), (TaxonomyDouble("approved"), routing, False),
-                                  (TaxonomyDouble(), approved_routing, False),
-                                  (TaxonomyDouble("approved"), approved_routing, True)):
+    draft_routing = dict(copy.deepcopy(routing), review_status="draft")
+    for owners, table, opened in ((GateOf("draft"), draft_routing, False), (GateOf("approved"), draft_routing, False),
+                                  (GateOf("draft"), approved_routing, False),
+                                  (GateOf("approved"), approved_routing, True)):
         assert relevance.routing_approved(routing=table, tax=owners) is opened
         out = _signal(unit, owners, table, approved=relevance.routing_approved(routing=table, tax=owners))
         if opened:
@@ -326,7 +312,7 @@ def test_the_gate_keeps_every_domain_unknown_until_both_tables_are_approved(synt
             assert {(v["verdict"], v["reason"]) for v in out.values()} == {("unknown", "not_approved")}
     # 승인 칸 말고는 같은 표다 — 한 칸만 고친 커밋이 거르기를 연다.
     assert {k: v for k, v in approved_routing.items() if k != "review_status"} == {
-        k: v for k, v in routing.items() if k != "review_status"}
+        k: v for k, v in draft_routing.items() if k != "review_status"}
 
 
 # ---------------------------------------------------------------- XU3 · XU4 · XU5(M2 #14 가 M3 로 넘긴 단위 계약 — #56)

@@ -21,7 +21,7 @@ VOCAB_ASSETS: tuple[str, ...] = (
     "adjacency",
     "character-seed-rules",
     "mech-owners",            # 메커니즘 → 영역 배정표(재설계 M3 S3-2 — 승인 문 review_status)
-    # ↓ 재설계 M3 셀 꾸러미(C3-5)가 여기에 "change-routing"(변경 → 메커니즘·부품 역할 → 영역 표, 승인 문 status) 한 줄을 더한다.
+    "change-routing",         # 변경 → 메커니즘·부품 역할 → 영역 표(재설계 M3 C3-5 — 승인 문 review_status)
 )
 # 메커니즘 → 영역 배정표(assets/mech-owners.v1.json). 택소노미 파일 밖에 둔다 — 배정은 사람이 고치는 정책이라 고칠 때마다
 # taxonomy_version(지표 키의 접미)을 올리면 안 된다(M3.md 4.1). 승인 문은 review_status 가 이 값일 때만 열린다.

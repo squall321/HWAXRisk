@@ -39,8 +39,8 @@ FORCING_RULES: tuple[tuple[str, str], ...] = (
 
 
 def _taxonomy() -> Any:
-    """택소노미 1.2 의 읽는 함수를 가진 것 — 정본은 `app.taxonomy` 모듈이다(형제 꾸러미 S3-2 가 `domains_for` ·
-    `mech_owners_meta` 를 더한다). 가지 m3 에 합치기 전에는 그 두 함수가 없으므로 시험은 `tax=` 로 대역을 준다."""
+    """택소노미 1.2 의 읽는 함수를 가진 것 — `app.taxonomy` 모듈이다(`domains_for` · `mech_owners_meta` · `load_taxonomy`, 형제
+    꾸러미 S3-2). 시험은 `tax=` 로 승인 칸만 바꿔 보이는 사본을 준다."""
     return taxonomy
 
 
