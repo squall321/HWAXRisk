@@ -1178,3 +1178,15 @@ git diff 를 직접 보고 역검토했다(자기 보고를 믿지 말라고 명
 
 **검증** — `pnpm build` 통과 · `pytest` 1204 passed, 2 skipped · 배포본에서 화면 여섯을 눌러
 콘솔 오류 0·가로 스크롤 0 확인 · 브리프 토큰이 탭을 열 때만 발급되는 것을 fetch 계수로 확인.
+
+### D38. 스키마 v5 는 재설계 M3 몫으로 예약한다 (2026-10-14)
+
+- **결정.** `MIGRATIONS` 의 다음 판(v5)은 리스크 심사 재설계 M3 몫이다. 통합 가지 `m3` 에서 짓고, 꾸러미 둘(셀 확장
+  `m3-cells` · 쟁점·종합 `m3-synth`)은 하위 가지를 따로 워크트리로 두고 `m3` 위로 rebase 한다. v5 블록의 주인은 쟁점·종합
+  꾸러미의 걸음 S3-1 하나다 — 셀 꾸러미가 쓰는 표(`rr_unit_live`, 걸음 C3-1)도 그 블록에 함께 들고, 블록을 고치는 것은
+  주인뿐이다. 단계 D(dev 배선 리허설) 전에는 push 하지 않고, 그때 `tests/test_store.py` 의 `PUSHED_DDL_SHA256[5]` 가 굳는다.
+- **근거.** v5 는 몇 주 가지에 머문다. 그동안 다른 세션이 main 의 `MIGRATIONS` 를 먼저 건드리면 판 번호가 부딪치고, 나간
+  판은 고칠 수 없다(v4 때와 같은 까닭 — 그때는 에이전트 안내에만 적었다). 계획과 결정은 형제 리포
+  `../HWAXPortal/docs/risk-review-redesign/M3.md`(3절 짓는 순서 · 3.2 파일 주인 · 4.2 v5 DDL)와 그 context-notes D-32~D-35 다.
+- **넣지 않는 것.** v4 주석이 v5 로 미뤘던 `rr_roster.input_gaps_json` 은 v5 에도 없다(M3.md 5절 #43 — 입력 결손은
+  `rr_roster.ecad_dependent` 와 스냅샷 `missing.ecad_absent` 로 늘 같은 값이 계산된다).
