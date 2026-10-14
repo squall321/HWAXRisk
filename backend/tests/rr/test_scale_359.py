@@ -171,3 +171,32 @@ def test_one_experts_pack_502_does_not_hold_the_others_reviews(tmp_path, monkeyp
     states = {c["state"] for c in risk_store.query("SELECT state FROM rr_review_cells WHERE target_key = ? AND agent_key = ?",
                                                     (key, "xd-syn-1"))}
     assert states == {"failed"}
+
+
+def test_a_running_all_agents_job_with_eight_workers_still_fits_the_wire(scale, monkeypatch):
+    """반대 검토 MEDIUM 12(사용자 결정) — 잡이 도는 중이면 진행판의 잡 칸에 범위(scope — 전문가 359명 이름)와 워커 여덟의 신호가
+    실린다. MCP 답(risk_get_coverage 기본 · risk_next_step)은 그 둘을 수와 앞 몇 이름으로 줄여 25,000자 안이다(REST 는 그대로다)."""
+    from app import review_runner as rr
+    from app import runner
+
+    store, key, _job, roster = scale
+    agents = [r["key"] for r in roster]
+    job_id = rig.job(store, key, scope={"agents": agents})
+    runner._set_job(store, job_id, "running")
+    progress = rr.JobProgress(store, job_id, clock=lambda: 1_000_000)
+    for n, agent in enumerate(agents[:8]):
+        progress.worker(f"w{n}", agent_key=agent, purpose="review", unit_id=f"u-{n:012d}", call_kind="verdict",
+                        variant="fwd", deck_id=f"d-{n}", started_at=1_000_000, last_frame_at=1_000_000,
+                        last_event_at=1_000_000, last_step="attempt 1 · 판정 묶음을 읽는 중 " * 3)
+    factories.act_as_delegate(monkeypatch, OWNER)
+    rest = routes.coverage_payload(key, owner_sub=OWNER)["review"]["job"]
+    assert len(rest["scope"]["agents"]) == 359 and len(rest["signal"]["workers"]) == 8      # REST 는 전부를 싣는다
+    coverage = _call("risk_get_coverage", target_key=key)
+    project_id = store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (key,))["project_id"]
+    guide = _call("risk_next_step", project_id=project_id)
+    assert srv._wire_chars(coverage) <= srv.MCP_RESULT_CHARS, srv._wire_chars(coverage)
+    assert srv._wire_chars(guide) <= srv.MCP_RESULT_CHARS, srv._wire_chars(guide)
+    job = coverage["review"]["job"]
+    assert job["scope"]["agents_n"] == 359 and len(job["scope"]["agents"]) <= 5
+    assert job["signal"]["workers_n"] == 8 and len(job["signal"]["workers"]) <= 3
+    runner._set_job(store, job_id, "cancelled")

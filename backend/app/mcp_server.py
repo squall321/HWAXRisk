@@ -144,6 +144,8 @@ def risk_get_coverage(target_key: str, with_seats: bool = True, domain: str | No
         owner_sub = routes.mcp_scope_owner("target", target_key, _caller())
         out = routes.coverage_payload(target_key, owner_sub=owner_sub)
         review = out.get("review")
+        if review is not None and review.get("job") is not None:
+            review["job"] = routes.mcp_job_brief(review["job"])     # 범위 · 워커는 수와 앞 몇(반대 검토 MEDIUM 12)
         if order_offset is not None:
             if review is None:
                 raise AppError("E100", "order_offset 은 카드 대조 대상의 검토 순서 쪽이다 — 이 대상에는 검토 순서가 없다.", 422)

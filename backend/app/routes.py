@@ -3577,6 +3577,33 @@ def _review_job_payload(job: dict) -> dict:
             "waiting": progress.get("waiting"), "signal": signal}
 
 
+MCP_JOB_NAMES = 5          # MCP 답의 잡 범위 목록 칸마다 앞 몇 이름
+MCP_JOB_WORKERS = 3        # MCP 답의 워커 신호 앞 몇
+
+
+def mcp_job_brief(job: Any) -> Any:
+    """MCP 답의 검토 잡 칸(진행판 review.job · 길잡이 facts.review_job) — 범위(scope)의 목록 칸과 도는 워커 신호를 수와 앞 몇으로
+    줄인다(359명 전원 범위 · 워커 8 이면 와이어 25,000자를 넘었다 — 반대 검토 MEDIUM 12, 사용자 결정). REST 진행판은 전부를 싣는다."""
+    if not isinstance(job, dict):
+        return job
+    out = dict(job)
+    scope: dict[str, Any] = {}
+    for key, value in (job.get("scope") or {}).items():
+        if isinstance(value, list):
+            scope[key], scope[f"{key}_n"] = value[:MCP_JOB_NAMES], len(value)
+        else:
+            scope[key] = value
+    out["scope"] = scope
+    signal = job.get("signal")
+    if isinstance(signal, dict) and isinstance(signal.get("workers"), list):
+        workers = signal["workers"]
+        out["signal"] = {**signal, "workers_n": len(workers),
+                         "workers": [{k: w.get(k) for k in ("agent_key", "purpose", "unit_id", "call_kind", "frame_idle_s",
+                                                           "event_idle_s") if k in w}
+                                     for w in workers[:MCP_JOB_WORKERS] if isinstance(w, dict)]}
+    return out
+
+
 def _quality_summary(quality: Any) -> dict | None:
     """진행판의 품질 블록(루프가 60초마다 `progress_json.quality` 에 넣는다 — M2.md 5절 #16) 요약 — 문면과 기준 밖 항목. 수치 전체는
     문면 줄마다 같은 수다(review_quality.render_text). 카드 폭포는 `review.cards` 칸이다."""

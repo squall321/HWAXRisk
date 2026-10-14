@@ -908,7 +908,7 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
     brief = routes.review_order_brief(order)
     facts["review_order"] = brief["order"]
     facts["review_order_page"] = brief["order_page"]
-    facts["review_job"] = job
+    facts["review_job"] = routes.mcp_job_brief(job)       # 범위 · 워커는 수와 앞 몇(반대 검토 MEDIUM 12)
     # 거르기 · 실패 셀 · 입력 결손 — 목록이 아니라 셈이다(359명 대상에서도 답이 짧게, 재설계 M3 C3-8). 진행판 review 칸과 같은 수다.
     flt = review.get("filter") or {}
     if flt:
