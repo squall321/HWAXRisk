@@ -663,6 +663,14 @@ def should_stop_review(store: Any, job_id: str, stop: threading.Event | None = N
     return ask
 
 
+# 입력 결손 q1 줄의 정체와 세기(반대 검토 HIGH 1) — 같은 정체의 줄이 다시 오면 더 센 영향만 남는다.
+_IMPACT_RANK = {"yes": 2, "unknown": 1, "no": 0}
+
+
+def _q1_identity(row: Mapping[str, Any]) -> tuple:
+    return (row.get("k"), row.get("path"), tuple(row.get("l") or ()), row.get("title"))
+
+
 # ---------------------------------------------------------------- 진행 신호(progress_json)
 class JobProgress:
     """검토 잡 하나의 진행판(`rr_jobs.progress_json`) — S12 의 coverage.review.job 과 Claude 길잡이가 읽는다.
@@ -1801,12 +1809,18 @@ class _Session:
             accepted = review_verify.accept_rows(answer.result, kind="noinput", sent_aliases=cards, pack=self.pack,
                                                  unit_refs=cell.refs)
             self._note(cell, "noinput", None, cards, answer.result, accepted)
-            titles = {r["title"] for r in q1}
+            seen = {_q1_identity(r): i for i, r in enumerate(q1)}
             asks = {(r["item"], r["needs"]) for r in q2}
             for row in accepted["rows"]:
-                if row["t"] == "q1" and row["title"] not in titles:
-                    titles.add(row["title"])
-                    q1.append(row)
+                if row["t"] == "q1":
+                    # 겹침은 엔진의 줄 정체(카드 · 경로 · 줄 · 제목)로 가른다 — 엔진은 제목이 같아도 경로가 다르면 둘 다 남긴다(RB3-2).
+                    # 같은 정체면 더 센 영향(있음 > 모름 > 없음)이 남는다 — 걸림 아닌 줄이 걸림을 가리지 않는다(반대 검토 HIGH 1).
+                    at = seen.get(_q1_identity(row))
+                    if at is None:
+                        seen[_q1_identity(row)] = len(q1)
+                        q1.append(row)
+                    elif _IMPACT_RANK.get(row["impact"], 0) > _IMPACT_RANK.get(q1[at]["impact"], 0):
+                        q1[at] = row
                 elif row["t"] == "q2" and (row["item"], row["needs"]) not in asks:
                     asks.add((row["item"], row["needs"]))
                     q2.append(row)

@@ -247,3 +247,39 @@ def test_a_contested_impact_stands_and_the_report_names_the_retraction_and_its_p
     text = expert_report.render_report_md(report, part="units")
     assert ("검증된 철회가 이 영향을 다퉜다(영향은 선다) — «no» «결측 입력이 없어도 이 카드의 조건은 이 변경과 겹치지 않는다»"
             " · 경로 «보드 고정점 → 근접 계면»") in text
+
+
+def _one_gap_cell(store, script, *, more: int = 0) -> tuple[str, str, FakeReviewEngine]:
+    key = rig.target(store, ROSTER)
+    first = _units(store, key)[0]["unit_id"]
+    job_id = rig.job(store, key, scope={"agents": [MEM1], "unit_ids": [first]})
+    fake = FakeReviewEngine(_packs(ROSTER))
+    fake.noinput_script = {first: script}
+    fake.noinput_q2 = {first: [""]}
+    if more:
+        fake.noinput_more = {first: more}
+    rig.Rig(store, fake).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    return key, first, fake
+
+
+@pytest.mark.parametrize("script, more", [
+    # ① 같은 제목 · 다른 경로 — 엔진은 둘 다 남긴다(RB3-2). 제목만으로 겹침을 가르면 뒤의 '영향 있음' 이 사라진다
+    ([[{"impact": "no", "title": "A", "path": "Y"}, {"impact": "yes", "title": "A", "path": "X"}]], 0),
+    # ② 다시 물었더니 같은 줄이 모름 → 영향 있음으로 올라갔다 — 걸림 아닌 앞 줄이 뒤의 걸림을 가리지 않는다
+    ([[{"impact": "unknown", "title": "A", "path": "X"}], [{"impact": "yes", "title": "A", "path": "X"}]], 1),
+    # ③ 제목 없는 영향 있음 — 엔진은 받는다(_check_q1 은 제목을 요구하지 않는다). 버리면 결과가 none 으로 떨어진다
+    ([[{"impact": "yes", "title": "", "path": "보드 고정점 → 근접 계면"}, {"impact": "no", "title": "B"}]], 0),
+])
+def test_an_impact_is_never_lost_to_a_same_title_row_a_reask_or_a_missing_title(store, script, more):
+    """재설계 M3 반대 검토 HIGH 1 — 입력 결손 결과의 '영향 있음' 은 같은 제목의 다른 줄 · 다시 묻기 · 빈 제목 때문에 사라지지 않는다.
+    겹침은 엔진의 줄 정체(카드 · 경로 · 줄 · 제목)로 가르고, 같은 정체면 더 센 영향(있음 > 모름 > 없음)이 남는다. 제목 없는 영향은
+    경로로 제목을 대신한다. 셀은 impact 로 닫히고 finding 이 선다."""
+    key, first, _fake = _one_gap_cell(store, script, more=more)
+    cell = _cell(store, key, first, MEM1)
+    got = json.loads(cell["extras_json"])["noinput"]
+    assert (got["outcome"], cell["state"]) == ("impact", "reviewed")
+    hits = [r for r in got["q1"] if r["impact"] == "yes"]
+    assert len(hits) == 1 and hits[0]["title"]
+    findings = store.query("SELECT finding_json FROM rr_findings WHERE target_key = ? AND source_kind = 'card_review'", (key,))
+    assert len(findings) == 1

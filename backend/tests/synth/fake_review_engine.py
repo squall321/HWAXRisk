@@ -47,6 +47,8 @@
                    차례로 대고(그 카드 글에서 자른 인용) 변경 줄 하나를 단다, no 줄은 카드·줄 없이 낸다(재설계 M3 C3-3)
   noinput_q2       unit_id → q2 줄의 항목 목록(빈 글 = 확인할 것 없음 — 까닭만, (항목, 필요한 자료) 쌍도 된다). 기본은 예제처럼
                    둘(첫째는 첫 카드를 댄다)
+  noinput_script   unit_id → 호출마다 차례로 쓸 q1 줄 목록([{impact, title?, path?, flipped_from?}, …] — 다 쓰면 마지막 것을 되풀이).
+                   주면 noinput_q1 대신 이것이 그 호출의 q1 이다(같은 제목 · 다른 경로, 제목 없는 영향, 다시 물어 올린 영향)
   noinput_more     unit_id → more=yes 로 답할 횟수(답마다 하나씩 준다 — 그 동안 quality.maybe_more 참). 다시 물으면 q1 제목 번호가
                    받은 extra.known 수 뒤에서 이어진다
   noinput_same_titles  참이면 다시 물어도 q1 제목 번호를 1 부터 다시 매긴다(같은 영향을 되풀이하는 모델 — 앱이 한 번만 남기는지)
@@ -299,6 +301,7 @@ class FakeReviewEngine:
         self.noinput_q2: dict[str, list[str]] = {}
         self.noinput_more: dict[str, int] = {}
         self.noinput_same_titles = False
+        self.noinput_script: dict[str, list[list[dict[str, Any]]]] = {}
         self.error_cells: dict[tuple[str, str], dict[str, Any]] = {}
         self.truncate: dict[tuple[str, str | None, str | None], str] = {}
         self.queued_ms: int | None = None
@@ -722,7 +725,12 @@ class FakeReviewEngine:
         base = 0 if self.noinput_same_titles else len(extra.get("known") or ())
         codes = [str(m.get("code")) for m in extra.get("mechanisms") or () if isinstance(m, Mapping)]
         q1: list[dict] = []
-        for i, impact in enumerate(self.noinput_q1.get(uid, ["yes", "yes"])):
+        script = self.noinput_script.get(uid)
+        spec: list[dict] = []
+        if script:
+            with self._lock:
+                spec = script.pop(0) if len(script) > 1 else script[0]
+        for i, impact in enumerate([s["impact"] for s in spec] if spec else self.noinput_q1.get(uid, ["yes", "yes"])):
             alias = order[i % len(order)] if order and impact != "no" else ""
             card = cards.get(alias) if alias else None
             quote, sid = quote_of(card) if card is not None else ("", "")
@@ -738,6 +746,8 @@ class FakeReviewEngine:
                 "refs": "ok" if cited or impact != "yes" else "missing", "quote": "ok", "quote_sid": sid,
                 "nums_unsourced": [], "coerced": [],
                 "mech": "no_list" if not codes else "missing" if impact == "yes" and not mech else "ok", "why": "ok"})
+            if spec:
+                row.update({k: v for k, v in spec[i].items() if k in ("title", "path", "flipped_from")})
             if alias and alias in self.contested:
                 row["contested_by"] = copy.deepcopy(self.contested[alias])
                 row["checks"]["dup_conflict"] = True

@@ -429,9 +429,11 @@ def _accept_noinput(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping
             _drop(dropped, "bad_enum", raw)
             continue
         title = _text(raw.get("title")).strip()
-        if impact == "yes" and not title:
-            _drop(dropped, "no_title", raw)
-            continue
+        untitled = impact == "yes" and not title
+        if untitled:
+            # 엔진은 제목 없는 영향 줄을 받는다(_check_q1 은 제목을 요구하지 않는다) — 버리면 '영향 있음' 이 결과에서 사라진다(반대 검토
+            # HIGH 1). 경로 · 이유로 제목을 대신하고 표지를 단다.
+            title = _text(raw.get("path")).strip() or _text(raw.get("why")).strip() or "제목 없는 영향"
         quote = (_quote_columns(raw.get("cq"), card, checks.get("quote")) if card is not None
                  else {"quote_ok": None, "check_disagree": 0, "section_id": None})
         rows.append({**base, "impact": impact, "title": title, "mech": _text(raw.get("mech")) or None,
@@ -440,7 +442,8 @@ def _accept_noinput(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping
                      "quote_ok": quote["quote_ok"], "check_disagree": quote["check_disagree"],
                      "section_id": quote["section_id"],
                      "grade": card_grade(card) if card is not None and quote["quote_ok"] == 1 else None,
-                     "refs_ok": refs_verdict(refs, unit_refs, required=impact == "yes")})
+                     "refs_ok": refs_verdict(refs, unit_refs, required=impact == "yes"),
+                     **({"title_fallback": True} if untitled else {})})
     have = {r["t"] for r in rows}
     return {"rows": rows, "missing": [t for t in ("q1", "q2") if t not in have], "dropped": dropped, "extras": out}
 
