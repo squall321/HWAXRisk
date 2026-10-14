@@ -10,7 +10,7 @@ import re
 
 import pytest
 
-from app import closure, config, issues, registry, runner, synth, units
+from app import closure, common, config, issues, registry, runner, synth, units
 from app.runner import EngineRejected
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
@@ -350,7 +350,7 @@ def test_a_synth_job_whose_summaries_are_all_reused_still_finishes(store):
     assert first["trigger"] == "synth_done" and first["pages"]
 
 
-def test_a_summary_cut_by_a_restart_goes_back_to_pending_and_one_stuck_target_does_not_starve_another(store):
+def test_a_summary_cut_by_a_restart_goes_back_to_pending_and_one_stuck_target_does_not_starve_another(store, monkeypatch):
     """H2 — 요약 호출 도중 앱이 내려가면 그 행이 running 으로 남아 새 워커가 '기다림' 만 되풀이했고, 워커가 늘 가장 오래된 잡을
     집어 다른 대상의 종합 잡도 줄에 묶였다. 재기동 복구가 running 요약을 대기로(차감 없이) 돌리고, 워커는 대상마다 번갈아 집는다."""
     first, second = _ledger(store), _ledger(store)
@@ -362,7 +362,10 @@ def test_a_summary_cut_by_a_restart_goes_back_to_pending_and_one_stuck_target_do
     stuck = store.query_one("SELECT summary_id, attempts FROM rr_summaries WHERE target_key = ? AND state = 'running'",
                             (first,))
     assert stuck is not None
-    synth.create_synth_job(store, second, owner_sub=OWNER, requester_sub=OWNER)
+    later = common.now_epoch() + 60                                     # 묶인 잡이 확실히 더 오래됐다(같은 초면 id 가 가른다)
+    with monkeypatch.context() as patched:
+        patched.setattr(common, "now_epoch", lambda: later)
+        synth.create_synth_job(store, second, owner_sub=OWNER, requester_sub=OWNER)
     engine = FakeSummaryEngine()
     steps = _tick_until(synth.SynthWorker(store, config.settings, engine), limit=120, stop=("idle",))
     done = {s["job_id"] for s in steps if s["step"] == "completed"}

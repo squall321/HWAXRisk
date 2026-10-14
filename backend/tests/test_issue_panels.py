@@ -537,7 +537,7 @@ def test_a_resolved_issue_keeps_its_panel_verdict_when_its_evidence_changes_and_
     registry.merge(store, key)
     row = _row(store, key, anchor)
     assert (row["severity"], row["judgement"]) == ("치명", "FAIL") and row["merged"]["before_issue"]["judgement"] == "WARNING"
-    assert row["merged"]["issue_reraised"]["label"] == REARGUE
+    assert (row["merged"].get("issue_reraised") or {}).get("label") == REARGUE
     report = synth.report_source(store, key, version=synth.assemble_report(store, key, trigger="manual")["version_no"])
     summary = "\n".join(t for p in report["pages"] if p["kind"] == "summary" for b in synth.BLOCKS for t in p["blocks"][b])
     line = next(t for t in summary.split("\n") if f"reg:{anchor}" in t)
