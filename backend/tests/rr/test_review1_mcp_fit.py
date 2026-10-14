@@ -1,19 +1,24 @@
-# 반대 검토 1차(review1) 쪽 받기 몫 — 쪽을 잇는 안정 열쇠와 ledger_rev(L3)
+# 반대 검토 1차(review1) 쪽 받기 몫 — 쪽을 잇는 안정 열쇠와 ledger_rev(L3), 제기자가 많은 등록부 행도 MCP 와이어 안에 오고 쪽이 이어진다(H5)
 """원장은 생산자 경로다 — 검토 → 쟁점 → 종합은 test_review1_closure 의 사슬(가짜 검토 엔진 · 가짜 쟁점 패널 엔진 · 가짜 요약 엔진)이
 세운다. 쪽은 REST 본체(routes.issues_payload · registry_payload — MCP 가 같은 함수를 쓴다)로 받고, 쪽 사이의 원장 변화는 사람의 쟁점
-결정(routes.put_issue)과 등록부 상태 표기(routes.put_registry_status)다.
+결정(routes.put_issue)과 등록부 상태 표기(routes.put_registry_status)다. 제기자가 많은 행은 한 영역 전문가 40명이 같은 단위를 같은
+카드로 FAIL 로 본 검토 잡(가짜 검토 엔진)이 세운다.
 """
 from __future__ import annotations
 
 import pytest
 
 import app.mcp_server as srv
-from app import issues, routes
+from app import issues, registry, routes, units
 from tests import factories
 from tests.rr.test_review1_closure import _chained
+from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
+from tests.synth.fake_review_engine import FakeReviewEngine
 
 OWNER = rig.OWNER
+CARDS = {c["alias"]: c for c in fre.load("pack_ok.json")["cards"]}
+CROWD = tuple({"key": f"mech-c-{i}", "domain": "mech", "relevance": round(0.95 - i * 0.001, 3)} for i in range(40))
 
 
 @pytest.fixture
@@ -76,3 +81,32 @@ def test_the_paging_tools_tell_the_caller_about_the_ledger_rev():
     for name, order in (("risk_get_issues", "쟁점 id 순"), ("risk_get_registry", "(family_key, cluster_key) 순")):
         assert order in tools[name].description and "ledger_rev" in tools[name].description and "offset 0" in (
             tools[name].description), name
+
+
+def test_a_registry_row_raised_by_a_crowd_fits_the_wire_and_the_pages_still_join(store, monkeypatch):
+    """H5 — 제기자가 많은 행은 merged_json(merged 와 같은 내용)과 merged 의 긴 목록(원자 id · 제기자)으로 혼자 와이어를 넘어, 한 행 쪽도
+    본문과 next_offset 을 함께 잃었다(359명에서 4만 자). MCP 행은 merged_json 을 빼고, 한 행이 혼자 넘으면 긴 목록을 앞 몇 개와 원래
+    길이(merged.lists_total)로 준다 — 쪽마다 상한 안이고 next_offset 으로 이으면 전 행이다. REST 행은 그대로다."""
+    roster = rig.ROSTER + CROWD
+    key = rig.target(store, roster)
+    unit = units.load_units(store, key)[0]["unit_id"]
+    job_id = rig.job(store, key, scope={"agents": [r["key"] for r in CROWD], "unit_ids": [unit]})
+    fake = FakeReviewEngine(rig.packs(roster))
+    fake.verdicts = {str(CARDS["K01"]["record_id"]): ("yes", "FAIL")}
+    rig.Rig(store, fake).finish(job_id)
+    registry.merge(store, key)
+    whole = {r["cluster_key"]: r for r in routes.registry_payload(key, owner_sub=OWNER)["rows"]}
+    crowded = max(whole.values(), key=lambda r: len(r["merged"]["member_ids"]))
+    assert len(crowded["merged"]["member_ids"]) == 40 and "merged_json" in crowded                 # REST 는 그대로
+    limit = 5_000
+    assert srv._wire_chars({k: v for k, v in crowded.items() if k != "merged_json"}) > limit        # 한 행이 혼자 넘는다
+    monkeypatch.setattr(srv, "MCP_RESULT_CHARS", limit)
+    factories.act_as_delegate(monkeypatch, OWNER)
+    pages = _pages(lambda offset: srv.risk_get_registry(key, offset=offset))
+    assert all(srv._wire_chars(p) <= limit for p in pages), [srv._wire_chars(p) for p in pages]
+    got = {r["cluster_key"]: r for p in pages for r in p["rows"]}
+    assert set(got) == set(whole) and sum(len(p["rows"]) for p in pages) == len(whole)
+    assert not any("merged_json" in r for r in got.values())
+    slim = got[crowded["cluster_key"]]["merged"]
+    assert slim.get("lists_total", {}).get("member_ids") == 40 and len(slim["member_ids"]) < 40
+    assert slim["member_ids"] == crowded["merged"]["member_ids"][:len(slim["member_ids"])]

@@ -241,13 +241,41 @@ def risk_get_diff(diff_id: str, part: str, change_kind: str | None = None, q: st
 def risk_get_registry(target_key: str, status: str | None = None, severity: str | None = None,
                       domain: str | None = None, offset: int = 0, attention: str | None = None,
                       unit_id: str | None = None) -> dict:
-    """타깃 등록부(rr_registry 행 한 번에 최대 200 + verdict 후보) 조회, status·severity·domain·attention(주의 등급 A·B·C·D — 쉼표로 여럿)·unit_id 로 거르고 한 번에 약 2만 5천 자 안에서 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다), 쪽은 (family_key, cluster_key) 순이고 쪽마다 ledger_rev(거른 목록 전체의 지문)가 오니 앞 쪽과 다르면 그사이 원장이 바뀐 것이라 offset 0 부터 다시 받는다, 카드 대조 대상의 행에는 지지 수 넷(전문가·영역·단위·검증)·주의 등급·쟁점 상태와 merged.claimed(hold 전 주장값)·distribution 이 있다."""
+    """타깃 등록부(rr_registry 행 한 번에 최대 200 + verdict 후보) 조회, status·severity·domain·attention(주의 등급 A·B·C·D — 쉼표로 여럿)·unit_id 로 거르고 한 번에 약 2만 5천 자 안에서 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다), 쪽은 (family_key, cluster_key) 순이고 쪽마다 ledger_rev(거른 목록 전체의 지문)가 오니 앞 쪽과 다르면 그사이 원장이 바뀐 것이라 offset 0 부터 다시 받는다, 카드 대조 대상의 행에는 지지 수 넷(전문가·영역·단위·검증)·주의 등급·쟁점 상태와 merged.claimed(hold 전 주장값)·distribution 이 있다, 행에 merged_json 은 없고(merged 와 같은 내용) 한 행이 혼자 상한을 넘으면 merged 의 긴 목록을 앞 몇 개와 원래 길이(merged.lists_total)로 준다(전부는 웹 REST GET /api/targets/{key}/registry)."""
     def rows(key: str, *, owner_sub: str) -> dict:
-        return _fit_rows(lambda take: routes.registry_payload(
-            key, owner_sub=owner_sub, status=status, severity=severity, domain=domain, attention=attention,
-            unit_id=unit_id, limit=take, offset=offset), REGISTRY_LIMIT)
+        def page(take: int, keep: int | None = None) -> dict:
+            out = routes.registry_payload(key, owner_sub=owner_sub, status=status, severity=severity, domain=domain,
+                                          attention=attention, unit_id=unit_id, limit=take, offset=offset)
+            return {**out, "rows": [_registry_row(r, keep) for r in out["rows"]]}
+
+        out = _fit_rows(page, REGISTRY_LIMIT)
+        for keep in REGISTRY_LIST_KEEP:
+            if _wire_chars(out) <= MCP_RESULT_CHARS:
+                break
+            out = page(len(out["rows"]), keep)          # 한 행이 혼자 넘는다 — 그 행의 긴 목록을 줄인다(next_offset 은 그대로)
+        return out
 
     return _scoped("target", target_key, rows, target_key)
+
+
+# 등록부 MCP 행 — merged_json 은 merged 와 같은 내용이라 빼고(행 길이의 4할), 한 행이 혼자 와이어를 넘으면 merged 의 긴 목록(원자 id ·
+# 제기자 · 인용 …)을 앞 몇 개로 줄이고 원래 길이를 merged.lists_total 에 적는다(review1 H5 — 359명에서 제기자 240명 행 하나가 4만 자라
+# 본문과 next_offset 을 함께 잃었다). 전부는 REST GET /api/targets/{key}/registry 다(행 모양 그대로).
+REGISTRY_LIST_KEEP: tuple[int, ...] = (20, 5, 1, 0)
+
+
+def _registry_row(row: dict, keep: int | None) -> dict:
+    out = {k: v for k, v in row.items() if k != "merged_json"}
+    merged = row.get("merged")
+    if keep is None or not isinstance(merged, dict):
+        return out
+    slim, totals = {}, {}
+    for name, value in merged.items():
+        if isinstance(value, list) and len(value) > keep:
+            slim[name], totals[name] = value[:keep], len(value)
+        else:
+            slim[name] = value
+    return {**out, "merged": {**slim, "lists_total": totals} if totals else slim}
 
 
 @mcp.tool()
