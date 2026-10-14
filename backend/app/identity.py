@@ -241,7 +241,8 @@ def _cipher(*, create: bool) -> Fernet | None:
     try:
         return Fernet(key)
     except (ValueError, TypeError):
-        log.warning("cred.key 가 Fernet 키 형식이 아닙니다: %s", config.cred_key_path())
+        config.warn_once(log, "cred-key-format", "자격 암호화 키가 Fernet 키 형식이 아닙니다 — GET /api/me 의 box.reasons"
+                         " cred_key_invalid 를 본다")
         return None
 
 
@@ -264,7 +265,7 @@ def decrypt_pat(blob: bytes | str | None) -> str | None:
     try:
         return cipher.decrypt(raw).decode("utf-8")
     except (InvalidToken, UnicodeDecodeError):
-        log.warning("저장된 PAT 를 복호할 수 없습니다(키 교체 또는 손상).")
+        config.warn_once(log, "pat-undecryptable", "저장된 PAT 를 복호할 수 없습니다(키 교체 또는 손상).")
         return None
 
 

@@ -376,8 +376,7 @@ def test_me_box_carries_the_reasons_and_the_key_source(client, wired):
     box = body["box"]
     assert box["cred_key_source"] in ("secrets", "env", "path", "dev_fallback", "absent")
     assert isinstance(box["reasons"], list) and all(set(r) >= {"code", "message", "fix"} for r in box["reasons"])
-    blocking = {"host_mismatch", "missing_required", "cred_key_dev_fallback"}
-    assert box["secrets_valid"] is not any(r["code"] in blocking for r in box["reasons"])
+    assert box["secrets_valid"] is not any(r["code"] in config.BLOCKING_BOX_REASONS for r in box["reasons"])
 
 
 # ---------------------------------------------------------------- 키 명령은 안전한 셸 한 줄이다(BEH-7)
@@ -473,17 +472,118 @@ def test_the_move_command_copies_the_same_value_once_and_refuses_an_empty_cred_k
 _ABS_PATH = re.compile(r"(?<![\w:/])/(?:home|tmp|data|var|srv|opt|etc|root|mnt|usr)\b")
 
 
-@pytest.mark.parametrize("case", ["absent", "dev_fallback", "host_mismatch", "optional"])
+@pytest.mark.parametrize("case", ["absent", "dev_fallback", "host_mismatch", "optional", "invalid", "path_missing"])
 def test_box_reason_texts_name_the_data_directory_not_its_path(tmp_path, case):
     """글은 화면에 그대로 보인다 — 절대경로 대신 '데이터 디렉터리' 라 하고, 경로는 관리자만 /api/meta/runtime 의 data_dir 로 본다."""
+    env: dict[str, str] = {}
     if case == "dev_fallback":
         config.load_cred_key(tmp_path)
     if case in ("host_mismatch", "optional"):
         _secrets_file(tmp_path, HWAXRISK_CRED_KEY=FERNET_KEY)
-    box = config.box_assessment(box_match=case != "host_mismatch", data_dir=tmp_path, env={})
+    if case == "invalid":
+        _secrets_file(tmp_path, HWAXRISK_CRED_KEY="not-a-fernet-key")
+    if case == "path_missing":
+        env = {"HWAXRISK_CRED_KEY_PATH": str(tmp_path / "gone" / "cred.key")}
+    box = config.box_assessment(box_match=case != "host_mismatch", data_dir=tmp_path, env=env)
     assert box["reasons"]
     text = json.dumps(box["reasons"], ensure_ascii=False)
     assert str(tmp_path) not in text and not _ABS_PATH.search(text), text
     for reason in box["reasons"]:
         if reason["code"] in ("missing_required", "cred_key_dev_fallback", "missing_optional"):
             assert config.DATA_DIR_WORDS in reason["fix"]
+
+
+# ---------------------------------------------------------------- 키 검증·경로 없음·한 번 읽기·한 번 경고(BEH-8)
+@pytest.mark.parametrize("where", ["secrets", "env", "path", "dev_fallback"])
+def test_a_key_that_fernet_refuses_is_a_blocking_reason(tmp_path, where):
+    """키가 있어도 Fernet 이 받지 않으면 저장도 복호도 못 한다 — cred_key_invalid 이고 secrets_valid 가 아니다. 출처가 무엇이든 같다."""
+    bad = "x" * 20
+    env: dict[str, str] = {}
+    if where == "secrets":
+        _secrets_file(tmp_path, HWAXRISK_CRED_KEY=bad)
+    elif where == "env":
+        env = {"HWAXRISK_CRED_KEY": bad}
+    elif where == "path":
+        (tmp_path / "outside.key").write_text(bad, encoding="utf-8")
+        env = {"HWAXRISK_CRED_KEY_PATH": str(tmp_path / "outside.key")}
+    else:
+        (tmp_path / "cred.key").write_text(bad, encoding="utf-8")
+    box = config.box_assessment(box_match=True, data_dir=tmp_path, env=env)
+    assert box["cred_key_source"] == where and box["secrets_valid"] is False
+    invalid = next(r for r in box["reasons"] if r["code"] == "cred_key_invalid")
+    assert invalid["keys"] == ["HWAXRISK_CRED_KEY_PATH" if where == "path" else "HWAXRISK_CRED_KEY"]
+    assert bad not in json.dumps(box)
+    # 같은 출처에 Fernet 키를 주면 그 까닭이 없다.
+    good = {"secrets": lambda: _secrets_file(tmp_path, HWAXRISK_CRED_KEY=FERNET_KEY),
+            "env": lambda: env.update(HWAXRISK_CRED_KEY=FERNET_KEY),
+            "path": lambda: (tmp_path / "outside.key").write_text(FERNET_KEY, encoding="utf-8"),
+            "dev_fallback": lambda: (tmp_path / "cred.key").write_text(FERNET_KEY, encoding="utf-8")}
+    good[where]()
+    assert "cred_key_invalid" not in _codes(config.box_assessment(box_match=True, data_dir=tmp_path, env=env))
+
+
+def test_a_key_path_that_points_nowhere_is_named_without_blocking_by_itself(tmp_path):
+    """HWAXRISK_CRED_KEY_PATH 가 가리키는 파일이 없으면 그 길은 건너뛴다 — 그 사실을 까닭(cred_key_path_missing)으로 말하되, 막을지는
+    키가 실제로 온 출처가 정한다(secrets 에 키가 있으면 막지 않는다)."""
+    env = {"HWAXRISK_CRED_KEY_PATH": str(tmp_path / "gone.key")}
+    box = config.box_assessment(box_match=True, data_dir=tmp_path, env=env)
+    assert {"cred_key_path_missing", "missing_required"} <= set(_codes(box)) and box["secrets_valid"] is False
+    _secrets_file(tmp_path, HWAXRISK_CRED_KEY=FERNET_KEY)
+    box = config.box_assessment(box_match=True, data_dir=tmp_path, env=env)
+    assert "cred_key_path_missing" in _codes(box) and box["secrets_valid"] is True
+    missing = next(r for r in box["reasons"] if r["code"] == "cred_key_path_missing")
+    assert missing["keys"] == ["HWAXRISK_CRED_KEY_PATH"] and str(tmp_path) not in json.dumps(missing, ensure_ascii=False)
+
+
+@pytest.fixture
+def own_data_dir(tmp_path, monkeypatch):
+    """GET /api/me 가 이 시험만의 데이터 디렉터리를 보게 한다(DB 는 그대로) — secrets.env 를 세션 디렉터리에 쓰지 않는다."""
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, data_dir=tmp_path))
+    monkeypatch.delenv("HWAXRISK_CRED_KEY", raising=False)
+    monkeypatch.delenv("HWAXRISK_CRED_KEY_PATH", raising=False)
+    monkeypatch.setattr(config, "_WARNED", set())
+    return tmp_path
+
+
+def test_me_reads_secrets_env_once_per_request(client, wired, own_data_dir, monkeypatch):
+    """박스 판정·키 출처·PAT 복호(요약과 자동 등록 판정)가 한 요청 안에서 secrets.env 를 한 번만 읽는다 — 종전에는 다섯 번이었다."""
+    _secrets_file(own_data_dir, HWAXRISK_CRED_KEY=FERNET_KEY)
+    get_store().upsert_credential("bob@example.com", identity.encrypt_pat(_fake_jwt()).decode("ascii"), "u-bob",
+                                  "bob@example.com", "[]", int(time.time()) + 30 * 86400)
+    reads: list[str] = []
+    real = config._read_env_file
+
+    def counting(path, keys):
+        if path.name == "secrets.env":
+            reads.append(str(path))
+        return real(path, keys)
+
+    monkeypatch.setattr(config, "_read_env_file", counting)
+    body = client.get("/api/me", headers=AUTH).json()
+    assert body["portal_pat"]["decryptable"] is True and body["box"]["cred_key_source"] == "secrets"
+    assert reads == [str(own_data_dir / "secrets.env")]
+    client.get("/api/me", headers=AUTH)
+    assert len(reads) == 2                                          # 다음 요청은 다시 읽는다(키를 바꾸면 보인다)
+
+
+def test_me_warns_once_per_process_not_per_request(client, wired, own_data_dir, monkeypatch, caplog):
+    """요청마다 도는 판정이 같은 WARNING 을 되풀이하지 않는다 — secrets.env 권한·없는 키 경로·형식이 틀린 키·못 푸는 PAT."""
+    def warned_after_three_requests() -> list[str]:
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            for _ in range(3):
+                assert client.get("/api/me", headers=AUTH).status_code == 200
+        return [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and r.name.startswith("hwax_risk.")]
+
+    get_store().upsert_credential("bob@example.com", "garbage", "u-bob", "bob@example.com", "[]", int(time.time()) + 86400 * 30)
+    # ① secrets.env 가 0644 이고 그 키가 Fernet 키가 아니다 — 요청마다 판정·복호가 돌아도 경고는 한 번씩이다.
+    _secrets_file(own_data_dir, HWAXRISK_CRED_KEY="not-a-fernet-key")
+    (own_data_dir / "secrets.env").chmod(0o644)
+    warned = warned_after_three_requests()
+    for words in ("0600", "Fernet 키 형식이 아닙니다"):
+        assert sum(words in m for m in warned) == 1, (words, warned)
+    # ② 키 줄이 없고 HWAXRISK_CRED_KEY_PATH 가 없는 파일을 가리킨다 — 그 경고도 한 번이다.
+    _secrets_file(own_data_dir, HWAXRISK_BACKUP_KEY="age1x")
+    monkeypatch.setenv("HWAXRISK_CRED_KEY_PATH", str(own_data_dir / "gone.key"))
+    warned = warned_after_three_requests()
+    assert sum("가리키는 파일이 없습니다" in m for m in warned) == 1, warned

@@ -488,6 +488,12 @@ def get_me(request: Request, ident: identity.Identity = Depends(identity.current
     `box.reasons` 가 코드별로 싣는다 — 기동 뒤에 cred.key 가 생기는 일이 있어(첫 PAT 등록) 요청 때 다시 판정한다.
     익명에게는 `box{secrets_valid, reasons[{code}]}` 만 준다 — 글·키 이름·호스트 이름·포털 주소는 싣지 않는다(SEC-6).
     """
+    # 한 요청에 secrets.env 를 한 번만 읽는다 — 박스 판정·키 출처·PAT 복호(요약·자동 등록 판정)가 각자 읽어 다섯 번이었다(BEH-8).
+    with config.secrets_read_once():
+        return _me_payload(request, ident)
+
+
+def _me_payload(request: Request, ident: identity.Identity) -> dict:
     state = request.app.state
     payload = ident.to_dict()
     portal_pat = None

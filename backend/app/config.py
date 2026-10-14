@@ -2,16 +2,48 @@
 from __future__ import annotations
 
 import base64
+import contextvars
 import logging
 import os
 import secrets as secrets_module
 import stat
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from cryptography.fernet import Fernet
+
 log = logging.getLogger("hwax_risk.config")
+
+# 같은 까닭의 WARNING 은 프로세스마다 한 번이다 — 요청마다 도는 판정(GET /api/me 의 박스 자격·PAT 복호)이 로그를 메우지 않게.
+_WARNED: set[str] = set()
+
+
+def warn_once(logger: logging.Logger, key: str, message: str, *args: Any) -> None:
+    """`key` 의 WARNING 을 프로세스에서 처음 한 번만 남기고, 그 뒤로는 DEBUG 로 남긴다. 키 값은 싣지 않는다(쓰는 쪽 몫)."""
+    if key in _WARNED:
+        logger.debug(message, *args)
+        return
+    _WARNED.add(key)
+    logger.warning(message, *args)
+
+
+# secrets.env 를 한 번만 읽는 구간(secrets_read_once) — 그 안에서는 load_secrets 가 같은 경로의 첫 읽기를 다시 쓴다.
+_SECRETS_MEMO: contextvars.ContextVar[dict[str, dict[str, str]] | None] = contextvars.ContextVar(
+    "hwaxrisk_secrets_memo", default=None)
+
+
+@contextmanager
+def secrets_read_once() -> Iterator[None]:
+    """이 블록 안에서는 secrets.env 를 경로마다 한 번만 읽는다 — GET /api/me 는 박스 판정·키 출처·PAT 복호가 각자 읽어 한 요청에
+    다섯 번 읽었다. 블록 밖의 읽기는 그대로 매번 읽는다(키를 바꾸면 다음 요청부터 보인다)."""
+    token = _SECRETS_MEMO.set({})
+    try:
+        yield
+    finally:
+        _SECRETS_MEMO.reset(token)
 
 # 리포 루트(backend/app/ 의 부모의 부모). 로컬 폴백 데이터 루트 <리포>/data 의 기준이다.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -379,12 +411,18 @@ def load_secrets(data_dir: Path) -> dict[str, str]:
     파일이 없으면 빈 dict. 모드가 0600 이 아니면 경고만 낸다. 값은 절대 로그하지 않는다.
     """
     path = data_dir / SECRETS_FILENAME
-    if not path.is_file():
-        return {}
-    mode = stat.S_IMODE(path.stat().st_mode)
-    if mode != 0o600:
-        log.warning("secrets.env 권한이 0600 이 아닙니다(%s): %o", path, mode)
-    return _read_env_file(path, (*SECRET_KEYS, *OPTIONAL_SECRET_KEYS))
+    memo = _SECRETS_MEMO.get()
+    if memo is not None and str(path) in memo:
+        return dict(memo[str(path)])
+    out: dict[str, str] = {}
+    if path.is_file():
+        mode = stat.S_IMODE(path.stat().st_mode)
+        if mode != 0o600:
+            warn_once(log, f"secrets-mode:{path}", "secrets.env 권한이 0600 이 아닙니다(%s): %o", path, mode)
+        out = _read_env_file(path, (*SECRET_KEYS, *OPTIONAL_SECRET_KEYS))
+    if memo is not None:
+        memo[str(path)] = dict(out)
+    return out
 
 
 def _read_env_file(path: Path, keys: tuple[str, ...]) -> dict[str, str]:
@@ -574,9 +612,12 @@ def cred_key_move_fix() -> str:
 def box_assessment(*, box_match: bool, data_dir: Path | None = None, env: Mapping[str, str] | None = None) -> dict:
     """박스 자격 판정 — `{secrets_valid, cred_key_source, reasons[{code, keys?, message, fix}]}`(GET /api/me 의 box).
 
-    코드는 넷이다 — host_mismatch(이관 직후) · missing_required(필수 키 없음) · cred_key_dev_fallback(키가 cred.key 폴백)
-    · missing_optional(그 길만 닫힌다, 앱은 돈다). `secrets_valid` 는 앞의 셋이 없을 때 참이다. 값도 절대경로도 싣지 않는다 —
-    글은 화면에 그대로 보이고, 경로는 '데이터 디렉터리'(DATA_DIR_WORDS)로 말한다.
+    코드는 host_mismatch(이관 직후) · missing_required(필수 키 없음) · cred_key_invalid(키가 Fernet 키 형식이 아니다 — 저장도 복호도
+    못 한다) · cred_key_dev_fallback(키가 cred.key 폴백) · cred_key_path_missing(HWAXRISK_CRED_KEY_PATH 가 가리키는 파일이 없다 —
+    그 길은 건너뛰고 다음 출처에서 읽는다) · missing_optional(그 길만 닫힌다, 앱은 돈다)이다. `secrets_valid` 는 host_mismatch ·
+    missing_required · cred_key_invalid · cred_key_dev_fallback 이 없을 때 참이다(cred_key_path_missing 은 그것만으로는 막지 않는다
+    — 키가 다음 출처에서 오고 그 출처의 까닭이 따로 선다). 값도 절대경로도 싣지 않는다 — 글은 화면에 그대로 보이고, 경로는
+    '데이터 디렉터리'(DATA_DIR_WORDS)로 말한다.
     """
     env = os.environ if env is None else env
     root = settings.data_dir if data_dir is None else data_dir
@@ -601,7 +642,25 @@ def box_assessment(*, box_match: bool, data_dir: Path | None = None, env: Mappin
                     f" `{CRED_KEY_NEW_COMMAND}`. 키를 잃으면 등록된 PAT 가 전부 풀리지 않으니 secrets.env 와 같은 등급으로 따로"
                     " 보관한다."),
         })
-    elif source == "dev_fallback":
+    if source != "absent" and not _cred_key_is_fernet(root, env, source, secrets):
+        reasons.append({
+            "code": "cred_key_invalid",
+            "keys": ["HWAXRISK_CRED_KEY_PATH" if source == "path" else "HWAXRISK_CRED_KEY"],
+            "message": (f"자격 암호화 키(출처 {source})를 읽지 못했거나 Fernet 키 형식(32바이트 urlsafe base64)이 아니다 — 사용자 PAT 를"
+                        " 저장도 복호도 못 해 등록은 422 로 거절되고 패널은 그 사람 자격을 쓰지 못한다."),
+            "fix": ("키 값을 바로잡는다(따옴표·잘린 값·섞인 글자) — 등록된 PAT 를 암호화한 그 값이어야 한다. 그 값을 잃었으면 잘못된 키"
+                    " 줄을 지우고 새 키를 넣은 뒤(새 키 명령은 이미 값이 있는 키 줄이 있으면 아무것도 바꾸지 않는다) 각자 다시 등록한다."),
+        })
+    raw_path = (env.get("HWAXRISK_CRED_KEY_PATH") or "").strip()
+    if raw_path and not Path(raw_path).is_file():
+        reasons.append({
+            "code": "cred_key_path_missing", "keys": ["HWAXRISK_CRED_KEY_PATH"],
+            "message": ("HWAXRISK_CRED_KEY_PATH 가 가리키는 파일이 없다 — 그 길은 건너뛰고 다음 출처(cred.key 폴백 또는 없음)에서 키를"
+                        f" 찾는다(지금 출처 {source})."),
+            "fix": ("HWAXRISK_CRED_KEY_PATH 를 실제 키 파일로 고치거나(마운트·파일 이름) 쓰지 않으면 지우고 앱을 다시 띄운다 — 그 파일의"
+                    " 키로 암호화한 PAT 는 다른 키로는 풀리지 않는다."),
+        })
+    if source == "dev_fallback":
         reasons.append({
             "code": "cred_key_dev_fallback", "keys": list(SECRET_KEYS),
             "message": (f"자격 암호화 키를 데이터 디렉터리의 {CRED_KEY_FILENAME}(앱이 만든 개발용 폴백)에서 읽는다 — 암호문"
@@ -618,9 +677,29 @@ def box_assessment(*, box_match: bool, data_dir: Path | None = None, env: Mappin
                                                                        for key in missing),
             "fix": f"필요한 길만 켠다 — {DATA_DIR_WORDS}의 secrets.env 에 KEY=값 줄을 넣고(0600) 앱을 다시 띄운다.",
         })
-    blocking = {"host_mismatch", "missing_required", "cred_key_dev_fallback"}
-    return {"secrets_valid": not any(r["code"] in blocking for r in reasons), "cred_key_source": source,
+    return {"secrets_valid": not any(r["code"] in BLOCKING_BOX_REASONS for r in reasons), "cred_key_source": source,
             "reasons": reasons}
+
+
+# secrets_valid 를 거짓으로 만드는 까닭(GET /api/me 의 box.reasons code).
+BLOCKING_BOX_REASONS: frozenset[str] = frozenset({"host_mismatch", "missing_required", "cred_key_invalid", "cred_key_dev_fallback"})
+
+
+def _cred_key_is_fernet(root: Path, env: Mapping[str, str], source: str, secrets: Mapping[str, str]) -> bool:
+    """`source` 출처의 자격 암호화 키가 Fernet 이 받는 키인가 — 읽지 못하면 아니다. 키 값은 로그하지 않는다."""
+    try:
+        if source == "secrets":
+            raw = secrets.get("HWAXRISK_CRED_KEY", "").strip().encode("ascii")
+        elif source == "env":
+            raw = (env.get("HWAXRISK_CRED_KEY") or "").strip().encode("ascii")
+        elif source == "path":
+            raw = Path((env.get("HWAXRISK_CRED_KEY_PATH") or "").strip()).read_bytes().strip()
+        else:
+            raw = cred_key_path(root).read_bytes().strip()
+        Fernet(raw)
+    except (OSError, ValueError, TypeError):
+        return False
+    return True
 
 
 def load_cred_key(data_dir: Path | None = None, *, create: bool = True) -> bytes | None:
@@ -639,7 +718,7 @@ def load_cred_key(data_dir: Path | None = None, *, create: bool = True) -> bytes
         external = Path(raw_path)
         if external.is_file():
             return _read_cred_key(external)
-        log.warning("HWAXRISK_CRED_KEY_PATH 가 가리키는 파일이 없습니다: %s", external)
+        warn_once(log, f"cred-key-path:{external}", "HWAXRISK_CRED_KEY_PATH 가 가리키는 파일이 없습니다: %s", external)
     path = cred_key_path(data_dir)
     try:
         if path.is_file():
@@ -666,7 +745,7 @@ def load_cred_key(data_dir: Path | None = None, *, create: bool = True) -> bytes
 def _read_cred_key(path: Path) -> bytes | None:
     mode = stat.S_IMODE(path.stat().st_mode)
     if mode != 0o600:
-        log.warning("cred.key 권한이 0600 이 아닙니다(%s): %o", path, mode)
+        warn_once(log, f"cred-key-mode:{path}", "cred.key 권한이 0600 이 아닙니다(%s): %o", path, mode)
     return path.read_bytes().strip() or None
 
 
