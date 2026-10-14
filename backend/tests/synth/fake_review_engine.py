@@ -66,14 +66,17 @@
   no_quote         이 별칭들의 판정 행에 인용을 싣지 않는다(cq 빈 글 · checks.quote empty — 인용 통과율의 분모, X1-06, S11)
   dup_conflict     (agent_key, 별칭) 또는 별칭 — 그 fwd 판정 행에 checks.dup_conflict 를 단다(엔진이 같은 카드의 다른 판정과
                    부딪친 줄을 남겼다는 표지 — RB3-1, 엔진 216650e. 앱은 걸린 것처럼 두 번째 판정을 준다 — 재설계 M3 C3-9)
-  contested        별칭 → contested_by{verdict, cq, quote, why, attempt} — 그 fwd 판정 행에 검증된 철회의 다툼을 싣고 dup_conflict 를
-                   단다(엔진 RB3-1 — 예제 result_verdict_contested 의 모양, 걸림은 선다)
+  contested        별칭 → contested_by{verdict, cq, quote, why, attempt, raw?, path?, l?} — 그 fwd 판정 행(과 그 카드를 댄 입력 결손 q1
+                   줄)에 다툼을 싣고 dup_conflict 를 단다(엔진 RB3-1 — 예제 result_verdict_contested · result_verdict_coerced_clash ·
+                   result_noinput_contested 의 모양, 앞 줄이 선다)
   inject           주면 모델이 쓰는 글 칸(why · title · mech_free · path · check · item · needs — 비지 않은 것)의 끝에 이 글을 덧붙인다
                    (2차 주입 대본 — WP5b C12 ⑤ · 재설계 M3 C3-13. 훑기 u · h 줄, 판정 v 줄, 카드 밖 f · h 줄, 입력 결손 q1 · q2 줄)
   inject_kinds     inject 를 이 종류(sweep · verdict · offcard · noinput)의 답에만 건다(None 이면 전부)
   search_states    카드 밖 호출이 extra.search 를 실었을 때 차례로 낼 meta.search.state(ok · empty_scope · no_hits · failed — 다 쓰면
-                   마지막 것을 되풀이, 비면 meta.search 를 싣지 않는다 — M2 엔진처럼). ok 면 발췌 하나(D01)를 실은 것으로 적는다
-                   (예제 result_offcard_search_* 의 모양, cr-offcard-2)
+                   마지막 것을 되풀이, 비면 meta.search 를 싣지 않는다 — M2 엔진처럼). ok 면 예제 result_offcard_search_ok 의 발췌
+                   셋(D01~D03)을 실은 것으로 적고 D01 을 댄 카드 밖 줄 하나를 더한다(cr-offcard-2)
+  alias_words      별칭 → checks.alias(['칸:낱말', …]) — 그 fwd 판정 행에 엔진이 별칭표로 읽은 낱말을 단다(예제 result_verdict_alias 의
+                   모양, 엔진 c4e4823)
   flipped          별칭 → flipped_from{verdict, attempt, raw?} — 그 fwd 판정 행에 보충이 갈아 낀 표지를 단다(raw 가 있으면 어휘 밖
                    값을 엔진이 고친 것 — 예제 result_verdict_flipped 의 모양, D-42)
   clipped          meta.clipped 로 낼 값 — 엔진이 몫에서 끊은 입력 {<입력>: {orig_chars, kept_chars}}(RB3-11, 기본 {})
@@ -304,6 +307,7 @@ class FakeReviewEngine:
         self.contested: dict[str, dict[str, Any]] = {}
         self.flipped: dict[str, dict[str, Any]] = {}
         self.search_states: list[str] = []
+        self.alias_words: dict[str, list[str]] = {}
         self.inject = ""
         self.inject_kinds: set[str] | None = None
         # 기록
@@ -557,6 +561,8 @@ class FakeReviewEngine:
                 if variant == "fwd" and row["k"] in self.contested:
                     row["contested_by"] = copy.deepcopy(self.contested[row["k"]])
                     row["checks"]["dup_conflict"] = True
+                if variant == "fwd" and row["k"] in self.alias_words:
+                    row["checks"]["alias"] = list(self.alias_words[row["k"]])
             if (self.truncated or cut == "length") and main:
                 main = main[:-1]
                 quality.update(truncated=True, tail_broken=True)
@@ -656,12 +662,19 @@ class FakeReviewEngine:
         if kind == "offcard" and isinstance(search, Mapping) and self.search_states:
             with self._lock:
                 state = self.search_states.pop(0) if len(self.search_states) > 1 else self.search_states[0]
-            used = ([{"alias": "D01", "record_id": "DOC-LD-0001", "section_id": "s1", "title": "구조 해석 보고서 1",
-                      "chars": 66, "orig_chars": 66, "clipped": False}] if state == "ok" else [])
+            used = (copy.deepcopy(load("result_offcard_search_ok.json")["meta"]["search"]["used"]) if state == "ok" else [])
             meta["search"] = {"state": state, "queries": list(search.get("queries") or ()), "hits_n": len(used),
                               "scope_n": 0 if state == "empty_scope" else None if state == "failed" else 2734, "used": used,
                               "note": "검색 시간 초과(가짜)" if state == "failed" else "", "req_cut": 0}
             meta["basis"] = "search_only" if used else "role_only"
+            if used:                                       # 실은 발췌의 별칭 표(엔진은 발췌가 있을 때만 docs 를 싣는다)
+                meta["aliases"]["docs"] = {u["alias"]: u["record_id"] for u in used}
+                first = next((r for r in rows if r["t"] == "f"), None)
+                if first is not None:                      # 발췌를 댄 카드 밖 줄 하나(src D01 · record_id · section_id)
+                    doc = {**copy.deepcopy(first), "title": "문서 근거 위험", "src": "D01", "q": "", "basis": "긴 문서",
+                           "record_id": used[0]["record_id"], "section_id": used[0]["section_id"]}
+                    doc["checks"].update(src="ok", quote="ok", quote_sid=used[0]["section_id"])
+                    rows.insert(rows.index(first) + 1, doc)
         return {"kind": kind, "variant": variant, "rows": rows, "missing": missing, "extras": extras,
                 "quality": quality, "meta": meta}
 
@@ -719,6 +732,9 @@ class FakeReviewEngine:
                 "refs": "ok" if cited or impact != "yes" else "missing", "quote": "ok", "quote_sid": sid,
                 "nums_unsourced": [], "coerced": [],
                 "mech": "no_list" if not codes else "missing" if impact == "yes" and not mech else "ok", "why": "ok"})
+            if alias and alias in self.contested:
+                row["contested_by"] = copy.deepcopy(self.contested[alias])
+                row["checks"]["dup_conflict"] = True
             q1.append(row)
         cap = int(self.base_limits["noinput"]["items_max"])
         dropped = max(0, len(q1) - cap)

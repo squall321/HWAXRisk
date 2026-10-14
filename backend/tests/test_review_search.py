@@ -59,12 +59,12 @@ def test_only_the_zero_card_expert_asks_and_an_excerpt_makes_the_cell_search_onl
     cell = _cell(store, key, unit_id)
     assert cell["basis"] == "search_only"
     assert json.loads(cell["extras_json"])["offcard"]["search"] == {
-        "state": "ok", "hits_n": 1, "used_n": 1, "search_failed": False, "queries": review_runner.search_queries(payload)}
+        "state": "ok", "hits_n": 3, "used_n": 3, "search_failed": False, "queries": review_runner.search_queries(payload)}
     assert review_cells.expert_tally(store, key, ZERO)["role_only_only"] is True
     assert review_cells.closure_cells(store, key)["no_cards"] == {
         "experts": 1, "cells": 1, "by_basis": {"role_only": 0, "search_only": 1, "search_failed": 0}}
     report = expert_report.render_report_md(expert_report.build_report(store, key, ZERO))
-    assert "긴 문서 발췌 1건" in report
+    assert "긴 문서 발췌 3건" in report
 
 
 def test_an_empty_scope_answer_is_role_only_and_is_not_retried(store):
