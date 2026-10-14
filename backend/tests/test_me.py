@@ -587,3 +587,42 @@ def test_me_warns_once_per_process_not_per_request(client, wired, own_data_dir, 
     monkeypatch.setenv("HWAXRISK_CRED_KEY_PATH", str(own_data_dir / "gone.key"))
     warned = warned_after_three_requests()
     assert sum("가리키는 파일이 없습니다" in m for m in warned) == 1, warned
+
+
+def test_a_new_breakage_after_a_live_key_change_warns_again(own_data_dir, monkeypatch, caplog):
+    """경고 열쇠는 까닭에 지금 키의 출처·지문(sha256 앞 8자)을 더한 것이다 — 돌던 박스에서 키를 갈아 새로 깨지면 다시 WARNING 이다
+    (R2-5). 종전에는 까닭 이름뿐이라 키를 바꾼 뒤의 새 고장이 DEBUG 로만 남았다. 같은 키의 같은 고장은 한 번이고, 키 값은 어디에도
+    싣지 않는다."""
+    seen: list[str] = []
+
+    def warnings(action) -> list[str]:
+        caplog.clear()
+        with caplog.at_level("DEBUG"):
+            for _ in range(2):
+                action()
+        seen.extend(r.getMessage() for r in caplog.records)
+        return [r.getMessage() for r in caplog.records if r.levelname == "WARNING" and r.name == "hwax_risk.identity"]
+
+    k1, k2, k3 = (base64.urlsafe_b64encode(bytes([n]) * 32).decode() for n in (1, 2, 3))
+    _secrets_file(own_data_dir, HWAXRISK_CRED_KEY=k1)
+    blob = identity.encrypt_pat(FAKE_PAT)
+
+    def decrypt() -> None:
+        assert identity.decrypt_pat(blob) is None
+
+    # ① 저장된 PAT 를 지금 키로 못 푼다 — 같은 키면 한 번, 키를 갈면 다시, 같은 키라도 출처가 바뀌면(secrets → env) 다시.
+    _secrets_file(own_data_dir, HWAXRISK_CRED_KEY=k2)
+    assert sum("복호할 수 없습니다" in m for m in warnings(decrypt)) == 1
+    _secrets_file(own_data_dir, HWAXRISK_CRED_KEY=k3)
+    assert sum("복호할 수 없습니다" in m for m in warnings(decrypt)) == 1
+    _secrets_file(own_data_dir)
+    monkeypatch.setenv("HWAXRISK_CRED_KEY", k3)
+    assert sum("복호할 수 없습니다" in m for m in warnings(decrypt)) == 1
+    monkeypatch.delenv("HWAXRISK_CRED_KEY")
+    # ② 키가 Fernet 형식이 아니다 — 틀린 키를 다른 틀린 키로 바꿔도 다시 말한다.
+    for bad in ("not-a-fernet-key-one", "not-a-fernet-key-two"):
+        _secrets_file(own_data_dir, HWAXRISK_CRED_KEY=bad)
+        assert sum("Fernet 키 형식이 아닙니다" in m for m in warnings(decrypt)) == 1, bad
+    text = "\n".join(seen)
+    for key in (k1, k2, k3, "not-a-fernet-key-one", "not-a-fernet-key-two"):
+        assert key not in text

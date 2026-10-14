@@ -233,22 +233,32 @@ def current(request: Request) -> Identity:
 READ_ONLY_SCOPES = ["read"]
 
 
-def _cipher(*, create: bool) -> Fernet | None:
-    """cred.key 로 만든 Fernet. 키가 없거나 형식이 깨졌으면 None(키 값은 로그하지 않는다)."""
+def _key_tag(key: bytes) -> str:
+    """경고를 가르는 꼬리표 — 키 출처(config.cred_key_source)와 지문(키 바이트 sha256 의 앞 8자). 키 값은 싣지 않는다.
+
+    경고는 꼬리표마다 한 번이다(config.warn_once) — 돌던 박스에서 키를 갈아 새로 깨지면 다시 WARNING 으로 남는다. 종전 열쇠는 까닭
+    이름뿐이라 프로세스에 한 번이었고, 키를 바꾼 뒤의 새 고장은 DEBUG 로만 남았다(R2-5). 실패 갈래에서만 부른다(출처 판정이 파일을
+    읽는다)."""
+    return f"출처 {config.cred_key_source()}, 지문 {hashlib.sha256(key).hexdigest()[:8]}"
+
+
+def _cipher(*, create: bool) -> tuple[Fernet | None, bytes | None]:
+    """cred.key 로 만든 (Fernet, 그 키). 키가 없으면 (None, None), 형식이 깨졌으면 (None, 키)다(키 값은 로그하지 않는다)."""
     key = config.load_cred_key(create=create)
     if not key:
-        return None
+        return None, None
     try:
-        return Fernet(key)
+        return Fernet(key), key
     except (ValueError, TypeError):
-        config.warn_once(log, "cred-key-format", "자격 암호화 키가 Fernet 키 형식이 아닙니다 — GET /api/me 의 box.reasons"
-                         " cred_key_invalid 를 본다")
-        return None
+        tag = _key_tag(key)
+        config.warn_once(log, f"cred-key-format:{tag}", "자격 암호화 키가 Fernet 키 형식이 아닙니다(%s) — GET /api/me 의"
+                         " box.reasons cred_key_invalid 를 본다", tag)
+        return None, key
 
 
 def encrypt_pat(pat: str) -> bytes:
     """PAT 원문 → portal_pat_enc BLOB. 키를 읽지도 만들지도 못하면 422 `cred_key_absent`(평문 폴백 없음)."""
-    cipher = _cipher(create=True)
+    cipher, _ = _cipher(create=True)
     if cipher is None:
         raise AppError("cred_key_absent", "자격 암호화 키(cred.key)가 없어 PAT 를 저장할 수 없습니다.", 422)
     return cipher.encrypt(pat.encode("utf-8"))
@@ -258,14 +268,15 @@ def decrypt_pat(blob: bytes | str | None) -> str | None:
     """portal_pat_enc → PAT 원문. 키 없음·키 교체·손상은 None 이고 호출자는 자격 (a) 로 강등한다(plan §8.2.7)."""
     if not blob:
         return None
-    cipher = _cipher(create=False)
-    if cipher is None:
+    cipher, key = _cipher(create=False)
+    if cipher is None or key is None:
         return None
     raw = blob.encode("utf-8") if isinstance(blob, str) else bytes(blob)
     try:
         return cipher.decrypt(raw).decode("utf-8")
     except (InvalidToken, UnicodeDecodeError):
-        config.warn_once(log, "pat-undecryptable", "저장된 PAT 를 복호할 수 없습니다(키 교체 또는 손상).")
+        tag = _key_tag(key)
+        config.warn_once(log, f"pat-undecryptable:{tag}", "저장된 PAT 를 지금 키(%s)로 복호할 수 없습니다(키 교체 또는 손상).", tag)
         return None
 
 
