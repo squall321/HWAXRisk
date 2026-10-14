@@ -460,6 +460,28 @@ def test_claim_next_job_marks_pat_unavailable_and_keeps_state(risk_store, tmp_pa
     assert job["params"]["tier"] == "A"
 
 
+def test_a_stalled_pat_unavailable_job_is_written_only_when_its_text_changes(risk_store, tmp_path):
+    """자격이 없어 멈춘 잡은 claim 마다(5초) 다시 판정된다 — 글이 그대로면 rr_jobs 를 다시 쓰지 않아 updated_at 이 멈춘 때를 지킨다.
+    까닭이 바뀌면(마지막 자동 등록 실패가 새로 적혔다) 그때 쓴다."""
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+    risk_store.delete_credential(OWNER)
+    assert runner.claim_next_job(risk_store, cfg) is None
+    first = risk_store.query_one("SELECT error FROM rr_jobs WHERE id = ?", (job_id,))["error"]
+    assert first.startswith("pat_unavailable: ")
+    risk_store.execute("UPDATE rr_jobs SET updated_at = 1 WHERE id = ?", (job_id,))     # 멈춘 때를 표시해 둔다
+    for _ in range(3):
+        assert runner.claim_next_job(risk_store, cfg) is None
+    row = risk_store.query_one("SELECT error, updated_at FROM rr_jobs WHERE id = ?", (job_id,))
+    assert (row["error"], row["updated_at"]) == (first, 1)
+    risk_store.note_portal_pat_error(OWNER, "timeout: 포털이 제때 답하지 않았다", kind="transient")
+    assert runner.claim_next_job(risk_store, cfg) is None
+    row = risk_store.query_one("SELECT error, updated_at FROM rr_jobs WHERE id = ?", (job_id,))
+    assert row["error"] != first and "마지막 자동 등록 실패: timeout" in row["error"] and row["updated_at"] > 1
+
+
 def test_claim_next_job_respects_serial_and_daily_cap(risk_store, tmp_path):
     target_key = seeded(risk_store)
     give_credential(risk_store)

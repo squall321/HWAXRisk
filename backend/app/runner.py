@@ -1136,10 +1136,11 @@ def claim_next_job(store: Any, settings: Any | None = None) -> dict | None:
         credential, credential_note = resolve_credential_with_note(
             store, cfg, job["owner_sub"], _params(row).get("requester"))
         if credential is None:
-            store.execute(
-                "UPDATE rr_jobs SET error = ?, updated_at = ? WHERE id = ?",
-                ("pat_unavailable" + (f": {credential_note}" if credential_note else ""), now_epoch(), job["id"])
-            )
+            # 멈춘 잡은 5초마다 다시 판정된다 — 글이 바뀔 때만 쓴다(위의 다시 저장 대기와 같다). 매번 쓰면 updated_at 이 늘
+            # 지금이라 '언제부터 멈췄나' 가 보이지 않고 쓰기만 쌓인다.
+            note = "pat_unavailable" + (f": {credential_note}" if credential_note else "")
+            if last_error != note:
+                store.execute("UPDATE rr_jobs SET error = ?, updated_at = ? WHERE id = ?", (note, now_epoch(), job["id"]))
             continue
         if job["state"] != "running":
             _set_job(store, job["id"], "running")
