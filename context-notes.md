@@ -1236,3 +1236,22 @@ rebase 때 부딪치지 않게).
 - **초안이 넓다.** 배정표 초안과 곱하면 `mechanical.drop_stress`(소유 sim·mech, 관련 rel·disp·cam·xd·pcb)가 거의 모든 변경 줄에
   있어 그 일곱 영역은 늘 '관련' 이다. syn40·syn150 의 묶음·경계 단위에서 코드 신호가 '무관' 인 영역은 mem·soc·std·sh·passive
   쪽뿐이었다. 거르기의 절감은 이 표와 배정표를 사람이 훑는 데 달렸다(M3.md 8절 첫 줄) — 단계 A 끝에 이 수를 표와 함께 건넨다.
+
+### M3C-3. 경로 결정표(`relevance.route_decision`) — 처음 맞는 줄, 그리고 '거를 수 있던 셀' 과 '그림자' 를 가른다
+- **모양.** 입력은 셀 하나의 사실(잡의 거르기 · 1순위 · 단위 종류 · 카드 0장 · 입력 결손과 결측 블록 판 · 넓힘 · 대상 끔 · 넘김 ·
+  1순위 대기)과 두 신호(`code_for` · `sweep_signal`), 표본 열쇠(T, u, a)다. 반환은 `{decision, route, route_forced, would_filter,
+  shadow, route_json}` — C3-6 의 `_classify` 가 그대로 원장에 쓴다. `route_json` 은 m3-cells 3.2 의 모양에 `reason` 칸만 더했다.
+- **규칙 이름과 원장 토큰.** 강제 줄 아홉(1·2·3·4·5·6a 넓힘·6b 대상 끔·7·8)의 이름이 `route_json.rule`·`forced_all` 이고
+  `route_forced` 는 3.1 의 어휘다. 6b(대상 전체 끔)는 규칙 이름 `target_off` · 토큰 `filter_off` 다 — 1 번(잡의 거르기 끔)과 토큰이
+  같아 원장에서 둘을 가르는 것은 `rule` 이다. 강제 줄이 여럿이면 `forced_all` 에 순서대로 다 적는다.
+- **`would_filter` 와 `shadow`.** `would_filter` 는 9 번까지 내려와 두 신호가 다 무관이었던 셀(거름 + 표본 — 완결 몫 `filtered.
+  would_filter` 가 이 수다), `shadow` 는 거르지 않았지만 거르기가 닫았을 셀이다 — 1순위 셀(1·2·8 번을 빼고 다시 본다: 1순위
+  대기는 그 사람 자신의 몫이다)과 대상 그림자 모드(`shadow`)의 셀. 1순위 셀은 다른 강제 사유(전역 단위 등)가 있으면 그림자가
+  아니다 — 1순위가 아니었어도 거르지 않았을 셀이다.
+- **잡 거르기 `off` 면 아무것도 적지 않는다.** 결정은 검토로 내지만 `_classify` 는 원장에 `route*`·그림자를 쓰지 않는다 — M2 잡의
+  원장이 바이트로 같아야 한다(m3-cells C3-6 수용 기준).
+- **입력 결손 전문가.** 검토로 가면 `route='noinput'`(그 셀은 `verdict`·`offcard` 대신 `noinput` 한 번이다), 표본이면 `audit`,
+  거르면 `filtered` 다. 결측 블록 판은 `sweep_gap_aware(요청에 extra.missing 을 실었나, 답의 meta.prompt_rev.sweep)` — 둘 다여야
+  하고 모르는 판 표기는 아니다.
+- **훑기 신호.** `k` 가 달린 `no` 는 '관련' 이다(엔진 `_check_u` 가 이미 maybe 로 올리지만 회계가 묶음을 합친 뒤에도 그대로 본다).
+  `stamp`·`error`·답 없음·훑기 실패는 '모름' — 사유를 `reason` 에 남긴다.

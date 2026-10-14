@@ -473,3 +473,180 @@ def test_xu5_every_kind_is_a_summary_line_and_has_mechanisms(synth, producer_cas
         related = {d for d, v in out.items() if v["verdict"] == "related"}
         assert bool(related) is (code != "mesh.density_changed"), (code, related)
         assert "unknown" not in {v["verdict"] for v in out.values()}, code
+
+
+# ---------------------------------------------------------------- 훑기 신호 · 결측 블록 판
+@pytest.mark.parametrize(("entry", "failed", "verdict", "reason"), [
+    ({"rel": "no", "k": [], "why": ["무관"]}, False, "unrelated", None),
+    ({"rel": "no", "k": ["K03"], "why": []}, False, "related", None),   # k 가 달린 no 는 무관이 아니다
+    ({"rel": "maybe", "k": [], "why": []}, False, "related", None),
+    ({"rel": "yes", "k": ["K01"], "why": []}, False, "related", None),
+    ({"rel": "stamp", "k": [], "why": []}, False, "unknown", "stamp"),  # 도장 찍힌 no 는 믿지 않는다
+    ({"rel": "error", "k": [], "why": []}, False, "unknown", "error"),  # 그 쪽의 답에 없던 단위
+    (None, False, "unknown", "no_answer"),
+    ({"rel": "no", "k": [], "why": []}, True, "unknown", "sweep_failed"),
+])
+def test_sweep_signal_is_unrelated_only_for_a_clean_no(entry, failed, verdict, reason):
+    out = relevance.sweep_signal(entry, failed=failed)
+    assert (out["verdict"], out["reason"]) == (verdict, reason)
+    assert out["stamp"] is (entry is not None and not failed and entry["rel"] == "stamp")
+
+
+@pytest.mark.parametrize(("sent", "rev", "aware"), [
+    (True, "cr-sweep-2", True), (True, "cr-sweep-10", True), (True, "cr-sweep-1", False), (False, "cr-sweep-2", False),
+    (True, None, False), (True, "cr-sweep-x", False), (True, "cr-verdict-2", False)])
+def test_a_gap_expert_sweep_counts_only_from_the_missing_block_revision(sent, rev, aware):
+    assert relevance.sweep_gap_aware(sent, rev) is aware
+
+
+# ---------------------------------------------------------------- 경로 결정표(m3-cells 3.2) — 줄마다 하나
+_UNRELATED = {"verdict": "unrelated", "related_domains": [], "via": {}, "unmapped": [], "reason": None}
+_SWEEP_NO = {"verdict": "unrelated", "rel": "no", "k": [], "why": ["무관"], "stamp": False, "reason": None}
+_FORCING_KW = {"filter_off": {"filter_mode": "off"}, "rank1": {"rank1": True}, "global_unit": {"unit_kind": "global"},
+               "no_cards": {"no_cards": True}, "input_gap": {"input_gap": True}, "widened": {"widened": True},
+               "target_off": {"target_off": True}, "handoff": {"handoffs": [{"from": "rf-x", "why": "안테나"}]},
+               "tier_a_pending": {"tier_a_pending": True}}
+
+
+def _key_with(audit: bool, pct: float = 5) -> tuple[str, str, str]:
+    """표본 해시가 pct 아래(audit=True) 또는 위인 셀 열쇠 — 결정표가 쓰는 함수로 고르지 않고 해시를 직접 본다."""
+    for n in range(10000):
+        key = ("T", f"u{n}", "a")
+        score = relevance.sample_score("filter_audit", *key)
+        if (score < pct / 100) is audit:
+            return key
+    raise AssertionError("열쇠를 못 찾았다")
+
+
+def _route(**kw):
+    args = {"filter_mode": "on", "rank1": False, "unit_kind": "bundle", "no_cards": False, "input_gap": False,
+            "gap_aware": False, "widened": False, "target_off": False, "handoffs": [], "tier_a_pending": False,
+            "code": _UNRELATED, "sweep": _SWEEP_NO, "sample_key": _key_with(False), "audit_pct": 5,
+            "routing_rev": "change-routing-1.0|mech-owners-1.0|tax-1.2"}
+    args.update(kw)
+    return relevance.route_decision(**args)
+
+
+def test_row9_both_signals_unrelated_filters_the_cell():
+    out = _route()
+    assert (out["decision"], out["route"], out["route_forced"]) == ("filtered", "filtered", None)
+    assert (out["would_filter"], out["shadow"]) == (True, False)
+    rj = out["route_json"]
+    assert (rj["rule"], rj["decision"], rj["filter"], rj["forced_all"]) == ("both_unrelated", "filtered", "on", [])
+    assert rj["code"] == _UNRELATED and rj["sweep"] == _SWEEP_NO
+    assert rj["routing_rev"] == "change-routing-1.0|mech-owners-1.0|tax-1.2"
+    assert rj["audit"]["pct"] == 5 and rj["audit"]["score"] >= 0.05
+    assert out["decision"] in relevance.DECISIONS
+
+
+def test_row9_below_the_audit_hash_the_cell_is_judged_to_the_end():
+    key = _key_with(True)
+    out = _route(sample_key=key)
+    assert (out["decision"], out["route"], out["route_forced"], out["would_filter"]) == (
+        "audit", "audit", "filter_audit", True)
+    assert out["route_json"]["audit"]["score"] == relevance.sample_score("filter_audit", *key) < 0.05
+
+
+def test_row9_audit_rate_zero_never_samples_and_hundred_samples_everything():
+    keys = [("T", f"u{n}", "a") for n in range(400)]
+    assert {_route(sample_key=k, audit_pct=0)["decision"] for k in keys} == {"filtered"}
+    assert {_route(sample_key=k, audit_pct=100)["decision"] for k in keys} == {"audit"}
+    picked = [k for k in keys if _route(sample_key=k)["decision"] == "audit"]
+    assert picked == [k for k in keys if relevance.sample_score("filter_audit", *k) < 0.05]
+    assert 0 < len(picked) < 60                                 # 5% 안팎 — 같은 열쇠면 늘 같은 셀이다
+    assert [k for k in keys if _route(sample_key=k)["decision"] == "audit"] == picked
+
+
+@pytest.mark.parametrize("code", ["related", "unrelated", "unknown"])
+@pytest.mark.parametrize("sweep", ["related", "unrelated", "unknown"])
+def test_row10_anything_but_two_unrelated_signals_is_reviewed(code, sweep):
+    """모르면 검토다 — 두 신호가 다 무관일 때만 거른다(D-33 ②)."""
+    out = _route(code=dict(_UNRELATED, verdict=code), sweep=dict(_SWEEP_NO, verdict=sweep))
+    if (code, sweep) == ("unrelated", "unrelated"):
+        assert out["decision"] == "filtered"
+    else:
+        assert (out["decision"], out["route_forced"], out["would_filter"], out["route_json"]["rule"]) == (
+            "review", None, False, "signal_related")
+        assert out["route_json"]["audit"] is None
+
+
+@pytest.mark.parametrize(("rule", "token"), [
+    ("filter_off", "filter_off"), ("rank1", "rank1"), ("global_unit", "global_unit"), ("no_cards", "no_cards"),
+    ("input_gap", "input_gap"), ("widened", "widened"), ("target_off", "filter_off"), ("handoff", "handoff"),
+    ("tier_a_pending", "tier_a_pending")])
+def test_rows1_to_8_each_forcing_rule_keeps_a_filterable_cell(rule, token):
+    """두 신호가 다 무관인 셀도 강제 줄 하나면 검토로 간다 — 표본 해시 아래 셀도 표본이 아니라 그 강제 사유다."""
+    for key in (_key_with(False), _key_with(True)):
+        out = _route(sample_key=key, **_FORCING_KW[rule])
+        assert (out["decision"], out["route_forced"], out["would_filter"]) == ("review", token, False), key
+        assert out["route_json"]["rule"] == rule and out["route_json"]["forced_all"] == [rule]
+        assert out["route_json"]["audit"] is None
+    assert out["route"] == ("noinput" if rule == "input_gap" else "review")
+
+
+def test_rows1_to_8_the_first_matching_rule_wins():
+    names = [name for name, _token in relevance.FORCING_RULES]
+    assert names == ["filter_off", "rank1", "global_unit", "no_cards", "input_gap", "widened", "target_off", "handoff",
+                     "tier_a_pending"]                          # m3-cells 3.2 의 줄 순서(6 번은 넓힘 · 대상 끔 둘)
+    for i, first in enumerate(names):
+        for later in names[i + 1:]:
+            kw = {**_FORCING_KW[first], **_FORCING_KW[later]}
+            out = _route(**kw)
+            assert out["route_json"]["rule"] == first, (first, later)
+            assert out["route_json"]["forced_all"] == [first, later], (first, later)
+            assert out["route_forced"] == dict(relevance.FORCING_RULES)[first]
+
+
+def test_row5_a_gap_expert_is_filtered_only_after_the_missing_block_sweep():
+    """입력 결손 전문가는 결측 블록을 받은 판(cr-sweep-2)의 훑기일 때만 두 신호 규칙을 탄다(X1-17). 거르지 않으면 noinput 길이다."""
+    assert _route(input_gap=True, gap_aware=False)["route_forced"] == "input_gap"
+    aware = _route(input_gap=True, gap_aware=True)
+    assert (aware["decision"], aware["route"]) == ("filtered", "filtered")
+    reviewed = _route(input_gap=True, gap_aware=True, code=dict(_UNRELATED, verdict="related"))
+    assert (reviewed["decision"], reviewed["route"]) == ("review", "noinput")
+    audited = _route(input_gap=True, gap_aware=True, sample_key=_key_with(True))
+    assert (audited["decision"], audited["route"]) == ("audit", "audit")
+    assert _route(gap_aware=True)["decision"] == "filtered"     # 결손이 아닌 전문가에게 그 판 표지는 아무 뜻이 없다
+
+
+def test_row7_handoffs_are_frozen_in_the_route_json():
+    handoffs = [{"from": "rf-a", "why": "안테나 간극"}, {"from": "sh-b", "why": "음향 포트"}]
+    out = _route(handoffs=handoffs)
+    assert out["route_json"]["handoff"] == handoffs and out["route_forced"] == "handoff"
+
+
+def test_row2_rank1_cells_are_never_filtered_but_shadow_what_filtering_would_close():
+    """1순위 셀은 거르지 않고, 9 번이 참이었을 셀을 그림자로 적는다 — 그 사람이 1순위가 아니었다면 거를 셀이다(대상의 1순위 대기는
+    그 사람 자신의 몫이라 그림자 판정에서 뺀다). 다른 강제 사유가 있거나 신호가 관련이면 그림자가 아니다."""
+    for key in (_key_with(False), _key_with(True)):
+        out = _route(rank1=True, sample_key=key)
+        assert (out["decision"], out["route_forced"], out["would_filter"], out["shadow"]) == ("review", "rank1", False, True)
+    assert _route(rank1=True, tier_a_pending=True)["shadow"] is True
+    for other in ("global_unit", "no_cards", "input_gap", "widened", "target_off", "handoff"):
+        assert _route(rank1=True, **_FORCING_KW[other])["shadow"] is False, other
+    assert _route(rank1=True, sweep=dict(_SWEEP_NO, verdict="unknown"))["shadow"] is False
+    assert _route(rank1=True, code=dict(_UNRELATED, verdict="related"))["shadow"] is False
+    assert _route(rank1=True, filter_mode="off")["shadow"] is False     # M2 잡은 그림자도 적지 않는다(원장이 바이트로 같다)
+    assert _route(rank1=True, filter_mode="shadow")["shadow"] is True
+
+
+def test_shadow_mode_classifies_but_never_filters():
+    for key in (_key_with(False), _key_with(True)):
+        out = _route(filter_mode="shadow", sample_key=key)
+        assert (out["decision"], out["route"], out["route_forced"]) == ("review", "review", None)
+        assert (out["would_filter"], out["shadow"], out["route_json"]["rule"]) == (True, True, "both_unrelated")
+        assert out["route_json"]["audit"] is None and out["route_json"]["filter"] == "shadow"
+    assert _route(filter_mode="shadow", code=dict(_UNRELATED, verdict="unknown"))["shadow"] is False
+    with pytest.raises(ValueError):
+        _route(filter_mode="sometimes")
+
+
+def test_a_real_unit_routes_through_both_signals(synth, approved_tax, routing):
+    """생산자 단위 · 실제 코드 신호 · 훑기 회계 모양으로 결정표를 지난다 — 코드가 관련인 영역은 훑기가 no 여도 검토다."""
+    unit = _reviewable(synth[40])[0]
+    signal = _signal(unit, approved_tax, routing)
+    sweep = relevance.sweep_signal({"rel": "no", "k": [], "why": ["무관"], "missing_in": 0})
+    for domain in relevance.domain_codes(approved_tax):
+        out = _route(code=relevance.code_for(signal, domain), sweep=sweep, unit_kind=unit["kind"])
+        assert out["decision"] == ("filtered" if signal[domain]["verdict"] == "unrelated" else "review"), domain
+        assert out["route_json"]["code"]["related_domains"] == sorted(d for d, v in signal.items() if v["verdict"] == "related")
