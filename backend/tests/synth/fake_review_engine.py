@@ -33,6 +33,7 @@
   cond_text        단독 재질의 c 줄의 조건 글(기본 COND — 긴 글로 바꾸면 반출의 조건 글 200자를 본다, S9)
   offcard_src·offcard_quote  카드 밖 f 줄이 근거로 댄 배경 카드 별칭과 그 인용(기본 exp · 빈 인용 — S9 의 카드 근거 카드 밖 줄)
   handoff_to       이 영역으로 넘기는 h 줄을 훑기(첫 단위)와 카드 밖 호출에 하나씩 더한다(S10 의 넘김 절)
+  handoff_unit     훑기 h 줄이 넘기는 단위(unit_id) — 그 쪽에 그 단위가 없으면 h 줄을 내지 않는다(거르기 넘김 줄, 재설계 M3 C3-6)
   seen·need        카드 밖 m 줄의 따져 본 메커니즘 · need 줄의 글(S10 의 메커니즘·필요 정보 절)
   hold_runs        n(1부터 센 run 차례) → threading.Event — 그 run 은 result 앞에서 그 사건을 기다린다(호출 중 재기동 시험)
   solo_verdicts    solo 변형에서만 쓰는 record_id → (applies, judgement) — 단독 재질의가 앞 판정을 뒤집는 카드(S11)
@@ -40,6 +41,16 @@
                    M3.md 4.4.3). solo_mechs 는 단독 재질의 줄에만(묶음 판정과 다른 메커니즘). 엔진 계약 예제
                    result_verdict_mech.json 이 서면 그 모양에 맞춘다(재설계 M3 S3-3 — 쟁점·종합 꾸러미가 더한 칸)
   sweep_rel        unit_id → 훑기 rel(yes·maybe·no) — 그 단위의 u 줄 rel 을 바꾼다(훑기 '무관' 비율, S11)
+  noinput_q1       unit_id → q1 줄의 impact 목록(기본 yes 둘 — 계약 예제 result_noinput_ok 의 모양). yes·unknown 줄은 실린 카드를
+                   차례로 대고(그 카드 글에서 자른 인용) 변경 줄 하나를 단다, no 줄은 카드·줄 없이 낸다(재설계 M3 C3-3)
+  noinput_q2       unit_id → q2 줄의 항목 목록(빈 글 = 확인할 것 없음 — 까닭만, (항목, 필요한 자료) 쌍도 된다). 기본은 예제처럼
+                   둘(첫째는 첫 카드를 댄다)
+  noinput_more     unit_id → more=yes 로 답할 횟수(답마다 하나씩 준다 — 그 동안 quality.maybe_more 참). 다시 물으면 q1 제목 번호가
+                   받은 extra.known 수 뒤에서 이어진다
+  noinput_same_titles  참이면 다시 물어도 q1 제목 번호를 1 부터 다시 매긴다(같은 영향을 되풀이하는 모델 — 앱이 한 번만 남기는지)
+  sweep_split      훑기 묶음 수(기본 1 — 카드 전부 한 묶음). 둘 이상이면 카드를 팩 순서로 나눈다
+  sweep_error_aliases  이 별칭이 실린 훑기 묶음의 run 은 내용 탓 오류(no_rows)다 — 훑기 쪽 하나만 실패한 전문가(sweep_state failed)
+  sweep_drop       훑기 답에서 뺄 unit_id(앱 회계가 그 단위를 error 로 적는다 — 거르기의 '답에 없는 단위', 재설계 M3 C3-6)
   sweep_k          unit_id → 별칭 목록 — 그 단위의 u 줄 k 를 실은 카드 전부가 아니라 이것만으로 낸다(카드 밖 호출이 훑기 k 에 걸린
                    배경 카드를 먼저 싣는지 — P-03, R3A-5)
   error_cells      (agent_key, unit_id) → error 프레임 — 그 셀의 run 은 늘 그 오류다(내용 탓이면 셀이 failed 로 간다, S11)
@@ -52,6 +63,9 @@
                    (절단 모름 — X1-22, S11)
   queued_ms        정수면 meta.queued_ms 로 싣는다(자리 대기 — 엔진 예제에는 없는 칸이라 기본은 싣지 않는다, S11)
   no_quote         이 별칭들의 판정 행에 인용을 싣지 않는다(cq 빈 글 · checks.quote empty — 인용 통과율의 분모, X1-06, S11)
+  dup_conflict     (agent_key, 별칭) 또는 별칭 — 그 fwd 판정 행에 checks.dup_conflict 를 단다(엔진이 같은 카드의 다른 판정과
+                   부딪친 줄을 남겼다는 표지 — RB3-1, 엔진 216650e. 앱은 걸린 것처럼 두 번째 판정을 준다 — 재설계 M3 C3-9)
+  clipped          meta.clipped 로 낼 값 — 엔진이 몫에서 끊은 입력 {<입력>: {orig_chars, kept_chars}}(RB3-11, 기본 {})
   no_refs          이 별칭들의 판정 행에 변경 줄을 싣지 않는다(l·refs 빈 목록 · checks.refs missing — 참조 통과율의 분모, S11)
 기록 — requests(받은 요청 전부), runs(받은 run 수), max_active(동시에 돈 run 의 최댓값).
 S8(검토 루프)과 WP5b C9 가 이 파일을 넓힌다. 시험이 쓰는 여러 전문가의 팩은 `derive_pack` 이 엔진 계약 예제(pack_ok·pack_empty)에서
@@ -77,8 +91,8 @@ CONTRACT = Path(__file__).resolve().parents[1] / "fixtures" / "card_review" / "c
 # 엔진 요청 모델(card_review.RunRequest·PlanRequest·PackRequest 와 안쪽 항목)의 칸 — 선언 밖 칸은 422 unknown_fields.
 IDENT_FIELDS = frozenset({"groups", "user_email", "user_pat", "entitlements"})
 RUN_SHAPE: dict[str, frozenset[str]] = {
-    "": frozenset({"kind", "variant", "target_key", "expert", "cards", "digest", "unit", "manifest", "extra", "expect"})
-    | IDENT_FIELDS,
+    "": frozenset({"kind", "variant", "target_key", "expert", "cards", "digest", "unit", "manifest", "extra", "expect",
+                   "summary"}) | IDENT_FIELDS,
     "expert": frozenset({"key", "name", "domain", "role"}),
     "digest": frozenset({"alias", "type", "title", "record_id", "card_id"}),
     "unit": frozenset({"unit_id", "kind", "title", "summary", "notes", "lines", "context", "evidence", "missing",
@@ -88,11 +102,18 @@ RUN_SHAPE: dict[str, frozenset[str]] = {
     "unit.evidence": frozenset({"ref", "text", "owner_unit"}),
     "unit.missing": frozenset({"kind", "note"}),
     "manifest": frozenset({"unit_id", "kind", "title", "text"}),
-    "extra": frozenset({"domains", "mechanisms", "known"}),
+    "extra": frozenset({"domains", "mechanisms", "known", "missing", "search"}),
+    "extra.missing": frozenset({"kind", "note"}),
+    "extra.search": frozenset({"queries"}),
+    "summary": frozenset({"scope", "rows", "must_cover", "blocks"}),
+    "summary.scope": frozenset({"kind", "key", "label"}),
+    "summary.rows": frozenset({"ref", "text"}),
+    "summary.blocks": frozenset({"name", "title", "text"}),
     "extra.domains": frozenset({"key", "label"}),
     "extra.mechanisms": frozenset({"code", "label"}),
     "extra.known": frozenset({"alias", "judgement", "why"}),
-    "expect": frozenset({"prompt_rev", "limits_rev"}),
+    # run 의 기대 판 — limits_rev_kind 는 그 종류의 판(limits_rev_by_kind[kind] — RB3-6, 엔진 RunExpect). plan 은 받지 않는다.
+    "expect": frozenset({"prompt_rev", "limits_rev", "limits_rev_kind"}),
 }
 PLAN_SHAPE: dict[str, frozenset[str]] = {
     "": frozenset({"cards", "units", "expect"}) | IDENT_FIELDS,
@@ -241,6 +262,7 @@ class FakeReviewEngine:
         self.offcard_src = "exp"
         self.offcard_quote = ""
         self.handoff_to: str | None = None
+        self.handoff_unit: str | None = None
         self.seen: list[str] = []
         self.need: str | None = None
         self.hold_runs: dict[int, threading.Event] = {}
@@ -249,11 +271,20 @@ class FakeReviewEngine:
         self.solo_mechs: dict[Any, tuple[str, str]] = {}
         self.sweep_rel: dict[str, str] = {}
         self.sweep_k: dict[str, list[str]] = {}
+        self.sweep_drop: set[str] = set()
+        self.sweep_split = 1
+        self.sweep_error_aliases: set[str] = set()
+        self.noinput_q1: dict[str, list[str]] = {}
+        self.noinput_q2: dict[str, list[str]] = {}
+        self.noinput_more: dict[str, int] = {}
+        self.noinput_same_titles = False
         self.error_cells: dict[tuple[str, str], dict[str, Any]] = {}
         self.truncate: dict[tuple[str, str | None, str | None], str] = {}
         self.queued_ms: int | None = None
         self.no_quote: set[str] = set()
         self.no_refs: set[str] = set()
+        self.dup_conflict: set[Any] = set()
+        self.clipped: dict[str, Any] = {}
         # 기록
         self.requests: list[dict[str, Any]] = []
         self.runs = 0
@@ -310,18 +341,28 @@ class FakeReviewEngine:
         if self.ctx_unknown:
             return self._reject(503, "ctx_unknown", "LLM 서버에 창 크기를 묻지 못해 다시 묻는 중이다(가짜)",
                                 retry_after_s=60, infra=True, retryable=True)
-        want = (body.get("expect") or {}).get("limits_rev")
-        if want not in (None, self.limits_rev):
-            return self._reject(409, "rev_mismatch", f"요청이 기대한 limits_rev({want})가 이 서버의 판({self.limits_rev})과"
-                                " 다르다", limits_rev=self.limits_rev, expect=body.get("expect"))
+        expect = body.get("expect") or {}
+        want = expect.get("limits_rev")
+        kind_rev = self.kind_rev(body.get("kind")) if route == "run" else None
+        if want not in (None, self.limits_rev) or (route == "run" and expect.get("limits_rev_kind") not in (None, kind_rev)):
+            # 엔진 prepare 처럼 준 것만 견주고, 거절에 지금 판(전체 · 그 종류)과 받은 expect 를 되비춘다(RB3-6).
+            return self._reject(409, "rev_mismatch", f"요청이 기대한 판({expect})이 이 서버의 판(limits_rev={self.limits_rev},"
+                                f" limits_rev_kind={kind_rev})과 다르다", limits_rev=self.limits_rev,
+                                **({"limits_rev_kind": kind_rev} if route == "run" else {}), expect=expect)
         if route == "run":
+            # 엔진 prepare 의 종류별 요청 검사(재설계 M3 계약 2·6) — 입력 결손 호출은 unit.missing 이 있어야 하고, 전문가 단위 결측
+            # extra.missing 은 훑기에만 싣는다.
+            if body.get("kind") == "noinput" and not ((body.get("unit") or {}).get("missing") or []):
+                return self._reject(422, "bad_request", "unit.missing 이 없다 — noinput 은 결손 입력이 있는 단위에만 부른다(가짜)")
+            if (body.get("extra") or {}).get("missing") and body.get("kind") != "sweep":
+                return self._reject(422, "bad_request", "extra.missing 은 sweep 에만 싣는다(가짜)")
             # 엔진 prepare 처럼 run 은 종류별 prompt_rev 도 견준다(limits_rev 의 원천에 PROMPT_REV 는 없다 — R3A-6).
             want_prompt = (body.get("expect") or {}).get("prompt_rev")
             have_prompt = (self.base_limits.get("prompt_rev") or {}).get(body.get("kind"))
             if want_prompt not in (None, have_prompt):
                 return self._reject(409, "rev_mismatch", f"요청이 기대한 판(prompt_rev={want_prompt})이 이 서버의 판"
                                     f"(prompt_rev={have_prompt})과 다르다", prompt_rev=have_prompt,
-                                    limits_rev=self.limits_rev, expect=body.get("expect"))
+                                    limits_rev=self.limits_rev, limits_rev_kind=kind_rev, expect=body.get("expect"))
         if route == "plan":
             return httpx.Response(200, json=self.plan(body))
         return self._run(body)
@@ -331,6 +372,10 @@ class FakeReviewEngine:
         return httpx.Response(status, json={"code": code, "message": message, **extra})
 
     # -- 단발 ------------------------------------------------------------------------------
+    def kind_rev(self, kind: Any) -> str | None:
+        """그 종류의 판(limits_rev_by_kind[kind] — RB3-6). 시험이 base_limits 의 표를 바꿔 한 종류의 판만 올린다."""
+        return (self.base_limits.get("limits_rev_by_kind") or {}).get(str(kind))
+
     def limits(self) -> dict:
         out = copy.deepcopy(self.base_limits)
         out.update({"ctx_source": "fallback" if self.ctx_unknown else self.ctx_source, "ctx_retrying": self.ctx_unknown,
@@ -378,7 +423,8 @@ class FakeReviewEngine:
 
         checkable = [c for c in cards if c.get("checkable")]
         verdict_decks = [deck("verdict", checkable[i:i + k]) for i in range(0, len(checkable), k)]
-        sweep_decks = [deck("sweep", cards)] if cards else []
+        size = -(-len(cards) // max(1, int(self.sweep_split))) if cards else 0
+        sweep_decks = [deck("sweep", cards[i:i + size]) for i in range(0, len(cards), size)] if cards else []
         fits = [u["unit_id"] for u in units if u["unit_id"] not in self.oversize_units]
         pages = [fits[i:i + per_page] for i in range(0, len(fits), per_page)]
         p_hard = int(self.base_limits["p_hard"])
@@ -408,6 +454,10 @@ class FakeReviewEngine:
         if self._take("busy_n"):
             return self._busy()
         cell = (str((body.get("expert") or {}).get("key") or ""), str((body.get("unit") or {}).get("unit_id") or ""))
+        if body.get("kind") == "sweep" and {c.get("alias") for c in body.get("cards") or ()} & self.sweep_error_aliases:
+            return self._stream(iter([_sse("status", {"step": "attempt", "n": 1}),
+                                      _sse("error", {"code": "no_rows", "message": "훑기 줄이 하나도 없다(가짜)", "infra": False,
+                                                     "retryable": False, "attempt": 1}), _sse("done", {})]))
         if cell in self.error_cells:
             return self._stream(iter([_sse("status", {"step": "attempt", "n": 1}),
                                       _sse("error", {**self.error_cells[cell], "attempt": 1}), _sse("done", {})]))
@@ -476,6 +526,10 @@ class FakeReviewEngine:
             judge = order[::-1] if variant == "rev" else order
             main = [self._mech(self._verdict_row(a, cards[a], own, lines, variant=variant), body, variant)
                     for a in judge if a not in self.skip_cards]
+            agent = str((body.get("expert") or {}).get("key") or "")
+            for row in main:
+                if variant == "fwd" and (row["k"] in self.dup_conflict or (agent, row["k"]) in self.dup_conflict):
+                    row["checks"]["dup_conflict"] = True
             if (self.truncated or cut == "length") and main:
                 main = main[:-1]
                 quality.update(truncated=True, tail_broken=True)
@@ -496,14 +550,19 @@ class FakeReviewEngine:
             rows = [{"t": "u", "k": hit[uid], "u": u, "rel": self.sweep_rel.get(uid) or ("maybe" if order else "no"),
                      "why": "카드의 적용 조건이 이 단위에 걸릴 수 있다", "unit_id": uid,
                      "record_ids": [cards[a]["record_id"] for a in hit[uid]], "from_attempt": 1,
-                     "checks": {"why": "ok", "coerced": []}} for u, uid in units.items()]
-            if self.handoff_to and units:
-                first = next(iter(units))
+                     "checks": {"why": "ok", "coerced": []}} for u, uid in units.items() if uid not in self.sweep_drop]
+            first = (next((u for u, uid in units.items() if uid == self.handoff_unit), None) if self.handoff_unit
+                     else next(iter(units), None))
+            if self.handoff_to and first is not None:
                 rows.append({"t": "h", "u": first, "to": self.handoff_to, "why": "훑기가 다른 영역의 몫으로 본 단위",
                              "unit_id": units[first], "from_attempt": 1, "checks": {"coerced": []}})
             missing = []
             extras["unmatched_cards"] = []
             quality.update(expected=len(units), ok=len(rows))
+        elif kind == "noinput":
+            rows, quality_more = self._noinput_rows(body, cards, order, own, lines)
+            missing = []
+            quality.update(expected=3, **quality_more)
         else:
             cap = int(self.base_limits["offcard"]["findings_max"])
             n = min(int(self.offcard_findings), cap)
@@ -529,14 +588,15 @@ class FakeReviewEngine:
         prompt_rev = self.base_limits["prompt_rev"][kind]
         meta = {"model": self.base_limits.get("model"), "ctx_tokens": self.base_limits["ctx_tokens"],
                 "ctx_source": self.ctx_source, "prompt_rev": prompt_rev, "norm_rev": self.base_limits["norm_rev"],
-                "limits_rev": self.limits_rev,
+                "limits_rev": self.limits_rev, "limits_rev_kind": self.kind_rev(kind),
                 "input_sha": hashlib.sha256(json.dumps(body, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
                 "prompt_chars": len(json.dumps(body, ensure_ascii=False)),
                 "usage": {"llm_calls": 1, "tokens_in": 1000, "tokens_out": 100,
                           "per_attempt": [{"n": 1, "tokens_in": 1000, "tokens_out": 100}]},
                 "finish_reason": ("length" if (self.truncated or cut == "length") and kind == "verdict" else "stop"),
                 "llm_ms": [0],
-                "soft_over": False, "basis": "cards" if (order or digest) else "role_only", "bg_dropped": 0,
+                "soft_over": False, "basis": "noinput" if kind == "noinput" else "cards" if (order or digest) else "role_only",
+                "bg_dropped": 0, "clipped": copy.deepcopy(self.clipped),
                 "order_effective": not (kind == "verdict" and variant == "rev" and len(order) < 2),
                 "aliases": {"cards": {a: cards[a]["record_id"] for a in order},
                             "lines": {a: x["ref"] for a, x in lines.items()}, "units": units}}
@@ -549,11 +609,14 @@ class FakeReviewEngine:
                              "per_attempt": [{"n": 1, "tokens_in": 1000, "tokens_out": 100},
                                              {"n": 2, "tokens_in": 1000, "tokens_out": 100}]}
             meta["llm_ms"] = [0, 0]
-        if cut == "length" and kind == "offcard":
+        if cut == "length" and kind in ("offcard", "noinput"):
             rows = [r for r in rows if r["t"] != "more"]
             missing = ["more"]
             quality.update(truncated=True, tail_broken=True, maybe_more=None)
             meta["finish_reason"] = "length"
+        # 엔진 RB3-1 — 걸린 줄은 밀려나지 않고, 부딪친 줄(checks.dup_conflict)과 보충이 갈아 낀 줄(flipped_from)을 센다(늘 실린다).
+        quality.update(dup_conflict=sum(1 for r in rows if (r.get("checks") or {}).get("dup_conflict")),
+                       flipped=sum(1 for r in rows if r.get("flipped_from")))
         if self.queued_ms is not None:
             meta["queued_ms"] = int(self.queued_ms)
         return {"kind": kind, "variant": variant, "rows": rows, "missing": missing, "extras": extras,
@@ -589,11 +652,78 @@ class FakeReviewEngine:
                 "checks": {"quote": status, "quote_sid": sid, "refs": "ok" if cited or applies != "yes" else "missing",
                            "nums_unsourced": [], "need": "ok", "coerced": []}}
 
+    def _noinput_rows(self, body: Mapping[str, Any], cards: Mapping[str, Mapping[str, Any]], order: Sequence[str],
+                      own: Sequence[str], lines: Mapping[str, Mapping[str, Any]]) -> tuple[list[dict], dict]:
+        """입력 결손 호출의 q1·q2·more 줄과 quality 의 ok·dropped_over_cap·maybe_more — 엔진 계약 2(result_noinput_* 의 모양)."""
+        uid = str((body.get("unit") or {}).get("unit_id") or "")
+        extra = body.get("extra") or {}
+        base = 0 if self.noinput_same_titles else len(extra.get("known") or ())
+        codes = [str(m.get("code")) for m in extra.get("mechanisms") or () if isinstance(m, Mapping)]
+        q1: list[dict] = []
+        for i, impact in enumerate(self.noinput_q1.get(uid, ["yes", "yes"])):
+            alias = order[i % len(order)] if order and impact != "no" else ""
+            card = cards.get(alias) if alias else None
+            quote, sid = quote_of(card) if card is not None else ("", "")
+            cited = list(own[:1]) if impact != "no" else []
+            mech = (codes[0] if codes else "") if impact == "yes" else ""
+            row = {"t": "q1", "l": cited, "impact": impact, "title": f"보드 근접 계면 간극 축소 {base + i + 1}", "mech": mech,
+                   "mech_free": "", "path": "보드 고정점 → 근접 계면" if impact == "yes" else "", "k": alias, "cq": quote,
+                   "sev": "중대" if impact == "yes" else "", "why": "변경 줄의 간극 축소가 카드의 적용 조건과 겹친다",
+                   "refs": [lines[a]["ref"] for a in cited]}
+            if card is not None:
+                row["record_id"] = str(card.get("record_id") or "")
+            row.update(from_attempt=1, checks={
+                "refs": "ok" if cited or impact != "yes" else "missing", "quote": "ok", "quote_sid": sid,
+                "nums_unsourced": [], "coerced": [],
+                "mech": "no_list" if not codes else "missing" if impact == "yes" and not mech else "ok", "why": "ok"})
+            q1.append(row)
+        cap = int(self.base_limits["noinput"]["items_max"])
+        dropped = max(0, len(q1) - cap)
+        q1 = q1[:cap]
+        q2: list[dict] = []
+        items = self.noinput_q2.get(uid, ["보드 고정점 주변 부품 배치", "근접 계면의 네트 경로"])
+        for i, entry in enumerate(items):
+            # 항목 하나는 글(필요한 자료는 기본값) 또는 (항목, 필요한 자료) 쌍이다
+            item, needs = entry if isinstance(entry, tuple) else (entry, "ECAD 배치·스택업" if entry else "")
+            alias = order[0] if order and i == 0 and item else ""
+            card = cards.get(alias) if alias else None
+            row = {"t": "q2", "l": list(own[:1]), "item": item, "needs": needs, "k": alias,
+                   "why": "바뀐 보스 위치와 부품 간극을 대조해야 한다" if item else "결측 입력이 와도 이 단위에서 볼 것이 없다",
+                   "refs": [lines[a]["ref"] for a in own[:1]]}
+            if card is not None:
+                row["record_id"] = str(card.get("record_id") or "")
+            row.update(from_attempt=1, checks={"refs": "ok", "why": "ok", "coerced": []})
+            q2.append(row)
+        with self._lock:
+            left = self.noinput_more.get(uid, 0)
+            if left:
+                self.noinput_more[uid] = left - 1
+        more = "yes" if left else "no"
+        rows = q1 + q2 + [{"t": "more", "more": more, "from_attempt": 1, "checks": {"coerced": []}}]
+        # quality.ok 는 q1·q2 둘 다 센다(엔진 RB3 — 짧은 까닭의 q1 no · 빈 항목 q2 는 checks.why short 로 다시 묻는다)
+        return rows, {"ok": len(q1) + len(q2), "dropped_over_cap": dropped, "maybe_more": len(q1) >= cap or more == "yes"}
+
     def _mech(self, row: dict, body: Mapping[str, Any], variant: str | None) -> dict:
-        """대본(mechs·solo_mechs)이 있으면 v 줄에 mech·mech_free 를 싣는다 — 열쇠는 (전문가, record_id) 가 먼저, 없으면 record_id."""
+        """v 줄의 mech·mech_free 와 checks.mech — 엔진 `_check_mech` 그대로(cr-verdict-2). 대본(mechs·solo_mechs)이 있으면 그 값을
+        싣는다 — 열쇠는 (전문가, record_id) 가 먼저, 없으면 record_id. 요청에 메커니즘 목록이 없으면 칸을 비우고 no_list, 목록 밖
+        코드는 free 로 고치고 원래 값을 mech_free 에, 걸린 줄(WARNING·FAIL)인데 비면 missing, 그 밖은 ok·free 다."""
         agent, record_id = str((body.get("expert") or {}).get("key") or ""), str(row.get("record_id") or "")
         mech = self.solo_mechs.get((agent, record_id), self.solo_mechs.get(record_id)) if variant == "solo" else None
         mech = mech or self.mechs.get((agent, record_id), self.mechs.get(record_id))
-        if mech is not None:
-            row["mech"], row["mech_free"] = mech
+        row["mech"], row["mech_free"] = mech if mech is not None else ("", "")
+        codes = {str(m.get("code")) for m in ((body.get("extra") or {}).get("mechanisms") or ()) if isinstance(m, Mapping)}
+        if not codes:
+            if row["mech"] and row["mech"] != "free":
+                row["mech_free"] = row["mech_free"] or row["mech"]
+            row["mech"] = ""
+            row["checks"]["mech"] = "no_list"
+            return row
+        if row["mech"] and row["mech"] != "free" and row["mech"] not in codes:
+            row["checks"]["coerced"].append(f"mech:{row['mech']}")
+            row["mech_free"] = row["mech_free"] or row["mech"]
+            row["mech"] = "free"
+        if row["judgement"] in ("WARNING", "FAIL") and not row["mech"]:
+            row["checks"]["mech"] = "missing"
+        else:
+            row["checks"]["mech"] = "free" if row["mech"] == "free" else "ok"
         return row

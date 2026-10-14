@@ -21,7 +21,7 @@ import re
 from dataclasses import asdict, dataclass
 from typing import Any, Mapping, Sequence
 
-from . import brief, render
+from . import brief, render, taxonomy
 from . import diff as diff_module
 from .common import canonical_json, now_epoch, sha256_hex
 from .errors import AppError
@@ -2276,9 +2276,29 @@ def _target_missing(store, target_key: str, blocked_by: str | None) -> list[dict
     return out
 
 
+INPUT_GAP_ASSET = "input-gap"
+
+
+def input_gap_hint(domain: str) -> str | None:
+    """입력 결손 영역의 실마리(`assets/input-gap.v1.json` — 재설계 M3 C3-3). 표에 없는 영역은 None 이다."""
+    hint = (taxonomy.load_json(INPUT_GAP_ASSET).get("domains") or {}).get(str(domain))
+    return str(hint) if hint else None
+
+
+def gap_missing(missing: Sequence[Mapping[str, Any]], input_gaps: Sequence[str], domain: str) -> list[dict]:
+    """결측 블록에 그 전문가 영역의 실마리를 단다 — 입력 결손(`ecad_absent`)인 전문가의 ecad 줄 끝에 '이 영역이 볼 것' 을 붙인다.
+    결손이 아니거나 실마리가 없으면 그대로다(다른 전문가의 요청 본문은 바뀌지 않는다)."""
+    hint = input_gap_hint(domain) if "ecad_absent" in input_gaps else None
+    if not hint:
+        return [dict(m) for m in missing]
+    return [{**m, "note": f"{_s(m.get('note'))} 이 영역이 볼 것 — {hint}."} if m.get("kind") == "ecad" else dict(m)
+            for m in missing]
+
+
 def review_payload(store, target_key: str, unit_id: str, agent_key: str) -> dict:
     """카드 대조 요청의 `unit`(M2.md 4.3) — `payload_of`(단위·동결 근거) + `missing[{kind, note}]`(대상 수준 결측과 빌드의 의미층
-    차단) + `input_gaps`(그 전문가의 입력 결손, `planner.review_order` 의 계산값). 줄이지 않는다(엔진에 그대로 간다).
+    차단 — 입력 결손 전문가면 ecad 줄에 그 영역의 실마리, `gap_missing`) + `input_gaps`(그 전문가의 입력 결손,
+    `planner.review_order` 의 계산값). 줄이지 않는다(엔진에 그대로 간다).
 
     그 전문가가 로스터에 없으면 404 `agent_not_in_roster` 다(입력 결손을 빈 목록으로 지어내지 않는다).
     """
@@ -2290,7 +2310,8 @@ def review_payload(store, target_key: str, unit_id: str, agent_key: str) -> dict
         raise AppError("agent_not_in_roster", f"이 대상의 로스터에 없는 전문가입니다 — {agent_key}.", 404)
     build = active_build(store, target_key) or latest_build(store, target_key)
     payload = payload_of(_unit_of(row), _evidence_of(row))
-    payload["missing"] = _target_missing(store, target_key, (build or {}).get("blocked_by"))
+    payload["missing"] = gap_missing(_target_missing(store, target_key, (build or {}).get("blocked_by")), order["input_gaps"],
+                                     order["domain"])
     payload["input_gaps"] = list(order["input_gaps"])
     return payload
 

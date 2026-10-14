@@ -155,13 +155,15 @@ DEFAULT_REVIEW_CALL_TIMEOUT_S = 18000
 
 @dataclass(frozen=True)
 class Knob:
-    """검토 손잡이 하나 — 환경변수 이름 · Settings 속성 · 코드 기본값 · 형(int|bool) · 정수의 하한(그 밑은 기동을 막는다)."""
+    """검토 손잡이 하나 — 환경변수 이름 · Settings 속성 · 코드 기본값 · 형(int|bool|choice) · 정수의 하한(그 밑은 기동을 막는다) ·
+    선택지(choice 의 낱말 — 그 밖의 값은 기동을 막는다)."""
 
     env: str
     attr: str
-    default: int | bool
+    default: int | bool | str
     kind: str = "int"
     minimum: int = 0
+    choices: tuple[str, ...] = ()
 
 
 REVIEW_KNOBS: tuple[Knob, ...] = (
@@ -176,6 +178,14 @@ REVIEW_KNOBS: tuple[Knob, ...] = (
     Knob("HWAXRISK_REVIEW_MAX_CHARGED", "risk_review_max_charged", 2, minimum=1),   # 셀의 내용 탓 실패 한도
     Knob("HWAXRISK_REVIEW_CONSENT_CALLS", "risk_review_consent_calls", 1500),  # 동의가 필요한 호출 추정
     Knob("HWAXRISK_REVIEW_MAX_CALLS", "risk_review_max_calls", 30000, minimum=1),   # 넘으면 거절하는 상한
+    # 관련 없는 셀 거르기(재설계 M3 C3-6) — off · shadow(분류만 적고 거르지 않는다) · on. 승인 문이 닫혀 있으면 손잡이와 상관없이
+    # 거르지 않는다(#40). 표본 비율은 거를 셀 가운데 끝까지 판정하는 몫(%)이다.
+    Knob("HWAXRISK_REVIEW_FILTER", "risk_review_filter", "on", "choice", choices=("off", "shadow", "on")),
+    Knob("HWAXRISK_FILTER_AUDIT_PCT", "risk_filter_audit_pct", 5),
+    # 이중 판정(재설계 M3 C3-9) — flagged(걸린 별칭만 rev, 1순위는 보정용 전량) · all(M2 동작). 무작위 뒤집기 비율은 보정의
+    # '걸림 없음 → 걸림' 이 5% 를 넘은 대상에서 걸림 없는 묶음을 rev 하는 몫(%)이다 — 0 이면 켜지지 않는다(#32).
+    Knob("HWAXRISK_REVIEW_DUAL", "risk_review_dual", "flagged", "choice", choices=("flagged", "all")),
+    Knob("HWAXRISK_REVIEW_DUAL_NEG_PCT", "risk_review_dual_neg_pct", 10),
 )
 # 포털 PAT 자동 등록의 손잡이(리스크 앱 사람 자격 R1 — 전부 선택). 갱신 문턱은 남은 수명이 이 밑이면 '지금 다시 받아야 한다'(due
 # expiring)는 뜻이고 패널 자격 여유(credential_margin_s)보다 커야 한다(main.check_credential_chain) — 아니면 자동 등록이 '아직
@@ -290,6 +300,10 @@ class Settings:
     risk_review_max_charged: int = 2
     risk_review_consent_calls: int = 1500
     risk_review_max_calls: int = 30000
+    risk_review_filter: str = "on"
+    risk_filter_audit_pct: int = 5
+    risk_review_dual: str = "flagged"
+    risk_review_dual_neg_pct: int = 10
     risk_pat_renew_before_s: int = DEFAULT_PAT_RENEW_BEFORE_S
     risk_pat_auto_retry_s: int = DEFAULT_PAT_AUTO_RETRY_S
     risk_issue_panel_cap: int = 24
@@ -461,7 +475,7 @@ def load_review_knobs(data_dir: Path, env: Mapping[str, str] | None = None) -> t
 
     반환은 (Settings 속성 → 값, ((환경변수 이름, 출처 env|knobs.env|default), …)). 빈 값은 적지 않은 것으로 본다. knobs.env 의 줄
     끝 주석(`KEY=1  # 파일럿`)은 떼고 읽는다(손잡이 값에는 '#' 이 들 일이 없다). 정수가 아니거나 하한(`Knob.minimum`) 밑인 값,
-    켜기·끄기 낱말(1·true·yes·on · 0·false·no·off)이 아닌 불리언은 기동을 막는다 — 어느 자리(파일 경로 또는 환경변수)의 어느
+    켜기·끄기 낱말(1·true·yes·on · 0·false·no·off)이 아닌 불리언, 선택지(`Knob.choices`, 대소문자 무시) 밖의 값은 기동을 막는다 — 어느 자리(파일 경로 또는 환경변수)의 어느
     손잡이인지 말한다. 조용히 기본값으로 돌면 박스에 적은 값이 듣지 않는 것을 아무도 모른다(켜기 스위치가 오타·꼬리 주석에서
     조용히 꺼지던 것 — 반대 검토 C2a RC-5). 손잡이 사이의 관계(단위 크기의 순서·시간 한도의 사슬)는 main.check_review_chain 이 본다.
     """
@@ -486,6 +500,12 @@ def load_review_knobs(data_dir: Path, env: Mapping[str, str] | None = None) -> t
                 raise RuntimeError(f"{knob.env}={raw!r} 은 켜기·끄기 값이 아닙니다({where}) — 1·true·yes·on 이나"
                                    f" 0·false·no·off 로 적거나 지우면 기본값 {int(bool(knob.default))} 로 돈다.")
             values[knob.attr] = token in _KNOB_TRUE
+        elif knob.kind == "choice":
+            token = raw.lower()
+            if token not in knob.choices:
+                raise RuntimeError(f"{knob.env}={raw!r} 은 {' · '.join(knob.choices)} 가운데 하나가 아닙니다({where}) —"
+                                   f" 고치거나 지우면 기본값 {knob.default} 로 돈다.")
+            values[knob.attr] = token
         else:
             try:
                 value = int(raw)

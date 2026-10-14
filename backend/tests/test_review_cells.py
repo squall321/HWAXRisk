@@ -18,7 +18,7 @@ import httpx
 import pytest
 
 from app import cardpack, config, identity, narrative, planner, review_cells, review_ops, review_runner, routes, runner
-from app import review_verify, units
+from app import relevance, review_verify, units
 from app.common import now_epoch
 from app.errors import AppError
 from app.review_cells import IllegalTransition
@@ -74,9 +74,12 @@ def _running(store, job: dict) -> dict:
 
 
 def _refused(fn, *args, **kwargs) -> AppError:
-    with pytest.raises(AppError) as exc:
+    """거절(AppError)을 돌려준다 — 거절하지 않았으면 단언 실패다(변이 검사가 '죽음' 으로 세는 실패의 모양)."""
+    try:
         fn(*args, **kwargs)
-    return exc.value
+    except AppError as exc:
+        return exc
+    raise AssertionError(f"{getattr(fn, '__name__', fn)} 가 거절하지 않았다")
 
 
 def _cells(store, key: str) -> list[dict]:
@@ -352,7 +355,7 @@ def test_a_cards_free_expert_reviews_by_role_and_its_seat_closes_done_weak_no_ca
     assert (cell["basis"], cell["tries"], cell["lease_owner"], cell["cards_expected"], cell["cards_judged"]) == (
         "role_only", 1, None, 0, 0)
     summary = review_cells.review_summary(store, key)
-    assert summary["cells"]["by_basis"] == {"cards": 0, "background": 0, "role_only": len(unit_ids)}
+    assert summary["cells"]["by_basis"] == {"cards": 0, "background": 0, "role_only": len(unit_ids), "noinput": 0}
     assert summary["cells"]["in_scope"]["by_state"]["reviewed"] == len(unit_ids)
 
     closed = planner.close_review_seat(store, key, SEAL, review_id=head["review_id"], opinion_id=_opinion(key))
@@ -435,7 +438,7 @@ def test_a_seat_is_not_closed_with_out_of_scope_cells_failures_only_on_a_panel_t
     review_cells.fail_open_cells(store, key, peer, code="pack_unavailable", error="팩 502 여섯 번")
     assert review_cells.expert_tally(store, key, peer)["failed"] == len(unit_ids)
     out = planner.close_review_seat(store, key, peer, review_id=review_cells.review_id_of(key, peer), opinion_id="x" * 32)
-    assert (out["updated"], out["why"]) == (False, "nothing_reviewed")
+    assert (out["updated"], out["why"]) == (False, f"failed_open:{len(unit_ids)}")    # 사유가 열린 실패 수를 단다(m3-cells 3.9)
 
     _stop(store, live)                                                  # 남은 단위를 다음 잡이 돈다
     live = _running(store, _job(store, key, scope={"agents": [SEAL]}))
@@ -662,12 +665,14 @@ def test_a_new_job_reopens_experts_that_still_have_cells_in_its_scope(store):
 # ---------------------------------------------------------------- 검토 잡 만들기 — 반환·잡 행·자격
 def test_the_job_row_carries_its_scope_knobs_and_the_user_credential(store):
     """반환 모양과 잡 행 — mode reviews · tier 없음 · queued · 범위 · 동의 출처 · 사용자 PAT 자격 · 실행 설정 사본(dual_rate 1.0 ·
-    훑기 켬 · 거르기 끔 · 내용 탓 한도 · 표본 소금). 패널 원장(rr_coverage)은 건드리지 않는다."""
+    이중 판정 손잡이(걸린 것만 · 1순위 보정 · 무작위 뒤집기 비율) · 훑기 켬 · 거르기 손잡이와 표본 비율 · 변경 → 영역 표의 판과
+    만들 때의 승인 여부 · 내용 탓 한도 · 표본 소금). 패널 원장
+    (rr_coverage)은 건드리지 않는다."""
     key = _target(store)
     before = [tuple(r) for r in store.query("SELECT * FROM rr_coverage WHERE target_key = ? ORDER BY agent_key", (key,))]
     out = _job(store, key, scope={"domains": ["mech", "sim"], "tiers": ["A"]}, user_memo="메모")
     assert set(out) == {"job_id", "mode", "cells_total", "cells_in_scope", "experts_in_scope", "units", "calls_estimate",
-                        "credential"}
+                        "credential", "undeferred"}          # 푼 보류 좌석 수(재설계 M3 C3-2)
     assert (out["mode"], out["experts_in_scope"]) == ("reviews", 2)
     assert out["calls_estimate"] == review_runner.calls_estimate(out["cells_in_scope"], 2)
     assert out["credential"]["kind"] == "owner" and out["credential"]["email"] == OWNER
@@ -678,9 +683,14 @@ def test_the_job_row_carries_its_scope_knobs_and_the_user_credential(store):
     assert params["scope"] == {"tiers": ["A"], "domains": ["mech", "sim"]}
     assert (params["user_memo"], params["consent"], params["consent_source"], params["requester"]) == (
         "메모", True, "web", OWNER)
-    assert params["knobs"] == {"dual_rate": 1.0, "sweep": "on", "filter": "off",
+    assert params["knobs"] == {"dual_rate": 1.0, "dual": config.settings.risk_review_dual, "dual_calib": "tier_a",
+                               "dual_neg_pct": config.settings.risk_review_dual_neg_pct,
+                               "sweep": "on", "filter": config.settings.risk_review_filter,
+                               "audit_pct": config.settings.risk_filter_audit_pct,
+                               "routing_rev": relevance.routing_rev(), "routing_approved": relevance.routing_approved(),
                                "max_charged": config.settings.risk_review_max_charged,
                                "sample_salt": review_verify.SAMPLE_SALT}
+    assert (params["knobs"]["filter"], params["knobs"]["audit_pct"], params["knobs"]["routing_approved"]) == ("on", 5, False)
     assert params["credential"] == out["credential"] and json.loads(row["progress_json"])["mode"] == "reviews"
     assert [tuple(r) for r in store.query("SELECT * FROM rr_coverage WHERE target_key = ? ORDER BY agent_key",
                                           (key,))] == before
@@ -751,10 +761,10 @@ def test_refusals_for_switch_target_units_and_live_jobs(store, monkeypatch):
     assert make()["mode"] == "reviews"
 
 
-def test_refusals_for_scope_input_gaps_and_call_budget(store, monkeypatch):
-    """범위 — 모르는 칸·목록 아님·빈 목록·대상에 없는 값은 422 scope_invalid, 맞는 셀이 없으면 422 scope_empty, ECAD 가 없는데
-    ECAD 에 기대는 전문가가 들면 422 input_gap_m3. 호출 추정의 높은 끝이 상한을 넘으면 409 review_too_large, 동의 문턱을 넘는데
-    consent 가 없으면 422 consent_required."""
+def test_refusals_for_scope_and_call_budget(store, monkeypatch):
+    """범위 — 모르는 칸·목록 아님·빈 목록·대상에 없는 값은 422 scope_invalid, 맞는 셀이 없으면 422 scope_empty. 호출 추정의 높은
+    끝이 상한을 넘으면 409 review_too_large, 동의 문턱을 넘는데 consent 가 없으면 422 consent_required. 입력 결손 전문가는 거절하지
+    않는다(재설계 M3 C3-2 — 아래 시험)."""
     key = _target(store, agents=factories.agents())
     _pat(store)
 
@@ -771,10 +781,6 @@ def test_refusals_for_scope_input_gaps_and_call_budget(store, monkeypatch):
         assert (refused.code, refused.http_status, refused.detail) == ("scope_invalid", 422, detail), scope
     refused = _refused(make, {"tiers": ["A"], "agents": ["mech-syn-1"]})
     assert (refused.code, refused.http_status, refused.detail["experts"]) == ("scope_empty", 422, 0)
-    refused = _refused(make, None)
-    assert (refused.code, refused.http_status, refused.detail["agents"]) == ("input_gap_m3", 422,
-                                                                              ["pcb-syn-0", "pcb-syn-1"])
-    assert _refused(make, {"domains": ["pcb"]}).code == "input_gap_m3"
 
     scope = {"domains": ["mech"]}
     high = review_runner.calls_estimate(2 * len(_unit_ids(store, key)), 2)["high"]
@@ -788,6 +794,88 @@ def test_refusals_for_scope_input_gaps_and_call_budget(store, monkeypatch):
                                                                             "HWAXRISK_REVIEW_CONSENT_CALLS")
     assert store.query_one("SELECT COUNT(*) AS n FROM rr_review_cells WHERE target_key = ?", (key,))["n"] == 0
     assert make(scope)["calls_estimate"]["high"] == high
+
+
+# ---------------------------------------------------------------- 전원 포함 · 보류 해제(재설계 M3 C3-2)
+def _undefer_audits(store, key: str) -> list[dict]:
+    return [dict(r) for r in store.query(
+        "SELECT actor, actor_verified, channel, scope, subject_id, action, after_json, reason FROM rr_audit"
+        " WHERE subject_id = ? AND action = 'coverage.undefer' ORDER BY at", (key,))]
+
+
+def test_input_gap_experts_join_the_scope_and_their_deferred_seats_open_with_the_job(store):
+    """ECAD 에 기대는데 ECAD 가 없는 전문가도 범위에 든다(422 input_gap_m3 는 없다). 카드 대조 대상이면 범위 안의 보류(deferred ·
+    ecad_absent) 좌석이 잡을 만드는 트랜잭션에서 pending 으로 풀리고 감사 한 행(coverage.undefer · review_scope)이 남는다 — 풀지
+    않으면 원장 마감이 그 행을 건드리지 않아 종결 어휘(deferred)로 남는다(거짓 완결)."""
+    key = _target(store, agents=factories.agents())          # pcb-syn-0 은 입력 결손 1순위, pcb-syn-1 은 보류 좌석
+    order = planner.review_order(store, key)
+    assert {r["agent_key"] for r in order if r["input_gaps"]} == {"pcb-syn-0", "pcb-syn-1"}
+    assert _coverage(store, key, "pcb-syn-1")["status"] == "deferred"
+
+    job = _job(store, key)                                     # 범위를 빼면 로스터 전원이다
+    assert (job["experts_in_scope"], job["undeferred"]) == (len(order), 1)
+    seat = dict(store.query_one("SELECT status, reason, status_source, decided_by FROM rr_coverage WHERE target_key = ?"
+                                " AND agent_key = 'pcb-syn-1'", (key,)))
+    assert seat == {"status": "pending", "reason": None, "status_source": "human", "decided_by": OWNER}
+    assert {c["agent_key"] for c in _cells(store, key) if c["run_id"] == job["job_id"]} == {r["agent_key"] for r in order}
+    audits = _undefer_audits(store, key)
+    assert len(audits) == 1
+    audit = audits[0]
+    assert (audit["actor"], audit["actor_verified"], audit["channel"], audit["scope"], audit["reason"]) == (
+        OWNER, 1, "rest", "coverage", "review_scope")
+    assert json.loads(audit["after_json"])["agents"] == ["pcb-syn-1"] and json.loads(audit["after_json"])["n"] == 1
+    assert planner.check_invariants(store, key) == []
+
+
+def test_only_deferred_seats_in_the_scope_open_and_panel_targets_keep_theirs(store):
+    """범위 밖의 보류는 그대로다(감사도 없다). 패널 대상에 얹은 검토는 보류를 풀지 않는다 — 원장을 닫지 않는 길이고 패널 편성이
+    바뀐다(M2.md 5절 #8). 사람이 원하면 REST 로 푼다."""
+    key = _target(store, agents=factories.agents())
+    job = _job(store, key, scope={"domains": ["mech"]})
+    assert job["undeferred"] == 0 and _coverage(store, key, "pcb-syn-1")["status"] == "deferred"
+    assert _undefer_audits(store, key) == []
+
+    panels = _target(store, agents=factories.agents(), flow="panels", seed=7)
+    units.build_units(store, panels, built_by=OWNER, reason="패널 대상에 얹은 검토")
+    out = _job(store, panels, scope={"domains": ["pcb"]})
+    assert out["undeferred"] == 0 and _coverage(store, panels, "pcb-syn-1")["status"] == "deferred"
+
+
+def test_the_undefer_route_needs_a_reason_waits_for_live_jobs_and_says_the_level_does_not_drop(store):
+    """POST /targets/{key}/undefer — 사유 4~300자(422 reason_required), 도는 잡이 있으면 409 job_live, 바꿀 것이 없으면 200 changed:false.
+    푼 좌석과 감사 한 행이 남고, 응답은 저장된 레벨이 내려가지 않는다는 것과 영역 깊이를 싣는다."""
+    key = _target(store, agents=factories.agents(), flow="panels")
+    body = routes.UndeferBody(reason="회로 전문가도 패널에 앉힌다")
+    me = factories.ident(OWNER)
+    for reason in ("", "짧다", "x" * 301):
+        assert _refused(routes.post_undefer, key, routes.UndeferBody(reason=reason), ident=me).code == "reason_required"
+    units.build_units(store, key, built_by=OWNER, reason="패널 대상에 얹은 검토")
+    job = _job(store, key, scope={"domains": ["mech"]})
+    refused = _refused(routes.post_undefer, key, body, ident=me)
+    assert (refused.code, refused.http_status, refused.detail["jobs"][0]["id"]) == ("job_live", 409, job["job_id"])
+    runner.cancel_job(store, job["job_id"], by=OWNER)
+
+    out = routes.post_undefer(key, body, ident=me)
+    assert (out["undeferred"], out["agents"], out["agents_total"], out["changed"]) == (1, ["pcb-syn-1"], 1, True)
+    assert "내려가지 않는다" in out["note"] and "pcb" in out["depth"]
+    assert _coverage(store, key, "pcb-syn-1")["status"] == "pending"
+    again = routes.post_undefer(key, body, ident=me)
+    assert (again["undeferred"], again["changed"]) == (0, False)
+    audits = _undefer_audits(store, key)
+    assert [(a["channel"], a["reason"], a["actor_verified"]) for a in audits] == [("rest", body.reason, 1)]
+    delegated = identity.Identity(email=OWNER, display_name="합성", role="user", organization="qa", anonymous=False,
+                                  source="sso")
+    seeded = _target(store, agents=factories.agents(), flow="panels", seed=8)
+    routes.post_undefer(seeded, body, ident=delegated)
+    assert [(a["channel"], a["actor_verified"]) for a in _undefer_audits(store, seeded)] == [("mcp", 0)]
+
+
+def test_a_carried_revert_does_not_open_a_deferred_seat(store):
+    """보류는 undefer 한 문으로만 풀린다 — 이월 되돌리기(PUT coverage status=pending)는 보류 좌석에 409 다."""
+    key = _target(store, agents=factories.agents(), flow="panels")
+    refused = _refused(planner.revert_carried, store, key, "pcb-syn-1")
+    assert (refused.code, refused.http_status) == ("E100", 409)
+    assert _coverage(store, key, "pcb-syn-1")["status"] == "deferred"
 
 
 def test_a_target_whose_panel_awaits_repersist_refuses_a_review_job(store, monkeypatch):

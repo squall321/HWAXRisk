@@ -185,8 +185,10 @@ def test_every_metric_of_the_full_grid_equals_the_hand_count(store):
     key, job_id, fake, order = _full(store)
     res = review_quality.compute(store, key)
 
-    assert (res["policy_version"], res["model"], res["limits_rev"]) == ("rq-1", "fake-glm", "21349c51")
-    assert res["prompt_rev"] == "offcard=cr-offcard-1,sweep=cr-sweep-1,verdict=cr-verdict-1"
+    assert (res["policy_version"], res["model"], res["limits_rev"]) == (
+        "rq-1", "fake-glm", fre.load("limits_1m.json")["limits_rev"])           # 창 판은 계약 예제의 것이다
+    revs = fre.load("limits_1m.json")["prompt_rev"]                         # 판은 계약 예제의 것이다
+    assert res["prompt_rev"] == f"offcard={revs['offcard']},sweep={revs['sweep']},verdict={revs['verdict']}"
     assert res["revs"]["mixed"] is False
     # K — 엔진 limits 의 verdict.k(계약 예제 8)를 계획이 머리에 얼린 값. 묶음을 받아 계획을 짠 전문가마다 센다(R3B-10).
     planned = sum(1 for r in store.query("SELECT plan_json FROM rr_expert_reports WHERE target_key = ?", (key,))
@@ -199,7 +201,7 @@ def test_every_metric_of_the_full_grid_equals_the_hand_count(store):
         6, 5, 30, 30, 0, 0)
     assert grid["by_state"] == {"pending": 0, "running": 0, "reviewed": 29, "na_irrelevant": 0, "no_input": 0,
                                 "failed": 1, "skipped": 0}
-    assert grid["reviewed_by_basis"] == {"cards": 19, "background": 5, "role_only": 5}
+    assert grid["reviewed_by_basis"] == {"cards": 19, "background": 5, "role_only": 5, "noinput": 0}
     assert (grid["in_scope"]["job_id"], grid["in_scope"]["total"]) == (job_id, 30)
     assert (grid["out_of_scope_pending"], grid["failed_open"]) == (0, 1)
     assert grid["expert_states"]["by_state"] == {"planned": 0, "running": 0, "ready": 5, "partial": 1, "blocked": 0}
@@ -211,8 +213,8 @@ def test_every_metric_of_the_full_grid_equals_the_hand_count(store):
     assert cards["denominator"] == (4 * 11 + 5) * 5 == 245
     lines = {name: m["num"] for name, m in cards["lines"].items()}
     assert lines == {"judged": 114, "unjudged": 0, "background_full": 96, "background_title_only": 0,
-                     "background_unsent": 0, "no_body": 24, "failed": 11, "open": 0, "out_of_scope": 0, "filtered": 0,
-                     "no_input": 0}
+                     "background_unsent": 0, "no_body": 24, "noinput_reviewed": 0, "failed": 11, "open": 0,
+                     "out_of_scope": 0, "filtered": 0, "no_input": 0}
     assert {m["den"] for m in cards["lines"].values()} == {245} and cards["residual"] == 0
     assert cards["lines"]["judged"]["value"] == round(114 / 245, 6)
     assert (cards["experts_without_pack"], cards["cells_without_pack"]) == (0, 0)
@@ -289,7 +291,7 @@ def test_the_expert_scope_counts_one_expert_and_the_experts_add_up_to_the_target
     key, _job_id, _fake, _order = _full(store)
     res = review_quality.compute(store, key, agent_key=SEAL)
     assert (res["agent_key"], res["grid"]["experts"], res["grid"]["cells"]) == (SEAL, 1, 5)
-    assert res["grid"]["reviewed_by_basis"] == {"cards": 5, "background": 0, "role_only": 0}
+    assert res["grid"]["reviewed_by_basis"] == {"cards": 5, "background": 0, "role_only": 0, "noinput": 0}
     assert res["cards"]["denominator"] == 55
     assert {n: m["num"] for n, m in res["cards"]["lines"].items() if m["num"]} == {
         "judged": 30, "background_full": 20, "no_body": 5}
@@ -331,7 +333,7 @@ def test_every_metric_of_a_scoped_ledger_with_truncation_waits_and_small_samples
     # 격자 — 30칸 가운데 범위(SEAL × 단위 둘)만 검토, 나머지 28칸은 범위 밖 대기. SEAL 은 범위 밖 대기가 남아 일부 마감(P-04).
     grid = res["grid"]
     assert grid["by_state"]["reviewed"] == 2 and grid["by_state"]["pending"] == 28
-    assert grid["reviewed_by_basis"] == {"cards": 2, "background": 0, "role_only": 0}
+    assert grid["reviewed_by_basis"] == {"cards": 2, "background": 0, "role_only": 0, "noinput": 0}
     assert grid["in_scope"]["total"] == 2 and grid["in_scope"]["by_state"]["reviewed"] == 2
     assert grid["out_of_scope_pending"] == 28
     assert grid["expert_states"]["by_state"] == {"planned": 5, "running": 0, "ready": 0, "partial": 1, "blocked": 0}
@@ -465,7 +467,8 @@ def _assert_text_is_the_json(block: dict) -> None:
     st, basis = grid["by_state"], grid["reviewed_by_basis"]
     assert lines["[격자]"].startswith(f"[격자] 칸 {grid['cells']:,} = 전문가 {grid['experts']:,} × 단위 {grid['units']:,}"
                                      f" · 검토 {st['reviewed']:,}(카드 대조 {basis['cards']:,} · 배경 카드뿐"
-                                     f" {basis['background']:,} · 역할만 {basis['role_only']:,})")
+                                     f" {basis['background']:,} · 역할만 {basis['role_only']:,}"
+                                     f" · 입력 결손 호출 {basis['noinput']:,})")
     assert f" · 미완 {st['failed']:,}(처분 전 {grid['failed_open']:,}) " in lines["[격자]"]
     assert f" · 범위 밖 대기 {grid['out_of_scope_pending']:,} " in lines["[격자]"]
     assert lines["[카드]"].startswith(f"[카드] 분모 {cards['denominator']:,} = ")

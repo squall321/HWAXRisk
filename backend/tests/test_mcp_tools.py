@@ -219,7 +219,7 @@ def test_entry_tool_signatures():
                                        "scope"}
     assert required("risk_start_job") == {"target_key"}
     assert tools["risk_start_job"].inputSchema["properties"]["mode"]["default"] == "panels"
-    assert props("risk_job_action") == {"job_id", "action"}
+    assert props("risk_job_action") == {"job_id", "action", "reason", "filter"}    # 실패 셀 처분(재설계 M3 C3-4)
     assert props("risk_repersist_panel") == {"panel_id", "discard"} and required("risk_repersist_panel") == {"panel_id"}
 
 

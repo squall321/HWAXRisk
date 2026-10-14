@@ -607,8 +607,10 @@ def test_allowed_transitions_cover_every_status():
     for source, targets in planner.ALLOWED_TRANSITIONS.items():
         assert targets <= planner.ALL_STATUSES, source
     assert planner.TERMINAL_STATUSES & planner.OPEN_STATUSES == frozenset()
-    # 종결 상태에서 나가는 유일한 길은 carried → pending 이다.
-    assert {s for s in planner.TERMINAL_STATUSES if planner.ALLOWED_TRANSITIONS[s]} == {"carried"}
+    # 종결 상태에서 나가는 길은 carried → pending(이월 되돌리기)과 deferred → pending(보류 해제 — 재설계 M3 C3-2, planner.undefer
+    # 한 문으로만 연다) 둘이다.
+    assert {s for s in planner.TERMINAL_STATUSES if planner.ALLOWED_TRANSITIONS[s]} == {"carried", "deferred"}
+    assert planner.ALLOWED_TRANSITIONS["deferred"] == frozenset({"pending"})
 
 
 # ---------------------------------------------------------------- 승계(plan §6.8.2 네 조건)

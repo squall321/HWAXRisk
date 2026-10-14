@@ -1237,3 +1237,209 @@ git diff 를 직접 보고 역검토했다(자기 보고를 믿지 말라고 명
   업데이트 이력, 절차서의 이 꾸러미 몫. README 의 'MCP 도구 7종' 줄은 M1 전부터 낡아 있다(손대지 않았다).
 - **남긴 것** — C11 의 입력 결손·셀 다시 열기 행(셀 꾸러미 전이 함수가 합쳐진 뒤), C12 ⑤ 2차 주입(셀 꾸러미 대본 칸), C14 정확한
   모양 단언(엔진의 마지막 계약 예제를 받은 뒤), 최근 쟁점 패널 다섯의 `issue_yield_low` 안내.
+
+## 2026-10-14 — 재설계 M3 셀 확장(가지 `m3-cells`) 단계 A
+
+계획 정본은 포털 `docs/risk-review-redesign/M3.md`(3절 단계 A · 4절 계약 · 5절 #26~#62)와 `reference/m3-cells.md` 다.
+둘이 다르면 M3.md 가 이긴다. 이 절은 셀 꾸러미가 앱 리포에서 내린 결정만 적는다(번호 `M3C-n` — 형제 꾸러미의 `D` 번호와
+rebase 때 부딪치지 않게).
+
+### M3C-1. 시작 걸음(C3-0) — 닻은 그대로였고, 닻에 없던 사실이 둘 나왔다
+- **대조.** HEAD `3aea93b` 에서 m3-cells 2절의 닻을 문자열로 다시 찾았다. 앱 쪽은 전부 그대로다 — `create_review_job` 의
+  `input_gap_m3` 거절, 잡 `knobs = {dual_rate 1.0, sweep on, filter off}`, `CALLS_PER_CELL = (3, 14)`, `_Cell.dual_decks` 와
+  `_solo_set` 의 묶음 갈래, `prompt_key` 가 종류 판 전부를 잇는 것, `ALLOWED_TRANSITIONS["deferred"] = frozenset()`,
+  `review_rollup` 의 `nothing_reviewed`, `ir_builder.SEED_SYNONYMS`, `audit.binom_upper`, `review_verify.sample_score`.
+  엔진 HEAD `412edde` 도 그대로다(`UNSUPPORTED_KINDS = ("noinput", "cross")` · `_WITH_DELIB` 기본 `min(2, conc)` ·
+  `k = max(1, min(k_knob, k_out))`). 엔진 작업 트리에는 엔진 걸음을 짓는 다른 세션의 커밋 전 변경이 있다 — 셀 꾸러미는 엔진을
+  건드리지 않는다.
+- **닻에 없던 사실 ①.** 저장된 단위 줄에는 `change_kind` 가 없다 — `units` 빌드가 줄의 `_item` 을 끝에 떼어 낸다. 계약(M3.md
+  4.9)의 '`codes` 에 없으면 `change_kinds`' 는 줄이 그 칸을 실어 올 때만 듣는다. 그래서 변경 → 메커니즘 표가 생산자 코드를
+  `codes` 만으로 전부 풀게 짓고 시험이 그것을 지킨다(M3C-2).
+- **닻에 없던 사실 ②.** `rr_review_cells.sample_json` 에는 이미 M2 의 시도 표지(`attempt`)가 산다. C3-6·C3-7 이 표본·그림자·
+  `dual_neg` 칸을 더할 때 그 키를 덮지 않는다.
+- **하지 않은 것.** 'v5 는 재설계 M3 몫, 가지 `m3`, 블록 주인은 S3-1' 메모는 가지 `m3`(S3-0)가 쓴다 — 이 가지에도 두면 rebase 때
+  같은 자리에서 부딪친다.
+
+### M3C-2. 코드 신호(C3-5) — 변경 → 메커니즘 표는 코드만으로 닫히고, 택소노미와는 한 이음매로 닿는다
+- **표.** `app/assets/change-routing.v1.json`(`change-routing-1.0`) — `codes` 97줄(의미 이벤트 39 · 노드 6 · 엣지 6가족 × 4 ·
+  접촉 범위 · 파라메트릭 27), `change_kinds` 14(택소노미 축 전부, `consistency`·`none` 은 null), `roles` 10(정규명 전부), `always` 빔.
+  사람이 훑을 표라 줄마다 `note` 로 까닭을 단다.
+- **승인 칸 이름은 `review_status`(값 `draft`)다.** M3.md 4.1·4.9 는 이 표의 칸을 `status` 로 적었다. 배정표(`mech-owners.v1.json`)와
+  같은 이름 · 같은 값(`draft`·`approved`)·같은 `reviewed_by`·`reviewed_at` 으로 두어, 사용자가 셋을 한 번에 훑고 승인 커밋이 두
+  파일의 같은 칸을 고치게 했다. 승인 문은 둘 다 `approved` 일 때만 연다(#40) — `relevance.routing_approved`.
+- **생산자 코드는 `codes` 만으로 푼다**(M3C-1 ①). 시험이 둘을 본다 — 생산자 입력 전부(syn3·40·150 · 무작위 대본 다섯 ·
+  `cross.bridge_stale` · diff_pairs 6쌍)의 항목 코드, 그리고 표를 읽지 않고 센 코드 공간(diff 스키마의 열거 + `diff.PARAM_RULES`).
+  모르는 버킷(`<layer>.<rest>`)과 표에 없는 코드는 접두에 삼켜지지 않고 '모름' 이다. 접두는 `param.material.*` 하나다 — 생산자가 새
+  재질 칸을 내도 재질 교체로 읽는다(정확 일치가 먼저라 E·rho·sigy·nu·mid·keyword·match_basis 는 따로다).
+- **롤업도 메커니즘이 있다.** `asm.rollup_changed`·`param.rollup` 은 전역 단위만이 아니라 그 조립 단위의 묶음에 탄다(units W2-01).
+  `[]`('설계 변경 아님')로 두면 롤업 줄만 남은 묶음이 코드 신호로 전 영역 무관이 된다 — 위상 요약(접합·접촉·공차·질량)으로 둔다.
+- **이음매.** 택소노미 1.2 의 읽는 함수(`domains_for` · `mech_owners_meta` · `load_taxonomy`)는 `relevance._taxonomy()` 한 곳에서
+  `app.taxonomy` 모듈로 닿고, 모든 함수가 `tax=` 로 대역을 받는다. 가지 `m3` 전에는 시험이 `TaxonomyDouble`(m3-synthesis 3.4 초안
+  52행)을 준다. rebase 하면 시험의 `tax` 픽스처만 `taxonomy` 로 바꾸고 대역과 그 픽스처 파일을 지운다 — 운영 코드는 그대로다.
+  `domains_for([코드])` 가 빈 dict 면 그 메커니즘은 배정표에 행이 없는 것으로 읽어 '모름'(`mech:<코드>`)이다.
+- **역할.** 이름을 정규화한 토큰의 **어느 자리에서든** 1~3토큰 창이 정규명이나 그 동의어면 그 역할이다(`ir_builder.name_norm_canon`
+  은 머리 토큰만 바꾼다 — `rear_cover` 의 `cover` 를 놓친다). 역할은 영역을 더하기만 한다. 씨앗 표에서 하나만 바꿨다 — `shield_can`
+  에 `rel` 을 더했다(EMI 의 소유가 rf·rel·pcb 다).
+- **초안이 넓다.** 배정표 초안과 곱하면 `mechanical.drop_stress`(소유 sim·mech, 관련 rel·disp·cam·xd·pcb)가 거의 모든 변경 줄에
+  있어 그 일곱 영역은 늘 '관련' 이다. syn40·syn150 의 묶음·경계 단위에서 코드 신호가 '무관' 인 영역은 mem·soc·std·sh·passive
+  쪽뿐이었다. 거르기의 절감은 이 표와 배정표를 사람이 훑는 데 달렸다(M3.md 8절 첫 줄) — 단계 A 끝에 이 수를 표와 함께 건넨다.
+
+### M3C-3. 경로 결정표(`relevance.route_decision`) — 처음 맞는 줄, 그리고 '거를 수 있던 셀' 과 '그림자' 를 가른다
+- **모양.** 입력은 셀 하나의 사실(잡의 거르기 · 1순위 · 단위 종류 · 카드 0장 · 입력 결손과 결측 블록 판 · 넓힘 · 대상 끔 · 넘김 ·
+  1순위 대기)과 두 신호(`code_for` · `sweep_signal`), 표본 열쇠(T, u, a)다. 반환은 `{decision, route, route_forced, would_filter,
+  shadow, route_json}` — C3-6 의 `_classify` 가 그대로 원장에 쓴다. `route_json` 은 m3-cells 3.2 의 모양에 `reason` 칸만 더했다.
+- **규칙 이름과 원장 토큰.** 강제 줄 아홉(1·2·3·4·5·6a 넓힘·6b 대상 끔·7·8)의 이름이 `route_json.rule`·`forced_all` 이고
+  `route_forced` 는 3.1 의 어휘다. 6b(대상 전체 끔)는 규칙 이름 `target_off` · 토큰 `filter_off` 다 — 1 번(잡의 거르기 끔)과 토큰이
+  같아 원장에서 둘을 가르는 것은 `rule` 이다. 강제 줄이 여럿이면 `forced_all` 에 순서대로 다 적는다.
+- **`would_filter` 와 `shadow`.** `would_filter` 는 9 번까지 내려와 두 신호가 다 무관이었던 셀(거름 + 표본 — 완결 몫 `filtered.
+  would_filter` 가 이 수다), `shadow` 는 거르지 않았지만 거르기가 닫았을 셀이다 — 1순위 셀(1·2·8 번을 빼고 다시 본다: 1순위
+  대기는 그 사람 자신의 몫이다)과 대상 그림자 모드(`shadow`)의 셀. 1순위 셀은 다른 강제 사유(전역 단위 등)가 있으면 그림자가
+  아니다 — 1순위가 아니었어도 거르지 않았을 셀이다.
+- **잡 거르기 `off` 면 아무것도 적지 않는다.** 결정은 검토로 내지만 `_classify` 는 원장에 `route*`·그림자를 쓰지 않는다 — M2 잡의
+  원장이 바이트로 같아야 한다(m3-cells C3-6 수용 기준).
+- **입력 결손 전문가.** 검토로 가면 `route='noinput'`(그 셀은 `verdict`·`offcard` 대신 `noinput` 한 번이다), 표본이면 `audit`,
+  거르면 `filtered` 다. 결측 블록 판은 `sweep_gap_aware(요청에 extra.missing 을 실었나, 답의 meta.prompt_rev.sweep)` — 둘 다여야
+  하고 모르는 판 표기는 아니다.
+- **훑기 신호.** `k` 가 달린 `no` 는 '관련' 이다(엔진 `_check_u` 가 이미 maybe 로 올리지만 회계가 묶음을 합친 뒤에도 그대로 본다).
+  `stamp`·`error`·답 없음·훑기 실패는 '모름' — 사유를 `reason` 에 남긴다.
+
+### M3C-4. 놓침 판정(`review_verify.audit_outcome`) — 표의 순서를 그대로 쓰고, 표가 비운 칸 하나는 안전한 쪽으로 메웠다
+- 결과 넷과 순서는 m3-cells 3.4 그대로다 — `risk_miss` → `relevance_miss` → `undetermined` → `kept`, 처음 맞는 줄. 실효 판정은
+  `effective_rows` 의 것을 받는다(변형이 걸렸다가 풀린 카드는 거기서 이미 `undetermined` · `split=1` 이고 여기서 `risk_miss` 다).
+- **표가 비운 칸 — 심각도가 없는 카드 밖 리스크.** 표는 '리스크 · 중대·치명 → risk_miss', '경미·개선 → relevance_miss' 만 적었다.
+  엔진은 모르는 심각도를 빈 문자열로 내린다(`_enum(row, "sev", SEVS, "")`). 그 줄을 `risk_miss` 로 둔다 — 경미가 아닌 리스크는
+  전부다. 놓침을 넓히는 쪽이 안전하고(넓힘은 비용만 든다), X1-13 의 '모르는 것을 깨끗한 쪽에 넣지 않는다' 와 같은 방향이다.
+  방향이 빈 줄은 앱 회계의 기본값대로 리스크다.
+- **표의 순서가 정하는 칸 — `applies='yes'` 이면서 판정 보류인 행.** 표의 순서상 `relevance_miss` 다(보류보다 앞 줄). 보수 상한
+  `(risk_miss + undetermined) / 표본` 에는 들지 않는다. 표를 그대로 따랐고 시험이 그 순서를 고정한다 — 바꾸려면 표부터 고친다.
+
+### M3C-5. 걸린 것만 이중 판정(`review_verify.dual_plan_flagged` · `dual_neg_state`) — 보정과 무작위 뒤집기를 한 계획 함수에
+- **한 함수가 묶음 하나의 rev 를 정한다.** m3-cells C3-9 는 `dual_plan_flagged(fwd_request, flagged_aliases)` 와 이유 넷(`dual` ·
+  `single_flag` · `none_flagged` · `same_body`)을 적었다. M3.md #31·#32 가 1순위 보정(묶음 전체)과 무작위 뒤집기를 더해, 인자
+  `calibrate`·`neg_on`·`neg_pct`·`sample_key` 와 이유 둘(`calib` · `dual_neg`)을 더했다. 처음 맞는 줄 — 보정 → 걸림 둘 이상 →
+  걸림 하나 → (걸림 없음이고 켜졌으면) 무작위 → 걸림 없음. 걸린 묶음은 무작위 길을 타지 않는다. 묶음 전체 rev 가 fwd 와 같은
+  본문(카드 1장)이면 `same_body` 로 단독에 보낸다(`dual_plan` 과 같다). `dual='all'`(M2)은 지금 `dual_plan` 그대로다.
+- **걸림 하나면 `solo` 에 그 별칭을 싣는다.** 단독 재질의가 그 카드의 두 번째 판정이라는 것을 계획에 드러낸다(`_solo_set` 의 '실효가
+  걸림' 갈래도 같은 카드를 고른다 — 겹쳐도 한 번이다). 반환 `aliases` 는 rev 에 실은 별칭이고 셀의 `dual_aliases` 가 된다.
+- **걸린 별칭만 실은 rev 본문.** 카드는 fwd 순서(엔진이 뒤집는다), 묶음에서 빠진 카드는 제목 목록(digest)으로 내려 팩 순서로
+  세운다. 팩 순서는 별칭 숫자 순서다(엔진 `assign_aliases` 가 팩 순서로 K01… 를 매긴다). 시험이 그 본문을
+  `engine_client.run_body(cards=걸린 별칭, digest=팩의 나머지)` 와 견준다. 엔진 검증기(형제 리포 서브프로세스)로 422 없이 받는지는
+  C3-9(루프 배선)에서 본다 — 지금 엔진 작업 트리는 다른 세션이 고치는 중이다.
+- **무작위 뒤집기의 켜짐(#32).** `dual_neg_state(1순위 셀 판정 행, tier_a_closed, already_on)` — 셀 × 카드마다 fwd 가 OK·na 이고
+  rev 행이 있는 것이 분모, 그 가운데 rev 가 FAIL·WARNING 인 것이 분자, 비율이 5% 를 **넘으면**(`>`) 켠다. 1순위 셀이 다 종결되기
+  전이거나 잴 카드가 0 이면 '미측정' 이다. 한 번 켜지면(그 대상의 셀에 `sample_json.dual_neg.on` 이 섰으면) 꺼지지 않는다 — 1순위
+  셀이 사람의 다시로 다시 돌아 비율이 내려가도 그대로다. 같은 카드라도 단위가 다르면 따로 센다.
+
+### M3C-6. 변이 검사와 rebase 할 일 — 단계 A 끝
+- **변이.** `git archive` 사본 한 곳에서 66개(결정표 24 · 훑기 신호 5 · 코드 신호 10 · 놓침 판정 9 · 이중 판정 계획 12 · 켜짐 6)를
+  하나씩 넣고 그 파일의 시험을 돌렸다. 단언 실패로 붉어진 것만 죽음으로 셌다(junit 의 실패 메시지가 `AssertionError`·`assert` 로
+  시작하는 것). 첫 판은 62 죽음 · 살아남음 2 · 단언 아닌 실패 1 · 분류 실수 1 이었다 — 살아남은 둘은 죽은 조건(1순위 그림자의
+  '잡 거르기 끔' — 강제 줄 목록이 이미 막는다, 지웠다)과 시험 없는 규칙(가장 긴 접두 — 실제 표에 접두가 하나뿐이다, 시험을
+  더했다), 단언 아닌 실패는 보정 비율의 `KeyError`(분모 조건을 빼면 틀린 분모가 단언에 걸리게 `.get` 으로 읽는다)였다. 고친 뒤
+  둘째 판 66/66 이 단언으로 죽었고 사본은 HEAD 와 바이트로 같다.
+- **가지 `m3` 로 rebase 하면.** ① `tests/test_relevance.py` 의 `tax` · `approved_tax` 픽스처가 `TaxonomyDouble` 대신 `app.taxonomy`
+  를 쓰게 한다(`approved_tax` 는 `mech-owners.v1.json` 이 draft 인 동안 `review_status` 만 바꾼 사본이 필요하다 — `mech_owners_meta`
+  를 덮는 얇은 감싸개). ② `TaxonomyDouble` 과 `tests/fixtures/relevance/mech_owners_draft.json` 을 지운다. ③ `taxonomy.VOCAB_ASSETS`
+  에 `change-routing` 한 줄(M3.md 3.2 — S3-2 가 먼저). ④ 시험의 `52`(활성 메커니즘 수) · `tax-1.2` 가 진짜 표에서도 맞는지 본다 —
+  배정표가 초안과 달라졌으면 XU5 의 '33종 전부 어느 영역엔가 닿는다' 와 '15영역이 다 닿는다' 가 그 차이를 잡는다.
+  운영 코드(`relevance.py`)는 고치지 않는다 — 이음매가 `_taxonomy()` 하나다.
+- **전체 시험(공유 잠금 아래 한 번).** 2,540개(main 의 2,440 + 이 가지 100) 가운데 붉은 것은 하나다 —
+  `test_card_review_request_contract.py::test_run_bodies_built_from_real_units_and_packs_pass_the_engines_validator`. 형제 엔진의
+  HEAD 가 `8e1e3d4`(엔진 꾸러미 E3 진행 중)로 올라 검증기가 `limits["noinput"]["items_max"]` 를 읽는데, 그 시험이 넘기는 엔진
+  계약 예제 `limits_1m.json` 에는 아직 `noinput` 칸이 없다(E3-10 이 계약 예제를 다시 뜬다). main `3aea93b` 를 같은 엔진에 대도
+  똑같이 붉고, 이 가지를 기준 엔진 `412edde`(git archive 사본)에 대면 초록이다 — 이 가지 탓이 아니다. ruff 는 깨끗하다.
+
+### M3C-7. 가지 `m3` 위로 rebase — 이음매 한 곳은 그대로 맞았다
+- `m3`(`a9dfbde` — v5 블록 `f6731c2` · 택소노미 1.2 `5320f33` · 배정표 `793b685` · #25 앱 쪽 `48b1fe5`) 위로 옮겼다. 부딪친 곳은
+  이 파일 하나(가지 `m3` 의 D38 과 이 절이 같은 끝에 붙었다 — 둘 다 남겼다)다.
+- `taxonomy.domains_for` 는 dict 를 넓힌 `DomainRoles`(승인 여부 · 표에 없는 코드 · `signal(domain)`)를 돌려준다. 코드 신호는
+  메커니즘마다 `domains_for([코드])` 의 영역만 읽고 승인 문은 두 표를 함께 스스로 본다 — 표에 없는 코드는 빈 결과라 '모름' 이다.
+  `relevance.py` 는 고치지 않았다.
+- 시험은 진짜 택소노미 1.2 · 배정표 초안 52행 위에서 돈다. 배정표가 draft 인 동안 '문이 열렸을 때' 는 승인 칸만 바꿔 보이는
+  `GateOf` 로 본다. 대역과 그 픽스처 파일은 지웠다. `VOCAB_ASSETS` 의 표시 줄에 `change-routing` 을 넣었다(표시 줄의 '승인 문 status'
+  를 이 표의 칸 이름 `review_status` 로 바로잡았다 — M3C-2). 승인된 뒤에도 표 모양 시험이 건너뛰지 않게 '누가 언제 승인했나' 를 본다.
+
+## 2026-10-14 — 재설계 M3 셀 확장(가지 `m3-cells`) 단계 C 첫 묶음(C3-2 · C3-4 · C3-6 · C3-3 · C3-9)
+
+### M3C-8. 전원 포함 · 보류 해제(C3-2)
+- 422 `input_gap_m3` 를 없앴다. 카드 대조 대상(`flow='cells'`)이면 `create_review_job` 이 잡을 세우는 같은 트랜잭션에서 범위 안
+  `deferred`(`ecad_absent`) 좌석을 `pending` 으로 풀고(`planner.undefer`) 감사 한 행(`coverage.undefer`)을 남긴다 — 풀지 않으면 원장
+  마감이 그 행을 건드리지 않아 종결 어휘로 남는다(거짓 완결). 패널 대상은 풀지 않고 사람이 `POST /targets/{key}/undefer` 로 푼다.
+- 보류를 여는 문은 그 하나다 — 이월 되돌리기(`revert_carried`)는 보류 좌석에 409 다. `routes._audit` 는 감사 id 를 돌려주고
+  `actor_verified` 를 받는다(MCP 길은 0).
+- `review_ops` 에 `input_gap_m3` 별칭은 남기지 않았다(m3-cells 3.12 의 권고와 다르다) — 그 코드를 내는 곳이 없어 별칭은 죽은 줄이다.
+
+### M3C-9. 실패 셀 처분(C3-4)
+- 다시 연 셀은 시도 수가 0 으로 돌아가므로 앞의 같은 시도에서 받은 답을 다시 쓰면 같은 실패를 엔진을 부르지 않고 되풀이한다 —
+  요청 열쇠에 `reopened_n`(0 보다 클 때만)을 넣었다. 한 번도 다시 열리지 않은 셀(M2 원장)의 열쇠는 그대로다.
+- 처분과 잡 세우기를 바깥 트랜잭션 하나로 묶었다 — 잡이 동의·자격으로 거절되면 처분도 되돌아간다(`store.tx()` 는 겹쳐 들어간다).
+- 묶음을 끝내 못 받은 전문가(pack error)도 사람이 셀을 넘기면 마감된다(`FINALIZE_PACK_SQL` 에 error, 마감은 묶음 없이 보고서를 짓는다).
+- 롤업은 m3-cells 3.9 의 아홉 줄. `failed_open` 은 failed 셀 전부다(넘긴 셀은 skipped 라 따로 셀 필요가 없다).
+
+### M3C-10. 엔진 계약 예제 사본 두 번(734bc38 · f2281e3)
+- 두 번 다 제 커밋으로 다시 떴다(`ce810ab` · `b41742b`). 가짜 엔진은 요청 모양(`extra.missing` · `extra.search` · `summary` ·
+  run 의 `expect.limits_rev_kind`)과 결과 모양(`checks.mech` · `meta.limits_rev_kind` · `meta.clipped` · `quality.dup_conflict` ·
+  `flipped` · noinput q1 의 `checks.why` · q1·q2 를 함께 세는 `quality.ok`)을 예제에 맞췄다.
+- 창 부족 판정은 `cell_kinds` 만 본다 — 요약만 못 도는 박스는 셀 일을 멈추지 않는다.
+- 엔진 HEAD 가 계약 예제보다 앞서 있던 동안(예제 재생성 전) 요청 계약 시험은 엔진 기준판의 `git archive` 사본(`HWAX_AGENT_SERVER_REPO`)
+  으로 확인했다.
+
+### M3C-11. 거르기 분류(C3-6)
+- 잡 거르기 `off`(M2 잡 포함)면 아무것도 쓰지 않는다 — 결정표의 1번 줄을 원장에 적지 않는 대신 M2 원장과 바이트가 같다.
+- 분류는 셀마다 한 번이다 — `route` 가 선 셀(재기동·인프라 실패 뒤)과 사람이 다시 연 셀(`human_retry`)은 다시 분류하지 않는다.
+  입력이 바뀌면(`start_cell` 이 `route` 를 비운다) 다시 분류한다. 시험이 '1순위가 그 사이 닫혀도 다시 거르지 않는다' 를 본다.
+- 1순위 대기(8번 줄)는 대상의 1순위 셀 전부(잡 범위와 상관없이)다 — 1순위를 범위에서 뺀 잡은 그래서 거르지 않는다.
+- 넘김(7번)은 다른 머리의 `sweep_json.handoffs` 를 SQLite `json_each` 로 읽는다(359명 × 세션마다 파이썬 파싱을 피한다).
+- 승인 문은 잡을 만들 때 얼린다(`routing_approved`). 표가 아직 초안이라 운영에서는 분류만 적고 아무것도 걸러지지 않는다. 손잡이
+  기본은 `on` 이다(M3.md 4.5).
+- 택소노미에 없는 로스터 영역의 코드 신호는 `unknown`(`domain_unknown`) — 거르는 쪽에 서지 않는다.
+
+### M3C-12. 셀 지문 · 계획 · 훑기 열쇠 · 기대 판은 그 셀이 부르는 종류만(#37 · RB3-6)
+- `prompt_key(lim, kinds)` · `limits_key(lim, kinds)` — 카드 전문가 sweep·verdict·offcard, 입력 결손 전문가 sweep·noinput.
+  종류별 판이 없는 엔진(M2)은 전역 `limits_rev` 그대로라 M2 원장의 지문이 바뀌지 않는다.
+- run 의 `expect` 는 `{prompt_rev, limits_rev_kind}`, plan 은 전역 `limits_rev` 그대로(엔진이 plan 의 `limits_rev_kind` 를 422).
+  `_limits_moved` 는 그 종류의 판만 본다 — 다른 종류에만 닿은 변경은 rev_mismatch 가 되지 않는다.
+
+### M3C-13. 입력 결손 호출(C3-3)
+- 엔진의 `limits.kinds` 에 noinput 이 없으면 계획 전에 잡을 `agent_outdated` 로 멈춘다(차감 없음) — `unsupported_kind` 를 받아
+  `contract`(자동 재개 없음)로 서는 길을 피한다.
+- 요청의 digest 는 전 카드 제목(엔진 예제 `req_noinput` 과 같다). 정산표 네 줄은 `review_verify.noinput_outcome` 이 정하고, q1·q2
+  가운데 한 줄도 없으면 결과가 없어 내용 탓 실패(`noinput_incomplete`)다. 마지막 답이 잘렸으면 `output_truncated`.
+- basis `noinput` 을 `CELL_BASES` 에 넣고 불변식(G4)이 그 셀을 따로 본다(계획 카드 수 NULL · 결과 있음). 판정 표에는 쓰지 않는다.
+- finding — q1 yes 줄. `judgement_claimed` 는 WARNING 으로 남긴다(q1 은 판정이 아니라 '영향 있음' 주장이라 hold 정책의 상한으로
+  적었다 — 수용 기준 'judgement_claimed 가 남는다' 의 해석).
+- 보고서에 `input_gap` 절(결손 · 실마리 · 단위마다 결과 · 영향 · 확인할 것)과 필요한 정보의 q2. `REPORT_REV` 는 올리지 않았다 —
+  C3-8 이 한 번만 올린다(M3.md 3.2).
+- 영역 실마리(`input-gap.v1.json`)는 입력 결손 전문가의 ecad 줄에만 붙는다 — 다른 전문가의 요청 본문은 바뀌지 않는다.
+- 품질 문면의 '훑기 무관 — 분류에 쓰지 않음' 은 거르기가 켜진 대상에서는 맞지 않는 말이다 — 거르기 칸을 다는 C3-8 이 고친다.
+
+### M3C-14. 걸린 것만 이중 판정(C3-9)
+- 시험대(review_rig)의 기본은 `all`(M2 동작)이다 — 호출 차례·수를 세는 M2 시험이 그 위에 서 있다. 운영 기본은 `flagged`.
+- 단독 갈래는 rev 를 실은 별칭(`dual_aliases`)으로 정한다 — 묶음 단위면 안 걸린 카드가 단독으로 샌다.
+- 무작위 뒤집기는 원장에서 유도한다(보정 모집단 = 대상의 1순위 셀 판정 행, 1순위가 다 닫혔나, 이미 켜진 셀이 있나). 셀마다
+  `sample_json.dual_neg{on, picked}`(1순위 밖 · 묶음이 있는 셀만).
+- RB3-1 — 판정 행의 `checks.dup_conflict` · `flipped_from` 은 그 카드를 걸린 것처럼 다룬다(rev 또는 단독). 셀 단위가 아니라 표지가
+  선 행의 카드 단위다(엔진의 `quality.dup_conflict`·`flipped` 는 그 행 수의 합이다). `flipped_from` 은 판정 표에 칸이 없어
+  `checks_json` 사본에 둔다.
+- `flips.order` 의 모집단을 보정용으로 바꾸고 `flips.flagged_pos_neg` 를 더하는 일은 품질 기준판 rq-2 와 함께 C3-8 로 넘겼다.
+
+### M3C-15. RB3 의 보이기
+- ctx_too_small 보류 글이 까닭(window · output_cap · output_too_large)과 고칠 손잡이를 싣는다.
+- 품질 수치에 엔진이 알린 부딪침(`flips.engine_conflict`)과 몫에서 끊은 입력(`truncation.clipped` — 호출 원장 앱 회계에 남긴다)을
+  더했다. 전문가 보고서의 품질 절이 같은 문면이다.
+
+### M3C-16. 변이 검사 — 단계 C 첫 묶음
+- `git archive` 사본 한 곳(`scratchpad/celm3-<pid>-b`)에서 63개(C3-2 3 · C3-4 4 · C3-6 13 · #37·RB3-6 5 · RB3-14 2 · 품질 2 · C3-3
+  20 · C3-9 14)를 하나씩 넣고 그 규칙의 시험 파일을 돌렸다. 단언 실패로 붉어진 것만 죽음으로 셌다.
+- 첫 판 48 죽음 · 살아남음 9 · 단언 아닌 실패 6. 살아남은 것은 시험이 그 갈래를 밟지 않던 곳이었다 — 다시 연 셀이 앞 실행의 ok
+  답을 다시 쓰는지(그때 시험은 오류 프레임이라 캐시가 없었다), 훑기 묶음 하나만 실패한 전문가, 결손이 아닌 전문가의 실마리, 까닭만인
+  q2 의 자료 칸, 보충이 다 받은 입력 결손 답, 1순위가 일부만 닫힌 대상의 무작위 뒤집기, 걸린 별칭만 실은 rev 의 호출 원장, 그리고
+  보류 해제가 전이표를 보지 않던 것(`undefer` 에 `_guard` 를 더했다). 단언 아닌 실패는 거절·기동 실패를 못 낸 경우(`pytest.raises`)와
+  표지가 빠진 경우(`KeyError`)라 시험이 단언으로 떨어지게 고쳤다.
+- 고친 뒤 둘째 판 61/63, 남은 둘 가운데 하나(요약 판만 오른 뒤 재기동 없이 도는 세션의 기대 판)는 시험을 넓혀 죽였다 — 62/63.
+  마지막 하나(훑기 열쇠를 전역 판으로)는 같은 값의 변이다 — 다시 훑어도 머리 호출의 요청 열쇠가 종류별 판이라 원장의 답을 그대로
+  다시 읽어 엔진 호출도 결과도 달라지지 않는다.
+- **전체 시험(공유 잠금 아래 한 번).** 2,666 통과 · xfail 6 · 실패 0(엔진 HEAD `3f23572` · 계약 예제 `f2281e3` 사본). ruff 깨끗하다.
+- **가지 `m3` 와 합칠 때.** 이 가지를 세운 뒤 `m3` 가 21커밋 나아갔다(쟁점·종합 꾸러미). 3방향 비교로 글자가 부딪치는 곳은 이
+  파일(`context-notes.md` — 형제의 D39 와 이 절이 같은 끝)뿐이다 — 둘 다 남긴다. 두 가지가 함께 고친 파일은 config · engine_client ·
+  mcp_server · planner · routes · test_mcp_tools 다.

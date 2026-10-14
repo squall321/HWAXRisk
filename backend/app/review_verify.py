@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import re
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any
@@ -209,11 +210,13 @@ def accept_rows(result: Mapping[str, Any], *, kind: str, sent_aliases: Sequence[
     빠진 카드가 된다. `missing` 은 앱이 다시 센 것이다(엔진의 `missing` 은 `extras.engine_missing` 에 둔다). solo 의 `c` 줄은
     같은 별칭의 `conds_json` 으로 간다.
     offcard — `f` 행을 카드 밖 후보로, `m`·`h`·`need`·`none`·`more` 는 `extras` 로. sweep — `u` 행을 단위 선별로(빠진 단위가
-    `missing`, 어느 줄에도 없는 카드가 `extras.cards_unseen`).
+    `missing`, 어느 줄에도 없는 카드가 `extras.cards_unseen`). noinput — `q1`(지금 변경으로 말할 수 있는 영향)·`q2`(결측 입력이
+    오면 확인할 것) 행을 그대로 `t` 를 달아(재설계 M3 C3-3 · m3-cells 3.6), `more` 는 `extras` 로. 빠진 줄 종류(q1·q2)가
+    `missing` 이다.
     """
-    if kind not in ("verdict", "offcard", "sweep"):
+    if kind not in ("verdict", "offcard", "sweep", "noinput"):
         raise ValueError(f"모르는 호출 종류 — {kind!r}")
-    if kind in ("verdict", "offcard") and unit_refs is None:
+    if kind in ("verdict", "offcard", "noinput") and unit_refs is None:
         raise ValueError(f"{kind} 의 참조 대조에는 unit_refs(그 단위에 실은 참조)가 필요하다")
     if kind == "sweep" and page_units is None:
         raise ValueError("sweep 의 회계에는 page_units(그 쪽에 실은 단위)가 필요하다")
@@ -227,6 +230,8 @@ def accept_rows(result: Mapping[str, Any], *, kind: str, sent_aliases: Sequence[
         return _accept_verdict(raw_rows, sent, cards, frozenset(unit_refs or ()), variant, common)
     if kind == "offcard":
         return _accept_offcard(raw_rows, sent, cards, frozenset(unit_refs or ()), common)
+    if kind == "noinput":
+        return _accept_noinput(raw_rows, sent, cards, frozenset(unit_refs or ()), common)
     quality = result.get("quality") if isinstance(result, Mapping) and isinstance(result.get("quality"), Mapping) else {}
     return _accept_sweep(raw_rows, sent, list(dict.fromkeys(str(u) for u in page_units or ())), common,
                          stamp=bool(quality.get("stamp")))
@@ -291,6 +296,9 @@ def _accept_verdict(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping
             _drop(dropped, "inconsistent", raw)
             continue
         checks = raw.get("checks") if isinstance(raw.get("checks"), Mapping) else {}
+        if raw.get("flipped_from"):
+            # 엔진 보충이 앞 시도의 판정을 갈아 끼웠다(RB3-1 — 행의 flipped_from). 판정 표에 그 칸이 없어 checks 사본에 남긴다.
+            checks = {**checks, "flipped_from": raw.get("flipped_from")}
         lines = as_list(raw.get("l"))
         refs = as_list(raw.get("refs"))
         quote = _quote_columns(raw.get("cq"), card, checks.get("quote"))
@@ -369,6 +377,86 @@ def _accept_offcard(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping
         else:
             _drop(dropped, "foreign_row", raw)
     return {"rows": findings, "missing": [], "dropped": dropped, "extras": out}
+
+
+IMPACTS = APPLIES                   # q1 의 impact — 영향 있음 · 없음 · 모름
+
+
+def _accept_noinput(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping[str, Any]], unit_refs: frozenset,
+                    extras: dict) -> dict:
+    """입력 결손 호출의 회계 — 카드(`k`)는 실은 별칭이어야 하고(밖이면 버린다 — `alias_outside_call`), 참조가 남의 단위를 가리키면
+    버린다(`foreign_ref` — Q8). impact 가 열거 밖이면 버리고(`bad_enum`), 영향 있음(yes)인데 제목이 없으면 finding 이 될 수 없어
+    버린다(`no_title`). 카드 인용(`cq`)은 그 카드의 얼린 원문으로 다시 대조한다(`quote_ok` — verdict 와 같은 규칙). 목록 칸은 문자열
+    하나도 한 항목으로 읽는다(D-25)."""
+    sent_set = set(sent)
+    dropped: list[dict] = []
+    rows: list[dict] = []
+    out = dict(extras, more=None)
+    for raw in raw_rows:
+        if not isinstance(raw, Mapping):
+            _drop(dropped, "not_object", raw)
+            continue
+        t = raw.get("t")
+        if t == "more":
+            out["more"] = _text(raw.get("more")) or None
+            continue
+        if t not in ("q1", "q2"):
+            _drop(dropped, "foreign_row", raw)
+            continue
+        alias = _text(raw.get("k")).strip()
+        if alias and alias not in sent_set:
+            _drop(dropped, "alias_outside_call", raw)
+            continue
+        refs = as_list(raw.get("refs"))
+        if any(ref not in unit_refs for ref in refs):
+            _drop(dropped, "foreign_ref", raw)
+            continue
+        checks = raw.get("checks") if isinstance(raw.get("checks"), Mapping) else {}
+        card = cards.get(alias) if alias else None
+        base = {"t": t, "k": alias or None, "record_id": str(card["record_id"]) if card is not None else None,
+                "l": as_list(raw.get("l")), "refs": refs, "why": _text(raw.get("why")) or None, "checks": dict(checks)}
+        if t == "q2":
+            rows.append({**base, "item": _text(raw.get("item")).strip(), "needs": _text(raw.get("needs")) or None,
+                         "refs_ok": refs_verdict(refs, unit_refs, required=False)})
+            continue
+        impact = _text(raw.get("impact"))
+        if impact not in IMPACTS:
+            _drop(dropped, "bad_enum", raw)
+            continue
+        title = _text(raw.get("title")).strip()
+        if impact == "yes" and not title:
+            _drop(dropped, "no_title", raw)
+            continue
+        quote = (_quote_columns(raw.get("cq"), card, checks.get("quote")) if card is not None
+                 else {"quote_ok": None, "check_disagree": 0, "section_id": None})
+        rows.append({**base, "impact": impact, "title": title, "mech": _text(raw.get("mech")) or None,
+                     "mech_free": _text(raw.get("mech_free")) or None, "path": _text(raw.get("path")) or None,
+                     "cq": _text(raw.get("cq")) or None, "sev": _text(raw.get("sev")) or None,
+                     "quote_ok": quote["quote_ok"], "check_disagree": quote["check_disagree"],
+                     "section_id": quote["section_id"],
+                     "grade": card_grade(card) if card is not None and quote["quote_ok"] == 1 else None,
+                     "refs_ok": refs_verdict(refs, unit_refs, required=impact == "yes")})
+    have = {r["t"] for r in rows}
+    return {"rows": rows, "missing": [t for t in ("q1", "q2") if t not in have], "dropped": dropped, "extras": out}
+
+
+def noinput_outcome(q1: Sequence[Mapping[str, Any]], q2: Sequence[Mapping[str, Any]]) -> str | None:
+    """입력 결손 셀을 닫는 결과(m3-cells 3.6 의 정산표) — 처음 맞는 줄이다.
+
+    | q1 | q2 | 결과 | 셀 |
+    | 영향 있음(yes)이 하나라도 | 무엇이든 | impact | reviewed(basis noinput) |
+    | yes 없고 모름(unknown) 있음 | 무엇이든 | unknown | no_input |
+    | 전부 없음(no) | 확인할 항목 ≥1 | request | no_input |
+    | 전부 없음(no) | 항목 0(까닭만) | none | reviewed(basis noinput) |
+    q1 이나 q2 가 한 줄도 없으면 None 이다(답이 모자라다 — 정산이 내용 탓 실패로 센다)."""
+    if not q1 or not q2:
+        return None
+    impacts = {str(r.get("impact")) for r in q1}
+    if "yes" in impacts:
+        return "impact"
+    if "unknown" in impacts:
+        return "unknown"
+    return "request" if any(_text(r.get("item")).strip() for r in q2) else "none"
 
 
 def _accept_sweep(raw_rows: list, sent: list[str], page_units: list[str], extras: dict, *, stamp: bool) -> dict:
@@ -562,3 +650,140 @@ def dual_plan(fwd_request: Mapping[str, Any], *, dual_rate: float = 1.0, sample_
         return {"rev": None, "solo": [str(c.get("alias")) for c in fwd_request.get("cards") or ()],
                 "reason": "same_body"}
     return {"rev": rev, "solo": [], "reason": "dual"}
+
+
+# ---------------------------------------------------------------- 거른 셀의 놓침(M3 C3-7 — X1-13 · m3-cells 3.4)
+AUDIT_OUTCOMES: tuple[str, ...] = ("risk_miss", "relevance_miss", "undetermined", "kept")
+SEV_MINOR = "경미"
+
+
+def _offcard_risk(row: Mapping[str, Any]) -> bool:
+    """카드 밖 줄이 리스크 놓침인가 — 방향이 리스크이고 심각도가 경미가 아니다. 중대·치명이 그렇고, 심각도가 비었거나 모르는 값인
+    리스크도 그쪽에 둔다(모르는 것을 깨끗한 쪽에 넣지 않는다 — 놓침을 넓히는 쪽이 안전하다)."""
+    return str(row.get("dir") or "risk") == "risk" and str(row.get("sev") or "") != SEV_MINOR
+
+
+def audit_outcome(effective: Mapping[str, Mapping[str, Any]], offcard_rows: Sequence[Mapping[str, Any]]) -> str:
+    """표본·그림자 셀 하나의 놓침 판정 — 처음 맞는 줄이다(X1-13 · m3-cells 3.4).
+
+    | risk_miss | 실효 FAIL·WARNING 이 하나라도(실효 undetermined 이면서 split=1 — 변형이 걸렸던 카드 — 포함), 또는 카드 밖
+    |           | 리스크의 심각도가 경미가 아니다(`_offcard_risk`) |
+    | relevance_miss | 걸림은 없지만 applies='yes' 실효 행이나 카드 밖 줄(경미 리스크 · 개선)이 있다 |
+    | undetermined | 위 둘이 아니고 applies='unknown' 이거나 판정이 undetermined 인 실효 행이 있다 |
+    | kept | 실효가 전부 해당 없음이고 카드 밖이 없다 |
+
+    `effective` 는 `effective_rows` 의 반환, `offcard_rows` 는 카드 밖 회계(`accept_rows(kind='offcard')`)의 rows 다.
+    넓힘(그 영역의 거른 셀을 다시 연다)을 일으키는 것은 risk_miss 뿐이다.
+    """
+    rows = list(effective.values())
+    if any(str(e.get("judgement")) in FLAGGED or (str(e.get("judgement")) == "undetermined" and int(e.get("split") or 0))
+           for e in rows) or any(_offcard_risk(f) for f in offcard_rows):
+        return "risk_miss"
+    if any(str(e.get("applies")) == "yes" for e in rows) or offcard_rows:
+        return "relevance_miss"
+    if any(str(e.get("applies")) == "unknown" or str(e.get("judgement")) == "undetermined" for e in rows):
+        return "undetermined"
+    return "kept"
+
+
+# ---------------------------------------------------------------- 걸린 것만 이중 판정 · 1순위 보정 · 무작위 뒤집기(M3 C3-9 — #31 · #32)
+DUAL_NEG_TRIGGER = 0.05             # 보정 모집단의 '걸림 없음 → 걸림' 비율이 이것을 넘으면 그 대상에서 무작위 뒤집기를 켠다(#32)
+DUAL_REASONS: tuple[str, ...] = ("dual", "single_flag", "none_flagged", "same_body", "calib", "dual_neg")
+
+
+def dual_neg_state(calib_rows: Sequence[Mapping[str, Any]], *, tier_a_closed: bool, already_on: bool = False) -> dict:
+    """무작위 뒤집기를 켜나(#32) — 원장에서 유도한다(저장하지 않는다). 반환 {state: on · off · unmeasured, n, flips, rate}.
+
+    `calib_rows` 는 보정 모집단(1순위 셀 — 묶음 전체를 rev 했다)의 판정 행 [{unit_id, agent_key, record_id, variant, judgement}].
+    셀 × 카드마다 fwd 가 걸림 없음(OK·na)이고 rev 행이 있는 것이 분모, 그 가운데 rev 가 걸림(FAIL·WARNING)인 것이 분자다.
+    한 번 켜지면 꺼지지 않는다(`already_on` — 그 대상의 셀 가운데 `sample_json.dual_neg.on` 이 선 것이 있다). 1순위 셀이 다
+    종결되기 전이거나(분류 8 번 줄이 풀리는 때와 같다) 잴 카드가 없으면 '미측정' 이고 켜지 않는다.
+    """
+    pairs: dict[tuple[str, str, str], dict[str, str]] = {}
+    for row in calib_rows:
+        key = (str(row.get("unit_id")), str(row.get("agent_key")), str(row.get("record_id")))
+        pairs.setdefault(key, {})[str(row.get("variant") or "fwd")] = str(row.get("judgement") or "")
+    measured = [p for p in pairs.values() if p.get("fwd") in CLEAR and "rev" in p]
+    flips = sum(1 for p in measured if p.get("rev") in FLAGGED)
+    rate = flips / len(measured) if measured else None
+    if already_on:
+        state = "on"
+    elif not tier_a_closed or rate is None:
+        state = "unmeasured"
+    else:
+        state = "on" if rate > DUAL_NEG_TRIGGER else "off"
+    return {"state": state, "n": len(measured), "flips": flips, "rate": rate}
+
+
+def engine_conflict(row: Mapping[str, Any]) -> bool:
+    """엔진이 그 판정 행에 부딪침을 알렸나(RB3-1) — 같은 카드의 다른 판정과 부딪쳤거나(`checks.dup_conflict`) 보충이 판정을 갈아
+    끼웠다(`flipped_from`). 그런 행은 '문제없음' 으로 믿지 않고 걸린 것처럼 두 번째 판정을 받는다(rev 또는 단독). `checks_json`(원장
+    행) 또는 `checks`(받은 행) 어느 쪽이든 읽는다."""
+    checks = row.get("checks")
+    if not isinstance(checks, Mapping):
+        try:
+            checks = json.loads(row.get("checks_json") or "{}")
+        except (TypeError, ValueError):
+            checks = {}
+    return isinstance(checks, Mapping) and (checks.get("dup_conflict") is True or bool(checks.get("flipped_from"))
+                                            or bool(row.get("flipped_from")))
+
+
+def _alias_order(alias: Any) -> tuple[int, str]:
+    """팩 별칭(K01…)은 팩 순서로 매겨진다(엔진 `assign_aliases`) — 숫자 순서가 팩 순서다."""
+    text = str(alias or "")
+    return (int(text[1:]), text) if text[1:].isdigit() else (1 << 30, text)
+
+
+def _flagged_rev(fwd_request: Mapping[str, Any], flagged: Sequence[str]) -> dict:
+    """걸린 별칭만 실은 rev 요청 — 카드는 fwd 순서 그대로(엔진이 뒤집는다), 빠진 묶음 카드는 제목 목록(digest)으로 내려 팩 순서로
+    둔다. `engine_client.run_body('verdict', variant='rev', cards=걸린 별칭, digest=팩의 나머지)` 와 같은 본문이다."""
+    keep = set(flagged)
+    rev = dict(copy.deepcopy(dict(fwd_request)), variant="rev")
+    cards = list(rev.get("cards") or ())
+    rev["cards"] = [c for c in cards if str(c.get("alias")) in keep]
+    moved = [{k: (None if c.get(k) is None else str(c.get(k))) for k in ("alias", "type", "title", "record_id", "card_id")}
+             for c in cards if str(c.get("alias")) not in keep]
+    rev["digest"] = sorted([*(rev.get("digest") or ()), *moved], key=lambda d: _alias_order(d.get("alias")))
+    return rev
+
+
+def dual_plan_flagged(fwd_request: Mapping[str, Any], flagged_aliases: Collection[str], *, calibrate: bool = False,
+                      neg_on: bool = False, neg_pct: float = 0.0, sample_key: Sequence[str] = (),
+                      salt: str = SAMPLE_SALT) -> dict:
+    """fwd 판정 요청(묶음 하나)의 이중 판정 계획 — `knobs.dual='flagged'` 의 길. 반환 {rev, solo, reason, aliases, neg{on, picked}}.
+
+    `flagged_aliases` 는 그 셀 · 묶음에서 fwd 실효(빠진 카드 재질의 뒤)가 FAIL·WARNING 인 별칭이다. 처음 맞는 줄이다.
+
+    | 1순위 셀(`calibrate` — 보정 모집단) | 묶음 전체 rev — `calib` |
+    | 걸린 별칭 둘 이상 | 그 별칭만 실은 rev 한 번 — `dual` |
+    | 걸린 별칭 하나 | rev 없이 그 카드의 단독 재질의가 두 번째 판정 — `single_flag` |
+    | 걸림 없음 · 무작위 뒤집기가 켜졌고 `sample_score('dual_neg', T, u, a, 묶음) < neg_pct/100` | 묶음 전체 rev — `dual_neg` |
+    | 걸림 없음 | rev 없음 — `none_flagged` |
+
+    묶음 전체 rev 가 fwd 와 같은 본문이면(카드 1장 묶음) 부르지 않고 그 카드를 단독으로 보낸다(`same_body` — `dual_plan` 과 같다).
+    `aliases` 는 rev 에 실은 별칭(셀의 `dual_aliases` — 단독 재질의의 'rev 를 물었는데 rev 행이 없다' 갈래가 이것으로 판단한다).
+    """
+    if fwd_request.get("kind") != "verdict" or fwd_request.get("variant") != "fwd":
+        raise ValueError("dual_plan_flagged 는 verdict·fwd 요청만 받는다")
+    order = [str(c.get("alias")) for c in fwd_request.get("cards") or ()]
+    wanted = {str(a) for a in flagged_aliases}
+    flagged = [a for a in order if a in wanted]
+    neg = {"on": bool(neg_on) and neg_pct > 0, "picked": False}
+
+    def whole(reason: str) -> dict:
+        rev = dict(copy.deepcopy(dict(fwd_request)), variant="rev")
+        if effective_body_sha(rev) == effective_body_sha(fwd_request):
+            return {"rev": None, "solo": order, "reason": "same_body", "aliases": [], "neg": neg}
+        return {"rev": rev, "solo": [], "reason": reason, "aliases": order, "neg": neg}
+
+    if calibrate:
+        return whole("calib")
+    if len(flagged) >= 2:
+        return {"rev": _flagged_rev(fwd_request, flagged), "solo": [], "reason": "dual", "aliases": flagged, "neg": neg}
+    if len(flagged) == 1:
+        return {"rev": None, "solo": flagged, "reason": "single_flag", "aliases": [], "neg": neg}
+    if neg["on"] and sample_score("dual_neg", *sample_key, salt=salt) < neg_pct / 100.0:
+        neg["picked"] = True
+        return whole("dual_neg")
+    return {"rev": None, "solo": [], "reason": "none_flagged", "aliases": [], "neg": neg}

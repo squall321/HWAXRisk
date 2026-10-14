@@ -28,7 +28,7 @@ OTHER = "other@example.com"
 # ---------------------------------------------------------------- 응답 칸(스냅샷)
 PANEL_COVERAGE_KEYS = {"target_key", "job", "roster_size", "by_domain", "by_status", "strong", "unseated_n", "level",
                        "close_level", "flow", "units"}                      # S12 전 진행판 칸 — 그대로다(D-24)
-REVIEW_KEYS = {"units", "cells", "experts", "cards", "quality", "order", "job"}
+REVIEW_KEYS = {"units", "cells", "experts", "cards", "quality", "order", "dispositions", "job"}   # dispositions — 재설계 M3 C3-4
 REVIEW_CELLS_KEYS = {"total", "by_state", "by_basis", "in_scope", "out_of_scope_pending", "failed_open", "form_only"}
 REVIEW_EXPERTS_KEYS = {"total", "by_state"}
 ORDER_KEYS = {"order", "agent_key", "domain", "rank_in_domain", "tier", "deferred", "input_gaps", "state", "cards_total",
@@ -64,7 +64,7 @@ REPORT_META_KEYS = {"target_key", "agent_key", "state", "version", "report_hash"
 REPORT_PAGE_KEYS = REPORT_META_KEYS | {"format", "part", "unit_id", "pages_total", "page_no", "page"}   # + next_page
 PAGE_KEYS = {"page_no", "kind", "title", "blocks"}
 REVIEW_JOB_KEYS = {"job_id", "mode", "cells_total", "cells_in_scope", "experts_in_scope", "units", "calls_estimate",
-                   "credential"}                                            # + credential_note(미리 알릴 것이 있을 때)
+                   "credential", "undeferred"}                              # + credential_note(미리 알릴 것이 있을 때)
 
 
 @pytest.fixture

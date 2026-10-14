@@ -138,7 +138,9 @@ def test_an_expert_session_sweeps_then_runs_every_deck_over_every_unit_before_th
     assert seen == expected
     fwd = next(b for b in _runs(fake) if b["variant"] == "fwd")
     assert [d["alias"] for d in fwd["digest"]] == ["K05", "K06", *background]
-    assert fwd["expect"] == {"prompt_rev": limits["prompt_rev"]["verdict"], "limits_rev": limits["limits_rev"]}
+    # run 의 기대 판은 그 종류의 판이다(엔진 RunExpect — RB3-6)
+    assert fwd["expect"] == {"prompt_rev": limits["prompt_rev"]["verdict"],
+                             "limits_rev_kind": limits["limits_rev_by_kind"]["verdict"]}
     offcard = [b for b in _runs(fake) if b["kind"] == "offcard"][0]
     assert [d["alias"] for d in offcard["digest"]] == decks[0] + decks[1]
     assert [k["alias"] for k in offcard["extra"]["known"]] == decks[0] + decks[1]
@@ -733,7 +735,45 @@ def test_a_window_too_small_for_any_call_holds_ctx_too_small_before_any_call(sto
     r.tick()
     row = rig.job_row(store, job_id)
     assert (row["state"], row["hold_code"]) == ("paused", "ctx_too_small")
-    assert "11,246" in row["error"] and fake.runs == 0 and fake.calls("pack") == []
+    need = fre.load("limits_ctx_too_small.json")["ctx_too_small"]["need_ctx_tokens"]      # 계약 예제가 정한 필요 창
+    assert f"{need:,}" in row["error"] and fake.runs == 0 and fake.calls("pack") == []
+
+
+@pytest.mark.parametrize(("reason", "words"), [
+    ("output_cap", ("까닭 output_cap", "CARD_REVIEW_MAX_TOKENS(없으면 DELIB_MAX_TOKENS)를 5,200 토큰 이상으로 올린")),
+    ("output_too_large", ("까닭 output_too_large", "출력 상한이 창보다 크다", "줄인 뒤 재개한다")),
+])
+def test_a_ctx_too_small_hold_names_its_reason_and_the_knob_to_fix(store, monkeypatch, reason, words):
+    """엔진의 ctx_too_small 까닭(RB3-14)마다 보류 글이 고칠 손잡이를 말한다 — 출력 상한이 행 한 줄도 못 내면 출력 상한을 필요한 값
+    이상으로 올리고(창을 키워도 소용없다), 출력 상한이 창보다 크면 줄인다. 창이 모자라면(window) 필요한 창과 창 손잡이다."""
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    limits = fre.load("limits_ctx_too_small.json")
+    limits["ctx_too_small"] = {"reason": reason, "need_ctx_tokens": None,
+                               "need_max_tokens": 5200 if reason == "output_cap" else None, "message": "엔진의 말(가짜)"}
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")}, limits=limits)
+    rig.Rig(store, fake).tick()
+    row = rig.job_row(store, job_id)
+    assert (row["state"], row["hold_code"]) == ("paused", "ctx_too_small")
+    assert all(w in row["error"] for w in words), row["error"]
+    assert "엔진의 말(가짜)" in row["error"] and fake.runs == 0
+
+
+def test_a_box_that_cannot_run_only_the_summary_keeps_reviewing_cells(store, monkeypatch):
+    """ctx_too_small 은 셀이 부르는 종류(cell_kinds)만 본다 — 요약(summary)만 못 도는 박스는 셀 일을 멈추지 않는다(M3.md 4.3). 셀 종류
+    하나라도 못 돌면 지금처럼 멈춘다."""
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    limits = fre.load("limits_1m.json")
+    limits["runnable"] = {**limits["runnable"], "summary": False}
+    rig.Rig(store, FakeReviewEngine({SEAL: fre.load("pack_ok.json")}, limits=limits)).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    other = rig.target(store, seed=5)
+    held = rig.job(store, other, scope={"agents": [SEAL]})
+    limits["runnable"] = {**limits["runnable"], "noinput": False}
+    r = rig.Rig(store, FakeReviewEngine({SEAL: fre.load("pack_ok.json")}, limits=limits))
+    r.tick()
+    assert (rig.job_row(store, held)["state"], rig.job_row(store, held)["hold_code"]) == ("paused", "ctx_too_small")
 
 
 def test_a_pair_over_unit_runs_that_decks_cards_solo(store, monkeypatch):
@@ -1171,9 +1211,10 @@ def test_a_revision_change_mid_job_replans_and_carries_on_and_a_real_mismatch_ho
 
     key, job_id, fake, r, gate = _stalled(store, monkeypatch, 3)
     if change == "prompt":
-        fake.base_limits["prompt_rev"]["verdict"] = "cr-verdict-2"
+        fake.base_limits["prompt_rev"]["verdict"] = "cr-verdict-next"          # 지금 판(계약 예제)과 다른 판
     elif change == "limits":
-        fake.limits_rev = "limits-rev-2"
+        fake.limits_rev = "limits-rev-2"                                       # 판정 손잡이가 바뀌었다 — 전체 판과 verdict 판
+        fake.base_limits["limits_rev_by_kind"]["verdict"] = "verdict-rev-2"
     else:
         fake.error_n = 1
         fake.error = {"code": "rev_mismatch", "message": "판이 다르다(가짜)", "infra": False, "retryable": False}
@@ -1190,7 +1231,92 @@ def test_a_revision_change_mid_job_replans_and_carries_on_and_a_real_mismatch_ho
     assert len(fake.calls("plan")) == 2
     assert {(c["state"], c["reopened_n"]) for c in _cells(store, key, SEAL)} == {("reviewed", 1)}
     head = _head(store, key, SEAL)
-    assert (head["prompt_rev"], head["limits_rev"]) == (review_runner.prompt_key(fake.limits()), fake.limits_rev)
+    assert (head["prompt_rev"], head["limits_rev"]) == (review_runner.prompt_key(fake.limits(), review_runner.CARD_KINDS),
+                                                        review_runner.limits_key(fake.limits(), review_runner.CARD_KINDS))
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_a_summary_only_move_replans_without_restarting_any_cell(store, monkeypatch, restart):
+    """#37 · RB3-6 — 엔진이 요약 손잡이·요약 판만 올리면(전역 limits_rev 와 종류별 summary 판 · summary prompt_rev 가 바뀌고 카드
+    전문가가 부르는 종류의 판은 그대로) 도는 잡은 아무 일 없이 이어 돈다 — run 의 expect 가 그 종류의 판이라 rev_mismatch 가 없고,
+    그 판 올림과 함께 앱이 재기동해 새 세션이 limits 를 다시 받아도 셀 지문·계획·훑기 열쇠가 그 셀이 부르는 종류의 판만 잇기 때문에
+    어느 셀도 처음부터 돌지 않으며(reopened_n 0 · 입력 지문 그대로) 계획과 훑기를 다시 받지 않는다. 재기동 없이 도는 세션은 지난
+    limits 그대로 다음 호출을 내는데, 그 기대 판이 종류별이라 엔진이 받아 준다."""
+    from app import review_runner
+
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    fake.base_limits["limits_rev_by_kind"] = {k: f"{k}-rev-1" for k in fake.base_limits["kinds"]}
+    gate = threading.Event()
+    fake.hold_runs = {3: gate}
+    r = rig.Rig(store, fake)
+    r.tick()
+    r.tick(wait=False)
+    rig.wait_for(lambda: fake.runs == 3)
+    hashes = {c["unit_id"]: c["input_hash"] for c in _cells(store, key, SEAL)}
+    assert None not in hashes.values()
+    fake.limits_rev = "limits-rev-2"
+    fake.base_limits["limits_rev_by_kind"]["summary"] = "summary-rev-2"
+    fake.base_limits["prompt_rev"]["summary"] = "cr-summary-9"
+    if restart:
+        review_cells.recover_running(store)                                 # 판 올림과 함께 앱도 다시 떴다
+        second = rig.Rig(store, fake, clock=r.clock, boot_id="boot-b")
+        second.finish(job_id)
+        gate.set()
+        r.loop.join(30)
+    else:
+        gate.set()
+        r.loop.join(30)
+        r.finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    assert _calls(store, job_id, error_code="rev_mismatch") == []
+    assert {(c["state"], c["reopened_n"]) for c in _cells(store, key, SEAL)} == {("reviewed", 0)}
+    assert {c["unit_id"]: c["input_hash"] for c in _cells(store, key, SEAL)} == hashes
+    assert len(fake.calls("plan")) == 1
+    assert [b["kind"] for b in _runs(fake)].count("sweep") == len(json.loads(_head(store, key, SEAL)["plan_json"])["plan"]
+                                                                   ["manifest_pages"])
+    head = _head(store, key, SEAL)
+    assert head["limits_rev"] == review_runner.limits_key(fake.limits(), review_runner.CARD_KINDS)
+    assert head["limits_rev"] == "offcard=offcard-rev-1,sweep=sweep-rev-1,verdict=verdict-rev-1"
+    assert head["prompt_rev"] == review_runner.prompt_key(fake.limits(), review_runner.CARD_KINDS)
+
+
+def test_an_engine_without_per_kind_revs_is_asked_with_the_global_rev(store, monkeypatch):
+    """종류별 판(limits_rev_by_kind)을 내지 않는 엔진(M2)에는 run 의 expect 가 전역 limits_rev 이고 머리·셀의 판 열쇠도 전역 판
+    그대로다(M2 원장과 같은 값)."""
+    from app import review_runner
+
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    unit_id = _unit_ids(store, key)[0]
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [unit_id]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    fake.base_limits.pop("limits_rev_by_kind")
+    rig.Rig(store, fake).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    fwd = next(b for b in _runs(fake) if b["kind"] == "verdict")
+    assert fwd["expect"] == {"prompt_rev": fake.base_limits["prompt_rev"]["verdict"], "limits_rev": fake.limits_rev}
+    assert _head(store, key, SEAL)["limits_rev"] == fake.limits_rev
+    assert review_runner.limits_key(fake.limits(), review_runner.CARD_KINDS) == fake.limits_rev
+
+
+def test_the_cell_keys_take_only_the_kinds_the_cell_calls_and_fall_back_to_the_global_rev():
+    """prompt_key·limits_key — 종류를 주면 그 종류만 잇는다. sweep·verdict·offcard 셋뿐인 엔진(M2)에서 카드 전문가의 prompt_key 는
+    종전(종류 전부)과 같고, 종류별 창 판이 없으면 전역 limits_rev 그대로다(M2 원장의 지문이 바뀌지 않는다). 표에 빠진 종류는 전역
+    판으로 메운다."""
+    from app import review_runner as rr
+
+    m2 = {"prompt_rev": {"sweep": "cr-sweep-1", "verdict": "cr-verdict-1", "offcard": "cr-offcard-1"}, "limits_rev": "g1"}
+    assert rr.prompt_key(m2, rr.CARD_KINDS) == rr.prompt_key(m2) == "offcard=cr-offcard-1,sweep=cr-sweep-1,verdict=cr-verdict-1"
+    assert rr.limits_key(m2, rr.CARD_KINDS) == rr.limits_key(m2) == "g1"
+    m3 = {"prompt_rev": {**m2["prompt_rev"], "noinput": "cr-noinput-1", "summary": "cr-summary-1"}, "limits_rev": "g2",
+          "limits_rev_by_kind": {"sweep": "s", "verdict": "v", "offcard": "o", "summary": "m"}}
+    assert rr.prompt_key(m3, rr.GAP_KINDS) == "noinput=cr-noinput-1,sweep=cr-sweep-1"
+    assert rr.limits_key(m3, rr.CARD_KINDS) == "offcard=o,sweep=s,verdict=v"
+    assert rr.limits_key(m3, rr.GAP_KINDS) == "noinput=g2,sweep=s"
+    assert rr.limits_key(m3) == "g2"
 
 
 # ---------------------------------------------------------------- 반대 검토 R3A-5 — 나갈 기준을 지키는 갈래가 변이를 견디지 않게

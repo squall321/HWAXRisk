@@ -31,8 +31,10 @@ KINDS: tuple[str, ...] = ("sweep", "verdict/fwd", "verdict/rev", "verdict/solo",
 CALL_DONE_STATES: tuple[str, ...] = ("ok", "infra_fail", "content_fail", "aborted")   # 낸 호출(기다림·도는 중 제외)
 SWEEP_ANSWERED: tuple[str, ...] = ("yes", "maybe", "no", "stamp")                     # 훑기가 답한 단위(error 제외)
 # 카드 폭포의 줄 — 분모 = Σ(셀마다 그 전문가 묶음의 카드 전부). 줄의 합이 분모다(어긋나면 residual).
+# noinput_reviewed — 입력 결손 호출로 검토한 칸(재설계 M3 C3-3)의 카드 전부. 카드를 한 장씩 판정하지 않고 근거로 읽었다 — '판정 없음'
+# 으로 세면 거짓 미판정이 된다.
 WATERFALL: tuple[str, ...] = ("judged", "unjudged", "background_full", "background_title_only", "background_unsent",
-                              "no_body", "failed", "open", "out_of_scope", "filtered", "no_input")
+                              "no_body", "noinput_reviewed", "failed", "open", "out_of_scope", "filtered", "no_input")
 # 새 표(v4) — 대상 범위와 전문가 범위. 전문가 범위는 머리(rr_expert_reports)를 뺀다 — 보고서를 머리에 쓰는 S10 이 이 수를
 # 보고서에 실으므로, 넣으면 같은 원장에서도 다시 마감할 때마다 앞 보고서의 바이트가 수에 들어가 보고서가 바뀐다(m-07).
 TARGET_TABLES: tuple[str, ...] = ("rr_unit_builds", "rr_units", "rr_expert_reports", "rr_review_cells", "rr_card_verdicts",
@@ -173,7 +175,10 @@ def _load(store: Any, target_key: str, agent_key: str | None) -> dict:
     calls = [r for r in _rows(store,
         "SELECT call_id, agent_key, unit_id, kind, variant, state, duration_ms, queued_ms, output_truncated, soft_over,"
         " attempts, prompt_chars, tokens_in, tokens_out, dropped_over_cap, model, prompt_rev, limits_rev,"
-        " json_extract(quality_json, '$.app.check_disagree') AS check_disagree FROM rr_review_calls"
+        " json_extract(quality_json, '$.app.check_disagree') AS check_disagree,"
+        " json_extract(quality_json, '$.engine.dup_conflict') AS dup_conflict,"
+        " json_extract(quality_json, '$.engine.flipped') AS flipped,"
+        " json_extract(quality_json, '$.app.clipped') AS clipped FROM rr_review_calls"
         f" WHERE target_key = ?{extra} ORDER BY call_id", [target_key, *params])
         if r["unit_id"] is None or r["unit_id"] in alive]
     heads = _rows(store, "SELECT agent_key, state, pack_hash, pack_status, sweep_json, plan_json FROM rr_expert_reports"
@@ -299,7 +304,9 @@ def _cards(data: Mapping[str, Any], policy: Mapping[str, Any]) -> dict:
         total = checkable + background + no_body
         denominator += total
         state = c["state"]
-        if state == "reviewed":
+        if state == "reviewed" and c["basis"] == review_cells.NOINPUT:
+            lines["noinput_reviewed"] += total
+        elif state == "reviewed":
             judged = judged_of.get((c["unit_id"], c["agent_key"]), 0)
             full, title = int(c["bg_full_n"] or 0), int(c["bg_title_only_n"] or 0)
             lines["judged"] += judged
@@ -328,8 +335,17 @@ def _cards(data: Mapping[str, Any], policy: Mapping[str, Any]) -> dict:
     }
 
 
+def _clipped(call: Mapping[str, Any]) -> dict:
+    try:
+        value = json.loads(call.get("clipped") or "null")
+    except (TypeError, ValueError):
+        value = None
+    return value if isinstance(value, dict) else {}
+
+
 def _truncation(data: Mapping[str, Any], policy: Mapping[str, Any]) -> dict:
     ok = [c for c in data["calls"] if c["state"] == "ok"]
+    clipped = [_clipped(c) for c in ok if _clipped(c)]
     reviewed = [c for c in data["cells"] if c["state"] == "reviewed"]
     offcard = [c for c in ok if c["kind"] == "offcard"]
     return {
@@ -346,6 +362,8 @@ def _truncation(data: Mapping[str, Any], policy: Mapping[str, Any]) -> dict:
         "dropped_over_cap": {"rows": sum(int(c["dropped_over_cap"]) for c in ok if c["dropped_over_cap"] is not None),
                              "offcard_calls": len(offcard),
                              "offcard_calls_unknown": sum(1 for c in offcard if c["dropped_over_cap"] is None)},
+        # 엔진이 몫에서 끊은 입력(RB3-11 — meta.clipped)을 실은 호출 수와 끊긴 입력 이름
+        "clipped": {"calls": len(clipped), "inputs": sorted({name for c in clipped for name in c})},
     }
 
 
@@ -416,6 +434,12 @@ def _flips(data: Mapping[str, Any], effective: Sequence[Mapping[str, Any]], poli
                           "hold": disputed.get("hold", 0)},
         "solo_base_hold": base_hold, "solo_only": solo_only,
         "split": rate(sum(1 for r in effective if r["split"]), len(effective), policy=policy),
+        # 엔진이 알린 부딪침(RB3-1) — 같은 카드의 다른 판정과 부딪친 줄(dup_conflict)과 보충이 갈아 낀 판정(flipped). 그 카드는
+        # 걸린 것처럼 두 번째 판정을 받았다(review_runner._flagged · _solo_set).
+        "engine_conflict": {"dup_conflict": sum(int(c["dup_conflict"] or 0) for c in data["calls"] if c["state"] == "ok"),
+                            "flipped": sum(int(c["flipped"] or 0) for c in data["calls"] if c["state"] == "ok"),
+                            "calls": sum(1 for c in data["calls"] if c["state"] == "ok"
+                                         and (int(c["dup_conflict"] or 0) or int(c["flipped"] or 0)))},
     }
 
 
@@ -638,7 +662,8 @@ def render_text(result: Mapping[str, Any]) -> str:
     lines.append(
         f"[격자] 칸 {_n(grid['cells'])} = 전문가 {_n(grid['experts'])} × 단위 {_n(grid['units'])}{gap}"
         f" · 검토 {_n(st['reviewed'])}(카드 대조 {_n(basis['cards'])} · 배경 카드뿐 {_n(basis['background'])}"
-        f" · 역할만 {_n(basis['role_only'])}{unset}) · 무관 {_n(st['na_irrelevant'])} · 입력 결손 {_n(st['no_input'])}"
+        f" · 역할만 {_n(basis['role_only'])} · 입력 결손 호출 {_n(basis['noinput'])}{unset}) · 무관 {_n(st['na_irrelevant'])}"
+        f" · 입력 결손 {_n(st['no_input'])}"
         f" · 미완 {_n(st['failed'])}(처분 전 {_n(grid['failed_open'])}) · 넘김 {_n(st['skipped'])}"
         f" · 대기 {_n(waiting)} · 범위 밖 대기 {_n(grid['out_of_scope_pending'])}"
         f" · 형식만 채운 칸 {fmt_rate(grid['form_only'])}"
@@ -649,17 +674,19 @@ def render_text(result: Mapping[str, Any]) -> str:
         f"[카드] 분모 {_n(cards['denominator'])} = Σ 칸마다 그 전문가 묶음의 카드 전부 · 판정 받음 {fmt_rate(cl['judged'])}"
         f" · 검토 칸인데 판정 없음 {fmt_rate(cl['unjudged'])} · 배경 본문으로 읽힘 {fmt_rate(cl['background_full'])}"
         f" · 배경 제목만 {fmt_rate(cl['background_title_only'])} · 배경 안 실림 {fmt_rate(cl['background_unsent'])}"
-        f" · 본문 없음 {fmt_rate(cl['no_body'])} · 미완·넘김 칸 {fmt_rate(cl['failed'])} · 대기 칸 {fmt_rate(cl['open'])}"
+        f" · 본문 없음 {fmt_rate(cl['no_body'])} · 입력 결손 호출로 본 칸 {fmt_rate(cl['noinput_reviewed'])}"
+        f" · 미완·넘김 칸 {fmt_rate(cl['failed'])} · 대기 칸 {fmt_rate(cl['open'])}"
         f" · 범위 밖 칸 {fmt_rate(cl['out_of_scope'])} · 무관 칸 {fmt_rate(cl['filtered'])}"
         f" · 입력 결손 칸 {fmt_rate(cl['no_input'])}{residual}"
         f" · 묶음 미확보 전문가 {_n(cards['experts_without_pack'])}명({_n(cards['cells_without_pack'])}칸 — 분모 밖)")
-    cap, drop = trunc["offcard_capped"], trunc["dropped_over_cap"]
+    cap, drop, clip = trunc["offcard_capped"], trunc["dropped_over_cap"], trunc["clipped"]
     lines.append(
         f"[절단] 호출 {fmt_rate(trunc['calls'])} · 호출 모름 {fmt_rate(trunc['calls_unknown'])}"
         f" · 검토 칸 {fmt_rate(trunc['cells'])} · 검토 칸 모름 {fmt_rate(trunc['cells_unknown'])}"
         f" · 품질 한도 넘김 호출 {fmt_rate(trunc['soft_over'])}"
         f" · 카드 밖 상한 닿음 {_n(cap['cells'])}칸({_n(cap['hits'])}번)"
-        f" · 상한 밖 버림 {_n(drop['rows'])}줄(카드 밖 호출 {_n(drop['offcard_calls'])} 가운데 모름 {_n(drop['offcard_calls_unknown'])})")
+        f" · 상한 밖 버림 {_n(drop['rows'])}줄(카드 밖 호출 {_n(drop['offcard_calls'])} 가운데 모름 {_n(drop['offcard_calls_unknown'])})"
+        f" · 몫에서 끊은 입력 {_n(clip['calls'])}호출" + (f"({', '.join(_q(x) for x in clip['inputs'])})" if clip["inputs"] else ""))
     quote = cite["quote"]
     lines.append(
         f"[인용] 카드 인용 대조 통과 — 걸림 {fmt_rate(quote['flagged'])} · 걸림 없음 {fmt_rate(quote['clear'])}"
@@ -672,7 +699,9 @@ def render_text(result: Mapping[str, Any]) -> str:
         f" · 단독 걸림 없음→걸림 {fmt_rate(flips['solo_neg_pos'])}"
         f" · fwd·rev 가 갈려 단독이 가른 카드 {_n(dis['cards'])}(걸림 {_n(dis['pos'])} · 걸림 없음 {_n(dis['neg'])}"
         f" · 보류 {_n(dis['hold'])}) · 바탕이 보류 {_n(flips['solo_base_hold'])} · 단독뿐 {_n(flips['solo_only'])}"
-        f" · 변형 갈림(보류로 둠) {fmt_rate(flips['split'])}")
+        f" · 변형 갈림(보류로 둠) {fmt_rate(flips['split'])}"
+        f" · 엔진이 알린 부딪침 {_n(flips['engine_conflict']['dup_conflict'])}줄"
+        f" · 보충이 갈아 낀 판정 {_n(flips['engine_conflict']['flipped'])}줄(두 번째 판정을 받았다)")
     kinds = " · ".join(f"{label} {_fmt_secs(stat)}" for label, stat in secs["kinds"].items())
     waits = " · ".join(f"{label} {_n(n)}" for label, n in secs["waits"].items() if label != "total")
     lines.append(

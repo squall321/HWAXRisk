@@ -265,6 +265,7 @@ class _Member:
     weak_subject: bool = False
     conf: str | None = None
     quote_chars: int | None = None             # 카드 인용이 이미 줄인 글일 때(들여온 원장)의 원래 길이 — R3B-7
+    noinput_index: int | None = None           # 그 셀 입력 결손 호출 q1 줄의 자리(재설계 M3 C3-3)
 
 
 def _unit_layers(ledger: Ledger, unit_id: str) -> dict[str, str]:
@@ -420,6 +421,54 @@ def _offcard_members(ledger: Ledger, unit_id: str, ctx: narrative.SpecContext,
     return out
 
 
+def noinput_rows(cell: Mapping[str, Any]) -> dict:
+    """셀의 입력 결손 호출 결과(재설계 M3 C3-3) — {q1[], q2[], outcome, more, asks}. 그 호출을 하지 않은 셀은 빈 목록·None 이다."""
+    extras = _json(cell.get("extras_json"), {})
+    got = extras.get("noinput") if isinstance(extras.get("noinput"), Mapping) else {}
+    return {"q1": [dict(r) for r in got.get("q1") or () if isinstance(r, Mapping)],
+            "q2": [dict(r) for r in got.get("q2") or () if isinstance(r, Mapping)],
+            "outcome": got.get("outcome"), "more": got.get("more"), "asks": got.get("asks")}
+
+
+def _noinput_members(ledger: Ledger, unit_id: str, ctx: narrative.SpecContext,
+                     items: Mapping[str, Mapping[str, Any]]) -> list[_Member]:
+    """입력 결손 호출의 '영향 있음'(q1 impact=yes) 줄 → finding 후보(m3-cells 3.6). 걸림의 무게는 카드 밖 지적과 같고(hold 정책 —
+    WARNING 까지), 그 줄이 영향을 걸었다는 주장을 `judgement_claimed`(WARNING)로 남긴다. 카드를 댔으면 그 카드 인용, 아니면 경험칙이다."""
+    payload = ledger.payloads[unit_id]
+    unit_refs = _unit_refs(payload)
+    out: list[_Member] = []
+    for index, row in enumerate(noinput_rows(ledger.cells[unit_id])["q1"]):
+        if row.get("impact") != "yes":
+            continue
+        sev_claimed = _s(row.get("sev")) if _s(row.get("sev")) in _SEV_RANK else None
+        severity, judgement = _hold("risk", 2, None, sev_claimed)
+        mechanism, detail, free = _mech_parts(row.get("mech"), row.get("mech_free"))
+        detectability, resolving = _detect(None, None)
+        refs = list(dict.fromkeys(str(r) for r in row.get("refs") or ()))
+        record_id = _s(row.get("record_id"))
+        card = ledger.unit_cards(unit_id).get(record_id) if record_id else None
+        passed = row.get("quote_ok") == 1
+        cites = ([(passed, _card_cite(record_id, row.get("cq"), row.get("cq_chars")))] if card is not None else [])
+        cites += [(ref in unit_refs, {"ref": ref, "quote": ""}) for ref in refs]
+        subject, change_kind, weak = _subject(ledger, unit_id, [r for r in refs if r in unit_refs], ctx, items)
+        grade = _s(row.get("grade")) if card is not None and passed and row.get("grade") else "경험칙"
+        raw = {
+            "direction": "risk", "domain": ledger.head["domain"], "owner_domain": ledger.head["domain"],
+            "raised_by": [ledger.agent_key], "mechanism": mechanism, "mechanism_detail": detail,
+            "mechanism_free": free, "subject": subject, "change_kind": change_kind,
+            "trigger_condition": "none", "severity": severity, "judgement": judgement,
+            "detectability": detectability, "resolving_check": resolving, "evidence_grade": grade,
+            "claim": _s(row.get("title")), "warrant": _s(row.get("path")) or _s(row.get("why")),
+        }
+        if card is not None:
+            raw[narrative.FREE_KEY_FALLBACK] = f"card~{_s(card.get('card_id')) or record_id}"
+        out.append(_Member(unit_id=unit_id, raw=raw, direction="risk", weight=2,
+                           sev_rank=_SEV_RANK.get(sev_claimed or "", 0), passed=passed, alias_rank=(1 << 20, ""), grade=grade,
+                           claimed="WARNING", sev_claimed=sev_claimed, nums=[], cites=cites,
+                           corpus_cards=[record_id] if card is not None else [], weak_subject=weak, noinput_index=index))
+    return out
+
+
 def _corpus(ledger: Ledger, unit_id: str, record_ids: Sequence[str]) -> str:
     """수치 대조 말뭉치 — 인용한 카드들의 글(얼린 묶음) + 그 단위 요청에 실린 줄 글 전부(소유 줄·문맥·근거)."""
     cards = ledger.unit_cards(unit_id)
@@ -474,7 +523,8 @@ def _fold(ledger: Ledger, members: Sequence[_Member], ctx: narrative.SpecContext
         "claim_uid": uid, "source": SOURCE_KIND, "review_id": ledger.review_id, "unit_ids": [unit_id],
         "cards": sorted((dict(m.card) for m in ordered if m.card), key=lambda c: ledger.alias_key(c["alias"], unit_id)),
         "off_card": all(m.off_index is not None for m in ordered),
-        "off_card_n": sum(1 for m in ordered if m.off_index is not None), "input_gap": False,
+        "off_card_n": sum(1 for m in ordered if m.off_index is not None),
+        "input_gap": any(m.noinput_index is not None for m in ordered),          # 입력 결손 호출의 영향 줄(C3-3)
         "conf": next((m.conf for m in ordered if m.conf), None), "judgement_claimed": claimed,
         "severity_claimed": sev_claimed, "nums_missing": sorted({n for m in ordered for n in m.nums}), "doc_refs": [],
         "split": any(m.split for m in ordered), "weak_subject": rep.weak_subject,
@@ -501,8 +551,11 @@ def mech_flags(finding: Mapping[str, Any], domain: str) -> list[str]:
 
 
 def _member_key(member: _Member) -> str:
-    """보고서가 판정 행·카드 밖 줄에서 그것이 들어간 finding 을 찾는 열쇠 — `card:<record_id>` · `off:<자리>`."""
-    return f"card:{member.card['record_id']}" if member.card else f"off:{member.off_index}"
+    """보고서가 판정 행·카드 밖 줄·입력 결손 영향 줄에서 그것이 들어간 finding 을 찾는 열쇠 — `card:<record_id>` · `off:<자리>` ·
+    `noinput:<자리>`."""
+    if member.card:
+        return f"card:{member.card['record_id']}"
+    return f"noinput:{member.noinput_index}" if member.noinput_index is not None else f"off:{member.off_index}"
 
 
 def build_findings(store: Any, ledger: Ledger) -> dict:
@@ -517,7 +570,8 @@ def build_findings(store: Any, ledger: Ledger) -> dict:
         unit_id = unit["unit_id"]
         # 카드 인용은 그 셀을 본 묶음의 글로 검증한다 — 묶음이 바뀐 대상에서 머리 묶음으로 보면 같은 record_id 의 다른 글에 댄다(R3B-2).
         local = dataclasses.replace(ctx, card_pack=ledger.unit_cards(unit_id))
-        members = _card_members(ledger, unit_id, local, items) + _offcard_members(ledger, unit_id, local, items)
+        members = (_card_members(ledger, unit_id, local, items) + _offcard_members(ledger, unit_id, local, items)
+                   + _noinput_members(ledger, unit_id, local, items))
         groups: dict[tuple[str, str], list[_Member]] = {}
         for member in members:
             probe = _normalize({**member.raw, "cites": [c for _p, c in member.cites]}, local,
@@ -573,6 +627,8 @@ def _scope_section(ledger: Ledger, state: str) -> dict:
             continue
         if cell_state == "failed":
             why = {"code": cell.get("error_code"), "text": cell.get("error")}
+        elif cell_state == "skipped":
+            why = {"code": "skipped", "text": cell.get("decide_note"), "by": cell.get("decided_by")}   # 넘김 — 사유(C3-4)
         elif cell.get("run_id") != run_id:
             why = {"code": "out_of_scope", "text": None}
         elif state == "blocked":
@@ -798,9 +854,12 @@ def _handoff_section(ledger: Ledger) -> list[dict]:
 
 
 def _needs_section(ledger: Ledger) -> list[dict]:
-    """필요한 추가 정보 — 보류 행의 need 와 카드 밖 호출의 need 줄. 공백을 접어 같은 글은 한 항목으로(어디서 나왔나는 모은다)."""
+    """필요한 추가 정보 — 보류 행의 need 와 카드 밖 호출의 need 줄, 입력 결손 호출이 '결측 입력이 오면 확인할 것' 으로 낸 항목(q2 —
+    검토한 셀과 입력 결손 셀 둘 다, 재설계 M3 C3-3). 공백을 접어 같은 글은 한 항목으로(어디서 나왔나는 모은다)."""
     out = []
-    for unit in ledger.reviewed():
+    for unit in ledger.units:
+        if (ledger.cells.get(unit["unit_id"]) or {}).get("state") not in ("reviewed", "no_input"):
+            continue
         items: dict[str, dict] = {}
 
         def add(text: Any, source: str) -> None:
@@ -815,10 +874,48 @@ def _needs_section(ledger: Ledger) -> list[dict]:
         _rows, rest = offcard_rows(ledger.cells[unit["unit_id"]])
         for need in rest.get("need") or ():
             add(need.get("what") if isinstance(need, Mapping) else need, "off_card")
+        for ask in noinput_rows(ledger.cells[unit["unit_id"]])["q2"]:
+            if _s(ask.get("item")).strip():
+                add(f"{_s(ask.get('item'))} — {_s(ask.get('needs'))}" if _s(ask.get("needs")) else ask.get("item"),
+                    "noinput")
         if items:
             out.append({"unit_id": unit["unit_id"], "unit_seq": unit["seq"], "title": unit["title"],
                         "items": list(items.values())})
     return out
+
+
+def _input_gap_section(ledger: Ledger, finding_of: Mapping[tuple[str, str], str]) -> dict | None:
+    """입력 결손(재설계 M3 C3-3) — 그 전문가가 입력 결손이면(ECAD 에 기대는데 ECAD 가 없다) 결손 · 영역 실마리 · 단위마다 입력 결손
+    호출의 결과(셀을 닫은 결과 · 지금 변경으로 말할 수 있는 영향 q1(카드 인용 200자) · 결측 입력이 오면 확인할 것 q2). 결손이 아닌
+    전문가는 None 이다."""
+    gaps = list(ledger.order.get("input_gaps") or ())
+    if not gaps:
+        return None
+    rows = []
+    for unit in ledger.units:
+        cell = ledger.cells.get(unit["unit_id"]) or {}
+        got = noinput_rows(cell)
+        if got["outcome"] is None and not got["q1"] and not got["q2"]:
+            continue
+        impacts = []
+        for index, row in enumerate(got["q1"]):
+            cq, cq_chars = _clip_quote(row.get("cq"), row.get("cq_chars"))
+            record_id, section = _s(row.get("record_id")), _s(row.get("section_id"))
+            impacts.append({
+                "index": index, "impact": row.get("impact"), "title": row.get("title"), "mech": row.get("mech"),
+                "mech_free": row.get("mech_free"), "path": row.get("path"), "sev": row.get("sev"), "why": row.get("why"),
+                "lines": list(row.get("l") or ()), "refs": list(row.get("refs") or ()), "refs_ok": row.get("refs_ok"),
+                "record_id": record_id or None, "cq": cq or None, "cq_chars": cq_chars,
+                "quote_ref": (f"card:{record_id}#{section}" if section else f"card:{record_id}") if record_id else None,
+                "quote_ok": row.get("quote_ok"),
+                "finding_id": finding_of.get((unit["unit_id"], f"noinput:{index}"))})
+        asks = [{"item": row.get("item"), "needs": row.get("needs"), "why": row.get("why"),
+                 "record_id": row.get("record_id"), "lines": list(row.get("l") or ())} for row in got["q2"]]
+        rows.append({"unit_id": unit["unit_id"], "unit_seq": unit["seq"], "title": unit["title"],
+                     "state": cell.get("state"), "outcome": got["outcome"], "asks_n": got["asks"],
+                     "impacts": impacts, "requests": asks})
+    return {"gaps": gaps, "domain": ledger.head["domain"], "hint": units.input_gap_hint(ledger.head["domain"]),
+            "units": rows}
 
 
 def _mechanisms_section(ledger: Ledger) -> list[dict]:
@@ -871,8 +968,8 @@ def build_report(store: Any, target_key: str, agent_key: str, *, ledger: Ledger 
     판번호·만든 시각은 싣지 않는다(m-07, 행의 revision·finalized_at 에만 있다).
 
     절은 head · scope(끝에 보지 못한 것) · checklist(점검 카드 × 카드로 본 단위마다 실효 판정 한 행, 생략 없음) · background ·
-    unjudged_cards · by_unit · off_card · handoff · needs_info · mechanisms · findings · quality(S11 의 전문가 몫 — 모듈이 없으면
-    미측정)다. 카드 인용은 판정당 200자로 싣고 원래 길이를 옆 칸에 적는다(사용자 결정 1). 그 밖의 글은 줄이지 않는다(D-21).
+    unjudged_cards · by_unit · off_card · handoff · needs_info · mechanisms · input_gap(입력 결손 전문가만 — 재설계 M3 C3-3) ·
+    findings · quality(S11 의 전문가 몫 — 모듈이 없으면 미측정)다. 카드 인용은 판정당 200자로 싣고 원래 길이를 옆 칸에 적는다(사용자 결정 1). 그 밖의 글은 줄이지 않는다(D-21).
     `findings` 를 주지 않으면 여기서 짓는다. `blocked` 는 카드 묶음을 끝내 받지 못한 전문가의 까닭이다 — 그 보고서는 아무 단위도
     보지 않았다는 것을 '보지 못한 것' 이 말한다."""
     ledger = ledger if ledger is not None else load_ledger(store, target_key, agent_key)
@@ -888,6 +985,7 @@ def build_report(store: Any, target_key: str, agent_key: str, *, ledger: Ledger 
         "background": [_card_head(ledger.pack.cards[a]) for a in ledger.pack.background] if ledger.pack is not None else [],
         "unjudged_cards": _unjudged_section(ledger), "by_unit": _by_unit_section(ledger, off_card), "off_card": off_card,
         "handoff": _handoff_section(ledger), "needs_info": _needs_section(ledger), "mechanisms": _mechanisms_section(ledger),
+        "input_gap": _input_gap_section(ledger, finding_of),
         "findings": _findings_section(findings, ledger),
         "quality": {**_quality_section(store, target_key, agent_key), "mech": _mech_quality(ledger, findings)},
     }
@@ -1261,15 +1359,16 @@ BLOCKS: tuple[str, ...] = ("background", "results", "recommendation", "minutes")
 _SECTION_BLOCK = {"head": "background", "guide": "background", "scope": "background", "checklist": "results",
                   "background": "results",
                   "unjudged_cards": "results", "by_unit": "results", "off_card": "results", "handoff": "recommendation",
-                  "needs_info": "recommendation", "mechanisms": "minutes", "findings": "results", "quality": "minutes"}
+                  "needs_info": "recommendation", "mechanisms": "minutes", "findings": "results", "quality": "minutes",
+                  "input_gap": "results"}
 # 읽는 차례(R3B-12) — 머리와 '읽는 법' 다음에 올린 finding 이 먼저 오고, 본 범위 → 단위별 분석(걸림·보류는 자세히) → 카드 밖 지적
 # → 필요한 정보·넘김 → 점검표 → 나머지 차례다. 파일럿 규모(단위 약 60)의 full 은 수십만 자라 사람이 앞 몇 쪽에서 걸린 것을 먼저 본다.
 _PART_SECTIONS = {
     "summary": ("head", "guide", "findings", "scope", "quality"),
-    "units": ("by_unit", "off_card", "handoff", "needs_info", "mechanisms"),
+    "units": ("by_unit", "input_gap", "off_card", "handoff", "needs_info", "mechanisms"),
     "cards": ("checklist", "background", "unjudged_cards"),
-    "full": ("head", "guide", "findings", "scope", "by_unit", "off_card", "needs_info", "handoff", "checklist", "background",
-             "unjudged_cards", "mechanisms", "quality"),
+    "full": ("head", "guide", "findings", "scope", "by_unit", "input_gap", "off_card", "needs_info", "handoff", "checklist",
+             "background", "unjudged_cards", "mechanisms", "quality"),
 }
 # full 의 점검표는 걸림 없음·해당 없음 행을 한 줄로 싣는다 — cards 는 모든 행을 자세히 싣는다(인용을 카드 원문과 견주는 자리).
 _COMPACT_CHECKLIST_PARTS = ("full",)
@@ -1632,9 +1731,44 @@ def _md_needs(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
     items = [f"## 필요한 추가 정보 {sum(len(u['items']) for u in units_)}건"]
     for u in units_:
         items.append(f"### 단위 {u['unit_seq']} {_q(u['title'])}")
-        items += [f"- {_q(x['text'])} — " + " · ".join("카드 밖 호출" if s == "off_card" else f"{s} 보류" for s in x["from"])
+        items += [f"- {_q(x['text'])} — " + " · ".join(_NEED_FROM.get(s) or f"{s} 보류" for s in x["from"])
                   for x in u["items"]]
     if not units_:
+        items.append("- 없음")
+    return items
+
+
+_NEED_FROM = {"off_card": "카드 밖 호출", "noinput": "입력 결손 호출 — 결측 입력이 오면 확인할 것"}
+_IMPACT_WORD = {"yes": "영향 있음", "no": "영향 없음", "unknown": "영향 모름"}
+_OUTCOME_LINE = {"impact": "지금 변경으로 말할 수 있는 영향이 있다(검토)", "none": "결측 입력이 와도 볼 것이 없다(검토)",
+                 "unknown": "영향을 가릴 수 없다(입력 결손)", "request": "결측 입력이 와야 볼 수 있다(입력 결손)"}
+
+
+def _md_input_gap(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
+    """입력 결손 절 — 그 전문가가 입력 결손이 아니면(또는 그 절이 없던 판의 보고서면) 아무것도 싣지 않는다."""
+    gap = report.get("input_gap")
+    if not gap:
+        return []
+    rows = [u for u in gap["units"] if not unit_id or u["unit_id"] == unit_id]
+    items = [f"## 입력 결손 — {' · '.join(_q(g) for g in gap['gaps'])} · 영역 {_q(gap['domain'])}"
+             + (f" · 이 영역이 볼 것 {_q(gap['hint'])}" if gap.get("hint") else "")]
+    for u in rows:
+        lines = [f"### 단위 {u['unit_seq']} {_q(u['title'])} — {_OUTCOME_LINE.get(u['outcome'], '결과 없음')}"]
+        for x in u["impacts"]:
+            lines.append(f"- {_IMPACT_WORD.get(x['impact'], _q(x['impact']))} {_q(x['title'])}"
+                         + (f" · {_sev(x['sev'])}" if _sev(x.get("sev")) else "")
+                         + f" · 메커니즘 {_q(x.get('mech') or '')} {_q(x.get('mech_free') or '')}"
+                         + (f" · finding {_q(x['finding_id'])}" if x.get("finding_id") else ""))
+            if x["impact"] != "no":
+                lines.append(f"  - 경로 {_q(x.get('path') or '')} · 이유 {_q(x.get('why') or '')}")
+                lines.append("  - " + (_quote_line("카드 인용", x["quote_ref"], x["cq"], x["cq_chars"], x["quote_ok"], word="cq")
+                                       if x.get("record_id") else "근거 경험칙 — 카드 근거 없음"))
+                lines.append(f"  - 변경 줄 {_refs(x['lines'], x['refs']) or '없음'} — {_refs_mark(x['refs'], x.get('refs_ok'))}")
+        for r in u["requests"]:
+            lines.append(f"- 입력이 오면 확인할 것 {_q(r['item'])} — 필요한 자료 {_q(r.get('needs') or '')}"
+                         if r.get("item") else f"- 입력이 와도 확인할 것 없음 — {_q(r.get('why') or '')}")
+        items.append("\n".join(lines))
+    if not rows:
         items.append("- 없음")
     return items
 
@@ -1691,6 +1825,7 @@ def _md_items(report: Mapping[str, Any], *, part: str = "full", unit_id: str | N
         "off_card": lambda: _md_off_card(report, unit_id), "handoff": lambda: _md_handoff(report, unit_id),
         "needs_info": lambda: _md_needs(report, unit_id), "mechanisms": lambda: _md_mechanisms(report, unit_id),
         "findings": lambda: _md_findings(report, unit_id), "quality": lambda: _md_quality(report),
+        "input_gap": lambda: _md_input_gap(report, unit_id),
     }
     return [(_SECTION_BLOCK[name], text) for name in _PART_SECTIONS[part] for text in render_of[name]()]
 
