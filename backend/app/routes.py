@@ -638,7 +638,7 @@ def get_runtime(request: Request, ident: identity.Identity = Depends(identity.cu
     lock = getattr(request.app.state, "runner_lock", None)
     return {
         # 검토 손잡이 + PAT 자동 등록 손잡이(HWAXRISK_PAT_RENEW_BEFORE_S · HWAXRISK_PAT_AUTO_RETRY_S) — 같은 knobs.env 에서 읽는다.
-        "knobs": {**config.review_knobs(), **config.pat_knobs()},
+        "knobs": {**config.review_knobs(), **config.pat_knobs(), **config.issue_knobs()},   # + 쟁점 손잡이(M3 S3-6)
         "knobs_file": str(config.settings.data_dir / config.KNOBS_FILENAME),
         # 박스 자격 글(GET /api/me 의 box.reasons)이 '데이터 디렉터리' 라고만 하는 그 경로(SEC-6 — 화면 글은 경로를 싣지 않는다).
         "data_dir": str(config.settings.data_dir),

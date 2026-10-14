@@ -497,6 +497,7 @@ def _merge_cluster(target_key: str, stored_key: str, base_key: str, bucket: str,
         merged["claimed"] = claimed
         merged["distribution"] = distribution
         merged["unit_ids"] = sorted({str(m["unit_id"]) for m in all_members if m.get("unit_id")})
+        merged["w_det"] = w_det             # 쟁점 우선순위가 같은 가중을 쓴다(issues.issue_priority — S3-6)
 
     row = {
         "target_key": target_key,

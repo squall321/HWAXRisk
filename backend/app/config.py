@@ -186,8 +186,15 @@ PAT_KNOBS: tuple[Knob, ...] = (
     Knob("HWAXRISK_PAT_RENEW_BEFORE_S", "risk_pat_renew_before_s", DEFAULT_PAT_RENEW_BEFORE_S, minimum=1),
     Knob("HWAXRISK_PAT_AUTO_RETRY_S", "risk_pat_auto_retry_s", DEFAULT_PAT_AUTO_RETRY_S),
 )
+# 쟁점 손잡이(재설계 M3 S3-6 · M3.md 4.6 · #28) — 과제당 쟁점 패널은 P1 을 HARD_CAP 까지 먼저, P2·P3 은 합계가 CAP 에 닿을 때까지.
+ISSUE_KNOBS: tuple[Knob, ...] = (
+    Knob("HWAXRISK_ISSUE_PANEL_CAP", "risk_issue_panel_cap", 24),
+    Knob("HWAXRISK_ISSUE_PANEL_HARD_CAP", "risk_issue_panel_hard_cap", 48),
+    Knob("HWAXRISK_ISSUE_SPLIT_MIN_OPPOSERS", "risk_issue_split_min_opposers", 2, minimum=1),
+    Knob("HWAXRISK_ISSUE_MAX_CHARGED", "risk_issue_max_charged", 2, minimum=1),   # 쟁점 하나의 내용 탓 한도(넘으면 inconclusive)
+)
 # knobs.env 가 읽는 손잡이 전부 — 출처(env · knobs.env · default)와 검증이 같다.
-BOX_KNOBS: tuple[Knob, ...] = REVIEW_KNOBS + PAT_KNOBS
+BOX_KNOBS: tuple[Knob, ...] = REVIEW_KNOBS + PAT_KNOBS + ISSUE_KNOBS
 # 손잡이 불리언의 낱말 — 그 밖의 값은 기동을 막는다(다른 스위치의 _bool 처럼 기본값으로 돌지 않는다).
 _KNOB_TRUE = ("1", "true", "yes", "on")
 _KNOB_FALSE = ("0", "false", "no", "off")
@@ -281,6 +288,10 @@ class Settings:
     risk_review_max_calls: int = 30000
     risk_pat_renew_before_s: int = DEFAULT_PAT_RENEW_BEFORE_S
     risk_pat_auto_retry_s: int = DEFAULT_PAT_AUTO_RETRY_S
+    risk_issue_panel_cap: int = 24
+    risk_issue_panel_hard_cap: int = 48
+    risk_issue_split_min_opposers: int = 2
+    risk_issue_max_charged: int = 2
     knob_sources: tuple[tuple[str, str], ...] = ()
 
 
@@ -523,6 +534,14 @@ def pat_knobs(cfg: object | None = None) -> dict[str, dict]:
     sources = dict(getattr(cfg, "knob_sources", ()) or ())
     return {knob.env: {"value": getattr(cfg, knob.attr, knob.default), "source": sources.get(knob.env, "default")}
             for knob in PAT_KNOBS}
+
+
+def issue_knobs(cfg: object | None = None) -> dict[str, dict]:
+    """GET /api/meta/runtime 의 `knobs` 에 더하는 쟁점 손잡이(M3 S3-6) — {환경변수 이름: {value, source}}."""
+    cfg = settings if cfg is None else cfg
+    sources = dict(getattr(cfg, "knob_sources", ()) or ())
+    return {knob.env: {"value": getattr(cfg, knob.attr, knob.default), "source": sources.get(knob.env, "default")}
+            for knob in ISSUE_KNOBS}
 
 
 def pat_renew_before_s(cfg: object | None = None) -> int:

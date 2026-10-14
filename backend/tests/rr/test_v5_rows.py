@@ -1,20 +1,17 @@
 # v5 새 표의 반출·이양·폐기 등록과 행 단위 반출 변환(재설계 M3 S3-1) — 행은 각 표의 생산자 걸음으로만 만든다(손 INSERT 금지)
 """S3-1 은 표와 등록·반출 변환만 넣는다. 새 표 행의 생산자는 뒤 걸음에 선다 — 등록부의 카드 인용은 S3-4(`registry.finding_scope` — 섰다),
-쟁점은 S3-6(`issues.select_issues`), 쟁점 패널은 S3-7, 완결 확인은 S3-8, 요약·보고서 판은 S3-9, 근거 꾸러미 실호출은 셀 꾸러미
-C3-12(`unit_live.ensure`)다. 생산자가 아직 없는 행 시험은 자리표시로 둔다 — 전제가 없을 때만 기대한 실패이고(strict), 전제가 서면
-몸통의 실패가 그대로 붉다. 그 걸음이 서면 표식을 지우고 이 시험을 그 생산자에 다시 묶는다(M3.md 4.2 끝 · m3-synthesis S3-1).
+쟁점은 S3-6(`issues.select_issues` — 섰다), 쟁점 패널은 S3-7, 완결 확인은 S3-8, 요약·보고서 판은 S3-9, 근거 꾸러미 실호출은 셀 꾸러미
+C3-12(`unit_live.ensure`)다. 생산자가 아직 없는 행 시험은 자리표시(strict xfail)로 두었다가 그 걸음이 서면 표식을 지우고 그
+생산자에 다시 묶는다(M3.md 4.2 끝 · m3-synthesis S3-1) — 등록부·쟁점 둘은 묶였다.
 """
 from __future__ import annotations
 
 import gzip
-import importlib
 import json
 from collections.abc import Iterator
 from typing import Any
 
-import pytest
-
-from app import export, registry, routes, units
+from app import export, issues, registry, routes, units
 from app.risk_store import RiskStore
 from tests import factories
 from tests.rr import v4_build
@@ -26,25 +23,6 @@ OWNER = factories.OWNER
 HEIR = "heir@example.com"
 V5_OWNED = ("rr_issues", "rr_summaries", "rr_reports", "rr_close_acks", "rr_unit_live")
 BY_TARGET = "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"
-
-
-class M3ProducerMissing(Exception):
-    """그 표의 생산자 걸음이 아직 없다 — 자리표시 시험의 기대한 실패는 이것 하나다."""
-
-
-def _require(module_name: str, *names: str) -> Any:
-    try:
-        module = importlib.import_module(module_name)
-    except ModuleNotFoundError as exc:
-        raise M3ProducerMissing(module_name) from exc
-    missing = [n for n in names if not hasattr(module, n)]
-    if missing:
-        raise M3ProducerMissing(f"{module_name}.{', '.join(missing)}")
-    return module
-
-
-S3_6_ISSUES = pytest.mark.xfail(strict=True, raises=M3ProducerMissing,
-                                reason="S3-6 producer — issues.select_issues(쟁점 선정)가 생기면 이 표식을 지운다")
 
 
 # ---------------------------------------------------------------- 등록
@@ -228,11 +206,9 @@ def test_registry_rows_of_a_cells_target_leave_the_box_with_card_quotes_cut_to_2
         dest.close()
 
 
-@S3_6_ISSUES
 def test_issue_rows_leave_the_box_cut_move_with_the_owner_and_purge_to_no_card_text(risk_store, monkeypatch, tmp_path):
-    """쟁점(S3-6 의 선정) — 반출에서 basis_json 의 카드 인용이 200자로 줄고 원래 길이가 실린다. 이양이 owner_sub 를 옮기고, 폐기가
-    근거·결과·좌석·재제기를 비운다(행과 상태는 남는다)."""
-    issues = _require("app.issues", "select_issues")
+    """쟁점(S3-6 생산자 — issues.select_issues) — 반출에서 basis_json 의 카드 인용이 200자로 줄고 원래 길이가 실린다. 이양이
+    owner_sub 를 옮기고, 폐기가 근거·결과·좌석·재제기를 비운다(행과 상태는 남는다)."""
     card_experts = tuple(review_rig.CARD_EXPERTS)
     key = _flagged_cells_target(risk_store, monkeypatch, tmp_path, experts=card_experts)
     registry.merge(risk_store, key)
