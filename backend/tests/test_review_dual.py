@@ -277,3 +277,28 @@ def test_the_order_flip_rate_counts_only_the_calibration_population_when_dual_is
     assert agreed[MECH1] > 0 and agreed[MECH2] > 0                       # 둘 다 견줄 행이 있다 — 모집단이 갈린다
     flips = review_quality.compute(store, key)["flips"]
     assert (flips["order_population"], flips["order"]["den"]) == ("calibration", agreed[MECH1])
+
+
+
+def test_a_solo_only_card_the_engine_marked_as_contested_gets_a_second_judgement(store):
+    """반대 검토 MEDIUM 9 — 묶음째로는 창을 넘어(pair_over) 단독으로만 본 카드의 단독 행에 엔진이 부딪침(다툼 · dup_conflict)을 알리면
+    그 카드는 두 번째 판정(그 카드 하나의 rev)을 받는다. 두 번째가 FAIL 이면 실효는 보류(split — '문제없음' 이 아니다)이고 finding 이
+    된다. 표지 없는 단독 카드는 한 번이다."""
+    fake = FakeReviewEngine(_packs())
+    key = rig.target(store, ROSTER)
+    unit_id = units.load_units(store, key)[0]["unit_id"]
+    fake.pair_over_units = {unit_id}
+    fake.solo_marks = {"K01": {"contested_by": {"verdict": ["yes", "FAIL"], "why": "다른 답은 걸렸다", "attempt": 1}}}
+    fake.rev_verdicts = {_record("K01"): ("yes", "FAIL")}
+    job_id = rig.job(store, key, scope={"agents": [MECH2], "unit_ids": [unit_id]})
+    rig.Rig(store, fake).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    revs = [[c["alias"] for c in b["cards"]] for b in _runs(fake, MECH2, "rev")]
+    assert revs == [["K01"]]
+    rows = [dict(r) for r in store.query("SELECT * FROM rr_card_verdicts WHERE target_key = ? AND agent_key = ? AND unit_id = ?"
+                                         " AND record_id = ?", (key, MECH2, unit_id, _record("K01")))]
+    eff = review_verify.effective_rows(rows)[_record("K01")]
+    assert (sorted(r["variant"] for r in rows), eff["judgement"], eff["split"]) == (["rev", "solo"], "undetermined", 1)
+    findings = [json.loads(r["finding_json"]) for r in store.query(
+        "SELECT finding_json FROM rr_findings WHERE target_key = ? AND source_kind = 'card_review'", (key,))]
+    assert findings                                                             # 보류(split)인 카드는 finding 후보다

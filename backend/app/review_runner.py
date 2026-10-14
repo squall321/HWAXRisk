@@ -1640,6 +1640,15 @@ class _Session:
                     break
             else:
                 cell.samples_done = False
+                continue
+            # 단독으로만 본 카드(fwd · rev 없음 — pair_over 따위)의 단독 행에 엔진이 부딪침을 알렸으면 그 카드 하나의 rev 로 두 번째
+            # 판정을 받는다(반대 검토 MEDIUM 9 — 종전에는 fwd 행만 보아 한 번으로 끝났다). 갈리면 실효 규칙이 보류(split)로 둔다.
+            mine = [r for r in self._rows(cell) if r["alias"] == alias]
+            if (not any(r["variant"] in ("fwd", "rev") for r in mine)
+                    and any(r["variant"] == "solo" and review_verify.engine_conflict(r) for r in mine)):
+                if not cell.alive or not self._verdict(cell, [alias], "rev", self._verdict_body(cell, [alias], "rev"),
+                                                       deck_id=decks.get(alias)):
+                    return
 
     # -- 카드 밖 -------------------------------------------------------------------------------
     def _known(self, cell: _Cell) -> list[dict]:

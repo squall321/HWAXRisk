@@ -81,6 +81,7 @@
   search_states    카드 밖 호출이 extra.search 를 실었을 때 차례로 낼 meta.search.state(ok · empty_scope · no_hits · failed — 다 쓰면
                    마지막 것을 되풀이, 비면 meta.search 를 싣지 않는다 — M2 엔진처럼). ok 면 예제 result_offcard_search_ok 의 발췌
                    셋(D01~D03)을 실은 것으로 적고 D01 을 댄 카드 밖 줄 하나를 더한다(cr-offcard-2)
+  solo_marks       별칭 → {contested_by?, flipped_from?, dup_conflict?} — 그 단독(solo) 판정 행에 엔진의 부딪침 표지를 단다
   alias_words      별칭 → checks.alias(['칸:낱말', …]) — 그 fwd 판정 행에 엔진이 별칭표로 읽은 낱말을 단다(예제 result_verdict_alias 의
                    모양, 엔진 c4e4823)
   flipped          별칭 → flipped_from{verdict, attempt, raw?} — 그 fwd 판정 행에 보충이 갈아 낀 표지를 단다(raw 가 있으면 어휘 밖
@@ -318,6 +319,7 @@ class FakeReviewEngine:
         self.flipped: dict[str, dict[str, Any]] = {}
         self.search_states: list[str] = []
         self.alias_words: dict[str, list[str]] = {}
+        self.solo_marks: dict[str, dict[str, Any]] = {}
         self.inject = ""
         self.inject_kinds: set[str] | None = None
         # 기록
@@ -577,6 +579,10 @@ class FakeReviewEngine:
                     row["checks"]["dup_conflict"] = True
                 if variant == "fwd" and row["k"] in self.alias_words:
                     row["checks"]["alias"] = list(self.alias_words[row["k"]])
+                if variant == "solo" and row["k"] in self.solo_marks:   # 단독 행의 부딪침 표지(반대 검토 MEDIUM 9)
+                    marks = self.solo_marks[row["k"]]
+                    row.update({k: copy.deepcopy(v) for k, v in marks.items() if k in ("contested_by", "flipped_from")})
+                    row["checks"]["dup_conflict"] = bool(marks.get("dup_conflict", True))
             if (self.truncated or cut == "length") and main:
                 main = main[:-1]
                 quality.update(truncated=True, tail_broken=True)
