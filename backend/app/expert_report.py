@@ -768,6 +768,18 @@ def _conflict_marks(checks: Sequence[Mapping[str, Any]]) -> dict:
             "flipped_from": dict(flipped) if flipped is not None else None, "alias_words": aliases}
 
 
+def _flipped(value: Any) -> dict | None:
+    """보충이 앞 답을 갈아 끼움(flipped_from) — {verdict[], attempt, raw?}. 없으면 None."""
+    if not isinstance(value, Mapping):
+        return None
+    verdict = value.get("verdict")
+    out = {"verdict": list(verdict) if isinstance(verdict, (list, tuple)) else [verdict] if verdict else [],
+           "attempt": value.get("attempt")}
+    if _s(value.get("raw")):
+        out["raw"] = _s(value.get("raw"))
+    return out
+
+
 def _contested(value: Any) -> dict | None:
     """다툼(contested_by) — 판정 · 이유 · 시도(카드 인용은 200자로 줄인다) · 모델이 쓴 낱말(raw — 엔진이 어휘 밖 값을 고쳤다) ·
     입력 결손 q1 의 경로와 줄(path · l, 엔진 c4e4823). 없는 칸은 싣지 않는다(종전 보고서 바이트가 그대로다)."""
@@ -979,6 +991,8 @@ def _input_gap_section(ledger: Ledger, finding_of: Mapping[tuple[str, str], str]
                 "quote_ok": row.get("quote_ok"),
                 "contested": _contested(((row.get("checks") or {}) if isinstance(row.get("checks"), Mapping) else {})
                                         .get("contested_by")),
+                "flipped_from": _flipped(((row.get("checks") or {}) if isinstance(row.get("checks"), Mapping) else {})
+                                         .get("flipped_from")),
                 "finding_id": finding_of.get((unit["unit_id"], f"noinput:{index}"))})
         asks = [{"item": row.get("item"), "needs": row.get("needs"), "why": row.get("why"),
                  "record_id": row.get("record_id"), "lines": list(row.get("l") or ())} for row in got["q2"]]
@@ -1872,9 +1886,17 @@ def _md_input_gap(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
                 lines.append(f"  - 변경 줄 {_refs(x['lines'], x['refs']) or '없음'} — {_refs_mark(x['refs'], x.get('refs_ok'))}")
             if x.get("contested"):
                 c = x["contested"]
-                lines.append("  - 검증된 철회가 이 영향을 다퉜다(영향은 선다) — " + "·".join(_q(v) for v in c["verdict"])
+                # 영향(있음 · 모름) 줄이면 검증된 철회가 다툰 것, 없음 줄이면 같은 카드의 다른 답과 부딪친 것이다(반대 검토 MEDIUM 5)
+                head = ("검증된 철회가 이 영향을 다퉜다(영향은 선다)" if x["impact"] in ("yes", "unknown")
+                        else "같은 카드의 다른 답이 이 줄과 부딪쳤다(이 줄이 선다)")
+                lines.append(f"  - {head} — " + "·".join(_q(v) for v in c["verdict"])
                              + (f" {_q(c['why'])}" if c.get("why") else "")
-                             + (f" · 경로 {_q(c['path'])}" if c.get("path") else ""))
+                             + (f" · 경로 {_q(c['path'])}" if c.get("path") else "")
+                             + (f" · 모델이 쓴 낱말 {_q(c['raw'])}" if c.get("raw") else ""))
+            if x.get("flipped_from"):
+                f = x["flipped_from"]
+                lines.append("  - 엔진 보충이 앞 답 " + "·".join(_q(v) for v in f["verdict"]) + " 을 갈아 끼웠다"
+                             + (f"(앞 답은 어휘 밖 낱말 {_q(f['raw'])} 을 고친 값)" if f.get("raw") else ""))
         for r in u["requests"]:
             lines.append(f"- 입력이 오면 확인할 것 {_q(r['item'])} — 필요한 자료 {_q(r.get('needs') or '')}"
                          if r.get("item") else f"- 입력이 와도 확인할 것 없음 — {_q(r.get('why') or '')}")

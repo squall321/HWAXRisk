@@ -283,3 +283,20 @@ def test_an_impact_is_never_lost_to_a_same_title_row_a_reask_or_a_missing_title(
     assert len(hits) == 1 and hits[0]["title"]
     findings = store.query("SELECT finding_json FROM rr_findings WHERE target_key = ? AND source_kind = 'card_review'", (key,))
     assert len(findings) == 1
+
+
+
+def test_a_flipped_or_contested_non_hit_q1_is_kept_and_named_as_such(store):
+    """반대 검토 MEDIUM 5 — 보충이 앞 답(모름 — 걸림)을 '없음' 으로 갈아 끼운 q1(flipped_from · raw)은 그 표지가 셀 기록과 보고서에
+    남는다. 없음 줄에 실린 다툼은 '검증된 철회가 이 영향을 다퉜다' 가 아니라 '같은 카드의 다른 답이 이 줄과 부딪쳤다' 다."""
+    flipped = {"verdict": ["unknown"], "attempt": 1, "raw": "모르겠음"}
+    contested = {"verdict": ["yes"], "why": "다른 답은 영향 있음이라 했다", "attempt": 1}
+    key, first, _fake = _one_gap_cell(store, [[
+        {"impact": "no", "title": "A", "flipped_from": flipped},
+        {"impact": "no", "title": "B", "k": "K01", "contested_by": contested}]])
+    q1 = json.loads(_cell(store, key, first, MEM1)["extras_json"])["noinput"]["q1"]
+    assert q1[0]["checks"]["flipped_from"] == flipped and q1[1]["checks"]["contested_by"] == contested
+    text = expert_report.render_report_md(expert_report.load_report(store, key, MEM1), part="units")
+    assert "엔진 보충이 앞 답 «unknown» 을 갈아 끼웠다(앞 답은 어휘 밖 낱말 «모르겠음» 을 고친 값)" in text
+    assert "같은 카드의 다른 답이 이 줄과 부딪쳤다(이 줄이 선다) — «yes» «다른 답은 영향 있음이라 했다»" in text
+    assert "검증된 철회가 이 영향을 다퉜다" not in text

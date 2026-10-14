@@ -47,7 +47,7 @@
                    차례로 대고(그 카드 글에서 자른 인용) 변경 줄 하나를 단다, no 줄은 카드·줄 없이 낸다(재설계 M3 C3-3)
   noinput_q2       unit_id → q2 줄의 항목 목록(빈 글 = 확인할 것 없음 — 까닭만, (항목, 필요한 자료) 쌍도 된다). 기본은 예제처럼
                    둘(첫째는 첫 카드를 댄다)
-  noinput_script   unit_id → 호출마다 차례로 쓸 q1 줄 목록([{impact, title?, path?, flipped_from?}, …] — 다 쓰면 마지막 것을 되풀이).
+  noinput_script   unit_id → 호출마다 차례로 쓸 q1 줄 목록([{impact, title?, path?, flipped_from?, contested_by?, k?}, …] — 다 쓰면 마지막 것을 되풀이).
                    주면 noinput_q1 대신 이것이 그 호출의 q1 이다(같은 제목 · 다른 경로, 제목 없는 영향, 다시 물어 올린 영향)
   noinput_more     unit_id → more=yes 로 답할 횟수(답마다 하나씩 준다 — 그 동안 quality.maybe_more 참). 다시 물으면 q1 제목 번호가
                    받은 extra.known 수 뒤에서 이어진다
@@ -755,7 +755,7 @@ class FakeReviewEngine:
                 "nums_unsourced": [], "coerced": [],
                 "mech": "no_list" if not codes else "missing" if impact == "yes" and not mech else "ok", "why": "ok"})
             if spec:
-                row.update({k: v for k, v in spec[i].items() if k in ("title", "path", "flipped_from")})
+                row.update({k: v for k, v in spec[i].items() if k in ("title", "path", "flipped_from", "contested_by", "k")})
             if alias and alias in self.contested:
                 row["contested_by"] = copy.deepcopy(self.contested[alias])
                 row["checks"]["dup_conflict"] = True
