@@ -7,7 +7,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from app import config, taxonomy
-from app.common import canonical_json, new_uuid, now_epoch
+from app.common import canonical_json, new_uuid, now_epoch, sha256_hex
 from app.errors import AppError
 
 PLANNER_VERSION = "planner-1.0"
@@ -54,7 +54,8 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "done_weak": frozenset(),
     "abstain": frozenset(),
     "skipped": frozenset(),
-    "deferred": frozenset(),
+    # 보류는 입력 결손 전문가를 전원 검토에 넣을 때 푼다(재설계 M3 C3-2 — `undefer` 하나가 연다, carried 되돌리기로는 안 풀린다).
+    "deferred": frozenset({"pending"}),
     "carried": frozenset({"pending"}),
 }
 
@@ -797,6 +798,8 @@ def revert_carried(store: Any, target_key: str, agent_key: str, *, decided_by: s
     )
     if row is None:
         raise AppError("E404", f"원장 행이 없습니다: {target_key}:{agent_key}", 404)
+    if row["status"] == "deferred":
+        raise AppError("E100", "보류(deferred) 좌석은 되돌리기로 풀지 않는다 — POST /api/targets/{key}/undefer 로 푼다.", 409)
     _guard(row["status"], "pending")
     cycle = int(row["cycle"] or 1) + 1
     now = now_epoch()
@@ -809,6 +812,44 @@ def revert_carried(store: Any, target_key: str, agent_key: str, *, decided_by: s
     return {"target_key": target_key, "agent_key": agent_key, "status": "pending", "cycle": cycle,
             "status_source": "human" if decided_by else "code", "decided_by": decided_by,
             "decided_at": now if decided_by else None}
+
+
+UNDEFER_AUDIT_KEYS = 200            # 감사 행에 싣는 전문가 키 수의 상한(나머지는 수와 해시로)
+
+
+def undefer(store: Any, target_key: str, *, decided_by: str, reason: str, agents: Sequence[str] | None = None,
+            reasons: Sequence[str] | None = None, channel: str = "rest", actor_verified: bool = True) -> dict:
+    """보류(deferred) 좌석을 pending 으로 푼다 — 같은 트랜잭션에 `rr_audit` 한 행(scope coverage · action coverage.undefer).
+
+    `agents` 를 주면 그 전문가만, `reasons` 를 주면 그 보류 사유(`rr_coverage.reason`)만 푼다. 푼 행에는 `status_source='human'`·
+    `decided_by`·`decided_at` 이 남는다(보류를 푸는 것은 사람의 잡 만들기·REST 다). 바꿀 것이 없으면 감사도 쓰지 않는다.
+    반환 {undeferred(수), agents(푼 전문가 — 로스터 순)}.
+    """
+    from app import routes  # noqa: PLC0415 — routes 는 무겁다(_audit · 과제 id).
+
+    wanted = None if agents is None else set(agents)
+    allowed = None if reasons is None else set(reasons)
+    now = now_epoch()
+    with store.tx():
+        rows = [dict(r) for r in store.query(
+            "SELECT c.agent_key, c.reason FROM rr_coverage c JOIN rr_roster r ON r.target_key = c.target_key"
+            " AND r.agent_key = c.agent_key WHERE c.target_key = ? AND c.status = 'deferred'"
+            " ORDER BY r.domain, r.rank_in_domain, c.agent_key", (target_key,))]
+        picked = [r["agent_key"] for r in rows
+                  if (wanted is None or r["agent_key"] in wanted) and (allowed is None or r["reason"] in allowed)]
+        if not picked:
+            return {"undeferred": 0, "agents": []}
+        store.executemany(
+            "UPDATE rr_coverage SET status = 'pending', reason = NULL, finished_at = NULL, updated_at = ?,"
+            " status_source = 'human', decided_by = ?, decided_at = ? WHERE target_key = ? AND agent_key = ?"
+            " AND status = 'deferred'", [(now, decided_by, now, target_key, agent) for agent in picked])
+        target = store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (target_key,))
+        routes._audit(store, decided_by, scope="coverage", subject_id=target_key, action="coverage.undefer",
+                      project_id=target["project_id"] if target is not None else None,
+                      after={"n": len(picked), "agents": picked[:UNDEFER_AUDIT_KEYS],
+                             "agents_sha": sha256_hex("\n".join(picked))[:16]},
+                      reason=reason, channel=channel, actor_verified=actor_verified)
+    return {"undeferred": len(picked), "agents": picked}
 
 
 def apply_carry_over(

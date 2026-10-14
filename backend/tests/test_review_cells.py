@@ -667,7 +667,7 @@ def test_the_job_row_carries_its_scope_knobs_and_the_user_credential(store):
     before = [tuple(r) for r in store.query("SELECT * FROM rr_coverage WHERE target_key = ? ORDER BY agent_key", (key,))]
     out = _job(store, key, scope={"domains": ["mech", "sim"], "tiers": ["A"]}, user_memo="메모")
     assert set(out) == {"job_id", "mode", "cells_total", "cells_in_scope", "experts_in_scope", "units", "calls_estimate",
-                        "credential"}
+                        "credential", "undeferred"}          # 푼 보류 좌석 수(재설계 M3 C3-2)
     assert (out["mode"], out["experts_in_scope"]) == ("reviews", 2)
     assert out["calls_estimate"] == review_runner.calls_estimate(out["cells_in_scope"], 2)
     assert out["credential"]["kind"] == "owner" and out["credential"]["email"] == OWNER
@@ -751,10 +751,10 @@ def test_refusals_for_switch_target_units_and_live_jobs(store, monkeypatch):
     assert make()["mode"] == "reviews"
 
 
-def test_refusals_for_scope_input_gaps_and_call_budget(store, monkeypatch):
-    """범위 — 모르는 칸·목록 아님·빈 목록·대상에 없는 값은 422 scope_invalid, 맞는 셀이 없으면 422 scope_empty, ECAD 가 없는데
-    ECAD 에 기대는 전문가가 들면 422 input_gap_m3. 호출 추정의 높은 끝이 상한을 넘으면 409 review_too_large, 동의 문턱을 넘는데
-    consent 가 없으면 422 consent_required."""
+def test_refusals_for_scope_and_call_budget(store, monkeypatch):
+    """범위 — 모르는 칸·목록 아님·빈 목록·대상에 없는 값은 422 scope_invalid, 맞는 셀이 없으면 422 scope_empty. 호출 추정의 높은
+    끝이 상한을 넘으면 409 review_too_large, 동의 문턱을 넘는데 consent 가 없으면 422 consent_required. 입력 결손 전문가는 거절하지
+    않는다(재설계 M3 C3-2 — 아래 시험)."""
     key = _target(store, agents=factories.agents())
     _pat(store)
 
@@ -771,10 +771,6 @@ def test_refusals_for_scope_input_gaps_and_call_budget(store, monkeypatch):
         assert (refused.code, refused.http_status, refused.detail) == ("scope_invalid", 422, detail), scope
     refused = _refused(make, {"tiers": ["A"], "agents": ["mech-syn-1"]})
     assert (refused.code, refused.http_status, refused.detail["experts"]) == ("scope_empty", 422, 0)
-    refused = _refused(make, None)
-    assert (refused.code, refused.http_status, refused.detail["agents"]) == ("input_gap_m3", 422,
-                                                                              ["pcb-syn-0", "pcb-syn-1"])
-    assert _refused(make, {"domains": ["pcb"]}).code == "input_gap_m3"
 
     scope = {"domains": ["mech"]}
     high = review_runner.calls_estimate(2 * len(_unit_ids(store, key)), 2)["high"]
@@ -788,6 +784,88 @@ def test_refusals_for_scope_input_gaps_and_call_budget(store, monkeypatch):
                                                                             "HWAXRISK_REVIEW_CONSENT_CALLS")
     assert store.query_one("SELECT COUNT(*) AS n FROM rr_review_cells WHERE target_key = ?", (key,))["n"] == 0
     assert make(scope)["calls_estimate"]["high"] == high
+
+
+# ---------------------------------------------------------------- 전원 포함 · 보류 해제(재설계 M3 C3-2)
+def _undefer_audits(store, key: str) -> list[dict]:
+    return [dict(r) for r in store.query(
+        "SELECT actor, actor_verified, channel, scope, subject_id, action, after_json, reason FROM rr_audit"
+        " WHERE subject_id = ? AND action = 'coverage.undefer' ORDER BY at", (key,))]
+
+
+def test_input_gap_experts_join_the_scope_and_their_deferred_seats_open_with_the_job(store):
+    """ECAD 에 기대는데 ECAD 가 없는 전문가도 범위에 든다(422 input_gap_m3 는 없다). 카드 대조 대상이면 범위 안의 보류(deferred ·
+    ecad_absent) 좌석이 잡을 만드는 트랜잭션에서 pending 으로 풀리고 감사 한 행(coverage.undefer · review_scope)이 남는다 — 풀지
+    않으면 원장 마감이 그 행을 건드리지 않아 종결 어휘(deferred)로 남는다(거짓 완결)."""
+    key = _target(store, agents=factories.agents())          # pcb-syn-0 은 입력 결손 1순위, pcb-syn-1 은 보류 좌석
+    order = planner.review_order(store, key)
+    assert {r["agent_key"] for r in order if r["input_gaps"]} == {"pcb-syn-0", "pcb-syn-1"}
+    assert _coverage(store, key, "pcb-syn-1")["status"] == "deferred"
+
+    job = _job(store, key)                                     # 범위를 빼면 로스터 전원이다
+    assert (job["experts_in_scope"], job["undeferred"]) == (len(order), 1)
+    seat = dict(store.query_one("SELECT status, reason, status_source, decided_by FROM rr_coverage WHERE target_key = ?"
+                                " AND agent_key = 'pcb-syn-1'", (key,)))
+    assert seat == {"status": "pending", "reason": None, "status_source": "human", "decided_by": OWNER}
+    assert {c["agent_key"] for c in _cells(store, key) if c["run_id"] == job["job_id"]} == {r["agent_key"] for r in order}
+    audits = _undefer_audits(store, key)
+    assert len(audits) == 1
+    audit = audits[0]
+    assert (audit["actor"], audit["actor_verified"], audit["channel"], audit["scope"], audit["reason"]) == (
+        OWNER, 1, "rest", "coverage", "review_scope")
+    assert json.loads(audit["after_json"])["agents"] == ["pcb-syn-1"] and json.loads(audit["after_json"])["n"] == 1
+    assert planner.check_invariants(store, key) == []
+
+
+def test_only_deferred_seats_in_the_scope_open_and_panel_targets_keep_theirs(store):
+    """범위 밖의 보류는 그대로다(감사도 없다). 패널 대상에 얹은 검토는 보류를 풀지 않는다 — 원장을 닫지 않는 길이고 패널 편성이
+    바뀐다(M2.md 5절 #8). 사람이 원하면 REST 로 푼다."""
+    key = _target(store, agents=factories.agents())
+    job = _job(store, key, scope={"domains": ["mech"]})
+    assert job["undeferred"] == 0 and _coverage(store, key, "pcb-syn-1")["status"] == "deferred"
+    assert _undefer_audits(store, key) == []
+
+    panels = _target(store, agents=factories.agents(), flow="panels", seed=7)
+    units.build_units(store, panels, built_by=OWNER, reason="패널 대상에 얹은 검토")
+    out = _job(store, panels, scope={"domains": ["pcb"]})
+    assert out["undeferred"] == 0 and _coverage(store, panels, "pcb-syn-1")["status"] == "deferred"
+
+
+def test_the_undefer_route_needs_a_reason_waits_for_live_jobs_and_says_the_level_does_not_drop(store):
+    """POST /targets/{key}/undefer — 사유 4~300자(422 reason_required), 도는 잡이 있으면 409 job_live, 바꿀 것이 없으면 200 changed:false.
+    푼 좌석과 감사 한 행이 남고, 응답은 저장된 레벨이 내려가지 않는다는 것과 영역 깊이를 싣는다."""
+    key = _target(store, agents=factories.agents(), flow="panels")
+    body = routes.UndeferBody(reason="회로 전문가도 패널에 앉힌다")
+    me = factories.ident(OWNER)
+    for reason in ("", "짧다", "x" * 301):
+        assert _refused(routes.post_undefer, key, routes.UndeferBody(reason=reason), ident=me).code == "reason_required"
+    units.build_units(store, key, built_by=OWNER, reason="패널 대상에 얹은 검토")
+    job = _job(store, key, scope={"domains": ["mech"]})
+    refused = _refused(routes.post_undefer, key, body, ident=me)
+    assert (refused.code, refused.http_status, refused.detail["jobs"][0]["id"]) == ("job_live", 409, job["job_id"])
+    runner.cancel_job(store, job["job_id"], by=OWNER)
+
+    out = routes.post_undefer(key, body, ident=me)
+    assert (out["undeferred"], out["agents"], out["agents_total"], out["changed"]) == (1, ["pcb-syn-1"], 1, True)
+    assert "내려가지 않는다" in out["note"] and "pcb" in out["depth"]
+    assert _coverage(store, key, "pcb-syn-1")["status"] == "pending"
+    again = routes.post_undefer(key, body, ident=me)
+    assert (again["undeferred"], again["changed"]) == (0, False)
+    audits = _undefer_audits(store, key)
+    assert [(a["channel"], a["reason"], a["actor_verified"]) for a in audits] == [("rest", body.reason, 1)]
+    delegated = identity.Identity(email=OWNER, display_name="합성", role="user", organization="qa", anonymous=False,
+                                  source="sso")
+    seeded = _target(store, agents=factories.agents(), flow="panels", seed=8)
+    routes.post_undefer(seeded, body, ident=delegated)
+    assert [(a["channel"], a["actor_verified"]) for a in _undefer_audits(store, seeded)] == [("mcp", 0)]
+
+
+def test_a_carried_revert_does_not_open_a_deferred_seat(store):
+    """보류는 undefer 한 문으로만 풀린다 — 이월 되돌리기(PUT coverage status=pending)는 보류 좌석에 409 다."""
+    key = _target(store, agents=factories.agents(), flow="panels")
+    refused = _refused(planner.revert_carried, store, key, "pcb-syn-1")
+    assert (refused.code, refused.http_status) == ("E100", 409)
+    assert _coverage(store, key, "pcb-syn-1")["status"] == "deferred"
 
 
 def test_a_target_whose_panel_awaits_repersist_refuses_a_review_job(store, monkeypatch):

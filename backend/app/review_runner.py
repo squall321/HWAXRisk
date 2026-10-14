@@ -167,25 +167,28 @@ def _refuse_live_jobs(store: Any, target_key: str) -> None:
 
 def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_sub: str | None = None,
                       scope: Mapping[str, Any] | None = None, user_memo: str | None = None, consent: bool = False,
-                      consent_source: str | None = None, settings: Any | None = None) -> dict:
+                      consent_source: str | None = None, settings: Any | None = None, channel: str = "rest",
+                      actor_verified: bool = True) -> dict:
     """검토 잡 1건을 세운다 — 네트워크를 부르지 않는다(격자와 범위는 여기서, 카드 묶음·호출은 루프가).
 
     범위는 `{tiers?, domains?, agents?, unit_ids?}`(칸끼리 AND, 빠진 칸은 전부)다. 격자는 범위와 상관없이 로스터 전원 × 검토
     대상 단위이고, 범위는 그 가운데 이 잡이 집을 셀이다(X1-27 — 범위 밖 셀은 pending 으로 남는다).
     거절 — 409 review_disabled(HWAXRISK_REVIEW_ENABLED=0) · 404 E404 · 409 review_job_exists · 409 review_in_flight(그 대상의
-    전문가·셀이 아직 running — 끝난 잡의 워커가 놓기를 기다린다) · 409 panel_job_running · 409 repersist_pending · 422 units_absent(활성 빌드가 ok·oversize 가 아니다) · 422 scope_invalid · 422 scope_empty · 422
-    input_gap_m3(범위에 ECAD 에 기대는데 ECAD 가 없는 전문가 — 입력 결손 호출은 M3) · 409 review_too_large(높은 끝 추정이
-    HWAXRISK_REVIEW_MAX_CALLS 초과) · 422 consent_required(HWAXRISK_REVIEW_CONSENT_CALLS 초과인데 consent 가 없다) · 422
-    pat_unavailable(쓸 사용자 PAT 가 없다 — 포털에서 PAT 를 등록한다, 서비스 계정으로 내려가지 않는다).
+    전문가·셀이 아직 running — 끝난 잡의 워커가 놓기를 기다린다) · 409 panel_job_running · 409 repersist_pending · 422 units_absent(활성 빌드가 ok·oversize 가 아니다) · 422 scope_invalid · 422 scope_empty ·
+    409 review_too_large(높은 끝 추정이 HWAXRISK_REVIEW_MAX_CALLS 초과) · 422 consent_required(HWAXRISK_REVIEW_CONSENT_CALLS 초과인데
+    consent 가 없다) · 422 pat_unavailable(쓸 사용자 PAT 가 없다 — 포털에서 PAT 를 등록한다, 서비스 계정으로 내려가지 않는다).
+    입력 결손 전문가(ECAD 에 기대는데 ECAD 가 없다)도 범위에 받는다(재설계 M3 C3-2 — 그 셀은 입력 결손 호출로 닫힌다). 카드 대조
+    대상(`flow='cells'`)이면 범위 안 전문가의 보류(`deferred` · `ecad_absent`) 좌석을 같은 트랜잭션에서 pending 으로 풀고 감사 한 행을
+    남긴다(풀지 않으면 원장 마감이 그 행을 건드리지 않아 종결 어휘로 남는다 — 거짓 완결). 패널 대상에 얹은 검토는 풀지 않는다.
     반환 {job_id, mode, cells_total, cells_in_scope, experts_in_scope, units, calls_estimate{low, high},
-    credential{kind, email, exp}, credential_note?}. 높은 끝 추정 소요(호출 × 300초 ÷ 동시 수)가 PAT 남은 수명보다 길거나
-    요청자 PAT 를 수명 때문에 건너뛰었으면 `credential_note` 로 미리 알린다.
+    credential{kind, email, exp}, undeferred, credential_note?}. 높은 끝 추정 소요(호출 × 300초 ÷ 동시 수)가 PAT 남은 수명보다 길거나
+    요청자 PAT 를 수명 때문에 건너뛰었으면 `credential_note` 로 미리 알린다. `channel`·`actor_verified` 는 보류 해제 감사 행의 입구다.
     """
     from app import routes  # noqa: PLC0415 — routes 는 runner·planner 를 거쳐 무겁다(같은 문을 쓴다).
 
     cfg = config.settings if settings is None else settings
     routes.require_review_enabled(cfg)
-    target = store.query_one("SELECT target_key FROM rr_targets WHERE target_key = ?", (target_key,))
+    target = store.query_one("SELECT target_key, flow FROM rr_targets WHERE target_key = ?", (target_key,))
     if target is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
     _refuse_live_jobs(store, target_key)
@@ -197,12 +200,6 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
     unit_rows = units.load_units(store, target_key, reviewable_only=True)
     order = planner.review_order(store, target_key)
     picked = resolve_scope(scope, order, unit_rows)
-    gaps = [r for r in picked["experts"] if r["input_gaps"]]
-    if gaps:
-        raise AppError("input_gap_m3", f"범위에 입력 결손 전문가 {len(gaps)}명이 있다(ECAD 에 기대는데 이 대상에 ECAD 가 없다)"
-                       " — 입력 결손 호출은 M3 다. 범위(domains·agents)에서 빼고 만든다.", 422,
-                       detail={"agents": [r["agent_key"] for r in gaps],
-                               "input_gaps": sorted({g for r in gaps for g in r["input_gaps"]})})
     agents = [r["agent_key"] for r in picked["experts"]]
     states = {(r["unit_id"], r["agent_key"]): r["state"] for r in store.query(
         "SELECT unit_id, agent_key, state FROM rr_review_cells WHERE target_key = ?", (target_key,))}
@@ -245,6 +242,10 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
         _refuse_live_jobs(store, target_key)
         plan = review_cells.plan_cells(store, target_key, now=now)
         review_cells.assign_scope(store, target_key, job_id, agents=agents, unit_ids=picked["unit_ids"], now=now)
+        undeferred = (planner.undefer(store, target_key, decided_by=requester_sub or owner_sub, reason="review_scope",
+                                      agents=agents, reasons=("ecad_absent",), channel=channel,
+                                      actor_verified=actor_verified)["undeferred"]
+                      if target["flow"] == "cells" else 0)
         store.execute(
             "INSERT INTO rr_jobs(id, target_key, owner_sub, tier, state, concurrency, params_json, progress_json,"
             " credential_email, panels_done, panels_total, created_at, updated_at, mode)"
@@ -253,7 +254,7 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
              canonical_json({"mode": MODE, "phase": "pack"}), credential["email"], now, now, MODE))
     out = {"job_id": job_id, "mode": MODE, "cells_total": plan["cells_total"],
            "cells_in_scope": len(agents) * len(picked["unit_ids"]), "experts_in_scope": len(agents),
-           "units": plan["units"], "calls_estimate": estimate, "credential": credential}
+           "units": plan["units"], "calls_estimate": estimate, "credential": credential, "undeferred": undeferred}
     if notes:
         out["credential_note"] = " · ".join(notes)
     return out

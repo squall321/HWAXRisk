@@ -258,12 +258,13 @@ def _require_user(ident: identity.Identity) -> str:
 
 def _audit(store: Any, owner_sub: str, *, scope: str, subject_id: str, action: str,
            project_id: str | None = None, before: Any = None, after: Any = None,
-           reason: str | None = None, channel: str = "rest") -> None:
-    """rr_audit 1행(append-only, 사람 행위 한정 — plan §0.6). 열람(GET)은 남기지 않는다."""
+           reason: str | None = None, channel: str = "rest", actor_verified: bool = True) -> None:
+    """rr_audit 1행(append-only, 사람 행위 한정 — plan §0.6). 열람(GET)은 남기지 않는다. MCP 길의 행위자는 `actor_verified=False`
+    (§6.11 — 게이트웨이가 넘긴 신원이다)."""
     store.execute(
         "INSERT INTO rr_audit(id, owner_sub, actor, actor_verified, channel, scope, subject_id, project_id,"
-        " action, before_json, after_json, reason, at) VALUES (?,?,?,1,?,?,?,?,?,?,?,?,?)",
-        (new_uuid(), owner_sub, owner_sub, channel, scope, subject_id, project_id, action,
+        " action, before_json, after_json, reason, at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (new_uuid(), owner_sub, owner_sub, int(bool(actor_verified)), channel, scope, subject_id, project_id, action,
          canonical_json(before) if before is not None else None,
          canonical_json(after) if after is not None else None, reason, now_epoch()),
     )
@@ -2934,9 +2935,11 @@ def create_job(target_key: str, body: JobBody,
     consent_source = CONSENT_SOURCES.get(ident.source, ident.source)
     if body.mode == "reviews":
         store = get_store()
+        channel = AUDIT_CHANNELS.get(ident.source, "rest")
         out = review_runner.create_review_job(store, target_key, owner_sub=row["owner_sub"], requester_sub=email,
                                               scope=body.scope, user_memo=body.user_memo, consent=body.consent,
-                                              consent_source=consent_source)
+                                              consent_source=consent_source, channel=channel,
+                                              actor_verified=channel != "mcp")
         params = _loads(store.query_one("SELECT params_json FROM rr_jobs WHERE id = ?", (out["job_id"],))["params_json"], {})
         _audit(store, email, scope="job", subject_id=out["job_id"], project_id=row["project_id"], action="job.create",
                after={"mode": out["mode"], "target_key": target_key, "scope": params.get("scope") or {},
@@ -3003,6 +3006,56 @@ def put_coverage(target_key: str, agent_key: str, body: CoverageBody,
                project_id=row["project_id"], action=action, before={"status": before["status"]},
                after={"status": out["status"]}, reason=body.reason)
     return out
+
+
+# ---------------------------------------------------------------- 사람의 처분(재설계 M3 C3-2 · C3-4)
+REASON_MIN, REASON_MAX = 4, 300
+
+
+def _human_reason(text: str | None) -> str:
+    """처분·보류 해제의 사유 — 앞뒤 공백을 떼고 4~300자. 아니면 422 reason_required(조용히 자르지 않는다)."""
+    reason = (text or "").strip()
+    if not REASON_MIN <= len(reason) <= REASON_MAX:
+        raise AppError("reason_required", f"사유를 {REASON_MIN}~{REASON_MAX}자로 적는다 — 지금 {len(reason)}자.", 422,
+                       detail={"min": REASON_MIN, "max": REASON_MAX, "chars": len(reason)})
+    return reason
+
+
+class UndeferBody(BaseModel):
+    reason: str
+
+
+UNDEFER_LIST_MAX = 50
+
+
+@router.post("/targets/{target_key}/undefer")
+def post_undefer(target_key: str, body: UndeferBody, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """보류(deferred) 좌석을 사람이 푼다(재설계 M3 C3-2) — 패널 대상(검토를 얹은 대상 포함)의 길이다. 카드 대조 대상은 검토 잡을 만들
+    때 범위 안 보류가 저절로 풀린다. editor 이상, 사유 4~300자(422 reason_required), 그 대상에 도는 잡(어느 방식이든)이 있으면 409
+    job_live(편성 도중에 좌석이 바뀌지 않게). 바꿀 것이 없으면 200 changed:false. 감사 한 행(coverage.undefer).
+    반환 {target_key, undeferred, agents[≤50], agents_total, changed, level, note, depth{영역: {need, have, roster, deferred}}} —
+    저장된 레벨은 내려가지 않는다(분모가 커져도 이미 오른 레벨은 그대로이고 depth 가 지금의 깊이를 보인다, W2-16 (c))."""
+    email = _require_user(ident)
+    store = get_store()
+    row = store.query_one("SELECT owner_sub, project_id FROM rr_targets WHERE target_key = ?", (target_key,))
+    if row is None:
+        raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
+    if not _is_admin(ident):
+        require_role(row["project_id"], email, "editor")
+    reason = _human_reason(body.reason)
+    live = _live_jobs(store, target_key)
+    if live:
+        raise AppError("job_live", f"이 대상에 도는 잡이 있다({live[0]['id']}, {live[0]['mode']} · {live[0]['state']}) — 그 잡이 끝나거나"
+                       " 취소된 뒤 보류를 푼다.", 409, detail={"jobs": [{"id": j["id"], "mode": j["mode"], "state": j["state"]}
+                                                              for j in live]})
+    channel = AUDIT_CHANNELS.get(ident.source, "rest")
+    out = planner.undefer(store, target_key, decided_by=email, reason=reason, channel=channel,
+                          actor_verified=channel != "mcp")
+    level = registry_module.close_level(store, target_key, persist=False)
+    return {"target_key": target_key, "undeferred": out["undeferred"], "agents": out["agents"][:UNDEFER_LIST_MAX],
+            "agents_total": len(out["agents"]), "changed": bool(out["undeferred"]), "level": level["level"],
+            "note": "저장된 레벨은 내려가지 않는다 — 푼 좌석이 영역 깊이의 분모에 든다(depth).",
+            "depth": (level.get("detail") or {}).get("depth")}
 
 
 # ================================================================ 커버리지·등록부·패널

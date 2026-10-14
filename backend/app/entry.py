@@ -856,8 +856,8 @@ def _review_start_step(target_key: str) -> dict:
     return _step("risk_start_job", {"target_key": target_key, "mode": "reviews", "scope": {"agents": ["<agent_key>", "…"]}},
                  "카드 대조 검토 잡을 세운다 — 범위의 전문가는 facts.review_order(영역마다 영역 안 순위 1~3 — 영역 · 영역 안 순위 ·"
                  " tier · 입력 결손 · 묶음을 얼린 뒤의 카드 수, 전부는 risk_get_coverage(order_offset=0) 가 쪽으로 준다)를 보고 사용자가"
-                 " 고른다(M2 파일럿은 영역마다 대표 한 명 — 영역 안 순위 1 이고 input_gaps 가 빈 전문가). 입력 결손 전문가를 넣으면 422"
-                 " input_gap_m3 다. 범위 밖 셀은 pending 으로 남아 다음 잡이 돌 수 있다. 잡을 만들면"
+                 " 고른다(scope 를 빼면 로스터 전원 — 입력 결손 전문가도 들고 그 셀은 입력 결손 호출로 닫힌다, M2 파일럿은 영역마다 대표"
+                 " 한 명 — 영역 안 순위 1). 범위 밖 셀은 pending 으로 남아 다음 잡이 돌 수 있다. 잡을 만들면"
                  " 호출 수 추정(calls_estimate)이 나오고 HWAXRISK_REVIEW_CONSENT_CALLS 를 넘으면 동의가 필요하다 — 범위와 비용을 사용자에게"
                  " 보이고 확인받은 뒤 부른다." + _CONSENT_WHY)
 
@@ -938,14 +938,12 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
         credential, why = review_runner.review_credential(store, None, owner, ident.email)
         if credential is None:
             blocked.append(_blocked("pat_unavailable", f"카드 대조 검토는 사용자 PAT 로만 돈다 — {why}.", fix_register_pat()))
-        runnable = [r["agent_key"] for r in order if not r.get("input_gaps")]
-        left = int(store.query_one(
-            f"SELECT COUNT(*) AS n FROM rr_review_cells WHERE target_key = ? AND state = 'pending'"
-            f" AND agent_key IN ({','.join('?' * len(runnable)) or 'NULL'})", (target_key, *runnable))["n"] or 0)
+        left = int(store.query_one("SELECT COUNT(*) AS n FROM rr_review_cells WHERE target_key = ? AND state = 'pending'",
+                                   (target_key,))["n"] or 0)
         if job is None or left:
             steps.append(_review_start_step(target_key))
             if job is not None:
-                notes.append(f"범위 밖으로 남은 셀이 {left}개다(입력 결손이 아닌 전문가) — 범위를 넓혀 새 검토 잡으로 이어 돈다.")
+                notes.append(f"범위 밖으로 남은 셀이 {left}개다 — 범위를 넓혀 새 검토 잡으로 이어 돈다.")
     if job is None:
         steps.append(_step("risk_get_units", {"target_key": target_key},
                            "검토 단위 목록(전문가가 카드로 대조할 변경 묶음).", write=False))

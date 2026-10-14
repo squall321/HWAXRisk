@@ -64,7 +64,7 @@ REPORT_META_KEYS = {"target_key", "agent_key", "state", "version", "report_hash"
 REPORT_PAGE_KEYS = REPORT_META_KEYS | {"format", "part", "unit_id", "pages_total", "page_no", "page"}   # + next_page
 PAGE_KEYS = {"page_no", "kind", "title", "blocks"}
 REVIEW_JOB_KEYS = {"job_id", "mode", "cells_total", "cells_in_scope", "experts_in_scope", "units", "calls_estimate",
-                   "credential"}                                            # + credential_note(미리 알릴 것이 있을 때)
+                   "credential", "undeferred"}                              # + credential_note(미리 알릴 것이 있을 때)
 
 
 @pytest.fixture
