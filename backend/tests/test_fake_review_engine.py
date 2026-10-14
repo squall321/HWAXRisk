@@ -247,7 +247,7 @@ def test_health_and_the_request_log(tmp_path):
     fake = FakeReviewEngine()
     client = _client(tmp_path, fake)
     health = client.health()
-    assert health["card_review"] == {"capable": True, "active": 0, "limit": 4, "limit_reason": "normal",
+    assert health["card_review"] == {"capable": True, "active": 0, "limit": 8, "limit_reason": "normal",   # 관문 8(D-34)
                                      "request_worst_s": 10824, "error": None}
     fake.gate_limit = 2
     assert client.health()["card_review"]["limit"] == 2 and client.limits(email=USER)["gate"]["limit"] == 2

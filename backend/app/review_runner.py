@@ -1863,7 +1863,10 @@ class ReviewLoop:
                                      "note": str(error)})
             return []
         runnable = lim.get("runnable") if isinstance(lim.get("runnable"), Mapping) else {}
-        if lim.get("ctx_too_small") or (runnable and not all(runnable.values())):
+        # 셀이 부르는 종류(cell_kinds)만 본다 — 요약(summary)만 못 도는 박스는 셀 일을 멈추지 않는다(M3.md 4.3). cell_kinds 가 없는
+        # 옛 엔진은 runnable 전부가 셀 종류다.
+        cell_kinds = lim.get("cell_kinds") if isinstance(lim.get("cell_kinds"), list) else list(runnable)
+        if lim.get("ctx_too_small") or any(runnable.get(k) is False for k in cell_kinds):
             small = lim.get("ctx_too_small") if isinstance(lim.get("ctx_too_small"), Mapping) else {}
             need = small.get("need_ctx_tokens")
             for job in live:

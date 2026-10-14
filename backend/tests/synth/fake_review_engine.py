@@ -77,8 +77,8 @@ CONTRACT = Path(__file__).resolve().parents[1] / "fixtures" / "card_review" / "c
 # 엔진 요청 모델(card_review.RunRequest·PlanRequest·PackRequest 와 안쪽 항목)의 칸 — 선언 밖 칸은 422 unknown_fields.
 IDENT_FIELDS = frozenset({"groups", "user_email", "user_pat", "entitlements"})
 RUN_SHAPE: dict[str, frozenset[str]] = {
-    "": frozenset({"kind", "variant", "target_key", "expert", "cards", "digest", "unit", "manifest", "extra", "expect"})
-    | IDENT_FIELDS,
+    "": frozenset({"kind", "variant", "target_key", "expert", "cards", "digest", "unit", "manifest", "extra", "expect",
+                   "summary"}) | IDENT_FIELDS,
     "expert": frozenset({"key", "name", "domain", "role"}),
     "digest": frozenset({"alias", "type", "title", "record_id", "card_id"}),
     "unit": frozenset({"unit_id", "kind", "title", "summary", "notes", "lines", "context", "evidence", "missing",
@@ -88,7 +88,13 @@ RUN_SHAPE: dict[str, frozenset[str]] = {
     "unit.evidence": frozenset({"ref", "text", "owner_unit"}),
     "unit.missing": frozenset({"kind", "note"}),
     "manifest": frozenset({"unit_id", "kind", "title", "text"}),
-    "extra": frozenset({"domains", "mechanisms", "known"}),
+    "extra": frozenset({"domains", "mechanisms", "known", "missing", "search"}),
+    "extra.missing": frozenset({"kind", "note"}),
+    "extra.search": frozenset({"queries"}),
+    "summary": frozenset({"scope", "rows", "must_cover", "blocks"}),
+    "summary.scope": frozenset({"kind", "key", "label"}),
+    "summary.rows": frozenset({"ref", "text"}),
+    "summary.blocks": frozenset({"name", "title", "text"}),
     "extra.domains": frozenset({"key", "label"}),
     "extra.mechanisms": frozenset({"code", "label"}),
     "extra.known": frozenset({"alias", "judgement", "why"}),
@@ -590,10 +596,26 @@ class FakeReviewEngine:
                            "nums_unsourced": [], "need": "ok", "coerced": []}}
 
     def _mech(self, row: dict, body: Mapping[str, Any], variant: str | None) -> dict:
-        """대본(mechs·solo_mechs)이 있으면 v 줄에 mech·mech_free 를 싣는다 — 열쇠는 (전문가, record_id) 가 먼저, 없으면 record_id."""
+        """v 줄의 mech·mech_free 와 checks.mech — 엔진 `_check_mech` 그대로(cr-verdict-2). 대본(mechs·solo_mechs)이 있으면 그 값을
+        싣는다 — 열쇠는 (전문가, record_id) 가 먼저, 없으면 record_id. 요청에 메커니즘 목록이 없으면 칸을 비우고 no_list, 목록 밖
+        코드는 free 로 고치고 원래 값을 mech_free 에, 걸린 줄(WARNING·FAIL)인데 비면 missing, 그 밖은 ok·free 다."""
         agent, record_id = str((body.get("expert") or {}).get("key") or ""), str(row.get("record_id") or "")
         mech = self.solo_mechs.get((agent, record_id), self.solo_mechs.get(record_id)) if variant == "solo" else None
         mech = mech or self.mechs.get((agent, record_id), self.mechs.get(record_id))
-        if mech is not None:
-            row["mech"], row["mech_free"] = mech
+        row["mech"], row["mech_free"] = mech if mech is not None else ("", "")
+        codes = {str(m.get("code")) for m in ((body.get("extra") or {}).get("mechanisms") or ()) if isinstance(m, Mapping)}
+        if not codes:
+            if row["mech"] and row["mech"] != "free":
+                row["mech_free"] = row["mech_free"] or row["mech"]
+            row["mech"] = ""
+            row["checks"]["mech"] = "no_list"
+            return row
+        if row["mech"] and row["mech"] != "free" and row["mech"] not in codes:
+            row["checks"]["coerced"].append(f"mech:{row['mech']}")
+            row["mech_free"] = row["mech_free"] or row["mech"]
+            row["mech"] = "free"
+        if row["judgement"] in ("WARNING", "FAIL") and not row["mech"]:
+            row["checks"]["mech"] = "missing"
+        else:
+            row["checks"]["mech"] = "free" if row["mech"] == "free" else "ok"
         return row

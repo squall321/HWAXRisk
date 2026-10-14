@@ -733,7 +733,25 @@ def test_a_window_too_small_for_any_call_holds_ctx_too_small_before_any_call(sto
     r.tick()
     row = rig.job_row(store, job_id)
     assert (row["state"], row["hold_code"]) == ("paused", "ctx_too_small")
-    assert "11,246" in row["error"] and fake.runs == 0 and fake.calls("pack") == []
+    need = fre.load("limits_ctx_too_small.json")["ctx_too_small"]["need_ctx_tokens"]      # 계약 예제가 정한 필요 창
+    assert f"{need:,}" in row["error"] and fake.runs == 0 and fake.calls("pack") == []
+
+
+def test_a_box_that_cannot_run_only_the_summary_keeps_reviewing_cells(store, monkeypatch):
+    """ctx_too_small 은 셀이 부르는 종류(cell_kinds)만 본다 — 요약(summary)만 못 도는 박스는 셀 일을 멈추지 않는다(M3.md 4.3). 셀 종류
+    하나라도 못 돌면 지금처럼 멈춘다."""
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    limits = fre.load("limits_1m.json")
+    limits["runnable"] = {**limits["runnable"], "summary": False}
+    rig.Rig(store, FakeReviewEngine({SEAL: fre.load("pack_ok.json")}, limits=limits)).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    other = rig.target(store, seed=5)
+    held = rig.job(store, other, scope={"agents": [SEAL]})
+    limits["runnable"] = {**limits["runnable"], "noinput": False}
+    r = rig.Rig(store, FakeReviewEngine({SEAL: fre.load("pack_ok.json")}, limits=limits))
+    r.tick()
+    assert (rig.job_row(store, held)["state"], rig.job_row(store, held)["hold_code"]) == ("paused", "ctx_too_small")
 
 
 def test_a_pair_over_unit_runs_that_decks_cards_solo(store, monkeypatch):
@@ -1171,7 +1189,7 @@ def test_a_revision_change_mid_job_replans_and_carries_on_and_a_real_mismatch_ho
 
     key, job_id, fake, r, gate = _stalled(store, monkeypatch, 3)
     if change == "prompt":
-        fake.base_limits["prompt_rev"]["verdict"] = "cr-verdict-2"
+        fake.base_limits["prompt_rev"]["verdict"] = "cr-verdict-next"          # 지금 판(계약 예제)과 다른 판
     elif change == "limits":
         fake.limits_rev = "limits-rev-2"
     else:

@@ -185,8 +185,10 @@ def test_every_metric_of_the_full_grid_equals_the_hand_count(store):
     key, job_id, fake, order = _full(store)
     res = review_quality.compute(store, key)
 
-    assert (res["policy_version"], res["model"], res["limits_rev"]) == ("rq-1", "fake-glm", "21349c51")
-    assert res["prompt_rev"] == "offcard=cr-offcard-1,sweep=cr-sweep-1,verdict=cr-verdict-1"
+    assert (res["policy_version"], res["model"], res["limits_rev"]) == (
+        "rq-1", "fake-glm", fre.load("limits_1m.json")["limits_rev"])           # 창 판은 계약 예제의 것이다
+    revs = fre.load("limits_1m.json")["prompt_rev"]                         # 판은 계약 예제의 것이다
+    assert res["prompt_rev"] == f"offcard={revs['offcard']},sweep={revs['sweep']},verdict={revs['verdict']}"
     assert res["revs"]["mixed"] is False
     # K — 엔진 limits 의 verdict.k(계약 예제 8)를 계획이 머리에 얼린 값. 묶음을 받아 계획을 짠 전문가마다 센다(R3B-10).
     planned = sum(1 for r in store.query("SELECT plan_json FROM rr_expert_reports WHERE target_key = ?", (key,))
