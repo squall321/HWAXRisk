@@ -460,7 +460,7 @@ def test_a_resolved_issue_comes_back_only_when_its_raisers_change(store, monkeyp
     resolved = _issue(store, key, anchor)
     assert resolved["state"] == "resolved"
     issues.select_issues(store, key, selected_round=2)
-    assert _issue(store, key, anchor)["state"] == "resolved"
+    assert (_issue(store, key, anchor)["state"], _issue(store, key, anchor)["reraised_json"]) == ("resolved", None)
     _review(store, key, ("mech-syn-0",), [unit], verdicts={"K01": ("yes", "FAIL")})
     registry.merge(store, key)
     _select(store, monkeypatch, tmp_path, key, cap=2)
@@ -498,14 +498,15 @@ def test_issue_panels_keep_the_ledger_invariants(store, monkeypatch, tmp_path):
 REARGUE = "패널 판정 — 근거 바뀜, 다시 토의 필요"
 
 
-def _retry_ok(store, key: str, agent: str, unit: str) -> None:
-    """사람의 다시(셀 꾸러미 처분) — 그 셀을 K01 OK 로 다시 본다(제기자가 빠진다)."""
+def _retry_ok(store, key: str, agent: str, unit: str, *, verdict: str = "OK") -> None:
+    """사람의 다시(셀 꾸러미 처분) — 그 셀을 K01 OK 로 다시 본다(제기자가 빠진다). verdict='FAIL' 이면 새 제기자가 선다."""
     cell = dict(store.query_one("SELECT unit_id, agent_key, state FROM rr_review_cells WHERE target_key = ? AND agent_key = ?"
                                 " AND unit_id = ?", (key, agent, unit)))
     made = review_runner.dispose_cells(store, key, action="retry", rows=[cell], decided_by=OWNER, owner_sub=OWNER,
                                        note="다시 본다", force=True, start=True, consent=True, consent_source="web")
     fake = FakeReviewEngine(rig.packs())
-    fake.verdicts = {_rid("K01"): ("yes", "OK")}
+    fake.verdicts = {_rid("K01"): ("yes", verdict)}
+    fake.mechs = {_rid("K01"): MECH} if verdict == "FAIL" else {}
     rig.Rig(store, fake).finish(made["job"]["job_id"])
     registry.merge(store, key)
 
@@ -531,6 +532,8 @@ def test_a_resolved_issue_keeps_its_panel_verdict_when_its_evidence_changes_and_
     reraised = json.loads(after["reraised_json"])
     assert reraised["round"] == 2 and reraised["at"] >= decided["updated_at"] and reraised["basis_hash"] != after["basis_hash"]
     assert reraised["raisers_removed"] == ["mech-syn-0"]
+    issues.select_issues(store, key, selected_round=3)                          # 같은 바뀐 근거 — 처음 적은 것 그대로
+    assert json.loads(_issue(store, key, anchor)["reraised_json"]) == reraised
     registry.merge(store, key)
     row = _row(store, key, anchor)
     assert (row["severity"], row["judgement"]) == ("치명", "FAIL") and row["merged"]["before_issue"]["judgement"] == "WARNING"
@@ -556,7 +559,17 @@ def test_a_reraised_resolved_issue_goes_back_to_a_panel_when_the_cap_has_room_an
     assert (queued["state"], queued["outcome"], queued["panel_id"]) == ("queued", "escalated", first_panel)
     registry.merge(store, key)
     assert (_row(store, key, anchor)["severity"], _row(store, key, anchor)["judgement"]) == ("치명", "FAIL")
-    _run_issues(store, config.settings, IssuePanelEngine(store, {"*": {"severity": "중대", "judgement": "WARNING"}}), key)
+    issues.create_issues_job(store, key, owner_sub=OWNER, requester_sub=OWNER)
+    job = runner.claim_next_job(store, config.settings)
+    panel = issues.plan_issue_panel(store, key, job=job)                        # 새 패널이 편성된 동안(panel_id 가 새 패널)
+    assert _issue(store, key, anchor)["panel_id"] == panel["id"]
+    registry.merge(store, key)
+    assert (_row(store, key, anchor)["severity"], _row(store, key, anchor)["judgement"]) == ("치명", "FAIL")
+    runner._release_panel(store, panel)
+    _run_issues_existing(store, IssuePanelEngine(store, {"*": "unparseable"}), limit=1)   # 결정문을 못 읽어도 앞 결과는 둔다
+    held = _issue(store, key, anchor)
+    assert (held["state"], held["outcome"], held["charged"]) == ("queued", "escalated", 1)
+    _run_issues_existing(store, IssuePanelEngine(store, {"*": {"severity": "중대", "judgement": "WARNING"}}))
     done = _issue(store, key, anchor)
     assert done["state"] == "resolved" and done["panel_id"] != first_panel and done["reraised_json"] is None
     assert json.loads(done["outcome_json"])["panel_id"] == done["panel_id"]
@@ -579,6 +592,9 @@ def test_a_human_queue_or_skip_survives_reselection_even_above_the_cap(store, mo
     issues.select_issues(store, key, selected_round=2)
     kept = next(r for r in issues.issue_rows(store, key) if r["issue_id"] == over["issue_id"])
     assert (kept["state"], kept["status_source"]) == ("queued", "human")
+    _run_issues_existing(store, IssuePanelEngine(store))                       # 사람이 올린 쟁점을 패널이 판정했다 — 결정은 끝났다
+    judged = next(r for r in issues.issue_rows(store, key) if r["issue_id"] == over["issue_id"])
+    assert (judged["state"], judged["status_source"]) == ("resolved", "code")
 
 
 def test_an_in_flight_issue_of_a_cancelled_job_is_untried_not_left_queued(store, monkeypatch, tmp_path):
@@ -622,6 +638,8 @@ def test_a_pat_failure_pauses_the_issue_job_with_a_credential_hold_and_keeps_the
     assert store.query_one("SELECT COUNT(*) AS n FROM rr_jobs WHERE target_key = ? AND mode = 'synth'", (key,))["n"] == 0
     runner.resume_job(store, job["job_id"], by=OWNER)
     assert store.query_one("SELECT hold_code FROM rr_jobs WHERE id = ?", (job["job_id"],))["hold_code"] is None
+    _run_issues_existing(store, IssuePanelEngine(store, {"*": runner.EngineError("엔진이 터졌다")}), limit=2)
+    assert store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job["job_id"],))["state"] != "failed"   # 자격 보류는 세지 않는다
     _run_issues_existing(store, IssuePanelEngine(store))
     assert store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job["job_id"],))["state"] == "completed"
 
@@ -667,9 +685,11 @@ def test_the_issue_result_line_names_the_same_atom_as_the_outcome_and_the_regist
         assert (outcome["severity_after"], outcome["judgement_after"]) == ("중대", "FAIL") == (row["severity"], row["judgement"])
 
 
-def test_an_issue_panel_that_ends_after_a_purge_writes_nothing_back(store, monkeypatch, tmp_path):
+@pytest.mark.parametrize("when", ["answer", "before_persist"])
+def test_an_issue_panel_that_ends_after_a_purge_writes_nothing_back(store, monkeypatch, tmp_path, when):
     """L6(결정) — 폐기(purge) 뒤에 끝난 쟁점 패널의 결과는 버린다 — 패널 원문(결정문 · 결과 원문 · 도구 호출)도, 쟁점 패널 finding 도,
-    쟁점의 결과도 쓰지 않는다(같은 트랜잭션에서 과제의 폐기 상태를 본다). 패널에는 까닭만 남는다."""
+    쟁점의 결과도 쓰지 않는다(같은 트랜잭션에서 과제의 폐기 상태를 본다). 패널에는 까닭만 남는다. 엔진이 답을 낸 뒤 원장에 앉히기
+    직전(종료 모델 재확인 사이)에 폐기돼도 같다."""
     from tests import factories
 
     key, (unit,) = _ledger(store)
@@ -677,22 +697,73 @@ def test_an_issue_panel_that_ends_after_a_purge_writes_nothing_back(store, monke
     project_id = store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (key,))["project_id"]
     code = store.query_one("SELECT code FROM rr_projects WHERE id = ?", (project_id,))["code"]
 
+    def purge() -> None:
+        with factories.routes_store(store):
+            routes.purge_project(project_id, routes.PurgeBody(code=code, reason="폐기 시험"), ident=factories.ident(OWNER))
+
     class PurgingEngine(IssuePanelEngine):
+        answered = False
+
         def run(self, delib_opts, *, owner_sub=None):
             out = super().run(delib_opts, owner_sub=owner_sub)
-            with factories.routes_store(store):
-                routes.purge_project(project_id, routes.PurgeBody(code=code, reason="폐기 시험"), ident=factories.ident(OWNER))
+            self.answered = True
+            if when == "answer":
+                purge()
             return out
+
+        def health(self):
+            if when == "before_persist" and self.answered and not getattr(self, "purged", False):
+                self.purged = True
+                purge()
+            return super().health()
 
     results = _run_issues(store, config.settings, PurgingEngine(store, {"*": {"severity": "치명", "judgement": "FAIL"}}), key)
     panel_id = results[0]["panel_id"]
     assert results[0]["status"] == "purged"
     panel = store.query_one("SELECT status, error, decision_text, risk_spec_json, result_gz FROM rr_panels WHERE id = ?",
                             (panel_id,))
-    assert (panel["status"], panel["decision_text"], panel["risk_spec_json"], panel["result_gz"]) == ("error", None, None, None)
+    assert (panel["status"], panel["decision_text"], panel["risk_spec_json"]) == ("error", None, None)
+    # 결과 원문(result_gz)은 폐기 전에 엔진이 답했으면 그때 적힌 것이다 — 폐기가 그 열을 비우는 것은 폐기 쪽(routes.PURGE_BLANK_SQL,
+    # 둘째 단계) 몫이다. 폐기 뒤의 답은 적지 않는다.
+    if when == "answer":
+        assert panel["result_gz"] is None
     assert panel["error"].startswith("project_purged")
     assert store.query_one("SELECT COUNT(*) AS n FROM rr_findings WHERE panel_id = ?", (panel_id,))["n"] == 0
     assert store.query_one("SELECT COUNT(*) AS n FROM rr_panel_calls WHERE panel_id = ? AND result_gz IS NOT NULL",
                            (panel_id,))["n"] == 0
     issue = next(r for r in issues.issue_rows(store, key) if r["panel_id"] == panel_id)
-    assert issue["outcome"] is None
+    assert (issue["outcome"], issue["state"], issue["state_reason"]) == (None, "untried_cap", "chain_cancelled")
+
+
+def test_a_requeued_resolved_issue_released_without_a_live_job_returns_to_its_verdict(store, monkeypatch, tmp_path):
+    """H3 · H4 — 다시 줄을 선 결과 쟁점은 잡이 취소돼 놓여도(도는 패널이 닫힌 뒤든 대기 중이든) 미토의가 아니라 그 결과 쟁점으로
+    돌아간다 — 결과를 잃지 않는다. 다시 줄을 섰다가 후보에서 빠져도 물러나지(withdrawn) 않고 결과 쟁점으로 돌아간다."""
+    key, (unit,) = _ledger(store)
+    anchor = _k01_anchor(store, key, unit)
+    _select(store, monkeypatch, tmp_path, key, cap=1)
+    _run_issues(store, config.settings, IssuePanelEngine(store, {"*": {"severity": "치명", "judgement": "FAIL"}}), key)
+    _retry_ok(store, key, "mech-syn-0", unit)
+    _select(store, monkeypatch, tmp_path, key, cap=2)
+    assert _issue(store, key, anchor)["state"] == "queued"
+    job = issues.create_issues_job(store, key, owner_sub=OWNER, requester_sub=OWNER)
+    claimed = runner.claim_next_job(store, config.settings)
+    panel = issues.plan_issue_panel(store, key, job=claimed)
+    issues.start_issue_panel(store, panel["id"])
+    runner.cancel_job(store, job["job_id"], by=OWNER)
+    assert runner.claim_next_job(store, config.settings) is None
+    runner._release_panel(store, panel)
+    back = _issue(store, key, anchor)
+    assert (back["state"], back["outcome"]) == ("resolved", "escalated")
+    _select(store, monkeypatch, tmp_path, key, cap=3)                           # 자리가 있어 다시 줄을 선다
+    queued = _issue(store, key, anchor)
+    assert queued["state"] == "queued"
+    _retry_ok(store, key, "xd-syn-0", unit, verdict="FAIL")                   # 줄을 선 채 근거가 또 바뀐다 — 새 근거만 다시 적는다
+    issues.select_issues(store, key, selected_round=4)
+    refreshed = _issue(store, key, anchor)
+    assert (refreshed["state"], refreshed["outcome"]) == ("queued", "escalated")
+    assert refreshed["basis_hash"] != queued["basis_hash"] and "xd-syn-0" in [r["agent_key"] for r in refreshed["basis"]["raisers"]]
+    _retry_ok(store, key, "xd-syn-0", unit)
+    _retry_ok(store, key, rig.SEAL, unit)                                       # 마지막 제기자도 OK — 후보에서 빠진다
+    issues.select_issues(store, key, selected_round=5)
+    gone = _issue(store, key, anchor)
+    assert (gone["state"], gone["outcome"]) == ("resolved", "escalated")

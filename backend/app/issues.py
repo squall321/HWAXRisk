@@ -305,10 +305,16 @@ def select_issues(store: RiskStore, target_key: str, *, selected_round: int, set
             if row and (_str(row["status_source"]) == "human" or state in IN_FLIGHT_STATES or state == "skipped"):
                 cand["action"] = "keep"
             elif row and row["outcome"] is not None:
-                # 결과 쟁점 — 근거(패널 때 얼린 것)가 그대로면 그대로, 바뀌면 다시 토의 후보(상한에 자리가 있을 때만 다시 돈다).
-                cand["action"] = "keep" if row["basis_hash"] == cand["basis_hash"] else "reraise"
-                if cand["action"] == "reraise":
-                    pending.append(cand)
+                # 결과 쟁점 — 다시 줄을 서 있으면 그대로, 근거가 바뀌었거나 다시 토의를 기다리면(reraised_json — 다시 섰다가 잡이
+                # 취소돼 돌아온 것 포함) 다시 토의 후보(상한에 자리가 있을 때만 다시 돈다), 아니면 그대로.
+                if state == "queued":
+                    # 이미 다시 줄을 섰다(자리를 쥐고 있다) — 근거가 또 바뀌었으면 새 근거만 다시 적는다.
+                    cand["action"] = "refresh" if row["basis_hash"] != cand["basis_hash"] else "keep"
+                else:
+                    changed = row["basis_hash"] != cand["basis_hash"] or bool(row["reraised_json"])
+                    cand["action"] = "reraise" if changed else "keep"
+                    if changed:
+                        pending.append(cand)
             elif state in DONE_STATES and row["basis_hash"] == cand["basis_hash"]:
                 cand["action"] = "keep"
             else:
@@ -324,10 +330,11 @@ def select_issues(store: RiskStore, target_key: str, *, selected_round: int, set
                 store.execute("UPDATE rr_issues SET rank = ?, updated_at = ? WHERE target_key = ? AND anchor_cluster_key = ?",
                               (rank, now, target_key, anchor))
                 continue
-            if cand["action"] == "reraise":
+            if cand["action"] in ("reraise", "refresh"):
                 reraised_n += 1
-                _reraise(store, target_key, existing[anchor], cand, rank=rank, requeue=anchor in run,
-                         selected_round=selected_round, cells_hash=cells_hash, now=now)
+                _reraise(store, target_key, existing[anchor], cand, rank=rank,
+                         requeue=cand["action"] == "refresh" or anchor in run, selected_round=selected_round,
+                         cells_hash=cells_hash, now=now)
                 continue
             state, reason = ("queued", None) if anchor in run else ("untried_cap", CAP_REASON)
             _upsert(store, target_key, cand, rank=rank, state=state, reason=reason, selected_round=selected_round,
