@@ -62,6 +62,7 @@
   no_quote         이 별칭들의 판정 행에 인용을 싣지 않는다(cq 빈 글 · checks.quote empty — 인용 통과율의 분모, X1-06, S11)
   dup_conflict     (agent_key, 별칭) 또는 별칭 — 그 fwd 판정 행에 checks.dup_conflict 를 단다(엔진이 같은 카드의 다른 판정과
                    부딪친 줄을 남겼다는 표지 — RB3-1, 엔진 216650e. 앱은 걸린 것처럼 두 번째 판정을 준다 — 재설계 M3 C3-9)
+  clipped          meta.clipped 로 낼 값 — 엔진이 몫에서 끊은 입력 {<입력>: {orig_chars, kept_chars}}(RB3-11, 기본 {})
   no_refs          이 별칭들의 판정 행에 변경 줄을 싣지 않는다(l·refs 빈 목록 · checks.refs missing — 참조 통과율의 분모, S11)
 기록 — requests(받은 요청 전부), runs(받은 run 수), max_active(동시에 돈 run 의 최댓값).
 S8(검토 루프)과 WP5b C9 가 이 파일을 넓힌다. 시험이 쓰는 여러 전문가의 팩은 `derive_pack` 이 엔진 계약 예제(pack_ok·pack_empty)에서
@@ -278,6 +279,7 @@ class FakeReviewEngine:
         self.no_quote: set[str] = set()
         self.no_refs: set[str] = set()
         self.dup_conflict: set[Any] = set()
+        self.clipped: dict[str, Any] = {}
         # 기록
         self.requests: list[dict[str, Any]] = []
         self.runs = 0
@@ -584,7 +586,7 @@ class FakeReviewEngine:
                 "finish_reason": ("length" if (self.truncated or cut == "length") and kind == "verdict" else "stop"),
                 "llm_ms": [0],
                 "soft_over": False, "basis": "noinput" if kind == "noinput" else "cards" if (order or digest) else "role_only",
-                "bg_dropped": 0, "clipped": {},
+                "bg_dropped": 0, "clipped": copy.deepcopy(self.clipped),
                 "order_effective": not (kind == "verdict" and variant == "rev" and len(order) < 2),
                 "aliases": {"cards": {a: cards[a]["record_id"] for a in order},
                             "lines": {a: x["ref"] for a, x in lines.items()}, "units": units}}

@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from app import review_cells, review_verify, units
+from app import review_cells, review_quality, review_verify, units
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
 from tests.synth.fake_review_engine import FakeReviewEngine
@@ -147,7 +147,7 @@ def test_an_engine_conflict_on_a_clear_row_is_treated_as_flagged(store, conflict
     그대로 한 번이다."""
     fake = FakeReviewEngine(_packs())
     fake.dup_conflict = {(MECH2, a) for a in conflicted}
-    _run(store, fake)
+    key, _unit = _run(store, fake)
     revs = _runs(fake, MECH2, "rev")
     solos = [c["alias"] for b in _runs(fake, MECH2, "solo") for c in b["cards"]]
     if len(conflicted) == 1:
@@ -155,3 +155,21 @@ def test_an_engine_conflict_on_a_clear_row_is_treated_as_flagged(store, conflict
     else:
         assert ([[c["alias"] for c in b["cards"]] for b in revs], solos) == ([conflicted], [])
     assert _runs(fake, MECH1, "solo") == []
+    # 품질 수치와 보고서의 품질 절이 엔진이 알린 부딪침을 센다
+    quality = review_quality.compute(store, key, agent_key=MECH2)
+    assert quality["flips"]["engine_conflict"] == {"dup_conflict": len(conflicted), "flipped": 0, "calls": 1}
+    assert f"엔진이 알린 부딪침 {len(conflicted)}줄" in review_quality.block(store, key, agent_key=MECH2)["text"]
+
+
+def test_inputs_the_engine_clipped_are_counted_in_quality(store):
+    """엔진이 몫에서 끊은 입력(meta.clipped — RB3-11)은 호출 원장의 앱 회계에 남고 품질 수치·문면이 그 호출 수와 입력 이름을 싣는다.
+    빈 것({})은 원장에 싣지 않는다."""
+    fake = FakeReviewEngine(_packs())
+    fake.clipped = {"cards": {"orig_chars": 1000, "kept_chars": 500}}
+    key, _unit = _run(store, fake, agents=[MECH1])
+    calls = [json.loads(r["quality_json"])["app"].get("clipped") for r in store.query(
+        "SELECT quality_json FROM rr_review_calls WHERE target_key = ? AND state = 'ok'", (key,))]
+    assert calls and all(c == fake.clipped for c in calls)
+    quality = review_quality.compute(store, key, agent_key=MECH1)
+    assert quality["truncation"]["clipped"] == {"calls": len(calls), "inputs": ["cards"]}
+    assert f"몫에서 끊은 입력 {len(calls)}호출(«cards»)" in review_quality.block(store, key, agent_key=MECH1)["text"]

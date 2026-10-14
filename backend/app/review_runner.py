@@ -1267,7 +1267,10 @@ class _Session:
                 "quality_json": canonical_json({"engine": dict(quality), "app": {
                     "dropped": sorted({str(d.get("reason")) for d in accepted.get("dropped") or ()}),
                     "dropped_n": len(accepted.get("dropped") or ()), "missing": list(accepted.get("missing") or ()),
-                    "check_disagree": disagree, **dict(app or {})}})}
+                    "check_disagree": disagree, **dict(app or {}),
+                    # 엔진이 몫에서 끊은 입력(RB3-11 — meta.clipped). 빈 것은 싣지 않는다(종전 원장과 같은 바이트)
+                    **({"clipped": dict(meta["clipped"])} if isinstance(meta.get("clipped"), Mapping) and meta["clipped"]
+                       else {})}})}
         written = review_cells.write_call_result(self.store, self.target_key, self.agent, lease_owner=self.lease, call=call,
                                                  verdicts=verdicts, cell=cell_sets, head=head_sets, outcome=None,
                                                  max_charged=self.max_charged, now=self.now())
