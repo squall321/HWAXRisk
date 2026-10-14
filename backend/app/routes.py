@@ -441,7 +441,8 @@ async def post_auth_portal_pat(request: Request, background: BackgroundTasks) ->
     X-Heax-User-Email 은 허브 관리자로 덮여 올 수 있어 읽지 않는다(없으면 403 delegation_required). 본문은 문을 지난 뒤에 읽는다.
     `{pat}` 은 PUT /api/me/portal-pat 와 같은 검사를 지나고(이메일 = 위임 이메일) scopes 는 설정과 무관하게 ['read'] 만 받는다 —
     출처는 gateway-exchange 다. 검사에 걸리면 그 까닭을 마지막 자동 실패로도 적는다(쉼이 걸려 단언마다 다시 바라지 않게).
-    `{error}` 는 아무것도 등록하지 않는다. 그 사람이 자동을 껐으면 409 portal_pat_auto_off 이고 아무것도 쓰지 않는다.
+    `{error}` 는 아무것도 등록하지 않는다. 그 사람이 자동을 껐으면 409 portal_pat_auto_off 이고 아무것도 쓰지 않는다. `{pat}` 인데
+    지금 받을 까닭이 없으면(pat_due_reason 이 None — 단언의 portal_pat_wanted 와 같은 판정) 409 not_wanted 이고 실패로도 적지 않는다.
     저장 전의 거절은 전부 4xx 다 — 게이트웨이는 4xx 면 새 PAT 를 폐기하고 5xx 면 살려 둔다. 등록 검사가 포털에 못 닿은 것은
     424 portal_unreachable 이다(R2-1).
     """
@@ -477,6 +478,11 @@ def _gateway_portal_pat(email: str, body: Any, background: BackgroundTasks | Non
     pat = body.get("pat")
     if not isinstance(pat, str) or not pat.strip():
         raise AppError("pat_invalid", "pat 이 비었거나 문자열이 아닙니다.", 422)
+    # 지금 받을 까닭이 없으면 받지 않는다(R2-7) — 판정은 단언의 portal_pat_wanted 와 같은 pat_due_reason 이다. 게이트웨이는 등록이
+    # 실제로는 됐는데 결과를 모른 뒤(시간 초과·5xx) 묵은 바람으로 다시 교환해 보낼 수 있다. 409 면 게이트웨이가 새 PAT 를 폐기한다.
+    # 자동 등록 실패로 적지 않는다 — 실패가 아니고, 적으면 쉼이 걸린다.
+    if pat_due_reason(store.get_credential(email)) is None:
+        raise AppError("not_wanted", "이 사람의 포털 PAT 는 지금 바꿀 까닭이 없다(이미 등록돼 있고 갱신 문턱 위) — 등록하지 않는다.", 409)
     try:
         out = _register_portal_pat(store, email, pat.strip(), source=GATEWAY_PAT_SOURCE, read_only=True,
                                    background=background)

@@ -296,6 +296,41 @@ def test_portal_pat_writes_nothing_for_someone_who_turned_auto_off(client, box):
     assert _credential_rows() == 0 and box["portal"] == [] and _auto(client)["last_error"] is None
 
 
+def test_a_stale_replay_after_a_registration_that_went_through_is_not_wanted(client, box):
+    """게이트웨이는 등록이 실제로는 됐는데 결과를 모른 뒤(시간 초과·5xx) 묵은 바람으로 다시 교환해 보낼 수 있다 — 지금 받을 까닭이
+    없으면 409 not_wanted 로 거절해(게이트웨이가 새 PAT 를 폐기한다) 아무것도 바꾸지 않는다. 자동 등록 실패로도 적지 않는다(R2-7)."""
+    first = _jwt(pat_name="hwax-risk")
+    assert client.post("/api/auth/portal-pat", headers=GW, json={"pat": first}).status_code == 200
+    before = get_store().get_user_prefs(EMAIL)
+    box["portal"].clear()
+    replay = _jwt(jti="jti-erin-2", pat_name="hwax-risk")
+    r = client.post("/api/auth/portal-pat", headers=GW, json={"pat": replay})
+    assert (r.status_code, r.json()["error"]["code"]) == (409, "not_wanted")
+    assert identity.credential_pat(get_store().get_credential(EMAIL)) == first and box["revoked"] == []
+    assert box["portal"] == []                                       # 포털에 묻기도 전이다
+    assert get_store().get_user_prefs(EMAIL) == before               # 실패로 적지 않는다 — 쉼이 걸리지 않는다
+    assert routes.portal_pat_wanted(get_store(), EMAIL) is None
+
+
+@pytest.mark.parametrize("case", ["absent", "fresh", "expiring", "revoked", "undecryptable", "audience"])
+def test_the_gateway_door_takes_a_pat_exactly_when_the_mint_would_ask_for_one(client, box, case):
+    """받을지는 단언의 portal_pat_wanted 와 같은 판정(pat_due_reason)이다 — 바랄 까닭이 있으면 받고, 없으면 not_wanted 다. 마지막 자동
+    실패의 쉼은 '바랄 까닭' 이 아니다 — 쉼 안에 온 PAT 도 까닭이 있으면 받는다(동시에 돈 교환 둘 가운데 늦은 것)."""
+    renew = config.pat_renew_before_s()
+    if case != "absent":
+        old = _jwt(jti="jti-erin-0", aud=["mcp-gateway"] if case == "audience" else ["mcp-gateway", "step-forge"])
+        _register(old, exp_in=renew - 3600 if case == "expiring" else renew + 3600)
+    if case in ("revoked", "undecryptable"):
+        column, value = ("revoked_at", 1) if case == "revoked" else ("portal_pat_enc", b"garbage")
+        get_store().execute(f"UPDATE _user_credentials SET {column} = ? WHERE owner_sub = ?", (value, EMAIL))
+    asked = routes.portal_pat_wanted(get_store(), EMAIL) is not None
+    get_store().note_portal_pat_error(EMAIL, "register-pat_invalid: 앞선 시도", kind="final")
+    r = client.post("/api/auth/portal-pat", headers=GW, json={"pat": _jwt()})
+    assert asked is (case != "fresh")
+    assert r.status_code == (200 if asked else 409), r.text
+    assert (_registered_jti() == "jti-erin-1") is asked
+
+
 # ---------------------------------------------------------------- 손잡이·기동 검사
 def test_the_renew_threshold_must_exceed_the_panel_credential_margin():
     """갱신 문턱이 패널 자격 여유 이하면 자동 등록이 '아직이다' 라고 보는 PAT 로 패널이 멈춘다 — 기동을 막고 손잡이를 말한다."""
@@ -529,9 +564,20 @@ def _registered_jti() -> str:
     return get_store().get_credential(EMAIL)["pat_jti"]
 
 
+def _make_due() -> None:
+    """등록된 행을 갱신 문턱 밑으로 — 게이트웨이 문은 지금 받을 까닭이 없으면 받지 않는다(not_wanted, R2-7)."""
+    get_store().execute("UPDATE _user_credentials SET pat_exp = ? WHERE owner_sub = ?",
+                        (now_epoch() + config.pat_renew_before_s() - 3600, EMAIL))
+
+
+def _register_due(pat: str) -> None:
+    _register(pat)
+    _make_due()
+
+
 @pytest.mark.parametrize("path", ["gateway", "put"])
 def test_a_renewal_revokes_the_superseded_hwax_risk_pat_after_accepting_the_new_one(client, box, caplog, path):
-    _register(OLD)                                                  # 행의 jti 는 jti-erin-0
+    _register_due(OLD)                                              # 행의 jti 는 jti-erin-0
     new = _jwt(pat_name="hwax-risk")
     with caplog.at_level(logging.DEBUG):
         if path == "gateway":
@@ -552,7 +598,7 @@ def test_only_a_different_live_hwax_risk_pat_is_revoked(client, box, case):
     """다른 이름의 PAT 는 그 사람이 다른 데서 쓸 수 있다 — 폐기하지 않는다. 같은 PAT 의 재등록·이미 폐기 표기된 것·풀리지 않는 것도
     부르지 않는다."""
     old = {"other_name": _jwt(jti="jti-erin-0", pat_name="claude"), "no_name": _jwt(jti="jti-erin-0")}.get(case, OLD)
-    _register(old)
+    _register_due(old)
     if case == "revoked":
         get_store().execute("UPDATE _user_credentials SET revoked_at = 1 WHERE owner_sub = ?", (EMAIL,))
     if case == "undecryptable":
@@ -565,10 +611,11 @@ def test_only_a_different_live_hwax_risk_pat_is_revoked(client, box, case):
 def test_a_new_pat_exchanged_from_the_old_one_does_not_revoke_its_parent(client, box):
     """옛것이 사람이 Claude 에 쓰는 PAT(이름 hwax-risk)이고 새것이 그것으로 교환한 자식이면(`par` = 옛 jti) 옛것을 폐기하지 않는다 —
     포털 폐기는 자식에게 이어져 방금 받은 새것까지 죽는다(수리 1라운드 편차 7)."""
-    _register(OLD)
+    _register_due(OLD)
     child = _jwt(pat_name="hwax-risk", par="jti-erin-0")
     assert client.post("/api/auth/portal-pat", headers=GW, json={"pat": child}).status_code == 200
     assert box["revoked"] == [] and _registered_jti() == "jti-erin-1"
+    _make_due()
     other = _jwt(jti="jti-erin-2", pat_name="hwax-risk", par="jti-somebody-else")
     assert client.post("/api/auth/portal-pat", headers=GW, json={"pat": other}).status_code == 200
     assert box["revoked"] == [f"Bearer {child}"], "다른 원의 자식이면 옛것(앞선 자식)은 그대로 폐기한다"
@@ -576,7 +623,7 @@ def test_a_new_pat_exchanged_from_the_old_one_does_not_revoke_its_parent(client,
 
 def test_a_refused_new_pat_keeps_the_old_one_and_revokes_nothing(client, box):
     """새것이 등록 검사에 걸리면 옛것은 그대로 쓴다 — 폐기는 받아들인 뒤에만 한다."""
-    _register(OLD)
+    _register_due(OLD)
     box["portal_ok"] = False
     r = client.post("/api/auth/portal-pat", headers=GW, json={"pat": _jwt(pat_name="hwax-risk")})
     assert r.status_code == 422
@@ -585,7 +632,7 @@ def test_a_refused_new_pat_keeps_the_old_one_and_revokes_nothing(client, box):
 
 @pytest.mark.parametrize("revoke", [500, 401, None], ids=["http_500", "http_401", "unreachable"])
 def test_a_failed_revoke_does_not_undo_the_registration(client, box, caplog, revoke):
-    _register(OLD)
+    _register_due(OLD)
     box["revoke"] = revoke
     new = _jwt(pat_name="hwax-risk")
     with caplog.at_level(logging.DEBUG):
