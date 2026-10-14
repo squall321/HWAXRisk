@@ -509,6 +509,18 @@ def test_only_a_different_live_hwax_risk_pat_is_revoked(client, box, case):
     assert box["revoked"] == [] and identity.credential_pat(get_store().get_credential(EMAIL)) == new
 
 
+def test_a_new_pat_exchanged_from_the_old_one_does_not_revoke_its_parent(client, box):
+    """옛것이 사람이 Claude 에 쓰는 PAT(이름 hwax-risk)이고 새것이 그것으로 교환한 자식이면(`par` = 옛 jti) 옛것을 폐기하지 않는다 —
+    포털 폐기는 자식에게 이어져 방금 받은 새것까지 죽는다(수리 1라운드 편차 7)."""
+    _register(OLD)
+    child = _jwt(pat_name="hwax-risk", par="jti-erin-0")
+    assert client.post("/api/auth/portal-pat", headers=GW, json={"pat": child}).status_code == 200
+    assert box["revoked"] == [] and _registered_jti() == "jti-erin-1"
+    other = _jwt(jti="jti-erin-2", pat_name="hwax-risk", par="jti-somebody-else")
+    assert client.post("/api/auth/portal-pat", headers=GW, json={"pat": other}).status_code == 200
+    assert box["revoked"] == [f"Bearer {child}"], "다른 원의 자식이면 옛것(앞선 자식)은 그대로 폐기한다"
+
+
 def test_a_refused_new_pat_keeps_the_old_one_and_revokes_nothing(client, box):
     """새것이 등록 검사에 걸리면 옛것은 그대로 쓴다 — 폐기는 받아들인 뒤에만 한다."""
     _register(OLD)
