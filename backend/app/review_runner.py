@@ -1231,17 +1231,22 @@ class _Session:
         scope = (f"cell|{cell.row.get('input_hash')}|{cell.attempt}|{seq}" if cell is not None
                  else f"head|{self.pack.pack_key}|{limits_key(self.lim, self.kinds)}|{prompt_key(self.lim, self.kinds)}")
         reopened = int(cell.row.get("reopened_n") or 0) if cell is not None else 0
-        if reopened:
+        if reopened and cell is not None and cell.row.get("route_forced") == review_cells.HUMAN_RETRY:
             # 사람이 다시 연 셀(retry_cells — 시도 수가 0 으로 돌아간다)은 앞의 같은 시도에서 받은 답을 다시 쓰지 않는다 — 쓰면 같은
-            # 답으로 같은 실패를 엔진을 부르지 않고 되풀이한다. 한 번도 다시 열리지 않은 셀의 열쇠는 그대로다(M2 원장과 같은 열쇠).
+            # 답으로 같은 실패를 엔진을 부르지 않고 되풀이한다. 그 밖의 다시 열기(입력 바뀜 · 넓힘 · 넘김 · 보충 표본)는 열쇠가 그대로다
+            # — 입력 바뀜은 입력 지문이 이미 열쇠에 들고, M2 원장의 열쇠가 바뀌지 않는다(반대 검토 LOW 18 · 사용자 결정).
             scope += f"|r{reopened}"
         return sha256_hex(scope + "|" + canonical_json(body))
 
     def _cached(self, cell: _Cell | None, request_hash: str) -> dict | None:
+        # 셀의 답은 그 셀이 지금 시작(started_at — 입력이 바뀌어 처음부터 돌면 새로 찍힌다)한 뒤에 받은 것만 다시 쓴다. 캐시는 같은
+        # 시도의 이어 돌기 몫이라 답의 판정 행이 원장에 남아 있어야 하는데(_commit 은 다시 쓴 답을 적지 않는다), 입력이 A → B → A 로
+        # 돌아온 셀은 A 의 앞 답이 같은 열쇠여도 그 행이 지워졌다(반대 검토 LOW 18 — 다시 연 횟수를 열쇠에서 뺀 입력 바뀜의 짝).
+        since = int(cell.row.get("started_at") or 0) if cell is not None else 0
         row = self.store.query_one(
             "SELECT result_gz FROM rr_review_calls WHERE target_key = ? AND agent_key = ? AND unit_id IS ? AND request_hash = ?"
-            " AND state = 'ok' AND result_gz IS NOT NULL ORDER BY started_at DESC LIMIT 1",
-            (self.target_key, self.agent, cell.unit_id if cell is not None else None, request_hash))
+            " AND state = 'ok' AND result_gz IS NOT NULL AND started_at >= ? ORDER BY started_at DESC LIMIT 1",
+            (self.target_key, self.agent, cell.unit_id if cell is not None else None, request_hash, since))
         if row is None:
             return None
         try:

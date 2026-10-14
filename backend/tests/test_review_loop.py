@@ -1131,6 +1131,53 @@ def test_a_byte_identical_reask_goes_to_the_engine_not_the_request_cache(store, 
     assert row is not None
 
 
+def _settled_once(store) -> tuple[str, str, FakeReviewEngine, rig.Rig, list[tuple]]:
+    """SEAL 이 단위 하나를 끝까지 돈 원장 — (대상, 단위, 가짜 엔진, 시험대, 그 셀의 엔진 호출[(kind, variant)])."""
+    key = rig.target(store)
+    unit_id = _unit_ids(store, key)[0]
+    fake = FakeReviewEngine(rig.packs())
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [unit_id]}))
+    return key, unit_id, fake, r, [(b["kind"], b.get("variant")) for b in _runs(fake) if b.get("unit")]
+
+
+def _back_to_pending(store, key: str, unit_id: str, **sets: object) -> None:
+    """정산된 셀을 정산 전에 멈춘 셀처럼 둔다(판정 행 · 시도 표지는 그대로, 머리는 다시 집힌다)."""
+    extra = "".join(f", {k} = ?" for k in sets)
+    store.execute(f"UPDATE rr_review_cells SET state = 'pending', finished_at = NULL, lease_owner = NULL{extra}"
+                  " WHERE target_key = ? AND unit_id = ? AND agent_key = ?", (*sets.values(), key, unit_id, SEAL))
+    store.execute("UPDATE rr_expert_reports SET state = 'planned' WHERE target_key = ? AND agent_key = ?", (key, SEAL))
+
+
+def test_an_m2_cell_once_reopened_by_an_input_change_keeps_its_request_keys_on_resume(store):
+    """반대 검토 LOW 18(사용자 결정) — 요청 열쇠의 다시 연 횟수(|r…)는 사람의 다시(human_retry)에만 붙는다. 입력 바뀜으로 한 번 다시
+    열린 적이 있는(reopened_n 1) M2 원장의 셀이 호출을 다 받고 정산 전에 멈췄다가 이어 돌면, 그 시도에서 받은 답을 그대로 다시
+    쓴다(M2 는 열쇠에 그 수를 넣지 않았다 — 종전에는 열쇠가 바뀌어 같은 답을 엔진에 다시 물었다). 사람의 다시는
+    test_a_retried_cell_never_replays_the_answers_of_its_first_run 이 본다."""
+    key, unit_id, fake, r, _calls = _settled_once(store)
+    runs = len(_runs(fake))
+    _back_to_pending(store, key, unit_id, reopened_n=1)
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [unit_id]})
+    r.finish(job_id)
+    cell = next(c for c in _cells(store, key, SEAL) if c["unit_id"] == unit_id)
+    assert (rig.state(store, job_id), cell["state"], cell["reopened_n"]) == ("completed", "reviewed", 1)
+    assert cell["route_forced"] != review_cells.HUMAN_RETRY
+    assert len(_runs(fake)) == runs                                    # 같은 시도의 받은 답 — 엔진을 다시 부르지 않았다
+
+
+def test_a_cell_whose_input_comes_back_never_replays_answers_from_before_its_reset(store):
+    """반대 검토 LOW 18 의 짝 — 입력이 A → B → A 로 돌아온 셀(B 로 시작했다가 멈춘 셀이 A 로 다시 시작 — start_cell 이 판정 행을
+    지우고 처음부터)은 A 로 앞서 받은 답이 같은 열쇠여도 다시 쓰지 않는다. 다시 쓰면 그 답의 판정 행은 적히지 않아(다시 쓴 답은 적지
+    않는다) 빠진 카드 재질의 · 단독 재질의 · 차감으로 번진다. 엔진은 그 셀의 호출을 한 번씩만 새로 받고 셀은 차감 없이 끝난다."""
+    key, unit_id, fake, r, calls = _settled_once(store)
+    runs = len(_runs(fake))
+    _back_to_pending(store, key, unit_id, input_hash="input-b")
+    r.finish(rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [unit_id]}))
+    cell = next(c for c in _cells(store, key, SEAL) if c["unit_id"] == unit_id)
+    assert (cell["state"], cell["reopened_n"], cell["charged"]) == ("reviewed", 1, 0)
+    assert [(b["kind"], b.get("variant")) for b in _runs(fake)[runs:]] == calls
+
+
 def test_a_defect_in_a_session_releases_the_expert_with_a_pause_instead_of_stranding_it(store, monkeypatch):
     """세션 코드의 결함(예기치 않은 예외)이 루프를 죽이거나 전문가를 running 으로 붙들지 않는다 — 놓고 잠시(INTERNAL_BACKOFF_S) 쉰
     뒤 다시 집힌다."""
