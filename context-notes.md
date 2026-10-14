@@ -1561,3 +1561,140 @@ rebase 때 부딪치지 않게).
 - 고친 뒤 60/60 이 단언으로 죽는다.
 - **전체 시험(공유 잠금 아래).** 2,835 통과 · xfail 4 · 실패 0(엔진 c4e4823 예제 사본). 첫 전체 판은 실패 둘이었다 — 건너뜀 예산에
   새 시험(2차 주입의 형제 부재 건너뜀)을 적지 않은 것, 그리고 예제 사본이 엔진과 달랐던 것(마지막 사본 전). ruff 깨끗하다.
+
+## 재설계 M3 — 셀 꾸러미 반대 검토 1차 수리(1ccc007 기준 HIGH 4 · MEDIUM 10 · LOW 6, 2026-10-14)
+
+검토 결과와 조정자의 결정은 스크래치(cells-review1-findings.md)에 있다. 결정 항목(#8 · #12 · #13 · 셀 밖 인용 · #18 · #20)은 그대로
+구현했고, 나머지는 검토의 고칠 방향을 따랐다 — 따르지 않은 곳은 아래에 까닭을 적는다.
+
+### M3C-29. HIGH 1 — 입력 결손 q1 의 '영향 있음' 이 사라지던 것
+- 겹침의 정체는 (카드 k · 경로 · 줄 l · 제목)이다. 검토는 impact 까지 정체에 넣자고 했지만 따르지 않았다 — 다시 물어 같은 줄이
+  모름 → 있음으로 오르면(재현 2) 두 줄이 다 남아 한 영향이 둘로 센다. 같은 정체면 더 센 영향(있음 > 모름 > 없음)이 남는다 —
+  '걸림 아닌 줄이 걸림을 갈아 끼우지 않는다' 는 검토의 뜻은 그대로다.
+- 엔진은 걸린 줄에 카드와 변경 줄을 달고 없음 줄에는 달지 않는다 — 그래서 '있음 A' 다음 '없음 A' 는 정체가 달라 둘 다 남는다(변이
+  시험이 찾았다, 시험 ④ 는 있음 → 모름으로 든다).
+- 제목 없는 영향은 버리지 않고 경로 → 이유 → '제목 없는 영향' 으로 제목을 대신하고 `title_fallback` 표지를 단다.
+
+### M3C-30. HIGH 2 — 훑기 u 줄의 부딪침 표지
+- 회계의 단위 칸에 `conflict`(engine_conflict — dup_conflict · flipped_from · contested_by)를 싣고, `sweep_signal` 은 표지가 선 '무관'
+  (rel no · k 없음)을 unknown(reason engine_conflict)으로 낸다 — 그 셀은 거르지 않고 분류 기록에 까닭이 남는다(D-42 ④).
+- `engine_conflict` 가 contested_by 도 본다 — 두 번째 판정의 방아쇠에도 함께 든다.
+
+### M3C-31. HIGH 3 — 사람의 다시가 표본 표지를 지우던 것
+- 다시는 표본 · 그림자 표지와 분류 기록(route · route_json)을 남기고 결과만 비운다. 앞 결과는 `was` 에 쌓는다.
+- `widened_domains` 가 `was` 도 읽는다 — 넓힘은 쌓이기만 한다(넓힘의 원인 셀을 다시 열어도 되돌아가지 않는다). 사람이 다시 연 셀은
+  분류하지 않으므로(human_retry) route 'audit' 이 그대로 남아 정산이 새 결과를 적는다.
+
+### M3C-32. HIGH 4 — 게이트웨이 답 하나가 B 층 단위를 영영 세우던 것
+- 정규 JSON 으로 적을 수 없는 답(NaN · 무한 · 홀로 선 서로게이트)은 `unreadable_reply` — 내용 탓(live_error_body)으로 그 호출만 빠진 채 언다.
+- 워커의 예상 밖 결함은 `unit_live.note_failure` — 백오프가 지난 미동결 단위의 attempts + 1 · not_before(60초부터 두 배, 비교 후
+  쓰기), 여섯 번째에 `live_internal_error` 로 partial.
+
+### M3C-33. MEDIUM 5 · 6 · 7
+- 5 — q1 의 flipped_from 도 셀 기록(checks)에 싣는다. 보고서는 '엔진 보충이 앞 답 … 을 갈아 끼웠다(앞 답은 어휘 밖 낱말 … 을 고친
+  값)'. '검증된 철회가 이 영향을 다퉜다' 는 걸린 줄(있음 · 모름)만이고, 없음 줄의 다툼은 '같은 카드의 다른 답이 이 줄과 부딪쳤다(이
+  줄이 선다)' 와 모델이 쓴 낱말이다.
+- 6 — floor_met 은 결과를 낸 표본만 센다(전체와 영역마다). 결과 없는 표본은 도는 중(pending)과 닫힌 실패(failed)로 가른다.
+  closure.py 는 고치지 않았다 — floor_met 을 그대로 읽으므로 이제 막는다.
+- 7 — 잡 끝 보충 표본은 끝난 잡(취소 · 실패 · 끝남)이 거른 셀도 고르고 셀과 그 전문가 머리를 이 잡으로 찍는다
+  (`reopen_filtered(run_id=…)`). 살아 있는 다른 잡의 셀과 다른 잡이 쥔(running) 전문가의 셀은 그 잡에 둔다.
+- 7 의 뒤탈은 M3C-45.
+
+### M3C-34. MEDIUM 8(사용자 결정) — 넘긴 셀의 걸림
+- `review_cells.cell_hits` = 실효 FAIL · WARNING 과 부딪침 표지 행(카드마다 하나)의 합집합 + q1 있음 · 모름.
+- 보고서 원장의 `partial()`(걸림이 있는 넘긴 셀) · `judged()`(검토 + partial)로 점검표 · finding 을 읽는다. 점검표 첫 표지
+  '넘긴 셀 — 일부만 판정', finding 은 카드 행만이다(카드 밖 호출은 끝내 못 받았으니 뺀다). 넘김 응답의 `hits` 와 '보지 못한 것' 줄에
+  그 수가 든다. 거절은 없다(결정 그대로).
+
+### M3C-35. MEDIUM 9 — 단독으로만 본 카드
+- fwd · rev 행이 없고(pair_over) 단독 행에 엔진 표지가 있으면 그 카드 하나의 rev 로 두 번째 판정을 받는다. 원장의 judgement 칸은
+  그대로이고 실효 규칙(effective_rows)이 갈림을 보류(split)로 둔다 — finding 후보다.
+
+### M3C-36. MEDIUM 10 · LOW 16 — 두 커밋 사이
+- 표본 · 그림자 결과를 `settle_cell` · `settle_noinput` 의 `sample_results` 로 정산과 같은 트랜잭션에 적는다(`note_sample_result` 는
+  없앴다). 넓힘(widen)은 그 뒤다 — 사이에서 죽으면 잡 끝(보충 표본 앞)의 `reopen_widened` 가 원장에서 유도해 다시 한다. 분류와
+  넓힘이 엇갈린 셀(LOW 16)도 같은 자리가 거둔다.
+- 불변식 G9 — 닫힌 표본 · 그림자 셀에는 결과가 있다. 결과를 지우면 G9 가 서는 시험을 따로 두었다(종전 시험은 빈 불변식만 보았다).
+- 훑기를 원장에서 다시 읽는 길도 그 넘김의 다시 열기를 이어 한다(멱등). LOW 15 의 잡 끝 거두기가 같은 틈을 덮어 이 줄을 지우는 변이는
+  살아남는다(같은 끝 상태 — 다시 열기가 잡 끝으로 늦을 뿐이다). 곧바로 여는 길을 남겼다.
+
+### M3C-37. MEDIUM 11 · 셀 밖 인용(사용자 결정)
+- 반출의 `_clip_extras` 가 입력 결손 q1 의 cq 와 그 다툼의 cq 를, 판정 행 반출이 checks_json 의 다툼 cq 를 200자로 줄인다(원래 길이는
+  `<칸>_chars`). 셀 하나 REST 가 같은 함수를 지난다.
+- `registry_payload`(merged_json 원문 칸까지 — `_export_view` 를 먼저)와 `claims_for_ref` 도 같은 규칙이다(REST · MCP 같은 함수).
+
+### M3C-38. MEDIUM 12 · 13(사용자 결정)
+- `routes.mcp_job_brief` — 범위의 목록 칸은 앞 5 이름과 `<칸>_n`, 워커 신호는 앞 3(칸 여섯)과 `workers_n`. REST 진행판은 전부를 싣는다.
+- 규모 시험의 길잡이는 그동안 소스 단계에서 멈춰 길잡이 몫을 재지 못했다(합성 과제는 소스 행 없이 스냅샷을 만든다). 소스를 잠시 붙여
+  대상 단계까지 걸어 잰다 — 줄이지 않으면 359명 · 워커 8 에서 27,921자였다. 진행판(risk_get_coverage)은 검토 순서를 줄여 맞추므로
+  잡 칸을 줄이면 그만큼 순서 · 좌석이 더 실린다.
+- risk_job_action 의 consent — retry_failed 만(다른 action 에 주면 E100). 도구 설명과 길잡이의 다시 단계 why 가 '사용자에게 동의를
+  받은 뒤에만 true' 라고 말하고, 길잡이는 args 에 채우지 않는다(SEC-4 와 같은 까닭). 잡 params 에 consent_source mcp 가 남는다.
+
+### M3C-39. MEDIUM 14 — B 층의 취소 · 폐기
+- ensure 가 시작 · 호출마다 앞 · 얼리기 앞에서 멈춘다 — stop 은 `should_stop_review(poll_s=0)`(취소 · 사람의 정지 · 앱 종료, 매번
+  새로 읽는다)이고, 과제 폐기는 ensure 가 따로 본다. 멈추면 아무것도 얼리지 않는다 — 받은 답은 rr_brief_calls 에 남아 다음 잡이 다시
+  부르지 않고 쓴다(폐기면 그것도 적지 않는다).
+- 확인과 쓰기 사이에 끼는 폐기는 쓰기가 막는다 — 얼리기 · 다시 하기의 UPDATE 에 `NOT_PURGED_SQL`, `LiveSource._record` 는 확인과
+  쓰기를 한 트랜잭션에 둔다(store.tx 는 RLock + BEGIN IMMEDIATE 라 폐기의 트랜잭션과 엇갈리지 않는다).
+- 알려진 틈 — 마지막 확인 뒤 · 얼리기 앞에 취소가 끼면 그 단위들은 언다. 그 잡 안에서 받은 정상 답이라 해가 없다고 보았다.
+
+### M3C-40. LOW 15 — 카드 밖 넘김
+- `review_cells.handoffs` 가 훑기(머리 sweep_json)와 카드 밖 호출(셀 handoffs_json — 그 셀의 단위) 둘을 읽고 분류 7번 줄이 둘 다 센다.
+- 거른 뒤에 온 카드 밖 넘김은 잡 끝(보충 표본 앞)이 거둔다(`reopen_handed_off`). 곧바로 열지 않은 것은 카드 밖 커밋과 다시 열기 사이의
+  죽음까지 한 자리에서 거두려는 것이다. 셀의 잡 결속은 그대로다(reopen_widened 와 같다 — 끝난 잡의 셀이면 다음 잡이 돌린다).
+- 자기 넘김은 세지 않는다. 7번 줄이 세지 않으니 거두기가 세면 다시 걸러지고 잡 끝이 그것을 되풀이해 잡이 끝나지 않는다(시험이
+  60틱으로 잡는다).
+- 가짜 엔진의 handoff_to 는 handoff_unit · handoff_from 이 있으면 카드 밖 h 줄을 내지 않는다. 모든 전문가의 카드 밖 넘김이 분류보다
+  먼저 오느냐가 실행마다 달라 거르기 시험의 흐름을 갈랐기 때문이다. 카드 밖 넘김은 `offcard_handoffs` 로 낸다.
+
+### M3C-41. LOW 17 — 남의 대상의 404
+- `routes._target_editor` — 구성원이 아니면 없는 대상과 같은 글('타깃(<부른 사람이 준 열쇠>)')이고, 등급 미달 403 은 그대로다. 셀
+  쓰기(다시 · 넘김 · 보류 풀기)와 `_editable_target`(단위 세우기 · 방식 바꾸기 · 보고서 다시 내기 · 쟁점 결정)에 건다.
+- 쟁점 결정(PUT /issues)은 부른 사람이 대상 열쇠를 주지 않으므로 없는 쟁점과 같은 글로 바꾼다. 쓰기 문만 바꾸면 그 길에서 대상 열쇠가
+  샌다. 쟁점 · 종합 꾸러미의 경로라 보고에 그 hunk 를 적는다.
+- 손대지 않은 같은 꼴(셀 꾸러미 밖)이 있다. POST /targets/{key}/jobs, 좌석 상태 바꾸기, 패널 다시 앉히기, 사람 finding, MCP
+  risk_start_job(entry.start_job)은 아직 '과제(<id>)' 다.
+
+### M3C-42. LOW 18(사용자 결정) — 다시 연 횟수와 요청 캐시
+- 요청 열쇠의 `|r…` 는 route_forced 가 human_retry 일 때만 붙는다. 입력 바뀜은 입력 지문이 이미 열쇠에 든다.
+- 짝으로 셀의 요청 캐시를 그 셀의 started_at 이후 받은 답으로 묶었다. 캐시는 같은 시도의 이어 돌기 몫이라 답의 판정 행이 원장에
+  남아 있어야 한다(`_commit` 은 다시 쓴 답을 적지 않는다). 입력이 A → B → A 로 돌아온 셀은 그 행이 지워졌는데, 결정대로 `|r` 을
+  빼자 A 의 앞 답을 다시 써 빠진 카드 재질의 · 단독 여섯 · 차감으로 번졌다(시험에서 엔진 호출 14 대 4).
+- started_at 은 입력 바뀜에서만 새로 찍히고 이어 돌기 · 사람의 다시에서는 남는다(사람의 다시는 `|r` 이 맡는다). M2 원장의 이어
+  돌기는 그대로 맞는다.
+
+### M3C-43. LOW 19 · 20
+- 19 — ensure 의 `clock` 으로 얼린 행의 frozen_at · updated_at 을 적는 순간의 시각으로 단다. not_before 의 기준은 시작 시각 그대로다.
+  clock 이 없으면 준 now(직접 부르는 시험의 옛 동작)다. 루프는 제 시계를 넘긴다.
+- 20 — 사용자 PAT 시야의 tools/list 에 없는 도구는 live_denied(#55)이고, 모르는 키 · 빠진 필수 키만 live_schema_mismatch 다
+  (`schema_gap` 이 (코드, 글)을 돌려준다).
+
+### M3C-44. 공유 파일에서 바꾼 곳(합류 때 볼 것)
+- entry.py — `job_action` 의 consent(시그니처 · 다른 action 거절 두 줄 · CellsRetryBody 전달), `_cells_answer` 의 facts.review_job
+  (mcp_job_brief)과 다시 단계 why.
+- mcp_server.py — risk_get_coverage 의 review.job(mcp_job_brief), risk_job_action 의 consent(시그니처 · 설명 · 전달).
+- review_runner.py — dispose_cells(hits), `_IMPACT_RANK` · `_q1_identity`, `_request_hash` · `_cached`, `_sweep`(원장 길의
+  `_replay_handoffs`) · `_replay_handoffs`, `_handoffs_to`, `_solos`, `_noinput` 겹침, `_settle` · `_sample_results`, `_audit_topup`,
+  `_work_live`. `_finish` 는 손대지 않았다.
+- routes.py — `_target_editor` · `_editable_target` · post_undefer · `_dispose` · put_issue(쟁점 · 종합 꾸러미의 경로) ·
+  registry_payload · claims_for_ref · `mcp_job_brief`.
+- closure.py · runner.py · synth.py · chain.py 는 손대지 않았다.
+
+### M3C-45. MEDIUM 7 의 뒤탈 — 셋 중 하나꼴로만 붙던 시험
+- 낮은 바닥 · 뒤 잡의 놓침 시험이 보충 표본이 끝난 잡의 거른 셀까지 점수 순으로 고르게 되자 셋째 잡이 b2 를 고를지가 대상 열쇠마다
+  바뀌었다. git archive 두 사본으로 갈랐다(59ab45d 에서 6/6, 61ed736 에서 2/6). 수리 때는 한 번 붙어 지나쳤다.
+- 잡 소금을 골라 b2 가 첫째가 되게 얼렸다(시나리오는 그대로). 표본 점수로 고르는 셈을 바꾼 뒤에는 그 시험을 여러 번 돌린다.
+
+### M3C-46. 변이 검사 · 전체 시험 — 반대 검토 수리
+- 변이를 짜며 비어 있던 시험 셋을 먼저 더했다 — G9 가 실제로 서는지, 자기 넘김으로 잡 끝이 되풀이되지 않는지, 마지막 호출 도중의
+  취소 · 폐기(얼리기 앞의 확인).
+- `git archive` 사본(`scratchpad/celm3-<pid>-r1` · `r1b`)에서 49개(HIGH 11 · MEDIUM 26 · LOW 12)를 하나씩 넣고 그 수리의 시험만
+  돌렸다. 단언 실패만 죽음으로 셌다.
+- 첫 판은 39 죽음 · 살아남음 3 · 단언 아닌 실패 7 이었다. 살아남은 것 가운데 둘은 q1 의 정체를 제목만으로 보는 변이와 걸림 아닌
+  줄이 걸림을 갈아 끼우는 변이다 — 시험이 남는 줄 전부를 보지 않았다(①은 둘 다 남는지, ④는 약해진 같은 줄로 고쳤다). 단언 아닌
+  실패(ValueError · KeyError)는 단언으로 고쳤다. 잡 칸 줄이기를 지운 변이는 KeyError 로만 넘어졌다 — 진행판은 순서를 줄여 맞추고
+  길잡이는 소스 단계에서 멈췄기 때문이다(M3C-38).
+- 고친 뒤 48/49 가 단언으로 죽는다. 남은 하나(원장 길의 넘김 다시 열기를 지우는 변이)는 잡 끝 거두기가 같은 끝 상태를 만드는 같은
+  값 변이다(M3C-36).
+- **전체 시험(공유 잠금 아래).** 2,882 통과 · xfail 4 · 실패 0(종전 2,835). ruff 깨끗하다.
