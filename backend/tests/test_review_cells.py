@@ -662,7 +662,8 @@ def test_a_new_job_reopens_experts_that_still_have_cells_in_its_scope(store):
 # ---------------------------------------------------------------- 검토 잡 만들기 — 반환·잡 행·자격
 def test_the_job_row_carries_its_scope_knobs_and_the_user_credential(store):
     """반환 모양과 잡 행 — mode reviews · tier 없음 · queued · 범위 · 동의 출처 · 사용자 PAT 자격 · 실행 설정 사본(dual_rate 1.0 ·
-    훑기 켬 · 거르기 손잡이와 표본 비율 · 변경 → 영역 표의 판과 만들 때의 승인 여부 · 내용 탓 한도 · 표본 소금). 패널 원장
+    이중 판정 손잡이(걸린 것만 · 1순위 보정 · 무작위 뒤집기 비율) · 훑기 켬 · 거르기 손잡이와 표본 비율 · 변경 → 영역 표의 판과
+    만들 때의 승인 여부 · 내용 탓 한도 · 표본 소금). 패널 원장
     (rr_coverage)은 건드리지 않는다."""
     key = _target(store)
     before = [tuple(r) for r in store.query("SELECT * FROM rr_coverage WHERE target_key = ? ORDER BY agent_key", (key,))]
@@ -679,7 +680,9 @@ def test_the_job_row_carries_its_scope_knobs_and_the_user_credential(store):
     assert params["scope"] == {"tiers": ["A"], "domains": ["mech", "sim"]}
     assert (params["user_memo"], params["consent"], params["consent_source"], params["requester"]) == (
         "메모", True, "web", OWNER)
-    assert params["knobs"] == {"dual_rate": 1.0, "sweep": "on", "filter": config.settings.risk_review_filter,
+    assert params["knobs"] == {"dual_rate": 1.0, "dual": config.settings.risk_review_dual, "dual_calib": "tier_a",
+                               "dual_neg_pct": config.settings.risk_review_dual_neg_pct,
+                               "sweep": "on", "filter": config.settings.risk_review_filter,
                                "audit_pct": config.settings.risk_filter_audit_pct,
                                "routing_rev": relevance.routing_rev(), "routing_approved": relevance.routing_approved(),
                                "max_charged": config.settings.risk_review_max_charged,

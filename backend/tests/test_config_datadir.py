@@ -302,6 +302,7 @@ REVIEW_DEFAULTS = {
     "HWAXRISK_REVIEW_CONSENT_CALLS": 1500, "HWAXRISK_REVIEW_MAX_CALLS": 30000,
     # 재설계 M3.md 4.5 의 거르기 손잡이(C3-6)
     "HWAXRISK_REVIEW_FILTER": "on", "HWAXRISK_FILTER_AUDIT_PCT": 5,
+    "HWAXRISK_REVIEW_DUAL": "flagged", "HWAXRISK_REVIEW_DUAL_NEG_PCT": 10,     # 이중 판정(C3-9 — M3.md 4.5, #32)
 }
 
 
@@ -370,13 +371,18 @@ def test_a_choice_knob_takes_only_its_words_and_says_where(tmp_path):
     with pytest.raises(RuntimeError) as exc:
         config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path / "x"), "HWAXRISK_REVIEW_FILTER": "1"})
     assert "HWAXRISK_REVIEW_FILTER='1'" in str(exc.value) and "환경변수" in str(exc.value)
+    assert config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path / "y"),
+                                     "HWAXRISK_REVIEW_DUAL": "ALL"}).risk_review_dual == "all"
+    with pytest.raises(RuntimeError) as exc:
+        config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path / "y"), "HWAXRISK_REVIEW_DUAL": "flag"})
+    assert "flagged · all" in str(exc.value)
 
 
 @pytest.mark.parametrize("name,raw", [
     ("HWAXRISK_UNIT_MAX_LINES", "0"), ("HWAXRISK_UNIT_TARGET_LINES", "-3"), ("HWAXRISK_UNITS_SMALL_LINES", "0"),
     ("HWAXRISK_UNITS_MAX", "0"), ("HWAXRISK_REVIEW_CONCURRENCY", "0"), ("HWAXRISK_REVIEW_CALL_TIMEOUT_S", "-1"),
     ("HWAXRISK_REVIEW_READ_TIMEOUT_S", "-5"), ("HWAXRISK_REVIEW_MAX_CHARGED", "0"), ("HWAXRISK_REVIEW_MAX_CALLS", "0"),
-    ("HWAXRISK_REVIEW_CONSENT_CALLS", "-1"), ("HWAXRISK_FILTER_AUDIT_PCT", "-1"),
+    ("HWAXRISK_REVIEW_CONSENT_CALLS", "-1"), ("HWAXRISK_FILTER_AUDIT_PCT", "-1"), ("HWAXRISK_REVIEW_DUAL_NEG_PCT", "-1"),
 ])
 def test_a_knob_below_its_floor_stops_the_boot_and_says_where(tmp_path, name, raw):
     """정수 손잡이는 하한을 본다(RC-5) — 단위 크기·워커·한도·상한은 1 이상, 시간은 0(끔) 이상, 동의 기준은 0 이상. 종전에는

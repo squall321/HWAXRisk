@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import re
 from collections.abc import Collection, Mapping, Sequence
 from typing import Any
@@ -295,6 +296,9 @@ def _accept_verdict(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping
             _drop(dropped, "inconsistent", raw)
             continue
         checks = raw.get("checks") if isinstance(raw.get("checks"), Mapping) else {}
+        if raw.get("flipped_from"):
+            # 엔진 보충이 앞 시도의 판정을 갈아 끼웠다(RB3-1 — 행의 flipped_from). 판정 표에 그 칸이 없어 checks 사본에 남긴다.
+            checks = {**checks, "flipped_from": raw.get("flipped_from")}
         lines = as_list(raw.get("l"))
         refs = as_list(raw.get("refs"))
         quote = _quote_columns(raw.get("cq"), card, checks.get("quote"))
@@ -709,6 +713,20 @@ def dual_neg_state(calib_rows: Sequence[Mapping[str, Any]], *, tier_a_closed: bo
     else:
         state = "on" if rate > DUAL_NEG_TRIGGER else "off"
     return {"state": state, "n": len(measured), "flips": flips, "rate": rate}
+
+
+def engine_conflict(row: Mapping[str, Any]) -> bool:
+    """엔진이 그 판정 행에 부딪침을 알렸나(RB3-1) — 같은 카드의 다른 판정과 부딪쳤거나(`checks.dup_conflict`) 보충이 판정을 갈아
+    끼웠다(`flipped_from`). 그런 행은 '문제없음' 으로 믿지 않고 걸린 것처럼 두 번째 판정을 받는다(rev 또는 단독). `checks_json`(원장
+    행) 또는 `checks`(받은 행) 어느 쪽이든 읽는다."""
+    checks = row.get("checks")
+    if not isinstance(checks, Mapping):
+        try:
+            checks = json.loads(row.get("checks_json") or "{}")
+        except (TypeError, ValueError):
+            checks = {}
+    return isinstance(checks, Mapping) and (checks.get("dup_conflict") is True or bool(checks.get("flipped_from"))
+                                            or bool(row.get("flipped_from")))
 
 
 def _alias_order(alias: Any) -> tuple[int, str]:

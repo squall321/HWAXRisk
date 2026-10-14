@@ -162,6 +162,22 @@ def test_maybe_more_asks_again_with_the_titles_so_far_at_most_three_more_times(s
     assert {len(_bodies(fake, MEM1, "noinput", u)) for u in others} == {1}
 
 
+def test_the_same_impact_said_again_is_kept_once(store):
+    """다시 물은 답이 앞 답의 영향을 같은 제목으로 되풀이하면 한 번만 남는다(받은 q1 제목 기준)."""
+    roster = (ROSTER[1],)
+    key = rig.target(store, roster)
+    job_id = rig.job(store, key)
+    fake = FakeReviewEngine(_packs(roster))
+    unit_id = _units(store, key)[0]["unit_id"]
+    fake.noinput_more = {unit_id: 1}
+    fake.noinput_same_titles = True
+    rig.Rig(store, fake).finish(job_id)
+    assert len(_bodies(fake, MEM1, "noinput", unit_id)) == 2
+    got = _cell(store, key, unit_id, MEM1)["extras"]["noinput"]
+    assert [r["title"] for r in got["q1"]] == ["보드 근접 계면 간극 축소 1", "보드 근접 계면 간극 축소 2"]
+    assert got["asks"] == 2
+
+
 def test_an_engine_that_does_not_know_noinput_holds_the_job_without_charging(store, monkeypatch):
     """엔진의 limits.kinds 에 noinput 이 없으면 그 호출을 내지 않고 잡을 agent_outdated(300초 자동 재개)로 멈춘다 — 입력 결손 셀은
     차감 없이 pending 이고 카드 전문가는 이어 돈 셈이다. 엔진이 올라오면 저절로 이어 돌아 끝난다."""

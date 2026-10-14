@@ -325,6 +325,22 @@ def test_an_offcard_quote_from_a_sent_card_is_rechecked():
         1 if rv.quote_check(quote, card)[0] == "ok" else 0, card["record_id"], 0)
 
 
+def test_an_engine_conflict_mark_survives_the_accounting_and_reads_back_from_the_ledger(fwd):
+    """RB3-1 — 엔진이 판정 행에 단 부딪침 표지(checks.dup_conflict · 행의 flipped_from)는 앱 회계를 지나 checks_json 에 남고
+    (판정 표에 flipped_from 칸이 없어 checks 사본에 둔다), engine_conflict 가 받은 행·원장 행 어느 쪽에서든 읽는다."""
+    result = copy.deepcopy(_load("result_verdict_ok.json"))
+    first, second = result["rows"][0], result["rows"][1]
+    first["checks"] = {**first["checks"], "dup_conflict": True}
+    second["flipped_from"] = {"verdict": "FAIL", "attempt": 1}
+    rows = {r["alias"]: r for r in _accept(result, fwd)["rows"]}
+    a, b = first["k"], second["k"]
+    assert json.loads(rows[a]["checks_json"])["dup_conflict"] is True
+    assert json.loads(rows[b]["checks_json"])["flipped_from"] == {"verdict": "FAIL", "attempt": 1}
+    assert rv.engine_conflict(rows[a]) and rv.engine_conflict(rows[b]) and rv.engine_conflict(second)
+    assert not any(rv.engine_conflict(r) for k, r in rows.items() if k not in (a, b))
+    assert not rv.engine_conflict({"checks_json": "not json"}) and not rv.engine_conflict({})
+
+
 # ---------------------------------------------------------------- 입력 결손 호출(재설계 M3 C3-3)
 def test_noinput_rows_are_accepted_whole_from_the_engine_example():
     """엔진 계약 예제(req_noinput · result_noinput_ok) — q1 둘(영향 있음 · 카드 인용이 앱 재대조도 지난다) · q2 둘(카드를 댄 것과

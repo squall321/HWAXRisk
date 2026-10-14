@@ -14,7 +14,8 @@ import threading
 
 import pytest
 
-from app import config, relevance, review_cells, units
+from app import config, relevance, review_cells, routes, units
+from tests import factories
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
 from tests.synth.fake_review_engine import FakeReviewEngine
@@ -277,6 +278,52 @@ def test_a_sweep_that_does_not_say_unrelated_keeps_the_cell(store, monkeypatch, 
     assert (cell["state"], cell["route"], cell["route_forced"]) == ("reviewed", "review", None)
     sweep = cell["route_json"]["sweep"]
     assert (sweep["verdict"], sweep["rel"]) == (("unknown", "error") if rel == "absent" else ("related", rel))
+
+
+def test_a_cell_a_person_reopened_is_never_classified_again(store, monkeypatch):
+    """사람이 force 로 다시 연 셀(route_forced human_retry)은 새 잡이 거를 셀로 볼 입력이어도 분류하지 않고 끝까지 본다."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=100)
+    key, _job, fake, kinds = _run(store, SMALL)
+    b = kinds["boundary"]
+    assert _cell(store, key, b, STD2)["route"] == "audit"
+    _knobs(monkeypatch, risk_filter_audit_pct=0)                 # 새 잡이면 거를 셀이다
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[b, STD2]], force=True, reason="사람이 다시 본다"),
+                                  ident=factories.ident(rig.OWNER))
+    rig.Rig(store, fake).finish(out["job"]["job_id"])
+    cell = _cell(store, key, b, STD2)
+    assert (cell["state"], cell["route"], cell["route_forced"], cell["route_json"]) == (
+        "reviewed", None, review_cells.HUMAN_RETRY, None)
+
+
+def test_a_classified_cell_keeps_its_route_when_the_inputs_move_before_it_settles(store, monkeypatch):
+    """분류는 셀마다 한 번이다 — 1순위 셀이 열려 있어 검토로 보낸(tier_a_pending) 셀은, 세션이 도중에 죽고 그 사이 1순위가 다
+    닫혀 같은 입력이면 걸렀을 때가 되어도 다시 분류되지 않는다(입력 지문이 바뀌기 전까지 route·route_json 그대로)."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    key = rig.target(store, SMALL)
+    fake = FakeReviewEngine(_packs(SMALL))
+    kinds = _units(store, key)
+    b = kinds["boundary"]
+    _quiet(fake, b, kinds["global"])
+    job_id = rig.job(store, key, scope={"agents": [STD2]})
+    gate = threading.Event()
+    fake.hold_runs = {3: gate}
+    first = rig.Rig(store, fake, boot_id="boot-a")
+    first.tick()
+    first.tick(wait=False)
+    rig.wait_for(lambda: fake.runs == 3)
+    before = _cell(store, key, b, STD2)
+    assert (before["route"], before["route_forced"]) == ("review", "tier_a_pending")
+    review_cells.recover_running(store)
+    store.execute("UPDATE rr_review_cells SET state = 'reviewed' WHERE target_key = ? AND agent_key = ?", (key, STD1))
+    second = rig.Rig(store, fake, clock=first.clock, boot_id="boot-b")
+    second.finish(job_id)
+    gate.set()
+    first.loop.join(30)
+    after = _cell(store, key, b, STD2)
+    assert (after["state"], after["route"], after["route_forced"], after["route_json"]) == (
+        "reviewed", "review", "tier_a_pending", before["route_json"])
 
 
 # ---------------------------------------------------------------- 재기동

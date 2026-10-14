@@ -584,6 +584,25 @@ def route_cell(store: Any, target_key: str, unit_id: str, agent_key: str, *, lea
         return {"written": True, "state": "running"}
 
 
+def merge_sample(store: Any, target_key: str, unit_id: str, agent_key: str, *, lease_owner: str,
+                 values: Mapping[str, Any], now: int | None = None) -> bool:
+    """도는 셀의 `sample_json` 에 칸을 더한다(같은 열쇠는 덮는다 — 시도 표지 `attempt` 와 다른 칸은 남긴다). 쓴 행이 있으면 참
+    (선점을 잃었으면 거짓). 이중 판정의 무작위 뒤집기 표지 `dual_neg{on, picked}`(재설계 M3 C3-9)가 쓴다."""
+    now = now_epoch() if now is None else now
+    key = (target_key, unit_id, agent_key)
+    with store.tx():
+        row = _cell(store, *key)
+        if row is None or row["state"] != "running" or row["lease_owner"] != lease_owner:
+            return False
+        try:
+            sample = json.loads(row["sample_json"] or "null")
+        except ValueError:
+            sample = None
+        sample = {**(sample if isinstance(sample, dict) else {}), **dict(values)}
+        return bool(store.execute(f"UPDATE rr_review_cells SET sample_json = ?, updated_at = ? WHERE {_cell_where()}"
+                                  " AND lease_owner = ?", (json.dumps(sample, sort_keys=True), now, *key, lease_owner)))
+
+
 def begin_call(store: Any, target_key: str, agent_key: str, *, lease_owner: str, call: Mapping[str, Any],
                now: int | None = None) -> bool:
     """호출을 내기 직전에 호출 원장에 `running` 행을 둔다 — 재기동 복구가 그 호출을 `aborted('restart')` 로 닫을 수 있게.

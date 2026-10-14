@@ -46,6 +46,7 @@
   noinput_q2       unit_id → q2 줄의 항목 목록(빈 글 = 확인할 것 없음 — 까닭만). 기본은 예제처럼 둘(첫째는 첫 카드를 댄다)
   noinput_more     unit_id → more=yes 로 답할 횟수(답마다 하나씩 준다 — 그 동안 quality.maybe_more 참). 다시 물으면 q1 제목 번호가
                    받은 extra.known 수 뒤에서 이어진다
+  noinput_same_titles  참이면 다시 물어도 q1 제목 번호를 1 부터 다시 매긴다(같은 영향을 되풀이하는 모델 — 앱이 한 번만 남기는지)
   sweep_drop       훑기 답에서 뺄 unit_id(앱 회계가 그 단위를 error 로 적는다 — 거르기의 '답에 없는 단위', 재설계 M3 C3-6)
   sweep_k          unit_id → 별칭 목록 — 그 단위의 u 줄 k 를 실은 카드 전부가 아니라 이것만으로 낸다(카드 밖 호출이 훑기 k 에 걸린
                    배경 카드를 먼저 싣는지 — P-03, R3A-5)
@@ -59,6 +60,8 @@
                    (절단 모름 — X1-22, S11)
   queued_ms        정수면 meta.queued_ms 로 싣는다(자리 대기 — 엔진 예제에는 없는 칸이라 기본은 싣지 않는다, S11)
   no_quote         이 별칭들의 판정 행에 인용을 싣지 않는다(cq 빈 글 · checks.quote empty — 인용 통과율의 분모, X1-06, S11)
+  dup_conflict     (agent_key, 별칭) 또는 별칭 — 그 fwd 판정 행에 checks.dup_conflict 를 단다(엔진이 같은 카드의 다른 판정과
+                   부딪친 줄을 남겼다는 표지 — RB3-1, 엔진 216650e. 앱은 걸린 것처럼 두 번째 판정을 준다 — 재설계 M3 C3-9)
   no_refs          이 별칭들의 판정 행에 변경 줄을 싣지 않는다(l·refs 빈 목록 · checks.refs missing — 참조 통과율의 분모, S11)
 기록 — requests(받은 요청 전부), runs(받은 run 수), max_active(동시에 돈 run 의 최댓값).
 S8(검토 루프)과 WP5b C9 가 이 파일을 넓힌다. 시험이 쓰는 여러 전문가의 팩은 `derive_pack` 이 엔진 계약 예제(pack_ok·pack_empty)에서
@@ -267,11 +270,13 @@ class FakeReviewEngine:
         self.noinput_q1: dict[str, list[str]] = {}
         self.noinput_q2: dict[str, list[str]] = {}
         self.noinput_more: dict[str, int] = {}
+        self.noinput_same_titles = False
         self.error_cells: dict[tuple[str, str], dict[str, Any]] = {}
         self.truncate: dict[tuple[str, str | None, str | None], str] = {}
         self.queued_ms: int | None = None
         self.no_quote: set[str] = set()
         self.no_refs: set[str] = set()
+        self.dup_conflict: set[Any] = set()
         # 기록
         self.requests: list[dict[str, Any]] = []
         self.runs = 0
@@ -500,6 +505,10 @@ class FakeReviewEngine:
             judge = order[::-1] if variant == "rev" else order
             main = [self._mech(self._verdict_row(a, cards[a], own, lines, variant=variant), body, variant)
                     for a in judge if a not in self.skip_cards]
+            agent = str((body.get("expert") or {}).get("key") or "")
+            for row in main:
+                if variant == "fwd" and (row["k"] in self.dup_conflict or (agent, row["k"]) in self.dup_conflict):
+                    row["checks"]["dup_conflict"] = True
             if (self.truncated or cut == "length") and main:
                 main = main[:-1]
                 quality.update(truncated=True, tail_broken=True)
@@ -624,7 +633,7 @@ class FakeReviewEngine:
         """입력 결손 호출의 q1·q2·more 줄과 quality 의 ok·dropped_over_cap·maybe_more — 엔진 계약 2(result_noinput_* 의 모양)."""
         uid = str((body.get("unit") or {}).get("unit_id") or "")
         extra = body.get("extra") or {}
-        base = len(extra.get("known") or ())
+        base = 0 if self.noinput_same_titles else len(extra.get("known") or ())
         codes = [str(m.get("code")) for m in extra.get("mechanisms") or () if isinstance(m, Mapping)]
         q1: list[dict] = []
         for i, impact in enumerate(self.noinput_q1.get(uid, ["yes", "yes"])):

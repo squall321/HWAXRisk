@@ -182,6 +182,10 @@ REVIEW_KNOBS: tuple[Knob, ...] = (
     # 거르지 않는다(#40). 표본 비율은 거를 셀 가운데 끝까지 판정하는 몫(%)이다.
     Knob("HWAXRISK_REVIEW_FILTER", "risk_review_filter", "on", "choice", choices=("off", "shadow", "on")),
     Knob("HWAXRISK_FILTER_AUDIT_PCT", "risk_filter_audit_pct", 5),
+    # 이중 판정(재설계 M3 C3-9) — flagged(걸린 별칭만 rev, 1순위는 보정용 전량) · all(M2 동작). 무작위 뒤집기 비율은 보정의
+    # '걸림 없음 → 걸림' 이 5% 를 넘은 대상에서 걸림 없는 묶음을 rev 하는 몫(%)이다 — 0 이면 켜지지 않는다(#32).
+    Knob("HWAXRISK_REVIEW_DUAL", "risk_review_dual", "flagged", "choice", choices=("flagged", "all")),
+    Knob("HWAXRISK_REVIEW_DUAL_NEG_PCT", "risk_review_dual_neg_pct", 10),
 )
 # 포털 PAT 자동 등록의 손잡이(리스크 앱 사람 자격 R1 — 전부 선택). 갱신 문턱은 남은 수명이 이 밑이면 '지금 다시 받아야 한다'(due
 # expiring)는 뜻이고 패널 자격 여유(credential_margin_s)보다 커야 한다(main.check_credential_chain) — 아니면 자동 등록이 '아직
@@ -287,6 +291,8 @@ class Settings:
     risk_review_max_calls: int = 30000
     risk_review_filter: str = "on"
     risk_filter_audit_pct: int = 5
+    risk_review_dual: str = "flagged"
+    risk_review_dual_neg_pct: int = 10
     risk_pat_renew_before_s: int = DEFAULT_PAT_RENEW_BEFORE_S
     risk_pat_auto_retry_s: int = DEFAULT_PAT_AUTO_RETRY_S
     knob_sources: tuple[tuple[str, str], ...] = ()

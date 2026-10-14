@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from app import cardpack, config, engine_client, routes, taxonomy, units
+from app import cardpack, config, engine_client, review_verify, routes, taxonomy, units
 from tests import factories
 from tests.conftest import FIXTURES_DIR, REPO_ROOT
 from tests.synth import fake_review_engine as fre
@@ -104,6 +104,9 @@ def _bodies(store, target_key: str) -> dict[str, dict]:
             bodies[f"{agent}/verdict.rev/{uid}"] = body("verdict", uid, variant="rev", cards=checkable[:8],
                                                         digest=background)
             bodies[f"{agent}/verdict.solo/{uid}"] = body("verdict", uid, variant="solo", cards=checkable[:1])
+            # 걸린 별칭만 실은 rev(재설계 M3 C3-9) — 나머지 묶음 카드는 제목 목록으로 내린다
+            bodies[f"{agent}/verdict.rev.flagged/{uid}"] = review_verify.dual_plan_flagged(
+                bodies[f"{agent}/verdict.fwd/{uid}"], checkable[1:3])["rev"]
             bodies[f"{agent}/offcard/{uid}"] = body(
                 "offcard", uid, cards=background, digest=list(frozen.order),
                 known=[{"alias": "K01", "judgement": "FAIL", "why": "접착폭 하한 밑", "record_id": "x", "applies": "yes"}])

@@ -234,8 +234,10 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
         "consent": bool(consent), "consent_source": consent_source if consent else None,
         "credential": credential, "calls_estimate": estimate,
         # 잡에 복사해 두는 실행 설정 — 도는 중에 설정이 바뀌어도 이 잡의 표본·배치는 바뀌지 않는다(결정론의 전제). 거르기의 승인
-        # 문(#40)도 만들 때의 것을 얼린다 — 승인 커밋은 다음 잡부터 듣는다(재설계 M3 C3-6). M2 잡은 filter 'off' 다.
-        "knobs": {"dual_rate": 1.0, "sweep": "on", "filter": str(cfg.risk_review_filter),
+        # 문(#40)도 만들 때의 것을 얼린다 — 승인 커밋은 다음 잡부터 듣는다(재설계 M3 C3-6). 이중 판정은 걸린 별칭만(dual flagged ·
+        # 1순위는 보정용 전량 — C3-9). M2 잡은 filter 'off' 이고 dual 칸이 없어 'all' 로 읽는다.
+        "knobs": {"dual_rate": 1.0, "dual": str(cfg.risk_review_dual), "dual_calib": "tier_a",
+                  "dual_neg_pct": int(cfg.risk_review_dual_neg_pct), "sweep": "on", "filter": str(cfg.risk_review_filter),
                   "audit_pct": int(cfg.risk_filter_audit_pct), "routing_rev": relevance.routing_rev(),
                   "routing_approved": relevance.routing_approved(), "max_charged": int(cfg.risk_review_max_charged),
                   "sample_salt": review_verify.SAMPLE_SALT},
@@ -718,7 +720,8 @@ class _Cell:
     payload: dict
     refs: frozenset
     fwd_bodies: dict = field(default_factory=dict)      # deck_id → 그 묶음 전부를 실은 fwd 본문(rev 계획의 바탕)
-    dual_decks: set = field(default_factory=set)        # rev 를 물은 묶음
+    dual_aliases: set = field(default_factory=set)      # rev 에 실은 별칭(걸린 것만 실은 rev 면 그 별칭만 — C3-9)
+    neg_picked: bool = False                            # 무작위 뒤집기로 걸림 없는 묶음을 rev 했나(#32)
     forced_solo: list = field(default_factory=list)     # pair_over·같은 본문(1장 묶음)이라 단독으로 돌릴 카드
     log: list = field(default_factory=list)             # 이번 시도의 호출 요약(새로 받은 것과 원장에서 다시 읽은 것)
     inj: list = field(default_factory=list)
@@ -780,6 +783,10 @@ class _Session:
         self.max_charged = int(knobs.get("max_charged") or getattr(self.settings, "risk_review_max_charged", 2) or 2)
         self.dual_rate = float(knobs.get("dual_rate", 1.0))
         self.salt = str(knobs.get("sample_salt") or review_verify.SAMPLE_SALT)
+        # 이중 판정(재설계 M3 C3-9) — M2 잡은 dual 칸이 없어 'all'(묶음 전체 rev)이다.
+        self.dual_mode = str(knobs.get("dual") or "all")
+        self.dual_calib = knobs.get("dual_calib")
+        self.dual_neg_pct = float(knobs.get("dual_neg_pct") or 0)
         # 거르기(재설계 M3 C3-6) — M2 잡은 'off' 라 분류하지 않는다(원장이 종전과 바이트가 같다).
         self.filter_mode = str(knobs.get("filter") or "off")
         self.audit_pct = float(knobs.get("audit_pct") or 0)
@@ -1374,8 +1381,28 @@ class _Session:
 
     def _rows(self, cell: _Cell) -> list[dict]:
         return [dict(r) for r in self.store.query(
-            "SELECT record_id, variant, alias, applies, judgement, why, is_effective FROM rr_card_verdicts"
+            "SELECT record_id, variant, alias, applies, judgement, why, is_effective, checks_json FROM rr_card_verdicts"
             " WHERE target_key = ? AND unit_id = ? AND agent_key = ?", (self.target_key, cell.unit_id, self.agent))]
+
+    def _flagged(self, cell: _Cell, aliases: Sequence[str]) -> list[str]:
+        """그 묶음에서 fwd(빠진 카드 재질의 뒤)가 걸림(FAIL·WARNING)이거나 엔진이 부딪침을 알린(RB3-1) 별칭 — 걸린 것만 이중
+        판정(C3-9)의 rev·단독 대상이다."""
+        sent = set(aliases)
+        return [r["alias"] for r in self._rows(cell) if r["variant"] == "fwd" and r["alias"] in sent
+                and (r["judgement"] in review_verify.FLAGGED or review_verify.engine_conflict(r))]
+
+    def _dual_neg(self) -> dict:
+        """무작위 뒤집기를 켜나(#32) — 원장에서 유도한다: 보정 모집단(대상의 1순위 셀)의 fwd·rev 판정, 1순위 셀이 다 닫혔나, 이미
+        켜진 셀이 있나. `review_verify.dual_neg_state` 의 반환."""
+        active = set(review_cells.active_unit_ids(self.store, self.target_key))
+        already = self.store.query_one(
+            "SELECT 1 FROM rr_review_cells WHERE target_key = ? AND json_extract(sample_json, '$.dual_neg.on') = 1 LIMIT 1",
+            (self.target_key,)) is not None
+        rows = [dict(r) for r in self.store.query(
+            "SELECT v.unit_id, v.agent_key, v.record_id, v.variant, v.judgement FROM rr_card_verdicts v JOIN rr_expert_reports h"
+            " ON h.target_key = v.target_key AND h.agent_key = v.agent_key WHERE v.target_key = ? AND h.rank_in_domain = 1"
+            " AND v.variant IN ('fwd', 'rev')", (self.target_key,)) if r["unit_id"] in active]
+        return review_verify.dual_neg_state(rows, tier_a_closed=not self._tier_a_pending(active), already_on=already)
 
     def _judged(self, cell: _Cell, variant: str) -> set[str]:
         return {r["alias"] for r in self._rows(cell) if r["variant"] == variant}
@@ -1406,20 +1433,23 @@ class _Session:
 
     def _solo_set(self, cell: _Cell) -> list[str]:
         """단독 재질의할 카드(팩 순서) — 묶음째로는 창을 넘는 짝(pair_over)·같은 본문이라 rev 를 건너뛴 1장 묶음(X1-20)·fwd 와
-        rev 가 갈린 카드·fwd 나 rev 를 끝내 못 받은 카드·실효가 걸림(FAIL·WARNING)인 카드. fwd·rev 행만으로 정한다(단독 행이 섞이면
-        재기동 뒤의 세션이 다른 집합을 고른다)."""
+        rev 가 갈린 카드·fwd 나 rev(rev 에 실은 별칭 — C3-9)를 끝내 못 받은 카드·실효가 걸림(FAIL·WARNING)인 카드·엔진이 fwd 에
+        부딪침을 알렸는데 rev 를 받지 않은 카드(RB3-1). fwd·rev 행만으로 정한다(단독 행이 섞이면 재기동 뒤의 세션이 다른 집합을
+        고른다)."""
         assert self.pack is not None
         rows = [r for r in self._rows(cell) if r["variant"] in ("fwd", "rev")]
         effective = review_verify.effective_rows(rows) if rows else {}
-        decks = self._deck_of()
         out: list[str] = []
         for alias in self.pack.checkable:
             record_id = str(self.pack.cards[alias]["record_id"])
             have = {r["variant"] for r in rows if r["record_id"] == record_id}
             eff = effective.get(record_id) or {}
+            conflict = any(r["variant"] == "fwd" and review_verify.engine_conflict(r) for r in rows
+                           if r["record_id"] == record_id)
             if (alias in cell.forced_solo or "fwd" not in have
-                    or (decks.get(alias) in cell.dual_decks and "rev" not in have)
-                    or eff.get("agree") == 0 or eff.get("judgement") in review_verify.FLAGGED):
+                    or (alias in cell.dual_aliases and "rev" not in have)
+                    or eff.get("agree") == 0 or eff.get("judgement") in review_verify.FLAGGED
+                    or (conflict and "rev" not in have)):
                 out.append(alias)
         return out
 
@@ -1724,20 +1754,40 @@ class _Session:
                     if not missing:
                         break
                     self._verdict(cell, missing, "fwd", self._verdict_body(cell, missing, "fwd"), deck_id=deck_id, seq=seq)
+        # 이중 판정 — flagged(C3-9): 걸린 별칭만 실은 rev(둘 이상) · 하나면 단독이 두 번째 판정 · 1순위 셀은 보정용 묶음 전체 ·
+        # 무작위 뒤집기가 켜졌으면 걸림 없는 묶음의 일부. all(M2): 묶음 전체.
+        flagged_mode = self.dual_mode == "flagged"
+        calibrate = flagged_mode and self.dual_calib == "tier_a" and self._head_row().get("rank_in_domain") == 1
+        neg_on = flagged_mode and not calibrate and bool(decks) and self.dual_neg_pct > 0 \
+            and self._dual_neg()["state"] == "on"
         for deck in decks:
             deck_id, aliases = str(deck.get("deck_id")), list(deck.get("aliases") or ())
             for cell in live():
                 if (deck_id, cell.unit_id) in pair_over or deck_id not in cell.fwd_bodies:
                     continue
                 self.focus = cell
-                dual = review_verify.dual_plan(cell.fwd_bodies[deck_id], dual_rate=self.dual_rate,
-                                               sample_key=(self.target_key, cell.unit_id, self.agent, deck_id), salt=self.salt)
+                sample_key = (self.target_key, cell.unit_id, self.agent, deck_id)
+                if flagged_mode:
+                    dual = review_verify.dual_plan_flagged(cell.fwd_bodies[deck_id], self._flagged(cell, aliases),
+                                                           calibrate=calibrate, neg_on=neg_on, neg_pct=self.dual_neg_pct,
+                                                           sample_key=sample_key, salt=self.salt)
+                    cell.neg_picked = cell.neg_picked or dual["neg"]["picked"]
+                else:
+                    dual = {**review_verify.dual_plan(cell.fwd_bodies[deck_id], dual_rate=self.dual_rate,
+                                                      sample_key=sample_key, salt=self.salt), "aliases": aliases}
                 if dual["rev"] is None:
                     if dual["reason"] == "same_body":
                         cell.forced_solo.extend(a for a in dual["solo"] if a not in cell.forced_solo)
                     continue
-                cell.dual_decks.add(deck_id)
-                self._verdict(cell, aliases, "rev", dual["rev"], deck_id=deck_id)
+                cell.dual_aliases.update(dual["aliases"])
+                self._verdict(cell, dual["aliases"], "rev", dual["rev"], deck_id=deck_id)
+        if flagged_mode and not calibrate and decks:
+            for cell in live():
+                # 셀마다 무작위 뒤집기 표지(#32) — 켜졌나 · 이 셀의 걸림 없는 묶음이 뽑혔나(보고서·품질이 켜진 뒤 셀 수를 센다)
+                if not review_cells.merge_sample(self.store, self.target_key, cell.unit_id, self.agent, lease_owner=self.lease,
+                                                 values={"dual_neg": {"on": neg_on, "picked": cell.neg_picked}},
+                                                 now=self.now()):
+                    raise _Stop("lease", release=False)
         if self.pack.card_basis == cardpack.CARD_BASIS_CARDS:
             for cell in live():
                 self._solos(cell)
