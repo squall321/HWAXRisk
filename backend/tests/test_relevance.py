@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import json
 import random
+import re
 
 import pytest
 
@@ -316,3 +317,159 @@ def test_the_gate_keeps_every_domain_unknown_until_both_tables_are_approved(synt
     # 승인 칸 말고는 같은 표다 — 한 칸만 고친 커밋이 거르기를 연다.
     assert {k: v for k, v in approved_routing.items() if k != "review_status"} == {
         k: v for k, v in routing.items() if k != "review_status"}
+
+
+# ---------------------------------------------------------------- XU3 · XU4 · XU5(M2 #14 가 M3 로 넘긴 단위 계약 — #56)
+def _dn_index(case) -> dict[str, set[str]]:
+    """부품 이름 → 그 부품의 dn(대응한 짝은 base 쪽 dn — units 와 같은 규칙)."""
+    nodes = units._Nodes(case.diff, case.view)
+    out: dict[str, set[str]] = {}
+    for side in ("base", "target"):
+        for node in case.view[side]["nodes"]:
+            if node.get("label"):
+                out.setdefault(str(node["label"]), set()).add(nodes.dn_of[str(node["nid"])])
+    return out
+
+
+def _record_dns(record, names) -> set[str]:
+    out: set[str] = set()
+    for subject in record.subjects:
+        if subject.startswith(("dim:", "contact#", "asm:")):
+            out.add(subject.casefold())
+        else:
+            out |= {dn.casefold() for dn in names.get(subject, ())}
+    return out
+
+
+def _anchors(item) -> set[str]:
+    return {str(a).casefold() for a in item["anchors_raw"] if a}
+
+
+@pytest.mark.parametrize("size", (40, 150))
+def test_xu3_script_flags_land_in_the_unit_kind_they_name(synth, size):
+    """대본의 깃발과 단위 종류가 맞는다 — 경계 계면은 경계 단위, 부품 키 없는 이벤트는 전역 단위(롤업은 그 조립 단위의 묶음에
+    탈 수 있다 — units W2-01), 설계 무관·제외 등급은 제외 단위, 단서 등급(null_one_side 등)은 검토 단위 안의 단서 줄, 임계 밑은
+    어느 단위에도 없다."""
+    case = synth[size]
+    names = _dn_index(case)
+    owner = {ref: unit for unit in case.built["units"] for ref in unit["cids"]}
+    line_of = {(unit["unit_id"], line["ref"]): line for unit in case.built["units"] for line in unit["lines"]}
+    checked: dict[str, int] = {}
+    for record in case.target.manifest:
+        dns = _record_dns(record, names)
+        events = [i for i in case.items if i["layer"] == "semantic" and i["code"] in record.expect_codes
+                  and _anchors(i) and _anchors(i) <= dns]
+        reasons = [f.split(":", 1)[1] for f in record.flags if f.startswith("excluded:")]
+        if "boundary" in record.flags:
+            assert events and {owner[i["ref"]]["kind"] for i in events} == {"boundary"}, record
+            checked["boundary"] = checked.get("boundary", 0) + 1
+        if "design_irrelevant" in record.flags:
+            assert events and {owner[i["ref"]]["kind"] for i in events} == {"excluded"}, record
+            assert {line_of[(owner[i["ref"]]["unit_id"], i["ref"])]["klass"] for i in events} == {"non_design"}
+            checked["design_irrelevant"] = checked.get("design_irrelevant", 0) + 1
+        if "no_ckey" in record.flags:
+            # 깃발은 부품 키 없는 이벤트의 것이다 — 명명 치수 연산은 그 부품의 두께 이벤트(부품 키 있음)도 함께 낸다.
+            keyless = [i for i in events if not any(a.startswith("p:") for a in _anchors(i))]
+            kinds = {owner[i["ref"]]["kind"] for i in keyless}
+            events = keyless
+            assert events and kinds <= ({"global", "bundle"} if "derived" in record.flags else {"global"}), (record, kinds)
+            checked["no_ckey"] = checked.get("no_ckey", 0) + 1
+        for reason in reasons:                                 # 이벤트가 없는 변화 — 대본이 겨냥한 원자료를 본다
+            mine = [i for i in case.items if _anchors(i) & dns and (i.get("flag") == reason or i.get("excluded_reason") == reason
+                                                                   or i.get("nd_reason") == reason)]
+            if reason == "noise":
+                noise = [d for d in (case.diff["parametric"].get("node_params") or ())
+                         if str(d.get("dn") or "").casefold() in dns and d.get("flag") == "noise"]
+                assert noise and not [d for d in noise if d["cid"] in owner], record
+            elif reason in units.EXCLUDED_POLICY["caveat"]:
+                assert mine and {owner[i["ref"]]["reviewable"] for i in mine} == {True}, record
+                assert {line_of[(owner[i["ref"]]["unit_id"], i["ref"])]["klass"] for i in mine} == {"caveat"}, record
+            else:
+                assert mine and {owner[i["ref"]]["kind"] for i in mine} == {"excluded"}, record
+            checked[f"excluded:{reason}"] = checked.get(f"excluded:{reason}", 0) + 1
+    assert {"boundary", "no_ckey"} <= set(checked), checked
+    if size == 150:
+        assert {"design_irrelevant", "excluded:noise", "excluded:null_one_side", "excluded:status_changed"} <= set(checked)
+    # 단서 등급은 어디서 왔든 검토 단위 안에 단서 줄로 남는다(사유가 붙는다).
+    caveats = [i for i in case.items if i["klass"] == "caveat"]
+    assert caveats
+    for item in caveats:
+        holder = owner[item["ref"]]
+        assert holder["reviewable"] and line_of[(holder["unit_id"], item["ref"])]["caveat"], item["code"]
+
+
+def _shuffled_results(results, rng: random.Random) -> list[dict]:
+    out = []
+    for result in results:
+        result = dict(result, nodes=list(result["nodes"]), edges=list(result["edges"]))
+        rng.shuffle(result["nodes"])
+        rng.shuffle(result["edges"])
+        out.append(result)
+    return out
+
+
+def _unit_prints(built) -> list[tuple]:
+    return sorted((u["unit_id"], u["unit_hash"], u["summary_sha"], u["digest"], u["title"]) for u in built["units"])
+
+
+def test_xu4_adapter_order_does_not_move_units_or_their_signal(tmp_path_factory, approved_tax, routing):
+    """어댑터 결과의 노드·엣지 순서를 섞어도(씨앗 50) 단위 id 집합·내용 지문과 단위마다의 코드 신호가 같다."""
+    case = _synth_case(tmp_path_factory, "xu4", 40)
+    try:
+        expected = _unit_prints(case.built)
+        signals = {u["unit_id"]: _signal(u, approved_tax, routing) for u in _reviewable(case)}
+        later = factories.CAPTURED_AT + 86400
+        base, target = devseed.to_adapter_results(case.target.base), devseed.to_adapter_results(case.target.target,
+                                                                                                 captured_at=later)
+        moved = 0
+        for seed in range(50):
+            rng = random.Random(seed)
+            mixed = _shuffled_results(base, rng)
+            moved += [n["local_key"] for n in mixed[0]["nodes"]] != [n["local_key"] for n in base[0]["nodes"]]
+            first = factories.make_snapshot(case.store, case.target.project_id, mixed, label=f"XU4-{seed}a")
+            second = factories.make_snapshot(case.store, case.target.project_id, _shuffled_results(target, rng),
+                                             label=f"XU4-{seed}b", captured_at=later)
+            diff_obj = factories.make_diff(case.store, first["snapshot_id"], second["snapshot_id"])
+            built = units.build_diff_units(diff_obj, units._ir_view(case.store, first["snapshot_id"],
+                                                                   second["snapshot_id"]))
+            assert _unit_prints(built) == expected, seed
+            assert {u["unit_id"]: _signal(u, approved_tax, routing) for u in built["units"] if u["reviewable"]
+                    and u["kind"] != "excluded"} == signals, seed
+        assert moved == 50                                     # 섞기가 실제로 순서를 바꿨다
+    finally:
+        case.store.close()
+
+
+_LINE_CODE = r"^C\d{{2,}} (?:\[c:[0-9a-f]{{12}}\] )?(?:\(이벤트 없음\) )?{code}(?: |$)"
+
+
+def _summary_codes(case, codes) -> set[str]:
+    """단위 요약 글의 [변경] 줄에 코드로 나타난 것(접은 줄 `Cnn <코드> 같은 변화 N건` 포함 — 문맥 줄은 남의 소유라 뺀다)."""
+    found: set[str] = set()
+    for unit in case.built["units"]:
+        body = unit["summary"].split("\n[문맥]")[0]
+        for code in codes:
+            if re.search(_LINE_CODE.format(code=re.escape(code)), body, re.MULTILINE):
+                found.add(code)
+    return found
+
+
+def test_xu5_every_kind_is_a_summary_line_and_has_mechanisms(synth, producer_cases, approved_tax, routing):
+    """33종 코드(스키마 39종 − 아직 어떤 입력도 내지 않는 loadpath 3 · ecad 3)가 전부 어느 단위의 요약 글엔가 줄로 나타난다 —
+    syn40 은 대본의 expect_codes 로 센 31종, 짝 있는 부품의 판 두께가 cross.bridge_stale, 남는 것은 지금 생산자가 못 내는
+    contact.type_changed(devseed.PRODUCER_GAPS) 하나뿐이다. 그 33종은 전부 변경 → 메커니즘 표에 있고, 줄 하나만으로도 어느
+    영역엔가 닿는다(메시 밀도는 설계 변경이 아니라 닿지 않는다)."""
+    kinds = {c for c in SCHEMA["event"]["properties"]["code"]["enum"] if not c.startswith(("loadpath.", "ecad."))}
+    assert len(kinds) == 33
+    expected = set(devseed.expected_codes(synth[40].target.manifest))
+    assert len(expected) == 31
+    seen = _summary_codes(synth[40], expected)
+    assert seen == expected
+    bridge = next(case for case in producer_cases if case.name == "bridge")
+    seen |= _summary_codes(bridge, {"cross.bridge_stale"})
+    assert kinds - seen == set(devseed.PRODUCER_GAPS) == {"contact.type_changed"}
+    for code in sorted(kinds):
+        out = relevance.code_signal([{"code": code}], [], approved=True, routing=routing, tax=approved_tax)
+        related = {d for d, v in out.items() if v["verdict"] == "related"}
+        assert bool(related) is (code != "mesh.density_changed"), (code, related)
+        assert "unknown" not in {v["verdict"] for v in out.values()}, code
