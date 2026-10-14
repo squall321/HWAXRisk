@@ -287,6 +287,9 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
     params = {
         "scope": picked["scope"], "user_memo": str(user_memo) if user_memo else None, "requester": requester_sub,
         "consent": bool(consent), "consent_source": consent_source if consent else None,
+        # 사슬 표지(재설계 M3 review1 M8) — 이 코드가 세운 검토 잡만 끝나면 쟁점 → 종합을 잇는다. 표지가 없는 잡(M2 코드가 세운 잡)은
+        # 올린 뒤에도 사슬이 건드리지 않는다(사람이 쟁점·종합을 직접 시작한다).
+        "chain": True,
         "credential": credential, "calls_estimate": estimate,
         # 잡에 복사해 두는 실행 설정 — 도는 중에 설정이 바뀌어도 이 잡의 표본·배치는 바뀌지 않는다(결정론의 전제). 거르기의 승인
         # 문(#40)도 만들 때의 것을 얼린다 — 승인 커밋은 다음 잡부터 듣는다(재설계 M3 C3-6). 이중 판정은 걸린 별칭만(dual flagged ·

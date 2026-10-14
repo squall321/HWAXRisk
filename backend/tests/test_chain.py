@@ -373,3 +373,33 @@ def test_an_issue_job_that_ends_while_a_synthesis_waits_rearms_that_synthesis_in
     assert synth_job["id"] == waiting
     assert (synth_job["chain"].get("rearmed_by"), synth_job["chain"].get("registry_hash")) == (
         issue_job["id"], synth.registry_hash(store, key))
+
+
+# ---------------------------------------------------------------- 반대 검토 1차(review1) M8
+def test_the_first_sweep_after_the_v5_upgrade_does_not_chain_m2_era_review_jobs(tmp_path, monkeypatch):
+    """M8(결정) — 사슬은 M3 코드가 세운 검토 잡(만들 때 사슬 표지를 단 잡)에서만 시작한다. v4(M2 코드)가 끝낸 검토 잡이 걸린 원장을
+    v5 로 올린 뒤 첫 sweep 은 아무 잡도 · 판도 · 쟁점도 세우지 않는다 — 사람이 시작하지 않은 쟁점 패널·요약이 돌지 않는다."""
+    from tests.rr import v4_build
+    from tests.rr.test_v4_upgrade import _thaw
+    from app.risk_store import RiskStore
+
+    store = RiskStore(_thaw(v4_build.V4_DIR / v4_build.DB_GZ, tmp_path))
+    store.open()
+    store.migrate()
+    rig.configure(monkeypatch, store, tmp_path)
+    reviewed = json.loads((v4_build.V4_DIR / "manifest.json").read_text(encoding="utf-8"))["targets"]["reviewed"]
+    assert rig.state(store, reviewed["job_id"]) == "completed"
+    out = chain.sweep(store)
+    assert out["made"] == []
+    for table in ("rr_issues", "rr_reports", "rr_summaries"):
+        assert store.query_one(f"SELECT COUNT(*) AS n FROM {table}")["n"] == 0, table
+    assert store.query_one("SELECT COUNT(*) AS n FROM rr_jobs WHERE mode IN ('issues', 'synth')")["n"] == 0
+    assert chain.on_reviews_closed(store, rig.job_row(store, reviewed["job_id"]))["reason"] == "pre_m3_job"
+    store.close()
+
+
+def test_a_review_job_made_by_m3_code_carries_the_chain_mark(store):
+    """M8(결정) — 검토 잡을 만들 때(사람의 처분이 세우는 잡도) 사슬 표지를 단다."""
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [rig.SEAL]})
+    assert json.loads(rig.job_row(store, job_id)["params_json"]).get("chain") is True

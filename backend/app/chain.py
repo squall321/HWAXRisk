@@ -102,6 +102,13 @@ def _next_round(store: RiskStore, target_key: str) -> int:
     return int(row["r"] or 0) + 1
 
 
+def chain_marked(store: RiskStore, job_id: str) -> bool:
+    """M3 코드가 세운 검토 잡인가 — 만들 때 단 사슬 표지(`params_json.chain`). M2 코드가 세운 잡은 v5 로 올린 뒤에도 사슬의 출발점이
+    아니다(review1 M8 — 사람이 시작하지 않은 쟁점 패널·요약을 돌리지 않는다)."""
+    row = store.query_one("SELECT params_json FROM rr_jobs WHERE id = ?", (job_id,))
+    return row is not None and _loads(row["params_json"]).get("chain") is True
+
+
 def create_stage_job(store: RiskStore, target_key: str, stage: str, *, prev: Mapping[str, Any], reason: str,
                      round_no: int) -> dict:
     """사슬의 다음 잡 하나 — 앞 잡(`prev`)에 이미 다음 잡이 있으면 그것을 돌려준다(`created: False`). 반환 {job_id, stage, created,
@@ -137,6 +144,8 @@ def on_reviews_closed(store: RiskStore, job: Mapping[str, Any]) -> dict:
     key = str(job["target_key"])
     if not _cells_target(store, key):
         return {"stage": None, "reason": "panels"}
+    if not chain_marked(store, str(job["id"])):
+        return {"stage": None, "reason": "pre_m3_job"}
     registry.merge(store, key)
     open_n = scope_open(store, key)
     if open_n:
