@@ -294,3 +294,21 @@ def test_rows_of_a_domain_are_never_dropped_and_a_long_claim_is_cut_with_its_len
     line = synth.row_line(store, longer, line_max=400)
     assert len(line) <= 400 and "(900자 중" in line
     assert units.load_units(store, key)
+
+
+def test_the_report_freezes_the_quality_block_of_its_version_and_the_residual_reads_the_same_numbers(store):
+    """C10 — 보고서 판은 그 판의 품질 블록을 고정본으로 싣는다(뒤에 품질이 바뀌어도 옛 판의 글은 그대로 — 판이 pages_gz 에 얼린다).
+    완결의 quality 잔여는 같은 품질 수치(out_of_bounds)를 읽는다(진행판의 값 — 다시 세지 않는다)."""
+    from app import review_quality
+
+    key = _ledger(store)
+    out = synth.assemble_report(store, key, trigger="manual")
+    report = synth.report_source(store, key, version=out["version_no"])
+    block = review_quality.block(store, key)
+    minutes = report["pages"][0]["blocks"]["minutes"]
+    start = minutes.index("## 검토 품질(이 판의 고정본)") + 1
+    assert minutes[start:start + len(block["text"].split("\n"))] == block["text"].split("\n")
+    residual = next((q for q in closure.close_level_cells(store, key, persist=False)["qualifiers"]
+                     if q["item"] == "quality"), None)
+    bounds = list(block["json"]["out_of_bounds"])
+    assert (residual["out_of_bounds"] if residual else []) == bounds
