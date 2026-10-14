@@ -432,13 +432,15 @@ def level_label(level: str, labels: Sequence[str], *, head: str | None = None) -
     return f"{text}({' · '.join(labels)})" if labels else text
 
 
-def close_level_cells(store: RiskStore, target_key: str, *, persist: bool = True) -> dict:
+def close_level_cells(store: RiskStore, target_key: str, *, persist: bool = True,
+                      counts: dict | None = None) -> dict:
     """cells 대상의 완결 판정(3.8) — 지금 계산(`level_current`)과 저장 레벨(내려가지 않는다), 잔여·표기·수. `persist` 면
     rr_targets 의 level·level_label·closure_json·closure_at 을 쓴다(캐시 — 진행판·MCP 가 읽는다)."""
     target = store.query_one("SELECT target_key, level, close_level FROM rr_targets WHERE target_key = ?", (target_key,))
     if target is None:
         raise AppError("E404", f"타깃을 찾지 못했습니다: {target_key}", 404)
-    counts = cell_counts(store, target_key)
+    # 종합 보고서는 같은 호출 안의 수 한 벌로 판정과 머리를 낸다(나갈 기준 4) — 그 수를 받으면 다시 세지 않는다.
+    counts = counts if counts is not None else cell_counts(store, target_key)
     rows, order = counts["_rows"], counts["_order"]
     target_close = (target["close_level"] or "C3")
     by_agent: dict[str, list[dict]] = {}

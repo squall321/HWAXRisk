@@ -186,12 +186,16 @@ PAT_KNOBS: tuple[Knob, ...] = (
     Knob("HWAXRISK_PAT_RENEW_BEFORE_S", "risk_pat_renew_before_s", DEFAULT_PAT_RENEW_BEFORE_S, minimum=1),
     Knob("HWAXRISK_PAT_AUTO_RETRY_S", "risk_pat_auto_retry_s", DEFAULT_PAT_AUTO_RETRY_S),
 )
-# 쟁점 손잡이(재설계 M3 S3-6 · M3.md 4.6 · #28) — 과제당 쟁점 패널은 P1 을 HARD_CAP 까지 먼저, P2·P3 은 합계가 CAP 에 닿을 때까지.
+# 쟁점·종합 꾸러미의 손잡이(재설계 M3 S3-6 · S3-9 · M3.md 4.6 · #28) — 과제당 쟁점 패널은 P1 을 HARD_CAP 까지 먼저, P2·P3 은
+# 합계가 CAP 에 닿을 때까지. 요약은 내용 탓·인프라 한도.
 ISSUE_KNOBS: tuple[Knob, ...] = (
     Knob("HWAXRISK_ISSUE_PANEL_CAP", "risk_issue_panel_cap", 24),
     Knob("HWAXRISK_ISSUE_PANEL_HARD_CAP", "risk_issue_panel_hard_cap", 48),
     Knob("HWAXRISK_ISSUE_SPLIT_MIN_OPPOSERS", "risk_issue_split_min_opposers", 2, minimum=1),
     Knob("HWAXRISK_ISSUE_MAX_CHARGED", "risk_issue_max_charged", 2, minimum=1),   # 쟁점 하나의 내용 탓 한도(넘으면 inconclusive)
+    # 요약 하나의 내용 탓 · 인프라 실패 한도(넘으면 code_only — P-08 ③, M3 S3-9).
+    Knob("HWAXRISK_SUMMARY_MAX_CHARGED", "risk_summary_max_charged", 2, minimum=1),
+    Knob("HWAXRISK_SUMMARY_INFRA_MAX", "risk_summary_infra_max", 6, minimum=1),
 )
 # knobs.env 가 읽는 손잡이 전부 — 출처(env · knobs.env · default)와 검증이 같다.
 BOX_KNOBS: tuple[Knob, ...] = REVIEW_KNOBS + PAT_KNOBS + ISSUE_KNOBS
@@ -292,6 +296,8 @@ class Settings:
     risk_issue_panel_hard_cap: int = 48
     risk_issue_split_min_opposers: int = 2
     risk_issue_max_charged: int = 2
+    risk_summary_max_charged: int = 2
+    risk_summary_infra_max: int = 6
     knob_sources: tuple[tuple[str, str], ...] = ()
 
 

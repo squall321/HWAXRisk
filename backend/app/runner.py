@@ -22,9 +22,10 @@ log = logging.getLogger("hwax_risk.runner")
 
 # (스레드명, 폴링 주기 초). sync_loop 은 PAT 폐기 대조(§8.2.7)를 돌리고 external_sync 재시도(§5.5.3)는 P4 배선,
 # nightly_loop(§7.7 야간 잡) 본문은 P6 에서 채운다. review_loop 은 카드 대조 검토 잡의 틱이다(재설계 M2 · m2-wp3b S8 —
-# review_runner.ReviewLoop).
+# review_runner.ReviewLoop). synth_loop 은 종합 잡(영역 요약 → 과제 종합 → 보고서 판)의 틱이다(재설계 M3 S3-9 — synth.SynthWorker,
+# 요약 호출은 틱마다 하나씩 차례로).
 _LOOPS: tuple[tuple[str, float], ...] = (("panel_loop", 5.0), ("sync_loop", 60.0), ("nightly_loop", 60.0),
-                                         ("review_loop", 2.0))
+                                         ("review_loop", 2.0), ("synth_loop", 5.0))
 
 # 좌석 귀속 정규식(plan §0.2.3·§6.7 7단계). SSE 스트림과 POST /api/panels/{id}/complete 의 events[] 에 같은 식을 쓴다.
 STATUS_LOOKUP_RE = re.compile(r"^(?P<key>\S+) 조회: (?P<tool>\S+)$")
@@ -2358,6 +2359,10 @@ class RiskRunner:
         self.review_engine = review_engine
         self._review = review_runner.ReviewLoop(store, settings, review_engine, stop=self._stop,
                                                 boot_id=getattr(lock, "boot_id", None))
+        # 종합 잡(M3 S3-9) — 요약은 카드 대조와 같은 포털 중계·엔진 관문을 지난다(같은 엔진 클라이언트). 엔진이 없으면 틱이 쉰다.
+        from app import synth  # noqa: PLC0415 — synth 는 이 모듈을 거쳐 무겁다.
+
+        self._synth = synth.SynthWorker(store, settings, review_engine, stop=self._stop)
 
     # ------------------------------------------------------------ 루프
     def _loop(self, name: str, interval: float) -> None:
@@ -2382,6 +2387,11 @@ class RiskRunner:
                     self._review.tick()
                 except Exception:  # noqa: BLE001 — 한 번의 실패가 스레드를 죽이지 않게 한다.
                     log.exception("review_loop tick 실패")
+            elif name == "synth_loop":
+                try:
+                    self._synth.tick()
+                except Exception:  # noqa: BLE001 — 한 번의 실패가 스레드를 죽이지 않게 한다.
+                    log.exception("synth_loop tick 실패")
             self._stop.wait(interval)
 
     def _revocation_tick(self) -> None:
