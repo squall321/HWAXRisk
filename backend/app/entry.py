@@ -413,7 +413,14 @@ def job_action(ident: identity.Identity, *, job_id: str, action: str, reason: st
     if action in _DISPOSE_ACTIONS:
         job = store.query_one("SELECT target_key, mode FROM rr_jobs WHERE id = ?", (job_id,))
         if job is None or job["mode"] != review_runner.MODE:
-            raise AppError("E404", f"검토 잡({job_id}) 을 찾을 수 없습니다.", 404)
+            raise routes._not_visible(job_id)
+        try:
+            routes._editable_target(job["target_key"], ident)
+        except AppError as exc:
+            # 남의 잡 — 없는 잡과 같은 답(not_visible)이다. 라우트의 404 글은 대상 열쇠를 싣는다(재설계 M3 C3-13).
+            if exc.http_status == 404:
+                raise routes._not_visible(job_id) from None
+            raise
         if filter is not None and not isinstance(filter, dict):
             raise AppError("cells_selector_invalid", "filter 는 객체다.", 422)
         selector = {**(filter or {}), "job_id": job_id}

@@ -306,7 +306,7 @@ def test_risk_job_action_retries_and_skips_the_jobs_failed_cells_for_a_delegated
     assert (out["skipped"], out["keys"]) == (1, [[unit_ids[0], PEER]])
     audit = _audits(store, "cells.skip")[0]
     assert (audit["channel"], audit["actor_verified"], audit["reason"]) == ("mcp", 0, "Claude 에서 넘긴다")
-    assert _call("risk_job_action", job_id="no-such-job", action="retry_failed")["error"] == "E404"
+    assert _call("risk_job_action", job_id="no-such-job", action="retry_failed")["error"] == "not_visible"   # 남의 잡과 같은 답(C3-13)
 
 
 def test_the_guide_offers_retry_and_skip_after_a_job_ends_with_failed_cells(store, monkeypatch):
