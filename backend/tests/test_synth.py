@@ -344,6 +344,10 @@ def test_a_synth_job_whose_summaries_are_all_reused_still_finishes(store):
     assert len(engine.requests) == calls
     tagged = store.query_one("SELECT COUNT(*) AS n FROM rr_summaries WHERE target_key = ? AND run_id = ?", (key, again))["n"]
     assert tagged == len(config.settings.risk_roster_domains) + 1
+    # 내용이 같은 종합 판은 새로 서지 않는다 — 자기 판 표기를 세려고 먼저 세운 판 행도 남기지 않는다(review1 M4).
+    first = synth.report_source(store, key)
+    assert store.query_one("SELECT COUNT(*) AS n FROM rr_reports WHERE target_key = ? AND pages_n = 0", (key,))["n"] == 0
+    assert first["trigger"] == "synth_done" and first["pages"]
 
 
 def test_a_summary_cut_by_a_restart_goes_back_to_pending_and_one_stuck_target_does_not_starve_another(store):
@@ -407,9 +411,12 @@ def test_the_synth_done_report_states_its_own_level_not_stale_before_synthesis(s
     assert after["level_label"] in _page_text(report, "summary")
 
 
-def test_an_inflight_summary_after_a_purge_writes_nothing_back(store):
-    """L6 — 폐기(purge) 뒤에 끝난 요약 호출의 결과는 쓰지 않는다(같은 트랜잭션에서 과제의 폐기 상태를 본다). 판도 세우지 않는다."""
+@pytest.mark.parametrize("after", ["answer", "job_fault"])
+def test_an_inflight_summary_after_a_purge_writes_nothing_back(store, after):
+    """L6 — 폐기(purge) 뒤에 끝난 요약 호출의 결과는 쓰지 않는다(같은 트랜잭션에서 과제의 폐기 상태를 본다). 판도 세우지 않고
+    (409 project_purged), 폐기가 취소한 잡을 그 호출의 실패 갈래가 되살리지 않는다."""
     from app import routes
+    from app.errors import AppError
     from tests import factories
 
     key = _ledger(store)
@@ -425,6 +432,8 @@ def test_an_inflight_summary_after_a_purge_writes_nothing_back(store):
                 with factories.routes_store(store):
                     routes.purge_project(project_id, routes.PurgeBody(code=code, reason="폐기 시험"),
                                          ident=factories.ident(OWNER))
+                if after == "job_fault":
+                    raise EngineRejected("llm_misconfigured", "LLM 설정이 틀렸다(가짜)")
             return super().run(body, **kwargs)
 
     worker = synth.SynthWorker(store, config.settings, PurgingEngine())
@@ -435,3 +444,7 @@ def test_an_inflight_summary_after_a_purge_writes_nothing_back(store):
                         (key,))
     assert [r["call_id"] for r in calls] == []
     assert store.query_one("SELECT COUNT(*) AS n FROM rr_reports WHERE target_key = ?", (key,))["n"] == before
+    assert store.query_one("SELECT state FROM rr_jobs WHERE target_key = ? AND mode = 'synth'", (key,))["state"] == "cancelled"
+    with pytest.raises(AppError) as refused:
+        synth.assemble_report(store, key, trigger="manual")
+    assert (refused.value.code, refused.value.http_status) == ("project_purged", 409)
