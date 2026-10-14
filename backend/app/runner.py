@@ -361,11 +361,13 @@ _SETTINGS_BUTTON = "포털에서 발급해 등록"
 
 # 자동 등록을 멈추는 길 — 켜져 있는 동안은 지우거나 포털에서 폐기한 PAT 도 Claude 에서 hwax_risk 도구를 부를 때 다시 만든다(의도다
 # — Claude 만 쓰는 사람에게는 다시 켤 스위치가 없다, D3). 멈추는 길은 설정의 자동 등록 스위치인데 화면에 아직 없다 — 그때까지는
-# 운영자가 그 사람으로 PUT /api/me/portal-pat-auto 를 부른다. 지금 있는 길만 말한다(웹 자동 등록도 아직 없다, R2-8). GET /api/me 의
-# portal_pat.auto.how_to_stop 과 pat_unavailable 안내가 같이 말한다.
+# 운영자가 앱 데이터 DB 의 _user_prefs 에서 끈다(포털 절차서 AUTO_SWITCH_RUNBOOK). 운영자가 그 사람으로 API 를 부를 길은 없어 말하지
+# 않는다(R3-4). 지금 있는 길만 말한다(웹 자동 등록도 아직 없다, R2-8). GET /api/me 의 portal_pat.auto.how_to_stop 과
+# pat_unavailable 안내가 같이 말한다.
+AUTO_SWITCH_RUNBOOK = "포털 docs/risk-review-redesign/server-setup-m1.md §7-2"
 AUTO_STOP_HINT = ("자동 등록이 켜져 있는 동안은 등록된 PAT 를 지우거나 포털에서 폐기해도 Claude 에서 hwax_risk 도구를 부를 때 다시"
-                  " 만든다 — 멈추는 길은 설정의 자동 등록 스위치다(곧 생긴다 — 그때까지는 운영자가 그 사람으로"
-                  " PUT /api/me/portal-pat-auto {enabled:false} 를 부른다).")
+                  " 만든다 — 멈추는 길은 설정의 자동 등록 스위치다(곧 생긴다 — 그때까지는 운영자가 앱 데이터 DB 에서 끈다,"
+                  f" {AUTO_SWITCH_RUNBOOK}).")
 
 
 def pat_unavailable_guidance(store: Any, email: str | None) -> str:
@@ -378,8 +380,7 @@ def pat_unavailable_guidance(store: Any, email: str | None) -> str:
     prefs = get_prefs(email) if email and callable(get_prefs) else None
     if prefs and not prefs.get("portal_pat_auto"):
         text += (" 이 사람은 자동 등록을 꺼 두어 Claude 로 불러도 등록되지 않는다 — 설정 화면의 버튼으로 등록하거나 자동 등록을 다시"
-                 " 켠다(설정의 스위치는 곧 생긴다 — 그때까지는 운영자가 그 사람으로 PUT /api/me/portal-pat-auto {enabled:true} 를"
-                 " 부른다).")
+                 f" 켠다(설정의 스위치는 곧 생긴다 — 그때까지는 운영자가 앱 데이터 DB 에서 켠다, {AUTO_SWITCH_RUNBOOK}).")
     else:
         text += f" {AUTO_STOP_HINT}"
     if prefs and prefs.get("auto_error"):
