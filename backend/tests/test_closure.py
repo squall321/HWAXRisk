@@ -5,6 +5,7 @@ M2 원장으로 만들 수 없는 칸만 M3.md 4.10 의 모양 그대로 대역�
 """
 from __future__ import annotations
 
+import sqlite3
 import time
 
 import pytest
@@ -117,7 +118,8 @@ def test_the_stored_level_never_drops_and_a_lower_count_is_reported_as_regressed
 
 
 # ---------------------------------------------------------------- 잔여 · 확인
-def test_a_failed_cell_is_a_blocking_residual_that_only_the_owner_can_ack_with_a_reason_and_the_current_hash(store):
+def test_a_failed_cell_is_a_blocking_residual_that_only_the_owner_can_ack_with_a_reason_and_the_current_hash(store,
+                                                                                                            monkeypatch):
     """실패 셀은 막음 잔여다. 확인은 소유자·관리자만(편집자 403), 사유 필수(422), 확인 시점의 basis_hash 가 다르면 409, 막음 잔여가
     아니면 422 ack_not_allowed. 확인·취소마다 rr_audit 한 행이고 캐시가 새로 써진다. 취소는 행을 지우지 않는다."""
     order = None
@@ -171,6 +173,15 @@ def test_a_failed_cell_is_a_blocking_residual_that_only_the_owner_can_ack_with_a
                                                 " 'close.ack%' ORDER BY at, action", (key,))]
     assert sorted(actions) == ["close.ack", "close.ack.revoke"]
     assert store.query_one("SELECT COUNT(*) AS n FROM rr_close_acks WHERE target_key = ?", (key,))["n"] == 1
+    # 같은 초에 다시 확인해도 이력 행이 겹치지 않는다(ack_at 이 키의 일부 — 취소 뒤 곧바로 다시 확인). 시계를 첫 확인의 초에 묶는다.
+    first_at = store.query_one("SELECT ack_at FROM rr_close_acks WHERE target_key = ?", (key,))["ack_at"]
+    monkeypatch.setattr(closure.common, "now_epoch", lambda: first_at)
+    try:
+        again = closure.ack_residual(store, key, "failed", reason="다시 확인한다", by=OWNER, basis_hash=failed["basis_hash"])
+    except sqlite3.IntegrityError as exc:
+        pytest.fail(f"같은 초의 두 번째 확인이 이력 키에 부딪쳤다 — {exc}")
+    assert again["ack_at"] == first_at + 1
+    assert _residual(closure.refresh(store, key), "failed")["acked"]
 
 
 def test_an_ack_goes_stale_when_the_residual_set_changes(store):

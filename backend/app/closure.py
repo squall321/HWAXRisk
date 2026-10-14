@@ -386,7 +386,9 @@ def ack_residual(store: RiskStore, target_key: str, item: str, *, reason: str, b
         raise AppError("residual_changed", "그 사이 잔여가 바뀌었다 — 다시 읽고 확인한다.", 409,
                        detail={"item": item, "basis_hash": current["basis_hash"], "basis_n": current["basis_n"]})
     owner = store.query_one("SELECT owner_sub FROM rr_targets WHERE target_key = ?", (target_key,))["owner_sub"]
-    now = common.now_epoch()
+    # 같은 초에 다시 확인해도(낡은 확인을 곧바로 다시) 이력 행이 겹치지 않게 — ack_at 은 키의 일부다(P-11).
+    last = store.query_one("SELECT MAX(ack_at) AS t FROM rr_close_acks WHERE target_key = ? AND item = ?", (target_key, item))
+    now = max(common.now_epoch(), int(last["t"] or 0) + 1)
     store.execute("INSERT INTO rr_close_acks(target_key, item, ack_at, owner_sub, ack_by, ack_reason, basis_n, basis_hash)"
                   " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                   (target_key, item, now, owner, by, text, current["basis_n"], current["basis_hash"]))
