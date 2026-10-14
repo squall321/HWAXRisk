@@ -519,7 +519,8 @@ def get_me(request: Request, ident: identity.Identity = Depends(identity.current
 
     `box.secrets_valid` 는 필수가 갖춰졌다는 뜻이다(호스트 일치 · 자격 암호화 키 있음 · 그 키가 cred.key 폴백이 아님). 까닭은
     `box.reasons` 가 코드별로 싣는다 — 기동 뒤에 cred.key 가 생기는 일이 있어(첫 PAT 등록) 요청 때 다시 판정한다.
-    익명에게는 `box{secrets_valid, reasons[{code}]}` 만 준다 — 글·키 이름·호스트 이름·포털 주소는 싣지 않는다(SEC-6).
+    익명에게는 `box{hostname, secrets_valid, cred_key_present, portal_base, reasons[{code}]}` 다 — 앞의 넷은 이 작업 전부터 공개였고
+    화면이 읽는다(R2-9). 까닭의 글(message·fix)·키 이름(keys)·키 출처(cred_key_source)는 싣지 않는다(SEC-6).
     """
     # 한 요청에 secrets.env 를 한 번만 읽는다 — 박스 판정·키 출처·PAT 복호(요약·자동 등록 판정)가 각자 읽어 다섯 번이었다(BEH-8).
     with config.secrets_read_once():
@@ -539,17 +540,19 @@ def _me_payload(request: Request, ident: identity.Identity) -> dict:
         portal_pat["auto"] = portal_pat_auto(store, ident.email, row)
     payload["portal_pat"] = portal_pat
     box = config.box_assessment(box_match=bool(state.box_match))
+    # 누구에게나 주는 칸 — 이 작업 전부터 공개였고 설정 화면(SettingsPage)이 익명에게도 읽는다(types.ts 는 hostname 을 요구한다, R2-9).
+    public = {"hostname": state.hostname, "secrets_valid": box["secrets_valid"],
+              # 부작용 없는 갈래로만 본다 — 여기서 키를 만들면 기존 암호문이 영구히 복호 불가가 된다.
+              "cred_key_present": config.load_cred_key(create=False) is not None,
+              # 앱이 포털을 부르는 주소를 화면이 볼 수 있게 낸다(비밀이 아니다). 이 값이 틀리면
+              # PAT 등록·패널 실행이 전부 실패하는데 화면에 안 보이면 사람이 토큰을 의심한다
+              # (2026-09-30 실측 — 기본값이 포털 vite 개발 포트라 죽어 있었고 아무도 못 봤다).
+              "portal_base": config.settings.portal_base}
     if ident.anonymous:
-        payload["box"] = {"secrets_valid": box["secrets_valid"], "reasons": [{"code": r["code"]} for r in box["reasons"]]}
+        # 까닭은 code 만 — 글(고칠 명령)·키 이름·키 출처는 로그인한 사람에게만 준다(SEC-6).
+        payload["box"] = {**public, "reasons": [{"code": r["code"]} for r in box["reasons"]]}
         return payload
-    payload["box"] = {"hostname": state.hostname, "secrets_valid": box["secrets_valid"],
-                      "cred_key_source": box["cred_key_source"], "reasons": box["reasons"],
-                      # 부작용 없는 갈래로만 본다 — 여기서 키를 만들면 기존 암호문이 영구히 복호 불가가 된다.
-                      "cred_key_present": config.load_cred_key(create=False) is not None,
-                      # 앱이 포털을 부르는 주소를 화면이 볼 수 있게 낸다(비밀이 아니다). 이 값이 틀리면
-                      # PAT 등록·패널 실행이 전부 실패하는데 화면에 안 보이면 사람이 토큰을 의심한다
-                      # (2026-09-30 실측 — 기본값이 포털 vite 개발 포트라 죽어 있었고 아무도 못 봤다).
-                      "portal_base": config.settings.portal_base}
+    payload["box"] = {**public, "cred_key_source": box["cred_key_source"], "reasons": box["reasons"]}
     return payload
 
 

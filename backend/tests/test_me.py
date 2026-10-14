@@ -75,15 +75,22 @@ def test_me_anonymous(client, wired):
     body = client.get("/api/me").json()
     assert body["anonymous"] is True and body["email"] is None and body["source"] == "none"
     assert body["portal_pat"] is None
-    # 익명에게는 판정과 까닭의 code 만 — 글(고칠 명령)·키 이름·호스트 이름·포털 주소는 싣지 않는다(SEC-6).
-    assert set(body["box"]) == {"secrets_valid", "reasons"} and body["box"]["secrets_valid"] is False
-    assert body["box"]["reasons"] and all(set(r) == {"code"} for r in body["box"]["reasons"])
+    # 익명에게는 이 작업 전부터 공개였던 칸(호스트 이름·키 있음·포털 주소)과 판정, 까닭의 code 만 — 설정 화면(SettingsPage)이 익명에게도
+    # 읽고 types.ts 는 hostname 을 요구한다(R2-9). 까닭의 글(고칠 명령)·키 이름·키 출처는 싣지 않는다(SEC-6).
+    anon = body["box"]
+    assert set(anon) == {"hostname", "secrets_valid", "cred_key_present", "portal_base", "reasons"}
+    assert anon["secrets_valid"] is False and anon["hostname"] and isinstance(anon["cred_key_present"], bool)
+    assert anon["reasons"] and all(set(r) == {"code"} for r in anon["reasons"])
+    text = json.dumps(anon, ensure_ascii=False)
+    assert str(config.settings.data_dir) not in text and not _ABS_PATH.search(text), text
     assert set(body) == {"email", "display_name", "role", "organization", "anonymous", "source", "portal_pat", "box"}
     # 로그인한 사람은 그대로 다 본다 — portal_base 는 진단값이다(틀리면 PAT 등록·패널이 전부 실패하는데 화면에 안 보이면 사람이
     # 토큰을 의심한다, 2026-09-30 실측).
     box = client.get("/api/me", headers=AUTH).json()["box"]
     assert set(box) == {"hostname", "secrets_valid", "cred_key_present", "cred_key_source", "reasons", "portal_base"}
     assert box["portal_base"].startswith("http") and all({"code", "message", "fix"} <= set(r) for r in box["reasons"])
+    assert {k: box[k] for k in ("hostname", "secrets_valid", "cred_key_present", "portal_base")} == {
+        k: anon[k] for k in ("hostname", "secrets_valid", "cred_key_present", "portal_base")}
 
 
 def test_me_authenticated_without_pat(client, wired):
