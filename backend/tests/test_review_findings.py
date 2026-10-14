@@ -368,6 +368,9 @@ REVIEW_READERS: dict[tuple[str, str], str] = {
     ("registry.py", "_load_findings"): "거름 글이 상수 FINDING_SCOPE_SQL 에서 온다(M3 S3-4 — 카드 대조 finding 은 cells 대상만)",
     ("registry.py", "_contested_marking_done"): "거름 글이 상수 FINDING_SCOPE_SQL 에서 온다(M3 S3-4 — 위와 같은 범위)",
     ("routes.py", "_cluster_finding_ids"): "거름 글이 상수 FINDING_SCOPE_SQL 에서 온다(M3 S3-4 — 등록부와 같은 범위)",
+    ("issues.py", "_card_atoms"): "카드 대조 원자만 읽는다(source_kind = 카드 대조 — 쟁점 유형의 원천, M3 S3-6)",
+    ("issues.py", "_panel_atoms"): "쟁점 패널 자신의 원자(panel_id + source_kind = issue_panel — 결과 판정, M3 S3-7)",
+    ("brief.py", "_issue_side"): "쟁점 근거 I4 — 제기자의 finding 을 id 로 짚는다(카드 밖 지적의 주장 줄, M3 S3-7)",
 }
 _READ_SQL = re.compile(r"\b(?:FROM|JOIN)\s+rr_findings\b", re.IGNORECASE)
 
