@@ -241,7 +241,7 @@ def risk_get_diff(diff_id: str, part: str, change_kind: str | None = None, q: st
 def risk_get_registry(target_key: str, status: str | None = None, severity: str | None = None,
                       domain: str | None = None, offset: int = 0, attention: str | None = None,
                       unit_id: str | None = None) -> dict:
-    """타깃 등록부(rr_registry 행 한 번에 최대 200 + verdict 후보) 조회, status·severity·domain·attention(주의 등급 A·B·C·D — 쉼표로 여럿)·unit_id 로 거르고 한 번에 약 2만 5천 자 안에서 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다), 카드 대조 대상의 행에는 지지 수 넷(전문가·영역·단위·검증)·주의 등급·쟁점 상태와 merged.claimed(hold 전 주장값)·distribution 이 있다."""
+    """타깃 등록부(rr_registry 행 한 번에 최대 200 + verdict 후보) 조회, status·severity·domain·attention(주의 등급 A·B·C·D — 쉼표로 여럿)·unit_id 로 거르고 한 번에 약 2만 5천 자 안에서 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다), 쪽은 (family_key, cluster_key) 순이고 쪽마다 ledger_rev(거른 목록 전체의 지문)가 오니 앞 쪽과 다르면 그사이 원장이 바뀐 것이라 offset 0 부터 다시 받는다, 카드 대조 대상의 행에는 지지 수 넷(전문가·영역·단위·검증)·주의 등급·쟁점 상태와 merged.claimed(hold 전 주장값)·distribution 이 있다."""
     def rows(key: str, *, owner_sub: str) -> dict:
         return _fit_rows(lambda take: routes.registry_payload(
             key, owner_sub=owner_sub, status=status, severity=severity, domain=domain, attention=attention,
@@ -571,7 +571,7 @@ ISSUE_LIMIT = 100
 @mcp.tool()
 def risk_get_issues(target_key: str, state: str | None = None, p_class: str | None = None, limit: int = ISSUE_LIMIT,
                     offset: int = 0) -> dict:
-    """쟁점 목록(읽기 전용, 카드 대조 대상) — 쟁점마다 유형(held_fail·solo_severe·split_verdict)·등급(P1~P3)·순위·상태(queued·planned·running·resolved·inconclusive·untried_cap·withdrawn·skipped)·결과(upheld·downgraded·escalated·rejected·undetermined)·원래 분포(제기·반대 수, 주장 판정별)·좌석과 상한(cap.base·hard·run)을 준다, state(쉼표로 여럿)·p_class 로 거르고 한 번에 약 2만 5천 자 안에서 limit 행까지 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다), 쟁점은 웹 러너가 돌린다 — Claude 에서는 지켜본다(올리기·건너뛰기는 웹 화면)."""
+    """쟁점 목록(읽기 전용, 카드 대조 대상) — 쟁점마다 유형(held_fail·solo_severe·split_verdict)·등급(P1~P3)·순위·상태(queued·planned·running·resolved·inconclusive·untried_cap·withdrawn·skipped)·결과(upheld·downgraded·escalated·rejected·undetermined)·원래 분포(제기·반대 수, 주장 판정별)·좌석과 상한(cap.base·hard·run)을 준다, state(쉼표로 여럿)·p_class 로 거르고 한 번에 약 2만 5천 자 안에서 limit 행까지 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다), 쪽은 쟁점 id 순이고 쪽마다 ledger_rev(거른 목록 전체의 지문)가 오니 앞 쪽과 다르면 그사이 원장이 바뀐 것이라 offset 0 부터 다시 받는다, 쟁점은 웹 러너가 돌린다 — Claude 에서는 지켜본다(올리기·건너뛰기는 웹 화면)."""
     def rows(key: str, *, owner_sub: str) -> dict:
         return _fit_rows(lambda take: routes.issues_payload(key, owner_sub=owner_sub, state=state, p_class=p_class,
                                                             limit=take, offset=offset), limit)

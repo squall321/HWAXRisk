@@ -3327,9 +3327,16 @@ def _issue_row_out(issue: dict) -> dict:
             "selected_round": issue["selected_round"], "attempts": issue["attempts"], "charged": issue["charged"]}
 
 
+def ledger_rev(rows: list[dict]) -> str:
+    """쪽을 잇는 동안 원장이 바뀌었는지 — 거른 목록 전부(쪽으로 나누기 전)의 지문(review1 L3). 쪽마다 같은 값이면 쪽을 이은 것이 한
+    시점의 목록이고, 앞 쪽과 다르면 그사이 러너·사람이 원장을 바꾼 것이라 offset 0 부터 다시 받는다."""
+    return sha256_hex(canonical_json(rows))[:16]
+
+
 def issues_payload(target_key: str, *, owner_sub: str | None = None, state: str | None = None, p_class: str | None = None,
                    type: str | None = None, limit: int = ISSUE_LIST_LIMIT, offset: int = 0) -> dict:  # noqa: A002 — REST 쿼리 이름
-    """`GET /targets/{key}/issues` 본체 — MCP `risk_get_issues` 와 같은 함수. 순위 순, 상한 뒤는 `next_offset`."""
+    """`GET /targets/{key}/issues` 본체 — MCP `risk_get_issues` 와 같은 함수. 쟁점 id 순(쪽을 잇는 안정 열쇠 — 러너가 다시 고르며 바꾸는
+    순위로 나누면 쪽 사이에 행이 빠지거나 겹친다, review1 L3 — 순위는 행의 rank), 상한 뒤는 `next_offset`, 쪽마다 `ledger_rev`."""
     _target_row(target_key, owner_sub)
     store = get_store()
     rows = issues_module.issue_rows(store, target_key, [s.strip() for s in str(state).split(",") if s.strip()] if state
@@ -3338,11 +3345,12 @@ def issues_payload(target_key: str, *, owner_sub: str | None = None, state: str 
         rows = [r for r in rows if r["p_class"] == p_class]
     if type:
         rows = [r for r in rows if type in (r.get("types") or ())]
+    rows.sort(key=lambda r: str(r["issue_id"]))
     take = max(1, min(int(limit or ISSUE_LIST_LIMIT), ISSUE_LIST_MAX))
     start = max(0, int(offset or 0))
     page = rows[start:start + take]
     used = issues_module.cap_used(store, target_key)
-    out = {"target_key": target_key, "total": len(rows), "limit": take, "offset": start,
+    out = {"target_key": target_key, "total": len(rows), "limit": take, "offset": start, "ledger_rev": ledger_rev(rows),
            "cap": {"base": int(config.settings.risk_issue_panel_cap), "hard": int(config.settings.risk_issue_panel_hard_cap),
                    "run": used["P1"] + used["other"]},
            "rows": [_issue_row_out(r) for r in page]}
@@ -4022,8 +4030,15 @@ def registry_payload(target_key: str, *, owner_sub: str | None = None, status: s
         # 동안 이 필터(와 MCP risk_get_registry 의 domain)는 늘 0행이었다(WP4 2.2 ⑤).
         rows = [r for r in rows if domain in (r.get("merged") or {}).get("domains", ())
                 or str((r.get("merged") or {}).get("owner_domain") or "") == domain]
+    if limit is not None:
+        # 쪽으로 나눌 때(MCP)는 안정 열쇠 순이다 — 주의 등급·우선순위는 병합마다 바뀌어 쪽 사이에 행이 빠지거나 겹친다(review1 L3).
+        # 한 번에 다 주는 REST(웹)는 위의 읽는 순서 그대로다. family_key 는 행 모양(REST · 패널 바이트)에 없는 열이라 따로 읽는다.
+        family = {r["cluster_key"]: r["family_key"] or "" for r in store.query(
+            "SELECT cluster_key, family_key FROM rr_registry WHERE target_key = ?", (target_key,))}
+        rows.sort(key=lambda r: (family.get(r["cluster_key"], ""), str(r["cluster_key"])))
     start = max(0, int(offset or 0))
     total = len(rows)
+    rev = ledger_rev([{k: v for k, v in r.items() if k != "merged"} for r in rows])     # merged 는 merged_json 과 같은 내용이다
     rows = rows[start:]
     truncated = limit is not None and len(rows) > int(limit)
     if limit is not None:
@@ -4032,7 +4047,7 @@ def registry_payload(target_key: str, *, owner_sub: str | None = None, status: s
     extra = {"next_offset": start + len(rows)} if truncated else {}
     # 카드 인용은 판정당 200자(사용자 결정 1 — 반출과 같은 모양 규칙, 원래 길이는 <칸>_chars). REST · MCP 가 같은 답이다.
     rows = [export_module._clip_card_text(export_module._export_view("rr_registry", dict(r))) for r in rows]
-    return {"target_key": target_key, "rows": rows, "truncated": truncated, "total": total, **extra,
+    return {"target_key": target_key, "rows": rows, "truncated": truncated, "total": total, **extra, "ledger_rev": rev,
             "verdict_candidate": registry_module.verdict_candidate(store, target_key),
             # 후보는 코드가 내고 확정은 사람이 낸다(§8.2.4) — 화면 헤더가 둘을 한 응답에서 읽는다.
             "verdict_final": target["verdict_final"] if target is not None else None}
