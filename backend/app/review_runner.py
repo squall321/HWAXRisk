@@ -29,12 +29,19 @@ log = logging.getLogger("hwax_risk.review")
 MODE = "reviews"
 SCOPE_KEYS: tuple[str, ...] = ("tiers", "domains", "agents", "unit_ids")   # 범위 칸 넷(PLAN 4절 REST)
 
-# 호출 수 추정 — 잡을 만들 때는 카드 묶음을 받기 전이라 묶음 수를 모른다. 셀 하나의 낮은 끝은 묶음 하나의 fwd·rev 와 카드 밖
-# 한 번(3), 높은 끝은 묶음 둘의 fwd·rev(4) + 빠진 카드 재질의 2 + 단독 재질의 4 + 카드 밖 1 + '이것 말고 더' 3 = 14 다
-# (m2-wp3b S8 의 호출 표, 점검 카드는 전문가당 평균 12.9장 — spec-wp3b §3.14.1). 전문가마다 훑기 1~2 를 더한다.
-# M2 파일럿의 셀당 호출 수(품질 '실측')로 다시 정한다.
-CALLS_PER_CELL: tuple[int, int] = (3, 14)
-SWEEP_CALLS_PER_EXPERT: tuple[int, int] = (1, 2)
+# 호출 수 추정(재설계 M3 C3-10 — m3-cells 의 계약) — 잡을 만들 때는 카드 묶음을 받기 전이라 묶음 수를 모른다.
+# - expected(거르기 없음 가정) = 카드 셀 × (fwd D + 빠진 카드 0.1 + rev + 단독 0.1 + 카드 밖 1.05) + 입력 결손 셀 × 1.05
+#   + 1순위 보정 rev(1순위 카드 셀 × D, 걸린 것만 이중 판정일 때) + 훑기(전문가마다 1). D = ceil(12.9 / k)(점검 카드 평균 12.9 —
+#   03-cards, 평균의 올림이라 보수 쪽), rev = flagged 면 0.05 · all 이면 D. k 는 그 박스의 마지막 limits.verdict.k(머리 plan_json),
+#   없으면 8. 동의·거절 문턱은 이 값과 견준다.
+# - low = 거를 수 있는 셀(1순위 밖)의 70% 가 걸러진다는 가정(거르기가 켜지고 표가 승인된 잡만 — 아니면 expected).
+# - high = 셀당 14(묶음 둘의 fwd·rev 4 + 빠진 카드 2 + 단독 4 + 카드 밖 1 + '이것 말고 더' 3) + 전문가마다 훑기 2(M2 의 식).
+CALLS_PER_CELL_HIGH = 14
+SWEEP_CALLS_HIGH = 2
+CHECKABLE_MEAN = 12.9
+FALLBACK_K = 8
+MISSING_PER_CELL, SOLO_PER_CELL, OFFCARD_PER_CELL, NOINPUT_PER_CELL, FLAGGED_REV_PER_CELL = 0.1, 0.1, 1.05, 1.05, 0.05
+FILTERED_SHARE_LOW = 0.7
 EST_CALL_S = 300               # 호출 하나의 가정(PLAN 6절 — 5분). 자격 수명과 견주는 데만 쓴다
 LIVE_STATES: tuple[str, ...] = runner.LIVE_JOB_STATES
 
@@ -112,10 +119,42 @@ def resolve_scope(scope: Mapping[str, Any] | None, order: Sequence[Mapping[str, 
     return {"scope": norm, "experts": experts, "unit_ids": unit_ids}
 
 
-def calls_estimate(cells: int, experts: int) -> dict:
-    """돌 셀 수·전문가 수로 호출 수의 낮은·높은 끝(CALLS_PER_CELL · SWEEP_CALLS_PER_EXPERT)."""
-    return {"low": cells * CALLS_PER_CELL[0] + experts * SWEEP_CALLS_PER_EXPERT[0],
-            "high": cells * CALLS_PER_CELL[1] + experts * SWEEP_CALLS_PER_EXPERT[1]}
+def box_k(store: Any) -> tuple[int, str]:
+    """이 박스의 마지막 판정 묶음당 카드 상한 k — 전문가 머리 plan_json 에 얼린 값 가운데 최신, 없으면 8. (k, 출처)."""
+    row = store.query_one("SELECT plan_json FROM rr_expert_reports WHERE plan_json IS NOT NULL"
+                          " AND json_extract(plan_json, '$.k') IS NOT NULL ORDER BY updated_at DESC LIMIT 1")
+    value = _json(row["plan_json"], {}).get("k") if row is not None else None
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value, "box"
+    return FALLBACK_K, "fallback"
+
+
+def card_cell_calls(k: int, dual: str) -> float:
+    """카드 셀 하나의 기대 호출 수 — fwd D + 빠진 카드 0.1 + rev(flagged 0.05 · all D) + 단독 0.1 + 카드 밖 1.05."""
+    d = math.ceil(CHECKABLE_MEAN / max(1, int(k)))
+    return d + MISSING_PER_CELL + (FLAGGED_REV_PER_CELL if dual == "flagged" else d) + SOLO_PER_CELL + OFFCARD_PER_CELL
+
+
+def calls_estimate(cells: Mapping[str, int], experts: int, *, k: int = FALLBACK_K, dual: str = "flagged",
+                   k_source: str = "fallback") -> dict:
+    """호출 수 추정 — `cells` 는 {card(카드 셀), gap(입력 결손 셀), rank1(1순위 카드 셀 — 보정 rev), filterable(거를 수 있는 셀 —
+    거르기가 켜지고 승인된 잡만)}. 반환 {low, expected, high, basis}(셈은 정수로 올린다)."""
+    card, gap = int(cells.get("card") or 0), int(cells.get("gap") or 0)
+    rank1, filterable = int(cells.get("rank1") or 0), int(cells.get("filterable") or 0)
+    d = math.ceil(CHECKABLE_MEAN / max(1, int(k)))
+    per_card = card_cell_calls(k, dual)
+    calibration = rank1 * d if dual == "flagged" else 0
+    expected = card * per_card + gap * NOINPUT_PER_CELL + calibration + experts
+    low = expected - FILTERED_SHARE_LOW * filterable * per_card
+    rev = f"{FLAGGED_REV_PER_CELL}(걸린 것만)" if dual == "flagged" else f"{d}(묶음 전체)"
+    basis = (f"k {k}({'이 박스의 마지막 계획' if k_source == 'box' else '계획 전 기본값'}) · 묶음 D {d}(점검 카드 평균 {CHECKABLE_MEAN}"
+             f" ÷ k 올림) · 카드 셀당 {per_card:.2f}회(fwd {d} · 빠진 카드 {MISSING_PER_CELL} · rev {rev} · 단독 {SOLO_PER_CELL} ·"
+             f" 카드 밖 {OFFCARD_PER_CELL}) · 입력 결손 셀당 {NOINPUT_PER_CELL}회"
+             + (f" · 1순위 보정 rev 셀당 {d}회" if dual == "flagged" else "")
+             + f" · 훑기 전문가당 1회 · 호출 하나 {EST_CALL_S // 60}분 · 낮은 끝은 거를 수 있는 셀 {filterable:,}개의"
+             f" {int(FILTERED_SHARE_LOW * 100)}% 가 걸러진다는 가정 · 높은 끝은 셀당 {CALLS_PER_CELL_HIGH}회")
+    return {"low": math.ceil(low), "expected": math.ceil(expected),
+            "high": (card + gap) * CALLS_PER_CELL_HIGH + experts * SWEEP_CALLS_HIGH, "basis": basis}
 
 
 # ---------------------------------------------------------------- 잡 만들기
@@ -165,6 +204,21 @@ def _refuse_live_jobs(store: Any, target_key: str) -> None:
                        detail={"panels": [p["id"] for p in waiting]})
 
 
+def _job_estimate(store: Any, cfg: Any, order: Sequence[Mapping[str, Any]], to_run: Sequence[tuple[str, str]]) -> dict:
+    """그 잡이 돌 셀(전문가, 단위)의 호출 추정 — 입력 결손 전문가 · 1순위 · 거를 수 있는 셀(거르기가 켜지고 표가 승인된 잡의
+    1순위 밖 셀)을 가른다."""
+    info = {str(r["agent_key"]): r for r in order}
+    gap = sum(1 for a, _u in to_run if (info.get(a) or {}).get("input_gaps"))
+    card = len(to_run) - gap
+    rank1 = sum(1 for a, _u in to_run if not (info.get(a) or {}).get("input_gaps") and (info.get(a) or {}).get("rank_in_domain") == 1)
+    filtering = getattr(cfg, "risk_review_filter", "off") == "on" and relevance.routing_approved()
+    filterable = sum(1 for a, _u in to_run if (info.get(a) or {}).get("rank_in_domain") != 1) if filtering else 0
+    k, source = box_k(store)
+    return calls_estimate({"card": card, "gap": gap, "rank1": rank1, "filterable": filterable},
+                          len({a for a, _u in to_run}), k=k, dual=str(getattr(cfg, "risk_review_dual", "flagged")),
+                          k_source=source)
+
+
 def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_sub: str | None = None,
                       scope: Mapping[str, Any] | None = None, user_memo: str | None = None, consent: bool = False,
                       consent_source: str | None = None, settings: Any | None = None, channel: str = "rest",
@@ -180,7 +234,7 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
     입력 결손 전문가(ECAD 에 기대는데 ECAD 가 없다)도 범위에 받는다(재설계 M3 C3-2 — 그 셀은 입력 결손 호출로 닫힌다). 카드 대조
     대상(`flow='cells'`)이면 범위 안 전문가의 보류(`deferred` · `ecad_absent`) 좌석을 같은 트랜잭션에서 pending 으로 풀고 감사 한 행을
     남긴다(풀지 않으면 원장 마감이 그 행을 건드리지 않아 종결 어휘로 남는다 — 거짓 완결). 패널 대상에 얹은 검토는 풀지 않는다.
-    반환 {job_id, mode, cells_total, cells_in_scope, experts_in_scope, units, calls_estimate{low, high},
+    반환 {job_id, mode, cells_total, cells_in_scope, experts_in_scope, units, calls_estimate{low, expected, high, basis},
     credential{kind, email, exp}, undeferred, credential_note?}. 높은 끝 추정 소요(호출 × 300초 ÷ 동시 수)가 PAT 남은 수명보다 길거나
     요청자 PAT 를 수명 때문에 건너뛰었으면 `credential_note` 로 미리 알린다. `channel`·`actor_verified` 는 보류 해제 감사 행의 입구다.
     """
@@ -204,13 +258,13 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
     states = {(r["unit_id"], r["agent_key"]): r["state"] for r in store.query(
         "SELECT unit_id, agent_key, state FROM rr_review_cells WHERE target_key = ?", (target_key,))}
     to_run = [(a, u) for a in agents for u in picked["unit_ids"] if states.get((u, a), "pending") == "pending"]
-    estimate = calls_estimate(len(to_run), len({a for a, _ in to_run}))
-    if estimate["high"] > int(cfg.risk_review_max_calls):
-        raise AppError("review_too_large", f"호출 추정의 높은 끝 {estimate['high']:,}회가 상한 {int(cfg.risk_review_max_calls):,}회"
+    estimate = _job_estimate(store, cfg, order, to_run)
+    if estimate["expected"] > int(cfg.risk_review_max_calls):
+        raise AppError("review_too_large", f"호출 추정 {estimate['expected']:,}회가 상한 {int(cfg.risk_review_max_calls):,}회"
                        "(HWAXRISK_REVIEW_MAX_CALLS)를 넘는다 — 범위(tiers·domains·agents·unit_ids)를 줄여 나눠 돈다.", 409,
                        detail={"calls_estimate": estimate, "knob": "HWAXRISK_REVIEW_MAX_CALLS"})
-    if estimate["high"] > int(cfg.risk_review_consent_calls) and not consent:
-        raise AppError("consent_required", f"호출 추정의 높은 끝 {estimate['high']:,}회가 {int(cfg.risk_review_consent_calls):,}회"
+    if estimate["expected"] > int(cfg.risk_review_consent_calls) and not consent:
+        raise AppError("consent_required", f"호출 추정 {estimate['expected']:,}회가 {int(cfg.risk_review_consent_calls):,}회"
                        "(HWAXRISK_REVIEW_CONSENT_CALLS)를 넘는다 — consent:true 로 명시 승인한다.", 422,
                        detail={"calls_estimate": estimate, "knob": "HWAXRISK_REVIEW_CONSENT_CALLS"})
     credential, credential_note = review_credential(store, cfg, owner_sub, requester_sub)
@@ -221,11 +275,11 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
     now = now_epoch()
     notes = [credential_note] if credential_note else []
     workers = max(1, int(cfg.risk_review_concurrency))
-    need_s = math.ceil(estimate["high"] / workers) * EST_CALL_S
+    need_s = math.ceil(estimate["expected"] / workers) * EST_CALL_S
     left = credential["exp"] - now
     if need_s > left:
-        notes.append(f"{credential['email']} 의 PAT 남은 수명 {max(left, 0) / 3600:.1f}시간이 이 잡의 높은 끝 추정 소요"
-                     f" {need_s / 3600:.1f}시간(호출 {estimate['high']:,}회 × {EST_CALL_S}초 ÷ 동시 {workers})보다 짧다 — 도중에"
+        notes.append(f"{credential['email']} 의 PAT 남은 수명 {max(left, 0) / 3600:.1f}시간이 이 잡의 추정 소요"
+                     f" {need_s / 3600:.1f}시간(호출 {estimate['expected']:,}회 × {EST_CALL_S}초 ÷ 동시 {workers})보다 짧다 — 도중에"
                      " 만료되면 잡이 credential 로 멈춘다(서비스 계정으로 내려가지 않는다). 포털에서 PAT 를 다시 발급해"
                      " 등록하고 재개하면 이어 돈다")
     job_id = new_uuid()
@@ -2306,7 +2360,7 @@ class ReviewLoop:
         return phase
 
     def _spawn(self, active: list[tuple[dict, str]], now: int) -> int:
-        conc = max(1, int(getattr(self.settings, "risk_review_concurrency", 4) or 4))
+        conc = max(1, int(getattr(self.settings, "risk_review_concurrency", 8) or 8))
         if active:
             self._probe(self._health, self.engine.health, HEALTH_CACHE_S)
         limit = self.server().get("limit")

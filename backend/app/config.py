@@ -172,7 +172,7 @@ REVIEW_KNOBS: tuple[Knob, ...] = (
     Knob("HWAXRISK_UNIT_MAX_LINES", "risk_unit_max_lines", 40, minimum=1),
     Knob("HWAXRISK_UNITS_SMALL_LINES", "risk_units_small_lines", 15, minimum=1),
     Knob("HWAXRISK_UNITS_MAX", "risk_units_max", 60, minimum=1),
-    Knob("HWAXRISK_REVIEW_CONCURRENCY", "risk_review_concurrency", 4, minimum=1),   # 앱의 검토 워커 수
+    Knob("HWAXRISK_REVIEW_CONCURRENCY", "risk_review_concurrency", 8, minimum=1),   # 앱의 검토 워커 수(M3 D-34 — 엔진 관문과 같은 8)
     Knob("HWAXRISK_REVIEW_CALL_TIMEOUT_S", "risk_review_call_timeout_s", DEFAULT_REVIEW_CALL_TIMEOUT_S),  # 0 = 끔
     Knob("HWAXRISK_REVIEW_READ_TIMEOUT_S", "risk_review_read_timeout_s", 300),  # 프레임 사이 침묵 한도(엔진 ping 15초), 0 = 끔
     Knob("HWAXRISK_REVIEW_MAX_CHARGED", "risk_review_max_charged", 2, minimum=1),   # 셀의 내용 탓 실패 한도
@@ -294,7 +294,7 @@ class Settings:
     risk_unit_max_lines: int = 40
     risk_units_small_lines: int = 15
     risk_units_max: int = 60
-    risk_review_concurrency: int = 4
+    risk_review_concurrency: int = 8
     risk_review_call_timeout_s: int = DEFAULT_REVIEW_CALL_TIMEOUT_S
     risk_review_read_timeout_s: int = 300
     risk_review_max_charged: int = 2

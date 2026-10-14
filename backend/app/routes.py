@@ -7,6 +7,7 @@ import gzip
 import hmac
 import json
 import logging
+import math
 import re
 import secrets
 import sqlite3
@@ -3628,7 +3629,10 @@ def review_payload(store: Any, target_key: str, flow: str | None) -> dict | None
                        "would_filter": flt["would_filter"], "filtered": flt["n"], "audited": flt["audit"]["sampled"],
                        "audit": {k: flt["audit"][k] for k in ("risk_miss", "relevance_miss", "undetermined", "kept", "upper95",
                                                               "upper95_conservative", "n_audit", "floor_met", "pending")},
-                       "shadow": dict(flt["shadow"]), "widened": list(flt["widened"]), "off": flt["off"]},
+                       "shadow": dict(flt["shadow"]), "widened": list(flt["widened"]), "off": flt["off"],
+                       # 거른 셀이 아낀 호출의 어림(재설계 M3 C3-10 — 카드 셀 하나의 기대 호출 수 × 거른 셀)
+                       "saved_calls_est": math.ceil(flt["n"] * review_runner.card_cell_calls(
+                           review_runner.box_k(store)[0], str(knobs.get("dual") or "all")))},
             "noinput": dict(closure["no_input"]),
             "job": _review_job_payload(job) if job is not None else None}
 

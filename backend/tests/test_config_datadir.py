@@ -297,7 +297,7 @@ def test_cred_key_defaults_to_settings_data_dir():
 # ---------------------------------------------------------------- 카드 대조 검토 손잡이(재설계 M2.md 4.5)
 REVIEW_DEFAULTS = {
     "HWAXRISK_REVIEW_ENABLED": False, "HWAXRISK_UNIT_TARGET_LINES": 20, "HWAXRISK_UNIT_MAX_LINES": 40,
-    "HWAXRISK_UNITS_SMALL_LINES": 15, "HWAXRISK_UNITS_MAX": 60, "HWAXRISK_REVIEW_CONCURRENCY": 4,
+    "HWAXRISK_UNITS_SMALL_LINES": 15, "HWAXRISK_UNITS_MAX": 60, "HWAXRISK_REVIEW_CONCURRENCY": 8,
     "HWAXRISK_REVIEW_CALL_TIMEOUT_S": 18000, "HWAXRISK_REVIEW_READ_TIMEOUT_S": 300, "HWAXRISK_REVIEW_MAX_CHARGED": 2,
     "HWAXRISK_REVIEW_CONSENT_CALLS": 1500, "HWAXRISK_REVIEW_MAX_CALLS": 30000,
     # 재설계 M3.md 4.5 의 거르기 손잡이(C3-6)
@@ -326,7 +326,7 @@ def test_knobs_env_overrides_the_default_and_the_environment_overrides_knobs_env
     mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path), HWAXRISK_UNITS_MAX="90", HWAXRISK_REVIEW_CONCURRENCY=" ")
     s = mod.settings
     assert (s.risk_review_enabled, s.risk_units_max, s.risk_review_read_timeout_s) == (True, 90, 600)
-    assert (s.risk_review_concurrency, s.risk_review_max_calls) == (4, 30000)
+    assert (s.risk_review_concurrency, s.risk_review_max_calls) == (8, 30000)
     knobs = mod.review_knobs(s)
     assert knobs["HWAXRISK_REVIEW_ENABLED"] == {"value": True, "source": "knobs.env"}
     assert knobs["HWAXRISK_UNITS_MAX"] == {"value": 90, "source": "env"}

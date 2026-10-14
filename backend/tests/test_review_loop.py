@@ -206,6 +206,22 @@ def test_a_restart_in_the_middle_of_a_call_reruns_only_that_call_without_chargin
 
 
 # ---------------------------------------------------------------- 기다림 · 차단기
+@pytest.mark.parametrize("limit", [4, 8])
+def test_eight_workers_never_exceed_the_servers_gate_limit(store, monkeypatch, limit):
+    """재설계 M3 C3-10 — 앱 워커 기본은 8(D-34)이고, 엔진 관문 limit(/health — 심의가 돌면 4)을 넘겨 띄우지 않는다. 6명 잡이 limit
+    4 면 동시에 넷까지, 8 이면 넷을 넘는다."""
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_concurrency=8))
+    assert config.settings.risk_review_concurrency == 8
+    key = rig.target(store)
+    job_id = rig.job(store, key)
+    fake = FakeReviewEngine(rig.packs())
+    fake.gate_limit = limit
+    fake.delay_s = 0.05
+    rig.Rig(store, fake).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    assert fake.max_active <= limit and (fake.max_active > 4) == (limit == 8)
+
+
 def test_review_busy_waits_without_counting_anything(store, monkeypatch):
     """서버 관문이 동시 2 를 넘는 run 에 review_busy 로 답한다 — 기다림은 아무것도 세지 않는다(P-02(5)). 셀의 tries·infra_streak·
     charged 가 0 을 지나지 않고, 차단기는 닫힌 채이며 잡은 completed 다. 기다린 호출은 원장에 wait 로 남는다(품질 수치가 따로 센다)."""

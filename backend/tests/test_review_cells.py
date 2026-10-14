@@ -12,6 +12,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+import math
 import threading
 
 import httpx
@@ -674,7 +675,8 @@ def test_the_job_row_carries_its_scope_knobs_and_the_user_credential(store):
     assert set(out) == {"job_id", "mode", "cells_total", "cells_in_scope", "experts_in_scope", "units", "calls_estimate",
                         "credential", "undeferred"}          # 푼 보류 좌석 수(재설계 M3 C3-2)
     assert (out["mode"], out["experts_in_scope"]) == ("reviews", 2)
-    assert out["calls_estimate"] == review_runner.calls_estimate(out["cells_in_scope"], 2)
+    assert out["calls_estimate"] == review_runner.calls_estimate(
+        {"card": out["cells_in_scope"], "gap": 0, "rank1": out["cells_in_scope"], "filterable": 0}, 2)
     assert out["credential"]["kind"] == "owner" and out["credential"]["email"] == OWNER
     row = dict(store.query_one("SELECT * FROM rr_jobs WHERE id = ?", (out["job_id"],)))
     assert (row["mode"], row["tier"], row["state"], row["credential_email"], row["concurrency"]) == (
@@ -696,10 +698,11 @@ def test_the_job_row_carries_its_scope_knobs_and_the_user_credential(store):
                                           (key,))] == before
 
 
-def test_the_review_credential_is_a_user_pat_and_never_the_service_pat(store):
+def test_the_review_credential_is_a_user_pat_and_never_the_service_pat(store, monkeypatch):
     """자격은 요청자 → 소유자의 사용자 PAT 만이고 남은 수명이 검토 여유(호출 벽시계 + 600초)를 넘어야 한다. 서비스 PAT 가 있어도
-    쓰지 않고 422 pat_unavailable 이다(사용자 결정 3). 요청자 PAT 를 수명 때문에 건너뛰었거나, 높은 끝 추정 소요가 PAT 수명보다
-    길면 credential_note 로 미리 말한다."""
+    쓰지 않고 422 pat_unavailable 이다(사용자 결정 3). 요청자 PAT 를 수명 때문에 건너뛰었거나, 추정 소요(기대 호출 수 × 5분 ÷ 동시
+    수 — 재설계 M3 C3-10)가 PAT 수명보다 길면 credential_note 로 미리 말한다. 워커 하나로 소요를 늘린다."""
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_concurrency=1))
     key = _target(store)
     (config.settings.data_dir / "secrets.env").write_text("HWAXRISK_PORTAL_PAT=svc-pat\n", encoding="utf-8")
     assert config.load_secrets(config.settings.data_dir).get("HWAXRISK_PORTAL_PAT") == "svc-pat"
@@ -719,7 +722,7 @@ def test_the_review_credential_is_a_user_pat_and_never_the_service_pat(store):
     out = make(requester_sub=PEER)
     assert out["credential"]["kind"] == "owner" and out["credential"]["email"] == OWNER
     assert f"{PEER} 의 PAT" in out["credential_note"]                  # 요청자 PAT 를 건너뛰었다
-    assert "credential 로 멈춘다" in out["credential_note"]           # 남은 수명이 높은 끝 추정 소요보다 짧다
+    assert "credential 로 멈춘다" in out["credential_note"]           # 남은 수명이 추정 소요보다 짧다
     runner.cancel_job(store, out["job_id"], by=OWNER)
     _pat(store, PEER)
     out = make(requester_sub=PEER)
@@ -782,18 +785,40 @@ def test_refusals_for_scope_and_call_budget(store, monkeypatch):
     refused = _refused(make, {"tiers": ["A"], "agents": ["mech-syn-1"]})
     assert (refused.code, refused.http_status, refused.detail["experts"]) == ("scope_empty", 422, 0)
 
+    # 문턱은 기대값(expected — 재설계 M3 C3-10)과 견준다. mech 2명(1순위 1) × 단위, 입력 결손 없음, 승인 전이라 거를 셀 0, k 기본 8.
     scope = {"domains": ["mech"]}
-    high = review_runner.calls_estimate(2 * len(_unit_ids(store, key)), 2)["high"]
-    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_max_calls=high - 1))
+    n = len(_unit_ids(store, key))
+    estimate = review_runner.calls_estimate({"card": 2 * n, "gap": 0, "rank1": n, "filterable": 0}, 2)
+    expected = estimate["expected"]
+    assert estimate["low"] == expected < estimate["high"] == 2 * n * 14 + 2 * 2
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_max_calls=expected - 1))
     refused = _refused(make, scope)
-    assert (refused.code, refused.http_status, refused.detail["calls_estimate"]["high"]) == ("review_too_large", 409, high)
-    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_max_calls=high,
-                                                               risk_review_consent_calls=high - 1))
+    assert (refused.code, refused.http_status, refused.detail["calls_estimate"]) == ("review_too_large", 409, estimate)
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_max_calls=expected,
+                                                               risk_review_consent_calls=expected - 1))
     refused = _refused(make, scope, consent=False)
     assert (refused.code, refused.http_status, refused.detail["knob"]) == ("consent_required", 422,
                                                                             "HWAXRISK_REVIEW_CONSENT_CALLS")
     assert store.query_one("SELECT COUNT(*) AS n FROM rr_review_cells WHERE target_key = ?", (key,))["n"] == 0
-    assert make(scope)["calls_estimate"]["high"] == high
+    assert make(scope)["calls_estimate"] == estimate
+
+
+def test_the_calls_estimate_for_the_full_roster_stays_under_the_cap_with_flagged_dual_judgement():
+    """재설계 M3 C3-10 — 359명 × 단위 20(카드 셀 4,980 · 입력 결손 셀 2,200 · 1순위 카드 셀 180, k 8)의 기대 호출 수는 약 2만으로
+    상한 3만 밑이다(카드 셀당 3.3 = fwd 2 + 빠진 카드 0.1 + rev 0.05 + 단독 0.1 + 카드 밖 1.05). 이중 판정 all 이면 rev 몫이 D 로
+    늘고, 낮은 끝은 거를 수 있는 셀의 70% 가 걸러진다고 본 값, 높은 끝은 셀당 14(M2 의 식)다. basis 가 쓴 가정이 셈과 같다."""
+    cells = {"card": 4980, "gap": 2200, "rank1": 180, "filterable": 0}
+    flagged = review_runner.calls_estimate(cells, 359, k=8, dual="flagged", k_source="box")
+    assert review_runner.card_cell_calls(8, "flagged") == pytest.approx(3.3)
+    assert flagged["expected"] == math.ceil(4980 * 3.3 + 2200 * 1.05 + 180 * 2 + 359) < 30000
+    assert flagged["high"] == 7180 * 14 + 359 * 2 == 101238 and flagged["low"] == flagged["expected"]
+    assert "k 8(이 박스의 마지막 계획)" in flagged["basis"] and "카드 셀당 3.30회" in flagged["basis"]
+    assert "rev 0.05(걸린 것만)" in flagged["basis"] and "1순위 보정 rev 셀당 2회" in flagged["basis"]
+    every = review_runner.calls_estimate(cells, 359, k=8, dual="all")
+    assert every["expected"] == math.ceil(4980 * 5.25 + 2200 * 1.05 + 359) and "rev 2(묶음 전체)" in every["basis"]
+    low = review_runner.calls_estimate({**cells, "filterable": 4000}, 359, k=8)
+    assert low["low"] == math.ceil(flagged["expected"] - 0.7 * 4000 * 3.3) and low["expected"] == flagged["expected"]
+    assert review_runner.calls_estimate(cells, 359, k=4)["expected"] > flagged["expected"]          # 묶음 넷 — D 4
 
 
 # ---------------------------------------------------------------- 전원 포함 · 보류 해제(재설계 M3 C3-2)
