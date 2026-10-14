@@ -392,8 +392,10 @@ class SynthWorker:
 
     def _set(self, job_id: str, state: str, *, hold: str | None = None, until: int | None = None,
              error: str | None = None) -> None:
+        # 사람·폐기가 닫은 잡(취소·끝)은 도는 틱이 되살리지 않는다(review1 L6 — 폐기가 잡을 취소한 뒤 늦게 끝난 호출).
         self.store.execute("UPDATE rr_jobs SET state = ?, hold_code = ?, hold_until = ?, error = ?, updated_at = ?"
-                           " WHERE id = ?", (state, hold, until, error, self.clock(), job_id))
+                           " WHERE id = ? AND state IN ('queued', 'running', 'paused')",
+                           (state, hold, until, error, self.clock(), job_id))
 
     def _drain_all(self) -> bool:
         probe = getattr(self.engine, "drain_state", None)
@@ -557,23 +559,33 @@ class SynthWorker:
                prompt_rev: Any = None, error: str | None = None, infra_streak: int | None = None,
                charged: int | None = None) -> dict:
         out = output if output is not None else _code_output(summary, reason or "")
-        now = self.clock()
-        self.store.execute(
-            "UPDATE rr_summaries SET state = ?, state_reason = ?, output_json = ?, checks_json = COALESCE(?, checks_json),"
-            " model = COALESCE(?, model), prompt_rev = COALESCE(?, prompt_rev), error = COALESCE(?, error),"
-            " infra_streak = COALESCE(?, infra_streak), charged = COALESCE(?, charged), finished_at = ?, updated_at = ?"
-            " WHERE summary_id = ?",
-            (state, reason, common.canonical_json(dict(out)), common.canonical_json(dict(checks)) if checks else None,
-             model, prompt_rev, error, infra_streak, charged, now, now, summary_id))
+        with self.store.tx():
+            # 폐기된 과제의 요약은 늦게 끝난 호출이라도 쓰지 않는다 — 같은 트랜잭션에서 폐기 상태를 본다(review1 L6).
+            if registry.target_purged(self.store, self._target_of(summary_id)):
+                return {"step": "purged", "summary_id": summary_id, "state": None, "reason": "project_purged"}
+            now = self.clock()
+            self.store.execute(
+                "UPDATE rr_summaries SET state = ?, state_reason = ?, output_json = ?, checks_json = COALESCE(?, checks_json),"
+                " model = COALESCE(?, model), prompt_rev = COALESCE(?, prompt_rev), error = COALESCE(?, error),"
+                " infra_streak = COALESCE(?, infra_streak), charged = COALESCE(?, charged), finished_at = ?, updated_at = ?"
+                " WHERE summary_id = ?",
+                (state, reason, common.canonical_json(dict(out)), common.canonical_json(dict(checks)) if checks else None,
+                 model, prompt_rev, error, infra_streak, charged, now, now, summary_id))
         return {"step": step, "summary_id": summary_id, "state": state, "reason": reason}
+
+    def _target_of(self, summary_id: str) -> str:
+        row = self.store.query_one("SELECT target_key FROM rr_summaries WHERE summary_id = ?", (summary_id,))
+        return str(row["target_key"]) if row is not None else ""
 
     def _ledger(self, job: Mapping[str, Any], call_id: str, started: int, body: Mapping[str, Any], *,
                 result: Mapping[str, Any] | None = None, error: BaseException | None = None, state: str) -> None:
-        """호출 원장(rr_review_calls, kind 'summary', agent_key 'synth') 한 행."""
+        """호출 원장(rr_review_calls, kind 'summary', agent_key 'synth') 한 행. 폐기된 과제면 엔진 답 원문(result_gz · 품질)은 싣지
+        않는다(review1 L6 — 호출이 있었다는 행과 셈만 남는다)."""
+        purged = result is not None and registry.target_purged(self.store, str(job["target_key"]))
         meta = (result or {}).get("meta") or {}
         usage = meta.get("usage") or {}
-        quality = (result or {}).get("quality") or {}
-        text = common.canonical_json(dict(result)) if result is not None else None
+        quality = {} if purged else (result or {}).get("quality") or {}
+        text = common.canonical_json(dict(result)) if result is not None and not purged else None
         self.store.execute(
             "INSERT OR REPLACE INTO rr_review_calls(call_id, target_key, agent_key, unit_id, owner_sub, run_id, kind, state,"
             " request_hash, input_sha, prompt_chars, tokens_in, tokens_out, finish_reason, soft_over, attempts, model,"
@@ -801,13 +813,16 @@ def assemble_report(store: RiskStore, target_key: str, *, trigger: str) -> dict:
     만들지 않는다(`created: False`). 반환 {report_uid, version_no, pages_n, level_label, counts, narrative_state, created}.
 
     종합 판(synth_done)은 **자기 판이 선 뒤**의 완결 표기를 싣는다 — 같은 트랜잭션에서 지금 셀 지문의 판 행을 먼저 세우고 그 위에서
-    센다(종전에는 자기 판 전의 신선도로 세어 모든 종합 판의 표기가 '후속 낡음(종합 전)' 이었다, review1 M4)."""
+    센다(종전에는 자기 판 전의 신선도로 세어 모든 종합 판의 표기가 '후속 낡음(종합 전)' 이었다, review1 M4). 폐기된 과제에는 판을
+    세우지 않는다(409 project_purged — review1 L6)."""
     if trigger not in REPORT_TRIGGERS:
         raise AppError("E100", f"모르는 보고서 판 계기 — {trigger!r}. 허용 {list(REPORT_TRIGGERS)}.", 422)
     target = store.query_one("SELECT owner_sub, flow FROM rr_targets WHERE target_key = ?", (target_key,))
     if target is None:
         raise AppError("E404", f"타깃이 없습니다 — {target_key}.", 404)
     with store.tx():
+        if registry.target_purged(store, target_key):
+            raise AppError("project_purged", f"폐기된 과제의 대상에는 보고서 판을 세우지 않는다 — {target_key}.", 409)
         last = store.query_one("SELECT report_uid, version_no, content_hash, pages_n, level_label, narrative_state, counts_json"
                                " FROM rr_reports WHERE target_key = ? ORDER BY version_no DESC LIMIT 1", (target_key,))
         version_no = int(last["version_no"]) + 1 if last is not None else 1

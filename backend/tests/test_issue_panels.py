@@ -490,3 +490,34 @@ def test_issue_panels_keep_the_ledger_invariants(store, monkeypatch, tmp_path):
     assert planner.check_invariants(store, key) == []
     store.execute("UPDATE rr_issues SET panel_id = 'elsewhere' WHERE panel_id = ?", (panel["id"],))   # 어긋남을 만든다
     assert any("(8)" in p for p in planner.check_invariants(store, key))
+
+
+def test_an_issue_panel_that_ends_after_a_purge_writes_nothing_back(store, monkeypatch, tmp_path):
+    """L6(결정) — 폐기(purge) 뒤에 끝난 쟁점 패널의 결과는 버린다 — 패널 원문(결정문 · 결과 원문 · 도구 호출)도, 쟁점 패널 finding 도,
+    쟁점의 결과도 쓰지 않는다(같은 트랜잭션에서 과제의 폐기 상태를 본다). 패널에는 까닭만 남는다."""
+    from tests import factories
+
+    key, (unit,) = _ledger(store)
+    _select(store, monkeypatch, tmp_path, key, cap=1)
+    project_id = store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (key,))["project_id"]
+    code = store.query_one("SELECT code FROM rr_projects WHERE id = ?", (project_id,))["code"]
+
+    class PurgingEngine(IssuePanelEngine):
+        def run(self, delib_opts, *, owner_sub=None):
+            out = super().run(delib_opts, owner_sub=owner_sub)
+            with factories.routes_store(store):
+                routes.purge_project(project_id, routes.PurgeBody(code=code, reason="폐기 시험"), ident=factories.ident(OWNER))
+            return out
+
+    results = _run_issues(store, config.settings, PurgingEngine(store, {"*": {"severity": "치명", "judgement": "FAIL"}}), key)
+    panel_id = results[0]["panel_id"]
+    assert results[0]["status"] == "purged"
+    panel = store.query_one("SELECT status, error, decision_text, risk_spec_json, result_gz FROM rr_panels WHERE id = ?",
+                            (panel_id,))
+    assert (panel["status"], panel["decision_text"], panel["risk_spec_json"], panel["result_gz"]) == ("error", None, None, None)
+    assert panel["error"].startswith("project_purged")
+    assert store.query_one("SELECT COUNT(*) AS n FROM rr_findings WHERE panel_id = ?", (panel_id,))["n"] == 0
+    assert store.query_one("SELECT COUNT(*) AS n FROM rr_panel_calls WHERE panel_id = ? AND result_gz IS NOT NULL",
+                           (panel_id,))["n"] == 0
+    issue = next(r for r in issues.issue_rows(store, key) if r["panel_id"] == panel_id)
+    assert issue["outcome"] is None

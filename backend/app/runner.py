@@ -1773,9 +1773,13 @@ def save_panel_result(store: Any, panel: Mapping[str, Any], job: Mapping[str, An
                "frozen": dict(frozen or {}), "model_json": dict(model_json or {})}
     try:
         text = canonical_json(payload)
-        store.execute(
-            "UPDATE rr_panels SET result_gz = ?, result_hash = ?, result_saved_at = ? WHERE id = ?",
-            (gzip.compress(text.encode("utf-8")), sha256_hex(text)[:12], now_epoch(), panel["id"]))
+        with store.tx():
+            # 폐기된 과제의 결과 원문은 패널에도 남기지 않는다(review1 L6 — 폐기가 비운 칸을 늦은 쓰기가 다시 채운다).
+            if _target_purged(store, panel["target_key"]):
+                return False
+            store.execute(
+                "UPDATE rr_panels SET result_gz = ?, result_hash = ?, result_saved_at = ? WHERE id = ?",
+                (gzip.compress(text.encode("utf-8")), sha256_hex(text)[:12], now_epoch(), panel["id"]))
         return True
     except Exception:  # noqa: BLE001 — 위 설명대로다.
         log.exception("패널 %s 엔진 결과를 패널에 적지 못했다", panel["id"])
@@ -2112,6 +2116,25 @@ def _note_issue_yield(store: Any, job: Mapping[str, Any], target_key: str) -> No
     store.execute("UPDATE rr_jobs SET progress_json = ? WHERE id = ?", (canonical_json(body), job["id"]))
 
 
+PURGED_PANEL_ERROR = "project_purged: 과제가 폐기돼 늦게 끝난 패널 결과를 버렸다(원장·패널에 쓰지 않았다)"
+
+
+def _target_purged(store: Any, target_key: str) -> bool:
+    """폐기 상태는 늘 실제 원장에서 본다 — 주입한 대역 registry 가 아니라(review1 L6)."""
+    from app import registry  # noqa: PLC0415 — registry 는 이 모듈을 거쳐 무겁다.
+
+    return registry.target_purged(store, target_key)
+
+
+def _close_panel_purged(store: Any, panel: Mapping[str, Any]) -> dict:
+    """폐기된 과제의 패널을 결과 없이 닫는다 — 자리는 차감 없이 되돌리고(쟁점 패널이면 그 쟁점은 잡이 없어 미토의로) 패널에는 까닭만."""
+    _release_panel(store, panel, charge=False)
+    store.execute("UPDATE rr_panels SET status = 'error', error = ?, ended_at = ? WHERE id = ?",
+                  (PURGED_PANEL_ERROR, now_epoch(), panel["id"]))
+    log.warning("패널 %s: 과제가 폐기돼 늦게 끝난 결과를 버렸다", panel["id"])
+    return {"panel_id": panel["id"], "status": "purged"}
+
+
 def _complete_panel(
     store: Any,
     settings: Any,
@@ -2139,8 +2162,12 @@ def _complete_panel(
     events = result.get("events")
     attribution = attribute_events(events, seat_keys)
 
-    # 좌석 도구 호출 원문은 포털 대화가 아니라 이 표가 정본이다(§6.7.2 7단계).
-    record_panel_calls(store, panel, events, source="sse", conv_id=result.get("conv_id"))
+    with store.tx():
+        # 폐기된 과제의 패널은 늦게 끝나도 원장에 쓰지 않는다 — 같은 트랜잭션에서 폐기 상태를 본다(재설계 M3 review1 L6).
+        if _target_purged(store, panel["target_key"]):
+            return _close_panel_purged(store, panel)
+        # 좌석 도구 호출 원문은 포털 대화가 아니라 이 표가 정본이다(§6.7.2 7단계).
+        record_panel_calls(store, panel, events, source="sse", conv_id=result.get("conv_id"))
 
     spec = narrative_mod.parse_risk_spec(decision_text)
     parsed = spec is not None
@@ -2159,6 +2186,8 @@ def _complete_panel(
 
     # 8~12단계를 한 트랜잭션으로 묶는다 — 중간 실패 시 'done 인데 finding 0·좌석 running' 반쪽 저장이 남지 않는다.
     with store.tx():
+        if _target_purged(store, panel["target_key"]):
+            return _close_panel_purged(store, panel)
         store.execute(
             "UPDATE rr_panels SET status = 'done', decision_text = ?, risk_spec_json = ?, risk_spec_parsed = ?,"
             " conv_id = ?, report_id = ?, model_json = ?, ended_at = ? WHERE id = ?",

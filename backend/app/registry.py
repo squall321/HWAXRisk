@@ -84,6 +84,13 @@ ATTENTION_ORDER: dict[str, int] = {"A": 0, "B": 1, "C": 2, "D": 3}
 _ISSUE_DONE_STATES = ("resolved", "inconclusive")
 
 
+def target_purged(store: RiskStore, target_key: str) -> bool:
+    """대상의 과제가 폐기(purge)됐나 — 늦게 끝난 패널·요약의 쓰기가 같은 트랜잭션에서 이것을 보고 버린다(재설계 M3 review1 L6)."""
+    row = store.query_one("SELECT p.status FROM rr_targets t JOIN rr_projects p ON p.id = t.project_id WHERE t.target_key = ?",
+                          (target_key,))
+    return row is not None and row["status"] == "purged"
+
+
 def target_flow(store: RiskStore, target_key: str) -> str:
     """대상의 방식 — 'cells' | 'panels'(행이 없거나 옛 행이면 panels)."""
     row = store.query_one("SELECT flow FROM rr_targets WHERE target_key = ?", (target_key,))

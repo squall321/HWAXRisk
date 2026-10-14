@@ -406,3 +406,32 @@ def test_the_synth_done_report_states_its_own_level_not_stale_before_synthesis(s
     assert report["level_label"] == after["level_label"] and f"[{after['level_label']}]" in report["title"]
     assert after["level_label"] in _page_text(report, "summary")
 
+
+def test_an_inflight_summary_after_a_purge_writes_nothing_back(store):
+    """L6 — 폐기(purge) 뒤에 끝난 요약 호출의 결과는 쓰지 않는다(같은 트랜잭션에서 과제의 폐기 상태를 본다). 판도 세우지 않는다."""
+    from app import routes
+    from tests import factories
+
+    key = _ledger(store)
+    project_id = store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (key,))["project_id"]
+    code = store.query_one("SELECT code FROM rr_projects WHERE id = ?", (project_id,))["code"]
+    synth.create_synth_job(store, key, owner_sub=OWNER, requester_sub=OWNER)
+    before = store.query_one("SELECT COUNT(*) AS n FROM rr_reports WHERE target_key = ?", (key,))["n"]
+
+    class PurgingEngine(FakeSummaryEngine):
+        def run(self, body, **kwargs):
+            if not getattr(self, "purged", False):
+                self.purged = True
+                with factories.routes_store(store):
+                    routes.purge_project(project_id, routes.PurgeBody(code=code, reason="폐기 시험"),
+                                         ident=factories.ident(OWNER))
+            return super().run(body, **kwargs)
+
+    worker = synth.SynthWorker(store, config.settings, PurgingEngine())
+    _tick_until(worker, limit=60)
+    leaked = store.query("SELECT summary_id FROM rr_summaries WHERE target_key = ? AND output_json IS NOT NULL", (key,))
+    assert [r["summary_id"] for r in leaked] == []
+    calls = store.query("SELECT call_id FROM rr_review_calls WHERE target_key = ? AND kind = 'summary' AND result_gz IS NOT NULL",
+                        (key,))
+    assert [r["call_id"] for r in calls] == []
+    assert store.query_one("SELECT COUNT(*) AS n FROM rr_reports WHERE target_key = ?", (key,))["n"] == before
