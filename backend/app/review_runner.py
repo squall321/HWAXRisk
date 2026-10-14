@@ -18,9 +18,9 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from app import (cardpack, config, engine_client, expert_report, planner, relevance, review_cells, review_ops, review_verify,
-                 runner, units)
-from app.common import canonical_json, new_uuid, now_epoch, sha256_hex
+from app import (cardpack, config, engine_client, expert_report, identity, planner, relevance, review_cells, review_ops,
+                 review_verify, runner, unit_live, units)
+from app.common import canonical_json, http_client, new_uuid, now_epoch, sha256_hex
 from app.errors import AppError
 from app.runner import EngineBusy, EngineRejected, EngineStreamLost, PatUnavailable
 
@@ -301,6 +301,9 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
         # 확인과 쓰기 사이에 다른 잡이 서지 않게 트랜잭션 안에서 문을 다시 본다(패널 잡 만들기도 같은 트랜잭션에서 본다).
         _refuse_live_jobs(store, target_key)
         plan = review_cells.plan_cells(store, target_key, now=now)
+        # 근거 꾸러미 실호출(B 층 — C3-12)의 단위 행 — 손잡이가 켜져 있으면 아직(NULL)으로 두어 루프의 live 워커가 얼리고, 꺼져 있으면
+        # 곧바로 none 이다. 이미 있는 행(앞 잡이 얼린 것)은 그대로다.
+        unit_live.seed(store, target_key, enabled=unit_live.enabled(cfg), now=now)
         review_cells.assign_scope(store, target_key, job_id, agents=agents, unit_ids=picked["unit_ids"], now=now)
         undeferred = (planner.undefer(store, target_key, decided_by=requester_sub or owner_sub, reason="review_scope",
                                       agents=agents, reasons=("ecad_absent",), channel=channel,
@@ -1142,8 +1145,8 @@ class _Session:
         self.focus = None
         now = self.now()
         rows = self.store.query(
-            "SELECT unit_id FROM rr_review_cells WHERE target_key = ? AND agent_key = ? AND run_id = ? AND state = 'pending'"
-            " AND (not_before IS NULL OR not_before <= ?) ORDER BY unit_seq ASC, unit_id ASC",
+            "SELECT unit_id FROM rr_review_cells c WHERE target_key = ? AND agent_key = ? AND run_id = ? AND state = 'pending'"
+            f" AND (not_before IS NULL OR not_before <= ?){unit_live.READY_SQL} ORDER BY unit_seq ASC, unit_id ASC",
             (self.target_key, self.agent, self.job_id, now))
         active = {u["unit_id"] for u in units.load_units(self.store, self.target_key)}
         cells: list[_Cell] = []
@@ -1153,8 +1156,10 @@ class _Session:
             if unit_id not in active:
                 continue
             payload = self._payload(unit_id)
+            live = unit_live.lines_for(self.store, self.target_key, unit_id)
             digest = review_cells.cell_input_hash(unit_hash=payload.get("unit_hash"), evidence_sha=payload.get("evidence_sha"),
-                                                  pack_hash=self.pack.pack_key, prompt_rev=pkey, limits_rev=lkey)
+                                                  pack_hash=self.pack.pack_key, prompt_rev=pkey, limits_rev=lkey,
+                                                  live_sha=(live or {}).get("sha"))
             started = review_cells.start_cell(self.store, self.target_key, unit_id, self.agent, lease_owner=self.lease,
                                               input_hash=digest, pack_hash=self.pack.pack_key, prompt_rev=pkey,
                                               verify_rev=review_verify.VERIFY_REV, now=now)
@@ -1991,6 +1996,8 @@ class ReviewLoop:
         self._limits: dict[str, _Probe] = {}            # 자격(이메일)마다 — 다른 사람의 자격으로 물은 답을 쓰지 않는다(R3A-3)
         self._health = _Probe()
         self._fallback_since: dict[str, int] = {}
+        # 근거 꾸러미 실호출의 게이트웨이 전송 — 시험이 httpx.MockTransport 를 꽂는 자리(None 이면 실제 네트워크).
+        self.live_transport: Any = None
 
     # -- 바탕 ------------------------------------------------------------------------------
     def ready(self) -> bool:
@@ -2373,7 +2380,8 @@ class ReviewLoop:
             " AND e.pack_status IN ('todo', 'error') AND EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key ="
             " e.target_key AND c.agent_key = e.agent_key AND c.run_id = e.run_id AND c.state = 'pending') LIMIT 1",
             (job["target_key"], job["id"]))
-        phase = "pack" if needs_pack is not None else "review"
+        phase = ("live" if unit_live.pending(self.store, str(job["target_key"])) else
+                 "pack" if needs_pack is not None else "review")
         progress = self.progress(job["id"])
         if progress.body.get("phase") != phase:
             progress.set(phase=phase, count=True)
@@ -2389,6 +2397,19 @@ class ReviewLoop:
         cap = min(conc, int(limit)) if isinstance(limit, int) and not isinstance(limit, bool) and limit >= 0 else conc
         free = cap - len(self.workers())
         started = 0
+        # 근거 꾸러미 실호출(B 층 — C3-12)이 먼저다 — 대상마다 워커 하나(같은 대상의 잡이 둘이어도). 잡 전체를 live 로 묶지 않는다
+        # (C3-11 과 같은 까닭) — 언 단위의 셀은 그 사이에도 돈다(셀 문은 unit_live.READY_SQL).
+        for job, _phase in sorted(active, key=lambda item: self._served.get(item[0]["id"], -1)):
+            if free <= 0 or self.stop.is_set():
+                break
+            target_key = str(job["target_key"])
+            if ((job.get("hold_code") and self.workers(job["id"]))
+                    or any(w.purpose == "live" and w.agent_key == target_key for w in self.workers())):
+                continue
+            if unit_live.pending(self.store, target_key, now=now, due_only=True):
+                self._start_live(job)
+                free -= 1
+                started += 1
         while free > 0 and not self.stop.is_set():
             order = sorted(active, key=lambda item: (len(self.workers(item[0]["id"])), self._served.get(item[0]["id"], -1)))
             picked = None
@@ -2414,6 +2435,40 @@ class ReviewLoop:
             free -= 1
             started += 1
         return started
+
+    def _start_live(self, job: Mapping[str, Any]) -> None:
+        target_key = str(job["target_key"])
+        thread = threading.Thread(target=self._work_live, args=(dict(job),), name=f"review-live-{target_key[:12]}", daemon=True)
+        with self._lock:
+            # 근거 꾸러미 워커는 전문가가 아니라 대상을 쥔다 — agent_key 자리에 대상 열쇠를 둔다(대상마다 하나를 가리는 열쇠).
+            self._workers.append(_Worker(thread=thread, job_id=str(job["id"]), agent_key=target_key, purpose="live"))
+        thread.start()
+
+    def _work_live(self, job: dict) -> None:
+        """대상 하나의 근거 꾸러미 실호출(B 층)을 얼린다 — 자격은 그 잡의 사용자 PAT 하나다(남은 수명이 ensure 기한 + 600초 밑이면
+        쓰지 않는다 — W2-04 (d)). 자격이 없거나 게이트웨이가 401 이면 잡을 credential 로 멈춘다(서비스 계정으로 내려가지 않는다)."""
+        target_key, job_id = str(job["target_key"]), str(job["id"])
+        email = _credential_email(job) or ""
+        try:
+            row = self.store.get_credential(email) if email else None
+            pat = identity.credential_pat(row) if row else None
+            if not pat or int((row or {}).get("pat_exp") or 0) <= self.clock() + unit_live.ENSURE_DEADLINE_S + 600:
+                raise unit_live.CredentialRejected(f"{email or '(사람 없음)'} 의 포털 PAT 가 없거나 남은 수명이 근거 꾸러미 실호출"
+                                                   f" 여유 {unit_live.ENSURE_DEADLINE_S + 600}초에 못 미친다")
+            client = http_client(transport=self.live_transport) if self.live_transport is not None else None
+            try:
+                out = unit_live.ensure(self.store, self.settings, target_key, {"kind": "user", "email": email, "pat": pat},
+                                       http_client=client, now=self.clock())
+            finally:
+                if client is not None:
+                    client.close()
+            if out["frozen"] or out["retry"]:
+                log.info("검토 잡 %s: 근거 꾸러미 실호출 — 얼림 %s · 다시 %s · 호출 %s(재사용 %s)", job_id, out["frozen"],
+                         out["retry"], out["calls"], out["cached"])
+        except unit_live.CredentialRejected as exc:
+            self.hold(job_id, "credential", f"근거 꾸러미 실호출({target_key}): {exc} — {CREDENTIAL_FIX}")
+        except Exception:  # noqa: BLE001 — 근거 꾸러미 결함이 루프를 죽이지 않는다. 행은 아직(NULL)이라 다음 틱이 다시 한다.
+            log.exception("근거 꾸러미 실호출 실패(job=%s, target=%s)", job_id, target_key)
 
     def _start_worker(self, job: Mapping[str, Any], head: Mapping[str, Any], purpose: str) -> None:
         thread = threading.Thread(target=self._work, args=(dict(job), dict(head), purpose),

@@ -220,6 +220,32 @@ class McpHttpClient:
             return {"ok": False, "error": "tool_error", "detail": self._unwrap(result)}
         return {"ok": True, "result": self._unwrap(result)}
 
+    def list_tools(self, *, deadline: float | None = None) -> dict:
+        """도구 목록(tools/list — 이름 · inputSchema). 성공 {'ok': True, 'result': [도구…]}(nextCursor 쪽을 끝까지 잇는다), 실패는
+        call 과 같은 {'ok': False, 'error': …}. 근거 꾸러미 B 층이 인자 키를 스키마와 대조한다(W2-03 (c))."""
+        tools: list = []
+        cursor: str | None = None
+        try:
+            handshake = self._handshake(deadline)
+            if not handshake["ok"]:
+                return handshake
+            for _ in range(100):
+                params = {"cursor": cursor} if cursor else {}
+                reply = self._post({"jsonrpc": "2.0", "id": self._rpc_id(), "method": "tools/list", "params": params},
+                                   deadline)
+                if not reply["ok"]:
+                    return reply
+                result = reply["result"] if isinstance(reply["result"], Mapping) else {}
+                tools.extend(t for t in result.get("tools") or () if isinstance(t, Mapping))
+                cursor = result.get("nextCursor") or None
+                if not cursor:
+                    break
+        except _DeadlineExceeded as exc:
+            return {"ok": False, "error": DEADLINE_EXCEEDED, "detail": str(exc)}
+        except httpx.HTTPError as exc:
+            return {"ok": False, "error": "transport_error", "detail": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, "result": tools}
+
     def close(self) -> None:
         if self._owns_client and self._client is not None:
             self._client.close()

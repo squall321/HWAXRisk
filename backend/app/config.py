@@ -186,6 +186,9 @@ REVIEW_KNOBS: tuple[Knob, ...] = (
     # '걸림 없음 → 걸림' 이 5% 를 넘은 대상에서 걸림 없는 묶음을 rev 하는 몫(%)이다 — 0 이면 켜지지 않는다(#32).
     Knob("HWAXRISK_REVIEW_DUAL", "risk_review_dual", "flagged", "choice", choices=("flagged", "all")),
     Knob("HWAXRISK_REVIEW_DUAL_NEG_PCT", "risk_review_dual_neg_pct", 10),
+    # 근거 꾸러미 실호출(B 층, 재설계 M3 C3-12) — 캡처에 없던 지금 상태(해석 보고서 비교 · 재질 물성 비교)를 사용자 PAT 로 불러
+    # 단위마다 한 번 얼린다. 0 이면 전 단위 none 이고 호출 0 이다.
+    Knob("HWAXRISK_EVIDENCE_LIVE", "risk_evidence_live", True, "bool"),
 )
 # 포털 PAT 자동 등록의 손잡이(리스크 앱 사람 자격 R1 — 전부 선택). 갱신 문턱은 남은 수명이 이 밑이면 '지금 다시 받아야 한다'(due
 # expiring)는 뜻이고 패널 자격 여유(credential_margin_s)보다 커야 한다(main.check_credential_chain) — 아니면 자동 등록이 '아직
@@ -304,6 +307,7 @@ class Settings:
     risk_filter_audit_pct: int = 5
     risk_review_dual: str = "flagged"
     risk_review_dual_neg_pct: int = 10
+    risk_evidence_live: bool = True
     risk_pat_renew_before_s: int = DEFAULT_PAT_RENEW_BEFORE_S
     risk_pat_auto_retry_s: int = DEFAULT_PAT_AUTO_RETRY_S
     risk_issue_panel_cap: int = 24

@@ -1923,8 +1923,8 @@ def review_scope(store, target_key: str, agent_key: str, review_id: str, pack: A
 
     - `pack` — `cardpack.FrozenPack`(그 전문가의 얼린 묶음), 팩 dict, record_id → 카드 dict, 또는 None(카드 0장 — 그때 card:
       인용은 전부 not_in_pack 이다. 묶음이 없는 전문가가 낸 카드 인용은 지어낸 것이다).
-    - `call_ids` = 그 타깃 스냅샷들의 `rr_snapshot_calls.call_id` ∪ 그 단위들의 근거 꾸러미 호출 id(P-07 — 코드가 조회해 실어
-      준 근거를 짚은 finding 이 dangling 이 되지 않게). `_panel_scope` 의 call_ids 는 M2 에서 건드리지 않는다(패널 경로 불변).
+    - `call_ids` = 그 타깃 스냅샷들의 `rr_snapshot_calls.call_id` ∪ 그 단위들의 근거 꾸러미 호출 id ∪ 얼린 실호출(B 층)이 받은 호출
+      id(P-07 — 코드가 조회해 실어 준 근거를 짚은 finding 이 dangling 이 되지 않게). `_panel_scope` 의 call_ids 는 M2 에서 건드리지 않는다(패널 경로 불변).
     - `number_corpus` — finding 하나의 수치 대조 말뭉치(인용한 카드 글 + 인용한 줄 글). 승격이 finding 마다
       `dataclasses.replace(ctx, number_corpus=…)` 로 바꿔 넣는다.
     """
@@ -1936,6 +1936,9 @@ def review_scope(store, target_key: str, agent_key: str, review_id: str, pack: A
         call_ids.update(str(r["call_id"]) for r in store.query(
             f"SELECT call_id FROM rr_snapshot_calls WHERE snapshot_id IN ({marks})", tuple(snapshot_ids)))
     call_ids |= _evidence_call_ids(store, target_key)
+    from app import unit_live  # noqa: PLC0415 — unit_live 가 units 를 거쳐 무거운 import 를 끈다.
+
+    call_ids |= unit_live.call_ids(store, target_key)          # 근거 꾸러미 실호출(B 층 b-… — 재설계 M3 C3-12)
     if pack is None:
         card_pack: Mapping[str, Any] = {}
     elif isinstance(pack, cardpack.FrozenPack):

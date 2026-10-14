@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from app import cardpack, config, engine_client, review_verify, routes, taxonomy, units
+from app import cardpack, config, engine_client, review_verify, routes, taxonomy, unit_live, units
 from tests import factories
 from tests.conftest import FIXTURES_DIR, REPO_ROOT
 from tests.synth import fake_review_engine as fre
@@ -127,6 +127,22 @@ def _bodies(store, target_key: str) -> dict[str, dict]:
     bodies["sim-syn-0/offcard.role_only"] = engine_client.run_body(
         "offcard", target_key=target_key, pack=empty,
         unit=units.review_payload(store, target_key, reviewable[0]["unit_id"], "sim-syn-0"))
+    # 근거 꾸러미 실호출(B 층 — C3-12)이 붙은 단위 — 가짜 게이트웨이 앞에서 실제 ensure 가 얼린 줄(tool:b-…)이 unit.evidence 끝에 선다
+    from tests.test_unit_live import Gateway
+
+    unit_live.seed(store, target_key, enabled=True)
+    client = Gateway().client()
+    try:
+        unit_live.ensure(store, None, target_key, {"kind": "user", "email": factories.OWNER, "pat": "pat-contract"},
+                         http_client=client)
+    finally:
+        client.close()
+    live = next(u["unit_id"] for u in reviewable if (unit_live.lines_for(store, target_key, u["unit_id"]) or {}).get("lines"))
+    frozen = cardpack.view_of({**pack, "agent_key": "mech-syn-0"})
+    bodies["mech-syn-0/verdict.fwd.live"] = engine_client.run_body(
+        "verdict", target_key=target_key, pack=frozen, variant="fwd", cards=list(frozen.checkable)[:8],
+        unit=units.review_payload(store, target_key, live, "mech-syn-0"),
+        expect={"prompt_rev": limits["prompt_rev"]["verdict"], "limits_rev_kind": limits["limits_rev_by_kind"]["verdict"]})
     return bodies
 
 
@@ -143,6 +159,7 @@ def test_run_bodies_built_from_real_units_and_packs_pass_the_engines_validator(c
     assert pcb["extra"]["domains"][0] == {"key": "xd", "label": "XD(외관·조립 설계)"}
     assert len(pcb["extra"]["domains"]) == len(config.settings.risk_roster_domains) == 15
     assert pcb["extra"]["known"] == [] and len(pcb["extra"]["mechanisms"]) == 52        # 택소노미 1.2(재설계 M3 D-34)
+    assert bodies["mech-syn-0/verdict.fwd.live"]["unit"]["evidence"][-1]["ref"].startswith("tool:b-")
     # 대조군 — 엔진 자신의 요청 예제는 지나고, 안쪽 칸 이름이 틀린 것은 걸린다(검증기가 헛돌지 않는다).
     control = fre.load("req_verdict_fwd.json")
     bodies["_control_ok"] = control

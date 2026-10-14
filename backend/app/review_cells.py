@@ -16,7 +16,7 @@ from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
-from app import planner, review_ops, review_verify, runner, units
+from app import planner, review_ops, review_verify, runner, unit_live, units
 from app.common import canonical_json, new_uuid, now_epoch, sha256_hex
 from app.errors import AppError
 
@@ -135,11 +135,15 @@ def review_id_of(target_key: str, agent_key: str) -> str:
 
 
 def cell_input_hash(*, unit_hash: str | None, evidence_sha: str | None, pack_hash: str | None,
-                    prompt_rev: str | None, limits_rev: str | None) -> str:
+                    prompt_rev: str | None, limits_rev: str | None, live_sha: str | None = None) -> str:
     """셀 입력의 지문 — `unit_hash | evidence_sha | pack_hash | prompt_rev | limits_rev`(M2.md 4.6.1). 하나라도 바뀌면 그 셀은
-    처음부터 돈다(start_cell)."""
+    처음부터 돈다(start_cell). 근거 꾸러미 실호출(B 층)의 `live_sha` 는 값이 있을 때만 끝에 붙는다(재설계 M3 C3-12) — 없으면 M2 식
+    그대로라 B 층 이전 원장의 셀 지문이 바뀌지 않는다."""
     parts = (unit_hash, evidence_sha, pack_hash, prompt_rev, limits_rev)
-    return sha256_hex("|".join("" if p is None else str(p) for p in parts))[:16]
+    text = "|".join("" if p is None else str(p) for p in parts)
+    if live_sha is not None:
+        text += f"|live:{live_sha}"
+    return sha256_hex(text)[:16]
 
 
 def _cell_where() -> str:
@@ -324,7 +328,8 @@ def claim_next_expert(store: Any, job: Mapping[str, Any] | None = None, *, boot_
     lease = f"{boot_id}:{new_uuid()}"
     pack_cond = ("e.pack_status IN ('todo', 'error')" if purpose == "pack" else
                  f"e.pack_status IN ({FINALIZE_PACK_SQL})" if purpose == "finalize" else "e.pack_status IN ('ok', 'empty')")
-    cell_cond = " AND (c.not_before IS NULL OR c.not_before <= ?)" if purpose == "review" else ""
+    # 검토는 근거 꾸러미 실호출(B 층)이 언 단위의 셀만 집는다(unit_live.READY_SQL — 행이 없는 단위는 B 층 이전 원장이다).
+    cell_cond = " AND (c.not_before IS NULL OR c.not_before <= ?)" + unit_live.READY_SQL if purpose == "review" else ""
     cells_cond = (" AND EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key = e.target_key AND c.agent_key = e.agent_key"
                   f" AND c.run_id = e.run_id AND c.state = 'pending'{cell_cond})")
     if purpose == "finalize":

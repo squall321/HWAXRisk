@@ -43,8 +43,9 @@ def _load(name: str) -> dict:
 @pytest.fixture
 def store(risk_store, monkeypatch, tmp_path):
     monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    # 근거 꾸러미 실호출(B 층 — C3-12)은 끈다 — 원장 시험은 M2 셀 문(행 none)으로 돈다. B 층의 셀 문은 test_unit_live 가 본다.
     monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, data_dir=tmp_path,
-                                                               risk_review_enabled=True))
+                                                               risk_review_enabled=True, risk_evidence_live=False))
     cardpack.clear_cache()
     return risk_store
 

@@ -2310,16 +2310,34 @@ def review_payload(store, target_key: str, unit_id: str, agent_key: str) -> dict
         raise AppError("agent_not_in_roster", f"이 대상의 로스터에 없는 전문가입니다 — {agent_key}.", 404)
     build = active_build(store, target_key) or latest_build(store, target_key)
     payload = payload_of(_unit_of(row), _evidence_of(row))
+    _with_live(payload, store, target_key, unit_id)
     payload["missing"] = gap_missing(_target_missing(store, target_key, (build or {}).get("blocked_by")), order["input_gaps"],
                                      order["domain"])
     payload["input_gaps"] = list(order["input_gaps"])
     return payload
 
 
+def _with_live(payload: dict, store, target_key: str, unit_id: str) -> None:
+    """근거 꾸러미 실호출(B 층 — 재설계 M3 C3-12)을 동결 근거 줄 뒤에 붙인다 — 줄(`tool:b-…`)과 notes 의 '지금 상태' 머리 · 못 받은
+    호출. 얼린 B 층이 없으면(행이 없거나 아직 · 빈 줄) 본문은 M2 그대로다. 칸은 더하지 않는다 — 엔진의 단위 모양(RunUnit)은 모르는
+    칸을 422 unknown_fields 로 거절한다. 셀 지문의 live_sha 는 러너가 `unit_live.lines_for` 에서 읽는다."""
+    from . import unit_live  # noqa: PLC0415 — unit_live 가 units 를 읽는다(순환 import 회피).
+
+    live = unit_live.lines_for(store, target_key, unit_id)
+    if not live:
+        return
+    payload["evidence"] = [*payload["evidence"], *({"ref": r["ref"], "text": r["text"]} for r in live["lines"])]
+    extra = unit_live.notes_of(live)
+    if extra:
+        payload["notes"] = " ".join(x for x in (payload["notes"], extra) if x)
+
+
 def unit_refs(store, target_key: str, unit_id: str) -> set[str]:
-    """그 단위에서 판정이 인용할 수 있는 참조(`refs_of` — 소유 줄 + 동결 근거 줄, 문맥 줄은 뺀다). Q8 의 기준이다."""
+    """그 단위에서 판정이 인용할 수 있는 참조(`refs_of` — 소유 줄 + 동결 근거 줄 + 실호출 근거 줄, 문맥 줄은 뺀다). Q8 의 기준이다."""
+    from . import unit_live  # noqa: PLC0415 — 순환 import 회피.
+
     row = _row_of(store, target_key, unit_id)
-    return refs_of(_unit_of(row), _evidence_of(row))
+    return refs_of(_unit_of(row), _evidence_of(row)) | unit_live.refs_of(store, target_key, unit_id)
 
 
 def ref_index(store, target_key: str) -> dict[str, str]:

@@ -41,10 +41,11 @@ def configure(monkeypatch, store, tmp_path, **overrides: Any) -> None:
     """설정(데이터 디렉터리·새 흐름 스위치·단위 크기·검토 손잡이)과 라우트 저장소. secrets.env 에는 서비스 PAT 를 둔다.
 
     이중 판정은 M2 동작(`all` — 묶음 전체 rev)이 기본이다 — 호출 차례·수를 세는 M2 시험이 그 위에 서 있다. 걸린 것만 이중
-    판정(운영 기본 `flagged`, 재설계 M3 C3-9)은 그것을 보는 시험이 `risk_review_dual='flagged'` 로 켠다."""
+    판정(운영 기본 `flagged`, 재설계 M3 C3-9)은 그것을 보는 시험이 `risk_review_dual='flagged'` 로 켠다. 근거 꾸러미 실호출(B 층,
+    운영 기본 켬 — C3-12)도 M2 처럼 끈다(전 단위 none · 호출 0) — 그것을 보는 시험이 `risk_evidence_live=True` 와 가짜 게이트웨이로 켠다."""
     monkeypatch.setattr(routes, "get_store", lambda: store)
     values = {"data_dir": tmp_path, "risk_review_enabled": True, "risk_review_concurrency": 4, "risk_review_dual": "all",
-              **CAPS, **overrides}
+              "risk_evidence_live": False, **CAPS, **overrides}
     monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, **values))
     secrets = tmp_path / "secrets.env"
     secrets.write_text(f"HWAXRISK_PORTAL_PAT={SERVICE_PAT}\n", encoding="utf-8")

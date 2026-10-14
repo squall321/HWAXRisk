@@ -303,6 +303,7 @@ REVIEW_DEFAULTS = {
     # 재설계 M3.md 4.5 의 거르기 손잡이(C3-6)
     "HWAXRISK_REVIEW_FILTER": "on", "HWAXRISK_FILTER_AUDIT_PCT": 5,
     "HWAXRISK_REVIEW_DUAL": "flagged", "HWAXRISK_REVIEW_DUAL_NEG_PCT": 10,     # 이중 판정(C3-9 — M3.md 4.5, #32)
+    "HWAXRISK_EVIDENCE_LIVE": True,                                             # 근거 꾸러미 실호출(C3-12 — M3.md 4.5)
 }
 
 
