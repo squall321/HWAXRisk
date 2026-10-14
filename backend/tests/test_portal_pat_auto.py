@@ -136,7 +136,7 @@ def test_put_records_the_source_and_clears_the_last_auto_error(client, box):
 def test_a_delegated_mint_asks_for_a_pat_only_when_one_is_due(client, box):
     out = _mint(client, GW)
     assert out["portal_pat_wanted"] == {"name": "hwax-risk", "audiences": ["mcp-gateway", "step-forge"], "scopes": ["read"],
-                                        "ttl_days": 90}
+                                        "ttl_days": 90, "min_remaining_s": routes.PAT_MIN_REMAINING_S, "reason": "absent"}
     assert set(out) == {"access_token", "token_type", "expires_in", "portal_pat_wanted"}
     _register(exp_in=config.pat_renew_before_s() + 3600)            # 갱신 문턱보다 넉넉하다 — 바라지 않는다
     assert "portal_pat_wanted" not in _mint(client, GW)
@@ -418,3 +418,27 @@ def test_a_success_clears_the_error_kind(client, box):
     assert (prefs["auto_error"], prefs["auto_error_kind"], prefs["auto_error_at"]) == (None, None, None)
     with pytest.raises(ValueError):
         get_store().note_portal_pat_error(EMAIL, "x", kind="maybe")
+
+
+# ---------------------------------------------------------------- 바라는 PAT 의 남은 수명(BEH-4)
+@pytest.mark.parametrize("case", ["absent", "revoked", "undecryptable"])
+def test_wanted_says_why_and_asks_for_at_least_a_day(box, case):
+    if case != "absent":
+        _register(exp_in=60 * 86400)
+        column, value = ("revoked_at", 1) if case == "revoked" else ("portal_pat_enc", b"garbage")
+        get_store().execute(f"UPDATE _user_credentials SET {column} = ? WHERE owner_sub = ?", (value, EMAIL))
+    wanted = routes.portal_pat_wanted(get_store(), EMAIL)
+    assert (wanted["reason"], wanted["min_remaining_s"]) == (case, routes.PAT_MIN_REMAINING_S)
+
+
+@pytest.mark.parametrize("days_left", [5.0, 0.5, -2.0], ids=["five_days", "half_day", "expired"])
+def test_a_renewal_asks_for_a_pat_that_outlives_the_current_one_by_a_day(box, days_left):
+    """갱신이면 지금 PAT 보다 하루 더 살아야 한다 — 원 PAT 가 곧 끝나면 포털이 더 오래 살지 못하는 자식을 내지 않고 source_expiring
+    으로 거절한다(갈아 끼워도 곧 다시 expiring 이다). 이미 끝난 PAT 면 하한(하루)이다."""
+    _register(exp_in=int(days_left * 86400))
+    now = now_epoch()
+    left = get_store().get_credential(EMAIL)["pat_exp"] - now
+    wanted = routes.portal_pat_wanted(get_store(), EMAIL, now=now)
+    assert wanted["reason"] == "expiring"
+    assert wanted["min_remaining_s"] == max(routes.PAT_MIN_REMAINING_S, left + routes.PAT_MIN_REMAINING_S)
+    assert wanted["min_remaining_s"] > left

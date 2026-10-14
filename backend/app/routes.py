@@ -150,6 +150,11 @@ def portal_pat_wanted(store: Any, email: str, *, now: int | None = None) -> dict
     """위임 단언 발급에 실을 `portal_pat_wanted` — 자동이 켜져 있고, 지금 받아야 하고(due), 마지막 자동 실패가 쉼
     (HWAXRISK_PAT_AUTO_RETRY_S)보다 오래됐을 때만. 아니면 None.
 
+    꼴은 `{name, audiences, scopes, ttl_days, min_remaining_s, reason}` 이다. `reason` 은 due_reason 이고 늘 있다.
+    `min_remaining_s` 는 새 PAT 이 적어도 살아야 할 초다 — 포털은 못 미치면 내지 않고 400 source_expiring 으로 거절한다. 보통은
+    PAT_MIN_REMAINING_S(등록 하한)이고, 갱신(expiring)이면 지금 PAT 보다 하루 더(`max(하한, 남은 수명 + 하한)`)다 — 원 PAT 가 곧
+    끝나면 더 오래 살지 못하는 자식을 받아 갈아 끼우는 일을 포털이 막는다.
+
     갱신(expiring)은 마지막 자동 등록도 쉼보다 오래됐을 때만 바란다 — 원 PAT 의 남은 수명이 문턱보다 짧으면 교환 PAT 도 그만큼이라
     (만료 ≤ 원) 등록해도 곧바로 다시 expiring 이 된다. 그때 단언을 받을 때마다 교환을 걸지 않게 한다.
     """
@@ -157,7 +162,8 @@ def portal_pat_wanted(store: Any, email: str, *, now: int | None = None) -> dict
     prefs = store.get_user_prefs(email)
     if not prefs["portal_pat_auto"]:
         return None
-    reason = pat_due_reason(store.get_credential(email), now=now)
+    row = store.get_credential(email)
+    reason = pat_due_reason(row, now=now)
     if reason is None:
         return None
     retry = config.pat_auto_retry_s()
@@ -168,7 +174,12 @@ def portal_pat_wanted(store: Any, email: str, *, now: int | None = None) -> dict
             return None
     if reason == "expiring" and prefs["auto_at"] and now - int(prefs["auto_at"]) < retry:
         return None
-    return json.loads(json.dumps(PORTAL_PAT_WANTED))         # 사본 — 호출자가 고쳐도 상수가 바뀌지 않게
+    wanted = json.loads(json.dumps(PORTAL_PAT_WANTED))       # 사본 — 호출자가 고쳐도 상수가 바뀌지 않게
+    minimum = PAT_MIN_REMAINING_S
+    if reason == "expiring":
+        minimum = max(PAT_MIN_REMAINING_S, int(row.get("pat_exp") or 0) - now + PAT_MIN_REMAINING_S)
+    wanted.update(min_remaining_s=int(minimum), reason=reason)
+    return wanted
 
 
 def _pat_summary(row: dict | None) -> dict | None:
