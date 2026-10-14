@@ -160,6 +160,22 @@ def test_off_card_rows_become_findings_and_an_unclassified_text_is_queued_once_p
     assert nightly.scan_unclassified(store, now=common.now_epoch()) == {"n_unclassified": 0, "queued": 0}
 
 
+def test_an_untitled_off_card_row_is_kept_with_a_fallback_title_and_becomes_a_finding(store):
+    """반대 검토 2차 HIGH 1(a) · D-46 — 엔진의 _check_f 는 제목을 묻지 않는다(RB-1 이 제목 없는 f 줄을 다룬다). 앱이 제목 없는 카드 밖
+    f 줄을 버려(no_title) 카드 밖 걸림이 결과에서 사라졌다 — 셀은 reviewed · n_offcard 0 · finding 0, 흔적은 호출 원장의 dropped
+    뿐이었다. 경로로 제목을 대신하고 title_fallback 표지를 단다(q1 과 같은 규칙)."""
+    key, _job, _fake = _run(store, scope={"agents": [rig.ZERO_CARDS]}, offcard=1, offcard_title="")
+    cells = [dict(r) for r in store.query("SELECT n_offcard, extras_json FROM rr_review_cells WHERE target_key = ?"
+                                          " AND agent_key = ?", (key, rig.ZERO_CARDS))]
+    assert cells and all(c["n_offcard"] == 1 for c in cells)
+    row = json.loads(cells[0]["extras_json"])["offcard"]["findings"][0]
+    assert (row["title"], row.get("title_fallback")) == ("변경 줄의 계면", True)
+    assert len(_findings(store, key, rig.ZERO_CARDS)) == len(_unit_ids(store, key))
+    dropped = [json.loads(r["quality_json"])["app"]["dropped"] for r in store.query(
+        "SELECT quality_json FROM rr_review_calls WHERE target_key = ? AND kind = 'offcard' AND state = 'ok'", (key,))]
+    assert dropped and all("no_title" not in d for d in dropped)
+
+
 # ---------------------------------------------------------------- 의견 행 · 원장
 def test_the_opinion_row_is_a_complete_seat_opinion_in_the_review_band_and_closes_the_cells_ledger(store):
     """의견 행은 seat_opinion.v1 을 통과하고(필수 칸 전부) 패널 자리가 review_id, 회차가 501 이다. 걸림이 있으면 conditional,

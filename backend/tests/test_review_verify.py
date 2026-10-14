@@ -360,9 +360,10 @@ def test_noinput_rows_are_accepted_whole_from_the_engine_example():
 
 
 def test_noinput_accounting_drops_what_cannot_be_trusted():
-    """실리지 않은 카드를 댄 줄(alias_outside_call) · 남의 단위를 가리키는 참조(foreign_ref — Q8) · 열거 밖 impact(bad_enum)는 버린다.
-    제목 없는 영향 줄은 버리지 않고 경로로 제목을 대신한다(title_fallback — 반대 검토 HIGH 1, 엔진은 그 줄을 받는다). 지어낸 인용은
-    앱 재대조가 0 으로 가른다. 줄 종류가 빠지면 missing 이다."""
+    """실리지 않은 카드를 댄 줄(alias_outside_call) · 열거 밖 impact(bad_enum)는 버린다. 그 단위 소속 줄 밖을 댄 참조(엔진이 L 별칭을
+    준 문맥 줄)는 버리지 않고 refs_ok 0 · ref_context 로 표시한다(반대 검토 2차 HIGH 1 · D-46 — 종전 foreign_ref 로 버렸다). 제목 없는
+    영향 줄은 버리지 않고 경로로 제목을 대신한다(title_fallback — 반대 검토 HIGH 1, 엔진은 그 줄을 받는다). 지어낸 인용은 앱 재대조가
+    0 으로 가른다. 줄 종류가 빠지면 missing 이다."""
     request = _load("req_noinput.json")
     result = copy.deepcopy(_load("result_noinput_ok.json"))
     q1, q1b, q2, q2b, more = result["rows"]
@@ -370,10 +371,12 @@ def test_noinput_accounting_drops_what_cannot_be_trusted():
             {**q1b, "k": "K99"}, {**q1b, "refs": ["c:not-this-unit"]}, {**q1b, "impact": "maybe"},
             {**q1b, "title": ""}, {**q1b, "impact": "no", "title": "", "k": "", "cq": "", "refs": [], "l": []}, more]
     out = _accept({**result, "rows": rows}, request)
-    assert sorted(d["reason"] for d in out["dropped"]) == ["alias_outside_call", "bad_enum", "foreign_ref"]
+    assert sorted(d["reason"] for d in out["dropped"]) == ["alias_outside_call", "bad_enum"]
     kept = out["rows"]
-    assert [(r["impact"], r["quote_ok"]) for r in kept] == [("yes", 0), (q1b["impact"], 1), ("no", None)]
-    untitled = kept[1]
+    assert [(r["impact"], r["quote_ok"]) for r in kept] == [("yes", 0), (q1b["impact"], 1), (q1b["impact"], 1), ("no", None)]
+    outside, untitled = kept[1], kept[2]
+    assert (outside["refs"], outside["refs_ok"], outside.get("ref_context")) == (["c:not-this-unit"], 0, True)
+    assert not any(r.get("ref_context") for r in (kept[0], untitled, kept[3]))
     assert (untitled["title"], untitled.get("title_fallback")) == ((q1b.get("path") or q1b.get("why")).strip(), True)
     assert out["missing"] == ["q2"]
     assert _accept({**result, "rows": [q2, q2b, more]}, request)["missing"] == ["q1"]

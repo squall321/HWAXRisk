@@ -33,6 +33,7 @@
   long_quote       이 별칭들의 인용을 카드에 없는 긴 글(LONG_QUOTE, 260자)로 낸다(엔진 checks.quote 는 정직하게 not_found)
   cond_text        단독 재질의 c 줄의 조건 글(기본 COND — 긴 글로 바꾸면 반출의 조건 글 200자를 본다, S9)
   offcard_src·offcard_quote  카드 밖 f 줄이 근거로 댄 배경 카드 별칭과 그 인용(기본 exp · 빈 인용 — S9 의 카드 근거 카드 밖 줄)
+  offcard_title    주면 카드 밖 f 줄의 제목을 이것으로 낸다(빈 글 — 엔진 _check_f 는 제목을 묻지 않는다, 반대 검토 2차 HIGH 1)
   handoff_to       이 영역으로 넘기는 h 줄을 훑기(첫 단위)와 카드 밖 호출에 하나씩 더한다(S10 의 넘김 절). handoff_unit · handoff_from
                    을 주면(거르기의 훑기 넘김 시험) 카드 밖 호출에는 더하지 않는다 — 카드 밖 h 줄도 넘김으로 세므로(반대 검토 LOW 15)
                    모든 전문가의 카드 밖 넘김이 분류보다 먼저 오느냐가 시험의 흐름을 갈라서다. 카드 밖 넘김은 offcard_handoffs 로
@@ -51,8 +52,10 @@
                    차례로 대고(그 카드 글에서 자른 인용) 변경 줄 하나를 단다, no 줄은 카드·줄 없이 낸다(재설계 M3 C3-3)
   noinput_q2       unit_id → q2 줄의 항목 목록(빈 글 = 확인할 것 없음 — 까닭만, (항목, 필요한 자료) 쌍도 된다). 기본은 예제처럼
                    둘(첫째는 첫 카드를 댄다)
-  noinput_script   unit_id → 호출마다 차례로 쓸 q1 줄 목록([{impact, title?, path?, flipped_from?, contested_by?, k?}, …] — 다 쓰면 마지막 것을 되풀이).
-                   주면 noinput_q1 대신 이것이 그 호출의 q1 이다(같은 제목 · 다른 경로, 제목 없는 영향, 다시 물어 올린 영향)
+  noinput_script   unit_id → 호출마다 차례로 쓸 q1 줄 목록([{impact, title?, path?, flipped_from?, contested_by?, k?, sev?, why?, ctx?}, …]
+                   — 다 쓰면 마지막 것을 되풀이). 주면 noinput_q1 대신 이것이 그 호출의 q1 이다(같은 제목 · 다른 경로, 제목 없는 영향, 다시 물어
+                   올린 영향). ctx 가 참이면 그 줄은 단위 문맥 줄(context)을 댄다(엔진은 문맥 줄에도 L 별칭을 준다 — 반대 검토 2차 HIGH 1)
+  noinput_q2_ctx   이 unit_id 들의 q2 줄은 단위 문맥 줄을 댄다
   noinput_more     unit_id → more=yes 로 답할 횟수(답마다 하나씩 준다 — 그 동안 quality.maybe_more 참). 다시 물으면 q1 제목 번호가
                    받은 extra.known 수 뒤에서 이어진다
   noinput_same_titles  참이면 다시 물어도 q1 제목 번호를 1 부터 다시 매긴다(같은 영향을 되풀이하는 모델 — 앱이 한 번만 남기는지)
@@ -291,6 +294,7 @@ class FakeReviewEngine:
         self.cond_text = COND
         self.offcard_src = "exp"
         self.offcard_quote = ""
+        self.offcard_title: str | None = None
         self.handoff_to: str | None = None
         self.handoff_unit: str | None = None
         self.handoff_from: set[str] | None = None
@@ -311,6 +315,7 @@ class FakeReviewEngine:
         self.noinput_more: dict[str, int] = {}
         self.noinput_same_titles = False
         self.noinput_script: dict[str, list[list[dict[str, Any]]]] = {}
+        self.noinput_q2_ctx: set[str] = set()
         self.sweep_marks: dict[str, dict[str, Any]] = {}
         self.error_cells: dict[tuple[str, str], dict[str, Any]] = {}
         self.error_kinds: set[str] | None = None
@@ -630,7 +635,8 @@ class FakeReviewEngine:
         else:
             cap = int(self.base_limits["offcard"]["findings_max"])
             n = min(int(self.offcard_findings), cap)
-            rows = [{"t": "f", "l": own[:1], "dir": "risk", "title": f"카드 밖 위험 {i}", "mech": "free",
+            rows = [{"t": "f", "l": own[:1], "dir": "risk",
+                     "title": f"카드 밖 위험 {i}" if self.offcard_title is None else self.offcard_title, "mech": "free",
                      "mech_free": "계면 박리", "path": "변경 줄의 계면", "src": self.offcard_src, "q": self.offcard_quote,
                      "sev": "중대", "conf": "medium",
                      "check_kind": "test", "check": "고온 고습 시험으로 박리를 본다",
@@ -756,11 +762,14 @@ class FakeReviewEngine:
         if script:
             with self._lock:
                 spec = script.pop(0) if len(script) > 1 else script[0]
+        context = [a for a, x in lines.items() if x["part"] == "context"][:1]
         for i, impact in enumerate([s["impact"] for s in spec] if spec else self.noinput_q1.get(uid, ["yes", "yes"])):
             alias = order[i % len(order)] if order and impact != "no" else ""
             card = cards.get(alias) if alias else None
             quote, sid = quote_of(card) if card is not None else ("", "")
             cited = list(own[:1]) if impact != "no" else []
+            if spec and spec[i].get("ctx"):
+                cited = list(context)
             mech = (codes[0] if codes else "") if impact == "yes" else ""
             row = {"t": "q1", "l": cited, "impact": impact, "title": f"보드 근접 계면 간극 축소 {base + i + 1}", "mech": mech,
                    "mech_free": "", "path": "보드 고정점 → 근접 계면" if impact == "yes" else "", "k": alias, "cq": quote,
@@ -773,7 +782,8 @@ class FakeReviewEngine:
                 "nums_unsourced": [], "coerced": [],
                 "mech": "no_list" if not codes else "missing" if impact == "yes" and not mech else "ok", "why": "ok"})
             if spec:
-                row.update({k: v for k, v in spec[i].items() if k in ("title", "path", "flipped_from", "contested_by", "k", "cq")})
+                row.update({k: v for k, v in spec[i].items()
+                            if k in ("title", "path", "flipped_from", "contested_by", "k", "cq", "sev", "why")})
             if alias and alias in self.contested:
                 row["contested_by"] = copy.deepcopy(self.contested[alias])
                 row["checks"]["dup_conflict"] = True
@@ -788,9 +798,10 @@ class FakeReviewEngine:
             item, needs = entry if isinstance(entry, tuple) else (entry, "ECAD 배치·스택업" if entry else "")
             alias = order[0] if order and i == 0 and item else ""
             card = cards.get(alias) if alias else None
-            row = {"t": "q2", "l": list(own[:1]), "item": item, "needs": needs, "k": alias,
+            cited = list(context) if uid in self.noinput_q2_ctx else list(own[:1])
+            row = {"t": "q2", "l": cited, "item": item, "needs": needs, "k": alias,
                    "why": "바뀐 보스 위치와 부품 간극을 대조해야 한다" if item else "결측 입력이 와도 이 단위에서 볼 것이 없다",
-                   "refs": [lines[a]["ref"] for a in own[:1]]}
+                   "refs": [lines[a]["ref"] for a in cited]}
             if card is not None:
                 row["record_id"] = str(card.get("record_id") or "")
             row.update(from_attempt=1, checks={"refs": "ok", "why": "ok", "coerced": []})

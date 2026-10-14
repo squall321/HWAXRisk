@@ -1006,6 +1006,7 @@ def _input_gap_section(ledger: Ledger, finding_of: Mapping[tuple[str, str], str]
                 "index": index, "impact": row.get("impact"), "title": row.get("title"), "mech": row.get("mech"),
                 "mech_free": row.get("mech_free"), "path": row.get("path"), "sev": row.get("sev"), "why": row.get("why"),
                 "lines": list(row.get("l") or ()), "refs": list(row.get("refs") or ()), "refs_ok": row.get("refs_ok"),
+                "ref_context": bool(row.get("ref_context")),
                 "record_id": record_id or None, "cq": cq or None, "cq_chars": cq_chars,
                 "quote_ref": (f"card:{record_id}#{section}" if section else f"card:{record_id}") if record_id else None,
                 "quote_ok": row.get("quote_ok"),
@@ -1015,7 +1016,8 @@ def _input_gap_section(ledger: Ledger, finding_of: Mapping[tuple[str, str], str]
                                          .get("flipped_from")),
                 "finding_id": finding_of.get((unit["unit_id"], f"noinput:{index}"))})
         asks = [{"item": row.get("item"), "needs": row.get("needs"), "why": row.get("why"),
-                 "record_id": row.get("record_id"), "lines": list(row.get("l") or ())} for row in got["q2"]]
+                 "record_id": row.get("record_id"), "lines": list(row.get("l") or ()),
+                 "ref_context": bool(row.get("ref_context"))} for row in got["q2"]]
         rows.append({"unit_id": unit["unit_id"], "unit_seq": unit["seq"], "title": unit["title"],
                      "state": cell.get("state"), "outcome": got["outcome"], "asks_n": got["asks"],
                      "impacts": impacts, "requests": asks})
@@ -1574,13 +1576,15 @@ def _quote_mark(state: Any, ok: Any, ref: str) -> str:
     return _QUOTE_STATE_LINE.get(str(state), _q(state)).format(section=f"(절 {section})" if section else "")
 
 
-def _refs_mark(refs: Sequence[Any], refs_ok: Any) -> str:
+def _refs_mark(refs: Sequence[Any], refs_ok: Any, *, context: bool = False) -> str:
     """변경 줄 참조의 대조 표기(R3B-5) — 참조가 있어야 하는 행(applies=yes 판정 · 카드 밖 리스크)이 비어 0 인 것을 '그 단위 밖 참조'
-    와 가른다(review_verify.refs_verdict 는 둘 다 0 이다)."""
+    와 가른다(review_verify.refs_verdict 는 둘 다 0 이다). 입력 결손 줄이 단위의 문맥 줄을 댔으면(`ref_context`) 그렇게 적는다."""
     if refs_ok == 1:
         return "그 단위 소속"
     if not refs:
         return "참조가 필요한 행인데 판정에 쓴 변경 줄을 대지 않았다" if refs_ok == 0 else "참조 없음"
+    if context:
+        return "문맥 줄을 댔다(그 단위 소속 줄이 아니다)"
     return "그 단위 밖 참조가 섞였다"
 
 
@@ -1906,7 +1910,8 @@ def _md_input_gap(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
                 lines.append(f"  - 경로 {_q(x.get('path') or '')} · 이유 {_q(x.get('why') or '')}")
                 lines.append("  - " + (_quote_line("카드 인용", x["quote_ref"], x["cq"], x["cq_chars"], x["quote_ok"], word="cq")
                                        if x.get("record_id") else "근거 경험칙 — 카드 근거 없음"))
-                lines.append(f"  - 변경 줄 {_refs(x['lines'], x['refs']) or '없음'} — {_refs_mark(x['refs'], x.get('refs_ok'))}")
+                lines.append(f"  - 변경 줄 {_refs(x['lines'], x['refs']) or '없음'} — "
+                             f"{_refs_mark(x['refs'], x.get('refs_ok'), context=bool(x.get('ref_context')))}")
             if x.get("contested"):
                 c = x["contested"]
                 # 영향(있음 · 모름) 줄이면 검증된 철회가 다툰 것, 없음 줄이면 같은 카드의 다른 답과 부딪친 것이다(반대 검토 MEDIUM 5)
@@ -1921,8 +1926,9 @@ def _md_input_gap(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
                 lines.append("  - 엔진 보충이 앞 답 " + "·".join(_q(v) for v in f["verdict"]) + " 을 갈아 끼웠다"
                              + (f"(앞 답은 어휘 밖 낱말 {_q(f['raw'])} 을 고친 값)" if f.get("raw") else ""))
         for r in u["requests"]:
-            lines.append(f"- 입력이 오면 확인할 것 {_q(r['item'])} — 필요한 자료 {_q(r.get('needs') or '')}"
-                         if r.get("item") else f"- 입력이 와도 확인할 것 없음 — {_q(r.get('why') or '')}")
+            lines.append((f"- 입력이 오면 확인할 것 {_q(r['item'])} — 필요한 자료 {_q(r.get('needs') or '')}"
+                          if r.get("item") else f"- 입력이 와도 확인할 것 없음 — {_q(r.get('why') or '')}")
+                         + (" · 문맥 줄을 댔다(그 단위 소속 줄이 아니다)" if r.get("ref_context") else ""))
         items.append("\n".join(lines))
     if not rows:
         items.append("- 없음")

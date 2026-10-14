@@ -342,9 +342,11 @@ def _accept_offcard(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping
         t = raw.get("t")
         if t == "f":
             title = _text(raw.get("title")).strip()
-            if not title:
-                _drop(dropped, "no_title", raw)
-                continue
+            untitled = not title
+            if untitled:
+                # 엔진의 _check_f 는 제목을 묻지 않는다(RB-1) — 버리면 카드 밖 걸림이 결과에서 사라진다(반대 검토 2차 HIGH 1 · D-46).
+                # 경로 · 메커니즘 원문으로 제목을 대신하고 표지를 단다(q1 과 같은 규칙).
+                title = _text(raw.get("path")).strip() or _text(raw.get("mech_free")).strip() or "제목 없는 카드 밖 위험"
             checks = raw.get("checks") if isinstance(raw.get("checks"), Mapping) else {}
             src = _text(raw.get("src")) or "exp"
             card = cards.get(src) if src in sent_set else None
@@ -363,7 +365,7 @@ def _accept_offcard(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping
                 "section_id": quote["section_id"],
                 "grade": card_grade(card) if card is not None and quote["quote_ok"] == 1 else None,
                 "refs_ok": refs_verdict(refs, unit_refs, required=True),
-                "checks": dict(checks)})
+                "checks": dict(checks), **({"title_fallback": True} if untitled else {})})
         elif t == "m":
             out["seen"] = sorted(set(out["seen"]) | set(as_list(raw.get("seen"))))
         elif t == "h":
@@ -386,10 +388,11 @@ IMPACTS = APPLIES                   # q1 의 impact — 영향 있음 · 없음 
 
 def _accept_noinput(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping[str, Any]], unit_refs: frozenset,
                     extras: dict) -> dict:
-    """입력 결손 호출의 회계 — 카드(`k`)는 실은 별칭이어야 하고(밖이면 버린다 — `alias_outside_call`), 참조가 남의 단위를 가리키면
-    버린다(`foreign_ref` — Q8). impact 가 열거 밖이면 버리고(`bad_enum`), 영향 있음(yes)인데 제목이 없으면 finding 이 될 수 없어
-    버린다(`no_title`). 카드 인용(`cq`)은 그 카드의 얼린 원문으로 다시 대조한다(`quote_ok` — verdict 와 같은 규칙). 목록 칸은 문자열
-    하나도 한 항목으로 읽는다(D-25)."""
+    """입력 결손 호출의 회계 — 카드(`k`)는 실은 별칭이어야 하고(밖이면 버린다 — `alias_outside_call`), impact 가 열거 밖이면
+    버린다(`bad_enum`). 참조가 그 단위 소속 줄 밖이면(엔진이 L 별칭을 준 문맥 줄) 버리지 않고 refs_ok 0 · `ref_context` 로 표시한다
+    (반대 검토 2차 HIGH 1 · D-46 — D-37 이 옛 계약 글보다 앞선다, 판정 행과 같다). 영향 있음(yes)인데 제목이 없으면 경로 · 이유로
+    제목을 대신하고 `title_fallback` 을 단다. 카드 인용(`cq`)은 그 카드의 얼린 원문으로 다시 대조한다(`quote_ok` — verdict 와 같은
+    규칙). 목록 칸은 문자열 하나도 한 항목으로 읽는다(D-25)."""
     sent_set = set(sent)
     dropped: list[dict] = []
     rows: list[dict] = []
@@ -410,9 +413,7 @@ def _accept_noinput(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping
             _drop(dropped, "alias_outside_call", raw)
             continue
         refs = as_list(raw.get("refs"))
-        if any(ref not in unit_refs for ref in refs):
-            _drop(dropped, "foreign_ref", raw)
-            continue
+        context = any(ref not in unit_refs for ref in refs)
         checks = raw.get("checks") if isinstance(raw.get("checks"), Mapping) else {}
         for mark in ("contested_by", "flipped_from"):
             # 다툼(contested_by — 앞 줄이 선다) · 보충이 앞 답을 갈아 끼움(flipped_from — 고친 값이면 raw). 판정 행처럼 checks 사본에
@@ -421,7 +422,8 @@ def _accept_noinput(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping
                 checks = {**checks, mark: raw[mark]}
         card = cards.get(alias) if alias else None
         base = {"t": t, "k": alias or None, "record_id": str(card["record_id"]) if card is not None else None,
-                "l": as_list(raw.get("l")), "refs": refs, "why": _text(raw.get("why")) or None, "checks": dict(checks)}
+                "l": as_list(raw.get("l")), "refs": refs, "why": _text(raw.get("why")) or None, "checks": dict(checks),
+                **({"ref_context": True} if context else {})}
         if t == "q2":
             rows.append({**base, "item": _text(raw.get("item")).strip(), "needs": _text(raw.get("needs")) or None,
                          "refs_ok": refs_verdict(refs, unit_refs, required=False)})
