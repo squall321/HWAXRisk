@@ -718,6 +718,57 @@ def test_a_failed_revoke_does_not_undo_the_registration(client, box, caplog, rev
     assert "jti-erin-0" in caplog.text and "폐기하지 못했다" in caplog.text and OLD not in caplog.text
 
 
+def _delete(client):
+    r = client.put("/api/me/portal-pat", json={"pat": None}, headers=AUTH)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"registered": False, "email": None, "groups": [], "exp": None}
+
+
+@pytest.mark.parametrize("prev", ["gateway-exchange", "web"])
+def test_deleting_an_app_obtained_pat_revokes_it_at_the_portal(client, box, caplog, prev):
+    """지우기만 하면 자동 등록이 켜진 사람은 지우고 다시 받을 때마다 살아 있는 교환 자식이 하나씩 남고, 다섯이면 포털이
+    too_many_children 으로 거절해 Claude 길이 막힌다(R3-5). 앱이 받아 온 hwax-risk PAT 는 지운 뒤 포털에서도 폐기한다 — 갈아 끼울 때와
+    같은 규칙이고, 로그에는 jti 만 남는다."""
+    _register(OLD)
+    get_store().note_portal_pat_registered(EMAIL, prev)
+    with caplog.at_level(logging.DEBUG):
+        _delete(client)
+    assert _credential_rows() == 0 and box["revoked"] == [f"Bearer {OLD}"]
+    assert "jti-erin-0" in caplog.text and "폐기했다" in caplog.text
+    assert OLD not in caplog.text and OLD.split(".")[1] not in caplog.text
+    # 자동 스위치는 그대로다 — 켜져 있으면 다시 바란다(지운 채 두려면 끈다).
+    assert _mint(client, GW)["portal_pat_wanted"]["reason"] == "absent"
+
+
+@pytest.mark.parametrize("case", ["manual", "unknown_source", "other_name", "revoked", "undecryptable", "nothing"])
+def test_deleting_revokes_only_what_a_replacement_would(client, box, case):
+    """폐기 규칙은 갈아 끼울 때(_superseded_pat)와 같다 — 사람이 붙여 넣은 것(manual)·출처 모름·다른 이름·이미 폐기 표기·풀리지 않는
+    것은 지우기만 하고 포털에 묻지 않는다. 지울 것이 없어도 200 이다."""
+    if case != "nothing":
+        _register(_jwt(jti="jti-erin-0", pat_name="claude") if case == "other_name" else OLD)
+        source = {"manual": "manual", "unknown_source": None}.get(case, "gateway-exchange")
+        if source is not None:
+            get_store().note_portal_pat_registered(EMAIL, source)
+    if case == "revoked":
+        get_store().execute("UPDATE _user_credentials SET revoked_at = 1 WHERE owner_sub = ?", (EMAIL,))
+    if case == "undecryptable":
+        get_store().execute("UPDATE _user_credentials SET portal_pat_enc = ? WHERE owner_sub = ?", (b"garbage", EMAIL))
+    _delete(client)
+    assert _credential_rows() == 0 and box["revoked"] == []
+
+
+@pytest.mark.parametrize("revoke", [500, None], ids=["http_500", "unreachable"])
+def test_a_failed_revoke_on_delete_still_deletes(client, box, caplog, revoke):
+    """폐기는 지운 뒤의 최선 노력이다 — 포털이 거절하거나 닿지 않아도 지운 것은 그대로다."""
+    _register(OLD)
+    get_store().note_portal_pat_registered(EMAIL, "gateway-exchange")
+    box["revoke"] = revoke
+    with caplog.at_level(logging.DEBUG):
+        _delete(client)
+    assert _credential_rows() == 0 and box["revoked"] == [f"Bearer {OLD}"]
+    assert "폐기하지 못했다" in caplog.text and OLD not in caplog.text
+
+
 # ---------------------------------------------------------------- 청중이 모자란 PAT 도 받아야 한다(BEH-1)
 def test_a_pat_without_step_forge_is_due_for_its_audience(client, box):
     """step-forge 가 없으면 위임 캡처의 REST 다리가 닫힌다 — 그것도 '받아야 한다' 의 까닭(audience)이고, 단언은 모자란 청중을

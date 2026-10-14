@@ -362,19 +362,19 @@ def _superseded_pat(row: dict | None, new_jti: str, *, parent: Any = None,
 
 
 def _revoke_superseded_pat(pat: str, jti: str) -> None:
-    """앞선 PAT 를 그 토큰 자신으로 폐기한다 — `POST {portal}/auth/pat/revoke-self`(Bearer 그 PAT). 최선 노력이라 던지지 않고,
-    로그에는 jti 와 결과만 싣는다(토큰·응답 본문은 싣지 않는다)."""
+    """앞선(갈아 끼웠거나 지운) PAT 를 그 토큰 자신으로 폐기한다 — `POST {portal}/auth/pat/revoke-self`(Bearer 그 PAT). 최선 노력이라
+    던지지 않고, 로그에는 jti 와 결과만 싣는다(토큰·응답 본문은 싣지 않는다)."""
     base = config.settings.portal_base.rstrip("/")
     try:
         with http_client(transport=_portal_transport, timeout=PAT_REVOKE_TIMEOUT_S) as client:
             r = client.post(f"{base}/auth/pat/revoke-self", headers={"Authorization": f"Bearer {pat}"})
     except Exception as exc:  # noqa: BLE001 — 폐기 실패가 등록을 되돌리지 않는다
-        log.warning("갈아 끼운 포털 PAT 를 폐기하지 못했다 — jti %s (%s)", jti, type(exc).__name__)
+        log.warning("갈아 끼웠거나 지운 포털 PAT 를 폐기하지 못했다 — jti %s (%s)", jti, type(exc).__name__)
         return
     if r.status_code == 200:
-        log.info("갈아 끼운 포털 PAT 를 폐기했다 — jti %s", jti)
+        log.info("갈아 끼웠거나 지운 포털 PAT 를 폐기했다 — jti %s", jti)
     else:
-        log.warning("갈아 끼운 포털 PAT 를 폐기하지 못했다 — jti %s (HTTP %s)", jti, r.status_code)
+        log.warning("갈아 끼웠거나 지운 포털 PAT 를 폐기하지 못했다 — jti %s (HTTP %s)", jti, r.status_code)
 
 
 def _verify_with_portal(pat: str) -> None:
@@ -569,11 +569,18 @@ def put_portal_pat(body: PortalPatBody, background: BackgroundTasks,
     """사용자 포털 PAT 등록(러너 자격 (b)). null 은 삭제. 검증 순서 — email → aud/scope → exp → 포털 실호출.
 
     `source` 는 web(화면의 자동 등록) · manual(기본 — 사람이 누른 버튼)이고 성공하면 자동 등록 기록(portal_pat.auto)에 남는다.
+    삭제는 지운 PAT 가 앱이 받아 온 hwax-risk PAT 면(갈아 끼울 때와 같은 규칙 — `_superseded_pat`) 응답을 보낸 뒤 포털에서도 폐기한다
+    (R3-5). 지우기만 하면 자동 등록이 켜진 사람은 지우고 다시 받을 때마다 살아 있는 교환 자식이 하나씩 남아, 다섯이면 포털이
+    too_many_children 으로 거절해 Claude 길이 막혔다.
     """
     owner_sub = _require_user(ident)
     store = get_store()
     if body.pat is None:
+        # 지우기 전에 읽는다 — 행과 그 출처가 폐기해도 되는 것(앱이 받아 온 것)인지를 말한다. 폐기는 지운 뒤, 최선 노력이다.
+        stale = _superseded_pat(store.get_credential(owner_sub), "", source=store.get_user_prefs(owner_sub)["auto_source"])
         store.delete_credential(owner_sub)
+        if stale is not None:
+            background.add_task(_revoke_superseded_pat, *stale)
         return {"registered": False, "email": None, "groups": [], "exp": None}
     source = body.source or "manual"
     if source not in PAT_SOURCES:
