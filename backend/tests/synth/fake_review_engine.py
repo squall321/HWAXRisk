@@ -431,7 +431,8 @@ class FakeReviewEngine:
         pair_over = [{"deck_id": d["deck_id"], "unit_id": u["unit_id"], "need": p_hard + 1, "have": p_hard}
                      for u in units if u["unit_id"] in self.pair_over_units and u["unit_id"] not in self.oversize_units
                      for d in verdict_decks]
-        return {"limits_rev": self.limits_rev, "verdict_decks": verdict_decks, "sweep_decks": sweep_decks,
+        return {"limits_rev": self.limits_rev, "limits_rev_by_kind": dict(self.base_limits.get("limits_rev_by_kind") or {}),
+                "verdict_decks": verdict_decks, "sweep_decks": sweep_decks,
                 "manifest_pages": pages,
                 "oversize": {"cards": [], "kinds": {}, "units": [u["unit_id"] for u in units
                                                                   if u["unit_id"] in self.oversize_units],
