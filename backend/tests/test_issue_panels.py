@@ -13,6 +13,7 @@ import pytest
 
 from app import brief, config, issues, registry, routes, runner, units
 from app.common import canonical_json
+from app.errors import AppError
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
 from tests.synth.fake_review_engine import FakeReviewEngine
@@ -86,6 +87,15 @@ def _run_issues(store, cfg, engine, key: str, *, limit: int = 10) -> list[dict]:
     return out
 
 
+def _resubmit(panel_id: str, result: dict) -> dict:
+    """POST /panels/{id}/complete(재제출) — 쟁점 패널은 cells 대상에서도 받는다(거절되면 그 자리에서 시험이 실패한다)."""
+    try:
+        return routes.complete_panel(panel_id, engine="web", decision_text=result["decision_text"], turns=result["turns"],
+                                     owner_sub=OWNER)
+    except AppError as exc:
+        pytest.fail(f"쟁점 패널 재제출이 거절됐다 — {exc.code}: {exc.message}")
+
+
 def _coverage_hash(store) -> str:
     rows = [dict(r) for r in store.query("SELECT * FROM rr_coverage ORDER BY target_key, agent_key")]
     return hashlib.sha256(canonical_json(rows).encode()).hexdigest()
@@ -126,7 +136,7 @@ def test_an_issue_panel_runs_off_the_ledger_and_upholds_the_anchor_without_touch
     assert (done["state"], done["outcome"]) == ("resolved", "upheld")
     row = _row(store, key, anchor)
     assert (row["judgement"], row["issue_state"], row["issue_id"]) == ("FAIL", "upheld", issue["issue_id"])
-    assert row["merged"]["before_issue"]["judgement"] == "WARNING"
+    assert (row["merged"].get("before_issue") or {}).get("judgement") == "WARNING"
     assert results[-1]["status"] == "no_panel" and results[-1]["job_state"] == "completed"
 
 
@@ -192,7 +202,7 @@ def test_coverage_panels_carry_the_app_mark_too(store, tmp_path, monkeypatch):
                                (panel["id"],))),
         "seats": json.loads(store.query_one("SELECT seats_json FROM rr_panels WHERE id = ?", (panel["id"],))["seats_json"]),
         "modifiers": ["toulmin"], "rounds": 3, "tools": []}, user_memo="")
-    assert opts["started_by"] == "app" and "save_report" not in opts
+    assert opts.get("started_by") == "app" and "save_report" not in opts
 
 
 # ---------------------------------------------------------------- 닻 맞춤 · 결과 다섯 갈래(⑤ ⑥)
@@ -241,9 +251,9 @@ def test_the_five_outcomes_set_the_issue_and_the_anchor_row(store, monkeypatch, 
     assert (row["severity"], row["judgement"]) == (severity, judgement)
     assert row["issue_state"] == (outcome if state != "inconclusive" else "undetermined")
     if outcome in ("upheld", "downgraded", "escalated"):
-        kept = row["merged"]["before_issue"]
-        assert (kept["severity"], kept["judgement"], kept["support_experts"]) == ("중대", "WARNING", 2)
-        assert kept["claimed"]["judgement"] == "FAIL"
+        kept = row["merged"].get("before_issue") or {}
+        assert (kept.get("severity"), kept.get("judgement"), kept.get("support_experts")) == ("중대", "WARNING", 2)
+        assert (kept.get("claimed") or {}).get("judgement") == "FAIL"
     else:
         assert "before_issue" not in row["merged"]
     if outcome == "rejected":
@@ -318,8 +328,7 @@ def test_an_unparseable_decision_charges_the_issue_and_the_second_makes_it_incon
     assert (issue["state"], issue["state_reason"], issue["charged"]) == ("inconclusive", "spec_parse_failed", 2)
     good = IssuePanelEngine(store, {issue_id: {"severity": "치명", "judgement": "FAIL"}})
     fixed = good.run(engine.calls[-1])
-    routes.complete_panel(second[0]["panel_id"], engine="web", decision_text=fixed["decision_text"],
-                          turns=fixed["turns"], owner_sub=OWNER)
+    _resubmit(second[0]["panel_id"], fixed)
     issue = _issue(store, key, anchor)
     assert (issue["state"], issue["outcome"]) == ("resolved", "escalated")
     assert _row(store, key, anchor)["severity"] == "치명"
@@ -380,7 +389,7 @@ def test_issue_jobs_do_not_stop_for_the_daily_cap_and_issue_panels_do_not_count_
     key, (unit,) = _ledger(store)
     _select(store, monkeypatch, tmp_path, key, risk_daily_panel_cap=0)
     results = _run_issues(store, config.settings, IssuePanelEngine(store), key)
-    assert results[0]["status"] == "done"
+    assert results and results[0]["status"] == "done", results
     assert runner._panels_today(store, key) == 0
     assert store.query_one("SELECT state FROM rr_jobs WHERE mode = 'issues'")["state"] == "completed"
 
@@ -422,7 +431,7 @@ def test_a_late_resubmission_of_an_old_panel_does_not_override_the_current_panel
     _run_issues(store, config.settings, engine, key, limit=1)
     assert (_issue(store, key, anchor)["outcome"], _row(store, key, anchor)["judgement"]) == ("upheld", "FAIL")
     late = IssuePanelEngine(store, {issue_id: {"severity": "경미", "judgement": "WARNING"}}).run(engine.calls[-1])
-    routes.complete_panel(old, engine="web", decision_text=late["decision_text"], turns=late["turns"], owner_sub=OWNER)
+    _resubmit(old, late)
     issue = _issue(store, key, anchor)
     assert (issue["outcome"], issue["panel_id"]) == ("upheld", engine_panel(store, issue_id))
     assert _row(store, key, anchor)["judgement"] == "FAIL"
