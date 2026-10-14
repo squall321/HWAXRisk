@@ -599,6 +599,36 @@ REOPEN_VIAS: tuple[str, ...] = ("widened", "filter_off", "handoff", "filter_floo
 FILTER_FLOOR = "filter_floor"
 
 
+def handoffs(store: Any, target_key: str) -> list[dict]:
+    """넘김(`h` 줄) — [{from, unit_id, to, why}]. 훑기(머리 sweep_json.handoffs — 줄이 단위를 적는다)와 카드 밖 호출(셀
+    handoffs_json — 그 셀의 단위다) 둘 다다(반대 검토 LOW 15 — M3.md 4.9 의 h 줄은 훑기에 한정하지 않는다). 보낸 전문가 · 훑기 먼저 순."""
+    rows = store.query(
+        "SELECT src, unit_id, dest, why FROM ("
+        "SELECT h.agent_key AS src, json_extract(x.value, '$.unit_id') AS unit_id, json_extract(x.value, '$.to') AS dest,"
+        " json_extract(x.value, '$.why') AS why, 0 AS kind, 0 AS seq, x.key AS n"
+        " FROM rr_expert_reports h, json_each(h.sweep_json, '$.handoffs') x WHERE h.target_key = ? AND h.sweep_json IS NOT NULL"
+        " UNION ALL SELECT c.agent_key, c.unit_id, json_extract(x.value, '$.to'), json_extract(x.value, '$.why'), 1, c.unit_seq,"
+        " x.key FROM rr_review_cells c, json_each(c.handoffs_json) x WHERE c.target_key = ? AND c.handoffs_json IS NOT NULL"
+        ") ORDER BY src, kind, seq, n", (target_key, target_key))
+    return [{"from": str(r["src"]), "unit_id": str(r["unit_id"]), "to": str(r["dest"]), "why": r["why"] or ""}
+            for r in rows if r["unit_id"] and r["dest"]]
+
+
+def reopen_handed_off(store: Any, target_key: str, *, now: int | None = None) -> int:
+    """다른 전문가가 넘긴(`h` 줄) 단위 · 영역의 남은 거른 셀을 다시 연다(handoff — 다시 분류되면 7번 줄로 검토다). 훑기의 늦은
+    넘김은 훑기가 곧바로 다시 열지만 카드 밖 넘김은 잡 끝(보충 표본 앞)이 거둔다(반대 검토 LOW 15) — 원장에서 유도해 멱등이다.
+    자기 넘김은 세지 않는다(7번 줄이 세지 않으니 다시 걸러질 셀을 잡 끝마다 되풀이해 열지 않게). 다시 연 셀 수."""
+    senders: dict[tuple[str, str], set[str]] = {}
+    for h in handoffs(store, target_key):
+        senders.setdefault((h["unit_id"], h["to"]), set()).add(h["from"])
+    if not senders:
+        return 0
+    cells = [(r["unit_id"], r["agent_key"]) for r in store.query(
+        "SELECT unit_id, agent_key, domain FROM rr_review_cells WHERE target_key = ? AND state = 'na_irrelevant'", (target_key,))
+             if senders.get((r["unit_id"], r["domain"]), set()) - {r["agent_key"]}]
+    return len(reopen_filtered(store, target_key, via="handoff", cells=cells, now=now)) if cells else 0
+
+
 def widened_domains(store: Any, target_key: str) -> list[str]:
     """넓힌 영역 — 표본·그림자 셀의 결과가 risk_miss 인(또는 사람의 다시 전에 그랬던 — `was`) 셀의 영역. 저장하지 않고 원장에서
     유도하되 쌓기만 한다 — 넓힘의 원인 셀을 다시 열어도 넓힘은 되돌아가지 않는다(반대 검토 HIGH 3)."""

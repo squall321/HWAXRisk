@@ -230,7 +230,7 @@ def route_decision(*, filter_mode: str, rank1: bool, unit_kind: str, no_cards: b
     | 4 | a 의 카드 0장 | 검토 · no_cards |
     | 5 | a 가 입력 결손이고 훑기가 결측 블록을 못 받았다 | 검토(noinput 길) · input_gap |
     | 6 | d 가 넓혀졌다 · 대상 전체 거르기가 꺼졌다 | 검토 · widened · filter_off |
-    | 7 | 다른 전문가의 훑기가 u 를 d 로 넘겼다 | 검토 · handoff |
+    | 7 | 다른 전문가의 훑기 · 카드 밖 호출이 u 를 d 로 넘겼다(`h` 줄) | 검토 · handoff |
     | 8 | 대상의 1순위 셀이 아직 다 종결되지 않았다 | 검토 · tier_a_pending |
     | 9 | 코드 = 무관 그리고 훑기 = 무관 | 거름 — 표본 해시 < audit_pct/100 이면 표본(audit · filter_audit) |
     | 10 | 그 밖(어느 한쪽이 관련·모름) | 검토 |

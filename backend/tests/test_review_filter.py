@@ -533,6 +533,60 @@ def test_a_late_handoff_reopens_a_filtered_cell_of_that_domain(store, monkeypatc
     assert order.index(STD2) < order.index("xd-syn-1")                     # 넘김이 거른 뒤에 왔다
 
 
+def _offcard_handoff_target(store, monkeypatch) -> tuple[str, FakeReviewEngine, dict[str, str], rig.Rig]:
+    """승인 · 표본 0% · 보충 표본 바닥 0(거른 셀이 잡 끝 표본으로 다시 열리지 않게) — 1순위 셋이 먼저 다 닫힌 원장."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 0)
+    monkeypatch.setattr(review_cells, "AUDIT_DOMAIN_FLOOR", 0)
+    key = rig.target(store, ROSTER)
+    fake = _fake(ROSTER)
+    kinds = _units(store, key)
+    _quiet(fake, kinds["boundary"], kinds["global"])
+    return key, fake, kinds, rig.Rig(store, fake)
+
+
+OFFCARD_WHY = "카드 밖 호출이 다른 영역의 몫으로 본 줄"
+
+
+def test_another_experts_offcard_handoff_keeps_the_cell_it_arrives_before(store, monkeypatch):
+    """반대 검토 LOW 15 — 카드 밖 호출의 h 줄(그 셀의 단위를 다른 영역으로 넘긴다)도 넘김이다(M3.md 4.9 의 h 줄은 훑기에 한정하지
+    않는다). mech 1순위의 카드 밖 호출이 경계 단위를 std 로 넘긴 뒤 std 2순위가 분류하면 7번 줄(handoff)로 검토에 남고
+    route_json.handoff 에 보낸 전문가가 있다(종전에는 걸러졌다)."""
+    key, fake, kinds, r = _offcard_handoff_target(store, monkeypatch)
+    b = kinds["boundary"]
+    fake.offcard_handoffs = {(MECH1, b): "std"}
+    r.finish(rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]}))
+    assert json.loads(_cell(store, key, b, MECH1)["handoffs_json"])[0]["to"] == "std"
+    r.finish(rig.job(store, key, scope={"agents": [STD2]}))
+    cell = _cell(store, key, b, STD2)
+    assert (cell["state"], cell["route"], cell["route_forced"]) == ("reviewed", "review", "handoff")
+    assert cell["route_json"]["handoff"] == [{"from": MECH1, "why": OFFCARD_WHY}]
+    assert review_cells.review_invariants(store, key) == []
+
+
+def test_a_late_offcard_handoff_reopens_the_filtered_cell_at_job_end(store, monkeypatch):
+    """반대 검토 LOW 15 — 거른 뒤에 온 카드 밖 넘김: std 2순위가 경계 단위를 거른 뒤 mech 2순위의 카드 밖 호출이 그 단위를 std 로
+    넘긴다. 잡 끝(보충 표본 앞)이 그 셀을 다시 연다(handoff — 셀의 잡 결속은 그대로라 거른 잡의 셀이다). 그 전문가를 다시 범위로
+    잡은 잡이 다시 분류하면 7번 줄로 검토다. 자기 넘김은 세지 않으므로 다시 열린 셀이 다시 걸러져 잡 끝이 되풀이되지 않는다."""
+    key, fake, kinds, r = _offcard_handoff_target(store, monkeypatch)
+    b = kinds["boundary"]
+    r.finish(rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]}))
+    r.finish(rig.job(store, key, scope={"agents": [STD2]}))
+    assert _cell(store, key, b, STD2)["state"] == "na_irrelevant"
+    fake.offcard_handoffs = {(MECH2, b): "std"}
+    sender = rig.job(store, key, scope={"agents": [MECH2]})
+    r.finish(sender)
+    assert rig.state(store, sender) == "completed"
+    cell = _cell(store, key, b, STD2)
+    assert (cell["state"], cell["route"], cell["route_forced"], cell["reopened_n"]) == ("pending", None, "handoff", 1)
+    r.finish(rig.job(store, key, scope={"agents": [STD2]}))
+    cell = _cell(store, key, b, STD2)
+    assert (cell["state"], cell["route"], cell["route_forced"]) == ("reviewed", "review", "handoff")
+    assert cell["route_json"]["handoff"] == [{"from": MECH2, "why": OFFCARD_WHY}]
+    assert review_cells.review_invariants(store, key) == []
+
+
 # ---------------------------------------------------------------- 재기동
 def test_a_restart_keeps_the_classification_and_never_reclassifies(store, monkeypatch):
     """1순위가 먼저 다 닫힌 뒤 2순위 세션이 분류하고 판정 호출 도중 죽는다 — 재기동 복구 뒤 새 러너는 걸러진 셀을 다시 열지 않고

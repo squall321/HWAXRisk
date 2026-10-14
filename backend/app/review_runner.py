@@ -1479,14 +1479,11 @@ class _Session:
 
     # -- 거르기 분류(재설계 M3 C3-6) ----------------------------------------------------------------
     def _handoffs_to(self, domain: str) -> dict[str, list[dict]]:
-        """다른 전문가의 훑기가 이 영역으로 넘긴 단위(`h` 줄 — 머리 sweep_json.handoffs, 분류 시점까지 온 것) → [{from, why}]."""
+        """다른 전문가가 이 영역으로 넘긴 단위(`h` 줄 — 훑기와 카드 밖 호출, 분류 시점까지 온 것 · 반대 검토 LOW 15) → [{from, why}]."""
         out: dict[str, list[dict]] = {}
-        for r in self.store.query(
-                "SELECT h.agent_key AS src, json_extract(x.value, '$.unit_id') AS unit_id, json_extract(x.value, '$.why') AS why"
-                " FROM rr_expert_reports h, json_each(h.sweep_json, '$.handoffs') x WHERE h.target_key = ? AND h.agent_key <> ?"
-                " AND h.sweep_json IS NOT NULL AND json_extract(x.value, '$.to') = ? ORDER BY h.agent_key, x.key",
-                (self.target_key, self.agent, domain)):
-            out.setdefault(str(r["unit_id"]), []).append({"from": r["src"], "why": r["why"] or ""})
+        for h in review_cells.handoffs(self.store, self.target_key):
+            if h["to"] == domain and h["from"] != self.agent:
+                out.setdefault(h["unit_id"], []).append({"from": h["from"], "why": h["why"]})
         return out
 
     def _tier_a_pending(self, active: set[str]) -> bool:
@@ -2455,10 +2452,13 @@ class ReviewLoop:
 
     def _audit_topup(self, job: Mapping[str, Any]) -> int:
         """잡 끝 보충 표본(C3-7) — 잡 거르기가 on 일 때 거른 셀을 표본 바닥(59건 · 영역당 1건)까지 다시 연다. 그 앞에 넓힌 영역의 남은
-        거른 셀을 거둔다(넓힘은 원장에서 유도된다 — 정산 뒤 넓힘 전에 죽었거나 분류와 엇갈린 셀, 반대 검토 MEDIUM 10 · LOW 16).
-        이 잡이 이어 돌 셀이 생겼으면 그 수(0 이 아니면 잡은 review 로 이어 돈다)."""
+        거른 셀을 거둔다(넓힘은 원장에서 유도된다 — 정산 뒤 넓힘 전에 죽었거나 분류와 엇갈린 셀, 반대 검토 MEDIUM 10 · LOW 16)
+        · 다른 전문가가 넘긴 단위 · 영역의 남은 거른 셀도(카드 밖 넘김 — LOW 15). 이 잡이 이어 돌 셀이 생겼으면 그 수(0 이 아니면
+        잡은 review 로 이어 돈다)."""
         target_key = str(job["target_key"])
-        if review_cells.reopen_widened(self.store, target_key, now=self.clock()) and self._open_cells(job):
+        reaped = (review_cells.reopen_widened(self.store, target_key, now=self.clock())
+                  + review_cells.reopen_handed_off(self.store, target_key, now=self.clock()))
+        if reaped and self._open_cells(job):
             return 1
         knobs = (job.get("params") or {}).get("knobs") or {}
         if knobs.get("filter") != "on":

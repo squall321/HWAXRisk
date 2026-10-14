@@ -33,9 +33,13 @@
   long_quote       이 별칭들의 인용을 카드에 없는 긴 글(LONG_QUOTE, 260자)로 낸다(엔진 checks.quote 는 정직하게 not_found)
   cond_text        단독 재질의 c 줄의 조건 글(기본 COND — 긴 글로 바꾸면 반출의 조건 글 200자를 본다, S9)
   offcard_src·offcard_quote  카드 밖 f 줄이 근거로 댄 배경 카드 별칭과 그 인용(기본 exp · 빈 인용 — S9 의 카드 근거 카드 밖 줄)
-  handoff_to       이 영역으로 넘기는 h 줄을 훑기(첫 단위)와 카드 밖 호출에 하나씩 더한다(S10 의 넘김 절)
+  handoff_to       이 영역으로 넘기는 h 줄을 훑기(첫 단위)와 카드 밖 호출에 하나씩 더한다(S10 의 넘김 절). handoff_unit · handoff_from
+                   을 주면(거르기의 훑기 넘김 시험) 카드 밖 호출에는 더하지 않는다 — 카드 밖 h 줄도 넘김으로 세므로(반대 검토 LOW 15)
+                   모든 전문가의 카드 밖 넘김이 분류보다 먼저 오느냐가 시험의 흐름을 갈라서다. 카드 밖 넘김은 offcard_handoffs 로
   handoff_unit     훑기 h 줄이 넘기는 단위(unit_id) — 그 쪽에 그 단위가 없으면 h 줄을 내지 않는다(거르기 넘김 줄, 재설계 M3 C3-6)
   handoff_from     주면 이 전문가들의 훑기만 h 줄을 낸다(늦은 넘김 — 재설계 M3 C3-7)
+  offcard_handoffs (agent_key, unit_id) → 영역 — 그 전문가의 그 단위 카드 밖 호출만 그 영역으로 넘기는 h 줄을 낸다(훑기는 내지
+                   않는다 — 카드 밖 넘김도 거른 셀을 지키고 다시 여는지, 반대 검토 LOW 15)
   seen·need        카드 밖 m 줄의 따져 본 메커니즘 · need 줄의 글(S10 의 메커니즘·필요 정보 절)
   hold_runs        n(1부터 센 run 차례) → threading.Event — 그 run 은 result 앞에서 그 사건을 기다린다(호출 중 재기동 시험)
   solo_verdicts    solo 변형에서만 쓰는 record_id → (applies, judgement) — 단독 재질의가 앞 판정을 뒤집는 카드(S11)
@@ -290,6 +294,7 @@ class FakeReviewEngine:
         self.handoff_to: str | None = None
         self.handoff_unit: str | None = None
         self.handoff_from: set[str] | None = None
+        self.offcard_handoffs: dict[tuple[str, str], str] = {}
         self.seen: list[str] = []
         self.need: str | None = None
         self.hold_runs: dict[int, threading.Event] = {}
@@ -637,8 +642,13 @@ class FakeReviewEngine:
             more = "yes" if n >= cap else "no"
             rows += [{"t": "m", "seen": list(self.seen), "from_attempt": 1, "checks": {"coerced": []}},
                      {"t": "more", "more": more, "from_attempt": 1, "checks": {"coerced": []}}]
-            if self.handoff_to:
+            if self.handoff_to and self.handoff_unit is None and self.handoff_from is None:
                 rows.append({"t": "h", "to": self.handoff_to, "why": "카드 밖 호출이 다른 영역의 몫으로 본 줄", "l": own[:1],
+                             "from_attempt": 1, "checks": {"coerced": []}})
+            handed = self.offcard_handoffs.get((str((body.get("expert") or {}).get("key") or ""),
+                                                str((body.get("unit") or {}).get("unit_id") or "")))
+            if handed:
+                rows.append({"t": "h", "to": handed, "why": "카드 밖 호출이 다른 영역의 몫으로 본 줄", "l": own[:1],
                              "from_attempt": 1, "checks": {"coerced": []}})
             if self.need:
                 rows.append({"t": "need", "what": self.need, "from_attempt": 1, "checks": {"coerced": []}})
