@@ -3280,7 +3280,10 @@ def post_closure_ack(target_key: str, item: str, body: CloseAckBody,
                after={"item": item, "basis_hash": out["basis_hash"], "basis_n": out["basis_n"]},
                reason=body.reason.strip())
         level = closure_module.refresh(store, target_key)
-    return {**out, "level": level["level"], "level_label": level["level_label"]}
+    # 확인이 표기를 바꿨다 — 보고서 판(trigger ack)도 그 표기로 선다(review1 M4). 조립이 터져도 확인은 무르지 않는다.
+    report = synth_module.safe_assemble(store, target_key, trigger="ack")
+    return {**out, "level": level["level"], "level_label": level["level_label"],
+            "report_version": report["version_no"] if report else None}
 
 
 @router.delete("/targets/{target_key}/closure/acks/{item}")
@@ -3293,7 +3296,9 @@ def delete_closure_ack(target_key: str, item: str, ident: identity.Identity = De
         _audit(store, email, scope="target", subject_id=target_key, action="close.ack.revoke",
                project_id=row["project_id"], before={"item": item}, after={"item": item, "revoked": True})
         level = closure_module.refresh(store, target_key)
-    return {**out, "level": level["level"], "level_label": level["level_label"]}
+    report = synth_module.safe_assemble(store, target_key, trigger="ack")
+    return {**out, "level": level["level"], "level_label": level["level_label"],
+            "report_version": report["version_no"] if report else None}
 
 
 # ---------------------------------------------------------------- 쟁점 · 종합 보고서(재설계 M3 S3-10 — REST 한 벌, MCP 가 같은 함수를 쓴다)

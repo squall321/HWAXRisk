@@ -100,3 +100,19 @@ def test_a_synthesis_older_than_the_issue_results_does_not_make_c3(store):
     _synth(store)
     fresh = _ack_all(store, key)
     assert fresh["level"] == "C3" and fresh["detail"]["fresh"]["report"] is True
+
+
+def test_an_ack_and_its_revocation_each_make_a_report_version_with_the_new_label(store):
+    """M4(확인 몫) — 확인 · 확인 취소마다 판(trigger ack)이 서고 그 판의 표기가 지금 완결 표기다. 종전에는 확인 뒤 완결은 C3 인데
+    보고서는 확인 전 판(종합 판)을 돌려줬다."""
+    key = _chained(store)
+    acked = _ack_all(store, key)
+    report = synth.report_source(store, key)
+    assert (report["trigger"], report["level_label"]) == ("ack", acked["level_label"])
+    item = next(q for q in acked["qualifiers"] if q["blocking"])
+    with factories.routes_store(store):
+        routes.delete_closure_ack(key, item["item"], ident=factories.ident(OWNER))
+    revoked = closure.cached(store, key)
+    again = synth.report_source(store, key)
+    assert again["version_no"] == report["version_no"] + 1
+    assert (again["trigger"], again["level_label"]) == ("ack", revoked["level_label"])
