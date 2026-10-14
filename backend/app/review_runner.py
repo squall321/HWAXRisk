@@ -432,6 +432,13 @@ MISSING_REASKS = 2                  # 빠진 카드 재질의(fwd) — 셀마다
 SOLO_REASKS = 2                     # 단독 재질의가 그 카드를 빼먹었을 때 다시 묻는 수
 MORE_REASKS = 3                     # 카드 밖 줄이 findings_max 에 닿으면 '이것 말고 더' 를 다시 묻는 수(X1-16)
 NOINPUT_MORE_REASKS = 3             # 입력 결손 호출이 maybe_more 면 받은 q1 제목을 known 에 실어 '이것 말고 더' 를 다시 묻는 수
+# 카드 0장 전문가의 긴 문서 검색(재설계 M3 C3-12 · M3.md 4.4.4 · #39) — 검색어 1~3개(하나당 600자 — 엔진이 그 넘는 것을 끊는다).
+# 검색이 못 물었으면(meta.search.state='failed') 같은 호출을 인프라로(차감 없이) SEARCH_RETRIES 번까지 다시 내고, 그 뒤에는 답을
+# role_only 로 받고 셀에 search_failed 를 적는다(셀은 막히지 않는다).
+SEARCH_QUERY_MAX = 600
+SEARCH_QUERIES = 3
+SEARCH_RETRIES = 3
+SEARCH_FAILED = "search_failed"
 INTERNAL_BACKOFF_S = 60             # 워커가 예기치 않은 예외로 끝난 전문가를 다시 집기 전의 대기
 INTERNAL_STRIKES = 3                # 같은 셀(또는 머리 몫)의 예기치 않은 예외가 잇달아 이만큼이면 셀을 차감하거나 잡을 멈춘다(R3A-2)
 CALL_CAP_FACTOR = 3                 # 셀당 호출 수 상한 = 3 × (2·묶음 수 + 점검 카드 수 + 4)(m-02)
@@ -517,6 +524,35 @@ def _json(text: Any, default: Any) -> Any:
     except (TypeError, ValueError):
         return default
     return value if isinstance(value, type(default)) else default
+
+
+def search_queries(unit: Mapping[str, Any]) -> list[str]:
+    """카드 0장 전문가의 긴 문서 검색어 — 단위 제목, 변경 줄 몸통(앞에서부터 600자까지 ' · ' 로 잇는다)의 둘(같으면 하나).
+    코드가 쓴 글과 위생 통과본뿐이고 LLM 이 짓지 않는다. 비면 단위 id 하나."""
+    title = " ".join(str(unit.get("title") or "").split())
+    body = ""
+    for line in unit.get("lines") or ():
+        text = " ".join(str((line or {}).get("text") or "").split())
+        if not text:
+            continue
+        joined = f"{body} · {text}" if body else text
+        if len(joined) > SEARCH_QUERY_MAX:
+            body = body or text[:SEARCH_QUERY_MAX]
+            break
+        body = joined
+    out = [q[:SEARCH_QUERY_MAX] for q in (title, body) if q]
+    out = list(dict.fromkeys(out))[:SEARCH_QUERIES]
+    return out or [str(unit.get("unit_id") or "")]
+
+
+def search_meta(result: Mapping[str, Any]) -> dict:
+    """답의 meta.search(cr-offcard-2) — {state, hits_n, used_n} 또는 {}(검색을 청하지 않았거나 엔진이 싣지 않았다)."""
+    meta = result.get("meta") if isinstance(result.get("meta"), Mapping) else {}
+    search = meta.get("search") if isinstance(meta.get("search"), Mapping) else None
+    if search is None:
+        return {}
+    return {"state": str(search.get("state") or ""), "hits_n": int(search.get("hits_n") or 0),
+            "used_n": len([u for u in search.get("used") or () if isinstance(u, Mapping)])}
 
 
 def offcard_cut(result: Mapping[str, Any]) -> bool | None:
@@ -1645,12 +1681,21 @@ class _Session:
         capped = 0
         seq = 0
         asked = list(known)
+        # 카드 0장 전문가만 긴 문서를 찾는다(M3.md #38 · engine-ops A5 — 카드가 있는 전문가로 넓히는 것은 M4).
+        queries = search_queries(cell.payload) if self.pack.card_basis == cardpack.CARD_BASIS_NONE else []
+        searched: dict[str, Any] = {}
         while True:
             body = engine_client.run_body("offcard", target_key=self.target_key, pack=self.pack, cards=cards, digest=digest,
-                                          unit=cell.payload, known=asked, expect=self._expect("offcard"), cfg=self.settings)
+                                          unit=cell.payload, known=asked, expect=self._expect("offcard"), cfg=self.settings,
+                                          search=queries)
             answer = self._ask(cell, "offcard", None, cards, body, seq=seq)
             if answer is None:
                 return
+            if queries:
+                got_search = search_meta(answer.result)
+                if got_search.get("state") == "failed" and not answer.cached:
+                    self._search_retry(cell, answer)          # 다시 낼 몫이 남았으면 인프라로 놓는다(_Stop)
+                searched = self._searched(searched, got_search)
             accepted = review_verify.accept_rows(answer.result, kind="offcard", sent_aliases=cards, pack=self.pack,
                                                  unit_refs=cell.refs)
             self._note(cell, "offcard", None, cards, answer.result, accepted)
@@ -1667,12 +1712,15 @@ class _Session:
             last = not hit or seq >= MORE_REASKS
             meta = answer.result.get("meta") if isinstance(answer.result.get("meta"), Mapping) else {}
             bg_dropped = int(meta.get("bg_dropped") or 0)
+            offcard_extras = {**extras, "findings": findings, "known_dropped": self._known_dropped(asked)}
+            if queries:
+                offcard_extras["search"] = {**searched, "queries": queries}
             sets: dict[str, Any] = {
-                "basis": self._cell_basis(), "credential_kind": self.cred_kind, "model": meta.get("model"),
+                "basis": ("search_only" if searched.get("used_n") else self._cell_basis()) if queries else self._cell_basis(),
+                "credential_kind": self.cred_kind, "model": meta.get("model"),
                 "n_offcard": len(findings), "offcard_capped": capped, "offcard_state": "done" if last else "todo",
                 "bg_full_n": max(len(cards) - bg_dropped, 0), "bg_title_only_n": bg_dropped,
-                "extras_json": canonical_json({"inj": cell.inj, "offcard": {**extras, "findings": findings,
-                                                                            "known_dropped": self._known_dropped(asked)}}),
+                "extras_json": canonical_json({"inj": cell.inj, "offcard": offcard_extras}),
                 "mechs_json": canonical_json(sorted(set(extras["seen"]) | {str(f["mech"]) for f in findings
                                                                            if f.get("mech") and f.get("mech") != "free"})),
                 "handoffs_json": canonical_json(extras["handoffs"]),
@@ -1692,6 +1740,36 @@ class _Session:
             seq += 1
             asked = known + [{"alias": f"F{i:02d}", "judgement": None, "why": str(f.get("title") or "")}
                              for i, f in enumerate(findings, 1)]
+
+    @staticmethod
+    def _searched(prev: Mapping[str, Any], got: Mapping[str, Any]) -> dict:
+        """셀의 긴 문서 검색 몫을 모은다 — 마지막 state, 적중 · 실은 발췌 수의 합, 못 물은 채 받은 답이 있었나(search_failed)."""
+        if not got:
+            return dict(prev)
+        return {"state": got.get("state"), "hits_n": int(prev.get("hits_n") or 0) + int(got.get("hits_n") or 0),
+                "used_n": int(prev.get("used_n") or 0) + int(got.get("used_n") or 0),
+                SEARCH_FAILED: bool(prev.get(SEARCH_FAILED)) or got.get("state") == "failed"}
+
+    def _search_retry(self, cell: _Cell, answer: _Answer) -> None:
+        """검색이 못 물은 답(meta.search.state='failed') — 같은 요청에서 그런 답을 SEARCH_RETRIES 번 받기 전이면 그 호출을 인프라
+        실패(search_failed — 차감 없음 · 셀 백오프)로 적고 놓는다. 다 썼으면 돌아가 그 답을 받는다(role_only · search_failed)."""
+        assert answer.call is not None
+        before = int(self.store.query_one("SELECT COUNT(*) AS n FROM rr_review_calls WHERE request_hash = ? AND error_code = ?",
+                                          (answer.call["request_hash"], SEARCH_FAILED))["n"] or 0)
+        if before >= SEARCH_RETRIES:
+            return
+        why = f"긴 문서 검색을 못 물었다({before + 1}/{SEARCH_RETRIES}) — 같은 호출을 다시 낸다"
+        outcome = review_ops.Outcome(code=SEARCH_FAILED, klass=review_ops.INFRA)
+        # 차단기에는 싣지 않는다(_failed 를 거치지 않는다) — 답은 왔고 못 물은 것은 문서 검색(agent_search)이라 LLM 장애가 아니다.
+        # 카드 0장 셀이 몰려 실패해도 잡 전체를 llm_outage 로 멈추지 않는다.
+        call = {**answer.call, "state": _CALL_STATE[review_ops.INFRA], "outcome_class": review_ops.INFRA,
+                "error_code": SEARCH_FAILED, "error": why, "error_infra": 1, "error_retryable": 1}
+        written = review_cells.write_call_result(self.store, self.target_key, self.agent, lease_owner=self.lease, call=call,
+                                                 outcome=outcome, max_charged=self.max_charged, now=self.now())
+        self.call = None
+        if not written["written"]:
+            raise _Stop("lease", release=False)
+        raise _Stop(f"infra:{SEARCH_FAILED}")
 
     # -- 입력 결손 호출(재설계 M3 C3-3) --------------------------------------------------------------
     def _input_gaps(self) -> list[str]:

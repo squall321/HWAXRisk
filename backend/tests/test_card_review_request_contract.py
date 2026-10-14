@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from app import cardpack, config, engine_client, review_verify, routes, taxonomy, unit_live, units
+from app import cardpack, config, engine_client, review_runner, review_verify, routes, taxonomy, unit_live, units
 from tests import factories
 from tests.conftest import FIXTURES_DIR, REPO_ROOT
 from tests.synth import fake_review_engine as fre
@@ -127,6 +127,10 @@ def _bodies(store, target_key: str) -> dict[str, dict]:
     bodies["sim-syn-0/offcard.role_only"] = engine_client.run_body(
         "offcard", target_key=target_key, pack=empty,
         unit=units.review_payload(store, target_key, reviewable[0]["unit_id"], "sim-syn-0"))
+    # 카드 0장 전문가의 긴 문서 검색(재설계 M3 C3-12 · cr-offcard-2) — 검토 루프가 짓는 검색어 그대로
+    first = units.review_payload(store, target_key, reviewable[0]["unit_id"], "sim-syn-0")
+    bodies["sim-syn-0/offcard.search"] = engine_client.run_body(
+        "offcard", target_key=target_key, pack=empty, unit=first, search=review_runner.search_queries(first))
     # 근거 꾸러미 실호출(B 층 — C3-12)이 붙은 단위 — 가짜 게이트웨이 앞에서 실제 ensure 가 얼린 줄(tool:b-…)이 unit.evidence 끝에 선다
     from tests.test_unit_live import Gateway
 
@@ -159,6 +163,8 @@ def test_run_bodies_built_from_real_units_and_packs_pass_the_engines_validator(c
     assert pcb["extra"]["domains"][0] == {"key": "xd", "label": "XD(외관·조립 설계)"}
     assert len(pcb["extra"]["domains"]) == len(config.settings.risk_roster_domains) == 15
     assert pcb["extra"]["known"] == [] and len(pcb["extra"]["mechanisms"]) == 52        # 택소노미 1.2(재설계 M3 D-34)
+    assert bodies["sim-syn-0/offcard.search"]["extra"]["search"]["queries"]                 # 카드 0장 전문가만 검색을 청한다
+    assert "search" not in bodies["mech-syn-0/offcard/" + units.load_units(store, key)[0]["unit_id"]]["extra"]
     assert bodies["mech-syn-0/verdict.fwd.live"]["unit"]["evidence"][-1]["ref"].startswith("tool:b-")
     # 대조군 — 엔진 자신의 요청 예제는 지나고, 안쪽 칸 이름이 틀린 것은 걸린다(검증기가 헛돌지 않는다).
     control = fre.load("req_verdict_fwd.json")

@@ -625,7 +625,8 @@ def _scope_section(ledger: Ledger, state: str) -> dict:
             "bg_title_only_n": int(cell.get("bg_title_only_n") or 0) if reviewed else 0,
             "error_code": cell.get("error_code"), "tries": int(cell.get("tries") or 0),
             "charged": int(cell.get("charged") or 0), "pack_state": ledger.pack_state(unit["unit_id"]) if reviewed else None,
-            "route": cell.get("route"), "route_forced": cell.get("route_forced"), "sample": _sample_marks(cell)})
+            "route": cell.get("route"), "route_forced": cell.get("route_forced"), "sample": _sample_marks(cell),
+            "search": _search_marks(cell) if reviewed else None})
         if reviewed:
             continue
         if cell_state == "na_irrelevant":
@@ -653,6 +654,17 @@ def _scope_section(ledger: Ledger, state: str) -> dict:
             by_basis[row["basis"]] = by_basis.get(row["basis"], 0) + 1
     return {"units": rows, "totals": {"units": len(rows), "by_state": dict(sorted(by_state.items())),
                                       "by_basis": dict(sorted(by_basis.items()))}, "unseen": unseen, "filtered": filtered}
+
+
+def _search_marks(cell: Mapping[str, Any]) -> dict | None:
+    """카드 0장 전문가 셀의 긴 문서 검색(재설계 M3 C3-12 · #39) — {state, hits_n, used_n, search_failed} 또는 None(검색을 청하지
+    않은 셀). search_failed 는 검색을 못 물은 채(인프라로 다시 낸 뒤에도) 역할만으로 받은 답이 있었다는 표지다."""
+    extras = _json(cell.get("extras_json"), {})
+    search = ((extras.get("offcard") or {}) if isinstance(extras, Mapping) else {}).get("search")
+    if not isinstance(search, Mapping):
+        return None
+    return {"state": search.get("state"), "hits_n": int(search.get("hits_n") or 0), "used_n": int(search.get("used_n") or 0),
+            "search_failed": bool(search.get("search_failed"))}
 
 
 def _sample_marks(cell: Mapping[str, Any]) -> dict | None:
@@ -1575,6 +1587,11 @@ def _md_scope(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
                      f" · 카드 밖 호출에 배경 카드 본문 {u['bg_full_n']}장 · 제목만 {u['bg_title_only_n']}장")
         elif u["state"] == "failed":
             line += f" {_q(u['error_code'])} · 호출 {u['tries']}번 · 내용 탓 {u['charged']}번"
+        search = u.get("search")
+        if search:
+            line += (" · 긴 문서 검색 못 함(search_failed — 역할만으로 답했다)" if search["search_failed"] and not search["used_n"]
+                     else f" · 긴 문서 발췌 {search['used_n']}건" if search["used_n"]
+                     else f" · 긴 문서 검색 {_q(search['state'])}(실은 발췌 없음 — 역할만으로 답했다)")
         if not u["in_scope"] and u["state"] != "reviewed":
             line += " · 이 검토 잡의 범위 밖"
         sample = u.get("sample") or {}

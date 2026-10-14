@@ -68,6 +68,9 @@
                    부딪친 줄을 남겼다는 표지 — RB3-1, 엔진 216650e. 앱은 걸린 것처럼 두 번째 판정을 준다 — 재설계 M3 C3-9)
   contested        별칭 → contested_by{verdict, cq, quote, why, attempt} — 그 fwd 판정 행에 검증된 철회의 다툼을 싣고 dup_conflict 를
                    단다(엔진 RB3-1 — 예제 result_verdict_contested 의 모양, 걸림은 선다)
+  search_states    카드 밖 호출이 extra.search 를 실었을 때 차례로 낼 meta.search.state(ok · empty_scope · no_hits · failed — 다 쓰면
+                   마지막 것을 되풀이, 비면 meta.search 를 싣지 않는다 — M2 엔진처럼). ok 면 발췌 하나(D01)를 실은 것으로 적는다
+                   (예제 result_offcard_search_* 의 모양, cr-offcard-2)
   flipped          별칭 → flipped_from{verdict, attempt, raw?} — 그 fwd 판정 행에 보충이 갈아 낀 표지를 단다(raw 가 있으면 어휘 밖
                    값을 엔진이 고친 것 — 예제 result_verdict_flipped 의 모양, D-42)
   clipped          meta.clipped 로 낼 값 — 엔진이 몫에서 끊은 입력 {<입력>: {orig_chars, kept_chars}}(RB3-11, 기본 {})
@@ -293,6 +296,7 @@ class FakeReviewEngine:
         self.clipped: dict[str, Any] = {}
         self.contested: dict[str, dict[str, Any]] = {}
         self.flipped: dict[str, dict[str, Any]] = {}
+        self.search_states: list[str] = []
         # 기록
         self.requests: list[dict[str, Any]] = []
         self.runs = 0
@@ -634,6 +638,16 @@ class FakeReviewEngine:
                        flipped=sum(1 for r in rows if r.get("flipped_from")))
         if self.queued_ms is not None:
             meta["queued_ms"] = int(self.queued_ms)
+        search = (body.get("extra") or {}).get("search")
+        if kind == "offcard" and isinstance(search, Mapping) and self.search_states:
+            with self._lock:
+                state = self.search_states.pop(0) if len(self.search_states) > 1 else self.search_states[0]
+            used = ([{"alias": "D01", "record_id": "DOC-LD-0001", "section_id": "s1", "title": "구조 해석 보고서 1",
+                      "chars": 66, "orig_chars": 66, "clipped": False}] if state == "ok" else [])
+            meta["search"] = {"state": state, "queries": list(search.get("queries") or ()), "hits_n": len(used),
+                              "scope_n": 0 if state == "empty_scope" else None if state == "failed" else 2734, "used": used,
+                              "note": "검색 시간 초과(가짜)" if state == "failed" else "", "req_cut": 0}
+            meta["basis"] = "search_only" if used else "role_only"
         return {"kind": kind, "variant": variant, "rows": rows, "missing": missing, "extras": extras,
                 "quality": quality, "meta": meta}
 

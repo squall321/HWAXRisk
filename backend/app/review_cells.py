@@ -1145,6 +1145,7 @@ def expert_tally(store: Any, target_key: str, agent_key: str) -> dict:
     {by_state, open, reviewed, failed, skipped, no_input, filtered, verified, role_only_only, noinput_only}. `verified` 는 reviewed
     셀의 실효 판정 가운데 `applies='yes'` 이고 `quote_ok = 1`·`refs_ok = 1` 인 행이 하나라도 있나다(X1-05 — 해당 없음 행의 공허한 참은
     세지 않는다). `filtered` 는 거른 셀(na_irrelevant), `noinput_only` 는 reviewed 셀이 전부 입력 결손 호출로 본 것이다(basis noinput).
+    `role_only_only` 는 reviewed 셀이 전부 카드 없이 본 것이다 — 역할만(role_only) 또는 긴 문서 발췌만(search_only, C3-12).
     """
     active = set(active_unit_ids(store, target_key))
     rows = _target_cells(store, target_key, active, agent_key)
@@ -1162,7 +1163,7 @@ def expert_tally(store: Any, target_key: str, agent_key: str) -> dict:
             "open": sum(by_state.get(s, 0) for s in OPEN_CELL_STATES), "reviewed": len(reviewed),
             "failed": by_state.get("failed", 0), "skipped": by_state.get("skipped", 0),
             "no_input": by_state.get("no_input", 0), "filtered": by_state.get("na_irrelevant", 0), "verified": verified,
-            "role_only_only": bool(reviewed) and all(r["basis"] == "role_only" for r in reviewed),
+            "role_only_only": bool(reviewed) and all(r["basis"] in ("role_only", "search_only") for r in reviewed),
             "noinput_only": bool(reviewed) and all(r["basis"] == "noinput" for r in reviewed)}
 
 
