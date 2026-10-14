@@ -1009,6 +1009,8 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
             steps.append(_review_start_step(target_key))
             if job is not None:
                 notes.append(f"범위 밖으로 남은 셀이 {left}개다 — 범위를 넓혀 새 검토 잡으로 이어 돈다.")
+        elif stage is None and job["state"] == "completed" and not _chain_marked(store, job["id"]):
+            steps.append(_pre_m3_chain_step(target_key, job["id"], notes))
     if job is None:
         steps.append(_step("risk_get_units", {"target_key": target_key},
                            "검토 단위 목록(전문가가 카드로 대조할 변경 묶음).", write=False))
@@ -1065,6 +1067,23 @@ def _chain_answer(answer, target_key: str, project_id: str, stage: dict, repersi
                      " risk_job_action(action='pause')).")
     notes.append(f"{what} {stage['job_id']} 가 {stage['state']} 다 — 끝나면 사슬이 다음 단계(쟁점 → 종합 → 보고서 판)를 저절로 세운다.")
     return answer(mode, [*repersist_steps, *watch])
+
+
+def _chain_marked(store: Any, job_id: str) -> bool:
+    from app import chain  # noqa: PLC0415 — chain 은 종합·쟁점을 거쳐 무겁다.
+
+    return chain.chain_marked(store, job_id)
+
+
+def _pre_m3_chain_step(target_key: str, job_id: str, notes: list[str]) -> dict:
+    """M2 코드가 세운 검토 잡(사슬 표지 없음) 뒤에는 쟁점 → 종합이 저절로 서지 않는다(review1 M8 — 조정자 결정: 사람이 길잡이에서
+    시작한다). 검토 잡을 한 번 세우면 셀이 다 닫혀 있어 검토 호출 없이 곧바로 끝나고, 그 잡(표지가 있다)의 끝에서 사슬이 선다."""
+    notes.append(f"마지막 검토 잡 {job_id} 는 M2 시절 잡이라(사슬 표지 없음) 쟁점 → 종합이 저절로 서지 않았다 — 이어 돌리려면 사람이"
+                 " 아래 risk_start_job 걸음으로 시작한다. 종합만 다시 내려면 웹 화면이나 REST POST"
+                 f" /api/targets/{target_key}/report {{refresh_summaries:true}} 다.")
+    return _step("risk_start_job", {"target_key": target_key, "mode": "reviews"},
+                 "검토 잡을 한 번 세워 사슬을 시작한다 — 셀이 다 닫혀 있어 검토 호출 없이 곧바로 끝나고, 그 끝에서 쟁점 선정 → 쟁점 패널 →"
+                 " 종합 → 보고서 판이 저절로 선다. 쟁점 패널 · 영역 요약은 엔진 호출이 든다 — 사용자에게 보이고 확인받은 뒤 부른다.")
 
 
 def _reraised_note(store: Any, target_key: str, notes: list[str]) -> None:

@@ -423,3 +423,37 @@ def test_a_review_job_made_by_m3_code_carries_the_chain_mark(store):
     key = rig.target(store)
     job_id = rig.job(store, key, scope={"agents": [rig.SEAL]})
     assert json.loads(rig.job_row(store, job_id)["params_json"]).get("chain") is True
+
+
+def test_the_guide_lets_a_person_start_the_chain_on_an_m2_era_target(tmp_path, monkeypatch):
+    """M8(결정 — 둘째 단계 길잡이 몫) — M2 시절 검토 잡 뒤에는 사슬이 저절로 서지 않으니 길잡이가 사람에게 시작 걸음(risk_start_job
+    mode='reviews')을 준다. 그 걸음을 따르면 셀이 다 닫혀 있어 검토 호출 없이 잡이 끝나고, 그 끝에서 사슬이 다음 잡을 세운다. 사슬이
+    선 뒤의 길잡이는 그 걸음을 다시 주지 않는다. 종전에는 길잡이가 '마지막 검토 잡은 completed 다' 에서 멈췄다."""
+    from tests.rr import v4_build
+    from tests.rr.test_v4_upgrade import _thaw
+    from tests.test_review_mcp import _delegate, _project_with_source
+    from app.risk_store import RiskStore
+
+    store = RiskStore(_thaw(v4_build.V4_DIR / v4_build.DB_GZ, tmp_path))
+    store.open()
+    store.migrate()
+    try:
+        rig.configure(monkeypatch, store, tmp_path)
+        rig.pat(store)
+        reviewed = json.loads((v4_build.V4_DIR / "manifest.json").read_text(encoding="utf-8"))["targets"]["reviewed"]
+        key = reviewed["target_key"]
+        project_id = _project_with_source(store, key)
+        out = entry.next_step(_delegate(), project_id=project_id)
+        step = next((s for s in out["next"] if s["tool"] == "risk_start_job"), None)
+        assert step is not None and step["args"] == {"target_key": key, "mode": "reviews"}, out["next"]
+        assert any(reviewed["job_id"] in n and "사슬 표지 없음" in n for n in out["notes"]), out["notes"]
+        made = entry.start_job(_delegate(), **step["args"])
+        fake = FakeReviewEngine(rig.packs())
+        rig.Rig(store, fake).finish(made["job_id"])
+        assert fake.calls("run") == [] and fake.calls("plan") == []      # 검토 호출 없이 끝났다(묶음 · 한도 조회뿐)
+        nxt = store.query_one("SELECT mode FROM rr_jobs WHERE json_extract(chain_json, '$.prev_job_id') = ?", (made["job_id"],))
+        assert nxt is not None and nxt["mode"] in chain.STAGES
+        again = entry.next_step(_delegate(), project_id=project_id)
+        assert not any(s["tool"] == "risk_start_job" for s in again["next"]), again["next"]
+    finally:
+        store.close()
