@@ -1486,13 +1486,13 @@ class _Session:
 
     def _replay_handoffs(self) -> None:
         """늦은 넘김(C3-7) — 이 훑기가 넘긴 (단위, 영역)의 셀 가운데 이미 걸러진 것을 다시 연다(다시 분류되면 7번 줄로 검토다).
-        거른 셀만 여므로 멱등이다 — 훑기를 원장에서 다시 읽을 때도 부른다. 제 셀은 빼고(자기 넘김은 7번 줄이 세지 않아 다시 걸러질
-        뿐이다), 다시 연 셀은 이 잡으로 찍는다(앞 잡의 셀이면 아무 잡도 돌리지 않는다 — 반대 검토 2차 MEDIUM 3)."""
+        거른 셀만 여므로 멱등이다 — 훑기를 원장에서 다시 읽을 때도 부른다. 제 셀은 뺀다(자기 넘김은 7번 줄이 세지 않아 다시 걸러질
+        뿐이고, 그 전문가 세션마다 되풀이됐다 — 반대 검토 2차 MEDIUM 3). 곧바로 연 셀의 잡 결속은 그대로다(C3-7 의 넓힘과 같다 —
+        그 셀을 범위로 잡은 다음 잡이 분류한다. 잡 끝의 거두기만 지금 잡으로 찍는다)."""
         for handoff in self.sweep.get("handoffs") or ():
             if handoff.get("unit_id") and handoff.get("to"):
                 review_cells.reopen_filtered(self.store, self.target_key, via="handoff", domain=str(handoff["to"]),
-                                             unit_id=str(handoff["unit_id"]), exclude_agent=self.agent, run_id=self.job_id,
-                                             now=self.now())
+                                             unit_id=str(handoff["unit_id"]), exclude_agent=self.agent, now=self.now())
 
     # -- 거르기 분류(재설계 M3 C3-6) ----------------------------------------------------------------
     def _handoffs_to(self, domain: str) -> dict[str, list[dict]]:

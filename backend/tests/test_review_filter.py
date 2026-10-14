@@ -588,22 +588,45 @@ def test_a_late_offcard_handoff_reopens_the_filtered_cell_at_job_end(store, monk
     assert review_cells.review_invariants(store, key) == []
 
 
-def test_a_late_sweep_handoff_reopens_an_earlier_jobs_filtered_cell_into_the_running_job(store, monkeypatch):
-    """반대 검토 2차 MEDIUM 3 — 훑기의 늦은 넘김이 곧바로 다시 연 셀도 지금 잡으로 찍힌다. 앞 잡이 거른 셀(std 2순위 × 경계 단위)을
-    mech 2순위의 훑기가 std 로 넘기면 지금 잡이 그 셀을 돌린다 — 종전에는 앞 잡의 결속 그대로 pending 이라 잡 끝의 거두기(거른
-    셀만 본다)도 지나쳐 아무 잡도 돌리지 않았다."""
-    key, fake, kinds, r = _offcard_handoff_target(store, monkeypatch)
-    b = kinds["boundary"]
+def test_a_job_end_widening_reap_runs_an_earlier_jobs_filtered_cells_in_the_running_job(store, monkeypatch):
+    """반대 검토 2차 MEDIUM 3 — 잡 끝이 넓힌 영역의 남은 거른 셀을 거둘 때(정산 뒤 넓히기 전에 죽은 길) 그 셀과 전문가 머리를 지금
+    잡으로 찍는다 — 앞 잡(회로 2순위)이 거른 셀을 지금 잡(회로 1순위 그림자의 사람의 다시)이 끝까지 돌린다. 종전에는 앞 잡의 결속
+    그대로 pending 이라 지금 잡은 끝나고 아무 잡도 돌리지 않았다."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 0)
+    monkeypatch.setattr(review_cells, "AUDIT_DOMAIN_FLOOR", 0)
+    key = rig.target(store, ROSTER)
+    us = units.load_units(store, key)
+    bundles = [u["unit_id"] for u in us if u["kind"] == "bundle"]
+    fake = _fake(ROSTER)
+    _quiet(fake, *bundles)
+    for u in us:
+        fake.noinput_q1[u["unit_id"]], fake.noinput_q2[u["unit_id"]] = ["no"], [""]
+    r = rig.Rig(store, fake)
     r.finish(rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]}))
-    r.finish(rig.job(store, key, scope={"agents": [STD2]}))
-    assert _cell(store, key, b, STD2)["state"] == "na_irrelevant"
-    fake.handoff_to, fake.handoff_unit, fake.handoff_from = "std", b, {MECH2}
-    sender = rig.job(store, key, scope={"agents": [MECH2]})
-    r.finish(sender)
-    cell = _cell(store, key, b, STD2)
-    assert (rig.state(store, sender), cell["state"], cell["run_id"], cell["route_forced"]) == (
-        "completed", "reviewed", sender, "handoff")
-    assert cell["route_json"]["handoff"] == [{"from": MECH2, "why": "훑기가 다른 영역의 몫으로 본 단위"}]
+    shadow = next(c for c in _cells(store, key) if c["agent_key"] == MEM1 and (c["sample_json"] or {}).get("shadow"))
+    earlier = rig.job(store, key, scope={"agents": [MEM2]})
+    r.finish(earlier)
+    filtered = [c["unit_id"] for c in _cells(store, key) if c["agent_key"] == MEM2 and c["state"] == "na_irrelevant"]
+    assert filtered
+    fake.noinput_q1[shadow["unit_id"]] = ["yes"]                     # 다시 보니 그림자가 걸림을 놓쳤다
+    real, crashed = review_cells.widen, []
+
+    def crash_once(*args, **kwargs):
+        if not crashed:
+            crashed.append(1)
+            raise RuntimeError("넓히기 직전에 죽었다(가짜)")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(review_cells, "widen", crash_once)
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[shadow["unit_id"], MEM1]], force=True,
+                                                             reason="그림자를 다시 본다"), ident=factories.ident(rig.OWNER))
+    running = out["job"]["job_id"]
+    r.finish(running)
+    assert crashed and rig.state(store, running) == "completed" and "mem" in review_cells.widened_domains(store, key)
+    reaped = [_cell(store, key, u, MEM2) for u in filtered]
+    assert {(c["state"], c["run_id"], c["route_forced"]) for c in reaped} == {("reviewed", running, "widened")}
 
 
 def test_an_experts_handoff_to_its_own_domain_never_reopens_its_own_filtered_cell_at_job_end(store, monkeypatch):
@@ -862,6 +885,19 @@ def test_an_audit_that_never_produced_a_result_does_not_meet_the_floor(store, mo
     assert (audit["sampled"], audit["pending"], audit["failed"], audit["n_audit"], audit["floor_met"]) == (0, 0, 1, 1, False)
     residual = next(r for r in closure.residuals(store, key, closure.cell_counts(store, key)) if r["item"] == "filtered")
     assert residual["blocking"] is True
+
+
+def test_a_sample_whose_marker_an_input_change_cleared_still_counts_in_the_top_up_and_closure(store, monkeypatch):
+    """반대 검토 2차 LOW 6 · MEDIUM 4 — 입력이 바뀌어 표지가 지워진 셀(앞 결과만 sample_json.was 에 남는다)의 표본 결과는 잡 끝 보충
+    표본과 완결 몫이 똑같이 센다 — 둘이 다르게 세면 바닥을 두고 갈린다(MEDIUM 4 가 막으려던 것)."""
+    key, _job, kinds, r, gate, _fake = _filtered_mid_job(store, monkeypatch)
+    store.execute("UPDATE rr_review_cells SET sample_json = json_object('was', json_object('filter_audit', json_array('kept')))"
+                  " WHERE target_key = ? AND unit_id = ? AND agent_key = ?", (key, kinds["global"], STD1))
+    out = review_cells.audit_topup(store, key, "another-job", audit_pct=0, salt="s")
+    closure_audit = review_cells.closure_cells(store, key)["filtered"]["audit"]
+    assert (out["n"], out["sampled"], closure_audit["sampled"], closure_audit["kept"]) == (2, 1, 1, 1)
+    gate.set()
+    r.loop.join(30)
 
 
 def test_an_audit_closed_without_a_result_is_replaced_by_the_next_top_up(store, monkeypatch):
