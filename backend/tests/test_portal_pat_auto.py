@@ -308,6 +308,22 @@ def test_the_renew_threshold_must_exceed_the_panel_credential_margin():
     main.check_credential_chain(dataclasses.replace(config.settings, risk_pat_renew_before_s=margin + 1))
 
 
+def test_the_renew_threshold_must_leave_room_below_the_wanted_lifetime_minus_the_retry_pause():
+    """갱신 문턱이 '바라는 수명(ttl_days) − 자동 등록 쉼' 이상이면 막 받은 PAT 가 곧바로 다시 갱신 대상이다 — 기동을 막고 둘을 말한다
+    (BEH-10)."""
+    ceiling = routes.PORTAL_PAT_WANTED["ttl_days"] * 86400 - config.pat_auto_retry_s(config.settings)
+    for renew in (ceiling, ceiling + 1):
+        with pytest.raises(RuntimeError) as exc:
+            main.check_credential_chain(dataclasses.replace(config.settings, risk_pat_renew_before_s=renew))
+        text = str(exc.value)
+        assert f"HWAXRISK_PAT_RENEW_BEFORE_S {renew}초" in text and f"{ceiling}초" in text and "HWAXRISK_PAT_AUTO_RETRY_S" in text
+    main.check_credential_chain(dataclasses.replace(config.settings, risk_pat_renew_before_s=ceiling - 1))
+    # 쉼을 늘리면 그만큼 문턱의 천장이 내려온다.
+    cfg = dataclasses.replace(config.settings, risk_pat_renew_before_s=ceiling - 1, risk_pat_auto_retry_s=config.pat_auto_retry_s() + 2)
+    with pytest.raises(RuntimeError):
+        main.check_credential_chain(cfg)
+
+
 def test_the_pat_knobs_are_read_like_the_other_box_knobs(tmp_path):
     (tmp_path / "knobs.env").write_text("HWAXRISK_PAT_AUTO_RETRY_S=600\nHWAXRISK_PAT_RENEW_BEFORE_S=172800\n", encoding="utf-8")
     loaded = config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path), "HWAXRISK_PAT_RENEW_BEFORE_S": "259200"})
