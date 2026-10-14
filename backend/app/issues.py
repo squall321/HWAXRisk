@@ -284,21 +284,31 @@ def cap_used(store: RiskStore, target_key: str) -> dict[str, int]:
 def select_issues(store: RiskStore, target_key: str, *, selected_round: int, settings: Any = None,
                   cells_hash: str | None = None) -> dict:
     """쟁점을 고른다(3.6) — 후보를 `rr_issues` 에 쓰고 상한 안은 `queued`, 밖은 `untried_cap(cap)`, 후보에서 빠진 대기 행은
-    `withdrawn` 이다. 편성·도는 쟁점과 사람이 넘긴 쟁점은 건드리지 않고, 끝난 쟁점은 근거 해시가 바뀌었을 때만 다시 대기로 간다.
-    등록부 행의 `issue_id`·`issue_state` 를 같은 트랜잭션에서 맞춘다. 반환 {candidates, queued, untried_cap, withdrawn,
-    by_type, by_class, cap{base, hard, used}}."""
+    `withdrawn` 이다. 등록부 행의 `issue_id`·`issue_state` 를 같은 트랜잭션에서 맞춘다. 반환 {candidates, queued, untried_cap,
+    withdrawn, reraised, by_type, by_class, cap{base, hard, used}}.
+
+    건드리지 않는 것 — 편성·도는 쟁점, 사람이 정한 쟁점(`status_source='human'` — 올리기·건너뛰기, 상한 밖으로 올린 것도 그대로다,
+    review1 L1), 근거가 그대로인 결과 쟁점. **패널이 결과를 낸 쟁점은 상한으로 밀려나지 않고 결과·패널을 잃지 않는다**(review1 H3) —
+    근거가 바뀌면 결과를 두고 `reraised_json`(무엇이 언제 바뀌었나)을 적으며, 상한에 자리가 있을 때만 새 패널로 다시 줄을 선다(그
+    패널의 결과가 옛 결과를 바꾼다). 자리가 없으면 결과 쟁점 그대로 남아 '패널 판정 — 근거 바뀜, 다시 토의 필요' 로 보인다."""
     cfg = settings or config.settings
     now = common.now_epoch()
     found = candidates(store, target_key, settings=cfg)
     with store.tx():
         existing = {str(r["anchor_cluster_key"]): dict(r) for r in store.query(
-            "SELECT issue_id, anchor_cluster_key, state, basis_hash FROM rr_issues WHERE target_key = ?", (target_key,))}
+            "SELECT issue_id, anchor_cluster_key, state, basis_hash, basis_json, outcome, status_source, reraised_json"
+            " FROM rr_issues WHERE target_key = ?", (target_key,))}
         pending: list[dict] = []
         for cand in found:
             row = existing.get(cand["anchor_cluster_key"])
             state = _str(row["state"]) if row else ""
-            if state in IN_FLIGHT_STATES or state == "skipped":
+            if row and (_str(row["status_source"]) == "human" or state in IN_FLIGHT_STATES or state == "skipped"):
                 cand["action"] = "keep"
+            elif row and row["outcome"] is not None:
+                # 결과 쟁점 — 근거(패널 때 얼린 것)가 그대로면 그대로, 바뀌면 다시 토의 후보(상한에 자리가 있을 때만 다시 돈다).
+                cand["action"] = "keep" if row["basis_hash"] == cand["basis_hash"] else "reraise"
+                if cand["action"] == "reraise":
+                    pending.append(cand)
             elif state in DONE_STATES and row["basis_hash"] == cand["basis_hash"]:
                 cand["action"] = "keep"
             else:
@@ -307,18 +317,30 @@ def select_issues(store: RiskStore, target_key: str, *, selected_round: int, set
         used = cap_used(store, target_key)
         run, out = allocate_cap(pending, cap=int(cfg.risk_issue_panel_cap), hard_cap=int(cfg.risk_issue_panel_hard_cap),
                                 used_p1=used["P1"], used_other=used["other"])
+        reraised_n = 0
         for rank, cand in enumerate(found, start=1):
             anchor = cand["anchor_cluster_key"]
             if cand["action"] == "keep":
                 store.execute("UPDATE rr_issues SET rank = ?, updated_at = ? WHERE target_key = ? AND anchor_cluster_key = ?",
                               (rank, now, target_key, anchor))
                 continue
+            if cand["action"] == "reraise":
+                reraised_n += 1
+                _reraise(store, target_key, existing[anchor], cand, rank=rank, requeue=anchor in run,
+                         selected_round=selected_round, cells_hash=cells_hash, now=now)
+                continue
             state, reason = ("queued", None) if anchor in run else ("untried_cap", CAP_REASON)
             _upsert(store, target_key, cand, rank=rank, state=state, reason=reason, selected_round=selected_round,
                     cells_hash=cells_hash, now=now)
-        gone = [a for a, r in existing.items() if a not in {c["anchor_cluster_key"] for c in found}
+        listed = {c["anchor_cluster_key"] for c in found}
+        gone = [a for a, r in existing.items() if a not in listed and _str(r["status_source"]) != "human"
                 and _str(r["state"]) in ("queued", "untried_cap")]
         for anchor in gone:
+            if existing[anchor]["outcome"] is not None:
+                # 다시 줄을 섰던 결과 쟁점이 후보에서 빠졌다 — 결과 쟁점으로 돌아간다(물러나지 않는다 — 결과를 잃지 않는다).
+                store.execute(f"UPDATE rr_issues SET state = {_DONE_OF_OUTCOME}, rank = NULL, updated_at = ?"
+                              " WHERE target_key = ? AND anchor_cluster_key = ?", (now, target_key, anchor))
+                continue
             store.execute("UPDATE rr_issues SET state = 'withdrawn', state_reason = NULL, rank = NULL, updated_at = ?"
                           " WHERE target_key = ? AND anchor_cluster_key = ?", (now, target_key, anchor))
         _sync_registry(store, target_key)
@@ -329,8 +351,44 @@ def select_issues(store: RiskStore, target_key: str, *, selected_round: int, set
             by_type[t] = by_type.get(t, 0) + 1
         by_class[cand["p_class"]] = by_class.get(cand["p_class"], 0) + 1
     return {"candidates": len(found), "queued": len(run), "untried_cap": len(out), "withdrawn": len(gone),
-            "by_type": by_type, "by_class": by_class,
+            "reraised": reraised_n, "by_type": by_type, "by_class": by_class,
             "cap": {"base": int(cfg.risk_issue_panel_cap), "hard": int(cfg.risk_issue_panel_hard_cap), "used": used}}
+
+
+# 결과(outcome)가 있는 쟁점이 돌아갈 끝난 상태 — 판정 못 함(undetermined)은 inconclusive, 나머지는 resolved(SQL 식).
+_DONE_OF_OUTCOME = "CASE WHEN outcome = 'undetermined' THEN 'inconclusive' ELSE 'resolved' END"
+
+
+def _keys(entries: Iterable[Mapping[str, Any]] | None) -> set[str]:
+    return {_str(e.get("agent_key")) for e in entries or () if isinstance(e, Mapping) and _str(e.get("agent_key"))}
+
+
+def _reraise(store: RiskStore, target_key: str, row: Mapping[str, Any], cand: Mapping[str, Any], *, rank: int,
+             requeue: bool, selected_round: int, cells_hash: str | None, now: int) -> None:
+    """패널이 판정한 뒤 근거가 바뀐 쟁점(review1 H3) — 결과(outcome · outcome_json · panel_id)는 두고 `reraised_json` 에 패널 때의
+    근거에서 무엇이 바뀌었나(제기자·반대자 들고 남, 주장값 앞뒤)와 언제(at · round)를 적는다. 같은 바뀐 근거면 처음 적은 시각을
+    둔다. `requeue`(상한에 자리) 면 새 근거로 다시 줄을 서고(새 패널의 결과가 옛 결과를 바꾼다), 아니면 결과 쟁점 그대로다."""
+    before = _loads(row["basis_json"], {}) or {}
+    after = cand["basis"]
+    old = _loads(row["reraised_json"], {}) or {}
+    reraised = old if old.get("basis_hash") == cand["basis_hash"] else {
+        "at": now, "round": int(selected_round), "basis_hash": cand["basis_hash"], "panel_basis_hash": row["basis_hash"],
+        "raisers_added": sorted(_keys(after.get("raisers")) - _keys(before.get("raisers"))),
+        "raisers_removed": sorted(_keys(before.get("raisers")) - _keys(after.get("raisers"))),
+        "opposers_added": sorted(_keys(after.get("opposers")) - _keys(before.get("opposers"))),
+        "opposers_removed": sorted(_keys(before.get("opposers")) - _keys(after.get("opposers"))),
+        "claimed_before": before.get("claimed") or {}, "claimed_after": after.get("claimed") or {}}
+    if requeue:
+        store.execute(
+            "UPDATE rr_issues SET state = 'queued', state_reason = 'reraised', rank = ?, types_json = ?, p_class = ?,"
+            " priority = ?, unit_id = ?, basis_json = ?, basis_hash = ?, reraised_json = ?, selected_round = ?, cells_hash = ?,"
+            " updated_at = ? WHERE issue_id = ?",
+            (rank, common.canonical_json(list(cand["types"])), cand["p_class"], cand["priority"], cand["unit_id"],
+             common.canonical_json(cand["basis"]), cand["basis_hash"], common.canonical_json(reraised), int(selected_round),
+             cells_hash, now, row["issue_id"]))
+        return
+    store.execute(f"UPDATE rr_issues SET state = {_DONE_OF_OUTCOME}, rank = ?, reraised_json = ?, updated_at = ?"
+                  " WHERE issue_id = ?", (rank, common.canonical_json(reraised), now, row["issue_id"]))
 
 
 def _upsert(store: RiskStore, target_key: str, cand: Mapping[str, Any], *, rank: int, state: str, reason: str | None,
@@ -678,9 +736,10 @@ def resolve_issue(store: RiskStore, panel_id: str, *, settings: Any = None) -> d
         charged = int(issue["charged"] or 0) + 1
         state = "inconclusive" if charged >= int(cfg.risk_issue_max_charged) else "queued"
         with store.tx():
-            store.execute("UPDATE rr_issues SET state = ?, state_reason = 'spec_parse_failed', outcome = ?, charged = ?,"
-                          " updated_at = ? WHERE issue_id = ?",
-                          (state, "undetermined" if state == "inconclusive" else None, charged, now, issue["issue_id"]))
+            # 앞 패널의 결과가 있으면(다시 줄을 선 결과 쟁점) 대기로 돌아갈 때 그 결과를 둔다(review1 H3).
+            store.execute("UPDATE rr_issues SET state = ?, state_reason = 'spec_parse_failed', outcome = CASE WHEN ?"
+                          " = 'inconclusive' THEN 'undetermined' ELSE outcome END, charged = ?, updated_at = ? WHERE issue_id = ?",
+                          (state, state, charged, now, issue["issue_id"]))
             _sync_registry(store, target_key)
         return {"issue_id": issue["issue_id"], "state": state, "outcome": "undetermined" if state == "inconclusive" else None}
     anchor = str(issue["anchor_cluster_key"])
@@ -716,8 +775,9 @@ def resolve_issue(store: RiskStore, panel_id: str, *, settings: Any = None) -> d
                     "contest_note": next((_str(_loads(a["finding_json"], {}).get("contest_note")) for a in atoms
                                           if _str(_loads(a["finding_json"], {}).get("contest_note"))), "")}
     with store.tx():
-        store.execute("UPDATE rr_issues SET state = ?, state_reason = ?, outcome = ?, outcome_json = ?, updated_at = ?"
-                      " WHERE issue_id = ?", (state, reason, outcome, common.canonical_json(outcome_json), now,
-                                              issue["issue_id"]))
+        # 새 결과가 옛 결과를 바꾼다 — 다시 토의 표기(reraised_json)는 내리고, 사람의 올리기는 그 패널로 끝났다(이제 코드 상태다).
+        store.execute("UPDATE rr_issues SET state = ?, state_reason = ?, outcome = ?, outcome_json = ?, reraised_json = NULL,"
+                      " status_source = 'code', updated_at = ? WHERE issue_id = ?",
+                      (state, reason, outcome, common.canonical_json(outcome_json), now, issue["issue_id"]))
         _sync_registry(store, target_key)
     return {"issue_id": issue["issue_id"], "state": state, "outcome": outcome}

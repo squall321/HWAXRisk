@@ -82,6 +82,8 @@ CARD_REVIEW_SOURCE = "card_review"
 ATTENTION_ORDER: dict[str, int] = {"A": 0, "B": 1, "C": 2, "D": 3}
 # 쟁점 상태 → 등록부 issue_state(v5 열 어휘). 끝난 쟁점은 결과(outcome)를, 판정을 못 낸 쟁점(inconclusive)은 undetermined 를 싣는다.
 _ISSUE_DONE_STATES = ("resolved", "inconclusive")
+# 패널이 판정한 뒤 근거(제기자·반대자·주장값)가 바뀐 쟁점의 표기(재설계 M3 review1 H3 — 등록부·보고서·길잡이가 같은 글을 쓴다).
+REARGUE_LABEL = "패널 판정 — 근거 바뀜, 다시 토의 필요"
 
 
 def target_purged(store: RiskStore, target_key: str) -> bool:
@@ -550,14 +552,18 @@ def _apply_issue(row: dict, merged: dict, issue: Mapping[str, Any], members: Seq
                  w_det: float, contested: int) -> None:
     """닻 쟁점의 결과를 행에 얹는다(S3-4 · 3.5 표 — 덮되 원래 분포를 같은 줄에, D-34).
 
-    upheld · downgraded · escalated — 그 쟁점의 지금 패널(`rr_issues.panel_id`) 원자 가운데 살아 있는 리스크 원자(sev3 가 가장
-    큰 것)의 심각도·판정·근거 등급으로 행을 덮고 우선순위를 다시 센다. 구성원에서 셈한 값은 merged.before_issue 에 남는다.
+    upheld · downgraded · escalated — 그 결과를 낸 패널(`outcome_json.panel_id` — 없으면 `rr_issues.panel_id`) 원자 가운데 살아 있는
+    리스크 원자(sev3 가 가장 큰 것)의 심각도·판정·근거 등급으로 행을 덮고 우선순위를 다시 센다. 구성원에서 셈한 값은
+    merged.before_issue 에 남는다. 근거가 바뀌어 다시 줄을 선 쟁점(review1 H3)도 새 패널이 결과를 바꾸기 전까지 옛 패널의 덮어쓰기를
+    그대로 둔다 — 결과가 있는 쟁점은 상태와 상관없이 덮는다.
     rejected — 사람 finding 이 없으면 코드 상태를 rejected_in_panel 로 둔다(지지 수는 지우지 않는다 — '제기 12명 · 패널 기각').
-    undetermined·끝나지 않은 쟁점 — 쟁점 id·상태만 적는다."""
+    undetermined·결과가 없는 쟁점 — 쟁점 id·상태만 적는다. 판정 뒤 근거가 바뀐 쟁점은 merged.issue_reraised 에 표기·무엇이
+    바뀌었나를 단다."""
     row["issue_id"] = _clean_str(issue.get("issue_id")) or None
     row["issue_state"] = issue_state_of(issue)
-    if _clean_str(issue.get("state")) != "resolved":
-        return
+    reraised = _loads(issue.get("reraised_json"), {})
+    if reraised:
+        merged["issue_reraised"] = {"label": REARGUE_LABEL, **{k: reraised[k] for k in sorted(reraised)}}
     outcome = _clean_str(issue.get("outcome"))
     if outcome == "rejected":
         if not row["human_n"]:
@@ -565,8 +571,9 @@ def _apply_issue(row: dict, merged: dict, issue: Mapping[str, Any], members: Seq
         return
     if outcome not in ("upheld", "downgraded", "escalated"):
         return
+    decided_by = _clean_str(_loads(issue.get("outcome_json"), {}).get("panel_id")) or _clean_str(issue.get("panel_id"))
     atoms = [m for m in members if _clean_str(m.get("source_kind")) == ISSUE_PANEL_SOURCE
-             and _clean_str(m.get("source_id") or m.get("panel_id")) == _clean_str(issue.get("panel_id"))
+             and _clean_str(m.get("source_id") or m.get("panel_id")) == decided_by
              and _clean_str(m.get("status")) != "rejected_in_panel" and _clean_str(m.get("direction")) != "improvement"]
     if not atoms:
         return
@@ -766,8 +773,8 @@ def merge(store: RiskStore, target_key: str, *, owner_sub: str | None = None, pe
     roster_domain = {str(r["agent_key"]): str(r["domain"]) for r in store.query(
         "SELECT agent_key, domain FROM rr_roster WHERE target_key = ?", (target_key,))}
     issues = ({str(r["anchor_cluster_key"]): dict(r) for r in store.query(
-        "SELECT issue_id, anchor_cluster_key, state, outcome, panel_id FROM rr_issues WHERE target_key = ?",
-        (target_key,))} if flow == "cells" else {})
+        "SELECT issue_id, anchor_cluster_key, state, outcome, outcome_json, panel_id, reraised_json FROM rr_issues"
+        " WHERE target_key = ?", (target_key,))} if flow == "cells" else {})
 
     buckets: dict[tuple[str, str], list[dict]] = {}
     alias_cache: dict[str, str] = {}

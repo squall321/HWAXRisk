@@ -11,7 +11,7 @@ import json
 
 import pytest
 
-from app import brief, config, issues, registry, routes, runner, units
+from app import brief, config, issues, registry, review_runner, routes, runner, units
 from app.common import canonical_json
 from app.errors import AppError
 from tests.synth import fake_review_engine as fre
@@ -447,7 +447,8 @@ def engine_panel(store, issue_id: str) -> str:
 
 # ---------------------------------------------------------------- 다시 고르기(S3-6 ⑧ ⑨) — 끝난 쟁점이 서야 본다
 def test_a_resolved_issue_comes_back_only_when_its_raisers_change(store, monkeypatch, tmp_path):
-    """S3-6 ⑧ — 끝난 쟁점은 근거(제기자·반대자·주장값)가 그대로면 다시 골라도 그대로다. 새 제기자가 서면 queued 로 돌아간다."""
+    """S3-6 ⑧ — 끝난 쟁점은 근거(제기자·반대자·주장값)가 그대로면 다시 골라도 그대로다. 새 제기자가 서면(상한에 자리가 있을 때)
+    queued 로 돌아가되 앞 패널의 결과는 새 패널이 바꿀 때까지 둔다(review1 H3 — 무엇이 바뀌었나는 reraised_json)."""
     key = rig.target(store)
     (unit,) = [u["unit_id"] for u in units.load_units(store, key)[:1]]
     _review(store, key, (SEAL,), [unit], verdicts={"K01": ("yes", "FAIL")})
@@ -464,7 +465,8 @@ def test_a_resolved_issue_comes_back_only_when_its_raisers_change(store, monkeyp
     registry.merge(store, key)
     _select(store, monkeypatch, tmp_path, key, cap=2)
     again = _issue(store, key, anchor)
-    assert again["state"] == "queued" and again["basis_hash"] != resolved["basis_hash"] and again["outcome"] is None
+    assert again["state"] == "queued" and again["basis_hash"] != resolved["basis_hash"] and again["outcome"] == "upheld"
+    assert json.loads(again["reraised_json"])["raisers_added"] == ["mech-syn-0"]
 
 
 def test_the_cap_counts_the_panels_a_target_already_ran_across_rounds(store, monkeypatch, tmp_path):
@@ -490,6 +492,93 @@ def test_issue_panels_keep_the_ledger_invariants(store, monkeypatch, tmp_path):
     assert planner.check_invariants(store, key) == []
     store.execute("UPDATE rr_issues SET panel_id = 'elsewhere' WHERE panel_id = ?", (panel["id"],))   # 어긋남을 만든다
     assert any("(8)" in p for p in planner.check_invariants(store, key))
+
+
+# ---------------------------------------------------------------- 반대 검토 1차(review1)
+REARGUE = "패널 판정 — 근거 바뀜, 다시 토의 필요"
+
+
+def _retry_ok(store, key: str, agent: str, unit: str) -> None:
+    """사람의 다시(셀 꾸러미 처분) — 그 셀을 K01 OK 로 다시 본다(제기자가 빠진다)."""
+    cell = dict(store.query_one("SELECT unit_id, agent_key, state FROM rr_review_cells WHERE target_key = ? AND agent_key = ?"
+                                " AND unit_id = ?", (key, agent, unit)))
+    made = review_runner.dispose_cells(store, key, action="retry", rows=[cell], decided_by=OWNER, owner_sub=OWNER,
+                                       note="다시 본다", force=True, start=True, consent=True, consent_source="web")
+    fake = FakeReviewEngine(rig.packs())
+    fake.verdicts = {_rid("K01"): ("yes", "OK")}
+    rig.Rig(store, fake).finish(made["job"]["job_id"])
+    registry.merge(store, key)
+
+
+def test_a_resolved_issue_keeps_its_panel_verdict_when_its_evidence_changes_and_the_cap_is_full(store, monkeypatch,
+                                                                                                 tmp_path):
+    """H3(결정) — 패널이 결과를 낸 쟁점은 다시 고를 때 상한으로 밀려나지 않고 결과·패널을 잃지 않는다. 근거가 바뀌면 결과를 두고
+    reraised_json 에 무엇이 언제 바뀌었는지 적으며, 등록부는 패널 덮어쓰기(before_issue 포함)를 그대로 두고 '패널 판정 — 근거 바뀜,
+    다시 토의 필요' 를 단다. 보고서는 그 쟁점을 미토의가 아니라 그 표기로 싣는다."""
+    from app import synth
+
+    key, (unit,) = _ledger(store)
+    anchor = _k01_anchor(store, key, unit)
+    _select(store, monkeypatch, tmp_path, key, cap=1)
+    _run_issues(store, config.settings, IssuePanelEngine(store, {"*": {"severity": "치명", "judgement": "FAIL"}}), key)
+    decided = _issue(store, key, anchor)
+    assert (decided["state"], decided["outcome"]) == ("resolved", "escalated")
+    _retry_ok(store, key, "mech-syn-0", unit)
+    issues.select_issues(store, key, selected_round=2)
+    after = _issue(store, key, anchor)
+    assert (after["state"], after["outcome"], after["panel_id"]) == ("resolved", "escalated", decided["panel_id"])
+    assert after["outcome_json"] == decided["outcome_json"] and after["basis_hash"] == decided["basis_hash"]
+    reraised = json.loads(after["reraised_json"])
+    assert reraised["round"] == 2 and reraised["at"] >= decided["updated_at"] and reraised["basis_hash"] != after["basis_hash"]
+    assert reraised["raisers_removed"] == ["mech-syn-0"]
+    registry.merge(store, key)
+    row = _row(store, key, anchor)
+    assert (row["severity"], row["judgement"]) == ("치명", "FAIL") and row["merged"]["before_issue"]["judgement"] == "WARNING"
+    assert row["merged"]["issue_reraised"]["label"] == REARGUE
+    report = synth.report_source(store, key, version=synth.assemble_report(store, key, trigger="manual")["version_no"])
+    summary = "\n".join(t for p in report["pages"] if p["kind"] == "summary" for b in synth.BLOCKS for t in p["blocks"][b])
+    line = next(t for t in summary.split("\n") if f"reg:{anchor}" in t)
+    assert REARGUE in line and "미토의" not in line
+
+
+def test_a_reraised_resolved_issue_goes_back_to_a_panel_when_the_cap_has_room_and_the_new_verdict_replaces_the_old(
+        store, monkeypatch, tmp_path):
+    """H3(결정) — 상한에 자리가 있으면 근거가 바뀐 결과 쟁점은 새 패널로 다시 줄을 선다. 그동안 등록부는 옛 패널 덮어쓰기를 그대로
+    두고, 새 패널의 결과가 옛 결과를 바꾼다(그때 다시 토의 표기는 내려간다)."""
+    key, (unit,) = _ledger(store)
+    anchor = _k01_anchor(store, key, unit)
+    _select(store, monkeypatch, tmp_path, key, cap=1)
+    _run_issues(store, config.settings, IssuePanelEngine(store, {"*": {"severity": "치명", "judgement": "FAIL"}}), key)
+    first_panel = _issue(store, key, anchor)["panel_id"]
+    _retry_ok(store, key, "mech-syn-0", unit)
+    _select(store, monkeypatch, tmp_path, key, cap=2)
+    queued = _issue(store, key, anchor)
+    assert (queued["state"], queued["outcome"], queued["panel_id"]) == ("queued", "escalated", first_panel)
+    registry.merge(store, key)
+    assert (_row(store, key, anchor)["severity"], _row(store, key, anchor)["judgement"]) == ("치명", "FAIL")
+    _run_issues(store, config.settings, IssuePanelEngine(store, {"*": {"severity": "중대", "judgement": "WARNING"}}), key)
+    done = _issue(store, key, anchor)
+    assert done["state"] == "resolved" and done["panel_id"] != first_panel and done["reraised_json"] is None
+    assert json.loads(done["outcome_json"])["panel_id"] == done["panel_id"]
+    row = _row(store, key, anchor)
+    assert (row["severity"], row["judgement"]) == ("중대", "WARNING") and "issue_reraised" not in row["merged"]
+
+
+def test_a_human_queue_or_skip_survives_reselection_even_above_the_cap(store, monkeypatch, tmp_path):
+    """L1(결정) — 사람의 올리기·건너뛰기(status_source='human')는 자동 다시 고르기보다 앞선다 — 상한 밖으로 올린 쟁점도 다시 고르기가
+    untried_cap 으로 되돌리지 않는다(상한은 자동 선정의 몫이다)."""
+    from tests import factories
+
+    key, unit_ids = _ledger(store, units_n=2)
+    _select(store, monkeypatch, tmp_path, key, cap=1)
+    rows = issues.issue_rows(store, key)
+    over = next(r for r in rows if r["state"] == "untried_cap")
+    with factories.routes_store(store):
+        routes.put_issue(over["issue_id"], routes.IssueActionBody(action="queue", reason="상한을 넘겨 본다"),
+                         ident=factories.ident(OWNER))
+    issues.select_issues(store, key, selected_round=2)
+    kept = next(r for r in issues.issue_rows(store, key) if r["issue_id"] == over["issue_id"])
+    assert (kept["state"], kept["status_source"]) == ("queued", "human")
 
 
 def test_the_issue_result_line_names_the_same_atom_as_the_outcome_and_the_registry(store, monkeypatch, tmp_path):

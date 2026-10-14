@@ -651,6 +651,15 @@ def _issue_line(issue: Mapping[str, Any]) -> str:
         tail = f" → 쟁점 패널 {words.get(issue['outcome'], issue['outcome'])}"
         if outcome.get("severity_after"):
             tail += f" severity={outcome['severity_after']} · judgement={outcome.get('judgement_after') or '-'}"
+        reraised = _loads(issue.get("reraised_json"), {}) or {}
+        if reraised:
+            # 패널이 판정한 뒤 근거가 바뀌었다(review1 H3) — 결과는 그대로 싣되 다시 토의가 필요하다고 크게 적는다.
+            moved = [f"{label} {', '.join(reraised[k])}" for k, label in (
+                ("raisers_added", "제기 +"), ("raisers_removed", "제기 −"), ("opposers_added", "반대 +"),
+                ("opposers_removed", "반대 −")) if reraised.get(k)]
+            tail += f" — **{registry.REARGUE_LABEL}**" + (f"({' · '.join(moved)})" if moved else "")
+            if issue.get("state") == "queued":
+                tail += " · 새 패널 대기"
         return head + tail
     return head + f" → {issue['state']}" + (f"({issue['state_reason']})" if issue.get("state_reason") else "")
 
