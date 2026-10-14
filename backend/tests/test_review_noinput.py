@@ -334,6 +334,26 @@ def test_a_skipped_input_gap_cells_unknown_impact_goes_where_a_reviewed_cells_wo
     assert "입력 결손 영향 모름 1줄 — 입력 결손 절" in expert_report.render_report_md(report)
 
 
+@pytest.mark.parametrize("script, more, kept", [
+    # ① 한 답 안의 두 줄(같은 카드 · 경로 · 줄, 제목 없음 → 같은 대신 제목) — 엔진은 내용 전부로 가려 둘 다 냈다. 앱이 합치지 않는다
+    ([[{"impact": "yes", "title": "", "path": "P", "k": "K01", "why": "까닭 하나", "sev": "경미"},
+       {"impact": "yes", "title": "", "path": "P", "k": "K01", "why": "까닭 둘", "sev": "치명"}]], 0, ["경미", "치명"]),
+    # ② 다시 물었더니 같은 줄이 같은 영향 · 더 무거운 심각도로 왔다 — 비기면 더 무거운 쪽이 남는다
+    ([[{"impact": "yes", "title": "A", "path": "X", "sev": "경미"}], [{"impact": "yes", "title": "A", "path": "X", "sev": "치명"}]],
+     1, ["치명"]),
+])
+def test_q1_rows_merge_only_across_reasks_and_a_tie_keeps_the_more_severe(store, script, more, kept):
+    """반대 검토 2차 LOW 5 · D-46 — q1 의 겹침은 다시 묻기 사이에서만 가른다. 한 답 안의 줄은 엔진이 낸 그대로 둔다(종전에는 같은
+    정체의 두 영향이 하나로 합쳐져 가벼운 쪽이 남았고 finding 심각도가 경미였다). 다시 묻기 사이에서 영향이 비기면 더 무거운
+    심각도가 남는다. finding 의 심각도는 남은 줄에서 나온다(치명은 hold 정책으로 중대)."""
+    key, first, _fake = _one_gap_cell(store, script, more=more)
+    q1 = (_cell(store, key, first, MEM1)["extras"].get("noinput") or {}).get("q1") or []
+    assert [r["sev"] for r in q1 if r["impact"] == "yes"] == kept
+    severities = [r["severity"] for r in store.query("SELECT severity FROM rr_findings WHERE target_key = ?"
+                                                         " AND source_kind = 'card_review'", (key,))]
+    assert severities and max(severities, key=lambda s: {"경미": 1, "중대": 2}.get(s, 0)) == "중대"
+
+
 def test_a_flipped_or_contested_non_hit_q1_is_kept_and_named_as_such(store):
     """반대 검토 MEDIUM 5 — 보충이 앞 답(모름 — 걸림)을 '없음' 으로 갈아 끼운 q1(flipped_from · raw)은 그 표지가 셀 기록과 보고서에
     남는다. 없음 줄에 실린 다툼은 '검증된 철회가 이 영향을 다퉜다' 가 아니라 '같은 카드의 다른 답이 이 줄과 부딪쳤다' 다."""

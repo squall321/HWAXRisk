@@ -670,12 +670,18 @@ def should_stop_review(store: Any, job_id: str, stop: threading.Event | None = N
     return ask
 
 
-# 입력 결손 q1 줄의 정체와 세기(반대 검토 HIGH 1) — 같은 정체의 줄이 다시 오면 더 센 영향만 남는다.
+# 입력 결손 q1 줄의 정체와 세기(반대 검토 HIGH 1 · 2차 LOW 5) — 다시 묻기에서 같은 정체의 줄이 다시 오면 더 센 영향이, 영향이 비기면
+# 더 무거운 심각도가 남는다(심각도 차례는 보고서의 것과 같다).
 _IMPACT_RANK = {"yes": 2, "unknown": 1, "no": 0}
+_SEV_RANK = {"경미": 1, "중대": 2, "치명": 3}
 
 
 def _q1_identity(row: Mapping[str, Any]) -> tuple:
     return (row.get("k"), row.get("path"), tuple(row.get("l") or ()), row.get("title"))
+
+
+def _q1_strength(row: Mapping[str, Any]) -> tuple[int, int]:
+    return _IMPACT_RANK.get(str(row.get("impact")), 0), _SEV_RANK.get(str(row.get("sev") or ""), 0)
 
 
 # ---------------------------------------------------------------- 진행 신호(progress_json)
@@ -1834,17 +1840,18 @@ class _Session:
             accepted = review_verify.accept_rows(answer.result, kind="noinput", sent_aliases=cards, pack=self.pack,
                                                  unit_refs=cell.refs)
             self._note(cell, "noinput", None, cards, answer.result, accepted)
+            # 앞 답들이 남긴 줄의 정체 — 이 답 안의 줄끼리는 합치지 않는다(엔진이 내용 전부로 가려 낸 줄이다, 2차 LOW 5 · D-46)
             seen = {_q1_identity(r): i for i, r in enumerate(q1)}
             asks = {(r["item"], r["needs"]) for r in q2}
             for row in accepted["rows"]:
                 if row["t"] == "q1":
-                    # 겹침은 엔진의 줄 정체(카드 · 경로 · 줄 · 제목)로 가른다 — 엔진은 제목이 같아도 경로가 다르면 둘 다 남긴다(RB3-2).
-                    # 같은 정체면 더 센 영향(있음 > 모름 > 없음)이 남는다 — 걸림 아닌 줄이 걸림을 가리지 않는다(반대 검토 HIGH 1).
-                    at = seen.get(_q1_identity(row))
+                    # 다시 묻기 사이의 겹침은 엔진의 줄 정체(카드 · 경로 · 줄 · 제목)로 가른다 — 엔진은 제목이 같아도 경로가 다르면 둘 다
+                    # 남긴다(RB3-2). 같은 정체면 더 센 영향(있음 > 모름 > 없음), 비기면 더 무거운 심각도가 남는다 — 걸림 아닌 줄이
+                    # 걸림을 가리지 않는다(반대 검토 HIGH 1). 앞 줄 하나는 이 답의 줄 하나와만 견준다.
+                    at = seen.pop(_q1_identity(row), None)
                     if at is None:
-                        seen[_q1_identity(row)] = len(q1)
                         q1.append(row)
-                    elif _IMPACT_RANK.get(row["impact"], 0) > _IMPACT_RANK.get(q1[at]["impact"], 0):
+                    elif _q1_strength(row) > _q1_strength(q1[at]):
                         q1[at] = row
                 elif row["t"] == "q2" and (row["item"], row["needs"]) not in asks:
                     asks.add((row["item"], row["needs"]))
