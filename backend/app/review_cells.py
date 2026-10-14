@@ -751,17 +751,22 @@ def widen(store: Any, target_key: str, domain: str, *, now: int | None = None) -
 def audit_topup(store: Any, target_key: str, job_id: str, *, audit_pct: float, salt: str, now: int | None = None) -> dict:
     """잡 끝 보충 표본(m3-cells 3.4) — 거를 수 있던 셀(거름 + 표본)의 수 N 에서 `n_audit = max(ceil(audit_pct% × N), min(N, 59))`
     와 거른 셀이 있는 영역마다 1건을 채울 때까지, 그 잡이 분류한 거른 셀을 `sample_score('filter_audit')` 오름차순으로 다시 연다
-    (filter_floor — 영역 바닥이 먼저다). 그 잡 범위 밖이라 못 채운 수는 `short` 로 남는다(완결 몫이 floor_met 로 낸다).
+    (filter_floor — 영역 바닥이 먼저다). 바닥은 결과를 낸 표본과 아직 결과를 낼 수 있는 표본(도는 것 · 사람의 처분을 기다리는
+    실패 — 다시 하면 표지가 남아 결과를 낸다)만 센다. 결과 없이 닫힌 표본(넘긴 것)은 세지 않고 그 자리를 채운다(반대 검토 2차
+    MEDIUM 4 · D-46 — 완결 몫은 결과를 낸 것만 센다). 실패를 곧바로 채우지 않는 것은 실패가 그 전문가의 같은 까닭이면 영역의 거른
+    셀을 차례로 실패로 바꾸기 때문이다. 그 잡 범위 밖이라 못 채운 수는 `short` 로 남는다(완결 몫이 floor_met 로 낸다).
     반환 {n, n_audit, sampled, need, reopened, short, domains_short}."""
     import math  # noqa: PLC0415
 
     now = now_epoch() if now is None else now
     rows = [dict(r) for r in store.query(
-        "SELECT unit_id, agent_key, domain, state, run_id, json_extract(sample_json, '$.filter_audit') AS audit"
+        "SELECT unit_id, agent_key, domain, state, run_id, json_extract(sample_json, '$.filter_audit') AS audit,"
+        " json_extract(sample_json, '$.filter_audit.result') AS result"
         " FROM rr_review_cells WHERE target_key = ? AND (route = 'filtered' OR route = 'audit')", (target_key,))]
     filtered = [r for r in rows if r["state"] == "na_irrelevant"]
-    audited = [r for r in rows if r["audit"] is not None]
-    n = len(filtered) + len(audited)
+    marked = [r for r in rows if r["audit"] is not None]
+    audited = [r for r in marked if r["result"] in AUDIT_RESULTS or r["state"] in (*OPEN_CELL_STATES, "failed")]
+    n = len(filtered) + len(marked)
     if not filtered:
         return {"n": n, "n_audit": 0, "sampled": len(audited), "need": 0, "reopened": 0, "short": 0, "domains_short": []}
     n_audit = max(math.ceil(float(audit_pct) / 100.0 * n), min(n, AUDIT_MIN_N))

@@ -834,6 +834,37 @@ def test_an_audit_that_never_produced_a_result_does_not_meet_the_floor(store, mo
     assert residual["blocking"] is True
 
 
+def test_an_audit_closed_without_a_result_is_replaced_by_the_next_top_up(store, monkeypatch):
+    """반대 검토 2차 MEDIUM 4 · D-46 — 잡 끝 보충 표본이 바닥을 셀 때 결과를 낸 표본과 아직 도는 표본만 센다. 결과 없이 닫힌 표본(끝내
+    실패해 넘긴 것)은 세지 않고 그 자리를 다른 거른 셀로 채운다 — 종전에는 표지만 보고 세어 need 0 이라 아무것도 다시 열지 않았고,
+    완결 몫(결과를 낸 것만 센다)은 floor_met 거짓이라 사람의 확인 없이는 풀리지 않았다."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    key = rig.target(store, ROSTER)
+    us = units.load_units(store, key)
+    bundles = [u["unit_id"] for u in us if u["kind"] == "bundle"]
+    fake = _fake(ROSTER)
+    _quiet(fake, *bundles)
+    for u in us:
+        fake.noinput_q1[u["unit_id"]], fake.noinput_q2[u["unit_id"]] = ["no"], [""]
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]}))
+    monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 1)
+    fake.error_cells = {(MEM2, u): {"code": "no_rows", "message": "행이 없다(가짜)", "infra": False, "retryable": False}
+                        for u in bundles}
+    r.finish(rig.job(store, key, scope={"agents": [MEM2]}))
+    failed = next(c for c in _cells(store, key) if c["agent_key"] == MEM2 and c["state"] == "failed")
+    fake.error_cells = {}
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(cells=[[failed["unit_id"], MEM2]], reason="표본이 끝내 실패했다"),
+                                 ident=factories.ident(rig.OWNER))
+    r.finish(out["job"]["job_id"])
+    cells = [c for c in _cells(store, key) if c["agent_key"] == MEM2 and c["unit_id"] in bundles]
+    replaced = [c for c in cells if c["route_forced"] == review_cells.FILTER_FLOOR and c["state"] in ("reviewed", "no_input")]
+    assert [c["unit_id"] for c in replaced] != [] and failed["unit_id"] not in [c["unit_id"] for c in replaced]
+    audit = review_cells.closure_cells(store, key)["filtered"]["audit"]
+    assert (audit["sampled"], audit["failed"], audit["floor_met"]) == (1, 1, True)
+
+
 def test_the_job_end_top_up_reopens_cells_an_ended_job_filtered_and_stamps_them_with_its_own_job(store, monkeypatch):
     """반대 검토 MEDIUM 7 — 잡 끝 보충 표본은 끝난(취소된) 잡이 거른 셀도 고른다 — 그 셀을 이 잡 id 로 찍어 이 잡이 끝까지 돌린다.
     종전에는 제 잡이 거른 셀만 골라 앞 잡을 취소하면 거른 셀이 영영 거른 채였고(바닥 미달) 잔여가 확인 없이는 풀리지 않았다."""
