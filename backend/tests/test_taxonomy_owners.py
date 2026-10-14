@@ -1,6 +1,8 @@
-# 택소노미 1.2(메커니즘 14종, 재설계 M3 S3-2) — 옛 38행 보존 · 대분류 일치 · 1.1 별칭 보존 · 1.1 finding 정규화 불변
-"""D-34 가 광학·음향·RF·방수·ESD·자기 등 14종을 더했다. 1.1 에서 이미 코드로 풀리던 낱말·finding 은 1.2 에서도 같은 코드다 — 비교
-기준은 얼린 1.1 자산(`tests/fixtures/taxonomy/taxonomy.1.1.json`, HWAXRisk 3aea93b 의 것)이다.
+# 택소노미 1.2(메커니즘 14종)와 메커니즘 → 영역 배정표(재설계 M3 S3-2) — 불변식 · 승인 문 · 읽는 함수 · 1.1 별칭 보존
+"""배정표(`assets/mech-owners.v1.json`)는 사람이 훑고 승인하는 정책이고(D-35 — 초안은 review_status draft), 거르기의 코드 신호·쟁점 패널의
+인접 석·카드 대조 finding 의 영역 밖 표지가 같은 표를 읽는다. 승인 전에는 코드 신호가 전 영역 '모름' 이라 거르기가 일어나지 않는다.
+1.1 에서 이미 코드로 풀리던 낱말·finding 은 1.2 에서도 같은 코드다 — 비교 기준은 얼린 1.1 자산(`tests/fixtures/taxonomy/taxonomy.1.1.json`,
+HWAXRisk 3aea93b 의 것)이다.
 """
 from __future__ import annotations
 
@@ -9,6 +11,7 @@ import gzip
 import json
 import shutil
 import sqlite3
+from collections import Counter
 from pathlib import Path
 
 import pytest
@@ -150,3 +153,129 @@ def test_findings_that_1_1_resolved_resolve_the_same_under_1_2(under, tmp_path):
     resolved = {p: v for p, v in old.items() if v[1] != "unclassified"}
     assert resolved and {p: new[p] for p in resolved} == resolved
     assert {p: (old[p], new[p]) for p in old if old[p] != new[p]} == {}
+
+
+# ---------------------------------------------------------------- 메커니즘 → 영역 배정표
+def _owners_doc() -> dict:
+    return taxonomy.load_json(taxonomy.MECH_OWNERS_ASSET)
+
+
+def test_the_owner_table_covers_every_active_code_once_with_known_domains_and_no_overlap():
+    """불변식 넷(M3.md 4.9) — 택소노미 active 코드마다 정확히 한 행 · 소유 1개 이상, 영역 이름은 택소노미 영역 15개 안, 15개 영역이 전부
+    어느 행엔가 나온다(닿지 않는 영역은 코드 신호가 늘 '무관' 이라 훑기 하나로 걸러진다 — 두 신호 규칙이 무너진다), 한 행에서 소유와
+    관련이 겹치지 않는다. 행 차례는 택소노미 축 차례다."""
+    doc = _owners_doc()
+    rows = doc["rows"]
+    domains = set(_domains())
+    assert len(domains) == 15
+    assert [r["code"] for r in rows] == _active(taxonomy.load_taxonomy())
+    for row in rows:
+        assert set(row) == {"code", "owners", "related"}, row["code"]
+        assert row["owners"] and len(set(row["owners"])) == len(row["owners"]), row["code"]
+        assert len(set(row["related"])) == len(row["related"]), row["code"]
+        assert not set(row["owners"]) & set(row["related"]), row["code"]
+        assert set(row["owners"]) | set(row["related"]) <= domains, row["code"]
+    assert {d for r in rows for d in r["owners"] + r["related"]} == domains
+    assert doc["mech_owners_version"] == "1.0"
+    assert doc["taxonomy_version"] == taxonomy.load_taxonomy()["taxonomy_version"]
+
+
+def test_the_review_status_is_a_gate_value_with_a_reviewer_once_approved():
+    """review_status 는 draft · approved 둘 중 하나다. 승인 커밋은 review_status·reviewed_by·reviewed_at 을 함께 고친다(D-35 — 그 전에는
+    둘 다 비어 있다)."""
+    doc = _owners_doc()
+    assert doc["review_status"] in ("draft", taxonomy.APPROVED)
+    if doc["review_status"] == taxonomy.APPROVED:
+        assert doc["reviewed_by"] and doc["reviewed_at"]
+    else:
+        assert doc["reviewed_by"] is None and doc["reviewed_at"] is None
+
+
+def test_the_draft_is_the_table_handed_to_the_user():
+    """초안(review_status draft)은 m3-synthesis 3.4 의 52행이다 — 그 문서가 '훑을 때 봐 주면 좋은 셋' 으로 적은 수가 이 자산의 수와
+    같다(xd 24개 — 소유 11 · 관련 13, mech 41개, rel 27개, mem·std 는 관련으로만, 재질 계열 넷의 첫 소유가 rel — P-15). 사용자가 표를
+    고쳐 승인하면 이 시험은 건너뛴다(승인본이 정본이다)."""
+    doc = _owners_doc()
+    if doc["review_status"] != "draft":
+        pytest.skip("배정표가 승인됐다 — 초안의 수는 더 보지 않는다")
+    rows = doc["rows"]
+    owners = Counter(d for r in rows for d in r["owners"])
+    related = Counter(d for r in rows for d in r["related"])
+    assert len(rows) == 52
+    assert (owners["xd"], related["xd"]) == (11, 13)
+    assert owners["mech"] + related["mech"] == 41 and owners["rel"] + related["rel"] == 27
+    assert owners["mem"] == owners["std"] == 0 and related["mem"] == related["std"] == 5
+    first = {r["code"]: r["owners"][0] for r in rows}
+    assert {c: first[c] for c in ("material.creep", "material.moisture", "material.corrosion",
+                                  "material.adhesive_aging")} == dict.fromkeys(
+        ("material.creep", "material.moisture", "material.corrosion", "material.adhesive_aging"), "rel")
+    assert {c: first[c] for c in NEW_1_2} == {
+        "optical.alignment": "cam", "optical.stray_light": "cam", "optical.contamination": "cam",
+        "acoustic.leak": "sh", "acoustic.resonance": "sh", "acoustic.port_block": "sh", "rf.detune": "rf",
+        "rf.efficiency": "rf", "rf.isolation": "rf", "rf.sar": "rf", "interface.seal_compression": "mech",
+        "interface.ingress_path": "mech", "electrical.esd": "rel", "electrical.magnetic_interference": "sh"}
+
+
+def test_the_read_functions_follow_the_table():
+    table = taxonomy.mech_owners()
+    assert table["thermal.cte_mismatch"] == {"owners": ("rel", "material"), "related": ("pcb", "mech", "sim", "disp")}
+    assert list(table) == [r["code"] for r in _owners_doc()["rows"]]
+    roles = taxonomy.domains_for(["thermal.cte_mismatch", "mechanical.bending", "no.such_code", "no.such_code"])
+    assert roles["mech"] == "owner"                                      # 한 코드의 관련 · 다른 코드의 소유 → 소유
+    assert roles["rel"] == "owner" and roles["disp"] == "related" and "xd" not in roles
+    assert roles.unknown == ("no.such_code",)
+    assert taxonomy.domains_for([]) == {} and taxonomy.domains_for([]).unknown == ()
+    mem = taxonomy.mechanisms_of("mem")
+    assert mem["owner"] == [] and mem["related"] == ["thermal.solder_fatigue", "electrical.net", "electrical.si_pi",
+                                                     "electrical.pad_lift", "process.solder"]
+    sh = taxonomy.mechanisms_of("sh")
+    assert sh["owner"] == ["acoustic.leak", "acoustic.resonance", "acoustic.port_block",
+                           "electrical.magnetic_interference"]
+    for domain in _domains():
+        split = taxonomy.mechanisms_of(domain)
+        assert split["owner"] or split["related"], domain
+        assert not set(split["owner"]) & set(split["related"]), domain
+    meta = taxonomy.mech_owners_meta()
+    assert set(meta) == {"version", "taxonomy_version", "review_status", "reviewed_by", "reviewed_at", "approved"}
+    assert meta["approved"] is (meta["review_status"] == taxonomy.APPROVED)
+
+
+def _approved(monkeypatch, **changes) -> None:
+    """배정표를 승인본으로 바꿔 끼운다(시험 안에서만 — 표의 행은 그대로)."""
+    real = taxonomy.load_json
+    doc = {**copy.deepcopy(real(taxonomy.MECH_OWNERS_ASSET)), "review_status": taxonomy.APPROVED,
+           "reviewed_by": "reviewer@example.com", "reviewed_at": "2026-10-14", **changes}
+    monkeypatch.setattr(taxonomy, "load_json", lambda name: doc if name == taxonomy.MECH_OWNERS_ASSET else real(name))
+
+
+def test_before_approval_the_code_signal_is_unknown_for_every_domain(monkeypatch):
+    """승인 문(#40) — 배정표가 승인 전이면 domains_for 의 결과에 approved: false 가 실리고, 코드 신호는 소유 영역까지 전 영역 '모름' 이다
+    (거르기가 일어나지 않는다). 표 자체(소유·관련)는 승인과 상관없이 그대로 준다 — 인접 석·영역 밖 표지는 표를 쓴다."""
+    _approved(monkeypatch, review_status="draft", reviewed_by=None, reviewed_at=None)
+    roles = taxonomy.domains_for(["mechanical.bending"])
+    assert roles.approved is False and taxonomy.mech_owners_meta()["approved"] is False
+    assert roles["mech"] == "owner"
+    assert {d: roles.signal(d) for d in _domains()} == dict.fromkeys(_domains(), "unknown")
+    assert {d: taxonomy.domains_for([]).signal(d) for d in _domains()} == dict.fromkeys(_domains(), "unknown")
+
+
+def test_after_approval_the_code_signal_reads_the_table(monkeypatch):
+    """승인 뒤 — 소유 ∪ 관련은 related, 그 밖은 unrelated, 표에 없는 코드가 하나라도 섞이면 나머지는 unknown, 메커니즘이 없으면
+    (설계 변경이 아니다) 전부 unrelated 다."""
+    _approved(monkeypatch)
+    roles = taxonomy.domains_for(["mechanical.bending"])
+    assert roles.approved is True and taxonomy.mech_owners_meta()["approved"] is True
+    near = {"mech", "sim", "disp", "pcb", "rel", "passive"}
+    assert {d: roles.signal(d) for d in _domains()} == {d: "related" if d in near else "unrelated" for d in _domains()}
+    mixed = taxonomy.domains_for(["mechanical.bending", "no.such_code"])
+    assert {d: mixed.signal(d) for d in _domains()} == {d: "related" if d in near else "unknown" for d in _domains()}
+    assert {d: taxonomy.domains_for([]).signal(d) for d in _domains()} == dict.fromkeys(_domains(), "unrelated")
+
+
+def test_the_owner_table_is_a_listed_vocab_asset():
+    """`/meta/vocab` 이 배정표의 판을 보인다. 목록의 자산은 전부 파일이 있다 — 셀 꾸러미가 change-routing 을 더할 때 파일을 빠뜨리면
+    여기서 붉다."""
+    assert "mech-owners" in taxonomy.VOCAB_ASSETS
+    index = {item["name"]: item for item in taxonomy.vocab_index()}
+    assert index["mech-owners"]["version"] == "1.0"
+    assert [name for name, item in index.items() if not item["present"] or item.get("error")] == []

@@ -600,7 +600,8 @@ def put_portal_pat_auto(body: PortalPatAutoBody, ident: identity.Identity = Depe
 
 @router.get("/meta/taxonomy")
 def get_taxonomy() -> dict:
-    return taxonomy.load_taxonomy()
+    """리스크 택소노미와 메커니즘 → 영역 배정표(review_status 포함 — 사람이 훑고 승인한다, 재설계 M3 S3-2)."""
+    return {**taxonomy.load_taxonomy(), "mech_owners": taxonomy.load_json(taxonomy.MECH_OWNERS_ASSET)}
 
 
 @router.get("/meta/adapters")
