@@ -65,11 +65,17 @@ class IssuePanelEngine:
         diff = self.store.query_one("SELECT base_snapshot_id, target_snapshot_id, diff_json FROM rr_diffs WHERE id = ?",
                                     (target["ref_id"],))
         events = json.loads(diff["diff_json"])["semantic"]["events"]
-        cited = {c["ref"] for c in anchor["merged"].get("cites") or () if str(c.get("ref", "")).startswith("c:")}
-        event = next(e for e in events if e.get("cid") in cited)
+        rep = json.loads(self.store.query_one("SELECT finding_json FROM rr_findings WHERE finding_id = ?",
+                                              (anchor["merged"]["claim_finding_id"],))["finding_json"])
+        cited = {c["ref"] for c in rep.get("cites") or () if str(c.get("ref", "")).startswith("c:")}
+        event = next((e for e in events if e.get("cid") in cited), None)
+        if event is None:
+            # 닻의 인용 줄이 diff 이벤트가 아니다(묶음 밖 원자료 줄) — 대표 원자의 주체·변경 종류·인용을 그대로 쓴다.
+            line = next(c for c in rep["cites"] if str(c.get("ref", "")).startswith("c:"))
+            event = {"cid": line["ref"], "text": line.get("quote") or "", "change_kind": rep["change_kind"],
+                     "subject": {"ckeys": list((rep.get("subject") or {}).get("ckeys") or ())}}
         if plan.get("subject") == "other":
-            event = next(e for e in events if e.get("cid") not in cited
-                         and e["subject"]["ckeys"] != next(x for x in events if x.get("cid") in cited)["subject"]["ckeys"])
+            event = next(e for e in events if e.get("cid") not in cited and e["subject"]["ckeys"] != event["subject"]["ckeys"])
         seat = seats[0]
         finding = {
             "id": "F1", "direction": plan["direction"], "domain": seat.split("-", 1)[0],

@@ -138,6 +138,9 @@ def test_an_issue_panel_runs_off_the_ledger_and_upholds_the_anchor_without_touch
     assert (row["judgement"], row["issue_state"], row["issue_id"]) == ("FAIL", "upheld", issue["issue_id"])
     assert (row["merged"].get("before_issue") or {}).get("judgement") == "WARNING"
     assert results[-1]["status"] == "no_panel" and results[-1]["job_state"] == "completed"
+    # 쟁점 해결 뒤 완결 캐시가 새로 써졌다(S3-8 — 러너의 close_level 이 cells 대상이면 closure 를 쓴다).
+    cache = store.query_one("SELECT level_label, closure_at FROM rr_targets WHERE target_key = ?", (key,))
+    assert cache["closure_at"] and "결손 사냥 미실행" in cache["level_label"]
 
 
 # ---------------------------------------------------------------- 좌석 · 근거 · 질문(② ③ ④ ⑩)

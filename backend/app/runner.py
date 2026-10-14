@@ -2236,7 +2236,8 @@ def _complete_panel(
         )
 
         level = registry_mod.close_level(store, panel["target_key"])
-        if level.get("raised"):
+        # 쟁점 패널(cells 대상)의 보고서 판은 종합 보고서(S3-9)의 몫이다 — 패널 통합 보고서를 조립하지 않는다.
+        if level.get("raised") and not issue_panel:
             # 보고서는 원장에서 다시 만들 수 있는 파생물이다 — 조립이 터져도 패널 저장을 무르지 않고 패널에 표를 남긴다.
             # (조립은 읽기뿐이라 트랜잭션 안에서 받아도 반쪽 쓰기가 없다.)
             try:

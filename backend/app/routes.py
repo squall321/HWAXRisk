@@ -29,6 +29,7 @@ from app import state as state_module
 from app import units as units_module
 from app import registry as registry_module
 from app import issues as issues_module
+from app import closure as closure_module
 from app.adapters import base as adapters_base
 from app.adapters import registry as adapters_registry
 from app.adapters.dyna import CONTEXT_KIND as CONTEXT_CALL_KIND
@@ -3049,6 +3050,79 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
         # RA·AIDataHub 반영 요약 — {ra|adh: {state, pending_ops, reason, message}}. 보내는 쪽이 아직 없다(sender_unwired, M4).
         "external_sync": ra_client.sync_summary(ra_client.parse_external_sync(target["external_sync_json"])),
     }
+
+
+# ---------------------------------------------------------------- 완결 판정(재설계 M3 S3-8 — closure)
+class CloseAckBody(BaseModel):
+    reason: str = Field(default="", max_length=closure_module.ACK_REASON_MAX)
+    basis_hash: str = ""
+
+
+def closure_payload(target_key: str, *, owner_sub: str | None = None, fresh: bool = False) -> dict:
+    """`GET /targets/{key}/closure` 본체 — cells 대상은 완결 판정 캐시(`fresh` 면 그 자리에서 다시 센다, 없으면 처음 센다)와 확인
+    목록(유효·낡음·취소), 패널 대상은 지금 판정(`registry.close_level`, 쓰지 않는다)에 flow 를 단다."""
+    target = _target_row(target_key, owner_sub)
+    store = get_store()
+    if target["flow"] != "cells":
+        return {**registry_module.close_level(store, target_key, persist=False), "flow": "panels"}
+    data = (closure_module.close_level_cells(store, target_key, persist=True) if fresh
+            else closure_module.cached(store, target_key) or closure_module.refresh(store, target_key))
+    current = {q["item"]: q["basis_hash"] for q in data.get("qualifiers") or ()}
+    acks = []
+    for row in store.query("SELECT item, ack_at, ack_by, ack_reason, basis_n, basis_hash, revoked_by, revoked_at"
+                           " FROM rr_close_acks WHERE target_key = ? ORDER BY ack_at, item", (target_key,)):
+        state = ("revoked" if row["revoked_at"] is not None
+                 else "valid" if current.get(row["item"]) == row["basis_hash"] else "stale")
+        acks.append({**dict(row), "state": state})
+    return {**data, "acks": acks}
+
+
+@router.get("/targets/{target_key}/closure")
+def get_closure(target_key: str, fresh: int = 0, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """완결 판정 — 레벨·잔여·표기·수(M3 S3-8). 진행판·MCP 는 캐시를 읽고 `fresh=1` 만 그 자리에서 다시 센다."""
+    return closure_payload(target_key, owner_sub=_require_user(ident), fresh=bool(fresh))
+
+
+def _closure_owner(target_key: str, ident: identity.Identity) -> tuple[str, dict]:
+    """확인(ack)은 과제 소유자와 관리자만이다(편집자 403, 웹·REST 만 — MCP 쓰기 도구 없음)."""
+    email = _require_user(ident)
+    row = get_store().query_one("SELECT project_id, flow FROM rr_targets WHERE target_key = ?", (target_key,))
+    if row is None:
+        raise AppError("E404", f"타깃을 찾을 수 없습니다 — {target_key}.", 404)
+    _require_owner(row["project_id"], ident)
+    if row["flow"] != "cells":
+        raise AppError("ack_not_allowed", "완결 잔여 확인은 카드 대조 대상(flow='cells')에만 있다.", 422)
+    return email, dict(row)
+
+
+@router.post("/targets/{target_key}/closure/acks/{item}")
+def post_closure_ack(target_key: str, item: str, body: CloseAckBody,
+                     ident: identity.Identity = Depends(identity.current)) -> dict:
+    """막음 잔여 한 종류를 확인한다 — 사유 필수(300자 안) · 확인 시점의 basis_hash(다르면 409 residual_changed) · rr_audit 한 행 ·
+    캐시를 새로 쓴다."""
+    email, row = _closure_owner(target_key, ident)
+    store = get_store()
+    with store.tx():
+        out = closure_module.ack_residual(store, target_key, item, reason=body.reason, by=email,
+                                          basis_hash=body.basis_hash)
+        _audit(store, email, scope="target", subject_id=target_key, action="close.ack", project_id=row["project_id"],
+               after={"item": item, "basis_hash": out["basis_hash"], "basis_n": out["basis_n"]},
+               reason=body.reason.strip())
+        level = closure_module.refresh(store, target_key)
+    return {**out, "level": level["level"], "level_label": level["level_label"]}
+
+
+@router.delete("/targets/{target_key}/closure/acks/{item}")
+def delete_closure_ack(target_key: str, item: str, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """확인 취소 — 행을 지우지 않고 표기한다 · rr_audit 한 행 · 캐시를 새로 쓴다."""
+    email, row = _closure_owner(target_key, ident)
+    store = get_store()
+    with store.tx():
+        out = closure_module.revoke_ack(store, target_key, item, by=email)
+        _audit(store, email, scope="target", subject_id=target_key, action="close.ack.revoke",
+               project_id=row["project_id"], before={"item": item}, after={"item": item, "revoked": True})
+        level = closure_module.refresh(store, target_key)
+    return {**out, "level": level["level"], "level_label": level["level_label"]}
 
 
 def _live_signal(store, state: str, signal: Any) -> dict | None:

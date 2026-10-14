@@ -1197,6 +1197,16 @@ def _unresolved_parse_failures(panels: list[dict]) -> int:
 
 
 def close_level(store: RiskStore, target_key: str, *, persist: bool = True) -> dict:
+    """완결 레벨의 문지기(M3 S3-8) — 카드 대조 대상(flow='cells')은 `closure.close_level_cells`(셀 셈·잔여·표기·캐시), 그 밖은
+    지금 본문(`_close_level_panels` — 패널 대상은 바이트 그대로, D-24)."""
+    if target_flow(store, target_key) == "cells":
+        from app import closure  # noqa: PLC0415 — closure 는 registry 를 쓰지 않지만 무거운 모듈을 끌어온다.
+
+        return closure.close_level_cells(store, target_key, persist=persist)
+    return _close_level_panels(store, target_key, persist=persist)
+
+
+def _close_level_panels(store: RiskStore, target_key: str, *, persist: bool = True) -> dict:
     """완결 레벨 C0~C3 를 계산한다(plan §6.9). 레벨은 단조 증가만 하고 persist 면 rr_targets.level 에 반영한다."""
     target = store.query_one(
         "SELECT target_key, project_id, level, close_level, verdict_final, verdict_candidate "
