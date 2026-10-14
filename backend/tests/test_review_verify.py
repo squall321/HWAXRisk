@@ -435,3 +435,55 @@ def test_dual_plan_samples_below_full_rate(fwd):
     assert picked == [k for k in keys if rv.sample_score("dual", *k) < 0.15] and 0 < len(picked) < 200
     with pytest.raises(ValueError):
         rv.dual_plan(dict(fwd, variant="rev"))
+
+
+# ---------------------------------------------------------------- 거른 셀의 놓침 판정(M3 C3-7 — X1-13 · m3-cells 3.4)
+def _eff(*cards):
+    """카드마다 변형 행 [(variant, applies, judgement), …] → `effective_rows` 가 낸 실효(생산자 함수 그대로)."""
+    rows = [{"record_id": f"R{i}", "variant": v, "applies": a, "judgement": j}
+            for i, card in enumerate(cards) for v, a, j in card]
+    return rv.effective_rows(rows)
+
+
+_NA = [("fwd", "no", "na")]
+_OK = [("fwd", "yes", "OK")]
+
+
+@pytest.mark.parametrize(("cards", "offcard", "outcome"), [
+    # risk_miss — 실효 걸림 하나, 변형이 걸렸다가 풀린 카드(split), 카드 밖 중대·치명, 심각도 없는 카드 밖 리스크
+    ([_NA, [("fwd", "yes", "FAIL")]], [], "risk_miss"),
+    ([_NA, [("fwd", "yes", "WARNING")]], [], "risk_miss"),
+    ([_NA, [("fwd", "yes", "FAIL"), ("rev", "yes", "OK"), ("solo", "yes", "OK")]], [], "risk_miss"),
+    ([_NA, [("fwd", "no", "na"), ("rev", "yes", "WARNING")]], [], "risk_miss"),
+    ([_NA], [{"dir": "risk", "sev": "중대"}], "risk_miss"),
+    ([_NA], [{"dir": "risk", "sev": "치명"}], "risk_miss"),
+    ([_NA], [{"dir": "risk", "sev": None}], "risk_miss"),
+    ([_NA], [{"sev": ""}], "risk_miss"),                                 # 방향이 비면 리스크다(앱 회계의 기본값)
+    ([_OK, [("fwd", "unknown", "undetermined")]], [{"dir": "risk", "sev": "경미"}, {"dir": "risk", "sev": "치명"}],
+     "risk_miss"),
+    # relevance_miss — 걸림 없이 적용된 카드, 카드 밖 경미·개선
+    ([_NA, _OK], [], "relevance_miss"),
+    ([_NA, [("fwd", "yes", "undetermined")]], [], "relevance_miss"),   # 표의 순서 — applies=yes 가 보류보다 먼저다
+    ([_NA], [{"dir": "risk", "sev": "경미"}], "relevance_miss"),
+    ([_NA], [{"dir": "improvement", "sev": "치명"}], "relevance_miss"),
+    ([_NA, [("fwd", "unknown", "undetermined")]], [{"dir": "improvement", "sev": "경미"}], "relevance_miss"),
+    # undetermined — 판단 불가는 깨끗한 쪽에 넣지 않는다
+    ([_NA, [("fwd", "unknown", "undetermined")]], [], "undetermined"),
+    ([[("fwd", "unknown", "undetermined")]], [], "undetermined"),
+    # kept — 전부 해당 없음, 카드 밖 없음
+    ([_NA, _NA], [], "kept"),
+    ([], [], "kept"),
+])
+def test_audit_outcome_table(cards, offcard, outcome):
+    assert rv.audit_outcome(_eff(*cards), offcard) == outcome
+    assert outcome in rv.AUDIT_OUTCOMES
+
+
+def test_audit_outcome_reads_the_engine_offcard_rows_through_the_app_accounting():
+    """카드 밖 줄은 앱 회계(`accept_rows(kind='offcard')`)를 지난 모양 그대로 읽는다 — 엔진 계약 예제의 결과로."""
+    request, result = _load("req_offcard.json"), _load("result_offcard_ok.json")
+    rows = _accept(result, request)["rows"]
+    assert rows
+    expected = ("risk_miss" if any(r["dir"] == "risk" and r["sev"] != "경미" for r in rows) else "relevance_miss")
+    assert rv.audit_outcome(_eff(_NA), rows) == expected
+    assert rv.audit_outcome(_eff(_NA), [dict(r, dir="improvement") for r in rows]) == "relevance_miss"

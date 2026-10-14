@@ -562,3 +562,37 @@ def dual_plan(fwd_request: Mapping[str, Any], *, dual_rate: float = 1.0, sample_
         return {"rev": None, "solo": [str(c.get("alias")) for c in fwd_request.get("cards") or ()],
                 "reason": "same_body"}
     return {"rev": rev, "solo": [], "reason": "dual"}
+
+
+# ---------------------------------------------------------------- 거른 셀의 놓침(M3 C3-7 — X1-13 · m3-cells 3.4)
+AUDIT_OUTCOMES: tuple[str, ...] = ("risk_miss", "relevance_miss", "undetermined", "kept")
+SEV_MINOR = "경미"
+
+
+def _offcard_risk(row: Mapping[str, Any]) -> bool:
+    """카드 밖 줄이 리스크 놓침인가 — 방향이 리스크이고 심각도가 경미가 아니다. 중대·치명이 그렇고, 심각도가 비었거나 모르는 값인
+    리스크도 그쪽에 둔다(모르는 것을 깨끗한 쪽에 넣지 않는다 — 놓침을 넓히는 쪽이 안전하다)."""
+    return str(row.get("dir") or "risk") == "risk" and str(row.get("sev") or "") != SEV_MINOR
+
+
+def audit_outcome(effective: Mapping[str, Mapping[str, Any]], offcard_rows: Sequence[Mapping[str, Any]]) -> str:
+    """표본·그림자 셀 하나의 놓침 판정 — 처음 맞는 줄이다(X1-13 · m3-cells 3.4).
+
+    | risk_miss | 실효 FAIL·WARNING 이 하나라도(실효 undetermined 이면서 split=1 — 변형이 걸렸던 카드 — 포함), 또는 카드 밖
+    |           | 리스크의 심각도가 경미가 아니다(`_offcard_risk`) |
+    | relevance_miss | 걸림은 없지만 applies='yes' 실효 행이나 카드 밖 줄(경미 리스크 · 개선)이 있다 |
+    | undetermined | 위 둘이 아니고 applies='unknown' 이거나 판정이 undetermined 인 실효 행이 있다 |
+    | kept | 실효가 전부 해당 없음이고 카드 밖이 없다 |
+
+    `effective` 는 `effective_rows` 의 반환, `offcard_rows` 는 카드 밖 회계(`accept_rows(kind='offcard')`)의 rows 다.
+    넓힘(그 영역의 거른 셀을 다시 연다)을 일으키는 것은 risk_miss 뿐이다.
+    """
+    rows = list(effective.values())
+    if any(str(e.get("judgement")) in FLAGGED or (str(e.get("judgement")) == "undetermined" and int(e.get("split") or 0))
+           for e in rows) or any(_offcard_risk(f) for f in offcard_rows):
+        return "risk_miss"
+    if any(str(e.get("applies")) == "yes" for e in rows) or offcard_rows:
+        return "relevance_miss"
+    if any(str(e.get("applies")) == "unknown" or str(e.get("judgement")) == "undetermined" for e in rows):
+        return "undetermined"
+    return "kept"
