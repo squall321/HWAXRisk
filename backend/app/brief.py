@@ -1912,7 +1912,7 @@ def collect_refs(items: Sequence[Mapping[str, Any]]) -> list[str]:
 # `{severity}/{judgement}`(`중대/WARNING`)가 판단어로 걸려 같은 과제의 두 번째 리비전 브리프가 죽었다(WP1 P-03).
 _QUOTE_LINE = re.compile(r"^(?:\[[^\]]*\]\s)*(?:reg|narr|rule|warn):")
 # 자산 원문을 그대로 싣는 항목 — 좌석 계약은 사람이 쓴 계약문이라 인용이지 코드 산문이 아니다(plan §3.4.3).
-_QUOTED_SOURCES = ("seat_contract",)
+_QUOTED_SOURCES = ("seat_contract", "issue_verdicts", "issue_cards", "issue_handoffs")   # + 쟁점 패널의 인용 원천(M3 S3-7)
 
 
 def lint_items(items: Sequence[Mapping[str, Any]]) -> dict:
@@ -2152,6 +2152,245 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
             "similar_corpus_n": similar.get("corpus_n", 0),
         },
     }
+
+
+# ---------------------------------------------------------------- 쟁점 패널 브리프(재설계 M3 S3-7 · M3.md #48)
+# 엔진은 뒤 항목부터 버리므로 순서가 뜻이 있다(P-17-3) — 쟁점 정의 → 제기 측 → 반대 측 → 인용된 카드 절 → 변경 원문 → 근거 발췌 →
+# 스코프 → 넘김 → 같은 대상의 선례 → 메모. 좌석 계약(I0c)은 러너가 둘째 칸에 끼운다. 항목 key 는 엔진 규칙([A-Za-z0-9_.-]{1,24}).
+ISSUE_ITEM_ORDER: tuple[str, ...] = ("I1", "I4", "I5", "I6", "I2", "I3", "I0", "I7", "I8", "M")
+# 바닥 표(합 9,600 + 러너가 끼우는 좌석 계약 1,000 ≤ 11,000) — 프로파일 배수로 함께 는다(BriefProfile.inner, D-21).
+ISSUE_CAPS: dict[str, int] = {"I1": 800, "I4": 2200, "I5": 1400, "I6": 2200, "I2": 1000, "I3": 500, "I0": 500,
+                              "I7": 300, "I8": 300, "M": 400}
+_ISSUE_SOURCES: dict[str, tuple[str, str]] = {
+    "I1": ("issue_definition", "rr_issues"), "I4": ("issue_verdicts", "rr_card_verdicts"),
+    "I5": ("issue_verdicts", "rr_card_verdicts"), "I6": ("issue_cards", "rr_card_packs"),
+    "I2": ("rr_units.lines", "rr_units"), "I3": ("rr_units.evidence", "rr_units"), "I0": ("rr_scope", "rr_targets"),
+    "I7": ("issue_handoffs", "rr_review_cells"), "I8": ("rr_registry.prior", "rr_registry"), "M": ("user_memo", "rr_jobs"),
+}
+ISSUE_SEAT_KEY = "I0c"
+
+
+def _issue_counts(counts: Mapping[str, Any], fmt: str) -> str:
+    return " · ".join(fmt.format(k=k, n=n) for k, n in sorted((counts or {}).items())) or "-"
+
+
+def _issue_i1(issue: Mapping[str, Any], anchor: Mapping[str, Any], target_key: str, names: Sequence[str]) -> dict:
+    """I1 쟁점 정의 — 유형·닻의 네 필드(그대로 쓰라는 값)·분포·hold 표기. 코드 산문이라 판정 낱말은 `judgement=`·`severity=` 꼴."""
+    basis = issue.get("basis") or {}
+    claimed = basis.get("claimed") or {}
+    distribution = basis.get("distribution") or {}
+    before = basis.get("registry_before") or {}
+    lines = [
+        f"쟁점 {issue['issue_id']} · 유형 {', '.join(issue.get('types') or ())} · 등급 {issue.get('p_class')}"
+        f" · 순위 {issue.get('rank') or '-'} · 닻 [reg:{target_key}#{issue['anchor_cluster_key']}]",
+        "finding 의 네 필드는 이 값 그대로 쓴다 — mechanism=" + _q(anchor.get("mechanism"), limit=0)
+        + " · mechanism_detail=" + _q(anchor.get("mechanism_detail"), limit=0)
+        + " · subject=" + _q(anchor.get("subject_key"), limit=0) + " · change_kind=" + _q(anchor.get("change_kind"), limit=0),
+        "부품 이름 " + (" · ".join(_q(n) for n in names) or "-"),
+        f"제기 {len(basis.get('raisers') or ())}명 — "
+        + _issue_counts(distribution.get("raisers_by_domain") or {}, "{k} {n}명")
+        + f" · 반대 {distribution.get('opposers', len(basis.get('opposers') or ()))}명",
+        "주장 판정별 — " + _issue_counts(distribution.get("by_judgement_claimed") or {}, "judgement={k} {n}명"),
+        "주장 심각도별 — " + _issue_counts(distribution.get("by_severity") or {}, "severity={k} {n}명"),
+        f"등록부 값(hold 뒤) severity={_s(before.get('severity'), '-')} · judgement={_s(before.get('judgement'), '-')}"
+        f" · 주장값 severity={_s(claimed.get('severity'), '-')} · judgement={_s(claimed.get('judgement'), '-')}"
+        f" · judgement=FAIL 주장 {int(claimed.get('fail_experts') or 0)}명 · severity=치명 주장"
+        f" {int(claimed.get('critical_experts') or 0)}명 · 그 가운데 카드 인용이 대조를 지난 사람"
+        f" {int(claimed.get('verified_fail_experts') or 0)}명",
+    ]
+    return {"key": "I1", "args": issue["issue_id"], "result": _body("issue_definition", lines)}
+
+
+def _verdict_rows(store, target_key: str, agent_key: str, unit_ids: Sequence[str], record_ids: Sequence[str],
+                  *, judgement: str | None = None) -> list[dict]:
+    if not unit_ids or not record_ids:
+        return []
+    marks_u, marks_r = ",".join("?" * len(unit_ids)), ",".join("?" * len(record_ids))
+    sql = ("SELECT unit_id, agent_key, record_id, section_id, alias, applies, judgement, cq, sev, mech, mech_free, path,"
+           " check_kind, check_text, why, refs_json, conds_json, quote_ok FROM rr_card_verdicts WHERE target_key = ?"
+           f" AND agent_key = ? AND is_effective = 1 AND unit_id IN ({marks_u}) AND record_id IN ({marks_r})")
+    params: list[Any] = [target_key, agent_key, *unit_ids, *record_ids]
+    if judgement:
+        sql += " AND judgement = ?"
+        params.append(judgement)
+    return [dict(r) for r in store.query(sql + " ORDER BY unit_id, record_id", params)]
+
+
+def _verdict_line(row: Mapping[str, Any]) -> str:
+    """판정 행 한 줄 — 카드 표지 `card:<record_id>#<sid>` · 적용·판정 · 카드 인용 원문 · 변경 줄 · 사유 · 영향 경로 · 닫는 확인 · 조건 대조."""
+    refs = " ".join(f"[{r}]" for r in _j(row.get("refs_json"), []) or ())
+    sid = f"#{row['section_id']}" if row.get("section_id") else ""
+    parts = [f"- [card:{row['record_id']}{sid}] applies={row['applies']} · judgement={row['judgement']}",
+             f"severity={row['sev']}(주장)" if row.get("sev") else "", f"quote_ok={_s(row.get('quote_ok'), '-')}",
+             f"카드 인용 {_q(row.get('cq'), 'claim', limit=0)}" if row.get("cq") else "",
+             f"변경 줄 {refs}" if refs else "", f"사유 {_q(row.get('why'), 'claim')}" if row.get("why") else "",
+             f"경로 {_q(row.get('path'), 'claim')}" if row.get("path") else "",
+             f"닫는 확인 {_q(_s(row.get('check_kind')) + ': ' + _s(row.get('check_text')), 'claim')}"
+             if row.get("check_text") else "",
+             f"조건 대조 {_q(canonical_json(_j(row.get('conds_json'), [])), 'claim')}" if row.get("conds_json") else ""]
+    return " · ".join(p for p in parts if p)
+
+
+def _issue_side(store, target_key: str, key: str, people: Sequence[Mapping[str, Any]], *, role: str,
+                judgement: str | None, cards_out: list[dict]) -> dict:
+    """I4(제기 측)·I5(반대 측) — 사람마다 머리 줄과 그 사람의 판정 행. 카드 밖 지적은 finding 의 주장과 인용 줄로."""
+    lines: list[str] = []
+    for person in people:
+        agent = str(person["agent_key"])
+        head = f"{role} {agent}({_s(person.get('domain'), '-')})"
+        if role == "제기":
+            head += (f" · judgement={_s(person.get('judgement'), '-')} · severity={_s(person.get('severity'), '-')}"
+                     f" · 카드 인용 대조 {'지남' if person.get('verified') else '못 지남'}")
+        lines.append(head)
+        rows = _verdict_rows(store, target_key, agent, list(person.get("unit_ids") or ()),
+                             list(person.get("record_ids") or ()), judgement=judgement)
+        for row in rows:
+            lines.append(_verdict_line(row))
+            cards_out.append({"agent_key": agent, "record_id": row["record_id"], "section_id": row.get("section_id"),
+                              "quote_ok": row.get("quote_ok")})
+        for fid in person.get("finding_ids") or ():
+            found = store.query_one("SELECT finding_json FROM rr_findings WHERE finding_id = ?", (fid,))
+            fj = _j(found["finding_json"], {}) if found is not None else {}
+            cites = [c for c in fj.get("cites") or () if isinstance(c, Mapping)]
+            if any(_s(c.get("ref")).startswith("card:") for c in cites):
+                continue
+            refs = " ".join(f"[{c['ref']}]" for c in cites if _s(c.get("ref")).startswith("c:"))
+            lines.append(f"- 카드 밖 지적 {_q(fj.get('claim'), 'claim')} {refs}".rstrip())
+    return {"key": key, "args": ",".join(str(p["agent_key"]) for p in people) or "-",
+            "result": _body("issue_verdicts", lines or ["[해당 판정 없음]"])}
+
+
+def _issue_i6(store, target_key: str, cards: Sequence[Mapping[str, Any]]) -> tuple[dict, dict]:
+    """I6 — 인용된 카드의 **인용이 맞은 절만** 원문으로(같은 절은 한 번). 대조를 못 지난 인용의 카드는 제목과 그 사실만. 반환
+    (항목, record_id → 카드 — 좌석 인용 검증 범위)."""
+    from app import cardpack  # noqa: PLC0415 — 얼린 팩 읽기는 쓸 때만.
+
+    lines: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    scope: dict[str, Any] = {}
+    for item in cards:
+        rid, sid = str(item["record_id"]), _s(item.get("section_id"))
+        if (rid, sid) in seen:
+            continue
+        seen.add((rid, sid))
+        try:
+            pack = cardpack.load_for(store, target_key, str(item["agent_key"]))
+        except cardpack.PackMissing:
+            pack = None
+        card = (pack.record_cards.get(rid) if pack is not None else None) or {}
+        title = _q(card.get("title") or rid)
+        if card:
+            scope[rid] = card
+        section = next((s for s in card.get("sections") or () if _s(s.get("sid")) == sid), None)
+        if item.get("quote_ok") == 1 and section is not None:
+            lines.append(f"[card:{rid}#{sid}] {title} — {_q(section.get('text'), 'claim', limit=0)}")
+        else:
+            lines.append(f"[card:{rid}] {title} — 인용 대조를 못 지난 인용이라 절 원문을 싣지 않는다")
+    return ({"key": "I6", "args": ",".join(sorted({r for r, _s2 in seen})) or "-",
+             "result": _body("issue_cards", lines or ["[인용된 카드 없음]"])}, scope)
+
+
+def _issue_unit_items(store, target_key: str, unit_id: str | None, agent_key: str | None) -> tuple[dict, dict]:
+    """I2(그 단위의 변경 줄·문맥 줄 전부)·I3(그 단위의 동결 근거 발췌) — 단위 원장 그대로(정규 표기, `[c:…]`)."""
+    from app import units  # noqa: PLC0415 — 단위 원장은 쓸 때만.
+
+    if not unit_id or not agent_key:
+        empty = ["[쟁점에 단위가 없다]"]
+        return ({"key": "I2", "args": "-", "result": _body("rr_units.lines", empty)},
+                {"key": "I3", "args": "-", "result": _body("rr_units.evidence", empty)})
+    payload = units.review_payload(store, target_key, unit_id, agent_key)
+    changes = [f"[{line['ref']}] {_q(line['text'], 'claim', limit=0)}" for line in payload.get("lines") or ()]
+    changes += [f"문맥 [{line['ref']}] {_q(line['text'], 'claim', limit=0)}" for line in payload.get("context") or ()]
+    evidence = [f"[{row['ref']}] {_q(row['text'], 'claim', limit=0)}" for row in payload.get("evidence") or ()]
+    return ({"key": "I2", "args": unit_id, "result": _body("rr_units.lines", changes or ["[변경 줄 없음]"])},
+            {"key": "I3", "args": unit_id, "result": _body("rr_units.evidence", evidence or ["[근거 발췌 없음]"])})
+
+
+def _issue_i7(store, target_key: str, unit_id: str | None, domains: set[str]) -> dict:
+    """I7 — 그 단위에서 다른 영역으로 넘긴 줄 가운데 좌석 영역에 닿는 것."""
+    lines: list[str] = []
+    for row in store.query("SELECT agent_key, handoffs_json FROM rr_review_cells WHERE target_key = ? AND unit_id = ?"
+                           " AND handoffs_json IS NOT NULL ORDER BY agent_key", (target_key, _s(unit_id))):
+        for handoff in _j(row["handoffs_json"], []) or ():
+            if isinstance(handoff, Mapping) and _s(handoff.get("to")) in domains:
+                aliases = ",".join(str(a) for a in handoff.get("l") or ())
+                lines.append(f"{row['agent_key']} → {handoff.get('to')} {_q(handoff.get('why'), 'claim')}"
+                             + (f" (줄 {aliases})" if aliases else ""))
+    return {"key": "I7", "args": _s(unit_id, "-"), "result": _body("issue_handoffs", lines or ["[넘김 없음]"])}
+
+
+def _issue_i8(store, target_key: str, anchor: Mapping[str, Any]) -> dict:
+    """I8 — 같은 대상의 같은 메커니즘 다른 클러스터(선례 줄 꼴)."""
+    rows = store.query(f"SELECT {_REGISTRY_COLS} FROM rr_registry WHERE target_key = ? AND mechanism = ? AND cluster_key <> ?"
+                       " ORDER BY priority DESC, cluster_key", (target_key, _s(anchor.get("mechanism")),
+                                                                _s(anchor.get("cluster_key"))))
+    lines = [_registry_line(row, "같은 대상") for row in rows]
+    return {"key": "I8", "args": target_key, "result": _body("rr_registry.prior", lines or ["[같은 메커니즘 다른 클러스터 없음]"])}
+
+
+def build_issue_brief(store, target_key: str, issue: Mapping[str, Any], *, seats: Sequence[Mapping[str, Any]],
+                      panel_id: str | None = None, profile: BriefProfile | None = None, user_memo: str | None = None,
+                      strict_lint: bool = False, shield_lint: bool = True) -> dict:
+    """쟁점 패널의 근거(I1 → I4 → I5 → I6 → I2 → I3 → I0 → I7 → I8 → M). 전문가·카드의 글(I4·I5·I6·I7)은 인용 원천이라 판단어
+    린터가 코드 산문으로 읽지 않고 전부 «» 안이다(앞 단계 LLM 출력의 2차 주입 위생 — WP5b 3.10.4). 카드 원문은 인용이 맞은 절만
+    싣는다 — 인용되지 않은 절이 rr_panels.brief_gz 에 남지 않는다(카나리아). 반환은 build_brief 와 같은 모양에 `meta.card_scope`
+    (record_id → 카드 — 좌석 인용 검증 범위)를 더한다. `strict_lint` 는 방패 뒤에도 위반이 남으면 E500(시험)."""
+    from app import issues as issues_module  # noqa: PLC0415 — issues 는 brief 를 쓰지 않는다(순환 회피 겸).
+
+    profile = profile or PROFILE_LEGACY
+    ctx = _target_context(store, target_key)
+    owner_sub = _s(ctx["target"]["owner_sub"]) or None
+    anchor = issues_module.anchor_row(store, target_key, str(issue["anchor_cluster_key"])) or {
+        "cluster_key": issue["anchor_cluster_key"]}
+    basis = issue.get("basis") or {}
+    domains = {_s(s.get("domain")) for s in seats}
+    first_agent = next((_s(s.get("key")) for s in seats), None)
+    begin_suspect_queue(store, owner_sub)
+    _assembly_scale.value = max(1.0, profile.budget / ENGINE_BUDGET)
+    cards: list[dict] = []
+    try:
+        names = name_index(store, (ctx["base_snapshot_id"], ctx["snapshot_id"]))
+        i4 = _issue_side(store, target_key, "I4", basis.get("raisers") or (), role="제기", judgement=None, cards_out=cards)
+        i5 = _issue_side(store, target_key, "I5", basis.get("opposers") or (), role="반대", judgement="OK", cards_out=cards)
+        i6, scope = _issue_i6(store, target_key, cards)
+        i2, i3 = _issue_unit_items(store, target_key, issue.get("unit_id"), first_agent)
+        i0 = {**_item_e0(store, ctx, False, _panel_model(store, target_key, panel_id)), "key": "I0"}
+        raw = [_issue_i1(issue, anchor, target_key, issues_module.part_names(store, anchor)), i4, i5, i6, i2, i3, i0,
+               _issue_i7(store, target_key, issue.get("unit_id"), domains), _issue_i8(store, target_key, anchor)]
+        if user_memo:
+            raw.append({"key": "M", "args": target_key, "result": memo_result(target_key, user_memo,
+                                                                               profile.inner(ISSUE_CAPS["M"]))})
+        shielded: list[dict] = []
+        if shield_lint:
+            for entry in raw:
+                if _ISSUE_SOURCES[entry["key"]][0] not in _QUOTED_SOURCES:
+                    shielded += _shield_entry(entry, names, humanize=False)
+    finally:
+        end_suspect_queue()
+        _assembly_scale.value = 1.0
+    clipped: dict[str, dict] = {}
+    items: list[dict] = []
+    for entry in sorted(raw, key=lambda e: ISSUE_ITEM_ORDER.index(e["key"])):
+        source, tool = _ISSUE_SOURCES[entry["key"]]
+        item = {"source": _clamp(source, CLAMP_SOURCE), "tool": _clamp(tool, CLAMP_TOOL),
+                "args": _clamp(entry["args"], CLAMP_ARGS), "result": entry["result"]}
+        cap = profile.inner(ISSUE_CAPS[entry["key"]])
+        text = _s(entry["result"])
+        item["result"], dropped = clip_lines_n(text, min(profile.item_result_max, cap - line_overhead(item)))
+        if dropped:
+            lines_n = len(text.split("\n")) - 1
+            clipped[entry["key"]] = {"lines": lines_n, "kept": lines_n - dropped, "omitted": dropped}
+        item["key"] = entry["key"]
+        items.append(item)
+    lint = lint_items(items)
+    if strict_lint and lint["ok"] is False:
+        raise AppError("E500", f"쟁점 브리프 판단어 린터 위반 {len(lint['violations'])}건 — {lint['violations'][:3]}",
+                       http_status=500)
+    return {"target_key": target_key, "evidence": [{k: i[k] for k in ("source", "tool", "args", "result", "key")}
+                                                   for i in items],
+            "keys": [i["key"] for i in items], "refs": collect_refs(items),
+            "meta": {"profile": profile.name, "budget": profile.budget, "clipped": clipped, "lint": lint,
+                     "shielded": shielded, "card_scope": scope}}
 
 
 # ---------------------------------------------------------------- §5.7 유사 검색

@@ -59,7 +59,7 @@ def _card_atoms(store: RiskStore, target_key: str) -> dict[str, dict]:
     """살아 있는 카드 대조 원자 — finding_id → {agent_key, unit_id, refs, judgement_claimed, severity_claimed, raisers}."""
     out: dict[str, dict] = {}
     for row in store.query(
-            "SELECT finding_id, agent_key, unit_id, status, judgement, severity, finding_json FROM rr_findings"
+            "SELECT finding_id, agent_key, unit_id, status, judgement, severity, evidence_grade, finding_json FROM rr_findings"
             " WHERE target_key = ? AND source_kind = ? AND COALESCE(status, 'open') <> 'rejected_in_panel'"
             " AND COALESCE(origin, 'llm') <> 'human'", (target_key, registry.CARD_REVIEW_SOURCE)):
         fj = _loads(row["finding_json"], {})
@@ -68,7 +68,12 @@ def _card_atoms(store: RiskStore, target_key: str) -> dict[str, dict]:
             "agent_key": _str(row["agent_key"]), "unit_id": _str(row["unit_id"]), "refs": _change_refs(fj),
             "judgement": _str(fj.get("judgement_claimed")) or _str(row["judgement"]),
             "severity": _str(fj.get("severity_claimed")) or _str(row["severity"]),
-            "raisers": raisers}
+            "raisers": raisers, "grade": _str(row["evidence_grade"]),
+            "cards": sorted({_str(c.get("ref"))[len("card:"):].split("#", 1)[0] for c in fj.get("cites") or ()
+                             if isinstance(c, Mapping) and _str(c.get("ref")).startswith("card:")}),
+            # 카드 인용이 앱 재대조를 지났나(registry._verified 의 card_only 와 같은 뜻 — 지어낸 인용은 quote_mismatch 다).
+            "verified": any(isinstance(c, Mapping) and c.get("ok") and c.get("verified") and not c.get("quote_mismatch")
+                            and c.get("ref_type") == "card" for c in fj.get("_resolved_cites") or ())}
     return out
 
 
@@ -198,9 +203,14 @@ def basis_of(row: Mapping[str, Any], atoms: Mapping[str, Mapping[str, Any]], opp
     for fid, atom in sorted(atoms.items()):
         for key in atom["raisers"]:
             entry = raisers.setdefault(key, {"agent_key": key, "domain": roster_domain.get(key) or key.split("-", 1)[0],
-                                             "finding_ids": [], "unit_ids": [], "judgement": atom["judgement"],
-                                             "severity": atom["severity"]})
+                                             "finding_ids": [], "unit_ids": [], "record_ids": [],
+                                             "judgement": atom["judgement"], "severity": atom["severity"],
+                                             "verified": False, "grade": atom["grade"]})
             entry["finding_ids"].append(fid)
+            entry["record_ids"] = sorted(set(entry["record_ids"]) | set(atom["cards"]))
+            entry["verified"] = entry["verified"] or atom["verified"]
+            if registry.W_GRADE.get(atom["grade"], 0.6) > registry.W_GRADE.get(entry["grade"], 0.6):
+                entry["grade"] = atom["grade"]
             if atom["unit_id"] and atom["unit_id"] not in entry["unit_ids"]:
                 entry["unit_ids"].append(atom["unit_id"])
             if registry.JUDGEMENT_ORDER.get(atom["judgement"], 1) > registry.JUDGEMENT_ORDER.get(entry["judgement"], 1):
@@ -367,3 +377,333 @@ def issue_rows(store: RiskStore, target_key: str, states: Iterable[str] | None =
         item["basis"] = _loads(item.pop("basis_json"), {})
         out.append(item)
     return out
+
+
+# ================================================================ 쟁점 패널(S3-7) — 지금 심의 엔진의 작은 패널 하나(3라운드)
+ISSUE_TIER = "I"                       # rr_panels.tier — 패널 Tier 문지기(FLOW_GATED_TIERS) 밖이다
+ISSUE_ROUNDS = 3
+SEATS_MIN, SEATS_MAX = 2, 5            # 로스터 좌석(기준선 옹호 지정석은 엔진이 더한다)
+RAISER_SEATS, COUNTER_SEATS = 2, 2
+QUESTION_MAX = 600
+ISSUES_MODE = "issues"
+# 쟁점 패널 결과를 그 쟁점에 앉히지 않는 상태(사람이 넘긴 것·후보에서 빠진 것) — 늦게 온 결과가 사람의 결정을 덮지 않는다.
+_UNRESOLVABLE_STATES: tuple[str, ...] = ("skipped", "withdrawn")
+
+
+class PlanConflict(Exception):
+    """편성 경합 — 같은 쟁점을 두 편성이 동시에 planned 로 옮기려 했다(한 트랜잭션의 rowcount 가 1 이 아니다)."""
+
+
+def _mech_label(code: str) -> str:
+    from app import taxonomy  # noqa: PLC0415 — 자산 읽기는 쓸 때만.
+
+    for row in (taxonomy.load_taxonomy().get("axes") or {}).get("mechanism") or ():
+        if str(row.get("code")) == code:
+            return str(row.get("label") or code)
+    return code
+
+
+def issue_row(store: RiskStore, issue_id: str) -> dict | None:
+    rows = [r for r in issue_rows(store, _target_of(store, issue_id) or "") if r["issue_id"] == issue_id]
+    return rows[0] if rows else None
+
+
+def _target_of(store: RiskStore, issue_id: str) -> str | None:
+    row = store.query_one("SELECT target_key FROM rr_issues WHERE issue_id = ?", (issue_id,))
+    return str(row["target_key"]) if row is not None else None
+
+
+def anchor_row(store: RiskStore, target_key: str, anchor: str) -> dict | None:
+    """닻 클러스터의 등록부 행(merged 를 푼 것)."""
+    for row in registry.registry_rows(store, target_key):
+        if row["cluster_key"] == anchor:
+            return row
+    return None
+
+
+def create_issues_job(store: RiskStore, target_key: str, *, owner_sub: str, requester_sub: str | None = None,
+                      consent_source: str | None = "web", user_memo: str | None = None, settings: Any = None,
+                      chain: Mapping[str, Any] | None = None) -> dict:
+    """쟁점 잡(`rr_jobs.mode='issues'`, tier NULL) — 대기 쟁점을 패널 러너가 한 줄로 돈다(3.7). 자격이 없어도 행을 만든다 —
+    `error='pat_unavailable: …'` 를 적고 집는 쪽이 지금처럼 자격 없는 잡을 건너뛴다(자격 검사로 행을 만들지 않는 일이 없다)."""
+    from app import runner  # noqa: PLC0415 — runner 는 이 모듈을 쓴다.
+
+    cfg = settings or config.settings
+    credential, note = runner.resolve_credential_with_note(store, cfg, owner_sub, requester_sub)
+    queued = store.query_one("SELECT COUNT(*) AS n FROM rr_issues WHERE target_key = ? AND state = 'queued'",
+                             (target_key,))
+    job_id = common.new_uuid()
+    now = common.now_epoch()
+    params = {"mode": ISSUES_MODE, "requester": requester_sub, "consent": True, "consent_source": consent_source,
+              "user_memo": user_memo or None, "credential": credential["kind"] if credential else None}
+    error = None if credential else "pat_unavailable" + (f": {note}" if note else "")
+    store.execute(
+        "INSERT INTO rr_jobs(id, target_key, owner_sub, tier, state, concurrency, params_json, credential_email,"
+        " panels_done, panels_total, error, mode, chain_json, created_at, updated_at)"
+        " VALUES (?, ?, ?, NULL, 'queued', 1, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
+        (job_id, target_key, owner_sub, common.canonical_json(params), (credential or {}).get("email"),
+         int(queued["n"] or 0), error, ISSUES_MODE, common.canonical_json(dict(chain)) if chain else None, now, now))
+    return {"job_id": job_id, "issues_queued": int(queued["n"] or 0), "credential": params["credential"],
+            **({"error": error} if error else {})}
+
+
+def _seat_order(entry: Mapping[str, Any], ranks: Mapping[str, int]) -> tuple:
+    """제기·반대 석의 차례 — 인용 대조를 지난 사람 → 근거 등급 → rank_in_domain → 키."""
+    return (0 if entry.get("verified") or entry.get("split") else 1,
+            -registry.W_GRADE.get(_str(entry.get("grade")), 0.6), ranks.get(entry["agent_key"], 99), entry["agent_key"])
+
+
+def _pick_spread(entries: Sequence[Mapping[str, Any]], n: int, taken_domains: set[str]) -> list[dict]:
+    """차례대로 n 명 — 영역이 다르면 다른 영역을 먼저(이미 앉은 영역은 뒤로)."""
+    out: list[dict] = []
+    pool = list(entries)
+    while pool and len(out) < n:
+        fresh = [e for e in pool if e["domain"] not in taken_domains]
+        pick = (fresh or pool)[0]
+        pool.remove(pick)
+        out.append(dict(pick))
+        taken_domains.add(pick["domain"])
+    return out
+
+
+def seats_for(store: RiskStore, target_key: str, issue: Mapping[str, Any]) -> list[dict]:
+    """쟁점 패널의 로스터 좌석(2~5) — 제기 1~2 · 반대 0~2 · 반대가 없으면 인접 1~2. 한 줄은
+    `{key, domain, origin, rank_in_domain, issue_role}`(제기 primary · 반대·인접 counter — rr_seat_opinions.origin CHECK 안)."""
+    from app import taxonomy  # noqa: PLC0415
+
+    roster = {str(r["agent_key"]): dict(r) for r in store.query(
+        "SELECT agent_key, domain, rank_in_domain FROM rr_roster WHERE target_key = ? ORDER BY agent_key", (target_key,))}
+    ranks = {k: int(v["rank_in_domain"] or 99) for k, v in roster.items()}
+    basis = issue.get("basis") or {}
+
+    def entry(item: Mapping[str, Any]) -> dict:
+        key = str(item["agent_key"])
+        return {**dict(item), "domain": _str((roster.get(key) or {}).get("domain")) or key.split("-", 1)[0]}
+
+    raisers = sorted((entry(r) for r in basis.get("raisers") or () if r["agent_key"] in roster),
+                     key=lambda e: _seat_order(e, ranks))
+    opposers = sorted((entry(o) for o in basis.get("opposers") or () if o["agent_key"] in roster),
+                      key=lambda e: _seat_order(e, ranks))
+    taken: set[str] = set()
+    seats = [{**e, "issue_role": "raiser"} for e in _pick_spread(raisers, RAISER_SEATS, taken)]
+    seats += [{**e, "issue_role": "opposer"} for e in _pick_spread(opposers, COUNTER_SEATS, taken)]
+    if not opposers:
+        seats += [{**e, "issue_role": "adjacent"}
+                  for e in _adjacent(store, target_key, issue, roster, ranks, {s["agent_key"] for s in seats},
+                                     {s["domain"] for s in seats if s["issue_role"] == "raiser"}, taxonomy)]
+    seats = seats[:SEATS_MAX]
+    return [{"key": s["agent_key"], "domain": s["domain"], "origin": "primary" if s["issue_role"] == "raiser" else "counter",
+             "rank_in_domain": ranks.get(s["agent_key"], 99), "issue_role": s["issue_role"]} for s in seats]
+
+
+def _adjacent(store: RiskStore, target_key: str, issue: Mapping[str, Any], roster: Mapping[str, dict],
+              ranks: Mapping[str, int], seated: set[str], raiser_domains: set[str], taxonomy: Any) -> list[dict]:
+    """인접 석 1~2 — 닻 메커니즘의 배정표 소유 ∪ 관련 영역 가운데 제기 석과 다른 영역에서, 그 단위 셀이 reviewed 이고 applies=yes
+    판정이 많은 사람. 없으면 그 단위를 본(reviewed) 다른 영역 사람, 그래도 없으면 로스터 차례(좌석 하한 2)."""
+    anchor = anchor_row(store, target_key, str(issue["anchor_cluster_key"])) or {}
+    code = f"{_str(anchor.get('mechanism'))}.{_str(anchor.get('mechanism_detail'))}"
+    owners = taxonomy.mech_owners().get(code) or {"owners": (), "related": ()}
+    wanted = set(owners["owners"]) | set(owners["related"])
+    reviewed = {str(r["agent_key"]): int(r["n"]) for r in store.query(
+        "SELECT c.agent_key AS agent_key, COUNT(v.record_id) AS n FROM rr_review_cells c LEFT JOIN rr_card_verdicts v"
+        " ON v.target_key = c.target_key AND v.unit_id = c.unit_id AND v.agent_key = c.agent_key AND v.is_effective = 1"
+        " AND v.applies = 'yes' WHERE c.target_key = ? AND c.unit_id = ? AND c.state = 'reviewed' GROUP BY c.agent_key",
+        (target_key, _str(issue.get("unit_id"))))}
+    pool = [k for k in roster if k not in seated and roster[k]["domain"] not in raiser_domains]
+
+    def ordered(keys: Iterable[str]) -> list[str]:
+        return sorted(keys, key=lambda k: (-reviewed.get(k, -1), ranks.get(k, 99), k))
+
+    first = ordered(k for k in pool if k in reviewed and roster[k]["domain"] in wanted)
+    second = ordered(k for k in pool if k in reviewed and k not in first)
+    need = max(1, SEATS_MIN - len(seated))
+    picked = (first + second)[:2] or ordered(k for k in roster if k not in seated)[:need]
+    return [{"agent_key": k, "domain": roster[k]["domain"]} for k in picked]
+
+
+def part_names(store: RiskStore, anchor: Mapping[str, Any], limit: int = 4) -> list[str]:
+    """닻의 부품 이름 — 등록부가 모은 이름(merged.names), 없으면 주체 ckey 의 표시 이름(rr_part_keys.display_name · 첫 별칭)."""
+    names = [str(n) for n in (anchor.get("merged") or {}).get("names") or () if n]
+    if names:
+        return names[:limit]
+    out: list[str] = []
+    for ckey in [c for c in _str(anchor.get("subject_key")).split("|") if c][:limit]:
+        row = store.query_one("SELECT display_name, aliases_json FROM rr_part_keys WHERE ckey = ?", (ckey,))
+        aliases = _loads(row["aliases_json"], []) if row is not None else []
+        label = next((_str(a.get("label")) for a in aliases if isinstance(a, Mapping) and _str(a.get("label"))), "")
+        out.append(_str(row["display_name"]) if row is not None and row["display_name"] else (label or ckey))
+    return out
+
+
+def issue_question(store: RiskStore, issue: Mapping[str, Any]) -> str:
+    """쟁점 패널의 질문(600자 안) — 부품 이름·변경 종류·메커니즘 이름과, finding 의 네 필드를 [근거] I1 의 값 그대로 쓰라는 말."""
+    anchor = anchor_row(store, str(issue["target_key"]), str(issue["anchor_cluster_key"])) or {}
+    code = f"{_str(anchor.get('mechanism'))}.{_str(anchor.get('mechanism_detail'))}"
+    names = part_names(store, anchor) or [_str(anchor.get("subject_key"))]
+    head = (f"[쟁점 {issue['issue_id']} · {', '.join(issue.get('types') or ())}] 부품 {', '.join(names)} 의"
+            f" {_str(anchor.get('change_kind')) or '변경'} 변경에서 메커니즘 {_mech_label(code)}({code}) 이 성립하는가.")
+    tail = (" 결정문의 finding 은 mechanism·mechanism_detail·subject·change_kind 네 필드를 [근거] I1 의 값 그대로 쓰고,"
+            " 심각도·판정을 다시 정한다.")
+    return (head[:QUESTION_MAX - len(tail)] + tail)[:QUESTION_MAX]
+
+
+def plan_issue_panel(store: RiskStore, target_key: str, *, job: Mapping[str, Any], settings: Any = None) -> dict | None:
+    """다음 대기 쟁점(순위 순) 하나의 패널을 편성한다 — 한 트랜잭션에서 rr_panels(kind='issue'·tier 'I'·issue_id) INSERT 와
+    rr_issues 를 queued → planned 로(rowcount 1 일 때만). 좌석 원장(rr_coverage)은 건드리지 않는다. 대기 쟁점이 없으면 None.
+
+    **바깥 트랜잭션 안에서 부르지 마라**(planner.plan_next_panel 과 같다 — 경합 롤백이 바깥 커밋에 섞인다)."""
+    from app import planner  # noqa: PLC0415
+
+    rows = issue_rows(store, target_key, ("queued",))
+    if not rows:
+        return None
+    issue = rows[0]
+    seats = seats_for(store, target_key, issue)
+    target = store.query_one("SELECT owner_sub FROM rr_targets WHERE target_key = ?", (target_key,))
+    panel_id = common.new_uuid()
+    now = common.now_epoch()
+    mods = list(planner.DEFAULT_MODIFIERS)
+    budget = {"rounds_planned": ISSUE_ROUNDS, "tools_planned": [], "issue_id": issue["issue_id"]}
+    seats_json = common.canonical_json(seats)
+    try:
+        with store.tx() as conn:
+            row = conn.execute("SELECT COALESCE(MAX(panel_no), 0) + 1 AS next_no FROM rr_panels WHERE target_key = ?",
+                               (target_key,)).fetchone()
+            panel_no = int(row["next_no"])
+            conn.execute(
+                "INSERT INTO rr_panels(id, target_key, owner_sub, panel_no, tier, seats_json, chair_template,"
+                " modifiers_json, rounds, engine, tool_mode, status, budget_json, llm_calls_planned, kind, issue_id,"
+                " created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'web', 'evidence_only', 'planned', ?, ?, 'issue', ?, ?)",
+                (panel_id, target_key, target["owner_sub"], panel_no, ISSUE_TIER, seats_json, planner.CHAIR_TEMPLATE,
+                 common.canonical_json(mods), ISSUE_ROUNDS, common.canonical_json(budget),
+                 (len(seats) + 1) * ISSUE_ROUNDS + 3, issue["issue_id"], now))
+            cur = conn.execute(
+                "UPDATE rr_issues SET state = 'planned', state_reason = NULL, panel_id = ?, seats_json = ?,"
+                " attempts = attempts + 1, updated_at = ? WHERE issue_id = ? AND state = 'queued'",
+                (panel_id, seats_json, now, issue["issue_id"]))
+            if cur.rowcount != 1:
+                raise PlanConflict(issue["issue_id"])
+            _sync_registry(store, target_key)
+    except PlanConflict:
+        return None
+    return {"id": panel_id, "target_key": target_key, "owner_sub": target["owner_sub"], "panel_no": panel_no,
+            "tier": ISSUE_TIER, "kind": "issue", "issue_id": issue["issue_id"], "issue": issue, "seats": seats,
+            "seats_json": seats_json, "modifiers": mods, "rounds": ISSUE_ROUNDS, "tools": [], "budget": budget,
+            "status": "planned", "created_at": now}
+
+
+def start_issue_panel(store: RiskStore, panel_id: str) -> None:
+    """planned → running(패널·쟁점). 좌석 원장은 건드리지 않는다."""
+    now = common.now_epoch()
+    with store.tx():
+        store.execute("UPDATE rr_panels SET status = 'running', started_at = ? WHERE id = ?", (now, panel_id))
+        store.execute("UPDATE rr_issues SET state = 'running', updated_at = ? WHERE panel_id = ? AND state = 'planned'",
+                      (now, panel_id))
+        row = store.query_one("SELECT target_key FROM rr_panels WHERE id = ?", (panel_id,))
+        if row is not None:
+            _sync_registry(store, str(row["target_key"]))
+
+
+def release_issue(store: RiskStore, panel_id: str, *, charge: bool, reason: str | None = None,
+                  settings: Any = None) -> dict | None:
+    """패널이 결과 없이 닫혔다 — 그 쟁점(지금 패널이 이 패널인 것만)을 대기로 되돌린다. `charge` 면 내용 탓(charged + 1)이고
+    한도(HWAXRISK_ISSUE_MAX_CHARGED)에 닿으면 `inconclusive(reason)` 다. 패널 id 는 남긴다 — 그 패널을 고쳐 다시 내면
+    `resolve_issue` 가 이 쟁점에 결과를 앉힌다(다시 편성되면 패널 id 가 바뀌어 옛 패널은 덮지 못한다)."""
+    cfg = settings or config.settings
+    row = store.query_one("SELECT issue_id, target_key, state, charged FROM rr_issues WHERE panel_id = ?", (panel_id,))
+    if row is None or _str(row["state"]) not in IN_FLIGHT_STATES:
+        return None
+    charged = int(row["charged"] or 0) + (1 if charge else 0)
+    state = "inconclusive" if charge and charged >= int(cfg.risk_issue_max_charged) else "queued"
+    outcome = "undetermined" if state == "inconclusive" else None
+    now = common.now_epoch()
+    with store.tx():
+        store.execute("UPDATE rr_issues SET state = ?, state_reason = ?, outcome = ?, charged = ?, updated_at = ?"
+                      " WHERE issue_id = ?", (state, reason if charge or state != "queued" else None, outcome, charged,
+                                              now, row["issue_id"]))
+        _sync_registry(store, str(row["target_key"]))
+    return {"issue_id": row["issue_id"], "state": state, "charged": charged}
+
+
+def untry_queued(store: RiskStore, target_key: str, reason: str) -> int:
+    """남은 대기 쟁점을 `untried_cap(reason)` 로 — 쟁점 잡이 연속 오류로 실패했거나(engine_fail) 사람이 취소했을 때
+    (chain_cancelled)다. 지우지 않는다(보고서 '미토의' 행)."""
+    with store.tx():
+        n = store.execute("UPDATE rr_issues SET state = 'untried_cap', state_reason = ?, updated_at = ?"
+                          " WHERE target_key = ? AND state = 'queued'", (reason, common.now_epoch(), target_key))
+        _sync_registry(store, target_key)
+    return int(n or 0)
+
+
+def _panel_atoms(store: RiskStore, panel_id: str) -> list[dict]:
+    return [dict(r) for r in store.query(
+        "SELECT finding_id, cluster_key, direction, status, severity, sev3, judgement, evidence_grade, finding_json"
+        " FROM rr_findings WHERE panel_id = ? AND source_kind = ? ORDER BY finding_id", (panel_id, registry.ISSUE_PANEL_SOURCE))]
+
+
+def resolve_issue(store: RiskStore, panel_id: str, *, settings: Any = None) -> dict:
+    """쟁점 패널의 결과로 쟁점을 정한다(3.6 결과 어휘) — 반환 {issue_id, state, outcome, stale?}.
+
+    `rr_issues.panel_id` 가 이 패널이 아니면(늦게 끝난 옛 패널·재제출) 쟁점을 건드리지 않는다(P-17-5). 결정문을 파싱하지 못했으면
+    내용 탓 하나(한도면 `inconclusive(spec_parse_failed)`). 닻(닻 맞춤으로 붙은 것 포함) 원자가 없으면 `inconclusive`·
+    `undetermined(no_matching_atom)`, 전부 기각이거나 개선뿐이면 `resolved`·`rejected`. 살아 있는 리스크 원자 가운데 sev3 가 가장
+    큰 것이 주장값 최댓값(없으면 등록부 값)보다 낮으면 `downgraded`, 같으면 `upheld`, 높으면 `escalated`, 판정이 undetermined 면
+    `inconclusive`. 등록부 덮어쓰기는 병합이 한다(registry._apply_issue)."""
+    cfg = settings or config.settings
+    panel = store.query_one("SELECT id, target_key, issue_id, risk_spec_parsed, status FROM rr_panels WHERE id = ?",
+                            (panel_id,))
+    if panel is None or not panel["issue_id"]:
+        return {"issue_id": None, "state": None, "outcome": None}
+    issue = store.query_one("SELECT issue_id, target_key, anchor_cluster_key, state, panel_id, charged, basis_json"
+                            " FROM rr_issues WHERE issue_id = ?", (panel["issue_id"],))
+    if issue is None:
+        return {"issue_id": panel["issue_id"], "state": None, "outcome": None}
+    if _str(issue["panel_id"]) != panel_id or _str(issue["state"]) in _UNRESOLVABLE_STATES:
+        return {"issue_id": issue["issue_id"], "state": issue["state"], "outcome": None, "stale": True}
+    target_key = str(issue["target_key"])
+    now = common.now_epoch()
+    if not panel["risk_spec_parsed"]:
+        charged = int(issue["charged"] or 0) + 1
+        state = "inconclusive" if charged >= int(cfg.risk_issue_max_charged) else "queued"
+        with store.tx():
+            store.execute("UPDATE rr_issues SET state = ?, state_reason = 'spec_parse_failed', outcome = ?, charged = ?,"
+                          " updated_at = ? WHERE issue_id = ?",
+                          (state, "undetermined" if state == "inconclusive" else None, charged, now, issue["issue_id"]))
+            _sync_registry(store, target_key)
+        return {"issue_id": issue["issue_id"], "state": state, "outcome": "undetermined" if state == "inconclusive" else None}
+    anchor = str(issue["anchor_cluster_key"])
+    atoms = [a for a in _panel_atoms(store, panel_id)
+             if registry.resolve_cluster_key(store, _str(a["cluster_key"])) == anchor]
+    basis = _loads(issue["basis_json"], {})
+    claimed = basis.get("claimed") or {}
+    before = basis.get("registry_before") or {}
+    base_sev3 = int(claimed.get("sev3") or before.get("sev3") or 0)
+    live = [a for a in atoms if _str(a["status"]) != "rejected_in_panel"]
+    risk = [a for a in live if _str(a["direction"]) != "improvement"]
+    reason = None
+    if not atoms:
+        state, outcome, reason = "inconclusive", "undetermined", "no_matching_atom"
+    elif not risk:
+        state, outcome = "resolved", "rejected"
+    else:
+        atom = max(risk, key=lambda a: (int(a["sev3"] or 0), registry.JUDGEMENT_ORDER.get(_str(a["judgement"]), 0),
+                                        _str(a["finding_id"])))
+        if _str(atom["judgement"]) == "undetermined":
+            state, outcome, reason = "inconclusive", "undetermined", "no_decision"
+        else:
+            sev3 = int(atom["sev3"] or 0)
+            state = "resolved"
+            outcome = "downgraded" if sev3 < base_sev3 else ("escalated" if sev3 > base_sev3 else "upheld")
+    chosen = (max(risk, key=lambda a: (int(a["sev3"] or 0), _str(a["finding_id"]))) if risk else None)
+    outcome_json = {"panel_id": panel_id, "atom_finding_ids": [str(a["finding_id"]) for a in atoms],
+                    "severity_after": _str(chosen["severity"]) if chosen else None,
+                    "judgement_after": _str(chosen["judgement"]) if chosen else None,
+                    "grade_after": _str(chosen["evidence_grade"]) if chosen else None,
+                    "contest_note": next((_str(_loads(a["finding_json"], {}).get("contest_note")) for a in atoms
+                                          if _str(_loads(a["finding_json"], {}).get("contest_note"))), "")}
+    with store.tx():
+        store.execute("UPDATE rr_issues SET state = ?, state_reason = ?, outcome = ?, outcome_json = ?, updated_at = ?"
+                      " WHERE issue_id = ?", (state, reason, outcome, common.canonical_json(outcome_json), now,
+                                              issue["issue_id"]))
+        _sync_registry(store, target_key)
+    return {"issue_id": issue["issue_id"], "state": state, "outcome": outcome}

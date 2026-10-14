@@ -995,4 +995,10 @@ def check_invariants(store: Any, target_key: str) -> list[str]:
         for seat in seats:
             if seat.get("key") not in roster_keys:
                 problems.append(f"(5) 패널 {panel['id']} 의 좌석 {seat.get('key')} 가 로스터에 없다.")
+    # (8) 쟁점 패널(M3 S3-7) — 편성·도는 쟁점 패널은 issue_id 가 있고 그 쟁점의 지금 패널이다(끝난 옛 패널은 다시 편성되면 어긋난다).
+    for panel in store.query(
+            "SELECT p.id, p.issue_id, i.panel_id AS current FROM rr_panels p LEFT JOIN rr_issues i ON i.issue_id = p.issue_id"
+            " WHERE p.target_key = ? AND p.kind = 'issue' AND p.status IN ('planned', 'running')", (target_key,)):
+        if not panel["issue_id"] or panel["current"] != panel["id"]:
+            problems.append(f"(8) 쟁점 패널 {panel['id']} 이 그 쟁점({panel['issue_id']})의 지금 패널이 아니다.")
     return problems

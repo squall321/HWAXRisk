@@ -1833,7 +1833,7 @@ def _target_scope(store, target_key: str) -> tuple[dict, dict]:
 def _panel_scope(store, panel_id: str) -> tuple[dict, dict, list[dict], SpecContext]:
     """패널 행·타깃 행·seats 와 cites 검증 스코프(SpecContext)를 만든다."""
     panel = store.query_one(
-        "SELECT id, target_key, owner_sub, panel_no, tier, seats_json, conv_id, chair_template, model_json"
+        "SELECT id, target_key, owner_sub, panel_no, tier, seats_json, conv_id, chair_template, model_json, kind, issue_id"
         " FROM rr_panels WHERE id = ?", (panel_id,))
     if panel is None:
         raise AppError("E404", f"패널을 찾을 수 없습니다 — {panel_id}.", 404)
@@ -1860,12 +1860,43 @@ def _panel_scope(store, panel_id: str) -> tuple[dict, dict, list[dict], SpecCont
             brief_refs = frozenset(brief_module.collect_refs([i for i in items if isinstance(i, Mapping)]))
             brief_known = True
 
+    # 쟁점 패널(M3 S3-7) — 근거 I6 에 실은 카드 절을 인용 범위로 싣는다(P-17-7). 카드는 그 쟁점 제기·반대 측의 얼린 묶음에서 찾는다.
+    card_pack = _issue_card_pack(store, dict(panel), items if brief_known else None) if panel["kind"] == "issue" else None
     ctx = SpecContext(
         panel_id=str(panel["id"]), owner_sub=str(panel["owner_sub"] or ""),
         conv_id=str(panel["conv_id"] or ""), seats=tuple(str(s.get("key")) for s in seats),
         brief_refs=brief_refs, brief_known=brief_known, **fields,
+        **({"card_pack": card_pack, "card_scope": frozenset(card_pack)} if card_pack is not None else {}),
     )
     return dict(panel), target, seats, ctx
+
+
+_ISSUE_CARD_TOKEN = re.compile(r"\[card:([^\]#\s]+)")
+
+
+def _issue_card_pack(store, panel: Mapping[str, Any], items: Sequence[Mapping[str, Any]] | None) -> dict:
+    """쟁점 패널 근거 I6 이 실은 카드 — record_id → 얼린 카드(그 쟁점 제기·반대 측 전문가의 묶음에서). 근거가 없으면 빈 범위."""
+    rids: list[str] = []
+    for item in items or ():
+        if isinstance(item, Mapping) and item.get("key") == "I6":
+            rids += [r for r in _ISSUE_CARD_TOKEN.findall(str(item.get("result") or "")) if r not in rids]
+    row = store.query_one("SELECT basis_json FROM rr_issues WHERE issue_id = ?", (panel.get("issue_id"),))
+    try:
+        basis = json.loads(row["basis_json"]) if row is not None and row["basis_json"] else {}
+    except (TypeError, ValueError):
+        basis = {}
+    experts = [str(p.get("agent_key")) for p in (basis.get("raisers") or []) + (basis.get("opposers") or [])
+               if isinstance(p, Mapping)]
+    out: dict[str, Any] = {}
+    for agent in experts:
+        try:
+            pack = cardpack.load_for(store, str(panel["target_key"]), agent)
+        except cardpack.PackMissing:
+            continue
+        for rid in rids:
+            if pack is not None and rid in pack.record_cards and rid not in out:
+                out[rid] = pack.record_cards[rid]
+    return out
 
 
 def _evidence_call_ids(store, target_key: str) -> set[str]:
@@ -2028,6 +2059,32 @@ def _release_ledger_cycles(store, target_key: str, panel_id: str, keys: Sequence
         store.execute("UPDATE rr_seat_opinions SET cycle = ? WHERE opinion_id = ?", (moved, row["opinion_id"]))
 
 
+def _tag_issue_findings(store, panel: Mapping[str, Any], atoms: Sequence[Mapping[str, Any]]) -> None:
+    """쟁점 패널이 낸 finding 에 출처를 단다 — `source_kind='issue_panel'` · `source_id`=패널 · `unit_id`=쟁점의 단위 ·
+    `agent_key`=첫 제기 좌석. 닻 맞춤(WP4 3.7.6) — 원자의 subject_key 와 메커니즘 대분류가 닻과 같은데 키만 다르면 cluster_key 를
+    닻 키로 두고 계산값은 `finding_json.cluster_key_computed` 에 남긴다. 패널 대상의 저장(INSERT)은 그대로다(D-24)."""
+    issue = store.query_one("SELECT anchor_cluster_key, unit_id FROM rr_issues WHERE issue_id = ?", (panel.get("issue_id"),))
+    if issue is None:
+        return
+    anchor_key = str(issue["anchor_cluster_key"])
+    anchor = store.query_one("SELECT subject_key, mechanism FROM rr_registry WHERE target_key = ? AND cluster_key = ?",
+                             (panel["target_key"], anchor_key))
+    for atom in atoms:
+        uid = str(atom.get("claim_uid") or "")
+        raised = [str(k) for k in (atom.get("raised_by") or ())]
+        body = dict(atom)
+        if (anchor is not None and str(atom.get("cluster_key") or "") != anchor_key
+                and str(atom.get("subject_key") or "") == str(anchor["subject_key"] or "")
+                and str(atom.get("mechanism") or "") == str(anchor["mechanism"] or "")):
+            body["cluster_key_computed"] = atom.get("cluster_key")
+            body["cluster_key"] = anchor_key
+        store.execute(
+            "UPDATE rr_findings SET source_kind = 'issue_panel', source_id = ?, unit_id = ?, agent_key = ?,"
+            " cluster_key = ?, finding_json = ? WHERE finding_id = ?",
+            (panel["id"], issue["unit_id"], raised[0] if raised else None, body.get("cluster_key"),
+             json.dumps(body, ensure_ascii=False, sort_keys=True), uid))
+
+
 def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec: Mapping[str, Any] | None = None,
                          turns: Sequence[Mapping[str, Any]] = (), attribution: Mapping[str, Any] | None = None,
                          actor: str | None = None, grade_rules: str | None = None) -> dict:
@@ -2086,15 +2143,18 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
         for r in store.query("SELECT agent_key, cycle FROM rr_coverage WHERE target_key = ?", (target_key,))
     }
     nonledger_cycle = NONLEDGER_CYCLE_BASE + int(panel["panel_no"] or 0)
+    # 쟁점 패널(M3 S3-7)은 좌석 원장을 쓰지 않는다 — 모든 좌석이 원장 밖 회차이고 성격 진술을 앉히지 않는다(WP4 3.7).
+    issue_panel = panel.get("kind") == "issue"
 
     out_seats: list[dict] = []
     opinion_rows: list[tuple] = []
     for agent_key, domain, origin in roster:
-        ledger_seat = origin in ("primary", "counter")
+        seated = origin in ("primary", "counter")
+        ledger_seat = seated and not issue_panel
         cycle = cycles.get(agent_key, 1) if ledger_seat else nonledger_cycle
         rows = grouped.get(agent_key) or []
         state = dict(attr_seats.get(agent_key) or {})
-        if ledger_seat and not rows and not int(state.get("turns_n") or 0):
+        if seated and not rows and not int(state.get("turns_n") or 0):
             # 한 마디도 못 한 원장 좌석은 의견을 내지 않았다 — 행을 만들지 않는다(WP1 P-01). 좌석 원장은 이 좌석을 실패로
             # 읽어 같은 회차로 pending 에 되돌리므로, 행을 남기면 다음 패널에서 다시 앉아 저장할 때 그 회차에 걸린다.
             # 발언 글이 없어도 스트림이 그 좌석의 발언 프레임을 셌으면(귀속 turns_n) 원장은 종결로 읽으므로 행을 둔다.
@@ -2161,7 +2221,7 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
             json.dumps(opinion["raised_finding_ids"], ensure_ascii=False),
             opinion["excerpt_for_rag"], now,
         ))
-        if origin in ("primary", "counter"):
+        if seated:
             out_seats.append({
                 "agent_key": agent_key, "opinion_id": opinion_id,
                 "turns_n": len(rows), "cited_refs_n": len(refs), "cited_ir": cited_ir,
@@ -2249,9 +2309,12 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
                          now),
                     )
 
+        if issue_panel:
+            _tag_issue_findings(store, panel, atoms)
+
         # 성격 진술(§4.6 L2 panel 층). 같은 패널이 다시 제출되면 그 패널의 행만 갈아 끼운다.
         store.execute("DELETE FROM rr_character WHERE id LIKE ?", (f"{panel_id}#%",))
-        if spec is not None and project_id:
+        if spec is not None and project_id and not issue_panel:
             for facet in (body.get("character") or {}).get("facets") or ():
                 for index, statement in enumerate(facet.get("statements") or ()):
                     local = str(statement.get("id") or f"{facet.get('facet')}-{index}")

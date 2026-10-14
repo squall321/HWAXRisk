@@ -28,6 +28,7 @@ from app import roster as roster_module
 from app import state as state_module
 from app import units as units_module
 from app import registry as registry_module
+from app import issues as issues_module
 from app.adapters import base as adapters_base
 from app.adapters import registry as adapters_registry
 from app.adapters.dyna import CONTEXT_KIND as CONTEXT_CALL_KIND
@@ -4059,6 +4060,8 @@ def complete_panel(panel_id: str, *, engine: str, decision_text: str, turns: lis
     parsed = spec is not None
     store = get_store()
     now = now_epoch()
+    # 쟁점 패널(M3 S3-7)은 cells 대상에서 도는 패널이다 — 좌석 원장을 쓰지 않고 결과로 쟁점을 정한다(러너와 같은 갈래).
+    issue_panel = (store.query_one("SELECT kind FROM rr_panels WHERE id = ?", (panel_id,)) or {"kind": None})["kind"] == "issue"
 
     # engine·tool_mode — MCP 경로는 좌석 도구 호출 경로가 없어 evidence_only 등급이다(§6.11).
     # 재제출은 기존 engine·tool_mode 를 유지한다(§6.11 재제출 행).
@@ -4115,16 +4118,16 @@ def complete_panel(panel_id: str, *, engine: str, decision_text: str, turns: lis
     with store.tx():
         # 패널 결과는 패널 방식 대상에만 앉는다 — 방식 바꾸기와 같은 트랜잭션 순서로 본다(RC-1). 토큰을 받은 뒤 대상이 cells 로
         # 바뀌었으면 늦게 온 결과(MCP L2 회차)가 그 대상의 좌석·의견·등록부를 조용히 바꾸지 않는다(D-24 — 비교 중 등록부 고정).
-        if _target_flow(store, panel["target_key"]) == "cells":
+        if _target_flow(store, panel["target_key"]) == "cells" and not issue_panel:
             raise AppError("flow_mismatch", "이 패널의 대상은 그 사이 카드 대조(flow='cells') 방식으로 바뀌었다 — 패널 결과를 앉히지"
                            " 않는다. 결과를 살리려면 검토 잡이 서기 전에 방식을 panels 로 되돌린(POST /api/targets/"
                            f"{panel['target_key']}/flow) 뒤 다시 낸다.", 422,
                            detail={"flow": "cells", "panel_id": panel_id})
         # planned 패널은 좌석이 assigned 다 — 종결 전에 running 으로 이어 원장 상태를 맞춘다(§6.8.2 전이표). 이 전이도
         # 같은 트랜잭션이다 — 밖에서 커밋하면 저장이 터졌을 때 패널·좌석이 running 에 굳어 그 타깃이 멈춘다.
-        if panel["status"] == "planned":
+        if panel["status"] == "planned" and not issue_panel:
             planner.start_panel_seats(store, panel_id)
-        if panel["status"] == "error":
+        if panel["status"] == "error" and not issue_panel:
             # error 로 닫힌 패널의 좌석은 pending·panel_id NULL 이라 원장 갱신(apply_seat_results)이 건너뛴다 — 먼저
             # 그 패널로 되찾는다. 한 석이라도 다른 데 가 있으면 다시 앉히지 않는다(WP1 R-5).
             reclaimed = planner.reclaim_panel_seats(store, panel_id)
@@ -4156,8 +4159,12 @@ def complete_panel(panel_id: str, *, engine: str, decision_text: str, turns: lis
                 "used_tool": attr.get("used_tool"), "cited_refs_n": int(seat.get("cited_refs_n") or 0),
                 "abstained": bool(seat.get("abstained")),
             })
-        applied = planner.apply_seat_results(store, panel_id, seat_results, decision_ok=bool(decision_text),
-                                             model=model_json.get("model"))
+        if issue_panel:
+            issues_module.resolve_issue(store, panel_id)      # 지금 패널이 아니면(옛 패널 재제출) 쟁점을 건드리지 않는다
+            applied = {"seats": []}
+        else:
+            applied = planner.apply_seat_results(store, panel_id, seat_results, decision_ok=bool(decision_text),
+                                                 model=model_json.get("model"))
         # 원장이 실제로 바뀐 좌석이 있을 때만 참이다 — 이미 종결된 패널을 다시 내면 거짓이다(종전에는 늘 참이었다).
         coverage_updated = any(item.get("updated") for item in applied["seats"])
 

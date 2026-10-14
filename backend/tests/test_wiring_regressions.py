@@ -381,6 +381,37 @@ def test_the_whole_request_body_is_accepted_by_the_portal_model(risk_store, tmp_
     assert verdict["dropped"] == []
 
 
+def test_an_issue_panel_body_is_accepted_by_the_portal_model(risk_store, monkeypatch, tmp_path):
+    """쟁점 패널(재설계 M3 S3-7 ⑩)의 본문 — 보고서 저장 없음(save_report 0)·앱 표지(started_by app)·지정 도구 없음·3라운드·
+    I0~I8 근거를 포털의 실제 요청 모델이 받고 버리는 칸이 없다. 쟁점은 M2 검토 루프 원장에서 S3-6 이 고른 것이다."""
+    from app import issues
+    from tests.test_issue_panels import _ledger
+    from tests.synth import review_rig
+
+    backend = _portal_backend()
+    if backend is None:
+        pytest.skip("포털 리포가 곁에 없다(HWAX_PORTAL_REPO 또는 ../HWAXPortal) — 문서 경계 시험만 돈다")
+    review_rig.configure(monkeypatch, risk_store, tmp_path, risk_issue_panel_cap=1, risk_issue_panel_hard_cap=1)
+    key, _units = _ledger(risk_store)
+    issues.select_issues(risk_store, key, selected_round=1)
+    issues.create_issues_job(risk_store, key, owner_sub=review_rig.OWNER, requester_sub=review_rig.OWNER)
+    seen: dict = {}
+    engine = _portal_engine(risk_store, config.settings, seen,
+                            _sse(("delib", {"kind": "decision", "text": DECISION}), ("done", {})))
+    out = runner.run_panel(risk_store, config.settings, engine, runner.claim_next_job(risk_store, config.settings))
+    assert out["status"] == "done", out
+    opts = seen["body"]["delib_opts"]
+    assert (opts["save_report"], opts["started_by"], opts["tools"], opts["rounds"]) == (0, "app", [], 3)
+    r = subprocess.run([sys.executable, "-c", _PORTAL_VALIDATE], input=json.dumps(seen["body"]), cwd=backend,
+                       env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, capture_output=True, text=True, timeout=120)
+    if r.returncode == _PORTAL_DEPENDENCY_MISSING:
+        missing = json.loads(r.stdout)["missing_module"]
+        pytest.skip(f"포털 모델을 이 venv 로 불러오지 못했다 — 포털의 서드파티 의존 {missing!r} 이 이 venv 에 없다")
+    assert r.returncode == 0, f"포털 모델로 쟁점 패널 본문을 검증하지 못했다(rc={r.returncode}) — {r.stderr.strip()[-2000:]}"
+    verdict = json.loads(r.stdout)
+    assert verdict["errors"] == [] and verdict["dropped"] == []
+
+
 def test_the_synthetic_panel_body_factory_returns_what_the_runner_sent(risk_store, tmp_path):
     """세 리포 사슬 시험(에이전트 서버 tests/test_risk_panel_body_chain.py)이 쓰는 공장 — 합성 다건 변경 타깃에서 러너가
     포털에 실제로 보낸 본문이다. 질문에 그 타깃의 diff_id 가, 검색어가 포털 상한 안으로, 1백만 토큰 창의 근거 예산이면

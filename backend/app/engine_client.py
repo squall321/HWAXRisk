@@ -339,6 +339,14 @@ class PortalPanelEngine:
             raise EngineError("agent-server /health 응답이 객체가 아닙니다.")
         return info
 
+    def drain_state(self) -> dict:
+        """에이전트 서버 비우기(M3.md 4.7) — `/health` 의 `drain{on, scope, until, …}` 와 `draining`. 러너는 `on` 이면 범위와
+        상관없이 패널을 집지 않는다(#50). 그 칸이 없는 옛 서버면 `on: false` 다. 불통이면 예외(러너가 비우지 않는 것으로 본다)."""
+        info = self._health_info()
+        drain = info.get("drain") if isinstance(info.get("drain"), Mapping) else {}
+        return {"on": bool(drain.get("on") or info.get("draining")), "scope": drain.get("scope"),
+                "until": drain.get("until"), "reason": drain.get("reason")}
+
     @staticmethod
     def _health_view(info: Mapping[str, Any]) -> dict:
         """/health 본문 → 패널 model_json 의 칸."""
