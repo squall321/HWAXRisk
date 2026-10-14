@@ -81,9 +81,11 @@ def test_flagged_cards_on_one_change_fold_into_one_finding_held_at_warning(store
     """같은 전문가의 카드 셋(FAIL·WARNING·FAIL)이 같은 변경 · 같은 메커니즘이면 단위마다 finding 하나에 cards[] 셋이다. hold 정책 —
     등록부로 갈 값은 WARNING · 중대이고 원래 판정은 judgement_claimed 에 FAIL 로 남는다. 패널 자리는 비고 출처 넷이 차며 회수
     자격은 0, 등록부에는 병합하지 않는다. 근거 문장에 카드 참조·인용이 있어도 수치 대조가 깨지지 않고(P-05) finding 글에 카드 본문이
-    없다(P-06)."""
+    없다(P-06). 걸린 줄은 같은 메커니즘 코드를 단다(cr-verdict-2 — 메커니즘이 없으면 cells 대상에서는 카드마다 갈린다, M3 S3-3 ·
+    tests/test_review_mech.py)."""
     key, _job, _fake = _run(store, scope={"agents": [SEAL]},
-                            verdicts={"K01": ("yes", "FAIL"), "K02": ("yes", "WARNING"), "K03": ("yes", "FAIL")})
+                            verdicts={"K01": ("yes", "FAIL"), "K02": ("yes", "WARNING"), "K03": ("yes", "FAIL")},
+                            mechs={_rid(a): ("interface.clearance", "") for a in ("K01", "K02", "K03")})
     review_id = _head(store, key, SEAL)["review_id"]
     rows = _findings(store, key)
     assert sorted(r["unit_id"] for r in rows) == sorted(_unit_ids(store, key))

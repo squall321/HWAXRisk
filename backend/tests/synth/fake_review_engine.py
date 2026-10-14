@@ -36,6 +36,9 @@
   seen·need        카드 밖 m 줄의 따져 본 메커니즘 · need 줄의 글(S10 의 메커니즘·필요 정보 절)
   hold_runs        n(1부터 센 run 차례) → threading.Event — 그 run 은 result 앞에서 그 사건을 기다린다(호출 중 재기동 시험)
   solo_verdicts    solo 변형에서만 쓰는 record_id → (applies, judgement) — 단독 재질의가 앞 판정을 뒤집는 카드(S11)
+  mechs·solo_mechs record_id 또는 (agent_key, record_id) → (mech, mech_free) — v 줄에 메커니즘을 싣는다(cr-verdict-2 의 걸린 줄 칸,
+                   M3.md 4.4.3). solo_mechs 는 단독 재질의 줄에만(묶음 판정과 다른 메커니즘). 엔진 계약 예제
+                   result_verdict_mech.json 이 서면 그 모양에 맞춘다(재설계 M3 S3-3 — 쟁점·종합 꾸러미가 더한 칸)
   sweep_rel        unit_id → 훑기 rel(yes·maybe·no) — 그 단위의 u 줄 rel 을 바꾼다(훑기 '무관' 비율, S11)
   sweep_k          unit_id → 별칭 목록 — 그 단위의 u 줄 k 를 실은 카드 전부가 아니라 이것만으로 낸다(카드 밖 호출이 훑기 k 에 걸린
                    배경 카드를 먼저 싣는지 — P-03, R3A-5)
@@ -242,6 +245,8 @@ class FakeReviewEngine:
         self.need: str | None = None
         self.hold_runs: dict[int, threading.Event] = {}
         self.solo_verdicts: dict[str, tuple[str, str]] = {}
+        self.mechs: dict[Any, tuple[str, str]] = {}
+        self.solo_mechs: dict[Any, tuple[str, str]] = {}
         self.sweep_rel: dict[str, str] = {}
         self.sweep_k: dict[str, list[str]] = {}
         self.error_cells: dict[tuple[str, str], dict[str, Any]] = {}
@@ -469,7 +474,8 @@ class FakeReviewEngine:
         extras: dict[str, Any] = {"inj": []}
         if kind == "verdict":
             judge = order[::-1] if variant == "rev" else order
-            main = [self._verdict_row(a, cards[a], own, lines, variant=variant) for a in judge if a not in self.skip_cards]
+            main = [self._mech(self._verdict_row(a, cards[a], own, lines, variant=variant), body, variant)
+                    for a in judge if a not in self.skip_cards]
             if (self.truncated or cut == "length") and main:
                 main = main[:-1]
                 quality.update(truncated=True, tail_broken=True)
@@ -582,3 +588,12 @@ class FakeReviewEngine:
                 "card_id": str(card.get("card_id") or ""), "from_attempt": 1,
                 "checks": {"quote": status, "quote_sid": sid, "refs": "ok" if cited or applies != "yes" else "missing",
                            "nums_unsourced": [], "need": "ok", "coerced": []}}
+
+    def _mech(self, row: dict, body: Mapping[str, Any], variant: str | None) -> dict:
+        """대본(mechs·solo_mechs)이 있으면 v 줄에 mech·mech_free 를 싣는다 — 열쇠는 (전문가, record_id) 가 먼저, 없으면 record_id."""
+        agent, record_id = str((body.get("expert") or {}).get("key") or ""), str(row.get("record_id") or "")
+        mech = self.solo_mechs.get((agent, record_id), self.solo_mechs.get(record_id)) if variant == "solo" else None
+        mech = mech or self.mechs.get((agent, record_id), self.mechs.get(record_id))
+        if mech is not None:
+            row["mech"], row["mech_free"] = mech
+        return row

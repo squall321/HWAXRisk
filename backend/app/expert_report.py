@@ -22,7 +22,7 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from app import cardpack, export, narrative, planner, render, review_cells, review_quality, review_verify, units
+from app import cardpack, export, narrative, planner, render, review_cells, review_quality, review_verify, taxonomy, units
 from app.common import canonical_json, now_epoch
 from app.errors import AppError
 
@@ -345,6 +345,7 @@ def _card_members(ledger: Ledger, unit_id: str, ctx: narrative.SpecContext,
             "detectability": detectability, "resolving_check": resolving, "evidence_grade": grade,
             "claim": _s(eff.get("why")),
             "warrant": f"근거 카드 [card:{record_id}] " + render.quote_source(_s(eff.get("cq"))),
+            narrative.FREE_KEY_FALLBACK: f"card~{_s(eff.get('card_id')) or record_id}",
         }
         card = {"record_id": record_id, "card_id": eff.get("card_id"), "alias": eff["alias"],
                 "judgement": eff["judgement"], "claimed": claimed, "variant": eff["variant"], "agree": eff["agree"],
@@ -409,6 +410,8 @@ def _offcard_members(ledger: Ledger, unit_id: str, ctx: narrative.SpecContext,
             "detectability": detectability, "resolving_check": resolving, "evidence_grade": grade,
             "claim": _s(row.get("title")), "warrant": _s(row.get("path")),
         }
+        if card is not None:
+            raw[narrative.FREE_KEY_FALLBACK] = f"card~{_s(card.get('card_id')) or record_id}"
         out.append(_Member(unit_id=unit_id, raw=raw, direction=direction, weight=2,
                            sev_rank=_SEV_RANK.get(sev_claimed or "", 0), passed=passed, alias_rank=(1 << 20, ""), grade=grade,
                            claimed=None, sev_claimed=sev_claimed, nums=[], off_index=index, cites=cites,
@@ -479,7 +482,22 @@ def _fold(ledger: Ledger, members: Sequence[_Member], ctx: narrative.SpecContext
     })
     if rep.card is not None and rep.quote_chars is not None:
         finding["warrant_chars"] = [rep.quote_chars]          # 근거 문장의 «» 인용이 이미 줄인 글이다(R3B-7)
+    flags = mech_flags(finding, ledger.head["domain"])
+    if flags:
+        finding["flags"] = flags
     return finding
+
+
+MECH_OUT_OF_DOMAIN = "mech_out_of_domain"
+
+
+def mech_flags(finding: Mapping[str, Any], domain: str) -> list[str]:
+    """finding 의 메커니즘 표지 — 그 메커니즘이 배정표에서 그 전문가 영역의 소유 ∪ 관련 밖이면 `mech_out_of_domain`(M3.md 4.4.3).
+    판정은 바꾸지 않는다(표지만 — 배정표는 검사에만 쓴다, D-34·#25). 미분류·표에 없는 코드는 따지지 않는다."""
+    row = taxonomy.mech_owners().get(f"{finding.get('mechanism')}.{finding.get('mechanism_detail')}")
+    if row is None or domain in row["owners"] or domain in row["related"]:
+        return []
+    return [MECH_OUT_OF_DOMAIN]
 
 
 def _member_key(member: _Member) -> str:
@@ -586,7 +604,7 @@ def _findings_section(findings: Sequence[Mapping[str, Any]], ledger: Ledger) -> 
                         "judgement": c["judgement"]} for c in f.get("cards") or ()],
              "off_card": bool(f.get("off_card")), "split": bool(f.get("split")), "claim": f.get("claim") or "",
              "dangling": list(f.get("dangling") or ()), "quote_mismatch": list(f.get("quote_mismatch") or ()),
-             "unquoted_numbers": list(f.get("unquoted_numbers") or ())}
+             "unquoted_numbers": list(f.get("unquoted_numbers") or ()), "flags": list(f.get("flags") or ())}
             for f in findings]
 
 
@@ -813,6 +831,22 @@ def _mechanisms_section(ledger: Ledger) -> list[dict]:
     return out
 
 
+def _mech_quality(ledger: Ledger, findings: Sequence[Mapping[str, Any]]) -> dict:
+    """메커니즘 신고의 품질(M2 #25 의 앱 쪽) — 걸린(FAIL·WARNING) 실효 카드 수, 그 가운데 메커니즘을 달지 않은 수(단독 재질의 줄도
+    묶음 판정 줄도 mech 가 비었다 — 엔진의 checks.mech='missing'), 배정표의 그 영역 밖 메커니즘을 단 finding 수."""
+    flagged = missing = 0
+    for unit in ledger.reviewed():
+        variants = _variants(ledger, unit["unit_id"])
+        for record_id, eff in ledger.effective(unit["unit_id"]).items():
+            if eff["judgement"] not in review_verify.FLAGGED:
+                continue
+            solo = variants[record_id].get("solo") or eff
+            flagged += 1
+            missing += 0 if _s(solo.get("mech")) or _s(eff.get("mech")) else 1
+    return {"flagged": flagged, "missing": missing,
+            "out_of_domain": sum(1 for f in findings if MECH_OUT_OF_DOMAIN in (f.get("flags") or ()))}
+
+
 def _quality_section(store: Any, target_key: str, agent_key: str) -> dict:
     """검토 품질(S11 의 전문가 몫) — 품질 수치 모듈의 계산(`compute(…, agent_key=…)`)과 문면(`block`)이다. 표본이 모자란 값은 그
     모듈이 0 이 아니라 '표본 수 미달(n=…)' 로 적는다."""
@@ -854,7 +888,8 @@ def build_report(store: Any, target_key: str, agent_key: str, *, ledger: Ledger 
         "background": [_card_head(ledger.pack.cards[a]) for a in ledger.pack.background] if ledger.pack is not None else [],
         "unjudged_cards": _unjudged_section(ledger), "by_unit": _by_unit_section(ledger, off_card), "off_card": off_card,
         "handoff": _handoff_section(ledger), "needs_info": _needs_section(ledger), "mechanisms": _mechanisms_section(ledger),
-        "findings": _findings_section(findings, ledger), "quality": _quality_section(store, target_key, agent_key),
+        "findings": _findings_section(findings, ledger),
+        "quality": {**_quality_section(store, target_key, agent_key), "mech": _mech_quality(ledger, findings)},
     }
 
 

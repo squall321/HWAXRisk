@@ -353,9 +353,11 @@ def _merge_cluster(target_key: str, stored_key: str, base_key: str, bucket: str,
         "priority": priority,
         "rejected": len(rejected_members),
         "human_n": human_n,
+        # 세부 자리는 클러스터 키와 같은 규칙이다 — cells 대상의 미분류 카드 대조 finding 은 쪼갠 세부(key_detail, M3.md 4.4.3)를 써야
+        # 근접 중복 스캔이 갈라 놓은 것을 다시 묶지 않는다(P-17-6). 그 칸이 없는 finding(패널 대상 전부)은 지금 식 그대로다.
         "family_key": family_key_of(
             _clean_str(rep.get("mechanism")) or "unclassified",
-            _clean_str(rep.get("mechanism_detail")),
+            _clean_str(rep["_json"].get("key_detail")) or _clean_str(rep.get("mechanism_detail")),
             _clean_str(rep.get("change_kind")),
         ),
         # 전원이 기각한 클러스터는 코드가 세운 판정이다 — 사람이 닫은 status 를 덮지는 않는다.

@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
@@ -299,6 +300,8 @@ class SpecContext:
     card_pack: Mapping[str, Any] | None = None           # record_id → 얼린 카드(cardpack.FrozenPack.record_cards)
     card_scope: frozenset | None = None                  # 이 스코프에 허용된 record_id. None 이면 묶음 전체
     number_corpus: str | None = None                     # claim·warrant 수치 대조의 말뭉치. None 이면 quote 들
+    # 대상의 방식(panels | cells). 'cells' 면 미분류 finding 의 클러스터 키를 자유 기술로 쪼갠다(M3.md #30 — `review_scope` 만 채운다).
+    flow: str = "panels"
     _names: dict | None = field(default=None, repr=False, compare=False)   # part_names() 의 한 번 읽은 값
 
     # ------------------------------------------------ 조회
@@ -1179,6 +1182,32 @@ def cluster_key_of(mechanism: str, mechanism_detail: str, subject_key: str, chan
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
 
+# 미분류 쪼개기(M2 #25 · M3.md 4.4.3 · #30) — 카드 대조 finding 의 메커니즘이 비거나 택소노미 밖(free)이면 cells 대상에서만 클러스터
+# 키(와 family_key)의 세부 자리를 'unclassified~' + 자유 기술 열쇠로 둔다. 서로 다른 자유 기술이 process.unclassified 한 덩이로
+# 뭉치지 않게 한다. mechanism_detail 칸은 그대로 'unclassified' 이고 쪼갠 세부는 finding 의 key_detail 에만 적는다(쪼갰을 때만 —
+# 패널 대상의 finding 바이트는 그대로다, D-24). 자유 기술도 없으면 그 카드로 쪼갠다 — 부르는 쪽이 '_free_key_fallback'
+# ('card~' + card_id 또는 record_id)를 날 finding 에 실어 주고, 정규화가 꺼내 쓰고 지운다(저장되지 않는다).
+UNCLASSIFIED = "unclassified"
+FREE_KEY_CHARS = 24
+FREE_KEY_FALLBACK = "_free_key_fallback"
+
+
+def free_key_of(text: Any) -> str:
+    """자유 기술 열쇠 — NFKC · 소문자 · 공백과 구두점(유니코드 P 범주)을 뺀 앞 24자."""
+    folded = unicodedata.normalize("NFKC", str(text or "")).lower()
+    return "".join(ch for ch in folded if not ch.isspace() and not unicodedata.category(ch).startswith("P"))[:FREE_KEY_CHARS]
+
+
+def key_detail_of(finding: Mapping[str, Any], flow: str, fallback: str | None = None) -> str:
+    """클러스터 키·family_key 의 세부 자리 — cells 대상의 미분류만 'unclassified~<자유 기술 열쇠>'(없으면 '~' + fallback), 그
+    밖은 mechanism_detail 그대로다."""
+    detail = str(finding.get("mechanism_detail") or "")
+    if flow != "cells" or detail != UNCLASSIFIED:
+        return detail
+    free = free_key_of(finding.get("mechanism_free")) or str(fallback or "")
+    return f"{UNCLASSIFIED}~{free}" if free else detail
+
+
 # ================================================================ §4.2.2 정규화
 def _fix_enum(value: Any, name: str, path: str, invalid: list[dict]) -> Any:
     allowed = _ENUMS[name]
@@ -1292,8 +1321,11 @@ def _normalize_finding(finding: dict, path: str, ctx: SpecContext, *, is_gain: b
     finding["precedent_corpus_n"] = corpus_n
 
     finding["tool_call_refs"] = _resolve_tool_calls(finding.get("tool_calls") or (), raised_by, ctx)
+    key_detail = key_detail_of(finding, ctx.flow, finding.pop(FREE_KEY_FALLBACK, None))
+    if key_detail != finding["mechanism_detail"]:
+        finding["key_detail"] = key_detail
     finding["cluster_key"] = cluster_key_of(
-        finding["mechanism"], finding["mechanism_detail"], finding["subject_key"], finding["change_kind"]
+        finding["mechanism"], key_detail, finding["subject_key"], finding["change_kind"]
     )
     if raised_by:
         expected = _dom_of(raised_by[0])
@@ -1883,9 +1915,11 @@ def review_scope(store, target_key: str, agent_key: str, review_id: str, pack: A
         card_pack = dict(pack)
     else:
         raise TypeError("pack 은 cardpack.FrozenPack · 팩 dict · record_id → 카드 dict · None 가운데 하나다")
+    flow = store.query_one("SELECT flow FROM rr_targets WHERE target_key = ?", (target_key,))["flow"]
     return SpecContext(
         panel_id=str(review_id), owner_sub=str(target["owner_sub"] or ""), seats=(str(agent_key),),
-        call_ids=frozenset(call_ids), card_pack=card_pack, number_corpus=number_corpus, **fields,
+        call_ids=frozenset(call_ids), card_pack=card_pack, number_corpus=number_corpus,
+        flow=str(flow or "panels"), **fields,
     )
 
 
