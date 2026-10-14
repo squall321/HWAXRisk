@@ -1124,10 +1124,14 @@ def recover_running(store: Any, *, now: int | None = None) -> dict:
 
 
 # ---------------------------------------------------------------- 셈
-def _target_cells(store: Any, target_key: str, active: set[str]) -> list[dict]:
-    return [dict(r) for r in store.query(
-        "SELECT unit_id, agent_key, state, basis, run_id, decided_by FROM rr_review_cells WHERE target_key = ?",
-        (target_key,)) if r["unit_id"] in active]
+def _target_cells(store: Any, target_key: str, active: set[str], agent_key: str | None = None) -> list[dict]:
+    """대상의 셀(활성 단위만) — agent_key 를 주면 SQL 에서 그 전문가로 거른다(마감마다 7천여 행을 읽지 않는다 — C3-11)."""
+    sql, args = ("SELECT unit_id, agent_key, state, basis, run_id, decided_by FROM rr_review_cells WHERE target_key = ?",
+                 [target_key])
+    if agent_key is not None:
+        sql += " AND agent_key = ?"
+        args.append(agent_key)
+    return [dict(r) for r in store.query(sql, tuple(args)) if r["unit_id"] in active]
 
 
 def expert_tally(store: Any, target_key: str, agent_key: str) -> dict:
@@ -1138,7 +1142,7 @@ def expert_tally(store: Any, target_key: str, agent_key: str) -> dict:
     세지 않는다). `filtered` 는 거른 셀(na_irrelevant), `noinput_only` 는 reviewed 셀이 전부 입력 결손 호출로 본 것이다(basis noinput).
     """
     active = set(active_unit_ids(store, target_key))
-    rows = [r for r in _target_cells(store, target_key, active) if r["agent_key"] == agent_key]
+    rows = _target_cells(store, target_key, active, agent_key)
     by_state = Counter(r["state"] for r in rows)
     reviewed = [r for r in rows if r["state"] == "reviewed"]
     reviewed_units = sorted({r["unit_id"] for r in reviewed})

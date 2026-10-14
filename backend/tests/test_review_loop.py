@@ -1481,3 +1481,42 @@ def test_a_late_progress_write_does_not_overwrite_a_finished_jobs_board(store, m
     late.worker("late-worker", agent_key=SEAL, purpose="review", started_at=r.clock())
     late.set(phase="review", count=True)
     assert rig.job_row(store, job_id)["progress_json"] == board
+
+
+def test_the_quality_board_is_recomputed_no_sooner_than_thirty_times_its_last_cost(store, monkeypatch):
+    """C3-11 — 진행판의 품질 칸(QUALITY_HOOK)은 max(60, 30 × 지난 계산 초) 마다만 다시 계산한다(359명 원장에서 계산이 길어지면 원장
+    락을 쥐는 몫이 저절로 줄어든다). 원장 셈 자체는 60초 간격 그대로이고, 끝난 잡의 진행판은 간격과 무관하게 다시 계산한다."""
+    import types
+
+    from app import review_runner
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    mono = [0.0]
+    cost = [4.0]
+    calls: list[int] = []
+
+    def hook(_store, _key, _job):
+        calls.append(clock())
+        mono[0] += cost[0]
+        return {"n": len(calls)}
+
+    monkeypatch.setattr(review_runner, "QUALITY_HOOK", hook)
+    monkeypatch.setattr(review_runner, "time", types.SimpleNamespace(monotonic=lambda: mono[0]))
+    clock = rig.Clock(1000)
+    progress = review_runner.JobProgress(store, job_id, clock=clock)
+    progress.refresh(force=True)
+    assert calls == [1000] and progress.quality_interval() == 120           # 4초 계산 → 120초 간격
+    clock.advance(61)
+    progress.refresh()
+    assert calls == [1000] and progress._counted_at == 1061                 # 원장 셈은 60초 간격 그대로
+    clock.advance(58)
+    progress.set(phase="review", count=True)                                # 강제 셈도 품질 간격은 지킨다
+    assert calls == [1000]
+    cost[0] = 0.5
+    clock.advance(1)
+    progress.refresh(force=True)
+    assert calls == [1000, 1120] and progress.quality_interval() == 60      # 빨라지면 바닥 60초로 돌아온다
+    clock.advance(5)
+    board = json.loads(progress.finish("completed"))
+    assert calls == [1000, 1120, 1125] and board["quality"] == {"n": 3}     # 끝난 잡은 간격과 무관

@@ -42,6 +42,7 @@ CHECKABLE_MEAN = 12.9
 FALLBACK_K = 8
 MISSING_PER_CELL, SOLO_PER_CELL, OFFCARD_PER_CELL, NOINPUT_PER_CELL, FLAGGED_REV_PER_CELL = 0.1, 0.1, 1.05, 1.05, 0.05
 FILTERED_SHARE_LOW = 0.7
+SPAWN_PURPOSES: tuple[str, ...] = ("pack", "review", "finalize")
 EST_CALL_S = 300               # 호출 하나의 가정(PLAN 6절 — 5분). 자격 수명과 견주는 데만 쓴다
 LIVE_STATES: tuple[str, ...] = runner.LIVE_JOB_STATES
 
@@ -418,6 +419,10 @@ HEALTH_CACHE_S = 30                 # 서버 관문 limit(/health) 캐시
 LIMITS_CACHE_S = 60                 # 창·판(/card-review/limits) 캐시
 PROBE_JOIN_S = 1.0                  # 틱이 탐침을 기다리는 한도 — 넘으면 이번 틱은 새 호출을 내지 않고 기다린다(지난 답을 쓰지 않는다)
 PROGRESS_INTERVAL_S = 60            # progress_json 을 다시 세는 간격(단계·차단기·워커 변화는 즉시 적는다)
+# 품질 칸(QUALITY_HOOK)을 다시 계산하는 간격 — max(60, 30 × 지난 계산 초). 359명 원장에서 계산이 길어지면 원장 락을 쥐는 몫이
+# 1/30 을 넘지 않게 저절로 벌어진다(재설계 M3 C3-11). 끝난 잡의 진행판은 간격과 무관하게 다시 계산한다.
+QUALITY_MIN_INTERVAL_S = 60
+QUALITY_COST_FACTOR = 30
 STOP_POLL_S = 5                     # 도는 호출이 잡 행(취소·사람의 정지)을 읽는 간격
 WAIT_SLICE_S = 5                    # 기다림을 이만큼씩 쪼개 그 사이 잡 상태를 본다(코드 보류·취소가 기다림을 끊는다)
 MISSING_REASKS = 2                  # 빠진 카드 재질의(fwd) — 셀마다 최대
@@ -656,9 +661,15 @@ class JobProgress:
         self._workers: dict[str, dict] = {}
         self._counted_at: int | None = None
         self._frames_at: int | None = None
+        self._quality_at: int | None = None
+        self._quality_s = 0.0
+
+    def quality_interval(self) -> int:
+        """품질 칸을 다시 계산하는 간격(초) — max(QUALITY_MIN_INTERVAL_S, QUALITY_COST_FACTOR × 지난 계산 초)."""
+        return max(QUALITY_MIN_INTERVAL_S, math.ceil(QUALITY_COST_FACTOR * self._quality_s))
 
     # -- 셈 -------------------------------------------------------------------------
-    def _count(self) -> None:
+    def _count(self, *, final: bool = False) -> None:
         store, job_id = self.store, self.job_id
         heads = [dict(r) for r in store.query(
             "SELECT state, pack_status FROM rr_expert_reports WHERE target_key = ? AND run_id = ?", (self.target_key, job_id))]
@@ -684,11 +695,17 @@ class JobProgress:
                           "calls": calls})
         if self._server is not None:
             self.body["server"] = dict(self._server())
-        if QUALITY_HOOK is not None and self.target_key:
+        now = self.clock()
+        if QUALITY_HOOK is not None and self.target_key and (
+                final or self._quality_at is None or now - self._quality_at >= self.quality_interval()):
+            tick = time.monotonic()
             try:
                 self.body["quality"] = QUALITY_HOOK(store, self.target_key, job_id)
             except Exception:  # noqa: BLE001 — 품질 수치가 진행판을 막지 않는다.
                 log.exception("검토 잡 %s 품질 수치 실패(비치명)", job_id)
+            finally:
+                self._quality_s = time.monotonic() - tick
+                self._quality_at = now
 
     def payload(self) -> dict:
         with self._lock:
@@ -738,7 +755,7 @@ class JobProgress:
             self.body["waiting"] = None
             self._workers.clear()
             try:
-                self._count()
+                self._count(final=True)
             except Exception:  # noqa: BLE001
                 log.exception("검토 잡 %s 진행 셈 실패(비치명)", self.job_id)
             return canonical_json({**self.body, "workers": []})
@@ -2153,12 +2170,17 @@ class ReviewLoop:
                           " — 인용 정규화(norm_rev)·대조 규칙이 어긋났다. 에이전트 서버와 리스크 앱의 판을 맞춘 뒤 재개한다")
 
     def check_aidh(self, job_id: str, target_key: str) -> None:
-        """범위 안 전문가 전원(열린 셀이 남은 사람)의 카드 묶음이 카드 저장소 쪽 실패(502·503)면 잡 보류 aidh_unreachable."""
+        """범위 안 전문가 전원(열린 셀이 남은 사람)의 카드 묶음이 카드 저장소 쪽 실패(502·503)면 잡 보류 aidh_unreachable. 그 잡
+        범위에 묶음을 받은(ok·empty) 전문가가 하나라도 있으면 카드 저장소는 닿는다 — 그 사람들이 먼저 검토를 다 끝내 열린 셀이 묶음
+        실패 전문가에게만 남아도 잡을 멈추지 않고 그 사람의 묶음 한도(PACK_RETRY_MAX)로 간다(전문가 단위 단계 — 재설계 M3 C3-11)."""
         rows = [dict(r) for r in self.store.query(
             "SELECT e.agent_key, e.pack_status, e.pack_error FROM rr_expert_reports e WHERE e.target_key = ? AND e.run_id = ?"
             " AND e.state <> 'blocked' AND EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key = e.target_key"
             " AND c.agent_key = e.agent_key AND c.run_id = e.run_id AND c.state = 'pending')", (target_key, job_id))]
-        if rows and all(r["pack_status"] == "error" and r["pack_error"] in AIDH_CODES for r in rows):
+        reached = self.store.query_one(
+            "SELECT 1 FROM rr_expert_reports WHERE target_key = ? AND run_id = ? AND pack_status IN ('ok', 'empty') LIMIT 1",
+            (target_key, job_id)) is not None
+        if rows and not reached and all(r["pack_status"] == "error" and r["pack_error"] in AIDH_CODES for r in rows):
             codes = ", ".join(sorted({str(r["pack_error"]) for r in rows}))
             self.hold(job_id, "aidh_unreachable", f"범위 안 전문가 {len(rows)}명 모두 카드 묶음을 받지 못했다({codes}) — AIDataHub·"
                       "게이트웨이의 카드 조회를 본다. 정해진 간격 뒤 스스로 다시 받는다")
@@ -2373,7 +2395,9 @@ class ReviewLoop:
             for job, phase in order:
                 if job.get("hold_code") and self.workers(job["id"]):
                     continue                            # 반쯤 연 재개 — 성공 하나까지 워커 하나
-                for purpose in (phase, "finalize") if phase == "review" else (phase,):
+                # 전문가 단위 단계(재설계 M3 C3-11) — 묶음을 받은 전문가는 남이 묶음을 다시 받는 동안에도 검토로 집힌다(잡 전체를
+                # pack 단계로 묶지 않는다 — M2.md 8절의 위험). 집는 목적 순서는 pack → review → finalize.
+                for purpose in SPAWN_PURPOSES:
                     head = review_cells.claim_next_expert(self.store, {"id": job["id"]}, boot_id=self.boot_id, now=now,
                                                           purpose=purpose)
                     if head is not None:
