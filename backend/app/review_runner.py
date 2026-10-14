@@ -260,6 +260,93 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
     return out
 
 
+# ---------------------------------------------------------------- 사람의 처분이 세우는 잡(재설계 M3 C3-4)
+DISPOSE_KEYS_MAX = 50              # 응답에 싣는 셀 열쇠 수(나머지는 수로 — MCP 와이어 25,000자)
+DISPOSE_AUDIT_KEYS = 200           # 감사 행에 싣는 셀 열쇠 수(나머지는 수와 해시로)
+
+
+def live_review_job(store: Any, target_key: str) -> dict | None:
+    """그 대상의 살아 있는(queued·running·paused·cancelling) 검토 잡 — 하나뿐이다(_refuse_live_jobs)."""
+    marks = ",".join("?" * len(LIVE_STATES))
+    row = store.query_one(f"SELECT id, state, params_json FROM rr_jobs WHERE target_key = ? AND mode = ? AND state IN ({marks})"
+                          " ORDER BY created_at DESC LIMIT 1", (target_key, MODE, *LIVE_STATES))
+    return _job_of(row) if row is not None else None
+
+
+def scope_covers(scope: Mapping[str, Any], expert: Mapping[str, Any], unit_id: str) -> bool:
+    """잡의 범위(정규 표기 — 칸끼리 AND, 빠진 칸은 전부)가 그 전문가(review_order 행) × 단위를 덮나."""
+    return ((not scope.get("tiers") or expert.get("tier") in scope["tiers"])
+            and (not scope.get("domains") or expert.get("domain") in scope["domains"])
+            and (not scope.get("agents") or expert.get("agent_key") in scope["agents"])
+            and (not scope.get("unit_ids") or unit_id in scope["unit_ids"]))
+
+
+def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Mapping[str, Any]], decided_by: str,
+                  owner_sub: str, note: str | None, force: bool = False, start: bool = True, consent: bool = False,
+                  consent_source: str | None = None, channel: str = "rest", actor_verified: bool = True,
+                  selector: Mapping[str, Any] | None = None, settings: Any | None = None) -> dict:
+    """사람의 처분 한 번 — 다시(`retry`) 또는 넘김(`skip`) — 과 그 셀을 집을 잡을 한 트랜잭션으로(재설계 M3 C3-4 · m3-cells 3.7).
+
+    다시 — 살아 있는 검토 잡의 범위가 그 셀을 덮으면 그 잡이 집는다(`adopted` — 셀·머리의 run_id 를 그 잡으로), 덮지 않으면 다음 잡을
+    기다린다(`waiting`), 살아 있는 잡이 없고 `start` 면 그 셀들의 (전문가, 단위)로 범위를 잡은 검토 잡을 만든다(`created` —
+    `create_review_job` 그대로라 동의 문턱도 그대로다). 넘김 — 살아 있는 잡이 있으면 그 전문가 머리를 그 잡에 찍어 마감되게 하고
+    (`adopted`), 없으면 그 셀의 (전문가, 단위)로 마감 잡을 만든다(돌 셀은 0 이다). 잡을 만들다 거절(동의·자격·스위치)되면 처분도
+    되돌린다 — 아무것도 바꾸기 전에 거절한 것과 같다. 바꾼 셀이 있으면 감사 한 행(scope coverage · cells.retry|cells.skip).
+    반환 {target_key, matched, retried|skipped, not_failed, keys_total, keys[≤50], experts, job{action, job_id?, calls_estimate?},
+    audit_id, changed}.
+    """
+    from app import routes  # noqa: PLC0415 — routes 는 무겁다(_audit · 과제 id · 스위치).
+
+    if action not in ("retry", "skip"):
+        raise ValueError(f"모르는 처분 — {action!r}")
+    order = {r["agent_key"]: r for r in planner.review_order(store, target_key)}
+    counted = "retried" if action == "retry" else "skipped"
+    out: dict[str, Any] = {"target_key": target_key, "matched": len(rows), counted: 0}
+    with store.tx():
+        changed = (review_cells.retry_cells(store, target_key, rows, force=force, decided_by=decided_by, note=note)
+                   if action == "retry" else
+                   review_cells.skip_cells(store, target_key, rows, decided_by=decided_by, note=note or ""))
+        keys = [[c["unit_id"], c["agent_key"]] for c in changed]
+        agents = sorted({c["agent_key"] for c in changed})
+        unit_ids = [u for u in dict.fromkeys(c["unit_id"] for c in changed)]
+        out.update({counted: len(changed), "not_failed": len(rows) - len(changed), "keys_total": len(keys),
+                    "keys": keys[:DISPOSE_KEYS_MAX], "experts": len(agents), "changed": bool(changed)})
+        if not changed:
+            out.update({"job": {"action": "none"}, "audit_id": None})
+            return out
+        live = live_review_job(store, target_key)
+        now = now_epoch()
+        if live is not None:
+            scope = (live.get("params") or {}).get("scope") or {}
+            mine = changed if action == "skip" else [c for c in changed
+                                                      if scope_covers(scope, order.get(c["agent_key"], {}), c["unit_id"])]
+            if action == "retry":
+                store.executemany("UPDATE rr_review_cells SET run_id = ?, updated_at = ? WHERE target_key = ? AND unit_id = ?"
+                                  " AND agent_key = ? AND state = 'pending'",
+                                  [(live["id"], now, target_key, c["unit_id"], c["agent_key"]) for c in mine])
+            store.executemany("UPDATE rr_expert_reports SET run_id = ?, updated_at = ? WHERE target_key = ? AND agent_key = ?",
+                              [(live["id"], now, target_key, a) for a in sorted({c["agent_key"] for c in mine})])
+            out["job"] = {"action": "adopted" if mine else "waiting", "job_id": live["id"], "adopted": len(mine),
+                          "waiting": len(changed) - len(mine)}
+        elif action == "skip" or start:
+            made = create_review_job(store, target_key, owner_sub=owner_sub, requester_sub=decided_by,
+                                     scope={"agents": agents, "unit_ids": unit_ids}, consent=consent or action == "skip",
+                                     consent_source=consent_source, settings=settings, channel=channel,
+                                     actor_verified=actor_verified)
+            out["job"] = {"action": "created", "job_id": made["job_id"], "calls_estimate": made["calls_estimate"]}
+        else:
+            out["job"] = {"action": "none"}
+        target = store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (target_key,))
+        out["audit_id"] = routes._audit(
+            store, decided_by, scope="coverage", subject_id=target_key, action=f"cells.{action}",
+            project_id=target["project_id"] if target is not None else None,
+            after={"n": len(changed), "selector": dict(selector or {}), "force": bool(force) if action == "retry" else None,
+                   "keys_sha": sha256_hex(canonical_json(keys))[:16], "keys": keys[:DISPOSE_AUDIT_KEYS],
+                   "job": out["job"]},
+            reason=note, channel=channel, actor_verified=actor_verified)
+    return out
+
+
 # ================================================================ 검토 루프(m2-wp3b S8)
 # 선점 단위는 전문가 세션이다 — 워커 하나가 전문가 한 명을 쥐고 그 사람의 범위 안 셀을 정해진 차례(훑기 → 묶음 먼저 fwd → 빠진 카드
 # 재질의 → rev → 단독 → 카드 밖 → 정산)로 돈다. 루프 스레드는 2초마다 틱을 돌며 보류를 풀고·잡을 닫고·창을 보고·워커를 띄운다.
@@ -941,6 +1028,11 @@ class _Session:
         assert self.pack is not None
         scope = (f"cell|{cell.row.get('input_hash')}|{cell.attempt}|{seq}" if cell is not None
                  else f"head|{self.pack.pack_key}|{self.lim.get('limits_rev')}|{prompt_key(self.lim)}")
+        reopened = int(cell.row.get("reopened_n") or 0) if cell is not None else 0
+        if reopened:
+            # 사람이 다시 연 셀(retry_cells — 시도 수가 0 으로 돌아간다)은 앞의 같은 시도에서 받은 답을 다시 쓰지 않는다 — 쓰면 같은
+            # 답으로 같은 실패를 엔진을 부르지 않고 되풀이한다. 한 번도 다시 열리지 않은 셀의 열쇠는 그대로다(M2 원장과 같은 열쇠).
+            scope += f"|r{reopened}"
         return sha256_hex(scope + "|" + canonical_json(body))
 
     def _cached(self, cell: _Cell | None, request_hash: str) -> dict | None:
@@ -1386,9 +1478,11 @@ class _Session:
                        " 로그(hwax_risk.review)를 보고 고친 뒤 재개한다")
 
     def finalize(self) -> None:
-        """마감만 — 범위 안 셀이 다 닫혔는데 마감이 끝나지 않은 머리(마감 도중 결함·재기동)를 다시 마감한다. 얼린 묶음이 이 박스에
-        없으면 다시 받는다(M2.md 5절 #22)."""
-        self.pack = self._load_pack()
+        """마감만 — 범위 안 셀이 다 닫혔는데 마감이 끝나지 않은 머리(마감 도중 결함·재기동 · 사람이 셀을 넘긴 뒤)를 다시 마감한다.
+        얼린 묶음이 이 박스에 없으면 다시 받는다(M2.md 5절 #22). 묶음을 끝내 못 받은(pack_status error) 전문가는 묶음 없이 마감한다 —
+        그 셀은 사람이 넘겨 닫혔고 마감은 엔진을 부를 일이 없다(재설계 M3 C3-4)."""
+        if self._head_row().get("pack_status") != "error":
+            self.pack = self._load_pack()
         self._close()
 
     def run(self) -> None:
@@ -1838,7 +1932,7 @@ class ReviewLoop:
         것이어도 센다(R3A-1 — 마감 전에 멈춘 앞 잡의 전문가를 이 잡이 마감한다, `claim_next_expert(purpose='finalize')` 와 같은 조건)."""
         return int(self.store.query_one(
             "SELECT COUNT(*) AS n FROM rr_expert_reports e WHERE e.target_key = ? AND e.run_id = ? AND e.state = 'planned'"
-            " AND e.pack_status IN ('ok', 'empty') AND NOT EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key ="
+            f" AND e.pack_status IN ({review_cells.FINALIZE_PACK_SQL}) AND NOT EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key ="
             " e.target_key AND c.agent_key = e.agent_key AND c.run_id = e.run_id AND c.state IN ('pending', 'running'))",
             (job["target_key"], job["id"]))["n"] or 0)
 
@@ -1851,8 +1945,9 @@ class ReviewLoop:
                 "SELECT error_code, COUNT(*) AS n FROM rr_review_cells WHERE target_key = ? AND run_id = ? AND state = 'failed'"
                 " GROUP BY error_code ORDER BY error_code", (job["target_key"], job["id"]))
             total = sum(int(r["n"]) for r in failed)
-            error = (f"범위 안 셀 {total}개가 실패로 끝났다({', '.join(f'{r['error_code']} {r['n']}' for r in failed)}) — 실패 셀의"
-                     " 처분(다시·넘김)은 M3 다" if total else None)
+            error = (f"범위 안 셀 {total}개가 실패로 끝났다({', '.join(f'{r['error_code']} {r['n']}' for r in failed)}) — 사람이"
+                     " 처분한다(다시 POST …/cells/retry · 넘김 POST …/cells/skip, Claude 는 risk_job_action 의 retry_failed·"
+                     "skip_failed)" if total else None)
             self._finish(job, "completed", error)
             return None
         needs_pack = self.store.query_one(

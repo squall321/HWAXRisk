@@ -258,16 +258,18 @@ def _require_user(ident: identity.Identity) -> str:
 
 def _audit(store: Any, owner_sub: str, *, scope: str, subject_id: str, action: str,
            project_id: str | None = None, before: Any = None, after: Any = None,
-           reason: str | None = None, channel: str = "rest", actor_verified: bool = True) -> None:
-    """rr_audit 1행(append-only, 사람 행위 한정 — plan §0.6). 열람(GET)은 남기지 않는다. MCP 길의 행위자는 `actor_verified=False`
-    (§6.11 — 게이트웨이가 넘긴 신원이다)."""
+           reason: str | None = None, channel: str = "rest", actor_verified: bool = True) -> str:
+    """rr_audit 1행(append-only, 사람 행위 한정 — plan §0.6) — 그 행의 id. 열람(GET)은 남기지 않는다. MCP 길의 행위자는
+    `actor_verified=False`(§6.11 — 게이트웨이가 넘긴 신원이다)."""
+    audit_id = new_uuid()
     store.execute(
         "INSERT INTO rr_audit(id, owner_sub, actor, actor_verified, channel, scope, subject_id, project_id,"
         " action, before_json, after_json, reason, at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (new_uuid(), owner_sub, owner_sub, int(bool(actor_verified)), channel, scope, subject_id, project_id, action,
+        (audit_id, owner_sub, owner_sub, int(bool(actor_verified)), channel, scope, subject_id, project_id, action,
          canonical_json(before) if before is not None else None,
          canonical_json(after) if after is not None else None, reason, now_epoch()),
     )
+    return audit_id
 
 
 def _decode_jwt_payload(pat: str) -> dict:
@@ -3058,6 +3060,62 @@ def post_undefer(target_key: str, body: UndeferBody, ident: identity.Identity = 
             "depth": (level.get("detail") or {}).get("depth")}
 
 
+class CellsRetryBody(BaseModel):
+    """`cells`([[unit_id, agent_key], …])와 `filter`({job_id?, agent_key?, unit_id?, domain?, error_code?, state?}) 가운데 하나."""
+
+    cells: list[Any] | None = None
+    filter: dict[str, Any] | None = None
+    reason: str | None = None
+    force: bool = False
+    start: bool = True
+    consent: bool = False
+
+
+class CellsSkipBody(BaseModel):
+    cells: list[Any] | None = None
+    filter: dict[str, Any] | None = None
+    reason: str
+
+
+def _dispose(target_key: str, ident: identity.Identity, *, action: str, cells: list[Any] | None,
+             filter: dict[str, Any] | None, reason: str | None, force: bool = False, start: bool = True,
+             consent: bool = False) -> dict:
+    email = _require_user(ident)
+    store = get_store()
+    row = store.query_one("SELECT owner_sub, project_id FROM rr_targets WHERE target_key = ?", (target_key,))
+    if row is None:
+        raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
+    if not _is_admin(ident):
+        require_role(row["project_id"], email, "editor")
+    note = _human_reason(reason) if (reason is not None or force or action == "skip") else None
+    rows = review_cells.select_cells(store, target_key, cells=cells, filter=filter)
+    channel = AUDIT_CHANNELS.get(ident.source, "rest")
+    selector = {"cells_n": len(cells)} if cells is not None else {"filter": dict(filter or {})}
+    return review_runner.dispose_cells(store, target_key, action=action, rows=rows, decided_by=email,
+                                       owner_sub=row["owner_sub"], note=note, force=force, start=start, consent=consent,
+                                       consent_source=CONSENT_SOURCES.get(ident.source, ident.source), channel=channel,
+                                       actor_verified=channel != "mcp", selector=selector)
+
+
+@router.post("/targets/{target_key}/cells/retry")
+def post_cells_retry(target_key: str, body: CellsRetryBody, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """실패 셀을 다시 연다(재설계 M3 C3-4) — 기본은 `failed` 만, `force` 면 `reviewed`·`no_input` 도(사유 필수 · 판정 행을 지운다 — 끝난
+    M2 파일럿 셀을 새 판으로 다시 본다). 대상이 아닌 셀은 `not_failed` 로 세고 손대지 않는다. 살아 있는 검토 잡이 덮으면 그 잡이 집고
+    (`adopted`), 없고 `start` 면 검토 잡을 만든다(`created` — 동의 문턱 그대로, 동의가 필요한데 없으면 아무것도 바꾸기 전에 422
+    consent_required). editor 이상, 사유는 4~300자(주면 · force 면 필수), cells·filter 가 둘 다거나 둘 다 없거나 모르는 칸이면 422
+    cells_selector_invalid. 바꿀 것이 없으면 200 changed:false. 감사 한 행(cells.retry). 응답은 `review_runner.dispose_cells` 의 것이다."""
+    return _dispose(target_key, ident, action="retry", cells=body.cells, filter=body.filter, reason=body.reason,
+                    force=body.force, start=body.start, consent=body.consent)
+
+
+@router.post("/targets/{target_key}/cells/skip")
+def post_cells_skip(target_key: str, body: CellsSkipBody, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """실패 셀을 사유와 함께 넘긴다(재설계 M3 C3-4) — `failed → skipped` 만(PLAN 4절 C-18). 그 전문가는 다시 마감되고 보고서 '보지
+    못한 것' 에 '넘김 — 사유' 로 남는다. 살아 있는 잡이 있으면 그 잡이 마감하고, 없으면 마감 잡(돌 셀 0)을 세운다. editor 이상, 사유
+    4~300자 필수(422 reason_required). 감사 한 행(cells.skip)."""
+    return _dispose(target_key, ident, action="skip", cells=body.cells, filter=body.filter, reason=body.reason)
+
+
 # ================================================================ 커버리지·등록부·패널
 @router.get("/targets/{target_key}/coverage")
 def get_coverage(target_key: str, ident: identity.Identity = Depends(identity.current)) -> dict:
@@ -3252,7 +3310,7 @@ def review_payload(store: Any, target_key: str, flow: str | None) -> dict | None
     잡 전에도 낸다(검토 순서를 보고 범위를 고른다 — #24).
 
     {units, cells{total, by_state, by_basis, in_scope, out_of_scope_pending, failed_open, form_only}, experts{total, by_state},
-    cards(카드 폭포 | None), quality(요약 | None), order[…], job(가장 최근 검토 잡 | None)}. 셀·전문가 셈은 활성 단위로 센 원장 값,
+    cards(카드 폭포 | None), quality(요약 | None), order[…], dispositions{retried, skipped}, job(가장 최근 검토 잡 | None)}. 셀·전문가 셈은 활성 단위로 센 원장 값,
     카드 폭포·품질은 그 잡의 진행판(`progress_json.quality`)에서 읽는다(5초 폴링이 원장을 다시 세지 않는다)."""
     has_cells = store.query_one("SELECT 1 FROM rr_review_cells WHERE target_key = ? LIMIT 1", (target_key,)) is not None
     if flow != "cells" and not has_cells:
@@ -3268,8 +3326,15 @@ def review_payload(store: Any, target_key: str, flow: str | None) -> dict | None
     # 값은 품질 블록과 같은 계산(60초마다 센 진행판의 품질 json)이고, 품질을 아직 세지 않았으면 None(미측정)이다.
     grid = (quality.get("json") or {}).get("grid") if isinstance(quality, dict) else None
     cells = {**summary["cells"], "form_only": (grid or {}).get("form_only")}
+    # 사람의 처분(재설계 M3 C3-4) — 다시 연 셀(route_forced human_retry, 그 뒤 입력이 바뀌지 않은 것)과 넘긴 셀의 수.
+    active = review_cells.active_unit_ids(store, target_key)
+    tally = store.query_one(
+        "SELECT SUM(route_forced = ?) AS retried, SUM(state = 'skipped') AS skipped FROM rr_review_cells"
+        f" WHERE target_key = ? AND unit_id IN ({','.join('?' * len(active)) or 'NULL'})",
+        (review_cells.HUMAN_RETRY, target_key, *active))
     return {"units": summary["units"], "cells": cells, "experts": summary["experts"], "cards": cards,
             "quality": _quality_summary(quality), "order": review_order_payload(store, target_key),
+            "dispositions": {"retried": int(tally["retried"] or 0), "skipped": int(tally["skipped"] or 0)},
             "job": _review_job_payload(job) if job is not None else None}
 
 

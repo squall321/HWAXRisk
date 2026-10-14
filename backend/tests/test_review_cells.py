@@ -435,7 +435,7 @@ def test_a_seat_is_not_closed_with_out_of_scope_cells_failures_only_on_a_panel_t
     review_cells.fail_open_cells(store, key, peer, code="pack_unavailable", error="팩 502 여섯 번")
     assert review_cells.expert_tally(store, key, peer)["failed"] == len(unit_ids)
     out = planner.close_review_seat(store, key, peer, review_id=review_cells.review_id_of(key, peer), opinion_id="x" * 32)
-    assert (out["updated"], out["why"]) == (False, "nothing_reviewed")
+    assert (out["updated"], out["why"]) == (False, f"failed_open:{len(unit_ids)}")    # 사유가 열린 실패 수를 단다(m3-cells 3.9)
 
     _stop(store, live)                                                  # 남은 단위를 다음 잡이 돈다
     live = _running(store, _job(store, key, scope={"agents": [SEAL]}))

@@ -573,6 +573,8 @@ def _scope_section(ledger: Ledger, state: str) -> dict:
             continue
         if cell_state == "failed":
             why = {"code": cell.get("error_code"), "text": cell.get("error")}
+        elif cell_state == "skipped":
+            why = {"code": "skipped", "text": cell.get("decide_note"), "by": cell.get("decided_by")}   # 넘김 — 사유(C3-4)
         elif cell.get("run_id") != run_id:
             why = {"code": "out_of_scope", "text": None}
         elif state == "blocked":

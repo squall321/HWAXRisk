@@ -28,7 +28,7 @@ OTHER = "other@example.com"
 # ---------------------------------------------------------------- 응답 칸(스냅샷)
 PANEL_COVERAGE_KEYS = {"target_key", "job", "roster_size", "by_domain", "by_status", "strong", "unseated_n", "level",
                        "close_level", "flow", "units"}                      # S12 전 진행판 칸 — 그대로다(D-24)
-REVIEW_KEYS = {"units", "cells", "experts", "cards", "quality", "order", "job"}
+REVIEW_KEYS = {"units", "cells", "experts", "cards", "quality", "order", "dispositions", "job"}   # dispositions — 재설계 M3 C3-4
 REVIEW_CELLS_KEYS = {"total", "by_state", "by_basis", "in_scope", "out_of_scope_pending", "failed_open", "form_only"}
 REVIEW_EXPERTS_KEYS = {"total", "by_state"}
 ORDER_KEYS = {"order", "agent_key", "domain", "rank_in_domain", "tier", "deferred", "input_gaps", "state", "cards_total",

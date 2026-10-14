@@ -397,10 +397,33 @@ def _start_review_job(ident: identity.Identity, store: Any, target_key: str, web
 _ALREADY = {"pause": ("paused",), "resume": ("queued", "running")}
 
 
-def job_action(ident: identity.Identity, *, job_id: str, action: str) -> dict:
-    """`POST /api/jobs/{id}/{action}`(pause|resume|cancel). 이미 그 상태면 그대로 돌려준다(`changed: false`)."""
+# 실패 셀 처분(재설계 M3 C3-4) — 새 도구 없이 risk_job_action 의 두 갈래로(REST POST …/cells/retry · …/cells/skip 와 같은 함수).
+_DISPOSE_ACTIONS = {"retry_failed": "retry", "skip_failed": "skip"}
+
+
+def job_action(ident: identity.Identity, *, job_id: str, action: str, reason: str | None = None,
+               filter: dict | None = None) -> dict:
+    """`POST /api/jobs/{id}/{action}`(pause|resume|cancel). 이미 그 상태면 그대로 돌려준다(`changed: false`).
+
+    `retry_failed`·`skip_failed` 는 그 검토 잡이 찍은(run_id) 셀 가운데 `failed` 를 다시 열거나 사유와 함께 넘긴다 — `filter`
+    ({agent_key?, unit_id?, domain?, error_code?, state?})로 좁히고 job_id 는 이 잡으로 못 박는다. 응답은 REST 처분과 같다
+    (`review_runner.dispose_cells`). 넘김은 사유(4~300자)가 필수다. 쓰기다 — 위임 단언 없는 Bearer 는 delegation_required."""
     require_delegate(ident)
     store = routes.get_store()
+    if action in _DISPOSE_ACTIONS:
+        job = store.query_one("SELECT target_key, mode FROM rr_jobs WHERE id = ?", (job_id,))
+        if job is None or job["mode"] != review_runner.MODE:
+            raise AppError("E404", f"검토 잡({job_id}) 을 찾을 수 없습니다.", 404)
+        if filter is not None and not isinstance(filter, dict):
+            raise AppError("cells_selector_invalid", "filter 는 객체다.", 422)
+        selector = {**(filter or {}), "job_id": job_id}
+        if _DISPOSE_ACTIONS[action] == "retry":
+            return routes.post_cells_retry(job["target_key"], routes.CellsRetryBody(filter=selector, reason=reason),
+                                           ident=ident)
+        return routes.post_cells_skip(job["target_key"], routes.CellsSkipBody(filter=selector, reason=reason or ""),
+                                      ident=ident)
+    if reason is not None or filter is not None:
+        raise AppError("E100", "reason·filter 는 retry_failed·skip_failed 의 칸이다.", 422)
     before = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))
     try:
         out = routes.job_action(job_id, action, ident=ident)
@@ -901,9 +924,17 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
                    "셀 격자 — " + ("이 검토 잡 범위의 " if job is not None else "") + "전문가 × 단위의 상태·판정 수·실패 까닭"
                    "(agent_key·state 로 더 거른다).", write=False)]
     scope_cells = ((review.get("cells") or {}).get("in_scope") or {}) if job is not None else {}
-    if int(((scope_cells.get("by_state") or {}).get("failed")) or 0):
+    failed_n = int(((scope_cells.get("by_state") or {}).get("failed")) or 0)
+    dispose: list[dict] = []
+    if failed_n:
         watch.append(_step("risk_get_cells", {**cells_args, "state": "failed"},
-                           f"이 검토 잡 범위에서 실패로 끝난 셀 {scope_cells['by_state']['failed']}개와 그 까닭(error_code).", write=False))
+                           f"이 검토 잡 범위에서 실패로 끝난 셀 {failed_n}개와 그 까닭(error_code).", write=False))
+        if job["state"] not in REVIEW_LIVE_STATES:
+            # 끝난 잡의 실패 셀 — 사람이 처분한다(재설계 M3 C3-4). 다시는 범위를 잡은 검토 잡을 세우고, 넘김은 사유가 필수다.
+            dispose = [_step("risk_job_action", {"job_id": job["id"], "action": "retry_failed"},
+                             f"실패 셀 {failed_n}개를 다시 연다(까닭을 고친 뒤 — 같은 까닭이면 같은 실패다). 그 셀들로 검토 잡이 선다."),
+                       _step("risk_job_action", {"job_id": job["id"], "action": "skip_failed", "reason": "<4~300자 사유>"},
+                             "다시 돌리지 않을 실패 셀을 사유와 함께 넘긴다 — 그 전문가가 다시 마감되고 보고서에 '넘김 — 사유' 로 남는다.")]
     if finalized:
         names = ", ".join(finalized[:9]) + (" …" if len(finalized) > 9 else "")
         watch.append(_step("risk_get_expert_report", {"target_key": target_key, "agent_key": finalized[0]},
@@ -931,7 +962,7 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
         if waiting.get("reason"):
             notes.append(f"검토 잡이 기다린다 — {waiting['reason']}" + (f": {waiting['note']}" if waiting.get("note") else "") + ".")
         return answer("running", [*repersist_steps, *watch])
-    steps = [*repersist_steps]
+    steps = [*repersist_steps, *dispose]
     if job is not None:
         notes.append(f"마지막 검토 잡 {job['id']} 는 {job['state']} 다" + (f" — {job['error']}" if job.get("error") else "") + ".")
     if config.review_enabled() and units_state.get("status") in units_module.OPEN_STATUSES:

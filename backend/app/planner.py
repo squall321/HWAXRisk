@@ -908,30 +908,47 @@ def apply_carry_over(
 
 
 # ---------------------------------------------------------------- 카드 대조 검토 마감(재설계 M2 · m2-wp3b S5)
-REVIEW_CLOSE_STATUSES: tuple[str, ...] = ("done", "done_weak", "abstain")
+REVIEW_CLOSE_STATUSES: tuple[str, ...] = ("done", "done_weak", "abstain", "skipped")
 
 
 def review_rollup(tally: Mapping[str, Any]) -> tuple[str | None, str | None]:
-    """한 전문가의 셀 셈(`review_cells.expert_tally`) → (원장 상태, 사유). 위에서 처음 맞는 줄이고, 상태가 None 이면 닫지 않는다.
+    """한 전문가의 셀 셈(`review_cells.expert_tally`) → (원장 상태, 사유). 위에서 처음 맞는 줄이고, 상태가 None 이면 닫지 않는다
+    (재설계 M3 m3-cells 3.9 — 사유 문자열은 완결 판정이 깊이·strong 분모를 가르는 데 읽는다, M3.md 4.1).
 
-    | 셀 | 상태 | 사유 |
-    | 열린 셀(pending·running)이 있다 — 범위 밖 pending 포함 | 닫지 않는다 | open_cells |
-    | reviewed 0 — 남은 것이 실패·넘김·해당 없음뿐 | 닫지 않는다 | nothing_reviewed |
-    | reviewed ≥1 · 검증된 근거가 있다 | done(실패·넘김 셀이 있으면 done_weak) | — · partial:<n> |
-    | reviewed ≥1 · 검증된 근거가 없다 | done_weak | partial:<n> · no_cards · no_verified_cite |
-    '검증된 근거' 는 실효 판정 가운데 `applies='yes'` 이고 인용·참조 대조를 둘 다 지난 행이다(X1-05). 실패 셀이 남았으면 done 이
-    아니다(m-01). no_cards 는 reviewed 셀이 전부 역할만으로 본 것(카드 0장 전문가)이다.
+    | # | 셀 | 상태 | 사유 |
+    | 1 | 열린 셀(pending·running)이 있다 — 범위 밖 pending 포함 | 닫지 않는다 | open_cells |
+    | 2 | reviewed ≥1 · 전부 입력 결손 호출(basis noinput) | done_weak | input_gap:ecad_absent(실패·넘김이 있으면 ;partial:<n>) |
+    | 3 | reviewed ≥1 · 실패·넘김이 있다 | done_weak | partial:<n> |
+    | 4 | reviewed ≥1 · 검증된 근거가 있다 | done | — |
+    | 5 | reviewed ≥1 · 검증된 근거가 없다 | done_weak | no_cards · no_verified_cite |
+    | 6 | reviewed 0 · 열린 실패가 있다 | 닫지 않는다 | failed_open:<n> |
+    | 7 | reviewed 0 · 넘김 ≥1 | skipped | cells_skipped:<n> |
+    | 8 | reviewed 0 · 입력 결손(no_input) ≥1 | abstain | no_input:ecad_absent |
+    | 9 | reviewed 0 · 전부 거름 | abstain | filtered:<n> |
+    '검증된 근거' 는 실효 판정 가운데 `applies='yes'` 이고 인용·참조 대조를 둘 다 지난 행이다(X1-05). 입력 결손만으로 본 전문가는 주 입력
+    없이 본 것이라 done 으로 올리지 않는다(m3-cells a-17). no_cards 는 reviewed 셀이 전부 역할만으로 본 것(카드 0장 전문가)이다.
+    reviewed 0 인데 남은 것이 하나도 없는(셀이 없는) 전문가는 닫지 않는다(nothing_reviewed).
     """
     if tally["open"]:
         return None, "open_cells"
-    if not tally["reviewed"]:
-        return None, "nothing_reviewed"
     unseen = int(tally["failed"]) + int(tally["skipped"])
-    if unseen:
-        return "done_weak", f"partial:{unseen}"
-    if tally["verified"]:
-        return "done", None
-    return "done_weak", "no_cards" if tally["role_only_only"] else "no_verified_cite"
+    if tally["reviewed"]:
+        if tally.get("noinput_only"):
+            return "done_weak", "input_gap:ecad_absent" + (f";partial:{unseen}" if unseen else "")
+        if unseen:
+            return "done_weak", f"partial:{unseen}"
+        if tally["verified"]:
+            return "done", None
+        return "done_weak", "no_cards" if tally["role_only_only"] else "no_verified_cite"
+    if tally["failed"]:
+        return None, f"failed_open:{int(tally['failed'])}"
+    if tally["skipped"]:
+        return "skipped", f"cells_skipped:{int(tally['skipped'])}"
+    if tally.get("no_input"):
+        return "abstain", "no_input:ecad_absent"
+    if tally.get("filtered"):
+        return "abstain", f"filtered:{int(tally['filtered'])}"
+    return None, "nothing_reviewed"
 
 
 def close_review_seat(store: Any, target_key: str, agent_key: str, *, review_id: str, opinion_id: str,
@@ -973,7 +990,8 @@ def close_review_seat(store: Any, target_key: str, agent_key: str, *, review_id:
     updated = store.execute(
         "UPDATE rr_coverage SET status = ?, reason = ?, opinion_id = ?, panel_id = ?, origin = 'primary', tier = ?,"
         " model = ?, finished_at = ?, updated_at = ?, status_source = 'code'"
-        " WHERE target_key = ? AND agent_key = ? AND (status = 'pending' OR (panel_id = ? AND status IN (?, ?, ?)))",
+        f" WHERE target_key = ? AND agent_key = ? AND (status = 'pending' OR (panel_id = ? AND status IN"
+        f" ({','.join('?' * len(REVIEW_CLOSE_STATUSES))})))",
         (status, reason, opinion_id, review_id, tier, model, now, now, target_key, agent_key, review_id,
          *REVIEW_CLOSE_STATUSES))
     return {"updated": bool(updated), "status": status if updated else row["status"],

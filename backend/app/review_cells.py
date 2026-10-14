@@ -23,14 +23,16 @@ from app.errors import AppError
 # ---------------------------------------------------------------- 어휘와 전이표
 CELL_STATES: tuple[str, ...] = ("pending", "running", "reviewed", "na_irrelevant", "no_input", "failed", "skipped")
 OPEN_CELL_STATES: tuple[str, ...] = ("pending", "running")
-# M2 가 쓰는 전이만 적는다. na_irrelevant·no_input 은 어휘만 있다(거르기·입력 결손 호출은 M3·M4).
 CELL_TRANSITIONS: frozenset[tuple[str, str]] = frozenset({
     ("pending", "running"),      # 워커가 셀의 첫 호출을 시작한다(start_cell — 선점 대조)
     ("running", "reviewed"),     # 정산 성공(settle_cell)
     ("running", "pending"),      # 인프라·잡 보류·취소·재기동·한도 미만 내용 탓 — 기다림은 셀을 놓지 않는다
     ("running", "failed"),       # 내용 탓 한도·호출 수 상한
     ("pending", "failed"),       # 카드 묶음 한도 초과·agent_not_found(fail_open_cells)
-    ("failed", "skipped"),       # 사람의 넘김(처분 REST 는 M3) — skipped 는 failed 에서만 간다(PLAN 4절 C-18)
+    ("failed", "skipped"),       # 사람의 넘김(skip_cells) — skipped 는 failed 에서만 간다(PLAN 4절 C-18)
+    ("failed", "pending"),       # 사람의 다시(retry_cells — 재설계 M3 C3-4)
+    ("reviewed", "pending"),     # 사람의 force 다시 — 판정 행을 지우고 처음부터(끝난 M2 파일럿 셀을 새 판으로, m3-engine-ops A12)
+    ("no_input", "pending"),     # 사람의 force 다시(입력 결손 셀)
 })
 EXPERT_STATES: tuple[str, ...] = ("planned", "running", "ready", "partial", "blocked")
 EXPERT_TRANSITIONS: frozenset[tuple[str, str]] = frozenset({
@@ -51,6 +53,9 @@ _MACHINES: dict[str, tuple[str, frozenset[tuple[str, str]]]] = {
 CELL_BASES: tuple[str, ...] = ("cards", "background", "role_only")   # reviewed 셀을 무엇으로 봤나(X1-04)
 CALL_FINAL_STATES: tuple[str, ...] = ("ok", "infra_fail", "content_fail", "aborted")
 RESTART_CODE = "restart"
+# 마감으로 집는 머리의 묶음 상태 — 묶음을 끝내 못 받아 셀이 다 실패로 닫힌 전문가도 사람이 그 셀을 넘기면 마감된다(재설계 M3 C3-4 —
+# 보고서는 묶음 없이 짓는다). 열린 셀이 있는 머리는 마감으로 집히지 않으므로 묶음을 다시 받는 길(pack)과 겹치지 않는다.
+FINALIZE_PACK_SQL = "'ok', 'empty', 'error'"
 
 # 셀이 정산에서 내용 탓으로 끝날 때의 코드(앱이 낸다 — review_ops 표 밖이라 내용 탓이다).
 SETTLE_CARDS_UNJUDGED = "cards_unjudged"
@@ -309,7 +314,8 @@ def claim_next_expert(store: Any, job: Mapping[str, Any] | None = None, *, boot_
         raise ValueError(f"모르는 선점 목적 — {purpose!r}")
     now = now_epoch() if now is None else now
     lease = f"{boot_id}:{new_uuid()}"
-    pack_cond = "e.pack_status IN ('todo', 'error')" if purpose == "pack" else "e.pack_status IN ('ok', 'empty')"
+    pack_cond = ("e.pack_status IN ('todo', 'error')" if purpose == "pack" else
+                 f"e.pack_status IN ({FINALIZE_PACK_SQL})" if purpose == "finalize" else "e.pack_status IN ('ok', 'empty')")
     cell_cond = " AND (c.not_before IS NULL OR c.not_before <= ?)" if purpose == "review" else ""
     cells_cond = (" AND EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key = e.target_key AND c.agent_key = e.agent_key"
                   f" AND c.run_id = e.run_id AND c.state = 'pending'{cell_cond})")
@@ -873,8 +879,9 @@ def _target_cells(store: Any, target_key: str, active: set[str]) -> list[dict]:
 def expert_tally(store: Any, target_key: str, agent_key: str) -> dict:
     """한 전문가의 셀 셈(활성 단위만) — 원장 롤업(`planner.close_review_seat`)의 입력.
 
-    {by_state, open, reviewed, failed, skipped, verified, role_only_only}. `verified` 는 reviewed 셀의 실효 판정 가운데
-    `applies='yes'` 이고 `quote_ok = 1`·`refs_ok = 1` 인 행이 하나라도 있나다(X1-05 — 해당 없음 행의 공허한 참은 세지 않는다).
+    {by_state, open, reviewed, failed, skipped, no_input, filtered, verified, role_only_only, noinput_only}. `verified` 는 reviewed
+    셀의 실효 판정 가운데 `applies='yes'` 이고 `quote_ok = 1`·`refs_ok = 1` 인 행이 하나라도 있나다(X1-05 — 해당 없음 행의 공허한 참은
+    세지 않는다). `filtered` 는 거른 셀(na_irrelevant), `noinput_only` 는 reviewed 셀이 전부 입력 결손 호출로 본 것이다(basis noinput).
     """
     active = set(active_unit_ids(store, target_key))
     rows = [r for r in _target_cells(store, target_key, active) if r["agent_key"] == agent_key]
@@ -890,8 +897,10 @@ def expert_tally(store: Any, target_key: str, agent_key: str) -> dict:
             (target_key, agent_key, *reviewed_units)) is not None
     return {"by_state": {s: by_state.get(s, 0) for s in CELL_STATES},
             "open": sum(by_state.get(s, 0) for s in OPEN_CELL_STATES), "reviewed": len(reviewed),
-            "failed": by_state.get("failed", 0), "skipped": by_state.get("skipped", 0), "verified": verified,
-            "role_only_only": bool(reviewed) and all(r["basis"] == "role_only" for r in reviewed)}
+            "failed": by_state.get("failed", 0), "skipped": by_state.get("skipped", 0),
+            "no_input": by_state.get("no_input", 0), "filtered": by_state.get("na_irrelevant", 0), "verified": verified,
+            "role_only_only": bool(reviewed) and all(r["basis"] == "role_only" for r in reviewed),
+            "noinput_only": bool(reviewed) and all(r["basis"] == "noinput" for r in reviewed)}
 
 
 def _latest_review_job(store: Any, target_key: str) -> dict | None:
@@ -900,12 +909,112 @@ def _latest_review_job(store: Any, target_key: str) -> dict | None:
     return dict(row) if row is not None else None
 
 
+# ---------------------------------------------------------------- 사람의 처분(재설계 M3 C3-4)
+SELECTOR_FILTER_KEYS: tuple[str, ...] = ("job_id", "agent_key", "unit_id", "domain", "error_code", "state")
+RETRY_STATES: tuple[str, ...] = ("failed",)
+FORCE_STATES: tuple[str, ...] = ("failed", "reviewed", "no_input")
+HUMAN_RETRY = "human_retry"         # 사람이 다시 연 셀의 route_forced — 거르지 않는다
+
+
+def _selector_error(message: str, **detail: Any) -> AppError:
+    return AppError("cells_selector_invalid", message, 422, detail=detail)
+
+
+def select_cells(store: Any, target_key: str, *, cells: Sequence[Any] | None = None,
+                 filter: Mapping[str, Any] | None = None) -> list[dict]:
+    """처분할 셀 — `cells`([[unit_id, agent_key], …])와 `filter`({job_id?, agent_key?, unit_id?, domain?, error_code?, state?}) 가운데
+    정확히 하나다. 둘 다·둘 다 없음·모르는 칸·모양이 틀린 쌍·격자(활성 단위)에 없는 쌍은 422 `cells_selector_invalid` 다 — 이름 하나를
+    잘못 적은 선택이 말없이 좁아지지 않게. 상태는 거르지 않는다(맞는 상태만 바꾸는 것은 부르는 쪽이다). 검토 순서 → 단위 순번."""
+    if (cells is None) == (filter is None):
+        raise _selector_error("cells 와 filter 가운데 정확히 하나를 준다.", cells=cells is not None, filter=filter is not None)
+    active = set(active_unit_ids(store, target_key))
+    rows = [dict(r) for r in store.query(
+        "SELECT c.*, COALESCE(h.review_order, 1 << 30) AS _order FROM rr_review_cells c LEFT JOIN rr_expert_reports h"
+        " ON h.target_key = c.target_key AND h.agent_key = c.agent_key WHERE c.target_key = ?"
+        " ORDER BY _order, c.agent_key, c.unit_seq, c.unit_id", (target_key,)) if r["unit_id"] in active]
+    if filter is not None:
+        if not isinstance(filter, Mapping):
+            raise _selector_error("filter 는 객체다.")
+        unknown = sorted(set(filter) - set(SELECTOR_FILTER_KEYS))
+        if unknown:
+            raise _selector_error(f"filter 에 모르는 칸이 있다 — {unknown}. 칸은 {list(SELECTOR_FILTER_KEYS)} 다.", unknown_keys=unknown)
+        if "state" in filter and filter["state"] not in CELL_STATES:
+            raise _selector_error(f"filter.state 는 {list(CELL_STATES)} 가운데 하나다 — {filter['state']!r}.")
+        column = {"job_id": "run_id"}
+        picked = [r for r in rows if all(r[column.get(k, k)] == v for k, v in filter.items() if v is not None)]
+    else:
+        pairs: list[tuple[str, str]] = []
+        for item in cells:
+            if not isinstance(item, (list, tuple)) or len(item) != 2 or not all(isinstance(v, str) and v for v in item):
+                raise _selector_error("cells 의 항목은 [unit_id, agent_key] 쌍이다.", item=item)
+            pairs.append((item[0], item[1]))
+        index = {(r["unit_id"], r["agent_key"]): r for r in rows}
+        outside = [list(p) for p in dict.fromkeys(pairs) if p not in index]
+        if outside:
+            raise _selector_error(f"이 대상의 격자에 없는 셀이 있다 — {outside[:10]}.", cells=outside)
+        wanted = set(pairs)
+        picked = [r for r in rows if (r["unit_id"], r["agent_key"]) in wanted]
+    for row in picked:
+        row.pop("_order", None)
+    return picked
+
+
+def retry_cells(store: Any, target_key: str, rows: Sequence[Mapping[str, Any]], *, force: bool, decided_by: str,
+                note: str | None, now: int | None = None) -> list[dict]:
+    """사람의 다시 — `failed`(force 면 `reviewed`·`no_input` 도) 셀을 `pending` 으로 연다. 바꾼 셀(dict) 목록.
+
+    한 셀마다 — 판정 행을 지우고(force 의 reviewed·no_input), 셈·결과·분류 칸을 처음으로 비우고(`_CELL_RESET`), `tries`·`charged`·
+    `infra_streak` 0, `reopened_n + 1`(같은 입력의 다시도 앞 시도의 호출 답을 다시 쓰지 않는다 — 요청 열쇠에 든다),
+    `route_forced='human_retry'`(거르지 않는다), 사람 표기 열(status_source·decided_by·decided_at·decide_note). 그 전문가 머리
+    ready·partial·blocked 는 planned 로(blocked 는 묶음 시도 수와 백오프를 비워 묶음부터 다시 받는다). 부른 쪽이 트랜잭션을 연다."""
+    now = now_epoch() if now is None else now
+    states = FORCE_STATES if force else RETRY_STATES
+    changed: list[dict] = []
+    with store.tx():
+        for row in rows:
+            if row["state"] not in states:
+                continue
+            key = (target_key, row["unit_id"], row["agent_key"])
+            if row["state"] in ("reviewed", "no_input"):
+                store.execute(f"DELETE FROM rr_card_verdicts WHERE {_cell_where()}", key)
+            sets = {**_CELL_RESET, "input_hash": None, "lease_owner": None, "heartbeat_at": None, "finished_at": None,
+                    "reopened_n": Expr("reopened_n + 1"), "route_forced": HUMAN_RETRY, "status_source": "human",
+                    "decided_by": decided_by, "decided_at": now, "decide_note": note}
+            if _move(store, "cell", row["state"], "pending", where=_cell_where(), params=key, sets=sets, now=now) == 1:
+                changed.append(dict(row))
+        for agent in sorted({r["agent_key"] for r in changed}):
+            _reopen(store, target_key, agent, now=now)
+    return changed
+
+
+def skip_cells(store: Any, target_key: str, rows: Sequence[Mapping[str, Any]], *, decided_by: str, note: str,
+               now: int | None = None) -> list[dict]:
+    """사람의 넘김 — `failed` 셀만 `skipped` 로(사유 필수 — 부른 쪽이 본다). 사람 표기 열을 적고, 그 전문가 머리 ready·partial·
+    blocked 는 planned 로 두어 다시 마감되게 한다(보고서 '보지 못한 것' 에 '넘김 — 사유'). 바꾼 셀(dict) 목록. 부른 쪽이 트랜잭션을 연다."""
+    now = now_epoch() if now is None else now
+    changed: list[dict] = []
+    with store.tx():
+        for row in rows:
+            if row["state"] != "failed":
+                continue
+            key = (target_key, row["unit_id"], row["agent_key"])
+            sets = {"status_source": "human", "decided_by": decided_by, "decided_at": now, "decide_note": note}
+            if _move(store, "cell", "failed", "skipped", where=_cell_where(), params=key, sets=sets, now=now) == 1:
+                changed.append(dict(row))
+        for agent in sorted({r["agent_key"] for r in changed}):
+            _move(store, "expert", ("ready", "partial"), "planned", where=_head_where(), params=(target_key, agent),
+                  now=now)
+            _move(store, "expert", "blocked", "planned", where=_head_where(), params=(target_key, agent), now=now)
+    return changed
+
+
 def review_summary(store: Any, target_key: str, *, job_id: str | None = None) -> dict:
     """진행판·보고서의 셀 셈(활성 단위만). 셀이 없는 타깃은 `cells.total` 0 이다.
 
     {units, cells{total, by_state, by_basis, in_scope{job_id, total, by_state} | None, out_of_scope_pending, failed_open},
     experts{total, by_state}}. `by_basis` 는 reviewed 셀을 무엇으로 봤는지로 가른다(X1-04 — 카드 대조 · 배경 카드뿐 · 역할만).
-    범위는 `job_id`(없으면 그 타깃의 가장 최근 검토 잡)가 찍은 셀이다. `failed_open` 은 사람이 처분하지 않은 failed 셀이다.
+    범위는 `job_id`(없으면 그 타깃의 가장 최근 검토 잡)가 찍은 셀이다. `failed_open` 은 사람이 처분하지 않은 failed 셀이다 — 넘긴
+    셀은 skipped 상태라 failed 전부다(사람이 다시 연 뒤 또 실패한 셀도 열린 실패다).
     """
     active = set(active_unit_ids(store, target_key))
     rows = _target_cells(store, target_key, active)
@@ -927,7 +1036,7 @@ def review_summary(store: Any, target_key: str, *, job_id: str | None = None) ->
                   "by_basis": {**{b: by_basis.get(b, 0) for b in CELL_BASES},
                                **({"unset": by_basis["unset"]} if by_basis.get("unset") else {})},
                   "in_scope": in_scope, "out_of_scope_pending": out_pending,
-                  "failed_open": sum(1 for r in rows if r["state"] == "failed" and not r["decided_by"])},
+                  "failed_open": by_state.get("failed", 0)},
         "experts": {"total": sum(heads.values()), "by_state": {s: heads.get(s, 0) for s in EXPERT_STATES}},
     }
 
