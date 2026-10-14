@@ -10,6 +10,7 @@ import json
 import pytest
 
 from app import chain, closure, config, entry, issues, routes, runner, synth
+from app.common import now_epoch
 from tests import factories
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
@@ -35,10 +36,18 @@ def _fake() -> FakeReviewEngine:
 
 
 def _review(store, key: str, scope=None) -> str:
+    """검토 잡 하나를 끝까지. 시험대 시계를 지난 달에서 시작한다 — 시험대는 틱마다 시계를 61초씩 밀어 실제 시각보다 앞서 가는데,
+    sweep 은 '마지막으로 끝난 잡' 을 끝난 시각으로 고르므로 검토 잡이 뒤에 실제 시각으로 끝난 쟁점·종합 잡보다 늦게 끝난 것처럼 보인다."""
     job_id = rig.job(store, key, scope=scope)
-    rig.Rig(store, _fake()).finish(job_id)
+    rig.Rig(store, _fake(), clock=rig.Clock(now_epoch() - 30 * 86400)).finish(job_id)
     assert rig.state(store, job_id) == "completed", rig.job_row(store, job_id)
     return job_id
+
+
+def _one(rows: list, what: str):
+    """하나뿐이어야 하는 행 — 아니면 단언 실패(풀어 쓰기의 ValueError 가 아니라)."""
+    assert len(rows) == 1, (what, rows)
+    return rows[0]
 
 
 def _jobs(store, key: str, mode: str) -> list[dict]:
@@ -105,7 +114,7 @@ def test_a_narrow_review_makes_only_a_code_report_and_the_full_one_chains_issues
 
     second = _review(store, key)
     assert chain.scope_open(store, key) == 0
-    (issue_job,) = _jobs(store, key, "issues")
+    issue_job = _one(_jobs(store, key, "issues"), "issues 잡")
     assert issue_job["state"] == "queued" and _jobs(store, key, "synth") == []
     assert {k: issue_job["chain"][k] for k in ("root_job_id", "prev_job_id", "stage", "round", "scope_open", "reason")} == {
         "root_job_id": second, "prev_job_id": second, "stage": "issues", "round": 1, "scope_open": 0,
@@ -118,7 +127,7 @@ def test_a_narrow_review_makes_only_a_code_report_and_the_full_one_chains_issues
 
     _run_issue_jobs(store, IssuePanelEngine(store, {"*": {"severity": "중대", "judgement": "FAIL"}}))
     assert _jobs(store, key, "issues")[0]["state"] == "completed"
-    (synth_job,) = _jobs(store, key, "synth")
+    synth_job = _one(_jobs(store, key, "synth"), "synth 잡")
     assert (synth_job["state"], synth_job["chain"]["prev_job_id"], synth_job["chain"]["root_job_id"],
             synth_job["chain"]["reason"]) == ("queued", issue_job["id"], second, "issues_completed")
     assert _versions(store, key)[-1] == (3, "issues_closed")
@@ -138,7 +147,7 @@ def test_no_issue_to_run_goes_straight_to_synthesis(store, monkeypatch, tmp_path
     rig.Rig(store, FakeReviewEngine(rig.packs())).finish(job_id)
     assert [i for i in issues.issue_rows(store, key) if i["state"] == "queued"] == []
     assert _jobs(store, key, "issues") == []
-    (synth_job,) = _jobs(store, key, "synth")
+    synth_job = _one(_jobs(store, key, "synth"), "synth 잡")
     assert (synth_job["chain"]["prev_job_id"], synth_job["chain"]["reason"]) == (job_id, "no_issues")
 
 
@@ -173,7 +182,7 @@ def test_a_missing_credential_still_makes_the_next_job_row_with_the_reason(store
     monkeypatch.setattr(runner, "resolve_credential_with_note",
                         lambda *a, **k: (None, "koo@example.com 의 쓸 수 있는 포털 PAT 가 없다(가짜)"))
     _review(store, key)
-    (issue_job,) = _jobs(store, key, "issues")
+    issue_job = _one(_jobs(store, key, "issues"), "issues 잡")
     assert issue_job["state"] == "queued" and issue_job["error"].startswith("pat_unavailable: ")
     assert issue_job["credential_email"] is None
 
@@ -182,7 +191,7 @@ def test_a_cancelled_issue_job_ends_the_chain(store):
     """⑤ 사람이 쟁점 잡을 취소하면 종합 잡이 생기지 않고 남은 쟁점은 untried_cap(chain_cancelled)이다. sweep 도 잇지 않는다."""
     key = rig.target(store)
     _review(store, key)
-    (issue_job,) = _jobs(store, key, "issues")
+    issue_job = _one(_jobs(store, key, "issues"), "issues 잡")
     runner.cancel_job(store, issue_job["id"], by=OWNER)
     assert _jobs(store, key, "synth") == []
     assert {(i["state"], i["state_reason"]) for i in issues.issue_rows(store, key) if i["rank"] <= 2} == {
@@ -196,9 +205,9 @@ def test_three_engine_errors_fail_the_issue_job_and_the_chain_still_reaches_synt
     key = rig.target(store)
     _review(store, key)
     _run_issue_jobs(store, IssuePanelEngine(store, {"*": runner.EngineError("엔진이 터졌다")}))
-    (issue_job,) = _jobs(store, key, "issues")
+    issue_job = _one(_jobs(store, key, "issues"), "issues 잡")
     assert (issue_job["state"], issue_job["error"]) == ("failed", "engine_fail_streak")
-    (synth_job,) = _jobs(store, key, "synth")
+    synth_job = _one(_jobs(store, key, "synth"), "synth 잡")
     assert (synth_job["chain"]["prev_job_id"], synth_job["chain"]["reason"]) == (issue_job["id"], "issues_failed")
     assert _versions(store, key)[-1][1] == "issues_closed"
 
@@ -216,7 +225,7 @@ def test_five_rejected_issue_panels_leave_a_low_yield_note_without_stopping_the_
     if one_upheld:
         script[queued[-1]["issue_id"]] = {"severity": "중대", "judgement": "FAIL"}
     _run_issue_jobs(store, IssuePanelEngine(store, script))
-    (issue_job,) = _jobs(store, key, "issues")
+    issue_job = _one(_jobs(store, key, "issues"), "issues 잡")
     row = store.query_one("SELECT progress_json FROM rr_jobs WHERE id = ?", (issue_job["id"],))
     progress = json.loads(row["progress_json"] or "{}")
     assert issue_job["state"] == "completed"
@@ -261,7 +270,7 @@ def test_the_guide_follows_the_chain_to_the_report_and_names_the_residuals_left_
     key = rig.target(store)
     project_id = _project_with_source(store, key)
     _review(store, key)
-    (issue_job,) = _jobs(store, key, "issues")
+    issue_job = _one(_jobs(store, key, "issues"), "issues 잡")
     waiting = entry.next_step(_delegate(), project_id=project_id)
     assert waiting["where"] == "issues" and waiting["next"][0]["tool"] == "risk_get_issues"
     assert waiting["facts"]["stage"]["job_id"] == issue_job["id"] and waiting["facts"]["level_label"].startswith("C1(")
@@ -276,9 +285,9 @@ def test_the_guide_follows_the_chain_to_the_report_and_names_the_residuals_left_
     _run_synth(store, FakeSummaryEngine({"xd": "over_budget"}))
     done = entry.next_step(_delegate(), project_id=project_id)
     assert done["where"] == "done" and done["facts"]["report"]["trigger"] == "synth_done"
-    (report,) = [s for s in done["next"] if s["tool"] == "risk_get_report"]
+    report = _one([s for s in done["next"] if s["tool"] == "risk_get_report"], "걸음 risk_get_report")
     assert report["args"] == {"target_key": key, "part": "summary"} and report["write"] is False
-    (residual,) = [b for b in done["blocked"] if b["code"] == "residual_unacked"]
+    residual = _one([b for b in done["blocked"] if b["code"] == "residual_unacked"], "막힘 residual_unacked")
     pending = [q["item"] for q in closure.cached(store, key)["qualifiers"] if q["blocking"] and not q["acked"]]
     assert residual["items"] == pending and pending and "/closure" in residual["fix"]
     assert any("서술 없이 표만 선 요약 1건 — xd ctx_too_small" in n for n in done["notes"])
@@ -292,9 +301,9 @@ def test_the_guide_says_the_issue_job_waits_for_a_pat(store, monkeypatch):
     project_id = _project_with_source(store, key)
     monkeypatch.setattr(runner, "resolve_credential_with_note", lambda *a, **k: (None, "PAT 없음(가짜)"))
     _review(store, key)
-    (issue_job,) = _jobs(store, key, "issues")
+    issue_job = _one(_jobs(store, key, "issues"), "issues 잡")
     out = entry.next_step(_delegate(), project_id=project_id)
-    (pat,) = [b for b in out["blocked"] if b["code"] == "pat_unavailable"]
+    pat = _one([b for b in out["blocked"] if b["code"] == "pat_unavailable"], "막힘 pat_unavailable")
     assert pat["job_id"] == issue_job["id"] and out["where"] == "issues"
 
 
@@ -317,12 +326,14 @@ def test_a_c2_target_chains_once_its_tier_b_scope_closes_even_with_other_cells_o
     assert chain.scope_open(store, other) > 0 and _jobs(store, other, "issues") == _jobs(store, other, "synth") == []
 
 
-def test_a_review_that_closes_while_a_stage_waits_leaves_the_next_step_to_that_stage(store):
-    """살아 있는 단계가 있으면 사슬은 같은 일을 또 세우지 않는다 — 쟁점 잡이 줄에 있으면 새 쟁점 잡도 종합 잡도 없고(그 잡이 끝나면
-    종합을 잇는다), 종합 잡이 아직 집히지 않았으면 새 종합 잡이 없다. 끝내 종합 잡은 하나다."""
+def test_a_review_that_closes_while_a_stage_waits_leaves_the_next_step_to_that_stage(store, monkeypatch, tmp_path):
+    """살아 있는 단계가 있으면 사슬은 같은 일을 또 세우지 않는다 — 쟁점 잡이 줄에 있으면(고른 쟁점을 사람이 다 넘겨 다시 골라도 대기
+    쟁점이 없다) 새 쟁점 잡도 종합 잡도 없고(그 잡이 끝나면 종합을 잇는다), 종합 잡이 아직 집히지 않았으면 새 종합 잡이 없다. 끝내
+    종합 잡은 하나다."""
+    rig.configure(monkeypatch, store, tmp_path, risk_issue_panel_cap=48, risk_issue_panel_hard_cap=48)   # 고른 쟁점이 다 대기다
     key = rig.target(store)
     _review(store, key)
-    (issue_job,) = _jobs(store, key, "issues")
+    issue_job = _one(_jobs(store, key, "issues"), "issues 잡")
     for issue in [i for i in issues.issue_rows(store, key) if i["state"] == "queued"]:
         routes.put_issue(issue["issue_id"], routes.IssueActionBody(action="skip", reason="이번에는 넘긴다"),
                          ident=factories.ident(OWNER))
@@ -335,18 +346,19 @@ def test_a_review_that_closes_while_a_stage_waits_leaves_the_next_step_to_that_s
     rig.Rig(store, _fake()).finish(made["job"]["job_id"])
     assert [j["id"] for j in _jobs(store, key, "issues")] == [issue_job["id"]] and _jobs(store, key, "synth") == []
     # 줄에 선 쟁점 잡이 이번 고르기의 지문을 받았다 — 쟁점을 다 그대로 둔 다시 고르기라도 쟁점 단계가 지금 지문으로 신선하다.
+    assert [i["state"] for i in issues.issue_rows(store, key) if i["state"] in ("queued", "untried_cap")] == []
     rearmed = _jobs(store, key, "issues")[0]["chain"]
-    assert (rearmed["rearmed_by"], rearmed["cells_hash"]) == (made["job"]["job_id"], closure.closing_hash(store, key))
+    assert (rearmed.get("rearmed_by"), rearmed.get("cells_hash")) == (made["job"]["job_id"], closure.closing_hash(store, key))
     assert closure.refresh(store, key)["detail"]["fresh"]["issues"] is True
     _run_issue_jobs(store, IssuePanelEngine(store))
-    (synth_job,) = _jobs(store, key, "synth")
+    synth_job = _one(_jobs(store, key, "synth"), "synth 잡")
     assert synth_job["chain"]["prev_job_id"] == issue_job["id"]
     again = review_runner.dispose_cells(store, key, action="retry", rows=[dict(retry)], decided_by=OWNER,
                                         owner_sub=OWNER, note="한 번 더", force=True, start=True, consent=True,
                                         consent_source="web")
     rig.Rig(store, _fake()).finish(again["job"]["job_id"])
     assert [j["id"] for j in _jobs(store, key, "synth")] == [synth_job["id"]]
-    assert _jobs(store, key, "synth")[0]["chain"]["rearmed_by"] == again["job"]["job_id"]
+    assert _jobs(store, key, "synth")[0]["chain"].get("rearmed_by") == again["job"]["job_id"]
 
 
 def test_an_issue_job_that_ends_while_a_synthesis_waits_rearms_that_synthesis_instead_of_queuing_another(store):
@@ -354,10 +366,10 @@ def test_an_issue_job_that_ends_while_a_synthesis_waits_rearms_that_synthesis_in
     결과가 든 등록부 지문)으로 돈다는 표지를 단다."""
     key = rig.target(store)
     _review(store, key)
-    (issue_job,) = _jobs(store, key, "issues")
+    issue_job = _one(_jobs(store, key, "issues"), "issues 잡")
     waiting = routes.post_report(key, routes.ReportBody(refresh_summaries=True), ident=factories.ident(OWNER))["job_id"]
     _run_issue_jobs(store, IssuePanelEngine(store, {"*": {"severity": "치명", "judgement": "FAIL"}}))
-    (synth_job,) = _jobs(store, key, "synth")
+    synth_job = _one(_jobs(store, key, "synth"), "synth 잡")
     assert synth_job["id"] == waiting
-    assert (synth_job["chain"]["rearmed_by"], synth_job["chain"]["registry_hash"]) == (issue_job["id"],
-                                                                                      synth.registry_hash(store, key))
+    assert (synth_job["chain"].get("rearmed_by"), synth_job["chain"].get("registry_hash")) == (
+        issue_job["id"], synth.registry_hash(store, key))
