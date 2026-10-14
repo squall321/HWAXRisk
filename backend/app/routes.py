@@ -66,6 +66,8 @@ PORTAL_PAT_WANTED: dict[str, Any] = {"name": "hwax-risk", "audiences": ["mcp-gat
                                      "ttl_days": 90}
 PAT_SOURCES: tuple[str, ...] = ("web", "manual")       # PUT /api/me/portal-pat 가 받는 출처
 GATEWAY_PAT_SOURCE = "gateway-exchange"               # POST /api/auth/portal-pat 로 등록된 것
+# POST /api/auth/portal-pat 가 저장 전에 5xx 로 끝날 거절을 내는 상태(424 Failed Dependency — 등록 검사가 포털에 못 닿았다).
+GATEWAY_PRESTORE_STATUS = 424
 # 게이트웨이가 보내는 실패 code 의 꼴(게이트웨이 _PORTAL_PAT_CODE 와 같다) — 꼴이 아니면 unknown 으로 적는다.
 AUTO_ERROR_CODE = re.compile(r"[A-Za-z0-9_.:-]{1,40}")
 # 자동 등록 실패를 적는 글 — 게이트웨이가 함께 보낸 message 는 받지 않는다(포털 거절 글이 무엇을 되울리든 안내문에 박히지 않게).
@@ -440,6 +442,8 @@ async def post_auth_portal_pat(request: Request, background: BackgroundTasks) ->
     `{pat}` 은 PUT /api/me/portal-pat 와 같은 검사를 지나고(이메일 = 위임 이메일) scopes 는 설정과 무관하게 ['read'] 만 받는다 —
     출처는 gateway-exchange 다. 검사에 걸리면 그 까닭을 마지막 자동 실패로도 적는다(쉼이 걸려 단언마다 다시 바라지 않게).
     `{error}` 는 아무것도 등록하지 않는다. 그 사람이 자동을 껐으면 409 portal_pat_auto_off 이고 아무것도 쓰지 않는다.
+    저장 전의 거절은 전부 4xx 다 — 게이트웨이는 4xx 면 새 PAT 를 폐기하고 5xx 면 살려 둔다. 등록 검사가 포털에 못 닿은 것은
+    424 portal_unreachable 이다(R2-1).
     """
     _gateway_guard(request)
     raw = request.headers.get("x-hwax-delegate-email")
@@ -479,6 +483,11 @@ def _gateway_portal_pat(email: str, body: Any, background: BackgroundTasks | Non
     except AppError as exc:
         store.note_portal_pat_error(email, f"register-{exc.code}: {exc.message}", kind=auto_error_kind(exc.code))
         log.info("게이트웨이가 보낸 포털 PAT 를 등록하지 않았다 — %s (%s)", email, exc.code)
+        if exc.http_status >= 500:
+            # 등록이 던지는 거절은 전부 저장 전이다 — 이 문은 그것을 4xx 로 낸다. 게이트웨이는 5xx 를 '앱이 받았는지 모름' 으로 읽어
+            # 새 PAT 를 폐기하지 않고 다시 보내는데, 그렇게 남은 PAT 가 포털의 자식 상한(다섯)을 채워 Claude 길을 막는다(R2-1). 5xx 는
+            # 등록 검사가 포털에 못 닿은 portal_unreachable 하나이고 424 로 낸다(code 는 그대로 — 일시 오류로 센다). 웹 PUT 은 502 그대로다.
+            raise AppError(exc.code, exc.message, GATEWAY_PRESTORE_STATUS) from exc
         raise
     log.info("포털 PAT 를 게이트웨이 교환으로 등록했다 — %s (exp %s, jti %s)", email, out["exp"], out["jti"])
     return {"registered": True, "email": email, "exp": out["exp"], "jti": out["jti"]}

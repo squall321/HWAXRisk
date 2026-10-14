@@ -426,12 +426,65 @@ def test_a_registration_that_cannot_reach_the_portal_is_transient(client, box, d
     """등록 검사에서 앱이 포털에 못 닿은 것(portal_unreachable)은 일시 오류다 — 포털이 PAT 를 거절한 것(pat_invalid)은 아니다."""
     box["portal_down"], box["portal_ok"] = down, False
     r = client.post("/api/auth/portal-pat", headers=GW, json={"pat": _jwt()})
-    assert r.status_code == (502 if down else 422)
+    assert r.status_code == (424 if down else 422)
     prefs = get_store().get_user_prefs(EMAIL)
     assert prefs["auto_error"].startswith("register-portal_unreachable" if down else "register-pat_invalid")
     assert prefs["auto_error_kind"] == kind
     _age_last_error(routes.AUTO_RETRY_TRANSIENT_S + 1)
     assert ("portal_pat_wanted" in _mint(client, GW)) is down
+
+
+def _no_jti_pat() -> str:
+    payload = json.loads(base64.urlsafe_b64decode(_jwt().split(".")[1] + "=="))
+    payload.pop("jti")
+    seg = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+    return ".".join([_jwt().split(".")[0], seg, "fakesig"])
+
+
+@pytest.mark.parametrize("case", ["portal_down", "portal_rejects", "other_email", "audience", "expiring", "broad_scopes",
+                                  "no_jti", "not_a_jwt", "cred_key_absent", "empty_pat", "both_fields", "auto_off"])
+def test_no_refusal_before_storing_is_a_5xx(client, box, monkeypatch, case):
+    """저장 전의 거절은 전부 4xx 다 — 게이트웨이는 4xx 면 새 PAT 를 폐기하고 5xx 면 '받았는지 모름' 으로 살려 두고 다시 보낸다. 그렇게
+    남은 PAT 가 포털의 자식 상한(다섯)을 채워 Claude 길을 막았다(R2-1). 포털에 못 닿은 것은 424 portal_unreachable 이다."""
+    body: dict = {"pat": _jwt()}
+    if case == "portal_down":
+        box["portal_down"] = True
+    elif case == "portal_rejects":
+        box["portal_ok"] = False
+    elif case == "other_email":
+        body = {"pat": _jwt(email="mallory@example.com")}
+    elif case == "audience":
+        body = {"pat": _jwt(aud=["heax-hub"])}
+    elif case == "expiring":
+        body = {"pat": _jwt(exp=int(time.time()) + 3600)}
+    elif case == "broad_scopes":
+        body = {"pat": _jwt(scopes=["read", "write"])}
+    elif case == "no_jti":
+        body = {"pat": _no_jti_pat()}
+    elif case == "not_a_jwt":
+        body = {"pat": "not-a-jwt"}
+    elif case == "cred_key_absent":
+        monkeypatch.setattr(config, "load_cred_key", lambda *a, **k: None)
+    elif case == "empty_pat":
+        body = {"pat": "  "}
+    elif case == "both_fields":
+        body = {"pat": _jwt(), "error": "timeout"}
+    elif case == "auto_off":
+        get_store().set_portal_pat_auto(EMAIL, False)
+    r = client.post("/api/auth/portal-pat", headers=GW, json=body)
+    assert 400 <= r.status_code < 500, (case, r.status_code, r.text)
+    assert _credential_rows() == 0 and box["revoked"] == []
+    if case == "portal_down":
+        assert (r.status_code, r.json()["error"]["code"]) == (424, "portal_unreachable")
+        assert get_store().get_user_prefs(EMAIL)["auto_error_kind"] == "transient"     # 일시 오류로 센다(600초 쉼)
+
+
+def test_the_web_registration_keeps_502_when_the_portal_is_unreachable(client, box):
+    """화면 계약은 그대로다 — 웹 PUT /api/me/portal-pat 는 포털에 못 닿으면 종전처럼 502 portal_unreachable 이다(424 는 게이트웨이 문만)."""
+    box["portal_down"] = True
+    r = client.put("/api/me/portal-pat", json={"pat": _jwt(), "source": "web"}, headers=AUTH)
+    assert (r.status_code, r.json()["error"]["code"]) == (502, "portal_unreachable")
+    assert _credential_rows() == 0
 
 
 def test_a_success_clears_the_error_kind(client, box):
