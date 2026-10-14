@@ -570,9 +570,12 @@ def _make_due() -> None:
                         (now_epoch() + config.pat_renew_before_s() - 3600, EMAIL))
 
 
-def _register_due(pat: str) -> None:
+def _register_due(pat: str, source: str | None = "gateway-exchange") -> None:
+    """갱신 문턱 밑의 등록 — 출처(source)는 그 등록이 어디서 왔나다. 앱이 받아 온 것(gateway-exchange·web)만 갈아 끼울 때 폐기한다."""
     _register(pat)
     _make_due()
+    if source is not None:
+        get_store().note_portal_pat_registered(EMAIL, source)
 
 
 @pytest.mark.parametrize("path", ["gateway", "put"])
@@ -610,8 +613,9 @@ def test_only_a_different_live_hwax_risk_pat_is_revoked(client, box, case):
 
 def test_a_new_pat_exchanged_from_the_old_one_does_not_revoke_its_parent(client, box):
     """옛것이 사람이 Claude 에 쓰는 PAT(이름 hwax-risk)이고 새것이 그것으로 교환한 자식이면(`par` = 옛 jti) 옛것을 폐기하지 않는다 —
-    포털 폐기는 자식에게 이어져 방금 받은 새것까지 죽는다(수리 1라운드 편차 7)."""
-    _register_due(OLD)
+    포털 폐기는 자식에게 이어져 방금 받은 새것까지 죽는다(수리 1라운드 편차 7). 옛것이 앱이 받아 온 것이어도(웹 버튼으로 낸 PAT 를
+    Claude 에 넣었다) 자식 대조는 그대로 선다."""
+    _register_due(OLD, source="web")
     child = _jwt(pat_name="hwax-risk", par="jti-erin-0")
     assert client.post("/api/auth/portal-pat", headers=GW, json={"pat": child}).status_code == 200
     assert box["revoked"] == [] and _registered_jti() == "jti-erin-1"
@@ -619,6 +623,24 @@ def test_a_new_pat_exchanged_from_the_old_one_does_not_revoke_its_parent(client,
     other = _jwt(jti="jti-erin-2", pat_name="hwax-risk", par="jti-somebody-else")
     assert client.post("/api/auth/portal-pat", headers=GW, json={"pat": other}).status_code == 200
     assert box["revoked"] == [f"Bearer {child}"], "다른 원의 자식이면 옛것(앞선 자식)은 그대로 폐기한다"
+
+
+@pytest.mark.parametrize("path", ["gateway", "put"])
+@pytest.mark.parametrize("prev,revoked", [("gateway-exchange", True), ("web", True), ("manual", False), (None, False)],
+                         ids=["gateway_exchange", "web", "manual", "unknown"])
+def test_only_a_pat_the_app_obtained_is_revoked_when_replaced(client, box, path, prev, revoked):
+    """사람이 손으로 붙여 넣은 PAT(출처 manual)는 이름이 hwax-risk 여도 폐기하지 않는다 — 그것이 그 사람의 Claude PAT 이기도 하면 포털
+    폐기가 자식에게 이어져 Claude 길과 그 자식들이 함께 죽는다(R2-2). 출처를 모르면(이 규칙 전에 등록된 행) 폐기하지 않는다. 보는
+    출처는 이 등록이 덮어쓰기 전의 것이다."""
+    _register_due(OLD, source=prev)
+    new = _jwt(pat_name="hwax-risk")
+    if path == "gateway":
+        r = client.post("/api/auth/portal-pat", headers=GW, json={"pat": new})
+    else:
+        r = client.put("/api/me/portal-pat", json={"pat": new, "source": "web"}, headers=AUTH)
+    assert r.status_code == 200, r.text
+    assert box["revoked"] == ([f"Bearer {OLD}"] if revoked else []) and _registered_jti() == "jti-erin-1"
+    assert get_store().get_user_prefs(EMAIL)["auto_source"] == ("gateway-exchange" if path == "gateway" else "web")
 
 
 def test_a_refused_new_pat_keeps_the_old_one_and_revokes_nothing(client, box):

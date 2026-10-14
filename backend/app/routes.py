@@ -66,6 +66,8 @@ PORTAL_PAT_WANTED: dict[str, Any] = {"name": "hwax-risk", "audiences": ["mcp-gat
                                      "ttl_days": 90}
 PAT_SOURCES: tuple[str, ...] = ("web", "manual")       # PUT /api/me/portal-pat 가 받는 출처
 GATEWAY_PAT_SOURCE = "gateway-exchange"               # POST /api/auth/portal-pat 로 등록된 것
+# 앱이 받아 온 PAT 의 출처 — 갈아 끼울 때 이것만 포털에서 폐기한다(manual 은 사람이 붙여 넣은 것이라 다른 데서도 쓸 수 있다, R2-2).
+APP_OBTAINED_SOURCES: frozenset[str] = frozenset({GATEWAY_PAT_SOURCE, "web"})
 # POST /api/auth/portal-pat 가 저장 전에 5xx 로 끝날 거절을 내는 상태(424 Failed Dependency — 등록 검사가 포털에 못 닿았다).
 GATEWAY_PRESTORE_STATUS = 424
 # 게이트웨이가 보내는 실패 code 의 꼴(게이트웨이 _PORTAL_PAT_CODE 와 같다) — 꼴이 아니면 unknown 으로 적는다.
@@ -282,8 +284,9 @@ def _register_portal_pat(store: Any, owner_sub: str, pat: str, *, source: str, r
     포털 실호출 → scopes·jti·Fernet(identity.credential_record). 성공하면 _user_prefs 에 출처·시각을 적는다. PAT 원문은 돌려주지
     않고 로그에도 싣지 않는다.
 
-    새것을 받아들인 **뒤에** 갈아 끼운 앞선 PAT 를 포털에서 폐기한다(`_superseded_pat` — 풀리고, jti 가 다르고, pat_name 이
-    hwax-risk 인 것만). 포털 교환은 같은 이름의 형제를 더는 폐기하지 않는다 — 앱이 새것을 거절하면 쓰던 자격까지 잃었다(SEC-1).
+    새것을 받아들인 **뒤에** 갈아 끼운 앞선 PAT 를 포털에서 폐기한다(`_superseded_pat` — 앱이 받아 온 것이고(앞선 등록의 출처가
+    gateway-exchange·web), 풀리고, jti 가 다르고, pat_name 이 hwax-risk 인 것만). 포털 교환은 같은 이름의 형제를 더는 폐기하지 않는다
+    — 앱이 새것을 거절하면 쓰던 자격까지 잃었다(SEC-1).
     `background` 가 있으면 응답을 보낸 뒤에, 없으면 그 자리에서 부른다. 실패해도 등록은 그대로다.
     """
     claims = _decode_jwt_payload(pat)
@@ -308,7 +311,10 @@ def _register_portal_pat(store: Any, owner_sub: str, pat: str, *, source: str, r
     groups = claims.get("groups") if isinstance(claims.get("groups"), list) else []
     # 저장은 Fernet 암호문이다(plan §8.2.7) — scopes 검사·jti 추출·암호화를 identity 가 한 곳에서 한다.
     rec = identity.credential_record(claims, pat)
-    superseded = _superseded_pat(store.get_credential(owner_sub), rec["pat_jti"], parent=claims.get("par"))
+    # 앞선 등록의 출처는 이 등록이 덮어쓰기 **전에** 읽는다 — 폐기해도 되는 것(앱이 받아 온 것)인지가 거기 있다(R2-2).
+    prev_source = store.get_user_prefs(owner_sub)["auto_source"]
+    superseded = _superseded_pat(store.get_credential(owner_sub), rec["pat_jti"], parent=claims.get("par"),
+                                 source=prev_source)
     store.upsert_credential(
         owner_sub, rec["portal_pat_enc"].decode("ascii"), claims.get("sub"), email,
         json.dumps(groups, ensure_ascii=False), int(exp),
@@ -323,13 +329,19 @@ def _register_portal_pat(store: Any, owner_sub: str, pat: str, *, source: str, r
             "scopes": rec["scopes"], "jti": rec["pat_jti"]}
 
 
-def _superseded_pat(row: dict | None, new_jti: str, *, parent: Any = None) -> tuple[str, str] | None:
-    """등록이 갈아 끼우는 앞선 PAT — (PAT, jti) 또는 None. 풀리고(폐기 표기·복호 실패가 아님), jti 가 새것과 다르고, `pat_name`
-    클레임이 hwax-risk(이 앱이 바라 받은 것 — 웹 버튼·자동 등록·게이트웨이 교환)인 것만이다. 다른 이름의 PAT 는 그 사람이 다른
-    데서도 쓸 수 있어 폐기하지 않는다.
+def _superseded_pat(row: dict | None, new_jti: str, *, parent: Any = None,
+                    source: str | None = None) -> tuple[str, str] | None:
+    """등록이 갈아 끼우는 앞선 PAT — (PAT, jti) 또는 None. 앱이 받아 온 것이고(`source` — 앞선 등록의 출처가 APP_OBTAINED_SOURCES),
+    풀리고(폐기 표기·복호 실패가 아님), jti 가 새것과 다르고, `pat_name` 클레임이 hwax-risk 인 것만이다. 다른 이름의 PAT 는 그 사람이
+    다른 데서도 쓸 수 있어 폐기하지 않는다.
+
+    사람이 손으로 붙여 넣은 PAT(출처 manual)는 이름이 hwax-risk 여도 폐기하지 않는다 — 그것이 그 사람의 Claude PAT 이기도 하면 포털
+    폐기가 자식에게 이어져 Claude 길과 그 자식들이 함께 죽는다(R2-2). 출처를 모르면(None — 이 규칙 전에 등록된 행) 폐기하지 않는다.
 
     새것이 옛것의 **자식**이면(포털 교환 PAT 의 `par` = 원의 jti) 폐기하지 않는다 — 포털의 폐기는 자식에게 이어져 방금 받은 새것까지
     죽는다. 사람이 Claude 에 쓰는 PAT(이름 hwax-risk)를 손으로 등록해 두었고 그 PAT 로 온 호출이 교환한 경우다."""
+    if source not in APP_OBTAINED_SOURCES:
+        return None
     old = identity.credential_pat(row)
     if old is None or row is None:
         return None
