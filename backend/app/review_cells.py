@@ -504,7 +504,9 @@ def start_cell(store: Any, target_key: str, unit_id: str, agent_key: str, *, lea
                                 "started_at": row["started_at"] or now, "finished_at": None}
         if row["input_hash"] is not None and row["input_hash"] != input_hash:
             store.execute(f"DELETE FROM rr_card_verdicts WHERE {_cell_where()}", key)
-            sets.update(_CELL_RESET, reopened_n=Expr("reopened_n + 1"), started_at=now)
+            # 표본 · 그림자의 앞 결과는 따라간다 — 놓침 증거는 쌓이기만 한다(반대 검토 2차 LOW 6 · D-46)
+            sets.update(_CELL_RESET, reopened_n=Expr("reopened_n + 1"), started_at=now,
+                        sample_json=_carried_history(row["sample_json"]))
         if _move(store, "cell", "pending", "running", where=_cell_where(), params=key, sets=sets, now=now) != 1:
             return None
         return _cell(store, *key)
@@ -634,29 +636,73 @@ def widened_domains(store: Any, target_key: str) -> list[str]:
     """넓힌 영역 — 표본·그림자 셀의 결과가 risk_miss 인(또는 사람의 다시 전에 그랬던 — `was`) 셀의 영역. 저장하지 않고 원장에서
     유도하되 쌓기만 한다 — 넓힘의 원인 셀을 다시 열어도 넓힘은 되돌아가지 않는다(반대 검토 HIGH 3)."""
     hit = " OR ".join(f"json_extract(sample_json, '$.{k}.result') = 'risk_miss' OR EXISTS (SELECT 1 FROM"
-                      f" json_each(sample_json, '$.{k}.was') w WHERE w.value = 'risk_miss')" for k in SAMPLE_RESULT_KEYS)
+                      f" json_each(sample_json, '$.was.{k}') w WHERE w.value = 'risk_miss')" for k in SAMPLE_RESULT_KEYS)
     return [str(r["domain"]) for r in store.query(
         f"SELECT DISTINCT domain FROM rr_review_cells WHERE target_key = ? AND ({hit}) ORDER BY domain", (target_key,))]
 
 
-def _retained_sample(sample_json: Any) -> str | None:
-    """사람의 다시가 남기는 표본 · 그림자 표지 — 결과만 비우고 앞 결과는 `was` 에 쌓는다(반대 검토 HIGH 3). 다시 돈 셀의 정산이 새
-    결과를 적어 넓힘이 이어지고, 넓힘은 앞 결과까지 본다. 표지가 없으면 None(종전처럼 비운다)."""
+def _sample_of(sample_json: Any) -> dict:
     try:
         sample = json.loads(sample_json or "null")
     except (TypeError, ValueError):
-        return None
-    if not isinstance(sample, dict):
-        return None
-    kept: dict[str, Any] = {}
+        return {}
+    return sample if isinstance(sample, dict) else {}
+
+
+def _history(sample: Mapping[str, Any]) -> dict[str, list[str]]:
+    """앞 결과(`sample_json.was` — 표지 종류 → 결과 목록). 표지와 따로 둔다 — 표지가 지워져도(입력 바뀜) 남는다(2차 LOW 6)."""
+    was = sample.get("was") if isinstance(sample.get("was"), Mapping) else {}
+    return {k: [str(w) for w in was.get(k) or ()] for k in SAMPLE_RESULT_KEYS if was.get(k)}
+
+
+def _with_history(sample: Mapping[str, Any]) -> dict[str, list[str]]:
+    """앞 결과에 지금 결과를 더한 목록 — 사람의 다시 · 입력 바뀜이 결과를 비우기 전에 부른다."""
+    was = _history(sample)
     for key in SAMPLE_RESULT_KEYS:
         marker = sample.get(key)
-        if isinstance(marker, dict):
-            was = [str(w) for w in marker.get("was") or ()]
-            if marker.get("result"):
-                was.append(str(marker["result"]))
-            kept[key] = {**marker, "result": None, **({"was": was} if was else {})}
-    return json.dumps(kept, sort_keys=True) if kept else None
+        if isinstance(marker, Mapping) and marker.get("result"):
+            was.setdefault(key, []).append(str(marker["result"]))
+    return was
+
+
+def _retained_sample(sample_json: Any) -> tuple[str | None, bool]:
+    """사람의 다시가 남기는 표본 · 그림자 — (sample_json, 표지가 남았나). 표지는 결과만 비우고 앞 결과는 `was` 에 쌓는다(반대 검토
+    HIGH 3 — 다시 돈 셀의 정산이 새 결과를 적어 넓힘이 이어지고, 넓힘은 앞 결과까지 본다). 표지가 없어도 앞 결과는 남긴다(2차 LOW 6
+    — 놓침 증거는 쌓이기만 한다). 둘 다 없으면 (None, False)."""
+    sample = _sample_of(sample_json)
+    kept: dict[str, Any] = {key: {**sample[key], "result": None} for key in SAMPLE_RESULT_KEYS
+                            if isinstance(sample.get(key), Mapping)}
+    was = _with_history(sample)
+    if was:
+        kept["was"] = was
+    return (json.dumps(kept, sort_keys=True) if kept else None), any(key in kept for key in SAMPLE_RESULT_KEYS)
+
+
+def _carried_history(sample_json: Any) -> str | None:
+    """입력이 바뀌어 처음부터 도는 셀(start_cell 의 _CELL_RESET)이 남기는 것 — 표지는 지우고(다시 분류한다) 앞 결과와 지금 결과만
+    `was` 로 남긴다(반대 검토 2차 LOW 6 · D-46 — 놓침 증거는 쌓이기만 한다). 없으면 None."""
+    was = _with_history(_sample_of(sample_json))
+    return json.dumps({"was": was}, sort_keys=True) if was else None
+
+
+def sample_outcomes(sample_json: Any) -> dict[str, dict]:
+    """표본 · 그림자의 실효 결과(반대 검토 2차 LOW 6 · D-46 — 놓침 증거는 쌓이기만 한다) — {종류: {marked, result, picked_by}}. 지금
+    표지가 있거나 앞 결과가 있는 종류만 싣는다. result 는 지금 결과나 앞 결과 가운데 risk_miss 가 하나라도 있으면 risk_miss, 아니면
+    지금 결과, 지금 결과가 없으면 마지막 앞 결과, 아무것도 없으면 None(아직). 완결 몫 · 품질 · 보고서가 넓힘(`widened_domains`)과
+    같은 셈을 읽는다."""
+    sample = _sample_of(sample_json)
+    history = _history(sample)
+    out: dict[str, dict] = {}
+    for key in SAMPLE_RESULT_KEYS:
+        marker = sample.get(key) if isinstance(sample.get(key), Mapping) else None
+        now = str(marker["result"]) if marker is not None and marker.get("result") else None
+        seen = [*history.get(key, ()), *([now] if now else [])]
+        if marker is None and not seen:
+            continue
+        result = "risk_miss" if "risk_miss" in seen else now or (seen[-1] if seen else None)
+        out[key] = {"marked": marker is not None, "result": result,
+                    "picked_by": marker.get("picked_by") if marker is not None else None}
+    return out
 
 
 def filter_off(store: Any, target_key: str) -> bool:
@@ -759,14 +805,18 @@ def audit_topup(store: Any, target_key: str, job_id: str, *, audit_pct: float, s
     import math  # noqa: PLC0415
 
     now = now_epoch() if now is None else now
-    rows = [dict(r) for r in store.query(
-        "SELECT unit_id, agent_key, domain, state, run_id, json_extract(sample_json, '$.filter_audit') AS audit,"
-        " json_extract(sample_json, '$.filter_audit.result') AS result"
-        " FROM rr_review_cells WHERE target_key = ? AND (route = 'filtered' OR route = 'audit')", (target_key,))]
+    rows = []
+    for r in store.query("SELECT unit_id, agent_key, domain, state, run_id, route, sample_json FROM rr_review_cells"
+                         " WHERE target_key = ?", (target_key,)):
+        # 표본의 실효 결과 — 앞 결과(was)까지 본다, 완결 몫과 같은 셈(반대 검토 2차 LOW 6 · D-46)
+        audit = sample_outcomes(r["sample_json"]).get("filter_audit")
+        if r["route"] in (FILTERED, "audit") or audit is not None:
+            rows.append({**{k: r[k] for k in ("unit_id", "agent_key", "domain", "state", "run_id")}, "audit": audit})
     filtered = [r for r in rows if r["state"] == "na_irrelevant"]
     marked = [r for r in rows if r["audit"] is not None]
-    audited = [r for r in marked if r["result"] in AUDIT_RESULTS or r["state"] in (*OPEN_CELL_STATES, "failed")]
-    n = len(filtered) + len(marked)
+    audited = [r for r in marked if r["audit"]["result"] in AUDIT_RESULTS
+               or (r["audit"]["marked"] and r["state"] in (*OPEN_CELL_STATES, "failed"))]
+    n = len({id(r) for r in filtered + marked})
     if not filtered:
         return {"n": n, "n_audit": 0, "sampled": len(audited), "need": 0, "reopened": 0, "short": 0, "domains_short": []}
     n_audit = max(math.ceil(float(audit_pct) / 100.0 * n), min(n, AUDIT_MIN_N))
@@ -1324,11 +1374,13 @@ def retry_cells(store: Any, target_key: str, rows: Sequence[Mapping[str, Any]], 
             sets = {**_CELL_RESET, "input_hash": None, "lease_owner": None, "heartbeat_at": None, "finished_at": None,
                     "reopened_n": Expr("reopened_n + 1"), "route_forced": HUMAN_RETRY, "status_source": "human",
                     "decided_by": decided_by, "decided_at": now, "decide_note": note}
-            kept = _retained_sample(_cell(store, *key)["sample_json"])
+            cell = _cell(store, *key)
+            kept, marked = _retained_sample(cell["sample_json"])
             if kept is not None:
+                sets["sample_json"] = kept                    # 앞 결과(was)는 표지가 없어도 남는다(2차 LOW 6)
+            if marked:
                 # 표본 · 그림자 셀은 그 표지와 분류 기록을 남긴다 — 다시 돈 정산이 결과를 적어 넓힘이 이어진다(반대 검토 HIGH 3)
-                cell = _cell(store, *key)
-                sets.update(sample_json=kept, route=cell["route"], route_json=cell["route_json"])
+                sets.update(route=cell["route"], route_json=cell["route_json"])
             if _move(store, "cell", row["state"], "pending", where=_cell_where(), params=key, sets=sets, now=now) == 1:
                 changed.append(dict(row))
         for agent in sorted({r["agent_key"] for r in changed}):
@@ -1468,14 +1520,15 @@ def closure_cells(store: Any, target_key: str) -> dict:
     roster = planner.review_order(store, target_key)
     rows = [dict(r) for r in store.query(
         "SELECT unit_id, agent_key, domain, state, basis, run_id, error_code, decided_by, decide_note,"
-        " json_extract(route_json, '$.rule') AS rule,"
-        " json_type(sample_json, '$.filter_audit') IS NOT NULL AS audited,"
-        " json_extract(sample_json, '$.filter_audit.result') AS audit_result,"
-        " json_type(sample_json, '$.shadow') IS NOT NULL AS shadowed,"
-        " json_extract(sample_json, '$.shadow.result') AS shadow_result,"
+        " json_extract(route_json, '$.rule') AS rule, sample_json,"
         " json_extract(extras_json, '$.noinput.outcome') AS noinput_outcome,"
         " json_extract(extras_json, '$.offcard.search.search_failed') AS search_failed"
         " FROM rr_review_cells WHERE target_key = ?", (target_key,)) if r["unit_id"] in active]
+    for r in rows:
+        # 표본 · 그림자의 실효 결과 — 앞 결과의 놓침까지 센다(반대 검토 2차 LOW 6 · D-46, 넓힘과 같은 셈)
+        outcomes = sample_outcomes(r.pop("sample_json"))
+        r.update(audited=int("filter_audit" in outcomes), audit_result=(outcomes.get("filter_audit") or {}).get("result"),
+                 shadowed=int("shadow" in outcomes), shadow_result=(outcomes.get("shadow") or {}).get("result"))
     by_state = Counter(r["state"] for r in rows)
     by_basis = Counter(r["basis"] for r in rows if r["state"] == "reviewed")
     failed_codes = Counter(r["error_code"] or "unknown" for r in rows if r["state"] == "failed")
@@ -1489,7 +1542,7 @@ def closure_cells(store: Any, target_key: str) -> dict:
     shadow_done = [r for r in shadows if r["shadow_result"] in AUDIT_RESULTS]
     shadow_miss = sum(1 for r in shadow_done if r["shadow_result"] == "risk_miss")
     by_domain: dict[str, dict[str, int]] = {}
-    for r in filtered + audited:
+    for r in {id(r): r for r in filtered + audited}.values():       # 앞 결과만 남은 거른 셀은 한 번만 센다
         cell = by_domain.setdefault(str(r["domain"]), {"filtered": 0, "audited": 0, "settled": 0})
         cell["filtered" if r["state"] == "na_irrelevant" else "audited"] += 1
         cell["settled"] += int(r in settled)
@@ -1498,7 +1551,7 @@ def closure_cells(store: Any, target_key: str) -> dict:
     audit_open = sum(1 for r in unsettled if r["state"] in OPEN_CELL_STATES)
     job = _latest_review_job(store, target_key)
     knobs = (json.loads(job["params_json"] or "{}").get("knobs") or {}) if job is not None and job.get("params_json") else {}
-    population = len(filtered) + len(audited)
+    population = len({id(r) for r in filtered + audited})
     pct = float(knobs.get("audit_pct") or 0)
     n_audit = max(math.ceil(pct / 100.0 * population), min(population, AUDIT_MIN_N)) if population else 0
     # 바닥은 결과를 낸 표본만 센다 — 전체와 영역마다(반대 검토 MEDIUM 6 — 실패한 표본을 세면 표본 0 인 거름이 막지 않았다)

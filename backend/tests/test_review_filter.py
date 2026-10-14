@@ -800,9 +800,39 @@ def test_a_human_retry_keeps_the_sample_marker_so_a_rerun_miss_still_widens_and_
 
     out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[audit_unit, MEM2]], force=True,
                                                              reason="넓힘의 원인 셀을 다시 본다"), ident=factories.ident(rig.OWNER))
-    marker = _cell(store, key, audit_unit, MEM2)["sample_json"]["filter_audit"]
-    assert (marker["result"], marker["was"]) == (None, ["risk_miss"])
+    sample = _cell(store, key, audit_unit, MEM2)["sample_json"]
+    assert (sample["filter_audit"]["result"], sample.get("was")) == (None, {"filter_audit": ["risk_miss"]})
     assert "mem" in review_cells.widened_domains(store, key)                       # 넓힘은 되돌아가지 않는다
+
+    # 2차 LOW 6 · D-46 — 놓침 증거는 쌓이기만 한다. ③ 다시 돈 표본이 이번에는 놓침이 아니어도(kept) 그 셀은 놓침으로 센다 — 완결 몫 ·
+    # 품질 · 보고서가 넓힘과 같은 셈이다(종전에는 지금 결과만 보아 놓침 1 → 0, 95% 상한이 막음에서 안 막음으로 편집자 손에 바뀌었다).
+    fake.noinput_q1[audit_unit] = ["no"]
+    r.finish(out["job"]["job_id"])
+    assert _cell(store, key, audit_unit, MEM2)["sample_json"]["filter_audit"]["result"] == "kept"
+    _assert_one_miss(store, key, MEM2)
+    # ④ 다시 연 셀이 정산 전에 다른 입력으로 시작하면(start_cell 이 처음부터) 앞 결과(was)가 따라간다 — 넓힘도 놓침 셈도 그대로다
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[audit_unit, MEM2]], force=True,
+                                                             reason="입력이 바뀐 뒤 다시 본다"), ident=factories.ident(rig.OWNER))
+    store.execute("UPDATE rr_review_cells SET input_hash = 'stale-input' WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+                  (key, audit_unit, MEM2))
+    r.finish(out["job"]["job_id"])
+    cell = _cell(store, key, audit_unit, MEM2)
+    assert cell["state"] in ("reviewed", "no_input") and (cell["sample_json"] or {}).get("was") == {
+        "filter_audit": ["risk_miss", "kept"]}
+    assert "mem" in review_cells.widened_domains(store, key)
+    _assert_one_miss(store, key, MEM2)
+
+
+def _assert_one_miss(store, key: str, agent: str) -> None:
+    """놓침 하나 — 완결 몫(거름 표본) · 품질 수치 · 전문가 보고서 머리가 같은 셈이다."""
+    from app import expert_report, review_quality
+
+    audit = review_cells.closure_cells(store, key)["filtered"]["audit"]
+    assert (audit["sampled"], audit["risk_miss"]) == (1, 1)
+    quality = review_quality.compute(store, key)["filter"]["audit"]
+    assert (quality["sampled"], quality["counts"]["risk_miss"]) == (1, 1)
+    head = expert_report.load_report(store, key, agent)["head"]["filter"]
+    assert head["risk_miss"] == 1
 
 
 def test_an_audit_that_never_produced_a_result_does_not_meet_the_floor(store, monkeypatch):

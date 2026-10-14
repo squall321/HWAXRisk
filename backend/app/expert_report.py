@@ -682,13 +682,14 @@ def _search_marks(cell: Mapping[str, Any]) -> dict | None:
 
 
 def _sample_marks(cell: Mapping[str, Any]) -> dict | None:
-    """그 셀의 표본·그림자(재설계 M3 C3-7) — {filter_audit?: {picked_by, result}, shadow?: {result}}. 둘 다 없으면 None."""
-    sample = _json(cell.get("sample_json"), {})
+    """그 셀의 표본·그림자(재설계 M3 C3-7) — {filter_audit?: {picked_by, result}, shadow?: {result}}. 둘 다 없으면 None. 결과는 실효
+    결과다 — 앞 결과의 놓침까지 센다(반대 검토 2차 LOW 6 · D-46 — 완결 몫 · 넓힘과 같은 셈, `review_cells.sample_outcomes`)."""
+    outcomes = review_cells.sample_outcomes(cell.get("sample_json"))
     out = {}
-    if isinstance(sample.get("filter_audit"), Mapping):
-        out["filter_audit"] = {"picked_by": sample["filter_audit"].get("picked_by"), "result": sample["filter_audit"].get("result")}
-    if isinstance(sample.get("shadow"), Mapping):
-        out["shadow"] = {"result": sample["shadow"].get("result")}
+    if "filter_audit" in outcomes:
+        out["filter_audit"] = {"picked_by": outcomes["filter_audit"]["picked_by"], "result": outcomes["filter_audit"]["result"]}
+    if "shadow" in outcomes:
+        out["shadow"] = {"result": outcomes["shadow"]["result"]}
     return out or None
 
 

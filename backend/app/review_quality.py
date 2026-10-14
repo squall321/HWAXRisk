@@ -168,11 +168,14 @@ def _load(store: Any, target_key: str, agent_key: str | None) -> dict:
     cells = [r for r in _rows(store,
         "SELECT unit_id, agent_key, state, basis, run_id, pack_hash, cards_expected, cards_judged, truncated, soft_over,"
         " offcard_capped, bg_full_n, bg_title_only_n, n_fail, n_warning, quote_ok, decided_by, route,"
-        " json_extract(route_json, '$.rule') AS rule, json_type(sample_json, '$.filter_audit') IS NOT NULL AS audited,"
-        " json_extract(sample_json, '$.filter_audit.result') AS audit_result,"
-        " json_type(sample_json, '$.shadow') IS NOT NULL AS shadowed, json_extract(sample_json, '$.shadow.result') AS shadow_result,"
+        " json_extract(route_json, '$.rule') AS rule, sample_json,"
         " json_extract(extras_json, '$.noinput.outcome') AS noinput_outcome FROM rr_review_cells"
         f" WHERE target_key = ?{extra} ORDER BY agent_key, unit_id", [target_key, *params]) if r["unit_id"] in alive]
+    for cell in cells:
+        # 표본 · 그림자의 실효 결과 — 앞 결과의 놓침까지 센다(반대 검토 2차 LOW 6 · D-46 — 완결 몫 · 넓힘과 같은 셈)
+        outcomes = review_cells.sample_outcomes(cell.pop("sample_json"))
+        cell.update(audited=int("filter_audit" in outcomes), audit_result=(outcomes.get("filter_audit") or {}).get("result"),
+                    shadowed=int("shadow" in outcomes), shadow_result=(outcomes.get("shadow") or {}).get("result"))
     verdicts = [r for r in _rows(store,
         "SELECT unit_id, agent_key, record_id, variant, applies, judgement, quote_ok, refs_ok, check_disagree, is_effective,"
         " agree, split, json_type(checks_json, '$.flipped_from') IS NOT NULL AS flipped_row,"
