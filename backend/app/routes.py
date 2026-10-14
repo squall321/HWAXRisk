@@ -7,6 +7,7 @@ import gzip
 import hmac
 import json
 import logging
+import re
 import secrets
 import sqlite3
 import time
@@ -63,7 +64,44 @@ PORTAL_PAT_WANTED: dict[str, Any] = {"name": "hwax-risk", "audiences": ["mcp-gat
                                      "ttl_days": 90}
 PAT_SOURCES: tuple[str, ...] = ("web", "manual")       # PUT /api/me/portal-pat 가 받는 출처
 GATEWAY_PAT_SOURCE = "gateway-exchange"               # POST /api/auth/portal-pat 로 등록된 것
-AUTO_ERROR_CODE_MAX = 64
+# 게이트웨이가 보내는 실패 code 의 꼴(게이트웨이 _PORTAL_PAT_CODE 와 같다) — 꼴이 아니면 unknown 으로 적는다.
+AUTO_ERROR_CODE = re.compile(r"[A-Za-z0-9_.:-]{1,40}")
+# 자동 등록 실패를 적는 글 — 게이트웨이가 함께 보낸 message 는 받지 않는다(포털 거절 글이 무엇을 되울리든 안내문에 박히지 않게).
+# code 마다 앱이 고른 글이고, 글마다 사람이 할 일을 말한다. 이 글이 pat_unavailable 안내·rr_jobs.error·risk_next_step 에 박힌다.
+AUTO_ERROR_TEMPLATES: dict[str, str] = {
+    "invalid_source": "Claude 에 넣은 PAT 를 포털이 받지 않았다(서명·청중·만료·폐기) — 포털 토큰 화면에서 새로 발급해 Claude 에 넣는다",
+    "account_disabled": "포털 계정이 정지돼 있다 — 포털 관리자에게 문의한다",
+    "permission_denied": "포털 API 토큰 권한(feat:api-token)이 없다 — 포털 '내 권한' 에서 요청한다",
+    "source_not_exchangeable": ("Claude 에 넣은 PAT 로는 바꿔 받을 수 없다(챗·절차용·교환으로 받은 PAT 이거나 방금 폐기됐다) — 포털 토큰"
+                                " 화면에서 직접 발급한 PAT 를 Claude 에 넣는다"),
+    "widen_audience": ("Claude 에 넣은 PAT 의 청중이 모자라다 — 포털 토큰 화면에서 모든 청중(mcp-gateway·step-forge 포함)으로 새로"
+                       " 발급해 Claude 에 넣는다"),
+    "widen_scopes": "Claude 에 넣은 PAT 에 read 범위가 없다 — 포털 토큰 화면에서 read 를 포함해 새로 발급해 Claude 에 넣는다",
+    "bad_ttl": "포털이 요청한 수명을 받지 않았다 — 포털 관리자에게 PAT 최대 수명 설정을 확인해 달라고 한다",
+    "bad_scope": "포털이 요청한 범위를 받지 않았다 — 포털 관리자에게 문의한다",
+    "source_expiring": "Claude 에 넣은 PAT 가 곧 끝난다 — 포털 토큰 화면에서 새로 발급해 Claude 에 넣는다",
+    "too_many_children": ("Claude 에 넣은 PAT 로 바꿔 받은 PAT 가 너무 많다 — 포털 토큰 화면에서 쓰지 않는 hwax-risk PAT 를"
+                          " 폐기한다"),
+    "timeout": "포털이 제때 답하지 않았다 — 잠시 뒤 Claude 에서 다시 부르면 다시 시도한다",
+    "unreachable": "게이트웨이가 포털에 닿지 못했다 — 잠시 뒤 다시 시도한다(계속되면 운영자에게 알린다)",
+    "bad_response": "포털 교환 응답에 토큰이 없었다 — 잠시 뒤 다시 시도한다(계속되면 운영자에게 알린다)",
+}
+AUTO_ERROR_HTTP_5XX = "포털이 HTTP {status} 로 답했다(일시 장애) — 잠시 뒤 다시 시도한다(계속되면 운영자에게 알린다)"
+AUTO_ERROR_HTTP = "포털이 HTTP {status} 로 거절했다 — 웹 리스크 앱 설정 화면의 '포털에서 발급해 등록' 으로 직접 등록한다"
+AUTO_ERROR_GENERIC = ("포털 PAT 를 자동으로 받지 못했다 — 웹 리스크 앱 설정 화면의 '포털에서 발급해 등록' 으로 직접 등록한다(계속되면"
+                      " 운영자에게 알린다)")
+
+
+def auto_error_text(raw_code: Any) -> str:
+    """게이트웨이가 보낸 실패 code → 적을 글 `<code>: <앱이 고른 글>`. code 가 꼴(AUTO_ERROR_CODE)이 아니면 unknown 이다."""
+    code = str(raw_code if raw_code is not None else "").strip()
+    if not AUTO_ERROR_CODE.fullmatch(code):
+        return f"unknown: {AUTO_ERROR_GENERIC}"
+    http = re.fullmatch(r"http_([1-5]\d\d)", code)
+    if http:
+        status = int(http.group(1))
+        return f"{code}: " + (AUTO_ERROR_HTTP_5XX if status >= 500 else AUTO_ERROR_HTTP).format(status=status)
+    return f"{code}: {AUTO_ERROR_TEMPLATES.get(code, AUTO_ERROR_GENERIC)}"
 
 
 def pat_due_reason(row: dict | None, *, now: int | None = None, cfg: Any | None = None) -> str | None:
@@ -331,10 +369,10 @@ def _gateway_portal_pat(email: str, body: Any) -> dict:
     if not store.get_user_prefs(email)["portal_pat_auto"]:
         raise AppError("portal_pat_auto_off", "이 사람은 포털 PAT 자동 등록을 껐습니다 — 등록하지도 적지도 않습니다.", 409)
     if body.get("error") is not None:
-        code = str(body["error"]).strip()[:AUTO_ERROR_CODE_MAX] or "error"
-        message = str(body.get("message") or "").strip()
-        store.note_portal_pat_error(email, f"{code}: {message}" if message else code)
-        log.info("포털 PAT 자동 등록 실패를 적었다 — %s (%s)", email, code)
+        # code 만 받는다 — message 는 읽지 않고 앱이 고른 글을 적는다(포털 거절 글·PAT 조각이 안내문에 박히지 않게).
+        text = auto_error_text(body["error"])
+        store.note_portal_pat_error(email, text)
+        log.info("포털 PAT 자동 등록 실패를 적었다 — %s (%s)", email, text.split(":", 1)[0])
         return {"registered": False, "recorded": True, "email": email}
     pat = body.get("pat")
     if not isinstance(pat, str) or not pat.strip():

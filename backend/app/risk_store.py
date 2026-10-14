@@ -9,6 +9,7 @@ import shutil
 import sqlite3
 import threading
 import time
+import unicodedata
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from pathlib import Path
@@ -841,8 +842,15 @@ _HOUSEKEEPING_DDL: list[str] = [
     "CREATE TABLE IF NOT EXISTS _user_prefs(owner_sub TEXT PRIMARY KEY, portal_pat_auto INTEGER NOT NULL DEFAULT 1, "
     "auto_source TEXT, auto_at INTEGER, auto_error TEXT, auto_error_at INTEGER)",
 ]
-# 자동 등록 실패 글의 상한(자) — 게이트웨이가 보내는 글이라 길이를 그쪽이 정하지 않게 한다.
+# 자동 등록 실패 글의 상한(자) — 이 글은 안내문(pat_unavailable·rr_jobs.error·risk_next_step)에 그대로 박힌다.
 AUTO_ERROR_MAX = 500
+
+
+def plain_note(value: Any, limit: int = AUTO_ERROR_MAX) -> str:
+    """다른 글에 박히는 한 줄 — 제어·서식 문자(Cc·Cf: 줄바꿈·ESC·방향 바꿈 등)를 빈칸으로 바꿔 공백을 하나로 접고 `limit` 자에서
+    자른다. 자동 등록 실패 글을 적는 유일한 자리(`RiskStore.note_portal_pat_error`)가 이것을 지난다."""
+    text = "".join(" " if unicodedata.category(ch) in ("Cc", "Cf") else ch for ch in str(value))
+    return " ".join(text.split())[:limit]
 
 
 class RiskStore:
@@ -1125,10 +1133,11 @@ class RiskStore:
                            (owner_sub, 1, str(source), now, None, None))
 
     def note_portal_pat_error(self, owner_sub: str, error: str, *, at: int | None = None) -> None:
-        """자동 등록 실패 — 글은 AUTO_ERROR_MAX 자에서 자른다. 등록된 PAT·지난 성공 기록은 건드리지 않는다."""
+        """자동 등록 실패 — 글은 제어 문자를 지우고 AUTO_ERROR_MAX 자에서 자른다(plain_note). 글은 앱이 고른 것이어야 한다 —
+        게이트웨이가 보낸 글은 받지 않는다(routes.auto_error_text). 등록된 PAT·지난 성공 기록은 건드리지 않는다."""
         now = int(time.time()) if at is None else int(at)
         self._upsert_prefs(owner_sub, "auto_error = excluded.auto_error, auto_error_at = excluded.auto_error_at",
-                           (owner_sub, 1, None, None, str(error)[:AUTO_ERROR_MAX], now))
+                           (owner_sub, 1, None, None, plain_note(error), now))
 
     def _upsert_prefs(self, owner_sub: str, update_sql: str, values: tuple) -> None:
         with self._lock:
