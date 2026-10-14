@@ -175,7 +175,9 @@ def _load(store: Any, target_key: str, agent_key: str | None) -> dict:
         f" WHERE target_key = ?{extra} ORDER BY agent_key, unit_id", [target_key, *params]) if r["unit_id"] in alive]
     verdicts = [r for r in _rows(store,
         "SELECT unit_id, agent_key, record_id, variant, applies, judgement, quote_ok, refs_ok, check_disagree, is_effective,"
-        f" agree, split FROM rr_card_verdicts WHERE target_key = ?{extra} ORDER BY agent_key, unit_id, record_id, variant",
+        " agree, split, json_type(checks_json, '$.flipped_from') IS NOT NULL AS flipped_row,"
+        " json_type(checks_json, '$.flipped_from.raw') IS NOT NULL AS flipped_raw"
+        f" FROM rr_card_verdicts WHERE target_key = ?{extra} ORDER BY agent_key, unit_id, record_id, variant",
         [target_key, *params]) if r["unit_id"] in alive]
     calls = [r for r in _rows(store,
         "SELECT call_id, agent_key, unit_id, kind, variant, state, duration_ms, queued_ms, output_truncated, soft_over,"
@@ -461,7 +463,11 @@ def _flips(data: Mapping[str, Any], effective: Sequence[Mapping[str, Any]], poli
         "engine_conflict": {"dup_conflict": sum(int(c["dup_conflict"] or 0) for c in data["calls"] if c["state"] == "ok"),
                             "flipped": sum(int(c["flipped"] or 0) for c in data["calls"] if c["state"] == "ok"),
                             "calls": sum(1 for c in data["calls"] if c["state"] == "ok"
-                                         and (int(c["dup_conflict"] or 0) or int(c["flipped"] or 0)))},
+                                         and (int(c["dup_conflict"] or 0) or int(c["flipped"] or 0))),
+                            # 판정 행의 flipped_from 을 둘로 가른다 — 모델이 어휘 밖 값을 써 엔진이 고친 것(raw 가 있다)과
+                            # 판정을 바꾼 것(raw 가 없다). 둘 다 두 번째 판정을 받는다(D-42) — 이 셈은 보이기만 한다.
+                            "coerced": sum(1 for v in data["verdicts"] if v["flipped_row"] and v["flipped_raw"]),
+                            "explicit": sum(1 for v in data["verdicts"] if v["flipped_row"] and not v["flipped_raw"])},
     }
 
 
@@ -773,8 +779,9 @@ def render_text(result: Mapping[str, Any]) -> str:
         f" · 보류 {_n(dis['hold'])}) · 바탕이 보류 {_n(flips['solo_base_hold'])} · 단독뿐 {_n(flips['solo_only'])}"
         f" · 변형 갈림(보류로 둠) {fmt_rate(flips['split'])}"
         f" · 엔진이 알린 부딪침 {_n(flips['engine_conflict']['dup_conflict'])}줄"
-        f" · 보충이 갈아 낀 줄 {_n(flips['engine_conflict']['flipped'])}(엔진이 스스로 고친 값을 바로잡은 것도 든다 — 판정 변화의"
-        " 수가 아니다, 그 카드는 두 번째 판정을 받았다)")
+        f" · 보충이 갈아 낀 줄 {_n(flips['engine_conflict']['flipped'])}(판정 행 가운데 어휘 밖 값을 고친 것"
+        f" {_n(flips['engine_conflict']['coerced'])} · 판정을 바꾼 것 {_n(flips['engine_conflict']['explicit'])} — 판정 변화의 수가"
+        " 아니다, 그 카드는 두 번째 판정을 받았다)")
     kinds = " · ".join(f"{label} {_fmt_secs(stat)}" for label, stat in secs["kinds"].items())
     waits = " · ".join(f"{label} {_n(n)}" for label, n in secs["waits"].items() if label != "total")
     lines.append(

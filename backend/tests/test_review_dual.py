@@ -185,8 +185,22 @@ def test_an_engine_conflict_on_a_clear_row_is_treated_as_flagged(store, conflict
     assert _runs(fake, MECH1, "solo") == []
     # 품질 수치와 보고서의 품질 절이 엔진이 알린 부딪침을 센다
     quality = review_quality.compute(store, key, agent_key=MECH2)
-    assert quality["flips"]["engine_conflict"] == {"dup_conflict": len(conflicted), "flipped": 0, "calls": 1}
+    assert quality["flips"]["engine_conflict"] == {"dup_conflict": len(conflicted), "flipped": 0, "calls": 1, "coerced": 0,
+                                                   "explicit": 0}
     assert f"엔진이 알린 부딪침 {len(conflicted)}줄" in review_quality.block(store, key, agent_key=MECH2)["text"]
+
+
+def test_a_flipped_row_gets_a_second_judgement_and_quality_splits_coerced_from_explicit(store):
+    """D-42 E — 보충이 갈아 낀 행(flipped_from 이 걸림 아닌 값으로 끝남)은 raw 가 있든 없든 두 번째 판정을 받는다. raw 는 품질 셈만
+    가른다 — 어휘 밖 값을 엔진이 고친 것(coerced)과 판정을 바꾼 것(explicit)."""
+    fake = FakeReviewEngine(_packs())
+    fake.flipped = {"K02": {"verdict": "FAIL", "attempt": 1}, "K03": {"verdict": "FAIL", "attempt": 1, "raw": "Fail"}}
+    key, _unit = _run(store, fake, agents=[MECH2])
+    revs = [[c["alias"] for c in b["cards"]] for b in _runs(fake, MECH2, "rev")]
+    assert revs == [["K02", "K03"]]
+    quality = review_quality.compute(store, key, agent_key=MECH2)
+    assert {k: quality["flips"]["engine_conflict"][k] for k in ("coerced", "explicit")} == {"coerced": 1, "explicit": 1}
+    assert "어휘 밖 값을 고친 것 1 · 판정을 바꾼 것 1" in review_quality.block(store, key, agent_key=MECH2)["text"]
 
 
 def test_inputs_the_engine_clipped_are_counted_in_quality(store):

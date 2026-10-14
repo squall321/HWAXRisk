@@ -68,6 +68,8 @@
                    부딪친 줄을 남겼다는 표지 — RB3-1, 엔진 216650e. 앱은 걸린 것처럼 두 번째 판정을 준다 — 재설계 M3 C3-9)
   contested        별칭 → contested_by{verdict, cq, quote, why, attempt} — 그 fwd 판정 행에 검증된 철회의 다툼을 싣고 dup_conflict 를
                    단다(엔진 RB3-1 — 예제 result_verdict_contested 의 모양, 걸림은 선다)
+  flipped          별칭 → flipped_from{verdict, attempt, raw?} — 그 fwd 판정 행에 보충이 갈아 낀 표지를 단다(raw 가 있으면 어휘 밖
+                   값을 엔진이 고친 것 — 예제 result_verdict_flipped 의 모양, D-42)
   clipped          meta.clipped 로 낼 값 — 엔진이 몫에서 끊은 입력 {<입력>: {orig_chars, kept_chars}}(RB3-11, 기본 {})
   no_refs          이 별칭들의 판정 행에 변경 줄을 싣지 않는다(l·refs 빈 목록 · checks.refs missing — 참조 통과율의 분모, S11)
 기록 — requests(받은 요청 전부), runs(받은 run 수), max_active(동시에 돈 run 의 최댓값).
@@ -290,6 +292,7 @@ class FakeReviewEngine:
         self.dup_conflict: set[Any] = set()
         self.clipped: dict[str, Any] = {}
         self.contested: dict[str, dict[str, Any]] = {}
+        self.flipped: dict[str, dict[str, Any]] = {}
         # 기록
         self.requests: list[dict[str, Any]] = []
         self.runs = 0
@@ -536,6 +539,8 @@ class FakeReviewEngine:
             for row in main:
                 if variant == "fwd" and (row["k"] in self.dup_conflict or (agent, row["k"]) in self.dup_conflict):
                     row["checks"]["dup_conflict"] = True
+                if variant == "fwd" and row["k"] in self.flipped:
+                    row["flipped_from"] = copy.deepcopy(self.flipped[row["k"]])
                 if variant == "fwd" and row["k"] in self.contested:
                     row["contested_by"] = copy.deepcopy(self.contested[row["k"]])
                     row["checks"]["dup_conflict"] = True
