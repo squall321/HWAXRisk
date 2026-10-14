@@ -68,6 +68,9 @@
                    부딪친 줄을 남겼다는 표지 — RB3-1, 엔진 216650e. 앱은 걸린 것처럼 두 번째 판정을 준다 — 재설계 M3 C3-9)
   contested        별칭 → contested_by{verdict, cq, quote, why, attempt} — 그 fwd 판정 행에 검증된 철회의 다툼을 싣고 dup_conflict 를
                    단다(엔진 RB3-1 — 예제 result_verdict_contested 의 모양, 걸림은 선다)
+  inject           주면 모델이 쓰는 글 칸(why · title · mech_free · path · check · item · needs — 비지 않은 것)의 끝에 이 글을 덧붙인다
+                   (2차 주입 대본 — WP5b C12 ⑤ · 재설계 M3 C3-13. 훑기 u · h 줄, 판정 v 줄, 카드 밖 f · h 줄, 입력 결손 q1 · q2 줄)
+  inject_kinds     inject 를 이 종류(sweep · verdict · offcard · noinput)의 답에만 건다(None 이면 전부)
   search_states    카드 밖 호출이 extra.search 를 실었을 때 차례로 낼 meta.search.state(ok · empty_scope · no_hits · failed — 다 쓰면
                    마지막 것을 되풀이, 비면 meta.search 를 싣지 않는다 — M2 엔진처럼). ok 면 발췌 하나(D01)를 실은 것으로 적는다
                    (예제 result_offcard_search_* 의 모양, cr-offcard-2)
@@ -230,6 +233,10 @@ def quote_of(card: Mapping[str, Any]) -> tuple[str, str]:
     return "", ""
 
 
+# 2차 주입 대본(inject)이 덧붙는 모델 글 칸 — 엔진 행의 자유 글 칸 전부다(코드 · 별칭 · 참조 칸은 뺀다).
+INJECT_FIELDS: tuple[str, ...] = ("why", "title", "mech_free", "path", "check", "item", "needs")
+
+
 class FakeReviewEngine:
     """가짜 엔진 + 포털 중계. `transport` 를 PortalReviewEngine 에 꽂는다. 받은 요청은 `requests` 에 남는다."""
 
@@ -297,6 +304,8 @@ class FakeReviewEngine:
         self.contested: dict[str, dict[str, Any]] = {}
         self.flipped: dict[str, dict[str, Any]] = {}
         self.search_states: list[str] = []
+        self.inject = ""
+        self.inject_kinds: set[str] | None = None
         # 기록
         self.requests: list[dict[str, Any]] = []
         self.runs = 0
@@ -638,6 +647,11 @@ class FakeReviewEngine:
                        flipped=sum(1 for r in rows if r.get("flipped_from")))
         if self.queued_ms is not None:
             meta["queued_ms"] = int(self.queued_ms)
+        if self.inject and (self.inject_kinds is None or kind in self.inject_kinds):
+            for row in rows:
+                for field in INJECT_FIELDS:
+                    if isinstance(row.get(field), str) and row[field]:
+                        row[field] = f"{row[field]} {self.inject}"
         search = (body.get("extra") or {}).get("search")
         if kind == "offcard" and isinstance(search, Mapping) and self.search_states:
             with self._lock:

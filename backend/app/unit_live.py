@@ -27,10 +27,10 @@ import gzip
 import json
 import logging
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any
 
-from app import config, field_source, render, units
+from app import brief, config, field_source, render, units
 from app.common import canonical_json, now_epoch, sha256_hex
 
 log = logging.getLogger("hwax_risk.unit_live")
@@ -227,14 +227,17 @@ def schema_gap(tool: str, args: Mapping[str, Any], schemas: Mapping[str, Mapping
 
 
 # ---------------------------------------------------------------- 응답 → 줄
-def render_lines(tool: str, args: Mapping[str, Any], result: Any, *, pids: Sequence[str] | None = None) -> list[str]:
-    """응답 하나 → 줄 글들. 머리 한 줄(도구와 인자) 뒤에 행마다 한 줄 — 수치 · id 칸은 그대로, 문자열은 «위생 통과본»(자르지 않는다).
-    `compare_reports` 는 그 단위 부품의 pid 행만 싣는다(pid 가 없는 행은 싣는다 — 단위에 pid 가 하나도 없으면 전부)."""
-    head = f"{tool}(" + ", ".join(f"{k}={_value(v)}" for k, v in sorted(args.items())) + ")"
-    rows = _rows(result)
+def render_lines(tool: str, args: Mapping[str, Any], result: Any, *, pids: Sequence[str] | None = None,
+                 on_suspect: Callable[[dict], None] | None = None) -> list[str]:
+    """응답 하나 → 줄 글들. 머리 한 줄(도구와 인자) 뒤에 행마다 한 줄 — 수치 · id 칸은 그대로, 문자열은 «위생 통과본»(자르지 않는다 —
+    주입 어휘는 자리표시자이고 `on_suspect` 가 걸린 원문을 받는다). `compare_reports` 는 그 단위 부품의 pid 행만 싣는다(pid 가 없는
+    행은 싣는다 — 단위에 pid 가 하나도 없으면 전부)."""
+    note = on_suspect
+    head = f"{tool}(" + ", ".join(f"{k}={_value(v, note)}" for k, v in sorted(args.items())) + ")"
+    rows = _rows(result, note)
     if rows is None:
         text = result if isinstance(result, str) else canonical_json(result)
-        return [head] + [_q(line) for line in str(text).splitlines() if line.strip()]
+        return [head] + [_q(line, note) for line in str(text).splitlines() if line.strip()]
     keep = set(pids or ())
     lines = [head]
     for label, row in rows:
@@ -242,13 +245,13 @@ def render_lines(tool: str, args: Mapping[str, Any], result: Any, *, pids: Seque
             pid = row.get("part_id", row.get("pid"))
             if pid is not None and str(pid) not in keep:
                 continue
-        body = _flat(row)
+        body = _flat(row, note=note)
         if body:
             lines.append(f"{label}: {body}" if label else body)
     return lines
 
 
-def _rows(result: Any) -> list[tuple[str, Any]] | None:
+def _rows(result: Any, note: Callable[[dict], None] | None = None) -> list[tuple[str, Any]] | None:
     """행 목록 — 목록이면 항목마다, 객체면 목록 칸의 항목마다(칸 이름이 머리) + 나머지 칸 한 줄. 그 밖(글 · 수)은 None."""
     if isinstance(result, list):
         return [("", item) for item in result]
@@ -259,9 +262,9 @@ def _rows(result: Any) -> list[tuple[str, Any]] | None:
     for key in sorted(result):
         value = result[key]
         if isinstance(value, list) and any(isinstance(v, Mapping) for v in value):
-            rows += [(_safe_key(key), item) for item in value]
+            rows += [(_safe_key(key, note), item) for item in value]
         elif isinstance(value, Mapping) and value and all(isinstance(v, Mapping) for v in value.values()):
-            rows += [(f"{_safe_key(key)}.{_safe_key(k)}", value[k]) for k in sorted(value)]
+            rows += [(f"{_safe_key(key, note)}.{_safe_key(k, note)}", value[k]) for k in sorted(value)]
         else:
             scalars[key] = value
     if scalars:
@@ -269,44 +272,45 @@ def _rows(result: Any) -> list[tuple[str, Any]] | None:
     return rows
 
 
-def _flat(value: Any, prefix: str = "") -> str:
+def _flat(value: Any, prefix: str = "", *, note: Callable[[dict], None] | None = None) -> str:
     """객체 하나 → `칸=값` 을 ' · ' 로. 수 · 참거짓은 그대로, id 칸과 문자열은 «» 안, 빈 값은 뺀다."""
     if not isinstance(value, Mapping):
-        return _value(value)
+        return _value(value, note)
     parts: list[str] = []
     for key in sorted(value):
         item = value[key]
-        name = f"{prefix}{_safe_key(key)}"
+        name = f"{prefix}{_safe_key(key, note)}"
         if isinstance(item, Mapping):
-            inner = _flat(item, f"{name}.")
+            inner = _flat(item, f"{name}.", note=note)
             if inner:
                 parts.append(inner)
         elif item is None or item == "" or item == []:
             continue
         else:
-            parts.append(f"{name}={_value(item)}")
+            parts.append(f"{name}={_value(item, note)}")
     return " · ".join(parts)
 
 
-def _value(value: Any) -> str:
+def _value(value: Any, note: Callable[[dict], None] | None = None) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, (int, float)):
         return repr(value) if isinstance(value, float) else str(value)
     if isinstance(value, list):
-        return "[" + ", ".join(_value(v) for v in value) + "]"
+        return "[" + ", ".join(_value(v, note) for v in value) + "]"
     if isinstance(value, Mapping):
-        return "{" + _flat(value) + "}"
-    return _q(value)
+        return "{" + _flat(value, note=note) + "}"
+    return _q(value, note)
 
 
-def _safe_key(key: Any) -> str:
+def _safe_key(key: Any, note: Callable[[dict], None] | None = None) -> str:
     text = str(key)
-    return text if text.replace("_", "").replace("-", "").isalnum() and text.isascii() and len(text) <= 40 else _q(text)
+    return (text if text.replace("_", "").replace("-", "").isalnum() and text.isascii() and len(text) <= 40
+            else _q(text, note))
 
 
-def _q(text: Any) -> str:
-    return render.sanitize_source_text(text, "label", limit=0)
+def _q(text: Any, note: Callable[[dict], None] | None = None) -> str:
+    return render.sanitize_source_text(text, "label", limit=0, on_suspect=note)
 
 
 # ---------------------------------------------------------------- 얼리기
@@ -433,17 +437,30 @@ def _settle(store: Any, target_key: str, unit_id: str, plan: Mapping[str, Any], 
         return
     lines: list[dict] = []
     gaps: list[dict] = []
+    suspects: dict[str, dict] = {}
+
+    def note(payload: Mapping[str, Any]) -> None:
+        suspects.setdefault(str(payload.get("sha1")), dict(payload))
+
     for key, entry in zip(keys, entries):
         got = outcomes.get(key) or {}
         if entry["state"] == "ok":
             pids = plan["pids"].get(unit_id) if entry["tool"] == "compare_reports" else None
-            text = " / ".join(render_lines(entry["tool"], entry["args"], got.get("result"), pids=pids))
+            text = " / ".join(render_lines(entry["tool"], entry["args"], got.get("result"), pids=pids, on_suspect=note))
             lines.append({"ref": f"tool:{entry['call_id']}", "text": text})
         else:
             gaps.append({"tool": entry["tool"], "code": entry["code"] or INFRA_EXHAUSTED, "note": got.get("note") or ""})
     status = "partial" if gaps else "ok"
-    _freeze(store, target_key, unit_id, status, out, now=now, entries=entries, lines=lines, gaps=gaps, email=email,
-            attempts=attempts + int(bool(infra)))
+    if _freeze(store, target_key, unit_id, status, out, now=now, entries=entries, lines=lines, gaps=gaps, email=email,
+               attempts=attempts + int(bool(infra))) and suspects:
+        # 응답에 든 주입 어휘(자리표시자로 실린 원문)는 큐레이션 큐로 — 단위 빌드의 suspects 와 같은 큐 · 같은 규칙(열린 같은 sha1 은 한 번)
+        owner = store.query_one("SELECT owner_sub FROM rr_targets WHERE target_key = ?", (target_key,))
+        brief.begin_suspect_queue(store, owner["owner_sub"] if owner is not None else None)
+        try:
+            for payload in suspects.values():
+                brief._on_suspect(payload)
+        finally:
+            brief.end_suspect_queue()
 
 
 def _freeze(store: Any, target_key: str, unit_id: str, status: str, out: dict, *, now: int,
