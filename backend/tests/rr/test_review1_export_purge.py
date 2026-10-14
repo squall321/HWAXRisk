@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from app import config, export, routes, runner, synth
+from app import closure, config, export, issues, routes, runner, synth
 from app.risk_store import RiskStore
 from tests import factories
 from tests.synth import fake_review_engine as fre
@@ -118,3 +118,32 @@ def test_a_purge_blanks_the_registry_and_the_panels_raw_engine_result(risk_store
     assert risk_store.query_one("SELECT COUNT(*) AS n FROM rr_panels WHERE target_key = ? AND result_hash IS NOT NULL",
                                 (key,))["n"] > 0
 
+
+def test_an_import_keeps_a_revoked_ack_and_a_persons_issue_decision(risk_store, chained, tmp_path):
+    """L4 — 사람의 확인 취소(rr_close_acks.revoked_*)와 쟁점 결정(rr_issues.status_source='human' · decided_by · 사유)은 사람의 확정이다
+    — 같은 행을 그 전 모양으로 가진 박스에 들여오면 그 결정이 이긴다(종전에는 둘 다 자동 행으로 읽혀 건너뛰었다)."""
+    key = chained
+    result = closure.refresh(risk_store, key)
+    item = next(q for q in result["qualifiers"] if q["blocking"])
+    closure.ack_residual(risk_store, key, item["item"], reason="넘긴다", by=OWNER, basis_hash=item["basis_hash"])
+    untried = next(r for r in issues.issue_rows(risk_store, key) if r["state"] in ("untried_cap", "queued", "resolved"))
+    before_text = "".join(export.iter_lines(risk_store, OWNER, 0))       # 결정 전의 반출 — 받는 박스의 원장
+    dest = RiskStore(tmp_path / "dest.db")
+    dest.open()
+    dest.migrate()
+    try:
+        export.import_jsonl(dest, OWNER, before_text)
+        closure.revoke_ack(risk_store, key, item["item"], by=OWNER)
+        with factories.routes_store(risk_store):
+            routes.put_issue(untried["issue_id"], routes.IssueActionBody(action="skip", reason="이번 판에서는 넘긴다"),
+                             ident=factories.ident(OWNER))
+        out = export.import_jsonl(dest, OWNER, "".join(export.iter_lines(risk_store, OWNER, 0)))
+        ack = dest.query_one("SELECT revoked_by, revoked_at FROM rr_close_acks WHERE target_key = ? AND item = ?",
+                             (key, item["item"]))
+        assert (ack["revoked_by"], ack["revoked_at"] is not None) == (OWNER, True), out
+        issue = dest.query_one("SELECT state, status_source, decided_by, reason FROM rr_issues WHERE issue_id = ?",
+                               (untried["issue_id"],))
+        assert dict(issue) == {"state": "skipped", "status_source": "human", "decided_by": OWNER,
+                               "reason": "이번 판에서는 넘긴다"}
+    finally:
+        dest.close()

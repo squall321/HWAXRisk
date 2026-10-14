@@ -340,6 +340,12 @@ def _human_rank(table: str, row: dict) -> int:
         return 1 if row.get("status") in ("verified", "dismissed", "mitigated") else 0
     if table == "rr_curation_queue":
         return 1 if row.get("status") in ("done", "rejected") else 0
+    # 재설계 M3(review1 L4) — 완결 잔여 확인의 취소(확인 행은 시각이 키라 새 확인은 새 행이다 — 취소만 같은 행을 고친다)와 사람의
+    # 쟁점 결정(올리기 · 건너뛰기).
+    if table == "rr_close_acks":
+        return 1 if row.get("revoked_at") is not None else 0
+    if table == "rr_issues":
+        return 1 if row.get("status_source") == "human" else 0
     return 0
 
 
