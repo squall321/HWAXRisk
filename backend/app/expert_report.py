@@ -763,17 +763,25 @@ def _conflict_marks(checks: Sequence[Mapping[str, Any]]) -> dict:
     """엔진이 알린 부딪침을 그 카드의 변형 전부(fwd 먼저)에서 모은다 — 실효가 단독 재질의여도 fwd 의 다툼이 사라지지 않게."""
     contested = next((c.get("contested_by") for c in checks if isinstance(c.get("contested_by"), Mapping)), None)
     flipped = next((c.get("flipped_from") for c in checks if isinstance(c.get("flipped_from"), Mapping)), None)
+    aliases = list(dict.fromkeys(str(a) for c in checks for a in (c.get("alias") or ()) if isinstance(c.get("alias"), list)))
     return {"contested": _contested(contested), "dup_conflict": any(c.get("dup_conflict") is True for c in checks),
-            "flipped_from": dict(flipped) if flipped is not None else None}
+            "flipped_from": dict(flipped) if flipped is not None else None, "alias_words": aliases}
 
 
 def _contested(value: Any) -> dict | None:
-    """철회 다툼(contested_by) — 판정 · 이유 · 시도(카드 인용은 200자로 줄인다)."""
+    """다툼(contested_by) — 판정 · 이유 · 시도(카드 인용은 200자로 줄인다) · 모델이 쓴 낱말(raw — 엔진이 어휘 밖 값을 고쳤다) ·
+    입력 결손 q1 의 경로와 줄(path · l, 엔진 c4e4823). 없는 칸은 싣지 않는다(종전 보고서 바이트가 그대로다)."""
     if not isinstance(value, Mapping):
         return None
     cq, cq_chars = _clip_quote(value.get("cq"))
-    return {"verdict": list(value.get("verdict") or ()), "why": _s(value.get("why")) or None, "cq": cq or None,
-            "cq_chars": cq_chars, "quote": value.get("quote"), "attempt": value.get("attempt")}
+    out = {"verdict": list(value.get("verdict") or ()), "why": _s(value.get("why")) or None, "cq": cq or None,
+           "cq_chars": cq_chars, "quote": value.get("quote"), "attempt": value.get("attempt")}
+    for key in ("raw", "path"):
+        if _s(value.get(key)):
+            out[key] = _s(value.get(key))
+    if value.get("l"):
+        out["l"] = [str(x) for x in value.get("l") or ()]
+    return out
 
 
 def _card_head(card: Mapping[str, Any]) -> dict:
@@ -969,6 +977,8 @@ def _input_gap_section(ledger: Ledger, finding_of: Mapping[tuple[str, str], str]
                 "record_id": record_id or None, "cq": cq or None, "cq_chars": cq_chars,
                 "quote_ref": (f"card:{record_id}#{section}" if section else f"card:{record_id}") if record_id else None,
                 "quote_ok": row.get("quote_ok"),
+                "contested": _contested(((row.get("checks") or {}) if isinstance(row.get("checks"), Mapping) else {})
+                                        .get("contested_by")),
                 "finding_id": finding_of.get((unit["unit_id"], f"noinput:{index}"))})
         asks = [{"item": row.get("item"), "needs": row.get("needs"), "why": row.get("why"),
                  "record_id": row.get("record_id"), "lines": list(row.get("l") or ())} for row in got["q2"]]
@@ -1631,13 +1641,20 @@ def _row_marks(row: Mapping[str, Any], card: Mapping[str, Any] | None) -> list[s
         marks.append(f"엔진 보충 {_q(row['revised_from'])}")
     contested = row.get("contested")
     if contested:
-        marks.append("검증된 철회가 이 걸림을 다퉜다(걸림은 선다) — " + "·".join(_q(v) for v in contested["verdict"])
-                     + (f" {_q(contested['why'])}" if contested.get("why") else ""))
+        # 걸린 행이면 검증된 철회가 다툰 것(걸림은 선다), 걸리지 않은 행이면 같은 카드의 다른 판정(고친 값 따위)과 부딪친 것이다
+        head = ("검증된 철회가 이 걸림을 다퉜다(걸림은 선다)" if row.get("judgement") in review_verify.FLAGGED
+                else "같은 카드의 다른 판정이 이 행과 부딪쳤다(이 행이 선다)")
+        marks.append(f"{head} — " + "·".join(_q(v) for v in contested["verdict"])
+                     + (f" {_q(contested['why'])}" if contested.get("why") else "")
+                     + (f" · 모델이 쓴 낱말 {_q(contested['raw'])}" if contested.get("raw") else ""))
     elif row.get("dup_conflict"):
         marks.append("엔진이 같은 카드의 다른 판정과 부딪쳤다고 알렸다")
     flipped = row.get("flipped_from")
     if flipped:
-        marks.append("엔진 보충이 앞 판정 " + "·".join(_q(v) for v in flipped.get("verdict") or ()) + " 을 갈아 끼웠다")
+        marks.append("엔진 보충이 앞 판정 " + "·".join(_q(v) for v in flipped.get("verdict") or ()) + " 을 갈아 끼웠다"
+                     + (f"(앞 판정은 어휘 밖 낱말 {_q(flipped['raw'])} 을 고친 값)" if _s(flipped.get("raw")) else ""))
+    if row.get("alias_words"):
+        marks.append("엔진이 별칭표로 읽은 낱말 " + " · ".join(_q(w) for w in row["alias_words"]))
     return marks
 
 
@@ -1853,6 +1870,11 @@ def _md_input_gap(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
                 lines.append("  - " + (_quote_line("카드 인용", x["quote_ref"], x["cq"], x["cq_chars"], x["quote_ok"], word="cq")
                                        if x.get("record_id") else "근거 경험칙 — 카드 근거 없음"))
                 lines.append(f"  - 변경 줄 {_refs(x['lines'], x['refs']) or '없음'} — {_refs_mark(x['refs'], x.get('refs_ok'))}")
+            if x.get("contested"):
+                c = x["contested"]
+                lines.append("  - 검증된 철회가 이 영향을 다퉜다(영향은 선다) — " + "·".join(_q(v) for v in c["verdict"])
+                             + (f" {_q(c['why'])}" if c.get("why") else "")
+                             + (f" · 경로 {_q(c['path'])}" if c.get("path") else ""))
         for r in u["requests"]:
             lines.append(f"- 입력이 오면 확인할 것 {_q(r['item'])} — 필요한 자료 {_q(r.get('needs') or '')}"
                          if r.get("item") else f"- 입력이 와도 확인할 것 없음 — {_q(r.get('why') or '')}")

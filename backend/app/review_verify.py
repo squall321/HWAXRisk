@@ -414,6 +414,9 @@ def _accept_noinput(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping
             _drop(dropped, "foreign_ref", raw)
             continue
         checks = raw.get("checks") if isinstance(raw.get("checks"), Mapping) else {}
+        if isinstance(raw.get("contested_by"), Mapping):
+            # 검증된 철회가 그 q1 을 다퉜다(엔진 RB3-1 — 영향 있음은 선다). 판정 행처럼 checks 사본에 남긴다(보고서가 싣는다).
+            checks = {**checks, "contested_by": raw["contested_by"]}
         card = cards.get(alias) if alias else None
         base = {"t": t, "k": alias or None, "record_id": str(card["record_id"]) if card is not None else None,
                 "l": as_list(raw.get("l")), "refs": refs, "why": _text(raw.get("why")) or None, "checks": dict(checks)}

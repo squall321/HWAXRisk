@@ -223,3 +223,26 @@ def test_a_short_or_cut_answer_is_a_content_failure_charged_to_the_cell(store, m
     repaired = _cell(store, key, third, MEM1)
     assert (repaired["state"], repaired["charged"], repaired["truncated"]) == ("reviewed", 0, 0)
     assert review_cells.review_invariants(store, key) == []
+
+
+def test_a_contested_impact_stands_and_the_report_names_the_retraction_and_its_path(store):
+    """검증된 철회가 입력 결손 q1(영향 있음)을 다퉜다(엔진 RB3-1 — result_noinput_contested 의 모양, contested_by 에 path · l): 영향은
+    서고(셀 impact · finding), 보고서 입력 결손 절에 철회의 판정 · 이유 · 경로가 «» 안에 실린다."""
+    key = rig.target(store, ROSTER)
+    first = _units(store, key)[0]["unit_id"]
+    job_id = rig.job(store, key, scope={"agents": [MEM1], "unit_ids": [first]})
+    fake = FakeReviewEngine(_packs(ROSTER))
+    fake.noinput_q1 = {first: ["yes"]}
+    fake.contested = {"K01": {"verdict": ["no"], "cq": "철회가 댄 카드 문장", "quote": "ok",
+                              "why": "결측 입력이 없어도 이 카드의 조건은 이 변경과 겹치지 않는다", "attempt": 2,
+                              "path": "보드 고정점 → 근접 계면", "l": ["L01"]}}
+    rig.Rig(store, fake).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    cell = _cell(store, key, first, MEM1)
+    assert json.loads(cell["extras_json"])["noinput"]["outcome"] == "impact"
+    report = expert_report.load_report(store, key, MEM1)
+    impact = report["input_gap"]["units"][0]["impacts"][0]
+    assert impact["contested"]["path"] == "보드 고정점 → 근접 계면" and impact["contested"]["l"] == ["L01"]
+    text = expert_report.render_report_md(report, part="units")
+    assert ("검증된 철회가 이 영향을 다퉜다(영향은 선다) — «no» «결측 입력이 없어도 이 카드의 조건은 이 변경과 겹치지 않는다»"
+            " · 경로 «보드 고정점 → 근접 계면»") in text

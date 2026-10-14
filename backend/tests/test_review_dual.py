@@ -237,3 +237,29 @@ def test_a_contested_hit_stands_and_the_report_says_who_contested_it(store):
     assert "검증된 철회가 이 걸림을 다퉜다(걸림은 선다) — «yes»·«OK» «카드의 조건과 변경 줄을 맞대어 보니 한계 안이다»" in text
     assert [c["alias"] for b in _runs(fake, MECH2, "solo") for c in b["cards"]] == ["K02"]
 
+
+
+def test_a_coerced_clash_an_alias_word_and_a_raw_flip_are_named_in_the_checklist(store):
+    """엔진 마지막 예제(c4e4823)의 표지 — ① 고친 값과 부딪친 다툼(걸리지 않은 행의 contested_by · raw)은 '같은 카드의 다른 판정이 이 행과
+    부딪쳤다(이 행이 선다)' 와 모델이 쓴 낱말로(걸린 행의 '검증된 철회' 문구가 아니다), 두 번째 판정을 받는다(dup_conflict). ② 별칭표로
+    읽은 낱말(checks.alias)은 그 낱말로. ③ 앞 판정이 어휘 밖 낱말을 고친 값이던 보충(flipped_from.raw)은 그 낱말로 적는다."""
+    from app import expert_report
+
+    fake = FakeReviewEngine(_packs())
+    fake.verdicts = {_record("K03"): ("yes", "FAIL")}
+    fake.contested = {"K02": {"verdict": ["yes", "undetermined"], "cq": "철회가 댄 카드 문장", "quote": "ok",
+                              "why": "카드의 조건과 변경 줄을 맞대어 보니 한계 안이다", "attempt": 1, "raw": "보류중"}}
+    fake.alias_words = {"K03": ["judgement:FAILED"]}
+    fake.flipped = {"K03": {"verdict": ["yes", "OK"], "attempt": 1, "raw": "통과됨"}}
+    key, unit_id = _run(store, fake, agents=[MECH2])
+    report = expert_report.load_report(store, key, MECH2)
+    rows = {c["alias"]: next(r for r in c["rows"] if r["unit_id"] == unit_id) for c in report["checklist"]}
+    assert (rows["K02"]["judgement"], rows["K02"]["contested"]["raw"], rows["K03"]["alias_words"]) == (
+        "OK", "보류중", ["judgement:FAILED"])
+    text = expert_report.render_report_md(report, part="cards")
+    assert ("같은 카드의 다른 판정이 이 행과 부딪쳤다(이 행이 선다) — «yes»·«undetermined» «카드의 조건과 변경 줄을 맞대어 보니 한계"
+            " 안이다» · 모델이 쓴 낱말 «보류중»") in text
+    assert "엔진이 별칭표로 읽은 낱말 «judgement:FAILED»" in text
+    assert "엔진 보충이 앞 판정 «yes»·«OK» 을 갈아 끼웠다(앞 판정은 어휘 밖 낱말 «통과됨» 을 고친 값)" in text
+    assert "K02" in [c["alias"] for b in _runs(fake, MECH2, "solo") for c in b["cards"]] + [
+        c["alias"] for b in _runs(fake, MECH2, "rev") for c in b["cards"]]                    # 부딪친 행은 두 번째 판정
