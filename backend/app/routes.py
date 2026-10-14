@@ -14,7 +14,7 @@ import time
 from typing import Any, Literal
 
 import httpx
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi.responses import StreamingResponse
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, model_validator
@@ -41,6 +41,8 @@ log = logging.getLogger("hwax_risk.routes")
 
 PORTAL_TIMEOUT_S = 3.0
 PAT_MIN_REMAINING_S = 86400
+# 갈아 끼운 앞선 PAT 를 포털에서 폐기하는 호출의 한도 — 최선 노력이고 응답을 보낸 뒤에 돈다.
+PAT_REVOKE_TIMEOUT_S = 2.0
 # 테스트가 httpx.MockTransport 를 꽂는 자리. None 이면 실제 네트워크.
 _portal_transport: httpx.BaseTransport | None = None
 
@@ -253,12 +255,17 @@ def _decode_jwt_payload(pat: str) -> dict:
     return payload
 
 
-def _register_portal_pat(store: Any, owner_sub: str, pat: str, *, source: str, read_only: bool = False) -> dict:
+def _register_portal_pat(store: Any, owner_sub: str, pat: str, *, source: str, read_only: bool = False,
+                         background: BackgroundTasks | None = None) -> dict:
     """포털 PAT 등록 — PUT /api/me/portal-pat 와 POST /api/auth/portal-pat 가 같은 검사를 지난다.
 
     순서 — email(= owner_sub) → aud/scope → exp(≥ PAT_MIN_REMAINING_S) → (read_only 면 scopes ['read'] 를 설정과 무관하게) →
     포털 실호출 → scopes·jti·Fernet(identity.credential_record). 성공하면 _user_prefs 에 출처·시각을 적는다. PAT 원문은 돌려주지
     않고 로그에도 싣지 않는다.
+
+    새것을 받아들인 **뒤에** 갈아 끼운 앞선 PAT 를 포털에서 폐기한다(`_superseded_pat` — 풀리고, jti 가 다르고, pat_name 이
+    hwax-risk 인 것만). 포털 교환은 같은 이름의 형제를 더는 폐기하지 않는다 — 앱이 새것을 거절하면 쓰던 자격까지 잃었다(SEC-1).
+    `background` 가 있으면 응답을 보낸 뒤에, 없으면 그 자리에서 부른다. 실패해도 등록은 그대로다.
     """
     claims = _decode_jwt_payload(pat)
     email = str(claims.get("email") or "").strip().lower()
@@ -282,13 +289,50 @@ def _register_portal_pat(store: Any, owner_sub: str, pat: str, *, source: str, r
     groups = claims.get("groups") if isinstance(claims.get("groups"), list) else []
     # 저장은 Fernet 암호문이다(plan §8.2.7) — scopes 검사·jti 추출·암호화를 identity 가 한 곳에서 한다.
     rec = identity.credential_record(claims, pat)
+    superseded = _superseded_pat(store.get_credential(owner_sub), rec["pat_jti"])
     store.upsert_credential(
         owner_sub, rec["portal_pat_enc"].decode("ascii"), claims.get("sub"), email,
         json.dumps(groups, ensure_ascii=False), int(exp),
         pat_scopes_json=rec["pat_scopes_json"], pat_jti=rec["pat_jti"])
     store.note_portal_pat_registered(owner_sub, source)
+    if superseded is not None:
+        if background is not None:
+            background.add_task(_revoke_superseded_pat, *superseded)
+        else:
+            _revoke_superseded_pat(*superseded)
     return {"registered": True, "email": email, "groups": groups, "exp": int(exp),
             "scopes": rec["scopes"], "jti": rec["pat_jti"]}
+
+
+def _superseded_pat(row: dict | None, new_jti: str) -> tuple[str, str] | None:
+    """등록이 갈아 끼우는 앞선 PAT — (PAT, jti) 또는 None. 풀리고(폐기 표기·복호 실패가 아님), jti 가 새것과 다르고, `pat_name`
+    클레임이 hwax-risk(이 앱이 바라 받은 것 — 웹 버튼·자동 등록·게이트웨이 교환)인 것만이다. 다른 이름의 PAT 는 그 사람이 다른
+    데서도 쓸 수 있어 폐기하지 않는다."""
+    old = identity.credential_pat(row)
+    if old is None or row is None:
+        return None
+    jti = str(row.get("pat_jti") or "")
+    if not jti or jti == new_jti:
+        return None
+    if identity.unverified_claims(old).get("pat_name") != PORTAL_PAT_WANTED["name"]:
+        return None
+    return old, jti
+
+
+def _revoke_superseded_pat(pat: str, jti: str) -> None:
+    """앞선 PAT 를 그 토큰 자신으로 폐기한다 — `POST {portal}/auth/pat/revoke-self`(Bearer 그 PAT). 최선 노력이라 던지지 않고,
+    로그에는 jti 와 결과만 싣는다(토큰·응답 본문은 싣지 않는다)."""
+    base = config.settings.portal_base.rstrip("/")
+    try:
+        with http_client(transport=_portal_transport, timeout=PAT_REVOKE_TIMEOUT_S) as client:
+            r = client.post(f"{base}/auth/pat/revoke-self", headers={"Authorization": f"Bearer {pat}"})
+    except Exception as exc:  # noqa: BLE001 — 폐기 실패가 등록을 되돌리지 않는다
+        log.warning("갈아 끼운 포털 PAT 를 폐기하지 못했다 — jti %s (%s)", jti, type(exc).__name__)
+        return
+    if r.status_code == 200:
+        log.info("갈아 끼운 포털 PAT 를 폐기했다 — jti %s", jti)
+    else:
+        log.warning("갈아 끼운 포털 PAT 를 폐기하지 못했다 — jti %s (HTTP %s)", jti, r.status_code)
 
 
 def _verify_with_portal(pat: str) -> None:
@@ -368,7 +412,7 @@ def _gateway_guard(request: Request) -> str:
 
 
 @router.post("/auth/portal-pat")
-async def post_auth_portal_pat(request: Request) -> dict:
+async def post_auth_portal_pat(request: Request, background: BackgroundTasks) -> dict:
     """게이트웨이 전용 — 포털 교환으로 받은 위임된 사람의 PAT 를 등록하거나(`{pat}`), 교환 실패를 적는다(`{error, message}`).
 
     문은 `/auth/sso` 와 같다(시크릿 미설정 404 · 불일치 401). 사람은 **X-Hwax-Delegate-Email 로만** 정한다 — Caddy 를 거친
@@ -390,10 +434,10 @@ async def post_auth_portal_pat(request: Request) -> dict:
         body = json.loads((await request.body()) or b"null")
     except ValueError as exc:
         raise AppError("E100", "본문이 JSON 이 아닙니다 — {pat} 또는 {error, message} 를 보냅니다.", 422) from exc
-    return await run_in_threadpool(_gateway_portal_pat, email, body)
+    return await run_in_threadpool(_gateway_portal_pat, email, body, background)
 
 
-def _gateway_portal_pat(email: str, body: Any) -> dict:
+def _gateway_portal_pat(email: str, body: Any, background: BackgroundTasks | None = None) -> dict:
     """`post_auth_portal_pat` 의 본체(스레드에서 돈다 — 포털 실호출이 이벤트 루프를 붙들지 않게)."""
     if not isinstance(body, dict) or (body.get("pat") is None) == (body.get("error") is None):
         raise AppError("E100", "본문은 {pat} 또는 {error, message} 둘 중 하나입니다.", 422)
@@ -410,7 +454,8 @@ def _gateway_portal_pat(email: str, body: Any) -> dict:
     if not isinstance(pat, str) or not pat.strip():
         raise AppError("pat_invalid", "pat 이 비었거나 문자열이 아닙니다.", 422)
     try:
-        out = _register_portal_pat(store, email, pat.strip(), source=GATEWAY_PAT_SOURCE, read_only=True)
+        out = _register_portal_pat(store, email, pat.strip(), source=GATEWAY_PAT_SOURCE, read_only=True,
+                                   background=background)
     except AppError as exc:
         store.note_portal_pat_error(email, f"register-{exc.code}: {exc.message}", kind=auto_error_kind(exc.code))
         log.info("게이트웨이가 보낸 포털 PAT 를 등록하지 않았다 — %s (%s)", email, exc.code)
@@ -451,7 +496,8 @@ def get_me(request: Request, ident: identity.Identity = Depends(identity.current
 
 
 @router.put("/me/portal-pat")
-def put_portal_pat(body: PortalPatBody, ident: identity.Identity = Depends(identity.current)) -> dict:
+def put_portal_pat(body: PortalPatBody, background: BackgroundTasks,
+                   ident: identity.Identity = Depends(identity.current)) -> dict:
     """사용자 포털 PAT 등록(러너 자격 (b)). null 은 삭제. 검증 순서 — email → aud/scope → exp → 포털 실호출.
 
     `source` 는 web(화면의 자동 등록) · manual(기본 — 사람이 누른 버튼)이고 성공하면 자동 등록 기록(portal_pat.auto)에 남는다.
@@ -464,7 +510,7 @@ def put_portal_pat(body: PortalPatBody, ident: identity.Identity = Depends(ident
     source = body.source or "manual"
     if source not in PAT_SOURCES:
         raise AppError("E100", f"source 는 {list(PAT_SOURCES)} 중 하나입니다 — {source!r}.", 422)
-    return _register_portal_pat(store, owner_sub, body.pat, source=source)
+    return _register_portal_pat(store, owner_sub, body.pat, source=source, background=background)
 
 
 @router.put("/me/portal-pat-auto")

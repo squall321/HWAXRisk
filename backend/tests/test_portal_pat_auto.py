@@ -41,7 +41,7 @@ def _clean() -> None:
 @pytest.fixture
 def box(monkeypatch):
     """heax 는 TOKEN 만 erin, 포털 /agent/conversations 는 portal_ok 에 따라 200/401, 게이트웨이 시크릿은 SECRET."""
-    log = {"portal": [], "portal_ok": True, "portal_down": False}
+    log = {"portal": [], "portal_ok": True, "portal_down": False, "revoked": [], "revoke": 200}
 
     def heax(req: httpx.Request) -> httpx.Response:
         if req.headers.get("authorization") == f"Bearer {TOKEN}":
@@ -49,6 +49,12 @@ def box(monkeypatch):
         return httpx.Response(401)
 
     def portal(req: httpx.Request) -> httpx.Response:
+        if req.url.path == "/auth/pat/revoke-self":
+            assert req.method == "POST"
+            log["revoked"].append(req.headers.get("authorization"))
+            if log["revoke"] is None:
+                raise httpx.ConnectError("portal down", request=req)
+            return httpx.Response(log["revoke"], json={"revoked": "x"})
         log["portal"].append(req.headers.get("authorization"))
         if log["portal_down"]:
             raise httpx.ConnectError("portal down", request=req)
@@ -442,3 +448,65 @@ def test_a_renewal_asks_for_a_pat_that_outlives_the_current_one_by_a_day(box, da
     assert wanted["reason"] == "expiring"
     assert wanted["min_remaining_s"] == max(routes.PAT_MIN_REMAINING_S, left + routes.PAT_MIN_REMAINING_S)
     assert wanted["min_remaining_s"] > left
+
+
+# ---------------------------------------------------------------- 갈아 끼운 PAT 폐기(SEC-1)
+# 포털 교환은 같은 이름의 형제를 더는 폐기하지 않는다 — 앱이 새것을 받아들인 뒤에 옛것을 그 토큰 자신으로 폐기한다.
+OLD = _jwt(jti="jti-erin-0", pat_name="hwax-risk", aud=["mcp-gateway", "step-forge"])
+
+
+def _registered_jti() -> str:
+    return get_store().get_credential(EMAIL)["pat_jti"]
+
+
+@pytest.mark.parametrize("path", ["gateway", "put"])
+def test_a_renewal_revokes_the_superseded_hwax_risk_pat_after_accepting_the_new_one(client, box, caplog, path):
+    _register(OLD)                                                  # 행의 jti 는 jti-erin-0
+    new = _jwt(pat_name="hwax-risk")
+    with caplog.at_level(logging.DEBUG):
+        if path == "gateway":
+            r = client.post("/api/auth/portal-pat", headers=GW, json={"pat": new})
+        else:
+            r = client.put("/api/me/portal-pat", json={"pat": new, "source": "web"}, headers=AUTH)
+    assert r.status_code == 200, r.text
+    assert box["revoked"] == [f"Bearer {OLD}"] and _registered_jti() == "jti-erin-1"
+    assert box["portal"] == [f"Bearer {new}"]                     # 새것을 포털에 확인한 뒤다
+    # 로그에는 jti 와 결과만 — 토큰(옛것·새것)은 어디에도 없다.
+    assert "jti-erin-0" in caplog.text and "폐기했다" in caplog.text
+    for token in (OLD, new):
+        assert token not in caplog.text and token.split(".")[1] not in caplog.text
+
+
+@pytest.mark.parametrize("case", ["other_name", "no_name", "same_jti", "revoked", "undecryptable"])
+def test_only_a_different_live_hwax_risk_pat_is_revoked(client, box, case):
+    """다른 이름의 PAT 는 그 사람이 다른 데서 쓸 수 있다 — 폐기하지 않는다. 같은 PAT 의 재등록·이미 폐기 표기된 것·풀리지 않는 것도
+    부르지 않는다."""
+    old = {"other_name": _jwt(jti="jti-erin-0", pat_name="claude"), "no_name": _jwt(jti="jti-erin-0")}.get(case, OLD)
+    _register(old)
+    if case == "revoked":
+        get_store().execute("UPDATE _user_credentials SET revoked_at = 1 WHERE owner_sub = ?", (EMAIL,))
+    if case == "undecryptable":
+        get_store().execute("UPDATE _user_credentials SET portal_pat_enc = ? WHERE owner_sub = ?", (b"garbage", EMAIL))
+    new = _jwt(jti="jti-erin-0" if case == "same_jti" else "jti-erin-1", pat_name="hwax-risk")
+    assert client.post("/api/auth/portal-pat", headers=GW, json={"pat": new}).status_code == 200
+    assert box["revoked"] == [] and identity.credential_pat(get_store().get_credential(EMAIL)) == new
+
+
+def test_a_refused_new_pat_keeps_the_old_one_and_revokes_nothing(client, box):
+    """새것이 등록 검사에 걸리면 옛것은 그대로 쓴다 — 폐기는 받아들인 뒤에만 한다."""
+    _register(OLD)
+    box["portal_ok"] = False
+    r = client.post("/api/auth/portal-pat", headers=GW, json={"pat": _jwt(pat_name="hwax-risk")})
+    assert r.status_code == 422
+    assert box["revoked"] == [] and identity.credential_pat(get_store().get_credential(EMAIL)) == OLD
+
+
+@pytest.mark.parametrize("revoke", [500, 401, None], ids=["http_500", "http_401", "unreachable"])
+def test_a_failed_revoke_does_not_undo_the_registration(client, box, caplog, revoke):
+    _register(OLD)
+    box["revoke"] = revoke
+    new = _jwt(pat_name="hwax-risk")
+    with caplog.at_level(logging.DEBUG):
+        r = client.post("/api/auth/portal-pat", headers=GW, json={"pat": new})
+    assert r.status_code == 200 and _registered_jti() == "jti-erin-1" and box["revoked"] == [f"Bearer {OLD}"]
+    assert "jti-erin-0" in caplog.text and "폐기하지 못했다" in caplog.text and OLD not in caplog.text
