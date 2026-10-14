@@ -917,6 +917,7 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
     for name in ("stage", "report"):
         if coverage.get(name) is not None:
             facts[name] = coverage[name]
+    _reraised_note(store, target_key, notes)
     # 거르기 · 실패 셀 · 입력 결손 — 목록이 아니라 셈이다(359명 대상에서도 답이 짧게, 재설계 M3 C3-8). 진행판 review 칸과 같은 수다.
     flt = review.get("filter") or {}
     if flt:
@@ -1064,6 +1065,22 @@ def _chain_answer(answer, target_key: str, project_id: str, stage: dict, repersi
                      " risk_job_action(action='pause')).")
     notes.append(f"{what} {stage['job_id']} 가 {stage['state']} 다 — 끝나면 사슬이 다음 단계(쟁점 → 종합 → 보고서 판)를 저절로 세운다.")
     return answer(mode, [*repersist_steps, *watch])
+
+
+def _reraised_note(store: Any, target_key: str, notes: list[str]) -> None:
+    """패널이 판정한 뒤 근거가 바뀌었는데 상한에 자리가 없어 다시 돌지 못한 결과 쟁점(review1 H3 — 조정자 결정) — 표기와 다시 올리는
+    길(사람의 결정은 상한 밖이어도 된다)과 넘기는 길(완결 잔여 issues_reraised 확인)."""
+    from app import registry  # noqa: PLC0415 — registry 는 무겁다.
+
+    rows = store.query("SELECT issue_id FROM rr_issues WHERE target_key = ? AND reraised_json IS NOT NULL"
+                       " AND state IN ('resolved', 'inconclusive') ORDER BY issue_id", (target_key,))
+    if not rows:
+        return
+    ids = [r["issue_id"] for r in rows]
+    shown = ", ".join(ids[:10]) + (f" 외 {len(ids) - 10}건" if len(ids) > 10 else "")
+    notes.append(f"쟁점 {len(ids)}건 — {registry.REARGUE_LABEL}(상한에 자리가 없어 다시 돌지 않았다): {shown}. 다시 토의하려면 웹"
+                 " 화면이나 REST PUT /api/issues/<issue_id> {action:'queue', reason} 로 올린다(사람의 결정은 상한 밖이어도 된다)."
+                 " 넘기려면 완결 잔여 issues_reraised 를 소유자·관리자가 확인한다.")
 
 
 def _code_only_notes(store: Any, target_key: str, notes: list[str]) -> None:

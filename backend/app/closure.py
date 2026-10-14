@@ -32,10 +32,13 @@ FILTER_UPPER_MAX = 0.05           # 표본 놓침 95% 상한
 ACK_REASON_MAX = 300
 # 잔여(4.10 표의 차례 + 카드 없는 영역 D-35) — 막음 여부는 늘 막는 것 · 조건부(filtered · undetermined) · 표기만(no_cards ·
 # depth_no_cards · cross · mech).
-RESIDUAL_ITEMS: tuple[str, ...] = ("input_gap", "failed", "skipped", "issues_untried", "filtered", "unit_excluded",
-                                   "quality", "undetermined", "no_cards", "depth_no_cards", "cross_not_run",
+RESIDUAL_ITEMS: tuple[str, ...] = ("input_gap", "failed", "skipped", "issues_untried", "issues_reraised", "filtered",
+                                   "unit_excluded", "quality", "undetermined", "no_cards", "depth_no_cards", "cross_not_run",
                                    "mech_not_run")
-ALWAYS_BLOCKING: frozenset[str] = frozenset({"input_gap", "failed", "skipped", "issues_untried", "unit_excluded", "quality"})
+ALWAYS_BLOCKING: frozenset[str] = frozenset({"input_gap", "failed", "skipped", "issues_untried", "issues_reraised",
+                                             "unit_excluded", "quality"})
+# 잔여 행에 싣는 쟁점 id 의 수(나머지는 수로 — 진행판 · MCP 와이어).
+RESIDUAL_IDS_MAX = 20
 
 
 def _loads(text: Any, default: Any) -> Any:
@@ -305,6 +308,18 @@ def residuals(store: RiskStore, target_key: str, counts: Mapping[str, Any]) -> l
                     "held_fail": len(held), "sentences": sentences,
                     "label": f"미토의 쟁점 {len(untried)}건(주장 FAIL {claimed_fail})",
                     "rows": [[r["issue_id"], r["state"], r["state_reason"] or ""] for r in untried]})
+    # 패널이 판정한 뒤 근거가 바뀌었는데 상한에 자리가 없어 다시 돌지 못한 결과 쟁점(review1 H3 — 조정자 결정: 조용히 남기지 않고
+    # 잔여로 보인다). 다시 줄을 선 것(queued)은 쟁점 진행에 든다.
+    from app import registry  # noqa: PLC0415 — registry 는 무겁다.
+
+    reraised = [dict(r) for r in store.query(
+        "SELECT issue_id, basis_hash, reraised_json FROM rr_issues WHERE target_key = ? AND reraised_json IS NOT NULL"
+        " AND state IN ('resolved', 'inconclusive') ORDER BY issue_id", (target_key,))]
+    if reraised:
+        ids = [r["issue_id"] for r in reraised]
+        out.append({"item": "issues_reraised", "n": len(reraised), "issue_ids": ids[:RESIDUAL_IDS_MAX],
+                    "label": f"{registry.REARGUE_LABEL} {len(reraised)}건",
+                    "rows": [[r["issue_id"], (_loads(r["reraised_json"], {}) or {}).get("basis_hash")] for r in reraised]})
     flt = counts["filter"]
     if int(flt.get("n") or 0):
         audit = flt.get("audit") or {}

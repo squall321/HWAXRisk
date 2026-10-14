@@ -5,9 +5,11 @@
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
-from app import closure, config, issues, routes, runner, synth
+from app import closure, config, entry, issues, registry, review_runner, routes, runner, synth, units
 from tests import factories
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
@@ -17,6 +19,7 @@ from tests.synth.issue_panel_engine import IssuePanelEngine
 
 OWNER = rig.OWNER
 CARDS = {c["alias"]: c for c in fre.load("pack_ok.json")["cards"]}
+REARGUE = registry.REARGUE_LABEL
 
 
 def _fake(**verdicts) -> FakeReviewEngine:
@@ -116,3 +119,41 @@ def test_an_ack_and_its_revocation_each_make_a_report_version_with_the_new_label
     again = synth.report_source(store, key)
     assert again["version_no"] == report["version_no"] + 1
     assert (again["trigger"], again["level_label"]) == ("ack", revoked["level_label"])
+
+
+def _reraised(store) -> tuple[str, str]:
+    """상한 1 · 결과 쟁점 하나의 제기자가 다시 봐서 빠진 원장 — (대상, 다시 토의를 기다리는 쟁점 id)."""
+    key = rig.target(store, MIXED_ROSTER)
+    unit = units.load_units(store, key)[0]["unit_id"]
+    job_id = rig.job(store, key, scope={"agents": [rig.SEAL, "mech-syn-0", "xd-syn-0", "xd-syn-1"], "unit_ids": [unit]})
+    rig.Rig(store, _fake()).finish(job_id)
+    registry.merge(store, key)
+    issues.select_issues(store, key, selected_round=1)
+    issues.create_issues_job(store, key, owner_sub=OWNER, requester_sub=OWNER)
+    _issues(store)
+    decided = next(r for r in issues.issue_rows(store, key) if r["state"] == "resolved")
+    cell = dict(store.query_one("SELECT unit_id, agent_key, state FROM rr_review_cells WHERE target_key = ? AND agent_key = ?"
+                                " AND unit_id = ?", (key, "mech-syn-0", unit)))
+    made = review_runner.dispose_cells(store, key, action="retry", rows=[cell], decided_by=OWNER, owner_sub=OWNER,
+                                       note="다시 본다", force=True, start=True, consent=True, consent_source="web")
+    rig.Rig(store, _fake(judgement="OK")).finish(made["job"]["job_id"])
+    registry.merge(store, key)
+    issues.select_issues(store, key, selected_round=2)
+    after = {r["issue_id"]: r for r in issues.issue_rows(store, key)}[decided["issue_id"]]
+    assert after["state"] == "resolved" and json.loads(after["reraised_json"] or "null"), after
+    return key, decided["issue_id"]
+
+
+def test_a_reraised_verdict_that_could_not_run_again_is_a_blocking_residual_and_the_guide_names_it(store):
+    """H3(결정) — 상한에 자리가 없어 다시 돌지 못한 결과 쟁점(패널 판정 — 근거 바뀜)은 조용히 남지 않는다 — 완결의 막음 잔여
+    issues_reraised 로 서고(확인으로 넘길 수 있다), 길잡이도 그 표기와 다시 올리는 길(PUT /issues/{id} queue)을 말한다."""
+    from tests.test_review_mcp import _delegate, _project_with_source
+
+    key, issue_id = _reraised(store)
+    project_id = _project_with_source(store, key)
+    result = closure.refresh(store, key)
+    item = next((q for q in result["qualifiers"] if q["item"] == "issues_reraised"), None)
+    assert item is not None and item["blocking"] is True and item["n"] == 1 and REARGUE in item["label"]
+    assert REARGUE in result["level_label"]
+    out = entry.next_step(_delegate(), project_id=project_id)
+    assert any(REARGUE in n and issue_id in n for n in out["notes"]), out["notes"]
