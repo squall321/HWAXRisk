@@ -339,23 +339,32 @@ def rest_channel_kind(*, heax_token: str | None, gateway_pat: str | None, servic
     return None
 
 
-def gateway_rest_pat(row: Mapping[str, Any] | None, *, margin_s: int, now: int | None = None) -> tuple[str | None, str | None]:
-    """게이트웨이 REST 다리에 실을 그 사람의 포털 PAT — (PAT, None) 또는 (None, 못 쓰는 까닭).
+# 게이트웨이 REST 다리를 못 쓰는 까닭의 code — 고칠 길이 다르다. no_pat·short_life 는 자동 등록(웹에서 앱 열기·Claude 에서 다시
+# 부르기)이 고친다. no_site_audience 는 Claude 에서 다시 불러도 고쳐지지 않는다 — 게이트웨이는 Claude 에 넣은 PAT 의 청중을 넘는
+# PAT 를 바꿔 받지 않으므로, 사람이 토큰 화면에서 step-forge 를 포함한 PAT 를 새로 발급해 Claude 에 넣어야 한다.
+GATEWAY_PAT_NO_PAT, GATEWAY_PAT_SHORT_LIFE, GATEWAY_PAT_NO_SITE_AUDIENCE = "no_pat", "short_life", "no_site_audience"
+
+
+def gateway_rest_pat(row: Mapping[str, Any] | None, *, margin_s: int,
+                     now: int | None = None) -> tuple[str | None, str | None, str | None]:
+    """게이트웨이 REST 다리에 실을 그 사람의 포털 PAT — (PAT, None, None) 또는 (None, 못 쓰는 까닭, 그 code).
 
     등록된 PAT 가 풀리고(폐기·복호 실패 아님), 남은 수명이 `margin_s`(캡처의 사용자 PAT 여유와 같다)를 넘고, aud 에 게이트웨이
     사이트 키(step-forge)가 있어야 한다 — 게이트웨이는 aud 로 그 사이트를 연다(HWAXMcpGateway rest_proxy `_verify`).
     """
     pat = identity.credential_pat(row)
     if pat is None:
-        return None, "그 사람의 등록된 포털 PAT 가 없다(없음·폐기·복호 불가)"
+        return None, "그 사람의 등록된 포털 PAT 가 없다(없음·폐기·복호 불가)", GATEWAY_PAT_NO_PAT
     left = int((row or {}).get("pat_exp") or 0) - (now_epoch() if now is None else int(now))
     if left <= int(margin_s):
-        return None, f"그 사람의 포털 PAT 남은 수명 {max(left, 0)}초가 캡처 여유 {int(margin_s)}초 이하다"
+        return (None, f"그 사람의 포털 PAT 남은 수명 {max(left, 0)}초가 캡처 여유 {int(margin_s)}초 이하다",
+                GATEWAY_PAT_SHORT_LIFE)
     aud = identity.unverified_claims(pat).get("aud")
     sites = sorted(set(GATEWAY_REST_SITES.values()))
     if not set(aud if isinstance(aud, list) else [aud]) & set(sites):
-        return None, f"그 사람의 포털 PAT 의 aud 에 게이트웨이 REST 사이트({'·'.join(sites)})가 없다"
-    return pat, None
+        return (None, f"그 사람의 포털 PAT 의 aud 에 게이트웨이 REST 사이트({'·'.join(sites)})가 없다",
+                GATEWAY_PAT_NO_SITE_AUDIENCE)
+    return pat, None, None
 
 
 def clients_from_settings(settings, secrets: Mapping[str, str] | None = None, *,

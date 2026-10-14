@@ -330,15 +330,19 @@ def test_capture_rest_follows_caller_token_then_the_gateway_pat_then_the_service
     assert delegated.delegated is True and delegated.token is None
     creds = entry._credentials(box.store, delegated, OWNER)
     assert creds["capture_rest"] is None and "등록된 포털 PAT 가 없다" in creds["capture_rest_note"]
+    assert creds["capture_rest_code"] == "no_pat"
     write_secrets(box, HWAXRISK_HEAX_SERVICE_PAT="service-pat")
     assert entry._credentials(box.store, delegated, OWNER)["capture_rest"] == "service_pat"
     # aud 에 step-forge 가 없는 PAT 는 다리를 못 연다(게이트웨이가 aud 로 사이트를 연다) — 서비스 PAT 로 간다.
     register_jwt(box, OWNER, ["mcp-gateway"])
     creds = entry._credentials(box.store, delegated, OWNER)
     assert creds["capture_rest"] == "service_pat" and "step-forge" in creds["capture_rest_note"]
+    # 청중이 모자란 것은 Claude 에서 다시 불러도 고쳐지지 않는다 — 토큰 화면에서 새로 발급해 Claude 에 넣으라고 한다(BEH-1).
+    assert creds["capture_rest_code"] == "no_site_audience" and entry.FIX_BRIDGE_AUDIENCE in creds["capture_rest_note"]
+    assert "Claude 에서 다시" not in creds["capture_rest_note"]
     register_jwt(box, OWNER, ["mcp-gateway", "step-forge"])
     creds = entry._credentials(box.store, delegated, OWNER)
-    assert (creds["capture_rest"], creds["capture_rest_note"]) == ("user_pat_gateway", None)
+    assert (creds["capture_rest"], creds["capture_rest_note"], creds["capture_rest_code"]) == ("user_pat_gateway", None, None)
     # 웹 호출자는 제 로그인 토큰이 먼저다.
     assert entry._credentials(box.store, web_ident(OWNER), OWNER)["capture_rest"] == "caller_token"
 
@@ -378,6 +382,30 @@ def test_a_claude_capture_reads_rest_through_the_gateway_with_the_persons_pat(bo
     # 웹으로 캡처하면 제 로그인 토큰이 먼저이고 사람 PAT 는 다리에 싣지 않는다(위임 호출이 아니다).
     web = routes.create_snapshot(pid, routes.SnapshotBody(), ident=web_ident(OWNER))
     assert seen == {"heax_token": "heax-web-token", "gateway_pat": None} and web["credentials"]["rest"] == "caller_token"
+
+
+def test_a_bridge_closed_for_lack_of_step_forge_says_to_issue_a_new_pat_not_to_call_again(box):
+    """위임 호출의 PAT 에 step-forge 가 없어 다리가 닫혀 G6 이 unit_unknown 이면, 고칠 곳은 토큰 화면에서 step-forge 를 포함해 새로
+    발급해 Claude 에 넣는 것이다 — 'Claude 에서 다시 부르면' 은 약속하지 않는다(게이트웨이는 Claude 에 넣은 PAT 의 청중을 넘는 PAT 를
+    바꿔 받지 않는다). 등록이 없을 때(no_pat)는 다시 부르면 등록된다고 하되 그 단서를 함께 말한다."""
+    act_as(box, OWNER)
+    wire_sources(box, FakeSourceApps())
+    pid = call("risk_create_project", code="NOAUD", name="청중 모자람", classification="internal")["id"]
+    call("risk_add_source", project_id=pid, kind="mcad", ref=SOURCE_REFS["mcad"])
+    out = call("risk_next_step", project_id=pid)
+    absent = {b["code"]: b for b in out["blocked"]}["rest_channel_absent"]
+    assert "Claude 에서 다시 부를 때 저절로 등록" in absent["fix"] and "청중을 넘지 못한다" in absent["fix"]
+
+    register_jwt(box, OWNER, ["mcp-gateway"])
+    out = call("risk_next_step", project_id=pid)
+    absent = {b["code"]: b for b in out["blocked"]}["rest_channel_absent"]
+    assert entry.FIX_BRIDGE_AUDIENCE in absent["fix"] and "Claude 에서 다시" not in absent["fix"]
+    snap = call("risk_capture_snapshot", project_id=pid)
+    assert snap["blocked"] is True
+    blocked = {b["code"]: b for b in call("risk_next_step", project_id=pid)["blocked"]}
+    assert blocked["gate_blocked"]["reason"] == "unit_unknown"
+    assert entry.FIX_BRIDGE_AUDIENCE in blocked["gate_blocked"]["fix"] and "Claude 에서 다시" not in blocked["gate_blocked"]["fix"]
+    assert "HWAXRISK_HEAX_SERVICE_PAT" in blocked["gate_blocked"]["fix"]
 
 
 # ---------------------------------------------------------------- 게이트웨이 길에 REST 자격이 없는 박스

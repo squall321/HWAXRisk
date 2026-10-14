@@ -433,10 +433,13 @@ def _credentials(store: Any, ident: identity.Identity, owner: str) -> dict:
     runner_credential, runner_note = runner.resolve_credential_with_note(store, None, owner, ident.email)
     # 캡처의 REST 채널 — create_snapshot 과 같은 함수·같은 순서다(R2): caller_token(웹 호출자의 heax 토큰) · user_pat_gateway(게이트웨이
     # 위임 호출이고 그 사람의 포털 PAT 로 게이트웨이 REST 다리) · service_pat · None.
-    gateway_pat, gateway_why = (adapters_registry.gateway_rest_pat(row, margin_s=runner.CREDENTIAL_MARGIN_S)
-                                if _delegated(ident) else (None, None))
+    gateway_pat, gateway_why, gateway_code = (
+        adapters_registry.gateway_rest_pat(row, margin_s=runner.CREDENTIAL_MARGIN_S) if _delegated(ident) else (None, None, None))
     capture_rest = adapters_registry.rest_channel_kind(
         heax_token=ident.token, gateway_pat=gateway_pat, service_pat=secrets.get("HWAXRISK_HEAX_SERVICE_PAT"))
+    bridge_closed = capture_rest != "user_pat_gateway" and gateway_why is not None
+    if bridge_closed and gateway_code == adapters_registry.GATEWAY_PAT_NO_SITE_AUDIENCE:
+        gateway_why = f"{gateway_why} — {FIX_BRIDGE_AUDIENCE}"
     return {
         "portal_pat": {"registered": row is not None, "usable": usable, "seconds_left": left,
                        "revoked_at": row.get("revoked_at") if row is not None else None},
@@ -444,8 +447,10 @@ def _credentials(store: Any, ident: identity.Identity, owner: str) -> dict:
         "runner_note": runner_note,
         "roster": bool(roster_module.credential(store, owner)),
         "capture_rest": capture_rest,
-        # 위임 호출인데 게이트웨이 REST 다리를 못 쓰는 까닭(쓰거나 위임 호출이 아니면 None).
-        "capture_rest_note": gateway_why if capture_rest != "user_pat_gateway" else None,
+        # 위임 호출인데 게이트웨이 REST 다리를 못 쓰는 까닭과 그 code(no_pat · short_life · no_site_audience — 쓰거나 위임 호출이 아니면
+        # None). no_site_audience 는 Claude 에서 다시 불러도 고쳐지지 않아 까닭 뒤에 고칠 길을 붙인다.
+        "capture_rest_note": gateway_why if bridge_closed else None,
+        "capture_rest_code": gateway_code if bridge_closed else None,
         # 캡처의 MCP 채널 — create_snapshot 과 같은 규칙(남은 수명 > CREDENTIAL_MARGIN_S 인 본인 PAT → 서비스 PAT).
         "capture_mcp": ("user_pat" if usable and left is not None and left > runner.CREDENTIAL_MARGIN_S
                         else "service_pat" if secrets.get("HWAXRISK_PORTAL_PAT") else None),
@@ -492,24 +497,38 @@ _CAPTURE_FIX = {
 }
 
 
-def _fix_gate_blocked(reason: str | None, project_id: str) -> str:
+# 게이트웨이 REST 다리가 step-forge 청중이 없어 닫혔을 때 고칠 길. Claude 에서 다시 불러도 고쳐지지 않는다 — 게이트웨이는 Claude 에
+# 넣은 PAT 의 청중을 넘는 PAT 를 바꿔 받지 않는다(context-notes C-10). 그래서 '다시 부르면' 을 약속하지 않는다.
+FIX_BRIDGE_AUDIENCE = ("포털 토큰 화면에서 step-forge 를 포함한(모든 청중) 포털 PAT 를 새로 발급해 Claude 에 넣는다 — 그러면 다음 Claude"
+                       " 호출에서 이 앱에 등록된 PAT 가 저절로 바뀐다")
+
+
+def _fix_gate_blocked(reason: str | None, project_id: str, *, rest_code: str | None = None) -> str:
+    """G6 차단의 고칠 곳. unit_unknown 이면 REST 를 읽을 길을 말한다 — `rest_code` 는 위임 호출이 게이트웨이 REST 다리를 못 쓰는
+    까닭(adapters.registry.GATEWAY_PAT_*)이고 그에 따라 고칠 길이 다르다."""
     if reason == state_module.UNKNOWN_BLOCKING_REASON:
-        return ("mcad 를 REST(/tree)로 읽지 못해 단위를 검문할 수 없었다 — Claude(게이트웨이 위임)로 캡처하면 그 사람의 등록된 포털"
-                " PAT 로 게이트웨이 REST(step-forge)를 읽는다. 그 PAT 는 남은 수명이 캡처 여유를 넘고 aud 에 step-forge 가 있어야 한다 —"
-                " 웹에서 리스크 앱을 한 번 열거나 Claude 에서 다시 부르면 자동으로 등록되고, 설정 화면에서 직접 등록할 수도 있다. 그 뒤"
-                f" risk_capture_snapshot 을 다시 부른다. 아니면 웹 과제 화면({web_paths(project_id=project_id)['project']})에서 다시"
-                " 캡처하거나(로그인 토큰으로 REST 를 읽는다), 운영자가 앱 secrets.env 에 HWAXRISK_HEAX_SERVICE_PAT 를 넣은 뒤"
-                " risk_capture_snapshot 을 다시 부른다.")
+        if rest_code == adapters_registry.GATEWAY_PAT_NO_SITE_AUDIENCE:
+            how = ("그 사람의 등록된 포털 PAT 에 step-forge 청중이 없어 게이트웨이 REST 다리가 닫혀 있다 — " + FIX_BRIDGE_AUDIENCE
+                   + ". 그 뒤 risk_capture_snapshot 을 다시 부른다.")
+        else:
+            how = ("Claude(게이트웨이 위임)로 캡처하면 그 사람의 등록된 포털 PAT 로 게이트웨이 REST(step-forge)를 읽는다. 그 PAT 는 남은"
+                   " 수명이 캡처 여유를 넘고 aud 에 step-forge 가 있어야 한다 — 없거나 곧 끝나면 웹에서 리스크 앱을 한 번 열거나 Claude 에서"
+                   " 다시 부를 때 저절로 등록·갱신된다(설정 화면에서 직접 등록할 수도 있다). 다만 Claude 길로 받는 PAT 는 Claude 에 넣은 PAT"
+                   " 의 청중을 넘지 못한다 — 그 PAT 에 step-forge 가 없으면 " + FIX_BRIDGE_AUDIENCE + ". 그 뒤 risk_capture_snapshot 을"
+                   " 다시 부른다.")
+        return (f"mcad 를 REST(/tree)로 읽지 못해 단위를 검문할 수 없었다 — {how} 아니면 웹 과제 화면"
+                f"({web_paths(project_id=project_id)['project']})에서 다시 캡처하거나(로그인 토큰으로 REST 를 읽는다), 운영자가 앱"
+                " secrets.env 에 HWAXRISK_HEAX_SERVICE_PAT 를 넣은 뒤 risk_capture_snapshot 을 다시 부른다.")
     return "소스 앱에서 단위를 mm 로 맞추거나 모델 크기 불일치를 고친 뒤 risk_capture_snapshot 을 다시 부른다. G6 은 ack 로 넘길 수 없다."
 
 
-def _rest_channel_absent(project_id: str, why: str | None = None) -> dict:
+def _rest_channel_absent(project_id: str, why: str | None = None, rest_code: str | None = None) -> dict:
     return _blocked(
         "rest_channel_absent",
         "이 호출에는 소스 앱 REST 를 읽을 자격이 없다 — 게이트웨이 REST 다리(그 사람의 포털 PAT)를 못 쓰고"
         + (f"({why})" if why else "") + ", 게이트웨이를 거친 호출에는 웹 로그인 토큰이 없으며, 이 박스에는 서비스 자격"
         "(HWAXRISK_HEAX_SERVICE_PAT)도 없다. Claude 에서 캡처하면 mcad 가 MCP 폴백으로 읽혀 G6 이 unit_unknown 으로 막힌다.",
-        _fix_gate_blocked(state_module.UNKNOWN_BLOCKING_REASON, project_id))
+        _fix_gate_blocked(state_module.UNKNOWN_BLOCKING_REASON, project_id, rest_code=rest_code))
 
 
 # 카드 대조(flow='cells')가 꺼진 박스의 길잡이 메모 — 대상을 열기 전 두 방식을 나란히 보이는 자리에서 cells 걸음 대신 쓴다.
@@ -585,7 +604,7 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
                                     source_id=source["id"]))
     if {"dyna", "dyna_result"} & set(kinds) and creds["capture_mcp"] != "user_pat":
         notes.append("dyna 는 사람별 세션이라 본인 PAT 가 있어야 읽힌다 — 없으면 dyna 가 빈 채 캡처된다. " + fix_register_pat())
-    capture_blockers = ([_rest_channel_absent(project_id, creds["capture_rest_note"])]
+    capture_blockers = ([_rest_channel_absent(project_id, creds["capture_rest_note"], creds["capture_rest_code"])]
                         if "mcad" in kinds and creds["capture_rest"] is None else [])
 
     # 2. 캡처
@@ -610,7 +629,8 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
     latest = snapshots[0]
     if latest["blocked_reason"]:
         blocked.append(_blocked("gate_blocked", "최신 스냅샷이 G6(단위·크기)으로 막혔다 — 변경 비교도 심사 대상도 열리지 않는다.",
-                                _fix_gate_blocked(latest["blocked_reason"], project_id), reason=latest["blocked_reason"],
+                                _fix_gate_blocked(latest["blocked_reason"], project_id, rest_code=creds["capture_rest_code"]),
+                                reason=latest["blocked_reason"],
                                 snapshot_id=latest["id"]))
         blocked.extend(capture_blockers)
         return answer("capture", [] if capture_blockers else [
@@ -646,7 +666,7 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
         facts["pair"] = {"base_snapshot_id": base["id"], "target_snapshot_id": latest["id"]}
         if base["blocked_reason"]:
             blocked.append(_blocked("gate_blocked", "비교의 앞 스냅샷이 G6 으로 막혀 변경 비교를 만들 수 없다.",
-                                    _fix_gate_blocked(base["blocked_reason"], project_id),
+                                    _fix_gate_blocked(base["blocked_reason"], project_id, rest_code=creds["capture_rest_code"]),
                                     reason=base["blocked_reason"], snapshot_id=base["id"]))
             return answer("diff", [])
         diff = store.query_one(

@@ -26,7 +26,7 @@ GW = {"X-Heax-Gateway-Secret": SECRET, "X-Hwax-Delegate-Email": EMAIL,
 
 def _jwt(**claims) -> str:
     """서명은 가짜다(포털 확인은 MockTransport 가 대신한다). 기본 클레임은 게이트웨이 교환이 주는 정상 PAT."""
-    payload = {"sub": "u-erin", "email": EMAIL, "aud": ["mcp-gateway"], "scope": "api", "scopes": ["read"],
+    payload = {"sub": "u-erin", "email": EMAIL, "aud": ["mcp-gateway", "step-forge"], "scope": "api", "scopes": ["read"],
                "jti": "jti-erin-1", "groups": ["cae"], "exp": int(time.time()) + 90 * 86400, **claims}
     seg = lambda obj: base64.urlsafe_b64encode(json.dumps(obj).encode()).decode().rstrip("=")  # noqa: E731
     return f"{seg({'alg': 'RS256', 'typ': 'JWT'})}.{seg(payload)}.fakesig"
@@ -510,3 +510,32 @@ def test_a_failed_revoke_does_not_undo_the_registration(client, box, caplog, rev
         r = client.post("/api/auth/portal-pat", headers=GW, json={"pat": new})
     assert r.status_code == 200 and _registered_jti() == "jti-erin-1" and box["revoked"] == [f"Bearer {OLD}"]
     assert "jti-erin-0" in caplog.text and "폐기하지 못했다" in caplog.text and OLD not in caplog.text
+
+
+# ---------------------------------------------------------------- 청중이 모자란 PAT 도 받아야 한다(BEH-1)
+def test_a_pat_without_step_forge_is_due_for_its_audience(client, box):
+    """step-forge 가 없으면 위임 캡처의 REST 다리가 닫힌다 — 그것도 '받아야 한다' 의 까닭(audience)이고, 단언은 모자란 청중을
+    require_audiences 로 싣는다(게이트웨이는 호출자 PAT 에 그 청중이 없으면 포털을 부르지 않는다 — 되풀이가 없다)."""
+    for aud in (["mcp-gateway"], "mcp-gateway"):
+        _register(_jwt(aud=aud), exp_in=config.pat_renew_before_s() + 3600)
+        auto = _auto(client)
+        assert (auto["due"], auto["due_reason"]) == (True, "audience")
+        wanted = _mint(client, GW)["portal_pat_wanted"]
+        assert wanted["reason"] == "audience" and wanted["require_audiences"] == ["step-forge"]
+        assert wanted["min_remaining_s"] == routes.PAT_MIN_REMAINING_S
+        assert wanted["audiences"] == ["mcp-gateway", "step-forge"]
+    _register(_jwt(), exp_in=config.pat_renew_before_s() + 3600)    # 두 청중 다 — 받을 까닭이 없다
+    assert _auto(client)["due"] is False and "portal_pat_wanted" not in _mint(client, GW)
+
+
+@pytest.mark.parametrize("stronger", ["expiring", "revoked", "undecryptable"])
+def test_a_missing_audience_ranks_below_the_other_reasons(client, box, stronger):
+    renew = config.pat_renew_before_s()
+    _register(_jwt(aud=["mcp-gateway"]), exp_in=renew - 3600 if stronger == "expiring" else renew + 3600)
+    if stronger == "revoked":
+        get_store().execute("UPDATE _user_credentials SET revoked_at = 1 WHERE owner_sub = ?", (EMAIL,))
+    if stronger == "undecryptable":
+        get_store().execute("UPDATE _user_credentials SET portal_pat_enc = ? WHERE owner_sub = ?", (b"garbage", EMAIL))
+    assert _auto(client)["due_reason"] == stronger
+    wanted = routes.portal_pat_wanted(get_store(), EMAIL)
+    assert wanted["reason"] == stronger and "require_audiences" not in wanted

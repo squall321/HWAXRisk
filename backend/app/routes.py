@@ -122,16 +122,27 @@ def auto_error_text(raw_code: Any) -> str:
     return f"{code}: {AUTO_ERROR_TEMPLATES.get(code, AUTO_ERROR_GENERIC)}"
 
 
+def missing_audiences(pat: str | None) -> list[str]:
+    """바라는 청중(PORTAL_PAT_WANTED.audiences) 가운데 이 PAT 의 aud 에 없는 것(순서는 바라는 순서)."""
+    aud = identity.unverified_claims(pat).get("aud")
+    have = aud if isinstance(aud, list) else [aud]
+    return [a for a in PORTAL_PAT_WANTED["audiences"] if a not in have]
+
+
 def pat_due_reason(row: dict | None, *, now: int | None = None, cfg: Any | None = None) -> str | None:
-    """지금 포털 PAT 를 받아 등록해야 하는 까닭 — absent · revoked · undecryptable · expiring(남은 수명 < 갱신 문턱). 아니면 None."""
+    """지금 포털 PAT 를 받아 등록해야 하는 까닭 — 앞의 것이 먼저다: absent · revoked · undecryptable · expiring(남은 수명 < 갱신
+    문턱) · audience(aud 에 바라는 청중이 모자라다 — step-forge 가 없으면 위임 캡처의 REST 다리가 닫힌다). 아니면 None."""
     if row is None:
         return "absent"
     if row.get("revoked_at"):
         return "revoked"
-    if identity.credential_pat(row) is None:
+    pat = identity.credential_pat(row)
+    if pat is None:
         return "undecryptable"
     left = int(row.get("pat_exp") or 0) - (now_epoch() if now is None else int(now))
-    return "expiring" if left < config.pat_renew_before_s(cfg) else None
+    if left < config.pat_renew_before_s(cfg):
+        return "expiring"
+    return "audience" if missing_audiences(pat) else None
 
 
 def portal_pat_auto(store: Any, email: str, row: dict | None) -> dict:
@@ -152,7 +163,9 @@ def portal_pat_wanted(store: Any, email: str, *, now: int | None = None) -> dict
     """위임 단언 발급에 실을 `portal_pat_wanted` — 자동이 켜져 있고, 지금 받아야 하고(due), 마지막 자동 실패가 쉼
     (HWAXRISK_PAT_AUTO_RETRY_S)보다 오래됐을 때만. 아니면 None.
 
-    꼴은 `{name, audiences, scopes, ttl_days, min_remaining_s, reason}` 이다. `reason` 은 due_reason 이고 늘 있다.
+    꼴은 `{name, audiences, scopes, ttl_days, min_remaining_s, reason, require_audiences?}` 이다. `reason` 은 due_reason 이고 늘 있다.
+    `require_audiences` 는 reason 이 audience 일 때만 있고 등록된 PAT 에 모자란 청중이다 — 게이트웨이는 호출자 PAT 에 그 청중이
+    없으면 포털을 부르지 않고 건너뛴다(바꿔 받아도 다시 모자라 되풀이만 한다).
     `min_remaining_s` 는 새 PAT 이 적어도 살아야 할 초다 — 포털은 못 미치면 내지 않고 400 source_expiring 으로 거절한다. 보통은
     PAT_MIN_REMAINING_S(등록 하한)이고, 갱신(expiring)이면 지금 PAT 보다 하루 더(`max(하한, 남은 수명 + 하한)`)다 — 원 PAT 가 곧
     끝나면 더 오래 살지 못하는 자식을 받아 갈아 끼우는 일을 포털이 막는다.
@@ -181,6 +194,8 @@ def portal_pat_wanted(store: Any, email: str, *, now: int | None = None) -> dict
     if reason == "expiring":
         minimum = max(PAT_MIN_REMAINING_S, int(row.get("pat_exp") or 0) - now + PAT_MIN_REMAINING_S)
     wanted.update(min_remaining_s=int(minimum), reason=reason)
+    if reason == "audience":
+        wanted["require_audiences"] = missing_audiences(identity.credential_pat(row))
     return wanted
 
 

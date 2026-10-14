@@ -354,13 +354,15 @@ def test_the_gateway_bridge_takes_only_a_usable_pat_that_names_the_site():
         return {"portal_pat": identity.encrypt_pat(pat).decode("ascii"), "pat_exp": now_epoch() + left, **extra}
 
     good = _fake_pat(["mcp-gateway", "step-forge"])
-    assert adapters_registry.gateway_rest_pat(row(good, 7200), margin_s=1800) == (good, None)
-    for bad, words in ((None, "등록된 포털 PAT 가 없다"), (row(good, 7200, revoked_at=1), "등록된 포털 PAT 가 없다"),
-                       (row(good, 1800), "캡처 여유 1800초 이하"),
-                       (row(_fake_pat(["mcp-gateway"]), 7200), "aud 에 게이트웨이 REST 사이트(step-forge)가 없다"),
-                       (row("not-a-jwt", 7200), "aud 에 게이트웨이 REST 사이트")):
-        pat, why = adapters_registry.gateway_rest_pat(bad, margin_s=1800)
-        assert pat is None and words in why, (bad, why)
+    assert adapters_registry.gateway_rest_pat(row(good, 7200), margin_s=1800) == (good, None, None)
+    for bad, words, code in ((None, "등록된 포털 PAT 가 없다", "no_pat"),
+                             (row(good, 7200, revoked_at=1), "등록된 포털 PAT 가 없다", "no_pat"),
+                             (row(good, 1800), "캡처 여유 1800초 이하", "short_life"),
+                             (row(_fake_pat(["mcp-gateway"]), 7200), "aud 에 게이트웨이 REST 사이트(step-forge)가 없다",
+                              "no_site_audience"),
+                             (row("not-a-jwt", 7200), "aud 에 게이트웨이 REST 사이트", "no_site_audience")):
+        pat, why, got = adapters_registry.gateway_rest_pat(bad, margin_s=1800)
+        assert pat is None and words in why and got == code, (bad, why, got)
 
 
 def test_a_source_call_that_times_out_names_the_limit_and_the_knob():
