@@ -201,6 +201,16 @@ def test_every_schema_code_resolves_and_unknown_buckets_do_not(routing):
                                                                                                      routing)
 
 
+def test_the_longest_prefix_wins_and_an_exact_match_beats_any_prefix():
+    table = {"codes": [{"match": "param.*", "mechanisms": ["mechanical.mass"]},
+                       {"match": "param.material.*", "mechanisms": ["material.property_uncertain"]},
+                       {"match": "param.material.E", "mechanisms": ["mechanical.bending"]}]}
+    assert relevance.code_mechanisms("param.material.grade", table) == ("material.property_uncertain",)
+    assert relevance.code_mechanisms("param.volume", table) == ("mechanical.mass",)
+    assert relevance.code_mechanisms("param.material.E", table) == ("mechanical.bending",)
+    assert relevance.code_mechanisms("parametric.x", table) is None
+
+
 def test_the_change_kind_is_a_net_only_when_the_line_carries_it(routing):
     assert relevance.line_mechanisms({"code": "part.teleported"}, routing) is None
     assert relevance.line_mechanisms({"code": "part.teleported", "change_kind": "dimension"}, routing) == tuple(

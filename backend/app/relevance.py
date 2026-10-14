@@ -240,8 +240,9 @@ def route_decision(*, filter_mode: str, rank1: bool, unit_kind: str, no_cards: b
             "target_off": bool(target_off), "handoff": bool(handoffs), "tier_a_pending": bool(tier_a_pending)}
     forced = [name for name, _token in FORCING_RULES if hits[name]]
     both = code.get("verdict") == "unrelated" and sweep.get("verdict") == "unrelated"
-    # 1순위의 그림자 — 그 사람이 1순위가 아니었다면(대상의 1순위 대기도 그 사람 몫이다) 9 번까지 내려왔을까.
-    rank1_shadow = bool(rank1) and filter_mode != "off" and both and not [
+    # 1순위의 그림자 — 그 사람이 1순위가 아니었다면(대상의 1순위 대기도 그 사람 몫이다) 9 번까지 내려왔을까. 잡 거르기 끔(1 번)은
+    # 빼지 않는다 — 끈 잡은 그림자도 적지 않는다.
+    rank1_shadow = bool(rank1) and both and not [
         name for name in forced if name not in ("rank1", "tier_a_pending")]
     audit: dict | None = None
     if forced:

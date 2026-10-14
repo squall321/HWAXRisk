@@ -616,7 +616,7 @@ def dual_neg_state(calib_rows: Sequence[Mapping[str, Any]], *, tier_a_closed: bo
         key = (str(row.get("unit_id")), str(row.get("agent_key")), str(row.get("record_id")))
         pairs.setdefault(key, {})[str(row.get("variant") or "fwd")] = str(row.get("judgement") or "")
     measured = [p for p in pairs.values() if p.get("fwd") in CLEAR and "rev" in p]
-    flips = sum(1 for p in measured if p["rev"] in FLAGGED)
+    flips = sum(1 for p in measured if p.get("rev") in FLAGGED)
     rate = flips / len(measured) if measured else None
     if already_on:
         state = "on"
