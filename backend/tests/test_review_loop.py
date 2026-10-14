@@ -1235,11 +1235,13 @@ def test_a_revision_change_mid_job_replans_and_carries_on_and_a_real_mismatch_ho
                                                         review_runner.limits_key(fake.limits(), review_runner.CARD_KINDS))
 
 
-def test_a_summary_only_move_replans_without_restarting_any_cell(store, monkeypatch):
+@pytest.mark.parametrize("restart", [False, True])
+def test_a_summary_only_move_replans_without_restarting_any_cell(store, monkeypatch, restart):
     """#37 · RB3-6 — 엔진이 요약 손잡이·요약 판만 올리면(전역 limits_rev 와 종류별 summary 판 · summary prompt_rev 가 바뀌고 카드
     전문가가 부르는 종류의 판은 그대로) 도는 잡은 아무 일 없이 이어 돈다 — run 의 expect 가 그 종류의 판이라 rev_mismatch 가 없고,
     그 판 올림과 함께 앱이 재기동해 새 세션이 limits 를 다시 받아도 셀 지문·계획·훑기 열쇠가 그 셀이 부르는 종류의 판만 잇기 때문에
-    어느 셀도 처음부터 돌지 않으며(reopened_n 0 · 입력 지문 그대로) 계획과 훑기를 다시 받지 않는다."""
+    어느 셀도 처음부터 돌지 않으며(reopened_n 0 · 입력 지문 그대로) 계획과 훑기를 다시 받지 않는다. 재기동 없이 도는 세션은 지난
+    limits 그대로 다음 호출을 내는데, 그 기대 판이 종류별이라 엔진이 받아 준다."""
     from app import review_runner
 
     _one(store, monkeypatch)
@@ -1258,11 +1260,16 @@ def test_a_summary_only_move_replans_without_restarting_any_cell(store, monkeypa
     fake.limits_rev = "limits-rev-2"
     fake.base_limits["limits_rev_by_kind"]["summary"] = "summary-rev-2"
     fake.base_limits["prompt_rev"]["summary"] = "cr-summary-9"
-    review_cells.recover_running(store)                                     # 판 올림과 함께 앱도 다시 떴다
-    second = rig.Rig(store, fake, clock=r.clock, boot_id="boot-b")
-    second.finish(job_id)
-    gate.set()
-    r.loop.join(30)
+    if restart:
+        review_cells.recover_running(store)                                 # 판 올림과 함께 앱도 다시 떴다
+        second = rig.Rig(store, fake, clock=r.clock, boot_id="boot-b")
+        second.finish(job_id)
+        gate.set()
+        r.loop.join(30)
+    else:
+        gate.set()
+        r.loop.join(30)
+        r.finish(job_id)
     assert rig.state(store, job_id) == "completed"
     assert _calls(store, job_id, error_code="rev_mismatch") == []
     assert {(c["state"], c["reopened_n"]) for c in _cells(store, key, SEAL)} == {("reviewed", 0)}
