@@ -473,24 +473,36 @@ def offcard_cut(result: Mapping[str, Any]) -> bool | None:
     return True if quality.get("truncated") is True else None
 
 
-def ctx_too_small_text(lim: Mapping[str, Any], small: Mapping[str, Any], runnable: Mapping[str, Any]) -> str:
-    """ctx_too_small 보류의 글 — 엔진이 그 까닭(`reason`)과 고칠 손잡이를 말한다(RB3-14): window(창이 모자라다 — 필요한 창
-    need_ctx_tokens, LLM 창 손잡이) · output_cap(출력 상한이 행 한 줄도 못 낸다 — 필요한 출력 상한 need_max_tokens) · output_too_large
-    (출력 상한이 창보다 크다 — 줄인다). 까닭이 없는 옛 엔진은 창 갈래로 읽는다."""
-    reason = str(small.get("reason") or "window")
-    head = (f"이 박스의 창 {int(lim.get('ctx_tokens') or 0):,} 토큰({lim.get('ctx_source')})으로는 카드 대조 호출을 짤 수 없다"
-            f"(까닭 {reason} · runnable {dict(runnable)})")
+def _ctx_fix(reason: str, small: Mapping[str, Any]) -> str:
     if reason == "output_cap":
         need = small.get("need_max_tokens")
-        fix = (" — 출력 상한이 행 한 줄도 못 낸다(창을 키워도 소용없다). 에이전트 서버의 CARD_REVIEW_MAX_TOKENS(없으면"
-               " DELIB_MAX_TOKENS)를 " + (f"{int(need):,} 토큰 이상으로" if need else "") + " 올린 뒤 재개한다")
-    elif reason == "output_too_large":
-        fix = " — 출력 상한이 창보다 크다. 에이전트 서버의 CARD_REVIEW_MAX_TOKENS 또는 DELIB_MAX_TOKENS 를 줄인 뒤 재개한다"
-    else:
-        need = small.get("need_ctx_tokens")
-        fix = ((f" — 창이 {int(need):,} 토큰 이상인 LLM 이 필요하다" if need else "")
-               + f". 다시 쪼개지 않는다(D-22) — {CTX_KNOB}·VLLM_MODEL 을 고친 뒤 재개한다")
-    return f"{head}{fix}. {small.get('message') or ''}".rstrip()
+        return ("출력 상한이 행 한 줄도 못 낸다(창을 키워도 소용없다). 에이전트 서버의 CARD_REVIEW_MAX_TOKENS(없으면"
+                " DELIB_MAX_TOKENS)를 " + (f"{int(need):,} 토큰 이상으로 " if need else "") + "올린 뒤 재개한다")
+    if reason == "output_too_large":
+        return "출력 상한이 창보다 크다. 에이전트 서버의 CARD_REVIEW_MAX_TOKENS 또는 DELIB_MAX_TOKENS 를 줄인 뒤 재개한다"
+    need = small.get("need_ctx_tokens")
+    return ((f"창이 {int(need):,} 토큰 이상인 LLM 이 필요하다. " if need else "")
+            + f"다시 쪼개지 않는다(D-22) — {CTX_KNOB}·VLLM_MODEL 을 고친 뒤 재개한다")
+
+
+def ctx_too_small_text(lim: Mapping[str, Any], small: Mapping[str, Any], runnable: Mapping[str, Any],
+                       cell_kinds: Sequence[str] = ()) -> str:
+    """ctx_too_small 보류의 글 — 엔진이 셀 종류마다 말한 까닭(`reason_by_kind`, 없으면 `reason` — RB3-14)과 고칠 손잡이: window(창이
+    모자라다 — 필요한 창 need_ctx_tokens, LLM 창 손잡이) · output_cap(출력 상한이 행 한 줄도 못 낸다 — 필요한 출력 상한
+    need_max_tokens) · output_too_large(출력 상한이 창보다 크다 — 줄인다). 까닭이 없는 옛 엔진은 창 갈래로 읽는다. 까닭이 같은 종류는
+    한 문장으로 묶는다."""
+    by_kind = small.get("reason_by_kind") if isinstance(small.get("reason_by_kind"), Mapping) else {}
+    short = [k for k in (cell_kinds or list(by_kind) or list(runnable)) if runnable.get(k) is False or k in by_kind]
+    groups: dict[str, list[str]] = {}
+    for kind in short:
+        groups.setdefault(str(by_kind.get(kind) or small.get("reason") or "window"), []).append(str(kind))
+    if not groups:
+        groups[str(small.get("reason") or "window")] = []
+    head = (f"이 박스의 창 {int(lim.get('ctx_tokens') or 0):,} 토큰({lim.get('ctx_source')})으로는 카드 대조 호출을 짤 수 없다"
+            f"(runnable {dict(runnable)})")
+    parts = [f"{'·'.join(kinds) + ' ' if kinds else ''}까닭 {reason} — {_ctx_fix(reason, small)}"
+             for reason, kinds in groups.items()]
+    return f"{head}. {' / '.join(parts)}. {small.get('message') or ''}".rstrip()
 
 
 def _job_of(row: Mapping[str, Any]) -> dict:
@@ -2144,7 +2156,7 @@ class ReviewLoop:
         if lim.get("ctx_too_small") or any(runnable.get(k) is False for k in cell_kinds):
             small = lim.get("ctx_too_small") if isinstance(lim.get("ctx_too_small"), Mapping) else {}
             for job in live:
-                self.hold(job["id"], "ctx_too_small", ctx_too_small_text(lim, small, runnable))
+                self.hold(job["id"], "ctx_too_small", ctx_too_small_text(lim, small, runnable, cell_kinds))
             self._forget_limits(email)
             return []
         if lim.get("ctx_retrying"):

@@ -739,18 +739,23 @@ def test_a_window_too_small_for_any_call_holds_ctx_too_small_before_any_call(sto
     assert f"{need:,}" in row["error"] and fake.runs == 0 and fake.calls("pack") == []
 
 
-@pytest.mark.parametrize(("reason", "words"), [
-    ("output_cap", ("까닭 output_cap", "CARD_REVIEW_MAX_TOKENS(없으면 DELIB_MAX_TOKENS)를 5,200 토큰 이상으로 올린")),
-    ("output_too_large", ("까닭 output_too_large", "출력 상한이 창보다 크다", "줄인 뒤 재개한다")),
+@pytest.mark.parametrize(("by_kind", "words"), [
+    ({"sweep": "output_cap", "verdict": "output_cap", "offcard": "output_cap", "noinput": "output_cap"},
+     ("sweep·verdict·offcard·noinput 까닭 output_cap", "CARD_REVIEW_MAX_TOKENS(없으면 DELIB_MAX_TOKENS)를 5,200 토큰 이상으로 올린")),
+    ({"sweep": "output_too_large", "verdict": "output_too_large", "offcard": "output_too_large", "noinput": "output_too_large"},
+     ("까닭 output_too_large", "출력 상한이 창보다 크다", "줄인 뒤 재개한다")),
+    ({"sweep": "window", "verdict": "output_cap", "offcard": "output_cap", "noinput": "output_cap"},
+     ("sweep 까닭 window", "verdict·offcard·noinput 까닭 output_cap", "창이 12,700 토큰 이상인 LLM", "5,200 토큰 이상으로")),
 ])
-def test_a_ctx_too_small_hold_names_its_reason_and_the_knob_to_fix(store, monkeypatch, reason, words):
-    """엔진의 ctx_too_small 까닭(RB3-14)마다 보류 글이 고칠 손잡이를 말한다 — 출력 상한이 행 한 줄도 못 내면 출력 상한을 필요한 값
-    이상으로 올리고(창을 키워도 소용없다), 출력 상한이 창보다 크면 줄인다. 창이 모자라면(window) 필요한 창과 창 손잡이다."""
+def test_a_ctx_too_small_hold_names_its_reason_and_the_knob_to_fix(store, monkeypatch, by_kind, words):
+    """엔진의 ctx_too_small 까닭(RB3-14 — 셀 종류마다 reason_by_kind)마다 보류 글이 고칠 손잡이를 말한다 — 출력 상한이 행 한 줄도
+    못 내면 출력 상한을 필요한 값 이상으로 올리고(창을 키워도 소용없다), 출력 상한이 창보다 크면 줄인다. 창이 모자라면(window)
+    필요한 창과 창 손잡이다. 까닭이 같은 종류는 한 문장으로 묶인다."""
     key = rig.target(store)
     job_id = rig.job(store, key, scope={"agents": [SEAL]})
     limits = fre.load("limits_ctx_too_small.json")
-    limits["ctx_too_small"] = {"reason": reason, "need_ctx_tokens": None,
-                               "need_max_tokens": 5200 if reason == "output_cap" else None, "message": "엔진의 말(가짜)"}
+    limits["ctx_too_small"] = {"reason": "window", "reason_by_kind": by_kind, "need_ctx_tokens": 12700,
+                               "need_max_tokens": 5200, "message": "엔진의 말(가짜)"}
     fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")}, limits=limits)
     rig.Rig(store, fake).tick()
     row = rig.job_row(store, job_id)
