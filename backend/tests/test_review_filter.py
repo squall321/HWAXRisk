@@ -14,7 +14,7 @@ import threading
 
 import pytest
 
-from app import config, relevance, review_cells, routes, units
+from app import config, relevance, review_cells, review_verify, routes, units
 from tests import factories
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
@@ -666,6 +666,12 @@ def test_a_low_floor_samples_one_cell_per_domain_and_a_later_miss_reopens_what_a
     assert (audit["n_audit"], audit["sampled"], audit["floor_met"]) == (4, 2, False)
 
     monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 3)               # 셋째 잡의 바닥 — 그 잡이 거른 b2 한 건을 다시 연다
+    # 보충 표본은 끝난 잡이 거른 셀(left)까지 표본 점수 순으로 고른다(반대 검토 MEDIUM 7) — 대상 열쇠마다 점수가 달라 b2 가 첫째가
+    # 되는 잡 소금을 고른다(잡이 만들 때 얼린다). 그러지 않으면 셋 가운데 무엇을 고르는지가 실행마다 바뀐다.
+    pool = [(c["unit_id"], c["agent_key"]) for c in left] + [(b2, MEM2)]
+    salt = next(f"s{i}" for i in range(500) if min(pool, key=lambda p, i=i: (review_verify.sample_score(
+        "filter_audit", key, *p, salt=f"s{i}"), p)) == (b2, MEM2))
+    monkeypatch.setattr(review_verify, "SAMPLE_SALT", salt)
     fake.noinput_q1[b2] = ["yes"]                                     # 끝까지 보니 영향 있음 — 거른 셀이 걸림을 놓쳤다
     done({"agents": [MEM2], "unit_ids": [b2]})
     audited = _cell(store, key, b2, MEM2)
