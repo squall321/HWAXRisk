@@ -1282,3 +1282,22 @@ rebase 때 부딪치지 않게).
   rev 행이 있는 것이 분모, 그 가운데 rev 가 FAIL·WARNING 인 것이 분자, 비율이 5% 를 **넘으면**(`>`) 켠다. 1순위 셀이 다 종결되기
   전이거나 잴 카드가 0 이면 '미측정' 이다. 한 번 켜지면(그 대상의 셀에 `sample_json.dual_neg.on` 이 섰으면) 꺼지지 않는다 — 1순위
   셀이 사람의 다시로 다시 돌아 비율이 내려가도 그대로다. 같은 카드라도 단위가 다르면 따로 센다.
+
+### M3C-6. 변이 검사와 rebase 할 일 — 단계 A 끝
+- **변이.** `git archive` 사본 한 곳에서 66개(결정표 24 · 훑기 신호 5 · 코드 신호 10 · 놓침 판정 9 · 이중 판정 계획 12 · 켜짐 6)를
+  하나씩 넣고 그 파일의 시험을 돌렸다. 단언 실패로 붉어진 것만 죽음으로 셌다(junit 의 실패 메시지가 `AssertionError`·`assert` 로
+  시작하는 것). 첫 판은 62 죽음 · 살아남음 2 · 단언 아닌 실패 1 · 분류 실수 1 이었다 — 살아남은 둘은 죽은 조건(1순위 그림자의
+  '잡 거르기 끔' — 강제 줄 목록이 이미 막는다, 지웠다)과 시험 없는 규칙(가장 긴 접두 — 실제 표에 접두가 하나뿐이다, 시험을
+  더했다), 단언 아닌 실패는 보정 비율의 `KeyError`(분모 조건을 빼면 틀린 분모가 단언에 걸리게 `.get` 으로 읽는다)였다. 고친 뒤
+  둘째 판 66/66 이 단언으로 죽었고 사본은 HEAD 와 바이트로 같다.
+- **가지 `m3` 로 rebase 하면.** ① `tests/test_relevance.py` 의 `tax` · `approved_tax` 픽스처가 `TaxonomyDouble` 대신 `app.taxonomy`
+  를 쓰게 한다(`approved_tax` 는 `mech-owners.v1.json` 이 draft 인 동안 `review_status` 만 바꾼 사본이 필요하다 — `mech_owners_meta`
+  를 덮는 얇은 감싸개). ② `TaxonomyDouble` 과 `tests/fixtures/relevance/mech_owners_draft.json` 을 지운다. ③ `taxonomy.VOCAB_ASSETS`
+  에 `change-routing` 한 줄(M3.md 3.2 — S3-2 가 먼저). ④ 시험의 `52`(활성 메커니즘 수) · `tax-1.2` 가 진짜 표에서도 맞는지 본다 —
+  배정표가 초안과 달라졌으면 XU5 의 '33종 전부 어느 영역엔가 닿는다' 와 '15영역이 다 닿는다' 가 그 차이를 잡는다.
+  운영 코드(`relevance.py`)는 고치지 않는다 — 이음매가 `_taxonomy()` 하나다.
+- **전체 시험(공유 잠금 아래 한 번).** 2,540개(main 의 2,440 + 이 가지 100) 가운데 붉은 것은 하나다 —
+  `test_card_review_request_contract.py::test_run_bodies_built_from_real_units_and_packs_pass_the_engines_validator`. 형제 엔진의
+  HEAD 가 `8e1e3d4`(엔진 꾸러미 E3 진행 중)로 올라 검증기가 `limits["noinput"]["items_max"]` 를 읽는데, 그 시험이 넘기는 엔진
+  계약 예제 `limits_1m.json` 에는 아직 `noinput` 칸이 없다(E3-10 이 계약 예제를 다시 뜬다). main `3aea93b` 를 같은 엔진에 대도
+  똑같이 붉고, 이 가지를 기준 엔진 `412edde`(git archive 사본)에 대면 초록이다 — 이 가지 탓이 아니다. ruff 는 깨끗하다.
