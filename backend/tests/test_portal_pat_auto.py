@@ -123,6 +123,22 @@ def test_the_switch_turns_auto_off_and_on(client, box):
     assert client.put("/api/me/portal-pat-auto", json={"enabled": False}).status_code == 401
 
 
+def test_turning_auto_back_on_clears_the_last_failure_and_its_hold(client, box):
+    """꺼 두었던 자동 등록을 다시 켜면 마지막 자동 실패와 그 쉼을 지운다 — 다시 켠 사람은 곧바로 다시 바란다(R3-1). 켜져 있는데 다시
+    켜는 것(같은 값)은 쉼을 지우지 않는다 — 실패 뒤 쉼을 되풀이 요청으로 건너뛰지 않게. 마지막 성공 기록은 그대로다."""
+    store = get_store()
+    store.note_portal_pat_registered(EMAIL, "gateway-exchange", at=now_epoch() - 86400)
+    store.note_portal_pat_error(EMAIL, "register-pat_invalid: 앞선 시도", kind="final")
+    assert client.put("/api/me/portal-pat-auto", json={"enabled": True}, headers=AUTH).json()["last_error"] is not None
+    assert "portal_pat_wanted" not in _mint(client, GW)                         # 켜져 있던 채 다시 켰다 — 쉼 그대로
+    client.put("/api/me/portal-pat-auto", json={"enabled": False}, headers=AUTH)
+    assert _auto(client)["last_error"] is not None                              # 끄는 것은 기록을 지우지 않는다
+    auto = client.put("/api/me/portal-pat-auto", json={"enabled": True}, headers=AUTH).json()
+    assert (auto["last_error"], auto["last_error_kind"], auto["last_error_at"]) == (None, None, None)
+    assert auto["last_source"] == "gateway-exchange" and auto["last_at"] is not None
+    assert _mint(client, GW)["portal_pat_wanted"]["reason"] == "absent"
+
+
 def test_put_records_the_source_and_clears_the_last_auto_error(client, box):
     get_store().note_portal_pat_error(EMAIL, "exchange-403: 원 PAT 가 기록되지 않았다")
     assert _auto(client)["last_error"].startswith("exchange-403")

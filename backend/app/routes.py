@@ -583,7 +583,8 @@ def put_portal_pat(body: PortalPatBody, background: BackgroundTasks,
 
 @router.put("/me/portal-pat-auto")
 def put_portal_pat_auto(body: PortalPatAutoBody, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """포털 PAT 자동 등록 스위치 — 끄면 화면도 게이트웨이도 그 사람의 PAT 를 저절로 받지 않는다. 답은 portal_pat.auto 와 같은 꼴."""
+    """포털 PAT 자동 등록 스위치 — 끄면 화면도 게이트웨이도 그 사람의 PAT 를 저절로 받지 않는다. 꺼져 있던 것을 켜면 마지막 자동
+    실패와 그 쉼을 지워 곧바로 다시 바란다(R3-1). 답은 portal_pat.auto 와 같은 꼴."""
     owner_sub = _require_user(ident)
     store = get_store()
     store.set_portal_pat_auto(owner_sub, body.enabled)

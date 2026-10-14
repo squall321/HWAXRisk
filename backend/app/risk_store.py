@@ -1123,8 +1123,11 @@ class RiskStore:
         return dict(row)
 
     def set_portal_pat_auto(self, owner_sub: str, enabled: bool) -> None:
-        """자동 등록 스위치(PUT /api/me/portal-pat-auto) — 기록 칸은 그대로 둔다."""
-        self._upsert_prefs(owner_sub, "portal_pat_auto = excluded.portal_pat_auto",
+        """자동 등록 스위치(PUT /api/me/portal-pat-auto). 꺼져 있던 것을 켜면 마지막 자동 등록 실패와 그 쉼을 지운다 — 다시 켠 사람은
+        곧바로 다시 바란다(R3-1). 그 밖의 기록 칸(마지막 성공)은 그대로 둔다."""
+        cleared = "".join(f", {col} = CASE WHEN _user_prefs.portal_pat_auto = 0 AND excluded.portal_pat_auto = 1 THEN NULL"
+                          f" ELSE _user_prefs.{col} END" for col in ("auto_error", "auto_error_kind", "auto_error_at"))
+        self._upsert_prefs(owner_sub, "portal_pat_auto = excluded.portal_pat_auto" + cleared,
                            (owner_sub, 1 if enabled else 0, None, None, None, None, None))
 
     def note_portal_pat_registered(self, owner_sub: str, source: str, *, at: int | None = None) -> None:
