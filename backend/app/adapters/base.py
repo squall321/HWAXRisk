@@ -193,6 +193,10 @@ class FallbackRestClient:
     부르지 않고 곧바로 실패를 돌려준다. 401·403·404 같은 거절은 호출마다 다시 묻는다(그 경로만의 거절일 수 있다). 넘어갈 곳이 없으면
     다리의 실패를 그대로 돌려주되 호출 행의 error 앞에 다리임을 붙인다. 처음 실패한 다리 호출의 HTTP 상태·오류는 `bridge_failure` 에,
     실제로 답을 받으러 간 자격의 순서는 `used` 에 남는다(캡처 응답 credentials.rest·rest_bridge, 캡처 잡의 error_json.rest_bridge).
+
+    엮은 실패 답(자격 이름·앞선 다리 실패를 붙인 것·건너뛴 것)에는 `own_error` 가 붙는다 — 그 호출이 스스로 받은 오류이고, 건너뛰어
+    부르지 않았으면 None 이다. CallRecorder 는 이것만 보고 시간 초과 글을 쓴다(R3-3 — 앞선 다리의 ReadTimeout 이 글에 섞였다고 0초 만에
+    건너뛴 행이나 서비스 PAT 의 404 를 '120초 동안 응답이 없었다' 로 바꿔 적었다).
     """
 
     def __init__(self, primary: RestGetClient, fallback: RestGetClient | None, *,
@@ -233,16 +237,17 @@ class FallbackRestClient:
                 # 다리 자체가 죽었다 — 이 캡처의 남은 호출은 다리를 부르지 않는다.
                 self._skip_primary, self._skip_reason = True, str(bridge.get("error"))
             if self.fallback is None:
-                return {**bridge, "error": f"{self.primary_kind} {bridge.get('error')}"}
+                return {**bridge, "error": f"{self.primary_kind} {bridge.get('error')}", "own_error": bridge.get("error")}
         elif self.fallback is None:
-            return {"ok": False, "http_status": None,
+            return {"ok": False, "http_status": None, "own_error": None,
                     "error": f"{self.primary_kind} 건너뜀 — 이 캡처에서 앞서 다리가 {self._skip_reason}"}
         self._mark(self.fallback_kind)
         reply = self.fallback.get(path, params)
         if reply.get("ok"):
             return reply
         before = (bridge or {}).get("error") or (self.bridge_failure or {}).get("error")
-        return {**reply, "error": f"{self.fallback_kind} {reply.get('error')} (앞서 {self.primary_kind} {before})"}
+        return {**reply, "error": f"{self.fallback_kind} {reply.get('error')} (앞서 {self.primary_kind} {before})",
+                "own_error": reply.get("error")}
 
     def close(self) -> None:
         self.primary.close()
@@ -328,12 +333,19 @@ class CallRecorder:
         call_id = self._next_call_id()
         ok = bool(reply.get("ok"))
         error = None if ok else str(reply.get("error") or "unknown_error")
-        if not ok and "ReadTimeout" in f"{error} {reply.get('detail') or ''}":
+        # 이 답 **자신의** 오류 — FallbackRestClient 가 엮은 답은 `own_error` 에 그 호출이 받은 것만 싣는다(건너뛴 행은 None — 부르지도
+        # 않았다). 글에 앞선 다리의 ReadTimeout 이 섞여 있어도 이 행이 기다린 것은 아니다(R3-3). HTTP 거절의 본문(detail)에 그 낱말이
+        # 있어도 전송 시간 초과가 아니다.
+        own = reply.get("own_error", error)
+        if not ok and isinstance(own, str) and own.startswith("transport_error") \
+                and "ReadTimeout" in f"{own} {reply.get('detail') or ''}":
             # 침묵 한도에 걸렸다 — 값과 손잡이를 호출 행에 적는다('transport_error' 만으로는 어느 한도인지 모른다).
             limit = getattr(self.rest if channel == "rest" else self.mcp, "timeout", None)
             seconds = getattr(limit, "read", limit)
             waited = f"{seconds:g}초" if isinstance(seconds, (int, float)) else "침묵 한도"
-            error = f"transport_error: 소스 {logged_tool} 가 {waited} 동안 응답이 없었다(HWAXRISK_SOURCE_CALL_TIMEOUT_S)"
+            timed_out = f"transport_error: 소스 {logged_tool} 가 {waited} 동안 응답이 없었다(HWAXRISK_SOURCE_CALL_TIMEOUT_S)"
+            # 엮은 답이면 그 호출의 몫만 바꾼다 — 자격 이름과 앞선 다리 실패는 그대로 남는다.
+            error = error.replace(own, timed_out, 1) if "own_error" in reply else timed_out
         # 응답 계약 검사(§2.13.1) — 위반은 예외가 아니라 행에 남는 표기다.
         # 계약표는 맨이름 키다 — 실이름으로 찾으면 전부 '계약 없는 도구' 가 되어 검사가 조용히 꺼진다.
         contract = check_contract(tool, reply.get("result")) if ok else {

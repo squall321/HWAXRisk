@@ -525,6 +525,51 @@ def test_a_source_call_that_times_out_names_the_limit_and_the_knob():
     assert down.call("mcp", "project_tree", {}, source_kind="mcad")["error"] == "transport_error"
 
 
+def test_only_a_calls_own_read_timeout_is_written_as_the_silence_limit(tmp_path):
+    """호출 행의 '120초 동안 응답이 없었다' 는 그 호출 **자신**이 침묵 한도에 걸렸을 때만이다(R3-3). 다리 시간 초과 뒤 0초 만에 건너뛴
+    행과 서비스 PAT 의 404 는 글에 앞선 다리의 ReadTimeout 이 섞여 있어도 제 글(건너뛴 까닭·그 상태)을 지킨다. HTTP 거절 본문에 그
+    낱말이 있어도 전송 시간 초과가 아니다."""
+    import types
+
+    state: dict = {"gw.test": "timeout", "heax.test": 404}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        answer = state[request.url.host]
+        if answer == "timeout":
+            raise httpx.ReadTimeout("no bytes", request=request)
+        return httpx.Response(answer, json={"detail": "upstream ReadTimeout"})
+
+    def recorder(service_pat: str | None) -> CallRecorder:
+        settings = types.SimpleNamespace(gateway_mcp="https://gw.test/mcp", heax_base="https://heax.test", data_dir=tmp_path)
+        channels = adapters_registry.clients_from_settings(
+            settings, {"HWAXRISK_HEAX_SERVICE_PAT": service_pat} if service_pat else {}, gateway_pat="user-pat",
+            http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+        return CallRecorder("cafe0000deadbeef", rest=channels["rest"])
+
+    silent = f"transport_error: 소스 GET {TREE} 가 120초 동안 응답이 없었다(HWAXRISK_SOURCE_CALL_TIMEOUT_S)"
+    # ① 서비스 PAT 없음 — 다리 자신의 시간 초과는 한도를 말하고(자격 이름은 남는다), 그 뒤 건너뛴 행은 부르지 않았다고 말한다.
+    rec = recorder(None)
+    first, skipped = (rec.call("rest", TREE, {}, source_kind="mcad") for _ in range(2))
+    assert skipped["error"] == "user_pat_gateway 건너뜀 — 이 캡처에서 앞서 다리가 transport_error: ReadTimeout"
+    assert first["error"] == f"user_pat_gateway {silent}"
+    assert [c["error"] for c in rec.calls] == [first["error"], skipped["error"]]
+    # ② 다리가 시간 초과로 죽은 뒤 서비스 PAT 가 404 로 거절했다 — 그 행은 404 다(다리를 건너뛴 다음 호출도).
+    rec = recorder("service-pat")
+    replies = [rec.call("rest", TREE, {}, source_kind="mcad") for _ in range(2)]
+    for reply in replies:
+        assert reply["http_status"] == 404
+        assert reply["error"] == "service_pat http_404 (앞서 user_pat_gateway transport_error: ReadTimeout)", reply
+    # ③ 서비스 PAT 자신이 시간 초과면 그 몫만 한도로 바뀐다 — 앞선 다리 거절은 남는다.
+    state.update({"gw.test": 403, "heax.test": "timeout"})
+    assert recorder("service-pat").call("rest", TREE, {}, source_kind="mcad")["error"] == (
+        f"service_pat {silent} (앞서 user_pat_gateway http_403)")
+    # ④ 게이트웨이 504 본문에 ReadTimeout 이란 낱말이 있어도 전송 시간 초과가 아니다.
+    state["heax.test"] = 504
+    plain = CallRecorder("cafe0000deadbeef", rest=RestGetClient(
+        "https://heax.test", "service-pat", client=httpx.Client(transport=httpx.MockTransport(handler))))
+    assert plain.call("rest", TREE, {}, source_kind="mcad")["error"] == "http_504"
+
+
 # ---------------------------------------------------------------- 게이트웨이 발견(§2.13.2)
 def _tools_map_client(body: dict, seen: list | None = None) -> httpx.Client:
     def handler(request: httpx.Request) -> httpx.Response:
