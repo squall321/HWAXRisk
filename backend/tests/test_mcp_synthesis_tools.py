@@ -98,6 +98,8 @@ def test_an_issue_panel_result_is_not_submitted_from_claude(store, monkeypatch):
     engine = IssuePanelEngine(store)
     runner.run_panel(store, config.settings, engine, runner.claim_next_job(store, config.settings, engine=engine))
     panel_id = store.query_one("SELECT id FROM rr_panels WHERE target_key = ? AND kind = 'issue'", (key,))["id"]
+    before = dict(store.query_one("SELECT * FROM rr_panels WHERE id = ?", (panel_id,)))
     monkeypatch.setattr(srv.entry, "require_delegate", lambda _identity: OWNER)
     out = srv.risk_submit_panel_result(panel_id, "mcp", "결정문", [], actor=OWNER)
-    assert out["error"] == "issue_panel_web_only"
+    assert out.get("error") == "issue_panel_web_only", out
+    assert dict(store.query_one("SELECT * FROM rr_panels WHERE id = ?", (panel_id,))) == before
