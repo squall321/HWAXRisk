@@ -43,7 +43,7 @@ models = {
             "extra.domains": cr.DomainItem, "extra.mechanisms": cr.MechItem, "extra.known": cr.KnownItem,
             "extra.missing": cr.MissingItem, "extra.search": cr.SearchSpec, "summary": cr.SummaryInput,
             "summary.scope": cr.SummaryScope, "summary.rows": cr.SummaryRow, "summary.blocks": cr.SummaryBlock,
-            "expect": cr.Expect},
+            "expect": cr.RunExpect},
     "plan": {"": cr.PlanRequest, "cards": cr.PlanCard, "units": cr.PlanUnit, "expect": cr.Expect},
     "pack": {"": cr.PackRequest},
 }

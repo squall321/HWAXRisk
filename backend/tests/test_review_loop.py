@@ -1191,7 +1191,8 @@ def test_a_revision_change_mid_job_replans_and_carries_on_and_a_real_mismatch_ho
     if change == "prompt":
         fake.base_limits["prompt_rev"]["verdict"] = "cr-verdict-next"          # 지금 판(계약 예제)과 다른 판
     elif change == "limits":
-        fake.limits_rev = "limits-rev-2"
+        fake.limits_rev = "limits-rev-2"                                       # 판정 손잡이가 바뀌었다 — 전체 판과 verdict 판
+        fake.base_limits["limits_rev_by_kind"]["verdict"] = "verdict-rev-2"
     else:
         fake.error_n = 1
         fake.error = {"code": "rev_mismatch", "message": "판이 다르다(가짜)", "infra": False, "retryable": False}
@@ -1209,7 +1210,7 @@ def test_a_revision_change_mid_job_replans_and_carries_on_and_a_real_mismatch_ho
     assert {(c["state"], c["reopened_n"]) for c in _cells(store, key, SEAL)} == {("reviewed", 1)}
     head = _head(store, key, SEAL)
     assert (head["prompt_rev"], head["limits_rev"]) == (review_runner.prompt_key(fake.limits(), review_runner.CARD_KINDS),
-                                                        fake.limits_rev)
+                                                        review_runner.limits_key(fake.limits(), review_runner.CARD_KINDS))
 
 
 def test_a_summary_only_move_replans_without_restarting_any_cell(store, monkeypatch):

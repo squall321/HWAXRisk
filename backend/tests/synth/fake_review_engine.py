@@ -108,7 +108,8 @@ RUN_SHAPE: dict[str, frozenset[str]] = {
     "extra.domains": frozenset({"key", "label"}),
     "extra.mechanisms": frozenset({"code", "label"}),
     "extra.known": frozenset({"alias", "judgement", "why"}),
-    "expect": frozenset({"prompt_rev", "limits_rev"}),
+    # run 의 기대 판 — limits_rev_kind 는 그 종류의 판(limits_rev_by_kind[kind] — RB3-6, 엔진 RunExpect). plan 은 받지 않는다.
+    "expect": frozenset({"prompt_rev", "limits_rev", "limits_rev_kind"}),
 }
 PLAN_SHAPE: dict[str, frozenset[str]] = {
     "": frozenset({"cards", "units", "expect"}) | IDENT_FIELDS,
@@ -333,10 +334,14 @@ class FakeReviewEngine:
         if self.ctx_unknown:
             return self._reject(503, "ctx_unknown", "LLM 서버에 창 크기를 묻지 못해 다시 묻는 중이다(가짜)",
                                 retry_after_s=60, infra=True, retryable=True)
-        want = (body.get("expect") or {}).get("limits_rev")
-        if want not in (None, self.limits_rev):
-            return self._reject(409, "rev_mismatch", f"요청이 기대한 limits_rev({want})가 이 서버의 판({self.limits_rev})과"
-                                " 다르다", limits_rev=self.limits_rev, expect=body.get("expect"))
+        expect = body.get("expect") or {}
+        want = expect.get("limits_rev")
+        kind_rev = self.kind_rev(body.get("kind")) if route == "run" else None
+        if want not in (None, self.limits_rev) or (route == "run" and expect.get("limits_rev_kind") not in (None, kind_rev)):
+            # 엔진 prepare 처럼 준 것만 견주고, 거절에 지금 판(전체 · 그 종류)과 받은 expect 를 되비춘다(RB3-6).
+            return self._reject(409, "rev_mismatch", f"요청이 기대한 판({expect})이 이 서버의 판(limits_rev={self.limits_rev},"
+                                f" limits_rev_kind={kind_rev})과 다르다", limits_rev=self.limits_rev,
+                                **({"limits_rev_kind": kind_rev} if route == "run" else {}), expect=expect)
         if route == "run":
             # 엔진 prepare 의 종류별 요청 검사(재설계 M3 계약 2·6) — 입력 결손 호출은 unit.missing 이 있어야 하고, 전문가 단위 결측
             # extra.missing 은 훑기에만 싣는다.
@@ -350,7 +355,7 @@ class FakeReviewEngine:
             if want_prompt not in (None, have_prompt):
                 return self._reject(409, "rev_mismatch", f"요청이 기대한 판(prompt_rev={want_prompt})이 이 서버의 판"
                                     f"(prompt_rev={have_prompt})과 다르다", prompt_rev=have_prompt,
-                                    limits_rev=self.limits_rev, expect=body.get("expect"))
+                                    limits_rev=self.limits_rev, limits_rev_kind=kind_rev, expect=body.get("expect"))
         if route == "plan":
             return httpx.Response(200, json=self.plan(body))
         return self._run(body)
@@ -360,6 +365,10 @@ class FakeReviewEngine:
         return httpx.Response(status, json={"code": code, "message": message, **extra})
 
     # -- 단발 ------------------------------------------------------------------------------
+    def kind_rev(self, kind: Any) -> str | None:
+        """그 종류의 판(limits_rev_by_kind[kind] — RB3-6). 시험이 base_limits 의 표를 바꿔 한 종류의 판만 올린다."""
+        return (self.base_limits.get("limits_rev_by_kind") or {}).get(str(kind))
+
     def limits(self) -> dict:
         out = copy.deepcopy(self.base_limits)
         out.update({"ctx_source": "fallback" if self.ctx_unknown else self.ctx_source, "ctx_retrying": self.ctx_unknown,
@@ -567,7 +576,7 @@ class FakeReviewEngine:
         prompt_rev = self.base_limits["prompt_rev"][kind]
         meta = {"model": self.base_limits.get("model"), "ctx_tokens": self.base_limits["ctx_tokens"],
                 "ctx_source": self.ctx_source, "prompt_rev": prompt_rev, "norm_rev": self.base_limits["norm_rev"],
-                "limits_rev": self.limits_rev,
+                "limits_rev": self.limits_rev, "limits_rev_kind": self.kind_rev(kind),
                 "input_sha": hashlib.sha256(json.dumps(body, ensure_ascii=False, sort_keys=True).encode()).hexdigest(),
                 "prompt_chars": len(json.dumps(body, ensure_ascii=False)),
                 "usage": {"llm_calls": 1, "tokens_in": 1000, "tokens_out": 100,
@@ -575,7 +584,7 @@ class FakeReviewEngine:
                 "finish_reason": ("length" if (self.truncated or cut == "length") and kind == "verdict" else "stop"),
                 "llm_ms": [0],
                 "soft_over": False, "basis": "noinput" if kind == "noinput" else "cards" if (order or digest) else "role_only",
-                "bg_dropped": 0,
+                "bg_dropped": 0, "clipped": {},
                 "order_effective": not (kind == "verdict" and variant == "rev" and len(order) < 2),
                 "aliases": {"cards": {a: cards[a]["record_id"] for a in order},
                             "lines": {a: x["ref"] for a, x in lines.items()}, "units": units}}
@@ -593,6 +602,9 @@ class FakeReviewEngine:
             missing = ["more"]
             quality.update(truncated=True, tail_broken=True, maybe_more=None)
             meta["finish_reason"] = "length"
+        # 엔진 RB3-1 — 걸린 줄은 밀려나지 않고, 부딪친 줄(checks.dup_conflict)과 보충이 갈아 낀 줄(flipped_from)을 센다(늘 실린다).
+        quality.update(dup_conflict=sum(1 for r in rows if (r.get("checks") or {}).get("dup_conflict")),
+                       flipped=sum(1 for r in rows if r.get("flipped_from")))
         if self.queued_ms is not None:
             meta["queued_ms"] = int(self.queued_ms)
         return {"kind": kind, "variant": variant, "rows": rows, "missing": missing, "extras": extras,
@@ -651,7 +663,7 @@ class FakeReviewEngine:
             row.update(from_attempt=1, checks={
                 "refs": "ok" if cited or impact != "yes" else "missing", "quote": "ok", "quote_sid": sid,
                 "nums_unsourced": [], "coerced": [],
-                "mech": "no_list" if not codes else "missing" if impact == "yes" and not mech else "ok"})
+                "mech": "no_list" if not codes else "missing" if impact == "yes" and not mech else "ok", "why": "ok"})
             q1.append(row)
         cap = int(self.base_limits["noinput"]["items_max"])
         dropped = max(0, len(q1) - cap)
@@ -674,7 +686,8 @@ class FakeReviewEngine:
                 self.noinput_more[uid] = left - 1
         more = "yes" if left else "no"
         rows = q1 + q2 + [{"t": "more", "more": more, "from_attempt": 1, "checks": {"coerced": []}}]
-        return rows, {"ok": len(q1), "dropped_over_cap": dropped, "maybe_more": len(q1) >= cap or more == "yes"}
+        # quality.ok 는 q1·q2 둘 다 센다(엔진 RB3 — 짧은 까닭의 q1 no · 빈 항목 q2 는 checks.why short 로 다시 묻는다)
+        return rows, {"ok": len(q1) + len(q2), "dropped_over_cap": dropped, "maybe_more": len(q1) >= cap or more == "yes"}
 
     def _mech(self, row: dict, body: Mapping[str, Any], variant: str | None) -> dict:
         """v 줄의 mech·mech_free 와 checks.mech — 엔진 `_check_mech` 그대로(cr-verdict-2). 대본(mechs·solo_mechs)이 있으면 그 값을
