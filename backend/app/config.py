@@ -557,9 +557,14 @@ CRED_KEY_MOVE_COMMAND = (
     " else echo 'cred.key 가 비었다 — 아무것도 바꾸지 않았다'; fi; fi")
 
 
+# 박스 자격 글(GET /api/me 의 box.reasons — 화면에 그대로 보인다)은 절대경로를 싣지 않는다(SEC-6). 고칠 곳은 '데이터 디렉터리' 로
+# 말하고, 그 경로는 관리자만 /api/meta/runtime 의 data_dir 로 본다.
+DATA_DIR_WORDS = "데이터 디렉터리(경로는 관리자용 /api/meta/runtime 의 data_dir)"
+
+
 def cred_key_move_fix() -> str:
     """`cred.key` 폴백을 secrets.env 로 옮기는 절차 — **같은 값**을 옮긴다(CRED_KEY_MOVE_COMMAND — 값을 화면에 찍지 않는다)."""
-    return ("같은 값을 secrets.env 로 옮기고 앱을 다시 띄운다 — 데이터 디렉터리에서 이 한 줄을 실행한다(키 값은 화면에 찍히지 않고,"
+    return (f"같은 값을 secrets.env 로 옮기고 앱을 다시 띄운다 — {DATA_DIR_WORDS}에서 이 한 줄을 실행한다(키 값은 화면에 찍히지 않고,"
             " cred.key 가 비었거나 secrets.env 에 이미 키 줄이 있으면 아무것도 바꾸지 않는다)"
             f" `{CRED_KEY_MOVE_COMMAND}`. 새 키를 만들어 넣으면 이미 등록된 사용자 PAT 가 전부 풀리지 않는다(모두 다시 등록해야"
             " 한다) — 반드시 cred.key 의 값을 그대로 옮긴다. 다시 띄운 뒤 설정 화면의 키 출처가 secrets 이면 cred.key 는 지워도 된다"
@@ -570,7 +575,8 @@ def box_assessment(*, box_match: bool, data_dir: Path | None = None, env: Mappin
     """박스 자격 판정 — `{secrets_valid, cred_key_source, reasons[{code, keys?, message, fix}]}`(GET /api/me 의 box).
 
     코드는 넷이다 — host_mismatch(이관 직후) · missing_required(필수 키 없음) · cred_key_dev_fallback(키가 cred.key 폴백)
-    · missing_optional(그 길만 닫힌다, 앱은 돈다). `secrets_valid` 는 앞의 셋이 없을 때 참이다. 값은 싣지 않는다.
+    · missing_optional(그 길만 닫힌다, 앱은 돈다). `secrets_valid` 는 앞의 셋이 없을 때 참이다. 값도 절대경로도 싣지 않는다 —
+    글은 화면에 그대로 보이고, 경로는 '데이터 디렉터리'(DATA_DIR_WORDS)로 말한다.
     """
     env = os.environ if env is None else env
     root = settings.data_dir if data_dir is None else data_dir
@@ -590,7 +596,7 @@ def box_assessment(*, box_match: bool, data_dir: Path | None = None, env: Mappin
             "code": "missing_required", "keys": list(SECRET_KEYS),
             "message": "자격 암호화 키(HWAXRISK_CRED_KEY)가 없다 — 사용자 PAT 를 저장할 때 앱이 데이터 디렉터리에 개발용 cred.key 를"
                        " 만들어 쓰게 된다(암호문과 같은 디렉터리라 백업 한 벌에 키와 암호문이 함께 실린다).",
-            "fix": ("운영 키를 만들어 secrets.env 에 넣고 앱을 다시 띄운다 — 데이터 디렉터리에서 이 한 줄을 실행한다(키 값은 화면에"
+            "fix": (f"운영 키를 만들어 secrets.env 에 넣고 앱을 다시 띄운다 — {DATA_DIR_WORDS}에서 이 한 줄을 실행한다(키 값은 화면에"
                     " 찍히지 않고, secrets.env 에 이미 키 줄이 있으면 아무것도 바꾸지 않는다)"
                     f" `{CRED_KEY_NEW_COMMAND}`. 키를 잃으면 등록된 PAT 가 전부 풀리지 않으니 secrets.env 와 같은 등급으로 따로"
                     " 보관한다."),
@@ -610,7 +616,7 @@ def box_assessment(*, box_match: bool, data_dir: Path | None = None, env: Mappin
             "code": "missing_optional", "keys": missing,
             "message": "없는 선택 키 — 앱은 돌고 그 길만 닫힌다. " + " · ".join(f"{key}: {OPTIONAL_KEY_EFFECTS[key]}"
                                                                        for key in missing),
-            "fix": f"필요한 길만 켠다 — {root / SECRETS_FILENAME} 에 KEY=값 줄을 넣고(0600) 앱을 다시 띄운다.",
+            "fix": f"필요한 길만 켠다 — {DATA_DIR_WORDS}의 secrets.env 에 KEY=값 줄을 넣고(0600) 앱을 다시 띄운다.",
         })
     blocking = {"host_mismatch", "missing_required", "cred_key_dev_fallback"}
     return {"secrets_valid": not any(r["code"] in blocking for r in reasons), "cred_key_source": source,

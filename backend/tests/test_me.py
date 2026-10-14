@@ -75,13 +75,15 @@ def test_me_anonymous(client, wired):
     body = client.get("/api/me").json()
     assert body["anonymous"] is True and body["email"] is None and body["source"] == "none"
     assert body["portal_pat"] is None
-    # portal_base 는 진단값이다 — 이 주소가 틀리면 PAT 등록·패널이 전부 실패하는데 화면에 안 보이면
-    # 사람이 토큰을 의심한다(2026-09-30 실측). 비밀이 아니므로 익명 응답에도 싣는다.
-    assert set(body["box"]) == {"hostname", "secrets_valid", "cred_key_present", "cred_key_source", "reasons",
-                                "portal_base"}
-    assert body["box"]["portal_base"].startswith("http")
-    assert isinstance(body["box"]["hostname"], str) and body["box"]["secrets_valid"] is False
+    # 익명에게는 판정과 까닭의 code 만 — 글(고칠 명령)·키 이름·호스트 이름·포털 주소는 싣지 않는다(SEC-6).
+    assert set(body["box"]) == {"secrets_valid", "reasons"} and body["box"]["secrets_valid"] is False
+    assert body["box"]["reasons"] and all(set(r) == {"code"} for r in body["box"]["reasons"])
     assert set(body) == {"email", "display_name", "role", "organization", "anonymous", "source", "portal_pat", "box"}
+    # 로그인한 사람은 그대로 다 본다 — portal_base 는 진단값이다(틀리면 PAT 등록·패널이 전부 실패하는데 화면에 안 보이면 사람이
+    # 토큰을 의심한다, 2026-09-30 실측).
+    box = client.get("/api/me", headers=AUTH).json()["box"]
+    assert set(box) == {"hostname", "secrets_valid", "cred_key_present", "cred_key_source", "reasons", "portal_base"}
+    assert box["portal_base"].startswith("http") and all({"code", "message", "fix"} <= set(r) for r in box["reasons"])
 
 
 def test_me_authenticated_without_pat(client, wired):
@@ -465,3 +467,23 @@ def test_the_move_command_copies_the_same_value_once_and_refuses_an_empty_cred_k
     empty = tmp_path / "nokey"
     empty.mkdir()
     assert "없거나 비었다" in _sh(snippet, empty).stdout and not (empty / "secrets.env").exists()
+
+
+# ---------------------------------------------------------------- 박스 자격 글에는 경로가 없다(SEC-6)
+_ABS_PATH = re.compile(r"(?<![\w:/])/(?:home|tmp|data|var|srv|opt|etc|root|mnt|usr)\b")
+
+
+@pytest.mark.parametrize("case", ["absent", "dev_fallback", "host_mismatch", "optional"])
+def test_box_reason_texts_name_the_data_directory_not_its_path(tmp_path, case):
+    """글은 화면에 그대로 보인다 — 절대경로 대신 '데이터 디렉터리' 라 하고, 경로는 관리자만 /api/meta/runtime 의 data_dir 로 본다."""
+    if case == "dev_fallback":
+        config.load_cred_key(tmp_path)
+    if case in ("host_mismatch", "optional"):
+        _secrets_file(tmp_path, HWAXRISK_CRED_KEY=FERNET_KEY)
+    box = config.box_assessment(box_match=case != "host_mismatch", data_dir=tmp_path, env={})
+    assert box["reasons"]
+    text = json.dumps(box["reasons"], ensure_ascii=False)
+    assert str(tmp_path) not in text and not _ABS_PATH.search(text), text
+    for reason in box["reasons"]:
+        if reason["code"] in ("missing_required", "cred_key_dev_fallback", "missing_optional"):
+            assert config.DATA_DIR_WORDS in reason["fix"]

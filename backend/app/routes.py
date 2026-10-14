@@ -486,6 +486,7 @@ def get_me(request: Request, ident: identity.Identity = Depends(identity.current
 
     `box.secrets_valid` 는 필수가 갖춰졌다는 뜻이다(호스트 일치 · 자격 암호화 키 있음 · 그 키가 cred.key 폴백이 아님). 까닭은
     `box.reasons` 가 코드별로 싣는다 — 기동 뒤에 cred.key 가 생기는 일이 있어(첫 PAT 등록) 요청 때 다시 판정한다.
+    익명에게는 `box{secrets_valid, reasons[{code}]}` 만 준다 — 글·키 이름·호스트 이름·포털 주소는 싣지 않는다(SEC-6).
     """
     state = request.app.state
     payload = ident.to_dict()
@@ -499,6 +500,9 @@ def get_me(request: Request, ident: identity.Identity = Depends(identity.current
         portal_pat["auto"] = portal_pat_auto(store, ident.email, row)
     payload["portal_pat"] = portal_pat
     box = config.box_assessment(box_match=bool(state.box_match))
+    if ident.anonymous:
+        payload["box"] = {"secrets_valid": box["secrets_valid"], "reasons": [{"code": r["code"]} for r in box["reasons"]]}
+        return payload
     payload["box"] = {"hostname": state.hostname, "secrets_valid": box["secrets_valid"],
                       "cred_key_source": box["cred_key_source"], "reasons": box["reasons"],
                       # 부작용 없는 갈래로만 본다 — 여기서 키를 만들면 기존 암호문이 영구히 복호 불가가 된다.
@@ -578,6 +582,8 @@ def get_runtime(request: Request, ident: identity.Identity = Depends(identity.cu
         # 검토 손잡이 + PAT 자동 등록 손잡이(HWAXRISK_PAT_RENEW_BEFORE_S · HWAXRISK_PAT_AUTO_RETRY_S) — 같은 knobs.env 에서 읽는다.
         "knobs": {**config.review_knobs(), **config.pat_knobs()},
         "knobs_file": str(config.settings.data_dir / config.KNOBS_FILENAME),
+        # 박스 자격 글(GET /api/me 의 box.reasons)이 '데이터 디렉터리' 라고만 하는 그 경로(SEC-6 — 화면 글은 경로를 싣지 않는다).
+        "data_dir": str(config.settings.data_dir),
         "runner_lock": {"held": lock.held() if lock is not None else None,
                         "holder": lock.holder() if lock is not None else None},
         "schema_version": store.known_version if store.known_version is not None else store.schema_version(),
