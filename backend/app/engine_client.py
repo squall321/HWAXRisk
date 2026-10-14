@@ -735,7 +735,8 @@ def review_mechanisms() -> list[dict]:
 def run_body(kind: str, *, target_key: str, pack: cardpack.FrozenPack, cards: Sequence[str] = (),
              variant: str | None = None, digest: Sequence[str] = (), unit: Mapping[str, Any] | None = None,
              manifest: Sequence[Mapping[str, Any]] = (), known: Sequence[Mapping[str, Any]] = (),
-             expect: Mapping[str, Any] | None = None, cfg: Any = None) -> dict:
+             expect: Mapping[str, Any] | None = None, cfg: Any = None,
+             missing: Sequence[Mapping[str, Any]] = ()) -> dict:
     """카드 대조 run 요청 하나(M2.md 4.3). 신원 칸 넷은 싣지 않는다(포털이 덮어쓴다).
 
     - `pack` — 얼린 팩. `expert` 는 그 팩의 {agent_key, name, domain, role}, `cards` 는 별칭 순서대로 팩 항목 그대로
@@ -743,6 +744,8 @@ def run_body(kind: str, *, target_key: str, pack: cardpack.FrozenPack, cards: Se
     - `unit` 은 `units.review_payload` 의 출력, `manifest` 는 `units.manifest_items` 의 한 쪽이다 — 둘 다 그대로 싣는다.
     - `known` 은 이미 낸 판정 행에서 {alias, judgement, why} 만(엔진 KnownItem), `extra.domains`·`mechanisms` 는 위 둘이다.
     - `expect` 는 준 것만 싣는다(엔진은 실린 판만 견준다).
+    - `missing` 은 입력 결손 전문가의 훑기에만 싣는 전문가 단위 결측 `extra.missing[{kind, note}]`(cr-sweep-2 — 결측 입력이 와도
+      무관한 단위만 no, 가릴 수 없으면 maybe. 재설계 M3 C3-3). 비면 칸을 싣지 않는다 — 엔진은 sweep 밖의 그 칸을 422 로 거절한다.
     """
     body: dict[str, Any] = {
         "kind": kind, "variant": variant, "target_key": target_key,
@@ -758,6 +761,8 @@ def run_body(kind: str, *, target_key: str, pack: cardpack.FrozenPack, cards: Se
                   "known": [{"alias": str(row.get("alias") or ""), "judgement": _text(row.get("judgement")),
                              "why": _text(row.get("why"))} for row in known]},
     }
+    if missing:
+        body["extra"]["missing"] = [{"kind": _text(m.get("kind")), "note": _text(m.get("note"))} for m in missing]
     if expect:
         body["expect"] = {k: expect[k] for k in ("prompt_rev", "limits_rev") if expect.get(k) is not None}
     return body

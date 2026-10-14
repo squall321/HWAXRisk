@@ -352,7 +352,7 @@ def test_a_cards_free_expert_reviews_by_role_and_its_seat_closes_done_weak_no_ca
     assert (cell["basis"], cell["tries"], cell["lease_owner"], cell["cards_expected"], cell["cards_judged"]) == (
         "role_only", 1, None, 0, 0)
     summary = review_cells.review_summary(store, key)
-    assert summary["cells"]["by_basis"] == {"cards": 0, "background": 0, "role_only": len(unit_ids)}
+    assert summary["cells"]["by_basis"] == {"cards": 0, "background": 0, "role_only": len(unit_ids), "noinput": 0}
     assert summary["cells"]["in_scope"]["by_state"]["reviewed"] == len(unit_ids)
 
     closed = planner.close_review_seat(store, key, SEAL, review_id=head["review_id"], opinion_id=_opinion(key))

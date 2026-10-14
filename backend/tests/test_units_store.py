@@ -104,9 +104,13 @@ def test_the_engine_unit_carries_target_level_gaps_and_the_experts_input_gaps(ri
     payload = units.review_payload(risk_store, synth40.target_key, uid, units_agent(risk_store, synth40.target_key, "pcb"))
     assert payload["input_gaps"] == ["ecad_absent"]
     assert [m["kind"] for m in payload["missing"]] == ["ecad"] and set(payload["missing"][0]) == {"kind", "note"}
-    assert payload["missing"][0]["note"].endswith("(두 리비전 모두).")
     mech = units.review_payload(risk_store, synth40.target_key, uid, units_agent(risk_store, synth40.target_key, "mech"))
-    assert mech["input_gaps"] == [] and mech["missing"] == payload["missing"]
+    assert mech["input_gaps"] == [] and [m["kind"] for m in mech["missing"]] == ["ecad"]
+    assert mech["missing"][0]["note"].endswith("(두 리비전 모두).")
+    # 입력 결손 전문가의 ecad 줄 끝에만 그 영역의 실마리(assets/input-gap.v1.json — 재설계 M3 C3-3)가 붙는다.
+    assert payload["missing"][0]["note"] == (f"{mech['missing'][0]['note']} 이 영역이 볼 것 —"
+                                             f" {units.input_gap_hint('pcb')}.")
+    assert units.input_gap_hint("pcb") == "보드 고정점·지지 스팬·보드 근접 계면" and units.input_gap_hint("mech") is None
     with pytest.raises(AppError) as exc:
         units.review_payload(risk_store, synth40.target_key, uid, "nobody-syn-9")
     assert exc.value.code == "agent_not_in_roster" and exc.value.http_status == 404

@@ -209,11 +209,13 @@ def accept_rows(result: Mapping[str, Any], *, kind: str, sent_aliases: Sequence[
     빠진 카드가 된다. `missing` 은 앱이 다시 센 것이다(엔진의 `missing` 은 `extras.engine_missing` 에 둔다). solo 의 `c` 줄은
     같은 별칭의 `conds_json` 으로 간다.
     offcard — `f` 행을 카드 밖 후보로, `m`·`h`·`need`·`none`·`more` 는 `extras` 로. sweep — `u` 행을 단위 선별로(빠진 단위가
-    `missing`, 어느 줄에도 없는 카드가 `extras.cards_unseen`).
+    `missing`, 어느 줄에도 없는 카드가 `extras.cards_unseen`). noinput — `q1`(지금 변경으로 말할 수 있는 영향)·`q2`(결측 입력이
+    오면 확인할 것) 행을 그대로 `t` 를 달아(재설계 M3 C3-3 · m3-cells 3.6), `more` 는 `extras` 로. 빠진 줄 종류(q1·q2)가
+    `missing` 이다.
     """
-    if kind not in ("verdict", "offcard", "sweep"):
+    if kind not in ("verdict", "offcard", "sweep", "noinput"):
         raise ValueError(f"모르는 호출 종류 — {kind!r}")
-    if kind in ("verdict", "offcard") and unit_refs is None:
+    if kind in ("verdict", "offcard", "noinput") and unit_refs is None:
         raise ValueError(f"{kind} 의 참조 대조에는 unit_refs(그 단위에 실은 참조)가 필요하다")
     if kind == "sweep" and page_units is None:
         raise ValueError("sweep 의 회계에는 page_units(그 쪽에 실은 단위)가 필요하다")
@@ -227,6 +229,8 @@ def accept_rows(result: Mapping[str, Any], *, kind: str, sent_aliases: Sequence[
         return _accept_verdict(raw_rows, sent, cards, frozenset(unit_refs or ()), variant, common)
     if kind == "offcard":
         return _accept_offcard(raw_rows, sent, cards, frozenset(unit_refs or ()), common)
+    if kind == "noinput":
+        return _accept_noinput(raw_rows, sent, cards, frozenset(unit_refs or ()), common)
     quality = result.get("quality") if isinstance(result, Mapping) and isinstance(result.get("quality"), Mapping) else {}
     return _accept_sweep(raw_rows, sent, list(dict.fromkeys(str(u) for u in page_units or ())), common,
                          stamp=bool(quality.get("stamp")))
@@ -369,6 +373,86 @@ def _accept_offcard(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping
         else:
             _drop(dropped, "foreign_row", raw)
     return {"rows": findings, "missing": [], "dropped": dropped, "extras": out}
+
+
+IMPACTS = APPLIES                   # q1 의 impact — 영향 있음 · 없음 · 모름
+
+
+def _accept_noinput(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping[str, Any]], unit_refs: frozenset,
+                    extras: dict) -> dict:
+    """입력 결손 호출의 회계 — 카드(`k`)는 실은 별칭이어야 하고(밖이면 버린다 — `alias_outside_call`), 참조가 남의 단위를 가리키면
+    버린다(`foreign_ref` — Q8). impact 가 열거 밖이면 버리고(`bad_enum`), 영향 있음(yes)인데 제목이 없으면 finding 이 될 수 없어
+    버린다(`no_title`). 카드 인용(`cq`)은 그 카드의 얼린 원문으로 다시 대조한다(`quote_ok` — verdict 와 같은 규칙). 목록 칸은 문자열
+    하나도 한 항목으로 읽는다(D-25)."""
+    sent_set = set(sent)
+    dropped: list[dict] = []
+    rows: list[dict] = []
+    out = dict(extras, more=None)
+    for raw in raw_rows:
+        if not isinstance(raw, Mapping):
+            _drop(dropped, "not_object", raw)
+            continue
+        t = raw.get("t")
+        if t == "more":
+            out["more"] = _text(raw.get("more")) or None
+            continue
+        if t not in ("q1", "q2"):
+            _drop(dropped, "foreign_row", raw)
+            continue
+        alias = _text(raw.get("k")).strip()
+        if alias and alias not in sent_set:
+            _drop(dropped, "alias_outside_call", raw)
+            continue
+        refs = as_list(raw.get("refs"))
+        if any(ref not in unit_refs for ref in refs):
+            _drop(dropped, "foreign_ref", raw)
+            continue
+        checks = raw.get("checks") if isinstance(raw.get("checks"), Mapping) else {}
+        card = cards.get(alias) if alias else None
+        base = {"t": t, "k": alias or None, "record_id": str(card["record_id"]) if card is not None else None,
+                "l": as_list(raw.get("l")), "refs": refs, "why": _text(raw.get("why")) or None, "checks": dict(checks)}
+        if t == "q2":
+            rows.append({**base, "item": _text(raw.get("item")).strip(), "needs": _text(raw.get("needs")) or None,
+                         "refs_ok": refs_verdict(refs, unit_refs, required=False)})
+            continue
+        impact = _text(raw.get("impact"))
+        if impact not in IMPACTS:
+            _drop(dropped, "bad_enum", raw)
+            continue
+        title = _text(raw.get("title")).strip()
+        if impact == "yes" and not title:
+            _drop(dropped, "no_title", raw)
+            continue
+        quote = (_quote_columns(raw.get("cq"), card, checks.get("quote")) if card is not None
+                 else {"quote_ok": None, "check_disagree": 0, "section_id": None})
+        rows.append({**base, "impact": impact, "title": title, "mech": _text(raw.get("mech")) or None,
+                     "mech_free": _text(raw.get("mech_free")) or None, "path": _text(raw.get("path")) or None,
+                     "cq": _text(raw.get("cq")) or None, "sev": _text(raw.get("sev")) or None,
+                     "quote_ok": quote["quote_ok"], "check_disagree": quote["check_disagree"],
+                     "section_id": quote["section_id"],
+                     "grade": card_grade(card) if card is not None and quote["quote_ok"] == 1 else None,
+                     "refs_ok": refs_verdict(refs, unit_refs, required=impact == "yes")})
+    have = {r["t"] for r in rows}
+    return {"rows": rows, "missing": [t for t in ("q1", "q2") if t not in have], "dropped": dropped, "extras": out}
+
+
+def noinput_outcome(q1: Sequence[Mapping[str, Any]], q2: Sequence[Mapping[str, Any]]) -> str | None:
+    """입력 결손 셀을 닫는 결과(m3-cells 3.6 의 정산표) — 처음 맞는 줄이다.
+
+    | q1 | q2 | 결과 | 셀 |
+    | 영향 있음(yes)이 하나라도 | 무엇이든 | impact | reviewed(basis noinput) |
+    | yes 없고 모름(unknown) 있음 | 무엇이든 | unknown | no_input |
+    | 전부 없음(no) | 확인할 항목 ≥1 | request | no_input |
+    | 전부 없음(no) | 항목 0(까닭만) | none | reviewed(basis noinput) |
+    q1 이나 q2 가 한 줄도 없으면 None 이다(답이 모자라다 — 정산이 내용 탓 실패로 센다)."""
+    if not q1 or not q2:
+        return None
+    impacts = {str(r.get("impact")) for r in q1}
+    if "yes" in impacts:
+        return "impact"
+    if "unknown" in impacts:
+        return "unknown"
+    return "request" if any(_text(r.get("item")).strip() for r in q2) else "none"
 
 
 def _accept_sweep(raw_rows: list, sent: list[str], page_units: list[str], extras: dict, *, stamp: bool) -> dict:

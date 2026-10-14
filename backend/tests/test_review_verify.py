@@ -278,7 +278,9 @@ def test_unit_refs_and_page_units_are_required():
     with pytest.raises(ValueError):
         rv.accept_rows({"rows": []}, kind="sweep", sent_aliases=[], pack={"cards": []})
     with pytest.raises(ValueError):
-        rv.accept_rows({"rows": []}, kind="noinput", sent_aliases=[], pack={"cards": []}, unit_refs=set())
+        rv.accept_rows({"rows": []}, kind="noinput", sent_aliases=[], pack={"cards": []})
+    with pytest.raises(ValueError):
+        rv.accept_rows({"rows": []}, kind="summary", sent_aliases=[], pack={"cards": []}, unit_refs=set())
 
 
 # ---------------------------------------------------------------- 등급
@@ -321,6 +323,53 @@ def test_an_offcard_quote_from_a_sent_card_is_rechecked():
     finding = _accept(result, request)["rows"][0]
     assert (finding["quote_ok"], finding["record_id"], finding["check_disagree"]) == (
         1 if rv.quote_check(quote, card)[0] == "ok" else 0, card["record_id"], 0)
+
+
+# ---------------------------------------------------------------- 입력 결손 호출(재설계 M3 C3-3)
+def test_noinput_rows_are_accepted_whole_from_the_engine_example():
+    """엔진 계약 예제(req_noinput · result_noinput_ok) — q1 둘(영향 있음 · 카드 인용이 앱 재대조도 지난다) · q2 둘(카드를 댄 것과
+    대지 않은 것) · more no. 버린 줄도 빠진 줄 종류도 없다."""
+    request = _load("req_noinput.json")
+    out = _accept(_load("result_noinput_ok.json"), request)
+    assert out["missing"] == [] and out["dropped"] == []
+    q1 = [r for r in out["rows"] if r["t"] == "q1"]
+    q2 = [r for r in out["rows"] if r["t"] == "q2"]
+    assert [(r["impact"], r["k"], r["quote_ok"], r["refs_ok"], r["check_disagree"]) for r in q1] == [
+        ("yes", "K01", 1, 1, 0), ("yes", "K02", 1, 1, 0)]
+    assert q1[0]["record_id"] == request["cards"][0]["record_id"] and q1[0]["mech"] == "thermal.cte_mismatch"
+    assert [(r["item"], r["k"], r["record_id"]) for r in q2] == [
+        ("보드 고정점 주변 부품 배치", "K01", request["cards"][0]["record_id"]), ("근접 계면의 네트 경로", None, None)]
+    assert out["extras"]["more"] == "no"
+    assert rv.noinput_outcome(q1, q2) == "impact"
+
+
+def test_noinput_accounting_drops_what_cannot_be_trusted():
+    """실리지 않은 카드를 댄 줄(alias_outside_call) · 남의 단위를 가리키는 참조(foreign_ref — Q8) · 열거 밖 impact(bad_enum) · 제목
+    없는 영향 줄(no_title)은 버린다. 지어낸 인용은 앱 재대조가 0 으로 가른다. 줄 종류가 빠지면 missing 이다."""
+    request = _load("req_noinput.json")
+    result = copy.deepcopy(_load("result_noinput_ok.json"))
+    q1, q1b, q2, q2b, more = result["rows"]
+    rows = [{**q1, "cq": "카드에 없는 지어낸 인용 문장이다 열다섯 자를 넘는다"},
+            {**q1b, "k": "K99"}, {**q1b, "refs": ["c:not-this-unit"]}, {**q1b, "impact": "maybe"},
+            {**q1b, "title": ""}, {**q1b, "impact": "no", "title": "", "k": "", "cq": "", "refs": [], "l": []}, more]
+    out = _accept({**result, "rows": rows}, request)
+    assert sorted(d["reason"] for d in out["dropped"]) == ["alias_outside_call", "bad_enum", "foreign_ref", "no_title"]
+    kept = out["rows"]
+    assert [(r["impact"], r["quote_ok"]) for r in kept] == [("yes", 0), ("no", None)]
+    assert out["missing"] == ["q2"]
+    assert _accept({**result, "rows": [q2, q2b, more]}, request)["missing"] == ["q1"]
+
+
+@pytest.mark.parametrize(("impacts", "items", "outcome"), [
+    (["yes", "no"], [""], "impact"), (["unknown", "yes"], ["a"], "impact"), (["no", "unknown"], [""], "unknown"),
+    (["no"], ["", "확인할 것"], "request"), (["no", "no"], [""], "none"), ([], ["a"], None), (["yes"], [], None),
+])
+def test_the_noinput_settle_table(impacts, items, outcome):
+    """m3-cells 3.6 의 정산표 — 영향 있음이 하나라도 있으면 impact, 없고 모름이 있으면 unknown, 전부 없음이면 확인할 항목이 있을 때
+    request · 까닭만이면 none. q1·q2 가운데 하나라도 비면 결과가 없다(내용 탓 실패)."""
+    q1 = [{"impact": i} for i in impacts]
+    q2 = [{"item": x} for x in items]
+    assert rv.noinput_outcome(q1, q2) == outcome
 
 
 def _sweep_call(result: dict, request: dict) -> dict:

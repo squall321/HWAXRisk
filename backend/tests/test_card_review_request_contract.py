@@ -109,6 +109,16 @@ def _bodies(store, target_key: str) -> dict[str, dict]:
                 known=[{"alias": "K01", "judgement": "FAIL", "why": "접착폭 하한 밑", "record_id": "x", "applies": "yes"}])
         bodies[f"{agent}/sweep"] = body("sweep", None, cards=list(frozen.order),
                                         manifest=units.manifest_items(store, target_key))
+        if agent == "pcb-syn-0":
+            # 입력 결손 전문가(재설계 M3 C3-3) — 단위마다 입력 결손 호출(카드 전부 · 전 카드 제목 · 다시 묻기의 known)과 결측 블록을 실은
+            # 훑기(cr-sweep-2 의 extra.missing). 검토 루프가 짓는 그 모양이다.
+            for unit in reviewable:
+                bodies[f"{agent}/noinput/{unit['unit_id']}"] = body(
+                    "noinput", unit["unit_id"], cards=list(frozen.order), digest=list(frozen.order),
+                    known=[{"alias": "Q01", "judgement": "yes", "why": "보드 근접 계면 간극 축소"}])
+            missing = units.review_payload(store, target_key, reviewable[0]["unit_id"], agent)["missing"]
+            bodies[f"{agent}/sweep.missing"] = body("sweep", None, cards=list(frozen.order),
+                                                    manifest=units.manifest_items(store, target_key), missing=missing)
     empty = cardpack.view_of({**fre.load("pack_empty.json"), "agent_key": "sim-syn-0"})
     bodies["sim-syn-0/offcard.role_only"] = engine_client.run_body(
         "offcard", target_key=target_key, pack=empty,
@@ -122,6 +132,10 @@ def test_run_bodies_built_from_real_units_and_packs_pass_the_engines_validator(c
     # 생산자가 실제로 결측·입력 결손을 싣는 판이어야 시험이 그 칸을 덮는다(합성 쌍에는 회로 소스가 없다).
     pcb = next(b for name, b in bodies.items() if name.startswith("pcb-syn-0/verdict.fwd/"))
     assert pcb["unit"]["input_gaps"] == ["ecad_absent"] and pcb["unit"]["missing"][0]["kind"] == "ecad"
+    assert pcb["unit"]["missing"][0]["note"].endswith("이 영역이 볼 것 — 보드 고정점·지지 스팬·보드 근접 계면.")
+    assert bodies["pcb-syn-0/sweep.missing"]["extra"]["missing"] == [
+        {"kind": m["kind"], "note": m["note"]} for m in pcb["unit"]["missing"]]
+    assert "missing" not in bodies["mech-syn-0/sweep"]["extra"]          # 결손이 아닌 전문가의 훑기에는 싣지 않는다
     assert pcb["extra"]["domains"][0] == {"key": "xd", "label": "XD(외관·조립 설계)"}
     assert len(pcb["extra"]["domains"]) == len(config.settings.risk_roster_domains) == 15
     assert pcb["extra"]["known"] == [] and len(pcb["extra"]["mechanisms"]) == 52        # 택소노미 1.2(재설계 M3 D-34)

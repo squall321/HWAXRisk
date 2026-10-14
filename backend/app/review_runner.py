@@ -363,6 +363,7 @@ WAIT_SLICE_S = 5                    # 기다림을 이만큼씩 쪼개 그 사�
 MISSING_REASKS = 2                  # 빠진 카드 재질의(fwd) — 셀마다 최대
 SOLO_REASKS = 2                     # 단독 재질의가 그 카드를 빼먹었을 때 다시 묻는 수
 MORE_REASKS = 3                     # 카드 밖 줄이 findings_max 에 닿으면 '이것 말고 더' 를 다시 묻는 수(X1-16)
+NOINPUT_MORE_REASKS = 3             # 입력 결손 호출이 maybe_more 면 받은 q1 제목을 known 에 실어 '이것 말고 더' 를 다시 묻는 수
 INTERNAL_BACKOFF_S = 60             # 워커가 예기치 않은 예외로 끝난 전문가를 다시 집기 전의 대기
 INTERNAL_STRIKES = 3                # 같은 셀(또는 머리 몫)의 예기치 않은 예외가 잇달아 이만큼이면 셀을 차감하거나 잡을 멈춘다(R3A-2)
 CALL_CAP_FACTOR = 3                 # 셀당 호출 수 상한 = 3 × (2·묶음 수 + 점검 카드 수 + 4)(m-02)
@@ -723,6 +724,7 @@ class _Cell:
     inj: list = field(default_factory=list)
     samples_done: bool = True
     alive: bool = True
+    noinput: dict | None = None                         # 입력 결손 호출의 모은 답 {q1, q2, outcome}(정산이 읽는다 — C3-3)
 
     @property
     def unit_id(self) -> str:
@@ -791,6 +793,7 @@ class _Session:
         self.plan: dict = {}
         self.sweep: dict = {}
         self.kinds: tuple[str, ...] = CARD_KINDS   # 이 전문가의 셀이 부르는 종류 — 입력 결손 전문가면 GAP_KINDS(run 이 정한다)
+        self.gaps: list[str] = []                  # 그 전문가의 입력 결손(planner.review_order — ECAD 에 기대는데 ECAD 가 없다)
         self.payloads: dict[str, dict] = {}
         self.focus: _Cell | None = None          # 지금 다루는 셀(없으면 머리 몫) — 예기치 않은 예외를 그 셀에 센다(R3A-2)
         self.call: dict | None = None            # 원장에 running 으로 둔 채 아직 닫지 않은 호출 행(begin_call 의 바탕)
@@ -1194,7 +1197,7 @@ class _Session:
         quality = result.get("quality") if isinstance(result.get("quality"), Mapping) else {}
         meta = result.get("meta") if isinstance(result.get("meta"), Mapping) else {}
         # 판정 호출의 절단은 '빠진 카드를 끝내 못 받았나' 로 다시 가리므로 엔진 값 그대로, 카드 밖 호출은 마지막 시도로 가린다(R3A-4).
-        cut = offcard_cut(result) if kind == "offcard" else quality.get("truncated")
+        cut = offcard_cut(result) if kind in ("offcard", "noinput") else quality.get("truncated")
         cell.log.append({"kind": kind, "variant": variant, "aliases": list(aliases), "truncated": cut,
                          "soft_over": bool(meta.get("soft_over")), "stamp": bool(quality.get("stamp")),
                          "expected": quality.get("expected"), "missing": len(accepted.get("missing") or ())})
@@ -1258,18 +1261,23 @@ class _Session:
             self.sweep = done
             return
         manifest = {m["unit_id"]: m for m in units.manifest_items(self.store, self.target_key)}
+        # 입력 결손 전문가의 훑기에는 결측 블록(그 영역의 실마리를 단 unit.missing — 대상 수준이라 단위마다 같다)을 싣는다(C3-3).
+        missing = list(self._payload(next(iter(manifest)))["missing"]) if self.gaps and manifest else []
         calls: list[dict] = []
+        revs: set[str] = set()
         failed = 0
         for deck in self.plan.get("sweep_decks") or ():
             aliases = list(deck.get("aliases") or ())
             for page_no, page in enumerate(self.plan.get("manifest_pages") or ()):
                 items = [manifest[u] for u in page if u in manifest]
                 body = engine_client.run_body("sweep", target_key=self.target_key, pack=self.pack, cards=aliases,
-                                              manifest=items, expect=self._expect("sweep"), cfg=self.settings)
+                                              manifest=items, expect=self._expect("sweep"), cfg=self.settings,
+                                              missing=missing)
                 answer = self._ask(None, "sweep", None, aliases, body, deck_id=deck.get("deck_id"), page_no=page_no)
                 if answer is None:
                     failed += 1
                     continue
+                revs.add(str((answer.result.get("meta") or {}).get("prompt_rev") or ""))
                 accepted = review_verify.accept_rows(answer.result, kind="sweep", sent_aliases=aliases, pack=self.pack,
                                                      page_units=[i["unit_id"] for i in items])
                 self._commit(None, answer, accepted)
@@ -1278,6 +1286,9 @@ class _Session:
         accounting = review_verify.sweep_accounting(calls) if calls else {"units": {}, "units_error": [],
                                                                           "cards_unseen": [], "handoffs": [], "dropped": []}
         self.sweep = {"key": key, "failed_pages": failed, **accounting}
+        if missing:
+            # 결측 블록을 받은 판의 답일 때만 그 전문가의 셀을 거른다(m3-cells 3.2 의 5번 · X1-17) — 실은 것과 답의 판을 남긴다.
+            self.sweep.update(missing_sent=True, prompt_revs=sorted(revs))
         if not review_cells.write_head(self.store, self.target_key, self.agent, lease_owner=self.lease, now=self.now(),
                                        sets={"sweep_state": "failed" if failed else "done",
                                              "sweep_json": canonical_json(self.sweep)}):
@@ -1309,7 +1320,8 @@ class _Session:
 
         잡 거르기가 'off'(M2 잡 포함)면 아무것도 쓰지 않는다. 이미 분류된 셀(route 가 선 셀 — 재기동·인프라 실패 뒤의 세션)과 사람이
         다시 연 셀(route_forced human_retry)은 그대로 둔다 — 한 셀은 입력이 바뀌기 전까지 한 번만 분류된다. 넓힘·대상 전체 끔(6번)은
-        C3-7 이 원장에서 유도해 넣는다(아직 거짓)."""
+        C3-7 이 원장에서 유도해 넣는다(아직 거짓). 입력 결손 전문가는 훑기가 결측 블록을 받은 판(cr-sweep-2 이상)의 답일 때만 두 신호
+        규칙에 들고, 아니면 5번(input_gap)으로 입력 결손 호출 길(route noinput)이다."""
         assert self.pack is not None
         if self.filter_mode == "off":
             return
@@ -1324,6 +1336,8 @@ class _Session:
         tier_a = self._tier_a_pending(set(unit_of))
         swept = self.pack.card_basis in (cardpack.CARD_BASIS_CARDS, cardpack.CARD_BASIS_BACKGROUND)
         sweep_failed = head.get("sweep_state") == "failed"
+        revs = list(self.sweep.get("prompt_revs") or ())
+        gap_aware = bool(revs) and all(relevance.sweep_gap_aware(bool(self.sweep.get("missing_sent")), r) for r in revs)
         for cell in todo:
             self.focus = cell
             unit = unit_of[cell.unit_id]
@@ -1331,7 +1345,7 @@ class _Session:
                                            approved=self.routing_approved)
             decision = relevance.route_decision(
                 filter_mode=self.filter_mode, rank1=head.get("rank_in_domain") == 1, unit_kind=str(unit["kind"]),
-                no_cards=not swept, input_gap=bool(cell.payload.get("input_gaps")), gap_aware=False, widened=False,
+                no_cards=not swept, input_gap=bool(self.gaps), gap_aware=gap_aware, widened=False,
                 target_off=False, handoffs=handoffs.get(cell.unit_id, []), tier_a_pending=tier_a,
                 code=relevance.code_for(signal, domain),
                 sweep=relevance.sweep_signal((self.sweep.get("units") or {}).get(cell.unit_id), failed=sweep_failed),
@@ -1451,7 +1465,7 @@ class _Session:
         judged = {r["alias"] for r in self._rows(cell) if r["is_effective"]}
         lost = any(e["truncated"] is True and e["kind"] == "verdict" and any(a not in judged for a in e["aliases"])
                    for e in cell.log)
-        last_off = next((e for e in reversed(cell.log) if e["kind"] == "offcard"), None)
+        last_off = next((e for e in reversed(cell.log) if e["kind"] in ("offcard", "noinput")), None)
         if lost or (last_off is not None and last_off["truncated"] is True):
             return 1
         if any(e["truncated"] is None for e in cell.log):
@@ -1523,16 +1537,87 @@ class _Session:
             asked = known + [{"alias": f"F{i:02d}", "judgement": None, "why": str(f.get("title") or "")}
                              for i, f in enumerate(findings, 1)]
 
+    # -- 입력 결손 호출(재설계 M3 C3-3) --------------------------------------------------------------
+    def _input_gaps(self) -> list[str]:
+        order = next((r for r in planner.review_order(self.store, self.target_key) if r["agent_key"] == self.agent), None)
+        return list((order or {}).get("input_gaps") or ())
+
+    def _noinput(self, cell: _Cell) -> None:
+        """입력 결손 셀 — 단위마다 `noinput` 한 번(m3-cells 3.6). 카드는 팩 전부(훑기 k 에 걸린 것 먼저, 나머지 팩 순서 — 넘치면 엔진이
+        제목으로 내리고 bg_dropped 로 센다), digest 는 전 카드 제목이다. 카드 0장 전문가는 역할만으로 부른다. 답이 maybe_more 면 받은
+        q1 제목을 known 에 실어 '이것 말고 더' 를 최대 NOINPUT_MORE_REASKS 번 다시 묻고(X1-16 과 같은 규칙), 같은 제목의 q1 · 같은
+        항목의 q2 는 한 번만 남긴다. 모은 답과 결과는 extras_json.noinput 과 셀(`cell.noinput`)에 두고 정산이 읽는다 — 카드 판정 표에는
+        쓰지 않는다."""
+        assert self.pack is not None
+        self.focus = cell
+        hits = set(((self.sweep.get("units") or {}).get(cell.unit_id) or {}).get("k") or ())
+        order = list(self.pack.order)
+        cards = [a for a in order if a in hits] + [a for a in order if a not in hits]
+        q1: list[dict] = []
+        q2: list[dict] = []
+        known: list[dict] = []
+        more: Any = None
+        seq = 0
+        while True:
+            body = engine_client.run_body("noinput", target_key=self.target_key, pack=self.pack, cards=cards, digest=order,
+                                          unit=cell.payload, known=known, expect=self._expect("noinput"), cfg=self.settings)
+            answer = self._ask(cell, "noinput", None, cards, body, seq=seq)
+            if answer is None:
+                return
+            accepted = review_verify.accept_rows(answer.result, kind="noinput", sent_aliases=cards, pack=self.pack,
+                                                 unit_refs=cell.refs)
+            self._note(cell, "noinput", None, cards, answer.result, accepted)
+            titles = {r["title"] for r in q1}
+            asks = {(r["item"], r["needs"]) for r in q2}
+            for row in accepted["rows"]:
+                if row["t"] == "q1" and row["title"] not in titles:
+                    titles.add(row["title"])
+                    q1.append(row)
+                elif row["t"] == "q2" and (row["item"], row["needs"]) not in asks:
+                    asks.add((row["item"], row["needs"]))
+                    q2.append(row)
+            more = accepted["extras"].get("more")
+            quality = answer.result.get("quality") if isinstance(answer.result.get("quality"), Mapping) else {}
+            last = quality.get("maybe_more") is not True or seq >= NOINPUT_MORE_REASKS
+            outcome = review_verify.noinput_outcome(q1, q2)
+            meta = answer.result.get("meta") if isinstance(answer.result.get("meta"), Mapping) else {}
+            bg_dropped = int(meta.get("bg_dropped") or 0)
+            sets: dict[str, Any] = {
+                "basis": review_cells.NOINPUT, "credential_kind": self.cred_kind, "model": meta.get("model"),
+                "bg_full_n": max(len(cards) - bg_dropped, 0), "bg_title_only_n": bg_dropped,
+                "extras_json": canonical_json({"inj": cell.inj, "noinput": {"q1": q1, "q2": q2, "more": more,
+                                                                            "asks": seq + 1, "outcome": outcome}}),
+                "mechs_json": canonical_json(sorted({str(r["mech"]) for r in q1 if r["impact"] == "yes" and r.get("mech")
+                                                     and r["mech"] != "free"})),
+            }
+            if last:
+                sets.update({"truncated": self._truncation(cell),
+                             "soft_over": int(any(e["soft_over"] for e in cell.log)),
+                             "stamp": int(any(e["stamp"] for e in cell.log)),
+                             "rows_expected": sum(int(e["expected"] or 0) for e in cell.log),
+                             "rows_missing": sum(int(e["missing"] or 0) for e in cell.log)})
+            self._commit(cell, answer, accepted, cell_sets=sets, app={"known_n": len(known), "more_seq": seq})
+            if last:
+                cell.noinput = {"q1": q1, "q2": q2, "outcome": outcome}
+                return
+            seq += 1
+            known = [{"alias": f"Q{i:02d}", "judgement": r["impact"], "why": r["title"]} for i, r in enumerate(q1, 1)]
+
     # -- 정산 · 마감 ------------------------------------------------------------------------------
     def _settle(self, cell: _Cell) -> None:
         self.focus = cell
-        out = review_cells.settle_cell(self.store, self.target_key, cell.unit_id, self.agent, lease_owner=self.lease,
-                                       samples_done=cell.samples_done, more_calls=False, max_charged=self.max_charged,
-                                       now=self.now())
+        if self.gaps:
+            out = review_cells.settle_noinput(self.store, self.target_key, cell.unit_id, self.agent, lease_owner=self.lease,
+                                              outcome=(cell.noinput or {}).get("outcome"), max_charged=self.max_charged,
+                                              now=self.now())
+        else:
+            out = review_cells.settle_cell(self.store, self.target_key, cell.unit_id, self.agent, lease_owner=self.lease,
+                                           samples_done=cell.samples_done, more_calls=False, max_charged=self.max_charged,
+                                           now=self.now())
         if not out["written"]:
             raise _Stop("lease", release=False)
         cell.alive = False
-        if out["state"] != "reviewed":
+        if out["state"] not in ("reviewed", "no_input"):
             log.info("검토 잡 %s: %s×%s 셀 정산 미달(%s) → %s", self.job_id, cell.unit_id, self.agent,
                      ", ".join(out.get("missing") or [out.get("code") or ""]), out["state"])
 
@@ -1583,9 +1668,19 @@ class _Session:
 
     def run(self) -> None:
         """전문가 세션 — 묶음 → 창 → 계획 → 셀 시작 → 훑기 → 거르기 분류 → fwd(묶음 먼저 · 단위 나중) → 빠진 카드 재질의 → rev →
-        단독 → 카드 밖 → 정산 → 마감 또는 놓기. 호출과 호출 사이마다 멈춤을 묻는다(`_gate`)."""
+        단독 → 카드 밖 → 정산 → 마감 또는 놓기. 입력 결손 전문가는 거르기 분류 뒤 셀마다 입력 결손 호출 → 정산이다. 호출과 호출
+        사이마다 멈춤을 묻는다(`_gate`)."""
         self.pack = self._load_pack()
         self.lim = dict(self._unary(lambda: self.loop.limits_for(self.email), "창 조회"))
+        self.gaps = self._input_gaps()
+        self.kinds = GAP_KINDS if self.gaps else CARD_KINDS
+        if self.gaps and "noinput" not in (self.lim.get("kinds") or ()):
+            # 엔진이 입력 결손 호출을 모른다 — 내지 않고(unsupported_kind 로 contract 에 서는 길을 피한다) 잡을 agent_outdated
+            # (300초 자동 재개)로 멈춘다. 셀은 차감 없이 pending 이다(m3-cells 3.6).
+            self._hold("agent_outdated", f"에이전트 서버가 입력 결손 호출(noinput)을 모른다 — limits.kinds"
+                       f" {list(self.lim.get('kinds') or ())}. {self.agent} 는 ECAD 에 기대는데 이 대상에 ECAD 가 없어 그 호출로만"
+                       " 닫힌다. 운영자가 에이전트 서버를 재설계 M3 판(cr-noinput-1)으로 올리면 이어 돈다")
+            raise _Stop("agent_outdated")
         self.plan = self._plan()
         cells = self._start_cells()
         if not cells:
@@ -1593,6 +1688,14 @@ class _Session:
         if self.pack.card_basis in (cardpack.CARD_BASIS_CARDS, cardpack.CARD_BASIS_BACKGROUND):
             self._sweep()
         self._classify(cells)
+        if self.gaps:
+            # 입력 결손 전문가 — 카드 대조(fwd·rev·단독)와 카드 밖 호출 대신 셀마다 입력 결손 호출 한 번(m3-cells 3.6)
+            for cell in [c for c in cells if c.alive]:
+                self._noinput(cell)
+            for cell in [c for c in cells if c.alive]:
+                self._settle(cell)
+            self._close()
+            return
         decks = list(self.plan.get("verdict_decks") or ()) if self.pack.card_basis == cardpack.CARD_BASIS_CARDS else []
         pair_over = {(str(p.get("deck_id")), str(p.get("unit_id"))) for p in self.plan.get("pair_over") or ()}
 

@@ -24,7 +24,8 @@ SCENES = {"verdict_fwd": ("req_verdict_fwd.json", "result_verdict_ok.json"),
           "verdict_rev": ("req_verdict_rev.json", "result_verdict_rev.json"),
           "verdict_solo": ("req_verdict_solo.json", "result_verdict_solo.json"),
           "sweep": ("req_sweep.json", "result_sweep_ok.json"),
-          "offcard": ("req_offcard.json", "result_offcard_ok.json")}
+          "offcard": ("req_offcard.json", "result_offcard_ok.json"),
+          "noinput": ("req_noinput.json", "result_noinput_ok.json")}
 
 
 class _Store:

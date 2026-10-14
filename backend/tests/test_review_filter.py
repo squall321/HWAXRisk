@@ -102,17 +102,18 @@ def _run(store, roster=ROSTER, *, scope=None, fake_setup=None) -> tuple[str, str
 # ---------------------------------------------------------------- 열 줄 — 한 원장에서
 def test_a_cell_both_signals_call_unrelated_is_filtered_and_every_forcing_rule_keeps_its_cell(store, monkeypatch):
     """승인 · 거르기 on · 표본 0% — 두 신호가 다 무관인 셀만 걸러진다(na_irrelevant · route/basis filtered · 선점 없음 · 그 셀의
-    판정·카드 밖 호출 0). 강제 줄은 저마다 그 이름으로 셀을 검토에 남긴다 — 1순위(그 셀이 거를 셀이었으면 그림자) · 전역 단위 ·
-    카드 0장 · 결측 블록 없는 입력 결손(route noinput). 코드 신호가 관련인 셀은 강제 없이 검토다. 걸러진 셀의 route_json 에 두 신호와
-    규칙·판 표지가 얼고, 거른 셀만 남은 전문가는 없으니 원장은 그대로 닫힌다."""
+    판정·카드 밖 호출 0). 입력 결손 전문가도 훑기가 결측 블록을 받은 판(cr-sweep-2)이면 같은 규칙으로 걸러지고, 나머지 셀은 입력
+    결손 호출 길(route noinput)이다. 강제 줄은 저마다 그 이름으로 셀을 검토에 남긴다 — 1순위(그 셀이 거를 셀이었으면 그림자) · 전역
+    단위 · 카드 0장. 코드 신호가 관련이거나 훑기가 maybe 인 셀은 강제 없이 검토다. 걸러진 셀의 route_json 에 두 신호와 규칙·판
+    표지가 얼고, 거른 셀만 남은 전문가는 없으니 원장은 그대로 닫힌다."""
     _approve(monkeypatch)
     _knobs(monkeypatch, risk_filter_audit_pct=0)
     key, job_id, fake, kinds = _run(store)
     b, g, u1 = kinds["boundary"], kinds["global"], kinds["bundle"]
 
     filtered = [c for c in _cells(store, key) if c["state"] == "na_irrelevant"]
-    assert [(c["unit_id"], c["agent_key"]) for c in filtered] == [(b, STD2)]
-    cell = filtered[0]
+    assert [(c["unit_id"], c["agent_key"]) for c in filtered] == [(b, MEM2), (b, STD2)]
+    cell = filtered[1]
     assert (cell["route"], cell["route_forced"], cell["basis"], cell["lease_owner"]) == ("filtered", None, "filtered", None)
     assert cell["finished_at"] is not None and cell["run_id"] == job_id
     rj = cell["route_json"]
@@ -132,15 +133,17 @@ def test_a_cell_both_signals_call_unrelated_is_filtered_and_every_forcing_rule_k
     assert _cell(store, key, b, STD1)["sample_json"]["shadow"] == {"would_filter": True, "result": None}
     assert route(g, STD2) == ("reviewed", "review", "global_unit")
     assert route(b, STD3) == ("reviewed", "review", "no_cards")
-    assert route(b, MEM2) == ("reviewed", "noinput", "input_gap")             # 결측 블록을 못 받은 훑기 — 거르지 않는다
-    assert route(u1, MEM2) == ("reviewed", "noinput", "input_gap")
+    assert route(b, MEM2)[:2] == ("na_irrelevant", "filtered")               # 결측 블록을 받은 훑기(cr-sweep-2)의 무관
+    assert _cell(store, key, b, MEM2)["route_json"]["forced_all"] == []
+    assert route(u1, MEM2) == ("reviewed", "noinput", None)                   # 훑기 maybe — 입력 결손 호출 길
+    assert route(g, MEM2) == ("reviewed", "noinput", "global_unit")
     assert route(b, MEM1) == ("reviewed", "noinput", "rank1")
     assert route(b, MECH2) == ("reviewed", "review", None)                    # 코드 신호가 관련 — 10번 줄
     assert _cell(store, key, b, MECH2)["route_json"]["rule"] == "signal_related"
     assert route(u1, STD2) == ("reviewed", "review", None)
     # 1순위 그림자 — 그 사람이 1순위가 아니었다면 걸렀을 셀만. 다른 강제 줄이 걸린 셀(전역 단위)은 그림자가 아니다.
     shadows = sorted((c["unit_id"], c["agent_key"]) for c in _cells(store, key) if (c["sample_json"] or {}).get("shadow"))
-    assert shadows == [(b, STD1)]
+    assert shadows == [(b, MEM1), (b, STD1)]
     assert {c["route"] for c in _cells(store, key)} <= {"filtered", "review", "noinput"}
     tally = review_cells.expert_tally(store, key, STD2)
     assert (tally["filtered"], tally["reviewed"], tally["open"]) == (1, 4, 0)
@@ -204,6 +207,29 @@ def test_the_filter_off_writes_no_route_at_all_like_an_m2_job(store, monkeypatch
     assert {(c["state"], c["route"], c["route_forced"]) for c in cells} == {("reviewed", None, None)}
     assert {c["route_json"] is None for c in cells} == {True}
     assert {json.dumps(c["sample_json"], sort_keys=True) for c in cells} == {'{"attempt": 0}'}
+
+
+def test_an_input_gap_sweep_on_the_old_rev_never_filters_the_gap_experts_cells(store, monkeypatch):
+    """입력 결손 전문가의 훑기가 결측 블록을 모르는 판(cr-sweep-1)의 답이면 '무관' 이 'ECAD 가 없어 보이는 것이 없다' 일 수 있어
+    거르지 않는다 — 5번 줄(input_gap)로 입력 결손 호출 길이다(X1-17). 그 훑기 요청에는 결측 블록(영역 실마리를 단 ecad 줄)이 실렸고,
+    결손이 아닌 전문가의 훑기에는 실리지 않는다."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    roster = (ROSTER[0], ROSTER[5], ROSTER[6])
+
+    def setup(fake, kinds):
+        fake.base_limits["prompt_rev"]["sweep"] = "cr-sweep-1"
+
+    key, _job, fake, kinds = _run(store, roster, fake_setup=setup)
+    cell = _cell(store, key, kinds["boundary"], MEM2)
+    assert (cell["state"], cell["route"], cell["route_forced"]) == ("reviewed", "noinput", "input_gap")
+    assert (cell["route_json"]["code"]["verdict"], cell["route_json"]["sweep"]["verdict"]) == ("unrelated", "unrelated")
+    assert [c for c in _cells(store, key) if c["state"] == "na_irrelevant"] == []
+    sweeps = {r["body"]["expert"]["key"]: r["body"]["extra"].get("missing") for r in fake.calls("run")
+              if r["body"]["kind"] == "sweep"}
+    assert sweeps[STD1] is None
+    assert [m["kind"] for m in sweeps[MEM2]] == ["ecad"]
+    assert sweeps[MEM2][0]["note"].endswith("이 영역이 볼 것 — 언더필·스택업.")
 
 
 # ---------------------------------------------------------------- 넘김 · 1순위 대기 · 훑기 관련

@@ -1,0 +1,13 @@
+{
+  "version": "input-gap-1.0",
+  "kind": "ecad",
+  "note": "입력 결손 호출의 영역 실마리(재설계 M3 C3-3 · m3-cells 3.6) — ECAD 가 없는 대상에서 ECAD 에 기대는 영역(HWAXRISK_ECAD_DOMAINS)의 전문가에게 결측 블록(unit.missing · 훑기 extra.missing)의 ecad 글 끝에 '이 영역이 볼 것' 으로 싣는다. 출처는 WP2 3.10.2 와 docs/design-risk-review/cad-capabilities.md 다. 여기 없는 영역은 실마리 없이 결측 글만 싣는다.",
+  "domains": {
+    "passive": "소자 위치의 변형률·지지 스팬",
+    "soc": "Z 간극·TIM 접촉",
+    "mem": "언더필·스택업",
+    "pwr": "팩 주변 간극과 허용치",
+    "rf": "방사체·접지 금속과의 거리",
+    "pcb": "보드 고정점·지지 스팬·보드 근접 계면"
+  }
+}

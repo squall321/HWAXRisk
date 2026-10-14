@@ -29,6 +29,7 @@ CELL_TRANSITIONS: frozenset[tuple[str, str]] = frozenset({
     ("running", "pending"),      # 인프라·잡 보류·취소·재기동·한도 미만 내용 탓 — 기다림은 셀을 놓지 않는다
     ("running", "failed"),       # 내용 탓 한도·호출 수 상한
     ("running", "na_irrelevant"),  # 거르기 분류(route_cell — 재설계 M3 C3-6): 두 신호가 다 무관이고 강제 사유가 없다
+    ("running", "no_input"),     # 입력 결손 호출의 정산(settle_noinput — C3-3): 영향을 모르거나 결측 입력이 와야 볼 수 있다
     ("pending", "failed"),       # 카드 묶음 한도 초과·agent_not_found(fail_open_cells)
     ("failed", "skipped"),       # 사람의 넘김(skip_cells) — skipped 는 failed 에서만 간다(PLAN 4절 C-18)
     ("failed", "pending"),       # 사람의 다시(retry_cells — 재설계 M3 C3-4)
@@ -51,7 +52,11 @@ _MACHINES: dict[str, tuple[str, frozenset[tuple[str, str]]]] = {
     "cell": ("rr_review_cells", CELL_TRANSITIONS),
     "expert": ("rr_expert_reports", EXPERT_TRANSITIONS),
 }
-CELL_BASES: tuple[str, ...] = ("cards", "background", "role_only")   # reviewed 셀을 무엇으로 봤나(X1-04)
+# reviewed 셀을 무엇으로 봤나(X1-04) — 카드 대조 · 배경 카드뿐 · 역할만 · 입력 결손 호출(재설계 M3 C3-3)
+CELL_BASES: tuple[str, ...] = ("cards", "background", "role_only", "noinput")
+NOINPUT = "noinput"
+# 입력 결손 호출의 결과 → 셀 상태(m3-cells 3.6 의 정산표 — review_verify.noinput_outcome)
+NOINPUT_STATES: dict[str, str] = {"impact": "reviewed", "none": "reviewed", "unknown": "no_input", "request": "no_input"}
 CALL_FINAL_STATES: tuple[str, ...] = ("ok", "infra_fail", "content_fail", "aborted")
 RESTART_CODE = "restart"
 # 마감으로 집는 머리의 묶음 상태 — 묶음을 끝내 못 받아 셀이 다 실패로 닫힌 전문가도 사람이 그 셀을 넘기면 마감된다(재설계 M3 C3-4 —
@@ -63,6 +68,7 @@ SETTLE_CARDS_UNJUDGED = "cards_unjudged"
 SETTLE_TRUNCATED = "output_truncated"
 SETTLE_SAMPLES = "samples_incomplete"
 SETTLE_OFFCARD = "offcard_incomplete"
+SETTLE_NOINPUT = "noinput_incomplete"      # 입력 결손 호출의 답에 q1 이나 q2 가 한 줄도 없다
 
 # 호출 결과·정산이 고칠 수 있는 열 — 상태·선점·신원·잡 결속은 이 모듈의 함수만 바꾼다.
 _CELL_PROTECTED = frozenset({"target_key", "unit_id", "agent_key", "owner_sub", "state", "lease_owner", "run_id",
@@ -809,6 +815,39 @@ def settle_cell(store: Any, target_key: str, unit_id: str, agent_key: str, *, le
         return {"written": True, "state": "pending", "code": missing[0], "missing": missing}
 
 
+def settle_noinput(store: Any, target_key: str, unit_id: str, agent_key: str, *, lease_owner: str, outcome: str | None,
+                   max_charged: int = 2, now: int | None = None) -> dict:
+    """입력 결손 셀을 정산한다(재설계 M3 C3-3) — {written, state, code?, missing?}. 결과(`review_verify.noinput_outcome`)가
+    impact·none 이면 reviewed, unknown·request 면 no_input 이다(basis 는 셀이 이미 noinput). 결과가 없거나(답에 q1·q2 가 모자라다)
+    마지막 답이 잘린 채 끝났으면(`truncated = 1`) 내용 탓 실패다 — `charged + 1`, 한도에 닿으면 failed. 선점을 잃었으면
+    {written: False}."""
+    now = now_epoch() if now is None else now
+    key = (target_key, unit_id, agent_key)
+    where = f"{_cell_where()} AND lease_owner = ?"
+    params = (*key, lease_owner)
+    release = {"lease_owner": None, "heartbeat_at": None, "finished_at": now}
+    with store.tx():
+        row = _cell(store, *key)
+        if not _holds(store, target_key, agent_key, lease_owner) or row is None or row["state"] != "running" \
+                or row["lease_owner"] != lease_owner:
+            return {"written": False, "state": row["state"] if row else None}
+        missing = ([] if outcome in NOINPUT_STATES else [SETTLE_NOINPUT]) + ([SETTLE_TRUNCATED] if row["truncated"] == 1 else [])
+        if not missing:
+            dst = NOINPUT_STATES[str(outcome)]
+            _move(store, "cell", "running", dst, where=where, params=params, now=now,
+                  sets={**release, "not_before": None, "error_code": None, "error_class": None, "error": None, "knob": None})
+            return {"written": True, "state": dst}
+        charged = int(row["charged"] or 0) + 1
+        failure = {**release, "charged": charged, "error_code": missing[0], "error_class": review_ops.CONTENT,
+                   "error": "정산 조건 미달 — " + ", ".join(missing)}
+        if charged >= max(1, int(max_charged)):
+            _move(store, "cell", "running", "failed", where=where, params=params, now=now, sets=failure)
+            return {"written": True, "state": "failed", "code": missing[0], "missing": missing}
+        _move(store, "cell", "running", "pending", where=where, params=params, now=now,
+              sets={**failure, "finished_at": None})
+        return {"written": True, "state": "pending", "code": missing[0], "missing": missing}
+
+
 INTERNAL_CODE = "internal_error"
 _INTERNAL_KEY = "internal"          # 머리 stats_json 의 칸 — {<unit_id> | 'head': 연달은 결함 수}
 
@@ -1093,6 +1132,8 @@ def review_invariants(store: Any, target_key: str) -> list[str]:
     (G3) 선점 — running 셀은 그 전문가가 같은 선점으로 running 이고, running 머리는 선점이 있으며, 아닌 것은 선점이 없다.
     (G4) reviewed 셀 — `cards_judged == cards_expected`(카드 누락 0), `truncated` 가 1 이 아니고(절단 0, NULL 은 모름),
          카드 밖 호출이 끝났고, 무엇으로 봤는지(basis)가 있다. 실효 판정이 있는 카드 수가 `cards_judged` 와 같다(X1-03).
+         입력 결손 호출로 본 셀(basis noinput — 재설계 M3 C3-3)은 카드를 한 장씩 판정하지 않으므로 계획 카드 수가 비고(NULL)
+         판정 행이 0 이며 입력 결손 결과(extras_json.noinput.outcome)가 있다. no_input 셀도 basis 가 noinput 이고 결과가 있다.
     (G5) 판정 행 — 그 행의 호출이 원장에 있고 그 호출에 실은 카드에 그 별칭이 있다(나갈 기준 2). 참조가 없는데 `applies` 가
          yes 가 아니면 `refs_ok` 는 NULL 이다(X1-05). 카드마다 실효 행이 하나다.
     (G6) failed 셀에는 까닭(error_code)이 있다.
@@ -1100,7 +1141,8 @@ def review_invariants(store: Any, target_key: str) -> list[str]:
     problems: list[str] = []
     cells = [dict(r) for r in store.query(
         "SELECT unit_id, agent_key, state, lease_owner, basis, cards_expected, cards_judged, truncated, offcard_state,"
-        " error_code FROM rr_review_cells WHERE target_key = ?", (target_key,))]
+        " error_code, json_extract(extras_json, '$.noinput.outcome') AS noinput_outcome FROM rr_review_cells"
+        " WHERE target_key = ?", (target_key,))]
     heads = {r["agent_key"]: dict(r) for r in store.query(
         "SELECT agent_key, state, lease_owner FROM rr_expert_reports WHERE target_key = ?", (target_key,))}
     if not cells and not heads:
@@ -1128,7 +1170,17 @@ def review_invariants(store: Any, target_key: str) -> list[str]:
             problems.append(f"(G3) running 셀 {name} 의 선점이 그 전문가의 선점과 다르다.")
         if c["state"] != "running" and c["lease_owner"]:
             problems.append(f"(G3) {c['state']} 셀 {name} 에 선점이 남았다.")
-        if c["state"] == "reviewed":
+        noinput = c["basis"] == NOINPUT
+        if c["state"] in ("reviewed", "no_input") and noinput and c["noinput_outcome"] not in NOINPUT_STATES:
+            problems.append(f"(G4) 입력 결손 셀 {name} 에 입력 결손 결과가 없다.")
+        if c["state"] == "no_input" and not noinput:
+            problems.append(f"(G4) no_input 셀 {name} 의 basis {c['basis']!r} 가 noinput 이 아니다.")
+        if c["state"] == "reviewed" and noinput:
+            if c["cards_expected"] is not None:
+                problems.append(f"(G4) 입력 결손 셀 {name} 에 계획 카드 수 {c['cards_expected']} 가 있다.")
+            if c["truncated"] == 1:
+                problems.append(f"(G4) reviewed 셀 {name} 에 절단이 남았다.")
+        elif c["state"] == "reviewed":
             if c["cards_expected"] is None or c["cards_judged"] != c["cards_expected"]:
                 problems.append(f"(G4) reviewed 셀 {name} 의 판정 카드 {c['cards_judged']} ≠ 계획 {c['cards_expected']}.")
             if c["truncated"] == 1:
