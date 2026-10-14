@@ -384,6 +384,8 @@ _CALL_STATE = {review_ops.INFRA: "infra_fail", review_ops.CONTENT: "content_fail
 _BASIS_OF_PACK = {cardpack.CARD_BASIS_CARDS: "cards", cardpack.CARD_BASIS_BACKGROUND: "background",
                   cardpack.CARD_BASIS_NONE: "role_only"}
 _JUDGEMENT_FIRST = {"FAIL": 0, "WARNING": 1}
+# 입력 결손 셀이 표본·그림자일 때의 놓침 판정(C3-7) — 영향 있음은 걸림을 놓친 것, 모름·입력이 와야 볼 수 있음은 판단 불가, 없음은 지킴
+_NOINPUT_AUDIT = {"impact": "risk_miss", "unknown": "undetermined", "request": "undetermined", "none": "kept"}
 
 # S11(품질 수치)이 꽂는 자리 — (store, target_key, job_id) -> dict | None. 진행판이 60초마다 불러 progress_json.quality 에 넣는다
 # (5초 폴링이 원장을 다시 세지 않게 — M2.md 5절 #16). None 이면 칸을 비워 둔다.
@@ -1337,6 +1339,11 @@ class _Session:
                                        sets={"sweep_state": "failed" if failed else "done",
                                              "sweep_json": canonical_json(self.sweep)}):
             raise _Stop("lease", release=False)
+        # 늦은 넘김(C3-7) — 이 훑기가 넘긴 (단위, 영역)의 셀 가운데 이미 걸러진 것을 다시 연다(다시 분류되면 7번 줄로 검토다).
+        for handoff in self.sweep.get("handoffs") or ():
+            if handoff.get("unit_id") and handoff.get("to"):
+                review_cells.reopen_filtered(self.store, self.target_key, via="handoff", domain=str(handoff["to"]),
+                                             unit_id=str(handoff["unit_id"]), now=self.now())
 
     # -- 거르기 분류(재설계 M3 C3-6) ----------------------------------------------------------------
     def _handoffs_to(self, domain: str) -> dict[str, list[dict]]:
@@ -1363,8 +1370,8 @@ class _Session:
         부르지 않는다), 표본으로 끝까지 보내거나(route='audit'), 검토로 보낸다. 코드 신호는 잡에 얼린 승인 여부로 낸다(#40).
 
         잡 거르기가 'off'(M2 잡 포함)면 아무것도 쓰지 않는다. 이미 분류된 셀(route 가 선 셀 — 재기동·인프라 실패 뒤의 세션)과 사람이
-        다시 연 셀(route_forced human_retry)은 그대로 둔다 — 한 셀은 입력이 바뀌기 전까지 한 번만 분류된다. 넓힘·대상 전체 끔(6번)은
-        C3-7 이 원장에서 유도해 넣는다(아직 거짓). 입력 결손 전문가는 훑기가 결측 블록을 받은 판(cr-sweep-2 이상)의 답일 때만 두 신호
+        다시 연 셀(route_forced human_retry)은 그대로 둔다 — 한 셀은 입력이 바뀌기 전까지 한 번만 분류된다(넓힘·늦은 넘김으로 다시 연
+        셀은 분류 칸을 비워 다시 분류한다 — C3-7). 넓힘·대상 전체 끔(6번)은 원장에서 유도한다. 입력 결손 전문가는 훑기가 결측 블록을 받은 판(cr-sweep-2 이상)의 답일 때만 두 신호
         규칙에 들고, 아니면 5번(input_gap)으로 입력 결손 호출 길(route noinput)이다."""
         assert self.pack is not None
         if self.filter_mode == "off":
@@ -1378,6 +1385,8 @@ class _Session:
         unit_of = {u["unit_id"]: u for u in units.load_units(self.store, self.target_key)}
         handoffs = self._handoffs_to(domain)
         tier_a = self._tier_a_pending(set(unit_of))
+        widened = review_cells.widened_domains(self.store, self.target_key)          # 원장에서 유도(C3-7)
+        target_off = len(widened) >= review_cells.WIDEN_ALL_AT
         swept = self.pack.card_basis in (cardpack.CARD_BASIS_CARDS, cardpack.CARD_BASIS_BACKGROUND)
         sweep_failed = head.get("sweep_state") == "failed"
         revs = list(self.sweep.get("prompt_revs") or ())
@@ -1389,8 +1398,8 @@ class _Session:
                                            approved=self.routing_approved)
             decision = relevance.route_decision(
                 filter_mode=self.filter_mode, rank1=head.get("rank_in_domain") == 1, unit_kind=str(unit["kind"]),
-                no_cards=not swept, input_gap=bool(self.gaps), gap_aware=gap_aware, widened=False,
-                target_off=False, handoffs=handoffs.get(cell.unit_id, []), tier_a_pending=tier_a,
+                no_cards=not swept, input_gap=bool(self.gaps), gap_aware=gap_aware, widened=domain in widened,
+                target_off=target_off, handoffs=handoffs.get(cell.unit_id, []), tier_a_pending=tier_a,
                 code=relevance.code_for(signal, domain),
                 sweep=relevance.sweep_signal((self.sweep.get("units") or {}).get(cell.unit_id), failed=sweep_failed),
                 sample_key=(self.target_key, cell.unit_id, self.agent), audit_pct=self.audit_pct, salt=self.salt,
@@ -1684,9 +1693,37 @@ class _Session:
         if not out["written"]:
             raise _Stop("lease", release=False)
         cell.alive = False
+        if out["state"] in ("reviewed", "no_input"):
+            self._sample_outcome(cell)
         if out["state"] not in ("reviewed", "no_input"):
             log.info("검토 잡 %s: %s×%s 셀 정산 미달(%s) → %s", self.job_id, cell.unit_id, self.agent,
                      ", ".join(out.get("missing") or [out.get("code") or ""]), out["state"])
+
+    def _sample_outcome(self, cell: _Cell) -> None:
+        """정산이 끝난 표본·그림자 셀의 결과(재설계 M3 C3-7 — X1-13 의 넷)를 `sample_json` 에 적고, 걸림을 놓쳤으면(risk_miss) 그
+        영역을 그 대상에서 넓힌다. 카드 셀은 `review_verify.audit_outcome`(실효 판정 · 카드 밖 줄), 입력 결손 셀은 그 결과로 —
+        영향 있음 risk_miss · 모름·확인할 항목 undetermined · 없음 kept."""
+        row = self.store.query_one("SELECT domain, sample_json FROM rr_review_cells WHERE target_key = ? AND unit_id = ?"
+                                   " AND agent_key = ?", (self.target_key, cell.unit_id, self.agent))
+        sample = _json(row["sample_json"] if row is not None else None, {})
+        keys = [k for k in review_cells.SAMPLE_RESULT_KEYS if isinstance(sample.get(k), Mapping)]
+        if not keys:
+            return
+        if self.gaps:
+            outcome = _NOINPUT_AUDIT.get(str((cell.noinput or {}).get("outcome")), "undetermined")
+        else:
+            rows = self._rows(cell)
+            head = self.store.query_one("SELECT extras_json FROM rr_review_cells WHERE target_key = ? AND unit_id = ?"
+                                        " AND agent_key = ?", (self.target_key, cell.unit_id, self.agent))
+            offcard, _rest = expert_report.offcard_rows(dict(head) if head is not None else {})
+            outcome = review_verify.audit_outcome(review_verify.effective_rows(rows) if rows else {}, offcard)
+        if not review_cells.note_sample_result(self.store, self.target_key, cell.unit_id, self.agent, lease_owner=self.lease,
+                                               results={k: outcome for k in keys}, now=self.now()):
+            raise _Stop("lease", release=False)
+        if outcome == "risk_miss":
+            out = review_cells.widen(self.store, self.target_key, str(row["domain"]), now=self.now())
+            log.info("검토 잡 %s: %s×%s 의 %s 가 걸림을 놓쳤다 — 영역 %s 를 넓혔다(다시 연 셀 %s, 대상 전체 끔 %s)", self.job_id,
+                     cell.unit_id, self.agent, "·".join(keys), row["domain"], out["reopened"], out["off"])
 
     def _close(self) -> None:
         """세션 끝 — 그 전문가의 범위 안 열린 셀이 0 이면 마감(`finalize_expert`), 아니면 놓는다(백오프 중인 셀·다음 시도의 셀은
@@ -2222,11 +2259,26 @@ class ReviewLoop:
             " e.target_key AND c.agent_key = e.agent_key AND c.run_id = e.run_id AND c.state IN ('pending', 'running'))",
             (job["target_key"], job["id"]))["n"] or 0)
 
+    def _audit_topup(self, job: Mapping[str, Any]) -> int:
+        """잡 끝 보충 표본(C3-7) — 잡 거르기가 on 일 때 그 잡이 거른 셀을 표본 바닥(59건 · 영역당 1건)까지 다시 연다. 다시 연 셀 수."""
+        knobs = (job.get("params") or {}).get("knobs") or {}
+        if knobs.get("filter") != "on":
+            return 0
+        out = review_cells.audit_topup(self.store, str(job["target_key"]), str(job["id"]),
+                                       audit_pct=float(knobs.get("audit_pct") or 0),
+                                       salt=str(knobs.get("sample_salt") or review_verify.SAMPLE_SALT), now=self.clock())
+        if out["reopened"]:
+            log.info("검토 잡 %s: 보충 표본 %s셀을 다시 열었다(거를 수 있던 %s · 표본 바닥 %s · 지금 표본 %s)", job["id"],
+                     out["reopened"], out["n"], out["n_audit"], out["sampled"])
+        return int(out["reopened"])
+
     def _complete_or_phase(self, job: Mapping[str, Any]) -> str | None:
         # 다른 잡이 쥐고 있다가 그 잡이 끝난 뒤 놓은 범위 안 셀을 먼저 거둔다 — 그러지 않으면 아래 셈이 그 셀을 못 보고 잡을 닫는다(R3A-1).
         review_cells.adopt_released(self.store, str(job["id"]), now=self.clock())
         if (self._open_cells(job) == 0 and self._running_heads(job) == 0 and not self.workers(job["id"])
                 and self._unfinalized(job) == 0):
+            if self._audit_topup(job):
+                return "review"                          # 보충 표본으로 다시 연 셀이 있다 — 잡은 이어 돈다(사슬보다 먼저)
             failed = self.store.query(
                 "SELECT error_code, COUNT(*) AS n FROM rr_review_cells WHERE target_key = ? AND run_id = ? AND state = 'failed'"
                 " GROUP BY error_code ORDER BY error_code", (job["target_key"], job["id"]))

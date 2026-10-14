@@ -53,6 +53,14 @@ def _packs(roster) -> dict[str, dict]:
                        else fre.derive_pack(ok, r["key"], name=r["key"], domain=r["domain"])) for r in roster}
 
 
+def _fake(roster) -> FakeReviewEngine:
+    """걸림 없는 대본의 가짜 엔진 — 카드 판정은 적용·OK, 카드 밖 지적 0. 표본·그림자 셀의 결과가 놓침(risk_miss)이 아니라 넓힘이
+    일어나지 않는다(넓힘을 보는 시험이 걸림을 따로 건다)."""
+    fake = FakeReviewEngine(_packs(roster))
+    fake.offcard_findings = 0
+    return fake
+
+
 def _units(store, key: str) -> dict[str, str]:
     """kind → unit_id(경계·전역은 하나씩, 묶음은 첫째)."""
     out: dict[str, str] = {}
@@ -89,7 +97,7 @@ def _quiet(fake: FakeReviewEngine, *unit_ids: str) -> None:
 def _run(store, roster=ROSTER, *, scope=None, fake_setup=None) -> tuple[str, str, FakeReviewEngine, dict[str, str]]:
     key = rig.target(store, roster)
     job_id = rig.job(store, key, scope=scope)
-    fake = FakeReviewEngine(_packs(roster))
+    fake = _fake(roster)
     kinds = _units(store, key)
     _quiet(fake, kinds["boundary"], kinds["global"])
     if fake_setup is not None:
@@ -102,21 +110,26 @@ def _run(store, roster=ROSTER, *, scope=None, fake_setup=None) -> tuple[str, str
 
 # ---------------------------------------------------------------- 열 줄 — 한 원장에서
 def test_a_cell_both_signals_call_unrelated_is_filtered_and_every_forcing_rule_keeps_its_cell(store, monkeypatch):
-    """승인 · 거르기 on · 표본 0% — 두 신호가 다 무관인 셀만 걸러진다(na_irrelevant · route/basis filtered · 선점 없음 · 그 셀의
-    판정·카드 밖 호출 0). 입력 결손 전문가도 훑기가 결측 블록을 받은 판(cr-sweep-2)이면 같은 규칙으로 걸러지고, 나머지 셀은 입력
-    결손 호출 길(route noinput)이다. 강제 줄은 저마다 그 이름으로 셀을 검토에 남긴다 — 1순위(그 셀이 거를 셀이었으면 그림자) · 전역
-    단위 · 카드 0장. 코드 신호가 관련이거나 훑기가 maybe 인 셀은 강제 없이 검토다. 걸러진 셀의 route_json 에 두 신호와 규칙·판
-    표지가 얼고, 거른 셀만 남은 전문가는 없으니 원장은 그대로 닫힌다."""
+    """승인 · 거르기 on · 표본 0% — 두 신호가 다 무관인 셀만 걸러진다(route_json 의 결정 filtered · 두 신호와 규칙·판 표지가 언다).
+    입력 결손 전문가도 훑기가 결측 블록을 받은 판(cr-sweep-2)이면 같은 규칙으로 걸러지고, 나머지 셀은 입력 결손 호출 길(route
+    noinput)이다. 강제 줄은 저마다 그 이름으로 셀을 검토에 남긴다 — 1순위(그 셀이 거를 셀이었으면 그림자) · 전역 단위 · 카드 0장.
+    코드 신호가 관련이거나 훑기가 maybe 인 셀은 강제 없이 검토다. 걸러진 셀은 그 세션에서 아무 호출도 받지 않고, 잡 끝 보충 표본
+    (C3-7 — 거를 수 있던 셀이 바닥 min(N, 59)에 못 미친다)이 영역마다 하나씩 다시 열어 끝까지 판정한다(route audit · filter_floor ·
+    결과는 놓침 넷 가운데 하나). 그림자 셀에도 결과가 남는다. 걸림을 놓친 결과가 없으니 넓힌 영역도 없다."""
     _approve(monkeypatch)
     _knobs(monkeypatch, risk_filter_audit_pct=0)
-    key, job_id, fake, kinds = _run(store)
+
+    def setup(fake, kinds):
+        # 경계 단위의 입력 결손 호출은 '영향 없음 · 확인할 것 없음' — 회로 1순위의 그림자가 놓침이 아니게(넓힘이 없게)
+        fake.noinput_q1 = {kinds["boundary"]: ["no"]}
+        fake.noinput_q2 = {kinds["boundary"]: [""]}
+
+    key, job_id, fake, kinds = _run(store, fake_setup=setup)
     b, g, u1 = kinds["boundary"], kinds["global"], kinds["bundle"]
 
-    filtered = [c for c in _cells(store, key) if c["state"] == "na_irrelevant"]
-    assert [(c["unit_id"], c["agent_key"]) for c in filtered] == [(b, MEM2), (b, STD2)]
-    cell = filtered[1]
-    assert (cell["route"], cell["route_forced"], cell["basis"], cell["lease_owner"]) == ("filtered", None, "filtered", None)
-    assert cell["finished_at"] is not None and cell["run_id"] == job_id
+    classified = [c for c in _cells(store, key) if (c["route_json"] or {}).get("decision") == "filtered"]
+    assert [(c["unit_id"], c["agent_key"]) for c in classified] == [(b, MEM2), (b, STD2)]
+    cell = _cell(store, key, b, STD2)
     rj = cell["route_json"]
     assert (rj["rule"], rj["decision"], rj["filter"], rj["forced_all"], rj["handoff"], rj["audit"]) == (
         "both_unrelated", "filtered", "on", [], [], {"score": rj["audit"]["score"], "pct": 0})
@@ -124,30 +137,42 @@ def test_a_cell_both_signals_call_unrelated_is_filtered_and_every_forcing_rule_k
     assert (rj["code"]["verdict"], rj["sweep"]["verdict"], rj["sweep"]["rel"], rj["sweep"]["k"]) == (
         "unrelated", "unrelated", "no", [])
     assert "std" not in rj["code"]["related_domains"] and "mech" in rj["code"]["related_domains"]
-    assert [x["kind"] for x in _unit_runs(fake, STD2, b)] == []               # 걸러진 셀은 아무 호출도 받지 않는다
+    # 보충 표본 — 다시 열려 끝까지 판정됐다(분류 기록은 그대로 둔다)
+    assert (cell["state"], cell["route"], cell["route_forced"], cell["basis"], cell["lease_owner"], cell["reopened_n"]) == (
+        "reviewed", "audit", "filter_floor", "cards", None, 1)
+    assert cell["run_id"] == job_id
+    assert cell["sample_json"].get("filter_audit") == {"score": rj["audit"]["score"], "picked_by": "domain_floor",
+                                                       "result": "relevance_miss"}
+    # 걸러진 셀은 그 세션에서 호출을 받지 않았다 — 그 셀의 호출은 그 전문가의 다른 단위 호출이 다 끝난 뒤다
+    runs = [r["body"] for r in fake.calls("run") if r["body"]["expert"]["key"] == STD2 and r["body"]["kind"] != "sweep"]
+    mine = [i for i, body in enumerate(runs) if (body.get("unit") or {}).get("unit_id") == b]
+    assert mine and min(mine) > max(i for i, body in enumerate(runs) if (body.get("unit") or {}).get("unit_id") != b)
 
     def route(unit_id, agent):
         c = _cell(store, key, unit_id, agent)
         return c["state"], c["route"], c["route_forced"]
 
     assert route(b, STD1) == ("reviewed", "review", "rank1")
-    assert _cell(store, key, b, STD1)["sample_json"].get("shadow") == {"would_filter": True, "result": None}
+    assert _cell(store, key, b, STD1)["sample_json"].get("shadow") == {"would_filter": True, "result": "relevance_miss"}
     assert route(g, STD2) == ("reviewed", "review", "global_unit")
     assert route(b, STD3) == ("reviewed", "review", "no_cards")
-    assert route(b, MEM2)[:2] == ("na_irrelevant", "filtered")               # 결측 블록을 받은 훑기(cr-sweep-2)의 무관
+    assert route(b, MEM2) == ("reviewed", "audit", "filter_floor")         # 결측 블록을 받은 훑기(cr-sweep-2)의 무관
     assert _cell(store, key, b, MEM2)["route_json"]["forced_all"] == []
+    assert _cell(store, key, b, MEM2)["sample_json"]["filter_audit"]["result"] == "kept"   # 입력 결손 결과 none
     assert route(u1, MEM2) == ("reviewed", "noinput", None)                   # 훑기 maybe — 입력 결손 호출 길
     assert route(g, MEM2) == ("reviewed", "noinput", "global_unit")
     assert route(b, MEM1) == ("reviewed", "noinput", "rank1")
+    assert _cell(store, key, b, MEM1)["sample_json"]["shadow"]["result"] == "kept"
     assert route(b, MECH2) == ("reviewed", "review", None)                    # 코드 신호가 관련 — 10번 줄
     assert _cell(store, key, b, MECH2)["route_json"]["rule"] == "signal_related"
     assert route(u1, STD2) == ("reviewed", "review", None)
     # 1순위 그림자 — 그 사람이 1순위가 아니었다면 걸렀을 셀만. 다른 강제 줄이 걸린 셀(전역 단위)은 그림자가 아니다.
     shadows = sorted((c["unit_id"], c["agent_key"]) for c in _cells(store, key) if (c["sample_json"] or {}).get("shadow"))
     assert shadows == [(b, MEM1), (b, STD1)]
-    assert {c["route"] for c in _cells(store, key)} <= {"filtered", "review", "noinput"}
+    assert {c["route"] for c in _cells(store, key)} <= {"audit", "review", "noinput"}
+    assert review_cells.widened_domains(store, key) == [] and review_cells.filter_off(store, key) is False
     tally = review_cells.expert_tally(store, key, STD2)
-    assert (tally["filtered"], tally["reviewed"], tally["open"]) == (1, 4, 0)
+    assert (tally["filtered"], tally["reviewed"], tally["open"]) == (0, 5, 0)
     ledger = {r["agent_key"]: r["status"] for r in store.query("SELECT agent_key, status FROM rr_coverage WHERE"
                                                                " target_key = ?", (key,))}
     assert ledger[STD2] == "done"
@@ -155,7 +180,7 @@ def test_a_cell_both_signals_call_unrelated_is_filtered_and_every_forcing_rule_k
 
 def test_the_audit_rate_sends_the_cell_to_the_end_and_a_full_rate_filters_nothing(store, monkeypatch):
     """표본 100% — 거를 셀이 걸러지지 않고 끝까지 판정된다(route audit · filter_audit · sample_json.filter_audit 의 점수와
-    picked_by rate, 결과는 정산 몫이라 비었다). 시도 표지(attempt)는 남는다."""
+    picked_by rate, 결과는 정산이 놓침 넷으로 적는다 — 걸림 없이 적용이면 relevance_miss). 시도 표지(attempt)는 남는다."""
     _approve(monkeypatch)
     _knobs(monkeypatch, risk_filter_audit_pct=100)
     key, _job, fake, kinds = _run(store, SMALL)
@@ -163,7 +188,7 @@ def test_the_audit_rate_sends_the_cell_to_the_end_and_a_full_rate_filters_nothin
     assert (cell["state"], cell["route"], cell["route_forced"]) == ("reviewed", "audit", "filter_audit")
     assert cell["route_json"]["decision"] == "audit" and cell["route_json"]["audit"]["pct"] == 100
     audit = cell["sample_json"].get("filter_audit")
-    assert audit == {"score": cell["route_json"]["audit"]["score"], "picked_by": "rate", "result": None}
+    assert audit == {"score": cell["route_json"]["audit"]["score"], "picked_by": "rate", "result": "relevance_miss"}
     assert cell["sample_json"]["attempt"] == 0
     assert "offcard" in [x["kind"] for x in _unit_runs(fake, STD2, kinds["boundary"])]
     assert [c for c in _cells(store, key) if c["state"] == "na_irrelevant"] == []
@@ -178,7 +203,7 @@ def test_shadow_mode_reviews_every_cell_and_marks_the_ones_it_would_have_filtere
     assert (cell["state"], cell["route"], cell["route_forced"]) == ("reviewed", "review", None)
     assert (cell["route_json"]["rule"], cell["route_json"]["decision"], cell["route_json"]["filter"]) == (
         "both_unrelated", "review", "shadow")
-    assert cell["sample_json"].get("shadow") == {"would_filter": True, "result": None}
+    assert cell["sample_json"].get("shadow") == {"would_filter": True, "result": "relevance_miss"}
     assert [c for c in _cells(store, key) if c["state"] == "na_irrelevant"] == []
 
 
@@ -188,7 +213,7 @@ def test_a_closed_approval_gate_filters_nothing_even_with_the_filter_on(store, m
     key = rig.target(store, SMALL)
     job_id = rig.job(store, key)
     _approve(monkeypatch)                                   # 잡이 선 뒤에 연 문은 그 잡에 듣지 않는다
-    fake = FakeReviewEngine(_packs(SMALL))
+    fake = _fake(SMALL)
     kinds = _units(store, key)
     _quiet(fake, kinds["boundary"])
     rig.Rig(store, fake).finish(job_id)
@@ -321,7 +346,7 @@ def test_a_classified_cell_keeps_its_route_when_the_inputs_move_before_it_settle
     _approve(monkeypatch)
     _knobs(monkeypatch, risk_filter_audit_pct=0)
     key = rig.target(store, SMALL)
-    fake = FakeReviewEngine(_packs(SMALL))
+    fake = _fake(SMALL)
     kinds = _units(store, key)
     b = kinds["boundary"]
     _quiet(fake, b, kinds["global"])
@@ -345,14 +370,121 @@ def test_a_classified_cell_keeps_its_route_when_the_inputs_move_before_it_settle
         "reviewed", "review", "tier_a_pending", before["route_json"])
 
 
-# ---------------------------------------------------------------- 재기동
-def test_a_restart_keeps_the_classification_and_never_reclassifies(store, monkeypatch):
-    """1순위가 먼저 다 닫힌 뒤 2순위 세션이 분류하고 판정 호출 도중 죽는다 — 재기동 복구 뒤 새 러너는 걸러진 셀을 다시 열지 않고
-    검토 셀의 분류(route·route_json)를 그대로 둔 채 이어 돈다. 걸러진 셀은 끝까지 호출 0 이다."""
+# ---------------------------------------------------------------- 표본·그림자의 놓침 · 넓힘 · 늦은 넘김 · 보충 표본(C3-7)
+def test_a_shadow_that_missed_a_hit_widens_the_domain_and_its_cells_are_never_filtered(store, monkeypatch):
+    """1순위의 그림자 셀(거를 셀이었을 셀)이 끝까지 보니 카드 밖 리스크(심각도 중대)를 냈다 — 놓침(risk_miss)이 sample_json 에
+    남고 그 영역(std)이 그 대상에서 넓어진다. 그 뒤 분류되는 같은 영역의 셀은 6번 줄(widened)로 검토다. 넓힘은 저장하지 않고
+    원장(표본·그림자 결과)에서 유도한다."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+
+    def setup(fake, kinds):
+        fake.offcard_findings = 1                     # 카드 밖 리스크 '중대' — 그림자 셀의 결과가 놓침이다
+
+    key, _job, _fake, kinds = _run(store, SMALL, fake_setup=setup)
+    b = kinds["boundary"]
+    assert _cell(store, key, b, STD1)["sample_json"]["shadow"] == {"would_filter": True, "result": "risk_miss"}
+    assert review_cells.widened_domains(store, key) == ["std"] and review_cells.filter_off(store, key) is False
+    cell = _cell(store, key, b, STD2)
+    assert (cell["state"], cell["route"], cell["route_forced"], cell["route_json"]["forced_all"]) == (
+        "reviewed", "review", "widened", ["widened"])
+    assert (cell["route_json"]["code"]["verdict"], cell["route_json"]["sweep"]["verdict"]) == ("unrelated", "unrelated")
+
+
+def _filtered_mid_job(store, monkeypatch) -> tuple[str, str, dict, rig.Rig, threading.Event, FakeReviewEngine]:
+    """1순위(std)가 먼저 다 닫힌 뒤 2순위 잡이 경계 단위를 거르고 다음 판정 호출에서 선다 — 보충 표본 전의 원장."""
     _approve(monkeypatch)
     _knobs(monkeypatch, risk_filter_audit_pct=0)
     key = rig.target(store, SMALL)
-    fake = FakeReviewEngine(_packs(SMALL))
+    fake = _fake(SMALL)
+    kinds = _units(store, key)
+    _quiet(fake, kinds["boundary"], kinds["global"])
+    rig.Rig(store, fake).finish(rig.job(store, key, scope={"agents": [STD1]}))
+    job_id = rig.job(store, key, scope={"agents": [STD2]})
+    gate = threading.Event()
+    fake.hold_runs = {fake.runs + 3: gate}
+    r = rig.Rig(store, fake)
+    r.tick()
+    r.tick(wait=False)
+    rig.wait_for(lambda: fake.runs == max(fake.hold_runs))
+    assert _cell(store, key, kinds["boundary"], STD2)["state"] == "na_irrelevant"
+    return key, job_id, kinds, r, gate, fake
+
+
+def _risk_miss(store, key: str, unit_id: str, agent: str, domain: str | None = None) -> None:
+    """정산이 적는 표본·그림자 결과의 놓침을 그 셀에 둔다(넓힘의 원천). 영역을 주면 그 셀의 영역 칸도 바꿔 영역 셋을 만든다."""
+    store.execute("UPDATE rr_review_cells SET domain = COALESCE(?, domain), sample_json = json_object('shadow',"
+                  " json_object('would_filter', 1, 'result', 'risk_miss')) WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+                  (domain, key, unit_id, agent))
+
+
+def test_widening_reopens_the_domains_filtered_cells_to_be_classified_again(store, monkeypatch):
+    """넓힘은 그 영역의 거른 셀을 전부 다시 연다(na_irrelevant → pending · reopened_n + 1 · 분류 칸을 비운다) — 다시 돌면 6번 줄
+    widened 로 검토다. 다시 열 것이 없으면 아무것도 바꾸지 않는다. 그 잡 범위 밖에서 걸러진 셀은 보충 표본이 채우지 못한다(short ·
+    그 영역)."""
+    key, job_id, kinds, r, gate, fake = _filtered_mid_job(store, monkeypatch)
+    b = kinds["boundary"]
+    short = review_cells.audit_topup(store, key, "another-job", audit_pct=0, salt="s")
+    assert (short["reopened"], short["short"], short["domains_short"]) == (0, 1, ["std"])
+    _risk_miss(store, key, b, STD1)
+    out = review_cells.widen(store, key, "std")
+    assert (out["widened"], out["off"], out["reopened"]) == (["std"], False, 1)
+    cell = _cell(store, key, b, STD2)
+    assert (cell["state"], cell["route"], cell["route_forced"], cell["basis"], cell["reopened_n"]) == (
+        "pending", None, "widened", None, 1)
+    assert review_cells.reopen_filtered(store, key, via="widened", domain="std") == []      # 다시 열 것이 없다
+    review_cells.recover_running(store)
+    gate.set()
+    r.loop.join(30)
+    rig.Rig(store, fake, clock=r.clock, boot_id="boot-b").finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    again = _cell(store, key, b, STD2)
+    assert (again["state"], again["route"], again["route_forced"]) == ("reviewed", "review", "widened")
+
+
+def test_a_third_widened_domain_turns_filtering_off_for_the_target(store, monkeypatch):
+    """넓힌 영역이 셋이 되는 넓힘은 그 영역 밖의 거른 셀까지 전부 다시 연다(via filter_off) — 대상 전체 거르기가 꺼졌다(원장에서
+    유도)."""
+    key, _job, kinds, r, gate, _fake_ = _filtered_mid_job(store, monkeypatch)
+    _risk_miss(store, key, kinds["global"], STD1, "mech")
+    _risk_miss(store, key, kinds["bundle"], STD1, "xd")
+    assert review_cells.filter_off(store, key) is False
+    _risk_miss(store, key, kinds["boundary"], STD1, "sim")
+    assert review_cells.widened_domains(store, key) == ["mech", "sim", "xd"] and review_cells.filter_off(store, key)
+    out = review_cells.widen(store, key, "sim")
+    assert (out["off"], out["reopened"]) == (True, 1)
+    assert _cell(store, key, kinds["boundary"], STD2)["route_forced"] == "filter_off"
+    gate.set()
+    r.loop.join(30)
+
+
+def test_a_late_handoff_reopens_a_filtered_cell_of_that_domain(store, monkeypatch):
+    """xd 2순위의 훑기가 std 2순위가 이미 거른 경계 단위를 std 로 넘긴다(h 줄) — 그 셀이 다시 열리고(handoff) 다시 분류되면 7번
+    줄로 검토다. 넘김 기록에 보낸 전문가가 있다."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    roster = (*SMALL, {"key": "xd-syn-0", "domain": "xd", "relevance": 0.99}, {"key": "xd-syn-1", "domain": "xd", "relevance": 0.9})
+
+    def setup(fake, kinds):
+        fake.handoff_to, fake.handoff_unit, fake.handoff_from = "std", kinds["boundary"], {"xd-syn-1"}
+
+    key, _job, fake, kinds = _run(store, roster, fake_setup=setup)
+    cell = _cell(store, key, kinds["boundary"], STD2)
+    assert (cell["state"], cell["route"], cell["route_forced"], cell["reopened_n"]) == ("reviewed", "review", "handoff", 1)
+    assert cell["route_json"]["handoff"] == [{"from": "xd-syn-1", "why": "훑기가 다른 영역의 몫으로 본 단위"}]
+    order = [r["body"]["expert"]["key"] for r in fake.calls("run") if r["body"]["kind"] == "sweep"]
+    assert order.index(STD2) < order.index("xd-syn-1")                     # 넘김이 거른 뒤에 왔다
+
+
+# ---------------------------------------------------------------- 재기동
+def test_a_restart_keeps_the_classification_and_never_reclassifies(store, monkeypatch):
+    """1순위가 먼저 다 닫힌 뒤 2순위 세션이 분류하고 판정 호출 도중 죽는다 — 재기동 복구 뒤 새 러너는 걸러진 셀을 다시 열지 않고
+    검토 셀의 분류(route·route_json)를 그대로 둔 채 이어 돈다. 걸러진 셀은 그 잡의 셀이 다 닫힐 때까지 호출 0 이고, 잡 끝 보충
+    표본(C3-7)만 그 셀을 다시 연다(분류 기록 route_json 은 그대로)."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    key = rig.target(store, SMALL)
+    fake = _fake(SMALL)
     kinds = _units(store, key)
     _quiet(fake, kinds["boundary"], kinds["global"])
     first_job = rig.job(store, key, scope={"agents": [STD1]})
@@ -376,8 +508,12 @@ def test_a_restart_keeps_the_classification_and_never_reclassifies(store, monkey
     first.loop.join(30)
     assert rig.state(store, second_job) == "completed"
     after = {c["unit_id"]: c for c in _cells(store, key) if c["agent_key"] == STD2}
-    assert {u: (c["route"], c["route_forced"], c["route_json"]) for u, c in after.items()} == {
-        u: v[1:] for u, v in classified.items()}
-    assert after[kinds["boundary"]]["state"] == "na_irrelevant"
-    assert [x["kind"] for x in _unit_runs(fake, STD2, kinds["boundary"])] == []
+    b = kinds["boundary"]
+    assert {u: (c["route"], c["route_forced"], c["route_json"]) for u, c in after.items() if u != b} == {
+        u: v[1:] for u, v in classified.items() if u != b}
+    assert (after[b]["state"], after[b]["route"], after[b]["route_forced"], after[b]["route_json"]) == (
+        "reviewed", "audit", "filter_floor", classified[b][3])
+    runs = [r["body"] for r in fake.calls("run") if r["body"]["expert"]["key"] == STD2 and r["body"]["kind"] != "sweep"]
+    mine = [i for i, body in enumerate(runs) if (body.get("unit") or {}).get("unit_id") == b]
+    assert mine and min(mine) > max(i for i, body in enumerate(runs) if (body.get("unit") or {}).get("unit_id") != b)
     assert review_cells.review_invariants(store, key) == []

@@ -34,6 +34,7 @@
   offcard_src·offcard_quote  카드 밖 f 줄이 근거로 댄 배경 카드 별칭과 그 인용(기본 exp · 빈 인용 — S9 의 카드 근거 카드 밖 줄)
   handoff_to       이 영역으로 넘기는 h 줄을 훑기(첫 단위)와 카드 밖 호출에 하나씩 더한다(S10 의 넘김 절)
   handoff_unit     훑기 h 줄이 넘기는 단위(unit_id) — 그 쪽에 그 단위가 없으면 h 줄을 내지 않는다(거르기 넘김 줄, 재설계 M3 C3-6)
+  handoff_from     주면 이 전문가들의 훑기만 h 줄을 낸다(늦은 넘김 — 재설계 M3 C3-7)
   seen·need        카드 밖 m 줄의 따져 본 메커니즘 · need 줄의 글(S10 의 메커니즘·필요 정보 절)
   hold_runs        n(1부터 센 run 차례) → threading.Event — 그 run 은 result 앞에서 그 사건을 기다린다(호출 중 재기동 시험)
   solo_verdicts    solo 변형에서만 쓰는 record_id → (applies, judgement) — 단독 재질의가 앞 판정을 뒤집는 카드(S11)
@@ -263,6 +264,7 @@ class FakeReviewEngine:
         self.offcard_quote = ""
         self.handoff_to: str | None = None
         self.handoff_unit: str | None = None
+        self.handoff_from: set[str] | None = None
         self.seen: list[str] = []
         self.need: str | None = None
         self.hold_runs: dict[int, threading.Event] = {}
@@ -554,7 +556,8 @@ class FakeReviewEngine:
                      "checks": {"why": "ok", "coerced": []}} for u, uid in units.items() if uid not in self.sweep_drop]
             first = (next((u for u, uid in units.items() if uid == self.handoff_unit), None) if self.handoff_unit
                      else next(iter(units), None))
-            if self.handoff_to and first is not None:
+            sender = str((body.get("expert") or {}).get("key") or "")
+            if self.handoff_to and first is not None and (self.handoff_from is None or sender in self.handoff_from):
                 rows.append({"t": "h", "u": first, "to": self.handoff_to, "why": "훑기가 다른 영역의 몫으로 본 단위",
                              "unit_id": units[first], "from_attempt": 1, "checks": {"coerced": []}})
             missing = []

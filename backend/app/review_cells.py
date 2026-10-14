@@ -30,6 +30,7 @@ CELL_TRANSITIONS: frozenset[tuple[str, str]] = frozenset({
     ("running", "failed"),       # 내용 탓 한도·호출 수 상한
     ("running", "na_irrelevant"),  # 거르기 분류(route_cell — 재설계 M3 C3-6): 두 신호가 다 무관이고 강제 사유가 없다
     ("running", "no_input"),     # 입력 결손 호출의 정산(settle_noinput — C3-3): 영향을 모르거나 결측 입력이 와야 볼 수 있다
+    ("na_irrelevant", "pending"),  # 넓힘 · 늦은 넘김 · 대상 전체 끔 · 보충 표본(reopen_filtered — C3-7)
     ("pending", "failed"),       # 카드 묶음 한도 초과·agent_not_found(fail_open_cells)
     ("failed", "skipped"),       # 사람의 넘김(skip_cells) — skipped 는 failed 에서만 간다(PLAN 4절 C-18)
     ("failed", "pending"),       # 사람의 다시(retry_cells — 재설계 M3 C3-4)
@@ -582,6 +583,157 @@ def route_cell(store: Any, target_key: str, unit_id: str, agent_key: str, *, lea
                       (decision["route"], decision["route_forced"], route_json,
                        json.dumps(sample, sort_keys=True) if sample else row["sample_json"], now, *key, lease_owner))
         return {"written": True, "state": "running"}
+
+
+# ---------------------------------------------------------------- 표본 재검토 · 대표 그림자 · 넓힘(재설계 M3 C3-7 — m3-cells 3.4)
+AUDIT_MIN_N = 59                    # 보충 표본의 바닥 — '놓침 0 이면 95% 상한 5%' 의 최소 표본(WP4 3.4.2)
+AUDIT_DOMAIN_FLOOR = 1              # 거른 셀이 있는 영역마다 표본 최소 수
+WIDEN_ALL_AT = 3                    # 넓힌 영역이 이만큼이면 그 대상의 거르기를 끈다
+SAMPLE_RESULT_KEYS: tuple[str, ...] = ("filter_audit", "shadow")
+REOPEN_VIAS: tuple[str, ...] = ("widened", "filter_off", "handoff", "filter_floor")
+FILTER_FLOOR = "filter_floor"
+
+
+def widened_domains(store: Any, target_key: str) -> list[str]:
+    """넓힌 영역 — 표본·그림자 셀의 결과가 risk_miss 인 셀의 영역(저장하지 않고 원장에서 유도한다 — 재기동·반출에도 같다)."""
+    return [str(r["domain"]) for r in store.query(
+        "SELECT DISTINCT domain FROM rr_review_cells WHERE target_key = ? AND (json_extract(sample_json, '$.filter_audit.result')"
+        " = 'risk_miss' OR json_extract(sample_json, '$.shadow.result') = 'risk_miss') ORDER BY domain", (target_key,))]
+
+
+def filter_off(store: Any, target_key: str) -> bool:
+    """그 대상의 거르기가 꺼졌나 — 넓힌 영역이 WIDEN_ALL_AT 이상이다(원장에서 유도)."""
+    return len(widened_domains(store, target_key)) >= WIDEN_ALL_AT
+
+
+def reopen_filtered(store: Any, target_key: str, *, via: str, domain: str | None = None, unit_id: str | None = None,
+                    cells: Sequence[tuple[str, str]] | None = None, picked_by: Mapping[tuple[str, str], str] | None = None,
+                    scores: Mapping[tuple[str, str], float] | None = None, now: int | None = None) -> list[tuple[str, str]]:
+    """거른 셀(na_irrelevant · route filtered)을 다시 연다(na_irrelevant → pending · reopened_n + 1) — 다시 연 (unit_id, agent_key).
+
+    `via` — widened(그 영역의 표본·그림자가 걸림을 놓쳤다) · filter_off(넓힌 영역이 셋 이상) · handoff(늦게 온 넘김) 는 분류 칸
+    (`route`)을 비워 세션이 다시 분류한다(6·7번 줄이 그 까닭을 `route_forced` 로 적는다). filter_floor(잡 끝 보충 표본)는
+    `route='audit'` · `route_forced='filter_floor'` 와 `sample_json.filter_audit{score, picked_by, result:null}` 을 적어 다시 분류하지
+    않는다. 셀의 잡 결속(run_id)은 그대로다 — 그 잡이 살아 있으면 그 잡이 돌린다. 그 전문가 머리 ready·partial 은 planned 로.
+    고르는 칸은 `domain`·`unit_id`·`cells` 가운데 준 것(AND)이다. 부른 쪽 트랜잭션에 들어간다."""
+    if via not in REOPEN_VIAS:
+        raise ValueError(f"via 는 {REOPEN_VIAS} 가운데 하나다 — {via!r}")
+    now = now_epoch() if now is None else now
+    where, params = ["target_key = ?", "state = 'na_irrelevant'"], [target_key]
+    if domain is not None:
+        where.append("domain = ?")
+        params.append(domain)
+    if unit_id is not None:
+        where.append("unit_id = ?")
+        params.append(unit_id)
+    rows = [dict(r) for r in store.query(f"SELECT unit_id, agent_key, sample_json FROM rr_review_cells WHERE {' AND '.join(where)}"
+                                         " ORDER BY agent_key, unit_seq", params)]
+    if cells is not None:
+        wanted = {tuple(c) for c in cells}
+        rows = [r for r in rows if (r["unit_id"], r["agent_key"]) in wanted]
+    opened: list[tuple[str, str]] = []
+    with store.tx():
+        for row in rows:
+            key = (target_key, row["unit_id"], row["agent_key"])
+            sets: dict[str, Any] = {"lease_owner": None, "heartbeat_at": None, "finished_at": None, "basis": None,
+                                    "reopened_n": Expr("reopened_n + 1")}
+            if via == FILTER_FLOOR:
+                try:
+                    sample = json.loads(row["sample_json"] or "null")
+                except ValueError:
+                    sample = None
+                sample = dict(sample) if isinstance(sample, dict) else {}
+                pair = (row["unit_id"], row["agent_key"])
+                sample["filter_audit"] = {"score": (scores or {}).get(pair), "picked_by": (picked_by or {}).get(pair, "floor"),
+                                          "result": None}
+                sets.update(route="audit", route_forced=FILTER_FLOOR, sample_json=json.dumps(sample, sort_keys=True))
+            else:
+                sets.update(route=None, route_forced=via)
+            if _move(store, "cell", "na_irrelevant", "pending", where=_cell_where(), params=key, sets=sets, now=now) == 1:
+                opened.append((row["unit_id"], row["agent_key"]))
+        for agent in sorted({a for _u, a in opened}):
+            _reopen(store, target_key, agent, now=now)
+    return opened
+
+
+def note_sample_result(store: Any, target_key: str, unit_id: str, agent_key: str, *, lease_owner: str,
+                       results: Mapping[str, str], now: int | None = None) -> bool:
+    """정산이 끝난 표본·그림자 셀의 결과(`review_verify.audit_outcome` — risk_miss · relevance_miss · undetermined · kept)를
+    `sample_json.<filter_audit|shadow>.result` 에 적는다. 그 전문가를 쥔 선점으로만 쓴다(셀은 이미 놓였다). 쓴 행이 있으면 참."""
+    now = now_epoch() if now is None else now
+    key = (target_key, unit_id, agent_key)
+    with store.tx():
+        if not _holds(store, target_key, agent_key, lease_owner):
+            return False
+        row = _cell(store, *key)
+        if row is None:
+            return False
+        try:
+            sample = json.loads(row["sample_json"] or "null")
+        except ValueError:
+            sample = None
+        sample = dict(sample) if isinstance(sample, dict) else {}
+        for name, result in results.items():
+            if name in sample and isinstance(sample[name], dict):
+                sample[name] = {**sample[name], "result": result}
+        return bool(store.execute(f"UPDATE rr_review_cells SET sample_json = ?, updated_at = ? WHERE {_cell_where()}",
+                                  (json.dumps(sample, sort_keys=True), now, *key)))
+
+
+def widen(store: Any, target_key: str, domain: str, *, now: int | None = None) -> dict:
+    """그 영역을 그 대상에서 넓힌다 — 그 영역의 거른 셀을 전부 다시 열고, 넓힌 영역이 WIDEN_ALL_AT 에 닿으면 남은 거른 셀 전부를
+    다시 연다(대상 전체 끔). 반환 {widened, off, reopened}."""
+    now = now_epoch() if now is None else now
+    with store.tx():
+        opened = reopen_filtered(store, target_key, via="widened", domain=domain, now=now)
+        off = filter_off(store, target_key)
+        if off:
+            opened += reopen_filtered(store, target_key, via="filter_off", now=now)
+    return {"widened": widened_domains(store, target_key), "off": off, "reopened": len(opened)}
+
+
+def audit_topup(store: Any, target_key: str, job_id: str, *, audit_pct: float, salt: str, now: int | None = None) -> dict:
+    """잡 끝 보충 표본(m3-cells 3.4) — 거를 수 있던 셀(거름 + 표본)의 수 N 에서 `n_audit = max(ceil(audit_pct% × N), min(N, 59))`
+    와 거른 셀이 있는 영역마다 1건을 채울 때까지, 그 잡이 분류한 거른 셀을 `sample_score('filter_audit')` 오름차순으로 다시 연다
+    (filter_floor — 영역 바닥이 먼저다). 그 잡 범위 밖이라 못 채운 수는 `short` 로 남는다(완결 몫이 floor_met 로 낸다).
+    반환 {n, n_audit, sampled, need, reopened, short, domains_short}."""
+    import math  # noqa: PLC0415
+
+    now = now_epoch() if now is None else now
+    rows = [dict(r) for r in store.query(
+        "SELECT unit_id, agent_key, domain, state, run_id, json_extract(sample_json, '$.filter_audit') AS audit"
+        " FROM rr_review_cells WHERE target_key = ? AND (route = 'filtered' OR route = 'audit')", (target_key,))]
+    filtered = [r for r in rows if r["state"] == "na_irrelevant"]
+    audited = [r for r in rows if r["audit"] is not None]
+    n = len(filtered) + len(audited)
+    if not filtered:
+        return {"n": n, "n_audit": 0, "sampled": len(audited), "need": 0, "reopened": 0, "short": 0, "domains_short": []}
+    n_audit = max(math.ceil(float(audit_pct) / 100.0 * n), min(n, AUDIT_MIN_N))
+    covered = {r["domain"] for r in audited}
+    mine = sorted((r for r in filtered if r["run_id"] == job_id),
+                  key=lambda r: (review_verify.sample_score("filter_audit", target_key, r["unit_id"], r["agent_key"],
+                                                            salt=salt), r["unit_id"], r["agent_key"]))
+    picks: dict[tuple[str, str], str] = {}
+    for domain in sorted({r["domain"] for r in filtered} - covered):
+        first = next((r for r in mine if r["domain"] == domain), None)
+        if first is not None:
+            picks[(first["unit_id"], first["agent_key"])] = "domain_floor"
+    need = max(0, n_audit - len(audited) - len(picks))
+    for r in mine:
+        if need <= 0:
+            break
+        pair = (r["unit_id"], r["agent_key"])
+        if pair not in picks:
+            picks[pair] = "floor"
+            need -= 1
+    domains_short = sorted({r["domain"] for r in filtered} - covered
+                           - {r["domain"] for r in mine if (r["unit_id"], r["agent_key"]) in picks})
+    scores = {(r["unit_id"], r["agent_key"]): review_verify.sample_score("filter_audit", target_key, r["unit_id"],
+                                                                         r["agent_key"], salt=salt) for r in mine}
+    opened = reopen_filtered(store, target_key, via=FILTER_FLOOR, cells=list(picks), picked_by=picks, scores=scores,
+                             now=now) if picks else []
+    return {"n": n, "n_audit": n_audit, "sampled": len(audited), "need": max(0, n_audit - len(audited)),
+            "reopened": len(opened), "short": need, "domains_short": domains_short}
 
 
 def merge_sample(store: Any, target_key: str, unit_id: str, agent_key: str, *, lease_owner: str,
