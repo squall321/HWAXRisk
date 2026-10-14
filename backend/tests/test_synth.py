@@ -315,3 +315,77 @@ def test_the_report_freezes_the_quality_block_of_its_version_and_the_residual_re
                      if q["item"] == "quality"), None)
     bounds = list(block["json"]["out_of_bounds"])
     assert (residual["out_of_bounds"] if residual else []) == bounds
+
+
+# ---------------------------------------------------------------- 반대 검토 1차(review1) — 종합 잡의 걸림
+class _Killed(BaseException):
+    """앱이 요약 호출 도중에 내려간 것 — 워커의 except Exception 을 지나 틱 밖으로 나간다(재기동 흉내)."""
+
+
+def _tick_until(worker, *, limit: int = 120, stop=("completed", "idle")) -> list[dict]:
+    steps = []
+    for _ in range(limit):
+        steps.append(worker.tick())
+        if steps[-1]["step"] in stop:
+            break
+    return steps
+
+
+def test_a_synth_job_whose_summaries_are_all_reused_still_finishes(store):
+    """H1 — 같은 입력의 종합 잡을 다시 세우면(보고서 다시 내기 · 같은 실패의 재시도) 요약은 전부 다시 쓰이는데, 그 행이 이 잡의
+    것으로 표지되지 않으면 잡은 영영 '계획' 만 되풀이했다. 다시 쓴 요약도 이 잡의 것이고 잡은 끝난다(호출 0회)."""
+    key = _ledger(store)
+    engine = FakeSummaryEngine()
+    assert _drive(store, engine, key)[-1]["step"] == "completed"
+    calls = len(engine.requests)
+    again = synth.create_synth_job(store, key, owner_sub=OWNER, requester_sub=OWNER)["job_id"]
+    steps = _tick_until(synth.SynthWorker(store, config.settings, engine), limit=60)
+    assert steps[-1] == {**steps[-1], "job_id": again, "step": "completed"}, [s["step"] for s in steps][-5:]
+    assert len(engine.requests) == calls
+    tagged = store.query_one("SELECT COUNT(*) AS n FROM rr_summaries WHERE target_key = ? AND run_id = ?", (key, again))["n"]
+    assert tagged == len(config.settings.risk_roster_domains) + 1
+
+
+def test_a_summary_cut_by_a_restart_goes_back_to_pending_and_one_stuck_target_does_not_starve_another(store):
+    """H2 — 요약 호출 도중 앱이 내려가면 그 행이 running 으로 남아 새 워커가 '기다림' 만 되풀이했고, 워커가 늘 가장 오래된 잡을
+    집어 다른 대상의 종합 잡도 줄에 묶였다. 재기동 복구가 running 요약을 대기로(차감 없이) 돌리고, 워커는 대상마다 번갈아 집는다."""
+    first, second = _ledger(store), _ledger(store)
+    synth.create_synth_job(store, first, owner_sub=OWNER, requester_sub=OWNER)
+    killer = FakeSummaryEngine({"mech": _Killed()})
+    worker = synth.SynthWorker(store, config.settings, killer)
+    with pytest.raises(_Killed):
+        _tick_until(worker, limit=60)
+    stuck = store.query_one("SELECT summary_id, attempts FROM rr_summaries WHERE target_key = ? AND state = 'running'",
+                            (first,))
+    assert stuck is not None
+    synth.create_synth_job(store, second, owner_sub=OWNER, requester_sub=OWNER)
+    engine = FakeSummaryEngine()
+    steps = _tick_until(synth.SynthWorker(store, config.settings, engine), limit=120, stop=("idle",))
+    done = {s["job_id"] for s in steps if s["step"] == "completed"}
+    second_job = store.query_one("SELECT id FROM rr_jobs WHERE target_key = ? AND mode = 'synth'", (second,))["id"]
+    assert second_job in done                                            # 묶인 대상이 있어도 다른 대상은 끝난다
+    assert synth.recover_running(store) == {"summaries": 1}
+    row = store.query_one("SELECT state, attempts, charged FROM rr_summaries WHERE summary_id = ?", (stuck["summary_id"],))
+    assert (row["state"], row["charged"]) == ("pending", 0)
+    steps = _tick_until(synth.SynthWorker(store, config.settings, engine), limit=60)
+    assert steps[-1]["step"] == "completed"
+
+
+def test_the_runner_recovers_cut_summaries_when_it_takes_the_lock(store, monkeypatch):
+    """H2 — 러너가 잠금을 쥔 뒤의 재기동 복구(패널·검토 복구와 같은 자리)가 끊긴 요약도 되돌린다."""
+    seen: list = []
+    monkeypatch.setattr(synth, "recover_running", lambda s: seen.append(s) or {"summaries": 0})
+    monkeypatch.setattr(runner, "_LOOPS", ())
+    loop = runner.RiskRunner(store, config.settings)
+    loop._begin()
+    loop.stop()
+    assert seen == [store]
+
+
+def test_every_summary_write_stamps_updated_at(store):
+    """L5 — rr_summaries.updated_at 을 적는다(계획 · 호출 시작 · 닫기)."""
+    key = _ledger(store)
+    _drive(store, FakeSummaryEngine(), key)
+    rows = store.query("SELECT updated_at, created_at FROM rr_summaries WHERE target_key = ?", (key,))
+    assert rows and all(r["updated_at"] is not None and r["updated_at"] >= r["created_at"] for r in rows)
+

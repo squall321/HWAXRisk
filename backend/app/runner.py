@@ -2535,6 +2535,10 @@ class RiskRunner:
                     from app import review_cells  # noqa: PLC0415 — review_cells 는 planner 를 거쳐 무겁다.
 
                     review_cells.recover_running(self.store)
+                    # 종합 잡의 요약 호출도 — running 요약 → pending(차감 없음, review1 H2).
+                    from app import synth  # noqa: PLC0415 — synth 는 이 모듈을 거쳐 무겁다.
+
+                    synth.recover_running(self.store)
                     # 스냅샷 잡도 같은 자리에서 마감한다 — running 인 채 남으면 영영 진행판에 걸린다(§2.11.3).
                     from app import routes as routes_module  # noqa: PLC0415 — routes 는 runner 를 import 한다.
 

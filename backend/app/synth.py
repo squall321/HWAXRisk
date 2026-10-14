@@ -254,6 +254,8 @@ def plan_summary(store: RiskStore, target_key: str, scope_kind: str, scope_key: 
     row = store.query_one("SELECT state, state_reason FROM rr_summaries WHERE summary_id = ?", (sid,))
     now = common.now_epoch()
     if row is not None and (row["state"] == "done" or (row["state"] == "code_only" and row["state_reason"] == "no_rows")):
+        # 다시 쓰는 행도 이 잡의 것이다 — 잡의 틱은 run_id 로 제 요약을 센다(종전에는 옛 잡에 남아 '계획' 만 되풀이했다, review1 H1).
+        store.execute("UPDATE rr_summaries SET run_id = ?, updated_at = ? WHERE summary_id = ?", (run_id, now, sid))
         return {"summary_id": sid, "state": row["state"], "reused": True}
     if built["n_rows"] == 0:
         state, reason, output = "code_only", "no_rows", common.canonical_json(_code_output(built["summary"], "no_rows"))
@@ -262,15 +264,15 @@ def plan_summary(store: RiskStore, target_key: str, scope_kind: str, scope_key: 
     if row is None:
         store.execute(
             "INSERT INTO rr_summaries(summary_id, target_key, owner_sub, scope_kind, scope_key, input_hash, input_chars,"
-            " n_rows, state, state_reason, output_json, run_id, created_at, finished_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " n_rows, state, state_reason, output_json, run_id, created_at, finished_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (sid, target_key, owner_sub, scope_kind, scope_key, built["input_hash"], built["input_chars"], built["n_rows"],
-             state, reason, output, run_id, now, now if state == "code_only" else None))
+             state, reason, output, run_id, now, now if state == "code_only" else None, now))
     else:
         store.execute("UPDATE rr_summaries SET state = ?, state_reason = ?, output_json = ?, checks_json = NULL, attempts = 0,"
                       " charged = 0, infra_streak = 0, not_before = NULL, run_id = ?, error_code = NULL, error = NULL,"
-                      " finished_at = ? WHERE summary_id = ?",
-                      (state, reason, output, run_id, now if state == "code_only" else None, sid))
+                      " finished_at = ?, updated_at = ? WHERE summary_id = ?",
+                      (state, reason, output, run_id, now if state == "code_only" else None, now, sid))
     return {"summary_id": sid, "state": state, "reused": False}
 
 
@@ -366,15 +368,27 @@ class SynthWorker:
         self.engine = engine
         self.stop = stop or threading.Event()
         self.clock = clock or common.now_epoch
+        self._turn = 0
+        self._served: dict[str, int] = {}
 
     # ------------------------------------------------------------ 잡
     def _job(self) -> dict | None:
-        row = self.store.query_one(
-            "SELECT id, target_key, owner_sub, state, params_json, credential_email, hold_code, hold_until, error"
+        """집을 잡 — 대상마다 가장 오래된 잡 하나를 두고, 그 가운데 가장 오래 집지 않은 대상의 잡이다(review1 H1·H2 — 한 대상의 잡이
+        기다리거나 묶여도 다른 대상의 종합 잡이 줄에 묶이지 않는다)."""
+        rows = self.store.query(
+            "SELECT id, target_key, owner_sub, state, params_json, credential_email, hold_code, hold_until, error, created_at"
             " FROM rr_jobs WHERE mode = ? AND (state IN ('queued', 'running') OR (state = 'paused' AND hold_code IS NOT"
-            " NULL AND hold_code <> 'user' AND hold_until IS NOT NULL AND hold_until <= ?)) ORDER BY created_at, id LIMIT 1",
+            " NULL AND hold_code <> 'user' AND hold_until IS NOT NULL AND hold_until <= ?)) ORDER BY created_at, id",
             (SYNTH_MODE, self.clock()))
-        return dict(row) if row is not None else None
+        heads: dict[str, dict] = {}
+        for row in rows:
+            heads.setdefault(str(row["target_key"]), dict(row))
+        if not heads:
+            return None
+        self._turn += 1
+        job = min(heads.values(), key=lambda r: (self._served.get(str(r["target_key"]), 0), r["created_at"], r["id"]))
+        self._served[str(job["target_key"])] = self._turn
+        return job
 
     def _set(self, job_id: str, state: str, *, hold: str | None = None, until: int | None = None,
              error: str | None = None) -> None:
@@ -453,8 +467,8 @@ class SynthWorker:
         built = summary_input(self.store, key, row["scope_kind"], row["scope_key"], limits=limits, counts=counts)
         if built["input_hash"] != row["input_hash"]:
             # 계획한 뒤 원장이 바뀌었다(병합·쟁점 해결) — 이번 입력으로 다시 세운다(같은 run).
-            self.store.execute("UPDATE rr_summaries SET state = 'code_only', state_reason = 'superseded', finished_at = ?"
-                               " WHERE summary_id = ?", (self.clock(), summary_id))
+            self.store.execute("UPDATE rr_summaries SET state = 'code_only', state_reason = 'superseded', finished_at = ?,"
+                               " updated_at = ? WHERE summary_id = ?", (self.clock(), self.clock(), summary_id))
             plan_summary(self.store, key, row["scope_kind"], row["scope_key"], run_id=job["id"], limits=limits,
                          counts=counts, owner_sub=job["owner_sub"])
             return {"job_id": job["id"], "step": "replanned", "summary_id": summary_id}
@@ -465,8 +479,8 @@ class SynthWorker:
         body = summary_request(key, built["summary"], limits=limits, notes=checks.get("notes") or ())
         call_id = common.new_uuid()
         started = self.clock()
-        self.store.execute("UPDATE rr_summaries SET state = 'running', attempts = attempts + 1, call_id = ? WHERE summary_id = ?",
-                           (call_id, summary_id))
+        self.store.execute("UPDATE rr_summaries SET state = 'running', attempts = attempts + 1, call_id = ?, updated_at = ?"
+                           " WHERE summary_id = ?", (call_id, started, summary_id))
         try:
             result = self.engine.run(body, email=email, should_stop=lambda: "stopped" if self.stop.is_set() else None)
         except Exception as exc:  # noqa: BLE001 — 부류로 가른다.
@@ -481,8 +495,9 @@ class SynthWorker:
                                output={**to_output(result), **cover}, checks=check, model=meta.get("model"),
                                prompt_rev=meta.get("prompt_rev"))
         if not checks.get("retried"):
-            self.store.execute("UPDATE rr_summaries SET state = 'pending', checks_json = ? WHERE summary_id = ?",
-                               (common.canonical_json({**check, "retried": True, "notes": check_notes(check)}), summary_id))
+            self.store.execute("UPDATE rr_summaries SET state = 'pending', checks_json = ?, updated_at = ? WHERE summary_id = ?",
+                               (common.canonical_json({**check, "retried": True, "notes": check_notes(check)}), self.clock(),
+                                summary_id))
             return {"job_id": job["id"], "step": "reask", "summary_id": summary_id}
         return self._close(summary_id, "code_only", "checks_failed", built["summary"], step="checks_failed",
                            output={**to_output(result), "code_only": "checks_failed"}, checks={**check, "retried": True},
@@ -504,20 +519,20 @@ class SynthWorker:
             return self._close(sid, "code_only", "ctx_too_small", summary, step="over_budget", error=str(exc))
         if code == "cover_too_large":
             # 앱이 cover_max 를 어겼다 — 앱 결함이라 종합 잡을 contract 로 보류한다(#49). 요약 행은 대기로 돌아간다.
-            self.store.execute("UPDATE rr_summaries SET state = 'pending', error_code = ?, error = ? WHERE summary_id = ?",
-                               (code, str(exc), sid))
+            self.store.execute("UPDATE rr_summaries SET state = 'pending', error_code = ?, error = ?, updated_at = ?"
+                               " WHERE summary_id = ?", (code, str(exc), self.clock(), sid))
             self._set(job["id"], "paused", hold="contract", error=f"{code}: {exc}")
             return {"job_id": job["id"], "step": "hold", "hold": "contract"}
         cfg = self.settings or config.settings
         if outcome.klass == review_ops.JOB:
-            self.store.execute("UPDATE rr_summaries SET state = 'pending', error_code = ?, error = ? WHERE summary_id = ?",
-                               (outcome.code, str(exc), sid))
+            self.store.execute("UPDATE rr_summaries SET state = 'pending', error_code = ?, error = ?, updated_at = ?"
+                               " WHERE summary_id = ?", (outcome.code, str(exc), self.clock(), sid))
             self._set(job["id"], "paused", hold=outcome.hold_code, error=f"{outcome.code}: {exc}")
             return {"job_id": job["id"], "step": "hold", "hold": outcome.hold_code}
         if outcome.klass in (review_ops.WAIT, review_ops.CANCELLED):
             until = self.clock() + int(outcome.retry_after_s or review_ops.WAIT_DEFAULT_S)
-            self.store.execute("UPDATE rr_summaries SET state = 'pending', not_before = ?, error_code = ? WHERE summary_id = ?",
-                               (until, outcome.code, sid))
+            self.store.execute("UPDATE rr_summaries SET state = 'pending', not_before = ?, error_code = ?, updated_at = ?"
+                               " WHERE summary_id = ?", (until, outcome.code, self.clock(), sid))
             return {"job_id": job["id"], "step": "wait", "code": outcome.code}
         if outcome.klass == review_ops.INFRA:
             streak = int(row["infra_streak"] or 0) + 1
@@ -526,14 +541,15 @@ class SynthWorker:
                                    infra_streak=streak)
             until = self.clock() + review_ops.backoff_s(streak, salt=sid)
             self.store.execute("UPDATE rr_summaries SET state = 'pending', infra_streak = ?, not_before = ?, error_code = ?,"
-                               " error = ? WHERE summary_id = ?", (streak, until, outcome.code, str(exc), sid))
+                               " error = ?, updated_at = ? WHERE summary_id = ?",
+                               (streak, until, outcome.code, str(exc), self.clock(), sid))
             return {"job_id": job["id"], "step": "infra", "code": outcome.code}
         charged = int(row["charged"] or 0) + 1
         if charged >= int(cfg.risk_summary_max_charged):
             return self._close(sid, "code_only", "content_fail", summary, step="content_fail", error=str(exc),
                                charged=charged)
-        self.store.execute("UPDATE rr_summaries SET state = 'pending', charged = ?, error_code = ?, error = ?"
-                           " WHERE summary_id = ?", (charged, outcome.code, str(exc), sid))
+        self.store.execute("UPDATE rr_summaries SET state = 'pending', charged = ?, error_code = ?, error = ?, updated_at = ?"
+                           " WHERE summary_id = ?", (charged, outcome.code, str(exc), self.clock(), sid))
         return {"job_id": job["id"], "step": "content", "code": outcome.code}
 
     def _close(self, summary_id: str, state: str, reason: str | None, summary: Mapping[str, Any], *, step: str,
@@ -541,12 +557,14 @@ class SynthWorker:
                prompt_rev: Any = None, error: str | None = None, infra_streak: int | None = None,
                charged: int | None = None) -> dict:
         out = output if output is not None else _code_output(summary, reason or "")
+        now = self.clock()
         self.store.execute(
             "UPDATE rr_summaries SET state = ?, state_reason = ?, output_json = ?, checks_json = COALESCE(?, checks_json),"
             " model = COALESCE(?, model), prompt_rev = COALESCE(?, prompt_rev), error = COALESCE(?, error),"
-            " infra_streak = COALESCE(?, infra_streak), charged = COALESCE(?, charged), finished_at = ? WHERE summary_id = ?",
+            " infra_streak = COALESCE(?, infra_streak), charged = COALESCE(?, charged), finished_at = ?, updated_at = ?"
+            " WHERE summary_id = ?",
             (state, reason, common.canonical_json(dict(out)), common.canonical_json(dict(checks)) if checks else None,
-             model, prompt_rev, error, infra_streak, charged, self.clock(), summary_id))
+             model, prompt_rev, error, infra_streak, charged, now, now, summary_id))
         return {"step": step, "summary_id": summary_id, "state": state, "reason": reason}
 
     def _ledger(self, job: Mapping[str, Any], call_id: str, started: int, body: Mapping[str, Any], *,
@@ -820,6 +838,16 @@ def assemble_report(store: RiskStore, target_key: str, *, trigger: str) -> dict:
     closure.refresh(store, target_key)
     return {"report_uid": uid, "version_no": version_no, "pages_n": len(built["pages"]), "level_label": result["level_label"],
             "counts": public, "narrative_state": built["narrative_state"], "created": True}
+
+
+def recover_running(store: RiskStore) -> dict:
+    """재기동 복구 — 앞 기동이 요약 호출 도중에 내려가 running 으로 남은 요약을 대기로 돌린다(차감 없음 — 앱이 내려간 것은 그 요약
+    탓이 아니다, review1 H2). 러너가 잠금을 쥔 뒤 패널·검토 복구와 같은 자리에서 부른다. 반환 {summaries}."""
+    n = int(store.execute("UPDATE rr_summaries SET state = 'pending', call_id = NULL, updated_at = ? WHERE state = 'running'",
+                          (common.now_epoch(),)) or 0)
+    if n:
+        log.warning("재기동 복구: 호출 도중에 끊긴 요약 %s건을 대기로 돌렸다(차감 없음)", n)
+    return {"summaries": n}
 
 
 def safe_assemble(store: RiskStore, target_key: str, *, trigger: str) -> dict | None:
