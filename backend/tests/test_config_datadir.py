@@ -300,6 +300,8 @@ REVIEW_DEFAULTS = {
     "HWAXRISK_UNITS_SMALL_LINES": 15, "HWAXRISK_UNITS_MAX": 60, "HWAXRISK_REVIEW_CONCURRENCY": 4,
     "HWAXRISK_REVIEW_CALL_TIMEOUT_S": 18000, "HWAXRISK_REVIEW_READ_TIMEOUT_S": 300, "HWAXRISK_REVIEW_MAX_CHARGED": 2,
     "HWAXRISK_REVIEW_CONSENT_CALLS": 1500, "HWAXRISK_REVIEW_MAX_CALLS": 30000,
+    # 재설계 M3.md 4.5 의 거르기 손잡이(C3-6)
+    "HWAXRISK_REVIEW_FILTER": "on", "HWAXRISK_FILTER_AUDIT_PCT": 5,
 }
 
 
@@ -308,7 +310,7 @@ def _knobs_file(data_dir: Path, text: str) -> None:
 
 
 def test_review_knobs_default_to_the_plan_table(tmp_path, reload_config):
-    """손잡이 열한 개의 코드 기본값은 M2.md 4.5 표 그대로이고, 아무것도 적지 않은 박스는 출처가 전부 default 다."""
+    """손잡이의 코드 기본값은 M2.md 4.5 · M3.md 4.5 표 그대로이고, 아무것도 적지 않은 박스는 출처가 전부 default 다."""
     mod = reload_config(HWAXRISK_DATA_DIR=str(tmp_path))
     knobs = mod.review_knobs(mod.settings)
     assert {name: k["value"] for name, k in knobs.items()} == REVIEW_DEFAULTS
@@ -353,11 +355,28 @@ def test_a_switch_word_that_is_not_on_or_off_stops_the_boot_and_says_where(tmp_p
         assert got.risk_review_enabled is on, word
 
 
+def test_a_choice_knob_takes_only_its_words_and_says_where(tmp_path):
+    """선택지 손잡이(재설계 M3 C3-6 의 HWAXRISK_REVIEW_FILTER)는 그 낱말만 받는다 — 대소문자는 가리지 않고, 밖의 값은 기동을 막으며
+    어느 자리의 어느 손잡이인지와 고를 낱말을 말한다(불리언과 같은 규율 — 오타가 조용히 기본값으로 돌지 않는다)."""
+    for word, want in (("shadow", "shadow"), ("OFF", "off"), ("On", "on")):
+        got = config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path), "HWAXRISK_REVIEW_FILTER": word})
+        assert got.risk_review_filter == want, word
+    _knobs_file(tmp_path, "HWAXRISK_REVIEW_FILTER=shadows\n")
+    with pytest.raises(RuntimeError) as exc:
+        config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path)})
+    text = str(exc.value)
+    assert "HWAXRISK_REVIEW_FILTER='shadows'" in text and str(tmp_path / "knobs.env") in text
+    assert "off · shadow · on" in text
+    with pytest.raises(RuntimeError) as exc:
+        config.load_settings(env={"HWAXRISK_DATA_DIR": str(tmp_path / "x"), "HWAXRISK_REVIEW_FILTER": "1"})
+    assert "HWAXRISK_REVIEW_FILTER='1'" in str(exc.value) and "환경변수" in str(exc.value)
+
+
 @pytest.mark.parametrize("name,raw", [
     ("HWAXRISK_UNIT_MAX_LINES", "0"), ("HWAXRISK_UNIT_TARGET_LINES", "-3"), ("HWAXRISK_UNITS_SMALL_LINES", "0"),
     ("HWAXRISK_UNITS_MAX", "0"), ("HWAXRISK_REVIEW_CONCURRENCY", "0"), ("HWAXRISK_REVIEW_CALL_TIMEOUT_S", "-1"),
     ("HWAXRISK_REVIEW_READ_TIMEOUT_S", "-5"), ("HWAXRISK_REVIEW_MAX_CHARGED", "0"), ("HWAXRISK_REVIEW_MAX_CALLS", "0"),
-    ("HWAXRISK_REVIEW_CONSENT_CALLS", "-1"),
+    ("HWAXRISK_REVIEW_CONSENT_CALLS", "-1"), ("HWAXRISK_FILTER_AUDIT_PCT", "-1"),
 ])
 def test_a_knob_below_its_floor_stops_the_boot_and_says_where(tmp_path, name, raw):
     """정수 손잡이는 하한을 본다(RC-5) — 단위 크기·워커·한도·상한은 1 이상, 시간은 0(끔) 이상, 동의 기준은 0 이상. 종전에는

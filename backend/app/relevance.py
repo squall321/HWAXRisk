@@ -173,8 +173,10 @@ def code_signal(lines: Sequence[Mapping[str, Any]], part_names: Iterable[Any], *
 
 
 def code_for(signal: Mapping[str, Mapping[str, Any]], domain: str) -> dict:
-    """한 셀(영역 d)의 `route_json.code` — 그 영역의 신호에 관련 영역 목록을 붙인다."""
-    own = signal[domain]
+    """한 셀(영역 d)의 `route_json.code` — 그 영역의 신호에 관련 영역 목록을 붙인다. 택소노미에 없는 영역(로스터 영역 손잡이로
+    더한 영역)은 `unknown`(사유 `domain_unknown`) 이다 — 거르는 쪽에 서지 않는다."""
+    own = signal.get(domain) or {"verdict": "unknown", "via": {"mech": [], "role": [], "always": False}, "unmapped": [],
+                                 "reason": "domain_unknown"}
     return {"verdict": own["verdict"], "related_domains": sorted(d for d, s in signal.items() if s["verdict"] == "related"),
             "via": own["via"], "unmapped": own["unmapped"], "reason": own["reason"]}
 

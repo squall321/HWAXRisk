@@ -33,6 +33,7 @@
   cond_text        단독 재질의 c 줄의 조건 글(기본 COND — 긴 글로 바꾸면 반출의 조건 글 200자를 본다, S9)
   offcard_src·offcard_quote  카드 밖 f 줄이 근거로 댄 배경 카드 별칭과 그 인용(기본 exp · 빈 인용 — S9 의 카드 근거 카드 밖 줄)
   handoff_to       이 영역으로 넘기는 h 줄을 훑기(첫 단위)와 카드 밖 호출에 하나씩 더한다(S10 의 넘김 절)
+  handoff_unit     훑기 h 줄이 넘기는 단위(unit_id) — 그 쪽에 그 단위가 없으면 h 줄을 내지 않는다(거르기 넘김 줄, 재설계 M3 C3-6)
   seen·need        카드 밖 m 줄의 따져 본 메커니즘 · need 줄의 글(S10 의 메커니즘·필요 정보 절)
   hold_runs        n(1부터 센 run 차례) → threading.Event — 그 run 은 result 앞에서 그 사건을 기다린다(호출 중 재기동 시험)
   solo_verdicts    solo 변형에서만 쓰는 record_id → (applies, judgement) — 단독 재질의가 앞 판정을 뒤집는 카드(S11)
@@ -40,6 +41,7 @@
                    M3.md 4.4.3). solo_mechs 는 단독 재질의 줄에만(묶음 판정과 다른 메커니즘). 엔진 계약 예제
                    result_verdict_mech.json 이 서면 그 모양에 맞춘다(재설계 M3 S3-3 — 쟁점·종합 꾸러미가 더한 칸)
   sweep_rel        unit_id → 훑기 rel(yes·maybe·no) — 그 단위의 u 줄 rel 을 바꾼다(훑기 '무관' 비율, S11)
+  sweep_drop       훑기 답에서 뺄 unit_id(앱 회계가 그 단위를 error 로 적는다 — 거르기의 '답에 없는 단위', 재설계 M3 C3-6)
   sweep_k          unit_id → 별칭 목록 — 그 단위의 u 줄 k 를 실은 카드 전부가 아니라 이것만으로 낸다(카드 밖 호출이 훑기 k 에 걸린
                    배경 카드를 먼저 싣는지 — P-03, R3A-5)
   error_cells      (agent_key, unit_id) → error 프레임 — 그 셀의 run 은 늘 그 오류다(내용 탓이면 셀이 failed 로 간다, S11)
@@ -247,6 +249,7 @@ class FakeReviewEngine:
         self.offcard_src = "exp"
         self.offcard_quote = ""
         self.handoff_to: str | None = None
+        self.handoff_unit: str | None = None
         self.seen: list[str] = []
         self.need: str | None = None
         self.hold_runs: dict[int, threading.Event] = {}
@@ -255,6 +258,7 @@ class FakeReviewEngine:
         self.solo_mechs: dict[Any, tuple[str, str]] = {}
         self.sweep_rel: dict[str, str] = {}
         self.sweep_k: dict[str, list[str]] = {}
+        self.sweep_drop: set[str] = set()
         self.error_cells: dict[tuple[str, str], dict[str, Any]] = {}
         self.truncate: dict[tuple[str, str | None, str | None], str] = {}
         self.queued_ms: int | None = None
@@ -502,9 +506,10 @@ class FakeReviewEngine:
             rows = [{"t": "u", "k": hit[uid], "u": u, "rel": self.sweep_rel.get(uid) or ("maybe" if order else "no"),
                      "why": "카드의 적용 조건이 이 단위에 걸릴 수 있다", "unit_id": uid,
                      "record_ids": [cards[a]["record_id"] for a in hit[uid]], "from_attempt": 1,
-                     "checks": {"why": "ok", "coerced": []}} for u, uid in units.items()]
-            if self.handoff_to and units:
-                first = next(iter(units))
+                     "checks": {"why": "ok", "coerced": []}} for u, uid in units.items() if uid not in self.sweep_drop]
+            first = (next((u for u, uid in units.items() if uid == self.handoff_unit), None) if self.handoff_unit
+                     else next(iter(units), None))
+            if self.handoff_to and first is not None:
                 rows.append({"t": "h", "u": first, "to": self.handoff_to, "why": "훑기가 다른 영역의 몫으로 본 단위",
                              "unit_id": units[first], "from_attempt": 1, "checks": {"coerced": []}})
             missing = []

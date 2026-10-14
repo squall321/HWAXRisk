@@ -18,8 +18,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from app import (cardpack, config, engine_client, expert_report, planner, review_cells, review_ops, review_verify, runner,
-                 units)
+from app import (cardpack, config, engine_client, expert_report, planner, relevance, review_cells, review_ops, review_verify,
+                 runner, units)
 from app.common import canonical_json, new_uuid, now_epoch, sha256_hex
 from app.errors import AppError
 from app.runner import EngineBusy, EngineRejected, EngineStreamLost, PatUnavailable
@@ -233,8 +233,11 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
         "scope": picked["scope"], "user_memo": str(user_memo) if user_memo else None, "requester": requester_sub,
         "consent": bool(consent), "consent_source": consent_source if consent else None,
         "credential": credential, "calls_estimate": estimate,
-        # 잡에 복사해 두는 실행 설정 — 도는 중에 설정이 바뀌어도 이 잡의 표본·배치는 바뀌지 않는다(결정론의 전제).
-        "knobs": {"dual_rate": 1.0, "sweep": "on", "filter": "off", "max_charged": int(cfg.risk_review_max_charged),
+        # 잡에 복사해 두는 실행 설정 — 도는 중에 설정이 바뀌어도 이 잡의 표본·배치는 바뀌지 않는다(결정론의 전제). 거르기의 승인
+        # 문(#40)도 만들 때의 것을 얼린다 — 승인 커밋은 다음 잡부터 듣는다(재설계 M3 C3-6). M2 잡은 filter 'off' 다.
+        "knobs": {"dual_rate": 1.0, "sweep": "on", "filter": str(cfg.risk_review_filter),
+                  "audit_pct": int(cfg.risk_filter_audit_pct), "routing_rev": relevance.routing_rev(),
+                  "routing_approved": relevance.routing_approved(), "max_charged": int(cfg.risk_review_max_charged),
                   "sample_salt": review_verify.SAMPLE_SALT},
     }
     with store.tx():
@@ -758,6 +761,11 @@ class _Session:
         self.max_charged = int(knobs.get("max_charged") or getattr(self.settings, "risk_review_max_charged", 2) or 2)
         self.dual_rate = float(knobs.get("dual_rate", 1.0))
         self.salt = str(knobs.get("sample_salt") or review_verify.SAMPLE_SALT)
+        # 거르기(재설계 M3 C3-6) — M2 잡은 'off' 라 분류하지 않는다(원장이 종전과 바이트가 같다).
+        self.filter_mode = str(knobs.get("filter") or "off")
+        self.audit_pct = float(knobs.get("audit_pct") or 0)
+        self.routing_approved = knobs.get("routing_approved") is True
+        self.routing_rev = knobs.get("routing_rev")
         self.progress = loop.progress(self.job_id)
         self.wkey = f"{self.agent}:{self.lease[-8:]}"
         self.should_stop = should_stop_review(self.store, self.job_id, loop.stop, poll_s=loop.poll_s)
@@ -1214,8 +1222,9 @@ class _Session:
 
     # -- 훑기 --------------------------------------------------------------------------------
     def _sweep(self) -> None:
-        """훑기 — 묶음 × 목록 쪽. 답은 셀 분류에 쓰지 않는다(route='review' — M2 는 늘 대조로 간다). 내용 탓으로 실패한 쪽이 있으면
-        sweep_state='failed' 로 두고 나아간다. 카드 밖 호출이 훑기 k 에 걸린 배경 카드를 먼저 싣는다."""
+        """훑기 — 묶음 × 목록 쪽. 답은 거르기 분류(`_classify` — 재설계 M3 C3-6)의 훑기 신호다(M2 잡은 분류하지 않는다). 내용 탓으로
+        실패한 쪽이 있으면 sweep_state='failed' 로 두고 나아간다(그 전문가의 셀은 훑기 신호가 '모름' 이라 거르지 않는다). 카드 밖
+        호출이 훑기 k 에 걸린 배경 카드를 먼저 싣는다."""
         assert self.pack is not None
         self.focus = None
         head = self._head_row()
@@ -1249,6 +1258,69 @@ class _Session:
                                        sets={"sweep_state": "failed" if failed else "done",
                                              "sweep_json": canonical_json(self.sweep)}):
             raise _Stop("lease", release=False)
+
+    # -- 거르기 분류(재설계 M3 C3-6) ----------------------------------------------------------------
+    def _handoffs_to(self, domain: str) -> dict[str, list[dict]]:
+        """다른 전문가의 훑기가 이 영역으로 넘긴 단위(`h` 줄 — 머리 sweep_json.handoffs, 분류 시점까지 온 것) → [{from, why}]."""
+        out: dict[str, list[dict]] = {}
+        for r in self.store.query(
+                "SELECT h.agent_key AS src, json_extract(x.value, '$.unit_id') AS unit_id, json_extract(x.value, '$.why') AS why"
+                " FROM rr_expert_reports h, json_each(h.sweep_json, '$.handoffs') x WHERE h.target_key = ? AND h.agent_key <> ?"
+                " AND h.sweep_json IS NOT NULL AND json_extract(x.value, '$.to') = ? ORDER BY h.agent_key, x.key",
+                (self.target_key, self.agent, domain)):
+            out.setdefault(str(r["unit_id"]), []).append({"from": r["src"], "why": r["why"] or ""})
+        return out
+
+    def _tier_a_pending(self, active: set[str]) -> bool:
+        """그 대상의 1순위 셀(검토 대상 단위 전부 — 잡 범위와 상관없이) 가운데 아직 열린 것이 있나(X1-12 (4) — 대표 그림자의 놓침률이
+        서기 전에는 거르지 않는다)."""
+        return any(r["unit_id"] in active for r in self.store.query(
+            "SELECT DISTINCT c.unit_id FROM rr_review_cells c JOIN rr_expert_reports h ON h.target_key = c.target_key"
+            " AND h.agent_key = c.agent_key WHERE c.target_key = ? AND h.rank_in_domain = 1 AND c.state IN ('pending', 'running')",
+            (self.target_key,)))
+
+    def _classify(self, cells: Sequence[_Cell]) -> None:
+        """훑기 바로 뒤 한 번 — 셀마다 m3-cells 3.2 의 열 줄(`relevance.route_decision`)로 거르거나(na_irrelevant — 이 세션에서 더
+        부르지 않는다), 표본으로 끝까지 보내거나(route='audit'), 검토로 보낸다. 코드 신호는 잡에 얼린 승인 여부로 낸다(#40).
+
+        잡 거르기가 'off'(M2 잡 포함)면 아무것도 쓰지 않는다. 이미 분류된 셀(route 가 선 셀 — 재기동·인프라 실패 뒤의 세션)과 사람이
+        다시 연 셀(route_forced human_retry)은 그대로 둔다 — 한 셀은 입력이 바뀌기 전까지 한 번만 분류된다. 넓힘·대상 전체 끔(6번)은
+        C3-7 이 원장에서 유도해 넣는다(아직 거짓)."""
+        assert self.pack is not None
+        if self.filter_mode == "off":
+            return
+        todo = [c for c in cells if c.alive and not c.row.get("route")
+                and c.row.get("route_forced") != review_cells.HUMAN_RETRY]
+        if not todo:
+            return
+        head = self._head_row()
+        domain = str(head.get("domain") or "")
+        unit_of = {u["unit_id"]: u for u in units.load_units(self.store, self.target_key)}
+        handoffs = self._handoffs_to(domain)
+        tier_a = self._tier_a_pending(set(unit_of))
+        swept = self.pack.card_basis in (cardpack.CARD_BASIS_CARDS, cardpack.CARD_BASIS_BACKGROUND)
+        sweep_failed = head.get("sweep_state") == "failed"
+        for cell in todo:
+            self.focus = cell
+            unit = unit_of[cell.unit_id]
+            signal = relevance.code_signal(unit["lines"], [p.get("name") for p in unit["parts"]],
+                                           approved=self.routing_approved)
+            decision = relevance.route_decision(
+                filter_mode=self.filter_mode, rank1=head.get("rank_in_domain") == 1, unit_kind=str(unit["kind"]),
+                no_cards=not swept, input_gap=bool(cell.payload.get("input_gaps")), gap_aware=False, widened=False,
+                target_off=False, handoffs=handoffs.get(cell.unit_id, []), tier_a_pending=tier_a,
+                code=relevance.code_for(signal, domain),
+                sweep=relevance.sweep_signal((self.sweep.get("units") or {}).get(cell.unit_id), failed=sweep_failed),
+                sample_key=(self.target_key, cell.unit_id, self.agent), audit_pct=self.audit_pct, salt=self.salt,
+                routing_rev=self.routing_rev)
+            out = review_cells.route_cell(self.store, self.target_key, cell.unit_id, self.agent, lease_owner=self.lease,
+                                          decision=decision, now=self.now())
+            if not out["written"]:
+                raise _Stop("lease", release=False)
+            cell.row.update(route=decision["route"], route_forced=decision["route_forced"])
+            if out["state"] == "na_irrelevant":
+                cell.alive = False
+        self.focus = None
 
     # -- 카드 대조 -----------------------------------------------------------------------------
     def _others(self, aliases: Sequence[str]) -> list[str]:
@@ -1486,8 +1558,8 @@ class _Session:
         self._close()
 
     def run(self) -> None:
-        """전문가 세션 — 묶음 → 창 → 계획 → 셀 시작 → 훑기 → fwd(묶음 먼저 · 단위 나중) → 빠진 카드 재질의 → rev → 단독 → 카드 밖 →
-        정산 → 마감 또는 놓기. 호출과 호출 사이마다 멈춤을 묻는다(`_gate`)."""
+        """전문가 세션 — 묶음 → 창 → 계획 → 셀 시작 → 훑기 → 거르기 분류 → fwd(묶음 먼저 · 단위 나중) → 빠진 카드 재질의 → rev →
+        단독 → 카드 밖 → 정산 → 마감 또는 놓기. 호출과 호출 사이마다 멈춤을 묻는다(`_gate`)."""
         self.pack = self._load_pack()
         self.lim = dict(self._unary(lambda: self.loop.limits_for(self.email), "창 조회"))
         self.plan = self._plan()
@@ -1496,6 +1568,7 @@ class _Session:
             raise _Stop("no_cells")
         if self.pack.card_basis in (cardpack.CARD_BASIS_CARDS, cardpack.CARD_BASIS_BACKGROUND):
             self._sweep()
+        self._classify(cells)
         decks = list(self.plan.get("verdict_decks") or ()) if self.pack.card_basis == cardpack.CARD_BASIS_CARDS else []
         pair_over = {(str(p.get("deck_id")), str(p.get("unit_id"))) for p in self.plan.get("pair_over") or ()}
 

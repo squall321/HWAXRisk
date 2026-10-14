@@ -17,7 +17,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from app import planner, review_ops, review_verify, runner, units
-from app.common import new_uuid, now_epoch, sha256_hex
+from app.common import canonical_json, new_uuid, now_epoch, sha256_hex
 from app.errors import AppError
 
 # ---------------------------------------------------------------- 어휘와 전이표
@@ -28,6 +28,7 @@ CELL_TRANSITIONS: frozenset[tuple[str, str]] = frozenset({
     ("running", "reviewed"),     # 정산 성공(settle_cell)
     ("running", "pending"),      # 인프라·잡 보류·취소·재기동·한도 미만 내용 탓 — 기다림은 셀을 놓지 않는다
     ("running", "failed"),       # 내용 탓 한도·호출 수 상한
+    ("running", "na_irrelevant"),  # 거르기 분류(route_cell — 재설계 M3 C3-6): 두 신호가 다 무관이고 강제 사유가 없다
     ("pending", "failed"),       # 카드 묶음 한도 초과·agent_not_found(fail_open_cells)
     ("failed", "skipped"),       # 사람의 넘김(skip_cells) — skipped 는 failed 에서만 간다(PLAN 4절 C-18)
     ("failed", "pending"),       # 사람의 다시(retry_cells — 재설계 M3 C3-4)
@@ -532,6 +533,49 @@ def begin_attempt(store: Any, target_key: str, unit_id: str, agent_key: str, *, 
                       (*_args(_ATTEMPT_RESET), json.dumps({**marker, "attempt": attempt}, sort_keys=True), now, *key,
                        lease_owner))
         return _cell(store, *key)
+
+
+FILTERED = "filtered"               # 거른 셀의 route·basis(상태는 na_irrelevant — 밖으로는 '거름')
+
+
+def route_cell(store: Any, target_key: str, unit_id: str, agent_key: str, *, lease_owner: str,
+               decision: Mapping[str, Any], now: int | None = None) -> dict:
+    """도는 셀 하나에 거르기 분류(`relevance.route_decision` 의 반환 — 재설계 M3 C3-6)를 적는다 — {written, state}.
+
+    거름(`filtered`)은 running → na_irrelevant 다(`route`·`basis` 'filtered', 선점을 놓고 `finished_at`). 표본(`audit`)·검토는
+    running 그대로 `route`·`route_forced`·`route_json` 을 적고, `sample_json` 에 표본 `filter_audit{score, picked_by:'rate',
+    result:null}` 또는 그림자 `shadow{would_filter:true, result:null}` 을 더한다 — 시도 표지(`attempt`)는 남긴다. 결과(result)는
+    정산이 적는다(C3-7). 선점을 잃었으면 {written: False}.
+    """
+    now = now_epoch() if now is None else now
+    key = (target_key, unit_id, agent_key)
+    where = f"{_cell_where()} AND lease_owner = ?"
+    route_json = canonical_json(decision["route_json"])
+    with store.tx():
+        row = _cell(store, *key)
+        if not _holds(store, target_key, agent_key, lease_owner) or row is None or row["state"] != "running" \
+                or row["lease_owner"] != lease_owner:
+            return {"written": False, "state": row["state"] if row else None}
+        if decision["decision"] == FILTERED:
+            _move(store, "cell", "running", "na_irrelevant", where=where, params=(*key, lease_owner), now=now,
+                  sets={"route": FILTERED, "route_forced": None, "route_json": route_json, "basis": FILTERED,
+                        "lease_owner": None, "heartbeat_at": None, "finished_at": now})
+            return {"written": True, "state": "na_irrelevant"}
+        try:
+            sample = json.loads(row["sample_json"] or "null")
+        except ValueError:
+            sample = None
+        sample = dict(sample) if isinstance(sample, dict) else {}
+        if decision["decision"] == "audit":
+            sample["filter_audit"] = {"score": decision["route_json"]["audit"]["score"], "picked_by": "rate",
+                                      "result": None}
+        if decision["shadow"]:
+            sample["shadow"] = {"would_filter": True, "result": None}
+        store.execute(f"UPDATE rr_review_cells SET route = ?, route_forced = ?, route_json = ?, sample_json = ?,"
+                      f" updated_at = ? WHERE {where}",
+                      (decision["route"], decision["route_forced"], route_json,
+                       json.dumps(sample, sort_keys=True) if sample else row["sample_json"], now, *key, lease_owner))
+        return {"written": True, "state": "running"}
 
 
 def begin_call(store: Any, target_key: str, agent_key: str, *, lease_owner: str, call: Mapping[str, Any],

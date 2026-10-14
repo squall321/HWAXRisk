@@ -266,6 +266,15 @@ def test_a_mechanism_without_an_owner_row_is_unknown(approved_tax):
     assert out["mech"]["unmapped"] == ["mech:optical.not_yet_in_the_table"]
 
 
+def test_a_roster_domain_outside_the_taxonomy_reads_unknown_never_unrelated(approved_tax, routing):
+    """로스터 영역 손잡이로 더한 영역(택소노미에 없다)의 셀 신호는 모름이다 — 표가 그 영역을 모르니 거르는 쪽에 서지 않는다(C3-6)."""
+    signal = relevance.code_signal([{"code": "mesh.density_changed"}], [], approved=True, routing=routing, tax=approved_tax)
+    assert relevance.code_for(signal, "mech")["verdict"] == "unrelated"
+    out = relevance.code_for(signal, "acoustic_extra")
+    assert (out["verdict"], out["reason"], out["unmapped"]) == ("unknown", "domain_unknown", [])
+    assert out["related_domains"] == []
+
+
 def test_only_non_design_lines_are_unrelated_everywhere(approved_tax, routing):
     out = relevance.code_signal([{"code": "mesh.density_changed"}, {"code": "param.n_elems"}], ["SPACER_DAMIDA"],
                                 approved=True, routing=routing, tax=approved_tax)
