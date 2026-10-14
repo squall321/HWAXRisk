@@ -1405,14 +1405,19 @@ def closure_cells(store: Any, target_key: str) -> dict:
     shadow_miss = sum(1 for r in shadow_done if r["shadow_result"] == "risk_miss")
     by_domain: dict[str, dict[str, int]] = {}
     for r in filtered + audited:
-        cell = by_domain.setdefault(str(r["domain"]), {"filtered": 0, "audited": 0})
+        cell = by_domain.setdefault(str(r["domain"]), {"filtered": 0, "audited": 0, "settled": 0})
         cell["filtered" if r["state"] == "na_irrelevant" else "audited"] += 1
+        cell["settled"] += int(r in settled)
+    # 결과를 내지 못한 표본 — 아직 도는 것(대기)과 끝내 실패 · 넘김으로 닫힌 것(실패)을 가른다(반대 검토 MEDIUM 6)
+    unsettled = [r for r in audited if r["audit_result"] not in AUDIT_RESULTS]
+    audit_open = sum(1 for r in unsettled if r["state"] in OPEN_CELL_STATES)
     job = _latest_review_job(store, target_key)
     knobs = (json.loads(job["params_json"] or "{}").get("knobs") or {}) if job is not None and job.get("params_json") else {}
     population = len(filtered) + len(audited)
     pct = float(knobs.get("audit_pct") or 0)
     n_audit = max(math.ceil(pct / 100.0 * population), min(population, AUDIT_MIN_N)) if population else 0
-    floor_met = len(audited) >= n_audit and all(v["audited"] >= AUDIT_DOMAIN_FLOOR for v in by_domain.values())
+    # 바닥은 결과를 낸 표본만 센다 — 전체와 영역마다(반대 검토 MEDIUM 6 — 실패한 표본을 세면 표본 0 인 거름이 막지 않았다)
+    floor_met = len(settled) >= n_audit and all(v["settled"] >= AUDIT_DOMAIN_FLOOR for v in by_domain.values())
     risk = results.get("risk_miss", 0)
     gap = [r for r in rows if r["basis"] == NOINPUT and r["state"] in ("reviewed", "no_input")]
     held = store.query(
@@ -1433,7 +1438,7 @@ def closure_cells(store: Any, target_key: str) -> dict:
         "filtered": {
             "n": len(filtered), "would_filter": sum(1 for r in rows if r["rule"] == "both_unrelated"),
             "by_domain": dict(sorted(by_domain.items())),
-            "audit": {"sampled": len(settled), "pending": len(audited) - len(settled), "n_audit": n_audit,
+            "audit": {"sampled": len(settled), "pending": audit_open, "failed": len(unsettled) - audit_open, "n_audit": n_audit,
                       "floor_met": floor_met, **{k: results.get(k, 0) for k in AUDIT_RESULTS},
                       "upper95": _rate_upper(risk, len(settled)),
                       "upper95_conservative": _rate_upper(risk + results.get("undetermined", 0), len(settled))},

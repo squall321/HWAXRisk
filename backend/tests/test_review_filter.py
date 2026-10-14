@@ -700,3 +700,32 @@ def test_a_human_retry_keeps_the_sample_marker_so_a_rerun_miss_still_widens_and_
     marker = _cell(store, key, audit_unit, MEM2)["sample_json"]["filter_audit"]
     assert (marker["result"], marker["was"]) == (None, ["risk_miss"])
     assert "mem" in review_cells.widened_domains(store, key)                       # 넓힘은 되돌아가지 않는다
+
+
+def test_an_audit_that_never_produced_a_result_does_not_meet_the_floor(store, monkeypatch):
+    """반대 검토 MEDIUM 6 — 표본 바닥(floor_met)은 결과를 낸 표본만 센다(전체와 영역마다). 거른 셀이 남은 대상에서 유일한 보충 표본이
+    끝내 실패하면 표본 0 이라 바닥에 못 미치고 완결의 '거름' 잔여가 막는다(종전에는 실패한 표본을 세어 floor_met 이 참, 95% 상한도
+    없어 막지 않았다). 그 표본은 '대기' 가 아니라 '실패' 로 센다."""
+    from app import closure
+
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    key = rig.target(store, ROSTER)
+    us = units.load_units(store, key)
+    bundles = [u["unit_id"] for u in us if u["kind"] == "bundle"]
+    fake = _fake(ROSTER)
+    _quiet(fake, *bundles)                                            # 회로(mem)만 걸러진다 — std 는 묶음에서 코드 신호가 관련이다
+    for u in us:
+        fake.noinput_q1[u["unit_id"]], fake.noinput_q2[u["unit_id"]] = ["no"], [""]
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]}))
+    monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 1)
+    fake.error_cells = {(MEM2, u): {"code": "no_rows", "message": "행이 없다(가짜)", "infra": False, "retryable": False}
+                        for u in bundles}
+    r.finish(rig.job(store, key, scope={"agents": [MEM2]}))
+    cells = [c for c in _cells(store, key) if c["agent_key"] == MEM2 and c["unit_id"] in bundles]
+    assert sorted(c["state"] for c in cells) == ["failed", "na_irrelevant", "na_irrelevant"]
+    audit = review_cells.closure_cells(store, key)["filtered"]["audit"]
+    assert (audit["sampled"], audit["pending"], audit["failed"], audit["n_audit"], audit["floor_met"]) == (0, 0, 1, 1, False)
+    residual = next(r for r in closure.residuals(store, key, closure.cell_counts(store, key)) if r["item"] == "filtered")
+    assert residual["blocking"] is True
