@@ -16,6 +16,7 @@
   error_n·error    앞 run N 번은 error 프레임(기본 llm_unreachable, infra true)
   cut_n            앞 run N 번은 status 한 장 뒤 연결이 끊긴다(done 없음)
   delay_s          result 앞에서 이만큼 잔다(실제 시간)
+  pack_gate        threading.Event — 묶음 응답 앞에서 이 사건을 기다린다(30초 — 묶음이 도는 동안 같은 틱에 검토가 집히지 않게)
   limits_delay_s   limits 응답 앞에서 이만큼 잔다(실제 시간 — 포털 → 에이전트 서버 왕복이 루프의 탐침 한도를 넘는 박스, R3A-3)
   limits_error     (상태, 본문) — limits 가 이 오류로 답한다(포털이 중계한 agent_unreachable 따위 — 창 조회 실패, R3A-10)
   credential_expired  포털이 PAT 를 401 로 거절한다(모든 경로)
@@ -263,6 +264,7 @@ class FakeReviewEngine:
         self.cut_n = 0
         self.delay_s = 0.0
         self.limits_delay_s = 0.0
+        self.pack_gate: threading.Event | None = None
         self.limits_error: tuple[int, dict[str, Any]] | None = None
         self.credential_expired = False
         self.ctx_source = str(self.base_limits.get("ctx_source") or "server")
@@ -419,6 +421,8 @@ class FakeReviewEngine:
 
     def _pack(self, body: Mapping[str, Any]) -> httpx.Response:
         key = str(body.get("agent_key") or "")
+        if self.pack_gate is not None:
+            self.pack_gate.wait(30)
         with self._lock:
             errors = self.pack_errors.get(key)
             if isinstance(errors, list):

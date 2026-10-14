@@ -221,19 +221,40 @@ def test_eight_workers_never_exceed_the_servers_gate_limit(store, monkeypatch, l
     job_id = rig.job(store, key, scope={"unit_ids": [first]})
     fake = FakeReviewEngine(rig.packs())
     fake.gate_limit = limit
-    # 앞 여섯 run(전문가마다 첫 호출)을 붙들어 둔다 — 다섯이 함께 돌면(또는 5초가 지나면) 놓는다. 겹침이 박스 부하의 시간에 기대지
-    # 않는다(호출 간격으로 재면 바쁜 박스에서 셋 · 넷만 겹쳐 흔들렸다).
-    release = threading.Event()
+    # 겹침이 박스 부하의 시간에 기대지 않게 둘을 붙든다(호출 간격 · 5초 기한으로 재면 둘 · 넷만 겹쳐 흔들렸다). ① 묶음 — 여섯이 다
+    # 집힌 뒤에 놓는다. 전문가 단위 단계(C3-11)라 빨리 끝난 묶음의 전문가는 같은 틱에 검토로 집히는데, 시험대는 틱마다 워커를
+    # 기다리므로 첫 틱의 검토 둘과 둘째 틱의 넷이 겹치지 않는다. ② 앞 여섯 run(전문가마다 첫 호출) — 다섯이 함께 돌거나 살아 있는
+    # 검토 워커가 모두 붙들렸으면 놓는다(limit 4 는 넷까지만 뜬다). 60초는 안전망이다.
+    packs, release = threading.Event(), threading.Event()
+    fake.pack_gate = packs
     fake.hold_runs = {n: release for n in range(1, 7)}
+    r = rig.Rig(store, fake)
+    spawning = threading.Event()                 # 틱이 워커를 띄우는 중 — 다 띄운 뒤에만 '모두 붙들렸다' 를 센다
+    spawn = r.loop._spawn
+
+    def counted_spawn(*args, **kwargs):
+        spawning.set()
+        try:
+            return spawn(*args, **kwargs)
+        finally:
+            spawning.clear()
+
+    r.loop._spawn = counted_spawn
 
     def watch() -> None:
-        end = time.monotonic() + 5
-        while time.monotonic() < end and fake.active < 5:
+        end = time.monotonic() + 60
+        while time.monotonic() < end and not (len(fake.calls("pack")) >= 6 or (fake.calls("pack") and not spawning.is_set())):
+            time.sleep(0.01)
+        packs.set()
+        while time.monotonic() < end:
+            reviewing = sum(1 for w in r.loop.workers() if w.purpose == "review")
+            if fake.active >= 5 or (fake.active and not spawning.is_set() and fake.active == reviewing):
+                break
             time.sleep(0.01)
         release.set()
 
     threading.Thread(target=watch, daemon=True).start()
-    rig.Rig(store, fake).finish(job_id)
+    r.finish(job_id)
     assert rig.state(store, job_id) == "completed"
     assert fake.max_active <= limit and (fake.max_active > 4) == (limit == 8)
 
