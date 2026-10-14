@@ -210,13 +210,29 @@ def test_a_restart_in_the_middle_of_a_call_reruns_only_that_call_without_chargin
 def test_eight_workers_never_exceed_the_servers_gate_limit(store, monkeypatch, limit):
     """재설계 M3 C3-10 — 앱 워커 기본은 8(D-34)이고, 엔진 관문 limit(/health — 심의가 돌면 4)을 넘겨 띄우지 않는다. 6명 잡이 limit
     4 면 동시에 넷까지, 8 이면 넷을 넘는다."""
-    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_concurrency=8))
+    # 거르기를 끈다 — 켜 두면 1순위 대기(분류 8번 줄)로 영역마다 1순위만 먼저 돌아 겹침이 시간에 기댄다.
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_concurrency=8,
+                                                                risk_review_filter="off"))
     assert config.settings.risk_review_concurrency == 8
+    import time
+
     key = rig.target(store)
-    job_id = rig.job(store, key)
+    first = units.load_units(store, key)[0]["unit_id"]
+    job_id = rig.job(store, key, scope={"unit_ids": [first]})
     fake = FakeReviewEngine(rig.packs())
     fake.gate_limit = limit
-    fake.delay_s = 0.05
+    # 앞 여섯 run(전문가마다 첫 호출)을 붙들어 둔다 — 다섯이 함께 돌면(또는 5초가 지나면) 놓는다. 겹침이 박스 부하의 시간에 기대지
+    # 않는다(호출 간격으로 재면 바쁜 박스에서 셋 · 넷만 겹쳐 흔들렸다).
+    release = threading.Event()
+    fake.hold_runs = {n: release for n in range(1, 7)}
+
+    def watch() -> None:
+        end = time.monotonic() + 5
+        while time.monotonic() < end and fake.active < 5:
+            time.sleep(0.01)
+        release.set()
+
+    threading.Thread(target=watch, daemon=True).start()
     rig.Rig(store, fake).finish(job_id)
     assert rig.state(store, job_id) == "completed"
     assert fake.max_active <= limit and (fake.max_active > 4) == (limit == 8)
