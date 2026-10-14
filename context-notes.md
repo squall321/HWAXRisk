@@ -1564,8 +1564,9 @@ rebase 때 부딪치지 않게).
 
 ### D41. 단계 C 셋째 묶음(S3-5 · 남은 S3-12 · 길잡이) — 정한 것과 남긴 것 (2026-10-14)
 
-- **사슬의 자리와 원자성.** 훅은 넷이다 — `ReviewLoop._finish`(completed 로 바뀐 직후 · 보충 표본이 셀을 다시 열면 오지 않는다) ·
-  `runner._finish_job` 의 쟁점 갈래 · 연속 3패널 오류로 실패한 쟁점 잡 · `SynthWorker` 완료. 모두 앞 잡의 UPDATE 밖에서
+- **사슬의 자리와 원자성.** 훅은 셋이다 — `ReviewLoop._finish`(completed 로 바뀐 직후 · 보충 표본이 셀을 다시 열면 오지 않는다) ·
+  `runner._finish_job` 의 쟁점 갈래 · 연속 3패널 오류로 실패한 쟁점 잡. 설계서의 `on_synth_closed` 는 두지 않았다 — 종합 워커의 판
+  조립(`assemble_report`)이 이미 완결 캐시를 다시 쓴다(두 번 셀 까닭이 없다 — 변이 검사가 같은 값이라 알려 줬다). 모두 앞 잡의 UPDATE 밖에서
   `chain.safe` 로 부른다(터져도 앞 잡을 무르지 않고 로그 — 다음 sweep 이 다시 본다). `sweep` 은 러너 스레드 `chain_loop`(30초)이고,
   살아 있는 검토·쟁점·종합 잡이 없을 때 '마지막으로 끝난 잡'(updated_at · rowid 차례)에 다음 잡이 없으면 그 훅을 한 번 부른다
   (`chain_json.prev_job_id` 로 멱등 — 확인과 쓰기가 한 트랜잭션). 검토 잡은 마감 범위가 다 닫혔을 때만 잇는다.

@@ -429,9 +429,6 @@ class SynthWorker:
             return {"job_id": job["id"], "step": "planned_target"}
         report = assemble_report(self.store, key, trigger="synth_done")
         self._set(job["id"], "completed")
-        from app import chain  # noqa: PLC0415 — chain 은 이 모듈을 쓴다.
-
-        chain.safe(chain.on_synth_closed, self.store, job)
         return {"job_id": job["id"], "step": "completed", "report": report}
 
     def _job_error(self, job: Mapping[str, Any], exc: BaseException) -> dict:

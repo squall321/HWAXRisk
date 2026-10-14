@@ -4,7 +4,7 @@
     reviews ──completed──▶ on_reviews_closed ─┬─ 마감 범위에 열린 셀이 남았다 ─▶ 병합 → 코드 조립 판(reviews_partial). 끝
                                               └─ 다 닫혔다 ─▶ 병합 → 판(reviews_closed) → 쟁점 선정 → issues 잡(없으면 synth 잡)
     issues  ──completed·failed──▶ on_issues_closed ─▶ 병합 → 판(issues_closed) → synth 잡
-    synth   ──completed──▶ on_synth_closed ─▶ 완결 캐시(판 synth_done 은 종합 워커가 이미 세웠다)
+    synth   ──completed──▶ (사슬 끝 — 판 synth_done 은 종합 워커가 세우고 그 조립이 완결 캐시를 쓴다)
 
 - 다음 잡 생성은 앞 잡의 상태 전이와 다른 트랜잭션이다. 그 사이에 프로세스가 죽으면 `sweep`(러너 30초 틱)이 메운다 — 마지막으로
   끝난 단계에 다음 잡이 없으면 하나만 만든다(`chain_json.prev_job_id` 로 멱등).
@@ -182,15 +182,6 @@ def on_issues_closed(store: RiskStore, job: Mapping[str, Any]) -> dict:
                "report": report}
     closure.refresh(store, key)
     return out
-
-
-def on_synth_closed(store: RiskStore, job: Mapping[str, Any]) -> dict:
-    """종합 잡이 completed 로 닫힌 뒤 — 판(synth_done)은 워커가 세웠다. 완결 캐시를 새로 쓴다."""
-    key = str(job["target_key"])
-    if not _cells_target(store, key):
-        return {"stage": None, "reason": "panels"}
-    result = closure.refresh(store, key)
-    return {"stage": None, "reason": "synth_done", "level_label": result.get("level_label")}
 
 
 def safe(hook: Any, store: RiskStore, job: Mapping[str, Any]) -> dict | None:
