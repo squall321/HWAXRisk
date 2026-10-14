@@ -71,21 +71,26 @@ class FakeSummaryEngine:
         if plan == "outside":
             para["refs"].append("reg:ffffffffffff")
         out_rows.append(para)
+        # 결과의 칸은 엔진 계약 예제(result_summary_ok · _missing — 엔진 c4e4823)와 같은 모양이다(C14 — tests/test_summary_contract.py).
         meta = {"model": "fake-sum", "ctx_tokens": 1_048_576, "ctx_source": "server", "prompt_rev": PROMPT_REV,
-                "norm_rev": "cr-n1", "limits_rev": LIMITS_REV, "input_sha": "f" * 64, "prompt_chars": 4000,
-                "usage": {"llm_calls": 1, "tokens_in": 2000, "tokens_out": 300}, "finish_reason": "stop", "llm_ms": [0],
-                "soft_over": False, "basis": "rows", "aliases": {"rows": alias}}
+                "norm_rev": "cr-n1", "limits_rev": "fake-cells-1", "limits_rev_kind": LIMITS_REV, "input_sha": "f" * 64,
+                "prompt_chars": 4000, "usage": {"llm_calls": 1, "tokens_in": 2000, "tokens_out": 300,
+                                                "per_attempt": [{"n": 1, "tokens_in": 2000, "tokens_out": 300}]},
+                "finish_reason": "stop", "llm_ms": [0], "soft_over": False, "basis": "rows", "bg_dropped": 0,
+                "order_effective": True, "aliases": {"rows": alias}, "clipped": {}}
         if plan == "clipped":
             meta["clipped"] = {"blocks": {"had": 52_000, "kept": 40_000}}
+        quality = {"expected": len(cover) + 2, "ok": len(out_rows), "flagged": 0, "missing": len(dropped), "bad_lines": 0,
+                   "truncated": False, "tail_broken": False, "attempts": 1, "repaired": False, "stamp": False,
+                   "dropped_over_cap": 0, "maybe_more": None, "dropped_alias": 0, "dup": 0, "dup_conflict": 0, "flipped": 0,
+                   "narrative_chars": len(para["text"]), "long": False}
         return {"kind": "summary", "variant": None, "rows": out_rows, "missing": dropped, "extras": {"inj": []},
-                "quality": {"expected": len(cover) + 2, "ok": len(out_rows), "missing": len(dropped), "attempts": 1,
-                            "repaired": False, "narrative_chars": len(para["text"])},
-                "meta": meta}
+                "quality": quality, "meta": meta}
 
     @staticmethod
     def _row(t: str, aliases: list[str], text: str, alias: Mapping[str, str]) -> dict:
         return {"t": t, "r": list(aliases), "text": text, "refs": [alias[a] for a in aliases], "from_attempt": 1,
-                "checks": {"refs": "ok", "nums_unsourced": [], "coerced": []}}
+                "checks": {"refs": "ok", "text": "ok", "nums_unsourced": [], "coerced": []}}
 
     def _check(self, body: Mapping[str, Any]) -> dict:
         """엔진 `_summary_ctx` 와 같은 요청 검사."""

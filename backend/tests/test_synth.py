@@ -1,7 +1,7 @@
 # 영역 요약과 종합 보고서(재설계 M3 S3-9) — 요약 서술만 LLM 이고 표·수는 코드이며, LLM 이 죽어도 보고서 판이 서는지 본다
 """입력은 생산자다 — 원장은 가짜 검토 엔진을 꽂은 M2 검토 루프(tests/synth/review_rig.py)와 S3-6 선정·S3-7 쟁점 패널(가짜 쟁점
 패널 엔진), 요약은 종합 잡(`synth.create_synth_job`)을 `SynthWorker.tick` 으로 끝까지 돌린 것이다(가짜 요약 엔진 —
-tests/synth/fake_summary_engine.py). 엔진의 정확한 출력 모양 단언(C14)은 엔진의 마지막 계약 예제를 받은 뒤 더한다.
+tests/synth/fake_summary_engine.py). 엔진의 정확한 출력 모양 단언(C14)은 tests/test_summary_contract.py 에 있다.
 """
 from __future__ import annotations
 
