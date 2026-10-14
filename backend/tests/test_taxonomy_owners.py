@@ -194,10 +194,11 @@ def test_the_review_status_is_a_gate_value_with_a_reviewer_once_approved():
 def test_the_draft_is_the_table_handed_to_the_user():
     """초안(review_status draft)은 m3-synthesis 3.4 의 52행이다 — 그 문서가 '훑을 때 봐 주면 좋은 셋' 으로 적은 수가 이 자산의 수와
     같다(xd 24개 — 소유 11 · 관련 13, mech 41개, rel 27개, mem·std 는 관련으로만, 재질 계열 넷의 첫 소유가 rel — P-15). 사용자가 표를
-    고쳐 승인하면 이 시험은 건너뛴다(승인본이 정본이다)."""
+    고쳐 승인하면 승인본이 정본이라 초안의 수는 더 보지 않고 승인한 사람·때가 적혔는지만 본다(건너뛰지 않는다 — 건너뜀 예산)."""
     doc = _owners_doc()
     if doc["review_status"] != "draft":
-        pytest.skip("배정표가 승인됐다 — 초안의 수는 더 보지 않는다")
+        assert doc["review_status"] == taxonomy.APPROVED and doc["reviewed_by"] and doc["reviewed_at"]
+        return
     rows = doc["rows"]
     owners = Counter(d for r in rows for d in r["owners"])
     related = Counter(d for r in rows for d in r["related"])
