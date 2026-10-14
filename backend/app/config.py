@@ -62,8 +62,8 @@ CRED_KEY_FILENAME = "cred.key"
 # 자격 C-6). 나머지는 없으면 그 길만 닫히고 앱은 돈다(OPTIONAL_KEY_EFFECTS). 종전에는 다섯 키를 다 필수로 세어 쓰지 않는
 # 키(RA 쓰기·AIDataHub — 보내는 쪽이 아직 배선되지 않았다, M4)까지 모자라다고 해 어느 박스든 경고가 떴다.
 SECRET_KEYS: tuple[str, ...] = ("HWAXRISK_CRED_KEY",)
-# 있으면 읽지만 없어도 기동을 막지 않는 키. PORTAL_PAT 는 scopes ['read'] 전용이고, RA 객체·보고서 쓰기와 AIDataHub import 는
-# PORTAL_PAT_RW 만 쓴다(§5.1 원칙 10).
+# 있으면 읽지만 없어도 기동을 막지 않는 키. PORTAL_PAT 는 scopes ['read'] 전용이고, RA 객체·보고서 쓰기는 PORTAL_PAT_RW 만 쓰며
+# (§5.1 원칙 10) AIDataHub 반입은 HWAXRISK_AIDH_API_KEY 를 쓴다 — 둘 다 보내는 쪽이 아직 배선되지 않았다(M4).
 # HEAX_GATEWAY_SECRET: MCP 게이트웨이와만 나눠 갖는 이 앱 전용 값. 있어야 /auth/sso·/auth/portal-pat 가 열린다(없으면 404).
 #   HEAXHub 의 gateway_shared_secret 을 재사용하지 않는다 — 그 값은 portal_auth 라우트에서 Caddy 가
 #   모든 요청에 주입하므로, 같은 값을 쓰면 로그인한 아무나 남의 이메일로 단언을 발급받을 수 있다.
