@@ -309,8 +309,9 @@ def test_a_skipped_cells_hits_are_exactly_what_its_report_carries(store, monkeyp
     if case == "split":                                  # fwd FAIL · rev OK · 단독 OK — 실효 OK 인데 걸린 변형이 있어 갈림
         fake.verdicts, fake.rev_verdicts, fake.solo_verdicts = {k01: ("yes", "FAIL")}, {k01: ("yes", "OK")}, {k01: ("yes", "OK")}
         fake.error_cells, fake.error_kinds = {(SEAL, unit_ids[0]): NO_ROWS}, {"offcard"}
-    else:                                                # fwd OK 에 부딪침 표지 — 두 번째 판정(rev)이 끝내 실패
+    else:                                                # fwd 모름에 부딪침 표지 — 두 번째 판정(rev)이 끝내 실패
         monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_dual="flagged"))
+        fake.verdicts = {k01: ("unknown", "undetermined")}
         fake.dup_conflict = {"K01"}
         fake.contested = {"K01": {"verdict": ["yes", "FAIL"], "why": "같은 카드의 다른 답", "attempt": 1, "raw": "FAILED?"}}
         fake.error_cells, fake.error_kinds = {(SEAL, unit_ids[0]): NO_ROWS}, {"verdict:rev"}
@@ -330,6 +331,7 @@ def test_a_skipped_cells_hits_are_exactly_what_its_report_carries(store, monkeyp
     assert "카드 판정 1건 — 점검표 · finding" in md
     if case == "unjudged_conflict":
         assert held[0].get("conflict_unjudged") and "다툼 표지 — 두 번째 판정 못 함" in md
+        assert [u["unit_id"] for u in report["needs_info"]] == [unit_ids[0]]        # 그 카드의 필요한 정보 — 검토한 셀과 같은 자리
 
 
 def test_risk_job_action_retries_and_skips_the_jobs_failed_cells_for_a_delegated_identity_only(store, monkeypatch):
