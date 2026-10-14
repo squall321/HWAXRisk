@@ -73,16 +73,19 @@ def check_credential_chain(settings) -> None:
             " 갱신하지 않는 PAT 로 패널이 수명 부족으로 멈춥니다. 문턱을 여유보다 크게 올리세요(기본"
             f" {config.DEFAULT_PAT_RENEW_BEFORE_S}). 문턱을 적는 자리는 {config.REVIEW_KNOB_HOME} 또는 환경변수, 여유의 손잡이를"
             f" 적는 자리는 {config.KNOB_HOME}.")
-    # 갱신 문턱은 바라는 PAT 수명에서 자동 등록 쉼을 뺀 것보다 작아야 한다 — 아니면 막 받은 PAT 가 쉼이 끝나기 전에 다시 '갱신할
-    # 때(expiring)' 가 되어 자동 등록이 받자마자 또 바꿔 받는다(BEH-10).
+    # 갱신 문턱은 바라는 PAT 수명에서 자동 등록 쉼과 등록 하한을 뺀 것보다 작아야 한다. 쉼 — 아니면 막 받은 PAT 가 쉼이 끝나기 전에
+    # 다시 '갱신할 때(expiring)' 가 되어 자동 등록이 받자마자 또 바꿔 받는다(BEH-10). 하한 — 갱신은 지금 PAT 보다 하루 더 사는 PAT 를
+    # 바란다(min_remaining_s = 남은 수명 + PAT_MIN_REMAINING_S). 남은 수명이 문턱 가까이면 그것이 바라는 수명을 넘어, 포털이 낼 수 없는
+    # 것이라 source_expiring('Claude 에 넣은 PAT 가 곧 끝난다' — 엉뚱한 안내)으로 거절한다(R2-6).
     ttl_days = int(PORTAL_PAT_WANTED["ttl_days"])
     retry = config.pat_auto_retry_s(settings)
-    ceiling = ttl_days * 86400 - retry
+    ceiling = ttl_days * 86400 - retry - PAT_MIN_REMAINING_S
     if renew >= ceiling:
         raise RuntimeError(
             f"PAT 자동 갱신 문턱(HWAXRISK_PAT_RENEW_BEFORE_S {renew}초)이 바라는 PAT 수명 {ttl_days}일({ttl_days * 86400}초)에서"
-            f" 자동 등록 쉼(HWAXRISK_PAT_AUTO_RETRY_S {retry}초)을 뺀 {ceiling}초 이상입니다 — 막 받은 PAT 가 곧바로 다시 갱신"
-            f" 대상이 되어 자동 등록이 바꿔 받기를 되풀이합니다. 문턱을 {ceiling}초 밑으로 내리거나 쉼을 줄이세요(기본 문턱"
+            f" 자동 등록 쉼(HWAXRISK_PAT_AUTO_RETRY_S {retry}초)과 등록 하한({PAT_MIN_REMAINING_S}초)을 뺀 {ceiling}초 이상입니다"
+            " — 막 받은 PAT 가 곧바로 다시 갱신 대상이 되어 자동 등록이 바꿔 받기를 되풀이하거나, 갱신이 바라는 수명(남은 수명 + 하한)이"
+            f" 바라는 PAT 수명을 넘어 포털이 거절합니다. 문턱을 {ceiling}초 밑으로 내리거나 쉼을 줄이세요(기본 문턱"
             f" {config.DEFAULT_PAT_RENEW_BEFORE_S}). 손잡이를 적는 자리는 {config.REVIEW_KNOB_HOME} 또는 환경변수.")
 
 

@@ -345,9 +345,10 @@ def test_the_renew_threshold_must_exceed_the_panel_credential_margin():
 
 
 def test_the_renew_threshold_must_leave_room_below_the_wanted_lifetime_minus_the_retry_pause():
-    """갱신 문턱이 '바라는 수명(ttl_days) − 자동 등록 쉼' 이상이면 막 받은 PAT 가 곧바로 다시 갱신 대상이다 — 기동을 막고 둘을 말한다
-    (BEH-10)."""
-    ceiling = routes.PORTAL_PAT_WANTED["ttl_days"] * 86400 - config.pat_auto_retry_s(config.settings)
+    """갱신 문턱이 '바라는 수명(ttl_days) − 자동 등록 쉼 − 등록 하한' 이상이면 막 받은 PAT 가 곧바로 다시 갱신 대상이거나(BEH-10), 갱신이
+    바라는 수명(남은 수명 + 하한)이 바라는 PAT 수명을 넘는다(R2-6) — 기동을 막고 손잡이를 말한다."""
+    ceiling = (routes.PORTAL_PAT_WANTED["ttl_days"] * 86400 - config.pat_auto_retry_s(config.settings)
+               - routes.PAT_MIN_REMAINING_S)
     for renew in (ceiling, ceiling + 1):
         with pytest.raises(RuntimeError) as exc:
             main.check_credential_chain(dataclasses.replace(config.settings, risk_pat_renew_before_s=renew))
@@ -358,6 +359,30 @@ def test_the_renew_threshold_must_leave_room_below_the_wanted_lifetime_minus_the
     cfg = dataclasses.replace(config.settings, risk_pat_renew_before_s=ceiling - 1, risk_pat_auto_retry_s=config.pat_auto_retry_s() + 2)
     with pytest.raises(RuntimeError):
         main.check_credential_chain(cfg)
+
+
+def test_no_threshold_the_boot_check_accepts_makes_a_renewal_ask_for_more_than_the_wanted_lifetime(box, monkeypatch):
+    """기동 검사를 지나는 가장 큰 문턱에서도, 문턱 바로 밑의 PAT 를 갱신할 때 바라는 수명(min_remaining_s = 남은 수명 + 하한)이 바라는
+    PAT 수명(ttl_days)을 넘지 않는다 — 넘으면 포털이 낼 수 없어 source_expiring('Claude 에 넣은 PAT 가 곧 끝난다' — 엉뚱한 안내)으로
+    거절한다(R2-6). 가장 큰 문턱은 식이 아니라 기동 검사에 물어 찾는다."""
+    ttl = routes.PORTAL_PAT_WANTED["ttl_days"] * 86400
+
+    def accepted(renew: int) -> bool:
+        try:
+            main.check_credential_chain(dataclasses.replace(config.settings, risk_pat_renew_before_s=renew))
+        except RuntimeError:
+            return False
+        return True
+
+    low, high = config.pat_renew_before_s(), ttl                    # 기본 문턱은 지나고, 수명 전체는 지나지 않는다
+    assert accepted(low) and not accepted(high)
+    while high - low > 1:
+        mid = (low + high) // 2
+        low, high = (mid, high) if accepted(mid) else (low, mid)
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_pat_renew_before_s=low))
+    _register(exp_in=low - 1)
+    wanted = routes.portal_pat_wanted(get_store(), EMAIL, now=now_epoch())     # 등록 뒤의 지금 — 남은 수명은 문턱 밑이다
+    assert wanted["reason"] == "expiring" and wanted["min_remaining_s"] <= ttl, (low, wanted["min_remaining_s"], ttl)
 
 
 def test_the_pat_knobs_are_read_like_the_other_box_knobs(tmp_path):
