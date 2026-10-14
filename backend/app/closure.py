@@ -211,8 +211,13 @@ def cell_counts(store: RiskStore, target_key: str) -> dict:
         "cells": {"expected": len(roster) * len(reviewable), "actual": len(rows), "by_state": dict(cells.get("by_state") or {}),
                   "reviewed_by_basis": dict(cells.get("by_basis") or {}), "verdict_gaps": verdict_gaps},
         "experts": {"active_by_domain": active_by_domain, "have_by_domain": have_by_domain,
+                    # 깊이의 분모 — 카드로 본 전문가만(재설계 M3 review1 M5 — 사용자 결정 D-35 를 섞인 영역까지).
+                    "carded_by_domain": carded_by_domain,
                     # 실제로 검토한 전문가가 전부 카드 없이(역할·배경만) 본 영역 — 깊이를 막지 않고 표기 잔여다(D-35).
                     "no_card_domains": sorted(d for d, n in active_by_domain.items() if n and not carded_by_domain.get(d)),
+                    # 카드로 본 전문가도 있는 영역의 카드 없는 전문가 수 — 깊이에 세지 않고 표기 잔여에 이름이 선다(M5).
+                    "cardless_mixed": {d: n - carded_by_domain[d] for d, n in sorted(active_by_domain.items())
+                                       if carded_by_domain.get(d) and n > carded_by_domain[d]},
                     "reviewed_cards": sum(have_by_domain.values()), "input_gap": len(input_gap),
                     "input_gap_keys": sorted(input_gap), "filtered_only": filtered_only, "reports": report_counts},
         "filter": dict(cells.get("filtered") or {}),
@@ -335,9 +340,11 @@ def residuals(store: RiskStore, target_key: str, counts: Mapping[str, Any]) -> l
     if no_cards:
         out.append({"item": "no_cards", "n": len(no_cards), "label": f"카드 0장 {len(no_cards)}명", "rows": no_cards})
     cardless = list(counts["experts"]["no_card_domains"])
-    if cardless:
-        out.append({"item": "depth_no_cards", "n": len(cardless), "domains": cardless,
-                    "label": f"카드 없는 영역 — 역할 판단만 · {'·'.join(cardless)}", "rows": cardless})
+    mixed = dict(counts["experts"].get("cardless_mixed") or {})
+    if cardless or mixed:
+        names = cardless + [f"{d}(그중 {n}명)" for d, n in sorted(mixed.items())]
+        out.append({"item": "depth_no_cards", "n": len(cardless) + len(mixed), "domains": cardless, "mixed": mixed,
+                    "label": f"카드 없는 영역 — 역할 판단만 · {'·'.join(names)}", "rows": [cardless, sorted(mixed.items())]})
     out.append({"item": "cross_not_run", "n": counts["handoffs"]["lines"], "pairs": counts["handoffs"]["pairs"],
                 "label": f"2차 영향 미실행(넘김 {counts['handoffs']['lines']}건 표만)", "rows": []})
     out.append({"item": "mech_not_run", "n": counts["mechanisms_reported"]["codes"], "label": "결손 사냥 미실행", "rows": []})
@@ -489,10 +496,13 @@ def close_level_cells(store: RiskStore, target_key: str, *, persist: bool = True
     depth: dict[str, dict] = {}
     depth_ok = True
     no_card_domains = set(counts["experts"]["no_card_domains"])
-    for domain, active in sorted(counts["experts"]["active_by_domain"].items()):
+    carded_by_domain = counts["experts"].get("carded_by_domain") or {}
+    for domain, everyone in sorted(counts["experts"]["active_by_domain"].items()):
+        # 분모는 카드로 본 전문가다(review1 M5) — 카드 없는 전문가는 깊이를 채울 수 없으니 막지 않고 표기 잔여에 이름만 선다.
+        active = int(carded_by_domain.get(domain, 0))
         need = active if active < 3 else max(3, math.ceil(0.3 * active))
         have = int(counts["experts"]["have_by_domain"].get(domain, 0))
-        depth[domain] = {"active": active, "have": have, "need": need}
+        depth[domain] = {"active": active, "have": have, "need": need, "cardless": everyone - active}
         if domain in no_card_domains:
             # 카드 0장 전문가는 역할만으로 답하고 보고서에 잔여로 남는다(D-35) — 그 영역은 깊이를 막지 않는다(잔여 depth_no_cards).
             depth[domain]["exempt"] = "no_cards"
@@ -539,6 +549,10 @@ def close_level_cells(store: RiskStore, target_key: str, *, persist: bool = True
         notes.append(f"보고서 누락 {reports_missing}명")
     if counts["issues"]["open"]:
         notes.append(f"쟁점 진행 {counts['issues']['open']}건")
+    short = [f"{d} {v['have']}/{v['need']}" for d, v in depth.items() if "exempt" not in v and v["have"] < v["need"]]
+    if c1 and short:
+        # 셀이 다 닫혔는데 C2 가 아닌 까닭이 깊이면 그 영역과 수를 말한다(review1 M5 — 종전에는 표기에 아무것도 없었다).
+        notes.append(f"깊이 미달 {'·'.join(short[:5])}" + (f" 외 {len(short) - 5}영역" if len(short) > 5 else ""))
     if c1 and not fresh["issues"]:
         # 고른 적이 없으면 선정 전, 고른 뒤 셀이 다시 열렸으면 그 수(사슬 잡이 얼린 다시 연 횟수와의 차), 그 밖의 셀 변화는 지문만.
         notes.append("후속 낡음(쟁점 선정 전)" if not fresh["selected"] else

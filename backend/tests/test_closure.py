@@ -264,24 +264,40 @@ def test_refresh_on_the_largest_m2_ledger_stays_well_under_a_second(store):
     assert time.perf_counter() - started < 1.0
 
 
-@pytest.mark.parametrize(("roster", "exempt", "blocked"), [
-    (rig.ROSTER, ["sim"], []),                                                     # 배경 카드뿐 + 0장 — 리그의 sim
-    (CARD_ROSTER + ({"key": rig.ZERO_CARDS, "domain": "material", "relevance": 0.8},), ["material"], []),   # 0장 한 명
-    (CARD_ROSTER + ({"key": rig.ZERO_CARDS, "domain": "mech", "relevance": 0.5},), [], ["mech"]),  # 카드 가진 영역의 미달
+@pytest.mark.parametrize(("roster", "exempt", "mixed", "failing", "blocked"), [
+    (rig.ROSTER, ["sim"], {}, None, []),                                           # 배경 카드뿐 + 0장 — 리그의 sim
+    (CARD_ROSTER + ({"key": rig.ZERO_CARDS, "domain": "material", "relevance": 0.8},), ["material"], {}, None, []),
+    # 카드 가진 영역에 0장 한 명이 섞였다 — 깊이는 카드로 본 둘만 세고(둘 다 닫혔다) 0장은 잔여에 이름만(review1 M5)
+    (CARD_ROSTER + ({"key": rig.ZERO_CARDS, "domain": "mech", "relevance": 0.5},), [], {"mech": 1}, None, []),
+    # 카드로 본 사람이 깊이에 못 미치면(한 명의 셀이 전부 실패) 지금처럼 막는다
+    (CARD_ROSTER, [], {}, "mech-syn-0", ["mech"]),
 ])
-def test_a_domain_whose_active_experts_all_lack_cards_is_a_label_not_a_depth_block(store, roster, exempt, blocked):
+def test_a_domain_whose_active_experts_all_lack_cards_is_a_label_not_a_depth_block(store, roster, exempt, mixed, failing,
+                                                                                    blocked):
     """D-35 — 카드 0장 전문가는 역할만으로 답하고 보고서에 잔여로 남는다. 실제로 검토한 전문가가 전부 카드 없이 본 영역은 C2 깊이를
-    막지 않고 표기 잔여 depth_no_cards('카드 없는 영역 — 역할 판단만 · <영역>')가 선다. 카드를 가진 전문가가 있는 영역이 깊이에
-    못 미치면 지금처럼 막는다(카드 없이 본 사람은 그 영역의 have 에 들지 않는다 — X1-04)."""
-    key = _full_grid(store, roster=roster)
+    막지 않고 표기 잔여 depth_no_cards('카드 없는 영역 — 역할 판단만 · <영역>')가 선다. 깊이의 분모·분자는 카드로 본 전문가만이라
+    (review1 M5 — 조정자 결정) 카드 없는 사람이 섞인 영역은 카드로 본 사람들이 깊이를 채우면 막히지 않고 그 사람 수가 잔여에
+    '<영역>(그중 N명)' 으로 선다. 카드로 본 사람이 깊이에 못 미치면 지금처럼 막는다(카드 없이 본 사람은 have 에 들지 않는다 — X1-04)."""
+    unit_ids = None
+    if failing:
+        probe = rig.target(store, roster)
+        unit_ids = [u["unit_id"] for u in units.load_units(store, probe)]
+    key = _full_grid(store, roster=roster,
+                     error_cells={(failing, u): NO_ROWS for u in unit_ids} if failing else None)
     result = closure.close_level_cells(store, key, persist=False)
     depth = result["detail"]["depth"]
     assert sorted(d for d, v in depth.items() if v.get("exempt") == "no_cards") == exempt
     for domain in blocked:
         assert "exempt" not in depth[domain] and depth[domain]["have"] < depth[domain]["need"]
+        assert f"깊이 미달 {domain} {depth[domain]['have']}/{depth[domain]['need']}" in result["level_label"]
+    if not blocked:
+        assert "깊이 미달" not in result["level_label"]
+    for domain in mixed:
+        assert depth[domain]["have"] >= depth[domain]["need"] and depth[domain]["cardless"] == mixed[domain]
     item = _residual(result, "depth_no_cards")
-    if exempt:
-        assert item and not item["blocking"] and item["domains"] == exempt
-        assert f"카드 없는 영역 — 역할 판단만 · {'·'.join(exempt)}" in result["level_label"]
+    if exempt or mixed:
+        names = exempt + [f"{d}(그중 {n}명)" for d, n in sorted(mixed.items())]
+        assert item and not item["blocking"] and item["domains"] == exempt and item["mixed"] == mixed
+        assert f"카드 없는 영역 — 역할 판단만 · {'·'.join(names)}" in result["level_label"]
     else:
         assert item is None
