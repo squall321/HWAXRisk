@@ -231,13 +231,16 @@ def test_both_sides_human_confirmed_and_different_goes_to_conflicts(seeded, empt
 # ---------------------------------------------------------------- v4(재설계 M2) — 검토 단위·셀 원장
 V4_EXPORTED = ("rr_unit_builds", "rr_units", "rr_expert_reports", "rr_review_cells", "rr_card_verdicts",
                "rr_review_calls")
+# v5(재설계 M3) — 쟁점·요약·보고서 판·완결 확인·근거 꾸러미 실호출. 박스 지역 표는 없다(M3.md 4.2).
+V5_EXPORTED = ("rr_issues", "rr_summaries", "rr_reports", "rr_close_acks", "rr_unit_live")
 
 
 def test_v4_tables_ride_the_export_except_the_local_card_packs(seeded, empty_store):
-    """새 표 여섯은 반출 표 목록 끝에 붙고 since 열이 실제 열이다. 카드 묶음은 박스 지역 사본이라 목록에 없다.
-    새 표가 빈 v4 원장도 빈 DB 로 왕복해 같은 행 수·해시다(행이 든 왕복은 C2 의 생산자가 생긴 뒤 본다)."""
+    """새 표 여섯은 반출 표 목록에서 v5 표 앞에 붙고 since 열이 실제 열이다. 카드 묶음은 박스 지역 사본이라 목록에 없다.
+    새 표가 빈 원장도 빈 DB 로 왕복해 같은 행 수·해시다(행이 든 왕복은 C2 의 생산자가 생긴 뒤 본다)."""
     assert export.LOCAL_ONLY_TABLES == {"rr_card_packs"}
-    assert export.TABLE_ORDER[-len(V4_EXPORTED):] == V4_EXPORTED
+    head = export.TABLE_ORDER[:-len(V5_EXPORTED)]
+    assert head[-len(V4_EXPORTED):] == V4_EXPORTED
     assert "rr_card_packs" not in export.TABLE_ORDER
     for table in V4_EXPORTED:
         cols, _ = export._table_meta(seeded, table)
@@ -246,13 +249,35 @@ def test_v4_tables_ride_the_export_except_the_local_card_packs(seeded, empty_sto
     assert export._EXPORT_SKIP_COLUMNS["rr_review_calls"] == ("result_gz",)
 
     body = "".join(export.iter_lines(seeded, ALICE, 0))
-    assert json.loads(body.splitlines()[0])["schema_version"] == LATEST_SCHEMA == 4
+    assert json.loads(body.splitlines()[0])["schema_version"] == LATEST_SCHEMA == 5
     assert not any(json.loads(ln)["table"] == "rr_card_packs" for ln in body.splitlines()[1:])
     export.import_jsonl(empty_store, ALICE, body)
     here, there = export.row_digest(empty_store, ALICE), export.row_digest(seeded, ALICE)
     assert "rr_card_packs" not in here
     assert {t: here[t] for t in V4_EXPORTED} == {t: there[t] for t in V4_EXPORTED}
     assert all(here[t][0] == 0 for t in V4_EXPORTED)
+
+
+def test_v5_tables_ride_the_export_at_the_end_with_real_since_columns(seeded, empty_store):
+    """v5 새 표 다섯은 반출 표 목록 끝에 붙고(박스 지역 표 없음), since 열이 실제 열이며 owner_sub 가 있다. 고쳐 쓰는 행은
+    updated_at 이 먼저고, 완결 확인은 취소 시각(revoked_at)이 먼저다 — 취소가 since 반출에서 빠지지 않게. 새 표가 빈 v5 원장도
+    빈 DB 로 왕복해 같은 행 수·해시다(행이 든 왕복은 각 표의 생산자 걸음이 본다 — tests/rr/test_v5_rows.py)."""
+    assert export.TABLE_ORDER[-len(V5_EXPORTED):] == V5_EXPORTED
+    assert not export.LOCAL_ONLY_TABLES & set(V5_EXPORTED)
+    for table in V5_EXPORTED:
+        cols, _ = export._table_meta(seeded, table)
+        assert export._SINCE_COLS.get(table) and set(export._SINCE_COLS[table]) <= set(cols), table
+        assert "owner_sub" in cols and "target_key" in cols, table
+        assert table not in export._EXPORT_SKIP_COLUMNS, table
+    assert {t: (export._SINCE_COLS.get(t) or ("",))[0] for t in V5_EXPORTED} == {
+        "rr_issues": "updated_at", "rr_summaries": "updated_at", "rr_reports": "created_at",
+        "rr_close_acks": "revoked_at", "rr_unit_live": "updated_at"}
+
+    body = "".join(export.iter_lines(seeded, ALICE, 0))
+    export.import_jsonl(empty_store, ALICE, body)
+    here, there = export.row_digest(empty_store, ALICE), export.row_digest(seeded, ALICE)
+    assert {t: here[t] for t in V5_EXPORTED} == {t: there[t] for t in V5_EXPORTED}
+    assert all(here[t][0] == 0 for t in V5_EXPORTED)
 
 
 def test_card_pack_lines_are_refused_on_import(empty_store):

@@ -90,6 +90,13 @@ _SINCE_COLS: dict[str, tuple[str, ...]] = {
     "rr_review_cells": ("updated_at", "created_at"),
     "rr_card_verdicts": ("updated_at", "created_at"),
     "rr_review_calls": ("started_at",),
+    # v5(재설계 M3) — 쟁점·요약·근거 꾸러미 실호출은 고쳐 쓰는 행이라 updated_at 이 먼저다. 보고서 판은 한 번 쓰고 고치지 않는다.
+    # 완결 확인은 취소할 때 행을 지우지 않고 revoked_at 을 적으므로 그것이 먼저다(취소가 since 반출에서 빠지지 않게).
+    "rr_issues": ("updated_at", "created_at"),
+    "rr_summaries": ("updated_at", "created_at"),
+    "rr_reports": ("created_at",),
+    "rr_close_acks": ("revoked_at", "ack_at"),
+    "rr_unit_live": ("updated_at", "created_at"),
 }
 
 
@@ -169,6 +176,28 @@ def clip_queue_payload(payload: Any) -> Any:
     return {**payload, "raw": clipped, "raw_chars": payload.get("raw_chars") or lengths}
 
 
+def _clip_card_text(value: Any) -> Any:
+    """JSON 값 안의 카드 인용을 판정당 200자로 — card: 인용 행의 quote, 판정 모양 항목의 cq, 글 안의 «» 인용(원래 길이는 옆 칸
+    `<칸>_chars` — 이미 적힌 값은 그대로). 등록부 merged_json·쟁점 basis_json 은 걸음마다 칸이 자라므로(주장값·분포·쟁점 전 값·
+    제기자 판정 — M3.md 4.2) 칸 이름이 아니라 모양으로 찾아 깊이와 상관없이 다 줄인다."""
+    if isinstance(value, list):
+        return [_clip_card_text(v) for v in value]
+    if not isinstance(value, dict):
+        return value
+    out = {k: _clip_card_text(v) for k, v in value.items()}
+    cut: set[str] = set()
+    if str(out.get("ref") or "").startswith("card:") and isinstance(out.get("quote"), str):
+        out, cut = _clip(out, "quote"), {"quote"}
+    if isinstance(out.get("cq"), str):
+        out, cut = _clip(out, "cq"), cut | {"cq"}
+    for key in [k for k, v in out.items() if isinstance(v, str) and k not in cut and not k.endswith("_chars")]:
+        clipped, lengths = clip_quoted(out[key])
+        if lengths:
+            out[key] = clipped
+            out[f"{key}_chars"] = out.get(f"{key}_chars") or lengths
+    return out
+
+
 def _clip_extras(extras: Any) -> Any:
     """셀 extras_json — 카드 밖 줄의 인용(q, 배경 카드에서 옮긴 글)."""
     off = extras.get("offcard") if isinstance(extras, dict) else None
@@ -180,7 +209,8 @@ def _clip_extras(extras: Any) -> Any:
 
 def _export_view(table: str, row: dict) -> dict:
     """반출 줄 하나 — 표마다 박스 밖으로 내보낼 모양으로 바꾼다(카드 인용 200자 — 판정 행 cq·조건별 대조, 셀의 카드 밖 인용,
-    카드 대조 finding 의 인용·근거 문장, 인용 역색인의 card: 인용, 카드 대조 마감이 올린 큐 항목의 원문)."""
+    카드 대조 finding 의 인용·근거 문장, 인용 역색인의 card: 인용, 카드 대조 마감이 올린 큐 항목의 원문, 등록부·쟁점의 카드 인용.
+    쟁점 패널의 브리프는 싣지 않는다)."""
     if table == "rr_card_verdicts":
         cq = row.get("cq")
         if isinstance(cq, str) and len(cq) > EXPORT_CQ_MAX:
@@ -203,6 +233,14 @@ def _export_view(table: str, row: dict) -> dict:
     if table == "rr_curation_queue":
         payload = _clip_json(row.get("payload_json"), clip_queue_payload)
         return row if payload is row.get("payload_json") else {**row, "payload_json": payload}
+    # v5(재설계 M3) — 쟁점 패널이 받은 근거(I6)에는 카드 절 원문이 든다. 그 브리프는 박스 밖으로 내보내지 않는다(그 박스에서만
+    # 쓴다 — 브리프 해시·항목 해시는 남는다). 등록부·쟁점의 카드 인용은 판정 행과 같은 200자 규칙이다(M2 #18·#21 을 넓힌다).
+    if table == "rr_panels" and row.get("kind") == "issue" and row.get("brief_gz") is not None:
+        return {**row, "brief_gz": None}
+    if table in ("rr_registry", "rr_issues"):
+        column = "merged_json" if table == "rr_registry" else "basis_json"
+        clipped = _clip_json(row.get(column), _clip_card_text)
+        return row if clipped is row.get(column) else {**row, column: clipped}
     return row
 
 

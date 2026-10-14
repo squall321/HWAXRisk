@@ -1215,6 +1215,12 @@ TRANSFER_DERIVED: tuple[tuple[str, str], ...] = (
     ("rr_review_cells", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_card_verdicts", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_review_calls", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    # v5(재설계 M3) — 쟁점·영역 요약·종합 보고서 판·완결 확인과 근거 꾸러미 실호출. 빠뜨리면 이양 뒤 새 소유자의 반출에서 사라진다.
+    ("rr_issues", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_summaries", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_reports", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_close_acks", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_unit_live", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
 )
 MEMBER_ROLES = ("viewer", "editor")
 RUNNING_JOB_STATES = ("queued", "running", "paused", "cancelling")
@@ -1395,6 +1401,8 @@ class PurgeBody(BaseModel):
     reason: str = Field(max_length=300)
 
 
+# 폐기된 보고서 판의 쪽 — 빈 쪽 목록(JSON `[]`)의 gzip. 시각을 0 으로 박아 같은 바이트다(rr_reports.pages_gz 가 NOT NULL 이다).
+_EMPTY_PAGES_GZ = gzip.compress(b"[]", mtime=0)
 # 폐기가 비우는 원문 열(plan §5.2.6). NOT NULL 열은 DDL 이 41표로 동결돼 있어 NULL 대신 빈 문자열로 비운다.
 PURGE_BLANK_SQL: tuple[tuple[str, str], ...] = (
     ("rr_snapshots", "UPDATE rr_snapshots SET ir_json = '' WHERE project_id = ?"),
@@ -1443,6 +1451,20 @@ PURGE_BLANK_SQL: tuple[tuple[str, str], ...] = (
                           " '$.mechanism_free', NULL)"
                           " WHERE json_extract(payload_json, '$.target_key') IN"
                           " (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    # v5(재설계 M3) — 쟁점의 근거·결과·좌석·재제기(전문가 판정 글과 카드 인용이 든다), 요약의 LLM 서술과 대조 결과, 보고서 판의
+    # 쪽(NOT NULL 이라 빈 쪽 목록의 gzip — 판 머리·수·해시는 남는다), 완결 확인의 사유, 대상의 완결 캐시, 근거 꾸러미 실호출의
+    # 근거 줄·호출 계획(도구 인자에 재질명이 든다)·못 받은 사유다. 쟁점·확인의 행과 상태는 남는다.
+    ("rr_issues", "UPDATE rr_issues SET basis_json = '', outcome_json = NULL, seats_json = NULL, reraised_json = NULL"
+                  " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_summaries", "UPDATE rr_summaries SET output_json = NULL, checks_json = NULL"
+                     " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_reports", f"UPDATE rr_reports SET pages_gz = X'{_EMPTY_PAGES_GZ.hex()}', pages_n = 0"
+                   " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_close_acks", "UPDATE rr_close_acks SET ack_reason = '[purged]'"
+                      " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_targets", "UPDATE rr_targets SET closure_json = NULL WHERE project_id = ?"),
+    ("rr_unit_live", "UPDATE rr_unit_live SET lines_gz = NULL, plan_json = '[]', gaps_json = NULL"
+                     " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
 )
 
 

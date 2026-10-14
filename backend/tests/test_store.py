@@ -18,6 +18,8 @@ HOUSEKEEPING = {"_schema_migrations", "_user_credentials", "_user_prefs"}
 # v4(재설계 M2) 가 더한 표 — 검토 단위(WP2) 둘과 셀 원장(WP3b) 다섯(M2.md 5절 #2).
 V4_TABLES = {"rr_unit_builds", "rr_units", "rr_expert_reports", "rr_review_cells", "rr_card_verdicts",
              "rr_card_packs", "rr_review_calls"}
+# v5(재설계 M3) 가 더한 표 — 쟁점·요약·종합 보고서·완결 확인 넷과 셀 꾸러미의 근거 꾸러미 실호출 하나(M3.md 4.2).
+V5_TABLES = {"rr_issues", "rr_summaries", "rr_reports", "rr_close_acks", "rr_unit_live"}
 # §5.2 가 '41 표' 로 세는 근거 — 33 표 위에 v1 으로 더해진 8 표.
 ADDED_IN_41 = {"rr_project_members", "rr_gate_acks", "rr_registry_status_log", "rr_audit",
                "rr_panel_calls", "rr_cluster_alias", "rr_requirements", "rr_snapshot_jobs"}
@@ -55,13 +57,18 @@ def test_v2_adds_the_brief_call_ledger_and_keeps_v1_data(tmp_path):
     from app.risk_store import MIGRATIONS as MIG
 
     assert [v for v, _ in MIG][:2] == [1, 2]
-    # 허용 연산만 쓴다(plan §5.2.5 (6)) — ALTER 로 CHECK 를 고치는 문장이 없다.
+    # 허용 연산만 쓴다(plan §5.2.5 (6)) — ALTER 로 CHECK 를 고치는 문장이 없다. 유일 색인은 같은 판이 새로 만든 표에만 건다
+    # (빈 표라 이행이 겹친 행으로 죽지 않는다 — 이미 행이 든 표에 걸면 박스마다 성패가 갈린다).
     for _, statements in MIG[1:]:
+        created = {t.upper() for t in re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", "\n".join(statements))}
         for sql in statements:
             head = sql.strip().upper()
-            assert head.startswith(("CREATE TABLE IF NOT EXISTS", "ALTER TABLE", "CREATE INDEX IF NOT EXISTS"))
+            assert head.startswith(("CREATE TABLE IF NOT EXISTS", "ALTER TABLE", "CREATE INDEX IF NOT EXISTS",
+                                    "CREATE UNIQUE INDEX IF NOT EXISTS"))
             if head.startswith("ALTER TABLE"):
                 assert " ADD COLUMN " in head
+            if head.startswith("CREATE UNIQUE INDEX"):
+                assert re.match(r"CREATE UNIQUE INDEX IF NOT EXISTS \w+ ON (\w+)", head).group(1) in created, sql
 
     db = tmp_path / "risk_review.db"
     store = RiskStore(db)
@@ -89,10 +96,11 @@ def test_migrate_creates_v1_tables(risk_store, tmp_path):
     assert db_path.exists()
     tables = _tables(db_path)
     rr = {t for t in tables if t.startswith("rr_")}
-    # v1 표 41개는 정본 §5.2.2 전문 그대로이고, 뒤 버전이 더한 표(v2 rr_brief_calls · v4 재설계 M2 일곱)가 그 위에 붙는다.
+    # v1 표 41개는 정본 §5.2.2 전문 그대로이고, 뒤 버전이 더한 표(v2 rr_brief_calls · v4 재설계 M2 일곱 · v5 재설계 M3 다섯)가
+    # 그 위에 붙는다.
     assert set(DDL_TABLES) <= rr
     assert len(DDL_TABLES) == 41
-    assert rr - set(DDL_TABLES) == {"rr_brief_calls"} | V4_TABLES
+    assert rr - set(DDL_TABLES) == {"rr_brief_calls"} | V4_TABLES | V5_TABLES
     assert HOUSEKEEPING <= tables
     assert tables - rr - HOUSEKEEPING <= {"sqlite_sequence"}
     assert _columns(db_path, "_schema_migrations") == {"version", "applied_at", "app_version"}
@@ -241,6 +249,9 @@ PUSHED_DDL_SHA256 = {
     3: "a20f49f302e0c92292d7792a9a990b4d8c809b1f3eb0dce9b609bb0879b35e39",
     # v4 — 리스크 심사 재설계 M2(dev 배선 리허설 통과 뒤 2026-10-12 push). 이제 고치지 않는다 — 바꿀 것은 v5 로.
     4: "f44b1630c19df06f0929485782c55253edf8a765858c1c30a824cb31b119c0b5",
+    # v5 는 아직 나가지 않았다 — 가지 m3 에만 있고 dev 리허설(재설계 PLAN 4절 C-2, M3 단계 D)이 끝나야 main 에 오른다.
+    # 그때까지는 블록을 고칠 수 있고(주인은 쟁점·종합 걸음 S3-1), 고치면 같은 커밋에서 이 값을 고친다. push 하는 날 이 값이 굳는다.
+    5: "9474298a9049f38be2bea5d3e4ddf72ef963e141d9ee9fc65a6ff334b9ee40be",
 }
 SHARED_TABLES = {"rr_dim_vocab", "rr_delta_priors", "rr_rules", "rr_metrics"}
 
@@ -548,7 +559,7 @@ V4_INDEXES = {
 def test_v4_is_the_m2_block_with_the_step_plans_column_names(risk_store, tmp_path):
     """v4 하나에 단위 표 둘 · 셀 원장 표 다섯 · rr_targets.flow · rr_jobs 열 넷 · rr_findings 열 넷이 다 있고 그 밖은 없다.
     rr_roster.input_gaps_json 은 v4 가 아니다(M3 의 v5)."""
-    assert [v for v, _ in MIGRATIONS] == [1, 2, 3, 4]
+    assert [v for v, _ in MIGRATIONS][:4] == [1, 2, 3, 4]
     v4 = MIGRATIONS[3][1]
     assert set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", "\n".join(v4))) == V4_TABLES == set(V4_COLUMNS)
     altered: dict[str, set[str]] = {}
@@ -600,9 +611,11 @@ def test_a_v3_db_rises_to_v4_once_with_one_v3_copy(tmp_path):
         store = RiskStore(db)
         store.open()
         try:
+            store_module.MIGRATIONS = original[:4]
             assert store.migrate() == 4
             assert store.query_one("SELECT COUNT(*) AS n FROM rr_projects")["n"] == 1
         finally:
+            store_module.MIGRATIONS = original
             store.close()
         copies = [p.name for p in tmp_path.glob("risk_review.db.pre-migrate-*")]
         assert len(copies) == 1 and copies[0].startswith("risk_review.db.pre-migrate-v3-"), copies
@@ -610,5 +623,139 @@ def test_a_v3_db_rises_to_v4_once_with_one_v3_copy(tmp_path):
     con = sqlite3.connect(tmp_path / copies[0])
     try:
         assert con.execute("PRAGMA user_version").fetchone()[0] == 3
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------- v5 — 재설계 M3 의 한 블록(M3.md 4.2)
+# 열 이름은 M3.md 4.2 의 DDL 그대로다(셀 꾸러미 C3-1 의 rr_unit_live 문장 포함). 바꾸면 쟁점·종합·셀 걸음의 생산자·소비자가 함께
+# 바뀌어야 하므로 여기에 못 박는다 — 단계 D 리허설이 표 모양을 바꾸라고 하면 블록 주인(S3-1)이 블록과 이 표를 같이 고친다.
+V5_COLUMNS = {
+    "rr_issues": {
+        "issue_id", "target_key", "owner_sub", "anchor_cluster_key", "unit_id", "types_json", "p_class", "priority",
+        "rank", "basis_json", "basis_hash", "seats_json", "state", "state_reason", "outcome", "outcome_json",
+        "panel_id", "attempts", "charged", "selected_round", "cells_hash", "reraised_json", "status_source",
+        "decided_by", "decided_at", "reason", "created_at", "updated_at"},
+    "rr_summaries": {
+        "summary_id", "target_key", "owner_sub", "scope_kind", "scope_key", "input_hash", "input_chars", "n_rows",
+        "state", "state_reason", "output_json", "checks_json", "attempts", "charged", "infra_streak", "not_before",
+        "run_id", "call_id", "model", "prompt_rev", "error_code", "error", "created_at", "finished_at", "updated_at"},
+    "rr_reports": {
+        "report_uid", "target_key", "owner_sub", "version_no", "trigger", "flow", "level", "level_label",
+        "narrative_state", "title", "counts_json", "closure_hash", "cells_hash", "registry_hash", "summary_ids_json",
+        "pages_gz", "pages_n", "content_hash", "created_at"},
+    "rr_close_acks": {
+        "target_key", "item", "ack_at", "owner_sub", "ack_by", "ack_reason", "basis_n", "basis_hash", "revoked_by",
+        "revoked_at"},
+    "rr_unit_live": {
+        "target_key", "unit_id", "owner_sub", "status", "plan_json", "lines_gz", "live_sha", "live_chars",
+        "credential_kind", "credential_email", "gaps_json", "attempts", "not_before", "frozen_at", "created_at",
+        "updated_at"},
+}
+V5_PRIMARY_KEYS = {"rr_issues": ["issue_id"], "rr_summaries": ["summary_id"], "rr_reports": ["report_uid"],
+                   "rr_close_acks": ["target_key", "item", "ack_at"], "rr_unit_live": ["target_key", "unit_id"]}
+V5_ADDED_COLUMNS = {
+    "rr_jobs": {"chain_json"}, "rr_panels": {"kind", "issue_id"},
+    "rr_registry": {"support_experts", "support_domains", "support_units", "support_verified", "attention", "issue_id",
+                    "issue_state"},
+    "rr_targets": {"level_label", "closure_json", "closure_at"}}
+# 이름 → (표, 열, 유일한가)
+V5_INDEXES = {
+    "ix_rr_panels_kind": ("rr_panels", ["target_key", "kind", "status"], False),
+    "ix_rr_registry_attention": ("rr_registry", ["target_key", "attention", "priority"], False),
+    "ux_rr_issues_anchor": ("rr_issues", ["target_key", "anchor_cluster_key"], True),
+    "ix_rr_issues_state": ("rr_issues", ["target_key", "state", "rank"], False),
+    "ix_rr_summaries_scope": ("rr_summaries", ["target_key", "scope_kind", "scope_key", "created_at"], False),
+}
+# 넣지 않기로 한 것(M3.md 4.2 끝 · 5절 #43) — 다른 걸음이 슬쩍 더하면 계약 밖이다.
+V5_LEFT_OUT = {"rr_roster": {"input_gaps_json"}, "rr_review_cells": {"input_gap_json", "route_det", "route_llm",
+                                                                      "audit_kind", "audit_result"},
+               "rr_reports": {"ra_entity_id", "ra_report_id"}, "rr_summaries": {"n_rows_omitted"}}
+
+
+def test_v5_is_the_m3_block_with_the_contract_column_names(risk_store, tmp_path):
+    """v5 하나에 새 표 다섯 · 새 열 열셋(rr_jobs 1 · rr_panels 2 · rr_registry 7 · rr_targets 3) · 새 색인 다섯이 있고 그 밖은 없다.
+    rr_panels.kind 는 NOT NULL DEFAULT 'coverage' 라 옛 패널 행이 coverage 로 읽힌다. 넣지 않기로 한 열·표는 없다."""
+    assert [v for v, _ in MIGRATIONS][:5] == [1, 2, 3, 4, 5]
+    v5 = MIGRATIONS[4][1]
+    assert set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", "\n".join(v5))) == V5_TABLES == set(V5_COLUMNS)
+    altered: dict[str, set[str]] = {}
+    for sql in v5:
+        hit = re.match(r"ALTER TABLE (\w+) ADD COLUMN (\w+)", sql)
+        if hit:
+            altered.setdefault(hit.group(1), set()).add(hit.group(2))
+    assert altered == V5_ADDED_COLUMNS and sum(len(c) for c in altered.values()) == 13
+    assert set(re.findall(r"CREATE (?:UNIQUE )?INDEX IF NOT EXISTS (\w+)", "\n".join(v5))) == set(V5_INDEXES)
+    assert not {"rr_cell_audits", "rr_post_runs"} & set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)",
+                                                                    "\n".join(s for _, ss in MIGRATIONS for s in ss)))
+
+    db = tmp_path / "risk_review.db"
+    for table, cols in V5_COLUMNS.items():
+        assert _columns(db, table) == cols, table
+    con = sqlite3.connect(db)
+    try:
+        for table, keys in V5_PRIMARY_KEYS.items():
+            info = con.execute(f"PRAGMA table_info({table})").fetchall()
+            assert [r[1] for r in sorted((r for r in info if r[5]), key=lambda r: r[5])] == keys, table
+        for name, (table, cols, unique) in V5_INDEXES.items():
+            assert [r[2] for r in con.execute(f"PRAGMA index_info({name})").fetchall()] == cols, name
+            assert con.execute("SELECT tbl_name FROM sqlite_master WHERE name = ?", (name,)).fetchone()[0] == table
+            assert {r[1]: r[2] for r in con.execute(f"PRAGMA index_list({table})")}[name] == int(unique), name
+        # rr_reports 의 판 번호는 대상 안에서 하나다(UNIQUE(target_key, version_no)).
+        assert any(r[2] == 1 and [c[2] for c in con.execute(f"PRAGMA index_info({r[1]})")] == ["target_key", "version_no"]
+                   for r in con.execute("PRAGMA index_list(rr_reports)")), "rr_reports 의 판 번호 유일 제약이 없다"
+        kind = next(r for r in con.execute("PRAGMA table_info(rr_panels)") if r[1] == "kind")
+        assert (kind[3], kind[4]) == (1, "'coverage'")                    # NOT NULL · 기본값
+    finally:
+        con.close()
+    for table, cols in V5_ADDED_COLUMNS.items():
+        assert cols <= _columns(db, table)
+    for table, cols in V5_LEFT_OUT.items():
+        assert not cols & _columns(db, table), table
+    # rr_jobs.mode 의 넓힌 어휘는 굳은 v4 주석 대신 러너 상수에 있다(M3.md 4.1) — NULL 은 panels 로 읽힌다.
+    from app import runner
+
+    assert runner.JOB_MODES == ("panels", "reviews", "issues", "synth")
+    assert "COALESCE(mode, 'panels')" in runner.PANEL_JOBS_SQL
+
+
+def test_a_v4_db_rises_to_v5_once_with_one_v4_copy(tmp_path):
+    """행이 든 v4 DB 가 옛 행을 그대로 둔 채 v5 로 오르고 출발 버전 사본(pre-migrate-v4-*) 하나만 남는다. 두 번째 기동은
+    아무것도 하지 않는다. 옛 패널 행의 kind 는 coverage, 옛 행의 새 열은 비어 있다. M2 검토 루프가 채운 v4 원장은
+    tests/rr/test_v5_upgrade.py 가 본다."""
+    from app import risk_store as store_module
+
+    db = tmp_path / "risk_review.db"
+    v4 = RiskStore(db)
+    v4.open()
+    original = store_module.MIGRATIONS
+    try:
+        store_module.MIGRATIONS = original[:4]
+        assert v4.migrate() == 4
+        v4.execute("INSERT INTO rr_projects(id, owner_sub, code, name, created_at, updated_at)"
+                   " VALUES ('P1','u','F7','F7',1,1)")
+    finally:
+        store_module.MIGRATIONS = original
+        v4.close()
+    assert not V5_TABLES & _tables(db) and "kind" not in _columns(db, "rr_panels")
+
+    for _ in range(2):
+        store = RiskStore(db)
+        store.open()
+        try:
+            store_module.MIGRATIONS = original[:5]
+            assert store.migrate() == 5
+            assert store.query_one("SELECT COUNT(*) AS n FROM rr_projects")["n"] == 1
+        finally:
+            store_module.MIGRATIONS = original
+            store.close()
+        copies = [p.name for p in tmp_path.glob("risk_review.db.pre-migrate-*")]
+        assert len(copies) == 1 and copies[0].startswith("risk_review.db.pre-migrate-v4-"), copies
+    assert V5_TABLES <= _tables(db)
+    for table, cols in V5_ADDED_COLUMNS.items():
+        assert cols <= _columns(db, table), table
+    con = sqlite3.connect(tmp_path / copies[0])
+    try:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 4
     finally:
         con.close()

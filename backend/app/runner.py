@@ -983,6 +983,9 @@ FLOW_GATED_TIERS: tuple[str, ...] = ("A", "B", "C")
 LIVE_JOB_STATES: tuple[str, ...] = ("queued", "running", "paused", "cancelling")
 # 패널 러너·진행판·브리프가 보는 잡 — mode 가 NULL(v4 전 행)이거나 panels 인 것. 검토 잡(reviews)은 그 러너의 것이다.
 PANEL_JOBS_SQL = "COALESCE(mode, 'panels') = 'panels'"
+# rr_jobs.mode 의 어휘(NULL = panels). v4 의 열 주석은 굳은 블록이라 넓힌 어휘는 여기와 v5 머리 주석에 적는다(M3.md 4.1) —
+# issues 는 쟁점 패널 잡, synth 는 영역 요약·종합 잡이다(재설계 M3 의 잡 사슬). 공개 REST 의 mode 는 panels·reviews 그대로다.
+JOB_MODES: tuple[str, ...] = ("panels", "reviews", "issues", "synth")
 
 
 def panel_job_gate(store: Any, target_key: str, tier: str) -> None:

@@ -752,9 +752,112 @@ ALTER TABLE rr_claim_refs ADD COLUMN quote_chars INTEGER;   -- 인용 원문 글
 """
 _DDL_V4: list[str] = _split_statements(_DDL_V4_SQL)
 
+# v5 — 리스크 심사 재설계 M3(쟁점·종합·완결 + 근거 꾸러미 실호출). 한 블록 · 한 커밋이고(M3.md 4.2) 주인은 쟁점·종합 걸음 S3-1 이다 —
+# 셀 꾸러미의 rr_unit_live(걸음 C3-1)도 이 블록 안에 있고, 블록을 고치는 것은 주인뿐이다. 새 표 다섯(rr_issues · rr_summaries ·
+# rr_reports · rr_close_acks · rr_unit_live) · 새 열 열셋(rr_jobs 1 · rr_panels 2 · rr_registry 7 · rr_targets 3) · 새 색인 다섯.
+# 새 표는 전부 owner_sub·target_key 가 있고 박스 지역 표(export.LOCAL_ONLY_TABLES)는 없다. 어휘 열에는 제약을 걸지 않는다(C-3).
+# rr_jobs.mode 어휘는 이제 NULL = panels · panels · reviews · issues · synth 다(runner.JOB_MODES) — v4 의 열 주석은 굳은 블록이라
+# 여기에 적는다. 넣지 않는 것 — v4 주석이 미뤄 둔 input_gap_json·route_det·route_llm·audit_kind·audit_result·ix_rr_cells_reuse 와
+# rr_roster.input_gaps_json(M3.md 5절 #43), rr_cell_audits·rr_post_runs, rr_reports.ra_*(M4 의 v6), rr_summaries.n_rows_omitted.
+# 가지 m3 에만 있고 dev 리허설(M3 단계 D) 뒤에 push 한다 — 그때 tests/test_store.py 의 PUSHED_DDL_SHA256[5] 가 굳는다.
+_DDL_V5_SQL = """
+ALTER TABLE rr_jobs ADD COLUMN chain_json TEXT;          -- {root_job_id, prev_job_id, stage, round, cells_hash, registry_hash, scope_open, reason}
+
+ALTER TABLE rr_panels ADD COLUMN kind TEXT NOT NULL DEFAULT 'coverage';   -- coverage | issue
+ALTER TABLE rr_panels ADD COLUMN issue_id TEXT;          -- kind='issue' 이면 rr_issues.issue_id
+CREATE INDEX IF NOT EXISTS ix_rr_panels_kind ON rr_panels(target_key, kind, status);
+
+ALTER TABLE rr_registry ADD COLUMN support_experts INTEGER;   -- 서로 다른 제기 전문가 수(쟁점 패널 원자·반대석·사람 제외)
+ALTER TABLE rr_registry ADD COLUMN support_domains INTEGER;   -- 그 전문가들의 로스터 영역 수
+ALTER TABLE rr_registry ADD COLUMN support_units INTEGER;     -- 서로 다른 unit_id 수(NULL 은 세지 않는다)
+ALTER TABLE rr_registry ADD COLUMN support_verified INTEGER;  -- 검증된 인용이 1건 이상인 원자를 낸 전문가 수
+ALTER TABLE rr_registry ADD COLUMN attention TEXT;            -- A | B | C | D (읽는 순서 — 판정이 아니다)
+ALTER TABLE rr_registry ADD COLUMN issue_id TEXT;
+ALTER TABLE rr_registry ADD COLUMN issue_state TEXT;          -- NULL | queued | planned | running | upheld | downgraded | escalated | rejected | undetermined | untried_cap | skipped | withdrawn
+CREATE INDEX IF NOT EXISTS ix_rr_registry_attention ON rr_registry(target_key, attention, priority);
+
+ALTER TABLE rr_targets ADD COLUMN level_label TEXT;      -- 완결 표기(잔여 포함). 맨 레벨 이름은 잔여 0 일 때만
+ALTER TABLE rr_targets ADD COLUMN closure_json TEXT;     -- closure.cell_counts·잔여의 캐시(진행판 5초 폴링이 원장을 다시 세지 않게)
+ALTER TABLE rr_targets ADD COLUMN closure_at INTEGER;
+
+CREATE TABLE IF NOT EXISTS rr_issues (                   -- 쟁점. 등록부 클러스터 하나에 하나
+  issue_id TEXT PRIMARY KEY,                             -- 'iss-' + sha1(target_key|anchor_cluster_key)[:12]
+  target_key TEXT NOT NULL, owner_sub TEXT NOT NULL,
+  anchor_cluster_key TEXT NOT NULL,                      -- .imp 없는 base 키 — resolve_cluster_key 를 지난 값
+  unit_id TEXT,                                          -- 대표 원자의 단위
+  types_json TEXT NOT NULL,                              -- ["held_fail","solo_severe","split_verdict"] 가운데 걸린 것 전부
+  p_class TEXT NOT NULL,                                 -- P1 | P2 | P3
+  priority REAL NOT NULL, rank INTEGER,                  -- 선정 순서(1부터, 결정론)
+  basis_json TEXT NOT NULL,                              -- {raisers[], opposers[], claimed{}, distribution{}, registry_before{}, refs[]} — 편성 때 동결
+  basis_hash TEXT NOT NULL,                              -- 제기자·반대자 집합과 주장값의 해시 — 바뀌면 다시 고른다
+  seats_json TEXT,                                       -- 패널을 만들 때 동결 [{key, domain, origin, rank_in_domain, issue_role}]
+  state TEXT NOT NULL DEFAULT 'queued',                  -- queued | planned | running | resolved | inconclusive | untried_cap | withdrawn | skipped
+  state_reason TEXT,                                     -- cap | engine_fail | chain_cancelled | spec_parse_failed | no_decision | no_matching_atom | human
+  outcome TEXT,                                          -- upheld | downgraded | escalated | rejected | undetermined
+  outcome_json TEXT,                                     -- {panel_id, atom_finding_ids[], severity_after, judgement_after, grade_after, contest_note}
+  panel_id TEXT,                                         -- 지금 그 쟁점의 패널 — resolve_issue 는 이것과 같은 패널의 결과만 쓴다
+  attempts INTEGER NOT NULL DEFAULT 0, charged INTEGER NOT NULL DEFAULT 0,
+  selected_round INTEGER NOT NULL DEFAULT 1, cells_hash TEXT,   -- 고를 때의 마감 범위 셀 지문
+  reraised_json TEXT,                                    -- 닫힌 뒤 새 영역이 다시 제기했을 때의 표기(자동 재토의 없음)
+  status_source TEXT NOT NULL DEFAULT 'code', decided_by TEXT, decided_at INTEGER, reason TEXT,
+  created_at INTEGER, updated_at INTEGER);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_rr_issues_anchor ON rr_issues(target_key, anchor_cluster_key);
+CREATE INDEX IF NOT EXISTS ix_rr_issues_state ON rr_issues(target_key, state, rank);
+
+CREATE TABLE IF NOT EXISTS rr_summaries (                -- 영역 요약·과제 종합의 LLM 서술과 코드 대조 결과
+  summary_id TEXT PRIMARY KEY,                           -- 'sm-' + sha1(target_key|scope_kind|scope_key|input_hash)[:16]
+  target_key TEXT NOT NULL, owner_sub TEXT NOT NULL,
+  scope_kind TEXT NOT NULL, scope_key TEXT NOT NULL,     -- domain '<영역 코드>' | target '-'
+  input_hash TEXT NOT NULL, input_chars INTEGER, n_rows INTEGER,
+  state TEXT NOT NULL DEFAULT 'pending',                 -- pending | running | done | code_only
+  state_reason TEXT,                                     -- no_rows | content_fail | infra_exhausted | ctx_too_small | checks_failed
+  output_json TEXT, checks_json TEXT,                    -- 객체로 옮긴 출력 · {missing[], nums_unsourced[], refs_outside[], retried}
+  attempts INTEGER NOT NULL DEFAULT 0, charged INTEGER NOT NULL DEFAULT 0,
+  infra_streak INTEGER NOT NULL DEFAULT 0, not_before INTEGER,
+  run_id TEXT, call_id TEXT, model TEXT, prompt_rev TEXT, error_code TEXT, error TEXT,
+  created_at INTEGER, finished_at INTEGER, updated_at INTEGER);
+CREATE INDEX IF NOT EXISTS ix_rr_summaries_scope ON rr_summaries(target_key, scope_kind, scope_key, created_at);
+
+CREATE TABLE IF NOT EXISTS rr_reports (                  -- 종합 보고서 판(앱 사본이 정본 — RA 투영은 M4)
+  report_uid TEXT PRIMARY KEY,                           -- 'rp-' + sha1(target_key|version_no)[:16]
+  target_key TEXT NOT NULL, owner_sub TEXT NOT NULL,
+  version_no INTEGER NOT NULL,
+  trigger TEXT NOT NULL,                                 -- reviews_partial | reviews_closed | issues_closed | synth_done | ack | manual | level_up
+  flow TEXT NOT NULL, level TEXT NOT NULL, level_label TEXT NOT NULL,
+  narrative_state TEXT NOT NULL,                         -- none | partial | full — 서술이 붙은 정도
+  title TEXT NOT NULL,
+  counts_json TEXT NOT NULL,                             -- 그 판을 만들 때의 closure 수(보고서 머리와 같은 값)
+  closure_hash TEXT NOT NULL, cells_hash TEXT NOT NULL, registry_hash TEXT NOT NULL,
+  summary_ids_json TEXT,
+  pages_gz BLOB NOT NULL, pages_n INTEGER NOT NULL,      -- gzip(JSON [{page_no, kind, title, blocks{background[], results[], recommendation[], minutes[]}}])
+  content_hash TEXT NOT NULL,                            -- 직전 판과 같으면 새 판을 만들지 않는다
+  created_at INTEGER NOT NULL,
+  UNIQUE(target_key, version_no));
+
+CREATE TABLE IF NOT EXISTS rr_close_acks (               -- 완결 잔여의 사람 확인. 재확인 이력을 남긴다
+  target_key TEXT NOT NULL, item TEXT NOT NULL, ack_at INTEGER NOT NULL,
+  owner_sub TEXT NOT NULL,
+  ack_by TEXT NOT NULL, ack_reason TEXT NOT NULL,        -- 300자 안, 빈 문자열이면 422
+  basis_n INTEGER NOT NULL, basis_hash TEXT NOT NULL,    -- 확인 시점 잔여 수와 그 행 집합의 sha256[:12] — 집합이 바뀌면 낡은 확인이다
+  revoked_by TEXT, revoked_at INTEGER,                   -- 취소는 행을 지우지 않고 표기한다
+  PRIMARY KEY(target_key, item, ack_at));                -- 유효한 확인 = 그 item 의 revoked_at 이 NULL 인 가장 늦은 행
+
+CREATE TABLE IF NOT EXISTS rr_unit_live (                -- 검토 단위의 실호출 근거(B 층). 단위마다 한 번 얼리고 고치지 않는다
+  target_key TEXT NOT NULL, unit_id TEXT NOT NULL, owner_sub TEXT NOT NULL,
+  status TEXT,                                           -- NULL(아직) | ok | partial | none | skipped(셀이 이미 돈 단위)
+  plan_json TEXT NOT NULL DEFAULT '[]',                  -- 결정적 호출 계획 [{tool, args, call_id, state, code}]
+  lines_gz BLOB, live_sha TEXT, live_chars INTEGER,      -- 렌더한 근거 줄([{ref:'tool:b-…', text}]) gzip
+  credential_kind TEXT, credential_email TEXT,           -- 부른 자격(사용자 PAT 만)
+  gaps_json TEXT,                                        -- 못 받은 호출과 사유
+  attempts INTEGER NOT NULL DEFAULT 0, not_before INTEGER,  -- 인프라 실패 재시도
+  frozen_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER,
+  PRIMARY KEY(target_key, unit_id));
+"""
+_DDL_V5: list[str] = _split_statements(_DDL_V5_SQL)
+
 # 버전 오름차순. 한 버전 = 한 트랜잭션. 허용 연산은 CREATE TABLE IF NOT EXISTS · ADD COLUMN · CREATE INDEX IF NOT EXISTS 뿐(plan §5.2.5 (6)).
 # 한 번 나간 버전의 문장은 고치지 않는다 — tests/test_store.py 가 버전마다 DDL 해시를 못 박는다.
-MIGRATIONS: list[tuple[int, list[str]]] = [(1, _DDL_V1), (2, _DDL_V2), (3, _DDL_V3), (4, _DDL_V4)]
+MIGRATIONS: list[tuple[int, list[str]]] = [(1, _DDL_V1), (2, _DDL_V2), (3, _DDL_V3), (4, _DDL_V4), (5, _DDL_V5)]
 
 # ---------------------------------------------------------------- 이행 안전(WP5a R3 · 반대 검토 X2-01·X2-02)
 # 이행 전체(버전 읽기 → 사본 → 버전별 트랜잭션 → 사본 정리)를 감싸는 파일 잠금. 기다린다 — HEAXHub 는 헬스가 안 오면 같은
