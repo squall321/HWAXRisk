@@ -315,6 +315,25 @@ def test_q1_and_q2_rows_citing_a_context_line_are_kept_and_marked_never_dropped(
     assert "문맥 줄을 댔다" in text
 
 
+def test_a_skipped_input_gap_cells_unknown_impact_goes_where_a_reviewed_cells_would(store):
+    """반대 검토 2차 MEDIUM 2 · D-46 — 넘긴 입력 결손 셀의 영향 모름(q1 unknown)은 검토한 셀처럼 입력 결손 절에 실리고, 넘김 응답과
+    보고서의 글이 그 자리를 말한다(종전에는 걸림으로 세면서 '점검표 · finding 에 남겼다' 고 했지만 그런 자리에 없었다)."""
+    from app import routes
+    from tests import factories
+
+    key, first, fake = _one_gap_cell(store, [[{"impact": "unknown", "title": "A"}]], noinput_q2=lambda uid: {uid: []})
+    cell = _cell(store, key, first, MEM1)
+    assert cell["state"] == "failed"
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": cell["run_id"]}, reason="입력 결손 답이 끝내 모자랐다"),
+                                 ident=factories.ident(rig.OWNER))
+    assert (out.get("hits"), out.get("hits_by")) == (1, {"card": 0, "conflict_mark": 0, "noinput_yes": 0, "noinput_unknown": 1})
+    rig.Rig(store, fake).finish(out["job"]["job_id"])
+    report = expert_report.load_report(store, key, MEM1)
+    gap = [u for u in (report.get("input_gap") or {}).get("units") or () if u["unit_id"] == first]
+    assert gap and [i["impact"] for i in gap[0]["impacts"]] == ["unknown"]
+    assert "입력 결손 영향 모름 1줄 — 입력 결손 절" in expert_report.render_report_md(report)
+
+
 def test_a_flipped_or_contested_non_hit_q1_is_kept_and_named_as_such(store):
     """반대 검토 MEDIUM 5 — 보충이 앞 답(모름 — 걸림)을 '없음' 으로 갈아 끼운 q1(flipped_from · raw)은 그 표지가 셀 기록과 보고서에
     남는다. 없음 줄에 실린 다툼은 '검증된 철회가 이 영향을 다퉜다' 가 아니라 '같은 카드의 다른 답이 이 줄과 부딪쳤다' 다."""

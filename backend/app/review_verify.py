@@ -609,6 +609,33 @@ def effective_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict]:
     return out
 
 
+def effective_view(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict]:
+    """record_id → 실효 판정(실효 변형 행의 열 + effective_rows 의 표기). applies·judgement 는 실효 규칙의 값이다 — 변형이 갈린
+    카드(split)는 행에 적힌 변형의 판정이 아니라 undetermined 다(X1-14). 행의 원래 값은 row_applies·row_judgement 에 둔다.
+    보고서 원장(`expert_report.Ledger.effective`)과 넘긴 셀의 걸림 셈(`review_cells.cell_hits`)이 같은 함수를 읽는다."""
+    marks = effective_rows(rows) if rows else {}
+    out: dict[str, dict] = {}
+    for row in rows:
+        if row["is_effective"]:
+            mark = marks[str(row["record_id"])]
+            out[str(row["record_id"])] = {**row, "row_applies": row["applies"], "row_judgement": row["judgement"],
+                                          **{k: mark[k] for k in ("applies", "judgement", "claimed", "flipped", "disputed")}}
+    return out
+
+
+def candidate_kind(eff: Mapping[str, Any], variants: Mapping[str, Mapping[str, Any]]) -> str | None:
+    """실효 판정 하나가 finding 후보가 되는 까닭 — flagged(실효 FAIL · WARNING) · split(실효 undetermined 이면서 변형이 갈렸다 —
+    X1-14) · unjudged_conflict(엔진이 부딪침을 알린 행인데 두 번째 판정이 없다 — 끝내 실패해 넘긴 셀, 갈림처럼 후보다. 반대 검토 2차
+    MEDIUM 2 · D-46). 아니면 None. `variants` 는 그 카드의 변형 → 판정 행이다. 보고서와 넘김의 걸림 셈이 같은 규칙을 쓴다."""
+    if eff["judgement"] in FLAGGED:
+        return "flagged"
+    if eff["judgement"] == "undetermined" and int(eff.get("split") or 0) == 1:
+        return "split"
+    if len(variants) == 1 and any(engine_conflict(r) for r in variants.values()):
+        return "unjudged_conflict"
+    return None
+
+
 def mark_effective(rows: Sequence[Mapping[str, Any]]) -> list[dict]:
     """판정 행 복사본에 `is_effective`(실효 변형 행만 1)·`agree`·`split`(그 카드의 행 전부)을 채운다 — 쓰기 직전에 부른다."""
     effective = effective_rows(rows)

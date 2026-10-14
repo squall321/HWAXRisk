@@ -375,8 +375,12 @@ def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Ma
         out.update({counted: len(changed), "not_failed": len(rows) - len(changed), "keys_total": len(keys),
                     "keys": keys[:DISPOSE_KEYS_MAX], "experts": len(agents), "changed": bool(changed)})
         if action == "skip":
-            # 넘긴 셀이 이미 정산된 걸림을 실었다 — 그 걸림은 보고서 · finding 에 남는다(반대 검토 MEDIUM 8 — 사용자 결정)
-            out["hits"] = sum(review_cells.cell_hits(store, target_key, c["unit_id"], c["agent_key"]) for c in changed)
+            # 넘긴 셀이 이미 정산된 걸림을 실었다 — 그 걸림은 검토한 셀처럼 보고서에 남고, 어디에 남는지를 갈래로 말한다(반대 검토
+            # MEDIUM 8 · 2차 MEDIUM 2 — D-46: card 점검표 · finding, conflict_mark 점검표, noinput_yes 입력 결손 절 · finding,
+            # noinput_unknown 입력 결손 절)
+            hits = [review_cells.cell_hits(store, target_key, c["unit_id"], c["agent_key"]) for c in changed]
+            out["hits_by"] = {k: sum(h[k] for h in hits) for k in review_cells.HIT_KINDS}
+            out["hits"] = sum(out["hits_by"].values())
         if not changed:
             out.update({"job": {"action": "none"}, "audit_id": None})
             return out

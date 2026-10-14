@@ -230,7 +230,7 @@ def test_skip_needs_a_reason_and_the_expert_closes_again_with_the_skip_in_the_re
     assert _head(store, key, PEER)["state"] == "ready" and _seat(store, key, PEER) == ("done_weak", "partial:1")
     report = expert_report.load_report(store, key, PEER)
     assert [u["why"] for u in report["scope"]["unseen"]] == [{"code": "skipped", "text": "입력이 와야 본다", "by": OWNER,
-                                                              "hits": 0}]
+                                                              "hits": 0, "hits_by": {k: 0 for k in review_cells.HIT_KINDS}}]
     assert routes.coverage_payload(key, owner_sub=OWNER)["review"]["dispositions"] == {"retried": 0, "skipped": 1}
     assert len(_audits(store, "cells.skip")) == 1
 
@@ -294,6 +294,44 @@ def test_the_selector_is_one_of_cells_or_filter_and_never_narrows_silently(store
 
 
 # ---------------------------------------------------------------- Claude 입구
+@pytest.mark.parametrize("case", ["split", "unjudged_conflict"])
+def test_a_skipped_cells_hits_are_exactly_what_its_report_carries(store, monkeypatch, case):
+    """반대 검토 2차 MEDIUM 2 · D-46 — 넘긴 셀의 걸림 셈은 검토한 셀이면 보고서가 실을 것과 같다. ① 변형이 갈려 실효 undetermined 인
+    카드(split)는 검토한 셀처럼 finding 후보다 — 종전 셈은 실효 FAIL · WARNING 만 보아 0 이라 점검표에도 finding 에도 없었다. ② 엔진이
+    부딪침을 알린 행인데 두 번째 판정을 끝내 못 받은 카드는 갈림처럼 후보다('다툼 표지 — 두 번째 판정 못 함') — 종전에는 셈이 1 이라
+    '점검표 · finding 에 남겼다' 고 말했지만 finding 은 0 이었다. 넘김 응답의 수와 보고서의 글이 실제로 실린 것과 같다."""
+    from app import expert_report, units
+
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    k01 = str(fre.load("pack_ok.json")["cards"][0]["record_id"])
+    fake = FakeReviewEngine(rig.packs())
+    if case == "split":                                  # fwd FAIL · rev OK · 단독 OK — 실효 OK 인데 걸린 변형이 있어 갈림
+        fake.verdicts, fake.rev_verdicts, fake.solo_verdicts = {k01: ("yes", "FAIL")}, {k01: ("yes", "OK")}, {k01: ("yes", "OK")}
+        fake.error_cells, fake.error_kinds = {(SEAL, unit_ids[0]): NO_ROWS}, {"offcard"}
+    else:                                                # fwd OK 에 부딪침 표지 — 두 번째 판정(rev)이 끝내 실패
+        monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_dual="flagged"))
+        fake.dup_conflict = {"K01"}
+        fake.contested = {"K01": {"verdict": ["yes", "FAIL"], "why": "같은 카드의 다른 답", "attempt": 1, "raw": "FAILED?"}}
+        fake.error_cells, fake.error_kinds = {(SEAL, unit_ids[0]): NO_ROWS}, {"verdict:rev"}
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": unit_ids[:1]})
+    rig.Rig(store, fake).finish(job_id)
+    assert _cells(store, key, SEAL)[unit_ids[0]]["state"] == "failed"
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": job_id}, reason="끝내 실패한 셀을 넘긴다"),
+                                 ident=ME)
+    assert (out["skipped"], out.get("hits"), (out.get("hits_by") or {}).get("card")) == (1, 1, 1)
+    rig.Rig(store, fake).finish(out["job"]["job_id"])
+    report = expert_report.load_report(store, key, SEAL)
+    rows = [r for c in report["checklist"] for r in c["rows"] if r.get("unit_id") == unit_ids[0] and not r.get("missing")]
+    held = [r for r in rows if r.get("finding_id")]
+    assert len(held) == 1 and held[0].get("partial_cell")
+    assert [f["unit_id"] for f in report["findings"]] == [unit_ids[0]]
+    md = expert_report.render_report_md(report)
+    assert "카드 판정 1건 — 점검표 · finding" in md
+    if case == "unjudged_conflict":
+        assert held[0].get("conflict_unjudged") and "다툼 표지 — 두 번째 판정 못 함" in md
+
+
 def test_risk_job_action_retries_and_skips_the_jobs_failed_cells_for_a_delegated_identity_only(store, monkeypatch):
     """새 도구 없이 risk_job_action 의 retry_failed·skip_failed 다. 그 잡이 찍은 셀이 기본 집합이고 filter 로 좁힌다. 위임 단언 없는
     Bearer 는 delegation_required, 감사 행은 channel mcp · actor_verified 0 이다."""

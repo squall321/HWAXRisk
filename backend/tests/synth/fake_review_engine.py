@@ -67,7 +67,8 @@
   sweep_k          unit_id → 별칭 목록 — 그 단위의 u 줄 k 를 실은 카드 전부가 아니라 이것만으로 낸다(카드 밖 호출이 훑기 k 에 걸린
                    배경 카드를 먼저 싣는지 — P-03, R3A-5)
   error_cells      (agent_key, unit_id) → error 프레임 — 그 셀의 run 은 늘 그 오류다(내용 탓이면 셀이 failed 로 간다, S11)
-  error_kinds      error_cells 를 이 종류(verdict · offcard · noinput)의 run 에만 건다(None 이면 전부 — 판정은 받고 카드 밖 호출만 실패)
+  error_kinds      error_cells 를 이 종류(verdict · offcard · noinput)의 run 에만 건다(None 이면 전부 — 판정은 받고 카드 밖 호출만 실패).
+                   'verdict:rev' 처럼 변형까지 주면 그 변형의 run 에만(두 번째 판정만 끝내 실패 — 반대 검토 2차 MEDIUM 2)
   truncate         (kind, variant, unit_id) → 'length' | 'repaired' | 'unknown' — 처음 맞는 run 한 번만: length 는 판정이면
                    truncated 처럼 마지막 판정 행을 빼고(행이 둘 이상인 호출에 건다 — 엔진은 남는 행이 0 이면 결과 대신
                    truncated_empty 를 낸다), 카드 밖이면 꼬리(more 줄)를 잃은 채 끝난 답이다(missing ['more'] · maybe_more null ·
@@ -510,7 +511,8 @@ class FakeReviewEngine:
             return self._stream(iter([_sse("status", {"step": "attempt", "n": 1}),
                                       _sse("error", {"code": "no_rows", "message": "훑기 줄이 하나도 없다(가짜)", "infra": False,
                                                      "retryable": False, "attempt": 1}), _sse("done", {})]))
-        if cell in self.error_cells and (self.error_kinds is None or body.get("kind") in self.error_kinds):
+        if cell in self.error_cells and (self.error_kinds is None or body.get("kind") in self.error_kinds
+                                          or f"{body.get('kind')}:{body.get('variant')}" in self.error_kinds):
             return self._stream(iter([_sse("status", {"step": "attempt", "n": 1}),
                                       _sse("error", {**self.error_cells[cell], "attempt": 1}), _sse("done", {})]))
         if self._take("error_n"):

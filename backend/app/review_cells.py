@@ -1325,20 +1325,30 @@ def retry_cells(store: Any, target_key: str, rows: Sequence[Mapping[str, Any]], 
     return changed
 
 
-def cell_hits(store: Any, target_key: str, unit_id: str, agent_key: str) -> int:
-    """그 셀에 이미 정산된 걸림 수(반대 검토 MEDIUM 8 — 넘긴 셀도 이것은 센다) — 실효 판정이 FAIL · WARNING 이거나 엔진이 부딪침 표지를
-    단 판정 행(카드마다 하나), 입력 결손 q1 의 영향 있음 · 모름."""
+HIT_KINDS: tuple[str, ...] = ("card", "conflict_mark", "noinput_yes", "noinput_unknown")
+
+
+def cell_hits(store: Any, target_key: str, unit_id: str, agent_key: str) -> dict:
+    """그 셀에 이미 정산된 걸림(반대 검토 MEDIUM 8 · 2차 MEDIUM 2 — D-46) — 검토한 셀이면 보고서에 실릴 것과 같은 셈이다.
+    card: finding 후보 카드(`review_verify.candidate_kind` — 실효 FAIL · WARNING · 변형 갈림 · 두 번째 판정을 못 한 부딪침 — 점검표와
+    finding), conflict_mark: 그 밖의 부딪침 표지 카드(점검표의 표지), noinput_yes: 입력 결손 영향 있음(입력 결손 절과 finding),
+    noinput_unknown: 영향 모름(입력 결손 절). n 은 합이다."""
     rows = [dict(r) for r in store.query(f"SELECT * FROM rr_card_verdicts WHERE {_cell_where()}", (target_key, unit_id, agent_key))]
-    effective = review_verify.effective_rows(rows) if rows else {}
-    marked = {str(r["record_id"]) for r in rows if review_verify.engine_conflict(r)}
-    hits = {rid for rid, mark in effective.items() if mark["judgement"] in review_verify.FLAGGED} | marked
+    variants: dict[str, dict[str, dict]] = {}
+    for row in rows:
+        variants.setdefault(str(row["record_id"]), {}).setdefault(str(row.get("variant") or "fwd"), row)
+    effective = review_verify.effective_view(rows)
+    card = {rid for rid, eff in effective.items() if review_verify.candidate_kind(eff, variants.get(rid) or {})}
+    marked = {str(r["record_id"]) for r in rows if review_verify.engine_conflict(r)} - card
     cell = _cell(store, target_key, unit_id, agent_key)
     try:
         extras = json.loads((cell or {}).get("extras_json") or "{}")
     except ValueError:
         extras = {}
-    q1 = ((extras.get("noinput") or {}) if isinstance(extras, dict) else {}).get("q1") or ()
-    return len(hits) + sum(1 for r in q1 if isinstance(r, dict) and r.get("impact") in ("yes", "unknown"))
+    q1 = [r for r in ((extras.get("noinput") or {}) if isinstance(extras, dict) else {}).get("q1") or () if isinstance(r, dict)]
+    out = {"card": len(card), "conflict_mark": len(marked), "noinput_yes": sum(1 for r in q1 if r.get("impact") == "yes"),
+           "noinput_unknown": sum(1 for r in q1 if r.get("impact") == "unknown")}
+    return {**out, "n": sum(out.values())}
 
 
 def skip_cells(store: Any, target_key: str, rows: Sequence[Mapping[str, Any]], *, decided_by: str, note: str,
