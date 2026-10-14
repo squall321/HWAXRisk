@@ -1212,3 +1212,27 @@ rebase 때 부딪치지 않게).
   `dual_neg` 칸을 더할 때 그 키를 덮지 않는다.
 - **하지 않은 것.** 'v5 는 재설계 M3 몫, 가지 `m3`, 블록 주인은 S3-1' 메모는 가지 `m3`(S3-0)가 쓴다 — 이 가지에도 두면 rebase 때
   같은 자리에서 부딪친다.
+
+### M3C-2. 코드 신호(C3-5) — 변경 → 메커니즘 표는 코드만으로 닫히고, 택소노미와는 한 이음매로 닿는다
+- **표.** `app/assets/change-routing.v1.json`(`change-routing-1.0`) — `codes` 97줄(의미 이벤트 39 · 노드 6 · 엣지 6가족 × 4 ·
+  접촉 범위 · 파라메트릭 27), `change_kinds` 14(택소노미 축 전부, `consistency`·`none` 은 null), `roles` 10(정규명 전부), `always` 빔.
+  사람이 훑을 표라 줄마다 `note` 로 까닭을 단다.
+- **승인 칸 이름은 `review_status`(값 `draft`)다.** M3.md 4.1·4.9 는 이 표의 칸을 `status` 로 적었다. 배정표(`mech-owners.v1.json`)와
+  같은 이름 · 같은 값(`draft`·`approved`)·같은 `reviewed_by`·`reviewed_at` 으로 두어, 사용자가 셋을 한 번에 훑고 승인 커밋이 두
+  파일의 같은 칸을 고치게 했다. 승인 문은 둘 다 `approved` 일 때만 연다(#40) — `relevance.routing_approved`.
+- **생산자 코드는 `codes` 만으로 푼다**(M3C-1 ①). 시험이 둘을 본다 — 생산자 입력 전부(syn3·40·150 · 무작위 대본 다섯 ·
+  `cross.bridge_stale` · diff_pairs 6쌍)의 항목 코드, 그리고 표를 읽지 않고 센 코드 공간(diff 스키마의 열거 + `diff.PARAM_RULES`).
+  모르는 버킷(`<layer>.<rest>`)과 표에 없는 코드는 접두에 삼켜지지 않고 '모름' 이다. 접두는 `param.material.*` 하나다 — 생산자가 새
+  재질 칸을 내도 재질 교체로 읽는다(정확 일치가 먼저라 E·rho·sigy·nu·mid·keyword·match_basis 는 따로다).
+- **롤업도 메커니즘이 있다.** `asm.rollup_changed`·`param.rollup` 은 전역 단위만이 아니라 그 조립 단위의 묶음에 탄다(units W2-01).
+  `[]`('설계 변경 아님')로 두면 롤업 줄만 남은 묶음이 코드 신호로 전 영역 무관이 된다 — 위상 요약(접합·접촉·공차·질량)으로 둔다.
+- **이음매.** 택소노미 1.2 의 읽는 함수(`domains_for` · `mech_owners_meta` · `load_taxonomy`)는 `relevance._taxonomy()` 한 곳에서
+  `app.taxonomy` 모듈로 닿고, 모든 함수가 `tax=` 로 대역을 받는다. 가지 `m3` 전에는 시험이 `TaxonomyDouble`(m3-synthesis 3.4 초안
+  52행)을 준다. rebase 하면 시험의 `tax` 픽스처만 `taxonomy` 로 바꾸고 대역과 그 픽스처 파일을 지운다 — 운영 코드는 그대로다.
+  `domains_for([코드])` 가 빈 dict 면 그 메커니즘은 배정표에 행이 없는 것으로 읽어 '모름'(`mech:<코드>`)이다.
+- **역할.** 이름을 정규화한 토큰의 **어느 자리에서든** 1~3토큰 창이 정규명이나 그 동의어면 그 역할이다(`ir_builder.name_norm_canon`
+  은 머리 토큰만 바꾼다 — `rear_cover` 의 `cover` 를 놓친다). 역할은 영역을 더하기만 한다. 씨앗 표에서 하나만 바꿨다 — `shield_can`
+  에 `rel` 을 더했다(EMI 의 소유가 rf·rel·pcb 다).
+- **초안이 넓다.** 배정표 초안과 곱하면 `mechanical.drop_stress`(소유 sim·mech, 관련 rel·disp·cam·xd·pcb)가 거의 모든 변경 줄에
+  있어 그 일곱 영역은 늘 '관련' 이다. syn40·syn150 의 묶음·경계 단위에서 코드 신호가 '무관' 인 영역은 mem·soc·std·sh·passive
+  쪽뿐이었다. 거르기의 절감은 이 표와 배정표를 사람이 훑는 데 달렸다(M3.md 8절 첫 줄) — 단계 A 끝에 이 수를 표와 함께 건넨다.
