@@ -102,7 +102,7 @@ def test_migrate_creates_v1_tables(risk_store, tmp_path):
         "pat_jti", "pat_exp", "revoked_at", "revoked_seen_at", "registered_at"}
     # 자동 등록 스위치·기록(리스크 앱 사람 자격 R1) — 버전 밖 살림 표라 v4 지문(PUSHED_DDL_SHA256)은 그대로다.
     assert _columns(db_path, "_user_prefs") == {
-        "owner_sub", "portal_pat_auto", "auto_source", "auto_at", "auto_error", "auto_error_at"}
+        "owner_sub", "portal_pat_auto", "auto_source", "auto_at", "auto_error", "auto_error_kind", "auto_error_at"}
     assert risk_store.schema_version() == LATEST
     # v1 표 41개는 그대로 있고 v2 가 더한 표가 뒤에 붙는다.
     assert set(DDL_TABLES) <= set(risk_store.tables())

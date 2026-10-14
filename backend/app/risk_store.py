@@ -840,8 +840,10 @@ _HOUSEKEEPING_DDL: list[str] = [
     "pat_sub TEXT, pat_email TEXT, pat_groups_json TEXT, pat_scopes_json TEXT NOT NULL, pat_jti TEXT NOT NULL, "
     "pat_exp INTEGER, revoked_at INTEGER, revoked_seen_at INTEGER, registered_at INTEGER)",
     "CREATE TABLE IF NOT EXISTS _user_prefs(owner_sub TEXT PRIMARY KEY, portal_pat_auto INTEGER NOT NULL DEFAULT 1, "
-    "auto_source TEXT, auto_at INTEGER, auto_error TEXT, auto_error_at INTEGER)",
+    "auto_source TEXT, auto_at INTEGER, auto_error TEXT, auto_error_kind TEXT, auto_error_at INTEGER)",
 ]
+# 자동 등록 실패의 갈래 — transient(잠깐 안 닿음·5xx: 짧게 쉬고 다시 바란다) · final(사람이 고쳐야 한다: 손잡이만큼 쉰다).
+AUTO_ERROR_KINDS: tuple[str, ...] = ("transient", "final")
 # 자동 등록 실패 글의 상한(자) — 이 글은 안내문(pat_unavailable·rr_jobs.error·risk_next_step)에 그대로 박힌다.
 AUTO_ERROR_MAX = 500
 
@@ -1113,37 +1115,41 @@ class RiskStore:
         """owner_sub 의 자동 등록 설정 — 행이 없으면 기본값(자동 켜짐, 기록 없음)이다. 읽기는 행을 만들지 않는다."""
         with self._lock:
             row = self.conn.execute(
-                "SELECT owner_sub, portal_pat_auto, auto_source, auto_at, auto_error, auto_error_at FROM _user_prefs"
-                " WHERE owner_sub = ?", (owner_sub,)).fetchone()
+                "SELECT owner_sub, portal_pat_auto, auto_source, auto_at, auto_error, auto_error_kind, auto_error_at"
+                " FROM _user_prefs WHERE owner_sub = ?", (owner_sub,)).fetchone()
         if row is None:
             return {"owner_sub": owner_sub, "portal_pat_auto": 1, "auto_source": None, "auto_at": None,
-                    "auto_error": None, "auto_error_at": None}
+                    "auto_error": None, "auto_error_kind": None, "auto_error_at": None}
         return dict(row)
 
     def set_portal_pat_auto(self, owner_sub: str, enabled: bool) -> None:
         """자동 등록 스위치(PUT /api/me/portal-pat-auto) — 기록 칸은 그대로 둔다."""
         self._upsert_prefs(owner_sub, "portal_pat_auto = excluded.portal_pat_auto",
-                           (owner_sub, 1 if enabled else 0, None, None, None, None))
+                           (owner_sub, 1 if enabled else 0, None, None, None, None, None))
 
     def note_portal_pat_registered(self, owner_sub: str, source: str, *, at: int | None = None) -> None:
         """등록 성공 — 출처(web·manual·gateway-exchange)와 시각을 적고 지난 실패를 지운다(지난 글이 성공 뒤에도 남지 않게)."""
         now = int(time.time()) if at is None else int(at)
         self._upsert_prefs(owner_sub, "auto_source = excluded.auto_source, auto_at = excluded.auto_at,"
-                                      " auto_error = NULL, auto_error_at = NULL",
-                           (owner_sub, 1, str(source), now, None, None))
+                                      " auto_error = NULL, auto_error_kind = NULL, auto_error_at = NULL",
+                           (owner_sub, 1, str(source), now, None, None, None))
 
-    def note_portal_pat_error(self, owner_sub: str, error: str, *, at: int | None = None) -> None:
+    def note_portal_pat_error(self, owner_sub: str, error: str, *, kind: str = "final", at: int | None = None) -> None:
         """자동 등록 실패 — 글은 제어 문자를 지우고 AUTO_ERROR_MAX 자에서 자른다(plain_note). 글은 앱이 고른 것이어야 한다 —
-        게이트웨이가 보낸 글은 받지 않는다(routes.auto_error_text). 등록된 PAT·지난 성공 기록은 건드리지 않는다."""
+        게이트웨이가 보낸 글은 받지 않는다(routes.auto_error_text). `kind` 는 AUTO_ERROR_KINDS 하나다(다시 바라기까지의 쉼을 가른다).
+        등록된 PAT·지난 성공 기록은 건드리지 않는다."""
+        if kind not in AUTO_ERROR_KINDS:
+            raise ValueError(f"자동 등록 실패 갈래는 {AUTO_ERROR_KINDS} 하나다 — {kind!r}")
         now = int(time.time()) if at is None else int(at)
-        self._upsert_prefs(owner_sub, "auto_error = excluded.auto_error, auto_error_at = excluded.auto_error_at",
-                           (owner_sub, 1, None, None, plain_note(error), now))
+        self._upsert_prefs(owner_sub, "auto_error = excluded.auto_error, auto_error_kind = excluded.auto_error_kind,"
+                                      " auto_error_at = excluded.auto_error_at",
+                           (owner_sub, 1, None, None, plain_note(error), kind, now))
 
     def _upsert_prefs(self, owner_sub: str, update_sql: str, values: tuple) -> None:
         with self._lock:
             self.conn.execute(
-                "INSERT INTO _user_prefs(owner_sub, portal_pat_auto, auto_source, auto_at, auto_error, auto_error_at)"
-                f" VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(owner_sub) DO UPDATE SET {update_sql}", values)
+                "INSERT INTO _user_prefs(owner_sub, portal_pat_auto, auto_source, auto_at, auto_error, auto_error_kind,"
+                f" auto_error_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(owner_sub) DO UPDATE SET {update_sql}", values)
             if self._tx_depth == 0:
                 self.conn.commit()
 

@@ -92,11 +92,27 @@ AUTO_ERROR_GENERIC = ("포털 PAT 를 자동으로 받지 못했다 — 웹 리�
                       " 운영자에게 알린다)")
 
 
+# 일시 오류 — 포털·게이트웨이가 잠깐 안 닿았거나 앞단이 5xx 로 답했다(portal_unreachable 은 등록 때 앱이 포털에 못 닿은 것). 이
+# 실패는 AUTO_RETRY_TRANSIENT_S 만 쉬고 다시 바란다 — HWAXRISK_PAT_AUTO_RETRY_S(기본 6시간)를 그대로 걸면 몇 초짜리 장애 하나로
+# 그 사람의 Claude 길 자동 등록이 반나절 멈춘다. 그 밖(포털 거절·등록 검사 실패)은 사람이 고쳐야 하므로 손잡이만큼 쉰다.
+TRANSIENT_AUTO_ERRORS: frozenset[str] = frozenset({"timeout", "unreachable", "bad_response", "portal_unreachable"})
+AUTO_RETRY_TRANSIENT_S = 600
+
+
+def auto_error_code(raw_code: Any) -> str:
+    """게이트웨이가 보낸 실패 code — 꼴(AUTO_ERROR_CODE)이 아니면 unknown."""
+    code = str(raw_code if raw_code is not None else "").strip()
+    return code if AUTO_ERROR_CODE.fullmatch(code) else "unknown"
+
+
+def auto_error_kind(code: str) -> str:
+    """실패의 갈래 — transient(TRANSIENT_AUTO_ERRORS · http_5xx) · final."""
+    return "transient" if code in TRANSIENT_AUTO_ERRORS or re.fullmatch(r"http_5\d\d", code) else "final"
+
+
 def auto_error_text(raw_code: Any) -> str:
     """게이트웨이가 보낸 실패 code → 적을 글 `<code>: <앱이 고른 글>`. code 가 꼴(AUTO_ERROR_CODE)이 아니면 unknown 이다."""
-    code = str(raw_code if raw_code is not None else "").strip()
-    if not AUTO_ERROR_CODE.fullmatch(code):
-        return f"unknown: {AUTO_ERROR_GENERIC}"
+    code = auto_error_code(raw_code)
     http = re.fullmatch(r"http_([1-5]\d\d)", code)
     if http:
         status = int(http.group(1))
@@ -117,7 +133,8 @@ def pat_due_reason(row: dict | None, *, now: int | None = None, cfg: Any | None 
 
 
 def portal_pat_auto(store: Any, email: str, row: dict | None) -> dict:
-    """GET /api/me 의 `portal_pat.auto` — {enabled, due, due_reason, last_source, last_at, last_error, last_error_at}.
+    """GET /api/me 의 `portal_pat.auto` — {enabled, due, due_reason, last_source, last_at, last_error, last_error_kind,
+    last_error_at}. last_error_kind 는 transient(짧게 쉬고 다시 바란다) · final(사람이 고쳐야 한다) · None.
 
     화면은 `enabled && due` 면 지금 버튼이 하는 일(포털 /auth/pat 발급 → PUT /api/me/portal-pat, source 'web')을 조용히 한 번 한다.
     """
@@ -125,7 +142,8 @@ def portal_pat_auto(store: Any, email: str, row: dict | None) -> dict:
     reason = pat_due_reason(row)
     return {"enabled": bool(prefs["portal_pat_auto"]), "due": reason is not None, "due_reason": reason,
             "last_source": prefs["auto_source"], "last_at": prefs["auto_at"],
-            "last_error": prefs["auto_error"], "last_error_at": prefs["auto_error_at"]}
+            "last_error": prefs["auto_error"], "last_error_kind": prefs["auto_error_kind"],
+            "last_error_at": prefs["auto_error_at"]}
 
 
 def portal_pat_wanted(store: Any, email: str, *, now: int | None = None) -> dict | None:
@@ -143,8 +161,11 @@ def portal_pat_wanted(store: Any, email: str, *, now: int | None = None) -> dict
     if reason is None:
         return None
     retry = config.pat_auto_retry_s()
-    if prefs["auto_error_at"] and now - int(prefs["auto_error_at"]) < retry:
-        return None
+    if prefs["auto_error_at"]:
+        # 일시 오류는 짧게 쉰다(손잡이가 그보다 짧으면 손잡이) — 사람이 고쳐야 하는 실패만 손잡이만큼 쉰다.
+        held = min(AUTO_RETRY_TRANSIENT_S, retry) if prefs["auto_error_kind"] == "transient" else retry
+        if now - int(prefs["auto_error_at"]) < held:
+            return None
     if reason == "expiring" and prefs["auto_at"] and now - int(prefs["auto_at"]) < retry:
         return None
     return json.loads(json.dumps(PORTAL_PAT_WANTED))         # 사본 — 호출자가 고쳐도 상수가 바뀌지 않게
@@ -370,9 +391,9 @@ def _gateway_portal_pat(email: str, body: Any) -> dict:
         raise AppError("portal_pat_auto_off", "이 사람은 포털 PAT 자동 등록을 껐습니다 — 등록하지도 적지도 않습니다.", 409)
     if body.get("error") is not None:
         # code 만 받는다 — message 는 읽지 않고 앱이 고른 글을 적는다(포털 거절 글·PAT 조각이 안내문에 박히지 않게).
-        text = auto_error_text(body["error"])
-        store.note_portal_pat_error(email, text)
-        log.info("포털 PAT 자동 등록 실패를 적었다 — %s (%s)", email, text.split(":", 1)[0])
+        code = auto_error_code(body["error"])
+        store.note_portal_pat_error(email, auto_error_text(code), kind=auto_error_kind(code))
+        log.info("포털 PAT 자동 등록 실패를 적었다 — %s (%s)", email, code)
         return {"registered": False, "recorded": True, "email": email}
     pat = body.get("pat")
     if not isinstance(pat, str) or not pat.strip():
@@ -380,7 +401,7 @@ def _gateway_portal_pat(email: str, body: Any) -> dict:
     try:
         out = _register_portal_pat(store, email, pat.strip(), source=GATEWAY_PAT_SOURCE, read_only=True)
     except AppError as exc:
-        store.note_portal_pat_error(email, f"register-{exc.code}: {exc.message}")
+        store.note_portal_pat_error(email, f"register-{exc.code}: {exc.message}", kind=auto_error_kind(exc.code))
         log.info("게이트웨이가 보낸 포털 PAT 를 등록하지 않았다 — %s (%s)", email, exc.code)
         raise
     log.info("포털 PAT 를 게이트웨이 교환으로 등록했다 — %s (exp %s, jti %s)", email, out["exp"], out["jti"])

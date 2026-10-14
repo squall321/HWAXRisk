@@ -41,7 +41,7 @@ def _clean() -> None:
 @pytest.fixture
 def box(monkeypatch):
     """heax 는 TOKEN 만 erin, 포털 /agent/conversations 는 portal_ok 에 따라 200/401, 게이트웨이 시크릿은 SECRET."""
-    log = {"portal": [], "portal_ok": True}
+    log = {"portal": [], "portal_ok": True, "portal_down": False}
 
     def heax(req: httpx.Request) -> httpx.Response:
         if req.headers.get("authorization") == f"Bearer {TOKEN}":
@@ -50,6 +50,8 @@ def box(monkeypatch):
 
     def portal(req: httpx.Request) -> httpx.Response:
         log["portal"].append(req.headers.get("authorization"))
+        if log["portal_down"]:
+            raise httpx.ConnectError("portal down", request=req)
         return httpx.Response(200 if log["portal_ok"] else 401, json={"conversations": []})
 
     monkeypatch.setattr(identity, "_transport", httpx.MockTransport(heax))
@@ -88,7 +90,7 @@ def test_me_says_a_pat_is_due_when_none_is_registered(client, box):
     pat = client.get("/api/me", headers=AUTH).json()["portal_pat"]
     assert pat["registered"] is False and pat["email"] is None
     assert pat["auto"] == {"enabled": True, "due": True, "due_reason": "absent", "last_source": None, "last_at": None,
-                           "last_error": None, "last_error_at": None}
+                           "last_error": None, "last_error_kind": None, "last_error_at": None}
     # 익명에는 자동 칸이 없다(누구의 것도 아니다).
     assert client.get("/api/me").json()["portal_pat"] is None
 
@@ -369,3 +371,50 @@ def test_what_embeds_the_last_error_carries_only_the_app_message(client, box):
     assert credential is None
     assert f"마지막 자동 등록 실패: widen_audience: {routes.AUTO_ERROR_TEMPLATES['widen_audience']}" in note
     assert "되울린" not in note and "eyJhbGciOi" not in note and "\x1b" not in note
+
+
+# ---------------------------------------------------------------- 일시 오류는 짧게 쉰다(BEH-4)
+def _age_last_error(seconds: int) -> None:
+    get_store().execute("UPDATE _user_prefs SET auto_error_at = ? WHERE owner_sub = ?", (now_epoch() - seconds, EMAIL))
+
+
+@pytest.mark.parametrize("code,kind", [
+    ("timeout", "transient"), ("unreachable", "transient"), ("bad_response", "transient"), ("http_500", "transient"),
+    ("http_503", "transient"), ("http_599", "transient"), ("http_404", "final"), ("source_expiring", "final"),
+    ("invalid_source", "final"), ("not a code", "final"),
+])
+def test_a_transient_exchange_failure_holds_the_ask_only_briefly(client, box, code, kind):
+    """잠깐 안 닿은 것(timeout·unreachable·bad_response·http_5xx)은 짧게(AUTO_RETRY_TRANSIENT_S) 쉬고 다시 바란다 — 6시간 쉼은 사람이
+    고쳐야 하는 실패(포털 거절)에만 건다. 갈래는 _user_prefs.auto_error_kind 에 남고 /api/me 가 싣는다."""
+    assert client.post("/api/auth/portal-pat", headers=GW, json={"error": code}).status_code == 200
+    assert get_store().get_user_prefs(EMAIL)["auto_error_kind"] == kind
+    assert _auto(client)["last_error_kind"] == kind
+    assert "portal_pat_wanted" not in _mint(client, GW)                         # 막 실패했다 — 어느 갈래든 쉰다
+    _age_last_error(routes.AUTO_RETRY_TRANSIENT_S - 30)
+    assert "portal_pat_wanted" not in _mint(client, GW)
+    _age_last_error(routes.AUTO_RETRY_TRANSIENT_S + 1)
+    assert ("portal_pat_wanted" in _mint(client, GW)) is (kind == "transient")
+    _age_last_error(config.pat_auto_retry_s() + 1)
+    assert "portal_pat_wanted" in _mint(client, GW)
+
+
+@pytest.mark.parametrize("down,kind", [(True, "transient"), (False, "final")], ids=["portal_unreachable", "pat_invalid"])
+def test_a_registration_that_cannot_reach_the_portal_is_transient(client, box, down, kind):
+    """등록 검사에서 앱이 포털에 못 닿은 것(portal_unreachable)은 일시 오류다 — 포털이 PAT 를 거절한 것(pat_invalid)은 아니다."""
+    box["portal_down"], box["portal_ok"] = down, False
+    r = client.post("/api/auth/portal-pat", headers=GW, json={"pat": _jwt()})
+    assert r.status_code == (502 if down else 422)
+    prefs = get_store().get_user_prefs(EMAIL)
+    assert prefs["auto_error"].startswith("register-portal_unreachable" if down else "register-pat_invalid")
+    assert prefs["auto_error_kind"] == kind
+    _age_last_error(routes.AUTO_RETRY_TRANSIENT_S + 1)
+    assert ("portal_pat_wanted" in _mint(client, GW)) is down
+
+
+def test_a_success_clears_the_error_kind(client, box):
+    client.post("/api/auth/portal-pat", headers=GW, json={"error": "timeout"})
+    assert client.post("/api/auth/portal-pat", headers=GW, json={"pat": _jwt()}).status_code == 200
+    prefs = get_store().get_user_prefs(EMAIL)
+    assert (prefs["auto_error"], prefs["auto_error_kind"], prefs["auto_error_at"]) == (None, None, None)
+    with pytest.raises(ValueError):
+        get_store().note_portal_pat_error(EMAIL, "x", kind="maybe")
