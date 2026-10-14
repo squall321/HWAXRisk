@@ -85,6 +85,22 @@ def test_another_persons_target_is_404_on_every_cell_route(reviewed, case):
         assert exc.http_status != 404, (case, exc.code)
 
 
+@pytest.mark.parametrize("case", sorted(CASES), ids=lambda c: f"{c[0]} {c[1][len(PREFIX):]}")
+def test_another_persons_target_answers_exactly_like_a_missing_target(reviewed, case, risk_store):
+    """반대 검토 LOW 17 — 남의 대상의 404 는 없는 대상의 404 와 같은 글이다(부른 사람이 준 대상 열쇠만 되돌린다). 종전에는 쓰기
+    경로가 '과제(<과제 id>) 를 찾을 수 없습니다' 로 답해 그 대상이 있다는 것과 과제 id 를 흘렸다."""
+    key, unit, _job = reviewed
+    project_id = risk_store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (key,))["project_id"]
+    call = CASES[case]
+    with pytest.raises(AppError) as theirs:
+        call(key, unit, factories.ident(OTHER))
+    with pytest.raises(AppError) as missing:
+        call("no-such-target", unit, factories.ident(OTHER))
+    assert project_id not in theirs.value.message
+    assert ((theirs.value.code, theirs.value.http_status, theirs.value.message.replace(key, "<key>"))
+            == (missing.value.code, missing.value.http_status, missing.value.message.replace("no-such-target", "<key>")))
+
+
 def _call(name: str, /, **kwargs) -> dict:
     out = getattr(srv, name)(**kwargs)
     return asyncio.run(out) if asyncio.iscoroutine(out) else out
@@ -109,3 +125,30 @@ def test_mcp_dispositions_and_reads_are_not_visible_outside_the_callers_scope(re
     factories.act_as_delegate(monkeypatch, OWNER)
     assert _call("risk_get_cells", target_key=key)["rows"]
     assert "error" not in _call("risk_job_action", job_id=job_id, action="retry_failed", reason="주인의 처분")
+
+
+def test_the_shared_write_gate_answers_strangers_like_missing_things_on_the_other_routes_too(risk_store, monkeypatch, tmp_path):
+    """반대 검토 LOW 17 — 쓰기 문(`_editable_target`)을 함께 쓰는 셀 밖 경로도 같은 규칙이다. 방식 바꾸기 · 보고서 다시 내기는 없는
+    대상과 같은 글이고, 대상 열쇠를 부른 사람이 주지 않은 쟁점 결정은 없는 쟁점과 같은 글이다(대상 열쇠 · 과제 id 를 흘리지 않는다)."""
+    from tests.test_issue_report_routes import _ledger
+
+    rig.configure(monkeypatch, risk_store, tmp_path, risk_issue_panel_cap=2, risk_issue_panel_hard_cap=2)
+    key = _ledger(risk_store, run_issues=False)
+    project_id = risk_store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (key,))["project_id"]
+    issue_id = risk_store.query_one("SELECT issue_id FROM rr_issues WHERE target_key = ? LIMIT 1", (key,))["issue_id"]
+    stranger = factories.ident(OTHER)
+    pairs = (
+        (lambda k: routes.post_target_flow(k, routes.FlowBody(to="panels", reason="남의 대상의 방식을 바꿔 본다"),
+                                           ident=stranger), key, "no-such-target"),
+        (lambda k: routes.post_report(k, routes.ReportBody(), ident=stranger), key, "no-such-target"),
+        (lambda k: routes.put_issue(k, routes.IssueActionBody(action="skip", reason="남의 쟁점을 건너뛰어 본다"),
+                                    ident=stranger), issue_id, "no-such-issue"),
+    )
+    for call, real, missing_id in pairs:
+        with pytest.raises(AppError) as theirs:
+            call(real)
+        with pytest.raises(AppError) as missing:
+            call(missing_id)
+        assert project_id not in theirs.value.message and (real == key or key not in theirs.value.message)
+        assert ((theirs.value.code, theirs.value.http_status, theirs.value.message.replace(real, "<id>"))
+                == (missing.value.code, missing.value.http_status, missing.value.message.replace(missing_id, "<id>")))

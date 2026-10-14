@@ -2732,6 +2732,17 @@ class UnitsBody(BaseModel):
     reason: str | None = Field(default=None, max_length=300)
 
 
+def _target_editor(target_key: str, project_id: str, email: str) -> None:
+    """대상 쓰기의 권한 — 그 과제의 editor 이상. 구성원이 아니면 없는 대상과 같은 404 다(그 대상이 있다는 것과 과제 id 를 흘리지
+    않는다 — 반대 검토 LOW 17). 등급 미달은 그대로 403 role_insufficient 다(구성원은 대상이 있는 것을 안다)."""
+    try:
+        require_role(project_id, email, "editor")
+    except AppError as exc:
+        if exc.http_status != 404:
+            raise
+        raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404) from None
+
+
 def _editable_target(target_key: str, ident: identity.Identity) -> tuple[str, dict]:
     """쓰기 문 — 잡을 세울 수 있는 사람(그 과제의 editor 이상, 관리자 우회)과 같다. (호출자 이메일, 타깃 행)."""
     email = _require_user(ident)
@@ -2740,7 +2751,7 @@ def _editable_target(target_key: str, ident: identity.Identity) -> tuple[str, di
     if row is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
     if not _is_admin(ident):
-        require_role(row["project_id"], email, "editor")
+        _target_editor(target_key, row["project_id"], email)
     return email, dict(row)
 
 
@@ -3047,7 +3058,7 @@ def post_undefer(target_key: str, body: UndeferBody, ident: identity.Identity = 
     if row is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
     if not _is_admin(ident):
-        require_role(row["project_id"], email, "editor")
+        _target_editor(target_key, row["project_id"], email)
     reason = _human_reason(body.reason)
     live = _live_jobs(store, target_key)
     if live:
@@ -3092,7 +3103,7 @@ def _dispose(target_key: str, ident: identity.Identity, *, action: str, cells: l
     if row is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
     if not _is_admin(ident):
-        require_role(row["project_id"], email, "editor")
+        _target_editor(target_key, row["project_id"], email)
     note = _human_reason(reason) if (reason is not None or force or action == "skip") else None
     rows = review_cells.select_cells(store, target_key, cells=cells, filter=filter)
     channel = AUDIT_CHANNELS.get(ident.source, "rest")
@@ -3318,7 +3329,13 @@ def put_issue(issue_id: str, body: IssueActionBody, ident: identity.Identity = D
     row = store.query_one("SELECT target_key, state FROM rr_issues WHERE issue_id = ?", (issue_id,))
     if row is None:
         raise AppError("E404", f"쟁점을 찾을 수 없습니다 — {issue_id}.", 404)
-    email, target = _editable_target(str(row["target_key"]), ident)
+    try:
+        email, target = _editable_target(str(row["target_key"]), ident)
+    except AppError as exc:
+        if exc.http_status != 404:
+            raise
+        # 남의 쟁점 — 없는 쟁점과 같은 답이다(대상 열쇠를 흘리지 않는다, 반대 검토 LOW 17 의 쓰기 문 변경을 따라).
+        raise AppError("E404", f"쟁점을 찾을 수 없습니다 — {issue_id}.", 404) from None
     if body.action not in ISSUE_ACTIONS:
         raise AppError("E100", f"action 은 {list(ISSUE_ACTIONS)} 가운데 하나다 — {body.action!r}.", 422)
     reason = body.reason.strip()
