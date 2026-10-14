@@ -403,16 +403,6 @@ def _mech_label(code: str) -> str:
     return code
 
 
-def issue_row(store: RiskStore, issue_id: str) -> dict | None:
-    rows = [r for r in issue_rows(store, _target_of(store, issue_id) or "") if r["issue_id"] == issue_id]
-    return rows[0] if rows else None
-
-
-def _target_of(store: RiskStore, issue_id: str) -> str | None:
-    row = store.query_one("SELECT target_key FROM rr_issues WHERE issue_id = ?", (issue_id,))
-    return str(row["target_key"]) if row is not None else None
-
-
 def anchor_row(store: RiskStore, target_key: str, anchor: str) -> dict | None:
     """닻 클러스터의 등록부 행(merged 를 푼 것)."""
     for row in registry.registry_rows(store, target_key):
