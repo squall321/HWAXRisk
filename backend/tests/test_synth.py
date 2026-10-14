@@ -389,3 +389,20 @@ def test_every_summary_write_stamps_updated_at(store):
     rows = store.query("SELECT updated_at, created_at FROM rr_summaries WHERE target_key = ?", (key,))
     assert rows and all(r["updated_at"] is not None and r["updated_at"] >= r["created_at"] for r in rows)
 
+
+def test_the_synth_done_report_states_its_own_level_not_stale_before_synthesis(store):
+    """M4(종합 몫) — 종합 판은 자기 판(synth_done)이 서기 전의 신선도로 표기를 셌다 → 모든 종합 판의 제목·머리가 '후속 낡음(종합
+    전)' 이었다. 판의 표기 = 판을 세운 뒤의 완결 표기다. 원장은 사슬이 끝까지 돈 것이다(쟁점 패널 → 종합 잡)."""
+    key = _ledger(store)
+    engine = IssuePanelEngine(store, {"*": {"severity": "치명", "judgement": "FAIL"}})
+    while (job := runner.claim_next_job(store, config.settings, engine=engine)) is not None:
+        runner.run_panel(store, config.settings, engine, job)
+    assert closure.refresh(store, key)["c2"] is True
+    assert _tick_until(synth.SynthWorker(store, config.settings, FakeSummaryEngine()), limit=120)[-1]["step"] == "completed"
+    report = synth.report_source(store, key)
+    assert report["trigger"] == "synth_done"
+    after = closure.refresh(store, key)
+    assert "후속 낡음(종합 전)" not in report["level_label"] and "후속 낡음(종합 전)" not in report["title"]
+    assert report["level_label"] == after["level_label"] and f"[{after['level_label']}]" in report["title"]
+    assert after["level_label"] in _page_text(report, "summary")
+

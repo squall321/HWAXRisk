@@ -798,44 +798,65 @@ def registry_hash(store: RiskStore, target_key: str) -> str:
 
 def assemble_report(store: RiskStore, target_key: str, *, trigger: str) -> dict:
     """보고서 판 하나 — 수는 같은 호출 안의 `closure.cell_counts` 한 벌(판정과 머리가 같은 값). 내용이 직전 판과 같으면 새 판을
-    만들지 않는다(`created: False`). 반환 {report_uid, version_no, pages_n, level_label, counts, narrative_state, created}."""
+    만들지 않는다(`created: False`). 반환 {report_uid, version_no, pages_n, level_label, counts, narrative_state, created}.
+
+    종합 판(synth_done)은 **자기 판이 선 뒤**의 완결 표기를 싣는다 — 같은 트랜잭션에서 지금 셀 지문의 판 행을 먼저 세우고 그 위에서
+    센다(종전에는 자기 판 전의 신선도로 세어 모든 종합 판의 표기가 '후속 낡음(종합 전)' 이었다, review1 M4)."""
     if trigger not in REPORT_TRIGGERS:
         raise AppError("E100", f"모르는 보고서 판 계기 — {trigger!r}. 허용 {list(REPORT_TRIGGERS)}.", 422)
     target = store.query_one("SELECT owner_sub, flow FROM rr_targets WHERE target_key = ?", (target_key,))
     if target is None:
         raise AppError("E404", f"타깃이 없습니다 — {target_key}.", 404)
-    counts = closure.cell_counts(store, target_key)
-    result = closure.close_level_cells(store, target_key, persist=True, counts=counts)
-    public = {k: v for k, v in counts.items() if not k.startswith("_")}
-    last = store.query_one("SELECT report_uid, version_no, content_hash, pages_n, level_label, narrative_state, counts_json"
-                           " FROM rr_reports WHERE target_key = ? ORDER BY version_no DESC LIMIT 1", (target_key,))
-    version_no = int(last["version_no"]) + 1 if last is not None else 1
-    built = build_report(store, target_key, closure_result=result, counts=counts, version_no=version_no)
-    # 판 번호를 뺀 내용으로 해시한다 — 같은 내용이면 판 번호만 다른 새 판을 만들지 않는다.
-    body_pages = json.loads(common.canonical_json(built["pages"]).replace(f"v{version_no} [", "v# ["))
-    content_hash = common.sha256_hex(common.canonical_json({"pages": body_pages, "counts": public,
-                                                            "label": result["level_label"]}))[:16]
-    if last is not None and last["content_hash"] == content_hash:
-        return {"report_uid": last["report_uid"], "version_no": last["version_no"], "pages_n": last["pages_n"],
-                "level_label": last["level_label"], "counts": _loads(last["counts_json"], {}),
-                "narrative_state": last["narrative_state"], "created": False}
-    heuristic = all(_str(r.get("evidence_grade")) == "경험칙" for r in registry.registry_rows(store, target_key)) and \
-        bool(registry.registry_rows(store, target_key))
-    title = ("[가설 단계] " if heuristic else "") + f"리스크 심사 보고서 v{version_no} [{result['level_label']}] — {target_key}"
-    uid = "rp-" + hashlib.sha1(f"{target_key}|{version_no}".encode()).hexdigest()[:16]
-    now = common.now_epoch()
-    store.execute(
-        "INSERT INTO rr_reports(report_uid, target_key, owner_sub, version_no, trigger, flow, level, level_label,"
-        " narrative_state, title, counts_json, closure_hash, cells_hash, registry_hash, summary_ids_json, pages_gz, pages_n,"
-        " content_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (uid, target_key, target["owner_sub"], version_no, trigger, target["flow"], result["level"], result["level_label"],
-         built["narrative_state"], title, common.canonical_json(public),
-         common.sha256_hex(common.canonical_json({"level": result["level"], "label": result["level_label"]}))[:16],
-         result["detail"]["cells_hash"], registry_hash(store, target_key), common.canonical_json(built["summary_ids"]),
-         gzip.compress(common.canonical_json(built["pages"]).encode("utf-8"), mtime=0), len(built["pages"]), content_hash,
-         now))
-    # 판이 섰다 — 신선도(종합까지 지금 지문으로 돌았나)가 바뀔 수 있으니 완결 캐시를 다시 쓴다.
-    closure.refresh(store, target_key)
+    with store.tx():
+        last = store.query_one("SELECT report_uid, version_no, content_hash, pages_n, level_label, narrative_state, counts_json"
+                               " FROM rr_reports WHERE target_key = ? ORDER BY version_no DESC LIMIT 1", (target_key,))
+        version_no = int(last["version_no"]) + 1 if last is not None else 1
+        uid = "rp-" + hashlib.sha1(f"{target_key}|{version_no}".encode()).hexdigest()[:16]
+        now = common.now_epoch()
+        provisional = trigger == "synth_done"
+        if provisional:
+            store.execute(
+                "INSERT INTO rr_reports(report_uid, target_key, owner_sub, version_no, trigger, flow, level, level_label,"
+                " narrative_state, title, counts_json, closure_hash, cells_hash, registry_hash, pages_gz, pages_n,"
+                " content_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, 'C0', '', 'none', '', '{}', '', ?, '', ?, 0, '', ?)",
+                (uid, target_key, target["owner_sub"], version_no, trigger, target["flow"],
+                 closure.closing_hash(store, target_key), gzip.compress(b"[]", mtime=0), now))
+        counts = closure.cell_counts(store, target_key)
+        result = closure.close_level_cells(store, target_key, persist=True, counts=counts)
+        public = {k: v for k, v in counts.items() if not k.startswith("_")}
+        built = build_report(store, target_key, closure_result=result, counts=counts, version_no=version_no)
+        # 판 번호를 뺀 내용으로 해시한다 — 같은 내용이면 판 번호만 다른 새 판을 만들지 않는다.
+        body_pages = json.loads(common.canonical_json(built["pages"]).replace(f"v{version_no} [", "v# ["))
+        content_hash = common.sha256_hex(common.canonical_json({"pages": body_pages, "counts": public,
+                                                                "label": result["level_label"]}))[:16]
+        if last is not None and last["content_hash"] == content_hash:
+            if provisional:
+                store.execute("DELETE FROM rr_reports WHERE report_uid = ?", (uid,))
+                closure.refresh(store, target_key)
+            return {"report_uid": last["report_uid"], "version_no": last["version_no"], "pages_n": last["pages_n"],
+                    "level_label": last["level_label"], "counts": _loads(last["counts_json"], {}),
+                    "narrative_state": last["narrative_state"], "created": False}
+        rows = registry.registry_rows(store, target_key)
+        heuristic = bool(rows) and all(_str(r.get("evidence_grade")) == "경험칙" for r in rows)
+        title = ("[가설 단계] " if heuristic else "") + f"리스크 심사 보고서 v{version_no} [{result['level_label']}] — {target_key}"
+        values = (result["level"], result["level_label"], built["narrative_state"], title, common.canonical_json(public),
+                  common.sha256_hex(common.canonical_json({"level": result["level"], "label": result["level_label"]}))[:16],
+                  result["detail"]["cells_hash"], registry_hash(store, target_key), common.canonical_json(built["summary_ids"]),
+                  gzip.compress(common.canonical_json(built["pages"]).encode("utf-8"), mtime=0), len(built["pages"]),
+                  content_hash)
+        if provisional:
+            store.execute(
+                "UPDATE rr_reports SET level = ?, level_label = ?, narrative_state = ?, title = ?, counts_json = ?,"
+                " closure_hash = ?, cells_hash = ?, registry_hash = ?, summary_ids_json = ?, pages_gz = ?, pages_n = ?,"
+                " content_hash = ? WHERE report_uid = ?", (*values, uid))
+        else:
+            store.execute(
+                "INSERT INTO rr_reports(report_uid, target_key, owner_sub, version_no, trigger, flow, level, level_label,"
+                " narrative_state, title, counts_json, closure_hash, cells_hash, registry_hash, summary_ids_json, pages_gz,"
+                " pages_n, content_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (uid, target_key, target["owner_sub"], version_no, trigger, target["flow"], *values, now))
+        # 판이 섰다 — 신선도(종합까지 지금 지문으로 돌았나)가 바뀔 수 있으니 완결 캐시를 다시 쓴다.
+        closure.refresh(store, target_key)
     return {"report_uid": uid, "version_no": version_no, "pages_n": len(built["pages"]), "level_label": result["level_label"],
             "counts": public, "narrative_state": built["narrative_state"], "created": True}
 
