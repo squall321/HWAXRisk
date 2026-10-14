@@ -678,6 +678,7 @@ def test_the_job_row_carries_its_scope_knobs_and_the_user_credential(store):
     assert (out["mode"], out["experts_in_scope"]) == ("reviews", 2)
     assert out["calls_estimate"] == review_runner.calls_estimate(
         {"card": out["cells_in_scope"], "gap": 0, "rank1": out["cells_in_scope"], "filterable": 0}, 2)
+    assert review_runner.box_k(store) == (8, "fallback")                     # 이 박스에 계획이 아직 없다 — k 는 8(C3-10)
     assert out["credential"]["kind"] == "owner" and out["credential"]["email"] == OWNER
     row = dict(store.query_one("SELECT * FROM rr_jobs WHERE id = ?", (out["job_id"],)))
     assert (row["mode"], row["tier"], row["state"], row["credential_email"], row["concurrency"]) == (

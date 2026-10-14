@@ -242,7 +242,8 @@ def test_a_contested_impact_stands_and_the_report_names_the_retraction_and_its_p
     assert json.loads(cell["extras_json"])["noinput"]["outcome"] == "impact"
     report = expert_report.load_report(store, key, MEM1)
     impact = report["input_gap"]["units"][0]["impacts"][0]
-    assert impact["contested"]["path"] == "보드 고정점 → 근접 계면" and impact["contested"]["l"] == ["L01"]
+    contested = impact.get("contested") or {}
+    assert (contested.get("path"), contested.get("l")) == ("보드 고정점 → 근접 계면", ["L01"])
     text = expert_report.render_report_md(report, part="units")
     assert ("검증된 철회가 이 영향을 다퉜다(영향은 선다) — «no» «결측 입력이 없어도 이 카드의 조건은 이 변경과 겹치지 않는다»"
             " · 경로 «보드 고정점 → 근접 계면»") in text

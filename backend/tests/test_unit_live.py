@@ -222,7 +222,8 @@ def test_content_failures_freeze_partial_and_schema_mismatches_never_call(store,
         del gw.schemas["compare_materials"]
     _ensure(store, key, gw)
     row = _row(store, key, _material_unit(store, key))
-    assert (row["status"], json.loads(row["gaps_json"])[0]["code"], len(gw.calls)) == ("partial", code, called)
+    gaps = json.loads(row["gaps_json"] or "[]")
+    assert (row["status"], [g["code"] for g in gaps], len(gw.calls)) == ("partial", [code], called)
 
 
 def test_infra_failures_are_not_frozen_and_back_off_doubling_until_the_sixth(store):

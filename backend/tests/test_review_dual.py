@@ -194,13 +194,14 @@ def test_a_flipped_row_gets_a_second_judgement_and_quality_splits_coerced_from_e
     """D-42 E — 보충이 갈아 낀 행(flipped_from 이 걸림 아닌 값으로 끝남)은 raw 가 있든 없든 두 번째 판정을 받는다. raw 는 품질 셈만
     가른다 — 어휘 밖 값을 엔진이 고친 것(coerced)과 판정을 바꾼 것(explicit)."""
     fake = FakeReviewEngine(_packs())
-    fake.flipped = {"K02": {"verdict": "FAIL", "attempt": 1}, "K03": {"verdict": "FAIL", "attempt": 1, "raw": "Fail"}}
+    fake.flipped = {"K02": {"verdict": ["yes", "FAIL"], "attempt": 1}, "K03": {"verdict": ["yes", "FAIL"], "attempt": 1},
+                    "K04": {"verdict": ["yes", "FAIL"], "attempt": 1, "raw": "Fail"}}
     key, _unit = _run(store, fake, agents=[MECH2])
     revs = [[c["alias"] for c in b["cards"]] for b in _runs(fake, MECH2, "rev")]
-    assert revs == [["K02", "K03"]]
+    assert revs == [["K02", "K03", "K04"]]
     quality = review_quality.compute(store, key, agent_key=MECH2)
-    assert {k: quality["flips"]["engine_conflict"][k] for k in ("coerced", "explicit")} == {"coerced": 1, "explicit": 1}
-    assert "어휘 밖 값을 고친 것 1 · 판정을 바꾼 것 1" in review_quality.block(store, key, agent_key=MECH2)["text"]
+    assert {k: quality["flips"]["engine_conflict"][k] for k in ("coerced", "explicit")} == {"coerced": 1, "explicit": 2}
+    assert "어휘 밖 값을 고친 것 1 · 판정을 바꾼 것 2" in review_quality.block(store, key, agent_key=MECH2)["text"]
 
 
 def test_inputs_the_engine_clipped_are_counted_in_quality(store):
@@ -263,3 +264,16 @@ def test_a_coerced_clash_an_alias_word_and_a_raw_flip_are_named_in_the_checklist
     assert "엔진 보충이 앞 판정 «yes»·«OK» 을 갈아 끼웠다(앞 판정은 어휘 밖 낱말 «통과됨» 을 고친 값)" in text
     assert "K02" in [c["alias"] for b in _runs(fake, MECH2, "solo") for c in b["cards"]] + [
         c["alias"] for b in _runs(fake, MECH2, "rev") for c in b["cards"]]                    # 부딪친 행은 두 번째 판정
+
+
+def test_the_order_flip_rate_counts_only_the_calibration_population_when_dual_is_flagged(store):
+    """걸린 것만 이중 판정(flagged)이면 순서 뒤집힘(flips.order)은 보정 모집단 — 1순위 전문가의 셀 — 만 센다(rq-2). 1순위 밖 전문가의
+    걸린 별칭 rev 도 fwd 와 견줄 수 있지만(agree) 그 표본은 걸린 카드로 치우쳐 분모에 넣지 않는다."""
+    fake = FakeReviewEngine(_packs())
+    fake.verdicts = {_record("K02"): ("yes", "FAIL"), _record("K03"): ("yes", "FAIL")}      # 걸린 둘 — 2순위도 rev 를 받는다
+    key, _unit = _run(store, fake, agents=[MECH1, MECH2])
+    agreed = {a: int(store.query_one("SELECT COUNT(*) AS n FROM rr_card_verdicts WHERE target_key = ? AND agent_key = ?"
+                                     " AND is_effective = 1 AND agree IS NOT NULL", (key, a))["n"]) for a in (MECH1, MECH2)}
+    assert agreed[MECH1] > 0 and agreed[MECH2] > 0                       # 둘 다 견줄 행이 있다 — 모집단이 갈린다
+    flips = review_quality.compute(store, key)["flips"]
+    assert (flips["order_population"], flips["order"]["den"]) == ("calibration", agreed[MECH1])

@@ -571,3 +571,64 @@ def test_a_restart_keeps_the_classification_and_never_reclassifies(store, monkey
     mine = [i for i, body in enumerate(runs) if (body.get("unit") or {}).get("unit_id") == b]
     assert mine and min(mine) > max(i for i, body in enumerate(runs) if (body.get("unit") or {}).get("unit_id") != b)
     assert review_cells.review_invariants(store, key) == []
+
+
+def test_a_low_floor_samples_one_cell_per_domain_and_a_later_miss_reopens_what_an_earlier_job_filtered(store, monkeypatch):
+    """보충 표본 바닥(C3-7)과 넓힘의 즉시 다시 열기 — 1순위가 다 닫힌 뒤(첫 잡) 바닥이 작으면(AUDIT_MIN_N 1 · 비율 0) 둘째 잡이 거른 셀
+    가운데 영역마다 한 건만 다시 열려 끝까지 판정되고 나머지는 거른 채 남는다. 완결 몫은 실제 바닥(59 — 거를 수 있던 셀 N 전부)에 못
+    미쳐 floor_met 이 거짓이다. 셋째 잡의 보충 표본이 같은 영역에서 걸림을 놓치면(입력 결손 셀의 영향 있음 → risk_miss) 둘째 잡이
+    거른 셀이 그 잡의 보충 표본이 아니라 넓힘으로 곧바로 다시 열린다(route_forced widened · pending — 다음 잡이 분류한다)."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    key = rig.target(store, ROSTER)
+    us = units.load_units(store, key)
+    boundary = next(u["unit_id"] for u in us if u["kind"] == "boundary")
+    b0, b1, b2 = (u["unit_id"] for u in us if u["kind"] == "bundle")
+    fake = _fake(ROSTER)
+    _quiet(fake, *(u["unit_id"] for u in us))
+    for u in us:                                                      # 입력 결손 호출은 '영향 없음 · 확인할 것 없음'
+        fake.noinput_q1[u["unit_id"]], fake.noinput_q2[u["unit_id"]] = ["no"], [""]
+    r = rig.Rig(store, fake)
+
+    def done(scope) -> str:
+        job_id = rig.job(store, key, scope=scope)
+        r.finish(job_id)
+        assert rig.state(store, job_id) == "completed"
+        return job_id
+
+    done({"agents": [STD1, MECH1, MEM1]})                             # 1순위가 먼저 다 닫힌다(8번 줄)
+    monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 1)
+    done({"agents": [STD2, MEM2], "unit_ids": [boundary, b0, b1]})
+    cells = _cells(store, key)
+    floor = [c for c in cells if c["route_forced"] == review_cells.FILTER_FLOOR]
+    assert sorted(c["domain"] for c in floor) == ["mem", "std"]       # 영역마다 한 건
+    left = [c for c in cells if c["state"] == "na_irrelevant"]
+    assert len(left) == 2 and {(c["agent_key"], c["domain"]) for c in left} == {(MEM2, "mem")}
+    monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 59)
+    audit = review_cells.closure_cells(store, key)["filtered"]["audit"]
+    assert (audit["n_audit"], audit["sampled"], audit["floor_met"]) == (4, 2, False)
+
+    monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 3)               # 셋째 잡의 바닥 — 그 잡이 거른 b2 한 건을 다시 연다
+    fake.noinput_q1[b2] = ["yes"]                                     # 끝까지 보니 영향 있음 — 거른 셀이 걸림을 놓쳤다
+    done({"agents": [MEM2], "unit_ids": [b2]})
+    audited = _cell(store, key, b2, MEM2)
+    assert (audited["route_forced"], audited["sample_json"]["filter_audit"]["result"]) == (review_cells.FILTER_FLOOR,
+                                                                                          "risk_miss")
+    assert "mem" in review_cells.widened_domains(store, key)
+    reopened = [_cell(store, key, c["unit_id"], c["agent_key"]) for c in left]
+    assert {(c["state"], c["route_forced"], c["reopened_n"]) for c in reopened} == {("pending", "widened", 1)}
+
+
+def test_a_filtered_cell_without_its_classification_record_breaks_the_invariant(store, monkeypatch):
+    """불변식 G8 — 거른 셀(na_irrelevant)은 거르기 분류가 거른 셀이다(route filtered · 분류 기록 route_json.rule). 기록이 빠진 거른 셀은
+    완결 몫의 불변식에 걸린다(그 대상은 완결을 막는다)."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    key, job_id, kinds, r, gate, fake = _filtered_mid_job(store, monkeypatch)
+    b = kinds["boundary"]
+    assert not any("(G8)" in p for p in review_cells.review_invariants(store, key))
+    store.execute("UPDATE rr_review_cells SET route_json = NULL WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+                  (key, b, STD2))
+    assert any("(G8)" in p for p in review_cells.closure_cells(store, key)["invariants"])
+    gate.set()
+    r.loop.join(30)
