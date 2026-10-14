@@ -75,7 +75,7 @@ def test_the_issue_list_has_the_contract_fields_filters_and_pages(store):
 
 
 def test_a_person_queues_an_untried_issue_or_skips_one_with_a_reason_and_an_audit_row(store):
-    """PUT /issues/{id} — 편집자 이상, 사유 필수(422), 편성·도는 쟁점은 409. queue 는 상한 밖 쟁점을 대기로 올리고 쟁점 잡을 세운다
+    """PUT /issues/{id} — 편집자 이상(남의 쟁점은 없는 쟁점과 같은 404), 사유 필수(422), 편성·도는 쟁점은 409. queue 는 상한 밖 쟁점을 대기로 올리고 쟁점 잡을 세운다
     (상한을 넘기는 사람의 결정), skip 은 skipped(완결 잔여 '미토의' 에 든다). 행위마다 rr_audit 한 행."""
     key = _ledger(store, run_issues=False)
     rows = issues.issue_rows(store, key)
@@ -89,7 +89,13 @@ def test_a_person_queues_an_untried_issue_or_skips_one_with_a_reason_and_an_audi
         with pytest.raises(AppError) as other:
             routes.put_issue(untried["issue_id"], routes.IssueActionBody(action="queue", reason="봐야 한다"),
                              ident=factories.ident(OTHER))
-        assert other.value.http_status == 404
+        with pytest.raises(AppError) as absent:
+            routes.put_issue("iss-000000000000", routes.IssueActionBody(action="queue", reason="봐야 한다"),
+                             ident=factories.ident(OTHER))
+        # 남의 쟁점은 없는 쟁점과 같은 답이다 — 과제 id · 대상 열쇠가 실리지 않는다.
+        assert (other.value.http_status, other.value.code) == (absent.value.http_status, absent.value.code) == (404, "E404")
+        assert other.value.message == absent.value.message.replace("iss-000000000000", untried["issue_id"])
+        assert _project(store, key) not in other.value.message and key not in other.value.message
         out = routes.put_issue(untried["issue_id"], routes.IssueActionBody(action="queue", reason="상한을 넘겨 본다"),
                                ident=factories.ident(OWNER))
         assert out["state"] == "queued" and out["job_id"]

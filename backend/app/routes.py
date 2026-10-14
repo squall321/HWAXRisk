@@ -3349,9 +3349,16 @@ def put_issue(issue_id: str, body: IssueActionBody, ident: identity.Identity = D
     없으면 잡을 세운다) · skip: 건너뛴다(skipped — 완결 잔여에 든다). rr_audit 한 행."""
     store = get_store()
     row = store.query_one("SELECT target_key, state FROM rr_issues WHERE issue_id = ?", (issue_id,))
+    missing = AppError("E404", f"쟁점을 찾을 수 없습니다 — {issue_id}.", 404)
     if row is None:
-        raise AppError("E404", f"쟁점을 찾을 수 없습니다 — {issue_id}.", 404)
-    email, target = _editable_target(str(row["target_key"]), ident)
+        raise missing
+    try:
+        email, target = _editable_target(str(row["target_key"]), ident)
+    except AppError as exc:
+        # 남의 과제의 쟁점은 없는 쟁점과 같은 답이다 — 쟁점 id 만 준 사람에게 과제 id 를 알리지 않는다(셀 꾸러미 risk_job_action 과 같은 규칙).
+        if exc.http_status == 404:
+            raise missing from None
+        raise
     if body.action not in ISSUE_ACTIONS:
         raise AppError("E100", f"action 은 {list(ISSUE_ACTIONS)} 가운데 하나다 — {body.action!r}.", 422)
     reason = body.reason.strip()
