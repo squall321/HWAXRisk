@@ -347,3 +347,17 @@ def test_a_review_that_closes_while_a_stage_waits_leaves_the_next_step_to_that_s
     rig.Rig(store, _fake()).finish(again["job"]["job_id"])
     assert [j["id"] for j in _jobs(store, key, "synth")] == [synth_job["id"]]
     assert _jobs(store, key, "synth")[0]["chain"]["rearmed_by"] == again["job"]["job_id"]
+
+
+def test_an_issue_job_that_ends_while_a_synthesis_waits_rearms_that_synthesis_instead_of_queuing_another(store):
+    """쟁점 잡이 끝날 때 아직 집히지 않은 종합 잡(사람이 다시 낸 보고서)이 있으면 새 종합 잡을 세우지 않고 그 잡이 지금 원장(쟁점
+    결과가 든 등록부 지문)으로 돈다는 표지를 단다."""
+    key = rig.target(store)
+    _review(store, key)
+    (issue_job,) = _jobs(store, key, "issues")
+    waiting = routes.post_report(key, routes.ReportBody(refresh_summaries=True), ident=factories.ident(OWNER))["job_id"]
+    _run_issue_jobs(store, IssuePanelEngine(store, {"*": {"severity": "치명", "judgement": "FAIL"}}))
+    (synth_job,) = _jobs(store, key, "synth")
+    assert synth_job["id"] == waiting
+    assert (synth_job["chain"]["rearmed_by"], synth_job["chain"]["registry_hash"]) == (issue_job["id"],
+                                                                                      synth.registry_hash(store, key))

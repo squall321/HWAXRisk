@@ -229,11 +229,12 @@ def test_row12_whole_circuit_domains_without_input_name_the_domains_at_c1_and_c2
 # ---------------------------------------------------------------- ⑬ 다시 열린 셀
 def test_row13_a_cell_reopened_after_the_selection_makes_the_issue_stage_stale_until_the_chain_runs_again(store):
     """⑬ 쟁점 선정 뒤 셀이 다시 열려 재검토에 들면 후속 낡음이다 — C2 가 거짓이고 표기에 '후속 낡음(재검토 1셀)'. 그 검토 잡이 끝나면
-    사슬이 지금 지문으로 다시 고르고 C2 로 돌아온다."""
+    사슬이 지금 지문으로 다시 고르고(새 사슬 잡이 그때의 다시 연 횟수를 얼린다) C2 로 돌아온다. 그 뒤 또 다시 열면 그 뒤의 것만 센다."""
     key = rig.target(store)
     _review(store, key)
     _issues(store)
-    assert closure.refresh(store, key)["level"] == "C2"
+    _synth(store)
+    assert closure.refresh(store, key)["c2"] is True
     made = _reopen(store, key, _cell(store, key, "xd-syn-1", state="reviewed"), start=True)
     stale = closure.refresh(store, key)
     assert (stale["c1"], stale["c2"]) == (True, False)
