@@ -473,6 +473,26 @@ def offcard_cut(result: Mapping[str, Any]) -> bool | None:
     return True if quality.get("truncated") is True else None
 
 
+def ctx_too_small_text(lim: Mapping[str, Any], small: Mapping[str, Any], runnable: Mapping[str, Any]) -> str:
+    """ctx_too_small 보류의 글 — 엔진이 그 까닭(`reason`)과 고칠 손잡이를 말한다(RB3-14): window(창이 모자라다 — 필요한 창
+    need_ctx_tokens, LLM 창 손잡이) · output_cap(출력 상한이 행 한 줄도 못 낸다 — 필요한 출력 상한 need_max_tokens) · output_too_large
+    (출력 상한이 창보다 크다 — 줄인다). 까닭이 없는 옛 엔진은 창 갈래로 읽는다."""
+    reason = str(small.get("reason") or "window")
+    head = (f"이 박스의 창 {int(lim.get('ctx_tokens') or 0):,} 토큰({lim.get('ctx_source')})으로는 카드 대조 호출을 짤 수 없다"
+            f"(까닭 {reason} · runnable {dict(runnable)})")
+    if reason == "output_cap":
+        need = small.get("need_max_tokens")
+        fix = (" — 출력 상한이 행 한 줄도 못 낸다(창을 키워도 소용없다). 에이전트 서버의 CARD_REVIEW_MAX_TOKENS(없으면"
+               " DELIB_MAX_TOKENS)를 " + (f"{int(need):,} 토큰 이상으로" if need else "") + " 올린 뒤 재개한다")
+    elif reason == "output_too_large":
+        fix = " — 출력 상한이 창보다 크다. 에이전트 서버의 CARD_REVIEW_MAX_TOKENS 또는 DELIB_MAX_TOKENS 를 줄인 뒤 재개한다"
+    else:
+        need = small.get("need_ctx_tokens")
+        fix = ((f" — 창이 {int(need):,} 토큰 이상인 LLM 이 필요하다" if need else "")
+               + f". 다시 쪼개지 않는다(D-22) — {CTX_KNOB}·VLLM_MODEL 을 고친 뒤 재개한다")
+    return f"{head}{fix}. {small.get('message') or ''}".rstrip()
+
+
 def _job_of(row: Mapping[str, Any]) -> dict:
     job = dict(row)
     job["params"] = _json(job.get("params_json"), {})
@@ -2120,12 +2140,8 @@ class ReviewLoop:
         cell_kinds = lim.get("cell_kinds") if isinstance(lim.get("cell_kinds"), list) else list(runnable)
         if lim.get("ctx_too_small") or any(runnable.get(k) is False for k in cell_kinds):
             small = lim.get("ctx_too_small") if isinstance(lim.get("ctx_too_small"), Mapping) else {}
-            need = small.get("need_ctx_tokens")
             for job in live:
-                self.hold(job["id"], "ctx_too_small", f"이 박스의 창 {int(lim.get('ctx_tokens') or 0):,} 토큰"
-                          f"({lim.get('ctx_source')})으로는 카드 대조 호출을 짤 수 없다(runnable {dict(runnable)})"
-                          + (f" — 창이 {int(need):,} 토큰 이상인 LLM 이 필요하다" if need else "")
-                          + f". 다시 쪼개지 않는다(D-22) — {CTX_KNOB}·VLLM_MODEL 을 고친 뒤 재개한다. {small.get('message') or ''}".rstrip())
+                self.hold(job["id"], "ctx_too_small", ctx_too_small_text(lim, small, runnable))
             self._forget_limits(email)
             return []
         if lim.get("ctx_retrying"):

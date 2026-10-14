@@ -739,6 +739,26 @@ def test_a_window_too_small_for_any_call_holds_ctx_too_small_before_any_call(sto
     assert f"{need:,}" in row["error"] and fake.runs == 0 and fake.calls("pack") == []
 
 
+@pytest.mark.parametrize(("reason", "words"), [
+    ("output_cap", ("까닭 output_cap", "CARD_REVIEW_MAX_TOKENS(없으면 DELIB_MAX_TOKENS)를 5,200 토큰 이상으로 올린")),
+    ("output_too_large", ("까닭 output_too_large", "출력 상한이 창보다 크다", "줄인 뒤 재개한다")),
+])
+def test_a_ctx_too_small_hold_names_its_reason_and_the_knob_to_fix(store, monkeypatch, reason, words):
+    """엔진의 ctx_too_small 까닭(RB3-14)마다 보류 글이 고칠 손잡이를 말한다 — 출력 상한이 행 한 줄도 못 내면 출력 상한을 필요한 값
+    이상으로 올리고(창을 키워도 소용없다), 출력 상한이 창보다 크면 줄인다. 창이 모자라면(window) 필요한 창과 창 손잡이다."""
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    limits = fre.load("limits_ctx_too_small.json")
+    limits["ctx_too_small"] = {"reason": reason, "need_ctx_tokens": None,
+                               "need_max_tokens": 5200 if reason == "output_cap" else None, "message": "엔진의 말(가짜)"}
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")}, limits=limits)
+    rig.Rig(store, fake).tick()
+    row = rig.job_row(store, job_id)
+    assert (row["state"], row["hold_code"]) == ("paused", "ctx_too_small")
+    assert all(w in row["error"] for w in words), row["error"]
+    assert "엔진의 말(가짜)" in row["error"] and fake.runs == 0
+
+
 def test_a_box_that_cannot_run_only_the_summary_keeps_reviewing_cells(store, monkeypatch):
     """ctx_too_small 은 셀이 부르는 종류(cell_kinds)만 본다 — 요약(summary)만 못 도는 박스는 셀 일을 멈추지 않는다(M3.md 4.3). 셀 종류
     하나라도 못 돌면 지금처럼 멈춘다."""
