@@ -3941,6 +3941,8 @@ def registry_payload(target_key: str, *, owner_sub: str | None = None, status: s
         rows = rows[: int(limit)]
     target = store.query_one("SELECT verdict_final FROM rr_targets WHERE target_key = ?", (target_key,))
     extra = {"next_offset": start + len(rows)} if truncated else {}
+    # 카드 인용은 판정당 200자(사용자 결정 1 — 반출과 같은 모양 규칙, 원래 길이는 <칸>_chars). REST · MCP 가 같은 답이다.
+    rows = [export_module._clip_card_text(export_module._export_view("rr_registry", dict(r))) for r in rows]
     return {"target_key": target_key, "rows": rows, "truncated": truncated, "total": total, **extra,
             "verdict_candidate": registry_module.verdict_candidate(store, target_key),
             # 후보는 코드가 내고 확정은 사람이 낸다(§8.2.4) — 화면 헤더가 둘을 한 응답에서 읽는다.
@@ -4825,8 +4827,9 @@ def claims_for_ref(ref: str, *, owner_sub: str | None = None, limit: int = 100,
     start = max(0, int(offset or 0))
     rows = get_store().query(sql + " ORDER BY r.claim_uid LIMIT ? OFFSET ?", (*params, int(limit) + 1, start))
     truncated = len(rows) > int(limit)
+    # card: 인용은 판정당 200자(사용자 결정 1 — 인용 역색인 반출과 같은 규칙, 원래 길이는 quote_chars)
     out = {"ref": info["ref"], "ref_type": info["kind"],
-           "claims": [dict(r) for r in rows[: int(limit)]], "truncated": truncated}
+           "claims": [export_module._export_view("rr_claim_refs", dict(r)) for r in rows[: int(limit)]], "truncated": truncated}
     if truncated:
         out["next_offset"] = start + int(limit)        # 상한 뒤를 이어 받는다(절단 전수 조사 M1)
     return out

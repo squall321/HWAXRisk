@@ -763,7 +763,7 @@ class FakeReviewEngine:
                 "nums_unsourced": [], "coerced": [],
                 "mech": "no_list" if not codes else "missing" if impact == "yes" and not mech else "ok", "why": "ok"})
             if spec:
-                row.update({k: v for k, v in spec[i].items() if k in ("title", "path", "flipped_from", "contested_by", "k")})
+                row.update({k: v for k, v in spec[i].items() if k in ("title", "path", "flipped_from", "contested_by", "k", "cq")})
             if alias and alias in self.contested:
                 row["contested_by"] = copy.deepcopy(self.contested[alias])
                 row["checks"]["dup_conflict"] = True

@@ -300,3 +300,23 @@ def test_a_flipped_or_contested_non_hit_q1_is_kept_and_named_as_such(store):
     assert "엔진 보충이 앞 답 «unknown» 을 갈아 끼웠다(앞 답은 어휘 밖 낱말 «모르겠음» 을 고친 값)" in text
     assert "같은 카드의 다른 답이 이 줄과 부딪쳤다(이 줄이 선다) — «yes» «다른 답은 영향 있음이라 했다»" in text
     assert "검증된 철회가 이 영향을 다퉜다" not in text
+
+
+def test_q1_and_contested_quotes_keep_the_200_character_cap_in_the_cell_payload_and_the_export(store):
+    """반대 검토 MEDIUM 11 — 카드 인용 200자 상한(사용자 결정 1)은 입력 결손 q1 의 cq 와 그 줄 · 판정 행에 실린 다툼(contested_by)의
+    cq 에도 걸린다 — 셀 하나 REST(cell_payload)와 반출에 원래 길이(<칸>_chars)와 함께 줄여 실린다."""
+    from app import export, routes
+    from tests import factories
+
+    long = fre.LONG_QUOTE
+    contested = {"verdict": ["no"], "cq": long, "why": "철회", "attempt": 2}
+    key, first, _fake = _one_gap_cell(store, [[{"impact": "yes", "title": "A", "cq": long, "contested_by": contested}]])
+    raw = json.loads(_cell(store, key, first, MEM1)["extras_json"])["noinput"]["q1"][0]
+    assert raw["cq"] == long and raw["checks"]["contested_by"]["cq"] == long          # 원장에는 원문 그대로다
+    payload = routes.get_cell(key, first, MEM1, ident=factories.ident(rig.OWNER))
+    shown = payload["cell"]["extras_json"]["noinput"]["q1"][0]
+    assert (len(shown["cq"]), shown["cq_chars"]) == (export.EXPORT_CQ_MAX, len(long))
+    assert (len(shown["checks"]["contested_by"]["cq"]), shown["checks"]["contested_by"]["cq_chars"]) == (
+        export.EXPORT_CQ_MAX, len(long))
+    exported = "".join(export.iter_lines(store, rig.OWNER, 0))
+    assert long not in exported and long[:export.EXPORT_CQ_MAX] in exported
