@@ -8,8 +8,8 @@ A 층(`units.evidence_lines` — 스냅샷 IR 동결본 발췌)은 네트워크�
 폴백은 없다, W2-03 (b)) → 그 쌍이 든 단위에 붙인다. LLM 이 인자를 짜지 않는다.
 
 규칙.
-- 인자 키는 게이트웨이 `tools/list` 의 inputSchema 와 대조한다 — 도구가 없거나 모르는 키·빠진 필수 키면 계획에서 빼고
-  `live_schema_mismatch` 로 적는다(W2-03 (c)).
+- 인자 키는 게이트웨이 `tools/list` 의 inputSchema 와 대조한다 — 모르는 키·빠진 필수 키면 계획에서 빼고 `live_schema_mismatch` 로
+  적는다(W2-03 (c)). 도구가 사용자 PAT 시야의 목록에 아예 없으면 부르지 않고 `live_denied` 다(#55 — 반대 검토 LOW 20).
 - 자격은 그 잡의 사용자 PAT 하나다(사용자 결정 3 — 서비스 계정으로 내려가지 않는다). 401 은 잡의 credential 보류(`CredentialRejected`).
 - 실패를 둘로 가른다(W2-04 (c)) — 내용 탓(오류 본문 `error` 키 · 스키마 · 403 · 도구 오류)은 그 호출만 빠진 채 `partial` 로 얼린다.
   인프라 탓(연결 · 5xx · 기한)은 얼리지 않고 `attempts + 1` · `not_before`(60초부터 두 배)로 다시 하고, 여섯 번째에 그 호출을
@@ -216,19 +216,20 @@ def _pid_index(*irs: Mapping[str, Any] | None) -> dict[str, set[str]]:
 
 # ---------------------------------------------------------------- 스키마 대조
 def schema_gap(tool: str, args: Mapping[str, Any], schemas: Mapping[str, Mapping[str, Any]],
-               names: Sequence[str]) -> str | None:
-    """인자가 게이트웨이 inputSchema 와 맞지 않으면 그 까닭(글), 맞으면 None — 도구가 없음 · 모르는 키 · 빠진 필수 키."""
+               names: Sequence[str]) -> tuple[str, str] | None:
+    """부를 수 없으면 (까닭 코드, 글), 맞으면 None — 도구가 사용자 PAT 시야에 없음(live_denied — #55) · 모르는 키 · 빠진 필수 키
+    (live_schema_mismatch)."""
     real = field_source._real_name(tool, names)
     if real not in schemas:
-        return f"게이트웨이에 {tool} 이 없다(사용자 PAT 시야)"
+        return DENIED, f"게이트웨이에 {tool} 이 없다(사용자 PAT 시야)"
     schema = schemas[real] if isinstance(schemas[real], Mapping) else {}
     props = schema.get("properties") if isinstance(schema.get("properties"), Mapping) else None
     if props is not None:
         unknown = sorted(set(args) - set(props))
         if unknown:
-            return f"모르는 인자 {unknown}"
+            return SCHEMA_MISMATCH, f"모르는 인자 {unknown}"
     missing = sorted(set(schema.get("required") or ()) - set(args))
-    return f"빠진 필수 인자 {missing}" if missing else None
+    return (SCHEMA_MISMATCH, f"빠진 필수 인자 {missing}") if missing else None
 
 
 # ---------------------------------------------------------------- 응답 → 줄
@@ -389,7 +390,7 @@ def ensure(store: Any, settings: Any, target_key: str, credential: Mapping[str, 
                 call = plan["calls"][key]
                 gap = schema_gap(call["tool"], call["args"], schemas, names)
                 if gap is not None:
-                    outcomes[key] = {"state": "content", "code": SCHEMA_MISMATCH, "note": gap}
+                    outcomes[key] = {"state": "content", "code": gap[0], "note": gap[1]}
                     continue
                 if halted := _halted(store, target_key, stop):
                     out["aborted"] = halted

@@ -208,12 +208,13 @@ def test_an_error_body_is_never_kept_as_success(store):
 @pytest.mark.parametrize("case, code, called", [
     ("http_403", unit_live.DENIED, 1),
     ("schema_key", unit_live.SCHEMA_MISMATCH, 0),
-    ("schema_tool", unit_live.SCHEMA_MISMATCH, 0),
+    ("schema_tool", unit_live.DENIED, 0),
     ("http_400", unit_live.ERROR_BODY, 1),
 ])
 def test_content_failures_freeze_partial_and_schema_mismatches_never_call(store, case, code, called):
-    """내용 탓 — 403(live_denied) · 4xx(live_error_body)는 그 호출만 빠진 채 얼고, 인자 키가 게이트웨이 inputSchema 에 없거나 도구가
-    없으면 계획에서 빼고 부르지 않는다(live_schema_mismatch — W2-03 (c))."""
+    """내용 탓 — 403(live_denied) · 4xx(live_error_body)는 그 호출만 빠진 채 얼고, 인자 키가 게이트웨이 inputSchema 에 없으면 계획에서
+    빼고 부르지 않는다(live_schema_mismatch — W2-03 (c)). 도구가 사용자 PAT 시야의 tools/list 에 아예 없으면 부르지 않고
+    live_denied 다(#55 — 반대 검토 LOW 20 · 사용자 결정)."""
     key = _target(store)
     gw = Gateway()
     if case.startswith("http_"):
