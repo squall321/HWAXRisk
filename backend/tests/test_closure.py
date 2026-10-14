@@ -252,3 +252,19 @@ def test_a_domain_whose_experts_answered_without_cards_has_no_depth(store):
     result = closure.close_level_cells(store, key, persist=False)
     assert result["detail"]["depth"]["sim"] == {"active": 2, "have": 0, "need": 2}
     assert _residual(result, "no_cards")["n"] == 1 and not _residual(result, "no_cards")["blocking"]
+
+
+def test_the_progress_board_reads_the_closure_cache_without_writing(store, monkeypatch, tmp_path):
+    """진행판(coverage_payload — MCP risk_get_coverage 와 같은 함수)은 캐시를 읽는다 — 캐시가 있으면 그 표기·잔여 그대로이고 원장을
+    다시 세지 않는다. 캐시 전이면 쓰지 않고 센다(읽기는 DB 를 바꾸지 않는다)."""
+    key = _full_grid(store, roster=CARD_ROSTER)
+    before = store.query_one("SELECT closure_json, level_label FROM rr_targets WHERE target_key = ?", (key,))
+    board = routes.coverage_payload(key, owner_sub=OWNER)
+    assert board["level_label"] == closure.close_level_cells(store, key, persist=False)["level_label"]
+    after = store.query_one("SELECT closure_json, level_label FROM rr_targets WHERE target_key = ?", (key,))
+    assert dict(after) == dict(before) and before["closure_json"] is None
+    cached = closure.refresh(store, key)
+    monkeypatch.setattr(closure, "cell_counts", lambda *_a, **_k: pytest.fail("진행판이 원장을 다시 셌다"))
+    board = routes.coverage_payload(key, owner_sub=OWNER)
+    assert (board["level"], board["level_label"]) == (cached["level"], cached["level_label"])
+    assert [q["item"] for q in board["qualifiers"]] == [q["item"] for q in cached["qualifiers"]]

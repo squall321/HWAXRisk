@@ -3024,7 +3024,10 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
     target = _target_row(target_key, owner_sub)
     store = get_store()
     summary = planner.coverage_summary(store, target_key)
-    level = registry_module.close_level(store, target_key, persist=False)
+    # 카드 대조 대상은 완결 캐시를 읽는다(M3 S3-8 · P-17-13 — 5초 폴링이 원장을 다시 세지 않게). 캐시 전이면 쓰지 않고 센다(읽기는
+    # DB 를 바꾸지 않는다).
+    level = ((closure_module.cached(store, target_key) or closure_module.close_level_cells(store, target_key, persist=False))
+             if target["flow"] == "cells" else registry_module.close_level(store, target_key, persist=False))
     # `job` 은 패널 잡이다(칸의 뜻 불변) — 카드 대조 검토 잡은 진행판의 제 칸(review)이 맡는다(재설계 M2 S6·S12).
     job = store.query_one(
         "SELECT id, tier, state, pause_reason, panels_done, panels_total, error, progress_json FROM rr_jobs"
@@ -3049,6 +3052,9 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
         "review": review_payload(store, target_key, target["flow"]),
         # RA·AIDataHub 반영 요약 — {ra|adh: {state, pending_ops, reason, message}}. 보내는 쪽이 아직 없다(sender_unwired, M4).
         "external_sync": ra_client.sync_summary(ra_client.parse_external_sync(target["external_sync_json"])),
+        # 완결 표기와 잔여(M3 S3-8) — 카드 대조 대상만 싣는다(패널 대상의 응답은 review 칸 하나만 더해진 그대로다, D-24).
+        **({"level_label": level.get("level_label") or level["level"], "qualifiers": list(level.get("qualifiers") or ())}
+           if target["flow"] == "cells" else {}),
     }
 
 
