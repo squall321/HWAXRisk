@@ -442,8 +442,13 @@ def _fresh(store: RiskStore, target_key: str, current: str) -> dict:
     baseline = chains[-1].get("reopened_n") if chains else None
     report = store.query_one("SELECT version_no, cells_hash, trigger FROM rr_reports WHERE target_key = ?"
                              " ORDER BY version_no DESC LIMIT 1", (target_key,))
+    # 종합 판은 셀 지문만이 아니라 등록부 지문(rr_reports.registry_hash)도 지금 것이어야 신선하다 — 종합 뒤 쟁점 결과가 바뀌면(사람이
+    # 올린 상한 밖 쟁점 따위) 셀은 그대로여도 그 판의 쟁점 표 · 서술은 옛 것이다(review1 M3).
+    from app import synth  # noqa: PLC0415 — synth 는 이 모듈을 쓴다.
+
     synthesized = store.query_one("SELECT 1 FROM rr_reports WHERE target_key = ? AND cells_hash = ? AND trigger = 'synth_done'"
-                                  " LIMIT 1", (target_key, current)) is not None
+                                  " AND registry_hash = ? LIMIT 1",
+                                  (target_key, current, synth.registry_hash(store, target_key))) is not None
     synth_version = store.query_one("SELECT MAX(version_no) AS v FROM rr_reports WHERE target_key = ? AND trigger = 'synth_done'",
                                     (target_key,))["v"]
     return {"issues": issues_fresh, "report": bool(report is not None and report["cells_hash"] == current and synthesized),

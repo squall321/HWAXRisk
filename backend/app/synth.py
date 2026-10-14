@@ -838,13 +838,15 @@ def assemble_report(store: RiskStore, target_key: str, *, trigger: str) -> dict:
         uid = "rp-" + hashlib.sha1(f"{target_key}|{version_no}".encode()).hexdigest()[:16]
         now = common.now_epoch()
         provisional = trigger == "synth_done"
+        reg_hash = registry_hash(store, target_key)
         if provisional:
+            # 신선도는 셀 지문과 등록부 지문을 함께 본다(closure._fresh — review1 M3) — 먼저 세우는 행도 둘 다 단다.
             store.execute(
                 "INSERT INTO rr_reports(report_uid, target_key, owner_sub, version_no, trigger, flow, level, level_label,"
                 " narrative_state, title, counts_json, closure_hash, cells_hash, registry_hash, pages_gz, pages_n,"
-                " content_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, 'C0', '', 'none', '', '{}', '', ?, '', ?, 0, '', ?)",
+                " content_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, 'C0', '', 'none', '', '{}', '', ?, ?, ?, 0, '', ?)",
                 (uid, target_key, target["owner_sub"], version_no, trigger, target["flow"],
-                 closure.closing_hash(store, target_key), gzip.compress(b"[]", mtime=0), now))
+                 closure.closing_hash(store, target_key), reg_hash, gzip.compress(b"[]", mtime=0), now))
         counts = closure.cell_counts(store, target_key)
         result = closure.close_level_cells(store, target_key, persist=True, counts=counts)
         public = {k: v for k, v in counts.items() if not k.startswith("_")}
@@ -865,7 +867,7 @@ def assemble_report(store: RiskStore, target_key: str, *, trigger: str) -> dict:
         title = ("[가설 단계] " if heuristic else "") + f"리스크 심사 보고서 v{version_no} [{result['level_label']}] — {target_key}"
         values = (result["level"], result["level_label"], built["narrative_state"], title, common.canonical_json(public),
                   common.sha256_hex(common.canonical_json({"level": result["level"], "label": result["level_label"]}))[:16],
-                  result["detail"]["cells_hash"], registry_hash(store, target_key), common.canonical_json(built["summary_ids"]),
+                  result["detail"]["cells_hash"], reg_hash, common.canonical_json(built["summary_ids"]),
                   gzip.compress(common.canonical_json(built["pages"]).encode("utf-8"), mtime=0), len(built["pages"]),
                   content_hash)
         if provisional:

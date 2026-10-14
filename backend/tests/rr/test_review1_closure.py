@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import pytest
 
-from app import closure, config, routes, runner, synth
+from app import closure, config, issues, routes, runner, synth
 from tests import factories
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
@@ -81,3 +81,22 @@ def test_a_domain_whose_carded_experts_meet_depth_is_not_blocked_by_its_cardless
     assert done["c2"] is True and done["level"] == "C3", done["level_label"]
     gap = next(q for q in done["qualifiers"] if q["item"] == "depth_no_cards")
     assert gap["blocking"] is False and gap["mixed"] == {"sim": 1} and "sim(그중 1명)" in gap["label"]
+
+
+def test_a_synthesis_older_than_the_issue_results_does_not_make_c3(store):
+    """M3 — 종합 판(synth_done)이 선 뒤에 사람이 상한 밖 쟁점을 올려 패널이 판정하면 등록부가 바뀐다 — 셀 지문은 그대로라도 그 종합
+    판은 낡았다(registry_hash). 확인을 다 해도 C3 가 아니고 '후속 낡음(보고서 판)' 이다. 새 종합이 서면 C3 다."""
+    key = _chained(store)
+    untried = [r for r in issues.issue_rows(store, key) if r["state"] == "untried_cap"]
+    assert untried
+    with factories.routes_store(store):
+        for issue in untried:
+            routes.put_issue(issue["issue_id"], routes.IssueActionBody(action="queue", reason="상한을 넘겨 본다"),
+                             ident=factories.ident(OWNER))
+    _issues(store)                                                     # 종합 잡이 사슬로 줄을 서지만 아직 돌지 않았다
+    stale = _ack_all(store, key)
+    assert stale["detail"]["fresh"]["report"] is False and stale["level"] != "C3"
+    assert "후속 낡음(보고서 판)" in stale["level_label"]
+    _synth(store)
+    fresh = _ack_all(store, key)
+    assert fresh["level"] == "C3" and fresh["detail"]["fresh"]["report"] is True
