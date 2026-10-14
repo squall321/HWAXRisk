@@ -1418,13 +1418,19 @@ PURGE_BLANK_SQL: tuple[tuple[str, str], ...] = (
                           " WHERE snapshot_id IN (SELECT id FROM rr_snapshots WHERE project_id = ?)"),
     ("rr_states", "UPDATE rr_states SET state_json = '', summary_text = NULL"
                   " WHERE snapshot_id IN (SELECT id FROM rr_snapshots WHERE project_id = ?)"),
-    ("rr_panels", "UPDATE rr_panels SET decision_text = NULL, risk_spec_json = NULL, brief_gz = NULL"
+    # 패널의 엔진 결과 원문(result_gz — 결정문 · 좌석 발언 · 근거가 든다, 다시 저장용)도 비운다(재설계 M3 review1 — 폐기 전에 적힌
+    # 원문이 남았다). 해시(result_hash)는 남는다.
+    ("rr_panels", "UPDATE rr_panels SET decision_text = NULL, risk_spec_json = NULL, brief_gz = NULL, result_gz = NULL"
                   " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_panel_calls", "UPDATE rr_panel_calls SET result_gz = NULL"
                        " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_seat_opinions", "UPDATE rr_seat_opinions SET opinion_json = '', excerpt_for_rag = NULL"
                          " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_findings", "UPDATE rr_findings SET finding_json = '' WHERE project_id = ?"),
+    # 등록부 행의 병합 본문 — 대표 주장 · 근거 문장 · 인용(카드 인용 포함) · 쟁점 패널 덮어쓰기 앞 값이 든다(review1 M7). NOT NULL 이라
+    # 빈 객체로 비운다 — 판정 열(심각도 · 판정 · 지지 수)과 행은 남는다.
+    ("rr_registry", "UPDATE rr_registry SET merged_json = '{}'"
+                    " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     # 인용 역색인의 인용 글 — finding_json 의 cites 와 같은 글이다(패널 finding 의 인용, 카드 대조 finding 의 card: 인용 — 카드 원문
     # 그대로, M2.md 5절 #18). 행·참조·원래 길이(quote_chars)는 남는다.
     ("rr_claim_refs", "UPDATE rr_claim_refs SET quote = NULL"

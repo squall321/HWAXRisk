@@ -6,6 +6,7 @@ cover_too_large. 행에 R001… 별칭을 매기고 결과 줄의 refs 를 되�
 대본(`script`) — 범위 key(영역 코드 · '-') 또는 '*' → 하나:
   'ok' · 'missing'(첫 must_cover 를 risk 줄에서 빼고 missing 에 싣는다 — 다시 물어도 같다) · 'missing_once'(첫 호출만) ·
   'nums'(para 줄에 출처 없는 수) · 'outside'(입력 밖 참조를 싣는다) · 'clipped'(meta.clipped 를 싣는다) · 'over_budget' ·
+  {'para': '<글>'}(서술 줄을 그 글로 — 서기가 행 글을 옮겨 적은 서술) ·
   예외 인스턴스(그대로 올린다 — 인프라·내용 탓 시험)
 `runnable` 이 거짓이면 limits 의 runnable.summary=false. `drain` 은 None 이거나 {'on', 'scope'}.
 기록 — requests(받은 본문 전부).
@@ -70,6 +71,8 @@ class FakeSummaryEngine:
             para["text"] += " — 999건이 겹친다"
         if plan == "outside":
             para["refs"].append("reg:ffffffffffff")
+        if isinstance(plan, dict) and plan.get("para"):
+            para["text"] = str(plan["para"])
         out_rows.append(para)
         # 결과의 칸은 엔진 계약 예제(result_summary_ok · _missing — 엔진 c4e4823)와 같은 모양이다(C14 — tests/test_summary_contract.py).
         meta = {"model": "fake-sum", "ctx_tokens": 1_048_576, "ctx_source": "server", "prompt_rev": PROMPT_REV,

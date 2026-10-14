@@ -6,7 +6,8 @@
   {"severity": "치명"|"중대"|"경미", "judgement": "FAIL"|"WARNING"|"OK"|"undetermined",
    "direction": "risk"|"improvement", "status": "open"|"rejected_in_panel", "detail": None(닻 그대로)|"<다른 세부>",
    "subject": None(닻 그대로)|"other" — 다른 이벤트의 주체(닻에 붙지 않는 원자),
-   "also": [{"severity", "judgement"}, …] — 같은 닻에 원자를 더 낸다(F2… — 같은 주체·변경·인용, 판정만 다르다)}
+   "also": [{"severity", "judgement"}, …] — 같은 닻에 원자를 더 낸다(F2… — 같은 주체·변경·인용, 판정만 다르다),
+   "card_quote": {"ref": "card:<record_id>#<sid>", "quote": "<글>"} — 좌석이 카드 절을 옮겨 적은 인용(근거 문장 «» 에도 싣는다)}
   "unparseable" — 결정문에 JSON 이 없다(파싱 실패)
   예외 인스턴스 — 그대로 올린다(러너 실패 표 시험)
 `drain` 이 참이면 `drain_state()` 가 비우는 중이라 답한다. `calls` 는 받은 delib_opts 전부다.
@@ -85,8 +86,12 @@ class IssuePanelEngine:
             "trigger_condition": "none", "severity": plan["severity"], "judgement": plan["judgement"],
             "detectability": {"level": "sim-detectable", "tool": "report_part_risk"},
             "evidence_grade": "도구예측", "precedent": "none",
-            "cites": [{"ref": event["cid"], "quote": event["text"]}], "tool_calls": [],
-            "claim": "쟁점 패널이 닻 클러스터를 다시 본 결과다.", "warrant": "변경 줄이 그 메커니즘의 조건을 바꾼다.",
+            "cites": [{"ref": event["cid"], "quote": event["text"]}] + ([dict(plan["card_quote"])] if plan.get("card_quote")
+                                                                          else []),
+            "tool_calls": [],
+            "claim": "쟁점 패널이 닻 클러스터를 다시 본 결과다.",
+            "warrant": ("변경 줄이 그 메커니즘의 조건을 바꾼다." + (f" 근거 카드 «{plan['card_quote']['quote']}»"
+                                                               if plan.get("card_quote") else "")),
             "resolving_check": {"kind": "sim", "ref": "낙하 해석 재실행"}, "owner_domain": seat.split("-", 1)[0],
             "raised_by": [seat], "contested_by": (["delib-baseline-defender"] if plan["status"] == "rejected_in_panel"
                                                  else []),
