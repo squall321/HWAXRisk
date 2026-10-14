@@ -95,8 +95,12 @@ class IssuePanelEngine:
             "findings": [finding] if plan["direction"] == "risk" else [],
             "gains": [finding] if plan["direction"] == "improvement" else [],
             "cross_domain": [], "open_items": [],
+            # 성격 진술 하나 — 쟁점 패널은 이것을 앉히지 않는다(rr_character 무접촉, WP4 3.7).
             "character": {"one_liner": "쟁점 하나의 재심.",
-                          "facets": [{"facet": f, "statements": [], "na_reason": "좌석 미기재"} for f in facets]},
+                          "facets": [{"facet": f, "statements": ([{"id": "s1", "text": "두께를 늘리는 개정이 잦다.",
+                                                                    "tags": [], "cites": [], "by": [seat]}]
+                                                                  if f == "lineage" else []),
+                                      "na_reason": "" if f == "lineage" else "좌석 미기재"} for f in facets]},
             "coverage": {"seats": [{"key": k, "domain": k.split("-", 1)[0], "origin": "primary"} for k in seats],
                          "domains_seated": sorted({k.split("-", 1)[0] for k in seats}), "domains_missing": []},
             "verdict": "undetermined", "verdict_conditions": [],

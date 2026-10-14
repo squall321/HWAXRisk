@@ -120,6 +120,8 @@ def test_an_issue_panel_runs_off_the_ledger_and_upholds_the_anchor_without_touch
     cycles = {r["cycle"] for r in store.query("SELECT cycle FROM rr_seat_opinions WHERE panel_id = ?",
                                               (results[0]["panel_id"],))}
     assert cycles and all(c > 100000 for c in cycles)
+    assert store.query_one("SELECT COUNT(*) AS n FROM rr_character WHERE id LIKE ?",
+                           (f"{results[0]['panel_id']}#%",))["n"] == 0       # 성격 진술을 앉히지 않는다
     done = _issue(store, key, anchor)
     assert (done["state"], done["outcome"]) == ("resolved", "upheld")
     row = _row(store, key, anchor)
@@ -333,6 +335,17 @@ def test_three_engine_errors_in_a_row_fail_the_job_and_leave_the_rest_untried(st
     rows = issues.issue_rows(store, key)
     assert {(r["state"], r["state_reason"]) for r in rows if r["rank"] <= 2} == {("untried_cap", "engine_fail")}
     assert all(r["charged"] == 0 for r in rows)
+
+
+def test_a_cancelled_issue_job_leaves_the_waiting_issues_untried(store, monkeypatch, tmp_path):
+    """3.7 — 사람이 취소한 쟁점 잡 뒤에는 잇지 않는다. 남은 대기 쟁점은 untried_cap(chain_cancelled) 이다(지우지 않는다)."""
+    key, unit_ids = _ledger(store, units_n=2)
+    _select(store, monkeypatch, tmp_path, key, cap=2)
+    job = issues.create_issues_job(store, key, owner_sub=OWNER, requester_sub=OWNER)
+    runner.cancel_job(store, job["job_id"], by=OWNER)
+    rows = [r for r in issues.issue_rows(store, key) if r["rank"] <= 2]
+    assert {(r["state"], r["state_reason"]) for r in rows} == {("untried_cap", "chain_cancelled")}
+    assert store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job["job_id"],))["state"] == "cancelled"
 
 
 def test_a_result_that_failed_to_persist_keeps_the_issue_running_until_the_repersist_resolves_it(store, monkeypatch,
