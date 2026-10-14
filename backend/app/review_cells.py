@@ -1349,8 +1349,8 @@ def closure_cells(store: Any, target_key: str) -> dict:
     {grid{roster, units, expected, actual}, by_state, by_basis(검토 셀의 바탕 + 거른 셀 filtered), failed{open, by_code},
     skipped{n, experts, by_note[{note, n, by}]}, filtered{n, would_filter, by_domain{d: {filtered, audited}}, audit{sampled, pending,
     n_audit, floor_met, risk_miss, relevance_miss, undetermined, kept, upper95, upper95_conservative}, shadow{would_filter, sampled,
-    risk_miss, upper95}, widened[], off}, no_input{experts, cells, by_outcome}, undetermined{rows, cells}, out_of_scope_pending,
-    invariants[]}. 표본 바닥(`n_audit = max(ceil(audit_pct% × N), min(N, 59))` · 영역마다 1건)의 비율은 가장 최근 검토 잡의 것이다."""
+    risk_miss, upper95}, widened[], off}, no_input{experts, cells, by_outcome}, undetermined{rows, cells},
+    no_cards{experts, cells, by_basis{role_only, search_only, search_failed}}, out_of_scope_pending, invariants[]}. 표본 바닥(`n_audit = max(ceil(audit_pct% × N), min(N, 59))` · 영역마다 1건)의 비율은 가장 최근 검토 잡의 것이다."""
     import math  # noqa: PLC0415
 
     active = set(active_unit_ids(store, target_key))
@@ -1362,7 +1362,8 @@ def closure_cells(store: Any, target_key: str) -> dict:
         " json_extract(sample_json, '$.filter_audit.result') AS audit_result,"
         " json_type(sample_json, '$.shadow') IS NOT NULL AS shadowed,"
         " json_extract(sample_json, '$.shadow.result') AS shadow_result,"
-        " json_extract(extras_json, '$.noinput.outcome') AS noinput_outcome"
+        " json_extract(extras_json, '$.noinput.outcome') AS noinput_outcome,"
+        " json_extract(extras_json, '$.offcard.search.search_failed') AS search_failed"
         " FROM rr_review_cells WHERE target_key = ?", (target_key,)) if r["unit_id"] in active]
     by_state = Counter(r["state"] for r in rows)
     by_basis = Counter(r["basis"] for r in rows if r["state"] == "reviewed")
@@ -1393,6 +1394,9 @@ def closure_cells(store: Any, target_key: str) -> dict:
         " AND (applies = 'unknown' OR judgement = 'undetermined')", (target_key,))
     held = [r for r in held if r["unit_id"] in active]
     job_id = job["id"] if job is not None else None
+    cardless = {str(r["agent_key"]) for r in store.query(
+        "SELECT agent_key FROM rr_expert_reports WHERE target_key = ? AND card_basis = 'none'", (target_key,))}
+    seen = [r for r in rows if r["agent_key"] in cardless and r["state"] == "reviewed"]
     return {
         "grid": {"roster": len(roster), "units": len(active), "expected": len(roster) * len(active), "actual": len(rows)},
         "by_state": {s: by_state.get(s, 0) for s in CELL_STATES},
@@ -1413,6 +1417,11 @@ def closure_cells(store: Any, target_key: str) -> dict:
         "no_input": {"experts": len({r["agent_key"] for r in gap}), "cells": len(gap),
                      "by_outcome": {o: sum(1 for r in gap if r["noinput_outcome"] == o) for o in NOINPUT_OUTCOMES}},
         "undetermined": {"rows": len(held), "cells": len({(r["unit_id"], r["agent_key"]) for r in held})},
+        # 카드 0장 전문가(D-35 · #38 · #39)의 검토 셀 — 역할만 · 긴 문서 발췌 · 검색을 못 물은 채 역할만(search_failed, role_only 의 일부)
+        "no_cards": {"experts": len(cardless), "cells": len(seen),
+                     "by_basis": {"role_only": sum(1 for r in seen if r["basis"] == "role_only"),
+                                  "search_only": sum(1 for r in seen if r["basis"] == "search_only"),
+                                  "search_failed": sum(1 for r in seen if r["search_failed"])}},
         "out_of_scope_pending": sum(1 for r in rows if r["state"] == "pending" and r["run_id"] != job_id),
         "invariants": review_invariants(store, target_key),
     }
