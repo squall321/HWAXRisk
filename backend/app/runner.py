@@ -72,10 +72,13 @@ BRIEF_TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (sqlite3.OperationalEr
 PERSIST_ERROR_CODE = "persist_error"
 # 사람이 다시 저장을 포기한 패널(`…/repersist?discard=1`) — 엔진 결과는 패널에 남고 좌석은 다음 패널에서 다시 돈다.
 PERSIST_ABANDONED_CODE = "persist_abandoned"
+# 자격(사용자 PAT)이 없어 시작하지 못한 쟁점 패널 — 잡은 보류 credential 로 멈춘다(재설계 M3 review1 M1).
+CREDENTIAL_HOLD_CODE = "credential_hold"
 # 좌석 재시도와 연속 실패(ENGINE_FAIL_STREAK)에 세지 않는 패널 error 코드 — 좌석 탓이 아닌 중단이다. 세면 좌석과
 # 무관한 일 세 번에 그 좌석이 skipped 로 굳고 잡이 죽는다.
 UNCHARGED_CODES: tuple[str, ...] = (*STREAM_LOST_CODES, RESTART_CODE, *NO_DECISION_CODES, *UNSTARTED_CODES,
-                                    BRIEF_ERROR_CODE, BRIEF_RETRY_CODE, PERSIST_ERROR_CODE, PERSIST_ABANDONED_CODE)
+                                    BRIEF_ERROR_CODE, BRIEF_RETRY_CODE, PERSIST_ERROR_CODE, PERSIST_ABANDONED_CODE,
+                                    CREDENTIAL_HOLD_CODE)
 # 다시 저장을 기다리는 타깃의 잡이 줄에서 기다리는 까닭(잡 행 error) — 집으면 지운다.
 REPERSIST_PENDING_CODE = "repersist_pending"
 PROGRESS_WRITE_INTERVAL_S = 60     # 도는 패널의 '마지막 신호' 를 잡 행에 적는 간격 — 줄마다 적으면 15초 ping 이 DB 를 두드린다
@@ -1124,7 +1127,9 @@ def resume_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
     row = _job_row(store, job_id)
     if row["state"] != "paused":
         raise AppError("E100", f"재개할 수 없는 상태입니다 — {row['state']}.", 409)
-    return _set_job(store, job_id, "queued", by=by, hold=_HOLD_CLEARED if row["mode"] not in PANEL_RUNNER_MODES else None)
+    # 보류 열은 검토 잡 · 종합 잡과, 자격 보류로 멈춘 쟁점 잡(review1 M1)만 쓴다 — 재개하면 비운다(종전 패널 잡은 늘 비어 있다).
+    clear = row["mode"] not in PANEL_RUNNER_MODES or row["hold_code"] is not None
+    return _set_job(store, job_id, "queued", by=by, hold=_HOLD_CLEARED if clear else None)
 
 
 def cancel_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
@@ -1622,6 +1627,8 @@ def run_panel(
         # 배선이 덜 된 채 좌석을 앉히면 패널이 running 에 고착돼 그 타깃이 영영 편성되지 않는다.
         log.error("러너 인터페이스 결손 %s — 잡 %s 를 집지 않는다", missing, job.get("id"))
         _set_job(store, job["id"], "failed", error="missing_interface: " + ",".join(missing))
+        if job.get("mode") == "issues":
+            _issue_job_failed(store, job, "job_failed")
         return {"panel_id": None, "status": "missing_interface", "missing": missing}
 
     issue_job = job.get("mode") == "issues"
@@ -1731,6 +1738,8 @@ def run_panel(
                     error="stopped: 엔진 자리를 기다리던 중에 앱이 내려갔다 — 심의는 시작되지 않았다"
                           "(좌석 재시도는 차감하지 않았다)")
         except PatUnavailable as exc:
+            if issue_job:
+                return _hold_issue_job_for_credential(store, panel, job, exc)
             # 자격 문제는 폴백·재시도 대상이 아니다 — 잡을 멈추고 좌석을 되돌린다(plan §6.7.1).
             out = _close_panel_error(store, panel, job, f"pat_unavailable: {exc}", settings)
             _set_job(store, job["id"], "failed", error="pat_unavailable")
@@ -1911,12 +1920,32 @@ def _close_panel_error(store: Any, panel: Mapping[str, Any], job: Mapping[str, A
         _set_job(store, job["id"], "failed", error="engine_fail_streak")
         if job.get("mode") == "issues":
             # 쟁점 잡이 연속 오류로 실패하면 남은 대기 쟁점은 untried_cap(engine_fail) — 지우지 않는다(3.7 실패 표).
-            from app import chain, issues  # noqa: PLC0415 — issues 는 이 모듈을 쓴다.
-
-            issues.untry_queued(store, panel["target_key"], "engine_fail")
-            # 쟁점 잡이 실패로 닫혀도 종합은 잇는다(P-08 ② — 코드 조립 판과 미토의 잔여가 남는다).
-            chain.safe(chain.on_issues_closed, store, job)
+            _issue_job_failed(store, job, "engine_fail")
     return {"panel_id": panel["id"], "status": "error", "error": error}
+
+
+def _issue_job_failed(store: Any, job: Mapping[str, Any], reason: str) -> None:
+    """정말로 실패로 끝난 쟁점 잡 — 남은 대기 쟁점을 `untried_cap(reason)` 로 놓아 미토의로 보이게 하고(연속 오류는 engine_fail, 그
+    밖은 job_failed — review1 M1), 사슬은 종합을 잇는다(P-08 ② — 코드 조립 판과 미토의 잔여가 남는다)."""
+    from app import chain, issues  # noqa: PLC0415 — issues 는 이 모듈을 쓴다.
+
+    issues.untry_queued(store, job["target_key"], reason)
+    chain.safe(chain.on_issues_closed, store, job)
+
+
+def _hold_issue_job_for_credential(store: Any, panel: Mapping[str, Any], job: Mapping[str, Any], exc: Exception) -> dict:
+    """쟁점 잡의 자격 실패(PatUnavailable — 포털 401 따위)는 잡을 보류 credential 로 멈춘다(검토 잡과 같다, review1 M1). 패널은
+    시작하지 못한 것처럼 닫고(차감 없음 · 연속 오류에 세지 않는다) 쟁점은 대기로 돌린다 — 멈춘 잡이 살아 있어 사슬은 종합으로 넘어가지
+    않는다. 사람이 포털에서 PAT 를 등록하고 재개하면 이어 돈다(길잡이는 pat_unavailable 막힘과 등록 방법을 말한다)."""
+    _release_panel(store, panel, charge=False)
+    store.execute("UPDATE rr_panels SET status = 'error', error = ?, ended_at = ? WHERE id = ?",
+                  (f"{CREDENTIAL_HOLD_CODE}: 쓸 수 있는 사용자 PAT 가 없어 쟁점 패널을 시작하지 못했다 — {exc}", now_epoch(),
+                   panel["id"]))
+    row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job["id"],))
+    if row is not None and row["state"] == "running":
+        _set_job(store, job["id"], "paused", by="code:credential", error=f"pat_unavailable: {exc}",
+                 hold={"code": "credential", "until": None})
+    return {"panel_id": panel["id"], "status": "paused", "error": "pat_unavailable"}
 
 
 def _close_panel_stream_lost(store: Any, panel: Mapping[str, Any], job: Mapping[str, Any],

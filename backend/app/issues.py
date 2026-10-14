@@ -674,35 +674,66 @@ def start_issue_panel(store: RiskStore, panel_id: str) -> None:
             _sync_registry(store, str(row["target_key"]))
 
 
+LIVE_JOB_STATES: tuple[str, ...] = ("queued", "running", "paused")
+
+
+def _orphan_reason(store: RiskStore, target_key: str) -> str | None:
+    """그 대상에 살아 있는 쟁점 잡이 없으면 놓인 쟁점이 갈 까닭 — 마지막 쟁점 잡이 취소(중)면 chain_cancelled, 그 밖(실패)은
+    job_failed. 살아 있는 잡이 있으면 None(그 잡이 다시 집는다)."""
+    live = store.query_one(f"SELECT 1 FROM rr_jobs WHERE target_key = ? AND mode = ? AND state IN"
+                           f" ({','.join('?' * len(LIVE_JOB_STATES))}) LIMIT 1", (target_key, ISSUES_MODE, *LIVE_JOB_STATES))
+    if live is not None:
+        return None
+    last = store.query_one("SELECT state FROM rr_jobs WHERE target_key = ? AND mode = ? ORDER BY created_at DESC, rowid DESC"
+                           " LIMIT 1", (target_key, ISSUES_MODE))
+    return "job_failed" if last is not None and _str(last["state"]) == "failed" else "chain_cancelled"
+
+
 def release_issue(store: RiskStore, panel_id: str, *, charge: bool, reason: str | None = None,
                   settings: Any = None) -> dict | None:
     """패널이 결과 없이 닫혔다 — 그 쟁점(지금 패널이 이 패널인 것만)을 대기로 되돌린다. `charge` 면 내용 탓(charged + 1)이고
     한도(HWAXRISK_ISSUE_MAX_CHARGED)에 닿으면 `inconclusive(reason)` 다. 패널 id 는 남긴다 — 그 패널을 고쳐 다시 내면
-    `resolve_issue` 가 이 쟁점에 결과를 앉힌다(다시 편성되면 패널 id 가 바뀌어 옛 패널은 덮지 못한다)."""
+    `resolve_issue` 가 이 쟁점에 결과를 앉힌다(다시 편성되면 패널 id 가 바뀌어 옛 패널은 덮지 못한다).
+
+    그 대상에 살아 있는 쟁점 잡이 없으면(사람이 잡을 취소하는 사이 닫힌 패널 — review1 H4) 대기로 두지 않는다 — 집을 잡이 없어
+    영영 '쟁점 진행' 으로 남는다. `untry_queued` 와 같은 길로 놓는다(chain_cancelled · job_failed). 앞 패널의 결과가 있는 쟁점은
+    결과를 잃지 않는다(review1 H3 — 판정 못 함으로 끝날 때만 결과가 바뀐다)."""
     cfg = settings or config.settings
     row = store.query_one("SELECT issue_id, target_key, state, charged FROM rr_issues WHERE panel_id = ?", (panel_id,))
     if row is None or _str(row["state"]) not in IN_FLIGHT_STATES:
         return None
+    target_key = str(row["target_key"])
     charged = int(row["charged"] or 0) + (1 if charge else 0)
     state = "inconclusive" if charge and charged >= int(cfg.risk_issue_max_charged) else "queued"
-    outcome = "undetermined" if state == "inconclusive" else None
     now = common.now_epoch()
     with store.tx():
-        store.execute("UPDATE rr_issues SET state = ?, state_reason = ?, outcome = ?, charged = ?, updated_at = ?"
-                      " WHERE issue_id = ?", (state, reason if charge or state != "queued" else None, outcome, charged,
-                                              now, row["issue_id"]))
-        _sync_registry(store, str(row["target_key"]))
+        store.execute("UPDATE rr_issues SET state = ?, state_reason = ?, outcome = CASE WHEN ? = 'inconclusive' THEN"
+                      " 'undetermined' ELSE outcome END, charged = ?, updated_at = ? WHERE issue_id = ?",
+                      (state, reason if charge or state != "queued" else None, state, charged, now, row["issue_id"]))
+        orphan = _orphan_reason(store, target_key) if state == "queued" else None
+        if orphan is not None:
+            _untry(store, "issue_id = ?", (row["issue_id"],), orphan)
+            state = _str(store.query_one("SELECT state FROM rr_issues WHERE issue_id = ?", (row["issue_id"],))["state"])
+        _sync_registry(store, target_key)
     return {"issue_id": row["issue_id"], "state": state, "charged": charged}
 
 
+def _untry(store: RiskStore, where: str, params: tuple, reason: str) -> int:
+    """대기 쟁점을 놓는다 — 결과가 없으면 `untried_cap(reason)`(보고서 '미토의'), 앞 패널의 결과가 있으면(다시 줄을 섰던 결과 쟁점)
+    그 결과 쟁점으로 돌아간다(review1 H3 — 결과를 잃지 않는다)."""
+    return int(store.execute(
+        f"UPDATE rr_issues SET state = CASE WHEN outcome IS NULL THEN 'untried_cap' ELSE {_DONE_OF_OUTCOME} END,"
+        " state_reason = CASE WHEN outcome IS NULL THEN ? ELSE state_reason END, updated_at = ?"
+        f" WHERE state = 'queued' AND {where}", (reason, common.now_epoch(), *params)) or 0)
+
+
 def untry_queued(store: RiskStore, target_key: str, reason: str) -> int:
-    """남은 대기 쟁점을 `untried_cap(reason)` 로 — 쟁점 잡이 연속 오류로 실패했거나(engine_fail) 사람이 취소했을 때
-    (chain_cancelled)다. 지우지 않는다(보고서 '미토의' 행)."""
+    """남은 대기 쟁점을 놓는다(`_untry`) — 쟁점 잡이 연속 오류로 실패했거나(engine_fail) 다른 까닭으로 실패했거나(job_failed) 사람이
+    취소했을 때(chain_cancelled)다. 지우지 않는다(보고서 '미토의' 행). 사람이 상한 밖으로 올린 쟁점도 같은 길이다."""
     with store.tx():
-        n = store.execute("UPDATE rr_issues SET state = 'untried_cap', state_reason = ?, updated_at = ?"
-                          " WHERE target_key = ? AND state = 'queued'", (reason, common.now_epoch(), target_key))
+        n = _untry(store, "target_key = ?", (target_key,), reason)
         _sync_registry(store, target_key)
-    return int(n or 0)
+    return n
 
 
 def _panel_atoms(store: RiskStore, panel_id: str) -> list[dict]:

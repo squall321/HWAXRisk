@@ -581,6 +581,75 @@ def test_a_human_queue_or_skip_survives_reselection_even_above_the_cap(store, mo
     assert (kept["state"], kept["status_source"]) == ("queued", "human")
 
 
+def test_an_in_flight_issue_of_a_cancelled_job_is_untried_not_left_queued(store, monkeypatch, tmp_path):
+    """H4 — 사람이 쟁점 잡을 취소하는 사이 도는 패널이 있으면, 다른 자리의 집기가 잡을 cancelled 로 닫고 대기 쟁점을 미토의로 옮긴
+    뒤 그 패널이 닫히며 쟁점을 대기로 되돌렸다 — 살아 있는 잡이 없어 영영 '쟁점 진행' 이었다. 잡이 살아 있지 않으면 놓인 쟁점은
+    untried_cap(chain_cancelled) 다."""
+    key, unit_ids = _ledger(store, units_n=2)
+    _select(store, monkeypatch, tmp_path, key, cap=2)
+    job = issues.create_issues_job(store, key, owner_sub=OWNER, requester_sub=OWNER)
+    claimed = runner.claim_next_job(store, config.settings)
+    panel = issues.plan_issue_panel(store, key, job=claimed)
+    issues.start_issue_panel(store, panel["id"])
+    runner.cancel_job(store, job["job_id"], by=OWNER)
+    assert runner.claim_next_job(store, config.settings) is None                       # 둘째 자리 — 잡을 cancelled 로 닫는다
+    runner._release_panel(store, panel)                                                # 도는 패널이 스트림을 닫고 놓인다
+    issue = next(r for r in issues.issue_rows(store, key) if r["issue_id"] == panel["issue_id"])
+    assert (issue["state"], issue["state_reason"]) == ("untried_cap", "chain_cancelled")
+    assert [r["state"] for r in issues.issue_rows(store, key) if r["state"] in ("queued", "planned", "running")] == []
+
+
+def test_a_pat_failure_pauses_the_issue_job_with_a_credential_hold_and_keeps_the_issues_queued(store, monkeypatch,
+                                                                                                tmp_path):
+    """M1(결정) — 쟁점 잡의 자격 실패(PatUnavailable)는 잡을 보류 credential 로 멈춘다(검토 잡과 같다). 대기 쟁점은 대기 그대로(차감
+    없음)이고 사슬은 멈춘 동안 종합으로 넘어가지 않는다. 다시 이어 돌면 끝까지 가고 그때 종합이 선다."""
+    from app import chain
+
+    key, unit_ids = _ledger(store, units_n=2)
+    _select(store, monkeypatch, tmp_path, key, cap=2)
+    queued = sorted(r["issue_id"] for r in issues.issue_rows(store, key) if r["state"] == "queued")
+    job = issues.create_issues_job(store, key, owner_sub=OWNER, requester_sub=OWNER)
+    engine = IssuePanelEngine(store, {"*": runner.PatUnavailable("koo@example.com 의 PAT 가 만료됐다(가짜)")})
+    claimed = runner.claim_next_job(store, config.settings, engine=engine)
+    out = runner.run_panel(store, config.settings, engine, claimed)
+    row = store.query_one("SELECT state, hold_code, error FROM rr_jobs WHERE id = ?", (job["job_id"],))
+    assert (row["state"], row["hold_code"]) == ("paused", "credential") and row["error"].startswith("pat_unavailable: ")
+    assert out["status"] == "paused"
+    issues_now = {r["issue_id"]: r for r in issues.issue_rows(store, key)}
+    assert sorted(i for i, r in issues_now.items() if r["state"] == "queued") == queued
+    assert all(issues_now[i]["charged"] == 0 for i in queued)
+    assert chain.sweep(store)["made"] == []
+    assert store.query_one("SELECT COUNT(*) AS n FROM rr_jobs WHERE target_key = ? AND mode = 'synth'", (key,))["n"] == 0
+    runner.resume_job(store, job["job_id"], by=OWNER)
+    assert store.query_one("SELECT hold_code FROM rr_jobs WHERE id = ?", (job["job_id"],))["hold_code"] is None
+    _run_issues_existing(store, IssuePanelEngine(store))
+    assert store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job["job_id"],))["state"] == "completed"
+
+
+def _run_issues_existing(store, engine, *, limit: int = 10) -> None:
+    for _ in range(limit):
+        job = runner.claim_next_job(store, config.settings, engine=engine)
+        if job is None:
+            return
+        runner.run_panel(store, config.settings, engine, job)
+
+
+def test_an_issue_job_that_really_fails_releases_its_queued_issues_as_untried(store, monkeypatch, tmp_path):
+    """M1(결정) — 정말로 실패로 끝난 쟁점 잡(배선 결손 따위)은 남은 대기 쟁점을 untried_cap(job_failed) 로 놓아 미토의로 보이게 한다."""
+    from types import SimpleNamespace
+
+    key, unit_ids = _ledger(store, units_n=2)
+    _select(store, monkeypatch, tmp_path, key, cap=2)
+    queued = [r["issue_id"] for r in issues.issue_rows(store, key) if r["state"] == "queued"]
+    assert queued
+    issues.create_issues_job(store, key, owner_sub=OWNER, requester_sub=OWNER)
+    job = runner.claim_next_job(store, config.settings)
+    out = runner.run_panel(store, config.settings, IssuePanelEngine(store), job, registry_mod=SimpleNamespace())
+    assert out["status"] == "missing_interface"
+    rows = {r["issue_id"]: r for r in issues.issue_rows(store, key)}
+    assert {(rows[i]["state"], rows[i]["state_reason"]) for i in queued} == {("untried_cap", "job_failed")}
+
+
 def test_the_issue_result_line_names_the_same_atom_as_the_outcome_and_the_registry(store, monkeypatch, tmp_path):
     """M2 — 패널이 닻에 같은 심각도의 원자를 여럿 내면(중대 FAIL · 중대 OK …) 결과 칸(outcome_json 의 판정)도 등록부·결과처럼
     (심각도, 판정) 순으로 고른다 — 종전에는 (심각도, finding id) 로 골라 보고서 줄이 등록부와 어긋났다."""
