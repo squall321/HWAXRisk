@@ -587,6 +587,23 @@ def test_a_late_offcard_handoff_reopens_the_filtered_cell_at_job_end(store, monk
     assert review_cells.review_invariants(store, key) == []
 
 
+def test_an_experts_handoff_to_its_own_domain_never_reopens_its_own_filtered_cell_at_job_end(store, monkeypatch):
+    """반대 검토 LOW 15 의 짝 — 자기 훑기가 자기 영역으로 넘긴 줄은 7번 줄이 세지 않는다(그 셀은 걸러진다). 잡 끝의 넘김 거두기도
+    그 줄로 그 셀을 다시 열지 않는다 — 열면 다시 분류돼 또 걸러지고 잡 끝이 그것을 되풀이해 잡이 끝나지 않는다."""
+    key, fake, kinds, r = _offcard_handoff_target(store, monkeypatch)
+    b = kinds["boundary"]
+    r.finish(rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]}))
+    fake.handoff_to, fake.handoff_unit, fake.handoff_from = "std", b, {STD2}
+    job_id = rig.job(store, key, scope={"agents": [STD2]})
+    r.finish(job_id, ticks=60)
+    cell = _cell(store, key, b, STD2)
+    assert rig.state(store, job_id) == "completed"
+    assert (cell["state"], cell["route_json"]["decision"], cell["route_json"]["handoff"], cell["reopened_n"]) == (
+        "na_irrelevant", "filtered", [], 0)
+    assert review_cells.handoffs(store, key) == [{"from": STD2, "unit_id": b, "to": "std",
+                                                  "why": "훑기가 다른 영역의 몫으로 본 단위"}]
+
+
 # ---------------------------------------------------------------- 재기동
 def test_a_restart_keeps_the_classification_and_never_reclassifies(store, monkeypatch):
     """1순위가 먼저 다 닫힌 뒤 2순위 세션이 분류하고 판정 호출 도중 죽는다 — 재기동 복구 뒤 새 러너는 걸러진 셀을 다시 열지 않고
