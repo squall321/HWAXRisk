@@ -232,7 +232,7 @@ def _export_view(table: str, row: dict) -> dict:
     if table == "rr_review_cells":
         extras = _clip_json(row.get("extras_json"), _clip_extras)
         return row if extras is row.get("extras_json") else {**row, "extras_json": extras}
-    if table == "rr_findings" and row.get("source_kind") == _CARD_REVIEW:
+    if table == "rr_findings" and row.get("source_kind") in _CARD_TEXT_SOURCES:
         finding = _clip_json(row.get("finding_json"), _clip_finding)
         return row if finding is row.get("finding_json") else {**row, "finding_json": finding}
     if table == "rr_claim_refs" and row.get("ref_type") == "card":
@@ -244,13 +244,80 @@ def _export_view(table: str, row: dict) -> dict:
         return row if payload is row.get("payload_json") else {**row, "payload_json": payload}
     # v5(재설계 M3) — 쟁점 패널이 받은 근거(I6)에는 카드 절 원문이 든다. 그 브리프는 박스 밖으로 내보내지 않는다(그 박스에서만
     # 쓴다 — 브리프 해시·항목 해시는 남는다). 등록부·쟁점의 카드 인용은 판정 행과 같은 200자 규칙이다(M2 #18·#21 을 넓힌다).
-    if table == "rr_panels" and row.get("kind") == "issue" and row.get("brief_gz") is not None:
-        return {**row, "brief_gz": None}
+    if table == "rr_panels" and row.get("kind") == "issue":
+        # 쟁점 패널의 결정문 · risk_spec 에는 좌석이 옮겨 적은 카드 절이 들 수 있다(review1 M6) — 같은 200자 규칙이다.
+        out = {**row, "brief_gz": None}
+        if isinstance(row.get("decision_text"), str):
+            out["decision_text"] = clip_card_text_blob(row["decision_text"])
+        out["risk_spec_json"] = _clip_json(row.get("risk_spec_json"), _clip_card_text)
+        return out
+    if table == "rr_reports" and isinstance(row.get("pages_gz"), dict):
+        # 보고서 판의 쪽 — 요약 서기(LLM)의 서술은 «» 안에 실리고 행 글을 옮겨 적을 수 있다(review1 M6). «» 인용을 200자로.
+        pages = _clip_pages_gz(_decode(row["pages_gz"]))
+        return row if pages is None else {**row, "pages_gz": _encode(pages)}
     if table in ("rr_registry", "rr_issues"):
         column = "merged_json" if table == "rr_registry" else "basis_json"
         clipped = _clip_json(row.get(column), _clip_card_text)
         return row if clipped is row.get(column) else {**row, column: clipped}
     return row
+
+
+# 카드 글을 옮겨 적을 수 있는 finding 출처 — 카드 대조(M2)와 쟁점 패널(M3 — 좌석이 쟁점 근거의 카드 절을 옮겨 적는다, review1 M6).
+_CARD_TEXT_SOURCES: tuple[str, ...] = (_CARD_REVIEW, "issue_panel")
+_JSON_QUOTE = re.compile(r'("quote"\s*:\s*")((?:[^"\\]|\\.)*)(")')
+
+
+def clip_card_text_blob(text: str) -> str:
+    """JSON 이 섞인 자유 글(쟁점 패널 결정문)의 카드 글 — «» 인용과 JSON 의 "quote" 글을 하나마다 200자로 줄이고 원래 길이를 그 자리에
+    적는다('…(원래 N자)'). 줄일 것이 없으면 그대로."""
+    clipped = _mark_lengths(text)
+
+    def cut(m: re.Match) -> str:
+        try:
+            value = json.loads(f'"{m.group(2)}"')
+        except ValueError:
+            return m.group(0)
+        if len(value) <= EXPORT_CQ_MAX:
+            return m.group(0)
+        short = json.dumps(value[:EXPORT_CQ_MAX] + f"…(원래 {len(value)}자)", ensure_ascii=False)[1:-1]
+        return m.group(1) + short + m.group(3)
+
+    return _JSON_QUOTE.sub(cut, clipped)
+
+
+def _clip_strings(value: Any) -> Any:
+    """JSON 값 안의 글마다 «» 인용을 200자로(원래 길이는 그 자리에 '…(원래 N자)')."""
+    if isinstance(value, list):
+        return [_clip_strings(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _clip_strings(v) for k, v in value.items()}
+    if isinstance(value, str):
+        return _mark_lengths(value)
+    return value
+
+
+def _mark_lengths(text: str) -> str:
+    def cut(m: re.Match) -> str:
+        if len(m.group(1)) <= EXPORT_CQ_MAX:
+            return m.group(0)
+        return "«" + m.group(1)[:EXPORT_CQ_MAX] + f"…(원래 {len(m.group(1))}자)»"
+
+    return _QUOTED.sub(cut, text)
+
+
+def _clip_pages_gz(blob: bytes) -> bytes | None:
+    """보고서 판 쪽(gzip JSON)의 «» 인용을 200자로 — 바뀐 것이 없으면 None."""
+    import gzip  # noqa: PLC0415
+
+    try:
+        pages = json.loads(gzip.decompress(blob).decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    clipped = _clip_strings(pages)
+    if clipped == pages:
+        return None
+    return gzip.compress(json.dumps(clipped, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+                         mtime=0)
 
 
 def _human_rank(table: str, row: dict) -> int:

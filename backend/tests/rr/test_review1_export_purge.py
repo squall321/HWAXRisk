@@ -77,6 +77,30 @@ def _texts(value) -> list[str]:
     return []
 
 
+def test_issue_panel_card_text_leaves_the_box_cut_to_200_characters(risk_store, chained):
+    """M6 — 쟁점 패널이 옮겨 적은 카드 절(390자)은 반출에서 판정당 200자로 줄어든다 — 쟁점 패널 finding(인용·근거 문장)·패널의
+    결정문·risk_spec·보고서 판의 쪽 어디에도 통째로 실리지 않는다. 원래 길이는 남는다(finding 인용의 quote_chars)."""
+    key = chained
+    tables = _exported(risk_store)
+    panel_ids = {r["id"] for r in risk_store.query("SELECT id FROM rr_panels WHERE target_key = ? AND kind = 'issue'", (key,))}
+    places = {
+        "rr_findings": [r for r in tables["rr_findings"] if r.get("source_kind") == "issue_panel"],
+        "rr_panels": [r for r in tables["rr_panels"] if r["id"] in panel_ids],
+        "rr_reports": [r for r in tables.get("rr_reports", []) if r["target_key"] == key],
+    }
+    assert all(places.values()), {k: len(v) for k, v in places.items()}
+    whole = {where: sum(1 for row in rows for t in _texts(row) if SECTION in t) for where, rows in places.items()}
+    assert whole == {"rr_findings": 0, "rr_panels": 0, "rr_reports": 0}
+    cites = [c for r in places["rr_findings"] for c in json.loads(r["finding_json"]).get("cites") or ()
+             if str(c.get("ref") or "").startswith("card:")]
+    assert cites and all(len(c["quote"]) <= export.EXPORT_CQ_MAX and c.get("quote_chars") == len(SECTION) for c in cites)
+    report = synth.report_source(risk_store, key)
+    assert any(SECTION in t for p in report["pages"] for b in synth.BLOCKS for t in p["blocks"][b])   # 판에는 실렸다
+    # 박스 안의 원장은 그대로다(줄이는 것은 반출뿐이다).
+    assert any(SECTION in (r["finding_json"] or "") for r in risk_store.query(
+        "SELECT finding_json FROM rr_findings WHERE target_key = ? AND source_kind = 'issue_panel'", (key,)))
+
+
 def test_a_purge_blanks_the_registry_and_the_panels_raw_engine_result(risk_store, chained):
     """M7 · 새로 본 것 — 폐기가 등록부 merged_json(카드 인용 · 쟁점 패널 주장 · 근거 문장)과 패널의 엔진 결과 원문(result_gz — 결정문 ·
     발언이 든다)을 비운다. 반출에도 그 글이 남지 않는다. 행과 해시·수는 남는다."""
