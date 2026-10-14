@@ -1818,9 +1818,13 @@ def create_snapshot(project_id: str, body: SnapshotBody,
     # 이 캡처가 어느 자격으로 읽었나 — MCP 는 user(본인 포털 PAT) · service(서비스 PAT — 짧은 캡처 호출이라 내려간다, U-3) · None,
     # REST 는 caller_token · user_pat_gateway · service_pat · None(R2)이고, 다리가 실패해 서비스 PAT 로 넘어갔으면 두 시도를 잇는다
     # (user_pat_gateway→service_pat). 다리가 실패했으면 rest_bridge{http_status, error} 가 함께 있다(BEH-2).
+    # rest_ok 는 REST 호출이 하나 이상 있었고 전부 읽혔다는 뜻이다(어느 자격으로든) — 서비스 PAT 가 없는 박스에서는 rest 가 다리가
+    # 읽었든 못 읽었든 user_pat_gateway 라 이것으로 가른다(R2-10). REST 를 부르지 않은 캡처(REST 자격 없음·REST 를 안 쓰는 소스)도 false 다.
     rest_used = getattr(channels["rest"], "used", None)
+    rest_calls = [c for c in calls if c.get("channel") == "rest"]
     credentials = {"mcp": "user" if portal_pat else ("service" if channels.get("portal_pat") else None),
-                   "rest": "→".join(rest_used) if rest_used else channels.get("rest_credential")}
+                   "rest": "→".join(rest_used) if rest_used else channels.get("rest_credential"),
+                   "rest_ok": bool(rest_calls) and all(c.get("ok") for c in rest_calls)}
     if bridge_failure:
         credentials["rest_bridge"] = bridge_failure
     return {**out, "job_id": job_id, "job_state": state, "calls_reused": reused, "credentials": credentials}

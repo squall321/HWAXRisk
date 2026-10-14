@@ -379,6 +379,7 @@ def test_a_claude_capture_reads_rest_through_the_gateway_with_the_persons_pat(bo
     snap = call("risk_capture_snapshot", project_id=pid)
     assert seen == {"heax_token": None, "gateway_pat": pat}
     assert snap["credentials"]["rest"] == "user_pat_gateway" and snap["blocked"] is False
+    assert snap["credentials"]["rest_ok"] is True                      # 다리가 읽었다(아래 다리 실패와 rest 는 같다, R2-10)
     # 웹으로 캡처하면 제 로그인 토큰이 먼저이고 사람 PAT 는 다리에 싣지 않는다(위임 호출이 아니다).
     web = routes.create_snapshot(pid, routes.SnapshotBody(), ident=web_ident(OWNER))
     assert seen == {"heax_token": "heax-web-token", "gateway_pat": None} and web["credentials"]["rest"] == "caller_token"
@@ -444,6 +445,7 @@ def test_a_rejected_bridge_call_falls_through_to_the_service_pat_and_the_capture
     snap = call("risk_capture_snapshot", project_id=pid)
     assert bridge["seen"] and set(bridge["seen"]) == {f"Bearer {pat}"}
     assert snap["blocked"] is False and snap["credentials"]["rest"] == "user_pat_gateway→service_pat"
+    assert snap["credentials"]["rest_ok"] is True                      # 서비스 PAT 로 끝내 읽었다
     assert snap["credentials"]["rest_bridge"] == {"http_status": 403, "error": "http_403"}
     out = call("risk_next_step", project_id=pid)
     assert out["facts"]["credentials"]["capture_rest_note"] is None          # 끝내 읽었다 — 말할 실패가 없다
@@ -462,6 +464,8 @@ def test_when_the_bridge_and_everything_after_it_fail_the_g6_fix_names_the_bridg
     snap = call("risk_capture_snapshot", project_id=pid)
     assert snap["blocked"] is True and snap["credentials"]["rest"] == "user_pat_gateway"
     assert snap["credentials"]["rest_bridge"]["http_status"] == 401
+    # 서비스 PAT 가 없으면 rest 는 다리가 읽었을 때와 같다 — rest_ok 가 못 읽은 것을 말한다(R2-10).
+    assert snap["credentials"]["rest_ok"] is False
     out = call("risk_next_step", project_id=pid)
     assert out["facts"]["credentials"]["capture_rest"] == "user_pat_gateway"
     note = out["facts"]["credentials"]["capture_rest_note"]
@@ -494,6 +498,7 @@ def test_without_a_rest_credential_the_claude_capture_is_blocked_and_says_where_
 
     snap = call("risk_capture_snapshot", project_id=pid)
     assert snap["blocked"] is True
+    assert (snap["credentials"]["rest"], snap["credentials"]["rest_ok"]) == (None, False)     # REST 를 부르지 못했다
     gates = state_module.load_state(box.store, snap["snapshot_id"])["gates"]
     assert state_module.blocked_reason(gates) == state_module.UNKNOWN_BLOCKING_REASON
     out = call("risk_next_step", project_id=pid)
