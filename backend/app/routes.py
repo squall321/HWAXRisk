@@ -3176,10 +3176,34 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
         "review": review_payload(store, target_key, target["flow"]),
         # RA·AIDataHub 반영 요약 — {ra|adh: {state, pending_ops, reason, message}}. 보내는 쪽이 아직 없다(sender_unwired, M4).
         "external_sync": ra_client.sync_summary(ra_client.parse_external_sync(target["external_sync_json"])),
-        # 완결 표기와 잔여(M3 S3-8) — 카드 대조 대상만 싣는다(패널 대상의 응답은 review 칸 하나만 더해진 그대로다, D-24).
-        **({"level_label": level.get("level_label") or level["level"], "qualifiers": list(level.get("qualifiers") or ())}
+        # 완결 표기와 잔여(M3 S3-8) · 사슬 단계와 마지막 보고서 판(S3-5) — 카드 대조 대상만 싣는다(패널 대상의 응답은 review 칸
+        # 하나만 더해진 그대로다, D-24).
+        **({"level_label": level.get("level_label") or level["level"], "qualifiers": list(level.get("qualifiers") or ()),
+            "stage": chain_stage(store, target_key), "report": report_head(store, target_key)}
            if target["flow"] == "cells" else {}),
     }
+
+
+def chain_stage(store: Any, target_key: str) -> dict | None:
+    """사슬 단계(S3-5) — 살아 있는 쟁점·종합 잡(없으면 마지막 것)의 {mode, job_id, state, hold_code, pause_reason, error, advice?}.
+    없으면 None."""
+    row = store.query_one(
+        "SELECT id, mode, state, hold_code, pause_reason, error, progress_json FROM rr_jobs WHERE target_key = ?"
+        " AND mode IN ('issues', 'synth') ORDER BY state IN ('queued', 'running', 'paused', 'cancelling') DESC,"
+        " created_at DESC, rowid DESC LIMIT 1", (target_key,))
+    if row is None:
+        return None
+    out = {"mode": row["mode"], "job_id": row["id"], "state": row["state"], "hold_code": row["hold_code"],
+           "pause_reason": row["pause_reason"], "error": row["error"]}
+    advice = (_loads(row["progress_json"], {}) or {}).get("advice")
+    return {**out, "advice": advice} if advice else out
+
+
+def report_head(store: Any, target_key: str) -> dict | None:
+    """마지막 보고서 판의 머리 {version_no, trigger, narrative_state, created_at} — 없으면 None."""
+    row = store.query_one("SELECT version_no, trigger, narrative_state, created_at FROM rr_reports WHERE target_key = ?"
+                          " ORDER BY version_no DESC LIMIT 1", (target_key,))
+    return dict(row) if row is not None else None
 
 
 # ---------------------------------------------------------------- 완결 판정(재설계 M3 S3-8 — closure)

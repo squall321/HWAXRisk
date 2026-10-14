@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from app import chain, closure, config, issues, routes, runner, synth
+from app import chain, closure, config, entry, issues, routes, runner, synth
 from tests import factories
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
@@ -244,3 +244,50 @@ def test_the_low_yield_note_stays_on_the_board_while_the_next_issue_panel_runs(s
     assert len(engine.seen) > issues.YIELD_WINDOW
     assert [s.get("advice") for s in engine.seen] == [None] * issues.YIELD_WINDOW + ["issue_yield_low"] * (
         len(engine.seen) - issues.YIELD_WINDOW)
+
+
+# ---------------------------------------------------------------- 길잡이(risk_next_step — 3.11)
+def test_the_guide_follows_the_chain_to_the_report_and_names_the_residuals_left_for_a_person(store):
+    """쟁점 잡이 서면 where='issues' · risk_get_issues 를 지켜보고, 사람이 멈추면 막힘 chain_paused 와 재개가 맨 앞이다. 사슬이
+    끝나면 where='done' · risk_get_report(part summary) 걸음, facts 의 완결 표기·사슬 단계·보고서 머리, 막음 잔여는 '웹 화면에서
+    소유자·관리자가 확인한다' 막힘이다(Claude 경로의 확인은 없다)."""
+    from tests.test_review_mcp import _delegate, _project_with_source
+
+    key = rig.target(store)
+    project_id = _project_with_source(store, key)
+    _review(store, key)
+    (issue_job,) = _jobs(store, key, "issues")
+    waiting = entry.next_step(_delegate(), project_id=project_id)
+    assert waiting["where"] == "issues" and waiting["next"][0]["tool"] == "risk_get_issues"
+    assert waiting["facts"]["stage"]["job_id"] == issue_job["id"] and waiting["facts"]["level_label"].startswith("C1(")
+    assert waiting["blocked"] == []
+    runner.pause_job(store, issue_job["id"], by=OWNER)
+    paused = entry.next_step(_delegate(), project_id=project_id)
+    assert [b["code"] for b in paused["blocked"]] == ["chain_paused"] and paused["where"] == "issues"
+    assert paused["next"][0] == {**paused["next"][0], "tool": "risk_job_action",
+                                 "args": {"job_id": issue_job["id"], "action": "resume"}}
+    runner.resume_job(store, issue_job["id"], by=OWNER)
+    _run_issue_jobs(store, IssuePanelEngine(store))
+    _run_synth(store, FakeSummaryEngine({"xd": "over_budget"}))
+    done = entry.next_step(_delegate(), project_id=project_id)
+    assert done["where"] == "done" and done["facts"]["report"]["trigger"] == "synth_done"
+    (report,) = [s for s in done["next"] if s["tool"] == "risk_get_report"]
+    assert report["args"] == {"target_key": key, "part": "summary"} and report["write"] is False
+    (residual,) = [b for b in done["blocked"] if b["code"] == "residual_unacked"]
+    pending = [q["item"] for q in closure.cached(store, key)["qualifiers"] if q["blocking"] and not q["acked"]]
+    assert residual["items"] == pending and pending and "/closure" in residual["fix"]
+    assert any("서술 없이 표만 선 요약 1건 — xd ctx_too_small" in n for n in done["notes"])
+
+
+def test_the_guide_says_the_issue_job_waits_for_a_pat(store, monkeypatch):
+    """자격이 없어 사슬 잡이 집히지 않으면 막힘 pat_unavailable 이 그 잡을 가리킨다."""
+    from tests.test_review_mcp import _delegate, _project_with_source
+
+    key = rig.target(store)
+    project_id = _project_with_source(store, key)
+    monkeypatch.setattr(runner, "resolve_credential_with_note", lambda *a, **k: (None, "PAT 없음(가짜)"))
+    _review(store, key)
+    (issue_job,) = _jobs(store, key, "issues")
+    out = entry.next_step(_delegate(), project_id=project_id)
+    (pat,) = [b for b in out["blocked"] if b["code"] == "pat_unavailable"]
+    assert pat["job_id"] == issue_job["id"] and out["where"] == "issues"

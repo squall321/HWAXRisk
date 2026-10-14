@@ -909,6 +909,11 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
     facts["review_order"] = brief["order"]
     facts["review_order_page"] = brief["order_page"]
     facts["review_job"] = job
+    # 완결 표기(캐시)와 사슬 — 지금 도는(없으면 마지막) 쟁점·종합 잡, 마지막 보고서 판의 머리(재설계 M3 S3-5 · 3.11).
+    facts["level_label"] = coverage.get("level_label")
+    for name in ("stage", "report"):
+        if coverage.get(name) is not None:
+            facts[name] = coverage[name]
     # 거르기 · 실패 셀 · 입력 결손 — 목록이 아니라 셈이다(359명 대상에서도 답이 짧게, 재설계 M3 C3-8). 진행판 review 칸과 같은 수다.
     flt = review.get("filter") or {}
     if flt:
@@ -980,7 +985,12 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
         waiting = job.get("waiting") or {}
         if waiting.get("reason"):
             notes.append(f"검토 잡이 기다린다 — {waiting['reason']}" + (f": {waiting['note']}" if waiting.get("note") else "") + ".")
+        if job.get("phase") in REVIEW_PHASE_NOTES:
+            notes.append(REVIEW_PHASE_NOTES[job["phase"]])
         return answer("running", [*repersist_steps, *watch])
+    stage = coverage.get("stage")
+    if stage is not None and stage["state"] in REVIEW_LIVE_STATES:
+        return _chain_answer(answer, target_key, project_id, stage, repersist_steps, blocked, notes)
     steps = [*repersist_steps, *dispose]
     if job is not None:
         notes.append(f"마지막 검토 잡 {job['id']} 는 {job['state']} 다" + (f" — {job['error']}" if job.get("error") else "") + ".")
@@ -997,4 +1007,67 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
     if job is None:
         steps.append(_step("risk_get_units", {"target_key": target_key},
                            "검토 단위 목록(전문가가 카드로 대조할 변경 묶음).", write=False))
+    report = coverage.get("report")
+    if report is not None:
+        steps.append(_step("risk_get_report", {"target_key": target_key, "part": "summary"},
+                           f"종합 보고서 v{report['version_no']}({report['trigger']}) — 완결 표기·잔여·수·쟁점 결과. part='full'"
+                           " 이 전부이고 next_page 로 이어 받는다.", write=False))
+        _code_only_notes(store, target_key, notes)
+    if stage is not None:
+        # 사슬이 끝났다(살아 있는 쟁점·종합 잡 없음) — 막음 잔여는 사람이 확인해야 다음 레벨로 오른다(MCP 경로의 확인은 없다).
+        pending = [q for q in coverage.get("qualifiers") or () if q.get("blocking") and not q.get("acked")]
+        if pending:
+            blocked.append(_blocked(
+                "residual_unacked", f"막음 잔여 {len(pending)}종이 확인을 기다린다 — {' · '.join(q['label'] for q in pending)}.",
+                "웹 화면에서 소유자·관리자가 확인한다(사유 필수) — 잔여와 basis_hash 는 REST GET"
+                f" /api/targets/{target_key}/closure 가 준다. Claude 경로의 확인은 없다.",
+                items=[q["item"] for q in pending]))
     return answer("done" if job is not None and job["state"] == "completed" else "review", [*steps, *watch])
+
+
+# 검토 잡의 단계(진행판 phase)마다 길잡이가 덧붙이는 말 — live 는 근거 꾸러미 실호출(B 층, 재설계 M3 C3-12)이다.
+REVIEW_PHASE_NOTES = {
+    "live": "검토 잡이 근거 꾸러미 실호출(B 층) 단계다 — 단위마다 실데이터를 얼리는 중이고, 끝나면 카드 묶음 · 셀 호출이 선다.",
+}
+
+
+def _chain_answer(answer, target_key: str, project_id: str, stage: dict, repersist_steps: list[dict], blocked: list[dict],
+                  notes: list[str]) -> dict:
+    """사슬 단계(S3-5)가 살아 있는 cells 대상의 길잡이 — 쟁점 잡이면 risk_get_issues, 종합 잡이면 진행판을 지켜본다. 멈췄으면 재개가
+    맨 앞이다(앱 재기동으로 멈춘 잡은 M4 전에는 저절로 재개하지 않는다). 자격이 없어 집히지 않는 잡은 그 막힘을 준다."""
+    mode = stage["mode"]
+    what = ("쟁점 잡(쟁점 패널을 한 줄로 — 웹 러너가 돈다)" if mode == "issues"
+            else "종합 잡(영역 요약 → 과제 종합 → 보고서 판)")
+    watch = ([_step("risk_get_issues", {"target_key": target_key},
+                    "쟁점 목록 — 상태 · 등급 · 결과(유지 · 하향 · 상향 · 기각 · 불명)와 원래 분포.", write=False)]
+             if mode == "issues" else
+             [_step("risk_get_coverage", {"target_key": target_key, "with_seats": False},
+                    "진행판 — 지금 도는 사슬 단계(stage) · 마지막 보고서 판(report) · 완결 표기.", write=False)])
+    watch.append(_step("risk_next_step", {"project_id": project_id}, "단계·막힘을 다시 본다.", write=False))
+    error = str(stage.get("error") or "")
+    if error.startswith("pat_unavailable"):
+        blocked.append(_blocked("pat_unavailable", f"{what} {stage['job_id']} 를 돌릴 사용자 PAT 가 없다 — {error}",
+                                fix_register_pat() + " 등록하면 러너가 그 잡을 이어 집는다.", job_id=stage["job_id"]))
+    if stage["state"] == "paused":
+        blocked.append(_blocked("chain_paused", error or f"{what} 이 멈췄다.",
+                                "까닭을 고친 뒤 risk_job_action(action='resume') 으로 재개한다 — 앱 재기동으로 멈춘 잡은 M4 전에는"
+                                " 저절로 재개하지 않는다(결과가 저장된 패널은 다시 저장이 먼저다).", job_id=stage["job_id"],
+                                hold_code=stage.get("hold_code"), pause_reason=stage.get("pause_reason")))
+        return answer(mode, [*repersist_steps, _step("risk_job_action", {"job_id": stage["job_id"], "action": "resume"},
+                                                     f"멈춘 {what} 을 재개한다."), *watch])
+    if stage.get("advice") == "issue_yield_low":
+        notes.append("최근 쟁점 패널 다섯이 전부 기각·불명이다(issue_yield_low) — 남은 쟁점을 계속 돌릴지 사람이 정한다(멈추려면"
+                     " risk_job_action(action='pause')).")
+    notes.append(f"{what} {stage['job_id']} 가 {stage['state']} 다 — 끝나면 사슬이 다음 단계(쟁점 → 종합 → 보고서 판)를 저절로 세운다.")
+    return answer(mode, [*repersist_steps, *watch])
+
+
+def _code_only_notes(store: Any, target_key: str, notes: list[str]) -> None:
+    """서술 없이 닫힌 요약(code_only — 행 0 인 영역은 빼고)의 까닭을 한 줄로."""
+    from app import synth  # noqa: PLC0415 — synth 는 등록부·완결을 거쳐 무겁다.
+
+    held = [f"{r['scope_key'] if r['scope_kind'] == 'domain' else '과제 종합'} {r['state_reason']}"
+            for r in synth.latest_summaries(store, target_key)
+            if r["state"] == "code_only" and r["state_reason"] != "no_rows"]
+    if held:
+        notes.append(f"서술 없이 표만 선 요약 {len(held)}건 — " + " · ".join(held) + "(까닭은 보고서 그 쪽의 '서술 없음' 에 있다).")

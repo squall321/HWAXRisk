@@ -302,8 +302,10 @@ def test_the_guide_watches_a_running_review_job_and_reads_reports_once_it_is_don
     r.finish(job_id)
     done = entry.next_step(_delegate(), project_id=project_id)
     assert done["where"] == "done"
-    assert [s["tool"] for s in done["next"]] == ["risk_start_job", "risk_get_coverage", "risk_get_cells",
+    # 좁은 범위라도 검토 잡 끝의 사슬(재설계 M3 S3-5)이 코드 조립 판(reviews_partial)을 세웠다 — 그 판을 읽는 걸음이 선다.
+    assert [s["tool"] for s in done["next"]] == ["risk_start_job", "risk_get_report", "risk_get_coverage", "risk_get_cells",
                                                  "risk_get_expert_report", "risk_next_step"]
+    assert done["facts"]["report"]["trigger"] == "reviews_partial" and "stage" not in done["facts"]
     report = next(s for s in done["next"] if s["tool"] == "risk_get_expert_report")
     assert report["args"] == {"target_key": key, "agent_key": SEAL} and report["write"] is False
     assert any("범위 밖으로 남은 셀이 25개" in n for n in done["notes"])          # 로스터 6 × 단위 5 − SEAL 의 5

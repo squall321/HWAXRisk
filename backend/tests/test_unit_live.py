@@ -299,6 +299,26 @@ def test_the_knob_off_freezes_every_unit_none_and_calls_nothing(store, monkeypat
         prompt_rev=cell["prompt_rev"], limits_rev=limits)
 
 
+def test_the_guide_says_a_review_job_in_the_live_phase_is_freezing_evidence(store):
+    """검토 잡 단계 live(근거 꾸러미 실호출 — B 층)를 길잡이가 안다 — 도는 잡의 메모에 그 단계의 뜻을 싣는다(재설계 M3 S3-5 길잡이)."""
+    from app import entry
+    from tests.test_review_mcp import _delegate, _project_with_source
+
+    key = _target(store)
+    project_id = _project_with_source(store, key)
+    unit_id = _material_unit(store, key)
+    job_id = rig.job(store, key, scope={"agents": [rig.SEAL]})
+    gw = Gateway()
+    gw.answers["compare_materials"] = "http_503"
+    r = rig.Rig(store, FakeReviewEngine(rig.packs()))
+    r.loop.live_transport = gw.transport
+    r.run(lambda: all(c["state"] == "reviewed" for c in store.query(
+        "SELECT state FROM rr_review_cells WHERE target_key = ? AND agent_key = ? AND unit_id <> ?", (key, rig.SEAL, unit_id))))
+    assert rig.progress(store, job_id)["phase"] == "live"
+    out = entry.next_step(_delegate(), project_id=project_id)
+    assert out["where"] == "running" and entry.REVIEW_PHASE_NOTES["live"] in out["notes"]
+
+
 # ---------------------------------------------------------------- 루프 — 셀 문 · 자격
 def test_a_units_cells_wait_for_its_live_evidence_while_other_units_run(store):
     """B 층이 서기 전의 단위는 셀을 시작하지 않는다(input_hash 없음) — 게이트웨이가 5xx 인 동안 다른 단위의 셀은 끝까지 돌고 잡은
