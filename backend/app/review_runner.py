@@ -1432,6 +1432,7 @@ class _Session:
         done = _json(head.get("sweep_json"), {})
         if head.get("sweep_state") in ("done", "failed") and done.get("key") == key:
             self.sweep = done
+            self._replay_handoffs()           # 적은 뒤 다시 열기 전에 죽었어도 재기동이 이어 한다(반대 검토 MEDIUM 10 — 멱등)
             return
         manifest = {m["unit_id"]: m for m in units.manifest_items(self.store, self.target_key)}
         # 입력 결손 전문가의 훑기에는 결측 블록(그 영역의 실마리를 단 unit.missing — 대상 수준이라 단위마다 같다)을 싣는다(C3-3).
@@ -1466,7 +1467,11 @@ class _Session:
                                        sets={"sweep_state": "failed" if failed else "done",
                                              "sweep_json": canonical_json(self.sweep)}):
             raise _Stop("lease", release=False)
-        # 늦은 넘김(C3-7) — 이 훑기가 넘긴 (단위, 영역)의 셀 가운데 이미 걸러진 것을 다시 연다(다시 분류되면 7번 줄로 검토다).
+        self._replay_handoffs()
+
+    def _replay_handoffs(self) -> None:
+        """늦은 넘김(C3-7) — 이 훑기가 넘긴 (단위, 영역)의 셀 가운데 이미 걸러진 것을 다시 연다(다시 분류되면 7번 줄로 검토다).
+        거른 셀만 여므로 멱등이다 — 훑기를 원장에서 다시 읽을 때도 부른다."""
         for handoff in self.sweep.get("handoffs") or ():
             if handoff.get("unit_id") and handoff.get("to"):
                 review_cells.reopen_filtered(self.store, self.target_key, via="handoff", domain=str(handoff["to"]),
@@ -1866,48 +1871,46 @@ class _Session:
     # -- 정산 · 마감 ------------------------------------------------------------------------------
     def _settle(self, cell: _Cell) -> None:
         self.focus = cell
+        # 표본 · 그림자 셀의 결과는 정산과 같은 트랜잭션에 적는다 — 사이에서 죽으면 놓친 걸림(risk_miss)이 적히지 않아 넓힘 신호를
+        # 잃었다(반대 검토 MEDIUM 10). 넓힘의 다시 열기는 원장에서 유도되므로 잡 끝(_audit_topup 앞)이 빠진 것을 다시 한다.
+        sample = self._sample_results(cell)
+        results = {k: sample["outcome"] for k in sample.get("keys") or ()}
         if self.gaps:
             out = review_cells.settle_noinput(self.store, self.target_key, cell.unit_id, self.agent, lease_owner=self.lease,
                                               outcome=(cell.noinput or {}).get("outcome"), max_charged=self.max_charged,
-                                              now=self.now())
+                                              sample_results=results, now=self.now())
         else:
             out = review_cells.settle_cell(self.store, self.target_key, cell.unit_id, self.agent, lease_owner=self.lease,
                                            samples_done=cell.samples_done, more_calls=False, max_charged=self.max_charged,
-                                           now=self.now())
+                                           sample_results=results, now=self.now())
         if not out["written"]:
             raise _Stop("lease", release=False)
         cell.alive = False
-        if out["state"] in ("reviewed", "no_input"):
-            self._sample_outcome(cell)
+        if out["state"] in ("reviewed", "no_input") and sample.get("outcome") == "risk_miss":
+            widened = review_cells.widen(self.store, self.target_key, sample["domain"], now=self.now())
+            log.info("검토 잡 %s: %s×%s 의 %s 가 걸림을 놓쳤다 — 영역 %s 를 넓혔다(다시 연 셀 %s, 대상 전체 끔 %s)", self.job_id,
+                     cell.unit_id, self.agent, "·".join(sample["keys"]), sample["domain"], widened["reopened"], widened["off"])
         if out["state"] not in ("reviewed", "no_input"):
             log.info("검토 잡 %s: %s×%s 셀 정산 미달(%s) → %s", self.job_id, cell.unit_id, self.agent,
                      ", ".join(out.get("missing") or [out.get("code") or ""]), out["state"])
 
-    def _sample_outcome(self, cell: _Cell) -> None:
-        """정산이 끝난 표본·그림자 셀의 결과(재설계 M3 C3-7 — X1-13 의 넷)를 `sample_json` 에 적고, 걸림을 놓쳤으면(risk_miss) 그
-        영역을 그 대상에서 넓힌다. 카드 셀은 `review_verify.audit_outcome`(실효 판정 · 카드 밖 줄), 입력 결손 셀은 그 결과로 —
-        영향 있음 risk_miss · 모름·확인할 항목 undetermined · 없음 kept."""
-        row = self.store.query_one("SELECT domain, sample_json FROM rr_review_cells WHERE target_key = ? AND unit_id = ?"
-                                   " AND agent_key = ?", (self.target_key, cell.unit_id, self.agent))
+    def _sample_results(self, cell: _Cell) -> dict:
+        """표본·그림자 셀의 결과(재설계 M3 C3-7 — X1-13 의 넷) — {keys, outcome, domain}, 표본·그림자가 아니면 {}. 카드 셀은
+        `review_verify.audit_outcome`(실효 판정 · 카드 밖 줄), 입력 결손 셀은 그 결과로 — 영향 있음 risk_miss · 모름·확인할 항목
+        undetermined · 없음 kept. 정산이 같은 트랜잭션에 적는다(`settle_*` 의 sample_results)."""
+        row = self.store.query_one("SELECT domain, sample_json, extras_json FROM rr_review_cells WHERE target_key = ?"
+                                   " AND unit_id = ? AND agent_key = ?", (self.target_key, cell.unit_id, self.agent))
         sample = _json(row["sample_json"] if row is not None else None, {})
         keys = [k for k in review_cells.SAMPLE_RESULT_KEYS if isinstance(sample.get(k), Mapping)]
         if not keys:
-            return
+            return {}
         if self.gaps:
             outcome = _NOINPUT_AUDIT.get(str((cell.noinput or {}).get("outcome")), "undetermined")
         else:
             rows = self._rows(cell)
-            head = self.store.query_one("SELECT extras_json FROM rr_review_cells WHERE target_key = ? AND unit_id = ?"
-                                        " AND agent_key = ?", (self.target_key, cell.unit_id, self.agent))
-            offcard, _rest = expert_report.offcard_rows(dict(head) if head is not None else {})
+            offcard, _rest = expert_report.offcard_rows(dict(row) if row is not None else {})
             outcome = review_verify.audit_outcome(review_verify.effective_rows(rows) if rows else {}, offcard)
-        if not review_cells.note_sample_result(self.store, self.target_key, cell.unit_id, self.agent, lease_owner=self.lease,
-                                               results={k: outcome for k in keys}, now=self.now()):
-            raise _Stop("lease", release=False)
-        if outcome == "risk_miss":
-            out = review_cells.widen(self.store, self.target_key, str(row["domain"]), now=self.now())
-            log.info("검토 잡 %s: %s×%s 의 %s 가 걸림을 놓쳤다 — 영역 %s 를 넓혔다(다시 연 셀 %s, 대상 전체 끔 %s)", self.job_id,
-                     cell.unit_id, self.agent, "·".join(keys), row["domain"], out["reopened"], out["off"])
+        return {"keys": keys, "outcome": outcome, "domain": str(row["domain"])}
 
     def _close(self) -> None:
         """세션 끝 — 그 전문가의 범위 안 열린 셀이 0 이면 마감(`finalize_expert`), 아니면 놓는다(백오프 중인 셀·다음 시도의 셀은
@@ -2451,7 +2454,12 @@ class ReviewLoop:
             (job["target_key"], job["id"]))["n"] or 0)
 
     def _audit_topup(self, job: Mapping[str, Any]) -> int:
-        """잡 끝 보충 표본(C3-7) — 잡 거르기가 on 일 때 그 잡이 거른 셀을 표본 바닥(59건 · 영역당 1건)까지 다시 연다. 다시 연 셀 수."""
+        """잡 끝 보충 표본(C3-7) — 잡 거르기가 on 일 때 거른 셀을 표본 바닥(59건 · 영역당 1건)까지 다시 연다. 그 앞에 넓힌 영역의 남은
+        거른 셀을 거둔다(넓힘은 원장에서 유도된다 — 정산 뒤 넓힘 전에 죽었거나 분류와 엇갈린 셀, 반대 검토 MEDIUM 10 · LOW 16).
+        이 잡이 이어 돌 셀이 생겼으면 그 수(0 이 아니면 잡은 review 로 이어 돈다)."""
+        target_key = str(job["target_key"])
+        if review_cells.reopen_widened(self.store, target_key, now=self.clock()) and self._open_cells(job):
+            return 1
         knobs = (job.get("params") or {}).get("knobs") or {}
         if knobs.get("filter") != "on":
             return 0

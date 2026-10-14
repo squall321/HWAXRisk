@@ -749,3 +749,64 @@ def test_the_job_end_top_up_reopens_cells_an_ended_job_filtered_and_stamps_them_
     cell = _cell(store, key, b, STD2)
     assert (cell["state"], cell["route_forced"], cell["run_id"]) == ("reviewed", review_cells.FILTER_FLOOR, second)
     assert review_cells.closure_cells(store, key)["filtered"]["audit"]["floor_met"] is True
+
+
+def test_a_crash_between_settling_a_sample_and_widening_loses_neither_the_result_nor_the_reopen(store, monkeypatch):
+    """반대 검토 MEDIUM 10 ① — 표본 셀의 결과(risk_miss)는 정산과 같은 트랜잭션에 적힌다. 넓힘(거른 셀 다시 열기) 직전에 죽어도 결과는
+    남고(불변식 G9 — 닫힌 표본 셀에 결과가 없으면 걸린다), 잡 끝이 넓힌 영역의 남은 거른 셀을 다시 연다."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    key = rig.target(store, ROSTER)
+    us = units.load_units(store, key)
+    bundles = [u["unit_id"] for u in us if u["kind"] == "bundle"]
+    fake = _fake(ROSTER)
+    _quiet(fake, *bundles)
+    for u in us:
+        fake.noinput_q1[u["unit_id"]], fake.noinput_q2[u["unit_id"]] = ["no"], [""]
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]}))
+    monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 1)
+    for u in bundles:
+        fake.noinput_q1[u] = ["yes"]                                  # 보충 표본이 끝까지 보면 영향 있음 — 놓친 걸림
+    real, crashed = review_cells.widen, []
+
+    def crash_once(*args, **kwargs):
+        if not crashed:
+            crashed.append(1)
+            raise RuntimeError("넓히기 직전에 죽었다(가짜)")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(review_cells, "widen", crash_once)
+    job_id = rig.job(store, key, scope={"agents": [MEM2]})
+    r.finish(job_id)
+    assert crashed and rig.state(store, job_id) == "completed"
+    cells = {c["unit_id"]: c for c in _cells(store, key) if c["agent_key"] == MEM2 and c["unit_id"] in bundles}
+    audited = [c for c in cells.values() if c["route_forced"] == review_cells.FILTER_FLOOR]
+    assert [c["sample_json"]["filter_audit"]["result"] for c in audited] == ["risk_miss"]
+    assert review_cells.review_invariants(store, key) == []
+    assert "mem" in review_cells.widened_domains(store, key)
+    assert {c["state"] for c in cells.values()} - {"reviewed"} <= {"pending"}            # 남은 거른 셀은 다시 열렸다
+    assert not any(c["state"] == "na_irrelevant" for c in cells.values())
+
+
+def test_a_crash_between_writing_the_sweep_and_reopening_its_handoff_is_replayed_on_restart(store, monkeypatch):
+    """반대 검토 MEDIUM 10 ② — 훑기를 적은 뒤 그 넘김(h 줄)으로 거른 셀을 다시 열기 전에 죽어도, 다음 세션이 원장의 훑기를 다시 읽을 때
+    그 다시 열기를 이어 한다(거른 셀만 여므로 멱등)."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    roster = (*SMALL, {"key": "xd-syn-0", "domain": "xd", "relevance": 0.99}, {"key": "xd-syn-1", "domain": "xd", "relevance": 0.9})
+    real, crashed = review_cells.reopen_filtered, []
+
+    def crash_once(*args, **kwargs):
+        if kwargs.get("via") == "handoff" and not crashed:
+            crashed.append(1)
+            raise RuntimeError("넘김을 다시 열기 직전에 죽었다(가짜)")
+        return real(*args, **kwargs)
+
+    def setup(fake, kinds):
+        fake.handoff_to, fake.handoff_unit, fake.handoff_from = "std", kinds["boundary"], {"xd-syn-1"}
+        monkeypatch.setattr(review_cells, "reopen_filtered", crash_once)
+
+    key, _job, _fake, kinds = _run(store, roster, fake_setup=setup)
+    cell = _cell(store, key, kinds["boundary"], STD2)
+    assert crashed and (cell["state"], cell["route_forced"]) == ("reviewed", "handoff")

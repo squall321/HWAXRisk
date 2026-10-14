@@ -690,28 +690,14 @@ def reopen_filtered(store: Any, target_key: str, *, via: str, domain: str | None
     return opened
 
 
-def note_sample_result(store: Any, target_key: str, unit_id: str, agent_key: str, *, lease_owner: str,
-                       results: Mapping[str, str], now: int | None = None) -> bool:
-    """정산이 끝난 표본·그림자 셀의 결과(`review_verify.audit_outcome` — risk_miss · relevance_miss · undetermined · kept)를
-    `sample_json.<filter_audit|shadow>.result` 에 적는다. 그 전문가를 쥔 선점으로만 쓴다(셀은 이미 놓였다). 쓴 행이 있으면 참."""
+def reopen_widened(store: Any, target_key: str, *, now: int | None = None) -> int:
+    """넓힌 영역(대상 전체 끔이면 전부)의 남은 거른 셀을 다시 연다 — 넓힘은 원장에서 유도되므로 정산 뒤 widen 전에 죽었거나(반대
+    검토 MEDIUM 10) 분류와 넓힘이 엇갈려(LOW 16) 남은 셀을 잡 끝(보충 표본 앞)이 거둔다. 다시 연 셀 수."""
     now = now_epoch() if now is None else now
-    key = (target_key, unit_id, agent_key)
-    with store.tx():
-        if not _holds(store, target_key, agent_key, lease_owner):
-            return False
-        row = _cell(store, *key)
-        if row is None:
-            return False
-        try:
-            sample = json.loads(row["sample_json"] or "null")
-        except ValueError:
-            sample = None
-        sample = dict(sample) if isinstance(sample, dict) else {}
-        for name, result in results.items():
-            if name in sample and isinstance(sample[name], dict):
-                sample[name] = {**sample[name], "result": result}
-        return bool(store.execute(f"UPDATE rr_review_cells SET sample_json = ?, updated_at = ? WHERE {_cell_where()}",
-                                  (json.dumps(sample, sort_keys=True), now, *key)))
+    if filter_off(store, target_key):
+        return len(reopen_filtered(store, target_key, via="filter_off", now=now))
+    return sum(len(reopen_filtered(store, target_key, via="widened", domain=d, now=now))
+               for d in widened_domains(store, target_key))
 
 
 def widen(store: Any, target_key: str, domain: str, *, now: int | None = None) -> dict:
@@ -974,9 +960,26 @@ def _args(sets: Mapping[str, Any]) -> list[Any]:
     return [v for v in sets.values() if not isinstance(v, Expr)]
 
 
+def _with_sample_results(sample_json: Any, results: Mapping[str, str] | None) -> dict:
+    """정산의 sets 에 더할 표본·그림자 결과(`sample_json.<filter_audit|shadow>.result`) — 그 표지가 있는 열쇠만. 줄 것이 없으면 {}."""
+    if not results:
+        return {}
+    try:
+        sample = json.loads(sample_json or "null")
+    except (TypeError, ValueError):
+        sample = None
+    sample = dict(sample) if isinstance(sample, dict) else {}
+    hit = [k for k in results if isinstance(sample.get(k), dict)]
+    if not hit:
+        return {}
+    for k in hit:
+        sample[k] = {**sample[k], "result": results[k]}
+    return {"sample_json": json.dumps(sample, sort_keys=True)}
+
+
 def settle_cell(store: Any, target_key: str, unit_id: str, agent_key: str, *, lease_owner: str,
                 samples_done: bool = True, more_calls: bool = False, fail_code: str | None = None,
-                max_charged: int = 2, now: int | None = None) -> dict:
+                max_charged: int = 2, sample_results: Mapping[str, str] | None = None, now: int | None = None) -> dict:
     """도는 셀을 정산한다 — {written, state, code?, missing?}.
 
     `reviewed` 조건(전부 참) — `cards_expected` 가 있고 `cards_judged == cards_expected`, 정산에 쓴 호출에 절단이 남지 않았다
@@ -1011,7 +1014,7 @@ def settle_cell(store: Any, target_key: str, unit_id: str, agent_key: str, *, le
         if not missing:
             _move(store, "cell", "running", "reviewed", where=where, params=params, now=now,
                   sets={**release, "not_before": None, "error_code": None, "error_class": None, "error": None,
-                        "knob": None})
+                        "knob": None, **_with_sample_results(row["sample_json"], sample_results)})
             return {"written": True, "state": "reviewed"}
         if more_calls:
             return {"written": True, "state": "running", "missing": missing}
@@ -1027,7 +1030,7 @@ def settle_cell(store: Any, target_key: str, unit_id: str, agent_key: str, *, le
 
 
 def settle_noinput(store: Any, target_key: str, unit_id: str, agent_key: str, *, lease_owner: str, outcome: str | None,
-                   max_charged: int = 2, now: int | None = None) -> dict:
+                   max_charged: int = 2, sample_results: Mapping[str, str] | None = None, now: int | None = None) -> dict:
     """입력 결손 셀을 정산한다(재설계 M3 C3-3) — {written, state, code?, missing?}. 결과(`review_verify.noinput_outcome`)가
     impact·none 이면 reviewed, unknown·request 면 no_input 이다(basis 는 셀이 이미 noinput). 결과가 없거나(답에 q1·q2 가 모자라다)
     마지막 답이 잘린 채 끝났으면(`truncated = 1`) 내용 탓 실패다 — `charged + 1`, 한도에 닿으면 failed. 선점을 잃었으면
@@ -1046,7 +1049,8 @@ def settle_noinput(store: Any, target_key: str, unit_id: str, agent_key: str, *,
         if not missing:
             dst = NOINPUT_STATES[str(outcome)]
             _move(store, "cell", "running", dst, where=where, params=params, now=now,
-                  sets={**release, "not_before": None, "error_code": None, "error_class": None, "error": None, "knob": None})
+                  sets={**release, "not_before": None, "error_code": None, "error_class": None, "error": None, "knob": None,
+                        **_with_sample_results(row["sample_json"], sample_results)})
             return {"written": True, "state": dst}
         charged = int(row["charged"] or 0) + 1
         failure = {**release, "charged": charged, "error_code": missing[0], "error_class": review_ops.CONTENT,
@@ -1503,12 +1507,16 @@ def review_invariants(store: Any, target_key: str) -> list[str]:
     (G6) failed 셀에는 까닭(error_code)이 있다.
     (G7) skipped 셀에는 넘긴 사람(decided_by)과 사유(decide_note)가 있다(재설계 M3 C3-8 — 3.10).
     (G8) na_irrelevant 셀은 거르기 분류가 거른 셀이다 — `route='filtered'` 이고 분류 기록(route_json.rule)이 있다.
+    (G9) 닫힌(reviewed · no_input) 표본 · 그림자 셀에는 결과가 있다(반대 검토 MEDIUM 10 — 정산과 같은 트랜잭션에 적는다).
     """
     problems: list[str] = []
     cells = [dict(r) for r in store.query(
         "SELECT unit_id, agent_key, state, lease_owner, basis, cards_expected, cards_judged, truncated, offcard_state,"
         " error_code, decided_by, decide_note, route, json_extract(route_json, '$.rule') AS route_rule,"
-        " json_extract(extras_json, '$.noinput.outcome') AS noinput_outcome FROM rr_review_cells"
+        " json_extract(extras_json, '$.noinput.outcome') AS noinput_outcome,"
+        " json_type(sample_json, '$.filter_audit') IS NOT NULL AND json_type(sample_json, '$.filter_audit.result') IN"
+        " (NULL, 'null') AS audit_open, json_type(sample_json, '$.shadow') IS NOT NULL AND"
+        " json_type(sample_json, '$.shadow.result') IN (NULL, 'null') AS shadow_open FROM rr_review_cells"
         " WHERE target_key = ?", (target_key,))]
     heads = {r["agent_key"]: dict(r) for r in store.query(
         "SELECT agent_key, state, lease_owner FROM rr_expert_reports WHERE target_key = ?", (target_key,))}
@@ -1562,6 +1570,8 @@ def review_invariants(store: Any, target_key: str) -> list[str]:
             problems.append(f"(G7) skipped 셀 {name} 에 넘긴 사람이나 사유가 없다.")
         if c["state"] == "na_irrelevant" and not (c["route"] == FILTERED and c["route_rule"]):
             problems.append(f"(G8) na_irrelevant 셀 {name} 에 거르기 분류 기록(route filtered · route_json.rule)이 없다.")
+        if c["state"] in ("reviewed", "no_input") and (c["audit_open"] or c["shadow_open"]):
+            problems.append(f"(G9) 닫힌 표본 · 그림자 셀 {name} 에 결과가 없다(정산과 결과가 갈라졌다).")
     judged = Counter((r["unit_id"], r["agent_key"]) for r in store.query(
         "SELECT unit_id, agent_key FROM rr_card_verdicts WHERE target_key = ? AND is_effective = 1", (target_key,)))
     for c in cells:
