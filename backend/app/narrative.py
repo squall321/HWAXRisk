@@ -2180,6 +2180,7 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
         )
 
         old = [r["claim_uid"] for r in store.query(
+            # 카드 대조 거름 그대로(M3 S3-4) — 패널 범위·패널 브리프의 자리라 cells 대상에서 돌지 않거나 카드 finding 은 panel_id 가 없어 안 걸린다
             "SELECT claim_uid FROM rr_findings WHERE panel_id = ? AND COALESCE(source_kind, '') <> 'card_review'",
             (panel_id,))]
         if old:

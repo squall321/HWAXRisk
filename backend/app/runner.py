@@ -1756,6 +1756,7 @@ def repersist_panel(store: Any, settings: Any, panel_id: str, *, narrative_mod: 
         log.exception("패널 %s 다시 저장 실패", panel_id)
         raise AppError("persist_failed", f"다시 저장하지 못했다 — {type(exc).__name__}: {exc}", 422) from exc
     findings = store.query_one("SELECT COUNT(*) AS n FROM rr_findings WHERE panel_id = ?"
+                               # 카드 대조 거름 그대로(M3 S3-4) — 패널 범위·패널 브리프의 자리라 cells 대상에서 돌지 않거나 카드 finding 은 panel_id 가 없어 안 걸린다
                                " AND COALESCE(source_kind, '') <> 'card_review'", (panel_id,))
     return {**out, "findings_n": int(findings["n"] or 0)}
 

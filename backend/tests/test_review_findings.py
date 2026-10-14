@@ -365,6 +365,9 @@ REVIEW_READERS: dict[tuple[str, str], str] = {
     ("routes.py", "put_curation"): "큐 항목이 가리키는 finding(검토 마감이 올린 미분류 메커니즘 항목 포함)",
     ("learning.py", "plan_remap"): "택소노미 재매핑은 finding 전부의 별칭을 더한다(cluster_key 는 바이트 불변)",
     ("brief.py", "_finding_subjects"): "E7 이 다른 대상의 의견 행(검토 의견 포함 — 설계서대로 둔다)이 올린 finding 의 주체를 본다",
+    ("registry.py", "_load_findings"): "거름 글이 상수 FINDING_SCOPE_SQL 에서 온다(M3 S3-4 — 카드 대조 finding 은 cells 대상만)",
+    ("registry.py", "_contested_marking_done"): "거름 글이 상수 FINDING_SCOPE_SQL 에서 온다(M3 S3-4 — 위와 같은 범위)",
+    ("routes.py", "_cluster_finding_ids"): "거름 글이 상수 FINDING_SCOPE_SQL 에서 온다(M3 S3-4 — 등록부와 같은 범위)",
 }
 _READ_SQL = re.compile(r"\b(?:FROM|JOIN)\s+rr_findings\b", re.IGNORECASE)
 

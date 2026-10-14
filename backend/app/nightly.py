@@ -369,6 +369,7 @@ def scan_unclassified(store: Any, *, now: int) -> dict:
     """mechanism_detail='unclassified' 로 저장된 finding 을 큐에 올린다(§7.1 — detail 이 목록 밖일 때)."""
     rows = store.query(
         "SELECT finding_id, owner_sub, mechanism, mechanism_free FROM rr_findings"
+        # 카드 대조 거름 그대로(M3 S3-4) — 과제를 가로지르는 학습·지표·야간 자리라 카드 대조 원자는 회수 자격 0(M2 #9)·cells 대상은 통계에 넣지 않는다(M3 #57)
         " WHERE mechanism_detail = 'unclassified' AND COALESCE(source_kind, '') <> 'card_review' ORDER BY finding_id")
     queued = 0
     for row in rows:

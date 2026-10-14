@@ -3464,13 +3464,36 @@ def panel_transcript_payload(panel_id: str, *, owner_sub: str | None = None) -> 
             "turns": turns, "risk_spec": spec or None}
 
 
+REGISTRY_SOURCES: tuple[str, ...] = ("panels",)
+
+
 def registry_payload(target_key: str, *, owner_sub: str | None = None, status: str | None = None,
                      severity: str | None = None, domain: str | None = None,
-                     limit: int | None = None, offset: int = 0) -> dict:
-    """`GET /api/targets/{key}/registry` 본체 — MCP `risk_get_registry` 와 같은 함수. 상한 뒤는 `next_offset` 으로 받는다."""
+                     limit: int | None = None, offset: int = 0, attention: str | None = None,
+                     unit_id: str | None = None, source: str | None = None) -> dict:
+    """`GET /api/targets/{key}/registry` 본체 — MCP `risk_get_registry` 와 같은 함수. 상한 뒤는 `next_offset` 으로 받는다.
+
+    재설계 M3 S3-4 — `attention`(쉼표로 여럿 — A,B)·`unit_id`(그 단위가 제기에 든 행) 거름. cells 대상은 주의 등급 → 우선순위 →
+    지지 영역 수 → 지지 전문가 수 → 키 순이다(패널 대상은 지금 순서 그대로). `source='panels'` 는 저장 없이 패널 finding 만으로
+    다시 센 비교 보기다(패널을 돌린 뒤 cells 로 바꾼 대상의 '바꾸기 전 등록부' — M3 #57)."""
     _target_row(target_key, owner_sub)
     store = get_store()
-    rows = registry_module.registry_rows(store, target_key)
+    if source and source not in REGISTRY_SOURCES:
+        raise AppError("E100", f"source 는 {list(REGISTRY_SOURCES)} 가운데 하나다 — {source!r}.", 422)
+    if source == "panels":
+        rows = registry_module.merge(store, target_key, persist=False, include_card=False)["rows"]
+        rows.sort(key=lambda r: (-float(r["priority"] or 0), str(r["cluster_key"])))
+    else:
+        rows = registry_module.registry_rows(store, target_key)
+        if registry_module.target_flow(store, target_key) == "cells":
+            rows.sort(key=lambda r: (registry_module.ATTENTION_ORDER.get(str(r.get("attention") or ""), 9),
+                                     -float(r["priority"] or 0), -int(r.get("support_domains") or 0),
+                                     -int(r.get("support_experts") or 0), str(r["cluster_key"])))
+    if attention:
+        wanted = {a.strip().upper() for a in str(attention).split(",") if a.strip()}
+        rows = [r for r in rows if str(r.get("attention") or "") in wanted]
+    if unit_id:
+        rows = [r for r in rows if unit_id in ((r.get("merged") or {}).get("unit_ids") or ())]
     if status:
         rows = [r for r in rows if r["status"] == status]
     if severity:
@@ -3496,9 +3519,12 @@ def registry_payload(target_key: str, *, owner_sub: str | None = None, status: s
 
 @router.get("/targets/{target_key}/registry")
 def get_registry(target_key: str, status: str | None = None, severity: str | None = None,
-                 domain: str | None = None, ident: identity.Identity = Depends(identity.current)) -> dict:
+                 domain: str | None = None, attention: str | None = None, unit_id: str | None = None,
+                 source: str | None = None, offset: int = 0,
+                 ident: identity.Identity = Depends(identity.current)) -> dict:
     owner_sub = _require_user(ident)
-    return registry_payload(target_key, owner_sub=owner_sub, status=status, severity=severity, domain=domain)
+    return registry_payload(target_key, owner_sub=owner_sub, status=status, severity=severity, domain=domain,
+                            attention=attention, unit_id=unit_id, source=source, offset=offset)
 
 
 @router.get("/targets/{target_key}/seats")
@@ -3562,8 +3588,7 @@ REGISTRY_LABEL_OUTCOME = {"verified": "confirmed", "dismissed": "refuted"}
 def _cluster_finding_ids(store: Any, cluster_key: str, owner_sub: str,
                          target_key: str | None) -> list[str]:
     """그 등록부 클러스터에 실린 finding id — 사람 확정 라벨의 대상."""
-    sql = ("SELECT finding_id FROM rr_findings WHERE cluster_key = ? AND owner_sub = ?"
-           " AND COALESCE(source_kind, '') <> 'card_review'")
+    sql = f"SELECT finding_id FROM rr_findings WHERE cluster_key = ? AND owner_sub = ? AND {registry_module.FINDING_SCOPE_SQL}"
     params: list[Any] = [cluster_key, owner_sub]
     if target_key:
         sql += " AND target_key = ?"
@@ -4617,6 +4642,7 @@ def _next_human_claim_uid(store: Any, target_key: str) -> str:
     """`<target_key>#H<n>` — 그 타깃의 사람 finding 순번(plan §0.2.2)."""
     rows = store.query(
         "SELECT claim_uid FROM rr_findings WHERE target_key = ? AND origin = 'human'"
+        # 카드 대조 거름 그대로(M3 S3-4) — 카드 대조 finding 이 걸릴 수 없는 자리다(사람 finding 순번·의심 문구 회수)
         " AND COALESCE(source_kind, '') <> 'card_review'", (target_key,))
     used = []
     for row in rows:
@@ -4878,6 +4904,7 @@ def put_curation(queue_id: str, body: CurationDecisionBody,
             if claim_uid:
                 restored = int(store.execute(
                     "UPDATE rr_findings SET recall_eligible = 1, updated_at = ?"
+                    # 카드 대조 거름 그대로(M3 S3-4) — 카드 대조 finding 이 걸릴 수 없는 자리다(사람 finding 순번·의심 문구 회수)
                     " WHERE claim_uid = ? AND owner_sub = ? AND COALESCE(source_kind, '') <> 'card_review'",
                     (now_epoch(), claim_uid, owner_sub)) or 0)
             applied = {"restored_text": payload.get("raw"), "sha1": payload.get("sha1"),

@@ -1,5 +1,5 @@
 # v5 새 표의 반출·이양·폐기 등록과 행 단위 반출 변환(재설계 M3 S3-1) — 행은 각 표의 생산자 걸음으로만 만든다(손 INSERT 금지)
-"""S3-1 은 표와 등록·반출 변환만 넣는다. 새 표 행의 생산자는 뒤 걸음에 선다 — 등록부의 카드 인용은 S3-4(`registry.finding_scope`),
+"""S3-1 은 표와 등록·반출 변환만 넣는다. 새 표 행의 생산자는 뒤 걸음에 선다 — 등록부의 카드 인용은 S3-4(`registry.finding_scope` — 섰다),
 쟁점은 S3-6(`issues.select_issues`), 쟁점 패널은 S3-7, 완결 확인은 S3-8, 요약·보고서 판은 S3-9, 근거 꾸러미 실호출은 셀 꾸러미
 C3-12(`unit_live.ensure`)다. 생산자가 아직 없는 행 시험은 자리표시로 둔다 — 전제가 없을 때만 기대한 실패이고(strict), 전제가 서면
 몸통의 실패가 그대로 붉다. 그 걸음이 서면 표식을 지우고 이 시험을 그 생산자에 다시 묶는다(M3.md 4.2 끝 · m3-synthesis S3-1).
@@ -43,8 +43,6 @@ def _require(module_name: str, *names: str) -> Any:
     return module
 
 
-S3_4_MERGE = pytest.mark.xfail(strict=True, raises=M3ProducerMissing,
-                               reason="S3-4 producer — registry.finding_scope(cells 대상 등록부 병합)가 생기면 이 표식을 지운다")
 S3_6_ISSUES = pytest.mark.xfail(strict=True, raises=M3ProducerMissing,
                                 reason="S3-6 producer — issues.select_issues(쟁점 선정)가 생기면 이 표식을 지운다")
 
@@ -208,11 +206,10 @@ def test_registry_rows_without_card_quotes_leave_the_box_as_they_are(tmp_path):
         store.close()
 
 
-@S3_4_MERGE
 def test_registry_rows_of_a_cells_target_leave_the_box_with_card_quotes_cut_to_200(risk_store, monkeypatch, tmp_path):
-    """M3 부터 카드 대조 finding 이 등록부에 들어온다(S3-4). 등록부 merged_json 의 card: 인용과 «» 근거 문장은 판정당 200자로 줄고
-    원래 길이(260)가 옆 칸에 실린다. 들여온 박스에서 다시 내보내도 원래 길이가 남는다."""
-    _require("app.registry", "finding_scope")
+    """M3 부터 카드 대조 finding 이 등록부에 들어온다(S3-4 생산자 — registry.merge 의 cells 병합). 등록부 merged_json 의 card: 인용과
+    «» 근거 문장은 판정당 200자로 줄고 원래 길이(260)가 옆 칸에 실린다. 들여온 박스에서 다시 내보내도 원래 길이가 남는다(들이기가
+    다시 부르는 병합이 들여온 finding 의 원래 길이 칸을 옮겨 싣는다)."""
     key = _flagged_cells_target(risk_store, monkeypatch, tmp_path, experts=(review_rig.SEAL,))
     registry.merge(risk_store, key)
     rows = [r for r in _exported(risk_store)["rr_registry"] if r["target_key"] == key]
