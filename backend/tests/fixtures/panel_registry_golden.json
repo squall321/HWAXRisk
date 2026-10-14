@@ -1,0 +1,832 @@
+{
+ "v2": {
+  "diff:12b1733714634da7b87aa48aff6b1652": {
+   "close_level": {
+    "c1": false,
+    "c2": false,
+    "c3": false,
+    "close_level": "C2",
+    "detail": {
+     "contested_marked": true,
+     "depth": {
+      "mech": {
+       "deferred": 0,
+       "have": 0,
+       "need": 2,
+       "roster": 2
+      },
+      "pcb": {
+       "deferred": 1,
+       "have": 0,
+       "need": 1,
+       "roster": 2
+      },
+      "rel": {
+       "deferred": 0,
+       "have": 0,
+       "need": 2,
+       "roster": 2
+      },
+      "sim": {
+       "deferred": 0,
+       "have": 0,
+       "need": 2,
+       "roster": 2
+      },
+      "xd": {
+       "deferred": 0,
+       "have": 0,
+       "need": 2,
+       "roster": 2
+      }
+     },
+     "domains_terminal": {
+      "cam": 0,
+      "disp": 0,
+      "material": 0,
+      "mech": 0,
+      "mem": 0,
+      "passive": 0,
+      "pcb": 1,
+      "pwr": 0,
+      "rel": 0,
+      "rf": 0,
+      "sh": 0,
+      "sim": 0,
+      "soc": 0,
+      "std": 0,
+      "xd": 0
+     },
+     "done_weak": 0,
+     "failed": 0,
+     "skipped": 0,
+     "skipped_ratio": 0.0,
+     "spec_parse_failed": 0,
+     "strong": 0,
+     "strong_ratio": 0.0,
+     "tier_a_done": 0
+    },
+    "level": "C0",
+    "previous_level": "C0",
+    "raised": false,
+    "roster_size": 10,
+    "status_counts": {
+     "assigned": 5,
+     "deferred": 1,
+     "pending": 4
+    },
+    "target_key": "diff:12b1733714634da7b87aa48aff6b1652",
+    "unseated_n": 9
+   },
+   "merge": {
+    "clusters": 0,
+    "findings": 0,
+    "verdict_candidate": "undetermined"
+   },
+   "rows": []
+  },
+  "diff:b631dcfc5fe8406ab0b53e0e164a1d63": {
+   "close_level": {
+    "c1": false,
+    "c2": false,
+    "c3": false,
+    "close_level": "C2",
+    "detail": {
+     "contested_marked": true,
+     "depth": {
+      "mech": {
+       "deferred": 0,
+       "have": 1,
+       "need": 2,
+       "roster": 2
+      },
+      "pcb": {
+       "deferred": 1,
+       "have": 1,
+       "need": 1,
+       "roster": 2
+      },
+      "rel": {
+       "deferred": 0,
+       "have": 1,
+       "need": 2,
+       "roster": 2
+      },
+      "sim": {
+       "deferred": 0,
+       "have": 1,
+       "need": 2,
+       "roster": 2
+      },
+      "xd": {
+       "deferred": 0,
+       "have": 1,
+       "need": 2,
+       "roster": 2
+      }
+     },
+     "domains_terminal": {
+      "cam": 0,
+      "disp": 0,
+      "material": 0,
+      "mech": 1,
+      "mem": 0,
+      "passive": 0,
+      "pcb": 2,
+      "pwr": 0,
+      "rel": 1,
+      "rf": 0,
+      "sh": 0,
+      "sim": 1,
+      "soc": 0,
+      "std": 0,
+      "xd": 1
+     },
+     "done_weak": 0,
+     "failed": 0,
+     "skipped": 0,
+     "skipped_ratio": 0.0,
+     "spec_parse_failed": 0,
+     "strong": 5,
+     "strong_ratio": 1.0,
+     "tier_a_done": 1
+    },
+    "level": "C0",
+    "previous_level": "C0",
+    "raised": false,
+    "roster_size": 10,
+    "status_counts": {
+     "deferred": 1,
+     "done": 5,
+     "pending": 4
+    },
+    "target_key": "diff:b631dcfc5fe8406ab0b53e0e164a1d63",
+    "unseated_n": 4
+   },
+   "merge": {
+    "clusters": 3,
+    "findings": 3,
+    "verdict_candidate": "conditional"
+   },
+   "rows": [
+    {
+     "change_kind": "dimension",
+     "cluster_key": "724d0ced2c40",
+     "contested": 0,
+     "direction": "risk",
+     "evidence_grade": "도구예측",
+     "family_key": "24ac25998b1c",
+     "human_n": 0,
+     "judgement": "WARNING",
+     "mechanism": "mechanical",
+     "mechanism_detail": "drop_stress",
+     "merged_json": "{\"cites\":[{\"quote\":\"PLATE_2 min_dim 1.000→1.400 mm (+40.0%) (min_dim 근사) [c:73d5d1b165af]\",\"ref\":\"c:73d5d1b165af\"}],\"claim\":\"PLATE_2 두께가 1.0→1.4 mm 로 늘어 적층 높이 여유가 줄어든다.\",\"claim_finding_id\":\"08910bb5c8de4c9999c99659ddba8020#F1\",\"cluster_key\":\"724d0ced2c40\",\"contest_notes\":[],\"direction\":\"risk\",\"domains\":[\"mech\"],\"feature_snapshot\":{\"c:73d5d1b165af\":{\"after\":1.4,\"before\":1.0,\"change_kind\":\"dimension\",\"cid\":\"c:73d5d1b165af\",\"code\":\"part.thickness_changed\",\"confidence\":\"medium\",\"subject_key\":\"ck:4bbe8075874f\"}},\"human_refs\":[],\"member_ids\":[\"08910bb5c8de4c9999c99659ddba8020#F1\"],\"names\":[],\"owner_domain\":\"mech\",\"panels\":[\"08910bb5c8de4c9999c99659ddba8020\"],\"precedent_counts\":{\"none\":1},\"raised_by\":[\"mech-legacy-0\"],\"rejected_refs\":[],\"resolving_checks\":[\"sim:낙하 해석 재실행\"],\"severity_counts\":{\"중대\":1},\"stored_cluster_key\":\"724d0ced2c40\",\"trigger_condition\":\"none\",\"warrant\":\"diff 의미 이벤트가 같은 방향의 수치 변화를 낸다.\"}",
+     "precedent": "none",
+     "priority": 1.8,
+     "rejected": 0,
+     "sev3": 2,
+     "severity": "중대",
+     "status": "open",
+     "status_source": "code",
+     "subject_key": "ck:4bbe8075874f",
+     "support": 1,
+     "weak_subject": 0
+    },
+    {
+     "change_kind": "dimension",
+     "cluster_key": "724d0ced2c40.imp",
+     "contested": 0,
+     "direction": "improvement",
+     "evidence_grade": "도구예측",
+     "family_key": "24ac25998b1c",
+     "human_n": 0,
+     "judgement": "OK",
+     "mechanism": "mechanical",
+     "mechanism_detail": "drop_stress",
+     "merged_json": "{\"cites\":[{\"quote\":\"PLATE_2 min_dim 1.000→1.400 mm (+40.0%) (min_dim 근사) [c:73d5d1b165af]\",\"ref\":\"c:73d5d1b165af\"}],\"claim\":\"두께 증가로 굽힘 강성이 올라간다.\",\"claim_finding_id\":\"08910bb5c8de4c9999c99659ddba8020#G1\",\"cluster_key\":\"724d0ced2c40\",\"contest_notes\":[],\"direction\":\"improvement\",\"domains\":[\"mech\"],\"feature_snapshot\":{\"c:73d5d1b165af\":{\"after\":1.4,\"before\":1.0,\"change_kind\":\"dimension\",\"cid\":\"c:73d5d1b165af\",\"code\":\"part.thickness_changed\",\"confidence\":\"medium\",\"subject_key\":\"ck:4bbe8075874f\"}},\"human_refs\":[],\"member_ids\":[\"08910bb5c8de4c9999c99659ddba8020#G1\"],\"names\":[],\"owner_domain\":\"mech\",\"panels\":[\"08910bb5c8de4c9999c99659ddba8020\"],\"precedent_counts\":{\"none\":1},\"raised_by\":[\"mech-legacy-0\"],\"rejected_refs\":[],\"resolving_checks\":[\"sim:낙하 해석 재실행\"],\"severity_counts\":{\"경미\":1},\"stored_cluster_key\":\"724d0ced2c40.imp\",\"trigger_condition\":\"none\",\"warrant\":\"diff 의미 이벤트가 같은 방향의 수치 변화를 낸다.\"}",
+     "precedent": "none",
+     "priority": 0.9,
+     "rejected": 0,
+     "sev3": 1,
+     "severity": "경미",
+     "status": "open",
+     "status_source": "code",
+     "subject_key": "ck:4bbe8075874f",
+     "support": 1,
+     "weak_subject": 0
+    },
+    {
+     "change_kind": "material",
+     "cluster_key": "db42c4b1b018",
+     "contested": 0,
+     "direction": "risk",
+     "evidence_grade": "도구예측",
+     "family_key": "7417161f2794",
+     "human_n": 0,
+     "judgement": "WARNING",
+     "mechanism": "interface",
+     "mechanism_detail": "interference",
+     "merged_json": "{\"cites\":[{\"quote\":\"PLATE_1 material.material_norm al6061→az91d [c:091b1945d319]\",\"ref\":\"c:091b1945d319\"}],\"claim\":\"PLATE_1 재질 교체로 접합부 강성 가정이 바뀐다.\",\"claim_finding_id\":\"08910bb5c8de4c9999c99659ddba8020#F2\",\"cluster_key\":\"db42c4b1b018\",\"contest_notes\":[],\"direction\":\"risk\",\"domains\":[\"mech\"],\"feature_snapshot\":{\"c:091b1945d319\":{\"after\":\"az91d\",\"before\":\"al6061\",\"change_kind\":\"material\",\"cid\":\"c:091b1945d319\",\"code\":\"part.material_changed\",\"confidence\":\"medium\",\"subject_key\":\"ck:bbb130fa4587\"}},\"human_refs\":[],\"member_ids\":[\"08910bb5c8de4c9999c99659ddba8020#F2\"],\"names\":[],\"owner_domain\":\"mech\",\"panels\":[\"08910bb5c8de4c9999c99659ddba8020\"],\"precedent_counts\":{\"none\":1},\"raised_by\":[\"mech-legacy-0\"],\"rejected_refs\":[],\"resolving_checks\":[\"sim:낙하 해석 재실행\"],\"severity_counts\":{\"중대\":1},\"stored_cluster_key\":\"db42c4b1b018\",\"trigger_condition\":\"none\",\"warrant\":\"diff 의미 이벤트가 같은 방향의 수치 변화를 낸다.\"}",
+     "precedent": "none",
+     "priority": 1.8,
+     "rejected": 0,
+     "sev3": 2,
+     "severity": "중대",
+     "status": "open",
+     "status_source": "code",
+     "subject_key": "ck:bbb130fa4587",
+     "support": 1,
+     "weak_subject": 0
+    }
+   ]
+  },
+  "diff:d0f8cd698f4f420083f48a0641b6dd84": {
+   "close_level": {
+    "c1": false,
+    "c2": false,
+    "c3": false,
+    "close_level": "C2",
+    "detail": {
+     "contested_marked": true,
+     "depth": {
+      "mech": {
+       "deferred": 0,
+       "have": 0,
+       "need": 2,
+       "roster": 2
+      },
+      "pcb": {
+       "deferred": 1,
+       "have": 0,
+       "need": 1,
+       "roster": 2
+      },
+      "rel": {
+       "deferred": 0,
+       "have": 0,
+       "need": 2,
+       "roster": 2
+      },
+      "sim": {
+       "deferred": 0,
+       "have": 0,
+       "need": 2,
+       "roster": 2
+      },
+      "xd": {
+       "deferred": 0,
+       "have": 0,
+       "need": 2,
+       "roster": 2
+      }
+     },
+     "domains_terminal": {
+      "cam": 0,
+      "disp": 0,
+      "material": 0,
+      "mech": 0,
+      "mem": 0,
+      "passive": 0,
+      "pcb": 1,
+      "pwr": 0,
+      "rel": 0,
+      "rf": 0,
+      "sh": 0,
+      "sim": 0,
+      "soc": 0,
+      "std": 0,
+      "xd": 0
+     },
+     "done_weak": 0,
+     "failed": 0,
+     "skipped": 0,
+     "skipped_ratio": 0.0,
+     "spec_parse_failed": 0,
+     "strong": 0,
+     "strong_ratio": 0.0,
+     "tier_a_done": 0
+    },
+    "level": "C0",
+    "previous_level": "C0",
+    "raised": false,
+    "roster_size": 10,
+    "status_counts": {
+     "deferred": 1,
+     "pending": 9
+    },
+    "target_key": "diff:d0f8cd698f4f420083f48a0641b6dd84",
+    "unseated_n": 9
+   },
+   "merge": {
+    "clusters": 1,
+    "findings": 1,
+    "verdict_candidate": "undetermined"
+   },
+   "rows": [
+    {
+     "change_kind": "dimension",
+     "cluster_key": "724d0ced2c40",
+     "contested": 0,
+     "direction": "risk",
+     "evidence_grade": "경험칙",
+     "family_key": "24ac25998b1c",
+     "human_n": 1,
+     "judgement": "WARNING",
+     "mechanism": "mechanical",
+     "mechanism_detail": "drop_stress",
+     "merged_json": "{\"cites\":[{\"quote\":\"PLATE_2 min_dim 1.000→1.400 mm (+40.0%) (min_dim 근사) [c:73d5d1b165af]\",\"ref\":\"c:73d5d1b165af\"}],\"claim\":\"두께가 늘어 적층 높이 여유가 줄었다.\",\"claim_finding_id\":\"diff:d0f8cd698f4f420083f48a0641b6dd84#H1\",\"cluster_key\":\"724d0ced2c40\",\"contest_notes\":[],\"direction\":\"risk\",\"domains\":[\"mech\"],\"feature_snapshot\":{},\"human_refs\":[\"diff:d0f8cd698f4f420083f48a0641b6dd84#H1\"],\"member_ids\":[\"diff:d0f8cd698f4f420083f48a0641b6dd84#H1\"],\"names\":[],\"owner_domain\":\"\",\"panels\":[],\"precedent_counts\":{\"none\":1},\"raised_by\":[],\"rejected_refs\":[],\"resolving_checks\":[],\"severity_counts\":{\"중대\":1},\"stored_cluster_key\":\"724d0ced2c40\",\"trigger_condition\":\"\",\"warrant\":\"\"}",
+     "precedent": "none",
+     "priority": 2.4,
+     "rejected": 0,
+     "sev3": 2,
+     "severity": "중대",
+     "status": "open",
+     "status_source": "code",
+     "subject_key": "ck:4bbe8075874f",
+     "support": 0,
+     "weak_subject": 0
+    }
+   ]
+  }
+ },
+ "v3": {
+  "diff:7ac74892dd9c401c8f7a07f067a471c1": {
+   "close_level": {
+    "c1": false,
+    "c2": false,
+    "c3": false,
+    "close_level": "C2",
+    "detail": {
+     "contested_marked": true,
+     "depth": {
+      "mech": {
+       "deferred": 0,
+       "have": 0,
+       "need": 2,
+       "roster": 2
+      },
+      "pcb": {
+       "deferred": 1,
+       "have": 0,
+       "need": 1,
+       "roster": 2
+      },
+      "rel": {
+       "deferred": 0,
+       "have": 0,
+       "need": 2,
+       "roster": 2
+      },
+      "sim": {
+       "deferred": 0,
+       "have": 0,
+       "need": 2,
+       "roster": 2
+      },
+      "xd": {
+       "deferred": 0,
+       "have": 0,
+       "need": 2,
+       "roster": 2
+      }
+     },
+     "domains_terminal": {
+      "cam": 0,
+      "disp": 0,
+      "material": 0,
+      "mech": 0,
+      "mem": 0,
+      "passive": 0,
+      "pcb": 1,
+      "pwr": 0,
+      "rel": 0,
+      "rf": 0,
+      "sh": 0,
+      "sim": 0,
+      "soc": 0,
+      "std": 0,
+      "xd": 0
+     },
+     "done_weak": 0,
+     "failed": 0,
+     "skipped": 0,
+     "skipped_ratio": 0.0,
+     "spec_parse_failed": 0,
+     "strong": 0,
+     "strong_ratio": 0.0,
+     "tier_a_done": 0
+    },
+    "level": "C0",
+    "previous_level": "C0",
+    "raised": false,
+    "roster_size": 10,
+    "status_counts": {
+     "deferred": 1,
+     "pending": 9
+    },
+    "target_key": "diff:7ac74892dd9c401c8f7a07f067a471c1",
+    "unseated_n": 9
+   },
+   "merge": {
+    "clusters": 0,
+    "findings": 0,
+    "verdict_candidate": "undetermined"
+   },
+   "rows": []
+  },
+  "diff:80b9a2403ffb41bb891721d0c97d13ea": {
+   "close_level": {
+    "c1": false,
+    "c2": false,
+    "c3": false,
+    "close_level": "C2",
+    "detail": {
+     "contested_marked": true,
+     "depth": {
+      "mech": {
+       "deferred": 0,
+       "have": 2,
+       "need": 2,
+       "roster": 2
+      },
+      "pcb": {
+       "deferred": 1,
+       "have": 1,
+       "need": 1,
+       "roster": 2
+      },
+      "rel": {
+       "deferred": 0,
+       "have": 2,
+       "need": 2,
+       "roster": 2
+      },
+      "sim": {
+       "deferred": 0,
+       "have": 2,
+       "need": 2,
+       "roster": 2
+      },
+      "xd": {
+       "deferred": 0,
+       "have": 2,
+       "need": 2,
+       "roster": 2
+      }
+     },
+     "domains_terminal": {
+      "cam": 0,
+      "disp": 0,
+      "material": 0,
+      "mech": 2,
+      "mem": 0,
+      "passive": 0,
+      "pcb": 2,
+      "pwr": 0,
+      "rel": 2,
+      "rf": 0,
+      "sh": 0,
+      "sim": 2,
+      "soc": 0,
+      "std": 0,
+      "xd": 2
+     },
+     "done_weak": 0,
+     "failed": 0,
+     "skipped": 0,
+     "skipped_ratio": 0.0,
+     "spec_parse_failed": 0,
+     "strong": 9,
+     "strong_ratio": 1.0,
+     "tier_a_done": 1
+    },
+    "level": "C0",
+    "previous_level": "C0",
+    "raised": false,
+    "roster_size": 10,
+    "status_counts": {
+     "deferred": 1,
+     "done": 9
+    },
+    "target_key": "diff:80b9a2403ffb41bb891721d0c97d13ea",
+    "unseated_n": 0
+   },
+   "merge": {
+    "clusters": 3,
+    "findings": 6,
+    "verdict_candidate": "conditional"
+   },
+   "rows": [
+    {
+     "change_kind": "dimension",
+     "cluster_key": "724d0ced2c40",
+     "contested": 0,
+     "direction": "risk",
+     "evidence_grade": "도구예측",
+     "family_key": "24ac25998b1c",
+     "human_n": 0,
+     "judgement": "WARNING",
+     "mechanism": "mechanical",
+     "mechanism_detail": "drop_stress",
+     "merged_json": "{\"cites\":[{\"quote\":\"PLATE_2 min_dim 1.000→1.400 mm (+40.0%) (min_dim 근사) [c:73d5d1b165af]\",\"ref\":\"c:73d5d1b165af\"}],\"claim\":\"PLATE_2 두께가 1.0→1.4 mm 로 늘어 적층 높이 여유가 줄어든다.\",\"claim_finding_id\":\"2e4ab520dd3b4b5889aa94b3ed6f1c77#F1\",\"cluster_key\":\"724d0ced2c40\",\"contest_notes\":[],\"direction\":\"risk\",\"domains\":[\"mech\"],\"feature_snapshot\":{\"c:73d5d1b165af\":{\"after\":1.4,\"before\":1.0,\"change_kind\":\"dimension\",\"cid\":\"c:73d5d1b165af\",\"code\":\"part.thickness_changed\",\"confidence\":\"medium\",\"subject_key\":\"ck:4bbe8075874f\"}},\"human_refs\":[],\"member_ids\":[\"2e4ab520dd3b4b5889aa94b3ed6f1c77#F1\",\"c30cde099f244dbca8fd9679e17dc6e7#F1\"],\"names\":[],\"owner_domain\":\"mech\",\"panels\":[\"2e4ab520dd3b4b5889aa94b3ed6f1c77\",\"c30cde099f244dbca8fd9679e17dc6e7\"],\"precedent_counts\":{\"none\":2},\"raised_by\":[\"mech-legacy-0\",\"mech-legacy-1\"],\"rejected_refs\":[],\"resolving_checks\":[\"sim:낙하 해석 재실행\"],\"severity_counts\":{\"중대\":2},\"stored_cluster_key\":\"724d0ced2c40\",\"trigger_condition\":\"none\",\"warrant\":\"diff 의미 이벤트가 같은 방향의 수치 변화를 낸다.\"}",
+     "precedent": "none",
+     "priority": 1.8,
+     "rejected": 0,
+     "sev3": 2,
+     "severity": "중대",
+     "status": "open",
+     "status_source": "code",
+     "subject_key": "ck:4bbe8075874f",
+     "support": 2,
+     "weak_subject": 0
+    },
+    {
+     "change_kind": "dimension",
+     "cluster_key": "724d0ced2c40.imp",
+     "contested": 0,
+     "direction": "improvement",
+     "evidence_grade": "도구예측",
+     "family_key": "24ac25998b1c",
+     "human_n": 0,
+     "judgement": "OK",
+     "mechanism": "mechanical",
+     "mechanism_detail": "drop_stress",
+     "merged_json": "{\"cites\":[{\"quote\":\"PLATE_2 min_dim 1.000→1.400 mm (+40.0%) (min_dim 근사) [c:73d5d1b165af]\",\"ref\":\"c:73d5d1b165af\"}],\"claim\":\"두께 증가로 굽힘 강성이 올라간다.\",\"claim_finding_id\":\"2e4ab520dd3b4b5889aa94b3ed6f1c77#G1\",\"cluster_key\":\"724d0ced2c40\",\"contest_notes\":[],\"direction\":\"improvement\",\"domains\":[\"mech\"],\"feature_snapshot\":{\"c:73d5d1b165af\":{\"after\":1.4,\"before\":1.0,\"change_kind\":\"dimension\",\"cid\":\"c:73d5d1b165af\",\"code\":\"part.thickness_changed\",\"confidence\":\"medium\",\"subject_key\":\"ck:4bbe8075874f\"}},\"human_refs\":[],\"member_ids\":[\"2e4ab520dd3b4b5889aa94b3ed6f1c77#G1\",\"c30cde099f244dbca8fd9679e17dc6e7#G1\"],\"names\":[],\"owner_domain\":\"mech\",\"panels\":[\"2e4ab520dd3b4b5889aa94b3ed6f1c77\",\"c30cde099f244dbca8fd9679e17dc6e7\"],\"precedent_counts\":{\"none\":2},\"raised_by\":[\"mech-legacy-0\",\"mech-legacy-1\"],\"rejected_refs\":[],\"resolving_checks\":[\"sim:낙하 해석 재실행\"],\"severity_counts\":{\"경미\":2},\"stored_cluster_key\":\"724d0ced2c40.imp\",\"trigger_condition\":\"none\",\"warrant\":\"diff 의미 이벤트가 같은 방향의 수치 변화를 낸다.\"}",
+     "precedent": "none",
+     "priority": 0.9,
+     "rejected": 0,
+     "sev3": 1,
+     "severity": "경미",
+     "status": "open",
+     "status_source": "code",
+     "subject_key": "ck:4bbe8075874f",
+     "support": 2,
+     "weak_subject": 0
+    },
+    {
+     "change_kind": "material",
+     "cluster_key": "db42c4b1b018",
+     "contested": 0,
+     "direction": "risk",
+     "evidence_grade": "도구예측",
+     "family_key": "7417161f2794",
+     "human_n": 0,
+     "judgement": "WARNING",
+     "mechanism": "interface",
+     "mechanism_detail": "interference",
+     "merged_json": "{\"cites\":[{\"quote\":\"PLATE_1 material.material_norm al6061→az91d [c:091b1945d319]\",\"ref\":\"c:091b1945d319\"}],\"claim\":\"PLATE_1 재질 교체로 접합부 강성 가정이 바뀐다.\",\"claim_finding_id\":\"2e4ab520dd3b4b5889aa94b3ed6f1c77#F2\",\"cluster_key\":\"db42c4b1b018\",\"contest_notes\":[],\"direction\":\"risk\",\"domains\":[\"mech\"],\"feature_snapshot\":{\"c:091b1945d319\":{\"after\":\"az91d\",\"before\":\"al6061\",\"change_kind\":\"material\",\"cid\":\"c:091b1945d319\",\"code\":\"part.material_changed\",\"confidence\":\"medium\",\"subject_key\":\"ck:bbb130fa4587\"}},\"human_refs\":[],\"member_ids\":[\"2e4ab520dd3b4b5889aa94b3ed6f1c77#F2\",\"c30cde099f244dbca8fd9679e17dc6e7#F2\"],\"names\":[],\"owner_domain\":\"mech\",\"panels\":[\"2e4ab520dd3b4b5889aa94b3ed6f1c77\",\"c30cde099f244dbca8fd9679e17dc6e7\"],\"precedent_counts\":{\"none\":2},\"raised_by\":[\"mech-legacy-0\",\"mech-legacy-1\"],\"rejected_refs\":[],\"resolving_checks\":[\"sim:낙하 해석 재실행\"],\"severity_counts\":{\"중대\":2},\"stored_cluster_key\":\"db42c4b1b018\",\"trigger_condition\":\"none\",\"warrant\":\"diff 의미 이벤트가 같은 방향의 수치 변화를 낸다.\"}",
+     "precedent": "none",
+     "priority": 1.8,
+     "rejected": 0,
+     "sev3": 2,
+     "severity": "중대",
+     "status": "open",
+     "status_source": "code",
+     "subject_key": "ck:bbb130fa4587",
+     "support": 2,
+     "weak_subject": 0
+    }
+   ]
+  }
+ },
+ "v4": {
+  "diff:7ac74892dd9c401c8f7a07f067a471c1": {
+   "close_level": {
+    "c1": false,
+    "c2": false,
+    "c3": false,
+    "close_level": "C2",
+    "detail": {
+     "contested_marked": true,
+     "depth": {
+      "mech": {
+       "deferred": 0,
+       "have": 0,
+       "need": 2,
+       "roster": 2
+      },
+      "pcb": {
+       "deferred": 1,
+       "have": 0,
+       "need": 1,
+       "roster": 2
+      },
+      "rel": {
+       "deferred": 0,
+       "have": 0,
+       "need": 2,
+       "roster": 2
+      },
+      "sim": {
+       "deferred": 0,
+       "have": 0,
+       "need": 2,
+       "roster": 2
+      },
+      "xd": {
+       "deferred": 0,
+       "have": 0,
+       "need": 2,
+       "roster": 2
+      }
+     },
+     "domains_terminal": {
+      "cam": 0,
+      "disp": 0,
+      "material": 0,
+      "mech": 0,
+      "mem": 0,
+      "passive": 0,
+      "pcb": 1,
+      "pwr": 0,
+      "rel": 0,
+      "rf": 0,
+      "sh": 0,
+      "sim": 0,
+      "soc": 0,
+      "std": 0,
+      "xd": 0
+     },
+     "done_weak": 0,
+     "failed": 0,
+     "skipped": 0,
+     "skipped_ratio": 0.0,
+     "spec_parse_failed": 0,
+     "strong": 0,
+     "strong_ratio": 0.0,
+     "tier_a_done": 0
+    },
+    "level": "C0",
+    "previous_level": "C0",
+    "raised": false,
+    "roster_size": 10,
+    "status_counts": {
+     "deferred": 1,
+     "pending": 9
+    },
+    "target_key": "diff:7ac74892dd9c401c8f7a07f067a471c1",
+    "unseated_n": 9
+   },
+   "merge": {
+    "clusters": 0,
+    "findings": 0,
+    "verdict_candidate": "undetermined"
+   },
+   "rows": []
+  },
+  "diff:80b9a2403ffb41bb891721d0c97d13ea": {
+   "close_level": {
+    "c1": false,
+    "c2": false,
+    "c3": false,
+    "close_level": "C2",
+    "detail": {
+     "contested_marked": true,
+     "depth": {
+      "mech": {
+       "deferred": 0,
+       "have": 2,
+       "need": 2,
+       "roster": 2
+      },
+      "pcb": {
+       "deferred": 1,
+       "have": 1,
+       "need": 1,
+       "roster": 2
+      },
+      "rel": {
+       "deferred": 0,
+       "have": 2,
+       "need": 2,
+       "roster": 2
+      },
+      "sim": {
+       "deferred": 0,
+       "have": 2,
+       "need": 2,
+       "roster": 2
+      },
+      "xd": {
+       "deferred": 0,
+       "have": 2,
+       "need": 2,
+       "roster": 2
+      }
+     },
+     "domains_terminal": {
+      "cam": 0,
+      "disp": 0,
+      "material": 0,
+      "mech": 2,
+      "mem": 0,
+      "passive": 0,
+      "pcb": 2,
+      "pwr": 0,
+      "rel": 2,
+      "rf": 0,
+      "sh": 0,
+      "sim": 2,
+      "soc": 0,
+      "std": 0,
+      "xd": 2
+     },
+     "done_weak": 0,
+     "failed": 0,
+     "skipped": 0,
+     "skipped_ratio": 0.0,
+     "spec_parse_failed": 0,
+     "strong": 9,
+     "strong_ratio": 1.0,
+     "tier_a_done": 1
+    },
+    "level": "C0",
+    "previous_level": "C0",
+    "raised": false,
+    "roster_size": 10,
+    "status_counts": {
+     "deferred": 1,
+     "done": 9
+    },
+    "target_key": "diff:80b9a2403ffb41bb891721d0c97d13ea",
+    "unseated_n": 0
+   },
+   "merge": {
+    "clusters": 3,
+    "findings": 6,
+    "verdict_candidate": "conditional"
+   },
+   "rows": [
+    {
+     "change_kind": "dimension",
+     "cluster_key": "724d0ced2c40",
+     "contested": 0,
+     "direction": "risk",
+     "evidence_grade": "도구예측",
+     "family_key": "24ac25998b1c",
+     "human_n": 0,
+     "judgement": "WARNING",
+     "mechanism": "mechanical",
+     "mechanism_detail": "drop_stress",
+     "merged_json": "{\"cites\":[{\"quote\":\"PLATE_2 min_dim 1.000→1.400 mm (+40.0%) (min_dim 근사) [c:73d5d1b165af]\",\"ref\":\"c:73d5d1b165af\"}],\"claim\":\"PLATE_2 두께가 1.0→1.4 mm 로 늘어 적층 높이 여유가 줄어든다.\",\"claim_finding_id\":\"2e4ab520dd3b4b5889aa94b3ed6f1c77#F1\",\"cluster_key\":\"724d0ced2c40\",\"contest_notes\":[],\"direction\":\"risk\",\"domains\":[\"mech\"],\"feature_snapshot\":{\"c:73d5d1b165af\":{\"after\":1.4,\"before\":1.0,\"change_kind\":\"dimension\",\"cid\":\"c:73d5d1b165af\",\"code\":\"part.thickness_changed\",\"confidence\":\"medium\",\"subject_key\":\"ck:4bbe8075874f\"}},\"human_refs\":[],\"member_ids\":[\"2e4ab520dd3b4b5889aa94b3ed6f1c77#F1\",\"c30cde099f244dbca8fd9679e17dc6e7#F1\"],\"names\":[],\"owner_domain\":\"mech\",\"panels\":[\"2e4ab520dd3b4b5889aa94b3ed6f1c77\",\"c30cde099f244dbca8fd9679e17dc6e7\"],\"precedent_counts\":{\"none\":2},\"raised_by\":[\"mech-legacy-0\",\"mech-legacy-1\"],\"rejected_refs\":[],\"resolving_checks\":[\"sim:낙하 해석 재실행\"],\"severity_counts\":{\"중대\":2},\"stored_cluster_key\":\"724d0ced2c40\",\"trigger_condition\":\"none\",\"warrant\":\"diff 의미 이벤트가 같은 방향의 수치 변화를 낸다.\"}",
+     "precedent": "none",
+     "priority": 1.8,
+     "rejected": 0,
+     "sev3": 2,
+     "severity": "중대",
+     "status": "open",
+     "status_source": "code",
+     "subject_key": "ck:4bbe8075874f",
+     "support": 2,
+     "weak_subject": 0
+    },
+    {
+     "change_kind": "dimension",
+     "cluster_key": "724d0ced2c40.imp",
+     "contested": 0,
+     "direction": "improvement",
+     "evidence_grade": "도구예측",
+     "family_key": "24ac25998b1c",
+     "human_n": 0,
+     "judgement": "OK",
+     "mechanism": "mechanical",
+     "mechanism_detail": "drop_stress",
+     "merged_json": "{\"cites\":[{\"quote\":\"PLATE_2 min_dim 1.000→1.400 mm (+40.0%) (min_dim 근사) [c:73d5d1b165af]\",\"ref\":\"c:73d5d1b165af\"}],\"claim\":\"두께 증가로 굽힘 강성이 올라간다.\",\"claim_finding_id\":\"2e4ab520dd3b4b5889aa94b3ed6f1c77#G1\",\"cluster_key\":\"724d0ced2c40\",\"contest_notes\":[],\"direction\":\"improvement\",\"domains\":[\"mech\"],\"feature_snapshot\":{\"c:73d5d1b165af\":{\"after\":1.4,\"before\":1.0,\"change_kind\":\"dimension\",\"cid\":\"c:73d5d1b165af\",\"code\":\"part.thickness_changed\",\"confidence\":\"medium\",\"subject_key\":\"ck:4bbe8075874f\"}},\"human_refs\":[],\"member_ids\":[\"2e4ab520dd3b4b5889aa94b3ed6f1c77#G1\",\"c30cde099f244dbca8fd9679e17dc6e7#G1\"],\"names\":[],\"owner_domain\":\"mech\",\"panels\":[\"2e4ab520dd3b4b5889aa94b3ed6f1c77\",\"c30cde099f244dbca8fd9679e17dc6e7\"],\"precedent_counts\":{\"none\":2},\"raised_by\":[\"mech-legacy-0\",\"mech-legacy-1\"],\"rejected_refs\":[],\"resolving_checks\":[\"sim:낙하 해석 재실행\"],\"severity_counts\":{\"경미\":2},\"stored_cluster_key\":\"724d0ced2c40.imp\",\"trigger_condition\":\"none\",\"warrant\":\"diff 의미 이벤트가 같은 방향의 수치 변화를 낸다.\"}",
+     "precedent": "none",
+     "priority": 0.9,
+     "rejected": 0,
+     "sev3": 1,
+     "severity": "경미",
+     "status": "open",
+     "status_source": "code",
+     "subject_key": "ck:4bbe8075874f",
+     "support": 2,
+     "weak_subject": 0
+    },
+    {
+     "change_kind": "material",
+     "cluster_key": "db42c4b1b018",
+     "contested": 0,
+     "direction": "risk",
+     "evidence_grade": "도구예측",
+     "family_key": "7417161f2794",
+     "human_n": 0,
+     "judgement": "WARNING",
+     "mechanism": "interface",
+     "mechanism_detail": "interference",
+     "merged_json": "{\"cites\":[{\"quote\":\"PLATE_1 material.material_norm al6061→az91d [c:091b1945d319]\",\"ref\":\"c:091b1945d319\"}],\"claim\":\"PLATE_1 재질 교체로 접합부 강성 가정이 바뀐다.\",\"claim_finding_id\":\"2e4ab520dd3b4b5889aa94b3ed6f1c77#F2\",\"cluster_key\":\"db42c4b1b018\",\"contest_notes\":[],\"direction\":\"risk\",\"domains\":[\"mech\"],\"feature_snapshot\":{\"c:091b1945d319\":{\"after\":\"az91d\",\"before\":\"al6061\",\"change_kind\":\"material\",\"cid\":\"c:091b1945d319\",\"code\":\"part.material_changed\",\"confidence\":\"medium\",\"subject_key\":\"ck:bbb130fa4587\"}},\"human_refs\":[],\"member_ids\":[\"2e4ab520dd3b4b5889aa94b3ed6f1c77#F2\",\"c30cde099f244dbca8fd9679e17dc6e7#F2\"],\"names\":[],\"owner_domain\":\"mech\",\"panels\":[\"2e4ab520dd3b4b5889aa94b3ed6f1c77\",\"c30cde099f244dbca8fd9679e17dc6e7\"],\"precedent_counts\":{\"none\":2},\"raised_by\":[\"mech-legacy-0\",\"mech-legacy-1\"],\"rejected_refs\":[],\"resolving_checks\":[\"sim:낙하 해석 재실행\"],\"severity_counts\":{\"중대\":2},\"stored_cluster_key\":\"db42c4b1b018\",\"trigger_condition\":\"none\",\"warrant\":\"diff 의미 이벤트가 같은 방향의 수치 변화를 낸다.\"}",
+     "precedent": "none",
+     "priority": 1.8,
+     "rejected": 0,
+     "sev3": 2,
+     "severity": "중대",
+     "status": "open",
+     "status_source": "code",
+     "subject_key": "ck:bbb130fa4587",
+     "support": 2,
+     "weak_subject": 0
+    }
+   ]
+  }
+ }
+}
