@@ -426,10 +426,10 @@ def test_a_bridge_failure_without_a_way_out_says_which_credential_failed(tmp_pat
 
 
 @pytest.mark.parametrize("service_pat", ["service-pat", None], ids=["service_pat", "no_service_pat"])
-@pytest.mark.parametrize("status", [502, 503, 504, None], ids=["http_502", "http_503", "http_504", "transport"])
+@pytest.mark.parametrize("status", [502, 503, None], ids=["http_502", "http_503", "transport"])
 def test_a_dead_bridge_is_skipped_for_the_rest_of_the_capture(tmp_path, status, service_pat):
-    """다리의 502·503·504 는 게이트웨이가 상류 실패·시간 초과(한 번에 110초)로 내는 것이다 — 전송 오류처럼 그 캡처의 남은 호출은 다리를
-    건너뛴다(R2-3). 서비스 PAT 가 없는 박스(cae00)에서도 건너뛰고, 남은 호출은 다리를 부르지 않고 곧바로 실패를 돌려준다."""
+    """다리의 502·503 은 게이트웨이가 상류에 닿지 못해 내는 것이다 — 전송 오류처럼 그 캡처의 남은 호출은 다리를 건너뛴다(R2-3). 서비스
+    PAT 가 없는 박스(cae00)에서도 건너뛰고, 남은 호출은 다리를 부르지 않고 곧바로 실패를 돌려준다. 504 는 따로 본다(R3-2)."""
     rest, seen, _ = _bridge_box(tmp_path, bridge=status, service_pat=service_pat)
     replies = [rest.get(TREE) for _ in range(5)]
     assert seen.count(BRIDGE) == 1, seen
@@ -455,14 +455,43 @@ def test_a_refusing_bridge_is_asked_again_on_every_call(tmp_path, status, servic
 
 
 def test_the_skip_names_the_failure_that_killed_the_bridge_not_an_earlier_refusal(tmp_path):
-    """앞선 호출의 404(그 경로만의 거절) 뒤에 504 가 다리를 죽였으면, 건너뛴 호출은 504 를 말한다 — bridge_failure 는 처음 실패 그대로다."""
+    """앞선 호출의 404(그 경로만의 거절) 뒤에 502 가 다리를 죽였으면, 건너뛴 호출은 502 를 말한다 — bridge_failure 는 처음 실패 그대로다."""
     rest, seen, state = _bridge_box(tmp_path, bridge=404, service_pat=None)
     rest.get(TREE)
-    state["bridge"] = 504
+    state["bridge"] = 502
     rest.get(TREE)
     skipped = rest.get(TREE)
-    assert seen == [BRIDGE, BRIDGE] and "http_504" in skipped["error"] and "http_404" not in skipped["error"]
+    assert seen == [BRIDGE, BRIDGE] and "http_502" in skipped["error"] and "http_404" not in skipped["error"]
     assert rest.bridge_failure == {"http_status": 404, "error": "http_404"}
+
+
+@pytest.mark.parametrize("service_pat", ["service-pat", None], ids=["service_pat", "no_service_pat"])
+def test_one_bridge_504_is_asked_again_and_two_in_a_row_skip_the_bridge(tmp_path, service_pat):
+    """504 는 게이트웨이의 호출당 상류 시간 초과(110초)다 — 그 호출 하나가 느렸을 뿐일 수 있어 다음 호출은 다리에 다시 묻는다. 잇단 두
+    번이면 다리가 죽은 것으로 보고 그 캡처의 남은 호출은 건너뛴다. 사이에 다른 답이 끼면 처음부터 센다(R3-2)."""
+    rest, seen, state = _bridge_box(tmp_path, bridge=504, service_pat=service_pat)
+    rest.get(TREE)
+    state["bridge"] = 200
+    reply = rest.get(TREE)
+    assert reply.get("result") == {"via": "bridge"}, reply          # 504 하나 뒤에도 다리로 읽는다
+    state["bridge"] = 504
+    rest.get(TREE)
+    state["bridge"] = 404
+    rest.get(TREE)                                                   # 거절이 끼었다 — 잇단 504 가 아니다
+    state["bridge"] = 504
+    rest.get(TREE)
+    assert seen.count(BRIDGE) == 5, seen
+    skipped_by = rest.get(TREE)                                      # 잇단 두 번째 504 — 여기서부터 건너뛴다
+    state["bridge"] = 200
+    after = rest.get(TREE)
+    assert seen.count(BRIDGE) == 6, seen
+    if service_pat:
+        assert seen == [BRIDGE, SERVICE, BRIDGE, BRIDGE, SERVICE, BRIDGE, SERVICE, BRIDGE, SERVICE, BRIDGE, SERVICE, SERVICE]
+        assert skipped_by["ok"] and after.get("result") == {"via": "service"}, after
+    else:
+        assert seen == [BRIDGE] * 6
+        assert skipped_by["http_status"] == 504 and skipped_by["error"] == "user_pat_gateway http_504"
+        assert after["http_status"] is None and after["error"].startswith("user_pat_gateway 건너뜀") and "http_504" in after["error"]
 
 
 def test_a_source_call_that_times_out_names_the_limit_and_the_knob():
@@ -626,6 +655,42 @@ def test_mcad_rest_channel_builds_world_bbox_and_resolves_edges_by_node_id():
     assert result["call_ids"] == [c for c in result["call_ids"]] and result["call_ids"][0] == "cafe0000-001"
     assert len(recorder.calls) == len(result["call_ids"])
     assert {c["channel"] for c in recorder.calls} == {"mcp", "rest"}
+
+
+def test_one_slow_graph_through_the_bridge_does_not_send_parts_and_interfaces_to_mcp(tmp_path):
+    """서비스 PAT 가 없는 박스(cae00)에서 큰 형상의 graph 하나가 게이트웨이 504(호출당 상류 시간 초과)로 끝나도, 그 캡처의 /parts·
+    /interfaces 는 다리로 읽는다 — 504 하나로 다리를 건너뛰면 계면이 MCP 폴백(kind 별 상한)으로 내려가 잘렸다(R3-2)."""
+    import types
+
+    bridge_seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET" and request.url.host == "gw.test", request.url
+        assert request.headers["authorization"] == "Bearer user-pat"
+        bridge_seen.append(request.url.path)
+        source = "/apps/step_forge" + request.url.path.removeprefix("/api/step-forge")
+        if source.endswith("/artifacts/graph/"):
+            return httpx.Response(504, json={"detail": "upstream timed out"})
+        body = REST_ROUTES.get(source)
+        return httpx.Response(200, json=body) if body is not None else httpx.Response(404, json={})
+
+    settings = types.SimpleNamespace(gateway_mcp="https://gw.test/mcp", heax_base="https://heax.test", data_dir=tmp_path)
+    channels = adapters_registry.clients_from_settings(
+        settings, {}, gateway_pat="user-pat", http_client=httpx.Client(transport=httpx.MockTransport(handler)))
+    assert channels["rest_credential"] == "user_pat_gateway" and channels["rest"].fallback is None
+    mcp_seen: list = []
+    recorder = CallRecorder("cafe0000deadbeef", mcp=_mcp(MCP_TOOLS_FULL, mcp_seen), rest=channels["rest"])
+    result = mcad.McadAdapter(APP_KEY).capture({"stepforge_project_id": SF_PROJECT, "detect_job_id": "01JDET"},
+                                               _principal(service=None), recorder)
+    gw = f"/api/step-forge/api/projects/{SF_PROJECT}"
+    assert bridge_seen == [gw, f"{gw}/tree", f"{gw}/artifacts/graph/", f"{gw}/parts", f"{gw}/interfaces"]
+    rows = {c["tool"]: c for c in recorder.calls if c["channel"] == "rest"}
+    assert rows[f"GET {BASE}/artifacts/graph/"]["http_status"] == 504
+    assert rows[f"GET {BASE}/parts"]["ok"] and rows[f"GET {BASE}/interfaces"]["ok"]
+    assert [name for name, _ in mcp_seen if name == "list_interfaces"] == []     # 계면은 MCP 로 내려가지 않았다
+    assert "interfaces_unreadable" not in result["source"]["degraded"]
+    assert result["source"]["channel"] == "rest+mcp"
+    assert [e["kind"] for e in result["edges"] if e["kind"] == "tied"] == ["tied"]
 
 
 def test_mcad_source_hash_is_deterministic_and_covers_tol_and_job():

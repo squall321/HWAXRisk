@@ -173,8 +173,13 @@ class GatewayRestClient(RestGetClient):
         return f"{self.base_url}/api/{GATEWAY_REST_SITES[parts[2]]}/{parts[3]}"
 
 
-# 게이트웨이 REST 다리가 '다리 자체가 죽었다' 로 내는 HTTP 상태 — 상류(소스 앱) 실패·시간 초과다. 그 캡처의 남은 호출은 다리를 건너뛴다.
-BRIDGE_DOWN_STATUSES: frozenset[int] = frozenset({502, 503, 504})
+# 게이트웨이 REST 다리가 '다리 자체가 죽었다' 로 내는 HTTP 상태 — 상류(소스 앱)에 닿지 못했다. 그 캡처의 남은 호출은 다리를 건너뛴다.
+BRIDGE_DOWN_STATUSES: frozenset[int] = frozenset({502, 503})
+# 504 는 게이트웨이의 호출당 상류 시간 초과(110초)다 — 큰 형상의 graph 처럼 그 호출 하나가 느렸을 뿐일 수 있어 호출마다 다시 묻는다. 같은
+# 캡처에서 잇달아 BRIDGE_TIMEOUT_STREAK 번이면 다리가 죽은 것으로 보고 건너뛴다(R3-2 — 504 하나로 건너뛰면 서비스 PAT 가 없는 박스에서
+# 뒤의 /parts·/interfaces 가 MCP 폴백으로 내려가 계면이 잘렸다).
+BRIDGE_TIMEOUT_STATUS = 504
+BRIDGE_TIMEOUT_STREAK = 2
 
 
 class FallbackRestClient:
@@ -182,12 +187,12 @@ class FallbackRestClient:
     사람 자격 R2 · BEH-2). 종전에는 다리를 고르면 다리 하나뿐이라, 다리가 거절하면 서비스 PAT 가 있는 박스에서도 REST 가 통째로 죽어
     G6 이 unit_unknown 이었다.
 
-    다리가 전송 오류(닿지 않음·시간 초과)나 502·503·504 를 내면 그 캡처의 남은 호출은 다리를 건너뛴다 — 그 셋은 게이트웨이가 상류
-    실패·시간 초과(한 번에 110초)로 내는 것이라, 죽은 다리를 호출마다 기다리면 다섯 호출에 550초가 쌓인다(R2-3). 넘어갈 곳(서비스
-    PAT)이 없어도 건너뛴다 — 그때 남은 호출은 다리를 부르지 않고 곧바로 실패를 돌려준다. 401·403·404 같은 거절은 호출마다 다시 묻는다
-    (그 경로만의 거절일 수 있다). 넘어갈 곳이 없으면 다리의 실패를 그대로 돌려주되 호출 행의 error 앞에 다리임을 붙인다. 처음 실패한
-    다리 호출의 HTTP 상태·오류는 `bridge_failure` 에, 실제로 답을 받으러 간 자격의 순서는 `used` 에 남는다(캡처 응답
-    credentials.rest·rest_bridge, 캡처 잡의 error_json.rest_bridge).
+    다리가 전송 오류(닿지 않음·시간 초과)나 502·503 을 내면 그 캡처의 남은 호출은 다리를 건너뛴다 — 죽은 다리를 호출마다 기다리면
+    다섯 호출에 550초가 쌓인다(R2-3). 504(게이트웨이의 호출당 상류 시간 초과, 110초)는 그 호출 하나가 느렸을 뿐일 수 있어 호출마다 다시
+    묻고, 잇달아 두 번(BRIDGE_TIMEOUT_STREAK)이면 건너뛴다(R3-2). 넘어갈 곳(서비스 PAT)이 없어도 건너뛴다 — 그때 남은 호출은 다리를
+    부르지 않고 곧바로 실패를 돌려준다. 401·403·404 같은 거절은 호출마다 다시 묻는다(그 경로만의 거절일 수 있다). 넘어갈 곳이 없으면
+    다리의 실패를 그대로 돌려주되 호출 행의 error 앞에 다리임을 붙인다. 처음 실패한 다리 호출의 HTTP 상태·오류는 `bridge_failure` 에,
+    실제로 답을 받으러 간 자격의 순서는 `used` 에 남는다(캡처 응답 credentials.rest·rest_bridge, 캡처 잡의 error_json.rest_bridge).
     """
 
     def __init__(self, primary: RestGetClient, fallback: RestGetClient | None, *,
@@ -198,7 +203,8 @@ class FallbackRestClient:
         self.bridge_failure: dict | None = None
         self.used: list[str] = []
         self._skip_primary = False
-        self._skip_reason: str | None = None       # 다리를 건너뛰게 만든 실패(처음 실패와 다를 수 있다 — 앞선 404 뒤의 504)
+        self._skip_reason: str | None = None       # 다리를 건너뛰게 만든 실패(처음 실패와 다를 수 있다 — 앞선 404 뒤의 502)
+        self._timeouts = 0                          # 잇단 504 의 수 — 다른 답이 오면 0 으로 돌아간다
 
     @property
     def available(self) -> bool:
@@ -217,12 +223,13 @@ class FallbackRestClient:
         if not self._skip_primary:
             self._mark(self.primary_kind)
             bridge = self.primary.get(path, params)
+            status = bridge.get("http_status")
+            self._timeouts = self._timeouts + 1 if status == BRIDGE_TIMEOUT_STATUS else 0
             if bridge.get("ok"):
                 return bridge
             if self.bridge_failure is None:
-                self.bridge_failure = {"http_status": bridge.get("http_status"), "error": str(bridge.get("error"))}
-            status = bridge.get("http_status")
-            if status is None or status in BRIDGE_DOWN_STATUSES:
+                self.bridge_failure = {"http_status": status, "error": str(bridge.get("error"))}
+            if status is None or status in BRIDGE_DOWN_STATUSES or self._timeouts >= BRIDGE_TIMEOUT_STREAK:
                 # 다리 자체가 죽었다 — 이 캡처의 남은 호출은 다리를 부르지 않는다.
                 self._skip_primary, self._skip_reason = True, str(bridge.get("error"))
             if self.fallback is None:
