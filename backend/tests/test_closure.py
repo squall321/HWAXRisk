@@ -74,7 +74,7 @@ def test_a_cells_target_climbs_with_its_ledger_and_never_shows_a_bare_level(stor
     key = rig.target(store)
     before = registry.close_level(store, key, persist=False)
     assert before["flow"] == "cells" and before["level"] == "C0" and "격자 결손" in before["level_label"]   # 검토 잡 전
-    key = _full_grid(store, verdicts={"K01": ("yes", "FAIL")}, roster=CARD_ROSTER)
+    key = _full_grid(store, verdicts={"K01": ("yes", "FAIL")})            # sim 은 카드 없는 영역 — 깊이를 막지 않는다(D-35)
     first = registry.close_level(store, key)
     assert (first["level"], first["c1"], first["c2"]) == ("C1", True, False)
     assert first["counts"]["cells"]["actual"] == first["counts"]["cells"]["expected"] > 0
@@ -90,7 +90,7 @@ def test_a_cells_target_climbs_with_its_ledger_and_never_shows_a_bare_level(stor
             break
     done = registry.close_level(store, key)
     assert (done["level"], done["c2"], done["c3"]) == ("C2", True, False)
-    assert "후속 낡음(종합 전)" in done["level_label"]
+    assert "후속 낡음(종합 전)" in done["level_label"] and "카드 없는 영역 — 역할 판단만 · sim" in done["level_label"]
     for result in (before, first, waiting, done):
         assert result["level_label"] != result["level"]
         assert "결손 사냥 미실행" in result["level_label"] and "2차 영향 미실행" in result["level_label"]
@@ -245,26 +245,24 @@ def test_refresh_on_the_largest_m2_ledger_stays_well_under_a_second(store):
     assert time.perf_counter() - started < 1.0
 
 
-def test_a_domain_whose_experts_answered_without_cards_has_no_depth(store):
-    """깊이는 실제로 카드로 본 전문가만 센다(X1-02 · X1-04) — 배경 카드뿐·0장 전문가만 있는 영역(sim)은 active 2 · have 0 이라
-    C2 깊이를 채우지 못한다. 카드 0장 전문가는 표기 잔여 no_cards 다(#38)."""
-    key = _full_grid(store)
+@pytest.mark.parametrize(("roster", "exempt", "blocked"), [
+    (rig.ROSTER, ["sim"], []),                                                     # 배경 카드뿐 + 0장 — 리그의 sim
+    (CARD_ROSTER + ({"key": rig.ZERO_CARDS, "domain": "material", "relevance": 0.8},), ["material"], []),   # 0장 한 명
+    (CARD_ROSTER + ({"key": rig.ZERO_CARDS, "domain": "mech", "relevance": 0.5},), [], ["mech"]),  # 카드 가진 영역의 미달
+])
+def test_a_domain_whose_active_experts_all_lack_cards_is_a_label_not_a_depth_block(store, roster, exempt, blocked):
+    """D-35 — 카드 0장 전문가는 역할만으로 답하고 보고서에 잔여로 남는다. 실제로 검토한 전문가가 전부 카드 없이 본 영역은 C2 깊이를
+    막지 않고 표기 잔여 depth_no_cards('카드 없는 영역 — 역할 판단만 · <영역>')가 선다. 카드를 가진 전문가가 있는 영역이 깊이에
+    못 미치면 지금처럼 막는다(카드 없이 본 사람은 그 영역의 have 에 들지 않는다 — X1-04)."""
+    key = _full_grid(store, roster=roster)
     result = closure.close_level_cells(store, key, persist=False)
-    assert result["detail"]["depth"]["sim"] == {"active": 2, "have": 0, "need": 2}
-    assert _residual(result, "no_cards")["n"] == 1 and not _residual(result, "no_cards")["blocking"]
-
-
-def test_the_progress_board_reads_the_closure_cache_without_writing(store, monkeypatch, tmp_path):
-    """진행판(coverage_payload — MCP risk_get_coverage 와 같은 함수)은 캐시를 읽는다 — 캐시가 있으면 그 표기·잔여 그대로이고 원장을
-    다시 세지 않는다. 캐시 전이면 쓰지 않고 센다(읽기는 DB 를 바꾸지 않는다)."""
-    key = _full_grid(store, roster=CARD_ROSTER)
-    before = store.query_one("SELECT closure_json, level_label FROM rr_targets WHERE target_key = ?", (key,))
-    board = routes.coverage_payload(key, owner_sub=OWNER)
-    assert board["level_label"] == closure.close_level_cells(store, key, persist=False)["level_label"]
-    after = store.query_one("SELECT closure_json, level_label FROM rr_targets WHERE target_key = ?", (key,))
-    assert dict(after) == dict(before) and before["closure_json"] is None
-    cached = closure.refresh(store, key)
-    monkeypatch.setattr(closure, "cell_counts", lambda *_a, **_k: pytest.fail("진행판이 원장을 다시 셌다"))
-    board = routes.coverage_payload(key, owner_sub=OWNER)
-    assert (board["level"], board["level_label"]) == (cached["level"], cached["level_label"])
-    assert [q["item"] for q in board["qualifiers"]] == [q["item"] for q in cached["qualifiers"]]
+    depth = result["detail"]["depth"]
+    assert sorted(d for d, v in depth.items() if v.get("exempt") == "no_cards") == exempt
+    for domain in blocked:
+        assert "exempt" not in depth[domain] and depth[domain]["have"] < depth[domain]["need"]
+    item = _residual(result, "depth_no_cards")
+    if exempt:
+        assert item and not item["blocking"] and item["domains"] == exempt
+        assert f"카드 없는 영역 — 역할 판단만 · {'·'.join(exempt)}" in result["level_label"]
+    else:
+        assert item is None

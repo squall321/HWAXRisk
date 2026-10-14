@@ -30,9 +30,11 @@ STRONG_RATIO_MIN = 0.7            # 셀 기준 strong(검토한 셀 가운데 �
 UNDETERMINED_MAX = 0.20           # 적용 판정 가운데 보류 비율 — 넘으면 막음(#52, 사용자 확인 대기)
 FILTER_UPPER_MAX = 0.05           # 표본 놓침 95% 상한
 ACK_REASON_MAX = 300
-# 잔여 열하나(4.10 표의 차례) — 막음 여부는 늘 막는 것 · 조건부(filtered · undetermined) · 표기만(no_cards · cross · mech).
+# 잔여(4.10 표의 차례 + 카드 없는 영역 D-35) — 막음 여부는 늘 막는 것 · 조건부(filtered · undetermined) · 표기만(no_cards ·
+# depth_no_cards · cross · mech).
 RESIDUAL_ITEMS: tuple[str, ...] = ("input_gap", "failed", "skipped", "issues_untried", "filtered", "unit_excluded",
-                                   "quality", "undetermined", "no_cards", "cross_not_run", "mech_not_run")
+                                   "quality", "undetermined", "no_cards", "depth_no_cards", "cross_not_run",
+                                   "mech_not_run")
 ALWAYS_BLOCKING: frozenset[str] = frozenset({"input_gap", "failed", "skipped", "issues_untried", "unit_excluded", "quality"})
 
 
@@ -140,8 +142,12 @@ def cell_counts(store: RiskStore, target_key: str) -> dict:
 
     active_by_domain: dict[str, int] = {}
     have_by_domain: dict[str, int] = {}
+    carded_by_domain: dict[str, int] = {}
     input_gap: list[str] = []
     filtered_only = 0
+    # 카드 묶음의 바탕(rr_expert_reports.card_basis — cards · background · none). 묶음을 아직 안 받은 전문가는 셀의 basis 로 본다.
+    card_basis = {str(r["agent_key"]): r["card_basis"] for r in store.query(
+        "SELECT agent_key, card_basis FROM rr_expert_reports WHERE target_key = ?", (target_key,))}
     for key, info in roster.items():
         mine = by_agent.get(key, [])
         if info["input_gaps"] or (mine and all(r["state"] == NO_INPUT_STATE for r in mine)):
@@ -151,6 +157,9 @@ def cell_counts(store: RiskStore, target_key: str) -> dict:
             filtered_only += 1
             continue
         active_by_domain[info["domain"]] = active_by_domain.get(info["domain"], 0) + 1
+        basis = card_basis.get(key)
+        if basis == "cards" or (basis is None and any((r["basis"] or "") == "cards" for r in mine)):
+            carded_by_domain[info["domain"]] = carded_by_domain.get(info["domain"], 0) + 1
         closed = mine and all(r["state"] not in OPEN_CELL_STATES for r in mine)
         if closed and any(r["state"] == "reviewed" and (r["basis"] or "cards") == "cards" for r in mine):
             have_by_domain[info["domain"]] = have_by_domain.get(info["domain"], 0) + 1
@@ -199,6 +208,8 @@ def cell_counts(store: RiskStore, target_key: str) -> dict:
         "cells": {"expected": len(roster) * len(reviewable), "actual": len(rows), "by_state": dict(cells.get("by_state") or {}),
                   "reviewed_by_basis": dict(cells.get("by_basis") or {}), "verdict_gaps": verdict_gaps},
         "experts": {"active_by_domain": active_by_domain, "have_by_domain": have_by_domain,
+                    # 실제로 검토한 전문가가 전부 카드 없이(역할·배경만) 본 영역 — 깊이를 막지 않고 표기 잔여다(D-35).
+                    "no_card_domains": sorted(d for d, n in active_by_domain.items() if n and not carded_by_domain.get(d)),
                     "reviewed_cards": sum(have_by_domain.values()), "input_gap": len(input_gap),
                     "input_gap_keys": sorted(input_gap), "filtered_only": filtered_only, "reports": report_counts},
         "filter": dict(cells.get("filtered") or {}),
@@ -320,6 +331,10 @@ def residuals(store: RiskStore, target_key: str, counts: Mapping[str, Any]) -> l
         "SELECT agent_key FROM rr_expert_reports WHERE target_key = ? AND card_basis = 'none'", (target_key,)))
     if no_cards:
         out.append({"item": "no_cards", "n": len(no_cards), "label": f"카드 0장 {len(no_cards)}명", "rows": no_cards})
+    cardless = list(counts["experts"]["no_card_domains"])
+    if cardless:
+        out.append({"item": "depth_no_cards", "n": len(cardless), "domains": cardless,
+                    "label": f"카드 없는 영역 — 역할 판단만 · {'·'.join(cardless)}", "rows": cardless})
     out.append({"item": "cross_not_run", "n": counts["handoffs"]["lines"], "pairs": counts["handoffs"]["pairs"],
                 "label": f"2차 영향 미실행(넘김 {counts['handoffs']['lines']}건 표만)", "rows": []})
     out.append({"item": "mech_not_run", "n": counts["mechanisms_reported"]["codes"], "label": "결손 사냥 미실행", "rows": []})
@@ -451,10 +466,15 @@ def close_level_cells(store: RiskStore, target_key: str, *, persist: bool = True
     fresh = _fresh(store, target_key, current_hash)
     depth: dict[str, dict] = {}
     depth_ok = True
+    no_card_domains = set(counts["experts"]["no_card_domains"])
     for domain, active in sorted(counts["experts"]["active_by_domain"].items()):
         need = active if active < 3 else max(3, math.ceil(0.3 * active))
         have = int(counts["experts"]["have_by_domain"].get(domain, 0))
         depth[domain] = {"active": active, "have": have, "need": need}
+        if domain in no_card_domains:
+            # 카드 0장 전문가는 역할만으로 답하고 보고서에 잔여로 남는다(D-35) — 그 영역은 깊이를 막지 않는다(잔여 depth_no_cards).
+            depth[domain]["exempt"] = "no_cards"
+            continue
         depth_ok = depth_ok and have >= need
     p1_open = int(counts["issues"]["p1"]["open"])
     c2 = bool(c1 and all_closed(scope_b) and depth_ok and fresh["issues"] and p1_open == 0)
