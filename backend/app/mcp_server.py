@@ -170,9 +170,12 @@ def risk_get_coverage(target_key: str, with_seats: bool = True, domain: str | No
 
 
 @mcp.tool()
-def risk_list_panels(target_key: str) -> dict:
-    """이 타깃에서 이미 돈 패널 목록(좌석·라운드·엔진·품질·보고서 id) — panel_id 의 출처다."""
-    return _scoped("target", target_key, routes.panels_payload, target_key)
+def risk_list_panels(target_key: str, kind: str | None = None) -> dict:
+    """이 타깃에서 이미 돈 패널 목록(좌석·라운드·엔진·품질·보고서 id · kind coverage|issue · 쟁점 패널이면 issue_id) — panel_id 의 출처다, kind 로 거른다."""
+    def panels(key: str, *, owner_sub: str) -> dict:
+        return routes.panels_payload(key, owner_sub=owner_sub, kind=kind)
+
+    return _scoped("target", target_key, panels, target_key)
 
 
 @mcp.tool()
@@ -182,14 +185,15 @@ def risk_get_panel_transcript(panel_id: str) -> dict:
 
 
 @mcp.tool()
-def risk_taxonomy() -> dict:
-    """통제 어휘 — mechanism·severity·judgement·direction·domain 허용값(추측해 넣으면 422 다)."""
-    return _guarded(lambda: {
-        "taxonomy": routes.taxonomy.load_taxonomy(),
-        "asset_version": routes.taxonomy.ASSET_VERSION,
-        "vocab": routes.taxonomy.vocab_index(),
-        "promotable_axes": routes.character.promotable_axes(),
-    })
+def risk_taxonomy(part: str = "index", offset: int = 0) -> dict:
+    """통제 어휘 — severity·judgement·direction·domain 등 허용값(추측해 넣으면 422 다), part='index' 는 메커니즘 밖의 축 전부·어휘 색인·메커니즘 → 영역 배정표의 머리(review_status — 승인 전이면 draft), part='mechanism' 은 메커니즘 행, 'mech_owners' 는 배정표 행(owners·related), 'maps' 는 동의어·실패 사상이고, 행 쪽은 약 2만 5천 자씩 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다)."""
+    def call() -> dict:
+        if part in ("mechanism", "mech_owners"):
+            total = routes.taxonomy_payload(part, offset=0)["total"]
+            return _fit_rows(lambda take: routes.taxonomy_payload(part, offset=offset, limit=take), max(1, total))
+        return routes.taxonomy_payload(part, offset=offset)
+
+    return _guarded(call)
 
 
 @mcp.tool()
@@ -225,10 +229,15 @@ def risk_get_diff(diff_id: str, part: str, change_kind: str | None = None, q: st
 
 @mcp.tool()
 def risk_get_registry(target_key: str, status: str | None = None, severity: str | None = None,
-                      domain: str | None = None, offset: int = 0) -> dict:
-    """타깃 등록부(rr_registry 행 한 번에 200 + verdict 후보) 조회, status·severity·domain 으로 거르고 next_offset 을 offset 으로 주면 이어 받는다."""
-    return _scoped("target", target_key, routes.registry_payload, target_key, status=status,
-                   severity=severity, domain=domain, limit=REGISTRY_LIMIT, offset=offset)
+                      domain: str | None = None, offset: int = 0, attention: str | None = None,
+                      unit_id: str | None = None) -> dict:
+    """타깃 등록부(rr_registry 행 한 번에 최대 200 + verdict 후보) 조회, status·severity·domain·attention(주의 등급 A·B·C·D — 쉼표로 여럿)·unit_id 로 거르고 한 번에 약 2만 5천 자 안에서 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다), 카드 대조 대상의 행에는 지지 수 넷(전문가·영역·단위·검증)·주의 등급·쟁점 상태와 merged.claimed(hold 전 주장값)·distribution 이 있다."""
+    def rows(key: str, *, owner_sub: str) -> dict:
+        return _fit_rows(lambda take: routes.registry_payload(
+            key, owner_sub=owner_sub, status=status, severity=severity, domain=domain, attention=attention,
+            unit_id=unit_id, limit=take, offset=offset), REGISTRY_LIMIT)
+
+    return _scoped("target", target_key, rows, target_key)
 
 
 @mcp.tool()
@@ -271,6 +280,10 @@ def risk_submit_panel_result(
     def call() -> dict:
         # 소유권은 도달한 위임 신원이 정한다 — 자칭 actor 를 열쇠로 쓰면 남이 actor=<소유자> 로 남의 패널을 종결한다(SEC-5).
         owner_sub = entry.require_delegate(routes.mcp_identity(_request()))
+        # 쟁점 패널(M3 S3-7)은 웹 러너가 돌리고 고쳐 다시 내는 것도 웹·REST 다 — Claude 에서는 지켜본다(risk_get_issues).
+        if routes.panel_kind(panel_id) == "issue":
+            return {"error": "issue_panel_web_only",
+                    "message": "쟁점 패널은 웹 러너가 돌린다 — Claude 에서는 risk_get_issues 로 지켜본다."}
         return routes.complete_panel(
             panel_id, engine=engine, decision_text=decision_text, turns=list(turns or []),
             report_id=report_id, conv_id=None, events=None, model=model,

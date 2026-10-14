@@ -138,7 +138,8 @@ def test_signatures_follow_plan():
     # 변경 줄(part='lines')의 거름·이어 받기는 선택 인자다 — 종전 두 인자만 줘도 같은 응답이다(WP1 S14).
     assert set(props("risk_get_diff")) == {"diff_id", "part", "change_kind", "q", "offset", "limit"}
     assert set(tools["risk_get_diff"].inputSchema["required"]) == {"diff_id", "part"}
-    assert set(props("risk_get_registry")) == {"target_key", "status", "severity", "domain", "offset"}
+    # 등록부 — 주의 등급·단위 거름(재설계 M3 S3-10)은 선택 인자다.
+    assert set(props("risk_get_registry")) == {"target_key", "status", "severity", "domain", "offset", "attention", "unit_id"}
     assert set(props("risk_claims_for_ref")) == {"ref", "offset"}
     assert set(props("risk_get_brief")) == {"target_key", "brief_token", "tier"}
     assert props("risk_get_brief")["tier"]["default"] == "B"
@@ -163,7 +164,7 @@ def test_signatures_follow_plan():
         "summary", 1)
     # 발견·조회는 인자가 최소여야 한다 — id 를 모르는 클라이언트가 첫 호출로 쓴다.
     assert set(props("risk_list_projects")) == set()
-    assert set(props("risk_taxonomy")) == set()
+    assert set(props("risk_taxonomy")) == {"part", "offset"}
     # 진행판 — 검토 순서 전부(order_offset)와 좌석 행(seat_offset)은 와이어 한도 안에서 쪽으로 받는다(R3B-1).
     assert set(props("risk_get_coverage")) == {"target_key", "with_seats", "domain", "order_offset", "seat_offset"}
     assert (props("risk_get_coverage")["order_offset"]["default"], props("risk_get_coverage")["seat_offset"]["default"]) == (

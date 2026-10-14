@@ -30,6 +30,7 @@ from app import units as units_module
 from app import registry as registry_module
 from app import issues as issues_module
 from app import closure as closure_module
+from app import synth as synth_module
 from app.adapters import base as adapters_base
 from app.adapters import registry as adapters_registry
 from app.adapters.dyna import CONTEXT_KIND as CONTEXT_CALL_KIND
@@ -3131,6 +3132,204 @@ def delete_closure_ack(target_key: str, item: str, ident: identity.Identity = De
     return {**out, "level": level["level"], "level_label": level["level_label"]}
 
 
+# ---------------------------------------------------------------- 쟁점 · 종합 보고서(재설계 M3 S3-10 — REST 한 벌, MCP 가 같은 함수를 쓴다)
+ISSUE_LIST_LIMIT = 100
+ISSUE_LIST_MAX = 500
+ISSUE_ACTIONS: tuple[str, ...] = ("queue", "skip")
+ISSUE_REASON_MAX = 300
+
+
+def _issue_row_out(issue: dict) -> dict:
+    """쟁점 한 행의 바깥 모양(3.11) — 근거 원문(basis 의 인용)은 싣지 않고 분포만 싣는다."""
+    basis = issue.get("basis") or {}
+    dist = basis.get("distribution") or {}
+    return {"issue_id": issue["issue_id"], "rank": issue["rank"], "types": list(issue.get("types") or ()),
+            "p_class": issue["p_class"], "priority": issue["priority"], "anchor_cluster_key": issue["anchor_cluster_key"],
+            "unit_id": issue["unit_id"], "state": issue["state"], "state_reason": issue["state_reason"],
+            "outcome": issue["outcome"], "outcome_json": _loads(issue.get("outcome_json"), None),
+            "distribution": {"raisers": len(basis.get("raisers") or ()),
+                             "raisers_by_domain": dist.get("raisers_by_domain") or {},
+                             "by_judgement_claimed": dist.get("by_judgement_claimed") or {},
+                             "by_severity": dist.get("by_severity") or {},
+                             "opposers": len(basis.get("opposers") or ())},
+            "panel_id": issue["panel_id"],
+            "seats": [{"key": s.get("key"), "domain": s.get("domain"), "issue_role": s.get("issue_role")}
+                      for s in _loads(issue.get("seats_json"), []) or ()],
+            "selected_round": issue["selected_round"], "attempts": issue["attempts"], "charged": issue["charged"]}
+
+
+def issues_payload(target_key: str, *, owner_sub: str | None = None, state: str | None = None, p_class: str | None = None,
+                   type: str | None = None, limit: int = ISSUE_LIST_LIMIT, offset: int = 0) -> dict:  # noqa: A002 — REST 쿼리 이름
+    """`GET /targets/{key}/issues` 본체 — MCP `risk_get_issues` 와 같은 함수. 순위 순, 상한 뒤는 `next_offset`."""
+    _target_row(target_key, owner_sub)
+    store = get_store()
+    rows = issues_module.issue_rows(store, target_key, [s.strip() for s in str(state).split(",") if s.strip()] if state
+                                    else None)
+    if p_class:
+        rows = [r for r in rows if r["p_class"] == p_class]
+    if type:
+        rows = [r for r in rows if type in (r.get("types") or ())]
+    take = max(1, min(int(limit or ISSUE_LIST_LIMIT), ISSUE_LIST_MAX))
+    start = max(0, int(offset or 0))
+    page = rows[start:start + take]
+    used = issues_module.cap_used(store, target_key)
+    out = {"target_key": target_key, "total": len(rows), "limit": take, "offset": start,
+           "cap": {"base": int(config.settings.risk_issue_panel_cap), "hard": int(config.settings.risk_issue_panel_hard_cap),
+                   "run": used["P1"] + used["other"]},
+           "rows": [_issue_row_out(r) for r in page]}
+    if start + len(page) < len(rows):
+        out["next_offset"] = start + len(page)
+    return out
+
+
+@router.get("/targets/{target_key}/issues")
+def get_issues(target_key: str, state: str | None = None, p_class: str | None = None, type: str | None = None,  # noqa: A002
+               limit: int = ISSUE_LIST_LIMIT, offset: int = 0,
+               ident: identity.Identity = Depends(identity.current)) -> dict:
+    """쟁점 목록 — 유형·등급·상태·결과·분포·좌석(근거 원문은 싣지 않는다)."""
+    return issues_payload(target_key, owner_sub=_require_user(ident), state=state, p_class=p_class, type=type,
+                          limit=limit, offset=offset)
+
+
+class IssueActionBody(BaseModel):
+    action: str
+    reason: str = Field(default="", max_length=ISSUE_REASON_MAX)
+
+
+@router.put("/issues/{issue_id}")
+def put_issue(issue_id: str, body: IssueActionBody, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """사람의 쟁점 결정(editor, 사유 필수) — queue: 상한 밖·끝난 쟁점을 다시 대기로(상한을 넘기는 사람의 결정 — 살아 있는 쟁점 잡이
+    없으면 잡을 세운다) · skip: 건너뛴다(skipped — 완결 잔여에 든다). rr_audit 한 행."""
+    store = get_store()
+    row = store.query_one("SELECT target_key, state FROM rr_issues WHERE issue_id = ?", (issue_id,))
+    if row is None:
+        raise AppError("E404", f"쟁점을 찾을 수 없습니다 — {issue_id}.", 404)
+    email, target = _editable_target(str(row["target_key"]), ident)
+    if body.action not in ISSUE_ACTIONS:
+        raise AppError("E100", f"action 은 {list(ISSUE_ACTIONS)} 가운데 하나다 — {body.action!r}.", 422)
+    reason = body.reason.strip()
+    if not reason:
+        raise AppError("reason_required", "쟁점을 올리거나 건너뛰려면 사유가 필요합니다(300자 안).", 422)
+    if row["state"] in issues_module.IN_FLIGHT_STATES:
+        raise AppError("issue_in_flight", f"편성·도는 쟁점은 바꾸지 않는다 — {row['state']}.", 409)
+    state = "queued" if body.action == "queue" else "skipped"
+    job = None
+    with store.tx():
+        store.execute("UPDATE rr_issues SET state = ?, state_reason = ?, status_source = 'human', decided_by = ?,"
+                      " decided_at = ?, reason = ?, updated_at = ? WHERE issue_id = ?",
+                      (state, "human", email, now_epoch(), reason, now_epoch(), issue_id))
+        issues_module._sync_registry(store, target["target_key"])
+        _audit(store, email, scope="target", subject_id=target["target_key"], action=f"issue.{body.action}",
+               project_id=target["project_id"], before={"issue_id": issue_id, "state": row["state"]},
+               after={"issue_id": issue_id, "state": state}, reason=reason)
+    if body.action == "queue":
+        live = store.query_one(f"SELECT id FROM rr_jobs WHERE target_key = ? AND mode = 'issues' AND state IN"
+                               f" ({','.join('?' * len(runner.LIVE_JOB_STATES))}) LIMIT 1",
+                               (target["target_key"], *runner.LIVE_JOB_STATES))
+        job = live["id"] if live is not None else issues_module.create_issues_job(
+            store, target["target_key"], owner_sub=target["owner_sub"], requester_sub=email)["job_id"]
+    return {"issue_id": issue_id, "state": state, "job_id": job}
+
+
+REPORT_PAGE_CHARS = expert_report.PAGE_CHARS
+
+
+def report_source(target_key: str, *, owner_sub: str | None = None, version: int | None = None) -> tuple[dict, dict]:
+    """종합 보고서 판(없으면 404 report_absent) — (머리 칸, 저장된 판)."""
+    _target_row(target_key, owner_sub)
+    report = synth_module.report_source(get_store(), target_key, version=version)
+    if report is None:
+        raise AppError("report_absent", "이 대상에는 종합 보고서 판이 아직 없다 — POST /targets/{key}/report 로 만든다.", 404)
+    meta = {"target_key": target_key, "version": report["version_no"], "report_uid": report["report_uid"],
+            "title": report["title"], "level_label": report["level_label"], "narrative_state": report["narrative_state"],
+            "trigger": report["trigger"], "counts": report["counts"], "created_at": report["created_at"]}
+    return meta, report
+
+
+def report_render(report: dict, *, part: str, page_chars: int = REPORT_PAGE_CHARS) -> list[dict]:
+    return synth_module.render_pages(report, page_chars, part=part)
+
+
+def report_envelope(meta: dict, pages: list[dict], page_no: int, *, part: str) -> dict:
+    """쪽 하나 — 머리 칸 + {format:'md', part, pages_total, page_no, next_page?, page}."""
+    if not 1 <= int(page_no) <= len(pages):
+        raise AppError("E100", f"page 는 1 ~ {len(pages)} 가운데 하나다 — {page_no!r}.", 422, detail={"pages_total": len(pages)})
+    out = {**meta, "format": "md", "part": part, "pages_total": len(pages), "page_no": int(page_no),
+           "page": pages[int(page_no) - 1]}
+    if int(page_no) < len(pages):
+        out["next_page"] = int(page_no) + 1
+    return out
+
+
+def report_payload(target_key: str, *, owner_sub: str | None = None, version: int | None = None, page: int = 1,
+                   part: str = "summary", format: str = "md") -> dict:  # noqa: A002 — REST 쿼리 이름
+    """`GET /targets/{key}/report` 본체 — md 는 쪽 하나(`next_page` 로 이어 받는다), json 은 판 전체(쪽 모양 그대로). `version` 이
+    지금 판과 다르면 409 report_version_moved(쪽을 받는 사이 새 판이 섞이지 않게)."""
+    if format not in REPORT_FORMATS:
+        raise AppError("E100", f"format 은 {list(REPORT_FORMATS)} 가운데 하나다 — {format!r}.", 422)
+    meta, report = report_source(target_key, owner_sub=owner_sub)
+    check_report_version(meta, version)
+    if format == "json":
+        return {**meta, "format": "json", "pages": report["pages"]}
+    return report_envelope(meta, report_render(report, part=part), page, part=part)
+
+
+@router.get("/targets/{target_key}/report")
+def get_report(target_key: str, version: int | None = None, page: int = 1, part: str = "summary", format: str = "md",  # noqa: A002
+               ident: identity.Identity = Depends(identity.current)) -> dict:
+    """종합 보고서(앱 사본이 정본) — 쪽마다 25,000자 안, 쪽을 이으면 part 전체다."""
+    return report_payload(target_key, owner_sub=_require_user(ident), version=version, page=page, part=part, format=format)
+
+
+class ReportBody(BaseModel):
+    refresh_summaries: bool = False
+
+
+@router.post("/targets/{target_key}/report")
+def post_report(target_key: str, body: ReportBody = ReportBody(),
+                ident: identity.Identity = Depends(identity.current)) -> dict:
+    """보고서를 다시 낸다(editor) — refresh_summaries 가 거짓이면 지금 원장으로 코드 조립 판(trigger manual)을 그 자리에서, 참이면
+    종합 잡(영역 요약 → 과제 종합 → 판)을 세운다."""
+    email, target = _editable_target(target_key, ident)
+    if target["flow"] != "cells":
+        raise AppError("flow_mismatch", "종합 보고서 판은 카드 대조 대상(flow='cells')에만 있다 — 패널 대상은 통합 보고서다.", 422)
+    store = get_store()
+    if body.refresh_summaries:
+        return {"target_key": target_key, **synth_module.create_synth_job(store, target_key, owner_sub=target["owner_sub"],
+                                                                           requester_sub=email)}
+    return {"target_key": target_key, **synth_module.assemble_report(store, target_key, trigger="manual")}
+
+
+# ---------------------------------------------------------------- 어휘 쪽(재설계 M3 S3-10 — MCP risk_taxonomy 의 와이어 한도)
+TAXONOMY_PARTS: tuple[str, ...] = ("index", "mechanism", "mech_owners", "maps")
+
+
+def taxonomy_payload(part: str = "index", *, offset: int = 0, limit: int | None = None) -> dict:
+    """통제 어휘를 쪽으로 — index(메커니즘 밖의 축 전부 · 어휘 색인 · 배정표 머리) · mechanism(메커니즘 행) · mech_owners(메커니즘 →
+    영역 배정표와 승인 상태 review_status) · maps(동의어·실패 사상). 행이 긴 쪽은 limit·offset 으로 나눈다(자르지 않는다)."""
+    if part not in TAXONOMY_PARTS:
+        raise AppError("E100", f"part 는 {list(TAXONOMY_PARTS)} 가운데 하나다 — {part!r}.", 422)
+    doc = taxonomy.load_taxonomy()
+    meta = taxonomy.mech_owners_meta()
+    head = {"asset_version": taxonomy.ASSET_VERSION, "taxonomy_version": doc.get("taxonomy_version"), "part": part,
+            "parts": list(TAXONOMY_PARTS), "mech_owners": meta}
+    if part == "index":
+        axes = {k: v for k, v in (doc.get("axes") or {}).items() if k != "mechanism"}
+        return {**head, "axes": axes, "mechanism_count": len((doc.get("axes") or {}).get("mechanism") or ()),
+                "enum_defaults": doc.get("enum_defaults"), "priority_weights": doc.get("priority_weights"),
+                "vocab": taxonomy.vocab_index(), "promotable_axes": character.promotable_axes()}
+    if part == "maps":
+        return {**head, "synonyms": doc.get("synonyms"), "failure_map": doc.get("failure_map"), "voc_map": doc.get("voc_map")}
+    rows = (list((doc.get("axes") or {}).get("mechanism") or ()) if part == "mechanism"
+            else list(taxonomy.load_json(taxonomy.MECH_OWNERS_ASSET).get("rows") or ()))
+    start = max(0, int(offset or 0))
+    page = rows[start:] if limit is None else rows[start:start + max(1, int(limit))]
+    out = {**head, "total": len(rows), "offset": start, "rows": page}
+    if start + len(page) < len(rows):
+        out["next_offset"] = start + len(page)
+    return out
+
+
 def _live_signal(store, state: str, signal: Any) -> dict | None:
     """잡 행에 적힌 마지막 신호 — 그 패널이 지금 도는 동안에만 싣는다. 아니면 None 이다.
 
@@ -3502,13 +3701,15 @@ def seats_payload(target_key: str, domain: str | None = None, *, owner_sub: str 
     return {"target_key": target_key, "domain": domain, "seats": rows}
 
 
-def panels_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
-    """`GET /targets/{key}/panels` 본체 — MCP `risk_list_panels` 와 같은 함수."""
+def panels_payload(target_key: str, *, owner_sub: str | None = None, kind: str | None = None) -> dict:
+    """`GET /targets/{key}/panels` 본체 — MCP `risk_list_panels` 와 같은 함수. 패널마다 `kind`(coverage · issue)와 `issue_id`
+    (M3 S3-10), `kind` 로 거른다."""
     _target_row(target_key, owner_sub)
     rows = get_store().query(
         "SELECT id, panel_no, tier, seats_json, modifiers_json, rounds, engine, tool_mode, conv_id, report_id,"
-        " status, risk_spec_parsed, quality_json, model_json, llm_calls, retry, error, started_at, ended_at"
-        " FROM rr_panels WHERE target_key = ? ORDER BY panel_no", (target_key,))
+        " status, risk_spec_parsed, quality_json, model_json, llm_calls, retry, error, started_at, ended_at, kind, issue_id"
+        " FROM rr_panels WHERE target_key = ?" + (" AND kind = ?" if kind else "") + " ORDER BY panel_no",
+        (target_key, kind) if kind else (target_key,))
     panels = []
     for row in rows:
         item = dict(row)
@@ -3518,6 +3719,12 @@ def panels_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
         item["model"] = _loads(item.pop("model_json"), {})
         panels.append(item)
     return {"target_key": target_key, "panels": panels}
+
+
+def panel_kind(panel_id: str) -> str | None:
+    """패널의 종류(coverage · issue) — 없으면 None."""
+    row = get_store().query_one("SELECT kind FROM rr_panels WHERE id = ?", (panel_id,))
+    return str(row["kind"]) if row is not None else None
 
 
 def panel_transcript_payload(panel_id: str, *, owner_sub: str | None = None) -> dict:
@@ -3619,9 +3826,9 @@ def get_seats(target_key: str, domain: str | None = None,
 
 
 @router.get("/targets/{target_key}/panels")
-def get_panels(target_key: str, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """패널 목록(conv_id · report_id · quality_json · model_json)."""
-    return panels_payload(target_key, owner_sub=_require_user(ident))
+def get_panels(target_key: str, kind: str | None = None, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """패널 목록(conv_id · report_id · quality_json · model_json · kind · issue_id)."""
+    return panels_payload(target_key, owner_sub=_require_user(ident), kind=kind)
 
 
 @router.get("/panels/{panel_id}/transcript")
