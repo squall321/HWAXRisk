@@ -78,8 +78,9 @@ def _page_text(report: dict, kind: str | None = None) -> str:
 
 # ---------------------------------------------------------------- 한 바퀴
 def test_every_roster_domain_gets_a_summary_and_the_report_head_equals_the_closure_counts(store):
-    """로스터 영역 15개 전부에 요약 행이 서고, 행 0 인 영역은 LLM 없이 code_only(no_rows) 다. 과제 종합 뒤 보고서 판 v1(synth_done)이
-    서고, 머리의 수(counts_json)가 같은 시점의 closure.cell_counts 와 같다. 서술이 다 붙어 narrative_state full 이다."""
+    """로스터 영역 15개 전부에 요약 행이 서고, 행 0 인 영역은 LLM 없이 code_only(no_rows) 다. 과제 종합 뒤 보고서 판(synth_done — 앞
+    판은 검토 잡 끝의 사슬이 세운 코드 조립 판이다)이 서고, 머리의 수(counts_json)가 같은 시점의 closure.cell_counts 와 같다. 서술이
+    다 붙어 narrative_state full 이다."""
     key = _ledger(store)
     engine = FakeSummaryEngine()
     steps = _drive(store, engine, key)
@@ -92,11 +93,13 @@ def test_every_roster_domain_gets_a_summary_and_the_report_head_equals_the_closu
     assert called == sorted([d for d in domains if d not in no_rows] + ["-"]) and no_rows
     assert all(r["state"] == "done" for k, r in rows.items() if k[1] not in no_rows)
     report = synth.report_source(store, key)
-    assert (report["version_no"], report["trigger"], report["narrative_state"]) == (1, "synth_done", "full")
+    chained = store.query_one("SELECT COUNT(*) AS n FROM rr_reports WHERE target_key = ? AND trigger <> 'synth_done'", (key,))["n"]
+    assert chained >= 1
+    assert (report["version_no"], report["trigger"], report["narrative_state"]) == (chained + 1, "synth_done", "full")
     fresh = {k: v for k, v in closure.cell_counts(store, key).items() if not k.startswith("_")}
     assert report["counts"] == json.loads(json.dumps(fresh))
     # 근거 등급이 전부 경험칙인 원장이라 지금처럼 [가설 단계] 가 앞에 붙는다.
-    assert report["title"] == f"[가설 단계] 리스크 심사 보고서 v1 [{report['level_label']}] — {key}"
+    assert report["title"] == f"[가설 단계] 리스크 심사 보고서 v{chained + 1} [{report['level_label']}] — {key}"
     assert [p["kind"] for p in report["pages"]] == ["summary"] + ["domain"] * 15 + ["mechanisms", "appendix"]
     appendix = [t for t in report["pages"][-1]["blocks"]["minutes"] if t.startswith("- ")]
     assert len(appendix) == len(rig.ROSTER)

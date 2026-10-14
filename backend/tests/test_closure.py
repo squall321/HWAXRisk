@@ -11,7 +11,7 @@ import time
 import pytest
 from pydantic import ValidationError
 
-from app import closure, config, issues, registry, review_cells, routes, runner, units
+from app import closure, config, registry, review_cells, review_runner, routes, runner, units
 from app.errors import AppError
 from tests import factories
 from tests.synth import fake_review_engine as fre
@@ -69,22 +69,27 @@ def test_the_label_is_the_bare_level_only_without_residuals():
 
 # ---------------------------------------------------------------- 레벨 사다리
 def test_a_cells_target_climbs_with_its_ledger_and_never_shows_a_bare_level(store, monkeypatch, tmp_path):
-    """검토 전 C0(격자 결손) → 격자를 다 돌면 C1(대표 셀 닫힘 · 보고서 누락 0 · 판정 누락 0) → 쟁점 단계가 지금 셀 지문으로 돌고
-    P1 쟁점이 끝나면 C2. 종합 보고서 판이 없어 C3 는 아니다(후속 낡음). 어느 단계든 표기는 맨 레벨 이름이 아니다 — 2차 영향·결손
-    사냥 미실행이 늘 붙는다. 문지기(registry.close_level)가 cells 대상에 이 판정을 쓴다."""
+    """검토 전 C0(격자 결손) → 대표 셀만 닫히면 C1(열린 셀 · 쟁점 선정 전) → 격자를 다 돌면 사슬이 쟁점을 고르고(S3-5) P1 쟁점이
+    도는 동안 C1(쟁점 진행) → 쟁점 패널이 끝나면 C2. 종합 보고서 판이 없어 C3 는 아니다(후속 낡음). 어느 단계든 표기는 맨 레벨
+    이름이 아니다 — 2차 영향·결손 사냥 미실행이 늘 붙는다. 문지기(registry.close_level)가 cells 대상에 이 판정을 쓴다."""
+    rig.configure(monkeypatch, store, tmp_path, risk_issue_panel_cap=48, risk_issue_panel_hard_cap=48)
     key = rig.target(store)
     before = registry.close_level(store, key, persist=False)
     assert before["flow"] == "cells" and before["level"] == "C0" and "격자 결손" in before["level_label"]   # 검토 잡 전
-    key = _full_grid(store, verdicts={"K01": ("yes", "FAIL")})            # sim 은 카드 없는 영역 — 깊이를 막지 않는다(D-35)
+    fake = FakeReviewEngine(rig.packs())
+    fake.verdicts = {_rid("K01"): ("yes", "FAIL")}                       # sim 은 카드 없는 영역 — 깊이를 막지 않는다(D-35)
+    fake.mechs = {_rid("K01"): ("interface.clearance", "")}
+    reps = [r["key"] for r in rig.ROSTER if r["key"] in (rig.SEAL, rig.BACKGROUND_ONLY, "xd-syn-0")]
+    job_id = rig.job(store, key, scope={"agents": reps})
+    rig.Rig(store, fake).finish(job_id)
     first = registry.close_level(store, key)
     assert (first["level"], first["c1"], first["c2"]) == ("C1", True, False)
-    assert first["counts"]["cells"]["actual"] == first["counts"]["cells"]["expected"] > 0
-    assert "후속 낡음(쟁점 선정 전)" in first["level_label"]
-    rig.configure(monkeypatch, store, tmp_path, risk_issue_panel_cap=48, risk_issue_panel_hard_cap=48)
-    issues.select_issues(store, key, selected_round=1, cells_hash=closure.closing_hash(store, key))
+    assert "열린 셀" in first["level_label"] and "후속 낡음(쟁점 선정 전)" in first["level_label"]
+    job_id = rig.job(store, key)
+    rig.Rig(store, fake).finish(job_id)
     waiting = registry.close_level(store, key)
-    assert waiting["counts"]["issues"]["p1"]["open"] >= 1 and waiting["level"] == "C1"
-    issues.create_issues_job(store, key, owner_sub=OWNER, requester_sub=OWNER)
+    assert waiting["counts"]["cells"]["actual"] == waiting["counts"]["cells"]["expected"] > 0
+    assert waiting["counts"]["issues"]["p1"]["open"] >= 1 and waiting["level"] == "C1" and "쟁점 진행" in waiting["level_label"]
     engine = IssuePanelEngine(store)
     while (job := runner.claim_next_job(store, config.settings, engine=engine)) is not None:
         if runner.run_panel(store, config.settings, engine, job)["status"] == "no_panel":
@@ -102,18 +107,21 @@ def test_a_cells_target_climbs_with_its_ledger_and_never_shows_a_bare_level(stor
 
 
 def test_the_stored_level_never_drops_and_a_lower_count_is_reported_as_regressed(store):
-    """저장 레벨은 내려가지 않는다 — 지금 계산이 낮으면 level_current 와 regressed 로 알린다(X1-24). 더 넓은 검토 잡이 새 셀을
-    열면 그 셀이 열린 동안 계산은 C0 이다."""
-    key = _full_grid(store)
-    assert registry.close_level(store, key)["level"] == "C1"
+    """저장 레벨은 내려가지 않는다 — 지금 계산이 낮으면 level_current 와 regressed 로 알린다(X1-24). 사람이 대표 셀을 다시 열면(셀
+    처분 — 잡은 세우지 않는다) 그 셀이 열린 동안 계산은 C0 이다."""
+    key = _full_grid(store)                               # 쟁점 없음 → 사슬이 곧바로 종합 잡(쟁점 단계 신선) → C2
+    assert registry.close_level(store, key)["level"] == "C2"
     job_id = rig.job(store, key)                         # 같은 격자를 다시 — 셀은 그대로 닫혀 있다
     assert rig.state(store, job_id) in ("queued", "running", "completed")
     again = registry.close_level(store, key)
-    assert again["level"] == "C1"
-    store.execute("UPDATE rr_review_cells SET state = 'pending' WHERE target_key = ? AND rowid = (SELECT MIN(rowid)"
-                  " FROM rr_review_cells WHERE target_key = ?)", (key, key))      # 재개방(셀 처분 REST 는 셀 꾸러미 C3-7)
+    assert again["level"] == "C2"
+    runner.cancel_job(store, job_id, by=OWNER)
+    rep = store.query_one("SELECT unit_id, agent_key, state FROM rr_review_cells WHERE target_key = ? AND agent_key = ?"
+                          " ORDER BY unit_seq LIMIT 1", (key, SEAL))
+    review_runner.dispose_cells(store, key, action="retry", rows=[dict(rep)], decided_by=OWNER, owner_sub=OWNER,
+                                note="다시 본다", force=True, start=False)
     reopened = registry.close_level(store, key)
-    assert (reopened["level"], reopened["level_current"], reopened["regressed"]) == ("C1", "C0", True)
+    assert (reopened["level"], reopened["level_current"], reopened["regressed"]) == ("C2", "C0", True)
     assert "재개방 1셀" in reopened["level_label"]
 
 

@@ -429,6 +429,9 @@ class SynthWorker:
             return {"job_id": job["id"], "step": "planned_target"}
         report = assemble_report(self.store, key, trigger="synth_done")
         self._set(job["id"], "completed")
+        from app import chain  # noqa: PLC0415 — chain 은 이 모듈을 쓴다.
+
+        chain.safe(chain.on_synth_closed, self.store, job)
         return {"job_id": job["id"], "step": "completed", "report": report}
 
     def _job_error(self, job: Mapping[str, Any], exc: BaseException) -> dict:
@@ -772,7 +775,7 @@ def build_report(store: RiskStore, target_key: str, *, closure_result: Mapping[s
     return {"pages": pages, "narrative_state": narrative_state, "summary_ids": sorted(r["summary_id"] for r in latest.values())}
 
 
-def _registry_hash(store: RiskStore, target_key: str) -> str:
+def registry_hash(store: RiskStore, target_key: str) -> str:
     rows = [(r["cluster_key"], r["severity"], r["judgement"], r["status"], r.get("issue_state"), r.get("attention"))
             for r in registry.registry_rows(store, target_key)]
     return common.sha256_hex(common.canonical_json(sorted(rows)))[:16]
@@ -813,7 +816,7 @@ def assemble_report(store: RiskStore, target_key: str, *, trigger: str) -> dict:
         (uid, target_key, target["owner_sub"], version_no, trigger, target["flow"], result["level"], result["level_label"],
          built["narrative_state"], title, common.canonical_json(public),
          common.sha256_hex(common.canonical_json({"level": result["level"], "label": result["level_label"]}))[:16],
-         result["detail"]["cells_hash"], _registry_hash(store, target_key), common.canonical_json(built["summary_ids"]),
+         result["detail"]["cells_hash"], registry_hash(store, target_key), common.canonical_json(built["summary_ids"]),
          gzip.compress(common.canonical_json(built["pages"]).encode("utf-8"), mtime=0), len(built["pages"]), content_hash,
          now))
     # 판이 섰다 — 신선도(종합까지 지금 지문으로 돌았나)가 바뀔 수 있으니 완결 캐시를 다시 쓴다.

@@ -2604,7 +2604,7 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
             " principal_json, consent_at, level, close_level, external_sync_json, flow, created_at, updated_at)"
             " VALUES (?,?,?,?,?,?,?,?,?,'C0',?,?,?,?,?)",
             (target_key, owner_sub, body.kind, body.ref_id, project_id, base_project_id, ir_hash,
-             canonical_json(ident.to_dict()), now, config.settings.risk_default_close_level,
+             canonical_json(ident.to_dict()), now, close_level_for(flow),
              canonical_json(ra_client.empty_sync()), flow, now, now),
         )
         if agents:
@@ -2623,8 +2623,8 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
         except Exception as exc:  # noqa: BLE001
             log.exception("대상 %s 의 단위를 얹지 못해 panels 로 연다", target_key)
             flow, flow_fallback = "panels", {"from": "cells", "reason": "persist_error"}
-            store.execute("UPDATE rr_targets SET flow = 'panels', updated_at = ? WHERE target_key = ?",
-                          (now_epoch(), target_key))
+            store.execute("UPDATE rr_targets SET flow = 'panels', close_level = ?, updated_at = ? WHERE target_key = ?",
+                          (close_level_for("panels"), now_epoch(), target_key))
             failed = {**built, "status": "failed", "error": "persist_error", "error_detail": f"{type(exc).__name__}: {exc}",
                       "units": [], "unit_ids": [], "evidence": {}, "suspects": []}
             try:
@@ -2654,6 +2654,12 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
     if units_out is not None:
         out["units"] = units_out
     return out
+
+
+def close_level_for(flow: str) -> str:
+    """대상의 마감 레벨 — 카드 대조(cells) 대상은 전원(C3 — D-34, 15명·114명은 중간 점검 지점), 패널 대상은 박스 손잡이
+    `HWAXRISK_DEFAULT_CLOSE_LEVEL`(기본 C2) 그대로다(재설계 M3 S3-5). 마감 레벨을 사람이 고르는 길은 없다 — 방식을 바꾸면 따라 바뀐다."""
+    return "C3" if flow == "cells" else config.settings.risk_default_close_level
 
 
 def require_review_enabled(cfg: Any = None) -> None:
@@ -2844,7 +2850,8 @@ def post_target_flow(target_key: str, body: FlowBody, ident: identity.Identity =
       세운다, 안 서면 409 units_unbuildable — 까닭은 빌드 error). 이미 돈 패널·의견·등록부는 건드리지 않는다
       — 패널을 돌린 대상에 카드 대조를 얹는 길이다(D-24 '비교', 파일럿 길).
     - cells → panels: 검토 잡이 한 번도 없을 때만(409 flow_locked·review_ran).
-    바꾸면 rr_audit(scope='target', action='target.flow') 한 행을 남긴다. 같은 방식이면 아무것도 쓰지 않는다(changed:false).
+    마감 레벨은 방식을 따라간다(`close_level_for` — cells 는 C3, panels 는 박스 손잡이). 바꾸면 rr_audit(scope='target',
+    action='target.flow') 한 행을 남긴다(방식·마감 레벨 앞뒤). 같은 방식이면 아무것도 쓰지 않는다(changed:false).
     """
     email, target = _editable_target(target_key, ident)
     store = get_store()
@@ -2869,10 +2876,12 @@ def post_target_flow(target_key: str, body: FlowBody, ident: identity.Identity =
         lock = _flow_lock(store, target_key, body.to)
         if lock is not None:
             raise lock
-        store.execute("UPDATE rr_targets SET flow = ?, updated_at = ? WHERE target_key = ?",
-                      (body.to, now_epoch(), target_key))
+        before = store.query_one("SELECT close_level FROM rr_targets WHERE target_key = ?", (target_key,))["close_level"]
+        store.execute("UPDATE rr_targets SET flow = ?, close_level = ?, updated_at = ? WHERE target_key = ?",
+                      (body.to, close_level_for(body.to), now_epoch(), target_key))
         _audit(store, email, scope="target", subject_id=target_key, project_id=target["project_id"],
-               action="target.flow", before={"flow": target["flow"]}, after={"flow": body.to}, reason=body.reason,
+               action="target.flow", before={"flow": target["flow"], "close_level": before},
+               after={"flow": body.to, "close_level": close_level_for(body.to)}, reason=body.reason,
                channel=AUDIT_CHANNELS.get(ident.source, "rest"))
     out = {"target_key": target_key, "flow": body.to, "changed": True}
     if body.to == "cells":

@@ -114,15 +114,17 @@ def test_a_person_queues_an_untried_issue_or_skips_one_with_a_reason_and_an_audi
 # ---------------------------------------------------------------- 보고서
 def test_the_report_reads_by_pages_and_a_moved_version_is_409(store):
     """GET /targets/{key}/report — 판이 없으면 404 report_absent. 판이 서면 md 쪽(next_page 로 이어 받으면 part 전체), json 은 쪽 전체,
-    version 이 지금 판과 다르면 409 report_version_moved. POST 는 코드 조립 판(refresh_summaries=false)이나 종합 잡(true)."""
-    key = _ledger(store)
+    version 이 지금 판과 다르면 409 report_version_moved. POST 는 코드 조립 판(refresh_summaries=false — 내용이 같으면 그 판 그대로)이나
+    종합 잡(true)."""
     with pytest.raises(AppError) as absent:
-        routes.report_payload(key, owner_sub=OWNER)
+        routes.report_payload(rig.target(store), owner_sub=OWNER)                     # 검토 전 — 사슬이 판을 세우기 전
     assert absent.value.code == "report_absent"
+    key = _ledger(store)
+    chained = synth.report_source(store, key)["version_no"]                           # 사슬이 세운 판(검토 · 쟁점 끝)
     with factories.routes_store(store):
         made = routes.post_report(key, routes.ReportBody(refresh_summaries=False), ident=factories.ident(OWNER))
         job = routes.post_report(key, routes.ReportBody(refresh_summaries=True), ident=factories.ident(OWNER))
-    assert made["version_no"] == 1 and made["created"] and job["job_id"]
+    assert made["version_no"] == chained + int(made["created"]) and job["job_id"]
     assert store.query_one("SELECT mode FROM rr_jobs WHERE id = ?", (job["job_id"],))["mode"] == "synth"
     report = synth.report_source(store, key)
     first = routes.report_payload(key, owner_sub=OWNER, part="full")

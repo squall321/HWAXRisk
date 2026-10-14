@@ -2414,6 +2414,12 @@ class ReviewLoop:
             with self._lock:
                 self._progress.pop(job["id"], None)
                 self._served.pop(job["id"], None)
+            if state == "completed":
+                # 잡 사슬(재설계 M3 S3-5) — 위 UPDATE 와 다른 트랜잭션에서 병합 → 판 → 쟁점 → 종합을 잇는다. 보충 표본이 셀을 다시
+                # 열었으면 여기 오지 않는다(_complete_or_phase 가 review 로 돌려 잡이 이어 돈다).
+                from app import chain  # noqa: PLC0415 — chain 은 종합·쟁점을 거쳐 무겁다.
+
+                chain.safe(chain.on_reviews_closed, self.store, job)
 
     def _unfinalized(self, job: Mapping[str, Any]) -> int:
         """범위 안 셀이 다 닫혔는데 마감되지 않은(planned 로 남은) 머리 수 — 마감 도중 결함·재기동 뒤의 것이다. 닫힌 셀이 앞 잡의

@@ -80,7 +80,7 @@ def _card_bodies() -> list[str]:
 def test_flagged_cards_on_one_change_fold_into_one_finding_held_at_warning(store):
     """같은 전문가의 카드 셋(FAIL·WARNING·FAIL)이 같은 변경 · 같은 메커니즘이면 단위마다 finding 하나에 cards[] 셋이다. hold 정책 —
     등록부로 갈 값은 WARNING · 중대이고 원래 판정은 judgement_claimed 에 FAIL 로 남는다. 패널 자리는 비고 출처 넷이 차며 회수
-    자격은 0, 등록부에는 병합하지 않는다. 근거 문장에 카드 참조·인용이 있어도 수치 대조가 깨지지 않고(P-05) finding 글에 카드 본문이
+    자격은 0 이다(등록부 병합은 검토 잡 끝의 사슬 몫이다 — 재설계 M3 S3-5, tests/test_chain.py). 근거 문장에 카드 참조·인용이 있어도 수치 대조가 깨지지 않고(P-05) finding 글에 카드 본문이
     없다(P-06). 걸린 줄은 같은 메커니즘 코드를 단다(cr-verdict-2 — 메커니즘이 없으면 cells 대상에서는 카드마다 갈린다, M3 S3-3 ·
     tests/test_review_mech.py)."""
     key, _job, _fake = _run(store, scope={"agents": [SEAL]},
@@ -108,7 +108,6 @@ def test_flagged_cards_on_one_change_fold_into_one_finding_held_at_warning(store
     refs = {r["ref"] for r in store.query("SELECT ref FROM rr_claim_refs WHERE claim_uid = ?", (rows[0]["claim_uid"],))}
     assert {f"card:{_rid(a)}" for a in ("K01", "K02", "K03")} <= refs
     assert routes.claims_for_ref(f"card:{_rid('K01')}", owner_sub=OWNER)["claims"]      # '이 카드를 근거로 든 지적'
-    assert store.query_one("SELECT COUNT(*) AS n FROM rr_registry WHERE target_key = ?", (key,))["n"] == 0
 
 
 def test_each_expert_raises_its_own_finding_in_a_shared_cluster(store):

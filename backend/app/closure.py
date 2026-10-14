@@ -109,16 +109,19 @@ def cells_hash(store: RiskStore, target_key: str, *, scope: Iterable[str] | None
     return common.sha256_hex(common.canonical_json(rows))[:16]
 
 
-def closing_hash(store: RiskStore, target_key: str) -> str:
-    """마감 범위의 셀 지문 — 마감 레벨이 C3(cells 대상의 기본)이면 격자 전부, C2 면 Tier B 범위(A·B) 전문가의 셀. 쟁점 선정·
-    사슬 잡·보고서 판이 얼리는 값이고 완결 판정의 신선도가 이것과 견준다."""
+def closing_agents(store: RiskStore, target_key: str) -> list[str] | None:
+    """마감 범위의 전문가 — 마감 레벨이 C3(cells 대상의 기본)이면 None(격자 전부), C2 면 Tier B 범위(A·B) 전문가."""
     from app import planner  # noqa: PLC0415
 
     row = store.query_one("SELECT close_level FROM rr_targets WHERE target_key = ?", (target_key,))
     if row is None or (row["close_level"] or "C3") == "C3":
-        return cells_hash(store, target_key)
-    return cells_hash(store, target_key, scope=[r["agent_key"] for r in planner.review_order(store, target_key)
-                                               if r["tier"] in ("A", "B")])
+        return None
+    return [r["agent_key"] for r in planner.review_order(store, target_key) if r["tier"] in ("A", "B")]
+
+
+def closing_hash(store: RiskStore, target_key: str) -> str:
+    """마감 범위의 셀 지문(`closing_agents`) — 쟁점 선정·사슬 잡·보고서 판이 얼리는 값이고 완결 판정의 신선도가 이것과 견준다."""
+    return cells_hash(store, target_key, scope=closing_agents(store, target_key))
 
 
 # ---------------------------------------------------------------- 수
@@ -408,23 +411,38 @@ def revoke_ack(store: RiskStore, target_key: str, item: str, *, by: str) -> dict
 
 
 # ---------------------------------------------------------------- 레벨 · 표기
+def reopened_sum(store: RiskStore, target_key: str) -> int:
+    """마감 범위 셀의 다시 연 횟수 합(`reopened_n` — 사람의 다시 · 거른 셀 다시 열기 · 입력이 바뀐 셀). 사슬 잡이 얼려 두고 '후속
+    낡음(재검토 N셀)' 의 N 을 이 값의 차로 센다."""
+    agents = closing_agents(store, target_key)
+    return sum(int(r["reopened_n"] or 0) for r in store.query(
+        "SELECT agent_key, reopened_n FROM rr_review_cells WHERE target_key = ? AND reopened_n > 0", (target_key,))
+               if agents is None or r["agent_key"] in agents)
+
+
 def _fresh(store: RiskStore, target_key: str, current: str) -> dict:
-    """후속 단계가 지금 셀 지문으로 돌았나 — 쟁점(선정한 쟁점의 cells_hash · 사슬 잡의 chain_json.cells_hash)과 보고서 판(종합까지
-    — trigger synth_done 의 cells_hash)."""
+    """후속 단계가 지금 셀 지문으로 돌았나 — 쟁점(선정한 쟁점의 cells_hash · 사슬 잡의 chain_json.cells_hash)과 보고서 판(마지막 판이
+    지금 지문이고 그 지문으로 종합까지 돈 판 synth_done 이 있다). 낡았을 때 표기에 쓸 것 — 쟁점을 고른 적이 있나(`selected`), 마지막
+    사슬 잡 뒤 다시 연 셀 수(`reopened_since` — 사슬 잡이 없으면 None), 종합 판 번호(`synth_version`)."""
     issues_fresh = store.query_one("SELECT 1 FROM rr_issues WHERE target_key = ? AND cells_hash = ? LIMIT 1",
                                    (target_key, current)) is not None
-    if not issues_fresh:
-        for row in store.query("SELECT chain_json FROM rr_jobs WHERE target_key = ? AND mode IN ('issues', 'synth')"
-                               " AND chain_json IS NOT NULL", (target_key,)):
-            if (_loads(row["chain_json"], {}) or {}).get("cells_hash") == current:
-                issues_fresh = True
-                break
+    chains = [_loads(r["chain_json"], {}) or {} for r in store.query(
+        "SELECT chain_json FROM rr_jobs WHERE target_key = ? AND mode IN ('issues', 'synth') AND chain_json IS NOT NULL"
+        " ORDER BY created_at, rowid", (target_key,))]
+    issues_fresh = issues_fresh or any(c.get("cells_hash") == current for c in chains)
+    selected = bool(chains) or store.query_one("SELECT 1 FROM rr_issues WHERE target_key = ? LIMIT 1",
+                                               (target_key,)) is not None
+    baseline = chains[-1].get("reopened_n") if chains else None
     report = store.query_one("SELECT version_no, cells_hash, trigger FROM rr_reports WHERE target_key = ?"
                              " ORDER BY version_no DESC LIMIT 1", (target_key,))
     synthesized = store.query_one("SELECT 1 FROM rr_reports WHERE target_key = ? AND cells_hash = ? AND trigger = 'synth_done'"
                                   " LIMIT 1", (target_key, current)) is not None
+    synth_version = store.query_one("SELECT MAX(version_no) AS v FROM rr_reports WHERE target_key = ? AND trigger = 'synth_done'",
+                                    (target_key,))["v"]
     return {"issues": issues_fresh, "report": bool(report is not None and report["cells_hash"] == current and synthesized),
-            "report_version": report["version_no"] if report is not None else None}
+            "report_version": report["version_no"] if report is not None else None, "synth_version": synth_version,
+            "selected": selected,
+            "reopened_since": (max(reopened_sum(store, target_key) - int(baseline), 0) if baseline is not None else None)}
 
 
 def level_label(level: str, labels: Sequence[str], *, head: str | None = None) -> str:
@@ -522,11 +540,13 @@ def close_level_cells(store: RiskStore, target_key: str, *, persist: bool = True
     if counts["issues"]["open"]:
         notes.append(f"쟁점 진행 {counts['issues']['open']}건")
     if c1 and not fresh["issues"]:
-        notes.append("후속 낡음(쟁점 선정 전)")
+        # 고른 적이 없으면 선정 전, 고른 뒤 셀이 다시 열렸으면 그 수(사슬 잡이 얼린 다시 연 횟수와의 차), 그 밖의 셀 변화는 지문만.
+        notes.append("후속 낡음(쟁점 선정 전)" if not fresh["selected"] else
+                     f"후속 낡음(재검토 {fresh['reopened_since']}셀)" if fresh["reopened_since"] else "후속 낡음(셀 바뀜)")
     elif c2 and not fresh["report"]:
-        notes.append("후속 낡음(종합 전)" if fresh["report_version"] is None else "후속 낡음(보고서 판)")
-    if regressed:
-        notes.append(f"재개방 {open_cells}셀")
+        notes.append("후속 낡음(종합 전)" if fresh["synth_version"] is None else "후속 낡음(보고서 판)")
+    if regressed and open_cells:
+        notes.append(f"재개방 {open_cells}셀")      # 셀이 닫힌 채 내려간 것(확인 낡음 따위)은 머리('C3 대기')와 잔여 표기가 말한다
     head = None
     if current == "C2" and target_close == "C3" and c3_core and blocking_left:
         head = "C2 · C3 대기"

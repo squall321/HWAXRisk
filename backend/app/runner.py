@@ -23,9 +23,9 @@ log = logging.getLogger("hwax_risk.runner")
 # (스레드명, 폴링 주기 초). sync_loop 은 PAT 폐기 대조(§8.2.7)를 돌리고 external_sync 재시도(§5.5.3)는 P4 배선,
 # nightly_loop(§7.7 야간 잡) 본문은 P6 에서 채운다. review_loop 은 카드 대조 검토 잡의 틱이다(재설계 M2 · m2-wp3b S8 —
 # review_runner.ReviewLoop). synth_loop 은 종합 잡(영역 요약 → 과제 종합 → 보고서 판)의 틱이다(재설계 M3 S3-9 — synth.SynthWorker,
-# 요약 호출은 틱마다 하나씩 차례로).
+# 요약 호출은 틱마다 하나씩 차례로). chain_loop 은 끊긴 잡 사슬 메우기다(S3-5 — chain.sweep, 끝난 단계에 다음 잡이 없으면 하나).
 _LOOPS: tuple[tuple[str, float], ...] = (("panel_loop", 5.0), ("sync_loop", 60.0), ("nightly_loop", 60.0),
-                                         ("review_loop", 2.0), ("synth_loop", 5.0))
+                                         ("review_loop", 2.0), ("synth_loop", 5.0), ("chain_loop", 30.0))
 
 # 좌석 귀속 정규식(plan §0.2.3·§6.7 7단계). SSE 스트림과 POST /api/panels/{id}/complete 의 events[] 에 같은 식을 쓴다.
 STATUS_LOOKUP_RE = re.compile(r"^(?P<key>\S+) 조회: (?P<tool>\S+)$")
@@ -1508,8 +1508,14 @@ def _quality(
 
 
 def _finish_job(store: Any, job: Mapping[str, Any], settings: Any) -> dict:
-    """Tier 범위 소진 — 잡을 completed 로 닫고, close_level 이 C3 이면 Tier B 뒤에 Tier C 를 자동 큐잉한다."""
+    """Tier 범위 소진 — 잡을 completed 로 닫고, close_level 이 C3 이면 Tier B 뒤에 Tier C 를 자동 큐잉한다. 쟁점 잡(M3 S3-5)은
+    대기 쟁점이 바닥난 것이고 사슬이 종합 잡을 잇는다."""
     _set_job(store, job["id"], "completed")
+    if job.get("mode") == "issues":
+        from app import chain  # noqa: PLC0415 — chain 은 종합·쟁점을 거쳐 무겁다.
+
+        follow = chain.safe(chain.on_issues_closed, store, job) or {}
+        return {"job_state": "completed", "next_job": follow.get("job_id") if follow.get("created") else None}
     target = store.query_one("SELECT owner_sub, close_level FROM rr_targets WHERE target_key = ?", (job["target_key"],))
     close_level = (target["close_level"] if target and target["close_level"] else settings.risk_default_close_level)
     if job["tier"] == "B" and close_level == "C3":
@@ -1901,9 +1907,11 @@ def _close_panel_error(store: Any, panel: Mapping[str, Any], job: Mapping[str, A
         _set_job(store, job["id"], "failed", error="engine_fail_streak")
         if job.get("mode") == "issues":
             # 쟁점 잡이 연속 오류로 실패하면 남은 대기 쟁점은 untried_cap(engine_fail) — 지우지 않는다(3.7 실패 표).
-            from app import issues  # noqa: PLC0415 — issues 는 이 모듈을 쓴다.
+            from app import chain, issues  # noqa: PLC0415 — issues 는 이 모듈을 쓴다.
 
             issues.untry_queued(store, panel["target_key"], "engine_fail")
+            # 쟁점 잡이 실패로 닫혀도 종합은 잇는다(P-08 ② — 코드 조립 판과 미토의 잔여가 남는다).
+            chain.safe(chain.on_issues_closed, store, job)
     return {"panel_id": panel["id"], "status": "error", "error": error}
 
 
@@ -2392,6 +2400,13 @@ class RiskRunner:
                     self._synth.tick()
                 except Exception:  # noqa: BLE001 — 한 번의 실패가 스레드를 죽이지 않게 한다.
                     log.exception("synth_loop tick 실패")
+            elif name == "chain_loop":
+                try:
+                    from app import chain  # noqa: PLC0415 — chain 은 종합·쟁점을 거쳐 무겁다.
+
+                    chain.sweep(self.store)
+                except Exception:  # noqa: BLE001 — 한 번의 실패가 스레드를 죽이지 않게 한다.
+                    log.exception("chain_loop sweep 실패")
             self._stop.wait(interval)
 
     def _revocation_tick(self) -> None:
