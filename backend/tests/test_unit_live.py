@@ -549,3 +549,25 @@ def test_a_purge_that_slips_past_the_checks_still_never_gets_its_rows_written(st
     assert {(row["lines_gz"], row["plan_json"], row["gaps_json"], row["attempts"]) for row in store.query(
         "SELECT lines_gz, plan_json, gaps_json, attempts FROM rr_unit_live WHERE target_key = ?", (key,))} == {(None, "[]", None, 0)}
     assert store.query_one("SELECT COUNT(*) AS n FROM rr_brief_calls WHERE target_key = ?", (key,))["n"] == 0
+
+
+def test_a_unit_frozen_after_a_long_call_carries_its_write_time_so_a_since_export_sees_it(store):
+    """반대 검토 LOW 19 — 얼린 행이 ensure 의 시작 시각을 달고 있으면 호출이 도는 사이에 돈 since 반출(그 뒤 시각부터)이 그 행을
+    영영 놓친다. 얼린 행의 frozen_at · updated_at 은 적는 순간의 시각이다(호출 전에 얼린 단위는 그 시각 그대로)."""
+    from app import export
+
+    key = _target(store)
+    unit_id = _material_unit(store, key)
+    rig.job(store, key, scope={"agents": [rig.SEAL]})
+    r = rig.Rig(store, FakeReviewEngine(rig.packs()))
+    gw = Gateway()
+    started = r.clock()
+    gw.on_call = lambda _name: r.clock.advance(600)                 # 호출 하나가 10분 걸렸다
+    r.loop.live_transport = gw.transport
+    r.tick()
+    row = _row(store, key, unit_id)
+    assert (row["status"], row["frozen_at"], row["updated_at"]) == ("ok", started + 600, started + 600)
+    other = next(u["unit_id"] for u in units.load_units(store, key) if u["unit_id"] != unit_id)
+    assert _row(store, key, other)["frozen_at"] == started                 # 부를 것이 없던 단위는 호출 전에 얼었다
+    since = [json.loads(line) for line in export.iter_lines(store, OWNER, started + 1)][1:]
+    assert [x["row"]["unit_id"] for x in since if x["table"] == "rr_unit_live"] == [unit_id]

@@ -2576,7 +2576,7 @@ class ReviewLoop:
             try:
                 # 호출 사이마다 잡을 새로 읽는다(poll_s=0) — 취소 · 사람의 정지 · 앱 종료면 더 부르지 않고 얼리지 않는다(MEDIUM 14).
                 out = unit_live.ensure(self.store, self.settings, target_key, {"kind": "user", "email": email, "pat": pat},
-                                       http_client=client, now=self.clock(),
+                                       http_client=client, now=self.clock(), clock=self.clock,
                                        stop=should_stop_review(self.store, job_id, self.stop, poll_s=0))
             finally:
                 if client is not None:
