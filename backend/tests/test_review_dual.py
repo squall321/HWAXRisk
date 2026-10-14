@@ -315,7 +315,7 @@ def test_a_contested_quote_on_a_verdict_row_keeps_the_200_character_cap(store):
     key, unit_id = _run(store, fake, agents=[MECH2])
     rows = routes.get_cell(key, unit_id, MECH2, ident=factories.ident(rig.OWNER))["verdicts"]
     marked = [r["checks_json"]["contested_by"] for r in rows if (r.get("checks_json") or {}).get("contested_by")]
-    assert marked and all((len(c["cq"]), c["cq_chars"]) == (export.EXPORT_CQ_MAX, len(fre.LONG_QUOTE)) for c in marked)
+    assert marked and all((len(c["cq"]), c.get("cq_chars")) == (export.EXPORT_CQ_MAX, len(fre.LONG_QUOTE)) for c in marked)
     assert fre.LONG_QUOTE not in "".join(export.iter_lines(store, rig.OWNER, 0))
 
 

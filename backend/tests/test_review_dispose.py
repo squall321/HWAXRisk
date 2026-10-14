@@ -321,12 +321,12 @@ def test_risk_job_action_retry_carries_the_humans_consent_like_rest(store, monke
     monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_consent_calls=0))
     assert "consent" in inspect.signature(srv.risk_job_action).parameters
     assert "consent=true" in (srv.risk_job_action.__doc__ or "")
-    assert _call("risk_job_action", job_id=job_id, action="retry_failed")["error"] == "consent_required"
+    assert _call("risk_job_action", job_id=job_id, action="retry_failed").get("error") == "consent_required"
     for action, extra in (("skip_failed", {"reason": "동의는 넘김의 칸이 아니다"}), ("pause", {})):
-        assert _call("risk_job_action", job_id=job_id, action=action, consent=True, **extra)["error"] == "E100", action
+        assert _call("risk_job_action", job_id=job_id, action=action, consent=True, **extra).get("error") == "E100", action
     assert _cells(store, key, PEER)[unit_ids[0]]["state"] == "failed" and _audits(store, "cells.retry") == []
     out = _call("risk_job_action", job_id=job_id, action="retry_failed", consent=True)
-    assert (out["retried"], out["job"]["action"]) == (1, "created")
+    assert (out.get("retried"), (out.get("job") or {}).get("action")) == (1, "created"), out
     params = json.loads(rig.job_row(store, out["job"]["job_id"])["params_json"])
     assert (params["consent"], params["consent_source"]) == (True, "mcp")
 

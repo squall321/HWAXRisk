@@ -435,7 +435,10 @@ def test_an_unreadable_reply_freezes_the_unit_partial_instead_of_stalling_it(sto
     key = _target(store)
     gw = Gateway()
     gw.answers["compare_materials"] = {**COMPARISON, "n_shared": bad}
-    _ensure(store, key, gw)
+    try:
+        _ensure(store, key, gw)
+    except ValueError as exc:                     # 원장에 적다가 빠져나가면 그 단위는 영영 미동결이다 — 단언으로 센다
+        raise AssertionError(f"읽을 수 없는 답이 ensure 를 빠져나갔다 — {exc}") from exc
     row = _row(store, key, _material_unit(store, key))
     gaps = json.loads(row["gaps_json"] or "[]")
     assert (row["status"], [g["code"] for g in gaps]) == ("partial", [unit_live.ERROR_BODY])
