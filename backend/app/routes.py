@@ -91,7 +91,8 @@ AUTO_ERROR_TEMPLATES: dict[str, str] = {
     "timeout": "포털이 제때 답하지 않았다 — 잠시 뒤 Claude 에서 다시 부르면 다시 시도한다",
     "unreachable": "게이트웨이가 포털에 닿지 못했다 — 잠시 뒤 다시 시도한다(계속되면 운영자에게 알린다)",
     "bad_response": "포털 교환 응답에 토큰이 없었다 — 잠시 뒤 다시 시도한다(계속되면 운영자에게 알린다)",
-    # 게이트웨이의 portal_pat_spec 이 없거나 틀렸다 — 사람이 아니라 운영자가 고친다. 일시 오류가 아니다(손잡이만큼 쉰다).
+    # 게이트웨이의 portal_pat_spec 이 없거나 틀렸다 — 사람이 아니라 운영자가 고친다. 일시 오류로 센다(짧게 쉰다) — 운영자가 게이트웨이를
+    # 고친 뒤에도 쉼이 앱 DB 에 남아 그 사람의 Claude 길 자동 등록이 손잡이(6시간)만큼 꺼져 있지 않게(R3-1).
     "gateway_misconfigured": ("게이트웨이 설정에 이 앱의 PAT 명세가 없다 — 운영자가 게이트웨이 provision 을 다시 돌린다(포털"
                               " docs/risk-credentials)"),
 }
@@ -103,8 +104,11 @@ AUTO_ERROR_GENERIC = ("포털 PAT 를 자동으로 받지 못했다 — 웹 리�
 
 # 일시 오류 — 포털·게이트웨이가 잠깐 안 닿았거나 앞단이 5xx 로 답했다(portal_unreachable 은 등록 때 앱이 포털에 못 닿은 것). 이
 # 실패는 AUTO_RETRY_TRANSIENT_S 만 쉬고 다시 바란다 — HWAXRISK_PAT_AUTO_RETRY_S(기본 6시간)를 그대로 걸면 몇 초짜리 장애 하나로
-# 그 사람의 Claude 길 자동 등록이 반나절 멈춘다. 그 밖(포털 거절·등록 검사 실패)은 사람이 고쳐야 하므로 손잡이만큼 쉰다.
-TRANSIENT_AUTO_ERRORS: frozenset[str] = frozenset({"timeout", "unreachable", "bad_response", "portal_unreachable"})
+# 그 사람의 Claude 길 자동 등록이 반나절 멈춘다. gateway_misconfigured(게이트웨이 명세 없음)도 여기다 — 사람이 고칠 일이 아니라 운영자가
+# 게이트웨이를 고치면 끝나는데, 쉼은 사람마다 앱 DB 에 남아 고친 뒤에도 손잡이만큼 꺼져 있었다(R3-1). 그 밖(포털 거절·등록 검사
+# 실패)은 사람이 고쳐야 하므로 손잡이만큼 쉰다.
+TRANSIENT_AUTO_ERRORS: frozenset[str] = frozenset({"timeout", "unreachable", "bad_response", "portal_unreachable",
+                                                   "gateway_misconfigured"})
 AUTO_RETRY_TRANSIENT_S = 600
 
 

@@ -466,7 +466,7 @@ def _age_last_error(seconds: int) -> None:
 @pytest.mark.parametrize("code,kind", [
     ("timeout", "transient"), ("unreachable", "transient"), ("bad_response", "transient"), ("http_500", "transient"),
     ("http_503", "transient"), ("http_599", "transient"), ("http_404", "final"), ("source_expiring", "final"),
-    ("invalid_source", "final"), ("not a code", "final"), ("gateway_misconfigured", "final"),
+    ("invalid_source", "final"), ("not a code", "final"), ("gateway_misconfigured", "transient"),
 ])
 def test_a_transient_exchange_failure_holds_the_ask_only_briefly(client, box, code, kind):
     """잠깐 안 닿은 것(timeout·unreachable·bad_response·http_5xx)은 짧게(AUTO_RETRY_TRANSIENT_S) 쉬고 다시 바란다 — 6시간 쉼은 사람이
@@ -481,6 +481,18 @@ def test_a_transient_exchange_failure_holds_the_ask_only_briefly(client, box, co
     assert ("portal_pat_wanted" in _mint(client, GW)) is (kind == "transient")
     _age_last_error(config.pat_auto_retry_s() + 1)
     assert "portal_pat_wanted" in _mint(client, GW)
+
+
+def test_a_misconfigured_gateway_holds_the_ask_only_as_long_as_a_transient_failure(client, box):
+    """게이트웨이에 PAT 명세가 없다(gateway_misconfigured)는 사람이 아니라 운영자가 고칠 일이다 — 운영자가 게이트웨이를 고치면 끝나야
+    하는데, 쉼은 사람마다 앱 DB 에 남는다. 손잡이(6시간)만큼 쉬면 고친 뒤에도 그 사람의 Claude 길 자동 등록이 반나절 꺼져 있다 — 일시
+    오류처럼 AUTO_RETRY_TRANSIENT_S(600초) 뒤에 다시 바란다(R3-1)."""
+    assert client.post("/api/auth/portal-pat", headers=GW, json={"error": "gateway_misconfigured"}).status_code == 200
+    at = int(get_store().get_user_prefs(EMAIL)["auto_error_at"])
+    assert routes.portal_pat_wanted(get_store(), EMAIL, now=at + routes.AUTO_RETRY_TRANSIENT_S - 30) is None
+    wanted = routes.portal_pat_wanted(get_store(), EMAIL, now=at + routes.AUTO_RETRY_TRANSIENT_S + 1)
+    assert wanted is not None and wanted["reason"] == "absent"
+    assert routes.AUTO_RETRY_TRANSIENT_S + 1 < config.pat_auto_retry_s()   # 손잡이만큼 쉬었다면 여기서는 아직 None 이다
 
 
 @pytest.mark.parametrize("down,kind", [(True, "transient"), (False, "final")], ids=["portal_unreachable", "pat_invalid"])
