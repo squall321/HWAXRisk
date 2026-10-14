@@ -4,6 +4,9 @@ from __future__ import annotations
 import base64
 import dataclasses
 import json
+import re
+import stat
+import subprocess
 import time
 
 import httpx
@@ -336,7 +339,7 @@ def test_box_reasons_name_a_missing_cred_key_and_a_host_mismatch(tmp_path):
     assert _codes(box)[:1] == ["missing_required"]
     required = box["reasons"][0]
     assert required["keys"] == ["HWAXRISK_CRED_KEY"]
-    assert "printf 'HWAXRISK_CRED_KEY=%s\\n'" in required["fix"] and str(tmp_path / "secrets.env") in required["fix"]
+    assert f"`{config.CRED_KEY_NEW_COMMAND}`" in required["fix"] and str(tmp_path) not in required["fix"]
     # 이관 직후 첫 기동 — 키가 있어도 secrets_valid 가 아니다.
     _secrets_file(tmp_path, HWAXRISK_CRED_KEY=FERNET_KEY)
     box = config.box_assessment(box_match=False, data_dir=tmp_path, env={})
@@ -352,7 +355,7 @@ def test_a_cred_key_fallback_is_a_reason_with_the_copy_the_same_value_fix(tmp_pa
     assert box["secrets_valid"] is False and box["cred_key_source"] == "dev_fallback"
     assert _codes(box)[0] == "cred_key_dev_fallback"
     fix = box["reasons"][0]["fix"]
-    assert f"printf 'HWAXRISK_CRED_KEY=%s\\n' \"$(cat {tmp_path / 'cred.key'})\" >> {tmp_path / 'secrets.env'}" in fix
+    assert f"`{config.CRED_KEY_MOVE_COMMAND}`" in fix and str(tmp_path) not in fix
     assert "새 키를 만들어 넣으면" in fix and "다시 띄운다" in fix
     assert key.decode() not in json.dumps(box)
     # 같은 값을 secrets.env 로 옮기면 출처가 secrets 이고 폴백 까닭이 사라진다 — 옮긴 키로 옛 암호문이 그대로 풀린다.
@@ -373,3 +376,92 @@ def test_me_box_carries_the_reasons_and_the_key_source(client, wired):
     assert isinstance(box["reasons"], list) and all(set(r) >= {"code", "message", "fix"} for r in box["reasons"])
     blocking = {"host_mismatch", "missing_required", "cred_key_dev_fallback"}
     assert box["secrets_valid"] is not any(r["code"] in blocking for r in box["reasons"])
+
+
+# ---------------------------------------------------------------- 키 명령은 안전한 셸 한 줄이다(BEH-7)
+def _snippet(fix: str) -> str:
+    found = re.findall(r"`([^`]+)`", fix)
+    assert len(found) == 1, fix
+    return found[0]
+
+
+def _sh(snippet: str, cwd) -> subprocess.CompletedProcess:
+    """데이터 디렉터리에서 돈다 — 명령은 경로를 박지 않는다."""
+    return subprocess.run(["bash", "-c", snippet], cwd=cwd, capture_output=True, text=True, timeout=30)
+
+
+def _reason(box: dict, code: str) -> dict:
+    return next(r for r in box["reasons"] if r["code"] == code)
+
+
+def test_the_new_key_command_writes_one_valid_fernet_key_without_printing_it(tmp_path):
+    """python 없이 32바이트 난수를 urlsafe base64 로 만든다 — Fernet 이 받는 키다. 끝 줄바꿈이 없는 secrets.env 의 마지막 줄에 붙지
+    않고, 0600 이며, 이미 값이 있는 키 줄이 있으면 아무것도 바꾸지 않는다(키를 갈면 등록된 PAT 가 전부 안 풀린다)."""
+    from cryptography.fernet import Fernet
+
+    snippet = _snippet(_reason(config.box_assessment(box_match=True, data_dir=tmp_path, env={}), "missing_required")["fix"])
+    # 키는 urlsafe 글자만 쓴다 — 32바이트 난수 하나가 '+'·'/' 를 품을 확률이 74% 쯤이라 열여섯 번 만들어 본다(놓칠 확률 1e-9 밑).
+    for n in range(16):
+        fresh = tmp_path / f"fresh{n}"
+        fresh.mkdir()
+        assert _sh(snippet, fresh).returncode == 0
+        made = config.load_secrets(fresh)["HWAXRISK_CRED_KEY"]
+        assert re.fullmatch(r"[A-Za-z0-9_-]{43}=", made), made
+        Fernet(made)
+    secrets_file = tmp_path / "secrets.env"
+    secrets_file.write_text("HWAXRISK_BACKUP_KEY=age1x", encoding="utf-8")         # 끝 줄바꿈이 없다
+    secrets_file.chmod(0o644)
+    out = _sh(snippet, tmp_path)
+    assert out.returncode == 0, out.stderr
+    loaded = config.load_secrets(tmp_path)
+    key = loaded["HWAXRISK_CRED_KEY"]
+    assert len(base64.urlsafe_b64decode(key)) == 32
+    token = Fernet(key).encrypt(b"pat")
+    assert Fernet(key).decrypt(token) == b"pat"
+    assert loaded["HWAXRISK_BACKUP_KEY"] == "age1x"                                 # 붙지 않았다
+    assert key not in out.stdout + out.stderr and "넣었다" in out.stdout
+    assert stat.S_IMODE(secrets_file.stat().st_mode) == 0o600
+    box = config.box_assessment(box_match=True, data_dir=tmp_path, env={})
+    assert box["cred_key_source"] == "secrets" and "missing_required" not in _codes(box)
+    # 다시 돌려도 바꾸지 않는다 — 앞뒤 빈칸이 있는 키 줄도 있는 것이다(앱이 그렇게 읽는다).
+    before = secrets_file.read_bytes()
+    out = _sh(snippet, tmp_path)
+    assert out.returncode == 0 and "이미 있다" in out.stdout and secrets_file.read_bytes() == before
+    secrets_file.write_text("  HWAXRISK_CRED_KEY = " + key + "\n", encoding="utf-8")
+    before = secrets_file.read_bytes()
+    assert "이미 있다" in _sh(snippet, tmp_path).stdout and secrets_file.read_bytes() == before
+
+
+@pytest.mark.parametrize("existing", ["HWAXRISK_CRED_KEY=\n", "# HWAXRISK_CRED_KEY=old\n", ""],
+                         ids=["empty_value", "commented", "no_file_line"])
+def test_an_empty_or_commented_key_line_is_not_a_key(tmp_path, existing):
+    _sh_new = _snippet(_reason(config.box_assessment(box_match=True, data_dir=tmp_path, env={}), "missing_required")["fix"])
+    if existing:
+        (tmp_path / "secrets.env").write_text(existing, encoding="utf-8")
+    assert "넣었다" in _sh(_sh_new, tmp_path).stdout
+    assert config.load_secrets(tmp_path).get("HWAXRISK_CRED_KEY")
+
+
+def test_the_move_command_copies_the_same_value_once_and_refuses_an_empty_cred_key(tmp_path):
+    """cred.key 폴백은 같은 값을 옮긴다(새 키면 등록된 PAT 가 안 풀린다). cred.key 가 없거나 비었으면, 이미 키 줄이 있으면 아무것도
+    바꾸지 않는다. 값은 화면에 찍지 않는다."""
+    key = config.load_cred_key(tmp_path)
+    snippet = _snippet(_reason(config.box_assessment(box_match=True, data_dir=tmp_path, env={}), "cred_key_dev_fallback")["fix"])
+    secrets_file = tmp_path / "secrets.env"
+    secrets_file.write_text("HWAXRISK_BACKUP_KEY=age1x", encoding="utf-8")
+    out = _sh(snippet, tmp_path)
+    assert out.returncode == 0 and "옮겼다" in out.stdout and key.decode() not in out.stdout + out.stderr
+    loaded = config.load_secrets(tmp_path)
+    assert loaded["HWAXRISK_CRED_KEY"] == key.decode() and loaded["HWAXRISK_BACKUP_KEY"] == "age1x"
+    assert stat.S_IMODE(secrets_file.stat().st_mode) == 0o600
+    before = secrets_file.read_bytes()
+    assert "이미 있다" in _sh(snippet, tmp_path).stdout and secrets_file.read_bytes() == before
+    for content in (b"", b"\n"):
+        other = tmp_path / f"other{len(content)}"
+        other.mkdir()
+        (other / "cred.key").write_bytes(content)
+        out = _sh(snippet, other)
+        assert "비었다" in out.stdout and not (other / "secrets.env").exists(), (content, out.stdout)
+    empty = tmp_path / "nokey"
+    empty.mkdir()
+    assert "없거나 비었다" in _sh(snippet, empty).stdout and not (empty / "secrets.env").exists()

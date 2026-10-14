@@ -138,15 +138,17 @@ def warn_stream_limits_off(settings) -> None:
             " 연결이든 끝없이 말하는 스트림이든 그 패널은 %s. %s.", held, back)
 
 
-def warn_box_reasons(box: dict) -> None:
+def warn_box_reasons(box: dict, data_dir) -> None:
     """박스 자격의 까닭을 기동 로그에 남긴다 — 필수 키 없음·cred.key 폴백은 WARNING, 선택 키 없음은 INFO(앱은 돈다).
 
     cred.key 폴백은 동작하므로 화면만 보면 아무 일도 없다. 그 파일을 모르고 옮기면 등록된 PAT 가 전부 풀리지 않는다 — 운영자가
-    로그에서 '옮기라' 는 말과 그 명령을 보게 한다(값은 싣지 않는다).
+    로그에서 '옮기라' 는 말과 그 명령을 보게 한다(값은 싣지 않는다). 화면 글은 경로를 싣지 않으므로(명령은 데이터 디렉터리에서
+    돈다) 로그 줄이 그 디렉터리를 함께 적는다.
     """
     for reason in box.get("reasons") or ():
         level = logging.INFO if reason["code"] == "missing_optional" else logging.WARNING
-        log.log(level, "박스 자격 %s — %s 고칠 곳: %s", reason["code"], reason["message"], reason["fix"])
+        log.log(level, "박스 자격 %s — %s 고칠 곳(데이터 디렉터리 %s): %s", reason["code"], reason["message"], data_dir,
+                reason["fix"])
 
 
 @asynccontextmanager
@@ -176,7 +178,7 @@ async def _lifespan(app: FastAPI):
     # 필수는 자격 암호화 키 하나다(env·path 로 준 키도 있는 것으로 센다) — 까닭은 GET /api/me 의 box.reasons 가 같은 판정으로 싣는다.
     box = config.box_assessment(box_match=box_match, data_dir=settings.data_dir)
     app.state.secrets_valid = box["secrets_valid"]
-    warn_box_reasons(box)
+    warn_box_reasons(box, settings.data_dir)
     # ⑤ identity 캐시 초기화.
     identity.reset_cache()
     # ⑥ 이식한 MCP Route 의 세션 매니저는 자동 기동되지 않으므로 직접 구동한다(MaterialTwinWeb·ThermalShockMCP 와 동일).

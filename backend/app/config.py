@@ -537,14 +537,33 @@ def cred_key_source(data_dir: Path | None = None, env: Mapping[str, str] | None 
     return "dev_fallback" if cred_key_path(root).is_file() else "absent"
 
 
-def cred_key_move_fix(data_dir: Path | None = None) -> str:
-    """`cred.key` 폴백을 secrets.env 로 옮기는 절차 — **같은 값**을 옮긴다(값이 화면에 찍히지 않는 명령)."""
-    root = settings.data_dir if data_dir is None else data_dir
-    key_file, secrets_file = root / CRED_KEY_FILENAME, root / SECRETS_FILENAME
-    return (f"같은 값을 secrets.env 로 옮기고 앱을 다시 띄운다 — printf 'HWAXRISK_CRED_KEY=%s\\n' \"$(cat {key_file})\""
-            f" >> {secrets_file} && chmod 600 {secrets_file} (값이 화면에 찍히지 않는다). 새 키를 만들어 넣으면 이미 등록된"
-            " 사용자 PAT 가 전부 풀리지 않는다(모두 다시 등록해야 한다) — 반드시 cred.key 의 값을 그대로 옮긴다. 다시 띄운 뒤 설정"
-            " 화면의 키 출처가 secrets 이면 cred.key 는 지워도 된다(백업 한 벌에 키와 암호문이 함께 실리지 않게).")
+# 자격 암호화 키를 secrets.env 에 넣는 셸 한 줄의 조각(데이터 디렉터리에서 돈다 — 경로를 박지 않는다). 키 값은 화면에 찍지 않는다 —
+# 변수에 받아 printf 로 파일에만 쓴다. 이미 값이 있는 HWAXRISK_CRED_KEY 줄이 있으면 아무것도 바꾸지 않는다(키를 갈면 등록된 PAT 가
+# 전부 안 풀린다). 줄 앞에 줄바꿈을 넣어 끝 줄바꿈이 없는 파일의 마지막 줄에 붙지 않게 하고, 파일은 0600 이다.
+_CRED_KEY_LINE_EXISTS = ("grep -Eq '^[[:space:]]*HWAXRISK_CRED_KEY[[:space:]]*=[[:space:]]*[^[:space:]]' secrets.env"
+                         " 2>/dev/null")
+_CRED_KEY_REFUSE = "echo 'secrets.env 에 HWAXRISK_CRED_KEY 가 이미 있다 — 아무것도 바꾸지 않았다'"
+_CRED_KEY_APPEND = "(umask 077; printf '\\nHWAXRISK_CRED_KEY=%s\\n' \"$k\" >> secrets.env) && chmod 600 secrets.env"
+# 새 키 — 32바이트 난수의 urlsafe base64(Fernet 키 형식). python 없이 돈다.
+CRED_KEY_NEW_COMMAND = (
+    f"if {_CRED_KEY_LINE_EXISTS}; then {_CRED_KEY_REFUSE}; else k=$(head -c32 /dev/urandom | base64 | tr '+/' '-_');"
+    f" if [ -n \"$k\" ]; then {_CRED_KEY_APPEND} && echo '넣었다 — 앱을 다시 띄운다';"
+    " else echo '키를 만들지 못했다 — 아무것도 바꾸지 않았다'; fi; fi")
+# cred.key 폴백 옮기기 — 같은 값을 옮긴다. cred.key 가 없거나 비었으면 아무것도 바꾸지 않는다.
+CRED_KEY_MOVE_COMMAND = (
+    "if [ ! -s cred.key ]; then echo 'cred.key 가 없거나 비었다 — 아무것도 바꾸지 않았다';"
+    f" elif {_CRED_KEY_LINE_EXISTS}; then {_CRED_KEY_REFUSE}; else k=$(cat cred.key);"
+    f" if [ -n \"$k\" ]; then {_CRED_KEY_APPEND} && echo '옮겼다 — 앱을 다시 띄운다';"
+    " else echo 'cred.key 가 비었다 — 아무것도 바꾸지 않았다'; fi; fi")
+
+
+def cred_key_move_fix() -> str:
+    """`cred.key` 폴백을 secrets.env 로 옮기는 절차 — **같은 값**을 옮긴다(CRED_KEY_MOVE_COMMAND — 값을 화면에 찍지 않는다)."""
+    return ("같은 값을 secrets.env 로 옮기고 앱을 다시 띄운다 — 데이터 디렉터리에서 이 한 줄을 실행한다(키 값은 화면에 찍히지 않고,"
+            " cred.key 가 비었거나 secrets.env 에 이미 키 줄이 있으면 아무것도 바꾸지 않는다)"
+            f" `{CRED_KEY_MOVE_COMMAND}`. 새 키를 만들어 넣으면 이미 등록된 사용자 PAT 가 전부 풀리지 않는다(모두 다시 등록해야"
+            " 한다) — 반드시 cred.key 의 값을 그대로 옮긴다. 다시 띄운 뒤 설정 화면의 키 출처가 secrets 이면 cred.key 는 지워도 된다"
+            "(백업 한 벌에 키와 암호문이 함께 실리지 않게).")
 
 
 def box_assessment(*, box_match: bool, data_dir: Path | None = None, env: Mapping[str, str] | None = None) -> dict:
@@ -571,10 +590,10 @@ def box_assessment(*, box_match: bool, data_dir: Path | None = None, env: Mappin
             "code": "missing_required", "keys": list(SECRET_KEYS),
             "message": "자격 암호화 키(HWAXRISK_CRED_KEY)가 없다 — 사용자 PAT 를 저장할 때 앱이 데이터 디렉터리에 개발용 cred.key 를"
                        " 만들어 쓰게 된다(암호문과 같은 디렉터리라 백업 한 벌에 키와 암호문이 함께 실린다).",
-            "fix": (f"운영 키를 secrets.env 에 넣고 앱을 다시 띄운다 — printf 'HWAXRISK_CRED_KEY=%s\\n' \"$(python3 -c 'from"
-                    f" cryptography.fernet import Fernet; print(Fernet.generate_key().decode())')\" >> {root / SECRETS_FILENAME}"
-                    f" && chmod 600 {root / SECRETS_FILENAME} (값이 화면에 찍히지 않는다). 키를 잃으면 등록된 PAT 가 전부 풀리지 않으니"
-                    " secrets.env 와 같은 등급으로 따로 보관한다."),
+            "fix": ("운영 키를 만들어 secrets.env 에 넣고 앱을 다시 띄운다 — 데이터 디렉터리에서 이 한 줄을 실행한다(키 값은 화면에"
+                    " 찍히지 않고, secrets.env 에 이미 키 줄이 있으면 아무것도 바꾸지 않는다)"
+                    f" `{CRED_KEY_NEW_COMMAND}`. 키를 잃으면 등록된 PAT 가 전부 풀리지 않으니 secrets.env 와 같은 등급으로 따로"
+                    " 보관한다."),
         })
     elif source == "dev_fallback":
         reasons.append({
@@ -582,7 +601,7 @@ def box_assessment(*, box_match: bool, data_dir: Path | None = None, env: Mappin
             "message": (f"자격 암호화 키를 데이터 디렉터리의 {CRED_KEY_FILENAME}(앱이 만든 개발용 폴백)에서 읽는다 — 암호문"
                         f"({DB_FILENAME})과 같은 디렉터리라 백업 한 벌에 키와 암호문이 함께 실리고, 이 파일을 모르고 옮기면 등록된"
                         " PAT 가 전부 풀리지 않는다. 동작은 한다."),
-            "fix": cred_key_move_fix(root),
+            "fix": cred_key_move_fix(),
         })
     missing = [key for key in OPTIONAL_SECRET_KEYS
                if not (secrets.get(key) or (key in _ENV_READ_OPTIONAL_KEYS and (env.get(key) or "").strip()))]
@@ -631,7 +650,7 @@ def load_cred_key(data_dir: Path | None = None, *, create: bool = True) -> bytes
         with os.fdopen(fd, "wb") as fh:
             fh.write(key)
         # 경고다 — 이 순간부터 등록된 PAT 가 이 파일에 묶인다. 운영 박스라면 같은 값을 secrets.env 로 옮겨야 한다.
-        log.warning("자격 암호화 키를 새로 만들었습니다: %s (0600, 개발용 폴백) — %s", path, cred_key_move_fix(path.parent))
+        log.warning("자격 암호화 키를 새로 만들었습니다: %s (0600, 개발용 폴백) — %s", path, cred_key_move_fix())
         return key
     except OSError as exc:
         log.warning("cred.key 를 읽거나 만들 수 없습니다(%s): %s", path, exc)

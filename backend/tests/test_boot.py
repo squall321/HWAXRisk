@@ -263,7 +263,7 @@ def test_the_lifespan_warns_when_the_cred_key_is_the_dev_fallback(tmp_path, monk
     warned = [r for r in caplog.records if r.name == "hwax_risk.main" and r.levelno == logging.WARNING]
     assert len(warned) == 1 and "cred_key_dev_fallback" in warned[0].getMessage()
     text = warned[0].getMessage()
-    assert f"printf 'HWAXRISK_CRED_KEY=%s\\n' \"$(cat {tmp_path / 'cred.key'})\"" in text and "새 키를 만들어 넣으면" in text
+    assert config.CRED_KEY_MOVE_COMMAND in text and "새 키를 만들어 넣으면" in text and f"데이터 디렉터리 {tmp_path}" in text
     assert key.decode() not in caplog.text
     assert state.secrets_valid is False
 
