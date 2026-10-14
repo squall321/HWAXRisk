@@ -10,7 +10,7 @@ import pydantic_core
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from app import entry, expert_report, routes
+from app import entry, expert_report, routes, synth
 from app.errors import AppError
 
 log = logging.getLogger("hwax_risk.mcp")
@@ -25,7 +25,9 @@ _INSTRUCTIONS = """HWAX Risk Review — 설계 리스크 심사 앱의 MCP 서�
       risk_get_registry · risk_claims_for_ref · risk_get_coverage(진행판·좌석) · risk_list_panels · risk_get_panel_transcript ·
       risk_get_units(카드 대조의 검토 단위 — 목록·요약·줄·동결 근거, 크면 next_offset 으로 나눠) ·
       risk_get_cells(카드 대조 셀 격자 — 전문가 × 단위의 상태·판정 수, 크면 next_offset 으로 나눠) ·
-      risk_get_expert_report(전문가 보고서 — 마크다운 쪽, next_page 로 이어 받으며 쪽을 다 이으면 part='full' 과 같다)
+      risk_get_expert_report(전문가 보고서 — 마크다운 쪽, next_page 로 이어 받으며 쪽을 다 이으면 part='full' 과 같다) ·
+      risk_get_issues(카드 대조 대상의 쟁점 — 유형·등급·상태·결과·분포, 쟁점 패널은 웹 러너가 돌린다 — Claude 에서는 지켜본다) ·
+      risk_get_report(종합 보고서 판 — 완결 표기·잔여·영역 요약·쟁점 결과, part=summary|domains|mechanisms|appendix|full 의 쪽)
 어휘: risk_taxonomy — severity·judgement·direction 의 허용값(추측해서 넣으면 422 다)
 심사: risk_get_brief(열쇠는 brief_token, tier 'A' 는 웹 전용 — 결과를 낼 신원에게만 연다) · risk_submit_panel_result(engine='mcp' 는
       evidence_only 등급) · risk_add_finding — 둘 다 쓰기라 아래 신원 규칙을 따르고 actor 는 신원이 아니다(표기)
@@ -549,5 +551,47 @@ def risk_get_expert_report(target_key: str, agent_key: str, part: str = "summary
         chars = _report_page_chars(meta, body, part=part, unit_id=unit_id)
         pages = routes.expert_report_render(body, part=part, unit_id=unit_id, page_chars=chars)
         return routes.expert_report_envelope(meta, pages, page, part=part, unit_id=unit_id)
+
+    return _scoped("target", target_key, report, target_key)
+
+
+# ================================================================ 쟁점 · 종합 보고서(재설계 M3 S3-10 — 읽기 둘)
+ISSUE_LIMIT = 100
+
+
+@mcp.tool()
+def risk_get_issues(target_key: str, state: str | None = None, p_class: str | None = None, limit: int = ISSUE_LIMIT,
+                    offset: int = 0) -> dict:
+    """쟁점 목록(읽기 전용, 카드 대조 대상) — 쟁점마다 유형(held_fail·solo_severe·split_verdict)·등급(P1~P3)·순위·상태(queued·planned·running·resolved·inconclusive·untried_cap·withdrawn·skipped)·결과(upheld·downgraded·escalated·rejected·undetermined)·원래 분포(제기·반대 수, 주장 판정별)·좌석과 상한(cap.base·hard·run)을 준다, state(쉼표로 여럿)·p_class 로 거르고 한 번에 약 2만 5천 자 안에서 limit 행까지 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다), 쟁점은 웹 러너가 돌린다 — Claude 에서는 지켜본다(올리기·건너뛰기는 웹 화면)."""
+    def rows(key: str, *, owner_sub: str) -> dict:
+        return _fit_rows(lambda take: routes.issues_payload(key, owner_sub=owner_sub, state=state, p_class=p_class,
+                                                            limit=take, offset=offset), limit)
+
+    return _scoped("target", target_key, rows, target_key)
+
+
+def _synthesis_page_chars(meta: dict, report: dict, *, part: str) -> int:
+    """종합 보고서 MCP 쪽의 글자 크기 — 그 판의 쪽 전부가 와이어 MCP_RESULT_CHARS 안에 들 때까지 줄인다(같은 판이면 같은 크기, 조각
+    하나가 혼자 넘는 쪽은 자르지 않는다 — risk_get_expert_report 와 같은 규칙)."""
+    chars = routes.REPORT_PAGE_CHARS
+    while True:
+        pages = routes.report_render(report, part=part, page_chars=chars)
+        over = [size for n, page in enumerate(pages, start=1) if _page_fragments(page) > 1
+                and (size := _wire_chars(routes.report_envelope(meta, pages, n, part=part))) > MCP_RESULT_CHARS]
+        if not over or chars <= 1:
+            return chars
+        chars = max(1, min(chars - 1, chars * MCP_RESULT_CHARS // max(over) - 1))
+
+
+@mcp.tool()
+def risk_get_report(target_key: str, part: str = "summary", version: int | None = None, page: int = 1) -> dict:
+    """종합 보고서 읽기(읽기 전용, 카드 대조 대상) — 그 판(rr_reports — 앱 사본이 정본)의 마크다운 쪽, part=summary(완결 표기·잔여·수·종합 서술·주의 A·B·쟁점 결과·미토의 쟁점·품질 블록)|domains(영역 15쪽 — 영역 요약 서술과 행)|mechanisms|appendix(전문가 색인)|full, 한 쪽은 약 2만 5천 자 안이고 next_page 를 page 로 주어 이어 받는다(본문을 자르지 않는다 — 쪽을 다 이으면 그 part 전체다), 둘째 쪽부터는 첫 쪽 응답의 version 을 주면 그사이 새 판이 서도 report_version_moved 로 알려 다른 판의 쪽이 섞이지 않는다, 판이 없으면 report_absent(웹 화면이나 REST 로 만든다)."""
+    def report(key: str, *, owner_sub: str) -> dict:
+        meta, body = routes.report_source(key, owner_sub=owner_sub)
+        routes.check_report_version(meta, version)
+        if part not in synth.PARTS:
+            raise AppError("E100", f"part 는 {list(synth.PARTS)} 가운데 하나다 — {part!r}.", 422)
+        chars = _synthesis_page_chars(meta, body, part=part)
+        return routes.report_envelope(meta, routes.report_render(body, part=part, page_chars=chars), page, part=part)
 
     return _scoped("target", target_key, report, target_key)

@@ -45,6 +45,9 @@ TOOL_NAMES = [
     # 카드 대조 검토 2종(재설계 M2 S12) — 셀 격자와 전문가 보고서를 읽는다. 검토 잡은 risk_start_job(mode='reviews') 이다.
     "risk_get_cells",
     "risk_get_expert_report",
+    # 쟁점·종합 보고서 2종(재설계 M3 S3-10) — 읽기 전용, 앞 목록 + 둘(29 → 31).
+    "risk_get_issues",
+    "risk_get_report",
 ]
 ENTRY_TOOLS = TOOL_NAMES[TOOL_NAMES.index("risk_next_step"):TOOL_NAMES.index("risk_repersist_panel") + 1]
 # 도구별 대표 인자와, 빈 원장에서 기대하는 오류 코드(없으면 None = 정상 응답).
@@ -64,6 +67,8 @@ CALLS = [
     ("risk_get_snapshot", {"snapshot_id": "s1", "part": "ir"}, "not_visible"),
     ("risk_get_diff", {"diff_id": "d1", "part": "summary"}, "not_visible"),
     ("risk_get_registry", {"target_key": "snap:s1"}, "not_visible"),
+    ("risk_get_issues", {"target_key": "snap:s1"}, "not_visible"),
+    ("risk_get_report", {"target_key": "snap:s1"}, "not_visible"),
     ("risk_claims_for_ref", {"ref": "e:0123456789ab"}, None),
     ("risk_get_brief", {"target_key": "snap:s1", "brief_token": "nope"}, "delegation_required"),
     ("risk_submit_panel_result", {"panel_id": "p1", "engine": "mcp", "decision_text": "…", "turns": [],
@@ -147,7 +152,8 @@ def test_signatures_follow_plan():
     for name in ("risk_get_snapshot", "risk_get_diff", "risk_get_registry", "risk_claims_for_ref",
                  "risk_get_brief", "risk_list_projects", "risk_get_coverage", "risk_list_panels",
                  "risk_get_panel_transcript", "risk_taxonomy", "risk_get_precedents",
-                 "risk_similar_projects", "risk_get_units", "risk_get_cells", "risk_get_expert_report"):
+                 "risk_similar_projects", "risk_get_units", "risk_get_cells", "risk_get_expert_report",
+                 "risk_get_issues", "risk_get_report"):
         assert "actor" not in set(props(name))
     # 검토 단위 — 대상 하나에 목록·단위 하나를 고르고, 나머지는 offset 으로 이어 받는다.
     assert set(props("risk_get_units")) == {"target_key", "unit_id", "part", "offset"}
@@ -162,6 +168,10 @@ def test_signatures_follow_plan():
     assert set(tools["risk_get_expert_report"].inputSchema["required"]) == {"target_key", "agent_key"}
     assert (props("risk_get_expert_report")["part"]["default"], props("risk_get_expert_report")["page"]["default"]) == (
         "summary", 1)
+    # 쟁점·종합 보고서(M3 S3-10) — 쟁점은 거름 둘과 나눠 받기, 보고서는 판의 쪽(part 기본 summary · page 1 · version 대조).
+    assert set(props("risk_get_issues")) == {"target_key", "state", "p_class", "limit", "offset"}
+    assert set(props("risk_get_report")) == {"target_key", "part", "version", "page"}
+    assert (props("risk_get_report")["part"]["default"], props("risk_get_report")["page"]["default"]) == ("summary", 1)
     # 발견·조회는 인자가 최소여야 한다 — id 를 모르는 클라이언트가 첫 호출로 쓴다.
     assert set(props("risk_list_projects")) == set()
     assert set(props("risk_taxonomy")) == {"part", "offset"}
