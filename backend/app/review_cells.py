@@ -600,10 +600,32 @@ FILTER_FLOOR = "filter_floor"
 
 
 def widened_domains(store: Any, target_key: str) -> list[str]:
-    """넓힌 영역 — 표본·그림자 셀의 결과가 risk_miss 인 셀의 영역(저장하지 않고 원장에서 유도한다 — 재기동·반출에도 같다)."""
+    """넓힌 영역 — 표본·그림자 셀의 결과가 risk_miss 인(또는 사람의 다시 전에 그랬던 — `was`) 셀의 영역. 저장하지 않고 원장에서
+    유도하되 쌓기만 한다 — 넓힘의 원인 셀을 다시 열어도 넓힘은 되돌아가지 않는다(반대 검토 HIGH 3)."""
+    hit = " OR ".join(f"json_extract(sample_json, '$.{k}.result') = 'risk_miss' OR EXISTS (SELECT 1 FROM"
+                      f" json_each(sample_json, '$.{k}.was') w WHERE w.value = 'risk_miss')" for k in SAMPLE_RESULT_KEYS)
     return [str(r["domain"]) for r in store.query(
-        "SELECT DISTINCT domain FROM rr_review_cells WHERE target_key = ? AND (json_extract(sample_json, '$.filter_audit.result')"
-        " = 'risk_miss' OR json_extract(sample_json, '$.shadow.result') = 'risk_miss') ORDER BY domain", (target_key,))]
+        f"SELECT DISTINCT domain FROM rr_review_cells WHERE target_key = ? AND ({hit}) ORDER BY domain", (target_key,))]
+
+
+def _retained_sample(sample_json: Any) -> str | None:
+    """사람의 다시가 남기는 표본 · 그림자 표지 — 결과만 비우고 앞 결과는 `was` 에 쌓는다(반대 검토 HIGH 3). 다시 돈 셀의 정산이 새
+    결과를 적어 넓힘이 이어지고, 넓힘은 앞 결과까지 본다. 표지가 없으면 None(종전처럼 비운다)."""
+    try:
+        sample = json.loads(sample_json or "null")
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(sample, dict):
+        return None
+    kept: dict[str, Any] = {}
+    for key in SAMPLE_RESULT_KEYS:
+        marker = sample.get(key)
+        if isinstance(marker, dict):
+            was = [str(w) for w in marker.get("was") or ()]
+            if marker.get("result"):
+                was.append(str(marker["result"]))
+            kept[key] = {**marker, "result": None, **({"was": was} if was else {})}
+    return json.dumps(kept, sort_keys=True) if kept else None
 
 
 def filter_off(store: Any, target_key: str) -> bool:
@@ -1243,6 +1265,11 @@ def retry_cells(store: Any, target_key: str, rows: Sequence[Mapping[str, Any]], 
             sets = {**_CELL_RESET, "input_hash": None, "lease_owner": None, "heartbeat_at": None, "finished_at": None,
                     "reopened_n": Expr("reopened_n + 1"), "route_forced": HUMAN_RETRY, "status_source": "human",
                     "decided_by": decided_by, "decided_at": now, "decide_note": note}
+            kept = _retained_sample(_cell(store, *key)["sample_json"])
+            if kept is not None:
+                # 표본 · 그림자 셀은 그 표지와 분류 기록을 남긴다 — 다시 돈 정산이 결과를 적어 넓힘이 이어진다(반대 검토 HIGH 3)
+                cell = _cell(store, *key)
+                sets.update(sample_json=kept, route=cell["route"], route_json=cell["route_json"])
             if _move(store, "cell", row["state"], "pending", where=_cell_where(), params=key, sets=sets, now=now) == 1:
                 changed.append(dict(row))
         for agent in sorted({r["agent_key"] for r in changed}):

@@ -325,19 +325,22 @@ def test_a_sweep_that_does_not_say_unrelated_keeps_the_cell(store, monkeypatch, 
 
 
 def test_a_cell_a_person_reopened_is_never_classified_again(store, monkeypatch):
-    """사람이 force 로 다시 연 셀(route_forced human_retry)은 새 잡이 거를 셀로 볼 입력이어도 분류하지 않고 끝까지 본다."""
+    """사람이 force 로 다시 연 셀(route_forced human_retry)은 새 잡이 거를 셀로 볼 입력이어도 분류하지 않고 끝까지 본다. 표본 셀이면
+    그 표지 · 분류 기록은 남는다(반대 검토 HIGH 3 — 다시 돈 정산이 결과를 다시 적는다)."""
     _approve(monkeypatch)
     _knobs(monkeypatch, risk_filter_audit_pct=100)
     key, _job, fake, kinds = _run(store, SMALL)
     b = kinds["boundary"]
-    assert _cell(store, key, b, STD2)["route"] == "audit"
+    before = _cell(store, key, b, STD2)
+    assert before["route"] == "audit"
     _knobs(monkeypatch, risk_filter_audit_pct=0)                 # 새 잡이면 거를 셀이다
     out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[b, STD2]], force=True, reason="사람이 다시 본다"),
                                   ident=factories.ident(rig.OWNER))
     rig.Rig(store, fake).finish(out["job"]["job_id"])
     cell = _cell(store, key, b, STD2)
     assert (cell["state"], cell["route"], cell["route_forced"], cell["route_json"]) == (
-        "reviewed", None, review_cells.HUMAN_RETRY, None)
+        "reviewed", "audit", review_cells.HUMAN_RETRY, before["route_json"])         # 다시 분류하지 않았다
+    assert cell["sample_json"]["filter_audit"]["result"] in review_cells.AUDIT_RESULTS
 
 
 def test_a_classified_cell_keeps_its_route_when_the_inputs_move_before_it_settles(store, monkeypatch):
@@ -654,3 +657,46 @@ def test_a_sweep_no_the_engine_marked_as_contested_never_filters_the_cell(store,
     cell = _cell(store, key, kinds["boundary"], STD2)
     assert cell["route_json"]["decision"] != "filtered" and cell["state"] == "reviewed"
     assert (cell["route_json"]["sweep"]["verdict"], cell["route_json"]["sweep"]["reason"]) == ("unknown", "engine_conflict")
+
+
+def test_a_human_retry_keeps_the_sample_marker_so_a_rerun_miss_still_widens_and_a_widening_never_reverts(store, monkeypatch):
+    """반대 검토 HIGH 3 — 사람의 다시는 표본 · 그림자 표지를 지우지 않는다(결과만 비우고 앞 결과는 was 에 쌓는다). ① 실패한 보충 표본 셀을
+    다시 열어 이번에는 영향 있음(risk_miss)이 나오면 그 영역이 넓어져 남은 거른 셀이 다시 열린다. ② 넓힘의 원인 셀을 강제로 다시 열어도
+    넓힌 영역은 되돌아가지 않는다(넓힘은 앞 결과까지 본다)."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    key = rig.target(store, ROSTER)
+    us = units.load_units(store, key)
+    fake = _fake(ROSTER)
+    _quiet(fake, *(u["unit_id"] for u in us))
+    for u in us:
+        fake.noinput_q1[u["unit_id"]], fake.noinput_q2[u["unit_id"]] = ["no"], [""]
+    r = rig.Rig(store, fake)
+    first = rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]})
+    r.finish(first)
+    monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 1)
+    fake.error_cells = {(MEM2, u["unit_id"]): {"code": "no_rows", "message": "행이 없다(가짜)", "infra": False, "retryable": False}
+                        for u in us}
+    second = rig.job(store, key, scope={"agents": [MEM2]})
+    r.finish(second)
+    cells = {c["unit_id"]: c for c in _cells(store, key) if c["agent_key"] == MEM2}
+    failed = [u for u, c in cells.items() if c["state"] == "failed" and c["sample_json"] and "filter_audit" in c["sample_json"]]
+    left = [u for u, c in cells.items() if c["state"] == "na_irrelevant"]
+    assert len(failed) == 1 and len(left) >= 1
+    audit_unit = failed[0]
+    fake.error_cells = {}
+    fake.noinput_q1[audit_unit] = ["yes"]
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[audit_unit, MEM2]], reason="표본 셀을 다시 본다"),
+                                  ident=factories.ident(rig.OWNER))
+    retried = _cell(store, key, audit_unit, MEM2)
+    assert "filter_audit" in (retried["sample_json"] or {}) and retried["sample_json"]["filter_audit"]["result"] is None
+    r.finish(out["job"]["job_id"])
+    assert _cell(store, key, audit_unit, MEM2)["sample_json"]["filter_audit"]["result"] == "risk_miss"
+    assert "mem" in review_cells.widened_domains(store, key)
+    assert {(c["state"], c["route_forced"]) for c in (_cell(store, key, u, MEM2) for u in left)} == {("pending", "widened")}
+
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[audit_unit, MEM2]], force=True,
+                                                             reason="넓힘의 원인 셀을 다시 본다"), ident=factories.ident(rig.OWNER))
+    marker = _cell(store, key, audit_unit, MEM2)["sample_json"]["filter_audit"]
+    assert (marker["result"], marker["was"]) == (None, ["risk_miss"])
+    assert "mem" in review_cells.widened_domains(store, key)                       # 넓힘은 되돌아가지 않는다
