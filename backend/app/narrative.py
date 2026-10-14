@@ -17,7 +17,7 @@ from jsonschema import Draft7Validator
 from app import cardpack, render, review_verify
 from app.common import canonical_json, now_epoch, parse_ref
 from app.errors import AppError
-from app.taxonomy import load_taxonomy
+from app.taxonomy import load_taxonomy, mechanism_majors
 
 log = logging.getLogger("hwax_risk.narrative")
 
@@ -1204,7 +1204,7 @@ def _normalize_mechanism(finding: dict, path: str, warnings: list[str], curation
             finding["mechanism_detail"] = str(by_code[code].get("detail") or code.split(".", 1)[-1])
             return
     original = f"{mechanism}.{detail}".strip(".")
-    finding["mechanism"] = mechanism if mechanism in {"thermal", "mechanical", "interface", "electrical", "material", "process"} else "process"
+    finding["mechanism"] = mechanism if mechanism in mechanism_majors(_taxonomy()) else "process"
     finding["mechanism_detail"] = "unclassified"
     finding["mechanism_free"] = original
     warnings.append(f"{path}: 택소노미에 없는 메커니즘 — {original}")

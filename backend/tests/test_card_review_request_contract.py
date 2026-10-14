@@ -122,7 +122,7 @@ def test_run_bodies_built_from_real_units_and_packs_pass_the_engines_validator(c
     assert pcb["unit"]["input_gaps"] == ["ecad_absent"] and pcb["unit"]["missing"][0]["kind"] == "ecad"
     assert pcb["extra"]["domains"][0] == {"key": "xd", "label": "XD(외관·조립 설계)"}
     assert len(pcb["extra"]["domains"]) == len(config.settings.risk_roster_domains) == 15
-    assert pcb["extra"]["known"] == [] and len(pcb["extra"]["mechanisms"]) == 38
+    assert pcb["extra"]["known"] == [] and len(pcb["extra"]["mechanisms"]) == 52        # 택소노미 1.2(재설계 M3 D-34)
     # 대조군 — 엔진 자신의 요청 예제는 지나고, 안쪽 칸 이름이 틀린 것은 걸린다(검증기가 헛돌지 않는다).
     control = fre.load("req_verdict_fwd.json")
     bodies["_control_ok"] = control

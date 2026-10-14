@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
+from typing import Any
 
 from app.errors import AppError
 
@@ -41,6 +43,18 @@ def load_json(name: str) -> dict:
 def load_taxonomy() -> dict:
     """리스크 택소노미 v1(assets/taxonomy.v1.json)."""
     return load_json("taxonomy")
+
+
+def mechanism_majors(doc: Mapping[str, Any] | None = None) -> tuple[str, ...]:
+    """메커니즘 대분류 — 택소노미 메커니즘 축에 나온 차례 그대로(1.2 는 thermal … process · optical · acoustic · rf 아홉).
+    risk_spec 스키마의 finding.mechanism enum 과 같다(시험이 본다). 정규화는 이 집합 밖의 대분류를 process 로 접는다."""
+    doc = load_taxonomy() if doc is None else doc
+    out: list[str] = []
+    for item in doc["axes"]["mechanism"]:
+        major = str(item.get("mechanism") or "")
+        if major and major not in out:
+            out.append(major)
+    return tuple(out)
 
 
 def version_of(doc: dict) -> str | None:
