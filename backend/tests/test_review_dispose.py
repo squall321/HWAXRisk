@@ -418,6 +418,9 @@ def test_a_skipped_cells_candidates_only_move_a_reviewed_stance_toward_condition
     report = expert_report.load_report(store, key, SEAL)
     mine = [f for f in report["findings"] if f["unit_id"] == unit_ids[0]]
     assert [f["partial_cell"] for f in mine] == ([True] if skipped != "OK" else [])
+    # 넘긴 단위의 단위별 분석 — 걸림 후보만 펴고 판정이 선 그 밖의 카드를 걸림 없음 줄로 펴지 않는다
+    block = _md_section(expert_report.render_report_md(report), "단위별 분석").split("### 단위 ")[1]
+    assert block.startswith("1 ") and " — 넘김 — 일부만 판정\n" in block and "judgement=OK" not in block
     if mine:
         assert "· 넘긴 셀 — 일부만 판정" in _head(store, key, SEAL)["summary_md"]
 

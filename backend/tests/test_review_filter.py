@@ -817,7 +817,18 @@ def _one_cell_retry_spill(store, monkeypatch, *, max_calls: int | None = None) -
     out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[shadow["unit_id"], MEM1]], force=True,
                                                              reason="그림자를 다시 본다"), ident=factories.ident(rig.OWNER))
     assert (out["job"]["action"], out["job"]["calls_estimate"]["expected"]) == ("created", 3)
+    # 시험대의 잡 셋은 같은 초에 선다 — 진행판 · 길잡이의 '가장 최근 잡'(created_at 초 · id)이 이 잡이게 만든 시각만 뒤로 민다
+    store.execute("UPDATE rr_jobs SET created_at = created_at + 5 WHERE id = ?", (out["job"]["job_id"],))
     return key, r, fake, filtered, out["job"]["job_id"]
+
+
+def _refused(fn, *args, **kwargs) -> AppError:
+    """거절(AppError)을 돌려준다 — 거절하지 않았으면 단언 실패다(변이 검사가 '죽음' 으로 세는 실패의 모양)."""
+    try:
+        fn(*args, **kwargs)
+    except AppError as exc:
+        return exc
+    raise AssertionError(f"{getattr(fn, '__name__', fn)} 가 거절하지 않았다")
 
 
 def _mem2_runs(fake: FakeReviewEngine, since: int) -> int:
@@ -864,19 +875,19 @@ def test_reopened_cells_past_the_allowance_pause_the_job_until_a_person_consents
         resumes = [s for s in guide["next"] if s["tool"] == "risk_job_action" and s["args"].get("action") == "resume"]
         assert resumes and all("consent" not in s["args"] for s in resumes)
 
-    def resume(**kwargs):
+    def resume(**kwargs) -> str | None:
+        """재개 — 거절의 코드(또는 None)."""
         if entry == "rest":
-            return routes.job_action(running, "resume", ident=factories.ident(rig.OWNER), **kwargs)
+            try:
+                routes.job_action(running, "resume", ident=factories.ident(rig.OWNER), **kwargs)
+            except AppError as exc:
+                return exc.code
+            return None
         factories.act_as_delegate(monkeypatch, rig.OWNER)
-        out = _call("risk_job_action", job_id=running, action="resume", **kwargs)
-        if out.get("error"):
-            raise AppError(out["error"], str(out.get("message")), 422)
-        return out
+        return _call("risk_job_action", job_id=running, action="resume", **kwargs).get("error")
 
-    with pytest.raises(AppError) as refused:
-        resume()
-    assert refused.value.code == "consent_required" and rig.job_row(store, running)["hold_code"] == "consent_extra"
-    resume(consent=True)
+    assert resume() == "consent_required" and rig.job_row(store, running)["hold_code"] == "consent_extra"
+    assert resume(consent=True) is None
     r.finish(running)
     assert rig.state(store, running) == "completed" and _mem2_runs(fake, runs) == 3
     assert {_cell(store, key, u, MEM2)["state"] for u in filtered} == {"reviewed"}
@@ -901,9 +912,8 @@ def test_a_person_who_does_not_consent_skips_the_waiting_cells_and_the_job_goes_
     assert (rig.state(store, running), rig.job_row(store, running)["hold_code"]) == ("paused", hold)
     reason = "다시 연 셀의 비용에 동의하지 않는다"
     if cap:
-        with pytest.raises(AppError) as refused:
-            routes.job_action(running, "resume", consent=True, ident=factories.ident(rig.OWNER))
-        assert (refused.value.code, refused.value.http_status) == ("max_calls", 409)
+        refused = _refused(routes.job_action, running, "resume", consent=True, ident=factories.ident(rig.OWNER))
+        assert (refused.code, refused.http_status) == ("max_calls", 409)
         other = next(c for c in _cells(store, key) if c["state"] == "pending" and c["run_id"] is None)
         body = routes.CellsSkipBody(cells=[[u, MEM2] for u in filtered] + [[other["unit_id"], other["agent_key"]]], reason=reason)
         expect = (3, 1)
@@ -950,18 +960,21 @@ def test_a_reopen_while_the_job_waits_on_an_auto_resuming_hold_turns_it_into_con
 
 def test_a_jobs_own_filtered_cells_it_reopens_are_inside_its_estimate_not_reopened_extra(store, monkeypatch):
     """반대 검토 4차 MEDIUM 2 · D-49 — 그 잡이 거른 제 범위의 셀을 그 잡의 넓힘이 다시 열면 그 셀은 만들 때의 추정(expected — 거르기
-    없음 가정) 안이다 — 다시 연 셀의 몫에 세지 않는다(넓힘이 셀을 다시 연 것은 그대로다)."""
-    _approve(monkeypatch)
-    _knobs(monkeypatch, risk_filter_audit_pct=0)
-
-    def setup(fake, kinds):
-        fake.offcard_findings = 1                     # 1순위 그림자 셀이 걸림을 놓쳤다 — std 를 넓힌다
-
-    key, job_id, _fake, kinds = _run(store, SMALL, fake_setup=setup)
-    cell = _cell(store, key, kinds["boundary"], STD2)
-    assert (cell["state"], cell["route_forced"], cell["run_id"]) == ("reviewed", "widened", job_id)
+    없음 가정) 안이다 — 다시 연 셀의 몫에 세지 않는다(셀은 그대로 다시 열려 그 잡이 돌린다)."""
+    key, job_id, kinds, r, gate, fake = _filtered_mid_job(store, monkeypatch)
+    b = kinds["boundary"]
+    assert _cell(store, key, b, STD2)["run_id"] == job_id
+    _risk_miss(store, key, b, STD1)
+    assert review_cells.widen(store, key, "std", run_id=job_id)["reopened"] == 1
+    cell = _cell(store, key, b, STD2)
+    assert (cell["state"], cell["run_id"], cell["route_forced"], cell["reopened_n"]) == ("pending", job_id, "widened", 1)
     extra = _reopened_extra(store, job_id) or {}
     assert (extra.get("cells"), extra.get("calls_est"), extra.get("hold")) == (0, 0.0, None)
+    review_cells.recover_running(store)
+    gate.set()
+    r.loop.join(30)
+    rig.Rig(store, fake, clock=r.clock, boot_id="boot-b").finish(job_id)
+    assert (rig.state(store, job_id), _cell(store, key, b, STD2)["state"]) == ("completed", "reviewed")
 
 
 def test_a_handoff_chain_across_unscoped_experts_counts_every_cell_it_pulls_in(store, monkeypatch):
