@@ -105,7 +105,8 @@ def _snapshot_of(store, project_id: str) -> str:
 
 @pytest.fixture
 def world(risk_store, monkeypatch):
-    """주인 쪽 원장 — 주인의 과제 P(심사 대상) · P-1~P-4, 주인이 viewer 인 동료의 과제 SHARED, 의견 둘, P 의 subject 위 주인의 등록부 행."""
+    """주인 쪽 원장 — 주인의 과제 P(심사 대상) · P-1~P-4, 주인이 viewer 인 동료의 과제 SHARED, 의견 둘, P 의 subject 위 주인의 등록부 행과
+    SHARED 위 동료의 비공개 행(구성원이어도 남의 비공개 행은 등록부 거름(owner_sub · 조직 공개) 밖이다 — owner_sub 없는 호출도 같다)."""
     store = risk_store
     monkeypatch.setattr(routes, "get_store", lambda: store)
     project, snapshot = _project(store, OWNER, "P-NOW")
@@ -114,10 +115,12 @@ def world(risk_store, monkeypatch):
     _members(shared, COLLEAGUE, OWNER)
     mine_target = _target(store, _snapshot_of(store, mine[0]), OWNER)
     _opinion(store, "op-mine", mine_target, OWNER, SEATS[0], 100)
-    _opinion(store, "op-shared", _target(store, shared_snapshot, COLLEAGUE), COLLEAGUE, SEATS[1], 100)
+    shared_target = _target(store, shared_snapshot, COLLEAGUE)
+    _opinion(store, "op-shared", shared_target, COLLEAGUE, SEATS[1], 100)
     subject = store.query_one("SELECT subject_key FROM rr_ir_edges WHERE snapshot_id = ? AND subject_key IS NOT NULL"
                               " ORDER BY subject_key LIMIT 1", (snapshot,))["subject_key"]
     _registry(store, mine_target, OWNER, "clu-mine", subject)
+    _registry(store, shared_target, COLLEAGUE, "clu-shared-private", subject)
     return {"store": store, "project": project, "target": _target(store, snapshot, OWNER), "mine": mine,
             "shared": shared, "subject": subject}
 
@@ -279,8 +282,9 @@ def test_mcp_lists_only_projects_both_the_owner_and_the_calling_member_can_see(w
 def test_aidatahub_recall_is_skipped_without_a_project_filter_and_carries_one_otherwise(world):
     """과제 거름을 밝히지 않은 AIDataHub 클라이언트를 넘기면(배선하면) 서술 경로와 좌석 기억 2차 경로는 찾지 않고 까닭을 남긴다 — 전체
     색인을 찾지 않는다. 지금의 실 클라이언트(AdhClient)도 거름을 밝히지 않는다. 거름을 밝힌 클라이언트의 찾기마다 타깃 소유자가 볼 수
-    있는 과제 목록이 간다."""
+    있는 과제 목록이 간다(남의 과제가 있는 원장이라 그 목록이 코퍼스 전체와 갈린다)."""
     store, project = world["store"], world["project"]
+    _add_stranger(world)
     unfiltered = _Recorder(filtered=False, hits=[_hit("r-mine1", world["mine"][0])])
     similar = brief.similar_projects(store, project, K, adh=unfiltered)
     built = _build(world, unfiltered)
