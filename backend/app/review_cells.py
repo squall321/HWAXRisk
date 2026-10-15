@@ -53,8 +53,9 @@ _MACHINES: dict[str, tuple[str, frozenset[tuple[str, str]]]] = {
     "cell": ("rr_review_cells", CELL_TRANSITIONS),
     "expert": ("rr_expert_reports", EXPERT_TRANSITIONS),
 }
-# reviewed 셀을 무엇으로 봤나(X1-04) — 카드 대조 · 배경 카드뿐 · 역할만 · 입력 결손 호출(재설계 M3 C3-3)
-CELL_BASES: tuple[str, ...] = ("cards", "background", "role_only", "noinput")
+# reviewed 셀을 무엇으로 봤나(X1-04) — 카드 대조 · 배경 카드뿐 · 역할만 · 긴 문서 발췌만(카드 0장 전문가의 검색 — C3-12) ·
+# 입력 결손 호출(재설계 M3 C3-3). 차례는 완결 몫의 CLOSURE_BASES 와 같다.
+CELL_BASES: tuple[str, ...] = ("cards", "background", "role_only", "search_only", "noinput")
 NOINPUT = "noinput"
 # 입력 결손 호출의 결과 → 셀 상태(m3-cells 3.6 의 정산표 — review_verify.noinput_outcome)
 NOINPUT_STATES: dict[str, str] = {"impact": "reviewed", "none": "reviewed", "unknown": "no_input", "request": "no_input"}

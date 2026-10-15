@@ -728,7 +728,8 @@ def render_text(result: Mapping[str, Any]) -> str:
     lines.append(
         f"[격자] 칸 {_n(grid['cells'])} = 전문가 {_n(grid['experts'])} × 단위 {_n(grid['units'])}{gap}"
         f" · 검토 {_n(st['reviewed'])}(카드 대조 {_n(basis['cards'])} · 배경 카드뿐 {_n(basis['background'])}"
-        f" · 역할만 {_n(basis['role_only'])} · 입력 결손 호출 {_n(basis['noinput'])}{unset}) · 무관 {_n(st['na_irrelevant'])}"
+        f" · 역할만 {_n(basis['role_only'])} · 긴 문서 발췌만 {_n(basis['search_only'])}"
+        f" · 입력 결손 호출 {_n(basis['noinput'])}{unset}) · 무관 {_n(st['na_irrelevant'])}"
         f" · 입력 결손 {_n(st['no_input'])}"
         f" · 미완 {_n(st['failed'])}(처분 전 {_n(grid['failed_open'])}) · 넘김 {_n(st['skipped'])}"
         f" · 대기 {_n(waiting)} · 범위 밖 대기 {_n(grid['out_of_scope_pending'])}"

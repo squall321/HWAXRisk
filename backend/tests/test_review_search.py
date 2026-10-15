@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from app import expert_report, review_cells, review_runner, units
+from app import closure, expert_report, review_cells, review_quality, review_runner, units
 from tests.synth import review_rig as rig
 from tests.synth.fake_review_engine import FakeReviewEngine
 
@@ -65,6 +65,30 @@ def test_only_the_zero_card_expert_asks_and_an_excerpt_makes_the_cell_search_onl
         "experts": 1, "cells": 1, "by_basis": {"role_only": 0, "search_only": 1, "search_failed": 0}}
     report = expert_report.render_report_md(expert_report.build_report(store, key, ZERO))
     assert "긴 문서 발췌 3건" in report
+
+
+def test_a_search_only_cell_is_a_basis_of_its_own_and_does_not_keep_the_target_from_closing(store):
+    """긴 문서 발췌만으로 본 셀(search_only)도 검토 셀의 바탕이다 — 불변식(G4)이 그 셀을 '바탕 없음' 으로 잡지 않아 격자를 다 돌면
+    C1 이 서고(나갈 기준 1 은 invariants == [] 다), 진행판 · 품질의 바탕 셈이 그 셀을 '바탕 모름'(unset)이 아니라 search_only 로
+    센다 — 품질 문면의 [격자] 줄도 그 수를 싣는다."""
+    key = rig.target(store)
+    fake = FakeReviewEngine(rig.packs())
+    fake.search_states = ["ok"]
+    job_id = rig.job(store, key)
+    rig.Rig(store, fake).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    n = len(units.load_units(store, key))
+    cells = store.query("SELECT state, basis FROM rr_review_cells WHERE target_key = ? AND agent_key = ?", (key, ZERO))
+    assert len(cells) == n and {(c["state"], c["basis"]) for c in cells} == {("reviewed", "search_only")}
+    assert review_cells.review_invariants(store, key) == []
+    assert closure.close_level_cells(store, key, persist=False)["c1"] is True
+    board = review_cells.review_summary(store, key)["cells"]["by_basis"]
+    assert board["search_only"] == n and "unset" not in board
+    quality = review_quality.block(store, key)
+    assert quality["json"]["grid"]["reviewed_by_basis"]["search_only"] == n
+    assert "unset" not in quality["json"]["grid"]["reviewed_by_basis"]
+    grid_line = next(line for line in quality["text"].split("\n") if line.startswith("[격자]"))
+    assert f" · 긴 문서 발췌만 {n} · " in grid_line and "바탕 모름" not in grid_line
 
 
 def test_an_empty_scope_answer_is_role_only_and_is_not_retried(store):
