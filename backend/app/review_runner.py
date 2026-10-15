@@ -109,10 +109,7 @@ def resolve_scope(scope: Mapping[str, Any] | None, order: Sequence[Mapping[str, 
         if outside:
             raise _scope_error(f"범위의 {key} 에 이 대상에 없는 값이 있다 — {outside}.", key=key, values=outside)
         norm[key] = items
-    experts = [r for r in order
-               if ("tiers" not in norm or r["tier"] in norm["tiers"])
-               and ("domains" not in norm or r["domain"] in norm["domains"])
-               and ("agents" not in norm or r["agent_key"] in norm["agents"])]
+    experts = review_cells.scope_experts(order, norm)            # adopt_released 가 잡 범위를 같은 규칙으로 다시 읽는다
     unit_ids = [u["unit_id"] for u in unit_rows if "unit_ids" not in norm or u["unit_id"] in norm["unit_ids"]]
     if not experts or not unit_ids:
         raise AppError("scope_empty", f"범위에 드는 셀이 없다 — 전문가 {len(experts)}명 × 단위 {len(unit_ids)}개.", 422,
@@ -162,10 +159,16 @@ def calls_estimate(cells: Mapping[str, int], experts: int, *, k: int = FALLBACK_
 def in_flight(store: Any, *, job_id: str | None = None, target_key: str | None = None) -> dict:
     """아직 도는(running) 전문가 머리·셀 수 — {heads, cells}. `job_id` 를 주면 그 잡의 것(run_id), `target_key` 를 주면 그 대상의
     것 전부다. 코드 보류는 도는 호출을 닫지 않으므로(M2.md 5절 #13) 잡이 paused 여도 0 이 아닐 수 있다(R3A-1)."""
-    col, value = ("run_id", job_id) if job_id is not None else ("target_key", target_key)
+    if job_id is not None:
+        # 그 잡의 머리 — 범위로 찍힌 머리이거나 그 잡에 묶인 셀이 있는 전문가(다시 연 셀은 셀만 묶는다 — 반대 검토 3차 · D-47)
+        row = store.query_one(
+            f"SELECT (SELECT COUNT(*) FROM rr_expert_reports e WHERE {review_cells.job_expert_sql('e')} AND e.state = 'running')"
+            " AS heads, (SELECT COUNT(*) FROM rr_review_cells WHERE run_id = ? AND state = 'running') AS cells",
+            (job_id, job_id, job_id))
+        return {"heads": int(row["heads"] or 0), "cells": int(row["cells"] or 0)}
     row = store.query_one(
-        f"SELECT (SELECT COUNT(*) FROM rr_expert_reports WHERE {col} = ? AND state = 'running') AS heads,"
-        f" (SELECT COUNT(*) FROM rr_review_cells WHERE {col} = ? AND state = 'running') AS cells", (value, value))
+        "SELECT (SELECT COUNT(*) FROM rr_expert_reports WHERE target_key = ? AND state = 'running') AS heads,"
+        " (SELECT COUNT(*) FROM rr_review_cells WHERE target_key = ? AND state = 'running') AS cells", (target_key, target_key))
     return {"heads": int(row["heads"] or 0), "cells": int(row["cells"] or 0)}
 
 
@@ -350,10 +353,11 @@ def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Ma
                   selector: Mapping[str, Any] | None = None, settings: Any | None = None) -> dict:
     """사람의 처분 한 번 — 다시(`retry`) 또는 넘김(`skip`) — 과 그 셀을 집을 잡을 한 트랜잭션으로(재설계 M3 C3-4 · m3-cells 3.7).
 
-    다시 — 살아 있는 검토 잡의 범위가 그 셀을 덮으면 그 잡이 집는다(`adopted` — 셀·머리의 run_id 를 그 잡으로), 덮지 않으면 다음 잡을
+    다시 — 살아 있는 검토 잡의 범위가 그 셀을 덮으면 그 잡이 집는다(`adopted` — 셀의 run_id 를 그 잡으로), 덮지 않으면 다음 잡을
     기다린다(`waiting`), 살아 있는 잡이 없고 `start` 면 그 셀들의 (전문가, 단위)로 범위를 잡은 검토 잡을 만든다(`created` —
-    `create_review_job` 그대로라 동의 문턱도 그대로다). 넘김 — 살아 있는 잡이 있으면 그 전문가 머리를 그 잡에 찍어 마감되게 하고
-    (`adopted`), 없으면 그 셀의 (전문가, 단위)로 마감 잡을 만든다(돌 셀은 0 이다). 잡을 만들다 거절(동의·자격·스위치)되면 처분도
+    `create_review_job` 그대로라 동의 문턱도 그대로다). 넘김 — 살아 있는 잡이 있으면 넘긴 셀을 그 잡에 묶어 그 전문가가 그 잡에서
+    다시 마감되게 하고(`adopted`), 없으면 그 셀의 (전문가, 단위)로 마감 잡을 만든다(돌 셀은 0 이다). 머리는 범위로 찍지 않는다
+    (반대 검토 3차 MEDIUM 3 · D-47 — 그 잡의 몫은 묶인 셀로 가린다). 잡을 만들다 거절(동의·자격·스위치)되면 처분도
     되돌린다 — 아무것도 바꾸기 전에 거절한 것과 같다. 바꾼 셀이 있으면 감사 한 행(scope coverage · cells.retry|cells.skip).
     반환 {target_key, matched, retried|skipped, not_failed, keys_total, keys[≤50], experts, job{action, job_id?, calls_estimate?},
     audit_id, changed}.
@@ -394,12 +398,12 @@ def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Ma
             scope = (live.get("params") or {}).get("scope") or {}
             mine = changed if action == "skip" else [c for c in changed
                                                       if scope_covers(scope, order.get(c["agent_key"], {}), c["unit_id"])]
-            if action == "retry":
-                store.executemany("UPDATE rr_review_cells SET run_id = ?, updated_at = ? WHERE target_key = ? AND unit_id = ?"
-                                  " AND agent_key = ? AND state = 'pending'",
-                                  [(live["id"], now, target_key, c["unit_id"], c["agent_key"]) for c in mine])
-            store.executemany("UPDATE rr_expert_reports SET run_id = ?, updated_at = ? WHERE target_key = ? AND agent_key = ?",
-                              [(live["id"], now, target_key, a) for a in sorted({c["agent_key"] for c in mine})])
+            # 셀만 그 잡에 묶는다 — 다시 연 셀은 그 잡이 돌리고, 넘긴 셀은 그 잡이 그 전문가를 다시 마감한다(그 잡의 몫은 묶인 셀로
+            # 가린다 — review_cells.job_expert_sql). 머리는 범위로 찍지 않는다(반대 검토 3차 MEDIUM 3 · D-47).
+            store.executemany("UPDATE rr_review_cells SET run_id = ?, updated_at = ? WHERE target_key = ? AND unit_id = ?"
+                              " AND agent_key = ? AND state = ?",
+                              [(live["id"], now, target_key, c["unit_id"], c["agent_key"],
+                                "pending" if action == "retry" else "skipped") for c in mine])
             out["job"] = {"action": "adopted" if mine else "waiting", "job_id": live["id"], "adopted": len(mine),
                           "waiting": len(changed) - len(mine)}
         elif action == "skip" or start:
@@ -736,7 +740,8 @@ class JobProgress:
     def _count(self, *, final: bool = False) -> None:
         store, job_id = self.store, self.job_id
         heads = [dict(r) for r in store.query(
-            "SELECT state, pack_status FROM rr_expert_reports WHERE target_key = ? AND run_id = ?", (self.target_key, job_id))]
+            f"SELECT e.state, e.pack_status FROM rr_expert_reports e WHERE e.target_key = ? AND {review_cells.job_expert_sql('e')}",
+            (self.target_key, job_id, job_id))]
         packs = {"total": len(heads), "todo": 0, "ok": 0, "empty": 0, "error": 0, "blocked": 0}
         for h in heads:
             key = "blocked" if h["state"] == "blocked" else (h["pack_status"] if h["pack_status"] in packs else "todo")
@@ -1491,12 +1496,13 @@ class _Session:
     def _replay_handoffs(self) -> None:
         """늦은 넘김(C3-7) — 이 훑기가 넘긴 (단위, 영역)의 셀 가운데 이미 걸러진 것을 다시 연다(다시 분류되면 7번 줄로 검토다).
         거른 셀만 여므로 멱등이다 — 훑기를 원장에서 다시 읽을 때도 부른다. 제 셀은 뺀다(자기 넘김은 7번 줄이 세지 않아 다시 걸러질
-        뿐이고, 그 전문가 세션마다 되풀이됐다 — 반대 검토 2차 MEDIUM 3). 곧바로 연 셀의 잡 결속은 그대로다(C3-7 의 넓힘과 같다 —
-        그 셀을 범위로 잡은 다음 잡이 분류한다. 잡 끝의 거두기만 지금 잡으로 찍는다)."""
+        뿐이고, 그 전문가 세션마다 되풀이됐다 — 반대 검토 2차 MEDIUM 3). 다시 연 셀만 이 잡에 묶어 이 잡이 돌린다 — 머리는 범위로
+        찍지 않는다(반대 검토 3차 MEDIUM 2 · D-47)."""
         for handoff in self.sweep.get("handoffs") or ():
             if handoff.get("unit_id") and handoff.get("to"):
                 review_cells.reopen_filtered(self.store, self.target_key, via="handoff", domain=str(handoff["to"]),
-                                             unit_id=str(handoff["unit_id"]), exclude_agent=self.agent, now=self.now())
+                                             unit_id=str(handoff["unit_id"]), exclude_agent=self.agent, run_id=self.job_id,
+                                             now=self.now())
 
     # -- 거르기 분류(재설계 M3 C3-6) ----------------------------------------------------------------
     def _handoffs_to(self, domain: str) -> dict[str, list[dict]]:
@@ -1910,7 +1916,7 @@ class _Session:
             raise _Stop("lease", release=False)
         cell.alive = False
         if out["state"] in ("reviewed", "no_input") and sample.get("outcome") == "risk_miss":
-            widened = review_cells.widen(self.store, self.target_key, sample["domain"], now=self.now())
+            widened = review_cells.widen(self.store, self.target_key, sample["domain"], run_id=self.job_id, now=self.now())
             log.info("검토 잡 %s: %s×%s 의 %s 가 걸림을 놓쳤다 — 영역 %s 를 넓혔다(다시 연 셀 %s, 대상 전체 끔 %s)", self.job_id,
                      cell.unit_id, self.agent, "·".join(sample["keys"]), sample["domain"], widened["reopened"], widened["off"])
         if out["state"] not in ("reviewed", "no_input"):
@@ -2311,12 +2317,12 @@ class ReviewLoop:
         범위에 묶음을 받은(ok·empty) 전문가가 하나라도 있으면 카드 저장소는 닿는다 — 그 사람들이 먼저 검토를 다 끝내 열린 셀이 묶음
         실패 전문가에게만 남아도 잡을 멈추지 않고 그 사람의 묶음 한도(PACK_RETRY_MAX)로 간다(전문가 단위 단계 — 재설계 M3 C3-11)."""
         rows = [dict(r) for r in self.store.query(
-            "SELECT e.agent_key, e.pack_status, e.pack_error FROM rr_expert_reports e WHERE e.target_key = ? AND e.run_id = ?"
+            "SELECT e.agent_key, e.pack_status, e.pack_error FROM rr_expert_reports e WHERE e.target_key = ?"
             " AND e.state <> 'blocked' AND EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key = e.target_key"
-            " AND c.agent_key = e.agent_key AND c.run_id = e.run_id AND c.state = 'pending')", (target_key, job_id))]
+            " AND c.agent_key = e.agent_key AND c.run_id = ? AND c.state = 'pending')", (target_key, job_id))]
         reached = self.store.query_one(
-            "SELECT 1 FROM rr_expert_reports WHERE target_key = ? AND run_id = ? AND pack_status IN ('ok', 'empty') LIMIT 1",
-            (target_key, job_id)) is not None
+            f"SELECT 1 FROM rr_expert_reports e WHERE e.target_key = ? AND {review_cells.job_expert_sql('e')}"
+            " AND e.pack_status IN ('ok', 'empty') LIMIT 1", (target_key, job_id, job_id)) is not None
         if rows and not reached and all(r["pack_status"] == "error" and r["pack_error"] in AIDH_CODES for r in rows):
             codes = ", ".join(sorted({str(r["pack_error"]) for r in rows}))
             self.hold(job_id, "aidh_unreachable", f"범위 안 전문가 {len(rows)}명 모두 카드 묶음을 받지 못했다({codes}) — AIDataHub·"
@@ -2471,10 +2477,10 @@ class ReviewLoop:
         """범위 안 셀이 다 닫혔는데 마감되지 않은(planned 로 남은) 머리 수 — 마감 도중 결함·재기동 뒤의 것이다. 닫힌 셀이 앞 잡의
         것이어도 센다(R3A-1 — 마감 전에 멈춘 앞 잡의 전문가를 이 잡이 마감한다, `claim_next_expert(purpose='finalize')` 와 같은 조건)."""
         return int(self.store.query_one(
-            "SELECT COUNT(*) AS n FROM rr_expert_reports e WHERE e.target_key = ? AND e.run_id = ? AND e.state = 'planned'"
-            f" AND e.pack_status IN ({review_cells.FINALIZE_PACK_SQL}) AND NOT EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key ="
-            " e.target_key AND c.agent_key = e.agent_key AND c.run_id = e.run_id AND c.state IN ('pending', 'running'))",
-            (job["target_key"], job["id"]))["n"] or 0)
+            f"SELECT COUNT(*) AS n FROM rr_expert_reports e WHERE e.target_key = ? AND {review_cells.job_expert_sql('e')}"
+            f" AND e.state = 'planned' AND e.pack_status IN ({review_cells.FINALIZE_PACK_SQL}) AND NOT EXISTS (SELECT 1 FROM"
+            " rr_review_cells c WHERE c.target_key = e.target_key AND c.agent_key = e.agent_key AND c.run_id = ?"
+            " AND c.state IN ('pending', 'running'))", (job["target_key"], job["id"], job["id"], job["id"]))["n"] or 0)
 
     def _audit_topup(self, job: Mapping[str, Any]) -> int:
         """잡 끝 보충 표본(C3-7) — 잡 거르기가 on 일 때 거른 셀을 표본 바닥(59건 · 영역당 1건)까지 다시 연다. 그 앞에 넓힌 영역의 남은
@@ -2482,7 +2488,7 @@ class ReviewLoop:
         · 다른 전문가가 넘긴 단위 · 영역의 남은 거른 셀도(카드 밖 넘김 — LOW 15). 이 잡이 이어 돌 셀이 생겼으면 그 수(0 이 아니면
         잡은 review 로 이어 돈다)."""
         target_key, job_id = str(job["target_key"]), str(job["id"])
-        # 거둔 셀과 그 전문가 머리는 이 잡으로 찍는다 — 앞 잡의 결속 그대로면 아무 잡도 돌리지 않는다(반대 검토 2차 MEDIUM 3)
+        # 거둔 셀만 이 잡에 묶는다 — 앞 잡의 결속 그대로면 아무 잡도 돌리지 않는다(2차 MEDIUM 3), 머리는 범위로 찍지 않는다(3차 · D-47)
         reaped = (review_cells.reopen_widened(self.store, target_key, run_id=job_id, now=self.clock())
                   + review_cells.reopen_handed_off(self.store, target_key, run_id=job_id, now=self.clock()))
         if reaped and self._open_cells(job):
@@ -2515,9 +2521,9 @@ class ReviewLoop:
             self._finish(job, "completed", error)
             return None
         needs_pack = self.store.query_one(
-            "SELECT 1 FROM rr_expert_reports e WHERE e.target_key = ? AND e.run_id = ? AND e.state IN ('planned', 'running')"
+            "SELECT 1 FROM rr_expert_reports e WHERE e.target_key = ? AND e.state IN ('planned', 'running')"
             " AND e.pack_status IN ('todo', 'error') AND EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key ="
-            " e.target_key AND c.agent_key = e.agent_key AND c.run_id = e.run_id AND c.state = 'pending') LIMIT 1",
+            " e.target_key AND c.agent_key = e.agent_key AND c.run_id = ? AND c.state = 'pending') LIMIT 1",
             (job["target_key"], job["id"]))
         phase = ("live" if unit_live.pending(self.store, str(job["target_key"])) else
                  "pack" if needs_pack is not None else "review")

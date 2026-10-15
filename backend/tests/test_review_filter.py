@@ -567,9 +567,9 @@ def test_another_experts_offcard_handoff_keeps_the_cell_it_arrives_before(store,
 
 def test_a_late_offcard_handoff_reopens_the_filtered_cell_at_job_end(store, monkeypatch):
     """반대 검토 LOW 15 · 2차 MEDIUM 3 — 거른 뒤에 온 카드 밖 넘김: std 2순위가 경계 단위를 거른 뒤(앞 잡) mech 2순위의 카드 밖 호출이
-    그 단위를 std 로 넘긴다. 잡 끝(보충 표본 앞)이 그 셀을 다시 열고 셀과 그 전문가 머리를 지금 잡으로 찍는다 — 지금 잡이 그 셀을
-    다시 분류해 7번 줄로 검토한다(종전에는 거른 잡의 결속 그대로 pending 으로 남아 아무 잡도 돌리지 않았다). 자기 넘김은 세지 않으므로
-    다시 열린 셀이 다시 걸러져 잡 끝이 되풀이되지 않는다."""
+    그 단위를 std 로 넘긴다. 잡 끝(보충 표본 앞)이 그 셀을 다시 열고 그 셀만 지금 잡에 묶는다(머리는 범위로 찍지 않는다 — 3차 ·
+    D-47) — 지금 잡이 그 셀을 다시 분류해 7번 줄로 검토한다(종전에는 거른 잡의 결속 그대로 pending 으로 남아 아무 잡도 돌리지 않았다).
+    자기 넘김은 세지 않으므로 다시 열린 셀이 다시 걸러져 잡 끝이 되풀이되지 않는다."""
     key, fake, kinds, r = _offcard_handoff_target(store, monkeypatch)
     b = kinds["boundary"]
     r.finish(rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]}))
@@ -583,15 +583,19 @@ def test_a_late_offcard_handoff_reopens_the_filtered_cell_at_job_end(store, monk
     assert (cell["state"], cell["run_id"], cell["route"], cell["route_forced"], cell["reopened_n"]) == (
         "reviewed", sender, "review", "handoff", 1)
     assert cell["route_json"]["handoff"] == [{"from": MECH2, "why": OFFCARD_WHY}]
-    assert store.query_one("SELECT state, run_id FROM rr_expert_reports WHERE target_key = ? AND agent_key = ?",
-                           (key, STD2))["run_id"] == sender
+    assert _head_run(store, key, STD2) != sender                      # 셀만 묶는다 — 머리는 범위로 찍지 않는다(3차 · D-47)
     assert review_cells.review_invariants(store, key) == []
 
 
-def test_a_job_end_widening_reap_runs_an_earlier_jobs_filtered_cells_in_the_running_job(store, monkeypatch):
-    """반대 검토 2차 MEDIUM 3 — 잡 끝이 넓힌 영역의 남은 거른 셀을 거둘 때(정산 뒤 넓히기 전에 죽은 길) 그 셀과 전문가 머리를 지금
-    잡으로 찍는다 — 앞 잡(회로 2순위)이 거른 셀을 지금 잡(회로 1순위 그림자의 사람의 다시)이 끝까지 돌린다. 종전에는 앞 잡의 결속
-    그대로 pending 이라 지금 잡은 끝나고 아무 잡도 돌리지 않았다."""
+def _head_run(store, key: str, agent: str) -> str | None:
+    return store.query_one("SELECT run_id FROM rr_expert_reports WHERE target_key = ? AND agent_key = ?", (key, agent))["run_id"]
+
+
+@pytest.mark.parametrize("crash", [False, True])
+def test_widening_binds_an_earlier_jobs_filtered_cells_to_the_running_job_without_stamping_the_head(store, monkeypatch, crash):
+    """반대 검토 2차 MEDIUM 3 · 3차 MEDIUM 2 · D-47 — 앞 잡(회로 2순위)이 거른 셀을 지금 잡(회로 1순위 그림자의 사람의 다시)의 넓힘이
+    다시 열면 그 셀만 지금 잡에 묶여 지금 잡이 끝까지 돌린다 — 정산의 곧바로 넓힘(정상 길)이든, 넓히기 전에 죽어 잡 끝이 거둔 길이든
+    같다. 종전 정상 길은 앞 잡의 결속 그대로 pending 이라 아무 잡도 돌리지 않았다. 전문가 머리는 범위로 찍지 않는다."""
     _approve(monkeypatch)
     _knobs(monkeypatch, risk_filter_audit_pct=0)
     monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 0)
@@ -614,7 +618,7 @@ def test_a_job_end_widening_reap_runs_an_earlier_jobs_filtered_cells_in_the_runn
     real, crashed = review_cells.widen, []
 
     def crash_once(*args, **kwargs):
-        if not crashed:
+        if crash and not crashed:
             crashed.append(1)
             raise RuntimeError("넓히기 직전에 죽었다(가짜)")
         return real(*args, **kwargs)
@@ -624,9 +628,60 @@ def test_a_job_end_widening_reap_runs_an_earlier_jobs_filtered_cells_in_the_runn
                                                              reason="그림자를 다시 본다"), ident=factories.ident(rig.OWNER))
     running = out["job"]["job_id"]
     r.finish(running)
-    assert crashed and rig.state(store, running) == "completed" and "mem" in review_cells.widened_domains(store, key)
+    assert bool(crashed) is crash and rig.state(store, running) == "completed"
+    assert "mem" in review_cells.widened_domains(store, key)
     reaped = [_cell(store, key, u, MEM2) for u in filtered]
     assert {(c["state"], c["run_id"], c["route_forced"]) for c in reaped} == {("reviewed", running, "widened")}
+    assert _head_run(store, key, MEM2) == earlier                    # 머리는 범위로 찍지 않는다
+
+
+def test_a_late_sweep_handoff_binds_an_earlier_jobs_filtered_cell_to_the_running_job(store, monkeypatch):
+    """반대 검토 3차 MEDIUM 2 · D-47(재현 B1) — 앞 잡(std 2순위)이 거른 경계 단위를 지금 잡(mech 2순위)의 훑기가 std 로 넘기면 곧바로
+    다시 연 그 셀만 지금 잡에 묶여 지금 잡이 돌린다(종전에는 앞 잡의 결속 그대로 pending 이라 지금 잡이 끝나고 아무 잡도 돌리지
+    않았다). 머리는 찍지 않는다."""
+    key, fake, kinds, r = _offcard_handoff_target(store, monkeypatch)
+    b = kinds["boundary"]
+    r.finish(rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]}))
+    earlier = rig.job(store, key, scope={"agents": [STD2]})
+    r.finish(earlier)
+    assert _cell(store, key, b, STD2)["state"] == "na_irrelevant"
+    fake.handoff_to, fake.handoff_unit, fake.handoff_from = "std", b, {MECH2}
+    sender = rig.job(store, key, scope={"agents": [MECH2]})
+    r.finish(sender)
+    cell = _cell(store, key, b, STD2)
+    assert (rig.state(store, sender), cell["state"], cell["run_id"], cell["route_forced"]) == (
+        "completed", "reviewed", sender, "handoff")
+    assert _head_run(store, key, STD2) == earlier
+
+
+@pytest.mark.parametrize("path", ["handoff_reap", "top_up"])
+def test_a_reopened_cell_runs_alone_and_never_pulls_the_experts_unscoped_cells_into_the_job(store, monkeypatch, path):
+    """반대 검토 3차 MEDIUM 3 · D-47(재현 C) — std 2순위를 경계 단위 하나로만 잡은 앞 잡이 그 셀을 거른 뒤(나머지 넷은 한 번도 잡히지
+    않았다), 지금 잡(mech 2순위)의 잡 끝이 그 셀을 다시 열면(카드 밖 넘김 거두기 · 보충 표본) 그 셀 하나만 지금 잡에 묶여 돈다.
+    종전에는 머리를 지금 잡으로 찍어 adopt_released 가 그 전문가의 범위 밖 셀 넷까지 거둬 다섯 단위를 다 돌렸다(범위 · 동의 · 추정
+    밖). 엔진 호출은 그 셀의 것뿐이다."""
+    key, fake, kinds, r = _offcard_handoff_target(store, monkeypatch)
+    b = kinds["boundary"]
+    others = [u["unit_id"] for u in units.load_units(store, key) if u["unit_id"] != b]
+    r.finish(rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]}))
+    earlier = rig.job(store, key, scope={"agents": [STD2], "unit_ids": [b]})
+    r.finish(earlier)
+    assert _cell(store, key, b, STD2)["state"] == "na_irrelevant"
+    if path == "handoff_reap":
+        fake.offcard_handoffs = {(MECH2, b): "std"}
+    else:
+        monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 1)
+        monkeypatch.setattr(review_cells, "AUDIT_DOMAIN_FLOOR", 1)
+    before = {u: (_cell(store, key, u, STD2)["state"], _cell(store, key, u, STD2)["run_id"]) for u in others}
+    runs = len(fake.calls("run"))
+    current = rig.job(store, key, scope={"agents": [MECH2]})
+    r.finish(current)
+    cell = _cell(store, key, b, STD2)
+    assert (rig.state(store, current), cell["state"], cell["run_id"]) == ("completed", "reviewed", current)
+    assert {u: (_cell(store, key, u, STD2)["state"], _cell(store, key, u, STD2)["run_id"]) for u in others} == before
+    std2 = [c["body"] for c in fake.calls("run")[runs:] if c["body"]["expert"]["key"] == STD2]
+    assert {(b_.get("unit") or {}).get("unit_id") for b_ in std2} == {b}         # 그 셀의 호출뿐(종전 15 — 다섯 단위)
+    assert _head_run(store, key, STD2) == earlier
 
 
 def test_an_experts_handoff_to_its_own_domain_never_reopens_its_own_filtered_cell_at_job_end(store, monkeypatch):
@@ -700,7 +755,8 @@ def test_a_low_floor_samples_one_cell_per_domain_and_a_later_miss_reopens_what_a
     """보충 표본 바닥(C3-7)과 넓힘의 즉시 다시 열기 — 1순위가 다 닫힌 뒤(첫 잡) 바닥이 작으면(AUDIT_MIN_N 1 · 비율 0) 둘째 잡이 거른 셀
     가운데 영역마다 한 건만 다시 열려 끝까지 판정되고 나머지는 거른 채 남는다. 완결 몫은 실제 바닥(59 — 거를 수 있던 셀 N 전부)에 못
     미쳐 floor_met 이 거짓이다. 셋째 잡의 보충 표본이 같은 영역에서 걸림을 놓치면(입력 결손 셀의 영향 있음 → risk_miss) 둘째 잡이
-    거른 셀이 그 잡의 보충 표본이 아니라 넓힘으로 곧바로 다시 열린다(route_forced widened · pending — 다음 잡이 분류한다)."""
+    거른 셀이 그 잡의 보충 표본이 아니라 넓힘으로 곧바로 다시 열려 셋째 잡에 묶이고 그 잡이 끝까지 본다(route_forced widened ·
+    reviewed — 살아 있는 잡이 다시 연 셀은 그 잡이 돌린다, 반대 검토 3차 MEDIUM 2 · D-47)."""
     _approve(monkeypatch)
     _knobs(monkeypatch, risk_filter_audit_pct=0)
     key = rig.target(store, ROSTER)
@@ -739,13 +795,13 @@ def test_a_low_floor_samples_one_cell_per_domain_and_a_later_miss_reopens_what_a
         "filter_audit", key, *p, salt=f"s{i}"), p)) == (b2, MEM2))
     monkeypatch.setattr(review_verify, "SAMPLE_SALT", salt)
     fake.noinput_q1[b2] = ["yes"]                                     # 끝까지 보니 영향 있음 — 거른 셀이 걸림을 놓쳤다
-    done({"agents": [MEM2], "unit_ids": [b2]})
+    third = done({"agents": [MEM2], "unit_ids": [b2]})
     audited = _cell(store, key, b2, MEM2)
     assert (audited["route_forced"], audited["sample_json"]["filter_audit"]["result"]) == (review_cells.FILTER_FLOOR,
                                                                                           "risk_miss")
     assert "mem" in review_cells.widened_domains(store, key)
     reopened = [_cell(store, key, c["unit_id"], c["agent_key"]) for c in left]
-    assert {(c["state"], c["route_forced"], c["reopened_n"]) for c in reopened} == {("pending", "widened", 1)}
+    assert {(c["state"], c["route_forced"], c["reopened_n"], c["run_id"]) for c in reopened} == {("reviewed", "widened", 1, third)}
 
 
 def test_a_filtered_cell_without_its_classification_record_breaks_the_invariant(store, monkeypatch):
@@ -787,8 +843,9 @@ def test_a_sweep_no_the_engine_marked_as_contested_never_filters_the_cell(store,
 
 def test_a_human_retry_keeps_the_sample_marker_so_a_rerun_miss_still_widens_and_a_widening_never_reverts(store, monkeypatch):
     """반대 검토 HIGH 3 — 사람의 다시는 표본 · 그림자 표지를 지우지 않는다(결과만 비우고 앞 결과는 was 에 쌓는다). ① 실패한 보충 표본 셀을
-    다시 열어 이번에는 영향 있음(risk_miss)이 나오면 그 영역이 넓어져 남은 거른 셀이 다시 열린다. ② 넓힘의 원인 셀을 강제로 다시 열어도
-    넓힌 영역은 되돌아가지 않는다(넓힘은 앞 결과까지 본다)."""
+    다시 열어 이번에는 영향 있음(risk_miss)이 나오면 그 영역이 넓어져 남은 거른 셀이 다시 열리고 다시 한 그 잡이 끝까지 본다(살아 있는
+    잡이 다시 연 셀은 그 잡에 묶인다 — 3차 MEDIUM 2 · D-47). ② 넓힘의 원인 셀을 강제로 다시 열어도 넓힌 영역은 되돌아가지 않는다(넓힘은
+    앞 결과까지 본다)."""
     _approve(monkeypatch)
     _knobs(monkeypatch, risk_filter_audit_pct=0)
     key = rig.target(store, ROSTER)
@@ -819,7 +876,8 @@ def test_a_human_retry_keeps_the_sample_marker_so_a_rerun_miss_still_widens_and_
     r.finish(out["job"]["job_id"])
     assert _cell(store, key, audit_unit, MEM2)["sample_json"]["filter_audit"]["result"] == "risk_miss"
     assert "mem" in review_cells.widened_domains(store, key)
-    assert {(c["state"], c["route_forced"]) for c in (_cell(store, key, u, MEM2) for u in left)} == {("pending", "widened")}
+    assert {(c["state"], c["route_forced"], c["run_id"]) for c in (_cell(store, key, u, MEM2) for u in left)} == {
+        ("reviewed", "widened", out["job"]["job_id"])}
 
     out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[audit_unit, MEM2]], force=True,
                                                              reason="넓힘의 원인 셀을 다시 본다"), ident=factories.ident(rig.OWNER))

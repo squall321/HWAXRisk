@@ -219,6 +219,22 @@ def plan_cells(store: Any, target_key: str, *, now: int | None = None) -> dict:
             "cells_total": len(order) * len(unit_rows), "cells_dropped": dropped}
 
 
+def job_expert_sql(alias: str = "e", job: str = "?") -> str:
+    """그 머리가 잡 J 의 몫인가 — 범위로 찍힌 머리(assign_scope 의 run_id)이거나 J 에 묶인 셀이 있는 전문가. 다시 연 셀은 셀만 J 에
+    묶고 머리는 범위로 찍지 않는다(반대 검토 3차 MEDIUM 2 · 3 · D-47). 자리표시자 둘(J, J) — `job` 에 열(j.id)을 주면 그 열과 견준다."""
+    return (f"({alias}.run_id = {job} OR EXISTS (SELECT 1 FROM rr_review_cells jc WHERE jc.target_key = {alias}.target_key"
+            f" AND jc.agent_key = {alias}.agent_key AND jc.run_id = {job}))")
+
+
+def scope_experts(order: Sequence[Mapping[str, Any]], scope: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """잡 범위(칸끼리 AND, 빠진 칸은 전부 — tiers · domains · agents)에 드는 로스터 행(순서 그대로). 머리 run_id 가 아니라 잡이 받은
+    범위다 — 잡을 만들 때(`review_runner.resolve_scope`)와 놓인 셀을 거둘 때(`adopt_released`)가 같은 규칙이다."""
+    return [r for r in order
+            if ("tiers" not in scope or r["tier"] in scope["tiers"])
+            and ("domains" not in scope or r["domain"] in scope["domains"])
+            and ("agents" not in scope or r["agent_key"] in scope["agents"])]
+
+
 def assign_scope(store: Any, target_key: str, run_id: str, *, agents: Sequence[str], unit_ids: Sequence[str],
                  now: int | None = None) -> dict:
     """검토 잡의 범위를 원장에 찍는다 — 범위 안 `pending` 셀과 범위 안 전문가 머리의 `run_id` 를 그 잡 id 로 둔다.
@@ -261,8 +277,9 @@ def adopt_released(store: Any, job_id: str, *, now: int | None = None) -> int:
 
     `assign_scope` 는 잡을 만드는 순간의 pending 셀만 찍는다 — 그때 다른 잡의 워커가 쥐고 있던(running) 셀은 옛 잡 id 를 단 채
     나중에 pending 으로 놓이고, 선점·완료 셈이 그 잡 id 의 셀만 보므로 아무도 집지 않는다(새 잡이 호출 0회로 completed). 그런
-    셀(run_id 가 없거나 살아 있지 않은 잡의 것)을 이 잡의 범위 — 이 잡이 찍은 전문가(머리 run_id) × 잡 범위의 unit_ids(없으면
-    전부) — 안에서 이 잡 id 로 찍고, 그 전문가가 ready·partial·blocked 면 다시 연다. 범위 밖 셀은 손대지 않는다. 거둔 셀 수.
+    셀을 이 잡 id 로 찍고 그 전문가가 ready·partial·blocked 면 다시 연다. 범위는 머리의 run_id 가 아니라 잡이 받은 범위(params.scope —
+    전문가 × unit_ids)이고, 거두는 셀은 죽은 잡에 묶인 것뿐이다 — 한 번도 잡히지 않은(run_id 없는) 셀이나 범위 밖 전문가의 셀은
+    손대지 않는다(반대 검토 3차 MEDIUM 3 · D-47 — 머리 찍기를 범위로 읽어 범위 밖 셀을 거두던 것). 거둔 셀 수.
     """
     now = now_epoch() if now is None else now
     job = store.query_one("SELECT target_key, params_json, state FROM rr_jobs WHERE id = ? AND mode = 'reviews'", (job_id,))
@@ -272,17 +289,17 @@ def adopt_released(store: Any, job_id: str, *, now: int | None = None) -> int:
         scope = (json.loads(job["params_json"] or "{}").get("scope") or {})
     except (TypeError, ValueError, AttributeError):
         scope = {}
-    units_in = set(scope.get("unit_ids") or ()) if isinstance(scope, Mapping) else set()
+    scope = scope if isinstance(scope, Mapping) else {}
     target_key = job["target_key"]
+    agents_in = {r["agent_key"] for r in scope_experts(planner.review_order(store, target_key), scope)}
+    units_in = set(scope.get("unit_ids") or ())
     marks = ",".join("?" * len(runner.LIVE_JOB_STATES))
     with store.tx():
         rows = [dict(r) for r in store.query(
-            "SELECT c.unit_id, c.agent_key FROM rr_review_cells c JOIN rr_expert_reports e"
-            " ON e.target_key = c.target_key AND e.agent_key = c.agent_key"
-            " WHERE c.target_key = ? AND e.run_id = ? AND c.state = 'pending' AND (c.run_id IS NULL OR c.run_id NOT IN"
-            f" (SELECT id FROM rr_jobs WHERE mode = 'reviews' AND state IN ({marks})))",
-            (target_key, job_id, *runner.LIVE_JOB_STATES))]
-        rows = [r for r in rows if not units_in or r["unit_id"] in units_in]
+            "SELECT c.unit_id, c.agent_key FROM rr_review_cells c WHERE c.target_key = ? AND c.state = 'pending'"
+            f" AND c.run_id IS NOT NULL AND c.run_id NOT IN (SELECT id FROM rr_jobs WHERE mode = 'reviews' AND state IN ({marks}))",
+            (target_key, *runner.LIVE_JOB_STATES))]
+        rows = [r for r in rows if r["agent_key"] in agents_in and (not units_in or r["unit_id"] in units_in)]
         if not rows:
             return 0
         adopted = int(store.executemany(
@@ -297,7 +314,7 @@ def adopt_released(store: Any, job_id: str, *, now: int | None = None) -> int:
 def _live_review_jobs(store: Any) -> list[dict]:
     """돌 수 있는 검토 잡 — 도는 전문가가 가장 적은 잡부터, 같으면 먼저 만든 잡부터(P-09)."""
     rows = store.query(
-        "SELECT j.id, j.target_key, j.state, (SELECT COUNT(*) FROM rr_expert_reports e WHERE e.run_id = j.id"
+        f"SELECT j.id, j.target_key, j.state, (SELECT COUNT(*) FROM rr_expert_reports e WHERE {job_expert_sql('e', 'j.id')}"
         " AND e.state = 'running') AS running_n FROM rr_jobs j WHERE j.mode = 'reviews' AND j.state = 'running'"
         " ORDER BY running_n ASC, j.created_at ASC, j.id ASC")
     return [dict(r) for r in rows]
@@ -330,11 +347,14 @@ def claim_next_expert(store: Any, job: Mapping[str, Any] | None = None, *, boot_
                  f"e.pack_status IN ({FINALIZE_PACK_SQL})" if purpose == "finalize" else "e.pack_status IN ('ok', 'empty')")
     # 검토는 근거 꾸러미 실호출(B 층)이 언 단위의 셀만 집는다(unit_live.READY_SQL — 행이 없는 단위는 B 층 이전 원장이다).
     cell_cond = " AND (c.not_before IS NULL OR c.not_before <= ?)" + unit_live.READY_SQL if purpose == "review" else ""
+    # 그 잡의 몫은 그 잡에 묶인 셀로 가린다 — 다시 연 셀은 셀만 묶이고 머리는 범위로 찍히지 않는다(반대 검토 3차 MEDIUM 2 · 3 · D-47)
+    member = ""
     cells_cond = (" AND EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key = e.target_key AND c.agent_key = e.agent_key"
-                  f" AND c.run_id = e.run_id AND c.state = 'pending'{cell_cond})")
+                  f" AND c.run_id = ? AND c.state = 'pending'{cell_cond})")
     if purpose == "finalize":
+        member = " AND " + job_expert_sql("e")
         cells_cond = (" AND NOT EXISTS (SELECT 1 FROM rr_review_cells c WHERE c.target_key = e.target_key"
-                      " AND c.agent_key = e.agent_key AND c.run_id = e.run_id AND c.state IN ('pending', 'running'))")
+                      " AND c.agent_key = e.agent_key AND c.run_id = ? AND c.state IN ('pending', 'running'))")
     with store.tx():
         if job is None:
             jobs = _live_review_jobs(store)
@@ -343,16 +363,16 @@ def claim_next_expert(store: Any, job: Mapping[str, Any] | None = None, *, boot_
                                   " AND state = 'running'", (job["id"],))
             jobs = [dict(row)] if row is not None else []
         for item in jobs:
-            params: list[Any] = [item["target_key"], item["id"], now]
+            params: list[Any] = [item["target_key"], *([item["id"], item["id"]] if member else []), now, item["id"]]
             if purpose == "review":
                 params.append(now)
             candidates = store.query(
-                "SELECT e.agent_key FROM rr_expert_reports e WHERE e.target_key = ? AND e.run_id = ?"
+                f"SELECT e.agent_key FROM rr_expert_reports e WHERE e.target_key = ?{member}"
                 f" AND e.state = 'planned' AND (e.not_before IS NULL OR e.not_before <= ?) AND {pack_cond}{cells_cond}"
                 " ORDER BY e.review_order ASC, e.agent_key ASC", params)
             for cand in candidates:
-                moved = _move(store, "expert", "planned", "running", where=f"{_head_where()} AND run_id = ?",
-                              params=(item["target_key"], cand["agent_key"], item["id"]),
+                moved = _move(store, "expert", "planned", "running", where=_head_where(),
+                              params=(item["target_key"], cand["agent_key"]),
                               sets={"lease_owner": lease, "claimed_at": now, "error": None}, now=now)
                 if moved == 1:
                     return _head(store, item["target_key"], cand["agent_key"])
@@ -397,11 +417,15 @@ def release_orphaned(store: Any, target_key: str, agent_key: str, *, run_id: str
     상태와 선점을 함께 옮긴다) — 다른 선점이 쥔 행은 건드리지 않는다. 이것이 없으면 그 행들이 재기동까지 running 이라 그 대상의 새 잡이
     409 review_in_flight('워커가 놓을 때까지')로 끝없이 막혔다(단계 D 리허설). 반환 {experts, cells, calls}."""
     now = now_epoch() if now is None else now
-    orphan = ("target_key = ? AND agent_key = ? AND run_id = ? AND lease_owner IS NULL"
-              " AND EXISTS (SELECT 1 FROM rr_jobs j WHERE j.id = ? AND j.state = 'cancelled')")
+    cancelled = " AND EXISTS (SELECT 1 FROM rr_jobs j WHERE j.id = ? AND j.state = 'cancelled')"
+    orphan = "target_key = ? AND agent_key = ? AND run_id = ? AND lease_owner IS NULL" + cancelled
     params = (target_key, agent_key, run_id, run_id)
+    # 머리는 그 잡의 몫이면(범위로 찍혔거나 그 잡에 묶인 셀이 있다 — 3차 · D-47) 놓는다
+    head_orphan = ("target_key = ? AND agent_key = ? AND lease_owner IS NULL AND " + job_expert_sql("rr_expert_reports")
+                   + cancelled)
     with store.tx():
-        experts = _move(store, "expert", "running", "planned", where=orphan, params=params, now=now)
+        experts = _move(store, "expert", "running", "planned", where=head_orphan,
+                        params=(target_key, agent_key, run_id, run_id, run_id), now=now)
         cells = _move(store, "cell", "running", "pending", where=orphan, params=params, sets={"heartbeat_at": None}, now=now)
         calls = int(store.execute(
             "UPDATE rr_review_calls SET state = 'aborted', outcome_class = ?, error_code = ?, error_infra = 0, error = ?"
@@ -619,8 +643,8 @@ def handoffs(store: Any, target_key: str) -> list[dict]:
 def reopen_handed_off(store: Any, target_key: str, *, run_id: str | None = None, now: int | None = None) -> int:
     """다른 전문가가 넘긴(`h` 줄) 단위 · 영역의 남은 거른 셀을 다시 연다(handoff — 다시 분류되면 7번 줄로 검토다). 훑기의 늦은
     넘김은 훑기가 곧바로 다시 열지만 카드 밖 넘김은 잡 끝(보충 표본 앞)이 거둔다(반대 검토 LOW 15) — 원장에서 유도해 멱등이다.
-    자기 넘김은 세지 않는다(7번 줄이 세지 않으니 다시 걸러질 셀을 잡 끝마다 되풀이해 열지 않게). `run_id` 를 주면 다시 연 셀과 그
-    전문가 머리를 그 잡으로 찍는다(잡 끝의 거두기 — 지금 잡이 돌린다, 2차 MEDIUM 3). 다시 연 셀 수."""
+    자기 넘김은 세지 않는다(7번 줄이 세지 않으니 다시 걸러질 셀을 잡 끝마다 되풀이해 열지 않게). `run_id` 를 주면 다시 연 셀만 그
+    잡에 묶는다(잡 끝의 거두기 — 지금 잡이 돌린다, 2차 MEDIUM 3 · 머리는 범위로 찍지 않는다, 3차 · D-47). 다시 연 셀 수."""
     senders: dict[tuple[str, str], set[str]] = {}
     for h in handoffs(store, target_key):
         senders.setdefault((h["unit_id"], h["to"]), set()).add(h["from"])
@@ -719,8 +743,9 @@ def reopen_filtered(store: Any, target_key: str, *, via: str, domain: str | None
     `via` — widened(그 영역의 표본·그림자가 걸림을 놓쳤다) · filter_off(넓힌 영역이 셋 이상) · handoff(늦게 온 넘김) 는 분류 칸
     (`route`)을 비워 세션이 다시 분류한다(6·7번 줄이 그 까닭을 `route_forced` 로 적는다). filter_floor(잡 끝 보충 표본)는
     `route='audit'` · `route_forced='filter_floor'` 와 `sample_json.filter_audit{score, picked_by, result:null}` 을 적어 다시 분류하지
-    않는다. 셀의 잡 결속(run_id)은 그대로다 — 그 잡이 살아 있으면 그 잡이 돌린다. `run_id` 를 주면 그 잡으로 셀과 그 전문가
-    머리를 찍는다(잡 끝 보충 표본이 끝난 잡의 거른 셀을 제 잡으로 돌린다 — 반대 검토 MEDIUM 7). 그 전문가 머리 ready·partial 은 planned 로.
+    않는다. 셀의 잡 결속(run_id)은 그대로다 — 그 잡이 살아 있으면 그 잡이 돌린다. `run_id` 를 주면 다시 연 셀만 그 잡에 묶는다 —
+    살아 있는 잡이 다시 열면 늘 그 잡이 돌린다(반대 검토 MEDIUM 7 · 3차 MEDIUM 2 · D-47). 전문가 머리는 범위로 찍지 않고(찍으면 범위 밖
+    셀까지 거뒀다 — 3차 MEDIUM 3) ready·partial 만 planned 로 다시 연다.
     고르는 칸은 `domain`·`unit_id`·`cells` 가운데 준 것(AND)이고, `exclude_agent` 의 셀은 뺀다(자기 넘김 — 7번 줄이 세지 않는다,
     반대 검토 2차 MEDIUM 3). 부른 쪽 트랜잭션에 들어간다."""
     if via not in REOPEN_VIAS:
@@ -764,17 +789,14 @@ def reopen_filtered(store: Any, target_key: str, *, via: str, domain: str | None
             if _move(store, "cell", "na_irrelevant", "pending", where=_cell_where(), params=key, sets=sets, now=now) == 1:
                 opened.append((row["unit_id"], row["agent_key"]))
         for agent in sorted({a for _u, a in opened}):
-            if run_id is not None:
-                store.execute("UPDATE rr_expert_reports SET run_id = ?, updated_at = ? WHERE target_key = ? AND agent_key = ?"
-                              " AND state <> 'running'", (run_id, now, target_key, agent))
             _reopen(store, target_key, agent, now=now)
     return opened
 
 
 def reopen_widened(store: Any, target_key: str, *, run_id: str | None = None, now: int | None = None) -> int:
     """넓힌 영역(대상 전체 끔이면 전부)의 남은 거른 셀을 다시 연다 — 넓힘은 원장에서 유도되므로 정산 뒤 widen 전에 죽었거나(반대
-    검토 MEDIUM 10) 분류와 넓힘이 엇갈려(LOW 16) 남은 셀을 잡 끝(보충 표본 앞)이 거둔다. `run_id` 를 주면 다시 연 셀과 그 전문가
-    머리를 그 잡으로 찍는다(2차 MEDIUM 3 — 앞 잡의 결속 그대로면 아무 잡도 돌리지 않는다). 다시 연 셀 수."""
+    검토 MEDIUM 10) 분류와 넓힘이 엇갈려(LOW 16) 남은 셀을 잡 끝(보충 표본 앞)이 거둔다. `run_id` 를 주면 다시 연 셀만 그 잡에
+    묶는다(2차 MEDIUM 3 — 앞 잡의 결속 그대로면 아무 잡도 돌리지 않는다 · 머리는 범위로 찍지 않는다, 3차 · D-47). 다시 연 셀 수."""
     now = now_epoch() if now is None else now
     if filter_off(store, target_key):
         return len(reopen_filtered(store, target_key, via="filter_off", run_id=run_id, now=now))
@@ -782,15 +804,16 @@ def reopen_widened(store: Any, target_key: str, *, run_id: str | None = None, no
                for d in widened_domains(store, target_key))
 
 
-def widen(store: Any, target_key: str, domain: str, *, now: int | None = None) -> dict:
+def widen(store: Any, target_key: str, domain: str, *, run_id: str | None = None, now: int | None = None) -> dict:
     """그 영역을 그 대상에서 넓힌다 — 그 영역의 거른 셀을 전부 다시 열고, 넓힌 영역이 WIDEN_ALL_AT 에 닿으면 남은 거른 셀 전부를
-    다시 연다(대상 전체 끔). 반환 {widened, off, reopened}."""
+    다시 연다(대상 전체 끔). `run_id` 는 넓힌 살아 있는 잡 — 다시 연 셀을 그 잡에 묶어 그 잡이 돌린다(반대 검토 3차 MEDIUM 2 ·
+    D-47). 반환 {widened, off, reopened}."""
     now = now_epoch() if now is None else now
     with store.tx():
-        opened = reopen_filtered(store, target_key, via="widened", domain=domain, now=now)
+        opened = reopen_filtered(store, target_key, via="widened", domain=domain, run_id=run_id, now=now)
         off = filter_off(store, target_key)
         if off:
-            opened += reopen_filtered(store, target_key, via="filter_off", now=now)
+            opened += reopen_filtered(store, target_key, via="filter_off", run_id=run_id, now=now)
     return {"widened": widened_domains(store, target_key), "off": off, "reopened": len(opened)}
 
 
@@ -827,7 +850,8 @@ def audit_topup(store: Any, target_key: str, job_id: str, *, audit_pct: float, s
         f"SELECT id FROM rr_jobs WHERE mode = 'reviews' AND state IN ({','.join('?' * len(runner.LIVE_JOB_STATES))})",
         tuple(runner.LIVE_JOB_STATES))} - {job_id}
     held = {str(r["agent_key"]) for r in store.query(
-        "SELECT agent_key FROM rr_expert_reports WHERE target_key = ? AND state = 'running' AND run_id <> ?", (target_key, job_id))}
+        f"SELECT e.agent_key FROM rr_expert_reports e WHERE e.target_key = ? AND e.state = 'running' AND NOT {job_expert_sql('e')}",
+        (target_key, job_id, job_id))}
     mine = sorted((r for r in filtered if r["run_id"] not in live and r["agent_key"] not in held),
                   key=lambda r: (review_verify.sample_score("filter_audit", target_key, r["unit_id"], r["agent_key"],
                                                             salt=salt), r["unit_id"], r["agent_key"]))
