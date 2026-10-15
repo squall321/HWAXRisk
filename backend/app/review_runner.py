@@ -49,6 +49,73 @@ EST_CALL_S = 300               # 호출 하나의 가정(PLAN 6절 — 5분). �
 LIVE_STATES: tuple[str, ...] = runner.LIVE_JOB_STATES
 
 
+# ---------------------------------------------------------------- 판단 LLM(Claude 길 X-2 — 포털 docs/risk-claude-engine)
+# 잡 params 의 `llm`(claude 잡에만 있다 — 없으면 GLM) · `consent_external`{by, at, source}(누가 · 언제 · 어느 입구로 반출에 동의했나) ·
+# `llm_mismatch`(claude 잡인데 외부 응답자 답이 아니었던 호출 · 패널 수). 사슬이 세우는 쟁점 · 종합 잡은 앞 잡의 두 칸을 물려받는다.
+EXTERNAL_KNOWN_CTX = "external"     # 외부 응답자 limits 의 창 출처(엔진이 EXTERNAL_LLM_CTX_TOKENS 로 셌다 — 앱이 아는 창이다)
+EXTERNAL_WORKFLOW = runner.EXTERNAL_WORKFLOW   # 잡 주인이 Claude Code 에서 돌리는 워크플로(포털 infra/pipeline — X-3)
+
+
+job_llm = runner.job_llm                  # 정본은 러너다(쟁점 · 종합 · 패널 잡도 같은 칸을 읽는다)
+llm_params = runner.llm_params
+consenter = runner.external_consenter
+note_llm_mismatch = runner.note_llm_mismatch
+
+
+EGRESS_WARNING = "이 잡의 지식카드·설계 변경 원문이 Claude(외부)로 나갑니다"
+
+
+def check_llm_choice(llm: Any, consent_external: Any) -> str | None:
+    """잡을 만들 때의 판단 LLM 선택 — 없음 · 'glm' 은 None(GLM, 종전), 'claude' 는 `consent_external` 이 JSON 참(True — 글자 'true' ·
+    1 은 아니다)일 때만 'claude' 다(아니면 422 consent_external_required). 그 밖의 값은 422 E100 이다. 동의는 사람이 하는 것이다 — 코드가
+    채우지 않는다(길잡이 · 사슬도 — 사슬은 앞 잡의 기록을 물려받을 뿐이다)."""
+    if llm is None or llm == engine_client.LLM_GLM:
+        return None
+    if llm != engine_client.LLM_CLAUDE:
+        raise AppError("E100", f"llm 은 {list(engine_client.LLM_CHOICES)} 가운데 하나다(없으면 glm) — {llm!r}.", 422)
+    if consent_external is not True:
+        raise AppError("consent_external_required", f"판단 LLM 을 Claude 로 고르면 {EGRESS_WARNING} — 사용자에게 그 사실을 보이고 동의를"
+                       " 받은 뒤에만 consent_external: true(JSON 참)를 더해 다시 만든다. 동의하지 않으면 llm 을 빼고(GLM) 만든다.", 422,
+                       detail={"llm": engine_client.LLM_CLAUDE, "got": repr(consent_external)[:80]})
+    return engine_client.LLM_CLAUDE
+
+
+def limits_match(lim: Mapping[str, Any], engine_llm: str | None) -> bool:
+    """받은 limits 가 그 잡의 길의 것인가 — 외부 응답자 길이면 `llm: external` 이 있어야 한다(없으면 포털 중계가 질의를 버려 GLM 창이
+    왔다 — X-3a). GLM 길은 늘 참이다(종전)."""
+    return engine_llm is None or lim.get("llm") == engine_llm
+
+
+def relay_dropped_message(lim: Mapping[str, Any]) -> str:
+    return ("외부 응답자(Claude) 창을 물었는데(GET /agent/card-review/limits?llm=external) 답에 llm=external 이 없다 — 포털 중계가"
+            f" 질의를 넘기지 않아 이 박스의 GLM 창(ctx_source={lim.get('ctx_source')}, limits_rev={lim.get('limits_rev')})이 왔다."
+            " GLM 판으로 짠 계획은 엔진의 외부 판과 어긋난다. 운영자가 포털을 그 중계를 고친 판으로 올린 뒤 재개하거나, 이 잡을 취소하고"
+            " llm 없이(GLM) 다시 만든다")
+
+
+def _text_or_none(value: Any) -> str | None:
+    return None if value is None else str(value)
+
+
+def require_external_llm(store: Any, cfg: Any) -> dict:
+    """에이전트 서버가 외부 응답자 길을 열었나 — /health 의 capabilities 에 external_llm 이 있어야 한다(없으면 409
+    external_llm_unavailable — 잡을 만들지 않는다). 읽지 못해도 같은 거절이다(확인하지 못한 길에 잡을 세우지 않는다). 반환은
+    `engine_client.external_health` 의 칸."""
+    try:
+        info = engine_client.build_review_engine(store, cfg).health()
+    except Exception as exc:  # noqa: BLE001 — 어떤 실패든 '확인하지 못했다' 로 거절한다.
+        raise AppError("external_llm_unavailable", "에이전트 서버 /health 를 읽지 못해 외부 응답자(Claude) 길이 열렸는지 확인하지 못했다"
+                       f"({type(exc).__name__}) — Claude 로 고른 잡을 만들지 않는다. HWAXRISK_AGENT_URL 로 /health 가 닿는지 본 뒤 다시"
+                       " 만들거나, llm 없이(GLM) 만든다.", 409, detail={"reason": "health_unreachable"}) from exc
+    external = info.get("external_llm") if isinstance(info, Mapping) else None
+    if not isinstance(external, Mapping):
+        raise AppError("external_llm_unavailable", "이 박스의 에이전트 서버는 외부 응답자(Claude) 길을 열지 않았다(/health 의"
+                       " capabilities 에 external_llm 이 없다 — 기본 꺼짐) — Claude 로 고른 잡을 만들지 않는다. 운영자가 에이전트 서버"
+                       " .env 에 EXTERNAL_LLM_ENABLED=1 을 적고 다시 띄운 뒤 만들거나, llm 없이(GLM) 만든다.", 409,
+                       detail={"reason": "capability_absent", "knob": "EXTERNAL_LLM_ENABLED"})
+    return dict(external)
+
+
 # ---------------------------------------------------------------- 자격(사용자 결정 3)
 def review_credential(store: Any, settings: Any | None, owner_sub: str | None,
                       requester_sub: str | None = None) -> tuple[dict | None, str | None]:
@@ -76,6 +143,17 @@ def review_credential(store: Any, settings: Any | None, owner_sub: str | None,
     why = (f"{short[0]} 의 PAT 남은 수명 {max(short[1], 0) / 3600:.1f}시간이 검토 여유 {margin / 3600:.1f}시간"
            "(HWAXRISK_REVIEW_CALL_TIMEOUT_S + 600초)에 못 미친다" if short else f"{who} 의 등록된 포털 PAT 가 없다")
     return None, why
+
+
+def pinned_review_credential(store: Any, settings: Any | None, who: str | None,
+                             owner_sub: str | None) -> tuple[dict | None, str | None]:
+    """claude 잡의 자격(Claude 길 X-2) — 동의한 사람(`who`)의 등록된 PAT 하나만 본다(`review_credential` 과 같은 수명 여유). 대상
+    소유자의 PAT 로도 서비스 계정으로도 내려가지 않는다 — 엔진의 과제는 호출 신원(그 PAT 의 사람)의 줄에 서고 그 사람의 Claude Code
+    워크플로만 집는다. kind 는 그 사람이 대상 소유자면 owner, 아니면 requester 다."""
+    credential, note = review_credential(store, settings, who)
+    if credential is not None and who != owner_sub:
+        credential = {**credential, "kind": "requester"}
+    return credential, note
 
 
 # ---------------------------------------------------------------- 범위
@@ -454,8 +532,10 @@ def _job_estimate(store: Any, cfg: Any, order: Sequence[Mapping[str, Any]], to_r
 def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_sub: str | None = None,
                       scope: Mapping[str, Any] | None = None, user_memo: str | None = None, consent: bool = False,
                       consent_source: str | None = None, settings: Any | None = None, channel: str = "rest",
-                      actor_verified: bool = True, cells: Sequence[Sequence[str]] | None = None) -> dict:
-    """검토 잡 1건을 세운다 — 네트워크를 부르지 않는다(격자와 범위는 여기서, 카드 묶음·호출은 루프가).
+                      actor_verified: bool = True, cells: Sequence[Sequence[str]] | None = None,
+                      llm: str | None = None, consent_external: Any = None) -> dict:
+    """검토 잡 1건을 세운다 — 네트워크를 부르지 않는다(격자와 범위는 여기서, 카드 묶음·호출은 루프가). claude 잡만 에이전트 서버
+    /health 를 한 번 묻는다(외부 응답자 길이 열렸나 — 트랜잭션 밖).
 
     범위는 `{tiers?, domains?, agents?, unit_ids?}`(칸끼리 AND, 빠진 칸은 전부)다. 격자는 범위와 상관없이 로스터 전원 × 검토
     대상 단위이고, 범위는 그 가운데 이 잡이 집을 셀이다(X1-27 — 범위 밖 셀은 pending 으로 남는다).
@@ -473,11 +553,17 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
     추정도 그 가운데 pending 인 셀로만 센다 — 처분(넘김 · 다시)이 세우는 잡이 그 처분의 셀만 묶는다(M3 묶음 검토 M5 · D-52 · M3C-80).
     범위(`scope`)는
     그 셀들의 전문가 · 단위로 준다(표시 · 검증). 잡 params 의 `cells` 가 그 집합이고 adopt_released 도 그 밖을 거두지 않는다.
+    `llm`(Claude 길 X-2)은 판단 LLM 이다 — 없음 · 'glm' 은 종전 그대로, 'claude' 는 카드 대조 호출이 잡 주인의 Claude Code 워크플로로
+    간다(지식카드 · 설계 변경 원문이 외부로 나간다). claude 는 `consent_external` 이 JSON 참(True)이어야 하고(아니면 422
+    consent_external_required — 사람 대신 채우지 않는다), 동의한 사람(요청자)의 PAT 로만 돈다(대상 소유자 · 서비스 계정으로 내려가지
+    않는다 — 과제는 그 사람의 워크플로만 집는다), 에이전트 서버 /health 의 capabilities 에 external_llm 이 있어야 한다(아니면 409
+    external_llm_unavailable). 잡 params 와 반환에 `llm` · `consent_external{by, at, source}` 가 실린다(GLM 잡에는 칸이 없다).
     """
     from app import routes  # noqa: PLC0415 — routes 는 runner·planner 를 거쳐 무겁다(같은 문을 쓴다).
 
     cfg = config.settings if settings is None else settings
     routes.require_review_enabled(cfg)
+    claude = check_llm_choice(llm, consent_external)
     target = store.query_one("SELECT target_key, flow FROM rr_targets WHERE target_key = ?", (target_key,))
     if target is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
@@ -505,11 +591,17 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
         raise AppError("consent_required", f"호출 추정 {estimate['expected']:,}회가 {int(cfg.risk_review_consent_calls):,}회"
                        "(HWAXRISK_REVIEW_CONSENT_CALLS)를 넘는다 — consent:true 로 명시 승인한다.", 422,
                        detail={"calls_estimate": estimate, "knob": "HWAXRISK_REVIEW_CONSENT_CALLS"})
-    credential, credential_note = review_credential(store, cfg, owner_sub, requester_sub)
+    who = requester_sub or owner_sub
+    credential, credential_note = (pinned_review_credential(store, cfg, who, owner_sub) if claude
+                                   else review_credential(store, cfg, owner_sub, requester_sub))
     if credential is None:
-        raise AppError("pat_unavailable", f"카드 대조 검토는 사용자 PAT 로만 돈다 — {credential_note}. 포털에서 PAT 를 발급해"
+        pinned = (f" Claude 길은 동의한 사람({who})의 PAT 로만 돈다 — 과제는 그 사람의 Claude Code 워크플로만 집으므로 대상"
+                  " 소유자의 PAT 로도 내려가지 않는다." if claude else "")
+        raise AppError("pat_unavailable", f"카드 대조 검토는 사용자 PAT 로만 돈다 — {credential_note}.{pinned} 포털에서 PAT 를 발급해"
                        " 등록한 뒤 다시 만든다(서비스 계정으로 내려가지 않는다).", 422,
                        detail={"fix": "portal_pat", "knob": "HWAXRISK_REVIEW_CALL_TIMEOUT_S"})
+    if claude:
+        require_external_llm(store, cfg)          # /health — 트랜잭션 밖에서 묻는다(네트워크)
     now = now_epoch()
     notes = [credential_note] if credential_note else []
     workers = max(1, int(cfg.risk_review_concurrency))
@@ -529,6 +621,8 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
         "chain": True,
         "credential": credential, "calls_estimate": estimate,
         **({"cells": [[u, a] for u, a in only]} if only is not None else {}),
+        # 판단 LLM(Claude 길 X-2) — claude 잡에만 llm · consent_external{by, at, source}(누가 · 언제 · 어느 입구). GLM 잡은 칸이 없다
+        **llm_params(claude, {"by": who, "at": now, "source": consent_source}),
         # 잡에 복사해 두는 실행 설정 — 도는 중에 설정이 바뀌어도 이 잡의 표본·배치는 바뀌지 않는다(결정론의 전제). 거르기의 승인
         # 문(#40)도 만들 때의 것을 얼린다 — 승인 커밋은 다음 잡부터 듣는다(재설계 M3 C3-6). 이중 판정은 걸린 별칭만(dual flagged ·
         # 1순위는 보정용 전량 — C3-9). M2 잡은 filter 'off' 이고 dual 칸이 없어 'all' 로 읽는다.
@@ -562,7 +656,8 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
     out = {"job_id": job_id, "mode": MODE, "cells_total": plan["cells_total"],
            "cells_in_scope": len(only) if only is not None else len(agents) * len(picked["unit_ids"]),
            "experts_in_scope": len(agents),
-           "units": plan["units"], "calls_estimate": estimate, "credential": credential, "undeferred": undeferred}
+           "units": plan["units"], "calls_estimate": estimate, "credential": credential, "undeferred": undeferred,
+           **llm_params(claude, params.get("consent_external"))}
     if notes:
         out["credential_note"] = " · ".join(notes)
     return out
@@ -923,6 +1018,17 @@ def credential_message(what: str, exc: BaseException) -> str:
     return f"{what}: {code} — {text}" + ("" if "서비스 계정" in text else f" — {CREDENTIAL_FIX}")
 
 
+def _engine_llm_of(job: Mapping[str, Any]) -> str | None:
+    """그 잡의 엔진 길 이름 — claude 잡이면 'external', 그 밖은 None(GLM)."""
+    return engine_client.engine_llm(job_llm(job.get("params")))
+
+
+def known_ctx_sources(llm: str | None) -> tuple[str, ...]:
+    """서버가 창을 안다고 볼 창 출처 — GLM 은 server · env(종전), 외부 응답자 길은 external 도(엔진이 EXTERNAL_LLM_CTX_TOKENS 로 센
+    창이다 — fallback 가정이 아니다)."""
+    return KNOWN_CTX_SOURCES if llm is None else (*KNOWN_CTX_SOURCES, EXTERNAL_KNOWN_CTX)
+
+
 def _credential_email(job: Mapping[str, Any]) -> str | None:
     cred = (job.get("params") or {}).get("credential") or {}
     return cred.get("email") if isinstance(cred, Mapping) else None
@@ -1174,6 +1280,7 @@ class _Answer:
     result: dict
     call: dict | None
     cached: bool
+    mismatch: dict | None = None        # claude 잡의 답인데 meta.llm 이 external 이 아니다(Claude 길 X-2 — llm_mismatch)
 
 
 @dataclass
@@ -1243,6 +1350,9 @@ class _Session:
         cred = params.get("credential") if isinstance(params.get("credential"), Mapping) else {}
         self.email = str(cred.get("email") or "")
         self.cred_kind = cred.get("kind")
+        # 판단 LLM(Claude 길 X-2) — claude 잡이면 창 · 계획 · 호출이 외부 응답자 길이다. 칸이 없는 잡은 GLM(종전)이다.
+        self.llm = job_llm(params)
+        self.engine_llm = engine_client.engine_llm(self.llm)
         knobs = params.get("knobs") if isinstance(params.get("knobs"), Mapping) else {}
         self.max_charged = int(knobs.get("max_charged") or getattr(self.settings, "risk_review_max_charged", 2) or 2)
         self.dual_rate = float(knobs.get("dual_rate", 1.0))
@@ -1474,7 +1584,7 @@ class _Session:
                                "chars": int(self.pack.cards[a].get("chars") or 0)} for a in self.pack.order],
                     "units": [{"unit_id": m["unit_id"], "manifest_chars": manifest_size(m, self.lim),
                                "body_chars": unit_size(self._payload(m["unit_id"]), self.lim)} for m in manifest],
-                    "expect": {"limits_rev": self.lim.get("limits_rev")}}
+                    "expect": {"limits_rev": self.lim.get("limits_rev")}, **engine_client.llm_fields(self.llm, "plan")}
             plan = dict(self._unary(lambda: self.engine.plan(body, email=self.email), f"계획({self.agent})"))
             if not review_cells.write_head(self.store, self.target_key, self.agent, lease_owner=self.lease, now=self.now(),
                                            sets={"plan_json": canonical_json({"pack_key": self.pack.pack_key,
@@ -1593,6 +1703,8 @@ class _Session:
         훑기는 그 쪽이 실패했다). 기다림은 같은 자리에서 다시 내고(아무것도 세지 않는다), 인프라·잡 보류·취소·묶음은 `_Stop` 이다."""
         assert self.pack is not None
         self.focus = cell
+        # claude 잡이면 llm · consent_external 을 싣는다(GLM 은 그대로 — 빈 칸). 요청 열쇠에도 든다.
+        body = {**body, **engine_client.llm_fields(self.llm, "run")}
         request_hash = self._request_hash(cell, body, seq)
         cached = self._cached(cell, request_hash)
         if cached is not None:
@@ -1635,7 +1747,20 @@ class _Session:
                     continue
                 return self._after_failure(cell, exc, outcome)
             return _Answer(result=dict(result), call={**base, "duration_ms": int((time.monotonic() - tick) * 1000)},
-                           cached=False)
+                           cached=False, mismatch=self._llm_mismatch(result))
+
+    def _llm_mismatch(self, result: Mapping[str, Any]) -> dict | None:
+        """claude 잡의 답이 외부 응답자 답인가(Claude 길 X-2) — meta.llm 이 external 이 아니면(중계가 llm 을 버렸다 따위) 그 답은 이 박스의
+        LLM 이 낸 것이다. Claude 로 적지 않는다 — {want, got} 을 돌려주고 잡에 셈을 올린다(그 호출 원장 행에도 남는다). GLM 잡은 None."""
+        if self.engine_llm is None:
+            return None
+        meta = result.get("meta") if isinstance(result.get("meta"), Mapping) else {}
+        got = meta.get("llm")
+        if got == self.engine_llm:
+            return None
+        note_llm_mismatch(self.store, self.job_id)
+        log.warning("검토 잡 %s: claude 잡의 카드 대조 답이 외부 응답자 답이 아니다(meta.llm=%r) — llm_mismatch", self.job_id, got)
+        return {"want": self.engine_llm, "got": _text_or_none(got)}
 
     def _failed(self, cell: _Cell | None, base: Mapping[str, Any], exc: BaseException, outcome: review_ops.Outcome,
                 duration_ms: int) -> None:
@@ -1681,7 +1806,7 @@ class _Session:
         원천에 PROMPT_REV 가 없다) 둘 다 본다(R3A-6). 다른 종류에만 닿은 변경은 run 의 expect 가 종류별 판이라 rev_mismatch 가 되지
         않는다(RB3-6) — 그런데도 온 rev_mismatch 는 앱의 계약 어긋남이라 contract 보류다."""
         try:
-            fresh = self.loop.limits_for(self.email, fresh=True)
+            fresh = self.loop.limits_for(self.email, fresh=True, llm=self.engine_llm)
         except _ENGINE_ERRORS:
             return False
         return (limits_key(fresh, self.kinds) != limits_key(self.lim, self.kinds)
@@ -1738,7 +1863,9 @@ class _Session:
                     "check_disagree": disagree, **dict(app or {}),
                     # 엔진이 몫에서 끊은 입력(RB3-11 — meta.clipped). 빈 것은 싣지 않는다(종전 원장과 같은 바이트)
                     **({"clipped": dict(meta["clipped"])} if isinstance(meta.get("clipped"), Mapping) and meta["clipped"]
-                       else {})}})}
+                       else {}),
+                    # claude 잡의 답이 외부 응답자 답이 아니었다(Claude 길 X-2) — 그 행에만 싣는다(GLM 원장은 같은 바이트)
+                    **({"llm_mismatch": dict(answer.mismatch)} if answer.mismatch else {})}})}
         written = review_cells.write_call_result(self.store, self.target_key, self.agent, lease_owner=self.lease, call=call,
                                                  verdicts=verdicts, cell=cell_sets, head=head_sets, outcome=None,
                                                  max_charged=self.max_charged, now=self.now())
@@ -2299,7 +2426,12 @@ class _Session:
         단독 → 카드 밖 → 정산 → 마감 또는 놓기. 입력 결손 전문가는 거르기 분류 뒤 셀마다 입력 결손 호출 → 정산이다. 호출과 호출
         사이마다 멈춤을 묻는다(`_gate`)."""
         self.pack = self._load_pack()
-        self.lim = dict(self._unary(lambda: self.loop.limits_for(self.email), "창 조회"))
+        self.lim = dict(self._unary(lambda: self.loop.limits_for(self.email, llm=self.engine_llm), "창 조회"))
+        if not limits_match(self.lim, self.engine_llm):
+            # 외부 응답자 창을 물었는데 GLM 창이 왔다 — 포털 중계가 ?llm=external 을 넘기지 않았다(X-3a). GLM 판으로 계획을 짜면
+            # 셀이 엔진의 외부 판과 어긋난다 — 설정 보류로 멈춘다(사람이 중계를 고치고 재개한다).
+            self._hold("external_config", relay_dropped_message(self.lim))
+            raise _Stop("external_config")
         self.gaps = self._input_gaps()
         self.kinds = GAP_KINDS if self.gaps else CARD_KINDS
         if self.gaps and "noinput" not in (self.lim.get("kinds") or ()):
@@ -2541,26 +2673,37 @@ class ReviewLoop:
                 return probe.value, probe.error
         return None
 
-    def _limits_entry(self, email: str) -> _Probe:
-        with self._lock:
-            return self._limits.setdefault(email, _Probe())
+    @staticmethod
+    def _lane(email: str, llm: str | None = None) -> str:
+        """창 답의 열쇠 — 자격(이메일)마다, 그리고 외부 응답자 길(Claude 길 X-2)은 따로(같은 사람의 GLM 잡과 판이 갈린다). GLM 은
+        이메일 그대로다(종전 열쇠)."""
+        return email if llm is None else f"{email}|{llm}"
 
-    def _forget_limits(self, email: str) -> None:
+    def _limits_entry(self, email: str, llm: str | None = None) -> _Probe:
+        with self._lock:
+            return self._limits.setdefault(self._lane(email, llm), _Probe())
+
+    def _forget_limits(self, email: str, llm: str | None = None) -> None:
         """그 자격의 창 답을 버린다 — 보류를 건 뒤(사람이 고치고 재개하면 새로 묻는다)."""
         with self._lock:
-            probe = self._limits.get(email)
+            probe = self._limits.get(self._lane(email, llm))
             if probe is not None:
                 probe.at = None
 
-    def limits_for(self, email: str, *, fresh: bool = False) -> dict:
-        """창·판(그 자격으로 물은 성공한 답, 60초 캐시). 워커가 부른다 — 낡았으면 그 자리에서 다시 묻는다(워커는 HTTP 를 붙들어도 된다)."""
-        probe = self._limits_entry(email)
+    def _fetch_limits(self, email: str, llm: str | None) -> dict:
+        """엔진 limits — GLM 은 종전 그대로(llm 칸 없이), 외부 응답자 길은 `llm='external'` 로 묻는다."""
+        return dict(self.engine.limits(email=email) if llm is None else self.engine.limits(email=email, llm=llm))
+
+    def limits_for(self, email: str, *, fresh: bool = False, llm: str | None = None) -> dict:
+        """창·판(그 자격으로 물은 성공한 답, 60초 캐시). 워커가 부른다 — 낡았으면 그 자리에서 다시 묻는다(워커는 HTTP 를 붙들어도 된다).
+        `llm` 은 엔진의 길 이름이다(외부 응답자면 'external' — 그 길의 창 답은 따로 담는다)."""
+        probe = self._limits_entry(email, llm)
         now = self.clock()
         with self._lock:
             if (not fresh and probe.error is None and isinstance(probe.value, Mapping) and probe.at is not None
                     and now - probe.at < LIMITS_CACHE_S):
                 return dict(probe.value)
-        value = dict(self.engine.limits(email=email))
+        value = self._fetch_limits(email, llm)
         with self._lock:
             probe.value, probe.error, probe.at = value, None, self.clock()
         return value
@@ -2626,15 +2769,27 @@ class ReviewLoop:
                       " 더 긴 간격 뒤 다시 재 본다", breaker=True)
             return
         since = self.progress(job_id).breaker().get("since")
-        classes = [r["outcome_class"] for r in self.store.query(
-            "SELECT outcome_class FROM rr_review_calls WHERE run_id = ? AND state <> 'running' AND started_at > ?"
-            " ORDER BY started_at DESC, rowid DESC LIMIT 100", (job_id, int(since) if since is not None else -1))]
+        rows = self.store.query(
+            "SELECT outcome_class, error_code FROM rr_review_calls WHERE run_id = ? AND state <> 'running' AND started_at > ?"
+            " ORDER BY started_at DESC, rowid DESC LIMIT 100", (job_id, int(since) if since is not None else -1))
+        classes = [r["outcome_class"] for r in rows]
         verdict = review_ops.breaker_verdict(classes)
         if verdict is not None:
-            counted = [k for k in classes if k and k not in (review_ops.WAIT, review_ops.CANCELLED)][:review_ops.BREAKER_WINDOW]
+            window = [r for r in rows if r["outcome_class"] and r["outcome_class"] not in (review_ops.WAIT, review_ops.CANCELLED)]
+            window = window[:review_ops.BREAKER_WINDOW]
+            counted = [r["outcome_class"] for r in window]
             infra = sum(1 for k in counted if k == review_ops.INFRA)
             content = sum(1 for k in counted if k == review_ops.CONTENT)
             if verdict == "llm_outage":
+                # 그 인프라 실패가 외부 응답자 부재 · 답 시간 초과였으면 시계로 다시 열지 않는다 — 잡 주인의 워크플로가 없으면 같다(X-2)
+                verdict = review_ops.outage_hold(r["error_code"] for r in window if r["outcome_class"] == review_ops.INFRA)
+            if verdict == "external_worker":
+                codes = sorted({str(r["error_code"]) for r in window if r["error_code"] in review_ops.EXTERNAL_WORKER_CODES})
+                message = (f"최근 끝난 호출 {len(counted)}건 가운데 인프라 실패가 {infra}건이고 대부분 외부 응답자가 과제를 집지 않았거나"
+                           f" 답하지 않았다({', '.join(codes)}) — 잡 주인의 Claude Code 워크플로 {EXTERNAL_WORKFLOW} 가 돌고 있지 않거나"
+                           " 다른 신원으로 붙었다. 잡 주인의 Claude Code 에서 그 사람의 PAT 로 워크플로를 (다시) 돌린 뒤 재개한다(차감은"
+                           " 없다 — 시계로 저절로 재개하지 않는다)")
+            elif verdict == "llm_outage":
                 message = (f"최근 끝난 호출 {len(counted)}건 가운데 인프라 실패가 {infra}건이다(LLM·에이전트 서버·포털이 불안정) —"
                            " 정해진 간격 뒤 호출 하나로 다시 재 보고(반쯤 연 재개) 성공하면 이어 돈다")
             else:
@@ -2674,9 +2829,9 @@ class ReviewLoop:
             f" FROM rr_jobs WHERE mode = 'reviews' AND state IN ({marks}) ORDER BY created_at ASC, id ASC", tuple(states))]
 
     def _limits_probe(self, job: Mapping[str, Any]) -> tuple[Any, BaseException | None] | None:
-        """그 잡의 자격(이메일)으로 물은 창 답 — `_probe` 의 (값, 오류) 또는 None(아직 모름)."""
-        email = _credential_email(job) or ""
-        return self._probe(self._limits_entry(email), lambda: dict(self.engine.limits(email=email)), LIMITS_CACHE_S)
+        """그 잡의 자격(이메일)과 길(GLM · 외부 응답자)로 물은 창 답 — `_probe` 의 (값, 오류) 또는 None(아직 모름)."""
+        email, llm = _credential_email(job) or "", _engine_llm_of(job)
+        return self._probe(self._limits_entry(email, llm), lambda: self._fetch_limits(email, llm), LIMITS_CACHE_S)
 
     def _resume(self, job: Mapping[str, Any], *, clear: bool) -> None:
         now = self.clock()
@@ -2698,8 +2853,9 @@ class ReviewLoop:
         if rule.resume_on == "ctx_source":
             seen = self._limits_probe(job)
             lim = seen[0] if seen is not None and seen[1] is None and isinstance(seen[0], Mapping) else None
-            if lim is not None and lim.get("ctx_source") in KNOWN_CTX_SOURCES and not lim.get("ctx_retrying"):
-                self._fallback_since.pop(_credential_email(job) or "", None)
+            llm = _engine_llm_of(job)
+            if lim is not None and lim.get("ctx_source") in known_ctx_sources(llm) and not lim.get("ctx_retrying"):
+                self._fallback_since.pop(self._lane(_credential_email(job) or "", llm), None)
                 self._resume(job, clear=True)
             return
         if job.get("hold_until") is not None and int(job["hold_until"]) <= now:
@@ -2714,16 +2870,18 @@ class ReviewLoop:
         """창 확인 — 새 호출을 내도 되는 잡 목록. 잡마다 그 잡의 자격(이메일)으로 물은 답만 본다 — 다른 잡의 오류나 다른 사람의
         이메일로 멈추지 않는다(반대 검토 R3A-3). 새 탐침이 아직 끝나지 않은 자격의 잡은 이번 틱에 새 호출을 내지 않는다(모름 —
         기다린다, 보류 없음). 자격이 없는 잡은 credential 로 멈춘다."""
-        groups: dict[str, list[dict]] = {}
+        groups: dict[tuple[str, str | None], list[dict]] = {}
         for job in jobs:
-            groups.setdefault(_credential_email(job) or "", []).append(job)
+            groups.setdefault((_credential_email(job) or "", _engine_llm_of(job)), []).append(job)
         allowed: list[dict] = []
-        for email, live in groups.items():
-            allowed.extend(self._window_group(email, live, now))
+        for (email, llm), live in groups.items():
+            allowed.extend(self._window_group(email, live, now, llm=llm))
         return allowed
 
-    def _window_group(self, email: str, live: list[dict], now: int) -> list[dict]:
-        """같은 자격의 잡들 — 그 자격으로 물은 창 답 하나로 가른다. 보류를 걸면 그 답을 버린다(재개 뒤에는 새로 묻는다)."""
+    def _window_group(self, email: str, live: list[dict], now: int, *, llm: str | None = None) -> list[dict]:
+        """같은 자격 · 같은 길의 잡들 — 그 자격으로 물은 창 답 하나로 가른다. 보류를 걸면 그 답을 버린다(재개 뒤에는 새로 묻는다).
+        외부 응답자 길(`llm`)은 그 길의 창 답을 따로 묻고, 답에 llm=external 이 없으면(포털 중계가 질의를 버렸다) 설정 보류다."""
+        lane = self._lane(email, llm)
         seen = self._limits_probe(live[0])
         if seen is None:
             return []                                  # 새 답이 아직 없다 — 지난 답을 다시 쓰지 않고 다음 틱에 본다
@@ -2735,17 +2893,22 @@ class ReviewLoop:
             if isinstance(error, PatUnavailable):
                 for job in live:
                     self.hold(job["id"], "credential", credential_message("창 조회", error))
-                self._forget_limits(email)
+                self._forget_limits(email, llm)
                 return []
             outcome = (engine_client.review_outcome(error) if isinstance(error, _ENGINE_ERRORS)
                        else review_ops.classify("portal_unreachable"))
             if outcome.klass == review_ops.JOB:
                 for job in live:
                     self.hold(job["id"], outcome.hold_code or "contract", f"창 조회: {error}")
-                self._forget_limits(email)
+                self._forget_limits(email, llm)
             else:
                 self._waiting(live, {"reason": outcome.code, "since": now, "retry_at": now + LIMITS_CACHE_S,
                                      "note": str(error)})
+            return []
+        if not limits_match(lim, llm):
+            for job in live:
+                self.hold(job["id"], "external_config", relay_dropped_message(lim))
+            self._forget_limits(email, llm)
             return []
         runnable = lim.get("runnable") if isinstance(lim.get("runnable"), Mapping) else {}
         # 셀이 부르는 종류(cell_kinds)만 본다 — 요약(summary)만 못 도는 박스는 셀 일을 멈추지 않는다(M3.md 4.3). cell_kinds 가 없는
@@ -2755,28 +2918,28 @@ class ReviewLoop:
             small = lim.get("ctx_too_small") if isinstance(lim.get("ctx_too_small"), Mapping) else {}
             for job in live:
                 self.hold(job["id"], "ctx_too_small", ctx_too_small_text(lim, small, runnable, cell_kinds))
-            self._forget_limits(email)
+            self._forget_limits(email, llm)
             return []
         if lim.get("ctx_retrying"):
             self._waiting(live, {"reason": "ctx_retrying", "since": now, "retry_at": now + LIMITS_CACHE_S})
             return []
-        if lim.get("ctx_source") not in KNOWN_CTX_SOURCES:
-            if email not in self._fallback_since:
+        if lim.get("ctx_source") not in known_ctx_sources(llm):
+            if lane not in self._fallback_since:
                 seen_w = [(self.progress(j["id"]).body.get("waiting") or {}) for j in live]
                 old = [int(w["since"]) for w in seen_w if w.get("reason") == "ctx_fallback" and w.get("since") is not None]
-                self._fallback_since[email] = min(old) if old else now
-            since = self._fallback_since[email]
+                self._fallback_since[lane] = min(old) if old else now
+            since = self._fallback_since[lane]
             if now - since >= review_ops.CTX_FALLBACK_HOLD_S:
                 for job in live:
                     self.hold(job["id"], "ctx_unknown", f"에이전트 서버가 LLM 창 크기를 모른다(ctx_source={lim.get('ctx_source')},"
                               f" {now - since}초 이어짐) — 에이전트 서버의 창 설정({CTX_KNOB})을 적거나 LLM 서버가 창 크기를 알리게"
                               " 하고 에이전트 서버를 다시 띄운다. 창 출처가 server·env 로 돌아오면 스스로 재개한다")
-                self._fallback_since.pop(email, None)
+                self._fallback_since.pop(lane, None)
             else:
                 self._waiting(live, {"reason": "ctx_fallback", "since": since,
                                      "retry_at": since + review_ops.CTX_FALLBACK_HOLD_S})
             return []
-        self._fallback_since.pop(email, None)
+        self._fallback_since.pop(lane, None)
         for job in live:
             # 창이 통과했다 — 루프가 적은 기다림은 사유와 상관없이 지운다(agent_unreachable·engine_busy 따위로 창 조회가 실패했다
             # 회복한 잡이 도는데도 '기다림' 으로 보이지 않게, R3A-10). 워커의 자리 기다림(표지 없음)은 그 워커가 지운다.

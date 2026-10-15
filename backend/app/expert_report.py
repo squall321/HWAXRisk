@@ -1674,6 +1674,10 @@ def _md_head(report: Mapping[str, Any]) -> list[str]:
              f"- 마감 상태 {_q(h['state'])} — {_STATE_LINE.get(h['state'], '')}" + (f" · {_q(h['why'])}" if h.get("why") else ""),
              f"- 모델 {_qv(h['model'])} · 프롬프트 판 {_qv(h['prompt_rev'])} · 정규화 판 {_qv(h['norm_rev'])} · 대조 판"
              f" {_qv(h['verify_rev'])} · 보고서 판 {_qv(h['report_rev'])}"]
+    judge = review_quality.judge_text((((report.get("quality") or {}).get("json")) or {}).get("judge_llm"))
+    if judge:
+        # 이 전문가의 호출을 누가 답했나(Claude 길 X-2) — 외부 응답자 답 · 어긋남이 있을 때만(GLM 보고서는 그대로). 셈은 품질 절과 같다
+        lines.append(f"- {judge}")
     pack = h.get("pack")
     if pack is None:
         lines.append(f"- 카드 묶음 없음 — 묶음 상태 {_q(h.get('pack_status'))}"

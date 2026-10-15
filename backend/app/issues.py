@@ -508,19 +508,23 @@ def yield_advice(store: RiskStore, target_key: str) -> str | None:
 
 def create_issues_job(store: RiskStore, target_key: str, *, owner_sub: str, requester_sub: str | None = None,
                       consent_source: str | None = "web", user_memo: str | None = None, settings: Any = None,
-                      chain: Mapping[str, Any] | None = None) -> dict:
+                      chain: Mapping[str, Any] | None = None, llm: str | None = None,
+                      consent_external: Mapping[str, Any] | None = None) -> dict:
     """쟁점 잡(`rr_jobs.mode='issues'`, tier NULL) — 대기 쟁점을 패널 러너가 한 줄로 돈다(3.7). 자격이 없어도 행을 만든다 —
-    `error='pat_unavailable: …'` 를 적고 집는 쪽이 지금처럼 자격 없는 잡을 건너뛴다(자격 검사로 행을 만들지 않는 일이 없다)."""
+    `error='pat_unavailable: …'` 를 적고 집는 쪽이 지금처럼 자격 없는 잡을 건너뛴다(자격 검사로 행을 만들지 않는 일이 없다).
+    `llm`·`consent_external` 은 사슬이 검토 잡에서 물려준 판단 LLM 과 반출 동의 기록이다(Claude 길 X-2 — claude 면 쟁점 패널이 외부
+    응답자로 돌고 동의한 사람의 PAT 로만 돈다). 사람이 직접 세우는 잡은 주지 않는다(GLM)."""
     from app import runner  # noqa: PLC0415 — runner 는 이 모듈을 쓴다.
 
     cfg = settings or config.settings
-    credential, note = runner.resolve_credential_with_note(store, cfg, owner_sub, requester_sub)
+    llm_fields = runner.llm_params(runner.job_llm({"llm": llm}), consent_external)
+    credential, note = runner.resolve_job_credential(store, cfg, owner_sub, requester_sub, llm_fields)
     queued = store.query_one("SELECT COUNT(*) AS n FROM rr_issues WHERE target_key = ? AND state = 'queued'",
                              (target_key,))
     job_id = common.new_uuid()
     now = common.now_epoch()
     params = {"mode": ISSUES_MODE, "requester": requester_sub, "consent": True, "consent_source": consent_source,
-              "user_memo": user_memo or None, "credential": credential["kind"] if credential else None}
+              "user_memo": user_memo or None, "credential": credential["kind"] if credential else None, **llm_fields}
     error = None if credential else "pat_unavailable" + (f": {note}" if note else "")
     store.execute(
         "INSERT INTO rr_jobs(id, target_key, owner_sub, tier, state, concurrency, params_json, credential_email,"
@@ -529,7 +533,7 @@ def create_issues_job(store: RiskStore, target_key: str, *, owner_sub: str, requ
         (job_id, target_key, owner_sub, common.canonical_json(params), (credential or {}).get("email"),
          int(queued["n"] or 0), error, ISSUES_MODE, common.canonical_json(dict(chain)) if chain else None, now, now))
     return {"job_id": job_id, "issues_queued": int(queued["n"] or 0), "credential": params["credential"],
-            **({"error": error} if error else {})}
+            **({"error": error} if error else {}), **llm_fields}
 
 
 def _seat_order(entry: Mapping[str, Any], ranks: Mapping[str, int]) -> tuple:

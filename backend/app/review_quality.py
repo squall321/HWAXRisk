@@ -22,10 +22,12 @@ from typing import Any
 
 from app import audit, planner, review_cells, review_verify, taxonomy
 from app.common import canonical_json, now_epoch, sha256_hex
+from app.runner import ENGINE_EXTERNAL, JUDGE_CLAUDE
 
 POLICY_ASSET = "review-quality"
 BLOCK_KEY = "quality"
 TITLE = "검토 품질"
+EXTERNAL_MODEL = ENGINE_EXTERNAL     # 외부 응답자 답의 meta.model(엔진 계약 — 그 길의 답에만 external 이 선다, Claude 길 X-2)
 # 호출 초를 가르는 종류 — verdict 는 변형까지(fwd·rev·solo). 늘 다섯 줄을 낸다(재지 않은 종류는 미측정으로).
 KINDS: tuple[str, ...] = ("sweep", "verdict/fwd", "verdict/rev", "verdict/solo", "offcard")
 CALL_DONE_STATES: tuple[str, ...] = ("ok", "infra_fail", "content_fail", "aborted")   # 낸 호출(기다림·도는 중 제외)
@@ -620,10 +622,49 @@ def compute(store: Any, target_key: str, *, agent_key: str | None = None) -> dic
         "filter": _filter(data, policy), "noinput": _noinput(data),
         "seconds": _seconds(data, policy), "pilot": _pilot(store, target_key, agent_key, data, effective, policy),
     }
+    judge = judge_llm(store, target_key, agent_key)
+    if judge is not None:
+        # 판단 LLM(Claude 길 X-2) — 외부 응답자 호출이나 llm_mismatch 가 있을 때만 싣는다(GLM 대상의 결과는 종전 그대로)
+        result["judge_llm"] = judge
     out, unchecked = _bounds(result)
     result["out_of_bounds"] = out
     result["unchecked"] = unchecked
     return result
+
+
+def judge_llm(store: Any, target_key: str, agent_key: str | None = None) -> dict | None:
+    """판단 LLM(Claude 길 X-2) — 받은(ok) 호출(활성 단위 · 단위 없는 훑기 · 요약) 가운데 외부 응답자가 답한 것(model 'external' — 엔진이
+    그 길의 답에만 단다)과 이 박스의 LLM 이 답한 것, 그리고 claude 잡인데 외부 응답자 답이 아니었던 호출(llm_mismatch — 그 행의
+    quality_json.app). 외부 · 어긋남이 둘 다 0 이면 None(GLM 대상 — 글을 바꾸지 않는다). 원장 지문(`_ledger_hash`)의 행과 따로
+    센다(GLM 원장의 지문이 바뀌지 않게)."""
+    extra, params = _scope_sql(agent_key)
+    alive = set(review_cells.active_unit_ids(store, target_key))
+    rows = [r for r in _rows(store,
+        "SELECT unit_id, model, json_extract(quality_json, '$.app.llm_mismatch') IS NOT NULL AS mismatch FROM rr_review_calls"
+        f" WHERE target_key = ? AND state = 'ok'{extra}", [target_key, *params])
+        if r["unit_id"] is None or r["unit_id"] in alive]
+    external = sum(1 for r in rows if r["model"] == EXTERNAL_MODEL)
+    mismatch = sum(1 for r in rows if r["mismatch"])
+    if not external and not mismatch:
+        return None
+    return {"external": external, "other": len(rows) - external, "mismatch": mismatch}
+
+
+def judge_text(judge: Mapping[str, Any] | None) -> str:
+    """판단 LLM 글 — 외부 응답자 호출만이면 '판단 LLM: Claude(외부, 사용자 신고 모델)', 섞였으면 판마다 호출 수, 어긋남이 있으면 그
+    수와 뜻. None 이면 빈 글(GLM — 종전 글 그대로)."""
+    if not judge:
+        return ""
+    parts = []
+    if judge["external"]:
+        parts.append(f"판단 LLM: {JUDGE_CLAUDE}" + (f" {_n(judge['external'])}회 · 이 박스의 LLM {_n(judge['other'])}회"
+                                                    if judge["other"] else ""))
+    else:
+        parts.append(f"판단 LLM: 이 박스의 LLM {_n(judge['other'])}회(Claude 로 고른 잡이지만 외부 응답자 답이 없다)")
+    if judge["mismatch"]:
+        parts.append(f"판단 LLM 어긋남(llm_mismatch) {_n(judge['mismatch'])}회 — Claude 로 고른 잡의 호출이 외부 응답자로 가지 않고 이 박스의"
+                     " LLM 으로 돌았다(포털 중계가 llm 을 넘기지 않았다) · 그 답은 Claude 답으로 적지 않았다")
+    return " · ".join(parts)
 
 
 # ---------------------------------------------------------------- 문면
@@ -717,7 +758,8 @@ def render_text(result: Mapping[str, Any]) -> str:
     grid, cards, trunc = result["grid"], result["cards"], result["truncation"]
     cite, flips, secs, pilot = result["citation"], result["flips"], result["seconds"], result["pilot"]
     who = f" · 전문가 {_q(result['agent_key'])}" if result.get("agent_key") else ""
-    lines = [f"[{TITLE} — 코드 계측{who} · 기준판 {result['policy_version']} · {_stamp_text(result)}"
+    judge = judge_text(result.get("judge_llm"))
+    lines = [f"[{TITLE} — 코드 계측{who} · 기준판 {result['policy_version']} · {judge + ' · ' if judge else ''}{_stamp_text(result)}"
              f" · 원장 {_q(result['ledger_hash'])}]"]
     st, basis = grid["by_state"], grid["reviewed_by_basis"]
     scope = grid["in_scope"]

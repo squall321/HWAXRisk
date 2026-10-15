@@ -73,7 +73,17 @@ HOLD_CODES: dict[str, HoldRule] = {
     # 다시 연 셀의 몫(반대 검토 4차 MEDIUM 2 · D-49) — 사람이 동의하거나(재개 consent) 그 셀을 넘겨야 이어 돈다 · 상한은 동의로 풀리지 않는다
     "consent_extra": HoldRule(auto=False),
     "max_calls": HoldRule(auto=False),
+    # Claude 길(X-2) — 잡 주인의 Claude Code 워크플로가 과제를 집지 않았다(부재 · 답 시간 초과). 사람이 워크플로를 다시 돌리고 재개한다
+    "external_worker": HoldRule(auto=False),
+    # Claude 길의 설정 — 에이전트 서버가 외부 응답자 길을 열지 않았거나 동의 · 신원 칸이 엔진에 닿지 않았다(포털 중계)
+    "external_config": HoldRule(auto=False),
 }
+
+# 외부 응답자(Claude 길 X-2 — 에이전트 서버 README '외부 응답자' 절). 부재 · 답 시간 초과는 엔진이 infra · retryable 로 낸다 — 인프라처럼
+# 차감 없이 다시 내고, 차단기가 열리면 그 실패가 이것들이었을 때 llm_outage(시계로 반쯤 연다) 대신 external_worker(사람이 재개)다.
+EXTERNAL_WORKER_CODES = frozenset({"external_worker_absent", "external_answer_timeout"})
+# 길이 닫혔거나 동의 · 신원 칸이 엔진에 닿지 않았다 — 같은 호출을 다시 내도 같다(설정 문제)
+EXTERNAL_CONFIG_CODES = frozenset({"external_llm_disabled", "external_consent_required", "external_owner_missing"})
 
 
 @dataclass(frozen=True)
@@ -107,7 +117,7 @@ _INFRA_CODES = frozenset({
     "llm_unreachable", "llm_timeout", "llm_error",
     "agent_unreachable", "agent_5xx", "agent_timeout", "agent_stream_idle", "portal_unreachable", "portal_5xx",
     "engine_stream_cut", "engine_silent", "restart", "store_write_failed", "busy",
-})
+}) | EXTERNAL_WORKER_CODES
 # `body_too_large`(포털 413 — 본문이 창 하나를 넘었다)와 `internal_error`(엔진 결함)는 내용 탓으로 센다 — 같은 셀을 같은
 # 본문으로 다시 내도 같은 결과라 한도(2)에서 멈춰야 한다. 표에 없는 코드도 이 부류다.
 _CONTENT_CODES = frozenset({"no_rows", "truncated_empty", "llm_rejected", "cards_unjudged", "review_parse_failed",
@@ -126,6 +136,7 @@ _HOLD_BY_CODE: dict[str, str] = {
     "unsupported_kind": "contract",                   # 엔진 build_ctx — 앱이 이 판에 없는 호출 종류를 보냈다
     "deck_too_large": "contract",
     "cover_too_large": "contract",                    # 요약의 must_cover 가 cover_hard_max 를 넘었다 — 앱이 cover_max 를 어겼다(M3.md 4.5)
+    **{code: "external_config" for code in EXTERNAL_CONFIG_CODES},
 }
 # 카드 묶음 조회 실패 — 그 전문가 묶음만 다시 받는다(재시도 횟수, 다 쓰면 셀의 실패 코드).
 _PACK_CODES: dict[str, tuple[int, str]] = {
@@ -249,3 +260,12 @@ def breaker_verdict(recent: Iterable[str | None]) -> str | None:
     if 2 * sum(1 for k in counted if k == CONTENT) >= len(counted):
         return "content_fail_rate"
     return None
+
+
+def outage_hold(infra_codes: Iterable[str | None]) -> str:
+    """차단기가 인프라로 열렸을 때(`breaker_verdict` 가 llm_outage) 걸 보류 코드 — 센 인프라 실패의 코드 가운데 절반 이상이 외부 응답자
+    부재 · 답 시간 초과(EXTERNAL_WORKER_CODES)면 `external_worker`(잡 주인이 Claude Code 워크플로를 다시 돌리고 사람이 재개한다 — 시계로
+    다시 열어 봐야 워크플로가 없으면 같다), 아니면 `llm_outage` 다(Claude 길 X-2)."""
+    codes = list(infra_codes)
+    external = sum(1 for code in codes if code in EXTERNAL_WORKER_CODES)
+    return "external_worker" if codes and 2 * external >= len(codes) else "llm_outage"

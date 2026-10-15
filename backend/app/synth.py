@@ -20,7 +20,7 @@ import threading
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Any
 
-from app import closure, common, config, issues, registry, render, review_ops
+from app import closure, common, config, issues, registry, render, review_ops, review_quality
 from app.errors import AppError
 from app.risk_store import RiskStore
 
@@ -341,20 +341,23 @@ def check_notes(check: Mapping[str, Any]) -> list[str]:
 # ---------------------------------------------------------------- 잡 · 워커
 def create_synth_job(store: RiskStore, target_key: str, *, owner_sub: str, requester_sub: str | None = None,
                      consent_source: str | None = "web", settings: Any = None,
-                     chain: Mapping[str, Any] | None = None) -> dict:
+                     chain: Mapping[str, Any] | None = None, llm: str | None = None,
+                     consent_external: Mapping[str, Any] | None = None) -> dict:
     """종합 잡(`rr_jobs.mode='synth'`) — 영역 요약 → 과제 종합 → 보고서 판(synth_done). 자격이 없어도 행을 만들고 까닭을 적는다.
 
     그 대상에 아직 집히지 않은(queued) 종합 잡이 있으면 새로 만들지 않고 그 잡을 돌려준다(`created: False`) — 그 잡이 시작할 때
     지금 원장을 읽는다. 도는 잡은 막지 않는다 — 그 잡이 이미 끝낸 요약은 옛 입력이라 새 잡이 뒤에 줄을 서고, 입력이 같은 요약은 다시
-    부르지 않는다(사슬 `chain._busy` 와 같은 규칙). 반환 {job_id, created, credential, error?}."""
+    부르지 않는다(사슬 `chain._busy` 와 같은 규칙). 반환 {job_id, created, credential, error?}. `llm`·`consent_external` 은 사슬이
+    물려준 판단 LLM 과 반출 동의 기록이다(Claude 길 X-2 — claude 면 요약 호출이 외부 응답자로 가고 동의한 사람의 PAT 로만 돈다)."""
     from app import runner  # noqa: PLC0415 — runner 는 이 모듈을 쓴다.
 
     cfg = settings or config.settings
-    credential, note = runner.resolve_credential_with_note(store, cfg, owner_sub, requester_sub)
+    llm_fields = runner.llm_params(runner.job_llm({"llm": llm}), consent_external)
+    credential, note = runner.resolve_job_credential(store, cfg, owner_sub, requester_sub, llm_fields)
     job_id = common.new_uuid()
     now = common.now_epoch()
     params = {"mode": SYNTH_MODE, "requester": requester_sub, "consent": True, "consent_source": consent_source,
-              "credential": credential["kind"] if credential else None}
+              "credential": credential["kind"] if credential else None, **llm_fields}
     error = None if credential else "pat_unavailable" + (f": {note}" if note else "")
     with store.tx():
         # 확인과 쓰기를 한 트랜잭션으로 — 보고서 다시 내기를 거푸 불러도, 사슬과 겹쳐도 대기 종합 잡은 하나다.
@@ -371,7 +374,8 @@ def create_synth_job(store: RiskStore, target_key: str, *, owner_sub: str, reque
             (job_id, target_key, owner_sub, common.canonical_json(params), (credential or {}).get("email"),
              len(config.settings.risk_roster_domains) + 1, error, SYNTH_MODE,
              common.canonical_json(dict(chain)) if chain else None, now, now))
-    return {"job_id": job_id, "created": True, "credential": params["credential"], **({"error": error} if error else {})}
+    return {"job_id": job_id, "created": True, "credential": params["credential"], **({"error": error} if error else {}),
+            **llm_fields}
 
 
 class SynthWorker:
@@ -436,13 +440,27 @@ class SynthWorker:
             if job["error"] != note:
                 self.store.execute("UPDATE rr_jobs SET error = ?, updated_at = ? WHERE id = ?", (note, self.clock(), job["id"]))
             return {"job_id": job["id"], "step": "draining"}
+        from app import runner  # noqa: PLC0415 — runner 는 이 모듈을 쓴다.
+
         if job["state"] != "running":
             self._set(job["id"], "running")
-        email = job["credential_email"] or _loads(job["params_json"], {}).get("requester") or job["owner_sub"]
+        params = _loads(job["params_json"], {})
+        # claude 잡(Claude 길 X-2)은 동의한 사람의 PAT 로만 — 자격 행이 없었으면 그 사람으로 묻는다(대상 소유자로 내려가지 않는다)
+        email = (job["credential_email"] or runner.external_consenter(params) or params.get("requester")
+                 or job["owner_sub"])
+        llm = runner.job_llm(params)
         try:
-            limits = self.engine.limits(email=email)
+            limits = (self.engine.limits(email=email) if llm is None
+                      else self.engine.limits(email=email, llm=runner.ENGINE_EXTERNAL))
         except Exception as exc:  # noqa: BLE001 — 아래 run 과 같은 갈래로 가른다.
             return self._job_error(job, exc)
+        if llm is not None and limits.get("llm") != runner.ENGINE_EXTERNAL:
+            # 외부 응답자 창을 물었는데 GLM 창이 왔다 — 포털 중계가 ?llm=external 을 버렸다(X-3a). 설정 보류로 멈춘다.
+            from app import review_runner  # noqa: PLC0415 — review_runner 는 무겁다(검토 루프).
+
+            self._set(job["id"], "paused", hold="external_config",
+                      error=f"external_config: {review_runner.relay_dropped_message(limits)}")
+            return {"job_id": job["id"], "step": "hold", "hold": "external_config"}
         key = job["target_key"]
         rows = {(r["scope_kind"], r["scope_key"]): r for r in self.store.query(
             "SELECT summary_id, scope_kind, scope_key, state, not_before FROM rr_summaries WHERE target_key = ? AND run_id = ?",
@@ -452,7 +470,7 @@ class SynthWorker:
             return {"job_id": job["id"], "step": "planned"}
         due = [r for k, r in sorted(rows.items()) if r["state"] == "pending" and int(r["not_before"] or 0) <= self.clock()]
         if due:
-            return self._run_one(job, due[0]["summary_id"], limits, email)
+            return self._run_one(job, due[0]["summary_id"], limits, email, llm=llm)
         if any(r["state"] in ("pending", "running") for r in rows.values()):
             return {"job_id": job["id"], "step": "waiting"}
         if TARGET_SCOPE not in rows:
@@ -479,7 +497,10 @@ class SynthWorker:
         return {"job_id": job["id"], "step": "job_error", "code": outcome.code}
 
     # ------------------------------------------------------------ 요약 하나
-    def _run_one(self, job: Mapping[str, Any], summary_id: str, limits: Mapping[str, Any], email: str) -> dict:
+    def _run_one(self, job: Mapping[str, Any], summary_id: str, limits: Mapping[str, Any], email: str, *,
+                 llm: str | None = None) -> dict:
+        from app import runner  # noqa: PLC0415 — runner 는 이 모듈을 쓴다.
+
         row = dict(self.store.query_one("SELECT * FROM rr_summaries WHERE summary_id = ?", (summary_id,)))
         key = job["target_key"]
         counts = closure.cell_counts(self.store, key)
@@ -496,6 +517,9 @@ class SynthWorker:
                                error="runnable.summary=false — 이 박스에서 요약만 못 돈다")
         checks = _loads(row["checks_json"], {}) or {}
         body = summary_request(key, built["summary"], limits=limits, notes=checks.get("notes") or ())
+        if llm is not None:
+            # claude 잡 — 외부 응답자 길과 반출 동의 표지(사람의 동의는 검토 잡을 만들 때 받아 사슬이 물려 왔다)
+            body.update(llm=runner.ENGINE_EXTERNAL, consent_external=True)
         call_id = common.new_uuid()
         started = self.clock()
         self.store.execute("UPDATE rr_summaries SET state = 'running', attempts = attempts + 1, call_id = ?, updated_at = ?"
@@ -504,7 +528,12 @@ class SynthWorker:
             result = self.engine.run(body, email=email, should_stop=lambda: "stopped" if self.stop.is_set() else None)
         except Exception as exc:  # noqa: BLE001 — 부류로 가른다.
             return self._failed(job, row, built["summary"], exc, call_id=call_id, started=started, body=body)
-        self._ledger(job, call_id, started, body, result=result, state="ok")
+        mismatch = None
+        if llm is not None and (result.get("meta") or {}).get("llm") != runner.ENGINE_EXTERNAL:
+            # claude 잡의 요약인데 외부 응답자 답이 아니다 — Claude 로 적지 않고 그 호출 행과 잡에 llm_mismatch 를 남긴다
+            mismatch = {"want": runner.ENGINE_EXTERNAL, "got": (result.get("meta") or {}).get("llm")}
+            runner.note_llm_mismatch(self.store, job["id"])
+        self._ledger(job, call_id, started, body, result=result, state="ok", mismatch=mismatch)
         check = check_summary(result, built["summary"])
         meta = result.get("meta") or {}
         # 꼭 다룰 행이 cover_max 에 걸렸으면 서술 대상은 A 상위만이다 — 보고서가 그 사실을 적는다(조용히 빼지 않는다).
@@ -524,7 +553,7 @@ class SynthWorker:
 
     def _failed(self, job: Mapping[str, Any], row: Mapping[str, Any], summary: Mapping[str, Any], exc: BaseException, *,
                 call_id: str, started: int, body: Mapping[str, Any]) -> dict:
-        from app import engine_client  # noqa: PLC0415
+        from app import engine_client, runner  # noqa: PLC0415
 
         code = _str(getattr(exc, "code", None))
         sid = row["summary_id"]
@@ -555,6 +584,16 @@ class SynthWorker:
             return {"job_id": job["id"], "step": "wait", "code": outcome.code}
         if outcome.klass == review_ops.INFRA:
             streak = int(row["infra_streak"] or 0) + 1
+            if streak >= int(cfg.risk_summary_infra_max) and outcome.code in review_ops.EXTERNAL_WORKER_CODES:
+                # 외부 응답자가 과제를 집지 않았다 — 다시 내도 워크플로가 없으면 같다(Claude 길 X-2). 서술 없이 닫지 않고 잡을 보류
+                # external_worker 로 멈춘다(요약은 대기 — 차감 없음). 사람이 잡 주인의 워크플로를 다시 돌리고 재개하면 이어 돈다.
+                self.store.execute("UPDATE rr_summaries SET state = 'pending', infra_streak = ?, not_before = NULL,"
+                                   " error_code = ?, error = ?, updated_at = ? WHERE summary_id = ?",
+                                   (streak, outcome.code, str(exc), self.clock(), sid))
+                self._set(job["id"], "paused", hold="external_worker",
+                          error=f"{outcome.code}: {exc} — 잡 주인의 Claude Code 에서 워크플로 {runner.EXTERNAL_WORKFLOW} 를 그"
+                                " 사람의 PAT 로 (다시) 돌린 뒤 재개한다")
+                return {"job_id": job["id"], "step": "hold", "hold": "external_worker"}
             if streak >= int(cfg.risk_summary_infra_max):
                 return self._close(sid, "code_only", "infra_exhausted", summary, step="infra_exhausted", error=str(exc),
                                    infra_streak=streak)
@@ -595,13 +634,17 @@ class SynthWorker:
         return str(row["target_key"]) if row is not None else ""
 
     def _ledger(self, job: Mapping[str, Any], call_id: str, started: int, body: Mapping[str, Any], *,
-                result: Mapping[str, Any] | None = None, error: BaseException | None = None, state: str) -> None:
+                result: Mapping[str, Any] | None = None, error: BaseException | None = None, state: str,
+                mismatch: Mapping[str, Any] | None = None) -> None:
         """호출 원장(rr_review_calls, kind 'summary', agent_key 'synth') 한 행. 폐기된 과제면 엔진 답 원문(result_gz · 품질)은 싣지
         않는다(review1 L6 — 호출이 있었다는 행과 셈만 남는다)."""
         purged = result is not None and registry.target_purged(self.store, str(job["target_key"]))
         meta = (result or {}).get("meta") or {}
         usage = meta.get("usage") or {}
         quality = {} if purged else (result or {}).get("quality") or {}
+        if mismatch:
+            # claude 잡의 요약이 외부 응답자 답이 아니었다(Claude 길 X-2) — 카드 대조 호출 행과 같은 자리(quality_json.app)
+            quality = {**dict(quality), "app": {"llm_mismatch": dict(mismatch)}}
         text = common.canonical_json(dict(result)) if result is not None and not purged else None
         self.store.execute(
             "INSERT OR REPLACE INTO rr_review_calls(call_id, target_key, agent_key, unit_id, owner_sub, run_id, kind, state,"
@@ -639,6 +682,9 @@ def _narrative_lines(summary: Mapping[str, Any] | None, *, scope: str) -> list[s
         return [f"**서술 없음 — {REASON_LABELS.get(reason, reason)}({reason}).**"]
     out = _loads(summary["output_json"], {})
     lines = ["서술은 LLM(요약 서기), 근거는 아래 표다 — 서술의 참조는 등록부 키다."]
+    if summary.get("model") == review_quality.EXTERNAL_MODEL:
+        # 이 요약은 외부 응답자가 썼다(Claude 길 X-2 — 엔진이 그 길의 답에만 model external 을 단다)
+        lines[0] = f"판단 LLM: {review_quality.JUDGE_CLAUDE} · " + lines[0]
     if out.get("headline"):
         lines.append(f"- 머리: {_q(out['headline'])}")
     for label, field in (("걸림", "key_risks"), ("갈림", "conflicts"), ("개선", "gains"), ("지켜볼 것", "watch"),
@@ -681,6 +727,32 @@ def _issue_line(issue: Mapping[str, Any]) -> str:
     return head + f" → {issue['state']}" + (f"({issue['state_reason']})" if issue.get("state_reason") else "")
 
 
+def _panel_judge(quality_json: Any) -> str:
+    """쟁점 패널 한 줄의 판단 LLM 꼬리(Claude 길 X-2) — 외부 응답자로 돌았으면 그 표기, claude 잡인데 아니었으면 어긋남. GLM 패널은 빈 글."""
+    quality = _loads(quality_json, {}) or {}
+    if quality.get("llm") == review_quality.EXTERNAL_MODEL:
+        return f" · 판단 LLM: {review_quality.JUDGE_CLAUDE}(좌석 도구 없는 evidence_only)"
+    if "llm_mismatch" in (quality.get("flags") or ()):
+        return " · **판단 LLM 어긋남(llm_mismatch) — Claude 로 고른 잡인데 이 박스의 LLM 으로 돌았다**"
+    return ""
+
+
+def _judge_lines(store: RiskStore, target_key: str) -> list[str]:
+    """보고서 머리의 판단 LLM 줄(Claude 길 X-2) — 카드 대조 · 요약 호출(review_quality.judge_llm)과 쟁점 패널에서 외부 응답자가 답한 것이
+    있거나 어긋남이 있을 때만. 없으면 [](GLM 대상 — 보고서 글은 종전 그대로)."""
+    judge = review_quality.judge_llm(store, target_key)
+    panels = [(_loads(r["quality_json"], {}) or {}) for r in store.query(
+        "SELECT quality_json FROM rr_panels WHERE target_key = ? AND kind = 'issue' AND quality_json IS NOT NULL", (target_key,))]
+    external = sum(1 for q in panels if q.get("llm") == review_quality.EXTERNAL_MODEL)
+    mismatch = sum(1 for q in panels if "llm_mismatch" in (q.get("flags") or ()))
+    lines = [f"- {review_quality.judge_text(judge)}"] if judge else []
+    if external:
+        lines.append(f"- 쟁점 패널 {external}건 판단 LLM: {review_quality.JUDGE_CLAUDE}(좌석 도구 없는 evidence_only)")
+    if mismatch:
+        lines.append(f"**쟁점 패널 {mismatch}건 판단 LLM 어긋남(llm_mismatch) — Claude 로 고른 잡인데 이 박스의 LLM 으로 돌았다**")
+    return lines
+
+
 def _quality_block(store: RiskStore, target_key: str) -> str:
     """품질 블록 — 이 판의 고정본(WP5b 3.11.1 · C10). 진행판에 있으면 그 값, 없으면 그 자리에서 센 값."""
     from app import review_quality  # noqa: PLC0415
@@ -717,6 +789,7 @@ def build_report(store: RiskStore, target_key: str, *, closure_result: Mapping[s
     open_cells = sum(1 for r in counts["_rows"] if r["state"] in closure.OPEN_CELL_STATES)
     if open_cells:
         background.append(f"**마감 범위 미완 — 열린 셀 {open_cells}**")
+    background += _judge_lines(store, target_key)
     for (kind, key), summary in sorted(latest.items()):
         reason = summary["state_reason"]
         if summary["state"] == "code_only" and reason not in ("no_rows", "superseded"):
@@ -758,8 +831,9 @@ def build_report(store: RiskStore, target_key: str, *, closure_result: Mapping[s
         recommendation += [f"- {line}" for line in asks["text"].split("\n")]
 
     minutes = ["## 쟁점 패널"]
-    minutes += [f"- {r['id']} · 쟁점 {r['issue_id']} · {r['status']}" for r in store.query(
-        "SELECT id, issue_id, status FROM rr_panels WHERE target_key = ? AND kind = 'issue' ORDER BY panel_no", (target_key,))]
+    minutes += [f"- {r['id']} · 쟁점 {r['issue_id']} · {r['status']}{_panel_judge(r['quality_json'])}" for r in store.query(
+        "SELECT id, issue_id, status, quality_json FROM rr_panels WHERE target_key = ? AND kind = 'issue' ORDER BY panel_no",
+        (target_key,))]
     minutes.append("## 영역 × 셀 상태")
     by_domain: dict[str, dict[str, int]] = {}
     for row in counts["_rows"]:

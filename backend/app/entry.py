@@ -328,11 +328,13 @@ def open_target(ident: identity.Identity, *, kind: str, ref_id: str, consent: bo
 
 def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = None, consent: bool = False,
               modifiers: list[str] | None = None, user_memo: str | None = None, concurrency: int = 1,
-              mode: str = "panels", scope: dict | None = None) -> dict:
+              mode: str = "panels", scope: dict | None = None, llm: str | None = None,
+              consent_external: Any = None) -> dict:
     """`POST /api/targets/{key}/jobs`. 같은 대상·같은 Tier 의 살아 있는 잡이 있으면 그것을 돌려준다.
 
     라우트는 부를 때마다 잡 행을 하나 더 만든다(중복 검사 없음). 역할 검사는 라우트와 같은 함수로 먼저 한다 — 살아 있는
     잡을 돌려주는 갈래가 남의 대상의 잡을 흘리지 않게. `mode='reviews'` 는 카드 대조 검토 잡이다(`_start_review_job`).
+    `llm`·`consent_external` 은 REST 본문과 같다(Claude 길 X-2 — claude 는 검토 잡에만, 동의는 사람이 한 뒤에만 true).
     """
     email = require_delegate(ident)
     store = routes.get_store()
@@ -344,7 +346,8 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = N
     web = web_paths(project_id=target["project_id"], target_key=target_key)
     if mode == "reviews":
         return _start_review_job(ident, store, target_key, web, tier=tier, consent=consent, modifiers=modifiers,
-                                 user_memo=user_memo, concurrency=concurrency, scope=scope)
+                                 user_memo=user_memo, concurrency=concurrency, scope=scope, llm=llm,
+                                 consent_external=consent_external)
     live = store.query_one(
         "SELECT id, tier, state, pause_reason, panels_done, panels_total, error, credential_email FROM rr_jobs"
         f" WHERE target_key = ? AND tier = ? AND {runner.PANEL_JOBS_SQL}"
@@ -353,7 +356,8 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = N
     if live is not None:
         return {"job_id": live["id"], "created": False, **{k: live[k] for k in live.keys() if k != "id"}, "web": web}
     body = _body(routes.JobBody, tier=tier, concurrency=concurrency, modifiers=modifiers, user_memo=user_memo,
-                 consent=consent, mode=mode, **({"scope": scope} if scope is not None else {}))
+                 consent=consent, mode=mode, **({"scope": scope} if scope is not None else {}),
+                 **({"llm": llm} if llm is not None else {}))
     return {**_create_job(ident, target_key, body), "created": True, "web": web}
 
 
@@ -369,13 +373,15 @@ def _create_job(ident: identity.Identity, target_key: str, body: Any) -> dict:
 
 def _start_review_job(ident: identity.Identity, store: Any, target_key: str, web: dict, *, tier: str | None,
                       consent: bool, modifiers: list[str] | None, user_memo: str | None, concurrency: int,
-                      scope: dict | None) -> dict:
+                      scope: dict | None, llm: str | None = None, consent_external: Any = None) -> dict:
     """검토 잡 — 같은 대상의 살아 있는 검토 잡이 있으면 그것을 돌려준다(`created: false` — 범위가 다르면 `differs: ['scope']`,
-    바꾸지 않는다). 패널 칸은 준 것만 본문에 싣는다 — 주면 본문 검증이 422 로 까닭을 말한다(조용히 버리지 않는다). 본문 검증은
-    살아 있는 잡을 돌려주기 전에 한다."""
+    판단 LLM 이 다르면 `differs` 에 'llm', 바꾸지 않는다). 패널 칸은 준 것만 본문에 싣는다 — 주면 본문 검증이 422 로 까닭을 말한다
+    (조용히 버리지 않는다). 본문 검증은 살아 있는 잡을 돌려주기 전에 한다(claude 의 동의 칸 검사는 잡을 만들 때 — 살아 있는 잡을
+    돌려주는 갈래는 아무것도 보내지 않는다)."""
     fields: dict[str, Any] = {"mode": "reviews", "user_memo": user_memo, "consent": consent}
     for name, value, unset in (("scope", scope, None), ("tier", tier, None), ("modifiers", modifiers, None),
-                               ("concurrency", concurrency, 1)):
+                               ("concurrency", concurrency, 1), ("llm", llm, None),
+                               ("consent_external", consent_external, None)):
         if value != unset:
             fields[name] = value
     body = _body(routes.JobBody, **fields)
@@ -384,11 +390,16 @@ def _start_review_job(ident: identity.Identity, store: Any, target_key: str, web
         f" WHERE target_key = ? AND mode = 'reviews' AND state IN ({','.join('?' for _ in LIVE_JOB_STATES)})"
         " ORDER BY created_at DESC, rowid DESC LIMIT 1", (target_key, *LIVE_JOB_STATES))
     if live is not None:
-        have = routes._loads(live["params_json"], {}).get("scope") or {}
+        params = routes._loads(live["params_json"], {})
+        have = params.get("scope") or {}
         out = {"job_id": live["id"], "created": False, "mode": "reviews", "scope": have,
-               **{k: live[k] for k in ("state", "hold_code", "hold_until", "error", "credential_email")}, "web": web}
-        if scope is not None and canonical_json(scope) != canonical_json(have):
-            out["differs"] = ["scope"]
+               **{k: live[k] for k in ("state", "hold_code", "hold_until", "error", "credential_email")},
+               **routes.job_llm_view(params), "web": web}
+        differs = (["scope"] if scope is not None and canonical_json(scope) != canonical_json(have) else [])
+        if llm is not None and (runner.job_llm({"llm": llm}) != runner.job_llm(params)):
+            differs.append("llm")                 # 고른 판단 LLM 이 살아 있는 잡과 다르다 — 바꾸지 않는다(그 잡을 취소한 뒤 새로)
+        if differs:
+            out["differs"] = differs
         return out
     return {**_create_job(ident, target_key, body), "created": True, "web": web}
 
@@ -879,7 +890,19 @@ REVIEW_HOLD_FIX: dict[str, str] = {
     "max_calls": "이 잡의 호출 추정 합이 HWAXRISK_REVIEW_MAX_CALLS 를 넘는다 — 동의로는 풀리지 않는다. 동의를 기다리는 셀을"
                  " risk_job_action(action='skip_failed', filter={'state': 'pending'}, reason=…) 로 넘기거나, 운영자가 상한을 올린 뒤"
                  " risk_job_action(action='resume') 으로 재개한다.",
+    # Claude 길(X-2) — 판단 LLM 이 잡 주인의 Claude Code 워크플로다
+    "external_worker": "잡 주인의 Claude Code 워크플로 hwax-risk-claude 가 과제를 집지 않았거나 답하지 않았다(엔진의 기다림 한도"
+                       " EXTERNAL_LLM_WAIT_S · 답 한도 EXTERNAL_LLM_ANSWER_S 를 넘겼다 — 차감은 없다). 잡 주인(반출에 동의한 사람)의"
+                       " Claude Code 에서 그 사람의 PAT 로 워크플로 hwax-risk-claude 를 (다시) 돌린 뒤 risk_job_action(action='resume')"
+                       " 으로 재개한다 — 시계로 저절로 재개하지 않는다.",
+    "external_config": "외부 응답자(Claude) 길의 설정 문제다 — 에이전트 서버가 그 길을 열지 않았거나(EXTERNAL_LLM_ENABLED · 값이 틀려"
+                       " 닫힘) 포털 중계가 llm · consent_external · 신원 칸을 엔진에 넘기지 않았다(무엇인지는 message 에 있다). 운영자가"
+                       " 고친 뒤 risk_job_action(action='resume') 으로 재개하거나, 잡을 취소하고 llm 없이(GLM) 다시 만든다.",
 }
+# Claude 길(X-2) — 도는 claude 잡의 길잡이 메모. 셀 호출 · 쟁점 패널 · 요약이 잡 주인의 과제 줄에서 워크플로를 기다린다.
+CLAUDE_WORKFLOW_NOTE = ("이 잡은 판단 LLM 이 Claude(외부, 사용자 신고 모델)다 — 엔진 호출이 잡 주인({who})의 과제 줄에서 그 사람의 Claude"
+                        " Code 워크플로 hwax-risk-claude 가 집어 답하기를 기다린다. 워크플로를 돌리고 있지 않으면 잡 주인의 Claude Code"
+                        " 에서 그 사람의 PAT 로 돌린다(돌지 않으면 기다림 한도 뒤 보류 external_worker 로 멈춘다 — 차감은 없다).")
 REVIEW_DISABLED_FIX = ("데이터 디렉터리의 knobs.env 에 HWAXRISK_REVIEW_ENABLED=1 을 적고 앱을 다시 띄운다 — 꺼져 있는 동안 검토 잡은"
                        " 새 선점·새 호출을 내지 않는다(도는 호출은 끝까지 간다).")
 REVIEW_LIVE_STATES = ("queued", "running", "paused", "cancelling")
@@ -1002,6 +1025,8 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
                 "risk_job_action", {"job_id": job["id"], "action": "resume"},
                 "blocked 의 fix 를 고친 뒤 재개한다 — 고치지 않고 재개하면 같은 까닭으로 다시 멈춘다."), *watch])
         waiting = job.get("waiting") or {}
+        if job.get("llm") == runner.LLM_CLAUDE:
+            notes.append(CLAUDE_WORKFLOW_NOTE.format(who=(job.get("consent_external") or {}).get("by") or "동의한 사람"))
         if waiting.get("reason"):
             notes.append(f"검토 잡이 기다린다 — {waiting['reason']}" + (f": {waiting['note']}" if waiting.get("note") else "") + ".")
         if job.get("phase") in REVIEW_PHASE_NOTES:
@@ -1079,12 +1104,16 @@ def _chain_answer(answer, target_key: str, project_id: str, stage: dict, repersi
         blocked.append(_blocked("pat_unavailable", f"{what} {stage['job_id']} 를 돌릴 사용자 PAT 가 없다 — {error}",
                                 fix_register_pat() + " 등록하면 러너가 그 잡을 이어 집는다.", job_id=stage["job_id"]))
     if stage["state"] == "paused":
+        hold = stage.get("hold_code")
         blocked.append(_blocked("chain_paused", error or f"{what} 이 멈췄다.",
+                                REVIEW_HOLD_FIX[hold] if hold in ("external_worker", "external_config") else
                                 "까닭을 고친 뒤 risk_job_action(action='resume') 으로 재개한다 — 앱 재기동으로 멈춘 잡은 M4 전에는"
                                 " 저절로 재개하지 않는다(결과가 저장된 패널은 다시 저장이 먼저다).", job_id=stage["job_id"],
-                                hold_code=stage.get("hold_code"), pause_reason=stage.get("pause_reason")))
+                                hold_code=hold, pause_reason=stage.get("pause_reason")))
         return answer(mode, [*repersist_steps, _step("risk_job_action", {"job_id": stage["job_id"], "action": "resume"},
                                                      f"멈춘 {what} 을 재개한다."), *watch])
+    if stage.get("llm") == runner.LLM_CLAUDE and stage["state"] in ("queued", "running"):
+        notes.append(CLAUDE_WORKFLOW_NOTE.format(who=(stage.get("consent_external") or {}).get("by") or "동의한 사람"))
     if stage.get("advice") == "issue_yield_low":
         notes.append("최근 쟁점 패널 다섯이 전부 기각·불명이다(issue_yield_low) — 남은 쟁점을 계속 돌릴지 사람이 정한다(멈추려면"
                      " risk_job_action(action='pause')).")

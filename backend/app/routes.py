@@ -2931,8 +2931,11 @@ def post_target_flow(target_key: str, body: FlowBody, ident: identity.Identity =
 class JobBody(BaseModel):
     """잡 본문 — `mode` 가 panels(기본 — Tier 패널 잡, tier 필수)·reviews(카드 대조 검토 잡, 재설계 M2 S12)를 가른다.
 
-    reviews 의 본문은 {mode, scope?, user_memo?, consent?} 다. 패널 칸(tier·modifiers·concurrency)을 주면 422 다 — 범위는
-    scope.tiers 로 주고, 동시 수는 박스 손잡이(HWAXRISK_REVIEW_CONCURRENCY)다. 패널 잡에 scope 를 주어도 422 다(조용히 버리지 않는다).
+    reviews 의 본문은 {mode, scope?, user_memo?, consent?, llm?, consent_external?} 다. 패널 칸(tier·modifiers·concurrency)을 주면
+    422 다 — 범위는 scope.tiers 로 주고, 동시 수는 박스 손잡이(HWAXRISK_REVIEW_CONCURRENCY)다. 패널 잡에 scope 를 주어도 422 다(조용히
+    버리지 않는다). `llm`(Claude 길 X-2)은 판단 LLM — glm(없음과 같다) · claude 이고 claude 는 검토 잡에만 받는다. claude 는
+    `consent_external` 이 JSON true 여야 한다(review_runner.check_llm_choice — 아니면 422 consent_external_required) — 이 잡의 지식카드 ·
+    설계 변경 원문이 Claude(외부)로 나간다. 그래서 그 칸은 bool 로 받지 않는다(글자 'true' · 1 을 참으로 바꾸지 않게).
     """
 
     tier: str | None = None
@@ -2942,6 +2945,8 @@ class JobBody(BaseModel):
     consent: bool = False
     mode: Literal["panels", "reviews"] = "panels"
     scope: dict[str, Any] | None = None            # {tiers?, domains?, agents?, unit_ids?} — review_runner.resolve_scope
+    llm: Literal["glm", "claude"] | None = None    # 판단 LLM(Claude 길 X-2) — 없으면 glm
+    consent_external: Any = None                   # claude 의 반출 동의 — JSON true 만(사람이 동의한 뒤에만)
 
     @model_validator(mode="after")
     def _fields_of_the_mode(self) -> "JobBody":
@@ -2950,6 +2955,8 @@ class JobBody(BaseModel):
                 raise ValueError("tier 가 필요하다 — 패널 잡(mode='panels')은 Tier(A·B·C)를 받는다")
             if self.scope is not None:
                 raise ValueError("scope 는 카드 대조 검토 잡(mode='reviews')의 칸이다 — 패널 잡은 tier 로 범위를 정한다")
+            if self.llm == "claude":
+                raise ValueError("llm='claude' 는 카드 대조 검토 잡(mode='reviews')의 칸이다 — 패널 잡은 이 박스의 LLM 으로 돈다")
             return self
         panel_only = sorted(k for k in ("tier", "modifiers", "concurrency")
                             if k in self.model_fields_set and (k != "modifiers" or self.modifiers))
@@ -2992,13 +2999,16 @@ def create_job(target_key: str, body: JobBody,
         out = review_runner.create_review_job(store, target_key, owner_sub=row["owner_sub"], requester_sub=email,
                                               scope=body.scope, user_memo=body.user_memo, consent=body.consent,
                                               consent_source=consent_source, channel=channel,
-                                              actor_verified=channel != "mcp")
+                                              actor_verified=channel != "mcp", llm=body.llm,
+                                              consent_external=body.consent_external)
         params = _loads(store.query_one("SELECT params_json FROM rr_jobs WHERE id = ?", (out["job_id"],))["params_json"], {})
         _audit(store, email, scope="job", subject_id=out["job_id"], project_id=row["project_id"], action="job.create",
                after={"mode": out["mode"], "target_key": target_key, "scope": params.get("scope") or {},
                       "cells_in_scope": out["cells_in_scope"], "experts_in_scope": out["experts_in_scope"],
                       "calls_estimate": out["calls_estimate"], "consent": bool(body.consent),
-                      "consent_source": params.get("consent_source")},
+                      "consent_source": params.get("consent_source"),
+                      # 반출 동의(Claude 길 X-2) — 누가 · 언제 · 어느 입구로(claude 잡에만 — GLM 잡의 감사 행은 그대로)
+                      **runner.llm_params(runner.job_llm(params), params.get("consent_external"))},
                channel=AUDIT_CHANNELS.get(ident.source, "rest"))
         return out
     return runner.create_job(get_store(), target_key, body.tier, owner_sub=row["owner_sub"],
@@ -3231,17 +3241,26 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
     }
 
 
+def job_llm_view(params: dict) -> dict:
+    """잡 한 줄에 싣는 판단 LLM 칸(Claude 길 X-2) — claude 잡이면 {llm, consent_external{by, at, source}, llm_mismatch?}, GLM 잡은
+    {}(종전 응답 그대로 — 칸이 없으면 glm 이다)."""
+    out = runner.llm_params(runner.job_llm(params), params.get("consent_external"))
+    if out and params.get("llm_mismatch"):
+        out["llm_mismatch"] = int(params["llm_mismatch"])
+    return out
+
+
 def chain_stage(store: Any, target_key: str) -> dict | None:
-    """사슬 단계(S3-5) — 살아 있는 쟁점·종합 잡(없으면 마지막 것)의 {mode, job_id, state, hold_code, pause_reason, error, advice?}.
-    없으면 None."""
+    """사슬 단계(S3-5) — 살아 있는 쟁점·종합 잡(없으면 마지막 것)의 {mode, job_id, state, hold_code, pause_reason, error, advice?}
+    (claude 잡이면 `job_llm_view` 의 칸도). 없으면 None."""
     row = store.query_one(
-        "SELECT id, mode, state, hold_code, pause_reason, error, progress_json FROM rr_jobs WHERE target_key = ?"
+        "SELECT id, mode, state, hold_code, pause_reason, error, progress_json, params_json FROM rr_jobs WHERE target_key = ?"
         " AND mode IN ('issues', 'synth') ORDER BY state IN ('queued', 'running', 'paused', 'cancelling') DESC,"
         " created_at DESC, rowid DESC LIMIT 1", (target_key,))
     if row is None:
         return None
     out = {"mode": row["mode"], "job_id": row["id"], "state": row["state"], "hold_code": row["hold_code"],
-           "pause_reason": row["pause_reason"], "error": row["error"]}
+           "pause_reason": row["pause_reason"], "error": row["error"], **job_llm_view(_loads(row["params_json"], {}))}
     advice = (_loads(row["progress_json"], {}) or {}).get("advice")
     return {**out, "advice": advice} if advice else out
 
@@ -3684,6 +3703,7 @@ def _review_job_payload(job: dict) -> dict:
     return {"id": job["id"], "mode": review_runner.MODE, "state": job["state"], "hold_code": job["hold_code"],
             "hold_until": job["hold_until"], "hold_n": int(job["hold_n"] or 0), "error": job["error"],
             "credential_email": job["credential_email"], "scope": params.get("scope") or {},
+            **job_llm_view(params),
             "phase": progress.get("phase"), "progress": {
                 **{k: progress.get(k) for k in REVIEW_JOB_PROGRESS_KEYS},
                 # 다시 연 셀의 몫 — 잡 params 에서 읽는다(멈춘 잡은 루프가 진행판을 다시 세지 않는다, 반대 검토 4차 MEDIUM 2 · D-49)

@@ -12,7 +12,7 @@
   invented_quote   이 별칭들의 인용을 지어낸다(엔진 `checks.quote` 는 정직하게 not_found)
   lying_quote      이 별칭들의 인용을 지어내고 `checks.quote` 를 ok 로 속인다(앱 재대조가 갈라야 한다)
   truncated        출력 상한에 걸렸다 — 마지막 판정 행이 빠지고 quality.truncated·finish_reason=length
-  busy_n           앞 run N 번은 error{review_busy, retry_after_s} → done(관문 즉답)
+  busy_n           앞 run N 번은 error{review_busy, retry_after_s} → done(관문 즉답 — reason 은 busy_reason, 기본 normal)
   error_n·error    앞 run N 번은 error 프레임(기본 llm_unreachable, infra true)
   cut_n            앞 run N 번은 status 한 장 뒤 연결이 끊긴다(done 없음)
   delay_s          result 앞에서 이만큼 잔다(실제 시간)
@@ -102,6 +102,14 @@
   calls_draining   참이면 /health 는 정상인 채로 새 run · pack 만 draining 과 같이 거절한다 — /health 를 읽는 길과 호출이 가는 길이 다른
                    서버를 볼 때(묶음 검토 L7)
   health_status · health_delay_s  /health 의 상태(200 이 아니면 그 상태로 거절)와 그 앞에서 자는 실제 시간(루프 탐침 한도를 넘기는 박스)
+외부 응답자 길(Claude 길 X-2 — 엔진 README '외부 응답자' 절과 그 계약 예제 tests/fixtures/external_llm/contract 의 모양):
+  external         참이면 엔진이 그 길을 열었다 — /health capabilities 에 external_llm 과 그 칸(health_on.json), limits?llm=external
+                   은 외부 창의 limits(limits_external.json — 판 limits_rev 가 GLM 과 갈린다), llm=external 인 plan · run 은 그 판으로
+                   견주고 답한다(run 의 meta.model · llm external, usage null). 거짓이면 그 요청은 409 external_llm_disabled(rejects.json)
+  external_error   (오류 프레임, 횟수 | None) — llm=external 인 run 이 그 오류로 끝난다(횟수만큼, None 이면 늘 — 일꾼 없음 · 답 시간 초과)
+  external_meta_llm  외부 run 답의 meta.llm(기본 'external'). None 이면 답이 이 박스의 LLM 의 모양이다(llm 없음 · 모델 이름 —
+                   claude 잡인데 외부 응답자 답이 아닌 어긋남의 모양. 판 대조는 그 길의 판으로 지난 뒤다)
+  drop_llm_query   참이면 limits 가 ?llm=external 을 못 본다(포털 중계가 질의를 버렸다 — X-3a) — GLM 창이 간다
 기록 — requests(받은 요청 전부), runs(받은 run 수), max_active(동시에 돈 run 의 최댓값), drain_refused(비우기로 거절한 run · pack).
 S8(검토 루프)과 WP5b C9 가 이 파일을 넓힌다. 시험이 쓰는 여러 전문가의 팩은 `derive_pack` 이 엔진 계약 예제(pack_ok·pack_empty)에서
 전문가 이름·카드 고르기만 바꿔 짓는다(카드 글·text_sha 는 엔진이 낸 그대로다).
@@ -122,12 +130,13 @@ import httpx
 from app import review_verify
 
 CONTRACT = Path(__file__).resolve().parents[1] / "fixtures" / "card_review" / "contract"
+EXTERNAL_CONTRACT = Path(__file__).resolve().parents[1] / "fixtures" / "external_llm" / "contract"
 
 # 엔진 요청 모델(card_review.RunRequest·PlanRequest·PackRequest 와 안쪽 항목)의 칸 — 선언 밖 칸은 422 unknown_fields.
 IDENT_FIELDS = frozenset({"groups", "user_email", "user_pat", "entitlements"})
 RUN_SHAPE: dict[str, frozenset[str]] = {
     "": frozenset({"kind", "variant", "target_key", "expert", "cards", "digest", "unit", "manifest", "extra", "expect",
-                   "summary"}) | IDENT_FIELDS,
+                   "summary", "llm", "consent_external"}) | IDENT_FIELDS,
     "expert": frozenset({"key", "name", "domain", "role"}),
     "digest": frozenset({"alias", "type", "title", "record_id", "card_id"}),
     "unit": frozenset({"unit_id", "kind", "title", "summary", "notes", "lines", "context", "evidence", "missing",
@@ -151,7 +160,7 @@ RUN_SHAPE: dict[str, frozenset[str]] = {
     "expect": frozenset({"prompt_rev", "limits_rev", "limits_rev_kind"}),
 }
 PLAN_SHAPE: dict[str, frozenset[str]] = {
-    "": frozenset({"cards", "units", "expect"}) | IDENT_FIELDS,
+    "": frozenset({"cards", "units", "expect", "llm"}) | IDENT_FIELDS,
     "cards": frozenset({"alias", "record_id", "checkable", "chars"}),
     "units": frozenset({"unit_id", "manifest_chars", "body_chars"}),
     "expect": frozenset({"prompt_rev", "limits_rev"}),
@@ -167,6 +176,10 @@ NEED = "변경 줄에 그 조건의 값이 없어 판정할 수 없다"
 
 def load(name: str) -> Any:
     return json.loads((CONTRACT / name).read_text(encoding="utf-8"))
+
+
+def load_external(name: str) -> Any:
+    return json.loads((EXTERNAL_CONTRACT / name).read_text(encoding="utf-8"))
 
 
 def alias_width(n: int) -> int:
@@ -277,6 +290,7 @@ class FakeReviewEngine:
         self.lying_quote: set[str] = set()
         self.truncated = False
         self.busy_n = 0
+        self.busy_reason = "normal"         # review_busy 의 reason(외부 응답자 길의 주인마다 상한은 external_per_owner — X-2)
         self.retry_after_s = 30
         self.error_n = 0
         self.error: dict[str, Any] = {"code": "llm_unreachable", "message": "LLM 서버에 연결하지 못했다(가짜)",
@@ -343,6 +357,12 @@ class FakeReviewEngine:
         self.calls_draining = False
         self.health_status = 200
         self.health_delay_s = 0.0
+        # 외부 응답자 길(Claude 길 X-2)
+        self.external = False
+        self.external_limits = load_external("limits_external.json")
+        self.external_error: tuple[dict[str, Any], int | None] | None = None
+        self.external_meta_llm: str | None = "external"
+        self.drop_llm_query = False
         # 기록
         self.requests: list[dict[str, Any]] = []
         self.drain_refused: list[dict[str, Any]] = []
@@ -375,7 +395,8 @@ class FakeReviewEngine:
         route = path.rsplit("/", 1)[-1] if path.startswith("/agent/card-review/") else path
         with self._lock:
             self.requests.append({"method": request.method, "path": path, "route": route, "body": body,
-                                  "authorization": request.headers.get("authorization")})
+                                  "authorization": request.headers.get("authorization"),
+                                  "llm": request.url.params.get("llm")})
         if path == "/health":
             if self.health_delay_s > 0:
                 time.sleep(float(self.health_delay_s))
@@ -391,6 +412,10 @@ class FakeReviewEngine:
                 time.sleep(float(self.limits_delay_s))
             if self.limits_error is not None:
                 return httpx.Response(int(self.limits_error[0]), json=copy.deepcopy(self.limits_error[1]))
+            if request.url.params.get("llm") == "external" and not self.drop_llm_query:
+                if not self.external:
+                    return self._external_disabled("limits")
+                return httpx.Response(200, json=self.limits(external=True))
             return httpx.Response(200, json=self.limits())
         if request.method != "POST" or route not in ("pack", "plan", "run"):
             return httpx.Response(404, json={"detail": "Not Found"})
@@ -403,16 +428,26 @@ class FakeReviewEngine:
                                 fields=extra)
         if route == "pack":
             return self._pack(body)
+        external = body.get("llm") == "external"
+        if external:
+            # 엔진의 거절 차례(README) — 길이 닫혔으면 409, run 은 동의 표지가 JSON true 가 아니면 422(과제를 만들기 전)
+            if not self.external:
+                return self._external_disabled(route)
+            if route == "run" and body.get("consent_external") is not True:
+                refused = load_external("rejects.json")["external_consent_required.run"]
+                return httpx.Response(int(refused["status"]), json=copy.deepcopy(refused["body"]))
         if self.ctx_unknown:
             return self._reject(503, "ctx_unknown", "LLM 서버에 창 크기를 묻지 못해 다시 묻는 중이다(가짜)",
                                 retry_after_s=60, infra=True, retryable=True)
         expect = body.get("expect") or {}
         want = expect.get("limits_rev")
-        kind_rev = self.kind_rev(body.get("kind")) if route == "run" else None
-        if want not in (None, self.limits_rev) or (route == "run" and expect.get("limits_rev_kind") not in (None, kind_rev)):
-            # 엔진 prepare 처럼 준 것만 견주고, 거절에 지금 판(전체 · 그 종류)과 받은 expect 를 되비춘다(RB3-6).
-            return self._reject(409, "rev_mismatch", f"요청이 기대한 판({expect})이 이 서버의 판(limits_rev={self.limits_rev},"
-                                f" limits_rev_kind={kind_rev})과 다르다", limits_rev=self.limits_rev,
+        lane_rev = str(self.external_limits["limits_rev"]) if external else self.limits_rev
+        kind_rev = self.kind_rev(body.get("kind"), external=external) if route == "run" else None
+        if want not in (None, lane_rev) or (route == "run" and expect.get("limits_rev_kind") not in (None, kind_rev)):
+            # 엔진 prepare 처럼 준 것만 견주고, 거절에 지금 판(전체 · 그 종류)과 받은 expect 를 되비춘다(RB3-6). 외부 응답자 길은
+            # 그 길의 판으로 견준다(GLM 판과 갈린다 — 길을 바꾸면 셀이 처음부터 돈다).
+            return self._reject(409, "rev_mismatch", f"요청이 기대한 판({expect})이 이 서버의 판(limits_rev={lane_rev},"
+                                f" limits_rev_kind={kind_rev})과 다르다", limits_rev=lane_rev,
                                 **({"limits_rev_kind": kind_rev} if route == "run" else {}), expect=expect)
         if route == "run":
             # 엔진 prepare 의 종류별 요청 검사(재설계 M3 계약 2·6) — 입력 결손 호출은 unit.missing 이 있어야 하고, 전문가 단위 결측
@@ -429,19 +464,35 @@ class FakeReviewEngine:
                                     f"(prompt_rev={have_prompt})과 다르다", prompt_rev=have_prompt,
                                     limits_rev=self.limits_rev, limits_rev_kind=kind_rev, expect=body.get("expect"))
         if route == "plan":
-            return httpx.Response(200, json=self.plan(body))
+            plan = self.plan(body)
+            if external:
+                plan.update(limits_rev=str(self.external_limits["limits_rev"]),
+                            limits_rev_by_kind=dict(self.external_limits["limits_rev_by_kind"]), llm="external")
+            return httpx.Response(200, json=plan)
         return self._run(body)
 
     @staticmethod
     def _reject(status: int, code: str, message: str, **extra: Any) -> httpx.Response:
         return httpx.Response(status, json={"code": code, "message": message, **extra})
 
-    # -- 단발 ------------------------------------------------------------------------------
-    def kind_rev(self, kind: Any) -> str | None:
-        """그 종류의 판(limits_rev_by_kind[kind] — RB3-6). 시험이 base_limits 의 표를 바꿔 한 종류의 판만 올린다."""
-        return (self.base_limits.get("limits_rev_by_kind") or {}).get(str(kind))
+    @staticmethod
+    def _external_disabled(route: str) -> httpx.Response:
+        refused = load_external("rejects.json")[f"external_llm_disabled.{route}"]
+        return httpx.Response(int(refused["status"]), json=copy.deepcopy(refused["body"]))
 
-    def limits(self) -> dict:
+    # -- 단발 ------------------------------------------------------------------------------
+    def kind_rev(self, kind: Any, *, external: bool = False) -> str | None:
+        """그 종류의 판(limits_rev_by_kind[kind] — RB3-6). 시험이 base_limits 의 표를 바꿔 한 종류의 판만 올린다. 외부 응답자 길은
+        그 길의 limits 의 표다."""
+        source = self.external_limits if external else self.base_limits
+        return (source.get("limits_rev_by_kind") or {}).get(str(kind))
+
+    def limits(self, *, external: bool = False) -> dict:
+        if external:
+            # 외부 응답자의 창으로 센 limits(엔진 계약 예제 그대로) — gate 는 그 길의 주인마다 상한(external_per_owner)
+            out = copy.deepcopy(self.external_limits)
+            out["gate"] = {**dict(out.get("gate") or {}), "active": self.active}
+            return out
         out = copy.deepcopy(self.base_limits)
         out.update({"ctx_source": "fallback" if self.ctx_unknown else self.ctx_source, "ctx_retrying": self.ctx_unknown,
                     "limits_rev": self.limits_rev,
@@ -451,9 +502,11 @@ class FakeReviewEngine:
     def health(self) -> dict:
         drain = {"on": self.draining, "scope": "all" if self.draining else None, "until": None, "until_idle": None,
                  "hold": False, "by": "update-all" if self.draining else None, "reason": None, "set_at": None}
+        extra = ({"external_llm": copy.deepcopy(load_external("health_on.json")["external_llm"])} if self.external else {})
         return {"model": self.base_limits.get("model"), "provider": "openai", "vllm": "http://llm.fake:8000/v1",
-                "review_active": self.active, "capabilities": ["card_review", "drain"], "draining": self.draining,
-                "drain": drain,
+                "review_active": self.active,
+                "capabilities": ["card_review", "drain", *(["external_llm"] if self.external else [])], **extra,
+                "draining": self.draining, "drain": drain,
                 "card_review": {"rev": self.base_limits.get("api_rev"), "kinds": list(self.base_limits.get("kinds") or ()),
                                 "limit": 0 if self.draining else self.gate_limit,
                                 "limit_reason": "draining" if self.draining else "normal", "active": self.active,
@@ -526,7 +579,7 @@ class FakeReviewEngine:
         return self._stream(iter([_sse("error", {"code": "review_busy", "message": "카드 대조 자리가 없다(가짜)", "infra": True,
                                                  "retryable": True,
                                                  "knob": "CARD_REVIEW_CONCURRENCY · CARD_REVIEW_CONCURRENCY_WITH_DELIB",
-                                                 "reason": "normal", "retry_after_s": self.retry_after_s,
+                                                 "reason": self.busy_reason, "retry_after_s": self.retry_after_s,
                                                  "limit": self.gate_limit, "active": self.active}),
                                   _sse("done", {})]))
 
@@ -550,6 +603,13 @@ class FakeReviewEngine:
         if self._take("error_n"):
             return self._stream(iter([_sse("status", {"step": "attempt", "n": 1}),
                                       _sse("error", {**self.error, "attempt": 1}), _sse("done", {})]))
+        if body.get("llm") == "external" and self.external_error is not None:
+            with self._lock:
+                frame, left = self.external_error
+                if left is not None:
+                    self.external_error = (frame, left - 1) if left > 1 else None
+            return self._stream(iter([_sse("status", {"step": "attempt", "n": 1}), _sse("error", dict(frame)),
+                                      _sse("done", {})]))
         if self._take("cut_n"):
             def cut() -> Iterator[bytes]:
                 yield _sse("status", {"step": "attempt", "n": 1})
@@ -750,6 +810,12 @@ class FakeReviewEngine:
                            "record_id": used[0]["record_id"], "section_id": used[0]["section_id"]}
                     doc["checks"].update(src="ok", quote="ok", quote_sid=used[0]["section_id"])
                     rows.insert(rows.index(first) + 1, doc)
+        if body.get("llm") == "external" and self.external_meta_llm is not None:
+            # 외부 응답자 답의 meta(엔진 계약 예제 result_verdict_ok — model · ctx_source external, usage null, 그 길의 판, llm).
+            # external_meta_llm 이 None 이면 이 박스의 LLM 이 낸 답의 모양 그대로다(llm 없음 · 모델 이름 — 어긋남의 모양)
+            meta.update(model="external", ctx_tokens=self.external_limits["ctx_tokens"], ctx_source="external",
+                        limits_rev=str(self.external_limits["limits_rev"]),
+                        limits_rev_kind=self.kind_rev(kind, external=True), usage=None, llm=self.external_meta_llm)
         return {"kind": kind, "variant": variant, "rows": rows, "missing": missing, "extras": extras,
                 "quality": quality, "meta": meta}
 

@@ -15,8 +15,8 @@ from app.common import http_client, now_epoch
 
 # 프로토콜·예외의 정본은 러너다(러너가 이 모듈을 import 하지 않으므로 순환이 없다).
 from app.runner import (
-    NO_DECISION_CODES, EngineBusy, EngineError, EngineNoDecision, EngineRejected, EngineStreamLost, PanelEngine,
-    PatUnavailable, ReviewEngine, pat_unavailable_guidance,
+    ENGINE_EXTERNAL, LLM_CHOICES, LLM_CLAUDE, LLM_GLM, NO_DECISION_CODES, EngineBusy, EngineError, EngineNoDecision,
+    EngineRejected, EngineStreamLost, PanelEngine, PatUnavailable, ReviewEngine, pat_unavailable_guidance,
 )
 
 log = logging.getLogger("hwax_risk.engine")
@@ -26,6 +26,7 @@ __all__ = [
     "build_engine", "parse_sse", "collect_stream",
     "ReviewEngine", "PortalReviewEngine", "build_review_engine", "collect_review_stream", "review_outcome",
     "run_body", "review_domains", "review_mechanisms",
+    "LLM_GLM", "LLM_CLAUDE", "LLM_CHOICES", "ENGINE_EXTERNAL",      # 판단 LLM 이름(정본은 러너 — Claude 길 X-2)
 ]
 
 # agent-server 는 '/심의 ' 로 시작하는 message 만 심의 파이프라인으로 보낸다(deliberation.DELIBERATE_TRIGGERS).
@@ -51,6 +52,24 @@ PAT_DEGRADED_CODES = ("_pat_degraded", "credential_degraded")
 # 포털 릴레이가 에이전트 서버의 침묵 한도(AGENT_STREAM_IDLE_TIMEOUT_S)로 구독을 끊으며 보내는 error 코드.
 # 침묵 한도 셋 중 가장 안쪽이라 이것이 먼저 온다 — 앱이 재는 침묵과 같은 사정이다(엔진은 계속 돌 수 있다).
 PORTAL_STREAM_IDLE_CODE = "agent_stream_idle"
+
+# ---------------------------------------------------------------- 판단 LLM(Claude 길 X-2 — 에이전트 서버 README '외부 응답자' 절)
+# 잡의 선택은 glm(없음과 같다) · claude 이고 엔진에는 external 로 보낸다(엔진은 claude 를 422 bad_request 로 거절한다 — 이름의 정본은
+# 러너다). 옮기는 자리는 여기 하나다. GLM 잡의 요청은 한 바이트도 바뀌지 않는다(아래 함수가 빈 것을 준다).
+EXTERNAL_CAPABILITY = "external_llm"          # /health capabilities 에 이것이 있어야 엔진이 그 길을 열었다
+
+
+def engine_llm(llm: str | None) -> str | None:
+    """잡의 선택 → 엔진의 이름 — claude 면 external, 그 밖(glm · 없음)은 None(엔진 기본 — 칸을 싣지 않는다)."""
+    return ENGINE_EXTERNAL if llm == LLM_CLAUDE else None
+
+
+def llm_fields(llm: str | None, route: str) -> dict:
+    """plan · run 본문에 더할 칸 — claude 잡이면 plan 은 `llm` 만(엔진 PlanRequest 는 엄격해 동의 칸을 422 unknown_fields 로 거절한다),
+    run 은 `llm` 과 `consent_external: true`(엔진은 JSON true 만 받는다 — 사람의 동의는 잡을 만들 때 받아 params 에 적었다). GLM 은 {}."""
+    if engine_llm(llm) is None:
+        return {}
+    return {"llm": ENGINE_EXTERNAL, **({"consent_external": True} if route == "run" else {})}
 
 
 # PatUnavailable 의 정본도 러너다 — 자격 (a)(b) 부재와 포털 401/403 이 같은 처리로 모인다(plan §6.7.1 폴백 규칙).
@@ -175,6 +194,8 @@ def collect_stream(frames: Iterable[tuple[str, dict]]) -> dict:
     error: str | None = None
     error_code = ""
     error_knob: str | None = None
+    error_data: dict = {}
+    marks: dict = {}                    # result 프레임의 llm · tool_mode(외부 응답자 심의만 싣는다 — Claude 길 X-2)
 
     def add(event: Mapping[str, Any]) -> None:
         events.append(dict(event))
@@ -221,6 +242,7 @@ def collect_stream(frames: Iterable[tuple[str, dict]]) -> dict:
         elif name == "result":
             if isinstance(data.get("content"), str):
                 result_text = data["content"]
+            marks.update({k: data[k] for k in ("llm", "tool_mode") if isinstance(data.get(k), str)})
         elif name == "warning":
             code = str(data.get("code") or "")
             if code in PAT_DEGRADED_CODES:
@@ -235,14 +257,19 @@ def collect_stream(frames: Iterable[tuple[str, dict]]) -> dict:
             error = str(data.get("message") or "")
             # 엔진은 화면에 뜨는 글에 설정 이름을 넣지 않고 knob 으로 따로 싣는다 — 버리면 어느 값을 올릴지 모른다.
             error_knob = _text(data.get("knob"))
+            error_data = dict(data)
         elif name == "done":
             break
 
     if error is not None:
         if error_code in NO_DECISION_CODES:
-            # 이 프레임은 맨 끝에 온다 — 발언·보고서 번호·결정문 자리의 글(좌석별 마지막 입장)을 다 받은 뒤다.
+            # 이 프레임은 맨 끝에 온다 — 발언·보고서 번호·결정문 자리의 글(좌석별 마지막 입장)을 다 받은 뒤다. 외부 응답자 심의는
+            # 의장이 못 낸 까닭(cause — external_worker_absent 따위)을 싣는다(Claude 길 X-2).
             raise EngineNoDecision(error_code, error, knob=error_knob, report_id=report_id, turns=turns,
-                                   decision_text=decision_text or result_text)
+                                   decision_text=decision_text or result_text, cause=_text(error_data.get("cause")))
+        if error_code in review_ops.EXTERNAL_CONFIG_CODES:
+            # 외부 응답자 길이 닫혔거나 동의 · 신원 칸이 엔진에 닿지 않았다 — 심의가 시작도 안 했다(러너가 설정 보류로 멈춘다).
+            raise EngineRejected(error_code, error, knob=error_knob, detail=error_data)
         raise EngineError(f"{error_code}: {error}".strip() + (f" — 설정 {error_knob}" if error_knob else ""))
     return {
         "decision_text": decision_text or result_text,
@@ -250,6 +277,7 @@ def collect_stream(frames: Iterable[tuple[str, dict]]) -> dict:
         "events": events,
         "report_id": report_id,
         "pat_degraded": pat_degraded,
+        **marks,
     }
 
 
@@ -349,7 +377,13 @@ class PortalPanelEngine:
 
     @staticmethod
     def _health_view(info: Mapping[str, Any]) -> dict:
-        """/health 본문 → 패널 model_json 의 칸."""
+        """/health 본문 → 패널 model_json 의 칸. 외부 응답자 길을 연 박스(capabilities 에 external_llm)면 `external_llm` 칸을 더한다
+        (`external_health` — 닫힌 박스의 답은 종전 그대로다)."""
+        external = external_health(info)
+        return {**PortalPanelEngine._glm_view(info), **({"external_llm": external} if external is not None else {})}
+
+    @staticmethod
+    def _glm_view(info: Mapping[str, Any]) -> dict:
         vllm = info.get("vllm")
         endpoint_host = None
         if isinstance(vllm, str) and "://" in vllm:
@@ -613,6 +647,19 @@ def _review_health(info: Mapping[str, Any]) -> dict:
             "error": _text(block.get("error"))}
 
 
+def external_health(info: Mapping[str, Any]) -> dict | None:
+    """/health 의 외부 응답자 칸(Claude 길 X-2) — capabilities 에 external_llm 이 있을 때만 {evid_budget, ctx_tokens, max_tokens, wait_s,
+    answer_s, max_inflight}(모르는 값은 None — 0 으로 치지 않는다). 그 길을 열지 않은 박스(꺼짐 · 설정이 틀려 닫힘)는 None 이다.
+    `evid_budget` 은 외부 창에서 유도한 근거 예산이다 — 외부 응답자 패널의 브리프 크기다(GLM 의 evid_budget 이 아니다)."""
+    caps = info.get("capabilities")
+    if not (isinstance(caps, list) and EXTERNAL_CAPABILITY in caps):
+        return None
+    block = info.get("external_llm") if isinstance(info.get("external_llm"), Mapping) else {}
+    return {key: _int_or_none(block.get(key)) for key in ("evid_budget", "ctx_tokens", "max_tokens", "max_inflight")} | {
+        key: (block.get(key) if isinstance(block.get(key), (int, float)) and not isinstance(block.get(key), bool) else None)
+        for key in ("wait_s", "answer_s")}
+
+
 class PortalReviewEngine(PortalPanelEngine):
     """앱 → 포털 `/agent/card-review/{limits,pack,plan,run}` — 카드 대조(M2.md 4.2~4.4). 포털 대화를 만들지 않는다(나갈 기준 3).
 
@@ -668,9 +715,10 @@ class PortalReviewEngine(PortalPanelEngine):
                                  detail={"http_status": 200})
         return out
 
-    def limits(self, *, email: str) -> dict:
-        """이 박스의 예산과 판(M2.md 4.2) — 응답 그대로."""
-        return self._unary("GET", "limits", None, email)
+    def limits(self, *, email: str, llm: str | None = None) -> dict:
+        """이 박스의 예산과 판(M2.md 4.2) — 응답 그대로. `llm='external'`(Claude 길 X-2 — 잡의 선택 claude)이면 외부 응답자의 창으로 센
+        것을 묻는다(`?llm=external` — 판 limits_rev 가 GLM 과 갈린다). 그 밖에는 종전 그대로 묻는다."""
+        return self._unary("GET", "limits" + (f"?llm={ENGINE_EXTERNAL}" if llm == ENGINE_EXTERNAL else ""), None, email)
 
     def pack(self, agent_key: str, *, email: str) -> dict:
         """그 전문가의 지식카드 전부 → 정규 팩(응답 그대로 — 확인·동결은 cardpack 몫). 엔진은 이 사람의 PAT 로만 카드를 받는다."""

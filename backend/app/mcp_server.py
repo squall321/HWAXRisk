@@ -450,10 +450,12 @@ async def risk_open_target(kind: str, ref_id: str, consent: bool = False, flow: 
 @mcp.tool()
 async def risk_start_job(target_key: str, tier: str | None = None, consent: bool = False,
                          modifiers: list[str] | None = None, user_memo: str | None = None, concurrency: int = 1,
-                         mode: str = "panels", scope: dict | None = None) -> dict:
-    """심사 잡 시작 — 쓰기: 범위와 비용(패널 수·LLM 호출 추정)을 사용자에게 확인한 뒤 부른다(Tier C 와 호출 추정이 큰 검토는 consent=true), mode=panels(기본 — tier 필수, Tier 는 누적이다 A 도메인 대표 → B → C 전원)|reviews(카드 대조 대상의 전문가별 카드 대조 — tier·modifiers·concurrency 없이 scope={agents·domains·tiers·unit_ids} 로 범위를 주고, 전문가는 risk_next_step 의 facts.review_order 를 보고 사용자가 고른다), 심사는 앱 러너가 돌리고 결과는 웹에 그대로 보인다, 같은 대상의 살아 있는 잡(panels 는 같은 Tier)이 있으면 그것을 돌려주고, 자격이 없으면 웹 설정 화면에서 등록하라는 fix 로 답한다."""
+                         mode: str = "panels", scope: dict | None = None, llm: str | None = None,
+                         consent_external: bool | None = None) -> dict:
+    """심사 잡 시작 — 쓰기: 범위와 비용(패널 수·LLM 호출 추정)을 사용자에게 확인한 뒤 부른다(Tier C 와 호출 추정이 큰 검토는 consent=true), mode=panels(기본 — tier 필수, Tier 는 누적이다 A 도메인 대표 → B → C 전원)|reviews(카드 대조 대상의 전문가별 카드 대조 — tier·modifiers·concurrency 없이 scope={agents·domains·tiers·unit_ids} 로 범위를 주고, 전문가는 risk_next_step 의 facts.review_order 를 보고 사용자가 고른다), 심사는 앱 러너가 돌리고 결과는 웹에 그대로 보인다, 같은 대상의 살아 있는 잡(panels 는 같은 Tier)이 있으면 그것을 돌려주고, 자격이 없으면 웹 설정 화면에서 등록하라는 fix 로 답한다. llm=glm(기본 — 빼도 같다)|claude(검토 잡만 — 판단 LLM 이 사용자 본인의 Claude Code 워크플로 hwax-risk-claude 다): 이 잡의 지식카드·설계 변경 원문이 Claude(외부)로 나갑니다 — 사용자에게 그 사실을 보이고 동의를 받은 뒤에만 consent_external=true 를 더한다(동의 없이 true 를 채우지 않는다 · 없으면 consent_external_required), 이 박스의 에이전트 서버가 그 길을 열지 않았으면 external_llm_unavailable, 잡은 동의한 사람의 PAT 로만 돌고 그 사람이 Claude Code 에서 워크플로를 돌려야 나아간다(멈추면 보류 external_worker), 사슬이 잇는 쟁점·종합 잡도 같은 선택과 동의를 물려받는다."""
     return await _entry(entry.start_job, target_key=target_key, tier=tier, consent=consent, modifiers=modifiers,
-                        user_memo=user_memo, concurrency=concurrency, mode=mode, scope=scope)
+                        user_memo=user_memo, concurrency=concurrency, mode=mode, scope=scope, llm=llm,
+                        consent_external=consent_external)
 
 
 @mcp.tool()

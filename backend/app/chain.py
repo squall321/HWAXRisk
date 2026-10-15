@@ -102,6 +102,15 @@ def _next_round(store: RiskStore, target_key: str) -> int:
     return int(row["r"] or 0) + 1
 
 
+def llm_kwargs(params: Mapping[str, Any]) -> dict:
+    """앞 잡 params 의 판단 LLM 과 동의 기록 → 다음 잡을 만드는 함수의 인자. GLM 잡이면 {}(종전 인자 그대로)."""
+    from app import runner  # noqa: PLC0415 — runner 는 무겁다(쟁점 · 종합이 이미 지연 import 로 쓴다).
+
+    if runner.job_llm(params) is None:
+        return {}
+    return {"llm": runner.LLM_CLAUDE, "consent_external": dict(params.get("consent_external") or {})}
+
+
 def chain_marked(store: RiskStore, job_id: str) -> bool:
     """M3 코드가 세운 검토 잡인가 — 만들 때 단 사슬 표지(`params_json.chain`). M2 코드가 세운 잡은 v5 로 올린 뒤에도 사슬의 출발점이
     아니다(review1 M8 — 사람이 시작하지 않은 쟁점 패널·요약을 돌리지 않는다)."""
@@ -126,7 +135,9 @@ def create_stage_job(store: RiskStore, target_key: str, stage: str, *, prev: Map
         if existing is not None:
             return {"job_id": existing, "stage": stage, "created": False, "chain": chain}
         kwargs = {"owner_sub": prev["owner_sub"], "requester_sub": params.get("requester"), "consent_source": "chain",
-                  "chain": chain}
+                  "chain": chain,
+                  # 판단 LLM 과 반출 동의 기록을 물려받는다(Claude 길 X-2) — 검토 잡이 claude 였으면 쟁점 · 종합도 claude 다(GLM 은 칸 없음)
+                  **llm_kwargs(params)}
         made = (issues.create_issues_job(store, target_key, user_memo=params.get("user_memo"), **kwargs) if stage == "issues"
                 else synth.create_synth_job(store, target_key, **kwargs))
         if made.get("created") is False:

@@ -14,7 +14,7 @@ from typing import Any, Protocol
 
 import httpx
 
-from app import brief, config, planner, taxonomy
+from app import brief, config, planner, review_ops, taxonomy
 from app.common import canonical_json, http_client, new_uuid, now_epoch, sha256_hex
 from app.errors import AppError
 
@@ -74,11 +74,13 @@ PERSIST_ERROR_CODE = "persist_error"
 PERSIST_ABANDONED_CODE = "persist_abandoned"
 # 자격(사용자 PAT)이 없어 시작하지 못한 쟁점 패널 — 잡은 보류 credential 로 멈춘다(재설계 M3 review1 M1).
 CREDENTIAL_HOLD_CODE = "credential_hold"
+# 외부 응답자 길(Claude 길 X-2)이 닫혔거나 동의 · 신원 칸이 엔진에 닿지 않아 시작하지 못한 쟁점 패널 — 잡은 보류 external_config 로 멈춘다.
+EXTERNAL_CONFIG_HOLD = "external_config"
 # 좌석 재시도와 연속 실패(ENGINE_FAIL_STREAK)에 세지 않는 패널 error 코드 — 좌석 탓이 아닌 중단이다. 세면 좌석과
 # 무관한 일 세 번에 그 좌석이 skipped 로 굳고 잡이 죽는다.
 UNCHARGED_CODES: tuple[str, ...] = (*STREAM_LOST_CODES, RESTART_CODE, *NO_DECISION_CODES, *UNSTARTED_CODES,
                                     BRIEF_ERROR_CODE, BRIEF_RETRY_CODE, PERSIST_ERROR_CODE, PERSIST_ABANDONED_CODE,
-                                    CREDENTIAL_HOLD_CODE)
+                                    CREDENTIAL_HOLD_CODE, EXTERNAL_CONFIG_HOLD)
 # 다시 저장을 기다리는 타깃의 잡이 줄에서 기다리는 까닭(잡 행 error) — 집으면 지운다.
 REPERSIST_PENDING_CODE = "repersist_pending"
 PROGRESS_WRITE_INTERVAL_S = 60     # 도는 패널의 '마지막 신호' 를 잡 행에 적는 간격 — 줄마다 적으면 15초 ping 이 DB 를 두드린다
@@ -183,11 +185,13 @@ class EngineNoDecision(EngineError):
     좌석은 전부 발언했다 — 실패한 것은 맨 끝의 의장 호출(대개 LLM 호출 한도)이다. 엔진은 좌석별 마지막 입장을
     결과로 내리고 회의록을 보고서로 저장한 뒤 error 로 끝낸다. 그래서 패널은 error 로 닫되 좌석 재시도와 연속
     실패에 세지 않고, 엔진이 남긴 것(`conv_id`·`report_id`·`decision_text`)을 패널에 적고 잡을 멈춘다(run_panel).
-    `knob` 은 엔진이 알린 설정 이름이다 — 엔진은 화면에 뜨는 글(message)에 이름을 넣지 않고 따로 싣는다.
+    `knob` 은 엔진이 알린 설정 이름이다 — 엔진은 화면에 뜨는 글(message)에 이름을 넣지 않고 따로 싣는다. `cause` 는 외부 응답자
+    심의(Claude 길 X-2)가 의장이 못 낸 까닭으로 싣는 코드다(external_worker_absent 따위 — 없으면 None).
     """
 
     def __init__(self, code: str, message: str, *, knob: str | None = None, conv_id: str | None = None,
-                 report_id: Any = None, turns: Sequence[Mapping[str, Any]] = (), decision_text: str = "") -> None:
+                 report_id: Any = None, turns: Sequence[Mapping[str, Any]] = (), decision_text: str = "",
+                 cause: str | None = None) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code
         self.knob = knob
@@ -195,6 +199,7 @@ class EngineNoDecision(EngineError):
         self.report_id = report_id
         self.turns = list(turns)
         self.decision_text = decision_text
+        self.cause = cause
 
 
 class EngineRejected(EngineError):
@@ -451,6 +456,64 @@ def resolve_credential(store: Any, settings: Any | None, owner_sub: str | None,
     시크릿 값은 돌려주지 않는다(엔진 클라이언트가 같은 규칙으로 다시 읽는다). 반환은 {kind, email?}.
     """
     return resolve_credential_with_note(store, settings, owner_sub, requester_sub)[0]
+
+
+# ---------------------------------------------------------------- 판단 LLM(Claude 길 X-2 — 포털 docs/risk-claude-engine)
+# 잡의 선택은 glm(없음과 같다) · claude 이고 엔진에는 external 로 보낸다(engine_client 가 옮긴다). 잡 params 의 칸 — `llm`(claude 잡에만
+# 있다) · `consent_external`{by, at, source}(누가 · 언제 · 어느 입구로 반출에 동의했나) · `llm_mismatch`(claude 잡인데 외부 응답자 답이
+# 아니었던 호출 · 패널 수). 사슬이 세우는 쟁점 · 종합 잡은 앞 잡의 llm 과 동의 기록을 물려받는다. GLM 잡에는 칸이 하나도 없다.
+LLM_GLM = "glm"
+LLM_CLAUDE = "claude"
+LLM_CHOICES: tuple[str, ...] = (LLM_GLM, LLM_CLAUDE)
+ENGINE_EXTERNAL = "external"
+EXTERNAL_WORKFLOW = "hwax-risk-claude"     # 잡 주인이 Claude Code 에서 돌리는 워크플로(포털 infra/pipeline — X-3)
+JUDGE_CLAUDE = "Claude(외부, 사용자 신고 모델)"   # 보고서 · 품질 글의 '판단 LLM' — 모델은 잡 주인이 Claude Code 에서 고른 것이다
+
+
+def job_llm(params: Mapping[str, Any] | None) -> str | None:
+    """잡의 판단 LLM 선택 — claude 면 'claude', 그 밖(칸 없음 · glm)은 None(GLM, 종전)."""
+    return LLM_CLAUDE if (params or {}).get("llm") == LLM_CLAUDE else None
+
+
+def llm_params(llm: str | None, consent: Mapping[str, Any] | None) -> dict:
+    """잡 params(와 응답)에 넣을 칸 — claude 면 {llm, consent_external}, GLM 이면 {}(종전 params 와 같은 바이트)."""
+    if llm != LLM_CLAUDE:
+        return {}
+    return {"llm": LLM_CLAUDE, "consent_external": dict(consent or {})}
+
+
+def external_consenter(params: Mapping[str, Any] | None) -> str | None:
+    """claude 잡에서 반출에 동의한 사람 — 그 잡의 엔진 호출(카드 대조 · 요약 · 쟁점 패널)은 이 사람의 PAT 로만 돈다(과제는 그 사람의
+    Claude Code 워크플로가 집는다). GLM 잡 · 기록이 없으면 None."""
+    if job_llm(params) is None:
+        return None
+    consent = (params or {}).get("consent_external")
+    who = consent.get("by") if isinstance(consent, Mapping) else None
+    return str(who) if who else None
+
+
+def resolve_job_credential(store: Any, settings: Any | None, owner_sub: str | None, requester_sub: str | None,
+                           params: Mapping[str, Any] | None) -> tuple[dict | None, str | None]:
+    """쟁점 · 종합 잡의 자격 — GLM 은 `resolve_credential_with_note`(요청자 → 대상 소유자) 그대로다. claude 잡은 동의한 사람의 PAT
+    하나만 본다 — 대상 소유자의 PAT 로도 서비스 계정으로도 내려가지 않는다(엔진의 과제는 호출 신원의 줄에 서고 그 사람의 워크플로만
+    집는다 — 남의 PAT 로 돌면 아무도 집지 못하거나 동의하지 않은 사람의 Claude 로 나간다). kind 는 그 사람이 대상 소유자면 owner, 아니면
+    requester 다(러너가 그 사람의 sub 를 엔진에 넘긴다)."""
+    if job_llm(params) is None:
+        return resolve_credential_with_note(store, settings, owner_sub, requester_sub)
+    who = external_consenter(params)
+    credential, note = resolve_credential_with_note(store, settings, who)
+    if credential is not None:
+        return {**credential, "kind": "owner" if who == owner_sub else "requester"}, note
+    return None, (f"{note} — Claude 길은 반출에 동의한 사람({who or '기록 없음'})의 PAT 로만 돈다(대상 소유자 · 서비스 계정으로"
+                  " 내려가지 않는다)")
+
+
+def note_llm_mismatch(store: Any, job_id: str) -> None:
+    """claude 잡의 답이 외부 응답자 답이 아니었다 — 잡 params 의 `llm_mismatch` 셈을 하나 올린다(한 문장 — 워커 여럿이 겹쳐도 잃지
+    않는다). 잡 행 · 진행판이 이 셈을 보이고, 보고서 · 품질 글은 그 호출 · 패널의 표지를 센다."""
+    store.execute("UPDATE rr_jobs SET params_json = json_set(COALESCE(params_json, '{}'), '$.llm_mismatch',"
+                  " COALESCE(json_extract(params_json, '$.llm_mismatch'), 0) + 1), updated_at = ? WHERE id = ?",
+                  (now_epoch(), job_id))
 
 
 # ---------------------------------------------------------------- delib_opts 조립(plan §6.6.4)
@@ -941,6 +1004,13 @@ def record_panel_calls(store: Any, panel: Mapping[str, Any], events: Sequence[Ma
 
 
 # ---------------------------------------------------------------- 잡(plan §6.4.3·§8.2.3)
+def _job_params(job: Mapping[str, Any]) -> dict:
+    """잡 dict 의 params — 러너가 집은 잡은 `params`(이미 푼 것), 다시 저장의 잡은 행의 `params_json` 이다. 둘 다 없으면 {}."""
+    if isinstance(job.get("params"), Mapping):
+        return dict(job["params"])
+    return _params(job) if "params_json" in job else {}
+
+
 def _params(row: Mapping[str, Any]) -> dict:
     try:
         value = json.loads(row["params_json"] or "{}")
@@ -1260,8 +1330,8 @@ def claim_next_job(store: Any, settings: Any | None = None, *, engine: Any | Non
                 if last_error != note:
                     store.execute("UPDATE rr_jobs SET error = ?, updated_at = ? WHERE id = ?", (note, now_epoch(), job["id"]))
                 continue
-        credential, credential_note = resolve_credential_with_note(
-            store, cfg, job["owner_sub"], _params(row).get("requester"))
+        credential, credential_note = resolve_job_credential(
+            store, cfg, job["owner_sub"], _params(row).get("requester"), _params(row))
         if credential is None:
             # 멈춘 잡은 5초마다 다시 판정된다 — 글이 바뀔 때만 쓴다(위의 다시 저장 대기와 같다). 매번 쓰면 updated_at 이 늘
             # 지금이라 '언제부터 멈췄나' 가 보이지 않고 쓰기만 쌓인다.
@@ -1423,23 +1493,27 @@ def seat_contract_rev() -> str:
     return sha256_hex(taxonomy.asset_path("seat-contract").read_bytes())[:12]
 
 
-def snapshot_model(engine: Any) -> dict:
+def snapshot_model(engine: Any, *, llm: str | None = None) -> dict:
     """엔진이 health() 를 노출하면 D6 model_json 스냅샷을 만든다(없으면 captured='unavailable').
 
     plan §6.7.2 1단계의 출처 스냅샷이다 — 정상이면 `captured='health_snapshot'`, 불통·미노출이면
     `captured='unavailable'`·`model='unknown'` 이고 어느 경우에도 예외를 올리지 않는다.
+    `llm='claude'`(Claude 길 X-2)면 판단 LLM 이 외부 응답자다 — `llm: external` 을 달고 근거 예산(`evid_budget`)을 /health 의
+    `external_llm.evid_budget`(외부 창에서 유도한 것 — `engine_client.external_health`)으로 둔다. 그 길을 열지 않은 박스 · 불통이면
+    None 이라 브리프가 바닥 프로파일로 떨어진다. GLM 은 종전 그대로다.
     """
+    external = {"llm": ENGINE_EXTERNAL} if llm == LLM_CLAUDE else {}
     probe = getattr(engine, "health", None)
     if not callable(probe):
         return {"runtime": "agent-server", "captured": "unavailable", "model": "unknown",
-                "seat_contract_rev": seat_contract_rev()}
+                "seat_contract_rev": seat_contract_rev(), **external}
     try:
         info = dict(probe() or {})
     except Exception as exc:  # noqa: BLE001 — /health 불통은 비치명이고 패널은 그대로 진행한다.
         log.warning("엔진 health 조회 실패(비치명): %s", exc)
         return {"runtime": "agent-server", "captured": "unavailable", "model": "unknown",
-                "seat_contract_rev": seat_contract_rev()}
-    return {
+                "seat_contract_rev": seat_contract_rev(), **external}
+    out = {
         "runtime": "agent-server",
         "provider": info.get("provider") or "vllm",
         "model": info.get("model") or "unknown",
@@ -1455,6 +1529,11 @@ def snapshot_model(engine: Any) -> dict:
         # 엔진이 제 모델 창에서 유도한 근거 예산(자) — 러너가 브리프 크기를 정한다(`brief.web_profile`). 옛 엔진은 null.
         "evid_budget": info.get("evid_budget"),
     }
+    if external:
+        block = info.get("external_llm") if isinstance(info.get("external_llm"), Mapping) else {}
+        budget = block.get("evid_budget")
+        out.update(external, evid_budget=budget if isinstance(budget, int) and not isinstance(budget, bool) else None)
+    return out
 
 
 def _quality(
@@ -1640,6 +1719,8 @@ def run_panel(
         return {"panel_id": None, "status": "missing_interface", "missing": missing}
 
     issue_job = job.get("mode") == "issues"
+    # 판단 LLM(Claude 길 X-2) — 사슬이 물려준 claude 쟁점 잡이면 패널이 외부 응답자로 돈다(좌석 도구 없는 evidence_only — 엔진이 강제)
+    llm = job_llm(params)
     if issue_job:
         # 쟁점 잡(M3 S3-7) — 대기 쟁점 하나의 패널. 좌석 원장을 쓰지 않는다(편성 전후 rr_coverage 그대로).
         from app import issues  # noqa: PLC0415 — issues 는 이 모듈을 쓴다.
@@ -1657,9 +1738,10 @@ def run_panel(
     else:
         planner.start_panel_seats(store, panel["id"])
     try:
-        model_json = snapshot_model(engine)
+        model_json = snapshot_model(engine, llm=llm)
         # 브리프 크기는 엔진이 이 패널을 시작할 때 알려 준 근거 예산에서 정한다(WP1 S9) — 패널마다 다시 읽으므로 엔진 창이
-        # 바뀌거나 창을 아직 못 물어본 가정값이 바로잡히면 다음 패널부터 따라간다.
+        # 바뀌거나 창을 아직 못 물어본 가정값이 바로잡히면 다음 패널부터 따라간다. claude 잡은 외부 창의 예산이다(GLM 1M 창으로 지은
+        # 브리프가 Claude 로 가지 않게 — snapshot_model 이 /health 의 external_llm.evid_budget 을 둔다).
         profile = brief.web_profile(model_json.get("evid_budget"))
         model_json["brief_profile"] = {"name": profile.name, "budget": profile.budget}
         target = store.query_one("SELECT kind, ref_id FROM rr_targets WHERE target_key = ?", (job["target_key"],))
@@ -1682,6 +1764,9 @@ def run_panel(
             store, settings, panel, user_memo=params.get("user_memo") or "", narrative_mod=narrative_mod, loss=loss,
             profile=profile, diff_ref=diff_ref,
         )
+        if llm is not None:
+            # 외부 응답자 심의 — 엔진은 동의 표지가 JSON true 여야 과제를 만든다(사람의 동의는 검토 잡을 만들 때 받아 잡에 물려 왔다)
+            delib_opts = {**delib_opts, "llm": ENGINE_EXTERNAL, "consent_external": True}
         # 브리프는 시변 조립물이라 이 패널이 실제로 받은 전문을 동결한다(§5.6.1).
         frozen = {**freeze_brief(store, panel, delib_opts["evidence"]), **loss,
                   # 검색어를 실어 보냈는가 — 엔진 상태줄이 '질문으로 찾았다' 고 하면 중간(옛 포털)이 키를 버린 것이다.
@@ -1695,7 +1780,9 @@ def run_panel(
     # 러너 자격 (b)(c) 사용자 PAT 를 쓰려면 그 사람의 sub 가 엔진까지 가야 한다(plan §6.7 3단계). 잡이 요청자
     # 자격으로 집혔으면 요청자를 넘긴다 — 늘 타깃 owner 를 넘기던 동안 잡 행은 '요청자 자격' 이라 적고 엔진은
     # owner(없으면 서비스) PAT 로 돌았다.
-    credential_sub = params.get("requester") if job.get("credential") == "requester" else job.get("owner_sub")
+    # claude 잡은 반출에 동의한 사람의 PAT 로만 돈다 — 그 사람의 워크플로만 과제를 집는다(대상 소유자 · 서비스로 내려가지 않는다)
+    credential_sub = external_consenter(params) or (
+        params.get("requester") if job.get("credential") == "requester" else job.get("owner_sub"))
     optional: dict = {}
     run_params = _run_parameters(engine)
     if "on_progress" in run_params:
@@ -1761,6 +1848,13 @@ def run_panel(
             return _close_panel_stream_lost(store, panel, job, exc)
         except EngineNoDecision as exc:
             return _close_panel_no_decision(store, panel, job, exc)
+        except EngineRejected as exc:
+            # 외부 응답자 길이 닫혔거나 동의 · 신원 칸이 엔진에 닿지 않았다(collect_stream — Claude 길 X-2) — 심의는 시작도 안 했다.
+            # 설정 문제라 같은 패널을 다시 내도 같다 — 쟁점 잡을 설정 보류로 멈춘다(차감 없음).
+            if issue_job and exc.code in review_ops.EXTERNAL_CONFIG_CODES:
+                return _hold_issue_job(store, panel, job, EXTERNAL_CONFIG_HOLD, str(exc))
+            error = f"engine_error: {exc}"
+            break
         except EngineError as exc:
             error = f"engine_error: {exc}"
             break
@@ -1961,6 +2055,20 @@ def _hold_issue_job_for_credential(store: Any, panel: Mapping[str, Any], job: Ma
     return {"panel_id": panel["id"], "status": "paused", "error": "pat_unavailable"}
 
 
+def _hold_issue_job(store: Any, panel: Mapping[str, Any], job: Mapping[str, Any], hold_code: str, why: str) -> dict:
+    """쟁점 잡을 코드 보류로 멈춘다(Claude 길 X-2 — external_config) — 자격 보류와 같은 길이다: 패널은 시작하지 못한 것처럼 닫고(차감
+    없음 · 연속 오류에 세지 않는다 — 패널 error 가 UNCHARGED 코드로 시작한다) 쟁점은 대기로 돌린다. 멈춘 잡이 살아 있어 사슬은 종합으로
+    넘어가지 않는다. 사람이 고치고 재개하면 이어 돈다."""
+    _release_panel(store, panel, charge=False)
+    store.execute("UPDATE rr_panels SET status = 'error', error = ?, ended_at = ? WHERE id = ?",
+                  (f"{hold_code}: 쟁점 패널을 시작하지 못했다 — {why}", now_epoch(), panel["id"]))
+    row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job["id"],))
+    if row is not None and row["state"] == "running":
+        _set_job(store, job["id"], "paused", by=f"code:{hold_code}", error=f"{hold_code}: {why}",
+                 hold={"code": hold_code, "until": None})
+    return {"panel_id": panel["id"], "status": "paused", "error": hold_code}
+
+
 def _close_panel_stream_lost(store: Any, panel: Mapping[str, Any], job: Mapping[str, Any],
                              lost: EngineStreamLost) -> dict:
     """앱이 스트림을 놓은 패널을 닫는다 — 좌석 재시도와 연속 실패에 세지 않고 잡을 멈춘다.
@@ -2065,6 +2173,13 @@ def _close_panel_no_decision(store: Any, panel: Mapping[str, Any], job: Mapping[
     # 그 사이 사람이 취소했으면(cancelling) 그 전이를 덮지 않는다 — 다음 편성에서 cancelled 가 된다.
     row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job["id"],))
     if row is not None and row["state"] == "running":
+        if failed.cause in review_ops.EXTERNAL_WORKER_CODES:
+            # 외부 응답자 심의의 의장이 과제를 받을 워커가 없어 못 냈다(Claude 길 X-2) — 엔진이 이미 기다림 한도와 의장 재호출을 다
+            # 썼다. 사람이 잡 주인의 Claude Code 워크플로를 다시 돌리고 재개한다(시계로 저절로 재개하지 않는다).
+            _set_job(store, job["id"], "paused", by=f"code:{failed.cause}", hold={"code": "external_worker", "until": None},
+                     error=f"{error} — 잡을 멈췄다(보류 external_worker · 좌석 재시도는 차감하지 않았다). 잡 주인의 Claude Code 에서"
+                           f" 워크플로 {EXTERNAL_WORKFLOW} 를 그 사람의 PAT 로 (다시) 돌린 뒤 재개한다")
+            return {"panel_id": panel["id"], "status": "error", "error": error}
         how = "엔진 박스의 그 설정을 올린 뒤 재개하면 이어 돈다" if failed.knob else "재개하면 이어 돈다"
         _set_job(store, job["id"], "paused", by=f"code:{failed.code}",
                  error=f"{error} — 잡을 멈췄다(좌석 재시도는 차감하지 않았다). {how}")
@@ -2333,6 +2448,18 @@ def _complete_panel(
         # 포털 대화를 못 만든 채 돌았다 — 포털에 이 패널의 발언이 남지 않았다(끊겼다면 부분 결과도 없다).
         if result.get("conv_missing"):
             quality["flags"].append("conversation_absent")
+        if job_llm(_job_params(job)) is not None:
+            # claude 잡의 패널(Claude 길 X-2) — 무엇이 돌았나는 엔진 result 프레임의 llm 이 정본이다. external 이면 판단 LLM 을 적고
+            # 좌석 도구가 없던 등급(tool_mode evidence_only)을 패널에 남긴다. 아니면(중계가 llm 을 버려 이 박스의 LLM 으로 돌았다)
+            # Claude 로 적지 않고 llm_mismatch 를 단다(잡에도 셈을 올린다).
+            if result.get("llm") == ENGINE_EXTERNAL:
+                quality["llm"] = ENGINE_EXTERNAL
+                if result.get("tool_mode") in ("tools", "evidence_only"):
+                    store.execute("UPDATE rr_panels SET tool_mode = ? WHERE id = ?", (result["tool_mode"], panel["id"]))
+            else:
+                quality["flags"].append("llm_mismatch")
+                quality["llm_mismatch"] = {"want": ENGINE_EXTERNAL, "got": result.get("llm")}
+                note_llm_mismatch(store, job["id"])
         store.execute(
             "UPDATE rr_panels SET quality_json = ?, llm_calls = ? WHERE id = ?",
             (canonical_json(quality), llm_calls, panel["id"]),
