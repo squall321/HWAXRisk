@@ -260,7 +260,8 @@ def test_a_skipped_cells_lines_say_skip_and_its_reason_never_out_of_scope(store,
     r.finish(running or out["job"]["job_id"])
     assert _head(store, key, PEER)["state"] == "ready"                      # 넘김을 실은 보고서로 다시 마감됐다
     md = expert_report.render_report_md(expert_report.load_report(store, key, PEER))
-    lines = [ln for ln in md.splitlines() if ln.startswith("- 단위 ") and "넘김" in ln]
+    # 본 범위 절(단위 줄 · 보지 못한 것) — 단위별 분석 · 메커니즘 절의 '넘김 — 일부만 판정' 표지(4차 MEDIUM 1)는 따로 본다
+    lines = [ln for ln in _md_section(md, "본 범위").splitlines() if ln.startswith("- 단위 ") and "넘김" in ln]
     assert len(lines) == 2 and all(ln.endswith(" — 넘김 — «입력이 와야 본다»") for ln in lines)
     assert "범위 밖" not in "".join(lines)
 
@@ -287,6 +288,106 @@ def test_skipping_a_pack_blocked_experts_cells_finalizes_it_without_a_pack_and_c
     assert _seat(store, key, PEER) == ("skipped", f"cells_skipped:{n}")
     assert _head(store, key, PEER)["state"] == "ready"
     assert {u["why"]["code"] for u in expert_report.load_report(store, key, PEER)["scope"]["unseen"]} == {"skipped"}
+
+
+def _stance(store, key: str, agent: str) -> tuple[str, str, str] | None:
+    """(rr_seat_opinions.final_stance, 의견 json 의 final_stance, turns[0].stance) — 의견 행이 없으면 None."""
+    row = store.query_one("SELECT final_stance, opinion_json FROM rr_seat_opinions WHERE target_key = ? AND agent_key = ?",
+                          (key, agent))
+    if row is None:
+        return None
+    opinion = json.loads(row["opinion_json"])
+    return row["final_stance"], opinion["final_stance"], opinion["turns"][0]["stance"]
+
+
+def _md_section(md: str, head: str) -> str:
+    return md.split(f"## {head}")[1].split("\n## ")[0]
+
+
+def test_an_expert_with_only_skipped_cells_abstains_and_its_skipped_units_never_read_as_clean(store):
+    """반대 검토 4차 MEDIUM 1 · D-49(재현 P1A) — 카드 묶음을 끝내 못 받은 전문가의 셀(전부 failed)을 넘기고 마감하면 검토한 셀이 없으니
+    입장은 abstain 이다(X1-15 — 검토한 셀이 없으면 abstain · 기권은 검토한 셀로만 정한다). 종전에는 넘긴 셀까지 판정한 셀로 읽어
+    agree 였다. 원장(skipped · cells_skipped)과 요약(검토 0 · 넘김 n)이 그 입장과 같은 말을 한다. 단위별 분석 · 메커니즘 절은 넘긴 단위를
+    숨기지 않고 '넘김 — 일부만 판정' 으로 보인다 — 'FAIL 0장 · … · 걸림 없음 0장' 으로 읽히지 않는다."""
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL, PEER]})
+    fake = FakeReviewEngine(rig.packs())
+    fake.pack_errors = {PEER: _pack_error("card_fetch_failed")}
+    r = rig.Rig(store, fake)
+    r.finish(job_id, step=2000)
+    n = len(_cells(store, key, PEER))
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(cells=[[u, PEER] for u in _cells(store, key, PEER)],
+                                                           reason="이 전문가의 카드가 아직 없다"), ident=ME)
+    r.finish(out["job"]["job_id"])
+    assert _stance(store, key, PEER) == ("abstain", "abstain", "abstain")
+    assert _seat(store, key, PEER) == ("skipped", f"cells_skipped:{n}")
+    summary = _head(store, key, PEER)["summary_md"]
+    assert "가운데 검토 0(" in summary and f" · 미완 0 · 대기 0 · 넘김 {n}(일부만 판정)." in summary
+    report = expert_report.load_report(store, key, PEER)
+    assert [u.get("partial_cell") for u in report["by_unit"]] == [True] * n
+    assert [m.get("partial_cell") for m in report["mechanisms"]] == [True] * n
+    md = expert_report.render_report_md(report)
+    by_unit = _md_section(md, "단위별 분석")
+    assert by_unit.count(" — 넘김 — 일부만 판정\n") == n and "#### 걸림 없음 · 해당 없음" not in by_unit
+    assert _md_section(md, "따져 본 메커니즘(카드 밖 호출)").count(" — 넘김 — 일부만 판정 · 적힌 것 없음") == n
+
+
+def test_skipping_the_only_failed_cell_never_turns_an_abstain_into_agree(store):
+    """반대 검토 4차 MEDIUM 1 · D-49(재현 P1B) — 범위가 한 단위뿐인 전문가의 셀이 no_rows 로 실패하면(판정 행 0) 입장은 abstain 이고,
+    그 셀을 넘겨도 abstain 이다 — 종전에는 넘김 하나로 agree 로 뒤집혔다(넘긴 셀은 입장을 동의로 움직이지 못한다)."""
+    from app import units
+
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    job_id = rig.job(store, key, scope={"agents": [PEER], "unit_ids": unit_ids[:1]})
+    fake = FakeReviewEngine(rig.packs())
+    fake.error_cells = {(PEER, unit_ids[0]): NO_ROWS}
+    r = rig.Rig(store, fake)
+    r.finish(job_id)
+    assert _cells(store, key, PEER)[unit_ids[0]]["state"] == "failed"
+    assert _stance(store, key, PEER) == ("abstain",) * 3
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(cells=[[unit_ids[0], PEER]], reason="엔진이 답을 못 낸다"), ident=ME)
+    r.finish(out["job"]["job_id"])
+    assert _head(store, key, PEER)["state"] == "partial" and _stance(store, key, PEER) == ("abstain",) * 3
+
+
+@pytest.mark.parametrize("skipped,reviewed,before,after", [
+    ("FAIL", "OK", "abstain", "oppose"),
+    ("WARNING", "OK", "abstain", "conditional"),
+    ("OK", "undetermined", "abstain", "abstain"),
+])
+def test_a_skipped_cells_candidates_only_move_a_reviewed_stance_toward_conditional_or_oppose(store, skipped, reviewed, before,
+                                                                                                after):
+    """반대 검토 4차 MEDIUM 1 · D-49 — 입장은 검토한 셀로 정하고(X1-15), 넘긴 셀의 걸림 후보는 그 입장을 조건부 · 반대 쪽으로만
+    움직인다. ① 넘긴 셀만 있을 때(검토 0)는 걸림 후보가 있어도 기권이다 — 기권은 검토한 셀로만 정한다(그 걸림은 finding · 보고서
+    '보지 못한 것' · 요약 줄로 남는다). ② 검토한 셀이 동의면 넘긴 셀의 FAIL 은 반대 · WARNING 은 조건부로 올린다. ③ 검토한 셀이 보류뿐이면
+    (기권) 넘긴 셀의 걸림 없음은 동의로 바꾸지 못한다 — 종전에는 넘긴 셀의 OK 가 적용 판정에 들어 agree 였다."""
+    from app import units
+
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    records = [str(c["record_id"]) for c in fre.load("pack_ok.json")["cards"]]
+    fake = FakeReviewEngine(rig.packs())
+    fake.offcard_findings = 0
+    fake.verdicts = {records[0]: ("yes", skipped)}
+    fake.error_cells, fake.error_kinds = {(SEAL, unit_ids[0]): NO_ROWS}, {"offcard"}
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [SEAL], "unit_ids": unit_ids[:1]}))
+    assert _cells(store, key, SEAL)[unit_ids[0]]["state"] == "failed"
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(cells=[[unit_ids[0], SEAL]], reason="카드 밖 호출이 계속 실패"),
+                                 ident=ME)
+    r.finish(out["job"]["job_id"])
+    assert _stance(store, key, SEAL) == (before,) * 3
+    fake.error_cells = {}
+    fake.verdicts = {rid: ("unknown", "undetermined") for rid in records} if reviewed == "undetermined" else {}
+    r.finish(rig.job(store, key, scope={"agents": [SEAL], "unit_ids": unit_ids[1:2]}))
+    assert _cells(store, key, SEAL)[unit_ids[1]]["state"] == "reviewed"
+    assert _stance(store, key, SEAL) == (after,) * 3
+    report = expert_report.load_report(store, key, SEAL)
+    mine = [f for f in report["findings"] if f["unit_id"] == unit_ids[0]]
+    assert [f["partial_cell"] for f in mine] == ([True] if skipped != "OK" else [])
+    if mine:
+        assert "· 넘긴 셀 — 일부만 판정" in _head(store, key, SEAL)["summary_md"]
 
 
 def test_retrying_pack_failed_cells_fetches_the_pack_again(store):
