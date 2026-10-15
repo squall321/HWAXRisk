@@ -333,8 +333,11 @@ def test_precedent_patterns_come_only_from_projects_both_the_owner_and_the_calle
     _finding(store, "f-b1", world["mine_target"], mine[0], OWNER, "cl-b")
     _finding(store, "f-b2", hidden_target, mine[1], OWNER, "cl-b")                # 주인만 보는 과제의 원자가 섞였다
     _finding(store, "f-x", stranger["target"], stranger["project"], STRANGER, "cl-x")
+    _finding(store, "f-xa", stranger["target"], stranger["project"], STRANGER, "cl-a")    # 남의 원자는 주인의 패턴을 이루지 않는다
+    _finding(store, "f-c", hidden_target, mine[1], OWNER, "cl-c")                       # 조직 공개면 숨은 과제가 섞여도 선다
     for pattern_id, owner, norm, visibility in (("P-A", OWNER, "cl-a", "private"), ("P-B", OWNER, "cl-b", "private"),
-                                                ("P-O", STRANGER, "cl-o", "org"), ("P-X", STRANGER, "cl-x", "private")):
+                                                ("P-C", OWNER, "cl-c", "org"), ("P-O", STRANGER, "cl-o", "org"),
+                                                ("P-X", STRANGER, "cl-x", "private")):
         _pattern(store, pattern_id, owner, norm, visibility)
     diff_id = factories.make_diff(store, _snapshot_of(store, mine[0]), _snapshot_of(store, project))["diff_id"]
 
@@ -342,8 +345,8 @@ def test_precedent_patterns_come_only_from_projects_both_the_owner_and_the_calle
         factories.act_as_delegate(monkeypatch, email)
         return [p["pattern_id"] for p in srv.risk_get_precedents(diff_id=diff_id)["pattern_candidates"]]
 
-    assert patterns(MEMBER) == ["P-A", "P-O"]
-    assert patterns(OWNER) == ["P-A", "P-B", "P-O"]
+    assert patterns(MEMBER) == ["P-A", "P-C", "P-O"]
+    assert patterns(OWNER) == ["P-A", "P-B", "P-C", "P-O"]
 
 
 # ---------------------------------------------------------------- E8(D47 — 코퍼스 수는 보이는 과제의 타깃만)

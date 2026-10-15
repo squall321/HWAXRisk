@@ -2776,8 +2776,8 @@ def _visible_patterns(store, owner: str, visible: set[str]) -> list:
     rows = store.query(
         "SELECT id, status, n_projects, precision, visibility, cluster_key_norm FROM rr_patterns "
         "WHERE status IN ('candidate','known') AND (owner_sub = ? OR visibility = 'org') ORDER BY id", (owner,))
-    private = sorted({_s(row["cluster_key_norm"]) for row in rows if row["visibility"] != "org"})
-    atoms = learning.collect_atoms(store, norms=private, owner_sub=owner) if private else {}
+    norms = sorted({_s(row["cluster_key_norm"]) for row in rows})
+    atoms = learning.collect_atoms(store, norms=norms, owner_sub=owner) if norms else {}
     return [row for row in rows if row["visibility"] == "org"
             or {_s(atom["project_id"]) for atom in atoms.get(_s(row["cluster_key_norm"]), [])} <= visible]
 
