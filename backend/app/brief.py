@@ -1515,10 +1515,14 @@ def _rows_of(payload, key: str) -> list:
 
 # ---------------------------------------------------------------- E6 유사 과제 성격
 def _item_e6(store, similar: Mapping[str, Any], ctx, profile: "BriefProfile | None" = None) -> dict:
-    """유사 과제의 성격 진술 — 확정·지지 많은 순으로 바닥 3건(프로파일 배수로 는다). 넘친 수는 꼬리 줄로 센다."""
+    """유사 과제의 성격 진술 — 확정·지지 많은 순으로 바닥 3건(프로파일 배수로 는다). 넘친 수는 꼬리 줄로 센다.
+
+    타깃 소유자가 구성원인 과제의 진술만 싣고 n_projects 도 그 안에서 센다(D46). 남이 조직 공개로 연 등록부 행으로 merged 에 든
+    과제는 그 행만 E5 에 서고, 그 과제의 성격 진술은 열린 것이 아니라 싣지 않는다.
+    """
     profile = profile or PROFILE_LEGACY
     source = _SOURCES["E6"][0]
-    corpus = _corpus_ids(store)
+    corpus = _corpus_ids(store) & _member_project_ids(store, _s(ctx["target"]["owner_sub"]))
     project_ids = [str(e.get("project_id")) for e in (similar.get("merged") or [])
                    if str(e.get("project_id")) in corpus]
     lines: list[str] = []

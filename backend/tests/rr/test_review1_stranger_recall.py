@@ -1,10 +1,12 @@
-# 반대 검토 1차(review1) 남 숨김 훑기 셋째 — 좌석 기억(E7)과 유사 과제 네 경로(함수 · REST · MCP)가 남의 과제를 싣지도, 있다는 것을 드러내지도 않는다(D45)
+# 반대 검토 1차(review1) 남 숨김 훑기 셋째 — 좌석 기억(E7) · 유사 과제 네 경로 · E6 이 남의 과제를 싣지도, 있다는 것을 드러내지도 않는다(D45 · D46)
 """주인(OWNER)의 과제 다섯과 주인이 구성원(viewer)인 동료의 과제 하나를 생산자 경로(라우트 · freeze_snapshot)로 세워 답을 받아 두고,
 남(STRANGER)의 과제 · 대상 · 좌석 의견 · 비공개 등록부 행 · 서술 적중을 더한 뒤의 답이 그것과 같은지 본다 — 남의 것이 목록에 없을
-뿐 아니라 수(corpus_n · 벡터 문턱) · 순위(빈칸) · 좌석 줄의 채움으로도 새지 않는다. 같은 답이 '둘 다 비었다' 로 통과하지 않게 주인의
-것과 구성원 과제의 것이 실리는지 따로 본다.
+뿐 아니라 수(corpus_n · 벡터 문턱 · E6 의 n_projects) · 순위(빈칸) · 좌석 줄의 채움으로도 새지 않는다. 같은 답이 '둘 다 비었다' 로
+통과하지 않게 주인의 것과 구성원 과제의 것이 실리는지 따로 본다.
 
-좌석 의견과 등록부 행은 손으로 쓴다 — 생산자는 패널 한 판 전부이고, E7 · subject 경로가 읽는 칸만 채운다(test_brief 와 같은 방식).
+D46 — 조직 공개로 연 남의 등록부 행은 그 행으로만 선다(E6 은 그 과제의 성격 진술을 싣지 않는다).
+
+좌석 의견 · 등록부 행 · 성격 진술은 손으로 쓴다 — 생산자는 패널 한 판 전부이고, 읽는 칸만 채운다(test_brief 와 같은 방식).
 """
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ from typing import Any
 import pytest
 
 import app.mcp_server as srv
-from app import brief, routes
+from app import brief, registry, routes
 from tests import factories
 
 OWNER = factories.OWNER
@@ -68,6 +70,16 @@ def _registry(store, target_key: str, owner: str, cluster_key: str, subject_key:
         " VALUES (?,?,?,?,?,?,?)", (target_key, cluster_key, owner, json.dumps({"claim": "간극"}), subject_key, "open", 1))
 
 
+def _members(project_id: str, owner: str, *emails: str) -> None:
+    """`routes.put_members` — 그 과제에 viewer 를 더한다."""
+    routes.put_members(project_id, routes.MembersBody(members=[routes.MemberItem(email=e, role="viewer") for e in emails]),
+                       ident=factories.ident(owner))
+
+
+def _snapshot_of(store, project_id: str) -> str:
+    return store.query_one("SELECT id FROM rr_snapshots WHERE project_id = ?", (project_id,))["id"]
+
+
 @pytest.fixture
 def world(risk_store, monkeypatch):
     """주인 쪽 원장 — 주인의 과제 P(심사 대상) · P-1~P-4, 주인이 viewer 인 동료의 과제 SHARED, 의견 둘, P 의 subject 위 주인의 등록부 행."""
@@ -76,10 +88,8 @@ def world(risk_store, monkeypatch):
     project, snapshot = _project(store, OWNER, "P-NOW")
     mine = [_project(store, OWNER, f"P-{n}")[0] for n in range(1, 5)]
     shared, shared_snapshot = _project(store, COLLEAGUE, "C-SHARED")
-    routes.put_members(shared, routes.MembersBody(members=[routes.MemberItem(email=OWNER, role="viewer")]),
-                       ident=factories.ident(COLLEAGUE))
-    mine_target = _target(store, store.query_one("SELECT id FROM rr_snapshots WHERE project_id = ?", (mine[0],))["id"],
-                          OWNER)
+    _members(shared, COLLEAGUE, OWNER)
+    mine_target = _target(store, _snapshot_of(store, mine[0]), OWNER)
     _opinion(store, "op-mine", mine_target, OWNER, SEATS[0], 100)
     _opinion(store, "op-shared", _target(store, shared_snapshot, COLLEAGUE), COLLEAGUE, SEATS[1], 100)
     subject = store.query_one("SELECT subject_key FROM rr_ir_edges WHERE snapshot_id = ? AND subject_key IS NOT NULL"
@@ -109,10 +119,18 @@ def _leaks(answer: Any, stranger: dict) -> list[str]:
             if value in text]
 
 
+def _build(world: dict, adh: Any = None) -> dict:
+    return brief.build_brief(world["store"], world["target"], adh=adh,
+                             seats=[{"key": key, "domain": "mech", "origin": "primary"} for key in SEATS])
+
+
+def _item(built: dict, key: str) -> dict:
+    return built["evidence"][built["keys"].index(key)]
+
+
 def _e7(world: dict) -> tuple[dict, dict]:
-    built = brief.build_brief(world["store"], world["target"],
-                              seats=[{"key": key, "domain": "mech", "origin": "primary"} for key in SEATS])
-    return built["evidence"][built["keys"].index("E7")], built
+    built = _build(world)
+    return _item(built, "E7"), built
 
 
 # ---------------------------------------------------------------- E7 좌석 기억
@@ -175,3 +193,29 @@ def test_similar_projects_answer_the_same_on_rest_and_mcp_before_and_after_a_str
         assert answer["corpus_n"] == 6
         assert sorted(e["project_id"] for e in answer["vector"]) == sorted([*world["mine"], world["shared"]])
         assert {e["project_id"] for e in answer["merged"]} >= {world["mine"][0], world["shared"]}
+
+
+# ---------------------------------------------------------------- E6(D46 — 조직 공개 행은 그 행으로만 · 수는 보이는 과제만)
+def test_e6_carries_no_character_of_a_project_that_came_in_by_an_org_shared_row(world):
+    """남이 조직 공개로 연 등록부 행은 subject 경로 · merged · E5 에 그 행으로 선다(남이 연 것). 그러나 그 행으로 merged 에 든 남의 과제의
+    성격 진술은 E6 에 싣지 않고, E6 의 n_projects 는 타깃 소유자가 볼 수 있는 과제만 센다 — 남을 더하기 전과 같은 E6 이다."""
+    store, project = world["store"], world["project"]
+    before = _item(_build(world), "E6")
+    stranger = _add_stranger(world)
+    registry.set_visibility(store, "clu-x", "org", owner_sub=STRANGER)
+    store.execute(
+        "INSERT INTO rr_character(id, project_id, owner_sub, facet, tag, statement, by_json, support_panels, status,"
+        " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ("ch-x", stranger["project"], STRANGER, "intent", "char:intent:x", "남의 과제의 설계 의도", json.dumps([SEATS[0]]), 3,
+         "confirmed", 1, 1))
+    # 브리프의 merged 는 상위 5 라 남의 과제가 동점 순서로 빠질 수 있다 — 모두를 싣는 k 의 merged 로 E6 을 따로 조립해 그 과제가
+    # merged 에 든 경우를 반드시 본다.
+    similar = brief.similar_projects(store, project, K, owner_sub=OWNER)
+    e6 = brief._item_e6(store, similar, brief._target_context(store, world["target"]))
+    built = _build(world)
+
+    assert [stranger["project"] in e["project_ids"] for e in similar["subject"]] == [True]
+    assert stranger["project"] in {e["project_id"] for e in similar["merged"]}
+    assert f"reg:{stranger['target']}#clu-x" in _item(built, "E5")["result"]
+    assert e6["result"] == _item(built, "E6")["result"] == before["result"]
+    assert before["result"].split("\n")[1:] == ["[유사 과제 성격 진술 없음 — 코퍼스 n_projects=6]"]
