@@ -332,7 +332,11 @@ def residuals(store: RiskStore, target_key: str, counts: Mapping[str, Any]) -> l
         tail = f"표본 {int(audit.get('sampled') or 0)} · 놓친 걸림 {int(audit.get('risk_miss') or 0)}"
         if upper is not None:
             tail += f" · 95% 상한 {float(upper) * 100:.1f}%"
-        out.append({"item": "filtered", "n": int(flt["n"]), "audit": dict(audit), "blocking": blocking,
+        # 거르기가 꺼졌는데 거른 셀이 남았다 — 넓힘과 다시 열기 사이에 잡이 죽었거나 취소됐다. 표본 수로는 그 까닭이 안 보이고(꺼지게 한
+        # 놓침은 그림자 쪽일 수 있다) 확인만 하면 그 셀은 검토 없이 닫힌다 — 꺼졌다고 말하고, 길잡이가 검토 잡을 걸음으로 준다(entry).
+        if flt.get("off"):
+            tail += f" · 거르기 꺼짐(넓힌 영역 {len(flt.get('widened') or ())}) — 검토 잡을 하나 돌리면 그 잡이 다시 본다"
+        out.append({"item": "filtered", "n": int(flt["n"]), "audit": dict(audit), "blocking": blocking, "off": bool(flt.get("off")),
                     "label": f"거름 {int(flt['n']):,}셀({tail})",
                     "rows": [int(flt["n"]), audit.get("sampled"), audit.get("risk_miss"), upper, bool(flt.get("off"))]})
     excluded = counts["units"]["excluded_by_reason"]

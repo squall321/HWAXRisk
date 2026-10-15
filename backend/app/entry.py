@@ -19,7 +19,7 @@ from urllib.parse import quote
 
 from pydantic import BaseModel, ValidationError
 
-from app import config, identity, planner, review_ops, review_runner, routes, runner
+from app import config, identity, planner, review_cells, review_ops, review_runner, routes, runner
 from app import roster as roster_module
 from app import units as units_module
 from app import state as state_module
@@ -1013,16 +1013,25 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
     steps = [*repersist_steps, *dispose]
     if job is not None:
         notes.append(f"마지막 검토 잡 {job['id']} 는 {job['state']} 다" + (f" — {job['error']}" if job.get("error") else "") + ".")
+    # 거르기가 꺼졌는데 거른 셀이 남았다(넓힘과 다시 열기 사이에 잡이 죽었거나 취소됐다) — 대기 셀은 0 이라 아래 '남은 셀' 걸음이
+    # 서지 않고, 막음 잔여의 확인만 남으면 그 셀은 검토 없이 닫힌다. 아무 범위의 검토 잡이 그 잡 끝 정리로 그 셀을 다시 연다.
+    # 진행판의 잔여(coverage.qualifiers)는 사슬 끝에 얼린 사본일 수 있어 원장에서 바로 센다(잔여 표기와 같은 셈).
+    flt = review_cells.closure_cells(store, target_key)["filtered"]
+    stranded = int(flt.get("n") or 0) if flt.get("off") else 0
     if config.review_enabled() and units_state.get("status") in units_module.OPEN_STATUSES:
         credential, why = review_runner.review_credential(store, None, owner, ident.email)
         if credential is None:
             blocked.append(_blocked("pat_unavailable", f"카드 대조 검토는 사용자 PAT 로만 돈다 — {why}.", fix_register_pat()))
         left = int(store.query_one("SELECT COUNT(*) AS n FROM rr_review_cells WHERE target_key = ? AND state = 'pending'",
                                    (target_key,))["n"] or 0)
-        if job is None or left:
+        if job is None or left or stranded:
             steps.append(_review_start_step(target_key))
-            if job is not None:
+            if job is not None and left:
                 notes.append(f"범위 밖으로 남은 셀이 {left}개다 — 범위를 넓혀 새 검토 잡으로 이어 돈다.")
+            if stranded:
+                notes.append(f"거르기가 꺼졌는데(넓힌 영역 셋 이상) 거른 셀 {stranded}개가 검토 없이 남았다 — 검토 잡을 하나"
+                             " 돌리면(범위는 아무것이나) 그 잡의 끝 정리가 그 셀을 다시 열어 본다. 잔여 '거름' 을 확인으로 닫으면 그"
+                             " 셀은 검토 없이 닫힌다.")
         elif stage is None and job["state"] == "completed" and not _chain_marked(store, job["id"]):
             steps.append(_pre_m3_chain_step(target_key, job["id"], notes))
     if job is None:
@@ -1043,7 +1052,7 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
                 "웹 화면에서 소유자·관리자가 확인한다(사유 필수) — 잔여와 basis_hash 는 REST GET"
                 f" /api/targets/{target_key}/closure 가 준다. Claude 경로의 확인은 없다.",
                 items=[q["item"] for q in pending]))
-    return answer("done" if job is not None and job["state"] == "completed" else "review", [*steps, *watch])
+    return answer("done" if job is not None and job["state"] == "completed" and not stranded else "review", [*steps, *watch])
 
 
 # 검토 잡의 단계(진행판 phase)마다 길잡이가 덧붙이는 말 — live 는 근거 꾸러미 실호출(B 층, 재설계 M3 C3-12)이다.
