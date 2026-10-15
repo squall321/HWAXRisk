@@ -879,3 +879,45 @@ def test_the_reargue_mark_rides_the_issue_rows_and_the_summary_input(store, monk
     issue_lines = next(b["text"] for b in built["summary"]["blocks"] if b["name"] == "issues")
     assert REARGUE in next(line for line in issue_lines.split("\n") if f"reg:{anchor}" in line)
     assert REARGUE in next(r["text"] for r in built["summary"]["rows"] if r["ref"] == f"reg:{anchor}"), text[:500]
+
+
+def test_a_repanel_that_judges_undetermined_keeps_the_old_verdict_and_says_so(store, monkeypatch, tmp_path):
+    """M2 — 다시 줄을 선 결과 쟁점의 새 패널이 판정 못 함(undetermined)을 내도 옛 판정(outcome · 그 판정의 패널)이 남고 표기에
+    '새 패널 결정 못 함' 이 붙는다 — 결정하지 못한 패널은 옛 판정을 지우지 않는다."""
+    key, anchor, old_panel, _engine = _escalated_then_reraised(store, monkeypatch, tmp_path, requeue=True)
+    _run_issues(store, config.settings, IssuePanelEngine(store, {"*": {"severity": "치명", "judgement": "undetermined"}}), key,
+                limit=1)
+    held = _issue(store, key, anchor)
+    assert (held["state"], held["outcome"], json.loads(held["outcome_json"])["panel_id"]) == ("resolved", "escalated", old_panel)
+    assert json.loads(held["reraised_json"])["new_panel_failed"]["reason"] == "no_decision"
+    registry.merge(store, key)
+    assert _row(store, key, anchor)["merged"]["issue_reraised"]["label"] == REPANEL_FAILED
+
+
+def test_a_charged_release_at_the_limit_keeps_the_old_verdict(store, monkeypatch, tmp_path):
+    """M2 — 내용 탓 놓기(release_issue charge)가 한도에 닿아도 판정이 있던 쟁점은 옛 판정을 둔다(지금 러너는 차감 없이 놓지만 함수의
+    약속이 같아야 한다 — 차감으로 부르는 날 M2 가 조용히 돌아오지 않게)."""
+    key, anchor, _old, _engine = _escalated_then_reraised(store, monkeypatch, tmp_path, requeue=True)
+    issue_id = _issue(store, key, anchor)["issue_id"]
+    store.execute("UPDATE rr_issues SET state = 'running', panel_id = 'p-new', charged = 1 WHERE issue_id = ?", (issue_id,))
+    out = issues.release_issue(store, "p-new", charge=True, reason="engine_content")
+    held = _issue(store, key, anchor)
+    assert (out["state"], held["state"], held["outcome"]) == ("resolved", "resolved", "escalated")
+    assert json.loads(held["reraised_json"])["new_panel_failed"]["reason"] == "engine_content"
+
+
+def test_a_human_requeue_resets_charged(store, monkeypatch, tmp_path):
+    """M2 — 사람이 끝난 쟁점을 다시 줄 세우면(PUT /issues queue) charged 가 0 이다 — 앞 시도의 실패를 새 회차의 몫으로 세지 않는다."""
+    from tests import factories
+
+    key, (unit,) = _ledger(store)
+    anchor = _k01_anchor(store, key, unit)
+    _select(store, monkeypatch, tmp_path, key, cap=1)
+    _run_issues(store, config.settings, IssuePanelEngine(store, {"*": "unparseable"}), key, limit=2)
+    spent = _issue(store, key, anchor)
+    assert (spent["state"], spent["charged"]) == ("inconclusive", 2)
+    with factories.routes_store(store):
+        routes.put_issue(spent["issue_id"], routes.IssueActionBody(action="queue", reason="다시 본다"),
+                         ident=factories.ident(OWNER))
+    again = _issue(store, key, anchor)
+    assert (again["state"], again["charged"]) == ("queued", 0)
