@@ -175,23 +175,35 @@ def cell_calls(expert: Mapping[str, Any], *, k: int, dual: str) -> float:
     return card_cell_calls(k, dual) + (d if dual == "flagged" and expert.get("rank_in_domain") == 1 else 0)
 
 
-def reopen_budget(params: Mapping[str, Any], *, max_calls: int) -> dict:
-    """잡의 다시 연 셀 몫(진행판 reopened_extra) — {cells, calls_est, consented{cells, calls_est}, unconsented{cells, calls_est},
-    allowance, expected, max_calls, hold}. 여유(allowance)는 max(ceil(REOPEN_SHARE × (expected + 동의한 몫)), REOPEN_FLOOR_CALLS) 다.
-    hold 는 추정 합(expected + 다시 연 몫 전부)이 max_calls 를 넘으면 max_calls, 아니고 동의 안 받은 몫이 여유를 넘으면 consent_extra,
-    아니면 None 이다."""
+def _reopen_runs(params: Mapping[str, Any]) -> dict[str, list]:
+    """잡의 다시 연 셀 원장 — "<unit_id>|<agent_key>" → [그 잡에서 추정 밖으로 돈(돌) 횟수, 그 가운데 동의받은 횟수, 한 번의 기대
+    호출](M3 묶음 검토 L5 — 돈 횟수만큼 센다). 모양이 틀린 줄은 버린다."""
     reopen = params.get("reopen") if isinstance(params.get("reopen"), Mapping) else {}
-    consented = reopen.get("consented") if isinstance(reopen.get("consented"), Mapping) else {}
-    unconsented = reopen.get("unconsented") if isinstance(reopen.get("unconsented"), Mapping) else {}
+    runs = reopen.get("runs") if isinstance(reopen.get("runs"), Mapping) else {}
+    out: dict[str, list] = {}
+    for key, rec in runs.items():
+        if isinstance(rec, (list, tuple)) and len(rec) == 3:
+            n, c, est = int(rec[0] or 0), int(rec[1] or 0), float(rec[2] or 0)
+            if n > 0:
+                out[str(key)] = [n, min(c, n), est]
+    return out
+
+
+def reopen_budget(params: Mapping[str, Any], *, max_calls: int) -> dict:
+    """잡의 다시 연 셀 몫(진행판 reopened_extra) — {cells, runs, calls_est, consented{cells, calls_est}, unconsented{cells,
+    calls_est}, allowance, expected, max_calls, hold}. 몫은 셀이 추정 밖으로 돈 횟수마다 센다(runs — L5). 여유(allowance)는
+    max(ceil(REOPEN_SHARE × (expected + 동의한 몫)), REOPEN_FLOOR_CALLS) 다. hold 는 추정 합(expected + 다시 연 몫 전부)이 max_calls 를
+    넘으면 max_calls, 아니고 동의 안 받은 몫이 여유를 넘으면 consent_extra, 아니면 None 이다."""
+    runs = _reopen_runs(params)
     expected = int(((params.get("calls_estimate") or {}).get("expected")) or 0)
-    c_calls = round(float(consented.get("calls_est") or 0), 2)
-    u_calls = round(sum(float(v) for v in unconsented.values()), 2)
+    c_calls = round(sum(c * est for _n, c, est in runs.values()), 2)
+    u_calls = round(sum((n - c) * est for n, c, est in runs.values()), 2)
     allowance = max(math.ceil(REOPEN_SHARE * (expected + c_calls)), REOPEN_FLOOR_CALLS)
     hold = ("max_calls" if expected + c_calls + u_calls > int(max_calls) else
             "consent_extra" if u_calls > allowance else None)
-    return {"cells": int(consented.get("cells") or 0) + len(unconsented), "calls_est": round(c_calls + u_calls, 2),
-            "consented": {"cells": int(consented.get("cells") or 0), "calls_est": c_calls},
-            "unconsented": {"cells": len(unconsented), "calls_est": u_calls},
+    return {"cells": len(runs), "runs": sum(n for n, _c, _est in runs.values()), "calls_est": round(c_calls + u_calls, 2),
+            "consented": {"cells": sum(1 for _n, c, _est in runs.values() if c), "calls_est": c_calls},
+            "unconsented": {"cells": sum(1 for n, c, _est in runs.values() if n > c), "calls_est": u_calls},
             "allowance": allowance, "expected": expected, "max_calls": int(max_calls), "hold": hold}
 
 
@@ -210,11 +222,14 @@ def reopen_hold_message(budget: Mapping[str, Any]) -> str:
             f" state=pending). {keep}")
 
 
-def charge_reopened(store: Any, job_id: str, cells: Sequence[tuple[str, str]], *, now: int | None = None) -> dict | None:
-    """살아 있는 잡에 묶은 다시 연 셀 — 그 잡의 동의받은 추정 밖의 셀(unit_id, agent_key)의 기대 호출을 params.reopen.unconsented 에
-    적고, 몫을 넘으면 같은 트랜잭션에서 잡을 멈춘다(묶기와 멈춤이 한 트랜잭션이라 선점이 그 사이에 그 셀을 집지 못한다). 부른 쪽
-    트랜잭션에 들어간다. 몫(`reopen_budget`) 또는 None(셀이 없거나 검토 잡이 아니다)."""
-    if not cells:
+def charge_reopened(store: Any, job_id: str, binds: Sequence[tuple[str, str, str | None]], *,
+                    now: int | None = None) -> dict | None:
+    """살아 있는 잡에 다시 묶은 셀(unit_id, agent_key, 앞 결속 run_id) — 그 잡의 추정 밖으로 도는 몫을 params.reopen.runs 에 셀마다
+    한 번씩 더 적고, 몫을 넘으면 같은 트랜잭션에서 잡을 멈춘다(묶기와 멈춤이 한 트랜잭션이라 선점이 그 사이에 그 셀을 집지 못한다).
+    추정 밖은 앞 결속이 그 잡이 아닌 셀과, 이미 이 원장에 적힌 셀(추정 밖 셀이 그 잡에서 다시 돈다 — L5)이다. 그 잡이 만들 때 추정에
+    넣은 제 셀(앞 결속이 그 잡이고 원장에 없다)은 다시 돌아도 세지 않는다(L6 · D-52). 부른 쪽 트랜잭션에 들어간다. 몫(`reopen_budget`)
+    또는 None(센 셀이 없거나 검토 잡이 아니다)."""
+    if not binds:
         return None
     now = now_epoch() if now is None else now
     with store.tx():
@@ -222,14 +237,18 @@ def charge_reopened(store: Any, job_id: str, cells: Sequence[tuple[str, str]], *
         if row is None:
             return None
         params = _json(row["params_json"], {})
+        runs = _reopen_runs(params)
+        counted = [(u, a) for u, a, prev in binds if prev != job_id or f"{u}|{a}" in runs]
+        if not counted:
+            return None
         order = {str(r["agent_key"]): r for r in planner.review_order(store, row["target_key"])}
         k, _source = box_k(store)
         dual = str(((params.get("knobs") or {}).get("dual")) or "all")
-        reopen = dict(params.get("reopen") or {})
-        unconsented = dict(reopen.get("unconsented") or {})
-        for unit_id, agent in cells:
-            unconsented[f"{unit_id}|{agent}"] = round(cell_calls(order.get(agent) or {}, k=k, dual=dual), 2)
-        params["reopen"] = {**reopen, "unconsented": unconsented}
+        for unit_id, agent in counted:
+            key = f"{unit_id}|{agent}"
+            n, c, est = runs.get(key) or [0, 0, round(cell_calls(order.get(agent) or {}, k=k, dual=dual), 2)]
+            runs[key] = [n + 1, c, est]
+        params["reopen"] = {**dict(params.get("reopen") or {}), "runs": runs}
         store.execute("UPDATE rr_jobs SET params_json = ?, updated_at = ? WHERE id = ?", (canonical_json(params), now, job_id))
         budget = reopen_budget(params, max_calls=int(config.settings.risk_review_max_calls))
         if budget["hold"] is not None:
@@ -256,17 +275,22 @@ def _reopen_hold(store: Any, job_id: str, budget: Mapping[str, Any], *, now: int
 
 
 def release_unconsented(store: Any, job_id: str, cells: Sequence[tuple[str, str]], *, now: int | None = None) -> dict | None:
-    """동의를 기다리던 셀을 사람이 넘겼다 — 그 셀을 다시 연 셀의 몫에서 뺀다(돌지 않는다). 부른 쪽 트랜잭션에 들어간다. 새 몫 또는 None."""
+    """동의를 기다리던 셀을 사람이 넘겼다 — 그 셀의 동의 안 받은 한 번을 다시 연 셀의 몫에서 뺀다(돌지 않는다). 부른 쪽 트랜잭션에
+    들어간다. 새 몫 또는 None."""
     now = now_epoch() if now is None else now
     with store.tx():
         row = store.query_one("SELECT params_json FROM rr_jobs WHERE id = ? AND mode = ?", (job_id, MODE))
         if row is None:
             return None
         params = _json(row["params_json"], {})
-        reopen = dict(params.get("reopen") or {})
-        unconsented = {k: v for k, v in (reopen.get("unconsented") or {}).items()
-                       if k not in {f"{u}|{a}" for u, a in cells}}
-        params["reopen"] = {**reopen, "unconsented": unconsented}
+        runs = _reopen_runs(params)
+        for unit_id, agent in cells:
+            key = f"{unit_id}|{agent}"
+            if key in runs and runs[key][0] > runs[key][1]:
+                runs[key][0] -= 1
+                if runs[key][0] == 0:
+                    del runs[key]
+        params["reopen"] = {**dict(params.get("reopen") or {}), "runs": runs}
         store.execute("UPDATE rr_jobs SET params_json = ?, updated_at = ? WHERE id = ?", (canonical_json(params), now, job_id))
     return reopen_budget(params, max_calls=int(config.settings.risk_review_max_calls))
 
@@ -278,7 +302,7 @@ def awaiting_consent(store: Any, target_key: str) -> tuple[str | None, set[tuple
     job = live_review_job(store, target_key)
     if job is None or reopen_budget(job.get("params") or {}, max_calls=int(config.settings.risk_review_max_calls))["hold"] is None:
         return None, set()
-    keys = {tuple(k.split("|", 1)) for k in (((job.get("params") or {}).get("reopen") or {}).get("unconsented") or {})}
+    keys = {tuple(k.split("|", 1)) for k, (n, c, _est) in _reopen_runs(job.get("params") or {}).items() if n > c}
     pending = {(r["unit_id"], r["agent_key"]) for r in store.query(
         "SELECT unit_id, agent_key FROM rr_review_cells WHERE target_key = ? AND run_id = ? AND state = 'pending'",
         (target_key, job["id"]))}
@@ -306,9 +330,8 @@ def resume_gate(store: Any, job_id: str, *, consent: bool, consent_source: str |
         raise AppError("consent_required", reopen_hold_message(budget) + " — 범위와 비용을 사람에게 보이고 동의를 받은 뒤"
                        " consent:true 로 재개한다.", 422, detail={"reopened_extra": budget})
     moved = dict(budget["unconsented"])
-    params["reopen"] = {**dict(params.get("reopen") or {}), "unconsented": {}, "consent_source": consent_source,
-                        "consented": {"cells": budget["consented"]["cells"] + moved["cells"],
-                                      "calls_est": round(budget["consented"]["calls_est"] + moved["calls_est"], 2)}}
+    runs = {key: [n, n, est] for key, (n, _c, est) in _reopen_runs(params).items()}
+    params["reopen"] = {**dict(params.get("reopen") or {}), "runs": runs, "consent_source": consent_source}
     store.execute("UPDATE rr_jobs SET params_json = ? WHERE id = ?", (canonical_json(params), job_id))
     return moved
 
@@ -596,7 +619,8 @@ def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Ma
                           "waiting": len(changed) - len(mine)}
             if action == "retry" and mine:
                 # 사람의 다시가 그 잡에 얹은 셀은 그 잡을 만들 때의 추정 밖이다 — 다시 연 셀의 몫에 센다(4차 MEDIUM 2 · D-49)
-                budget = charge_reopened(store, live["id"], [(c["unit_id"], c["agent_key"]) for c in mine], now=now)
+                budget = charge_reopened(store, live["id"], [(c["unit_id"], c["agent_key"], c.get("run_id")) for c in mine],
+                                         now=now)
                 if budget is not None and budget["hold"] is not None:
                     out["job"]["hold"] = budget["hold"]
             declined = [(c["unit_id"], c["agent_key"]) for c in changed if (c["unit_id"], c["agent_key"]) in awaiting]

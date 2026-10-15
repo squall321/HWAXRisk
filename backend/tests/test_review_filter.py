@@ -846,8 +846,8 @@ def test_reopened_cells_within_the_allowance_run_and_show_on_the_board_as_reopen
     assert {(_cell(store, key, u, MEM2)["state"], _cell(store, key, u, MEM2)["run_id"]) for u in filtered} == {
         ("reviewed", running)}
     assert _reopened_extra(store, running) == {
-        "cells": 3, "calls_est": 3.15, "consented": {"cells": 0, "calls_est": 0.0}, "unconsented": {"cells": 3, "calls_est": 3.15},
-        "allowance": 30, "expected": 3, "max_calls": 30000, "hold": None}
+        "cells": 3, "runs": 3, "calls_est": 3.15, "consented": {"cells": 0, "calls_est": 0.0},
+        "unconsented": {"cells": 3, "calls_est": 3.15}, "allowance": 30, "expected": 3, "max_calls": 30000, "hold": None}
 
 
 @pytest.mark.parametrize("entry", ["rest", "mcp"])

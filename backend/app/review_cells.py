@@ -804,9 +804,9 @@ def reopen_filtered(store: Any, target_key: str, *, via: str, domain: str | None
     `route='audit'` · `route_forced='filter_floor'` 와 `sample_json.filter_audit{score, picked_by, result:null}` 을 적어 다시 분류하지
     않는다. 셀의 잡 결속(run_id)은 그대로다 — 그 잡이 살아 있으면 그 잡이 돌린다. `run_id` 를 주면 다시 연 셀만 그 잡에 묶는다 —
     살아 있는 잡이 다시 열면 늘 그 잡이 돌린다(반대 검토 MEDIUM 7 · 3차 MEDIUM 2 · D-47). 전문가 머리는 범위로 찍지 않고(찍으면 범위 밖
-    셀까지 거뒀다 — 3차 MEDIUM 3) ready·partial 만 planned 로 다시 연다. 묶은 셀 가운데 앞 결속이 그 잡이 아닌 셀(그 잡의 추정 밖 —
-    제 범위에서 제가 거른 셀은 거르기 없음 가정의 추정 안이다)은 그 잡의 다시 연 셀 몫에 세고, 몫을 넘으면 같은 트랜잭션에서 그 잡을
-    멈춘다(`review_runner.charge_reopened` — 4차 MEDIUM 2 · D-49).
+    셀까지 거뒀다 — 3차 MEDIUM 3) ready·partial 만 planned 로 다시 연다. 묶은 셀은 앞 결속과 함께 그 잡의 다시 연 셀 몫에 넘기고 —
+    추정 밖 셀만 돈 횟수마다 센다(제 범위에서 제가 거른 셀은 거르기 없음 가정의 추정 안이다) — 몫을 넘으면 같은 트랜잭션에서 그 잡을
+    멈춘다(`review_runner.charge_reopened` — 4차 MEDIUM 2 · D-49 · 묶음 검토 L5 · L6 · D-52).
     고르는 칸은 `domain`·`unit_id`·`cells` 가운데 준 것(AND)이고, `exclude_agent` 의 셀은 뺀다(자기 넘김 — 7번 줄이 세지 않는다,
     반대 검토 2차 MEDIUM 3). 부른 쪽 트랜잭션에 들어간다."""
     if via not in REOPEN_VIAS:
@@ -829,7 +829,7 @@ def reopen_filtered(store: Any, target_key: str, *, via: str, domain: str | None
         wanted = {tuple(c) for c in cells}
         rows = [r for r in rows if (r["unit_id"], r["agent_key"]) in wanted]
     opened: list[tuple[str, str]] = []
-    extra: list[tuple[str, str]] = []
+    binds: list[tuple[str, str, str | None]] = []
     with store.tx():
         for row in rows:
             key = (target_key, row["unit_id"], row["agent_key"])
@@ -851,14 +851,13 @@ def reopen_filtered(store: Any, target_key: str, *, via: str, domain: str | None
                 sets["run_id"] = run_id
             if _move(store, "cell", "na_irrelevant", "pending", where=_cell_where(), params=key, sets=sets, now=now) == 1:
                 opened.append((row["unit_id"], row["agent_key"]))
-                if run_id is not None and row["run_id"] != run_id:
-                    extra.append((row["unit_id"], row["agent_key"]))
+                binds.append((row["unit_id"], row["agent_key"], row["run_id"]))
         for agent in sorted({a for _u, a in opened}):
             _reopen(store, target_key, agent, now=now)
-        if extra:
+        if run_id is not None and binds:
             from app import review_runner  # noqa: PLC0415 — review_runner 는 이 모듈을 import 한다.
 
-            review_runner.charge_reopened(store, run_id, extra, now=now)
+            review_runner.charge_reopened(store, run_id, binds, now=now)
     return opened
 
 

@@ -247,6 +247,64 @@ def test_a_retry_spilled_into_a_live_job_counts_against_its_reopen_allowance(sto
         assert rig.state(store, live) == "queued"
 
 
+def _extra_of(store, job_id: str) -> dict:
+    """그 잡의 진행판 한 줄(routes._review_job_payload)의 progress.reopened_extra."""
+    row = store.query_one("SELECT id, state, hold_code, hold_until, hold_n, error, credential_email, params_json, progress_json"
+                          " FROM rr_jobs WHERE id = ?", (job_id,))
+    return routes._review_job_payload(dict(row))["progress"].get("reopened_extra") or {}
+
+
+def test_retrying_a_cell_already_inside_the_live_jobs_estimate_is_not_charged_again(store, monkeypatch):
+    """M3 묶음 검토 L6 · D-52 — 살아 있는 잡이 만들 때 추정에 넣은 셀(그 잡의 범위에서 pending 이던 셀)이 그 잡에서 실패해 사람이 다시
+    열면 그 잡에 얹히되 다시 연 셀의 몫에 들지 않는다 — 추정 안의 셀이다(종전에는 다시 열 때마다 몫에 들어 헛 consent_extra 가 섰다)."""
+    from app import units
+
+    monkeypatch.setattr(review_runner, "REOPEN_FLOOR_CALLS", 2, raising=False)
+    monkeypatch.setattr(review_runner, "REOPEN_SHARE", 0.0, raising=False)
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_concurrency=1))
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    job_id = rig.job(store, key, scope={"agents": [SEAL, PEER]})
+    fake = FakeReviewEngine(rig.packs())
+    fake.error_cells = {(PEER, unit_ids[0]): NO_ROWS}
+    r = rig.Rig(store, fake)
+    r.run(lambda: _cells(store, key, PEER)[unit_ids[0]]["state"] == "failed")
+    assert rig.state(store, job_id) == "running"
+    fake.error_cells = {}
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[unit_ids[0], PEER]]), ident=ME)
+    assert (out["job"]["action"], out["job"]["job_id"], out["job"].get("hold")) == ("adopted", job_id, None)
+    assert (_extra_of(store, job_id).get("cells"), _extra_of(store, job_id).get("hold")) == (0, None)
+    r.finish(job_id)
+    assert (rig.state(store, job_id), _cells(store, key, PEER)[unit_ids[0]]["state"]) == ("completed", "reviewed")
+
+
+def test_an_extra_cell_run_again_in_the_live_job_is_counted_once_per_run(store, monkeypatch):
+    """M3 묶음 검토 L5 · D-52 — 추정 밖 셀(앞 잡에서 실패한 셀)을 사람이 살아 있는 잡에 두 번 다시 열면(그 사이 또 실패했다) 그 잡의
+    다시 연 셀의 몫은 돈 횟수만큼 센다 — 셀 하나 · 두 번(종전에는 셀마다 한 번만 적혀 몇 번을 돌아도 한 번 몫이었다)."""
+    from app import units
+
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_concurrency=1))
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    fake = FakeReviewEngine(rig.packs())
+    fake.error_cells = {(PEER, unit_ids[0]): NO_ROWS}
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [PEER]}))
+    assert _cells(store, key, PEER)[unit_ids[0]]["state"] == "failed"
+    live = rig.job(store, key, scope={"agents": [SEAL, PEER]})            # 그 셀은 실패라 이 잡의 추정 밖이다
+    for n in (1, 2):
+        out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[unit_ids[0], PEER]]), ident=ME)
+        assert (out["job"]["action"], out["job"]["job_id"]) == ("adopted", live)
+        extra = _extra_of(store, live)
+        assert (extra.get("cells"), extra.get("runs"), extra.get("calls_est")) == (1, n, round(5.25 * n, 2))
+        if n == 1:
+            r.run(lambda: _cells(store, key, PEER)[unit_ids[0]]["state"] == "failed")    # 이 잡에서 또 실패했다
+            assert rig.state(store, live) == "running"
+    fake.error_cells = {}
+    r.finish(live)
+    assert (rig.state(store, live), _cells(store, key, PEER)[unit_ids[0]]["state"]) == ("completed", "reviewed")
+
+
 def _granted(fn, *args, **kwargs):
     """처분 — 거절(AppError)이면 단언 실패다(변이 검사가 '죽음' 으로 세는 실패의 모양)."""
     try:

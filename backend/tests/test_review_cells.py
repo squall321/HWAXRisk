@@ -820,12 +820,14 @@ def test_the_reopen_allowance_is_a_fifth_of_the_consented_calls_with_a_floor_of_
     """반대 검토 4차 MEDIUM 2 · D-49 — 다시 연 셀의 몫. 동의 안 받은 다시 연 셀의 기대 호출이 max(동의받은 몫(처음 expected + 더
     동의한 몫)의 20%, 30회) 를 넘으면 consent_extra, 잡의 추정 합(expected + 다시 연 몫 전부)이 HWAXRISK_REVIEW_MAX_CALLS 를 넘으면
     max_calls 다(동의로 풀리지 않는다)."""
+    # 셀마다 [돈 횟수, 동의받은 횟수, 한 번의 기대 호출] — 동의받은 셀 하나(두 번 돌았다)와 동의를 기다리는 셀 하나(한 번)
     params = {"calls_estimate": {"expected": expected},
-              "reopen": {"consented": {"cells": 7, "calls_est": consented}, "unconsented": {"u-1|a": unconsented}}}
+              "reopen": {"runs": {"u-0|a": [2, 2, consented / 2], "u-1|a": [1, 0, unconsented]}}}
     budget = review_runner.reopen_budget(params, max_calls=max_calls)
     assert (budget["allowance"], budget["hold"]) == (allowance, hold)
-    assert (budget["cells"], budget["calls_est"], budget["unconsented"]) == (8, round(consented + unconsented, 2),
-                                                                             {"cells": 1, "calls_est": unconsented})
+    assert (budget["cells"], budget["runs"], budget["calls_est"], budget["unconsented"]) == (
+        2, 3, round(consented + unconsented, 2), {"cells": 1, "calls_est": unconsented})
+    assert budget["consented"] == {"cells": 1, "calls_est": round(consented, 2)}
 
 
 def test_a_cell_counts_the_calls_the_estimate_counts_for_it():
