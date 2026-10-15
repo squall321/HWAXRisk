@@ -1924,6 +1924,56 @@ rebase 때 부딪치지 않게).
   고치기 전 단언으로 졌다(옛 시험 둘은 병합 대상 행을 세운다). `git archive` 사본에서 변이 14 가 단언으로 죽었다 — 첫 판의 하나(승격 거름이
   합집합이어도 같은 답 — 주인과 결정한 사람이 같았다)는 남이 결정하는 시험으로 잡았다(ae0c24c). 전체 시험(공유 잠금 아래) 3,076 통과 · xfail 4 · 실패 0(종전 3,070).
 
+### D49. M3 수리 조합 반대 검토(4f71fce 기준)의 등록부 · 종합 몫 — 병합 대상 · 다시 토의 · 소유자별 별칭 · 좌석 기억 · 반출 · 읽기 가드(조정자 결정 D-52, 2026-10-15)
+
+검토(HIGH 1 · MEDIUM 9 · LOW 10)와 결정은 스크래치의 m3-combined-review-findings.md 에 있다. 이 몫은 H1 · M1 · M2 · M6 · M7 · M8 · M9 ·
+L1 · L2 · L3 · L9 · L10 과 읽기 경로 가드다(M3 · M4 · M5 · L4~L8 은 셀 꾸러미 `m3-cells` 몫).
+
+- **H1(병합 대상).** PUT · DELETE /registry/{ck}/merge 는 target_key 를 부른 사람의 대상으로 찾는다(`_target_row(…, owner)`). 남의
+  대상은 없는 대상과 같은 404 이고 아무것도 쓰지 않는다. 병합은 그 대상의 주인으로 돈다. 배포된 M2 앱에도 같은 경로가 있어 main 에
+  같은 수리를 핫픽스로 먼저 올렸다(12130f9 — push 는 조정자가 확인 뒤에 한다).
+- **M1.** 다시 줄 세우는 모든 길이 살아 있는 쟁점 잡을 본다. 읽을 수 없는 결정문으로 대기에 돌아가는 갈래(resolve_issue)에도
+  release_issue 와 같은 고아 점검(`_orphan_reason` → `_untry`)을 넣었다.
+- **M2 · L1 · L2 · L3(다시 토의).** 패널이 판정한 쟁점은 새 패널이 결정할 때까지 옛 판정(outcome · outcome_json · 등록부 덮어쓰기 ·
+  보고서 줄)을 둔다. 새 패널이 결정하지 못하면(읽을 수 없는 결정문 한도 · 판정 못 함 · 닻 원자 없음 · 차감 놓기 한도 — `_keep_verdict`)
+  결과 쟁점으로 돌아가고 reraised_json 에 new_panel_failed 를 달아 '패널 판정 — 근거 바뀜, 다시 토의 필요(새 패널 결정 못 함)' 로
+  보인다(`registry.reargue_label` — 등록부 · 보고서 · 쟁점 행 · 요약 입력이 같은 글). 다시 줄 세우기(선정의 `_reraise` · 사람의 PUT
+  queue)는 charged 를 0 으로 돌린다. 표기는 새 패널이 결정하거나 근거가 패널 때 근거(panel_basis_hash)로 돌아올 때만 내려간다 — 돌아오면
+  다시 줄 서지 않고 결과 쟁점으로 돌아간다(L2). 그 판정을 낸 옛 패널을 다시 내면 낡음(stale)이다(L1). 쟁점 행(REST · MCP 같은 함수)에
+  `reargue` 칸(없으면 null)이 선다(L3) — 행 칸을 못박은 시험(ISSUE_KEYS)을 함께 고쳤고, 계약 문서(포털 리포 m3-synthesis 3.11)의 행 칸
+  목록에도 더해야 한다. release_issue(charge=True)는 지금 부르는 곳이 없다(러너는 차감 없이 놓는다) — 함수의 약속을 같게 두고 직접 부르는
+  시험으로 지킨다.
+- **M6.** 패턴 행에 저장하는 특징 범위는 그 행 주인이 볼 수 있는 과제의 원자에서만 고른다(`learning._owner_ranges` — 새 패턴 · 갱신 둘
+  다). n_* 셈과 채점은 전역 그대로다(D48).
+- **M7(스키마 v5).** rr_cluster_alias 의 열쇠를 (owner_sub, old_cluster_key) 로 바꿨다. v5 블록 끝에서 같은 이름으로 다시 짓는다 — 새 표
+  rr_cluster_alias__v5 를 만들고, 옛 행을 owner_sub 그대로(그 행의 주인에게) rowid 순으로 옮기고, 옛 표를 지우고, 이름을 바꾼 뒤 색인
+  ix_rr_cluster_alias_owner_new(owner_sub, new_cluster_key)를 세운다. v2+ 허용 문(CREATE · ADD COLUMN · INDEX) 밖의 네 문이라 test_store
+  가 그 넷만 한 번씩 면제한다(REBUILD_STATEMENTS — CHECK 금지 · 문 머리 검사는 그대로). 설명은 SQL 주석이 아니라 파이썬 주석에 둔다(문
+  머리가 '--' 로 시작하면 가드가 갈린다). 동결 원장 v2 · v3 · v4 시험은 그대로 통과한다(별칭 행 0). PUSHED_DDL_SHA256[5] 는 같은 임시
+  방식으로 갈았다(25350889…). 해석 · 사슬 · 추가 · 철회(`learning.resolve_cluster_key` · `registry._alias_hops` · `add_cluster_alias` ·
+  `revoke_cluster_alias`)는 owner_sub 가 필수이고, 부르는 곳(학습 원자 · 라벨 · 재매핑 · 지표 · 야간 별칭 점검 · 근접 쌍 · 쟁점 후보 ·
+  쟁점 판정 · 병합)은 그 행의 주인을 넘긴다.
+- **M8 · L10(좌석 기억 E7).** SQL 은 코퍼스에서 뺀 과제(status · corpus_excluded)의 의견과 발췌가 빈 의견을 싣지 않는다. AIDataHub 적중은
+  hwax:project 표지의 과제가 보이는 과제일 때만 싣는다(`_hit_project` — 서술 경로와 같은 읽기).
+- **M9.** 기본 반출은 과제 열이 없는 대상 열쇠 표(등록부 · 기여 · 패널 …)도 그 대상의 과제로 과제 열 표와 같은 거름(`_PROJECT_SCOPE_SQL`)
+  을 건다.
+- **L9.** 야간 근접 중복 쌍의 막음은 (소유자, a, b) 로 센다 — 남의 큐 항목이 주인의 쌍을 막지 않는다.
+- **가드.** 라우터의 읽기 경로 41 == 시험 칸 31 + 면제 10(쓰기 경로 표와 같은 모양). 남이 주인의 것을 가리켜 읽으면 없는 것과 같은 답(글
+  전체)이고 주인으로는 404 가 아니다. 과제로 거르는 목록 셋(/diffs · /targets · /reports)은 남의 과제를 주면 없는 과제와 같은 빈 목록이다.
+  참조는 원장 참조(소유자 거름)와 스냅샷 스코프를 함께 준다. 면제 경로는 남에게 주인의 과제 id · 대상 열쇠를 싣지 않는지 따로 본다.
+  지금 코드에서 새는 곳은 없었다 — 이 표는 가드다.
+- **고치지 않고 보고.** ① 기본 반출은 스냅샷 · diff 열쇠 표(rr_ir_nodes · rr_ir_edges · rr_states · rr_snapshot_calls · rr_gate_acks ·
+  rr_diffs · rr_diff_events)를 아직 과제 거름 없이 싣는다 — 이번 결정(대상 열쇠 표)의 밖이다. ② 원장 참조 해석(routes._ref_from_store)은
+  owner_sub 로만 거른다 — 구성원은 남이 아니지만 그 과제의 reg · narr · tool 참조를 못 연다(새지는 않는다).
+- **시험 · 변이.** 수리 시험(H1 가드 · M1 · M2 · L1 · L2 · L3 · M6 · M7 둘 · M8 · L9 · L10 · M9)은 고치기 전에 단언으로 졌다. `git archive`
+  사본에서 변이 26 이 전부 단언으로 죽었다. 그 가운데 넷(새 패널의 판정 못 함 · 차감 놓기 한도 · 사람의 다시 줄 세우기 charged 0 · 남의
+  별칭 사슬이 홉 한도에 드는 것)은 지키는 시험이 없어 시험을 더해 잡았다(0fea7d7 · 6c10112). 앞의 셋은 더하기 전 시험으로 돌리면
+  살아남는다 — 계약 칸 시험(ISSUE_KEYS)이 L3 커밋으로 깨져 있는 동안에는 그 실패에 가려 죽은 것처럼 보였고, 그 시험을 고친 뒤(5ab3c10)
+  다시 돌려 확인했다. 전체 시험(공유 잠금 아래, 6c10112) 3,175 통과 · xfail 4 · 실패 0(D48 때 3,076 — 그 뒤 셀 꾸러미 병합
+  4f71fce 와 이번 시험이 더해졌다). main 핫픽스(12130f9)는 main 에서 2,435 통과 · xfail 4 · 실패 2 — 둘은 형제 리포 HWAXAgentServer
+  가 M3 계약(cr-verdict-2)이라 생기는 기존 실패(test_card_contract_copies · test_card_review_request_contract)이고 수리 전 main 사본에서도
+  같다.
+
 ## 재설계 M3 — 셀 꾸러미 반대 검토 2차 수리(1b1de6d 기준 HIGH 1 · MEDIUM 3 · LOW 3, D-46, 2026-10-14)
 
 검토 결과와 조정자 결정(D-46)은 스크래치의 cells-review2-findings.md 에 있다. HIGH 1(b)는 D-37 이 옛 계약 글(m3-cells.md 210/372)보다
