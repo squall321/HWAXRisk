@@ -344,3 +344,21 @@ def test_precedent_patterns_come_only_from_projects_both_the_owner_and_the_calle
 
     assert patterns(MEMBER) == ["P-A", "P-O"]
     assert patterns(OWNER) == ["P-A", "P-B", "P-O"]
+
+
+# ---------------------------------------------------------------- E8(D47 — 코퍼스 수는 보이는 과제의 타깃만)
+def test_e8_counts_only_targets_of_projects_the_owner_can_see(world):
+    """선례가 없는 diff 의 E8 은 '코퍼스 n_targets' 를 타깃 소유자가 볼 수 있는 과제의 타깃으로만 센다 — 남의 대상이 늘어도 같은 수다
+    (E6 의 n_projects 와 같은 규칙)."""
+    store, project, mine = world["store"], world["project"], world["mine"]
+    diff_id = factories.make_diff(store, _snapshot_of(store, mine[0]), _snapshot_of(store, project))["diff_id"]
+    target = factories.make_target(store, "diff", diff_id, agents=factories.agents(("mech",), len(SEATS)))
+
+    def e8() -> str:
+        built = brief.build_brief(store, target, seats=[{"key": key, "domain": "mech", "origin": "primary"} for key in SEATS])
+        return _item(built, "E8")["result"]
+
+    before = e8()
+    _add_stranger(world)
+    assert e8() == before
+    assert before.split("\n")[1:] == ["[선례 없음 — 코퍼스 n_targets=4, 이 조합 첫 사례]"]    # P-1 · SHARED · P · 이 diff

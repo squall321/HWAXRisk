@@ -1827,7 +1827,12 @@ def _item_e8(store, ctx) -> dict:
                 f"n_verified={verified} n_dismissed={dismissed} precision={precision} (n={total})"
             )
     if not lines:
-        corpus = store.query_one("SELECT COUNT(*) AS n FROM rr_targets")
+        # 코퍼스 수는 타깃 소유자가 볼 수 있는 과제의 타깃만 센다 — 시스템 전체 수는 남의 대상이 있다는 것을 드러낸다(D47, E6 과 같은
+        # 규칙). 위의 델타 선례 행은 소유자 열이 없는 코퍼스 통계 표 그대로다(plan §5.2.2 F).
+        owner = _s(ctx["target"]["owner_sub"])
+        corpus = store.query_one(
+            f"SELECT COUNT(*) AS n FROM rr_targets WHERE project_id IN (SELECT id FROM rr_projects WHERE {_MEMBER_OF})",
+            (owner, owner))
         lines = [f"[선례 없음 — 코퍼스 n_targets={corpus['n'] if corpus else 0}, 이 조합 첫 사례]"]
     return {"key": "E8", "args": f"diff:{diff_id}", "result": _body(source, lines)}
 
