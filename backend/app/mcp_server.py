@@ -211,15 +211,18 @@ def risk_taxonomy(part: str = "index", offset: int = 0) -> dict:
 @mcp.tool()
 def risk_get_precedents(diff_id: str) -> dict:
     """선례 — 같은 subject 의 과거 판정과 델타 선례(이 변경이 전에도 문제였나)."""
+    # 다른 과제의 행은 소유자와 실제로 부른 사람 둘 다 볼 수 있는 과제의 것만이다(D46) — 범위 판정 · 쓰기는 그대로 소유자로 돈다(D44).
     return _scoped("diff", diff_id, lambda d, *, owner_sub: routes.brief_module.precedents(
-        routes.get_store(), d, owner_sub=owner_sub), diff_id)
+        routes.get_store(), d, owner_sub=owner_sub, caller_projects=set(routes.visible_projects(_caller()))), diff_id)
 
 
 @mcp.tool()
 def risk_similar_projects(project_id: str, k: int = 5) -> dict:
     """비슷한 과제 top-k — 계보·벡터·서술·subject 네 경로별로 따로 준다(섞지 않는다)."""
+    # 다른 과제는 소유자와 실제로 부른 사람 둘 다 볼 수 있는 것만이다(D46) — 구성원이 소유자만 보는 과제를 알게 되지 않는다.
     return _scoped("project", project_id, lambda pid, *, owner_sub: routes.brief_module.similar_projects(
-        routes.get_store(), pid, max(1, min(20, int(k))), owner_sub=owner_sub), project_id)
+        routes.get_store(), pid, max(1, min(20, int(k))), owner_sub=owner_sub,
+        caller_projects=set(routes.visible_projects(_caller()))), project_id)
 
 
 @mcp.tool()

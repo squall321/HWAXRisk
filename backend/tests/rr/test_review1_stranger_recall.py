@@ -1,10 +1,11 @@
-# 반대 검토 1차(review1) 남 숨김 훑기 셋째 — 좌석 기억(E7) · 유사 과제 네 경로 · E6 이 남의 과제를 싣지도, 있다는 것을 드러내지도 않는다(D45 · D46)
+# 반대 검토 1차(review1) 남 숨김 훑기 셋째 — 좌석 기억(E7) · 유사 과제 네 경로 · 선례 · E6 이 남의 과제를 싣지도, 있다는 것을 드러내지도 않는다(D45 · D46)
 """주인(OWNER)의 과제 다섯과 주인이 구성원(viewer)인 동료의 과제 하나를 생산자 경로(라우트 · freeze_snapshot)로 세워 답을 받아 두고,
 남(STRANGER)의 과제 · 대상 · 좌석 의견 · 비공개 등록부 행 · 서술 적중을 더한 뒤의 답이 그것과 같은지 본다 — 남의 것이 목록에 없을
 뿐 아니라 수(corpus_n · 벡터 문턱 · E6 의 n_projects) · 순위(빈칸) · 좌석 줄의 채움으로도 새지 않는다. 같은 답이 '둘 다 비었다' 로
 통과하지 않게 주인의 것과 구성원 과제의 것이 실리는지 따로 본다.
 
-D46 — 조직 공개로 연 남의 등록부 행은 그 행으로만 선다(E6 은 그 과제의 성격 진술을 싣지 않는다).
+D46 — 조직 공개로 연 남의 등록부 행은 그 행으로만 선다(E6 은 그 과제의 성격 진술을 싣지 않는다). MCP 로 부른 구성원에게 다른 과제는
+소유자와 그 사람 둘 다 볼 수 있는 것만이다.
 
 좌석 의견 · 등록부 행 · 성격 진술은 손으로 쓴다 — 생산자는 패널 한 판 전부이고, 읽는 칸만 채운다(test_brief 와 같은 방식).
 """
@@ -22,6 +23,7 @@ from tests import factories
 OWNER = factories.OWNER
 COLLEAGUE = "colleague@example.com"
 STRANGER = "stranger@example.com"
+MEMBER = "member@example.com"
 # 좌석 셋 — 주인의 의견이 있는 좌석 · 구성원 과제(동료 소유)의 의견만 있는 좌석 · 남의 의견만 있는 좌석. 남의 의견은 셋 모두에 더 새로 단다.
 SEATS = ("mech-syn-0", "mech-syn-1", "mech-syn-2")
 K = 20          # 벡터 상위 k 가 모두를 싣는 크기 — 남이 순위에 밀려 우연히 빠지는 일이 없다(MCP 상한도 20)
@@ -219,3 +221,34 @@ def test_e6_carries_no_character_of_a_project_that_came_in_by_an_org_shared_row(
     assert f"reg:{stranger['target']}#clu-x" in _item(built, "E5")["result"]
     assert e6["result"] == _item(built, "E6")["result"] == before["result"]
     assert before["result"].split("\n")[1:] == ["[유사 과제 성격 진술 없음 — 코퍼스 n_projects=6]"]
+
+
+# ---------------------------------------------------------------- MCP 구성원(D46 — 다른 과제는 소유자와 부른 사람 둘 다 보는 것만)
+def test_mcp_lists_only_projects_both_the_owner_and_the_calling_member_can_see(world, monkeypatch):
+    """P 의 viewer 가 MCP 로 부르면 유사 과제 · 선례의 다른 과제는 주인과 그 사람이 둘 다 볼 수 있는 것만이다 — 주인만 보는 과제는
+    목록에도, 수(corpus_n)에도, 계보의 걸음 수에도 드러나지 않는다(그 사람이 볼 수 있는 과제라도 숨긴 과제를 건너야 닿으면 싣지 않는다).
+    같은 인자로 주인이 부르면 주인의 시야 그대로다."""
+    store, project, mine = world["store"], world["project"], world["mine"]
+    owner = factories.ident(OWNER)
+    step1 = routes.create_project(routes.ProjectBody(code="P-NEXT", name="다음 리비전", classification="internal",
+                                                     predecessor_project_id=project), ident=owner)["id"]
+    step2 = routes.create_project(routes.ProjectBody(code="P-NEXT2", name="그다음 리비전", classification="internal",
+                                                     predecessor_project_id=step1), ident=owner)["id"]
+    for seen_by_member in (project, mine[0], step2):
+        _members(seen_by_member, OWNER, MEMBER)
+    _registry(store, _target(store, _snapshot_of(store, mine[1]), OWNER), OWNER, "clu-hidden", world["subject"])
+    diff_id = factories.make_diff(store, _snapshot_of(store, mine[0]), _snapshot_of(store, project))["diff_id"]
+    hidden = [*mine[1:], world["shared"], step1]
+
+    factories.act_as_delegate(monkeypatch, MEMBER)
+    similar = srv.risk_similar_projects(project_id=project, k=K)
+    found = srv.risk_get_precedents(diff_id=diff_id)
+    assert [pid for pid in hidden if pid in json.dumps([similar, found])] == []
+    assert (similar["corpus_n"], similar["vector"], similar["lineage"]) == (2, [], [])
+    assert [(e["project_ids"], e["n_registry"]) for e in similar["subject"]] == [([mine[0]], 1)]
+    assert [c["cluster_key"] for c in found["clusters"]] == ["clu-mine"]
+
+    factories.act_as_delegate(monkeypatch, OWNER)
+    owners = srv.risk_similar_projects(project_id=project, k=K)
+    assert owners["corpus_n"] == 6 and [(e["project_id"], e["hops"]) for e in owners["lineage"]] == [(step1, 1), (step2, 2)]
+    assert sorted(c["cluster_key"] for c in srv.risk_get_precedents(diff_id=diff_id)["clusters"]) == ["clu-hidden", "clu-mine"]

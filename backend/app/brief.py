@@ -1580,21 +1580,28 @@ def _member_project_ids(store, email: str | None) -> set[str]:
     return {_s(row["id"]) for row in store.query(f"SELECT id FROM rr_projects WHERE {_MEMBER_OF}", (email, email))}
 
 
-def _lineage(store, project_id: str | None, hops: int = 3) -> list[tuple[str, int, str]]:
+def _lineage(store, project_id: str | None, hops: int = 3, *,
+             caller_projects: set[str] | None = None) -> list[tuple[str, int, str]]:
     """계보 — rr_projects.predecessor_project_id 를 앞뒤로 hops 만큼 따라간 (과제 id, 걸음, predecessor|successor)(자기 자신 제외).
     그 과제의 소유자가 구성원이 아닌 과제는 싣지도 건너 따라가지도 않는다 — 앞 과제 링크는 만들 때 구성원인지 보지만
-    (routes.create_project) 그 전에 선 링크와 들여오기로 선 링크가 남의 과제를 가리킬 수 있다(review1 남 숨김 훑기 둘째)."""
+    (routes.create_project) 그 전에 선 링크와 들여오기로 선 링크가 남의 과제를 가리킬 수 있다(review1 남 숨김 훑기 둘째).
+    `caller_projects`(실제로 부른 사람이 볼 수 있는 과제 — MCP)를 주면 그 밖의 과제도 같다 — 숨긴 과제를 건너 닿는 과제를 실으면
+    걸음 수가 그 사이의 과제를 드러낸다(D46)."""
     row = store.query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,)) if project_id else None
     if row is None:
         return []
     viewer = row["owner_sub"]
+
+    def shown(pid: str) -> bool:
+        return _member(store, pid, viewer) and (caller_projects is None or pid in caller_projects)
+
     out: list[tuple[str, int, str]] = []
     seen = {project_id}
     current = project_id
     for hop in range(1, hops + 1):
         row = store.query_one("SELECT predecessor_project_id FROM rr_projects WHERE id = ?", (current,))
         current = row["predecessor_project_id"] if row is not None else None
-        if not current or current in seen or not _member(store, current, viewer):
+        if not current or current in seen or not shown(current):
             break
         seen.add(current)
         out.append((current, hop, "predecessor"))
@@ -1606,7 +1613,7 @@ def _lineage(store, project_id: str | None, hops: int = 3) -> list[tuple[str, in
         rows = store.query(f"SELECT id FROM rr_projects WHERE predecessor_project_id IN ({marks})", frontier)
         frontier = []
         for row in rows:
-            if row["id"] in seen or not _member(store, row["id"], viewer):
+            if row["id"] in seen or not shown(row["id"]):
                 continue
             seen.add(row["id"])
             out.append((row["id"], hop, "successor"))
@@ -2499,7 +2506,7 @@ def _standardized(store, snapshot_id: str, stats: Mapping[str, tuple[float, floa
 
 
 def similar_projects(store, project_id: str, k: int = 5, *, owner_sub: str | None = None,
-                     adh=None, ra=None) -> dict:
+                     adh=None, ra=None, caller_projects: set[str] | None = None) -> dict:
     """§5.7 호출 계약의 응답 — 경로별(lineage·vector·text·subject) 목록과 가중 merged.
 
     절대 코사인 임계는 두지 않는다(상대 순위만 쓴다). 외부 미가용 경로는 reason 과 함께 비운다.
@@ -2507,12 +2514,17 @@ def similar_projects(store, project_id: str, k: int = 5, *, owner_sub: str | Non
     보는 사람은 그 과제의 소유자다(계보 `_lineage` 와 같은 사람 — 인자가 아니다, D44). 계보 · 벡터 · 서술은 그가 구성원인 과제만
     싣고, 남의 과제는 순위 · corpus_n(벡터 문턱)에도 들지 않는다 — 있다는 것조차 드러나지 않는다(D45). subject 의 등록부 행은
     종전대로 owner_sub(없으면 그 소유자)의 것 또는 그 주인이 조직 공개로 연 행이다(registry.set_visibility).
+
+    `caller_projects` 는 실제로 부른 사람이 볼 수 있는 과제다(MCP — 구성원 · 조직 공개로 들어온 호출자). 주면 다른 과제는 소유자와
+    그 사람 둘 다 볼 수 있는 것만 싣고 수도 그 안에서 센다(D46). 쓰기는 여전히 소유자로 돈다(D44) — 이것은 다른 과제를 보는 범위뿐이다.
     """
     row = store.query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,))
     viewer = _s(row["owner_sub"]) if row is not None else None
     visible = _member_project_ids(store, viewer)
+    if caller_projects is not None:
+        visible &= caller_projects
     lineage = [{"project_id": pid, "code": _project_code(store, pid), "hops": hop, "relation": relation}
-               for pid, hop, relation in _lineage(store, project_id)]
+               for pid, hop, relation in _lineage(store, project_id, caller_projects=caller_projects)]
 
     # 코퍼스에서 빠진 과제는 어느 경로로도 회수되지 않는다(§0.6 코퍼스 필터).
     corpus = _corpus_ids(store)
@@ -2546,7 +2558,7 @@ def similar_projects(store, project_id: str, k: int = 5, *, owner_sub: str | Non
         vector_reason = "스냅샷 없음"
 
     text, text_reason = _text_path(store, project_id, latest, adh, k, visible)
-    subject = _subject_path(store, latest.get(project_id), owner_sub or viewer)
+    subject = _subject_path(store, latest.get(project_id), owner_sub or viewer, visible)
 
     merged_scores: dict[str, dict] = {}
 
@@ -2641,8 +2653,12 @@ def alias_expand(store, keys: set[str]) -> dict[str, str]:
     return out
 
 
-def _subject_path(store, snapshot_id: str | None, owner_sub: str | None) -> list[dict]:
-    """§5.9.4 1) 정확 매치 — 이번 IR 의 subject_key(별칭 확장 포함)로 등록부를 회수한다."""
+def _subject_path(store, snapshot_id: str | None, owner_sub: str | None, visible: set[str]) -> list[dict]:
+    """§5.9.4 1) 정확 매치 — 이번 IR 의 subject_key(별칭 확장 포함)로 등록부를 회수한다.
+
+    행은 owner_sub 의 것 또는 조직 공개로 연 행이고, 조직 공개가 아닌 행은 보는 과제(`visible`)의 것만 싣고 센다 — MCP 로 부른
+    구성원에게 소유자만 보는 과제의 행이 드러나지 않는다(D46).
+    """
     paths = alias_expand(store, _subject_keys(store, snapshot_id))
     if not paths:
         return []
@@ -2650,34 +2666,37 @@ def _subject_path(store, snapshot_id: str | None, owner_sub: str | None) -> list
     for subject_key in sorted(paths):
         vis, vis_params = _visibility_clause(owner_sub)
         rows = store.query(
-            "SELECT target_key, status FROM rr_registry WHERE subject_key = ? "
+            "SELECT target_key, status, visibility FROM rr_registry WHERE subject_key = ? "
             f"AND status IN ('open','verified'){vis}",
             [subject_key, *vis_params],
         )
+        rows = [(row, _target_project(store, row["target_key"]) or "") for row in rows]
+        rows = [(row, pid) for row, pid in rows if row["visibility"] == "org" or pid in visible]
         if not rows:
             continue
         project_ids: list[str] = []
-        for row in rows:
-            target = store.query_one(
-                "SELECT project_id FROM rr_targets WHERE target_key = ?", (row["target_key"],))
-            pid = _s(target["project_id"]) if target is not None else ""
+        for _row, pid in rows:
             if pid and pid not in project_ids:
                 project_ids.append(pid)
         project_ids = [pid for pid in project_ids if pid in _corpus_ids(store)]
         if not project_ids:
             continue
         out.append({"subject_key": subject_key, "n_registry": len(rows),
-                    "n_verified": len([r for r in rows if r["status"] == "verified"]),
+                    "n_verified": len([row for row, _pid in rows if row["status"] == "verified"]),
                     "project_ids": project_ids, "path": paths[subject_key]})
     return out
 
 
 # ---------------------------------------------------------------- §5.7 선례 패널
-def precedents(store, diff_id: str, *, owner_sub: str | None = None) -> dict:
-    """ComparePage '선례' 패널과 E5·E8 의 원천(plan §5.7 두 번째 행)."""
+def precedents(store, diff_id: str, *, owner_sub: str | None = None, caller_projects: set[str] | None = None) -> dict:
+    """ComparePage '선례' 패널과 E5·E8 의 원천(plan §5.7 두 번째 행).
+
+    다른 과제의 등록부 행(clusters)은 owner_sub 의 것 또는 조직 공개로 연 행이고, 조직 공개가 아닌 행은 diff 소유자가 구성원인 과제의
+    것만이다. `caller_projects`(MCP 로 실제로 부른 사람이 볼 수 있는 과제)를 주면 그 안으로 더 좁힌다(D46).
+    """
     # 남의 diff 는 없는 diff 와 같다 — 그 diff 의 스냅샷(subject · 규칙 적중)을 읽어 주지 않는다(REST GET /precedents 는 소유를 보지
     # 않았다 — review1 남 숨김 훑기 둘째). MCP 는 범위를 본 뒤 그 행의 소유자로 부른다.
-    diff = store.query_one("SELECT id, target_snapshot_id FROM rr_diffs WHERE id = ?"
+    diff = store.query_one("SELECT id, owner_sub, target_snapshot_id FROM rr_diffs WHERE id = ?"
                            + (" AND owner_sub = ?" if owner_sub is not None else ""),
                            (diff_id, owner_sub) if owner_sub is not None else (diff_id,))
     if diff is None:
@@ -2694,13 +2713,18 @@ def precedents(store, diff_id: str, *, owner_sub: str | None = None) -> dict:
             delta_priors.append({k: row[k] for k in (
                 "change_kind", "mechanism", "mechanism_detail", "n_raised", "n_targets",
                 "n_verified", "n_dismissed")})
-    subject = _subject_path(store, _s(diff["target_snapshot_id"]), owner_sub)
+    visible = _member_project_ids(store, owner_sub or _s(diff["owner_sub"]))
+    if caller_projects is not None:
+        visible &= caller_projects
+    subject = _subject_path(store, _s(diff["target_snapshot_id"]), owner_sub, visible)
     clusters: list[dict] = []
     for hit in subject:
         vis, vis_params = _visibility_clause(owner_sub, "r")
         for row in store.query(
-                f"SELECT {_REGISTRY_COLS} FROM rr_registry AS r WHERE r.subject_key = ? "
+                f"SELECT {_REGISTRY_COLS}, visibility FROM rr_registry AS r WHERE r.subject_key = ? "
                 f"AND r.status IN ('open','verified'){vis}", [hit["subject_key"], *vis_params]):
+            if row["visibility"] != "org" and _target_project(store, row["target_key"]) not in visible:
+                continue
             merged = _j(row["merged_json"], {})
             clusters.append({
                 "reg_ref": f"reg:{row['target_key']}#{row['cluster_key']}",
