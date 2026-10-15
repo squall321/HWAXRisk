@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from app import common, config, learning, registry
+from app import common, config, export, learning, registry
 from app.errors import AppError
 
 OWNER = "tester@example.com"
@@ -283,6 +283,28 @@ def test_global_mining_queues_only_claims_of_projects_the_owner_can_see(risk_sto
     assert [leak for leak in ("TX", "FXa", "FXb", "남의 과제의 주장") if leak in text] == []
     assert payload.get("other_projects_n") == 1
     assert (payload["n_projects"], payload["n_findings"]) == (3, 8)                       # 셈은 전역 패턴 그대로
+
+
+def test_global_mining_stores_design_values_only_from_projects_the_owner_can_see(risk_store):
+    """전역 마이닝이라도 패턴 행에 저장하는 특징 범위(설계 값)는 그 행 주인이 볼 수 있는 과제의 원자에서만 고른다 — 셈(n_*)은 전역
+    그대로고 주인의 내보내기는 그 밖의 값을 싣지 않는다(조합 검토 M6). 종전에는 남의 원자 gap_mm 9.75 가 주인 행에 들었다."""
+    store = risk_store
+    _projects(store, {"P1": OWNER, "P2": OWNER, "PX": STRANGER})
+    for i, gap in enumerate((0.4, 0.5, 0.6), start=1):
+        _target(store, f"T{i}", project_id=f"P{(i % 2) + 1}")
+        for agent_key in ("seat-a", "seat-b"):
+            _finding(store, f"F{i}{agent_key[-1]}", f"T{i}", project_id=f"P{(i % 2) + 1}", agent_key=agent_key,
+                     feature_snapshot={"e:0123456789ab": {"gap_mm": gap}})
+    _target(store, "TX", project_id="PX", owner=STRANGER)
+    _finding(store, "FXa", "TX", project_id="PX", owner=STRANGER, feature_snapshot={"e:0123456789ab": {"gap_mm": 9.75}})
+    learning.mine_patterns(store)
+    row = store.query_one("SELECT owner_sub, feature_ranges_json, n_projects FROM rr_patterns", ())
+    assert row["owner_sub"] == OWNER and json.loads(row["feature_ranges_json"]) == {"edge.gap_mm": [0.4, 0.6]}
+    assert row["n_projects"] == 3                                                            # 셈은 전역 그대로
+    learning.mine_patterns(store)                                                           # 다시 돌아도(통계 갱신) 같다
+    assert json.loads(store.query_one("SELECT feature_ranges_json FROM rr_patterns", ())["feature_ranges_json"]) == {
+        "edge.gap_mm": [0.4, 0.6]}
+    assert "9.75" not in "".join(export.iter_lines(store, OWNER, 0))
 
 
 def test_mine_below_threshold_makes_nothing(risk_store):

@@ -622,6 +622,12 @@ def _visible_projects(store: RiskStore, *emails: str) -> set[str]:
     return set.intersection(*sets) if sets else set()
 
 
+def _owner_ranges(atoms: Sequence[Mapping[str, Any]], visible: set[str]) -> dict:
+    """패턴 행에 저장하는 특징 범위(설계 값) — 그 행 주인이 볼 수 있는 과제(`visible`)의 원자에서만 고른다. 전역 마이닝의 남의 설계
+    값이 주인 행과 그 내보내기에 들지 않게(조합 검토 M6) — 셈(n_*)은 전역 그대로다."""
+    return _feature_ranges([atom for atom in atoms if _s(atom["project_id"]) in visible])
+
+
 def _sample_claims(store: RiskStore, atoms: Sequence[Mapping[str, Any]], visible: set[str],
                    limit: int = 5) -> list[dict]:
     """주장 표본 — 보는 사람이 볼 수 있는 과제(`visible`)의 원자에서만 고른다. 야간 마이닝은 전역이라 남의 원자가 섞인다(D48)."""
@@ -675,6 +681,7 @@ def mine_patterns(store: RiskStore, *, owner_sub: str | None = None, now: int | 
                     # 카드 대조 거름 그대로(M3 S3-4) — 과제를 가로지르는 학습·지표·야간 자리라 카드 대조 원자는 회수 자격 0(M2 #9)·cells 대상은 통계에 넣지 않는다(M3 #57)
                     "SELECT owner_sub FROM rr_findings WHERE finding_id = ? AND COALESCE(source_kind, '') <> 'card_review'",
                     (atoms[0]["finding_id"],))["owner_sub"])
+                visible = _visible_projects(store, owner)
                 store.execute(
                     "INSERT INTO rr_patterns (id, owner_sub, visibility, cluster_key_norm, mechanism, "
                     "mechanism_detail, change_kind, subject_class, status, n_findings, n_targets, n_projects, "
@@ -683,10 +690,9 @@ def mine_patterns(store: RiskStore, *, owner_sub: str | None = None, now: int | 
                     (pattern_id, owner, norm, stats["mechanism"], stats["mechanism_detail"], stats["change_kind"],
                      stats["subject_class"], stats["n_findings"], stats["n_targets"], stats["n_projects"],
                      stats["n_experts"], stats["n_confirmed"], stats["n_refuted"], stats["precision"],
-                     common.canonical_json(stats["feature_ranges"]), now, now),
+                     common.canonical_json(_owner_ranges(atoms, visible)), now, now),
                 )
                 # 주장 · 대상 키는 큐 주인이 볼 수 있는 과제의 원자에서만, 남의 과제는 수로만(D48 조정자 결정) — n_* 셈은 전역 그대로다.
-                visible = _visible_projects(store, owner)
                 queue_id = _queue(store, owner, {
                     "pattern_id": pattern_id, "cluster_key_norm": norm, "proposal": "known",
                     "n_findings": stats["n_findings"], "n_projects": stats["n_projects"],
@@ -714,7 +720,8 @@ def mine_patterns(store: RiskStore, *, owner_sub: str | None = None, now: int | 
                 skipped.append({"cluster_key_norm": norm, "unmet": ["owned_by_other"],
                                 "owner_sub": _s(row["owner_sub"])})
                 continue
-            if _write_stats(store, pattern_id, stats, now):
+            ranges = _owner_ranges(atoms, _visible_projects(store, _s(row["owner_sub"])))
+            if _write_stats(store, pattern_id, {**stats, "feature_ranges": ranges}, now):
                 updated.append(pattern_id)
             if _s(row["status"]) in ("candidate", "known", "rule", "predictor"):
                 recent = _recent_precision(labels_all.get(norm, []))
