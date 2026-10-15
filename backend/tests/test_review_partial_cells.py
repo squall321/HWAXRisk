@@ -90,13 +90,8 @@ def test_a_skipped_cell_yields_the_reviewed_cells_findings_for_the_same_data(sto
     assert {k for k, n in (counts or {}).items() if n} == ({kind} if kind else set())
 
 
-@pytest.mark.parametrize("case", sorted(CASES))
-def test_a_skipped_cell_raises_the_stance_exactly_as_the_same_reviewed_cell_would(store, monkeypatch, case):
-    """반대 검토 4차 MEDIUM 1 · D-49 — 넘긴 셀의 걸림 후보는 검토한 셀과 같은 걸림 줄(X1-15)로 입장을 올린다(한 길 — D-47). 깨끗하게
-    검토한 단위 하나(바탕 agree)가 있는 원장에서 같은 자료의 셀을 검토한 셀로 두든 넘긴 셀로 두든 입장이 같다 — 넘긴 셀이 검토한 셀보다
-    더 올리거나 덜 올리지 않는다(기권 판단만 검토한 셀의 몫이다)."""
-    agent, switches, dual, _expect, _kind = CASES[case]
-    key, unit_id = _ledger_data(store, monkeypatch, agent, switches, dual)
+def _clean_unit(store, key: str, agent: str) -> str:
+    """그 전문가의 둘째 단위를 깨끗하게 검토한다(카드 OK · 카드 밖 없음 · 입력 결손은 영향 없음) — 바탕 입장 agree. 그 단위."""
     other = units.load_units(store, key)[1]["unit_id"]
     gap = agent == MEM1
     clean = FakeReviewEngine(gap_packs(GAP_ROSTER) if gap else rig.packs())
@@ -106,8 +101,49 @@ def test_a_skipped_cell_raises_the_stance_exactly_as_the_same_reviewed_cell_woul
     rig.Rig(store, clean).finish(rig.job(store, key, scope={"agents": [agent], "unit_ids": [other]}))
     assert store.query_one("SELECT state FROM rr_review_cells WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
                            (key, other, agent))["state"] == "reviewed"
+    return other
+
+
+@pytest.mark.parametrize("case", sorted(CASES))
+def test_a_skipped_cell_raises_the_stance_exactly_as_the_same_reviewed_cell_would(store, monkeypatch, case):
+    """반대 검토 4차 MEDIUM 1 · D-49 — 넘긴 셀의 걸림 후보는 검토한 셀과 같은 걸림 줄(X1-15)로 입장을 올린다(한 길 — D-47). 깨끗하게
+    검토한 단위 하나(바탕 agree)가 있는 원장에서 같은 자료의 셀을 검토한 셀로 두든 넘긴 셀로 두든 입장이 같다 — 넘긴 셀이 검토한 셀보다
+    더 올리거나 덜 올리지 않는다(기권 판단만 검토한 셀의 몫이다)."""
+    agent, switches, dual, _expect, _kind = CASES[case]
+    key, unit_id = _ledger_data(store, monkeypatch, agent, switches, dual)
+    _clean_unit(store, key, agent)
     stances = {}
     for state in ("reviewed", "skipped"):
         _findings_as(store, key, agent, unit_id, state)
         stances[state] = expert_report.prepare(store, key, agent).opinion["final_stance"]
     assert stances["skipped"] == stances["reviewed"]
+
+
+@pytest.mark.parametrize("state", ["reviewed", "skipped"])
+def test_an_input_gap_impact_yes_raises_the_stance_to_conditional_reviewed_or_skipped(store, monkeypatch, state):
+    """조정자 결정(4차 해석 4) — 입력 결손 q1 '영향 있음'(impact=yes)은 검토한 셀이든 넘긴 셀이든 입장을 conditional 로 올린다 — 확인되지
+    않은 영향이라 입력이 와야 확인한다(oppose 는 아니다). 종전에는 걸림 줄이 입력 결손 finding 을 보지 않아 agree 였다."""
+    key, unit_id = _ledger_data(store, monkeypatch, MEM1, {"noinput_script": [[{"impact": "yes", "title": "A"}]]}, "all")
+    _clean_unit(store, key, MEM1)
+    found, _ = _findings_as(store, key, MEM1, unit_id, state)
+    assert [(f["input_gap"], f["direction"], f.get("judgement_claimed")) for f in found] == [(True, "risk", "WARNING")]
+    assert expert_report.prepare(store, key, MEM1).opinion["final_stance"] == "conditional"
+
+
+def test_an_input_gap_impact_unknown_leaves_the_stance_and_stays_in_the_input_gap_and_needs_sections(store):
+    """조정자 결정(4차 해석 4) — 입력 결손 q1 '영향 모름'(impact=unknown)은 입장을 바꾸지 않는다(finding 이 아니다). 그 셀은 no_input 으로
+    닫히고 입력 결손 절의 영향 줄과 필요한 정보(q2 — 결측 입력이 오면 확인할 것)에 그대로 남는다."""
+    key = rig.target(store, GAP_ROSTER)
+    unit_id = units.load_units(store, key)[0]["unit_id"]
+    fake = FakeReviewEngine(gap_packs(GAP_ROSTER))
+    fake.noinput_script = {unit_id: [[{"impact": "unknown", "title": "A"}]]}
+    rig.Rig(store, fake).finish(rig.job(store, key, scope={"agents": [MEM1], "unit_ids": [unit_id]}))
+    _clean_unit(store, key, MEM1)
+    assert store.query_one("SELECT state FROM rr_review_cells WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+                           (key, unit_id, MEM1))["state"] == "no_input"
+    prepared = expert_report.prepare(store, key, MEM1)
+    assert (prepared.opinion["final_stance"], [f["unit_ids"] for f in prepared.findings]) == ("agree", [])
+    (row,) = [u for u in prepared.report["input_gap"]["units"] if u["unit_id"] == unit_id]
+    assert [i["impact"] for i in row["impacts"]] == ["unknown"] and row["requests"]
+    (needs,) = [u for u in prepared.report["needs_info"] if u["unit_id"] == unit_id]
+    assert {src for item in needs["items"] for src in item["from"]} == {"noinput"}

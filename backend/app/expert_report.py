@@ -1196,12 +1196,15 @@ _STANCE_RANK = {"agree": 0, "conditional": 1, "oppose": 2}
 
 
 def _raised(effective: Sequence[Mapping[str, Any]], findings: Sequence[Mapping[str, Any]]) -> str:
-    """X1-15 의 걸림 줄 — 실효 FAIL → oppose, WARNING·카드 밖 지적·변형이 갈린 카드(두 번째 판정 못 한 부딪침 포함) → conditional, 그 밖
-    agree. 검토한 셀과 넘긴 셀이 같은 줄을 지난다(D-47 — 한 길)."""
+    """X1-15 의 걸림 줄 — 실효 FAIL → oppose, WARNING·카드 밖 지적·변형이 갈린 카드(두 번째 판정 못 한 부딪침 포함)·입력 결손 '영향
+    있음'(q1 yes — 확인되지 않은 영향이라 입력이 와야 확인한다, oppose 는 아니다 · 조정자 결정 4차 해석 4) → conditional, 그 밖 agree.
+    '영향 모름' 은 finding 이 아니라 줄에 들지 않는다(입력 결손 절 · 필요한 정보에 남는다). 검토한 셀과 넘긴 셀이 같은 줄을 지난다
+    (D-47 — 한 길)."""
     if any(row["judgement"] == "FAIL" for row in effective):
         return "oppose"
     if (any(row["judgement"] == "WARNING" for row in effective)
-            or any(f["direction"] == "risk" and (f.get("off_card_n") or f.get("split")) for f in findings)):
+            or any(f["direction"] == "risk" and (f.get("off_card_n") or f.get("split") or f.get("input_gap"))
+                   for f in findings)):
         return "conditional"
     return "agree"
 
