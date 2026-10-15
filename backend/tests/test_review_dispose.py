@@ -230,7 +230,7 @@ def test_skip_needs_a_reason_and_the_expert_closes_again_with_the_skip_in_the_re
     assert _head(store, key, PEER)["state"] == "ready" and _seat(store, key, PEER) == ("done_weak", "partial:1")
     report = expert_report.load_report(store, key, PEER)
     assert [u["why"] for u in report["scope"]["unseen"]] == [{"code": "skipped", "text": "입력이 와야 본다", "by": OWNER,
-                                                              "hits": 0, "hits_by": {k: 0 for k in review_cells.HIT_KINDS}}]
+                                                              "hits": 0, "hits_by": {"card": 0, "offcard": 0, "noinput": 0}}]
     assert routes.coverage_payload(key, owner_sub=OWNER)["review"]["dispositions"] == {"retried": 0, "skipped": 1}
     assert len(_audits(store, "cells.skip")) == 1
 
@@ -332,6 +332,32 @@ def test_a_skipped_cells_hits_are_exactly_what_its_report_carries(store, monkeyp
     if case == "unjudged_conflict":
         assert held[0].get("conflict_unjudged") and "다툼 표지 — 두 번째 판정 못 함" in md
         assert [u["unit_id"] for u in report["needs_info"]] == [unit_ids[0]]        # 그 카드의 필요한 정보 — 검토한 셀과 같은 자리
+
+
+def test_a_skipped_cells_offcard_hit_becomes_a_finding_like_a_reviewed_cells(store):
+    """반대 검토 3차 HIGH 1 · D-47 — 카드 밖 호출을 받은 뒤 정산에서 끝내 실패한 셀(엔진이 점검 카드 하나를 끝내 내지 않는다 —
+    cards_unjudged)을 넘겨도 그 카드 밖 걸림은 검토한 셀처럼 finding 이고 카드 밖 절에 실린다(종전에는 넘긴 셀의 카드 밖 구성원을
+    빼 걸림 0 · finding 0 이었다). 넘김 응답의 걸림 셈은 보고서의 구성원 함수가 실제로 낸 것이다 — 카드 밖 갈래가 저절로 선다."""
+    from app import cardpack, expert_report, units
+
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    fake = FakeReviewEngine(rig.packs())
+    fake.offcard_findings = 1
+    fake.skip_cards = {list(cardpack.view_of(fre.load("pack_ok.json")).checkable)[-1]}
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": unit_ids[:1]})
+    rig.Rig(store, fake).finish(job_id)
+    cell = _cells(store, key, SEAL)[unit_ids[0]]
+    assert (cell["state"], cell["n_offcard"]) == ("failed", 1)
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(cells=[[unit_ids[0], SEAL]], reason="끝내 실패한 셀을 넘긴다"),
+                                 ident=ME)
+    assert (out.get("hits"), out.get("hits_by")) == (1, {"card": 0, "offcard": 1, "noinput": 0})
+    rig.Rig(store, fake).finish(out["job"]["job_id"])
+    report = expert_report.load_report(store, key, SEAL)
+    mine = [f for f in report["findings"] if f["unit_id"] == unit_ids[0]]
+    assert [(f["off_card"], f.get("partial_cell")) for f in mine] == [(True, True)]
+    assert [r["unit_id"] for r in report["off_card"]] == [unit_ids[0]]
+    assert "카드 밖 지적 1건 — 카드 밖 절 · finding" in expert_report.render_report_md(report)
 
 
 def test_risk_job_action_retries_and_skips_the_jobs_failed_cells_for_a_delegated_identity_only(store, monkeypatch):

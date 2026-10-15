@@ -612,7 +612,7 @@ def effective_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict]:
 def effective_view(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict]:
     """record_id → 실효 판정(실효 변형 행의 열 + effective_rows 의 표기). applies·judgement 는 실효 규칙의 값이다 — 변형이 갈린
     카드(split)는 행에 적힌 변형의 판정이 아니라 undetermined 다(X1-14). 행의 원래 값은 row_applies·row_judgement 에 둔다.
-    보고서 원장(`expert_report.Ledger.effective`)과 넘긴 셀의 걸림 셈(`review_cells.cell_hits`)이 같은 함수를 읽는다."""
+    보고서 원장(`expert_report.Ledger.effective`)이 읽는다."""
     marks = effective_rows(rows) if rows else {}
     out: dict[str, dict] = {}
     for row in rows:

@@ -335,8 +335,8 @@ def test_q1_and_q2_rows_citing_a_context_line_are_kept_and_marked_never_dropped(
 
 
 def test_a_skipped_input_gap_cells_unknown_impact_goes_where_a_reviewed_cells_would(store):
-    """반대 검토 2차 MEDIUM 2 · D-46 — 넘긴 입력 결손 셀의 영향 모름(q1 unknown)은 검토한 셀처럼 입력 결손 절에 실리고, 넘김 응답과
-    보고서의 글이 그 자리를 말한다(종전에는 걸림으로 세면서 '점검표 · finding 에 남겼다' 고 했지만 그런 자리에 없었다)."""
+    """반대 검토 2차 MEDIUM 2 · 3차 HIGH 1(D-47) — 넘긴 입력 결손 셀의 영향 모름(q1 unknown)은 검토한 셀처럼 입력 결손 절에 실린다.
+    걸림 셈은 구성원 함수가 실제로 낸 finding 구성원이라 모름 줄은 세지 않는다(finding 이 아니다 — 검토한 셀도 그렇다)."""
     from app import routes
     from tests import factories
 
@@ -345,32 +345,12 @@ def test_a_skipped_input_gap_cells_unknown_impact_goes_where_a_reviewed_cells_wo
     assert cell["state"] == "failed"
     out = routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": cell["run_id"]}, reason="입력 결손 답이 끝내 모자랐다"),
                                  ident=factories.ident(rig.OWNER))
-    assert (out.get("hits"), out.get("hits_by")) == (1, {"card": 0, "conflict_mark": 0, "noinput_yes": 0, "noinput_unknown": 1})
+    assert (out.get("hits"), out.get("hits_by")) == (0, {"card": 0, "offcard": 0, "noinput": 0})
     rig.Rig(store, fake).finish(out["job"]["job_id"])
     report = expert_report.load_report(store, key, MEM1)
     gap = [u for u in (report.get("input_gap") or {}).get("units") or () if u["unit_id"] == first]
     assert gap and [i["impact"] for i in gap[0]["impacts"]] == ["unknown"]
-    assert "입력 결손 영향 모름 1줄 — 입력 결손 절" in expert_report.render_report_md(report)
-
-
-@pytest.mark.parametrize("script, more, kept", [
-    # ① 한 답 안의 두 줄(같은 카드 · 경로 · 줄, 제목 없음 → 같은 대신 제목) — 엔진은 내용 전부로 가려 둘 다 냈다. 앱이 합치지 않는다
-    ([[{"impact": "yes", "title": "", "path": "P", "k": "K01", "why": "까닭 하나", "sev": "경미"},
-       {"impact": "yes", "title": "", "path": "P", "k": "K01", "why": "까닭 둘", "sev": "치명"}]], 0, ["경미", "치명"]),
-    # ② 다시 물었더니 같은 줄이 같은 영향 · 더 무거운 심각도로 왔다 — 비기면 더 무거운 쪽이 남는다
-    ([[{"impact": "yes", "title": "A", "path": "X", "sev": "경미"}], [{"impact": "yes", "title": "A", "path": "X", "sev": "치명"}]],
-     1, ["치명"]),
-])
-def test_q1_rows_merge_only_across_reasks_and_a_tie_keeps_the_more_severe(store, script, more, kept):
-    """반대 검토 2차 LOW 5 · D-46 — q1 의 겹침은 다시 묻기 사이에서만 가른다. 한 답 안의 줄은 엔진이 낸 그대로 둔다(종전에는 같은
-    정체의 두 영향이 하나로 합쳐져 가벼운 쪽이 남았고 finding 심각도가 경미였다). 다시 묻기 사이에서 영향이 비기면 더 무거운
-    심각도가 남는다. finding 의 심각도는 남은 줄에서 나온다(치명은 hold 정책으로 중대)."""
-    key, first, _fake = _one_gap_cell(store, script, more=more)
-    q1 = (_cell(store, key, first, MEM1)["extras"].get("noinput") or {}).get("q1") or []
-    assert [r["sev"] for r in q1 if r["impact"] == "yes"] == kept
-    severities = [r["severity"] for r in store.query("SELECT severity FROM rr_findings WHERE target_key = ?"
-                                                         " AND source_kind = 'card_review'", (key,))]
-    assert severities and max(severities, key=lambda s: {"경미": 1, "중대": 2}.get(s, 0)) == "중대"
+    assert not [f for f in report["findings"] if f["unit_id"] == first]
 
 
 def test_a_flipped_or_contested_non_hit_q1_is_kept_and_named_as_such(store):
