@@ -1564,6 +1564,18 @@ def _member(store, project_id: str, email: str) -> bool:
         "SELECT 1 FROM rr_project_members WHERE project_id = ? AND email = ?", (project_id, email)) is not None
 
 
+# `_member` 를 rr_projects 위의 조건 하나로 쓴 것(자리표 둘 = 그 사람 email 두 번) — 좌석 기억(E7)의 SQL 과 유사 과제의 거름이
+# 같은 뜻을 쓴다(남 숨김 훑기 셋째, D45). 조직 공개(mcp_visibility)는 넣지 않는다 — 남의 과제를 건너 찾는 것은 기본 기능이 아니다.
+_MEMBER_OF = "owner_sub = ? OR id IN (SELECT project_id FROM rr_project_members WHERE email = ?)"
+
+
+def _member_project_ids(store, email: str | None) -> set[str]:
+    """email 이 구성원인 과제 id 전부 — email 이 없으면 빈 집합(아무것도 보지 않는다)."""
+    if not email:
+        return set()
+    return {_s(row["id"]) for row in store.query(f"SELECT id FROM rr_projects WHERE {_MEMBER_OF}", (email, email))}
+
+
 def _lineage(store, project_id: str | None, hops: int = 3) -> list[tuple[str, int, str]]:
     """계보 — rr_projects.predecessor_project_id 를 앞뒤로 hops 만큼 따라간 (과제 id, 걸음, predecessor|successor)(자기 자신 제외).
     그 과제의 소유자가 구성원이 아닌 과제는 싣지도 건너 따라가지도 않는다 — 앞 과제 링크는 만들 때 구성원인지 보지만
@@ -1687,13 +1699,17 @@ def _item_e7(store, ctx, seats: Sequence[Mapping[str, Any]], adh, profile: "Brie
 
 def _seat_memory_line(store, agent_key: str, target_key: str, lineage: set[str],
                       subjects: set[str], adh, ctx, line_max: int = E7_SEAT_LINE) -> tuple[str, str | None]:
+    # 타깃 소유자가 구성원인 과제의 의견만 — 종전에는 같은 좌석의 의견을 소유자 누구든 읽어 남의 과제 발언이 이 패널의
+    # 프롬프트와 보고서에 실렸다(D45). 타깃 행이 없어 과제를 모르는 의견도 싣지 않는다.
+    owner = _s(ctx["target"]["owner_sub"])
     rows = store.query(
         "SELECT o.opinion_id, o.agent_key, o.target_key, o.raised_finding_ids_json, o.excerpt_for_rag, "
         "o.created_at, t.project_id FROM rr_seat_opinions AS o "
         "LEFT JOIN rr_targets AS t ON t.target_key = o.target_key "
         "WHERE o.agent_key = ? AND o.target_key <> ? "
+        f"AND t.project_id IN (SELECT id FROM rr_projects WHERE {_MEMBER_OF}) "
         "AND o.raised_finding_ids_json IS NOT NULL AND o.raised_finding_ids_json <> '[]'",
-        (agent_key, target_key),
+        (agent_key, target_key, owner, owner),
     )
     if rows:
         def rank(row):
@@ -2483,14 +2499,21 @@ def similar_projects(store, project_id: str, k: int = 5, *, owner_sub: str | Non
     """§5.7 호출 계약의 응답 — 경로별(lineage·vector·text·subject) 목록과 가중 merged.
 
     절대 코사인 임계는 두지 않는다(상대 순위만 쓴다). 외부 미가용 경로는 reason 과 함께 비운다.
+
+    보는 사람은 그 과제의 소유자다(계보 `_lineage` 와 같은 사람 — 인자가 아니다, D44). 계보 · 벡터 · 서술은 그가 구성원인 과제만
+    싣고, 남의 과제는 순위 · corpus_n(벡터 문턱)에도 들지 않는다 — 있다는 것조차 드러나지 않는다(D45). subject 의 등록부 행은
+    종전대로 owner_sub(없으면 그 소유자)의 것 또는 그 주인이 조직 공개로 연 행이다(registry.set_visibility).
     """
+    row = store.query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,))
+    viewer = _s(row["owner_sub"]) if row is not None else None
+    visible = _member_project_ids(store, viewer)
     lineage = [{"project_id": pid, "code": _project_code(store, pid), "hops": hop, "relation": relation}
                for pid, hop, relation in _lineage(store, project_id)]
 
     # 코퍼스에서 빠진 과제는 어느 경로로도 회수되지 않는다(§0.6 코퍼스 필터).
     corpus = _corpus_ids(store)
     lineage = [entry for entry in lineage if entry["project_id"] in corpus]
-    latest = _latest_snapshot_by_project(store)
+    latest = {pid: snapshot_id for pid, snapshot_id in _latest_snapshot_by_project(store).items() if pid in visible}
     corpus_n = len([p for p in latest if store.query_one(
         "SELECT snapshot_id FROM rr_states WHERE snapshot_id = ?", (latest[p],)) is not None])
     vector: list[dict] = []
@@ -2518,8 +2541,8 @@ def similar_projects(store, project_id: str, k: int = 5, *, owner_sub: str | Non
     else:
         vector_reason = "스냅샷 없음"
 
-    text, text_reason = _text_path(store, project_id, latest, adh, k)
-    subject = _subject_path(store, latest.get(project_id), owner_sub)
+    text, text_reason = _text_path(store, project_id, latest, adh, k, visible)
+    subject = _subject_path(store, latest.get(project_id), owner_sub or viewer)
 
     merged_scores: dict[str, dict] = {}
 
@@ -2547,8 +2570,13 @@ def similar_projects(store, project_id: str, k: int = 5, *, owner_sub: str | Non
             "reason": {"vector": vector_reason, "text": text_reason}}
 
 
-def _text_path(store, project_id: str, latest: Mapping[str, str], adh, k: int) -> tuple[list[dict], str | None]:
-    """AIDataHub hybrid_search 로 유사 서술을 찾는다(plan §7.3 3단계). 미가용이면 빈 목록."""
+def _text_path(store, project_id: str, latest: Mapping[str, str], adh, k: int,
+               visible: set[str]) -> tuple[list[dict], str | None]:
+    """AIDataHub hybrid_search 로 유사 서술을 찾는다(plan §7.3 3단계). 미가용이면 빈 목록.
+
+    적중은 보는 사람이 구성원인 과제(`visible`)의 것만 싣고 rank 는 실은 것끼리 1 부터 센다 — 걸러 낸 남의 적중이 순위의
+    빈칸으로 드러나지 않는다(D45).
+    """
     if adh is None or not getattr(adh, "available", False):
         return [], "external_sync=unavailable"
     snapshot_id = latest.get(project_id)
@@ -2566,16 +2594,16 @@ def _text_path(store, project_id: str, latest: Mapping[str, str], adh, k: int) -
     if isinstance(hits, dict):
         hits = hits.get("items") or hits.get("hits") or []
     out: list[dict] = []
-    for rank, hit in enumerate(hits if isinstance(hits, list) else [], start=1):
+    for hit in hits if isinstance(hits, list) else []:
         if not isinstance(hit, dict):
             continue
         tags = hit.get("tags") or []
         pid = next((str(t)[len("hwax:project:"):] for t in tags
                     if str(t).startswith("hwax:project:")), None)
-        if not pid or pid == project_id:
+        if not pid or pid == project_id or pid not in visible:
             continue
         out.append({"record_id": _s(hit.get("record_id") or hit.get("id")), "project_id": pid,
-                    "rank": rank, "section_id": _s(hit.get("section_id"))})
+                    "rank": len(out) + 1, "section_id": _s(hit.get("section_id"))})
     return out, None
 
 
