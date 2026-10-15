@@ -286,6 +286,51 @@ def test_a_retry_spilled_into_a_live_job_counts_against_its_reopen_allowance(sto
         assert rig.state(store, live) == "queued"
 
 
+@pytest.mark.parametrize("path", ["now", "loop"])
+def test_any_cancel_refreshes_the_reports_of_the_experts_the_job_touched(store, path):
+    """M3C-80(조정자 결정 — L8 을 넓힘) — 동의를 기다리지 않던 잡이어도 취소는 그 잡이 건드리거나 다시 연 전문가의 보고서를 엔진 없이
+    다시 짓는다. 실패 셀을 사람이 살아 있는 잡에 다시 열고(여유 안 — 보류 없음) 그 셀이 돌기 전에 잡을 취소하면 그 전문가 보고서는
+    그 단위를 '실패' 가 아니라 '보지 못한 것 — 대기' 로 싣고 머리는 partial 이다(종전에는 다시 열기 전 보고서 그대로 · 머리 planned).
+    아무것도 보지 않았고 보고서도 없는 머리는 그대로 둔다(지을 것이 없다). 진행판은 다시 지은 머리를 센다. 곧바로 닫힌 취소(now)와
+    cancelling 으로 섰다가 루프가 닫은 취소(loop) 둘 다다."""
+    key, job_id, unit_ids, fake, r = _failed_target(store)
+    revision = _head(store, key, PEER)["revision"]
+    live = rig.job(store, key, scope={"agents": [PEER, SEAL, "mech-syn-0"]})       # mech 2순위는 아직 아무것도 보지 않았다
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[unit_ids[0], PEER]]), ident=ME)
+    assert (out["job"]["job_id"], out["job"].get("hold"), _head(store, key, PEER)["state"]) == (live, None, "planned")
+    if path == "now":
+        assert routes.job_action(live, "cancel", ident=ME)["state"] == "cancelled"
+    else:
+        store.execute("UPDATE rr_jobs SET state = 'cancelling' WHERE id = ?", (live,))   # 도는 호출이 있던 때의 취소
+        r.tick()
+        assert rig.state(store, live) == "cancelled"
+    head = _head(store, key, PEER)
+    assert (head["state"], head["revision"]) == ("partial", revision + 1)
+    unseen = {u["unit_id"]: u["state"] for u in expert_report.load_report(store, key, PEER)["scope"]["unseen"]}
+    assert unseen.get(unit_ids[0]) == "pending"
+    idle = _head(store, key, "mech-syn-0")
+    assert (idle["state"], idle["report_gz"]) == ("planned", None)
+    by_state = rig.progress(store, live)["experts"]["by_state"]
+    assert (by_state["partial"], by_state["planned"]) == (1, 1)
+
+
+def test_a_cancel_refreshes_an_expert_whose_every_cell_was_reopened(store):
+    """M3C-81 — 보고서가 있는데 닫힌 셀이 하나도 남지 않은 전문가(사람이 그 셀을 전부 force 로 다시 열어 살아 있는 잡에 얹었다)도 취소가
+    다시 짓는다 — 모든 단위가 '보지 못한 것 — 대기' 이고, 검토한 셀이 없으니 입장은 abstain 이다(종전에는 다시 열기 전 보고서 그대로)."""
+    key, job_id, unit_ids, fake, r = _failed_target(store)
+    revision = _head(store, key, PEER)["revision"]
+    live = rig.job(store, key, scope={"agents": [PEER, SEAL, "mech-syn-0"]})
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[u, PEER] for u in unit_ids], force=True,
+                                                             reason="입력이 바뀌어 전부 다시 본다"), ident=ME)
+    assert (out["retried"], out["job"]["job_id"], out["job"].get("hold")) == (len(unit_ids), live, None)
+    assert routes.job_action(live, "cancel", ident=ME)["state"] == "cancelled"
+    head = _head(store, key, PEER)
+    assert (head["state"], head["revision"]) == ("partial", revision + 1)
+    report = expert_report.load_report(store, key, PEER)
+    assert {u["unit_id"]: u["state"] for u in report["scope"]["unseen"]} == {u: "pending" for u in unit_ids}
+    assert _stance(store, key, PEER) == ("abstain", "abstain", "abstain")
+
+
 def _extra_of(store, job_id: str) -> dict:
     """그 잡의 진행판 한 줄(routes._review_job_payload)의 progress.reopened_extra."""
     row = store.query_one("SELECT id, state, hold_code, hold_until, hold_n, error, credential_email, params_json, progress_json"

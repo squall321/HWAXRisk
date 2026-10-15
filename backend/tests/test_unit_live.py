@@ -11,7 +11,7 @@ from typing import Any
 import httpx
 import pytest
 
-from app import narrative, review_cells, unit_live, units
+from app import expert_report, narrative, review_cells, runner, unit_live, units
 from app.narrative import resolve_cites
 from tests.synth import review_rig as rig
 from tests.synth.fake_review_engine import FakeReviewEngine
@@ -371,6 +371,32 @@ def test_live_evidence_is_frozen_while_the_llm_gate_is_unknown_or_draining(store
     r.tick()
     assert (_row(store, key, unit_id)["status"], [c["arguments"] for c in gw.calls]) == ("ok", [PAIR])
     assert (fake.calls("pack"), fake.calls("run")) == ([], [])
+
+
+def test_cancelling_a_job_writes_the_report_of_an_expert_it_left_between_cells(store):
+    """M3C-80(조정자 결정 — L8 을 넓힘) — 근거 꾸러미를 기다리는 단위의 셀만 남기고 나머지를 검토한 전문가(마감 전이라 보고서가 없고
+    머리는 planned)도 취소가 그 검토한 셀로 보고서를 짓는다. 남은 단위는 '보지 못한 것' 에 대기다(종전에는 보고서가 없어 검토한 셀의
+    결과가 어디에도 보이지 않았다). 엔진은 부르지 않는다."""
+    key = _target(store)
+    unit_id = _material_unit(store, key)
+    job_id = rig.job(store, key, scope={"agents": [rig.SEAL]})
+    gw = Gateway()
+    gw.answers["compare_materials"] = "http_503"
+    fake = FakeReviewEngine(rig.packs())
+    r = rig.Rig(store, fake)
+    r.loop.live_transport = gw.transport
+    r.run(lambda: all(c["state"] == "reviewed" for c in store.query(
+        "SELECT state FROM rr_review_cells WHERE target_key = ? AND agent_key = ? AND unit_id <> ?", (key, rig.SEAL, unit_id))))
+    head = store.query_one("SELECT state, report_gz FROM rr_expert_reports WHERE target_key = ? AND agent_key = ?",
+                           (key, rig.SEAL))
+    assert (head["state"], head["report_gz"]) == ("planned", None)
+    runs = len(fake.calls("run"))
+    assert runner.cancel_job(store, job_id, by=OWNER)["state"] == "cancelled"
+    head = store.query_one("SELECT state, report_gz FROM rr_expert_reports WHERE target_key = ? AND agent_key = ?",
+                           (key, rig.SEAL))
+    assert (head["state"], head["report_gz"] is not None, len(fake.calls("run"))) == ("partial", True, runs)
+    report = expert_report.load_report(store, key, rig.SEAL)
+    assert {u["unit_id"]: u["state"] for u in report["scope"]["unseen"]} == {unit_id: "pending"}
 
 
 def test_the_engine_sees_the_live_line_in_that_units_request(store):

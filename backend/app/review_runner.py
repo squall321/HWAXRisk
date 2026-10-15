@@ -356,48 +356,53 @@ def in_flight(store: Any, *, job_id: str | None = None, target_key: str | None =
 
 
 def refresh_after_cancel(store: Any, job_id: str, *, now: int | None = None) -> list[str]:
-    """동의를 기다리던 잡(다시 연 셀 몫이 넘었다 — reopen_budget 의 hold)이 취소로 닫힐 때 그 잡이 다시 연 셀의 전문가 보고서를 지금
-    원장으로 다시 짓는다(M3 묶음 검토 L8 · D-52). 입장은 검토한 셀로 정하고, 돌지 않은 셀의 단위는 '보지 못한 것' 에 대기로 실리며 머리는
-    마감 규칙대로(열린 셀이 있으니 partial) 닫힌다 — 종전에는 다시 열기 전 보고서(거름 · 다 봤다)가 그대로였다. planned 머리를 잠깐
-    쥐고 마감과 같은 쓰기를 한다(엔진은 부르지 않는다 — 얼린 묶음이 이 박스에 없으면 놓고 둔다). 부른 쪽 트랜잭션에 들어간다. 다시
-    지은 전문가 키."""
+    """취소로 닫히는 검토 잡이 건드리거나 다시 연 전문가(`job_expert_sql` — 범위로 찍힌 머리 · 그 잡에 묶인 셀이 있는 전문가)의 보고서를
+    지금 원장으로 다시 짓는다 — 어떤 취소 뒤에도 낡은 전문가 보고서가 남지 않게(M3 묶음 검토 L8 · D-52, 모든 취소로 넓힘 M3C-81).
+    남은 planned 머리 가운데 앞서 얼린 보고서가 있거나 닫힌 셀이 있는 머리다 — 아무것도 보지 않았고 보고서도 없는 머리는 지을 것이 없어
+    그대로다. 입장은 검토한 셀로 정하고 돌지 않은 단위는 '보지 못한 것' 에 대기로 실리며 머리는 마감 규칙대로 닫힌다(열린 셀이 있으면
+    partial). 머리를 잠깐 쥐고 마감과 같은 쓰기를 한다(엔진은 부르지 않는다 — 얼린 묶음이 이 박스에 없으면 놓고 둔다). 전문가마다 제
+    트랜잭션이라 부른 쪽은 트랜잭션 밖에서 부른다. 다시 지은 전문가 키."""
     now = now_epoch() if now is None else now
-    job = store.query_one("SELECT target_key, params_json, state FROM rr_jobs WHERE id = ? AND mode = ?", (job_id, MODE))
+    job = store.query_one("SELECT target_key, state FROM rr_jobs WHERE id = ? AND mode = ?", (job_id, MODE))
     if job is None or job["state"] not in ("cancelling", "cancelled"):
         return []
-    params = _json(job["params_json"], {})
-    if reopen_budget(params, max_calls=int(config.settings.risk_review_max_calls))["hold"] is None:
-        return []
-    runs = _reopen_runs(params)
     target_key = str(job["target_key"])
-    agents = sorted({str(r["agent_key"]) for r in store.query(
-        "SELECT unit_id, agent_key FROM rr_review_cells WHERE target_key = ? AND run_id = ?", (target_key, job_id))
-        if f"{r['unit_id']}|{r['agent_key']}" in runs})
+    agents = [str(r["agent_key"]) for r in store.query(
+        f"SELECT e.agent_key FROM rr_expert_reports e WHERE e.target_key = ? AND {review_cells.job_expert_sql('e')}"
+        " AND e.state = 'planned' AND (e.report_gz IS NOT NULL OR EXISTS (SELECT 1 FROM rr_review_cells c"
+        " WHERE c.target_key = e.target_key AND c.agent_key = e.agent_key AND c.state NOT IN ('pending', 'running')))"
+        " ORDER BY e.review_order, e.agent_key", (target_key, job_id, job_id))]
     done: list[str] = []
     for agent in agents:
         lease = f"cancel:{new_uuid()}"
         if not review_cells.claim_for_refresh(store, target_key, agent, lease_owner=lease, now=now):
             continue
         try:
-            try:
-                prepared = expert_report.prepare(store, target_key, agent)
-            except Exception:  # noqa: BLE001 — 읽기만이다. 못 지어도(얼린 묶음이 없다 따위) 취소는 서고 머리는 planned 로 놓는다.
-                log.exception("취소된 잡 %s 의 전문가 %s 보고서를 다시 짓지 못했다", job_id, agent)
-                continue
+            prepared = expert_report.prepare(store, target_key, agent)
             with store.tx():
                 if expert_report.commit(store, prepared, lease_owner=lease, now=now) is not None:
                     review_cells.close_expert(store, target_key, agent, lease_owner=lease, now=now)
                     done.append(agent)
+        except Exception:  # noqa: BLE001 — 한 전문가를 못 지어도(얼린 묶음이 없다 따위 — 그 쓰기는 제 트랜잭션째 되돌아간다) 취소는
+            # 이미 섰고 다른 전문가는 다시 짓는다. 그 머리는 planned 로 놓는다.
+            log.exception("취소된 잡 %s 의 전문가 %s 보고서를 다시 짓지 못했다", job_id, agent)
         finally:
             review_cells.release_expert(store, target_key, agent, lease_owner=lease, now=now)   # 마감했으면 0행이다
     return done
 
 
+def refresh_cancelled(store: Any, job_id: str) -> list[str]:
+    """곧바로 닫힌 취소(`runner.cancel_job` — 그 트랜잭션 밖에서 부른다)의 뒤 — 그 잡이 건드린 전문가 보고서를 다시 짓고
+    (`refresh_after_cancel`), 다시 지었으면 끝난 진행판을 다시 센다(머리 상태가 바뀌었다). 다시 지은 전문가 키."""
+    done = refresh_after_cancel(store, job_id)
+    if done:
+        close_progress(store, job_id, "cancelled")
+    return done
+
+
 def close_progress(store: Any, job_id: str, state: str) -> None:
     """루프를 거치지 않고 끝난 잡(도는 것이 없는 paused·queued 의 취소)의 진행판을 끝난 모양으로 적는다 — phase=state, 워커 없음,
-    기다림 없음, 원장을 다시 센 값(R3A-1 · R3A-11). 취소면 그 앞에 동의를 기다리던 전문가 보고서를 다시 짓는다(L8 · D-52)."""
-    if state == "cancelled":
-        refresh_after_cancel(store, job_id)
+    기다림 없음, 원장을 다시 센 값(R3A-1 · R3A-11)."""
     body = JobProgress(store, job_id, clock=now_epoch).finish(state)
     store.execute("UPDATE rr_jobs SET progress_json = ? WHERE id = ?", (body, job_id))
 
@@ -2795,7 +2800,7 @@ class ReviewLoop:
 
     def _finish(self, job: Mapping[str, Any], state: str, error: str | None) -> None:
         """잡을 닫는다 — completed 는 error 를 실패 셀 셈으로 바꿔 적고(없으면 비운다), cancelled 는 취소 전의 error 를 둔다. 취소는
-        그 앞에 동의를 기다리던 전문가 보고서를 다시 짓는다(L8 · D-52 — 도는 것이 0 이라 쥘 머리를 다투는 세션이 없다)."""
+        그 앞에 그 잡이 건드린 전문가 보고서를 다시 짓는다(L8 · M3C-81 — 도는 것이 0 이라 쥘 머리를 다투는 세션이 없다)."""
         if state == "cancelled":
             refresh_after_cancel(self.store, str(job["id"]), now=self.clock())
         body = self.progress(job["id"]).finish(state)
