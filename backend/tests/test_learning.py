@@ -150,7 +150,9 @@ def test_resolve_cluster_key_follows_chain_and_skips_revoked(risk_store):
     store.execute(
         "INSERT INTO rr_cluster_alias(old_cluster_key, new_cluster_key, owner_sub, reason, decided_by, decided_at, "
         "revoked_by, revoked_at) VALUES ('b', 'c', ?, 'cluster_merge', ?, 1, ?, 2)", (OWNER, OWNER, OWNER))
-    assert learning.resolve_cluster_key(store, "a") == "b"
+    assert learning.resolve_cluster_key(store, "a", owner_sub=OWNER) == "b"
+    # 별칭은 소유자마다다 — 남의 키 해석에는 닿지 않는다(조합 검토 M7).
+    assert learning.resolve_cluster_key(store, "a", owner_sub="someone@else.com") == "a"
 
 
 def test_resolve_cluster_key_breaks_cycle(risk_store):
@@ -159,7 +161,7 @@ def test_resolve_cluster_key_breaks_cycle(risk_store):
         store.execute(
             "INSERT INTO rr_cluster_alias(old_cluster_key, new_cluster_key, owner_sub, reason, decided_by, "
             "decided_at) VALUES (?, ?, ?, 'cluster_merge', ?, 1)", (old, new, OWNER, OWNER))
-    assert learning.resolve_cluster_key(store, "a") == "b"
+    assert learning.resolve_cluster_key(store, "a", owner_sub=OWNER) == "b"
 
 
 # ---------------------------------------------------------------- §7.4 라벨 훅·재합산

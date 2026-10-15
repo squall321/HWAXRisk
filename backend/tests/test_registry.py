@@ -980,7 +980,7 @@ def test_cluster_alias_write_revoke_and_hop_limit(risk_store, clock):
 
     alias = registry.add_cluster_alias(risk_store, "ck:a0000000001", "ck:b0000000002", owner_sub=OWNER)
     assert alias["new_cluster_key"] == "ck:b0000000002"
-    assert registry.resolve_cluster_key(risk_store, "ck:a0000000001") == "ck:b0000000002"
+    assert registry.resolve_cluster_key(risk_store, "ck:a0000000001", owner_sub=OWNER) == "ck:b0000000002"
 
     with pytest.raises(AppError) as again:
         registry.add_cluster_alias(risk_store, "ck:a0000000001", "ck:b0000000002", owner_sub=OWNER)
@@ -995,7 +995,7 @@ def test_cluster_alias_write_revoke_and_hop_limit(risk_store, clock):
     # 철회는 행 삭제가 아니라 표기다 — 행은 남고 해석만 끊긴다.
     assert risk_store.query_one(
         "SELECT revoked_at FROM rr_cluster_alias WHERE old_cluster_key = 'ck:a0000000001'")["revoked_at"]
-    assert registry.resolve_cluster_key(risk_store, "ck:a0000000001") == "ck:a0000000001"
+    assert registry.resolve_cluster_key(risk_store, "ck:a0000000001", owner_sub=OWNER) == "ck:a0000000001"
 
 
 def test_cluster_alias_chain_stops_at_five_hops(risk_store, clock):
@@ -1036,6 +1036,28 @@ def test_merge_folds_findings_through_a_human_alias(risk_store, clock):
 
     registry.revoke_cluster_alias(risk_store, "ck:x0000000001", owner_sub=OWNER)
     assert registry.merge(risk_store, "T1", owner_sub=OWNER)["clusters"] == 2
+
+
+def test_cluster_aliases_are_per_owner(risk_store, clock):
+    """조합 검토 M7 — 클러스터 키는 내용 해시라 소유자를 가로질러 같다 — 별칭은 소유자마다다. 남이 같은 키에 별칭을 세워도 주인의 병합에
+    닿지 않고(주인의 finding 을 남의 키로 접지 않는다) 주인이 같은 옛 키에 제 별칭을 세우는 것을 막지 않는다(종전에는 E409 로 남의 키를
+    보였다). 철회도 그 소유자의 별칭만이다."""
+    other = "someone@else.com"
+    _target(risk_store)
+    _finding(risk_store, "T1", "F1", "ck:shared00001", panel_id="P1")
+    _finding(risk_store, "T1", "F2", "ck:theirs00002", panel_id="P2")
+    registry.add_cluster_alias(risk_store, "ck:shared00001", "ck:theirs00002", owner_sub=other)
+    assert registry.merge(risk_store, "T1", owner_sub=OWNER)["clusters"] == 2           # 남의 별칭으로 접지 않는다
+    try:
+        mine = registry.add_cluster_alias(risk_store, "ck:shared00001", "ck:theirs00002", owner_sub=OWNER)
+    except AppError as exc:
+        mine = {"error": exc.code, "message": exc.message}
+    assert mine.get("new_cluster_key") == "ck:theirs00002", mine
+    assert registry.merge(risk_store, "T1", owner_sub=OWNER)["clusters"] == 1           # 제 별칭으로는 접는다
+    assert registry.resolve_cluster_key(risk_store, "ck:shared00001", owner_sub=other) == "ck:theirs00002"
+    registry.revoke_cluster_alias(risk_store, "ck:shared00001", owner_sub=OWNER)
+    assert registry.resolve_cluster_key(risk_store, "ck:shared00001", owner_sub=OWNER) == "ck:shared00001"
+    assert registry.resolve_cluster_key(risk_store, "ck:shared00001", owner_sub=other) == "ck:theirs00002"
 
 
 # ================================================================ §4.7.3 통합 보고서 — minutes 의 [품질 플래그]

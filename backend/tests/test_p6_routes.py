@@ -572,7 +572,7 @@ def test_cluster_merge_decision_writes_an_alias_and_remerges(store, clock):
         "SELECT COUNT(*) AS n FROM rr_audit WHERE action = 'curation.decide'")["n"] == 1
     # 별칭이 서면 재병합이 대표 키 하나로 접는다.
     from app import registry as registry_module
-    assert registry_module.resolve_cluster_key(store, key_a) == key_b
+    assert registry_module.resolve_cluster_key(store, key_a, owner_sub=OWNER) == key_b
 
 
 def test_cluster_merge_rejects_a_family_mismatch(store, clock):
@@ -612,7 +612,7 @@ def test_unclassified_code_decision_remaps_through_an_alias(store, clock):
     assert out["applied"]["taxonomy_version_after"] != out["applied"]["taxonomy_version_before"]
     after = store.query_one("SELECT cluster_key FROM rr_findings WHERE finding_id = 'F9'")["cluster_key"]
     assert after == before                                    # 저장된 키는 바이트 불변이다
-    assert learning.resolve_cluster_key(store, before) != before   # 별칭으로 새 키에 이어진다
+    assert learning.resolve_cluster_key(store, before, owner_sub=OWNER) != before   # 별칭으로 새 키에 이어진다
     assert store.query_one("SELECT COUNT(*) AS n FROM rr_cluster_alias")["n"] == 1
 
 

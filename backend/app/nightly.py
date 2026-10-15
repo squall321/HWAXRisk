@@ -215,14 +215,15 @@ def check_cluster_alias(store: Any, *, now: int) -> dict:
     learning.resolve_cluster_key 는 순환을 만나면 조용히 멈추므로(정상 조회 경로) 그 조용함이 가리는
     깨진 사전을 여기서 따로 센다.
     """
+    # 별칭은 소유자마다다(조합 검토 M7) — 체인은 한 소유자의 별칭끼리만 잇는다.
     rows = store.query(
-        "SELECT old_cluster_key, new_cluster_key FROM rr_cluster_alias WHERE revoked_at IS NULL")
-    alias = {str(r["old_cluster_key"]): str(r["new_cluster_key"]) for r in rows}
+        "SELECT owner_sub, old_cluster_key, new_cluster_key FROM rr_cluster_alias WHERE revoked_at IS NULL")
+    alias = {(str(r["owner_sub"]), str(r["old_cluster_key"])): str(r["new_cluster_key"]) for r in rows}
     broken: list[str] = []
-    for key in sorted(alias):
+    for owner, key in sorted(alias):
         seen, current = [key], key
         for _ in range(ALIAS_CHAIN_MAX + 1):         # 5홉까지는 정상, 6홉째가 있으면 초과다
-            nxt = alias.get(current)
+            nxt = alias.get((owner, current))
             if nxt is None:
                 break
             if nxt in seen:
@@ -316,7 +317,8 @@ def scan_cluster_merge(store: Any, *, now: int, enabled: bool = True) -> dict:
     # 쌍으로 싣지 않는다(D47). 종전에는 같은 family 의 남의 클러스터가 앞 클러스터 주인의 큐에 올랐다.
     families: dict[tuple[str, str, str], dict[str, dict]] = {}
     for row in rows:
-        resolved = learning.resolve_cluster_key(store, str(row["cluster_key"]), _cache=alias_cache)
+        resolved = learning.resolve_cluster_key(store, str(row["cluster_key"]), owner_sub=str(row["owner_sub"]),
+                                                _cache=alias_cache)
         bucket = families.setdefault((str(row["family_key"]), str(row["direction"] or ""), str(row["owner_sub"])), {})
         bucket.setdefault(resolved, {
             "cluster_key": resolved, "owner_sub": str(row["owner_sub"]),

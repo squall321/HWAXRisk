@@ -192,7 +192,7 @@ def _bump_pattern(store: RiskStore, finding: Mapping[str, Any], pattern_id: str 
             "SELECT id, n_confirmed, n_refuted FROM rr_patterns WHERE id = ?", (pattern_id,))
     else:
         # 패턴이 세는 키는 별칭을 거친 대표 키다(plan §7.5) — 원본 cluster_key 로 찾으면 병합 뒤 못 찾는다.
-        norm = learning.resolve_cluster_key(store, _s(finding.get("cluster_key")))
+        norm = learning.resolve_cluster_key(store, _s(finding.get("cluster_key")), owner_sub=_s(finding.get("owner_sub")))
         row = store.query_one(
             "SELECT id, n_confirmed, n_refuted FROM rr_patterns WHERE cluster_key_norm = ?", (norm,))
     if row is None:
@@ -543,7 +543,7 @@ def distinct_models(store: RiskStore, *, owner_sub: str, cluster_key_norm: str) 
     cache: dict[str, str] = {}
     seen = {models.get(_s(r["panel_id"]), "") for r in rows
             if _s(r["status"]) not in EXCLUDED_FINDING_STATUS
-            and learning.resolve_cluster_key(store, _s(r["cluster_key"]), _cache=cache) == cluster_key_norm}
+            and learning.resolve_cluster_key(store, _s(r["cluster_key"]), owner_sub=owner_sub, _cache=cache) == cluster_key_norm}
     return len(seen - {""})
 
 
@@ -650,7 +650,7 @@ def _load_atoms(store: RiskStore) -> list[dict]:
         if _s(atom["project_id"]) not in corpus:
             continue
         cluster = _s(atom["cluster_key"])
-        norm = learning.resolve_cluster_key(store, cluster, _cache=cache)
+        norm = learning.resolve_cluster_key(store, cluster, owner_sub=_s(atom["owner_sub"]), _cache=cache)
         atom["cluster_key_norm"] = norm
         atom["agent_key"] = seats.get(_s(atom["opinion_id"]), "")
         atom["model"] = models.get(_s(atom["panel_id"]), "")

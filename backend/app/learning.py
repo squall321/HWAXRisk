@@ -103,22 +103,25 @@ def _num(value: Any) -> float | None:
     return float(value)
 
 
-def resolve_cluster_key(store: RiskStore, cluster_key: str, *, _cache: dict | None = None) -> str:
+def resolve_cluster_key(store: RiskStore, cluster_key: str, *, owner_sub: str, _cache: dict | None = None) -> str:
     """rr_cluster_alias 를 거친 대표 cluster_key(§4.3.2). 체인 ≤5홉이고 revoked 별칭·순환은 건너뛴다.
 
+    별칭은 소유자마다다(조합 검토 M7) — 그 키를 쓴 원장 행의 소유자(`owner_sub`)의 별칭만 따른다. 클러스터 키는 내용 해시라 소유자를
+    가로질러 같아, 남의 별칭을 따르면 주인의 finding 을 남의 키로 접는다.
     registry 가 같은 이름의 정본을 갖게 되면 이 함수는 그쪽으로 위임한다(중복 구현 금지).
     """
     key = _s(cluster_key)
     if not key:
         return key
-    if _cache is not None and key in _cache:
-        return _cache[key]
+    owner = _s(owner_sub)
+    if _cache is not None and (owner, key) in _cache:
+        return _cache[(owner, key)]
     seen = {key}
     current = key
     for _ in range(ALIAS_MAX_HOPS):
         row = store.query_one(
-            "SELECT new_cluster_key FROM rr_cluster_alias WHERE old_cluster_key = ? AND revoked_at IS NULL",
-            (current,),
+            "SELECT new_cluster_key FROM rr_cluster_alias WHERE owner_sub = ? AND old_cluster_key = ? AND revoked_at IS NULL",
+            (owner, current),
         )
         if row is None:
             break
@@ -128,7 +131,7 @@ def resolve_cluster_key(store: RiskStore, cluster_key: str, *, _cache: dict | No
         seen.add(nxt)
         current = nxt
     if _cache is not None:
-        _cache[key] = current
+        _cache[(owner, key)] = current
     return current
 
 
@@ -200,7 +203,7 @@ def collect_atoms(store: RiskStore, *, norms: Iterable[str] | None = None,
         cluster_key = _s(row["cluster_key"])
         if (row["target_key"], registry.strip_improvement_suffix(cluster_key)) in weak:
             continue
-        norm = resolve_cluster_key(store, cluster_key, _cache=cache)
+        norm = resolve_cluster_key(store, cluster_key, owner_sub=_s(row["owner_sub"]), _cache=cache)
         if wanted is not None and norm not in wanted:
             continue
         fj = _loads(row["finding_json"], {})
@@ -246,7 +249,7 @@ def collect_labels(store: RiskStore, *, owner_sub: str | None = None) -> dict[st
         params = (owner_sub,)
     for raw in store.query(sql + _LABEL_ORDER, params):
         row = dict(raw)
-        norm = resolve_cluster_key(store, _s(row["cluster_key"]), _cache=cache)
+        norm = resolve_cluster_key(store, _s(row["cluster_key"]), owner_sub=_s(row["owner_sub"]), _cache=cache)
         groups.setdefault(norm, []).append({
             "label_id": row["label_id"],
             "finding_id": row["finding_id"],
@@ -472,7 +475,7 @@ def on_label(store: RiskStore, label_id: str, *, now: int | None = None) -> dict
     """라벨 1건이 들어온 뒤의 훅(§7.4) — 그 조합의 선례 카운트와 그 패턴의 통계를 다시 맞춘다."""
     now = common.now_epoch() if now is None else now
     row = store.query_one(
-        "SELECT l.id AS label_id, l.finding_id, f.cluster_key, f.change_kind, f.mechanism, f.mechanism_detail "
+        "SELECT l.id AS label_id, l.finding_id, f.cluster_key, f.change_kind, f.mechanism, f.mechanism_detail, f.owner_sub "
         "FROM rr_labels AS l JOIN rr_findings AS f ON f.finding_id = l.finding_id"
         # 카드 대조 거름 그대로(M3 S3-4) — 과제를 가로지르는 학습·지표·야간 자리라 카드 대조 원자는 회수 자격 0(M2 #9)·cells 대상은 통계에 넣지 않는다(M3 #57)
         " AND COALESCE(f.source_kind, '') <> 'card_review' WHERE l.id = ?",
@@ -483,7 +486,7 @@ def on_label(store: RiskStore, label_id: str, *, now: int | None = None) -> dict
     combo = _combo_of(row)
     with store.tx():
         priors_written = recompute_label_priors(store, [combo] if combo else [], now=now)
-        norm = resolve_cluster_key(store, _s(row["cluster_key"]))
+        norm = resolve_cluster_key(store, _s(row["cluster_key"]), owner_sub=_s(row["owner_sub"]))
         pattern = store.query_one("SELECT id FROM rr_patterns WHERE cluster_key_norm = ?", (norm,))
         pattern_id = _s(pattern["id"]) if pattern is not None else ""
         if pattern_id:
@@ -1103,7 +1106,7 @@ def apply_remap(store: RiskStore, rows: Sequence[Mapping[str, Any]], *,
         if pair in seen:
             continue
         seen.add(pair)
-        if resolve_cluster_key(store, row["old_cluster_key"]) == row["new_cluster_key"]:
+        if resolve_cluster_key(store, row["old_cluster_key"], owner_sub=owner_sub or row["owner_sub"]) == row["new_cluster_key"]:
             continue
         try:
             registry.add_cluster_alias(store, row["old_cluster_key"], row["new_cluster_key"],

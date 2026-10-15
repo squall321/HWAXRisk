@@ -756,6 +756,10 @@ _DDL_V4: list[str] = _split_statements(_DDL_V4_SQL)
 # 셀 꾸러미의 rr_unit_live(걸음 C3-1)도 이 블록 안에 있고, 블록을 고치는 것은 주인뿐이다. 새 표 다섯(rr_issues · rr_summaries ·
 # rr_reports · rr_close_acks · rr_unit_live) · 새 열 열셋(rr_jobs 1 · rr_panels 2 · rr_registry 7 · rr_targets 3) · 새 색인 다섯.
 # 새 표는 전부 owner_sub·target_key 가 있고 박스 지역 표(export.LOCAL_ONLY_TABLES)는 없다. 어휘 열에는 제약을 걸지 않는다(C-3).
+# 끝에 rr_cluster_alias 를 소유자별 열쇠(owner_sub, old_cluster_key)로 다시 짓는다(조합 검토 M7 · D-52) — 클러스터 키는 내용
+# 해시라 소유자를 가로질러 같은데 v1 표는 옛 키 하나가 열쇠라, 남이 같은 키에 세운 별칭이 주인의 병합을 접고 주인의 별칭을 막았다.
+# 허용 연산(CREATE · ADD COLUMN · CREATE INDEX) 밖의 단 하나다 — 새 표를 만들고 옛 행을 그 owner_sub 의 별칭으로 옮긴 뒤 옛 표를
+# 지우고 이름을 돌려준다(한 트랜잭션 · 이행 전 사본). v1 의 reason 어휘 제약은 코드(registry.ALIAS_REASONS)가 지킨다.
 # rr_jobs.mode 어휘는 이제 NULL = panels · panels · reviews · issues · synth 다(runner.JOB_MODES) — v4 의 열 주석은 굳은 블록이라
 # 여기에 적는다. 넣지 않는 것 — v4 주석이 미뤄 둔 input_gap_json·route_det·route_llm·audit_kind·audit_result·ix_rr_cells_reuse 와
 # rr_roster.input_gaps_json(M3.md 5절 #43), rr_cell_audits·rr_post_runs, rr_reports.ra_*(M4 의 v6), rr_summaries.n_rows_omitted.
@@ -852,6 +856,20 @@ CREATE TABLE IF NOT EXISTS rr_unit_live (                -- 검토 단위의 실
   attempts INTEGER NOT NULL DEFAULT 0, not_before INTEGER,  -- 인프라 실패 재시도
   frozen_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER,
   PRIMARY KEY(target_key, unit_id));
+
+CREATE TABLE rr_cluster_alias__v5 (                      -- rr_cluster_alias 다시 짓기(소유자별 열쇠) — 위 주석
+  old_cluster_key TEXT NOT NULL, new_cluster_key TEXT NOT NULL, owner_sub TEXT NOT NULL,
+  reason TEXT NOT NULL, evidence_json TEXT,
+  decided_by TEXT NOT NULL, decided_at INTEGER NOT NULL,
+  revoked_by TEXT, revoked_at INTEGER,
+  PRIMARY KEY(owner_sub, old_cluster_key));
+INSERT INTO rr_cluster_alias__v5(old_cluster_key, new_cluster_key, owner_sub, reason, evidence_json, decided_by, decided_at,
+  revoked_by, revoked_at)
+  SELECT old_cluster_key, new_cluster_key, owner_sub, reason, evidence_json, decided_by, decided_at, revoked_by, revoked_at
+  FROM rr_cluster_alias ORDER BY rowid;
+DROP TABLE rr_cluster_alias;
+ALTER TABLE rr_cluster_alias__v5 RENAME TO rr_cluster_alias;
+CREATE INDEX IF NOT EXISTS ix_rr_cluster_alias_owner_new ON rr_cluster_alias(owner_sub, new_cluster_key);
 """
 _DDL_V5: list[str] = _split_statements(_DDL_V5_SQL)
 

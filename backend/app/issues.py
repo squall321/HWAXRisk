@@ -243,6 +243,8 @@ def candidates(store: RiskStore, target_key: str, *, settings: Any = None) -> li
     verdicts = _ok_verdicts(store, target_key)
     cell_mechs = _cell_mechs(store, target_key)
     roster_domain = _roster_domain(store, target_key)
+    owner = store.query_one("SELECT owner_sub FROM rr_targets WHERE target_key = ?", (target_key,))
+    owner_sub = _str(owner["owner_sub"]) if owner is not None else ""
     out: list[dict] = []
     for row in registry.registry_rows(store, target_key):
         key = str(row["cluster_key"])
@@ -253,7 +255,7 @@ def candidates(store: RiskStore, target_key: str, *, settings: Any = None) -> li
                                       min_opposers=int(cfg.risk_issue_split_min_opposers))
         if not types:
             continue
-        anchor = registry.resolve_cluster_key(store, key)
+        anchor = registry.resolve_cluster_key(store, key, owner_sub=owner_sub)
         rep = members.get(_str(row["merged"].get("claim_finding_id")))
         unit_ids = sorted({a["unit_id"] for a in members.values() if a["unit_id"]}) or list(
             row["merged"].get("unit_ids") or ())
@@ -788,8 +790,8 @@ def resolve_issue(store: RiskStore, panel_id: str, *, settings: Any = None) -> d
                             (panel_id,))
     if panel is None or not panel["issue_id"]:
         return {"issue_id": None, "state": None, "outcome": None}
-    issue = store.query_one("SELECT issue_id, target_key, anchor_cluster_key, state, panel_id, charged, basis_json, outcome,"
-                            " outcome_json, reraised_json FROM rr_issues WHERE issue_id = ?", (panel["issue_id"],))
+    issue = store.query_one("SELECT issue_id, target_key, owner_sub, anchor_cluster_key, state, panel_id, charged, basis_json,"
+                            " outcome, outcome_json, reraised_json FROM rr_issues WHERE issue_id = ?", (panel["issue_id"],))
     if issue is None:
         return {"issue_id": panel["issue_id"], "state": None, "outcome": None}
     if _str(issue["panel_id"]) != panel_id or _str(issue["state"]) in _UNRESOLVABLE_STATES:
@@ -823,7 +825,7 @@ def resolve_issue(store: RiskStore, panel_id: str, *, settings: Any = None) -> d
         return {"issue_id": issue["issue_id"], "state": state, "outcome": "undetermined" if state == "inconclusive" else None}
     anchor = str(issue["anchor_cluster_key"])
     atoms = [a for a in _panel_atoms(store, panel_id)
-             if registry.resolve_cluster_key(store, _str(a["cluster_key"])) == anchor]
+             if registry.resolve_cluster_key(store, _str(a["cluster_key"]), owner_sub=_str(issue["owner_sub"])) == anchor]
     basis = _loads(issue["basis_json"], {})
     claimed = basis.get("claimed") or {}
     before = basis.get("registry_before") or {}

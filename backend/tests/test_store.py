@@ -59,10 +59,14 @@ def test_v2_adds_the_brief_call_ledger_and_keeps_v1_data(tmp_path):
     assert [v for v, _ in MIG][:2] == [1, 2]
     # 허용 연산만 쓴다(plan §5.2.5 (6)) — ALTER 로 CHECK 를 고치는 문장이 없다. 유일 색인은 같은 판이 새로 만든 표에만 건다
     # (빈 표라 이행이 겹친 행으로 죽지 않는다 — 이미 행이 든 표에 걸면 박스마다 성패가 갈린다).
-    for _, statements in MIG[1:]:
+    for version, statements in MIG[1:]:
         created = {t.upper() for t in re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", "\n".join(statements))}
+        rebuild = REBUILD_STATEMENTS.get(version, ())
+        assert [sum(1 for s in statements if s.strip().upper().startswith(head)) for head in rebuild] == [1] * len(rebuild)
         for sql in statements:
             head = sql.strip().upper()
+            if rebuild and head.startswith(rebuild):
+                continue
             assert head.startswith(("CREATE TABLE IF NOT EXISTS", "ALTER TABLE", "CREATE INDEX IF NOT EXISTS",
                                     "CREATE UNIQUE INDEX IF NOT EXISTS"))
             if head.startswith("ALTER TABLE"):
@@ -243,6 +247,10 @@ def test_credential_value_lives_only_in_portal_pat_enc(risk_store, tmp_path):
 # ---------------------------------------------------------------- 이행 규약과 안전 묶음(WP5a R3 · 반대 검토 X2-01·X2-02)
 # 한 번 나간 버전의 DDL 은 고치지 않는다 — cae00 은 그 버전을 이미 적용했고 다시 돌리지 않는다(WP5a 3.2.1 마지막 규약).
 # 새 버전을 더하면 그 커밋이 여기에 해시를 같이 적는다(적지 않으면 아래 시험이 붉다).
+# 허용 연산(CREATE · ADD COLUMN · CREATE INDEX) 밖의 단 하나 — v5 의 rr_cluster_alias 다시 짓기(소유자별 열쇠, 조합 검토 M7 · D-52).
+# 새 표 → 옛 행 옮기기 → 옛 표 지우기 → 이름 돌려주기가 한 판에 하나씩 있어야 하고 그 밖의 문장은 예외가 아니다.
+REBUILD_STATEMENTS = {5: ("CREATE TABLE RR_CLUSTER_ALIAS__V5 (", "INSERT INTO RR_CLUSTER_ALIAS__V5(",
+                          "DROP TABLE RR_CLUSTER_ALIAS;", "ALTER TABLE RR_CLUSTER_ALIAS__V5 RENAME TO RR_CLUSTER_ALIAS;")}
 PUSHED_DDL_SHA256 = {
     1: "95298128f33e533a21a9bbdfb4aab46a9f0af096585f1e5932cc035887e09492",
     2: "162c36361ed98a7fb6d8cc195ab0e1c0fabe1ef448ec7e785f2311e2843bfea5",
@@ -251,7 +259,7 @@ PUSHED_DDL_SHA256 = {
     4: "f44b1630c19df06f0929485782c55253edf8a765858c1c30a824cb31b119c0b5",
     # v5 는 아직 나가지 않았다 — 가지 m3 에만 있고 dev 리허설(재설계 PLAN 4절 C-2, M3 단계 D)이 끝나야 main 에 오른다.
     # 그때까지는 블록을 고칠 수 있고(주인은 쟁점·종합 걸음 S3-1), 고치면 같은 커밋에서 이 값을 고친다. push 하는 날 이 값이 굳는다.
-    5: "9474298a9049f38be2bea5d3e4ddf72ef963e141d9ee9fc65a6ff334b9ee40be",
+    5: "25350889b546df9140150e8b55c7f1d1ebbe701fbf6e46ee91897db75fb89b13",
 }
 SHARED_TABLES = {"rr_dim_vocab", "rr_delta_priors", "rr_rules", "rr_metrics"}
 
@@ -666,6 +674,7 @@ V5_INDEXES = {
     "ux_rr_issues_anchor": ("rr_issues", ["target_key", "anchor_cluster_key"], True),
     "ix_rr_issues_state": ("rr_issues", ["target_key", "state", "rank"], False),
     "ix_rr_summaries_scope": ("rr_summaries", ["target_key", "scope_kind", "scope_key", "created_at"], False),
+    "ix_rr_cluster_alias_owner_new": ("rr_cluster_alias", ["owner_sub", "new_cluster_key"], False),
 }
 # 넣지 않기로 한 것(M3.md 4.2 끝 · 5절 #43) — 다른 걸음이 슬쩍 더하면 계약 밖이다.
 V5_LEFT_OUT = {"rr_roster": {"input_gaps_json"}, "rr_review_cells": {"input_gap_json", "route_det", "route_llm",
@@ -674,8 +683,9 @@ V5_LEFT_OUT = {"rr_roster": {"input_gaps_json"}, "rr_review_cells": {"input_gap_
 
 
 def test_v5_is_the_m3_block_with_the_contract_column_names(risk_store, tmp_path):
-    """v5 하나에 새 표 다섯 · 새 열 열셋(rr_jobs 1 · rr_panels 2 · rr_registry 7 · rr_targets 3) · 새 색인 다섯이 있고 그 밖은 없다.
-    rr_panels.kind 는 NOT NULL DEFAULT 'coverage' 라 옛 패널 행이 coverage 로 읽힌다. 넣지 않기로 한 열·표는 없다."""
+    """v5 하나에 새 표 다섯 · 새 열 열셋(rr_jobs 1 · rr_panels 2 · rr_registry 7 · rr_targets 3) · 새 색인 여섯과 rr_cluster_alias 의
+    소유자별 다시 짓기(열쇠 (owner_sub, old_cluster_key) — 조합 검토 M7)가 있고 그 밖은 없다. rr_panels.kind 는 NOT NULL DEFAULT
+    'coverage' 라 옛 패널 행이 coverage 로 읽힌다. 넣지 않기로 한 열·표는 없다."""
     assert [v for v, _ in MIGRATIONS][:5] == [1, 2, 3, 4, 5]
     v5 = MIGRATIONS[4][1]
     assert set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", "\n".join(v5))) == V5_TABLES == set(V5_COLUMNS)
@@ -704,6 +714,8 @@ def test_v5_is_the_m3_block_with_the_contract_column_names(risk_store, tmp_path)
         # rr_reports 의 판 번호는 대상 안에서 하나다(UNIQUE(target_key, version_no)).
         assert any(r[2] == 1 and [c[2] for c in con.execute(f"PRAGMA index_info({r[1]})")] == ["target_key", "version_no"]
                    for r in con.execute("PRAGMA index_list(rr_reports)")), "rr_reports 의 판 번호 유일 제약이 없다"
+        alias = con.execute("PRAGMA table_info(rr_cluster_alias)").fetchall()
+        assert [r[1] for r in sorted((r for r in alias if r[5]), key=lambda r: r[5])] == ["owner_sub", "old_cluster_key"]
         kind = next(r for r in con.execute("PRAGMA table_info(rr_panels)") if r[1] == "kind")
         assert (kind[3], kind[4]) == (1, "'coverage'")                    # NOT NULL · 기본값
     finally:
@@ -717,6 +729,46 @@ def test_v5_is_the_m3_block_with_the_contract_column_names(risk_store, tmp_path)
 
     assert runner.JOB_MODES == ("panels", "reviews", "issues", "synth")
     assert "COALESCE(mode, 'panels')" in runner.PANEL_JOBS_SQL
+
+
+def test_v5_moves_the_v4_cluster_aliases_to_their_owners(tmp_path):
+    """조합 검토 M7 — v4 원장의 별칭 행은 v5 다시 짓기에서 값 그대로 그 owner_sub 의 별칭으로 옮겨진다(철회 표기 포함). 그 뒤 열쇠는
+    (owner_sub, old_cluster_key) 라 다른 소유자가 같은 옛 키에 제 별칭을 세울 수 있고, 같은 소유자는 두 번 세우지 못한다."""
+    from app import risk_store as store_module
+
+    db = tmp_path / "risk_review.db"
+    cols = ("old_cluster_key, new_cluster_key, owner_sub, reason, evidence_json, decided_by, decided_at, revoked_by,"
+            " revoked_at")
+    rows = [("ck:a", "ck:b", "alice@x", "cluster_merge", "{}", "alice@x", 1, None, None),
+            ("ck:c", "ck:d", "bob@x", "taxonomy_major", '{"by":"code"}', "bob@x", 2, "bob@x", 3)]
+    v4 = RiskStore(db)
+    v4.open()
+    original = store_module.MIGRATIONS
+    try:
+        store_module.MIGRATIONS = original[:4]
+        assert v4.migrate() == 4
+        for row in rows:
+            v4.execute(f"INSERT INTO rr_cluster_alias({cols}) VALUES (?,?,?,?,?,?,?,?,?)", row)
+    finally:
+        store_module.MIGRATIONS = original
+        v4.close()
+    store = RiskStore(db)
+    store.open()
+    try:
+        assert store.migrate() == LATEST
+        assert [tuple(r) for r in store.query(f"SELECT {cols} FROM rr_cluster_alias ORDER BY rowid")] == rows
+
+        def added(owner: str) -> bool:
+            try:
+                store.execute(f"INSERT INTO rr_cluster_alias({cols}) VALUES ('ck:a','ck:z',?,'cluster_merge','{{}}',?,4,NULL,NULL)",
+                              (owner, owner))
+            except sqlite3.IntegrityError:
+                return False
+            return True
+
+        assert (added("bob@x"), added("alice@x")) == (True, False)
+    finally:
+        store.close()
 
 
 def test_a_v4_db_rises_to_v5_once_with_one_v4_copy(tmp_path):

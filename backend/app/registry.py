@@ -791,7 +791,7 @@ def merge(store: RiskStore, target_key: str, *, owner_sub: str | None = None, pe
             continue
         # 사람이 확정한 별칭이 있으면 대표 키로 접어 병합한다(finding 행의 cluster_key 는 불변, §4.3.2).
         if base not in alias_cache:
-            alias_cache[base] = resolve_cluster_key(store, base)
+            alias_cache[base] = resolve_cluster_key(store, base, owner_sub=owner_sub)
         base = alias_cache[base] or base
         buckets.setdefault((base, _bucket_of(_clean_str(item.get("direction")))), []).append(item)
 
@@ -1756,21 +1756,21 @@ ALIAS_MAX_HOPS = 5
 ALIAS_REASONS: tuple[str, ...] = ("taxonomy_major", "ckey_merge", "iface_alias", "dim_rename", "cluster_merge")
 
 
-def resolve_cluster_key(store: RiskStore, cluster_key: str) -> str:
-    """별칭 체인을 따라간 대표 cluster_key(≤5홉·순환 차단). 정본은 learning.resolve_cluster_key 다."""
+def resolve_cluster_key(store: RiskStore, cluster_key: str, *, owner_sub: str) -> str:
+    """별칭 체인을 따라간 대표 cluster_key(≤5홉·순환 차단) — 그 소유자의 별칭만(조합 검토 M7). 정본은 learning.resolve_cluster_key 다."""
     from app import learning  # noqa: PLC0415 — learning 은 registry 를 import 하지 않는다.
 
-    return learning.resolve_cluster_key(store, cluster_key)
+    return learning.resolve_cluster_key(store, cluster_key, owner_sub=owner_sub)
 
 
-def _alias_hops(store: RiskStore, start: str) -> int:
-    """start 에서 시작하는 별칭 체인의 홉 수. 순환이면 ALIAS_MAX_HOPS + 1 을 돌려준다."""
+def _alias_hops(store: RiskStore, start: str, owner_sub: str) -> int:
+    """start 에서 시작하는 그 소유자의 별칭 체인의 홉 수. 순환이면 ALIAS_MAX_HOPS + 1 을 돌려준다."""
     seen = {start}
     current, hops = start, 0
     while True:
         row = store.query_one(
-            "SELECT new_cluster_key FROM rr_cluster_alias WHERE old_cluster_key = ? AND revoked_at IS NULL",
-            (current,))
+            "SELECT new_cluster_key FROM rr_cluster_alias WHERE owner_sub = ? AND old_cluster_key = ? AND revoked_at IS NULL",
+            (owner_sub, current))
         if row is None:
             return hops
         nxt = _clean_str(row["new_cluster_key"])
@@ -1796,12 +1796,15 @@ def add_cluster_alias(store: RiskStore, old_cluster_key: str, new_cluster_key: s
         raise AppError("E100", "같은 키로는 별칭을 만들 수 없습니다.", 422)
     if reason not in ALIAS_REASONS:
         raise AppError("E100", f"reason 은 {list(ALIAS_REASONS)} 중 하나여야 합니다.", 422)
+    # 별칭은 소유자마다다 — 남이 같은 키에 세운 별칭은 보지도 막지도 않는다(조합 검토 M7).
     existing = store.query_one(
-        "SELECT new_cluster_key, revoked_at FROM rr_cluster_alias WHERE old_cluster_key = ?", (old_key,))
+        "SELECT new_cluster_key, revoked_at FROM rr_cluster_alias WHERE owner_sub = ? AND old_cluster_key = ?",
+        (owner_sub, old_key))
     if existing is not None and existing["revoked_at"] is None:
         raise AppError("E409", f"이미 별칭이 있는 키입니다 — {old_key} → {existing['new_cluster_key']}.", 409)
     # 새 키 뒤로 이어진 체인이 5홉을 넘거나 되돌아오면(순환) 만들지 않는다.
-    if _alias_hops(store, new_key) + 1 > ALIAS_MAX_HOPS or resolve_cluster_key(store, new_key) == old_key:
+    if (_alias_hops(store, new_key, owner_sub) + 1 > ALIAS_MAX_HOPS
+            or resolve_cluster_key(store, new_key, owner_sub=owner_sub) == old_key):
         raise AppError("alias_chain_too_long",
                        f"별칭 체인이 {ALIAS_MAX_HOPS} 홉을 넘거나 순환합니다 — {old_key} → {new_key}.", 409)
     now = common.now_epoch()
@@ -1825,6 +1828,6 @@ def revoke_cluster_alias(store: RiskStore, old_cluster_key: str, *, owner_sub: s
         return {"old_cluster_key": old_key, "revoked": False, "already": True}
     now = common.now_epoch()
     store.execute(
-        "UPDATE rr_cluster_alias SET revoked_by = ?, revoked_at = ? WHERE old_cluster_key = ?",
-        (owner_sub, now, old_key))
+        "UPDATE rr_cluster_alias SET revoked_by = ?, revoked_at = ? WHERE owner_sub = ? AND old_cluster_key = ?",
+        (owner_sub, now, owner_sub, old_key))
     return {"old_cluster_key": old_key, "revoked": True, "revoked_at": now}
