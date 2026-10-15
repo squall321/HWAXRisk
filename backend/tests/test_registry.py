@@ -1060,6 +1060,20 @@ def test_cluster_aliases_are_per_owner(risk_store, clock):
     assert registry.resolve_cluster_key(risk_store, "ck:shared00001", owner_sub=other) == "ck:theirs00002"
 
 
+def test_another_owners_alias_chain_does_not_count_toward_the_hop_limit(risk_store, clock):
+    """조합 검토 M7 — 홉 한도는 그 소유자의 사슬만 센다. 남이 어떤 키에서 한도만큼 이어진 사슬을 세워 두어도 주인이 그 키로 별칭을
+    세우는 것은 막히지 않는다(남의 사슬이 주인의 별칭을 alias_chain_too_long 으로 막지 않는다)."""
+    other = "someone@else.com"
+    chain = [f"ck:chain{i:07d}" for i in range(registry.ALIAS_MAX_HOPS + 1)]
+    for old, new in zip(chain, chain[1:]):
+        registry.add_cluster_alias(risk_store, old, new, owner_sub=other)
+    try:
+        mine = registry.add_cluster_alias(risk_store, "ck:mine0000001", chain[0], owner_sub=OWNER)
+    except AppError as exc:
+        mine = {"error": exc.code, "message": exc.message}
+    assert mine.get("new_cluster_key") == chain[0], mine
+
+
 # ================================================================ §4.7.3 통합 보고서 — minutes 의 [품질 플래그]
 
 
