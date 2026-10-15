@@ -82,8 +82,8 @@ def test_a_domain_whose_carded_experts_meet_depth_is_not_blocked_by_its_cardless
     depth = done["detail"]["depth"]["sim"]
     assert (depth["active"], depth["have"], depth["need"]) == (1, 1, 1), depth
     assert done["c2"] is True and done["level"] == "C3", done["level_label"]
-    gap = next(q for q in done["qualifiers"] if q["item"] == "depth_no_cards")
-    assert gap["blocking"] is False and gap["mixed"] == {"sim": 1} and "sim(그중 1명)" in gap["label"]
+    gap = next((q for q in done["qualifiers"] if q["item"] == "depth_no_cards"), None)
+    assert gap is not None and gap["blocking"] is False and gap.get("mixed") == {"sim": 1} and "sim(그중 1명)" in gap["label"]
 
 
 def test_a_synthesis_older_than_the_issue_results_does_not_make_c3(store):

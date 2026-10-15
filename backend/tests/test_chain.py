@@ -428,7 +428,8 @@ def test_a_review_job_made_by_m3_code_carries_the_chain_mark(store):
 def test_the_guide_lets_a_person_start_the_chain_on_an_m2_era_target(tmp_path, monkeypatch):
     """M8(결정 — 둘째 단계 길잡이 몫) — M2 시절 검토 잡 뒤에는 사슬이 저절로 서지 않으니 길잡이가 사람에게 시작 걸음(risk_start_job
     mode='reviews')을 준다. 그 걸음을 따르면 셀이 다 닫혀 있어 검토 호출 없이 잡이 끝나고, 그 끝에서 사슬이 다음 잡을 세운다. 사슬이
-    선 뒤의 길잡이는 그 걸음을 다시 주지 않는다. 종전에는 길잡이가 '마지막 검토 잡은 completed 다' 에서 멈췄다."""
+    끝난 뒤(마지막 검토 잡에 표지가 있고 끝난 종합 잡이 있다)의 길잡이는 그 걸음을 다시 주지 않는다. 종전에는 길잡이가 '마지막 검토 잡은
+    completed 다' 에서 멈췄다."""
     from tests.rr import v4_build
     from tests.rr.test_v4_upgrade import _thaw
     from tests.test_review_mcp import _delegate, _project_with_source
@@ -453,6 +454,9 @@ def test_the_guide_lets_a_person_start_the_chain_on_an_m2_era_target(tmp_path, m
         assert fake.calls("run") == [] and fake.calls("plan") == []      # 검토 호출 없이 끝났다(묶음 · 한도 조회뿐)
         nxt = store.query_one("SELECT mode FROM rr_jobs WHERE json_extract(chain_json, '$.prev_job_id') = ?", (made["job_id"],))
         assert nxt is not None and nxt["mode"] in chain.STAGES
+        _run_issue_jobs(store, IssuePanelEngine(store, {"*": {"severity": "치명", "judgement": "FAIL"}}))
+        _run_synth(store, FakeSummaryEngine())
+        assert [j["state"] for j in _jobs(store, key, "synth")] == ["completed"]          # 사슬이 끝났다(살아 있는 단계 없음)
         again = entry.next_step(_delegate(), project_id=project_id)
         assert not any(s["tool"] == "risk_start_job" for s in again["next"]), again["next"]
     finally:
