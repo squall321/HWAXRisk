@@ -263,6 +263,22 @@ def assign_scope(store: Any, target_key: str, run_id: str, *, agents: Sequence[s
     return {"cells": cells, "experts": heads, "reopened": reopened}
 
 
+def bind_cells(store: Any, target_key: str, run_id: str, cells: Sequence[Sequence[str]], *, now: int | None = None) -> int:
+    """그 셀들(unit_id, agent_key)만 잡에 묶는다 — 상태와 상관없이, 머리는 범위로 찍지 않는다(그 잡의 몫은 묶인 셀로 가린다 —
+    `job_expert_sql`). pending 셀이 생긴 전문가는 다시 연다. 처분(넘김 · 다시)이 세우는 잡이 그 처분의 셀만 묶는다(M3 묶음 검토 M5 ·
+    D-52 · M3C-80). 묶은 셀 수."""
+    now = now_epoch() if now is None else now
+    with store.tx():
+        bound = int(store.executemany(
+            "UPDATE rr_review_cells SET run_id = ?, updated_at = ? WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+            [(run_id, now, target_key, str(u), str(a)) for u, a in cells]) or 0)
+        for agent in sorted({str(a) for _u, a in cells}):
+            if store.query_one("SELECT 1 FROM rr_review_cells WHERE target_key = ? AND agent_key = ? AND run_id = ?"
+                               " AND state = 'pending' LIMIT 1", (target_key, agent, run_id)) is not None:
+                _reopen(store, target_key, agent, now=now)
+    return bound
+
+
 def _reopen(store: Any, target_key: str, agent_key: str, *, now: int) -> int:
     """범위 안에 pending 셀이 생긴 전문가를 다시 연다 — ready·partial 은 planned 로, blocked 는 묶음 시도 수와 백오프를 비우고
     planned 로. 옮긴 머리 수."""
@@ -293,13 +309,19 @@ def adopt_released(store: Any, job_id: str, *, now: int | None = None) -> int:
     target_key = job["target_key"]
     agents_in = {r["agent_key"] for r in scope_experts(planner.review_order(store, target_key), scope)}
     units_in = set(scope.get("unit_ids") or ())
+    try:
+        # 셀로 묶은 잡(넘김의 마감 잡 — M5 · D-52)은 그 셀들 밖을 거두지 않는다
+        only = {tuple(c) for c in json.loads(job["params_json"] or "{}").get("cells") or ()}
+    except (TypeError, ValueError, AttributeError):
+        only = set()
     marks = ",".join("?" * len(runner.LIVE_JOB_STATES))
     with store.tx():
         rows = [dict(r) for r in store.query(
             "SELECT c.unit_id, c.agent_key FROM rr_review_cells c WHERE c.target_key = ? AND c.state = 'pending'"
             f" AND c.run_id IS NOT NULL AND c.run_id NOT IN (SELECT id FROM rr_jobs WHERE mode = 'reviews' AND state IN ({marks}))",
             (target_key, *runner.LIVE_JOB_STATES))]
-        rows = [r for r in rows if r["agent_key"] in agents_in and (not units_in or r["unit_id"] in units_in)]
+        rows = [r for r in rows if r["agent_key"] in agents_in and (not units_in or r["unit_id"] in units_in)
+                and (not only or (r["unit_id"], r["agent_key"]) in only)]
         if not rows:
             return 0
         adopted = int(store.executemany(
@@ -395,6 +417,14 @@ def claim_next_expert(store: Any, job: Mapping[str, Any] | None = None, *, boot_
                 if moved == 1:
                     return _head(store, item["target_key"], cand["agent_key"])
     return None
+
+
+def claim_for_refresh(store: Any, target_key: str, agent_key: str, *, lease_owner: str, now: int | None = None) -> bool:
+    """`planned` 머리 하나를 보고서를 다시 짓기 위해 쥔다(planned → running) — 취소된 잡이 건드린 전문가(M3 묶음 검토 L8 · D-52 ·
+    M3C-81, `review_runner.refresh_after_cancel`). 쥐었으면 True."""
+    now = now_epoch() if now is None else now
+    return bool(_move(store, "expert", "planned", "running", where=_head_where(), params=(target_key, agent_key),
+                      sets={"lease_owner": lease_owner, "claimed_at": now, "error": None}, now=now))
 
 
 def _holds(store: Any, target_key: str, agent_key: str, lease_owner: str) -> bool:
@@ -782,9 +812,9 @@ def reopen_filtered(store: Any, target_key: str, *, via: str, domain: str | None
     `route='audit'` · `route_forced='filter_floor'` 와 `sample_json.filter_audit{score, picked_by, result:null}` 을 적어 다시 분류하지
     않는다. 셀의 잡 결속(run_id)은 그대로다 — 그 잡이 살아 있으면 그 잡이 돌린다. `run_id` 를 주면 다시 연 셀만 그 잡에 묶는다 —
     살아 있는 잡이 다시 열면 늘 그 잡이 돌린다(반대 검토 MEDIUM 7 · 3차 MEDIUM 2 · D-47). 전문가 머리는 범위로 찍지 않고(찍으면 범위 밖
-    셀까지 거뒀다 — 3차 MEDIUM 3) ready·partial 만 planned 로 다시 연다. 묶은 셀 가운데 앞 결속이 그 잡이 아닌 셀(그 잡의 추정 밖 —
-    제 범위에서 제가 거른 셀은 거르기 없음 가정의 추정 안이다)은 그 잡의 다시 연 셀 몫에 세고, 몫을 넘으면 같은 트랜잭션에서 그 잡을
-    멈춘다(`review_runner.charge_reopened` — 4차 MEDIUM 2 · D-49).
+    셀까지 거뒀다 — 3차 MEDIUM 3) ready·partial 만 planned 로 다시 연다. 묶은 셀은 앞 결속과 함께 그 잡의 다시 연 셀 몫에 넘기고 —
+    추정 밖 셀만 돈 횟수마다 센다(제 범위에서 제가 거른 셀은 거르기 없음 가정의 추정 안이다) — 몫을 넘으면 같은 트랜잭션에서 그 잡을
+    멈춘다(`review_runner.charge_reopened` — 4차 MEDIUM 2 · D-49 · 묶음 검토 L5 · L6 · D-52).
     고르는 칸은 `domain`·`unit_id`·`cells` 가운데 준 것(AND)이고, `exclude_agent` 의 셀은 뺀다(자기 넘김 — 7번 줄이 세지 않는다,
     반대 검토 2차 MEDIUM 3). 부른 쪽 트랜잭션에 들어간다."""
     if via not in REOPEN_VIAS:
@@ -807,7 +837,7 @@ def reopen_filtered(store: Any, target_key: str, *, via: str, domain: str | None
         wanted = {tuple(c) for c in cells}
         rows = [r for r in rows if (r["unit_id"], r["agent_key"]) in wanted]
     opened: list[tuple[str, str]] = []
-    extra: list[tuple[str, str]] = []
+    binds: list[tuple[str, str, str | None]] = []
     with store.tx():
         for row in rows:
             key = (target_key, row["unit_id"], row["agent_key"])
@@ -829,14 +859,13 @@ def reopen_filtered(store: Any, target_key: str, *, via: str, domain: str | None
                 sets["run_id"] = run_id
             if _move(store, "cell", "na_irrelevant", "pending", where=_cell_where(), params=key, sets=sets, now=now) == 1:
                 opened.append((row["unit_id"], row["agent_key"]))
-                if run_id is not None and row["run_id"] != run_id:
-                    extra.append((row["unit_id"], row["agent_key"]))
+                binds.append((row["unit_id"], row["agent_key"], row["run_id"]))
         for agent in sorted({a for _u, a in opened}):
             _reopen(store, target_key, agent, now=now)
-        if extra:
+        if run_id is not None and binds:
             from app import review_runner  # noqa: PLC0415 — review_runner 는 이 모듈을 import 한다.
 
-            review_runner.charge_reopened(store, run_id, extra, now=now)
+            review_runner.charge_reopened(store, run_id, binds, now=now)
     return opened
 
 

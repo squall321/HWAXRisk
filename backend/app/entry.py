@@ -980,6 +980,11 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
                            " part='full' 이 전부이고 next_page 로 이어 받는다.", write=False))
     watch.append(_step("risk_next_step", {"project_id": project_id}, "단계·막힘을 다시 본다.", write=False))
     if live:
+        # 다시 연 셀 몫이 넘었으면 보류 코드와 상관없이 동의 막힘을 보인다(사람이 멈췄거나 자격 보류가 덮어도 — M3 묶음 검토 M4 · D-52)
+        extra = (job.get("progress") or {}).get("reopened_extra") or {}
+        if extra.get("hold") and extra["hold"] != job.get("hold_code"):
+            blocked.append(_blocked(str(extra["hold"]), review_runner.reopen_hold_message(extra),
+                                    _review_hold_fix(extra["hold"]), job_id=job["id"]))
         if job["state"] == "paused":
             code = job.get("hold_code")
             if code == "user":

@@ -14,7 +14,7 @@ import threading
 
 import pytest
 
-from app import config, expert_report, relevance, review_cells, review_runner, review_verify, routes, units
+from app import config, expert_report, relevance, review_cells, review_runner, review_verify, routes, runner, units
 from app.errors import AppError
 from tests import factories
 from tests.synth import fake_review_engine as fre
@@ -846,8 +846,8 @@ def test_reopened_cells_within_the_allowance_run_and_show_on_the_board_as_reopen
     assert {(_cell(store, key, u, MEM2)["state"], _cell(store, key, u, MEM2)["run_id"]) for u in filtered} == {
         ("reviewed", running)}
     assert _reopened_extra(store, running) == {
-        "cells": 3, "calls_est": 3.15, "consented": {"cells": 0, "calls_est": 0.0}, "unconsented": {"cells": 3, "calls_est": 3.15},
-        "allowance": 30, "expected": 3, "max_calls": 30000, "hold": None}
+        "cells": 3, "runs": 3, "calls_est": 3.15, "consented": {"cells": 0, "calls_est": 0.0},
+        "unconsented": {"cells": 3, "calls_est": 3.15}, "allowance": 30, "expected": 3, "max_calls": 30000, "hold": None}
 
 
 @pytest.mark.parametrize("entry", ["rest", "mcp"])
@@ -935,6 +935,74 @@ def test_a_person_who_does_not_consent_skips_the_waiting_cells_and_the_job_goes_
     assert (_reopened_extra(store, running) or {}).get("unconsented") == {"cells": 0, "calls_est": 0.0}
     if cap:
         assert _cell(store, key, other["unit_id"], other["agent_key"])["state"] == "pending"
+
+
+@pytest.mark.parametrize("over", ["user", "credential"])
+def test_the_consent_blocker_and_declining_by_skip_follow_the_budget_not_the_hold_code(store, monkeypatch, over):
+    """M3 묶음 검토 M4 · D-52 — 동의를 기다리는 잡의 보류 코드가 바뀌어도(사람이 멈춤 · 자격 보류가 덮음) 동의 막힘과 '넘겨서 거절'
+    은 잡의 다시 연 셀 몫(reopen_budget 의 hold)을 따른다. 길잡이는 consent_extra 막힘을 보이고, 넘김(filter state=pending)은 기다리는
+    셀을 넘긴다(종전에는 hold_code 로 골라 skipped 0 · not_failed 3 이었다). 넘김은 사람이 건 그 보류를 풀지 않고(그대로 멈춰 있다),
+    재개는 동의 없이 지난다."""
+    monkeypatch.setattr(review_runner, "REOPEN_FLOOR_CALLS", 2, raising=False)
+    key, r, fake, filtered, running = _one_cell_retry_spill(store, monkeypatch)
+    try:
+        r.finish(running)
+        assert rig.job_row(store, running)["hold_code"] == "consent_extra"
+        if over == "user":
+            runner.pause_job(store, running, by=rig.OWNER)
+        else:
+            assert r.loop.hold(running, "credential", "PAT 가 만료됐다(가짜)")
+        assert rig.job_row(store, running)["hold_code"] == over
+        factories.act_as_delegate(monkeypatch, rig.OWNER)
+        guide = _call("risk_next_step", project_id=_project_with_source(store, key))
+        assert "consent_extra" in [b["code"] for b in guide["blocked"]]
+        out = routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": running, "state": "pending"},
+                                                               reason="다시 연 셀의 비용에 동의하지 않는다"),
+                                     ident=factories.ident(rig.OWNER))
+        assert (out["skipped"], out["job"].get("resumed"), rig.job_row(store, running)["hold_code"]) == (3, None, over)
+        assert routes.job_action(running, "resume", ident=factories.ident(rig.OWNER))["state"] == "queued"
+        r.finish(running)
+    finally:
+        r.stop.set()
+        r.loop.join(10)
+    assert rig.state(store, running) == "completed"
+    assert {_cell(store, key, u, MEM2)["state"] for u in filtered} == {"skipped"}
+
+
+@pytest.mark.parametrize("path", ["now", "loop"])
+def test_cancelling_a_job_held_for_consent_refreshes_the_reports_of_its_reopened_experts(store, monkeypatch, path):
+    """M3 묶음 검토 L8 · D-52 — 동의를 기다리던 잡을 사람이 취소하면 다시 열렸으나 돌지 않은 셀의 전문가 보고서를 지금 원장으로 다시
+    짓는다. 입장은 검토한 셀로 정하고, 돌지 않은 단위는 '보지 못한 것' 에 대기로 남으며(더는 '거름' 이 아니다) 머리는 partial 이다.
+    종전에는 그 보고서가 다시 열리기 전 그대로(거름 셋 · 다 봤다)였다. 곧바로 닫힌 취소(now)와, 도는 것이 있어 cancelling 으로 섰다가
+    루프가 닫은 취소(loop) 둘 다다."""
+    monkeypatch.setattr(review_runner, "REOPEN_FLOOR_CALLS", 2, raising=False)
+    key, r, fake, filtered, running = _one_cell_retry_spill(store, monkeypatch)
+    try:
+        r.finish(running)
+        assert rig.job_row(store, running)["hold_code"] == "consent_extra"
+        before = store.query_one("SELECT state, revision FROM rr_expert_reports WHERE target_key = ? AND agent_key = ?",
+                                 (key, MEM2))
+        assert before["state"] == "planned"                               # 다시 열기가 머리를 다시 열었다
+        if path == "now":
+            assert routes.job_action(running, "cancel", ident=factories.ident(rig.OWNER))["state"] == "cancelled"
+        else:
+            # 다른 전문가의 호출이 돌던 때의 취소(cancel_job 이 cancelling 으로 세운다) — 그 워커가 놓은 뒤 다음 틱이 닫는다
+            store.execute("UPDATE rr_jobs SET state = 'cancelling', hold_code = NULL, hold_until = NULL WHERE id = ?",
+                          (running,))
+            r.tick()
+            assert rig.job_row(store, running)["state"] == "cancelled"
+    finally:
+        r.stop.set()
+        r.loop.join(10)
+    head = store.query_one("SELECT state, revision FROM rr_expert_reports WHERE target_key = ? AND agent_key = ?", (key, MEM2))
+    assert (head["state"], head["revision"]) == ("partial", before["revision"] + 1)
+    report = expert_report.load_report(store, key, MEM2)
+    unseen = {u["unit_id"]: u["state"] for u in report["scope"]["unseen"]}
+    assert {u: unseen.get(u) for u in filtered} == {u: "pending" for u in filtered}
+    assert not {x["unit_id"] for x in report["scope"]["filtered"]} & set(filtered)
+    opinion = store.query_one("SELECT final_stance FROM rr_seat_opinions WHERE target_key = ? AND agent_key = ?", (key, MEM2))
+    assert opinion["final_stance"] == "agree"                             # 검토한 셀(영향 없음)로 정한 입장
+    assert {_cell(store, key, u, MEM2)["state"] for u in filtered} == {"pending"}
 
 
 def test_a_reopen_while_the_job_waits_on_an_auto_resuming_hold_turns_it_into_consent_extra(store, monkeypatch):

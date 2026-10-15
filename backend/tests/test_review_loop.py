@@ -358,8 +358,8 @@ def test_a_running_session_stops_before_its_next_call_when_the_last_health_says_
 def test_a_draining_refusal_is_a_wait_never_charged_and_the_session_does_not_send_it_again(store, monkeypatch):
     """리허설 E1b — 루프가 아직 비우기를 모르는(캐시가 정상) 사이 엔진이 다음 run 을 review_busy{reason: draining} 으로 거절하면(뒤
     그물) 그 호출은 기다림(wait)으로 적히고 아무것도 세지 않는다(charged · infra_streak 0 · 기다림은 tries 에 들지 않는다). 세션은
-    그 자리에서 다시 내지 않고 멈춘다 — 루프는 마지막 /health 를 비우기(관문 0)로 고쳐 두고 캐시를 버려, 깃발이 걷히면 다음 틱이
-    /health 를 새로 읽고 곧바로 이어 돈다(15초를 기다리지 않는다)."""
+    그 자리에서 다시 내지 않고 멈춘다 — 루프는 그 거절이 알린 retry_after_s(60초) 동안 비우기로 보고 카드 대조 워커를 띄우지 않으며
+    (깃발이 걷혀 /health 가 정상이어도 — 묶음 검토 L7 · D-52, 종전에는 곧바로 다시 띄웠다) 그 뒤 이어 돈다."""
     key, job_id, fake, r, gate = _stalled(store, monkeypatch, 3)
     try:
         fake.draining = True                                              # 루프의 /health 캐시는 아직 정상이다
@@ -371,11 +371,13 @@ def test_a_draining_refusal_is_a_wait_never_charged_and_the_session_does_not_sen
         cells = _cells(store, key, SEAL)
         assert {(c["charged"], c["infra_streak"]) for c in cells} == {(0, 0)}
         assert sum(c["tries"] for c in cells) == len([c for c in _calls(store, job_id, state="ok") if c["unit_id"]])
-        assert (r.loop.server()["limit"], _head(store, key, SEAL)["state"], rig.job_row(store, job_id)["hold_code"]) == (
-            0, "planned", None)
+        assert (r.loop.draining(), _head(store, key, SEAL)["state"], rig.job_row(store, job_id)["hold_code"]) == (
+            True, "planned", None)
         fake.draining = False
         r.clock.advance(1)
-        assert r.tick()["started"] == 1 and len(fake.drain_refused) == 1   # 버린 캐시 — 새로 읽고 곧바로 이어 돈다
+        assert r.tick()["started"] == 0                                   # 거절이 알린 60초 안 — /health 가 정상이어도 띄우지 않는다
+        r.clock.advance(59)
+        assert r.tick()["started"] == 1 and len(fake.drain_refused) == 1   # 그 뒤 이어 돈다
         r.finish(job_id)
     finally:
         r.stop.set()                     # 멈추지 않은 세션(고치기 전 코드 · 변이)이 저장소를 닫는 뒤까지 돌지 않게
@@ -386,8 +388,8 @@ def test_a_draining_refusal_is_a_wait_never_charged_and_the_session_does_not_sen
 
 def test_a_pack_refused_for_draining_is_a_wait_never_charged_and_never_sent_again(store, monkeypatch):
     """리허설 E1b — 묶음(pack)도 같다. 루프의 /health 캐시가 아직 정상인 동안 띄운 묶음 세션의 요청을 엔진이 review_busy{reason:
-    draining}(429)으로 거절하면 묶음 시도 수를 깎지 않고(pack_attempts 0) 그 자리에서 다시 내지 않으며 세션을 멈춘다. 루프의 관문은
-    0 이 되고 머리는 오류 없이 planned 다."""
+    draining}(429)으로 거절하면 묶음 시도 수를 깎지 않고(pack_attempts 0) 그 자리에서 다시 내지 않으며 세션을 멈춘다. 루프는 그 거절이
+    알린 60초 동안 비우기로 보고(L7 · D-52) 머리는 오류 없이 planned 다."""
     _one(store, monkeypatch)
     key = rig.target(store)
     job_id = rig.job(store, key, scope={"agents": list(rig.CARD_EXPERTS)})
@@ -401,7 +403,7 @@ def test_a_pack_refused_for_draining_is_a_wait_never_charged_and_never_sent_agai
         r.loop.join(30)
         assert [x["route"] for x in fake.drain_refused] == ["pack"]
         head = _head(store, key, fake.drain_refused[0]["expert"])
-        assert (head["state"], head["pack_attempts"], head["error"], r.loop.server()["limit"]) == ("planned", 0, None, 0)
+        assert (head["state"], head["pack_attempts"], head["error"], r.loop.draining()) == ("planned", 0, None, True)
         assert (rig.state(store, job_id), rig.job_row(store, job_id)["hold_code"]) == ("running", None)
         fake.draining = False
         r.clock.advance(1)
@@ -440,6 +442,80 @@ def test_a_pack_session_waiting_on_a_busy_gate_stops_before_sending_again_once_t
         r.stop.set()                     # 멈추지 않은 세션(고치기 전 코드 · 변이)이 저장소를 닫는 뒤까지 돌지 않게
         r.loop.join(10)
     assert rig.state(store, job_id) == "completed"
+
+
+@pytest.mark.parametrize("health", ["unreadable", "no_limit", "draining"])
+def test_a_closed_llm_gate_is_a_loop_wait_the_guide_names_and_it_lifts_when_health_reads_open(store, monkeypatch, health):
+    """M3 묶음 검토 M3 · D-52 — /health 를 읽지 못하거나(503 · 관문 limit 칸이 없다) 비우기면 루프는 카드 대조 워커를 띄우지 않고 그
+    까닭을 루프 기다림(waiting.reason 'health_unknown' · 'draining', source loop, 글)으로 적는다 — 같은 까닭이 이어지는 동안 since 는
+    그대로이고 길잡이(risk_next_step)가 그 글을 싣는다. 종전에는 잡이 running 인 채 아무 말 없이 0 이었다(기다림 없음 · 막힘 없음 ·
+    호출 0). /health 가 다시 열리면 기다림을 지우고 이어 돈다."""
+    from tests import factories
+    from tests.test_review_mcp import _call, _project_with_source
+
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    project_id = _project_with_source(store, key)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    real = fake.health
+    if health == "unreadable":
+        fake.health_status = 503
+    elif health == "no_limit":
+        monkeypatch.setattr(fake, "health", lambda: {**real(), "card_review": {**real()["card_review"], "limit": None}})
+    else:
+        fake.draining = True
+    r = rig.Rig(store, fake)
+    start = r.clock()
+    for _ in range(3):
+        r.tick()
+        r.clock.advance(review_runner.HEALTH_CACHE_S)
+    reason = "draining" if health == "draining" else "health_unknown"
+    waiting = rig.progress(store, job_id)["waiting"] or {}
+    assert (waiting.get("reason"), waiting.get("source"), waiting.get("since")) == (reason, "loop", start)
+    assert (rig.state(store, job_id), fake.calls("pack"), fake.calls("run")) == ("running", [], [])
+    factories.act_as_delegate(monkeypatch, rig.OWNER)
+    notes = _call("risk_next_step", project_id=project_id)["notes"]
+    assert [n for n in notes if n.startswith(f"검토 잡이 기다린다 — {reason}: ")]
+    if health == "unreadable":
+        fake.health_status = 200
+    elif health == "no_limit":
+        monkeypatch.setattr(fake, "health", real)
+    else:
+        fake.draining = False
+    assert r.tick()["started"] == 1
+    assert (rig.progress(store, job_id)["waiting"] or {}).get("reason") != reason
+    r.finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+
+
+def test_runs_refused_for_draining_while_health_reads_normal_are_sent_once_per_refusal_window(store, monkeypatch):
+    """M3 묶음 검토 L7 · D-52 — /health 는 정상인데(호출이 가는 길의 에이전트 서버만 비운다) run 이 review_busy{reason: draining} 으로
+    거절되면 루프는 그 거절이 알린 retry_after_s(60초) 동안 카드 대조 워커를 띄우지 않는다 — 거절은 그 창마다 하나다. 그 사이 진행판은
+    루프 기다림 draining(retry_at = 거절 + 60)이다. 종전에는 틱마다 /health 를 새로 읽어 정상이라 다시 띄워 분에 백 번 거절됐다.
+    아무것도 세지 않고, 비우기가 걷히면 끝까지 돈다."""
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    r = rig.Rig(store, fake)
+    try:
+        r.tick(packs_only=True)                                            # 묶음 — /health 정상을 캐시했다
+        fake.calls_draining = True
+        start = r.clock()
+        for _ in range(60):                                                # 2초 틱으로 120초
+            r.tick()
+            r.clock.advance(2)
+        assert [x["route"] for x in fake.drain_refused] == ["run", "run"]  # start 와 start + 60 에 하나씩
+        waiting = rig.progress(store, job_id)["waiting"] or {}
+        assert (waiting.get("reason"), waiting.get("source"), waiting.get("retry_at")) == ("draining", "loop", start + 120)
+        fake.calls_draining = False
+        r.finish(job_id)
+    finally:
+        r.stop.set()                     # 멈추지 않은 세션(고치기 전 코드 · 변이)이 저장소를 닫는 뒤까지 돌지 않게
+        r.loop.join(10)
+    assert rig.state(store, job_id) == "completed" and len(fake.drain_refused) == 2
+    assert {(c["state"], c["charged"]) for c in _cells(store, key, SEAL)} == {("reviewed", 0)}
 
 
 def test_an_infra_streak_opens_the_breaker_and_a_half_open_resume_finishes_without_charging(store, monkeypatch):
@@ -983,7 +1059,7 @@ def test_a_frozen_pack_missing_on_this_box_is_fetched_again(store, monkeypatch):
     job_id = rig.job(store, key, scope={"agents": [SEAL]})
     fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
     r = rig.Rig(store, fake)
-    r.tick()                                                # 묶음 받기만
+    r.tick(packs_only=True)                                 # 묶음 받기만
     assert _head(store, key, SEAL)["pack_status"] == "ok" and fake.runs == 0
     # 들여온 박스와 같은 자리 — 머리는 묶음 열쇠를 가리키는데 rr_card_packs 에는 그 행이 없다(행을 지울 뿐 손으로 넣지 않는다).
     store.execute("DELETE FROM rr_card_packs WHERE agent_key = ?", (SEAL,))
@@ -1197,7 +1273,7 @@ def test_a_portal_rejecting_the_users_pat_holds_credential_and_the_service_pat_i
     job_id = rig.job(store, key, scope={"agents": [SEAL]})
     fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
     r = rig.Rig(store, fake)
-    r.tick()                                                # 묶음은 받았다
+    r.tick(packs_only=True)                                 # 묶음은 받았다
     fake.credential_expired = True
     r.run(lambda: rig.state(store, job_id) == "paused", ticks=5)
     row = rig.job_row(store, job_id)
@@ -1489,7 +1565,7 @@ def test_a_defect_in_a_session_releases_the_expert_with_a_pause_instead_of_stran
     job_id = rig.job(store, key, scope={"agents": [SEAL]})
     fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
     r = rig.Rig(store, fake)
-    r.tick()                                                # 묶음
+    r.tick(packs_only=True)                                 # 묶음
     real = review_runner._Session.run
     monkeypatch.setattr(review_runner._Session, "run", lambda self: (_ for _ in ()).throw(RuntimeError("결함")))
     r.tick()

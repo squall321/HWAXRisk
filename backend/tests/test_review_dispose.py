@@ -181,6 +181,45 @@ def test_a_retry_that_needs_consent_changes_nothing(store, monkeypatch):
     assert stay["changed"] is False                                                    # 이미 다시 열렸다
 
 
+def test_a_retry_with_no_live_job_binds_only_the_retried_cells_and_estimates_only_them(store, monkeypatch):
+    """M3C-80(조정자 결정 — M5 의 원칙을 다시에도) — 살아 있는 잡이 없을 때 다시가 세우는 잡은 다시 연 셀만 묶고 그 셀만 추정한다.
+    다시 연 셀들의 (전문가, 단위) 곱에 든 다른 pending 셀은 묶지도 돌리지도 않는다(종전에는 전문가 × 단위 범위라 아무도 청하지 않은
+    셀까지 추정해 동의를 물었고 엔진을 불렀다). 사람의 다시는 그 셀들에 대한 동의일 뿐이다 — 그 셀들의 추정이 동의 문턱을 넘으면
+    종전처럼 consent 가 있어야 한다."""
+    from app import units
+
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    fake = FakeReviewEngine(rig.packs())
+    fake.error_cells = {(SEAL, unit_ids[0]): NO_ROWS, (PEER, unit_ids[1]): NO_ROWS}
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [SEAL], "unit_ids": unit_ids[:1]}))
+    r.finish(rig.job(store, key, scope={"agents": [PEER], "unit_ids": unit_ids[1:2]}))
+    fake.error_cells = {}
+    retried = [[unit_ids[0], SEAL], [unit_ids[1], PEER]]
+    cross = {(unit_ids[1], SEAL), (unit_ids[0], PEER)}
+    expected = review_runner._job_estimate(store, config.settings, planner.review_order(store, key),
+                                           [(a, u) for u, a in retried])["expected"]
+    knobs = dataclasses.replace(config.settings, risk_review_consent_calls=expected - 1)
+    monkeypatch.setattr(config, "settings", knobs)
+    refused = _refused(routes.post_cells_retry, key, routes.CellsRetryBody(cells=retried), ident=ME)
+    assert refused.code == "consent_required"                                        # 그 셀들의 추정이 문턱을 넘는다
+    monkeypatch.setattr(config, "settings", dataclasses.replace(knobs, risk_review_consent_calls=expected))
+    out = _granted(routes.post_cells_retry, key, routes.CellsRetryBody(cells=retried), ident=ME)
+    job = out["job"]
+    assert (out["retried"], job["action"], job["calls_estimate"]["expected"]) == (2, "created", expected)
+    assert json.loads(rig.job_row(store, job["job_id"])["params_json"])["cells"] == retried
+    bound = {(row["unit_id"], row["agent_key"]) for row in store.query(
+        "SELECT unit_id, agent_key FROM rr_review_cells WHERE run_id = ?", (job["job_id"],))}
+    assert bound == {tuple(c) for c in retried}
+    runs = len(fake.calls("run"))
+    r.finish(job["job_id"])
+    ran = {((b["body"].get("unit") or {}).get("unit_id"), b["body"]["expert"]["key"]) for b in fake.calls("run")[runs:]}
+    assert rig.state(store, job["job_id"]) == "completed" and not ran & cross
+    assert {(_cells(store, key, a)[u]["state"], _cells(store, key, a)[u]["run_id"]) for u, a in cross} == {("pending", None)}
+    assert {_cells(store, key, a)[u]["state"] for u, a in retried} == {"reviewed"}
+
+
 def test_a_retried_cell_a_live_job_does_not_cover_waits_for_the_next_job(store):
     """살아 있는 검토 잡이 그 셀을 덮지 않으면 다음 잡을 기다린다(waiting — 잡을 새로 세우지 않는다). 다음 잡이 그 셀을 범위로 집는다."""
     key, job_id, unit_ids, fake, r = _failed_target(store)
@@ -245,6 +284,252 @@ def test_a_retry_spilled_into_a_live_job_counts_against_its_reopen_allowance(sto
         assert (out["skipped"], out["keys"], out["job"].get("resumed")) == (1, [[unit_ids[0], PEER]], True)
         assert {u: c["state"] for u, c in _cells(store, key, "mech-syn-0").items()} == own == {u: "pending" for u in own}
         assert rig.state(store, live) == "queued"
+
+
+@pytest.mark.parametrize("path", ["now", "loop"])
+def test_any_cancel_refreshes_the_reports_of_the_experts_the_job_touched(store, path):
+    """M3C-80(조정자 결정 — L8 을 넓힘) — 동의를 기다리지 않던 잡이어도 취소는 그 잡이 건드리거나 다시 연 전문가의 보고서를 엔진 없이
+    다시 짓는다. 실패 셀을 사람이 살아 있는 잡에 다시 열고(여유 안 — 보류 없음) 그 셀이 돌기 전에 잡을 취소하면 그 전문가 보고서는
+    그 단위를 '실패' 가 아니라 '보지 못한 것 — 대기' 로 싣고 머리는 partial 이다(종전에는 다시 열기 전 보고서 그대로 · 머리 planned).
+    아무것도 보지 않았고 보고서도 없는 머리는 그대로 둔다(지을 것이 없다). 진행판은 다시 지은 머리를 센다. 곧바로 닫힌 취소(now)와
+    cancelling 으로 섰다가 루프가 닫은 취소(loop) 둘 다다."""
+    key, job_id, unit_ids, fake, r = _failed_target(store)
+    revision = _head(store, key, PEER)["revision"]
+    live = rig.job(store, key, scope={"agents": [PEER, SEAL, "mech-syn-0"]})       # mech 2순위는 아직 아무것도 보지 않았다
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[unit_ids[0], PEER]]), ident=ME)
+    assert (out["job"]["job_id"], out["job"].get("hold"), _head(store, key, PEER)["state"]) == (live, None, "planned")
+    if path == "now":
+        assert routes.job_action(live, "cancel", ident=ME)["state"] == "cancelled"
+    else:
+        store.execute("UPDATE rr_jobs SET state = 'cancelling' WHERE id = ?", (live,))   # 도는 호출이 있던 때의 취소
+        r.tick()
+        assert rig.state(store, live) == "cancelled"
+    head = _head(store, key, PEER)
+    assert (head["state"], head["revision"]) == ("partial", revision + 1)
+    unseen = {u["unit_id"]: u["state"] for u in expert_report.load_report(store, key, PEER)["scope"]["unseen"]}
+    assert unseen.get(unit_ids[0]) == "pending"
+    idle = _head(store, key, "mech-syn-0")
+    assert (idle["state"], idle["report_gz"]) == ("planned", None)
+    by_state = rig.progress(store, live)["experts"]["by_state"]
+    assert (by_state["partial"], by_state["planned"]) == (1, 1)
+
+
+def test_a_cancel_refreshes_an_expert_whose_every_cell_was_reopened(store):
+    """M3C-81 — 보고서가 있는데 닫힌 셀이 하나도 남지 않은 전문가(사람이 그 셀을 전부 force 로 다시 열어 살아 있는 잡에 얹었다)도 취소가
+    다시 짓는다 — 모든 단위가 '보지 못한 것 — 대기' 이고, 검토한 셀이 없으니 입장은 abstain 이다(종전에는 다시 열기 전 보고서 그대로)."""
+    key, job_id, unit_ids, fake, r = _failed_target(store)
+    revision = _head(store, key, PEER)["revision"]
+    live = rig.job(store, key, scope={"agents": [PEER, SEAL, "mech-syn-0"]})
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[u, PEER] for u in unit_ids], force=True,
+                                                             reason="입력이 바뀌어 전부 다시 본다"), ident=ME)
+    assert (out["retried"], out["job"]["job_id"], out["job"].get("hold")) == (len(unit_ids), live, None)
+    assert routes.job_action(live, "cancel", ident=ME)["state"] == "cancelled"
+    head = _head(store, key, PEER)
+    assert (head["state"], head["revision"]) == ("partial", revision + 1)
+    report = expert_report.load_report(store, key, PEER)
+    assert {u["unit_id"]: u["state"] for u in report["scope"]["unseen"]} == {u: "pending" for u in unit_ids}
+    assert _stance(store, key, PEER) == ("abstain", "abstain", "abstain")
+
+
+def _extra_of(store, job_id: str) -> dict:
+    """그 잡의 진행판 한 줄(routes._review_job_payload)의 progress.reopened_extra."""
+    row = store.query_one("SELECT id, state, hold_code, hold_until, hold_n, error, credential_email, params_json, progress_json"
+                          " FROM rr_jobs WHERE id = ?", (job_id,))
+    return routes._review_job_payload(dict(row))["progress"].get("reopened_extra") or {}
+
+
+def test_retrying_a_cell_already_inside_the_live_jobs_estimate_is_not_charged_again(store, monkeypatch):
+    """M3 묶음 검토 L6 · D-52 — 살아 있는 잡이 만들 때 추정에 넣은 셀(그 잡의 범위에서 pending 이던 셀)이 그 잡에서 실패해 사람이 다시
+    열면 그 잡에 얹히되 다시 연 셀의 몫에 들지 않는다 — 추정 안의 셀이다(종전에는 다시 열 때마다 몫에 들어 헛 consent_extra 가 섰다)."""
+    from app import units
+
+    monkeypatch.setattr(review_runner, "REOPEN_FLOOR_CALLS", 2, raising=False)
+    monkeypatch.setattr(review_runner, "REOPEN_SHARE", 0.0, raising=False)
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_concurrency=1))
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    job_id = rig.job(store, key, scope={"agents": [SEAL, PEER]})
+    fake = FakeReviewEngine(rig.packs())
+    fake.error_cells = {(PEER, unit_ids[0]): NO_ROWS}
+    r = rig.Rig(store, fake)
+    r.run(lambda: _cells(store, key, PEER)[unit_ids[0]]["state"] == "failed")
+    assert rig.state(store, job_id) == "running"
+    fake.error_cells = {}
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[unit_ids[0], PEER]]), ident=ME)
+    assert (out["job"]["action"], out["job"]["job_id"], out["job"].get("hold")) == ("adopted", job_id, None)
+    assert (_extra_of(store, job_id).get("cells"), _extra_of(store, job_id).get("hold")) == (0, None)
+    r.finish(job_id)
+    assert (rig.state(store, job_id), _cells(store, key, PEER)[unit_ids[0]]["state"]) == ("completed", "reviewed")
+
+
+def test_an_extra_cell_run_again_in_the_live_job_is_counted_once_per_run(store, monkeypatch):
+    """M3 묶음 검토 L5 · D-52 — 추정 밖 셀(앞 잡에서 실패한 셀)을 사람이 살아 있는 잡에 두 번 다시 열면(그 사이 또 실패했다) 그 잡의
+    다시 연 셀의 몫은 돈 횟수만큼 센다 — 셀 하나 · 두 번(종전에는 셀마다 한 번만 적혀 몇 번을 돌아도 한 번 몫이었다)."""
+    from app import units
+
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_concurrency=1))
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    fake = FakeReviewEngine(rig.packs())
+    fake.error_cells = {(PEER, unit_ids[0]): NO_ROWS}
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [PEER]}))
+    assert _cells(store, key, PEER)[unit_ids[0]]["state"] == "failed"
+    live = rig.job(store, key, scope={"agents": [SEAL, PEER]})            # 그 셀은 실패라 이 잡의 추정 밖이다
+    for n in (1, 2):
+        out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[unit_ids[0], PEER]]), ident=ME)
+        assert (out["job"]["action"], out["job"]["job_id"]) == ("adopted", live)
+        extra = _extra_of(store, live)
+        assert (extra.get("cells"), extra.get("runs"), extra.get("calls_est")) == (1, n, round(5.25 * n, 2))
+        if n == 1:
+            r.run(lambda: _cells(store, key, PEER)[unit_ids[0]]["state"] == "failed")    # 이 잡에서 또 실패했다
+            assert rig.state(store, live) == "running"
+    fake.error_cells = {}
+    r.finish(live)
+    assert (rig.state(store, live), _cells(store, key, PEER)[unit_ids[0]]["state"]) == ("completed", "reviewed")
+
+
+def test_declining_a_cells_second_run_by_skip_keeps_its_first_run_on_the_jobs_reopen_budget(store, monkeypatch):
+    """M3 묶음 검토 L5 · D-52 — 넘겨서 거절은 기다리던 한 번만 몫에서 뺀다. 추정 밖 셀이 살아 있는 잡에서 한 번 돈 뒤(여유 안) 다시 열려
+    여유를 넘으면, 그 셀을 넘겨도 이미 돈 한 번은 몫에 남는다(셀 하나 · 돈 횟수 1 · 5.25)."""
+    from app import units
+
+    monkeypatch.setattr(review_runner, "REOPEN_FLOOR_CALLS", 6, raising=False)
+    monkeypatch.setattr(review_runner, "REOPEN_SHARE", 0.0, raising=False)
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_concurrency=1))
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    fake = FakeReviewEngine(rig.packs())
+    fake.error_cells = {(PEER, unit_ids[0]): NO_ROWS}
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [PEER]}))
+    live = rig.job(store, key, scope={"agents": [SEAL, PEER]})            # 그 셀은 실패라 이 잡의 추정 밖이다
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[unit_ids[0], PEER]]), ident=ME)
+    assert (out["job"]["job_id"], out["job"].get("hold")) == (live, None)                   # 5.25 — 여유(6) 안
+    r.run(lambda: _cells(store, key, PEER)[unit_ids[0]]["state"] == "failed")               # 이 잡에서 또 실패했다
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[unit_ids[0], PEER]]), ident=ME)
+    assert (out["job"]["job_id"], out["job"].get("hold")) == (live, "consent_extra")        # 10.5 — 여유 밖
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": live, "state": "pending"},
+                                                           reason="두 번째 비용에는 동의하지 않는다"), ident=ME)
+    assert (out["skipped"], out["job"].get("resumed")) == (1, True)
+    extra = _extra_of(store, live)
+    assert (extra.get("cells"), extra.get("runs"), extra.get("calls_est"), extra.get("hold")) == (1, 1, 5.25, None)
+
+
+def test_declining_by_skip_never_skips_a_reopened_cell_the_person_already_consented_to(store, monkeypatch):
+    """M3 묶음 검토 M4 · D-52 — 동의를 기다리는 셀은 동의 안 받은 횟수가 남은 셀뿐이다. 사람이 한 번 동의한 다시 연 셀이 아직 돌기 전에
+    다른 셀이 얹혀 다시 consent_extra 로 멈추면, 넘겨서 거절(filter state=pending)은 새로 얹힌 셀만 넘기고 동의받은 셀은 pending 으로
+    남아 잡이 이어 돌 때 돈다."""
+    from app import units
+
+    monkeypatch.setattr(review_runner, "REOPEN_FLOOR_CALLS", 2, raising=False)
+    monkeypatch.setattr(review_runner, "REOPEN_SHARE", 0.0, raising=False)
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    fake = FakeReviewEngine(rig.packs())
+    fake.error_cells = {(PEER, unit_ids[0]): NO_ROWS, (PEER, unit_ids[1]): NO_ROWS}
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [PEER]}))
+    live = rig.job(store, key, scope={"agents": [SEAL, PEER]})            # 실패 셀 둘은 이 잡의 추정 밖이다
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[unit_ids[0], PEER]]), ident=ME)
+    assert (out["job"]["job_id"], out["job"].get("hold")) == (live, "consent_extra")
+    assert routes.job_action(live, "resume", consent=True, ident=ME)["state"] == "queued"   # 사람이 그 몫에 동의했다
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[unit_ids[1], PEER]]), ident=ME)
+    assert (out["job"]["job_id"], out["job"].get("hold")) == (live, "consent_extra")
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": live, "state": "pending"},
+                                                           reason="두 번째 다시의 비용에는 동의하지 않는다"), ident=ME)
+    assert (out["skipped"], out["keys"], out["job"].get("resumed")) == (1, [[unit_ids[1], PEER]], True)
+    assert _cells(store, key, PEER)[unit_ids[0]]["state"] == "pending"
+    fake.error_cells = {}
+    r.finish(live)
+    assert (rig.state(store, live), _cells(store, key, PEER)[unit_ids[0]]["state"]) == ("completed", "reviewed")
+
+
+def _granted(fn, *args, **kwargs):
+    """처분 — 거절(AppError)이면 단언 실패다(변이 검사가 '죽음' 으로 세는 실패의 모양)."""
+    try:
+        return fn(*args, **kwargs)
+    except AppError as exc:
+        raise AssertionError(f"{getattr(fn, '__name__', fn)} 가 거절했다 — {exc.code}: {exc}") from exc
+
+
+@pytest.mark.parametrize("low_cap", [False, True])
+def test_a_skip_with_no_live_job_binds_only_the_skipped_cells_and_records_no_consent(store, monkeypatch, low_cap):
+    """M3 묶음 검토 M5 · D-52 — 살아 있는 잡이 없을 때 넘김이 세우는 마감 잡은 넘긴 셀만 묶는다. 넘긴 셀들의 (전문가, 단위) 곱에 든
+    다른 pending 셀은 묶지도 돌리지도 않는다(종전에는 전문가 × 단위 범위라 아무도 청하지 않은 셀 둘이 엔진을 불렀다). 사람 대신
+    동의를 적지 않는다(consent false · consent_source 없음) — 돌 셀이 없어 추정이 0 이라 동의 문턱 · 상한에 걸리지 않는다(낮은
+    상한에서도 넘김이 된다 — 종전에는 409 로 실패 셀을 처분할 수 없었다)."""
+    from app import units
+
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    fake = FakeReviewEngine(rig.packs())
+    fake.error_cells = {(SEAL, unit_ids[0]): NO_ROWS, (PEER, unit_ids[1]): NO_ROWS}
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [SEAL], "unit_ids": unit_ids[:1]}))
+    r.finish(rig.job(store, key, scope={"agents": [PEER], "unit_ids": unit_ids[1:2]}))
+    assert (_cells(store, key, SEAL)[unit_ids[0]]["state"], _cells(store, key, PEER)[unit_ids[1]]["state"]) == (
+        "failed", "failed")
+    if low_cap:
+        monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_max_calls=1,
+                                                                    risk_review_consent_calls=0))
+    runs = len(fake.calls("run"))
+    out = _granted(routes.post_cells_skip, key, routes.CellsSkipBody(cells=[[unit_ids[0], SEAL], [unit_ids[1], PEER]],
+                                                                     reason="둘 다 넘긴다"), ident=ME)
+    job = out["job"]
+    assert (out["skipped"], job["action"], job["calls_estimate"]["expected"]) == (2, "created", 0)
+    params = json.loads(rig.job_row(store, job["job_id"])["params_json"])
+    assert (params["consent"], params["consent_source"]) == (False, None)
+    bound = {(row["unit_id"], row["agent_key"]) for row in store.query(
+        "SELECT unit_id, agent_key FROM rr_review_cells WHERE run_id = ?", (job["job_id"],))}
+    assert bound == {(unit_ids[0], SEAL), (unit_ids[1], PEER)}
+    r.finish(job["job_id"])
+    assert (rig.state(store, job["job_id"]), len(fake.calls("run"))) == ("completed", runs)       # 아무것도 돌지 않았다
+    assert (_cells(store, key, SEAL)[unit_ids[1]]["state"], _cells(store, key, PEER)[unit_ids[0]]["state"]) == (
+        "pending", "pending")
+    assert {_head(store, key, a)["state"] for a in (SEAL, PEER)} == {"partial"}                    # 다시 마감됐다(넘김을 실었다)
+
+
+def test_a_skip_job_never_adopts_a_dead_jobs_pending_cells_beside_the_skipped_ones(store):
+    """M3 묶음 검토 M5 · D-52 — 넘김의 마감 잡은 넘긴 셀만 묶으므로, 끝난 잡의 표지를 단 채 놓인 pending 셀(R3A-1 — adopt_released 가
+    거두는 셀)도 넘긴 셀이 아니면 거두지 않는다. 넘긴 셀들의 (전문가, 단위) 곱에 든 셀을 취소된 잡이 묶어 둔 채여도 그 셀은 돌지 않고
+    그 잡의 표지를 그대로 단다."""
+    from app import units
+
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    fake = FakeReviewEngine(rig.packs())
+    fake.error_cells = {(SEAL, unit_ids[0]): NO_ROWS, (PEER, unit_ids[1]): NO_ROWS}
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [SEAL], "unit_ids": unit_ids[:1]}))
+    r.finish(rig.job(store, key, scope={"agents": [PEER], "unit_ids": unit_ids[1:2]}))
+    dead = rig.job(store, key, scope={"agents": [SEAL, PEER], "unit_ids": unit_ids[:2]})   # 교차 셀 둘을 묶고 돌기 전에 취소된다
+    assert routes.job_action(dead, "cancel", ident=ME)["state"] == "cancelled"
+    runs = len(fake.calls("run"))
+    out = _granted(routes.post_cells_skip, key, routes.CellsSkipBody(cells=[[unit_ids[0], SEAL], [unit_ids[1], PEER]],
+                                                                     reason="둘 다 넘긴다"), ident=ME)
+    r.finish(out["job"]["job_id"])
+    assert (rig.state(store, out["job"]["job_id"]), len(fake.calls("run"))) == ("completed", runs)
+    cross = (_cells(store, key, SEAL)[unit_ids[1]], _cells(store, key, PEER)[unit_ids[0]])
+    assert {(c["state"], c["run_id"]) for c in cross} == {("pending", dead)}
+
+
+@pytest.mark.parametrize("health", ["unreadable", "draining"])
+def test_a_finalize_only_job_closes_while_the_llm_gate_is_unknown_or_draining(store, health):
+    """M3 묶음 검토 M3 · D-52 — 마감은 LLM 을 부르지 않는다 — /health 를 못 읽거나 비우기인 동안에도 넘김이 세운 마감 잡(돌 셀 0)이
+    그 전문가를 다시 마감하고 닫힌다. 종전에는 관문을 모르거나 0 이면 아무 워커도 띄우지 않아 그 잡이 running 인 채 머물렀다."""
+    key, job_id, unit_ids, fake, r = _failed_target(store)
+    if health == "unreadable":
+        fake.health_status = 503
+    else:
+        fake.draining = True
+    r.clock.advance(review_runner.HEALTH_CACHE_S)                              # 캐시를 지나 /health 를 새로 읽는다
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": job_id}, reason="입력이 와야 본다"), ident=ME)
+    for _ in range(3):
+        r.tick()
+        r.clock.advance(61)
+    assert (rig.state(store, out["job"]["job_id"]), _head(store, key, PEER)["state"], fake.drain_refused) == (
+        "completed", "ready", [])
 
 
 # ---------------------------------------------------------------- 넘김

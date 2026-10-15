@@ -1143,7 +1143,8 @@ def cancel_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
     검토 잡은 보류 열 셋을 비우고, 그 잡의 전문가·셀이 아직 도는(running) 동안은 상태와 상관없이 cancelling 이다 — paused 라도
     코드 보류는 도는 호출을 닫지 않는다(M2.md 5절 #13). 루프가 도는 것이 0 이 될 때 cancelled 로 닫고 진행판을 끝낸다. 그 사이
     잡이 살아 있어 새 잡이 그 셀을 범위에서 잃지 않는다(반대 검토 R3A-1). 도는 것이 없으면 곧바로 cancelled 이고 진행판을 끝난
-    모양(phase cancelled · 워커 없음)으로 적는다.
+    모양(phase cancelled · 워커 없음)으로 적는다. 그 뒤 트랜잭션 밖에서 그 잡이 건드린 전문가 보고서를 다시 짓는다(M3C-81 —
+    review_runner.refresh_cancelled, 전문가마다 제 트랜잭션).
     """
     row = _job_row(store, job_id)
     if row["state"] in ("cancelled", "completed", "failed"):
@@ -1166,7 +1167,8 @@ def cancel_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
             return _set_job(store, job_id, "cancelling", by=by, hold=_HOLD_CLEARED)
         out = _set_job(store, job_id, "cancelled", by=by, hold=_HOLD_CLEARED)
         review_runner.close_progress(store, job_id, "cancelled")
-        return out
+    review_runner.refresh_cancelled(store, job_id)
+    return out
 
 
 def _untry_after_cancel(store: Any, target_key: str) -> None:
