@@ -25,11 +25,11 @@ def add_part(store, ckey, *, canon="bracket", bucket="1.0x2.0x3.0@v42", material
 
 
 def add_registry(store, cluster_key, *, family="fam1", subject="ck:a", target="T1", status="open",
-                 direction="risk"):
+                 direction="risk", owner=OWNER):
     store.execute(
         "INSERT INTO rr_registry (target_key, cluster_key, owner_sub, merged_json, family_key,"
         " subject_key, status, direction) VALUES (?,?,?,?,?,?,?,?)",
-        (target, cluster_key, OWNER, "{}", family, subject, status, direction))
+        (target, cluster_key, owner, "{}", family, subject, status, direction))
 
 
 def add_finding(store, finding_id, *, mechanism="thermal", detail="unclassified", free="열피로 비슷"):
@@ -117,6 +117,34 @@ def test_cluster_merge_scan_queues_pair_without_auto_merge(risk_store):
     assert risk_store.query("SELECT old_cluster_key FROM rr_cluster_alias") == []
     # cluster_dup_ratio 는 metrics.recompute 가 이 큐를 세어 낸다 — 야간 스캔이 직접 쓰지 않는다.
     assert nightly.metric_value(risk_store, "cluster_dup_ratio") is None
+
+
+def test_cluster_merge_scan_pairs_only_clusters_of_one_owner(risk_store):
+    """근접 쌍은 한 소유자의 클러스터끼리다 — 병합은 두 클러스터를 다 가진 소유자만 하므로(routes 병합 · 별칭) 남의 클러스터와 그
+    subject 를 내 큐에 싣지 않는다(D47). 종전에는 같은 family 의 남의 클러스터가 주인 큐의 쌍으로 올랐다."""
+    _near_pair(risk_store)
+    add_part(risk_store, "ck:c", bucket="1.0x2.0x3.5@v42")
+    add_registry(risk_store, "cl_cccccccc", subject="ck:c", target="T9", owner="other@example.com")
+    out = nightly.scan_cluster_merge(risk_store, now=NOW)
+    pairs = [(json.loads(r["payload_json"])["a"], json.loads(r["payload_json"])["b"])
+             for r in queue_rows(risk_store, "cluster_merge")]
+    assert pairs == [("cl_aaaaaaaa", "cl_bbbbbbbb")]
+    assert out == {"n_clusters": 3, "n_pairs": 1, "queued": 1}
+
+
+def test_cluster_merge_suppression_is_per_owner(risk_store):
+    """막아 둔 쌍(열림 · 처리됨 · 막고 거절함)은 그 소유자의 쌍만 막는다 — 클러스터 키는 내용 해시라 소유자를 가로질러 같으므로, 남이 같은 키
+    쌍을 큐에 두었다고 주인의 쌍이 오르지 않으면 안 된다(조합 검토 L9)."""
+    other = "other@example.com"
+    _near_pair(risk_store)
+    add_registry(risk_store, "cl_aaaaaaaa", subject="ck:a", target="T8", owner=other)
+    add_registry(risk_store, "cl_bbbbbbbb", subject="ck:b", target="T8", owner=other)
+    nightly.enqueue(risk_store, "cluster_merge", {"a": "cl_aaaaaaaa", "b": "cl_bbbbbbbb", "family_key": "fam1"},
+                    owner_sub=other, now=NOW)
+    out = nightly.scan_cluster_merge(risk_store, now=NOW + 60)
+    owners = [r["owner_sub"] for r in risk_store.query(
+        "SELECT owner_sub FROM rr_curation_queue WHERE kind = 'cluster_merge' ORDER BY created_at, id")]
+    assert owners == [other, OWNER] and out["queued"] == 1
 
 
 def test_cluster_merge_scan_is_idempotent(risk_store):

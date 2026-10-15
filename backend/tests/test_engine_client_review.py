@@ -76,6 +76,9 @@ INDEX = _load("index.json")
 # 끝이 error 인 장면의 부류(M2.md 4.4) — (예외, 부류, 보류 코드).
 ERROR_SCENES = {
     "review_busy": (EngineBusy, review_ops.WAIT, None),
+    # update-all 비우기(재설계 M3 — 60초 뒤 같은 호출). 엔진이 실제로 낸 reason draining 을 그 갈래로 읽는다 — 러너는 그 자리에서
+    # 다시 내지 않고 세션을 멈춘다(리허설 E1b)
+    "review_busy_draining": (engine_client.ReviewDraining, review_ops.WAIT, None),
     "llm_timeout": (EngineRejected, review_ops.INFRA, None),
     "llm_unreachable": (EngineRejected, review_ops.INFRA, None),
     "llm_error": (EngineRejected, review_ops.INFRA, None),
@@ -122,7 +125,8 @@ def test_the_engine_frames_replay_through_the_client(tmp_path, scene):
             assert exc.infra is final["infra"] and exc.retryable is final["retryable"]
             assert exc.knob == final.get("knob") and exc.detail == final and "http_status" not in exc.detail
         else:
-            assert exc.retry_after_s == final["retry_after_s"] == 30
+            # 관문 즉답은 30초, update-all 비우기(reason draining)는 60초 뒤 같은 호출이다(M3.md 4.5).
+            assert exc.retry_after_s == final["retry_after_s"] == (60 if final.get("reason") == "draining" else 30)
     assert sent == [request]
 
 
@@ -167,6 +171,7 @@ REJECT_CLASS = {
     "denied": (EngineRejected, review_ops.JOB, "contract"),
     "ctx_too_small": (EngineRejected, review_ops.JOB, "ctx_too_small"),
     "ctx_unknown": (EngineBusy, review_ops.WAIT, None),
+    "cover_too_large": (EngineRejected, review_ops.JOB, "contract"),   # 요약의 must_cover 가 상한을 넘었다 — 앱 결함(M3.md 4.5)
 }
 PACK_CLASS = {
     "agent_not_found": (EngineRejected, review_ops.PACK, "agent_not_found"),

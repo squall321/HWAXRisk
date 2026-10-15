@@ -56,15 +56,62 @@ SKIPPED_RATIO_MAX = 0.05
 _REGISTRY_COLUMNS = (
     "target_key, cluster_key, owner_sub, visibility, merged_json, support, contested, direction, "
     "mechanism, mechanism_detail, change_kind, subject_key, severity, sev3, judgement, evidence_grade, "
-    "precedent, weak_subject, priority, status, verified_by_json, stale_json, superseded_by, ra_entity_id, updated_at"
+    "precedent, weak_subject, priority, status, verified_by_json, stale_json, superseded_by, ra_entity_id, updated_at, "
+    "support_experts, support_domains, support_units, support_verified, attention, issue_id, issue_state"
 )
 
-# 병합이 다시 계산하는 열(사람·라벨이 정하는 status·verified_by_json·stale_json·superseded_by 는 건드리지 않는다).
+# 병합이 다시 계산하는 열(사람·라벨이 정하는 status·verified_by_json·stale_json·superseded_by 는 건드리지 않는다). v5 의 일곱 열
+# (지지 수 넷 · 주의 등급 · 쟁점 id·상태)은 두 흐름 모두 채운다 — 패널 대상에서는 참고값이고 옛 열은 바이트 그대로다(D-24).
 _MERGE_OWNED_COLUMNS = (
     "merged_json", "support", "contested", "direction", "mechanism", "mechanism_detail", "change_kind",
     "subject_key", "severity", "sev3", "judgement", "evidence_grade", "precedent", "weak_subject", "priority",
     "rejected", "human_n", "family_key",
+    "support_experts", "support_domains", "support_units", "support_verified", "attention", "issue_id", "issue_state",
 )
+
+# 대상 범위로 finding 을 읽는 자리의 거름(M3.md 1.1 · S3-4) — 패널 대상(flow='panels')은 지금처럼 카드 대조 finding 을 읽지 않고
+# (M2 #7·#20), 카드 대조 대상(flow='cells')은 출처를 가리지 않고 전부(패널·카드 대조·쟁점 패널·사람) 읽는다. 대상 범위로 읽는 세
+# 자리(`_load_findings` · `_contested_marking_done` · `routes._cluster_finding_ids`)가 이 조각을 쓴다. 대상을 가리지 않는 질의에도
+# 맞는 꼴이다(대상마다 그 흐름으로 가른다).
+FINDING_SCOPE_SQL = ("(COALESCE(source_kind, '') <> 'card_review'"
+                     " OR target_key IN (SELECT target_key FROM rr_targets WHERE flow = 'cells'))")
+# 쟁점 패널 원자의 출처 — 지지 수에 세지 않고(이미 센 사람을 다시 앉힌 것이다) 쟁점 결과의 덮어쓰기 값으로만 쓴다(S3-4 · S3-7).
+ISSUE_PANEL_SOURCE = "issue_panel"
+CARD_REVIEW_SOURCE = "card_review"
+# 주의 등급(WP4 3.10.2 — 판정이 아니라 읽는 순서다). A·B 만 보고서 본문에 행으로 싣는다.
+ATTENTION_ORDER: dict[str, int] = {"A": 0, "B": 1, "C": 2, "D": 3}
+# 쟁점 상태 → 등록부 issue_state(v5 열 어휘). 끝난 쟁점은 결과(outcome)를, 판정을 못 낸 쟁점(inconclusive)은 undetermined 를 싣는다.
+_ISSUE_DONE_STATES = ("resolved", "inconclusive")
+# 패널이 판정한 뒤 근거(제기자·반대자·주장값)가 바뀐 쟁점의 표기(재설계 M3 review1 H3 — 등록부·보고서·길잡이가 같은 글을 쓴다).
+REARGUE_LABEL = "패널 판정 — 근거 바뀜, 다시 토의 필요"
+# 다시 줄을 선 결과 쟁점의 새 패널이 결정하지 못했다 — 옛 판정이 남고 표기에 이것을 붙인다(조합 검토 M2 — D-52).
+REPANEL_FAILED_NOTE = "(새 패널 결정 못 함)"
+
+
+def reargue_label(reraised: Mapping[str, Any] | None) -> str:
+    """다시 토의 표기 — 새 패널이 결정하지 못했으면 그 사실을 붙인다(등록부 · 보고서 · 쟁점 행 · 요약 입력이 같은 글을 쓴다)."""
+    return REARGUE_LABEL + (REPANEL_FAILED_NOTE if (reraised or {}).get("new_panel_failed") else "")
+
+
+def target_purged(store: RiskStore, target_key: str) -> bool:
+    """대상의 과제가 폐기(purge)됐나 — 늦게 끝난 패널·요약의 쓰기가 같은 트랜잭션에서 이것을 보고 버린다(재설계 M3 review1 L6)."""
+    row = store.query_one("SELECT p.status FROM rr_targets t JOIN rr_projects p ON p.id = t.project_id WHERE t.target_key = ?",
+                          (target_key,))
+    return row is not None and row["status"] == "purged"
+
+
+def target_flow(store: RiskStore, target_key: str) -> str:
+    """대상의 방식 — 'cells' | 'panels'(행이 없거나 옛 행이면 panels)."""
+    row = store.query_one("SELECT flow FROM rr_targets WHERE target_key = ?", (target_key,))
+    return "cells" if row is not None and row["flow"] == "cells" else "panels"
+
+
+def finding_scope(alias: str = "") -> str:
+    """`FINDING_SCOPE_SQL` 을 표 별칭 하나에 맞춘다(`alias='f'` → `f.source_kind`·`f.target_key`)."""
+    if not alias:
+        return FINDING_SCOPE_SQL
+    return (f"(COALESCE({alias}.source_kind, '') <> 'card_review'"
+            f" OR {alias}.target_key IN (SELECT target_key FROM rr_targets WHERE flow = 'cells'))")
 
 
 def corpus_projects(store: RiskStore) -> set[str]:
@@ -156,14 +203,16 @@ def _ckeys_of_subject(subject_key: str) -> list[str]:
 # ---------------------------------------------------------------- §4.7.1 등록부 병합
 
 
-def _load_findings(store: RiskStore, target_key: str) -> list[dict]:
-    """이 타깃의 finding·gain 전부(status 무관, plan §4.7.1 입력 정의)."""
+def _load_findings(store: RiskStore, target_key: str, *, include_card: bool = True) -> list[dict]:
+    """이 타깃의 finding·gain 전부(status 무관, plan §4.7.1 입력 정의). 카드 대조 finding 은 cells 대상에서만 읽는다
+    (`FINDING_SCOPE_SQL`). `include_card=False` 는 '패널만 본 등록부' 비교 보기(`merge(…, include_card=False)`)다."""
+    scope = FINDING_SCOPE_SQL if include_card else "COALESCE(source_kind, '') NOT IN ('card_review', 'issue_panel')"
     rows = store.query(
         "SELECT finding_id, claim_uid, panel_id, opinion_id, owner_sub, visibility, direction, domain, "
         "mechanism, mechanism_detail, change_kind, subject_key, ckeys_json, severity, sev3, judgement, "
         "detectability, detect_tool, evidence_grade, precedent, cluster_key, finding_json, origin, "
-        "author_sub, status, created_at "
-        "FROM rr_findings WHERE target_key = ? AND COALESCE(source_kind, '') <> 'card_review' ORDER BY finding_id",
+        "author_sub, status, created_at, unit_id, source_kind, source_id, agent_key "
+        f"FROM rr_findings WHERE target_key = ? AND {scope} ORDER BY finding_id",
         (target_key,),
     )
     out: list[dict] = []
@@ -190,20 +239,144 @@ def _representative(members: list[dict]) -> dict:
     return sorted(members, key=key)[0]
 
 
-def _merge_cluster(target_key: str, stored_key: str, base_key: str, bucket: str, members: list[dict]) -> dict:
-    """한 클러스터의 집계 행을 만든다(plan §4.7.1 병합 규칙)."""
+def _raisers(member: Mapping[str, Any]) -> list[str]:
+    """원자를 제기한 전문가 — finding_json.raised_by(반대석·의장 제외), 없으면 agent_key 열."""
+    keys = [str(k) for k in _as_list(member["_json"].get("raised_by")) if str(k) not in (ADVERSARY_KEY, "chair", "")]
+    return keys or ([str(member["agent_key"])] if member.get("agent_key") else [])
+
+
+def _verified(member: Mapping[str, Any], *, card_only: bool = False) -> bool:
+    """대조를 지난 인용이 하나라도 있는 원자인가 — 인용 해석 결과가 ok 이고 verified 이며 인용 문구가 어긋나지 않은 행(카드 행은 앱
+    재대조가 지난 것 — 지어낸 인용은 quote_mismatch 다). `card_only` 면 카드 인용만 본다(주장값의 검증 — 'FAIL 을 카드로 받쳤나')."""
+    return any(isinstance(c, Mapping) and c.get("ok") and c.get("verified") and not c.get("quote_mismatch")
+               and (not card_only or c.get("ref_type") == "card")
+               for c in _as_list(member["_json"].get("_resolved_cites")))
+
+
+def _support_counts(members: Sequence[Mapping[str, Any]], roster_domain: Mapping[str, str]) -> dict:
+    """지지 수 넷(S3-4 · WP4 3.5.1) — 기각되지 않은 llm 원자 가운데 쟁점 패널 원자가 아닌 것에서 센다. 반대석·의장·사람은 세지
+    않는다. experts = 서로 다른 제기 전문가 · domains = 그 전문가들의 로스터 영역(없으면 키 접두) · units = 서로 다른 unit_id(NULL
+    은 세지 않는다) · verified = 대조를 지난 인용이 달린 원자를 낸 전문가."""
+    experts: set[str] = set()
+    units: set[str] = set()
+    verified: set[str] = set()
+    for m in members:
+        if (_clean_str(m.get("status")) == "rejected_in_panel" or _clean_str(m.get("origin") or "llm") == "human"
+                or _clean_str(m.get("source_kind")) == ISSUE_PANEL_SOURCE):
+            continue
+        keys = _raisers(m)
+        experts.update(keys)
+        if m.get("unit_id"):
+            units.add(str(m["unit_id"]))
+        if _verified(m):
+            verified.update(keys)
+    domains = {roster_domain.get(k) or k.split("-", 1)[0] for k in experts}
+    return {"support_experts": len(experts), "support_domains": len(domains), "support_units": len(units),
+            "support_verified": len(verified)}
+
+
+def _claimed(members: Sequence[Mapping[str, Any]], roster_domain: Mapping[str, str]) -> tuple[dict, dict]:
+    """(주장값, 분포) — hold 정책이 등록부로 가는 값을 WARNING·중대로 묶은 뒤에도 원래 판정을 같은 줄에 남긴다(WP4 P-02 · X1-18).
+
+    살아 있는 llm 원자(쟁점 패널 원자 제외)의 주장 판정(`judgement_claimed`, 없으면 judgement)과 주장 심각도(`severity_claimed`,
+    없으면 severity)를 전문가마다 가장 무거운 값으로 접는다. 주장값은 그 최댓값과 FAIL·치명을 주장한 전문가 수, 그 가운데 인용이
+    대조를 지난 전문가 수다. 분포는 전문가 수로 센 판정별·심각도별·영역별 표다('12명 · FAIL 9 · WARNING 3' 의 원천)."""
+    per: dict[str, dict] = {}
+    for m in members:
+        if (_clean_str(m.get("status")) == "rejected_in_panel" or _clean_str(m.get("origin") or "llm") == "human"
+                or _clean_str(m.get("source_kind")) == ISSUE_PANEL_SOURCE):
+            continue
+        fj = m["_json"]
+        judgement = _clean_str(fj.get("judgement_claimed")) or _clean_str(m.get("judgement")) or "undetermined"
+        severity = _clean_str(fj.get("severity_claimed")) or _clean_str(m.get("severity")) or "경미"
+        for key in _raisers(m):
+            acc = per.setdefault(key, {"judgement": "OK", "severity": "경미", "verified": False})
+            if JUDGEMENT_ORDER.get(judgement, 1) > JUDGEMENT_ORDER.get(acc["judgement"], 0):
+                acc["judgement"] = judgement
+            if SEVERITY_ORDER.get(severity, 1) > SEVERITY_ORDER.get(acc["severity"], 1):
+                acc["severity"] = severity
+            acc["verified"] = acc["verified"] or _verified(m, card_only=True)
+    judgement = max((a["judgement"] for a in per.values()), key=lambda j: JUDGEMENT_ORDER.get(j, 1), default=None)
+    severity = max((a["severity"] for a in per.values()), key=lambda s: SEVERITY_ORDER.get(s, 1), default=None)
+    severe = [k for k, a in per.items() if a["judgement"] == "FAIL" or a["severity"] == "치명"]
+    claimed = {"judgement": judgement, "severity": severity,
+               "sev3": SEVERITY_ORDER.get(severity, 1) if severity else None,
+               "fail_experts": sum(1 for a in per.values() if a["judgement"] == "FAIL"),
+               "critical_experts": sum(1 for a in per.values() if a["severity"] == "치명"),
+               "verified_fail_experts": sum(1 for k in severe if per[k]["verified"])}
+    by_judgement: dict[str, int] = {}
+    by_severity: dict[str, int] = {}
+    by_domain: dict[str, int] = {}
+    for key, acc in per.items():
+        by_judgement[acc["judgement"]] = by_judgement.get(acc["judgement"], 0) + 1
+        by_severity[acc["severity"]] = by_severity.get(acc["severity"], 0) + 1
+        domain = roster_domain.get(key) or key.split("-", 1)[0]
+        by_domain[domain] = by_domain.get(domain, 0) + 1
+    return claimed, {"by_judgement_claimed": by_judgement, "by_severity": by_severity, "raisers_by_domain": by_domain}
+
+
+def issue_state_of(issue: Mapping[str, Any] | None) -> str | None:
+    """등록부 issue_state — 끝난 쟁점(resolved·inconclusive)은 그 결과(inconclusive 는 undetermined), 그 밖은 쟁점 상태."""
+    if issue is None:
+        return None
+    state = _clean_str(issue.get("state"))
+    if state in _ISSUE_DONE_STATES:
+        return _clean_str(issue.get("outcome")) or "undetermined"
+    return state or None
+
+
+def attention_of(row: Mapping[str, Any], claimed: Mapping[str, Any] | None = None) -> str:
+    """등록부 행의 주의 등급(WP4 3.10.2) — 판정이 아니라 읽는 순서다. 심각도·판정은 등록부 값과 **검증된** 주장값(FAIL·치명을
+    주장한 전문가 가운데 인용이 대조를 지난 사람이 있을 때 — X1-18 (1)) 가운데 무거운 쪽이다. 치명·FAIL 은 어느 경우에도 B 이상."""
+    if _clean_str(row.get("status")) in ("rejected_in_panel", "dismissed", "superseded"):
+        return "D"
+    sev3 = int(row.get("sev3") or 0)
+    judgement = _clean_str(row.get("judgement"))
+    if claimed and int(claimed.get("verified_fail_experts") or 0) >= 1:
+        sev3 = max(sev3, int(claimed.get("sev3") or 0))
+        if JUDGEMENT_ORDER.get(_clean_str(claimed.get("judgement")), 0) > JUDGEMENT_ORDER.get(judgement, 0):
+            judgement = _clean_str(claimed.get("judgement"))
+    severe = sev3 == 3 or judgement == "FAIL"
+    strong = _clean_str(row.get("evidence_grade")) in ("측정", "도구예측") or int(row.get("support_verified") or 0) >= 1
+    multi = int(row.get("support_domains") or 0) >= 2 or int(row.get("support_experts") or 0) >= 3
+    issue_state = _clean_str(row.get("issue_state"))
+    if severe and (strong or multi or issue_state == "upheld"):
+        return "A"
+    if severe:
+        return "B"
+    if sev3 == 2 and (strong or multi or issue_state in ("upheld", "downgraded")):
+        return "B"
+    return "C"
+
+
+def _merge_cluster(target_key: str, stored_key: str, base_key: str, bucket: str, members: list[dict], *,
+                   flow: str = "panels", roster_domain: Mapping[str, str] | None = None,
+                   issue: Mapping[str, Any] | None = None) -> dict:
+    """한 클러스터의 집계 행을 만든다(plan §4.7.1 병합 규칙).
+
+    `flow='cells'`(M3 S3-4) — 지지(`support`)는 서로 다른 제기 전문가 수이고, merged_json 에 주장값·분포·단위가 실리며, 그 닻의
+    쟁점(`issue`)이 끝났으면 쟁점 패널 원자의 값으로 행을 덮고 원래 값을 `before_issue` 에 남긴다(D-34). 쟁점 패널 원자는 집계에서
+    빼고 덮어쓰기 값으로만 쓴다. 패널 대상은 옛 열·merged_json 이 바이트 그대로다(지지 수 넷·주의 등급은 참고값으로 채운다)."""
+    roster_domain = roster_domain or {}
     all_members = sorted(members, key=lambda m: _clean_str(m.get("finding_id")))
     # 패널에서 기각된 원자(status='rejected_in_panel')는 지지에서 빠지고 rejected 로 따로 센다(plan §4.7.1).
     rejected_members = [m for m in all_members if _clean_str(m.get("status")) == "rejected_in_panel"]
     members = [m for m in all_members if _clean_str(m.get("status")) != "rejected_in_panel"]
     if not members:
         members = rejected_members            # 대표·집계 계산에는 기각 원자라도 써야 행을 만들 수 있다
+    # 쟁점 패널 원자는 집계(대표·심각도·판정·인용…)에 넣지 않는다 — 이미 센 사람을 다시 앉힌 패널의 판정이라 쟁점 결과의 덮어쓰기
+    # 값으로만 쓴다. 그 밖의 원자가 없을 때만(쟁점 패널이 새로 낸 클러스터) 그것으로 행을 만든다. 패널 대상에는 없다.
+    members = [m for m in members if _clean_str(m.get("source_kind")) != ISSUE_PANEL_SOURCE] or members
     # 사람 finding 은 전문가 지지로 세지 않는다 — human_n 으로 따로 센다(plan §4.7.1).
     llm_members = [m for m in members if _clean_str(m.get("origin") or "llm") != "human"]
     human_n = sum(1 for m in members if _clean_str(m.get("origin")) == "human")
 
     panels = sorted({_clean_str(m.get("panel_id")) for m in llm_members if m.get("panel_id")})
     support = len(panels) if panels else len(llm_members)
+    counts = _support_counts(all_members, roster_domain)
+    if flow == "cells":
+        # 패널 수는 카드 대조 원자(panel_id 없음)를 원자 수로 떨어뜨려 xd 122명이 부풀린다(m-16) — 전문가 수로 센다.
+        support = counts["support_experts"]
 
     contested = 0
     contest_notes: list[dict] = []
@@ -246,6 +419,8 @@ def _merge_cluster(target_key: str, stored_key: str, base_key: str, bucket: str,
                 continue
             seen_refs.add(ref)
             cites.append({"ref": ref, "quote": _clean_str(cite.get("quote"))})
+            if cite.get("quote_chars"):     # 들여온 카드 대조 인용의 원래 길이(반출이 단 칸 — 패널 finding 에는 없다)
+                cites[-1]["quote_chars"] = cite["quote_chars"]
         snap = fj.get("feature_snapshot")
         if isinstance(snap, dict):
             for ref, value in snap.items():
@@ -330,8 +505,17 @@ def _merge_cluster(target_key: str, stored_key: str, base_key: str, bucket: str,
         "trigger_condition": _clean_str(rep["_json"].get("trigger_condition")),
         "owner_domain": _clean_str(rep["_json"].get("owner_domain")),
     }
+    if rep["_json"].get("warrant_chars"):   # 들여온 카드 대조 근거 문장의 원래 길이(위 quote_chars 와 같다)
+        merged["warrant_chars"] = rep["_json"]["warrant_chars"]
+    claimed: dict | None = None
+    if flow == "cells":
+        claimed, distribution = _claimed(all_members, roster_domain)
+        merged["claimed"] = claimed
+        merged["distribution"] = distribution
+        merged["unit_ids"] = sorted({str(m["unit_id"]) for m in all_members if m.get("unit_id")})
+        merged["w_det"] = w_det             # 쟁점 우선순위가 같은 가중을 쓴다(issues.issue_priority — S3-6)
 
-    return {
+    row = {
         "target_key": target_key,
         "cluster_key": stored_key,
         "owner_sub": _clean_str(rep.get("owner_sub")),
@@ -353,15 +537,67 @@ def _merge_cluster(target_key: str, stored_key: str, base_key: str, bucket: str,
         "priority": priority,
         "rejected": len(rejected_members),
         "human_n": human_n,
+        # 세부 자리는 클러스터 키와 같은 규칙이다 — cells 대상의 미분류 카드 대조 finding 은 쪼갠 세부(key_detail, M3.md 4.4.3)를 써야
+        # 근접 중복 스캔이 갈라 놓은 것을 다시 묶지 않는다(P-17-6). 그 칸이 없는 finding(패널 대상 전부)은 지금 식 그대로다.
         "family_key": family_key_of(
             _clean_str(rep.get("mechanism")) or "unclassified",
-            _clean_str(rep.get("mechanism_detail")),
+            _clean_str(rep["_json"].get("key_detail")) or _clean_str(rep.get("mechanism_detail")),
             _clean_str(rep.get("change_kind")),
         ),
         # 전원이 기각한 클러스터는 코드가 세운 판정이다 — 사람이 닫은 status 를 덮지는 않는다.
         "code_status": "rejected_in_panel" if not [m for m in all_members
                                                    if _clean_str(m.get("status")) != "rejected_in_panel"] else "open",
+        **counts, "issue_id": None, "issue_state": None, "attention": None, "_claimed": claimed,
     }
+    if issue is not None and flow == "cells":
+        _apply_issue(row, merged, issue, all_members, w_det=w_det, contested=contested)
+        row["merged_json"] = common.canonical_json(merged)
+    return row
+
+
+def _apply_issue(row: dict, merged: dict, issue: Mapping[str, Any], members: Sequence[Mapping[str, Any]], *,
+                 w_det: float, contested: int) -> None:
+    """닻 쟁점의 결과를 행에 얹는다(S3-4 · 3.5 표 — 덮되 원래 분포를 같은 줄에, D-34).
+
+    upheld · downgraded · escalated — 그 결과를 낸 패널(`outcome_json.panel_id` — 없으면 `rr_issues.panel_id`) 원자 가운데 살아 있는
+    리스크 원자(sev3 가 가장 큰 것)의 심각도·판정·근거 등급으로 행을 덮고 우선순위를 다시 센다. 구성원에서 셈한 값은
+    merged.before_issue 에 남는다. 근거가 바뀌어 다시 줄을 선 쟁점(review1 H3)도 새 패널이 결과를 바꾸기 전까지 옛 패널의 덮어쓰기를
+    그대로 둔다 — 결과가 있는 쟁점은 상태와 상관없이 덮는다.
+    rejected — 사람 finding 이 없으면 코드 상태를 rejected_in_panel 로 둔다(지지 수는 지우지 않는다 — '제기 12명 · 패널 기각').
+    undetermined·결과가 없는 쟁점 — 쟁점 id·상태만 적는다. 판정 뒤 근거가 바뀐 쟁점은 merged.issue_reraised 에 표기·무엇이
+    바뀌었나를 단다."""
+    row["issue_id"] = _clean_str(issue.get("issue_id")) or None
+    row["issue_state"] = issue_state_of(issue)
+    reraised = _loads(issue.get("reraised_json"), {})
+    if reraised:
+        merged["issue_reraised"] = {"label": reargue_label(reraised), **{k: reraised[k] for k in sorted(reraised)}}
+    outcome = _clean_str(issue.get("outcome"))
+    if outcome == "rejected":
+        if not row["human_n"]:
+            row["code_status"] = "rejected_in_panel"
+        return
+    if outcome not in ("upheld", "downgraded", "escalated"):
+        return
+    decided_by = _clean_str(_loads(issue.get("outcome_json"), {}).get("panel_id")) or _clean_str(issue.get("panel_id"))
+    atoms = [m for m in members if _clean_str(m.get("source_kind")) == ISSUE_PANEL_SOURCE
+             and _clean_str(m.get("source_id") or m.get("panel_id")) == decided_by
+             and _clean_str(m.get("status")) != "rejected_in_panel" and _clean_str(m.get("direction")) != "improvement"]
+    if not atoms:
+        return
+    atom = max(atoms, key=lambda m: (int(m.get("sev3") or 0), JUDGEMENT_ORDER.get(_clean_str(m.get("judgement")), 0),
+                                     _clean_str(m.get("finding_id"))))
+    merged["before_issue"] = {"severity": row["severity"], "sev3": row["sev3"], "judgement": row["judgement"],
+                              "evidence_grade": row["evidence_grade"], "claimed": merged.get("claimed"),
+                              "distribution": merged.get("distribution"),
+                              **{k: row[k] for k in ("support_experts", "support_domains", "support_units",
+                                                     "support_verified")}}
+    severity = _clean_str(atom.get("severity")) or row["severity"]
+    row["severity"] = severity
+    row["sev3"] = SEVERITY_ORDER.get(severity, row["sev3"])
+    row["judgement"] = _clean_str(atom.get("judgement")) or row["judgement"]
+    row["evidence_grade"] = _clean_str(atom.get("evidence_grade")) or row["evidence_grade"]
+    priority = float(row["sev3"]) * w_det * W_GRADE.get(row["evidence_grade"], 0.6)
+    row["priority"] = round(priority * (0.8 if contested else 1.0), 6)
 
 
 def _write_registry_row(store: RiskStore, row: dict, now: int) -> str:
@@ -397,11 +633,14 @@ def _write_registry_row(store: RiskStore, row: dict, now: int) -> str:
         "INSERT INTO rr_registry (target_key, cluster_key, owner_sub, visibility, merged_json, support, contested, "
         "rejected, human_n, family_key, direction, mechanism, mechanism_detail, change_kind, subject_key, severity, "
         "sev3, judgement, evidence_grade, precedent, weak_subject, priority, status, verified_by_json, stale_json, "
+        "support_experts, support_domains, support_units, support_verified, attention, issue_id, issue_state, "
         "updated_at) "
         "VALUES (:target_key, :cluster_key, :owner_sub, :visibility, :merged_json, :support, :contested, "
         ":rejected, :human_n, :family_key, :direction, "
         ":mechanism, :mechanism_detail, :change_kind, :subject_key, :severity, :sev3, :judgement, :evidence_grade, "
-        ":precedent, :weak_subject, :priority, :code_status, NULL, NULL, :updated_at)",
+        ":precedent, :weak_subject, :priority, :code_status, NULL, NULL, "
+        ":support_experts, :support_domains, :support_units, :support_verified, :attention, :issue_id, :issue_state, "
+        ":updated_at)",
         {**row, "updated_at": now},
     )
     return "inserted"
@@ -520,17 +759,29 @@ def _recompute_priors(store: RiskStore, combos: Iterable[tuple], now: int) -> in
     return written
 
 
-def merge(store: RiskStore, target_key: str, *, owner_sub: str | None = None) -> dict:
+def merge(store: RiskStore, target_key: str, *, owner_sub: str | None = None, persist: bool = True,
+          include_card: bool = True) -> dict:
     """타깃의 finding 을 cluster_key 로 병합해 rr_registry·rr_delta_contrib·rr_delta_priors 를 다시 만든다.
 
     plan §4.7.1 — 패널이 끝날 때마다 다시 부르며 멱등이다(같은 finding 집합이면 support 가 중복 가산되지 않는다).
     같은 cluster_key 에 risk 와 improvement 가 섞이면 두 행으로 나누고 improvement 행에 IMPROVEMENT_SUFFIX 를 붙인다.
+
+    카드 대조 대상(flow='cells', M3 S3-4)은 카드 대조·쟁점 패널 finding 까지 읽고(M2 #7·#20 을 이 흐름에서만 푼다), 지지를 전문가
+    수로 세며, 끝난 쟁점의 결과를 닻 행에 얹고, 과제를 가로지르는 기여(rr_delta_contrib)에는 넣지 않는다(M3 #57 — 그 대상의
+    기여 행을 비운다). `persist=False` 는 아무것도 쓰지 않고 계산한 행을 `rows` 로 돌려준다 — `include_card=False` 와 함께
+    '패널만 본 등록부' 비교 보기(`GET …/registry?source=panels`)가 쓴다.
     """
     now = common.now_epoch()
-    findings = _load_findings(store, target_key)
+    flow = target_flow(store, target_key) if include_card else "panels"
+    findings = _load_findings(store, target_key, include_card=include_card)
     if owner_sub is None:
         row = store.query_one("SELECT owner_sub FROM rr_targets WHERE target_key = ?", (target_key,))
         owner_sub = _clean_str(row["owner_sub"]) if row is not None else ""
+    roster_domain = {str(r["agent_key"]): str(r["domain"]) for r in store.query(
+        "SELECT agent_key, domain FROM rr_roster WHERE target_key = ?", (target_key,))}
+    issues = ({str(r["anchor_cluster_key"]): dict(r) for r in store.query(
+        "SELECT issue_id, anchor_cluster_key, state, outcome, outcome_json, panel_id, reraised_json FROM rr_issues"
+        " WHERE target_key = ?", (target_key,))} if flow == "cells" else {})
 
     buckets: dict[tuple[str, str], list[dict]] = {}
     alias_cache: dict[str, str] = {}
@@ -540,25 +791,44 @@ def merge(store: RiskStore, target_key: str, *, owner_sub: str | None = None) ->
             continue
         # 사람이 확정한 별칭이 있으면 대표 키로 접어 병합한다(finding 행의 cluster_key 는 불변, §4.3.2).
         if base not in alias_cache:
-            alias_cache[base] = resolve_cluster_key(store, base)
+            alias_cache[base] = resolve_cluster_key(store, base, owner_sub=owner_sub)
         base = alias_cache[base] or base
         buckets.setdefault((base, _bucket_of(_clean_str(item.get("direction")))), []).append(item)
 
     rows: list[dict] = []
     for (base, bucket), members in sorted(buckets.items()):
         stored = base + IMPROVEMENT_SUFFIX if bucket == "improvement" else base
-        row = _merge_cluster(target_key, stored, base, bucket, members)
+        row = _merge_cluster(target_key, stored, base, bucket, members, flow=flow, roster_domain=roster_domain,
+                             issue=issues.get(base) if bucket == "risk" else None)
         if not row["owner_sub"]:
             row["owner_sub"] = owner_sub
         rows.append(row)
+
+    # 주의 등급은 행의 마지막 상태로 센다 — 사람이 정한 상태가 있으면 그것, 없으면 병합이 세운 코드 상태다.
+    existing = {str(r["cluster_key"]): (str(r["status"]), str(r["status_source"])) for r in store.query(
+        "SELECT cluster_key, status, status_source FROM rr_registry WHERE target_key = ?", (target_key,))}
+    for row in rows:
+        status, source = existing.get(row["cluster_key"], (row["code_status"], "code"))
+        row["attention"] = attention_of({**row, "status": status if source != "code" else row["code_status"]},
+                                        row["_claimed"])
+    if not persist:
+        out_rows = []
+        for row in rows:
+            status, source = existing.get(row["cluster_key"], (row["code_status"], "code"))
+            item = {k: v for k, v in row.items() if not k.startswith("_") and k != "code_status"}
+            out_rows.append({**item, "status": status if source != "code" else row["code_status"],
+                             "merged": _loads(row["merged_json"], {})})
+        return {"target_key": target_key, "flow": flow, "findings": len(findings), "clusters": len(rows),
+                "rows": out_rows}
 
     counts = {"inserted": 0, "updated": 0, "unchanged": 0}
     escalated: list[str] = []
     with store.tx():
         for row in rows:
             counts[_write_registry_row(store, row, now)] += 1
-        escalated = _flag_escalations(store, rows, target_key, now)
-        affected = _recompute_contrib(store, target_key, owner_sub or "", rows, now)
+        escalated = _flag_escalations(store, rows, target_key, now, flow=flow, owner_sub=owner_sub)
+        # cells 대상은 M3 동안 과제를 가로지르는 선례 통계에 기여하지 않는다(M3 #57 · 7절 (a)-2) — 그 대상의 기여 행을 비운다.
+        affected = _recompute_contrib(store, target_key, owner_sub or "", rows if flow != "cells" else [], now)
         priors_written = _recompute_priors(store, affected, now)
         candidate = verdict_candidate(store, target_key)
         current = store.query_one("SELECT verdict_candidate FROM rr_targets WHERE target_key = ?", (target_key,))
@@ -570,6 +840,7 @@ def merge(store: RiskStore, target_key: str, *, owner_sub: str | None = None) ->
 
     return {
         "target_key": target_key,
+        "flow": flow,
         "findings": len(findings),
         "clusters": len(rows),
         "inserted": counts["inserted"],
@@ -582,10 +853,17 @@ def merge(store: RiskStore, target_key: str, *, owner_sub: str | None = None) ->
 
 
 # 재제기 강도 비교 축(plan §4.7.1) — 하나라도 기준선보다 크면 '더 강한 근거' 다.
-def _is_stronger(row: Mapping[str, Any], basis: Mapping[str, Any]) -> dict | None:
-    """새 집계가 사람이 닫을 때의 기준선보다 강하면 delta(없으면 None)."""
+def _is_stronger(row: Mapping[str, Any], basis: Mapping[str, Any], *, flow: str = "panels") -> dict | None:
+    """새 집계가 사람이 닫을 때의 기준선보다 강하면 delta(없으면 None).
+
+    cells 대상의 행은 지지를 영역 수로 견준다(P-17-10 — 전문가 수는 로스터 크기에 끌려간다). 기준선이 그 값
+    (`support_domains_at_decision`)을 모르면 옛 `support_at_decision` 과 견준다."""
     sev3 = int(row.get("sev3") or 0) - int(basis.get("sev3_at_decision") or 0)
-    support = int(row.get("support") or 0) - int(basis.get("support_at_decision") or 0)
+    if flow == "cells":
+        baseline = basis.get("support_domains_at_decision", basis.get("support_at_decision"))
+        support = int(row.get("support_domains") or 0) - int(baseline or 0)
+    else:
+        support = int(row.get("support") or 0) - int(basis.get("support_at_decision") or 0)
     grade = (GRADE_ORDER.get(_clean_str(row.get("evidence_grade")), 0)
              - GRADE_ORDER.get(_clean_str(basis.get("grade_at_decision")), 0))
     if sev3 <= 0 and support <= 0 and grade <= 0:
@@ -593,22 +871,28 @@ def _is_stronger(row: Mapping[str, Any], basis: Mapping[str, Any]) -> dict | Non
     return {"sev3": sev3, "support": support, "grade": grade}
 
 
-def _flag_escalations(store: RiskStore, rows: Sequence[Mapping[str, Any]], target_key: str, now: int) -> list[str]:
+def _flag_escalations(store: RiskStore, rows: Sequence[Mapping[str, Any]], target_key: str, now: int, *,
+                      flow: str = "panels", owner_sub: str | None = None) -> list[str]:
     """사람이 dismissed 로 닫은 같은 클러스터가 더 강한 근거로 재제기되면 그 행에 재검토 표기를 남긴다.
 
     status 는 dismissed 그대로다 — 코드가 사람 판정을 뒤집지 않는다. 판정 후보에는 그대로 든다(plan §4.7.1).
+    표기는 그 대상 소유자(`owner_sub`, 없으면 rr_targets 의 소유자)의 행에만 쓴다 — 남이 닫은 행에 쓰면 남의 원장을 고치고 이
+    대상의 키(by_target)를 거기 싣는다(D48 조정자 결정). 소유자를 모르면 아무 행에도 쓰지 않는다.
     """
+    if owner_sub is None:
+        target = store.query_one("SELECT owner_sub FROM rr_targets WHERE target_key = ?", (target_key,))
+        owner_sub = _clean_str(target["owner_sub"]) if target is not None else ""
     flagged: list[str] = []
     for row in rows:
         others = store.query(
             "SELECT target_key, cluster_key, status, status_source, status_basis_json, needs_review_json"
-            " FROM rr_registry WHERE cluster_key = ? AND target_key != ? AND status = 'dismissed'"
+            " FROM rr_registry WHERE cluster_key = ? AND target_key != ? AND owner_sub = ? AND status = 'dismissed'"
             " AND status_source = 'human' ORDER BY target_key",
-            (row["cluster_key"], target_key),
+            (row["cluster_key"], target_key, owner_sub),
         )
         for other in others:
             basis = _loads(other["status_basis_json"], {})
-            delta = _is_stronger(row, basis)
+            delta = _is_stronger(row, basis, flow=flow)
             if delta is None:
                 continue
             note = {"escalated": True, "since": now, "by_target": target_key, "delta": delta}
@@ -716,7 +1000,8 @@ def set_status(
         raise AppError("note_required", "'mitigated' 전이에는 note 가 필요합니다.", 422)
     now = common.now_epoch()
     sql = ("SELECT target_key, cluster_key, verified_by_json, status, support, sev3, evidence_grade,"
-           " merged_json FROM rr_registry WHERE cluster_key = ? AND owner_sub = ?")
+           " merged_json, support_domains, support_experts, support_verified, judgement, issue_state"
+           " FROM rr_registry WHERE cluster_key = ? AND owner_sub = ?")
     params: list[Any] = [cluster_key, owner_sub]
     if target_key:
         sql += " AND target_key = ?"
@@ -738,19 +1023,25 @@ def set_status(
             log = _loads(row["verified_by_json"], [])
             log.append({"status": status, "by": decided_by, "at": now,
                         "evidence_ref": evidence_ref or "", "note": note or ""})
+            merged = _loads(row["merged_json"], {})
             basis = {
                 "evidence_ref": evidence_ref or "",
-                "finding_ids": _loads(row["merged_json"], {}).get("member_ids", []),
+                "finding_ids": merged.get("member_ids", []),
                 "support_at_decision": int(row["support"] or 0),
                 "sev3_at_decision": int(row["sev3"] or 0),
                 "grade_at_decision": _clean_str(row["evidence_grade"]),
             }
+            if target_flow(store, row["target_key"]) == "cells":
+                # 재제기 비교의 기준선(P-17-10) — cells 대상은 영역 수로 견준다(_is_stronger).
+                basis["support_domains_at_decision"] = int(row["support_domains"] or 0)
+            # 주의 등급은 상태에 달려 있다(사람이 기각·승계로 닫으면 D) — 병합을 기다리지 않고 같은 쓰기에서 고친다.
+            attention = attention_of({**dict(row), "status": status}, merged.get("claimed"))
             store.execute(
                 "UPDATE rr_registry SET status = ?, status_source = 'human', status_decided_by = ?,"
                 " status_decided_at = ?, status_note = ?, status_basis_json = ?, verified_by_json = ?,"
-                " needs_review_json = NULL, updated_at = ? WHERE target_key = ? AND cluster_key = ?",
+                " needs_review_json = NULL, attention = ?, updated_at = ? WHERE target_key = ? AND cluster_key = ?",
                 (status, decided_by, now, note, common.canonical_json(basis), common.canonical_json(log),
-                 now, row["target_key"], row["cluster_key"]),
+                 attention, now, row["target_key"], row["cluster_key"]),
             )
             seq = _next_status_seq(store, row["target_key"], row["cluster_key"])
             store.execute(
@@ -893,8 +1184,8 @@ def _contested_marking_done(store: RiskStore, target_key: str) -> bool:
         )
     }
     for row in store.query(
-        "SELECT cluster_key, finding_json, status FROM rr_findings WHERE target_key = ?"
-        " AND COALESCE(source_kind, '') <> 'card_review' ORDER BY finding_id", (target_key,)
+        f"SELECT cluster_key, finding_json, status FROM rr_findings WHERE target_key = ? AND {FINDING_SCOPE_SQL}"
+        " ORDER BY finding_id", (target_key,)
     ):
         if _clean_str(row["status"]) == "rejected_in_panel":
             continue
@@ -932,6 +1223,16 @@ def _unresolved_parse_failures(panels: list[dict]) -> int:
 
 
 def close_level(store: RiskStore, target_key: str, *, persist: bool = True) -> dict:
+    """완결 레벨의 문지기(M3 S3-8) — 카드 대조 대상(flow='cells')은 `closure.close_level_cells`(셀 셈·잔여·표기·캐시), 그 밖은
+    지금 본문(`_close_level_panels` — 패널 대상은 바이트 그대로, D-24)."""
+    if target_flow(store, target_key) == "cells":
+        from app import closure  # noqa: PLC0415 — closure 는 registry 를 쓰지 않지만 무거운 모듈을 끌어온다.
+
+        return closure.close_level_cells(store, target_key, persist=persist)
+    return _close_level_panels(store, target_key, persist=persist)
+
+
+def _close_level_panels(store: RiskStore, target_key: str, *, persist: bool = True) -> dict:
     """완결 레벨 C0~C3 를 계산한다(plan §6.9). 레벨은 단조 증가만 하고 persist 면 rr_targets.level 에 반영한다."""
     target = store.query_one(
         "SELECT target_key, project_id, level, close_level, verdict_final, verdict_candidate "
@@ -1213,6 +1514,7 @@ def _minutes_lines(store: RiskStore, target_key: str, panels: list[dict], covera
             "SELECT SUM(tool_calls_ok) AS n FROM rr_seat_opinions WHERE panel_id = ?", (p["id"],))["n"]
         rejected = sum(
             1 for f in store.query(
+                # 카드 대조 거름 그대로(M3 S3-4) — 패널 범위·패널 브리프의 자리라 cells 대상에서 돌지 않거나 카드 finding 은 panel_id 가 없어 안 걸린다
                 "SELECT finding_json FROM rr_findings WHERE panel_id = ? AND COALESCE(source_kind, '') <> 'card_review'"
                 " ORDER BY finding_id", (p["id"],)
             )
@@ -1433,8 +1735,9 @@ def set_visibility(store: RiskStore, cluster_key: str, visibility: str, *, owner
         params.append(target_key)
     rows = store.query(sql + " ORDER BY target_key", params)
     if not rows:
+        # 남이 볼 수 있는 행(조직 공개)이면 403 — 비공개 행은 없는 행과 같은 404 다(그 행이 있다는 것을 흘리지 않는다, 남 숨김 훑기).
         visible = store.query_one(
-            "SELECT owner_sub FROM rr_registry WHERE cluster_key = ? LIMIT 1", (cluster_key,))
+            "SELECT owner_sub FROM rr_registry WHERE cluster_key = ? AND visibility = 'org' LIMIT 1", (cluster_key,))
         if visible is not None:
             raise AppError("E403", "등록부 행의 공개 범위는 소유자만 바꿀 수 있습니다.", 403)
         raise AppError("E404", f"등록부 클러스터를 찾지 못했습니다: {cluster_key}", 404)
@@ -1453,21 +1756,21 @@ ALIAS_MAX_HOPS = 5
 ALIAS_REASONS: tuple[str, ...] = ("taxonomy_major", "ckey_merge", "iface_alias", "dim_rename", "cluster_merge")
 
 
-def resolve_cluster_key(store: RiskStore, cluster_key: str) -> str:
-    """별칭 체인을 따라간 대표 cluster_key(≤5홉·순환 차단). 정본은 learning.resolve_cluster_key 다."""
+def resolve_cluster_key(store: RiskStore, cluster_key: str, *, owner_sub: str) -> str:
+    """별칭 체인을 따라간 대표 cluster_key(≤5홉·순환 차단) — 그 소유자의 별칭만(조합 검토 M7). 정본은 learning.resolve_cluster_key 다."""
     from app import learning  # noqa: PLC0415 — learning 은 registry 를 import 하지 않는다.
 
-    return learning.resolve_cluster_key(store, cluster_key)
+    return learning.resolve_cluster_key(store, cluster_key, owner_sub=owner_sub)
 
 
-def _alias_hops(store: RiskStore, start: str) -> int:
-    """start 에서 시작하는 별칭 체인의 홉 수. 순환이면 ALIAS_MAX_HOPS + 1 을 돌려준다."""
+def _alias_hops(store: RiskStore, start: str, owner_sub: str) -> int:
+    """start 에서 시작하는 그 소유자의 별칭 체인의 홉 수. 순환이면 ALIAS_MAX_HOPS + 1 을 돌려준다."""
     seen = {start}
     current, hops = start, 0
     while True:
         row = store.query_one(
-            "SELECT new_cluster_key FROM rr_cluster_alias WHERE old_cluster_key = ? AND revoked_at IS NULL",
-            (current,))
+            "SELECT new_cluster_key FROM rr_cluster_alias WHERE owner_sub = ? AND old_cluster_key = ? AND revoked_at IS NULL",
+            (owner_sub, current))
         if row is None:
             return hops
         nxt = _clean_str(row["new_cluster_key"])
@@ -1493,12 +1796,15 @@ def add_cluster_alias(store: RiskStore, old_cluster_key: str, new_cluster_key: s
         raise AppError("E100", "같은 키로는 별칭을 만들 수 없습니다.", 422)
     if reason not in ALIAS_REASONS:
         raise AppError("E100", f"reason 은 {list(ALIAS_REASONS)} 중 하나여야 합니다.", 422)
+    # 별칭은 소유자마다다 — 남이 같은 키에 세운 별칭은 보지도 막지도 않는다(조합 검토 M7).
     existing = store.query_one(
-        "SELECT new_cluster_key, revoked_at FROM rr_cluster_alias WHERE old_cluster_key = ?", (old_key,))
+        "SELECT new_cluster_key, revoked_at FROM rr_cluster_alias WHERE owner_sub = ? AND old_cluster_key = ?",
+        (owner_sub, old_key))
     if existing is not None and existing["revoked_at"] is None:
         raise AppError("E409", f"이미 별칭이 있는 키입니다 — {old_key} → {existing['new_cluster_key']}.", 409)
     # 새 키 뒤로 이어진 체인이 5홉을 넘거나 되돌아오면(순환) 만들지 않는다.
-    if _alias_hops(store, new_key) + 1 > ALIAS_MAX_HOPS or resolve_cluster_key(store, new_key) == old_key:
+    if (_alias_hops(store, new_key, owner_sub) + 1 > ALIAS_MAX_HOPS
+            or resolve_cluster_key(store, new_key, owner_sub=owner_sub) == old_key):
         raise AppError("alias_chain_too_long",
                        f"별칭 체인이 {ALIAS_MAX_HOPS} 홉을 넘거나 순환합니다 — {old_key} → {new_key}.", 409)
     now = common.now_epoch()
@@ -1522,6 +1828,6 @@ def revoke_cluster_alias(store: RiskStore, old_cluster_key: str, *, owner_sub: s
         return {"old_cluster_key": old_key, "revoked": False, "already": True}
     now = common.now_epoch()
     store.execute(
-        "UPDATE rr_cluster_alias SET revoked_by = ?, revoked_at = ? WHERE old_cluster_key = ?",
-        (owner_sub, now, old_key))
+        "UPDATE rr_cluster_alias SET revoked_by = ?, revoked_at = ? WHERE owner_sub = ? AND old_cluster_key = ?",
+        (owner_sub, now, owner_sub, old_key))
     return {"old_cluster_key": old_key, "revoked": True, "revoked_at": now}

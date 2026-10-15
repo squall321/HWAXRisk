@@ -206,8 +206,9 @@ def test_the_quality_section_comes_from_the_quality_module(store):
     _run(store, key, scope={"agents": [SEAL], "unit_ids": _unit_ids(store, key)[:1]})
     report = expert_report.load_report(store, key, SEAL)
     want = review_quality.block(store, key, agent_key=SEAL)
-    assert report["quality"] == {"status": "measured", "json": review_quality.compute(store, key, agent_key=SEAL),
-                                 "text": want["text"]}
+    assert {k: v for k, v in report["quality"].items() if k != "mech"} == {
+        "status": "measured", "json": review_quality.compute(store, key, agent_key=SEAL), "text": want["text"]}
+    assert report["quality"]["mech"] == {"flagged": 0, "missing": 0, "out_of_domain": 0}    # 걸림 없음(M3 S3-3 의 칸)
     assert report["quality"]["json"]["grid"]["expert_states"] is None
     assert want["text"] in expert_report.render_report_md(report, part="summary")
     # 요약 첫 줄(의견 행 excerpt_for_rag)도 검토 수 옆에 '형식만 채운 칸' 을 단다(WP5b 3.11.3 규칙 3 — R3B-10).
@@ -434,8 +435,10 @@ def test_refinalizing_on_an_importing_box_keeps_the_original_length_of_clipped_q
         assert (len(row["cq"]), row["cq_chars"]) == (200, 260)
         assert {(len(c["cond"]), c["cond_chars"]) for c in row["conds"]} == {(200, 240)}
         assert "…(cq 260자 중 200자)" in expert_report.render_report_md(rebuilt, part="cards", unit_id=first)
-        finding = json.loads(dest.query_one("SELECT finding_json FROM rr_findings WHERE source_kind = 'card_review'"
-                                            " AND unit_id = ?", (first,))["finding_json"])
+        # 카드 밖 줄(자유 기술)과 메커니즘 없는 카드는 cells 대상에서 다른 클러스터다(M3 S3-3) — 그 카드가 든 finding 을 집는다.
+        finding = next(json.loads(r["finding_json"]) for r in dest.query(
+            "SELECT finding_json FROM rr_findings WHERE source_kind = 'card_review' AND unit_id = ?", (first,))
+            if f"card:{_rid('K01')}" in r["finding_json"])
         assert [(len(c["quote"]), c.get("quote_chars")) for c in finding["cites"] if c["ref"].startswith("card:")] == [(200, 260)]
         assert finding["warrant_chars"] == [260]
         refs = [dict(r) for r in dest.query("SELECT quote, quote_chars FROM rr_claim_refs WHERE ref_type = 'card' AND claim_uid"

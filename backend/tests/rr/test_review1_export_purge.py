@@ -1,0 +1,149 @@
+# 반대 검토 1차(review1) 반출·폐기·들여오기 몫 — 쟁점 패널이 옮긴 카드 글의 반출 상한(M6), 폐기가 등록부·패널 결과 원문을 비우는지(M7 · result_gz), 들여오기가 사람의 취소·결정을 잃지 않는지(L4)
+"""원장은 생산자 경로다 — 대상은 라우트(rig.target), 검토는 가짜 검토 엔진의 루프, 쟁점 → 종합은 검토 잡 끝의 사슬이 세운 잡을 러너(가짜
+쟁점 패널 엔진 — 좌석이 카드 절을 옮겨 적는 대본 card_quote)와 종합 워커(가짜 요약 엔진)가 돈다. 반출은 export.iter_lines,
+들여오기는 export.import_jsonl, 폐기는 routes.purge_project, 확인·취소는 closure, 사람의 쟁점 결정은 routes.put_issue 다.
+"""
+from __future__ import annotations
+
+import gzip
+import json
+
+import pytest
+
+from app import closure, config, export, issues, routes, runner, synth
+from app.risk_store import RiskStore
+from tests import factories
+from tests.synth import fake_review_engine as fre
+from tests.synth import review_rig as rig
+from tests.synth.fake_review_engine import FakeReviewEngine
+from tests.synth.fake_summary_engine import FakeSummaryEngine
+from tests.synth.issue_panel_engine import IssuePanelEngine
+
+OWNER = rig.OWNER
+CARDS = {c["alias"]: c for c in fre.load("pack_ok.json")["cards"]}
+SECTION = ("좌석이 카드 절을 통째로 옮겨 적은 글이다 — 박스 밖으로는 판정당 200자만 나간다. " * 8)[:390]
+
+
+@pytest.fixture
+def chained(risk_store, monkeypatch, tmp_path):
+    """검토 → 쟁점 패널(카드 절 390자를 옮겨 적은 결정문) → 종합 → 판까지 돈 원장 — 대상 열쇠."""
+    rig.configure(monkeypatch, risk_store, tmp_path, risk_issue_panel_cap=2, risk_issue_panel_hard_cap=2)
+    key = rig.target(risk_store)
+    job_id = rig.job(risk_store, key)
+    fake = FakeReviewEngine(rig.packs())
+    fake.verdicts = {str(CARDS["K01"]["record_id"]): ("yes", "FAIL")}
+    fake.mechs = {str(CARDS["K01"]["record_id"]): ("interface.clearance", "")}
+    rig.Rig(risk_store, fake).finish(job_id)
+    card = {"ref": f"card:{CARDS['K01']['record_id']}#{CARDS['K01']['sections'][0]['sid']}", "quote": SECTION}
+    engine = IssuePanelEngine(risk_store, {"*": {"severity": "치명", "judgement": "FAIL", "card_quote": card}})
+    while (job := runner.claim_next_job(risk_store, config.settings, engine=engine)) is not None:
+        runner.run_panel(risk_store, config.settings, engine, job)
+    # 요약 서기가 행 글(카드 절)을 서술에 옮겨 적었다 — 보고서 판 쪽의 «» 서술에 실린다.
+    worker = synth.SynthWorker(risk_store, config.settings, FakeSummaryEngine({"*": {"para": f"이 범위의 근거 «{SECTION}»"}}))
+    for _ in range(300):
+        if worker.tick()["step"] == "idle":
+            break
+    assert synth.report_source(risk_store, key)["trigger"] == "synth_done"
+    return key
+
+
+def _exported(store: RiskStore, owner: str = OWNER) -> dict[str, list[dict]]:
+    out: dict[str, list[dict]] = {}
+    for line in list(export.iter_lines(store, owner, 0))[1:]:
+        item = json.loads(line)
+        out.setdefault(item["table"], []).append(item["row"])
+    return out
+
+
+def _texts(value) -> list[str]:
+    """반출 값 안의 글 전부(JSON 글은 풀고, gzip·base64 블롭은 풀어서)."""
+    if isinstance(value, dict):
+        if set(value) == {"__b64__"}:
+            import base64
+
+            try:
+                return _texts(gzip.decompress(base64.b64decode(value["__b64__"])).decode("utf-8"))
+            except OSError:
+                return []
+        return [t for v in value.values() for t in _texts(v)]
+    if isinstance(value, list):
+        return [t for v in value for t in _texts(v)]
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            return [value]
+        return [value] if isinstance(parsed, str) else _texts(parsed) + [value]
+    return []
+
+
+def test_issue_panel_card_text_leaves_the_box_cut_to_200_characters(risk_store, chained):
+    """M6 — 쟁점 패널이 옮겨 적은 카드 절(390자)은 반출에서 판정당 200자로 줄어든다 — 쟁점 패널 finding(인용·근거 문장)·패널의
+    결정문·risk_spec·보고서 판의 쪽 어디에도 통째로 실리지 않는다. 원래 길이는 남는다(finding 인용의 quote_chars)."""
+    key = chained
+    tables = _exported(risk_store)
+    panel_ids = {r["id"] for r in risk_store.query("SELECT id FROM rr_panels WHERE target_key = ? AND kind = 'issue'", (key,))}
+    places = {
+        "rr_findings": [r for r in tables["rr_findings"] if r.get("source_kind") == "issue_panel"],
+        "rr_panels": [r for r in tables["rr_panels"] if r["id"] in panel_ids],
+        "rr_reports": [r for r in tables.get("rr_reports", []) if r["target_key"] == key],
+    }
+    assert all(places.values()), {k: len(v) for k, v in places.items()}
+    whole = {where: sum(1 for row in rows for t in _texts(row) if SECTION in t) for where, rows in places.items()}
+    assert whole == {"rr_findings": 0, "rr_panels": 0, "rr_reports": 0}
+    cites = [c for r in places["rr_findings"] for c in json.loads(r["finding_json"]).get("cites") or ()
+             if str(c.get("ref") or "").startswith("card:")]
+    assert cites and all(len(c["quote"]) <= export.EXPORT_CQ_MAX and c.get("quote_chars") == len(SECTION) for c in cites)
+    report = synth.report_source(risk_store, key)
+    assert any(SECTION in t for p in report["pages"] for b in synth.BLOCKS for t in p["blocks"][b])   # 판에는 실렸다
+    # 박스 안의 원장은 그대로다(줄이는 것은 반출뿐이다).
+    assert any(SECTION in (r["finding_json"] or "") for r in risk_store.query(
+        "SELECT finding_json FROM rr_findings WHERE target_key = ? AND source_kind = 'issue_panel'", (key,)))
+
+
+def test_a_purge_blanks_the_registry_and_the_panels_raw_engine_result(risk_store, chained):
+    """M7 · 새로 본 것 — 폐기가 등록부 merged_json(카드 인용 · 쟁점 패널 주장 · 근거 문장)과 패널의 엔진 결과 원문(result_gz — 결정문 ·
+    발언이 든다)을 비운다. 반출에도 그 글이 남지 않는다. 행과 해시·수는 남는다."""
+    key = chained
+    project_id = risk_store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (key,))["project_id"]
+    code = risk_store.query_one("SELECT code FROM rr_projects WHERE id = ?", (project_id,))["code"]
+    assert risk_store.query_one("SELECT COUNT(*) AS n FROM rr_panels WHERE target_key = ? AND result_gz IS NOT NULL",
+                                (key,))["n"] > 0
+    with factories.routes_store(risk_store):
+        routes.purge_project(project_id, routes.PurgeBody(code=code, reason="정리"), ident=factories.ident(OWNER))
+    registry_rows = risk_store.query("SELECT merged_json, severity FROM rr_registry WHERE target_key = ?", (key,))
+    assert registry_rows and {r["merged_json"] for r in registry_rows} == {"{}"} and all(r["severity"] for r in registry_rows)
+    assert risk_store.query_one("SELECT COUNT(*) AS n FROM rr_panels WHERE target_key = ? AND result_gz IS NOT NULL",
+                                (key,))["n"] == 0
+    assert risk_store.query_one("SELECT COUNT(*) AS n FROM rr_panels WHERE target_key = ? AND result_hash IS NOT NULL",
+                                (key,))["n"] > 0
+
+
+def test_an_import_keeps_a_revoked_ack_and_a_persons_issue_decision(risk_store, chained, tmp_path):
+    """L4 — 사람의 확인 취소(rr_close_acks.revoked_*)와 쟁점 결정(rr_issues.status_source='human' · decided_by · 사유)은 사람의 확정이다
+    — 같은 행을 그 전 모양으로 가진 박스에 들여오면 그 결정이 이긴다(종전에는 둘 다 자동 행으로 읽혀 건너뛰었다)."""
+    key = chained
+    result = closure.refresh(risk_store, key)
+    item = next(q for q in result["qualifiers"] if q["blocking"])
+    closure.ack_residual(risk_store, key, item["item"], reason="넘긴다", by=OWNER, basis_hash=item["basis_hash"])
+    untried = next(r for r in issues.issue_rows(risk_store, key) if r["state"] in ("untried_cap", "queued", "resolved"))
+    before_text = "".join(export.iter_lines(risk_store, OWNER, 0))       # 결정 전의 반출 — 받는 박스의 원장
+    dest = RiskStore(tmp_path / "dest.db")
+    dest.open()
+    dest.migrate()
+    try:
+        export.import_jsonl(dest, OWNER, before_text)
+        closure.revoke_ack(risk_store, key, item["item"], by=OWNER)
+        with factories.routes_store(risk_store):
+            routes.put_issue(untried["issue_id"], routes.IssueActionBody(action="skip", reason="이번 판에서는 넘긴다"),
+                             ident=factories.ident(OWNER))
+        out = export.import_jsonl(dest, OWNER, "".join(export.iter_lines(risk_store, OWNER, 0)))
+        ack = dest.query_one("SELECT revoked_by, revoked_at FROM rr_close_acks WHERE target_key = ? AND item = ?",
+                             (key, item["item"]))
+        assert (ack["revoked_by"], ack["revoked_at"] is not None) == (OWNER, True), out
+        issue = dest.query_one("SELECT state, status_source, decided_by, reason FROM rr_issues WHERE issue_id = ?",
+                               (untried["issue_id"],))
+        assert dict(issue) == {"state": "skipped", "status_source": "human", "decided_by": OWNER,
+                               "reason": "이번 판에서는 넘긴다"}
+    finally:
+        dest.close()

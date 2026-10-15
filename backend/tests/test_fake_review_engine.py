@@ -24,7 +24,29 @@ SCENES = {"verdict_fwd": ("req_verdict_fwd.json", "result_verdict_ok.json"),
           "verdict_rev": ("req_verdict_rev.json", "result_verdict_rev.json"),
           "verdict_solo": ("req_verdict_solo.json", "result_verdict_solo.json"),
           "sweep": ("req_sweep.json", "result_sweep_ok.json"),
-          "offcard": ("req_offcard.json", "result_offcard_ok.json")}
+          "offcard": ("req_offcard.json", "result_offcard_ok.json"),
+          "noinput": ("req_noinput.json", "result_noinput_ok.json"),
+          # 재설계 M3 C3-14 — 엔진 마지막 예제(c4e4823)의 표지 칸. 가짜의 스위치를 그 예제의 값으로 켜고 모양을 견준다.
+          "verdict_contested": ("req_verdict_fwd.json", "result_verdict_contested.json"),
+          "verdict_coerced_clash": ("req_verdict_fwd.json", "result_verdict_coerced_clash.json"),
+          "verdict_flipped": ("req_verdict_fwd.json", "result_verdict_flipped.json"),
+          "verdict_alias": ("req_verdict_fwd.json", "result_verdict_alias.json"),
+          "noinput_contested": ("req_noinput.json", "result_noinput_contested.json"),
+          "offcard_search": ("req_offcard_search.json", "result_offcard_search_ok.json")}
+
+
+def _switched(fake: FakeReviewEngine, engine: dict) -> FakeReviewEngine:
+    """엔진 예제 행의 표지(contested_by · flipped_from · checks.alias)와 meta.search 를 가짜의 스위치로 옮긴다 — 같은 별칭에 같은 값."""
+    for row in engine["rows"]:
+        if isinstance(row.get("contested_by"), dict):
+            fake.contested[row["k"]] = row["contested_by"]
+        if isinstance(row.get("flipped_from"), dict):
+            fake.flipped[row["k"]] = row["flipped_from"]
+        if (row.get("checks") or {}).get("alias"):
+            fake.alias_words[row["k"]] = row["checks"]["alias"]
+    if isinstance(engine["meta"].get("search"), dict):
+        fake.search_states = [engine["meta"]["search"]["state"]]
+    return fake
 
 
 class _Store:
@@ -55,6 +77,9 @@ def _keysets(rows) -> dict[str, set]:
     for row in rows:
         out.setdefault(row["t"], set()).add(frozenset(row))
         out.setdefault(f"{row['t']}.checks", set()).add(frozenset(row["checks"]))
+        for mark in ("contested_by", "flipped_from"):                    # 표지 칸 안쪽 모양도(재설계 M3 C3-14)
+            if isinstance(row.get(mark), dict):
+                out.setdefault(f"{row['t']}.{mark}", set()).add(frozenset(row[mark]))
     return out
 
 
@@ -71,7 +96,7 @@ def _accept(result: dict, request: dict) -> dict:
 def test_the_fake_result_has_the_engine_key_sets(tmp_path, scene):
     req_name, result_name = SCENES[scene]
     request, engine = fre.load(req_name), fre.load(result_name)
-    got = _client(tmp_path, FakeReviewEngine()).run(request, email=USER)
+    got = _client(tmp_path, _switched(FakeReviewEngine(), engine)).run(request, email=USER)
 
     assert set(got) == set(engine)
     for key in ("quality", "meta", "extras"):
@@ -85,6 +110,9 @@ def test_the_fake_result_has_the_engine_key_sets(tmp_path, scene):
     assert got["meta"]["aliases"] == engine["meta"]["aliases"]
     assert (got["kind"], got["variant"], got["missing"]) == (engine["kind"], engine["variant"], [])
     assert got["meta"]["prompt_rev"] == engine["meta"]["prompt_rev"] and got["meta"]["basis"] == engine["meta"]["basis"]
+    if "search" in engine["meta"]:
+        assert set(got["meta"]["search"]) == set(engine["meta"]["search"])
+        assert set(got["meta"]["search"]["used"][0]) == set(engine["meta"]["search"]["used"][0])
 
 
 @pytest.mark.parametrize("scene", ["verdict_fwd", "verdict_rev", "verdict_solo"])
@@ -247,7 +275,7 @@ def test_health_and_the_request_log(tmp_path):
     fake = FakeReviewEngine()
     client = _client(tmp_path, fake)
     health = client.health()
-    assert health["card_review"] == {"capable": True, "active": 0, "limit": 4, "limit_reason": "normal",
+    assert health["card_review"] == {"capable": True, "active": 0, "limit": 8, "limit_reason": "normal",   # 관문 8(D-34)
                                      "request_worst_s": 10824, "error": None}
     fake.gate_limit = 2
     assert client.health()["card_review"]["limit"] == 2 and client.limits(email=USER)["gate"]["limit"] == 2

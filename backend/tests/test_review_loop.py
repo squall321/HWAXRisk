@@ -11,7 +11,7 @@ import threading
 
 import pytest
 
-from app import cardpack, config, planner, review_cells, review_ops, runner, units
+from app import cardpack, config, planner, review_cells, review_ops, review_runner, runner, units
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
 from tests.synth.fake_review_engine import FakeReviewEngine
@@ -138,7 +138,9 @@ def test_an_expert_session_sweeps_then_runs_every_deck_over_every_unit_before_th
     assert seen == expected
     fwd = next(b for b in _runs(fake) if b["variant"] == "fwd")
     assert [d["alias"] for d in fwd["digest"]] == ["K05", "K06", *background]
-    assert fwd["expect"] == {"prompt_rev": limits["prompt_rev"]["verdict"], "limits_rev": limits["limits_rev"]}
+    # run 의 기대 판은 그 종류의 판이다(엔진 RunExpect — RB3-6)
+    assert fwd["expect"] == {"prompt_rev": limits["prompt_rev"]["verdict"],
+                             "limits_rev_kind": limits["limits_rev_by_kind"]["verdict"]}
     offcard = [b for b in _runs(fake) if b["kind"] == "offcard"][0]
     assert [d["alias"] for d in offcard["digest"]] == decks[0] + decks[1]
     assert [k["alias"] for k in offcard["extra"]["known"]] == decks[0] + decks[1]
@@ -179,7 +181,7 @@ def test_a_restart_in_the_middle_of_a_call_reruns_only_that_call_without_chargin
     gate = threading.Event()
     fake.hold_runs = {5: gate}
     first = rig.Rig(store, fake, boot_id="boot-a")
-    first.tick()                                           # 묶음 받기
+    first.tick(packs_only=True)                            # 묶음 받기
     first.tick(wait=False)                                 # 세션 — 다섯째 run 에서 선다
     rig.wait_for(lambda: fake.runs == 5)
     cut = store.query_one("SELECT call_id, unit_id FROM rr_review_calls WHERE state = 'running'")
@@ -204,6 +206,59 @@ def test_a_restart_in_the_middle_of_a_call_reruns_only_that_call_without_chargin
 
 
 # ---------------------------------------------------------------- 기다림 · 차단기
+@pytest.mark.parametrize("limit", [4, 8])
+def test_eight_workers_never_exceed_the_servers_gate_limit(store, monkeypatch, limit):
+    """재설계 M3 C3-10 — 앱 워커 기본은 8(D-34)이고, 엔진 관문 limit(/health — 심의가 돌면 4)을 넘겨 띄우지 않는다. 6명 잡이 limit
+    4 면 동시에 넷까지, 8 이면 넷을 넘는다."""
+    # 거르기를 끈다 — 켜 두면 1순위 대기(분류 8번 줄)로 영역마다 1순위만 먼저 돌아 겹침이 시간에 기댄다.
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_concurrency=8,
+                                                                risk_review_filter="off"))
+    assert config.settings.risk_review_concurrency == 8
+    import time
+
+    key = rig.target(store)
+    first = units.load_units(store, key)[0]["unit_id"]
+    job_id = rig.job(store, key, scope={"unit_ids": [first]})
+    fake = FakeReviewEngine(rig.packs())
+    fake.gate_limit = limit
+    # 겹침이 박스 부하의 시간에 기대지 않게 둘을 붙든다(호출 간격 · 5초 기한으로 재면 둘 · 넷만 겹쳐 흔들렸다). ① 묶음 — 여섯이 다
+    # 집힌 뒤에 놓는다. 전문가 단위 단계(C3-11)라 빨리 끝난 묶음의 전문가는 같은 틱에 검토로 집히는데, 시험대는 틱마다 워커를
+    # 기다리므로 첫 틱의 검토 둘과 둘째 틱의 넷이 겹치지 않는다. ② 앞 여섯 run(전문가마다 첫 호출) — 다섯이 함께 돌거나 살아 있는
+    # 검토 워커가 모두 붙들렸으면 놓는다(limit 4 는 넷까지만 뜬다). 60초는 안전망이다.
+    packs, release = threading.Event(), threading.Event()
+    fake.pack_gate = packs
+    fake.hold_runs = {n: release for n in range(1, 7)}
+    r = rig.Rig(store, fake)
+    spawning = threading.Event()                 # 틱이 워커를 띄우는 중 — 다 띄운 뒤에만 '모두 붙들렸다' 를 센다
+    spawn = r.loop._spawn
+
+    def counted_spawn(*args, **kwargs):
+        spawning.set()
+        try:
+            return spawn(*args, **kwargs)
+        finally:
+            spawning.clear()
+
+    r.loop._spawn = counted_spawn
+
+    def watch() -> None:
+        end = time.monotonic() + 60
+        while time.monotonic() < end and not (len(fake.calls("pack")) >= 6 or (fake.calls("pack") and not spawning.is_set())):
+            time.sleep(0.01)
+        packs.set()
+        while time.monotonic() < end:
+            reviewing = sum(1 for w in r.loop.workers() if w.purpose == "review")
+            if fake.active >= 5 or (fake.active and not spawning.is_set() and fake.active == reviewing):
+                break
+            time.sleep(0.01)
+        release.set()
+
+    threading.Thread(target=watch, daemon=True).start()
+    r.finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    assert fake.max_active <= limit and (fake.max_active > 4) == (limit == 8)
+
+
 def test_review_busy_waits_without_counting_anything(store, monkeypatch):
     """서버 관문이 동시 2 를 넘는 run 에 review_busy 로 답한다 — 기다림은 아무것도 세지 않는다(P-02(5)). 셀의 tries·infra_streak·
     charged 가 0 을 지나지 않고, 차단기는 닫힌 채이며 잡은 completed 다. 기다린 호출은 원장에 wait 로 남는다(품질 수치가 따로 센다)."""
@@ -223,6 +278,244 @@ def test_review_busy_waits_without_counting_anything(store, monkeypatch):
     assert sum(c["tries"] for c in cells) == len([c for c in _calls(store, job_id, state="ok") if c["unit_id"]])
     assert rig.progress(store, job_id)["breaker"] == {"state": "closed", "trips": 0, "hold_until": None, "since": None}
     assert 2 <= fake.max_active <= fake.busy_over
+
+
+# ---------------------------------------------------------------- 비우기(update-all — M3.md 4.7 · 리허설 E1b · D-51)
+@pytest.mark.parametrize("health", ["fail", "slow"])
+def test_a_tick_that_cannot_read_the_health_spawns_nothing(store, monkeypatch, health):
+    """리허설 E1b — 관문 limit 은 읽은 /health 에서만 온다. 캐시에 없으면 띄우기 전에 읽고, 그 틱에 읽지 못하면(실패 · 탐침 한도 안에 답이
+    없다) 아무것도 띄우지 않는다 — 종전에는 모르면 동시 수로 띄워 비우기 깃발 뒤 1초 안에 호출 여덟이 나갔다. 읽히면 이어 돈다."""
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine(rig.packs())
+    if health == "fail":
+        fake.health_status = 503
+    else:
+        fake.health_delay_s = review_runner.PROBE_JOIN_S + 0.5
+    r = rig.Rig(store, fake)
+    out = r.tick()
+    assert (out["started"], fake.calls("pack"), fake.calls("run"), rig.state(store, job_id)) == (0, [], [], "running")
+    assert fake.calls("/health")                                             # 띄우기 전에 물었다
+    fake.health_status = 200
+    r.finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+
+
+def test_the_health_is_read_again_after_fifteen_seconds_and_a_drain_spawns_nothing(store, monkeypatch):
+    """리허설 E1b · M3.md 4.7 — /health 캐시는 15초다(종전 30초). 비우기 깃발이 선 뒤 16초에 온 틱은 /health 를 새로 읽고 관문이
+    0(draining)이라 새 세션을 띄우지 않는다 — 엔진에 묶음 · run 이 하나도 가지 않는다(거절된 것도 없다). 깃발이 걷히면 이어 돈다."""
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": list(rig.CARD_EXPERTS)})
+    fake = FakeReviewEngine(rig.packs())
+    r = rig.Rig(store, fake)
+    try:
+        assert r.tick()["started"] == 1                                    # 첫 전문가의 묶음 — 이 틱이 /health 를 읽었다
+        sent = len(fake.calls("pack")) + len(fake.calls("run"))
+        fake.draining = True
+        r.clock.advance(16)                                                # M3.md 4.7 의 15초 — 30초 캐시면 아직 옛 답이다
+        assert r.tick()["started"] == 0
+        assert (len(fake.calls("pack")) + len(fake.calls("run")), fake.drain_refused) == (sent, [])
+        fake.draining = False
+        r.clock.advance(16)
+        r.finish(job_id)
+    finally:
+        r.stop.set()                     # 멈추지 않은 세션(고치기 전 코드 · 변이)이 저장소를 닫는 뒤까지 돌지 않게
+        r.loop.join(10)
+    assert rig.state(store, job_id) == "completed"
+    assert {c["charged"] for c in _cells(store, key) if c["agent_key"] in rig.CARD_EXPERTS} == {0}
+
+
+def test_a_running_session_stops_before_its_next_call_when_the_last_health_says_draining(store, monkeypatch):
+    """리허설 E1b — 루프가 마지막으로 읽은 /health 가 비우기(범위 all)라고 하면 도는 세션의 다음 호출은 보내기 전에 멈춘다. 깃발 앞에
+    받은 호출은 끝까지 가고, 그 뒤로는 엔진에 아무것도 가지 않는다(거절된 것도 없다). 셀은 차감 없이 pending 으로 놓이고 잡은 보류
+    없이 running 이며, 깃발이 걷히면 이어 돈다."""
+    key, job_id, fake, r, gate = _stalled(store, monkeypatch, 3)
+    try:
+        fake.draining = True
+        r.clock.advance(16)
+        assert r.loop.tick()["started"] == 0                              # 루프가 /health 를 다시 읽었다 — 관문 0
+        runs = fake.runs
+        gate.set()
+        rig.wait_for(lambda: not r.loop.workers(job_id))                  # 다음 호출을 보내지 않고 세션이 멈췄다
+        assert (fake.runs, fake.drain_refused) == (runs, [])
+        third = _calls(store, job_id)[2]
+        assert (third["state"], third["outcome_class"]) == ("ok", "ok")
+        assert {(c["state"], c["charged"], c["lease_owner"]) for c in _cells(store, key, SEAL)} <= {
+            ("pending", 0, None), ("reviewed", 0, None)}
+        assert (_head(store, key, SEAL)["state"], _head(store, key, SEAL)["error"], rig.state(store, job_id),
+                rig.job_row(store, job_id)["hold_code"]) == ("planned", None, "running", None)
+        fake.draining = False
+        r.clock.advance(16)
+        r.finish(job_id)
+    finally:
+        r.stop.set()                     # 멈추지 않은 세션(고치기 전 코드 · 변이)이 저장소를 닫는 뒤까지 돌지 않게
+        r.loop.join(10)
+    assert rig.state(store, job_id) == "completed"
+    assert {(c["state"], c["charged"]) for c in _cells(store, key, SEAL)} == {("reviewed", 0)}
+
+
+def test_a_draining_refusal_is_a_wait_never_charged_and_the_session_does_not_send_it_again(store, monkeypatch):
+    """리허설 E1b — 루프가 아직 비우기를 모르는(캐시가 정상) 사이 엔진이 다음 run 을 review_busy{reason: draining} 으로 거절하면(뒤
+    그물) 그 호출은 기다림(wait)으로 적히고 아무것도 세지 않는다(charged · infra_streak 0 · 기다림은 tries 에 들지 않는다). 세션은
+    그 자리에서 다시 내지 않고 멈춘다 — 루프는 그 거절이 알린 retry_after_s(60초) 동안 비우기로 보고 카드 대조 워커를 띄우지 않으며
+    (깃발이 걷혀 /health 가 정상이어도 — 묶음 검토 L7 · D-52, 종전에는 곧바로 다시 띄웠다) 그 뒤 이어 돈다."""
+    key, job_id, fake, r, gate = _stalled(store, monkeypatch, 3)
+    try:
+        fake.draining = True                                              # 루프의 /health 캐시는 아직 정상이다
+        gate.set()
+        rig.wait_for(lambda: not r.loop.workers(job_id))
+        assert [x["route"] for x in fake.drain_refused] == ["run"]        # 하나만 — 그 자리에서 다시 내지 않았다
+        waits = _calls(store, job_id, state="wait")
+        assert [(w["outcome_class"], w["error_code"]) for w in waits] == [("wait", "review_busy")]
+        cells = _cells(store, key, SEAL)
+        assert {(c["charged"], c["infra_streak"]) for c in cells} == {(0, 0)}
+        assert sum(c["tries"] for c in cells) == len([c for c in _calls(store, job_id, state="ok") if c["unit_id"]])
+        assert (r.loop.draining(), _head(store, key, SEAL)["state"], rig.job_row(store, job_id)["hold_code"]) == (
+            True, "planned", None)
+        fake.draining = False
+        r.clock.advance(1)
+        assert r.tick()["started"] == 0                                   # 거절이 알린 60초 안 — /health 가 정상이어도 띄우지 않는다
+        r.clock.advance(59)
+        assert r.tick()["started"] == 1 and len(fake.drain_refused) == 1   # 그 뒤 이어 돈다
+        r.finish(job_id)
+    finally:
+        r.stop.set()                     # 멈추지 않은 세션(고치기 전 코드 · 변이)이 저장소를 닫는 뒤까지 돌지 않게
+        r.loop.join(10)
+    assert rig.state(store, job_id) == "completed"
+    assert {(c["state"], c["charged"]) for c in _cells(store, key, SEAL)} == {("reviewed", 0)}
+
+
+def test_a_pack_refused_for_draining_is_a_wait_never_charged_and_never_sent_again(store, monkeypatch):
+    """리허설 E1b — 묶음(pack)도 같다. 루프의 /health 캐시가 아직 정상인 동안 띄운 묶음 세션의 요청을 엔진이 review_busy{reason:
+    draining}(429)으로 거절하면 묶음 시도 수를 깎지 않고(pack_attempts 0) 그 자리에서 다시 내지 않으며 세션을 멈춘다. 루프는 그 거절이
+    알린 60초 동안 비우기로 보고(L7 · D-52) 머리는 오류 없이 planned 다."""
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": list(rig.CARD_EXPERTS)})
+    fake = FakeReviewEngine(rig.packs())
+    r = rig.Rig(store, fake)
+    try:
+        assert r.tick()["started"] == 1                                    # 첫 전문가의 묶음 — /health 정상을 캐시했다
+        fake.draining = True
+        r.clock.advance(5)                                                 # 캐시는 아직 정상이다
+        assert r.tick()["started"] == 1                                    # 둘째 전문가의 묶음 세션 — 그 요청이 거절된다
+        r.loop.join(30)
+        assert [x["route"] for x in fake.drain_refused] == ["pack"]
+        head = _head(store, key, fake.drain_refused[0]["expert"])
+        assert (head["state"], head["pack_attempts"], head["error"], r.loop.draining()) == ("planned", 0, None, True)
+        assert (rig.state(store, job_id), rig.job_row(store, job_id)["hold_code"]) == ("running", None)
+        fake.draining = False
+        r.clock.advance(1)
+        r.finish(job_id)
+    finally:
+        r.stop.set()                     # 멈추지 않은 세션(고치기 전 코드 · 변이)이 저장소를 닫는 뒤까지 돌지 않게
+        r.loop.join(10)
+    assert rig.state(store, job_id) == "completed" and len(fake.drain_refused) == 1
+
+
+def test_a_pack_session_waiting_on_a_busy_gate_stops_before_sending_again_once_the_drain_begins(store, monkeypatch):
+    """리허설 E1b — 묶음 세션이 관문이 차 review_busy(보통)로 기다리는 사이 루프가 비우기를 읽으면, 기다림이 끝난 뒤 같은 요청을 다시
+    내지 않고 멈춘다 — 엔진에 아무것도 더 가지 않는다(비우기 거절도 0). 깃발이 걷히면 이어 돈다."""
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine(rig.packs())
+    gate = threading.Event()
+    fake.pack_gate = gate
+    fake.pack_errors = {SEAL: [(429, {"code": "review_busy", "message": "팩을 지을 자리가 없다(가짜)", "reason": "normal",
+                                       "retry_after_s": 1, "infra": True, "retryable": True})]}
+    r = rig.Rig(store, fake)
+    try:
+        r.tick(wait=False)
+        rig.wait_for(lambda: len(fake.calls("pack")) == 1)                 # 첫 묶음 요청이 엔진 안에서 붙들렸다
+        fake.draining = True
+        r.clock.advance(16)
+        assert r.loop.tick()["started"] == 0                              # 루프가 /health 를 다시 읽었다 — 비우기
+        gate.set()                                                        # 첫 요청은 자리 없음(보통)으로 끝난다
+        rig.wait_for(lambda: not r.loop.workers(job_id))
+        assert (len(fake.calls("pack")), fake.drain_refused, _head(store, key, SEAL)["pack_attempts"]) == (1, [], 0)
+        fake.draining = False
+        r.clock.advance(16)
+        r.finish(job_id)
+    finally:
+        r.stop.set()                     # 멈추지 않은 세션(고치기 전 코드 · 변이)이 저장소를 닫는 뒤까지 돌지 않게
+        r.loop.join(10)
+    assert rig.state(store, job_id) == "completed"
+
+
+@pytest.mark.parametrize("health", ["unreadable", "no_limit", "draining"])
+def test_a_closed_llm_gate_is_a_loop_wait_the_guide_names_and_it_lifts_when_health_reads_open(store, monkeypatch, health):
+    """M3 묶음 검토 M3 · D-52 — /health 를 읽지 못하거나(503 · 관문 limit 칸이 없다) 비우기면 루프는 카드 대조 워커를 띄우지 않고 그
+    까닭을 루프 기다림(waiting.reason 'health_unknown' · 'draining', source loop, 글)으로 적는다 — 같은 까닭이 이어지는 동안 since 는
+    그대로이고 길잡이(risk_next_step)가 그 글을 싣는다. 종전에는 잡이 running 인 채 아무 말 없이 0 이었다(기다림 없음 · 막힘 없음 ·
+    호출 0). /health 가 다시 열리면 기다림을 지우고 이어 돈다."""
+    from tests import factories
+    from tests.test_review_mcp import _call, _project_with_source
+
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    project_id = _project_with_source(store, key)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    real = fake.health
+    if health == "unreadable":
+        fake.health_status = 503
+    elif health == "no_limit":
+        monkeypatch.setattr(fake, "health", lambda: {**real(), "card_review": {**real()["card_review"], "limit": None}})
+    else:
+        fake.draining = True
+    r = rig.Rig(store, fake)
+    start = r.clock()
+    for _ in range(3):
+        r.tick()
+        r.clock.advance(review_runner.HEALTH_CACHE_S)
+    reason = "draining" if health == "draining" else "health_unknown"
+    waiting = rig.progress(store, job_id)["waiting"] or {}
+    assert (waiting.get("reason"), waiting.get("source"), waiting.get("since")) == (reason, "loop", start)
+    assert (rig.state(store, job_id), fake.calls("pack"), fake.calls("run")) == ("running", [], [])
+    factories.act_as_delegate(monkeypatch, rig.OWNER)
+    notes = _call("risk_next_step", project_id=project_id)["notes"]
+    assert [n for n in notes if n.startswith(f"검토 잡이 기다린다 — {reason}: ")]
+    if health == "unreadable":
+        fake.health_status = 200
+    elif health == "no_limit":
+        monkeypatch.setattr(fake, "health", real)
+    else:
+        fake.draining = False
+    assert r.tick()["started"] == 1
+    assert (rig.progress(store, job_id)["waiting"] or {}).get("reason") != reason
+    r.finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+
+
+def test_runs_refused_for_draining_while_health_reads_normal_are_sent_once_per_refusal_window(store, monkeypatch):
+    """M3 묶음 검토 L7 · D-52 — /health 는 정상인데(호출이 가는 길의 에이전트 서버만 비운다) run 이 review_busy{reason: draining} 으로
+    거절되면 루프는 그 거절이 알린 retry_after_s(60초) 동안 카드 대조 워커를 띄우지 않는다 — 거절은 그 창마다 하나다. 그 사이 진행판은
+    루프 기다림 draining(retry_at = 거절 + 60)이다. 종전에는 틱마다 /health 를 새로 읽어 정상이라 다시 띄워 분에 백 번 거절됐다.
+    아무것도 세지 않고, 비우기가 걷히면 끝까지 돈다."""
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    r = rig.Rig(store, fake)
+    try:
+        r.tick(packs_only=True)                                            # 묶음 — /health 정상을 캐시했다
+        fake.calls_draining = True
+        start = r.clock()
+        for _ in range(60):                                                # 2초 틱으로 120초
+            r.tick()
+            r.clock.advance(2)
+        assert [x["route"] for x in fake.drain_refused] == ["run", "run"]  # start 와 start + 60 에 하나씩
+        waiting = rig.progress(store, job_id)["waiting"] or {}
+        assert (waiting.get("reason"), waiting.get("source"), waiting.get("retry_at")) == ("draining", "loop", start + 120)
+        fake.calls_draining = False
+        r.finish(job_id)
+    finally:
+        r.stop.set()                     # 멈추지 않은 세션(고치기 전 코드 · 변이)이 저장소를 닫는 뒤까지 돌지 않게
+        r.loop.join(10)
+    assert rig.state(store, job_id) == "completed" and len(fake.drain_refused) == 2
+    assert {(c["state"], c["charged"]) for c in _cells(store, key, SEAL)} == {("reviewed", 0)}
 
 
 def test_an_infra_streak_opens_the_breaker_and_a_half_open_resume_finishes_without_charging(store, monkeypatch):
@@ -304,7 +597,7 @@ def _stalled(store, monkeypatch, nth: int) -> tuple[str, str, FakeReviewEngine, 
     gate = threading.Event()
     fake.hold_runs = {nth: gate}
     r = rig.Rig(store, fake)
-    r.tick()
+    r.tick(packs_only=True)               # 묶음만 — 같은 틱에 검토가 집히면 그 틱이 붙들린 run 을 기다린다(C3-11 의 경합)
     r.tick(wait=False)
     rig.wait_for(lambda: fake.runs == nth)
     return key, job_id, fake, r, gate
@@ -408,6 +701,28 @@ def test_a_job_closed_outside_the_loop_refuses_a_new_job_while_its_call_runs_and
     assert review_cells.review_invariants(store, key) == []
 
 
+def test_adopt_released_takes_only_dead_job_cells_inside_the_jobs_own_scope(store, monkeypatch):
+    """반대 검토 3차 MEDIUM 3 · D-47 — 놓인 셀 거두기(adopt_released)의 범위는 머리 run_id 가 아니라 잡이 받은 범위(params.scope —
+    전문가 × unit_ids)이고, 거두는 셀은 죽은 잡에 묶인 것뿐이다. 그 전문가 머리가 이 잡으로 찍혀 있어도 범위 밖 단위의 셀과 한 번도
+    잡히지 않은(run_id 없는) 셀은 그대로 둔다(종전에는 머리 찍기를 범위로 읽어 run_id 없는 셀까지 거뒀다)."""
+    from app import review_runner
+
+    key, first, fake, r, gate = _stalled(store, monkeypatch, 3)
+    rig.wait_for(lambda: any(w.get("last_step") for w in r.loop.progress(first).payload()["workers"]))
+    store.execute("UPDATE rr_jobs SET state = 'cancelled' WHERE id = ?", (first,))
+    inside, outside, never = (c["unit_id"] for c in _cells(store, key, SEAL)[:3])
+    monkeypatch.setattr(review_runner, "_refuse_live_jobs", lambda store, target_key: None)
+    second = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [inside, never]})
+    assert _head(store, key, SEAL)["run_id"] == second                  # 범위로 찍힌 머리 — 그래도 거두기의 범위가 아니다
+    gate.set()
+    r.loop.join(30)
+    store.execute("UPDATE rr_review_cells SET run_id = NULL WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+                  (key, never, SEAL))                                    # 한 번도 잡히지 않은 셀의 꼴
+    assert review_cells.adopt_released(store, second) == 1
+    cells = {c["unit_id"]: (c["state"], c["run_id"]) for c in _cells(store, key, SEAL)}
+    assert (cells[inside], cells[outside], cells[never]) == (("pending", second), ("pending", first), ("pending", None))
+
+
 def test_a_real_purge_while_a_call_runs_refuses_a_new_job_until_the_worker_closes_and_then_its_rows_are_released(
         store, monkeypatch):
     """단계 D 리허설(실제 배선)에서 찾은 것 — 실제 과제 폐기(`routes.purge_project`)는 잡을 루프 밖에서 곧바로 cancelled 로 쓰고 셀·머리의
@@ -441,6 +756,65 @@ def test_a_real_purge_while_a_call_runs_refuses_a_new_job_until_the_worker_close
     head = _head(store, key, SEAL)
     assert (head["state"], head["lease_owner"], head["sweep_json"], head["report_gz"], head["summary_md"]) == (
         "planned", None, None, None, None)
+
+
+def test_release_orphaned_frees_a_head_the_cancelled_job_held_only_through_a_bound_cell(store):
+    """반대 검토 3차 MEDIUM 2 · 3 · D-47 — 다시 연 셀만 그 잡에 묶인 전문가(머리는 앞 잡의 범위로 찍혀 있다)도 그 잡의 몫이다. 루프
+    밖에서 닫힌(cancelled) 그 잡이 쥐었던 고아 머리 · 셀을 놓는다 — 머리 run_id 로만 보면 머리가 running 으로 남아 그 대상의 새 잡이
+    409 review_in_flight 였다."""
+    peer = "xd-syn-1"
+    key = rig.target(store)
+    earlier = rig.job(store, key, scope={"agents": [SEAL]})
+    store.execute("UPDATE rr_jobs SET state = 'completed' WHERE id = ?", (earlier,))
+    current = rig.job(store, key, scope={"agents": [peer]})
+    unit_id = _cells(store, key, SEAL)[0]["unit_id"]
+    store.execute("UPDATE rr_review_cells SET run_id = ?, state = 'running', lease_owner = NULL WHERE target_key = ?"
+                  " AND unit_id = ? AND agent_key = ?", (current, key, unit_id, SEAL))     # 다시 연 셀 — 이 잡에 묶였다
+    store.execute("UPDATE rr_expert_reports SET state = 'running', lease_owner = NULL WHERE target_key = ? AND agent_key = ?",
+                  (key, SEAL))
+    store.execute("UPDATE rr_jobs SET state = 'cancelled' WHERE id = ?", (current,))
+    assert _head(store, key, SEAL)["run_id"] == earlier
+    out = review_cells.release_orphaned(store, key, SEAL, run_id=current)
+    assert (out["experts"], out["cells"]) == (1, 1)
+    assert (_head(store, key, SEAL)["state"], _cells(store, key, SEAL)[0]["state"]) == ("planned", "pending")
+
+
+def test_cancelling_waits_for_a_head_the_job_holds_only_through_a_bound_cell(store):
+    """반대 검토 3차 MEDIUM 2 · 3 · D-47 — 도는 수(in_flight)도 잡의 몫을 묶인 셀로 가린다. 다시 연 셀만 그 잡에 묶인 전문가(머리는 앞
+    잡의 범위로 찍혀 있다)를 그 잡의 워커가 셀 사이(훑기 · 마감)에 쥐고 있으면 취소는 cancelling 으로 기다린다 — 머리 run_id 로만 보면
+    도는 것이 0 이라 곧바로 cancelled 로 닫혀 워커가 쥔 채 잡이 끝났다."""
+    peer = "xd-syn-1"
+    key = rig.target(store)
+    earlier = rig.job(store, key, scope={"agents": [SEAL]})
+    store.execute("UPDATE rr_jobs SET state = 'completed' WHERE id = ?", (earlier,))
+    current = rig.job(store, key, scope={"agents": [peer]})
+    store.execute("UPDATE rr_jobs SET state = 'running' WHERE id = ?", (current,))
+    unit_id = _cells(store, key, SEAL)[0]["unit_id"]
+    store.execute("UPDATE rr_review_cells SET run_id = ?, state = 'pending' WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+                  (current, key, unit_id, SEAL))                          # 다시 연 셀 — 이 잡에 묶였다
+    store.execute("UPDATE rr_expert_reports SET state = 'running', lease_owner = 'worker' WHERE target_key = ? AND agent_key = ?",
+                  (key, SEAL))
+    assert _head(store, key, SEAL)["run_id"] == earlier
+    assert runner.cancel_job(store, current, by=OWNER)["state"] == "cancelling"
+
+
+def test_finalize_takes_only_the_jobs_own_experts(store):
+    """반대 검토 3차 MEDIUM 2 · 3 · D-47 — 마감 선점도 잡의 몫(범위로 찍힌 머리 · 그 잡에 묶인 셀의 전문가)만 집는다. 앞 잡의 셀을
+    기다리는 남의 전문가(planned)가 차례가 앞서도 그 잡은 그 사람을 마감하지 않는다 — 그 잡에 묶인 열린 셀이 없다는 것만 보면 기다리는
+    셀을 둔 채 머리가 닫힌다."""
+    peer = "xd-syn-1"
+    key = rig.target(store)
+    earlier = rig.job(store, key, scope={"agents": [SEAL]})                 # 돌지 않고 끝난 잡 — SEAL 의 셀이 그 잡에 묶여 기다린다
+    store.execute("UPDATE rr_jobs SET state = 'completed' WHERE id = ?", (earlier,))
+    store.execute("UPDATE rr_expert_reports SET pack_status = 'ok' WHERE target_key = ? AND agent_key = ?", (key, SEAL))
+    current = rig.job(store, key, scope={"agents": [peer]})
+    store.execute("UPDATE rr_jobs SET state = 'running' WHERE id = ?", (current,))
+    store.execute("UPDATE rr_review_cells SET state = 'reviewed' WHERE target_key = ? AND agent_key = ?", (key, peer))
+    store.execute("UPDATE rr_expert_reports SET state = 'planned', pack_status = 'ok' WHERE target_key = ? AND agent_key = ?",
+                  (key, peer))                                            # 셀을 다 닫고 마감 전에 멈춘 이 잡의 전문가
+    head = review_cells.claim_next_expert(store, {"id": current}, boot_id="boot-a", purpose="finalize")
+    assert head is not None and head["agent_key"] == peer
+    assert _head(store, key, SEAL)["state"] == "planned"
 
 
 def test_a_job_that_takes_over_an_expert_whose_cells_closed_before_its_finalize_finalizes_it(store, monkeypatch):
@@ -600,6 +974,65 @@ def test_every_expert_failing_the_pack_with_502_holds_the_job_aidh_unreachable(s
     assert rig.job_row(store, job_id)["hold_code"] is None
 
 
+@pytest.mark.parametrize(("cell_state", "pack_status"), [("pending", "todo"), ("reviewed", "ok")])
+def test_the_aidh_hold_counts_an_expert_the_job_holds_only_through_a_bound_cell(store, cell_state, pack_status):
+    """반대 검토 3차 MEDIUM 2 · 3 · D-47 — 다시 연 셀만 그 잡에 묶인 전문가(머리는 앞 잡의 범위로 찍혀 있다)도 그 잡의 몫이다. 그
+    사람이 아직 카드 묶음을 받는 중(todo)이거나 이미 받아 그 셀을 끝냈으면(카드 저장소는 닿는다) 범위로 찍힌 전문가의 묶음이 502 여도
+    잡을 aidh_unreachable 로 멈추지 않는다 — 머리 run_id 로만 보면 묶음을 못 받은 전문가만 남은 것으로 보여 잡이 멈췄다."""
+    peer = "xd-syn-1"
+    key = rig.target(store)
+    earlier = rig.job(store, key, scope={"agents": [SEAL]})
+    store.execute("UPDATE rr_jobs SET state = 'completed' WHERE id = ?", (earlier,))
+    current = rig.job(store, key, scope={"agents": [peer]})
+    store.execute("UPDATE rr_jobs SET state = 'running' WHERE id = ?", (current,))
+    unit_id = _cells(store, key, SEAL)[0]["unit_id"]
+    store.execute("UPDATE rr_review_cells SET run_id = ?, state = ? WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+                  (current, cell_state, key, unit_id, SEAL))              # 다시 연 셀 — 이 잡에 묶였다
+    store.execute("UPDATE rr_expert_reports SET state = 'planned', pack_status = ? WHERE target_key = ? AND agent_key = ?",
+                  (pack_status, key, SEAL))
+    store.execute("UPDATE rr_expert_reports SET pack_status = 'error', pack_error = 'card_list_unstable' WHERE target_key = ?"
+                  " AND agent_key = ?", (key, peer))
+    rig.Rig(store, FakeReviewEngine(rig.packs())).loop.check_aidh(current, key)
+    assert (rig.state(store, current), rig.job_row(store, current)["hold_code"]) == ("running", None)
+
+
+def test_the_pack_phase_counts_an_expert_the_job_holds_only_through_a_bound_cell(store):
+    """반대 검토 3차 MEDIUM 2 · 3 · D-47 — 다시 연 셀만 그 잡에 묶인 전문가가 카드 묶음을 아직 못 받았으면(todo) 그 잡의 단계는 묶음
+    (pack)이다 — 머리 run_id 로만 보면 묶음 받을 사람이 없어 검토(review) 단계로 적혔다."""
+    peer = "xd-syn-1"
+    key = rig.target(store)
+    earlier = rig.job(store, key, scope={"agents": [SEAL]})
+    store.execute("UPDATE rr_jobs SET state = 'completed' WHERE id = ?", (earlier,))
+    current = rig.job(store, key, scope={"agents": [peer]})
+    store.execute("UPDATE rr_jobs SET state = 'running' WHERE id = ?", (current,))
+    unit_id = _cells(store, key, SEAL)[0]["unit_id"]
+    store.execute("UPDATE rr_review_cells SET run_id = ?, state = 'pending' WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+                  (current, key, unit_id, SEAL))                          # 다시 연 셀 — 이 잡에 묶였다
+    store.execute("UPDATE rr_expert_reports SET state = 'planned', pack_status = 'todo' WHERE target_key = ? AND agent_key = ?",
+                  (key, SEAL))
+    store.execute("UPDATE rr_expert_reports SET pack_status = 'ok' WHERE target_key = ? AND agent_key = ?", (key, peer))
+    loop = rig.Rig(store, FakeReviewEngine(rig.packs())).loop
+    job = next(j for j in loop._jobs(("running",)) if j["id"] == current)
+    assert loop._complete_or_phase(job) == "pack"
+
+
+def test_job_order_counts_a_running_expert_the_job_holds_only_through_a_bound_cell(store):
+    """반대 검토 3차 MEDIUM 2 · 3 · D-47 — 잡 고르기 차례(도는 전문가가 적은 잡 먼저 — P-09)도 다시 연 셀만 그 잡에 묶인 전문가를 그
+    잡의 도는 전문가로 센다. 먼저 만든 잡이 그런 전문가 하나를 돌리고 있으면 나중 잡(도는 전문가 0)이 먼저다."""
+    first_key, second_key = rig.target(store), rig.target(store)
+    earlier = rig.job(store, first_key, scope={"agents": ["xd-syn-1"]})
+    store.execute("UPDATE rr_jobs SET state = 'completed' WHERE id = ?", (earlier,))
+    first = rig.job(store, first_key, scope={"agents": [SEAL]})
+    second = rig.job(store, second_key, scope={"agents": [SEAL]})
+    store.execute("UPDATE rr_jobs SET state = 'running' WHERE id IN (?, ?)", (first, second))
+    unit_id = _cells(store, first_key, "xd-syn-1")[0]["unit_id"]
+    store.execute("UPDATE rr_review_cells SET run_id = ?, state = 'running' WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+                  (first, first_key, unit_id, "xd-syn-1"))               # 다시 연 셀 — 앞 잡이 아니라 이 잡에 묶였다
+    store.execute("UPDATE rr_expert_reports SET state = 'running' WHERE target_key = ? AND agent_key = ?", (first_key, "xd-syn-1"))
+    assert _head(store, first_key, "xd-syn-1")["run_id"] == earlier
+    assert [(j["id"], j["running_n"]) for j in review_cells._live_review_jobs(store)] == [(second, 0), (first, 1)]
+
+
 def test_a_zero_card_answer_then_thirty_cards_is_taken_as_thirty(store, monkeypatch):
     """P-08 — 카드 0장 응답 한 번을 '카드 결손 전문가' 로 굳히지 않는다. 다시 받은 30장 묶음이 ok 이고 셀은 그 카드로 돈다."""
     key = rig.target(store)
@@ -626,7 +1059,7 @@ def test_a_frozen_pack_missing_on_this_box_is_fetched_again(store, monkeypatch):
     job_id = rig.job(store, key, scope={"agents": [SEAL]})
     fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
     r = rig.Rig(store, fake)
-    r.tick()                                                # 묶음 받기만
+    r.tick(packs_only=True)                                 # 묶음 받기만
     assert _head(store, key, SEAL)["pack_status"] == "ok" and fake.runs == 0
     # 들여온 박스와 같은 자리 — 머리는 묶음 열쇠를 가리키는데 rr_card_packs 에는 그 행이 없다(행을 지울 뿐 손으로 넣지 않는다).
     store.execute("DELETE FROM rr_card_packs WHERE agent_key = ?", (SEAL,))
@@ -656,7 +1089,7 @@ def test_a_window_outage_that_recovers_leaves_no_stale_waiting_on_a_running_job(
     assert (down["reason"], down["source"]) == ("agent_unreachable", "loop") and fake.calls("pack") == []
     fake.limits_error = None
     r.clock.advance(61)
-    r.tick()                                                # 묶음
+    r.tick(packs_only=True)                                 # 묶음
     r.tick(wait=False)                                      # 세션 — 둘째 run 에서 선다
     rig.wait_for(lambda: fake.runs == 2)
     board = rig.progress(store, job_id)
@@ -733,7 +1166,50 @@ def test_a_window_too_small_for_any_call_holds_ctx_too_small_before_any_call(sto
     r.tick()
     row = rig.job_row(store, job_id)
     assert (row["state"], row["hold_code"]) == ("paused", "ctx_too_small")
-    assert "11,246" in row["error"] and fake.runs == 0 and fake.calls("pack") == []
+    need = fre.load("limits_ctx_too_small.json")["ctx_too_small"]["need_ctx_tokens"]      # 계약 예제가 정한 필요 창
+    assert f"{need:,}" in row["error"] and fake.runs == 0 and fake.calls("pack") == []
+
+
+@pytest.mark.parametrize(("by_kind", "words"), [
+    ({"sweep": "output_cap", "verdict": "output_cap", "offcard": "output_cap", "noinput": "output_cap"},
+     ("sweep·verdict·offcard·noinput 까닭 output_cap", "CARD_REVIEW_MAX_TOKENS(없으면 DELIB_MAX_TOKENS)를 5,200 토큰 이상으로 올린")),
+    ({"sweep": "output_too_large", "verdict": "output_too_large", "offcard": "output_too_large", "noinput": "output_too_large"},
+     ("까닭 output_too_large", "출력 상한이 창보다 크다", "줄인 뒤 재개한다")),
+    ({"sweep": "window", "verdict": "output_cap", "offcard": "output_cap", "noinput": "output_cap"},
+     ("sweep 까닭 window", "verdict·offcard·noinput 까닭 output_cap", "창이 12,700 토큰 이상인 LLM", "5,200 토큰 이상으로")),
+])
+def test_a_ctx_too_small_hold_names_its_reason_and_the_knob_to_fix(store, monkeypatch, by_kind, words):
+    """엔진의 ctx_too_small 까닭(RB3-14 — 셀 종류마다 reason_by_kind)마다 보류 글이 고칠 손잡이를 말한다 — 출력 상한이 행 한 줄도
+    못 내면 출력 상한을 필요한 값 이상으로 올리고(창을 키워도 소용없다), 출력 상한이 창보다 크면 줄인다. 창이 모자라면(window)
+    필요한 창과 창 손잡이다. 까닭이 같은 종류는 한 문장으로 묶인다."""
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    limits = fre.load("limits_ctx_too_small.json")
+    limits["ctx_too_small"] = {"reason": "window", "reason_by_kind": by_kind, "need_ctx_tokens": 12700,
+                               "need_max_tokens": 5200, "message": "엔진의 말(가짜)"}
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")}, limits=limits)
+    rig.Rig(store, fake).tick()
+    row = rig.job_row(store, job_id)
+    assert (row["state"], row["hold_code"]) == ("paused", "ctx_too_small")
+    assert all(w in row["error"] for w in words), row["error"]
+    assert "엔진의 말(가짜)" in row["error"] and fake.runs == 0
+
+
+def test_a_box_that_cannot_run_only_the_summary_keeps_reviewing_cells(store, monkeypatch):
+    """ctx_too_small 은 셀이 부르는 종류(cell_kinds)만 본다 — 요약(summary)만 못 도는 박스는 셀 일을 멈추지 않는다(M3.md 4.3). 셀 종류
+    하나라도 못 돌면 지금처럼 멈춘다."""
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    limits = fre.load("limits_1m.json")
+    limits["runnable"] = {**limits["runnable"], "summary": False}
+    rig.Rig(store, FakeReviewEngine({SEAL: fre.load("pack_ok.json")}, limits=limits)).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    other = rig.target(store, seed=5)
+    held = rig.job(store, other, scope={"agents": [SEAL]})
+    limits["runnable"] = {**limits["runnable"], "noinput": False}
+    r = rig.Rig(store, FakeReviewEngine({SEAL: fre.load("pack_ok.json")}, limits=limits))
+    r.tick()
+    assert (rig.job_row(store, held)["state"], rig.job_row(store, held)["hold_code"]) == ("paused", "ctx_too_small")
 
 
 def test_a_pair_over_unit_runs_that_decks_cards_solo(store, monkeypatch):
@@ -797,7 +1273,7 @@ def test_a_portal_rejecting_the_users_pat_holds_credential_and_the_service_pat_i
     job_id = rig.job(store, key, scope={"agents": [SEAL]})
     fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
     r = rig.Rig(store, fake)
-    r.tick()                                                # 묶음은 받았다
+    r.tick(packs_only=True)                                 # 묶음은 받았다
     fake.credential_expired = True
     r.run(lambda: rig.state(store, job_id) == "paused", ticks=5)
     row = rig.job_row(store, job_id)
@@ -828,7 +1304,7 @@ def test_a_credential_failure_that_would_fill_the_breaker_window_still_holds_cre
     gate = threading.Event()
     fake.hold_runs = {9: gate}
     r = rig.Rig(store, fake)
-    r.tick()
+    r.tick(packs_only=True)
     r.tick()
     r.tick(wait=False)
     rig.wait_for(lambda: fake.runs == 9)
@@ -1033,6 +1509,53 @@ def test_a_byte_identical_reask_goes_to_the_engine_not_the_request_cache(store, 
     assert row is not None
 
 
+def _settled_once(store) -> tuple[str, str, FakeReviewEngine, rig.Rig, list[tuple]]:
+    """SEAL 이 단위 하나를 끝까지 돈 원장 — (대상, 단위, 가짜 엔진, 시험대, 그 셀의 엔진 호출[(kind, variant)])."""
+    key = rig.target(store)
+    unit_id = _unit_ids(store, key)[0]
+    fake = FakeReviewEngine(rig.packs())
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [unit_id]}))
+    return key, unit_id, fake, r, [(b["kind"], b.get("variant")) for b in _runs(fake) if b.get("unit")]
+
+
+def _back_to_pending(store, key: str, unit_id: str, **sets: object) -> None:
+    """정산된 셀을 정산 전에 멈춘 셀처럼 둔다(판정 행 · 시도 표지는 그대로, 머리는 다시 집힌다)."""
+    extra = "".join(f", {k} = ?" for k in sets)
+    store.execute(f"UPDATE rr_review_cells SET state = 'pending', finished_at = NULL, lease_owner = NULL{extra}"
+                  " WHERE target_key = ? AND unit_id = ? AND agent_key = ?", (*sets.values(), key, unit_id, SEAL))
+    store.execute("UPDATE rr_expert_reports SET state = 'planned' WHERE target_key = ? AND agent_key = ?", (key, SEAL))
+
+
+def test_an_m2_cell_once_reopened_by_an_input_change_keeps_its_request_keys_on_resume(store):
+    """반대 검토 LOW 18(사용자 결정) — 요청 열쇠의 다시 연 횟수(|r…)는 사람의 다시(human_retry)에만 붙는다. 입력 바뀜으로 한 번 다시
+    열린 적이 있는(reopened_n 1) M2 원장의 셀이 호출을 다 받고 정산 전에 멈췄다가 이어 돌면, 그 시도에서 받은 답을 그대로 다시
+    쓴다(M2 는 열쇠에 그 수를 넣지 않았다 — 종전에는 열쇠가 바뀌어 같은 답을 엔진에 다시 물었다). 사람의 다시는
+    test_a_retried_cell_never_replays_the_answers_of_its_first_run 이 본다."""
+    key, unit_id, fake, r, _calls = _settled_once(store)
+    runs = len(_runs(fake))
+    _back_to_pending(store, key, unit_id, reopened_n=1)
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [unit_id]})
+    r.finish(job_id)
+    cell = next(c for c in _cells(store, key, SEAL) if c["unit_id"] == unit_id)
+    assert (rig.state(store, job_id), cell["state"], cell["reopened_n"]) == ("completed", "reviewed", 1)
+    assert cell["route_forced"] != review_cells.HUMAN_RETRY
+    assert len(_runs(fake)) == runs                                    # 같은 시도의 받은 답 — 엔진을 다시 부르지 않았다
+
+
+def test_a_cell_whose_input_comes_back_never_replays_answers_from_before_its_reset(store):
+    """반대 검토 LOW 18 의 짝 — 입력이 A → B → A 로 돌아온 셀(B 로 시작했다가 멈춘 셀이 A 로 다시 시작 — start_cell 이 판정 행을
+    지우고 처음부터)은 A 로 앞서 받은 답이 같은 열쇠여도 다시 쓰지 않는다. 다시 쓰면 그 답의 판정 행은 적히지 않아(다시 쓴 답은 적지
+    않는다) 빠진 카드 재질의 · 단독 재질의 · 차감으로 번진다. 엔진은 그 셀의 호출을 한 번씩만 새로 받고 셀은 차감 없이 끝난다."""
+    key, unit_id, fake, r, calls = _settled_once(store)
+    runs = len(_runs(fake))
+    _back_to_pending(store, key, unit_id, input_hash="input-b")
+    r.finish(rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [unit_id]}))
+    cell = next(c for c in _cells(store, key, SEAL) if c["unit_id"] == unit_id)
+    assert (cell["state"], cell["reopened_n"], cell["charged"]) == ("reviewed", 1, 0)
+    assert [(b["kind"], b.get("variant")) for b in _runs(fake)[runs:]] == calls
+
+
 def test_a_defect_in_a_session_releases_the_expert_with_a_pause_instead_of_stranding_it(store, monkeypatch):
     """세션 코드의 결함(예기치 않은 예외)이 루프를 죽이거나 전문가를 running 으로 붙들지 않는다 — 놓고 잠시(INTERNAL_BACKOFF_S) 쉰
     뒤 다시 집힌다."""
@@ -1042,7 +1565,7 @@ def test_a_defect_in_a_session_releases_the_expert_with_a_pause_instead_of_stran
     job_id = rig.job(store, key, scope={"agents": [SEAL]})
     fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
     r = rig.Rig(store, fake)
-    r.tick()                                                # 묶음
+    r.tick(packs_only=True)                                 # 묶음
     real = review_runner._Session.run
     monkeypatch.setattr(review_runner._Session, "run", lambda self: (_ for _ in ()).throw(RuntimeError("결함")))
     r.tick()
@@ -1171,9 +1694,10 @@ def test_a_revision_change_mid_job_replans_and_carries_on_and_a_real_mismatch_ho
 
     key, job_id, fake, r, gate = _stalled(store, monkeypatch, 3)
     if change == "prompt":
-        fake.base_limits["prompt_rev"]["verdict"] = "cr-verdict-2"
+        fake.base_limits["prompt_rev"]["verdict"] = "cr-verdict-next"          # 지금 판(계약 예제)과 다른 판
     elif change == "limits":
-        fake.limits_rev = "limits-rev-2"
+        fake.limits_rev = "limits-rev-2"                                       # 판정 손잡이가 바뀌었다 — 전체 판과 verdict 판
+        fake.base_limits["limits_rev_by_kind"]["verdict"] = "verdict-rev-2"
     else:
         fake.error_n = 1
         fake.error = {"code": "rev_mismatch", "message": "판이 다르다(가짜)", "infra": False, "retryable": False}
@@ -1190,7 +1714,92 @@ def test_a_revision_change_mid_job_replans_and_carries_on_and_a_real_mismatch_ho
     assert len(fake.calls("plan")) == 2
     assert {(c["state"], c["reopened_n"]) for c in _cells(store, key, SEAL)} == {("reviewed", 1)}
     head = _head(store, key, SEAL)
-    assert (head["prompt_rev"], head["limits_rev"]) == (review_runner.prompt_key(fake.limits()), fake.limits_rev)
+    assert (head["prompt_rev"], head["limits_rev"]) == (review_runner.prompt_key(fake.limits(), review_runner.CARD_KINDS),
+                                                        review_runner.limits_key(fake.limits(), review_runner.CARD_KINDS))
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_a_summary_only_move_replans_without_restarting_any_cell(store, monkeypatch, restart):
+    """#37 · RB3-6 — 엔진이 요약 손잡이·요약 판만 올리면(전역 limits_rev 와 종류별 summary 판 · summary prompt_rev 가 바뀌고 카드
+    전문가가 부르는 종류의 판은 그대로) 도는 잡은 아무 일 없이 이어 돈다 — run 의 expect 가 그 종류의 판이라 rev_mismatch 가 없고,
+    그 판 올림과 함께 앱이 재기동해 새 세션이 limits 를 다시 받아도 셀 지문·계획·훑기 열쇠가 그 셀이 부르는 종류의 판만 잇기 때문에
+    어느 셀도 처음부터 돌지 않으며(reopened_n 0 · 입력 지문 그대로) 계획과 훑기를 다시 받지 않는다. 재기동 없이 도는 세션은 지난
+    limits 그대로 다음 호출을 내는데, 그 기대 판이 종류별이라 엔진이 받아 준다."""
+    from app import review_runner
+
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    fake.base_limits["limits_rev_by_kind"] = {k: f"{k}-rev-1" for k in fake.base_limits["kinds"]}
+    gate = threading.Event()
+    fake.hold_runs = {3: gate}
+    r = rig.Rig(store, fake)
+    r.tick(packs_only=True)
+    r.tick(wait=False)
+    rig.wait_for(lambda: fake.runs == 3)
+    hashes = {c["unit_id"]: c["input_hash"] for c in _cells(store, key, SEAL)}
+    assert None not in hashes.values()
+    fake.limits_rev = "limits-rev-2"
+    fake.base_limits["limits_rev_by_kind"]["summary"] = "summary-rev-2"
+    fake.base_limits["prompt_rev"]["summary"] = "cr-summary-9"
+    if restart:
+        review_cells.recover_running(store)                                 # 판 올림과 함께 앱도 다시 떴다
+        second = rig.Rig(store, fake, clock=r.clock, boot_id="boot-b")
+        second.finish(job_id)
+        gate.set()
+        r.loop.join(30)
+    else:
+        gate.set()
+        r.loop.join(30)
+        r.finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    assert _calls(store, job_id, error_code="rev_mismatch") == []
+    assert {(c["state"], c["reopened_n"]) for c in _cells(store, key, SEAL)} == {("reviewed", 0)}
+    assert {c["unit_id"]: c["input_hash"] for c in _cells(store, key, SEAL)} == hashes
+    assert len(fake.calls("plan")) == 1
+    assert [b["kind"] for b in _runs(fake)].count("sweep") == len(json.loads(_head(store, key, SEAL)["plan_json"])["plan"]
+                                                                   ["manifest_pages"])
+    head = _head(store, key, SEAL)
+    assert head["limits_rev"] == review_runner.limits_key(fake.limits(), review_runner.CARD_KINDS)
+    assert head["limits_rev"] == "offcard=offcard-rev-1,sweep=sweep-rev-1,verdict=verdict-rev-1"
+    assert head["prompt_rev"] == review_runner.prompt_key(fake.limits(), review_runner.CARD_KINDS)
+
+
+def test_an_engine_without_per_kind_revs_is_asked_with_the_global_rev(store, monkeypatch):
+    """종류별 판(limits_rev_by_kind)을 내지 않는 엔진(M2)에는 run 의 expect 가 전역 limits_rev 이고 머리·셀의 판 열쇠도 전역 판
+    그대로다(M2 원장과 같은 값)."""
+    from app import review_runner
+
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    unit_id = _unit_ids(store, key)[0]
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [unit_id]})
+    fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
+    fake.base_limits.pop("limits_rev_by_kind")
+    rig.Rig(store, fake).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    fwd = next(b for b in _runs(fake) if b["kind"] == "verdict")
+    assert fwd["expect"] == {"prompt_rev": fake.base_limits["prompt_rev"]["verdict"], "limits_rev": fake.limits_rev}
+    assert _head(store, key, SEAL)["limits_rev"] == fake.limits_rev
+    assert review_runner.limits_key(fake.limits(), review_runner.CARD_KINDS) == fake.limits_rev
+
+
+def test_the_cell_keys_take_only_the_kinds_the_cell_calls_and_fall_back_to_the_global_rev():
+    """prompt_key·limits_key — 종류를 주면 그 종류만 잇는다. sweep·verdict·offcard 셋뿐인 엔진(M2)에서 카드 전문가의 prompt_key 는
+    종전(종류 전부)과 같고, 종류별 창 판이 없으면 전역 limits_rev 그대로다(M2 원장의 지문이 바뀌지 않는다). 표에 빠진 종류는 전역
+    판으로 메운다."""
+    from app import review_runner as rr
+
+    m2 = {"prompt_rev": {"sweep": "cr-sweep-1", "verdict": "cr-verdict-1", "offcard": "cr-offcard-1"}, "limits_rev": "g1"}
+    assert rr.prompt_key(m2, rr.CARD_KINDS) == rr.prompt_key(m2) == "offcard=cr-offcard-1,sweep=cr-sweep-1,verdict=cr-verdict-1"
+    assert rr.limits_key(m2, rr.CARD_KINDS) == rr.limits_key(m2) == "g1"
+    m3 = {"prompt_rev": {**m2["prompt_rev"], "noinput": "cr-noinput-1", "summary": "cr-summary-1"}, "limits_rev": "g2",
+          "limits_rev_by_kind": {"sweep": "s", "verdict": "v", "offcard": "o", "summary": "m"}}
+    assert rr.prompt_key(m3, rr.GAP_KINDS) == "noinput=cr-noinput-1,sweep=cr-sweep-1"
+    assert rr.limits_key(m3, rr.CARD_KINDS) == "offcard=o,sweep=s,verdict=v"
+    assert rr.limits_key(m3, rr.GAP_KINDS) == "noinput=g2,sweep=s"
+    assert rr.limits_key(m3) == "g2"
 
 
 # ---------------------------------------------------------------- 반대 검토 R3A-5 — 나갈 기준을 지키는 갈래가 변이를 견디지 않게
@@ -1334,3 +1943,42 @@ def test_a_late_progress_write_does_not_overwrite_a_finished_jobs_board(store, m
     late.worker("late-worker", agent_key=SEAL, purpose="review", started_at=r.clock())
     late.set(phase="review", count=True)
     assert rig.job_row(store, job_id)["progress_json"] == board
+
+
+def test_the_quality_board_is_recomputed_no_sooner_than_thirty_times_its_last_cost(store, monkeypatch):
+    """C3-11 — 진행판의 품질 칸(QUALITY_HOOK)은 max(60, 30 × 지난 계산 초) 마다만 다시 계산한다(359명 원장에서 계산이 길어지면 원장
+    락을 쥐는 몫이 저절로 줄어든다). 원장 셈 자체는 60초 간격 그대로이고, 끝난 잡의 진행판은 간격과 무관하게 다시 계산한다."""
+    import types
+
+    from app import review_runner
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    mono = [0.0]
+    cost = [4.0]
+    calls: list[int] = []
+
+    def hook(_store, _key, _job):
+        calls.append(clock())
+        mono[0] += cost[0]
+        return {"n": len(calls)}
+
+    monkeypatch.setattr(review_runner, "QUALITY_HOOK", hook)
+    monkeypatch.setattr(review_runner, "time", types.SimpleNamespace(monotonic=lambda: mono[0]))
+    clock = rig.Clock(1000)
+    progress = review_runner.JobProgress(store, job_id, clock=clock)
+    progress.refresh(force=True)
+    assert calls == [1000] and progress.quality_interval() == 120           # 4초 계산 → 120초 간격
+    clock.advance(61)
+    progress.refresh()
+    assert calls == [1000] and progress._counted_at == 1061                 # 원장 셈은 60초 간격 그대로
+    clock.advance(58)
+    progress.set(phase="review", count=True)                                # 강제 셈도 품질 간격은 지킨다
+    assert calls == [1000]
+    cost[0] = 0.5
+    clock.advance(1)
+    progress.refresh(force=True)
+    assert calls == [1000, 1120] and progress.quality_interval() == 60      # 빨라지면 바닥 60초로 돌아온다
+    clock.advance(5)
+    board = json.loads(progress.finish("completed"))
+    assert calls == [1000, 1120, 1125] and board["quality"] == {"n": 3}     # 끝난 잡은 간격과 무관

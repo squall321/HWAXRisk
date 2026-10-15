@@ -339,6 +339,14 @@ class PortalPanelEngine:
             raise EngineError("agent-server /health 응답이 객체가 아닙니다.")
         return info
 
+    def drain_state(self) -> dict:
+        """에이전트 서버 비우기(M3.md 4.7) — `/health` 의 `drain{on, scope, until, …}` 와 `draining`. 러너는 `on` 이면 범위와
+        상관없이 패널을 집지 않는다(#50). 그 칸이 없는 옛 서버면 `on: false` 다. 불통이면 예외(러너가 비우지 않는 것으로 본다)."""
+        info = self._health_info()
+        drain = info.get("drain") if isinstance(info.get("drain"), Mapping) else {}
+        return {"on": bool(drain.get("on") or info.get("draining")), "scope": drain.get("scope"),
+                "until": drain.get("until"), "reason": drain.get("reason")}
+
     @staticmethod
     def _health_view(info: Mapping[str, Any]) -> dict:
         """/health 본문 → 패널 model_json 의 칸."""
@@ -368,8 +376,12 @@ class PortalPanelEngine:
     def run(self, delib_opts: Mapping[str, Any], *, owner_sub: str | None = None,
             on_progress: Callable[[Mapping[str, Any]], None] | None = None,
             conversation: tuple[str, str] | None = None,
-            should_stop: Callable[[], str | None] | None = None) -> dict:
+            should_stop: Callable[[], str | None] | None = None,
+            on_conversation: Callable[[str], None] | None = None) -> dict:
         """패널 1건을 돌리고 {decision_text, turns, conv_id, events, …} 를 돌려준다.
+
+        포털 대화가 생기면(다시 쓰는 대화도) 스트림을 열기 전에 `on_conversation(conv_id)` 로 러너에 넘긴다 — 러너가 곧바로
+        패널에 적어, 스트림 도중에 앱이 죽어도 그 심의의 대화를 잃지 않는다(D48).
 
         429(포털 agent_semaphore 초과)는 `EngineBusy` 라 러너가 대기 후 다시 묻는다 — 그때 러너는 그 예외의
         `conversation`(대화 id, 만든 자격)을 되돌려 주고, 같은 자격이면 그 대화를 다시 쓴다. 연결 실패·error 프레임은
@@ -388,6 +400,8 @@ class PortalPanelEngine:
             conv_id: str | None = conversation[0]
         else:
             conv_id = self.create_conversation(credential["pat"], f"[리스크심사] {question[:160]}")
+        if conv_id and on_conversation is not None:
+            on_conversation(conv_id)
 
         # 줄 사이 침묵 한도. 종전에는 '엔진 호출당 타임아웃 1800 + 60' 으로 유도했다 — LLM 시도 한 번만 가정한 값이라
         # 엔진이 SDK 재시도를 하거나 박스의 호출 한도를 올리면 건강한 패널을 끊었다. 이제는 죽은 스트림만 잡는
@@ -486,18 +500,25 @@ def _flag(value: Any) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
+class ReviewDraining(EngineBusy):
+    """엔진이 비우기(update-all, 범위 all)라며 거절했다 — `review_busy{reason: "draining"}`(M3.md 4.7). 기다림 부류(아무것도 세지
+    않는다)이고, 검토 러너는 그 자리에서 다시 내지 않고 세션을 멈춘다(리허설 E1b — 비우기 동안 같은 호출을 거듭 내지 않게)."""
+
+
 def _review_error(code: str | None, message: str, data: Mapping[str, Any], *, status: int | None = None,
                   retry_after: Any = None) -> Exception:
     """거절 하나(스트림 전 응답 또는 error 프레임) → 예외. 이름은 `review_ops.classify` 가 정한다(코드가 없으면 상태로).
 
-    기다림 부류는 `EngineBusy`(retry_after_s 는 classify 가 묶은 값), `credential` 보류는 `PatUnavailable`(서비스 계정으로 내려가지
-    않는다), 나머지는 `EngineRejected` 다 — 받은 코드 원문·엔진의 infra·retryable 비트·knob·본문을 그대로 싣는다.
+    기다림 부류는 `EngineBusy`(retry_after_s 는 classify 가 묶은 값 — 비우기 거절 `reason: draining` 은 그 갈래 `ReviewDraining`),
+    `credential` 보류는 `PatUnavailable`(서비스 계정으로 내려가지 않는다), 나머지는 `EngineRejected` 다 — 받은 코드 원문·엔진의
+    infra·retryable 비트·knob·본문을 그대로 싣는다.
     """
     wait = data.get("retry_after_s", retry_after)
     outcome = review_ops.classify(code, http_status=status, retry_after_s=wait)
     text = message or (f"HTTP {status}" if status is not None else "")
     if outcome.klass == review_ops.WAIT:
-        return EngineBusy(f"{outcome.code}: {text}", retry_after_s=outcome.retry_after_s, code=outcome.code)
+        busy = ReviewDraining if data.get("reason") == "draining" else EngineBusy
+        return busy(f"{outcome.code}: {text}", retry_after_s=outcome.retry_after_s, code=outcome.code)
     if outcome.hold_code == "credential":
         return PatUnavailable(f"{outcome.code}: {text}", code=outcome.code)
     detail = {**dict(data), **({"http_status": status} if status is not None else {})}
@@ -735,14 +756,19 @@ def review_mechanisms() -> list[dict]:
 def run_body(kind: str, *, target_key: str, pack: cardpack.FrozenPack, cards: Sequence[str] = (),
              variant: str | None = None, digest: Sequence[str] = (), unit: Mapping[str, Any] | None = None,
              manifest: Sequence[Mapping[str, Any]] = (), known: Sequence[Mapping[str, Any]] = (),
-             expect: Mapping[str, Any] | None = None, cfg: Any = None) -> dict:
+             expect: Mapping[str, Any] | None = None, cfg: Any = None,
+             missing: Sequence[Mapping[str, Any]] = (), search: Sequence[str] = ()) -> dict:
     """카드 대조 run 요청 하나(M2.md 4.3). 신원 칸 넷은 싣지 않는다(포털이 덮어쓴다).
 
     - `pack` — 얼린 팩. `expert` 는 그 팩의 {agent_key, name, domain, role}, `cards` 는 별칭 순서대로 팩 항목 그대로
       (`cardpack.cards_for` — rev 도 뒤집지 않는다, 엔진이 뒤집는다), `digest` 는 별칭의 {alias, type, title, record_id, card_id}.
     - `unit` 은 `units.review_payload` 의 출력, `manifest` 는 `units.manifest_items` 의 한 쪽이다 — 둘 다 그대로 싣는다.
     - `known` 은 이미 낸 판정 행에서 {alias, judgement, why} 만(엔진 KnownItem), `extra.domains`·`mechanisms` 는 위 둘이다.
-    - `expect` 는 준 것만 싣는다(엔진은 실린 판만 견준다).
+    - `expect` 는 준 것만 싣는다(엔진은 실린 판만 견준다 — run 은 그 종류의 판 `limits_rev_kind`, RB3-6).
+    - `missing` 은 입력 결손 전문가의 훑기에만 싣는 전문가 단위 결측 `extra.missing[{kind, note}]`(cr-sweep-2 — 결측 입력이 와도
+      무관한 단위만 no, 가릴 수 없으면 maybe. 재설계 M3 C3-3). 비면 칸을 싣지 않는다 — 엔진은 sweep 밖의 그 칸을 422 로 거절한다.
+    - `search` 는 카드 0장 전문가의 카드 밖 호출에만 싣는 긴 문서 검색어 `extra.search{queries[1~3]}`(cr-offcard-2 — 엔진이 LLM 전에
+      agent_search 로 찾아 D 별칭 발췌로 싣는다, M3.md 4.4.4). 비면 칸을 싣지 않는다.
     """
     body: dict[str, Any] = {
         "kind": kind, "variant": variant, "target_key": target_key,
@@ -758,8 +784,12 @@ def run_body(kind: str, *, target_key: str, pack: cardpack.FrozenPack, cards: Se
                   "known": [{"alias": str(row.get("alias") or ""), "judgement": _text(row.get("judgement")),
                              "why": _text(row.get("why"))} for row in known]},
     }
+    if missing:
+        body["extra"]["missing"] = [{"kind": _text(m.get("kind")), "note": _text(m.get("note"))} for m in missing]
+    if search:
+        body["extra"]["search"] = {"queries": [_text(q) for q in search]}
     if expect:
-        body["expect"] = {k: expect[k] for k in ("prompt_rev", "limits_rev") if expect.get(k) is not None}
+        body["expect"] = {k: expect[k] for k in ("prompt_rev", "limits_rev", "limits_rev_kind") if expect.get(k) is not None}
     return body
 
 

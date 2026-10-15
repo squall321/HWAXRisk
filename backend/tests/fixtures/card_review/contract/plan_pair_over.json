@@ -1,5 +1,12 @@
 {
- "limits_rev": "16e64903",
+ "limits_rev": "f2a1731a",
+ "limits_rev_by_kind": {
+  "sweep": "3a6be0e6",
+  "verdict": "13ed27fc",
+  "offcard": "58c36f4b",
+  "noinput": "48a6e6cd",
+  "summary": "58b9da14"
+ },
  "verdict_decks": [
   {
    "deck_id": "v-488278fa",
@@ -7,7 +14,7 @@
     "K01",
     "K02"
    ],
-   "chars": 12638,
+   "chars": 11728,
    "soft_over": false
   }
  ],
@@ -18,7 +25,7 @@
     "K01",
     "K02"
    ],
-   "chars": 12638,
+   "chars": 11728,
    "soft_over": false
   }
  ],
@@ -44,7 +51,7 @@
   {
    "deck_id": "v-488278fa",
    "unit_id": "u-big",
-   "need": 117193,
+   "need": 118003,
    "have": 112367
   }
  ]

@@ -38,9 +38,14 @@ CAPS = {"risk_unit_target_lines": 60, "risk_unit_max_lines": 120, "risk_units_sm
 
 
 def configure(monkeypatch, store, tmp_path, **overrides: Any) -> None:
-    """설정(데이터 디렉터리·새 흐름 스위치·단위 크기·검토 손잡이)과 라우트 저장소. secrets.env 에는 서비스 PAT 를 둔다."""
+    """설정(데이터 디렉터리·새 흐름 스위치·단위 크기·검토 손잡이)과 라우트 저장소. secrets.env 에는 서비스 PAT 를 둔다.
+
+    이중 판정은 M2 동작(`all` — 묶음 전체 rev)이 기본이다 — 호출 차례·수를 세는 M2 시험이 그 위에 서 있다. 걸린 것만 이중
+    판정(운영 기본 `flagged`, 재설계 M3 C3-9)은 그것을 보는 시험이 `risk_review_dual='flagged'` 로 켠다. 근거 꾸러미 실호출(B 층,
+    운영 기본 켬 — C3-12)도 M2 처럼 끈다(전 단위 none · 호출 0) — 그것을 보는 시험이 `risk_evidence_live=True` 와 가짜 게이트웨이로 켠다."""
     monkeypatch.setattr(routes, "get_store", lambda: store)
-    values = {"data_dir": tmp_path, "risk_review_enabled": True, "risk_review_concurrency": 4, **CAPS, **overrides}
+    values = {"data_dir": tmp_path, "risk_review_enabled": True, "risk_review_concurrency": 4, "risk_review_dual": "all",
+              "risk_evidence_live": False, **CAPS, **overrides}
     monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, **values))
     secrets = tmp_path / "secrets.env"
     secrets.write_text(f"HWAXRISK_PORTAL_PAT={SERVICE_PAT}\n", encoding="utf-8")
@@ -123,8 +128,16 @@ class Rig:
         self.loop = review_runner.ReviewLoop(store, config.settings, self.engine, stop=self.stop, clock=self.clock,
                                              pause=lambda seconds: self.stop.wait(0.001), boot_id=boot_id, poll_s=0)
 
-    def tick(self, *, wait: bool = True) -> dict:
-        out = self.loop.tick()
+    def tick(self, *, wait: bool = True, packs_only: bool = False) -> dict:
+        """틱 한 번 — `wait` 면 워커가 끝날 때까지 기다린다. `packs_only` 면 그 틱은 카드 묶음만 집는다 — 전문가 단위 단계(재설계 M3
+        C3-11)라 빨리 끝난 묶음의 전문가가 같은 틱에 검토로 집히는 경합을, '첫 틱은 묶음 · 다음 틱은 세션' 에 기대는 시험이 고정한다."""
+        saved = review_runner.SPAWN_PURPOSES
+        if packs_only:
+            review_runner.SPAWN_PURPOSES = ("pack",)
+        try:
+            out = self.loop.tick()
+        finally:
+            review_runner.SPAWN_PURPOSES = saved
         if wait:
             self.loop.join(60)
         return out

@@ -107,6 +107,68 @@ class FieldSource:
                           " WHERE call_id = ? AND ok = 0", (row[11], row[12], error, row[0]))
 
 
+class LiveSource(FieldSource):
+    """근거 꾸러미 B 층(재설계 M3 C3-12)의 얇은 감싸개 — W2-03 (d).
+
+    - 재사용 열쇠(`args_hash` · 호출 id)에 자격 종류를 넣는다 — 다른 자격으로 받은 원문을 이 자격의 근거로 다시 쓰지 않는다. E10 의
+      열쇠(인자만)와 갈리므로 브리프 캐시와 섞이지 않는다.
+    - 성공 응답이라도 결과에 `error` 키가 있으면(재료를 못 찾은 compare_materials 따위) 실패(ok=0, error `error_body`)로 적어 재사용하지
+      않는다 — 오류 본문이 그 대상에서 영구히 '성공' 으로 굳지 않게.
+    - 같은 대상 안에서 받은 원문은 나이와 상관없이 다시 쓴다(단위마다 한 번 얼리므로 창이 따로 없다).
+    - 결과를 None 하나로 접지 않고 {ok, result, error, status, call_id, cached} 로 돌려 B 층이 내용 탓 · 인프라 탓 · 자격을 가른다.
+    """
+
+    def __init__(self, mcp: Any, *, credential_kind: str, timeout: float | None = None,
+                 tool_names: Sequence[str] = ()) -> None:
+        super().__init__(mcp, timeout=timeout, reuse_s=10 ** 10, tool_names=tool_names)
+        self.credential = credential_kind
+
+    def key(self, args: Mapping[str, Any]) -> str:
+        return sha256_hex(canonical_json({"args": dict(args), "credential": self.credential}))
+
+    def _record(self, store, target_key: str, *args: Any, **kwargs: Any) -> None:
+        # 과제 폐기와 엇갈린 늦은 답은 적지 않는다(반대 검토 MEDIUM 14) — 폐기가 비운 원문을 다시 채우지 않게. 확인과 쓰기가 한
+        # 트랜잭션이라 폐기의 트랜잭션과 엇갈리지 않는다.
+        with store.tx():
+            if store.query_one("SELECT 1 FROM rr_targets t JOIN rr_projects p ON p.id = t.project_id"
+                               " WHERE t.target_key = ? AND p.status = 'purged'", (target_key,)) is not None:
+                return
+            super()._record(store, target_key, *args, **kwargs)
+
+    def call_id(self, target_key: str, tool: str, args: Mapping[str, Any]) -> str:
+        return _call_id(target_key, tool, self.key(args))
+
+    def fetch_live(self, store, target_key: str, owner_sub: str, tool: str, args: Mapping[str, Any], *,
+                   deadline: float | None = None) -> dict:
+        args_hash = self.key(args)
+        call_id = _call_id(target_key, tool, args_hash)
+        cached = self._cached(store, target_key, tool, args_hash)
+        if cached is not None:
+            return {"ok": True, "result": cached, "error": None, "status": None, "call_id": call_id, "cached": True}
+        started = time.monotonic()
+        try:
+            reply = self.mcp.call(_real_name(tool, self.tool_names), dict(args), deadline=deadline)
+        except Exception as exc:                      # noqa: BLE001 — 채널 오류는 인프라 탓으로 올린다.
+            reply = {"ok": False, "error": "transport_error", "detail": f"{type(exc).__name__}: {exc}"}
+        ok = bool(reply.get("ok")) if isinstance(reply, Mapping) else False
+        result = reply.get("result") if isinstance(reply, Mapping) else None
+        error = None if ok else _error_of(reply)
+        if ok and isinstance(result, Mapping) and "error" in result:
+            ok, error = False, "error_body"
+        if ok:
+            try:
+                # 정규 JSON 으로 적을 수 없는 답(NaN · 무한 · 홀로 선 서로게이트)은 읽을 수 없는 답이다(내용 탓) — 원장에 적다가 예외로
+                # 빠져나가 단위가 영영 미동결로 남지 않게(반대 검토 HIGH 4).
+                canonical_json(result).encode("utf-8")
+            except (ValueError, UnicodeError):
+                ok, error = False, "unreadable_reply"
+        self._record(store, target_key, owner_sub, tool, args, args_hash, result if ok else None, ok=ok, error=error,
+                     started=started)
+        return {"ok": ok, "result": result if ok else None, "error": error,
+                "status": reply.get("status") if isinstance(reply, Mapping) else None, "call_id": call_id,
+                "cached": False}
+
+
 def from_settings(settings=None, *, portal_pat: str | None = None, http_client: Any = None):
     """읽기 PAT 로 게이트웨이 MCP 채널을 만든다. PAT 가 없으면 None(조회 채널 없음)."""
     from app.ra_client import McpHttpClient      # noqa: PLC0415 — 순환 import 회피.

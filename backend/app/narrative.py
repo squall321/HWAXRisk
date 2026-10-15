@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from functools import lru_cache
@@ -17,7 +18,7 @@ from jsonschema import Draft7Validator
 from app import cardpack, render, review_verify
 from app.common import canonical_json, now_epoch, parse_ref
 from app.errors import AppError
-from app.taxonomy import load_taxonomy
+from app.taxonomy import load_taxonomy, mechanism_majors
 
 log = logging.getLogger("hwax_risk.narrative")
 
@@ -299,6 +300,8 @@ class SpecContext:
     card_pack: Mapping[str, Any] | None = None           # record_id → 얼린 카드(cardpack.FrozenPack.record_cards)
     card_scope: frozenset | None = None                  # 이 스코프에 허용된 record_id. None 이면 묶음 전체
     number_corpus: str | None = None                     # claim·warrant 수치 대조의 말뭉치. None 이면 quote 들
+    # 대상의 방식(panels | cells). 'cells' 면 미분류 finding 의 클러스터 키를 자유 기술로 쪼갠다(M3.md #30 — `review_scope` 만 채운다).
+    flow: str = "panels"
     _names: dict | None = field(default=None, repr=False, compare=False)   # part_names() 의 한 번 읽은 값
 
     # ------------------------------------------------ 조회
@@ -1179,6 +1182,32 @@ def cluster_key_of(mechanism: str, mechanism_detail: str, subject_key: str, chan
     return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:12]
 
 
+# 미분류 쪼개기(M2 #25 · M3.md 4.4.3 · #30) — 카드 대조 finding 의 메커니즘이 비거나 택소노미 밖(free)이면 cells 대상에서만 클러스터
+# 키(와 family_key)의 세부 자리를 'unclassified~' + 자유 기술 열쇠로 둔다. 서로 다른 자유 기술이 process.unclassified 한 덩이로
+# 뭉치지 않게 한다. mechanism_detail 칸은 그대로 'unclassified' 이고 쪼갠 세부는 finding 의 key_detail 에만 적는다(쪼갰을 때만 —
+# 패널 대상의 finding 바이트는 그대로다, D-24). 자유 기술도 없으면 그 카드로 쪼갠다 — 부르는 쪽이 '_free_key_fallback'
+# ('card~' + card_id 또는 record_id)를 날 finding 에 실어 주고, 정규화가 꺼내 쓰고 지운다(저장되지 않는다).
+UNCLASSIFIED = "unclassified"
+FREE_KEY_CHARS = 24
+FREE_KEY_FALLBACK = "_free_key_fallback"
+
+
+def free_key_of(text: Any) -> str:
+    """자유 기술 열쇠 — NFKC · 소문자 · 공백과 구두점(유니코드 P 범주)을 뺀 앞 24자."""
+    folded = unicodedata.normalize("NFKC", str(text or "")).lower()
+    return "".join(ch for ch in folded if not ch.isspace() and not unicodedata.category(ch).startswith("P"))[:FREE_KEY_CHARS]
+
+
+def key_detail_of(finding: Mapping[str, Any], flow: str, fallback: str | None = None) -> str:
+    """클러스터 키·family_key 의 세부 자리 — cells 대상의 미분류만 'unclassified~<자유 기술 열쇠>'(없으면 '~' + fallback), 그
+    밖은 mechanism_detail 그대로다."""
+    detail = str(finding.get("mechanism_detail") or "")
+    if flow != "cells" or detail != UNCLASSIFIED:
+        return detail
+    free = free_key_of(finding.get("mechanism_free")) or str(fallback or "")
+    return f"{UNCLASSIFIED}~{free}" if free else detail
+
+
 # ================================================================ §4.2.2 정규화
 def _fix_enum(value: Any, name: str, path: str, invalid: list[dict]) -> Any:
     allowed = _ENUMS[name]
@@ -1204,7 +1233,7 @@ def _normalize_mechanism(finding: dict, path: str, warnings: list[str], curation
             finding["mechanism_detail"] = str(by_code[code].get("detail") or code.split(".", 1)[-1])
             return
     original = f"{mechanism}.{detail}".strip(".")
-    finding["mechanism"] = mechanism if mechanism in {"thermal", "mechanical", "interface", "electrical", "material", "process"} else "process"
+    finding["mechanism"] = mechanism if mechanism in mechanism_majors(_taxonomy()) else "process"
     finding["mechanism_detail"] = "unclassified"
     finding["mechanism_free"] = original
     warnings.append(f"{path}: 택소노미에 없는 메커니즘 — {original}")
@@ -1292,8 +1321,11 @@ def _normalize_finding(finding: dict, path: str, ctx: SpecContext, *, is_gain: b
     finding["precedent_corpus_n"] = corpus_n
 
     finding["tool_call_refs"] = _resolve_tool_calls(finding.get("tool_calls") or (), raised_by, ctx)
+    key_detail = key_detail_of(finding, ctx.flow, finding.pop(FREE_KEY_FALLBACK, None))
+    if key_detail != finding["mechanism_detail"]:
+        finding["key_detail"] = key_detail
     finding["cluster_key"] = cluster_key_of(
-        finding["mechanism"], finding["mechanism_detail"], finding["subject_key"], finding["change_kind"]
+        finding["mechanism"], key_detail, finding["subject_key"], finding["change_kind"]
     )
     if raised_by:
         expected = _dom_of(raised_by[0])
@@ -1801,7 +1833,7 @@ def _target_scope(store, target_key: str) -> tuple[dict, dict]:
 def _panel_scope(store, panel_id: str) -> tuple[dict, dict, list[dict], SpecContext]:
     """패널 행·타깃 행·seats 와 cites 검증 스코프(SpecContext)를 만든다."""
     panel = store.query_one(
-        "SELECT id, target_key, owner_sub, panel_no, tier, seats_json, conv_id, chair_template, model_json"
+        "SELECT id, target_key, owner_sub, panel_no, tier, seats_json, conv_id, chair_template, model_json, kind, issue_id"
         " FROM rr_panels WHERE id = ?", (panel_id,))
     if panel is None:
         raise AppError("E404", f"패널을 찾을 수 없습니다 — {panel_id}.", 404)
@@ -1828,12 +1860,43 @@ def _panel_scope(store, panel_id: str) -> tuple[dict, dict, list[dict], SpecCont
             brief_refs = frozenset(brief_module.collect_refs([i for i in items if isinstance(i, Mapping)]))
             brief_known = True
 
+    # 쟁점 패널(M3 S3-7) — 근거 I6 에 실은 카드 절을 인용 범위로 싣는다(P-17-7). 카드는 그 쟁점 제기·반대 측의 얼린 묶음에서 찾는다.
+    card_pack = _issue_card_pack(store, dict(panel), items if brief_known else None) if panel["kind"] == "issue" else None
     ctx = SpecContext(
         panel_id=str(panel["id"]), owner_sub=str(panel["owner_sub"] or ""),
         conv_id=str(panel["conv_id"] or ""), seats=tuple(str(s.get("key")) for s in seats),
         brief_refs=brief_refs, brief_known=brief_known, **fields,
+        **({"card_pack": card_pack, "card_scope": frozenset(card_pack)} if card_pack is not None else {}),
     )
     return dict(panel), target, seats, ctx
+
+
+_ISSUE_CARD_TOKEN = re.compile(r"\[card:([^\]#\s]+)")
+
+
+def _issue_card_pack(store, panel: Mapping[str, Any], items: Sequence[Mapping[str, Any]] | None) -> dict:
+    """쟁점 패널 근거 I6 이 실은 카드 — record_id → 얼린 카드(그 쟁점 제기·반대 측 전문가의 묶음에서). 근거가 없으면 빈 범위."""
+    rids: list[str] = []
+    for item in items or ():
+        if isinstance(item, Mapping) and item.get("key") == "I6":
+            rids += [r for r in _ISSUE_CARD_TOKEN.findall(str(item.get("result") or "")) if r not in rids]
+    row = store.query_one("SELECT basis_json FROM rr_issues WHERE issue_id = ?", (panel.get("issue_id"),))
+    try:
+        basis = json.loads(row["basis_json"]) if row is not None and row["basis_json"] else {}
+    except (TypeError, ValueError):
+        basis = {}
+    experts = [str(p.get("agent_key")) for p in (basis.get("raisers") or []) + (basis.get("opposers") or [])
+               if isinstance(p, Mapping)]
+    out: dict[str, Any] = {}
+    for agent in experts:
+        try:
+            pack = cardpack.load_for(store, str(panel["target_key"]), agent)
+        except cardpack.PackMissing:
+            continue
+        for rid in rids:
+            if pack is not None and rid in pack.record_cards and rid not in out:
+                out[rid] = pack.record_cards[rid]
+    return out
 
 
 def _evidence_call_ids(store, target_key: str) -> set[str]:
@@ -1860,8 +1923,8 @@ def review_scope(store, target_key: str, agent_key: str, review_id: str, pack: A
 
     - `pack` — `cardpack.FrozenPack`(그 전문가의 얼린 묶음), 팩 dict, record_id → 카드 dict, 또는 None(카드 0장 — 그때 card:
       인용은 전부 not_in_pack 이다. 묶음이 없는 전문가가 낸 카드 인용은 지어낸 것이다).
-    - `call_ids` = 그 타깃 스냅샷들의 `rr_snapshot_calls.call_id` ∪ 그 단위들의 근거 꾸러미 호출 id(P-07 — 코드가 조회해 실어
-      준 근거를 짚은 finding 이 dangling 이 되지 않게). `_panel_scope` 의 call_ids 는 M2 에서 건드리지 않는다(패널 경로 불변).
+    - `call_ids` = 그 타깃 스냅샷들의 `rr_snapshot_calls.call_id` ∪ 그 단위들의 근거 꾸러미 호출 id ∪ 얼린 실호출(B 층)이 받은 호출
+      id(P-07 — 코드가 조회해 실어 준 근거를 짚은 finding 이 dangling 이 되지 않게). `_panel_scope` 의 call_ids 는 M2 에서 건드리지 않는다(패널 경로 불변).
     - `number_corpus` — finding 하나의 수치 대조 말뭉치(인용한 카드 글 + 인용한 줄 글). 승격이 finding 마다
       `dataclasses.replace(ctx, number_corpus=…)` 로 바꿔 넣는다.
     """
@@ -1873,6 +1936,9 @@ def review_scope(store, target_key: str, agent_key: str, review_id: str, pack: A
         call_ids.update(str(r["call_id"]) for r in store.query(
             f"SELECT call_id FROM rr_snapshot_calls WHERE snapshot_id IN ({marks})", tuple(snapshot_ids)))
     call_ids |= _evidence_call_ids(store, target_key)
+    from app import unit_live  # noqa: PLC0415 — unit_live 가 units 를 거쳐 무거운 import 를 끈다.
+
+    call_ids |= unit_live.call_ids(store, target_key)          # 근거 꾸러미 실호출(B 층 b-… — 재설계 M3 C3-12)
     if pack is None:
         card_pack: Mapping[str, Any] = {}
     elif isinstance(pack, cardpack.FrozenPack):
@@ -1883,9 +1949,11 @@ def review_scope(store, target_key: str, agent_key: str, review_id: str, pack: A
         card_pack = dict(pack)
     else:
         raise TypeError("pack 은 cardpack.FrozenPack · 팩 dict · record_id → 카드 dict · None 가운데 하나다")
+    flow = store.query_one("SELECT flow FROM rr_targets WHERE target_key = ?", (target_key,))["flow"]
     return SpecContext(
         panel_id=str(review_id), owner_sub=str(target["owner_sub"] or ""), seats=(str(agent_key),),
-        call_ids=frozenset(call_ids), card_pack=card_pack, number_corpus=number_corpus, **fields,
+        call_ids=frozenset(call_ids), card_pack=card_pack, number_corpus=number_corpus,
+        flow=str(flow or "panels"), **fields,
     )
 
 
@@ -1994,6 +2062,32 @@ def _release_ledger_cycles(store, target_key: str, panel_id: str, keys: Sequence
         store.execute("UPDATE rr_seat_opinions SET cycle = ? WHERE opinion_id = ?", (moved, row["opinion_id"]))
 
 
+def _tag_issue_findings(store, panel: Mapping[str, Any], atoms: Sequence[Mapping[str, Any]]) -> None:
+    """쟁점 패널이 낸 finding 에 출처를 단다 — `source_kind='issue_panel'` · `source_id`=패널 · `unit_id`=쟁점의 단위 ·
+    `agent_key`=첫 제기 좌석. 닻 맞춤(WP4 3.7.6) — 원자의 subject_key 와 메커니즘 대분류가 닻과 같은데 키만 다르면 cluster_key 를
+    닻 키로 두고 계산값은 `finding_json.cluster_key_computed` 에 남긴다. 패널 대상의 저장(INSERT)은 그대로다(D-24)."""
+    issue = store.query_one("SELECT anchor_cluster_key, unit_id FROM rr_issues WHERE issue_id = ?", (panel.get("issue_id"),))
+    if issue is None:
+        return
+    anchor_key = str(issue["anchor_cluster_key"])
+    anchor = store.query_one("SELECT subject_key, mechanism FROM rr_registry WHERE target_key = ? AND cluster_key = ?",
+                             (panel["target_key"], anchor_key))
+    for atom in atoms:
+        uid = str(atom.get("claim_uid") or "")
+        raised = [str(k) for k in (atom.get("raised_by") or ())]
+        body = dict(atom)
+        if (anchor is not None and str(atom.get("cluster_key") or "") != anchor_key
+                and str(atom.get("subject_key") or "") == str(anchor["subject_key"] or "")
+                and str(atom.get("mechanism") or "") == str(anchor["mechanism"] or "")):
+            body["cluster_key_computed"] = atom.get("cluster_key")
+            body["cluster_key"] = anchor_key
+        store.execute(
+            "UPDATE rr_findings SET source_kind = 'issue_panel', source_id = ?, unit_id = ?, agent_key = ?,"
+            " cluster_key = ?, finding_json = ? WHERE finding_id = ?",
+            (panel["id"], issue["unit_id"], raised[0] if raised else None, body.get("cluster_key"),
+             json.dumps(body, ensure_ascii=False, sort_keys=True), uid))
+
+
 def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec: Mapping[str, Any] | None = None,
                          turns: Sequence[Mapping[str, Any]] = (), attribution: Mapping[str, Any] | None = None,
                          actor: str | None = None, grade_rules: str | None = None) -> dict:
@@ -2052,15 +2146,18 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
         for r in store.query("SELECT agent_key, cycle FROM rr_coverage WHERE target_key = ?", (target_key,))
     }
     nonledger_cycle = NONLEDGER_CYCLE_BASE + int(panel["panel_no"] or 0)
+    # 쟁점 패널(M3 S3-7)은 좌석 원장을 쓰지 않는다 — 모든 좌석이 원장 밖 회차이고 성격 진술을 앉히지 않는다(WP4 3.7).
+    issue_panel = panel.get("kind") == "issue"
 
     out_seats: list[dict] = []
     opinion_rows: list[tuple] = []
     for agent_key, domain, origin in roster:
-        ledger_seat = origin in ("primary", "counter")
+        seated = origin in ("primary", "counter")
+        ledger_seat = seated and not issue_panel
         cycle = cycles.get(agent_key, 1) if ledger_seat else nonledger_cycle
         rows = grouped.get(agent_key) or []
         state = dict(attr_seats.get(agent_key) or {})
-        if ledger_seat and not rows and not int(state.get("turns_n") or 0):
+        if seated and not rows and not int(state.get("turns_n") or 0):
             # 한 마디도 못 한 원장 좌석은 의견을 내지 않았다 — 행을 만들지 않는다(WP1 P-01). 좌석 원장은 이 좌석을 실패로
             # 읽어 같은 회차로 pending 에 되돌리므로, 행을 남기면 다음 패널에서 다시 앉아 저장할 때 그 회차에 걸린다.
             # 발언 글이 없어도 스트림이 그 좌석의 발언 프레임을 셌으면(귀속 turns_n) 원장은 종결로 읽으므로 행을 둔다.
@@ -2127,7 +2224,7 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
             json.dumps(opinion["raised_finding_ids"], ensure_ascii=False),
             opinion["excerpt_for_rag"], now,
         ))
-        if origin in ("primary", "counter"):
+        if seated:
             out_seats.append({
                 "agent_key": agent_key, "opinion_id": opinion_id,
                 "turns_n": len(rows), "cited_refs_n": len(refs), "cited_ir": cited_ir,
@@ -2146,6 +2243,7 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
         )
 
         old = [r["claim_uid"] for r in store.query(
+            # 카드 대조 거름 그대로(M3 S3-4) — 패널 범위·패널 브리프의 자리라 cells 대상에서 돌지 않거나 카드 finding 은 panel_id 가 없어 안 걸린다
             "SELECT claim_uid FROM rr_findings WHERE panel_id = ? AND COALESCE(source_kind, '') <> 'card_review'",
             (panel_id,))]
         if old:
@@ -2214,9 +2312,12 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
                          now),
                     )
 
+        if issue_panel:
+            _tag_issue_findings(store, panel, atoms)
+
         # 성격 진술(§4.6 L2 panel 층). 같은 패널이 다시 제출되면 그 패널의 행만 갈아 끼운다.
         store.execute("DELETE FROM rr_character WHERE id LIKE ?", (f"{panel_id}#%",))
-        if spec is not None and project_id:
+        if spec is not None and project_id and not issue_panel:
             for facet in (body.get("character") or {}).get("facets") or ():
                 for index, statement in enumerate(facet.get("statements") or ()):
                     local = str(statement.get("id") or f"{facet.get('facet')}-{index}")

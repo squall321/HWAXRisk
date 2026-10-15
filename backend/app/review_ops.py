@@ -70,6 +70,9 @@ HOLD_CODES: dict[str, HoldRule] = {
     "aidh_unreachable": HoldRule(auto=True, delays_s=(300, 1800)),
     "agent_outdated": HoldRule(auto=True, delays_s=(300,)),
     "ctx_unknown": HoldRule(auto=True, resume_on="ctx_source"),
+    # 다시 연 셀의 몫(반대 검토 4차 MEDIUM 2 · D-49) — 사람이 동의하거나(재개 consent) 그 셀을 넘겨야 이어 돈다 · 상한은 동의로 풀리지 않는다
+    "consent_extra": HoldRule(auto=False),
+    "max_calls": HoldRule(auto=False),
 }
 
 
@@ -122,6 +125,7 @@ _HOLD_BY_CODE: dict[str, str] = {
     "bad_request": "contract", "empty_unit": "contract", "unsupported_unit_kind": "contract",
     "unsupported_kind": "contract",                   # 엔진 build_ctx — 앱이 이 판에 없는 호출 종류를 보냈다
     "deck_too_large": "contract",
+    "cover_too_large": "contract",                    # 요약의 must_cover 가 cover_hard_max 를 넘었다 — 앱이 cover_max 를 어겼다(M3.md 4.5)
 }
 # 카드 묶음 조회 실패 — 그 전문가 묶음만 다시 받는다(재시도 횟수, 다 쓰면 셀의 실패 코드).
 _PACK_CODES: dict[str, tuple[int, str]] = {

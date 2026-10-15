@@ -110,7 +110,7 @@
         "id": {"type": "string", "pattern": "^[FG][0-9]+$"},
         "direction": {"type": "string", "enum": ["risk", "improvement", "neutral"]},
         "domain": {"$ref": "#/definitions/domain"},
-        "mechanism": {"type": "string", "enum": ["thermal", "mechanical", "interface", "electrical", "material", "process"]},
+        "mechanism": {"type": "string", "enum": ["thermal", "mechanical", "interface", "electrical", "material", "process", "optical", "acoustic", "rf"]},
         "mechanism_detail": {"type": "string"},
         "mechanism_free": {"type": "string"},
         "change_kind": {

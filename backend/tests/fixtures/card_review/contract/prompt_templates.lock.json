@@ -1,0 +1,22 @@
+{
+ "sweep": {
+  "prompt_rev": "cr-sweep-2",
+  "template_sha": "a0d24cc980b1e26aa0d88ab6f4c8157e9d728115c9ec8ca46d665ed1ae748e54"
+ },
+ "verdict": {
+  "prompt_rev": "cr-verdict-2",
+  "template_sha": "f8f4dac6c39bafc75904898c88bfa6f688d92bd0e75646ff3ed054809bf7287d"
+ },
+ "offcard": {
+  "prompt_rev": "cr-offcard-2",
+  "template_sha": "e4f233d83ada07e1b7399abcf10252f65c66b1c231efbaee3fbd75897e3bcc3d"
+ },
+ "noinput": {
+  "prompt_rev": "cr-noinput-1",
+  "template_sha": "da53a5913e7503beb09360e23c527591e54e1e9d586444f53871b49510767bf9"
+ },
+ "summary": {
+  "prompt_rev": "cr-summary-2",
+  "template_sha": "e8f9fb333381fcee5337c451a500534170f954f6936ced33c3fd312a47ef8d5c"
+ }
+}

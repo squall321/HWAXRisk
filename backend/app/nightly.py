@@ -215,14 +215,15 @@ def check_cluster_alias(store: Any, *, now: int) -> dict:
     learning.resolve_cluster_key 는 순환을 만나면 조용히 멈추므로(정상 조회 경로) 그 조용함이 가리는
     깨진 사전을 여기서 따로 센다.
     """
+    # 별칭은 소유자마다다(조합 검토 M7) — 체인은 한 소유자의 별칭끼리만 잇는다.
     rows = store.query(
-        "SELECT old_cluster_key, new_cluster_key FROM rr_cluster_alias WHERE revoked_at IS NULL")
-    alias = {str(r["old_cluster_key"]): str(r["new_cluster_key"]) for r in rows}
+        "SELECT owner_sub, old_cluster_key, new_cluster_key FROM rr_cluster_alias WHERE revoked_at IS NULL")
+    alias = {(str(r["owner_sub"]), str(r["old_cluster_key"])): str(r["new_cluster_key"]) for r in rows}
     broken: list[str] = []
-    for key in sorted(alias):
+    for owner, key in sorted(alias):
         seen, current = [key], key
         for _ in range(ALIAS_CHAIN_MAX + 1):         # 5홉까지는 정상, 6홉째가 있으면 초과다
-            nxt = alias.get(current)
+            nxt = alias.get((owner, current))
             if nxt is None:
                 break
             if nxt in seen:
@@ -312,25 +313,31 @@ def scan_cluster_merge(store: Any, *, now: int, enabled: bool = True) -> dict:
         "SELECT target_key, cluster_key, owner_sub, family_key, subject_key, direction FROM rr_registry"
         " WHERE family_key IS NOT NULL AND status != 'superseded' ORDER BY family_key, cluster_key")
     # direction 을 묶음 키에 넣는다 — 등록부는 risk 와 improvement 를 따로 세우므로(§4.7.1) 그 둘은 중복이 아니다.
-    families: dict[tuple[str, str], dict[str, dict]] = {}
+    # 소유자도 넣는다 — 병합은 두 클러스터를 다 가진 소유자만 하므로(routes 병합 · 별칭) 남의 클러스터와 그 subject 를 내 큐의
+    # 쌍으로 싣지 않는다(D47). 종전에는 같은 family 의 남의 클러스터가 앞 클러스터 주인의 큐에 올랐다.
+    families: dict[tuple[str, str, str], dict[str, dict]] = {}
     for row in rows:
-        resolved = learning.resolve_cluster_key(store, str(row["cluster_key"]), _cache=alias_cache)
-        bucket = families.setdefault((str(row["family_key"]), str(row["direction"] or "")), {})
+        resolved = learning.resolve_cluster_key(store, str(row["cluster_key"]), owner_sub=str(row["owner_sub"]),
+                                                _cache=alias_cache)
+        bucket = families.setdefault((str(row["family_key"]), str(row["direction"] or ""), str(row["owner_sub"])), {})
         bucket.setdefault(resolved, {
             "cluster_key": resolved, "owner_sub": str(row["owner_sub"]),
             "subject_key": str(row["subject_key"] or ""),
         })
 
-    suppressed: set[tuple[str, str]] = set()
-    for payload, status, decision in _queue_payloads(store, "cluster_merge"):
-        pair = (str(payload.get("a") or ""), str(payload.get("b") or ""))
+    # 막음(열림 · 처리됨 · 막고 거절함)은 그 소유자의 쌍만 막는다 — 클러스터 키는 내용 해시라 소유자를 가로질러 같아, 남이 같은 키
+    # 쌍을 큐에 두면 주인의 쌍이 오르지 않았다(조합 검토 L9).
+    suppressed: set[tuple[str, str, str]] = set()
+    for row in store.query(
+            "SELECT owner_sub, payload_json, status, decision_json FROM rr_curation_queue WHERE kind = 'cluster_merge'"):
+        payload, decision, status = _loads(row["payload_json"], {}), _loads(row["decision_json"], {}), str(row["status"])
         if status == "open" or status == "done" or (status == "rejected" and decision.get("suppress")):
-            suppressed.add(pair)
+            suppressed.add((str(row["owner_sub"]), str(payload.get("a") or ""), str(payload.get("b") or "")))
 
     cache: dict[str, dict | None] = {}
     n_pairs = 0
     queued: list[str] = []
-    for (family_key, _direction), members in sorted(families.items()):
+    for (family_key, _direction, owner), members in sorted(families.items()):
         keys = sorted(members)
         for i, key_a in enumerate(keys):
             for key_b in keys[i + 1:]:
@@ -339,7 +346,7 @@ def scan_cluster_merge(store: Any, *, now: int, enabled: bool = True) -> dict:
                 if score is None:
                     continue
                 n_pairs += 1
-                if (key_a, key_b) in suppressed or len(queued) >= CLUSTER_MERGE_MAX:
+                if (owner, key_a, key_b) in suppressed or len(queued) >= CLUSTER_MERGE_MAX:
                     continue
                 payload = {"a": key_a, "b": key_b, "family_key": family_key,
                            "subject_a": a["subject_key"], "subject_b": b["subject_key"], "score": score}
@@ -369,6 +376,7 @@ def scan_unclassified(store: Any, *, now: int) -> dict:
     """mechanism_detail='unclassified' 로 저장된 finding 을 큐에 올린다(§7.1 — detail 이 목록 밖일 때)."""
     rows = store.query(
         "SELECT finding_id, owner_sub, mechanism, mechanism_free FROM rr_findings"
+        # 카드 대조 거름 그대로(M3 S3-4) — 과제를 가로지르는 학습·지표·야간 자리라 카드 대조 원자는 회수 자격 0(M2 #9)·cells 대상은 통계에 넣지 않는다(M3 #57)
         " WHERE mechanism_detail = 'unclassified' AND COALESCE(source_kind, '') <> 'card_review' ORDER BY finding_id")
     queued = 0
     for row in rows:

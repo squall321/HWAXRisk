@@ -88,11 +88,15 @@ def test_a_target_nothing_ran_on_switches_both_ways_and_each_switch_is_audited(s
     assert _switch(key, "cells") == {"target_key": key, "flow": "cells", "changed": False}
     back = _switch(key, "panels", reason=None)
     assert back == {"target_key": key, "flow": "panels", "changed": True} and _flow(store, key) == "panels"
+    # 마감 레벨이 방식을 따라간다(재설계 M3 S3-5 — cells 는 전원 C3, panels 는 박스 손잡이 C2) — 감사 행에 앞뒤가 같이 남는다.
+    panels_side, cells_side = {"close_level": "C2", "flow": "panels"}, {"close_level": "C3", "flow": "cells"}
     assert _audits(store, key) == [
-        {"actor": OWNER, "channel": "rest", "scope": "target", "action": "target.flow", "before_json": '{"flow":"panels"}',
-         "after_json": '{"flow":"cells"}', "reason": "비교", "before": {"flow": "panels"}, "after": {"flow": "cells"}},
-        {"actor": OWNER, "channel": "rest", "scope": "target", "action": "target.flow", "before_json": '{"flow":"cells"}',
-         "after_json": '{"flow":"panels"}', "reason": None, "before": {"flow": "cells"}, "after": {"flow": "panels"}}]
+        {"actor": OWNER, "channel": "rest", "scope": "target", "action": "target.flow",
+         "before_json": '{"close_level":"C2","flow":"panels"}', "after_json": '{"close_level":"C3","flow":"cells"}',
+         "reason": "비교", "before": panels_side, "after": cells_side},
+        {"actor": OWNER, "channel": "rest", "scope": "target", "action": "target.flow",
+         "before_json": '{"close_level":"C3","flow":"cells"}', "after_json": '{"close_level":"C2","flow":"panels"}',
+         "reason": None, "before": cells_side, "after": panels_side}]
     # 다시 cells 로 — 활성 빌드가 있으니 다시 세우지 않는다.
     assert _switch(key, "cells")["units"]["rev"] == 1
 
@@ -354,7 +358,7 @@ def test_claude_opens_a_target_in_either_flow_and_switches_an_open_one(store, mo
     switched = call(kind="diff", ref_id=synth.diff_id, consent=True, flow="cells", reason="파일럿")
     assert switched["flow"] == "cells" and switched["flow_change"]["changed"] is True
     assert [(a["channel"], a["reason"], a["after"]) for a in _audits(store, synth.target_key)] == [
-        ("mcp", "파일럿", {"flow": "cells"})]
+        ("mcp", "파일럿", {"close_level": "C3", "flow": "cells"})]
     assert call(kind="diff", ref_id=synth.diff_id, consent=True)["flow"] == "cells"
 
 

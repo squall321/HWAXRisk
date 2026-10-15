@@ -12,13 +12,14 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+import math
 import threading
 
 import httpx
 import pytest
 
 from app import cardpack, config, identity, narrative, planner, review_cells, review_ops, review_runner, routes, runner
-from app import review_verify, units
+from app import relevance, review_verify, units
 from app.common import now_epoch
 from app.errors import AppError
 from app.review_cells import IllegalTransition
@@ -42,8 +43,9 @@ def _load(name: str) -> dict:
 @pytest.fixture
 def store(risk_store, monkeypatch, tmp_path):
     monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    # 근거 꾸러미 실호출(B 층 — C3-12)은 끈다 — 원장 시험은 M2 셀 문(행 none)으로 돈다. B 층의 셀 문은 test_unit_live 가 본다.
     monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, data_dir=tmp_path,
-                                                               risk_review_enabled=True))
+                                                               risk_review_enabled=True, risk_evidence_live=False))
     cardpack.clear_cache()
     return risk_store
 
@@ -74,9 +76,12 @@ def _running(store, job: dict) -> dict:
 
 
 def _refused(fn, *args, **kwargs) -> AppError:
-    with pytest.raises(AppError) as exc:
+    """거절(AppError)을 돌려준다 — 거절하지 않았으면 단언 실패다(변이 검사가 '죽음' 으로 세는 실패의 모양)."""
+    try:
         fn(*args, **kwargs)
-    return exc.value
+    except AppError as exc:
+        return exc
+    raise AssertionError(f"{getattr(fn, '__name__', fn)} 가 거절하지 않았다")
 
 
 def _cells(store, key: str) -> list[dict]:
@@ -352,7 +357,7 @@ def test_a_cards_free_expert_reviews_by_role_and_its_seat_closes_done_weak_no_ca
     assert (cell["basis"], cell["tries"], cell["lease_owner"], cell["cards_expected"], cell["cards_judged"]) == (
         "role_only", 1, None, 0, 0)
     summary = review_cells.review_summary(store, key)
-    assert summary["cells"]["by_basis"] == {"cards": 0, "background": 0, "role_only": len(unit_ids)}
+    assert summary["cells"]["by_basis"] == {"cards": 0, "background": 0, "role_only": len(unit_ids), "noinput": 0}
     assert summary["cells"]["in_scope"]["by_state"]["reviewed"] == len(unit_ids)
 
     closed = planner.close_review_seat(store, key, SEAL, review_id=head["review_id"], opinion_id=_opinion(key))
@@ -435,7 +440,7 @@ def test_a_seat_is_not_closed_with_out_of_scope_cells_failures_only_on_a_panel_t
     review_cells.fail_open_cells(store, key, peer, code="pack_unavailable", error="팩 502 여섯 번")
     assert review_cells.expert_tally(store, key, peer)["failed"] == len(unit_ids)
     out = planner.close_review_seat(store, key, peer, review_id=review_cells.review_id_of(key, peer), opinion_id="x" * 32)
-    assert (out["updated"], out["why"]) == (False, "nothing_reviewed")
+    assert (out["updated"], out["why"]) == (False, f"failed_open:{len(unit_ids)}")    # 사유가 열린 실패 수를 단다(m3-cells 3.9)
 
     _stop(store, live)                                                  # 남은 단위를 다음 잡이 돈다
     live = _running(store, _job(store, key, scope={"agents": [SEAL]}))
@@ -662,14 +667,18 @@ def test_a_new_job_reopens_experts_that_still_have_cells_in_its_scope(store):
 # ---------------------------------------------------------------- 검토 잡 만들기 — 반환·잡 행·자격
 def test_the_job_row_carries_its_scope_knobs_and_the_user_credential(store):
     """반환 모양과 잡 행 — mode reviews · tier 없음 · queued · 범위 · 동의 출처 · 사용자 PAT 자격 · 실행 설정 사본(dual_rate 1.0 ·
-    훑기 켬 · 거르기 끔 · 내용 탓 한도 · 표본 소금). 패널 원장(rr_coverage)은 건드리지 않는다."""
+    이중 판정 손잡이(걸린 것만 · 1순위 보정 · 무작위 뒤집기 비율) · 훑기 켬 · 거르기 손잡이와 표본 비율 · 변경 → 영역 표의 판과
+    만들 때의 승인 여부 · 내용 탓 한도 · 표본 소금). 패널 원장
+    (rr_coverage)은 건드리지 않는다."""
     key = _target(store)
     before = [tuple(r) for r in store.query("SELECT * FROM rr_coverage WHERE target_key = ? ORDER BY agent_key", (key,))]
     out = _job(store, key, scope={"domains": ["mech", "sim"], "tiers": ["A"]}, user_memo="메모")
     assert set(out) == {"job_id", "mode", "cells_total", "cells_in_scope", "experts_in_scope", "units", "calls_estimate",
-                        "credential"}
+                        "credential", "undeferred"}          # 푼 보류 좌석 수(재설계 M3 C3-2)
     assert (out["mode"], out["experts_in_scope"]) == ("reviews", 2)
-    assert out["calls_estimate"] == review_runner.calls_estimate(out["cells_in_scope"], 2)
+    assert out["calls_estimate"] == review_runner.calls_estimate(
+        {"card": out["cells_in_scope"], "gap": 0, "rank1": out["cells_in_scope"], "filterable": 0}, 2)
+    assert review_runner.box_k(store) == (8, "fallback")                     # 이 박스에 계획이 아직 없다 — k 는 8(C3-10)
     assert out["credential"]["kind"] == "owner" and out["credential"]["email"] == OWNER
     row = dict(store.query_one("SELECT * FROM rr_jobs WHERE id = ?", (out["job_id"],)))
     assert (row["mode"], row["tier"], row["state"], row["credential_email"], row["concurrency"]) == (
@@ -678,18 +687,24 @@ def test_the_job_row_carries_its_scope_knobs_and_the_user_credential(store):
     assert params["scope"] == {"tiers": ["A"], "domains": ["mech", "sim"]}
     assert (params["user_memo"], params["consent"], params["consent_source"], params["requester"]) == (
         "메모", True, "web", OWNER)
-    assert params["knobs"] == {"dual_rate": 1.0, "sweep": "on", "filter": "off",
+    assert params["knobs"] == {"dual_rate": 1.0, "dual": config.settings.risk_review_dual, "dual_calib": "tier_a",
+                               "dual_neg_pct": config.settings.risk_review_dual_neg_pct,
+                               "sweep": "on", "filter": config.settings.risk_review_filter,
+                               "audit_pct": config.settings.risk_filter_audit_pct,
+                               "routing_rev": relevance.routing_rev(), "routing_approved": relevance.routing_approved(),
                                "max_charged": config.settings.risk_review_max_charged,
                                "sample_salt": review_verify.SAMPLE_SALT}
+    assert (params["knobs"]["filter"], params["knobs"]["audit_pct"], params["knobs"]["routing_approved"]) == ("on", 5, False)
     assert params["credential"] == out["credential"] and json.loads(row["progress_json"])["mode"] == "reviews"
     assert [tuple(r) for r in store.query("SELECT * FROM rr_coverage WHERE target_key = ? ORDER BY agent_key",
                                           (key,))] == before
 
 
-def test_the_review_credential_is_a_user_pat_and_never_the_service_pat(store):
+def test_the_review_credential_is_a_user_pat_and_never_the_service_pat(store, monkeypatch):
     """자격은 요청자 → 소유자의 사용자 PAT 만이고 남은 수명이 검토 여유(호출 벽시계 + 600초)를 넘어야 한다. 서비스 PAT 가 있어도
-    쓰지 않고 422 pat_unavailable 이다(사용자 결정 3). 요청자 PAT 를 수명 때문에 건너뛰었거나, 높은 끝 추정 소요가 PAT 수명보다
-    길면 credential_note 로 미리 말한다."""
+    쓰지 않고 422 pat_unavailable 이다(사용자 결정 3). 요청자 PAT 를 수명 때문에 건너뛰었거나, 추정 소요(기대 호출 수 × 5분 ÷ 동시
+    수 — 재설계 M3 C3-10)가 PAT 수명보다 길면 credential_note 로 미리 말한다. 워커 하나로 소요를 늘린다."""
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_concurrency=1))
     key = _target(store)
     (config.settings.data_dir / "secrets.env").write_text("HWAXRISK_PORTAL_PAT=svc-pat\n", encoding="utf-8")
     assert config.load_secrets(config.settings.data_dir).get("HWAXRISK_PORTAL_PAT") == "svc-pat"
@@ -709,7 +724,7 @@ def test_the_review_credential_is_a_user_pat_and_never_the_service_pat(store):
     out = make(requester_sub=PEER)
     assert out["credential"]["kind"] == "owner" and out["credential"]["email"] == OWNER
     assert f"{PEER} 의 PAT" in out["credential_note"]                  # 요청자 PAT 를 건너뛰었다
-    assert "credential 로 멈춘다" in out["credential_note"]           # 남은 수명이 높은 끝 추정 소요보다 짧다
+    assert "credential 로 멈춘다" in out["credential_note"]           # 남은 수명이 추정 소요보다 짧다
     runner.cancel_job(store, out["job_id"], by=OWNER)
     _pat(store, PEER)
     out = make(requester_sub=PEER)
@@ -751,10 +766,10 @@ def test_refusals_for_switch_target_units_and_live_jobs(store, monkeypatch):
     assert make()["mode"] == "reviews"
 
 
-def test_refusals_for_scope_input_gaps_and_call_budget(store, monkeypatch):
-    """범위 — 모르는 칸·목록 아님·빈 목록·대상에 없는 값은 422 scope_invalid, 맞는 셀이 없으면 422 scope_empty, ECAD 가 없는데
-    ECAD 에 기대는 전문가가 들면 422 input_gap_m3. 호출 추정의 높은 끝이 상한을 넘으면 409 review_too_large, 동의 문턱을 넘는데
-    consent 가 없으면 422 consent_required."""
+def test_refusals_for_scope_and_call_budget(store, monkeypatch):
+    """범위 — 모르는 칸·목록 아님·빈 목록·대상에 없는 값은 422 scope_invalid, 맞는 셀이 없으면 422 scope_empty. 호출 추정의 높은
+    끝이 상한을 넘으면 409 review_too_large, 동의 문턱을 넘는데 consent 가 없으면 422 consent_required. 입력 결손 전문가는 거절하지
+    않는다(재설계 M3 C3-2 — 아래 시험)."""
     key = _target(store, agents=factories.agents())
     _pat(store)
 
@@ -771,23 +786,161 @@ def test_refusals_for_scope_input_gaps_and_call_budget(store, monkeypatch):
         assert (refused.code, refused.http_status, refused.detail) == ("scope_invalid", 422, detail), scope
     refused = _refused(make, {"tiers": ["A"], "agents": ["mech-syn-1"]})
     assert (refused.code, refused.http_status, refused.detail["experts"]) == ("scope_empty", 422, 0)
-    refused = _refused(make, None)
-    assert (refused.code, refused.http_status, refused.detail["agents"]) == ("input_gap_m3", 422,
-                                                                              ["pcb-syn-0", "pcb-syn-1"])
-    assert _refused(make, {"domains": ["pcb"]}).code == "input_gap_m3"
 
+    # 문턱은 기대값(expected — 재설계 M3 C3-10)과 견준다. mech 2명(1순위 1) × 단위, 입력 결손 없음, 승인 전이라 거를 셀 0, k 기본 8.
     scope = {"domains": ["mech"]}
-    high = review_runner.calls_estimate(2 * len(_unit_ids(store, key)), 2)["high"]
-    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_max_calls=high - 1))
+    n = len(_unit_ids(store, key))
+    estimate = review_runner.calls_estimate({"card": 2 * n, "gap": 0, "rank1": n, "filterable": 0}, 2)
+    expected = estimate["expected"]
+    assert estimate["low"] == expected < estimate["high"] == 2 * n * 14 + 2 * 2
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_max_calls=expected - 1))
     refused = _refused(make, scope)
-    assert (refused.code, refused.http_status, refused.detail["calls_estimate"]["high"]) == ("review_too_large", 409, high)
-    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_max_calls=high,
-                                                               risk_review_consent_calls=high - 1))
+    assert (refused.code, refused.http_status, refused.detail["calls_estimate"]) == ("review_too_large", 409, estimate)
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_max_calls=expected,
+                                                               risk_review_consent_calls=expected - 1))
     refused = _refused(make, scope, consent=False)
     assert (refused.code, refused.http_status, refused.detail["knob"]) == ("consent_required", 422,
                                                                             "HWAXRISK_REVIEW_CONSENT_CALLS")
     assert store.query_one("SELECT COUNT(*) AS n FROM rr_review_cells WHERE target_key = ?", (key,))["n"] == 0
-    assert make(scope)["calls_estimate"]["high"] == high
+    assert make(scope)["calls_estimate"] == estimate
+
+
+@pytest.mark.parametrize("expected,consented,unconsented,max_calls,allowance,hold", [
+    (100, 0.0, 30.0, 30000, 30, None),                    # 여유 = max(ceil(0.2 × 100), 30) — 바닥 30 까지는 그대로 돈다
+    (100, 0.0, 30.5, 30000, 30, "consent_extra"),
+    (200, 0.0, 40.0, 30000, 40, None),                    # 20% 가 바닥보다 크면 20%
+    (200, 0.0, 40.25, 30000, 40, "consent_extra"),
+    (150, 100.0, 50.0, 30000, 50, None),                  # 동의받은 몫 = 처음 추정 + 사람이 재개로 더 동의한 몫
+    (150, 100.0, 50.25, 30000, 50, "consent_extra"),
+    (100, 0.0, 6.0, 105, 30, "max_calls"),                # 추정 합 106 > 상한 105 — 여유 안이어도 상한이 먼저다
+    (100, 4.0, 1.0, 105, 30, None),                       # 합 105 는 상한과 같다(넘지 않는다)
+])
+def test_the_reopen_allowance_is_a_fifth_of_the_consented_calls_with_a_floor_of_thirty_under_the_cap(
+        expected, consented, unconsented, max_calls, allowance, hold):
+    """반대 검토 4차 MEDIUM 2 · D-49 — 다시 연 셀의 몫. 동의 안 받은 다시 연 셀의 기대 호출이 max(동의받은 몫(처음 expected + 더
+    동의한 몫)의 20%, 30회) 를 넘으면 consent_extra, 잡의 추정 합(expected + 다시 연 몫 전부)이 HWAXRISK_REVIEW_MAX_CALLS 를 넘으면
+    max_calls 다(동의로 풀리지 않는다)."""
+    # 셀마다 [돈 횟수, 동의받은 횟수, 한 번의 기대 호출] — 동의받은 셀 하나(두 번 돌았다)와 동의를 기다리는 셀 하나(한 번)
+    params = {"calls_estimate": {"expected": expected},
+              "reopen": {"runs": {"u-0|a": [2, 2, consented / 2], "u-1|a": [1, 0, unconsented]}}}
+    budget = review_runner.reopen_budget(params, max_calls=max_calls)
+    assert (budget["allowance"], budget["hold"]) == (allowance, hold)
+    assert (budget["cells"], budget["runs"], budget["calls_est"], budget["unconsented"]) == (
+        2, 3, round(consented + unconsented, 2), {"cells": 1, "calls_est": unconsented})
+    assert budget["consented"] == {"cells": 1, "calls_est": round(consented, 2)}
+
+
+def test_a_cell_counts_the_calls_the_estimate_counts_for_it():
+    """다시 연 셀 하나의 기대 호출은 잡 추정(expected)의 셀 몫과 같은 식이다 — 입력 결손 셀 1.05, 카드 셀 card_cell_calls, 걸린 것만 이중
+    판정이면 1순위 카드 셀에 보정 rev D 를 더한다."""
+    assert review_runner.cell_calls({"input_gaps": ["ecad"]}, k=8, dual="flagged") == review_runner.NOINPUT_PER_CELL
+    assert review_runner.cell_calls({"rank_in_domain": 2}, k=8, dual="all") == review_runner.card_cell_calls(8, "all")
+    assert review_runner.cell_calls({"rank_in_domain": 1}, k=8, dual="all") == review_runner.card_cell_calls(8, "all")
+    assert review_runner.cell_calls({"rank_in_domain": 1}, k=8, dual="flagged") == review_runner.card_cell_calls(8, "flagged") + 2
+    for expert, cells in (({"rank_in_domain": 1}, {"card": 1, "rank1": 1}), ({"rank_in_domain": 2}, {"card": 1}),
+                          ({"input_gaps": ["ecad"]}, {"gap": 1})):
+        whole = review_runner.calls_estimate(cells, 0, k=8, dual="flagged")["expected"]
+        assert math.ceil(review_runner.cell_calls(expert, k=8, dual="flagged")) == whole
+
+
+def test_the_calls_estimate_for_the_full_roster_stays_under_the_cap_with_flagged_dual_judgement():
+    """재설계 M3 C3-10 — 359명 × 단위 20(카드 셀 4,980 · 입력 결손 셀 2,200 · 1순위 카드 셀 180, k 8)의 기대 호출 수는 약 2만으로
+    상한 3만 밑이다(카드 셀당 3.3 = fwd 2 + 빠진 카드 0.1 + rev 0.05 + 단독 0.1 + 카드 밖 1.05). 이중 판정 all 이면 rev 몫이 D 로
+    늘고, 낮은 끝은 거를 수 있는 셀의 70% 가 걸러진다고 본 값, 높은 끝은 셀당 14(M2 의 식)다. basis 가 쓴 가정이 셈과 같다."""
+    cells = {"card": 4980, "gap": 2200, "rank1": 180, "filterable": 0}
+    flagged = review_runner.calls_estimate(cells, 359, k=8, dual="flagged", k_source="box")
+    assert review_runner.card_cell_calls(8, "flagged") == pytest.approx(3.3)
+    assert flagged["expected"] == math.ceil(4980 * 3.3 + 2200 * 1.05 + 180 * 2 + 359) < 30000
+    assert flagged["high"] == 7180 * 14 + 359 * 2 == 101238 and flagged["low"] == flagged["expected"]
+    assert "k 8(이 박스의 마지막 계획)" in flagged["basis"] and "카드 셀당 3.30회" in flagged["basis"]
+    assert "rev 0.05(걸린 것만)" in flagged["basis"] and "1순위 보정 rev 셀당 2회" in flagged["basis"]
+    every = review_runner.calls_estimate(cells, 359, k=8, dual="all")
+    assert every["expected"] == math.ceil(4980 * 5.25 + 2200 * 1.05 + 359) and "rev 2(묶음 전체)" in every["basis"]
+    low = review_runner.calls_estimate({**cells, "filterable": 4000}, 359, k=8)
+    assert low["low"] == math.ceil(flagged["expected"] - 0.7 * 4000 * 3.3) and low["expected"] == flagged["expected"]
+    assert review_runner.calls_estimate(cells, 359, k=4)["expected"] > flagged["expected"]          # 묶음 넷 — D 4
+
+
+# ---------------------------------------------------------------- 전원 포함 · 보류 해제(재설계 M3 C3-2)
+def _undefer_audits(store, key: str) -> list[dict]:
+    return [dict(r) for r in store.query(
+        "SELECT actor, actor_verified, channel, scope, subject_id, action, after_json, reason FROM rr_audit"
+        " WHERE subject_id = ? AND action = 'coverage.undefer' ORDER BY at", (key,))]
+
+
+def test_input_gap_experts_join_the_scope_and_their_deferred_seats_open_with_the_job(store):
+    """ECAD 에 기대는데 ECAD 가 없는 전문가도 범위에 든다(422 input_gap_m3 는 없다). 카드 대조 대상이면 범위 안의 보류(deferred ·
+    ecad_absent) 좌석이 잡을 만드는 트랜잭션에서 pending 으로 풀리고 감사 한 행(coverage.undefer · review_scope)이 남는다 — 풀지
+    않으면 원장 마감이 그 행을 건드리지 않아 종결 어휘(deferred)로 남는다(거짓 완결)."""
+    key = _target(store, agents=factories.agents())          # pcb-syn-0 은 입력 결손 1순위, pcb-syn-1 은 보류 좌석
+    order = planner.review_order(store, key)
+    assert {r["agent_key"] for r in order if r["input_gaps"]} == {"pcb-syn-0", "pcb-syn-1"}
+    assert _coverage(store, key, "pcb-syn-1")["status"] == "deferred"
+
+    job = _job(store, key)                                     # 범위를 빼면 로스터 전원이다
+    assert (job["experts_in_scope"], job["undeferred"]) == (len(order), 1)
+    seat = dict(store.query_one("SELECT status, reason, status_source, decided_by FROM rr_coverage WHERE target_key = ?"
+                                " AND agent_key = 'pcb-syn-1'", (key,)))
+    assert seat == {"status": "pending", "reason": None, "status_source": "human", "decided_by": OWNER}
+    assert {c["agent_key"] for c in _cells(store, key) if c["run_id"] == job["job_id"]} == {r["agent_key"] for r in order}
+    audits = _undefer_audits(store, key)
+    assert len(audits) == 1
+    audit = audits[0]
+    assert (audit["actor"], audit["actor_verified"], audit["channel"], audit["scope"], audit["reason"]) == (
+        OWNER, 1, "rest", "coverage", "review_scope")
+    assert json.loads(audit["after_json"])["agents"] == ["pcb-syn-1"] and json.loads(audit["after_json"])["n"] == 1
+    assert planner.check_invariants(store, key) == []
+
+
+def test_only_deferred_seats_in_the_scope_open_and_panel_targets_keep_theirs(store):
+    """범위 밖의 보류는 그대로다(감사도 없다). 패널 대상에 얹은 검토는 보류를 풀지 않는다 — 원장을 닫지 않는 길이고 패널 편성이
+    바뀐다(M2.md 5절 #8). 사람이 원하면 REST 로 푼다."""
+    key = _target(store, agents=factories.agents())
+    job = _job(store, key, scope={"domains": ["mech"]})
+    assert job["undeferred"] == 0 and _coverage(store, key, "pcb-syn-1")["status"] == "deferred"
+    assert _undefer_audits(store, key) == []
+
+    panels = _target(store, agents=factories.agents(), flow="panels", seed=7)
+    units.build_units(store, panels, built_by=OWNER, reason="패널 대상에 얹은 검토")
+    out = _job(store, panels, scope={"domains": ["pcb"]})
+    assert out["undeferred"] == 0 and _coverage(store, panels, "pcb-syn-1")["status"] == "deferred"
+
+
+def test_the_undefer_route_needs_a_reason_waits_for_live_jobs_and_says_the_level_does_not_drop(store):
+    """POST /targets/{key}/undefer — 사유 4~300자(422 reason_required), 도는 잡이 있으면 409 job_live, 바꿀 것이 없으면 200 changed:false.
+    푼 좌석과 감사 한 행이 남고, 응답은 저장된 레벨이 내려가지 않는다는 것과 영역 깊이를 싣는다."""
+    key = _target(store, agents=factories.agents(), flow="panels")
+    body = routes.UndeferBody(reason="회로 전문가도 패널에 앉힌다")
+    me = factories.ident(OWNER)
+    for reason in ("", "짧다", "x" * 301):
+        assert _refused(routes.post_undefer, key, routes.UndeferBody(reason=reason), ident=me).code == "reason_required"
+    units.build_units(store, key, built_by=OWNER, reason="패널 대상에 얹은 검토")
+    job = _job(store, key, scope={"domains": ["mech"]})
+    refused = _refused(routes.post_undefer, key, body, ident=me)
+    assert (refused.code, refused.http_status, refused.detail["jobs"][0]["id"]) == ("job_live", 409, job["job_id"])
+    runner.cancel_job(store, job["job_id"], by=OWNER)
+
+    out = routes.post_undefer(key, body, ident=me)
+    assert (out["undeferred"], out["agents"], out["agents_total"], out["changed"]) == (1, ["pcb-syn-1"], 1, True)
+    assert "내려가지 않는다" in out["note"] and "pcb" in out["depth"]
+    assert _coverage(store, key, "pcb-syn-1")["status"] == "pending"
+    again = routes.post_undefer(key, body, ident=me)
+    assert (again["undeferred"], again["changed"]) == (0, False)
+    audits = _undefer_audits(store, key)
+    assert [(a["channel"], a["reason"], a["actor_verified"]) for a in audits] == [("rest", body.reason, 1)]
+    delegated = identity.Identity(email=OWNER, display_name="합성", role="user", organization="qa", anonymous=False,
+                                  source="sso")
+    seeded = _target(store, agents=factories.agents(), flow="panels", seed=8)
+    routes.post_undefer(seeded, body, ident=delegated)
+    assert [(a["channel"], a["actor_verified"]) for a in _undefer_audits(store, seeded)] == [("mcp", 0)]
+
+
+def test_a_carried_revert_does_not_open_a_deferred_seat(store):
+    """보류는 undefer 한 문으로만 풀린다 — 이월 되돌리기(PUT coverage status=pending)는 보류 좌석에 409 다."""
+    key = _target(store, agents=factories.agents(), flow="panels")
+    refused = _refused(planner.revert_carried, store, key, "pcb-syn-1")
+    assert (refused.code, refused.http_status) == ("E100", 409)
+    assert _coverage(store, key, "pcb-syn-1")["status"] == "deferred"
 
 
 def test_a_target_whose_panel_awaits_repersist_refuses_a_review_job(store, monkeypatch):

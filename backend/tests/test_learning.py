@@ -6,10 +6,11 @@ import json
 
 import pytest
 
-from app import common, config, learning, registry
+from app import common, config, export, learning, registry
 from app.errors import AppError
 
 OWNER = "tester@example.com"
+STRANGER = "stranger@example.com"
 CK = "ck:1111111111"
 NORM_A = "cl:aaaaaaaaaaaa"
 NORM_B = "cl:bbbbbbbbbbbb"
@@ -18,12 +19,19 @@ NORM_B = "cl:bbbbbbbbbbbb"
 # ---------------------------------------------------------------- 삽입 도우미
 
 
-def _target(store, target_key, *, project_id="P1", kind="snap", ref_id="S1", created_at=100):
+def _target(store, target_key, *, project_id="P1", kind="snap", ref_id="S1", created_at=100, owner=OWNER):
     store.execute(
         "INSERT INTO rr_targets(target_key, owner_sub, kind, ref_id, project_id, ir_hash, external_sync_json, "
         "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, '{}', ?, ?)",
-        (target_key, OWNER, kind, ref_id, project_id, "0123456789ab", created_at, created_at),
+        (target_key, owner, kind, ref_id, project_id, "0123456789ab", created_at, created_at),
     )
+
+
+def _projects(store, owners: dict) -> None:
+    """과제 행(소유자) — 큐 · 승격 응답이 보는 사람의 과제를 가린다(D48)."""
+    for project_id, owner in owners.items():
+        store.execute("INSERT INTO rr_projects(id, owner_sub, code, created_at, updated_at) VALUES (?, ?, ?, 1, 1)",
+                      (project_id, owner, project_id))
 
 
 def _snapshot(store, snapshot_id, *, project_id="P1", ir=None, ir_hash=None):
@@ -55,7 +63,7 @@ def _finding(
     store, finding_id, target_key, *, project_id="P1", cluster_key=NORM_A, agent_key="seat-a", model="claude-x",
     change_kind="placement", mechanism="interface", mechanism_detail="interference", direction="risk",
     severity="중대", status="open", recall_eligible=1, origin="llm", primed=False, feature_snapshot=None,
-    created_at=100, claim="합성 클레임",
+    created_at=100, claim="합성 클레임", owner=OWNER,
 ):
     """패널·좌석 의견까지 한 벌로 만들어 finding 을 넣는다(좌석 수·모델 수를 세려면 세 표가 다 필요하다)."""
     panel_id = f"PN-{target_key}-{agent_key}"
@@ -71,7 +79,7 @@ def _finding(
         "owner_sub, direction, domain, mechanism, mechanism_detail, change_kind, subject_key, severity, sev3, "
         "judgement, evidence_grade, precedent, cluster_key, finding_json, recall_eligible, status, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'mech', ?, ?, ?, ?, ?, 2, 'WARNING', '문헌·규격', 'none', ?, ?, ?, ?, ?)",
-        (finding_id, f"{panel_id}#{finding_id}", origin, target_key, panel_id, opinion_id, project_id, OWNER,
+        (finding_id, f"{panel_id}#{finding_id}", origin, target_key, panel_id, opinion_id, project_id, owner,
          direction, mechanism, mechanism_detail, change_kind, CK, severity, cluster_key, json.dumps(fj),
          recall_eligible, status, created_at),
     )
@@ -142,7 +150,9 @@ def test_resolve_cluster_key_follows_chain_and_skips_revoked(risk_store):
     store.execute(
         "INSERT INTO rr_cluster_alias(old_cluster_key, new_cluster_key, owner_sub, reason, decided_by, decided_at, "
         "revoked_by, revoked_at) VALUES ('b', 'c', ?, 'cluster_merge', ?, 1, ?, 2)", (OWNER, OWNER, OWNER))
-    assert learning.resolve_cluster_key(store, "a") == "b"
+    assert learning.resolve_cluster_key(store, "a", owner_sub=OWNER) == "b"
+    # 별칭은 소유자마다다 — 남의 키 해석에는 닿지 않는다(조합 검토 M7).
+    assert learning.resolve_cluster_key(store, "a", owner_sub="someone@else.com") == "a"
 
 
 def test_resolve_cluster_key_breaks_cycle(risk_store):
@@ -151,7 +161,7 @@ def test_resolve_cluster_key_breaks_cycle(risk_store):
         store.execute(
             "INSERT INTO rr_cluster_alias(old_cluster_key, new_cluster_key, owner_sub, reason, decided_by, "
             "decided_at) VALUES (?, ?, ?, 'cluster_merge', ?, 1)", (old, new, OWNER, OWNER))
-    assert learning.resolve_cluster_key(store, "a") == "b"
+    assert learning.resolve_cluster_key(store, "a", owner_sub=OWNER) == "b"
 
 
 # ---------------------------------------------------------------- §7.4 라벨 훅·재합산
@@ -254,6 +264,49 @@ def test_mine_creates_candidate_and_queue(risk_store):
     assert queue["kind"] == "pattern_candidate" and queue["status"] == "open"
     assert payload["pattern_id"] == "P-001" and payload["proposal"] == "known"
     assert len(payload["sample_claims"]) <= 5
+
+
+def test_global_mining_queues_only_claims_of_projects_the_owner_can_see(risk_store):
+    """야간 마이닝은 전역이라 남의 원자도 센다(통계는 전역 그대로) — 그러나 새 패턴 큐 항목의 주장 · 대상 키는 그 큐 주인이 볼 수 있는
+    과제의 원자에서만 고르고 남의 과제는 수로만 싣는다(D48 조정자 결정). 종전에는 앞 다섯 원자를 소유자를 보지 않고 실었다."""
+    store = risk_store
+    _projects(store, {"P1": OWNER, "P2": OWNER, "PX": STRANGER})
+    _spread(store, 3)
+    store.execute("UPDATE rr_findings SET created_at = 50 WHERE finding_id = 'F1a'")       # 큐 주인은 첫 원자의 소유자다
+    _target(store, "TX", project_id="PX", owner=STRANGER)
+    for agent_key in ("seat-a", "seat-b"):
+        _finding(store, f"FX{agent_key[-1]}", "TX", project_id="PX", agent_key=agent_key, owner=STRANGER,
+                 claim="남의 과제의 주장", created_at=60)
+    learning.mine_patterns(store)
+    queue = store.query_one("SELECT owner_sub, payload_json FROM rr_curation_queue", ())
+    payload = json.loads(queue["payload_json"])
+    text = json.dumps(payload, ensure_ascii=False)
+    assert queue["owner_sub"] == OWNER and payload["sample_claims"]
+    assert [leak for leak in ("TX", "FXa", "FXb", "남의 과제의 주장") if leak in text] == []
+    assert payload.get("other_projects_n") == 1
+    assert (payload["n_projects"], payload["n_findings"]) == (3, 8)                       # 셈은 전역 패턴 그대로
+
+
+def test_global_mining_stores_design_values_only_from_projects_the_owner_can_see(risk_store):
+    """전역 마이닝이라도 패턴 행에 저장하는 특징 범위(설계 값)는 그 행 주인이 볼 수 있는 과제의 원자에서만 고른다 — 셈(n_*)은 전역
+    그대로고 주인의 내보내기는 그 밖의 값을 싣지 않는다(조합 검토 M6). 종전에는 남의 원자 gap_mm 9.75 가 주인 행에 들었다."""
+    store = risk_store
+    _projects(store, {"P1": OWNER, "P2": OWNER, "PX": STRANGER})
+    for i, gap in enumerate((0.4, 0.5, 0.6), start=1):
+        _target(store, f"T{i}", project_id=f"P{(i % 2) + 1}")
+        for agent_key in ("seat-a", "seat-b"):
+            _finding(store, f"F{i}{agent_key[-1]}", f"T{i}", project_id=f"P{(i % 2) + 1}", agent_key=agent_key,
+                     feature_snapshot={"e:0123456789ab": {"gap_mm": gap}})
+    _target(store, "TX", project_id="PX", owner=STRANGER)
+    _finding(store, "FXa", "TX", project_id="PX", owner=STRANGER, feature_snapshot={"e:0123456789ab": {"gap_mm": 9.75}})
+    learning.mine_patterns(store)
+    row = store.query_one("SELECT owner_sub, feature_ranges_json, n_projects FROM rr_patterns", ())
+    assert row["owner_sub"] == OWNER and json.loads(row["feature_ranges_json"]) == {"edge.gap_mm": [0.4, 0.6]}
+    assert row["n_projects"] == 3                                                            # 셈은 전역 그대로
+    learning.mine_patterns(store)                                                           # 다시 돌아도(통계 갱신) 같다
+    assert json.loads(store.query_one("SELECT feature_ranges_json FROM rr_patterns", ())["feature_ranges_json"]) == {
+        "edge.gap_mm": [0.4, 0.6]}
+    assert "9.75" not in "".join(export.iter_lines(store, OWNER, 0))
 
 
 def test_mine_below_threshold_makes_nothing(risk_store):
@@ -567,6 +620,46 @@ def test_promote_rule_creates_active_rule(risk_store):
     assert json.loads(row["backtest_json"])["precision"] == 1.0
     assert store.query_one("SELECT status FROM rr_patterns WHERE id = 'P-001'", ())["status"] == "rule"
     assert [r["id"] for r in learning.active_pattern_rules(store)] == [row["id"]]
+
+
+def _backtest_with_a_stranger(store) -> None:
+    """주인의 라벨 코퍼스(P1) + 남의 과제 하나(PX)의 라벨 대상 둘 — 같은 패턴의 백테스트 표본에 섞인다."""
+    _projects(store, {"P1": OWNER, "PX": STRANGER})
+    _backtest_corpus(store)
+    _snapshot(store, "SX", project_id="PX", ir={
+        "nodes": [{"nid": "n1"}, {"nid": "n2"}],
+        "edges": [{"eid": "e1", "a": "n1", "b": "n2", "kind": "interference", "attrs": {"penetration_depth": 0.1}}],
+        "warnings": []})
+    for n in (1, 2):                                           # 남의 과제 하나에 라벨 대상 둘 — 수는 과제로 센다
+        _target(store, f"TX{n}", project_id="PX", ref_id="SX", created_at=150 + n, owner=STRANGER)
+        _finding(store, f"FX{n}", f"TX{n}", project_id="PX", owner=STRANGER)
+        _label(store, f"LX{n}", f"FX{n}", "confirmed", labeled_at=250 + n)
+    _pattern(store, "P-001", status="known")
+
+
+def _promote_to_rule(store, decided_by: str) -> dict:
+    return learning.promote(store, "P-001", to_status="rule", decided_by=decided_by,
+                            rule={"condition_json": CONDITION_HIT, "why_it_matters": "간섭 깊이가 확정 범위를 넘었다"})
+
+
+def test_promote_rule_shows_backtest_targets_only_of_projects_the_viewer_can_see(risk_store):
+    """규칙 승격 응답의 백테스트 표본은 패턴 주인과 결정한 사람 둘 다 볼 수 있는 과제의 대상만 키로 싣고 나머지는 과제 수로만 —
+    채점(n_labeled · 정밀도 · 재현율)은 전역 라벨 그대로다(D48). 종전에는 모든 소유자의 라벨 대상 키를 실었다."""
+    store = risk_store
+    _backtest_with_a_stranger(store)
+    out = _promote_to_rule(store, OWNER)
+    samples = [s["target_key"] for s in out["backtest"]["samples"]]
+    assert samples == [f"T{i:02d}" for i in range(1, 13)]                                   # TX1 · TX2 는 없다
+    assert out["backtest"].get("other_projects_n") == 1
+    assert out["backtest"]["n_labeled"] == 14                                                # 채점은 전역 그대로
+
+
+def test_promote_rule_samples_need_both_the_owner_and_the_decider(risk_store):
+    """둘 다 볼 수 있는 과제만이다 — 주인의 과제만 보는 사람도, 남의 과제만 보는 사람도 혼자서는 열지 못한다(교집합)."""
+    store = risk_store
+    _backtest_with_a_stranger(store)
+    out = _promote_to_rule(store, STRANGER)
+    assert out["backtest"]["samples"] == [] and out["backtest"].get("other_projects_n") == 2
 
 
 def test_promote_rule_requires_human_written_text(risk_store):

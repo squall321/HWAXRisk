@@ -340,7 +340,7 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = N
     if target is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
     if not routes._is_admin(ident):
-        routes.require_role(target["project_id"], email, "editor")
+        routes._target_editor(target_key, target["project_id"], email)      # 남에게는 없는 대상과 같은 답(남 숨김 훑기)
     web = web_paths(project_id=target["project_id"], target_key=target_key)
     if mode == "reviews":
         return _start_review_job(ident, store, target_key, web, tier=tier, consent=consent, modifiers=modifiers,
@@ -397,13 +397,47 @@ def _start_review_job(ident: identity.Identity, store: Any, target_key: str, web
 _ALREADY = {"pause": ("paused",), "resume": ("queued", "running")}
 
 
-def job_action(ident: identity.Identity, *, job_id: str, action: str) -> dict:
-    """`POST /api/jobs/{id}/{action}`(pause|resume|cancel). 이미 그 상태면 그대로 돌려준다(`changed: false`)."""
+# 실패 셀 처분(재설계 M3 C3-4) — 새 도구 없이 risk_job_action 의 두 갈래로(REST POST …/cells/retry · …/cells/skip 와 같은 함수).
+_DISPOSE_ACTIONS = {"retry_failed": "retry", "skip_failed": "skip"}
+
+
+def job_action(ident: identity.Identity, *, job_id: str, action: str, reason: str | None = None,
+               filter: dict | None = None, consent: bool = False) -> dict:
+    """`POST /api/jobs/{id}/{action}`(pause|resume|cancel). 이미 그 상태면 그대로 돌려준다(`changed: false`).
+
+    `retry_failed`·`skip_failed` 는 그 검토 잡이 찍은(run_id) 셀 가운데 `failed` 를 다시 열거나 사유와 함께 넘긴다 — `filter`
+    ({agent_key?, unit_id?, domain?, error_code?, state?})로 좁히고 job_id 는 이 잡으로 못 박는다. 응답은 REST 처분과 같다
+    (`review_runner.dispose_cells`). 넘김은 사유(4~300자)가 필수다. 다시의 `consent` 는 REST 와 같은 뜻이다(사람이 동의한 뒤에만
+    true — 반대 검토 MEDIUM 13). 재개의 `consent` 는 다시 연 셀의 몫(consent_extra)의 동의다(REST 재개의 consent 와 같다 — 4차
+    MEDIUM 2 · D-49). 쓰기다 — 위임 단언 없는 Bearer 는 delegation_required."""
     require_delegate(ident)
+    if consent and action not in ("retry_failed", "resume"):
+        raise AppError("E100", "consent 는 retry_failed(다시가 세울 잡의 동의)와 resume(다시 연 셀 몫의 동의)의 칸이다.", 422)
     store = routes.get_store()
+    if action in _DISPOSE_ACTIONS:
+        job = store.query_one("SELECT target_key, mode FROM rr_jobs WHERE id = ?", (job_id,))
+        if job is None or job["mode"] != review_runner.MODE:
+            raise routes._not_visible(job_id)
+        try:
+            routes._editable_target(job["target_key"], ident)
+        except AppError as exc:
+            # 남의 잡 — 없는 잡과 같은 답(not_visible)이다. 라우트의 404 글은 대상 열쇠를 싣는다(재설계 M3 C3-13).
+            if exc.http_status == 404:
+                raise routes._not_visible(job_id) from None
+            raise
+        if filter is not None and not isinstance(filter, dict):
+            raise AppError("cells_selector_invalid", "filter 는 객체다.", 422)
+        selector = {**(filter or {}), "job_id": job_id}
+        if _DISPOSE_ACTIONS[action] == "retry":
+            return routes.post_cells_retry(job["target_key"],
+                                           routes.CellsRetryBody(filter=selector, reason=reason, consent=consent), ident=ident)
+        return routes.post_cells_skip(job["target_key"], routes.CellsSkipBody(filter=selector, reason=reason or ""),
+                                      ident=ident)
+    if reason is not None or filter is not None:
+        raise AppError("E100", "reason·filter 는 retry_failed·skip_failed 의 칸이다.", 422)
     before = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))
     try:
-        out = routes.job_action(job_id, action, ident=ident)
+        out = routes.job_action(job_id, action, consent=consent, ident=ident)
     except AppError as exc:
         # 라우트가 소유를 확인한 뒤에야 E100(상태 전이 불가)이 난다 — 여기서 상태를 읽어 돌려줘도 남의 잡을 흘리지 않는다.
         row = store.query_one("SELECT state, pause_reason FROM rr_jobs WHERE id = ?", (job_id,))
@@ -837,6 +871,14 @@ REVIEW_HOLD_FIX: dict[str, str] = {
     "content_fail_rate": "최근 호출의 절반 이상이 내용 탓으로 실패해 차단기가 열렸다 — risk_get_cells(state='failed') 로 실패 까닭을"
                          " 보고 고친 뒤 risk_job_action(action='resume') 으로 재개한다.",
     "aidh_unreachable": "범위 안 전문가 모두 카드 묶음을 받지 못했다(AIDataHub·도구 서버) — hold_until 에 저절로 다시 본다.",
+    # 다시 연 셀의 몫(반대 검토 4차 MEDIUM 2 · D-49) — 진행판 review.job.progress.reopened_extra 가 셀 수 · 추정 호출을 준다
+    "consent_extra": "다시 연 셀(넓힘 · 넘김 · 보충 표본 · 살아 있는 잡에 얹은 다시)의 추정 호출이 동의받은 몫의 여유를 넘었다 — 그 셀 수와"
+                     " 비용(review.job.progress.reopened_extra)을 사용자에게 보이고 동의를 받은 뒤에만 risk_job_action(action='resume',"
+                     " consent=true) 로 이어 간다. 동의하지 않으면 risk_job_action(action='skip_failed', filter={'state': 'pending'},"
+                     " reason=…) 로 그 셀을 넘긴다(여유 안으로 돌아오면 잡이 이어 돈다).",
+    "max_calls": "이 잡의 호출 추정 합이 HWAXRISK_REVIEW_MAX_CALLS 를 넘는다 — 동의로는 풀리지 않는다. 동의를 기다리는 셀을"
+                 " risk_job_action(action='skip_failed', filter={'state': 'pending'}, reason=…) 로 넘기거나, 운영자가 상한을 올린 뒤"
+                 " risk_job_action(action='resume') 으로 재개한다.",
 }
 REVIEW_DISABLED_FIX = ("데이터 디렉터리의 knobs.env 에 HWAXRISK_REVIEW_ENABLED=1 을 적고 앱을 다시 띄운다 — 꺼져 있는 동안 검토 잡은"
                        " 새 선점·새 호출을 내지 않는다(도는 호출은 끝까지 간다).")
@@ -856,8 +898,8 @@ def _review_start_step(target_key: str) -> dict:
     return _step("risk_start_job", {"target_key": target_key, "mode": "reviews", "scope": {"agents": ["<agent_key>", "…"]}},
                  "카드 대조 검토 잡을 세운다 — 범위의 전문가는 facts.review_order(영역마다 영역 안 순위 1~3 — 영역 · 영역 안 순위 ·"
                  " tier · 입력 결손 · 묶음을 얼린 뒤의 카드 수, 전부는 risk_get_coverage(order_offset=0) 가 쪽으로 준다)를 보고 사용자가"
-                 " 고른다(M2 파일럿은 영역마다 대표 한 명 — 영역 안 순위 1 이고 input_gaps 가 빈 전문가). 입력 결손 전문가를 넣으면 422"
-                 " input_gap_m3 다. 범위 밖 셀은 pending 으로 남아 다음 잡이 돌 수 있다. 잡을 만들면"
+                 " 고른다(scope 를 빼면 로스터 전원 — 입력 결손 전문가도 들고 그 셀은 입력 결손 호출로 닫힌다, M2 파일럿은 영역마다 대표"
+                 " 한 명 — 영역 안 순위 1). 범위 밖 셀은 pending 으로 남아 다음 잡이 돌 수 있다. 잡을 만들면"
                  " 호출 수 추정(calls_estimate)이 나오고 HWAXRISK_REVIEW_CONSENT_CALLS 를 넘으면 동의가 필요하다 — 범위와 비용을 사용자에게"
                  " 보이고 확인받은 뒤 부른다." + _CONSENT_WHY)
 
@@ -878,7 +920,25 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
     brief = routes.review_order_brief(order)
     facts["review_order"] = brief["order"]
     facts["review_order_page"] = brief["order_page"]
-    facts["review_job"] = job
+    facts["review_job"] = routes.mcp_job_brief(job)       # 범위 · 워커는 수와 앞 몇(반대 검토 MEDIUM 12)
+    # 완결 표기(캐시)와 사슬 — 지금 도는(없으면 마지막) 쟁점·종합 잡, 마지막 보고서 판의 머리(재설계 M3 S3-5 · 3.11).
+    facts["level_label"] = coverage.get("level_label")
+    for name in ("stage", "report"):
+        if coverage.get(name) is not None:
+            facts[name] = coverage[name]
+    _reraised_note(store, target_key, notes)
+    # 거르기 · 실패 셀 · 입력 결손 — 목록이 아니라 셈이다(359명 대상에서도 답이 짧게, 재설계 M3 C3-8). 진행판 review 칸과 같은 수다.
+    flt = review.get("filter") or {}
+    if flt:
+        facts["filter"] = {k: flt.get(k) for k in ("mode", "approved", "would_filter", "filtered", "audited", "widened", "off")}
+        facts["filter"]["audit"] = {k: (flt.get("audit") or {}).get(k) for k in ("risk_miss", "upper95", "floor_met")}
+    failed = store.query("SELECT error_code, COUNT(*) AS n FROM rr_review_cells WHERE target_key = ? AND state = 'failed'"
+                         " GROUP BY error_code ORDER BY error_code", (target_key,))
+    if failed:
+        facts["failed_cells"] = {"n": sum(int(r["n"]) for r in failed),
+                                 "by_code": {str(r["error_code"] or "unknown"): int(r["n"]) for r in failed}}
+    if (review.get("noinput") or {}).get("cells"):
+        facts["no_input"] = dict(review["noinput"])
     if units_state.get("status") not in units_module.OPEN_STATUSES:
         blocked.append(_blocked(
             "units_unbuildable", f"이 카드 대조 대상의 검토 단위가 서 있지 않다(빌드 {units_state.get('status')}).",
@@ -901,9 +961,18 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
                    "셀 격자 — " + ("이 검토 잡 범위의 " if job is not None else "") + "전문가 × 단위의 상태·판정 수·실패 까닭"
                    "(agent_key·state 로 더 거른다).", write=False)]
     scope_cells = ((review.get("cells") or {}).get("in_scope") or {}) if job is not None else {}
-    if int(((scope_cells.get("by_state") or {}).get("failed")) or 0):
+    failed_n = int(((scope_cells.get("by_state") or {}).get("failed")) or 0)
+    dispose: list[dict] = []
+    if failed_n:
         watch.append(_step("risk_get_cells", {**cells_args, "state": "failed"},
-                           f"이 검토 잡 범위에서 실패로 끝난 셀 {scope_cells['by_state']['failed']}개와 그 까닭(error_code).", write=False))
+                           f"이 검토 잡 범위에서 실패로 끝난 셀 {failed_n}개와 그 까닭(error_code).", write=False))
+        if job["state"] not in REVIEW_LIVE_STATES:
+            # 끝난 잡의 실패 셀 — 사람이 처분한다(재설계 M3 C3-4). 다시는 범위를 잡은 검토 잡을 세우고, 넘김은 사유가 필수다.
+            dispose = [_step("risk_job_action", {"job_id": job["id"], "action": "retry_failed"},
+                             f"실패 셀 {failed_n}개를 다시 연다(까닭을 고친 뒤 — 같은 까닭이면 같은 실패다). 그 셀들로 검토 잡이 선다"
+                             " — 호출 추정이 동의 문턱을 넘으면 consent_required 로 돌아온다." + _CONSENT_WHY),
+                       _step("risk_job_action", {"job_id": job["id"], "action": "skip_failed", "reason": "<4~300자 사유>"},
+                             "다시 돌리지 않을 실패 셀을 사유와 함께 넘긴다 — 그 전문가가 다시 마감되고 보고서에 '넘김 — 사유' 로 남는다.")]
     if finalized:
         names = ", ".join(finalized[:9]) + (" …" if len(finalized) > 9 else "")
         watch.append(_step("risk_get_expert_report", {"target_key": target_key, "agent_key": finalized[0]},
@@ -911,6 +980,11 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
                            " part='full' 이 전부이고 next_page 로 이어 받는다.", write=False))
     watch.append(_step("risk_next_step", {"project_id": project_id}, "단계·막힘을 다시 본다.", write=False))
     if live:
+        # 다시 연 셀 몫이 넘었으면 보류 코드와 상관없이 동의 막힘을 보인다(사람이 멈췄거나 자격 보류가 덮어도 — M3 묶음 검토 M4 · D-52)
+        extra = (job.get("progress") or {}).get("reopened_extra") or {}
+        if extra.get("hold") and extra["hold"] != job.get("hold_code"):
+            blocked.append(_blocked(str(extra["hold"]), review_runner.reopen_hold_message(extra),
+                                    _review_hold_fix(extra["hold"]), job_id=job["id"]))
         if job["state"] == "paused":
             code = job.get("hold_code")
             if code == "user":
@@ -930,23 +1004,124 @@ def _cells_answer(answer, store: Any, ident: identity.Identity, owner: str, targ
         waiting = job.get("waiting") or {}
         if waiting.get("reason"):
             notes.append(f"검토 잡이 기다린다 — {waiting['reason']}" + (f": {waiting['note']}" if waiting.get("note") else "") + ".")
+        if job.get("phase") in REVIEW_PHASE_NOTES:
+            notes.append(REVIEW_PHASE_NOTES[job["phase"]])
         return answer("running", [*repersist_steps, *watch])
-    steps = [*repersist_steps]
+    stage = coverage.get("stage")
+    if stage is not None and stage["state"] in REVIEW_LIVE_STATES:
+        return _chain_answer(answer, target_key, project_id, stage, repersist_steps, blocked, notes)
+    steps = [*repersist_steps, *dispose]
     if job is not None:
         notes.append(f"마지막 검토 잡 {job['id']} 는 {job['state']} 다" + (f" — {job['error']}" if job.get("error") else "") + ".")
     if config.review_enabled() and units_state.get("status") in units_module.OPEN_STATUSES:
         credential, why = review_runner.review_credential(store, None, owner, ident.email)
         if credential is None:
             blocked.append(_blocked("pat_unavailable", f"카드 대조 검토는 사용자 PAT 로만 돈다 — {why}.", fix_register_pat()))
-        runnable = [r["agent_key"] for r in order if not r.get("input_gaps")]
-        left = int(store.query_one(
-            f"SELECT COUNT(*) AS n FROM rr_review_cells WHERE target_key = ? AND state = 'pending'"
-            f" AND agent_key IN ({','.join('?' * len(runnable)) or 'NULL'})", (target_key, *runnable))["n"] or 0)
+        left = int(store.query_one("SELECT COUNT(*) AS n FROM rr_review_cells WHERE target_key = ? AND state = 'pending'",
+                                   (target_key,))["n"] or 0)
         if job is None or left:
             steps.append(_review_start_step(target_key))
             if job is not None:
-                notes.append(f"범위 밖으로 남은 셀이 {left}개다(입력 결손이 아닌 전문가) — 범위를 넓혀 새 검토 잡으로 이어 돈다.")
+                notes.append(f"범위 밖으로 남은 셀이 {left}개다 — 범위를 넓혀 새 검토 잡으로 이어 돈다.")
+        elif stage is None and job["state"] == "completed" and not _chain_marked(store, job["id"]):
+            steps.append(_pre_m3_chain_step(target_key, job["id"], notes))
     if job is None:
         steps.append(_step("risk_get_units", {"target_key": target_key},
                            "검토 단위 목록(전문가가 카드로 대조할 변경 묶음).", write=False))
+    report = coverage.get("report")
+    if report is not None:
+        steps.append(_step("risk_get_report", {"target_key": target_key, "part": "summary"},
+                           f"종합 보고서 v{report['version_no']}({report['trigger']}) — 완결 표기·잔여·수·쟁점 결과. part='full'"
+                           " 이 전부이고 next_page 로 이어 받는다.", write=False))
+        _code_only_notes(store, target_key, notes)
+    if stage is not None:
+        # 사슬이 끝났다(살아 있는 쟁점·종합 잡 없음) — 막음 잔여는 사람이 확인해야 다음 레벨로 오른다(MCP 경로의 확인은 없다).
+        pending = [q for q in coverage.get("qualifiers") or () if q.get("blocking") and not q.get("acked")]
+        if pending:
+            blocked.append(_blocked(
+                "residual_unacked", f"막음 잔여 {len(pending)}종이 확인을 기다린다 — {' · '.join(q['label'] for q in pending)}.",
+                "웹 화면에서 소유자·관리자가 확인한다(사유 필수) — 잔여와 basis_hash 는 REST GET"
+                f" /api/targets/{target_key}/closure 가 준다. Claude 경로의 확인은 없다.",
+                items=[q["item"] for q in pending]))
     return answer("done" if job is not None and job["state"] == "completed" else "review", [*steps, *watch])
+
+
+# 검토 잡의 단계(진행판 phase)마다 길잡이가 덧붙이는 말 — live 는 근거 꾸러미 실호출(B 층, 재설계 M3 C3-12)이다.
+REVIEW_PHASE_NOTES = {
+    "live": "검토 잡이 근거 꾸러미 실호출(B 층) 단계다 — 단위마다 실데이터를 얼리는 중이고, 끝나면 카드 묶음 · 셀 호출이 선다.",
+}
+
+
+def _chain_answer(answer, target_key: str, project_id: str, stage: dict, repersist_steps: list[dict], blocked: list[dict],
+                  notes: list[str]) -> dict:
+    """사슬 단계(S3-5)가 살아 있는 cells 대상의 길잡이 — 쟁점 잡이면 risk_get_issues, 종합 잡이면 진행판을 지켜본다. 멈췄으면 재개가
+    맨 앞이다(앱 재기동으로 멈춘 잡은 M4 전에는 저절로 재개하지 않는다). 자격이 없어 집히지 않는 잡은 그 막힘을 준다."""
+    mode = stage["mode"]
+    what = ("쟁점 잡(쟁점 패널을 한 줄로 — 웹 러너가 돈다)" if mode == "issues"
+            else "종합 잡(영역 요약 → 과제 종합 → 보고서 판)")
+    watch = ([_step("risk_get_issues", {"target_key": target_key},
+                    "쟁점 목록 — 상태 · 등급 · 결과(유지 · 하향 · 상향 · 기각 · 불명)와 원래 분포.", write=False)]
+             if mode == "issues" else
+             [_step("risk_get_coverage", {"target_key": target_key, "with_seats": False},
+                    "진행판 — 지금 도는 사슬 단계(stage) · 마지막 보고서 판(report) · 완결 표기.", write=False)])
+    watch.append(_step("risk_next_step", {"project_id": project_id}, "단계·막힘을 다시 본다.", write=False))
+    error = str(stage.get("error") or "")
+    if error.startswith("pat_unavailable"):
+        blocked.append(_blocked("pat_unavailable", f"{what} {stage['job_id']} 를 돌릴 사용자 PAT 가 없다 — {error}",
+                                fix_register_pat() + " 등록하면 러너가 그 잡을 이어 집는다.", job_id=stage["job_id"]))
+    if stage["state"] == "paused":
+        blocked.append(_blocked("chain_paused", error or f"{what} 이 멈췄다.",
+                                "까닭을 고친 뒤 risk_job_action(action='resume') 으로 재개한다 — 앱 재기동으로 멈춘 잡은 M4 전에는"
+                                " 저절로 재개하지 않는다(결과가 저장된 패널은 다시 저장이 먼저다).", job_id=stage["job_id"],
+                                hold_code=stage.get("hold_code"), pause_reason=stage.get("pause_reason")))
+        return answer(mode, [*repersist_steps, _step("risk_job_action", {"job_id": stage["job_id"], "action": "resume"},
+                                                     f"멈춘 {what} 을 재개한다."), *watch])
+    if stage.get("advice") == "issue_yield_low":
+        notes.append("최근 쟁점 패널 다섯이 전부 기각·불명이다(issue_yield_low) — 남은 쟁점을 계속 돌릴지 사람이 정한다(멈추려면"
+                     " risk_job_action(action='pause')).")
+    notes.append(f"{what} {stage['job_id']} 가 {stage['state']} 다 — 끝나면 사슬이 다음 단계(쟁점 → 종합 → 보고서 판)를 저절로 세운다.")
+    return answer(mode, [*repersist_steps, *watch])
+
+
+def _chain_marked(store: Any, job_id: str) -> bool:
+    from app import chain  # noqa: PLC0415 — chain 은 종합·쟁점을 거쳐 무겁다.
+
+    return chain.chain_marked(store, job_id)
+
+
+def _pre_m3_chain_step(target_key: str, job_id: str, notes: list[str]) -> dict:
+    """M2 코드가 세운 검토 잡(사슬 표지 없음) 뒤에는 쟁점 → 종합이 저절로 서지 않는다(review1 M8 — 조정자 결정: 사람이 길잡이에서
+    시작한다). 검토 잡을 한 번 세우면 셀이 다 닫혀 있어 검토 호출 없이 곧바로 끝나고, 그 잡(표지가 있다)의 끝에서 사슬이 선다."""
+    notes.append(f"마지막 검토 잡 {job_id} 는 M2 시절 잡이라(사슬 표지 없음) 쟁점 → 종합이 저절로 서지 않았다 — 이어 돌리려면 사람이"
+                 " 아래 risk_start_job 걸음으로 시작한다. 종합만 다시 내려면 웹 화면이나 REST POST"
+                 f" /api/targets/{target_key}/report {{refresh_summaries:true}} 다.")
+    return _step("risk_start_job", {"target_key": target_key, "mode": "reviews"},
+                 "검토 잡을 한 번 세워 사슬을 시작한다 — 셀이 다 닫혀 있어 검토 호출 없이 곧바로 끝나고, 그 끝에서 쟁점 선정 → 쟁점 패널 →"
+                 " 종합 → 보고서 판이 저절로 선다. 쟁점 패널 · 영역 요약은 엔진 호출이 든다 — 사용자에게 보이고 확인받은 뒤 부른다.")
+
+
+def _reraised_note(store: Any, target_key: str, notes: list[str]) -> None:
+    """패널이 판정한 뒤 근거가 바뀌었는데 상한에 자리가 없어 다시 돌지 못한 결과 쟁점(review1 H3 — 조정자 결정) — 표기와 다시 올리는
+    길(사람의 결정은 상한 밖이어도 된다)과 넘기는 길(완결 잔여 issues_reraised 확인)."""
+    from app import registry  # noqa: PLC0415 — registry 는 무겁다.
+
+    rows = store.query("SELECT issue_id FROM rr_issues WHERE target_key = ? AND reraised_json IS NOT NULL"
+                       " AND state IN ('resolved', 'inconclusive') ORDER BY issue_id", (target_key,))
+    if not rows:
+        return
+    ids = [r["issue_id"] for r in rows]
+    shown = ", ".join(ids[:10]) + (f" 외 {len(ids) - 10}건" if len(ids) > 10 else "")
+    notes.append(f"쟁점 {len(ids)}건 — {registry.REARGUE_LABEL}(상한에 자리가 없어 다시 돌지 않았다): {shown}. 다시 토의하려면 웹"
+                 " 화면이나 REST PUT /api/issues/<issue_id> {action:'queue', reason} 로 올린다(사람의 결정은 상한 밖이어도 된다)."
+                 " 넘기려면 완결 잔여 issues_reraised 를 소유자·관리자가 확인한다.")
+
+
+def _code_only_notes(store: Any, target_key: str, notes: list[str]) -> None:
+    """서술 없이 닫힌 요약(code_only — 행 0 인 영역은 빼고)의 까닭을 한 줄로."""
+    from app import synth  # noqa: PLC0415 — synth 는 등록부·완결을 거쳐 무겁다.
+
+    held = [f"{r['scope_key'] if r['scope_kind'] == 'domain' else '과제 종합'} {r['state_reason']}"
+            for r in synth.latest_summaries(store, target_key)
+            if r["state"] == "code_only" and r["state_reason"] != "no_rows"]
+    if held:
+        notes.append(f"서술 없이 표만 선 요약 {len(held)}건 — " + " · ".join(held) + "(까닭은 보고서 그 쪽의 '서술 없음' 에 있다).")

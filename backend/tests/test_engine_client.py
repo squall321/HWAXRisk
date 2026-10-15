@@ -1,6 +1,7 @@
 # engine_client 배선 검사 — SSE 프레임 파싱·좌석 귀속 입력 조립·자격 순서((b)→(a))·429/연결오류 분기(전부 MockTransport, 실 LLM 호출 없음)
 from __future__ import annotations
 
+import inspect
 import json
 from types import SimpleNamespace
 
@@ -308,6 +309,24 @@ def test_a_429_hands_back_its_conversation_and_the_retry_reuses_it(tmp_path):
     result = engine.run({"question": "q"}, owner_sub="other@example.com", conversation=second.value.conversation)
     assert created == ["conv-1", "conv-2"] and result["conv_id"] == "conv-2" and result["credential"] == "owner"
     assert chats == [("conv-1", "Bearer owner-pat"), ("conv-1", "Bearer owner-pat"), ("conv-2", "Bearer other-pat")]
+
+
+def test_the_conversation_reaches_the_runner_before_the_stream_opens(tmp_path):
+    """대화를 만들면 스트림을 열기 전에 on_conversation 으로 러너에 넘긴다 — 러너가 곧바로 패널에 적어, 스트림 도중에 앱이 죽어도
+    그 심의의 포털 대화를 잃지 않는다(D48)."""
+    assert "on_conversation" in inspect.signature(engine_client.PortalPanelEngine.run).parameters
+    order: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/agent/conversations":
+            order.append("create")
+            return httpx.Response(200, json={"id": "conv-1"})
+        order.append("chat")
+        return httpx.Response(200, text=STREAM, headers={"content-type": "text/event-stream"})
+
+    result = _engine(tmp_path, handler).run({"question": "질문"},
+                                            on_conversation=lambda conv_id: order.append(f"linked:{conv_id}"))
+    assert order == ["create", "linked:conv-1", "chat"] and result["conv_id"] == "conv-1"
 
 
 def test_run_cuts_a_stream_that_outlives_the_panel_wall_clock(tmp_path):

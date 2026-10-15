@@ -1,0 +1,377 @@
+# 걸린 것만 이중 판정(재설계 M3 C3-9) — 걸린 별칭만 rev · 하나면 단독 · 1순위는 보정용 전량 · 무작위 뒤집기 자동 켬을 검토 루프 끝까지 본다
+"""가짜 엔진의 걸림 스위치(카드 0·1·3장)로 셀마다 낸 rev·단독 호출을 센다. 워커 하나 — 검토 순서가 1순위를 먼저 집어 보정이 먼저 선다.
+
+- 팩은 엔진 계약 예제(pack_ok — 점검 카드 6장, K=8 이라 묶음 하나)이고 단위는 시험대의 첫 단위 하나로 좁힌다.
+- 거르기는 끈다(분류는 test_review_filter.py).
+"""
+from __future__ import annotations
+
+import json
+
+import pytest
+
+from app import review_cells, review_quality, review_verify, units
+from tests.synth import fake_review_engine as fre
+from tests.synth import review_rig as rig
+from tests.synth.fake_review_engine import FakeReviewEngine
+
+MECH1, MECH2 = "mech-syn-0", "mech-syn-1"
+ROSTER: tuple[dict, ...] = ({"key": MECH1, "domain": "mech", "relevance": 0.99},
+                            {"key": MECH2, "domain": "mech", "relevance": 0.9})
+
+
+@pytest.fixture
+def store(risk_store, monkeypatch, tmp_path):
+    rig.configure(monkeypatch, risk_store, tmp_path, risk_review_concurrency=1, risk_review_filter="off",
+                  risk_review_dual="flagged")
+    return risk_store
+
+
+def _packs() -> dict[str, dict]:
+    ok = fre.load("pack_ok.json")
+    return {r["key"]: fre.derive_pack(ok, r["key"], name=r["key"], domain=r["domain"]) for r in ROSTER}
+
+
+def _record(alias: str) -> str:
+    return next(str(c["record_id"]) for c in fre.load("pack_ok.json")["cards"] if c["alias"] == alias)
+
+
+def _runs(fake: FakeReviewEngine, agent: str, variant: str) -> list[dict]:
+    return [r["body"] for r in fake.calls("run") if r["body"]["expert"]["key"] == agent and r["body"]["kind"] == "verdict"
+            and r["body"]["variant"] == variant]
+
+
+def _sample(store, key: str, agent: str) -> dict:
+    """그 전문가의 범위 안 첫 셀(단위 순서)의 sample_json."""
+    row = store.query_one("SELECT sample_json FROM rr_review_cells WHERE target_key = ? AND agent_key = ? AND run_id IS NOT NULL"
+                          " ORDER BY unit_seq LIMIT 1", (key, agent))
+    return json.loads(row["sample_json"] or "{}")
+
+
+def _run(store, fake: FakeReviewEngine, *, agents=None, one_unit: bool = True) -> tuple[str, str]:
+    key = rig.target(store, ROSTER)
+    unit_id = units.load_units(store, key)[0]["unit_id"]
+    job_id = rig.job(store, key, scope={**({"unit_ids": [unit_id]} if one_unit else {}),
+                                        **({"agents": agents} if agents else {})})
+    rig.Rig(store, fake).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    assert review_cells.review_invariants(store, key) == []
+    return key, unit_id
+
+
+# ---------------------------------------------------------------- 카드 0·1·3장 걸림
+@pytest.mark.parametrize("hits", [0, 1, 3])
+def test_only_flagged_aliases_get_a_second_judgement_and_rank_one_calibrates_the_whole_deck(store, hits):
+    """flagged — 걸림 0 인 묶음은 rev 0 · 단독 0, 걸림 하나면 rev 0 · 그 카드 단독 1, 둘 이상이면 그 별칭만 실은 rev 1(나머지 카드는
+    제목 목록으로 내린다)과 걸린 카드마다 단독 1. 안 걸린 카드는 단독으로 새지 않는다. 1순위 셀은 보정이라 묶음 전체를 rev 한다.
+    1순위 밖 셀에는 무작위 뒤집기 표지(꺼짐 · 안 뽑힘)가 남는다."""
+    flagged = [f"K0{i}" for i in range(1, hits + 1)]
+    fake = FakeReviewEngine(_packs())
+    fake.verdicts = {_record(a): ("yes", "FAIL") for a in flagged}
+    key, _unit = _run(store, fake)
+    checkable = [c["alias"] for c in fre.load("pack_ok.json")["cards"] if c.get("checkable")]
+
+    revs = _runs(fake, MECH2, "rev")
+    assert len(revs) == (1 if hits >= 2 else 0)
+    ledger = [json.loads(r["cards_json"]) for r in store.query(
+        "SELECT cards_json FROM rr_review_calls WHERE target_key = ? AND agent_key = ? AND variant = 'rev'", (key, MECH2))]
+    assert ledger == ([flagged] if hits >= 2 else [])                       # 호출 원장도 실은 별칭만 적는다
+    if revs:
+        assert [c["alias"] for c in revs[0]["cards"]] == flagged
+        assert [d["alias"] for d in revs[0]["digest"]][:len(checkable) - hits] == [a for a in checkable if a not in flagged]
+    assert sorted(c["alias"] for b in _runs(fake, MECH2, "solo") for c in b["cards"]) == flagged
+    assert _sample(store, key, MECH2).get("dual_neg") == {"on": False, "picked": False}
+
+    (calib,) = _runs(fake, MECH1, "rev")                                     # 1순위 — 보정용 묶음 전체
+    assert [c["alias"] for c in calib["cards"]] == checkable
+    assert sorted(c["alias"] for b in _runs(fake, MECH1, "solo") for c in b["cards"]) == flagged
+    assert "dual_neg" not in _sample(store, key, MECH1)
+    eff = {r["alias"]: r["judgement"] for r in store.query(
+        "SELECT alias, judgement FROM rr_card_verdicts WHERE target_key = ? AND agent_key = ? AND is_effective = 1",
+        (key, MECH2))}
+    assert eff == {a: ("FAIL" if a in flagged else "OK") for a in checkable}
+
+
+def test_the_all_mode_and_an_m2_job_rev_every_deck(store, monkeypatch):
+    """all(M2 동작) — 묶음마다 rev 하나(1순위 밖 셀도). knobs 에 dual 칸이 없는 M2 잡도 all 로 돈다. 무작위 뒤집기 표지는 없다."""
+    fake = FakeReviewEngine(_packs())
+    key = rig.target(store, ROSTER)
+    unit_id = units.load_units(store, key)[0]["unit_id"]
+    job_id = rig.job(store, key, scope={"unit_ids": [unit_id]})
+    row = store.query_one("SELECT params_json FROM rr_jobs WHERE id = ?", (job_id,))
+    params = json.loads(row["params_json"])
+    for name in ("dual", "dual_calib", "dual_neg_pct"):
+        params["knobs"].pop(name)
+    store.execute("UPDATE rr_jobs SET params_json = ? WHERE id = ?", (json.dumps(params), job_id))
+    rig.Rig(store, fake).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    assert len(_runs(fake, MECH2, "rev")) == len(_runs(fake, MECH1, "rev")) == 1
+    assert "dual_neg" not in _sample(store, key, MECH2)
+
+
+# ---------------------------------------------------------------- 무작위 뒤집기 자동 켬(#32)
+@pytest.mark.parametrize(("rev_flip", "scope_rank1", "state"), [(True, True, "on"), (False, True, "off"),
+                                                                 (True, False, "unmeasured")])
+def test_random_reverse_turns_on_when_the_calibration_flips_more_than_five_percent(store, monkeypatch, rev_flip,
+                                                                                   scope_rank1, state):
+    """보정 모집단(1순위 셀 — 묶음 전체 rev)에서 fwd 가 걸림 없음인데 rev 가 걸림인 카드의 비율이 5% 를 넘으면(6장 가운데 1장)
+    1순위가 다 닫힌 뒤의 셀은 걸림 없는 묶음을 무작위로 rev 한다(비율 100% 로 둬 반드시 뽑힌다) — 표지 on · picked. 뒤집힘이
+    없으면 꺼짐이고, 1순위가 범위 밖이라 보정이 없으면(1순위 셀이 열려 있다) 미측정이라 켜지지 않는다. 1순위 셀은 잡 범위와
+    상관없이 대상의 검토 단위 전부라 단위를 좁히지 않는다. 켜짐은 원장에서 유도한다."""
+    import dataclasses
+
+    from app import config
+
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_dual_neg_pct=100))
+    fake = FakeReviewEngine(_packs())
+    if rev_flip:
+        fake.rev_verdicts = {_record("K01"): ("yes", "FAIL")}
+    key, _unit = _run(store, fake, agents=None if scope_rank1 else [MECH2], one_unit=False)
+    on = state == "on"
+    n_units = len(units.load_units(store, key))
+    samples = [json.loads(r["sample_json"]).get("dual_neg") for r in store.query(
+        "SELECT sample_json FROM rr_review_cells WHERE target_key = ? AND agent_key = ?", (key, MECH2))]
+    assert samples == [{"on": on, "picked": on}] * n_units
+    assert len(_runs(fake, MECH2, "rev")) == (n_units if on else 0)
+    if on:
+        assert [c["alias"] for c in _runs(fake, MECH2, "rev")[0]["cards"]] == [
+            c["alias"] for c in fre.load("pack_ok.json")["cards"] if c.get("checkable")]
+    # 한 번 켜진 대상은 꺼지지 않는다 — 원장에 켜진 셀이 하나라도 있으면 그 뒤 세션도 켠다
+    rows = [dict(r) for r in store.query("SELECT unit_id, agent_key, record_id, variant, judgement FROM rr_card_verdicts"
+                                         " WHERE target_key = ? AND agent_key = ?", (key, MECH1))]
+    assert review_verify.dual_neg_state(rows, tier_a_closed=scope_rank1)["state"] == state
+
+
+def test_random_reverse_waits_until_every_rank_one_cell_is_closed(store, monkeypatch):
+    """보정이 이미 5% 를 넘게 뒤집혔어도(1순위의 첫 단위) 1순위 셀이 대상에 아직 열려 있으면 미측정이라 켜지 않는다 — 분류의 1순위
+    대기(8번 줄)와 같은 때에 풀린다."""
+    import dataclasses
+
+    from app import config
+
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_dual_neg_pct=100))
+    fake = FakeReviewEngine(_packs())
+    fake.rev_verdicts = {_record("K01"): ("yes", "FAIL")}
+    key = rig.target(store, ROSTER)
+    first = units.load_units(store, key)[0]["unit_id"]
+    rig.Rig(store, fake).finish(rig.job(store, key, scope={"agents": [MECH1], "unit_ids": [first]}))
+    rows = [dict(r) for r in store.query("SELECT unit_id, agent_key, record_id, variant, judgement FROM rr_card_verdicts"
+                                         " WHERE target_key = ? AND agent_key = ?", (key, MECH1))]
+    assert review_verify.dual_neg_state(rows, tier_a_closed=True)["state"] == "on"      # 닫혔다면 켜졌을 비율이다
+    job_id = rig.job(store, key, scope={"agents": [MECH2]})
+    rig.Rig(store, fake).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    assert _runs(fake, MECH2, "rev") == []
+    assert {json.dumps(json.loads(r["sample_json"]).get("dual_neg"), sort_keys=True) for r in store.query(
+        "SELECT sample_json FROM rr_review_cells WHERE target_key = ? AND agent_key = ?", (key, MECH2))} == {
+        '{"on": false, "picked": false}'}
+
+
+# ---------------------------------------------------------------- 엔진이 알린 부딪침(RB3-1)
+@pytest.mark.parametrize("conflicted", [["K02"], ["K02", "K03"]])
+def test_an_engine_conflict_on_a_clear_row_is_treated_as_flagged(store, conflicted):
+    """엔진이 fwd 의 OK 행에 같은 카드의 다른 판정과 부딪쳤다고 알리면(checks.dup_conflict — RB3-1) 그 카드는 '문제없음' 으로 믿지
+    않는다 — 걸린 것처럼 두 번째 판정을 받는다. 하나면 단독, 둘이면 그 둘만 실은 rev(둘 다 OK 로 같아 단독은 없다). 다른 카드는
+    그대로 한 번이다."""
+    fake = FakeReviewEngine(_packs())
+    fake.dup_conflict = {(MECH2, a) for a in conflicted}
+    key, _unit = _run(store, fake)
+    revs = _runs(fake, MECH2, "rev")
+    solos = [c["alias"] for b in _runs(fake, MECH2, "solo") for c in b["cards"]]
+    if len(conflicted) == 1:
+        assert (revs, solos) == ([], conflicted)
+    else:
+        assert ([[c["alias"] for c in b["cards"]] for b in revs], solos) == ([conflicted], [])
+    assert _runs(fake, MECH1, "solo") == []
+    # 품질 수치와 보고서의 품질 절이 엔진이 알린 부딪침을 센다
+    quality = review_quality.compute(store, key, agent_key=MECH2)
+    assert quality["flips"]["engine_conflict"] == {"dup_conflict": len(conflicted), "flipped": 0, "calls": 1, "coerced": 0,
+                                                   "explicit": 0}
+    assert f"엔진이 알린 부딪침 {len(conflicted)}줄" in review_quality.block(store, key, agent_key=MECH2)["text"]
+
+
+def test_a_flipped_row_gets_a_second_judgement_and_quality_splits_coerced_from_explicit(store):
+    """D-42 E — 보충이 갈아 낀 행(flipped_from 이 걸림 아닌 값으로 끝남)은 raw 가 있든 없든 두 번째 판정을 받는다. raw 는 품질 셈만
+    가른다 — 어휘 밖 값을 엔진이 고친 것(coerced)과 판정을 바꾼 것(explicit)."""
+    fake = FakeReviewEngine(_packs())
+    fake.flipped = {"K02": {"verdict": ["yes", "FAIL"], "attempt": 1}, "K03": {"verdict": ["yes", "FAIL"], "attempt": 1},
+                    "K04": {"verdict": ["yes", "FAIL"], "attempt": 1, "raw": "Fail"}}
+    key, _unit = _run(store, fake, agents=[MECH2])
+    revs = [[c["alias"] for c in b["cards"]] for b in _runs(fake, MECH2, "rev")]
+    assert revs == [["K02", "K03", "K04"]]
+    quality = review_quality.compute(store, key, agent_key=MECH2)
+    assert {k: quality["flips"]["engine_conflict"][k] for k in ("coerced", "explicit")} == {"coerced": 1, "explicit": 2}
+    assert "어휘 밖 값을 고친 것 1 · 판정을 바꾼 것 2" in review_quality.block(store, key, agent_key=MECH2)["text"]
+
+
+def test_inputs_the_engine_clipped_are_counted_in_quality(store):
+    """엔진이 몫에서 끊은 입력(meta.clipped — RB3-11)은 호출 원장의 앱 회계에 남고 품질 수치·문면이 그 호출 수와 입력 이름을 싣는다.
+    빈 것({})은 원장에 싣지 않는다."""
+    fake = FakeReviewEngine(_packs())
+    fake.clipped = {"cards": {"orig_chars": 1000, "kept_chars": 500}}
+    key, _unit = _run(store, fake, agents=[MECH1])
+    calls = [json.loads(r["quality_json"])["app"].get("clipped") for r in store.query(
+        "SELECT quality_json FROM rr_review_calls WHERE target_key = ? AND state = 'ok'", (key,))]
+    assert calls and all(c == fake.clipped for c in calls)
+    quality = review_quality.compute(store, key, agent_key=MECH1)
+    assert quality["truncation"]["clipped"] == {"calls": len(calls), "inputs": ["cards"]}
+    assert f"몫에서 끊은 입력 {len(calls)}호출(«cards»)" in review_quality.block(store, key, agent_key=MECH1)["text"]
+
+
+def test_a_contested_hit_stands_and_the_report_says_who_contested_it(store):
+    """검증된 철회가 걸림을 다퉜다(엔진 contested_by — RB3-1): 걸림은 서고(실효 FAIL · 단독 재질의를 받는다), 보고서 점검표 행에
+    다툼의 판정·이유가 실리고 마크다운에 '검증된 철회가 이 걸림을 다퉜다' 가 남는다(«» 안의 이유)."""
+    from app import expert_report
+
+    fake = FakeReviewEngine(_packs())
+    fake.verdicts = {_record("K02"): ("yes", "FAIL")}
+    fake.contested = {"K02": {"verdict": ["yes", "OK"], "cq": "철회가 댄 카드 문장", "quote": "ok",
+                              "why": "카드의 조건과 변경 줄을 맞대어 보니 한계 안이다", "attempt": 2}}
+    key, unit_id = _run(store, fake, agents=[MECH2])
+    report = expert_report.load_report(store, key, MECH2)
+    card = next(c for c in report["checklist"] if c["alias"] == "K02")
+    row = next(r for r in card["rows"] if r["unit_id"] == unit_id)
+    assert (row["judgement"], row["dup_conflict"]) == ("FAIL", True)
+    assert row["contested"] == {"verdict": ["yes", "OK"], "why": "카드의 조건과 변경 줄을 맞대어 보니 한계 안이다",
+                                "cq": "철회가 댄 카드 문장", "cq_chars": None, "quote": "ok", "attempt": 2}
+    text = expert_report.render_report_md(report, part="cards")
+    assert "검증된 철회가 이 걸림을 다퉜다(걸림은 선다) — «yes»·«OK» «카드의 조건과 변경 줄을 맞대어 보니 한계 안이다»" in text
+    assert [c["alias"] for b in _runs(fake, MECH2, "solo") for c in b["cards"]] == ["K02"]
+
+
+
+def test_a_coerced_clash_an_alias_word_and_a_raw_flip_are_named_in_the_checklist(store):
+    """엔진 마지막 예제(c4e4823)의 표지 — ① 고친 값과 부딪친 다툼(걸리지 않은 행의 contested_by · raw)은 '같은 카드의 다른 판정이 이 행과
+    부딪쳤다(이 행이 선다)' 와 모델이 쓴 낱말로(걸린 행의 '검증된 철회' 문구가 아니다), 두 번째 판정을 받는다(dup_conflict). ② 별칭표로
+    읽은 낱말(checks.alias)은 그 낱말로. ③ 앞 판정이 어휘 밖 낱말을 고친 값이던 보충(flipped_from.raw)은 그 낱말로 적는다."""
+    from app import expert_report
+
+    fake = FakeReviewEngine(_packs())
+    fake.verdicts = {_record("K03"): ("yes", "FAIL")}
+    fake.contested = {"K02": {"verdict": ["yes", "undetermined"], "cq": "철회가 댄 카드 문장", "quote": "ok",
+                              "why": "카드의 조건과 변경 줄을 맞대어 보니 한계 안이다", "attempt": 1, "raw": "보류중"}}
+    fake.alias_words = {"K03": ["judgement:FAILED"]}
+    fake.flipped = {"K03": {"verdict": ["yes", "OK"], "attempt": 1, "raw": "통과됨"}}
+    key, unit_id = _run(store, fake, agents=[MECH2])
+    report = expert_report.load_report(store, key, MECH2)
+    rows = {c["alias"]: next(r for r in c["rows"] if r["unit_id"] == unit_id) for c in report["checklist"]}
+    assert (rows["K02"]["judgement"], rows["K02"]["contested"]["raw"], rows["K03"]["alias_words"]) == (
+        "OK", "보류중", ["judgement:FAILED"])
+    text = expert_report.render_report_md(report, part="cards")
+    assert ("같은 카드의 다른 판정이 이 행과 부딪쳤다(이 행이 선다) — «yes»·«undetermined» «카드의 조건과 변경 줄을 맞대어 보니 한계"
+            " 안이다» · 모델이 쓴 낱말 «보류중»") in text
+    assert "엔진이 별칭표로 읽은 낱말 «judgement:FAILED»" in text
+    assert "엔진 보충이 앞 판정 «yes»·«OK» 을 갈아 끼웠다(앞 판정은 어휘 밖 낱말 «통과됨» 을 고친 값)" in text
+    assert "K02" in [c["alias"] for b in _runs(fake, MECH2, "solo") for c in b["cards"]] + [
+        c["alias"] for b in _runs(fake, MECH2, "rev") for c in b["cards"]]                    # 부딪친 행은 두 번째 판정
+
+
+def test_the_order_flip_rate_counts_only_the_calibration_population_when_dual_is_flagged(store):
+    """걸린 것만 이중 판정(flagged)이면 순서 뒤집힘(flips.order)은 보정 모집단 — 1순위 전문가의 셀 — 만 센다(rq-2). 1순위 밖 전문가의
+    걸린 별칭 rev 도 fwd 와 견줄 수 있지만(agree) 그 표본은 걸린 카드로 치우쳐 분모에 넣지 않는다."""
+    fake = FakeReviewEngine(_packs())
+    fake.verdicts = {_record("K02"): ("yes", "FAIL"), _record("K03"): ("yes", "FAIL")}      # 걸린 둘 — 2순위도 rev 를 받는다
+    key, _unit = _run(store, fake, agents=[MECH1, MECH2])
+    agreed = {a: int(store.query_one("SELECT COUNT(*) AS n FROM rr_card_verdicts WHERE target_key = ? AND agent_key = ?"
+                                     " AND is_effective = 1 AND agree IS NOT NULL", (key, a))["n"]) for a in (MECH1, MECH2)}
+    assert agreed[MECH1] > 0 and agreed[MECH2] > 0                       # 둘 다 견줄 행이 있다 — 모집단이 갈린다
+    flips = review_quality.compute(store, key)["flips"]
+    assert (flips["order_population"], flips["order"]["den"]) == ("calibration", agreed[MECH1])
+
+
+
+def test_a_solo_only_card_the_engine_marked_as_contested_gets_a_second_judgement(store):
+    """반대 검토 MEDIUM 9 — 묶음째로는 창을 넘어(pair_over) 단독으로만 본 카드의 단독 행에 엔진이 부딪침(다툼 · dup_conflict)을 알리면
+    그 카드는 두 번째 판정(그 카드 하나의 rev)을 받는다. 두 번째가 FAIL 이면 실효는 보류(split — '문제없음' 이 아니다)이고 finding 이
+    된다. 표지 없는 단독 카드는 한 번이다."""
+    fake = FakeReviewEngine(_packs())
+    key = rig.target(store, ROSTER)
+    unit_id = units.load_units(store, key)[0]["unit_id"]
+    fake.pair_over_units = {unit_id}
+    fake.solo_marks = {"K01": {"contested_by": {"verdict": ["yes", "FAIL"], "why": "다른 답은 걸렸다", "attempt": 1}}}
+    fake.rev_verdicts = {_record("K01"): ("yes", "FAIL")}
+    job_id = rig.job(store, key, scope={"agents": [MECH2], "unit_ids": [unit_id]})
+    rig.Rig(store, fake).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    revs = [[c["alias"] for c in b["cards"]] for b in _runs(fake, MECH2, "rev")]
+    assert revs == [["K01"]]
+    rows = [dict(r) for r in store.query("SELECT * FROM rr_card_verdicts WHERE target_key = ? AND agent_key = ? AND unit_id = ?"
+                                         " AND record_id = ?", (key, MECH2, unit_id, _record("K01")))]
+    eff = review_verify.effective_rows(rows)[_record("K01")]
+    assert (sorted(r["variant"] for r in rows), eff["judgement"], eff["split"]) == (["rev", "solo"], "undetermined", 1)
+    findings = [json.loads(r["finding_json"]) for r in store.query(
+        "SELECT finding_json FROM rr_findings WHERE target_key = ? AND source_kind = 'card_review'", (key,))]
+    assert findings                                                             # 보류(split)인 카드는 finding 후보다
+
+
+def test_a_solo_only_marked_card_the_rev_answer_omits_is_reasked_and_stays_a_miss_for_the_sample(store):
+    """반대 검토 3차 LOW 6 · D-47(재현 F) — 단독으로만 본 카드(pair_over)의 단독 행에 부딪침 표지가 섰는데 그 카드 하나의 rev 답이
+    그 카드를 빼먹으면 다른 빠진 행처럼 다시 묻는다(SOLO_REASKS). 끝내 못 받으면 셀은 검토로 닫히되 그 카드는 '두 번째 판정 못 한
+    부딪침' 보류 finding 으로 남고(D-37), 그 셀이 표본이면 결과는 kept 가 아니라 놓침(risk_miss)이다 — 종전에는 한 번 묻고 말아
+    표본이 '문제없음' 으로 끝났다."""
+    from app import expert_report, review_runner
+
+    fake = FakeReviewEngine(_packs())
+    fake.offcard_findings = 0
+    key = rig.target(store, ROSTER)
+    unit_id = units.load_units(store, key)[0]["unit_id"]
+    fake.pair_over_units = {unit_id}
+    fake.solo_marks = {"K01": {"dup_conflict": True, "contested_by": {"verdict": ["yes", "FAIL"], "why": "같은 카드의 다른 답",
+                                                                     "attempt": 1}}}
+    real = fake.result
+
+    def result(body):
+        out = real(body)
+        if body.get("kind") == "verdict" and body.get("variant") == "rev":     # 두 번째 판정(rev)이 그 카드를 늘 빼먹는다
+            out["rows"] = [r for r in out["rows"] if r.get("k") != "K01"]
+            out["missing"] = sorted(set(out.get("missing") or []) | {"K01"})
+        return out
+
+    fake.result = result
+    job_id = rig.job(store, key, scope={"agents": [MECH2], "unit_ids": [unit_id]})
+    store.execute("UPDATE rr_review_cells SET sample_json = ? WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+                  (json.dumps({"shadow": {"result": None, "would_filter": True}}), key, unit_id, MECH2))   # 그 셀은 그림자 표본
+    rig.Rig(store, fake).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    assert [[c["alias"] for c in b["cards"]] for b in _runs(fake, MECH2, "rev")] == [["K01"]] * (review_runner.SOLO_REASKS + 1)
+    cell = dict(store.query_one("SELECT state, sample_json FROM rr_review_cells WHERE target_key = ? AND unit_id = ?"
+                                " AND agent_key = ?", (key, unit_id, MECH2)))
+    assert (cell["state"], json.loads(cell["sample_json"])["shadow"]["result"]) == ("reviewed", "risk_miss")
+    report = expert_report.load_report(store, key, MECH2)
+    held = [r for c in report["checklist"] for r in c["rows"] if r.get("conflict_unjudged")]
+    assert [r["alias"] for r in held] == ["K01"]
+    assert [f["judgement"] for f in report["findings"] if f["cards"] and f["cards"][0]["alias"] == "K01"] == ["undetermined"]
+
+
+def test_a_contested_quote_on_a_verdict_row_keeps_the_200_character_cap(store):
+    """반대 검토 MEDIUM 11 — 판정 행에 실린 다툼(contested_by)의 cq 도 셀 하나 REST 와 반출에서 200자로 줄고 원래 길이가 실린다."""
+    from app import export, routes
+    from tests import factories
+
+    fake = FakeReviewEngine(_packs())
+    fake.verdicts = {_record("K02"): ("yes", "FAIL")}
+    fake.contested = {"K02": {"verdict": ["yes", "OK"], "cq": fre.LONG_QUOTE, "quote": "ok", "why": "철회", "attempt": 2}}
+    key, unit_id = _run(store, fake, agents=[MECH2])
+    rows = routes.get_cell(key, unit_id, MECH2, ident=factories.ident(rig.OWNER))["verdicts"]
+    marked = [r["checks_json"]["contested_by"] for r in rows if (r.get("checks_json") or {}).get("contested_by")]
+    assert marked and all((len(c["cq"]), c.get("cq_chars")) == (export.EXPORT_CQ_MAX, len(fre.LONG_QUOTE)) for c in marked)
+    assert fre.LONG_QUOTE not in "".join(export.iter_lines(store, rig.OWNER, 0))
+
+
+def test_card_quotes_in_the_registry_and_the_claim_index_keep_the_200_character_cap(store):
+    """반대 검토(셀 밖 — M2 S9 · S3-4, 사용자 결정) — 등록부(registry_payload — REST · MCP risk_get_registry)와 인용 역색인
+    (claims_for_ref — REST · MCP risk_claims_for_ref)도 카드 인용을 판정당 200자로 줄이고 원래 길이를 싣는다(C12 와 같은 규칙)."""
+    from app import export, registry, routes
+
+    fake = FakeReviewEngine(_packs())
+    fake.verdicts = {_record("K01"): ("yes", "FAIL")}
+    fake.long_quote = {"K01"}
+    key, _unit = _run(store, fake, agents=[MECH2])
+    registry.merge(store, key)
+    long = fre.LONG_QUOTE
+    reg = json.dumps(routes.registry_payload(key, owner_sub=rig.OWNER), ensure_ascii=False)
+    assert long not in reg and long[:export.EXPORT_CQ_MAX] in reg
+    claims = routes.claims_for_ref(f"card:{_record('K01')}", owner_sub=rig.OWNER)["claims"]
+    quoted = [c for c in claims if c.get("quote")]
+    assert quoted and all(len(c["quote"]) <= export.EXPORT_CQ_MAX for c in quoted)
+    assert any(c.get("quote_chars") == len(long) for c in quoted)

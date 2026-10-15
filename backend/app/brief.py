@@ -1187,6 +1187,15 @@ E5_POSITIVE_STATUSES = ("open", "verified")
 # 회수 검색에서 항상 빼는 상태 태그 3종(plan §5.6.3 '상태 필터') — 기각·철회·대체된 발언은 돌아오지 않는다.
 RECALL_EXCLUDE_TAGS: tuple[str, ...] = ("status:dismissed", "status:rejected_in_panel", "status:superseded")
 E5_NEGATIVE_STATUSES = ("rejected_in_panel", "dismissed")
+# AIDataHub 회수(서술 경로 · 좌석 기억 2차 경로)는 찾기를 보는 과제로 좁히는 클라이언트로만 한다 — 클라이언트가 `supports_project_filter`
+# (찾기 인자 project_ids 를 받아 그 과제의 레코드만 돌려준다)를 밝혀야 한다. 밝히지 않은 클라이언트를 넘기면 그 경로를 건너뛰고 이
+# 까닭을 남긴다 — 전체 색인을 찾지 않는다(D46). 지금의 AdhClient 는 밝히지 않는다.
+ADH_UNSCOPED = "adh_unscoped — 과제 거름이 없는 AIDataHub 찾기는 하지 않는다"
+
+
+def _adh_scoped(adh) -> bool:
+    """AIDataHub 회수를 써도 되는가 — 가용하고 과제 거름(`supports_project_filter`)을 밝힌 클라이언트일 때만."""
+    return adh is not None and bool(getattr(adh, "available", False)) and bool(getattr(adh, "supports_project_filter", False))
 
 
 def _corpus_ids(store) -> set[str]:
@@ -1376,6 +1385,7 @@ def scholar_query(store, ctx) -> str:
         " ORDER BY support_panels DESC, id LIMIT 2", (project_id,))] if project_id else []
     mechs = [_s(r["mechanism"]) for r in store.query(
         "SELECT mechanism, COUNT(*) AS n FROM rr_findings WHERE target_key = ? AND mechanism IS NOT NULL"
+        # 카드 대조 거름 그대로(M3 S3-4) — 패널 범위·패널 브리프의 자리라 cells 대상에서 돌지 않거나 카드 finding 은 panel_id 가 없어 안 걸린다
         " AND COALESCE(source_kind, '') <> 'card_review' GROUP BY mechanism ORDER BY n DESC, mechanism LIMIT 1", (_s(ctx["target"]["target_key"]),))]
     parts = [t.split(":")[-1] for t in tags if t] + [m for m in mechs if m]
     return " ".join(parts)
@@ -1514,10 +1524,14 @@ def _rows_of(payload, key: str) -> list:
 
 # ---------------------------------------------------------------- E6 유사 과제 성격
 def _item_e6(store, similar: Mapping[str, Any], ctx, profile: "BriefProfile | None" = None) -> dict:
-    """유사 과제의 성격 진술 — 확정·지지 많은 순으로 바닥 3건(프로파일 배수로 는다). 넘친 수는 꼬리 줄로 센다."""
+    """유사 과제의 성격 진술 — 확정·지지 많은 순으로 바닥 3건(프로파일 배수로 는다). 넘친 수는 꼬리 줄로 센다.
+
+    타깃 소유자가 구성원인 과제의 진술만 싣고 n_projects 도 그 안에서 센다(D46). 남이 조직 공개로 연 등록부 행으로 merged 에 든
+    과제는 그 행만 E5 에 서고, 그 과제의 성격 진술은 열린 것이 아니라 싣지 않는다.
+    """
     profile = profile or PROFILE_LEGACY
     source = _SOURCES["E6"][0]
-    corpus = _corpus_ids(store)
+    corpus = _corpus_ids(store) & _member_project_ids(store, _s(ctx["target"]["owner_sub"]))
     project_ids = [str(e.get("project_id")) for e in (similar.get("merged") or [])
                    if str(e.get("project_id")) in corpus]
     lines: list[str] = []
@@ -1554,33 +1568,71 @@ def _item_e6(store, similar: Mapping[str, Any], ctx, profile: "BriefProfile | No
 
 
 # ---------------------------------------------------------------- E7 좌석 개인 기억(고정 슬롯)
-def _lineage_project_ids(store, project_id: str | None, hops: int = 3) -> list[str]:
-    """rr_projects.predecessor_project_id 를 앞뒤로 hops 만큼 따라간 과제 id 목록(자기 자신 제외)."""
-    out: list[str] = []
+def _member(store, project_id: str, email: str) -> bool:
+    """email 이 그 과제의 구성원(소유자 · rr_project_members)인가."""
+    row = store.query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,))
+    if row is None:
+        return False
+    return row["owner_sub"] == email or store.query_one(
+        "SELECT 1 FROM rr_project_members WHERE project_id = ? AND email = ?", (project_id, email)) is not None
+
+
+# `_member` 를 rr_projects 위의 조건 하나로 쓴 것(자리표 둘 = 그 사람 email 두 번) — 좌석 기억(E7)의 SQL 과 유사 과제의 거름이
+# 같은 뜻을 쓴다(남 숨김 훑기 셋째, D45). 조직 공개(mcp_visibility)는 넣지 않는다 — 남의 과제를 건너 찾는 것은 기본 기능이 아니다.
+_MEMBER_OF = "owner_sub = ? OR id IN (SELECT project_id FROM rr_project_members WHERE email = ?)"
+
+
+def _member_project_ids(store, email: str | None) -> set[str]:
+    """email 이 구성원인 과제 id 전부 — email 이 없으면 빈 집합(아무것도 보지 않는다)."""
+    if not email:
+        return set()
+    return {_s(row["id"]) for row in store.query(f"SELECT id FROM rr_projects WHERE {_MEMBER_OF}", (email, email))}
+
+
+def _lineage(store, project_id: str | None, hops: int = 3, *,
+             caller_projects: set[str] | None = None) -> list[tuple[str, int, str]]:
+    """계보 — rr_projects.predecessor_project_id 를 앞뒤로 hops 만큼 따라간 (과제 id, 걸음, predecessor|successor)(자기 자신 제외).
+    그 과제의 소유자가 구성원이 아닌 과제는 싣지도 건너 따라가지도 않는다 — 앞 과제 링크는 만들 때 구성원인지 보지만
+    (routes.create_project) 그 전에 선 링크와 들여오기로 선 링크가 남의 과제를 가리킬 수 있다(review1 남 숨김 훑기 둘째).
+    `caller_projects`(실제로 부른 사람이 볼 수 있는 과제 — MCP)를 주면 그 밖의 과제도 같다 — 숨긴 과제를 건너 닿는 과제를 실으면
+    걸음 수가 그 사이의 과제를 드러낸다(D46)."""
+    row = store.query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,)) if project_id else None
+    if row is None:
+        return []
+    viewer = row["owner_sub"]
+
+    def shown(pid: str) -> bool:
+        return _member(store, pid, viewer) and (caller_projects is None or pid in caller_projects)
+
+    out: list[tuple[str, int, str]] = []
     seen = {project_id}
     current = project_id
-    for _ in range(hops):
-        if not current:
-            break
+    for hop in range(1, hops + 1):
         row = store.query_one("SELECT predecessor_project_id FROM rr_projects WHERE id = ?", (current,))
         current = row["predecessor_project_id"] if row is not None else None
-        if current and current not in seen:
-            seen.add(current)
-            out.append(current)
+        if not current or current in seen or not shown(current):
+            break
+        seen.add(current)
+        out.append((current, hop, "predecessor"))
     frontier = [project_id]
-    for _ in range(hops):
+    for hop in range(1, hops + 1):
         if not frontier:
             break
         marks = ",".join("?" for _ in frontier)
-        rows = store.query(
-            f"SELECT id FROM rr_projects WHERE predecessor_project_id IN ({marks})", frontier)
+        rows = store.query(f"SELECT id FROM rr_projects WHERE predecessor_project_id IN ({marks})", frontier)
         frontier = []
         for row in rows:
-            if row["id"] not in seen:
-                seen.add(row["id"])
-                out.append(row["id"])
-                frontier.append(row["id"])
+            if row["id"] in seen or not shown(row["id"]):
+                continue
+            seen.add(row["id"])
+            out.append((row["id"], hop, "successor"))
+            frontier.append(row["id"])
     return out
+
+
+def _lineage_project_ids(store, project_id: str | None, hops: int = 3) -> list[str]:
+    """계보 과제 id 목록(`_lineage` — 그 과제의 소유자가 구성원인 과제만)."""
+    return [pid for pid, _hop, _relation in _lineage(store, project_id, hops)]
 
 
 def _subject_keys(store, snapshot_id: str | None) -> set[str]:
@@ -1667,13 +1719,20 @@ def _item_e7(store, ctx, seats: Sequence[Mapping[str, Any]], adh, profile: "Brie
 
 def _seat_memory_line(store, agent_key: str, target_key: str, lineage: set[str],
                       subjects: set[str], adh, ctx, line_max: int = E7_SEAT_LINE) -> tuple[str, str | None]:
+    # 타깃 소유자가 구성원인 과제의 의견만 — 종전에는 같은 좌석의 의견을 소유자 누구든 읽어 남의 과제 발언이 이 패널의
+    # 프롬프트와 보고서에 실렸다(D45). 타깃 행이 없어 과제를 모르는 의견도 싣지 않는다. 코퍼스에서 빠진 과제(§0.6 — 사람이 뺐거나
+    # 회수했다)의 의견과 발췌가 빈 의견도 싣지 않는다 — 더 새 그 의견이 진짜 기억을 밀어내 «» 나 뺀 과제의 발언이 실렸다(조합 검토 M8).
+    owner = _s(ctx["target"]["owner_sub"])
     rows = store.query(
         "SELECT o.opinion_id, o.agent_key, o.target_key, o.raised_finding_ids_json, o.excerpt_for_rag, "
         "o.created_at, t.project_id FROM rr_seat_opinions AS o "
         "LEFT JOIN rr_targets AS t ON t.target_key = o.target_key "
         "WHERE o.agent_key = ? AND o.target_key <> ? "
-        "AND o.raised_finding_ids_json IS NOT NULL AND o.raised_finding_ids_json <> '[]'",
-        (agent_key, target_key),
+        f"AND t.project_id IN (SELECT id FROM rr_projects WHERE ({_MEMBER_OF})"
+        " AND status = 'active' AND corpus_excluded = 0) "
+        "AND o.raised_finding_ids_json IS NOT NULL AND o.raised_finding_ids_json <> '[]' "
+        "AND TRIM(COALESCE(o.excerpt_for_rag, '')) <> ''",
+        (agent_key, target_key, owner, owner),
     )
     if rows:
         def rank(row):
@@ -1685,7 +1744,7 @@ def _seat_memory_line(store, agent_key: str, target_key: str, lineage: set[str],
             return (in_lineage, overlap, -(row["created_at"] or 0), _s(row["opinion_id"]))
         best = sorted(rows, key=rank)[0]
         return _seat_line(store, best, _s(best["excerpt_for_rag"]), line_max)
-    recalled = _adh_seat_memory(adh, agent_key, ctx, line_max)
+    recalled = _adh_seat_memory(store, adh, agent_key, ctx, line_max)
     if recalled is not None:
         return recalled
     return f"[{agent_key}: 이전 발언 없음]", None
@@ -1701,10 +1760,11 @@ def _finding_subjects(store, finding_ids: Any) -> set[str]:
     return {_s(r["subject_key"]) for r in rows if r["subject_key"]}
 
 
-def _adh_seat_memory(adh, agent_key: str, ctx, line_max: int = E7_SEAT_LINE) -> tuple[str, str | None] | None:
-    """2차 경로 — AIDataHub 의사 에이전트 `risk-review-memory` 회수(plan §5.6.3 2). 미가용이면 None.
+def _adh_seat_memory(store, adh, agent_key: str, ctx, line_max: int = E7_SEAT_LINE) -> tuple[str, str | None] | None:
+    """2차 경로 — AIDataHub 의사 에이전트 `risk-review-memory` 회수(plan §5.6.3 2). 미가용이거나 과제 거름을 밝히지 않은
+    클라이언트면 None(찾지 않는다, D46) — 찾을 때는 타깃 소유자가 구성원인 과제로 좁힌다.
     (줄, 발췌를 자리표시자로 바꿨으면 그 어휘 id)."""
-    if adh is None or not getattr(adh, "available", False):
+    if not _adh_scoped(adh):
         return None
     summary = ""
     if ctx["kind"] == "diff" and ctx["diff"] is not None:
@@ -1712,27 +1772,36 @@ def _adh_seat_memory(adh, agent_key: str, ctx, line_max: int = E7_SEAT_LINE) -> 
     elif ctx["state"] is not None:
         summary = _s(ctx["state"]["summary_text"])[:200]
     code = _s(ctx["target"]["project_id"])
+    visible = _member_project_ids(store, _s(ctx["target"]["owner_sub"]))
     reply = adh.agent_search("risk-review-memory", f"{code} {summary}", mode="hybrid",
                              required_tags=[f"hwax:expert:{agent_key}"], top_k=3,
-                             exclude_tags=list(RECALL_EXCLUDE_TAGS))
+                             exclude_tags=list(RECALL_EXCLUDE_TAGS), project_ids=sorted(visible))
     if not reply.get("ok"):
         return None
     hits = reply.get("result") or []
     if isinstance(hits, dict):
         hits = hits.get("hits") or hits.get("items") or []
-    if not hits:
-        return None
-    hit = hits[0] if isinstance(hits[0], dict) else {}
-    meta = ((hit.get("content") or {}).get("meta") or {}) if isinstance(hit.get("content"), dict) else {}
-    portal = meta.get("portal") or {}
-    opinion_id = _s(portal.get("opinion_id"))
-    finding_id = _s(portal.get("finding_id"))
-    if not opinion_id:
-        return None
-    prefix = f"narr:{opinion_id}#{finding_id} | {agent_key} | adh/{_s(hit.get('record_id'))[:12]} | "
-    body = _s(hit.get("summary") or hit.get("text") or hit.get("title"))
-    quoted, suspect = _quoted_excerpt(body, max(0, line_max - len(prefix)))
-    return prefix + quoted, suspect
+    for hit in hits if isinstance(hits, list) else []:
+        # 받은 쪽에서도 적중의 과제를 본다 — 과제 태그가 없거나 볼 수 없는 과제의 적중은 건너뛴다(조합 검토 L10).
+        if not isinstance(hit, dict) or _hit_project(hit) not in visible:
+            continue
+        meta = ((hit.get("content") or {}).get("meta") or {}) if isinstance(hit.get("content"), dict) else {}
+        portal = meta.get("portal") or {}
+        opinion_id = _s(portal.get("opinion_id"))
+        finding_id = _s(portal.get("finding_id"))
+        if not opinion_id:
+            continue
+        prefix = f"narr:{opinion_id}#{finding_id} | {agent_key} | adh/{_s(hit.get('record_id'))[:12]} | "
+        body = _s(hit.get("summary") or hit.get("text") or hit.get("title"))
+        quoted, suspect = _quoted_excerpt(body, max(0, line_max - len(prefix)))
+        return prefix + quoted, suspect
+    return None
+
+
+def _hit_project(hit: Mapping[str, Any]) -> str | None:
+    """AIDataHub 적중의 과제 — `hwax:project:<id>` 태그(없으면 None)."""
+    return next((str(tag)[len("hwax:project:"):] for tag in hit.get("tags") or []
+                 if str(tag).startswith("hwax:project:")), None)
 
 
 # ---------------------------------------------------------------- E8 변경-델타 선례
@@ -1769,7 +1838,12 @@ def _item_e8(store, ctx) -> dict:
                 f"n_verified={verified} n_dismissed={dismissed} precision={precision} (n={total})"
             )
     if not lines:
-        corpus = store.query_one("SELECT COUNT(*) AS n FROM rr_targets")
+        # 코퍼스 수는 타깃 소유자가 볼 수 있는 과제의 타깃만 센다 — 시스템 전체 수는 남의 대상이 있다는 것을 드러낸다(D47, E6 과 같은
+        # 규칙). 위의 델타 선례 행은 소유자 열이 없는 코퍼스 통계 표 그대로다(plan §5.2.2 F).
+        owner = _s(ctx["target"]["owner_sub"])
+        corpus = store.query_one(
+            f"SELECT COUNT(*) AS n FROM rr_targets WHERE project_id IN (SELECT id FROM rr_projects WHERE {_MEMBER_OF})",
+            (owner, owner))
         lines = [f"[선례 없음 — 코퍼스 n_targets={corpus['n'] if corpus else 0}, 이 조합 첫 사례]"]
     return {"key": "E8", "args": f"diff:{diff_id}", "result": _body(source, lines)}
 
@@ -1911,7 +1985,7 @@ def collect_refs(items: Sequence[Mapping[str, Any]]) -> list[str]:
 # `{severity}/{judgement}`(`중대/WARNING`)가 판단어로 걸려 같은 과제의 두 번째 리비전 브리프가 죽었다(WP1 P-03).
 _QUOTE_LINE = re.compile(r"^(?:\[[^\]]*\]\s)*(?:reg|narr|rule|warn):")
 # 자산 원문을 그대로 싣는 항목 — 좌석 계약은 사람이 쓴 계약문이라 인용이지 코드 산문이 아니다(plan §3.4.3).
-_QUOTED_SOURCES = ("seat_contract",)
+_QUOTED_SOURCES = ("seat_contract", "issue_verdicts", "issue_cards", "issue_handoffs")   # + 쟁점 패널의 인용 원천(M3 S3-7)
 
 
 def lint_items(items: Sequence[Mapping[str, Any]]) -> dict:
@@ -2023,8 +2097,9 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
         owner_sub = _s(ctx["target"]["owner_sub"]) or None
     if seats is None:
         seats = _seats_of_panel(store, target_key, panel_id)
-    external_ok = bool(adh is not None and getattr(adh, "available", False)) or \
-        bool(ra is not None and getattr(ra, "available", False))
+    external_ok = _adh_scoped(adh) or bool(ra is not None and getattr(ra, "available", False))
+    # 가용한데 과제 거름을 밝히지 않은 AIDataHub 는 찾지 않았다 — 그 까닭을 meta.external_search 에 남긴다(D46).
+    adh_unscoped = adh is not None and bool(getattr(adh, "available", False)) and not _adh_scoped(adh)
     similar = similar_projects(store, _s(ctx["target"]["project_id"]), adh=adh, ra=ra, owner_sub=owner_sub)
 
     # 조립하는 동안 원천 문자열 위생(§3.4.1)의 suspect_text 적재 대상과 위생 길이 상한의 배수를 이 스레드에 걸어 둔다.
@@ -2142,7 +2217,7 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
             # 메모를 다 못 실었으면 {chars, kept} — 미리보기·MCP 호출자가 여기서 본다(패널에는 러너가 남긴다).
             "user_memo_cut": memo_cut(next((i for i in items if i["key"] == "M"), None)),
             "excluded": sorted(excluded),
-            "external_search": "available" if external_ok else "unavailable",
+            "external_search": "adh_unscoped" if adh_unscoped else ("available" if external_ok else "unavailable"),
             # E10 조회 자격 — user · service(사람 자격이 없어 서비스 PAT 로 물었다, U-3) · None(채널 없음).
             "field_credential": getattr(field, "credential", None) if field is not None else None,
             "lint": lint,
@@ -2151,6 +2226,245 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
             "similar_corpus_n": similar.get("corpus_n", 0),
         },
     }
+
+
+# ---------------------------------------------------------------- 쟁점 패널 브리프(재설계 M3 S3-7 · M3.md #48)
+# 엔진은 뒤 항목부터 버리므로 순서가 뜻이 있다(P-17-3) — 쟁점 정의 → 제기 측 → 반대 측 → 인용된 카드 절 → 변경 원문 → 근거 발췌 →
+# 스코프 → 넘김 → 같은 대상의 선례 → 메모. 좌석 계약(I0c)은 러너가 둘째 칸에 끼운다. 항목 key 는 엔진 규칙([A-Za-z0-9_.-]{1,24}).
+ISSUE_ITEM_ORDER: tuple[str, ...] = ("I1", "I4", "I5", "I6", "I2", "I3", "I0", "I7", "I8", "M")
+# 바닥 표(합 9,600 + 러너가 끼우는 좌석 계약 1,000 ≤ 11,000) — 프로파일 배수로 함께 는다(BriefProfile.inner, D-21).
+ISSUE_CAPS: dict[str, int] = {"I1": 800, "I4": 2200, "I5": 1400, "I6": 2200, "I2": 1000, "I3": 500, "I0": 500,
+                              "I7": 300, "I8": 300, "M": 400}
+_ISSUE_SOURCES: dict[str, tuple[str, str]] = {
+    "I1": ("issue_definition", "rr_issues"), "I4": ("issue_verdicts", "rr_card_verdicts"),
+    "I5": ("issue_verdicts", "rr_card_verdicts"), "I6": ("issue_cards", "rr_card_packs"),
+    "I2": ("rr_units.lines", "rr_units"), "I3": ("rr_units.evidence", "rr_units"), "I0": ("rr_scope", "rr_targets"),
+    "I7": ("issue_handoffs", "rr_review_cells"), "I8": ("rr_registry.prior", "rr_registry"), "M": ("user_memo", "rr_jobs"),
+}
+ISSUE_SEAT_KEY = "I0c"
+
+
+def _issue_counts(counts: Mapping[str, Any], fmt: str) -> str:
+    return " · ".join(fmt.format(k=k, n=n) for k, n in sorted((counts or {}).items())) or "-"
+
+
+def _issue_i1(issue: Mapping[str, Any], anchor: Mapping[str, Any], target_key: str, names: Sequence[str]) -> dict:
+    """I1 쟁점 정의 — 유형·닻의 네 필드(그대로 쓰라는 값)·분포·hold 표기. 코드 산문이라 판정 낱말은 `judgement=`·`severity=` 꼴."""
+    basis = issue.get("basis") or {}
+    claimed = basis.get("claimed") or {}
+    distribution = basis.get("distribution") or {}
+    before = basis.get("registry_before") or {}
+    lines = [
+        f"쟁점 {issue['issue_id']} · 유형 {', '.join(issue.get('types') or ())} · 등급 {issue.get('p_class')}"
+        f" · 순위 {issue.get('rank') or '-'} · 닻 [reg:{target_key}#{issue['anchor_cluster_key']}]",
+        "finding 의 네 필드는 이 값 그대로 쓴다 — mechanism=" + _q(anchor.get("mechanism"), limit=0)
+        + " · mechanism_detail=" + _q(anchor.get("mechanism_detail"), limit=0)
+        + " · subject=" + _q(anchor.get("subject_key"), limit=0) + " · change_kind=" + _q(anchor.get("change_kind"), limit=0),
+        "부품 이름 " + (" · ".join(_q(n) for n in names) or "-"),
+        f"제기 {len(basis.get('raisers') or ())}명 — "
+        + _issue_counts(distribution.get("raisers_by_domain") or {}, "{k} {n}명")
+        + f" · 반대 {distribution.get('opposers', len(basis.get('opposers') or ()))}명",
+        "주장 판정별 — " + _issue_counts(distribution.get("by_judgement_claimed") or {}, "judgement={k} {n}명"),
+        "주장 심각도별 — " + _issue_counts(distribution.get("by_severity") or {}, "severity={k} {n}명"),
+        f"등록부 값(hold 뒤) severity={_s(before.get('severity'), '-')} · judgement={_s(before.get('judgement'), '-')}"
+        f" · 주장값 severity={_s(claimed.get('severity'), '-')} · judgement={_s(claimed.get('judgement'), '-')}"
+        f" · judgement=FAIL 주장 {int(claimed.get('fail_experts') or 0)}명 · severity=치명 주장"
+        f" {int(claimed.get('critical_experts') or 0)}명 · 그 가운데 카드 인용이 대조를 지난 사람"
+        f" {int(claimed.get('verified_fail_experts') or 0)}명",
+    ]
+    return {"key": "I1", "args": issue["issue_id"], "result": _body("issue_definition", lines)}
+
+
+def _verdict_rows(store, target_key: str, agent_key: str, unit_ids: Sequence[str], record_ids: Sequence[str],
+                  *, judgement: str | None = None) -> list[dict]:
+    if not unit_ids or not record_ids:
+        return []
+    marks_u, marks_r = ",".join("?" * len(unit_ids)), ",".join("?" * len(record_ids))
+    sql = ("SELECT unit_id, agent_key, record_id, section_id, alias, applies, judgement, cq, sev, mech, mech_free, path,"
+           " check_kind, check_text, why, refs_json, conds_json, quote_ok FROM rr_card_verdicts WHERE target_key = ?"
+           f" AND agent_key = ? AND is_effective = 1 AND unit_id IN ({marks_u}) AND record_id IN ({marks_r})")
+    params: list[Any] = [target_key, agent_key, *unit_ids, *record_ids]
+    if judgement:
+        sql += " AND judgement = ?"
+        params.append(judgement)
+    return [dict(r) for r in store.query(sql + " ORDER BY unit_id, record_id", params)]
+
+
+def _verdict_line(row: Mapping[str, Any]) -> str:
+    """판정 행 한 줄 — 카드 표지 `card:<record_id>#<sid>` · 적용·판정 · 카드 인용 원문 · 변경 줄 · 사유 · 영향 경로 · 닫는 확인 · 조건 대조."""
+    refs = " ".join(f"[{r}]" for r in _j(row.get("refs_json"), []) or ())
+    sid = f"#{row['section_id']}" if row.get("section_id") else ""
+    parts = [f"- [card:{row['record_id']}{sid}] applies={row['applies']} · judgement={row['judgement']}",
+             f"severity={row['sev']}(주장)" if row.get("sev") else "", f"quote_ok={_s(row.get('quote_ok'), '-')}",
+             f"카드 인용 {_q(row.get('cq'), 'claim', limit=0)}" if row.get("cq") else "",
+             f"변경 줄 {refs}" if refs else "", f"사유 {_q(row.get('why'), 'claim')}" if row.get("why") else "",
+             f"경로 {_q(row.get('path'), 'claim')}" if row.get("path") else "",
+             f"닫는 확인 {_q(_s(row.get('check_kind')) + ': ' + _s(row.get('check_text')), 'claim')}"
+             if row.get("check_text") else "",
+             f"조건 대조 {_q(canonical_json(_j(row.get('conds_json'), [])), 'claim')}" if row.get("conds_json") else ""]
+    return " · ".join(p for p in parts if p)
+
+
+def _issue_side(store, target_key: str, key: str, people: Sequence[Mapping[str, Any]], *, role: str,
+                judgement: str | None, cards_out: list[dict]) -> dict:
+    """I4(제기 측)·I5(반대 측) — 사람마다 머리 줄과 그 사람의 판정 행. 카드 밖 지적은 finding 의 주장과 인용 줄로."""
+    lines: list[str] = []
+    for person in people:
+        agent = str(person["agent_key"])
+        head = f"{role} {agent}({_s(person.get('domain'), '-')})"
+        if role == "제기":
+            head += (f" · judgement={_s(person.get('judgement'), '-')} · severity={_s(person.get('severity'), '-')}"
+                     f" · 카드 인용 대조 {'지남' if person.get('verified') else '못 지남'}")
+        lines.append(head)
+        rows = _verdict_rows(store, target_key, agent, list(person.get("unit_ids") or ()),
+                             list(person.get("record_ids") or ()), judgement=judgement)
+        for row in rows:
+            lines.append(_verdict_line(row))
+            cards_out.append({"agent_key": agent, "record_id": row["record_id"], "section_id": row.get("section_id"),
+                              "quote_ok": row.get("quote_ok")})
+        for fid in person.get("finding_ids") or ():
+            found = store.query_one("SELECT finding_json FROM rr_findings WHERE finding_id = ?", (fid,))
+            fj = _j(found["finding_json"], {}) if found is not None else {}
+            cites = [c for c in fj.get("cites") or () if isinstance(c, Mapping)]
+            if any(_s(c.get("ref")).startswith("card:") for c in cites):
+                continue
+            refs = " ".join(f"[{c['ref']}]" for c in cites if _s(c.get("ref")).startswith("c:"))
+            lines.append(f"- 카드 밖 지적 {_q(fj.get('claim'), 'claim')} {refs}".rstrip())
+    return {"key": key, "args": ",".join(str(p["agent_key"]) for p in people) or "-",
+            "result": _body("issue_verdicts", lines or ["[해당 판정 없음]"])}
+
+
+def _issue_i6(store, target_key: str, cards: Sequence[Mapping[str, Any]]) -> tuple[dict, dict]:
+    """I6 — 인용된 카드의 **인용이 맞은 절만** 원문으로(같은 절은 한 번). 대조를 못 지난 인용의 카드는 제목과 그 사실만. 반환
+    (항목, record_id → 카드 — 좌석 인용 검증 범위)."""
+    from app import cardpack  # noqa: PLC0415 — 얼린 팩 읽기는 쓸 때만.
+
+    lines: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    scope: dict[str, Any] = {}
+    for item in cards:
+        rid, sid = str(item["record_id"]), _s(item.get("section_id"))
+        if (rid, sid) in seen:
+            continue
+        seen.add((rid, sid))
+        try:
+            pack = cardpack.load_for(store, target_key, str(item["agent_key"]))
+        except cardpack.PackMissing:
+            pack = None
+        card = (pack.record_cards.get(rid) if pack is not None else None) or {}
+        title = _q(card.get("title") or rid)
+        if card:
+            scope[rid] = card
+        section = next((s for s in card.get("sections") or () if _s(s.get("sid")) == sid), None)
+        if item.get("quote_ok") == 1 and section is not None:
+            lines.append(f"[card:{rid}#{sid}] {title} — {_q(section.get('text'), 'claim', limit=0)}")
+        else:
+            lines.append(f"[card:{rid}] {title} — 인용 대조를 못 지난 인용이라 절 원문을 싣지 않는다")
+    return ({"key": "I6", "args": ",".join(sorted({r for r, _s2 in seen})) or "-",
+             "result": _body("issue_cards", lines or ["[인용된 카드 없음]"])}, scope)
+
+
+def _issue_unit_items(store, target_key: str, unit_id: str | None, agent_key: str | None) -> tuple[dict, dict]:
+    """I2(그 단위의 변경 줄·문맥 줄 전부)·I3(그 단위의 동결 근거 발췌) — 단위 원장 그대로(정규 표기, `[c:…]`)."""
+    from app import units  # noqa: PLC0415 — 단위 원장은 쓸 때만.
+
+    if not unit_id or not agent_key:
+        empty = ["[쟁점에 단위가 없다]"]
+        return ({"key": "I2", "args": "-", "result": _body("rr_units.lines", empty)},
+                {"key": "I3", "args": "-", "result": _body("rr_units.evidence", empty)})
+    payload = units.review_payload(store, target_key, unit_id, agent_key)
+    changes = [f"[{line['ref']}] {_q(line['text'], 'claim', limit=0)}" for line in payload.get("lines") or ()]
+    changes += [f"문맥 [{line['ref']}] {_q(line['text'], 'claim', limit=0)}" for line in payload.get("context") or ()]
+    evidence = [f"[{row['ref']}] {_q(row['text'], 'claim', limit=0)}" for row in payload.get("evidence") or ()]
+    return ({"key": "I2", "args": unit_id, "result": _body("rr_units.lines", changes or ["[변경 줄 없음]"])},
+            {"key": "I3", "args": unit_id, "result": _body("rr_units.evidence", evidence or ["[근거 발췌 없음]"])})
+
+
+def _issue_i7(store, target_key: str, unit_id: str | None, domains: set[str]) -> dict:
+    """I7 — 그 단위에서 다른 영역으로 넘긴 줄 가운데 좌석 영역에 닿는 것."""
+    lines: list[str] = []
+    for row in store.query("SELECT agent_key, handoffs_json FROM rr_review_cells WHERE target_key = ? AND unit_id = ?"
+                           " AND handoffs_json IS NOT NULL ORDER BY agent_key", (target_key, _s(unit_id))):
+        for handoff in _j(row["handoffs_json"], []) or ():
+            if isinstance(handoff, Mapping) and _s(handoff.get("to")) in domains:
+                aliases = ",".join(str(a) for a in handoff.get("l") or ())
+                lines.append(f"{row['agent_key']} → {handoff.get('to')} {_q(handoff.get('why'), 'claim')}"
+                             + (f" (줄 {aliases})" if aliases else ""))
+    return {"key": "I7", "args": _s(unit_id, "-"), "result": _body("issue_handoffs", lines or ["[넘김 없음]"])}
+
+
+def _issue_i8(store, target_key: str, anchor: Mapping[str, Any]) -> dict:
+    """I8 — 같은 대상의 같은 메커니즘 다른 클러스터(선례 줄 꼴)."""
+    rows = store.query(f"SELECT {_REGISTRY_COLS} FROM rr_registry WHERE target_key = ? AND mechanism = ? AND cluster_key <> ?"
+                       " ORDER BY priority DESC, cluster_key", (target_key, _s(anchor.get("mechanism")),
+                                                                _s(anchor.get("cluster_key"))))
+    lines = [_registry_line(row, "같은 대상") for row in rows]
+    return {"key": "I8", "args": target_key, "result": _body("rr_registry.prior", lines or ["[같은 메커니즘 다른 클러스터 없음]"])}
+
+
+def build_issue_brief(store, target_key: str, issue: Mapping[str, Any], *, seats: Sequence[Mapping[str, Any]],
+                      panel_id: str | None = None, profile: BriefProfile | None = None, user_memo: str | None = None,
+                      strict_lint: bool = False, shield_lint: bool = True) -> dict:
+    """쟁점 패널의 근거(I1 → I4 → I5 → I6 → I2 → I3 → I0 → I7 → I8 → M). 전문가·카드의 글(I4·I5·I6·I7)은 인용 원천이라 판단어
+    린터가 코드 산문으로 읽지 않고 전부 «» 안이다(앞 단계 LLM 출력의 2차 주입 위생 — WP5b 3.10.4). 카드 원문은 인용이 맞은 절만
+    싣는다 — 인용되지 않은 절이 rr_panels.brief_gz 에 남지 않는다(카나리아). 반환은 build_brief 와 같은 모양에 `meta.card_scope`
+    (record_id → 카드 — 좌석 인용 검증 범위)를 더한다. `strict_lint` 는 방패 뒤에도 위반이 남으면 E500(시험)."""
+    from app import issues as issues_module  # noqa: PLC0415 — issues 는 brief 를 쓰지 않는다(순환 회피 겸).
+
+    profile = profile or PROFILE_LEGACY
+    ctx = _target_context(store, target_key)
+    owner_sub = _s(ctx["target"]["owner_sub"]) or None
+    anchor = issues_module.anchor_row(store, target_key, str(issue["anchor_cluster_key"])) or {
+        "cluster_key": issue["anchor_cluster_key"]}
+    basis = issue.get("basis") or {}
+    domains = {_s(s.get("domain")) for s in seats}
+    first_agent = next((_s(s.get("key")) for s in seats), None)
+    begin_suspect_queue(store, owner_sub)
+    _assembly_scale.value = max(1.0, profile.budget / ENGINE_BUDGET)
+    cards: list[dict] = []
+    try:
+        names = name_index(store, (ctx["base_snapshot_id"], ctx["snapshot_id"]))
+        i4 = _issue_side(store, target_key, "I4", basis.get("raisers") or (), role="제기", judgement=None, cards_out=cards)
+        i5 = _issue_side(store, target_key, "I5", basis.get("opposers") or (), role="반대", judgement="OK", cards_out=cards)
+        i6, scope = _issue_i6(store, target_key, cards)
+        i2, i3 = _issue_unit_items(store, target_key, issue.get("unit_id"), first_agent)
+        i0 = {**_item_e0(store, ctx, False, _panel_model(store, target_key, panel_id)), "key": "I0"}
+        raw = [_issue_i1(issue, anchor, target_key, issues_module.part_names(store, anchor)), i4, i5, i6, i2, i3, i0,
+               _issue_i7(store, target_key, issue.get("unit_id"), domains), _issue_i8(store, target_key, anchor)]
+        if user_memo:
+            raw.append({"key": "M", "args": target_key, "result": memo_result(target_key, user_memo,
+                                                                               profile.inner(ISSUE_CAPS["M"]))})
+        shielded: list[dict] = []
+        if shield_lint:
+            for entry in raw:
+                if _ISSUE_SOURCES[entry["key"]][0] not in _QUOTED_SOURCES:
+                    shielded += _shield_entry(entry, names, humanize=False)
+    finally:
+        end_suspect_queue()
+        _assembly_scale.value = 1.0
+    clipped: dict[str, dict] = {}
+    items: list[dict] = []
+    for entry in sorted(raw, key=lambda e: ISSUE_ITEM_ORDER.index(e["key"])):
+        source, tool = _ISSUE_SOURCES[entry["key"]]
+        item = {"source": _clamp(source, CLAMP_SOURCE), "tool": _clamp(tool, CLAMP_TOOL),
+                "args": _clamp(entry["args"], CLAMP_ARGS), "result": entry["result"]}
+        cap = profile.inner(ISSUE_CAPS[entry["key"]])
+        text = _s(entry["result"])
+        item["result"], dropped = clip_lines_n(text, min(profile.item_result_max, cap - line_overhead(item)))
+        if dropped:
+            lines_n = len(text.split("\n")) - 1
+            clipped[entry["key"]] = {"lines": lines_n, "kept": lines_n - dropped, "omitted": dropped}
+        item["key"] = entry["key"]
+        items.append(item)
+    lint = lint_items(items)
+    if strict_lint and lint["ok"] is False:
+        raise AppError("E500", f"쟁점 브리프 판단어 린터 위반 {len(lint['violations'])}건 — {lint['violations'][:3]}",
+                       http_status=500)
+    return {"target_key": target_key, "evidence": [{k: i[k] for k in ("source", "tool", "args", "result", "key")}
+                                                   for i in items],
+            "keys": [i["key"] for i in items], "refs": collect_refs(items),
+            "meta": {"profile": profile.name, "budget": profile.budget, "clipped": clipped, "lint": lint,
+                     "shielded": shielded, "card_scope": scope}}
 
 
 # ---------------------------------------------------------------- §5.7 유사 검색
@@ -2220,41 +2534,30 @@ def _standardized(store, snapshot_id: str, stats: Mapping[str, tuple[float, floa
 
 
 def similar_projects(store, project_id: str, k: int = 5, *, owner_sub: str | None = None,
-                     adh=None, ra=None) -> dict:
+                     adh=None, ra=None, caller_projects: set[str] | None = None) -> dict:
     """§5.7 호출 계약의 응답 — 경로별(lineage·vector·text·subject) 목록과 가중 merged.
 
     절대 코사인 임계는 두지 않는다(상대 순위만 쓴다). 외부 미가용 경로는 reason 과 함께 비운다.
+
+    보는 사람은 그 과제의 소유자다(계보 `_lineage` 와 같은 사람 — 인자가 아니다, D44). 계보 · 벡터 · 서술은 그가 구성원인 과제만
+    싣고, 남의 과제는 순위 · corpus_n(벡터 문턱)에도 들지 않는다 — 있다는 것조차 드러나지 않는다(D45). subject 의 등록부 행은
+    종전대로 owner_sub(없으면 그 소유자)의 것 또는 그 주인이 조직 공개로 연 행이다(registry.set_visibility).
+
+    `caller_projects` 는 실제로 부른 사람이 볼 수 있는 과제다(MCP — 구성원 · 조직 공개로 들어온 호출자). 주면 다른 과제는 소유자와
+    그 사람 둘 다 볼 수 있는 것만 싣고 수도 그 안에서 센다(D46). 쓰기는 여전히 소유자로 돈다(D44) — 이것은 다른 과제를 보는 범위뿐이다.
     """
-    lineage: list[dict] = []
-    seen = {project_id}
-    current = project_id
-    for hop in range(1, 4):
-        row = store.query_one("SELECT predecessor_project_id FROM rr_projects WHERE id = ?", (current,))
-        current = row["predecessor_project_id"] if row is not None else None
-        if not current or current in seen:
-            break
-        seen.add(current)
-        lineage.append({"project_id": current, "code": _project_code(store, current),
-                        "hops": hop, "relation": "predecessor"})
-    frontier = [project_id]
-    for hop in range(1, 4):
-        if not frontier:
-            break
-        marks = ",".join("?" for _ in frontier)
-        rows = store.query(f"SELECT id FROM rr_projects WHERE predecessor_project_id IN ({marks})", frontier)
-        frontier = []
-        for row in rows:
-            if row["id"] in seen:
-                continue
-            seen.add(row["id"])
-            lineage.append({"project_id": row["id"], "code": _project_code(store, row["id"]),
-                            "hops": hop, "relation": "successor"})
-            frontier.append(row["id"])
+    row = store.query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,))
+    viewer = _s(row["owner_sub"]) if row is not None else None
+    visible = _member_project_ids(store, viewer)
+    if caller_projects is not None:
+        visible &= caller_projects
+    lineage = [{"project_id": pid, "code": _project_code(store, pid), "hops": hop, "relation": relation}
+               for pid, hop, relation in _lineage(store, project_id, caller_projects=caller_projects)]
 
     # 코퍼스에서 빠진 과제는 어느 경로로도 회수되지 않는다(§0.6 코퍼스 필터).
     corpus = _corpus_ids(store)
     lineage = [entry for entry in lineage if entry["project_id"] in corpus]
-    latest = _latest_snapshot_by_project(store)
+    latest = {pid: snapshot_id for pid, snapshot_id in _latest_snapshot_by_project(store).items() if pid in visible}
     corpus_n = len([p for p in latest if store.query_one(
         "SELECT snapshot_id FROM rr_states WHERE snapshot_id = ?", (latest[p],)) is not None])
     vector: list[dict] = []
@@ -2282,8 +2585,8 @@ def similar_projects(store, project_id: str, k: int = 5, *, owner_sub: str | Non
     else:
         vector_reason = "스냅샷 없음"
 
-    text, text_reason = _text_path(store, project_id, latest, adh, k)
-    subject = _subject_path(store, latest.get(project_id), owner_sub)
+    text, text_reason = _text_path(store, project_id, latest, adh, k, visible)
+    subject = _subject_path(store, latest.get(project_id), owner_sub or viewer, visible)
 
     merged_scores: dict[str, dict] = {}
 
@@ -2311,10 +2614,17 @@ def similar_projects(store, project_id: str, k: int = 5, *, owner_sub: str | Non
             "reason": {"vector": vector_reason, "text": text_reason}}
 
 
-def _text_path(store, project_id: str, latest: Mapping[str, str], adh, k: int) -> tuple[list[dict], str | None]:
-    """AIDataHub hybrid_search 로 유사 서술을 찾는다(plan §7.3 3단계). 미가용이면 빈 목록."""
+def _text_path(store, project_id: str, latest: Mapping[str, str], adh, k: int,
+               visible: set[str]) -> tuple[list[dict], str | None]:
+    """AIDataHub hybrid_search 로 유사 서술을 찾는다(plan §7.3 3단계). 미가용이면 빈 목록.
+
+    적중은 보는 사람이 구성원인 과제(`visible`)의 것만 싣고 rank 는 실은 것끼리 1 부터 센다 — 걸러 낸 남의 적중이 순위의
+    빈칸으로 드러나지 않는다(D45).
+    """
     if adh is None or not getattr(adh, "available", False):
         return [], "external_sync=unavailable"
+    if not _adh_scoped(adh):
+        return [], ADH_UNSCOPED
     snapshot_id = latest.get(project_id)
     if not snapshot_id:
         return [], "스냅샷 없음"
@@ -2323,23 +2633,21 @@ def _text_path(store, project_id: str, latest: Mapping[str, str], adh, k: int) -
     if not query:
         return [], "summary_text 없음"
     reply = adh.hybrid_search(query, top_k=k, tags=["hwax-risk-review"],
-                              exclude_tags=list(RECALL_EXCLUDE_TAGS))
+                              exclude_tags=list(RECALL_EXCLUDE_TAGS), project_ids=sorted(visible))
     if not reply.get("ok"):
         return [], _s(reply.get("error"), "hybrid_search 실패")
     hits = reply.get("result") or []
     if isinstance(hits, dict):
         hits = hits.get("items") or hits.get("hits") or []
     out: list[dict] = []
-    for rank, hit in enumerate(hits if isinstance(hits, list) else [], start=1):
+    for hit in hits if isinstance(hits, list) else []:
         if not isinstance(hit, dict):
             continue
-        tags = hit.get("tags") or []
-        pid = next((str(t)[len("hwax:project:"):] for t in tags
-                    if str(t).startswith("hwax:project:")), None)
-        if not pid or pid == project_id:
+        pid = _hit_project(hit)
+        if not pid or pid == project_id or pid not in visible:
             continue
         out.append({"record_id": _s(hit.get("record_id") or hit.get("id")), "project_id": pid,
-                    "rank": rank, "section_id": _s(hit.get("section_id"))})
+                    "rank": len(out) + 1, "section_id": _s(hit.get("section_id"))})
     return out, None
 
 
@@ -2373,8 +2681,12 @@ def alias_expand(store, keys: set[str]) -> dict[str, str]:
     return out
 
 
-def _subject_path(store, snapshot_id: str | None, owner_sub: str | None) -> list[dict]:
-    """§5.9.4 1) 정확 매치 — 이번 IR 의 subject_key(별칭 확장 포함)로 등록부를 회수한다."""
+def _subject_path(store, snapshot_id: str | None, owner_sub: str | None, visible: set[str]) -> list[dict]:
+    """§5.9.4 1) 정확 매치 — 이번 IR 의 subject_key(별칭 확장 포함)로 등록부를 회수한다.
+
+    행은 owner_sub 의 것 또는 조직 공개로 연 행이고, 조직 공개가 아닌 행은 보는 과제(`visible`)의 것만 싣고 센다 — MCP 로 부른
+    구성원에게 소유자만 보는 과제의 행이 드러나지 않는다(D46).
+    """
     paths = alias_expand(store, _subject_keys(store, snapshot_id))
     if not paths:
         return []
@@ -2382,32 +2694,40 @@ def _subject_path(store, snapshot_id: str | None, owner_sub: str | None) -> list
     for subject_key in sorted(paths):
         vis, vis_params = _visibility_clause(owner_sub)
         rows = store.query(
-            "SELECT target_key, status FROM rr_registry WHERE subject_key = ? "
+            "SELECT target_key, status, visibility FROM rr_registry WHERE subject_key = ? "
             f"AND status IN ('open','verified'){vis}",
             [subject_key, *vis_params],
         )
+        rows = [(row, _target_project(store, row["target_key"]) or "") for row in rows]
+        rows = [(row, pid) for row, pid in rows if row["visibility"] == "org" or pid in visible]
         if not rows:
             continue
         project_ids: list[str] = []
-        for row in rows:
-            target = store.query_one(
-                "SELECT project_id FROM rr_targets WHERE target_key = ?", (row["target_key"],))
-            pid = _s(target["project_id"]) if target is not None else ""
+        for _row, pid in rows:
             if pid and pid not in project_ids:
                 project_ids.append(pid)
         project_ids = [pid for pid in project_ids if pid in _corpus_ids(store)]
         if not project_ids:
             continue
         out.append({"subject_key": subject_key, "n_registry": len(rows),
-                    "n_verified": len([r for r in rows if r["status"] == "verified"]),
+                    "n_verified": len([row for row, _pid in rows if row["status"] == "verified"]),
                     "project_ids": project_ids, "path": paths[subject_key]})
     return out
 
 
 # ---------------------------------------------------------------- §5.7 선례 패널
-def precedents(store, diff_id: str, *, owner_sub: str | None = None) -> dict:
-    """ComparePage '선례' 패널과 E5·E8 의 원천(plan §5.7 두 번째 행)."""
-    diff = store.query_one("SELECT id, target_snapshot_id FROM rr_diffs WHERE id = ?", (diff_id,))
+def precedents(store, diff_id: str, *, owner_sub: str | None = None, caller_projects: set[str] | None = None) -> dict:
+    """ComparePage '선례' 패널과 E5·E8 의 원천(plan §5.7 두 번째 행).
+
+    다른 과제의 등록부 행(clusters)은 owner_sub 의 것 또는 조직 공개로 연 행이고, 조직 공개가 아닌 행은 diff 소유자가 구성원인 과제의
+    것만이다. `caller_projects`(MCP 로 실제로 부른 사람이 볼 수 있는 과제)를 주면 그 안으로 더 좁힌다(D46). 패턴 후보도 같은 규칙이다
+    (`_visible_patterns`, D47).
+    """
+    # 남의 diff 는 없는 diff 와 같다 — 그 diff 의 스냅샷(subject · 규칙 적중)을 읽어 주지 않는다(REST GET /precedents 는 소유를 보지
+    # 않았다 — review1 남 숨김 훑기 둘째). MCP 는 범위를 본 뒤 그 행의 소유자로 부른다.
+    diff = store.query_one("SELECT id, owner_sub, target_snapshot_id FROM rr_diffs WHERE id = ?"
+                           + (" AND owner_sub = ?" if owner_sub is not None else ""),
+                           (diff_id, owner_sub) if owner_sub is not None else (diff_id,))
     if diff is None:
         raise AppError("E404", f"diff 가 없습니다: {diff_id}", http_status=404)
     kinds = [r["change_kind"] for r in store.query(
@@ -2422,13 +2742,18 @@ def precedents(store, diff_id: str, *, owner_sub: str | None = None) -> dict:
             delta_priors.append({k: row[k] for k in (
                 "change_kind", "mechanism", "mechanism_detail", "n_raised", "n_targets",
                 "n_verified", "n_dismissed")})
-    subject = _subject_path(store, _s(diff["target_snapshot_id"]), owner_sub)
+    visible = _member_project_ids(store, owner_sub or _s(diff["owner_sub"]))
+    if caller_projects is not None:
+        visible &= caller_projects
+    subject = _subject_path(store, _s(diff["target_snapshot_id"]), owner_sub, visible)
     clusters: list[dict] = []
     for hit in subject:
         vis, vis_params = _visibility_clause(owner_sub, "r")
         for row in store.query(
-                f"SELECT {_REGISTRY_COLS} FROM rr_registry AS r WHERE r.subject_key = ? "
+                f"SELECT {_REGISTRY_COLS}, visibility FROM rr_registry AS r WHERE r.subject_key = ? "
                 f"AND r.status IN ('open','verified'){vis}", [hit["subject_key"], *vis_params]):
+            if row["visibility"] != "org" and _target_project(store, row["target_key"]) not in visible:
+                continue
             merged = _j(row["merged_json"], {})
             clusters.append({
                 "reg_ref": f"reg:{row['target_key']}#{row['cluster_key']}",
@@ -2444,15 +2769,26 @@ def precedents(store, diff_id: str, *, owner_sub: str | None = None) -> dict:
     hits = _j(state["rule_hits_json"], []) if state is not None else []
     if isinstance(hits, dict):
         hits = hits.get("hits") or []
-    patterns = [{k: row[k] for k in ("id", "status", "n_projects", "precision")}
-                for row in store.query(
-                    "SELECT id, status, n_projects, precision FROM rr_patterns "
-                    "WHERE status IN ('candidate','known') ORDER BY id")]
+    patterns = _visible_patterns(store, owner_sub or _s(diff["owner_sub"]), visible)
     return {"delta_priors": delta_priors, "clusters": clusters,
             "rule_hits": hits if isinstance(hits, list) else [],
             "pattern_candidates": [{"pattern_id": p["id"], "status": p["status"],
                                     "n_projects": p["n_projects"], "precision": p["precision"]}
                                    for p in patterns]}
+
+
+def _visible_patterns(store, owner: str, visible: set[str]) -> list:
+    """선례의 패턴 후보 — 그 소유자의 패턴 또는 조직 공개로 연 패턴(라우트의 패턴 목록과 같은 거름)이고, 조직 공개가 아니면 그
+    패턴을 이룬 과제(그 소유자 원자의 과제)가 모두 보는 과제(`visible`) 안이어야 한다(D47). 종전에는 모든 소유자의 패턴을 실었다."""
+    from app import learning  # noqa: PLC0415 — learning 은 brief 를 import 하지 않는다.
+
+    rows = store.query(
+        "SELECT id, status, n_projects, precision, visibility, cluster_key_norm FROM rr_patterns "
+        "WHERE status IN ('candidate','known') AND (owner_sub = ? OR visibility = 'org') ORDER BY id", (owner,))
+    norms = sorted({_s(row["cluster_key_norm"]) for row in rows})
+    atoms = learning.collect_atoms(store, norms=norms, owner_sub=owner) if norms else {}
+    return [row for row in rows if row["visibility"] == "org"
+            or {_s(atom["project_id"]) for atom in atoms.get(_s(row["cluster_key_norm"]), [])} <= visible]
 
 
 def _target_project(store, target_key: str) -> str | None:

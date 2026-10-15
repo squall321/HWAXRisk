@@ -131,6 +131,7 @@ _FINDING_COLUMNS = (
 
 def _finding_row(store: RiskStore, finding_id: str) -> dict:
     row = store.query_one(f"SELECT {_FINDING_COLUMNS} FROM rr_findings WHERE finding_id = ?"
+                          # 카드 대조 거름 그대로(M3 S3-4) — 과제를 가로지르는 학습·지표·야간 자리라 카드 대조 원자는 회수 자격 0(M2 #9)·cells 대상은 통계에 넣지 않는다(M3 #57)
                           " AND COALESCE(source_kind, '') <> 'card_review'", (finding_id,))
     if row is None:
         raise AppError("E404", f"finding 을 찾을 수 없습니다 — {finding_id}.", 404)
@@ -191,7 +192,7 @@ def _bump_pattern(store: RiskStore, finding: Mapping[str, Any], pattern_id: str 
             "SELECT id, n_confirmed, n_refuted FROM rr_patterns WHERE id = ?", (pattern_id,))
     else:
         # 패턴이 세는 키는 별칭을 거친 대표 키다(plan §7.5) — 원본 cluster_key 로 찾으면 병합 뒤 못 찾는다.
-        norm = learning.resolve_cluster_key(store, _s(finding.get("cluster_key")))
+        norm = learning.resolve_cluster_key(store, _s(finding.get("cluster_key")), owner_sub=_s(finding.get("owner_sub")))
         row = store.query_one(
             "SELECT id, n_confirmed, n_refuted FROM rr_patterns WHERE cluster_key_norm = ?", (norm,))
     if row is None:
@@ -495,6 +496,7 @@ def precedents_by_model(store: RiskStore, *, owner_sub: str, change_kind: str,
         "f.direction AS direction, f.status AS status FROM rr_findings f "
         "JOIN rr_projects p ON p.id = f.project_id "
         "WHERE f.owner_sub = ? AND f.change_kind = ? AND f.mechanism = ? AND f.mechanism_detail = ? "
+        # 카드 대조 거름 그대로(M3 S3-4) — 과제를 가로지르는 학습·지표·야간 자리라 카드 대조 원자는 회수 자격 0(M2 #9)·cells 대상은 통계에 넣지 않는다(M3 #57)
         "AND COALESCE(f.source_kind, '') <> 'card_review' "
         "AND p.status = 'active' AND p.corpus_excluded = 0 ORDER BY f.finding_id",
         (owner_sub, change_kind, mechanism, mechanism_detail),
@@ -534,13 +536,14 @@ def distinct_models(store: RiskStore, *, owner_sub: str, cluster_key_norm: str) 
     models = panel_models(store, owner_sub)
     rows = store.query(
         "SELECT panel_id, status, cluster_key FROM rr_findings WHERE owner_sub = ?"
+        # 카드 대조 거름 그대로(M3 S3-4) — 과제를 가로지르는 학습·지표·야간 자리라 카드 대조 원자는 회수 자격 0(M2 #9)·cells 대상은 통계에 넣지 않는다(M3 #57)
         " AND COALESCE(source_kind, '') <> 'card_review' ORDER BY finding_id",
         (owner_sub,),
     )
     cache: dict[str, str] = {}
     seen = {models.get(_s(r["panel_id"]), "") for r in rows
             if _s(r["status"]) not in EXCLUDED_FINDING_STATUS
-            and learning.resolve_cluster_key(store, _s(r["cluster_key"]), _cache=cache) == cluster_key_norm}
+            and learning.resolve_cluster_key(store, _s(r["cluster_key"]), owner_sub=owner_sub, _cache=cache) == cluster_key_norm}
     return len(seen - {""})
 
 
@@ -640,13 +643,14 @@ def _load_atoms(store: RiskStore) -> list[dict]:
 
     cache: dict[str, str] = {}
     atoms: list[dict] = []
+    # 카드 대조 거름 그대로(M3 S3-4) — 과제를 가로지르는 학습·지표·야간 자리라 카드 대조 원자는 회수 자격 0(M2 #9)·cells 대상은 통계에 넣지 않는다(M3 #57)
     for row in store.query(f"SELECT {_FINDING_COLUMNS} FROM rr_findings WHERE COALESCE(source_kind, '') <> 'card_review'"
                            " ORDER BY finding_id", ()):
         atom = dict(row)
         if _s(atom["project_id"]) not in corpus:
             continue
         cluster = _s(atom["cluster_key"])
-        norm = learning.resolve_cluster_key(store, cluster, _cache=cache)
+        norm = learning.resolve_cluster_key(store, cluster, owner_sub=_s(atom["owner_sub"]), _cache=cache)
         atom["cluster_key_norm"] = norm
         atom["agent_key"] = seats.get(_s(atom["opinion_id"]), "")
         atom["model"] = models.get(_s(atom["panel_id"]), "")
@@ -1254,6 +1258,7 @@ def sync_labels(store: RiskStore, *, incidents: Sequence[Mapping[str, Any]] | No
         incidents = list(fetch() or ())
     rows = store.query(
         "SELECT finding_id, project_id, mechanism, subject_key, ckeys_json, owner_sub, status"
+        # 카드 대조 거름 그대로(M3 S3-4) — 과제를 가로지르는 학습·지표·야간 자리라 카드 대조 원자는 회수 자격 0(M2 #9)·cells 대상은 통계에 넣지 않는다(M3 #57)
         " FROM rr_findings WHERE status IN ('open','verified','dismissed') AND COALESCE(source_kind, '') <> 'card_review'"
         " ORDER BY finding_id", ())
     labeled = auto = queued = 0

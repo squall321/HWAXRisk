@@ -90,6 +90,13 @@ _SINCE_COLS: dict[str, tuple[str, ...]] = {
     "rr_review_cells": ("updated_at", "created_at"),
     "rr_card_verdicts": ("updated_at", "created_at"),
     "rr_review_calls": ("started_at",),
+    # v5(재설계 M3) — 쟁점·요약·근거 꾸러미 실호출은 고쳐 쓰는 행이라 updated_at 이 먼저다. 보고서 판은 한 번 쓰고 고치지 않는다.
+    # 완결 확인은 취소할 때 행을 지우지 않고 revoked_at 을 적으므로 그것이 먼저다(취소가 since 반출에서 빠지지 않게).
+    "rr_issues": ("updated_at", "created_at"),
+    "rr_summaries": ("updated_at", "created_at"),
+    "rr_reports": ("created_at",),
+    "rr_close_acks": ("revoked_at", "ack_at"),
+    "rr_unit_live": ("updated_at", "created_at"),
 }
 
 
@@ -169,18 +176,46 @@ def clip_queue_payload(payload: Any) -> Any:
     return {**payload, "raw": clipped, "raw_chars": payload.get("raw_chars") or lengths}
 
 
+def _clip_card_text(value: Any) -> Any:
+    """JSON 값 안의 카드 인용을 판정당 200자로 — card: 인용 행의 quote, 판정 모양 항목의 cq, 글 안의 «» 인용(원래 길이는 옆 칸
+    `<칸>_chars` — 이미 적힌 값은 그대로). 등록부 merged_json·쟁점 basis_json 은 걸음마다 칸이 자라므로(주장값·분포·쟁점 전 값·
+    제기자 판정 — M3.md 4.2) 칸 이름이 아니라 모양으로 찾아 깊이와 상관없이 다 줄인다."""
+    if isinstance(value, list):
+        return [_clip_card_text(v) for v in value]
+    if not isinstance(value, dict):
+        return value
+    out = {k: _clip_card_text(v) for k, v in value.items()}
+    cut: set[str] = set()
+    if str(out.get("ref") or "").startswith("card:") and isinstance(out.get("quote"), str):
+        out, cut = _clip(out, "quote"), {"quote"}
+    if isinstance(out.get("cq"), str):
+        out, cut = _clip(out, "cq"), cut | {"cq"}
+    for key in [k for k, v in out.items() if isinstance(v, str) and k not in cut and not k.endswith("_chars")]:
+        clipped, lengths = clip_quoted(out[key])
+        if lengths:
+            out[key] = clipped
+            out[f"{key}_chars"] = out.get(f"{key}_chars") or lengths
+    return out
+
+
 def _clip_extras(extras: Any) -> Any:
-    """셀 extras_json — 카드 밖 줄의 인용(q, 배경 카드에서 옮긴 글)."""
-    off = extras.get("offcard") if isinstance(extras, dict) else None
-    if not isinstance(off, dict) or not isinstance(off.get("findings"), list):
+    """셀 extras_json — 카드 밖 줄의 인용(q, 배경 카드에서 옮긴 글)과 입력 결손 q1 의 카드 인용(cq — 그 줄에 실린 다툼의 cq 까지,
+    반대 검토 MEDIUM 11)."""
+    if not isinstance(extras, dict):
         return extras
-    return {**extras, "offcard": {**off, "findings": [_clip(f, "q") if isinstance(f, dict) else f
-                                                      for f in off["findings"]]}}
+    out = dict(extras)
+    off = extras.get("offcard")
+    if isinstance(off, dict) and isinstance(off.get("findings"), list):
+        out["offcard"] = {**off, "findings": [_clip(f, "q") if isinstance(f, dict) else f for f in off["findings"]]}
+    if isinstance(extras.get("noinput"), dict):
+        out["noinput"] = _clip_card_text(extras["noinput"])
+    return out
 
 
 def _export_view(table: str, row: dict) -> dict:
     """반출 줄 하나 — 표마다 박스 밖으로 내보낼 모양으로 바꾼다(카드 인용 200자 — 판정 행 cq·조건별 대조, 셀의 카드 밖 인용,
-    카드 대조 finding 의 인용·근거 문장, 인용 역색인의 card: 인용, 카드 대조 마감이 올린 큐 항목의 원문)."""
+    카드 대조 finding 의 인용·근거 문장, 인용 역색인의 card: 인용, 카드 대조 마감이 올린 큐 항목의 원문, 등록부·쟁점의 카드 인용.
+    쟁점 패널의 브리프는 싣지 않는다)."""
     if table == "rr_card_verdicts":
         cq = row.get("cq")
         if isinstance(cq, str) and len(cq) > EXPORT_CQ_MAX:
@@ -189,11 +224,15 @@ def _export_view(table: str, row: dict) -> dict:
         conds = _clip_json(row.get("conds_json"),
                            lambda v: [_clip(c, "cond") if isinstance(c, dict) else c for c in v] if isinstance(v, list)
                            else v)
-        return row if conds is row.get("conds_json") else {**row, "conds_json": conds}
+        # 엔진이 단 다툼(contested_by)의 cq 도 같은 200자 규칙이다(반대 검토 MEDIUM 11 — checks 사본에 실린다)
+        checks = _clip_json(row.get("checks_json"), _clip_card_text)
+        if conds is not row.get("conds_json"):
+            row = {**row, "conds_json": conds}
+        return row if checks is row.get("checks_json") else {**row, "checks_json": checks}
     if table == "rr_review_cells":
         extras = _clip_json(row.get("extras_json"), _clip_extras)
         return row if extras is row.get("extras_json") else {**row, "extras_json": extras}
-    if table == "rr_findings" and row.get("source_kind") == _CARD_REVIEW:
+    if table == "rr_findings" and row.get("source_kind") in _CARD_TEXT_SOURCES:
         finding = _clip_json(row.get("finding_json"), _clip_finding)
         return row if finding is row.get("finding_json") else {**row, "finding_json": finding}
     if table == "rr_claim_refs" and row.get("ref_type") == "card":
@@ -203,7 +242,82 @@ def _export_view(table: str, row: dict) -> dict:
     if table == "rr_curation_queue":
         payload = _clip_json(row.get("payload_json"), clip_queue_payload)
         return row if payload is row.get("payload_json") else {**row, "payload_json": payload}
+    # v5(재설계 M3) — 쟁점 패널이 받은 근거(I6)에는 카드 절 원문이 든다. 그 브리프는 박스 밖으로 내보내지 않는다(그 박스에서만
+    # 쓴다 — 브리프 해시·항목 해시는 남는다). 등록부·쟁점의 카드 인용은 판정 행과 같은 200자 규칙이다(M2 #18·#21 을 넓힌다).
+    if table == "rr_panels" and row.get("kind") == "issue":
+        # 쟁점 패널의 결정문 · risk_spec 에는 좌석이 옮겨 적은 카드 절이 들 수 있다(review1 M6) — 같은 200자 규칙이다.
+        out = {**row, "brief_gz": None}
+        if isinstance(row.get("decision_text"), str):
+            out["decision_text"] = clip_card_text_blob(row["decision_text"])
+        out["risk_spec_json"] = _clip_json(row.get("risk_spec_json"), _clip_card_text)
+        return out
+    if table == "rr_reports" and isinstance(row.get("pages_gz"), dict):
+        # 보고서 판의 쪽 — 요약 서기(LLM)의 서술은 «» 안에 실리고 행 글을 옮겨 적을 수 있다(review1 M6). «» 인용을 200자로.
+        pages = _clip_pages_gz(_decode(row["pages_gz"]))
+        return row if pages is None else {**row, "pages_gz": _encode(pages)}
+    if table in ("rr_registry", "rr_issues"):
+        column = "merged_json" if table == "rr_registry" else "basis_json"
+        clipped = _clip_json(row.get(column), _clip_card_text)
+        return row if clipped is row.get(column) else {**row, column: clipped}
     return row
+
+
+# 카드 글을 옮겨 적을 수 있는 finding 출처 — 카드 대조(M2)와 쟁점 패널(M3 — 좌석이 쟁점 근거의 카드 절을 옮겨 적는다, review1 M6).
+_CARD_TEXT_SOURCES: tuple[str, ...] = (_CARD_REVIEW, "issue_panel")
+_JSON_QUOTE = re.compile(r'("quote"\s*:\s*")((?:[^"\\]|\\.)*)(")')
+
+
+def clip_card_text_blob(text: str) -> str:
+    """JSON 이 섞인 자유 글(쟁점 패널 결정문)의 카드 글 — «» 인용과 JSON 의 "quote" 글을 하나마다 200자로 줄이고 원래 길이를 그 자리에
+    적는다('…(원래 N자)'). 줄일 것이 없으면 그대로."""
+    clipped = _mark_lengths(text)
+
+    def cut(m: re.Match) -> str:
+        try:
+            value = json.loads(f'"{m.group(2)}"')
+        except ValueError:
+            return m.group(0)
+        if len(value) <= EXPORT_CQ_MAX:
+            return m.group(0)
+        short = json.dumps(value[:EXPORT_CQ_MAX] + f"…(원래 {len(value)}자)", ensure_ascii=False)[1:-1]
+        return m.group(1) + short + m.group(3)
+
+    return _JSON_QUOTE.sub(cut, clipped)
+
+
+def _clip_strings(value: Any) -> Any:
+    """JSON 값 안의 글마다 «» 인용을 200자로(원래 길이는 그 자리에 '…(원래 N자)')."""
+    if isinstance(value, list):
+        return [_clip_strings(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _clip_strings(v) for k, v in value.items()}
+    if isinstance(value, str):
+        return _mark_lengths(value)
+    return value
+
+
+def _mark_lengths(text: str) -> str:
+    def cut(m: re.Match) -> str:
+        if len(m.group(1)) <= EXPORT_CQ_MAX:
+            return m.group(0)
+        return "«" + m.group(1)[:EXPORT_CQ_MAX] + f"…(원래 {len(m.group(1))}자)»"
+
+    return _QUOTED.sub(cut, text)
+
+
+def _clip_pages_gz(blob: bytes) -> bytes | None:
+    """보고서 판 쪽(gzip JSON)의 «» 인용을 200자로 — 바뀐 것이 없으면 None."""
+    import gzip  # noqa: PLC0415
+
+    try:
+        pages = json.loads(gzip.decompress(blob).decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    clipped = _clip_strings(pages)
+    if clipped == pages:
+        return None
+    return gzip.compress(json.dumps(clipped, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+                         mtime=0)
 
 
 def _human_rank(table: str, row: dict) -> int:
@@ -226,6 +340,12 @@ def _human_rank(table: str, row: dict) -> int:
         return 1 if row.get("status") in ("verified", "dismissed", "mitigated") else 0
     if table == "rr_curation_queue":
         return 1 if row.get("status") in ("done", "rejected") else 0
+    # 재설계 M3(review1 L4) — 완결 잔여 확인의 취소(확인 행은 시각이 키라 새 확인은 새 행이다 — 취소만 같은 행을 고친다)와 사람의
+    # 쟁점 결정(올리기 · 건너뛰기).
+    if table == "rr_close_acks":
+        return 1 if row.get("revoked_at") is not None else 0
+    if table == "rr_issues":
+        return 1 if row.get("status_source") == "human" else 0
     return 0
 
 
@@ -286,9 +406,15 @@ def header_line(store: RiskStore, data_dir: Path | None = None) -> dict:
             "origin": read_origin(data_dir)}
 
 
-# 반출 기본 제외 — 회수된 과제와 코퍼스 제외 과제(plan §5.2.6 (ii)). `include_excluded=1` 로만 싣는다.
-_PROJECT_SCOPE_SQL = ("project_id IN (SELECT id FROM rr_projects WHERE owner_sub = ?"
-                      " AND status <> 'purged' AND (corpus_excluded = 0 OR ? = 1))")
+# 반출 기본 제외 — 회수된 과제와 코퍼스 제외 과제(plan §5.2.6 (ii)). `include_excluded=1` 로만 싣는다. 자리표는 둘(owner_sub,
+# include_excluded)이다.
+_SCOPED_PROJECTS_SQL = ("SELECT id FROM rr_projects WHERE owner_sub = ?"
+                        " AND status <> 'purged' AND (corpus_excluded = 0 OR ? = 1)")
+_PROJECT_SCOPE_SQL = f"project_id IN ({_SCOPED_PROJECTS_SQL})"
+# 스냅샷 · diff 열쇠 표(과제 열도 대상 열쇠도 없다)는 그 스냅샷 · diff 의 과제를 따른다(D50). diff 는 base · target 두 과제가 모두
+# 범위여야 한다 — 읽기 문지기(routes.mcp_scope_owner)와 같은 규칙이다(한쪽이 빠진 비교는 빠진 쪽의 내용을 싣는다). 자리표 넷.
+_SNAPSHOT_SCOPE_SQL = f"snapshot_id IN (SELECT id FROM rr_snapshots WHERE {_PROJECT_SCOPE_SQL})"
+_DIFF_PROJECTS_SQL = f"base_project_id IN ({_SCOPED_PROJECTS_SQL}) AND target_project_id IN ({_SCOPED_PROJECTS_SQL})"
 
 
 def _select(store: RiskStore, table: str, owner_sub: str, since: int,
@@ -297,7 +423,8 @@ def _select(store: RiskStore, table: str, owner_sub: str, since: int,
 
     owner_sub 열이 없는 공용 표(rr_dim_vocab·rr_rules·rr_metrics·rr_delta_priors)는 소유자로 거를 수 없다 —
     그 중 visibility 열이 있는 표는 'org' 행만 싣는다(남의 사설 집계가 내 JSONL 에 따라 나가지 않게 한다).
-    `project_id` 를 가진 표는 회수·코퍼스 제외 과제를 기본으로 뺀다(plan §5.2.6 (ii)).
+    `project_id` 를 가진 표는 회수·코퍼스 제외 과제를 기본으로 뺀다(plan §5.2.6 (ii)) — 과제 열 없이 `target_key` 를 가진 표는 그
+    대상의 과제로 같은 거름을 건다(조합 검토 M9). 둘 다 없는 스냅샷 · diff 열쇠 표는 그 스냅샷 · diff 의 과제로 건다(D50).
     """
     cols, pks = _table_meta(store, table)
     cols = [c for c in cols if c not in _EXPORT_SKIP_COLUMNS.get(table, ())]
@@ -316,6 +443,27 @@ def _select(store: RiskStore, table: str, owner_sub: str, since: int,
     elif "project_id" in cols:
         where.append(_PROJECT_SCOPE_SQL)
         params += [owner_sub, 1 if include_excluded else 0]
+    elif "target_key" in cols:
+        # 과제 열이 없는 대상 열쇠 표(등록부 · 기여 · 패널 …)는 그 대상의 과제로 같은 거름을 건다 — 종전에는 소유자로만 걸러 코퍼스에서
+        # 뺀(기밀) 과제의 행이 기본 반출에 실리는데 classification_max 는 'internal' 이라 했다(조합 검토 M9).
+        where.append(f"target_key IN (SELECT target_key FROM rr_targets WHERE {_PROJECT_SCOPE_SQL})")
+        params += [owner_sub, 1 if include_excluded else 0]
+    elif table == "rr_snapshot_calls":
+        # 스냅샷이 없는 호출(실패 · 부분 잡의 원문)은 그 스냅샷 잡의 과제를 따른다.
+        where.append(f"({_SNAPSHOT_SCOPE_SQL} OR (snapshot_id IS NULL AND job_id IN"
+                     f" (SELECT id FROM rr_snapshot_jobs WHERE {_PROJECT_SCOPE_SQL})))")
+        params += [owner_sub, 1 if include_excluded else 0] * 2
+    elif "snapshot_id" in cols:
+        # 스냅샷 열쇠 표(IR 노드 · 엣지 · 상태 · 게이트 확인)는 그 스냅샷의 과제를 따른다(D50).
+        where.append(_SNAPSHOT_SCOPE_SQL)
+        params += [owner_sub, 1 if include_excluded else 0]
+    elif table == "rr_diffs":
+        where.append(_DIFF_PROJECTS_SQL)
+        params += [owner_sub, 1 if include_excluded else 0] * 2
+    elif "diff_id" in cols:
+        # diff 열쇠 표(diff 이벤트)는 그 diff 를 따른다(D50).
+        where.append(f"diff_id IN (SELECT id FROM rr_diffs WHERE {_DIFF_PROJECTS_SQL})")
+        params += [owner_sub, 1 if include_excluded else 0] * 2
     since_cols = [c for c in _SINCE_COLS.get(table, ()) if c in cols]
     if since > 0 and since_cols:
         expr = since_cols[0] if len(since_cols) == 1 else f"COALESCE({', '.join(since_cols)})"
@@ -479,6 +627,7 @@ def import_jsonl(store: RiskStore, owner_sub: str, text: str) -> dict:
             if found is None:
                 other = store.query_one(f"SELECT owner_sub FROM {table} WHERE {pk_where}",
                                         tuple(values[c] for c in pks))
+                # 결정(review1 훑기 둘째): 부른 사람이 이미 쥔 PK 의 존재만 드러난다 — PK 유일성이 설계라 남의 자리엔 넣을 수 없다.
                 if other is not None:              # PK 는 같은데 주인이 다르다 — 값은 한 글자도 흘리지 않는다.
                     skipped += 1
                     conflicts.append({"table": table, "key": _key_of(row, pks), "reason": "owner_conflict"})

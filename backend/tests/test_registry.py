@@ -869,6 +869,7 @@ def _dismissed_row(store, target_key: str, cluster_key: str, *, sev3: int, suppo
 def test_a_stronger_reraise_flags_the_dismissed_row(risk_store, clock, new_sev3, expected):
     """강도가 오른 재제기는 needs_review_json 을 남기고, 같은 강도면 남기지 않는다. status 는 불변이다."""
     _dismissed_row(risk_store, "T_old", "ck:reraise00001", sev3=1, support=1, grade="경험칙")
+    _target(risk_store, "T_new")              # 병합하는 대상 — 표기는 그 소유자의 행에만 간다(D48)
     row = {"target_key": "T_new", "cluster_key": "ck:reraise00001", "sev3": new_sev3, "support": 1,
            "evidence_grade": "경험칙"}
     flagged = registry._flag_escalations(risk_store, [row], "T_new", 1234)
@@ -889,6 +890,7 @@ def test_a_stronger_reraise_flags_the_dismissed_row(risk_store, clock, new_sev3,
 def test_human_reconfirmation_clears_the_escalation_flag(risk_store, clock):
     """사람이 다시 확정하면 재검토 표기가 지워진다(set_status 가 needs_review_json 을 비운다)."""
     _dismissed_row(risk_store, "T_old", "ck:reraise00002", sev3=1, support=1, grade="경험칙")
+    _target(risk_store, "T_new")
     registry._flag_escalations(risk_store, [{"target_key": "T_new", "cluster_key": "ck:reraise00002",
                                              "sev3": 3, "support": 2, "evidence_grade": "도구예측"}],
                                "T_new", 1234)
@@ -901,9 +903,28 @@ def test_human_reconfirmation_clears_the_escalation_flag(risk_store, clock):
         "SELECT needs_review_json FROM rr_registry WHERE target_key = 'T_old'")["needs_review_json"] is None
 
 
+def test_a_reraise_flags_only_rows_of_the_targets_own_owner(risk_store, clock):
+    """재제기 표기는 그 대상 소유자의 행에만 쓴다 — 같은 cluster_key 라도 남이 닫은 행에는 쓰지 않아 남의 원장을 고치지 않고 이 대상의
+    키(by_target)를 거기 싣지 않는다(D48 조정자 결정). 같은 소유자가 닫은 행은 그대로 표기된다."""
+    other = "someone@else.com"
+    _dismissed_row(risk_store, "T_old", "ck:reraise00003", sev3=1, support=1, grade="경험칙")
+    _dismissed_row(risk_store, "T_theirs", "ck:reraise00003", sev3=1, support=1, grade="경험칙")
+    risk_store.execute("UPDATE rr_targets SET owner_sub = ?, project_id = 'P-theirs' WHERE target_key = 'T_theirs'", (other,))
+    risk_store.execute("UPDATE rr_registry SET owner_sub = ?, status_decided_by = ? WHERE target_key = 'T_theirs'", (other, other))
+    _target(risk_store, "T_new")
+    row = {"target_key": "T_new", "cluster_key": "ck:reraise00003", "sev3": 3, "support": 1, "evidence_grade": "경험칙"}
+
+    assert registry._flag_escalations(risk_store, [row], "T_new", 1234) == ["ck:reraise00003"]
+    notes = {r["target_key"]: r["needs_review_json"] for r in risk_store.query(
+        "SELECT target_key, needs_review_json FROM rr_registry WHERE cluster_key = 'ck:reraise00003'")}
+    assert notes["T_theirs"] is None
+    assert json.loads(notes["T_old"])["by_target"] == "T_new"
+
+
 # ================================================================ 조직 공개 토글(plan §5.1 원칙 9 · §0.9 P6-8)
 def test_visibility_toggle_is_owner_only_and_writes_stay_closed(risk_store, clock):
-    """org 로 열면 읽기가 열리고 쓰기는 그대로 소유자만이다(남의 신원은 404 가 아니라 403)."""
+    """org 로 열면 읽기가 열리고 쓰기는 그대로 소유자만이다 — 남이 볼 수 있는(조직 공개) 행에 남이 쓰면 403 이고, 비공개 행에는 없는
+    행과 같은 404 다(그 행이 있다는 것을 흘리지 않는다 — review1 남 숨김 훑기, 종전에는 비공개 행에도 403 이었다)."""
     from app import routes
 
     _target(risk_store)
@@ -912,7 +933,10 @@ def test_visibility_toggle_is_owner_only_and_writes_stay_closed(risk_store, cloc
 
     with pytest.raises(AppError) as stranger:
         registry.set_visibility(risk_store, "c1", "org", owner_sub=other)
-    assert (stranger.value.code, stranger.value.http_status) == ("E403", 403)
+    with pytest.raises(AppError) as missing:
+        registry.set_visibility(risk_store, "no-such-cluster", "org", owner_sub=other)
+    assert ((stranger.value.code, stranger.value.http_status, stranger.value.message.replace("c1", "<c>"))
+            == (missing.value.code, missing.value.http_status, missing.value.message.replace("no-such-cluster", "<c>")))
 
     out = registry.set_visibility(risk_store, "c1", "org", owner_sub=OWNER)
     assert out["visibility"] == "org" and out["updated"] == 1
@@ -923,6 +947,9 @@ def test_visibility_toggle_is_owner_only_and_writes_stay_closed(risk_store, cloc
     with pytest.raises(AppError) as write:
         registry.set_status(risk_store, "c1", "verified", owner_sub=other, evidence_ref="rpt:1")
     assert (write.value.code, write.value.http_status) == ("E403", 403)
+    with pytest.raises(AppError) as reopen:
+        registry.set_visibility(risk_store, "c1", "private", owner_sub=other)
+    assert (reopen.value.code, reopen.value.http_status) == ("E403", 403)
 
     with pytest.raises(AppError) as vocab:
         registry.set_visibility(risk_store, "c1", "public", owner_sub=OWNER)
@@ -953,7 +980,7 @@ def test_cluster_alias_write_revoke_and_hop_limit(risk_store, clock):
 
     alias = registry.add_cluster_alias(risk_store, "ck:a0000000001", "ck:b0000000002", owner_sub=OWNER)
     assert alias["new_cluster_key"] == "ck:b0000000002"
-    assert registry.resolve_cluster_key(risk_store, "ck:a0000000001") == "ck:b0000000002"
+    assert registry.resolve_cluster_key(risk_store, "ck:a0000000001", owner_sub=OWNER) == "ck:b0000000002"
 
     with pytest.raises(AppError) as again:
         registry.add_cluster_alias(risk_store, "ck:a0000000001", "ck:b0000000002", owner_sub=OWNER)
@@ -968,7 +995,7 @@ def test_cluster_alias_write_revoke_and_hop_limit(risk_store, clock):
     # 철회는 행 삭제가 아니라 표기다 — 행은 남고 해석만 끊긴다.
     assert risk_store.query_one(
         "SELECT revoked_at FROM rr_cluster_alias WHERE old_cluster_key = 'ck:a0000000001'")["revoked_at"]
-    assert registry.resolve_cluster_key(risk_store, "ck:a0000000001") == "ck:a0000000001"
+    assert registry.resolve_cluster_key(risk_store, "ck:a0000000001", owner_sub=OWNER) == "ck:a0000000001"
 
 
 def test_cluster_alias_chain_stops_at_five_hops(risk_store, clock):
@@ -1009,6 +1036,42 @@ def test_merge_folds_findings_through_a_human_alias(risk_store, clock):
 
     registry.revoke_cluster_alias(risk_store, "ck:x0000000001", owner_sub=OWNER)
     assert registry.merge(risk_store, "T1", owner_sub=OWNER)["clusters"] == 2
+
+
+def test_cluster_aliases_are_per_owner(risk_store, clock):
+    """조합 검토 M7 — 클러스터 키는 내용 해시라 소유자를 가로질러 같다 — 별칭은 소유자마다다. 남이 같은 키에 별칭을 세워도 주인의 병합에
+    닿지 않고(주인의 finding 을 남의 키로 접지 않는다) 주인이 같은 옛 키에 제 별칭을 세우는 것을 막지 않는다(종전에는 E409 로 남의 키를
+    보였다). 철회도 그 소유자의 별칭만이다."""
+    other = "someone@else.com"
+    _target(risk_store)
+    _finding(risk_store, "T1", "F1", "ck:shared00001", panel_id="P1")
+    _finding(risk_store, "T1", "F2", "ck:theirs00002", panel_id="P2")
+    registry.add_cluster_alias(risk_store, "ck:shared00001", "ck:theirs00002", owner_sub=other)
+    assert registry.merge(risk_store, "T1", owner_sub=OWNER)["clusters"] == 2           # 남의 별칭으로 접지 않는다
+    try:
+        mine = registry.add_cluster_alias(risk_store, "ck:shared00001", "ck:theirs00002", owner_sub=OWNER)
+    except AppError as exc:
+        mine = {"error": exc.code, "message": exc.message}
+    assert mine.get("new_cluster_key") == "ck:theirs00002", mine
+    assert registry.merge(risk_store, "T1", owner_sub=OWNER)["clusters"] == 1           # 제 별칭으로는 접는다
+    assert registry.resolve_cluster_key(risk_store, "ck:shared00001", owner_sub=other) == "ck:theirs00002"
+    registry.revoke_cluster_alias(risk_store, "ck:shared00001", owner_sub=OWNER)
+    assert registry.resolve_cluster_key(risk_store, "ck:shared00001", owner_sub=OWNER) == "ck:shared00001"
+    assert registry.resolve_cluster_key(risk_store, "ck:shared00001", owner_sub=other) == "ck:theirs00002"
+
+
+def test_another_owners_alias_chain_does_not_count_toward_the_hop_limit(risk_store, clock):
+    """조합 검토 M7 — 홉 한도는 그 소유자의 사슬만 센다. 남이 어떤 키에서 한도만큼 이어진 사슬을 세워 두어도 주인이 그 키로 별칭을
+    세우는 것은 막히지 않는다(남의 사슬이 주인의 별칭을 alias_chain_too_long 으로 막지 않는다)."""
+    other = "someone@else.com"
+    chain = [f"ck:chain{i:07d}" for i in range(registry.ALIAS_MAX_HOPS + 1)]
+    for old, new in zip(chain, chain[1:]):
+        registry.add_cluster_alias(risk_store, old, new, owner_sub=other)
+    try:
+        mine = registry.add_cluster_alias(risk_store, "ck:mine0000001", chain[0], owner_sub=OWNER)
+    except AppError as exc:
+        mine = {"error": exc.code, "message": exc.message}
+    assert mine.get("new_cluster_key") == chain[0], mine
 
 
 # ================================================================ §4.7.3 통합 보고서 — minutes 의 [품질 플래그]

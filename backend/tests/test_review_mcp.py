@@ -80,7 +80,8 @@ def test_risk_get_cells_pages_the_grid_inside_the_wire_limit_and_matches_rest(st
     key, job_id, _fake = _reviewed(store)
     factories.act_as_delegate(monkeypatch, OWNER)
     rest = routes.get_cells(key, ident=factories.ident(OWNER))["rows"]
-    want = [{c: r[c] for c in routes.CELL_BRIEF_COLUMNS} for r in rest]
+    brief = [*routes.CELL_BRIEF_COLUMNS, "filter_reason"]               # 거른 셀의 까닭 한 줄(재설계 M3 C3-8)
+    want = [{c: r[c] for c in brief} for r in rest]
     one = _call("risk_get_cells", target_key=key)
     assert srv._wire_chars(one) <= srv.MCP_RESULT_CHARS
     monkeypatch.setattr(srv, "MCP_RESULT_CHARS", 5000)                  # 한도를 줄여 여러 번에 나눠 받게 한다
@@ -88,7 +89,7 @@ def test_risk_get_cells_pages_the_grid_inside_the_wire_limit_and_matches_rest(st
     while True:
         page = _call("risk_get_cells", target_key=key, offset=offset)
         calls += 1
-        assert srv._wire_chars(page) <= 5000 and all(list(r) == list(routes.CELL_BRIEF_COLUMNS) for r in page["rows"])
+        assert srv._wire_chars(page) <= 5000 and all(list(r) == brief for r in page["rows"])
         rows += page["rows"]
         if "next_offset" not in page:
             break
@@ -147,7 +148,8 @@ def test_risk_get_coverage_picks_up_the_review_block_and_the_readers_write_nothi
     before = _digest(store)
     coverage = _call("risk_get_coverage", target_key=key, with_seats=False)
     rest = routes.coverage_payload(key, owner_sub=OWNER)["review"]
-    assert coverage["review"] == {**rest, **routes.review_order_brief(rest["order"])} and coverage["review"]["job"]
+    assert coverage["review"] == {**rest, **routes.review_order_brief(rest["order"]), "job": routes.mcp_job_brief(rest["job"])}
+    assert coverage["review"]["job"]                                    # 잡 칸은 범위 · 워커를 수로 줄인 MCP 모양(MEDIUM 12)
     _call("risk_get_cells", target_key=key)
     _call("risk_get_expert_report", target_key=key, agent_key=SEAL, part="full")
     assert _digest(store) == before
@@ -287,7 +289,7 @@ def test_the_guide_watches_a_running_review_job_and_reads_reports_once_it_is_don
     gate = threading.Event()
     fake.hold_runs = {2: gate}
     r = rig.Rig(store, fake)
-    r.tick()
+    r.tick(packs_only=True)
     r.tick(wait=False)
     rig.wait_for(lambda: fake.runs == 2)
     try:
@@ -301,8 +303,10 @@ def test_the_guide_watches_a_running_review_job_and_reads_reports_once_it_is_don
     r.finish(job_id)
     done = entry.next_step(_delegate(), project_id=project_id)
     assert done["where"] == "done"
-    assert [s["tool"] for s in done["next"]] == ["risk_start_job", "risk_get_coverage", "risk_get_cells",
+    # 좁은 범위라도 검토 잡 끝의 사슬(재설계 M3 S3-5)이 코드 조립 판(reviews_partial)을 세웠다 — 그 판을 읽는 걸음이 선다.
+    assert [s["tool"] for s in done["next"]] == ["risk_start_job", "risk_get_report", "risk_get_coverage", "risk_get_cells",
                                                  "risk_get_expert_report", "risk_next_step"]
+    assert done["facts"]["report"]["trigger"] == "reviews_partial" and "stage" not in done["facts"]
     report = next(s for s in done["next"] if s["tool"] == "risk_get_expert_report")
     assert report["args"] == {"target_key": key, "agent_key": SEAL} and report["write"] is False
     assert any("범위 밖으로 남은 셀이 25개" in n for n in done["notes"])          # 로스터 6 × 단위 5 − SEAL 의 5

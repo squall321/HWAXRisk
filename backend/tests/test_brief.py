@@ -208,6 +208,8 @@ def seed_real_snap_target(store, *, dyna: bool = False) -> str:
 
 class FakeAdh:
     """AdhClient 흉내 — 실 호출 없이 인자만 기록한다(실 LLM·네트워크 0)."""
+    # 과제 거름(찾기 인자 project_ids)을 밝힌다 — 밝히지 않은 클라이언트로는 브리프가 AIDataHub 를 찾지 않는다(D46).
+    supports_project_filter = True
 
     def __init__(self, *, hybrid=None, agent=None, available: bool = True) -> None:
         self.available = available
@@ -676,7 +678,7 @@ def test_e7_second_path_uses_adh_agent_search(risk_store):
     target_key = seed_diff_target(risk_store)
     risk_store.execute("DELETE FROM rr_seat_opinions")
     adh = FakeAdh(agent={"ok": True, "result": [{
-        "record_id": "rec-abcdef123456",
+        "record_id": "rec-abcdef123456", "tags": ["hwax:project:p_prev"],     # 받은 쪽도 적중의 과제를 본다(L10)
         "summary": "이전 과제에서 같은 계면의 간극을 재검사 대상으로 남겼다",
         "content": {"meta": {"portal": {"opinion_id": "op9", "finding_id": "pan9#F2"}}}}]})
     out = brief.build_brief(risk_store, target_key, adh=adh)

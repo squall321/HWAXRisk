@@ -51,6 +51,7 @@ _ATOM_SQL = (
     "SELECT finding_id, target_key, project_id, panel_id, opinion_id, origin, owner_sub, mechanism, "
     "mechanism_detail, change_kind, subject_key, cluster_key, direction, severity, sev3, finding_json, "
     "created_at FROM rr_findings WHERE status <> 'rejected_in_panel' AND recall_eligible = 1"
+    # 카드 대조 거름 그대로(M3 S3-4) — 과제를 가로지르는 학습·지표·야간 자리라 카드 대조 원자는 회수 자격 0(M2 #9)·cells 대상은 통계에 넣지 않는다(M3 #57)
     " AND COALESCE(source_kind, '') <> 'card_review'"
 )
 _ATOM_ORDER = " ORDER BY created_at, finding_id"
@@ -59,6 +60,7 @@ _LABEL_SQL = (
     "SELECT l.id AS label_id, l.finding_id, l.source, l.outcome, l.matched_by, l.match_score, "
     "l.labeled_at, l.occurred_at, l.owner_sub, f.target_key, f.cluster_key, f.change_kind, f.mechanism, "
     "f.mechanism_detail FROM rr_labels AS l JOIN rr_findings AS f ON f.finding_id = l.finding_id"
+    # 카드 대조 거름 그대로(M3 S3-4) — 과제를 가로지르는 학습·지표·야간 자리라 카드 대조 원자는 회수 자격 0(M2 #9)·cells 대상은 통계에 넣지 않는다(M3 #57)
     " AND COALESCE(f.source_kind, '') <> 'card_review'"
 )
 _LABEL_ORDER = " ORDER BY l.labeled_at, l.id"
@@ -101,22 +103,25 @@ def _num(value: Any) -> float | None:
     return float(value)
 
 
-def resolve_cluster_key(store: RiskStore, cluster_key: str, *, _cache: dict | None = None) -> str:
+def resolve_cluster_key(store: RiskStore, cluster_key: str, *, owner_sub: str, _cache: dict | None = None) -> str:
     """rr_cluster_alias 를 거친 대표 cluster_key(§4.3.2). 체인 ≤5홉이고 revoked 별칭·순환은 건너뛴다.
 
+    별칭은 소유자마다다(조합 검토 M7) — 그 키를 쓴 원장 행의 소유자(`owner_sub`)의 별칭만 따른다. 클러스터 키는 내용 해시라 소유자를
+    가로질러 같아, 남의 별칭을 따르면 주인의 finding 을 남의 키로 접는다.
     registry 가 같은 이름의 정본을 갖게 되면 이 함수는 그쪽으로 위임한다(중복 구현 금지).
     """
     key = _s(cluster_key)
     if not key:
         return key
-    if _cache is not None and key in _cache:
-        return _cache[key]
+    owner = _s(owner_sub)
+    if _cache is not None and (owner, key) in _cache:
+        return _cache[(owner, key)]
     seen = {key}
     current = key
     for _ in range(ALIAS_MAX_HOPS):
         row = store.query_one(
-            "SELECT new_cluster_key FROM rr_cluster_alias WHERE old_cluster_key = ? AND revoked_at IS NULL",
-            (current,),
+            "SELECT new_cluster_key FROM rr_cluster_alias WHERE owner_sub = ? AND old_cluster_key = ? AND revoked_at IS NULL",
+            (owner, current),
         )
         if row is None:
             break
@@ -126,7 +131,7 @@ def resolve_cluster_key(store: RiskStore, cluster_key: str, *, _cache: dict | No
         seen.add(nxt)
         current = nxt
     if _cache is not None:
-        _cache[key] = current
+        _cache[(owner, key)] = current
     return current
 
 
@@ -198,7 +203,7 @@ def collect_atoms(store: RiskStore, *, norms: Iterable[str] | None = None,
         cluster_key = _s(row["cluster_key"])
         if (row["target_key"], registry.strip_improvement_suffix(cluster_key)) in weak:
             continue
-        norm = resolve_cluster_key(store, cluster_key, _cache=cache)
+        norm = resolve_cluster_key(store, cluster_key, owner_sub=_s(row["owner_sub"]), _cache=cache)
         if wanted is not None and norm not in wanted:
             continue
         fj = _loads(row["finding_json"], {})
@@ -244,7 +249,7 @@ def collect_labels(store: RiskStore, *, owner_sub: str | None = None) -> dict[st
         params = (owner_sub,)
     for raw in store.query(sql + _LABEL_ORDER, params):
         row = dict(raw)
-        norm = resolve_cluster_key(store, _s(row["cluster_key"]), _cache=cache)
+        norm = resolve_cluster_key(store, _s(row["cluster_key"]), owner_sub=_s(row["owner_sub"]), _cache=cache)
         groups.setdefault(norm, []).append({
             "label_id": row["label_id"],
             "finding_id": row["finding_id"],
@@ -470,8 +475,9 @@ def on_label(store: RiskStore, label_id: str, *, now: int | None = None) -> dict
     """라벨 1건이 들어온 뒤의 훅(§7.4) — 그 조합의 선례 카운트와 그 패턴의 통계를 다시 맞춘다."""
     now = common.now_epoch() if now is None else now
     row = store.query_one(
-        "SELECT l.id AS label_id, l.finding_id, f.cluster_key, f.change_kind, f.mechanism, f.mechanism_detail "
+        "SELECT l.id AS label_id, l.finding_id, f.cluster_key, f.change_kind, f.mechanism, f.mechanism_detail, f.owner_sub "
         "FROM rr_labels AS l JOIN rr_findings AS f ON f.finding_id = l.finding_id"
+        # 카드 대조 거름 그대로(M3 S3-4) — 과제를 가로지르는 학습·지표·야간 자리라 카드 대조 원자는 회수 자격 0(M2 #9)·cells 대상은 통계에 넣지 않는다(M3 #57)
         " AND COALESCE(f.source_kind, '') <> 'card_review' WHERE l.id = ?",
         (label_id,),
     )
@@ -480,7 +486,7 @@ def on_label(store: RiskStore, label_id: str, *, now: int | None = None) -> dict
     combo = _combo_of(row)
     with store.tx():
         priors_written = recompute_label_priors(store, [combo] if combo else [], now=now)
-        norm = resolve_cluster_key(store, _s(row["cluster_key"]))
+        norm = resolve_cluster_key(store, _s(row["cluster_key"]), owner_sub=_s(row["owner_sub"]))
         pattern = store.query_one("SELECT id FROM rr_patterns WHERE cluster_key_norm = ?", (norm,))
         pattern_id = _s(pattern["id"]) if pattern is not None else ""
         if pattern_id:
@@ -611,10 +617,27 @@ def _queue(store: RiskStore, owner_sub: str, payload: Mapping[str, Any], now: in
     return queue_id
 
 
-def _sample_claims(store: RiskStore, atoms: Sequence[Mapping[str, Any]], limit: int = 5) -> list[dict]:
+def _visible_projects(store: RiskStore, *emails: str) -> set[str]:
+    """그 사람들 모두가 구성원인 과제 — '구성원' 은 brief._member_project_ids 하나다(D45 · D48)."""
+    from app import brief  # noqa: PLC0415 — brief 는 learning 을 함수 안에서만 부른다.
+
+    sets = [brief._member_project_ids(store, email) for email in emails]
+    return set.intersection(*sets) if sets else set()
+
+
+def _owner_ranges(atoms: Sequence[Mapping[str, Any]], visible: set[str]) -> dict:
+    """패턴 행에 저장하는 특징 범위(설계 값) — 그 행 주인이 볼 수 있는 과제(`visible`)의 원자에서만 고른다. 전역 마이닝의 남의 설계
+    값이 주인 행과 그 내보내기에 들지 않게(조합 검토 M6) — 셈(n_*)은 전역 그대로다."""
+    return _feature_ranges([atom for atom in atoms if _s(atom["project_id"]) in visible])
+
+
+def _sample_claims(store: RiskStore, atoms: Sequence[Mapping[str, Any]], visible: set[str],
+                   limit: int = 5) -> list[dict]:
+    """주장 표본 — 보는 사람이 볼 수 있는 과제(`visible`)의 원자에서만 고른다. 야간 마이닝은 전역이라 남의 원자가 섞인다(D48)."""
     out: list[dict] = []
-    for atom in atoms[:limit]:
+    for atom in [a for a in atoms if _s(a["project_id"]) in visible][:limit]:
         row = store.query_one("SELECT finding_json FROM rr_findings WHERE finding_id = ?"
+                              # 카드 대조 거름 그대로(M3 S3-4) — 과제를 가로지르는 학습·지표·야간 자리라 카드 대조 원자는 회수 자격 0(M2 #9)·cells 대상은 통계에 넣지 않는다(M3 #57)
                               " AND COALESCE(source_kind, '') <> 'card_review'", (atom["finding_id"],))
         claim = _s(_loads(row["finding_json"], {}).get("claim")) if row is not None else ""
         out.append({"finding_id": atom["finding_id"], "target_key": atom["target_key"], "claim": claim})
@@ -658,8 +681,10 @@ def mine_patterns(store: RiskStore, *, owner_sub: str | None = None, now: int | 
                     continue
                 pattern_id = _next_pattern_id(store)
                 owner = owner_sub or _s(store.query_one(
+                    # 카드 대조 거름 그대로(M3 S3-4) — 과제를 가로지르는 학습·지표·야간 자리라 카드 대조 원자는 회수 자격 0(M2 #9)·cells 대상은 통계에 넣지 않는다(M3 #57)
                     "SELECT owner_sub FROM rr_findings WHERE finding_id = ? AND COALESCE(source_kind, '') <> 'card_review'",
                     (atoms[0]["finding_id"],))["owner_sub"])
+                visible = _visible_projects(store, owner)
                 store.execute(
                     "INSERT INTO rr_patterns (id, owner_sub, visibility, cluster_key_norm, mechanism, "
                     "mechanism_detail, change_kind, subject_class, status, n_findings, n_targets, n_projects, "
@@ -668,8 +693,9 @@ def mine_patterns(store: RiskStore, *, owner_sub: str | None = None, now: int | 
                     (pattern_id, owner, norm, stats["mechanism"], stats["mechanism_detail"], stats["change_kind"],
                      stats["subject_class"], stats["n_findings"], stats["n_targets"], stats["n_projects"],
                      stats["n_experts"], stats["n_confirmed"], stats["n_refuted"], stats["precision"],
-                     common.canonical_json(stats["feature_ranges"]), now, now),
+                     common.canonical_json(_owner_ranges(atoms, visible)), now, now),
                 )
+                # 주장 · 대상 키는 큐 주인이 볼 수 있는 과제의 원자에서만, 남의 과제는 수로만(D48 조정자 결정) — n_* 셈은 전역 그대로다.
                 queue_id = _queue(store, owner, {
                     "pattern_id": pattern_id, "cluster_key_norm": norm, "proposal": "known",
                     "n_findings": stats["n_findings"], "n_projects": stats["n_projects"],
@@ -680,7 +706,8 @@ def mine_patterns(store: RiskStore, *, owner_sub: str | None = None, now: int | 
                     "stamp_missing": gate["stamp_missing"],
                     "note": None if gate["independence_verified"]
                     else "독립성 미검증(primed 스탬프 없음) — echo_ratio 0.0 은 되풀이가 없다는 뜻이 아니다.",
-                    "sample_claims": _sample_claims(store, atoms),
+                    "sample_claims": _sample_claims(store, atoms, visible),
+                    "other_projects_n": len({_s(a["project_id"]) for a in atoms} - visible),
                 }, now)
                 created.append({"pattern_id": pattern_id, "cluster_key_norm": norm, "queue_id": queue_id})
                 existing[norm] = {"id": pattern_id, "cluster_key_norm": norm, "status": "candidate",
@@ -696,7 +723,8 @@ def mine_patterns(store: RiskStore, *, owner_sub: str | None = None, now: int | 
                 skipped.append({"cluster_key_norm": norm, "unmet": ["owned_by_other"],
                                 "owner_sub": _s(row["owner_sub"])})
                 continue
-            if _write_stats(store, pattern_id, stats, now):
+            ranges = _owner_ranges(atoms, _visible_projects(store, _s(row["owner_sub"])))
+            if _write_stats(store, pattern_id, {**stats, "feature_ranges": ranges}, now):
                 updated.append(pattern_id)
             if _s(row["status"]) in ("candidate", "known", "rule", "predictor"):
                 recent = _recent_precision(labels_all.get(norm, []))
@@ -877,6 +905,21 @@ _ALLOWED_TRANSITIONS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _visible_samples(store: RiskStore, result: Mapping[str, Any], visible: set[str]) -> dict:
+    """백테스트 응답의 표본 — 볼 수 있는 과제(`visible`)의 대상만 키로 싣고 나머지는 과제 수(other_projects_n)로만(D48).
+    채점(n_labeled · 정밀도 · 재현율 · train · holdout)은 전역 라벨 그대로다."""
+    shown: list[dict] = []
+    hidden: set[str] = set()
+    for sample in result.get("samples") or []:
+        row = store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (sample["target_key"],))
+        project = _s(row["project_id"]) if row is not None else ""
+        if project in visible:
+            shown.append(sample)
+        else:
+            hidden.add(project)
+    return {**result, "samples": shown, "other_projects_n": len(hidden)}
+
+
 def _fail(unmet: Sequence[str], detail: str) -> AppError:
     return AppError("E100", f"승격 조건 미충족({', '.join(unmet)}) — {detail}", 422)
 
@@ -970,7 +1013,7 @@ def promote(
         condition = draft.get("condition_json") or draft_rule_condition(store, pattern_id)["condition_json"]
         result = backtest(store, condition, cluster_key_norm=norm,
                           aggregate=draft.get("aggregate"))
-        out["backtest"] = result
+        out["backtest"] = _visible_samples(store, result, _visible_projects(store, owner or "", decided_by))
         if not result["passes"]:
             raise _fail(result["unmet"],
                         f"n_labeled {result['n_labeled']} · precision {result['precision']} · "
@@ -1063,7 +1106,7 @@ def apply_remap(store: RiskStore, rows: Sequence[Mapping[str, Any]], *,
         if pair in seen:
             continue
         seen.add(pair)
-        if resolve_cluster_key(store, row["old_cluster_key"]) == row["new_cluster_key"]:
+        if resolve_cluster_key(store, row["old_cluster_key"], owner_sub=owner_sub or row["owner_sub"]) == row["new_cluster_key"]:
             continue
         try:
             registry.add_cluster_alias(store, row["old_cluster_key"], row["new_cluster_key"],

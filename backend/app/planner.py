@@ -7,7 +7,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from app import config, taxonomy
-from app.common import canonical_json, new_uuid, now_epoch
+from app.common import canonical_json, new_uuid, now_epoch, sha256_hex
 from app.errors import AppError
 
 PLANNER_VERSION = "planner-1.0"
@@ -54,7 +54,8 @@ ALLOWED_TRANSITIONS: dict[str, frozenset[str]] = {
     "done_weak": frozenset(),
     "abstain": frozenset(),
     "skipped": frozenset(),
-    "deferred": frozenset(),
+    # 보류는 입력 결손 전문가를 전원 검토에 넣을 때 푼다(재설계 M3 C3-2 — `undefer` 하나가 연다, carried 되돌리기로는 안 풀린다).
+    "deferred": frozenset({"pending"}),
     "carried": frozenset({"pending"}),
 }
 
@@ -797,6 +798,8 @@ def revert_carried(store: Any, target_key: str, agent_key: str, *, decided_by: s
     )
     if row is None:
         raise AppError("E404", f"원장 행이 없습니다: {target_key}:{agent_key}", 404)
+    if row["status"] == "deferred":
+        raise AppError("E100", "보류(deferred) 좌석은 되돌리기로 풀지 않는다 — POST /api/targets/{key}/undefer 로 푼다.", 409)
     _guard(row["status"], "pending")
     cycle = int(row["cycle"] or 1) + 1
     now = now_epoch()
@@ -809,6 +812,45 @@ def revert_carried(store: Any, target_key: str, agent_key: str, *, decided_by: s
     return {"target_key": target_key, "agent_key": agent_key, "status": "pending", "cycle": cycle,
             "status_source": "human" if decided_by else "code", "decided_by": decided_by,
             "decided_at": now if decided_by else None}
+
+
+UNDEFER_AUDIT_KEYS = 200            # 감사 행에 싣는 전문가 키 수의 상한(나머지는 수와 해시로)
+
+
+def undefer(store: Any, target_key: str, *, decided_by: str, reason: str, agents: Sequence[str] | None = None,
+            reasons: Sequence[str] | None = None, channel: str = "rest", actor_verified: bool = True) -> dict:
+    """보류(deferred) 좌석을 pending 으로 푼다 — 같은 트랜잭션에 `rr_audit` 한 행(scope coverage · action coverage.undefer).
+
+    `agents` 를 주면 그 전문가만, `reasons` 를 주면 그 보류 사유(`rr_coverage.reason`)만 푼다. 푼 행에는 `status_source='human'`·
+    `decided_by`·`decided_at` 이 남는다(보류를 푸는 것은 사람의 잡 만들기·REST 다). 바꿀 것이 없으면 감사도 쓰지 않는다.
+    반환 {undeferred(수), agents(푼 전문가 — 로스터 순)}.
+    """
+    from app import routes  # noqa: PLC0415 — routes 는 무겁다(_audit · 과제 id).
+
+    _guard("deferred", "pending")                 # 보류를 여는 전이도 전이표를 지난다(재설계 M3 C3-2)
+    wanted = None if agents is None else set(agents)
+    allowed = None if reasons is None else set(reasons)
+    now = now_epoch()
+    with store.tx():
+        rows = [dict(r) for r in store.query(
+            "SELECT c.agent_key, c.reason FROM rr_coverage c JOIN rr_roster r ON r.target_key = c.target_key"
+            " AND r.agent_key = c.agent_key WHERE c.target_key = ? AND c.status = 'deferred'"
+            " ORDER BY r.domain, r.rank_in_domain, c.agent_key", (target_key,))]
+        picked = [r["agent_key"] for r in rows
+                  if (wanted is None or r["agent_key"] in wanted) and (allowed is None or r["reason"] in allowed)]
+        if not picked:
+            return {"undeferred": 0, "agents": []}
+        store.executemany(
+            "UPDATE rr_coverage SET status = 'pending', reason = NULL, finished_at = NULL, updated_at = ?,"
+            " status_source = 'human', decided_by = ?, decided_at = ? WHERE target_key = ? AND agent_key = ?"
+            " AND status = 'deferred'", [(now, decided_by, now, target_key, agent) for agent in picked])
+        target = store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (target_key,))
+        routes._audit(store, decided_by, scope="coverage", subject_id=target_key, action="coverage.undefer",
+                      project_id=target["project_id"] if target is not None else None,
+                      after={"n": len(picked), "agents": picked[:UNDEFER_AUDIT_KEYS],
+                             "agents_sha": sha256_hex("\n".join(picked))[:16]},
+                      reason=reason, channel=channel, actor_verified=actor_verified)
+    return {"undeferred": len(picked), "agents": picked}
 
 
 def apply_carry_over(
@@ -867,30 +909,47 @@ def apply_carry_over(
 
 
 # ---------------------------------------------------------------- 카드 대조 검토 마감(재설계 M2 · m2-wp3b S5)
-REVIEW_CLOSE_STATUSES: tuple[str, ...] = ("done", "done_weak", "abstain")
+REVIEW_CLOSE_STATUSES: tuple[str, ...] = ("done", "done_weak", "abstain", "skipped")
 
 
 def review_rollup(tally: Mapping[str, Any]) -> tuple[str | None, str | None]:
-    """한 전문가의 셀 셈(`review_cells.expert_tally`) → (원장 상태, 사유). 위에서 처음 맞는 줄이고, 상태가 None 이면 닫지 않는다.
+    """한 전문가의 셀 셈(`review_cells.expert_tally`) → (원장 상태, 사유). 위에서 처음 맞는 줄이고, 상태가 None 이면 닫지 않는다
+    (재설계 M3 m3-cells 3.9 — 사유 문자열은 완결 판정이 깊이·strong 분모를 가르는 데 읽는다, M3.md 4.1).
 
-    | 셀 | 상태 | 사유 |
-    | 열린 셀(pending·running)이 있다 — 범위 밖 pending 포함 | 닫지 않는다 | open_cells |
-    | reviewed 0 — 남은 것이 실패·넘김·해당 없음뿐 | 닫지 않는다 | nothing_reviewed |
-    | reviewed ≥1 · 검증된 근거가 있다 | done(실패·넘김 셀이 있으면 done_weak) | — · partial:<n> |
-    | reviewed ≥1 · 검증된 근거가 없다 | done_weak | partial:<n> · no_cards · no_verified_cite |
-    '검증된 근거' 는 실효 판정 가운데 `applies='yes'` 이고 인용·참조 대조를 둘 다 지난 행이다(X1-05). 실패 셀이 남았으면 done 이
-    아니다(m-01). no_cards 는 reviewed 셀이 전부 역할만으로 본 것(카드 0장 전문가)이다.
+    | # | 셀 | 상태 | 사유 |
+    | 1 | 열린 셀(pending·running)이 있다 — 범위 밖 pending 포함 | 닫지 않는다 | open_cells |
+    | 2 | reviewed ≥1 · 전부 입력 결손 호출(basis noinput) | done_weak | input_gap:ecad_absent(실패·넘김이 있으면 ;partial:<n>) |
+    | 3 | reviewed ≥1 · 실패·넘김이 있다 | done_weak | partial:<n> |
+    | 4 | reviewed ≥1 · 검증된 근거가 있다 | done | — |
+    | 5 | reviewed ≥1 · 검증된 근거가 없다 | done_weak | no_cards · no_verified_cite |
+    | 6 | reviewed 0 · 열린 실패가 있다 | 닫지 않는다 | failed_open:<n> |
+    | 7 | reviewed 0 · 넘김 ≥1 | skipped | cells_skipped:<n> |
+    | 8 | reviewed 0 · 입력 결손(no_input) ≥1 | abstain | no_input:ecad_absent |
+    | 9 | reviewed 0 · 전부 거름 | abstain | filtered:<n> |
+    '검증된 근거' 는 실효 판정 가운데 `applies='yes'` 이고 인용·참조 대조를 둘 다 지난 행이다(X1-05). 입력 결손만으로 본 전문가는 주 입력
+    없이 본 것이라 done 으로 올리지 않는다(m3-cells a-17). no_cards 는 reviewed 셀이 전부 역할만으로 본 것(카드 0장 전문가)이다.
+    reviewed 0 인데 남은 것이 하나도 없는(셀이 없는) 전문가는 닫지 않는다(nothing_reviewed).
     """
     if tally["open"]:
         return None, "open_cells"
-    if not tally["reviewed"]:
-        return None, "nothing_reviewed"
     unseen = int(tally["failed"]) + int(tally["skipped"])
-    if unseen:
-        return "done_weak", f"partial:{unseen}"
-    if tally["verified"]:
-        return "done", None
-    return "done_weak", "no_cards" if tally["role_only_only"] else "no_verified_cite"
+    if tally["reviewed"]:
+        if tally.get("noinput_only"):
+            return "done_weak", "input_gap:ecad_absent" + (f";partial:{unseen}" if unseen else "")
+        if unseen:
+            return "done_weak", f"partial:{unseen}"
+        if tally["verified"]:
+            return "done", None
+        return "done_weak", "no_cards" if tally["role_only_only"] else "no_verified_cite"
+    if tally["failed"]:
+        return None, f"failed_open:{int(tally['failed'])}"
+    if tally["skipped"]:
+        return "skipped", f"cells_skipped:{int(tally['skipped'])}"
+    if tally.get("no_input"):
+        return "abstain", "no_input:ecad_absent"
+    if tally.get("filtered"):
+        return "abstain", f"filtered:{int(tally['filtered'])}"
+    return None, "nothing_reviewed"
 
 
 def close_review_seat(store: Any, target_key: str, agent_key: str, *, review_id: str, opinion_id: str,
@@ -932,7 +991,8 @@ def close_review_seat(store: Any, target_key: str, agent_key: str, *, review_id:
     updated = store.execute(
         "UPDATE rr_coverage SET status = ?, reason = ?, opinion_id = ?, panel_id = ?, origin = 'primary', tier = ?,"
         " model = ?, finished_at = ?, updated_at = ?, status_source = 'code'"
-        " WHERE target_key = ? AND agent_key = ? AND (status = 'pending' OR (panel_id = ? AND status IN (?, ?, ?)))",
+        f" WHERE target_key = ? AND agent_key = ? AND (status = 'pending' OR (panel_id = ? AND status IN"
+        f" ({','.join('?' * len(REVIEW_CLOSE_STATUSES))})))",
         (status, reason, opinion_id, review_id, tier, model, now, now, target_key, agent_key, review_id,
          *REVIEW_CLOSE_STATUSES))
     return {"updated": bool(updated), "status": status if updated else row["status"],
@@ -995,4 +1055,10 @@ def check_invariants(store: Any, target_key: str) -> list[str]:
         for seat in seats:
             if seat.get("key") not in roster_keys:
                 problems.append(f"(5) 패널 {panel['id']} 의 좌석 {seat.get('key')} 가 로스터에 없다.")
+    # (8) 쟁점 패널(M3 S3-7) — 편성·도는 쟁점 패널은 issue_id 가 있고 그 쟁점의 지금 패널이다(끝난 옛 패널은 다시 편성되면 어긋난다).
+    for panel in store.query(
+            "SELECT p.id, p.issue_id, i.panel_id AS current FROM rr_panels p LEFT JOIN rr_issues i ON i.issue_id = p.issue_id"
+            " WHERE p.target_key = ? AND p.kind = 'issue' AND p.status IN ('planned', 'running')", (target_key,)):
+        if not panel["issue_id"] or panel["current"] != panel["id"]:
+            problems.append(f"(8) 쟁점 패널 {panel['id']} 이 그 쟁점({panel['issue_id']})의 지금 패널이 아니다.")
     return problems

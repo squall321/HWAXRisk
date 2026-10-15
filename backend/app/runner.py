@@ -22,9 +22,10 @@ log = logging.getLogger("hwax_risk.runner")
 
 # (스레드명, 폴링 주기 초). sync_loop 은 PAT 폐기 대조(§8.2.7)를 돌리고 external_sync 재시도(§5.5.3)는 P4 배선,
 # nightly_loop(§7.7 야간 잡) 본문은 P6 에서 채운다. review_loop 은 카드 대조 검토 잡의 틱이다(재설계 M2 · m2-wp3b S8 —
-# review_runner.ReviewLoop).
+# review_runner.ReviewLoop). synth_loop 은 종합 잡(영역 요약 → 과제 종합 → 보고서 판)의 틱이다(재설계 M3 S3-9 — synth.SynthWorker,
+# 요약 호출은 틱마다 하나씩 차례로). chain_loop 은 끊긴 잡 사슬 메우기다(S3-5 — chain.sweep, 끝난 단계에 다음 잡이 없으면 하나).
 _LOOPS: tuple[tuple[str, float], ...] = (("panel_loop", 5.0), ("sync_loop", 60.0), ("nightly_loop", 60.0),
-                                         ("review_loop", 2.0))
+                                         ("review_loop", 2.0), ("synth_loop", 5.0), ("chain_loop", 30.0))
 
 # 좌석 귀속 정규식(plan §0.2.3·§6.7 7단계). SSE 스트림과 POST /api/panels/{id}/complete 의 events[] 에 같은 식을 쓴다.
 STATUS_LOOKUP_RE = re.compile(r"^(?P<key>\S+) 조회: (?P<tool>\S+)$")
@@ -71,10 +72,13 @@ BRIEF_TRANSIENT_ERRORS: tuple[type[BaseException], ...] = (sqlite3.OperationalEr
 PERSIST_ERROR_CODE = "persist_error"
 # 사람이 다시 저장을 포기한 패널(`…/repersist?discard=1`) — 엔진 결과는 패널에 남고 좌석은 다음 패널에서 다시 돈다.
 PERSIST_ABANDONED_CODE = "persist_abandoned"
+# 자격(사용자 PAT)이 없어 시작하지 못한 쟁점 패널 — 잡은 보류 credential 로 멈춘다(재설계 M3 review1 M1).
+CREDENTIAL_HOLD_CODE = "credential_hold"
 # 좌석 재시도와 연속 실패(ENGINE_FAIL_STREAK)에 세지 않는 패널 error 코드 — 좌석 탓이 아닌 중단이다. 세면 좌석과
 # 무관한 일 세 번에 그 좌석이 skipped 로 굳고 잡이 죽는다.
 UNCHARGED_CODES: tuple[str, ...] = (*STREAM_LOST_CODES, RESTART_CODE, *NO_DECISION_CODES, *UNSTARTED_CODES,
-                                    BRIEF_ERROR_CODE, BRIEF_RETRY_CODE, PERSIST_ERROR_CODE, PERSIST_ABANDONED_CODE)
+                                    BRIEF_ERROR_CODE, BRIEF_RETRY_CODE, PERSIST_ERROR_CODE, PERSIST_ABANDONED_CODE,
+                                    CREDENTIAL_HOLD_CODE)
 # 다시 저장을 기다리는 타깃의 잡이 줄에서 기다리는 까닭(잡 행 error) — 집으면 지운다.
 REPERSIST_PENDING_CODE = "repersist_pending"
 PROGRESS_WRITE_INTERVAL_S = 60     # 도는 패널의 '마지막 신호' 를 잡 행에 적는 간격 — 줄마다 적으면 15초 ping 이 DB 를 두드린다
@@ -98,6 +102,8 @@ class PanelEngine(Protocol):
     되돌려 준다 — 앞 시도가 만든 포털 대화를 다시 쓰라는 뜻이다.
     선택 인자 run(..., should_stop=) 를 받는 엔진에는 러너가 물음 함수를 준다 — 프레임마다 불러 사유(문자열)가
     돌아오면 스트림을 닫고 EngineStreamLost('cancelled') 로 올린다(사람이 그 잡을 취소·정지했다).
+    선택 인자 run(..., on_conversation=) 를 받는 엔진에는 러너가 콜백을 준다 — 포털 대화를 만들면 스트림 전에 불러 그
+    conv_id 를 곧바로 패널에 적는다(스트림 도중에 앱이 죽어도 재기동 복구가 그 연결을 지킨다, D48).
     포털 429 는 EngineBusy, 앱이 스트림을 놓은 것은 EngineStreamLost, 의장이 결정문을 못 낸 것은 EngineNoDecision,
     그 밖의 실패는 EngineError 로 올린다.
     """
@@ -708,6 +714,8 @@ def build_delib_opts(
     검색어가 포털 상한(600자)을 넘어 잘렸으면 `loss["knowledge_query_cut"]` 에 남는다. `diff_ref` 는 `panel_question` 의 것이다."""
     profile = profile or brief.PROFILE_LEGACY
     seats = panel["seats"]
+    if panel.get("kind") == "issue":
+        return _issue_delib_opts(store, panel, user_memo=user_memo, loss=loss, profile=profile)
     if evidence is None:
         module = narrative_mod
         if module is None:
@@ -768,11 +776,60 @@ def build_delib_opts(
         # 실어 보내던 동안(상한은 1800초였다) 앱 → 포털 길의 패널은 전부 'HTTP 422' 로 닫혔다. 호출당 타임아웃은
         # 박스 설정(DELIB_TIMEOUT_S)의 몫이고, 패널 벽시계(HWAXRISK_PANEL_TIMEOUT_S)는 엔진 클라이언트가 스트림에서 잰다.
         "question": panel_question(store, panel["target_key"], digest=digest, diff_ref=diff_ref),
+        # 앱이 띄운 심의다(M3 #26) — 엔진 관문은 사람이 띄운 심의(started_by ≠ app)만 카드 대조 절반 사유로 센다.
+        "started_by": STARTED_BY_APP,
     }
     # 좌석 지식카드 검색어 — 안 주면 엔진이 질문 전체로 찾는다(종전). 변경이 없으면 키를 싣지 않는다.
     if knowledge_query:
         opts["knowledge_query"] = knowledge_query
     return opts
+
+
+# 앱이 띄운 패널의 표지(포털 DelibOpts.started_by — Literal["human","app"]).
+STARTED_BY_APP = "app"
+
+
+def _issue_delib_opts(store: Any, panel: Mapping[str, Any], *, user_memo: str | None, loss: dict | None,
+                      profile: Any) -> dict:
+    """쟁점 패널의 delib_opts(M3 S3-7) — 근거는 `brief.build_issue_brief`(I1 → I4 → … → M, 좌석 계약 I0c 를 둘째 칸에), 질문은
+    `issues.issue_question`, 지정 도구 없음, 3라운드 고정(panel_budget 을 쓰지 않는다), 보고서 저장 없음(save_report 0 — X3),
+    검색어는 질문 그대로. `loss` 에는 브리프의 절단·방패와 12칸을 넘겨 빠진 항목을 적는다."""
+    from app import issues  # noqa: PLC0415 — issues 는 이 모듈을 쓴다.
+
+    # 편성이 실어 준 쟁점이 정본이다(없으면 — 다시 조립하는 길 — 그 쟁점 행).
+    issue = panel.get("issue") or next(i for i in issues.issue_rows(store, panel["target_key"])
+                                       if i["issue_id"] == panel["issue_id"])
+    built = brief.build_issue_brief(store, panel["target_key"], issue, seats=panel["seats"], panel_id=panel["id"],
+                                    profile=profile, user_memo=user_memo or None)
+    evidence = list(built["evidence"])
+    seat_item = {**seat_contract_evidence([s["domain"] for s in panel["seats"]], profile.cap("E0c")),
+                 "key": brief.ISSUE_SEAT_KEY}
+    evidence.insert(1 if evidence else 0, seat_item)
+    evidence, dropped = fit_evidence_slots(evidence)
+    if loss is not None:
+        if dropped:
+            loss["evidence_dropped"] = dropped
+        if built["meta"].get("clipped"):
+            loss["brief_clipped"] = dict(built["meta"]["clipped"])
+        if built["meta"].get("shielded"):
+            loss["brief_shielded"] = list(built["meta"]["shielded"])
+    question = issues.issue_question(store, issue)
+    return {
+        "chair_template": planner.CHAIR_TEMPLATE,
+        "modifiers": list(panel["modifiers"]),
+        "rounds": issues.ISSUE_ROUNDS,
+        "free_tools": planner.FREE_TOOLS,
+        "tool_budget": planner.TOOL_BUDGET,
+        "personas": [{"key": s["key"], "role": "", "origin": s["origin"]} for s in panel["seats"]],
+        "tools": [],
+        "apps": _delib_apps(),
+        "voc": "off",
+        "evidence": evidence,
+        "question": question,
+        "knowledge_query": question[:brief.KNOWLEDGE_QUERY_MAX],
+        "save_report": 0,
+        "started_by": STARTED_BY_APP,
+    }
 
 
 # ---------------------------------------------------------------- 패널 실행 원문·브리프 동결(plan §6.7.2 7단계·§5.6.1)
@@ -983,6 +1040,15 @@ FLOW_GATED_TIERS: tuple[str, ...] = ("A", "B", "C")
 LIVE_JOB_STATES: tuple[str, ...] = ("queued", "running", "paused", "cancelling")
 # 패널 러너·진행판·브리프가 보는 잡 — mode 가 NULL(v4 전 행)이거나 panels 인 것. 검토 잡(reviews)은 그 러너의 것이다.
 PANEL_JOBS_SQL = "COALESCE(mode, 'panels') = 'panels'"
+# rr_jobs.mode 의 어휘(NULL = panels). v4 의 열 주석은 굳은 블록이라 넓힌 어휘는 여기와 v5 머리 주석에 적는다(M3.md 4.1) —
+# issues 는 쟁점 패널 잡, synth 는 영역 요약·종합 잡이다(재설계 M3 의 잡 사슬). 공개 REST 의 mode 는 panels·reviews 그대로다.
+JOB_MODES: tuple[str, ...] = ("panels", "reviews", "issues", "synth")
+# 패널 러너가 집고 멈추고 취소를 닫는 잡 — 종전 패널 잡과 쟁점 잡(M3 S3-7, 쟁점 패널을 한 줄로 돈다). PANEL_JOBS_SQL 은 넓히지 않는다
+# — 진행판·길잡이·검토 잡 문지기가 그것을 '패널 Tier 잡' 으로 읽는다(쟁점 잡은 tier 가 없다).
+PANEL_RUNNER_MODES: tuple[str, ...] = ("panels", "issues")
+RUNNER_JOBS_SQL = "COALESCE(mode, 'panels') IN ('panels', 'issues')"
+# 에이전트 서버 비우기(update-all — M3.md 4.7 · #50) 동안 패널(coverage·쟁점)을 집지 않는다 — 잡은 줄에서 기다리고 이 말이 잡 행에 선다.
+DRAIN_CODE = "draining"
 
 
 def panel_job_gate(store: Any, target_key: str, tier: str) -> None:
@@ -1035,7 +1101,8 @@ _HOLD_CLEARED = {"code": None, "until": None, "n": 0}
 
 
 def _job_row(store: Any, job_id: str) -> Any:
-    row = store.query_one("SELECT state, COALESCE(mode, 'panels') AS mode, hold_code FROM rr_jobs WHERE id = ?", (job_id,))
+    row = store.query_one("SELECT state, COALESCE(mode, 'panels') AS mode, hold_code, target_key FROM rr_jobs WHERE id = ?",
+                          (job_id,))
     if row is None:
         raise AppError("E404", f"잡이 없습니다: {job_id}", 404)
     return row
@@ -1048,7 +1115,7 @@ def pause_job(store: Any, job_id: str, *, reason: str = "user", by: str | None =
     검토 잡은 사람의 정지가 보류 열을 hold_code='user'·hold_until=NULL 로 덮고, 코드가 멈춘(보류 코드가 사람이 아닌) paused
     에도 듣는다 — 사람이 멈춘 잡은 자동 재개가 다시 줄에 세우지 않는다(재설계 M2 S6, P-10)."""
     row = _job_row(store, job_id)
-    if row["mode"] != "panels":
+    if row["mode"] not in PANEL_RUNNER_MODES:
         if not (row["state"] in ("queued", "running") or (row["state"] == "paused" and row["hold_code"] != "user")):
             raise AppError("E100", f"일시정지할 수 없는 상태입니다 — {row['state']}.", 409)
         return _set_job(store, job_id, "paused", reason="user", by=by, hold={"code": "user", "until": None})
@@ -1062,7 +1129,9 @@ def resume_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
     row = _job_row(store, job_id)
     if row["state"] != "paused":
         raise AppError("E100", f"재개할 수 없는 상태입니다 — {row['state']}.", 409)
-    return _set_job(store, job_id, "queued", by=by, hold=_HOLD_CLEARED if row["mode"] != "panels" else None)
+    # 보류 열은 검토 잡 · 종합 잡과, 자격 보류로 멈춘 쟁점 잡(review1 M1)만 쓴다 — 재개하면 비운다(종전 패널 잡은 늘 비어 있다).
+    clear = row["mode"] not in PANEL_RUNNER_MODES or row["hold_code"] is not None
+    return _set_job(store, job_id, "queued", by=by, hold=_HOLD_CLEARED if clear else None)
 
 
 def cancel_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
@@ -1074,13 +1143,18 @@ def cancel_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
     검토 잡은 보류 열 셋을 비우고, 그 잡의 전문가·셀이 아직 도는(running) 동안은 상태와 상관없이 cancelling 이다 — paused 라도
     코드 보류는 도는 호출을 닫지 않는다(M2.md 5절 #13). 루프가 도는 것이 0 이 될 때 cancelled 로 닫고 진행판을 끝낸다. 그 사이
     잡이 살아 있어 새 잡이 그 셀을 범위에서 잃지 않는다(반대 검토 R3A-1). 도는 것이 없으면 곧바로 cancelled 이고 진행판을 끝난
-    모양(phase cancelled · 워커 없음)으로 적는다.
+    모양(phase cancelled · 워커 없음)으로 적는다. 그 뒤 트랜잭션 밖에서 그 잡이 건드린 전문가 보고서를 다시 짓는다(M3C-81 —
+    review_runner.refresh_cancelled, 전문가마다 제 트랜잭션).
     """
     row = _job_row(store, job_id)
     if row["state"] in ("cancelled", "completed", "failed"):
         return {"job_id": job_id, "state": row["state"], "pause_reason": None}
-    if row["mode"] == "panels":
-        return _set_job(store, job_id, "cancelling" if row["state"] == "running" else "cancelled", by=by)
+    if row["mode"] in PANEL_RUNNER_MODES:
+        state = "cancelling" if row["state"] == "running" else "cancelled"
+        out = _set_job(store, job_id, state, by=by)
+        if state == "cancelled" and row["mode"] == "issues":
+            _untry_after_cancel(store, row["target_key"])
+        return out
     from app import review_runner  # noqa: PLC0415 — review_runner 는 이 모듈을 import 한다.
 
     with store.tx():
@@ -1093,25 +1167,51 @@ def cancel_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
             return _set_job(store, job_id, "cancelling", by=by, hold=_HOLD_CLEARED)
         out = _set_job(store, job_id, "cancelled", by=by, hold=_HOLD_CLEARED)
         review_runner.close_progress(store, job_id, "cancelled")
-        return out
+    review_runner.refresh_cancelled(store, job_id)
+    return out
+
+
+def _untry_after_cancel(store: Any, target_key: str) -> None:
+    """사람이 취소한 쟁점 잡 — 남은 대기 쟁점은 `untried_cap(chain_cancelled)` 다(지우지 않는다 — 보고서 '미토의')."""
+    from app import issues  # noqa: PLC0415 — issues 는 이 모듈을 쓴다.
+
+    issues.untry_queued(store, target_key, "chain_cancelled")
 
 
 def _panels_today(store: Any, target_key: str) -> int:
+    """오늘 편성한 종전 패널(`kind='coverage'`) 수 — 쟁점 패널은 하루 상한에 세지 않는다(M3 #27)."""
     row = store.query_one(
-        "SELECT COUNT(*) AS n FROM rr_panels WHERE target_key = ? AND created_at >= ?",
+        "SELECT COUNT(*) AS n FROM rr_panels WHERE target_key = ? AND created_at >= ? AND kind = 'coverage'",
         (target_key, _local_midnight()),
     )
     return int(row["n"] or 0) if row else 0
 
 
-def claim_next_job(store: Any, settings: Any | None = None) -> dict | None:
-    """다음에 패널을 돌릴 잡 1건을 집는다. 타깃당 직렬·일일 상한·자격·취소를 여기서 판정한다.
+def engine_drain(engine: Any) -> bool:
+    """에이전트 서버가 비우는 중인가 — 엔진의 `drain_state()`(`/health` 의 `drain.on` · `draining`, M3.md 4.7). 그 칸을 모르는
+    엔진(옛 판·대역)이나 물음이 실패하면 거짓이다 — 비우기 신호를 못 읽었다고 러너를 세우지 않는다(종전 동작)."""
+    probe = getattr(engine, "drain_state", None)
+    if not callable(probe):
+        return False
+    try:
+        state = probe()
+    except Exception:  # noqa: BLE001 — 위 설명대로다.
+        log.warning("에이전트 서버 비우기 상태를 읽지 못했다 — 비우지 않는 것으로 보고 이어 간다", exc_info=True)
+        return False
+    return bool(isinstance(state, Mapping) and state.get("on"))
 
-    패널 잡만 본다(`rr_jobs.mode` 가 NULL·panels — 한 표에 카드 대조 검토 잡이 같이 산다, 재설계 M2 S6). 검토 잡은 그 러너가
-    집고 멈추고 취소를 닫는다. 그래도 패널 잡이 아닌 것이 집히면 패널 러너로 돌리지 않고 예외로 드러낸다.
+
+def claim_next_job(store: Any, settings: Any | None = None, *, engine: Any | None = None) -> dict | None:
+    """다음에 패널을 돌릴 잡 1건을 집는다. 타깃당 직렬·일일 상한·자격·취소·비우기를 여기서 판정한다.
+
+    패널 잡과 쟁점 잡만 본다(`rr_jobs.mode` 가 NULL·panels·issues — 한 표에 카드 대조 검토 잡이 같이 산다, 재설계 M2 S6). 검토 잡은
+    그 러너가 집고 멈추고 취소를 닫는다. 그래도 다른 잡이 집히면 패널 러너로 돌리지 않고 예외로 드러낸다. 쟁점 잡은 하루 상한으로
+    멈추지 않는다(M3 #27). `engine` 을 주면 에이전트 서버가 비우는 중(`drain.on` — 범위와 상관없이)인지 보고, 그동안 패널을 집지
+    않는다(#50 — 잡은 줄에서 기다린다).
     """
     cfg = config.settings if settings is None else settings
     midnight = _local_midnight()
+    draining: bool | None = None
     for row in store.query(
         "SELECT id, target_key, owner_sub, tier, state, pause_reason, params_json, panels_done, updated_at"
         f" FROM rr_jobs WHERE state = 'paused' AND pause_reason = 'daily_cap' AND {PANEL_JOBS_SQL}"
@@ -1123,15 +1223,17 @@ def claim_next_job(store: Any, settings: Any | None = None) -> dict | None:
     for row in store.query(
         "SELECT id, target_key, owner_sub, tier, state, params_json, panels_done, panels_total, error,"
         " COALESCE(mode, 'panels') AS mode"
-        f" FROM rr_jobs WHERE state IN ('queued', 'running', 'cancelling') AND {PANEL_JOBS_SQL}"
+        f" FROM rr_jobs WHERE state IN ('queued', 'running', 'cancelling') AND {RUNNER_JOBS_SQL}"
         " ORDER BY created_at ASC, id ASC"
     ):
         job = dict(row)
         last_error = job.pop("error")
-        if job.pop("mode") != "panels":
+        if job["mode"] not in PANEL_RUNNER_MODES:
             raise RuntimeError(f"패널 러너가 패널 잡이 아닌 잡({job['id']})을 집었다 — claim_next_job 의 mode 거름을 본다.")
         if job["state"] == "cancelling":
             _set_job(store, job["id"], "cancelled")
+            if job["mode"] == "issues":
+                _untry_after_cancel(store, job["target_key"])
             continue
         busy = store.query_one(
             "SELECT id FROM rr_panels WHERE target_key = ? AND status = 'running' LIMIT 1", (job["target_key"],)
@@ -1146,9 +1248,18 @@ def claim_next_job(store: Any, settings: Any | None = None) -> dict | None:
             if last_error != note:
                 store.execute("UPDATE rr_jobs SET error = ?, updated_at = ? WHERE id = ?", (note, now_epoch(), job["id"]))
             continue
-        if _panels_today(store, job["target_key"]) >= int(cfg.risk_daily_panel_cap):
+        if job["mode"] == "panels" and _panels_today(store, job["target_key"]) >= int(cfg.risk_daily_panel_cap):
             _set_job(store, job["id"], "paused", reason="daily_cap")
             continue
+        if engine is not None:
+            if draining is None:
+                draining = engine_drain(engine)
+            if draining:
+                note = (f"{DRAIN_CODE}: 에이전트 서버가 비우는 중이다(update-all) — 새 패널을 집지 않는다."
+                        " 비우기가 끝나면 이어 돈다")
+                if last_error != note:
+                    store.execute("UPDATE rr_jobs SET error = ?, updated_at = ? WHERE id = ?", (note, now_epoch(), job["id"]))
+                continue
         credential, credential_note = resolve_credential_with_note(
             store, cfg, job["owner_sub"], _params(row).get("requester"))
         if credential is None:
@@ -1230,7 +1341,22 @@ def abandon_repersist(store: Any, panel_id: str) -> dict:
     error = (f"{PERSIST_ABANDONED_CODE}: 사람이 다시 저장을 포기했다 — 엔진 결과는 패널에 남고 좌석은 다음 패널에서 다시 돈다."
              f" 앞 사유 — {row['error']}")
     store.execute("UPDATE rr_panels SET error = ? WHERE id = ? AND status = 'error'", (error, panel_id))
+    _release_panel(store, panel_id, charge=False)         # 쟁점 패널이면 그 쟁점을 대기로(종전 패널 좌석은 이미 pending)
     return {"panel_id": panel_id, "status": "error", "error": error, "abandoned": True}
+
+
+def _release_panel(store: Any, panel: Mapping[str, Any] | str, *, charge: bool = True) -> None:
+    """결과 없이 닫힌 패널의 자리를 되돌린다 — 종전 패널은 좌석(planner.fail_panel_seats, `charge` 면 재시도 차감), 쟁점 패널은 그
+    쟁점을 대기로(차감 없음 — 엔진·스트림·재기동은 쟁점 탓이 아니다, 3.7 실패 표). 쟁점 패널은 좌석 원장을 건드리지 않는다 — 같은
+    대상의 검토 좌석이 running 이어도 되돌리지 않는다."""
+    panel_id = panel if isinstance(panel, str) else str(panel["id"])
+    row = store.query_one("SELECT kind FROM rr_panels WHERE id = ?", (panel_id,))
+    if row is not None and row["kind"] == "issue":
+        from app import issues  # noqa: PLC0415 — issues 는 이 모듈을 쓴다.
+
+        issues.release_issue(store, panel_id, charge=False)
+        return
+    planner.fail_panel_seats(store, panel_id, reason="engine_fail", charge=charge)
 
 
 def recover_running_panels(store: Any) -> dict:
@@ -1248,15 +1374,21 @@ def recover_running_panels(store: Any) -> dict:
     cancelled 가 된다.
     """
     rows = store.query(
-        "SELECT id, target_key, result_gz IS NOT NULL AS has_result FROM rr_panels WHERE status = 'running'"
+        "SELECT id, target_key, kind, conv_id, result_gz IS NOT NULL AS has_result FROM rr_panels WHERE status = 'running'"
         " ORDER BY created_at ASC")
     now = now_epoch()
     cut_targets: dict[str, list[str]] = {}
     for row in rows:
-        planner.fail_panel_seats(store, row["id"], reason="engine_fail", charge=False)
+        # 결과가 저장된 쟁점 패널은 쟁점을 running 그대로 둔다 — 다시 저장(repersist)이 resolve_issue 까지 한다(3.7 실패 표).
+        if not (row["has_result"] and row["kind"] == "issue"):
+            _release_panel(store, row["id"], charge=False)
+        # 스트림 전에 적어 둔 포털 대화(D48)는 그대로 두고 error 에도 적는다 — 그 대화를 찾아 무시하거나 닫을 수 있게.
+        conv = f"포털 대화 {row['conv_id']}" if row["conv_id"] else ""
         if row["has_result"]:
             error = (f"{PERSIST_ERROR_CODE}: {RESTART_CODE} — 앱이 결과를 원장에 앉히던 중에 재기동했다. 엔진 결과는 패널에"
-                     f" 저장돼 있다 — {_repersist_hint(row['id'])} 로 다시 앉힌다")
+                     f" 저장돼 있다 — {_repersist_hint(row['id'])} 로 다시 앉힌다" + (f" ({conv})" if conv else ""))
+        elif conv:
+            error = f"{RESTART_CODE}: {conv} 에 그 심의가 남아 있다 — 엔진이 그 대화에 계속 쓸 수 있으니 찾아 무시하거나 닫는다"
         else:
             error = RESTART_CODE
         store.execute("UPDATE rr_panels SET status = 'error', error = ?, ended_at = ? WHERE id = ?",
@@ -1266,7 +1398,7 @@ def recover_running_panels(store: Any) -> dict:
             saved.append(row["id"])
     paused = 0
     # 패널 잡만 — 도는 검토 잡은 그 러너의 복구가 맡는다(여기서 queued 로 돌리면 선점한 셀과 어긋난다, 재설계 M2 S6).
-    for job in store.query(f"SELECT id, target_key FROM rr_jobs WHERE state = 'running' AND {PANEL_JOBS_SQL}"):
+    for job in store.query(f"SELECT id, target_key FROM rr_jobs WHERE state = 'running' AND {RUNNER_JOBS_SQL}"):
         if job["target_key"] in cut_targets:
             saved = cut_targets[job["target_key"]]
             # 결과가 저장된 패널이 있으면 '재개하면 이어 돈다' 를 말하지 않는다 — 그대로 따른 사람이 다시 저장 전에 재개해
@@ -1389,8 +1521,14 @@ def _quality(
 
 
 def _finish_job(store: Any, job: Mapping[str, Any], settings: Any) -> dict:
-    """Tier 범위 소진 — 잡을 completed 로 닫고, close_level 이 C3 이면 Tier B 뒤에 Tier C 를 자동 큐잉한다."""
+    """Tier 범위 소진 — 잡을 completed 로 닫고, close_level 이 C3 이면 Tier B 뒤에 Tier C 를 자동 큐잉한다. 쟁점 잡(M3 S3-5)은
+    대기 쟁점이 바닥난 것이고 사슬이 종합 잡을 잇는다."""
     _set_job(store, job["id"], "completed")
+    if job.get("mode") == "issues":
+        from app import chain  # noqa: PLC0415 — chain 은 종합·쟁점을 거쳐 무겁다.
+
+        follow = chain.safe(chain.on_issues_closed, store, job) or {}
+        return {"job_state": "completed", "next_job": follow.get("job_id") if follow.get("created") else None}
     target = store.query_one("SELECT owner_sub, close_level FROM rr_targets WHERE target_key = ?", (job["target_key"],))
     close_level = (target["close_level"] if target and target["close_level"] else settings.risk_default_close_level)
     if job["tier"] == "B" and close_level == "C3":
@@ -1423,7 +1561,7 @@ FOLLOW_UP_REFUSALS: tuple[str, ...] = ("flow_mismatch", "review_job_running", "p
 def _diminishing(store: Any, target_key: str) -> bool:
     """최근 3패널이 각각 신규 클러스터 <1 이면 수확 체감(호출자는 C1 충족까지 확인한다)."""
     rows = store.query(
-        "SELECT quality_json FROM rr_panels WHERE target_key = ? AND status = 'done'"
+        "SELECT quality_json FROM rr_panels WHERE target_key = ? AND status = 'done' AND kind = 'coverage'"
         " ORDER BY panel_no DESC LIMIT ?",
         (target_key, DIMINISHING_WINDOW),
     )
@@ -1497,15 +1635,27 @@ def run_panel(
         # 배선이 덜 된 채 좌석을 앉히면 패널이 running 에 고착돼 그 타깃이 영영 편성되지 않는다.
         log.error("러너 인터페이스 결손 %s — 잡 %s 를 집지 않는다", missing, job.get("id"))
         _set_job(store, job["id"], "failed", error="missing_interface: " + ",".join(missing))
+        if job.get("mode") == "issues":
+            _issue_job_failed(store, job, "job_failed")
         return {"panel_id": None, "status": "missing_interface", "missing": missing}
 
-    panel = planner.plan_next_panel(
-        store, job["target_key"], job["tier"], modifiers=params.get("modifiers"), settings=settings
-    )
+    issue_job = job.get("mode") == "issues"
+    if issue_job:
+        # 쟁점 잡(M3 S3-7) — 대기 쟁점 하나의 패널. 좌석 원장을 쓰지 않는다(편성 전후 rr_coverage 그대로).
+        from app import issues  # noqa: PLC0415 — issues 는 이 모듈을 쓴다.
+
+        panel = issues.plan_issue_panel(store, job["target_key"], job=job, settings=settings)
+    else:
+        panel = planner.plan_next_panel(
+            store, job["target_key"], job["tier"], modifiers=params.get("modifiers"), settings=settings
+        )
     if panel is None:
         return {"panel_id": None, "status": "no_panel", **_finish_job(store, job, settings)}
 
-    planner.start_panel_seats(store, panel["id"])
+    if issue_job:
+        issues.start_issue_panel(store, panel["id"])
+    else:
+        planner.start_panel_seats(store, panel["id"])
     try:
         model_json = snapshot_model(engine)
         # 브리프 크기는 엔진이 이 패널을 시작할 때 알려 준 근거 예산에서 정한다(WP1 S9) — 패널마다 다시 읽으므로 엔진 창이
@@ -1560,6 +1710,11 @@ def run_panel(
     should_stop = _stop_reader(store, job)
     if "should_stop" in run_params:
         optional["should_stop"] = should_stop
+    if "on_conversation" in run_params:
+        # 포털 대화가 생기면 스트림 전에 패널에 적는다 — 종전에는 패널 끝 · 잡힌 오류에서만 적어, 스트림 도중에 앱이 죽으면(SIGKILL)
+        # 패널은 conv_id 없이 error('restart') 로 남고 엔진이 계속 쓰는 그 대화는 고아가 됐다(M3 단계 D 리허설, D48).
+        optional["on_conversation"] = lambda conv_id: store.execute(
+            "UPDATE rr_panels SET conv_id = ? WHERE id = ?", (conv_id, panel["id"]))
     while True:
         try:
             result = engine.run(delib_opts, owner_sub=credential_sub, **optional)
@@ -1596,6 +1751,8 @@ def run_panel(
                     error="stopped: 엔진 자리를 기다리던 중에 앱이 내려갔다 — 심의는 시작되지 않았다"
                           "(좌석 재시도는 차감하지 않았다)")
         except PatUnavailable as exc:
+            if issue_job:
+                return _hold_issue_job_for_credential(store, panel, job, exc)
             # 자격 문제는 폴백·재시도 대상이 아니다 — 잡을 멈추고 좌석을 되돌린다(plan §6.7.1).
             out = _close_panel_error(store, panel, job, f"pat_unavailable: {exc}", settings)
             _set_job(store, job["id"], "failed", error="pat_unavailable")
@@ -1638,9 +1795,13 @@ def save_panel_result(store: Any, panel: Mapping[str, Any], job: Mapping[str, An
                "frozen": dict(frozen or {}), "model_json": dict(model_json or {})}
     try:
         text = canonical_json(payload)
-        store.execute(
-            "UPDATE rr_panels SET result_gz = ?, result_hash = ?, result_saved_at = ? WHERE id = ?",
-            (gzip.compress(text.encode("utf-8")), sha256_hex(text)[:12], now_epoch(), panel["id"]))
+        with store.tx():
+            # 폐기된 과제의 결과 원문은 패널에도 남기지 않는다(review1 L6 — 폐기가 비운 칸을 늦은 쓰기가 다시 채운다).
+            if _target_purged(store, panel["target_key"]):
+                return False
+            store.execute(
+                "UPDATE rr_panels SET result_gz = ?, result_hash = ?, result_saved_at = ? WHERE id = ?",
+                (gzip.compress(text.encode("utf-8")), sha256_hex(text)[:12], now_epoch(), panel["id"]))
         return True
     except Exception:  # noqa: BLE001 — 위 설명대로다.
         log.exception("패널 %s 엔진 결과를 패널에 적지 못했다", panel["id"])
@@ -1678,7 +1839,8 @@ def _close_panel_persist_error(store: Any, panel: Mapping[str, Any], job: Mappin
                            f"{PERSIST_ERROR_CODE}: 패널 {panel['id']} 은 원장에 저장됐지만 그 뒤 처리에서 멈췄다({why})."
                            " 잡을 멈췄다 — 재개하면 이어 돈다")
         return {"panel_id": panel["id"], "status": "done", "error": f"{PERSIST_ERROR_CODE}: {why}"}
-    planner.fail_panel_seats(store, panel["id"], reason="engine_fail", charge=False)
+    if panel.get("kind") != "issue":       # 쟁점 패널의 쟁점은 running 그대로 — 다시 저장이 resolve_issue 까지 한다
+        planner.fail_panel_seats(store, panel["id"], reason="engine_fail", charge=False)
     error = f"{PERSIST_ERROR_CODE}: {why}"
     store.execute(
         "UPDATE rr_panels SET status = 'error', error = ?, decision_text = ?, conv_id = ?, report_id = ?,"
@@ -1709,8 +1871,8 @@ def repersist_panel(store: Any, settings: Any, panel_id: str, *, narrative_mod: 
     seats_moved({moved:[{agent_key, status, panel_id}]}) · 422 persist_failed.
     """
     row = store.query_one(
-        "SELECT id, target_key, owner_sub, panel_no, tier, seats_json, budget_json, status, result_gz IS NOT NULL AS"
-        " has_result FROM rr_panels WHERE id = ?", (panel_id,))
+        "SELECT id, target_key, owner_sub, panel_no, tier, seats_json, budget_json, status, kind, issue_id,"
+        " result_gz IS NOT NULL AS has_result FROM rr_panels WHERE id = ?", (panel_id,))
     if row is None:
         raise AppError("E404", f"패널을 찾을 수 없습니다 — {panel_id}.", 404)
     if row["status"] != "error":
@@ -1729,15 +1891,17 @@ def repersist_panel(store: Any, settings: Any, panel_id: str, *, narrative_mod: 
     panel = {"id": row["id"], "target_key": row["target_key"], "owner_sub": row["owner_sub"],
              "panel_no": row["panel_no"], "tier": row["tier"],
              "seats": [s for s in json.loads(row["seats_json"] or "[]") if isinstance(s, dict)],
-             "tools": list((budget or {}).get("tools_planned") or [])}
-    job_row = store.query_one("SELECT id, target_key, owner_sub, tier, params_json FROM rr_jobs WHERE id = ?",
-                              (stored.get("job_id"),))
+             "tools": list((budget or {}).get("tools_planned") or []), "kind": row["kind"], "issue_id": row["issue_id"]}
+    job_row = store.query_one("SELECT id, target_key, owner_sub, tier, params_json, COALESCE(mode, 'panels') AS mode"
+                              " FROM rr_jobs WHERE id = ?", (stored.get("job_id"),))
     job = {**(dict(job_row) if job_row is not None else {"id": stored.get("job_id")}),
            "credential": stored.get("job_credential")}
     result = {k: v for k, v in stored.items() if k not in ("v", "job_id", "job_credential", "frozen", "model_json")}
     try:
         with store.tx():
-            reclaimed = planner.reclaim_panel_seats(store, panel_id)
+            # 쟁점 패널은 좌석 원장을 쓰지 않는다 — 되찾을 좌석이 없다(쟁점은 running 그대로 기다렸다).
+            reclaimed = (planner.reclaim_panel_seats(store, panel_id) if row["kind"] != "issue"
+                         else {"reclaimed": [], "moved": []})
             if reclaimed["moved"]:
                 raise AppError("seats_moved", "좌석이 이미 다른 데 가 있다 — 이 패널의 결과로 다시 앉히지 않는다"
                                " (엔진 결과는 패널에 그대로 남는다).", 409, detail={"moved": reclaimed["moved"]})
@@ -1753,12 +1917,13 @@ def repersist_panel(store: Any, settings: Any, panel_id: str, *, narrative_mod: 
         log.exception("패널 %s 다시 저장 실패", panel_id)
         raise AppError("persist_failed", f"다시 저장하지 못했다 — {type(exc).__name__}: {exc}", 422) from exc
     findings = store.query_one("SELECT COUNT(*) AS n FROM rr_findings WHERE panel_id = ?"
+                               # 카드 대조 거름 그대로(M3 S3-4) — 패널 범위·패널 브리프의 자리라 cells 대상에서 돌지 않거나 카드 finding 은 panel_id 가 없어 안 걸린다
                                " AND COALESCE(source_kind, '') <> 'card_review'", (panel_id,))
     return {**out, "findings_n": int(findings["n"] or 0)}
 
 
 def _close_panel_error(store: Any, panel: Mapping[str, Any], job: Mapping[str, Any], error: str, settings: Any) -> dict:
-    planner.fail_panel_seats(store, panel["id"], reason="engine_fail")
+    _release_panel(store, panel)
     now = now_epoch()
     store.execute(
         "UPDATE rr_panels SET status = 'error', error = ?, retry = retry + 1, ended_at = ? WHERE id = ?",
@@ -1766,7 +1931,34 @@ def _close_panel_error(store: Any, panel: Mapping[str, Any], job: Mapping[str, A
     )
     if _error_streak(store, panel["target_key"]) >= ENGINE_FAIL_STREAK:
         _set_job(store, job["id"], "failed", error="engine_fail_streak")
+        if job.get("mode") == "issues":
+            # 쟁점 잡이 연속 오류로 실패하면 남은 대기 쟁점은 untried_cap(engine_fail) — 지우지 않는다(3.7 실패 표).
+            _issue_job_failed(store, job, "engine_fail")
     return {"panel_id": panel["id"], "status": "error", "error": error}
+
+
+def _issue_job_failed(store: Any, job: Mapping[str, Any], reason: str) -> None:
+    """정말로 실패로 끝난 쟁점 잡 — 남은 대기 쟁점을 `untried_cap(reason)` 로 놓아 미토의로 보이게 하고(연속 오류는 engine_fail, 그
+    밖은 job_failed — review1 M1), 사슬은 종합을 잇는다(P-08 ② — 코드 조립 판과 미토의 잔여가 남는다)."""
+    from app import chain, issues  # noqa: PLC0415 — issues 는 이 모듈을 쓴다.
+
+    issues.untry_queued(store, job["target_key"], reason)
+    chain.safe(chain.on_issues_closed, store, job)
+
+
+def _hold_issue_job_for_credential(store: Any, panel: Mapping[str, Any], job: Mapping[str, Any], exc: Exception) -> dict:
+    """쟁점 잡의 자격 실패(PatUnavailable — 포털 401 따위)는 잡을 보류 credential 로 멈춘다(검토 잡과 같다, review1 M1). 패널은
+    시작하지 못한 것처럼 닫고(차감 없음 · 연속 오류에 세지 않는다) 쟁점은 대기로 돌린다 — 멈춘 잡이 살아 있어 사슬은 종합으로 넘어가지
+    않는다. 사람이 포털에서 PAT 를 등록하고 재개하면 이어 돈다(길잡이는 pat_unavailable 막힘과 등록 방법을 말한다)."""
+    _release_panel(store, panel, charge=False)
+    store.execute("UPDATE rr_panels SET status = 'error', error = ?, ended_at = ? WHERE id = ?",
+                  (f"{CREDENTIAL_HOLD_CODE}: 쓸 수 있는 사용자 PAT 가 없어 쟁점 패널을 시작하지 못했다 — {exc}", now_epoch(),
+                   panel["id"]))
+    row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job["id"],))
+    if row is not None and row["state"] == "running":
+        _set_job(store, job["id"], "paused", by="code:credential", error=f"pat_unavailable: {exc}",
+                 hold={"code": "credential", "until": None})
+    return {"panel_id": panel["id"], "status": "paused", "error": "pat_unavailable"}
 
 
 def _close_panel_stream_lost(store: Any, panel: Mapping[str, Any], job: Mapping[str, Any],
@@ -1779,7 +1971,7 @@ def _close_panel_stream_lost(store: Any, panel: Mapping[str, Any], job: Mapping[
     멈춘다. 사유는 잡의 error 에 적는다(pause_reason 은 CHECK 로 세 값만 받는다). 사람이 재개하면 이어 돈다.
     """
     error = str(lost)
-    planner.fail_panel_seats(store, panel["id"], reason="engine_fail", charge=False)
+    _release_panel(store, panel, charge=False)
     store.execute(
         "UPDATE rr_panels SET status = 'error', error = ?, conv_id = ?, ended_at = ? WHERE id = ?",
         (error, lost.conv_id, now_epoch(), panel["id"]),
@@ -1802,7 +1994,7 @@ def _close_panel_unstarted(store: Any, panel: Mapping[str, Any], job: Mapping[st
     편성해 봐야 같은 대기를 되풀이할 뿐이다(사람이 재개하면 이어 돈다). 앱이 내려가며 그친 대기는 멈추지 않는다 —
     겹칠 심의가 없으니 다시 뜨면 기동 복구가 그 잡을 줄 세운다. `conv_id` 는 대기 중에 만들어 둔 빈 대화다.
     """
-    planner.fail_panel_seats(store, panel["id"], reason="engine_fail", charge=False)
+    _release_panel(store, panel, charge=False)
     store.execute(
         "UPDATE rr_panels SET status = 'error', error = ?, conv_id = ?, ended_at = ? WHERE id = ?",
         (error, conv_id, now_epoch(), panel["id"]),
@@ -1862,7 +2054,7 @@ def _close_panel_no_decision(store: Any, panel: Mapping[str, Any], job: Mapping[
     """
     tail = f" — 설정 {failed.knob}" if failed.knob else ""
     error = str(failed) + tail
-    planner.fail_panel_seats(store, panel["id"], reason="engine_fail", charge=False)
+    _release_panel(store, panel, charge=False)
     # 발언 전부는 포털 대화(conv_id)와 엔진이 저장한 보고서(report_id)에 있다 — 패널에는 그 둘과, 엔진이 결정문
     # 자리에 내린 글(좌석별 마지막 입장)을 남긴다. 발언을 담을 열은 없다(스트림을 놓은 패널도 같다).
     store.execute(
@@ -1921,6 +2113,13 @@ def _progress_writer(store: Any, job: Mapping[str, Any], panel: Mapping[str, Any
     프레임(심의가 나아가고 있다)이다. 적는 데 실패해도 패널은 계속 돈다.
     """
     head = {"panel_id": panel["id"], "panel_no": panel.get("panel_no"), "started_at": now_epoch()}
+    if panel.get("kind") == "issue":
+        # 쟁점 패널의 수확 알림(issue_yield_low — 3.12)은 패널이 바뀌어도 진행판에 남는다(이 머리가 진행 줄마다 실린다).
+        from app import issues  # noqa: PLC0415 — issues 는 이 모듈을 쓴다.
+
+        advice = issues.yield_advice(store, panel["target_key"])
+        if advice:
+            head["advice"] = advice
     last: dict = {"written_at": None}
 
     def note(frame: Mapping[str, Any], *, force: bool = False) -> None:
@@ -1938,6 +2137,44 @@ def _progress_writer(store: Any, job: Mapping[str, Any], panel: Mapping[str, Any
             log.exception("패널 %s 진행 기록 실패(비치명)", panel["id"])
 
     return note
+
+
+def _note_issue_yield(store: Any, job: Mapping[str, Any], target_key: str) -> None:
+    """쟁점 패널이 끝날 때마다 잡 진행판의 `advice` 를 맞춘다 — 최근 다섯이 전부 기각·불명이면 issue_yield_low, 아니면 지운다.
+    잡을 멈추지 않는다(멈춤은 사람이 정한다 — 3.12)."""
+    from app import issues  # noqa: PLC0415 — issues 는 이 모듈을 쓴다.
+
+    advice = issues.yield_advice(store, target_key)
+    row = store.query_one("SELECT progress_json FROM rr_jobs WHERE id = ?", (job["id"],))
+    body = json.loads(row["progress_json"] or "{}") if row is not None else {}
+    if body.get("advice") == advice or (advice is None and "advice" not in body):
+        return
+    if advice:
+        body["advice"] = advice
+        log.warning("쟁점 잡 %s: 최근 쟁점 패널 %s건이 전부 기각·불명이다(issue_yield_low) — 멈춤은 사람이 정한다", job["id"],
+                    issues.YIELD_WINDOW)
+    else:
+        body.pop("advice", None)
+    store.execute("UPDATE rr_jobs SET progress_json = ? WHERE id = ?", (canonical_json(body), job["id"]))
+
+
+PURGED_PANEL_ERROR = "project_purged: 과제가 폐기돼 늦게 끝난 패널 결과를 버렸다(원장·패널에 쓰지 않았다)"
+
+
+def _target_purged(store: Any, target_key: str) -> bool:
+    """폐기 상태는 늘 실제 원장에서 본다 — 주입한 대역 registry 가 아니라(review1 L6)."""
+    from app import registry  # noqa: PLC0415 — registry 는 이 모듈을 거쳐 무겁다.
+
+    return registry.target_purged(store, target_key)
+
+
+def _close_panel_purged(store: Any, panel: Mapping[str, Any]) -> dict:
+    """폐기된 과제의 패널을 결과 없이 닫는다 — 자리는 차감 없이 되돌리고(쟁점 패널이면 그 쟁점은 잡이 없어 미토의로) 패널에는 까닭만."""
+    _release_panel(store, panel, charge=False)
+    store.execute("UPDATE rr_panels SET status = 'error', error = ?, ended_at = ? WHERE id = ?",
+                  (PURGED_PANEL_ERROR, now_epoch(), panel["id"]))
+    log.warning("패널 %s: 과제가 폐기돼 늦게 끝난 결과를 버렸다", panel["id"])
+    return {"panel_id": panel["id"], "status": "purged"}
 
 
 def _complete_panel(
@@ -1967,8 +2204,12 @@ def _complete_panel(
     events = result.get("events")
     attribution = attribute_events(events, seat_keys)
 
-    # 좌석 도구 호출 원문은 포털 대화가 아니라 이 표가 정본이다(§6.7.2 7단계).
-    record_panel_calls(store, panel, events, source="sse", conv_id=result.get("conv_id"))
+    with store.tx():
+        # 폐기된 과제의 패널은 늦게 끝나도 원장에 쓰지 않는다 — 같은 트랜잭션에서 폐기 상태를 본다(재설계 M3 review1 L6).
+        if _target_purged(store, panel["target_key"]):
+            return _close_panel_purged(store, panel)
+        # 좌석 도구 호출 원문은 포털 대화가 아니라 이 표가 정본이다(§6.7.2 7단계).
+        record_panel_calls(store, panel, events, source="sse", conv_id=result.get("conv_id"))
 
     spec = narrative_mod.parse_risk_spec(decision_text)
     parsed = spec is not None
@@ -1987,6 +2228,8 @@ def _complete_panel(
 
     # 8~12단계를 한 트랜잭션으로 묶는다 — 중간 실패 시 'done 인데 finding 0·좌석 running' 반쪽 저장이 남지 않는다.
     with store.tx():
+        if _target_purged(store, panel["target_key"]):
+            return _close_panel_purged(store, panel)
         store.execute(
             "UPDATE rr_panels SET status = 'done', decision_text = ?, risk_spec_json = ?, risk_spec_parsed = ?,"
             " conv_id = ?, report_id = ?, model_json = ?, ended_at = ? WHERE id = ?",
@@ -2023,9 +2266,17 @@ def _complete_panel(
                 "cited_refs_n": int(seat.get("cited_refs_n") or 0),
                 "abstained": bool(seat.get("abstained")),
             })
-        coverage = planner.apply_seat_results(
-            store, panel["id"], seat_results, decision_ok=bool(decision_text), model=model_final.get("model")
-        )
+        issue_panel = panel.get("kind") == "issue"
+        if issue_panel:
+            # 쟁점 패널은 좌석 원장을 쓰지 않는다 — 결과로 쟁점을 정하고(resolve_issue), 병합이 그 결과로 닻 행을 덮는다(3.5).
+            from app import issues  # noqa: PLC0415 — issues 는 이 모듈을 쓴다.
+
+            coverage = {"by_status": {}}
+            resolved = issues.resolve_issue(store, panel["id"], settings=settings)
+        else:
+            coverage = planner.apply_seat_results(
+                store, panel["id"], seat_results, decision_ok=bool(decision_text), model=model_final.get("model")
+            )
 
         merged = registry_mod.merge_panel(store, panel["id"])
         new_clusters = int((merged or {}).get("new_clusters") or 0)
@@ -2091,7 +2342,8 @@ def _complete_panel(
         )
 
         level = registry_mod.close_level(store, panel["target_key"])
-        if level.get("raised"):
+        # 쟁점 패널(cells 대상)의 보고서 판은 종합 보고서(S3-9)의 몫이다 — 패널 통합 보고서를 조립하지 않는다.
+        if level.get("raised") and not issue_panel:
             # 보고서는 원장에서 다시 만들 수 있는 파생물이다 — 조립이 터져도 패널 저장을 무르지 않고 패널에 표를 남긴다.
             # (조립은 읽기뿐이라 트랜잭션 안에서 받아도 반쪽 쓰기가 없다.)
             try:
@@ -2106,8 +2358,11 @@ def _complete_panel(
     # 연속 2패널 over_budget 이면 이후 패널을 rounds 2 로(적응은 앞으로만) — budget_json 에 남긴다.
     if "over_budget" in quality["flags"]:
         log.info("패널 %s over_budget(llm_calls=%s)", panel["id"], llm_calls)
-    if touch_job and level.get("level") not in (None, "C0") and _diminishing(store, panel["target_key"]):
+    if (touch_job and not issue_panel and level.get("level") not in (None, "C0")
+            and _diminishing(store, panel["target_key"])):
         _set_job(store, job["id"], "paused", reason="diminishing")
+    if touch_job and issue_panel:
+        _note_issue_yield(store, job, panel["target_key"])
 
     return {
         "panel_id": panel["id"],
@@ -2118,6 +2373,7 @@ def _complete_panel(
         "llm_calls": llm_calls,
         "level": level.get("level"),
         "quality_flags": quality["flags"],
+        **({"issue": resolved} if issue_panel else {}),
     }
 
 
@@ -2210,6 +2466,10 @@ class RiskRunner:
         self.review_engine = review_engine
         self._review = review_runner.ReviewLoop(store, settings, review_engine, stop=self._stop,
                                                 boot_id=getattr(lock, "boot_id", None))
+        # 종합 잡(M3 S3-9) — 요약은 카드 대조와 같은 포털 중계·엔진 관문을 지난다(같은 엔진 클라이언트). 엔진이 없으면 틱이 쉰다.
+        from app import synth  # noqa: PLC0415 — synth 는 이 모듈을 거쳐 무겁다.
+
+        self._synth = synth.SynthWorker(store, settings, review_engine, stop=self._stop)
 
     # ------------------------------------------------------------ 루프
     def _loop(self, name: str, interval: float) -> None:
@@ -2234,6 +2494,18 @@ class RiskRunner:
                     self._review.tick()
                 except Exception:  # noqa: BLE001 — 한 번의 실패가 스레드를 죽이지 않게 한다.
                     log.exception("review_loop tick 실패")
+            elif name == "synth_loop":
+                try:
+                    self._synth.tick()
+                except Exception:  # noqa: BLE001 — 한 번의 실패가 스레드를 죽이지 않게 한다.
+                    log.exception("synth_loop tick 실패")
+            elif name == "chain_loop":
+                try:
+                    from app import chain  # noqa: PLC0415 — chain 은 종합·쟁점을 거쳐 무겁다.
+
+                    chain.sweep(self.store)
+                except Exception:  # noqa: BLE001 — 한 번의 실패가 스레드를 죽이지 않게 한다.
+                    log.exception("chain_loop sweep 실패")
             self._stop.wait(interval)
 
     def _revocation_tick(self) -> None:
@@ -2269,7 +2541,7 @@ class RiskRunner:
             return
         started = False
         try:
-            job = claim_next_job(self.store, self.settings)
+            job = claim_next_job(self.store, self.settings, engine=self.engine)
             if job is None:
                 return
             worker = threading.Thread(
@@ -2334,6 +2606,10 @@ class RiskRunner:
                     from app import review_cells  # noqa: PLC0415 — review_cells 는 planner 를 거쳐 무겁다.
 
                     review_cells.recover_running(self.store)
+                    # 종합 잡의 요약 호출도 — running 요약 → pending(차감 없음, review1 H2).
+                    from app import synth  # noqa: PLC0415 — synth 는 이 모듈을 거쳐 무겁다.
+
+                    synth.recover_running(self.store)
                     # 스냅샷 잡도 같은 자리에서 마감한다 — running 인 채 남으면 영영 진행판에 걸린다(§2.11.3).
                     from app import routes as routes_module  # noqa: PLC0415 — routes 는 runner 를 import 한다.
 

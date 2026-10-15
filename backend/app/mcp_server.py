@@ -10,7 +10,7 @@ import pydantic_core
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from app import entry, expert_report, routes
+from app import entry, expert_report, routes, synth
 from app.errors import AppError
 
 log = logging.getLogger("hwax_risk.mcp")
@@ -25,7 +25,9 @@ _INSTRUCTIONS = """HWAX Risk Review — 설계 리스크 심사 앱의 MCP 서�
       risk_get_registry · risk_claims_for_ref · risk_get_coverage(진행판·좌석) · risk_list_panels · risk_get_panel_transcript ·
       risk_get_units(카드 대조의 검토 단위 — 목록·요약·줄·동결 근거, 크면 next_offset 으로 나눠) ·
       risk_get_cells(카드 대조 셀 격자 — 전문가 × 단위의 상태·판정 수, 크면 next_offset 으로 나눠) ·
-      risk_get_expert_report(전문가 보고서 — 마크다운 쪽, next_page 로 이어 받으며 쪽을 다 이으면 part='full' 과 같다)
+      risk_get_expert_report(전문가 보고서 — 마크다운 쪽, next_page 로 이어 받으며 쪽을 다 이으면 part='full' 과 같다) ·
+      risk_get_issues(카드 대조 대상의 쟁점 — 유형·등급·상태·결과·분포, 쟁점 패널은 웹 러너가 돌린다 — Claude 에서는 지켜본다) ·
+      risk_get_report(종합 보고서 판 — 완결 표기·잔여·영역 요약·쟁점 결과, part=summary|domains|mechanisms|appendix|full 의 쪽)
 어휘: risk_taxonomy — severity·judgement·direction 의 허용값(추측해서 넣으면 422 다)
 심사: risk_get_brief(열쇠는 brief_token, tier 'A' 는 웹 전용 — 결과를 낼 신원에게만 연다) · risk_submit_panel_result(engine='mcp' 는
       evidence_only 등급) · risk_add_finding — 둘 다 쓰기라 아래 신원 규칙을 따르고 actor 는 신원이 아니다(표기)
@@ -134,7 +136,7 @@ def risk_list_projects() -> dict:
 @mcp.tool()
 def risk_get_coverage(target_key: str, with_seats: bool = True, domain: str | None = None,
                       order_offset: int | None = None, seat_offset: int = 0) -> dict:
-    """심사 진행판 — 도메인별 상태·미착석 수·완결 레벨·잡 상태와 좌석 행(with_seats=False 면 카운트만, 좌석이 많으면 seat_offset 부터 한 번에 약 2만 5천 자씩 주고 next_seat_offset 으로 이어 받는다), 카드 대조 대상의 review 칸은 검토 순서를 영역마다 영역 안 순위 1~3 만 싣고(review.order_page 에 전체 셈) order_offset 을 주면 그 자리부터 검토 순서 전부를 쪽으로 준다(좌석 행 없이, next_order_offset 으로 이어 받는다)."""
+    """심사 진행판 — 도메인별 상태·미착석 수·완결 레벨·잡 상태와 좌석 행(with_seats=False 면 카운트만, 좌석이 많으면 seat_offset 부터 한 번에 약 2만 5천 자씩 주고 next_seat_offset 으로 이어 받는다), 카드 대조 대상의 review 칸은 검토 순서를 영역마다 영역 안 순위 1~3 만 싣고(review.order_page 에 전체 셈) order_offset 을 주면 그 자리부터 검토 순서 전부를 쪽으로 준다(좌석 행 없이, next_order_offset 으로 이어 받는다), 완결 잔여(qualifiers)의 목록 칸(미토의 쟁점 문장 · 몰린 칸 · 쟁점 id 따위)은 앞 5개와 수(<칸>_n)만 준다(전부는 웹 REST GET /api/targets/{key}/closure)."""
     # '더 돌려야 하나, 끝났나' 의 근거. 등록부는 판정 행만 주고 좌석이 몇 개 비었는지는 말하지 않는다.
     # 359명 로스터에서 검토 순서 전부(약 9만 자)·좌석 행 전부(약 12만 자)는 MCP 결과 상한을 넘어 본문을 잃는다(R3B-1) — 둘 다
     # 자르지 않고 쪽으로 나눈다. REST 진행판은 전부를 싣는다.
@@ -142,17 +144,17 @@ def risk_get_coverage(target_key: str, with_seats: bool = True, domain: str | No
         owner_sub = routes.mcp_scope_owner("target", target_key, _caller())
         out = routes.coverage_payload(target_key, owner_sub=owner_sub)
         review = out.get("review")
+        if review is not None and review.get("job") is not None:
+            review["job"] = routes.mcp_job_brief(review["job"])     # 범위 · 워커는 수와 앞 몇(반대 검토 MEDIUM 12)
+        if out.get("qualifiers") is not None:
+            out["qualifiers"] = routes.mcp_qualifiers(out["qualifiers"])     # 잔여의 목록 칸도 앞 몇과 수(review1 M9)
         if order_offset is not None:
             if review is None:
                 raise AppError("E100", "order_offset 은 카드 대조 대상의 검토 순서 쪽이다 — 이 대상에는 검토 순서가 없다.", 422)
             full = list(review["order"])
             return _fit_list(lambda take: {**out, "review": {**review, **routes.review_order_page(full, order_offset, take)}},
                              len(full), lambda page: len(page["review"]["order"]))
-        if review is not None:
-            review.update(routes.review_order_brief(review["order"]))
-        if not with_seats:
-            return out
-        seats = routes.seats_payload(target_key, domain, owner_sub=owner_sub)["seats"]
+        seats = routes.seats_payload(target_key, domain, owner_sub=owner_sub)["seats"] if with_seats else []
 
         def seat_page(take: int) -> dict:
             skip = max(0, int(seat_offset))
@@ -164,15 +166,28 @@ def risk_get_coverage(target_key: str, with_seats: bool = True, domain: str | No
                     page["next_seat_offset"] = skip + len(rows)
             return page
 
-        return _fit_list(seat_page, len(seats), lambda page: len(page["seats"]))
+        # 359명에서는 좌석을 한 줄로 줄여도 진행판의 나머지(검토 순서 요약 · 품질 칸)만으로 상한을 넘는다(재설계 M3 C3-11 — 운영처럼
+        # 품질 칸을 꽂은 규모 시험에서 26,579자) — 검토 순서 요약을 영역마다 앞 순위 3 → 2 → 1 명으로 줄인다(_fit_guide 와 같은
+        # 규칙, 전부는 order_offset 쪽).
+        full = list(review["order"]) if review is not None else []
+        for top in range(routes.REVIEW_ORDER_TOP, 0, -1):
+            if review is not None:
+                review.update(routes.review_order_brief(full, top=top))
+            page = _fit_list(seat_page, len(seats), lambda page: len(page["seats"])) if with_seats else out
+            if review is None or _wire_chars(page) <= MCP_RESULT_CHARS:
+                break
+        return page
 
     return _guarded(call)
 
 
 @mcp.tool()
-def risk_list_panels(target_key: str) -> dict:
-    """이 타깃에서 이미 돈 패널 목록(좌석·라운드·엔진·품질·보고서 id) — panel_id 의 출처다."""
-    return _scoped("target", target_key, routes.panels_payload, target_key)
+def risk_list_panels(target_key: str, kind: str | None = None) -> dict:
+    """이 타깃에서 이미 돈 패널 목록(좌석·라운드·엔진·품질·보고서 id · kind coverage|issue · 쟁점 패널이면 issue_id) — panel_id 의 출처다, kind 로 거른다."""
+    def panels(key: str, *, owner_sub: str) -> dict:
+        return routes.panels_payload(key, owner_sub=owner_sub, kind=kind)
+
+    return _scoped("target", target_key, panels, target_key)
 
 
 @mcp.tool()
@@ -182,28 +197,32 @@ def risk_get_panel_transcript(panel_id: str) -> dict:
 
 
 @mcp.tool()
-def risk_taxonomy() -> dict:
-    """통제 어휘 — mechanism·severity·judgement·direction·domain 허용값(추측해 넣으면 422 다)."""
-    return _guarded(lambda: {
-        "taxonomy": routes.taxonomy.load_taxonomy(),
-        "asset_version": routes.taxonomy.ASSET_VERSION,
-        "vocab": routes.taxonomy.vocab_index(),
-        "promotable_axes": routes.character.promotable_axes(),
-    })
+def risk_taxonomy(part: str = "index", offset: int = 0) -> dict:
+    """통제 어휘 — severity·judgement·direction·domain 등 허용값(추측해 넣으면 422 다), part='index' 는 메커니즘 밖의 축 전부·어휘 색인·메커니즘 → 영역 배정표의 머리(review_status — 승인 전이면 draft), part='mechanism' 은 메커니즘 행, 'mech_owners' 는 배정표 행(owners·related), 'maps' 는 동의어·실패 사상이고, 행 쪽은 약 2만 5천 자씩 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다)."""
+    def call() -> dict:
+        if part in ("mechanism", "mech_owners"):
+            total = routes.taxonomy_payload(part, offset=0)["total"]
+            return _fit_rows(lambda take: routes.taxonomy_payload(part, offset=offset, limit=take), max(1, total))
+        return routes.taxonomy_payload(part, offset=offset)
+
+    return _guarded(call)
 
 
 @mcp.tool()
 def risk_get_precedents(diff_id: str) -> dict:
     """선례 — 같은 subject 의 과거 판정과 델타 선례(이 변경이 전에도 문제였나)."""
+    # 다른 과제의 행은 소유자와 실제로 부른 사람 둘 다 볼 수 있는 과제의 것만이다(D46) — 범위 판정 · 쓰기는 그대로 소유자로 돈다(D44).
     return _scoped("diff", diff_id, lambda d, *, owner_sub: routes.brief_module.precedents(
-        routes.get_store(), d, owner_sub=owner_sub), diff_id)
+        routes.get_store(), d, owner_sub=owner_sub, caller_projects=set(routes.visible_projects(_caller()))), diff_id)
 
 
 @mcp.tool()
 def risk_similar_projects(project_id: str, k: int = 5) -> dict:
     """비슷한 과제 top-k — 계보·벡터·서술·subject 네 경로별로 따로 준다(섞지 않는다)."""
+    # 다른 과제는 소유자와 실제로 부른 사람 둘 다 볼 수 있는 것만이다(D46) — 구성원이 소유자만 보는 과제를 알게 되지 않는다.
     return _scoped("project", project_id, lambda pid, *, owner_sub: routes.brief_module.similar_projects(
-        routes.get_store(), pid, max(1, min(20, int(k))), owner_sub=owner_sub), project_id)
+        routes.get_store(), pid, max(1, min(20, int(k))), owner_sub=owner_sub,
+        caller_projects=set(routes.visible_projects(_caller()))), project_id)
 
 
 @mcp.tool()
@@ -225,10 +244,43 @@ def risk_get_diff(diff_id: str, part: str, change_kind: str | None = None, q: st
 
 @mcp.tool()
 def risk_get_registry(target_key: str, status: str | None = None, severity: str | None = None,
-                      domain: str | None = None, offset: int = 0) -> dict:
-    """타깃 등록부(rr_registry 행 한 번에 200 + verdict 후보) 조회, status·severity·domain 으로 거르고 next_offset 을 offset 으로 주면 이어 받는다."""
-    return _scoped("target", target_key, routes.registry_payload, target_key, status=status,
-                   severity=severity, domain=domain, limit=REGISTRY_LIMIT, offset=offset)
+                      domain: str | None = None, offset: int = 0, attention: str | None = None,
+                      unit_id: str | None = None) -> dict:
+    """타깃 등록부(rr_registry 행 한 번에 최대 200 + verdict 후보) 조회, status·severity·domain·attention(주의 등급 A·B·C·D — 쉼표로 여럿)·unit_id 로 거르고 한 번에 약 2만 5천 자 안에서 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다), 쪽은 (family_key, cluster_key) 순이고 쪽마다 ledger_rev(거른 목록 전체의 지문)가 오니 앞 쪽과 다르면 그사이 원장이 바뀐 것이라 offset 0 부터 다시 받는다, 카드 대조 대상의 행에는 지지 수 넷(전문가·영역·단위·검증)·주의 등급·쟁점 상태와 merged.claimed(hold 전 주장값)·distribution 이 있다, 행에 merged_json 은 없고(merged 와 같은 내용) 한 행이 혼자 상한을 넘으면 merged 의 긴 목록을 앞 몇 개와 원래 길이(merged.lists_total)로 준다(전부는 웹 REST GET /api/targets/{key}/registry)."""
+    def rows(key: str, *, owner_sub: str) -> dict:
+        def page(take: int, keep: int | None = None) -> dict:
+            out = routes.registry_payload(key, owner_sub=owner_sub, status=status, severity=severity, domain=domain,
+                                          attention=attention, unit_id=unit_id, limit=take, offset=offset)
+            return {**out, "rows": [_registry_row(r, keep) for r in out["rows"]]}
+
+        out = _fit_rows(page, REGISTRY_LIMIT)
+        for keep in REGISTRY_LIST_KEEP:
+            if _wire_chars(out) <= MCP_RESULT_CHARS:
+                break
+            out = page(len(out["rows"]), keep)          # 한 행이 혼자 넘는다 — 그 행의 긴 목록을 줄인다(next_offset 은 그대로)
+        return out
+
+    return _scoped("target", target_key, rows, target_key)
+
+
+# 등록부 MCP 행 — merged_json 은 merged 와 같은 내용이라 빼고(행 길이의 4할), 한 행이 혼자 와이어를 넘으면 merged 의 긴 목록(원자 id ·
+# 제기자 · 인용 …)을 앞 몇 개로 줄이고 원래 길이를 merged.lists_total 에 적는다(review1 H5 — 359명에서 제기자 240명 행 하나가 4만 자라
+# 본문과 next_offset 을 함께 잃었다). 전부는 REST GET /api/targets/{key}/registry 다(행 모양 그대로).
+REGISTRY_LIST_KEEP: tuple[int, ...] = (20, 5, 1, 0)
+
+
+def _registry_row(row: dict, keep: int | None) -> dict:
+    out = {k: v for k, v in row.items() if k != "merged_json"}
+    merged = row.get("merged")
+    if keep is None or not isinstance(merged, dict):
+        return out
+    slim, totals = {}, {}
+    for name, value in merged.items():
+        if isinstance(value, list) and len(value) > keep:
+            slim[name], totals[name] = value[:keep], len(value)
+        else:
+            slim[name] = value
+    return {**out, "merged": {**slim, "lists_total": totals} if totals else slim}
 
 
 @mcp.tool()
@@ -271,6 +323,11 @@ def risk_submit_panel_result(
     def call() -> dict:
         # 소유권은 도달한 위임 신원이 정한다 — 자칭 actor 를 열쇠로 쓰면 남이 actor=<소유자> 로 남의 패널을 종결한다(SEC-5).
         owner_sub = entry.require_delegate(routes.mcp_identity(_request()))
+        routes._panel_row(panel_id, owner_sub)       # 남의 패널은 없는 패널과 같다 — 종류도 말하지 않는다(남 숨김 훑기)
+        # 쟁점 패널(M3 S3-7)은 웹 러너가 돌리고 고쳐 다시 내는 것도 웹·REST 다 — Claude 에서는 지켜본다(risk_get_issues).
+        if routes.panel_kind(panel_id) == "issue":
+            return {"error": "issue_panel_web_only",
+                    "message": "쟁점 패널은 웹 러너가 돌린다 — Claude 에서는 risk_get_issues 로 지켜본다."}
         return routes.complete_panel(
             panel_id, engine=engine, decision_text=decision_text, turns=list(turns or []),
             report_id=report_id, conv_id=None, events=None, model=model,
@@ -400,9 +457,10 @@ async def risk_start_job(target_key: str, tier: str | None = None, consent: bool
 
 
 @mcp.tool()
-async def risk_job_action(job_id: str, action: str) -> dict:
-    """심사 잡 일시정지·재개·취소(action=pause|resume|cancel) — 쓰기: 사용자에게 확인한 뒤 부른다(취소는 되돌릴 수 없다), 이미 그 상태면 그대로 돌려주고(changed:false), 앱 재기동으로 멈춘 잡은 resume 해야 이어 돈다."""
-    return await _entry(entry.job_action, job_id=job_id, action=action)
+async def risk_job_action(job_id: str, action: str, reason: str | None = None, filter: dict | None = None,
+                          consent: bool = False) -> dict:
+    """심사 잡 일시정지·재개·취소(action=pause|resume|cancel)와 검토 잡의 실패 셀 처분(action=retry_failed|skip_failed) — 쓰기: 사용자에게 확인한 뒤 부른다(취소는 되돌릴 수 없다), 이미 그 상태면 그대로 돌려주고(changed:false), 앱 재기동으로 멈춘 잡은 resume 해야 이어 돈다. 처분은 그 잡이 찍은 failed 셀을 다시 열거나 사유 reason(4~300자, 넘김은 필수)과 함께 넘긴다 — filter{agent_key?, unit_id?, domain?, error_code?} 로 좁히고, 응답 keys 는 50개까지이고 keys_total 이 전부의 수다. 다시가 세울 검토 잡의 호출 추정이 동의 문턱을 넘으면 consent_required 다 — 범위와 비용을 사용자에게 보이고 동의를 받은 뒤에만 consent=true 로 다시 부른다(REST 의 consent 와 같은 뜻, retry_failed · resume 만). 검토 잡이 다시 연 셀의 몫을 넘어 멈췄으면(hold consent_extra — 진행판 reopened_extra 가 셀 수 · 추정 호출을 준다) 재개에도 같은 동의가 든다, 동의하지 않으면 skip_failed 에 filter={'state':'pending'} 로 그 셀을 넘기고(여유 안이면 잡이 이어 돈다), 잡 상한(hold max_calls)은 동의로 풀리지 않는다."""
+    return await _entry(entry.job_action, job_id=job_id, action=action, reason=reason, filter=filter, consent=consent)
 
 
 @mcp.tool()
@@ -536,5 +594,47 @@ def risk_get_expert_report(target_key: str, agent_key: str, part: str = "summary
         chars = _report_page_chars(meta, body, part=part, unit_id=unit_id)
         pages = routes.expert_report_render(body, part=part, unit_id=unit_id, page_chars=chars)
         return routes.expert_report_envelope(meta, pages, page, part=part, unit_id=unit_id)
+
+    return _scoped("target", target_key, report, target_key)
+
+
+# ================================================================ 쟁점 · 종합 보고서(재설계 M3 S3-10 — 읽기 둘)
+ISSUE_LIMIT = 100
+
+
+@mcp.tool()
+def risk_get_issues(target_key: str, state: str | None = None, p_class: str | None = None, limit: int = ISSUE_LIMIT,
+                    offset: int = 0) -> dict:
+    """쟁점 목록(읽기 전용, 카드 대조 대상) — 쟁점마다 유형(held_fail·solo_severe·split_verdict)·등급(P1~P3)·순위·상태(queued·planned·running·resolved·inconclusive·untried_cap·withdrawn·skipped)·결과(upheld·downgraded·escalated·rejected·undetermined)·원래 분포(제기·반대 수, 주장 판정별)·좌석과 상한(cap.base·hard·run)을 준다, state(쉼표로 여럿)·p_class 로 거르고 한 번에 약 2만 5천 자 안에서 limit 행까지 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다), 쪽은 쟁점 id 순이고 쪽마다 ledger_rev(거른 목록 전체의 지문)가 오니 앞 쪽과 다르면 그사이 원장이 바뀐 것이라 offset 0 부터 다시 받는다, 쟁점은 웹 러너가 돌린다 — Claude 에서는 지켜본다(올리기·건너뛰기는 웹 화면)."""
+    def rows(key: str, *, owner_sub: str) -> dict:
+        return _fit_rows(lambda take: routes.issues_payload(key, owner_sub=owner_sub, state=state, p_class=p_class,
+                                                            limit=take, offset=offset), limit)
+
+    return _scoped("target", target_key, rows, target_key)
+
+
+def _synthesis_page_chars(meta: dict, report: dict, *, part: str) -> int:
+    """종합 보고서 MCP 쪽의 글자 크기 — 그 판의 쪽 전부가 와이어 MCP_RESULT_CHARS 안에 들 때까지 줄인다(같은 판이면 같은 크기, 조각
+    하나가 혼자 넘는 쪽은 자르지 않는다 — risk_get_expert_report 와 같은 규칙)."""
+    chars = routes.REPORT_PAGE_CHARS
+    while True:
+        pages = routes.report_render(report, part=part, page_chars=chars)
+        over = [size for n, page in enumerate(pages, start=1) if _page_fragments(page) > 1
+                and (size := _wire_chars(routes.report_envelope(meta, pages, n, part=part))) > MCP_RESULT_CHARS]
+        if not over or chars <= 1:
+            return chars
+        chars = max(1, min(chars - 1, chars * MCP_RESULT_CHARS // max(over) - 1))
+
+
+@mcp.tool()
+def risk_get_report(target_key: str, part: str = "summary", version: int | None = None, page: int = 1) -> dict:
+    """종합 보고서 읽기(읽기 전용, 카드 대조 대상) — 그 판(rr_reports — 앱 사본이 정본)의 마크다운 쪽, part=summary(완결 표기·잔여·수·종합 서술·주의 A·B·쟁점 결과·미토의 쟁점·품질 블록)|domains(영역 15쪽 — 영역 요약 서술과 행)|mechanisms|appendix(전문가 색인)|full, 한 쪽은 약 2만 5천 자 안이고 next_page 를 page 로 주어 이어 받는다(본문을 자르지 않는다 — 쪽을 다 이으면 그 part 전체다), 둘째 쪽부터는 첫 쪽 응답의 version 을 주면 그사이 새 판이 서도 report_version_moved 로 알려 다른 판의 쪽이 섞이지 않는다, 판이 없으면 report_absent(웹 화면이나 REST 로 만든다)."""
+    def report(key: str, *, owner_sub: str) -> dict:
+        meta, body = routes.report_source(key, owner_sub=owner_sub)
+        routes.check_report_version(meta, version)
+        if part not in synth.PARTS:
+            raise AppError("E100", f"part 는 {list(synth.PARTS)} 가운데 하나다 — {part!r}.", 422)
+        chars = _synthesis_page_chars(meta, body, part=part)
+        return routes.report_envelope(meta, routes.report_render(body, part=part, page_chars=chars), page, part=part)
 
     return _scoped("target", target_key, report, target_key)

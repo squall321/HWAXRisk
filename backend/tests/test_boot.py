@@ -343,11 +343,15 @@ def test_meta_taxonomy(client):
     r = client.get("/api/meta/taxonomy")
     assert r.status_code == 200
     body = r.json()
-    assert body["taxonomy_version"] == "1.1"                    # change_kind 두 종(contact_type·parameter, R-32)
+    assert body["taxonomy_version"] == "1.2"                    # 1.1 change_kind 두 종(R-32) · 1.2 메커니즘 14종(재설계 M3 D-34)
     axes = body["axes"]
     assert {"mechanism", "change_kind", "trigger_condition", "severity_judgement",
             "detectability", "evidence_grade", "precedent", "direction", "status"} <= set(axes)
     assert axes["severity_judgement"] == {"경미": ["OK", "WARNING"], "중대": ["WARNING", "FAIL"], "치명": ["FAIL"]}
+    # 메커니즘 → 영역 배정표도 함께 준다 — 사람이 훑고 승인하는 표이고 승인 문(review_status)이 같이 보인다(재설계 M3 S3-2).
+    owners = body["mech_owners"]
+    assert owners["review_status"] in ("draft", "approved") and owners["taxonomy_version"] == "1.2"
+    assert [row["code"] for row in owners["rows"]] == [m["code"] for m in axes["mechanism"]]
 
 
 def _tools_map_client(payload, status_code=200):
@@ -423,7 +427,7 @@ def test_meta_vocab_lists_runtime_assets(client):
     r = client.get("/api/meta/vocab")
     assert r.status_code == 200
     text = str(r.json())
-    for name in ("character-vocab", "seat-contract", "rules-seed", "adjacency", "character-seed-rules"):
+    for name in ("character-vocab", "seat-contract", "rules-seed", "adjacency", "character-seed-rules", "mech-owners"):
         assert name in text, f"{name} 가 /meta/vocab 응답에 없다"
     assert "1.0" in text or "version" in text.lower()
 

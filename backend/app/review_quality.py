@@ -31,8 +31,10 @@ KINDS: tuple[str, ...] = ("sweep", "verdict/fwd", "verdict/rev", "verdict/solo",
 CALL_DONE_STATES: tuple[str, ...] = ("ok", "infra_fail", "content_fail", "aborted")   # 낸 호출(기다림·도는 중 제외)
 SWEEP_ANSWERED: tuple[str, ...] = ("yes", "maybe", "no", "stamp")                     # 훑기가 답한 단위(error 제외)
 # 카드 폭포의 줄 — 분모 = Σ(셀마다 그 전문가 묶음의 카드 전부). 줄의 합이 분모다(어긋나면 residual).
+# noinput_reviewed — 입력 결손 호출로 검토한 칸(재설계 M3 C3-3)의 카드 전부. 카드를 한 장씩 판정하지 않고 근거로 읽었다 — '판정 없음'
+# 으로 세면 거짓 미판정이 된다.
 WATERFALL: tuple[str, ...] = ("judged", "unjudged", "background_full", "background_title_only", "background_unsent",
-                              "no_body", "failed", "open", "out_of_scope", "filtered", "no_input")
+                              "no_body", "noinput_reviewed", "failed", "open", "out_of_scope", "filtered", "no_input")
 # 새 표(v4) — 대상 범위와 전문가 범위. 전문가 범위는 머리(rr_expert_reports)를 뺀다 — 보고서를 머리에 쓰는 S10 이 이 수를
 # 보고서에 실으므로, 넣으면 같은 원장에서도 다시 마감할 때마다 앞 보고서의 바이트가 수에 들어가 보고서가 바뀐다(m-07).
 TARGET_TABLES: tuple[str, ...] = ("rr_unit_builds", "rr_units", "rr_expert_reports", "rr_review_cells", "rr_card_verdicts",
@@ -43,12 +45,13 @@ AGENT_TABLES: tuple[str, ...] = ("rr_review_cells", "rr_card_verdicts", "rr_revi
 LABELS: dict[str, str] = {
     "truncation.calls": "절단(호출)", "citation.quote.flagged": "인용 대조(걸림)", "citation.quote.clear": "인용 대조(걸림 없음)",
     "flips.order": "순서(fwd·rev 다름)", "flips.solo_neg_pos": "뒤집힘(걸림 없음→걸림) 95% 상한",
+    "filter.audit.risk_miss": "거름 표본의 놓침 95% 상한",
 }
 
 
 # ---------------------------------------------------------------- 기준판
 def load_policy() -> dict:
-    """assets/review-quality.v1.json(기준판 rq-1)."""
+    """assets/review-quality.v1.json(기준판 rq-2 — 재설계 M3 C3-8 의 거르기 표본 기준)."""
     return taxonomy.load_json(POLICY_ASSET)
 
 
@@ -164,20 +167,32 @@ def _load(store: Any, target_key: str, agent_key: str | None) -> dict:
     extra, params = _scope_sql(agent_key)
     cells = [r for r in _rows(store,
         "SELECT unit_id, agent_key, state, basis, run_id, pack_hash, cards_expected, cards_judged, truncated, soft_over,"
-        " offcard_capped, bg_full_n, bg_title_only_n, n_fail, n_warning, quote_ok, decided_by FROM rr_review_cells"
+        " offcard_capped, bg_full_n, bg_title_only_n, n_fail, n_warning, quote_ok, decided_by, route,"
+        " json_extract(route_json, '$.rule') AS rule, sample_json,"
+        " json_extract(extras_json, '$.noinput.outcome') AS noinput_outcome,"
+        " json_extract(extras_json, '$.noinput.capped') AS noinput_capped FROM rr_review_cells"
         f" WHERE target_key = ?{extra} ORDER BY agent_key, unit_id", [target_key, *params]) if r["unit_id"] in alive]
+    for cell in cells:
+        # 표본 · 그림자의 실효 결과 — 앞 결과는 놓침만 센다(반대 검토 2차 LOW 6 · 3차 LOW 4 · D-47 — 완결 몫 · 넓힘과 같은 셈)
+        outcomes = review_cells.sample_outcomes(cell.pop("sample_json"))
+        cell.update(audit=outcomes.get("filter_audit"), shadow=outcomes.get("shadow"))
     verdicts = [r for r in _rows(store,
         "SELECT unit_id, agent_key, record_id, variant, applies, judgement, quote_ok, refs_ok, check_disagree, is_effective,"
-        f" agree, split FROM rr_card_verdicts WHERE target_key = ?{extra} ORDER BY agent_key, unit_id, record_id, variant",
+        " agree, split, json_type(checks_json, '$.flipped_from') IS NOT NULL AS flipped_row,"
+        " json_type(checks_json, '$.flipped_from.raw') IS NOT NULL AS flipped_raw"
+        f" FROM rr_card_verdicts WHERE target_key = ?{extra} ORDER BY agent_key, unit_id, record_id, variant",
         [target_key, *params]) if r["unit_id"] in alive]
     calls = [r for r in _rows(store,
         "SELECT call_id, agent_key, unit_id, kind, variant, state, duration_ms, queued_ms, output_truncated, soft_over,"
         " attempts, prompt_chars, tokens_in, tokens_out, dropped_over_cap, model, prompt_rev, limits_rev,"
-        " json_extract(quality_json, '$.app.check_disagree') AS check_disagree FROM rr_review_calls"
+        " json_extract(quality_json, '$.app.check_disagree') AS check_disagree,"
+        " json_extract(quality_json, '$.engine.dup_conflict') AS dup_conflict,"
+        " json_extract(quality_json, '$.engine.flipped') AS flipped,"
+        " json_extract(quality_json, '$.app.clipped') AS clipped FROM rr_review_calls"
         f" WHERE target_key = ?{extra} ORDER BY call_id", [target_key, *params])
         if r["unit_id"] is None or r["unit_id"] in alive]
-    heads = _rows(store, "SELECT agent_key, state, pack_hash, pack_status, sweep_json, plan_json FROM rr_expert_reports"
-                         f" WHERE target_key = ?{extra} ORDER BY agent_key", [target_key, *params])
+    heads = _rows(store, "SELECT agent_key, state, pack_hash, pack_status, sweep_json, plan_json, rank_in_domain"
+                         f" FROM rr_expert_reports WHERE target_key = ?{extra} ORDER BY agent_key", [target_key, *params])
     keys = sorted({(r["agent_key"], r["pack_hash"]) for r in (*cells, *heads) if r.get("pack_hash")})
     packs: dict[tuple[str, str], dict] = {}
     for agent, key in keys:
@@ -185,9 +200,17 @@ def _load(store: Any, target_key: str, agent_key: str | None) -> dict:
                               " AND pack_key = ?", (agent, key))
         if row is not None:
             packs[(agent, key)] = dict(row)
+    job_id = _latest_review_job(store, target_key)
+    job = store.query_one("SELECT params_json FROM rr_jobs WHERE id = ?", (job_id,)) if job_id else None
+    try:
+        knobs = (json.loads(job["params_json"] or "{}").get("knobs") or {}) if job is not None else {}
+    except ValueError:
+        knobs = {}
+    # 1순위(보정 모집단 — 걸린 것만 이중 판정이어도 묶음 전체를 rev 한다, C3-9) 전문가. 전문가 범위에서는 그 사람이 1순위인지다.
+    rank1 = {str(r["agent_key"]) for r in planner.review_order(store, target_key) if r["rank_in_domain"] == 1}
     return {"agent_key": agent_key, "agents": agents, "units": active, "cells": cells, "verdicts": verdicts, "calls": calls,
             "heads": heads,
-            "packs": packs, "job_id": _latest_review_job(store, target_key)}
+            "packs": packs, "job_id": job_id, "knobs": dict(knobs), "rank1": rank1}
 
 
 def _ledger_hash(data: Mapping[str, Any]) -> str:
@@ -299,7 +322,9 @@ def _cards(data: Mapping[str, Any], policy: Mapping[str, Any]) -> dict:
         total = checkable + background + no_body
         denominator += total
         state = c["state"]
-        if state == "reviewed":
+        if state == "reviewed" and c["basis"] == review_cells.NOINPUT:
+            lines["noinput_reviewed"] += total
+        elif state == "reviewed":
             judged = judged_of.get((c["unit_id"], c["agent_key"]), 0)
             full, title = int(c["bg_full_n"] or 0), int(c["bg_title_only_n"] or 0)
             lines["judged"] += judged
@@ -328,8 +353,17 @@ def _cards(data: Mapping[str, Any], policy: Mapping[str, Any]) -> dict:
     }
 
 
+def _clipped(call: Mapping[str, Any]) -> dict:
+    try:
+        value = json.loads(call.get("clipped") or "null")
+    except (TypeError, ValueError):
+        value = None
+    return value if isinstance(value, dict) else {}
+
+
 def _truncation(data: Mapping[str, Any], policy: Mapping[str, Any]) -> dict:
     ok = [c for c in data["calls"] if c["state"] == "ok"]
+    clipped = [_clipped(c) for c in ok if _clipped(c)]
     reviewed = [c for c in data["cells"] if c["state"] == "reviewed"]
     offcard = [c for c in ok if c["kind"] == "offcard"]
     return {
@@ -343,9 +377,13 @@ def _truncation(data: Mapping[str, Any], policy: Mapping[str, Any]) -> dict:
         # 카드 밖 줄이 findings_max 에 닿은 칸과 닿은 횟수(X1-16), 엔진이 상한 밖이라 버린 줄.
         "offcard_capped": {"cells": sum(1 for c in data["cells"] if int(c["offcard_capped"] or 0) > 0),
                            "hits": sum(int(c["offcard_capped"] or 0) for c in data["cells"])},
+        # 입력 결손 호출이 마지막 다시 묻기 뒤에도 '더 있다' 고 한 칸(반대 검토 2차 LOW 7 — 카드 밖 상한과 같은 몫)
+        "noinput_capped": {"cells": sum(1 for c in data["cells"] if c.get("noinput_capped"))},
         "dropped_over_cap": {"rows": sum(int(c["dropped_over_cap"]) for c in ok if c["dropped_over_cap"] is not None),
                              "offcard_calls": len(offcard),
                              "offcard_calls_unknown": sum(1 for c in offcard if c["dropped_over_cap"] is None)},
+        # 엔진이 몫에서 끊은 입력(RB3-11 — meta.clipped)을 실은 호출 수와 끊긴 입력 이름
+        "clipped": {"calls": len(clipped), "inputs": sorted({name for c in clipped for name in c})},
     }
 
 
@@ -407,16 +445,65 @@ def _flips(data: Mapping[str, Any], effective: Sequence[Mapping[str, Any]], poli
             neg_flip += int(now == "pos")
         else:
             base_hold += 1
-    ordered = [r for r in effective if r["agree"] is not None]
+    # 순서 뒤집힘의 모집단 — 걸린 것만 이중 판정(dual flagged — C3-9)이면 묶음 전체를 rev 한 1순위 셀(보정)만이다. rev 가 걸린
+    # 카드에만 간 셀을 넣으면 걸린 카드만 센 쏠린 비율이 된다. M2(all)는 셀 전부가 보정과 같다.
+    calibration = data.get("knobs", {}).get("dual") == "flagged"
+    ordered = [r for r in effective if r["agree"] is not None and (not calibration or r["agent_key"] in data["rank1"])]
+    # 걸린 fwd 가 rev·단독에서 풀린 비율(C3-9) — fwd 가 걸림인 카드 가운데 실효가 걸림 없음(OK·na)인 것.
+    fwd_hits = [rows for rows in cards.values() if (rows.get("fwd") or {}).get("judgement") in review_verify.FLAGGED]
+    cleared = sum(1 for rows in fwd_hits if any(v["is_effective"] and v["judgement"] in review_verify.CLEAR
+                                                for v in rows.values()))
     return {
         "order": rate(sum(1 for r in ordered if r["agree"] == 0), len(ordered), policy=policy, key="flips.order", upper=True),
+        "order_population": "calibration" if calibration else "all",
+        "flagged_pos_neg": rate(cleared, len(fwd_hits), policy=policy, key="flips.flagged_pos_neg", upper=True),
         "solo_pos_neg": rate(pos_flip, pos_den, policy=policy, key="flips.solo_pos_neg", upper=True),
         "solo_neg_pos": rate(neg_flip, neg_den, policy=policy, key="flips.solo_neg_pos", upper=True),
         "solo_disputed": {"cards": sum(disputed.values()), "pos": disputed.get("pos", 0), "neg": disputed.get("neg", 0),
                           "hold": disputed.get("hold", 0)},
         "solo_base_hold": base_hold, "solo_only": solo_only,
         "split": rate(sum(1 for r in effective if r["split"]), len(effective), policy=policy),
+        # 엔진이 알린 부딪침(RB3-1) — 같은 카드의 다른 판정과 부딪친 줄(dup_conflict)과 보충이 갈아 낀 판정(flipped). 그 카드는
+        # 걸린 것처럼 두 번째 판정을 받았다(review_runner._flagged · _solo_set).
+        "engine_conflict": {"dup_conflict": sum(int(c["dup_conflict"] or 0) for c in data["calls"] if c["state"] == "ok"),
+                            "flipped": sum(int(c["flipped"] or 0) for c in data["calls"] if c["state"] == "ok"),
+                            "calls": sum(1 for c in data["calls"] if c["state"] == "ok"
+                                         and (int(c["dup_conflict"] or 0) or int(c["flipped"] or 0))),
+                            # 판정 행의 flipped_from 을 둘로 가른다 — 모델이 어휘 밖 값을 써 엔진이 고친 것(raw 가 있다)과
+                            # 판정을 바꾼 것(raw 가 없다). 둘 다 두 번째 판정을 받는다(D-42) — 이 셈은 보이기만 한다.
+                            "coerced": sum(1 for v in data["verdicts"] if v["flipped_row"] and v["flipped_raw"]),
+                            "explicit": sum(1 for v in data["verdicts"] if v["flipped_row"] and not v["flipped_raw"])},
     }
+
+
+def _filter(data: Mapping[str, Any], policy: Mapping[str, Any]) -> dict:
+    """거르기(재설계 M3 C3-8) — 잡 손잡이 · 거를 수 있던 칸(두 신호 무관) · 거른 칸 · 표본(끝까지 본 칸의 놓침 넷과 놓침 비율의 95%
+    상한 · 보수 상한 — 기준 rq-2 의 filter.audit.risk_miss) · 대표 그림자(따로 센다 — 무작위 표본이 아니다)."""
+    cells = data["cells"]
+    # 완결 몫과 같은 셈 — 표본 수는 결과를 낸 표본, 놓침은 앞 놓침까지, 비율의 분모는 둘을 더한다(반대 검토 3차 LOW 4 · D-47)
+    tally = review_cells.sample_tally(c["audit"] for c in cells)
+    shadows = review_cells.sample_tally(c["shadow"] for c in cells)
+    risk = tally["counts"]["risk_miss"]
+    return {
+        "mode": data.get("knobs", {}).get("filter") or "off", "approved": data.get("knobs", {}).get("routing_approved"),
+        "would_filter": sum(1 for c in cells if c["rule"] == "both_unrelated"),
+        "filtered": sum(1 for c in cells if c["state"] == "na_irrelevant"),
+        "audit": {"sampled": tally["sampled"], "counts": tally["counts"],
+                  # 기준(rq-2)은 거를 수 있던 칸이 있는 범위에서만 견준다 — 거르기가 없던 범위를 '표본 미달' 로 적지 않는다
+                  "risk_miss": rate(risk, tally["n"], policy=policy, upper=True,
+                                    key="filter.audit.risk_miss" if any(c["rule"] == "both_unrelated" for c in cells)
+                                    else None),
+                  "conservative": rate(risk + tally["counts"]["undetermined"], tally["n"], policy=policy, upper=True)},
+        "shadow": {"sampled": shadows["sampled"],
+                   "risk_miss": rate(shadows["counts"]["risk_miss"], shadows["n"], policy=policy, upper=True)},
+    }
+
+
+def _noinput(data: Mapping[str, Any]) -> dict:
+    """입력 결손(재설계 M3 C3-8) — 입력 결손 호출로 닫힌 칸(검토 · 입력 결손)의 전문가 수 · 칸 수 · 결과별."""
+    cells = [c for c in data["cells"] if c["basis"] == review_cells.NOINPUT and c["state"] in ("reviewed", "no_input")]
+    return {"experts": len({c["agent_key"] for c in cells}), "cells": len(cells),
+            "by_outcome": {o: sum(1 for c in cells if c["noinput_outcome"] == o) for o in review_cells.NOINPUT_OUTCOMES}}
 
 
 def _label(call: Mapping[str, Any]) -> str:
@@ -486,7 +573,9 @@ def _pilot(store: Any, target_key: str, agent_key: str | None, data: Mapping[str
         "calls_per_cell": {"value": _ratio(len(cell_calls), len(touched)), "num": len(cell_calls), "den": len(touched)},
         "positive": rate(sum(1 for r in effective if r["klass"] == "pos"), len(effective), policy=policy),
         "sweep_irrelevant": {**rate(rel.get("no", 0), answered, policy=policy), "stamp": rel.get("stamp", 0),
-                             "error": rel.get("error", 0), "used_for_routing": False},
+                             "error": rel.get("error", 0),
+                             # 거르기 분류의 훑기 신호다(C3-6) — 잡 거르기가 off 면 쓰지 않는다
+                             "used_for_routing": (data.get("knobs", {}).get("filter") or "off") != "off"},
         "tokens": {"in": sum(int(c["tokens_in"] or 0) for c in ok), "out": sum(int(c["tokens_out"] or 0) for c in ok),
                    "calls": len(ok), "calls_unknown": sum(1 for c in ok if c["tokens_in"] is None)},
         "chars_per_token": {"value": _ratio(chars, tokens), "num": chars, "den": tokens, "calls": len(plain),
@@ -528,6 +617,7 @@ def compute(store: Any, target_key: str, *, agent_key: str | None = None) -> dic
         "revs": stamps["revs"], "ledger_hash": _ledger_hash(data),
         "grid": _grid(data, policy), "cards": _cards(data, policy), "truncation": _truncation(data, policy),
         "citation": _citation(data, effective, policy), "flips": _flips(data, effective, policy),
+        "filter": _filter(data, policy), "noinput": _noinput(data),
         "seconds": _seconds(data, policy), "pilot": _pilot(store, target_key, agent_key, data, effective, policy),
     }
     out, unchecked = _bounds(result)
@@ -638,7 +728,8 @@ def render_text(result: Mapping[str, Any]) -> str:
     lines.append(
         f"[격자] 칸 {_n(grid['cells'])} = 전문가 {_n(grid['experts'])} × 단위 {_n(grid['units'])}{gap}"
         f" · 검토 {_n(st['reviewed'])}(카드 대조 {_n(basis['cards'])} · 배경 카드뿐 {_n(basis['background'])}"
-        f" · 역할만 {_n(basis['role_only'])}{unset}) · 무관 {_n(st['na_irrelevant'])} · 입력 결손 {_n(st['no_input'])}"
+        f" · 역할만 {_n(basis['role_only'])} · 입력 결손 호출 {_n(basis['noinput'])}{unset}) · 무관 {_n(st['na_irrelevant'])}"
+        f" · 입력 결손 {_n(st['no_input'])}"
         f" · 미완 {_n(st['failed'])}(처분 전 {_n(grid['failed_open'])}) · 넘김 {_n(st['skipped'])}"
         f" · 대기 {_n(waiting)} · 범위 밖 대기 {_n(grid['out_of_scope_pending'])}"
         f" · 형식만 채운 칸 {fmt_rate(grid['form_only'])}"
@@ -649,17 +740,34 @@ def render_text(result: Mapping[str, Any]) -> str:
         f"[카드] 분모 {_n(cards['denominator'])} = Σ 칸마다 그 전문가 묶음의 카드 전부 · 판정 받음 {fmt_rate(cl['judged'])}"
         f" · 검토 칸인데 판정 없음 {fmt_rate(cl['unjudged'])} · 배경 본문으로 읽힘 {fmt_rate(cl['background_full'])}"
         f" · 배경 제목만 {fmt_rate(cl['background_title_only'])} · 배경 안 실림 {fmt_rate(cl['background_unsent'])}"
-        f" · 본문 없음 {fmt_rate(cl['no_body'])} · 미완·넘김 칸 {fmt_rate(cl['failed'])} · 대기 칸 {fmt_rate(cl['open'])}"
+        f" · 본문 없음 {fmt_rate(cl['no_body'])} · 입력 결손 호출로 본 칸 {fmt_rate(cl['noinput_reviewed'])}"
+        f" · 미완·넘김 칸 {fmt_rate(cl['failed'])} · 대기 칸 {fmt_rate(cl['open'])}"
         f" · 범위 밖 칸 {fmt_rate(cl['out_of_scope'])} · 무관 칸 {fmt_rate(cl['filtered'])}"
         f" · 입력 결손 칸 {fmt_rate(cl['no_input'])}{residual}"
         f" · 묶음 미확보 전문가 {_n(cards['experts_without_pack'])}명({_n(cards['cells_without_pack'])}칸 — 분모 밖)")
-    cap, drop = trunc["offcard_capped"], trunc["dropped_over_cap"]
+    flt, gap = result["filter"], result["noinput"]
+    audit_ = flt["audit"]
+    counts = audit_["counts"]
+    lines.append(
+        f"[거름] 거르기 {_q(flt['mode'])}{'' if flt['approved'] else '(변경 → 영역 표 승인 전 — 거르지 않는다)'}"
+        f" · 거를 수 있던 칸 {_n(flt['would_filter'])} · 거른 칸 {_n(flt['filtered'])}"
+        f" · 표본으로 끝까지 본 칸 {_n(audit_['sampled'])}(놓침 {_n(counts['risk_miss'])} · 관련 {_n(counts['relevance_miss'])}"
+        f" · 가릴 수 없음 {_n(counts['undetermined'])} · 지킴 {_n(counts['kept'])})"
+        f" · 놓침 비율 {fmt_rate(audit_['risk_miss'])} · 보수(놓침 + 가릴 수 없음) {fmt_rate(audit_['conservative'])}"
+        f" · 대표 그림자 {_n(flt['shadow']['sampled'])}칸 놓침 {fmt_rate(flt['shadow']['risk_miss'])}(무작위 표본이 아니다)")
+    lines.append(
+        f"[입력 결손] 입력 결손 호출로 닫은 칸 {_n(gap['cells'])}(전문가 {_n(gap['experts'])}명) · 영향 있음"
+        f" {_n(gap['by_outcome']['impact'])} · 모름 {_n(gap['by_outcome']['unknown'])} · 입력이 와야 봄"
+        f" {_n(gap['by_outcome']['request'])} · 영향 없음 {_n(gap['by_outcome']['none'])}")
+    cap, drop, clip = trunc["offcard_capped"], trunc["dropped_over_cap"], trunc["clipped"]
     lines.append(
         f"[절단] 호출 {fmt_rate(trunc['calls'])} · 호출 모름 {fmt_rate(trunc['calls_unknown'])}"
         f" · 검토 칸 {fmt_rate(trunc['cells'])} · 검토 칸 모름 {fmt_rate(trunc['cells_unknown'])}"
         f" · 품질 한도 넘김 호출 {fmt_rate(trunc['soft_over'])}"
         f" · 카드 밖 상한 닿음 {_n(cap['cells'])}칸({_n(cap['hits'])}번)"
-        f" · 상한 밖 버림 {_n(drop['rows'])}줄(카드 밖 호출 {_n(drop['offcard_calls'])} 가운데 모름 {_n(drop['offcard_calls_unknown'])})")
+        f" · 입력 결손 다시 묻기 상한 닿음 {_n(trunc['noinput_capped']['cells'])}칸"
+        f" · 상한 밖 버림 {_n(drop['rows'])}줄(카드 밖 호출 {_n(drop['offcard_calls'])} 가운데 모름 {_n(drop['offcard_calls_unknown'])})"
+        f" · 몫에서 끊은 입력 {_n(clip['calls'])}호출" + (f"({', '.join(_q(x) for x in clip['inputs'])})" if clip["inputs"] else ""))
     quote = cite["quote"]
     lines.append(
         f"[인용] 카드 인용 대조 통과 — 걸림 {fmt_rate(quote['flagged'])} · 걸림 없음 {fmt_rate(quote['clear'])}"
@@ -667,12 +775,18 @@ def render_text(result: Mapping[str, Any]) -> str:
         f" · 변경 줄 참조 통과 {fmt_rate(cite['refs'])} · 서버·앱 대조 갈림 {_n(cite['check_disagree'])}건")
     dis = flips["solo_disputed"]
     lines.append(
-        f"[뒤집힘] 순서(fwd·rev 다름) {fmt_rate(flips['order'])}"
+        f"[뒤집힘] 순서(fwd·rev 다름{' — 보정 모집단(1순위 셀)' if flips['order_population'] == 'calibration' else ''})"
+        f" {fmt_rate(flips['order'])}"
+        f" · 걸린 fwd 가 두 번째 판정에서 풀림 {fmt_rate(flips['flagged_pos_neg'])}"
         f" · 단독 걸림→걸림 없음 {fmt_rate(flips['solo_pos_neg'])}"
         f" · 단독 걸림 없음→걸림 {fmt_rate(flips['solo_neg_pos'])}"
         f" · fwd·rev 가 갈려 단독이 가른 카드 {_n(dis['cards'])}(걸림 {_n(dis['pos'])} · 걸림 없음 {_n(dis['neg'])}"
         f" · 보류 {_n(dis['hold'])}) · 바탕이 보류 {_n(flips['solo_base_hold'])} · 단독뿐 {_n(flips['solo_only'])}"
-        f" · 변형 갈림(보류로 둠) {fmt_rate(flips['split'])}")
+        f" · 변형 갈림(보류로 둠) {fmt_rate(flips['split'])}"
+        f" · 엔진이 알린 부딪침 {_n(flips['engine_conflict']['dup_conflict'])}줄"
+        f" · 보충이 갈아 낀 줄 {_n(flips['engine_conflict']['flipped'])}(판정 행 가운데 어휘 밖 값을 고친 것"
+        f" {_n(flips['engine_conflict']['coerced'])} · 판정을 바꾼 것 {_n(flips['engine_conflict']['explicit'])} — 판정 변화의 수가"
+        " 아니다, 그 카드는 두 번째 판정을 받았다)")
     kinds = " · ".join(f"{label} {_fmt_secs(stat)}" for label, stat in secs["kinds"].items())
     waits = " · ".join(f"{label} {_n(n)}" for label, n in secs["waits"].items() if label != "total")
     lines.append(
@@ -682,7 +796,7 @@ def render_text(result: Mapping[str, Any]) -> str:
     table_bytes = " · ".join(f"{name} {_n(n)}" for name, n in pilot["bytes"]["tables"].items())
     lines.append(
         f"[실측] 칸당 호출 {_fmt_mean(pilot['calls_per_cell'])} · 걸림 비율 {fmt_rate(pilot['positive'])}"
-        f" · 훑기 무관 {fmt_rate(sweep, f'분류에 쓰지 않음 — stamp {_n(sweep["stamp"])} · 답 없음 {_n(sweep["error"])}')}"
+        f" · 훑기 무관 {fmt_rate(sweep, ('거르기 분류의 훑기 신호' if sweep['used_for_routing'] else '분류에 쓰지 않음(거르기 끔)') + f' — stamp {_n(sweep["stamp"])} · 답 없음 {_n(sweep["error"])}')}"
         f" · 토큰 입력 {_n(tokens['in'])} · 출력 {_n(tokens['out'])}(받은 호출 {_n(tokens['calls'])} 가운데 모름"
         f" {_n(tokens['calls_unknown'])}) · 자/토큰 {_fmt_mean(chars, f'보충 없는 호출 {_n(chars["calls"])}')}"
         f" · 새 표 바이트 {_n(pilot['bytes']['total'])}({table_bytes})")

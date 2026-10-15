@@ -532,7 +532,7 @@ def test_change_kind_axis_agrees_across_asset_normalizer_and_schemas():
     axis = [row["code"] for row in doc["axes"]["change_kind"]]
     assert axis == list(narrative._CHANGE_KINDS) == spec_enum
     assert set(diff_enum) <= set(axis) and {"contact_type", "parameter"} <= set(axis)
-    assert doc["taxonomy_version"] == "1.1"
+    assert doc["taxonomy_version"] == "1.2"
 
 
 @pytest.mark.parametrize("kind", ["contact_type", "parameter"])

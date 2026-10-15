@@ -80,10 +80,12 @@ def _card_bodies() -> list[str]:
 def test_flagged_cards_on_one_change_fold_into_one_finding_held_at_warning(store):
     """같은 전문가의 카드 셋(FAIL·WARNING·FAIL)이 같은 변경 · 같은 메커니즘이면 단위마다 finding 하나에 cards[] 셋이다. hold 정책 —
     등록부로 갈 값은 WARNING · 중대이고 원래 판정은 judgement_claimed 에 FAIL 로 남는다. 패널 자리는 비고 출처 넷이 차며 회수
-    자격은 0, 등록부에는 병합하지 않는다. 근거 문장에 카드 참조·인용이 있어도 수치 대조가 깨지지 않고(P-05) finding 글에 카드 본문이
-    없다(P-06)."""
+    자격은 0 이다(등록부 병합은 검토 잡 끝의 사슬 몫이다 — 재설계 M3 S3-5, tests/test_chain.py). 근거 문장에 카드 참조·인용이 있어도 수치 대조가 깨지지 않고(P-05) finding 글에 카드 본문이
+    없다(P-06). 걸린 줄은 같은 메커니즘 코드를 단다(cr-verdict-2 — 메커니즘이 없으면 cells 대상에서는 카드마다 갈린다, M3 S3-3 ·
+    tests/test_review_mech.py)."""
     key, _job, _fake = _run(store, scope={"agents": [SEAL]},
-                            verdicts={"K01": ("yes", "FAIL"), "K02": ("yes", "WARNING"), "K03": ("yes", "FAIL")})
+                            verdicts={"K01": ("yes", "FAIL"), "K02": ("yes", "WARNING"), "K03": ("yes", "FAIL")},
+                            mechs={_rid(a): ("interface.clearance", "") for a in ("K01", "K02", "K03")})
     review_id = _head(store, key, SEAL)["review_id"]
     rows = _findings(store, key)
     assert sorted(r["unit_id"] for r in rows) == sorted(_unit_ids(store, key))
@@ -106,7 +108,6 @@ def test_flagged_cards_on_one_change_fold_into_one_finding_held_at_warning(store
     refs = {r["ref"] for r in store.query("SELECT ref FROM rr_claim_refs WHERE claim_uid = ?", (rows[0]["claim_uid"],))}
     assert {f"card:{_rid(a)}" for a in ("K01", "K02", "K03")} <= refs
     assert routes.claims_for_ref(f"card:{_rid('K01')}", owner_sub=OWNER)["claims"]      # '이 카드를 근거로 든 지적'
-    assert store.query_one("SELECT COUNT(*) AS n FROM rr_registry WHERE target_key = ?", (key,))["n"] == 0
 
 
 def test_each_expert_raises_its_own_finding_in_a_shared_cluster(store):
@@ -156,6 +157,22 @@ def test_off_card_rows_become_findings_and_an_unclassified_text_is_queued_once_p
         "SELECT payload_json FROM rr_curation_queue WHERE kind = 'unclassified_code'")]
     assert [(q["mechanism_free"], q["target_key"], q["source_kind"]) for q in queued] == [("계면 박리", key, "card_review")]
     assert nightly.scan_unclassified(store, now=common.now_epoch()) == {"n_unclassified": 0, "queued": 0}
+
+
+def test_an_untitled_off_card_row_is_kept_with_a_fallback_title_and_becomes_a_finding(store):
+    """반대 검토 2차 HIGH 1(a) · D-46 — 엔진의 _check_f 는 제목을 묻지 않는다(RB-1 이 제목 없는 f 줄을 다룬다). 앱이 제목 없는 카드 밖
+    f 줄을 버려(no_title) 카드 밖 걸림이 결과에서 사라졌다 — 셀은 reviewed · n_offcard 0 · finding 0, 흔적은 호출 원장의 dropped
+    뿐이었다. 경로로 제목을 대신하고 title_fallback 표지를 단다(q1 과 같은 규칙)."""
+    key, _job, _fake = _run(store, scope={"agents": [rig.ZERO_CARDS]}, offcard=1, offcard_title="")
+    cells = [dict(r) for r in store.query("SELECT n_offcard, extras_json FROM rr_review_cells WHERE target_key = ?"
+                                          " AND agent_key = ?", (key, rig.ZERO_CARDS))]
+    assert cells and all(c["n_offcard"] == 1 for c in cells)
+    row = json.loads(cells[0]["extras_json"])["offcard"]["findings"][0]
+    assert (row["title"], row.get("title_fallback")) == ("변경 줄의 계면", True)
+    assert len(_findings(store, key, rig.ZERO_CARDS)) == len(_unit_ids(store, key))
+    dropped = [json.loads(r["quality_json"])["app"]["dropped"] for r in store.query(
+        "SELECT quality_json FROM rr_review_calls WHERE target_key = ? AND kind = 'offcard' AND state = 'ok'", (key,))]
+    assert dropped and all("no_title" not in d for d in dropped)
 
 
 # ---------------------------------------------------------------- 의견 행 · 원장
@@ -363,6 +380,12 @@ REVIEW_READERS: dict[tuple[str, str], str] = {
     ("routes.py", "put_curation"): "큐 항목이 가리키는 finding(검토 마감이 올린 미분류 메커니즘 항목 포함)",
     ("learning.py", "plan_remap"): "택소노미 재매핑은 finding 전부의 별칭을 더한다(cluster_key 는 바이트 불변)",
     ("brief.py", "_finding_subjects"): "E7 이 다른 대상의 의견 행(검토 의견 포함 — 설계서대로 둔다)이 올린 finding 의 주체를 본다",
+    ("registry.py", "_load_findings"): "거름 글이 상수 FINDING_SCOPE_SQL 에서 온다(M3 S3-4 — 카드 대조 finding 은 cells 대상만)",
+    ("registry.py", "_contested_marking_done"): "거름 글이 상수 FINDING_SCOPE_SQL 에서 온다(M3 S3-4 — 위와 같은 범위)",
+    ("routes.py", "_cluster_finding_ids"): "거름 글이 상수 FINDING_SCOPE_SQL 에서 온다(M3 S3-4 — 등록부와 같은 범위)",
+    ("issues.py", "_card_atoms"): "카드 대조 원자만 읽는다(source_kind = 카드 대조 — 쟁점 유형의 원천, M3 S3-6)",
+    ("issues.py", "_panel_atoms"): "쟁점 패널 자신의 원자(panel_id + source_kind = issue_panel — 결과 판정, M3 S3-7)",
+    ("brief.py", "_issue_side"): "쟁점 근거 I4 — 제기자의 finding 을 id 로 짚는다(카드 밖 지적의 주장 줄, M3 S3-7)",
 }
 _READ_SQL = re.compile(r"\b(?:FROM|JOIN)\s+rr_findings\b", re.IGNORECASE)
 
