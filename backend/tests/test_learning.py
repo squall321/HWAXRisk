@@ -10,6 +10,7 @@ from app import common, config, learning, registry
 from app.errors import AppError
 
 OWNER = "tester@example.com"
+STRANGER = "stranger@example.com"
 CK = "ck:1111111111"
 NORM_A = "cl:aaaaaaaaaaaa"
 NORM_B = "cl:bbbbbbbbbbbb"
@@ -18,12 +19,19 @@ NORM_B = "cl:bbbbbbbbbbbb"
 # ---------------------------------------------------------------- 삽입 도우미
 
 
-def _target(store, target_key, *, project_id="P1", kind="snap", ref_id="S1", created_at=100):
+def _target(store, target_key, *, project_id="P1", kind="snap", ref_id="S1", created_at=100, owner=OWNER):
     store.execute(
         "INSERT INTO rr_targets(target_key, owner_sub, kind, ref_id, project_id, ir_hash, external_sync_json, "
         "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, '{}', ?, ?)",
-        (target_key, OWNER, kind, ref_id, project_id, "0123456789ab", created_at, created_at),
+        (target_key, owner, kind, ref_id, project_id, "0123456789ab", created_at, created_at),
     )
+
+
+def _projects(store, owners: dict) -> None:
+    """과제 행(소유자) — 큐 · 승격 응답이 보는 사람의 과제를 가린다(D48)."""
+    for project_id, owner in owners.items():
+        store.execute("INSERT INTO rr_projects(id, owner_sub, code, created_at, updated_at) VALUES (?, ?, ?, 1, 1)",
+                      (project_id, owner, project_id))
 
 
 def _snapshot(store, snapshot_id, *, project_id="P1", ir=None, ir_hash=None):
@@ -55,7 +63,7 @@ def _finding(
     store, finding_id, target_key, *, project_id="P1", cluster_key=NORM_A, agent_key="seat-a", model="claude-x",
     change_kind="placement", mechanism="interface", mechanism_detail="interference", direction="risk",
     severity="중대", status="open", recall_eligible=1, origin="llm", primed=False, feature_snapshot=None,
-    created_at=100, claim="합성 클레임",
+    created_at=100, claim="합성 클레임", owner=OWNER,
 ):
     """패널·좌석 의견까지 한 벌로 만들어 finding 을 넣는다(좌석 수·모델 수를 세려면 세 표가 다 필요하다)."""
     panel_id = f"PN-{target_key}-{agent_key}"
@@ -71,7 +79,7 @@ def _finding(
         "owner_sub, direction, domain, mechanism, mechanism_detail, change_kind, subject_key, severity, sev3, "
         "judgement, evidence_grade, precedent, cluster_key, finding_json, recall_eligible, status, created_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'mech', ?, ?, ?, ?, ?, 2, 'WARNING', '문헌·규격', 'none', ?, ?, ?, ?, ?)",
-        (finding_id, f"{panel_id}#{finding_id}", origin, target_key, panel_id, opinion_id, project_id, OWNER,
+        (finding_id, f"{panel_id}#{finding_id}", origin, target_key, panel_id, opinion_id, project_id, owner,
          direction, mechanism, mechanism_detail, change_kind, CK, severity, cluster_key, json.dumps(fj),
          recall_eligible, status, created_at),
     )
@@ -254,6 +262,27 @@ def test_mine_creates_candidate_and_queue(risk_store):
     assert queue["kind"] == "pattern_candidate" and queue["status"] == "open"
     assert payload["pattern_id"] == "P-001" and payload["proposal"] == "known"
     assert len(payload["sample_claims"]) <= 5
+
+
+def test_global_mining_queues_only_claims_of_projects_the_owner_can_see(risk_store):
+    """야간 마이닝은 전역이라 남의 원자도 센다(통계는 전역 그대로) — 그러나 새 패턴 큐 항목의 주장 · 대상 키는 그 큐 주인이 볼 수 있는
+    과제의 원자에서만 고르고 남의 과제는 수로만 싣는다(D48 조정자 결정). 종전에는 앞 다섯 원자를 소유자를 보지 않고 실었다."""
+    store = risk_store
+    _projects(store, {"P1": OWNER, "P2": OWNER, "PX": STRANGER})
+    _spread(store, 3)
+    store.execute("UPDATE rr_findings SET created_at = 50 WHERE finding_id = 'F1a'")       # 큐 주인은 첫 원자의 소유자다
+    _target(store, "TX", project_id="PX", owner=STRANGER)
+    for agent_key in ("seat-a", "seat-b"):
+        _finding(store, f"FX{agent_key[-1]}", "TX", project_id="PX", agent_key=agent_key, owner=STRANGER,
+                 claim="남의 과제의 주장", created_at=60)
+    learning.mine_patterns(store)
+    queue = store.query_one("SELECT owner_sub, payload_json FROM rr_curation_queue", ())
+    payload = json.loads(queue["payload_json"])
+    text = json.dumps(payload, ensure_ascii=False)
+    assert queue["owner_sub"] == OWNER and payload["sample_claims"]
+    assert [leak for leak in ("TX", "FXa", "FXb", "남의 과제의 주장") if leak in text] == []
+    assert payload.get("other_projects_n") == 1
+    assert (payload["n_projects"], payload["n_findings"]) == (3, 8)                       # 셈은 전역 패턴 그대로
 
 
 def test_mine_below_threshold_makes_nothing(risk_store):
@@ -567,6 +596,29 @@ def test_promote_rule_creates_active_rule(risk_store):
     assert json.loads(row["backtest_json"])["precision"] == 1.0
     assert store.query_one("SELECT status FROM rr_patterns WHERE id = 'P-001'", ())["status"] == "rule"
     assert [r["id"] for r in learning.active_pattern_rules(store)] == [row["id"]]
+
+
+def test_promote_rule_shows_backtest_targets_only_of_projects_the_viewer_can_see(risk_store):
+    """규칙 승격 응답의 백테스트 표본은 패턴 주인과 결정한 사람 둘 다 볼 수 있는 과제의 대상만 키로 싣고 나머지는 과제 수로만 —
+    채점(n_labeled · 정밀도 · 재현율)은 전역 라벨 그대로다(D48). 종전에는 모든 소유자의 라벨 대상 키를 실었다."""
+    store = risk_store
+    _projects(store, {"P1": OWNER, "PX": STRANGER})
+    _backtest_corpus(store)
+    _snapshot(store, "SX", project_id="PX", ir={
+        "nodes": [{"nid": "n1"}, {"nid": "n2"}],
+        "edges": [{"eid": "e1", "a": "n1", "b": "n2", "kind": "interference", "attrs": {"penetration_depth": 0.1}}],
+        "warnings": []})
+    for n in (1, 2):                                           # 남의 과제 하나에 라벨 대상 둘 — 수는 과제로 센다
+        _target(store, f"TX{n}", project_id="PX", ref_id="SX", created_at=150 + n, owner=STRANGER)
+        _finding(store, f"FX{n}", f"TX{n}", project_id="PX", owner=STRANGER)
+        _label(store, f"LX{n}", f"FX{n}", "confirmed", labeled_at=250 + n)
+    _pattern(store, "P-001", status="known")
+    out = learning.promote(store, "P-001", to_status="rule", decided_by=OWNER,
+                           rule={"condition_json": CONDITION_HIT, "why_it_matters": "간섭 깊이가 확정 범위를 넘었다"})
+    samples = [s["target_key"] for s in out["backtest"]["samples"]]
+    assert samples == [f"T{i:02d}" for i in range(1, 13)]                                   # TX1 · TX2 는 없다
+    assert out["backtest"].get("other_projects_n") == 1
+    assert out["backtest"]["n_labeled"] == 14                                                # 채점은 전역 그대로
 
 
 def test_promote_rule_requires_human_written_text(risk_store):

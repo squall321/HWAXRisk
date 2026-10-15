@@ -614,9 +614,19 @@ def _queue(store: RiskStore, owner_sub: str, payload: Mapping[str, Any], now: in
     return queue_id
 
 
-def _sample_claims(store: RiskStore, atoms: Sequence[Mapping[str, Any]], limit: int = 5) -> list[dict]:
+def _visible_projects(store: RiskStore, *emails: str) -> set[str]:
+    """그 사람들 모두가 구성원인 과제 — '구성원' 은 brief._member_project_ids 하나다(D45 · D48)."""
+    from app import brief  # noqa: PLC0415 — brief 는 learning 을 함수 안에서만 부른다.
+
+    sets = [brief._member_project_ids(store, email) for email in emails]
+    return set.intersection(*sets) if sets else set()
+
+
+def _sample_claims(store: RiskStore, atoms: Sequence[Mapping[str, Any]], visible: set[str],
+                   limit: int = 5) -> list[dict]:
+    """주장 표본 — 보는 사람이 볼 수 있는 과제(`visible`)의 원자에서만 고른다. 야간 마이닝은 전역이라 남의 원자가 섞인다(D48)."""
     out: list[dict] = []
-    for atom in atoms[:limit]:
+    for atom in [a for a in atoms if _s(a["project_id"]) in visible][:limit]:
         row = store.query_one("SELECT finding_json FROM rr_findings WHERE finding_id = ?"
                               # 카드 대조 거름 그대로(M3 S3-4) — 과제를 가로지르는 학습·지표·야간 자리라 카드 대조 원자는 회수 자격 0(M2 #9)·cells 대상은 통계에 넣지 않는다(M3 #57)
                               " AND COALESCE(source_kind, '') <> 'card_review'", (atom["finding_id"],))
@@ -675,6 +685,8 @@ def mine_patterns(store: RiskStore, *, owner_sub: str | None = None, now: int | 
                      stats["n_experts"], stats["n_confirmed"], stats["n_refuted"], stats["precision"],
                      common.canonical_json(stats["feature_ranges"]), now, now),
                 )
+                # 주장 · 대상 키는 큐 주인이 볼 수 있는 과제의 원자에서만, 남의 과제는 수로만(D48 조정자 결정) — n_* 셈은 전역 그대로다.
+                visible = _visible_projects(store, owner)
                 queue_id = _queue(store, owner, {
                     "pattern_id": pattern_id, "cluster_key_norm": norm, "proposal": "known",
                     "n_findings": stats["n_findings"], "n_projects": stats["n_projects"],
@@ -685,7 +697,8 @@ def mine_patterns(store: RiskStore, *, owner_sub: str | None = None, now: int | 
                     "stamp_missing": gate["stamp_missing"],
                     "note": None if gate["independence_verified"]
                     else "독립성 미검증(primed 스탬프 없음) — echo_ratio 0.0 은 되풀이가 없다는 뜻이 아니다.",
-                    "sample_claims": _sample_claims(store, atoms),
+                    "sample_claims": _sample_claims(store, atoms, visible),
+                    "other_projects_n": len({_s(a["project_id"]) for a in atoms} - visible),
                 }, now)
                 created.append({"pattern_id": pattern_id, "cluster_key_norm": norm, "queue_id": queue_id})
                 existing[norm] = {"id": pattern_id, "cluster_key_norm": norm, "status": "candidate",
@@ -882,6 +895,21 @@ _ALLOWED_TRANSITIONS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _visible_samples(store: RiskStore, result: Mapping[str, Any], visible: set[str]) -> dict:
+    """백테스트 응답의 표본 — 볼 수 있는 과제(`visible`)의 대상만 키로 싣고 나머지는 과제 수(other_projects_n)로만(D48).
+    채점(n_labeled · 정밀도 · 재현율 · train · holdout)은 전역 라벨 그대로다."""
+    shown: list[dict] = []
+    hidden: set[str] = set()
+    for sample in result.get("samples") or []:
+        row = store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (sample["target_key"],))
+        project = _s(row["project_id"]) if row is not None else ""
+        if project in visible:
+            shown.append(sample)
+        else:
+            hidden.add(project)
+    return {**result, "samples": shown, "other_projects_n": len(hidden)}
+
+
 def _fail(unmet: Sequence[str], detail: str) -> AppError:
     return AppError("E100", f"승격 조건 미충족({', '.join(unmet)}) — {detail}", 422)
 
@@ -975,7 +1003,7 @@ def promote(
         condition = draft.get("condition_json") or draft_rule_condition(store, pattern_id)["condition_json"]
         result = backtest(store, condition, cluster_key_norm=norm,
                           aggregate=draft.get("aggregate"))
-        out["backtest"] = result
+        out["backtest"] = _visible_samples(store, result, _visible_projects(store, owner or "", decided_by))
         if not result["passes"]:
             raise _fail(result["unmet"],
                         f"n_labeled {result['n_labeled']} · precision {result['precision']} · "
