@@ -221,14 +221,16 @@ def test_a_retry_covered_by_a_live_job_is_adopted(store):
     assert _cells(store, key, PEER)[unit_ids[0]]["state"] == "reviewed"
 
 
-@pytest.mark.parametrize("floor,hold", [(30, None), (2, "consent_extra")])
-def test_a_retry_spilled_into_a_live_job_counts_against_its_reopen_allowance(store, monkeypatch, floor, hold):
+@pytest.mark.parametrize("floor,share,hold", [(30, 0.2, None), (2, 0.0, "consent_extra")])
+def test_a_retry_spilled_into_a_live_job_counts_against_its_reopen_allowance(store, monkeypatch, floor, share, hold):
     """반대 검토 4차 MEDIUM 2 · D-49 — 사람의 다시가 살아 있는 잡에 얹힌 셀(그 잡을 만들 때 failed 라 그 잡의 추정 밖이다)은 다시 연 셀의
     몫에 든다 — 진행판 reopened_extra 가 그 셀을 세고, 여유를 넘으면 그 잡이 consent_extra 로 멈춘다(응답 job.hold). 종전에는 그 잡의
-    추정 · 동의 어디에도 셈해지지 않았다."""
+    추정 · 동의 어디에도 셈해지지 않았다. 멈춘 잡에서 넘김(filter state=pending)은 동의를 기다리는 그 셀만 넘긴다 — 그 잡의 범위로 아직
+    돌지 않은 셀(추정 안)은 그대로 pending 이고, 여유 안으로 돌아온 잡은 이어 돈다."""
     monkeypatch.setattr(review_runner, "REOPEN_FLOOR_CALLS", floor, raising=False)
+    monkeypatch.setattr(review_runner, "REOPEN_SHARE", share, raising=False)          # 여유를 바닥으로만 — 추정이 큰 잡이다
     key, job_id, unit_ids, fake, r = _failed_target(store)
-    live = rig.job(store, key, scope={"agents": [PEER, SEAL]})
+    live = rig.job(store, key, scope={"agents": [PEER, SEAL, "mech-syn-0"]})       # mech 2순위의 셀 다섯은 이 잡의 추정 안이다
     out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[unit_ids[0], PEER]]), ident=ME)
     assert (out["job"]["action"], out["job"].get("hold")) == ("adopted", hold)
     row = store.query_one("SELECT id, state, hold_code, hold_until, hold_n, error, credential_email, params_json, progress_json"
@@ -236,6 +238,13 @@ def test_a_retry_spilled_into_a_live_job_counts_against_its_reopen_allowance(sto
     extra = routes._review_job_payload(dict(row))["progress"].get("reopened_extra") or {}
     assert (extra.get("unconsented"), extra.get("hold")) == ({"cells": 1, "calls_est": 5.25}, hold)
     assert rig.state(store, live) == ("paused" if hold else "queued")
+    if hold:
+        own = {u: c["state"] for u, c in _cells(store, key, "mech-syn-0").items()}
+        out = routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": live, "state": "pending"},
+                                                               reason="다시의 비용에 동의하지 않는다"), ident=ME)
+        assert (out["skipped"], out["keys"], out["job"].get("resumed")) == (1, [[unit_ids[0], PEER]], True)
+        assert {u: c["state"] for u, c in _cells(store, key, "mech-syn-0").items()} == own == {u: "pending" for u in own}
+        assert rig.state(store, live) == "queued"
 
 
 # ---------------------------------------------------------------- 넘김
@@ -371,23 +380,29 @@ def test_skipping_the_only_failed_cell_never_turns_an_abstain_into_agree(store):
 @pytest.mark.parametrize("skipped,reviewed,before,after", [
     ("FAIL", "OK", "abstain", "oppose"),
     ("WARNING", "OK", "abstain", "conditional"),
+    ("offcard", "OK", "abstain", "conditional"),
+    ("offcard", "undetermined", "abstain", "abstain"),
     ("OK", "undetermined", "abstain", "abstain"),
 ])
 def test_a_skipped_cells_candidates_only_move_a_reviewed_stance_toward_conditional_or_oppose(store, skipped, reviewed, before,
                                                                                                 after):
     """반대 검토 4차 MEDIUM 1 · D-49 — 입장은 검토한 셀로 정하고(X1-15), 넘긴 셀의 걸림 후보는 그 입장을 조건부 · 반대 쪽으로만
     움직인다. ① 넘긴 셀만 있을 때(검토 0)는 걸림 후보가 있어도 기권이다 — 기권은 검토한 셀로만 정한다(그 걸림은 finding · 보고서
-    '보지 못한 것' · 요약 줄로 남는다). ② 검토한 셀이 동의면 넘긴 셀의 FAIL 은 반대 · WARNING 은 조건부로 올린다. ③ 검토한 셀이 보류뿐이면
-    (기권) 넘긴 셀의 걸림 없음은 동의로 바꾸지 못한다 — 종전에는 넘긴 셀의 OK 가 적용 판정에 들어 agree 였다."""
-    from app import units
+    '보지 못한 것' · 요약 줄로 남는다). ② 검토한 셀이 동의면 넘긴 셀의 FAIL 은 반대 · WARNING · 카드 밖 리스크는 조건부로 올린다.
+    ③ 검토한 셀이 보류뿐이면(기권) 넘긴 셀은 기권을 풀지 않는다 — 카드 밖 리스크도, 걸림 없음도(종전에는 넘긴 셀의 OK 가 적용 판정에
+    들어 agree 였다)."""
+    from app import cardpack, units
 
     key = rig.target(store)
     unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
     records = [str(c["record_id"]) for c in fre.load("pack_ok.json")["cards"]]
     fake = FakeReviewEngine(rig.packs())
-    fake.offcard_findings = 0
-    fake.verdicts = {records[0]: ("yes", skipped)}
-    fake.error_cells, fake.error_kinds = {(SEAL, unit_ids[0]): NO_ROWS}, {"offcard"}
+    fake.offcard_findings = 1 if skipped == "offcard" else 0
+    fake.verdicts = {records[0]: ("yes", skipped)} if skipped != "offcard" else {}
+    if skipped == "offcard":            # 카드 밖 호출을 받은 뒤 정산에서 실패한다(점검 카드 하나를 끝내 내지 않는다 — cards_unjudged)
+        fake.skip_cards = {list(cardpack.view_of(fre.load("pack_ok.json")).checkable)[-1]}
+    else:
+        fake.error_cells, fake.error_kinds = {(SEAL, unit_ids[0]): NO_ROWS}, {"offcard"}
     r = rig.Rig(store, fake)
     r.finish(rig.job(store, key, scope={"agents": [SEAL], "unit_ids": unit_ids[:1]}))
     assert _cells(store, key, SEAL)[unit_ids[0]]["state"] == "failed"
@@ -395,7 +410,7 @@ def test_a_skipped_cells_candidates_only_move_a_reviewed_stance_toward_condition
                                  ident=ME)
     r.finish(out["job"]["job_id"])
     assert _stance(store, key, SEAL) == (before,) * 3
-    fake.error_cells = {}
+    fake.error_cells, fake.skip_cards, fake.offcard_findings = {}, set(), 0
     fake.verdicts = {rid: ("unknown", "undetermined") for rid in records} if reviewed == "undetermined" else {}
     r.finish(rig.job(store, key, scope={"agents": [SEAL], "unit_ids": unit_ids[1:2]}))
     assert _cells(store, key, SEAL)[unit_ids[1]]["state"] == "reviewed"

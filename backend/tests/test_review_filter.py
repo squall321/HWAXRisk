@@ -887,9 +887,10 @@ def test_reopened_cells_past_the_allowance_pause_the_job_until_a_person_consents
 
 @pytest.mark.parametrize("cap", [False, True])
 def test_a_person_who_does_not_consent_skips_the_waiting_cells_and_the_job_goes_on(store, monkeypatch, cap):
-    """반대 검토 4차 MEDIUM 2 · D-49 — 동의하지 않으면 동의를 기다리는 셀을 사유와 함께 넘긴다(넘김의 filter state=pending — 그 잡의
-    다른 셀은 손대지 않는다). 그 셀은 차감 없이 skipped 이고(넘김 — «사유»), 몫이 여유 안으로 돌아오면 잡이 이어 돈다. 잡 하나의 추정
-    합이 HWAXRISK_REVIEW_MAX_CALLS 를 넘는 몫(max_calls)은 동의로 풀리지 않는다 — 409 이고, 넘기면 풀린다."""
+    """반대 검토 4차 MEDIUM 2 · D-49 — 동의하지 않으면 동의를 기다리는 셀을 사유와 함께 넘긴다(넘김의 filter state=pending). 넘김은
+    동의를 기다리는 셀만 pending 그대로 넘긴다 — 함께 고른 다른 pending 셀은 그대로다. 넘긴 셀은 차감 없이 skipped 이고(넘김 —
+    «사유»), 몫이 아직 여유 밖이면 잡은 멈춘 채 보류 글이 남은 셀 수로 바뀌고, 여유 안으로 돌아오면 잡이 이어 돈다. 잡 하나의 추정 합이
+    HWAXRISK_REVIEW_MAX_CALLS 를 넘는 몫(max_calls)은 동의로 풀리지 않는다 — 409 이고, 넘기면 풀린다."""
     if not cap:
         monkeypatch.setattr(review_runner, "REOPEN_FLOOR_CALLS", 2, raising=False)
     # 상한은 그 다시 앞에서 건다 — 추정 3 + 다시 연 셀 3.15 > 5
@@ -898,19 +899,53 @@ def test_a_person_who_does_not_consent_skips_the_waiting_cells_and_the_job_goes_
     r.finish(running)
     hold = "max_calls" if cap else "consent_extra"
     assert (rig.state(store, running), rig.job_row(store, running)["hold_code"]) == ("paused", hold)
+    reason = "다시 연 셀의 비용에 동의하지 않는다"
     if cap:
         with pytest.raises(AppError) as refused:
             routes.job_action(running, "resume", consent=True, ident=factories.ident(rig.OWNER))
         assert (refused.value.code, refused.value.http_status) == ("max_calls", 409)
-    out = routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": running, "state": "pending"},
-                                                           reason="다시 연 셀의 비용에 동의하지 않는다"),
-                                 ident=factories.ident(rig.OWNER))
-    assert (out["skipped"], out["job"].get("resumed")) == (3, True)
+        other = next(c for c in _cells(store, key) if c["state"] == "pending" and c["run_id"] is None)
+        body = routes.CellsSkipBody(cells=[[u, MEM2] for u in filtered] + [[other["unit_id"], other["agent_key"]]], reason=reason)
+        expect = (3, 1)
+    else:
+        first = routes.post_cells_skip(key, routes.CellsSkipBody(cells=[[filtered[0], MEM2]], reason=reason),
+                                       ident=factories.ident(rig.OWNER))
+        job = rig.job_row(store, running)
+        assert (first["skipped"], first["job"].get("resumed"), job["state"], job["hold_code"]) == (
+            1, None, "paused", "consent_extra")
+        assert "다시 연 셀 2개" in (job["error"] or "")                   # 남은 둘(2.1)이 아직 여유(2) 밖이다
+        body = routes.CellsSkipBody(filter={"job_id": running, "state": "pending"}, reason=reason)
+        expect = (2, 0)
+    out = routes.post_cells_skip(key, body, ident=factories.ident(rig.OWNER))
+    assert (out["skipped"], out["not_failed"], out["job"].get("resumed")) == (*expect, True)
     r.finish(running)
     assert rig.state(store, running) == "completed" and _mem2_runs(fake, runs) == 0
     held = [_cell(store, key, u, MEM2) for u in filtered]
-    assert {(c["state"], c["charged"], c["decide_note"]) for c in held} == {("skipped", 0, "다시 연 셀의 비용에 동의하지 않는다")}
+    assert {(c["state"], c["charged"], c["decide_note"]) for c in held} == {("skipped", 0, reason)}
     assert (_reopened_extra(store, running) or {}).get("unconsented") == {"cells": 0, "calls_est": 0.0}
+    if cap:
+        assert _cell(store, key, other["unit_id"], other["agent_key"])["state"] == "pending"
+
+
+def test_a_reopen_while_the_job_waits_on_an_auto_resuming_hold_turns_it_into_consent_extra(store, monkeypatch):
+    """반대 검토 4차 MEDIUM 2 · D-49 — 다시 연 셀이 몫을 넘을 때 그 잡이 시계로 저절로 재개할 보류(llm_outage)로 멈춰 있으면 그 보류를
+    consent_extra 로 바꾼다 — 그대로 두면 정해진 간격 뒤 저절로 재개해 동의 없이 그 셀을 돌린다."""
+    monkeypatch.setattr(review_runner, "REOPEN_FLOOR_CALLS", 2, raising=False)
+    key, r, fake, filtered, running = _one_cell_retry_spill(store, monkeypatch)
+    real = review_cells.widen
+
+    def widen_on_hold(*args, **kwargs):
+        r.loop.hold(running, "llm_outage", "LLM 이 불안정하다(가짜) — 정산과 넓힘 사이에 차단기가 열렸다")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(review_cells, "widen", widen_on_hold)
+    runs = len(fake.calls("run"))
+    r.finish(running)
+    job = rig.job_row(store, running)
+    assert (job["state"], job["hold_code"], job["hold_until"]) == ("paused", "consent_extra", None)
+    r.clock.advance(4000)                                                         # llm_outage 였다면 저절로 재개했을 때
+    r.tick()
+    assert rig.state(store, running) == "paused" and _mem2_runs(fake, runs) == 0
 
 
 def test_a_jobs_own_filtered_cells_it_reopens_are_inside_its_estimate_not_reopened_extra(store, monkeypatch):
