@@ -67,6 +67,39 @@ def test_copies_equal_the_engine_files_byte_for_byte():
                           f"(cp {source}/<파일> {COPIES}/)")
 
 
+# 외부 응답자(Claude 길 X-2) 계약 예제 — 엔진은 GLM 계약 디렉터리를 그대로 두고 외부 계약을 따로 둔다(X-D4). 같은 규칙으로 사본을 둔다.
+EXTERNAL_COPIES = FIXTURES_DIR / "external_llm" / "contract"
+EXTERNAL_ENGINE_REL = Path("tests") / "fixtures" / "external_llm" / "contract"
+
+
+def test_external_copies_exist():
+    """앱의 Claude 길 시험이 읽는 것 — 장면 색인이 가리키는 프레임·끝 결과(요청이 파일인 장면은 그 요청까지), 스트림 전 거절, 외부 창의
+    limits · plan, /health 의 켠 박스 · 끈 박스, 심의 프레임."""
+    names = {p.name for p in EXTERNAL_COPIES.iterdir() if p.is_file()}
+    assert {"limits_external.json", "plan_external.json", "plan_external_req.json", "rejects.json", "health_on.json",
+            "health_off.json", "delib_frames.json", "req_verdict_ok.json", "result_verdict_ok.json",
+            "run_external_worker_absent.sse", "run_external_answer_timeout.sse"} <= names, sorted(names)
+    index = json.loads((EXTERNAL_COPIES / "index.json").read_text(encoding="utf-8"))
+    scenes = {name for scene in index.values() for name in (scene["request"], scene["frames"], scene["final"])
+              if name.endswith((".json", ".sse"))}
+    assert scenes <= names, sorted(scenes - names)
+
+
+def test_external_copies_equal_the_engine_files_byte_for_byte():
+    repo = _engine_repo()
+    if not repo.is_dir():
+        pytest.skip(f"엔진 리포가 곁에 없다(HWAX_AGENT_SERVER_REPO 또는 ../HWAXAgentServer) — {repo}")
+    source = repo / EXTERNAL_ENGINE_REL
+    if not source.is_dir():
+        pytest.fail(f"엔진 리포는 곁에 있는데 외부 계약 예제 디렉터리가 없다 — {source}. 경로가 바뀌었으면 이 시험을 같이 고친다")
+    try:
+        differ = differing(EXTERNAL_COPIES, source)
+    except OSError as exc:
+        pytest.fail(f"엔진 리포는 곁에 있는데 원본을 읽지 못했다 — {exc}")
+    assert differ == [], (f"사본이 엔진 원본과 다르다 — {differ}. 엔진 예제가 다시 떴으면 원본을 그대로 다시 복사한다"
+                          f"(cp {source}/<파일> {EXTERNAL_COPIES}/)")
+
+
 def test_the_guard_sees_one_changed_byte_and_a_missing_original(tmp_path):
     """가드가 실제로 짚는다 — 한 바이트 다른 사본은 이름이 나오고, 원본이 없으면 건너뛰지 않고 OSError 다."""
     copies, source = tmp_path / "copies", tmp_path / "source"
