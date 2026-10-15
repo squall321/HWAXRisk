@@ -2973,7 +2973,7 @@ def create_job(target_key: str, body: JobBody,
 
     `mode='reviews'` 는 카드 대조 검토 잡이다 — `review_runner.create_review_job` 이 범위·자격(사용자 PAT 만)·호출 수 추정·동의를
     보고(거절 코드는 그 함수의 것), 만든 잡은 rr_audit(scope='job', action='job.create') 한 행을 남긴다. 반환 {job_id, mode,
-    cells_total, cells_in_scope, experts_in_scope, units, calls_estimate{low, high}, credential{kind, email, exp},
+    cells_total, cells_in_scope, experts_in_scope, units, calls_estimate{low, expected, high, basis}, credential{kind, email, exp},
     credential_note?}.
     """
     email = _require_user(ident)

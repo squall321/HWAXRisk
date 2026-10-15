@@ -461,13 +461,13 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
     대상 단위이고, 범위는 그 가운데 이 잡이 집을 셀이다(X1-27 — 범위 밖 셀은 pending 으로 남는다).
     거절 — 409 review_disabled(HWAXRISK_REVIEW_ENABLED=0) · 404 E404 · 409 review_job_exists · 409 review_in_flight(그 대상의
     전문가·셀이 아직 running — 끝난 잡의 워커가 놓기를 기다린다) · 409 panel_job_running · 409 repersist_pending · 422 units_absent(활성 빌드가 ok·oversize 가 아니다) · 422 scope_invalid · 422 scope_empty ·
-    409 review_too_large(높은 끝 추정이 HWAXRISK_REVIEW_MAX_CALLS 초과) · 422 consent_required(HWAXRISK_REVIEW_CONSENT_CALLS 초과인데
-    consent 가 없다) · 422 pat_unavailable(쓸 사용자 PAT 가 없다 — 포털에서 PAT 를 등록한다, 서비스 계정으로 내려가지 않는다).
+    409 review_too_large(기대 호출 수 추정 `calls_estimate.expected` 가 HWAXRISK_REVIEW_MAX_CALLS 초과) · 422 consent_required(그
+    추정이 HWAXRISK_REVIEW_CONSENT_CALLS 초과인데 consent 가 없다) · 422 pat_unavailable(쓸 사용자 PAT 가 없다 — 포털에서 PAT 를 등록한다, 서비스 계정으로 내려가지 않는다).
     입력 결손 전문가(ECAD 에 기대는데 ECAD 가 없다)도 범위에 받는다(재설계 M3 C3-2 — 그 셀은 입력 결손 호출로 닫힌다). 카드 대조
     대상(`flow='cells'`)이면 범위 안 전문가의 보류(`deferred` · `ecad_absent`) 좌석을 같은 트랜잭션에서 pending 으로 풀고 감사 한 행을
     남긴다(풀지 않으면 원장 마감이 그 행을 건드리지 않아 종결 어휘로 남는다 — 거짓 완결). 패널 대상에 얹은 검토는 풀지 않는다.
     반환 {job_id, mode, cells_total, cells_in_scope, experts_in_scope, units, calls_estimate{low, expected, high, basis},
-    credential{kind, email, exp}, undeferred, credential_note?}. 높은 끝 추정 소요(호출 × 300초 ÷ 동시 수)가 PAT 남은 수명보다 길거나
+    credential{kind, email, exp}, undeferred, credential_note?}. 추정 소요(기대 호출 수 × 300초 ÷ 동시 수)가 PAT 남은 수명보다 길거나
     요청자 PAT 를 수명 때문에 건너뛰었으면 `credential_note` 로 미리 알린다. `channel`·`actor_verified` 는 보류 해제 감사 행의 입구다.
     `cells`([[unit_id, agent_key], …])를 주면 범위의 전문가 × 단위 대신 그 셀만 이 잡에 묶고(상태와 상관없이 · 머리는 찍지 않는다)
     추정도 그 가운데 pending 인 셀로만 센다 — 처분(넘김 · 다시)이 세우는 잡이 그 처분의 셀만 묶는다(M3 묶음 검토 M5 · D-52 · M3C-80).
