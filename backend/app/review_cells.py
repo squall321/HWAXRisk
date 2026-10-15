@@ -419,6 +419,14 @@ def claim_next_expert(store: Any, job: Mapping[str, Any] | None = None, *, boot_
     return None
 
 
+def claim_for_refresh(store: Any, target_key: str, agent_key: str, *, lease_owner: str, now: int | None = None) -> bool:
+    """`planned` 머리 하나를 보고서를 다시 짓기 위해 쥔다(planned → running) — 동의를 기다리다 취소된 잡이 다시 연 전문가(M3 묶음 검토
+    L8 · D-52, `review_runner.refresh_after_cancel`). 쥐었으면 True."""
+    now = now_epoch() if now is None else now
+    return bool(_move(store, "expert", "planned", "running", where=_head_where(), params=(target_key, agent_key),
+                      sets={"lease_owner": lease_owner, "claimed_at": now, "error": None}, now=now))
+
+
 def _holds(store: Any, target_key: str, agent_key: str, lease_owner: str) -> bool:
     """그 선점이 아직 그 전문가를 쥐고 있나(running · 같은 lease_owner)."""
     row = store.query_one("SELECT 1 FROM rr_expert_reports WHERE target_key = ? AND agent_key = ? AND state = 'running'"
