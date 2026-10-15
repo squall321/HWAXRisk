@@ -103,6 +103,21 @@ def _snapshot_of(store, project_id: str) -> str:
     return store.query_one("SELECT id FROM rr_snapshots WHERE project_id = ?", (project_id,))["id"]
 
 
+def _finding(store, finding_id: str, target_key: str, project_id: str, owner: str, cluster_key: str) -> None:
+    """패턴 원자 하나 — learning.collect_atoms 가 읽는 칸만."""
+    store.execute(
+        "INSERT INTO rr_findings(finding_id, claim_uid, target_key, panel_id, project_id, owner_sub, direction, subject_key,"
+        " cluster_key, finding_json, status, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (finding_id, finding_id, target_key, f"pan-{finding_id}", project_id, owner, "risk", "ck:pattern", cluster_key,
+         json.dumps({"claim": f"{finding_id} 의 주장"}), "open", 1))
+
+
+def _pattern(store, pattern_id: str, owner: str, cluster_key_norm: str, visibility: str) -> None:
+    store.execute(
+        "INSERT INTO rr_patterns(id, owner_sub, visibility, cluster_key_norm, status, n_projects, precision, created_at,"
+        " updated_at) VALUES (?,?,?,?,?,?,?,?,?)", (pattern_id, owner, visibility, cluster_key_norm, "candidate", 2, 0.5, 1, 1))
+
+
 @pytest.fixture
 def world(risk_store, monkeypatch):
     """주인 쪽 원장 — 주인의 과제 P(심사 대상) · P-1~P-4, 주인이 viewer 인 동료의 과제 SHARED, 의견 둘, P 의 subject 위 주인의 등록부 행과
@@ -122,7 +137,7 @@ def world(risk_store, monkeypatch):
     _registry(store, mine_target, OWNER, "clu-mine", subject)
     _registry(store, shared_target, COLLEAGUE, "clu-shared-private", subject)
     return {"store": store, "project": project, "target": _target(store, snapshot, OWNER), "mine": mine,
-            "shared": shared, "subject": subject}
+            "shared": shared, "subject": subject, "mine_target": mine_target}
 
 
 def _add_stranger(world: dict) -> dict:
@@ -302,3 +317,30 @@ def test_aidatahub_recall_is_skipped_without_a_project_filter_and_carries_one_ot
     assert sorted({name for name, _kwargs in filtered.calls}) == ["agent_search", "hybrid_search"]
     assert [kwargs.get("project_ids") for _name, kwargs in filtered.calls] == [visible] * len(filtered.calls)
     assert _item(built, "E7")["result"].split("\n")[3].startswith("narr:op-adh#pan-adh#F1 | mech-syn-2 | adh/")
+
+
+# ---------------------------------------------------------------- 선례 패턴 후보(D47 — 패턴도 주인 ∩ 부른 사람)
+def test_precedent_patterns_come_only_from_projects_both_the_owner_and_the_caller_can_see(world, monkeypatch):
+    """선례의 pattern_candidates 는 주인의 패턴이나 조직 공개로 연 패턴이고, 조직 공개가 아니면 그 패턴을 이룬 과제(원자의 과제)가 모두
+    주인과 부른 사람 둘 다 볼 수 있는 과제다 — 남의 비공개 패턴은 누구에게도, 주인만 보는 과제가 섞인 패턴은 그 과제를 못 보는 구성원에게
+    드러나지 않는다. 조직 공개 패턴은 그대로다."""
+    store, project, mine = world["store"], world["project"], world["mine"]
+    for seen_by_member in (project, mine[0]):
+        _members(seen_by_member, OWNER, MEMBER)
+    hidden_target = _target(store, _snapshot_of(store, mine[1]), OWNER)
+    stranger = _add_stranger(world)
+    _finding(store, "f-a", world["mine_target"], mine[0], OWNER, "cl-a")          # 구성원도 보는 과제의 원자뿐
+    _finding(store, "f-b1", world["mine_target"], mine[0], OWNER, "cl-b")
+    _finding(store, "f-b2", hidden_target, mine[1], OWNER, "cl-b")                # 주인만 보는 과제의 원자가 섞였다
+    _finding(store, "f-x", stranger["target"], stranger["project"], STRANGER, "cl-x")
+    for pattern_id, owner, norm, visibility in (("P-A", OWNER, "cl-a", "private"), ("P-B", OWNER, "cl-b", "private"),
+                                                ("P-O", STRANGER, "cl-o", "org"), ("P-X", STRANGER, "cl-x", "private")):
+        _pattern(store, pattern_id, owner, norm, visibility)
+    diff_id = factories.make_diff(store, _snapshot_of(store, mine[0]), _snapshot_of(store, project))["diff_id"]
+
+    def patterns(email: str) -> list[str]:
+        factories.act_as_delegate(monkeypatch, email)
+        return [p["pattern_id"] for p in srv.risk_get_precedents(diff_id=diff_id)["pattern_candidates"]]
+
+    assert patterns(MEMBER) == ["P-A", "P-O"]
+    assert patterns(OWNER) == ["P-A", "P-B", "P-O"]

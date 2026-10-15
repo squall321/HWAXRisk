@@ -2706,7 +2706,8 @@ def precedents(store, diff_id: str, *, owner_sub: str | None = None, caller_proj
     """ComparePage '선례' 패널과 E5·E8 의 원천(plan §5.7 두 번째 행).
 
     다른 과제의 등록부 행(clusters)은 owner_sub 의 것 또는 조직 공개로 연 행이고, 조직 공개가 아닌 행은 diff 소유자가 구성원인 과제의
-    것만이다. `caller_projects`(MCP 로 실제로 부른 사람이 볼 수 있는 과제)를 주면 그 안으로 더 좁힌다(D46).
+    것만이다. `caller_projects`(MCP 로 실제로 부른 사람이 볼 수 있는 과제)를 주면 그 안으로 더 좁힌다(D46). 패턴 후보도 같은 규칙이다
+    (`_visible_patterns`, D47).
     """
     # 남의 diff 는 없는 diff 와 같다 — 그 diff 의 스냅샷(subject · 규칙 적중)을 읽어 주지 않는다(REST GET /precedents 는 소유를 보지
     # 않았다 — review1 남 숨김 훑기 둘째). MCP 는 범위를 본 뒤 그 행의 소유자로 부른다.
@@ -2754,15 +2755,26 @@ def precedents(store, diff_id: str, *, owner_sub: str | None = None, caller_proj
     hits = _j(state["rule_hits_json"], []) if state is not None else []
     if isinstance(hits, dict):
         hits = hits.get("hits") or []
-    patterns = [{k: row[k] for k in ("id", "status", "n_projects", "precision")}
-                for row in store.query(
-                    "SELECT id, status, n_projects, precision FROM rr_patterns "
-                    "WHERE status IN ('candidate','known') ORDER BY id")]
+    patterns = _visible_patterns(store, owner_sub or _s(diff["owner_sub"]), visible)
     return {"delta_priors": delta_priors, "clusters": clusters,
             "rule_hits": hits if isinstance(hits, list) else [],
             "pattern_candidates": [{"pattern_id": p["id"], "status": p["status"],
                                     "n_projects": p["n_projects"], "precision": p["precision"]}
                                    for p in patterns]}
+
+
+def _visible_patterns(store, owner: str, visible: set[str]) -> list:
+    """선례의 패턴 후보 — 그 소유자의 패턴 또는 조직 공개로 연 패턴(라우트의 패턴 목록과 같은 거름)이고, 조직 공개가 아니면 그
+    패턴을 이룬 과제(그 소유자 원자의 과제)가 모두 보는 과제(`visible`) 안이어야 한다(D47). 종전에는 모든 소유자의 패턴을 실었다."""
+    from app import learning  # noqa: PLC0415 — learning 은 brief 를 import 하지 않는다.
+
+    rows = store.query(
+        "SELECT id, status, n_projects, precision, visibility, cluster_key_norm FROM rr_patterns "
+        "WHERE status IN ('candidate','known') AND (owner_sub = ? OR visibility = 'org') ORDER BY id", (owner,))
+    private = sorted({_s(row["cluster_key_norm"]) for row in rows if row["visibility"] != "org"})
+    atoms = learning.collect_atoms(store, norms=private, owner_sub=owner) if private else {}
+    return [row for row in rows if row["visibility"] == "org"
+            or {_s(atom["project_id"]) for atom in atoms.get(_s(row["cluster_key_norm"]), [])} <= visible]
 
 
 def _target_project(store, target_key: str) -> str | None:
