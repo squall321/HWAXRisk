@@ -890,8 +890,9 @@ def test_a_human_retry_keeps_the_sample_marker_so_a_rerun_miss_still_widens_and_
     fake.noinput_q1[audit_unit] = ["no"]
     r.finish(out["job"]["job_id"])
     assert _cell(store, key, audit_unit, MEM2)["sample_json"]["filter_audit"]["result"] == "kept"
-    _assert_one_miss(store, key, MEM2)
-    # ④ 다시 연 셀이 정산 전에 다른 입력으로 시작하면(start_cell 이 처음부터) 앞 결과(was)가 따라간다 — 넓힘도 놓침 셈도 그대로다
+    _assert_one_miss(store, key, MEM2, sampled=1)
+    # ④ 다시 연 셀이 정산 전에 다른 입력으로 시작하면(start_cell 이 처음부터) 앞 결과(was)가 따라간다 — 넓힘도 놓침 셈도 그대로다.
+    # 표지는 지워져 그 셀은 결과를 낸 표본이 아니다 — 바닥(sampled)에는 들지 않고 놓침 수와 비율의 분모에만 든다(3차 LOW 4 · D-47)
     out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[audit_unit, MEM2]], force=True,
                                                              reason="입력이 바뀐 뒤 다시 본다"), ident=factories.ident(rig.OWNER))
     store.execute("UPDATE rr_review_cells SET input_hash = 'stale-input' WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
@@ -901,17 +902,18 @@ def test_a_human_retry_keeps_the_sample_marker_so_a_rerun_miss_still_widens_and_
     assert cell["state"] in ("reviewed", "no_input") and (cell["sample_json"] or {}).get("was") == {
         "filter_audit": ["risk_miss", "kept"]}
     assert "mem" in review_cells.widened_domains(store, key)
-    _assert_one_miss(store, key, MEM2)
+    _assert_one_miss(store, key, MEM2, sampled=0)
 
 
-def _assert_one_miss(store, key: str, agent: str) -> None:
-    """놓침 하나 — 완결 몫(거름 표본) · 품질 수치 · 전문가 보고서 머리가 같은 셈이다."""
+def _assert_one_miss(store, key: str, agent: str, *, sampled: int) -> None:
+    """놓침 하나 — 완결 몫(거름 표본) · 품질 수치 · 전문가 보고서 머리가 같은 셈이다. 표본 수는 결과를 낸 표본(지금 표지에 결과가
+    있다)이고 비율의 분모는 그 수에 결과를 아직 못 낸 놓침을 더한다(3차 LOW 4 · D-47)."""
     from app import expert_report, review_quality
 
     audit = review_cells.closure_cells(store, key)["filtered"]["audit"]
-    assert (audit["sampled"], audit["risk_miss"]) == (1, 1)
+    assert (audit["sampled"], audit["risk_miss"]) == (sampled, 1)
     quality = review_quality.compute(store, key)["filter"]["audit"]
-    assert (quality["sampled"], quality["counts"]["risk_miss"]) == (1, 1)
+    assert (quality["sampled"], quality["counts"]["risk_miss"], quality["risk_miss"]["den"]) == (sampled, 1, 1)
     head = expert_report.load_report(store, key, agent)["head"]["filter"]
     assert head["risk_miss"] == 1
 
@@ -945,17 +947,59 @@ def test_an_audit_that_never_produced_a_result_does_not_meet_the_floor(store, mo
     assert residual["blocking"] is True
 
 
-def test_a_sample_whose_marker_an_input_change_cleared_still_counts_in_the_top_up_and_closure(store, monkeypatch):
-    """반대 검토 2차 LOW 6 · MEDIUM 4 — 입력이 바뀌어 표지가 지워진 셀(앞 결과만 sample_json.was 에 남는다)의 표본 결과는 잡 끝 보충
-    표본과 완결 몫이 똑같이 센다 — 둘이 다르게 세면 바닥을 두고 갈린다(MEDIUM 4 가 막으려던 것)."""
+@pytest.mark.parametrize("was", ["kept", "relevance_miss", "risk_miss"])
+def test_a_sample_whose_marker_an_input_change_cleared_counts_only_an_earlier_miss(store, monkeypatch, was):
+    """반대 검토 2차 LOW 6 · MEDIUM 4 · 3차 LOW 4 · D-47 — 입력이 바뀌어 표지가 지워진 셀(앞 결과만 sample_json.was 에 남는다)은 결과를
+    낸 표본이 아니다 — 결과를 낸 표본은 지금 표지에 결과가 있는 것이고, 잡 끝 보충 표본 · 완결 몫 · 품질이 똑같이 바닥에 세지 않는다
+    (셋이 다르게 세면 바닥을 두고 갈린다 — 2차 MEDIUM 4). 앞 결과는 놓침만 센다 — 놓침이면 놓침 수와 비율의 분모에 들고(놓침 증거는
+    쌓이기만 한다), 놓침이 아니면 어디에도 세지 않는다(보고서도 그 셀을 '표본으로 끝까지 봄' 으로 적지 않는다)."""
+    from app import expert_report, review_quality
+
     key, _job, kinds, r, gate, _fake = _filtered_mid_job(store, monkeypatch)
-    store.execute("UPDATE rr_review_cells SET sample_json = json_object('was', json_object('filter_audit', json_array('kept')))"
-                  " WHERE target_key = ? AND unit_id = ? AND agent_key = ?", (key, kinds["global"], STD1))
-    out = review_cells.audit_topup(store, key, "another-job", audit_pct=0, salt="s")
+    store.execute("UPDATE rr_review_cells SET sample_json = json_object('was', json_object('filter_audit', json_array(?)))"
+                  " WHERE target_key = ? AND unit_id = ? AND agent_key = ?", (was, key, kinds["global"], STD1))
+    miss = int(was == "risk_miss")
     closure_audit = review_cells.closure_cells(store, key)["filtered"]["audit"]
-    assert (out["n"], out["sampled"], closure_audit["sampled"], closure_audit["kept"]) == (2, 1, 1, 1)
+    quality = review_quality.compute(store, key)["filter"]["audit"]
+    out = review_cells.audit_topup(store, key, "another-job", audit_pct=0, salt="s")
+    assert (out["n"], out["sampled"], closure_audit["sampled"], quality["sampled"]) == (1 + miss, 0, 0, 0)
+    assert ({k: closure_audit[k] for k in review_cells.AUDIT_RESULTS}, quality["counts"]) == (
+        {"risk_miss": miss, "relevance_miss": 0, "undetermined": 0, "kept": 0},) * 2
+    assert quality["risk_miss"]["den"] == miss and (closure_audit["upper95"] is None) is not bool(miss)
+    head = expert_report.build_report(store, key, STD1)["head"]["filter"]
+    assert (head["audited"], head["risk_miss"]) == (miss, miss)
     gate.set()
     r.loop.join(30)
+
+
+def test_a_refiltered_cell_with_only_an_earlier_non_miss_result_never_fills_the_floor(store, monkeypatch):
+    """반대 검토 3차 LOW 4 · D-47(재현 D) — 잡 끝 보충 표본으로 끝까지 본 셀(놓침이 아닌 결과)을 사람이 강제로 다시 열고 정산 전에 입력이
+    바뀌면 표지가 지워져 그 셀은 다시 걸러진다(앞 결과만 was 에 남는다). 놓침이 아닌 앞 결과는 그 셀을 결과를 낸 표본으로 만들지
+    않는다 — 그 잡 끝 보충 표본이 바닥을 다시 채워 그 셀을 새 표본으로 끝까지 본다. 종전에는 앞 결과로 바닥이 찼다고 보아 아무것도
+    다시 열지 않았고(완결 몫 floor_met 참 · 보충 0), 보고서는 거른 셀을 '표본으로 끝까지 봄 — 결과 «relevance_miss»' 로 적었다."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    key = rig.target(store, SMALL)
+    fake = _fake(SMALL)
+    kinds = _units(store, key)
+    _quiet(fake, kinds["boundary"], kinds["global"])
+    b = kinds["boundary"]
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [STD1]}))
+    r.finish(rig.job(store, key, scope={"agents": [STD2]}))         # std 2순위가 b 를 거르고 잡 끝 보충 표본이 b 를 끝까지 본다
+    first = _cell(store, key, b, STD2)["sample_json"]["filter_audit"]
+    assert first["result"] in review_cells.AUDIT_RESULTS and first["result"] != "risk_miss"
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[b, STD2]], force=True, reason="표본을 다시 본다"),
+                                  ident=factories.ident(rig.OWNER))
+    store.execute("UPDATE rr_review_cells SET input_hash = 'stale-input' WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+                  (key, b, STD2))                                   # 다시 연 셀이 정산 전에 다른 입력으로 시작한다(처음부터)
+    r.finish(out["job"]["job_id"])
+    cell = _cell(store, key, b, STD2)
+    assert (cell["state"], cell["route_forced"]) == ("reviewed", review_cells.FILTER_FLOOR)
+    assert cell["sample_json"]["filter_audit"]["result"] in review_cells.AUDIT_RESULTS
+    assert cell["sample_json"]["was"] == {"filter_audit": [first["result"]]}
+    audit = review_cells.closure_cells(store, key)["filtered"]["audit"]
+    assert (audit["sampled"], audit["n_audit"], audit["floor_met"]) == (1, 1, True)               # 새 결과로 바닥이 찼다
 
 
 def test_an_audit_closed_without_a_result_is_replaced_by_the_next_top_up(store, monkeypatch):

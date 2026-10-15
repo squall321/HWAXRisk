@@ -710,23 +710,36 @@ def _carried_history(sample_json: Any) -> str | None:
 
 
 def sample_outcomes(sample_json: Any) -> dict[str, dict]:
-    """표본 · 그림자의 실효 결과(반대 검토 2차 LOW 6 · D-46 — 놓침 증거는 쌓이기만 한다) — {종류: {marked, result, picked_by}}. 지금
-    표지가 있거나 앞 결과가 있는 종류만 싣는다. result 는 지금 결과나 앞 결과 가운데 risk_miss 가 하나라도 있으면 risk_miss, 아니면
-    지금 결과, 지금 결과가 없으면 마지막 앞 결과, 아무것도 없으면 None(아직). 완결 몫 · 품질 · 보고서가 넓힘(`widened_domains`)과
-    같은 셈을 읽는다."""
+    """표본 · 그림자의 실효 결과 — {종류: {marked, settled, result, picked_by}}. 지금 표지가 있거나 앞 결과에 놓침(risk_miss)이 있는
+    종류만 싣는다. 앞 결과(`was`)는 놓침만 센다 — 놓침 증거는 쌓이기만 하고(반대 검토 2차 LOW 6 · D-46), 놓침이 아닌 앞 결과는 다시
+    걸러진 셀을 결과를 낸 표본으로 만들지 않는다(3차 LOW 4 · D-47). settled 는 지금 표지에 결과가 있다는 것이다(바닥은 이것만 센다).
+    result 는 지금 결과나 앞 결과에 놓침이 있으면 risk_miss, 아니면 지금 결과, 지금 결과가 없으면 None(아직). 완결 몫 · 품질 · 보고서 ·
+    잡 끝 보충 표본이 넓힘(`widened_domains`)과 같은 셈을 읽는다(셈은 `sample_tally`)."""
     sample = _sample_of(sample_json)
     history = _history(sample)
     out: dict[str, dict] = {}
     for key in SAMPLE_RESULT_KEYS:
         marker = sample.get(key) if isinstance(sample.get(key), Mapping) else None
         now = str(marker["result"]) if marker is not None and marker.get("result") else None
-        seen = [*history.get(key, ()), *([now] if now else [])]
-        if marker is None and not seen:
+        missed = now == "risk_miss" or "risk_miss" in history.get(key, ())
+        if marker is None and not missed:
             continue
-        result = "risk_miss" if "risk_miss" in seen else now or (seen[-1] if seen else None)
-        out[key] = {"marked": marker is not None, "result": result,
+        out[key] = {"marked": marker is not None, "settled": now in AUDIT_RESULTS, "result": "risk_miss" if missed else now,
                     "picked_by": marker.get("picked_by") if marker is not None else None}
     return out
+
+
+def sample_tally(outcomes: Iterable[Mapping[str, Any] | None]) -> dict:
+    """표본 · 그림자 셈(반대 검토 3차 LOW 4 · D-47) — 완결 몫과 품질이 같은 수를 낸다. sampled 는 결과를 낸 표본(지금 표지에 결과가
+    있다 — 바닥이 세는 수)이고, counts 는 결과별이다 — 놓침은 결과를 아직 못 낸 표본의 앞 놓침까지, 그 밖의 결과는 결과를 낸 표본만.
+    n 은 비율의 분모다 — 결과를 낸 표본에 결과를 아직 못 낸 놓침을 더한다(놓침 수가 분모를 넘지 않는다)."""
+    rows = [o for o in outcomes if o]
+    settled = [o for o in rows if o["settled"]]
+    counts = Counter(str(o["result"]) for o in settled)
+    unsettled_miss = sum(1 for o in rows if not o["settled"] and o["result"] == "risk_miss")
+    counts["risk_miss"] += unsettled_miss
+    return {"sampled": len(settled), "n": len(settled) + unsettled_miss,
+            "counts": {k: counts.get(k, 0) for k in AUDIT_RESULTS}}
 
 
 def filter_off(store: Any, target_key: str) -> bool:
@@ -820,8 +833,8 @@ def widen(store: Any, target_key: str, domain: str, *, run_id: str | None = None
 def audit_topup(store: Any, target_key: str, job_id: str, *, audit_pct: float, salt: str, now: int | None = None) -> dict:
     """잡 끝 보충 표본(m3-cells 3.4) — 거를 수 있던 셀(거름 + 표본)의 수 N 에서 `n_audit = max(ceil(audit_pct% × N), min(N, 59))`
     와 거른 셀이 있는 영역마다 1건을 채울 때까지, 그 잡이 분류한 거른 셀을 `sample_score('filter_audit')` 오름차순으로 다시 연다
-    (filter_floor — 영역 바닥이 먼저다). 바닥은 결과를 낸 표본과 아직 결과를 낼 수 있는 표본(도는 것 · 사람의 처분을 기다리는
-    실패 — 다시 하면 표지가 남아 결과를 낸다)만 센다. 결과 없이 닫힌 표본(넘긴 것)은 세지 않고 그 자리를 채운다(반대 검토 2차
+    (filter_floor — 영역 바닥이 먼저다). 바닥은 결과를 낸 표본(지금 표지에 결과가 있다 — 앞 결과만 남은 셀은 아니다, 3차 LOW 4)과
+    아직 결과를 낼 수 있는 표본(도는 것 · 사람의 처분을 기다리는 실패 — 다시 하면 표지가 남아 결과를 낸다)만 센다. 결과 없이 닫힌 표본(넘긴 것)은 세지 않고 그 자리를 채운다(반대 검토 2차
     MEDIUM 4 · D-46 — 완결 몫은 결과를 낸 것만 센다). 실패를 곧바로 채우지 않는 것은 실패가 그 전문가의 같은 까닭이면 영역의 거른
     셀을 차례로 실패로 바꾸기 때문이다. 그 잡 범위 밖이라 못 채운 수는 `short` 로 남는다(완결 몫이 floor_met 로 낸다).
     반환 {n, n_audit, sampled, need, reopened, short, domains_short}."""
@@ -831,13 +844,13 @@ def audit_topup(store: Any, target_key: str, job_id: str, *, audit_pct: float, s
     rows = []
     for r in store.query("SELECT unit_id, agent_key, domain, state, run_id, route, sample_json FROM rr_review_cells"
                          " WHERE target_key = ?", (target_key,)):
-        # 표본의 실효 결과 — 앞 결과(was)까지 본다, 완결 몫과 같은 셈(반대 검토 2차 LOW 6 · D-46)
+        # 표본의 실효 결과 — 앞 결과(was)는 놓침만 본다, 완결 몫과 같은 셈(반대 검토 2차 LOW 6 · D-46 · 3차 LOW 4 · D-47)
         audit = sample_outcomes(r["sample_json"]).get("filter_audit")
         if r["route"] in (FILTERED, "audit") or audit is not None:
             rows.append({**{k: r[k] for k in ("unit_id", "agent_key", "domain", "state", "run_id")}, "audit": audit})
     filtered = [r for r in rows if r["state"] == "na_irrelevant"]
     marked = [r for r in rows if r["audit"] is not None]
-    audited = [r for r in marked if r["audit"]["result"] in AUDIT_RESULTS
+    audited = [r for r in marked if r["audit"]["settled"]
                or (r["audit"]["marked"] and r["state"] in (*OPEN_CELL_STATES, "failed"))]
     n = len({id(r) for r in filtered + marked})
     if not filtered:
@@ -1523,29 +1536,28 @@ def closure_cells(store: Any, target_key: str) -> dict:
         " json_extract(extras_json, '$.offcard.search.search_failed') AS search_failed"
         " FROM rr_review_cells WHERE target_key = ?", (target_key,)) if r["unit_id"] in active]
     for r in rows:
-        # 표본 · 그림자의 실효 결과 — 앞 결과의 놓침까지 센다(반대 검토 2차 LOW 6 · D-46, 넓힘과 같은 셈)
+        # 표본 · 그림자의 실효 결과 — 앞 결과는 놓침만 세고 바닥은 지금 표지에 결과가 있는 것만 센다(2차 LOW 6 · 3차 LOW 4 · D-47)
         outcomes = sample_outcomes(r.pop("sample_json"))
-        r.update(audited=int("filter_audit" in outcomes), audit_result=(outcomes.get("filter_audit") or {}).get("result"),
-                 shadowed=int("shadow" in outcomes), shadow_result=(outcomes.get("shadow") or {}).get("result"))
+        r.update(audit=outcomes.get("filter_audit"), shadow=outcomes.get("shadow"))
     by_state = Counter(r["state"] for r in rows)
     by_basis = Counter(r["basis"] for r in rows if r["state"] == "reviewed")
     failed_codes = Counter(r["error_code"] or "unknown" for r in rows if r["state"] == "failed")
     skipped = [r for r in rows if r["state"] == "skipped"]
     notes = Counter((r["decide_note"] or "", r["decided_by"] or "") for r in skipped)
     filtered = [r for r in rows if r["state"] == "na_irrelevant"]
-    audited = [r for r in rows if r["audited"]]
-    settled = [r for r in audited if r["audit_result"] in AUDIT_RESULTS]
-    results = Counter(r["audit_result"] for r in settled)
-    shadows = [r for r in rows if r["shadowed"]]
-    shadow_done = [r for r in shadows if r["shadow_result"] in AUDIT_RESULTS]
-    shadow_miss = sum(1 for r in shadow_done if r["shadow_result"] == "risk_miss")
+    audited = [r for r in rows if r["audit"]]
+    settled = [r for r in audited if r["audit"]["settled"]]
+    tally = sample_tally(r["audit"] for r in audited)
+    shadows = [r for r in rows if r["shadow"]]
+    shadow_tally = sample_tally(r["shadow"] for r in shadows)
     by_domain: dict[str, dict[str, int]] = {}
     for r in {id(r): r for r in filtered + audited}.values():       # 앞 결과만 남은 거른 셀은 한 번만 센다
         cell = by_domain.setdefault(str(r["domain"]), {"filtered": 0, "audited": 0, "settled": 0})
         cell["filtered" if r["state"] == "na_irrelevant" else "audited"] += 1
         cell["settled"] += int(r in settled)
-    # 결과를 내지 못한 표본 — 아직 도는 것(대기)과 끝내 실패 · 넘김으로 닫힌 것(실패)을 가른다(반대 검토 MEDIUM 6)
-    unsettled = [r for r in audited if r["audit_result"] not in AUDIT_RESULTS]
+    # 결과를 내지 못한 표본 — 아직 도는 것(대기)과 끝내 실패 · 넘김으로 닫힌 것(실패)을 가른다(반대 검토 MEDIUM 6). 표지가 지워져
+    # 앞 놓침만 남은 셀은 표본이 아니다(놓침 수와 분모에만 든다 — 3차 LOW 4)
+    unsettled = [r for r in audited if r["audit"]["marked"] and not r["audit"]["settled"]]
     audit_open = sum(1 for r in unsettled if r["state"] in OPEN_CELL_STATES)
     job = _latest_review_job(store, target_key)
     knobs = (json.loads(job["params_json"] or "{}").get("knobs") or {}) if job is not None and job.get("params_json") else {}
@@ -1554,7 +1566,7 @@ def closure_cells(store: Any, target_key: str) -> dict:
     n_audit = max(math.ceil(pct / 100.0 * population), min(population, AUDIT_MIN_N)) if population else 0
     # 바닥은 결과를 낸 표본만 센다 — 전체와 영역마다(반대 검토 MEDIUM 6 — 실패한 표본을 세면 표본 0 인 거름이 막지 않았다)
     floor_met = len(settled) >= n_audit and all(v["settled"] >= AUDIT_DOMAIN_FLOOR for v in by_domain.values())
-    risk = results.get("risk_miss", 0)
+    risk = tally["counts"]["risk_miss"]
     gap = [r for r in rows if r["basis"] == NOINPUT and r["state"] in ("reviewed", "no_input")]
     held = store.query(
         "SELECT unit_id, agent_key FROM rr_card_verdicts WHERE target_key = ? AND is_effective = 1"
@@ -1574,12 +1586,13 @@ def closure_cells(store: Any, target_key: str) -> dict:
         "filtered": {
             "n": len(filtered), "would_filter": sum(1 for r in rows if r["rule"] == "both_unrelated"),
             "by_domain": dict(sorted(by_domain.items())),
-            "audit": {"sampled": len(settled), "pending": audit_open, "failed": len(unsettled) - audit_open, "n_audit": n_audit,
-                      "floor_met": floor_met, **{k: results.get(k, 0) for k in AUDIT_RESULTS},
-                      "upper95": _rate_upper(risk, len(settled)),
-                      "upper95_conservative": _rate_upper(risk + results.get("undetermined", 0), len(settled))},
-            "shadow": {"would_filter": len(shadows), "sampled": len(shadow_done), "risk_miss": shadow_miss,
-                       "upper95": _rate_upper(shadow_miss, len(shadow_done))},
+            "audit": {"sampled": tally["sampled"], "pending": audit_open, "failed": len(unsettled) - audit_open,
+                      "n_audit": n_audit, "floor_met": floor_met, **tally["counts"],
+                      "upper95": _rate_upper(risk, tally["n"]),
+                      "upper95_conservative": _rate_upper(risk + tally["counts"]["undetermined"], tally["n"])},
+            "shadow": {"would_filter": len(shadows), "sampled": shadow_tally["sampled"],
+                       "risk_miss": shadow_tally["counts"]["risk_miss"],
+                       "upper95": _rate_upper(shadow_tally["counts"]["risk_miss"], shadow_tally["n"])},
             "widened": widened_domains(store, target_key), "off": filter_off(store, target_key)},
         "no_input": {"experts": len({r["agent_key"] for r in gap}), "cells": len(gap),
                      "by_outcome": {o: sum(1 for r in gap if r["noinput_outcome"] == o) for o in NOINPUT_OUTCOMES}},

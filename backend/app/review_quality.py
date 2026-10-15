@@ -173,10 +173,9 @@ def _load(store: Any, target_key: str, agent_key: str | None) -> dict:
         " json_extract(extras_json, '$.noinput.capped') AS noinput_capped FROM rr_review_cells"
         f" WHERE target_key = ?{extra} ORDER BY agent_key, unit_id", [target_key, *params]) if r["unit_id"] in alive]
     for cell in cells:
-        # 표본 · 그림자의 실효 결과 — 앞 결과의 놓침까지 센다(반대 검토 2차 LOW 6 · D-46 — 완결 몫 · 넓힘과 같은 셈)
+        # 표본 · 그림자의 실효 결과 — 앞 결과는 놓침만 센다(반대 검토 2차 LOW 6 · 3차 LOW 4 · D-47 — 완결 몫 · 넓힘과 같은 셈)
         outcomes = review_cells.sample_outcomes(cell.pop("sample_json"))
-        cell.update(audited=int("filter_audit" in outcomes), audit_result=(outcomes.get("filter_audit") or {}).get("result"),
-                    shadowed=int("shadow" in outcomes), shadow_result=(outcomes.get("shadow") or {}).get("result"))
+        cell.update(audit=outcomes.get("filter_audit"), shadow=outcomes.get("shadow"))
     verdicts = [r for r in _rows(store,
         "SELECT unit_id, agent_key, record_id, variant, applies, judgement, quote_ok, refs_ok, check_disagree, is_effective,"
         " agree, split, json_type(checks_json, '$.flipped_from') IS NOT NULL AS flipped_row,"
@@ -481,23 +480,22 @@ def _filter(data: Mapping[str, Any], policy: Mapping[str, Any]) -> dict:
     """거르기(재설계 M3 C3-8) — 잡 손잡이 · 거를 수 있던 칸(두 신호 무관) · 거른 칸 · 표본(끝까지 본 칸의 놓침 넷과 놓침 비율의 95%
     상한 · 보수 상한 — 기준 rq-2 의 filter.audit.risk_miss) · 대표 그림자(따로 센다 — 무작위 표본이 아니다)."""
     cells = data["cells"]
-    audited = [c for c in cells if c["audited"] and c["audit_result"]]
-    results = Counter(c["audit_result"] for c in audited)
-    shadows = [c for c in cells if c["shadowed"] and c["shadow_result"]]
-    shadow_miss = sum(1 for c in shadows if c["shadow_result"] == "risk_miss")
-    risk = results.get("risk_miss", 0)
+    # 완결 몫과 같은 셈 — 표본 수는 결과를 낸 표본, 놓침은 앞 놓침까지, 비율의 분모는 둘을 더한다(반대 검토 3차 LOW 4 · D-47)
+    tally = review_cells.sample_tally(c["audit"] for c in cells)
+    shadows = review_cells.sample_tally(c["shadow"] for c in cells)
+    risk = tally["counts"]["risk_miss"]
     return {
         "mode": data.get("knobs", {}).get("filter") or "off", "approved": data.get("knobs", {}).get("routing_approved"),
         "would_filter": sum(1 for c in cells if c["rule"] == "both_unrelated"),
         "filtered": sum(1 for c in cells if c["state"] == "na_irrelevant"),
-        "audit": {"sampled": len(audited),
-                  "counts": {k: results.get(k, 0) for k in ("risk_miss", "relevance_miss", "undetermined", "kept")},
+        "audit": {"sampled": tally["sampled"], "counts": tally["counts"],
                   # 기준(rq-2)은 거를 수 있던 칸이 있는 범위에서만 견준다 — 거르기가 없던 범위를 '표본 미달' 로 적지 않는다
-                  "risk_miss": rate(risk, len(audited), policy=policy, upper=True,
+                  "risk_miss": rate(risk, tally["n"], policy=policy, upper=True,
                                     key="filter.audit.risk_miss" if any(c["rule"] == "both_unrelated" for c in cells)
                                     else None),
-                  "conservative": rate(risk + results.get("undetermined", 0), len(audited), policy=policy, upper=True)},
-        "shadow": {"sampled": len(shadows), "risk_miss": rate(shadow_miss, len(shadows), policy=policy, upper=True)},
+                  "conservative": rate(risk + tally["counts"]["undetermined"], tally["n"], policy=policy, upper=True)},
+        "shadow": {"sampled": shadows["sampled"],
+                   "risk_miss": rate(shadows["counts"]["risk_miss"], shadows["n"], policy=policy, upper=True)},
     }
 
 
