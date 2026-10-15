@@ -305,6 +305,62 @@ def test_an_extra_cell_run_again_in_the_live_job_is_counted_once_per_run(store, 
     assert (rig.state(store, live), _cells(store, key, PEER)[unit_ids[0]]["state"]) == ("completed", "reviewed")
 
 
+def test_declining_a_cells_second_run_by_skip_keeps_its_first_run_on_the_jobs_reopen_budget(store, monkeypatch):
+    """M3 묶음 검토 L5 · D-52 — 넘겨서 거절은 기다리던 한 번만 몫에서 뺀다. 추정 밖 셀이 살아 있는 잡에서 한 번 돈 뒤(여유 안) 다시 열려
+    여유를 넘으면, 그 셀을 넘겨도 이미 돈 한 번은 몫에 남는다(셀 하나 · 돈 횟수 1 · 5.25)."""
+    from app import units
+
+    monkeypatch.setattr(review_runner, "REOPEN_FLOOR_CALLS", 6, raising=False)
+    monkeypatch.setattr(review_runner, "REOPEN_SHARE", 0.0, raising=False)
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_concurrency=1))
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    fake = FakeReviewEngine(rig.packs())
+    fake.error_cells = {(PEER, unit_ids[0]): NO_ROWS}
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [PEER]}))
+    live = rig.job(store, key, scope={"agents": [SEAL, PEER]})            # 그 셀은 실패라 이 잡의 추정 밖이다
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[unit_ids[0], PEER]]), ident=ME)
+    assert (out["job"]["job_id"], out["job"].get("hold")) == (live, None)                   # 5.25 — 여유(6) 안
+    r.run(lambda: _cells(store, key, PEER)[unit_ids[0]]["state"] == "failed")               # 이 잡에서 또 실패했다
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[unit_ids[0], PEER]]), ident=ME)
+    assert (out["job"]["job_id"], out["job"].get("hold")) == (live, "consent_extra")        # 10.5 — 여유 밖
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": live, "state": "pending"},
+                                                           reason="두 번째 비용에는 동의하지 않는다"), ident=ME)
+    assert (out["skipped"], out["job"].get("resumed")) == (1, True)
+    extra = _extra_of(store, live)
+    assert (extra.get("cells"), extra.get("runs"), extra.get("calls_est"), extra.get("hold")) == (1, 1, 5.25, None)
+
+
+def test_declining_by_skip_never_skips_a_reopened_cell_the_person_already_consented_to(store, monkeypatch):
+    """M3 묶음 검토 M4 · D-52 — 동의를 기다리는 셀은 동의 안 받은 횟수가 남은 셀뿐이다. 사람이 한 번 동의한 다시 연 셀이 아직 돌기 전에
+    다른 셀이 얹혀 다시 consent_extra 로 멈추면, 넘겨서 거절(filter state=pending)은 새로 얹힌 셀만 넘기고 동의받은 셀은 pending 으로
+    남아 잡이 이어 돌 때 돈다."""
+    from app import units
+
+    monkeypatch.setattr(review_runner, "REOPEN_FLOOR_CALLS", 2, raising=False)
+    monkeypatch.setattr(review_runner, "REOPEN_SHARE", 0.0, raising=False)
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    fake = FakeReviewEngine(rig.packs())
+    fake.error_cells = {(PEER, unit_ids[0]): NO_ROWS, (PEER, unit_ids[1]): NO_ROWS}
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [PEER]}))
+    live = rig.job(store, key, scope={"agents": [SEAL, PEER]})            # 실패 셀 둘은 이 잡의 추정 밖이다
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[unit_ids[0], PEER]]), ident=ME)
+    assert (out["job"]["job_id"], out["job"].get("hold")) == (live, "consent_extra")
+    assert routes.job_action(live, "resume", consent=True, ident=ME)["state"] == "queued"   # 사람이 그 몫에 동의했다
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[unit_ids[1], PEER]]), ident=ME)
+    assert (out["job"]["job_id"], out["job"].get("hold")) == (live, "consent_extra")
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": live, "state": "pending"},
+                                                           reason="두 번째 다시의 비용에는 동의하지 않는다"), ident=ME)
+    assert (out["skipped"], out["keys"], out["job"].get("resumed")) == (1, [[unit_ids[1], PEER]], True)
+    assert _cells(store, key, PEER)[unit_ids[0]]["state"] == "pending"
+    fake.error_cells = {}
+    r.finish(live)
+    assert (rig.state(store, live), _cells(store, key, PEER)[unit_ids[0]]["state"]) == ("completed", "reviewed")
+
+
 def _granted(fn, *args, **kwargs):
     """처분 — 거절(AppError)이면 단언 실패다(변이 검사가 '죽음' 으로 세는 실패의 모양)."""
     try:
@@ -348,6 +404,30 @@ def test_a_skip_with_no_live_job_binds_only_the_skipped_cells_and_records_no_con
     assert (_cells(store, key, SEAL)[unit_ids[1]]["state"], _cells(store, key, PEER)[unit_ids[0]]["state"]) == (
         "pending", "pending")
     assert {_head(store, key, a)["state"] for a in (SEAL, PEER)} == {"partial"}                    # 다시 마감됐다(넘김을 실었다)
+
+
+def test_a_skip_job_never_adopts_a_dead_jobs_pending_cells_beside_the_skipped_ones(store):
+    """M3 묶음 검토 M5 · D-52 — 넘김의 마감 잡은 넘긴 셀만 묶으므로, 끝난 잡의 표지를 단 채 놓인 pending 셀(R3A-1 — adopt_released 가
+    거두는 셀)도 넘긴 셀이 아니면 거두지 않는다. 넘긴 셀들의 (전문가, 단위) 곱에 든 셀을 취소된 잡이 묶어 둔 채여도 그 셀은 돌지 않고
+    그 잡의 표지를 그대로 단다."""
+    from app import units
+
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    fake = FakeReviewEngine(rig.packs())
+    fake.error_cells = {(SEAL, unit_ids[0]): NO_ROWS, (PEER, unit_ids[1]): NO_ROWS}
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [SEAL], "unit_ids": unit_ids[:1]}))
+    r.finish(rig.job(store, key, scope={"agents": [PEER], "unit_ids": unit_ids[1:2]}))
+    dead = rig.job(store, key, scope={"agents": [SEAL, PEER], "unit_ids": unit_ids[:2]})   # 교차 셀 둘을 묶고 돌기 전에 취소된다
+    assert routes.job_action(dead, "cancel", ident=ME)["state"] == "cancelled"
+    runs = len(fake.calls("run"))
+    out = _granted(routes.post_cells_skip, key, routes.CellsSkipBody(cells=[[unit_ids[0], SEAL], [unit_ids[1], PEER]],
+                                                                     reason="둘 다 넘긴다"), ident=ME)
+    r.finish(out["job"]["job_id"])
+    assert (rig.state(store, out["job"]["job_id"]), len(fake.calls("run"))) == ("completed", runs)
+    cross = (_cells(store, key, SEAL)[unit_ids[1]], _cells(store, key, PEER)[unit_ids[0]])
+    assert {(c["state"], c["run_id"]) for c in cross} == {("pending", dead)}
 
 
 @pytest.mark.parametrize("health", ["unreadable", "draining"])
