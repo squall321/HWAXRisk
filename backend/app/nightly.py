@@ -312,10 +312,12 @@ def scan_cluster_merge(store: Any, *, now: int, enabled: bool = True) -> dict:
         "SELECT target_key, cluster_key, owner_sub, family_key, subject_key, direction FROM rr_registry"
         " WHERE family_key IS NOT NULL AND status != 'superseded' ORDER BY family_key, cluster_key")
     # direction 을 묶음 키에 넣는다 — 등록부는 risk 와 improvement 를 따로 세우므로(§4.7.1) 그 둘은 중복이 아니다.
-    families: dict[tuple[str, str], dict[str, dict]] = {}
+    # 소유자도 넣는다 — 병합은 두 클러스터를 다 가진 소유자만 하므로(routes 병합 · 별칭) 남의 클러스터와 그 subject 를 내 큐의
+    # 쌍으로 싣지 않는다(D47). 종전에는 같은 family 의 남의 클러스터가 앞 클러스터 주인의 큐에 올랐다.
+    families: dict[tuple[str, str, str], dict[str, dict]] = {}
     for row in rows:
         resolved = learning.resolve_cluster_key(store, str(row["cluster_key"]), _cache=alias_cache)
-        bucket = families.setdefault((str(row["family_key"]), str(row["direction"] or "")), {})
+        bucket = families.setdefault((str(row["family_key"]), str(row["direction"] or ""), str(row["owner_sub"])), {})
         bucket.setdefault(resolved, {
             "cluster_key": resolved, "owner_sub": str(row["owner_sub"]),
             "subject_key": str(row["subject_key"] or ""),
@@ -330,7 +332,7 @@ def scan_cluster_merge(store: Any, *, now: int, enabled: bool = True) -> dict:
     cache: dict[str, dict | None] = {}
     n_pairs = 0
     queued: list[str] = []
-    for (family_key, _direction), members in sorted(families.items()):
+    for (family_key, _direction, _owner), members in sorted(families.items()):
         keys = sorted(members)
         for i, key_a in enumerate(keys):
             for key_b in keys[i + 1:]:
