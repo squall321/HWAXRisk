@@ -1974,6 +1974,31 @@ L1 · L2 · L3 · L9 · L10 과 읽기 경로 가드다(M3 · M4 · M5 · L4~L8 
   가 M3 계약(cr-verdict-2)이라 생기는 기존 실패(test_card_contract_copies · test_card_review_request_contract)이고 수리 전 main 사본에서도
   같다.
 
+### D50. D49 가 남긴 둘 — 반출의 스냅샷 · diff 열쇠 표 거름, 원장 참조는 구성원이 연다(조정자 결정, 2026-10-15)
+
+D-52 는 받아들여졌고 main 핫픽스(12130f9)는 조정자가 push 했다. D49 '고치지 않고 보고' 의 둘을 결정대로 닫는다.
+
+- **반출(①).** 과제 열도 대상 열쇠도 없는 일곱 표(rr_snapshot_calls · rr_ir_nodes · rr_ir_edges · rr_states · rr_gate_acks · rr_diffs ·
+  rr_diff_events)에 M9 와 같은 거름(`_PROJECT_SCOPE_SQL` — 소유자 · 회수 아님 · 코퍼스 제외는 include_excluded 로만)을 그 행의 과제로
+  건다. 스냅샷 열쇠 표는 그 스냅샷의 과제를 따른다. 스냅샷이 없는 호출(실패 · 부분 잡의 원문 — snapshot_id NULL)은 그 스냅샷 잡
+  (rr_snapshot_jobs)의 과제를 따른다 — 스냅샷 거름만 걸면 범위 안 과제의 실패 원문까지 빠진다. diff 는 base · target 두 과제가 모두
+  범위여야 실린다 — 읽기 문지기 mcp_scope_owner 의 규칙이다(한쪽이 빠진 비교는 빠진 쪽의 내용을 싣는다). diff 이벤트는 그 diff 를
+  따른다. 규칙은 열 이름으로 건다(`snapshot_id` · `diff_id`) — 과제 · 대상 열쇠 없이 이 열을 가진 새 표도 기본으로 거른다.
+- **반출 — 그대로 둔 것.** 대상 열쇠 표(M9)는 대상의 과제(rr_targets.project_id)만 본다 — 과제가 다른 diff 의 대상이면 그 diff 는
+  빠지고 대상에 매인 행은 실린다. 읽기 문지기도 대상은 그 과제로, diff 는 두 과제로 판정한다(같은 규칙이다). 과제 · 대상 · 스냅샷 ·
+  diff 열쇠가 없는 표(rr_part_keys · rr_sameas · rr_iface_alias · rr_id_map · rr_patterns · rr_curation_queue · rr_cluster_alias)는 소유자
+  거름뿐이다 — 이번 결정 밖이다(rr_part_keys 는 first_project_id 로 처음 본 과제를 적는 공용 부품 열쇠다).
+- **원장 참조(②).** `_ref_from_store` 의 reg · narr(판정 · 성격) · tool(패널 호출 id · 대화 좌표 · 스냅샷 호출)은 행의 과제를
+  project_role(소유자 · rr_project_members — 보기 권한도)로 본다(`_first_member_row`). 과제는 행의 과제 · 대상의 과제 · 스냅샷의
+  과제(없으면 스냅샷 잡의 과제)이고 SQL 의 `_ref_project` 칸으로 받아 응답에서 뗀다(응답 모양은 그대로다). 과제를 모르는 행은 그
+  행의 주인만 연다. 대화 좌표는 색인만 있고 유일하지 않아 볼 수 있는 첫 행을 고른다. 남에게는 같은 갈래의 없는 참조와 같은 404 다.
+- **참조 — 그대로 둔 것.** req(호출자 소유 요구) · voc · paper 참조와 get_ref 의 스냅샷 · diff 스코프(`_snapshot_row` · get_diff)는
+  소유자로 그대로 본다 — 구성원은 그 갈래를 못 열지만 새지는 않는다(이번 결정 밖).
+- **시험 · 변이.** 반출 시험 하나(코퍼스에서 뺀 기밀 과제 · 범위 안 과제 · 과제가 다른 diff · 스냅샷 없는 잡 호출 — 기본은 범위 안
+  과제의 행만, include_excluded 는 전부, 헤더는 internal)와 남 시험 표의 참조 갈래 일곱(주인 · 보기 구성원은 200, 남은 없는 참조와
+  같은 404, 과제 id · 대상 열쇠 없음)을 더했고 고치기 전에 단언으로 졌다(일곱째 — 스냅샷 없는 잡 호출 — 는 고친 뒤 더해 변이로
+  확인했다). `git archive` 사본에서 변이 15(반출 여섯 · 참조 아홉)가 전부 단언으로 죽었다. 전체 시험(공유 잠금 아래, 24b2ec9) 3,183 통과 · xfail 4 · 실패 0(D49 3,175 + 여덟).
+
 ## 재설계 M3 — 셀 꾸러미 반대 검토 2차 수리(1b1de6d 기준 HIGH 1 · MEDIUM 3 · LOW 3, D-46, 2026-10-14)
 
 검토 결과와 조정자 결정(D-46)은 스크래치의 cells-review2-findings.md 에 있다. HIGH 1(b)는 D-37 이 옛 계약 글(m3-cells.md 210/372)보다
