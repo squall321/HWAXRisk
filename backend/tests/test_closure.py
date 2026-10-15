@@ -264,6 +264,24 @@ def test_refresh_on_the_largest_m2_ledger_stays_well_under_a_second(store):
     assert time.perf_counter() - started < 1.0
 
 
+def test_a_domain_whose_carded_experts_all_failed_to_get_packs_is_short_on_depth_never_a_cardless_domain(store):
+    """M3 묶음 검토 L4 · D-52 — 카드 묶음을 끝내 못 받은 전문가(pack_status error — 셀이 전부 failed)는 카드로 보지 못한 전문가다 —
+    깊이의 분모에 들어 그 영역은 깊이 미달로 막히고(실패 셀은 실패로 막는다) '카드 없는 영역 — 역할 판단만' 이 되지 않는다. 종전에는
+    그 영역의 카드 전문가가 모두 묶음을 못 받으면 카드 없는 영역으로 깊이가 면제되고 표기만 남았다."""
+    sample = fre.load("pack_errors.json")["card_fetch_failed"]
+    key = rig.target(store, CARD_ROSTER)
+    job_id = rig.job(store, key)
+    fake = FakeReviewEngine(rig.packs())
+    fake.pack_errors = {a: (sample["status"], sample["body"]) for a in ("xd-syn-0", "xd-syn-1")}
+    rig.Rig(store, fake).finish(job_id, step=2000)
+    assert rig.state(store, job_id) == "completed"
+    result = closure.close_level_cells(store, key, persist=False)
+    xd = result["detail"]["depth"]["xd"]
+    assert (xd.get("exempt"), xd["active"], xd["have"], xd["need"]) == (None, 2, 0, 2)
+    assert "깊이 미달 xd 0/2" in result["level_label"] and "카드 없는 영역" not in result["level_label"]
+    assert _residual(result, "depth_no_cards") is None and _residual(result, "failed")["blocking"]
+
+
 @pytest.mark.parametrize(("roster", "exempt", "mixed", "failing", "blocked"), [
     (rig.ROSTER, ["sim"], {}, None, []),                                           # 배경 카드뿐 + 0장 — 리그의 sim
     (CARD_ROSTER + ({"key": rig.ZERO_CARDS, "domain": "material", "relevance": 0.8},), ["material"], {}, None, []),

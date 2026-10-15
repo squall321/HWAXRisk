@@ -152,8 +152,11 @@ def cell_counts(store: RiskStore, target_key: str) -> dict:
     input_gap: list[str] = []
     filtered_only = 0
     # 카드 묶음의 바탕(rr_expert_reports.card_basis — cards · background · none). 묶음을 아직 안 받은 전문가는 셀의 basis 로 본다.
-    card_basis = {str(r["agent_key"]): r["card_basis"] for r in store.query(
-        "SELECT agent_key, card_basis FROM rr_expert_reports WHERE target_key = ?", (target_key,))}
+    # 묶음을 끝내 못 받은(pack_status error) 전문가는 카드로 보지 못한 카드 전문가로 센다 — 깊이의 분모에 들고 '카드 없는 영역' 이
+    # 되지 않는다(M3 묶음 검토 L4 · D-52 — 종전에는 그 영역이 깊이 면제 · 표기만이었다).
+    card_basis = {str(r["agent_key"]): "cards" if r["card_basis"] is None and r["pack_status"] == "error" else r["card_basis"]
+                  for r in store.query("SELECT agent_key, card_basis, pack_status FROM rr_expert_reports WHERE target_key = ?",
+                                       (target_key,))}
     for key, info in roster.items():
         mine = by_agent.get(key, [])
         if info["input_gaps"] or (mine and all(r["state"] == NO_INPUT_STATE for r in mine)):
