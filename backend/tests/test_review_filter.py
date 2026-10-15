@@ -652,6 +652,8 @@ def test_a_late_sweep_handoff_binds_an_earlier_jobs_filtered_cell_to_the_running
     assert (rig.state(store, sender), cell["state"], cell["run_id"], cell["route_forced"]) == (
         "completed", "reviewed", sender, "handoff")
     assert _head_run(store, key, STD2) == earlier
+    assert rig.progress(store, sender)["experts"] == {"total": 2, "by_state": {**{s: 0 for s in review_cells.EXPERT_STATES},
+                                                                               "ready": 2}}   # 그 셀로 묶인 전문가도 그 잡의 몫
 
 
 @pytest.mark.parametrize("path", ["handoff_reap", "top_up"])
@@ -910,10 +912,10 @@ def _assert_one_miss(store, key: str, agent: str, *, sampled: int) -> None:
     있다)이고 비율의 분모는 그 수에 결과를 아직 못 낸 놓침을 더한다(3차 LOW 4 · D-47)."""
     from app import expert_report, review_quality
 
-    audit = review_cells.closure_cells(store, key)["filtered"]["audit"]
-    assert (audit["sampled"], audit["risk_miss"]) == (sampled, 1)
     quality = review_quality.compute(store, key)["filter"]["audit"]
     assert (quality["sampled"], quality["counts"]["risk_miss"], quality["risk_miss"]["den"]) == (sampled, 1, 1)
+    audit = review_cells.closure_cells(store, key)["filtered"]["audit"]
+    assert (audit["sampled"], audit["risk_miss"]) == (sampled, 1)
     head = expert_report.load_report(store, key, agent)["head"]["filter"]
     assert head["risk_miss"] == 1
 
@@ -959,13 +961,15 @@ def test_a_sample_whose_marker_an_input_change_cleared_counts_only_an_earlier_mi
     store.execute("UPDATE rr_review_cells SET sample_json = json_object('was', json_object('filter_audit', json_array(?)))"
                   " WHERE target_key = ? AND unit_id = ? AND agent_key = ?", (was, key, kinds["global"], STD1))
     miss = int(was == "risk_miss")
-    closure_audit = review_cells.closure_cells(store, key)["filtered"]["audit"]
+    counts = {"risk_miss": miss, "relevance_miss": 0, "undetermined": 0, "kept": 0}
     quality = review_quality.compute(store, key)["filter"]["audit"]
+    assert (quality["sampled"], quality["counts"], quality["risk_miss"]["den"]) == (0, counts, miss)
+    closure_audit = review_cells.closure_cells(store, key)["filtered"]["audit"]
     out = review_cells.audit_topup(store, key, "another-job", audit_pct=0, salt="s")
-    assert (out["n"], out["sampled"], closure_audit["sampled"], quality["sampled"]) == (1 + miss, 0, 0, 0)
-    assert ({k: closure_audit[k] for k in review_cells.AUDIT_RESULTS}, quality["counts"]) == (
-        {"risk_miss": miss, "relevance_miss": 0, "undetermined": 0, "kept": 0},) * 2
-    assert quality["risk_miss"]["den"] == miss and (closure_audit["upper95"] is None) is not bool(miss)
+    assert (out["n"], out["sampled"], closure_audit["sampled"]) == (1 + miss, 0, 0)
+    assert (closure_audit["pending"], closure_audit["failed"]) == (0, 0)          # 앞 놓침만 남은 셀은 결과를 못 낸 표본도 아니다
+    assert {k: closure_audit[k] for k in review_cells.AUDIT_RESULTS} == counts
+    assert (closure_audit["upper95"] is None) is not bool(miss)
     head = expert_report.build_report(store, key, STD1)["head"]["filter"]
     assert (head["audited"], head["risk_miss"]) == (miss, miss)
     gate.set()

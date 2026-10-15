@@ -197,6 +197,19 @@ def test_a_retried_cell_a_live_job_does_not_cover_waits_for_the_next_job(store):
     assert store.query_one("SELECT COUNT(*) AS n FROM rr_jobs")["n"] == 3
 
 
+def test_a_live_job_that_does_not_cover_a_waiting_retry_never_finalizes_that_expert(store):
+    """반대 검토 3차 MEDIUM 2 · 3 · D-47 — 잡의 몫은 범위로 찍힌 머리와 그 잡에 묶인 셀의 전문가다. 다시 연 셀이 살아 있는 잡의 범위
+    밖이라 다음 잡을 기다리면(waiting) 그 잡은 그 전문가를 마감하지 않는다 — 그 잡에 묶인 열린 셀이 없다는 것만으로 남의 전문가를
+    마감하면 기다리는 셀을 둔 채 머리가 partial 로 닫힌다."""
+    key, job_id, unit_ids, fake, r = _failed_target(store)
+    other = rig.job(store, key, scope={"agents": [SEAL]})
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[unit_ids[0], PEER]]), ident=ME)
+    assert out["job"]["action"] == "waiting" and _head(store, key, PEER)["state"] == "planned"
+    r.finish(other)
+    assert rig.state(store, other) == "completed"
+    assert (_head(store, key, PEER)["state"], _cells(store, key, PEER)[unit_ids[0]]["run_id"]) == ("planned", job_id)
+
+
 def test_a_retry_covered_by_a_live_job_is_adopted(store):
     key, job_id, unit_ids, fake, r = _failed_target(store)
     live = rig.job(store, key, scope={"agents": [PEER, SEAL]})
