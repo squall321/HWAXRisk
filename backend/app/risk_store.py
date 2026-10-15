@@ -763,7 +763,7 @@ _DDL_V4: list[str] = _split_statements(_DDL_V4_SQL)
 # rr_jobs.mode 어휘는 이제 NULL = panels · panels · reviews · issues · synth 다(runner.JOB_MODES) — v4 의 열 주석은 굳은 블록이라
 # 여기에 적는다. 넣지 않는 것 — v4 주석이 미뤄 둔 input_gap_json·route_det·route_llm·audit_kind·audit_result·ix_rr_cells_reuse 와
 # rr_roster.input_gaps_json(M3.md 5절 #43), rr_cell_audits·rr_post_runs, rr_reports.ra_*(M4 의 v6), rr_summaries.n_rows_omitted.
-# 가지 m3 에만 있고 dev 리허설(M3 단계 D) 뒤에 push 한다 — 그때 tests/test_store.py 의 PUSHED_DDL_SHA256[5] 가 굳는다.
+# 2026-10-15 main 에 올라 굳었다(M3 단계 D 리허설 뒤) — tests/test_store.py 의 PUSHED_DDL_SHA256[5] 가 지킨다. 바꿀 것은 v6 에.
 _DDL_V5_SQL = """
 ALTER TABLE rr_jobs ADD COLUMN chain_json TEXT;          -- {root_job_id, prev_job_id, stage, round, cells_hash, registry_hash, scope_open, reason}
 
