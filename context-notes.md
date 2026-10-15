@@ -1854,3 +1854,99 @@ M3C-48(갈래 목록 · '검토한 셀에서는 생기지 않는다') · M3C-49(
 - 고친 뒤 43/44 가 단언으로 죽는다. 남은 하나는 잡 끝 보충 표본의 '남이 쥔 전문가' 를 머리 run_id 로 되돌린 변이다 — 보충 표본은
   그 잡의 도는 머리가 0 일 때만 불리므로(`_complete_or_phase`) 그 자리에서는 같은 값이다(규칙을 맞춰 둔 것뿐이다).
 - **전체 시험(공유 잠금 아래).** 2,923 통과 · xfail 4 · 실패 0(종전 2,894). ruff 깨끗하다.
+
+## 재설계 M3 — 셀 꾸러미 반대 검토 4차 수리(90b5e25 기준 MEDIUM 2 · LOW 2, D-49, 2026-10-15)
+
+검토 결과와 조정자 결정은 스크래치의 cells-review4-findings.md 에 있다(그 문서의 D-48c 가 포털 기록의 D-49 다 — D-48 은 Claude 길
+결정이다). 3차의 구조 변경(넘긴 셀 한 길 · 셀만 묶기)은 걸림을 잃지 않았고, 남은 것은 그 구조의 뒤탈 둘(MEDIUM 1 · 2)과 옛 틈 둘
+(LOW 3 · 4)이다. 재현은 검토자 탐침(r4cells-probes-90b5e25.py.txt)의 P1A · P1B · P2 · P3 · P5 · P6 · P7 을 시험으로 옮겼다.
+
+### M3C-64. MEDIUM 1 — 입장은 검토한 셀로(faef6c7 · 한 길 2fc146d)
+- `_final_stance` 가 judged()(검토 ∪ 넘김)를 읽어 X1-15('검토한 셀이 없으면 abstain')를 깼다 — 데이터 없는 넘김이 agree 가 됐다(P1A 묶음
+  실패 뒤 다섯 넘김 · P1B no_rows 하나 넘김). 이제 바탕 입장은 `reviewed()` 와 넘긴 셀 finding 을 뺀 finding 으로 X1-15 그대로 정하고,
+  넘긴 셀의 걸림 후보는 검토한 셀과 같은 걸림 줄(`_raised` — 실효 FAIL → oppose, WARNING · 카드 밖 · 갈림(두 번째 판정 못 한 부딪침
+  포함) → conditional)로 그 입장을 올리기만 한다(max). 동의로는 결코 가지 않는다.
+- 첫 구현(faef6c7)은 넘긴 셀의 리스크 후보면 무엇이든 conditional 로 올려 같은 자료의 검토한 셀보다 더 올렸다(입력 결손 영향 있음 —
+  X1-15 의 줄은 그것을 세지 않는다). 변이 검사를 짜며 드러나 한 줄로 맞췄다(D-47 — 넘긴 셀은 검토한 셀과 한 길). 시험은 깨끗하게 검토한
+  단위 하나가 있는 원장에서 같은 자료의 셀을 검토 · 넘김으로 둘 때 입장이 같은지를 갈래 여덟로 본다.
+- **해석 — 기권은 검토한 셀로만.** 결정의 '기권은 reviewed() 로만 정한다' 를 글자 그대로 읽어, 바탕이 기권(검토 0 · 적용 판정이 보류뿐)이면
+  넘긴 셀의 후보가 있어도 기권이다. 그래야 X1-15 가 서고 원장(검토 0 · 넘김 ≥1 → skipped · cells_skipped, 롤업 표 7번 줄)과 입장이 같은
+  말을 한다. 그 걸림은 사라지지 않는다(D-37) — finding(partial_cell) · 보고서 '보지 못한 것' 줄 · 단위별 분석 · 요약 줄에 남는다. 다른
+  읽기(검토 0 이어도 후보가 oppose 로 올린다)를 고르면 롤업 표에 '넘긴 셀에 후보가 있으면 done_weak' 줄을 더해야 원장이 입장과 맞는다 —
+  결정에 없는 표 변경이라 하지 않았다.
+- 단위별 분석 · 메커니즘 절의 넘긴 단위는 빼지 않고 `partial_cell` 을 단다. 마크다운은 머리를 '넘김 — 일부만 판정' 으로 쓰고, 걸림
+  후보(FAIL · WARNING · 보류)만 펴며 '걸림 없음 · 해당 없음' 블록 대신 '넘긴 셀이라 걸림 없음으로 읽지 않는다' 한 줄을 적는다(판정이 선
+  카드는 점검표에 '넘긴 셀' 표기로 있다). JSON 의 OK · na 목록은 자료라 그대로 둔다.
+- 요약은 넘긴 셀을 검토로 세지 않고 '넘김 n(일부만 판정)' 을 따로 적으며, 넘긴 셀의 finding 줄 끝에 '넘긴 셀 — 일부만 판정' 을 단다
+  (넘김이 없으면 종전 바이트 그대로다).
+- 3차 LOW 7 시험(넘긴 셀 줄은 '넘김 — «사유»')은 본 범위 절만 보게 좁혔다 — 메커니즘 절의 새 표지 줄도 '- 단위 … 넘김' 으로 시작한다.
+- 손대지 않은 것(관찰 · 조정자 결정 몫) — 입력 결손 전문가가 검토한 셀에서 '영향 있음'(q1 yes — finding 이 선다)을 내도 입장은
+  agree 다(X1-15 의 걸림 줄이 카드 밖 · 갈림만 보고 입력 결손 finding 을 보지 않는다 — C3-3 부터, 탐침으로 확인). 이번 결정 밖이라 고치지
+  않았다. 줄에 `input_gap` 을 더하면 검토 · 넘김 두 길이 함께 바뀐다(한 줄이다).
+
+### M3C-65. MEDIUM 2 — 다시 연 셀의 몫(f4117ba · 시험 보강 5e850ac)
+- **몫의 원장.** 잡 `params.reopen` = {consented{cells, calls_est}, unconsented{"<unit_id>|<agent_key>": 기대 호출}, consent_source}. 열을
+  더하지 않았다(v5 블록은 S3-1 몫). 셀마다 값을 두는 것은 넘김이 그 셀을 뺄 때 같은 값을 빼기 위해서다(그 사이 박스의 k 가 바뀌어도).
+- **무엇을 세나.** 살아 있는 잡 J 에 묶는 다시 연 셀 가운데 J 의 동의받은 추정 밖인 것 — `reopen_filtered(run_id=J)`(넓힘 · 늦은 넘김 ·
+  잡 끝 거두기 · 보충 표본 다섯 길이 다 이 함수를 지난다)가 앞 결속이 J 가 아닌 셀을 센다. J 가 제 범위에서 제가 거른 셀은 추정 안이다
+  (expected 는 거르기 없음 가정이다). 사람의 다시가 살아 있는 잡에 얹힌 셀(dispose_cells 의 adopted)은 늘 센다 — 그 잡을 만들 때 failed 라
+  추정에 없었고, J 의 것이었어도 다시 도는 몫은 추정 밖이다. adopt_released 는 그 잡이 받은 범위 안이라 세지 않는다.
+- **셀 하나의 값** `cell_calls` 는 calls_estimate 의 expected 가 그 셀에 세는 몫 그대로다(입력 결손 1.05 · 카드 셀 card_cell_calls · 걸린
+  것만 이중 판정이면 1순위에 보정 rev D). k 는 셀 때의 box_k, dual 은 잡에 얼린 값이다.
+- **여유와 보류**(`reopen_budget`). 여유 = max(ceil(0.2 × (만들 때 expected + 동의한 몫)), 30). 동의 안 받은 몫 > 여유면 consent_extra,
+  추정 합(expected + 동의한 몫 + 동의 안 받은 몫) > HWAXRISK_REVIEW_MAX_CALLS 면 max_calls(먼저 본다 · 동의로 풀리지 않는다).
+- **멈춤은 묶기와 한 트랜잭션.** `charge_reopened` 가 묶는 트랜잭션 안에서 몫을 적고 넘으면 잡을 paused 로 둔다 — 선점(claim_next_expert)은
+  제 트랜잭션에서 잡이 running 이어야 하므로 그 셀은 한 번도 돌지 않는다(차감 없음 · 이 잡에 묶인 채 pending). 루프 틱에서 따로 보지
+  않는다 — 묶기의 멈춤과 사람의 재개 관문이 모든 길을 덮는다. 시계로 저절로 재개할 보류(llm_outage 따위)로 멈춘 잡은 그 보류를
+  consent_extra 로 덮고(그대로면 간격 뒤 저절로 재개해 동의 없이 돈다), 이미 이 몫으로 멈춘 잡은 새 셈의 코드 · 글로 고친다. 사람의 정지 ·
+  자격 · 사람이 고칠 보류는 그대로 두고 그 재개가 몫을 다시 본다.
+- **동의.** 사람의 재개(REST POST /jobs/{id}/resume?consent=true · MCP risk_job_action(action='resume', consent=true))가
+  `review_runner.resume_gate` 를 지난다 — 몫 안이면 아무것도 하지 않고, consent_extra 몫이면 동의 없이는 422 consent_required(아무것도
+  바꾸지 않는다), 동의면 동의 안 받은 몫을 동의받은 몫으로 옮긴다. max_calls 는 409 다. 보류 코드와 상관없이 몫으로 판다 — 사람이 멈춘
+  잡에 그 사이 묶인 셀도 동의를 받는다. 길잡이는 두 보류의 고칠 곳을 말하고 재개 걸음에 동의를 채우지 않는다(SEC-4).
+- **넘김.** 동의하지 않으면 넘김(filter state=pending)이 '동의를 기다리는 셀'(멈춘 잡의 동의 안 받은 몫에 든, 그 잡에 묶인 pending 셀)만
+  넘긴다 — 넘김은 failed 에서만 가므로(PLAN C-18) pending → failed(consent_declined · 차감 없음) → skipped. 몫에서 빼고, 여유 안으로
+  돌아오면 넘긴 사람의 이름으로 그 잡을 재개한다(job.resumed). 아직 밖이면 보류 글을 남은 수로 고친다.
+- **보이기.** 진행판 `review.job.progress.reopened_extra`(셀 수 · 추정 · 동의함 · 기다림 · 여유 · 상한 · 보류)는 잡 params 에서 읽는다 —
+  멈춘 잡은 루프가 진행판을 다시 세지 않아 JobProgress 에 두면 낡는다. MCP 답(길잡이 facts.review_job)도 같은 칸을 싣는다(작은 칸이다).
+- 해석 셋 — ① 결정의 'retry spill' 은 사람의 다시가 살아 있는 잡에 얹힌 것(adopted)으로 읽었다(넓힘은 따로 적혀 있다). ② '동의받은/
+  기대 호출' 은 만들 때의 expected 에 재개로 더 동의한 몫을 더한 것이다. ③ '잡의 합은 상한을 넘지 않는다' 는 추정 합으로 본다(만들 때의
+  review_too_large 가 expected 와 견주는 것과 같은 자) — 실제 호출 수의 상한은 두지 않았다.
+- 시험의 함정 — 시험대의 잡들은 같은 초에 서서 진행판의 '가장 최근 잡'(created_at 초 · id 무작위)이 그 잡이라고 기댈 수 없다. 몫의
+  시험은 그 잡의 줄(routes._review_job_payload)을 읽는다.
+
+### M3C-66. LOW 3 — 모름은 0 이 아니다(4a34feb)
+- 얼린 묶음이 이 박스에 없는 전문가(들여온 원장 — rr_card_packs 는 반출하지 않는다)의 셀을 넘기면 `count_members` 는 None 이고 넘김 응답은
+  hits · hits_by null · hits_basis 'pack_missing' · hits_note(그 전문가 · 모름이지 0 이 아니다 · 마감이 다시 받아 센다)다. 셀 수 있으면
+  hits_basis 'members'. 여러 전문가 가운데 하나라도 못 세면 합도 모름이다.
+
+### M3C-67. LOW 4 — 마감과 다시 열기가 엇갈려도(3c22d9b)
+- 마감은 세션이 그 잡의 열린 셀 0 을 센 뒤 트랜잭션 밖에서 보고서를 짓는다. 그 사이 다른 세션의 다시 열기가 그 전문가의 셀을 그 잡에
+  묶으면(_reopen 은 도는 머리를 건너뛴다) 종전에는 머리가 partial 로 닫혀 아무도 그 셀을 집지 못했다(P3 — 60시간). `close_expert` 는
+  마감하는 잡(finalize_expert 가 잡 id 를 준다)에 묶인 셀이 열려 있으면 머리를 planned 로 돌린다 — 보고서 · 의견은 그대로 쓰이고(원장은
+  열린 셀이 있어 닫히지 않는다) 그 잡이 그 셀을 돌린 뒤 다시 마감한다.
+- 안전망 `review_cells.replan_bound` — `_complete_or_phase` 가 잡 끝 셈 앞에서 그 잡에 묶인 pending 셀이 남은 ready · partial 머리를
+  planned 로 다시 연다. 시험은 둘을 따로 본다 — 마감 중 넓힘은 그 틱 뒤 곧바로 머리가 planned 인지(안전망은 다음 틱이다), 안전망은
+  머리를 다시 열지 않은 묶기(_reopen 을 건너뛴다)의 원장에서 잡이 끝나는지.
+
+### M3C-68. 공유 파일에서 바꾼 곳(m3 합류 때 볼 것)
+- routes.py — `job_action`(쿼리 consent · 재개는 한 트랜잭션에서 review_runner.resume_gate 뒤 runner.resume_job), `post_cells_skip`
+  설명글, `_review_job_payload` 의 progress.reopened_extra.
+- entry.py — `job_action`(resume 에 consent 허용 · routes 로 넘김 · 설명글), `REVIEW_HOLD_FIX` 의 consent_extra · max_calls.
+- mcp_server.py — `risk_job_action` 설명글(재개의 동의 · 넘김 filter state=pending · max_calls).
+- 그 밖 — review_ops.HOLD_CODES 에 두 코드(자동 재개 없음), 계약 시험 둘(보류 표 · 잡 진행판 칸)을 고쳤다. runner.py · planner.py ·
+  v5 블록 · frontend 는 손대지 않았다.
+
+### M3C-69. 변이 검사 · 전체 시험 — 반대 검토 4차 수리
+- 재현 시험은 90b5e25 의 app 위에서 단언으로 넘어지는 것을 먼저 봤다(사본 `scratchpad/celm3-<pid>-r4-old` — P1A · P1B · 후보 셋 · P2 ·
+  여유 밖 둘 · 넘김 둘 · 제가 거른 셀 · P5 · P7 · 다시 얹기 둘 · P3 · 안전망 · P6 · 계약 시험 둘). 새 함수의 단위 시험(reopen_budget ·
+  cell_calls)만 옛 코드에서 AttributeError 다 — 생산자 길의 시험이 단언으로 본다(M3C-60 과 같은 꼴). 입장의 짝 시험(검토 · 넘김이 같은
+  입장)은 옛 코드에서도 지난다 — 한 길 고침(2fc146d)을 지키는 시험이다(첫 구현에서는 단언으로 넘어졌다).
+- 첫 판(5e850ac, 사본 `celm3-<pid>-r4`)은 52개 가운데 44 가 단언으로 죽고 둘이 살았으며 다섯은 단언 아닌 실패(pytest.raises 의 DID NOT
+  RAISE 셋 · MCP 거절을 AppError 로 다시 던진 하나 · 같은 초에 선 잡 셋 가운데 길잡이가 다른 잡을 집은 흔들림 하나), 하나는 자리가
+  둘이었다. 산 둘은 제가 거른 셀의 시험이 정말 다시 열지 않던 것(분류 6번 줄로 검토였다)과 넘긴 단위의 걸림 없음 줄을 묶음 없는
+  넘김으로만 본 것이다. 시험을 고치고(0df3b51 — 거절은 단언으로, 그 잡의 만든 시각만 뒤로 민다) 입장의 한 길을 고쳤다(2fc146d).
+- 둘째 판(0df3b51)은 55개(LOW 3 다섯 · LOW 4 여섯 · MEDIUM 1 열여섯 · MEDIUM 2 스물여덟)가 모두 단언으로 죽는다.
+- **전체 시험(공유 잠금 아래, 0df3b51).** 2,961 통과 · xfail 4 · 실패 0(종전 2,923 — 새 시험 38). ruff 깨끗하다. 검토자 탐침 일곱을
+  마지막 판에 다시 돌리면 P1A · P1B · P1D 가 abstain, P3 잡 끝남, P6 hits null 이고, P2 · P5 · P7 은 바닥 안이라 그대로 돌되
+  reopened_extra 로 셈해진다(결정대로).
