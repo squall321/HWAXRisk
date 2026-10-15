@@ -376,8 +376,12 @@ class PortalPanelEngine:
     def run(self, delib_opts: Mapping[str, Any], *, owner_sub: str | None = None,
             on_progress: Callable[[Mapping[str, Any]], None] | None = None,
             conversation: tuple[str, str] | None = None,
-            should_stop: Callable[[], str | None] | None = None) -> dict:
+            should_stop: Callable[[], str | None] | None = None,
+            on_conversation: Callable[[str], None] | None = None) -> dict:
         """패널 1건을 돌리고 {decision_text, turns, conv_id, events, …} 를 돌려준다.
+
+        포털 대화가 생기면(다시 쓰는 대화도) 스트림을 열기 전에 `on_conversation(conv_id)` 로 러너에 넘긴다 — 러너가 곧바로
+        패널에 적어, 스트림 도중에 앱이 죽어도 그 심의의 대화를 잃지 않는다(D48).
 
         429(포털 agent_semaphore 초과)는 `EngineBusy` 라 러너가 대기 후 다시 묻는다 — 그때 러너는 그 예외의
         `conversation`(대화 id, 만든 자격)을 되돌려 주고, 같은 자격이면 그 대화를 다시 쓴다. 연결 실패·error 프레임은
@@ -396,6 +400,8 @@ class PortalPanelEngine:
             conv_id: str | None = conversation[0]
         else:
             conv_id = self.create_conversation(credential["pat"], f"[리스크심사] {question[:160]}")
+        if conv_id and on_conversation is not None:
+            on_conversation(conv_id)
 
         # 줄 사이 침묵 한도. 종전에는 '엔진 호출당 타임아웃 1800 + 60' 으로 유도했다 — LLM 시도 한 번만 가정한 값이라
         # 엔진이 SDK 재시도를 하거나 박스의 호출 한도를 올리면 건강한 패널을 끊었다. 이제는 죽은 스트림만 잡는

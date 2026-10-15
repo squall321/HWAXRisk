@@ -102,6 +102,8 @@ class PanelEngine(Protocol):
     되돌려 준다 — 앞 시도가 만든 포털 대화를 다시 쓰라는 뜻이다.
     선택 인자 run(..., should_stop=) 를 받는 엔진에는 러너가 물음 함수를 준다 — 프레임마다 불러 사유(문자열)가
     돌아오면 스트림을 닫고 EngineStreamLost('cancelled') 로 올린다(사람이 그 잡을 취소·정지했다).
+    선택 인자 run(..., on_conversation=) 를 받는 엔진에는 러너가 콜백을 준다 — 포털 대화를 만들면 스트림 전에 불러 그
+    conv_id 를 곧바로 패널에 적는다(스트림 도중에 앱이 죽어도 재기동 복구가 그 연결을 지킨다, D48).
     포털 429 는 EngineBusy, 앱이 스트림을 놓은 것은 EngineStreamLost, 의장이 결정문을 못 낸 것은 EngineNoDecision,
     그 밖의 실패는 EngineError 로 올린다.
     """
@@ -1370,7 +1372,7 @@ def recover_running_panels(store: Any) -> dict:
     cancelled 가 된다.
     """
     rows = store.query(
-        "SELECT id, target_key, kind, result_gz IS NOT NULL AS has_result FROM rr_panels WHERE status = 'running'"
+        "SELECT id, target_key, kind, conv_id, result_gz IS NOT NULL AS has_result FROM rr_panels WHERE status = 'running'"
         " ORDER BY created_at ASC")
     now = now_epoch()
     cut_targets: dict[str, list[str]] = {}
@@ -1378,9 +1380,13 @@ def recover_running_panels(store: Any) -> dict:
         # 결과가 저장된 쟁점 패널은 쟁점을 running 그대로 둔다 — 다시 저장(repersist)이 resolve_issue 까지 한다(3.7 실패 표).
         if not (row["has_result"] and row["kind"] == "issue"):
             _release_panel(store, row["id"], charge=False)
+        # 스트림 전에 적어 둔 포털 대화(D48)는 그대로 두고 error 에도 적는다 — 그 대화를 찾아 무시하거나 닫을 수 있게.
+        conv = f"포털 대화 {row['conv_id']}" if row["conv_id"] else ""
         if row["has_result"]:
             error = (f"{PERSIST_ERROR_CODE}: {RESTART_CODE} — 앱이 결과를 원장에 앉히던 중에 재기동했다. 엔진 결과는 패널에"
-                     f" 저장돼 있다 — {_repersist_hint(row['id'])} 로 다시 앉힌다")
+                     f" 저장돼 있다 — {_repersist_hint(row['id'])} 로 다시 앉힌다" + (f" ({conv})" if conv else ""))
+        elif conv:
+            error = f"{RESTART_CODE}: {conv} 에 그 심의가 남아 있다 — 엔진이 그 대화에 계속 쓸 수 있으니 찾아 무시하거나 닫는다"
         else:
             error = RESTART_CODE
         store.execute("UPDATE rr_panels SET status = 'error', error = ?, ended_at = ? WHERE id = ?",
@@ -1702,6 +1708,11 @@ def run_panel(
     should_stop = _stop_reader(store, job)
     if "should_stop" in run_params:
         optional["should_stop"] = should_stop
+    if "on_conversation" in run_params:
+        # 포털 대화가 생기면 스트림 전에 패널에 적는다 — 종전에는 패널 끝 · 잡힌 오류에서만 적어, 스트림 도중에 앱이 죽으면(SIGKILL)
+        # 패널은 conv_id 없이 error('restart') 로 남고 엔진이 계속 쓰는 그 대화는 고아가 됐다(M3 단계 D 리허설, D48).
+        optional["on_conversation"] = lambda conv_id: store.execute(
+            "UPDATE rr_panels SET conv_id = ? WHERE id = ?", (conv_id, panel["id"]))
     while True:
         try:
             result = engine.run(delib_opts, owner_sub=credential_sub, **optional)

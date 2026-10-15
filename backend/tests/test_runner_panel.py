@@ -975,6 +975,43 @@ def test_recover_running_panels_after_restart(risk_store, tmp_path):
     assert runner.claim_next_job(risk_store, cfg)["id"] == job_id
 
 
+class _Killed(BaseException):
+    """SIGKILL 흉내 — 러너의 except Exception 을 지나 그대로 올라간다(프로세스가 죽으면 닫는 코드는 돌지 않는다)."""
+
+
+class _DiesMidStream(FakePanelEngine):
+    """포털 대화를 만든 뒤 스트림 도중에 앱이 죽는 엔진."""
+
+    def run(self, delib_opts, *, owner_sub=None, on_conversation=None):
+        self.calls.append(dict(delib_opts))
+        if on_conversation is not None:
+            on_conversation("conv-killed-1")
+        raise _Killed()
+
+
+def test_a_panel_killed_mid_stream_keeps_its_conversation_through_restart_recovery(risk_store, tmp_path):
+    """엔진이 포털 대화를 만들면 스트림 전에 패널에 conv_id 를 적는다 — 스트림 도중에 앱이 죽어도(SIGKILL) 재기동 복구가 그
+    연결을 지키고 패널 error 에 적는다(그 대화를 찾아 무시하거나 닫을 수 있게, D48). 종전에는 패널 끝 · 잡힌 오류에서만 적어
+    리허설의 쟁점 패널이 conv_id 없이 error('restart') 로 남고 그 포털 대화는 고아가 됐다."""
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)
+    job = runner.claim_next_job(risk_store, cfg)
+    recorder: dict = {}
+    with pytest.raises(_Killed):
+        runner.run_panel(risk_store, cfg, _DiesMidStream(), job, narrative_mod=fake_narrative(recorder),
+                         registry_mod=fake_registry(recorder))
+    panel = risk_store.query_one("SELECT id, status, conv_id FROM rr_panels WHERE target_key = ?", (target_key,))
+    assert (panel["status"], panel["conv_id"]) == ("running", "conv-killed-1")
+
+    runner.recover_running_panels(risk_store)
+    row = risk_store.query_one("SELECT status, error, conv_id, retry FROM rr_panels WHERE id = ?", (panel["id"],))
+    assert (row["status"], row["conv_id"], row["retry"]) == ("error", "conv-killed-1", 0)
+    assert row["error"].startswith("restart: ") and "conv-killed-1" in row["error"]
+    assert runner._uncharged_code(row["error"]) == "restart"          # 코드는 그대로 restart — 좌석을 차감하지 않는다
+
+
 def test_restarts_never_skip_a_seat_or_feed_the_engine_fail_streak(risk_store, tmp_path):
     """재기동 세 번에도 좌석은 pending·retry 0 이고, 재기동 두 번 뒤의 진짜 엔진 실패 한 번은 한 번으로 세진다."""
     target_key, cfg, job_id, _panel = _cut_by_restart(risk_store, tmp_path)
