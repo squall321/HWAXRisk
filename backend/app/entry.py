@@ -408,10 +408,11 @@ def job_action(ident: identity.Identity, *, job_id: str, action: str, reason: st
     `retry_failed`·`skip_failed` 는 그 검토 잡이 찍은(run_id) 셀 가운데 `failed` 를 다시 열거나 사유와 함께 넘긴다 — `filter`
     ({agent_key?, unit_id?, domain?, error_code?, state?})로 좁히고 job_id 는 이 잡으로 못 박는다. 응답은 REST 처분과 같다
     (`review_runner.dispose_cells`). 넘김은 사유(4~300자)가 필수다. 다시의 `consent` 는 REST 와 같은 뜻이다(사람이 동의한 뒤에만
-    true — 반대 검토 MEDIUM 13). 쓰기다 — 위임 단언 없는 Bearer 는 delegation_required."""
+    true — 반대 검토 MEDIUM 13). 재개의 `consent` 는 다시 연 셀의 몫(consent_extra)의 동의다(REST 재개의 consent 와 같다 — 4차
+    MEDIUM 2 · D-49). 쓰기다 — 위임 단언 없는 Bearer 는 delegation_required."""
     require_delegate(ident)
-    if consent and action != "retry_failed":
-        raise AppError("E100", "consent 는 retry_failed 의 칸이다(다시가 세울 잡의 동의).", 422)
+    if consent and action not in ("retry_failed", "resume"):
+        raise AppError("E100", "consent 는 retry_failed(다시가 세울 잡의 동의)와 resume(다시 연 셀 몫의 동의)의 칸이다.", 422)
     store = routes.get_store()
     if action in _DISPOSE_ACTIONS:
         job = store.query_one("SELECT target_key, mode FROM rr_jobs WHERE id = ?", (job_id,))
@@ -436,7 +437,7 @@ def job_action(ident: identity.Identity, *, job_id: str, action: str, reason: st
         raise AppError("E100", "reason·filter 는 retry_failed·skip_failed 의 칸이다.", 422)
     before = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))
     try:
-        out = routes.job_action(job_id, action, ident=ident)
+        out = routes.job_action(job_id, action, consent=consent, ident=ident)
     except AppError as exc:
         # 라우트가 소유를 확인한 뒤에야 E100(상태 전이 불가)이 난다 — 여기서 상태를 읽어 돌려줘도 남의 잡을 흘리지 않는다.
         row = store.query_one("SELECT state, pause_reason FROM rr_jobs WHERE id = ?", (job_id,))
@@ -870,6 +871,14 @@ REVIEW_HOLD_FIX: dict[str, str] = {
     "content_fail_rate": "최근 호출의 절반 이상이 내용 탓으로 실패해 차단기가 열렸다 — risk_get_cells(state='failed') 로 실패 까닭을"
                          " 보고 고친 뒤 risk_job_action(action='resume') 으로 재개한다.",
     "aidh_unreachable": "범위 안 전문가 모두 카드 묶음을 받지 못했다(AIDataHub·도구 서버) — hold_until 에 저절로 다시 본다.",
+    # 다시 연 셀의 몫(반대 검토 4차 MEDIUM 2 · D-49) — 진행판 review.job.progress.reopened_extra 가 셀 수 · 추정 호출을 준다
+    "consent_extra": "다시 연 셀(넓힘 · 넘김 · 보충 표본 · 살아 있는 잡에 얹은 다시)의 추정 호출이 동의받은 몫의 여유를 넘었다 — 그 셀 수와"
+                     " 비용(review.job.progress.reopened_extra)을 사용자에게 보이고 동의를 받은 뒤에만 risk_job_action(action='resume',"
+                     " consent=true) 로 이어 간다. 동의하지 않으면 risk_job_action(action='skip_failed', filter={'state': 'pending'},"
+                     " reason=…) 로 그 셀을 넘긴다(여유 안으로 돌아오면 잡이 이어 돈다).",
+    "max_calls": "이 잡의 호출 추정 합이 HWAXRISK_REVIEW_MAX_CALLS 를 넘는다 — 동의로는 풀리지 않는다. 동의를 기다리는 셀을"
+                 " risk_job_action(action='skip_failed', filter={'state': 'pending'}, reason=…) 로 넘기거나, 운영자가 상한을 올린 뒤"
+                 " risk_job_action(action='resume') 으로 재개한다.",
 }
 REVIEW_DISABLED_FIX = ("데이터 디렉터리의 knobs.env 에 HWAXRISK_REVIEW_ENABLED=1 을 적고 앱을 다시 띄운다 — 꺼져 있는 동안 검토 잡은"
                        " 새 선점·새 호출을 내지 않는다(도는 호출은 끝까지 간다).")

@@ -70,6 +70,9 @@ HOLD_CODES: dict[str, HoldRule] = {
     "aidh_unreachable": HoldRule(auto=True, delays_s=(300, 1800)),
     "agent_outdated": HoldRule(auto=True, delays_s=(300,)),
     "ctx_unknown": HoldRule(auto=True, resume_on="ctx_source"),
+    # 다시 연 셀의 몫(반대 검토 4차 MEDIUM 2 · D-49) — 사람이 동의하거나(재개 consent) 그 셀을 넘겨야 이어 돈다 · 상한은 동의로 풀리지 않는다
+    "consent_extra": HoldRule(auto=False),
+    "max_calls": HoldRule(auto=False),
 }
 
 

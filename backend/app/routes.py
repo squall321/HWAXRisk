@@ -3011,14 +3011,22 @@ JOB_ACTIONS = {"pause": runner.pause_job, "resume": runner.resume_job, "cancel":
 
 
 @router.post("/jobs/{job_id}/{action}")
-def job_action(job_id: str, action: str, ident: identity.Identity = Depends(identity.current)) -> dict:
+def job_action(job_id: str, action: str, consent: bool = False, ident: identity.Identity = Depends(identity.current)) -> dict:
     """일시정지·재개·취소. 취소·일시정지는 도는 패널의 스트림을 닫는다(패널 경계까지 기다리지 않는다 — 벽시계가
-    12시간이다). 주체는 rr_jobs.state_by 에 남는다(plan §0.6)."""
+    12시간이다). 주체는 rr_jobs.state_by 에 남는다(plan §0.6). 재개의 `consent`(쿼리 — 사람이 동의한 뒤에만 true)는 검토 잡이 다시 연
+    셀의 몫을 넘어 멈췄을 때(consent_extra) 그 몫의 동의다 — 없으면 422 consent_required, 잡의 추정 합이 상한을 넘으면 동의와
+    상관없이 409 max_calls 다(반대 검토 4차 MEDIUM 2 · D-49 — review_runner.resume_gate)."""
     owner_sub = _require_user(ident)
     if action not in JOB_ACTIONS:
         raise AppError("E404", f"모르는 잡 조작입니다 — {action}.", 404)
     _owned_row("SELECT id, owner_sub FROM rr_jobs WHERE id = ?", (job_id,), owner_sub, f"잡({job_id})")
-    return JOB_ACTIONS[action](get_store(), job_id, by=owner_sub)
+    store = get_store()
+    if action != "resume":
+        return JOB_ACTIONS[action](store, job_id, by=owner_sub)
+    with store.tx():
+        review_runner.resume_gate(store, job_id, consent=consent,
+                                  consent_source=CONSENT_SOURCES.get(ident.source, ident.source))
+        return runner.resume_job(store, job_id, by=owner_sub)
 
 
 class CoverageBody(BaseModel):
@@ -3165,7 +3173,8 @@ def post_cells_retry(target_key: str, body: CellsRetryBody, ident: identity.Iden
 def post_cells_skip(target_key: str, body: CellsSkipBody, ident: identity.Identity = Depends(identity.current)) -> dict:
     """실패 셀을 사유와 함께 넘긴다(재설계 M3 C3-4) — `failed → skipped` 만(PLAN 4절 C-18). 그 전문가는 다시 마감되고 보고서 '보지
     못한 것' 에 '넘김 — 사유' 로 남는다. 살아 있는 잡이 있으면 그 잡이 마감하고, 없으면 마감 잡(돌 셀 0)을 세운다. editor 이상, 사유
-    4~300자 필수(422 reason_required). 감사 한 행(cells.skip)."""
+    4~300자 필수(422 reason_required). 감사 한 행(cells.skip). 다시 연 셀 몫으로 멈춘 잡에서 동의를 기다리는 셀도 넘긴다(pending →
+    failed(consent_declined · 차감 없음) → skipped, 여유 안으로 돌아오면 그 잡이 이어 돈다 — 반대 검토 4차 MEDIUM 2 · D-49)."""
     return _dispose(target_key, ident, action="skip", cells=body.cells, filter=body.filter, reason=body.reason)
 
 
@@ -3666,7 +3675,10 @@ def _review_job_payload(job: dict) -> dict:
     return {"id": job["id"], "mode": review_runner.MODE, "state": job["state"], "hold_code": job["hold_code"],
             "hold_until": job["hold_until"], "hold_n": int(job["hold_n"] or 0), "error": job["error"],
             "credential_email": job["credential_email"], "scope": params.get("scope") or {},
-            "phase": progress.get("phase"), "progress": {k: progress.get(k) for k in REVIEW_JOB_PROGRESS_KEYS},
+            "phase": progress.get("phase"), "progress": {
+                **{k: progress.get(k) for k in REVIEW_JOB_PROGRESS_KEYS},
+                # 다시 연 셀의 몫 — 잡 params 에서 읽는다(멈춘 잡은 루프가 진행판을 다시 세지 않는다, 반대 검토 4차 MEDIUM 2 · D-49)
+                "reopened_extra": review_runner.reopen_budget(params, max_calls=int(config.settings.risk_review_max_calls))},
             "waiting": progress.get("waiting"), "signal": signal}
 
 

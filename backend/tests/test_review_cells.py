@@ -805,6 +805,42 @@ def test_refusals_for_scope_and_call_budget(store, monkeypatch):
     assert make(scope)["calls_estimate"] == estimate
 
 
+@pytest.mark.parametrize("expected,consented,unconsented,max_calls,allowance,hold", [
+    (100, 0.0, 30.0, 30000, 30, None),                    # 여유 = max(ceil(0.2 × 100), 30) — 바닥 30 까지는 그대로 돈다
+    (100, 0.0, 30.5, 30000, 30, "consent_extra"),
+    (200, 0.0, 40.0, 30000, 40, None),                    # 20% 가 바닥보다 크면 20%
+    (200, 0.0, 40.25, 30000, 40, "consent_extra"),
+    (150, 100.0, 50.0, 30000, 50, None),                  # 동의받은 몫 = 처음 추정 + 사람이 재개로 더 동의한 몫
+    (150, 100.0, 50.25, 30000, 50, "consent_extra"),
+    (100, 0.0, 6.0, 105, 30, "max_calls"),                # 추정 합 106 > 상한 105 — 여유 안이어도 상한이 먼저다
+    (100, 4.0, 1.0, 105, 30, None),                       # 합 105 는 상한과 같다(넘지 않는다)
+])
+def test_the_reopen_allowance_is_a_fifth_of_the_consented_calls_with_a_floor_of_thirty_under_the_cap(
+        expected, consented, unconsented, max_calls, allowance, hold):
+    """반대 검토 4차 MEDIUM 2 · D-49 — 다시 연 셀의 몫. 동의 안 받은 다시 연 셀의 기대 호출이 max(동의받은 몫(처음 expected + 더
+    동의한 몫)의 20%, 30회) 를 넘으면 consent_extra, 잡의 추정 합(expected + 다시 연 몫 전부)이 HWAXRISK_REVIEW_MAX_CALLS 를 넘으면
+    max_calls 다(동의로 풀리지 않는다)."""
+    params = {"calls_estimate": {"expected": expected},
+              "reopen": {"consented": {"cells": 7, "calls_est": consented}, "unconsented": {"u-1|a": unconsented}}}
+    budget = review_runner.reopen_budget(params, max_calls=max_calls)
+    assert (budget["allowance"], budget["hold"]) == (allowance, hold)
+    assert (budget["cells"], budget["calls_est"], budget["unconsented"]) == (8, round(consented + unconsented, 2),
+                                                                             {"cells": 1, "calls_est": unconsented})
+
+
+def test_a_cell_counts_the_calls_the_estimate_counts_for_it():
+    """다시 연 셀 하나의 기대 호출은 잡 추정(expected)의 셀 몫과 같은 식이다 — 입력 결손 셀 1.05, 카드 셀 card_cell_calls, 걸린 것만 이중
+    판정이면 1순위 카드 셀에 보정 rev D 를 더한다."""
+    assert review_runner.cell_calls({"input_gaps": ["ecad"]}, k=8, dual="flagged") == review_runner.NOINPUT_PER_CELL
+    assert review_runner.cell_calls({"rank_in_domain": 2}, k=8, dual="all") == review_runner.card_cell_calls(8, "all")
+    assert review_runner.cell_calls({"rank_in_domain": 1}, k=8, dual="all") == review_runner.card_cell_calls(8, "all")
+    assert review_runner.cell_calls({"rank_in_domain": 1}, k=8, dual="flagged") == review_runner.card_cell_calls(8, "flagged") + 2
+    for expert, cells in (({"rank_in_domain": 1}, {"card": 1, "rank1": 1}), ({"rank_in_domain": 2}, {"card": 1}),
+                          ({"input_gaps": ["ecad"]}, {"gap": 1})):
+        whole = review_runner.calls_estimate(cells, 0, k=8, dual="flagged")["expected"]
+        assert math.ceil(review_runner.cell_calls(expert, k=8, dual="flagged")) == whole
+
+
 def test_the_calls_estimate_for_the_full_roster_stays_under_the_cap_with_flagged_dual_judgement():
     """재설계 M3 C3-10 — 359명 × 단위 20(카드 셀 4,980 · 입력 결손 셀 2,200 · 1순위 카드 셀 180, k 8)의 기대 호출 수는 약 2만으로
     상한 3만 밑이다(카드 셀당 3.3 = fwd 2 + 빠진 카드 0.1 + rev 0.05 + 단독 0.1 + 카드 밖 1.05). 이중 판정 all 이면 rev 몫이 D 로

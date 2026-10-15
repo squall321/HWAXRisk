@@ -36,7 +36,7 @@ ORDER_KEYS = {"order", "agent_key", "domain", "rank_in_domain", "tier", "deferre
               "checkable_n"}
 JOB_KEYS = {"id", "mode", "state", "hold_code", "hold_until", "hold_n", "error", "credential_email", "scope", "phase",
             "progress", "waiting", "signal"}
-JOB_PROGRESS_KEYS = {"packs", "experts", "cells", "calls", "breaker", "server"}
+JOB_PROGRESS_KEYS = {"packs", "experts", "cells", "calls", "breaker", "server", "reopened_extra"}   # 다시 연 셀의 몫(4차 MEDIUM 2)
 WORKER_KEYS = {"agent_key", "purpose", "unit_id", "call_kind", "variant", "deck_id", "started_at", "last_frame_at",
                "last_event_at", "last_step", "frame_idle_s", "event_idle_s"}
 QUALITY_KEYS = {"job_id", "computed_at", "title", "text", "policy_version", "ledger_hash", "out_of_bounds", "unchecked"}

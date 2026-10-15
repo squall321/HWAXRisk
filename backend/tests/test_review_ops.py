@@ -151,7 +151,7 @@ def test_hold_table_auto_resume_sets():
     auto = {code for code, rule in ops.HOLD_CODES.items() if rule.auto}
     assert auto == {"llm_outage", "aidh_unreachable", "agent_outdated", "ctx_unknown"}
     assert set(ops.HOLD_CODES) - auto == {"user", "credential", "content_fail_rate", "contract", "ctx_too_small",
-                                          "llm_misconfigured"}
+                                          "llm_misconfigured", "consent_extra", "max_calls"}
 
 
 def test_hold_delays_step_up_and_repeat_the_last():
