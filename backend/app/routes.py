@@ -4869,8 +4869,21 @@ def get_similar(project_id: str, k: int = 5, ident: identity.Identity = Depends(
     return brief_module.similar_projects(get_store(), project_id, k, owner_sub=owner_sub)
 
 
+def _first_member_row(sql: str, params: tuple, email: str) -> dict | None:
+    """원장 참조 행 가운데 부른 사람이 열 수 있는 첫 행 — 그 과제의 구성원(project_role — 소유자 · rr_project_members, 보기 권한도)이다
+    (D50 — 종전에는 행의 owner_sub 로만 걸러 구성원이 못 열었다). 과제는 SQL 의 `_ref_project` 칸(행 · 대상 · 스냅샷 · 스냅샷 잡의
+    과제)으로 받아 응답에서 뗀다. 과제를 모르는 행은 그 행의 주인(`_ref_owner`)만 연다."""
+    for row in get_store().query(sql, params):
+        item = dict(row)
+        owner, project = item.pop("_ref_owner"), item.pop("_ref_project")
+        if (project_role(str(project), email) is not None) if project else owner == email:
+            return item
+    return None
+
+
 def _ref_from_store(info: dict, owner_sub: str) -> dict | None:
-    """스냅샷 스코프 없이 전역으로 주소가 잡히는 참조(reg·narr·tool·rpt·inc·card·req·voc·paper)를 원장에서 찾는다."""
+    """스냅샷 스코프 없이 전역으로 주소가 잡히는 참조(reg·narr·tool·rpt·inc·card·req·voc·paper)를 원장에서 찾는다. reg · narr · tool 은
+    그 과제의 구성원이 연다(`_first_member_row`) — 남에게는 없는 참조와 같다."""
     store = get_store()
     kind = info["kind"]
     if kind == "req":
@@ -4886,39 +4899,43 @@ def _ref_from_store(info: dict, owner_sub: str) -> dict | None:
             store, kind, info["issue_key"] if kind == "voc" else info["paper_id"],
             product_code=info.get("product_code"), owner_sub=owner_sub)
     if kind == "reg":
-        row = store.query_one(
-            "SELECT target_key, cluster_key, merged_json, severity, judgement, status, support, contested"
-            " FROM rr_registry WHERE target_key = ? AND cluster_key = ? AND owner_sub = ?",
-            (info["target_key"], info["cluster_key"], owner_sub))
-        return dict(row) if row is not None else None
+        return _first_member_row(
+            "SELECT target_key, cluster_key, merged_json, severity, judgement, status, support, contested,"
+            " owner_sub AS _ref_owner, (SELECT project_id FROM rr_targets t WHERE t.target_key = rr_registry.target_key)"
+            " AS _ref_project FROM rr_registry WHERE target_key = ? AND cluster_key = ?",
+            (info["target_key"], info["cluster_key"]), owner_sub)
     if kind == "narr" and "finding_id" in info:
-        row = store.query_one(
-            "SELECT finding_id, claim_uid, opinion_id, cluster_key, severity, judgement, status, finding_json"
-            " FROM rr_findings WHERE finding_id = ? AND owner_sub = ?", (info["finding_id"], owner_sub))
-        return dict(row) if row is not None else None
+        return _first_member_row(
+            "SELECT finding_id, claim_uid, opinion_id, cluster_key, severity, judgement, status, finding_json,"
+            " owner_sub AS _ref_owner, project_id AS _ref_project FROM rr_findings WHERE finding_id = ?",
+            (info["finding_id"],), owner_sub)
     if kind == "narr":
-        row = store.query_one(
-            "SELECT id, project_id, facet, tag, statement, status FROM rr_character WHERE id = ? AND owner_sub = ?",
-            (info["character_id"], owner_sub))
-        return dict(row) if row is not None else None
+        return _first_member_row(
+            "SELECT id, project_id, facet, tag, statement, status, owner_sub AS _ref_owner, project_id AS _ref_project"
+            " FROM rr_character WHERE id = ?", (info["character_id"],), owner_sub)
     if kind == "tool" and "conv_id" in info:
         # 레거시 참조 — 포털 대화가 지워져도 rr_panel_calls(conv_id, activity_idx)로 해석한다(§6.7.2 7단계).
-        row = store.query_one(
+        row = _first_member_row(
             "SELECT call_id, panel_id, target_key, seq, agent_key, tool, result_gz, result_bytes, sha256,"
-            " conv_id, activity_idx FROM rr_panel_calls WHERE conv_id = ? AND activity_idx = ?"
-            " AND owner_sub = ?", (info["conv_id"], int(info["idx"]), owner_sub))
+            " conv_id, activity_idx, owner_sub AS _ref_owner, (SELECT project_id FROM rr_targets t"
+            " WHERE t.target_key = rr_panel_calls.target_key) AS _ref_project FROM rr_panel_calls"
+            " WHERE conv_id = ? AND activity_idx = ? ORDER BY call_id", (info["conv_id"], int(info["idx"])), owner_sub)
         return _panel_call_payload(row) if row is not None else None
     if kind == "tool" and str(info.get("call_id") or "").startswith("panel:"):
-        row = store.query_one(
+        row = _first_member_row(
             "SELECT call_id, panel_id, target_key, seq, agent_key, tool, result_gz, result_bytes, sha256,"
-            " conv_id, activity_idx FROM rr_panel_calls WHERE call_id = ? AND owner_sub = ?",
-            (str(info["call_id"])[len("panel:"):], owner_sub))
+            " conv_id, activity_idx, owner_sub AS _ref_owner, (SELECT project_id FROM rr_targets t"
+            " WHERE t.target_key = rr_panel_calls.target_key) AS _ref_project FROM rr_panel_calls WHERE call_id = ?",
+            (str(info["call_id"])[len("panel:"):],), owner_sub)
         return _panel_call_payload(row) if row is not None else None
     if kind == "tool" and "call_id" in info:
-        row = store.query_one(
+        # 스냅샷이 없는 호출(실패 · 부분 잡의 원문)은 그 스냅샷 잡의 과제를 따른다.
+        row = _first_member_row(
             "SELECT call_id, snapshot_id, seq, source_kind, app_key, channel, tool, args_json, ok, http_status,"
-            " response_sha256, response_gz, response_bytes, started_at, duration_ms, error FROM rr_snapshot_calls"
-            " WHERE call_id = ? AND owner_sub = ?", (info["call_id"], owner_sub))
+            " response_sha256, response_gz, response_bytes, started_at, duration_ms, error, owner_sub AS _ref_owner,"
+            " COALESCE((SELECT project_id FROM rr_snapshots s WHERE s.id = rr_snapshot_calls.snapshot_id),"
+            " (SELECT project_id FROM rr_snapshot_jobs j WHERE j.id = rr_snapshot_calls.job_id)) AS _ref_project"
+            " FROM rr_snapshot_calls WHERE call_id = ?", (info["call_id"],), owner_sub)
         return _tool_call_payload(row) if row is not None else None
     return None
 

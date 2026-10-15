@@ -643,3 +643,51 @@ def test_precedents_of_another_persons_diff_answer_like_a_missing_diff(ledger):
     missing = _answer(lambda: routes.get_precedents(diff_id="no-such-diff", ident=factories.ident(OTHER)))
     assert theirs[1] == 404 and _normal(theirs, ids, ("diff",)) == _normal(missing, {"diff": "no-such-diff"}, ("diff",))
     assert _answer(lambda: routes.get_precedents(diff_id=ids["diff"], ident=factories.ident(OWNER)))[1] == 200
+
+
+# ---------------------------------------------------------------- 원장 참조는 구성원이 연다(조정자 결정, D50)
+MEMBER = "member@example.com"
+
+
+def _ledger_refs(store: RiskStore, ids: dict) -> dict[str, tuple[str, str]]:
+    """원장에서 찾는 참조 갈래마다 (주인의 참조, 같은 갈래의 없는 참조) — reg · narr(판정 · 성격) · tool(패널 호출 id · 대화 좌표 ·
+    스냅샷 호출). 성격 진술과 스냅샷 호출은 이 사슬에 생산자가 없어(쟁점 패널은 성격을 앉히지 않고 스냅샷은 시험 장치가 세운다)
+    주인의 과제 · 스냅샷에 한 행씩 심는다."""
+    cluster = store.query_one("SELECT cluster_key FROM rr_registry WHERE target_key = ? ORDER BY cluster_key LIMIT 1",
+                              (ids["target"],))["cluster_key"]
+    call = store.query_one("SELECT call_id, conv_id, activity_idx FROM rr_panel_calls WHERE target_key = ? AND conv_id IS NOT NULL"
+                           " ORDER BY call_id LIMIT 1", (ids["target"],))
+    store.execute("INSERT INTO rr_character(id, project_id, owner_sub, facet, statement, status, created_at, updated_at)"
+                  " VALUES (?,?,?,?,?,?,?,?)", ("ch-owner-1", ids["project"], OWNER, "lineage", "두께를 늘리는 개정이 잦다.",
+                                                "panel", 1, 1))
+    store.execute("INSERT INTO rr_snapshot_calls(call_id, job_id, snapshot_id, owner_sub, seq, source_kind, channel, tool, ok,"
+                  " started_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                  ("snapcall-owner-001", "job-owner", ids["target_snapshot"], OWNER, 1, "mcad", "rest", "/tree", 1, 1))
+    return {
+        "reg": (f"reg:{ids['target']}#{cluster}", "reg:no-such-target#ck:no-such-cluster"),
+        "narr_finding": (ids["narr_ref"], MISSING_VALUES["narr_ref"]),
+        "narr_character": ("narr:ch-owner-1", "narr:no-such-character"),
+        "tool_panel": (f"tool:panel:{call['call_id']}", "tool:panel:no-such-call"),
+        "tool_conv": (f"tool:conv:{call['conv_id']}#{call['activity_idx']}", "tool:conv:no-such-conv#0"),
+        "tool_snapshot": ("tool:snapcall-owner-001", "tool:no-such-call"),
+    }
+
+
+@pytest.mark.parametrize("kind", ["reg", "narr_finding", "narr_character", "tool_panel", "tool_conv", "tool_snapshot"])
+def test_ledger_refs_open_for_project_members_and_answer_like_a_missing_ref_for_a_stranger(ledger, kind):
+    """원장 참조(reg · narr · tool)는 그 과제의 구성원(소유자 · rr_project_members — 보기 권한도)이 연다 — 종전에는 행의 owner_sub 로만
+    걸러 구성원이 못 열었다(D50). 남에게는 같은 갈래의 없는 참조와 같은 404 이고 과제 id · 대상 열쇠를 싣지 않는다."""
+    store, ids = ledger
+    ref, absent = _ledger_refs(store, ids)[kind]
+    routes.put_members(ids["project"], routes.MembersBody(members=[routes.MemberItem(email=MEMBER, role="viewer")]),
+                       ident=factories.ident(OWNER))
+    for who in (OWNER, MEMBER):
+        opened = _answer(lambda who=who: routes.get_ref(ref, ident=factories.ident(who)))
+        assert opened[1] == 200, (kind, who, opened)
+    stranger = factories.ident(OTHER)
+    theirs = _answer(lambda: routes.get_ref(ref, ident=stranger))
+    missing = _answer(lambda: routes.get_ref(absent, ident=stranger))
+    _no_leak(theirs[2], {**ids, "given": ref}, ("given",))
+    assert theirs[1] == 404, theirs
+    assert (theirs[0], _strip(theirs[2], {"given": ref}, ("given",))) == (
+        missing[0], _strip(missing[2], {"given": absent}, ("given",)))
