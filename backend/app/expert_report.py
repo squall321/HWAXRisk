@@ -1661,15 +1661,22 @@ def _md_head(report: Mapping[str, Any]) -> list[str]:
     return ["\n".join(lines)]
 
 
+def _skip_words(note: Any) -> str:
+    """넘긴 셀의 줄 — '넘김 — «사유»'(반대 검토 3차 LOW 7 · D-47 — 본 범위의 단위 줄과 보지 못한 것이 같은 글이다)."""
+    return "넘김 — " + (_q(note) if _s(note) else "사유 기록 없음")
+
+
 def _md_scope(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
     scope = report["scope"]
     totals = scope["totals"]["by_state"]
+    notes = {x["unit_id"]: x["why"].get("text") for x in scope["unseen"] if x["why"].get("code") == "skipped"}
     items = [f"## 본 범위 — 단위 {scope['totals']['units']}개 · " + " · ".join(
         f"{_STATE_WORD.get(s, _q(s))} {n}" for s, n in totals.items())]
     for u in scope["units"]:
         if unit_id and u["unit_id"] != unit_id:
             continue
-        line = f"- 단위 {u['unit_seq']} {_q(u['title'])} — {_STATE_WORD.get(u['state'], _q(u['state']))}"
+        line = f"- 단위 {u['unit_seq']} {_q(u['title'])} — " + (
+            _skip_words(notes.get(u["unit_id"])) if u["state"] == "skipped" else _STATE_WORD.get(u["state"], _q(u["state"])))
         if u["counts"] is not None:
             c = u["counts"]
             line += (f"({_q(u['basis'])}) · judgement=FAIL {c['FAIL']} · judgement=WARNING {c['WARNING']} · 보류"
@@ -1682,7 +1689,7 @@ def _md_scope(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
             line += (" · 긴 문서 검색 못 함(search_failed — 역할만으로 답했다)" if search["search_failed"] and not search["used_n"]
                      else f" · 긴 문서 발췌 {search['used_n']}건" if search["used_n"]
                      else f" · 긴 문서 검색 {_q(search['state'])}(실은 발췌 없음 — 역할만으로 답했다)")
-        if not u["in_scope"] and u["state"] != "reviewed":
+        if not u["in_scope"] and u["state"] not in ("reviewed", "skipped"):        # 넘김은 범위가 아니라 사람의 처분이다(3차 LOW 7)
             line += " · 이 검토 잡의 범위 밖"
         sample = u.get("sample") or {}
         if "filter_audit" in sample:
@@ -1697,8 +1704,12 @@ def _md_scope(report: Mapping[str, Any], unit_id: str | None) -> list[str]:
     why_word = {"out_of_scope": "이 검토 잡의 범위 밖이라 대기", "pack_blocked": "카드 묶음을 받지 못해 보지 않았다"}
     for x in unseen:
         why = x["why"]
-        text = why_word.get(why["code"]) or f"{_STATE_WORD.get(x['state'], _q(x['state']))} {_q(why['code'])}"
-        items.append(f"- 단위 {x['unit_seq']} {_q(x['title'])} — {text}" + (f" {_q(why['text'])}" if why.get("text") else "")
+        if why["code"] == "skipped":
+            text = _skip_words(why.get("text"))
+        else:
+            text = (why_word.get(why["code"]) or f"{_STATE_WORD.get(x['state'], _q(x['state']))} {_q(why['code'])}") + (
+                f" {_q(why['text'])}" if why.get("text") else "")
+        items.append(f"- 단위 {x['unit_seq']} {_q(x['title'])} — {text}"
                      + (f" · 넘긴 셀 — 일부만 판정(이미 정산된 걸림을 남겼다 — {_hits_line(why.get('hits_by') or {})})"
                         if why.get("hits") else ""))
     if not unseen:

@@ -235,6 +235,23 @@ def test_skip_needs_a_reason_and_the_expert_closes_again_with_the_skip_in_the_re
     assert len(_audits(store, "cells.skip")) == 1
 
 
+@pytest.mark.parametrize("live", [False, True])
+def test_a_skipped_cells_lines_say_skip_and_its_reason_never_out_of_scope(store, live):
+    """반대 검토 3차 LOW 7 · D-47 — 넘긴 셀의 보고서 줄(본 범위의 단위 줄 · 보지 못한 것)은 '넘김 — «사유»' 다. 넘김을 마감하는 잡(새로
+    선 마감 잡이든 살아 있던 잡이든)의 범위와 그 셀의 잡 결속이 달라도 '이 검토 잡의 범위 밖' 이라 적지 않는다 — 종전에는 넘긴 셀마다
+    단위 줄이 '넘김 · 이 검토 잡의 범위 밖', 보지 못한 것이 '넘김 «skipped» «사유»' 였다."""
+    key, job_id, unit_ids, fake, r = _failed_target(store)
+    running = rig.job(store, key, scope={"agents": [SEAL]}) if live else None
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(cells=[[unit_ids[0], PEER]], reason="입력이 와야 본다"), ident=ME)
+    assert out["job"]["action"] == ("adopted" if live else "created")
+    r.finish(running or out["job"]["job_id"])
+    assert _head(store, key, PEER)["state"] == "ready"                      # 넘김을 실은 보고서로 다시 마감됐다
+    md = expert_report.render_report_md(expert_report.load_report(store, key, PEER))
+    lines = [ln for ln in md.splitlines() if ln.startswith("- 단위 ") and "넘김" in ln]
+    assert len(lines) == 2 and all(ln.endswith(" — 넘김 — «입력이 와야 본다»") for ln in lines)
+    assert "범위 밖" not in "".join(lines)
+
+
 def test_skipping_a_pack_blocked_experts_cells_finalizes_it_without_a_pack_and_closes_the_seat_skipped(store):
     """카드 묶음을 끝내 못 받은 전문가(blocked — 셀이 전부 failed(pack_unavailable))의 셀을 넘기면 마감 잡이 묶음 없이 그 전문가를
     마감한다(묶음을 다시 받지 않는다). reviewed 0 · 넘김만 남은 전문가의 원장은 skipped(cells_skipped:n) 다(m3-cells 3.9 의 7번)."""
