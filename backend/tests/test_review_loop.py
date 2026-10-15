@@ -1059,7 +1059,7 @@ def test_a_frozen_pack_missing_on_this_box_is_fetched_again(store, monkeypatch):
     job_id = rig.job(store, key, scope={"agents": [SEAL]})
     fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
     r = rig.Rig(store, fake)
-    r.tick()                                                # 묶음 받기만
+    r.tick(packs_only=True)                                 # 묶음 받기만
     assert _head(store, key, SEAL)["pack_status"] == "ok" and fake.runs == 0
     # 들여온 박스와 같은 자리 — 머리는 묶음 열쇠를 가리키는데 rr_card_packs 에는 그 행이 없다(행을 지울 뿐 손으로 넣지 않는다).
     store.execute("DELETE FROM rr_card_packs WHERE agent_key = ?", (SEAL,))
@@ -1273,7 +1273,7 @@ def test_a_portal_rejecting_the_users_pat_holds_credential_and_the_service_pat_i
     job_id = rig.job(store, key, scope={"agents": [SEAL]})
     fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
     r = rig.Rig(store, fake)
-    r.tick()                                                # 묶음은 받았다
+    r.tick(packs_only=True)                                 # 묶음은 받았다
     fake.credential_expired = True
     r.run(lambda: rig.state(store, job_id) == "paused", ticks=5)
     row = rig.job_row(store, job_id)
@@ -1565,7 +1565,7 @@ def test_a_defect_in_a_session_releases_the_expert_with_a_pause_instead_of_stran
     job_id = rig.job(store, key, scope={"agents": [SEAL]})
     fake = FakeReviewEngine({SEAL: fre.load("pack_ok.json")})
     r = rig.Rig(store, fake)
-    r.tick()                                                # 묶음
+    r.tick(packs_only=True)                                 # 묶음
     real = review_runner._Session.run
     monkeypatch.setattr(review_runner._Session, "run", lambda self: (_ for _ in ()).throw(RuntimeError("결함")))
     r.tick()
