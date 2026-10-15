@@ -89,6 +89,26 @@ def test_header_is_first_line(seeded):
     assert isinstance(head["origin"], dict) and "hostname" in head["origin"]
 
 
+def test_default_export_scopes_target_keyed_rows_by_their_project(risk_store):
+    """기본 반출은 과제 열이 없는 대상 열쇠 표(등록부 · 기여 …)도 과제 열 표와 같은 규칙으로 거른다 — 코퍼스에서 뺀(기밀) 과제의 대상에
+    매인 행은 싣지 않고 include_excluded 로만 싣는다. 종전에는 그 행이 실리는데 classification_max 는 'internal' 이었다(조합 검토 M9)."""
+    _seed(risk_store, ALICE, at=1_000)
+    risk_store.execute("UPDATE rr_projects SET corpus_excluded = 1, excluded_reason = 'user', classification = 'confidential'"
+                       " WHERE id = 'p-ali'")
+    _insert(risk_store, "rr_registry", {"target_key": "t-ali", "cluster_key": "ck:excluded01", "owner_sub": ALICE,
+                                        "merged_json": "{}", "status": "open", "updated_at": 1_000})
+    _insert(risk_store, "rr_delta_contrib", {"change_kind": "placement", "mechanism": "interface",
+                                             "mechanism_detail": "interference", "target_key": "t-ali",
+                                             "owner_sub": ALICE, "resolving_checks_json": '["기밀 확인 절차"]',
+                                             "updated_at": 1_000})
+    default = {line["table"] for line in _lines(risk_store)[1:]}
+    assert not {"rr_targets", "rr_registry", "rr_delta_contrib"} & default
+    assert export.classification_max(risk_store, ALICE) == "internal"
+    widened = {json.loads(ln)["table"] for ln in list(export.iter_lines(risk_store, ALICE, 0, include_excluded=True))[1:]}
+    assert {"rr_targets", "rr_registry", "rr_delta_contrib"} <= widened
+    assert export.classification_max(risk_store, ALICE, include_excluded=True) == "confidential"
+
+
 def test_rows_follow_plan_table_order_and_skip_housekeeping(seeded):
     tables = [ln["table"] for ln in _lines(seeded)[1:]]
     assert tables, "행이 하나도 실리지 않았다"

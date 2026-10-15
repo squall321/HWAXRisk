@@ -417,7 +417,8 @@ def _select(store: RiskStore, table: str, owner_sub: str, since: int,
 
     owner_sub 열이 없는 공용 표(rr_dim_vocab·rr_rules·rr_metrics·rr_delta_priors)는 소유자로 거를 수 없다 —
     그 중 visibility 열이 있는 표는 'org' 행만 싣는다(남의 사설 집계가 내 JSONL 에 따라 나가지 않게 한다).
-    `project_id` 를 가진 표는 회수·코퍼스 제외 과제를 기본으로 뺀다(plan §5.2.6 (ii)).
+    `project_id` 를 가진 표는 회수·코퍼스 제외 과제를 기본으로 뺀다(plan §5.2.6 (ii)) — 과제 열 없이 `target_key` 를 가진 표는 그
+    대상의 과제로 같은 거름을 건다(조합 검토 M9).
     """
     cols, pks = _table_meta(store, table)
     cols = [c for c in cols if c not in _EXPORT_SKIP_COLUMNS.get(table, ())]
@@ -435,6 +436,11 @@ def _select(store: RiskStore, table: str, owner_sub: str, since: int,
             where.append("corpus_excluded = 0")
     elif "project_id" in cols:
         where.append(_PROJECT_SCOPE_SQL)
+        params += [owner_sub, 1 if include_excluded else 0]
+    elif "target_key" in cols:
+        # 과제 열이 없는 대상 열쇠 표(등록부 · 기여 · 패널 …)는 그 대상의 과제로 같은 거름을 건다 — 종전에는 소유자로만 걸러 코퍼스에서
+        # 뺀(기밀) 과제의 행이 기본 반출에 실리는데 classification_max 는 'internal' 이라 했다(조합 검토 M9).
+        where.append(f"target_key IN (SELECT target_key FROM rr_targets WHERE {_PROJECT_SCOPE_SQL})")
         params += [owner_sub, 1 if include_excluded else 0]
     since_cols = [c for c in _SINCE_COLS.get(table, ()) if c in cols]
     if since > 0 and since_cols:
