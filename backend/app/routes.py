@@ -3356,7 +3356,14 @@ def _issue_row_out(issue: dict) -> dict:
             "panel_id": issue["panel_id"],
             "seats": [{"key": s.get("key"), "domain": s.get("domain"), "issue_role": s.get("issue_role")}
                       for s in _loads(issue.get("seats_json"), []) or ()],
-            "selected_round": issue["selected_round"], "attempts": issue["attempts"], "charged": issue["charged"]}
+            "selected_round": issue["selected_round"], "attempts": issue["attempts"], "charged": issue["charged"],
+            # 패널이 판정한 뒤 근거가 바뀐 쟁점(review1 H3) — 등록부 · 보고서와 같은 표기를 행에도 싣는다(조합 검토 L3).
+            "reargue": _reargue_out(issue)}
+
+
+def _reargue_out(issue: dict) -> dict | None:
+    reraised = _loads(issue.get("reraised_json"), {}) or {}
+    return {"label": registry_module.reargue_label(reraised), **reraised} if reraised else None
 
 
 def ledger_rev(rows: list[dict]) -> str:
@@ -3431,9 +3438,11 @@ def put_issue(issue_id: str, body: IssueActionBody, ident: identity.Identity = D
     state = "queued" if body.action == "queue" else "skipped"
     job = None
     with store.tx():
+        # 다시 줄 세우기는 charged 를 0 으로 돌린다 — 앞 시도의 실패를 새 회차의 몫으로 세지 않는다(조합 검토 M2).
         store.execute("UPDATE rr_issues SET state = ?, state_reason = ?, status_source = 'human', decided_by = ?,"
-                      " decided_at = ?, reason = ?, updated_at = ? WHERE issue_id = ?",
-                      (state, "human", email, now_epoch(), reason, now_epoch(), issue_id))
+                      " decided_at = ?, reason = ?, charged = CASE WHEN ? = 'queued' THEN 0 ELSE charged END, updated_at = ?"
+                      " WHERE issue_id = ?",
+                      (state, "human", email, now_epoch(), reason, state, now_epoch(), issue_id))
         issues_module._sync_registry(store, target["target_key"])
         _audit(store, email, scope="target", subject_id=target["target_key"], action=f"issue.{body.action}",
                project_id=target["project_id"], before={"issue_id": issue_id, "state": row["state"]},

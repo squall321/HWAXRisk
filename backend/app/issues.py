@@ -305,16 +305,17 @@ def select_issues(store: RiskStore, target_key: str, *, selected_round: int, set
             if row and (_str(row["status_source"]) == "human" or state in IN_FLIGHT_STATES or state == "skipped"):
                 cand["action"] = "keep"
             elif row and row["outcome"] is not None:
-                # 결과 쟁점 — 다시 줄을 서 있으면 그대로, 근거가 바뀌었거나 다시 토의를 기다리면(reraised_json — 다시 섰다가 잡이
-                # 취소돼 돌아온 것 포함) 다시 토의 후보(상한에 자리가 있을 때만 다시 돈다), 아니면 그대로.
-                if state == "queued":
-                    # 이미 다시 줄을 섰다(자리를 쥐고 있다) — 근거가 또 바뀌었으면 새 근거만 다시 적는다.
+                # 결과 쟁점 — 근거가 패널 때 근거로 돌아왔으면(또는 그대로면) 다시 토의 표기를 내리고 다시 줄 서지 않는다(조합 검토
+                # L2 — 같은 패널을 또 돌리지 않는다). 다시 줄을 서 있으면 근거가 또 바뀌었을 때 새 근거만 다시 적고, 아니면 바뀐
+                # 근거가 다시 토의 후보다(상한에 자리가 있을 때만 다시 돈다).
+                panel_basis = (_loads(row["reraised_json"], {}) or {}).get("panel_basis_hash") or row["basis_hash"]
+                if cand["basis_hash"] == panel_basis:
+                    cand["action"] = "restore" if (row["reraised_json"] or state == "queued") else "keep"
+                elif state == "queued":
                     cand["action"] = "refresh" if row["basis_hash"] != cand["basis_hash"] else "keep"
                 else:
-                    changed = row["basis_hash"] != cand["basis_hash"] or bool(row["reraised_json"])
-                    cand["action"] = "reraise" if changed else "keep"
-                    if changed:
-                        pending.append(cand)
+                    cand["action"] = "reraise"
+                    pending.append(cand)
             elif state in DONE_STATES and row["basis_hash"] == cand["basis_hash"]:
                 cand["action"] = "keep"
             else:
@@ -329,6 +330,11 @@ def select_issues(store: RiskStore, target_key: str, *, selected_round: int, set
             if cand["action"] == "keep":
                 store.execute("UPDATE rr_issues SET rank = ?, updated_at = ? WHERE target_key = ? AND anchor_cluster_key = ?",
                               (rank, now, target_key, anchor))
+                continue
+            if cand["action"] == "restore":
+                store.execute(f"UPDATE rr_issues SET state = {_DONE_OF_OUTCOME}, rank = ?, basis_json = ?, basis_hash = ?,"
+                              " reraised_json = NULL, updated_at = ? WHERE target_key = ? AND anchor_cluster_key = ?",
+                              (rank, common.canonical_json(cand["basis"]), cand["basis_hash"], now, target_key, anchor))
                 continue
             if cand["action"] in ("reraise", "refresh"):
                 reraised_n += 1
@@ -389,7 +395,7 @@ def _reraise(store: RiskStore, target_key: str, row: Mapping[str, Any], cand: Ma
         store.execute(
             "UPDATE rr_issues SET state = 'queued', state_reason = 'reraised', rank = ?, types_json = ?, p_class = ?,"
             " priority = ?, unit_id = ?, basis_json = ?, basis_hash = ?, reraised_json = ?, selected_round = ?, cells_hash = ?,"
-            " updated_at = ? WHERE issue_id = ?",
+            " charged = 0, updated_at = ? WHERE issue_id = ?",
             (rank, common.canonical_json(list(cand["types"])), cand["p_class"], cand["priority"], cand["unit_id"],
              common.canonical_json(cand["basis"]), cand["basis_hash"], common.canonical_json(reraised), int(selected_round),
              cells_hash, now, row["issue_id"]))
@@ -706,7 +712,8 @@ def release_issue(store: RiskStore, panel_id: str, *, charge: bool, reason: str 
     영영 '쟁점 진행' 으로 남는다. `untry_queued` 와 같은 길로 놓는다(chain_cancelled · job_failed). 앞 패널의 결과가 있는 쟁점은
     결과를 잃지 않는다(review1 H3 — 판정 못 함으로 끝날 때만 결과가 바뀐다)."""
     cfg = settings or config.settings
-    row = store.query_one("SELECT issue_id, target_key, state, charged FROM rr_issues WHERE panel_id = ?", (panel_id,))
+    row = store.query_one("SELECT issue_id, target_key, state, charged, outcome, reraised_json FROM rr_issues"
+                          " WHERE panel_id = ?", (panel_id,))
     if row is None or _str(row["state"]) not in IN_FLIGHT_STATES:
         return None
     target_key = str(row["target_key"])
@@ -714,6 +721,10 @@ def release_issue(store: RiskStore, panel_id: str, *, charge: bool, reason: str 
     state = "inconclusive" if charge and charged >= int(cfg.risk_issue_max_charged) else "queued"
     now = common.now_epoch()
     with store.tx():
+        if state == "inconclusive" and _str(row["outcome"]) in PANEL_VERDICTS:
+            state = _keep_verdict(store, row, panel_id, reason or "charged", charged, now)
+            _sync_registry(store, target_key)
+            return {"issue_id": row["issue_id"], "state": state, "charged": charged}
         store.execute("UPDATE rr_issues SET state = ?, state_reason = ?, outcome = CASE WHEN ? = 'inconclusive' THEN"
                       " 'undetermined' ELSE outcome END, charged = ?, updated_at = ? WHERE issue_id = ?",
                       (state, reason if charge or state != "queued" else None, state, charged, now, row["issue_id"]))
@@ -723,6 +734,21 @@ def release_issue(store: RiskStore, panel_id: str, *, charge: bool, reason: str 
             state = _str(store.query_one("SELECT state FROM rr_issues WHERE issue_id = ?", (row["issue_id"],))["state"])
         _sync_registry(store, target_key)
     return {"issue_id": row["issue_id"], "state": state, "charged": charged}
+
+
+# 패널이 낸 판정 — 다시 줄을 선 결과 쟁점은 새 패널이 이 가운데 하나를 낼 때까지 옛 판정을 둔다(조합 검토 M2 — D-52).
+PANEL_VERDICTS: tuple[str, ...] = ("upheld", "downgraded", "escalated", "rejected")
+
+
+def _keep_verdict(store: RiskStore, issue: Mapping[str, Any], panel_id: str, reason: str, charged: int, now: int) -> str:
+    """새 패널이 결정하지 못했다(읽을 수 없는 결정문 한도 · 판정 못 함 · 닻 원자 없음) — 옛 판정(outcome · outcome_json)을 둔 채
+    결과 쟁점으로 돌아가고, 다시 토의 표기(reraised_json)에 new_panel_failed 를 단다 — '패널 판정 — 근거 바뀜, 다시 토의 필요(새 패널
+    결정 못 함)' 로 보인다. 표기는 새 패널이 결정하거나 근거가 패널 때로 돌아올 때만 내려간다."""
+    reraised = _loads(issue["reraised_json"], {}) or {}
+    reraised["new_panel_failed"] = {"panel_id": panel_id, "reason": reason, "at": now}
+    store.execute(f"UPDATE rr_issues SET state = {_DONE_OF_OUTCOME}, reraised_json = ?, charged = ?, updated_at = ?"
+                  " WHERE issue_id = ?", (common.canonical_json(reraised), charged, now, issue["issue_id"]))
+    return "resolved"
 
 
 def _untry(store: RiskStore, where: str, params: tuple, reason: str) -> int:
@@ -762,22 +788,37 @@ def resolve_issue(store: RiskStore, panel_id: str, *, settings: Any = None) -> d
                             (panel_id,))
     if panel is None or not panel["issue_id"]:
         return {"issue_id": None, "state": None, "outcome": None}
-    issue = store.query_one("SELECT issue_id, target_key, anchor_cluster_key, state, panel_id, charged, basis_json"
-                            " FROM rr_issues WHERE issue_id = ?", (panel["issue_id"],))
+    issue = store.query_one("SELECT issue_id, target_key, anchor_cluster_key, state, panel_id, charged, basis_json, outcome,"
+                            " outcome_json, reraised_json FROM rr_issues WHERE issue_id = ?", (panel["issue_id"],))
     if issue is None:
         return {"issue_id": panel["issue_id"], "state": None, "outcome": None}
     if _str(issue["panel_id"]) != panel_id or _str(issue["state"]) in _UNRESOLVABLE_STATES:
         return {"issue_id": issue["issue_id"], "state": issue["state"], "outcome": None, "stale": True}
+    if issue["reraised_json"] and _str((_loads(issue["outcome_json"], {}) or {}).get("panel_id")) == panel_id:
+        # 다시 토의를 기다리는 쟁점에 지금 판정을 낸 그 옛 패널을 다시 냈다 — 새 패널의 결정이 아니다. 표기를 내리거나 대기에서 빼거나
+        # 옛 판정을 새 근거에 붙이지 않는다(조합 검토 L1).
+        return {"issue_id": issue["issue_id"], "state": issue["state"], "outcome": None, "stale": True}
     target_key = str(issue["target_key"])
     now = common.now_epoch()
+    verdict = _str(issue["outcome"]) in PANEL_VERDICTS
     if not panel["risk_spec_parsed"]:
         charged = int(issue["charged"] or 0) + 1
         state = "inconclusive" if charged >= int(cfg.risk_issue_max_charged) else "queued"
         with store.tx():
+            if state == "inconclusive" and verdict:
+                state = _keep_verdict(store, issue, panel_id, "spec_parse_failed", charged, now)
+                _sync_registry(store, target_key)
+                return {"issue_id": issue["issue_id"], "state": state, "outcome": issue["outcome"]}
             # 앞 패널의 결과가 있으면(다시 줄을 선 결과 쟁점) 대기로 돌아갈 때 그 결과를 둔다(review1 H3).
             store.execute("UPDATE rr_issues SET state = ?, state_reason = 'spec_parse_failed', outcome = CASE WHEN ?"
                           " = 'inconclusive' THEN 'undetermined' ELSE outcome END, charged = ?, updated_at = ? WHERE issue_id = ?",
                           (state, state, charged, now, issue["issue_id"]))
+            # 살아 있는 쟁점 잡이 없으면 대기로 두지 않는다 — 집을 잡이 없어 영영 '쟁점 진행' 으로 남는다(조합 검토 M1, release_issue 와
+            # 같은 길).
+            orphan = _orphan_reason(store, target_key) if state == "queued" else None
+            if orphan is not None:
+                _untry(store, "issue_id = ?", (issue["issue_id"],), orphan)
+                state = _str(store.query_one("SELECT state FROM rr_issues WHERE issue_id = ?", (issue["issue_id"],))["state"])
             _sync_registry(store, target_key)
         return {"issue_id": issue["issue_id"], "state": state, "outcome": "undetermined" if state == "inconclusive" else None}
     anchor = str(issue["anchor_cluster_key"])
@@ -803,6 +844,12 @@ def resolve_issue(store: RiskStore, panel_id: str, *, settings: Any = None) -> d
             sev3 = int(atom["sev3"] or 0)
             state = "resolved"
             outcome = "downgraded" if sev3 < base_sev3 else ("escalated" if sev3 > base_sev3 else "upheld")
+    if outcome == "undetermined" and verdict:
+        # 새 패널이 결정하지 못했다(닻 원자 없음 · 판정 못 함) — 옛 판정을 둔다(조합 검토 M2).
+        with store.tx():
+            state = _keep_verdict(store, issue, panel_id, reason or "no_decision", int(issue["charged"] or 0), now)
+            _sync_registry(store, target_key)
+        return {"issue_id": issue["issue_id"], "state": state, "outcome": issue["outcome"]}
     # 결과 칸의 원자는 결과·등록부(registry._apply_issue)와 같은 원자다 — (sev3, 판정, finding id). 종전에는 (sev3, finding id) 로
     # 골라 같은 심각도의 OK·FAIL 원자가 섞이면 보고서 줄이 등록부와 어긋났다(review1 M2).
     chosen = atom if risk else None

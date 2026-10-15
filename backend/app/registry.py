@@ -84,6 +84,13 @@ ATTENTION_ORDER: dict[str, int] = {"A": 0, "B": 1, "C": 2, "D": 3}
 _ISSUE_DONE_STATES = ("resolved", "inconclusive")
 # 패널이 판정한 뒤 근거(제기자·반대자·주장값)가 바뀐 쟁점의 표기(재설계 M3 review1 H3 — 등록부·보고서·길잡이가 같은 글을 쓴다).
 REARGUE_LABEL = "패널 판정 — 근거 바뀜, 다시 토의 필요"
+# 다시 줄을 선 결과 쟁점의 새 패널이 결정하지 못했다 — 옛 판정이 남고 표기에 이것을 붙인다(조합 검토 M2 — D-52).
+REPANEL_FAILED_NOTE = "(새 패널 결정 못 함)"
+
+
+def reargue_label(reraised: Mapping[str, Any] | None) -> str:
+    """다시 토의 표기 — 새 패널이 결정하지 못했으면 그 사실을 붙인다(등록부 · 보고서 · 쟁점 행 · 요약 입력이 같은 글을 쓴다)."""
+    return REARGUE_LABEL + (REPANEL_FAILED_NOTE if (reraised or {}).get("new_panel_failed") else "")
 
 
 def target_purged(store: RiskStore, target_key: str) -> bool:
@@ -563,7 +570,7 @@ def _apply_issue(row: dict, merged: dict, issue: Mapping[str, Any], members: Seq
     row["issue_state"] = issue_state_of(issue)
     reraised = _loads(issue.get("reraised_json"), {})
     if reraised:
-        merged["issue_reraised"] = {"label": REARGUE_LABEL, **{k: reraised[k] for k in sorted(reraised)}}
+        merged["issue_reraised"] = {"label": reargue_label(reraised), **{k: reraised[k] for k in sorted(reraised)}}
     outcome = _clean_str(issue.get("outcome"))
     if outcome == "rejected":
         if not row["human_n"]:

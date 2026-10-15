@@ -767,3 +767,115 @@ def test_a_requeued_resolved_issue_released_without_a_live_job_returns_to_its_ve
     issues.select_issues(store, key, selected_round=5)
     gone = _issue(store, key, anchor)
     assert (gone["state"], gone["outcome"]) == ("resolved", "escalated")
+
+
+# ---------------------------------------------------------------- 조합 검토 M1 · M2 · L1 · L2 · L3(D-52 — 다시 토의)
+REPANEL_FAILED = REARGUE + "(새 패널 결정 못 함)"
+
+
+def _escalated_then_reraised(store, monkeypatch, tmp_path, *, requeue: bool) -> tuple[str, str, str, IssuePanelEngine]:
+    """패널이 치명/FAIL 로 올린 쟁점의 제기자가 빠진다(근거 바뀜) — requeue 면 상한에 자리가 있어 다시 줄을 선다. (대상, 닻, 옛 패널, 엔진)."""
+    key, (unit,) = _ledger(store)
+    anchor = _k01_anchor(store, key, unit)
+    _select(store, monkeypatch, tmp_path, key, cap=1)
+    engine = IssuePanelEngine(store, {"*": {"severity": "치명", "judgement": "FAIL"}})
+    _run_issues(store, config.settings, engine, key)
+    first = _issue(store, key, anchor)
+    assert (first["state"], first["outcome"]) == ("resolved", "escalated")
+    _retry_ok(store, key, "mech-syn-0", unit)
+    _select(store, monkeypatch, tmp_path, key, cap=2 if requeue else 1)
+    assert _issue(store, key, anchor)["state"] == ("queued" if requeue else "resolved")
+    return key, anchor, str(first["panel_id"]), engine
+
+
+def test_an_unparseable_resubmission_with_no_live_job_does_not_leave_the_issue_queued(store, monkeypatch, tmp_path):
+    """M1 — 쟁점 잡이 끝난 뒤 그 패널을 읽을 수 없는 결정문으로 다시 내도(POST /panels/{id}/complete) 쟁점이 잡 없는 대기로 남지
+    않는다 — 다시 줄 세우는 모든 길이 살아 있는 잡을 본다. 앞 결과가 있으면 그 결과 쟁점으로 돌아간다."""
+    key, (unit,) = _ledger(store)
+    anchor = _k01_anchor(store, key, unit)
+    _select(store, monkeypatch, tmp_path, key)
+    engine = IssuePanelEngine(store)
+    _run_issues(store, config.settings, engine, key)
+    decided = _issue(store, key, anchor)
+    assert decided["state"] == "resolved"
+    bad = IssuePanelEngine(store, {decided["issue_id"]: "unparseable"}).run(engine.calls[-1])
+    _resubmit(str(decided["panel_id"]), bad)
+    after = _issue(store, key, anchor)
+    assert (after["state"], after["outcome"]) == ("resolved", decided["outcome"])
+
+
+def test_a_failed_repanel_keeps_the_old_verdict_and_says_so_and_a_requeue_resets_charged(store, monkeypatch, tmp_path):
+    """M2 — 다시 줄을 선 결과 쟁점의 새 패널이 결정하지 못하면(읽을 수 없는 결정문 둘) 옛 판정이 남는다 — 등록부 덮어쓰기(before_issue
+    포함)와 보고서 줄이 옛 판정 그대로고 '패널 판정 — 근거 바뀜, 다시 토의 필요(새 패널 결정 못 함)' 로 보인다. 다시 줄 세우기는
+    charged 를 0 으로 돌린다(앞 패널의 실패를 새 근거의 몫으로 세지 않는다)."""
+    from app import synth
+
+    key, (unit,) = _ledger(store)
+    anchor = _k01_anchor(store, key, unit)
+    _select(store, monkeypatch, tmp_path, key, cap=1)
+    issue_id = _issue(store, key, anchor)["issue_id"]
+    engine = IssuePanelEngine(store, {issue_id: "unparseable"})
+    _run_issues(store, config.settings, engine, key, limit=1)
+    assert _issue(store, key, anchor)["charged"] == 1
+    engine.script[issue_id] = {"severity": "치명", "judgement": "FAIL"}
+    _run_issues(store, config.settings, engine, key)
+    assert (_issue(store, key, anchor)["outcome"], _issue(store, key, anchor)["charged"]) == ("escalated", 1)
+    _retry_ok(store, key, "mech-syn-0", unit)
+    _select(store, monkeypatch, tmp_path, key, cap=3)                           # 상한은 이 대상이 돌린 패널 둘을 센다
+    assert (_issue(store, key, anchor)["state"], _issue(store, key, anchor)["charged"]) == ("queued", 0)
+    _run_issues_existing(store, IssuePanelEngine(store, {"*": "unparseable"}), limit=1)
+    assert (_issue(store, key, anchor)["state"], _issue(store, key, anchor)["charged"]) == ("queued", 1)
+    _run_issues_existing(store, IssuePanelEngine(store, {"*": "unparseable"}), limit=1)
+    held = _issue(store, key, anchor)
+    assert (held["state"], held["outcome"]) == ("resolved", "escalated")
+    assert json.loads(held["reraised_json"]).get("new_panel_failed")
+    registry.merge(store, key)
+    row = _row(store, key, anchor)
+    assert (row["severity"], row["judgement"]) == ("치명", "FAIL") and row["merged"]["before_issue"]["judgement"] == "WARNING"
+    assert row["merged"]["issue_reraised"]["label"] == REPANEL_FAILED
+    report = synth.report_source(store, key, version=synth.assemble_report(store, key, trigger="manual")["version_no"])
+    summary = "\n".join(t for p in report["pages"] if p["kind"] == "summary" for b in synth.BLOCKS for t in p["blocks"][b])
+    line = next(t for t in summary.split("\n") if f"reg:{anchor}" in t)
+    assert REPANEL_FAILED in line and "판정 못 함" not in line.replace(REPANEL_FAILED, "")
+
+
+def test_resubmitting_the_old_panel_does_not_clear_the_reargue_mark_or_dequeue(store, monkeypatch, tmp_path):
+    """L1 — 근거가 바뀌어 다시 줄을 선 쟁점에 옛 패널을 다시 내도(POST /panels/{id}/complete) 다시 토의 표기가 내려가지 않고 대기에서
+    빠지지 않는다 — 표기는 새 패널이 결정할 때만 내려간다(옛 판정을 새 근거에 붙이지 않는다)."""
+    key, anchor, old_panel, engine = _escalated_then_reraised(store, monkeypatch, tmp_path, requeue=True)
+    before = _issue(store, key, anchor)
+    again = IssuePanelEngine(store, {"*": {"severity": "중대", "judgement": "WARNING"}}).run(engine.calls[-1])
+    _resubmit(old_panel, again)
+    after = _issue(store, key, anchor)
+    assert (after["state"], after["outcome"], after["outcome_json"]) == ("queued", "escalated", before["outcome_json"])
+    assert after["reraised_json"] == before["reraised_json"]
+
+
+def test_evidence_back_at_the_panel_basis_clears_the_mark_and_is_not_queued_again(store, monkeypatch, tmp_path):
+    """L2 — 바뀐 근거가 패널 때 근거로 돌아오면 다시 토의 표기가 내려가고 상한에 자리가 있어도 다시 줄 서지 않는다(같은 패널을 또 돌리지
+    않는다). 다시 줄을 서 있던 쟁점도 옛 판정의 결과 쟁점으로 돌아간다."""
+    for requeue in (False, True):
+        store.execute("DELETE FROM rr_issues")
+        key, anchor, old_panel, _engine = _escalated_then_reraised(store, monkeypatch, tmp_path, requeue=requeue)
+        unit = _issue(store, key, anchor)["unit_id"]
+        _retry_ok(store, key, "mech-syn-0", unit, verdict="FAIL")              # 빠졌던 제기자가 돌아온다 — 패널 때 근거
+        _select(store, monkeypatch, tmp_path, key, cap=3)
+        back = _issue(store, key, anchor)
+        assert (back["state"], back["outcome"], back["reraised_json"], back["panel_id"]) == (
+            "resolved", "escalated", None, old_panel), requeue
+
+
+def test_the_reargue_mark_rides_the_issue_rows_and_the_summary_input(store, monkeypatch, tmp_path):
+    """L3 — 다시 토의 표기는 쟁점 행(REST · MCP 같은 함수)과 요약 입력(등록부 행 줄 · 쟁점 블록)에도 선다 — 종전에는 그냥
+    resolved/escalated 로 보였다."""
+    from app import closure, synth
+
+    key, anchor, _old, _engine = _escalated_then_reraised(store, monkeypatch, tmp_path, requeue=False)
+    registry.merge(store, key)
+    (row,) = [r for r in routes.issues_payload(key, owner_sub=OWNER)["rows"] if r["anchor_cluster_key"] == anchor]
+    assert (row.get("reargue") or {}).get("label") == REARGUE
+    built = synth.summary_input(store, key, "target", key, limits=None, counts=closure.cell_counts(store, key))
+    text = json.dumps(built["summary"], ensure_ascii=False)
+    issue_lines = next(b["text"] for b in built["summary"]["blocks"] if b["name"] == "issues")
+    assert REARGUE in next(line for line in issue_lines.split("\n") if f"reg:{anchor}" in line)
+    assert REARGUE in next(r["text"] for r in built["summary"]["rows"] if r["ref"] == f"reg:{anchor}"), text[:500]

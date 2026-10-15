@@ -86,6 +86,9 @@ def row_line(store: RiskStore, row: Mapping[str, Any], *, line_max: int = LINE_M
             f"{int(row.get('support_units') or 0)}단위(검증 {int(row.get('support_verified') or 0)})")
     if row.get("issue_state"):
         head += f" · 쟁점 {row['issue_state']}"
+        if merged.get("issue_reraised"):
+            # 패널이 판정한 뒤 근거가 바뀐 쟁점 — 요약 입력에도 다시 토의 표기를 싣는다(조합 검토 L3).
+            head += f"({merged['issue_reraised'].get('label') or registry.REARGUE_LABEL})"
     claim = _str(merged.get("claim"))
     if not claim:
         return head[:line_max]
@@ -151,8 +154,10 @@ def _issues_block(store: RiskStore, target_key: str, domain: str | None) -> dict
         raisers = issue["basis"].get("raisers") or ()
         if domain is not None and not any(r.get("domain") == domain for r in raisers):
             continue
+        reraised = _loads(issue.get("reraised_json"), {}) or {}
         lines.append(f"reg:{issue['anchor_cluster_key']} · {issue['state']}" + (f"/{issue['outcome']}" if issue["outcome"]
-                                                                                else ""))
+                                                                                else "")
+                     + (f" · {registry.reargue_label(reraised)}" if reraised else ""))
     return {"name": "issues", "title": "쟁점 결과", "text": "\n".join(lines)} if lines else None
 
 
@@ -657,7 +662,7 @@ def _issue_line(issue: Mapping[str, Any]) -> str:
             moved = [f"{label} {', '.join(reraised[k])}" for k, label in (
                 ("raisers_added", "제기 +"), ("raisers_removed", "제기 −"), ("opposers_added", "반대 +"),
                 ("opposers_removed", "반대 −")) if reraised.get(k)]
-            tail += f" — **{registry.REARGUE_LABEL}**" + (f"({' · '.join(moved)})" if moved else "")
+            tail += f" — **{registry.reargue_label(reraised)}**" + (f"({' · '.join(moved)})" if moved else "")
             if issue.get("state") == "queued":
                 tail += " · 새 패널 대기"
         return head + tail
