@@ -1,4 +1,4 @@
-# 반대 검토 1차(review1) 남의 것 숨김 — 라우터의 쓰기 경로 전부와 MCP 도구 전부가 남에게 과제 id · 대상 열쇠를 흘리지 않고 없는 것과 같은 답이다(L2 · 조정자 추가 1), 받은 id 를 거쳐 읽는 자리(앞 과제 · 계보 · 선례)도 같다(훑기 둘째)
+# 반대 검토 1차(review1) 남의 것 숨김 — 라우터의 쓰기 · 읽기 경로 전부와 MCP 도구 전부가 남에게 과제 id · 대상 열쇠를 흘리지 않고 없는 것과 같은 답이다(L2 · 조정자 추가 1), 받은 id 를 거쳐 읽는 자리(앞 과제 · 계보 · 선례)도 같다(훑기 둘째)
 """경로 목록은 라우터(`routes.router`)에서, 도구 목록은 MCP 서버(`mcp.list_tools`)에서 뽑는다 — 이 시험의 표가 그 둘과 같아야 한다(새
 경로·도구가 남 시험 없이 들어오지 않는다). 표의 한 칸은 (부르는 함수, 부르는 사람이 준 id 의 이름) 이거나 남의 것을 가리키는 인자가
 없는 까닭(면제)이다. 남(구성원이 아닌 사람)이 주인의 것을 가리켜 부른 답은 ① 과제 id 를 싣지 않고 ② 대상 열쇠는 부른 사람이 준 때만
@@ -64,6 +64,12 @@ def _ids(store: RiskStore, key: str) -> dict[str, str]:
         "cluster": clusters[0], "cluster2": clusters[1], "requirement": requirement,
         "human_finding": human["finding_id"], "panel_finding": panel_finding, "queue": queue,
         "ref": store.query_one("SELECT ref FROM rr_claim_refs WHERE target_key = ? ORDER BY ref LIMIT 1", (key,))["ref"],
+        "unit": store.query_one("SELECT unit_id FROM rr_review_cells WHERE target_key = ? AND agent_key = ? ORDER BY unit_id"
+                                " LIMIT 1", (key, rig.SEAL))["unit_id"],
+        # 원장에서 찾는 참조(소유자 거름이 걸린 갈래) — 판정 finding 하나.
+        "narr_ref": "narr:{opinion_id}#{finding_id}".format(**store.query_one(
+            "SELECT opinion_id, finding_id FROM rr_findings WHERE target_key = ? AND opinion_id IS NOT NULL ORDER BY finding_id"
+            " LIMIT 1", (key,))),
     }
 
 
@@ -276,7 +282,7 @@ def _answer(call: Callable[[], Any]) -> tuple:
 
 
 # 없는 값 — 문법이 있는 칸(참조)은 문법에 맞는 없는 값이다(문법 오류로 먼저 갈리지 않게).
-MISSING_VALUES = {"ref": "c:000000000000"}
+MISSING_VALUES = {"ref": "c:000000000000", "narr_ref": "narr:no-such-opinion#no-such-finding"}
 
 
 def _missing(ids: dict, supplied: tuple[str, ...]) -> dict:
@@ -342,6 +348,115 @@ def test_the_import_answer_names_only_the_supplied_key(ledger):
     assert ids["project"] not in text and [c["reason"] for c in out["conflicts"]] == ["owner_conflict"]
     assert store.query_one("SELECT owner_sub, project_id FROM rr_targets WHERE target_key = ?", (ids["target"],))["project_id"] == (
         ids["project"])
+
+
+# ---------------------------------------------------------------- REST 읽기 표(조합 검토 — 남 시험이 없던 읽기 경로)
+GET_EXEMPT: dict[tuple[str, str], str] = {
+    ("GET", P + "/me"): "자기 신원 · 박스 자격 — 과제 · 대상 인자가 없다",
+    ("GET", P + "/meta/taxonomy"): "공용 분류 — 인자가 없다",
+    ("GET", P + "/meta/adapters"): "어댑터 목록 — 과제 · 대상 인자가 없다",
+    ("GET", P + "/meta/vocab"): "공용 어휘 — 인자가 없다",
+    ("GET", P + "/meta/runtime"): "관리자 전용 박스 손잡이 — 과제 · 대상 인자가 없다(남에게는 403)",
+    ("GET", P + "/meta/metrics"): "제 지표 — 과제 · 대상 인자가 없다(아래 시험)",
+    ("GET", P + "/projects"): "발견 — id 인자가 없다(남의 과제가 목록에 없는지는 아래 시험이 본다)",
+    ("GET", P + "/export"): "제 행만 반출 — id 인자가 없다(아래 시험)",
+    ("GET", P + "/curation"): "제 큐레이션 큐 — id 인자가 없다(아래 시험)",
+    ("GET", P + "/patterns"): "제 패턴 — id 인자가 없다(아래 시험)",
+}
+GET_CASES: dict[tuple[str, str], tuple[Call, tuple[str, ...]]] = {
+    ("GET", P + "/projects/{project_id}"): (lambda i, who: routes.get_project(i["project"], ident=who), ("project",)),
+    ("GET", P + "/projects/{project_id}/members"): (lambda i, who: routes.get_members(i["project"], ident=who), ("project",)),
+    ("GET", P + "/projects/{project_id}/audit"): (
+        lambda i, who: routes.get_project_audit(i["project"], ident=who), ("project",)),
+    ("GET", P + "/projects/{project_id}/requirements"): (
+        lambda i, who: routes.get_requirements(i["project"], ident=who), ("project",)),
+    ("GET", P + "/projects/{project_id}/character"): (
+        lambda i, who: routes.get_character(i["project"], ident=who), ("project",)),
+    ("GET", P + "/projects/{project_id}/similar"): (lambda i, who: routes.get_similar(i["project"], ident=who), ("project",)),
+    ("GET", P + "/snapshots/{snapshot_id}"): (
+        lambda i, who: routes.get_snapshot(i["target_snapshot"], ident=who), ("target_snapshot",)),
+    ("GET", P + "/snapshots/{snapshot_id}/rule_hits"): (
+        lambda i, who: routes.get_rule_hits(i["target_snapshot"], ident=who), ("target_snapshot",)),
+    ("GET", P + "/sameas"): (
+        lambda i, who: routes.get_sameas(base=i["base_snapshot"], target=i["target_snapshot"], ident=who),
+        ("base_snapshot", "target_snapshot")),
+    ("GET", P + "/diffs"): (lambda i, who: routes.list_diffs(project_id=i["project"], ident=who), ("project",)),
+    ("GET", P + "/targets"): (lambda i, who: routes.list_targets(project_id=i["project"], ident=who), ("project",)),
+    ("GET", P + "/reports"): (lambda i, who: routes.list_reports(project_id=i["project"], ident=who), ("project",)),
+    ("GET", P + "/diffs/{diff_id}"): (lambda i, who: routes.get_diff(i["diff"], ident=who), ("diff",)),
+    ("GET", P + "/precedents"): (lambda i, who: routes.get_precedents(diff_id=i["diff"], ident=who), ("diff",)),
+    # 원장 참조(소유자 거름) + 스냅샷 스코프 — 남에게는 두 갈래 다 없는 것과 같아야 한다.
+    ("GET", P + "/refs/{ref:path}"): (
+        lambda i, who: routes.get_ref(i["narr_ref"], snapshot_id=i["target_snapshot"], ident=who),
+        ("narr_ref", "target_snapshot")),
+    ("GET", P + "/targets/{target_key}/units"): (lambda i, who: routes.get_units(i["target"], ident=who), ("target",)),
+    ("GET", P + "/targets/{target_key}/units/{unit_id}"): (
+        lambda i, who: routes.get_target_unit(i["target"], i["unit"], ident=who), ("target",)),
+    ("GET", P + "/targets/{target_key}/coverage"): (lambda i, who: routes.get_coverage(i["target"], ident=who), ("target",)),
+    ("GET", P + "/targets/{target_key}/closure"): (lambda i, who: routes.get_closure(i["target"], ident=who), ("target",)),
+    ("GET", P + "/targets/{target_key}/issues"): (lambda i, who: routes.get_issues(i["target"], ident=who), ("target",)),
+    ("GET", P + "/targets/{target_key}/report"): (lambda i, who: routes.get_report(i["target"], ident=who), ("target",)),
+    ("GET", P + "/targets/{target_key}/cells"): (lambda i, who: routes.get_cells(i["target"], ident=who), ("target",)),
+    ("GET", P + "/targets/{target_key}/cells/{unit_id}/{agent_key}"): (
+        lambda i, who: routes.get_cell(i["target"], i["unit"], rig.SEAL, ident=who), ("target",)),
+    ("GET", P + "/targets/{target_key}/experts"): (lambda i, who: routes.get_experts(i["target"], ident=who), ("target",)),
+    ("GET", P + "/targets/{target_key}/experts/{agent_key}/report"): (
+        lambda i, who: routes.get_expert_report(i["target"], rig.SEAL, ident=who), ("target",)),
+    ("GET", P + "/targets/{target_key}/registry"): (lambda i, who: routes.get_registry(i["target"], ident=who), ("target",)),
+    ("GET", P + "/targets/{target_key}/seats"): (lambda i, who: routes.get_seats(i["target"], ident=who), ("target",)),
+    ("GET", P + "/targets/{target_key}/panels"): (lambda i, who: routes.get_panels(i["target"], ident=who), ("target",)),
+    ("GET", P + "/targets/{target_key}/brief"): (lambda i, who: routes.get_brief(i["target"], ident=who), ("target",)),
+    ("GET", P + "/panels/{panel_id}/transcript"): (
+        lambda i, who: routes.get_panel_transcript(i["panel"], ident=who), ("panel",)),
+    ("GET", P + "/panels/{panel_id}/brief"): (lambda i, who: routes.get_panel_brief(i["panel"], ident=who), ("panel",)),
+}
+# 남이 받는 답 — 기본은 없는 것과 같은 404 다. 과제로 거르는 목록은 남의 과제를 주면 없는 과제를 준 때와 같은 빈 목록이다.
+GET_EXPECT: dict[tuple[str, str], int] = {("GET", P + "/diffs"): 200, ("GET", P + "/targets"): 200, ("GET", P + "/reports"): 200}
+
+
+def _reading_routes() -> set[tuple[str, str]]:
+    return {("GET", route.path) for route in routes.router.routes if isinstance(route, APIRoute) and "GET" in route.methods}
+
+
+def test_every_reading_route_in_the_router_is_in_this_table():
+    """라우터의 읽기 경로 == 이 표(시험 칸 + 면제) — 새 읽기 경로도 남 시험 없이 들어오지 않는다."""
+    assert not set(GET_CASES) & set(GET_EXEMPT)
+    assert _reading_routes() == set(GET_CASES) | set(GET_EXEMPT)
+
+
+@pytest.mark.parametrize("case", sorted(GET_CASES), ids=lambda c: f"{c[0]} {c[1][len(P):]}")
+def test_a_stranger_gets_the_missing_answer_on_every_reading_route(ledger, case):
+    """남이 주인의 것을 가리켜 읽으면 과제 id 를 싣지 않고(대상 열쇠는 준 때만) 없는 id 로 부른 답과 같다. 주인으로는 404 가 아니다."""
+    store, ids = ledger
+    call, supplied = GET_CASES[case]
+    stranger = factories.ident(OTHER)
+    theirs = _answer(lambda: call(ids, stranger))
+    gone = _missing(ids, supplied)
+    missing = _answer(lambda: call(gone, stranger))
+    _no_leak(theirs[2], ids, supplied)
+    assert theirs[1] == GET_EXPECT.get(case, 404), theirs
+    # 읽기는 새 id · 시각을 만들지 않는다 — 칸 이름이 아니라 글 전체가 같아야 한다(빈 목록도 내용까지).
+    assert (theirs[0], _strip(theirs[2], ids, supplied)) == (missing[0], _strip(missing[2], gone, supplied))
+    mine = _answer(lambda: call(ids, factories.ident(OWNER)))
+    assert mine[1] != 404, (case, mine)
+
+
+def test_the_exempt_reading_routes_do_not_name_the_owners_project_or_target(ledger):
+    """면제한 읽기 경로(인자 없는 목록 · 반출 · 큐 · 패턴 · 지표)도 남에게 주인의 과제 id · 대상 열쇠를 싣지 않는다."""
+    store, ids = ledger
+    stranger = factories.ident(OTHER)
+
+    async def _drain(response) -> str:
+        return "".join([chunk async for chunk in response.body_iterator])
+
+    reads = (lambda: routes.list_projects(ident=stranger), lambda: routes.list_diffs(ident=stranger),
+             lambda: routes.list_targets(ident=stranger), lambda: routes.list_reports(ident=stranger),
+             lambda: routes.get_curation(ident=stranger), lambda: routes.get_patterns(ident=stranger),
+             lambda: routes.get_metrics(ident=stranger), lambda: routes.get_taxonomy(),
+             lambda: routes.get_vocab(), lambda: routes.get_adapters(ident=stranger))
+    for read in reads:
+        _no_leak(_answer(read)[2], ids, ())
+    _no_leak(asyncio.run(_drain(routes.get_export(ident=stranger))), ids, ())
 
 
 # ---------------------------------------------------------------- MCP 표
