@@ -247,6 +247,51 @@ def test_a_retry_spilled_into_a_live_job_counts_against_its_reopen_allowance(sto
         assert rig.state(store, live) == "queued"
 
 
+def _granted(fn, *args, **kwargs):
+    """처분 — 거절(AppError)이면 단언 실패다(변이 검사가 '죽음' 으로 세는 실패의 모양)."""
+    try:
+        return fn(*args, **kwargs)
+    except AppError as exc:
+        raise AssertionError(f"{getattr(fn, '__name__', fn)} 가 거절했다 — {exc.code}: {exc}") from exc
+
+
+@pytest.mark.parametrize("low_cap", [False, True])
+def test_a_skip_with_no_live_job_binds_only_the_skipped_cells_and_records_no_consent(store, monkeypatch, low_cap):
+    """M3 묶음 검토 M5 · D-52 — 살아 있는 잡이 없을 때 넘김이 세우는 마감 잡은 넘긴 셀만 묶는다. 넘긴 셀들의 (전문가, 단위) 곱에 든
+    다른 pending 셀은 묶지도 돌리지도 않는다(종전에는 전문가 × 단위 범위라 아무도 청하지 않은 셀 둘이 엔진을 불렀다). 사람 대신
+    동의를 적지 않는다(consent false · consent_source 없음) — 돌 셀이 없어 추정이 0 이라 동의 문턱 · 상한에 걸리지 않는다(낮은
+    상한에서도 넘김이 된다 — 종전에는 409 로 실패 셀을 처분할 수 없었다)."""
+    from app import units
+
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    fake = FakeReviewEngine(rig.packs())
+    fake.error_cells = {(SEAL, unit_ids[0]): NO_ROWS, (PEER, unit_ids[1]): NO_ROWS}
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [SEAL], "unit_ids": unit_ids[:1]}))
+    r.finish(rig.job(store, key, scope={"agents": [PEER], "unit_ids": unit_ids[1:2]}))
+    assert (_cells(store, key, SEAL)[unit_ids[0]]["state"], _cells(store, key, PEER)[unit_ids[1]]["state"]) == (
+        "failed", "failed")
+    if low_cap:
+        monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_max_calls=1,
+                                                                    risk_review_consent_calls=0))
+    runs = len(fake.calls("run"))
+    out = _granted(routes.post_cells_skip, key, routes.CellsSkipBody(cells=[[unit_ids[0], SEAL], [unit_ids[1], PEER]],
+                                                                     reason="둘 다 넘긴다"), ident=ME)
+    job = out["job"]
+    assert (out["skipped"], job["action"], job["calls_estimate"]["expected"]) == (2, "created", 0)
+    params = json.loads(rig.job_row(store, job["job_id"])["params_json"])
+    assert (params["consent"], params["consent_source"]) == (False, None)
+    bound = {(row["unit_id"], row["agent_key"]) for row in store.query(
+        "SELECT unit_id, agent_key FROM rr_review_cells WHERE run_id = ?", (job["job_id"],))}
+    assert bound == {(unit_ids[0], SEAL), (unit_ids[1], PEER)}
+    r.finish(job["job_id"])
+    assert (rig.state(store, job["job_id"]), len(fake.calls("run"))) == ("completed", runs)       # 아무것도 돌지 않았다
+    assert (_cells(store, key, SEAL)[unit_ids[1]]["state"], _cells(store, key, PEER)[unit_ids[0]]["state"]) == (
+        "pending", "pending")
+    assert {_head(store, key, a)["state"] for a in (SEAL, PEER)} == {"partial"}                    # 다시 마감됐다(넘김을 실었다)
+
+
 # ---------------------------------------------------------------- 넘김
 def test_skip_needs_a_reason_and_the_expert_closes_again_with_the_skip_in_the_report(store):
     """넘김 — failed 만 skipped(사유 4~300자 필수). 살아 있는 잡이 없으면 마감 잡(돌 셀 0)이 서서 그 전문가를 다시 마감하고, 보고서

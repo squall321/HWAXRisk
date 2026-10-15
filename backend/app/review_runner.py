@@ -385,7 +385,7 @@ def _job_estimate(store: Any, cfg: Any, order: Sequence[Mapping[str, Any]], to_r
 def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_sub: str | None = None,
                       scope: Mapping[str, Any] | None = None, user_memo: str | None = None, consent: bool = False,
                       consent_source: str | None = None, settings: Any | None = None, channel: str = "rest",
-                      actor_verified: bool = True) -> dict:
+                      actor_verified: bool = True, cells: Sequence[Sequence[str]] | None = None) -> dict:
     """검토 잡 1건을 세운다 — 네트워크를 부르지 않는다(격자와 범위는 여기서, 카드 묶음·호출은 루프가).
 
     범위는 `{tiers?, domains?, agents?, unit_ids?}`(칸끼리 AND, 빠진 칸은 전부)다. 격자는 범위와 상관없이 로스터 전원 × 검토
@@ -400,6 +400,9 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
     반환 {job_id, mode, cells_total, cells_in_scope, experts_in_scope, units, calls_estimate{low, expected, high, basis},
     credential{kind, email, exp}, undeferred, credential_note?}. 높은 끝 추정 소요(호출 × 300초 ÷ 동시 수)가 PAT 남은 수명보다 길거나
     요청자 PAT 를 수명 때문에 건너뛰었으면 `credential_note` 로 미리 알린다. `channel`·`actor_verified` 는 보류 해제 감사 행의 입구다.
+    `cells`([[unit_id, agent_key], …])를 주면 범위의 전문가 × 단위 대신 그 셀만 이 잡에 묶고(상태와 상관없이 · 머리는 찍지 않는다)
+    추정도 그 가운데 pending 인 셀로만 센다 — 넘김이 세우는 마감 잡이 넘긴 셀만 묶는다(M3 묶음 검토 M5 · D-52). 범위(`scope`)는
+    그 셀들의 전문가 · 단위로 준다(표시 · 검증). 잡 params 의 `cells` 가 그 집합이고 adopt_released 도 그 밖을 거두지 않는다.
     """
     from app import routes  # noqa: PLC0415 — routes 는 runner·planner 를 거쳐 무겁다(같은 문을 쓴다).
 
@@ -420,7 +423,9 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
     agents = [r["agent_key"] for r in picked["experts"]]
     states = {(r["unit_id"], r["agent_key"]): r["state"] for r in store.query(
         "SELECT unit_id, agent_key, state FROM rr_review_cells WHERE target_key = ?", (target_key,))}
-    to_run = [(a, u) for a in agents for u in picked["unit_ids"] if states.get((u, a), "pending") == "pending"]
+    only = list(dict.fromkeys((str(u), str(a)) for u, a in cells)) if cells is not None else None
+    to_run = ([(a, u) for u, a in only if states.get((u, a), "pending") == "pending"] if only is not None else
+              [(a, u) for a in agents for u in picked["unit_ids"] if states.get((u, a), "pending") == "pending"])
     estimate = _job_estimate(store, cfg, order, to_run)
     if estimate["expected"] > int(cfg.risk_review_max_calls):
         raise AppError("review_too_large", f"호출 추정 {estimate['expected']:,}회가 상한 {int(cfg.risk_review_max_calls):,}회"
@@ -453,6 +458,7 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
         # 올린 뒤에도 사슬이 건드리지 않는다(사람이 쟁점·종합을 직접 시작한다).
         "chain": True,
         "credential": credential, "calls_estimate": estimate,
+        **({"cells": [[u, a] for u, a in only]} if only is not None else {}),
         # 잡에 복사해 두는 실행 설정 — 도는 중에 설정이 바뀌어도 이 잡의 표본·배치는 바뀌지 않는다(결정론의 전제). 거르기의 승인
         # 문(#40)도 만들 때의 것을 얼린다 — 승인 커밋은 다음 잡부터 듣는다(재설계 M3 C3-6). 이중 판정은 걸린 별칭만(dual flagged ·
         # 1순위는 보정용 전량 — C3-9). M2 잡은 filter 'off' 이고 dual 칸이 없어 'all' 로 읽는다.
@@ -469,7 +475,10 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
         # 근거 꾸러미 실호출(B 층 — C3-12)의 단위 행 — 손잡이가 켜져 있으면 아직(NULL)으로 두어 루프의 live 워커가 얼리고, 꺼져 있으면
         # 곧바로 none 이다. 이미 있는 행(앞 잡이 얼린 것)은 그대로다.
         unit_live.seed(store, target_key, enabled=unit_live.enabled(cfg), now=now)
-        review_cells.assign_scope(store, target_key, job_id, agents=agents, unit_ids=picked["unit_ids"], now=now)
+        if only is not None:
+            review_cells.bind_cells(store, target_key, job_id, only, now=now)
+        else:
+            review_cells.assign_scope(store, target_key, job_id, agents=agents, unit_ids=picked["unit_ids"], now=now)
         undeferred = (planner.undefer(store, target_key, decided_by=requester_sub or owner_sub, reason="review_scope",
                                       agents=agents, reasons=("ecad_absent",), channel=channel,
                                       actor_verified=actor_verified)["undeferred"]
@@ -481,7 +490,8 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
             (job_id, target_key, owner_sub, workers, canonical_json(params),
              canonical_json({"mode": MODE, "phase": "pack"}), credential["email"], now, now, MODE))
     out = {"job_id": job_id, "mode": MODE, "cells_total": plan["cells_total"],
-           "cells_in_scope": len(agents) * len(picked["unit_ids"]), "experts_in_scope": len(agents),
+           "cells_in_scope": len(only) if only is not None else len(agents) * len(picked["unit_ids"]),
+           "experts_in_scope": len(agents),
            "units": plan["units"], "calls_estimate": estimate, "credential": credential, "undeferred": undeferred}
     if notes:
         out["credential_note"] = " · ".join(notes)
@@ -600,10 +610,14 @@ def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Ma
                 elif budget is not None:
                     _reopen_hold(store, held_job, budget, now=now)
         elif action == "skip" or start:
+            # 넘김의 마감 잡은 넘긴 셀만 묶는다 — 전문가 × 단위 범위면 아무도 청하지 않은 pending 셀까지 돌았다. 돌 셀이 없어 추정 0 이라
+            # 동의를 사람 대신 적지 않는다(M3 묶음 검토 M5 · D-52 — 종전에는 consent true 를 넣었다)
             made = create_review_job(store, target_key, owner_sub=owner_sub, requester_sub=decided_by,
-                                     scope={"agents": agents, "unit_ids": unit_ids}, consent=consent or action == "skip",
-                                     consent_source=consent_source, settings=settings, channel=channel,
-                                     actor_verified=actor_verified)
+                                     scope={"agents": agents, "unit_ids": unit_ids},
+                                     consent=consent if action == "retry" else False,
+                                     consent_source=consent_source if action == "retry" else None, settings=settings,
+                                     channel=channel, actor_verified=actor_verified,
+                                     cells=keys if action == "skip" else None)
             out["job"] = {"action": "created", "job_id": made["job_id"], "calls_estimate": made["calls_estimate"]}
         else:
             out["job"] = {"action": "none"}

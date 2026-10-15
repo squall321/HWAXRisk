@@ -263,6 +263,22 @@ def assign_scope(store: Any, target_key: str, run_id: str, *, agents: Sequence[s
     return {"cells": cells, "experts": heads, "reopened": reopened}
 
 
+def bind_cells(store: Any, target_key: str, run_id: str, cells: Sequence[Sequence[str]], *, now: int | None = None) -> int:
+    """그 셀들(unit_id, agent_key)만 잡에 묶는다 — 상태와 상관없이, 머리는 범위로 찍지 않는다(그 잡의 몫은 묶인 셀로 가린다 —
+    `job_expert_sql`). pending 셀이 생긴 전문가는 다시 연다. 넘김이 세우는 마감 잡이 넘긴 셀만 묶는다(M3 묶음 검토 M5 · D-52).
+    묶은 셀 수."""
+    now = now_epoch() if now is None else now
+    with store.tx():
+        bound = int(store.executemany(
+            "UPDATE rr_review_cells SET run_id = ?, updated_at = ? WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+            [(run_id, now, target_key, str(u), str(a)) for u, a in cells]) or 0)
+        for agent in sorted({str(a) for _u, a in cells}):
+            if store.query_one("SELECT 1 FROM rr_review_cells WHERE target_key = ? AND agent_key = ? AND run_id = ?"
+                               " AND state = 'pending' LIMIT 1", (target_key, agent, run_id)) is not None:
+                _reopen(store, target_key, agent, now=now)
+    return bound
+
+
 def _reopen(store: Any, target_key: str, agent_key: str, *, now: int) -> int:
     """범위 안에 pending 셀이 생긴 전문가를 다시 연다 — ready·partial 은 planned 로, blocked 는 묶음 시도 수와 백오프를 비우고
     planned 로. 옮긴 머리 수."""
@@ -293,13 +309,19 @@ def adopt_released(store: Any, job_id: str, *, now: int | None = None) -> int:
     target_key = job["target_key"]
     agents_in = {r["agent_key"] for r in scope_experts(planner.review_order(store, target_key), scope)}
     units_in = set(scope.get("unit_ids") or ())
+    try:
+        # 셀로 묶은 잡(넘김의 마감 잡 — M5 · D-52)은 그 셀들 밖을 거두지 않는다
+        only = {tuple(c) for c in json.loads(job["params_json"] or "{}").get("cells") or ()}
+    except (TypeError, ValueError, AttributeError):
+        only = set()
     marks = ",".join("?" * len(runner.LIVE_JOB_STATES))
     with store.tx():
         rows = [dict(r) for r in store.query(
             "SELECT c.unit_id, c.agent_key FROM rr_review_cells c WHERE c.target_key = ? AND c.state = 'pending'"
             f" AND c.run_id IS NOT NULL AND c.run_id NOT IN (SELECT id FROM rr_jobs WHERE mode = 'reviews' AND state IN ({marks}))",
             (target_key, *runner.LIVE_JOB_STATES))]
-        rows = [r for r in rows if r["agent_key"] in agents_in and (not units_in or r["unit_id"] in units_in)]
+        rows = [r for r in rows if r["agent_key"] in agents_in and (not units_in or r["unit_id"] in units_in)
+                and (not only or (r["unit_id"], r["agent_key"]) in only)]
         if not rows:
             return 0
         adopted = int(store.executemany(
