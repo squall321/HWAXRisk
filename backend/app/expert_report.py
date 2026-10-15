@@ -612,14 +612,15 @@ def build_findings(store: Any, ledger: Ledger) -> dict:
     return {"findings": findings, "curation": curation, "warnings": warnings}
 
 
-def count_members(store: Any, target_key: str, agent_key: str, unit_ids: Sequence[str]) -> dict[str, dict[str, int]]:
+def count_members(store: Any, target_key: str, agent_key: str, unit_ids: Sequence[str]) -> dict[str, dict[str, int]] | None:
     """그 전문가의 단위들에서 구성원 함수가 내는 finding 구성원 수(종류마다 — MEMBER_SOURCES) — 넘김 응답의 걸림 셈이 보고서와 같은
-    함수로 센다(반대 검토 3차 HIGH 1 · D-47). 원장을 읽지 못하는 전문가(묶음이 없다)는 0 이다."""
+    함수로 센다(반대 검토 3차 HIGH 1 · D-47). 얼린 묶음이 이 박스에 없어(들여온 원장) 원장을 읽지 못하면 None — 셀 수 없다는 것이지
+    0 이 아니다(4차 LOW 3 · D-49 — 마감은 묶음을 다시 받아 센다)."""
     zero = {kind: 0 for kind, _fn, _place in MEMBER_SOURCES}
     try:
         ledger = load_ledger(store, target_key, agent_key)
     except cardpack.PackMissing:
-        return {u: dict(zero) for u in unit_ids}
+        return None
     ctx = narrative.review_scope(store, target_key, agent_key, ledger.review_id, ledger.pack)
     items = ({str(i["ref"]): i for i in units.collect_diff_items(ctx.diff)} if ledger.target.get("kind") == "diff"
              else {})

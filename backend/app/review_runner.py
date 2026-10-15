@@ -360,7 +360,8 @@ def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Ma
     (반대 검토 3차 MEDIUM 3 · D-47 — 그 잡의 몫은 묶인 셀로 가린다). 잡을 만들다 거절(동의·자격·스위치)되면 처분도
     되돌린다 — 아무것도 바꾸기 전에 거절한 것과 같다. 바꾼 셀이 있으면 감사 한 행(scope coverage · cells.retry|cells.skip).
     반환 {target_key, matched, retried|skipped, not_failed, keys_total, keys[≤50], experts, job{action, job_id?, calls_estimate?},
-    audit_id, changed}.
+    audit_id, changed}. 넘김은 hits · hits_by · hits_basis(members — 구성원 함수가 센 수 · pack_missing — 얼린 묶음이 이 박스에 없어
+    셀 수 없다: hits · hits_by 가 null 이고 hits_note 가 까닭이다)를 더한다.
     """
     from app import routes  # noqa: PLC0415 — routes 는 무겁다(_audit · 과제 id · 스위치).
 
@@ -380,15 +381,26 @@ def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Ma
                     "keys": keys[:DISPOSE_KEYS_MAX], "experts": len(agents), "changed": bool(changed)})
         if action == "skip":
             # 넘긴 셀은 검토한 셀과 같은 구성원 함수를 가진 자료 그대로 지난다 — 그 함수들이 낸 finding 구성원을 종류마다 센다(반대 검토
-            # MEDIUM 8 · 3차 HIGH 1 — D-47, 보고서 '보지 못한 것' 줄과 같은 셈)
+            # MEDIUM 8 · 3차 HIGH 1 — D-47, 보고서 '보지 못한 것' 줄과 같은 셈). 얼린 묶음이 이 박스에 없는 전문가가 있으면 셀 수 없다 —
+            # 0 이 아니라 모름이다(4차 LOW 3 · D-49 — 마감이 묶음을 다시 받아 보고서가 센다).
             by_kind = {kind: 0 for kind, _fn, _place in expert_report.MEMBER_SOURCES}
+            missing: list[str] = []
             for agent in sorted({c["agent_key"] for c in changed}):
                 mine = [c["unit_id"] for c in changed if c["agent_key"] == agent]
-                for counts in expert_report.count_members(store, target_key, agent, mine).values():
+                counted = expert_report.count_members(store, target_key, agent, mine)
+                if counted is None:
+                    missing.append(agent)
+                    continue
+                for counts in counted.values():
                     for kind, n in counts.items():
                         by_kind[kind] += n
-            out["hits_by"] = by_kind
-            out["hits"] = sum(by_kind.values())
+            if missing:
+                out.update({"hits": None, "hits_by": None, "hits_basis": "pack_missing",
+                            "hits_note": f"전문가 {', '.join(missing[:5])}{' …' if len(missing) > 5 else ''} 의 얼린 카드 묶음이 이 박스에"
+                                         " 없어(들여온 원장) 넘긴 셀의 걸림을 지금 셀 수 없다 — 모름이지 0 이 아니다. 그 전문가를 다시"
+                                         " 마감할 때 묶음을 다시 받아 보고서 '보지 못한 것' 줄이 센다."})
+            else:
+                out.update({"hits": sum(by_kind.values()), "hits_by": by_kind, "hits_basis": "members"})
         if not changed:
             out.update({"job": {"action": "none"}, "audit_id": None})
             return out

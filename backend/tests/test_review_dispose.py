@@ -381,13 +381,42 @@ def test_a_skipped_cells_offcard_hit_becomes_a_finding_like_a_reviewed_cells(sto
     assert (cell["state"], cell["n_offcard"]) == ("failed", 1)
     out = routes.post_cells_skip(key, routes.CellsSkipBody(cells=[[unit_ids[0], SEAL]], reason="끝내 실패한 셀을 넘긴다"),
                                  ident=ME)
-    assert (out.get("hits"), out.get("hits_by")) == (1, {"card": 0, "offcard": 1, "noinput": 0})
+    assert (out.get("hits"), out.get("hits_by"), out.get("hits_basis")) == (1, {"card": 0, "offcard": 1, "noinput": 0},
+                                                                            "members")
     rig.Rig(store, fake).finish(out["job"]["job_id"])
     report = expert_report.load_report(store, key, SEAL)
     mine = [f for f in report["findings"] if f["unit_id"] == unit_ids[0]]
     assert [(f["off_card"], f.get("partial_cell")) for f in mine] == [(True, True)]
     assert [r["unit_id"] for r in report["off_card"]] == [unit_ids[0]]
     assert "카드 밖 지적 1건 — 카드 밖 절 · finding" in expert_report.render_report_md(report)
+
+
+def test_a_skip_whose_experts_pack_is_not_on_this_box_says_its_hits_are_unknown_never_zero(store):
+    """반대 검토 4차 LOW 3 · D-49 — 그 전문가의 얼린 카드 묶음이 이 박스에 없으면(들여온 원장 — rr_card_packs 는 반출하지 않는다) 넘김
+    응답은 걸림을 셀 수 없다. 걸림 수를 0 이라 하지 않고 모름(hits null · hits_basis pack_missing · 까닭 한 문장)이라 한다 — 종전에는
+    0 이라 했는데, 마감이 묶음을 다시 받아 지은 보고서는 같은 셀에 걸림 1 · finding 1 을 실었다(D-46 — 응답과 보고서가 같아야 한다)."""
+    from app import cardpack, units
+
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    k01 = str(fre.load("pack_ok.json")["cards"][0]["record_id"])
+    fake = FakeReviewEngine(rig.packs())
+    fake.verdicts, fake.rev_verdicts, fake.solo_verdicts = {k01: ("yes", "FAIL")}, {k01: ("yes", "OK")}, {k01: ("yes", "OK")}
+    fake.error_cells, fake.error_kinds = {(SEAL, unit_ids[0]): NO_ROWS}, {"offcard"}
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": unit_ids[:1]})
+    rig.Rig(store, fake).finish(job_id)
+    assert _cells(store, key, SEAL)[unit_ids[0]]["state"] == "failed"
+    store.execute("DELETE FROM rr_card_packs WHERE agent_key = ?", (SEAL,))       # 들여온 원장 — 이 박스에 얼린 묶음이 없다
+    with cardpack._LRU_LOCK:
+        cardpack._LRU.clear()
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": job_id}, reason="끝내 실패한 셀을 넘긴다"),
+                                 ident=ME)
+    assert (out["skipped"], out.get("hits"), out.get("hits_by"), out.get("hits_basis")) == (1, None, None, "pack_missing")
+    assert SEAL in out.get("hits_note", "") and "0 이 아니다" in out.get("hits_note", "")
+    rig.Rig(store, fake).finish(out["job"]["job_id"])
+    report = expert_report.load_report(store, key, SEAL)
+    (why,) = [u["why"] for u in report["scope"]["unseen"] if u["unit_id"] == unit_ids[0]]
+    assert why["hits"] == 1 and sum(1 for f in report["findings"] if f["unit_id"] == unit_ids[0]) == 1
 
 
 def test_risk_job_action_retries_and_skips_the_jobs_failed_cells_for_a_delegated_identity_only(store, monkeypatch):
