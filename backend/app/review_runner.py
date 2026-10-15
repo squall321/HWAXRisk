@@ -930,8 +930,8 @@ class _Cell:
 
 def finalize_expert(store: Any, job: Mapping[str, Any], head: Mapping[str, Any], *, lease_owner: str,
                     now: int | None = None) -> str | None:
-    """전문가 마감 — 범위 안 열린 셀이 0 이 된 세션의 끝에 부른다(선점을 쥔 채로). 옮긴 머리 상태(ready·partial) 또는 None(선점을
-    잃었다).
+    """전문가 마감 — 범위 안 열린 셀이 0 이 된 세션의 끝에 부른다(선점을 쥔 채로). 옮긴 머리 상태(ready·partial — 그 사이 다른 세션이
+    이 잡에 셀을 다시 묶었으면 planned, 반대 검토 4차 LOW 4) 또는 None(선점을 잃었다).
 
     finding 승격·의견 행·원장 마감(S9)과 보고서(S10)는 `expert_report.prepare` 가 읽기만으로 짓고, 쓰기는 머리를 닫는
     `review_cells.close_expert` 와 같은 트랜잭션이다 — 중간에 앱이 내려가면 아무것도 남지 않고, 그 머리는 재기동 복구 뒤
@@ -942,7 +942,7 @@ def finalize_expert(store: Any, job: Mapping[str, Any], head: Mapping[str, Any],
     with store.tx():
         if expert_report.commit(store, prepared, lease_owner=lease_owner, now=now) is None:
             return None
-        return review_cells.close_expert(store, target_key, agent, lease_owner=lease_owner, now=now)
+        return review_cells.close_expert(store, target_key, agent, lease_owner=lease_owner, run_id=str(job["id"]), now=now)
 
 
 # ---------------------------------------------------------------- 전문가 세션
@@ -2524,6 +2524,8 @@ class ReviewLoop:
     def _complete_or_phase(self, job: Mapping[str, Any]) -> str | None:
         # 다른 잡이 쥐고 있다가 그 잡이 끝난 뒤 놓은 범위 안 셀을 먼저 거둔다 — 그러지 않으면 아래 셈이 그 셀을 못 보고 잡을 닫는다(R3A-1).
         review_cells.adopt_released(self.store, str(job["id"]), now=self.clock())
+        # 이 잡에 묶인 pending 셀이 남았는데 머리가 ready·partial 이면 다시 연다 — 집을 것 없이 영영 돌지 않게(반대 검토 4차 LOW 4)
+        review_cells.replan_bound(self.store, str(job["id"]), now=self.clock())
         if (self._open_cells(job) == 0 and self._running_heads(job) == 0 and not self.workers(job["id"])
                 and self._unfinalized(job) == 0):
             if self._audit_topup(job):

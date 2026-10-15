@@ -310,6 +310,23 @@ def adopt_released(store: Any, job_id: str, *, now: int | None = None) -> int:
     return adopted
 
 
+def replan_bound(store: Any, job_id: str, *, now: int | None = None) -> int:
+    """안전망(반대 검토 4차 LOW 4 · D-49) — 그 잡에 묶인 pending 셀이 남았는데 머리가 ready·partial 인 전문가를 planned 로 다시 연다.
+    다시 열기는 머리를 함께 다시 열고(`_reopen`) 마감은 묶인 셀이 열려 있으면 planned 로 돌리지만(close_expert), 어느 길로든 그 둘이
+    엇갈리면 선점할 머리가 없어 잡이 집을 것 없이 영영 돈다. 옮긴 머리 수."""
+    now = now_epoch() if now is None else now
+    job = store.query_one("SELECT target_key FROM rr_jobs WHERE id = ?", (job_id,))
+    if job is None:
+        return 0
+    stuck = [r["agent_key"] for r in store.query(
+        "SELECT e.agent_key FROM rr_expert_reports e WHERE e.target_key = ? AND e.state IN ('ready', 'partial') AND EXISTS"
+        " (SELECT 1 FROM rr_review_cells c WHERE c.target_key = e.target_key AND c.agent_key = e.agent_key AND c.run_id = ?"
+        " AND c.state = 'pending')", (job["target_key"], job_id))]
+    with store.tx():
+        return sum(_move(store, "expert", ("ready", "partial"), "planned", where=_head_where(),
+                         params=(job["target_key"], agent), now=now) for agent in stuck)
+
+
 # ---------------------------------------------------------------- 선점
 def _live_review_jobs(store: Any) -> list[dict]:
     """돌 수 있는 검토 잡 — 도는 전문가가 가장 적은 잡부터, 같으면 먼저 만든 잡부터(P-09)."""
@@ -465,11 +482,17 @@ def closing_state(tally: Mapping[str, Any]) -> str:
     return "partial" if tally["failed"] or tally["open"] else "ready"
 
 
-def close_expert(store: Any, target_key: str, agent_key: str, *, lease_owner: str, now: int | None = None) -> str | None:
+def close_expert(store: Any, target_key: str, agent_key: str, *, lease_owner: str, run_id: str | None = None,
+                 now: int | None = None) -> str | None:
     """쥔 전문가의 검토를 마감한다 — `closing_state` 로 partial 또는 ready. 옮긴 상태 또는 None(선점을 잃었다). 승격·의견·원장·
-    보고서(S9·S10)는 `review_runner.finalize_expert` 가 같은 트랜잭션에서 이 앞에 쓴다."""
+    보고서(S9·S10)는 `review_runner.finalize_expert` 가 같은 트랜잭션에서 이 앞에 쓴다. 마감하는 잡(`run_id`)에 묶인 셀이 아직 열려
+    있으면(세션이 열린 셀 0 을 센 뒤 다른 세션의 다시 열기가 그 전문가의 셀을 묶었다) planned 로 돌린다 — 그 잡이 그 셀을 집고 다시
+    마감한다(반대 검토 4차 LOW 4 · D-49, 종전에는 partial 로 닫혀 아무도 그 셀을 집지 못했다)."""
     now = now_epoch() if now is None else now
-    dst = closing_state(expert_tally(store, target_key, agent_key))
+    bound_open = run_id is not None and store.query_one(
+        "SELECT 1 FROM rr_review_cells WHERE target_key = ? AND agent_key = ? AND run_id = ? AND state IN ('pending', 'running')"
+        " LIMIT 1", (target_key, agent_key, run_id)) is not None
+    dst = "planned" if bound_open else closing_state(expert_tally(store, target_key, agent_key))
     moved = _move(store, "expert", "running", dst, where=f"{_head_where()} AND lease_owner = ?",
                   params=(target_key, agent_key, lease_owner), sets={"lease_owner": None, "error": None}, now=now)
     if moved:

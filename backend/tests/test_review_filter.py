@@ -14,7 +14,7 @@ import threading
 
 import pytest
 
-from app import config, relevance, review_cells, review_verify, routes, units
+from app import config, expert_report, relevance, review_cells, review_verify, routes, units
 from tests import factories
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
@@ -708,6 +708,74 @@ def test_an_experts_handoff_to_its_own_domain_never_reopens_its_own_filtered_cel
     r.finish(out["job"]["job_id"])
     cell = _cell(store, key, b, STD2)
     assert (cell["state"], cell["reopened_n"]) == ("na_irrelevant", 0)
+
+
+def _head_state(store, key: str, agent: str) -> str:
+    return store.query_one("SELECT state FROM rr_expert_reports WHERE target_key = ? AND agent_key = ?", (key, agent))["state"]
+
+
+def _std2_filtered_job(store, monkeypatch) -> tuple[str, dict[str, str], rig.Rig]:
+    """std 1순위가 먼저 다 닫힌 원장(보충 표본 바닥 0 — 잡 끝이 거른 셀을 표본으로 다시 열지 않는다)."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 0)
+    monkeypatch.setattr(review_cells, "AUDIT_DOMAIN_FLOOR", 0)
+    key = rig.target(store, SMALL)
+    fake = _fake(SMALL)
+    kinds = _units(store, key)
+    _quiet(fake, kinds["boundary"], kinds["global"])
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [STD1]}))
+    return key, kinds, r
+
+
+def test_a_cell_reopened_while_its_expert_finalizes_sends_the_head_back_to_planned_and_the_job_ends(store, monkeypatch):
+    """반대 검토 4차 LOW 4 · D-49(재현 P3) — 마감이 그 잡의 열린 셀 0 을 센 뒤 마감 트랜잭션 앞에서 다른 세션의 넓힘이 그 전문가의
+    거른 셀을 다시 열면(그 잡에 묶인 pending) 마감은 머리를 partial 이 아니라 planned 로 돌린다. 종전에는 partial 로 닫혀 그 셀을
+    아무도 집지 못하고(검토 선점은 planned 만 · 마감 선점은 열린 셀이 없어야) 잡이 60시간을 돌아도 끝나지 않았다."""
+    key, kinds, r = _std2_filtered_job(store, monkeypatch)
+    b = kinds["boundary"]
+    job_id = rig.job(store, key, scope={"agents": [STD2]})
+    real, fired = expert_report.prepare, []
+
+    def prepare(store_, target_key, agent):
+        out = real(store_, target_key, agent)
+        if agent == STD2 and not fired:
+            fired.append(review_cells.reopen_filtered(store_, target_key, via="widened", domain="std"))
+        return out
+
+    monkeypatch.setattr(expert_report, "prepare", prepare)
+    for _ in range(30):
+        r.tick()
+        if fired:
+            break
+        r.clock.advance(61)
+    assert fired == [[(b, STD2)]]
+    cell = _cell(store, key, b, STD2)
+    assert (_head_state(store, key, STD2), cell["state"], cell["run_id"]) == ("planned", "pending", job_id)
+    r.finish(job_id, ticks=30)
+    cell = _cell(store, key, b, STD2)
+    assert (rig.state(store, job_id), cell["state"], cell["run_id"], _head_state(store, key, STD2)) == (
+        "completed", "na_irrelevant", job_id, "ready")
+
+
+def test_a_ready_head_left_with_a_pending_cell_bound_to_the_live_job_is_planned_again(store, monkeypatch):
+    """반대 검토 4차 LOW 4 · D-49 의 안전망 — 어떤 길로든 살아 있는 잡에 묶인 pending 셀이 남았는데 그 전문가 머리가 ready·partial 이면
+    (선점할 머리가 없다) 잡 끝 셈 앞에서 그 머리를 planned 로 다시 연다 — 잡이 집을 것 없이 영영 돌지 않는다. 머리를 다시 열지 않은
+    묶기(다시 열기의 _reopen 을 건너뛴다)로 그 원장을 만든다."""
+    key, kinds, r = _std2_filtered_job(store, monkeypatch)
+    b = kinds["boundary"]
+    r.finish(rig.job(store, key, scope={"agents": [STD2]}))
+    assert (_cell(store, key, b, STD2)["state"], _head_state(store, key, STD2)) == ("na_irrelevant", "ready")
+    live = rig.job(store, key, scope={"agents": [STD1]})              # std 1순위의 셀은 다 닫혀 이 잡이 돌 셀은 없다
+    real = review_cells._reopen
+    monkeypatch.setattr(review_cells, "_reopen", lambda *args, **kwargs: 0)
+    assert review_cells.reopen_filtered(store, key, via="widened", domain="std", run_id=live) == [(b, STD2)]
+    monkeypatch.setattr(review_cells, "_reopen", real)
+    assert (_head_state(store, key, STD2), _cell(store, key, b, STD2)["run_id"]) == ("ready", live)
+    r.finish(live, ticks=20)
+    cell = _cell(store, key, b, STD2)
+    assert (rig.state(store, live), cell["state"], cell["run_id"]) == ("completed", "na_irrelevant", live)
 
 
 # ---------------------------------------------------------------- 재기동
