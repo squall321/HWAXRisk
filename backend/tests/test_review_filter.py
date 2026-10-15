@@ -14,7 +14,7 @@ import threading
 
 import pytest
 
-from app import config, expert_report, relevance, review_cells, review_runner, review_verify, routes, units
+from app import config, expert_report, relevance, review_cells, review_runner, review_verify, routes, runner, units
 from app.errors import AppError
 from tests import factories
 from tests.synth import fake_review_engine as fre
@@ -935,6 +935,38 @@ def test_a_person_who_does_not_consent_skips_the_waiting_cells_and_the_job_goes_
     assert (_reopened_extra(store, running) or {}).get("unconsented") == {"cells": 0, "calls_est": 0.0}
     if cap:
         assert _cell(store, key, other["unit_id"], other["agent_key"])["state"] == "pending"
+
+
+@pytest.mark.parametrize("over", ["user", "credential"])
+def test_the_consent_blocker_and_declining_by_skip_follow_the_budget_not_the_hold_code(store, monkeypatch, over):
+    """M3 묶음 검토 M4 · D-52 — 동의를 기다리는 잡의 보류 코드가 바뀌어도(사람이 멈춤 · 자격 보류가 덮음) 동의 막힘과 '넘겨서 거절'
+    은 잡의 다시 연 셀 몫(reopen_budget 의 hold)을 따른다. 길잡이는 consent_extra 막힘을 보이고, 넘김(filter state=pending)은 기다리는
+    셀을 넘긴다(종전에는 hold_code 로 골라 skipped 0 · not_failed 3 이었다). 넘김은 사람이 건 그 보류를 풀지 않고(그대로 멈춰 있다),
+    재개는 동의 없이 지난다."""
+    monkeypatch.setattr(review_runner, "REOPEN_FLOOR_CALLS", 2, raising=False)
+    key, r, fake, filtered, running = _one_cell_retry_spill(store, monkeypatch)
+    try:
+        r.finish(running)
+        assert rig.job_row(store, running)["hold_code"] == "consent_extra"
+        if over == "user":
+            runner.pause_job(store, running, by=rig.OWNER)
+        else:
+            assert r.loop.hold(running, "credential", "PAT 가 만료됐다(가짜)")
+        assert rig.job_row(store, running)["hold_code"] == over
+        factories.act_as_delegate(monkeypatch, rig.OWNER)
+        guide = _call("risk_next_step", project_id=_project_with_source(store, key))
+        assert "consent_extra" in [b["code"] for b in guide["blocked"]]
+        out = routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": running, "state": "pending"},
+                                                               reason="다시 연 셀의 비용에 동의하지 않는다"),
+                                     ident=factories.ident(rig.OWNER))
+        assert (out["skipped"], out["job"].get("resumed"), rig.job_row(store, running)["hold_code"]) == (3, None, over)
+        assert routes.job_action(running, "resume", ident=factories.ident(rig.OWNER))["state"] == "queued"
+        r.finish(running)
+    finally:
+        r.stop.set()
+        r.loop.join(10)
+    assert rig.state(store, running) == "completed"
+    assert {_cell(store, key, u, MEM2)["state"] for u in filtered} == {"skipped"}
 
 
 def test_a_reopen_while_the_job_waits_on_an_auto_resuming_hold_turns_it_into_consent_extra(store, monkeypatch):

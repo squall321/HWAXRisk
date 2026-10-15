@@ -272,14 +272,13 @@ def release_unconsented(store: Any, job_id: str, cells: Sequence[tuple[str, str]
 
 
 def awaiting_consent(store: Any, target_key: str) -> tuple[str | None, set[tuple[str, str]]]:
-    """다시 연 셀 몫으로 멈춘(consent_extra · max_calls) 살아 있는 잡과 그 잡에서 동의를 기다리는 셀 — 동의 안 받은 몫에 든, 그 잡에
-    묶인 pending 셀. 그런 잡이 없으면 (None, ∅)."""
-    job = store.query_one(
-        "SELECT id, params_json FROM rr_jobs WHERE target_key = ? AND mode = ? AND state = 'paused' AND hold_code IN (?, ?)"
-        " ORDER BY created_at DESC LIMIT 1", (target_key, MODE, *REOPEN_HOLDS))
-    if job is None:
+    """다시 연 셀 몫이 넘은(reopen_budget 의 hold — 보류 코드가 아니다) 살아 있는 잡과 그 잡에서 동의를 기다리는 셀 — 동의 안 받은
+    몫에 든, 그 잡에 묶인 pending 셀. 동의를 기다리던 잡을 사람이 멈췄거나 자격 보류가 덮어도 같다(M3 묶음 검토 M4 · D-52 — 종전에는
+    hold_code 로 골라 넘겨서 거절하는 길이 막혔다). 그런 잡이 없으면 (None, ∅)."""
+    job = live_review_job(store, target_key)
+    if job is None or reopen_budget(job.get("params") or {}, max_calls=int(config.settings.risk_review_max_calls))["hold"] is None:
         return None, set()
-    keys = {tuple(k.split("|", 1)) for k in ((_json(job["params_json"], {}).get("reopen") or {}).get("unconsented") or {})}
+    keys = {tuple(k.split("|", 1)) for k in (((job.get("params") or {}).get("reopen") or {}).get("unconsented") or {})}
     pending = {(r["unit_id"], r["agent_key"]) for r in store.query(
         "SELECT unit_id, agent_key FROM rr_review_cells WHERE target_key = ? AND run_id = ? AND state = 'pending'",
         (target_key, job["id"]))}
@@ -604,10 +603,13 @@ def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Ma
             if declined and held_job is not None:
                 # 동의하지 않고 넘긴 셀은 돌지 않는다 — 몫에서 빼고, 여유 안으로 돌아오면 그 잡이 이어 돈다(재개는 넘긴 사람의 것)
                 budget = release_unconsented(store, held_job, declined, now=now)
-                if budget is not None and budget["hold"] is None:
+                row = store.query_one("SELECT state, hold_code FROM rr_jobs WHERE id = ?", (held_job,))
+                if (budget is not None and budget["hold"] is None and row is not None and row["state"] == "paused"
+                        and row["hold_code"] in REOPEN_HOLDS):
+                    # 그 몫이 멈춘 까닭이었을 때만 잇는다 — 사람의 정지 · 자격 보류는 넘김이 풀지 않는다(M4 · D-52)
                     runner.resume_job(store, held_job, by=decided_by)
                     out["job"]["resumed"] = True
-                elif budget is not None:
+                elif budget is not None and budget["hold"] is not None:
                     _reopen_hold(store, held_job, budget, now=now)
         elif action == "skip" or start:
             # 넘김의 마감 잡은 넘긴 셀만 묶는다 — 전문가 × 단위 범위면 아무도 청하지 않은 pending 셀까지 돌았다. 돌 셀이 없어 추정 0 이라
