@@ -265,8 +265,8 @@ def assign_scope(store: Any, target_key: str, run_id: str, *, agents: Sequence[s
 
 def bind_cells(store: Any, target_key: str, run_id: str, cells: Sequence[Sequence[str]], *, now: int | None = None) -> int:
     """그 셀들(unit_id, agent_key)만 잡에 묶는다 — 상태와 상관없이, 머리는 범위로 찍지 않는다(그 잡의 몫은 묶인 셀로 가린다 —
-    `job_expert_sql`). pending 셀이 생긴 전문가는 다시 연다. 넘김이 세우는 마감 잡이 넘긴 셀만 묶는다(M3 묶음 검토 M5 · D-52).
-    묶은 셀 수."""
+    `job_expert_sql`). pending 셀이 생긴 전문가는 다시 연다. 처분(넘김 · 다시)이 세우는 잡이 그 처분의 셀만 묶는다(M3 묶음 검토 M5 ·
+    D-52 · M3C-80). 묶은 셀 수."""
     now = now_epoch() if now is None else now
     with store.tx():
         bound = int(store.executemany(

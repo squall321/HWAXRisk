@@ -465,7 +465,8 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
     credential{kind, email, exp}, undeferred, credential_note?}. 높은 끝 추정 소요(호출 × 300초 ÷ 동시 수)가 PAT 남은 수명보다 길거나
     요청자 PAT 를 수명 때문에 건너뛰었으면 `credential_note` 로 미리 알린다. `channel`·`actor_verified` 는 보류 해제 감사 행의 입구다.
     `cells`([[unit_id, agent_key], …])를 주면 범위의 전문가 × 단위 대신 그 셀만 이 잡에 묶고(상태와 상관없이 · 머리는 찍지 않는다)
-    추정도 그 가운데 pending 인 셀로만 센다 — 넘김이 세우는 마감 잡이 넘긴 셀만 묶는다(M3 묶음 검토 M5 · D-52). 범위(`scope`)는
+    추정도 그 가운데 pending 인 셀로만 센다 — 처분(넘김 · 다시)이 세우는 잡이 그 처분의 셀만 묶는다(M3 묶음 검토 M5 · D-52 · M3C-80).
+    범위(`scope`)는
     그 셀들의 전문가 · 단위로 준다(표시 · 검증). 잡 params 의 `cells` 가 그 집합이고 adopt_released 도 그 밖을 거두지 않는다.
     """
     from app import routes  # noqa: PLC0415 — routes 는 runner·planner 를 거쳐 무겁다(같은 문을 쓴다).
@@ -590,9 +591,9 @@ def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Ma
     """사람의 처분 한 번 — 다시(`retry`) 또는 넘김(`skip`) — 과 그 셀을 집을 잡을 한 트랜잭션으로(재설계 M3 C3-4 · m3-cells 3.7).
 
     다시 — 살아 있는 검토 잡의 범위가 그 셀을 덮으면 그 잡이 집는다(`adopted` — 셀의 run_id 를 그 잡으로), 덮지 않으면 다음 잡을
-    기다린다(`waiting`), 살아 있는 잡이 없고 `start` 면 그 셀들의 (전문가, 단위)로 범위를 잡은 검토 잡을 만든다(`created` —
-    `create_review_job` 그대로라 동의 문턱도 그대로다). 넘김 — 살아 있는 잡이 있으면 넘긴 셀을 그 잡에 묶어 그 전문가가 그 잡에서
-    다시 마감되게 하고(`adopted`), 없으면 그 셀의 (전문가, 단위)로 마감 잡을 만든다(돌 셀은 0 이다). 머리는 범위로 찍지 않는다
+    기다린다(`waiting`), 살아 있는 잡이 없고 `start` 면 다시 연 셀만 묶은 검토 잡을 만든다(`created` — 추정도 그 셀만이고 동의
+    문턱은 그대로다, M3C-80). 넘김 — 살아 있는 잡이 있으면 넘긴 셀을 그 잡에 묶어 그 전문가가 그 잡에서 다시 마감되게 하고
+    (`adopted`), 없으면 넘긴 셀만 묶은 마감 잡을 만든다(돌 셀은 0 이다). 머리는 범위로 찍지 않는다
     (반대 검토 3차 MEDIUM 3 · D-47 — 그 잡의 몫은 묶인 셀로 가린다). 잡을 만들다 거절(동의·자격·스위치)되면 처분도
     되돌린다 — 아무것도 바꾸기 전에 거절한 것과 같다. 바꾼 셀이 있으면 감사 한 행(scope coverage · cells.retry|cells.skip).
     살아 있는 잡에 얹은 다시는 그 잡의 다시 연 셀 몫에 들고(넘으면 그 잡이 멈춘다 — job.hold), 다시 연 셀 몫으로 멈춘 잡에서 동의를
@@ -678,14 +679,14 @@ def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Ma
                 elif budget is not None and budget["hold"] is not None:
                     _reopen_hold(store, held_job, budget, now=now)
         elif action == "skip" or start:
-            # 넘김의 마감 잡은 넘긴 셀만 묶는다 — 전문가 × 단위 범위면 아무도 청하지 않은 pending 셀까지 돌았다. 돌 셀이 없어 추정 0 이라
-            # 동의를 사람 대신 적지 않는다(M3 묶음 검토 M5 · D-52 — 종전에는 consent true 를 넣었다)
+            # 처분이 세우는 잡은 그 처분의 셀만 묶고 추정한다 — 전문가 × 단위 범위면 아무도 청하지 않은 pending 셀까지 돌았다(넘김 M5 ·
+            # D-52, 다시 M3C-80). 넘김은 돌 셀이 없어 추정 0 이라 동의를 사람 대신 적지 않는다(종전에는 consent true 를 넣었다). 다시의
+            # 동의는 그 셀들의 추정에 대한 것이다
             made = create_review_job(store, target_key, owner_sub=owner_sub, requester_sub=decided_by,
                                      scope={"agents": agents, "unit_ids": unit_ids},
                                      consent=consent if action == "retry" else False,
                                      consent_source=consent_source if action == "retry" else None, settings=settings,
-                                     channel=channel, actor_verified=actor_verified,
-                                     cells=keys if action == "skip" else None)
+                                     channel=channel, actor_verified=actor_verified, cells=keys)
             out["job"] = {"action": "created", "job_id": made["job_id"], "calls_estimate": made["calls_estimate"]}
         else:
             out["job"] = {"action": "none"}

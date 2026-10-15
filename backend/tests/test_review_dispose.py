@@ -181,6 +181,45 @@ def test_a_retry_that_needs_consent_changes_nothing(store, monkeypatch):
     assert stay["changed"] is False                                                    # 이미 다시 열렸다
 
 
+def test_a_retry_with_no_live_job_binds_only_the_retried_cells_and_estimates_only_them(store, monkeypatch):
+    """M3C-80(조정자 결정 — M5 의 원칙을 다시에도) — 살아 있는 잡이 없을 때 다시가 세우는 잡은 다시 연 셀만 묶고 그 셀만 추정한다.
+    다시 연 셀들의 (전문가, 단위) 곱에 든 다른 pending 셀은 묶지도 돌리지도 않는다(종전에는 전문가 × 단위 범위라 아무도 청하지 않은
+    셀까지 추정해 동의를 물었고 엔진을 불렀다). 사람의 다시는 그 셀들에 대한 동의일 뿐이다 — 그 셀들의 추정이 동의 문턱을 넘으면
+    종전처럼 consent 가 있어야 한다."""
+    from app import units
+
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    fake = FakeReviewEngine(rig.packs())
+    fake.error_cells = {(SEAL, unit_ids[0]): NO_ROWS, (PEER, unit_ids[1]): NO_ROWS}
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [SEAL], "unit_ids": unit_ids[:1]}))
+    r.finish(rig.job(store, key, scope={"agents": [PEER], "unit_ids": unit_ids[1:2]}))
+    fake.error_cells = {}
+    retried = [[unit_ids[0], SEAL], [unit_ids[1], PEER]]
+    cross = {(unit_ids[1], SEAL), (unit_ids[0], PEER)}
+    expected = review_runner._job_estimate(store, config.settings, planner.review_order(store, key),
+                                           [(a, u) for u, a in retried])["expected"]
+    knobs = dataclasses.replace(config.settings, risk_review_consent_calls=expected - 1)
+    monkeypatch.setattr(config, "settings", knobs)
+    refused = _refused(routes.post_cells_retry, key, routes.CellsRetryBody(cells=retried), ident=ME)
+    assert refused.code == "consent_required"                                        # 그 셀들의 추정이 문턱을 넘는다
+    monkeypatch.setattr(config, "settings", dataclasses.replace(knobs, risk_review_consent_calls=expected))
+    out = _granted(routes.post_cells_retry, key, routes.CellsRetryBody(cells=retried), ident=ME)
+    job = out["job"]
+    assert (out["retried"], job["action"], job["calls_estimate"]["expected"]) == (2, "created", expected)
+    assert json.loads(rig.job_row(store, job["job_id"])["params_json"])["cells"] == retried
+    bound = {(row["unit_id"], row["agent_key"]) for row in store.query(
+        "SELECT unit_id, agent_key FROM rr_review_cells WHERE run_id = ?", (job["job_id"],))}
+    assert bound == {tuple(c) for c in retried}
+    runs = len(fake.calls("run"))
+    r.finish(job["job_id"])
+    ran = {((b["body"].get("unit") or {}).get("unit_id"), b["body"]["expert"]["key"]) for b in fake.calls("run")[runs:]}
+    assert rig.state(store, job["job_id"]) == "completed" and not ran & cross
+    assert {(_cells(store, key, a)[u]["state"], _cells(store, key, a)[u]["run_id"]) for u, a in cross} == {("pending", None)}
+    assert {_cells(store, key, a)[u]["state"] for u, a in retried} == {"reviewed"}
+
+
 def test_a_retried_cell_a_live_job_does_not_cover_waits_for_the_next_job(store):
     """살아 있는 검토 잡이 그 셀을 덮지 않으면 다음 잡을 기다린다(waiting — 잡을 새로 세우지 않는다). 다음 잡이 그 셀을 범위로 집는다."""
     key, job_id, unit_ids, fake, r = _failed_target(store)
