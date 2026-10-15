@@ -88,3 +88,26 @@ def test_a_skipped_cell_yields_the_reviewed_cells_findings_for_the_same_data(sto
     assert bool(reviewed) is expect
     assert all(f.get("partial_cell") for f in skipped) and not any(f.get("partial_cell") for f in reviewed)
     assert {k for k, n in (counts or {}).items() if n} == ({kind} if kind else set())
+
+
+@pytest.mark.parametrize("case", sorted(CASES))
+def test_a_skipped_cell_raises_the_stance_exactly_as_the_same_reviewed_cell_would(store, monkeypatch, case):
+    """반대 검토 4차 MEDIUM 1 · D-49 — 넘긴 셀의 걸림 후보는 검토한 셀과 같은 걸림 줄(X1-15)로 입장을 올린다(한 길 — D-47). 깨끗하게
+    검토한 단위 하나(바탕 agree)가 있는 원장에서 같은 자료의 셀을 검토한 셀로 두든 넘긴 셀로 두든 입장이 같다 — 넘긴 셀이 검토한 셀보다
+    더 올리거나 덜 올리지 않는다(기권 판단만 검토한 셀의 몫이다)."""
+    agent, switches, dual, _expect, _kind = CASES[case]
+    key, unit_id = _ledger_data(store, monkeypatch, agent, switches, dual)
+    other = units.load_units(store, key)[1]["unit_id"]
+    gap = agent == MEM1
+    clean = FakeReviewEngine(gap_packs(GAP_ROSTER) if gap else rig.packs())
+    clean.offcard_findings = 0
+    if gap:
+        clean.noinput_script, clean.noinput_q2 = {other: [[{"impact": "no", "title": "B"}]]}, {other: [""]}
+    rig.Rig(store, clean).finish(rig.job(store, key, scope={"agents": [agent], "unit_ids": [other]}))
+    assert store.query_one("SELECT state FROM rr_review_cells WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+                           (key, other, agent))["state"] == "reviewed"
+    stances = {}
+    for state in ("reviewed", "skipped"):
+        _findings_as(store, key, agent, unit_id, state)
+        stances[state] = expert_report.prepare(store, key, agent).opinion["final_stance"]
+    assert stances["skipped"] == stances["reviewed"]

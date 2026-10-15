@@ -1192,32 +1192,36 @@ def summary_md(report: Mapping[str, Any]) -> str:
 
 
 # ================================================================ 의견 행(seat_opinion.v1)
+_STANCE_RANK = {"agree": 0, "conditional": 1, "oppose": 2}
+
+
+def _raised(effective: Sequence[Mapping[str, Any]], findings: Sequence[Mapping[str, Any]]) -> str:
+    """X1-15 의 걸림 줄 — 실효 FAIL → oppose, WARNING·카드 밖 지적·변형이 갈린 카드(두 번째 판정 못 한 부딪침 포함) → conditional, 그 밖
+    agree. 검토한 셀과 넘긴 셀이 같은 줄을 지난다(D-47 — 한 길)."""
+    if any(row["judgement"] == "FAIL" for row in effective):
+        return "oppose"
+    if (any(row["judgement"] == "WARNING" for row in effective)
+            or any(f["direction"] == "risk" and (f.get("off_card_n") or f.get("split")) for f in findings)):
+        return "conditional"
+    return "agree"
+
+
 def _final_stance(ledger: Ledger, findings: Sequence[Mapping[str, Any]]) -> str:
-    """X1-15 — 검토한 셀로 정한다: 실효 FAIL → oppose, WARNING·카드 밖 지적·변형이 갈린 카드 → conditional, 적용 판정이 보류뿐이거나
-    검토한 셀이 없으면 abstain, 그 밖 → agree. 넘긴 셀의 걸림 후보(partial_cell finding — 실효 FAIL 이면 oppose, 그 밖의 리스크 후보면
-    conditional)는 그 입장을 조건부 · 반대 쪽으로만 움직인다 — 기권은 검토한 셀로만 정하고(넘긴 셀이 풀지도 만들지도 않는다), 동의로는
-    결코 가지 않는다(반대 검토 4차 MEDIUM 1 · D-49 — 넘긴 셀을 검토한 셀처럼 읽어 데이터 없는 넘김이 agree 가 됐다)."""
+    """X1-15 — 검토한 셀로 정한다: 걸림 줄(`_raised`), 그 줄이 agree 인데 적용 판정이 보류뿐이거나 검토한 셀이 없으면 abstain. 넘긴 셀의
+    걸림 후보는 같은 줄로 입장을 조건부 · 반대 쪽으로 올리기만 한다 — 기권은 검토한 셀로만 정하고(넘긴 셀이 풀지도 만들지도 않는다),
+    동의로는 결코 가지 않는다(반대 검토 4차 MEDIUM 1 · D-49 — 넘긴 셀을 검토한 셀처럼 읽어 데이터 없는 넘김이 agree 가 됐다)."""
     reviewed = ledger.reviewed()
     if not reviewed:
         return "abstain"
     effective = [row for unit in reviewed for row in ledger.effective(unit["unit_id"]).values()]
-    own = [f for f in findings if not f.get("partial_cell")]
-    if any(row["judgement"] == "FAIL" for row in effective):
-        return "oppose"
-    if (any(row["judgement"] == "WARNING" for row in effective)
-            or any(f["direction"] == "risk" and (f.get("off_card_n") or f.get("split")) for f in own)):
-        stance = "conditional"
-    else:
+    stance = _raised(effective, [f for f in findings if not f.get("partial_cell")])
+    if stance == "agree":
         applicable = [row["judgement"] for row in effective if row["applies"] != "no"]
         if applicable and all(j == "undetermined" for j in applicable):
             return "abstain"
-        stance = "agree"
-    partial = [row for unit in ledger.partial() for row in ledger.effective(unit["unit_id"]).values()]
-    if any(row["judgement"] == "FAIL" for row in partial):
-        return "oppose"
-    if any(f.get("partial_cell") and f["direction"] == "risk" for f in findings):
-        return "conditional"
-    return stance
+    partial = _raised([row for unit in ledger.partial() for row in ledger.effective(unit["unit_id"]).values()],
+                      [f for f in findings if f.get("partial_cell")])
+    return max(stance, partial, key=_STANCE_RANK.__getitem__)
 
 
 def _cited(ledger: Ledger) -> tuple[list[str], list[str], bool]:
