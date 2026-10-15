@@ -550,6 +550,19 @@ def test_audit_outcome_table(cards, offcard, outcome):
     assert outcome in rv.AUDIT_OUTCOMES
 
 
+@pytest.mark.parametrize(("marked", "variants", "outcome"), [
+    (True, ("solo",), "risk_miss"),                 # 두 번째 판정을 끝내 못 받은 부딪침 표지 — finding 후보다
+    (True, ("solo", "rev"), "relevance_miss"),      # 두 번째 판정을 받아 같다 — 걸림 없이 적용
+    (False, ("solo",), "relevance_miss"),           # 표지 없는 단독 행
+])
+def test_audit_outcome_counts_an_unjudged_conflict_as_a_miss(marked, variants, outcome):
+    """반대 검토 3차 LOW 6 · D-47 — 단독으로만 본 카드의 단독 행에 엔진 부딪침 표지가 섰는데 두 번째 판정(rev)을 끝내 못 받았으면
+    (변형이 하나뿐) 보고서는 보류 finding 을 싣는다(D-37). 표본 결과도 kept · relevance_miss 가 아니라 놓침이다 — 판정 행으로 변형을 본다."""
+    checks = json.dumps({"dup_conflict": True} if marked else {})
+    rows = [{"record_id": "R0", "variant": v, "applies": "yes", "judgement": "OK", "checks_json": checks} for v in variants]
+    assert rv.audit_outcome(rv.effective_rows(rows), [], rows=rows) == outcome
+
+
 def test_audit_outcome_reads_the_engine_offcard_rows_through_the_app_accounting():
     """카드 밖 줄은 앱 회계(`accept_rows(kind='offcard')`)를 지난 모양 그대로 읽는다 — 엔진 계약 예제의 결과로."""
     request, result = _load("req_offcard.json"), _load("result_offcard_ok.json")

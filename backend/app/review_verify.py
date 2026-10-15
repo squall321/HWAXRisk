@@ -706,11 +706,13 @@ def _offcard_risk(row: Mapping[str, Any]) -> bool:
     return str(row.get("dir") or "risk") == "risk" and str(row.get("sev") or "") != SEV_MINOR
 
 
-def audit_outcome(effective: Mapping[str, Mapping[str, Any]], offcard_rows: Sequence[Mapping[str, Any]]) -> str:
+def audit_outcome(effective: Mapping[str, Mapping[str, Any]], offcard_rows: Sequence[Mapping[str, Any]], *,
+                  rows: Sequence[Mapping[str, Any]] = ()) -> str:
     """표본·그림자 셀 하나의 놓침 판정 — 처음 맞는 줄이다(X1-13 · m3-cells 3.4).
 
-    | risk_miss | 실효 FAIL·WARNING 이 하나라도(실효 undetermined 이면서 split=1 — 변형이 걸렸던 카드 — 포함), 또는 카드 밖
-    |           | 리스크의 심각도가 경미가 아니다(`_offcard_risk`) |
+    | risk_miss | finding 후보(`candidate_kind`)가 하나라도 — 실효 FAIL·WARNING, 실효 undetermined 이면서 split=1(변형이 걸렸던
+    |           | 카드), 두 번째 판정을 끝내 못 받은 부딪침 표지(unjudged_conflict — 반대 검토 3차 LOW 6 · D-47, 판정 행 `rows` 로
+    |           | 변형을 본다) — 또는 카드 밖 리스크의 심각도가 경미가 아니다(`_offcard_risk`) |
     | relevance_miss | 걸림은 없지만 applies='yes' 실효 행이나 카드 밖 줄(경미 리스크 · 개선)이 있다 |
     | undetermined | 위 둘이 아니고 applies='unknown' 이거나 판정이 undetermined 인 실효 행이 있다 |
     | kept | 실효가 전부 해당 없음이고 카드 밖이 없다 |
@@ -718,13 +720,16 @@ def audit_outcome(effective: Mapping[str, Mapping[str, Any]], offcard_rows: Sequ
     `effective` 는 `effective_rows` 의 반환, `offcard_rows` 는 카드 밖 회계(`accept_rows(kind='offcard')`)의 rows 다.
     넓힘(그 영역의 거른 셀을 다시 연다)을 일으키는 것은 risk_miss 뿐이다.
     """
-    rows = list(effective.values())
-    if any(str(e.get("judgement")) in FLAGGED or (str(e.get("judgement")) == "undetermined" and int(e.get("split") or 0))
-           for e in rows) or any(_offcard_risk(f) for f in offcard_rows):
+    variants: dict[str, dict[str, Mapping[str, Any]]] = {}
+    for row in rows:
+        variants.setdefault(str(row["record_id"]), {})[str(row.get("variant") or "fwd")] = row
+    effs = list(effective.values())
+    if any(candidate_kind(e, variants.get(str(rid), {})) for rid, e in effective.items()) \
+            or any(_offcard_risk(f) for f in offcard_rows):
         return "risk_miss"
-    if any(str(e.get("applies")) == "yes" for e in rows) or offcard_rows:
+    if any(str(e.get("applies")) == "yes" for e in effs) or offcard_rows:
         return "relevance_miss"
-    if any(str(e.get("applies")) == "unknown" or str(e.get("judgement")) == "undetermined" for e in rows):
+    if any(str(e.get("applies")) == "unknown" or str(e.get("judgement")) == "undetermined" for e in effs):
         return "undetermined"
     return "kept"
 
