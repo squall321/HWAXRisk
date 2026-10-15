@@ -2423,3 +2423,13 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
 - 공유 파일(routes.py · entry.py · mcp_server.py)은 손대지 않았다. runner.py 는 `cancel_job` 의 반환을 트랜잭션 밖으로 옮기고 다시 짓기
   한 줄을 더했다.
 - **전체 시험(공유 잠금 아래, 1cb7631).** 3,150 통과 · xfail 4 · 실패 0(rc 0). ruff 깨끗하다.
+
+## 리스크 심사 Claude 길 X-2(가지 `x2-claude`, main d18e9d6 위, 2026-10-15)
+
+포털 `docs/risk-claude-engine/` 의 걸음 X-2 다. 엔진 계약은 HWAXAgentServer README '외부 응답자' 절(main 839fa68)과 그 계약 예제
+`tests/fixtures/external_llm/contract/` 다. 사용자 결정(X-D1) — 지어 두되 기본 꺼짐, 실제 Claude 로 돌리는 시험은 하지 않는다.
+
+### XR-1. 앱의 이름은 `claude`, 엔진의 이름은 `external` 이다
+- 잡 선택은 `llm: "glm" | "claude"`(없으면 glm)이고 엔진에는 `external` 로 보낸다(엔진은 `claude` 를 422 bad_request 로 거절한다 —
+  rejects.json). 옮기는 자리는 engine_client 한 곳이다.
+- GLM 잡의 params · 요청 본문 · 응답 · 보고서 바이트는 바뀌지 않는다 — 새 칸은 claude 잡에만 싣는다(없으면 glm).
