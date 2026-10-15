@@ -406,9 +406,15 @@ def header_line(store: RiskStore, data_dir: Path | None = None) -> dict:
             "origin": read_origin(data_dir)}
 
 
-# 반출 기본 제외 — 회수된 과제와 코퍼스 제외 과제(plan §5.2.6 (ii)). `include_excluded=1` 로만 싣는다.
-_PROJECT_SCOPE_SQL = ("project_id IN (SELECT id FROM rr_projects WHERE owner_sub = ?"
-                      " AND status <> 'purged' AND (corpus_excluded = 0 OR ? = 1))")
+# 반출 기본 제외 — 회수된 과제와 코퍼스 제외 과제(plan §5.2.6 (ii)). `include_excluded=1` 로만 싣는다. 자리표는 둘(owner_sub,
+# include_excluded)이다.
+_SCOPED_PROJECTS_SQL = ("SELECT id FROM rr_projects WHERE owner_sub = ?"
+                        " AND status <> 'purged' AND (corpus_excluded = 0 OR ? = 1)")
+_PROJECT_SCOPE_SQL = f"project_id IN ({_SCOPED_PROJECTS_SQL})"
+# 스냅샷 · diff 열쇠 표(과제 열도 대상 열쇠도 없다)는 그 스냅샷 · diff 의 과제를 따른다(D50). diff 는 base · target 두 과제가 모두
+# 범위여야 한다 — 읽기 문지기(routes.mcp_scope_owner)와 같은 규칙이다(한쪽이 빠진 비교는 빠진 쪽의 내용을 싣는다). 자리표 넷.
+_SNAPSHOT_SCOPE_SQL = f"snapshot_id IN (SELECT id FROM rr_snapshots WHERE {_PROJECT_SCOPE_SQL})"
+_DIFF_PROJECTS_SQL = f"base_project_id IN ({_SCOPED_PROJECTS_SQL}) AND target_project_id IN ({_SCOPED_PROJECTS_SQL})"
 
 
 def _select(store: RiskStore, table: str, owner_sub: str, since: int,
@@ -418,7 +424,7 @@ def _select(store: RiskStore, table: str, owner_sub: str, since: int,
     owner_sub 열이 없는 공용 표(rr_dim_vocab·rr_rules·rr_metrics·rr_delta_priors)는 소유자로 거를 수 없다 —
     그 중 visibility 열이 있는 표는 'org' 행만 싣는다(남의 사설 집계가 내 JSONL 에 따라 나가지 않게 한다).
     `project_id` 를 가진 표는 회수·코퍼스 제외 과제를 기본으로 뺀다(plan §5.2.6 (ii)) — 과제 열 없이 `target_key` 를 가진 표는 그
-    대상의 과제로 같은 거름을 건다(조합 검토 M9).
+    대상의 과제로 같은 거름을 건다(조합 검토 M9). 둘 다 없는 스냅샷 · diff 열쇠 표는 그 스냅샷 · diff 의 과제로 건다(D50).
     """
     cols, pks = _table_meta(store, table)
     cols = [c for c in cols if c not in _EXPORT_SKIP_COLUMNS.get(table, ())]
@@ -442,6 +448,22 @@ def _select(store: RiskStore, table: str, owner_sub: str, since: int,
         # 뺀(기밀) 과제의 행이 기본 반출에 실리는데 classification_max 는 'internal' 이라 했다(조합 검토 M9).
         where.append(f"target_key IN (SELECT target_key FROM rr_targets WHERE {_PROJECT_SCOPE_SQL})")
         params += [owner_sub, 1 if include_excluded else 0]
+    elif table == "rr_snapshot_calls":
+        # 스냅샷이 없는 호출(실패 · 부분 잡의 원문)은 그 스냅샷 잡의 과제를 따른다.
+        where.append(f"({_SNAPSHOT_SCOPE_SQL} OR (snapshot_id IS NULL AND job_id IN"
+                     f" (SELECT id FROM rr_snapshot_jobs WHERE {_PROJECT_SCOPE_SQL})))")
+        params += [owner_sub, 1 if include_excluded else 0] * 2
+    elif "snapshot_id" in cols:
+        # 스냅샷 열쇠 표(IR 노드 · 엣지 · 상태 · 게이트 확인)는 그 스냅샷의 과제를 따른다(D50).
+        where.append(_SNAPSHOT_SCOPE_SQL)
+        params += [owner_sub, 1 if include_excluded else 0]
+    elif table == "rr_diffs":
+        where.append(_DIFF_PROJECTS_SQL)
+        params += [owner_sub, 1 if include_excluded else 0] * 2
+    elif "diff_id" in cols:
+        # diff 열쇠 표(diff 이벤트)는 그 diff 를 따른다(D50).
+        where.append(f"diff_id IN (SELECT id FROM rr_diffs WHERE {_DIFF_PROJECTS_SQL})")
+        params += [owner_sub, 1 if include_excluded else 0] * 2
     since_cols = [c for c in _SINCE_COLS.get(table, ()) if c in cols]
     if since > 0 and since_cols:
         expr = since_cols[0] if len(since_cols) == 1 else f"COALESCE({', '.join(since_cols)})"

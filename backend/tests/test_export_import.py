@@ -109,6 +109,89 @@ def test_default_export_scopes_target_keyed_rows_by_their_project(risk_store):
     assert export.classification_max(risk_store, ALICE, include_excluded=True) == "confidential"
 
 
+# 스냅샷 · diff 열쇠 표 — 과제 열도 대상 열쇠도 없다(D50). 표마다 그 행이 매인 스냅샷 · diff 를 읽는 칸.
+SNAPSHOT_DIFF_KEYS = {"rr_snapshot_calls": "snapshot_id", "rr_ir_nodes": "snapshot_id", "rr_ir_edges": "snapshot_id",
+                      "rr_states": "snapshot_id", "rr_gate_acks": "snapshot_id", "rr_diffs": "id", "rr_diff_events": "diff_id"}
+
+
+def _snapshot_rows(store: RiskStore, owner: str, pid: str, sid: str, at: int, *, with_rows: bool = True) -> None:
+    _insert(store, "rr_snapshots", {"id": sid, "project_id": pid, "owner_sub": owner, "ir_version": "1.0",
+                                    "ir_hash": f"hash-{sid}", "ir_json": '{"nodes":[]}', "source_ids_json": "[]",
+                                    "kinds_json": '["mcad"]', "node_count": 1, "edge_count": 1, "warnings_n": 0,
+                                    "created_at": at})
+    if not with_rows:
+        return
+    _insert(store, "rr_snapshot_calls", {"call_id": f"{sid}-001", "job_id": sid, "snapshot_id": sid, "owner_sub": owner,
+                                         "seq": 1, "source_kind": "mcad", "channel": "rest", "tool": "/tree", "ok": 1,
+                                         "started_at": at})
+    _insert(store, "rr_ir_nodes", {"snapshot_id": sid, "nid": "n1", "owner_sub": owner, "kind": "part",
+                                   "source_kind": "mcad", "name": "N1", "name_norm": "n1"})
+    _insert(store, "rr_ir_edges", {"snapshot_id": sid, "eid": "e1", "owner_sub": owner, "kind": "interference",
+                                   "kind_family": "contact", "a": "n1", "b": "n1", "status": "auto"})
+    _insert(store, "rr_states", {"snapshot_id": sid, "owner_sub": owner, "state_json": "{}", "feature_json": "{}",
+                                 "gates_json": "{}", "computed_at": at})
+
+
+def _diff_rows(store: RiskStore, owner: str, did: str, base: tuple[str, str], target: tuple[str, str], at: int) -> None:
+    """diff 한 건(base · target 은 (과제, 스냅샷))과 그 이벤트 한 줄 · target 스냅샷의 게이트 확인 한 줄."""
+    _insert(store, "rr_diffs", {"id": did, "owner_sub": owner, "base_snapshot_id": base[1], "target_snapshot_id": target[1],
+                                "base_project_id": base[0], "target_project_id": target[0], "diff_version": "1.0",
+                                "diff_json": "{}", "summary_text": "기밀 변경 요약", "created_at": at})
+    _insert(store, "rr_diff_events", {"diff_id": did, "cid": "c:000000000001", "owner_sub": owner, "layer": "structural",
+                                      "code": "part_added", "text": "기밀 부품이 더해졌다"})
+
+
+def _subjects(lines) -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {table: set() for table in SNAPSHOT_DIFF_KEYS}
+    for line in lines:
+        if line["table"] in out:
+            out[line["table"]].add(line["row"][SNAPSHOT_DIFF_KEYS[line["table"]]])
+    return out
+
+
+def test_default_export_scopes_snapshot_and_diff_rows_by_their_project(risk_store):
+    """기본 반출은 스냅샷 · diff 열쇠 표(스냅샷 호출 · IR 노드 · 엣지 · 상태 · 게이트 확인 · diff · diff 이벤트)도 그 과제를 따른다 —
+    코퍼스에서 뺀 기밀 과제의 스냅샷 · diff 행은 싣지 않고 include_excluded 로만 싣는다. diff 는 base · target 두 과제가 모두 반출
+    범위여야 실린다(읽기 문지기 mcp_scope_owner 와 같은 규칙 — 한쪽이 빠진 비교는 빠진 쪽의 내용을 싣는다). 스냅샷이 없는 호출
+    (실패 · 부분 잡의 원문)은 그 스냅샷 잡의 과제를 따른다. 범위 안 과제의 행은 그대로 실린다(D50)."""
+    at = 1_000
+    for pid, code, grade in (("p-secret", "SECRET-1", "confidential"), ("p-kept", "KEPT-1", "internal")):
+        _insert(risk_store, "rr_projects", {"id": pid, "owner_sub": ALICE, "code": code, "name": "케이스", "stage": "concept",
+                                            "classification": grade, "character_status": "seed", "created_at": at,
+                                            "updated_at": at})
+    risk_store.execute("UPDATE rr_projects SET corpus_excluded = 1, excluded_reason = 'user' WHERE id = 'p-secret'")
+    _snapshot_rows(risk_store, ALICE, "p-secret", "s-secret", at)
+    _snapshot_rows(risk_store, ALICE, "p-secret", "s-secret2", at, with_rows=False)
+    _snapshot_rows(risk_store, ALICE, "p-kept", "s-kept", at)
+    _snapshot_rows(risk_store, ALICE, "p-kept", "s-kept2", at, with_rows=False)
+    _diff_rows(risk_store, ALICE, "d-secret", ("p-secret", "s-secret"), ("p-secret", "s-secret2"), at)
+    _diff_rows(risk_store, ALICE, "d-cross", ("p-secret", "s-secret"), ("p-kept", "s-kept"), at)
+    _diff_rows(risk_store, ALICE, "d-kept", ("p-kept", "s-kept"), ("p-kept", "s-kept2"), at)
+    for sid, did in (("s-secret", "d-secret"), ("s-kept", "d-kept")):
+        _insert(risk_store, "rr_gate_acks", {"snapshot_id": sid, "gate": "G1", "owner_sub": ALICE, "diff_id": did,
+                                             "ack_by": ALICE, "ack_at": at, "ack_reason": "넘긴다", "gates_hash": "h"})
+    # 스냅샷이 없는 호출 — 실패한 스냅샷 잡의 원문(그 잡의 과제를 따른다).
+    for pid, job in (("p-secret", "job-secret"), ("p-kept", "job-kept")):
+        _insert(risk_store, "rr_snapshot_jobs", {"id": job, "project_id": pid, "owner_sub": ALICE, "kinds_json": '["mcad"]',
+                                                 "state": "failed", "created_at": at})
+        _insert(risk_store, "rr_snapshot_calls", {"call_id": f"{job}-001", "job_id": job, "snapshot_id": None,
+                                                  "owner_sub": ALICE, "seq": 1, "source_kind": "mcad", "channel": "rest",
+                                                  "tool": "/tree", "ok": 0, "started_at": at})
+    default_lines = _lines(risk_store)[1:]
+    assert _subjects(default_lines) == {"rr_snapshot_calls": {"s-kept", None}, "rr_ir_nodes": {"s-kept"},
+                                        "rr_ir_edges": {"s-kept"}, "rr_states": {"s-kept"}, "rr_gate_acks": {"s-kept"},
+                                        "rr_diffs": {"d-kept"}, "rr_diff_events": {"d-kept"}}
+    assert {ln["row"]["call_id"] for ln in default_lines if ln["table"] == "rr_snapshot_calls"} == {"s-kept-001", "job-kept-001"}
+    assert export.classification_max(risk_store, ALICE) == "internal"
+    widened = [json.loads(ln) for ln in list(export.iter_lines(risk_store, ALICE, 0, include_excluded=True))[1:]]
+    assert _subjects(widened) == {"rr_snapshot_calls": {"s-secret", "s-kept", None}, "rr_ir_nodes": {"s-secret", "s-kept"},
+                                  "rr_ir_edges": {"s-secret", "s-kept"}, "rr_states": {"s-secret", "s-kept"},
+                                  "rr_gate_acks": {"s-secret", "s-kept"}, "rr_diffs": {"d-secret", "d-cross", "d-kept"},
+                                  "rr_diff_events": {"d-secret", "d-cross", "d-kept"}}
+    assert {ln["row"]["call_id"] for ln in widened if ln["table"] == "rr_snapshot_calls"} == {
+        "s-secret-001", "s-kept-001", "job-secret-001", "job-kept-001"}
+
+
 def test_rows_follow_plan_table_order_and_skip_housekeeping(seeded):
     tables = [ln["table"] for ln in _lines(seeded)[1:]]
     assert tables, "행이 하나도 실리지 않았다"
