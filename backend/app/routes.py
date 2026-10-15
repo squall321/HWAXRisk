@@ -866,6 +866,12 @@ def create_project(body: ProjectBody, ident: identity.Identity = Depends(identit
     now = now_epoch()
     project_id = new_uuid()
     store = get_store()
+    if body.predecessor_project_id and project_role(body.predecessor_project_id, owner_sub) is None and not (
+            _is_admin(ident) and store.query_one("SELECT 1 FROM rr_projects WHERE id = ?",
+                                                 (body.predecessor_project_id,)) is not None):
+        # 앞 과제는 부른 사람이 구성원인 과제여야 한다 — 남의 과제는 없는 과제와 같은 404 이고 아무것도 만들지 않는다(그 과제를 계보로
+        # 읽어 들이지 않는다 — 유사 과제의 계보 경로가 그 code 를 실었다, review1 남 숨김 훑기 둘째). 관리자는 있는 과제면 된다.
+        raise AppError("E404", f"앞 과제({body.predecessor_project_id}) 를 찾을 수 없습니다.", 404)
     # 정본 §8.2.4 — "첫 행이 product_code 대표값으로 들어가고 계보 과제가 있으면 그 과제의
     # product_code 가 predecessor_product_code 로 채워진다". 대표값은 `kind='product_code'` 인 행에서
     # 고른다(`ra_model` 값은 RA 엔티티 코드라 VOC 조회 키가 아니다 — brief.product_keys 와 같은 규칙).

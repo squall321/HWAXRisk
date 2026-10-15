@@ -1,4 +1,4 @@
-# 반대 검토 1차(review1) 남의 것 숨김 — 라우터의 쓰기 경로 전부와 MCP 도구 전부가 남에게 과제 id · 대상 열쇠를 흘리지 않고 없는 것과 같은 답이다(L2 · 조정자 추가 1)
+# 반대 검토 1차(review1) 남의 것 숨김 — 라우터의 쓰기 경로 전부와 MCP 도구 전부가 남에게 과제 id · 대상 열쇠를 흘리지 않고 없는 것과 같은 답이다(L2 · 조정자 추가 1), 받은 id 를 거쳐 읽는 자리(앞 과제 · 계보 · 선례)도 같다(훑기 둘째)
 """경로 목록은 라우터(`routes.router`)에서, 도구 목록은 MCP 서버(`mcp.list_tools`)에서 뽑는다 — 이 시험의 표가 그 둘과 같아야 한다(새
 경로·도구가 남 시험 없이 들어오지 않는다). 표의 한 칸은 (부르는 함수, 부르는 사람이 준 id 의 이름) 이거나 남의 것을 가리키는 인자가
 없는 까닭(면제)이다. 남(구성원이 아닌 사람)이 주인의 것을 가리켜 부른 답은 ① 과제 id 를 싣지 않고 ② 대상 열쇠는 부른 사람이 준 때만
@@ -244,8 +244,9 @@ PREPARE: dict[tuple[str, str], Callable[[dict, RiskStore], Any]] = {
         i["cluster"], routes.RegistryMergeBody(into=i["cluster2"], reason="cluster_merge"), ident=factories.ident(OWNER)),
     ("DELETE", P + "/targets/{target_key}/closure/acks/{item}"): lambda i, store: _owner_ack(i, store),
 }
-# 남이 받는 답 — 기본은 없는 것과 같은 404 다. 남의 것을 읽지 않고 제 행만 쓰는 경로는 성공한다(그 답에도 주인의 값이 없다).
-EXPECT: dict[tuple[str, str], int] = {("POST", P + "/projects"): 200, ("POST", P + "/sameas/decide"): 200}
+# 남이 받는 답 — 기본은 없는 것과 같은 404 다. 남의 것을 읽지 않고 제 행만 쓰는 경로는 성공한다(그 답에도 주인의 값이 없다). 새 과제는
+# 앞 과제로 남의 과제를 주면 없는 앞 과제와 같은 404 다(훑기 둘째 — 종전에는 그대로 만들어 계보가 남의 과제를 읽었다).
+EXPECT: dict[tuple[str, str], int] = {("POST", P + "/sameas/decide"): 200}
 
 
 def _owner_ack(ids: dict, store: RiskStore) -> Any:
@@ -347,9 +348,11 @@ def test_the_import_answer_names_only_the_supplied_key(ledger):
 MCP_EXEMPT: dict[str, str] = {
     "risk_list_projects": "발견 — id 인자가 없다(남의 과제가 목록에 없는지는 아래 시험이 본다)",
     "risk_taxonomy": "공용 어휘 — id 인자가 없다",
-    "risk_create_project": "새 과제 — 앞 과제(predecessor_project_id)는 REST POST /projects 칸과 같은 함수다",
 }
 MCP_CASES: dict[str, tuple[Callable[[dict], Any], tuple[str, ...]]] = {
+    "risk_create_project": (lambda i: srv.risk_create_project(code=f"p-{uuid.uuid4().hex[:8]}", name="남의 과제",
+                                                              classification="internal", predecessor_project_id=i["project"]),
+                            ("project",)),
     "risk_get_coverage": (lambda i: srv.risk_get_coverage(target_key=i["target"]), ("target",)),
     "risk_list_panels": (lambda i: srv.risk_list_panels(target_key=i["target"]), ("target",)),
     "risk_get_panel_transcript": (lambda i: srv.risk_get_panel_transcript(panel_id=i["panel"]), ("panel",)),
@@ -430,9 +433,68 @@ def test_a_stranger_gets_the_missing_answer_from_every_mcp_tool(ledger, monkeypa
 
 
 def test_the_exempt_mcp_tools_do_not_name_the_owners_project_or_target(ledger, monkeypatch):
-    """면제한 발견 · 어휘 · 새 과제 도구도 남에게 주인의 과제 id · 대상 열쇠를 싣지 않는다."""
+    """면제한 발견 · 어휘 도구도 남에게 주인의 과제 id · 대상 열쇠를 싣지 않는다."""
     store, ids = ledger
     factories.act_as_delegate(monkeypatch, OTHER)
-    for fn in (lambda: srv.risk_list_projects(), lambda: srv.risk_taxonomy(),
-               lambda: srv.risk_create_project(code="stranger-mcp", name="남의 과제", classification="internal")):
+    for fn in (lambda: srv.risk_list_projects(), lambda: srv.risk_taxonomy()):
         _no_leak(_mcp(fn)[2], ids, ())
+
+
+# ---------------------------------------------------------------- 받은 id 를 거쳐 읽는 자리(조정자 훑기 둘째)
+def _projects_of(store: RiskStore, owner: str) -> int:
+    return store.query_one("SELECT COUNT(*) AS n FROM rr_projects WHERE owner_sub = ?", (owner,))["n"]
+
+
+def test_a_foreign_predecessor_creates_nothing_on_either_entrance(ledger, monkeypatch):
+    """새 과제의 앞 과제가 남의 과제면 REST · MCP 둘 다 없는 앞 과제와 같은 404 이고 아무것도 만들지 않는다(같은 code 가 이미 있어도 —
+    MCP 입구는 그때 기존 과제를 돌려주던 갈래가 있다)."""
+    store, ids = ledger
+    stranger = factories.ident(OTHER)
+    routes.create_project(routes.ProjectBody(code="mine-1", name="내 과제", classification="internal"), ident=stranger)
+    before = _projects_of(store, OTHER)
+    rest = _answer(lambda: routes.create_project(routes.ProjectBody(
+        code="mine-2", name="남의 계보", classification="internal", predecessor_project_id=ids["project"]), ident=stranger))
+    factories.act_as_delegate(monkeypatch, OTHER)
+    mcp = [_mcp(lambda code=code: srv.risk_create_project(code=code, name="남의 계보", classification="internal",
+                                                          predecessor_project_id=ids["project"]))
+           for code in ("mine-3", "mine-1")]
+    assert rest[:2] == ("E404", 404) and [m[0] for m in mcp] == ["E404", "E404"], (rest, mcp)
+    assert _projects_of(store, OTHER) == before
+
+
+def test_lineage_never_reads_into_another_persons_project(ledger):
+    """앞 과제 링크는 만들 때 구성원인지 보지만 들여오기(남이 제 과제 행에 주인의 과제를 앞 과제로 적어 들여온다)로 선 링크가 남을 수
+    있다 — 계보는 구성원인 과제만 싣고 건너 따라가지 않는다. 남의 유사 과제에 주인의 과제(id · code)가 없고, 주인의 유사 과제에도 남의
+    과제가 없다. 주인이 제 과제를 앞 과제로 만든 다음 과제는 계보에 그대로 선다(거름이 계보를 통째로 끄지 않는다)."""
+    from app import brief
+
+    store, ids = ledger
+    head = next(iter(export.iter_lines(store, OTHER, 0)))
+    row = {"id": "p-stranger-lineage", "owner_sub": OTHER, "code": "s-lineage", "name": "남의 과제", "classification": "internal",
+           "predecessor_project_id": ids["project"], "created_at": 1, "updated_at": 1}
+
+    class _Body:
+        async def body(self) -> bytes:
+            return (head.rstrip("\n") + "\n" + json.dumps({"table": "rr_projects", "row": row}) + "\n").encode("utf-8")
+
+    assert asyncio.run(routes.post_import(_Body(), ident=factories.ident(OTHER)))["inserted"] == 1
+    mine = routes.create_project(routes.ProjectBody(code="next-rev", name="다음 리비전", classification="internal",
+                                                    predecessor_project_id=ids["project"]), ident=factories.ident(OWNER))
+    code = store.query_one("SELECT code FROM rr_projects WHERE id = ?", (ids["project"],))["code"]
+    theirs = routes.get_similar(row["id"], ident=factories.ident(OTHER))
+    assert ids["project"] not in json.dumps(theirs, ensure_ascii=False) and theirs["lineage"] == [], theirs["lineage"]
+    assert code not in json.dumps(theirs["lineage"], ensure_ascii=False)
+    owners = routes.get_similar(ids["project"], ident=factories.ident(OWNER))
+    assert [e["project_id"] for e in owners["lineage"]] == [mine["id"]], owners["lineage"]
+    # 좌석 기억(E7)의 순위가 쓰는 계보도 같은 함수다 — 남이 주인의 과제를 앞 과제로 적어 그 과제의 의견을 골라 올릴 수 없다.
+    assert brief._lineage_project_ids(store, row["id"]) == [] and brief._lineage_project_ids(store, ids["project"]) == [mine["id"]]
+
+
+def test_precedents_of_another_persons_diff_answer_like_a_missing_diff(ledger):
+    """선례(REST GET /precedents)는 받은 diff 의 스냅샷(subject · 규칙 적중)을 거쳐 읽는다 — 남의 diff 는 없는 diff 와 같은 404 다(종전에는
+    소유를 보지 않아 남의 스냅샷 규칙 적중까지 실었다). 주인으로는 답이 선다."""
+    store, ids = ledger
+    theirs = _answer(lambda: routes.get_precedents(diff_id=ids["diff"], ident=factories.ident(OTHER)))
+    missing = _answer(lambda: routes.get_precedents(diff_id="no-such-diff", ident=factories.ident(OTHER)))
+    assert theirs[1] == 404 and _normal(theirs, ids, ("diff",)) == _normal(missing, {"diff": "no-such-diff"}, ("diff",))
+    assert _answer(lambda: routes.get_precedents(diff_id=ids["diff"], ident=factories.ident(OWNER)))[1] == 200

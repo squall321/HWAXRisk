@@ -599,6 +599,7 @@ def import_jsonl(store: RiskStore, owner_sub: str, text: str) -> dict:
             if found is None:
                 other = store.query_one(f"SELECT owner_sub FROM {table} WHERE {pk_where}",
                                         tuple(values[c] for c in pks))
+                # 결정(review1 훑기 둘째): 부른 사람이 이미 쥔 PK 의 존재만 드러난다 — PK 유일성이 설계라 남의 자리엔 넣을 수 없다.
                 if other is not None:              # PK 는 같은데 주인이 다르다 — 값은 한 글자도 흘리지 않는다.
                     skipped += 1
                     conflicts.append({"table": table, "key": _key_of(row, pks), "reason": "owner_conflict"})

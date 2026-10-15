@@ -542,13 +542,14 @@ def test_a_successor_project_compares_against_its_predecessors_latest_capture(bo
     diff = call("risk_create_diff", **first_next(out)["args"])
     summary = routes.diff_part(diff["diff_id"], "diff", owner_sub=OWNER)
     assert summary["pair_kind"] == "same_project_revision"          # 계보 사슬이라 같은 과제의 리비전으로 본다
-    # 계보 과제가 남의 것이면 그 스냅샷을 앞에 세우지 않는다 — 비교가 두 스냅샷 모두 호출자 소유를 요구한다.
+    # 계보 과제가 남의 것이면 과제를 만들지 않는다 — 없는 앞 과제와 같은 404 다(review1 남 숨김 훑기 둘째 — 종전에는 만들고 길잡이가
+    # 그 스냅샷을 앞에 세우지 않는 것으로 막았다. 그 막음은 앞서 선 링크를 위해 남아 있다).
     act_as(box, OTHER)
-    foreign = call("risk_create_project", code="GEN-2", name="남의 계보", classification="internal",
-                   predecessor_project_id=old)["id"]
-    call("risk_add_source", project_id=foreign, kind="mcad", ref=SOURCE_REFS["mcad"])
-    call("risk_capture_snapshot", project_id=foreign)
-    assert call("risk_next_step", project_id=foreign)["where"] == "revision"
+    foreign = call("risk_create_project", code="GEN-2", name="남의 계보", classification="internal", predecessor_project_id=old)
+    missing = call("risk_create_project", code="GEN-2", name="남의 계보", classification="internal",
+                   predecessor_project_id="no-such-project")
+    assert foreign.get("error") == "E404" and "id" not in foreign
+    assert foreign["message"].replace(old, "<p>") == missing["message"].replace("no-such-project", "<p>")
 
 
 # ---------------------------------------------------------------- same-as 확정 — 비교가 읽는 원장 칸에 들어간다

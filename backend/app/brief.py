@@ -1555,33 +1555,52 @@ def _item_e6(store, similar: Mapping[str, Any], ctx, profile: "BriefProfile | No
 
 
 # ---------------------------------------------------------------- E7 좌석 개인 기억(고정 슬롯)
-def _lineage_project_ids(store, project_id: str | None, hops: int = 3) -> list[str]:
-    """rr_projects.predecessor_project_id 를 앞뒤로 hops 만큼 따라간 과제 id 목록(자기 자신 제외)."""
-    out: list[str] = []
+def _member(store, project_id: str, email: str) -> bool:
+    """email 이 그 과제의 구성원(소유자 · rr_project_members)인가."""
+    row = store.query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,))
+    if row is None:
+        return False
+    return row["owner_sub"] == email or store.query_one(
+        "SELECT 1 FROM rr_project_members WHERE project_id = ? AND email = ?", (project_id, email)) is not None
+
+
+def _lineage(store, project_id: str | None, hops: int = 3) -> list[tuple[str, int, str]]:
+    """계보 — rr_projects.predecessor_project_id 를 앞뒤로 hops 만큼 따라간 (과제 id, 걸음, predecessor|successor)(자기 자신 제외).
+    그 과제의 소유자가 구성원이 아닌 과제는 싣지도 건너 따라가지도 않는다 — 앞 과제 링크는 만들 때 구성원인지 보지만
+    (routes.create_project) 그 전에 선 링크와 들여오기로 선 링크가 남의 과제를 가리킬 수 있다(review1 남 숨김 훑기 둘째)."""
+    row = store.query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,)) if project_id else None
+    if row is None:
+        return []
+    viewer = row["owner_sub"]
+    out: list[tuple[str, int, str]] = []
     seen = {project_id}
     current = project_id
-    for _ in range(hops):
-        if not current:
-            break
+    for hop in range(1, hops + 1):
         row = store.query_one("SELECT predecessor_project_id FROM rr_projects WHERE id = ?", (current,))
         current = row["predecessor_project_id"] if row is not None else None
-        if current and current not in seen:
-            seen.add(current)
-            out.append(current)
+        if not current or current in seen or not _member(store, current, viewer):
+            break
+        seen.add(current)
+        out.append((current, hop, "predecessor"))
     frontier = [project_id]
-    for _ in range(hops):
+    for hop in range(1, hops + 1):
         if not frontier:
             break
         marks = ",".join("?" for _ in frontier)
-        rows = store.query(
-            f"SELECT id FROM rr_projects WHERE predecessor_project_id IN ({marks})", frontier)
+        rows = store.query(f"SELECT id FROM rr_projects WHERE predecessor_project_id IN ({marks})", frontier)
         frontier = []
         for row in rows:
-            if row["id"] not in seen:
-                seen.add(row["id"])
-                out.append(row["id"])
-                frontier.append(row["id"])
+            if row["id"] in seen or not _member(store, row["id"], viewer):
+                continue
+            seen.add(row["id"])
+            out.append((row["id"], hop, "successor"))
+            frontier.append(row["id"])
     return out
+
+
+def _lineage_project_ids(store, project_id: str | None, hops: int = 3) -> list[str]:
+    """계보 과제 id 목록(`_lineage` — 그 과제의 소유자가 구성원인 과제만)."""
+    return [pid for pid, _hop, _relation in _lineage(store, project_id, hops)]
 
 
 def _subject_keys(store, snapshot_id: str | None) -> set[str]:
@@ -2465,31 +2484,8 @@ def similar_projects(store, project_id: str, k: int = 5, *, owner_sub: str | Non
 
     절대 코사인 임계는 두지 않는다(상대 순위만 쓴다). 외부 미가용 경로는 reason 과 함께 비운다.
     """
-    lineage: list[dict] = []
-    seen = {project_id}
-    current = project_id
-    for hop in range(1, 4):
-        row = store.query_one("SELECT predecessor_project_id FROM rr_projects WHERE id = ?", (current,))
-        current = row["predecessor_project_id"] if row is not None else None
-        if not current or current in seen:
-            break
-        seen.add(current)
-        lineage.append({"project_id": current, "code": _project_code(store, current),
-                        "hops": hop, "relation": "predecessor"})
-    frontier = [project_id]
-    for hop in range(1, 4):
-        if not frontier:
-            break
-        marks = ",".join("?" for _ in frontier)
-        rows = store.query(f"SELECT id FROM rr_projects WHERE predecessor_project_id IN ({marks})", frontier)
-        frontier = []
-        for row in rows:
-            if row["id"] in seen:
-                continue
-            seen.add(row["id"])
-            lineage.append({"project_id": row["id"], "code": _project_code(store, row["id"]),
-                            "hops": hop, "relation": "successor"})
-            frontier.append(row["id"])
+    lineage = [{"project_id": pid, "code": _project_code(store, pid), "hops": hop, "relation": relation}
+               for pid, hop, relation in _lineage(store, project_id)]
 
     # 코퍼스에서 빠진 과제는 어느 경로로도 회수되지 않는다(§0.6 코퍼스 필터).
     corpus = _corpus_ids(store)
@@ -2647,7 +2643,11 @@ def _subject_path(store, snapshot_id: str | None, owner_sub: str | None) -> list
 # ---------------------------------------------------------------- §5.7 선례 패널
 def precedents(store, diff_id: str, *, owner_sub: str | None = None) -> dict:
     """ComparePage '선례' 패널과 E5·E8 의 원천(plan §5.7 두 번째 행)."""
-    diff = store.query_one("SELECT id, target_snapshot_id FROM rr_diffs WHERE id = ?", (diff_id,))
+    # 남의 diff 는 없는 diff 와 같다 — 그 diff 의 스냅샷(subject · 규칙 적중)을 읽어 주지 않는다(REST GET /precedents 는 소유를 보지
+    # 않았다 — review1 남 숨김 훑기 둘째). MCP 는 범위를 본 뒤 그 행의 소유자로 부른다.
+    diff = store.query_one("SELECT id, target_snapshot_id FROM rr_diffs WHERE id = ?"
+                           + (" AND owner_sub = ?" if owner_sub is not None else ""),
+                           (diff_id, owner_sub) if owner_sub is not None else (diff_id,))
     if diff is None:
         raise AppError("E404", f"diff 가 없습니다: {diff_id}", http_status=404)
     kinds = [r["change_kind"] for r in store.query(
