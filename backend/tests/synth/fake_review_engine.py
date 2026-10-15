@@ -96,7 +96,11 @@
                    값을 엔진이 고친 것 — 예제 result_verdict_flipped 의 모양, D-42)
   clipped          meta.clipped 로 낼 값 — 엔진이 몫에서 끊은 입력 {<입력>: {orig_chars, kept_chars}}(RB3-11, 기본 {})
   no_refs          이 별칭들의 판정 행에 변경 줄을 싣지 않는다(l·refs 빈 목록 · checks.refs missing — 참조 통과율의 분모, S11)
-기록 — requests(받은 요청 전부), runs(받은 run 수), max_active(동시에 돈 run 의 최댓값).
+  draining         참이면 update-all 의 비우기(범위 all)다 — /health 가 draining · drain{on, scope all} · card_review.limit 0 ·
+                   limit_reason draining 이고, 새 run 은 review_busy{reason: draining, retry_after_s 60} → done, 새 pack 은 429 같은
+                   글로 거절한다(엔진 review_gate · card_review — M3.md 4.7, 리허설 E1b). 거절한 요청은 drain_refused 에 남는다
+  health_status · health_delay_s  /health 의 상태(200 이 아니면 그 상태로 거절)와 그 앞에서 자는 실제 시간(루프 탐침 한도를 넘기는 박스)
+기록 — requests(받은 요청 전부), runs(받은 run 수), max_active(동시에 돈 run 의 최댓값), drain_refused(비우기로 거절한 run · pack).
 S8(검토 루프)과 WP5b C9 가 이 파일을 넓힌다. 시험이 쓰는 여러 전문가의 팩은 `derive_pack` 이 엔진 계약 예제(pack_ok·pack_empty)에서
 전문가 이름·카드 고르기만 바꿔 짓는다(카드 글·text_sha 는 엔진이 낸 그대로다).
 """
@@ -333,8 +337,12 @@ class FakeReviewEngine:
         self.solo_marks: dict[str, dict[str, Any]] = {}
         self.inject = ""
         self.inject_kinds: set[str] | None = None
+        self.draining = False
+        self.health_status = 200
+        self.health_delay_s = 0.0
         # 기록
         self.requests: list[dict[str, Any]] = []
+        self.drain_refused: list[dict[str, Any]] = []
         self.runs = 0
         self.max_active = 0
         self.active = 0
@@ -366,6 +374,10 @@ class FakeReviewEngine:
             self.requests.append({"method": request.method, "path": path, "route": route, "body": body,
                                   "authorization": request.headers.get("authorization")})
         if path == "/health":
+            if self.health_delay_s > 0:
+                time.sleep(float(self.health_delay_s))
+            if self.health_status != 200:
+                return httpx.Response(int(self.health_status), json={"detail": "에이전트 서버가 답하지 못했다(가짜)"})
             return httpx.Response(200, json=self.health())
         if not path.startswith("/agent/card-review/"):
             return httpx.Response(404, json={"detail": "Not Found"})
@@ -434,16 +446,31 @@ class FakeReviewEngine:
         return out
 
     def health(self) -> dict:
+        drain = {"on": self.draining, "scope": "all" if self.draining else None, "until": None, "until_idle": None,
+                 "hold": False, "by": "update-all" if self.draining else None, "reason": None, "set_at": None}
         return {"model": self.base_limits.get("model"), "provider": "openai", "vllm": "http://llm.fake:8000/v1",
-                "review_active": self.active, "capabilities": ["card_review"],
+                "review_active": self.active, "capabilities": ["card_review", "drain"], "draining": self.draining,
+                "drain": drain,
                 "card_review": {"rev": self.base_limits.get("api_rev"), "kinds": list(self.base_limits.get("kinds") or ()),
-                                "limit": self.gate_limit, "limit_reason": "normal", "active": self.active,
+                                "limit": 0 if self.draining else self.gate_limit,
+                                "limit_reason": "draining" if self.draining else "normal", "active": self.active,
                                 "retry_after_s": self.retry_after_s, "timeout_s": 1800, "tries": 2, "attempts_max": 3,
                                 "request_worst_s": 10824, "prompt_rev": dict(self.base_limits.get("prompt_rev") or {}),
                                 "totals": {}, "last_error": None}}
 
+    def _drain_refusal(self, route: str, body: Mapping[str, Any] | None) -> dict:
+        """비우기 거절의 본문(엔진 review_busy{reason: draining} — 60초 뒤 같은 호출을 다시 낸다, 아무것도 세지 않는다)."""
+        with self._lock:
+            self.drain_refused.append({"route": route, "kind": (body or {}).get("kind"),
+                                       "expert": ((body or {}).get("expert") or {}).get("key") or (body or {}).get("agent_key"),
+                                       "unit": ((body or {}).get("unit") or {}).get("unit_id")})
+        return {"code": "review_busy", "message": "리스크 검토 비우기 중이다(update-all, 가짜) — 새 호출을 받지 않는다",
+                "infra": True, "retryable": True, "reason": "draining", "retry_after_s": 60, "limit": 0, "active": self.active}
+
     def _pack(self, body: Mapping[str, Any]) -> httpx.Response:
         key = str(body.get("agent_key") or "")
+        if self.draining:
+            return httpx.Response(429, json=self._drain_refusal("pack", body))
         if self.pack_gate is not None:
             self.pack_gate.wait(30)
         with self._lock:
@@ -504,6 +531,8 @@ class FakeReviewEngine:
         with self._lock:
             self.runs += 1
             nth = self.runs
+        if self.draining:
+            return self._stream(iter([_sse("error", self._drain_refusal("run", body)), _sse("done", {})]))
         if self._take("busy_n"):
             return self._busy()
         cell = (str((body.get("expert") or {}).get("key") or ""), str((body.get("unit") or {}).get("unit_id") or ""))

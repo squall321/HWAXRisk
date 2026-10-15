@@ -11,7 +11,7 @@ import threading
 
 import pytest
 
-from app import cardpack, config, planner, review_cells, review_ops, runner, units
+from app import cardpack, config, planner, review_cells, review_ops, review_runner, runner, units
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
 from tests.synth.fake_review_engine import FakeReviewEngine
@@ -278,6 +278,110 @@ def test_review_busy_waits_without_counting_anything(store, monkeypatch):
     assert sum(c["tries"] for c in cells) == len([c for c in _calls(store, job_id, state="ok") if c["unit_id"]])
     assert rig.progress(store, job_id)["breaker"] == {"state": "closed", "trips": 0, "hold_until": None, "since": None}
     assert 2 <= fake.max_active <= fake.busy_over
+
+
+# ---------------------------------------------------------------- 비우기(update-all — M3.md 4.7 · 리허설 E1b · D-51)
+@pytest.mark.parametrize("health", ["fail", "slow"])
+def test_a_tick_that_cannot_read_the_health_spawns_nothing(store, monkeypatch, health):
+    """리허설 E1b — 관문 limit 은 읽은 /health 에서만 온다. 캐시에 없으면 띄우기 전에 읽고, 그 틱에 읽지 못하면(실패 · 탐침 한도 안에 답이
+    없다) 아무것도 띄우지 않는다 — 종전에는 모르면 동시 수로 띄워 비우기 깃발 뒤 1초 안에 호출 여덟이 나갔다. 읽히면 이어 돈다."""
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine(rig.packs())
+    if health == "fail":
+        fake.health_status = 503
+    else:
+        fake.health_delay_s = review_runner.PROBE_JOIN_S + 0.5
+    r = rig.Rig(store, fake)
+    out = r.tick()
+    assert (out["started"], fake.calls("pack"), fake.calls("run"), rig.state(store, job_id)) == (0, [], [], "running")
+    assert fake.calls("/health")                                             # 띄우기 전에 물었다
+    fake.health_status = 200
+    r.finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+
+
+def test_the_health_is_read_again_after_fifteen_seconds_and_a_drain_spawns_nothing(store, monkeypatch):
+    """리허설 E1b · M3.md 4.7 — /health 캐시는 15초다(종전 30초). 비우기 깃발이 선 뒤 16초에 온 틱은 /health 를 새로 읽고 관문이
+    0(draining)이라 새 세션을 띄우지 않는다 — 엔진에 묶음 · run 이 하나도 가지 않는다(거절된 것도 없다). 깃발이 걷히면 이어 돈다."""
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": list(rig.CARD_EXPERTS)})
+    fake = FakeReviewEngine(rig.packs())
+    r = rig.Rig(store, fake)
+    try:
+        assert r.tick()["started"] == 1                                    # 첫 전문가의 묶음 — 이 틱이 /health 를 읽었다
+        sent = len(fake.calls("pack")) + len(fake.calls("run"))
+        fake.draining = True
+        r.clock.advance(16)                                                # M3.md 4.7 의 15초 — 30초 캐시면 아직 옛 답이다
+        assert r.tick()["started"] == 0
+        assert (len(fake.calls("pack")) + len(fake.calls("run")), fake.drain_refused) == (sent, [])
+        fake.draining = False
+        r.clock.advance(16)
+        r.finish(job_id)
+    finally:
+        r.stop.set()                     # 멈추지 않은 세션(고치기 전 코드 · 변이)이 저장소를 닫는 뒤까지 돌지 않게
+        r.loop.join(10)
+    assert rig.state(store, job_id) == "completed"
+    assert {c["charged"] for c in _cells(store, key) if c["agent_key"] in rig.CARD_EXPERTS} == {0}
+
+
+def test_a_running_session_stops_before_its_next_call_when_the_last_health_says_draining(store, monkeypatch):
+    """리허설 E1b — 루프가 마지막으로 읽은 /health 가 비우기(범위 all)라고 하면 도는 세션의 다음 호출은 보내기 전에 멈춘다. 깃발 앞에
+    받은 호출은 끝까지 가고, 그 뒤로는 엔진에 아무것도 가지 않는다(거절된 것도 없다). 셀은 차감 없이 pending 으로 놓이고 잡은 보류
+    없이 running 이며, 깃발이 걷히면 이어 돈다."""
+    key, job_id, fake, r, gate = _stalled(store, monkeypatch, 3)
+    try:
+        fake.draining = True
+        r.clock.advance(16)
+        assert r.loop.tick()["started"] == 0                              # 루프가 /health 를 다시 읽었다 — 관문 0
+        runs = fake.runs
+        gate.set()
+        rig.wait_for(lambda: not r.loop.workers(job_id))                  # 다음 호출을 보내지 않고 세션이 멈췄다
+        assert (fake.runs, fake.drain_refused) == (runs, [])
+        third = _calls(store, job_id)[2]
+        assert (third["state"], third["outcome_class"]) == ("ok", "ok")
+        assert {(c["state"], c["charged"], c["lease_owner"]) for c in _cells(store, key, SEAL)} <= {
+            ("pending", 0, None), ("reviewed", 0, None)}
+        assert (_head(store, key, SEAL)["state"], rig.state(store, job_id), rig.job_row(store, job_id)["hold_code"]) == (
+            "planned", "running", None)
+        fake.draining = False
+        r.clock.advance(16)
+        r.finish(job_id)
+    finally:
+        r.stop.set()                     # 멈추지 않은 세션(고치기 전 코드 · 변이)이 저장소를 닫는 뒤까지 돌지 않게
+        r.loop.join(10)
+    assert rig.state(store, job_id) == "completed"
+    assert {(c["state"], c["charged"]) for c in _cells(store, key, SEAL)} == {("reviewed", 0)}
+
+
+def test_a_draining_refusal_is_a_wait_never_charged_and_the_session_does_not_send_it_again(store, monkeypatch):
+    """리허설 E1b — 루프가 아직 비우기를 모르는(캐시가 정상) 사이 엔진이 다음 run 을 review_busy{reason: draining} 으로 거절하면(뒤
+    그물) 그 호출은 기다림(wait)으로 적히고 아무것도 세지 않는다(charged · infra_streak 0 · 기다림은 tries 에 들지 않는다). 세션은
+    그 자리에서 다시 내지 않고 멈춘다 — 루프는 마지막 /health 를 비우기로 고쳐 두고 다음 틱에 새로 읽어 그동안 아무것도 띄우지 않는다."""
+    key, job_id, fake, r, gate = _stalled(store, monkeypatch, 3)
+    try:
+        fake.draining = True                                              # 루프의 /health 캐시는 아직 정상이다
+        gate.set()
+        rig.wait_for(lambda: not r.loop.workers(job_id))
+        assert [x["route"] for x in fake.drain_refused] == ["run"]        # 하나만 — 그 자리에서 다시 내지 않았다
+        waits = _calls(store, job_id, state="wait")
+        assert [(w["outcome_class"], w["error_code"]) for w in waits] == [("wait", "review_busy")]
+        cells = _cells(store, key, SEAL)
+        assert {(c["charged"], c["infra_streak"]) for c in cells} == {(0, 0)}
+        assert sum(c["tries"] for c in cells) == len([c for c in _calls(store, job_id, state="ok") if c["unit_id"]])
+        assert (r.loop.server()["limit"], _head(store, key, SEAL)["state"], rig.job_row(store, job_id)["hold_code"]) == (
+            0, "planned", None)
+        r.clock.advance(1)
+        assert r.tick()["started"] == 0 and len(fake.drain_refused) == 1  # 다음 틱은 /health 를 새로 읽고(아직 비우기) 띄우지 않는다
+        fake.draining = False
+        r.clock.advance(16)
+        r.finish(job_id)
+    finally:
+        r.stop.set()                     # 멈추지 않은 세션(고치기 전 코드 · 변이)이 저장소를 닫는 뒤까지 돌지 않게
+        r.loop.join(10)
+    assert rig.state(store, job_id) == "completed"
+    assert {(c["state"], c["charged"]) for c in _cells(store, key, SEAL)} == {("reviewed", 0)}
 
 
 def test_an_infra_streak_opens_the_breaker_and_a_half_open_resume_finishes_without_charging(store, monkeypatch):

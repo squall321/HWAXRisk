@@ -76,7 +76,9 @@ INDEX = _load("index.json")
 # 끝이 error 인 장면의 부류(M2.md 4.4) — (예외, 부류, 보류 코드).
 ERROR_SCENES = {
     "review_busy": (EngineBusy, review_ops.WAIT, None),
-    "review_busy_draining": (EngineBusy, review_ops.WAIT, None),        # update-all 비우기(재설계 M3 — 60초 뒤 같은 호출)
+    # update-all 비우기(재설계 M3 — 60초 뒤 같은 호출). 엔진이 실제로 낸 reason draining 을 그 갈래로 읽는다 — 러너는 그 자리에서
+    # 다시 내지 않고 세션을 멈춘다(리허설 E1b)
+    "review_busy_draining": (engine_client.ReviewDraining, review_ops.WAIT, None),
     "llm_timeout": (EngineRejected, review_ops.INFRA, None),
     "llm_unreachable": (EngineRejected, review_ops.INFRA, None),
     "llm_error": (EngineRejected, review_ops.INFRA, None),

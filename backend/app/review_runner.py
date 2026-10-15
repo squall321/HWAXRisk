@@ -623,7 +623,8 @@ def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Ma
 # 선점 단위는 전문가 세션이다 — 워커 하나가 전문가 한 명을 쥐고 그 사람의 범위 안 셀을 정해진 차례(훑기 → 묶음 먼저 fwd → 빠진 카드
 # 재질의 → rev → 단독 → 카드 밖 → 정산)로 돈다. 루프 스레드는 2초마다 틱을 돌며 보류를 풀고·잡을 닫고·창을 보고·워커를 띄운다.
 # 엔진 호출은 늘 워커에서 한다(루프 스레드가 HTTP 를 붙들지 않는다 — m-04, 창·관문 조회는 짧게 기다리는 탐침 스레드다).
-HEALTH_CACHE_S = 30                 # 서버 관문 limit(/health) 캐시
+HEALTH_CACHE_S = 15                 # 서버 관문 limit(/health) 캐시 — M3.md 4.7 의 15초(종전 30초 — 비우기 깃발 뒤에도 옛 limit 으로
+                                    # 띄웠다, 리허설 E1b · D-51)
 LIMITS_CACHE_S = 60                 # 창·판(/card-review/limits) 캐시
 PROBE_JOIN_S = 1.0                  # 틱이 탐침을 기다리는 한도 — 넘으면 이번 틱은 새 호출을 내지 않고 기다린다(지난 답을 쓰지 않는다)
 PROGRESS_INTERVAL_S = 60            # progress_json 을 다시 세는 간격(단계·차단기·워커 변화는 즉시 적는다)
@@ -1197,6 +1198,13 @@ class _Session:
         if state != "running":
             raise _Stop(f"job_{state}")
 
+    def _drain_gate(self) -> None:
+        """비우기 문 — 루프가 마지막으로 읽은 /health 가 비우기(범위 all)면 다음 호출을 보내지 않고 세션을 멈춘다(M3.md 4.7 — 도는 세션의
+        다음 호출은 기다린다 · 리허설 E1b). 셀은 차감 없이 pending 으로 놓이고, 루프는 /health 가 비우기를 거둘 때까지 새로 띄우지
+        않는다(관문 0). 엔진의 review_busy{draining} 거절이 뒤 그물이다(`_ask` · `fetch_pack`)."""
+        if self.loop.draining():
+            raise _Stop("draining")
+
     def _sleep(self, seconds: int | None, *, reason: str) -> None:
         """기다림 — WAIT_SLICE_S 씩 쪼개 그 사이 잡 상태를 본다. 기다리는 동안 진행판에 waiting 을 적는다(아무것도 세지 않는다)."""
         left = max(int(seconds or review_ops.WAIT_DEFAULT_S), 1)
@@ -1250,10 +1258,14 @@ class _Session:
         packinfo = stats.get("pack") if isinstance(stats.get("pack"), dict) else {}
         while True:
             self._gate()
+            self._drain_gate()
             try:
                 body = self.engine.pack(self.agent, email=self.email)
                 break
             except EngineBusy as exc:
+                if isinstance(exc, engine_client.ReviewDraining):
+                    self.loop.note_draining()                      # 비우기 거절 — 다시 내지 않고 멈춘다(리허설 E1b)
+                    raise _Stop("draining") from exc
                 self._sleep(exc.retry_after_s, reason=exc.code or "review_busy")
             except PatUnavailable as exc:
                 self._hold("credential", credential_message(f"카드 묶음({self.agent})", exc))
@@ -1497,6 +1509,7 @@ class _Session:
         unit_id = cell.unit_id if cell is not None else None
         while True:
             self._gate()
+            self._drain_gate()
             started = self.now()
             base = {"call_id": new_uuid(), "kind": kind, "variant": variant, "deck_id": deck_id, "page_no": page_no,
                     "seq": seq, "unit_id": unit_id, "run_id": self.job_id, "cards_json": json.dumps(list(aliases)),
@@ -1517,6 +1530,11 @@ class _Session:
                 outcome = engine_client.review_outcome(exc, timeouts_before=timeouts)
                 self._failed(cell, base, exc, outcome, int((time.monotonic() - tick) * 1000))
                 self.call = None
+                if isinstance(exc, engine_client.ReviewDraining):
+                    # 비우기 거절(뒤 그물) — 기다림으로 적었고(차감 없음) 그 자리에서 다시 내지 않는다. 루프의 /health 를 비우기로
+                    # 고쳐 두고 세션을 멈춘다 — 셀은 pending 으로 놓이고 비우기가 걷힌 뒤 새 세션이 이어 돈다(리허설 E1b)
+                    self.loop.note_draining()
+                    raise _Stop("draining") from exc
                 if outcome.klass == review_ops.WAIT:
                     self._sleep(outcome.retry_after_s, reason=outcome.code)
                     continue
@@ -2299,7 +2317,9 @@ class ReviewLoop:
     기다리던 ctx_unknown 은 창이 server·env 로 돌아오면 푼다. ② cancelling 이고 도는 전문가가 없는 잡을 cancelled 로, queued 를 running
     으로 옮긴다. ③ 창(limits, 60초 캐시)을 본다 — fallback 이면 새 호출을 내지 않고 기다리다 600초면 ctx_unknown, 창이 모자라면
     ctx_too_small. ④ 잡마다 단계(pack → review)를 정하고 범위 안 열린 셀이 0 이면 completed(실패 셀 수를 error 에). ⑤ 빈 자리 =
-    min(HWAXRISK_REVIEW_CONCURRENCY, 서버 관문 limit(/health, 30초 캐시)) − 도는 워커만큼 워커를 띄운다(잡을 돌아가며 — P-09).
+    min(HWAXRISK_REVIEW_CONCURRENCY, 서버 관문 limit(/health, 15초 캐시 — 그 틱에 읽지 못하면 아무것도 띄우지 않는다)) − 도는
+    워커만큼 워커를 띄운다(잡을 돌아가며 — P-09). 마지막으로 읽은 /health 가 비우기(범위 all)면 도는 세션의 다음 호출도 보내기 전에
+    멈춘다(M3.md 4.7 · 리허설 E1b).
     이 박스의 검토 스위치(HWAXRISK_REVIEW_ENABLED)가 꺼져 있으면 ②까지만 하고 새 전문가·셀을 집지 않는다 — 잡은 running 그대로,
     진행판은 waiting{reason:'review_disabled'}, 도는 호출은 끝까지 가고 그 세션은 다음 호출 앞에서 놓는다.
 
@@ -2352,6 +2372,33 @@ class ReviewLoop:
         value = self._health.value if isinstance(self._health.value, Mapping) else {}
         block = value.get("card_review") if isinstance(value.get("card_review"), Mapping) else {}
         return {"active": block.get("active"), "limit": block.get("limit")}
+
+    def draining(self) -> bool:
+        """마지막으로 읽은 /health 가 비우기(update-all, 범위 all)인가 — 엔진이 카드 대조 관문을 draining 으로 닫았다(card_review.
+        limit_reason — 그때 limit 은 0 이다, M3.md 4.7). 도는 세션은 다음 호출을 보내기 전에 이것을 본다(리허설 E1b)."""
+        with self._lock:
+            value = self._health.value if isinstance(self._health.value, Mapping) else {}
+        block = value.get("card_review") if isinstance(value.get("card_review"), Mapping) else {}
+        return block.get("limit_reason") == "draining"
+
+    def note_draining(self) -> None:
+        """엔진이 비우기라며 거절했다(review_busy{reason: draining} — 뒤 그물). 마지막 /health 를 비우기(관문 0)로 고쳐 두어 도는 다른
+        세션의 다음 호출도 보내기 전에 멈추게 하고, 다음 틱이 /health 를 새로 읽게 캐시를 버린다(그 답이 이것을 덮는다)."""
+        with self._lock:
+            value = dict(self._health.value) if isinstance(self._health.value, Mapping) else {}
+            block = dict(value.get("card_review")) if isinstance(value.get("card_review"), Mapping) else {}
+            value["card_review"] = {**block, "limit": 0, "limit_reason": "draining"}
+            self._health.value = value
+            self._health.at = None
+
+    @staticmethod
+    def _gate_limit(seen: tuple[Any, BaseException | None] | None) -> int | None:
+        """그 틱에 읽은 /health(`_probe` 의 답)의 관문 limit — 읽지 못했거나(아직 답이 없다 · 실패) limit 칸이 없으면 None."""
+        if seen is None or seen[1] is not None or not isinstance(seen[0], Mapping):
+            return None
+        block = seen[0].get("card_review") if isinstance(seen[0].get("card_review"), Mapping) else {}
+        limit = block.get("limit")
+        return limit if isinstance(limit, int) and not isinstance(limit, bool) and limit >= 0 else None
 
     def workers(self, job_id: str | None = None) -> list[_Worker]:
         with self._lock:
@@ -2733,10 +2780,14 @@ class ReviewLoop:
 
     def _spawn(self, active: list[tuple[dict, str]], now: int) -> int:
         conc = max(1, int(getattr(self.settings, "risk_review_concurrency", 8) or 8))
-        if active:
-            self._probe(self._health, self.engine.health, HEALTH_CACHE_S)
-        limit = self.server().get("limit")
-        cap = min(conc, int(limit)) if isinstance(limit, int) and not isinstance(limit, bool) and limit >= 0 else conc
+        if not active:
+            return 0
+        # 관문 limit 은 15초 안에 읽은 /health 에서만 — 캐시에 없으면 지금 읽고, 그 틱에 읽지 못하면(아직 답이 없다 · 실패 · limit 칸이
+        # 없다) 아무것도 띄우지 않는다. 종전에는 모르면 동시 수(8)로 띄워 비우기 깃발 뒤 1초 안에 호출 여덟이 나갔다(리허설 E1b · D-51).
+        limit = self._gate_limit(self._probe(self._health, self.engine.health, HEALTH_CACHE_S))
+        if limit is None:
+            return 0
+        cap = min(conc, limit)
         free = cap - len(self.workers())
         started = 0
         # 근거 꾸러미 실호출(B 층 — C3-12)이 먼저다 — 대상마다 워커 하나(같은 대상의 잡이 둘이어도). 잡 전체를 live 로 묶지 않는다
@@ -2845,7 +2896,8 @@ class ReviewLoop:
         except _Stop as stop:
             if stop.release:
                 review_cells.release_expert(self.store, target_key, agent, lease_owner=lease, not_before=stop.not_before,
-                                            error=None if stop.why in ("pack_frozen", "cells_left", "no_cells") else stop.why,
+                                            error=None if stop.why in ("pack_frozen", "cells_left", "no_cells", "draining")
+                                            else stop.why,
                                             now=self.clock())
         except Exception as exc:  # noqa: BLE001 — 전문가 하나의 결함이 루프를 죽이지 않는다. 그 전문가는 잠시 쉬고 다시 집힌다.
             log.exception("검토 워커 실패(job=%s, agent=%s)", job.get("id"), agent)

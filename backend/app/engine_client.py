@@ -494,18 +494,25 @@ def _flag(value: Any) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
+class ReviewDraining(EngineBusy):
+    """엔진이 비우기(update-all, 범위 all)라며 거절했다 — `review_busy{reason: "draining"}`(M3.md 4.7). 기다림 부류(아무것도 세지
+    않는다)이고, 검토 러너는 그 자리에서 다시 내지 않고 세션을 멈춘다(리허설 E1b — 비우기 동안 같은 호출을 거듭 내지 않게)."""
+
+
 def _review_error(code: str | None, message: str, data: Mapping[str, Any], *, status: int | None = None,
                   retry_after: Any = None) -> Exception:
     """거절 하나(스트림 전 응답 또는 error 프레임) → 예외. 이름은 `review_ops.classify` 가 정한다(코드가 없으면 상태로).
 
-    기다림 부류는 `EngineBusy`(retry_after_s 는 classify 가 묶은 값), `credential` 보류는 `PatUnavailable`(서비스 계정으로 내려가지
-    않는다), 나머지는 `EngineRejected` 다 — 받은 코드 원문·엔진의 infra·retryable 비트·knob·본문을 그대로 싣는다.
+    기다림 부류는 `EngineBusy`(retry_after_s 는 classify 가 묶은 값 — 비우기 거절 `reason: draining` 은 그 갈래 `ReviewDraining`),
+    `credential` 보류는 `PatUnavailable`(서비스 계정으로 내려가지 않는다), 나머지는 `EngineRejected` 다 — 받은 코드 원문·엔진의
+    infra·retryable 비트·knob·본문을 그대로 싣는다.
     """
     wait = data.get("retry_after_s", retry_after)
     outcome = review_ops.classify(code, http_status=status, retry_after_s=wait)
     text = message or (f"HTTP {status}" if status is not None else "")
     if outcome.klass == review_ops.WAIT:
-        return EngineBusy(f"{outcome.code}: {text}", retry_after_s=outcome.retry_after_s, code=outcome.code)
+        busy = ReviewDraining if data.get("reason") == "draining" else EngineBusy
+        return busy(f"{outcome.code}: {text}", retry_after_s=outcome.retry_after_s, code=outcome.code)
     if outcome.hold_code == "credential":
         return PatUnavailable(f"{outcome.code}: {text}", code=outcome.code)
     detail = {**dict(data), **({"http_status": status} if status is not None else {})}
