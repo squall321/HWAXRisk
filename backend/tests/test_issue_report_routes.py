@@ -19,8 +19,9 @@ OWNER = rig.OWNER
 OTHER = "other@example.com"
 EDITOR = "editor@example.com"
 CARDS = {c["alias"]: c for c in fre.load("pack_ok.json")["cards"]}
+# reargue — 패널이 판정한 뒤 근거가 바뀐 쟁점의 다시 토의 표기(없으면 null — 조합 검토 L3, D-52).
 ISSUE_KEYS = {"issue_id", "rank", "types", "p_class", "priority", "anchor_cluster_key", "unit_id", "state", "state_reason",
-              "outcome", "outcome_json", "distribution", "panel_id", "seats", "selected_round", "attempts", "charged"}
+              "outcome", "outcome_json", "distribution", "panel_id", "seats", "selected_round", "attempts", "charged", "reargue"}
 
 
 @pytest.fixture
