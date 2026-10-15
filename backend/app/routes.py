@@ -1045,6 +1045,17 @@ def require_role(project_id: str, email: str, need: str) -> str:
     return role
 
 
+def _member_or_missing(project_id: str, email: str, need: str, missing: AppError) -> str:
+    """`need` 이상의 구성원 — 구성원이 아닌 남이면 그 경로의 '없다' 답(`missing`)과 같은 404 다. 그 행이 있다는 것과 과제 id 를 흘리지
+    않는다(반대 검토 LOW 17 · review1 L2 · 남 숨김 훑기). 등급 미달은 그대로 403 이다(구성원은 그 행이 있는 것을 안다)."""
+    try:
+        return require_role(project_id, email, need)
+    except AppError as exc:
+        if exc.http_status != 404:
+            raise
+        raise missing from None
+
+
 class ProjectPatchBody(BaseModel):
     lifecycle: str | None = None
     closed_at: int | None = None
@@ -1971,9 +1982,15 @@ def put_requirement(requirement_id: str, body: RequirementDecision,
     store = get_store()
     before = store.query_one(
         "SELECT id, project_id, status, waive_reason FROM rr_requirements WHERE id = ?", (requirement_id,))
+    missing = AppError("E404", f"요구를 찾을 수 없습니다 — {requirement_id}.", 404)
     if before is None:
-        raise AppError("E404", f"요구를 찾을 수 없습니다 — {requirement_id}.", 404)
-    _project_row(before["project_id"], owner_sub)
+        raise missing
+    try:
+        _project_row(before["project_id"], owner_sub)
+    except AppError as exc:
+        if exc.http_status != 404:
+            raise
+        raise missing from None                     # 남의 요구는 없는 요구와 같다 — 과제 id 를 흘리지 않는다(남 숨김 훑기)
     updated = requirements.decide_requirement(
         store, requirement_id, status=body.status, waive_reason=body.waive_reason, actor_sub=owner_sub)
     _audit(store, owner_sub, scope="project", subject_id=requirement_id, project_id=before["project_id"],
@@ -1992,8 +2009,11 @@ def post_requirements_inherit(project_id: str, body: InheritBody,
     store = get_store()
     project = _project_row(project_id, owner_sub)
     source = store.query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (body.from_project_id,))
-    # 존재 여부는 모듈이 404 source_project_not_found 로 가른다 — 여기서는 있는 과제의 조회 규약만 본다.
+    # 존재 여부는 모듈이 404 source_project_not_found 로 가른다 — 여기서는 있는 과제의 조회 규약만 본다. 구성원이 아닌 남의 과제는
+    # 없는 과제와 같은 답이다(그 과제가 있다는 것을 흘리지 않는다 — 남 숨김 훑기).
     if source is not None and source["owner_sub"] != owner_sub:
+        if project_role(body.from_project_id, owner_sub) is None:
+            raise requirements.source_missing(body.from_project_id)
         raise AppError("not_a_member", f"승계 원본 과제를 볼 수 없습니다 — {body.from_project_id}.", 403)
     return requirements.inherit_requirements(store, project_id, project["owner_sub"], body.from_project_id)
 
@@ -2747,12 +2767,7 @@ class UnitsBody(BaseModel):
 def _target_editor(target_key: str, project_id: str, email: str) -> None:
     """대상 쓰기의 권한 — 그 과제의 editor 이상. 구성원이 아니면 없는 대상과 같은 404 다(그 대상이 있다는 것과 과제 id 를 흘리지
     않는다 — 반대 검토 LOW 17). 등급 미달은 그대로 403 role_insufficient 다(구성원은 대상이 있는 것을 안다)."""
-    try:
-        require_role(project_id, email, "editor")
-    except AppError as exc:
-        if exc.http_status != 404:
-            raise
-        raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404) from None
+    _member_or_missing(project_id, email, "editor", AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404))
 
 
 def _editable_target(target_key: str, ident: identity.Identity) -> tuple[str, dict]:
@@ -2961,7 +2976,7 @@ def create_job(target_key: str, body: JobBody,
     if row is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
     if not _is_admin(ident):
-        require_role(row["project_id"], email, "editor")
+        _target_editor(target_key, row["project_id"], email)
     # 게이트웨이 위임 단언(sso)은 게이트웨이만 받아 오므로 Claude 길이다(MCP 입구 risk_start_job · rest_call). 웹 화면은 쿠키다.
     # Bearer 는 개인 heax PAT 로 REST 를 직접 부른 것이라 웹 화면 동의가 아니다(3차 검토 발견 4). 그 밖의 출처는 그 값 그대로 남긴다.
     consent_source = CONSENT_SOURCES.get(ident.source, ident.source)
@@ -3019,7 +3034,7 @@ def put_coverage(target_key: str, agent_key: str, body: CoverageBody,
     if row is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
     if not _is_admin(ident):
-        require_role(row["project_id"], email, "editor")
+        _target_editor(target_key, row["project_id"], email)
     before = store.query_one(
         "SELECT status FROM rr_coverage WHERE target_key = ? AND agent_key = ?", (target_key, agent_key))
     if before is None:
@@ -3258,9 +3273,11 @@ def _closure_owner(target_key: str, ident: identity.Identity) -> tuple[str, dict
     """확인(ack)은 과제 소유자와 관리자만이다(편집자 403, 웹·REST 만 — MCP 쓰기 도구 없음)."""
     email = _require_user(ident)
     row = get_store().query_one("SELECT project_id, flow FROM rr_targets WHERE target_key = ?", (target_key,))
+    missing = AppError("E404", f"타깃을 찾을 수 없습니다 — {target_key}.", 404)
     if row is None:
-        raise AppError("E404", f"타깃을 찾을 수 없습니다 — {target_key}.", 404)
-    _require_owner(row["project_id"], ident)
+        raise missing
+    if not _is_admin(ident):
+        _member_or_missing(row["project_id"], email, "owner", missing)      # 남에게 과제 id 를 흘리지 않는다(review1 L2)
     if row["flow"] != "cells":
         raise AppError("ack_not_allowed", "완결 잔여 확인은 카드 대조 대상(flow='cells')에만 있다.", 422)
     return email, dict(row)
@@ -4259,8 +4276,9 @@ def get_panel_brief(panel_id: str, ident: identity.Identity = Depends(identity.c
 def post_resync(target_key: str, ident: identity.Identity = Depends(identity.current)) -> dict:
     """external_sync 두 채널을 pending 으로 되돌린다(§5.5.3). 소유자 전용."""
     owner_sub = _require_user(ident)
-    row = get_store().query_one("SELECT owner_sub FROM rr_targets WHERE target_key = ?", (target_key,))
-    if row is None:
+    row = get_store().query_one("SELECT owner_sub, project_id FROM rr_targets WHERE target_key = ?", (target_key,))
+    if row is None or (row["owner_sub"] != owner_sub and project_role(row["project_id"], owner_sub) is None):
+        # 구성원이 아닌 남에게는 없는 타깃과 같은 답이다(그 타깃이 있다는 것을 흘리지 않는다 — 남 숨김 훑기).
         raise AppError("E404", f"타깃을 찾을 수 없습니다 — {target_key}.", 404)
     if row["owner_sub"] != owner_sub:
         raise AppError("E403", "타깃 소유자만 재동기할 수 있습니다.", 403)
@@ -4776,10 +4794,11 @@ def post_panel_repersist(panel_id: str, discard: bool = False,
     row = store.query_one(
         "SELECT p.id, p.error, t.project_id FROM rr_panels p JOIN rr_targets t ON t.target_key = p.target_key"
         " WHERE p.id = ?", (panel_id,))
+    missing = AppError("E404", f"패널을 찾을 수 없습니다 — {panel_id}.", 404)
     if row is None:
-        raise AppError("E404", f"패널을 찾을 수 없습니다 — {panel_id}.", 404)
+        raise missing
     if not _is_admin(ident):
-        require_role(row["project_id"], email, "editor")
+        _member_or_missing(row["project_id"], email, "editor", missing)
     if discard:
         out = runner.abandon_repersist(store, panel_id)
         _audit(store, email, scope="panel", subject_id=panel_id, project_id=row["project_id"],
@@ -5233,7 +5252,7 @@ def create_human_finding(target_key: str, body: HumanFindingBody,
     if row is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
     if not _is_admin(ident):
-        require_role(row["project_id"], email, "editor")
+        _target_editor(target_key, row["project_id"], email)
     if body.direction not in HUMAN_DIRECTIONS:
         raise AppError("E100", f"direction 은 {list(HUMAN_DIRECTIONS)} 중 하나여야 합니다.", 422)
     if body.severity is not None and body.severity not in HUMAN_SEVERITIES:

@@ -408,7 +408,8 @@ def test_sync_loop_retries_a_due_channel_once_within_the_period(target_store, fr
 
 
 def test_resync_route_rejects_a_non_owner(target_store, monkeypatch):
-    """재동기는 타깃 소유자만 — 다른 신원은 (E403, 403) 이다."""
+    """재동기는 타깃 소유자만 — 구성원이 아닌 신원은 없는 타깃과 같은 (E404, 404) 다(그 타깃이 있다는 것을 흘리지 않는다 — review1
+    남 숨김 훑기, 종전에는 403 이었다). 구성원인데 소유자가 아니면 403 이다."""
     from app import routes
     from app.errors import AppError
 
@@ -417,7 +418,10 @@ def test_resync_route_rejects_a_non_owner(target_store, monkeypatch):
                            "to_dict": lambda self: {}})()
     with pytest.raises(AppError) as exc:
         routes.post_resync(TARGET, ident=ident)
-    assert (exc.value.code, exc.value.http_status) == ("E403", 403)
+    with pytest.raises(AppError) as missing:
+        routes.post_resync("diff:no-such-target", ident=ident)
+    assert (exc.value.code, exc.value.http_status, exc.value.message.replace(TARGET, "<key>")) == (
+        "E404", 404, missing.value.message.replace("diff:no-such-target", "<key>"))
 
     owner = type("I", (), {"anonymous": False, "email": OWNER, "role": None,
                            "to_dict": lambda self: {}})()

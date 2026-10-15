@@ -231,6 +231,11 @@ def decide_requirement(store, requirement_id: str, *, status: str, waive_reason:
 
 
 # ---------------------------------------------------------------- POST /projects/{id}/requirements/inherit
+def source_missing(from_project_id: str) -> AppError:
+    """승계 원본이 없다는 답 — 라우트가 구성원 아닌 남의 과제에도 같은 답을 낸다(있다는 것을 흘리지 않는다)."""
+    return AppError("source_project_not_found", f"승계 원본 과제가 없습니다 — {from_project_id}.", 404)
+
+
 def inherit_requirements(store, project_id: str, owner_sub: str, from_project_id: str) -> dict:
     """계보 과제의 요구를 복사한다 — `status='candidate'`·`inherited_from=<원본 id>`, 멱등(plan §2.8b (2)).
 
@@ -241,7 +246,7 @@ def inherit_requirements(store, project_id: str, owner_sub: str, from_project_id
     if from_project_id == project_id:
         raise AppError("same_project", "자기 자신에게서 요구를 승계할 수 없습니다.", 422)
     if store.query_one("SELECT id FROM rr_projects WHERE id = ?", (from_project_id,)) is None:
-        raise AppError("source_project_not_found", f"승계 원본 과제가 없습니다 — {from_project_id}.", 404)
+        raise source_missing(from_project_id)
 
     source = _rows(
         store,

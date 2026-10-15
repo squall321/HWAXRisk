@@ -320,6 +320,7 @@ def risk_submit_panel_result(
     def call() -> dict:
         # 소유권은 도달한 위임 신원이 정한다 — 자칭 actor 를 열쇠로 쓰면 남이 actor=<소유자> 로 남의 패널을 종결한다(SEC-5).
         owner_sub = entry.require_delegate(routes.mcp_identity(_request()))
+        routes._panel_row(panel_id, owner_sub)       # 남의 패널은 없는 패널과 같다 — 종류도 말하지 않는다(남 숨김 훑기)
         # 쟁점 패널(M3 S3-7)은 웹 러너가 돌리고 고쳐 다시 내는 것도 웹·REST 다 — Claude 에서는 지켜본다(risk_get_issues).
         if routes.panel_kind(panel_id) == "issue":
             return {"error": "issue_panel_web_only",

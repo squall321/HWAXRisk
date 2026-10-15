@@ -903,7 +903,8 @@ def test_human_reconfirmation_clears_the_escalation_flag(risk_store, clock):
 
 # ================================================================ 조직 공개 토글(plan §5.1 원칙 9 · §0.9 P6-8)
 def test_visibility_toggle_is_owner_only_and_writes_stay_closed(risk_store, clock):
-    """org 로 열면 읽기가 열리고 쓰기는 그대로 소유자만이다(남의 신원은 404 가 아니라 403)."""
+    """org 로 열면 읽기가 열리고 쓰기는 그대로 소유자만이다 — 남이 볼 수 있는(조직 공개) 행에 남이 쓰면 403 이고, 비공개 행에는 없는
+    행과 같은 404 다(그 행이 있다는 것을 흘리지 않는다 — review1 남 숨김 훑기, 종전에는 비공개 행에도 403 이었다)."""
     from app import routes
 
     _target(risk_store)
@@ -912,7 +913,10 @@ def test_visibility_toggle_is_owner_only_and_writes_stay_closed(risk_store, cloc
 
     with pytest.raises(AppError) as stranger:
         registry.set_visibility(risk_store, "c1", "org", owner_sub=other)
-    assert (stranger.value.code, stranger.value.http_status) == ("E403", 403)
+    with pytest.raises(AppError) as missing:
+        registry.set_visibility(risk_store, "no-such-cluster", "org", owner_sub=other)
+    assert ((stranger.value.code, stranger.value.http_status, stranger.value.message.replace("c1", "<c>"))
+            == (missing.value.code, missing.value.http_status, missing.value.message.replace("no-such-cluster", "<c>")))
 
     out = registry.set_visibility(risk_store, "c1", "org", owner_sub=OWNER)
     assert out["visibility"] == "org" and out["updated"] == 1
@@ -923,6 +927,9 @@ def test_visibility_toggle_is_owner_only_and_writes_stay_closed(risk_store, cloc
     with pytest.raises(AppError) as write:
         registry.set_status(risk_store, "c1", "verified", owner_sub=other, evidence_ref="rpt:1")
     assert (write.value.code, write.value.http_status) == ("E403", 403)
+    with pytest.raises(AppError) as reopen:
+        registry.set_visibility(risk_store, "c1", "private", owner_sub=other)
+    assert (reopen.value.code, reopen.value.http_status) == ("E403", 403)
 
     with pytest.raises(AppError) as vocab:
         registry.set_visibility(risk_store, "c1", "public", owner_sub=OWNER)

@@ -340,7 +340,7 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = N
     if target is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
     if not routes._is_admin(ident):
-        routes.require_role(target["project_id"], email, "editor")
+        routes._target_editor(target_key, target["project_id"], email)      # 남에게는 없는 대상과 같은 답(남 숨김 훑기)
     web = web_paths(project_id=target["project_id"], target_key=target_key)
     if mode == "reviews":
         return _start_review_job(ident, store, target_key, web, tier=tier, consent=consent, modifiers=modifiers,

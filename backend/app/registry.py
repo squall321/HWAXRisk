@@ -1723,8 +1723,9 @@ def set_visibility(store: RiskStore, cluster_key: str, visibility: str, *, owner
         params.append(target_key)
     rows = store.query(sql + " ORDER BY target_key", params)
     if not rows:
+        # 남이 볼 수 있는 행(조직 공개)이면 403 — 비공개 행은 없는 행과 같은 404 다(그 행이 있다는 것을 흘리지 않는다, 남 숨김 훑기).
         visible = store.query_one(
-            "SELECT owner_sub FROM rr_registry WHERE cluster_key = ? LIMIT 1", (cluster_key,))
+            "SELECT owner_sub FROM rr_registry WHERE cluster_key = ? AND visibility = 'org' LIMIT 1", (cluster_key,))
         if visible is not None:
             raise AppError("E403", "등록부 행의 공개 범위는 소유자만 바꿀 수 있습니다.", 403)
         raise AppError("E404", f"등록부 클러스터를 찾지 못했습니다: {cluster_key}", 404)
