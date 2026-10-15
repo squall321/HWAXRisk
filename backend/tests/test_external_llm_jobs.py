@@ -446,6 +446,21 @@ def test_a_claude_issue_panel_goes_external_with_the_consenters_pat_and_the_exte
     assert any("쟁점 패널 1건 판단 LLM" in line for line in synth._judge_lines(store, key))
 
 
+def test_the_engine_identity_of_a_claude_panel_is_the_consent_record_even_if_the_requester_differs(store, monkeypatch,
+                                                                                                    tmp_path):
+    """사슬은 요청자와 동의 기록을 함께 물려주므로 둘은 보통 같은 사람이다. 달라도(손으로 세운 잡) 엔진에 넘기는 자격은 동의 기록의
+    사람이다 — 잡을 집을 때 PAT 를 본 그 사람이다(요청자의 PAT 로 돌면 동의하지 않은 사람의 줄에 과제가 선다)."""
+    key = _issue_ledger(store, monkeypatch, tmp_path)
+    rig.pat(store, EDITOR)
+    issues.create_issues_job(store, key, owner_sub=OWNER, requester_sub=OWNER, consent_source="chain", llm="claude",
+                             consent_external={"by": EDITOR, "at": now_epoch(), "source": "web"})
+    engine = ExternalPanelEngine(store)
+    claimed = runner.claim_next_job(store, config.settings, engine=engine)
+    assert claimed["credential_email"] == EDITOR
+    assert runner.run_panel(store, config.settings, engine, claimed)["status"] == "done"
+    assert engine.owners == [EDITOR]
+
+
 def test_a_glm_issue_panel_keeps_its_old_options_and_marks(store, monkeypatch, tmp_path):
     key = _issue_ledger(store, monkeypatch, tmp_path)
     issues.create_issues_job(store, key, owner_sub=OWNER, requester_sub=OWNER)
