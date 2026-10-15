@@ -5,7 +5,7 @@
 통과하지 않게 주인의 것과 구성원 과제의 것이 실리는지 따로 본다.
 
 D46 — 조직 공개로 연 남의 등록부 행은 그 행으로만 선다(E6 은 그 과제의 성격 진술을 싣지 않는다). MCP 로 부른 구성원에게 다른 과제는
-소유자와 그 사람 둘 다 볼 수 있는 것만이다.
+소유자와 그 사람 둘 다 볼 수 있는 것만이다. 과제 거름을 밝히지 않은 AIDataHub 클라이언트로는 전체 색인을 찾지 않는다.
 
 좌석 의견 · 등록부 행 · 성격 진술은 손으로 쓴다 — 생산자는 패널 한 판 전부이고, 읽는 칸만 채운다(test_brief 와 같은 방식).
 """
@@ -18,6 +18,7 @@ import pytest
 
 import app.mcp_server as srv
 from app import brief, registry, routes
+from app.adh_client import AdhClient
 from tests import factories
 
 OWNER = factories.OWNER
@@ -30,14 +31,34 @@ K = 20          # 벡터 상위 k 가 모두를 싣는 크기 — 남이 순위�
 
 
 class _Adh:
-    """서술 경로의 AIDataHub 흉내 — 받은 적중을 그대로 돌려준다(실 호출 0)."""
+    """서술 경로의 AIDataHub 흉내 — 과제 거름을 밝히되 받은 적중을 그대로 돌려준다(거름을 어긴 색인 — 받은 쪽의 거름을 본다)."""
     available = True
+    supports_project_filter = True
 
     def __init__(self, hits: list[dict]) -> None:
         self.hits = hits
 
     def hybrid_search(self, q: str, **kwargs: Any) -> dict:
         return {"ok": True, "result": list(self.hits)}
+
+
+class _Recorder:
+    """AIDataHub 흉내 — 부른 찾기와 인자를 적는다. 과제 거름을 밝히는지(`supports_project_filter`)는 만들 때 고른다."""
+    available = True
+
+    def __init__(self, *, filtered: bool, hits: list[dict]) -> None:
+        self.supports_project_filter = filtered
+        self.hits = hits
+        self.calls: list[tuple[str, dict]] = []
+
+    def hybrid_search(self, q: str, **kwargs: Any) -> dict:
+        self.calls.append(("hybrid_search", kwargs))
+        return {"ok": True, "result": list(self.hits)}
+
+    def agent_search(self, agent_type: str, q: str, **kwargs: Any) -> dict:
+        self.calls.append(("agent_search", kwargs))
+        return {"ok": True, "result": [{"record_id": "rec-adh-memory", "summary": "색인에서 온 기억",
+                                        "content": {"meta": {"portal": {"opinion_id": "op-adh", "finding_id": "pan-adh#F1"}}}}]}
 
 
 def _hit(record_id: str, project_id: str | None) -> dict:
@@ -252,3 +273,28 @@ def test_mcp_lists_only_projects_both_the_owner_and_the_calling_member_can_see(w
     owners = srv.risk_similar_projects(project_id=project, k=K)
     assert owners["corpus_n"] == 6 and [(e["project_id"], e["hops"]) for e in owners["lineage"]] == [(step1, 1), (step2, 2)]
     assert sorted(c["cluster_key"] for c in srv.risk_get_precedents(diff_id=diff_id)["clusters"]) == ["clu-hidden", "clu-mine"]
+
+
+# ---------------------------------------------------------------- AIDataHub(D46 — 과제 거름 없이는 찾지 않는다)
+def test_aidatahub_recall_is_skipped_without_a_project_filter_and_carries_one_otherwise(world):
+    """과제 거름을 밝히지 않은 AIDataHub 클라이언트를 넘기면(배선하면) 서술 경로와 좌석 기억 2차 경로는 찾지 않고 까닭을 남긴다 — 전체
+    색인을 찾지 않는다. 지금의 실 클라이언트(AdhClient)도 거름을 밝히지 않는다. 거름을 밝힌 클라이언트의 찾기마다 타깃 소유자가 볼 수
+    있는 과제 목록이 간다."""
+    store, project = world["store"], world["project"]
+    unfiltered = _Recorder(filtered=False, hits=[_hit("r-mine1", world["mine"][0])])
+    similar = brief.similar_projects(store, project, K, adh=unfiltered)
+    built = _build(world, unfiltered)
+
+    assert unfiltered.calls == []
+    assert similar["text"] == [] and similar["reason"]["text"].startswith("adh_unscoped")
+    assert built["meta"]["external_search"] == "adh_unscoped" and "외부 검색 가용=false" in _item(built, "E0")["result"]
+    assert _item(built, "E7")["result"].split("\n")[3] == "[mech-syn-2: 이전 발언 없음]"
+    assert not getattr(AdhClient, "supports_project_filter", False)
+
+    filtered = _Recorder(filtered=True, hits=[_hit("r-mine1", world["mine"][0])])
+    brief.similar_projects(store, project, K, adh=filtered)
+    built = _build(world, filtered)
+    visible = sorted([project, *world["mine"], world["shared"]])
+    assert sorted({name for name, _kwargs in filtered.calls}) == ["agent_search", "hybrid_search"]
+    assert [kwargs.get("project_ids") for _name, kwargs in filtered.calls] == [visible] * len(filtered.calls)
+    assert _item(built, "E7")["result"].split("\n")[3].startswith("narr:op-adh#pan-adh#F1 | mech-syn-2 | adh/")

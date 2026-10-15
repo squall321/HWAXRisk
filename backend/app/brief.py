@@ -1187,6 +1187,15 @@ E5_POSITIVE_STATUSES = ("open", "verified")
 # 회수 검색에서 항상 빼는 상태 태그 3종(plan §5.6.3 '상태 필터') — 기각·철회·대체된 발언은 돌아오지 않는다.
 RECALL_EXCLUDE_TAGS: tuple[str, ...] = ("status:dismissed", "status:rejected_in_panel", "status:superseded")
 E5_NEGATIVE_STATUSES = ("rejected_in_panel", "dismissed")
+# AIDataHub 회수(서술 경로 · 좌석 기억 2차 경로)는 찾기를 보는 과제로 좁히는 클라이언트로만 한다 — 클라이언트가 `supports_project_filter`
+# (찾기 인자 project_ids 를 받아 그 과제의 레코드만 돌려준다)를 밝혀야 한다. 밝히지 않은 클라이언트를 넘기면 그 경로를 건너뛰고 이
+# 까닭을 남긴다 — 전체 색인을 찾지 않는다(D46). 지금의 AdhClient 는 밝히지 않는다.
+ADH_UNSCOPED = "adh_unscoped — 과제 거름이 없는 AIDataHub 찾기는 하지 않는다"
+
+
+def _adh_scoped(adh) -> bool:
+    """AIDataHub 회수를 써도 되는가 — 가용하고 과제 거름(`supports_project_filter`)을 밝힌 클라이언트일 때만."""
+    return adh is not None and bool(getattr(adh, "available", False)) and bool(getattr(adh, "supports_project_filter", False))
 
 
 def _corpus_ids(store) -> set[str]:
@@ -1732,7 +1741,7 @@ def _seat_memory_line(store, agent_key: str, target_key: str, lineage: set[str],
             return (in_lineage, overlap, -(row["created_at"] or 0), _s(row["opinion_id"]))
         best = sorted(rows, key=rank)[0]
         return _seat_line(store, best, _s(best["excerpt_for_rag"]), line_max)
-    recalled = _adh_seat_memory(adh, agent_key, ctx, line_max)
+    recalled = _adh_seat_memory(store, adh, agent_key, ctx, line_max)
     if recalled is not None:
         return recalled
     return f"[{agent_key}: 이전 발언 없음]", None
@@ -1748,10 +1757,11 @@ def _finding_subjects(store, finding_ids: Any) -> set[str]:
     return {_s(r["subject_key"]) for r in rows if r["subject_key"]}
 
 
-def _adh_seat_memory(adh, agent_key: str, ctx, line_max: int = E7_SEAT_LINE) -> tuple[str, str | None] | None:
-    """2차 경로 — AIDataHub 의사 에이전트 `risk-review-memory` 회수(plan §5.6.3 2). 미가용이면 None.
+def _adh_seat_memory(store, adh, agent_key: str, ctx, line_max: int = E7_SEAT_LINE) -> tuple[str, str | None] | None:
+    """2차 경로 — AIDataHub 의사 에이전트 `risk-review-memory` 회수(plan §5.6.3 2). 미가용이거나 과제 거름을 밝히지 않은
+    클라이언트면 None(찾지 않는다, D46) — 찾을 때는 타깃 소유자가 구성원인 과제로 좁힌다.
     (줄, 발췌를 자리표시자로 바꿨으면 그 어휘 id)."""
-    if adh is None or not getattr(adh, "available", False):
+    if not _adh_scoped(adh):
         return None
     summary = ""
     if ctx["kind"] == "diff" and ctx["diff"] is not None:
@@ -1761,7 +1771,8 @@ def _adh_seat_memory(adh, agent_key: str, ctx, line_max: int = E7_SEAT_LINE) -> 
     code = _s(ctx["target"]["project_id"])
     reply = adh.agent_search("risk-review-memory", f"{code} {summary}", mode="hybrid",
                              required_tags=[f"hwax:expert:{agent_key}"], top_k=3,
-                             exclude_tags=list(RECALL_EXCLUDE_TAGS))
+                             exclude_tags=list(RECALL_EXCLUDE_TAGS),
+                             project_ids=sorted(_member_project_ids(store, _s(ctx["target"]["owner_sub"]))))
     if not reply.get("ok"):
         return None
     hits = reply.get("result") or []
@@ -2070,8 +2081,9 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
         owner_sub = _s(ctx["target"]["owner_sub"]) or None
     if seats is None:
         seats = _seats_of_panel(store, target_key, panel_id)
-    external_ok = bool(adh is not None and getattr(adh, "available", False)) or \
-        bool(ra is not None and getattr(ra, "available", False))
+    external_ok = _adh_scoped(adh) or bool(ra is not None and getattr(ra, "available", False))
+    # 가용한데 과제 거름을 밝히지 않은 AIDataHub 는 찾지 않았다 — 그 까닭을 meta.external_search 에 남긴다(D46).
+    adh_unscoped = adh is not None and bool(getattr(adh, "available", False)) and not _adh_scoped(adh)
     similar = similar_projects(store, _s(ctx["target"]["project_id"]), adh=adh, ra=ra, owner_sub=owner_sub)
 
     # 조립하는 동안 원천 문자열 위생(§3.4.1)의 suspect_text 적재 대상과 위생 길이 상한의 배수를 이 스레드에 걸어 둔다.
@@ -2189,7 +2201,7 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
             # 메모를 다 못 실었으면 {chars, kept} — 미리보기·MCP 호출자가 여기서 본다(패널에는 러너가 남긴다).
             "user_memo_cut": memo_cut(next((i for i in items if i["key"] == "M"), None)),
             "excluded": sorted(excluded),
-            "external_search": "available" if external_ok else "unavailable",
+            "external_search": "adh_unscoped" if adh_unscoped else ("available" if external_ok else "unavailable"),
             # E10 조회 자격 — user · service(사람 자격이 없어 서비스 PAT 로 물었다, U-3) · None(채널 없음).
             "field_credential": getattr(field, "credential", None) if field is not None else None,
             "lint": lint,
@@ -2595,6 +2607,8 @@ def _text_path(store, project_id: str, latest: Mapping[str, str], adh, k: int,
     """
     if adh is None or not getattr(adh, "available", False):
         return [], "external_sync=unavailable"
+    if not _adh_scoped(adh):
+        return [], ADH_UNSCOPED
     snapshot_id = latest.get(project_id)
     if not snapshot_id:
         return [], "스냅샷 없음"
@@ -2603,7 +2617,7 @@ def _text_path(store, project_id: str, latest: Mapping[str, str], adh, k: int,
     if not query:
         return [], "summary_text 없음"
     reply = adh.hybrid_search(query, top_k=k, tags=["hwax-risk-review"],
-                              exclude_tags=list(RECALL_EXCLUDE_TAGS))
+                              exclude_tags=list(RECALL_EXCLUDE_TAGS), project_ids=sorted(visible))
     if not reply.get("ok"):
         return [], _s(reply.get("error"), "hybrid_search 실패")
     hits = reply.get("result") or []

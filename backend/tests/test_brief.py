@@ -208,6 +208,8 @@ def seed_real_snap_target(store, *, dyna: bool = False) -> str:
 
 class FakeAdh:
     """AdhClient 흉내 — 실 호출 없이 인자만 기록한다(실 LLM·네트워크 0)."""
+    # 과제 거름(찾기 인자 project_ids)을 밝힌다 — 밝히지 않은 클라이언트로는 브리프가 AIDataHub 를 찾지 않는다(D46).
+    supports_project_filter = True
 
     def __init__(self, *, hybrid=None, agent=None, available: bool = True) -> None:
         self.available = available
