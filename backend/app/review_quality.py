@@ -22,7 +22,7 @@ from typing import Any
 
 from app import audit, planner, review_cells, review_verify, taxonomy
 from app.common import canonical_json, now_epoch, sha256_hex
-from app.runner import ENGINE_EXTERNAL, JUDGE_CLAUDE
+from app.runner import ENGINE_EXTERNAL, JUDGE_CLAUDE, LLM_CLAUDE
 
 POLICY_ASSET = "review-quality"
 BLOCK_KEY = "quality"
@@ -636,7 +636,11 @@ def judge_llm(store: Any, target_key: str, agent_key: str | None = None) -> dict
     """판단 LLM(Claude 길 X-2) — 받은(ok) 호출(활성 단위 · 단위 없는 훑기 · 요약) 가운데 외부 응답자가 답한 것(model 'external' — 엔진이
     그 길의 답에만 단다)과 이 박스의 LLM 이 답한 것, 그리고 claude 잡인데 외부 응답자 답이 아니었던 호출(llm_mismatch — 그 행의
     quality_json.app). 외부 · 어긋남이 둘 다 0 이면 None(GLM 대상 — 글을 바꾸지 않는다). 원장 지문(`_ledger_hash`)의 행과 따로
-    센다(GLM 원장의 지문이 바뀌지 않게)."""
+    센다(GLM 원장의 지문이 바뀌지 않게). claude 잡이 한 번도 없던 대상은 호출 원장을 훑지 않는다(잡 표 한 번 — 359명 원장의 품질
+    계산에 훑기를 하나 더 얹지 않게)."""
+    if store.query_one("SELECT 1 FROM rr_jobs WHERE target_key = ? AND CASE WHEN json_valid(params_json) THEN"
+                       " json_extract(params_json, '$.llm') END = ? LIMIT 1", (target_key, LLM_CLAUDE)) is None:
+        return None
     extra, params = _scope_sql(agent_key)
     alive = set(review_cells.active_unit_ids(store, target_key))
     rows = [r for r in _rows(store,
