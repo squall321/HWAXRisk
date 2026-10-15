@@ -342,9 +342,11 @@ def _accept_offcard(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping
         t = raw.get("t")
         if t == "f":
             title = _text(raw.get("title")).strip()
-            if not title:
-                _drop(dropped, "no_title", raw)
-                continue
+            untitled = not title
+            if untitled:
+                # 엔진의 _check_f 는 제목을 묻지 않는다(RB-1) — 버리면 카드 밖 걸림이 결과에서 사라진다(반대 검토 2차 HIGH 1 · D-46).
+                # 경로 · 메커니즘 원문으로 제목을 대신하고 표지를 단다(q1 과 같은 규칙).
+                title = _text(raw.get("path")).strip() or _text(raw.get("mech_free")).strip() or "제목 없는 카드 밖 위험"
             checks = raw.get("checks") if isinstance(raw.get("checks"), Mapping) else {}
             src = _text(raw.get("src")) or "exp"
             card = cards.get(src) if src in sent_set else None
@@ -363,7 +365,7 @@ def _accept_offcard(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping
                 "section_id": quote["section_id"],
                 "grade": card_grade(card) if card is not None and quote["quote_ok"] == 1 else None,
                 "refs_ok": refs_verdict(refs, unit_refs, required=True),
-                "checks": dict(checks)})
+                "checks": dict(checks), **({"title_fallback": True} if untitled else {})})
         elif t == "m":
             out["seen"] = sorted(set(out["seen"]) | set(as_list(raw.get("seen"))))
         elif t == "h":
@@ -386,10 +388,11 @@ IMPACTS = APPLIES                   # q1 의 impact — 영향 있음 · 없음 
 
 def _accept_noinput(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping[str, Any]], unit_refs: frozenset,
                     extras: dict) -> dict:
-    """입력 결손 호출의 회계 — 카드(`k`)는 실은 별칭이어야 하고(밖이면 버린다 — `alias_outside_call`), 참조가 남의 단위를 가리키면
-    버린다(`foreign_ref` — Q8). impact 가 열거 밖이면 버리고(`bad_enum`), 영향 있음(yes)인데 제목이 없으면 finding 이 될 수 없어
-    버린다(`no_title`). 카드 인용(`cq`)은 그 카드의 얼린 원문으로 다시 대조한다(`quote_ok` — verdict 와 같은 규칙). 목록 칸은 문자열
-    하나도 한 항목으로 읽는다(D-25)."""
+    """입력 결손 호출의 회계 — 카드(`k`)는 실은 별칭이어야 하고(밖이면 버린다 — `alias_outside_call`), impact 가 열거 밖이면
+    버린다(`bad_enum`). 참조가 그 단위 소속 줄 밖이면(엔진이 L 별칭을 준 문맥 줄) 버리지 않고 refs_ok 0 · `ref_context` 로 표시한다
+    (반대 검토 2차 HIGH 1 · D-46 — D-37 이 옛 계약 글보다 앞선다, 판정 행과 같다). 영향 있음(yes)인데 제목이 없으면 경로 · 이유로
+    제목을 대신하고 `title_fallback` 을 단다. 카드 인용(`cq`)은 그 카드의 얼린 원문으로 다시 대조한다(`quote_ok` — verdict 와 같은
+    규칙). 목록 칸은 문자열 하나도 한 항목으로 읽는다(D-25)."""
     sent_set = set(sent)
     dropped: list[dict] = []
     rows: list[dict] = []
@@ -410,9 +413,7 @@ def _accept_noinput(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping
             _drop(dropped, "alias_outside_call", raw)
             continue
         refs = as_list(raw.get("refs"))
-        if any(ref not in unit_refs for ref in refs):
-            _drop(dropped, "foreign_ref", raw)
-            continue
+        context = any(ref not in unit_refs for ref in refs)
         checks = raw.get("checks") if isinstance(raw.get("checks"), Mapping) else {}
         for mark in ("contested_by", "flipped_from"):
             # 다툼(contested_by — 앞 줄이 선다) · 보충이 앞 답을 갈아 끼움(flipped_from — 고친 값이면 raw). 판정 행처럼 checks 사본에
@@ -421,7 +422,8 @@ def _accept_noinput(raw_rows: list, sent: list[str], cards: Mapping[str, Mapping
                 checks = {**checks, mark: raw[mark]}
         card = cards.get(alias) if alias else None
         base = {"t": t, "k": alias or None, "record_id": str(card["record_id"]) if card is not None else None,
-                "l": as_list(raw.get("l")), "refs": refs, "why": _text(raw.get("why")) or None, "checks": dict(checks)}
+                "l": as_list(raw.get("l")), "refs": refs, "why": _text(raw.get("why")) or None, "checks": dict(checks),
+                **({"ref_context": True} if context else {})}
         if t == "q2":
             rows.append({**base, "item": _text(raw.get("item")).strip(), "needs": _text(raw.get("needs")) or None,
                          "refs_ok": refs_verdict(refs, unit_refs, required=False)})
@@ -607,6 +609,33 @@ def effective_rows(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict]:
     return out
 
 
+def effective_view(rows: Sequence[Mapping[str, Any]]) -> dict[str, dict]:
+    """record_id → 실효 판정(실효 변형 행의 열 + effective_rows 의 표기). applies·judgement 는 실효 규칙의 값이다 — 변형이 갈린
+    카드(split)는 행에 적힌 변형의 판정이 아니라 undetermined 다(X1-14). 행의 원래 값은 row_applies·row_judgement 에 둔다.
+    보고서 원장(`expert_report.Ledger.effective`)이 읽는다."""
+    marks = effective_rows(rows) if rows else {}
+    out: dict[str, dict] = {}
+    for row in rows:
+        if row["is_effective"]:
+            mark = marks[str(row["record_id"])]
+            out[str(row["record_id"])] = {**row, "row_applies": row["applies"], "row_judgement": row["judgement"],
+                                          **{k: mark[k] for k in ("applies", "judgement", "claimed", "flipped", "disputed")}}
+    return out
+
+
+def candidate_kind(eff: Mapping[str, Any], variants: Mapping[str, Mapping[str, Any]]) -> str | None:
+    """실효 판정 하나가 finding 후보가 되는 까닭 — flagged(실효 FAIL · WARNING) · split(실효 undetermined 이면서 변형이 갈렸다 —
+    X1-14) · unjudged_conflict(엔진이 부딪침을 알린 행인데 두 번째 판정이 없다 — 끝내 실패해 넘긴 셀, 갈림처럼 후보다. 반대 검토 2차
+    MEDIUM 2 · D-46). 아니면 None. `variants` 는 그 카드의 변형 → 판정 행이다. 보고서와 넘김의 걸림 셈이 같은 규칙을 쓴다."""
+    if eff["judgement"] in FLAGGED:
+        return "flagged"
+    if eff["judgement"] == "undetermined" and int(eff.get("split") or 0) == 1:
+        return "split"
+    if len(variants) == 1 and any(engine_conflict(r) for r in variants.values()):
+        return "unjudged_conflict"
+    return None
+
+
 def mark_effective(rows: Sequence[Mapping[str, Any]]) -> list[dict]:
     """판정 행 복사본에 `is_effective`(실효 변형 행만 1)·`agree`·`split`(그 카드의 행 전부)을 채운다 — 쓰기 직전에 부른다."""
     effective = effective_rows(rows)
@@ -677,11 +706,13 @@ def _offcard_risk(row: Mapping[str, Any]) -> bool:
     return str(row.get("dir") or "risk") == "risk" and str(row.get("sev") or "") != SEV_MINOR
 
 
-def audit_outcome(effective: Mapping[str, Mapping[str, Any]], offcard_rows: Sequence[Mapping[str, Any]]) -> str:
+def audit_outcome(effective: Mapping[str, Mapping[str, Any]], offcard_rows: Sequence[Mapping[str, Any]], *,
+                  rows: Sequence[Mapping[str, Any]] = ()) -> str:
     """표본·그림자 셀 하나의 놓침 판정 — 처음 맞는 줄이다(X1-13 · m3-cells 3.4).
 
-    | risk_miss | 실효 FAIL·WARNING 이 하나라도(실효 undetermined 이면서 split=1 — 변형이 걸렸던 카드 — 포함), 또는 카드 밖
-    |           | 리스크의 심각도가 경미가 아니다(`_offcard_risk`) |
+    | risk_miss | finding 후보(`candidate_kind`)가 하나라도 — 실효 FAIL·WARNING, 실효 undetermined 이면서 split=1(변형이 걸렸던
+    |           | 카드), 두 번째 판정을 끝내 못 받은 부딪침 표지(unjudged_conflict — 반대 검토 3차 LOW 6 · D-47, 판정 행 `rows` 로
+    |           | 변형을 본다) — 또는 카드 밖 리스크의 심각도가 경미가 아니다(`_offcard_risk`) |
     | relevance_miss | 걸림은 없지만 applies='yes' 실효 행이나 카드 밖 줄(경미 리스크 · 개선)이 있다 |
     | undetermined | 위 둘이 아니고 applies='unknown' 이거나 판정이 undetermined 인 실효 행이 있다 |
     | kept | 실효가 전부 해당 없음이고 카드 밖이 없다 |
@@ -689,13 +720,16 @@ def audit_outcome(effective: Mapping[str, Mapping[str, Any]], offcard_rows: Sequ
     `effective` 는 `effective_rows` 의 반환, `offcard_rows` 는 카드 밖 회계(`accept_rows(kind='offcard')`)의 rows 다.
     넓힘(그 영역의 거른 셀을 다시 연다)을 일으키는 것은 risk_miss 뿐이다.
     """
-    rows = list(effective.values())
-    if any(str(e.get("judgement")) in FLAGGED or (str(e.get("judgement")) == "undetermined" and int(e.get("split") or 0))
-           for e in rows) or any(_offcard_risk(f) for f in offcard_rows):
+    variants: dict[str, dict[str, Mapping[str, Any]]] = {}
+    for row in rows:
+        variants.setdefault(str(row["record_id"]), {})[str(row.get("variant") or "fwd")] = row
+    effs = list(effective.values())
+    if any(candidate_kind(e, variants.get(str(rid), {})) for rid, e in effective.items()) \
+            or any(_offcard_risk(f) for f in offcard_rows):
         return "risk_miss"
-    if any(str(e.get("applies")) == "yes" for e in rows) or offcard_rows:
+    if any(str(e.get("applies")) == "yes" for e in effs) or offcard_rows:
         return "relevance_miss"
-    if any(str(e.get("applies")) == "unknown" or str(e.get("judgement")) == "undetermined" for e in rows):
+    if any(str(e.get("applies")) == "unknown" or str(e.get("judgement")) == "undetermined" for e in effs):
         return "undetermined"
     return "kept"
 

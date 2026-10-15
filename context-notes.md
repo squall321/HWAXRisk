@@ -1850,3 +1850,159 @@ rebase 때 부딪치지 않게).
 - **남긴 것(보고).** 좌석 기억(E7)은 계보와 상관없이 같은 좌석의 의견을 소유자 거름 없이 읽는다(rr_seat_opinions.owner_sub 를 보지
   않는다) — 계보 거름은 남이 링크로 주인 과제의 의견을 골라 올리는 것만 막는다. 유사 과제의 벡터 · 서술 경로는 코퍼스(§0.6) 전체의 과제
   id 를 싣는 설계다. 둘 다 받은 id 를 거쳐 읽는 자리가 아니라 이번 규칙 밖이고 다음 검토에 넘긴다.
+
+## 재설계 M3 — 셀 꾸러미 반대 검토 2차 수리(1b1de6d 기준 HIGH 1 · MEDIUM 3 · LOW 3, D-46, 2026-10-14)
+
+검토 결과와 조정자 결정(D-46)은 스크래치의 cells-review2-findings.md 에 있다. HIGH 1(b)는 D-37 이 옛 계약 글(m3-cells.md 210/372)보다
+앞선다 — 계약 글은 조정자가 고친다.
+
+### M3C-47. HIGH 1 — 엔진이 받는 걸림을 앱이 버리던 두 곳
+- 제목 없는 카드 밖 f 줄은 버리지 않는다. 경로 → 메커니즘 원문 → '제목 없는 카드 밖 위험' 으로 제목을 대신하고 `title_fallback` 을
+  단다(q1 과 같은 규칙 — 표지는 기록에만 둔다).
+- 입력 결손 q1 · q2 가 단위 소속 줄 밖의 참조를 대면(엔진은 문맥 줄에도 L 별칭을 준다) 버리지 않고 refs_ok 0 · `ref_context` 로 표시한다.
+  그래서 q1 이 전부 문맥 줄을 대도 셀은 실패가 아니라 정산된다. 보고서는 영향 줄의 변경 줄 대조와 확인할 것 줄에 '문맥 줄을 댔다(그
+  단위 소속 줄이 아니다)' 를 적는다. finding 의 인용은 그 참조를 통과하지 못한 인용으로 싣는다(종전 _noinput_members 의 규칙 그대로).
+
+### M3C-48. MEDIUM 2 — 넘긴 셀의 걸림 셈 = 보고서가 실제로 싣는 것
+- 셈과 보고서가 같은 규칙을 읽는다. `review_verify.effective_view`(보고서 원장의 effective 를 옮겼다)와 `candidate_kind` 다. 후보 까닭은
+  셋이다 — flagged(실효 FAIL · WARNING), split(실효 undetermined 이면서 변형이 갈림), unjudged_conflict(엔진 부딪침 표지가 선 행인데
+  변형이 하나뿐 — 두 번째 판정을 못 받았다).
+- unjudged_conflict 는 갈림처럼 무게 1 의 후보(undetermined 로 hold)이고, 점검표 표지 '다툼 표지 — 두 번째 판정 못 함' 과 finding 카드의
+  conflict_unjudged 가 선다. 검토한 셀에서는 생기지 않는다 — 부딪침 표지는 두 번째 판정의 방아쇠라 정산까지 간 셀이면 변형이 둘이다.
+- `review_cells.cell_hits` 는 갈래를 돌려준다(card · conflict_mark · noinput_yes · noinput_unknown · n). 넘김 응답 `hits_by` 와 보고서
+  '보지 못한 것' 줄이 그 갈래와 실린 자리를 말한다(카드 판정 — 점검표 · finding, 부딪침 표지 — 점검표, 영향 있음 — 입력 결손 절 · finding,
+  영향 모름 — 입력 결손 절). 필요한 정보 절도 넘긴 셀의 정산된 몫을 검토한 셀과 같은 자리에 싣는다.
+- 시험의 함정 하나 — 가짜 엔진에 applies no · OK 를 주면 엔진 계약 밖 짝이라 행이 버려져 빠진 카드 재질의로 번진다. 갈림 시나리오는
+  yes · OK 로 짓는다.
+
+### M3C-49. MEDIUM 3 — 잡 끝이 거둔 셀을 지금 잡으로
+- 잡 끝의 거두기(reopen_widened · reopen_handed_off)는 셀과 그 전문가 머리를 지금 잡으로 찍는다. 그래서 범위 밖 전문가의 셀도 지금
+  잡이 돌린다(MEDIUM 7 의 보충 표본과 같은 규칙, 살아 있는 검토 잡은 대상마다 하나라 다른 잡의 셀을 빼앗지 않는다).
+- 훑기의 늦은 넘김 다시 열기(_replay_handoffs)는 제 셀을 뺀다(exclude_agent). 곧바로 연 셀의 잡 결속은 그대로 둔다 — 결정이 찍기를
+  잡 끝의 거두기에만 걸었고, C3-7 의 곧바로 넓힘(widen)도 결속을 두어 그 셀을 범위로 잡은 다음 잡이 분류한다. 한때 찍었다가 결정의
+  범위로 되돌렸다(037ab3a).
+
+### M3C-50. MEDIUM 4 — 보충 표본의 바닥 셈
+- 바닥은 결과를 낸 표본과 아직 결과를 낼 수 있는 표본만 센다. 아직 낼 수 있는 표본은 도는 것과 사람의 처분을 기다리는 실패다(다시
+  하면 표지가 남아 결과를 낸다). 넘긴 표본만 그 자리를 다른 거른 셀로 채운다.
+- '결과 없이 닫힌 표본' 에 실패를 넣지 않은 것은 해석이다 — 넣으면 같은 까닭의 실패가 그 잡 안에서 영역의 거른 셀을 차례로 실패로
+  바꾼다(MEDIUM 6 시험이 거른 셋을 다 실패로 바꾸는 것으로 드러났다). 사람이 넘기면 넘김이 세우는 마감 잡의 끝이 채운다.
+
+### M3C-51. LOW 5 — q1 겹침은 다시 묻기 사이에서만
+- 한 답 안의 줄끼리는 합치지 않는다(엔진이 내용 전부로 가려 낸 줄이다). 앞 답들이 남긴 줄의 정체를 그 답 앞에서 떠 두고, 앞 줄 하나는
+  이 답의 줄 하나와만 견준다(seen.pop). 영향이 비기면 더 무거운 심각도가 남는다(_q1_strength — 심각도 차례는 보고서의 것).
+
+### M3C-52. LOW 6 — 놓침 증거는 쌓이기만 한다
+- 앞 결과를 표지 안(HIGH 3 의 marker.was)에서 표지와 따로(`sample_json.was` — 종류마다 목록)로 옮겼다. 입력이 바뀌어 처음부터 도는
+  셀(start_cell 의 _CELL_RESET)은 표지를 지우고 다시 분류하는데, 표지 안에 두면 앞 결과도 함께 지워지고 표지 꼴만 남기면 표지가 선
+  것으로 읽혀(G9 · 보충 표본) 틀린다. 아직 머지 전이라 옮길 옛 원장이 없다.
+- `review_cells.sample_outcomes` 하나를 넓힘 · 완결 몫 · 품질 · 보고서 머리 · 잡 끝 보충 표본이 함께 읽는다. 실효 결과는 지금 결과나
+  앞 결과 가운데 놓침이 하나라도 있으면 놓침, 아니면 지금 결과, 없으면 마지막 앞 결과다. 표지가 지워지고 앞 결과만 남은 셀도 표본으로
+  센다(보충 표본과 완결 몫이 같은 수 — 거른 셀이기도 하면 한 번만 센다).
+- 사람의 다시는 표지가 없어도 앞 결과를 남긴다. 분류 기록(route · route_json)은 표지가 있을 때만 남긴다.
+
+### M3C-53. LOW 7 — 입력 결손 다시 묻기 상한
+- 마지막 다시 묻기 뒤에도 '더 있다'(maybe_more)면 셀 기록 extras.noinput.capped 에 적는다(닿지 않은 셀의 기록 바이트는 그대로).
+  품질 truncation.noinput_capped{cells} 와 [절단] 줄이 센다 — 보고서 품질 절이 그 줄을 싣는다. 열을 더하지 않은 것은 v5 블록을 건드리지
+  않기 위해서다.
+
+### M3C-54. 공유 파일 · 손대지 않은 것
+- review_runner.py — dispose_cells(hits_by), 머리의 _SEV_RANK · _q1_strength, _replay_handoffs(제 셀 빼기), _noinput(겹침 · capped),
+  _audit_topup(거두기의 run_id). create_review_job · _finish 는 손대지 않았다. entry.py · mcp_server.py · routes.py · closure.py ·
+  runner.py · synth.py · chain.py 도 이번 회차에는 손대지 않았다.
+
+### M3C-55. 변이 검사 · 전체 시험 — 반대 검토 2차 수리
+- 변이를 짜며 비어 있던 시험을 먼저 더했다 — 앞 잡이 거른 셀을 잡 끝의 넓힘 거두기가 지금 잡으로 찍는지, 표지가 지워진 표본을 보충
+  표본과 완결 몫이 똑같이 세는지, 문맥 줄 표기가 영향 줄과 확인할 것 줄 둘 다에 서는지(한 글귀가 두 자리에 같아 한쪽을 지워도 붙었다).
+- `git archive` 사본(`scratchpad/celm3-<pid>-r2`)에서 28개(HIGH 1 다섯 · MEDIUM 2 여섯 · MEDIUM 3 셋 · MEDIUM 4 둘 · LOW 5 둘 · LOW 6
+  일곱 · LOW 7 셋)를 하나씩 넣고 그 수리의 시험만 돌렸다. 첫 판에 28/28 이 단언으로 죽었다.
+- **전체 시험(공유 잠금 아래).** 2,894 통과 · xfail 4 · 실패 0(종전 2,882). ruff 깨끗하다.
+
+## 재설계 M3 — 셀 꾸러미 반대 검토 3차 수리(489f905 기준 HIGH 1 · MEDIUM 2 · LOW 4, D-47, 2026-10-15)
+
+검토 결과와 조정자 결정(D-47)은 스크래치의 cells-review3-findings.md 에 있다. 되풀이되던 어긋남을 끊는 구조 변경이 둘이다 — 넘긴 셀은
+검토한 셀과 한 길로 지나고, 살아 있는 잡이 다시 연 셀은 셀만 그 잡에 묶는다(머리는 범위로 찍지 않는다). 이 절의 결정이 2차 기록의
+M3C-48(갈래 목록 · '검토한 셀에서는 생기지 않는다') · M3C-49(곧바로 연 셀의 결속 · 잡 끝 거두기의 머리 찍기) · M3C-52(앞 결과만 남은
+셀도 표본) 를 대신한다. 그 기록은 그때의 사실이라 고쳐 쓰지 않는다.
+
+### M3C-56. HIGH 1 — 넘긴 셀은 한 길(abeb556)
+- 넘긴(skipped) 셀은 검토한 셀과 같은 구성원 함수(MEMBER_SOURCES — 카드 · 카드 밖 · 입력 결손)를 가진 자료 그대로 지난다. finding 에는
+  `partial_cell`(보고서 표지 '넘긴 셀 — 일부만 판정')만 더한다. 종전에는 넘긴 셀만 카드 밖 구성원을 뺐고, 셈은 따로 지은 갈래
+  (`cell_hits` · `HIT_KINDS`)라 카드 밖 갈래가 없었다.
+- 셈은 그 함수들이 실제로 낸 구성원 수다. 보고서는 build_findings 가 넘긴 셀마다 `Ledger.member_counts` 에 적고, 넘김 응답 hits_by 는
+  `count_members` 가 같은 함수로 센다. 갈래(card · offcard · noinput)는 MEMBER_SOURCES 에서 저절로 선다 — 새 상수가 아니다.
+  `cell_hits` · `HIT_KINDS` 는 없앴다.
+- 영향 모름 입력 결손과 두 번째 판정까지 받은 부딪침 표지는 finding 이 아니라 셈도 0 이다. 보고서 '보지 못한 것' 줄은 걸림이 있을
+  때만 '넘긴 셀 — 일부만 판정(…)' 을 단다.
+- 카드 밖 · 단위 · 넘김 · 메커니즘 절과 의견 행(맺음 · 인용 · 지식)도 `Ledger.judged()`(검토 + 넘김)를 읽는다.
+- 시험은 갈래 여덟(카드 FAIL · WARNING · 갈림 · 부딪침 두 갈래 · 카드 밖 · 입력 결손 있음 · 모름)에서 같은 원장의 셀 상태만 바꿔 넘긴
+  셀과 검토한 셀의 finding 이 표지 빼고 같은지 본다(test_review_partial_cells.py). 가짜 엔진의 카드 밖 기본 한 줄은 카드 갈래에서 끈다.
+
+### M3C-57. MEDIUM 2 · 3 — 다시 연 셀은 셀만 묶는다(fedb411)
+- 살아 있는 잡이 다시 열면(정산의 곧바로 넓힘 · 훑기의 늦은 넘김 · 잡 끝 거두기 · 보충 표본) 다시 연 셀만 그 잡에 묶는다(run_id).
+  머리는 찍지 않는다.
+- 잡의 몫은 묶인 셀로 가린다 — `review_cells.job_expert_sql`(범위로 찍힌 머리이거나 그 잡에 묶인 셀이 있는 전문가). 검토 · 묶음 선점은
+  그 잡에 묶인 pending 셀이 있는 전문가이고, 마감은 그 잡의 몫인 머리 가운데 그 잡에 묶인 열린 셀이 없는 것이다. 도는 수(in_flight —
+  취소 판정) · 진행판 · 묶음 단계 · 마감 안 된 머리 셈 · 고아 놓기 · 잡 고르기 순서 · 보충 표본의 '남이 쥔 전문가' 도 같은 규칙이다.
+- 그 잡은 묶인 셀만 돈다 — 세션이 고르는 셀이 그 잡에 묶인 셀이라서다. 재현 C 는 종전 15 호출(다섯 단위)이 3 호출(그 셀)이 됐다.
+- adopt_released 는 머리 run_id 가 아니라 잡이 받은 범위(params.scope — resolve_scope 와 같은 `scope_experts`)에서 죽은 잡에 묶인
+  pending 셀만 거둔다. run_id 없는 셀은 거두지 않는다 — 잡을 만들 때 범위 안 pending 셀은 assign_scope 가 찍으므로 run_id 없는 셀은
+  한 번도 잡히지 않은 셀이다.
+- 사람의 처분도 셀만 묶는다. 다시는 범위가 덮는 셀을, 넘김은 넘긴 셀을 살아 있는 잡에 묶는다. 넘긴 셀이 묶여야 그 잡이 그 전문가를
+  다시 마감한다 — 그래서 그 잡의 진행판 셈에 넘긴 셀이 든다(응답이 adopted 라 말하는 셀이다).
+- 해석 하나 — 곧바로 다시 연 셀은 그 잡의 단위 범위 밖이어도 그 잡이 돈다(결정이 '다시 연 셀만 그 잡에' 라 했다). 그 전문가의 다른
+  셀은 손대지 않는다.
+- 머리 run_id 는 이제 범위로 찍은 잡만 뜻한다. 보고서 단위 행의 in_scope(셀 run_id == 머리 run_id)는 그 뜻 그대로 둔다 — 다시 연 셀을
+  돌린 잡은 머리를 찍지 않으므로 그 셀의 in_scope 는 거짓일 수 있다. 검토 · 넘김 줄에는 범위 밖 꼬리를 달지 않는다.
+
+### M3C-58. LOW 4 — 앞 결과는 놓침만, 표본은 지금 표지의 결과(4392cc9)
+- `sample_outcomes` 는 {marked, settled, result, picked_by} 다. 앞 결과(was)는 놓침만 세고, settled 는 지금 표지에 결과가 있다는 것이다.
+  마지막 앞 결과로 메우던 것은 없앴다. 앞 결과의 기록(was)은 그대로 쌓는다 — 읽는 쪽만 바뀌었다.
+- 셈은 `review_cells.sample_tally` 하나를 완결 몫과 품질이 같이 쓴다. 표본 수(sampled)는 결과를 낸 표본이다. 놓침은 결과를 아직 못
+  낸 표본의 앞 놓침까지 센다. 비율 분모(n)는 둘을 더해 놓침이 분모를 넘지 않는다(binom_upper 의 k ≤ n).
+- 완결 몫의 대기 · 실패는 표지가 선 채 결과가 없는 표본만 센다. 표지가 지워져 앞 놓침만 남은 셀은 표본이 아니고 놓침 수와 분모에만
+  든다. 잡 끝 보충 표본도 같은 settled 로 바닥을 센다 — 재현 D 는 이제 그 잡 끝이 다시 걸러진 셀을 새 표본으로 끝까지 본다.
+- 2차 시험 ④(표지가 지워진 놓침)는 표본 수 0 · 놓침 1 · 분모 1 이 됐다. 품질을 완결 몫보다 먼저 본다 — 분모를 줄이는 변이가
+  binom_upper 의 ValueError 가 아니라 단언으로 걸리게.
+
+### M3C-59. LOW 5 — 1차 모양을 읽지 않는다
+- 1차 수리의 표지 안 앞 결과(marker.was)와 1차 보고서의 걸림 수를 읽는 길은 두지 않는다. 그 모양은 배포된 적이 없다 — m3 ·
+  m3-rehearsal 은 밀지 않은 가지이고 그 모양을 가진 운영 원장이 없다(D-47).
+
+### M3C-60. LOW 6 — 단독 표지의 rev 를 다시 묻는다(49e83ef)
+- 단독으로만 본 카드(pair_over)의 단독 행에 부딪침 표지가 서면 그 카드 하나의 rev 를 받는다. 그 답이 그 카드를 빼먹으면 SOLO_REASKS
+  번까지 다시 묻는다.
+- 끝내 못 받으면 셀은 검토로 닫히고 보류 finding('두 번째 판정 못 한 부딪침')이 남는다(D-37). samples_done 을 내리지 않았다 — 내리면
+  셀이 samples_incomplete 로 실패해 결정이 남기라고 한 finding 이 검토한 셀에서 사라진다.
+- 표본 결과는 놓침이다. `audit_outcome` 이 finding 후보 규칙(`candidate_kind`)을 판정 행의 변형과 함께 읽어 unjudged_conflict 도
+  risk_miss 로 친다.
+- 단위 시험(test_audit_outcome_counts_an_unjudged_conflict_as_a_miss)은 새 인자(rows)의 계약이라 옛 코드에서는 TypeError 로 넘어진다.
+  재현은 생산자 길의 시험(test_review_dual)이 단언으로 본다.
+
+### M3C-61. LOW 7 — '넘김 — 사유'(610056e)
+- 넘긴 셀의 보고서 줄 둘(본 범위의 단위 줄 · 보지 못한 것)이 같은 글 '넘김 — «사유»' 다(_skip_words). 넘김에는 범위 밖 꼬리를 달지
+  않는다 — 넘김은 범위가 아니라 사람의 처분이다. 새로 선 마감 잡과 살아 있던 잡 두 길을 시험이 본다.
+
+### M3C-62. 공유 파일 · 손대지 않은 것
+- review_runner.py — resolve_scope(scope_experts), in_flight, dispose_cells(셀만 묶기 · hits_by), JobProgress._count, AIDataHub 판정,
+  묶음 단계(needs_pack), _unfinalized, _settle(넓힘 run_id), _replay_handoffs(run_id), _audit_topup(주석), _solos(rev 다시 묻기),
+  _sample_results(rows). create_review_job 은 손대지 않았다.
+- expert_report.py — Ledger(partial · judged · member_counts), MEMBER_SOURCES · _unit_members · build_findings · count_members,
+  _scope_section, _md_scope(_skip_words), _hits_line, judged() 를 읽는 절들.
+- review_cells.py — job_expert_sql · scope_experts, adopt_released, _live_review_jobs, claim_next_expert, release_orphaned,
+  reopen_filtered · reopen_widened · reopen_handed_off · widen, sample_outcomes · sample_tally, audit_topup, closure_cells.
+  review_quality.py(_load · _filter) · review_verify.py(audit_outcome).
+- frontend · 포털 문서 · runner.py · v5 블록은 손대지 않았다.
+
+### M3C-63. 변이 검사 · 전체 시험 — 반대 검토 3차 수리
+- 재현은 수리 전 사본(`scratchpad/celm3-<pid>-r3m-old` · `r3l4-old` · `r3l6-old`)에서 단언으로 넘어지는 것을 먼저 봤다(B1 · B2 둘 ·
+  C 둘 · D · 표지가 지워진 앞 결과 셋 · F · LOW 7 두 길 · adopt_released 범위). LOW 6 의 단위 시험만 새 인자의 계약이라 TypeError 다.
+- `git archive` 사본(`scratchpad/celm3-<pid>-r3`)에서 44개(HIGH 1 열 · MEDIUM 2 · 3 스물하나 · LOW 4 일곱 · LOW 6 셋 · LOW 7 셋)를
+  하나씩 넣고 그 수리의 시험만 돌렸다. 단언 실패만 죽음으로 셌다.
+- 첫 판(38개)은 33 죽음 · 살아남음 4 · 단언 아닌 실패 1 이었다. 살아남은 넷은 잡의 몫을 읽는 자리 가운데 시험이 없던 곳이다 — 마감
+  선점(`_unfinalized` 가 막아 가려졌다 — 남의 planned 머리가 차례가 앞설 때만 드러난다) · 도는 수(취소 판정) · 진행판 · 고아 놓기.
+  단언 아닌 하나는 분모를 줄인 변이가 binom_upper 의 ValueError 로 넘어진 것이라, 품질(분모를 단언한다)을 완결 몫보다 먼저 보게
+  고쳤다. 같은 규칙을 읽는 나머지 자리(잡 고르기 차례 · 묶음 단계 · AIDataHub 판정 둘)에도 변이를 넣고 시험을 더했다.
+- 고친 뒤 43/44 가 단언으로 죽는다. 남은 하나는 잡 끝 보충 표본의 '남이 쥔 전문가' 를 머리 run_id 로 되돌린 변이다 — 보충 표본은
+  그 잡의 도는 머리가 0 일 때만 불리므로(`_complete_or_phase`) 그 자리에서는 같은 값이다(규칙을 맞춰 둔 것뿐이다).
+- **전체 시험(공유 잠금 아래).** 2,923 통과 · xfail 4 · 실패 0(종전 2,894). ruff 깨끗하다.

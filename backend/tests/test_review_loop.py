@@ -463,6 +463,28 @@ def test_a_job_closed_outside_the_loop_refuses_a_new_job_while_its_call_runs_and
     assert review_cells.review_invariants(store, key) == []
 
 
+def test_adopt_released_takes_only_dead_job_cells_inside_the_jobs_own_scope(store, monkeypatch):
+    """반대 검토 3차 MEDIUM 3 · D-47 — 놓인 셀 거두기(adopt_released)의 범위는 머리 run_id 가 아니라 잡이 받은 범위(params.scope —
+    전문가 × unit_ids)이고, 거두는 셀은 죽은 잡에 묶인 것뿐이다. 그 전문가 머리가 이 잡으로 찍혀 있어도 범위 밖 단위의 셀과 한 번도
+    잡히지 않은(run_id 없는) 셀은 그대로 둔다(종전에는 머리 찍기를 범위로 읽어 run_id 없는 셀까지 거뒀다)."""
+    from app import review_runner
+
+    key, first, fake, r, gate = _stalled(store, monkeypatch, 3)
+    rig.wait_for(lambda: any(w.get("last_step") for w in r.loop.progress(first).payload()["workers"]))
+    store.execute("UPDATE rr_jobs SET state = 'cancelled' WHERE id = ?", (first,))
+    inside, outside, never = (c["unit_id"] for c in _cells(store, key, SEAL)[:3])
+    monkeypatch.setattr(review_runner, "_refuse_live_jobs", lambda store, target_key: None)
+    second = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": [inside, never]})
+    assert _head(store, key, SEAL)["run_id"] == second                  # 범위로 찍힌 머리 — 그래도 거두기의 범위가 아니다
+    gate.set()
+    r.loop.join(30)
+    store.execute("UPDATE rr_review_cells SET run_id = NULL WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+                  (key, never, SEAL))                                    # 한 번도 잡히지 않은 셀의 꼴
+    assert review_cells.adopt_released(store, second) == 1
+    cells = {c["unit_id"]: (c["state"], c["run_id"]) for c in _cells(store, key, SEAL)}
+    assert (cells[inside], cells[outside], cells[never]) == (("pending", second), ("pending", first), ("pending", None))
+
+
 def test_a_real_purge_while_a_call_runs_refuses_a_new_job_until_the_worker_closes_and_then_its_rows_are_released(
         store, monkeypatch):
     """단계 D 리허설(실제 배선)에서 찾은 것 — 실제 과제 폐기(`routes.purge_project`)는 잡을 루프 밖에서 곧바로 cancelled 로 쓰고 셀·머리의
@@ -496,6 +518,65 @@ def test_a_real_purge_while_a_call_runs_refuses_a_new_job_until_the_worker_close
     head = _head(store, key, SEAL)
     assert (head["state"], head["lease_owner"], head["sweep_json"], head["report_gz"], head["summary_md"]) == (
         "planned", None, None, None, None)
+
+
+def test_release_orphaned_frees_a_head_the_cancelled_job_held_only_through_a_bound_cell(store):
+    """반대 검토 3차 MEDIUM 2 · 3 · D-47 — 다시 연 셀만 그 잡에 묶인 전문가(머리는 앞 잡의 범위로 찍혀 있다)도 그 잡의 몫이다. 루프
+    밖에서 닫힌(cancelled) 그 잡이 쥐었던 고아 머리 · 셀을 놓는다 — 머리 run_id 로만 보면 머리가 running 으로 남아 그 대상의 새 잡이
+    409 review_in_flight 였다."""
+    peer = "xd-syn-1"
+    key = rig.target(store)
+    earlier = rig.job(store, key, scope={"agents": [SEAL]})
+    store.execute("UPDATE rr_jobs SET state = 'completed' WHERE id = ?", (earlier,))
+    current = rig.job(store, key, scope={"agents": [peer]})
+    unit_id = _cells(store, key, SEAL)[0]["unit_id"]
+    store.execute("UPDATE rr_review_cells SET run_id = ?, state = 'running', lease_owner = NULL WHERE target_key = ?"
+                  " AND unit_id = ? AND agent_key = ?", (current, key, unit_id, SEAL))     # 다시 연 셀 — 이 잡에 묶였다
+    store.execute("UPDATE rr_expert_reports SET state = 'running', lease_owner = NULL WHERE target_key = ? AND agent_key = ?",
+                  (key, SEAL))
+    store.execute("UPDATE rr_jobs SET state = 'cancelled' WHERE id = ?", (current,))
+    assert _head(store, key, SEAL)["run_id"] == earlier
+    out = review_cells.release_orphaned(store, key, SEAL, run_id=current)
+    assert (out["experts"], out["cells"]) == (1, 1)
+    assert (_head(store, key, SEAL)["state"], _cells(store, key, SEAL)[0]["state"]) == ("planned", "pending")
+
+
+def test_cancelling_waits_for_a_head_the_job_holds_only_through_a_bound_cell(store):
+    """반대 검토 3차 MEDIUM 2 · 3 · D-47 — 도는 수(in_flight)도 잡의 몫을 묶인 셀로 가린다. 다시 연 셀만 그 잡에 묶인 전문가(머리는 앞
+    잡의 범위로 찍혀 있다)를 그 잡의 워커가 셀 사이(훑기 · 마감)에 쥐고 있으면 취소는 cancelling 으로 기다린다 — 머리 run_id 로만 보면
+    도는 것이 0 이라 곧바로 cancelled 로 닫혀 워커가 쥔 채 잡이 끝났다."""
+    peer = "xd-syn-1"
+    key = rig.target(store)
+    earlier = rig.job(store, key, scope={"agents": [SEAL]})
+    store.execute("UPDATE rr_jobs SET state = 'completed' WHERE id = ?", (earlier,))
+    current = rig.job(store, key, scope={"agents": [peer]})
+    store.execute("UPDATE rr_jobs SET state = 'running' WHERE id = ?", (current,))
+    unit_id = _cells(store, key, SEAL)[0]["unit_id"]
+    store.execute("UPDATE rr_review_cells SET run_id = ?, state = 'pending' WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+                  (current, key, unit_id, SEAL))                          # 다시 연 셀 — 이 잡에 묶였다
+    store.execute("UPDATE rr_expert_reports SET state = 'running', lease_owner = 'worker' WHERE target_key = ? AND agent_key = ?",
+                  (key, SEAL))
+    assert _head(store, key, SEAL)["run_id"] == earlier
+    assert runner.cancel_job(store, current, by=OWNER)["state"] == "cancelling"
+
+
+def test_finalize_takes_only_the_jobs_own_experts(store):
+    """반대 검토 3차 MEDIUM 2 · 3 · D-47 — 마감 선점도 잡의 몫(범위로 찍힌 머리 · 그 잡에 묶인 셀의 전문가)만 집는다. 앞 잡의 셀을
+    기다리는 남의 전문가(planned)가 차례가 앞서도 그 잡은 그 사람을 마감하지 않는다 — 그 잡에 묶인 열린 셀이 없다는 것만 보면 기다리는
+    셀을 둔 채 머리가 닫힌다."""
+    peer = "xd-syn-1"
+    key = rig.target(store)
+    earlier = rig.job(store, key, scope={"agents": [SEAL]})                 # 돌지 않고 끝난 잡 — SEAL 의 셀이 그 잡에 묶여 기다린다
+    store.execute("UPDATE rr_jobs SET state = 'completed' WHERE id = ?", (earlier,))
+    store.execute("UPDATE rr_expert_reports SET pack_status = 'ok' WHERE target_key = ? AND agent_key = ?", (key, SEAL))
+    current = rig.job(store, key, scope={"agents": [peer]})
+    store.execute("UPDATE rr_jobs SET state = 'running' WHERE id = ?", (current,))
+    store.execute("UPDATE rr_review_cells SET state = 'reviewed' WHERE target_key = ? AND agent_key = ?", (key, peer))
+    store.execute("UPDATE rr_expert_reports SET state = 'planned', pack_status = 'ok' WHERE target_key = ? AND agent_key = ?",
+                  (key, peer))                                            # 셀을 다 닫고 마감 전에 멈춘 이 잡의 전문가
+    head = review_cells.claim_next_expert(store, {"id": current}, boot_id="boot-a", purpose="finalize")
+    assert head is not None and head["agent_key"] == peer
+    assert _head(store, key, SEAL)["state"] == "planned"
 
 
 def test_a_job_that_takes_over_an_expert_whose_cells_closed_before_its_finalize_finalizes_it(store, monkeypatch):
@@ -653,6 +734,65 @@ def test_every_expert_failing_the_pack_with_502_holds_the_job_aidh_unreachable(s
     fake.pack_errors = {}
     r.run(lambda: rig.state(store, job_id) == "completed", step=301)        # 300초 뒤 반쯤 열려 다시 받고 끝까지
     assert rig.job_row(store, job_id)["hold_code"] is None
+
+
+@pytest.mark.parametrize(("cell_state", "pack_status"), [("pending", "todo"), ("reviewed", "ok")])
+def test_the_aidh_hold_counts_an_expert_the_job_holds_only_through_a_bound_cell(store, cell_state, pack_status):
+    """반대 검토 3차 MEDIUM 2 · 3 · D-47 — 다시 연 셀만 그 잡에 묶인 전문가(머리는 앞 잡의 범위로 찍혀 있다)도 그 잡의 몫이다. 그
+    사람이 아직 카드 묶음을 받는 중(todo)이거나 이미 받아 그 셀을 끝냈으면(카드 저장소는 닿는다) 범위로 찍힌 전문가의 묶음이 502 여도
+    잡을 aidh_unreachable 로 멈추지 않는다 — 머리 run_id 로만 보면 묶음을 못 받은 전문가만 남은 것으로 보여 잡이 멈췄다."""
+    peer = "xd-syn-1"
+    key = rig.target(store)
+    earlier = rig.job(store, key, scope={"agents": [SEAL]})
+    store.execute("UPDATE rr_jobs SET state = 'completed' WHERE id = ?", (earlier,))
+    current = rig.job(store, key, scope={"agents": [peer]})
+    store.execute("UPDATE rr_jobs SET state = 'running' WHERE id = ?", (current,))
+    unit_id = _cells(store, key, SEAL)[0]["unit_id"]
+    store.execute("UPDATE rr_review_cells SET run_id = ?, state = ? WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+                  (current, cell_state, key, unit_id, SEAL))              # 다시 연 셀 — 이 잡에 묶였다
+    store.execute("UPDATE rr_expert_reports SET state = 'planned', pack_status = ? WHERE target_key = ? AND agent_key = ?",
+                  (pack_status, key, SEAL))
+    store.execute("UPDATE rr_expert_reports SET pack_status = 'error', pack_error = 'card_list_unstable' WHERE target_key = ?"
+                  " AND agent_key = ?", (key, peer))
+    rig.Rig(store, FakeReviewEngine(rig.packs())).loop.check_aidh(current, key)
+    assert (rig.state(store, current), rig.job_row(store, current)["hold_code"]) == ("running", None)
+
+
+def test_the_pack_phase_counts_an_expert_the_job_holds_only_through_a_bound_cell(store):
+    """반대 검토 3차 MEDIUM 2 · 3 · D-47 — 다시 연 셀만 그 잡에 묶인 전문가가 카드 묶음을 아직 못 받았으면(todo) 그 잡의 단계는 묶음
+    (pack)이다 — 머리 run_id 로만 보면 묶음 받을 사람이 없어 검토(review) 단계로 적혔다."""
+    peer = "xd-syn-1"
+    key = rig.target(store)
+    earlier = rig.job(store, key, scope={"agents": [SEAL]})
+    store.execute("UPDATE rr_jobs SET state = 'completed' WHERE id = ?", (earlier,))
+    current = rig.job(store, key, scope={"agents": [peer]})
+    store.execute("UPDATE rr_jobs SET state = 'running' WHERE id = ?", (current,))
+    unit_id = _cells(store, key, SEAL)[0]["unit_id"]
+    store.execute("UPDATE rr_review_cells SET run_id = ?, state = 'pending' WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+                  (current, key, unit_id, SEAL))                          # 다시 연 셀 — 이 잡에 묶였다
+    store.execute("UPDATE rr_expert_reports SET state = 'planned', pack_status = 'todo' WHERE target_key = ? AND agent_key = ?",
+                  (key, SEAL))
+    store.execute("UPDATE rr_expert_reports SET pack_status = 'ok' WHERE target_key = ? AND agent_key = ?", (key, peer))
+    loop = rig.Rig(store, FakeReviewEngine(rig.packs())).loop
+    job = next(j for j in loop._jobs(("running",)) if j["id"] == current)
+    assert loop._complete_or_phase(job) == "pack"
+
+
+def test_job_order_counts_a_running_expert_the_job_holds_only_through_a_bound_cell(store):
+    """반대 검토 3차 MEDIUM 2 · 3 · D-47 — 잡 고르기 차례(도는 전문가가 적은 잡 먼저 — P-09)도 다시 연 셀만 그 잡에 묶인 전문가를 그
+    잡의 도는 전문가로 센다. 먼저 만든 잡이 그런 전문가 하나를 돌리고 있으면 나중 잡(도는 전문가 0)이 먼저다."""
+    first_key, second_key = rig.target(store), rig.target(store)
+    earlier = rig.job(store, first_key, scope={"agents": ["xd-syn-1"]})
+    store.execute("UPDATE rr_jobs SET state = 'completed' WHERE id = ?", (earlier,))
+    first = rig.job(store, first_key, scope={"agents": [SEAL]})
+    second = rig.job(store, second_key, scope={"agents": [SEAL]})
+    store.execute("UPDATE rr_jobs SET state = 'running' WHERE id IN (?, ?)", (first, second))
+    unit_id = _cells(store, first_key, "xd-syn-1")[0]["unit_id"]
+    store.execute("UPDATE rr_review_cells SET run_id = ?, state = 'running' WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+                  (first, first_key, unit_id, "xd-syn-1"))               # 다시 연 셀 — 앞 잡이 아니라 이 잡에 묶였다
+    store.execute("UPDATE rr_expert_reports SET state = 'running' WHERE target_key = ? AND agent_key = ?", (first_key, "xd-syn-1"))
+    assert _head(store, first_key, "xd-syn-1")["run_id"] == earlier
+    assert [(j["id"], j["running_n"]) for j in review_cells._live_review_jobs(store)] == [(second, 0), (first, 1)]
 
 
 def test_a_zero_card_answer_then_thirty_cards_is_taken_as_thirty(store, monkeypatch):

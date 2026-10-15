@@ -360,9 +360,10 @@ def test_noinput_rows_are_accepted_whole_from_the_engine_example():
 
 
 def test_noinput_accounting_drops_what_cannot_be_trusted():
-    """실리지 않은 카드를 댄 줄(alias_outside_call) · 남의 단위를 가리키는 참조(foreign_ref — Q8) · 열거 밖 impact(bad_enum)는 버린다.
-    제목 없는 영향 줄은 버리지 않고 경로로 제목을 대신한다(title_fallback — 반대 검토 HIGH 1, 엔진은 그 줄을 받는다). 지어낸 인용은
-    앱 재대조가 0 으로 가른다. 줄 종류가 빠지면 missing 이다."""
+    """실리지 않은 카드를 댄 줄(alias_outside_call) · 열거 밖 impact(bad_enum)는 버린다. 그 단위 소속 줄 밖을 댄 참조(엔진이 L 별칭을
+    준 문맥 줄)는 버리지 않고 refs_ok 0 · ref_context 로 표시한다(반대 검토 2차 HIGH 1 · D-46 — 종전 foreign_ref 로 버렸다). 제목 없는
+    영향 줄은 버리지 않고 경로로 제목을 대신한다(title_fallback — 반대 검토 HIGH 1, 엔진은 그 줄을 받는다). 지어낸 인용은 앱 재대조가
+    0 으로 가른다. 줄 종류가 빠지면 missing 이다."""
     request = _load("req_noinput.json")
     result = copy.deepcopy(_load("result_noinput_ok.json"))
     q1, q1b, q2, q2b, more = result["rows"]
@@ -370,10 +371,12 @@ def test_noinput_accounting_drops_what_cannot_be_trusted():
             {**q1b, "k": "K99"}, {**q1b, "refs": ["c:not-this-unit"]}, {**q1b, "impact": "maybe"},
             {**q1b, "title": ""}, {**q1b, "impact": "no", "title": "", "k": "", "cq": "", "refs": [], "l": []}, more]
     out = _accept({**result, "rows": rows}, request)
-    assert sorted(d["reason"] for d in out["dropped"]) == ["alias_outside_call", "bad_enum", "foreign_ref"]
+    assert sorted(d["reason"] for d in out["dropped"]) == ["alias_outside_call", "bad_enum"]
     kept = out["rows"]
-    assert [(r["impact"], r["quote_ok"]) for r in kept] == [("yes", 0), (q1b["impact"], 1), ("no", None)]
-    untitled = kept[1]
+    assert [(r["impact"], r["quote_ok"]) for r in kept] == [("yes", 0), (q1b["impact"], 1), (q1b["impact"], 1), ("no", None)]
+    outside, untitled = kept[1], kept[2]
+    assert (outside["refs"], outside["refs_ok"], outside.get("ref_context")) == (["c:not-this-unit"], 0, True)
+    assert not any(r.get("ref_context") for r in (kept[0], untitled, kept[3]))
     assert (untitled["title"], untitled.get("title_fallback")) == ((q1b.get("path") or q1b.get("why")).strip(), True)
     assert out["missing"] == ["q2"]
     assert _accept({**result, "rows": [q2, q2b, more]}, request)["missing"] == ["q1"]
@@ -545,6 +548,19 @@ _OK = [("fwd", "yes", "OK")]
 def test_audit_outcome_table(cards, offcard, outcome):
     assert rv.audit_outcome(_eff(*cards), offcard) == outcome
     assert outcome in rv.AUDIT_OUTCOMES
+
+
+@pytest.mark.parametrize(("marked", "variants", "outcome"), [
+    (True, ("solo",), "risk_miss"),                 # 두 번째 판정을 끝내 못 받은 부딪침 표지 — finding 후보다
+    (True, ("solo", "rev"), "relevance_miss"),      # 두 번째 판정을 받아 같다 — 걸림 없이 적용
+    (False, ("solo",), "relevance_miss"),           # 표지 없는 단독 행
+])
+def test_audit_outcome_counts_an_unjudged_conflict_as_a_miss(marked, variants, outcome):
+    """반대 검토 3차 LOW 6 · D-47 — 단독으로만 본 카드의 단독 행에 엔진 부딪침 표지가 섰는데 두 번째 판정(rev)을 끝내 못 받았으면
+    (변형이 하나뿐) 보고서는 보류 finding 을 싣는다(D-37). 표본 결과도 kept · relevance_miss 가 아니라 놓침이다 — 판정 행으로 변형을 본다."""
+    checks = json.dumps({"dup_conflict": True} if marked else {})
+    rows = [{"record_id": "R0", "variant": v, "applies": "yes", "judgement": "OK", "checks_json": checks} for v in variants]
+    assert rv.audit_outcome(rv.effective_rows(rows), [], rows=rows) == outcome
 
 
 def test_audit_outcome_reads_the_engine_offcard_rows_through_the_app_accounting():

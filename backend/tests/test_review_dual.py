@@ -304,6 +304,45 @@ def test_a_solo_only_card_the_engine_marked_as_contested_gets_a_second_judgement
     assert findings                                                             # 보류(split)인 카드는 finding 후보다
 
 
+def test_a_solo_only_marked_card_the_rev_answer_omits_is_reasked_and_stays_a_miss_for_the_sample(store):
+    """반대 검토 3차 LOW 6 · D-47(재현 F) — 단독으로만 본 카드(pair_over)의 단독 행에 부딪침 표지가 섰는데 그 카드 하나의 rev 답이
+    그 카드를 빼먹으면 다른 빠진 행처럼 다시 묻는다(SOLO_REASKS). 끝내 못 받으면 셀은 검토로 닫히되 그 카드는 '두 번째 판정 못 한
+    부딪침' 보류 finding 으로 남고(D-37), 그 셀이 표본이면 결과는 kept 가 아니라 놓침(risk_miss)이다 — 종전에는 한 번 묻고 말아
+    표본이 '문제없음' 으로 끝났다."""
+    from app import expert_report, review_runner
+
+    fake = FakeReviewEngine(_packs())
+    fake.offcard_findings = 0
+    key = rig.target(store, ROSTER)
+    unit_id = units.load_units(store, key)[0]["unit_id"]
+    fake.pair_over_units = {unit_id}
+    fake.solo_marks = {"K01": {"dup_conflict": True, "contested_by": {"verdict": ["yes", "FAIL"], "why": "같은 카드의 다른 답",
+                                                                     "attempt": 1}}}
+    real = fake.result
+
+    def result(body):
+        out = real(body)
+        if body.get("kind") == "verdict" and body.get("variant") == "rev":     # 두 번째 판정(rev)이 그 카드를 늘 빼먹는다
+            out["rows"] = [r for r in out["rows"] if r.get("k") != "K01"]
+            out["missing"] = sorted(set(out.get("missing") or []) | {"K01"})
+        return out
+
+    fake.result = result
+    job_id = rig.job(store, key, scope={"agents": [MECH2], "unit_ids": [unit_id]})
+    store.execute("UPDATE rr_review_cells SET sample_json = ? WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
+                  (json.dumps({"shadow": {"result": None, "would_filter": True}}), key, unit_id, MECH2))   # 그 셀은 그림자 표본
+    rig.Rig(store, fake).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    assert [[c["alias"] for c in b["cards"]] for b in _runs(fake, MECH2, "rev")] == [["K01"]] * (review_runner.SOLO_REASKS + 1)
+    cell = dict(store.query_one("SELECT state, sample_json FROM rr_review_cells WHERE target_key = ? AND unit_id = ?"
+                                " AND agent_key = ?", (key, unit_id, MECH2)))
+    assert (cell["state"], json.loads(cell["sample_json"])["shadow"]["result"]) == ("reviewed", "risk_miss")
+    report = expert_report.load_report(store, key, MECH2)
+    held = [r for c in report["checklist"] for r in c["rows"] if r.get("conflict_unjudged")]
+    assert [r["alias"] for r in held] == ["K01"]
+    assert [f["judgement"] for f in report["findings"] if f["cards"] and f["cards"][0]["alias"] == "K01"] == ["undetermined"]
+
+
 def test_a_contested_quote_on_a_verdict_row_keeps_the_200_character_cap(store):
     """반대 검토 MEDIUM 11 — 판정 행에 실린 다툼(contested_by)의 cq 도 셀 하나 REST 와 반출에서 200자로 줄고 원래 길이가 실린다."""
     from app import export, routes

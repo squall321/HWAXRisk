@@ -168,11 +168,14 @@ def _load(store: Any, target_key: str, agent_key: str | None) -> dict:
     cells = [r for r in _rows(store,
         "SELECT unit_id, agent_key, state, basis, run_id, pack_hash, cards_expected, cards_judged, truncated, soft_over,"
         " offcard_capped, bg_full_n, bg_title_only_n, n_fail, n_warning, quote_ok, decided_by, route,"
-        " json_extract(route_json, '$.rule') AS rule, json_type(sample_json, '$.filter_audit') IS NOT NULL AS audited,"
-        " json_extract(sample_json, '$.filter_audit.result') AS audit_result,"
-        " json_type(sample_json, '$.shadow') IS NOT NULL AS shadowed, json_extract(sample_json, '$.shadow.result') AS shadow_result,"
-        " json_extract(extras_json, '$.noinput.outcome') AS noinput_outcome FROM rr_review_cells"
+        " json_extract(route_json, '$.rule') AS rule, sample_json,"
+        " json_extract(extras_json, '$.noinput.outcome') AS noinput_outcome,"
+        " json_extract(extras_json, '$.noinput.capped') AS noinput_capped FROM rr_review_cells"
         f" WHERE target_key = ?{extra} ORDER BY agent_key, unit_id", [target_key, *params]) if r["unit_id"] in alive]
+    for cell in cells:
+        # 표본 · 그림자의 실효 결과 — 앞 결과는 놓침만 센다(반대 검토 2차 LOW 6 · 3차 LOW 4 · D-47 — 완결 몫 · 넓힘과 같은 셈)
+        outcomes = review_cells.sample_outcomes(cell.pop("sample_json"))
+        cell.update(audit=outcomes.get("filter_audit"), shadow=outcomes.get("shadow"))
     verdicts = [r for r in _rows(store,
         "SELECT unit_id, agent_key, record_id, variant, applies, judgement, quote_ok, refs_ok, check_disagree, is_effective,"
         " agree, split, json_type(checks_json, '$.flipped_from') IS NOT NULL AS flipped_row,"
@@ -374,6 +377,8 @@ def _truncation(data: Mapping[str, Any], policy: Mapping[str, Any]) -> dict:
         # 카드 밖 줄이 findings_max 에 닿은 칸과 닿은 횟수(X1-16), 엔진이 상한 밖이라 버린 줄.
         "offcard_capped": {"cells": sum(1 for c in data["cells"] if int(c["offcard_capped"] or 0) > 0),
                            "hits": sum(int(c["offcard_capped"] or 0) for c in data["cells"])},
+        # 입력 결손 호출이 마지막 다시 묻기 뒤에도 '더 있다' 고 한 칸(반대 검토 2차 LOW 7 — 카드 밖 상한과 같은 몫)
+        "noinput_capped": {"cells": sum(1 for c in data["cells"] if c.get("noinput_capped"))},
         "dropped_over_cap": {"rows": sum(int(c["dropped_over_cap"]) for c in ok if c["dropped_over_cap"] is not None),
                              "offcard_calls": len(offcard),
                              "offcard_calls_unknown": sum(1 for c in offcard if c["dropped_over_cap"] is None)},
@@ -475,23 +480,22 @@ def _filter(data: Mapping[str, Any], policy: Mapping[str, Any]) -> dict:
     """거르기(재설계 M3 C3-8) — 잡 손잡이 · 거를 수 있던 칸(두 신호 무관) · 거른 칸 · 표본(끝까지 본 칸의 놓침 넷과 놓침 비율의 95%
     상한 · 보수 상한 — 기준 rq-2 의 filter.audit.risk_miss) · 대표 그림자(따로 센다 — 무작위 표본이 아니다)."""
     cells = data["cells"]
-    audited = [c for c in cells if c["audited"] and c["audit_result"]]
-    results = Counter(c["audit_result"] for c in audited)
-    shadows = [c for c in cells if c["shadowed"] and c["shadow_result"]]
-    shadow_miss = sum(1 for c in shadows if c["shadow_result"] == "risk_miss")
-    risk = results.get("risk_miss", 0)
+    # 완결 몫과 같은 셈 — 표본 수는 결과를 낸 표본, 놓침은 앞 놓침까지, 비율의 분모는 둘을 더한다(반대 검토 3차 LOW 4 · D-47)
+    tally = review_cells.sample_tally(c["audit"] for c in cells)
+    shadows = review_cells.sample_tally(c["shadow"] for c in cells)
+    risk = tally["counts"]["risk_miss"]
     return {
         "mode": data.get("knobs", {}).get("filter") or "off", "approved": data.get("knobs", {}).get("routing_approved"),
         "would_filter": sum(1 for c in cells if c["rule"] == "both_unrelated"),
         "filtered": sum(1 for c in cells if c["state"] == "na_irrelevant"),
-        "audit": {"sampled": len(audited),
-                  "counts": {k: results.get(k, 0) for k in ("risk_miss", "relevance_miss", "undetermined", "kept")},
+        "audit": {"sampled": tally["sampled"], "counts": tally["counts"],
                   # 기준(rq-2)은 거를 수 있던 칸이 있는 범위에서만 견준다 — 거르기가 없던 범위를 '표본 미달' 로 적지 않는다
-                  "risk_miss": rate(risk, len(audited), policy=policy, upper=True,
+                  "risk_miss": rate(risk, tally["n"], policy=policy, upper=True,
                                     key="filter.audit.risk_miss" if any(c["rule"] == "both_unrelated" for c in cells)
                                     else None),
-                  "conservative": rate(risk + results.get("undetermined", 0), len(audited), policy=policy, upper=True)},
-        "shadow": {"sampled": len(shadows), "risk_miss": rate(shadow_miss, len(shadows), policy=policy, upper=True)},
+                  "conservative": rate(risk + tally["counts"]["undetermined"], tally["n"], policy=policy, upper=True)},
+        "shadow": {"sampled": shadows["sampled"],
+                   "risk_miss": rate(shadows["counts"]["risk_miss"], shadows["n"], policy=policy, upper=True)},
     }
 
 
@@ -761,6 +765,7 @@ def render_text(result: Mapping[str, Any]) -> str:
         f" · 검토 칸 {fmt_rate(trunc['cells'])} · 검토 칸 모름 {fmt_rate(trunc['cells_unknown'])}"
         f" · 품질 한도 넘김 호출 {fmt_rate(trunc['soft_over'])}"
         f" · 카드 밖 상한 닿음 {_n(cap['cells'])}칸({_n(cap['hits'])}번)"
+        f" · 입력 결손 다시 묻기 상한 닿음 {_n(trunc['noinput_capped']['cells'])}칸"
         f" · 상한 밖 버림 {_n(drop['rows'])}줄(카드 밖 호출 {_n(drop['offcard_calls'])} 가운데 모름 {_n(drop['offcard_calls_unknown'])})"
         f" · 몫에서 끊은 입력 {_n(clip['calls'])}호출" + (f"({', '.join(_q(x) for x in clip['inputs'])})" if clip["inputs"] else ""))
     quote = cite["quote"]

@@ -197,6 +197,19 @@ def test_a_retried_cell_a_live_job_does_not_cover_waits_for_the_next_job(store):
     assert store.query_one("SELECT COUNT(*) AS n FROM rr_jobs")["n"] == 3
 
 
+def test_a_live_job_that_does_not_cover_a_waiting_retry_never_finalizes_that_expert(store):
+    """반대 검토 3차 MEDIUM 2 · 3 · D-47 — 잡의 몫은 범위로 찍힌 머리와 그 잡에 묶인 셀의 전문가다. 다시 연 셀이 살아 있는 잡의 범위
+    밖이라 다음 잡을 기다리면(waiting) 그 잡은 그 전문가를 마감하지 않는다 — 그 잡에 묶인 열린 셀이 없다는 것만으로 남의 전문가를
+    마감하면 기다리는 셀을 둔 채 머리가 partial 로 닫힌다."""
+    key, job_id, unit_ids, fake, r = _failed_target(store)
+    other = rig.job(store, key, scope={"agents": [SEAL]})
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[unit_ids[0], PEER]]), ident=ME)
+    assert out["job"]["action"] == "waiting" and _head(store, key, PEER)["state"] == "planned"
+    r.finish(other)
+    assert rig.state(store, other) == "completed"
+    assert (_head(store, key, PEER)["state"], _cells(store, key, PEER)[unit_ids[0]]["run_id"]) == ("planned", job_id)
+
+
 def test_a_retry_covered_by_a_live_job_is_adopted(store):
     key, job_id, unit_ids, fake, r = _failed_target(store)
     live = rig.job(store, key, scope={"agents": [PEER, SEAL]})
@@ -231,9 +244,26 @@ def test_skip_needs_a_reason_and_the_expert_closes_again_with_the_skip_in_the_re
     assert _head(store, key, PEER)["state"] == "ready" and _seat(store, key, PEER) == ("done_weak", "partial:1")
     report = expert_report.load_report(store, key, PEER)
     assert [u["why"] for u in report["scope"]["unseen"]] == [{"code": "skipped", "text": "입력이 와야 본다", "by": OWNER,
-                                                              "hits": 0}]
+                                                              "hits": 0, "hits_by": {"card": 0, "offcard": 0, "noinput": 0}}]
     assert routes.coverage_payload(key, owner_sub=OWNER)["review"]["dispositions"] == {"retried": 0, "skipped": 1}
     assert len(_audits(store, "cells.skip")) == 1
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_a_skipped_cells_lines_say_skip_and_its_reason_never_out_of_scope(store, live):
+    """반대 검토 3차 LOW 7 · D-47 — 넘긴 셀의 보고서 줄(본 범위의 단위 줄 · 보지 못한 것)은 '넘김 — «사유»' 다. 넘김을 마감하는 잡(새로
+    선 마감 잡이든 살아 있던 잡이든)의 범위와 그 셀의 잡 결속이 달라도 '이 검토 잡의 범위 밖' 이라 적지 않는다 — 종전에는 넘긴 셀마다
+    단위 줄이 '넘김 · 이 검토 잡의 범위 밖', 보지 못한 것이 '넘김 «skipped» «사유»' 였다."""
+    key, job_id, unit_ids, fake, r = _failed_target(store)
+    running = rig.job(store, key, scope={"agents": [SEAL]}) if live else None
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(cells=[[unit_ids[0], PEER]], reason="입력이 와야 본다"), ident=ME)
+    assert out["job"]["action"] == ("adopted" if live else "created")
+    r.finish(running or out["job"]["job_id"])
+    assert _head(store, key, PEER)["state"] == "ready"                      # 넘김을 실은 보고서로 다시 마감됐다
+    md = expert_report.render_report_md(expert_report.load_report(store, key, PEER))
+    lines = [ln for ln in md.splitlines() if ln.startswith("- 단위 ") and "넘김" in ln]
+    assert len(lines) == 2 and all(ln.endswith(" — 넘김 — «입력이 와야 본다»") for ln in lines)
+    assert "범위 밖" not in "".join(lines)
 
 
 def test_skipping_a_pack_blocked_experts_cells_finalizes_it_without_a_pack_and_closes_the_seat_skipped(store):
@@ -295,6 +325,72 @@ def test_the_selector_is_one_of_cells_or_filter_and_never_narrows_silently(store
 
 
 # ---------------------------------------------------------------- Claude 입구
+@pytest.mark.parametrize("case", ["split", "unjudged_conflict"])
+def test_a_skipped_cells_hits_are_exactly_what_its_report_carries(store, monkeypatch, case):
+    """반대 검토 2차 MEDIUM 2 · D-46 — 넘긴 셀의 걸림 셈은 검토한 셀이면 보고서가 실을 것과 같다. ① 변형이 갈려 실효 undetermined 인
+    카드(split)는 검토한 셀처럼 finding 후보다 — 종전 셈은 실효 FAIL · WARNING 만 보아 0 이라 점검표에도 finding 에도 없었다. ② 엔진이
+    부딪침을 알린 행인데 두 번째 판정을 끝내 못 받은 카드는 갈림처럼 후보다('다툼 표지 — 두 번째 판정 못 함') — 종전에는 셈이 1 이라
+    '점검표 · finding 에 남겼다' 고 말했지만 finding 은 0 이었다. 넘김 응답의 수와 보고서의 글이 실제로 실린 것과 같다."""
+    from app import expert_report, units
+
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    k01 = str(fre.load("pack_ok.json")["cards"][0]["record_id"])
+    fake = FakeReviewEngine(rig.packs())
+    if case == "split":                                  # fwd FAIL · rev OK · 단독 OK — 실효 OK 인데 걸린 변형이 있어 갈림
+        fake.verdicts, fake.rev_verdicts, fake.solo_verdicts = {k01: ("yes", "FAIL")}, {k01: ("yes", "OK")}, {k01: ("yes", "OK")}
+        fake.error_cells, fake.error_kinds = {(SEAL, unit_ids[0]): NO_ROWS}, {"offcard"}
+    else:                                                # fwd 모름에 부딪침 표지 — 두 번째 판정(rev)이 끝내 실패
+        monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_review_dual="flagged"))
+        fake.verdicts = {k01: ("unknown", "undetermined")}
+        fake.dup_conflict = {"K01"}
+        fake.contested = {"K01": {"verdict": ["yes", "FAIL"], "why": "같은 카드의 다른 답", "attempt": 1, "raw": "FAILED?"}}
+        fake.error_cells, fake.error_kinds = {(SEAL, unit_ids[0]): NO_ROWS}, {"verdict:rev"}
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": unit_ids[:1]})
+    rig.Rig(store, fake).finish(job_id)
+    assert _cells(store, key, SEAL)[unit_ids[0]]["state"] == "failed"
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": job_id}, reason="끝내 실패한 셀을 넘긴다"),
+                                 ident=ME)
+    assert (out["skipped"], out.get("hits"), (out.get("hits_by") or {}).get("card")) == (1, 1, 1)
+    rig.Rig(store, fake).finish(out["job"]["job_id"])
+    report = expert_report.load_report(store, key, SEAL)
+    rows = [r for c in report["checklist"] for r in c["rows"] if r.get("unit_id") == unit_ids[0] and not r.get("missing")]
+    held = [r for r in rows if r.get("finding_id")]
+    assert len(held) == 1 and held[0].get("partial_cell")
+    assert [f["unit_id"] for f in report["findings"]] == [unit_ids[0]]
+    md = expert_report.render_report_md(report)
+    assert "카드 판정 1건 — 점검표 · finding" in md
+    if case == "unjudged_conflict":
+        assert held[0].get("conflict_unjudged") and "다툼 표지 — 두 번째 판정 못 함" in md
+        assert [u["unit_id"] for u in report["needs_info"]] == [unit_ids[0]]        # 그 카드의 필요한 정보 — 검토한 셀과 같은 자리
+
+
+def test_a_skipped_cells_offcard_hit_becomes_a_finding_like_a_reviewed_cells(store):
+    """반대 검토 3차 HIGH 1 · D-47 — 카드 밖 호출을 받은 뒤 정산에서 끝내 실패한 셀(엔진이 점검 카드 하나를 끝내 내지 않는다 —
+    cards_unjudged)을 넘겨도 그 카드 밖 걸림은 검토한 셀처럼 finding 이고 카드 밖 절에 실린다(종전에는 넘긴 셀의 카드 밖 구성원을
+    빼 걸림 0 · finding 0 이었다). 넘김 응답의 걸림 셈은 보고서의 구성원 함수가 실제로 낸 것이다 — 카드 밖 갈래가 저절로 선다."""
+    from app import cardpack, expert_report, units
+
+    key = rig.target(store)
+    unit_ids = [u["unit_id"] for u in units.load_units(store, key)]
+    fake = FakeReviewEngine(rig.packs())
+    fake.offcard_findings = 1
+    fake.skip_cards = {list(cardpack.view_of(fre.load("pack_ok.json")).checkable)[-1]}
+    job_id = rig.job(store, key, scope={"agents": [SEAL], "unit_ids": unit_ids[:1]})
+    rig.Rig(store, fake).finish(job_id)
+    cell = _cells(store, key, SEAL)[unit_ids[0]]
+    assert (cell["state"], cell["n_offcard"]) == ("failed", 1)
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(cells=[[unit_ids[0], SEAL]], reason="끝내 실패한 셀을 넘긴다"),
+                                 ident=ME)
+    assert (out.get("hits"), out.get("hits_by")) == (1, {"card": 0, "offcard": 1, "noinput": 0})
+    rig.Rig(store, fake).finish(out["job"]["job_id"])
+    report = expert_report.load_report(store, key, SEAL)
+    mine = [f for f in report["findings"] if f["unit_id"] == unit_ids[0]]
+    assert [(f["off_card"], f.get("partial_cell")) for f in mine] == [(True, True)]
+    assert [r["unit_id"] for r in report["off_card"]] == [unit_ids[0]]
+    assert "카드 밖 지적 1건 — 카드 밖 절 · finding" in expert_report.render_report_md(report)
+
+
 def test_risk_job_action_retries_and_skips_the_jobs_failed_cells_for_a_delegated_identity_only(store, monkeypatch):
     """새 도구 없이 risk_job_action 의 retry_failed·skip_failed 다. 그 잡이 찍은 셀이 기본 집합이고 filter 로 좁힌다. 위임 단언 없는
     Bearer 는 delegation_required, 감사 행은 channel mcp · actor_verified 0 이다."""

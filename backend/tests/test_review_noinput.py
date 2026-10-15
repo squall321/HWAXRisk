@@ -162,6 +162,24 @@ def test_maybe_more_asks_again_with_the_titles_so_far_at_most_three_more_times(s
     assert {len(_bodies(fake, MEM1, "noinput", u)) for u in others} == {1}
 
 
+def test_a_more_left_after_the_last_reask_is_marked_capped_in_quality_and_the_report(store):
+    """반대 검토 2차 LOW 7 · D-46 — 마지막 다시 묻기 뒤에도 엔진이 '더 있다'(maybe_more) 고 하면 그 셀에 noinput_capped 를 적고 품질
+    수치와 보고서의 품질 줄이 그 칸 수를 말한다(카드 밖 offcard_capped 처럼) — 종전에는 셀이 그대로 닫히고 아무 데도 남지 않았다."""
+    roster = (ROSTER[1],)
+    key = rig.target(store, roster)
+    job_id = rig.job(store, key)
+    fake = FakeReviewEngine(_packs(roster))
+    unit_id = _units(store, key)[0]["unit_id"]
+    fake.noinput_more = {unit_id: 9}
+    rig.Rig(store, fake).finish(job_id)
+    got = _cell(store, key, unit_id, MEM1)["extras"]["noinput"]
+    assert (got["asks"], got["more"], got.get("capped")) == (4, "yes", True)
+    assert not any((_cell(store, key, u["unit_id"], MEM1)["extras"].get("noinput") or {}).get("capped")
+                   for u in _units(store, key)[1:])
+    assert review_quality.compute(store, key)["truncation"].get("noinput_capped") == {"cells": 1}
+    assert "입력 결손 다시 묻기 상한 닿음 1칸" in expert_report.render_report_md(expert_report.load_report(store, key, MEM1))
+
+
 def test_the_same_impact_said_again_is_kept_once(store):
     """다시 물은 답이 앞 답의 영향을 같은 제목으로 되풀이하면 한 번만 남는다(받은 q1 제목 기준)."""
     roster = (ROSTER[1],)
@@ -249,7 +267,7 @@ def test_a_contested_impact_stands_and_the_report_names_the_retraction_and_its_p
             " · 경로 «보드 고정점 → 근접 계면»") in text
 
 
-def _one_gap_cell(store, script, *, more: int = 0) -> tuple[str, str, FakeReviewEngine]:
+def _one_gap_cell(store, script, *, more: int = 0, **switches) -> tuple[str, str, FakeReviewEngine]:
     key = rig.target(store, ROSTER)
     first = _units(store, key)[0]["unit_id"]
     job_id = rig.job(store, key, scope={"agents": [MEM1], "unit_ids": [first]})
@@ -258,6 +276,8 @@ def _one_gap_cell(store, script, *, more: int = 0) -> tuple[str, str, FakeReview
     fake.noinput_q2 = {first: [""]}
     if more:
         fake.noinput_more = {first: more}
+    for name, value in switches.items():
+        setattr(fake, name, value(first) if callable(value) else value)
     rig.Rig(store, fake).finish(job_id)
     assert rig.state(store, job_id) == "completed"
     return key, first, fake
@@ -288,6 +308,49 @@ def test_an_impact_is_never_lost_to_a_same_title_row_a_reask_or_a_missing_title(
     findings = store.query("SELECT finding_json FROM rr_findings WHERE target_key = ? AND source_kind = 'card_review'", (key,))
     assert len(findings) == 1
 
+
+
+@pytest.mark.parametrize("script", [
+    [[{"impact": "yes", "title": "A", "ctx": True}, {"impact": "no", "title": "B"}]],      # 영향 있음 하나가 문맥 줄을 댔다
+    [[{"impact": "yes", "title": "A", "ctx": True}]],                                    # q1 전부가 문맥 줄을 댔다
+])
+def test_q1_and_q2_rows_citing_a_context_line_are_kept_and_marked_never_dropped(store, script):
+    """반대 검토 2차 HIGH 1(b) · D-46(D-37 이 옛 계약 글보다 앞선다) — 엔진은 단위의 문맥 줄에도 L 별칭을 주고(_resolve_l 이 남긴다)
+    그 줄을 댄 q1 · q2 를 받는다. 앱이 그 참조를 남의 단위 참조(foreign_ref)로 버려 영향 있음이 사라졌고, q1 이 전부 문맥 줄을 대면
+    noinput_incomplete 로 두 번 실패했다. 이제 버리지 않고 refs_ok 0 · ref_context 로 표시한다 — 셀은 impact 로 닫히고 finding 이
+    서며, 보고서는 그 줄이 문맥 줄을 댔다고 말한다."""
+    key, first, _fake = _one_gap_cell(store, script, noinput_q2_ctx=lambda uid: {uid})
+    assert units.review_payload(store, key, first, MEM1)["context"]                     # 그 단위에 문맥 줄이 있다
+    cell = _cell(store, key, first, MEM1)
+    got = cell["extras"].get("noinput") or {}
+    assert (cell["state"], got.get("outcome")) == ("reviewed", "impact"), cell["error_code"]
+    yes = [r for r in got["q1"] if r["impact"] == "yes"]
+    assert [(r["refs_ok"], r.get("ref_context")) for r in yes] == [(0, True)]
+    assert got["q2"] and all((r["refs_ok"], r.get("ref_context")) == (0, True) for r in got["q2"])
+    assert store.query_one("SELECT COUNT(*) AS n FROM rr_findings WHERE target_key = ? AND source_kind = 'card_review'",
+                           (key,))["n"] == 1
+    text = expert_report.render_report_md(expert_report.load_report(store, key, MEM1), part="units")
+    assert "— 문맥 줄을 댔다(그 단위 소속 줄이 아니다)" in text                        # 영향 줄의 변경 줄 대조
+    assert "· 문맥 줄을 댔다(그 단위 소속 줄이 아니다)" in text                        # 확인할 것(q2) 줄
+
+
+def test_a_skipped_input_gap_cells_unknown_impact_goes_where_a_reviewed_cells_would(store):
+    """반대 검토 2차 MEDIUM 2 · 3차 HIGH 1(D-47) — 넘긴 입력 결손 셀의 영향 모름(q1 unknown)은 검토한 셀처럼 입력 결손 절에 실린다.
+    걸림 셈은 구성원 함수가 실제로 낸 finding 구성원이라 모름 줄은 세지 않는다(finding 이 아니다 — 검토한 셀도 그렇다)."""
+    from app import routes
+    from tests import factories
+
+    key, first, fake = _one_gap_cell(store, [[{"impact": "unknown", "title": "A"}]], noinput_q2=lambda uid: {uid: []})
+    cell = _cell(store, key, first, MEM1)
+    assert cell["state"] == "failed"
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": cell["run_id"]}, reason="입력 결손 답이 끝내 모자랐다"),
+                                 ident=factories.ident(rig.OWNER))
+    assert (out.get("hits"), out.get("hits_by")) == (0, {"card": 0, "offcard": 0, "noinput": 0})
+    rig.Rig(store, fake).finish(out["job"]["job_id"])
+    report = expert_report.load_report(store, key, MEM1)
+    gap = [u for u in (report.get("input_gap") or {}).get("units") or () if u["unit_id"] == first]
+    assert gap and [i["impact"] for i in gap[0]["impacts"]] == ["unknown"]
+    assert not [f for f in report["findings"] if f["unit_id"] == first]
 
 
 def test_a_flipped_or_contested_non_hit_q1_is_kept_and_named_as_such(store):
