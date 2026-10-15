@@ -598,10 +598,8 @@ def test_promote_rule_creates_active_rule(risk_store):
     assert [r["id"] for r in learning.active_pattern_rules(store)] == [row["id"]]
 
 
-def test_promote_rule_shows_backtest_targets_only_of_projects_the_viewer_can_see(risk_store):
-    """규칙 승격 응답의 백테스트 표본은 패턴 주인과 결정한 사람 둘 다 볼 수 있는 과제의 대상만 키로 싣고 나머지는 과제 수로만 —
-    채점(n_labeled · 정밀도 · 재현율)은 전역 라벨 그대로다(D48). 종전에는 모든 소유자의 라벨 대상 키를 실었다."""
-    store = risk_store
+def _backtest_with_a_stranger(store) -> None:
+    """주인의 라벨 코퍼스(P1) + 남의 과제 하나(PX)의 라벨 대상 둘 — 같은 패턴의 백테스트 표본에 섞인다."""
     _projects(store, {"P1": OWNER, "PX": STRANGER})
     _backtest_corpus(store)
     _snapshot(store, "SX", project_id="PX", ir={
@@ -613,12 +611,31 @@ def test_promote_rule_shows_backtest_targets_only_of_projects_the_viewer_can_see
         _finding(store, f"FX{n}", f"TX{n}", project_id="PX", owner=STRANGER)
         _label(store, f"LX{n}", f"FX{n}", "confirmed", labeled_at=250 + n)
     _pattern(store, "P-001", status="known")
-    out = learning.promote(store, "P-001", to_status="rule", decided_by=OWNER,
-                           rule={"condition_json": CONDITION_HIT, "why_it_matters": "간섭 깊이가 확정 범위를 넘었다"})
+
+
+def _promote_to_rule(store, decided_by: str) -> dict:
+    return learning.promote(store, "P-001", to_status="rule", decided_by=decided_by,
+                            rule={"condition_json": CONDITION_HIT, "why_it_matters": "간섭 깊이가 확정 범위를 넘었다"})
+
+
+def test_promote_rule_shows_backtest_targets_only_of_projects_the_viewer_can_see(risk_store):
+    """규칙 승격 응답의 백테스트 표본은 패턴 주인과 결정한 사람 둘 다 볼 수 있는 과제의 대상만 키로 싣고 나머지는 과제 수로만 —
+    채점(n_labeled · 정밀도 · 재현율)은 전역 라벨 그대로다(D48). 종전에는 모든 소유자의 라벨 대상 키를 실었다."""
+    store = risk_store
+    _backtest_with_a_stranger(store)
+    out = _promote_to_rule(store, OWNER)
     samples = [s["target_key"] for s in out["backtest"]["samples"]]
     assert samples == [f"T{i:02d}" for i in range(1, 13)]                                   # TX1 · TX2 는 없다
     assert out["backtest"].get("other_projects_n") == 1
     assert out["backtest"]["n_labeled"] == 14                                                # 채점은 전역 그대로
+
+
+def test_promote_rule_samples_need_both_the_owner_and_the_decider(risk_store):
+    """둘 다 볼 수 있는 과제만이다 — 주인의 과제만 보는 사람도, 남의 과제만 보는 사람도 혼자서는 열지 못한다(교집합)."""
+    store = risk_store
+    _backtest_with_a_stranger(store)
+    out = _promote_to_rule(store, STRANGER)
+    assert out["backtest"]["samples"] == [] and out["backtest"].get("other_projects_n") == 2
 
 
 def test_promote_rule_requires_human_written_text(risk_store):
