@@ -1720,15 +1720,18 @@ def _item_e7(store, ctx, seats: Sequence[Mapping[str, Any]], adh, profile: "Brie
 def _seat_memory_line(store, agent_key: str, target_key: str, lineage: set[str],
                       subjects: set[str], adh, ctx, line_max: int = E7_SEAT_LINE) -> tuple[str, str | None]:
     # 타깃 소유자가 구성원인 과제의 의견만 — 종전에는 같은 좌석의 의견을 소유자 누구든 읽어 남의 과제 발언이 이 패널의
-    # 프롬프트와 보고서에 실렸다(D45). 타깃 행이 없어 과제를 모르는 의견도 싣지 않는다.
+    # 프롬프트와 보고서에 실렸다(D45). 타깃 행이 없어 과제를 모르는 의견도 싣지 않는다. 코퍼스에서 빠진 과제(§0.6 — 사람이 뺐거나
+    # 회수했다)의 의견과 발췌가 빈 의견도 싣지 않는다 — 더 새 그 의견이 진짜 기억을 밀어내 «» 나 뺀 과제의 발언이 실렸다(조합 검토 M8).
     owner = _s(ctx["target"]["owner_sub"])
     rows = store.query(
         "SELECT o.opinion_id, o.agent_key, o.target_key, o.raised_finding_ids_json, o.excerpt_for_rag, "
         "o.created_at, t.project_id FROM rr_seat_opinions AS o "
         "LEFT JOIN rr_targets AS t ON t.target_key = o.target_key "
         "WHERE o.agent_key = ? AND o.target_key <> ? "
-        f"AND t.project_id IN (SELECT id FROM rr_projects WHERE {_MEMBER_OF}) "
-        "AND o.raised_finding_ids_json IS NOT NULL AND o.raised_finding_ids_json <> '[]'",
+        f"AND t.project_id IN (SELECT id FROM rr_projects WHERE ({_MEMBER_OF})"
+        " AND status = 'active' AND corpus_excluded = 0) "
+        "AND o.raised_finding_ids_json IS NOT NULL AND o.raised_finding_ids_json <> '[]' "
+        "AND TRIM(COALESCE(o.excerpt_for_rag, '')) <> ''",
         (agent_key, target_key, owner, owner),
     )
     if rows:
@@ -1769,28 +1772,36 @@ def _adh_seat_memory(store, adh, agent_key: str, ctx, line_max: int = E7_SEAT_LI
     elif ctx["state"] is not None:
         summary = _s(ctx["state"]["summary_text"])[:200]
     code = _s(ctx["target"]["project_id"])
+    visible = _member_project_ids(store, _s(ctx["target"]["owner_sub"]))
     reply = adh.agent_search("risk-review-memory", f"{code} {summary}", mode="hybrid",
                              required_tags=[f"hwax:expert:{agent_key}"], top_k=3,
-                             exclude_tags=list(RECALL_EXCLUDE_TAGS),
-                             project_ids=sorted(_member_project_ids(store, _s(ctx["target"]["owner_sub"]))))
+                             exclude_tags=list(RECALL_EXCLUDE_TAGS), project_ids=sorted(visible))
     if not reply.get("ok"):
         return None
     hits = reply.get("result") or []
     if isinstance(hits, dict):
         hits = hits.get("hits") or hits.get("items") or []
-    if not hits:
-        return None
-    hit = hits[0] if isinstance(hits[0], dict) else {}
-    meta = ((hit.get("content") or {}).get("meta") or {}) if isinstance(hit.get("content"), dict) else {}
-    portal = meta.get("portal") or {}
-    opinion_id = _s(portal.get("opinion_id"))
-    finding_id = _s(portal.get("finding_id"))
-    if not opinion_id:
-        return None
-    prefix = f"narr:{opinion_id}#{finding_id} | {agent_key} | adh/{_s(hit.get('record_id'))[:12]} | "
-    body = _s(hit.get("summary") or hit.get("text") or hit.get("title"))
-    quoted, suspect = _quoted_excerpt(body, max(0, line_max - len(prefix)))
-    return prefix + quoted, suspect
+    for hit in hits if isinstance(hits, list) else []:
+        # 받은 쪽에서도 적중의 과제를 본다 — 과제 태그가 없거나 볼 수 없는 과제의 적중은 건너뛴다(조합 검토 L10).
+        if not isinstance(hit, dict) or _hit_project(hit) not in visible:
+            continue
+        meta = ((hit.get("content") or {}).get("meta") or {}) if isinstance(hit.get("content"), dict) else {}
+        portal = meta.get("portal") or {}
+        opinion_id = _s(portal.get("opinion_id"))
+        finding_id = _s(portal.get("finding_id"))
+        if not opinion_id:
+            continue
+        prefix = f"narr:{opinion_id}#{finding_id} | {agent_key} | adh/{_s(hit.get('record_id'))[:12]} | "
+        body = _s(hit.get("summary") or hit.get("text") or hit.get("title"))
+        quoted, suspect = _quoted_excerpt(body, max(0, line_max - len(prefix)))
+        return prefix + quoted, suspect
+    return None
+
+
+def _hit_project(hit: Mapping[str, Any]) -> str | None:
+    """AIDataHub 적중의 과제 — `hwax:project:<id>` 태그(없으면 None)."""
+    return next((str(tag)[len("hwax:project:"):] for tag in hit.get("tags") or []
+                 if str(tag).startswith("hwax:project:")), None)
 
 
 # ---------------------------------------------------------------- E8 변경-델타 선례
@@ -2632,9 +2643,7 @@ def _text_path(store, project_id: str, latest: Mapping[str, str], adh, k: int,
     for hit in hits if isinstance(hits, list) else []:
         if not isinstance(hit, dict):
             continue
-        tags = hit.get("tags") or []
-        pid = next((str(t)[len("hwax:project:"):] for t in tags
-                    if str(t).startswith("hwax:project:")), None)
+        pid = _hit_project(hit)
         if not pid or pid == project_id or pid not in visible:
             continue
         out.append({"record_id": _s(hit.get("record_id") or hit.get("id")), "project_id": pid,

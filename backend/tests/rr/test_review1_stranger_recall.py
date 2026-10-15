@@ -46,9 +46,10 @@ class _Recorder:
     """AIDataHub 흉내 — 부른 찾기와 인자를 적는다. 과제 거름을 밝히는지(`supports_project_filter`)는 만들 때 고른다."""
     available = True
 
-    def __init__(self, *, filtered: bool, hits: list[dict]) -> None:
+    def __init__(self, *, filtered: bool, hits: list[dict], memory_project: str | None = None) -> None:
         self.supports_project_filter = filtered
         self.hits = hits
+        self.memory_project = memory_project        # 좌석 기억 적중의 과제 태그(받은 쪽이 본다, L10)
         self.calls: list[tuple[str, dict]] = []
 
     def hybrid_search(self, q: str, **kwargs: Any) -> dict:
@@ -58,6 +59,7 @@ class _Recorder:
     def agent_search(self, agent_type: str, q: str, **kwargs: Any) -> dict:
         self.calls.append(("agent_search", kwargs))
         return {"ok": True, "result": [{"record_id": "rec-adh-memory", "summary": "색인에서 온 기억",
+                                        "tags": [f"hwax:project:{self.memory_project}"],
                                         "content": {"meta": {"portal": {"opinion_id": "op-adh", "finding_id": "pan-adh#F1"}}}}]}
 
 
@@ -190,6 +192,50 @@ def test_seat_memory_reads_only_opinions_of_projects_the_targets_owner_can_see(w
     assert _leaks(built, stranger) == []
 
 
+def test_seat_memory_skips_corpus_excluded_projects_and_empty_excerpts(world):
+    """E7 은 코퍼스에서 빠진 과제의 의견과 발췌가 빈 의견을 싣지 않는다 — 종전에는 더 새 그 의견이 주인의 진짜 기억을 밀어내 뺀 과제의
+    발언이나 «» 가 실렸다(조합 검토 M8)."""
+    store, mine = world["store"], world["mine"]
+    _opinion(store, "op-excluded", _target(store, _snapshot_of(store, mine[1]), OWNER), OWNER, SEATS[0], 500)
+    routes.patch_project(mine[1], routes.ProjectPatchBody(corpus_excluded=True, excluded_reason="user"),
+                         ident=factories.ident(OWNER))
+    _opinion(store, "op-empty", _target(store, _snapshot_of(store, mine[2]), OWNER), OWNER, SEATS[0], 600)
+    store.execute("UPDATE rr_seat_opinions SET excerpt_for_rag = '  ' WHERE opinion_id = 'op-empty'")
+    line = _e7(world)[0]["result"].split("\n")[1]
+    assert line.startswith("narr:op-mine#pan-op-mine#F1 | mech-syn-0 | P-1/"), line
+
+
+class _MemoryAdh:
+    """좌석 기억 2차 경로의 AIDataHub 흉내 — 과제 거름을 밝히되 받은 적중을 그대로 돌려준다(받은 쪽의 거름을 본다)."""
+    available = True
+    supports_project_filter = True
+
+    def __init__(self, hits: list[dict]) -> None:
+        self.hits = hits
+
+    def agent_search(self, agent_type: str, q: str, **kwargs: Any) -> dict:
+        return {"ok": True, "result": list(self.hits)}
+
+    def hybrid_search(self, q: str, **kwargs: Any) -> dict:
+        return {"ok": True, "result": []}
+
+
+def _memory_hit(opinion_id: str, project_id: str | None) -> dict:
+    return {"record_id": f"rec-{opinion_id}", "summary": f"{opinion_id} 의 기억",
+            "tags": [f"hwax:project:{project_id}"] if project_id else [],
+            "content": {"meta": {"portal": {"opinion_id": opinion_id, "finding_id": f"pan-{opinion_id}#F1"}}}}
+
+
+def test_seat_memory_recall_takes_only_hits_of_projects_the_owner_can_see(world):
+    """AIDataHub 2차 경로는 적중의 과제(hwax:project 태그)가 타깃 소유자가 볼 수 있는 과제인 것만 싣는다 — 과제 태그가 없거나 남의
+    과제면 건너뛴다(거름을 밝힌 클라이언트라도 받은 쪽에서 다시 본다, 조합 검토 L10)."""
+    stranger = _add_stranger(world)
+    adh = _MemoryAdh([_memory_hit("op-theirs", stranger["project"]), _memory_hit("op-untagged", None),
+                      _memory_hit("op-ok", world["mine"][0])])
+    line = _item(_build(world, adh), "E7")["result"].split("\n")[3]
+    assert line.startswith("narr:op-ok#pan-op-ok#F1 | mech-syn-2 | adh/"), line
+
+
 # ---------------------------------------------------------------- 유사 과제(함수 — 서술 경로와 owner_sub 없는 기본 호출까지)
 def test_similar_projects_lists_only_projects_the_owner_can_see_on_every_path(world):
     """벡터 · 서술 · subject 경로가 남의 과제를 싣지 않고 corpus_n 에도 세지 않는다 — 남의 적중이 끼어든 서술 순위는 실은 것끼리 1 부터
@@ -310,7 +356,7 @@ def test_aidatahub_recall_is_skipped_without_a_project_filter_and_carries_one_ot
     assert _item(built, "E7")["result"].split("\n")[3] == "[mech-syn-2: 이전 발언 없음]"
     assert not getattr(AdhClient, "supports_project_filter", False)
 
-    filtered = _Recorder(filtered=True, hits=[_hit("r-mine1", world["mine"][0])])
+    filtered = _Recorder(filtered=True, hits=[_hit("r-mine1", world["mine"][0])], memory_project=world["mine"][0])
     brief.similar_projects(store, project, K, adh=filtered)
     built = _build(world, filtered)
     visible = sorted([project, *world["mine"], world["shared"]])

@@ -678,7 +678,7 @@ def test_e7_second_path_uses_adh_agent_search(risk_store):
     target_key = seed_diff_target(risk_store)
     risk_store.execute("DELETE FROM rr_seat_opinions")
     adh = FakeAdh(agent={"ok": True, "result": [{
-        "record_id": "rec-abcdef123456",
+        "record_id": "rec-abcdef123456", "tags": ["hwax:project:p_prev"],     # 받은 쪽도 적중의 과제를 본다(L10)
         "summary": "이전 과제에서 같은 계면의 간극을 재검사 대상으로 남겼다",
         "content": {"meta": {"portal": {"opinion_id": "op9", "finding_id": "pan9#F2"}}}}]})
     out = brief.build_brief(risk_store, target_key, adh=adh)
