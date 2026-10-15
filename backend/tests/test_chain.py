@@ -395,6 +395,21 @@ def test_an_issue_job_that_ends_while_a_synthesis_waits_rearms_that_synthesis_in
         issue_job["id"], synth.registry_hash(store, key))
 
 
+def test_a_waiting_synthesis_made_between_the_chains_check_and_its_write_is_rearmed_not_doubled(store):
+    """사슬의 확인(`_busy`)과 쓰기 사이에 사람이 보고서를 다시 내 대기 종합 잡이 섰다 — 종합 잡 만들기가 그 잡을 돌려주고(created
+    false) 사슬은 새 잡 없이 그 잡에 지금 원장의 표지를 단다(살아 있는 단계를 만났을 때와 같은 길). 대기 종합 잡은 하나다."""
+    key = rig.target(store)
+    _review(store, key)
+    issue_job = _one(_jobs(store, key, "issues"), "issues 잡")
+    waiting = routes.post_report(key, routes.ReportBody(refresh_summaries=True), ident=factories.ident(OWNER))["job_id"]
+    out = chain.create_stage_job(store, key, "synth", prev=rig.job_row(store, issue_job["id"]), reason="issues_completed",
+                                 round_no=1)
+    assert (out["job_id"], out["created"], out["stage"]) == (waiting, False, "synth")
+    synth_job = _one(_jobs(store, key, "synth"), "synth 잡")
+    assert (synth_job["id"], synth_job["chain"].get("rearmed_by")) == (waiting, issue_job["id"])
+    assert synth_job["chain"]["cells_hash"] == closure.closing_hash(store, key) == out["chain"]["cells_hash"]
+
+
 # ---------------------------------------------------------------- 반대 검토 1차(review1) M8
 def test_the_first_sweep_after_the_v5_upgrade_does_not_chain_m2_era_review_jobs(tmp_path, monkeypatch):
     """M8(결정) — 사슬은 M3 코드가 세운 검토 잡(만들 때 사슬 표지를 단 잡)에서만 시작한다. v4(M2 코드)가 끝낸 검토 잡이 걸린 원장을

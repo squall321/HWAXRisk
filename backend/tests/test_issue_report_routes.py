@@ -13,6 +13,7 @@ from tests import factories
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
 from tests.synth.fake_review_engine import FakeReviewEngine
+from tests.synth.fake_summary_engine import FakeSummaryEngine
 from tests.synth.issue_panel_engine import IssuePanelEngine
 
 OWNER = rig.OWNER
@@ -146,6 +147,39 @@ def test_the_report_reads_by_pages_and_a_moved_version_is_409(store):
     with pytest.raises(AppError) as moved:
         routes.report_payload(key, owner_sub=OWNER, version=first["version"] + 5)
     assert (moved.value.http_status, moved.value.code) == (409, "report_version_moved")
+
+
+def test_a_summary_refresh_while_one_waits_returns_that_job_and_a_running_one_lets_the_next_queue(store):
+    """보고서 다시 내기(refresh_summaries)를 거푸 불러도 아직 집히지 않은(queued) 종합 잡은 하나다 — 두 번째는 그 잡을 돌려준다
+    (created false · 새 행 없음). 그 잡이 끝나면 다시 내기가 새 잡을 세운다. 도는 잡은 막지 않는다 — 그 잡이 이미 끝낸 요약은 옛
+    입력이라 새 잡이 뒤에 줄을 서고, 그 뒤의 다시 내기는 줄 선 잡을 돌려준다(사슬 `chain._busy` 와 같은 규칙)."""
+    key = _ledger(store, run_issues=False)
+
+    def refresh() -> dict:
+        with factories.routes_store(store):
+            return routes.post_report(key, routes.ReportBody(refresh_summaries=True), ident=factories.ident(OWNER))
+
+    def synth_jobs() -> list[tuple[str, str]]:
+        return [(r["id"], r["state"]) for r in store.query("SELECT id, state FROM rr_jobs WHERE target_key = ? AND mode = 'synth'"
+                                                           " ORDER BY rowid", (key,))]
+
+    first = refresh()
+    assert first["created"] is True and synth_jobs() == [(first["job_id"], "queued")]
+    again = refresh()
+    assert (again["job_id"], again["created"], again["credential"]) == (first["job_id"], False, first["credential"])
+    assert synth_jobs() == [(first["job_id"], "queued")]
+    worker = synth.SynthWorker(store, config.settings, FakeSummaryEngine())
+    for _ in range(200):
+        if worker.tick()["step"] == "completed":
+            break
+    assert synth_jobs() == [(first["job_id"], "completed")]
+    later = refresh()
+    assert later["created"] is True and later["job_id"] != first["job_id"]
+    assert worker.tick()["step"] == "planned"                                      # 새 잡이 돈다(running)
+    behind = refresh()
+    assert behind["created"] is True and synth_jobs() == [(first["job_id"], "completed"), (later["job_id"], "running"),
+                                                          (behind["job_id"], "queued")]
+    assert refresh()["job_id"] == behind["job_id"] and len(synth_jobs()) == 3
 
 
 def test_new_paths_hide_another_owners_target(store):

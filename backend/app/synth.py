@@ -342,7 +342,11 @@ def check_notes(check: Mapping[str, Any]) -> list[str]:
 def create_synth_job(store: RiskStore, target_key: str, *, owner_sub: str, requester_sub: str | None = None,
                      consent_source: str | None = "web", settings: Any = None,
                      chain: Mapping[str, Any] | None = None) -> dict:
-    """종합 잡(`rr_jobs.mode='synth'`) — 영역 요약 → 과제 종합 → 보고서 판(synth_done). 자격이 없어도 행을 만들고 까닭을 적는다."""
+    """종합 잡(`rr_jobs.mode='synth'`) — 영역 요약 → 과제 종합 → 보고서 판(synth_done). 자격이 없어도 행을 만들고 까닭을 적는다.
+
+    그 대상에 아직 집히지 않은(queued) 종합 잡이 있으면 새로 만들지 않고 그 잡을 돌려준다(`created: False`) — 그 잡이 시작할 때
+    지금 원장을 읽는다. 도는 잡은 막지 않는다 — 그 잡이 이미 끝낸 요약은 옛 입력이라 새 잡이 뒤에 줄을 서고, 입력이 같은 요약은 다시
+    부르지 않는다(사슬 `chain._busy` 와 같은 규칙). 반환 {job_id, created, credential, error?}."""
     from app import runner  # noqa: PLC0415 — runner 는 이 모듈을 쓴다.
 
     cfg = settings or config.settings
@@ -352,14 +356,22 @@ def create_synth_job(store: RiskStore, target_key: str, *, owner_sub: str, reque
     params = {"mode": SYNTH_MODE, "requester": requester_sub, "consent": True, "consent_source": consent_source,
               "credential": credential["kind"] if credential else None}
     error = None if credential else "pat_unavailable" + (f": {note}" if note else "")
-    store.execute(
-        "INSERT INTO rr_jobs(id, target_key, owner_sub, tier, state, concurrency, params_json, credential_email, panels_done,"
-        " panels_total, error, mode, chain_json, created_at, updated_at)"
-        " VALUES (?, ?, ?, NULL, 'queued', 1, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
-        (job_id, target_key, owner_sub, common.canonical_json(params), (credential or {}).get("email"),
-         len(config.settings.risk_roster_domains) + 1, error, SYNTH_MODE,
-         common.canonical_json(dict(chain)) if chain else None, now, now))
-    return {"job_id": job_id, "credential": params["credential"], **({"error": error} if error else {})}
+    with store.tx():
+        # 확인과 쓰기를 한 트랜잭션으로 — 보고서 다시 내기를 거푸 불러도, 사슬과 겹쳐도 대기 종합 잡은 하나다.
+        waiting = store.query_one("SELECT id, params_json, error FROM rr_jobs WHERE target_key = ? AND mode = ? AND state = 'queued'"
+                                  " ORDER BY created_at DESC LIMIT 1", (target_key, SYNTH_MODE))
+        if waiting is not None:
+            return {"job_id": waiting["id"], "created": False,
+                    "credential": _loads(waiting["params_json"], {}).get("credential"),
+                    **({"error": waiting["error"]} if waiting["error"] else {})}
+        store.execute(
+            "INSERT INTO rr_jobs(id, target_key, owner_sub, tier, state, concurrency, params_json, credential_email, panels_done,"
+            " panels_total, error, mode, chain_json, created_at, updated_at)"
+            " VALUES (?, ?, ?, NULL, 'queued', 1, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
+            (job_id, target_key, owner_sub, common.canonical_json(params), (credential or {}).get("email"),
+             len(config.settings.risk_roster_domains) + 1, error, SYNTH_MODE,
+             common.canonical_json(dict(chain)) if chain else None, now, now))
+    return {"job_id": job_id, "created": True, "credential": params["credential"], **({"error": error} if error else {})}
 
 
 class SynthWorker:

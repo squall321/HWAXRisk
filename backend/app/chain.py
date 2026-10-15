@@ -129,6 +129,11 @@ def create_stage_job(store: RiskStore, target_key: str, stage: str, *, prev: Map
                   "chain": chain}
         made = (issues.create_issues_job(store, target_key, user_memo=params.get("user_memo"), **kwargs) if stage == "issues"
                 else synth.create_synth_job(store, target_key, **kwargs))
+        if made.get("created") is False:
+            # 확인(_busy)과 이 쓰기 사이에 선 대기 종합 잡(사람이 다시 낸 보고서)이 받았다 — 새로 세우지 않고 그 잡이 지금 원장으로
+            # 돈다는 표지를 단다(살아 있는 단계를 만난 길과 같다).
+            return {"job_id": made["job_id"], "stage": stage, "created": False,
+                    "chain": _rearm(store, target_key, made["job_id"], by=str(prev["id"]), round_no=round_no)}
     log.info("사슬: 대상 %s 의 %s 잡 %s 를 세웠다(앞 잡 %s · %s)%s", target_key, stage, made["job_id"], prev["id"], reason,
              f" — {made['error']}" if made.get("error") else "")
     return {**made, "stage": stage, "created": True, "chain": chain}
