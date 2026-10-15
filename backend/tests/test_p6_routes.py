@@ -210,6 +210,48 @@ def test_registry_status_without_evidence_rolls_the_whole_transaction_back(store
     assert store.query_one("SELECT COUNT(*) AS n FROM rr_labels")["n"] == 0
 
 
+# ================================================================ PUT · DELETE /registry/{cluster}/merge — 남의 대상(조합 검토 H1)
+def _merge_answer(call) -> tuple:
+    try:
+        out = call()
+    except AppError as exc:
+        return exc.code, exc.http_status, exc.message
+    return "ok", 200, json.dumps(out, sort_keys=True, default=str)
+
+
+def test_a_stranger_cannot_run_the_registry_merge_on_another_persons_target(store, clock):
+    """제 클러스터 둘을 가진 남이 병합(PUT)이나 철회(DELETE)를 부르며 target_key 에 주인의 대상을 주면 없는 대상과 같은 404 이고
+    아무것도 쓰지 않는다 — 종전에는 주인의 대상을 남의 신원으로 다시 병합해 응답의 클러스터 수로 대상의 존재와 크기를 흘리고 남의
+    행에 주인의 대상 키를 적었다(조합 검토 H1). 주인이 제 대상으로 부르면 그대로 돈다."""
+    _base(store)                                                        # 주인의 대상 T1 · 클러스터 CK_A
+    _project(store, "P2", owner_sub=OTHER)
+    _target(store, "T2", owner_sub=OTHER, project_id="P2")
+    for cluster_key in ("ck:bbbbbbbbbbbb", "ck:cccccccccccc"):
+        _registry(store, cluster_key, target_key="T2", owner_sub=OTHER)
+    ledger = "SELECT target_key, cluster_key, owner_sub, needs_review_json, updated_at FROM rr_registry ORDER BY 1, 2"
+    before = [dict(r) for r in store.query(ledger)]
+
+    def merge(target_key):
+        return _merge_answer(lambda: routes.put_registry_merge(
+            "ck:bbbbbbbbbbbb", routes.RegistryMergeBody(into="ck:cccccccccccc", target_key=target_key),
+            ident=_ident(OTHER)))
+
+    def revoke(target_key):
+        return _merge_answer(lambda: routes.delete_registry_merge("ck:bbbbbbbbbbbb", target_key=target_key,
+                                                                  ident=_ident(OTHER)))
+
+    for call in (merge, revoke):
+        theirs, missing = call(TARGET), call("no-such-target")
+        assert theirs[:2] == ("E404", 404), theirs
+        assert theirs[2].replace(TARGET, "<t>") == missing[2].replace("no-such-target", "<t>")
+    assert [dict(r) for r in store.query(ledger)] == before
+    assert store.query("SELECT old_cluster_key FROM rr_cluster_alias") == []
+
+    mine = _merge_answer(lambda: routes.put_registry_merge(
+        "ck:bbbbbbbbbbbb", routes.RegistryMergeBody(into="ck:cccccccccccc", target_key="T2"), ident=_ident(OTHER)))
+    assert mine[0] == "ok", mine
+
+
 # ================================================================ GET /curation · PUT /curation/{id}
 def _queue_row(store, kind, payload, *, owner_sub=OWNER, queue_id="Q1"):
     store.execute(
