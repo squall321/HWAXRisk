@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from typing import Any
 
 from app import planner, review_ops, review_verify, runner, unit_live, units
@@ -782,7 +782,9 @@ def reopen_filtered(store: Any, target_key: str, *, via: str, domain: str | None
     `route='audit'` · `route_forced='filter_floor'` 와 `sample_json.filter_audit{score, picked_by, result:null}` 을 적어 다시 분류하지
     않는다. 셀의 잡 결속(run_id)은 그대로다 — 그 잡이 살아 있으면 그 잡이 돌린다. `run_id` 를 주면 다시 연 셀만 그 잡에 묶는다 —
     살아 있는 잡이 다시 열면 늘 그 잡이 돌린다(반대 검토 MEDIUM 7 · 3차 MEDIUM 2 · D-47). 전문가 머리는 범위로 찍지 않고(찍으면 범위 밖
-    셀까지 거뒀다 — 3차 MEDIUM 3) ready·partial 만 planned 로 다시 연다.
+    셀까지 거뒀다 — 3차 MEDIUM 3) ready·partial 만 planned 로 다시 연다. 묶은 셀 가운데 앞 결속이 그 잡이 아닌 셀(그 잡의 추정 밖 —
+    제 범위에서 제가 거른 셀은 거르기 없음 가정의 추정 안이다)은 그 잡의 다시 연 셀 몫에 세고, 몫을 넘으면 같은 트랜잭션에서 그 잡을
+    멈춘다(`review_runner.charge_reopened` — 4차 MEDIUM 2 · D-49).
     고르는 칸은 `domain`·`unit_id`·`cells` 가운데 준 것(AND)이고, `exclude_agent` 의 셀은 뺀다(자기 넘김 — 7번 줄이 세지 않는다,
     반대 검토 2차 MEDIUM 3). 부른 쪽 트랜잭션에 들어간다."""
     if via not in REOPEN_VIAS:
@@ -798,12 +800,14 @@ def reopen_filtered(store: Any, target_key: str, *, via: str, domain: str | None
     if exclude_agent is not None:
         where.append("agent_key <> ?")
         params.append(exclude_agent)
-    rows = [dict(r) for r in store.query(f"SELECT unit_id, agent_key, sample_json FROM rr_review_cells WHERE {' AND '.join(where)}"
-                                         " ORDER BY agent_key, unit_seq", params)]
+    rows = [dict(r) for r in store.query(
+        f"SELECT unit_id, agent_key, sample_json, run_id FROM rr_review_cells WHERE {' AND '.join(where)}"
+        " ORDER BY agent_key, unit_seq", params)]
     if cells is not None:
         wanted = {tuple(c) for c in cells}
         rows = [r for r in rows if (r["unit_id"], r["agent_key"]) in wanted]
     opened: list[tuple[str, str]] = []
+    extra: list[tuple[str, str]] = []
     with store.tx():
         for row in rows:
             key = (target_key, row["unit_id"], row["agent_key"])
@@ -825,8 +829,14 @@ def reopen_filtered(store: Any, target_key: str, *, via: str, domain: str | None
                 sets["run_id"] = run_id
             if _move(store, "cell", "na_irrelevant", "pending", where=_cell_where(), params=key, sets=sets, now=now) == 1:
                 opened.append((row["unit_id"], row["agent_key"]))
+                if run_id is not None and row["run_id"] != run_id:
+                    extra.append((row["unit_id"], row["agent_key"]))
         for agent in sorted({a for _u, a in opened}):
             _reopen(store, target_key, agent, now=now)
+        if extra:
+            from app import review_runner  # noqa: PLC0415 — review_runner 는 이 모듈을 import 한다.
+
+            review_runner.charge_reopened(store, run_id, extra, now=now)
     return opened
 
 
@@ -1449,17 +1459,27 @@ def retry_cells(store: Any, target_key: str, rows: Sequence[Mapping[str, Any]], 
     return changed
 
 
+CONSENT_DECLINED = "consent_declined"      # 동의를 기다리던 다시 연 셀을 사람이 넘겼다(넘김 앞의 실패 코드 — 차감 없음)
+
+
 def skip_cells(store: Any, target_key: str, rows: Sequence[Mapping[str, Any]], *, decided_by: str, note: str,
-               now: int | None = None) -> list[dict]:
+               awaiting: Collection[tuple[str, str]] = (), now: int | None = None) -> list[dict]:
     """사람의 넘김 — `failed` 셀만 `skipped` 로(사유 필수 — 부른 쪽이 본다). 사람 표기 열을 적고, 그 전문가 머리 ready·partial·
-    blocked 는 planned 로 두어 다시 마감되게 한다(보고서 '보지 못한 것' 에 '넘김 — 사유'). 바꾼 셀(dict) 목록. 부른 쪽이 트랜잭션을 연다."""
+    blocked 는 planned 로 두어 다시 마감되게 한다(보고서 '보지 못한 것' 에 '넘김 — 사유'). `awaiting` 은 다시 연 셀 몫으로 멈춘 잡에서
+    동의를 기다리는 셀이다 — 사람이 동의하지 않으면 그 pending 셀도 넘긴다(넘김은 failed 에서만 가므로 pending → failed
+    (consent_declined · 차감 없음) → skipped, 반대 검토 4차 MEDIUM 2 · D-49). 바꾼 셀(dict) 목록. 부른 쪽이 트랜잭션을 연다."""
     now = now_epoch() if now is None else now
     changed: list[dict] = []
     with store.tx():
         for row in rows:
-            if row["state"] != "failed":
-                continue
             key = (target_key, row["unit_id"], row["agent_key"])
+            if row["state"] == "pending" and (row["unit_id"], row["agent_key"]) in awaiting:
+                if _move(store, "cell", "pending", "failed", where=_cell_where(), params=key,
+                         sets={"error_code": CONSENT_DECLINED, "error": "다시 연 셀의 비용에 동의하지 않아 넘긴다(차감 없음)",
+                               "lease_owner": None}, now=now) != 1:
+                    continue
+            elif row["state"] != "failed":
+                continue
             sets = {"status_source": "human", "decided_by": decided_by, "decided_at": now, "decide_note": note}
             if _move(store, "cell", "failed", "skipped", where=_cell_where(), params=key, sets=sets, now=now) == 1:
                 changed.append(dict(row))

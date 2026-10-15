@@ -155,6 +155,165 @@ def calls_estimate(cells: Mapping[str, int], experts: int, *, k: int = FALLBACK_
             "high": (card + gap) * CALLS_PER_CELL_HIGH + experts * SWEEP_CALLS_HIGH, "basis": basis}
 
 
+# 다시 연 셀의 몫(반대 검토 4차 MEDIUM 2 · D-49) — 살아 있는 잡이 동의받은 추정 밖의 셀을 묶으면(넓힘 · 늦은 넘김 · 잡 끝 거두기 ·
+# 보충 표본 · 사람의 다시가 그 잡에 얹힌 것) 그 셀의 기대 호출을 잡의 params.reopen 에 적는다. 동의받은 몫(만들 때의 expected + 사람이
+# 재개로 더 동의한 몫)의 REOPEN_SHARE 와 REOPEN_FLOOR_CALLS 가운데 큰 것까지는 그대로 돌고(진행판 reopened_extra), 넘으면 그 잡을
+# consent_extra 로 멈춘다 — 차감은 없고 그 셀은 이 잡에 묶인 채 pending 이다. 잡 하나의 추정 합은 HWAXRISK_REVIEW_MAX_CALLS 를 넘지
+# 않는다(max_calls — 동의로 풀리지 않는다). 거르기 안전망(넓힘 · 넘김 · 보충 표본)은 끄지 않는다 — 그 비용이 사람 모르게 불어나는 것만 막는다.
+REOPEN_SHARE = 0.2
+REOPEN_FLOOR_CALLS = 30
+REOPEN_HOLDS: tuple[str, ...] = ("consent_extra", "max_calls")
+_AUTO_HOLDS: tuple[str, ...] = tuple(code for code, rule in review_ops.HOLD_CODES.items() if rule.auto)
+
+
+def cell_calls(expert: Mapping[str, Any], *, k: int, dual: str) -> float:
+    """셀 하나의 기대 호출 수 — calls_estimate 의 expected 가 그 셀에 세는 몫(입력 결손 셀 1.05 · 카드 셀 card_cell_calls · 걸린 것만
+    이중 판정이면 1순위 카드 셀에 보정 rev D). `expert` 는 planner.review_order 의 그 전문가 행이다."""
+    if expert.get("input_gaps"):
+        return NOINPUT_PER_CELL
+    d = math.ceil(CHECKABLE_MEAN / max(1, int(k)))
+    return card_cell_calls(k, dual) + (d if dual == "flagged" and expert.get("rank_in_domain") == 1 else 0)
+
+
+def reopen_budget(params: Mapping[str, Any], *, max_calls: int) -> dict:
+    """잡의 다시 연 셀 몫(진행판 reopened_extra) — {cells, calls_est, consented{cells, calls_est}, unconsented{cells, calls_est},
+    allowance, expected, max_calls, hold}. 여유(allowance)는 max(ceil(REOPEN_SHARE × (expected + 동의한 몫)), REOPEN_FLOOR_CALLS) 다.
+    hold 는 추정 합(expected + 다시 연 몫 전부)이 max_calls 를 넘으면 max_calls, 아니고 동의 안 받은 몫이 여유를 넘으면 consent_extra,
+    아니면 None 이다."""
+    reopen = params.get("reopen") if isinstance(params.get("reopen"), Mapping) else {}
+    consented = reopen.get("consented") if isinstance(reopen.get("consented"), Mapping) else {}
+    unconsented = reopen.get("unconsented") if isinstance(reopen.get("unconsented"), Mapping) else {}
+    expected = int(((params.get("calls_estimate") or {}).get("expected")) or 0)
+    c_calls = round(float(consented.get("calls_est") or 0), 2)
+    u_calls = round(sum(float(v) for v in unconsented.values()), 2)
+    allowance = max(math.ceil(REOPEN_SHARE * (expected + c_calls)), REOPEN_FLOOR_CALLS)
+    hold = ("max_calls" if expected + c_calls + u_calls > int(max_calls) else
+            "consent_extra" if u_calls > allowance else None)
+    return {"cells": int(consented.get("cells") or 0) + len(unconsented), "calls_est": round(c_calls + u_calls, 2),
+            "consented": {"cells": int(consented.get("cells") or 0), "calls_est": c_calls},
+            "unconsented": {"cells": len(unconsented), "calls_est": u_calls},
+            "allowance": allowance, "expected": expected, "max_calls": int(max_calls), "hold": hold}
+
+
+def reopen_hold_message(budget: Mapping[str, Any]) -> str:
+    """다시 연 셀 몫의 보류 글(잡 error · 재개 거절) — 무엇이 얼마나 넘었고 어떻게 푸나."""
+    waiting = budget["unconsented"]
+    keep = "아무것도 차감하지 않았고 그 셀은 이 잡에 묶인 채 기다린다"
+    if budget["hold"] == "max_calls":
+        return (f"이 잡의 호출 추정 합 {budget['expected'] + budget['calls_est']:.0f}회(처음 추정 {budget['expected']}회 · 다시 연 셀"
+                f" {budget['cells']}개 {budget['calls_est']:.0f}회)가 상한 {budget['max_calls']}회(HWAXRISK_REVIEW_MAX_CALLS)를 넘는다 —"
+                f" 동의로는 풀리지 않는다. 동의를 기다리는 셀 {waiting['cells']}개를 넘기거나(넘김의 filter state=pending) 상한을 올린 뒤"
+                f" 재개한다. {keep}")
+    return (f"다시 연 셀 {waiting['cells']}개(호출 추정 {waiting['calls_est']:.0f}회)가 여유 {budget['allowance']}회(동의받은 추정"
+            f" {budget['expected'] + budget['consented']['calls_est']:.0f}회의 {int(REOPEN_SHARE * 100)}% · 최소 {REOPEN_FLOOR_CALLS}회)를"
+            f" 넘었다 — 사람이 그 몫에 동의하면(재개 consent=true) 이어 돌고, 동의하지 않으면 그 셀을 넘긴다(넘김의 filter"
+            f" state=pending). {keep}")
+
+
+def charge_reopened(store: Any, job_id: str, cells: Sequence[tuple[str, str]], *, now: int | None = None) -> dict | None:
+    """살아 있는 잡에 묶은 다시 연 셀 — 그 잡의 동의받은 추정 밖의 셀(unit_id, agent_key)의 기대 호출을 params.reopen.unconsented 에
+    적고, 몫을 넘으면 같은 트랜잭션에서 잡을 멈춘다(묶기와 멈춤이 한 트랜잭션이라 선점이 그 사이에 그 셀을 집지 못한다). 부른 쪽
+    트랜잭션에 들어간다. 몫(`reopen_budget`) 또는 None(셀이 없거나 검토 잡이 아니다)."""
+    if not cells:
+        return None
+    now = now_epoch() if now is None else now
+    with store.tx():
+        row = store.query_one("SELECT target_key, params_json FROM rr_jobs WHERE id = ? AND mode = ?", (job_id, MODE))
+        if row is None:
+            return None
+        params = _json(row["params_json"], {})
+        order = {str(r["agent_key"]): r for r in planner.review_order(store, row["target_key"])}
+        k, _source = box_k(store)
+        dual = str(((params.get("knobs") or {}).get("dual")) or "all")
+        reopen = dict(params.get("reopen") or {})
+        unconsented = dict(reopen.get("unconsented") or {})
+        for unit_id, agent in cells:
+            unconsented[f"{unit_id}|{agent}"] = round(cell_calls(order.get(agent) or {}, k=k, dual=dual), 2)
+        params["reopen"] = {**reopen, "unconsented": unconsented}
+        store.execute("UPDATE rr_jobs SET params_json = ?, updated_at = ? WHERE id = ?", (canonical_json(params), now, job_id))
+        budget = reopen_budget(params, max_calls=int(config.settings.risk_review_max_calls))
+        if budget["hold"] is not None:
+            _reopen_hold(store, job_id, budget, now=now)
+    return budget
+
+
+def _reopen_hold(store: Any, job_id: str, budget: Mapping[str, Any], *, now: int) -> bool:
+    """다시 연 셀 몫을 넘은 잡을 멈춘다 — 도는(queued·running) 잡, 시계로 저절로 재개할 보류(재개하면 동의 없이 그 셀을 돌린다)와
+    이미 이 몫으로 멈춘 잡(새 셈의 코드 · 글로)만. 사람의 정지 · 자격 · 사람이 고쳐야 하는 보류는 그대로 둔다 — 그 재개가 몫을 다시
+    본다(`resume_gate`)."""
+    code = budget["hold"]
+    overridable = (*_AUTO_HOLDS, *REOPEN_HOLDS)
+    changed = store.execute(
+        "UPDATE rr_jobs SET state = 'paused', pause_reason = NULL, error = ?, hold_code = ?, hold_until = NULL,"
+        " hold_n = COALESCE(hold_n, 0) + 1, state_by = ?, state_at = ?, updated_at = ? WHERE id = ? AND mode = 'reviews'"
+        f" AND (state IN ('queued', 'running') OR (state = 'paused' AND hold_code IN ({','.join('?' * len(overridable))})"
+        " AND COALESCE(pause_reason, '') <> 'user'))",
+        (reopen_hold_message(budget), code, f"code:{code}", now, now, job_id, *overridable))
+    if changed:
+        log.warning("검토 잡 %s 보류 %s — 다시 연 셀 %s개(동의 안 받은 추정 %s회 · 여유 %s회)", job_id, code,
+                    budget["unconsented"]["cells"], budget["unconsented"]["calls_est"], budget["allowance"])
+    return bool(changed)
+
+
+def release_unconsented(store: Any, job_id: str, cells: Sequence[tuple[str, str]], *, now: int | None = None) -> dict | None:
+    """동의를 기다리던 셀을 사람이 넘겼다 — 그 셀을 다시 연 셀의 몫에서 뺀다(돌지 않는다). 부른 쪽 트랜잭션에 들어간다. 새 몫 또는 None."""
+    now = now_epoch() if now is None else now
+    with store.tx():
+        row = store.query_one("SELECT params_json FROM rr_jobs WHERE id = ? AND mode = ?", (job_id, MODE))
+        if row is None:
+            return None
+        params = _json(row["params_json"], {})
+        reopen = dict(params.get("reopen") or {})
+        unconsented = {k: v for k, v in (reopen.get("unconsented") or {}).items()
+                       if k not in {f"{u}|{a}" for u, a in cells}}
+        params["reopen"] = {**reopen, "unconsented": unconsented}
+        store.execute("UPDATE rr_jobs SET params_json = ?, updated_at = ? WHERE id = ?", (canonical_json(params), now, job_id))
+    return reopen_budget(params, max_calls=int(config.settings.risk_review_max_calls))
+
+
+def awaiting_consent(store: Any, target_key: str) -> tuple[str | None, set[tuple[str, str]]]:
+    """다시 연 셀 몫으로 멈춘(consent_extra · max_calls) 살아 있는 잡과 그 잡에서 동의를 기다리는 셀 — 동의 안 받은 몫에 든, 그 잡에
+    묶인 pending 셀. 그런 잡이 없으면 (None, ∅)."""
+    job = store.query_one(
+        "SELECT id, params_json FROM rr_jobs WHERE target_key = ? AND mode = ? AND state = 'paused' AND hold_code IN (?, ?)"
+        " ORDER BY created_at DESC LIMIT 1", (target_key, MODE, *REOPEN_HOLDS))
+    if job is None:
+        return None, set()
+    keys = {tuple(k.split("|", 1)) for k in ((_json(job["params_json"], {}).get("reopen") or {}).get("unconsented") or {})}
+    pending = {(r["unit_id"], r["agent_key"]) for r in store.query(
+        "SELECT unit_id, agent_key FROM rr_review_cells WHERE target_key = ? AND run_id = ? AND state = 'pending'",
+        (target_key, job["id"]))}
+    return str(job["id"]), {k for k in keys if k in pending}
+
+
+def resume_gate(store: Any, job_id: str, *, consent: bool, consent_source: str | None = None,
+                settings: Any | None = None) -> dict | None:
+    """사람의 재개 앞(반대 검토 4차 MEDIUM 2 · D-49) — 멈춘 검토 잡의 다시 연 셀 몫을 다시 본다. 추정 합이 HWAXRISK_REVIEW_MAX_CALLS 를
+    넘으면 409 max_calls(동의로 풀리지 않는다 — 기다리는 셀을 넘기거나 상한을 올린다), 동의 안 받은 몫이 여유를 넘으면 consent 가 있어야
+    한다 — 없으면 422 consent_required(아무것도 바꾸지 않는다), 있으면 그 몫을 동의받은 몫으로 옮긴다(사람이 동의한 뒤에만 true).
+    넘지 않거나 검토 잡이 아니면 아무것도 하지 않는다. 부른 쪽 트랜잭션에 들어간다. 반환 — 동의로 옮긴 몫 {cells, calls_est} 또는 None."""
+    cfg = config.settings if settings is None else settings
+    row = store.query_one("SELECT params_json FROM rr_jobs WHERE id = ? AND mode = ? AND state = 'paused'", (job_id, MODE))
+    if row is None:
+        return None
+    params = _json(row["params_json"], {})
+    budget = reopen_budget(params, max_calls=int(cfg.risk_review_max_calls))
+    if budget["hold"] == "max_calls":
+        raise AppError("max_calls", reopen_hold_message(budget), 409,
+                       detail={"reopened_extra": budget, "knob": "HWAXRISK_REVIEW_MAX_CALLS"})
+    if budget["hold"] != "consent_extra":
+        return None
+    if not consent:
+        raise AppError("consent_required", reopen_hold_message(budget) + " — 범위와 비용을 사람에게 보이고 동의를 받은 뒤"
+                       " consent:true 로 재개한다.", 422, detail={"reopened_extra": budget})
+    moved = dict(budget["unconsented"])
+    params["reopen"] = {**dict(params.get("reopen") or {}), "unconsented": {}, "consent_source": consent_source,
+                        "consented": {"cells": budget["consented"]["cells"] + moved["cells"],
+                                      "calls_est": round(budget["consented"]["calls_est"] + moved["calls_est"], 2)}}
+    store.execute("UPDATE rr_jobs SET params_json = ? WHERE id = ?", (canonical_json(params), job_id))
+    return moved
+
+
 # ---------------------------------------------------------------- 잡 만들기
 def in_flight(store: Any, *, job_id: str | None = None, target_key: str | None = None) -> dict:
     """아직 도는(running) 전문가 머리·셀 수 — {heads, cells}. `job_id` 를 주면 그 잡의 것(run_id), `target_key` 를 주면 그 대상의
@@ -359,6 +518,8 @@ def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Ma
     다시 마감되게 하고(`adopted`), 없으면 그 셀의 (전문가, 단위)로 마감 잡을 만든다(돌 셀은 0 이다). 머리는 범위로 찍지 않는다
     (반대 검토 3차 MEDIUM 3 · D-47 — 그 잡의 몫은 묶인 셀로 가린다). 잡을 만들다 거절(동의·자격·스위치)되면 처분도
     되돌린다 — 아무것도 바꾸기 전에 거절한 것과 같다. 바꾼 셀이 있으면 감사 한 행(scope coverage · cells.retry|cells.skip).
+    살아 있는 잡에 얹은 다시는 그 잡의 다시 연 셀 몫에 들고(넘으면 그 잡이 멈춘다 — job.hold), 다시 연 셀 몫으로 멈춘 잡에서 동의를
+    기다리는 셀은 넘김이 pending 그대로 넘긴다 — 그 몫이 여유 안으로 돌아오면 그 잡이 이어 돈다(job.resumed — 4차 MEDIUM 2 · D-49).
     반환 {target_key, matched, retried|skipped, not_failed, keys_total, keys[≤50], experts, job{action, job_id?, calls_estimate?},
     audit_id, changed}. 넘김은 hits · hits_by · hits_basis(members — 구성원 함수가 센 수 · pack_missing — 얼린 묶음이 이 박스에 없어
     셀 수 없다: hits · hits_by 가 null 이고 hits_note 가 까닭이다)를 더한다.
@@ -371,9 +532,12 @@ def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Ma
     counted = "retried" if action == "retry" else "skipped"
     out: dict[str, Any] = {"target_key": target_key, "matched": len(rows), counted: 0}
     with store.tx():
+        # 다시 연 셀 몫으로 멈춘 잡에서 동의를 기다리는 셀 — 사람이 동의하지 않으면 넘긴다(반대 검토 4차 MEDIUM 2 · D-49)
+        held_job, awaiting = awaiting_consent(store, target_key) if action == "skip" else (None, set())
         changed = (review_cells.retry_cells(store, target_key, rows, force=force, decided_by=decided_by, note=note)
                    if action == "retry" else
-                   review_cells.skip_cells(store, target_key, rows, decided_by=decided_by, note=note or ""))
+                   review_cells.skip_cells(store, target_key, rows, decided_by=decided_by, note=note or "",
+                                           awaiting=awaiting))
         keys = [[c["unit_id"], c["agent_key"]] for c in changed]
         agents = sorted({c["agent_key"] for c in changed})
         unit_ids = [u for u in dict.fromkeys(c["unit_id"] for c in changed)]
@@ -387,11 +551,11 @@ def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Ma
             missing: list[str] = []
             for agent in sorted({c["agent_key"] for c in changed}):
                 mine = [c["unit_id"] for c in changed if c["agent_key"] == agent]
-                counted = expert_report.count_members(store, target_key, agent, mine)
-                if counted is None:
+                members = expert_report.count_members(store, target_key, agent, mine)
+                if members is None:
                     missing.append(agent)
                     continue
-                for counts in counted.values():
+                for counts in members.values():
                     for kind, n in counts.items():
                         by_kind[kind] += n
             if missing:
@@ -418,6 +582,20 @@ def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Ma
                                 "pending" if action == "retry" else "skipped") for c in mine])
             out["job"] = {"action": "adopted" if mine else "waiting", "job_id": live["id"], "adopted": len(mine),
                           "waiting": len(changed) - len(mine)}
+            if action == "retry" and mine:
+                # 사람의 다시가 그 잡에 얹은 셀은 그 잡을 만들 때의 추정 밖이다 — 다시 연 셀의 몫에 센다(4차 MEDIUM 2 · D-49)
+                budget = charge_reopened(store, live["id"], [(c["unit_id"], c["agent_key"]) for c in mine], now=now)
+                if budget is not None and budget["hold"] is not None:
+                    out["job"]["hold"] = budget["hold"]
+            declined = [(c["unit_id"], c["agent_key"]) for c in changed if (c["unit_id"], c["agent_key"]) in awaiting]
+            if declined and held_job is not None:
+                # 동의하지 않고 넘긴 셀은 돌지 않는다 — 몫에서 빼고, 여유 안으로 돌아오면 그 잡이 이어 돈다(재개는 넘긴 사람의 것)
+                budget = release_unconsented(store, held_job, declined, now=now)
+                if budget is not None and budget["hold"] is None:
+                    runner.resume_job(store, held_job, by=decided_by)
+                    out["job"]["resumed"] = True
+                elif budget is not None:
+                    _reopen_hold(store, held_job, budget, now=now)
         elif action == "skip" or start:
             made = create_review_job(store, target_key, owner_sub=owner_sub, requester_sub=decided_by,
                                      scope={"agents": agents, "unit_ids": unit_ids}, consent=consent or action == "skip",

@@ -11,7 +11,7 @@ import json
 import pytest
 
 import app.mcp_server as srv
-from app import closure, config, expert_report, identity, planner, review_cells, routes
+from app import closure, config, expert_report, identity, planner, review_cells, review_runner, routes
 from app.errors import AppError
 from tests import factories
 from tests.synth import fake_review_engine as fre
@@ -219,6 +219,23 @@ def test_a_retry_covered_by_a_live_job_is_adopted(store):
     fake.error_cells = {}
     r.finish(live)
     assert _cells(store, key, PEER)[unit_ids[0]]["state"] == "reviewed"
+
+
+@pytest.mark.parametrize("floor,hold", [(30, None), (2, "consent_extra")])
+def test_a_retry_spilled_into_a_live_job_counts_against_its_reopen_allowance(store, monkeypatch, floor, hold):
+    """반대 검토 4차 MEDIUM 2 · D-49 — 사람의 다시가 살아 있는 잡에 얹힌 셀(그 잡을 만들 때 failed 라 그 잡의 추정 밖이다)은 다시 연 셀의
+    몫에 든다 — 진행판 reopened_extra 가 그 셀을 세고, 여유를 넘으면 그 잡이 consent_extra 로 멈춘다(응답 job.hold). 종전에는 그 잡의
+    추정 · 동의 어디에도 셈해지지 않았다."""
+    monkeypatch.setattr(review_runner, "REOPEN_FLOOR_CALLS", floor, raising=False)
+    key, job_id, unit_ids, fake, r = _failed_target(store)
+    live = rig.job(store, key, scope={"agents": [PEER, SEAL]})
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[unit_ids[0], PEER]]), ident=ME)
+    assert (out["job"]["action"], out["job"].get("hold")) == ("adopted", hold)
+    row = store.query_one("SELECT id, state, hold_code, hold_until, hold_n, error, credential_email, params_json, progress_json"
+                          " FROM rr_jobs WHERE id = ?", (live,))
+    extra = routes._review_job_payload(dict(row))["progress"].get("reopened_extra") or {}
+    assert (extra.get("unconsented"), extra.get("hold")) == ({"cells": 1, "calls_est": 5.25}, hold)
+    assert rig.state(store, live) == ("paused" if hold else "queued")
 
 
 # ---------------------------------------------------------------- 넘김

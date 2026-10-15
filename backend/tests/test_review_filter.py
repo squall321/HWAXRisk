@@ -14,11 +14,13 @@ import threading
 
 import pytest
 
-from app import config, expert_report, relevance, review_cells, review_verify, routes, units
+from app import config, expert_report, relevance, review_cells, review_runner, review_verify, routes, units
+from app.errors import AppError
 from tests import factories
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
 from tests.synth.fake_review_engine import FakeReviewEngine
+from tests.test_review_mcp import _call, _project_with_source
 
 STD1, STD2, STD3 = "std-syn-0", "std-syn-1", "std-syn-2"     # std 영역 1·2·3순위(3순위는 카드 0장)
 MECH1, MECH2 = "mech-syn-0", "mech-syn-1"
@@ -776,6 +778,217 @@ def test_a_ready_head_left_with_a_pending_cell_bound_to_the_live_job_is_planned_
     r.finish(live, ticks=20)
     cell = _cell(store, key, b, STD2)
     assert (rig.state(store, live), cell["state"], cell["run_id"]) == ("completed", "na_irrelevant", live)
+
+
+# ---------------------------------------------------------------- 다시 연 셀의 몫(반대 검토 4차 MEDIUM 2 · D-49)
+def _reopened_extra(store, job_id: str) -> dict | None:
+    """그 잡의 진행판(review.job 한 줄 — routes._review_job_payload)의 progress.reopened_extra. 시험대의 잡들은 같은 초에 서서 진행판의
+    '가장 최근 잡' 이 그 잡이라고 기대지 않는다."""
+    row = store.query_one("SELECT id, state, hold_code, hold_until, hold_n, error, credential_email, params_json, progress_json"
+                          " FROM rr_jobs WHERE id = ?", (job_id,))
+    return routes._review_job_payload(dict(row))["progress"].get("reopened_extra")
+
+
+def _one_cell_retry_spill(store, monkeypatch, *, max_calls: int | None = None) -> tuple[str, rig.Rig, FakeReviewEngine, list[str],
+                                                                                   str]:
+    """재현 P2 의 원장 — 회로 1순위 그림자 셀 하나를 사람이 force 로 다시 열면(추정 3회 · 동의 문턱 밑이라 동의 없이 선 잡) 다시 보니
+    놓침이라 회로가 넓어지고, 앞 잡(회로 2순위)이 거른 셀 셋이 지금 잡에 묶인다. `max_calls` 는 다시 앞에 거는 잡 상한이다(앞 잡들은
+    그 상한보다 크다). (대상, 시험대, 가짜 엔진, 그 셋의 단위, 지금 잡)."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 0)
+    monkeypatch.setattr(review_cells, "AUDIT_DOMAIN_FLOOR", 0)
+    key = rig.target(store, ROSTER)
+    us = units.load_units(store, key)
+    bundles = [u["unit_id"] for u in us if u["kind"] == "bundle"]
+    fake = _fake(ROSTER)
+    _quiet(fake, *bundles)
+    for u in us:
+        fake.noinput_q1[u["unit_id"]], fake.noinput_q2[u["unit_id"]] = ["no"], [""]
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]}))
+    shadow = next(c for c in _cells(store, key) if c["agent_key"] == MEM1 and (c["sample_json"] or {}).get("shadow"))
+    r.finish(rig.job(store, key, scope={"agents": [MEM2]}))
+    filtered = [c["unit_id"] for c in _cells(store, key) if c["agent_key"] == MEM2 and c["state"] == "na_irrelevant"]
+    assert len(filtered) == 3
+    fake.noinput_q1[shadow["unit_id"]] = ["yes"]
+    if max_calls is not None:
+        _knobs(monkeypatch, risk_review_max_calls=max_calls)
+    out = routes.post_cells_retry(key, routes.CellsRetryBody(cells=[[shadow["unit_id"], MEM1]], force=True,
+                                                             reason="그림자를 다시 본다"), ident=factories.ident(rig.OWNER))
+    assert (out["job"]["action"], out["job"]["calls_estimate"]["expected"]) == ("created", 3)
+    return key, r, fake, filtered, out["job"]["job_id"]
+
+
+def _mem2_runs(fake: FakeReviewEngine, since: int) -> int:
+    return sum(1 for c in fake.calls("run")[since:] if c["body"]["expert"]["key"] == MEM2)
+
+
+def test_reopened_cells_within_the_allowance_run_and_show_on_the_board_as_reopened_extra(store, monkeypatch):
+    """반대 검토 4차 MEDIUM 2 · D-49(재현 P2) — 넓힘이 지금 잡에 묶은 앞 잡의 거른 셀 셋(입력 결손 셀 1.05 × 3)은 여유(동의받은 추정 3회의
+    20% 와 30회 가운데 큰 것) 안이라 그대로 돌고, 진행판 review.job.progress.reopened_extra 가 그 셀 수 · 추정 호출을 말한다. 종전에는 추정 ·
+    동의 · 상한을 잡을 만들 때만 보아 다시 연 셀이 어디에도 셈해지지 않았다(한 셀 잡이 네 셀을 돌았다)."""
+    key, r, fake, filtered, running = _one_cell_retry_spill(store, monkeypatch)
+    runs = len(fake.calls("run"))
+    r.finish(running)
+    assert rig.state(store, running) == "completed" and _mem2_runs(fake, runs) == 3
+    assert {(_cell(store, key, u, MEM2)["state"], _cell(store, key, u, MEM2)["run_id"]) for u in filtered} == {
+        ("reviewed", running)}
+    assert _reopened_extra(store, running) == {
+        "cells": 3, "calls_est": 3.15, "consented": {"cells": 0, "calls_est": 0.0}, "unconsented": {"cells": 3, "calls_est": 3.15},
+        "allowance": 30, "expected": 3, "max_calls": 30000, "hold": None}
+
+
+@pytest.mark.parametrize("entry", ["rest", "mcp"])
+def test_reopened_cells_past_the_allowance_pause_the_job_until_a_person_consents(store, monkeypatch, entry):
+    """반대 검토 4차 MEDIUM 2 · D-49 — 다시 연 셀의 기대 호출이 여유를 넘으면 그 잡은 consent_extra 로 멈춘다 — 그 셀은 차감 없이
+    이 잡에 묶인 채 pending 이고 엔진을 부르지 않는다. 동의 없는 재개는 422 consent_required(아무것도 바꾸지 않는다), 사람이 동의한
+    재개(REST ?consent · MCP risk_job_action resume consent=true)는 그 몫을 동의받은 몫으로 옮겨 이어 돈다."""
+    monkeypatch.setattr(review_runner, "REOPEN_FLOOR_CALLS", 2, raising=False)      # 여유 = max(ceil(0.2 × 3), 2) = 2 < 3.15
+    key, r, fake, filtered, running = _one_cell_retry_spill(store, monkeypatch)
+    runs = len(fake.calls("run"))
+    r.finish(running)
+    job = rig.job_row(store, running)
+    assert (job["state"], job["hold_code"]) == ("paused", "consent_extra")
+    assert "다시 연 셀 3개(호출 추정 3회)" in (job["error"] or "")
+    assert {(_cell(store, key, u, MEM2)["state"], _cell(store, key, u, MEM2)["run_id"], _cell(store, key, u, MEM2)["tries"])
+            for u in filtered} == {("pending", running, 0)}
+    assert _mem2_runs(fake, runs) == 0
+    assert (_reopened_extra(store, running) or {}).get("hold") == "consent_extra"
+    if entry == "mcp":
+        # 길잡이는 막힘과 고칠 곳(사람의 동의 뒤 consent=true · 아니면 넘김)을 말하고 재개 걸음에 동의를 채워 주지 않는다
+        factories.act_as_delegate(monkeypatch, rig.OWNER)
+        guide = _call("risk_next_step", project_id=_project_with_source(store, key))
+        (blocked,) = [b for b in guide["blocked"] if b["code"] == "consent_extra"]
+        assert "consent=true" in blocked["fix"] and "'state': 'pending'" in blocked["fix"]
+        resumes = [s for s in guide["next"] if s["tool"] == "risk_job_action" and s["args"].get("action") == "resume"]
+        assert resumes and all("consent" not in s["args"] for s in resumes)
+
+    def resume(**kwargs):
+        if entry == "rest":
+            return routes.job_action(running, "resume", ident=factories.ident(rig.OWNER), **kwargs)
+        factories.act_as_delegate(monkeypatch, rig.OWNER)
+        out = _call("risk_job_action", job_id=running, action="resume", **kwargs)
+        if out.get("error"):
+            raise AppError(out["error"], str(out.get("message")), 422)
+        return out
+
+    with pytest.raises(AppError) as refused:
+        resume()
+    assert refused.value.code == "consent_required" and rig.job_row(store, running)["hold_code"] == "consent_extra"
+    resume(consent=True)
+    r.finish(running)
+    assert rig.state(store, running) == "completed" and _mem2_runs(fake, runs) == 3
+    assert {_cell(store, key, u, MEM2)["state"] for u in filtered} == {"reviewed"}
+    extra = _reopened_extra(store, running) or {}
+    assert (extra.get("consented"), extra.get("unconsented"), extra.get("hold")) == (
+        {"cells": 3, "calls_est": 3.15}, {"cells": 0, "calls_est": 0.0}, None)
+
+
+@pytest.mark.parametrize("cap", [False, True])
+def test_a_person_who_does_not_consent_skips_the_waiting_cells_and_the_job_goes_on(store, monkeypatch, cap):
+    """반대 검토 4차 MEDIUM 2 · D-49 — 동의하지 않으면 동의를 기다리는 셀을 사유와 함께 넘긴다(넘김의 filter state=pending — 그 잡의
+    다른 셀은 손대지 않는다). 그 셀은 차감 없이 skipped 이고(넘김 — «사유»), 몫이 여유 안으로 돌아오면 잡이 이어 돈다. 잡 하나의 추정
+    합이 HWAXRISK_REVIEW_MAX_CALLS 를 넘는 몫(max_calls)은 동의로 풀리지 않는다 — 409 이고, 넘기면 풀린다."""
+    if not cap:
+        monkeypatch.setattr(review_runner, "REOPEN_FLOOR_CALLS", 2, raising=False)
+    # 상한은 그 다시 앞에서 건다 — 추정 3 + 다시 연 셀 3.15 > 5
+    key, r, fake, filtered, running = _one_cell_retry_spill(store, monkeypatch, max_calls=5 if cap else None)
+    runs = len(fake.calls("run"))
+    r.finish(running)
+    hold = "max_calls" if cap else "consent_extra"
+    assert (rig.state(store, running), rig.job_row(store, running)["hold_code"]) == ("paused", hold)
+    if cap:
+        with pytest.raises(AppError) as refused:
+            routes.job_action(running, "resume", consent=True, ident=factories.ident(rig.OWNER))
+        assert (refused.value.code, refused.value.http_status) == ("max_calls", 409)
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": running, "state": "pending"},
+                                                           reason="다시 연 셀의 비용에 동의하지 않는다"),
+                                 ident=factories.ident(rig.OWNER))
+    assert (out["skipped"], out["job"].get("resumed")) == (3, True)
+    r.finish(running)
+    assert rig.state(store, running) == "completed" and _mem2_runs(fake, runs) == 0
+    held = [_cell(store, key, u, MEM2) for u in filtered]
+    assert {(c["state"], c["charged"], c["decide_note"]) for c in held} == {("skipped", 0, "다시 연 셀의 비용에 동의하지 않는다")}
+    assert (_reopened_extra(store, running) or {}).get("unconsented") == {"cells": 0, "calls_est": 0.0}
+
+
+def test_a_jobs_own_filtered_cells_it_reopens_are_inside_its_estimate_not_reopened_extra(store, monkeypatch):
+    """반대 검토 4차 MEDIUM 2 · D-49 — 그 잡이 거른 제 범위의 셀을 그 잡의 넓힘이 다시 열면 그 셀은 만들 때의 추정(expected — 거르기
+    없음 가정) 안이다 — 다시 연 셀의 몫에 세지 않는다(넓힘이 셀을 다시 연 것은 그대로다)."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+
+    def setup(fake, kinds):
+        fake.offcard_findings = 1                     # 1순위 그림자 셀이 걸림을 놓쳤다 — std 를 넓힌다
+
+    key, job_id, _fake, kinds = _run(store, SMALL, fake_setup=setup)
+    cell = _cell(store, key, kinds["boundary"], STD2)
+    assert (cell["state"], cell["route_forced"], cell["run_id"]) == ("reviewed", "widened", job_id)
+    extra = _reopened_extra(store, job_id) or {}
+    assert (extra.get("cells"), extra.get("calls_est"), extra.get("hold")) == (0, 0.0, None)
+
+
+def test_a_handoff_chain_across_unscoped_experts_counts_every_cell_it_pulls_in(store, monkeypatch):
+    """반대 검토 4차 MEDIUM 2 · D-49(재현 P7) — 범위가 {mech 2순위 × 경계 단위} 인 잡의 카드 밖 넘김(→ std)이 std 2순위의 거른 셀을,
+    그 셀의 카드 밖 넘김(→ mem)이 회로 2순위의 거른 셀을 차례로 그 잡에 묶는다(잡 끝 거두기). 사슬로 끌려온 셀마다 다시 연 셀의 몫에
+    든다(카드 셀 5.25 + 입력 결손 셀 1.05 — 바닥 안이라 돈다) — 종전에는 범위 밖 전문가 둘의 호출이 어디에도 셈해지지 않았다."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 0)
+    monkeypatch.setattr(review_cells, "AUDIT_DOMAIN_FLOOR", 0)
+    key = rig.target(store, ROSTER)
+    us = units.load_units(store, key)
+    edges = [u["unit_id"] for u in us if u["kind"] in ("bundle", "boundary")]
+    fake = _fake(ROSTER)
+    _quiet(fake, *edges)
+    for u in us:
+        fake.noinput_q1[u["unit_id"]], fake.noinput_q2[u["unit_id"]] = ["no"], [""]
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [STD1, MECH1, MEM1]}))
+    r.finish(rig.job(store, key, scope={"agents": [STD2, MEM2]}))
+    b = next(u for u in edges if _cell(store, key, u, STD2)["state"] == "na_irrelevant"
+             and _cell(store, key, u, MEM2)["state"] == "na_irrelevant")
+    fake.offcard_handoffs = {(MECH2, b): "std", (STD2, b): "mem"}
+    job = rig.job(store, key, scope={"agents": [MECH2], "unit_ids": [b]})
+    r.finish(job)
+    pulled = [_cell(store, key, b, STD2), _cell(store, key, b, MEM2)]
+    assert [(c["state"], c["run_id"], c["route_forced"]) for c in pulled] == [("reviewed", job, "handoff")] * 2
+    extra = _reopened_extra(store, job) or {}
+    assert (extra.get("unconsented"), extra.get("hold"), rig.state(store, job)) == (
+        {"cells": 2, "calls_est": 6.3}, None, "completed")
+
+
+def test_a_skip_job_with_nothing_to_run_runs_its_top_up_inside_the_floor(store, monkeypatch):
+    """반대 검토 4차 MEDIUM 2 · D-49(재현 P5) — 넘김이 세운 마감 잡(돌 셀 0 — 추정 0 이라 동의를 따로 묻지 않는다)의 잡 끝 보충 표본이
+    앞 잡이 거른 셀을 다시 열어 돌리는 몫(카드 셀 하나)은 바닥 30회 안이라 그대로 돌고 reopened_extra 로 보인다."""
+    _approve(monkeypatch)
+    _knobs(monkeypatch, risk_filter_audit_pct=0)
+    monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 0)
+    monkeypatch.setattr(review_cells, "AUDIT_DOMAIN_FLOOR", 0)
+    key = rig.target(store, SMALL)
+    fake = _fake(SMALL)
+    kinds = _units(store, key)
+    _quiet(fake, kinds["boundary"], kinds["global"])
+    r = rig.Rig(store, fake)
+    r.finish(rig.job(store, key, scope={"agents": [STD1]}))
+    no_rows = {"code": "no_rows", "message": "판정 행이 하나도 없다(가짜)", "infra": False, "retryable": False}
+    fake.error_cells = {(STD2, kinds["bundle"]): no_rows}
+    r.finish(rig.job(store, key, scope={"agents": [STD2]}))
+    assert (_cell(store, key, kinds["boundary"], STD2)["state"], _cell(store, key, kinds["bundle"], STD2)["state"]) == (
+        "na_irrelevant", "failed")
+    monkeypatch.setattr(review_cells, "AUDIT_MIN_N", 1)
+    monkeypatch.setattr(review_cells, "AUDIT_DOMAIN_FLOOR", 1)
+    fake.error_cells = {}
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(cells=[[kinds["bundle"], STD2]], reason="엔진이 답을 못 낸다"),
+                                 ident=factories.ident(rig.OWNER))
+    assert (out["job"]["action"], out["job"]["calls_estimate"]["expected"]) == ("created", 0)
+    r.finish(out["job"]["job_id"])
+    cell = _cell(store, key, kinds["boundary"], STD2)
+    assert (rig.state(store, out["job"]["job_id"]), cell["state"], cell["run_id"]) == (
+        "completed", "reviewed", out["job"]["job_id"])
+    extra = _reopened_extra(store, out["job"]["job_id"]) or {}
+    assert (extra.get("unconsented"), extra.get("allowance"), extra.get("hold")) == ({"cells": 1, "calls_est": 5.25}, 30, None)
 
 
 # ---------------------------------------------------------------- 재기동

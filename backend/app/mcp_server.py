@@ -425,7 +425,7 @@ async def risk_start_job(target_key: str, tier: str | None = None, consent: bool
 @mcp.tool()
 async def risk_job_action(job_id: str, action: str, reason: str | None = None, filter: dict | None = None,
                           consent: bool = False) -> dict:
-    """심사 잡 일시정지·재개·취소(action=pause|resume|cancel)와 검토 잡의 실패 셀 처분(action=retry_failed|skip_failed) — 쓰기: 사용자에게 확인한 뒤 부른다(취소는 되돌릴 수 없다), 이미 그 상태면 그대로 돌려주고(changed:false), 앱 재기동으로 멈춘 잡은 resume 해야 이어 돈다. 처분은 그 잡이 찍은 failed 셀을 다시 열거나 사유 reason(4~300자, 넘김은 필수)과 함께 넘긴다 — filter{agent_key?, unit_id?, domain?, error_code?} 로 좁히고, 응답 keys 는 50개까지이고 keys_total 이 전부의 수다. 다시가 세울 검토 잡의 호출 추정이 동의 문턱을 넘으면 consent_required 다 — 범위와 비용을 사용자에게 보이고 동의를 받은 뒤에만 consent=true 로 다시 부른다(REST 의 consent 와 같은 뜻, retry_failed 만)."""
+    """심사 잡 일시정지·재개·취소(action=pause|resume|cancel)와 검토 잡의 실패 셀 처분(action=retry_failed|skip_failed) — 쓰기: 사용자에게 확인한 뒤 부른다(취소는 되돌릴 수 없다), 이미 그 상태면 그대로 돌려주고(changed:false), 앱 재기동으로 멈춘 잡은 resume 해야 이어 돈다. 처분은 그 잡이 찍은 failed 셀을 다시 열거나 사유 reason(4~300자, 넘김은 필수)과 함께 넘긴다 — filter{agent_key?, unit_id?, domain?, error_code?} 로 좁히고, 응답 keys 는 50개까지이고 keys_total 이 전부의 수다. 다시가 세울 검토 잡의 호출 추정이 동의 문턱을 넘으면 consent_required 다 — 범위와 비용을 사용자에게 보이고 동의를 받은 뒤에만 consent=true 로 다시 부른다(REST 의 consent 와 같은 뜻, retry_failed · resume 만). 검토 잡이 다시 연 셀의 몫을 넘어 멈췄으면(hold consent_extra — 진행판 reopened_extra 가 셀 수 · 추정 호출을 준다) 재개에도 같은 동의가 든다, 동의하지 않으면 skip_failed 에 filter={'state':'pending'} 로 그 셀을 넘기고(여유 안이면 잡이 이어 돈다), 잡 상한(hold max_calls)은 동의로 풀리지 않는다."""
     return await _entry(entry.job_action, job_id=job_id, action=action, reason=reason, filter=filter, consent=consent)
 
 
