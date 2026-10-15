@@ -150,8 +150,10 @@ def test_pack_retry_doubles_from_sixty_to_the_cap():
 def test_hold_table_auto_resume_sets():
     auto = {code for code, rule in ops.HOLD_CODES.items() if rule.auto}
     assert auto == {"llm_outage", "aidh_unreachable", "agent_outdated", "ctx_unknown"}
+    # external_worker · external_config — Claude 길 X-2(워크플로를 다시 돌리거나 설정을 고친 뒤 사람이 재개한다)
     assert set(ops.HOLD_CODES) - auto == {"user", "credential", "content_fail_rate", "contract", "ctx_too_small",
-                                          "llm_misconfigured", "consent_extra", "max_calls"}
+                                          "llm_misconfigured", "consent_extra", "max_calls", "external_worker",
+                                          "external_config"}
 
 
 def test_hold_delays_step_up_and_repeat_the_last():

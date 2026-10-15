@@ -102,7 +102,7 @@
   calls_draining   참이면 /health 는 정상인 채로 새 run · pack 만 draining 과 같이 거절한다 — /health 를 읽는 길과 호출이 가는 길이 다른
                    서버를 볼 때(묶음 검토 L7)
   health_status · health_delay_s  /health 의 상태(200 이 아니면 그 상태로 거절)와 그 앞에서 자는 실제 시간(루프 탐침 한도를 넘기는 박스)
-외부 응답자 길(Claude 길 X-2 — 엔진 README '외부 응답자' 절과 그 계약 예제 tests/fixtures/external_llm/contract 의 모양):
+외부 응답자 길(Claude 길 X-2 — 엔진 README '외부 응답자' 절과 그 계약 예제 tests/fixtures/external_llm/contract 의 모양)의 스위치.
   external         참이면 엔진이 그 길을 열었다 — /health capabilities 에 external_llm 과 그 칸(health_on.json), limits?llm=external
                    은 외부 창의 limits(limits_external.json — 판 limits_rev 가 GLM 과 갈린다), llm=external 인 plan · run 은 그 판으로
                    견주고 답한다(run 의 meta.model · llm external, usage null). 거짓이면 그 요청은 409 external_llm_disabled(rejects.json)
