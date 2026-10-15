@@ -43,6 +43,8 @@ FALLBACK_K = 8
 MISSING_PER_CELL, SOLO_PER_CELL, OFFCARD_PER_CELL, NOINPUT_PER_CELL, FLAGGED_REV_PER_CELL = 0.1, 0.1, 1.05, 1.05, 0.05
 FILTERED_SHARE_LOW = 0.7
 SPAWN_PURPOSES: tuple[str, ...] = ("pack", "review", "finalize")
+# 엔진의 카드 대조 관문(/health 의 limit · 비우기)을 지나는 워커 — 마감 · 근거 꾸러미(live)는 LLM 을 부르지 않아 관문과 상관없다(M3 · D-52)
+GATED_PURPOSES = ("pack", "review")
 EST_CALL_S = 300               # 호출 하나의 가정(PLAN 6절 — 5분). 자격 수명과 견주는 데만 쓴다
 LIVE_STATES: tuple[str, ...] = runner.LIVE_JOB_STATES
 
@@ -739,6 +741,10 @@ CREDENTIAL_FIX = "포털에서 PAT 를 다시 발급해 등록하고 재개한�
 CTX_KNOB = "LLM_CONTEXT_TOKENS"
 DISABLED = "review_disabled"          # 이 박스의 검토 스위치(HWAXRISK_REVIEW_ENABLED)가 꺼져 있다 — 새 선점·새 호출을 내지 않는다
 LOOP_WAIT = "loop"                    # 진행판 waiting.source — 루프(창 조회·스위치)가 적은 기다림. 창이 통과하면 루프가 지운다(R3A-10)
+# 관문 기다림 — /health 를 못 읽었다 · 비우기(/health 의 draining · 엔진의 비우기 거절 뒤 retry_after_s). 창 통과가 아니라 관문이 열릴 때
+# _spawn 이 지운다(묶음 검토 M3 · D-52)
+GATE_WAITS = ("health_unknown", "draining")
+GATE_FREE_NOTE = "마감 · 근거 꾸러미는 그 사이에도 돈다"
 # 표지가 생기기 전에 적힌 진행판의 루프 기다림(사유로 가른다).
 _LEGACY_LOOP_WAITS = ("portal_unreachable", DISABLED)
 _ENGINE_ERRORS = (EngineBusy, PatUnavailable, EngineRejected, EngineStreamLost)
@@ -1283,8 +1289,8 @@ class _Session:
 
     def _drain_gate(self) -> None:
         """비우기 문 — 루프가 마지막으로 읽은 /health 가 비우기(범위 all)면 다음 호출을 보내지 않고 세션을 멈춘다(M3.md 4.7 — 도는 세션의
-        다음 호출은 기다린다 · 리허설 E1b). 셀은 차감 없이 pending 으로 놓이고, 루프는 /health 가 비우기를 거둘 때까지 새로 띄우지
-        않는다(관문 0). 엔진의 review_busy{draining} 거절이 뒤 그물이다(`_ask` · `fetch_pack`)."""
+        다음 호출은 기다린다 · 리허설 E1b). 셀은 차감 없이 pending 으로 놓이고, 루프는 /health 가 비우기를 거둘 때까지(엔진의 비우기
+        거절 뒤에는 그 retry_after_s 동안 — L7) 새로 띄우지 않는다. 엔진의 review_busy{draining} 거절이 뒤 그물이다(`_ask` · `fetch_pack`)."""
         if self.loop.draining():
             raise _Stop("draining")
 
@@ -1347,7 +1353,7 @@ class _Session:
                 break
             except EngineBusy as exc:
                 if isinstance(exc, engine_client.ReviewDraining):
-                    self.loop.note_draining()                      # 비우기 거절 — 다시 내지 않고 멈춘다(리허설 E1b)
+                    self.loop.note_draining(exc.retry_after_s)     # 비우기 거절 — 다시 내지 않고 멈춘다(리허설 E1b · L7)
                     raise _Stop("draining") from exc
                 self._sleep(exc.retry_after_s, reason=exc.code or "review_busy")
             except PatUnavailable as exc:
@@ -1614,9 +1620,9 @@ class _Session:
                 self._failed(cell, base, exc, outcome, int((time.monotonic() - tick) * 1000))
                 self.call = None
                 if isinstance(exc, engine_client.ReviewDraining):
-                    # 비우기 거절(뒤 그물) — 기다림으로 적었고(차감 없음) 그 자리에서 다시 내지 않는다. 루프의 /health 를 비우기로
-                    # 고쳐 두고 세션을 멈춘다 — 셀은 pending 으로 놓이고 비우기가 걷힌 뒤 새 세션이 이어 돈다(리허설 E1b)
-                    self.loop.note_draining()
+                    # 비우기 거절(뒤 그물) — 기다림으로 적었고(차감 없음) 그 자리에서 다시 내지 않는다. 루프는 그 거절이 알린
+                    # retry_after_s 동안 비우기로 보고 세션은 멈춘다 — 셀은 pending 으로 놓이고 그 뒤 새 세션이 이어 돈다(E1b · L7)
+                    self.loop.note_draining(exc.retry_after_s)
                     raise _Stop("draining") from exc
                 if outcome.klass == review_ops.WAIT:
                     self._sleep(outcome.retry_after_s, reason=outcome.code)
@@ -2429,6 +2435,7 @@ class ReviewLoop:
         self._served_n = 0
         self._limits: dict[str, _Probe] = {}            # 자격(이메일)마다 — 다른 사람의 자격으로 물은 답을 쓰지 않는다(R3A-3)
         self._health = _Probe()
+        self._drain_until: int | None = None            # 엔진의 비우기 거절이 알린 retry_after_s 의 끝(L7 · D-52)
         self._fallback_since: dict[str, int] = {}
         # 근거 꾸러미 실호출의 게이트웨이 전송 — 시험이 httpx.MockTransport 를 꽂는 자리(None 이면 실제 네트워크).
         self.live_transport: Any = None
@@ -2458,21 +2465,21 @@ class ReviewLoop:
 
     def draining(self) -> bool:
         """마지막으로 읽은 /health 가 비우기(update-all, 범위 all)인가 — 엔진이 카드 대조 관문을 draining 으로 닫았다(card_review.
-        limit_reason — 그때 limit 은 0 이다, M3.md 4.7). 도는 세션은 다음 호출을 보내기 전에 이것을 본다(리허설 E1b)."""
+        limit_reason — 그때 limit 은 0 이다, M3.md 4.7) — 또는 엔진의 비우기 거절이 알린 retry_after_s 안인가(`note_draining`). 도는
+        세션은 다음 호출을 보내기 전에 이것을 본다(리허설 E1b)."""
         with self._lock:
             value = self._health.value if isinstance(self._health.value, Mapping) else {}
+            until = self._drain_until
         block = value.get("card_review") if isinstance(value.get("card_review"), Mapping) else {}
-        return block.get("limit_reason") == "draining"
+        return block.get("limit_reason") == "draining" or (until is not None and until > self.clock())
 
-    def note_draining(self) -> None:
-        """엔진이 비우기라며 거절했다(review_busy{reason: draining} — 뒤 그물). 마지막 /health 를 비우기(관문 0)로 고쳐 두어 도는 다른
-        세션의 다음 호출도 보내기 전에 멈추게 하고, 다음 틱이 /health 를 새로 읽게 캐시를 버린다(그 답이 이것을 덮는다)."""
+    def note_draining(self, retry_after_s: int | None = None) -> None:
+        """엔진이 비우기라며 거절했다(review_busy{reason: draining} — 뒤 그물). 그 거절이 알린 retry_after_s 동안 비우기로 본다 — 도는
+        다른 세션은 다음 호출을 보내기 전에 멈추고, 루프는 그동안 카드 대조 워커를 띄우지 않는다. /health 가 정상이어도 그렇다 —
+        /health 를 읽는 길과 호출이 가는 길이 다른 서버를 보면 틱마다 다시 띄워 분에 백 번 거절되던 것(묶음 검토 L7 · D-52)."""
         with self._lock:
-            value = dict(self._health.value) if isinstance(self._health.value, Mapping) else {}
-            block = dict(value.get("card_review")) if isinstance(value.get("card_review"), Mapping) else {}
-            value["card_review"] = {**block, "limit": 0, "limit_reason": "draining"}
-            self._health.value = value
-            self._health.at = None
+            until = self.clock() + max(int(retry_after_s or review_ops.WAIT_DEFAULT_S), 1)
+            self._drain_until = max(self._drain_until or 0, until)
 
     @staticmethod
     def _gate_limit(seen: tuple[Any, BaseException | None] | None) -> int | None:
@@ -2767,9 +2774,11 @@ class ReviewLoop:
         for job in live:
             # 창이 통과했다 — 루프가 적은 기다림은 사유와 상관없이 지운다(agent_unreachable·engine_busy 따위로 창 조회가 실패했다
             # 회복한 잡이 도는데도 '기다림' 으로 보이지 않게, R3A-10). 워커의 자리 기다림(표지 없음)은 그 워커가 지운다.
+            # 관문 기다림(GATE_WAITS)은 관문이 열릴 때 _spawn 이 지운다.
             waiting = self.progress(job["id"]).body.get("waiting") or {}
             reason = str(waiting.get("reason") or "")
-            if waiting.get("source") == LOOP_WAIT or reason.startswith("ctx_") or reason in _LEGACY_LOOP_WAITS:
+            if ((waiting.get("source") == LOOP_WAIT and reason not in GATE_WAITS) or reason.startswith("ctx_")
+                    or reason in _LEGACY_LOOP_WAITS):
                 self.progress(job["id"]).set(waiting=None)
         return live
 
@@ -2870,17 +2879,62 @@ class ReviewLoop:
             progress.refresh()
         return phase
 
+    def _gate_wait(self, seen: tuple[Any, BaseException | None] | None, limit: int | None, now: int) -> dict | None:
+        """관문이 닫힌 까닭(루프 기다림) — 엔진의 비우기 거절이 알린 retry_after_s 안(draining) · /health 를 읽었는데 관문 limit 을 모른다
+        (health_unknown) · /health 가 비우기다(draining). 열렸거나 새 답이 아직 없으면 None."""
+        with self._lock:
+            until, read_at = self._drain_until, self._health.at
+        if until is not None and until > now:
+            return {"reason": "draining", "retry_at": until,
+                    "note": "에이전트 서버가 카드 대조 호출을 비우기로 거절했다(review_busy draining — /health 가 비우기가 아니어도)"
+                            f" — 그 거절이 알린 시각(retry_at)까지 새 호출을 내지 않는다. {GATE_FREE_NOTE}"}
+        if seen is None:
+            return None
+        retry_at = (read_at if read_at is not None else now) + HEALTH_CACHE_S
+        if limit is None:
+            why = f"{type(seen[1]).__name__}: {seen[1]}" if seen[1] is not None else "card_review.limit 칸이 없다"
+            return {"reason": "health_unknown", "retry_at": retry_at,
+                    "note": f"에이전트 서버 /health 에서 카드 대조 관문(limit)을 읽지 못했다({why[:200]}) — 관문을 모르면 카드 대조"
+                            " 호출을 내지 않는다. HWAXRISK_AGENT_URL 로 /health 가 닿는지 본다. 읽히면 저절로 이어 돈다."
+                            f" {GATE_FREE_NOTE}"}
+        block = seen[0].get("card_review") if isinstance(seen[0].get("card_review"), Mapping) else {}
+        if block.get("limit_reason") == "draining":
+            return {"reason": "draining", "retry_at": retry_at,
+                    "note": "에이전트 서버가 비우는 중이다(update-all — /health 의 카드 대조 관문 draining) — 새 카드 대조 호출을 내지"
+                            f" 않는다. 비우기가 끝나면 저절로 이어 돈다. {GATE_FREE_NOTE}"}
+        return None
+
+    def _gate_waiting(self, jobs: Sequence[Mapping[str, Any]], wait: Mapping[str, Any] | None, now: int) -> None:
+        """관문 기다림을 적거나(같은 까닭이 이어지면 since 를 둔다) 지운다 — 지우는 것은 루프가 적은 관문 기다림뿐이다."""
+        for job in jobs:
+            progress = self.progress(job["id"])
+            cur = progress.body.get("waiting") or {}
+            mine = cur.get("source") == LOOP_WAIT and cur.get("reason") in GATE_WAITS
+            if wait is None:
+                if mine:
+                    progress.set(waiting=None)
+                continue
+            since = cur.get("since") if mine and cur.get("reason") == wait["reason"] else now
+            progress.set(waiting={"reason": wait["reason"], "since": since, "retry_at": wait["retry_at"], "note": wait["note"],
+                                  "source": LOOP_WAIT})
+
     def _spawn(self, active: list[tuple[dict, str]], now: int) -> int:
         conc = max(1, int(getattr(self.settings, "risk_review_concurrency", 8) or 8))
         if not active:
             return 0
         # 관문 limit 은 15초 안에 읽은 /health 에서만 — 캐시에 없으면 지금 읽고, 그 틱에 읽지 못하면(아직 답이 없다 · 실패 · limit 칸이
-        # 없다) 아무것도 띄우지 않는다. 종전에는 모르면 동시 수(8)로 띄워 비우기 깃발 뒤 1초 안에 호출 여덟이 나갔다(리허설 E1b · D-51).
-        limit = self._gate_limit(self._probe(self._health, self.engine.health, HEALTH_CACHE_S))
-        if limit is None:
-            return 0
-        cap = min(conc, limit)
-        free = cap - len(self.workers())
+        # 없다) 카드 대조(묶음 · 검토) 워커를 띄우지 않는다. 종전에는 모르면 동시 수(8)로 띄워 비우기 깃발 뒤 1초 안에 호출 여덟이
+        # 나갔다(리허설 E1b · D-51). 못 읽음 · 비우기는 루프 기다림으로 적는다(종전에는 아무 말 없이 멈췄다 — 묶음 검토 M3 · D-52).
+        # 마감과 근거 꾸러미(B 층)는 LLM 을 부르지 않아 관문과 상관없이 동시 수 안에서 돈다.
+        seen = self._probe(self._health, self.engine.health, HEALTH_CACHE_S)
+        limit = self._gate_limit(seen)
+        wait = self._gate_wait(seen, limit, now)
+        if seen is not None or wait is not None:                # 새 답이 아직 없으면 지난 기다림을 그대로 둔다
+            self._gate_waiting([job for job, _phase in active], wait, now)
+        workers = self.workers()
+        free = conc - len(workers)
+        gated = 0 if limit is None or wait is not None else min(
+            free, min(conc, limit) - sum(1 for w in workers if w.purpose in GATED_PURPOSES))
         started = 0
         # 근거 꾸러미 실호출(B 층 — C3-12)이 먼저다 — 대상마다 워커 하나(같은 대상의 잡이 둘이어도). 잡 전체를 live 로 묶지 않는다
         # (C3-11 과 같은 까닭) — 언 단위의 셀은 그 사이에도 돈다(셀 문은 unit_live.READY_SQL).
@@ -2896,6 +2950,7 @@ class ReviewLoop:
                 free -= 1
                 started += 1
         while free > 0 and not self.stop.is_set():
+            purposes = [p for p in SPAWN_PURPOSES if gated > 0 or p not in GATED_PURPOSES]
             order = sorted(active, key=lambda item: (len(self.workers(item[0]["id"])), self._served.get(item[0]["id"], -1)))
             picked = None
             for job, phase in order:
@@ -2903,7 +2958,7 @@ class ReviewLoop:
                     continue                            # 반쯤 연 재개 — 성공 하나까지 워커 하나
                 # 전문가 단위 단계(재설계 M3 C3-11) — 묶음을 받은 전문가는 남이 묶음을 다시 받는 동안에도 검토로 집힌다(잡 전체를
                 # pack 단계로 묶지 않는다 — M2.md 8절의 위험). 집는 목적 순서는 pack → review → finalize.
-                for purpose in SPAWN_PURPOSES:
+                for purpose in purposes:
                     head = review_cells.claim_next_expert(self.store, {"id": job["id"]}, boot_id=self.boot_id, now=now,
                                                           purpose=purpose)
                     if head is not None:
@@ -2918,6 +2973,7 @@ class ReviewLoop:
             self._served[job["id"]] = self._served_n
             self._start_worker(job, head, phase)
             free -= 1
+            gated -= phase in GATED_PURPOSES
             started += 1
         return started
 

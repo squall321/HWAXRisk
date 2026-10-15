@@ -99,6 +99,8 @@
   draining         참이면 update-all 의 비우기(범위 all)다 — /health 가 draining · drain{on, scope all} · card_review.limit 0 ·
                    limit_reason draining 이고, 새 run 은 review_busy{reason: draining, retry_after_s 60} → done, 새 pack 은 429 같은
                    글로 거절한다(엔진 review_gate · card_review — M3.md 4.7, 리허설 E1b). 거절한 요청은 drain_refused 에 남는다
+  calls_draining   참이면 /health 는 정상인 채로 새 run · pack 만 draining 과 같이 거절한다 — /health 를 읽는 길과 호출이 가는 길이 다른
+                   서버를 볼 때(묶음 검토 L7)
   health_status · health_delay_s  /health 의 상태(200 이 아니면 그 상태로 거절)와 그 앞에서 자는 실제 시간(루프 탐침 한도를 넘기는 박스)
 기록 — requests(받은 요청 전부), runs(받은 run 수), max_active(동시에 돈 run 의 최댓값), drain_refused(비우기로 거절한 run · pack).
 S8(검토 루프)과 WP5b C9 가 이 파일을 넓힌다. 시험이 쓰는 여러 전문가의 팩은 `derive_pack` 이 엔진 계약 예제(pack_ok·pack_empty)에서
@@ -338,6 +340,7 @@ class FakeReviewEngine:
         self.inject = ""
         self.inject_kinds: set[str] | None = None
         self.draining = False
+        self.calls_draining = False
         self.health_status = 200
         self.health_delay_s = 0.0
         # 기록
@@ -469,7 +472,7 @@ class FakeReviewEngine:
 
     def _pack(self, body: Mapping[str, Any]) -> httpx.Response:
         key = str(body.get("agent_key") or "")
-        if self.draining:
+        if self.draining or self.calls_draining:
             return httpx.Response(429, json=self._drain_refusal("pack", body))
         if self.pack_gate is not None:
             self.pack_gate.wait(30)
@@ -531,7 +534,7 @@ class FakeReviewEngine:
         with self._lock:
             self.runs += 1
             nth = self.runs
-        if self.draining:
+        if self.draining or self.calls_draining:
             return self._stream(iter([_sse("error", self._drain_refusal("run", body)), _sse("done", {})]))
         if self._take("busy_n"):
             return self._busy()

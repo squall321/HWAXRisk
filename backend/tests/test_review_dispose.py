@@ -350,6 +350,24 @@ def test_a_skip_with_no_live_job_binds_only_the_skipped_cells_and_records_no_con
     assert {_head(store, key, a)["state"] for a in (SEAL, PEER)} == {"partial"}                    # 다시 마감됐다(넘김을 실었다)
 
 
+@pytest.mark.parametrize("health", ["unreadable", "draining"])
+def test_a_finalize_only_job_closes_while_the_llm_gate_is_unknown_or_draining(store, health):
+    """M3 묶음 검토 M3 · D-52 — 마감은 LLM 을 부르지 않는다 — /health 를 못 읽거나 비우기인 동안에도 넘김이 세운 마감 잡(돌 셀 0)이
+    그 전문가를 다시 마감하고 닫힌다. 종전에는 관문을 모르거나 0 이면 아무 워커도 띄우지 않아 그 잡이 running 인 채 머물렀다."""
+    key, job_id, unit_ids, fake, r = _failed_target(store)
+    if health == "unreadable":
+        fake.health_status = 503
+    else:
+        fake.draining = True
+    r.clock.advance(review_runner.HEALTH_CACHE_S)                              # 캐시를 지나 /health 를 새로 읽는다
+    out = routes.post_cells_skip(key, routes.CellsSkipBody(filter={"job_id": job_id}, reason="입력이 와야 본다"), ident=ME)
+    for _ in range(3):
+        r.tick()
+        r.clock.advance(61)
+    assert (rig.state(store, out["job"]["job_id"]), _head(store, key, PEER)["state"], fake.drain_refused) == (
+        "completed", "ready", [])
+
+
 # ---------------------------------------------------------------- 넘김
 def test_skip_needs_a_reason_and_the_expert_closes_again_with_the_skip_in_the_report(store):
     """넘김 — failed 만 skipped(사유 4~300자 필수). 살아 있는 잡이 없으면 마감 잡(돌 셀 0)이 서서 그 전문가를 다시 마감하고, 보고서

@@ -353,6 +353,26 @@ def test_a_units_cells_wait_for_its_live_evidence_while_other_units_run(store):
         prompt_rev=cell["prompt_rev"], limits_rev=limits, live_sha=live["sha"])
 
 
+@pytest.mark.parametrize("health", ["unreadable", "draining"])
+def test_live_evidence_is_frozen_while_the_llm_gate_is_unknown_or_draining(store, health):
+    """M3 묶음 검토 M3 · D-52 — 근거 꾸러미 실호출(B 층)은 게이트웨이 도구를 부를 뿐 LLM 을 부르지 않는다 — /health 를 못 읽거나
+    비우기여도 돈다(카드 대조 호출은 기다린다). 종전에는 관문을 모르거나 0 이면 아무 워커도 띄우지 않아 그 단위가 얼지 않았다."""
+    key = _target(store)
+    unit_id = _material_unit(store, key)
+    rig.job(store, key, scope={"agents": [rig.SEAL]})
+    gw = Gateway()
+    fake = FakeReviewEngine(rig.packs())
+    if health == "unreadable":
+        fake.health_status = 503
+    else:
+        fake.draining = True
+    r = rig.Rig(store, fake)
+    r.loop.live_transport = gw.transport
+    r.tick()
+    assert (_row(store, key, unit_id)["status"], [c["arguments"] for c in gw.calls]) == ("ok", [PAIR])
+    assert (fake.calls("pack"), fake.calls("run")) == ([], [])
+
+
 def test_the_engine_sees_the_live_line_in_that_units_request(store):
     """얼린 B 층 줄은 그 단위 셀의 엔진 요청(unit.evidence 끝 · notes 머리)에 실리고 엔진의 단위 모양(RunUnit)을 지난다 — 다른 단위의
     요청에는 없다."""
