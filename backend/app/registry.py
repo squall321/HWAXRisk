@@ -819,7 +819,7 @@ def merge(store: RiskStore, target_key: str, *, owner_sub: str | None = None, pe
     with store.tx():
         for row in rows:
             counts[_write_registry_row(store, row, now)] += 1
-        escalated = _flag_escalations(store, rows, target_key, now, flow=flow)
+        escalated = _flag_escalations(store, rows, target_key, now, flow=flow, owner_sub=owner_sub)
         # cells 대상은 M3 동안 과제를 가로지르는 선례 통계에 기여하지 않는다(M3 #57 · 7절 (a)-2) — 그 대상의 기여 행을 비운다.
         affected = _recompute_contrib(store, target_key, owner_sub or "", rows if flow != "cells" else [], now)
         priors_written = _recompute_priors(store, affected, now)
@@ -865,18 +865,23 @@ def _is_stronger(row: Mapping[str, Any], basis: Mapping[str, Any], *, flow: str 
 
 
 def _flag_escalations(store: RiskStore, rows: Sequence[Mapping[str, Any]], target_key: str, now: int, *,
-                      flow: str = "panels") -> list[str]:
+                      flow: str = "panels", owner_sub: str | None = None) -> list[str]:
     """사람이 dismissed 로 닫은 같은 클러스터가 더 강한 근거로 재제기되면 그 행에 재검토 표기를 남긴다.
 
     status 는 dismissed 그대로다 — 코드가 사람 판정을 뒤집지 않는다. 판정 후보에는 그대로 든다(plan §4.7.1).
+    표기는 그 대상 소유자(`owner_sub`, 없으면 rr_targets 의 소유자)의 행에만 쓴다 — 남이 닫은 행에 쓰면 남의 원장을 고치고 이
+    대상의 키(by_target)를 거기 싣는다(D48 조정자 결정). 소유자를 모르면 아무 행에도 쓰지 않는다.
     """
+    if owner_sub is None:
+        target = store.query_one("SELECT owner_sub FROM rr_targets WHERE target_key = ?", (target_key,))
+        owner_sub = _clean_str(target["owner_sub"]) if target is not None else ""
     flagged: list[str] = []
     for row in rows:
         others = store.query(
             "SELECT target_key, cluster_key, status, status_source, status_basis_json, needs_review_json"
-            " FROM rr_registry WHERE cluster_key = ? AND target_key != ? AND status = 'dismissed'"
+            " FROM rr_registry WHERE cluster_key = ? AND target_key != ? AND owner_sub = ? AND status = 'dismissed'"
             " AND status_source = 'human' ORDER BY target_key",
-            (row["cluster_key"], target_key),
+            (row["cluster_key"], target_key, owner_sub),
         )
         for other in others:
             basis = _loads(other["status_basis_json"], {})

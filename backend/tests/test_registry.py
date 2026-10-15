@@ -869,6 +869,7 @@ def _dismissed_row(store, target_key: str, cluster_key: str, *, sev3: int, suppo
 def test_a_stronger_reraise_flags_the_dismissed_row(risk_store, clock, new_sev3, expected):
     """강도가 오른 재제기는 needs_review_json 을 남기고, 같은 강도면 남기지 않는다. status 는 불변이다."""
     _dismissed_row(risk_store, "T_old", "ck:reraise00001", sev3=1, support=1, grade="경험칙")
+    _target(risk_store, "T_new")              # 병합하는 대상 — 표기는 그 소유자의 행에만 간다(D48)
     row = {"target_key": "T_new", "cluster_key": "ck:reraise00001", "sev3": new_sev3, "support": 1,
            "evidence_grade": "경험칙"}
     flagged = registry._flag_escalations(risk_store, [row], "T_new", 1234)
@@ -889,6 +890,7 @@ def test_a_stronger_reraise_flags_the_dismissed_row(risk_store, clock, new_sev3,
 def test_human_reconfirmation_clears_the_escalation_flag(risk_store, clock):
     """사람이 다시 확정하면 재검토 표기가 지워진다(set_status 가 needs_review_json 을 비운다)."""
     _dismissed_row(risk_store, "T_old", "ck:reraise00002", sev3=1, support=1, grade="경험칙")
+    _target(risk_store, "T_new")
     registry._flag_escalations(risk_store, [{"target_key": "T_new", "cluster_key": "ck:reraise00002",
                                              "sev3": 3, "support": 2, "evidence_grade": "도구예측"}],
                                "T_new", 1234)
@@ -899,6 +901,24 @@ def test_human_reconfirmation_clears_the_escalation_flag(risk_store, clock):
                         evidence_ref="rpt:2")
     assert risk_store.query_one(
         "SELECT needs_review_json FROM rr_registry WHERE target_key = 'T_old'")["needs_review_json"] is None
+
+
+def test_a_reraise_flags_only_rows_of_the_targets_own_owner(risk_store, clock):
+    """재제기 표기는 그 대상 소유자의 행에만 쓴다 — 같은 cluster_key 라도 남이 닫은 행에는 쓰지 않아 남의 원장을 고치지 않고 이 대상의
+    키(by_target)를 거기 싣지 않는다(D48 조정자 결정). 같은 소유자가 닫은 행은 그대로 표기된다."""
+    other = "someone@else.com"
+    _dismissed_row(risk_store, "T_old", "ck:reraise00003", sev3=1, support=1, grade="경험칙")
+    _dismissed_row(risk_store, "T_theirs", "ck:reraise00003", sev3=1, support=1, grade="경험칙")
+    risk_store.execute("UPDATE rr_targets SET owner_sub = ?, project_id = 'P-theirs' WHERE target_key = 'T_theirs'", (other,))
+    risk_store.execute("UPDATE rr_registry SET owner_sub = ?, status_decided_by = ? WHERE target_key = 'T_theirs'", (other, other))
+    _target(risk_store, "T_new")
+    row = {"target_key": "T_new", "cluster_key": "ck:reraise00003", "sev3": 3, "support": 1, "evidence_grade": "경험칙"}
+
+    assert registry._flag_escalations(risk_store, [row], "T_new", 1234) == ["ck:reraise00003"]
+    notes = {r["target_key"]: r["needs_review_json"] for r in risk_store.query(
+        "SELECT target_key, needs_review_json FROM rr_registry WHERE cluster_key = 'ck:reraise00003'")}
+    assert notes["T_theirs"] is None
+    assert json.loads(notes["T_old"])["by_target"] == "T_new"
 
 
 # ================================================================ 조직 공개 토글(plan §5.1 원칙 9 · §0.9 P6-8)
