@@ -478,8 +478,11 @@ def test_lineage_never_reads_into_another_persons_project(ledger):
             return (head.rstrip("\n") + "\n" + json.dumps({"table": "rr_projects", "row": row}) + "\n").encode("utf-8")
 
     assert asyncio.run(routes.post_import(_Body(), ident=factories.ident(OTHER)))["inserted"] == 1
-    mine = routes.create_project(routes.ProjectBody(code="next-rev", name="다음 리비전", classification="internal",
-                                                    predecessor_project_id=ids["project"]), ident=factories.ident(OWNER))
+    made = _answer(lambda: routes.create_project(routes.ProjectBody(
+        code="next-rev", name="다음 리비전", classification="internal", predecessor_project_id=ids["project"]),
+        ident=factories.ident(OWNER)))
+    assert made[1] == 200, made                                       # 제 과제를 앞 과제로 — 주인은 만든다
+    mine = json.loads(made[2])
     code = store.query_one("SELECT code FROM rr_projects WHERE id = ?", (ids["project"],))["code"]
     theirs = routes.get_similar(row["id"], ident=factories.ident(OTHER))
     assert ids["project"] not in json.dumps(theirs, ensure_ascii=False) and theirs["lineage"] == [], theirs["lineage"]

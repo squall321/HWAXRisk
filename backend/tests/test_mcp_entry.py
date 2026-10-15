@@ -530,8 +530,9 @@ def test_a_successor_project_compares_against_its_predecessors_latest_capture(bo
     old = call("risk_create_project", code="GEN-1", name="1세대", classification="internal")["id"]
     call("risk_add_source", project_id=old, kind="mcad", ref=SOURCE_REFS["mcad"])
     base = call("risk_capture_snapshot", project_id=old)["snapshot_id"]
-    new = call("risk_create_project", code="GEN-2", name="2세대", classification="internal",
-               predecessor_project_id=old)["id"]
+    made = call("risk_create_project", code="GEN-2", name="2세대", classification="internal", predecessor_project_id=old)
+    assert "id" in made, made                                         # 제 과제를 앞 과제로 — 만든다
+    new = made["id"]
     call("risk_add_source", project_id=new, kind="mcad", ref=SOURCE_REFS["mcad"])
     apps.revise()
     target = call("risk_capture_snapshot", project_id=new)["snapshot_id"]
