@@ -2433,3 +2433,81 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
 - 잡 선택은 `llm: "glm" | "claude"`(없으면 glm)이고 엔진에는 `external` 로 보낸다(엔진은 `claude` 를 422 bad_request 로 거절한다 —
   rejects.json). 옮기는 자리는 engine_client 한 곳이다.
 - GLM 잡의 params · 요청 본문 · 응답 · 보고서 바이트는 바뀌지 않는다 — 새 칸은 claude 잡에만 싣는다(없으면 glm).
+
+### XR-2. 동의는 JSON true 하나 · 누가 · 언제 · 어느 입구
+- `review_runner.check_llm_choice` — claude 는 `consent_external is True` 일 때만 선다(글자 'true' · 1 · 'yes' 는 422
+  `consent_external_required` — 잡 행이 생기지 않는다). REST 본문은 그 칸을 `Any` 로 받는다(pydantic bool 은 'true' 를 참으로 바꾼다).
+- 기록은 call-estimate 동의와 같은 자리다 — params `consent_external{by, at, source}`(by = 요청자 · source = web·mcp·api · chain 은 앞
+  잡의 기록을 그대로), 반환과 감사 행(job.create after)에도 같은 칸. GLM 잡에는 칸이 없다(params · 반환 · 감사 바이트 그대로).
+- MCP 입구는 FastMCP 가 형을 단 인자를 미리 풀어(글자 'true' → true) 엄격함이 REST 만 못하다 — 도구 설명이 '동의를 받은 뒤에만
+  true' 를 말하는 것이 그 자리의 그물이다(엔진 X-D6 도 FastMCP 의 풀기를 같은 식으로 받아들였다).
+
+### XR-3. 길이 열렸는지는 잡을 만들 때 /health 로
+- claude 잡만 `/health` 를 한 번 묻는다(트랜잭션 밖) — capabilities 에 external_llm 이 없으면 409 `external_llm_unavailable{reason:
+  capability_absent, knob: EXTERNAL_LLM_ENABLED}`, 읽지 못하면 같은 코드의 `reason: health_unreachable`(확인 못 한 길에 세우지 않는다).
+- 사슬이 세우는 쟁점 · 종합 잡은 다시 묻지 않는다 — 그 사이 스위치가 꺼지면 엔진의 `external_llm_disabled` 가 설정 보류로 멈춘다.
+
+### XR-4. '잡 주인의 PAT' 는 동의한 사람의 PAT 로 읽었다
+- 엔진의 과제는 호출 신원(포털이 PAT 로 덮어쓴 user_email)의 줄에 서고 그 사람의 워크플로만 집는다. 반출에 동의하고 워크플로를 돌릴
+  사람은 잡을 만든 요청자다 — 그래서 claude 잡의 자격은 그 사람의 PAT 하나뿐이다(검토 잡 `pinned_review_credential` · 쟁점 · 종합
+  `runner.resolve_job_credential` · 패널의 엔진 자격 `external_consenter`). GLM 처럼 대상 소유자의 PAT 로 내려가면 남의 줄에 과제가
+  서서 아무도 집지 못하거나, 동의하지 않은 사람의 Claude 로 나간다. 서비스 PAT 는 종전처럼 어디서도 쓰지 않는다.
+- 없을 때는 기존 길 그대로 — 검토 잡은 422 pat_unavailable(까닭에 '동의한 사람의 PAT 로만'), 쟁점 잡은 집지 않고 error
+  `pat_unavailable: …` 를 단 채 기다리며(엔진 401 이면 보류 credential), 종합은 엔진 자격 실패의 credential 보류다.
+
+### XR-5. 창 답은 길마다 따로 · 외부 창 출처는 '아는 창'
+- 루프의 창 캐시 열쇠는 이메일(GLM — 종전 열쇠) · `이메일|external`(외부)이다 — 같은 사람의 GLM 잡과 판이 갈린다.
+- 외부 limits 의 `ctx_source: external` 은 fallback 가정이 아니다(`known_ctx_sources`) — 아니면 600초 뒤 ctx_unknown 으로 멈췄다.
+- 외부 창을 물었는데 답에 `llm: external` 이 없으면(포털 중계가 ?llm 을 버렸다 — X-3a) GLM 판으로 계획하지 않고 `external_config` 로
+  멈춘다(루프 · 세션 · 종합 셋 다). 계획 · 호출 본문은 중계가 통째로 넘기므로 판 대조(rev_mismatch)가 뒤 그물이다.
+
+### XR-6. external_worker 는 '기존 다시 내기 뒤' 사람이 재개하는 보류
+- 검토 루프 — 일꾼 없음 · 답 시간 초과는 인프라(차감 없이 셀 백오프 — 기존 다시 내기)다. 차단기가 인프라로 열리면 창의 인프라
+  실패 절반 이상이 그 둘일 때 `llm_outage`(시계로 반쯤 연다) 대신 `external_worker`(auto 없음)다 — 워크플로가 없으면 시계로 다시 열어도
+  같다(`review_ops.outage_hold`). 엔진이 이미 EXTERNAL_LLM_WAIT_S 를 기다렸고, 부재 판정 뒤에는 그 사람의 과제를 곧바로 실패시키므로
+  창이 금방 찬다.
+- 쟁점 패널 — 엔진이 좌석 기다림과 의장 재호출을 다 쓴 뒤 `chair_failed{cause: external_worker_*}` 로 끝낸다. 패널은 종전 결정문 없음
+  길(차감 없음)로 닫고 잡만 `external_worker` 로 멈춘다.
+- 종합 — 요약의 인프라 한도(HWAXRISK_SUMMARY_INFRA_MAX)까지는 종전대로 다시 내고, 그 뒤 서술 없이 닫는 대신(infra_exhausted) 요약을
+  대기로 두고 잡을 `external_worker` 로 멈춘다.
+- 길잡이와 보류 글이 '잡 주인의 Claude Code 에서 워크플로 hwax-risk-claude 를 그 사람의 PAT 로 (다시) 돌린 뒤 재개' 를 말한다.
+
+### XR-7. 설정 문제는 보류 external_config 하나
+- `external_llm_disabled` · `external_consent_required` · `external_owner_missing`(카드 대조 스트림 전 거절 · 심의 error 프레임)과 중계의
+  질의 누락은 셀 탓이 아니고 다시 내도 같다 — 차감 없이 `external_config`(auto 없음)로 멈춘다. 패널 error 는 UNCHARGED 코드로 적어
+  연속 오류(ENGINE_FAIL_STREAK)에 세지 않는다. 엔진이 모르는 llm 값(bad_request)은 앱이 보내지 않는 값이라 종전 계약 어긋남 그대로다.
+
+### XR-8. 무엇이 돌았나는 엔진의 표지로 — llm_mismatch
+- 카드 대조 · 요약은 답의 `meta.llm`, 패널은 result 프레임의 `llm` 이 정본이다. claude 잡인데 external 이 아니면 답은 받되(이 박스의
+  LLM 답이라 반출은 없었다) Claude 로 적지 않는다 — 호출 행 `quality_json.app.llm_mismatch{want, got}` · 패널 quality flags
+  `llm_mismatch` · 잡 params `llm_mismatch`(json_set 한 문장으로 올린다 — 동시 워커가 잃지 않게).
+- 카드 대조에서는 판 대조(expect 의 외부 판)가 먼저 걸려 실제로는 rev_mismatch(contract)가 되기 쉽다 — 이 표지는 뒤 그물이다.
+  패널은 X-3a 전의 중계가 `delib_opts.llm` 을 버렸으므로 그때 바로 이 표지가 섰을 길이다.
+
+### XR-9. 표기 — 판단 LLM 은 돈 것에서 센다
+- 품질 글 첫 줄 · 전문가 보고서 머리 · 종합 보고서 머리 줄은 받은 호출 가운데 외부 응답자 답(엔진 계약상 `model: external`)과 어긋남을
+  센다(`review_quality.judge_llm`) — 외부만이면 '판단 LLM: Claude(외부, 사용자 신고 모델)', 섞이면 판마다 호출 수, 어긋남이 있으면 그
+  수. 요약 서술 머리 · 쟁점 패널 줄도 같은 말을 단다.
+- 원장 지문(`_ledger_hash`)의 행에는 칸을 더하지 않고 따로 센다 — GLM 대상의 품질 글 · 보고서 바이트가 그대로다(시험이 본다).
+
+### XR-10. 하지 않은 것 · 남긴 것
+- 사람이 처분(다시 · 넘김)으로 세우는 검토 잡, 사람이 올린 쟁점의 잡, 보고서 다시 내기의 종합 잡은 GLM 이다 — 동의는 잡마다이고
+  사슬 밖으로 넘기지 않는다(살아 있는 claude 잡이 그 셀을 집으면 claude 로 돈다). Claude 로 다시 돌리려면 새 잡을 claude 로 만든다.
+- 외부 잡의 워커도 앱의 동시 수와 /health 관문 수(GLM)에 함께 센다 — 엔진의 주인마다 상한은 `review_busy{external_per_owner}` 기다림이
+  지킨다(보수적이다 — 사람이 띄운 심의로 GLM 관문이 줄면 외부 잡도 같이 준다).
+- main d18e9d6 의 전체 시험에는 X-1 탓 실패가 하나 있었다 — 엔진 요청 모델에 llm · consent_external 이 들어 가짜 엔진의 모양 표와
+  갈렸다(test_card_review_request_contract). 가짜 엔진이 엔진을 따르게 고쳐 이 가지에서 닫았다.
+
+### XR-11. 시험 · 변이 · 전체 시험
+- 새 시험 두 파일(가짜만 — 실제 Claude 는 부르지 않는다) — `test_external_llm_contract.py`(엔진 외부 계약 예제 22개의 바이트 사본을
+  엔진 클라이언트 · 분류표 · 심의 수집에 그대로 흘린다 — 25건) · `test_external_llm_jobs.py`(잡 만들기 · 루프 · 사슬 · 쟁점 패널 ·
+  요약 · 표기 · 길잡이와 GLM 이 그대로인지 — 35건). 포털 요청 모델 시험(`test_wiring_regressions`)에 claude 패널 본문 한 건 —
+  포털 main(X-3a 뒤)이 llm · consent_external 을 받고 버리지 않는다.
+- 고친 기존 시험은 둘이고 둘 다 늘어난 계약 표면의 고정이다 — MCP `risk_start_job` 의 인자 집합(llm · consent_external), 보류 코드표의
+  사람이 재개하는 집합(external_worker · external_config). 가짜 엔진의 요청 모양 표는 엔진(X-1)을 따르게 고쳤다(XR-10 끝 줄).
+- 변이(스크래치 사본, 22개) — 동의(참 같은 값 · 검사 없음) · 능력 거절(탐침 없음 · 능력 무시) · 동의한 사람의 PAT 만(쟁점 잡 · 검토
+  잡 · 패널의 엔진 자격) · 사슬 상속 · external_worker(차단기 · 차감 · 패널 · 요약) · llm_mismatch(카드 대조 · 패널 · 요약) · 중계 질의
+  누락 · GLM 칸 없음 · 판단 LLM 표기 · 설정 보류(카드 대조 · 패널) · 패널 본문 · 외부 근거 예산. 첫 판 21/22 — 살아남은 m3b(패널의
+  엔진 자격을 동의 기록에 박지 않음)는 사슬이 요청자와 동의 기록을 함께 물려주어 같은 값이라 살았다. 둘이 갈린 잡의 시험을 더해
+  22/22(마지막 머리 b711f3a 에서도 22/22).
+- 전체 시험(공유 잠금 아래, b711f3a) — 3,277 통과 · xfail 4 · 실패 0(rc 0). ruff 깨끗하다.

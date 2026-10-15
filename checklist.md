@@ -388,14 +388,14 @@
 > 절(main 839fa68)이다. 기본 꺼짐 — 사람이 잡마다 고르고 동의할 때만 돈다. 실제 Claude 로 돌리는 시험은 하지 않는다(가짜만).
 > 결정과 까닭은 context-notes 의 'Claude 길 X-2' 절(XR-1~)에 적는다.
 
-- [ ] 잡 선택 `llm`(glm | claude, 없음 = glm) · `consent_external` 엄격 true(아니면 422 consent_external_required) · 동의 기록(누가·언제·입구)
-- [ ] 엔진 /health 의 capabilities 에 external_llm 이 없으면 409 external_llm_unavailable
-- [ ] 엔진 호출 — limits `?llm=external` · plan `llm` · run `llm` + `consent_external` · 외부 창 판을 그 잡에 일관되게(GLM 잡의 판은 그대로)
-- [ ] 사슬 — 쟁점 · 종합 잡이 검토 잡의 `llm` 과 동의 기록을 물려받는다
-- [ ] 쟁점 패널 — `delib_opts.llm` + `consent_external` · 동의한 사람의 PAT 로만(서비스 · 남의 PAT 로 내려가지 않는다) · 브리프는 외부 evid_budget
-- [ ] 오류 — external_worker_absent · external_answer_timeout(인프라 → 기존 다시 내기 뒤 보류 `external_worker`, 차감 없음) ·
+- [x] 잡 선택 `llm`(glm | claude, 없음 = glm) · `consent_external` 엄격 true(아니면 422 consent_external_required) · 동의 기록(누가·언제·입구)
+- [x] 엔진 /health 의 capabilities 에 external_llm 이 없으면 409 external_llm_unavailable
+- [x] 엔진 호출 — limits `?llm=external` · plan `llm` · run `llm` + `consent_external` · 외부 창 판을 그 잡에 일관되게(GLM 잡의 판은 그대로)
+- [x] 사슬 — 쟁점 · 종합 잡이 검토 잡의 `llm` 과 동의 기록을 물려받는다
+- [x] 쟁점 패널 — `delib_opts.llm` + `consent_external` · 동의한 사람의 PAT 로만(서비스 · 남의 PAT 로 내려가지 않는다) · 브리프는 외부 evid_budget
+- [x] 오류 — external_worker_absent · external_answer_timeout(인프라 → 기존 다시 내기 뒤 보류 `external_worker`, 차감 없음) ·
       review_busy external_per_owner(기다림) · external_llm_disabled · external_consent_required · external_owner_missing(설정 보류)
-- [ ] 무엇이 돌았나 — meta.llm · 패널 result.llm 이 external 이 아니면 Claude 로 적지 않고 `llm_mismatch` 를 잡 · 보고서에
-- [ ] 보고서 · 품질 글 — '판단 LLM: Claude(외부, 사용자 신고 모델)'(GLM 잡의 글은 그대로)
-- [ ] 길잡이 · MCP `risk_start_job` · REST 인자와 반출 경고
-- [ ] 시험(가짜만) — 외부 계약 예제 바이트 사본 · 카드 대조 · 패널 · GLM 회귀 · 변이 검사 · 전체 시험(공유 잠금)
+- [x] 무엇이 돌았나 — meta.llm · 패널 result.llm 이 external 이 아니면 Claude 로 적지 않고 `llm_mismatch` 를 잡 · 보고서에
+- [x] 보고서 · 품질 글 — '판단 LLM: Claude(외부, 사용자 신고 모델)'(GLM 잡의 글은 그대로)
+- [x] 길잡이 · MCP `risk_start_job` · REST 인자와 반출 경고
+- [x] 시험(가짜만) — 외부 계약 예제 바이트 사본 · 카드 대조 · 패널 · GLM 회귀 · 변이 검사 · 전체 시험(공유 잠금) — 변이 22/22 · 전체 3,277 통과(b711f3a, rc 0)
