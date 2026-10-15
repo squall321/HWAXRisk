@@ -330,11 +330,12 @@ def claim_next_expert(store: Any, job: Mapping[str, Any] | None = None, *, boot_
                       purpose: str = "review") -> dict | None:
     """전문가 한 명을 쥔다 — 쥔 머리(dict, `lease_owner` 포함) 또는 None.
 
-    `purpose='review'` 는 카드 묶음이 `ok`·`empty` 이고 백오프가 지난 범위 안 `pending` 셀이 있는 전문가, `'pack'` 은 묶음이
-    `todo`·`error` 이고 범위 안 `pending` 셀이 있는 전문가다(묶음 받기도 워커 자리에서 한다 — m-04). `'finalize'` 는 범위 안 셀이
-    다 닫혔는데 마감되지 않은 전문가다(마감 도중 결함·재기동 — 마감은 머리를 ready·partial 로 옮기므로 planned 로 남은 것이 그것이다).
-    마감은 닫힌 셀이 이 잡의 것이기를 요구하지 않는다 — 앞 잡에서 셀을 다 닫고 마감 전에 멈춘(재기동·취소) 전문가를 다음 잡이
-    범위에 넣으면 그 잡이 마감한다(R3A-1, 머리의 run_id 가 이 잡이면 그 잡의 범위다).
+    `purpose='review'` 는 카드 묶음이 `ok`·`empty` 이고 백오프가 지난, 이 잡에 묶인 `pending` 셀이 있는 전문가, `'pack'` 은 묶음이
+    `todo`·`error` 이고 이 잡에 묶인 `pending` 셀이 있는 전문가다(묶음 받기도 워커 자리에서 한다 — m-04). `'finalize'` 는 이 잡의
+    몫(`job_expert_sql` — 범위로 찍힌 머리이거나 이 잡에 묶인 셀이 있다)인데 이 잡에 묶인 셀이 다 닫히고 마감되지 않은 전문가다(마감
+    도중 결함·재기동 — 마감은 머리를 ready·partial 로 옮기므로 planned 로 남은 것이 그것이다). 마감은 닫힌 셀이 이 잡의 것이기를
+    요구하지 않는다 — 앞 잡에서 셀을 다 닫고 마감 전에 멈춘(재기동·취소) 전문가를 다음 잡이 범위에 넣으면 그 잡이 마감한다(R3A-1).
+    다시 연 셀은 셀만 묶이고 머리는 범위로 찍히지 않는다(반대 검토 3차 MEDIUM 2 · 3 · D-47).
     셋 다 `planned` 이고 머리의 백오프(`not_before`)가 지났어야 한다. 순서는 `review_order`(Tier A → B → C).
     `job` 을 주지 않으면 도는(`running`) 검토 잡을 돌아가며 — 도는 전문가가 가장 적은 잡부터 — 집는다(P-09). `job` 을 주어도
     그 잡이 지금 `running` 인 검토 잡이 아니면 None 이다. 선점은 `planned` 조건이 붙은 UPDATE 의 바뀐 행이 1 일 때만 선다.
