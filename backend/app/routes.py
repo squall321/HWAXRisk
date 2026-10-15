@@ -3651,19 +3651,24 @@ MCP_JOB_NAMES = 5          # MCP 답의 잡 범위 목록 칸마다 앞 몇 이�
 MCP_JOB_WORKERS = 3        # MCP 답의 워커 신호 앞 몇
 
 
+def _mcp_heads(value: dict) -> dict:
+    """목록 칸마다 앞 MCP_JOB_NAMES 개와 수(`<칸>_n`) — MCP 답이 런과 함께 자라지 않게(잡 범위 · 완결 잔여). REST 는 전부를 싣는다."""
+    out: dict[str, Any] = {}
+    for key, item in value.items():
+        if isinstance(item, list):
+            out[key], out[f"{key}_n"] = item[:MCP_JOB_NAMES], len(item)
+        else:
+            out[key] = item
+    return out
+
+
 def mcp_job_brief(job: Any) -> Any:
     """MCP 답의 검토 잡 칸(진행판 review.job · 길잡이 facts.review_job) — 범위(scope)의 목록 칸과 도는 워커 신호를 수와 앞 몇으로
     줄인다(359명 전원 범위 · 워커 8 이면 와이어 25,000자를 넘었다 — 반대 검토 MEDIUM 12, 사용자 결정). REST 진행판은 전부를 싣는다."""
     if not isinstance(job, dict):
         return job
     out = dict(job)
-    scope: dict[str, Any] = {}
-    for key, value in (job.get("scope") or {}).items():
-        if isinstance(value, list):
-            scope[key], scope[f"{key}_n"] = value[:MCP_JOB_NAMES], len(value)
-        else:
-            scope[key] = value
-    out["scope"] = scope
+    out["scope"] = _mcp_heads(job.get("scope") or {})
     signal = job.get("signal")
     if isinstance(signal, dict) and isinstance(signal.get("workers"), list):
         workers = signal["workers"]
@@ -3672,6 +3677,13 @@ def mcp_job_brief(job: Any) -> Any:
                                                            "event_idle_s") if k in w}
                                      for w in workers[:MCP_JOB_WORKERS] if isinstance(w, dict)]}
     return out
+
+
+def mcp_qualifiers(qualifiers: list[dict]) -> list[dict]:
+    """MCP 답의 완결 잔여(진행판 qualifiers) — 미토의 쟁점 문장 · 몰린 칸 · 쟁점 id 같은 목록 칸을 앞 몇과 수로 줄인다(review1 M9 — 미토의
+    쟁점 300건이면 문장만으로 진행판이 와이어 25,000자를 넘었다). 수 · 표기 · 확인 상태는 그대로다. 전부는 REST
+    GET /api/targets/{key}/closure 다."""
+    return [_mcp_heads(q) for q in qualifiers]
 
 
 def _quality_summary(quality: Any) -> dict | None:

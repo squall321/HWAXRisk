@@ -1,8 +1,9 @@
-# 반대 검토 1차(review1) 쪽 받기 몫 — 쪽을 잇는 안정 열쇠와 ledger_rev(L3), 제기자가 많은 등록부 행도 MCP 와이어 안에 오고 쪽이 이어진다(H5)
+# 반대 검토 1차(review1) 쪽 받기 몫 — 쪽을 잇는 안정 열쇠와 ledger_rev(L3), 제기자가 많은 등록부 행도 MCP 와이어 안에 오고 쪽이 이어진다(H5), 진행판 잔여의 목록 칸이 런과 함께 자라지 않는다(M9)
 """원장은 생산자 경로다 — 검토 → 쟁점 → 종합은 test_review1_closure 의 사슬(가짜 검토 엔진 · 가짜 쟁점 패널 엔진 · 가짜 요약 엔진)이
 세운다. 쪽은 REST 본체(routes.issues_payload · registry_payload — MCP 가 같은 함수를 쓴다)로 받고, 쪽 사이의 원장 변화는 사람의 쟁점
 결정(routes.put_issue)과 등록부 상태 표기(routes.put_registry_status)다. 제기자가 많은 행은 한 영역 전문가 40명이 같은 단위를 같은
-카드로 FAIL 로 본 검토 잡(가짜 검토 엔진)이 세운다.
+카드로 FAIL 로 본 검토 잡(가짜 검토 엔진)이 세운다. 미토의 쟁점이 많은 원장은 카드 열 장 전부를 FAIL 로 본 검토 → 상한 1 의 쟁점 잡이
+세운다.
 """
 from __future__ import annotations
 
@@ -11,7 +12,7 @@ import pytest
 import app.mcp_server as srv
 from app import issues, registry, routes, units
 from tests import factories
-from tests.rr.test_review1_closure import _chained
+from tests.rr.test_review1_closure import _chained, _issues
 from tests.synth import fake_review_engine as fre
 from tests.synth import review_rig as rig
 from tests.synth.fake_review_engine import FakeReviewEngine
@@ -110,3 +111,26 @@ def test_a_registry_row_raised_by_a_crowd_fits_the_wire_and_the_pages_still_join
     slim = got[crowded["cluster_key"]]["merged"]
     assert slim.get("lists_total", {}).get("member_ids") == 40 and len(slim["member_ids"]) < 40
     assert slim["member_ids"] == crowded["merged"]["member_ids"][:len(slim["member_ids"])]
+
+
+def test_coverage_residual_lists_stay_short_on_the_wire_however_many_issues_wait(store, monkeypatch):
+    """M9 — 완결 잔여의 목록 칸(미토의 쟁점 문장 · 몰린 칸 · 쟁점 id)은 런과 함께 자라 미토의 쟁점 300건이면 MCP 진행판이 와이어
+    25,000자를 넘었다(맞추는 고리는 좌석·검토 순서만 줄인다). MCP 진행판은 목록 칸마다 앞 5개와 수(<칸>_n)를 주고 수 · 표기 · 확인
+    상태는 그대로다. REST 는 전부다."""
+    key = rig.target(store)
+    job_id = rig.job(store, key)
+    fake = FakeReviewEngine(rig.packs())
+    fake.verdicts = {str(c["record_id"]): ("yes", "FAIL") for c in CARDS.values()}
+    rig.Rig(store, fake).finish(job_id)
+    _issues(store)
+    rest = {q["item"]: q for q in routes.coverage_payload(key, owner_sub=OWNER)["qualifiers"]}
+    assert len(rest["issues_untried"]["sentences"]) > routes.MCP_JOB_NAMES
+    factories.act_as_delegate(monkeypatch, OWNER)
+    mcp = {q["item"]: q for q in srv.risk_get_coverage(target_key=key, with_seats=False)["qualifiers"]}
+    assert set(mcp) == set(rest)
+    for item, q in rest.items():
+        for name, value in q.items():
+            if isinstance(value, list):
+                assert (mcp[item][name], mcp[item].get(f"{name}_n")) == (value[:routes.MCP_JOB_NAMES], len(value)), (item, name)
+            else:
+                assert mcp[item][name] == value, (item, name)

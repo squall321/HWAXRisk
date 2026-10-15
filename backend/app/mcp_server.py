@@ -136,7 +136,7 @@ def risk_list_projects() -> dict:
 @mcp.tool()
 def risk_get_coverage(target_key: str, with_seats: bool = True, domain: str | None = None,
                       order_offset: int | None = None, seat_offset: int = 0) -> dict:
-    """심사 진행판 — 도메인별 상태·미착석 수·완결 레벨·잡 상태와 좌석 행(with_seats=False 면 카운트만, 좌석이 많으면 seat_offset 부터 한 번에 약 2만 5천 자씩 주고 next_seat_offset 으로 이어 받는다), 카드 대조 대상의 review 칸은 검토 순서를 영역마다 영역 안 순위 1~3 만 싣고(review.order_page 에 전체 셈) order_offset 을 주면 그 자리부터 검토 순서 전부를 쪽으로 준다(좌석 행 없이, next_order_offset 으로 이어 받는다)."""
+    """심사 진행판 — 도메인별 상태·미착석 수·완결 레벨·잡 상태와 좌석 행(with_seats=False 면 카운트만, 좌석이 많으면 seat_offset 부터 한 번에 약 2만 5천 자씩 주고 next_seat_offset 으로 이어 받는다), 카드 대조 대상의 review 칸은 검토 순서를 영역마다 영역 안 순위 1~3 만 싣고(review.order_page 에 전체 셈) order_offset 을 주면 그 자리부터 검토 순서 전부를 쪽으로 준다(좌석 행 없이, next_order_offset 으로 이어 받는다), 완결 잔여(qualifiers)의 목록 칸(미토의 쟁점 문장 · 몰린 칸 · 쟁점 id 따위)은 앞 5개와 수(<칸>_n)만 준다(전부는 웹 REST GET /api/targets/{key}/closure)."""
     # '더 돌려야 하나, 끝났나' 의 근거. 등록부는 판정 행만 주고 좌석이 몇 개 비었는지는 말하지 않는다.
     # 359명 로스터에서 검토 순서 전부(약 9만 자)·좌석 행 전부(약 12만 자)는 MCP 결과 상한을 넘어 본문을 잃는다(R3B-1) — 둘 다
     # 자르지 않고 쪽으로 나눈다. REST 진행판은 전부를 싣는다.
@@ -146,6 +146,8 @@ def risk_get_coverage(target_key: str, with_seats: bool = True, domain: str | No
         review = out.get("review")
         if review is not None and review.get("job") is not None:
             review["job"] = routes.mcp_job_brief(review["job"])     # 범위 · 워커는 수와 앞 몇(반대 검토 MEDIUM 12)
+        if out.get("qualifiers") is not None:
+            out["qualifiers"] = routes.mcp_qualifiers(out["qualifiers"])     # 잔여의 목록 칸도 앞 몇과 수(review1 M9)
         if order_offset is not None:
             if review is None:
                 raise AppError("E100", "order_offset 은 카드 대조 대상의 검토 순서 쪽이다 — 이 대상에는 검토 순서가 없다.", 422)
