@@ -132,6 +132,21 @@ def test_cluster_merge_scan_pairs_only_clusters_of_one_owner(risk_store):
     assert out == {"n_clusters": 3, "n_pairs": 1, "queued": 1}
 
 
+def test_cluster_merge_suppression_is_per_owner(risk_store):
+    """막아 둔 쌍(열림 · 처리됨 · 막고 거절함)은 그 소유자의 쌍만 막는다 — 클러스터 키는 내용 해시라 소유자를 가로질러 같으므로, 남이 같은 키
+    쌍을 큐에 두었다고 주인의 쌍이 오르지 않으면 안 된다(조합 검토 L9)."""
+    other = "other@example.com"
+    _near_pair(risk_store)
+    add_registry(risk_store, "cl_aaaaaaaa", subject="ck:a", target="T8", owner=other)
+    add_registry(risk_store, "cl_bbbbbbbb", subject="ck:b", target="T8", owner=other)
+    nightly.enqueue(risk_store, "cluster_merge", {"a": "cl_aaaaaaaa", "b": "cl_bbbbbbbb", "family_key": "fam1"},
+                    owner_sub=other, now=NOW)
+    out = nightly.scan_cluster_merge(risk_store, now=NOW + 60)
+    owners = [r["owner_sub"] for r in risk_store.query(
+        "SELECT owner_sub FROM rr_curation_queue WHERE kind = 'cluster_merge' ORDER BY created_at, id")]
+    assert owners == [other, OWNER] and out["queued"] == 1
+
+
 def test_cluster_merge_scan_is_idempotent(risk_store):
     _near_pair(risk_store)
     nightly.scan_cluster_merge(risk_store, now=NOW)

@@ -323,16 +323,19 @@ def scan_cluster_merge(store: Any, *, now: int, enabled: bool = True) -> dict:
             "subject_key": str(row["subject_key"] or ""),
         })
 
-    suppressed: set[tuple[str, str]] = set()
-    for payload, status, decision in _queue_payloads(store, "cluster_merge"):
-        pair = (str(payload.get("a") or ""), str(payload.get("b") or ""))
+    # 막음(열림 · 처리됨 · 막고 거절함)은 그 소유자의 쌍만 막는다 — 클러스터 키는 내용 해시라 소유자를 가로질러 같아, 남이 같은 키
+    # 쌍을 큐에 두면 주인의 쌍이 오르지 않았다(조합 검토 L9).
+    suppressed: set[tuple[str, str, str]] = set()
+    for row in store.query(
+            "SELECT owner_sub, payload_json, status, decision_json FROM rr_curation_queue WHERE kind = 'cluster_merge'"):
+        payload, decision, status = _loads(row["payload_json"], {}), _loads(row["decision_json"], {}), str(row["status"])
         if status == "open" or status == "done" or (status == "rejected" and decision.get("suppress")):
-            suppressed.add(pair)
+            suppressed.add((str(row["owner_sub"]), str(payload.get("a") or ""), str(payload.get("b") or "")))
 
     cache: dict[str, dict | None] = {}
     n_pairs = 0
     queued: list[str] = []
-    for (family_key, _direction, _owner), members in sorted(families.items()):
+    for (family_key, _direction, owner), members in sorted(families.items()):
         keys = sorted(members)
         for i, key_a in enumerate(keys):
             for key_b in keys[i + 1:]:
@@ -341,7 +344,7 @@ def scan_cluster_merge(store: Any, *, now: int, enabled: bool = True) -> dict:
                 if score is None:
                     continue
                 n_pairs += 1
-                if (key_a, key_b) in suppressed or len(queued) >= CLUSTER_MERGE_MAX:
+                if (owner, key_a, key_b) in suppressed or len(queued) >= CLUSTER_MERGE_MAX:
                     continue
                 payload = {"a": key_a, "b": key_b, "family_key": family_key,
                            "subject_a": a["subject_key"], "subject_b": b["subject_key"], "score": score}
