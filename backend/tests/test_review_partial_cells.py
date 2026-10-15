@@ -130,9 +130,10 @@ def test_an_input_gap_impact_yes_raises_the_stance_to_conditional_reviewed_or_sk
     assert expert_report.prepare(store, key, MEM1).opinion["final_stance"] == "conditional"
 
 
-def test_an_input_gap_impact_unknown_leaves_the_stance_and_stays_in_the_input_gap_and_needs_sections(store):
+@pytest.mark.parametrize("state", ["no_input", "skipped"])
+def test_an_input_gap_impact_unknown_leaves_the_stance_and_stays_in_the_input_gap_and_needs_sections(store, state):
     """조정자 결정(4차 해석 4) — 입력 결손 q1 '영향 모름'(impact=unknown)은 입장을 바꾸지 않는다(finding 이 아니다). 그 셀은 no_input 으로
-    닫히고 입력 결손 절의 영향 줄과 필요한 정보(q2 — 결측 입력이 오면 확인할 것)에 그대로 남는다."""
+    닫히고(같은 자료를 넘긴 셀로 두어도 같다) 입력 결손 절의 영향 줄과 필요한 정보(q2 — 결측 입력이 오면 확인할 것)에 그대로 남는다."""
     key = rig.target(store, GAP_ROSTER)
     unit_id = units.load_units(store, key)[0]["unit_id"]
     fake = FakeReviewEngine(gap_packs(GAP_ROSTER))
@@ -141,6 +142,8 @@ def test_an_input_gap_impact_unknown_leaves_the_stance_and_stays_in_the_input_ga
     _clean_unit(store, key, MEM1)
     assert store.query_one("SELECT state FROM rr_review_cells WHERE target_key = ? AND unit_id = ? AND agent_key = ?",
                            (key, unit_id, MEM1))["state"] == "no_input"
+    if state == "skipped":
+        _findings_as(store, key, MEM1, unit_id, "skipped")
     prepared = expert_report.prepare(store, key, MEM1)
     assert (prepared.opinion["final_stance"], [f["unit_ids"] for f in prepared.findings]) == ("agree", [])
     (row,) = [u for u in prepared.report["input_gap"]["units"] if u["unit_id"] == unit_id]

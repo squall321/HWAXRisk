@@ -412,6 +412,36 @@ def test_a_pack_refused_for_draining_is_a_wait_never_charged_and_never_sent_agai
     assert rig.state(store, job_id) == "completed" and len(fake.drain_refused) == 1
 
 
+def test_a_pack_session_waiting_on_a_busy_gate_stops_before_sending_again_once_the_drain_begins(store, monkeypatch):
+    """리허설 E1b — 묶음 세션이 관문이 차 review_busy(보통)로 기다리는 사이 루프가 비우기를 읽으면, 기다림이 끝난 뒤 같은 요청을 다시
+    내지 않고 멈춘다 — 엔진에 아무것도 더 가지 않는다(비우기 거절도 0). 깃발이 걷히면 이어 돈다."""
+    _one(store, monkeypatch)
+    key = rig.target(store)
+    job_id = rig.job(store, key, scope={"agents": [SEAL]})
+    fake = FakeReviewEngine(rig.packs())
+    gate = threading.Event()
+    fake.pack_gate = gate
+    fake.pack_errors = {SEAL: [(429, {"code": "review_busy", "message": "팩을 지을 자리가 없다(가짜)", "reason": "normal",
+                                       "retry_after_s": 1, "infra": True, "retryable": True})]}
+    r = rig.Rig(store, fake)
+    try:
+        r.tick(wait=False)
+        rig.wait_for(lambda: len(fake.calls("pack")) == 1)                 # 첫 묶음 요청이 엔진 안에서 붙들렸다
+        fake.draining = True
+        r.clock.advance(16)
+        assert r.loop.tick()["started"] == 0                              # 루프가 /health 를 다시 읽었다 — 비우기
+        gate.set()                                                        # 첫 요청은 자리 없음(보통)으로 끝난다
+        rig.wait_for(lambda: not r.loop.workers(job_id))
+        assert (len(fake.calls("pack")), fake.drain_refused, _head(store, key, SEAL)["pack_attempts"]) == (1, [], 0)
+        fake.draining = False
+        r.clock.advance(16)
+        r.finish(job_id)
+    finally:
+        r.stop.set()                     # 멈추지 않은 세션(고치기 전 코드 · 변이)이 저장소를 닫는 뒤까지 돌지 않게
+        r.loop.join(10)
+    assert rig.state(store, job_id) == "completed"
+
+
 def test_an_infra_streak_opens_the_breaker_and_a_half_open_resume_finishes_without_charging(store, monkeypatch):
     """인프라 실패가 이어지면 차단기가 llm_outage 로 잡을 멈추고(300초 뒤 재개), 시계가 그 전이면 그대로다. 시계를 밀면 반쯤 열려
     워커 하나만 뜬다 — 그 첫 호출이 또 인프라 실패면 더 긴 간격(600초)으로 다시 멈추고, 성공하면 보류 열을 비워 원래대로 돈다.
