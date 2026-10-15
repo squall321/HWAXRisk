@@ -4232,6 +4232,8 @@ def put_registry_merge(cluster_key: str, body: RegistryMergeBody,
         raise AppError("E404", "두 등록부 클러스터가 모두 있어야 합니다.", 404)
     if left["family_key"] and right["family_key"] and left["family_key"] != right["family_key"]:
         raise AppError("family_key_differs", "family_key 가 다른 클러스터는 병합할 수 없습니다.", 422)
+    # 다시 병합할 대상은 부른 사람의 것이어야 한다 — 남의 대상은 없는 대상과 같은 404 이고 아무것도 쓰지 않는다(조합 검토 H1).
+    target = _target_row(body.target_key or left["target_key"], owner_sub)
 
     with store.tx():
         alias = registry_module.add_cluster_alias(
@@ -4240,7 +4242,7 @@ def put_registry_merge(cluster_key: str, body: RegistryMergeBody,
         _audit(store, owner_sub, scope="registry", subject_id=f"{left['target_key']}#{cluster_key}",
                action="registry.merge", before={"cluster_key": cluster_key},
                after={"cluster_key": body.into})
-    merged = registry_module.merge(store, body.target_key or left["target_key"], owner_sub=owner_sub)
+    merged = registry_module.merge(store, target["target_key"], owner_sub=target["owner_sub"])
     return {"alias": alias, "merged": {k: merged[k] for k in ("clusters", "inserted", "updated", "unchanged")}}
 
 
@@ -4253,12 +4255,14 @@ def delete_registry_merge(cluster_key: str, target_key: str | None = None,
     row = store.query_one(
         "SELECT target_key FROM rr_registry WHERE cluster_key = ? AND owner_sub = ? LIMIT 1",
         (cluster_key, owner_sub))
+    # 다시 병합할 대상은 부른 사람의 것이어야 한다 — 남의 대상은 없는 대상과 같은 404 이고 철회도 하지 않는다(조합 검토 H1).
+    target = _target_row(target_key or row["target_key"], owner_sub) if (target_key or row is not None) else None
     with store.tx():
         out = registry_module.revoke_cluster_alias(store, cluster_key, owner_sub=owner_sub)
         _audit(store, owner_sub, scope="registry", subject_id=cluster_key,
                action="registry.merge.revoke", before={"cluster_key": cluster_key}, after=out)
-    if row is not None:
-        registry_module.merge(store, target_key or row["target_key"], owner_sub=owner_sub)
+    if row is not None and target is not None:
+        registry_module.merge(store, target["target_key"], owner_sub=target["owner_sub"])
     return out
 
 

@@ -493,6 +493,33 @@ def test_lineage_never_reads_into_another_persons_project(ledger):
     assert brief._lineage_project_ids(store, row["id"]) == [] and brief._lineage_project_ids(store, ids["project"]) == [mine["id"]]
 
 
+def test_a_stranger_with_own_clusters_cannot_run_the_merge_on_the_owners_target(ledger):
+    """제 클러스터 둘을 가진 남이 병합(PUT)이나 철회(DELETE)를 부르며 target_key 에 주인의 대상을 주면 없는 대상과 같은 404 이고 아무것도
+    쓰지 않는다 — 종전에는 주인의 대상을 남의 신원으로 다시 병합해 응답의 클러스터 수로 그 대상의 존재와 크기를 흘리고 남의 행에 주인의
+    대상 키를 적었다(조합 검토 H1)."""
+    store, ids = ledger
+    for cluster_key in ("ck:strangera0001", "ck:strangerb0002"):
+        store.execute(
+            "INSERT INTO rr_registry(target_key, cluster_key, owner_sub, merged_json, family_key, status, updated_at)"
+            " VALUES (?,?,?,?,?,?,?)", ("snap:stranger-own", cluster_key, OTHER, "{}", "fam-stranger", "open", 1))
+    ledger_rows = "SELECT target_key, cluster_key, owner_sub, needs_review_json, updated_at FROM rr_registry ORDER BY 1, 2"
+    before = [dict(r) for r in store.query(ledger_rows)]
+    aliases = store.query_one("SELECT COUNT(*) AS n FROM rr_cluster_alias")["n"]
+    stranger = factories.ident(OTHER)
+    calls = {
+        "merge": lambda target: routes.put_registry_merge("ck:strangera0001", routes.RegistryMergeBody(
+            into="ck:strangerb0002", target_key=target), ident=stranger),
+        "revoke": lambda target: routes.delete_registry_merge("ck:strangera0001", target_key=target, ident=stranger),
+    }
+    for name, call in calls.items():
+        theirs = _answer(lambda: call(ids["target"]))
+        missing = _answer(lambda: call("no-such-target"))
+        assert theirs[:2] == ("E404", 404), (name, theirs)
+        assert _normal(theirs, ids, ("target",)) == _normal(missing, {"target": "no-such-target"}, ("target",)), name
+    assert [dict(r) for r in store.query(ledger_rows)] == before
+    assert store.query_one("SELECT COUNT(*) AS n FROM rr_cluster_alias")["n"] == aliases
+
+
 def test_precedents_of_another_persons_diff_answer_like_a_missing_diff(ledger):
     """선례(REST GET /precedents)는 받은 diff 의 스냅샷(subject · 규칙 적중)을 거쳐 읽는다 — 남의 diff 는 없는 diff 와 같은 404 다(종전에는
     소유를 보지 않아 남의 스냅샷 규칙 적중까지 실었다). 주인으로는 답이 선다."""
