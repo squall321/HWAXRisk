@@ -345,14 +345,21 @@ def create_synth_job(store: RiskStore, target_key: str, *, owner_sub: str, reque
                      consent_external: Mapping[str, Any] | None = None) -> dict:
     """종합 잡(`rr_jobs.mode='synth'`) — 영역 요약 → 과제 종합 → 보고서 판(synth_done). 자격이 없어도 행을 만들고 까닭을 적는다.
 
-    그 대상에 아직 집히지 않은(queued) 종합 잡이 있으면 새로 만들지 않고 그 잡을 돌려준다(`created: False`) — 그 잡이 시작할 때
-    지금 원장을 읽는다. 도는 잡은 막지 않는다 — 그 잡이 이미 끝낸 요약은 옛 입력이라 새 잡이 뒤에 줄을 서고, 입력이 같은 요약은 다시
-    부르지 않는다(사슬 `chain._busy` 와 같은 규칙). 반환 {job_id, created, credential, error?}. `llm`·`consent_external` 은 사슬이
-    물려준 판단 LLM 과 반출 동의 기록이다(Claude 길 X-2 — claude 면 요약 호출이 외부 응답자로 가고 동의한 사람의 PAT 로만 돈다)."""
-    from app import runner  # noqa: PLC0415 — runner 는 이 모듈을 쓴다.
+    그 대상에 아직 집히지 않은(queued) 같은 길의 종합 잡이 있으면 새로 만들지 않고 그 잡을 돌려준다(`created: False`) — 그 잡이 시작할
+    때 지금 원장을 읽는다. 도는 잡은 막지 않는다 — 그 잡이 이미 끝낸 요약은 옛 입력이라 새 잡이 뒤에 줄을 서고, 입력이 같은 요약은 다시
+    부르지 않는다(사슬 `chain._busy` 와 같은 규칙). 반환 {job_id, created, credential, error?, llm, consent_external?}. `llm`·
+    `consent_external` 은 사슬이 물려준 판단 LLM 과 반출 동의 기록이다(Claude 길 X-2 — claude 면 요약 호출이 외부 응답자로 가고 동의한
+    사람의 PAT 로만 돈다).
+
+    길(XR-12) — 다시 쓰는 대기 잡은 판단 LLM 과 동의한 사람이 같은 것뿐이다. 사람의 보고서 다시 내기(GLM)는 대기 중인 claude 종합 잡을
+    받지 않고, claude 사슬은 GLM 대기 잡이나 다른 사람의 claude 대기 잡을 받지 않는다 — 그때는 제 길의 잡을 새로 세운다(두 길의 종합
+    잡은 종합 워커가 대상마다 하나씩 먼저 선 차례로 돈다). 답은 늘 `llm`(glm · claude)을 말한다."""
+    from app import chain as chain_module, runner  # noqa: PLC0415 — 둘 다 이 모듈을 쓴다(인자 이름 chain 과 갈라 둔다).
 
     cfg = settings or config.settings
     llm_fields = runner.llm_params(runner.job_llm({"llm": llm}), consent_external)
+    lane = chain_module.job_lane(llm_fields)
+    said = llm_fields or {"llm": runner.LLM_GLM}            # 답이 말하는 판단 LLM(GLM 잡의 params 에는 여전히 칸이 없다)
     credential, note = runner.resolve_job_credential(store, cfg, owner_sub, requester_sub, llm_fields)
     job_id = common.new_uuid()
     now = common.now_epoch()
@@ -360,13 +367,17 @@ def create_synth_job(store: RiskStore, target_key: str, *, owner_sub: str, reque
               "credential": credential["kind"] if credential else None, **llm_fields}
     error = None if credential else "pat_unavailable" + (f": {note}" if note else "")
     with store.tx():
-        # 확인과 쓰기를 한 트랜잭션으로 — 보고서 다시 내기를 거푸 불러도, 사슬과 겹쳐도 대기 종합 잡은 하나다.
-        waiting = store.query_one("SELECT id, params_json, error FROM rr_jobs WHERE target_key = ? AND mode = ? AND state = 'queued'"
-                                  " ORDER BY created_at DESC LIMIT 1", (target_key, SYNTH_MODE))
+        # 확인과 쓰기를 한 트랜잭션으로 — 보고서 다시 내기를 거푸 불러도, 사슬과 겹쳐도 같은 길의 대기 종합 잡은 하나다.
+        waiting = next((row for row in store.query(
+            "SELECT id, params_json, error FROM rr_jobs WHERE target_key = ? AND mode = ? AND state = 'queued'"
+            " ORDER BY created_at DESC", (target_key, SYNTH_MODE)) if chain_module.job_lane(_loads(row["params_json"], {})) == lane),
+            None)
         if waiting is not None:
             return {"job_id": waiting["id"], "created": False,
                     "credential": _loads(waiting["params_json"], {}).get("credential"),
-                    **({"error": waiting["error"]} if waiting["error"] else {})}
+                    **({"error": waiting["error"]} if waiting["error"] else {}),
+                    **runner.llm_params(runner.job_llm(_loads(waiting["params_json"], {})),
+                                        _loads(waiting["params_json"], {}).get("consent_external")), "llm": lane[0]}
         store.execute(
             "INSERT INTO rr_jobs(id, target_key, owner_sub, tier, state, concurrency, params_json, credential_email, panels_done,"
             " panels_total, error, mode, chain_json, created_at, updated_at)"
@@ -375,7 +386,7 @@ def create_synth_job(store: RiskStore, target_key: str, *, owner_sub: str, reque
              len(config.settings.risk_roster_domains) + 1, error, SYNTH_MODE,
              common.canonical_json(dict(chain)) if chain else None, now, now))
     return {"job_id": job_id, "created": True, "credential": params["credential"], **({"error": error} if error else {}),
-            **llm_fields}
+            **said}
 
 
 class SynthWorker:

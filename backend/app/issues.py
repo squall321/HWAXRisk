@@ -506,21 +506,148 @@ def yield_advice(store: RiskStore, target_key: str) -> str | None:
     return YIELD_LOW_ADVICE
 
 
+# ---------------------------------------------------------------- 길 — 동의는 번지지 않는다(Claude 길 X-2 · XR-12)
+# claude 쟁점 잡은 제 사슬 걸음이 고른 쟁점만 돈다 — params `issue_rounds`{쟁점 id: 고른 회차}(만들 때, 같은 길의 사슬 걸음이 더할 때
+# 적는다). 그 쟁점이 대기이고, 사람이 정하지 않았고(status_source 'human' 이 아니다 — 사람이 올린 쟁점은 GLM 이다), 지금 회차가 적은
+# 회차와 같을 때만 그 잡의 몫이다(다른 걸음이 다시 고르면 그 걸음의 몫이다). GLM 쟁점 잡은 끝나지 않은 claude 잡의 몫이 아닌 대기 쟁점을
+# 돈다 — claude 잡이 없는 대상에서는 종전 그대로(대상의 대기 쟁점 전부 · 같은 SQL)다.
+ISSUE_ROUNDS_KEY = "issue_rounds"
+# 몫을 쥐는 claude 잡의 상태 — 취소 중(cancelling)도 쥔다(cancelled 로 닫힐 때 그 잡의 몫을 놓는다 — runner._untry_after_cancel).
+CLAIMING_JOB_STATES: tuple[str, ...] = ("queued", "running", "paused", "cancelling")
+# GLM 쟁점 잡만 고르는 SQL 조각(rr_jobs) — claude 잡이 없는 대상에서는 늘 참이라 종전 질의와 같은 행이다.
+NOT_CLAUDE_SQL = "COALESCE(json_extract(params_json, '$.llm'), '') <> 'claude'"
+
+
+def is_claude_params(params: Mapping[str, Any] | None) -> bool:
+    """그 잡이 claude 잡인가(params 의 `llm`) — runner.job_llm 과 같은 읽기다(이 모듈은 runner 를 위에서 import 하지 않는다)."""
+    return isinstance(params, Mapping) and params.get("llm") == "claude"
+
+
+def _job_params(job: Mapping[str, Any]) -> dict:
+    """잡 dict 의 params — 러너가 집은 잡은 `params`(푼 것), 행이면 `params_json` 이다."""
+    if isinstance(job.get("params"), Mapping):
+        return dict(job["params"])
+    return _loads(job.get("params_json"), {}) or {}
+
+
+def _round(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def claude_claims(store: RiskStore, target_key: str, *, include: str | None = None) -> dict[str, str]:
+    """대기 쟁점 id → 그것을 돌 claude 쟁점 잡 id. 끝나지 않은 claude 잡(`CLAIMING_JOB_STATES`)의 `issue_rounds` 가운데 대기이고 사람이
+    정하지 않았고 회차가 맞는 것이다. `include` 는 끝났어도 넣을 잡(취소 · 실패로 닫는 그 잡이 제 몫을 놓을 때). 두 잡이 같은 쟁점 ·
+    회차를 적었으면 먼저 선 잡의 몫이다. claude 잡이 없으면 {}(쟁점 행을 읽지 않는다)."""
+    marks = ",".join("?" * len(CLAIMING_JOB_STATES))
+    jobs = store.query(
+        "SELECT id, params_json FROM rr_jobs WHERE target_key = ? AND mode = ? AND json_extract(params_json, '$.llm') = 'claude'"
+        f" AND (state IN ({marks}) OR id = ?) ORDER BY created_at, id",
+        (target_key, ISSUES_MODE, *CLAIMING_JOB_STATES, include or ""))
+    if not jobs:
+        return {}
+    queued = {str(r["issue_id"]): r for r in store.query(
+        "SELECT issue_id, selected_round, status_source FROM rr_issues WHERE target_key = ? AND state = 'queued'", (target_key,))}
+    claims: dict[str, str] = {}
+    for job in jobs:
+        rounds = (_loads(job["params_json"], {}) or {}).get(ISSUE_ROUNDS_KEY)
+        for issue_id, round_no in (rounds.items() if isinstance(rounds, Mapping) else ()):
+            row = queued.get(str(issue_id))
+            if (row is None or _str(row["status_source"]) == "human" or _round(round_no) is None
+                    or _round(row["selected_round"]) != _round(round_no)):
+                continue
+            claims.setdefault(str(issue_id), str(job["id"]))
+    return claims
+
+
+def step_selection(store: RiskStore, target_key: str, round_no: int) -> dict[str, int]:
+    """사슬 걸음 하나(회차 `round_no`)가 고른 쟁점 — 그 회차로 대기에 선 쟁점(사람이 정한 것 빼고) {쟁점 id: 회차}. claude 쟁점 잡의
+    몫이다(`issue_rounds`)."""
+    return {str(r["issue_id"]): int(round_no) for r in store.query(
+        "SELECT issue_id FROM rr_issues WHERE target_key = ? AND state = 'queued' AND selected_round = ?"
+        " AND COALESCE(status_source, '') <> 'human' ORDER BY issue_id", (target_key, int(round_no)))}
+
+
+def glm_queued_n(store: RiskStore, target_key: str) -> int:
+    """GLM 쟁점 잡이 돌 대기 쟁점 수 — 끝나지 않은 claude 잡의 몫을 뺀다(claude 잡이 없으면 종전 셈 그대로)."""
+    queued = int(store.query_one("SELECT COUNT(*) AS n FROM rr_issues WHERE target_key = ? AND state = 'queued'",
+                                 (target_key,))["n"] or 0)
+    return queued - len(claude_claims(store, target_key))
+
+
+def bind_issues(store: RiskStore, job_id: str, rounds: Mapping[str, int]) -> None:
+    """같은 길(같은 사람의 claude 사슬)의 걸음이 고른 쟁점을 살아 있는 claude 쟁점 잡의 몫에 더한다(읽고 쓰기를 한 트랜잭션으로). 다른 길의
+    잡에는 부르지 않는다(chain._busy 가 같은 길만 돌려준다)."""
+    if not rounds:
+        return
+    with store.tx():
+        row = store.query_one("SELECT params_json FROM rr_jobs WHERE id = ?", (job_id,))
+        params = _loads(row["params_json"], {}) if row is not None else None
+        if not is_claude_params(params):
+            raise ValueError(f"claude 쟁점 잡이 아니다 — {job_id}(몫은 claude 잡에만 적는다)")
+        have = dict(params.get(ISSUE_ROUNDS_KEY) or {})
+        have.update({str(k): int(v) for k, v in rounds.items()})
+        params[ISSUE_ROUNDS_KEY] = have
+        store.execute("UPDATE rr_jobs SET params_json = ?, panels_total = ?, updated_at = ? WHERE id = ?",
+                      (common.canonical_json(params), len(have), common.now_epoch(), job_id))
+
+
+def _lane_rows(store: RiskStore, target_key: str, rows: list[dict], job: Mapping[str, Any]) -> list[dict]:
+    """대기 쟁점 행 가운데 그 잡이 돌 것 — claude 잡은 제 몫, GLM 잡은 끝나지 않은 claude 잡의 몫이 아닌 것(없으면 그대로)."""
+    claims = claude_claims(store, target_key)
+    if is_claude_params(_job_params(job)):
+        return [r for r in rows if claims.get(str(r["issue_id"])) == str(job.get("id"))]
+    return [r for r in rows if str(r["issue_id"]) not in claims] if claims else rows
+
+
+def _lane_where(store: RiskStore, target_key: str, job_id: str | None) -> tuple[str, tuple]:
+    """`_untry` 의 거름 — 잡이 없으면(종전) 대상 전부, claude 잡은 그 잡의 몫만(끝났어도 — 닫히는 그 잡이다), GLM 잡은 끝나지 않은 claude
+    잡의 몫을 뺀 것(그런 몫이 없으면 종전 거름 그대로)."""
+    if job_id is None:
+        return "target_key = ?", (target_key,)
+    row = store.query_one("SELECT params_json FROM rr_jobs WHERE id = ?", (job_id,))
+    claims = claude_claims(store, target_key, include=job_id)
+    if row is not None and is_claude_params(_loads(row["params_json"], {})):
+        mine = sorted(i for i, j in claims.items() if j == job_id)
+        if not mine:
+            return "0", ()
+        return f"target_key = ? AND issue_id IN ({','.join('?' * len(mine))})", (target_key, *mine)
+    if not claims:
+        return "target_key = ?", (target_key,)
+    others = sorted(claims)
+    return f"target_key = ? AND issue_id NOT IN ({','.join('?' * len(others))})", (target_key, *others)
+
+
 def create_issues_job(store: RiskStore, target_key: str, *, owner_sub: str, requester_sub: str | None = None,
                       consent_source: str | None = "web", user_memo: str | None = None, settings: Any = None,
                       chain: Mapping[str, Any] | None = None, llm: str | None = None,
-                      consent_external: Mapping[str, Any] | None = None) -> dict:
+                      consent_external: Mapping[str, Any] | None = None,
+                      issue_rounds: Mapping[str, int] | None = None) -> dict:
     """쟁점 잡(`rr_jobs.mode='issues'`, tier NULL) — 대기 쟁점을 패널 러너가 한 줄로 돈다(3.7). 자격이 없어도 행을 만든다 —
     `error='pat_unavailable: …'` 를 적고 집는 쪽이 지금처럼 자격 없는 잡을 건너뛴다(자격 검사로 행을 만들지 않는 일이 없다).
     `llm`·`consent_external` 은 사슬이 검토 잡에서 물려준 판단 LLM 과 반출 동의 기록이다(Claude 길 X-2 — claude 면 쟁점 패널이 외부
-    응답자로 돌고 동의한 사람의 PAT 로만 돈다). 사람이 직접 세우는 잡은 주지 않는다(GLM)."""
+    응답자로 돌고 동의한 사람의 PAT 로만 돈다). 사람이 직접 세우는 잡은 주지 않는다(GLM).
+
+    claude 잡은 `issue_rounds`(그 사슬 걸음이 고른 쟁점 {id: 회차} — `step_selection`)만 돈다(XR-12). 주지 않으면 지금 대기인 쟁점 가운데
+    사람이 정하지 않았고 다른 claude 잡의 몫이 아닌 것이다(사슬 밖에서 손으로 세운 잡 — 시험). GLM 잡에는 그 칸이 없다."""
     from app import runner  # noqa: PLC0415 — runner 는 이 모듈을 쓴다.
 
     cfg = settings or config.settings
     llm_fields = runner.llm_params(runner.job_llm({"llm": llm}), consent_external)
     credential, note = runner.resolve_job_credential(store, cfg, owner_sub, requester_sub, llm_fields)
-    queued = store.query_one("SELECT COUNT(*) AS n FROM rr_issues WHERE target_key = ? AND state = 'queued'",
-                             (target_key,))
+    if llm_fields:
+        if issue_rounds is None:
+            taken = claude_claims(store, target_key)
+            issue_rounds = {str(r["issue_id"]): int(r["selected_round"]) for r in store.query(
+                "SELECT issue_id, selected_round FROM rr_issues WHERE target_key = ? AND state = 'queued'"
+                " AND COALESCE(status_source, '') <> 'human' AND selected_round IS NOT NULL ORDER BY issue_id", (target_key,))
+                if str(r["issue_id"]) not in taken}
+        llm_fields = {**llm_fields, ISSUE_ROUNDS_KEY: {str(k): int(v) for k, v in issue_rounds.items()}}
+        queued_n = len(llm_fields[ISSUE_ROUNDS_KEY])
+    else:
+        queued_n = glm_queued_n(store, target_key)
     job_id = common.new_uuid()
     now = common.now_epoch()
     params = {"mode": ISSUES_MODE, "requester": requester_sub, "consent": True, "consent_source": consent_source,
@@ -531,9 +658,10 @@ def create_issues_job(store: RiskStore, target_key: str, *, owner_sub: str, requ
         " panels_done, panels_total, error, mode, chain_json, created_at, updated_at)"
         " VALUES (?, ?, ?, NULL, 'queued', 1, ?, ?, 0, ?, ?, ?, ?, ?, ?)",
         (job_id, target_key, owner_sub, common.canonical_json(params), (credential or {}).get("email"),
-         int(queued["n"] or 0), error, ISSUES_MODE, common.canonical_json(dict(chain)) if chain else None, now, now))
-    return {"job_id": job_id, "issues_queued": int(queued["n"] or 0), "credential": params["credential"],
-            **({"error": error} if error else {}), **llm_fields}
+         queued_n, error, ISSUES_MODE, common.canonical_json(dict(chain)) if chain else None, now, now))
+    reply_llm = {k: v for k, v in llm_fields.items() if k != ISSUE_ROUNDS_KEY}
+    return {"job_id": job_id, "issues_queued": queued_n, "credential": params["credential"],
+            **({"error": error} if error else {}), **reply_llm}
 
 
 def _seat_order(entry: Mapping[str, Any], ranks: Mapping[str, int]) -> tuple:
@@ -640,10 +768,13 @@ def plan_issue_panel(store: RiskStore, target_key: str, *, job: Mapping[str, Any
     """다음 대기 쟁점(순위 순) 하나의 패널을 편성한다 — 한 트랜잭션에서 rr_panels(kind='issue'·tier 'I'·issue_id) INSERT 와
     rr_issues 를 queued → planned 로(rowcount 1 일 때만). 좌석 원장(rr_coverage)은 건드리지 않는다. 대기 쟁점이 없으면 None.
 
-    **바깥 트랜잭션 안에서 부르지 마라**(planner.plan_next_panel 과 같다 — 경합 롤백이 바깥 커밋에 섞인다)."""
+    **바깥 트랜잭션 안에서 부르지 마라**(planner.plan_next_panel 과 같다 — 경합 롤백이 바깥 커밋에 섞인다).
+
+    대기 쟁점은 그 잡의 길 것만 본다(XR-12 — `_lane_rows`): claude 잡은 제 사슬 걸음이 고른 몫, GLM 잡은 끝나지 않은 claude 잡의 몫이 아닌
+    것(claude 잡이 없으면 종전 그대로 전부)."""
     from app import planner  # noqa: PLC0415
 
-    rows = issue_rows(store, target_key, ("queued",))
+    rows = _lane_rows(store, target_key, issue_rows(store, target_key, ("queued",)), job)
     if not rows:
         return None
     issue = rows[0]
@@ -696,15 +827,21 @@ def start_issue_panel(store: RiskStore, panel_id: str) -> None:
 LIVE_JOB_STATES: tuple[str, ...] = ("queued", "running", "paused")
 
 
-def _orphan_reason(store: RiskStore, target_key: str) -> str | None:
-    """그 대상에 살아 있는 쟁점 잡이 없으면 놓인 쟁점이 갈 까닭 — 마지막 쟁점 잡이 취소(중)면 chain_cancelled, 그 밖(실패)은
-    job_failed. 살아 있는 잡이 있으면 None(그 잡이 다시 집는다)."""
+def _orphan_reason(store: RiskStore, target_key: str, issue_id: str | None = None) -> str | None:
+    """그 쟁점을 다시 집을 쟁점 잡이 없으면 놓인 쟁점이 갈 까닭 — 마지막 쟁점 잡이 취소(중)면 chain_cancelled, 그 밖(실패)은
+    job_failed. 집을 잡이 있으면 None(그 잡이 다시 집는다).
+
+    길(XR-12) — 끝나지 않은 claude 잡의 몫이면 그 잡이 집는다(취소 중이면 그 잡이 닫힐 때 놓는다). 아니면 GLM 쟁점 잡만 센다 — 살아
+    있는 claude 잡은 제 몫 밖의 쟁점을 집지 않는다. claude 잡이 없는 대상에서는 종전 질의와 같은 행이다."""
+    if issue_id is not None and issue_id in claude_claims(store, target_key):
+        return None
     live = store.query_one(f"SELECT 1 FROM rr_jobs WHERE target_key = ? AND mode = ? AND state IN"
-                           f" ({','.join('?' * len(LIVE_JOB_STATES))}) LIMIT 1", (target_key, ISSUES_MODE, *LIVE_JOB_STATES))
+                           f" ({','.join('?' * len(LIVE_JOB_STATES))}) AND {NOT_CLAUDE_SQL} LIMIT 1",
+                           (target_key, ISSUES_MODE, *LIVE_JOB_STATES))
     if live is not None:
         return None
-    last = store.query_one("SELECT state FROM rr_jobs WHERE target_key = ? AND mode = ? ORDER BY created_at DESC, rowid DESC"
-                           " LIMIT 1", (target_key, ISSUES_MODE))
+    last = store.query_one(f"SELECT state FROM rr_jobs WHERE target_key = ? AND mode = ? AND {NOT_CLAUDE_SQL}"
+                           " ORDER BY created_at DESC, rowid DESC LIMIT 1", (target_key, ISSUES_MODE))
     return "job_failed" if last is not None and _str(last["state"]) == "failed" else "chain_cancelled"
 
 
@@ -734,7 +871,7 @@ def release_issue(store: RiskStore, panel_id: str, *, charge: bool, reason: str 
         store.execute("UPDATE rr_issues SET state = ?, state_reason = ?, outcome = CASE WHEN ? = 'inconclusive' THEN"
                       " 'undetermined' ELSE outcome END, charged = ?, updated_at = ? WHERE issue_id = ?",
                       (state, reason if charge or state != "queued" else None, state, charged, now, row["issue_id"]))
-        orphan = _orphan_reason(store, target_key) if state == "queued" else None
+        orphan = _orphan_reason(store, target_key, str(row["issue_id"])) if state == "queued" else None
         if orphan is not None:
             _untry(store, "issue_id = ?", (row["issue_id"],), orphan)
             state = _str(store.query_one("SELECT state FROM rr_issues WHERE issue_id = ?", (row["issue_id"],))["state"])
@@ -766,11 +903,15 @@ def _untry(store: RiskStore, where: str, params: tuple, reason: str) -> int:
         f" WHERE state = 'queued' AND {where}", (reason, common.now_epoch(), *params)) or 0)
 
 
-def untry_queued(store: RiskStore, target_key: str, reason: str) -> int:
+def untry_queued(store: RiskStore, target_key: str, reason: str, *, job_id: str | None = None) -> int:
     """남은 대기 쟁점을 놓는다(`_untry`) — 쟁점 잡이 연속 오류로 실패했거나(engine_fail) 다른 까닭으로 실패했거나(job_failed) 사람이
-    취소했을 때(chain_cancelled)다. 지우지 않는다(보고서 '미토의' 행). 사람이 상한 밖으로 올린 쟁점도 같은 길이다."""
+    취소했을 때(chain_cancelled)다. 지우지 않는다(보고서 '미토의' 행). 사람이 상한 밖으로 올린 쟁점도 같은 길이다.
+
+    `job_id` 를 주면 그 잡의 길 것만 놓는다(XR-12 — `_lane_where`): claude 잡은 제 몫만, GLM 잡은 끝나지 않은 claude 잡의 몫을 뺀 것.
+    claude 잡이 없는 대상에서는 종전 그대로(대상의 대기 쟁점 전부)다."""
     with store.tx():
-        n = _untry(store, "target_key = ?", (target_key,), reason)
+        where, params = _lane_where(store, target_key, job_id)
+        n = _untry(store, where, params, reason)
         _sync_registry(store, target_key)
     return n
 
@@ -821,7 +962,7 @@ def resolve_issue(store: RiskStore, panel_id: str, *, settings: Any = None) -> d
                           (state, state, charged, now, issue["issue_id"]))
             # 살아 있는 쟁점 잡이 없으면 대기로 두지 않는다 — 집을 잡이 없어 영영 '쟁점 진행' 으로 남는다(조합 검토 M1, release_issue 와
             # 같은 길).
-            orphan = _orphan_reason(store, target_key) if state == "queued" else None
+            orphan = _orphan_reason(store, target_key, str(issue["issue_id"])) if state == "queued" else None
             if orphan is not None:
                 _untry(store, "issue_id = ?", (issue["issue_id"],), orphan)
                 state = _str(store.query_one("SELECT state FROM rr_issues WHERE issue_id = ?", (issue["issue_id"],))["state"])

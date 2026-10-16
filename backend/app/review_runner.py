@@ -62,7 +62,10 @@ consenter = runner.external_consenter
 note_llm_mismatch = runner.note_llm_mismatch
 
 
-EGRESS_WARNING = "이 잡의 지식카드·설계 변경 원문이 Claude(외부)로 나갑니다"
+# 반출 경고(XR-12) — 검토 잡의 카드 대조만이 아니다. 사슬이 이어 세우는 쟁점 잡(이 걸음이 고른 쟁점)과 종합 잡도 같은 동의로 외부로 가고,
+# 그 입력은 이 대상 전체의 등록부 행 · 쟁점 · 요약이다(다른 사람의 검토 결과가 섞인다). 동의를 받는 글이 그것을 말해야 한다.
+EGRESS_WARNING = ("이 잡의 지식카드·설계 변경 원문과, 사슬이 이어 도는 쟁점 패널·종합 요약의 입력(이 대상 전체의 등록부 행·쟁점·요약 —"
+                  " 다른 사람의 검토 결과도 든다)이 Claude(외부)로 나갑니다")
 
 
 def check_llm_choice(llm: Any, consent_external: Any) -> str | None:

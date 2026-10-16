@@ -1223,7 +1223,7 @@ def cancel_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
         state = "cancelling" if row["state"] == "running" else "cancelled"
         out = _set_job(store, job_id, state, by=by)
         if state == "cancelled" and row["mode"] == "issues":
-            _untry_after_cancel(store, row["target_key"])
+            _untry_after_cancel(store, row["target_key"], job_id)
         return out
     from app import review_runner  # noqa: PLC0415 — review_runner 는 이 모듈을 import 한다.
 
@@ -1241,11 +1241,12 @@ def cancel_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
     return out
 
 
-def _untry_after_cancel(store: Any, target_key: str) -> None:
-    """사람이 취소한 쟁점 잡 — 남은 대기 쟁점은 `untried_cap(chain_cancelled)` 다(지우지 않는다 — 보고서 '미토의')."""
+def _untry_after_cancel(store: Any, target_key: str, job_id: str) -> None:
+    """사람이 취소한 쟁점 잡 — 그 잡의 길에 남은 대기 쟁점은 `untried_cap(chain_cancelled)` 다(지우지 않는다 — 보고서 '미토의'). 길이
+    다른 잡의 몫(claude 잡의 사슬 몫 · 그 밖의 GLM 몫)은 건드리지 않는다(XR-12 — claude 잡이 없는 대상에서는 종전 그대로 전부다)."""
     from app import issues  # noqa: PLC0415 — issues 는 이 모듈을 쓴다.
 
-    issues.untry_queued(store, target_key, "chain_cancelled")
+    issues.untry_queued(store, target_key, "chain_cancelled", job_id=job_id)
 
 
 def _panels_today(store: Any, target_key: str) -> int:
@@ -1303,7 +1304,7 @@ def claim_next_job(store: Any, settings: Any | None = None, *, engine: Any | Non
         if job["state"] == "cancelling":
             _set_job(store, job["id"], "cancelled")
             if job["mode"] == "issues":
-                _untry_after_cancel(store, job["target_key"])
+                _untry_after_cancel(store, job["target_key"], job["id"])
             continue
         busy = store.query_one(
             "SELECT id FROM rr_panels WHERE target_key = ? AND status = 'running' LIMIT 1", (job["target_key"],)
@@ -2036,7 +2037,7 @@ def _issue_job_failed(store: Any, job: Mapping[str, Any], reason: str) -> None:
     밖은 job_failed — review1 M1), 사슬은 종합을 잇는다(P-08 ② — 코드 조립 판과 미토의 잔여가 남는다)."""
     from app import chain, issues  # noqa: PLC0415 — issues 는 이 모듈을 쓴다.
 
-    issues.untry_queued(store, job["target_key"], reason)
+    issues.untry_queued(store, job["target_key"], reason, job_id=job["id"])      # 그 잡의 길 것만(XR-12)
     chain.safe(chain.on_issues_closed, store, job)
 
 

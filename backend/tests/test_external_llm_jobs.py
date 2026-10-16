@@ -27,7 +27,9 @@ SEAL = rig.SEAL
 EDITOR = "editor@example.com"
 CARDS = {c["alias"]: c for c in fre.load("pack_ok.json")["cards"]}
 JUDGE = "판단 LLM: Claude(외부, 사용자 신고 모델)"
-EGRESS = "이 잡의 지식카드·설계 변경 원문이 Claude(외부)로 나갑니다"
+# 반출 경고(XR-12) — 카드 대조만이 아니라 사슬이 이어 도는 쟁점 · 종합의 입력(대상 전체)도 나간다고 말해야 한다
+EGRESS = ("이 잡의 지식카드·설계 변경 원문과, 사슬이 이어 도는 쟁점 패널·종합 요약의 입력(이 대상 전체의 등록부 행·쟁점·요약 —"
+          " 다른 사람의 검토 결과도 든다)이 Claude(외부)로 나갑니다")
 ABSENT = fre.load_external("error_external_worker_absent.json")
 EVID_BUDGET = fre.load_external("health_on.json")["external_llm"]["evid_budget"]
 # GLM 검토 잡 params 의 칸(X-2 전과 같아야 한다 — 새 칸은 claude 잡에만)

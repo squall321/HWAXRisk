@@ -13,6 +13,12 @@
   입력이 바뀐 요약을 다시 세운다(superseded).
 - 사슬 잡은 앞 잡의 요청자·메모를 잇고 동의 출처는 `chain` 이다. 자격이 없어도 행을 만들고 `error='pat_unavailable: …'` 를 적는다
   (자격 검사로 사슬이 끊기지 않는다 — 집는 쪽이 건너뛰며 사유를 남긴다).
+- 길(Claude 길 X-2 · XR-12) — 잡의 길은 (판단 LLM, 동의한 사람)이다(`job_lane` — GLM 은 ('glm', None)). 위의 '살아 있으면 새로 만들지
+  않는다 · 다시 세운다(_rearm)' 는 같은 길의 잡끼리만이다 — GLM 사슬은 claude 잡을, claude 사슬은 다른 사람의 claude 잡이나 GLM 잡을
+  다시 세우지도 거기에 일을 더하지도 않고 제 길의 잡을 세운다. claude 쟁점 잡은 제 사슬 걸음이 고른 쟁점만 돈다(`issues.step_selection`
+  → params `issue_rounds`, 같은 길의 다음 걸음은 `issues.bind_issues` 로 더한다). 그래서 한 대상에 두 길의 쟁점 · 종합 잡이 함께 살 수
+  있다 — 패널 러너가 대상마다 도는 패널 하나로 줄 세우고(먼저 선 잡부터), 종합 워커가 대상마다 잡 하나씩 돈다(먼저 선 잡부터 —
+  보류된 잡은 다음 잡에 자리를 비킨다).
 """
 from __future__ import annotations
 
@@ -55,26 +61,41 @@ def scope_open(store: RiskStore, target_key: str) -> int:
     return sum(1 for r in rows if agents is None or r["agent_key"] in agents)
 
 
-def _live(store: RiskStore, target_key: str, modes: tuple[str, ...]) -> dict | None:
-    row = store.query_one(
-        f"SELECT id, mode, state FROM rr_jobs WHERE target_key = ? AND mode IN ({','.join('?' * len(modes))})"
-        f" AND state IN ({','.join('?' * len(LIVE_STATES))}) ORDER BY created_at DESC LIMIT 1",
-        (target_key, *modes, *LIVE_STATES))
-    return dict(row) if row is not None else None
+def job_lane(params: Mapping[str, Any] | None) -> tuple[str, str | None]:
+    """잡의 길(XR-12) — (판단 LLM, 동의한 사람). GLM 잡(칸 없음)은 ('glm', None), claude 잡은 ('claude', 동의 기록의 by)."""
+    from app import runner  # noqa: PLC0415 — runner 는 무겁다.
+
+    if runner.job_llm(params) is None:
+        return (runner.LLM_GLM, None)
+    return (runner.LLM_CLAUDE, runner.external_consenter(params))
 
 
-def _busy(store: RiskStore, target_key: str, stage: str) -> dict | None:
-    """그 단계를 새로 세울 필요가 없게 하는 살아 있는 잡 — 쟁점은 살아 있는 쟁점 잡(새 대기 쟁점을 그 잡이 집는다), 종합은 살아 있는
-    쟁점 잡(그 잡이 끝나면 종합을 잇는다)이나 아직 집히지 않은 종합 잡(시작할 때 지금 원장을 읽는다). 도는 종합 잡은 막지 않는다 —
-    그 잡이 이미 끝낸 요약은 옛 입력이라 새 종합 잡이 뒤에 줄을 선다."""
+def _live(store: RiskStore, target_key: str, modes: tuple[str, ...],
+          lane: tuple[str, str | None] | None = None) -> dict | None:
+    """그 단계들의 살아 있는 잡 가운데 가장 늦게 선 것 — `lane` 을 주면 그 길의 잡만 본다(XR-12). 반환 {id, mode, state}."""
+    for row in store.query(
+            f"SELECT id, mode, state, params_json FROM rr_jobs WHERE target_key = ? AND mode IN ({','.join('?' * len(modes))})"
+            f" AND state IN ({','.join('?' * len(LIVE_STATES))}) ORDER BY created_at DESC", (target_key, *modes, *LIVE_STATES)):
+        if lane is None or job_lane(_loads(row["params_json"])) == lane:
+            return {"id": row["id"], "mode": row["mode"], "state": row["state"]}
+    return None
+
+
+def _busy(store: RiskStore, target_key: str, stage: str, lane: tuple[str, str | None]) -> dict | None:
+    """그 단계를 새로 세울 필요가 없게 하는 같은 길의 살아 있는 잡 — 쟁점은 살아 있는 쟁점 잡(새 대기 쟁점을 그 잡이 집는다), 종합은
+    살아 있는 쟁점 잡(그 잡이 끝나면 종합을 잇는다)이나 아직 집히지 않은 종합 잡(시작할 때 지금 원장을 읽는다). 도는 종합 잡은 막지
+    않는다 — 그 잡이 이미 끝낸 요약은 옛 입력이라 새 종합 잡이 뒤에 줄을 선다. 길이 다른 잡은 없는 것으로 본다(XR-12 — 그 잡을 다시
+    세우거나 거기에 일을 더하면 동의가 번진다)."""
     if stage == "issues":
-        return _live(store, target_key, ("issues",))
-    live = _live(store, target_key, ("issues",))
+        return _live(store, target_key, ("issues",), lane)
+    live = _live(store, target_key, ("issues",), lane)
     if live is not None:
         return live
-    row = store.query_one("SELECT id, mode, state FROM rr_jobs WHERE target_key = ? AND mode = 'synth' AND state = 'queued'"
-                          " ORDER BY created_at DESC LIMIT 1", (target_key,))
-    return dict(row) if row is not None else None
+    for row in store.query("SELECT id, mode, state, params_json FROM rr_jobs WHERE target_key = ? AND mode = 'synth'"
+                           " AND state = 'queued' ORDER BY created_at DESC", (target_key,)):
+        if job_lane(_loads(row["params_json"])) == lane:
+            return {"id": row["id"], "mode": row["mode"], "state": row["state"]}
+    return None
 
 
 def _rearm(store: RiskStore, target_key: str, job_id: str, *, by: str, round_no: int) -> dict:
@@ -138,6 +159,9 @@ def create_stage_job(store: RiskStore, target_key: str, stage: str, *, prev: Map
                   "chain": chain,
                   # 판단 LLM 과 반출 동의 기록을 물려받는다(Claude 길 X-2) — 검토 잡이 claude 였으면 쟁점 · 종합도 claude 다(GLM 은 칸 없음)
                   **llm_kwargs(params)}
+        if stage == "issues" and "llm" in kwargs:
+            # claude 쟁점 잡은 이 걸음(회차 round_no)이 고른 쟁점만 돈다(XR-12) — 다른 길이 올린 쟁점은 그 길의 잡이 돈다
+            kwargs["issue_rounds"] = issues.step_selection(store, target_key, round_no)
         made = (issues.create_issues_job(store, target_key, user_memo=params.get("user_memo"), **kwargs) if stage == "issues"
                 else synth.create_synth_job(store, target_key, **kwargs))
         if made.get("created") is False:
@@ -173,15 +197,20 @@ def on_reviews_closed(store: RiskStore, job: Mapping[str, Any]) -> dict:
     report = synth.safe_assemble(store, key, trigger="reviews_closed")
     round_no = _next_round(store, key)
     issues.select_issues(store, key, selected_round=round_no, cells_hash=closure.closing_hash(store, key))
-    queued = int(store.query_one("SELECT COUNT(*) AS n FROM rr_issues WHERE target_key = ? AND state = 'queued'",
-                                 (key,))["n"] or 0)
+    row = _job(store, str(job["id"]))
+    lane = job_lane(_loads(row["params_json"]))
+    # 그 길이 돌 대기 쟁점(XR-12) — claude 사슬은 이 걸음이 고른 것, GLM 사슬은 끝나지 않은 claude 잡의 몫이 아닌 것(종전 셈 그대로)
+    picked = issues.step_selection(store, key, round_no) if lane[0] != "glm" else {}
+    queued = len(picked) if lane[0] != "glm" else issues.glm_queued_n(store, key)
     stage = "issues" if queued else "synth"
-    live = _busy(store, key, stage)
+    live = _busy(store, key, stage, lane)
     if live is not None:
+        if live["mode"] == "issues" and picked:
+            issues.bind_issues(store, live["id"], picked)      # 같은 사람의 claude 사슬 — 이 걸음이 고른 쟁점을 그 잡의 몫에 더한다
         _rearm(store, key, live["id"], by=str(job["id"]), round_no=round_no)
         out = {"stage": None, "reason": f"{live['mode']}_live", "job_id": live["id"], "report": report}
     else:
-        out = {**create_stage_job(store, key, stage, prev=_job(store, str(job["id"])),
+        out = {**create_stage_job(store, key, stage, prev=row,
                                   reason="reviews_closed" if queued else "no_issues", round_no=round_no), "report": report}
     closure.refresh(store, key)
     return out
@@ -197,7 +226,7 @@ def on_issues_closed(store: RiskStore, job: Mapping[str, Any]) -> dict:
         return {"stage": None, "reason": "panels"}
     registry.merge(store, key)
     report = synth.safe_assemble(store, key, trigger="issues_closed")
-    live = _busy(store, key, "synth")
+    live = _busy(store, key, "synth", job_lane(_loads(row["params_json"])))     # 같은 길의 잡만(XR-12)
     round_no = int(_loads(row["chain_json"]).get("round") or max(_next_round(store, key) - 1, 1))
     if live is not None:
         _rearm(store, key, live["id"], by=str(row["id"]), round_no=round_no)

@@ -3433,8 +3433,9 @@ class IssueActionBody(BaseModel):
 
 @router.put("/issues/{issue_id}")
 def put_issue(issue_id: str, body: IssueActionBody, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """사람의 쟁점 결정(editor, 사유 필수) — queue: 상한 밖·끝난 쟁점을 다시 대기로(상한을 넘기는 사람의 결정 — 살아 있는 쟁점 잡이
-    없으면 잡을 세운다) · skip: 건너뛴다(skipped — 완결 잔여에 든다). rr_audit 한 행."""
+    """사람의 쟁점 결정(editor, 사유 필수) — queue: 상한 밖·끝난 쟁점을 다시 대기로(상한을 넘기는 사람의 결정 — 살아 있는 GLM 쟁점
+    잡이 없으면 GLM 잡을 세운다 — 살아 있는 claude 쟁점 잡에는 붙지 않는다, XR-12) · skip: 건너뛴다(skipped — 완결 잔여에 든다). rr_audit
+    한 행."""
     store = get_store()
     row = store.query_one("SELECT target_key, state FROM rr_issues WHERE issue_id = ?", (issue_id,))
     missing = AppError("E404", f"쟁점을 찾을 수 없습니다 — {issue_id}.", 404)
@@ -3467,8 +3468,10 @@ def put_issue(issue_id: str, body: IssueActionBody, ident: identity.Identity = D
                project_id=target["project_id"], before={"issue_id": issue_id, "state": row["state"]},
                after={"issue_id": issue_id, "state": state}, reason=reason)
     if body.action == "queue":
+        # 사람이 올린 쟁점은 GLM 이다(XR-10 · XR-12) — 살아 있는 claude 쟁점 잡에 붙지 않는다(그 잡은 제 사슬 걸음의 몫만 돌고, 사람이
+        # 정한 쟁점은 그 몫이 아니다). 살아 있는 GLM 쟁점 잡이 있으면 그 잡, 없으면 GLM 쟁점 잡을 세운다.
         live = store.query_one(f"SELECT id FROM rr_jobs WHERE target_key = ? AND mode = 'issues' AND state IN"
-                               f" ({','.join('?' * len(runner.LIVE_JOB_STATES))}) LIMIT 1",
+                               f" ({','.join('?' * len(runner.LIVE_JOB_STATES))}) AND {issues_module.NOT_CLAUDE_SQL} LIMIT 1",
                                (target["target_key"], *runner.LIVE_JOB_STATES))
         job = live["id"] if live is not None else issues_module.create_issues_job(
             store, target["target_key"], owner_sub=target["owner_sub"], requester_sub=email)["job_id"]
