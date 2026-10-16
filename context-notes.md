@@ -2439,8 +2439,12 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
   `consent_external_required` — 잡 행이 생기지 않는다). REST 본문은 그 칸을 `Any` 로 받는다(pydantic bool 은 'true' 를 참으로 바꾼다).
 - 기록은 call-estimate 동의와 같은 자리다 — params `consent_external{by, at, source}`(by = 요청자 · source = web·mcp·api · chain 은 앞
   잡의 기록을 그대로), 반환과 감사 행(job.create after)에도 같은 칸. GLM 잡에는 칸이 없다(params · 반환 · 감사 바이트 그대로).
-- MCP 입구는 FastMCP 가 형을 단 인자를 미리 풀어(글자 'true' → true) 엄격함이 REST 만 못하다 — 도구 설명이 '동의를 받은 뒤에만
-  true' 를 말하는 것이 그 자리의 그물이다(엔진 X-D6 도 FastMCP 의 풀기를 같은 식으로 받아들였다).
+- ~~MCP 입구는 FastMCP 가 형을 단 인자를 미리 풀어(글자 'true' → true) 엄격함이 REST 만 못하다 — 도구 설명이 '동의를 받은 뒤에만
+  true' 를 말하는 것이 그 자리의 그물이다(엔진 X-D6 도 FastMCP 의 풀기를 같은 식으로 받아들였다).~~ **틀렸다(X-D7 ②, 10-16 고침).**
+  `bool` 주석이라 FastMCP(pydantic lax)가 'yes' · 'true' · 'on' · '1' · 1 을 True 로 바꿔 claude 잡이 서고 동의 기록이 남았다(반대 검토
+  재현). 엔진 X-D6 의 동의는 dict(advanced) 안의 값이라 FastMCP 가 풀지 않는 자리였다(탐침 mcp_dict — 'yes' 가 글자 그대로 닿는다) —
+  같은 경우가 아니었다. 이제 `consent_external: StrictBool | None` 이다 — FastMCP 가 도구에 닿기 전에 그 값들(과 0 · 'false' · dict)을
+  검증 오류로 거절하고 잡 행 · 감사 행이 생기지 않으며, 도구 목록의 형은 boolean 그대로다(test_external_llm_lanes).
 
 ### XR-3. 길이 열렸는지는 잡을 만들 때 /health 로
 - claude 잡만 `/health` 를 한 번 묻는다(트랜잭션 밖) — capabilities 에 external_llm 이 없으면 409 `external_llm_unavailable{reason:
@@ -2511,3 +2515,100 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
   엔진 자격을 동의 기록에 박지 않음)는 사슬이 요청자와 동의 기록을 함께 물려주어 같은 값이라 살았다. 둘이 갈린 잡의 시험을 더해
   22/22(마지막 머리 b711f3a 에서도 22/22).
 - 전체 시험(공유 잠금 아래, b711f3a) — 3,277 통과 · xfail 4 · 실패 0(rc 0). ruff 깨끗하다.
+
+### XR-12. 동의는 번지지 않는다 — 길(lane)로 나눈다(반대 검토 X-D7 ①, 10-16)
+- 결함 — 쟁점 · 종합 잡이 대상마다 하나라는 규칙(사슬 `_busy` · `_rearm`, 사람의 쟁점 올리기, 보고서 다시 내기의 대기 종합 잡 재사용)이
+  길을 가리지 않았다. 남의 GLM 사슬이 살아 있는 claude 쟁점 잡을 다시 세우고 그 잡이 그 쟁점을 동의한 사람의 PAT · Claude 로 냈으며(탐침
+  2a), 사람이 다시 올린 쟁점이 claude 잡에 붙었고(2b), 사람의 보고서 다시 내기가 대기 claude 종합 잡을 돌려받았다(2c). XR-10 이 'GLM 이다'
+  라고 적은 세 갈래가 실제로는 claude 로 돌았다.
+- 길 — 잡의 길은 (판단 LLM, 동의한 사람)이다(`chain.job_lane` — GLM 은 ('glm', None), claude 는 ('claude', consent_external.by)).
+  '살아 있으면 새로 세우지 않는다 · 다시 세운다 · 대기 잡을 다시 쓴다' 는 같은 길의 잡끼리만이다 — `chain._busy` · `chain._live(lane)` ·
+  `synth.create_synth_job`(대기 종합 잡 재사용) · `routes.put_issue`(살아 있는 GLM 쟁점 잡만 — `issues.NOT_CLAUDE_SQL`). GLM 사슬 · 사람의
+  올리기 · 보고서 다시 내기는 claude 잡을 건드리지 않고 GLM 잡에 붙거나 GLM 잡을 세운다. 다른 사람의 claude 사슬은 제 claude 잡을 세운다.
+  같은 사람의 claude 사슬만 그 사람의 살아 있는 claude 잡을 다시 세우고 거기에 일을 더한다.
+- 묶음(데이터) — claude 쟁점 잡의 params `issue_rounds`{쟁점 id: 고른 회차}(JSON 칸 — DDL 은 v5 그대로). 사슬이 잡을 세울 때 그 걸음(회차
+  R)이 대기로 세운 쟁점(사람이 정한 것 빼고 — `issues.step_selection`)을 적고, 같은 길의 다음 걸음은 `issues.bind_issues` 로 더한다.
+  그 잡이 도는 쟁점(`issues.claude_claims`)은 적은 쟁점 가운데 대기이고 사람이 정하지 않았고(status_source 'human' 아님) 지금 회차가
+  적은 회차와 같은 것이다 — 뒤의 걸음(어느 길이든)이 다시 고르면 그 걸음의 길로 넘어간다(마지막으로 고른 걸음이 이긴다 — GLM 걸음이 다시
+  고른 쟁점이 claude 잡에 남아 Claude 로 나가지 않게). 두 claude 잡이 같은 쟁점 · 회차를 적었으면 먼저 선 잡의 것이다. GLM 쟁점 잡은
+  끝나지 않은(queued · running · paused · cancelling) claude 잡의 몫이 아닌 대기 쟁점을 돈다.
+- 종합 — 종합 잡의 일은 제 run 의 요약 행(run_id = 잡 id)이고 시작할 때의 원장으로 짓는다. 길이 다른 요청은 그 잡을 다시 쓰지도 다시
+  세우지도 않으므로 claude 종합 잡에 남의 요청이 섞이지 않는다. 입력은 본래 대상 전체다(영역 요약은 그 영역이 제기에 참여한 등록부 행
+  전부 — 다른 사람의 검토 결과가 든다). 그래서 반출 경고가 그것을 말한다(아래).
+- 길에 따라 바꾼 곳 — 편성(`plan_issue_panel` → `_lane_rows`), 남은 대기 쟁점 놓기(`untry_queued(job_id=)` — 취소 · 실패한 그 잡의 길
+  것만), 패널이 결과 없이 닫힌 쟁점의 고아 판정(`_orphan_reason(issue_id)` — claude 잡의 몫이면 그 잡이, 아니면 살아 있는 GLM 잡만 다시
+  집는다), 사슬의 대기 수(`glm_queued_n`). claude 잡이 없는 대상에서는 모두 종전과 같은 행 · 같은 결과다(GLM 시험 · main 시험 그대로).
+- 두 길이 한 대상에 함께 산다 — 쟁점 잡은 패널 러너가 대상마다 도는 패널 하나로 줄 세우고(`claim_next_job` 의 대상당 직렬 — 먼저 선
+  잡부터, 멈춘 잡은 건너뛴다), 종합 잡은 종합 워커가 대상마다 한 잡씩 돈다(먼저 선 잡부터 — 보류된 잡은 다음 잡에 자리를 비킨다). 따로
+  막는 규칙을 더하지 않았다(직렬은 이미 있다). 남은 관찰 — 길잡이의 사슬 단계(`chain_stage`)는 살아 있는 것 가운데 가장 늦게 선 잡 하나만
+  보인다(멈춘 claude 잡이 앞이면 GLM 잡이 보일 수 있다 — 잡 목록에는 둘 다 있다).
+- 반출 경고 — '이 잡의 지식카드·설계 변경 원문' 만 말하던 것을 '…과, 사슬이 이어 도는 쟁점 패널·종합 요약의 입력(이 대상 전체의
+  등록부 행·쟁점·요약 — 다른 사람의 검토 결과도 든다)' 으로 고쳤다(review_runner.EGRESS_WARNING — 422 글 · MCP 도구 설명 · REST 본문
+  설명). 포털 PLAN.md 3절이 인용한 옛 문구는 포털 몫이다.
+- `create_synth_job` 의 답은 늘 `llm`(glm · claude)을 말한다 — GLM 잡의 params 에는 여전히 칸이 없다(보고서 다시 내기 응답에만 `llm: glm`
+  이 더해진다 — 의도한 GLM 응답 변화 하나).
+
+### XR-13. 재개한 종합 잡은 인프라 다시 내기 몫을 다시 갖는다(X-D7 ③)
+- 결함 — 보류 external_worker 는 요약의 인프라 셈이 한도에 닿아 걸리는데 셈을 그대로 두어, 사람이 재개한 뒤 일시 실패(agent_timeout) 한
+  번에 그 요약이 서술 없이 닫혔다(infra_exhausted, 탐침 1).
+- 고른 것 — 보류를 걸 때 0 으로 돌린다(재개할 때가 아니라). 그 잡의 대기 요약 전부(run_id)의 infra_streak 를 0 으로 하고, 몇 번 뒤
+  멈췄는지는 잡 행 글('인프라 다시 내기 N회 뒤 멈췄다')과 요약 행의 error_code · error 가 말한다. 이 갈래는 외부 응답자 코드
+  (EXTERNAL_WORKER_CODES)에서만 열리므로 GLM 요약의 셈은 그대로다. 재개 쪽(runner.resume_job)에 두지 않은 까닭 — 패널 · 검토 · 종합
+  잡이 함께 쓰는 문이라 종합의 한 보류만을 위한 갈래를 거기에 넣지 않았다.
+- 시험 — 재개 뒤 일시 실패 한 번은 다시 내기(infra)이고 서술이 선다 · 재개 직후 곧바로 일꾼 부재면 곧장 보류하지 않고 백오프(셈 1)를
+  거쳐 한도에서 다시 보류한다.
+
+### XR-14. 무엇이 돌았나를 모델 칸에도 — 패널 모델 · 패널 모드의 llm(X-D7 LOW)
+- claude 쟁점 패널의 model_json.model 은 외부 길 이름(external)이다 — 지표 · 학습의 모델 층화(metrics.panel_models · learning)가 그
+  패널을 /health 의 GLM 모델로 세지 않는다. /health 의 모델은 box_model 에 남는다. 엔진이 외부 길로 돌지 않았으면(llm_mismatch) 완료가
+  model 을 실제로 돈 그 box_model 로 고치고 llm 칸을 뺀다. 끝의 모델 재확인도 같은 길로 떠 model_changed_midrun 이 거짓으로 서지 않는다.
+- `risk_start_job(mode='panels', llm='claude')` 는 살아 있는 패널 잡이 있으면 그 잡을 돌려주며 선택을 말없이 버렸다. 이제 llm ·
+  consent_external 을 준 패널 요청은 살아 있는 잡을 돌려주기 전에 본문을 본다(검토 잡과 같은 차례) — claude · 동의 칸은 422(E100)다.
+  패널 본문의 consent_external 도 422 다(패널 잡은 반출이 없다). 칸이 없거나 llm=glm 이면 종전 그대로 살아 있는 잡을 돌려준다.
+
+### XR-15. 동의 기록에 사람이 없으면 닫힌 채 실패한다(X-D7 LOW)
+- 숨은 길 — 쟁점 패널의 엔진 자격과 종합 워커의 이메일이 `동의한 사람 or 요청자 or 대상 소유자` 였다. 동의 기록에 by 가 없는 claude 잡이면
+  남의 PAT 로 과제가 섰다. 지금 길(사슬 · 검토 잡 만들기)은 by 를 늘 적으므로 숨어 있던 것이다.
+- 고침 — `runner.resolve_job_credential` 은 by 가 없으면 자격 없음(NO_CONSENTER_NOTE — 러너가 집지 않고 까닭을 적는다), `run_panel` 은
+  편성 전에 설정 보류(external_config), 종합 워커는 창도 묻지 않고 설정 보류다. 요청자 · 대상 소유자 · 서비스 계정으로 내려가지 않는다.
+
+### XR-16. 엔진의 자체 에이전트 거절을 리스크 잡까지 넓힌다(X-D7 ④ — HWAXAgentServer 가지 `x2-gate`)
+- 이 박스의 GLM 챗 · 심의 에이전트가 사용자 이름으로 `risk_start_job(llm=claude, consent_external=true)` 를 부르거나(바로 · invoke_tool ·
+  게이트웨이 별칭) REST 다리(rest_call)로 리스크 앱 잡 경로에 그 칸을 실어 보내면 지식카드에 숨은 지시 한 줄로 동의가 지어진다. 엔진 X-D6
+  의 거절(_AGENT_NO_EXTERNAL)을 그 도구와 다리로 넓혔다 — risk_start_job 은 llm 이 claude · external 이거나 동의 칸이 있으면, rest_call 은
+  본문에 동의 칸이 있으면(어느 경로든) · 리스크 잡 경로(…/targets/<key>/jobs · …/jobs/<id>/<action>)의 본문 llm 이 claude · external
+  이면 게이트웨이에 닿기 전에 도구 오류로 끝난다. 그 칸이 없는 호출은 그대로다. 자세한 것은 그 가지의 커밋과 포털 X-D7.
+
+### XR-17. 외부 쟁점 패널에 대상 열쇠를 싣는다(X-D8 ⑦ 안 a — 코디네이터 결정, 10-16)
+- 까닭 — 엔진은 외부 과제 머리의 target_key 를 질문 머리 '[리스크심사 <코드> <키>]' 에서만 읽는데 쟁점 패널 질문은 '[쟁점 …]' 로 시작해
+  과제 머리에 대상 열쇠가 없었다. 워크플로(X-3)는 제가 맡은 대상의 과제만 답하므로 claude 쟁점 패널의 과제를 영영 답하지 않는다.
+- 앱 — claude 잡의 쟁점 패널 delib_opts 에 `target_key`(그 잡의 대상 열쇠)를 싣는다(runner.run_panel — 앱이 띄우는 외부 심의는 이것
+  하나다). GLM 패널 본문은 그대로다(시험이 본다).
+- 엔진(가지 x2-gate) — 외부 심의(llm=external)일 때만 `delib_opts.target_key`(MCP advanced 도)를 읽어 그 심의의 과제 머리 · 과제 기록에
+  싣는다(질문 머리보다 앞선다). 꼴은 'diff:<id>' · 'snap:<id>' 이고 아니면 심의를 열기 전에 bad_request 다. GLM 심의는 보내도 읽지 않는다
+  (사건 · LLM 이 받은 글이 같다 — 시험이 본다). 그 밖(앞 패널 보고서 거름 따위)에는 쓰지 않는다. 계약 예제 delib_frames.json 에 그 칸과
+  '쟁점 패널 꼴 질문의 과제 머리' 를 더했고, 이 리포의 바이트 사본도 같이 바꿨다 — 그래서 이 가지의 사본 가드는 엔진 x2-gate 를 짝으로 본다
+  (`HWAX_AGENT_SERVER_REPO=<x2-gate 작업 트리>` — 엔진 main 에 합치기 전까지).
+- 포털 — 중계(DelibOpts)가 target_key 를 선언 · 전달하는 것은 포털 몫이다(코디네이터). 그 전에는 포털이 그 칸을 말없이 버린다 — 시험
+  `test_a_claude_issue_panels_target_key_reaches_the_engine_through_the_portal_model` 이 strict xfail 이다(포털 DelibOpts 가 그 칸을 선언하면
+  표식이 스스로 꺼지고 엄격히 돈다). 기존 시험은 llm · consent_external 이 버려지지 않는지를 그대로 본다.
+
+### XR-18. 시험 · 변이 · 전체 시험(반대 검토 고침, 10-16)
+- 새 시험 — `test_external_llm_lanes.py`(함수 21 · 모은 시험 22): 탐침 다섯(2a · 2b · 2c · 1 · mcp_bool/mcp_strict)을 그 장면 그대로 옮기고
+  단언을 고친 동작으로 바꿨다. 더해 두 길이 한 대상에 사는 장면(제 몫만 돈다 · 취소 두 차례 · 고아 판정 · 같은 길만 다시 쓰기 · 다시 고른
+  걸음이 이긴다 · GLM 걸음의 대기 셈 · 사슬 걸음의 몫 · 같은 사람의 다음 걸음 · 종합 단계의 길 · 생산자 경로의 claude 사슬), 재개 뒤 인프라
+  몫 셋(잡의 대기 요약 전부), 패널 모델 둘, 패널 모드, 동의자 없는 잡. 고친 기존 시험 — `test_external_llm_jobs.py`(반출 경고 글 · 보류 때
+  셈을 0 으로 · claude 패널의 target_key · GLM 패널에는 없음), `test_wiring_regressions.py`(포털 경유 claude 패널 — target_key 는 따로
+  strict xfail).
+- 변이(스크래치 사본) — 앱 30개: 첫 판 26/29. 살아남은 셋 — 'claude 잡 취소가 대상 전부를 놓는다'(시험이 GLM 먼저 취소해 가려졌다 —
+  취소 두 차례로 고쳤다), 'GLM 걸음이 claude 몫도 센다'(고르기 뒤에만 드러난다 — 고르기를 비운 GLM 걸음 시험을 더했다), 셈 되돌림의 한
+  문장만 지운 변이(남은 문장이 덮는다 — 둘 다 지우는 변이로 바꾸고, '그 요약만 되돌린다' 변이를 나눠 잡 전체의 몫 시험을 더했다). 고친 뒤
+  30/30. 엔진(x2-gate) 13/13(리스크 잡 시작 · REST 다리 · 별칭 · 경로 · 대상 열쇠 꼴 · GLM 은 읽지 않음 · 칸이 머리보다 앞섬 · X-D6 회귀 그물).
+- 전체 시험(공유 잠금 아래, `HWAX_AGENT_SERVER_REPO=x2-gate 작업 트리`, a111e95) — 3,299 통과 · xfail 5(기존 4 + 포털 target_key 중계
+  strict xfail 1) · 실패 0(rc 0). 그 작업 트리에는 엔진 venv 를 가리키는 `.venv/`(심링크 — 무시되는 이름)를 두었다 — 형제 엔진 시험이
+  `<엔진 리포>/.venv/bin/python` 을 부른다.
+- main(d18e9d6)의 시험을 새 앱 코드에 대어(스크래치, 형제 없이) — 3,197 통과 · 실패 2 · 건너뜀 15 · xfail 4. 실패 둘은 반대 검토 때와 같은
+  X-2 표면 고정(risk_start_job 인자 집합 · 사람이 재개하는 보류 코드표)이다 — 새 차이가 없다.
+- GLM 출력 견주기(반대 검토의 하네스 — 같은 장면을 두 번 떠 흔들리는 칸을 걸렀다) — 검토한 머리(4ac2b92)와 견주어 다른 것은 종합 잡
+  만들기 답의 `llm: glm`(뜻한 것) · risk_start_job 설명 글 · 벽시계로 잰 초 값뿐이다. 잡 만들기 · 검토 루프 · 차단기 · 내용 실패 · 쟁점
+  패널 · 사슬은 같은 바이트다. ruff 깨끗하다.

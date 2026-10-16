@@ -399,3 +399,12 @@
 - [x] 보고서 · 품질 글 — '판단 LLM: Claude(외부, 사용자 신고 모델)'(GLM 잡의 글은 그대로)
 - [x] 길잡이 · MCP `risk_start_job` · REST 인자와 반출 경고
 - [x] 시험(가짜만) — 외부 계약 예제 바이트 사본 · 카드 대조 · 패널 · GLM 회귀 · 변이 검사 · 전체 시험(공유 잠금) — 변이 22/22 · 전체 3,277 통과(b711f3a, rc 0)
+- [x] 반대 검토(포털 X-D7, 10-16) 고침 — 동의는 번지지 않는다(길 · claude 쟁점 잡의 issue_rounds · 같은 길끼리만 다시 세우기 · 사람의 올리기와
+      보고서 다시 내기는 GLM · 반출 경고는 대상 전체) XR-12 · MCP 동의 StrictBool(XR-2 고침) · 재개한 종합 잡의 인프라 몫 XR-13 · claude 패널
+      model=external · 패널 모드의 llm=claude 422 XR-14 · 동의자 없는 잡은 닫힌 채 XR-15 · 엔진 자체 에이전트 거절 넓힘(엔진 가지 x2-gate) XR-16
+- [x] X-D8 ⑦ — claude 쟁점 패널 delib_opts.target_key(엔진 x2-gate 가 외부 과제 머리에 싣는다) XR-17 — 포털 중계(DelibOpts)는 코디네이터 몫,
+      그 전까지 포털 중계 시험 하나가 strict xfail
+- [x] 시험 · 변이 · 전체 시험 — 새 시험 22 · 변이 앱 30/30 · 엔진 13/13 · 전체 3,299 통과 · xfail 5(rc 0, a111e95) · main 시험 교차 실패는
+      검토 때와 같은 표면 고정 둘뿐 · GLM 출력은 종합 답의 llm: glm 말고 같다 — XR-18
+- [ ] 엔진 가지 x2-gate 를 main 에 합치기 전까지 이 가지의 사본 가드는 `HWAX_AGENT_SERVER_REPO=<x2-gate 작업 트리>` 로 돈다(delib_frames.json)
+- [ ] 포털 DelibOpts 가 target_key 를 선언 · 중계하면 strict xfail 이 스스로 꺼진다(코디네이터 몫 — 그 뒤 전체 시험 xfail 4)
