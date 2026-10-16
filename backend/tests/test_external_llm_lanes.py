@@ -12,8 +12,9 @@ import re
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
 
-from app import chain, config, issues, registry, routes, runner, synth, units
+from app import chain, config, entry, issues, metrics, registry, routes, runner, synth, units
 from app.common import now_epoch
+from app.errors import AppError
 from app.runner import EngineRejected
 from tests import factories
 from tests import test_external_llm_jobs as X
@@ -500,3 +501,83 @@ def test_holding_gives_back_the_budget_of_every_pending_summary_of_the_job(store
         clock.advance(100_000)
     assert steps[:2] == ["done", "infra"] and steps[-1] == "completed", steps
     assert not [s for s in synth.latest_summaries(store, key) if s["run_id"] == job_id and s["state_reason"] == "infra_exhausted"]
+
+
+# ================================================================ 패널의 모델 기록 · 패널 모드 · 동의자 없는 잡(XR-14 · XR-15)
+def test_a_claude_issue_panel_is_recorded_as_the_external_lane_not_the_box_model(store, monkeypatch, tmp_path):
+    """claude 쟁점 패널의 model_json.model 은 외부 길(external)이다 — 지표 · 학습의 모델 층화가 그 패널을 이 박스의 GLM 으로 세지
+    않는다. /health 의 모델은 box_model 에 남고, 끝에 다시 뜬 모델과 견줘 model_changed_midrun 이 거짓으로 서지 않는다."""
+    key = X._issue_ledger(store, monkeypatch, tmp_path)
+    rig.pat(store, EDITOR)
+    X._claude_issues_job(store, key)
+    engine = X.ExternalPanelEngine(store)
+    out = runner.run_panel(store, config.settings, engine, runner.claim_next_job(store, config.settings, engine=engine))
+    assert out["status"] == "done", out
+    panel = store.query_one("SELECT model_json, quality_json FROM rr_panels WHERE id = ?", (out["panel_id"],))
+    model = json.loads(panel["model_json"])
+    assert (model["model"], model["llm"], model["box_model"]) == ("external", "external", "issue-fake-model")
+    assert "model_changed_midrun" not in json.loads(panel["quality_json"])["flags"]
+    assert metrics.panel_models(store)[out["panel_id"]] == "external"
+
+
+def test_a_claude_panel_that_ran_on_the_box_records_the_model_that_ran(store, monkeypatch, tmp_path):
+    """claude 잡인데 엔진이 외부 길로 돌지 않았다(llm_mismatch — 중계가 delib_opts.llm 을 버렸다) — model 은 실제로 돈 이 박스의 모델이다."""
+    key = X._issue_ledger(store, monkeypatch, tmp_path)
+    rig.pat(store, EDITOR)
+    X._claude_issues_job(store, key)
+    engine = X.ExternalPanelEngine(store, llm=None)
+    out = runner.run_panel(store, config.settings, engine, runner.claim_next_job(store, config.settings, engine=engine))
+    assert out["status"] == "done" and "llm_mismatch" in out["quality_flags"]
+    model = json.loads(store.query_one("SELECT model_json FROM rr_panels WHERE id = ?", (out["panel_id"],))["model_json"])
+    assert model["model"] == "issue-fake-model" and "llm" not in model
+    assert metrics.panel_models(store)[out["panel_id"]] == "issue-fake-model"
+
+
+def test_panels_mode_refuses_claude_even_while_a_panel_job_is_live(store):
+    """risk_start_job(mode='panels', llm='claude')는 살아 있는 패널 잡이 있어도 그 잡을 돌려주며 선택을 말없이 버리지 않는다 — 검토 잡처럼
+    본문을 먼저 본다(422). llm · 동의 칸이 없는 요청은 종전 그대로 살아 있는 잡을 돌려준다."""
+    rig.pat(store)
+    target = factories.make_diff_target(store, 3)
+    ident = X._delegate()
+    first = entry.start_job(ident, target_key=target.target_key, tier="A")
+    assert first["created"] is True
+    for extra in ({"llm": "claude"}, {"llm": "claude", "consent_external": True}, {"consent_external": True}):
+        with pytest.raises(AppError) as refused:
+            entry.start_job(ident, target_key=target.target_key, tier="A", **extra)
+        assert (refused.value.code, refused.value.http_status) == ("E100", 422), extra
+    for extra in ({}, {"llm": "glm"}):
+        again = entry.start_job(ident, target_key=target.target_key, tier="A", **extra)
+        assert (again["job_id"], again["created"]) == (first["job_id"], False), extra
+
+
+def test_a_claude_job_without_a_consenter_never_runs_on_another_pat(store, monkeypatch, tmp_path):
+    """동의 기록에 사람(by)이 없는 claude 잡 — 요청자 · 대상 소유자의 PAT 가 있어도 그것으로 돌지 않는다. 러너는 집지 않고(까닭을 적는다),
+    직접 돌려도 편성 전에 설정 보류(external_config)로 멈추며, 종합 워커는 창도 묻지 않고 멈춘다."""
+    key = X._issue_ledger(store, monkeypatch, tmp_path)
+    rig.pat(store)
+    rig.pat(store, EDITOR)
+    nobody = {"at": now_epoch(), "source": "web"}
+    made = issues.create_issues_job(store, key, owner_sub=OWNER, requester_sub=EDITOR, consent_source="chain", llm="claude",
+                                    consent_external=nobody)
+    assert made["credential"] is None and "동의 기록" in made["error"]
+    engine = X.ExternalPanelEngine(store)
+    assert runner.claim_next_job(store, config.settings, engine=engine) is None
+    row = rig.job_row(store, made["job_id"])
+    assert row["state"] == "queued" and "동의 기록" in row["error"]
+    runner._set_job(store, made["job_id"], "running")
+    job = {"id": made["job_id"], "target_key": key, "owner_sub": OWNER, "mode": "issues", "state": "running",
+           "params": _params(store, made["job_id"]), "credential": "owner", "credential_email": OWNER}
+    out = runner.run_panel(store, config.settings, engine, job)
+    assert out == {"panel_id": None, "status": "paused", "error": "external_config"}
+    assert engine.calls == [] and _queued(store, key)
+    row = rig.job_row(store, made["job_id"])
+    assert (row["state"], row["hold_code"]) == ("paused", "external_config") and "동의 기록" in row["error"]
+
+    other = X._summary_ledger(store)
+    job_id = synth.create_synth_job(store, other, owner_sub=OWNER, requester_sub=OWNER, consent_source="chain", llm="claude",
+                                    consent_external=nobody)["job_id"]
+    summary = X.ExternalSummaryEngine()
+    step = synth.SynthWorker(store, config.settings, summary).tick()
+    assert step == {"job_id": job_id, "step": "hold", "hold": "external_config"}
+    assert summary.limits_llm == [] and summary.requests == []
+    assert "동의 기록" in rig.job_row(store, job_id)["error"]

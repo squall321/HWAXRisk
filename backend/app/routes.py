@@ -2935,7 +2935,9 @@ class JobBody(BaseModel):
     422 다 — 범위는 scope.tiers 로 주고, 동시 수는 박스 손잡이(HWAXRISK_REVIEW_CONCURRENCY)다. 패널 잡에 scope 를 주어도 422 다(조용히
     버리지 않는다). `llm`(Claude 길 X-2)은 판단 LLM — glm(없음과 같다) · claude 이고 claude 는 검토 잡에만 받는다. claude 는
     `consent_external` 이 JSON true 여야 한다(review_runner.check_llm_choice — 아니면 422 consent_external_required) — 이 잡의 지식카드 ·
-    설계 변경 원문이 Claude(외부)로 나간다. 그래서 그 칸은 bool 로 받지 않는다(글자 'true' · 1 을 참으로 바꾸지 않게).
+    설계 변경 원문과, 사슬이 이어 도는 쟁점 패널 · 종합 요약의 입력(이 대상 전체의 등록부 행 · 쟁점 · 요약)이 Claude(외부)로 나간다
+    (review_runner.EGRESS_WARNING). 그래서 그 칸은 bool 로 받지 않는다(글자 'true' · 1 을 참으로 바꾸지 않게). 패널 잡에는 둘 다 받지
+    않는다(llm=claude · consent_external 은 422 — 조용히 버리지 않는다).
     """
 
     tier: str | None = None
@@ -2957,6 +2959,9 @@ class JobBody(BaseModel):
                 raise ValueError("scope 는 카드 대조 검토 잡(mode='reviews')의 칸이다 — 패널 잡은 tier 로 범위를 정한다")
             if self.llm == "claude":
                 raise ValueError("llm='claude' 는 카드 대조 검토 잡(mode='reviews')의 칸이다 — 패널 잡은 이 박스의 LLM 으로 돈다")
+            if self.consent_external is not None:
+                raise ValueError("consent_external 은 Claude 로 고른 카드 대조 검토 잡(mode='reviews')의 칸이다 — 패널 잡은 이 박스의"
+                                 " LLM 으로 돌아 반출이 없다")
             return self
         panel_only = sorted(k for k in ("tier", "modifiers", "concurrency")
                             if k in self.model_fields_set and (k != "modifiers" or self.modifiers))

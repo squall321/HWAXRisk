@@ -456,10 +456,15 @@ class SynthWorker:
         if job["state"] != "running":
             self._set(job["id"], "running")
         params = _loads(job["params_json"], {})
-        # claude 잡(Claude 길 X-2)은 동의한 사람의 PAT 로만 — 자격 행이 없었으면 그 사람으로 묻는다(대상 소유자로 내려가지 않는다)
-        email = (job["credential_email"] or runner.external_consenter(params) or params.get("requester")
-                 or job["owner_sub"])
         llm = runner.job_llm(params)
+        consenter = runner.external_consenter(params)
+        if llm is not None and consenter is None:
+            # 동의 기록에 사람이 없는 claude 잡 — 요청자 · 대상 소유자의 PAT 로 대신 돌지 않는다(XR-15). 설정 보류로 멈춘다.
+            self._set(job["id"], "paused", hold="external_config", error=f"external_config: {runner.NO_CONSENTER_NOTE}")
+            return {"job_id": job["id"], "step": "hold", "hold": "external_config"}
+        # claude 잡(Claude 길 X-2)은 동의한 사람의 PAT 로만 — 자격 행이 없었으면 그 사람으로 묻는다(요청자 · 대상 소유자로 내려가지 않는다)
+        email = ((job["credential_email"] or consenter) if llm is not None
+                 else (job["credential_email"] or params.get("requester") or job["owner_sub"]))
         try:
             limits = (self.engine.limits(email=email) if llm is None
                       else self.engine.limits(email=email, llm=runner.ENGINE_EXTERNAL))

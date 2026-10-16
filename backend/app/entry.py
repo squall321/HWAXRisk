@@ -348,6 +348,13 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = N
         return _start_review_job(ident, store, target_key, web, tier=tier, consent=consent, modifiers=modifiers,
                                  user_memo=user_memo, concurrency=concurrency, scope=scope, llm=llm,
                                  consent_external=consent_external)
+    # 판단 LLM 칸(llm · consent_external)을 준 패널 잡 요청은 살아 있는 잡을 돌려주기 전에 본문을 검증한다(XR-14 — 검토 잡과 같은 차례).
+    # 패널 잡은 Claude 를 받지 않으므로 llm=claude · consent_external 은 422 다 — 살아 있는 잡을 돌려주며 그 선택을 말없이 버리지 않는다.
+    llm_fields = {**({"llm": llm} if llm is not None else {}),
+                  **({"consent_external": consent_external} if consent_external is not None else {})}
+    body = (_body(routes.JobBody, tier=tier, concurrency=concurrency, modifiers=modifiers, user_memo=user_memo,
+                  consent=consent, mode=mode, **({"scope": scope} if scope is not None else {}), **llm_fields)
+            if llm_fields else None)
     live = store.query_one(
         "SELECT id, tier, state, pause_reason, panels_done, panels_total, error, credential_email FROM rr_jobs"
         f" WHERE target_key = ? AND tier = ? AND {runner.PANEL_JOBS_SQL}"
@@ -355,9 +362,9 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = N
         " ORDER BY created_at DESC, rowid DESC LIMIT 1", (target_key, tier, *LIVE_JOB_STATES))
     if live is not None:
         return {"job_id": live["id"], "created": False, **{k: live[k] for k in live.keys() if k != "id"}, "web": web}
-    body = _body(routes.JobBody, tier=tier, concurrency=concurrency, modifiers=modifiers, user_memo=user_memo,
-                 consent=consent, mode=mode, **({"scope": scope} if scope is not None else {}),
-                 **({"llm": llm} if llm is not None else {}))
+    if body is None:
+        body = _body(routes.JobBody, tier=tier, concurrency=concurrency, modifiers=modifiers, user_memo=user_memo,
+                     consent=consent, mode=mode, **({"scope": scope} if scope is not None else {}))
     return {**_create_job(ident, target_key, body), "created": True, "web": web}
 
 

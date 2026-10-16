@@ -482,6 +482,11 @@ def llm_params(llm: str | None, consent: Mapping[str, Any] | None) -> dict:
     return {"llm": LLM_CLAUDE, "consent_external": dict(consent or {})}
 
 
+# claude 잡인데 동의 기록에 사람(by)이 없다 — 누구의 PAT 로도 돌지 않는다(요청자 · 대상 소유자로 대신하지 않는다, XR-15).
+NO_CONSENTER_NOTE = ("동의 기록(consent_external.by)에 사람이 없는 Claude 잡이다 — 요청자 · 대상 소유자 · 서비스 계정의 PAT 로 대신 돌지"
+                     " 않는다. 이 잡을 취소하고 동의할 사람이 Claude 로 다시 만든다(또는 llm 없이 GLM 으로)")
+
+
 def external_consenter(params: Mapping[str, Any] | None) -> str | None:
     """claude 잡에서 반출에 동의한 사람 — 그 잡의 엔진 호출(카드 대조 · 요약 · 쟁점 패널)은 이 사람의 PAT 로만 돈다(과제는 그 사람의
     Claude Code 워크플로가 집는다). GLM 잡 · 기록이 없으면 None."""
@@ -501,6 +506,9 @@ def resolve_job_credential(store: Any, settings: Any | None, owner_sub: str | No
     if job_llm(params) is None:
         return resolve_credential_with_note(store, settings, owner_sub, requester_sub)
     who = external_consenter(params)
+    if who is None:
+        # 동의 기록에 사람이 없다 — 요청자 · 대상 소유자의 PAT 로 대신하지 않는다(닫힌 채 실패 — XR-15)
+        return None, NO_CONSENTER_NOTE
     credential, note = resolve_credential_with_note(store, settings, who)
     if credential is not None:
         return {**credential, "kind": "owner" if who == owner_sub else "requester"}, note
@@ -1501,9 +1509,11 @@ def snapshot_model(engine: Any, *, llm: str | None = None) -> dict:
     `captured='unavailable'`·`model='unknown'` 이고 어느 경우에도 예외를 올리지 않는다.
     `llm='claude'`(Claude 길 X-2)면 판단 LLM 이 외부 응답자다 — `llm: external` 을 달고 근거 예산(`evid_budget`)을 /health 의
     `external_llm.evid_budget`(외부 창에서 유도한 것 — `engine_client.external_health`)으로 둔다. 그 길을 열지 않은 박스 · 불통이면
-    None 이라 브리프가 바닥 프로파일로 떨어진다. GLM 은 종전 그대로다.
+    None 이라 브리프가 바닥 프로파일로 떨어진다. `model` 은 외부 길 이름(external — 지표 · 학습의 모델 층화가 GLM 으로 세지 않게,
+    XR-14)이고 /health 의 모델(이 박스의 LLM)은 `box_model` 에 둔다 — 엔진이 그 길로 돌지 않았으면(llm_mismatch) 완료가 `model` 을
+    그 값으로 고친다. GLM 은 종전 그대로다.
     """
-    external = {"llm": ENGINE_EXTERNAL} if llm == LLM_CLAUDE else {}
+    external = {"llm": ENGINE_EXTERNAL, "model": ENGINE_EXTERNAL, "box_model": "unknown"} if llm == LLM_CLAUDE else {}
     probe = getattr(engine, "health", None)
     if not callable(probe):
         return {"runtime": "agent-server", "captured": "unavailable", "model": "unknown",
@@ -1533,7 +1543,9 @@ def snapshot_model(engine: Any, *, llm: str | None = None) -> dict:
     if external:
         block = info.get("external_llm") if isinstance(info.get("external_llm"), Mapping) else {}
         budget = block.get("evid_budget")
-        out.update(external, evid_budget=budget if isinstance(budget, int) and not isinstance(budget, bool) else None)
+        box = out["model"]                     # /health 의 모델 — 이 박스의 LLM(외부 길이 아니다)
+        out.update(external, box_model=box,
+                   evid_budget=budget if isinstance(budget, int) and not isinstance(budget, bool) else None)
     return out
 
 
@@ -1722,6 +1734,13 @@ def run_panel(
     issue_job = job.get("mode") == "issues"
     # 판단 LLM(Claude 길 X-2) — 사슬이 물려준 claude 쟁점 잡이면 패널이 외부 응답자로 돈다(좌석 도구 없는 evidence_only — 엔진이 강제)
     llm = job_llm(params)
+    if llm is not None and external_consenter(params) is None:
+        # 동의 기록에 사람이 없다 — 요청자 · 대상 소유자의 PAT 로 대신 돌지 않는다(XR-15). 편성하지 않고 설정 보류로 멈춘다.
+        row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job["id"],))
+        if row is not None and row["state"] == "running":
+            _set_job(store, job["id"], "paused", by=f"code:{EXTERNAL_CONFIG_HOLD}",
+                     error=f"{EXTERNAL_CONFIG_HOLD}: {NO_CONSENTER_NOTE}", hold={"code": EXTERNAL_CONFIG_HOLD, "until": None})
+        return {"panel_id": None, "status": "paused", "error": EXTERNAL_CONFIG_HOLD}
     if issue_job:
         # 쟁점 잡(M3 S3-7) — 대기 쟁점 하나의 패널. 좌석 원장을 쓰지 않는다(편성 전후 rr_coverage 그대로).
         from app import issues  # noqa: PLC0415 — issues 는 이 모듈을 쓴다.
@@ -1781,9 +1800,10 @@ def run_panel(
     # 러너 자격 (b)(c) 사용자 PAT 를 쓰려면 그 사람의 sub 가 엔진까지 가야 한다(plan §6.7 3단계). 잡이 요청자
     # 자격으로 집혔으면 요청자를 넘긴다 — 늘 타깃 owner 를 넘기던 동안 잡 행은 '요청자 자격' 이라 적고 엔진은
     # owner(없으면 서비스) PAT 로 돌았다.
-    # claude 잡은 반출에 동의한 사람의 PAT 로만 돈다 — 그 사람의 워크플로만 과제를 집는다(대상 소유자 · 서비스로 내려가지 않는다)
-    credential_sub = external_consenter(params) or (
-        params.get("requester") if job.get("credential") == "requester" else job.get("owner_sub"))
+    # claude 잡은 반출에 동의한 사람의 PAT 로만 돈다 — 그 사람의 워크플로만 과제를 집는다(대상 소유자 · 서비스로 내려가지 않는다 —
+    # 동의 기록에 사람이 없는 claude 잡은 위에서 멈췄다, XR-15)
+    credential_sub = (external_consenter(params) if llm is not None
+                      else params.get("requester") if job.get("credential") == "requester" else job.get("owner_sub"))
     optional: dict = {}
     run_params = _run_parameters(engine)
     if "on_progress" in run_params:
@@ -2334,13 +2354,24 @@ def _complete_panel(
     # 종료 직후 model 스냅샷 재확인(D6 — 시작값이 정본, 재실행 없음).
     model_final = dict(model_json)
     model_changed = False
+    claude_job = job_llm(_job_params(job)) is not None
     if engine is not None and model_json.get("captured") == "health_snapshot":
-        after = snapshot_model(engine)
+        # claude 잡의 시작값은 model=external 이다 — 같은 길로 다시 떠야 견줄 수 있다(GLM 은 종전 그대로)
+        after = snapshot_model(engine, llm=LLM_CLAUDE if claude_job else None)
         if after.get("captured") == "health_snapshot" and (
             after.get("model") != model_json.get("model") or after.get("vllm") != model_json.get("vllm")
         ):
             model_final["model_end"] = after.get("model")
             model_changed = True
+    if claude_job and result.get("llm") != ENGINE_EXTERNAL:
+        # claude 잡인데 외부 길로 돌지 않았다(llm_mismatch — 아래 품질 표지) — model 은 실제로 돈 이 박스의 LLM(시작 때 /health 의
+        # box_model)이다. external 로 남기면 지표 · 학습의 모델 층화가 이 박스의 답을 Claude 로 센다(XR-14).
+        model_final["model"] = model_json.get("box_model") or "unknown"
+        got = result.get("llm")
+        if isinstance(got, str) and got:
+            model_final["llm"] = got
+        else:
+            model_final.pop("llm", None)
 
     # 8~12단계를 한 트랜잭션으로 묶는다 — 중간 실패 시 'done 인데 finding 0·좌석 running' 반쪽 저장이 남지 않는다.
     with store.tx():
@@ -2449,7 +2480,7 @@ def _complete_panel(
         # 포털 대화를 못 만든 채 돌았다 — 포털에 이 패널의 발언이 남지 않았다(끊겼다면 부분 결과도 없다).
         if result.get("conv_missing"):
             quality["flags"].append("conversation_absent")
-        if job_llm(_job_params(job)) is not None:
+        if claude_job:
             # claude 잡의 패널(Claude 길 X-2) — 무엇이 돌았나는 엔진 result 프레임의 llm 이 정본이다. external 이면 판단 LLM 을 적고
             # 좌석 도구가 없던 등급(tool_mode evidence_only)을 패널에 남긴다. 아니면(중계가 llm 을 버려 이 박스의 LLM 으로 돌았다)
             # Claude 로 적지 않고 llm_mismatch 를 단다(잡에도 셈을 올린다).
