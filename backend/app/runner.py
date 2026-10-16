@@ -1785,8 +1785,10 @@ def run_panel(
             profile=profile, diff_ref=diff_ref,
         )
         if llm is not None:
-            # 외부 응답자 심의 — 엔진은 동의 표지가 JSON true 여야 과제를 만든다(사람의 동의는 검토 잡을 만들 때 받아 잡에 물려 왔다)
-            delib_opts = {**delib_opts, "llm": ENGINE_EXTERNAL, "consent_external": True}
+            # 외부 응답자 심의 — 엔진은 동의 표지가 JSON true 여야 과제를 만든다(사람의 동의는 검토 잡을 만들 때 받아 잡에 물려 왔다).
+            # target_key 는 엔진이 외부 과제 머리에 싣는 대상 열쇠다(X-D8 ⑦ — 쟁점 패널 질문은 '[쟁점 …]' 로 시작해 엔진이 질문 머리에서
+            # 읽지 못한다 — 워크플로는 제가 맡은 대상의 과제만 답한다). GLM 패널에는 싣지 않는다(본문 그대로).
+            delib_opts = {**delib_opts, "llm": ENGINE_EXTERNAL, "consent_external": True, "target_key": job["target_key"]}
         # 브리프는 시변 조립물이라 이 패널이 실제로 받은 전문을 동결한다(§5.6.1).
         frozen = {**freeze_brief(store, panel, delib_opts["evidence"]), **loss,
                   # 검색어를 실어 보냈는가 — 엔진 상태줄이 '질문으로 찾았다' 고 하면 중간(옛 포털)이 키를 버린 것이다.

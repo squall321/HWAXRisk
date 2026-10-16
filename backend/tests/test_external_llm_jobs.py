@@ -435,7 +435,7 @@ def test_a_claude_issue_panel_goes_external_with_the_consenters_pat_and_the_exte
     out = runner.run_panel(store, config.settings, engine, claimed)
     assert out["status"] == "done", out
     (opts,) = engine.calls
-    assert (opts["llm"], opts["consent_external"]) == ("external", True)
+    assert (opts["llm"], opts["consent_external"], opts["target_key"]) == ("external", True, key)   # 대상 열쇠 — X-D8 ⑦
     assert engine.owners == [EDITOR]
     panel = store.query_one("SELECT model_json, quality_json, tool_mode FROM rr_panels WHERE id = ?", (out["panel_id"],))
     model = json.loads(panel["model_json"])
@@ -470,7 +470,7 @@ def test_a_glm_issue_panel_keeps_its_old_options_and_marks(store, monkeypatch, t
     out = runner.run_panel(store, config.settings, engine, runner.claim_next_job(store, config.settings, engine=engine))
     assert out["status"] == "done"
     (opts,) = engine.calls
-    assert not {"llm", "consent_external"} & set(opts)
+    assert not {"llm", "consent_external", "target_key"} & set(opts)
     panel = store.query_one("SELECT model_json, quality_json, tool_mode FROM rr_panels WHERE id = ?", (out["panel_id"],))
     assert "llm" not in json.loads(panel["model_json"]) and json.loads(panel["model_json"])["evid_budget"] == 500_000
     quality = json.loads(panel["quality_json"])

@@ -412,9 +412,8 @@ def test_an_issue_panel_body_is_accepted_by_the_portal_model(risk_store, monkeyp
     assert verdict["errors"] == [] and verdict["dropped"] == []
 
 
-def test_a_claude_issue_panel_body_keeps_its_external_options_through_the_portal_model(risk_store, monkeypatch, tmp_path):
-    """Claude 길 X-2 — claude 쟁점 잡의 패널 본문(delib_opts 의 llm external · consent_external true)을 포털의 실제 요청 모델이 받고
-    버리지 않는다(포털 X-3a 이전에는 DelibOpts 에 선언이 없어 말없이 떨어져 GLM 으로 돌았다)."""
+def _claude_panel_through_the_portal(risk_store, monkeypatch, tmp_path) -> tuple[str, dict, dict]:
+    """claude 쟁점 잡의 패널 본문을 러너가 실제로 보내게 하고 포털의 요청 모델로 검증한다 — (대상 열쇠, 보낸 delib_opts, 판정)."""
     from app import issues
     from app.common import now_epoch
     from tests.test_issue_panels import _ledger
@@ -433,15 +432,41 @@ def test_a_claude_issue_panel_body_keeps_its_external_options_through_the_portal
                             _sse(("delib", {"kind": "decision", "text": DECISION}), ("done", {})))
     out = runner.run_panel(risk_store, config.settings, engine, runner.claim_next_job(risk_store, config.settings))
     assert out["status"] == "done", out
-    opts = seen["body"]["delib_opts"]
-    assert (opts["llm"], opts["consent_external"]) == ("external", True)
     r = subprocess.run([sys.executable, "-c", _PORTAL_VALIDATE], input=json.dumps(seen["body"]), cwd=backend,
                        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}, capture_output=True, text=True, timeout=120)
     if r.returncode == _PORTAL_DEPENDENCY_MISSING:
         missing = json.loads(r.stdout)["missing_module"]
         pytest.skip(f"포털 모델을 이 venv 로 불러오지 못했다 — 포털의 서드파티 의존 {missing!r} 이 이 venv 에 없다")
     assert r.returncode == 0, f"포털 모델로 쟁점 패널 본문을 검증하지 못했다(rc={r.returncode}) — {r.stderr.strip()[-2000:]}"
-    verdict = json.loads(r.stdout)
+    return key, seen["body"]["delib_opts"], json.loads(r.stdout)
+
+
+def _portal_declares(field: str) -> bool:
+    """포털의 DelibOpts 가 그 칸을 선언했나 — 소스 글로 본다(수집 때 하위 프로세스를 띄우지 않는다). 포털이 곁에 없으면 거짓."""
+    backend = _portal_backend()
+    if backend is None:
+        return False
+    src = (backend / "app" / "agent" / "routes.py").read_text(encoding="utf-8")
+    block = src.split("class DelibOpts", 1)[1].split("\nclass ", 1)[0] if "class DelibOpts" in src else ""
+    return re.search(rf"^\s+{re.escape(field)}\s*:", block, re.M) is not None
+
+
+def test_a_claude_issue_panel_body_keeps_its_external_options_through_the_portal_model(risk_store, monkeypatch, tmp_path):
+    """Claude 길 X-2 — claude 쟁점 잡의 패널 본문(delib_opts 의 llm external · consent_external true)을 포털의 실제 요청 모델이 받고
+    버리지 않는다(포털 X-3a 이전에는 DelibOpts 에 선언이 없어 말없이 떨어져 GLM 으로 돌았다). 대상 열쇠(target_key)는 아래 시험이 본다."""
+    key, opts, verdict = _claude_panel_through_the_portal(risk_store, monkeypatch, tmp_path)
+    assert (opts["llm"], opts["consent_external"], opts["target_key"]) == ("external", True, key)
+    assert verdict["errors"] == [] and set(verdict["dropped"]) <= {"target_key"}
+
+
+@pytest.mark.xfail(_portal_backend() is not None and not _portal_declares("target_key"), strict=True,
+                   reason="X-D8 ⑦ — 포털 DelibOpts 가 target_key 를 아직 선언 · 중계하지 않는다(포털 몫). 선언하면 이 표식은 스스로 꺼지고"
+                          " 시험이 그대로 엄격히 돈다")
+def test_a_claude_issue_panels_target_key_reaches_the_engine_through_the_portal_model(risk_store, monkeypatch, tmp_path):
+    """X-D8 ⑦ — claude 쟁점 패널의 대상 열쇠(delib_opts.target_key)를 포털이 버리지 않고 엔진까지 넘긴다. 엔진은 그것을 외부 과제 머리에
+    싣고(쟁점 패널 질문은 '[쟁점 …]' 로 시작해 머리에서 읽지 못한다), 워크플로는 제가 맡은 대상의 과제만 답한다."""
+    key, opts, verdict = _claude_panel_through_the_portal(risk_store, monkeypatch, tmp_path)
+    assert opts["target_key"] == key
     assert verdict["errors"] == [] and verdict["dropped"] == []
 
 
