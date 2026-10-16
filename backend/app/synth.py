@@ -598,12 +598,19 @@ class SynthWorker:
             if streak >= int(cfg.risk_summary_infra_max) and outcome.code in review_ops.EXTERNAL_WORKER_CODES:
                 # 외부 응답자가 과제를 집지 않았다 — 다시 내도 워크플로가 없으면 같다(Claude 길 X-2). 서술 없이 닫지 않고 잡을 보류
                 # external_worker 로 멈춘다(요약은 대기 — 차감 없음). 사람이 잡 주인의 워크플로를 다시 돌리고 재개하면 이어 돈다.
-                self.store.execute("UPDATE rr_summaries SET state = 'pending', infra_streak = ?, not_before = NULL,"
-                                   " error_code = ?, error = ?, updated_at = ? WHERE summary_id = ?",
-                                   (streak, outcome.code, str(exc), self.clock(), sid))
-                self._set(job["id"], "paused", hold="external_worker",
-                          error=f"{outcome.code}: {exc} — 잡 주인의 Claude Code 에서 워크플로 {runner.EXTERNAL_WORKFLOW} 를 그"
-                                " 사람의 PAT 로 (다시) 돌린 뒤 재개한다")
+                # 보류를 걸 때 그 잡의 대기 요약의 인프라 셈(infra_streak)을 0 으로 돌린다(XR-13) — 재개한 잡이 인프라 다시 내기 몫을
+                # 다시 갖는다(안 돌리면 재개 뒤 일시 실패 한 번에 서술 없이 닫힌다 — infra_exhausted). 무엇이 일어났는지는 error_code ·
+                # error · 잡 행의 보류가 말한다. 이 갈래는 외부 응답자 코드에서만 열리므로 GLM 요약의 셈은 그대로다.
+                with self.store.tx():
+                    self.store.execute("UPDATE rr_summaries SET state = 'pending', infra_streak = 0, not_before = NULL,"
+                                       " error_code = ?, error = ?, updated_at = ? WHERE summary_id = ?",
+                                       (outcome.code, str(exc), self.clock(), sid))
+                    self.store.execute("UPDATE rr_summaries SET infra_streak = 0, updated_at = ? WHERE run_id = ?"
+                                       " AND state = 'pending' AND infra_streak > 0", (self.clock(), job["id"]))
+                    self._set(job["id"], "paused", hold="external_worker",
+                              error=f"{outcome.code}: {exc} — 잡 주인의 Claude Code 에서 워크플로 {runner.EXTERNAL_WORKFLOW} 를"
+                                    f" 그 사람의 PAT 로 (다시) 돌린 뒤 재개한다(인프라 다시 내기 {streak}회 뒤 멈췄다 — 재개하면 그 몫이"
+                                    " 다시 선다)")
                 return {"job_id": job["id"], "step": "hold", "hold": "external_worker"}
             if streak >= int(cfg.risk_summary_infra_max):
                 return self._close(sid, "code_only", "infra_exhausted", summary, step="infra_exhausted", error=str(exc),

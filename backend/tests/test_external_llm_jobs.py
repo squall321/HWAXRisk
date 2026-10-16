@@ -623,7 +623,8 @@ def test_a_claude_synth_job_whose_relay_dropped_the_lane_holds_external_config(s
 
 def test_an_absent_worker_holds_the_synth_job_after_the_infra_limit_instead_of_closing_code_only(store):
     """요약 호출이 일꾼 없음으로 거듭 실패하면 기존 인프라 한도(HWAXRISK_SUMMARY_INFRA_MAX)까지 다시 내고, 그 뒤에는 서술 없이 닫지
-    않고 잡을 보류 external_worker 로 멈춘다(요약은 대기 — 사람이 워크플로를 다시 돌리고 재개한다)."""
+    않고 잡을 보류 external_worker 로 멈춘다(요약은 대기 — 사람이 워크플로를 다시 돌리고 재개한다). 멈출 때 그 잡의 대기 요약의 인프라
+    셈을 0 으로 돌린다(XR-13 — 재개한 잡이 다시 내기 몫을 다시 갖는다). 몇 번 뒤 멈췄는지는 잡 행의 글이 말한다."""
     key = _summary_ledger(store)
     job_id = _claude_synth(store, key)
     absent = EngineRejected(ABSENT["code"], ABSENT["message"], infra=True, retryable=True, knob=ABSENT["knob"])
@@ -638,7 +639,8 @@ def test_an_absent_worker_holds_the_synth_job_after_the_infra_limit_instead_of_c
     row = rig.job_row(store, job_id)
     assert (row["state"], row["hold_code"], row["hold_until"]) == ("paused", "external_worker", None)
     pending = [s for s in synth.latest_summaries(store, key) if s["run_id"] == job_id and s["state"] == "pending"]
-    assert pending and all(s["infra_streak"] >= config.settings.risk_summary_infra_max for s in pending)
+    assert pending and all(s["infra_streak"] == 0 for s in pending)
+    assert f"인프라 다시 내기 {config.settings.risk_summary_infra_max}회 뒤 멈췄다" in row["error"]
     assert not [s for s in synth.latest_summaries(store, key) if s["state_reason"] == "infra_exhausted"]
 
 

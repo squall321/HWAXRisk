@@ -12,8 +12,9 @@ import re
 import pytest
 from mcp.server.fastmcp.exceptions import ToolError
 
-from app import chain, config, issues, routes, runner, synth
+from app import chain, config, issues, registry, routes, runner, synth, units
 from app.common import now_epoch
+from app.runner import EngineRejected
 from tests import factories
 from tests import test_external_llm_jobs as X
 from tests.synth import fake_review_engine as fre
@@ -385,3 +386,117 @@ def test_mcp_risk_start_job_takes_only_a_json_true_consent_like_rest(store, monk
     tool = {t.name: t for t in asyncio.run(srv.mcp.list_tools())}["risk_start_job"]
     schema = tool.inputSchema["properties"]["consent_external"]
     assert {"type": "boolean"} in schema.get("anyOf", [schema]), schema
+
+
+# ================================================================ 재개한 종합 잡의 인프라 몫(XR-13)
+class SeqSummaryEngine(X.ExternalSummaryEngine):
+    """요약 run 이 대본을 차례로 따른다 — 예외면 올리고, 다 쓰면 외부 응답자 답."""
+
+    def __init__(self, seq) -> None:
+        super().__init__()
+        self.seq = list(seq)
+
+    def run(self, body, *, email, on_progress=None, should_stop=None):
+        step = self.seq.pop(0) if self.seq else "ok"
+        if isinstance(step, BaseException):
+            self.requests.append(dict(body))
+            raise step
+        return super().run(body, email=email)
+
+
+def _absent() -> EngineRejected:
+    return EngineRejected(X.ABSENT["code"], X.ABSENT["message"], infra=True, retryable=True, knob=X.ABSENT["knob"])
+
+
+def _hold_then_resume(store, then: list) -> tuple[str, str, synth.SynthWorker, rig.Clock]:
+    key = X._summary_ledger(store)
+    job_id = X._claude_synth(store, key)
+    clock = rig.Clock()
+    n = int(config.settings.risk_summary_infra_max)
+    worker = synth.SynthWorker(store, config.settings, SeqSummaryEngine([_absent()] * n + then), clock=clock)
+    for _ in range(200):
+        step = worker.tick()
+        if step.get("step") == "hold":
+            break
+        clock.advance(1000)
+    assert step == {"job_id": job_id, "step": "hold", "hold": "external_worker"}
+    runner.resume_job(store, job_id, by=OWNER)                     # 잡 주인이 워크플로를 다시 돌리고 재개했다
+    return key, job_id, worker, clock
+
+
+def test_a_resumed_synth_job_gets_its_infra_retry_budget_back(store):
+    """탐침 1 — 보류 external_worker 를 사람이 재개한 뒤 일시 실패(agent_timeout) 한 번에 그 요약이 서술 없이 닫혔다(infra_exhausted —
+    인프라 셈이 한도에 그대로 남아 있었다). 이제 보류를 걸 때 셈을 0 으로 돌려, 재개 뒤의 일시 실패는 다시 내기(백오프)이고 서술이 선다."""
+    timeout = EngineRejected("agent_timeout", "에이전트 서버가 답하지 않았다(가짜)", infra=True, retryable=True)
+    key, job_id, worker, clock = _hold_then_resume(store, [timeout])
+    steps = []
+    for _ in range(200):
+        step = worker.tick()
+        steps.append(step.get("step"))
+        if step.get("step") in ("completed", "hold", "idle"):
+            break
+        clock.advance(1000)
+    assert steps[0] == "infra" and steps[-1] == "completed", steps
+    assert not [s for s in synth.latest_summaries(store, key) if s["run_id"] == job_id and s["state_reason"] == "infra_exhausted"]
+
+
+def test_an_absent_worker_right_after_resume_backs_off_before_holding_again(store):
+    """재개했는데 워크플로가 여전히 없다(곧바로 external_worker_absent) — 곧장 다시 보류하지 않고 종전 다시 내기(백오프, 셈 1)를 거쳐
+    한도에 닿을 때 다시 external_worker 로 멈춘다."""
+    n = int(config.settings.risk_summary_infra_max)
+    key, job_id, worker, clock = _hold_then_resume(store, [_absent()] * n)
+    first = worker.tick()
+    assert first["step"] == "infra" and first["code"] == "external_worker_absent", first
+    row = store.query_one("SELECT infra_streak, not_before FROM rr_summaries WHERE run_id = ? AND error_code = ?"
+                          " ORDER BY updated_at DESC LIMIT 1", (job_id, "external_worker_absent"))
+    assert row["infra_streak"] == 1 and row["not_before"] > clock()
+    assert rig.job_row(store, job_id)["state"] == "running"
+    for _ in range(200):
+        step = worker.tick()
+        if step.get("step") == "hold":
+            break
+        clock.advance(1000)
+    assert step == {"job_id": job_id, "step": "hold", "hold": "external_worker"}
+
+
+def test_holding_gives_back_the_budget_of_every_pending_summary_of_the_job(store):
+    """재개한 잡이 갖는 인프라 몫은 잡의 대기 요약 전부의 것이다 — 멈춘 그 요약만이 아니다. 앞서 일시 실패로 셈이 한도 바로 아래까지 찬
+    다른 영역 요약도 보류 때 0 으로 돌아가, 재개 뒤 일시 실패 한 번에 서술 없이 닫히지 않는다."""
+    key = rig.target(store)
+    rig.pat(store)
+    unit = units.load_units(store, key)[0]["unit_id"]
+    for expert in (SEAL, "xd-syn-0"):                                   # 두 영역(mech · xd)에 등록부 행이 선다
+        review = rig.job(store, key, scope={"agents": [expert], "unit_ids": [unit]})
+        fake = FakeReviewEngine(rig.packs())
+        fake.verdicts = {X._rid("K01"): ("yes", "FAIL")}
+        fake.mechs = {X._rid("K01"): ("interface.clearance", "")}
+        rig.Rig(store, fake).finish(review)
+    registry.merge(store, key)
+    job_id = X._claude_synth(store, key)
+    n = int(config.settings.risk_summary_infra_max)
+    timeout = EngineRejected("agent_timeout", "에이전트 서버가 답하지 않았다(가짜)", infra=True, retryable=True)
+    clock = rig.Clock()
+    worker = synth.SynthWorker(store, config.settings, SeqSummaryEngine([_absent()] * n + ["ok", timeout]), clock=clock)
+    assert worker.tick()["step"] == "planned"
+    pending = [r["summary_id"] for r in store.query("SELECT summary_id FROM rr_summaries WHERE run_id = ? AND state = 'pending'"
+                                                    " ORDER BY scope_kind, scope_key", (job_id,))]
+    assert len(pending) >= 2, pending
+    store.execute("UPDATE rr_summaries SET infra_streak = ? WHERE summary_id = ?", (n - 1, pending[1]))   # 앞선 일시 실패의 셈
+    for _ in range(200):
+        step = worker.tick()
+        if step.get("step") == "hold":
+            break
+        clock.advance(100_000)                                         # 백오프가 늘 지나 있다 — 늘 맨 앞 요약이 돈다
+    assert step == {"job_id": job_id, "step": "hold", "hold": "external_worker"}
+    assert {r["infra_streak"] for r in store.query("SELECT infra_streak FROM rr_summaries WHERE run_id = ? AND state = 'pending'",
+                                                    (job_id,))} == {0}
+    runner.resume_job(store, job_id, by=OWNER)
+    steps = []
+    for _ in range(50):
+        step = worker.tick()
+        steps.append(step.get("step"))
+        if step.get("step") in ("completed", "hold", "idle"):
+            break
+        clock.advance(100_000)
+    assert steps[:2] == ["done", "infra"] and steps[-1] == "completed", steps
+    assert not [s for s in synth.latest_summaries(store, key) if s["run_id"] == job_id and s["state_reason"] == "infra_exhausted"]
