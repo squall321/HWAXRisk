@@ -5,10 +5,12 @@ tests/test_external_llm_jobs.py 의 것을 쓴다.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 
 import pytest
+from mcp.server.fastmcp.exceptions import ToolError
 
 from app import chain, config, issues, routes, runner, synth
 from app.common import now_epoch
@@ -357,3 +359,29 @@ def test_a_claude_review_chain_binds_its_steps_issues_and_runs_them_on_the_conse
     assert sorted(by_issue) == sorted(queued) and len(engine.seen) == len(queued), engine.seen
     assert all(by_issue[i] == ("external", EDITOR) for i in queued if i != human), by_issue
     assert by_issue[human] == (None, OWNER), by_issue
+
+
+# ================================================================ MCP 동의는 JSON true 만(XR-2 고침)
+def test_mcp_risk_start_job_takes_only_a_json_true_consent_like_rest(store, monkeypatch):
+    """탐침 mcp_bool — FastMCP 가 bool 주석 칸의 'yes' · 'true' · 'on' · 1 을 True 로 바꿔 claude 잡이 서고 동의 기록이 남았다(REST 는
+    같은 값을 422 로 거절한다). StrictBool 이면 FastMCP 가 도구에 닿기 전에 거절하고, 도구 목록의 형은 그대로 boolean 이다."""
+    import app.mcp_server as srv
+
+    key = rig.target(store)
+    rig.pat(store)
+    X._probe(monkeypatch, X._external_fake())
+    monkeypatch.setattr(routes, "mcp_identity", lambda request: X._delegate())
+    monkeypatch.setattr(srv, "_request", lambda: None)
+    args = {"target_key": key, "mode": "reviews", "llm": "claude", "scope": X._one_cell(store, key)}
+    for value in ("true", "yes", "on", "1", 1, 0, "false", {"ok": True}):
+        with pytest.raises(ToolError) as refused:
+            asyncio.run(srv.mcp.call_tool("risk_start_job", {**args, "consent_external": value}))
+        assert "consent_external" in str(refused.value), value
+    assert X._jobs_n(store) == 0
+    assert store.query_one("SELECT COUNT(*) AS n FROM rr_audit WHERE action = 'job.create'")["n"] == 0
+    res = asyncio.run(srv.mcp.call_tool("risk_start_job", {**args, "consent_external": True}))
+    out = json.loads((res[0] if isinstance(res, tuple) else res)[0].text)
+    assert out["created"] is True and out["llm"] == "claude" and out["consent_external"]["source"] == "mcp"
+    tool = {t.name: t for t in asyncio.run(srv.mcp.list_tools())}["risk_start_job"]
+    schema = tool.inputSchema["properties"]["consent_external"]
+    assert {"type": "boolean"} in schema.get("anyOf", [schema]), schema
