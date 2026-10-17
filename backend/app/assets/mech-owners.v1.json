@@ -1,9 +1,9 @@
 {
   "mech_owners_version": "1.0",
   "taxonomy_version": "1.2",
-  "review_status": "draft",
-  "reviewed_by": null,
-  "reviewed_at": null,
+  "review_status": "approved",
+  "reviewed_by": "squall321(사용자 — 포털 세션에서 '이대로 승인', review-tables.md 선택지 1)",
+  "reviewed_at": "2026-10-17T12:29:58+09:00",
   "note": "소유 = 그 메커니즘을 아무도 안 봤을 때 누구에게 묻나(쟁점 패널 인접 석 · M4 결손 사냥 — 첫째가 먼저). 관련 = 그 영역 사람이 이 메커니즘을 말해도 믿나. 거르기의 코드 신호는 소유 ∪ 관련을 '관련 있음' 으로 읽는다. 이 표의 review_status 와 변경 → 메커니즘 표(change-routing)의 status 가 둘 다 approved 가 아니면 거르기의 코드 신호는 전 영역 '모름' 이다(승인 문 — 재설계 M3.md #40). 승인은 review_status·reviewed_by·reviewed_at 만 고친 커밋으로 하고 다음 잡부터 듣는다. 초안 표와 바꾼 까닭은 HWAXPortal docs/risk-review-redesign/reference/m3-synthesis.md 3.4 다.",
   "rows": [
     {"code": "thermal.cte_mismatch", "owners": ["rel", "material"], "related": ["pcb", "mech", "sim", "disp"]},

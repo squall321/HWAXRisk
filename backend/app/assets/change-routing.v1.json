@@ -1,8 +1,8 @@
 {
   "version": "change-routing-1.0",
-  "review_status": "draft",
-  "reviewed_by": null,
-  "reviewed_at": null,
+  "review_status": "approved",
+  "reviewed_by": "squall321(사용자 — 포털 세션에서 '이대로 승인', review-tables.md 선택지 1)",
+  "reviewed_at": "2026-10-17T12:29:58+09:00",
   "note": "거르기 코드 신호의 두 표(M3 C3-5) — 변경 코드 → 후보 메커니즘(codes·change_kinds)과 부품 역할 → 영역(roles). 메커니즘 → 영역은 mech-owners.v1.json 이 정하고 그 소유 ∪ 관련이 '관련 있음' 이다. codes 는 정확 일치가 먼저이고 없으면 끝이 * 인 가장 긴 접두다. 어디에도 없거나 값이 null 이면 그 단위는 '모름'(거르지 않는다). 메커니즘 [] 는 '설계 변경이 아니다' 다. 역할은 더하기만 한다. review_status 와 mech-owners 의 review_status 가 둘 다 approved 일 때만 거르기가 열린다(#40).",
   "codes": [
     {"match": "part.added", "mechanisms": ["mechanical.mass", "interface.interference", "interface.clearance", "interface.tied", "interface.tolerance_stackup", "mechanical.drop_stress", "mechanical.rattle"], "note": "새 부품 — 질량·이웃과의 간섭/간극·체결·낙하 하중·덜그럭"},
