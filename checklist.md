@@ -253,6 +253,12 @@
   (§5.6 (4)) — 인용된 선례에 후속 `claim_uid` 를 누적해야 '선례가 실제로 쓰였는지' 의 원자료가 된다 ·
   ④ 등록부 `subject_ckeys` 를 `resolve_ckey()` 로 해석하는지(§5.9.1) — 이름이 다를 수 있어 의미 대조가 필요하다.
   ①②는 어댑터 픽스처가 선행이고 ③④는 원자·별칭 경로를 건드려 한 번에 하지 않았다.
+  · ④ **완료(2026-10-17)** — 등록부는 이미 풀고 있었다(`registry.invalidate(resolve_ckey=…)`). 같은 규칙(plan §4.8 2)의
+  나머지 둘 — 좌석 인용 ckey(승계 판정) · 성격 인용 ckey(재확인) — 가 병합 전 키 그대로 대조해, 옛 키를 인용한 좌석이
+  바뀐 주체를 못 보고 승계됐다. `_supersede_previous_target` 이 둘 다 풀게 고쳤다(시험 1 · 변이 2/2).
+  · ③ 은 빈칸 하나가 아니다 — plan §5.8 의 기록 넷(`precedent_refs` · `precedent_clusters` · `prior_cites_n` ·
+  `cited_by_later`)이 DDL 주석에만 있고 쓰는 코드가 없다. 패널 방식의 선례 인용 기록이고 P5 통과 기준 (4) 의 원자료라
+  그 측정 때 함께 짓는다(포털 docs/leftovers-1017 context-notes LO-D5).
 - [x] **UX 전환 2c — 남은 상세 화면 다섯** (2026-10-07, context-notes D37) — Project·Snapshot·Target·
   Compare·CurationQueue(3,464줄)를 Report Archive 스택으로 옮겼다. 공유 층(SectionCard·Badge·
   DataTable·StateBlocks·GateBanner + primitives 12종)을 먼저 확정해 방언을 막고, 화면마다 한

@@ -2538,11 +2538,12 @@ def _supersede_previous_target(store: Any, *, project_id: str, new_target_key: s
             "SELECT agent_key, opinion_json FROM rr_seat_opinions WHERE target_key = ?"
             " AND panel_id NOT IN (SELECT review_id FROM rr_expert_reports WHERE target_key = ?)", (prev_key, prev_key)):
         keys = _loads(row["opinion_json"], {}).get("cited_ckeys") or []
-        cited.setdefault(str(row["agent_key"]), []).extend(str(k) for k in keys)
+        # 의견에 적힌 키는 그때의 키다 — 그 뒤 병합(merged_into)됐으면 changed 와 같은 유효 ckey 로 풀어야 맞는다(§4.8 2).
+        cited.setdefault(str(row["agent_key"]), []).extend(resolve(str(k)) for k in keys)
     out["carried"] = planner.apply_carry_over(store, new_target_key, prev_key, cited_ckeys=cited,
                                               changed_ckeys=changed)
     # §4.8 5 — 성격 행은 과제 단위라 옮기지 않고, 인용 ckey 가 변경에 들면 재확인 표기만 남긴다.
-    out["character_needs_review"] = _flag_character_needs_review(store, project_id, set(changed), now)
+    out["character_needs_review"] = _flag_character_needs_review(store, project_id, set(changed), now, resolve=resolve)
     return out
 
 
@@ -2551,15 +2552,16 @@ def _diff_target_snapshot(store: Any, diff_id: Any) -> str | None:
     return str(row["target_snapshot_id"]) if row else None
 
 
-def _flag_character_needs_review(store: Any, project_id: str, changed: set[str], now: int) -> int:
+def _flag_character_needs_review(store: Any, project_id: str, changed: set[str], now: int, *, resolve) -> int:
     """성격 서술의 인용 ckey 가 바뀐 주체에 들면 `needs_review=1`(plan §4.8 5).
 
-    status 는 건드리지 않는다 — confirmed 를 코드가 내리지 않는다(사람만 바꾼다).
+    status 는 건드리지 않는다 — confirmed 를 코드가 내리지 않는다(사람만 바꾼다). 인용 ckey 는 `resolve` 로 유효 ckey 로
+    풀어 `changed`(이미 유효 ckey)와 대조한다(§4.8 2) — 필수 인자다, 빠뜨리면 병합된 옛 키를 인용한 행이 조용히 빠진다.
     """
     flagged = 0
     for row in store.query(
             "SELECT id, cites_json FROM rr_character WHERE project_id = ? AND needs_review = 0", (project_id,)):
-        keys = {str((c or {}).get("ckey")) for c in _loads(row["cites_json"], []) if isinstance(c, dict)}
+        keys = {resolve(str((c or {}).get("ckey"))) for c in _loads(row["cites_json"], []) if isinstance(c, dict)}
         if keys & changed:
             store.execute("UPDATE rr_character SET needs_review = 1, updated_at = ? WHERE id = ?",
                           (now, row["id"]))

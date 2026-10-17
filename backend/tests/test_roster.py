@@ -580,11 +580,58 @@ def test_character_statements_citing_a_changed_ckey_need_review(wired, ident):
         "'observation',?,'[]',1,1,1,0,'confirmed',1,1)",
         (OWNER, json.dumps([{"ref": "p:aaaaaaaaaaaa", "ckey": "ck:changed0001"}])))
 
-    n = routes._flag_character_needs_review(wired, "p1", {"ck:changed0001"}, 300)
+    n = routes._flag_character_needs_review(wired, "p1", {"ck:changed0001"}, 300, resolve=str)
 
     assert n == 1
     row = wired.query_one("SELECT needs_review, status FROM rr_character WHERE id = 'C1'")
     assert row["needs_review"] == 1
     assert row["status"] == "confirmed", "코드가 사람 판정(confirmed)을 내렸다"
     # 두 번 돌려도 같은 행을 다시 세지 않는다(needs_review=0 만 본다).
-    assert routes._flag_character_needs_review(wired, "p1", {"ck:changed0001"}, 300) == 0
+    assert routes._flag_character_needs_review(wired, "p1", {"ck:changed0001"}, 300, resolve=str) == 0
+
+
+def test_다음_리비전의_ckey_대조는_좌석과_성격의_인용_키도_병합_끝까지_푼다(wired, ident, monkeypatch):
+    """§4.8 2 — 대조 상대는 모두 유효 ckey 다. 앞 리비전의 좌석 · 성격이 인용한 옛 키가 그 뒤 새 키로 병합됐고 바뀐 것이
+    그 부품이면, 그 좌석은 바뀐 주체를 인용한 것이고(승계 대상 아님) 그 성격 행은 재확인이 서야 한다. 안 풀면 '바뀐 주체' 를
+    못 보고 재검증 없이 넘긴다(등록부는 이미 풀고 있었다 — registry.invalidate(resolve_ckey=…))."""
+    from tests import factories
+
+    project_id = factories.make_project(wired, owner=OWNER)
+    base, revised = factories.fixture_adapter_results(), factories.fixture_adapter_results()
+    factories.set_thickness(revised, "PLATE_2", 1.4)
+    s1 = factories.make_snapshot(wired, project_id, base, label="DV1", owner=OWNER)["snapshot_id"]
+    s2 = factories.make_snapshot(wired, project_id, revised, label="DV2", owner=OWNER,
+                                 captured_at=factories.CAPTURED_AT + 86400)["snapshot_id"]
+    factories.make_diff(wired, s1, s2, owner=OWNER)
+    first = routes.create_target(routes.TargetBody(kind="snap", ref_id=s1, consent=True, agents=[]),
+                                 ident=ident)["target_key"]
+
+    def plate2(snapshot_id: str) -> str:
+        return wired.query_one("SELECT ckey FROM rr_ir_nodes WHERE snapshot_id = ? AND name = 'PLATE_2'",
+                               (snapshot_id,))["ckey"]
+    old_ck, new_ck = plate2(s1), plate2(s2)
+    assert old_ck != new_ck, "두께가 바뀌면 계산 ckey(부피 버킷)가 달라진다 — 이 시험의 전제"
+    # 사람의 키 병합(생산자 경로) — 옛 키를 새 키에 앉힌다. 앞 타깃이 적어 둔 인용은 옛 키 그대로다.
+    routes.post_sameas_decide([{"decision": "merge_key", "ckey": old_ck, "ckey_into": new_ck}], ident=ident)
+    # 앞 타깃의 좌석 의견 · 성격 행 — 패널 생산자(narrative)가 적는 꼴(opinion_json.cited_ckeys · cites_json[].ckey)
+    wired.execute("INSERT INTO rr_seat_opinions(opinion_id, target_key, panel_id, owner_sub, agent_key, domain, opinion_json)"
+                  " VALUES ('o1', ?, 'pn1', ?, 'mech_a', 'mech', ?)", (first, OWNER, json.dumps({"cited_ckeys": [old_ck]})))
+    wired.execute(
+        "INSERT INTO rr_character(id, project_id, owner_sub, facet, tag, tags_json, statement, polarity,"
+        " cites_json, by_json, support_panels, support_targets, recall_eligible, needs_review, status,"
+        " created_at, updated_at) VALUES ('C1', ?, ?, 'intent', 'char:structure:thin_stack', '[]', '문장',"
+        " 'observation', ?, '[]', 1, 1, 1, 0, 'confirmed', 1, 1)",
+        (project_id, OWNER, json.dumps([{"ref": "p:aaaaaaaaaaaa", "ckey": old_ck}])))
+    seen: dict = {}
+
+    def carry(store, new_key, prev_key, *, cited_ckeys, changed_ckeys):
+        seen.update(cited=cited_ckeys, changed=set(changed_ckeys))
+        return {"carried": []}
+    monkeypatch.setattr(routes.planner, "apply_carry_over", carry)
+
+    out = routes.create_target(routes.TargetBody(kind="snap", ref_id=s2, consent=True, agents=[]),
+                               ident=ident)["superseded"]
+
+    assert new_ck in seen["changed"], ("바뀐 부품이 변경 집합에 없다 — 이 시험은 승계를 보지 않는다", seen["changed"])
+    assert seen["cited"] == {"mech_a": [new_ck]}, "좌석 인용 키를 병합 전 키 그대로 넘겼다 — 바뀐 주체를 인용한 좌석이 승계된다"
+    assert out["character_needs_review"] == 1, "병합 전 키를 인용한 성격 행에 재확인이 안 섰다"
