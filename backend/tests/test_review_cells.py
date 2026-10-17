@@ -666,11 +666,13 @@ def test_a_new_job_reopens_experts_that_still_have_cells_in_its_scope(store):
 
 
 # ---------------------------------------------------------------- 검토 잡 만들기 — 반환·잡 행·자격
-def test_the_job_row_carries_its_scope_knobs_and_the_user_credential(store):
+def test_the_job_row_carries_its_scope_knobs_and_the_user_credential(store, monkeypatch):
     """반환 모양과 잡 행 — mode reviews · tier 없음 · queued · 범위 · 동의 출처 · 사용자 PAT 자격 · 실행 설정 사본(dual_rate 1.0 ·
     이중 판정 손잡이(걸린 것만 · 1순위 보정 · 무작위 뒤집기 비율) · 훑기 켬 · 거르기 손잡이와 표본 비율 · 변경 → 영역 표의 판과
     만들 때의 승인 여부 · 내용 탓 한도 · 표본 소금). 패널 원장
-    (rr_coverage)은 건드리지 않는다."""
+    (rr_coverage)은 건드리지 않는다. 승인 문은 닫는다 — 실제 표는 2026-10-17 부터 승인이라, 기대값(거를 셀 0 · 얼린 승인 False)을 시험이
+    정한다(열린 문의 잡은 test_review_filter 가 본다)."""
+    monkeypatch.setattr(relevance, "routing_approved", lambda **_: False)
     key = _target(store)
     before = [tuple(r) for r in store.query("SELECT * FROM rr_coverage WHERE target_key = ? ORDER BY agent_key", (key,))]
     out = _job(store, key, scope={"domains": ["mech", "sim"], "tiers": ["A"]}, user_memo="메모")
@@ -770,7 +772,8 @@ def test_refusals_for_switch_target_units_and_live_jobs(store, monkeypatch):
 def test_refusals_for_scope_and_call_budget(store, monkeypatch):
     """범위 — 모르는 칸·목록 아님·빈 목록·대상에 없는 값은 422 scope_invalid, 맞는 셀이 없으면 422 scope_empty. 호출 추정의 높은
     끝이 상한을 넘으면 409 review_too_large, 동의 문턱을 넘는데 consent 가 없으면 422 consent_required. 입력 결손 전문가는 거절하지
-    않는다(재설계 M3 C3-2 — 아래 시험)."""
+    않는다(재설계 M3 C3-2 — 아래 시험). 승인 문은 닫는다 — 아래 호출 추정은 '거를 셀 0' 을 전제한다(실제 표는 10-17 부터 승인)."""
+    monkeypatch.setattr(relevance, "routing_approved", lambda **_: False)
     key = _target(store, agents=factories.agents())
     _pat(store)
 

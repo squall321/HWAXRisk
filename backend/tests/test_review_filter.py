@@ -49,6 +49,11 @@ def _approve(monkeypatch) -> None:
     monkeypatch.setattr(relevance, "routing_approved", lambda **_: True)
 
 
+def _close(monkeypatch) -> None:
+    """승인 문을 닫는다 — 실제 표의 상태(2026-10-17 부터 승인)에 기대지 않고 시험이 정한다."""
+    monkeypatch.setattr(relevance, "routing_approved", lambda **_: False)
+
+
 def _packs(roster) -> dict[str, dict]:
     ok, empty = fre.load("pack_ok.json"), fre.load("pack_empty.json")
     return {r["key"]: (fre.derive_pack(empty, r["key"], name="카드 0장", domain=r["domain"], keep="none") if r["key"] == STD3
@@ -213,6 +218,7 @@ def test_a_closed_approval_gate_filters_nothing_even_with_the_filter_on(store, m
     """승인 문이 닫힌 표(초안)로 만든 잡 — 코드 신호가 전 영역 모름(not_approved)이라 아무것도 걸러지지 않는다(#40). 잡은 그
     승인 여부를 얼린다 — 잡이 선 뒤에 문이 열려도 그 잡은 거르지 않는다."""
     key = rig.target(store, SMALL)
+    _close(monkeypatch)                                     # 실제 표는 승인됐다(10-17) — 닫힌 문은 시험이 건다
     job_id = rig.job(store, key)
     _approve(monkeypatch)                                   # 잡이 선 뒤에 연 문은 그 잡에 듣지 않는다
     fake = _fake(SMALL)
