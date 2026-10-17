@@ -979,3 +979,23 @@ def test_a_kind_with_no_calls_is_left_alone_and_system_status_does_not_count(ris
     status = {s["kind"]: s["status"] for s in routes._project_sources(project_id)}
     assert status == {"mcad": "linked", "dyna": "unreachable"}
     assert risk_store.query_one("SELECT probe_at FROM rr_sources WHERE id = 'src2'")["probe_at"] == 0
+
+
+# ------------------------------------------- 소스 격리 부재 경고(plan §2.13.3 · API 표 POST /projects/{id}/sources)
+def test_mcad_소스를_붙이면_격리_부재_경고가_응답에_선다_웹과_MCP_둘_다(risk_store, monkeypatch):
+    """StepForge 에는 사용자 격리가 없다 — 호출자 전원이 같은 /data 를 본다. 다른 종류(dyna 는 본인 세션)에는 붙지 않는다."""
+    from app import entry, identity
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    monkeypatch.setattr(routes.adapters_registry, "discover_adapters", lambda **k: [])
+    project_id = _project(risk_store)
+    web = routes.add_source(project_id, routes.SourceBody(kind="mcad", ref={"stepforge_project_id": "sf-1"}),
+                            ident=factories.ident(OWNER))
+    assert web["warnings"] == ["stepforge_no_isolation"]
+    dyna = routes.add_source(project_id, routes.SourceBody(kind="dyna", ref={"session_id": "s", "file_id": "f"}),
+                             ident=factories.ident(OWNER))
+    assert "warnings" not in dyna
+    # MCP 입구(entry)는 app_key 를 기본값으로 채워 위 웹 행과 다른 소스가 된다 — 새 과제에 붙인다.
+    mcp = entry.add_source(identity.Identity(email=OWNER, display_name=OWNER, role=None, organization=None,
+                                             anonymous=False, source="sso", delegated=True),
+                           project_id=_project(risk_store, "p2"), kind="mcad", ref={"stepforge_project_id": "sf-1"})
+    assert mcp["warnings"] == ["stepforge_no_isolation"] and mcp["created"] is True

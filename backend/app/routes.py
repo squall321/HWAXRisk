@@ -1643,7 +1643,12 @@ def add_source(project_id: str, body: SourceBody,
         (new_uuid(), project_id, owner_sub, body.kind, body.app_key, canonical_json(body.ref), ref_key,
          1 if body.bridge_declared else 0, canonical_json(probe), now, adapter["status"] if adapter else None, now),
     )
-    return {"ok": True, "probe": probe}
+    out = {"ok": True, "probe": probe}
+    if body.kind == "mcad":
+        # StepForge 에는 사용자 격리가 없다 — owner 칸도 per_user_sso 도 없어 게이트웨이를 지나는 호출자 전원이 같은 /data 를
+        # 본다(2026-08-31 실측). 그래서 남의 프로젝트도 붙일 수 있고, 이 앱이 세울 경계는 이 경고와 classification 필수뿐이다(plan §2.13.3).
+        out["warnings"] = ["stepforge_no_isolation"]
+    return out
 
 
 class SnapshotBody(BaseModel):
