@@ -33,7 +33,8 @@ __all__ = [
 DELIBERATE_TRIGGER = "/심의 "
 CHAT_PATH = "/agent/chat"
 CONVERSATIONS_PATH = "/agent/conversations"
-# 포털이 아직 conv kind 'risk-review' 를 받지 않는다(ConvCreate.kind 는 chat|deliberation) — 대화 생성은 비치명이라 'deliberation' 으로 만든다.
+# 포털은 conv kind 'risk-review' 도 받는다(ConvCreate.kind). 그래도 'deliberation' 으로 만든다 — 포털 화면은 탭마다 한 종류만
+# 보이고(심의 탭 = deliberation, ChatContext 의 kind 필터) 'risk-review' 로 만들면 패널 대화가 어느 탭에도 안 뜬다. 대화 생성은 비치명이다.
 CONVERSATION_KIND = "deliberation"
 CONVERSATION_SOURCE = "web"
 CONVERSATION_TITLE_MAX = 200
