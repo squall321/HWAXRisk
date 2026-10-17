@@ -1,11 +1,21 @@
 #!/usr/bin/env bash
 # HEAXHub appdata-to-drive.sh 호출 래퍼 — 등급 있는 원문(risk_review.db·exports/)은 평문 tar 에 싣지 않고
 # age 암호 사본(.age)만 올린다(plan §5.2.5 (3a) ②). --dry-run 은 tar 에 들어갈 목록만 찍고 아무것도 올리지 않는다.
+#
+# 이 앱만, 박스별 칸(Drive <HEAXHub>/risk-backup/<박스>/)에 올린다 — 최근 5벌(HEAX_DRIVE_RETAIN). 매일 03:30 크론(10-17 결정 2):
+#   30 3 * * * cd <HWAXRisk> && bash backend/scripts/backup-to-drive.sh >> ~/.local/state/hwax/risk-backup.log 2>&1  # hwax-risk-backup
+# 공유 칸(app-data — dev 가 올리고 cae00 이 병합해 받는다)에 올리지 않는 까닭: cae00 에서 같은 줄을 돌리면 그 흐름을 뒤섞고 다른 앱의
+# 운영 데이터까지 Drive 로 나간다. 공유 칸의 리스크 DB 는 포털 build-all 이 올리는 app-data 에 든다(평문은 .age 가 곁에 있으면 빠진다).
 set -euo pipefail
 
+# 경로는 이 파일에서 유도한다 — 박스마다 리포 루트가 다르다(dev ~/claude · cae00 ~/Projects). HEAXHub 는 형제 리포다.
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+HEAX_ROOT="${HEAXHUB_ROOT:-$(dirname "$ROOT")/HEAXHub}"
 DATA_DIR="${HWAXRISK_DATA_DIR:-${HEAX_DATA_DIR:-}}"
+[ -n "$DATA_DIR" ] || { [ -d "$HEAX_ROOT/var/app_data/hwax_risk" ] && DATA_DIR="$HEAX_ROOT/var/app_data/hwax_risk"; } || true
 DRY_RUN=0
-APPDATA_SCRIPT="${HEAXHUB_APPDATA_SCRIPT:-/home/koopark/claude/HEAXHub/deploy/apptainer/appdata-to-drive.sh}"
+APPDATA_SCRIPT="${HEAXHUB_APPDATA_SCRIPT:-$HEAX_ROOT/deploy/apptainer/appdata-to-drive.sh}"
+BOX="${HWAX_BOX:-$(hostname -s)}"
 
 usage() {
   echo "사용법: backup-to-drive.sh [--dry-run] [--data-dir <경로>]"
@@ -48,6 +58,7 @@ while IFS= read -r path; do
   rel="${path#"$DATA_DIR"/}"
   case "$rel" in
     risk_review.db|risk_review.db-wal|risk_review.db-shm) continue ;;
+    *.db.pre-*|*.db.bak*) continue ;;   # 죽은 DB 사본(이행 전 사본 등 — 평문이다). HEAXHub 스크립트가 같은 규칙으로 뺀다
     exports|exports/*) continue ;;
     secrets.env|cred.key) continue ;;   # 시크릿은 애초에 tar 에 넣지 않는다(HEAXHub 스크립트와 같은 규칙)
   esac
@@ -68,12 +79,15 @@ if [ "$DRY_RUN" = "1" ]; then
   exit 0
 fi
 
-command -v age >/dev/null 2>&1 || { echo "✗ age 미설치 — 암호 사본을 만들 수 없습니다"; exit 1; }
-command -v sqlite3 >/dev/null 2>&1 || { echo "✗ sqlite3 미설치"; exit 1; }
-
 if [ "$ENCRYPTED" = "1" ]; then
+  command -v age >/dev/null 2>&1 || { echo "✗ age 미설치 — 암호 사본을 만들 수 없습니다"; exit 1; }
   if [ -f "$DB" ]; then
-    sqlite3 "$DB" ".backup '$STAGE/risk_review.db'"
+    # 앱이 쓰는 중이어도 일관된 사본 — SQLite 백업 API(파이썬 표준 라이브러리, sqlite3 명령이 없는 박스가 있다)
+    python3 - "$DB" "$STAGE/risk_review.db" <<'PY'
+import sqlite3, sys
+s = sqlite3.connect(sys.argv[1]); d = sqlite3.connect(sys.argv[2])
+s.backup(d); d.close(); s.close()
+PY
     age -r "$KEY" -o "$DATA_DIR/risk_review.db.age" "$STAGE/risk_review.db"
     echo "· risk_review.db.age 갱신"
   fi
@@ -85,5 +99,11 @@ if [ "$ENCRYPTED" = "1" ]; then
 fi
 
 [ -x "$APPDATA_SCRIPT" ] || { echo "✗ HEAXHub 백업 스크립트를 찾을 수 없습니다: $APPDATA_SCRIPT"; exit 1; }
-HEAX_BACKUP_EXCLUDE="hwax_risk/risk_review.db hwax_risk/exports" "$APPDATA_SCRIPT"
-echo "✓ 암호 사본 준비 후 app-data 백업 호출 완료"
+# 허브는 제 var/app_data/hwax_risk 를 올린다 — 암호 사본을 만든 폴더가 그것이 아니면 엉뚱한 것이 올라간다.
+HUB_DIR="$(cd "$HEAX_ROOT/var/app_data/hwax_risk" 2>/dev/null && pwd -P)" || HUB_DIR=""
+[ -n "$HUB_DIR" ] && [ "$(cd "$DATA_DIR" && pwd -P)" = "$HUB_DIR" ] \
+  || { echo "✗ 데이터 폴더($DATA_DIR)가 허브의 var/app_data/hwax_risk 가 아니다 — 허브 백업은 그 폴더를 올린다(HEAXHUB_ROOT 확인)"; exit 1; }
+# 평문을 빼 달라고는 암호 사본이 있을 때만 한다 — 키가 없을 때도 빼면 DB 가 아예 안 실린다(예전 그대로였다).
+EXCL=""; [ "$ENCRYPTED" = "1" ] && EXCL="hwax_risk/risk_review.db hwax_risk/exports"
+HEAX_APPDATA_ONLY="hwax_risk" HEAX_APPDATA_CHANNEL="risk-backup/$BOX" HEAX_BACKUP_EXCLUDE="$EXCL" "$APPDATA_SCRIPT"
+echo "✓ 리스크 앱 백업 → Drive risk-backup/$BOX (암호=$ENCRYPTED)"
