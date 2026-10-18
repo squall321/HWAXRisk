@@ -298,9 +298,11 @@ def unverified_claims(pat: str | None) -> dict:
 def pat_scopes(claims: Mapping[str, Any]) -> list[str]:
     """PAT 클레임의 scopes 를 정규화한다. `risk_pat_require_read_only` 면 `['read']` 만 통과(422 `pat_scope_too_broad`).
 
-    이 검사는 **발급 메타데이터 확인이고 런타임 강제가 아니다** — 포털도 게이트웨이도 요청 경로에서 scopes 를
-    보지 않으므로 `scopes:['read']` PAT 로도 쓰기 도구가 열린다(plan §5.1 원칙 10 의 '집행될 때만 참' 단서).
-    근본 해결은 포털·게이트웨이의 scopes 강제이고 plan §10 #17 ② 결정 사항이다.
+    런타임 강제는 게이트웨이가 한다(HWAXMcpGateway `ffb5292`, HWAXPortal docs/followups-1017 결정 5 — 10-18). `scopes:['read']` PAT 는
+    게이트웨이에서 허용 목록(`read_tools.json` — 이 앱이 부르는 조회 26종) · 앱이 단 `readOnlyHint` · 게이트웨이 자체 조회만 부르고,
+    `rest_call` · REST 다리(`/api/<site>/`)는 GET · HEAD 만이다. 새 조회 도구를 부르게 되면 그 목록에 `백엔드키:원래 이름` 을 더한다.
+    판정 밖 — 읽기 PAT 로 포털 `/agent/chat` · 카드 대조를 부르면 포털이 챗 PAT 를 새로 찍어 심의(RA 초안 저장)가 돈다(패널의 길,
+    사용자 결정으로 그대로 둔다 — 같은 결정 FU-D17).
     """
     raw = claims.get("scopes")
     scopes = [str(s).strip().lower() for s in raw if str(s).strip()] if isinstance(raw, list) else []
