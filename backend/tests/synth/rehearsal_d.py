@@ -35,9 +35,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import copy
+import gzip
 import hashlib
 import json
 import os
+import random
 import resource
 import secrets
 import shutil
@@ -211,6 +214,37 @@ def load_cards() -> list[dict]:
     if not cards:
         raise RuntimeError(f"카드 고정물이 없다 — {root}")
     return cards
+
+
+_LONG_WORDS = ("간극", "압입", "볼트", "토크", "열팽창", "피로", "균열", "도금", "접합", "응력", "실링", "누설")
+
+
+def long_cards() -> list[dict]:
+    """20만 창 리허설(--long-cards)의 긴 카드 — 점검 카드 하나(30만 자 남짓 — 한 장 자리를 넘어 조각으로 돈다)와 배경 카드 넷
+    (4.5만 자 — 훑기에 걸리면 카드 밖 호출의 반드시 전문이 창 한 번을 넘어 쪽으로 돈다). 문장은 '다.' 로 끝나 문단 · 문장 경계에서
+    나뉜다. 엔진 고정물 카드(design_rule · data)를 본으로 id · 제목 · 절만 바꾼다(HWAXPortal docs/risk-200k W5)."""
+    root = AGENT_ROOT / "tests" / "fixtures" / "card_review" / "cards"
+    rule = json.loads((root / "design_rule.json").read_text(encoding="utf-8"))
+    data = json.loads((root / "data.json").read_text(encoding="utf-8"))
+
+    def grow(base: dict, seq: int, chars: int) -> dict:
+        rng = random.Random(seq)
+        paras, total = [], 0
+        while total < chars:
+            p = " ".join(" ".join(rng.choice(_LONG_WORDS) for _ in range(rng.randint(6, 14))) + " 이 변하면 응력이 달라진다."
+                         for _ in range(rng.randint(4, 9)))
+            paras.append(p)
+            total += len(p) + 2
+        text = "\n\n".join(paras)[:chars].rstrip()
+        card = copy.deepcopy(base)
+        card.update(id=f"DOC-CCT-MECH-2026-{900 + seq:010d}", seq=900 + seq, title=f"{base['title']} — 긴 카드 {seq}")
+        half = len(text) // 2
+        card["content"]["sections"] = [{"section_id": "1", "level": 1, "title": "본문 앞", "content_text": text[:half]},
+                                       {"section_id": "2", "level": 1, "title": "본문 뒤", "content_text": text[half:]}]
+        card["content"]["card"] = {**card["content"]["card"], "card_id": f"LONG-{seq}"}
+        return card
+
+    return [grow(rule, 1, 300_000)] + [grow(data, 1 + i, 45_000) for i in range(1, 5)]
 
 
 def card_type(rec: dict) -> str:
@@ -690,7 +724,13 @@ class Rehearsal:
 
     # ---------------------------------------------------------------- 씨앗
     def seed(self) -> None:
-        (self.risk_data / "knobs.env").write_text("".join(f"{k}={v}\n" for k, v in KNOBS.items()), encoding="utf-8")
+        knobs = dict(KNOBS)
+        if self.args.long_cards:
+            # 긴 카드 모드는 카드 대조의 조각 · 쪽을 본다 — 근거 꾸러미 실호출(M3 C3-1)은 이 하네스의 게이트웨이 싱크가 물성 도구를
+            # 503 으로 받아 그 단위가 여섯 번 다시 한 뒤(약 31분)에야 얼어 본 잡이 기한(1800초)을 넘긴다. 끄고 그 사실을 적는다.
+            knobs["HWAXRISK_EVIDENCE_LIVE"] = "0"
+            self.note("긴 카드 모드 — 근거 꾸러미 실호출을 껐다(HWAXRISK_EVIDENCE_LIVE=0 · 게이트웨이 싱크가 물성 도구를 503 으로 받는다)")
+        (self.risk_data / "knobs.env").write_text("".join(f"{k}={v}\n" for k, v in knobs.items()), encoding="utf-8")
         sec = self.risk_data / "secrets.env"
         sec.write_text(f"HWAXRISK_PORTAL_PAT={SERVICE_PAT}\nHWAXRISK_HEAX_GATEWAY_SECRET={self.gw_secret}\n", encoding="utf-8")
         sec.chmod(0o600)
@@ -713,7 +753,7 @@ class Rehearsal:
         self.ev["ports"] = dict(self.ports)
         log(f"포트 {self.ports}")
         closed = self.url("closed")
-        cards = load_cards()
+        cards = load_cards() + (long_cards() if self.args.long_cards else [])
         records = {c["id"]: c for c in cards}
         everything = sorted(records)
         background = sorted(c["id"] for c in cards if card_type(c) in BACKGROUND_TYPES)
@@ -734,7 +774,7 @@ class Rehearsal:
 
         # 가짜 LLM — 에이전트 서버 시험 디렉터리의 llm_server.py(1M 창을 /v1/models 로 알린다).
         self.procs["llm"] = Proc("llm", [str(self.agent_py), str(AGENT_ROOT / "tests" / "fakes" / "llm_server.py"),
-                                         "--port", str(self.ports["llm"]), "--ctx", str(CTX), "--model", MODEL,
+                                         "--port", str(self.ports["llm"]), "--ctx", str(self.args.ctx), "--model", MODEL,
                                          "--script", "oracle"],
                                  cwd=self.agent_dir / "cwd", env=base_env(), logs=self.logs, port=self.ports["llm"])
         # 에이전트 서버 — artifacts 는 /data 로 가는 심링크라 둘 다 스크래치로 돌린다(M2.md 4.6.2). 게이트웨이·AIDataHub 기본 주소(떠 있는
@@ -901,7 +941,7 @@ class Rehearsal:
         health = self.http.get(self.url("agent") + "/health").json()
         cr = health.get("card_review") or {}
         self.check("1_limits_via_portal_relay",
-                   r.status_code == 200 and body.get("ctx_tokens") == CTX and body.get("ctx_source") == "server",
+                   r.status_code == 200 and body.get("ctx_tokens") == self.args.ctx and body.get("ctx_source") == "server",
                    http_status=r.status_code, api_rev=body.get("api_rev"), model=body.get("model"),
                    ctx_tokens=body.get("ctx_tokens"), ctx_source=body.get("ctx_source"), ctx_retrying=body.get("ctx_retrying"),
                    runnable=body.get("runnable"), k=(body.get("verdict") or {}).get("k"), limits_rev=body.get("limits_rev"),
@@ -994,6 +1034,35 @@ class Rehearsal:
         # ── 끝까지 ───────────────────────────────────────────────────────
         wait_until(lambda: self.db.job(job_id)["state"] in ("completed", "failed", "cancelled"), 1800, "본 잡 끝", every=2)
         self.main_job_id = job_id
+
+    # ---------------------------------------------------------------- 점검 8 — 긴 카드(--long-cards)
+    def judge_long_cards(self) -> None:
+        """긴 카드가 멈추지 않고 다 읽혔나(HWAXPortal docs/risk-200k W5) — 본 잡의 호출 결과에 조각(meta.chunked) 판정 · 훑기가 있고, 창이
+        작으면(30만 토큰 밖) 쪽(meta.paged) 카드 밖 호출이 있다. 닫힌 칸의 커버리지에 놓침이 없고 불변식(G10 포함)이 빈다. 긴 점검 카드는
+        카드 전문가의 검토 칸마다 실효 판정이 있다."""
+        key, job_id = self.targets["main"]["target_key"], self.main_job_id
+        rows = self.db.q("SELECT kind, variant, state, result_gz FROM rr_review_calls WHERE run_id = ? AND state = 'ok'"
+                         " AND result_gz IS NOT NULL", (job_id,))
+        metas = []
+        for row in rows:
+            try:
+                metas.append((row["kind"], (json.loads(gzip.decompress(row["result_gz"])) or {}).get("meta") or {}))
+            except (OSError, ValueError):
+                continue
+        chunked = Counter(kind for kind, m in metas if m.get("chunked"))
+        paged = Counter(kind for kind, m in metas if m.get("paged"))
+        cells = self.coverage(key).get("review", {}).get("cells", {})
+        invariants = list(cells.get("invariants") or ())
+        quality = (self.coverage(key).get("review", {}).get("quality") or {}).get("text") or ""
+        proof = next((line for line in quality.split("\n") if line.startswith("[누락 0 증명]")), "")
+        long_rid = long_cards()[0]["id"]
+        judged = self.db.q("SELECT COUNT(DISTINCT unit_id || '|' || agent_key) AS n FROM rr_card_verdicts WHERE target_key = ?"
+                           " AND record_id = ? AND is_effective = 1", (key, long_rid))[0]["n"]
+        want_paged = self.args.ctx < 300_000
+        ok = (chunked.get("verdict", 0) > 0 and chunked.get("sweep", 0) > 0 and (paged.get("offcard", 0) > 0 or not want_paged)
+              and not invariants and " + 놓침 0 " in proof and judged > 0)
+        self.check("8_long_cards_all_read", ok, ctx=self.args.ctx, results=len(metas), chunked=dict(chunked),
+                   paged=dict(paged), invariants=invariants[:10], proof=proof, long_card_judged_cells=judged)
 
     # ---------------------------------------------------------------- 점검 2·5·6 판정
     def judge_main(self) -> None:
@@ -1216,6 +1285,8 @@ class Rehearsal:
             conv_before = self.conv_count()
             self.main_job()
             self.judge_main()
+            if self.args.long_cards:
+                self.judge_long_cards()
             self.cancel_path()
             self.judge_wire(conv_before)
         except BaseException as exc:  # noqa: BLE001 — 무엇이 터져도 띄운 것을 내리고 증거를 남긴다
@@ -1258,6 +1329,9 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--portal-python", help="포털 venv 파이썬(기본 ../HWAXPortal/backend/.venv/bin/python)")
     run.add_argument("--llm-delay", type=float, default=4.0, help="본 잡의 가짜 LLM 호출 하나의 초(재기동 때 호출이 돌고 있게)")
     run.add_argument("--cancel-delay", type=float, default=12.0, help="취소·폐기 단계의 가짜 LLM 호출 하나의 초")
+    run.add_argument("--ctx", type=int, default=CTX, help="가짜 LLM 의 창(토큰) — 20만이면 200000(HWAXPortal docs/risk-200k W5)")
+    run.add_argument("--long-cards", action="store_true",
+                     help="긴 카드(점검 30만 자 하나 · 배경 4.5만 자 넷)를 더하고 점검 8(조각 · 쪽 · 놓침 0)을 본다")
     seed = sub.add_parser("seed", help="(run 이 부른다) 임시 원장 씨앗")
     seed.add_argument("--data-dir", required=True)
     seed.add_argument("--out", required=True)
