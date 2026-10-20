@@ -1897,6 +1897,7 @@ class _Session:
         calls: list[dict] = []
         revs: set[str] = set()
         failed = 0
+        gaps: list[dict] = []              # 끝내 답을 못 받은 (묶음, 목록 쪽) — 그 단위에서 그 카드는 훑기로 고려되지 않았다(W-D10)
         for deck in self.plan.get("sweep_decks") or ():
             aliases = list(deck.get("aliases") or ())
             for page_no, page in enumerate(self.plan.get("manifest_pages") or ()):
@@ -1907,6 +1908,7 @@ class _Session:
                 answer = self._ask(None, "sweep", None, aliases, body, deck_id=deck.get("deck_id"), page_no=page_no)
                 if answer is None:
                     failed += 1
+                    gaps.append({"aliases": aliases, "units": [i["unit_id"] for i in items]})
                     continue
                 revs.add(str((answer.result.get("meta") or {}).get("prompt_rev") or ""))
                 accepted = review_verify.accept_rows(answer.result, kind="sweep", sent_aliases=aliases, pack=self.pack,
@@ -1916,7 +1918,7 @@ class _Session:
                               "result": answer.result})
         accounting = review_verify.sweep_accounting(calls) if calls else {"units": {}, "units_error": [],
                                                                           "cards_unseen": [], "handoffs": [], "dropped": []}
-        self.sweep = {"key": key, "failed_pages": failed, **accounting}
+        self.sweep = {"key": key, "failed_pages": failed, "gaps": gaps, **accounting}
         if missing:
             # 결측 블록을 받은 판의 답일 때만 그 전문가의 셀을 거른다(m3-cells 3.2 의 5번 · X1-17) — 실은 것과 답의 판을 남긴다.
             self.sweep.update(missing_sent=True, prompt_revs=sorted(revs))
@@ -2151,6 +2153,23 @@ class _Session:
             return None
         return 0
 
+    def _must_full(self, cell: _Cell, cards: Sequence[str]) -> list[str]:
+        """카드 밖 · 입력 결손 호출의 반드시 전문인 카드(HWAXPortal docs/risk-200k W-D10 · W-D15) — 그 단위의 훑기에 걸린 카드와 그 단위의
+        훑기 답이 없는 카드다. 답이 없다 — 그 카드의 묶음 × 그 단위의 목록 쪽 호출이 끝내 실패했거나(sweep.gaps), 그 단위가 훑기 답에
+        없거나 빠진 쪽이 있다(그때는 실린 카드 전부). 나머지 카드는 훑기에서 전문으로 그 단위와 맞대어졌으니 제목만 둔다. 엔진이
+        must_full 을 모르면(limits.features) 빈 목록 — 종전 그대로다. 실패한 쪽을 적지 않은 옛 훑기 기록에 실패가 있으면 전부다."""
+        if "must_full" not in (self.lim.get("features") or ()):
+            return []
+        entry = (self.sweep.get("units") or {}).get(cell.unit_id)
+        if entry is None or int(entry.get("missing_in") or 0) > 0:
+            return list(cards)
+        gaps = self.sweep.get("gaps")
+        if gaps is None and int(self.sweep.get("failed_pages") or 0) > 0:
+            return list(cards)
+        unseen = {a for g in gaps or () if cell.unit_id in (g.get("units") or ()) for a in g.get("aliases") or ()}
+        hits = set(entry.get("k") or ())
+        return [a for a in cards if a in hits or a in unseen]
+
     def _offcard(self, cell: _Cell) -> None:
         """카드 밖 호출 — 셀마다 1번. 배경 카드는 전부 본문으로 싣는다(훑기 k 에 걸린 것 먼저, 나머지 팩 순서 — P-03 · X1-11),
         digest 는 나머지 카드의 제목, known 은 그 셀의 실효 판정(걸림 먼저). 카드 밖 줄 수가 findings_max 에 닿으면 받은 제목을 known
@@ -2160,6 +2179,7 @@ class _Session:
         hits = set(((self.sweep.get("units") or {}).get(cell.unit_id) or {}).get("k") or ())
         background = list(self.pack.background)
         cards = [a for a in background if a in hits] + [a for a in background if a not in hits]
+        must = self._must_full(cell, cards)
         digest = self._others(cards)
         known = self._known(cell)
         cap = int(((self.lim.get("offcard") or {}).get("findings_max")) or 0)
@@ -2174,7 +2194,7 @@ class _Session:
         while True:
             body = engine_client.run_body("offcard", target_key=self.target_key, pack=self.pack, cards=cards, digest=digest,
                                           unit=cell.payload, known=asked, expect=self._expect("offcard"), cfg=self.settings,
-                                          search=queries)
+                                          search=queries, must_full=must)
             answer = self._ask(cell, "offcard", None, cards, body, seq=seq)
             if answer is None:
                 return
@@ -2194,10 +2214,16 @@ class _Session:
             extras["handoffs"].extend(got.get("handoffs") or ())
             extras["none"] = bool(extras["none"] or got.get("none"))
             extras["more"] = got.get("more")
-            hit = bool(cap) and len(found) >= cap
+            meta = answer.result.get("meta") if isinstance(answer.result.get("meta"), Mapping) else {}
+            # 쪽으로 나눠 부른 답(meta.paged — W-D15)은 쪽마다 상한이 따로라 합친 줄 수로 상한에 닿았다고 하지 않는다 — 쪽의 답을 모은
+            # 엔진의 maybe_more 를 따른다.
+            if meta.get("paged"):
+                quality = answer.result.get("quality") if isinstance(answer.result.get("quality"), Mapping) else {}
+                hit = quality.get("maybe_more") is True
+            else:
+                hit = bool(cap) and len(found) >= cap
             capped += int(hit)
             last = not hit or seq >= MORE_REASKS
-            meta = answer.result.get("meta") if isinstance(answer.result.get("meta"), Mapping) else {}
             bg_dropped = int(meta.get("bg_dropped") or 0)
             offcard_extras = {**extras, "findings": findings, "known_dropped": self._known_dropped(asked)}
             if queries:
@@ -2274,6 +2300,7 @@ class _Session:
         hits = set(((self.sweep.get("units") or {}).get(cell.unit_id) or {}).get("k") or ())
         order = list(self.pack.order)
         cards = [a for a in order if a in hits] + [a for a in order if a not in hits]
+        must = self._must_full(cell, cards)
         q1: list[dict] = []
         q2: list[dict] = []
         known: list[dict] = []
@@ -2281,7 +2308,8 @@ class _Session:
         seq = 0
         while True:
             body = engine_client.run_body("noinput", target_key=self.target_key, pack=self.pack, cards=cards, digest=order,
-                                          unit=cell.payload, known=known, expect=self._expect("noinput"), cfg=self.settings)
+                                          unit=cell.payload, known=known, expect=self._expect("noinput"), cfg=self.settings,
+                                          must_full=must)
             answer = self._ask(cell, "noinput", None, cards, body, seq=seq)
             if answer is None:
                 return

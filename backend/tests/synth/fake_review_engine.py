@@ -39,6 +39,8 @@
                    모든 전문가의 카드 밖 넘김이 분류보다 먼저 오느냐가 시험의 흐름을 갈라서다. 카드 밖 넘김은 offcard_handoffs 로
   handoff_unit     훑기 h 줄이 넘기는 단위(unit_id) — 그 쪽에 그 단위가 없으면 h 줄을 내지 않는다(거르기 넘김 줄, 재설계 M3 C3-6)
   handoff_from     주면 이 전문가들의 훑기만 h 줄을 낸다(늦은 넘김 — 재설계 M3 C3-7)
+  offcard_paged    쪽 수(0 이면 끔) — 반드시 전문인 카드(extra.must_full)를 실은 카드 밖 호출을 엔진이 쪽으로 나눠 부른 것처럼 낸다
+                   (meta.paged · f 줄은 상한 × 쪽 수까지 · maybe_more 는 쪽마다 상한에 닿았을 때만 — HWAXPortal docs/risk-200k W-D15)
   offcard_handoffs (agent_key, unit_id) → 영역 — 그 전문가의 그 단위 카드 밖 호출만 그 영역으로 넘기는 h 줄을 낸다(훑기는 내지
                    않는다 — 카드 밖 넘김도 거른 셀을 지키고 다시 여는지, 반대 검토 LOW 15)
   seen·need        카드 밖 m 줄의 따져 본 메커니즘 · need 줄의 글(S10 의 메커니즘·필요 정보 절)
@@ -146,7 +148,7 @@ RUN_SHAPE: dict[str, frozenset[str]] = {
     "unit.evidence": frozenset({"ref", "text", "owner_unit"}),
     "unit.missing": frozenset({"kind", "note"}),
     "manifest": frozenset({"unit_id", "kind", "title", "text"}),
-    "extra": frozenset({"domains", "mechanisms", "known", "missing", "search"}),
+    "extra": frozenset({"domains", "mechanisms", "known", "missing", "search", "must_full"}),
     "extra.missing": frozenset({"kind", "note"}),
     "extra.search": frozenset({"queries"}),
     "summary": frozenset({"scope", "rows", "must_cover", "blocks"}),
@@ -320,6 +322,7 @@ class FakeReviewEngine:
         self.handoff_unit: str | None = None
         self.handoff_from: set[str] | None = None
         self.offcard_handoffs: dict[tuple[str, str], str] = {}
+        self.offcard_paged = 0
         self.seen: list[str] = []
         self.need: str | None = None
         self.hold_runs: dict[int, threading.Event] = {}
@@ -456,6 +459,11 @@ class FakeReviewEngine:
                 return self._reject(422, "bad_request", "unit.missing 이 없다 — noinput 은 결손 입력이 있는 단위에만 부른다(가짜)")
             if (body.get("extra") or {}).get("missing") and body.get("kind") != "sweep":
                 return self._reject(422, "bad_request", "extra.missing 은 sweep 에만 싣는다(가짜)")
+            # 엔진 build_ctx 처럼 반드시 전문인 카드(W-D15)는 카드 밖 · 입력 결손에만, 실린 카드 안의 별칭만 받는다.
+            must = (body.get("extra") or {}).get("must_full") or []
+            sent = {str((c or {}).get("alias") or "") for c in body.get("cards") or []}
+            if must and (body.get("kind") not in ("offcard", "noinput") or not set(must) <= sent):
+                return self._reject(422, "bad_request", "extra.must_full 은 offcard · noinput 에만, cards 안의 별칭만(가짜)")
             # 엔진 prepare 처럼 run 은 종류별 prompt_rev 도 견준다(limits_rev 의 원천에 PROMPT_REV 는 없다 — R3A-6).
             want_prompt = (body.get("expect") or {}).get("prompt_rev")
             have_prompt = (self.base_limits.get("prompt_rev") or {}).get(body.get("kind"))
@@ -728,7 +736,8 @@ class FakeReviewEngine:
             quality.update(expected=3, **quality_more)
         else:
             cap = int(self.base_limits["offcard"]["findings_max"])
-            n = min(int(self.offcard_findings), cap)
+            pages = int(self.offcard_paged) if (body.get("extra") or {}).get("must_full") else 0
+            n = min(int(self.offcard_findings), cap * max(1, pages))
             rows = [{"t": "f", "l": own[:1], "dir": "risk",
                      "title": f"카드 밖 위험 {i}" if self.offcard_title is None else self.offcard_title, "mech": "free",
                      "mech_free": "계면 박리", "path": "변경 줄의 계면", "src": self.offcard_src, "q": self.offcard_quote,
@@ -739,7 +748,7 @@ class FakeReviewEngine:
                                 "quote": "ok" if self.offcard_src == "exp" else _offcard_quote(cards, self.offcard_src,
                                                                                                self.offcard_quote),
                                 "quote_sid": "", "coerced": []}} for i in range(1, n + 1)]
-            more = "yes" if n >= cap else "no"
+            more = "yes" if n >= cap * max(1, pages) else "no"
             rows += [{"t": "m", "seen": list(self.seen), "from_attempt": 1, "checks": {"coerced": []}},
                      {"t": "more", "more": more, "from_attempt": 1, "checks": {"coerced": []}}]
             if self.handoff_to and self.handoff_unit is None and self.handoff_from is None:
@@ -769,6 +778,8 @@ class FakeReviewEngine:
                 "order_effective": not (kind == "verdict" and variant == "rev" and len(order) < 2),
                 "aliases": {"cards": {a: cards[a]["record_id"] for a in order},
                             "lines": {a: x["ref"] for a, x in lines.items()}, "units": units}}
+        if kind == "offcard" and pages:
+            meta["paged"] = {"n": pages, "pages": [], "must_full": len((body.get("extra") or {}).get("must_full") or [])}
         if cut == "unknown":
             quality["truncated"] = None
             meta["finish_reason"] = None

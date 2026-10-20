@@ -387,3 +387,81 @@ def test_q1_and_contested_quotes_keep_the_200_character_cap_in_the_cell_payload_
         export.EXPORT_CQ_MAX, len(long))
     exported = "".join(export.iter_lines(store, rig.OWNER, 0))
     assert long not in exported and long[:export.EXPORT_CQ_MAX] in exported
+
+
+# ---------------------------------------------------------------- 반드시 전문인 카드(HWAXPortal docs/risk-200k W-D10 · W-D15)
+def _must(fake: FakeReviewEngine, agent: str, kind: str, unit_id: str) -> list | None:
+    (body,) = _bodies(fake, agent, kind, unit_id)[:1]
+    return body["extra"].get("must_full")
+
+
+def test_card_calls_mark_must_full_the_sweep_hits_and_the_cards_the_sweep_could_not_answer(store):
+    """카드 밖 · 입력 결손 호출은 그 단위의 훑기에 걸린 카드와 훑기 답이 없는 카드를 반드시 전문(extra.must_full)으로 알린다 — 나머지는
+    훑기에서 전문으로 그 단위와 맞대어졌으니 제목이어도 된다. 훑기 묶음 둘 가운데 첫 묶음(K01~K05)이 실패하면 그 묶음의 카드가 모든
+    단위에서, 훑기 답에서 빠진 단위(b2)에서는 실린 카드 전부가 반드시 전문이다. 순서는 실린 카드의 차례(훑기에 걸린 것 먼저)다."""
+    key = rig.target(store, ROSTER)
+    job_id = rig.job(store, key)
+    fake = FakeReviewEngine(_packs(ROSTER))
+    us = _units(store, key)
+    b0, b1, b2 = (u["unit_id"] for u in us if u["kind"] == "bundle")
+    fake.sweep_split = 2                       # 묶음 [K01~K05] · [K06~K10]
+    fake.sweep_error_aliases = {"K01"}         # 첫 묶음의 훑기는 끝내 실패한다
+    fake.sweep_k = {b0: ["K08"], b1: []}       # 가짜의 기본은 단위마다 묶음의 카드 전부가 걸린다 — b1 은 아무것도 안 걸린다
+    fake.sweep_drop = {b2}
+    rig.Rig(store, fake).finish(job_id)
+    first = ["K01", "K02", "K03", "K04", "K05"]
+    everything = [c["alias"] for c in _packs(ROSTER)[MEM2]["cards"]]
+    # 입력 결손 전문가 — 카드 전부를 싣는 호출
+    assert _must(fake, MEM2, "noinput", b0) == ["K08", *first]
+    assert _must(fake, MEM2, "noinput", b1) == first
+    assert _must(fake, MEM2, "noinput", b2) == everything
+    # 카드 전문가의 카드 밖 호출 — 배경 카드(K07~K10)만 싣는다
+    assert _must(fake, MECH1, "offcard", b0) == ["K08"]
+    assert _must(fake, MECH1, "offcard", b1) is None, "걸린 배경 카드도 답 없는 배경 카드도 없다 — 칸을 싣지 않는다"
+    assert _must(fake, MECH1, "offcard", b2) == ["K07", "K08", "K09", "K10"]
+
+
+def test_an_engine_without_the_must_full_feature_gets_no_must_full(store):
+    """엔진의 limits.features 에 must_full 이 없으면(옛 엔진 — 그 칸을 422 로 거절한다) 칸을 싣지 않는다."""
+    key = rig.target(store, ROSTER)
+    job_id = rig.job(store, key)
+    fake = FakeReviewEngine(_packs(ROSTER))
+    fake.base_limits.pop("features", None)
+    us = _units(store, key)
+    b0 = next(u["unit_id"] for u in us if u["kind"] == "bundle")
+    fake.sweep_k = {b0: ["K08"]}
+    rig.Rig(store, fake).finish(job_id)
+    assert rig.state(store, job_id) == "completed"
+    assert all("must_full" not in b["extra"] for b in _bodies(fake, MEM2, "noinput") + _bodies(fake, MECH1, "offcard"))
+
+
+def test_a_paged_offcard_answer_over_one_pages_cap_is_not_asked_again_unless_a_page_hit_its_cap(store):
+    """쪽으로 나눠 부른 카드 밖 답(meta.paged — W-D15)은 쪽마다 상한이 따로다 — 합친 지적이 한 호출의 상한(findings_max)을 넘어도 쪽마다
+    상한에 안 닿았으면(엔진 maybe_more 거짓) 다시 묻지 않는다. 쪽마다 닿았으면(참) 종전처럼 '이것 말고 더' 를 묻는다."""
+    cap = int(fre.load("limits_1m.json")["offcard"]["findings_max"])
+    for findings, asks in ((cap + 2, 1), (2 * cap, 1 + review_runner.MORE_REASKS)):
+        key = rig.target(store, ROSTER)
+        job_id = rig.job(store, key)
+        fake = FakeReviewEngine(_packs(ROSTER))
+        us = _units(store, key)
+        b0 = next(u["unit_id"] for u in us if u["kind"] == "bundle")
+        fake.sweep_k = {b0: ["K08"]}
+        fake.offcard_paged, fake.offcard_findings = 2, findings
+        rig.Rig(store, fake).finish(job_id)
+        bodies = _bodies(fake, MECH1, "offcard", b0)
+        assert bodies[0]["extra"]["must_full"] == ["K08"] and len(bodies) == asks, (findings, len(bodies))
+        cell = _cell(store, key, b0, MECH1)
+        assert cell["n_offcard"] >= findings and cell["offcard_capped"] == (asks if asks > 1 else 0), "닿은 답마다 센다"
+
+
+def test_an_old_sweep_record_with_failures_but_no_gap_list_marks_every_card_must_full():
+    """이 기능 전에 적은 훑기 기록(sweep_json)에는 실패한 쪽 목록(gaps)이 없다 — 실패가 있었으면 어느 카드인지 모르니 전부다. 실패가
+    없었으면 훑기에 걸린 카드만이다."""
+    import types
+
+    cell = types.SimpleNamespace(unit_id="u1")
+    old = types.SimpleNamespace(lim={"features": ["must_full"]},
+                                sweep={"failed_pages": 1, "units": {"u1": {"rel": "maybe", "k": ["K02"], "missing_in": 0}}})
+    assert review_runner._Session._must_full(old, cell, ["K01", "K02", "K03"]) == ["K01", "K02", "K03"]
+    clean = types.SimpleNamespace(lim=old.lim, sweep={**old.sweep, "failed_pages": 0})
+    assert review_runner._Session._must_full(clean, cell, ["K01", "K02", "K03"]) == ["K02"]

@@ -806,7 +806,8 @@ def run_body(kind: str, *, target_key: str, pack: cardpack.FrozenPack, cards: Se
              variant: str | None = None, digest: Sequence[str] = (), unit: Mapping[str, Any] | None = None,
              manifest: Sequence[Mapping[str, Any]] = (), known: Sequence[Mapping[str, Any]] = (),
              expect: Mapping[str, Any] | None = None, cfg: Any = None,
-             missing: Sequence[Mapping[str, Any]] = (), search: Sequence[str] = ()) -> dict:
+             missing: Sequence[Mapping[str, Any]] = (), search: Sequence[str] = (),
+             must_full: Sequence[str] = ()) -> dict:
     """카드 대조 run 요청 하나(M2.md 4.3). 신원 칸 넷은 싣지 않는다(포털이 덮어쓴다).
 
     - `pack` — 얼린 팩. `expert` 는 그 팩의 {agent_key, name, domain, role}, `cards` 는 별칭 순서대로 팩 항목 그대로
@@ -818,6 +819,9 @@ def run_body(kind: str, *, target_key: str, pack: cardpack.FrozenPack, cards: Se
       무관한 단위만 no, 가릴 수 없으면 maybe. 재설계 M3 C3-3). 비면 칸을 싣지 않는다 — 엔진은 sweep 밖의 그 칸을 422 로 거절한다.
     - `search` 는 카드 0장 전문가의 카드 밖 호출에만 싣는 긴 문서 검색어 `extra.search{queries[1~3]}`(cr-offcard-2 — 엔진이 LLM 전에
       agent_search 로 찾아 D 별칭 발췌로 싣는다, M3.md 4.4.4). 비면 칸을 싣지 않는다.
+    - `must_full` 은 카드 밖 · 입력 결손 호출의 반드시 전문인 카드 `extra.must_full[별칭]`(HWAXPortal docs/risk-200k W-D15 — 엔진이 몫이
+      아니라 창까지 전문으로 싣고 넘치면 쪽으로 나눠 부른다). 엔진의 limits.features 에 must_full 이 있을 때만 준다(부르는 쪽이 가른다 —
+      옛 엔진은 그 칸을 422 로 거절한다). 비면 칸을 싣지 않는다.
     """
     body: dict[str, Any] = {
         "kind": kind, "variant": variant, "target_key": target_key,
@@ -837,6 +841,8 @@ def run_body(kind: str, *, target_key: str, pack: cardpack.FrozenPack, cards: Se
         body["extra"]["missing"] = [{"kind": _text(m.get("kind")), "note": _text(m.get("note"))} for m in missing]
     if search:
         body["extra"]["search"] = {"queries": [_text(q) for q in search]}
+    if must_full:
+        body["extra"]["must_full"] = [str(a) for a in must_full]
     if expect:
         body["expect"] = {k: expect[k] for k in ("prompt_rev", "limits_rev", "limits_rev_kind") if expect.get(k) is not None}
     return body
