@@ -180,8 +180,11 @@ def clip_lines(text: str, limit: int) -> str:
     return clip_lines_n(text, limit)[0]
 
 
-def clip_lines_n(text: str, limit: int) -> tuple[str, int]:
-    """`clip_lines` 와 같고 버린 줄 수를 함께 돌려준다 — (자른 글, 버린 줄 수). 절단 원장(meta.clipped)의 재료다."""
+def clip_lines_n(text: str, limit: int, *, skip_long: bool = False) -> tuple[str, int]:
+    """`clip_lines` 와 같고 버린 줄 수를 함께 돌려준다 — (자른 글, 버린 줄 수). 절단 원장(meta.clipped)의 재료다.
+
+    `skip_long` 이면 들지 않는 줄 하나만 건너뛰고 뒤의 줄을 계속 본다(종전은 거기서 멈춰 뒤의 짧은 줄까지 다 버렸다). 첫 줄
+    (틀 줄)이 안 들면 종전처럼 멈춘다 — 틀 없이 본문만 나가지 않게. 버린 줄 수는 가운데서 빠진 것까지 센다."""
     text = "" if text is None else str(text)
     if limit <= 0:
         return "", (len(text.split("\n")) if text else 0)
@@ -196,6 +199,8 @@ def clip_lines_n(text: str, limit: int) -> tuple[str, int]:
         if used + add + reserve <= limit:
             kept.append(line)
             used += add
+        elif skip_long and kept:
+            continue
         else:
             break
     dropped = len(lines) - len(kept)
@@ -2321,7 +2326,7 @@ def _issue_side(store, target_key: str, key: str, people: Sequence[Mapping[str, 
         for row in rows:
             lines.append(_verdict_line(row))
             cards_out.append({"agent_key": agent, "record_id": row["record_id"], "section_id": row.get("section_id"),
-                              "quote_ok": row.get("quote_ok")})
+                              "quote_ok": row.get("quote_ok"), "side": role})
         for fid in person.get("finding_ids") or ():
             found = store.query_one("SELECT finding_json FROM rr_findings WHERE finding_id = ?", (fid,))
             fj = _j(found["finding_json"], {}) if found is not None else {}
@@ -2334,15 +2339,29 @@ def _issue_side(store, target_key: str, key: str, people: Sequence[Mapping[str, 
             "result": _body("issue_verdicts", lines or ["[해당 판정 없음]"])}
 
 
+def _alternate_sides(cards: Sequence[Mapping[str, Any]]) -> list:
+    """제기 측과 반대 측의 인용을 번갈아 세운다(각 측 안의 차례는 그대로, 측이 없는 항목은 한 무리). I6 이 칸을 넘으면 뒤 줄부터
+    빠지는데, 제기 측을 다 세운 뒤 반대 측을 세우면 반대 측 카드가 먼저 빠졌다 — 좁은 창(20만 토큰이면 I6 이 약 13,000자)에서
+    인용이 많은 쟁점일수록 패널이 한쪽 근거만 본다(HWAXPortal docs/risk-review-redesign D-57)."""
+    groups: dict[str, list] = {}
+    for item in cards:
+        groups.setdefault(_s(item.get("side")), []).append(item)
+    queues = list(groups.values())
+    out: list = []
+    for i in range(max((len(q) for q in queues), default=0)):
+        out += [q[i] for q in queues if i < len(q)]
+    return out
+
+
 def _issue_i6(store, target_key: str, cards: Sequence[Mapping[str, Any]]) -> tuple[dict, dict]:
-    """I6 — 인용된 카드의 **인용이 맞은 절만** 원문으로(같은 절은 한 번). 대조를 못 지난 인용의 카드는 제목과 그 사실만. 반환
-    (항목, record_id → 카드 — 좌석 인용 검증 범위)."""
+    """I6 — 인용된 카드의 **인용이 맞은 절만** 원문으로(같은 절은 한 번). 대조를 못 지난 인용의 카드는 제목과 그 사실만. 줄은
+    제기 측과 반대 측이 번갈아 선다(`_alternate_sides`). 반환 (항목, record_id → 카드 — 좌석 인용 검증 범위)."""
     from app import cardpack  # noqa: PLC0415 — 얼린 팩 읽기는 쓸 때만.
 
     lines: list[str] = []
     seen: set[tuple[str, str]] = set()
     scope: dict[str, Any] = {}
-    for item in cards:
+    for item in _alternate_sides(cards):
         rid, sid = str(item["record_id"]), _s(item.get("section_id"))
         if (rid, sid) in seen:
             continue
@@ -2450,7 +2469,9 @@ def build_issue_brief(store, target_key: str, issue: Mapping[str, Any], *, seats
                 "args": _clamp(entry["args"], CLAMP_ARGS), "result": entry["result"]}
         cap = profile.inner(ISSUE_CAPS[entry["key"]])
         text = _s(entry["result"])
-        item["result"], dropped = clip_lines_n(text, min(profile.item_result_max, cap - line_overhead(item)))
+        # I6 은 카드 절 한 줄이 길 수 있다 — 거기서 멈추면 그 뒤의 절(번갈아 선 반대 측 것 포함)이 다 빠지므로 그 줄만 건너뛴다.
+        item["result"], dropped = clip_lines_n(text, min(profile.item_result_max, cap - line_overhead(item)),
+                                               skip_long=entry["key"] == "I6")
         if dropped:
             lines_n = len(text.split("\n")) - 1
             clipped[entry["key"]] = {"lines": lines_n, "kept": lines_n - dropped, "omitted": dropped}

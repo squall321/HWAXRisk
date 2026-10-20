@@ -921,3 +921,78 @@ def test_a_human_requeue_resets_charged(store, monkeypatch, tmp_path):
                          ident=factories.ident(OWNER))
     again = _issue(store, key, anchor)
     assert (again["state"], again["charged"]) == ("queued", 0)
+
+
+# ---------------------------------------------------------------- I6 — 제기 · 반대 측 카드 절이 번갈아 선다(재설계 D-57)
+def _side_cards(raisers: list[tuple[str, str]], opposers: list[tuple[str, str]]) -> list[dict]:
+    """`_issue_side` 가 cards_out 에 싣는 꼴 — 제기 측(SEAL)과 반대 측(xd-syn-0)이 인용한 (별칭, 절)."""
+    return ([{"agent_key": SEAL, "record_id": _rid(a), "section_id": s, "quote_ok": 1, "side": "제기"} for a, s in raisers]
+            + [{"agent_key": "xd-syn-0", "record_id": _rid(a), "section_id": s, "quote_ok": 1, "side": "반대"}
+               for a, s in opposers])
+
+
+def _tags(text: str) -> list[str]:
+    import re  # noqa: PLC0415
+    return re.findall(r"\[card:([^\]#]+)#(\w+)\]", text)
+
+
+def test_the_cited_card_sections_alternate_between_raisers_and_opposers(store):
+    """제기 측을 다 세운 뒤 반대 측을 세우면 칸이 넘칠 때 반대 측 카드가 먼저 빠진다 — 측마다 차례는 그대로 두고 번갈아 세운다."""
+    key, _units = _ledger(store)
+    cards = _side_cards([("K01", "1"), ("K03", "1"), ("K05", "1")], [("K04", "1"), ("K06", "1")])
+    item, scope = brief._issue_i6(store, key, cards)
+    want = [(_rid(a), s) for a, s in (("K01", "1"), ("K04", "1"), ("K03", "1"), ("K06", "1"), ("K05", "1"))]
+    assert [tuple(t) for t in _tags(item["result"])] == want
+    assert set(scope) == {_rid(a) for a in ("K01", "K03", "K04", "K05", "K06")}, "인용 검증 범위는 순서와 무관하게 전부"
+
+
+def test_an_overflowing_i6_keeps_the_opposers_and_skips_only_the_long_section(store, monkeypatch, tmp_path):
+    """좁은 창에서 I6 이 넘친다 — ① 반대 측 절이 남는다(번갈아 선다) ② 칸보다 긴 절 하나는 그 줄만 빠지고 뒤의 절은 남는다
+    (종전은 거기서 멈춰 틀 줄과 '…(n줄 생략)' 만 남았다) ③ 빠진 줄 수는 절단 원장(meta.clipped.I6)에 그대로 선다."""
+    from app import cardpack  # noqa: PLC0415
+
+    key, (unit,) = _ledger(store)
+    anchor = _k01_anchor(store, key, unit)
+    _select(store, monkeypatch, tmp_path, key)
+    issue = _issue(store, key, anchor)
+    seats = issues.seats_for(store, key, issue)
+    raisers = [("K01", "1"), ("K01", "2"), ("K01", "3"), ("K03", "1"), ("K05", "1")]
+    opposers = [("K04", "1"), ("K06", "1")]
+
+    def fake_side(_store, _key, item_key, _people, *, role, judgement, cards_out):
+        cards_out += _side_cards(raisers, []) if role == "제기" else _side_cards([], opposers)
+        return {"key": item_key, "args": "-", "result": brief._body("issue_verdicts", [f"{role} 판정 줄"])}
+
+    real_load = cardpack.load_for
+    long_rid = _rid("K01")
+
+    def load_with_a_long_first_section(st, tk, agent):
+        pack = real_load(st, tk, agent)
+        if pack is None or agent != SEAL:
+            return pack
+        cards = {rid: dict(card) for rid, card in pack.record_cards.items()}
+        cards[long_rid]["sections"] = [({**s, "text": "긴 절 " * 400} if str(s.get("sid")) == "1" else s)
+                                       for s in cards[long_rid].get("sections") or ()]
+        import types  # noqa: PLC0415
+        return types.SimpleNamespace(record_cards=cards)
+
+    monkeypatch.setattr(brief, "_issue_side", fake_side)
+    monkeypatch.setattr(cardpack, "load_for", load_with_a_long_first_section)
+    monkeypatch.setitem(brief.ISSUE_CAPS, "I6", 900)          # 좁은 창 흉내 — 보통 절 서너 줄만 든다
+    built = brief.build_issue_brief(store, key, issue, seats=seats)
+    i6 = next(e["result"] for e in built["evidence"] if e["key"] == "I6")
+    tags = [tuple(t) for t in _tags(i6)]
+    assert (long_rid, "1") not in tags, "칸보다 긴 절은 빠진다"
+    assert (_rid("K04"), "1") in tags and (_rid("K06"), "1") in tags, f"반대 측 절이 남는다 — {tags}"
+    assert tags[:2] == [(_rid("K04"), "1"), (long_rid, "2")], "긴 줄 하나만 건너뛰고 차례대로 잇는다"
+    clipped = built["meta"]["clipped"]["I6"]
+    assert clipped["omitted"] >= 1 and clipped["kept"] + clipped["omitted"] == clipped["lines"]
+    assert i6.rstrip().endswith(f"…({clipped['omitted']}줄 생략)")
+
+
+def test_clip_lines_n_skip_long_jumps_one_line_but_never_the_frame():
+    text = "\n".join(["틀 줄", "x" * 100, "가", "나"])
+    assert brief.clip_lines_n(text, 30) == ("틀 줄\n…(3줄 생략)", 3), "종전 — 긴 줄에서 멈춘다"
+    assert brief.clip_lines_n(text, 30, skip_long=True) == ("틀 줄\n가\n나\n…(1줄 생략)", 1)
+    head_long = "\n".join(["y" * 100, "가"])
+    assert brief.clip_lines_n(head_long, 30, skip_long=True) == brief.clip_lines_n(head_long, 30), "틀 줄이 안 들면 종전처럼"
