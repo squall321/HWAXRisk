@@ -172,7 +172,8 @@ def _load(store: Any, target_key: str, agent_key: str | None) -> dict:
         " offcard_capped, bg_full_n, bg_title_only_n, n_fail, n_warning, quote_ok, decided_by, route,"
         " json_extract(route_json, '$.rule') AS rule, sample_json,"
         " json_extract(extras_json, '$.noinput.outcome') AS noinput_outcome,"
-        " json_extract(extras_json, '$.noinput.capped') AS noinput_capped FROM rr_review_cells"
+        " json_extract(extras_json, '$.noinput.capped') AS noinput_capped,"
+        " json_extract(extras_json, '$.coverage') AS coverage FROM rr_review_cells"
         f" WHERE target_key = ?{extra} ORDER BY agent_key, unit_id", [target_key, *params]) if r["unit_id"] in alive]
     for cell in cells:
         # 표본 · 그림자의 실효 결과 — 앞 결과는 놓침만 센다(반대 검토 2차 LOW 6 · 3차 LOW 4 · D-47 — 완결 몫 · 넓힘과 같은 셈)
@@ -348,11 +349,36 @@ def _cards(data: Mapping[str, Any], policy: Mapping[str, Any]) -> dict:
     return {
         "denominator": denominator,
         "lines": {name: rate(n, denominator, policy=policy) for name, n in lines.items()},
+        "coverage": _coverage(data["cells"]),
         "residual": denominator - sum(lines.values()),
         "experts_without_pack": len(no_pack_agents), "cells_without_pack": no_pack_cells,
         # X1-03 — 검토 칸의 판정 카드 = 계획 카드는 정산 조건이라 늘 참이다. 지표가 아니라 불변식으로만 둔다.
         "invariant": {"judged": inv_judged, "expected": inv_expected, "holds": inv_judged == inv_expected},
     }
+
+
+def _coverage(cells: Sequence[Mapping[str, Any]]) -> dict:
+    """닫힌(reviewed · no_input) 칸의 카드 커버리지 합(HWAXPortal docs/risk-200k W-D3 · W-D17 — 러너가 칸마다 extras_json.coverage 에
+    적는다). 카드 × 칸마다 전문으로 본 길 — 판정 · 카드 밖/입력 결손 호출의 전문 · 훑기 대조만. 놓침(missed)은 셋 다 없는 것(불변식
+    G10), hit_title 은 훑기에 걸렸는데 판정도 호출 전문도 없는 것(자리가 없어 제목으로). 커버리지를 적기 전에 닫힌 칸은 unknown 이다."""
+    out = {"cells": 0, "unknown_cells": 0, "pairs": 0, "judged": 0, "full": 0, "swept_only": 0, "missed": 0, "hit_title": 0}
+    for c in cells:
+        if c["state"] not in ("reviewed", "no_input"):
+            continue
+        try:
+            cov = json.loads(c.get("coverage") or "null")
+        except ValueError:
+            cov = None
+        if not isinstance(cov, Mapping):
+            out["unknown_cells"] += 1
+            continue
+        out["cells"] += 1
+        for key in ("judged", "full", "swept_only"):
+            out[key] += int(cov.get(key) or 0)
+        out["pairs"] += int(cov.get("cards") or 0)
+        out["missed"] += len(cov.get("missed") or ())
+        out["hit_title"] += len(cov.get("hit_title") or ())
+    return out
 
 
 def _clipped(call: Mapping[str, Any]) -> dict:
@@ -792,6 +818,12 @@ def render_text(result: Mapping[str, Any]) -> str:
         f" · 범위 밖 칸 {fmt_rate(cl['out_of_scope'])} · 무관 칸 {fmt_rate(cl['filtered'])}"
         f" · 입력 결손 칸 {fmt_rate(cl['no_input'])}{residual}"
         f" · 묶음 미확보 전문가 {_n(cards['experts_without_pack'])}명({_n(cards['cells_without_pack'])}칸 — 분모 밖)")
+    cov = cards["coverage"]
+    unknown = (f" · 커버리지를 적기 전에 닫힌 칸 {_n(cov['unknown_cells'])}(모름)" if cov["unknown_cells"] else "")
+    lines.append(
+        f"[누락 0 증명] 닫힌 칸 {_n(cov['cells'])} · 카드 × 칸 {_n(cov['pairs'])} = 판정 {_n(cov['judged'])}"
+        f" + 카드 밖·입력 결손 전문 {_n(cov['full'])} + 훑기 전문 대조만 {_n(cov['swept_only'])} + 놓침 {_n(cov['missed'])}"
+        f" · 훑기에 걸렸는데 제목만 {_n(cov['hit_title'])}{unknown}")
     flt, gap = result["filter"], result["noinput"]
     audit_ = flt["audit"]
     counts = audit_["counts"]

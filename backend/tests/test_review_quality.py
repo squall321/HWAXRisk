@@ -463,8 +463,8 @@ def _assert_text_is_the_json(block: dict) -> None:
     text, res = block["text"], block["json"]
     assert render.lint_text(text)["ok"], render.lint_text(text)["violations"]
     lines = {line.split("]", 1)[0] + "]": line for line in text.split("\n")[1:]}
-    assert list(lines) == ["[격자]", "[카드]", "[거름]", "[입력 결손]", "[절단]", "[인용]", "[뒤집힘]", "[호출 초]", "[실측]",
-                           "[기준]"]
+    assert list(lines) == ["[격자]", "[카드]", "[누락 0 증명]", "[거름]", "[입력 결손]", "[절단]", "[인용]", "[뒤집힘]",
+                           "[호출 초]", "[실측]", "[기준]"]
     for tag, paths in _LINE_PATHS.items():
         want = [_expected(_at(res, p), mean=p in ("pilot.calls_per_cell", "pilot.chars_per_token")) for p in paths]
         assert _parsed(lines[tag]) == want, tag
@@ -479,6 +479,12 @@ def _assert_text_is_the_json(block: dict) -> None:
     assert lines["[카드]"].startswith(f"[카드] 분모 {cards['denominator']:,} = ")
     assert (f"묶음 미확보 전문가 {cards['experts_without_pack']:,}명({cards['cells_without_pack']:,}칸"
             in lines["[카드]"])
+    cov = cards["coverage"]
+    assert cov["pairs"] == cov["judged"] + cov["full"] + cov["swept_only"] + cov["missed"], "카드 × 칸은 넷 가운데 하나다"
+    assert lines["[누락 0 증명]"].startswith(
+        f"[누락 0 증명] 닫힌 칸 {cov['cells']:,} · 카드 × 칸 {cov['pairs']:,} = 판정 {cov['judged']:,}"
+        f" + 카드 밖·입력 결손 전문 {cov['full']:,} + 훑기 전문 대조만 {cov['swept_only']:,} + 놓침 {cov['missed']:,}"
+        f" · 훑기에 걸렸는데 제목만 {cov['hit_title']:,}")
     cap = res["truncation"]["offcard_capped"]
     assert f"카드 밖 상한 닿음 {cap['cells']:,}칸({cap['hits']:,}번)" in lines["[절단]"]
     assert f"서버·앱 대조 갈림 {res['citation']['check_disagree']:,}건" in lines["[인용]"]
@@ -514,7 +520,7 @@ def test_the_block_text_carries_the_json_numbers_and_passes_the_linter(store, mo
     _assert_text_is_the_json(block)
     lines = block["text"].split("\n")
     assert "뒤집힘(걸림 없음→걸림) 표본 수 미달(n=2)" in lines[1]
-    assert "순서(fwd·rev 다름) 표본 수 미달(n=10)" in lines[7]
+    assert "순서(fwd·rev 다름) 표본 수 미달(n=10)" in lines[8]
     assert lines[-1] == ("[기준] 밖 2항 — 절단(호출) 4.5% > 0.0% · 인용 대조(걸림 없음) 33.3% < 80.0% · 표본 미달로 견주지 못한"
                          " 기준 2항(순서(fwd·rev 다름), 뒤집힘(걸림 없음→걸림) 95% 상한)")
 

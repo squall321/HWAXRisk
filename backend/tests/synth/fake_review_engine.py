@@ -39,6 +39,8 @@
                    모든 전문가의 카드 밖 넘김이 분류보다 먼저 오느냐가 시험의 흐름을 갈라서다. 카드 밖 넘김은 offcard_handoffs 로
   handoff_unit     훑기 h 줄이 넘기는 단위(unit_id) — 그 쪽에 그 단위가 없으면 h 줄을 내지 않는다(거르기 넘김 줄, 재설계 M3 C3-6)
   handoff_from     주면 이 전문가들의 훑기만 h 줄을 낸다(늦은 넘김 — 재설계 M3 C3-7)
+  title_only       별칭 집합 — 카드 밖 · 입력 결손 호출에서 이 카드는 전문으로 못 실은 것처럼(제목으로 내린 것처럼) 낸다 — meta.aliases.cards
+                   에서 빼고 bg_dropped 로 센다(엔진 must_dropped · 몫 밖 — 앱 커버리지 G10 시험, HWAXPortal docs/risk-200k W-D17)
   offcard_paged    쪽 수(0 이면 끔) — 반드시 전문인 카드(extra.must_full)를 실은 카드 밖 호출을 엔진이 쪽으로 나눠 부른 것처럼 낸다
                    (meta.paged · f 줄은 상한 × 쪽 수까지 · maybe_more 는 쪽마다 상한에 닿았을 때만 — HWAXPortal docs/risk-200k W-D15)
   offcard_handoffs (agent_key, unit_id) → 영역 — 그 전문가의 그 단위 카드 밖 호출만 그 영역으로 넘기는 h 줄을 낸다(훑기는 내지
@@ -323,6 +325,7 @@ class FakeReviewEngine:
         self.handoff_from: set[str] | None = None
         self.offcard_handoffs: dict[tuple[str, str], str] = {}
         self.offcard_paged = 0
+        self.title_only: set[str] = set()
         self.seen: list[str] = []
         self.need: str | None = None
         self.hold_runs: dict[int, threading.Event] = {}
@@ -774,9 +777,11 @@ class FakeReviewEngine:
                 "finish_reason": ("length" if (self.truncated or cut == "length") and kind == "verdict" else "stop"),
                 "llm_ms": [0],
                 "soft_over": False, "basis": "noinput" if kind == "noinput" else "cards" if (order or digest) else "role_only",
-                "bg_dropped": 0, "clipped": copy.deepcopy(self.clipped),
+                "bg_dropped": (sum(1 for a in order if a in self.title_only) if kind in ("offcard", "noinput") else 0),
+                "clipped": copy.deepcopy(self.clipped),
                 "order_effective": not (kind == "verdict" and variant == "rev" and len(order) < 2),
-                "aliases": {"cards": {a: cards[a]["record_id"] for a in order},
+                "aliases": {"cards": {a: cards[a]["record_id"] for a in order
+                                      if not (kind in ("offcard", "noinput") and a in self.title_only)},
                             "lines": {a: x["ref"] for a, x in lines.items()}, "units": units}}
         if kind == "offcard" and pages:
             meta["paged"] = {"n": pages, "pages": [], "must_full": len((body.get("extra") or {}).get("must_full") or [])}

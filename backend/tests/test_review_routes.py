@@ -40,7 +40,8 @@ JOB_PROGRESS_KEYS = {"packs", "experts", "cells", "calls", "breaker", "server", 
 WORKER_KEYS = {"agent_key", "purpose", "unit_id", "call_kind", "variant", "deck_id", "started_at", "last_frame_at",
                "last_event_at", "last_step", "frame_idle_s", "event_idle_s"}
 QUALITY_KEYS = {"job_id", "computed_at", "title", "text", "policy_version", "ledger_hash", "out_of_bounds", "unchecked"}
-CARDS_KEYS = {"denominator", "lines", "residual", "experts_without_pack", "cells_without_pack", "invariant"}
+CARDS_KEYS = {"denominator", "lines", "residual", "experts_without_pack", "cells_without_pack", "invariant",
+              "coverage"}       # 카드 커버리지 — 닫힌 칸의 카드 × 칸이 판정 · 전문 호출 · 훑기 대조 · 놓침 가운데 하나(W-D17)
 CELLS_PAGE_KEYS = {"target_key", "total", "limit", "offset", "rows"}       # + next_offset(남았을 때)
 CELL_ROW_KEYS = [
     "target_key", "unit_id", "agent_key", "owner_sub", "domain", "unit_seq", "state", "route", "route_forced", "basis",

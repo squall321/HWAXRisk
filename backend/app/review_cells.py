@@ -1697,12 +1697,16 @@ def review_invariants(store: Any, target_key: str) -> list[str]:
     (G7) skipped 셀에는 넘긴 사람(decided_by)과 사유(decide_note)가 있다(재설계 M3 C3-8 — 3.10).
     (G8) na_irrelevant 셀은 거르기 분류가 거른 셀이다 — `route='filtered'` 이고 분류 기록(route_json.rule)이 있다.
     (G9) 닫힌(reviewed · no_input) 표본 · 그림자 셀에는 결과가 있다(반대 검토 MEDIUM 10 — 정산과 같은 트랜잭션에 적는다).
+    (G10) 닫힌(reviewed · no_input) 셀의 카드마다 전문으로 본 길이 하나는 있다 — 판정 · 카드 밖/입력 결손 호출의 전문 · 훑기의 전문
+         대조(extras_json.coverage.missed 가 빈다, HWAXPortal docs/risk-200k W-D3 · W-D17). 커버리지를 적기 전에 닫힌 셀은 모른다
+         (보지 않는다). 거른 셀(na_irrelevant)은 훑기 답으로만 거르므로(G8) 훑기 대조가 늘 있다.
     """
     problems: list[str] = []
     cells = [dict(r) for r in store.query(
         "SELECT unit_id, agent_key, state, lease_owner, basis, cards_expected, cards_judged, truncated, offcard_state,"
         " error_code, decided_by, decide_note, route, json_extract(route_json, '$.rule') AS route_rule,"
         " json_extract(extras_json, '$.noinput.outcome') AS noinput_outcome,"
+        " json_extract(extras_json, '$.coverage.missed') AS coverage_missed,"
         " json_type(sample_json, '$.filter_audit') IS NOT NULL AND json_type(sample_json, '$.filter_audit.result') IN"
         " (NULL, 'null') AS audit_open, json_type(sample_json, '$.shadow') IS NOT NULL AND"
         " json_type(sample_json, '$.shadow.result') IN (NULL, 'null') AS shadow_open FROM rr_review_cells"
@@ -1761,6 +1765,11 @@ def review_invariants(store: Any, target_key: str) -> list[str]:
             problems.append(f"(G8) na_irrelevant 셀 {name} 에 거르기 분류 기록(route filtered · route_json.rule)이 없다.")
         if c["state"] in ("reviewed", "no_input") and (c["audit_open"] or c["shadow_open"]):
             problems.append(f"(G9) 닫힌 표본 · 그림자 셀 {name} 에 결과가 없다(정산과 결과가 갈라졌다).")
+        missed = json.loads(c["coverage_missed"]) if c["coverage_missed"] else []
+        if c["state"] in ("reviewed", "no_input") and missed:
+            problems.append(f"(G10) 닫힌 셀 {name} 에서 전문으로 본 적 없는 카드가 {len(missed)}장이다"
+                            f"({', '.join(map(str, missed[:5]))}{' 외' if len(missed) > 5 else ''}) — 판정 · 전문 호출 · 훑기 대조가"
+                            " 모두 없다.")
     judged = Counter((r["unit_id"], r["agent_key"]) for r in store.query(
         "SELECT unit_id, agent_key FROM rr_card_verdicts WHERE target_key = ? AND is_effective = 1", (target_key,)))
     for c in cells:

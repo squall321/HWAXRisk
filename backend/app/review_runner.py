@@ -2170,6 +2170,28 @@ class _Session:
         hits = set(entry.get("k") or ())
         return [a for a in cards if a in hits or a in unseen]
 
+    def _coverage(self, cell: _Cell, full: set[str]) -> dict:
+        """셀의 카드 커버리지(HWAXPortal docs/risk-200k W-D3 · W-D10 · W-D17) — 카드마다 전문으로 본 길이 하나는 있어야 한다: 판정
+        (점검 카드의 실효 판정) · 카드 밖 · 입력 결손 호출의 전문(엔진 meta.aliases.cards — 제목으로 내린 카드는 빠진다) · 훑기의 전문
+        대조(그 카드의 묶음 × 그 단위의 목록 쪽이 답했다). 셋 다 없으면 놓침(missed — 불변식 G10). 훑기에 걸렸는데 판정도 호출 전문도
+        없는 카드는 hit_title 이다(단위가 커서 자리가 없었다 — 엔진 must_dropped). 그 단위의 훑기 답이 빠졌으면 훑기 대조는 없다."""
+        universe = list(self.pack.order)
+        judged = {r["alias"] for r in self._rows(cell) if r["is_effective"]}
+        entry = (self.sweep.get("units") or {}).get(cell.unit_id)
+        gaps = self.sweep.get("gaps")
+        if entry is None or int(entry.get("missing_in") or 0) > 0 or (
+                gaps is None and int(self.sweep.get("failed_pages") or 0) > 0):
+            swept: set[str] = set()
+        else:
+            unseen = {a for g in gaps or () if cell.unit_id in (g.get("units") or ()) for a in g.get("aliases") or ()}
+            swept = {a for a in universe if a not in unseen}
+        hits = set((entry or {}).get("k") or ())
+        return {"cards": len(universe), "judged": sum(1 for a in universe if a in judged),
+                "full": sum(1 for a in universe if a in full and a not in judged),
+                "swept_only": sum(1 for a in universe if a in swept and a not in judged and a not in full),
+                "missed": [a for a in universe if a not in judged and a not in full and a not in swept],
+                "hit_title": [a for a in universe if a in hits and a not in judged and a not in full]}
+
     def _offcard(self, cell: _Cell) -> None:
         """카드 밖 호출 — 셀마다 1번. 배경 카드는 전부 본문으로 싣는다(훑기 k 에 걸린 것 먼저, 나머지 팩 순서 — P-03 · X1-11),
         digest 는 나머지 카드의 제목, known 은 그 셀의 실효 판정(걸림 먼저). 카드 밖 줄 수가 findings_max 에 닿으면 받은 제목을 known
@@ -2185,6 +2207,7 @@ class _Session:
         cap = int(((self.lim.get("offcard") or {}).get("findings_max")) or 0)
         findings: list[dict] = []
         extras: dict[str, Any] = {"need": [], "seen": [], "handoffs": [], "none": False, "more": None}
+        full: set[str] = set()                # 전문으로 실린 카드(엔진 meta.aliases.cards) — 다시 묻기를 건너 모은다
         capped = 0
         seq = 0
         asked = list(known)
@@ -2215,6 +2238,7 @@ class _Session:
             extras["none"] = bool(extras["none"] or got.get("none"))
             extras["more"] = got.get("more")
             meta = answer.result.get("meta") if isinstance(answer.result.get("meta"), Mapping) else {}
+            full |= set(((meta.get("aliases") or {}).get("cards") or {}))
             # 쪽으로 나눠 부른 답(meta.paged — W-D15)은 쪽마다 상한이 따로라 합친 줄 수로 상한에 닿았다고 하지 않는다 — 쪽의 답을 모은
             # 엔진의 maybe_more 를 따른다.
             if meta.get("paged"):
@@ -2225,7 +2249,7 @@ class _Session:
             capped += int(hit)
             last = not hit or seq >= MORE_REASKS
             bg_dropped = int(meta.get("bg_dropped") or 0)
-            offcard_extras = {**extras, "findings": findings, "known_dropped": self._known_dropped(asked)}
+            offcard_extras = {**extras, "findings": findings, "known_dropped": self._known_dropped(asked), "full": sorted(full)}
             if queries:
                 offcard_extras["search"] = {**searched, "queries": queries}
             sets: dict[str, Any] = {
@@ -2233,7 +2257,8 @@ class _Session:
                 "credential_kind": self.cred_kind, "model": meta.get("model"),
                 "n_offcard": len(findings), "offcard_capped": capped, "offcard_state": "done" if last else "todo",
                 "bg_full_n": max(len(cards) - bg_dropped, 0), "bg_title_only_n": bg_dropped,
-                "extras_json": canonical_json({"inj": cell.inj, "offcard": offcard_extras}),
+                "extras_json": canonical_json({"inj": cell.inj, "offcard": offcard_extras,
+                                               **({"coverage": self._coverage(cell, full)} if last else {})}),
                 "mechs_json": canonical_json(sorted(set(extras["seen"]) | {str(f["mech"]) for f in findings
                                                                            if f.get("mech") and f.get("mech") != "free"})),
                 "handoffs_json": canonical_json(extras["handoffs"]),
@@ -2305,6 +2330,7 @@ class _Session:
         q2: list[dict] = []
         known: list[dict] = []
         more: Any = None
+        full: set[str] = set()                # 전문으로 실린 카드(엔진 meta.aliases.cards) — 다시 묻기를 건너 모은다
         seq = 0
         while True:
             body = engine_client.run_body("noinput", target_key=self.target_key, pack=self.pack, cards=cards, digest=order,
@@ -2340,13 +2366,16 @@ class _Session:
             capped = quality.get("maybe_more") is True and seq >= NOINPUT_MORE_REASKS
             outcome = review_verify.noinput_outcome(q1, q2)
             meta = answer.result.get("meta") if isinstance(answer.result.get("meta"), Mapping) else {}
+            full |= set(((meta.get("aliases") or {}).get("cards") or {}))
             bg_dropped = int(meta.get("bg_dropped") or 0)
             sets: dict[str, Any] = {
                 "basis": review_cells.NOINPUT, "credential_kind": self.cred_kind, "model": meta.get("model"),
                 "bg_full_n": max(len(cards) - bg_dropped, 0), "bg_title_only_n": bg_dropped,
                 "extras_json": canonical_json({"inj": cell.inj, "noinput": {"q1": q1, "q2": q2, "more": more,
                                                                             "asks": seq + 1, "outcome": outcome,
-                                                                            **({"capped": True} if capped else {})}}),
+                                                                            "full": sorted(full),
+                                                                            **({"capped": True} if capped else {})},
+                                               **({"coverage": self._coverage(cell, full)} if last else {})}),
                 "mechs_json": canonical_json(sorted({str(r["mech"]) for r in q1 if r["impact"] == "yes" and r.get("mech")
                                                      and r["mech"] != "free"})),
             }

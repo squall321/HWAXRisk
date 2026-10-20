@@ -465,3 +465,40 @@ def test_an_old_sweep_record_with_failures_but_no_gap_list_marks_every_card_must
     assert review_runner._Session._must_full(old, cell, ["K01", "K02", "K03"]) == ["K01", "K02", "K03"]
     clean = types.SimpleNamespace(lim=old.lim, sweep={**old.sweep, "failed_pages": 0})
     assert review_runner._Session._must_full(clean, cell, ["K01", "K02", "K03"]) == ["K02"]
+
+
+# ---------------------------------------------------------------- 커버리지(W-D3 · W-D17) — 카드마다 전문으로 본 길
+def test_every_closed_cell_records_how_each_card_was_read_in_full_and_no_card_is_missed(store):
+    """카드 전문가의 셀 — 점검 카드는 판정, 배경 카드는 카드 밖 호출의 전문, 나머지는 훑기 대조다. 입력 결손 전문가의 셀 — 카드 밖 호출의
+    전문(반드시 전문인 카드)과 훑기 대조다. 놓친 카드가 없고 불변식이 지난다."""
+    key = rig.target(store, ROSTER)
+    job_id = rig.job(store, key)
+    fake = FakeReviewEngine(_packs(ROSTER))
+    us = _units(store, key)
+    b0 = next(u["unit_id"] for u in us if u["kind"] == "bundle")
+    fake.sweep_k = {b0: ["K08"]}
+    rig.Rig(store, fake).finish(job_id)
+    assert review_cells.review_invariants(store, key) == []
+    cov = _cell(store, key, b0, MECH1)["extras"]["coverage"]
+    assert cov == {"cards": 10, "judged": 6, "full": 4, "swept_only": 0, "missed": [], "hit_title": []}, cov
+    gap = _cell(store, key, b0, MEM2)["extras"]["coverage"]
+    assert (gap["cards"], gap["judged"], gap["missed"], gap["hit_title"]) == (10, 0, [], []), gap
+    assert gap["full"] + gap["swept_only"] == 10
+
+
+def test_a_card_neither_judged_nor_read_in_full_nor_swept_breaks_the_coverage_invariant(store):
+    """훑기 둘째 묶음(K06~K10)이 끝내 실패했고 카드 밖 호출이 그 묶음의 배경 카드 K08 을 전문으로 못 실었다(제목으로) — K08 은 이 셀
+    어디에서도 전문으로 읽히지 않았다. 셀은 coverage.missed 에 K08 을 적고 불변식 G10 이 잡는다(조용히 닫지 않는다)."""
+    key = rig.target(store, ROSTER)
+    job_id = rig.job(store, key)
+    fake = FakeReviewEngine(_packs(ROSTER))
+    us = _units(store, key)
+    b0 = next(u["unit_id"] for u in us if u["kind"] == "bundle")
+    fake.sweep_split = 2
+    fake.sweep_error_aliases = {"K06"}
+    fake.title_only = {"K08"}
+    rig.Rig(store, fake).finish(job_id)
+    cov = _cell(store, key, b0, MECH1)["extras"]["coverage"]
+    assert cov["missed"] == ["K08"] and cov["swept_only"] == 0, cov
+    assert any(p.startswith(f"(G10) 닫힌 셀 {b0}×{MECH1} 에서 전문으로 본 적 없는 카드가 1장이다(K08)")
+               for p in review_cells.review_invariants(store, key))
