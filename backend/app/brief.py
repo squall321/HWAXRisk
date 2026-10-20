@@ -2363,17 +2363,17 @@ def _quote_window(text: str, quote: str, size: int) -> str:
 
 
 def _issue_i6(store, target_key: str, cards: Sequence[Mapping[str, Any]],
-              section_max: int | None = None) -> tuple[dict, dict]:
+              budget: int | None = None) -> tuple[dict, dict]:
     """I6 — 인용된 카드의 **인용이 맞은 절만** 원문으로(같은 절은 한 번). 대조를 못 지난 인용의 카드는 제목과 그 사실만. 줄은
-    제기 측과 반대 측이 번갈아 선다(`_alternate_sides`). 절이 section_max 자를 넘으면 통째로 빠지지 않게 인용 둘레만 싣는다(HWAXPortal
-    docs/risk-200k W4 · E1 — 좁은 창에서 긴 절이 칸보다 길어 그 카드의 원문이 패널에 하나도 안 실렸다). 반환 (항목, record_id →
-    카드 — 좌석 인용 검증 범위). 항목의 `counts` 는 {sections, full, excerpt, no_text}."""
+    제기 측과 반대 측이 번갈아 선다(`_alternate_sides`). 원문이 다 들어가면(budget 안) 그대로 싣는다 — 1M 창에서는 잘라내지 않는다.
+    칸이 모자랄 때만 I6 칸의 1/3(바닥 400자)을 넘는 절을 인용 둘레로 줄인다(HWAXPortal docs/risk-200k W4 · E1 — 좁은 창에서 긴 절이
+    칸보다 길어 그 카드의 원문이 패널에 하나도 안 실렸고, 긴 절 하나가 뒤의 절을 다 밀어냈다). 반환 (항목, record_id → 카드 — 좌석
+    인용 검증 범위). 항목의 `counts` 는 {sections, full, excerpt, no_text}."""
     from app import cardpack  # noqa: PLC0415 — 얼린 팩 읽기는 쓸 때만.
 
-    lines: list[str] = []
+    rows: list[tuple] = []          # (rid, sid, 제목, 절 원문 | None, 인용) — 절 원문이 None 이면 원문을 싣지 않는 줄
     seen: set[tuple[str, str]] = set()
     scope: dict[str, Any] = {}
-    counts = {"sections": 0, "full": 0, "excerpt": 0, "no_text": 0}
     for item in _alternate_sides(cards):
         rid, sid = str(item["record_id"]), _s(item.get("section_id"))
         if (rid, sid) in seen:
@@ -2384,23 +2384,31 @@ def _issue_i6(store, target_key: str, cards: Sequence[Mapping[str, Any]],
         except cardpack.PackMissing:
             pack = None
         card = (pack.record_cards.get(rid) if pack is not None else None) or {}
-        title = _q(card.get("title") or rid)
         if card:
             scope[rid] = card
         section = next((s for s in card.get("sections") or () if _s(s.get("sid")) == sid), None)
-        counts["sections"] += 1
-        text = _s(section.get("text")) if section is not None else ""
-        if item.get("quote_ok") == 1 and section is not None and (not section_max or len(text) <= section_max):
-            counts["full"] += 1
-            lines.append(f"[card:{rid}#{sid}] {title} — {_q(text, 'claim', limit=0)}")
-        elif item.get("quote_ok") == 1 and section is not None:
-            counts["excerpt"] += 1
-            part = _quote_window(text, _s(item.get("cq")), int(section_max))
-            lines.append(f"[card:{rid}#{sid}] {title} — 절 {len(text):,}자 가운데 인용 둘레 {len(part):,}자"
-                         f" {_q(part, 'claim', limit=0)}")
-        else:
+        text = _s(section.get("text")) if item.get("quote_ok") == 1 and section is not None else None
+        rows.append((rid, sid, _q(card.get("title") or rid), text, _s(item.get("cq"))))
+
+    def full_line(rid, sid, title, text) -> str:
+        return f"[card:{rid}#{sid}] {title} — {_q(text, 'claim', limit=0)}"
+
+    tight = bool(budget) and sum(len(full_line(r, s, t, x)) + 1 for r, s, t, x, _q2 in rows if x is not None) > int(budget)
+    section_max = max(400, int(budget) // 3) if tight else None
+    lines: list[str] = []
+    counts = {"sections": len(rows), "full": 0, "excerpt": 0, "no_text": 0}
+    for rid, sid, title, text, quote in rows:
+        if text is None:
             counts["no_text"] += 1
             lines.append(f"[card:{rid}] {title} — 인용 대조를 못 지난 인용이라 절 원문을 싣지 않는다")
+        elif section_max is None or len(text) <= section_max:
+            counts["full"] += 1
+            lines.append(full_line(rid, sid, title, text))
+        else:
+            counts["excerpt"] += 1
+            part = _quote_window(text, quote, section_max)
+            lines.append(f"[card:{rid}#{sid}] {title} — 절 {len(text):,}자 가운데 인용 둘레 {len(part):,}자"
+                         f" {_q(part, 'claim', limit=0)}")
     return ({"key": "I6", "args": ",".join(sorted({r for r, _s2 in seen})) or "-",
              "result": _body("issue_cards", lines or ["[인용된 카드 없음]"]), "counts": counts}, scope)
 
@@ -2467,8 +2475,9 @@ def build_issue_brief(store, target_key: str, issue: Mapping[str, Any], *, seats
         names = name_index(store, (ctx["base_snapshot_id"], ctx["snapshot_id"]))
         i4 = _issue_side(store, target_key, "I4", basis.get("raisers") or (), role="제기", judgement=None, cards_out=cards)
         i5 = _issue_side(store, target_key, "I5", basis.get("opposers") or (), role="반대", judgement="OK", cards_out=cards)
-        # 절 한 줄은 I6 칸의 1/3 까지 — 긴 절도 인용 둘레로 실려 카드 셋은 원문이 선다(E1)
-        i6, scope = _issue_i6(store, target_key, cards, section_max=max(400, profile.inner(ISSUE_CAPS["I6"]) // 3))
+        # 칸이 모자랄 때만 긴 절을 I6 칸의 1/3 로 — 다 들어가면 원문 그대로다(E1, 1M 에서는 잘라내지 않는다)
+        i6, scope = _issue_i6(store, target_key, cards,
+                              budget=min(profile.item_result_max, profile.inner(ISSUE_CAPS["I6"])))
         i2, i3 = _issue_unit_items(store, target_key, issue.get("unit_id"), first_agent)
         i0 = {**_item_e0(store, ctx, False, _panel_model(store, target_key, panel_id)), "key": "I0"}
         raw = [_issue_i1(issue, anchor, target_key, issues_module.part_names(store, anchor)), i4, i5, i6, i2, i3, i0,

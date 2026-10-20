@@ -1001,3 +1001,25 @@ def test_clip_lines_n_skip_long_jumps_one_line_but_never_the_frame():
     assert brief.clip_lines_n(text, 30, skip_long=True) == ("틀 줄\n가\n나\n…(1줄 생략)", 1)
     head_long = "\n".join(["y" * 100, "가"])
     assert brief.clip_lines_n(head_long, 30, skip_long=True) == brief.clip_lines_n(head_long, 30), "틀 줄이 안 들면 종전처럼"
+
+
+def test_a_long_cited_section_is_kept_whole_when_everything_fits_and_cut_to_its_quote_only_when_i6_overflows(store, monkeypatch):
+    """E1 은 칸이 모자랄 때만 긴 절을 인용 둘레로 줄인다 — 다 들어가면(1M 창의 보통 경우) 긴 절도 원문 그대로다(1M 에서는 잘라내지
+    않는다, 사용자 지침 10-10). 같은 절 · 같은 인용으로 budget 만 바꿔 본다."""
+    import types  # noqa: PLC0415
+
+    from app import cardpack  # noqa: PLC0415
+
+    key, _units = _ledger(store)
+    long_text = "앞 문장이다. " * 300 + "인용된 핵심 문장이다." + " 뒤 문장이다." * 300
+    card = {"title": "긴 절 카드", "sections": [{"sid": "1", "text": long_text}]}
+    monkeypatch.setattr(cardpack, "load_for", lambda _st, _tk, _agent: types.SimpleNamespace(record_cards={"R-1": card}))
+    cards = [{"agent_key": SEAL, "record_id": "R-1", "section_id": "1", "quote_ok": 1, "side": "제기",
+              "cq": "인용된 핵심 문장이다."}]
+    roomy, _scope = brief._issue_i6(store, key, cards, budget=len(long_text) * 2)
+    assert long_text in roomy["result"] and roomy["counts"]["full"] == 1 and roomy["counts"]["excerpt"] == 0
+    tight, _scope = brief._issue_i6(store, key, cards, budget=3_000)
+    assert long_text not in tight["result"] and "인용된 핵심 문장이다." in tight["result"]
+    assert "가운데 인용 둘레 1,000자" in tight["result"] and tight["counts"]["excerpt"] == 1
+    whole, _scope = brief._issue_i6(store, key, cards)
+    assert long_text in whole["result"], "budget 을 안 주면(직접 부름) 원문 그대로다"

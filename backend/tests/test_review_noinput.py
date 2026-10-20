@@ -502,3 +502,58 @@ def test_a_card_neither_judged_nor_read_in_full_nor_swept_breaks_the_coverage_in
     assert cov["missed"] == ["K08"] and cov["swept_only"] == 0, cov
     assert any(p.startswith(f"(G10) 닫힌 셀 {b0}×{MECH1} 에서 전문으로 본 적 없는 카드가 1장이다(K08)")
                for p in review_cells.review_invariants(store, key))
+    quality = review_quality.compute(store, key, agent_key=MECH1)
+    assert quality["cards"]["coverage"]["missed"] >= 1, "품질 합이 놓침을 센다"
+    text = review_quality.block(store, key, agent_key=MECH1)["text"]
+    assert f"놓침 {quality['cards']['coverage']['missed']:,}" in text
+
+
+def test_a_unit_missing_from_the_sweep_answer_gives_no_sweep_coverage_so_a_title_only_card_is_missed(store):
+    """훑기 답에서 b0 이 빠졌다(답이 그 단위를 말하지 않았다) — 그 단위에서는 어느 카드도 훑기로 맞대어지지 않았다. 카드 밖 호출이 K08 을
+    전문으로 못 실었으면 K08 은 놓침이다(훑기 대조로 세면 빈칸이 가려진다)."""
+    key = rig.target(store, ROSTER)
+    job_id = rig.job(store, key)
+    fake = FakeReviewEngine(_packs(ROSTER))
+    us = _units(store, key)
+    b0 = next(u["unit_id"] for u in us if u["kind"] == "bundle")
+    fake.sweep_drop = {b0}
+    fake.title_only = {"K08"}
+    rig.Rig(store, fake).finish(job_id)
+    cov = _cell(store, key, b0, MECH1)["extras"]["coverage"]
+    assert (cov["missed"], cov["swept_only"]) == (["K08"], 0), cov
+
+
+def test_an_input_gap_cell_closed_as_no_input_is_also_held_to_the_coverage_invariant(store):
+    """입력 결손 전문가의 칸이 no_input(영향 모름)으로 닫혀도 G10 을 본다 — 훑기 둘째 묶음이 실패했고 입력 결손 호출이 K08 을 전문으로
+    못 실었으면 그 칸의 K08 은 놓침이다."""
+    key = rig.target(store, ROSTER)
+    job_id = rig.job(store, key)
+    fake = FakeReviewEngine(_packs(ROSTER))
+    us = _units(store, key)
+    b1 = [u["unit_id"] for u in us if u["kind"] == "bundle"][1]
+    fake.noinput_q1 = {b1: ["unknown"]}
+    fake.sweep_split = 2
+    fake.sweep_error_aliases = {"K06"}
+    fake.title_only = {"K08"}
+    rig.Rig(store, fake).finish(job_id)
+    cell = _cell(store, key, b1, MEM2)
+    assert cell["state"] == "no_input" and cell["extras"]["coverage"]["missed"] == ["K08"], cell["extras"].get("coverage")
+    assert any(p.startswith(f"(G10) 닫힌 셀 {b1}×{MEM2}") for p in review_cells.review_invariants(store, key))
+
+
+def test_a_swept_hit_card_that_could_not_be_read_in_full_is_counted_hit_title_not_missed(store):
+    """훑기가 b0 에 K08 을 걸었는데 카드 밖 호출이 K08 을 전문으로 못 실었다(엔진 must_dropped 흉내 — 단위가 창을 다 쓴다). 훑기에서는
+    전문으로 맞대어졌으니 놓침이 아니라 hit_title 이고 불변식은 지난다 — 품질 '[누락 0 증명]' 이 그 수를 따로 센다."""
+    key = rig.target(store, ROSTER)
+    job_id = rig.job(store, key)
+    fake = FakeReviewEngine(_packs(ROSTER))
+    us = _units(store, key)
+    b0 = next(u["unit_id"] for u in us if u["kind"] == "bundle")
+    fake.sweep_k = {b0: ["K08"]}
+    fake.title_only = {"K08"}
+    rig.Rig(store, fake).finish(job_id)
+    cov = _cell(store, key, b0, MECH1)["extras"]["coverage"]
+    assert (cov["missed"], cov["hit_title"]) == ([], ["K08"]) and cov["swept_only"] == 1, cov
+    assert not [p for p in review_cells.review_invariants(store, key) if p.startswith("(G10)")]
+    quality = review_quality.compute(store, key, agent_key=MECH1)
+    assert quality["cards"]["coverage"]["hit_title"] >= 1 and quality["cards"]["coverage"]["missed"] == 0
