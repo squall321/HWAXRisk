@@ -2326,7 +2326,7 @@ def _issue_side(store, target_key: str, key: str, people: Sequence[Mapping[str, 
         for row in rows:
             lines.append(_verdict_line(row))
             cards_out.append({"agent_key": agent, "record_id": row["record_id"], "section_id": row.get("section_id"),
-                              "quote_ok": row.get("quote_ok"), "side": role})
+                              "quote_ok": row.get("quote_ok"), "side": role, "cq": row.get("cq")})
         for fid in person.get("finding_ids") or ():
             found = store.query_one("SELECT finding_json FROM rr_findings WHERE finding_id = ?", (fid,))
             fj = _j(found["finding_json"], {}) if found is not None else {}
@@ -2353,14 +2353,27 @@ def _alternate_sides(cards: Sequence[Mapping[str, Any]]) -> list:
     return out
 
 
-def _issue_i6(store, target_key: str, cards: Sequence[Mapping[str, Any]]) -> tuple[dict, dict]:
+def _quote_window(text: str, quote: str, size: int) -> str:
+    """절 원문 가운데 인용 둘레 size 자 — 인용이 가운데 오게(못 찾으면 절 머리부터). 원문의 이어진 부분 문자열이다."""
+    at = text.find(quote) if quote else -1
+    if at < 0:
+        return text[:size]
+    lo = max(0, min(at - (size - len(quote)) // 2, len(text) - size))
+    return text[lo:lo + size]
+
+
+def _issue_i6(store, target_key: str, cards: Sequence[Mapping[str, Any]],
+              section_max: int | None = None) -> tuple[dict, dict]:
     """I6 — 인용된 카드의 **인용이 맞은 절만** 원문으로(같은 절은 한 번). 대조를 못 지난 인용의 카드는 제목과 그 사실만. 줄은
-    제기 측과 반대 측이 번갈아 선다(`_alternate_sides`). 반환 (항목, record_id → 카드 — 좌석 인용 검증 범위)."""
+    제기 측과 반대 측이 번갈아 선다(`_alternate_sides`). 절이 section_max 자를 넘으면 통째로 빠지지 않게 인용 둘레만 싣는다(HWAXPortal
+    docs/risk-200k W4 · E1 — 좁은 창에서 긴 절이 칸보다 길어 그 카드의 원문이 패널에 하나도 안 실렸다). 반환 (항목, record_id →
+    카드 — 좌석 인용 검증 범위). 항목의 `counts` 는 {sections, full, excerpt, no_text}."""
     from app import cardpack  # noqa: PLC0415 — 얼린 팩 읽기는 쓸 때만.
 
     lines: list[str] = []
     seen: set[tuple[str, str]] = set()
     scope: dict[str, Any] = {}
+    counts = {"sections": 0, "full": 0, "excerpt": 0, "no_text": 0}
     for item in _alternate_sides(cards):
         rid, sid = str(item["record_id"]), _s(item.get("section_id"))
         if (rid, sid) in seen:
@@ -2375,12 +2388,21 @@ def _issue_i6(store, target_key: str, cards: Sequence[Mapping[str, Any]]) -> tup
         if card:
             scope[rid] = card
         section = next((s for s in card.get("sections") or () if _s(s.get("sid")) == sid), None)
-        if item.get("quote_ok") == 1 and section is not None:
-            lines.append(f"[card:{rid}#{sid}] {title} — {_q(section.get('text'), 'claim', limit=0)}")
+        counts["sections"] += 1
+        text = _s(section.get("text")) if section is not None else ""
+        if item.get("quote_ok") == 1 and section is not None and (not section_max or len(text) <= section_max):
+            counts["full"] += 1
+            lines.append(f"[card:{rid}#{sid}] {title} — {_q(text, 'claim', limit=0)}")
+        elif item.get("quote_ok") == 1 and section is not None:
+            counts["excerpt"] += 1
+            part = _quote_window(text, _s(item.get("cq")), int(section_max))
+            lines.append(f"[card:{rid}#{sid}] {title} — 절 {len(text):,}자 가운데 인용 둘레 {len(part):,}자"
+                         f" {_q(part, 'claim', limit=0)}")
         else:
+            counts["no_text"] += 1
             lines.append(f"[card:{rid}] {title} — 인용 대조를 못 지난 인용이라 절 원문을 싣지 않는다")
     return ({"key": "I6", "args": ",".join(sorted({r for r, _s2 in seen})) or "-",
-             "result": _body("issue_cards", lines or ["[인용된 카드 없음]"])}, scope)
+             "result": _body("issue_cards", lines or ["[인용된 카드 없음]"]), "counts": counts}, scope)
 
 
 def _issue_unit_items(store, target_key: str, unit_id: str | None, agent_key: str | None) -> tuple[dict, dict]:
@@ -2445,7 +2467,8 @@ def build_issue_brief(store, target_key: str, issue: Mapping[str, Any], *, seats
         names = name_index(store, (ctx["base_snapshot_id"], ctx["snapshot_id"]))
         i4 = _issue_side(store, target_key, "I4", basis.get("raisers") or (), role="제기", judgement=None, cards_out=cards)
         i5 = _issue_side(store, target_key, "I5", basis.get("opposers") or (), role="반대", judgement="OK", cards_out=cards)
-        i6, scope = _issue_i6(store, target_key, cards)
+        # 절 한 줄은 I6 칸의 1/3 까지 — 긴 절도 인용 둘레로 실려 카드 셋은 원문이 선다(E1)
+        i6, scope = _issue_i6(store, target_key, cards, section_max=max(400, profile.inner(ISSUE_CAPS["I6"]) // 3))
         i2, i3 = _issue_unit_items(store, target_key, issue.get("unit_id"), first_agent)
         i0 = {**_item_e0(store, ctx, False, _panel_model(store, target_key, panel_id)), "key": "I0"}
         raw = [_issue_i1(issue, anchor, target_key, issues_module.part_names(store, anchor)), i4, i5, i6, i2, i3, i0,
@@ -2485,7 +2508,9 @@ def build_issue_brief(store, target_key: str, issue: Mapping[str, Any], *, seats
                                                    for i in items],
             "keys": [i["key"] for i in items], "refs": collect_refs(items),
             "meta": {"profile": profile.name, "budget": profile.budget, "clipped": clipped, "lint": lint,
-                     "shielded": shielded, "card_scope": scope}}
+                     "shielded": shielded, "card_scope": scope,
+                     # 인용된 카드 절 — 원문 · 인용 둘레 · 원문 없음(대조 못 지남) · 칸에서 빠진 줄(인용으로만 실린 카드, E1)
+                     "cited_sections": {**i6["counts"], "omitted": (clipped.get("I6") or {}).get("omitted", 0)}}}
 
 
 # ---------------------------------------------------------------- §5.7 유사 검색

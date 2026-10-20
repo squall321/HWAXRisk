@@ -946,9 +946,10 @@ def test_the_cited_card_sections_alternate_between_raisers_and_opposers(store):
     assert set(scope) == {_rid(a) for a in ("K01", "K03", "K04", "K05", "K06")}, "인용 검증 범위는 순서와 무관하게 전부"
 
 
-def test_an_overflowing_i6_keeps_the_opposers_and_skips_only_the_long_section(store, monkeypatch, tmp_path):
-    """좁은 창에서 I6 이 넘친다 — ① 반대 측 절이 남는다(번갈아 선다) ② 칸보다 긴 절 하나는 그 줄만 빠지고 뒤의 절은 남는다
-    (종전은 거기서 멈춰 틀 줄과 '…(n줄 생략)' 만 남았다) ③ 빠진 줄 수는 절단 원장(meta.clipped.I6)에 그대로 선다."""
+def test_an_overflowing_i6_keeps_the_opposers_and_cuts_a_long_section_to_its_quote(store, monkeypatch, tmp_path):
+    """좁은 창에서 I6 이 넘친다 — ① 반대 측 절이 남는다(번갈아 선다) ② 칸보다 긴 절은 통째로 빠지지 않고 인용 둘레만 실린다
+    (HWAXPortal docs/risk-200k E1 — 종전은 그 절이 빠져 그 카드의 원문이 패널에 하나도 없었다) ③ 빠진 줄 수는 절단 원장
+    (meta.clipped.I6)과 인용된 절 셈(meta.cited_sections)에 그대로 선다."""
     from app import cardpack  # noqa: PLC0415
 
     key, (unit,) = _ledger(store)
@@ -978,16 +979,20 @@ def test_an_overflowing_i6_keeps_the_opposers_and_skips_only_the_long_section(st
 
     monkeypatch.setattr(brief, "_issue_side", fake_side)
     monkeypatch.setattr(cardpack, "load_for", load_with_a_long_first_section)
-    monkeypatch.setitem(brief.ISSUE_CAPS, "I6", 900)          # 좁은 창 흉내 — 보통 절 서너 줄만 든다
+    monkeypatch.setitem(brief.ISSUE_CAPS, "I6", 1_500)        # 좁은 창 흉내 — 보통 절 몇 줄만 든다
     built = brief.build_issue_brief(store, key, issue, seats=seats)
     i6 = next(e["result"] for e in built["evidence"] if e["key"] == "I6")
     tags = [tuple(t) for t in _tags(i6)]
-    assert (long_rid, "1") not in tags, "칸보다 긴 절은 빠진다"
+    section_max = max(400, brief.PROFILE_LEGACY.inner(1_500) // 3)
+    long_line = next(line for line in i6.split("\n") if f"[card:{long_rid}#1]" in line)
+    assert f"가운데 인용 둘레 {section_max:,}자" in long_line, "칸보다 긴 절은 인용 둘레만 실린다"
     assert (_rid("K04"), "1") in tags and (_rid("K06"), "1") in tags, f"반대 측 절이 남는다 — {tags}"
-    assert tags[:2] == [(_rid("K04"), "1"), (long_rid, "2")], "긴 줄 하나만 건너뛰고 차례대로 잇는다"
+    assert tags[:2] == [(long_rid, "1"), (_rid("K04"), "1")], "제기 · 반대 측이 번갈아 선다"
     clipped = built["meta"]["clipped"]["I6"]
     assert clipped["omitted"] >= 1 and clipped["kept"] + clipped["omitted"] == clipped["lines"]
     assert i6.rstrip().endswith(f"…({clipped['omitted']}줄 생략)")
+    cited = built["meta"]["cited_sections"]
+    assert (cited["sections"], cited["excerpt"], cited["omitted"]) == (7, 1, clipped["omitted"]), cited
 
 
 def test_clip_lines_n_skip_long_jumps_one_line_but_never_the_frame():
