@@ -1050,6 +1050,8 @@ def create_job(
     settings: Any | None = None,
     requester_sub: str | None = None,
     consent_source: str | None = None,
+    llm: str | None = None,
+    consent_external: Any = None,
 ) -> dict:
     """배치 잡 1건을 만든다(POST /api/targets/{key}/jobs). Tier C 는 consent 필수, 러너 자격이 없으면 422.
 
@@ -1058,21 +1060,33 @@ def create_job(
     `consent_source` 는 동의가 들어온 입구다 — 'web'(웹 화면) · 'mcp'(Claude, 게이트웨이 위임 단언) · 'api'(개인 heax PAT Bearer 로
     부른 REST) · 'close_level'(C3 자동 후속).
     동의가 없으면 params 에는 None 으로 남는다(RV-7).
+    `llm`·`consent_external` 은 판단 LLM(Claude 길 X-2 — 포털 docs/claude-delib-parity C4)이다. claude 는 검토 잡과 같은 문을 지난다 —
+    `consent_external` 이 JSON 참이어야 하고(422 consent_external_required), 반출에 동의한 사람(요청자)의 PAT 로만 돌며(대상 소유자 ·
+    서비스 계정으로 내려가지 않는다), 에이전트 서버가 외부 응답자 길을 열었어야 한다(409 external_llm_unavailable). 패널은 외부
+    응답자로 돌고(좌석 자유 조회는 글 왕복 — 엔진이 실행한다), 워크플로가 없으면 잡이 보류 external_worker 로 멈춘다.
     """
+    from app import review_runner  # noqa: PLC0415 — review_runner 는 이 모듈을 import 한다.
+
     cfg = config.settings if settings is None else settings
     if tier not in planner.TIERS:
         raise AppError("E100", f"모르는 tier — {tier!r}. 허용 {list(planner.TIERS)}.", 422)
+    claude = review_runner.check_llm_choice(llm, consent_external)
     panel_job_gate(store, target_key, tier)
     if tier == "C" and not consent:
         raise AppError("E100", "Tier C 는 consent:true 명시 승인이 필요합니다.", 422)
-    credential, credential_note = resolve_credential_with_note(store, cfg, owner_sub, requester_sub)
+    now = now_epoch()
+    # claude 잡 — 동의 기록(누가 · 언제 · 어느 입구)을 params 에 싣고 자격은 그 사람의 PAT 하나다(resolve_job_credential — 러너가 잡을
+    # 집을 때도 같은 함수로 다시 본다).
+    llm_fields = llm_params(claude, {"by": requester_sub or owner_sub, "at": now, "source": consent_source})
+    credential, credential_note = resolve_job_credential(store, cfg, owner_sub, requester_sub, llm_fields)
     if credential is None:
         raise AppError("pat_unavailable", credential_note or pat_unavailable_guidance(store, requester_sub or owner_sub), 422)
+    if claude:
+        review_runner.require_external_llm(store, cfg)          # /health — 트랜잭션 밖에서 묻는다(네트워크)
 
     plan = planner.tier_plan(store, target_key, settings=cfg)
     row = next(t for t in plan["tiers"] if t["tier"] == tier)
     job_id = new_uuid()
-    now = now_epoch()
     params = {
         "tier": tier,
         "modifiers": list(planner.resolve_modifiers(modifiers)),
@@ -1084,6 +1098,7 @@ def create_job(
         "consent_source": consent_source if consent else None,
         "credential": credential["kind"],
         "requester": requester_sub,
+        **llm_fields,
     }
     with store.tx():
         # 방식 바꾸기(routes.post_target_flow)와 겹치지 않게 같은 트랜잭션 안에서 문을 다시 본다 — 확인과 쓰기 사이에 대상이
@@ -1101,6 +1116,7 @@ def create_job(
         "llm_calls_estimate": {"low": row["llm_calls_low"], "high": row["llm_calls_high"]},
         "credential": credential["kind"],
         "credential_email": credential.get("email"),
+        **llm_fields,
     }
     # 등록한 PAT 가 있는데 수명 때문에 다른 자격으로 돈다 — 만든 사람에게 그 자리에서 알린다.
     if credential_note:

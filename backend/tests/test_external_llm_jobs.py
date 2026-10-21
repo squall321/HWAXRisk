@@ -176,8 +176,7 @@ def test_the_rest_body_takes_llm_and_a_strict_consent(store, monkeypatch):
     key = rig.target(store)
     rig.pat(store)
     _probe(monkeypatch, _external_fake())
-    with pytest.raises(ValidationError):
-        routes.JobBody(mode="panels", tier="A", llm="claude")         # 패널 잡은 이 박스의 LLM 으로만 돈다
+    assert routes.JobBody(mode="panels", tier="A", llm="claude").llm == "claude"   # 패널 잡도 받는다(동의 칸 검사는 만들 때)
     with pytest.raises(ValidationError):
         routes.JobBody(mode="reviews", llm="external")                # 엔진의 이름은 앱의 선택이 아니다
     body = routes.JobBody(mode="reviews", llm="claude", consent_external="true", scope=_one_cell(store, key))

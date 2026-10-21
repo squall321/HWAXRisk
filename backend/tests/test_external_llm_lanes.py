@@ -533,21 +533,41 @@ def test_a_claude_panel_that_ran_on_the_box_records_the_model_that_ran(store, mo
     assert metrics.panel_models(store)[out["panel_id"]] == "issue-fake-model"
 
 
-def test_panels_mode_refuses_claude_even_while_a_panel_job_is_live(store):
-    """risk_start_job(mode='panels', llm='claude')는 살아 있는 패널 잡이 있어도 그 잡을 돌려주며 선택을 말없이 버리지 않는다 — 검토 잡처럼
-    본문을 먼저 본다(422). llm · 동의 칸이 없는 요청은 종전 그대로 살아 있는 잡을 돌려준다."""
+def test_panels_mode_returns_the_live_job_and_says_the_llm_differs_without_changing_it(store):
+    """risk_start_job(mode='panels', llm='claude')는 같은 Tier 의 살아 있는 패널 잡이 있으면 그 잡을 돌려주고, 판단 LLM 이 그 잡과 다르면
+    differs 에 'llm' 을 싣는다(바꾸지 않는다 — 검토 잡과 같다, 포털 docs/claude-delib-parity C4). 본문은 살아 있는 잡을 돌려주기 전에
+    본다(모르는 llm 은 422). llm · 동의 칸이 없는 요청은 종전 그대로 살아 있는 잡을 돌려준다."""
     rig.pat(store)
     target = factories.make_diff_target(store, 3)
     ident = X._delegate()
     first = entry.start_job(ident, target_key=target.target_key, tier="A")
-    assert first["created"] is True
-    for extra in ({"llm": "claude"}, {"llm": "claude", "consent_external": True}, {"consent_external": True}):
-        with pytest.raises(AppError) as refused:
-            entry.start_job(ident, target_key=target.target_key, tier="A", **extra)
-        assert (refused.value.code, refused.value.http_status) == ("E100", 422), extra
-    for extra in ({}, {"llm": "glm"}):
+    assert first["created"] is True and "llm" not in first
+    for extra in ({"llm": "claude"}, {"llm": "claude", "consent_external": True}):
         again = entry.start_job(ident, target_key=target.target_key, tier="A", **extra)
-        assert (again["job_id"], again["created"]) == (first["job_id"], False), extra
+        assert (again["job_id"], again["created"], again["differs"]) == (first["job_id"], False, ["llm"]), extra
+        assert "llm" not in again and "params_json" not in again, "살아 있는 GLM 잡의 판단 LLM 칸은 없다(glm)"
+    with pytest.raises(AppError) as refused:
+        entry.start_job(ident, target_key=target.target_key, tier="A", llm="external")
+    assert (refused.value.code, refused.value.http_status) == ("E100", 422)
+    for extra in ({}, {"llm": "glm"}, {"consent_external": True}):
+        again = entry.start_job(ident, target_key=target.target_key, tier="A", **extra)
+        assert (again["job_id"], again["created"]) == (first["job_id"], False) and "differs" not in again, extra
+
+
+def test_a_live_claude_panel_job_is_returned_with_its_judge_llm_fields(store, monkeypatch):
+    """살아 있는 Claude 패널 잡을 돌려줄 때 판단 LLM 칸(llm · consent_external)을 싣는다 — llm 없는 요청에는 differs 가 없고, glm 을 고르면
+    differs 에 'llm' 이 선다(검토 잡과 같다)."""
+    rig.pat(store)
+    X._probe(monkeypatch, X._external_fake())
+    target = factories.make_diff_target(store, 3)
+    ident = X._delegate()
+    first = entry.start_job(ident, target_key=target.target_key, tier="A", llm="claude", consent_external=True)
+    assert first["created"] is True and first["llm"] == "claude" and first["consent_external"]["source"] == "mcp"
+    again = entry.start_job(ident, target_key=target.target_key, tier="A")
+    assert (again["job_id"], again["created"], again["llm"]) == (first["job_id"], False, "claude") and "differs" not in again
+    assert again["consent_external"] == first["consent_external"]
+    other = entry.start_job(ident, target_key=target.target_key, tier="A", llm="glm")
+    assert (other["job_id"], other["differs"]) == (first["job_id"], ["llm"])
 
 
 def test_a_claude_job_without_a_consenter_never_runs_on_another_pat(store, monkeypatch, tmp_path):

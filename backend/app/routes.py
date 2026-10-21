@@ -2940,11 +2940,11 @@ class JobBody(BaseModel):
 
     reviews 의 본문은 {mode, scope?, user_memo?, consent?, llm?, consent_external?} 다. 패널 칸(tier·modifiers·concurrency)을 주면
     422 다 — 범위는 scope.tiers 로 주고, 동시 수는 박스 손잡이(HWAXRISK_REVIEW_CONCURRENCY)다. 패널 잡에 scope 를 주어도 422 다(조용히
-    버리지 않는다). `llm`(Claude 길 X-2)은 판단 LLM — glm(없음과 같다) · claude 이고 claude 는 검토 잡에만 받는다. claude 는
-    `consent_external` 이 JSON true 여야 한다(review_runner.check_llm_choice — 아니면 422 consent_external_required) — 이 잡의 지식카드 ·
-    설계 변경 원문과, 사슬이 이어 도는 쟁점 패널 · 종합 요약의 입력(이 대상 전체의 등록부 행 · 쟁점 · 요약)이 Claude(외부)로 나간다
-    (review_runner.EGRESS_WARNING). 그래서 그 칸은 bool 로 받지 않는다(글자 'true' · 1 을 참으로 바꾸지 않게). 패널 잡에는 둘 다 받지
-    않는다(llm=claude · consent_external 은 422 — 조용히 버리지 않는다).
+    버리지 않는다). `llm`(Claude 길 X-2)은 판단 LLM — glm(없음과 같다) · claude 이고 검토 잡 · 패널 잡 둘 다 받는다(패널 잡은 포털
+    docs/claude-delib-parity C4 — 좌석 자유 조회는 글 왕복으로 돈다). claude 는 `consent_external` 이 JSON true 여야 한다
+    (review_runner.check_llm_choice — 아니면 422 consent_external_required) — 이 잡의 지식카드 · 설계 변경 원문과, 사슬이 이어 도는 쟁점
+    패널 · 종합 요약의 입력(이 대상 전체의 등록부 행 · 쟁점 · 요약)이 Claude(외부)로 나간다(review_runner.EGRESS_WARNING — 패널 잡은 그
+    패널의 브리프 · 좌석 조회 결과). 그래서 그 칸은 bool 로 받지 않는다(글자 'true' · 1 을 참으로 바꾸지 않게).
     """
 
     tier: str | None = None
@@ -2964,11 +2964,6 @@ class JobBody(BaseModel):
                 raise ValueError("tier 가 필요하다 — 패널 잡(mode='panels')은 Tier(A·B·C)를 받는다")
             if self.scope is not None:
                 raise ValueError("scope 는 카드 대조 검토 잡(mode='reviews')의 칸이다 — 패널 잡은 tier 로 범위를 정한다")
-            if self.llm == "claude":
-                raise ValueError("llm='claude' 는 카드 대조 검토 잡(mode='reviews')의 칸이다 — 패널 잡은 이 박스의 LLM 으로 돈다")
-            if self.consent_external is not None:
-                raise ValueError("consent_external 은 Claude 로 고른 카드 대조 검토 잡(mode='reviews')의 칸이다 — 패널 잡은 이 박스의"
-                                 " LLM 으로 돌아 반출이 없다")
             return self
         panel_only = sorted(k for k in ("tier", "modifiers", "concurrency")
                             if k in self.model_fields_set and (k != "modifiers" or self.modifiers))
@@ -3023,10 +3018,20 @@ def create_job(target_key: str, body: JobBody,
                       **runner.llm_params(runner.job_llm(params), params.get("consent_external"))},
                channel=AUDIT_CHANNELS.get(ident.source, "rest"))
         return out
-    return runner.create_job(get_store(), target_key, body.tier, owner_sub=row["owner_sub"],
-                             modifiers=body.modifiers, user_memo=body.user_memo,
-                             concurrency=body.concurrency, consent=body.consent, requester_sub=email,
-                             consent_source=consent_source)
+    store = get_store()
+    out = runner.create_job(store, target_key, body.tier, owner_sub=row["owner_sub"],
+                            modifiers=body.modifiers, user_memo=body.user_memo,
+                            concurrency=body.concurrency, consent=body.consent, requester_sub=email,
+                            consent_source=consent_source, llm=body.llm, consent_external=body.consent_external)
+    if out.get("llm"):
+        # 반출 동의(Claude 길 X-2) — Claude 로 고른 패널 잡만 감사 한 행(누가 · 언제 · 어느 입구로 — 검토 잡과 같은 칸). GLM 패널 잡은 종전대로
+        # 감사 행을 남기지 않는다.
+        _audit(store, email, scope="job", subject_id=out["job_id"], project_id=row["project_id"], action="job.create",
+               after={"mode": "panels", "target_key": target_key, "tier": body.tier, "consent": bool(body.consent),
+                      "consent_source": consent_source if body.consent else None,
+                      **runner.llm_params(out["llm"], out["consent_external"])},
+               channel=AUDIT_CHANNELS.get(ident.source, "rest"))
+    return out
 
 
 JOB_ACTIONS = {"pause": runner.pause_job, "resume": runner.resume_job, "cancel": runner.cancel_job}
@@ -3223,13 +3228,16 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
              if target["flow"] == "cells" else registry_module.close_level(store, target_key, persist=False))
     # `job` 은 패널 잡이다(칸의 뜻 불변) — 카드 대조 검토 잡은 진행판의 제 칸(review)이 맡는다(재설계 M2 S6·S12).
     job = store.query_one(
-        "SELECT id, tier, state, pause_reason, panels_done, panels_total, error, progress_json FROM rr_jobs"
+        "SELECT id, tier, state, pause_reason, panels_done, panels_total, error, progress_json, params_json FROM rr_jobs"
         f" WHERE target_key = ? AND {runner.PANEL_JOBS_SQL} ORDER BY created_at DESC LIMIT 1", (target_key,))
     if job is not None:
         job = dict(job)
         # 도는 패널의 마지막 신호(러너가 1분 간격으로 적는다) — 벽시계가 몇 시간이라, 이것이 없으면 진행판에서
         # 도는 패널과 멈춘 패널이 똑같이 'running' 이다. {panel_id, started_at, last_frame_at, last_event_at, last_step}.
         job["signal"] = _live_signal(store, job["state"], _loads(job.pop("progress_json"), {}))
+        # 판단 LLM(Claude 길 X-2 · 포털 docs/claude-delib-parity C4) — Claude 패널 잡이면 llm · consent_external(· llm_mismatch) 칸을
+        # 더한다(보류 external_worker 의 까닭이 보이게). GLM 잡의 칸은 종전 그대로다.
+        job.update(job_llm_view(_loads(job.pop("params_json"), {})))
     return {
         "target_key": target_key,
         "job": job,

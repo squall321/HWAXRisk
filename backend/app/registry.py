@@ -1520,9 +1520,13 @@ def _minutes_lines(store: RiskStore, target_key: str, panels: list[dict], covera
             )
             if ADVERSARY_KEY in [str(x) for x in _as_list(_loads(f["finding_json"], {}).get("contested_by"))]
         )
+        # 판단 LLM(Claude 길 X-2) — 외부 응답자로 돈 패널만 llm 을 붙인다(GLM 패널의 줄은 종전 그대로). 붙이지 않으면 Claude 가 판정한
+        # 패널이 이 박스의 LLM 이 판정한 패널과 같은 줄로 남는다(Tier 패널 잡도 Claude 를 받는다 — 포털 docs/claude-delib-parity C4).
+        judged = (_loads(p["quality_json"], {}) or {}).get("llm")
         out.append(
             f"panel_no={p['panel_no']} tier={p['tier']} status={p['status']} engine={p['engine']}/{p['tool_mode']} "
-            f"conv_id={p['conv_id']} report_id={p['report_id']} seats=[{seat_keys}] "
+            + (f"llm={judged} " if judged else "")
+            + f"conv_id={p['conv_id']} report_id={p['report_id']} seats=[{seat_keys}] "
             f"tool_calls_ok={tool_ok} 반대석기각={rejected} verdict={spec.get('verdict')}"
         )
     if len(out) == 1:

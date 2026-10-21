@@ -334,7 +334,7 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = N
 
     라우트는 부를 때마다 잡 행을 하나 더 만든다(중복 검사 없음). 역할 검사는 라우트와 같은 함수로 먼저 한다 — 살아 있는
     잡을 돌려주는 갈래가 남의 대상의 잡을 흘리지 않게. `mode='reviews'` 는 카드 대조 검토 잡이다(`_start_review_job`).
-    `llm`·`consent_external` 은 REST 본문과 같다(Claude 길 X-2 — claude 는 검토 잡에만, 동의는 사람이 한 뒤에만 true).
+    `llm`·`consent_external` 은 REST 본문과 같다(Claude 길 X-2 — claude 는 검토 잡 · 패널 잡, 동의는 사람이 한 뒤에만 true).
     """
     email = require_delegate(ident)
     store = routes.get_store()
@@ -349,19 +349,25 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = N
                                  user_memo=user_memo, concurrency=concurrency, scope=scope, llm=llm,
                                  consent_external=consent_external)
     # 판단 LLM 칸(llm · consent_external)을 준 패널 잡 요청은 살아 있는 잡을 돌려주기 전에 본문을 검증한다(XR-14 — 검토 잡과 같은 차례).
-    # 패널 잡은 Claude 를 받지 않으므로 llm=claude · consent_external 은 422 다 — 살아 있는 잡을 돌려주며 그 선택을 말없이 버리지 않는다.
+    # 살아 있는 잡을 돌려줄 때 고른 판단 LLM 이 그 잡과 다르면 differs 에 'llm' 을 싣는다(바꾸지 않는다 — 검토 잡과 같다). 동의 칸 검사는
+    # 잡을 만들 때다(살아 있는 잡을 돌려주는 갈래는 아무것도 보내지 않는다).
     llm_fields = {**({"llm": llm} if llm is not None else {}),
                   **({"consent_external": consent_external} if consent_external is not None else {})}
     body = (_body(routes.JobBody, tier=tier, concurrency=concurrency, modifiers=modifiers, user_memo=user_memo,
                   consent=consent, mode=mode, **({"scope": scope} if scope is not None else {}), **llm_fields)
             if llm_fields else None)
     live = store.query_one(
-        "SELECT id, tier, state, pause_reason, panels_done, panels_total, error, credential_email FROM rr_jobs"
+        "SELECT id, tier, state, pause_reason, panels_done, panels_total, error, credential_email, params_json FROM rr_jobs"
         f" WHERE target_key = ? AND tier = ? AND {runner.PANEL_JOBS_SQL}"
         f" AND state IN ({','.join('?' for _ in LIVE_JOB_STATES)})"
         " ORDER BY created_at DESC, rowid DESC LIMIT 1", (target_key, tier, *LIVE_JOB_STATES))
     if live is not None:
-        return {"job_id": live["id"], "created": False, **{k: live[k] for k in live.keys() if k != "id"}, "web": web}
+        params = routes._loads(live["params_json"], {})
+        out = {"job_id": live["id"], "created": False,
+               **{k: live[k] for k in live.keys() if k not in ("id", "params_json")}, **routes.job_llm_view(params), "web": web}
+        if llm is not None and runner.job_llm({"llm": llm}) != runner.job_llm(params):
+            out["differs"] = ["llm"]              # 고른 판단 LLM 이 살아 있는 잡과 다르다 — 바꾸지 않는다(그 잡을 취소한 뒤 새로)
+        return out
     if body is None:
         body = _body(routes.JobBody, tier=tier, concurrency=concurrency, modifiers=modifiers, user_memo=user_memo,
                      consent=consent, mode=mode, **({"scope": scope} if scope is not None else {}))
