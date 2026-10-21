@@ -212,12 +212,13 @@ def _frames(*parts: str) -> list[str]:
 
 
 def test_an_external_deliberation_result_carries_its_marks():
-    """외부 응답자 심의의 result 프레임은 llm · tool_mode 를 단다 — 러너가 그것으로 무엇이 돌았나를 본다(Claude 길 X-2)."""
+    """외부 응답자 심의의 result 프레임은 llm · tool_mode 를 단다 — 러너가 그것으로 무엇이 돌았나를 본다(Claude 길 X-2). tool_mode 는
+    엔진이 실제로 돈 좌석 자유 조회의 길이다 — 예제는 글 왕복(tools, 포털 docs/claude-delib-parity C1)이다."""
     result = DELIB["result"]
     lines = _frames(_sse("status", DELIB["start_status"]), _sse("delib", DELIB["notice_card"]), _sse("result", result),
                     _sse("done", {}))
     out = engine_client.collect_stream(engine_client.parse_sse(lines))
-    assert (out["llm"], out["tool_mode"]) == ("external", "evidence_only")
+    assert (out["llm"], out["tool_mode"]) == ("external", "tools")
     assert out["decision_text"] == result["content"]
     plain = engine_client.collect_stream(engine_client.parse_sse(_frames(_sse("result", {"type": "text", "content": "x"}),
                                                                          _sse("done", {}))))

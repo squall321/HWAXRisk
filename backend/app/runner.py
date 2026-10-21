@@ -1732,7 +1732,8 @@ def run_panel(
         return {"panel_id": None, "status": "missing_interface", "missing": missing}
 
     issue_job = job.get("mode") == "issues"
-    # 판단 LLM(Claude 길 X-2) — 사슬이 물려준 claude 쟁점 잡이면 패널이 외부 응답자로 돈다(좌석 도구 없는 evidence_only — 엔진이 강제)
+    # 판단 LLM(Claude 길 X-2) — claude 잡(사슬이 물려준 쟁점 잡 · Claude 로 고른 패널 잡)이면 패널이 외부 응답자로 돈다(좌석 자유 조회는
+    # 글 왕복 — 엔진이 실행한다. 엔진이 실제로 돈 길을 result 프레임의 tool_mode 로 알린다)
     llm = job_llm(params)
     if llm is not None and external_consenter(params) is None:
         # 동의 기록에 사람이 없다 — 요청자 · 대상 소유자의 PAT 로 대신 돌지 않는다(XR-15). 편성하지 않고 설정 보류로 멈춘다.
@@ -2484,7 +2485,8 @@ def _complete_panel(
             quality["flags"].append("conversation_absent")
         if claude_job:
             # claude 잡의 패널(Claude 길 X-2) — 무엇이 돌았나는 엔진 result 프레임의 llm 이 정본이다. external 이면 판단 LLM 을 적고
-            # 좌석 도구가 없던 등급(tool_mode evidence_only)을 패널에 남긴다. 아니면(중계가 llm 을 버려 이 박스의 LLM 으로 돌았다)
+            # 엔진이 알린 좌석 자유 조회의 길(tool_mode — tools: 글 왕복 · evidence_only: 좌석 도구 없음)을 패널에 남긴다.
+            # 아니면(중계가 llm 을 버려 이 박스의 LLM 으로 돌았다)
             # Claude 로 적지 않고 llm_mismatch 를 단다(잡에도 셈을 올린다).
             if result.get("llm") == ENGINE_EXTERNAL:
                 quality["llm"] = ENGINE_EXTERNAL

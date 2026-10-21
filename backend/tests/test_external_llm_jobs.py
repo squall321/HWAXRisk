@@ -424,8 +424,8 @@ def _claude_issues_job(store, key: str, *, by: str = EDITOR) -> str:
 
 def test_a_claude_issue_panel_goes_external_with_the_consenters_pat_and_the_external_budget(store, monkeypatch, tmp_path):
     """delib_opts 에 llm external + consent_external true, 엔진에 넘기는 자격은 동의한 사람(대상 소유자가 아니다), 브리프 크기는 /health
-    의 external_llm.evid_budget 이다. 엔진 결과가 외부 응답자 답이면 패널에 판단 LLM 과 evidence_only 등급이 남고 보고서 줄이 그것을
-    말한다."""
+    의 external_llm.evid_budget 이다. 엔진 결과가 외부 응답자 답이면 패널에 판단 LLM 과 엔진이 알린 좌석 조회 길(글 왕복 — tools)이
+    남고 보고서 줄이 그것을 말한다."""
     key = _issue_ledger(store, monkeypatch, tmp_path)
     rig.pat(store, EDITOR)
     job_id = _claude_issues_job(store, key)
@@ -443,9 +443,23 @@ def test_a_claude_issue_panel_goes_external_with_the_consenters_pat_and_the_exte
     assert model["brief_profile"]["budget"] != 500_000
     quality = json.loads(panel["quality_json"])
     assert quality["llm"] == "external" and "llm_mismatch" not in quality["flags"]
-    assert panel["tool_mode"] == "evidence_only"
-    assert JUDGE.split(": ", 1)[1] in synth._panel_judge(panel["quality_json"])
-    assert any("쟁점 패널 1건 판단 LLM" in line for line in synth._judge_lines(store, key))
+    assert panel["tool_mode"] == "tools"
+    assert (JUDGE.split(": ", 1)[1] + "(좌석 조회는 글 왕복 — 엔진이 실행)") in synth._panel_judge(panel["quality_json"],
+                                                                                         panel["tool_mode"])
+    assert any("쟁점 패널 1건 판단 LLM" in line and "글 왕복" in line for line in synth._judge_lines(store, key))
+    # 종합 보고서의 쟁점 패널 줄(minutes)도 그 패널의 좌석 조회 길을 말한다
+    from app import closure  # noqa: PLC0415
+
+    counts = closure.cell_counts(store, key)
+    built = synth.build_report(store, key, closure_result=closure.close_level_cells(store, key, persist=False, counts=counts),
+                               counts=counts, version_no=1)
+    text = json.dumps(built["pages"], ensure_ascii=False)
+    import re  # noqa: PLC0415
+
+    hit = re.search(re.escape(f"- {out['panel_id']} · 쟁점 ") + r"[^\n\\\"]*", text)
+    assert hit, text[text.find("쟁점 패널"):text.find("쟁점 패널") + 600]
+    line = hit.group(0)
+    assert "판단 LLM: Claude(외부, 사용자 신고 모델)(좌석 조회는 글 왕복 — 엔진이 실행)" in line, line
 
 
 def test_the_engine_identity_of_a_claude_panel_is_the_consent_record_even_if_the_requester_differs(store, monkeypatch,

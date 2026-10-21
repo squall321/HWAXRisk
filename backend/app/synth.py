@@ -750,11 +750,18 @@ def _issue_line(issue: Mapping[str, Any]) -> str:
     return head + f" → {issue['state']}" + (f"({issue['state_reason']})" if issue.get("state_reason") else "")
 
 
-def _panel_judge(quality_json: Any) -> str:
-    """쟁점 패널 한 줄의 판단 LLM 꼬리(Claude 길 X-2) — 외부 응답자로 돌았으면 그 표기, claude 잡인데 아니었으면 어긋남. GLM 패널은 빈 글."""
+def _seat_lookup(tool_mode: Any) -> str:
+    """외부 응답자 패널의 좌석 조회 길(패널 tool_mode — 엔진이 result 프레임으로 알린 것) — tools 면 글 왕복(좌석이 적은 호출을 엔진이
+    실행했다), 그 밖(evidence_only · 글 왕복 전에 돈 패널)은 좌석 도구 없음."""
+    return "좌석 조회는 글 왕복 — 엔진이 실행" if tool_mode == "tools" else "좌석 도구 없는 evidence_only"
+
+
+def _panel_judge(quality_json: Any, tool_mode: Any = None) -> str:
+    """쟁점 패널 한 줄의 판단 LLM 꼬리(Claude 길 X-2) — 외부 응답자로 돌았으면 그 표기(좌석 조회의 길과 함께), claude 잡인데 아니었으면
+    어긋남. GLM 패널은 빈 글."""
     quality = _loads(quality_json, {}) or {}
     if quality.get("llm") == review_quality.EXTERNAL_MODEL:
-        return f" · 판단 LLM: {review_quality.JUDGE_CLAUDE}(좌석 도구 없는 evidence_only)"
+        return f" · 판단 LLM: {review_quality.JUDGE_CLAUDE}({_seat_lookup(tool_mode)})"
     if "llm_mismatch" in (quality.get("flags") or ()):
         return " · **판단 LLM 어긋남(llm_mismatch) — Claude 로 고른 잡인데 이 박스의 LLM 으로 돌았다**"
     return ""
@@ -764,13 +771,18 @@ def _judge_lines(store: RiskStore, target_key: str) -> list[str]:
     """보고서 머리의 판단 LLM 줄(Claude 길 X-2) — 카드 대조 · 요약 호출(review_quality.judge_llm)과 쟁점 패널에서 외부 응답자가 답한 것이
     있거나 어긋남이 있을 때만. 없으면 [](GLM 대상 — 보고서 글은 종전 그대로)."""
     judge = review_quality.judge_llm(store, target_key)
-    panels = [(_loads(r["quality_json"], {}) or {}) for r in store.query(
-        "SELECT quality_json FROM rr_panels WHERE target_key = ? AND kind = 'issue' AND quality_json IS NOT NULL", (target_key,))]
-    external = sum(1 for q in panels if q.get("llm") == review_quality.EXTERNAL_MODEL)
-    mismatch = sum(1 for q in panels if "llm_mismatch" in (q.get("flags") or ()))
+    panels = [((_loads(r["quality_json"], {}) or {}), r["tool_mode"]) for r in store.query(
+        "SELECT quality_json, tool_mode FROM rr_panels WHERE target_key = ? AND kind = 'issue' AND quality_json IS NOT NULL",
+        (target_key,))]
+    external: dict[str, int] = {}
+    for q, tool_mode in panels:
+        if q.get("llm") == review_quality.EXTERNAL_MODEL:
+            way = _seat_lookup(tool_mode)
+            external[way] = external.get(way, 0) + 1
+    mismatch = sum(1 for q, _t in panels if "llm_mismatch" in (q.get("flags") or ()))
     lines = [f"- {review_quality.judge_text(judge)}"] if judge else []
-    if external:
-        lines.append(f"- 쟁점 패널 {external}건 판단 LLM: {review_quality.JUDGE_CLAUDE}(좌석 도구 없는 evidence_only)")
+    for way, n in sorted(external.items()):
+        lines.append(f"- 쟁점 패널 {n}건 판단 LLM: {review_quality.JUDGE_CLAUDE}({way})")
     if mismatch:
         lines.append(f"**쟁점 패널 {mismatch}건 판단 LLM 어긋남(llm_mismatch) — Claude 로 고른 잡인데 이 박스의 LLM 으로 돌았다**")
     return lines
@@ -854,9 +866,10 @@ def build_report(store: RiskStore, target_key: str, *, closure_result: Mapping[s
         recommendation += [f"- {line}" for line in asks["text"].split("\n")]
 
     minutes = ["## 쟁점 패널"]
-    minutes += [f"- {r['id']} · 쟁점 {r['issue_id']} · {r['status']}{_panel_judge(r['quality_json'])}" for r in store.query(
-        "SELECT id, issue_id, status, quality_json FROM rr_panels WHERE target_key = ? AND kind = 'issue' ORDER BY panel_no",
-        (target_key,))]
+    minutes += [f"- {r['id']} · 쟁점 {r['issue_id']} · {r['status']}{_panel_judge(r['quality_json'], r['tool_mode'])}"
+                for r in store.query(
+                    "SELECT id, issue_id, status, quality_json, tool_mode FROM rr_panels WHERE target_key = ? AND kind = 'issue'"
+                    " ORDER BY panel_no", (target_key,))]
     minutes.append("## 영역 × 셀 상태")
     by_domain: dict[str, dict[str, int]] = {}
     for row in counts["_rows"]:
