@@ -426,6 +426,22 @@ def test_a_non_standard_board_keeps_layers_but_leaves_materials_unmatched(hub):
     assert len(hub.called("list_parts")) == 6
 
 
+@pytest.mark.parametrize("change", ["ambiguous", "one_layer_short", "kind_swapped"])
+def test_materials_come_only_from_a_standard_stackup_that_lines_up_layer_by_layer(hub, change):
+    """재료는 맞춘 표준 적층에서만 온다 — 판정이 standard 가 아니거나(후보가 여럿인 ambiguous 도) 층 수 · 구분 차례가 하나라도
+    어긋나면 자리를 짐작하지 않고 비운다."""
+    stackup = hub.boards[JOB_STD]["stackup"]
+    if change == "ambiguous":
+        stackup["verdict"] = "ambiguous"
+    elif change == "one_layer_short":
+        stackup["layers"] = stackup["layers"][:-1]
+    else:
+        stackup["layers"][1], stackup["layers"][2] = stackup["layers"][2], stackup["layers"][1]
+    result = _ecad(_capture(hub, JOB_STD))
+    assert {n["attrs"]["material"] for n in result["nodes"] if n["kind"] == "layer"} == {None}
+    assert "stackup_material_unmatched" in result["degraded"]
+
+
 def test_an_ecad_board_freezes_beside_mcad_and_mcad_keeps_its_own_tools(hub, risk_store):
     """mcad 와 함께 캡처해도 각 호출은 제 백엔드로 간다 — 스냅샷이 서고(same-as intra mcad↔ecad 포함) ecad_absent 가 없다."""
     hub.others = {name: body for name, body in recon.MCP_TOOLS_FULL.items()}
