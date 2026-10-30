@@ -184,6 +184,9 @@ def add_source(ident: identity.Identity, *, project_id: str, kind: str, ref: dic
     routes._project_row(project_id, owner)
     if kind not in routes.SOURCE_KINDS:
         raise AppError("E100", f"kind 는 {list(routes.SOURCE_KINDS)} 중 하나여야 합니다 — {kind!r}.", 422)
+    if kind == "ecad":
+        # 같은 kind 검사(source_kind_taken)보다 먼저다 — 고칠 곳은 다른 소스 행이 아니라 보드 찾기 · 붙이기 길이다.
+        raise routes.ecad_board_route_error(project_id)
     ref = dict(ref or {})
     missing = [key for key in REF_REQUIRED.get(kind, ()) if not ref.get(key)]
     if missing:
@@ -210,6 +213,27 @@ def add_source(ident: identity.Identity, *, project_id: str, kind: str, ref: dic
                                               bridge_declared=bridge_declared), ident=ident)
     row = next(s for s in routes._project_sources(project_id) if s["kind"] == kind and matches(s))
     return {**out, "source": row, "created": existed is None}
+
+
+def find_ecad_boards(ident: identity.Identity, *, query: str) -> dict:
+    """`GET /api/ecad/boards` — ODB 허브 find_job 후보(최대 10, truncated). 고르는 것은 사람이다.
+
+    읽기지만 쓰기와 같은 문을 지난다 — 찾기는 그 사람의 등록된 PAT 로 게이트웨이를 부르고, 찾는 까닭이 붙이기(쓰기)다.
+    """
+    owner = require_delegate(ident)
+    out = routes.ecad_board_candidates(query, owner_sub=owner)
+    return {**out, "note": "후보를 사용자에게 보이고 사용자가 고른 job_id 로 risk_set_ecad_board 를 부른다 — 같은 모델의 다른 판이"
+                           " 함께 나올 수 있어 모델 이름만으로 고르지 않는다."}
+
+
+def set_ecad_board(ident: identity.Identity, *, project_id: str, odb_job_id: str | None) -> dict:
+    """`PUT · DELETE /api/projects/{id}/ecad-board` — job_id 를 주면 find_job 으로 확인한 뒤 붙이고(바꾸고), null 이면 뗀다."""
+    require_delegate(ident)
+    if odb_job_id is None:
+        out = routes.delete_ecad_board(project_id, ident=ident)
+    else:
+        out = routes.put_ecad_board(project_id, _body(routes.EcadBoardBody, odb_job_id=odb_job_id), ident=ident)
+    return {**out, "web": web_paths(project_id=project_id)}
 
 
 def running_snapshot_jobs(project_id: str) -> list[dict]:

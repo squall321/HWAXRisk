@@ -1,4 +1,4 @@
-# hwax-risk MCP 서버 — 도구 29종(발견 7 + 원장 7 + Claude 입구 12 + 검토 단위 1 + 카드 대조 검토 2)은 REST 와 같은 함수를 부르는 접점이다(§6.11, LLM 을 부르지 않는다)
+# hwax-risk MCP 서버 — 도구 33종(발견 7 + 원장 7 + Claude 입구 12 + 검토 단위 1 + 카드 대조 검토 2 + 쟁점·종합 2 + ECAD 보드 2)은 REST 와 같은 함수를 부르는 접점이다(§6.11, LLM 을 부르지 않는다)
 from __future__ import annotations
 
 import logging
@@ -13,6 +13,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from app import brief, common, entry, expert_report, issues, planner, registry, review_cells, review_runner, routes, runner, synth
 from app.adapters import dyna as dyna_adapter
+from app.adapters import ecad as ecad_adapter
 from app.errors import AppError
 
 log = logging.getLogger("hwax_risk.mcp")
@@ -223,8 +224,9 @@ _A_PREDECESSOR = ("앞 리비전 과제의 id(선택, risk_list_projects 의 id)
                   "캡처가 없으면 길잡이가 그 과제(내 것)의 최신 스냅샷을 비교의 앞으로 쓴다.")
 _A_PRODUCT_CODE = "제품 코드(선택) — 브리프의 현장(VOC) 근거를 이 코드로 찾는다. 비우면 앞 과제(내 것)의 코드를 [전작] 으로 쓴다."
 _A_ADH_SCOPE = "AIDataHub 범위 {team, group}(선택) — 사용자가 확인한 값을 과제 행에 그대로 적고 자동으로 채우지 않는다."
-_A_SOURCE_KIND = (f"소스 종류 — {' · '.join(routes.SOURCE_KINDS)}(ecad 는 아직 어댑터 계약만 있다). 과제마다 종류당 하나이고 다른 "
-                  "소스면 409 source_kind_taken 이다(소스는 지울 수 없다).")
+_A_SOURCE_KIND = (f"소스 종류 — {' · '.join(k for k in routes.SOURCE_KINDS if k != 'ecad')}(ecad 보드는 이 도구가 아니라 "
+                  "risk_find_ecad_boards 로 찾아 risk_set_ecad_board 로 붙인다 — 주면 422 ecad_board_route). 과제마다 종류당 하나이고 "
+                  "다른 소스면 409 source_kind_taken 이다(소스는 지울 수 없다).")
 _A_SOURCE_REF = ("소스 위치 객체 — " + " · ".join(f"{kind} {{{', '.join(keys)}}}" for kind, keys in entry.REF_REQUIRED.items())
                  + " 는 필수 키다(빠지면 422). mcad 는 detect_job_id(계면 검출 잡)를, dyna_result 는 report_ids[] 를 받는다.")
 _A_APP_KEY = "소스 앱의 허브 앱 키(선택) — 비우면 게이트웨이 실측(/meta/adapters), 못 읽으면 어댑터 기본값으로 웹과 같게 고른다."
@@ -309,6 +311,11 @@ _A_ISSUE_LIMIT = (f"한 번에 줄 행 수 — 1~{routes.ISSUE_LIST_MAX} 사이�
                   "(남은 것은 next_offset).")
 _A_ISSUE_OFFSET = "건너뛸 행 수(0부터, 쟁점 id 순) — 앞 쪽의 next_offset 을 준다. ledger_rev 가 앞 쪽과 다르면 0 부터 다시 받는다."
 _A_SYNTH_PART = f"보고서 부분 — {' · '.join(synth.PARTS)}(무엇이 드는지는 도구 설명). 그 밖은 422 다."
+# ECAD 보드(ODB 허브 — 포털 docs/design-risk-review/ecad-1031 ER-01)
+_A_ECAD_QUERY = (f"찾을 말(1~{routes.ECAD_QUERY_MAX}자) — 과제 · 모델 · 파일 이름이나 ODB 허브 job_id 다. 후보는 최대 "
+                 f"{ecad_adapter.SEARCH_MAX}개이고 더 있으면 truncated 가 참이다.")
+_A_ECAD_JOB_ID = ("붙일 보드의 ODB 허브 job_id(16자리 16진) — risk_find_ecad_boards 후보 가운데 사용자가 고른 것을 그대로 준다. null 이면 "
+                  "과제의 보드를 뗀다.")
 
 
 @mcp.tool()
@@ -893,3 +900,18 @@ def risk_get_report(target_key: Annotated[str, Field(description=_A_TARGET_KEY)]
         return routes.report_envelope(meta, routes.report_render(body, part=part, page_chars=chars), page, part=part)
 
     return _scoped("target", target_key, report, target_key)
+
+
+# ================================================================ ECAD 보드(ODB 허브 — 포털 docs/design-risk-review/ecad-1031 ER-01)
+# 과제의 ECAD 보드는 사람이 고른다 — 찾기는 find_job 후보를 보일 뿐이고, 붙이기는 그 job_id 가 find_job 에 있을 때만 적는다.
+@mcp.tool()
+async def risk_find_ecad_boards(query: Annotated[str, Field(description=_A_ECAD_QUERY)]) -> dict:
+    """ECAD 보드 찾기(읽기 전용) — ODB 허브 find_job(과제 · 모델 · 파일 이름이나 job_id)의 후보(job_id · project · model · board_type · revision · 이름 · 파일 · 올린 시각, 최대 10개 · truncated)를 준다, 같은 모델의 다른 판이 함께 나올 수 있으니 후보를 사용자에게 보이고 사용자가 고른 job_id 로 risk_set_ecad_board 를 부른다(모델 이름만으로 고르지 않는다), 게이트웨이 위임으로 확인된 신원으로만 찾는다."""
+    return await _entry(entry.find_ecad_boards, query=query)
+
+
+@mcp.tool()
+async def risk_set_ecad_board(project_id: Annotated[str, Field(description=_A_PROJECT_ID)],
+                              odb_job_id: Annotated[str | None, Field(description=_A_ECAD_JOB_ID)]) -> dict:
+    """과제에 ECAD 보드 붙이기 · 바꾸기 · 떼기 — 쓰기: risk_find_ecad_boards 의 후보를 사용자에게 보이고 사용자가 고른 job_id 와 과제를 확인한 뒤 부른다, 그 job_id 가 find_job 에 실제로 있을 때만 붙이고(없으면 ecad_board_not_found) odb_job_id=null 이면 뗀다, 카드는 과제마다 한 장이라 다른 보드를 주면 바꾼다(감사 한 줄), 이미 동결된 스냅샷은 그대로이고 다음 risk_capture_snapshot 부터 보드 · 적층 · 분류된 부품을 읽는다(부품 좌표 · 넷은 아직 없다 — 표지로 남는다)."""
+    return await _entry(entry.set_ecad_board, project_id=project_id, odb_job_id=odb_job_id)

@@ -1,5 +1,5 @@
-# ECAD(ODB 허브) 1단계 — 요청서 부록 A 꼴의 가짜 odb-hub(표준 · 비표준 적층 두 보드 · list_parts 100행 쪽 상한 · 이름 겹침 접두)로 발견 · 캡처 · 표지를 본다(실 허브 호출 0)
-"""포털 docs/design-risk-review/ecad-1031 의 ER-02 ~ ER-04 를 시험한다.
+# ECAD(ODB 허브) 1단계 — 요청서 부록 A 꼴의 가짜 odb-hub(표준 · 비표준 적층 두 보드 · list_parts 100행 쪽 상한 · 이름 겹침 접두)로 발견 · 캡처 · 표지 · 보드 찾기 · 붙이기 · 떼기를 본다(실 허브 호출 0)
+"""포털 docs/design-risk-review/ecad-1031 의 ER-01 ~ ER-05 를 시험한다.
 
 가짜의 응답 꼴은 cae00 10-31 실측(요청서 부록 A)과 허브 레퍼런스(포털 docs/procedures/fixtures/odb-hub/reference.md 4절)에서
 옮겼다. find_job 의 봉투 열쇠는 부록 A 에 없어 list_jobs 와 같은 `jobs` 로 둔다(어댑터는 알려진 꼴 넷을 읽는다).
@@ -7,6 +7,7 @@ dev 게이트웨이에는 odb-hub 가 없다 — 실물 확인은 cae00 다시 �
 """
 from __future__ import annotations
 
+import asyncio
 import copy
 import hashlib
 import json
@@ -16,7 +17,8 @@ import httpx
 import pytest
 from jsonschema import Draft7Validator
 
-from app import ir_builder
+import app.mcp_server as srv
+from app import identity, ir_builder, routes
 from app import state as state_module
 from app.adapters import base as adapters_base
 from app.adapters import ecad as ecad_adapter
@@ -25,6 +27,7 @@ from app.adapters import registry as adapters_registry
 from app.adapters.base import CallRecorder, Principal, RestGetClient
 from app.errors import AppError
 from app.ra_client import McpHttpClient
+from tests import factories
 from tests import test_adapters as recon
 from tests.test_e2e_smoke import no_network  # noqa: F401 — autouse: 실제 소켓으로 나가는 httpx 를 막는다
 
@@ -536,3 +539,142 @@ def test_a_hub_that_ignores_the_page_does_not_loop(hub):
     assert len(hub.called("list_parts")) == 2 and "capture_partial" in result["degraded"]
     assert len([n for n in result["nodes"] if n["kind"] == "component"]) == 100
     assert "odb_paging_stalled" in [w["code"] for w in result["warnings"]]
+
+
+# ================================================================ 보드 고르기(ER-01) — REST · MCP
+WEB = identity.Identity(email=OWNER, display_name=OWNER, role="user", organization=None, anonymous=False,
+                        source="cookie", token="heax-web-token")
+
+
+@pytest.fixture
+def web_box(risk_store, monkeypatch, hub):
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    monkeypatch.setattr(adapters_registry, "clients_from_settings", lambda *a, **k: hub.channels())
+    project = routes.create_project(routes.ProjectBody(code="EC-1", name="보드 과제", classification="internal"), ident=WEB)
+    return project["id"]
+
+
+def _audits(store) -> list[dict]:
+    return [dict(r) for r in store.query(
+        "SELECT action, before_json, after_json, channel FROM rr_audit WHERE action = 'project.ecad_board' ORDER BY rowid",
+        ())]
+
+
+def test_the_search_shows_candidates_and_never_picks_one(web_box, hub):
+    """같은 모델의 두 판이 다 후보로 나온다 — 고르는 것은 사람이다. 10개를 넘으면 truncated 다."""
+    out = routes.get_ecad_boards(q="SM-X100", ident=WEB)
+    assert [c["job_id"] for c in out["candidates"]] == [JOB_STD, JOB_NON] and out["truncated"] is False
+    assert out["candidates"][0]["name"] == "PRJ-ALPHA / SM-X100 / Main / 0.7"
+    assert set(out["candidates"][0]) == {*ecad_adapter.CANDIDATE_KEYS, "name"}
+    assert "chosen" not in out and out["app_key"] == ODB and out["tool"] == "find_job"
+    many = routes.get_ecad_boards(q="FILLER", ident=WEB)
+    assert len(many["candidates"]) == ecad_adapter.SEARCH_MAX and many["truncated"] is True
+    none = routes.get_ecad_boards(q="없는 보드", ident=WEB)
+    assert none["candidates"] == [] and "결과가 없습니다" in none["hub_message"]
+    with pytest.raises(AppError) as empty:
+        routes.get_ecad_boards(q="  ", ident=WEB)
+    assert empty.value.http_status == 422
+
+
+def test_set_replace_and_clear_the_board_of_a_project(web_box, hub, risk_store):
+    project_id = web_box
+    first = routes.put_ecad_board(project_id, routes.EcadBoardBody(odb_job_id=JOB_STD.upper()), ident=WEB)
+    assert first["changed"] is True and first["previous_odb_job_id"] is None
+    assert first["source"]["ref"] == {"odb_job_id": JOB_STD} and first["source"]["app_key"] == ODB
+    assert first["source"]["probe"]["board"]["name"] == "PRJ-ALPHA / SM-X100 / Main / 0.7"
+    assert first["source"]["status"] == "linked"
+    card_id = first["source"]["id"]
+    # 다른 판으로 바꾸면 같은 카드가 바뀐다(카드는 과제마다 한 장) — 감사가 남는다.
+    second = routes.put_ecad_board(project_id, routes.EcadBoardBody(odb_job_id=JOB_NON), ident=WEB)
+    assert (second["changed"], second["previous_odb_job_id"], second["source"]["id"]) == (True, JOB_STD, card_id)
+    again = routes.put_ecad_board(project_id, routes.EcadBoardBody(odb_job_id=JOB_NON), ident=WEB)
+    assert again["changed"] is False
+    assert [s["kind"] for s in routes._project_sources(project_id)] == ["ecad"]
+    # 지어낸 job_id(꼴은 맞는다)는 find_job 에 없어 붙지 않는다. 꼴이 틀리면 허브를 부르지도 않는다.
+    with pytest.raises(AppError) as unknown:
+        routes.put_ecad_board(project_id, routes.EcadBoardBody(odb_job_id="0123456789abcdef"), ident=WEB)
+    assert (unknown.value.code, unknown.value.http_status) == ("ecad_board_not_found", 422)
+    calls = len(hub.calls)
+    with pytest.raises(AppError) as malformed:
+        routes.put_ecad_board(project_id, routes.EcadBoardBody(odb_job_id="SM-X100"), ident=WEB)
+    assert malformed.value.code == "E100" and len(hub.calls) == calls
+    assert routes._project_sources(project_id)[0]["ref"] == {"odb_job_id": JOB_NON}
+
+    cleared = routes.delete_ecad_board(project_id, ident=WEB)
+    assert (cleared["removed"], cleared["previous_odb_job_id"]) == (1, JOB_NON)
+    assert routes._project_sources(project_id) == []
+    assert routes.delete_ecad_board(project_id, ident=WEB)["removed"] == 0
+    audits = _audits(risk_store)
+    assert [json.loads(a["after_json"])["odb_job_id"] for a in audits] == [JOB_STD, JOB_NON, None]
+    assert {a["channel"] for a in audits} == {"web"}
+
+
+def test_the_generic_source_route_does_not_attach_a_board(web_box):
+    """일반 소스 연결로는 붙지 않는다 — find_job 확인 없이 붙거나 카드가 둘이 되면 어느 보드를 읽을지 uuid 순서가 정한다."""
+    with pytest.raises(AppError) as err:
+        routes.add_source(web_box, routes.SourceBody(kind="ecad", app_key=ODB, ref={"odb_job_id": JOB_STD}), ident=WEB)
+    assert (err.value.code, err.value.http_status) == ("ecad_board_route", 422)
+    assert "ecad-board" in err.value.detail["fix"] and routes._project_sources(web_box) == []
+
+
+def test_capture_after_attaching_reads_the_board_into_the_snapshot(web_box, hub, risk_store):
+    """요청서 6절 1단계 캡처 — 보드를 붙인 과제를 캡처하면 missing.ecad_absent 가 없고 component 수가 list_parts total,
+    layer 수가 5종으로 거른 행 수다. 카드의 도달 측정도 캡처가 본 것으로 바뀐다."""
+    project_id = web_box
+    routes.put_ecad_board(project_id, routes.EcadBoardBody(odb_job_id=JOB_STD), ident=WEB)
+    before = len(hub.calls)
+    out = routes.create_snapshot(project_id, routes.SnapshotBody(), ident=WEB)
+    assert out["job_state"] == "done" and out["reused"] is False
+    snap = risk_store.query_one("SELECT missing_json, ir_version FROM rr_snapshots WHERE id = ?", (out["snapshot_id"],))
+    assert json.loads(snap["missing_json"])["ecad_absent"] is False and snap["ir_version"] == "1.1"
+    counts = {r["kind"]: r["n"] for r in risk_store.query(
+        "SELECT kind, COUNT(*) AS n FROM rr_ir_nodes WHERE snapshot_id = ? GROUP BY kind", (out["snapshot_id"],))}
+    assert counts == {"component": 748, "layer": 23}
+    assert len(hub.calls) - before == 13
+    card = routes._project_sources(project_id)[0]
+    assert card["probe"]["detail"].startswith("capture_ok calls=13") and card["probe"]["board"]["job_id"] == JOB_STD
+
+
+def test_the_routes_answer_over_http(client, web_box, hub):
+    """REST 경로 셋 — GET /api/ecad/boards · PUT · DELETE /api/projects/{id}/ecad-board(신원은 웹 쿠키 신원으로 둔다)."""
+    from app.main import app
+
+    app.dependency_overrides[identity.current] = lambda: WEB
+    try:
+        found = client.get("/api/ecad/boards", params={"q": "SM-X100"})
+        assert found.status_code == 200 and len(found.json()["candidates"]) == 2
+        put = client.put(f"/api/projects/{web_box}/ecad-board", json={"odb_job_id": JOB_STD})
+        assert put.status_code == 200 and put.json()["source"]["ref"] == {"odb_job_id": JOB_STD}
+        missing = client.put(f"/api/projects/{web_box}/ecad-board", json={"odb_job_id": "0123456789abcdef"})
+        assert missing.status_code == 422 and missing.json()["error"]["code"] == "ecad_board_not_found"
+        gone = client.delete(f"/api/projects/{web_box}/ecad-board")
+        assert gone.status_code == 200 and gone.json()["removed"] == 1
+    finally:
+        app.dependency_overrides.pop(identity.current, None)
+
+
+def _call(tool: str, /, **kwargs) -> dict:
+    out = getattr(srv, tool)(**kwargs)
+    return asyncio.run(out) if asyncio.iscoroutine(out) else out
+
+
+def test_claude_finds_and_sets_the_board_through_the_same_routes(web_box, hub, risk_store, monkeypatch):
+    """MCP — 찾기 · 붙이기 · 떼기가 REST 와 같은 함수를 같은 신원으로 지난다. 위임으로 확인된 신원만 쓴다."""
+    project_id = web_box
+    factories.act_as_delegate(monkeypatch, OWNER)
+
+    found = _call("risk_find_ecad_boards", query="SM-X100")
+    assert [c["job_id"] for c in found["candidates"]] == [JOB_STD, JOB_NON] and "사용자" in found["note"]
+    attached = _call("risk_set_ecad_board", project_id=project_id, odb_job_id=JOB_NON)
+    assert attached["ok"] is True and attached["source"]["ref"] == {"odb_job_id": JOB_NON}
+    assert attached["web"]["project"].endswith(project_id)
+    refused = _call("risk_add_source", project_id=project_id, kind="ecad", ref={"odb_job_id": JOB_STD})
+    assert refused["error"] == "ecad_board_route"
+    cleared = _call("risk_set_ecad_board", project_id=project_id, odb_job_id=None)
+    assert cleared["removed"] == 1
+    audit = risk_store.query("SELECT channel FROM rr_audit WHERE action = 'project.ecad_board'", ())
+    assert {r["channel"] for r in audit} == {"mcp"}
+
+    monkeypatch.setattr(srv, "_request", lambda: None)            # 신원 없는 호출(게이트웨이 위임 단언이 없다)
+    assert _call("risk_find_ecad_boards", query="SM-X100")["error"] == "delegation_required"
+    assert _call("risk_set_ecad_board", project_id=project_id, odb_job_id=JOB_STD)["error"] == "delegation_required"

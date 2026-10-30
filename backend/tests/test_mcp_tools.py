@@ -48,6 +48,9 @@ TOOL_NAMES = [
     # 쟁점·종합 보고서 2종(재설계 M3 S3-10) — 읽기 전용, 앞 목록 + 둘(29 → 31).
     "risk_get_issues",
     "risk_get_report",
+    # ECAD 보드 2종(포털 docs/design-risk-review/ecad-1031 ER-01) — find_job 후보 찾기 · 사람이 고른 보드 붙이기(31 → 33).
+    "risk_find_ecad_boards",
+    "risk_set_ecad_board",
 ]
 ENTRY_TOOLS = TOOL_NAMES[TOOL_NAMES.index("risk_next_step"):TOOL_NAMES.index("risk_repersist_panel") + 1]
 # 도구별 대표 인자와, 빈 원장에서 기대하는 오류 코드(없으면 None = 정상 응답).
@@ -96,6 +99,10 @@ CALLS = [
     ("risk_get_units", {"target_key": "snap:s1", "unit_id": "u-0123456789ab", "part": "lines"}, "not_visible"),
     ("risk_get_cells", {"target_key": "snap:s1"}, "not_visible"),
     ("risk_get_expert_report", {"target_key": "snap:s1", "agent_key": "mech-test-seal"}, "not_visible"),
+    # ECAD 보드 — 찾기도 붙이기와 같은 문을 지난다(그 사람의 PAT 로 게이트웨이를 부른다).
+    ("risk_find_ecad_boards", {"query": "S26"}, "delegation_required"),
+    ("risk_set_ecad_board", {"project_id": "p1", "odb_job_id": "0123456789abcdef"}, "delegation_required"),
+    ("risk_set_ecad_board", {"project_id": "p1", "odb_job_id": None}, "delegation_required"),
 ]
 _HANGUL = re.compile(r"[가-힣]")
 # 인자 이름에 비밀이 오면 게이트웨이·포털 절차·클라이언트 대화 기록에 값이 남는다(작업 지시서 A-11) — 포털 절차의
@@ -222,6 +229,15 @@ def test_entry_tool_signatures():
     assert tools["risk_start_job"].inputSchema["properties"]["mode"]["default"] == "panels"
     assert props("risk_job_action") == {"job_id", "action", "reason", "filter", "consent"}    # 실패 셀 처분(재설계 M3 C3-4) · 다시의 동의(MEDIUM 13)
     assert props("risk_repersist_panel") == {"panel_id", "discard"} and required("risk_repersist_panel") == {"panel_id"}
+    # ECAD 보드 — job_id 는 null 이 뗀다는 뜻이라 기본값 없이 필수다(빠뜨려서 떼지 않게).
+    assert props("risk_find_ecad_boards") == {"query"} and required("risk_find_ecad_boards") == {"query"}
+    assert props("risk_set_ecad_board") == {"project_id", "odb_job_id"}
+    assert required("risk_set_ecad_board") == {"project_id", "odb_job_id"}
+    for name in ("risk_find_ecad_boards", "risk_set_ecad_board"):
+        assert "actor" not in props(name) and not [p for p in props(name) if _SECRET_ARG.search(p)], name
+    head = tools["risk_set_ecad_board"].description.strip()[:220]
+    assert "사용자에게" in head and "확인한 뒤 부른다" in head, head
+    assert "읽기 전용" in tools["risk_find_ecad_boards"].description.strip()[:220]
 
 
 def test_write_tool_descriptions_ask_for_confirmation_first():

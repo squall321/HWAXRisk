@@ -319,6 +319,21 @@
     "version": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Version"},
     "page": {"default": 1, "title": "Page", "type": "integer"}
    }
+  },
+  "risk_find_ecad_boards": {
+   "params": [["query", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["query"],
+   "properties": {
+    "query": {"title": "Query", "type": "string"}
+   }
+  },
+  "risk_set_ecad_board": {
+   "params": [["project_id", "POSITIONAL_OR_KEYWORD"], ["odb_job_id", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["odb_job_id", "project_id"],
+   "properties": {
+    "project_id": {"title": "Project Id", "type": "string"},
+    "odb_job_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "title": "Odb Job Id"}
+   }
   }
  }
 }

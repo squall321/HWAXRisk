@@ -33,6 +33,7 @@ from app import issues as issues_module
 from app import closure as closure_module
 from app import synth as synth_module
 from app.adapters import base as adapters_base
+from app.adapters import ecad as ecad_adapter
 from app.adapters import registry as adapters_registry
 from app.adapters.dyna import CONTEXT_KIND as CONTEXT_CALL_KIND
 from app import field_source
@@ -1612,6 +1613,8 @@ def add_source(project_id: str, body: SourceBody,
     _project_row(project_id, owner_sub)
     if body.kind not in SOURCE_KINDS:
         raise AppError("E100", f"kind 는 {list(SOURCE_KINDS)} 중 하나여야 합니다 — {body.kind!r}.", 422)
+    if body.kind == "ecad":
+        raise ecad_board_route_error(project_id)
     # 게이트웨이 실측으로 카드 상태를 정한다 — 고정 목록으로 적으면 캡처가 도는데도 '연결 안 됨' 이라고 적힌다.
     kind_root = body.kind.split("_")[0]
     adapter = next((a for a in adapters_registry.discover_adapters(token=ident.token)
@@ -1649,6 +1652,141 @@ def add_source(project_id: str, body: SourceBody,
         # 본다(2026-08-31 실측). 그래서 남의 프로젝트도 붙일 수 있고, 이 앱이 세울 경계는 이 경고와 classification 필수뿐이다(plan §2.13.3).
         out["warnings"] = ["stepforge_no_isolation"]
     return out
+
+
+# ---------------------------------------------------------------- ECAD 보드(ODB 허브 job_id, 포털 docs/design-risk-review/ecad-1031 ER-01)
+# 과제에 붙는 ECAD 보드는 소스 카드(kind='ecad') 한 장이고 ref 는 {odb_job_id} 다. 고르는 것은 사람이다 — 찾기는 find_job 후보를
+# 보여 줄 뿐이고, 붙이기는 그 job_id 가 find_job 에 실제로 있는지 확인한 뒤에만 적는다(모델 이름만으로 정하지 않는다).
+# 일반 소스 연결(POST /projects/{id}/sources)로는 붙이지 않는다 — 확인 없이 붙거나 카드가 둘이 되면 어느 보드를 읽을지 uuid 순서가 정한다.
+ECAD_QUERY_MAX = 200
+
+
+class EcadBoardBody(BaseModel):
+    odb_job_id: str = Field(min_length=1, max_length=64)
+
+
+def ecad_board_route_error(project_id: str) -> AppError:
+    """ECAD 보드를 일반 소스 연결로 붙이려 할 때의 거절 — 고칠 곳은 찾기 · 붙이기 길이다."""
+    return AppError("ecad_board_route",
+                    "ECAD 보드는 일반 소스 연결로 붙이지 않습니다 — find_job 후보에서 사람이 고른 job_id 를 붙입니다.", 422,
+                    detail={"fix": "GET /api/ecad/boards?q=<과제 · 모델 · 파일 이름 또는 job_id> 로 후보를 보이고, 고른 job_id 로"
+                                   f" PUT /api/projects/{project_id}/ecad-board {{odb_job_id}} 를 부른다(MCP 는"
+                                   " risk_find_ecad_boards → risk_set_ecad_board)."})
+
+
+def _ecad_mcp_channel(owner_sub: str) -> tuple[Any, dict]:
+    """ECAD 보드 찾기 · 붙이기 확인의 게이트웨이 MCP 채널과 도구 지도 — 캡처와 같은 자격(그 사람의 등록된 포털 PAT, 없거나 곧
+    끝나면 박스의 읽기 PAT)이라 찾아진 보드는 캡처도 읽는다."""
+    credential = get_store().get_credential(owner_sub) or {}
+    portal_pat = identity.credential_pat(credential)
+    if int(credential.get("pat_exp") or 0) <= now_epoch() + runner.CREDENTIAL_MARGIN_S:
+        portal_pat = None
+    channels = adapters_registry.clients_from_settings(
+        config.settings, config.load_secrets(config.settings.data_dir), portal_pat=portal_pat)
+    if channels.get("rest") is not None:
+        channels["rest"].close()          # 찾기는 REST 를 쓰지 않는다 — 만든 소켓은 닫는다
+    return channels.get("mcp"), dict(channels.get("tool_map") or {})
+
+
+def ecad_board_candidates(query: str, *, owner_sub: str) -> dict:
+    """find_job 후보(최대 10, truncated) — REST `GET /ecad/boards` 와 MCP `risk_find_ecad_boards` 의 본체."""
+    query = str(query or "").strip()
+    if not query or len(query) > ECAD_QUERY_MAX:
+        raise AppError("E100", f"찾을 말(q)은 1~{ECAD_QUERY_MAX}자입니다 — 과제 · 모델 · 파일 이름이나 job_id 를 줍니다.", 422)
+    channel, tool_map = _ecad_mcp_channel(owner_sub)
+    try:
+        return ecad_adapter.search_boards(channel, tool_map, query)
+    finally:
+        if channel is not None:
+            channel.close()
+
+
+def _ecad_rows(store: Any, project_id: str) -> list[dict]:
+    return [dict(r) for r in store.query(
+        "SELECT id, app_key, ref_json FROM rr_sources WHERE project_id = ? AND kind = 'ecad' ORDER BY id", (project_id,))]
+
+
+def _ecad_job_of(row: dict | None) -> str | None:
+    return (_loads(row["ref_json"], {}) or {}).get("odb_job_id") if row else None
+
+
+@router.get("/ecad/boards")
+def get_ecad_boards(q: str = Query(...), ident: identity.Identity = Depends(identity.current)) -> dict:
+    """ECAD 보드 후보 — ODB 허브 find_job(과제 · 모델 · 파일 이름이나 job_id) 결과를 사람에게 보일 꼴로(최대 10, truncated).
+
+    같은 모델의 다른 판이 함께 나올 수 있다 — 고르는 것은 사람이고 이 경로는 고르지 않는다."""
+    return ecad_board_candidates(q, owner_sub=_require_user(ident))
+
+
+@router.put("/projects/{project_id}/ecad-board")
+def put_ecad_board(project_id: str, body: EcadBoardBody, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """과제의 ECAD 보드를 붙이거나 바꾼다 — 그 job_id 가 find_job 후보에 실제로 있을 때만 적는다(카드는 과제마다 한 장).
+
+    같은 보드를 다시 보내면 카드의 보드 정보만 새로 적고 changed=false 다. 바뀌면 감사 한 줄(project.ecad_board)이 남는다.
+    이미 동결된 스냅샷은 그대로이고 다음 캡처부터 새 보드를 읽는다."""
+    owner_sub = _require_user(ident)
+    _project_row(project_id, owner_sub)
+    job_id = body.odb_job_id.strip()
+    if not ecad_adapter.JOB_ID_RE.match(job_id):
+        raise AppError("E100", f"odb_job_id 는 ODB 허브 job_id(16자리 16진)입니다 — {job_id[:40]!r}.", 422)
+    found = ecad_board_candidates(job_id, owner_sub=owner_sub)
+    board = next((c for c in found["candidates"] if str(c.get("job_id") or "").lower() == job_id.lower()), None)
+    if board is None:
+        raise AppError("ecad_board_not_found",
+                       f"ODB 허브 find_job 이 job_id {job_id} 를 찾지 못했습니다 — GET /api/ecad/boards 후보에서 고릅니다.", 422,
+                       detail={"candidates": found["candidates"], "hub_message": found.get("hub_message")})
+    job_id = str(board["job_id"])
+    app_key = str(found["app_key"])
+    ref = {"odb_job_id": job_id}
+    ref_key = f"ecad:{app_key}:{canonical_json(ref)}"
+    probe = {"reachable": True, "detail": f"find_job_ok app_key={app_key}", "capture_mode": "mcp", "status": "linked",
+             "board": board}
+    now = now_epoch()
+    store = get_store()
+    with store.tx():
+        rows = _ecad_rows(store, project_id)
+        previous = _ecad_job_of(rows[0] if rows else None)
+        for extra in rows[1:]:
+            # 카드가 둘이면(옛 일반 연결로 붙은 것) 앞의 하나만 남긴다 — 캡처는 kind 마다 앞의 카드만 읽는다.
+            store.execute("DELETE FROM rr_sources WHERE id = ?", (extra["id"],))
+        if rows:
+            store.execute(
+                "UPDATE rr_sources SET app_key = ?, ref_json = ?, ref_key = ?, probe_json = ?, probe_at = ?,"
+                " adapter_version = ? WHERE id = ?",
+                (app_key, canonical_json(ref), ref_key, canonical_json(probe), now, ecad_adapter.ADAPTER_VERSION,
+                 rows[0]["id"]))
+        else:
+            store.execute(
+                "INSERT INTO rr_sources(id, project_id, owner_sub, kind, app_key, ref_json, ref_key, bridge_declared,"
+                " probe_json, probe_at, adapter_version, created_at) VALUES (?,?,?,'ecad',?,?,?,0,?,?,?,?)",
+                (new_uuid(), project_id, owner_sub, app_key, canonical_json(ref), ref_key, canonical_json(probe), now,
+                 ecad_adapter.ADAPTER_VERSION, now))
+        if previous != job_id:
+            _audit(store, owner_sub, scope="project", subject_id=project_id, project_id=project_id,
+                   action="project.ecad_board", before={"odb_job_id": previous},
+                   after={"odb_job_id": job_id, "name": board.get("name")},
+                   channel=AUDIT_CHANNELS.get(ident.source, "rest"))
+    source = next(s for s in _project_sources(project_id) if s["kind"] == "ecad")
+    return {"ok": True, "project_id": project_id, "ecad_board": board, "source": source,
+            "previous_odb_job_id": previous, "changed": previous != job_id}
+
+
+@router.delete("/projects/{project_id}/ecad-board")
+def delete_ecad_board(project_id: str, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """과제의 ECAD 보드를 뗀다 — 카드를 지울 뿐 이미 동결된 스냅샷은 그대로다(다음 캡처의 ecad 는 결측). 없으면 removed=0."""
+    owner_sub = _require_user(ident)
+    _project_row(project_id, owner_sub)
+    store = get_store()
+    with store.tx():
+        rows = _ecad_rows(store, project_id)
+        previous = _ecad_job_of(rows[0] if rows else None)
+        for row in rows:
+            store.execute("DELETE FROM rr_sources WHERE id = ?", (row["id"],))
+        if rows:
+            _audit(store, owner_sub, scope="project", subject_id=project_id, project_id=project_id,
+                   action="project.ecad_board", before={"odb_job_id": previous}, after={"odb_job_id": None},
+                   channel=AUDIT_CHANNELS.get(ident.source, "rest"))
+    return {"ok": True, "project_id": project_id, "removed": len(rows), "previous_odb_job_id": previous}
 
 
 class SnapshotBody(BaseModel):
