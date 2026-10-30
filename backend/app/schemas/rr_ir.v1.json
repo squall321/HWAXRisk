@@ -70,7 +70,10 @@
         "report_parts_mismatch", "unit_converted_mil", "components_truncated", "nets_truncated",
         "tree_truncated", "parts_truncated", "no_depth_seq", "no_auto_named_flag", "interfaces_unreadable",
         "capture_partial", "capture_call_failed", "schema_drift", "large_model", "mcad_absent",
-        "dyna_absent", "fuzzy_skipped_large"
+        "dyna_absent", "fuzzy_skipped_large",
+        "ecad_nets_deferred", "component_xy_deferred", "components_unclassified_omitted", "outline_origin_unknown",
+        "stackup_material_unmatched", "copper_weight_absent", "plane_type_unknown", "odb_version_absent",
+        "component_value_absent", "component_height_partial"
       ]
     },
     "source": {

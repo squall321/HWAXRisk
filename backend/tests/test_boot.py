@@ -385,8 +385,9 @@ def test_meta_adapters_reports_what_the_gateway_actually_has(client):
     assert rows["mcad"]["status"] == "ready" and rows["mcad"]["tools_ok"] is True
     assert rows["mcad"]["app_key"] == "heax-step_forge"
     assert rows["dyna"]["status"] == "ready" and rows["dyna"]["tools_ok"] is True
-    # ecad 는 도구가 다 보여도 계약만 있는 스텁이다(§2.5.3) — 붙는 것은 P7.
-    assert rows["ecad"]["status"] == "contract_only" and rows["ecad"]["tools_ok"] is False
+    # ecad 도 실측이다 — 이 지도에는 odb-hub 백엔드가 없어 unavailable 이고 빠진 도구를 말한다(종전에는 늘 contract_only).
+    assert rows["ecad"]["status"] == "unavailable" and rows["ecad"]["tools_ok"] is False
+    assert rows["ecad"]["app_key"] == "odb-hub" and "find_job" in rows["ecad"]["tools_missing"]
     assert set(rows["mcad"]) == {"kind", "app_key", "status", "tools_ok", "tools_missing",
                                  "gateway_error", "warnings", "choices"}
 

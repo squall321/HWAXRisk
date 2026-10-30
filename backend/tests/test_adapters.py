@@ -1,4 +1,4 @@
-# 소스 어댑터(mcad·dyna·ecad_stub)와 게이트웨이 발견·캡처 오케스트레이션 — 응답 형상은 P1 정찰 실측 그대로이고 외부 호출은 전부 MockTransport(실 네트워크 0)
+# 소스 어댑터(mcad·dyna·ecad 결측)와 게이트웨이 발견·캡처 오케스트레이션 — 응답 형상은 P1 정찰 실측 그대로이고 외부 호출은 전부 MockTransport(실 네트워크 0)
 from __future__ import annotations
 
 import json
@@ -10,7 +10,8 @@ from jsonschema import Draft7Validator
 
 from app import ir_builder
 from app.adapters import dyna as dyna_adapter
-from app.adapters import ecad_stub, mcad
+from app.adapters import ecad as ecad_adapter
+from app.adapters import mcad
 from app.adapters import registry as adapters_registry
 from app.adapters import base as adapters_base
 from app.adapters.base import CallRecorder, Principal, RestGetClient
@@ -1161,14 +1162,15 @@ def test_group_of_follows_report_parser_rule():
 
 
 # ---------------------------------------------------------------- ecad 스텁
-def test_ecad_stub_is_contract_only():
+def test_ecad_without_a_board_is_the_stub_envelope():
+    """보드를 붙이지 않은 과제의 ecad 는 스텁 시절과 같은 봉투다 — 소스를 부르지 않고, 세대도 그대로라(0.0-stub) 옛 스냅샷과의
+    비교에 parser_differs 가 붙지 않는다. 보드를 붙인 캡처는 tests/test_ecad_adapter.py 가 본다."""
     recorder = CallRecorder("cafe0000deadbeef", mcp=_mcp({}))
-    result = ecad_stub.EcadStubAdapter().capture({}, _principal(), recorder)
+    result = ecad_adapter.EcadAdapter().capture({}, _principal(), recorder)
     assert result["nodes"] == [] and result["edges"] == []
     assert result["degraded"] == ["ecad_absent"] and result["missing"] == {"ecad_absent": True}
+    assert result["source"]["adapter_version"] == "0.0-stub" and result["source"]["app_key"] is None
     assert recorder.calls == []
-    assert ecad_stub.REQUIRED_TOOLS == ("odb_get_board", "odb_list_components", "odb_list_nets",
-                                        "odb_get_stackup")
 
 
 # ---------------------------------------------------------------- capture_all → freeze_snapshot

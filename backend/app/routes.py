@@ -1833,7 +1833,7 @@ def create_snapshot(project_id: str, body: SnapshotBody,
             sources=_project_sources(project_id), principal=principal, mcp_client=channels["mcp"],
             rest_client=channels["rest"], kinds=list(body.kinds) or None, report_ids=body.report_ids,
             detect_result_file_id=body.detect_result_file_id,
-            tool_names=channels.get("tool_names") or ())
+            tool_names=channels.get("tool_names") or (), tool_map=channels.get("tool_map") or {})
     except AppError as exc:
         # 캡처가 통째로 실패해도 잡 행은 남는다 — 그 잡의 호출 원문은 snapshot_id NULL 로 보존된다.
         failure = {"stage": "capture", "message": exc.message, "code": exc.code}

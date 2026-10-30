@@ -366,10 +366,21 @@ def compute_signals(ir: Mapping[str, Any], gates: Mapping[str, Mapping[str, Any]
     ecad_known = not missing.get("ecad_absent", True)
     components = [n for n in nodes if n.get("domain") == "ecad" and n.get("kind") == "component"]
     nets = [n for n in nodes if n.get("domain") == "ecad" and n.get("kind") == "net"]
-    put("counts.ecad.components", _rec("count", len(components) if ecad_known else None, None, [],
-                                       f"components={len(components)}" if ecad_known else "ecad absent", known=ecad_known))
-    put("counts.ecad.nets", _rec("count", len(nets) if ecad_known else None, None, [],
-                                 f"nets={len(nets)}" if ecad_known else "ecad absent", known=ecad_known))
+    # ECAD 1단계(포털 docs/design-risk-review/ecad-1031)는 보드 · 적층 · 분류된 부품만 싣는다 — 실리지 않은 칸을 0 으로 세지 않는다.
+    # 넷은 2단계라 `ecad_nets_deferred` 면 미측정이고, 부품 목록을 못 읽었으면(stats.n_components=null) 부품 수도 미측정이다.
+    ecad_source = _source(ir, "ecad") or {}
+    ecad_degraded = set(ecad_source.get("degraded") or ())
+    ecad_stats = ecad_source.get("stats") or {}
+    components_known = ecad_known and not ("n_components" in ecad_stats and ecad_stats["n_components"] is None)
+    nets_known = ecad_known and "ecad_nets_deferred" not in ecad_degraded
+    components_note = " (분류된 부품만)" if "components_unclassified_omitted" in ecad_degraded else ""
+    put("counts.ecad.components", _rec("count", len(components) if components_known else None, None, [],
+                                       f"components={len(components)}{components_note}" if components_known
+                                       else ("components 미측정(부품 목록을 읽지 못함)" if ecad_known else "ecad absent"),
+                                       known=components_known))
+    put("counts.ecad.nets", _rec("count", len(nets) if nets_known else None, None, [],
+                                 f"nets={len(nets)}" if nets_known
+                                 else ("nets 미측정(ecad_nets_deferred)" if ecad_known else "ecad absent"), known=nets_known))
 
     # --- ratios
     iface_total = sum(len(by_kind[k]) for k in _IFACE_KINDS)

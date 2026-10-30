@@ -9,7 +9,8 @@ import httpx
 
 from app import config, identity, ir_builder
 from app.adapters import dyna as dyna_adapter
-from app.adapters import ecad_stub, mcad
+from app.adapters import ecad as ecad_adapter
+from app.adapters import mcad
 from app.adapters.base import (
     GATEWAY_REST_SITES,
     CallRecorder,
@@ -19,6 +20,7 @@ from app.adapters.base import (
     Principal,
     Probe,
     RestGetClient,
+    backend_tool_name,
     source_timeout,
     tool_matches,
 )
@@ -29,7 +31,7 @@ from app.errors import AppError
 ADAPTERS: tuple[IrAdapter, ...] = (
     IrAdapter(kind="mcad", app_key="heax-step_forge", status="planned"),
     IrAdapter(kind="dyna", app_key="heax-kooremapper_mcp", status="planned"),
-    IrAdapter(kind="ecad", app_key=None, status="contract_only"),
+    IrAdapter(kind="ecad", app_key=ecad_adapter.DEFAULT_APP_KEY, status="planned"),
 )
 
 # kind → 그 백엔드에 다 보여야 하는 도구 집합(plan §2.13.2).
@@ -37,8 +39,11 @@ REQUIRED_TOOLS: dict[str, tuple[str, ...]] = {
     "mcad": mcad.REQUIRED_TOOLS,
     "dyna": dyna_adapter.REQUIRED_TOOLS,
     "dyna_result": dyna_adapter.DynaResultAdapter.required_tools,
-    "ecad": ecad_stub.REQUIRED_TOOLS,
+    "ecad": ecad_adapter.REQUIRED_TOOLS,
 }
+# 도구 이름 집합이 아니라 **백엔드 키와 원래 이름**으로 찾는 kind — ODB 허브의 `list_parts` 는 StepForge 의 것과 이름이 겹쳐
+# 게이트웨이가 둘 다 접두를 붙인다(`odbhub_list_parts`). 모든 백엔드에 suffix 를 맞추면 그 이름이 남의 도구와 섞인다.
+BACKEND_BOUND_KINDS: tuple[str, ...] = ("ecad",)
 # 캡처 순서 — dyna_result 는 dyna 뒤에 와야 pid→nid 를 넘겨받는다.
 CAPTURE_ORDER: tuple[str, ...] = ("mcad", "dyna", "dyna_result", "ecad")
 DISCOVERY_TIMEOUT = 10.0
@@ -52,7 +57,7 @@ def list_adapters() -> list[dict]:
 # 발견 결과 캐시 — /meta/adapters 와 소스 카드가 화면마다 부르므로 게이트웨이를 매번 때리지 않는다.
 DISCOVERY_TTL_S = 60.0
 _discovery_lock = threading.Lock()
-_discovery_cache: dict[str, Any] = {"at": 0.0, "rows": None, "tool_names": None, "tool_names_at": 0.0}
+_discovery_cache: dict[str, Any] = {"at": 0.0, "rows": None, "tool_map": None, "tool_map_at": 0.0}
 
 
 def reset_discovery_cache() -> None:
@@ -60,18 +65,17 @@ def reset_discovery_cache() -> None:
     with _discovery_lock:
         _discovery_cache["at"] = 0.0
         _discovery_cache["rows"] = None
-        _discovery_cache["tool_names"] = None
-        _discovery_cache["tool_names_at"] = 0.0
+        _discovery_cache["tool_map"] = None
+        _discovery_cache["tool_map_at"] = 0.0
 
 
 def _status_of(kind: str, probe: Probe, gateway_read: bool) -> str:
-    """정적 status 를 실측으로 덮는다 — 어휘는 `planned | ready | contract_only | unavailable`.
+    """정적 status 를 실측으로 덮는다 — 어휘는 `planned | ready | unavailable`.
 
-    ecad 는 계약만 있는 스텁이라 도구가 다 보여도 `contract_only` 다(§2.5.3 — 붙는 것은 P7).
+    ecad 도 실제 상태다 — 1단계 도구 여섯이 odb-hub 백엔드에 다 보이면 ready, 하나라도 없으면 unavailable 이다(포털
+    docs/design-risk-review/ecad-1031 ER-02 — 종전에는 계약 4이름을 기다리는 스텁이라 늘 `contract_only` 였다).
     게이트웨이를 아예 못 읽었으면 `planned` 로 남긴다 — '도구가 없다' 와 '못 물어봤다' 는 다르다.
     """
-    if kind == "ecad":
-        return "contract_only"
     if not gateway_read:
         return "planned"
     return "ready" if probe["reachable"] else "unavailable"
@@ -120,28 +124,34 @@ def default_app_key(kind: str) -> str | None:
     return next((a.app_key for a in ADAPTERS if a.kind == kind.split("_")[0]), None)
 
 
-def gateway_tool_names(*, token: str | None = None, client: httpx.Client | None = None,
-                       force: bool = False) -> tuple[str, ...]:
-    """게이트웨이가 실제로 노출하는 도구 이름들. 실패는 예외가 아니라 빈 튜플(맨이름으로 부른다).
+def gateway_tool_map(*, token: str | None = None, client: httpx.Client | None = None,
+                     force: bool = False) -> dict[str, str]:
+    """게이트웨이 `/tools-map` 의 map — 실제로 노출하는 도구 이름 → 백엔드. 실패는 예외가 아니라 빈 지도다.
 
     발견과 같은 TTL 로 캐시한다 — 캡처 한 번에 지도를 여러 번 받아 오지 않는다.
     """
     now = time.time()
     with _discovery_lock:
-        cached = _discovery_cache.get("tool_names")
-        seen_at = float(_discovery_cache.get("tool_names_at") or 0)
+        cached = _discovery_cache.get("tool_map")
+        seen_at = float(_discovery_cache.get("tool_map_at") or 0)
         if not force and cached is not None and now - seen_at < DISCOVERY_TTL_S:
-            return tuple(cached)
+            return dict(cached)
 
     registry = GatewayRegistry(config.settings.gateway_mcp, token=token, client=client)
     try:
-        names = tuple(sorted(registry.load()))
+        tools = dict(registry.load())
     finally:
         registry.close()
     with _discovery_lock:
-        _discovery_cache["tool_names"] = names
-        _discovery_cache["tool_names_at"] = now
-    return names
+        _discovery_cache["tool_map"] = tools
+        _discovery_cache["tool_map_at"] = now
+    return dict(tools)
+
+
+def gateway_tool_names(*, token: str | None = None, client: httpx.Client | None = None,
+                       force: bool = False) -> tuple[str, ...]:
+    """게이트웨이가 실제로 노출하는 도구 이름들(`gateway_tool_map` 의 열쇠). 실패는 예외가 아니라 빈 튜플(맨이름으로 부른다)."""
+    return tuple(sorted(gateway_tool_map(token=token, client=client, force=force)))
 
 
 def gateway_http_base(gateway_mcp_url: str) -> str:
@@ -216,6 +226,8 @@ class GatewayRegistry:
 
     def probe(self, kind: str, app_key: str | None = None) -> Probe:
         """plan §2.13.1 Probe. rest_ok 는 게이트웨이가 알 수 없는 값이라 None 이다(REST 는 캡처가 실증한다)."""
+        if kind in BACKEND_BOUND_KINDS:
+            return self._probe_backend(kind, app_key or default_app_key(kind))
         wants = REQUIRED_TOOLS.get(kind, ())
         self._ambiguous.pop(kind, None)
         resolved = self.app_key_for(kind, app_key or default_app_key(kind))
@@ -230,6 +242,16 @@ class GatewayRegistry:
                 "tools_present": present, "tools_missing": missing, "rest_ok": None,
                 "gateway_error": self._error, "warnings": warnings,
                 "candidates": self._ambiguous.get(kind, [])}
+
+    def _probe_backend(self, kind: str, backend: str | None) -> Probe:
+        """백엔드 키 하나에서 원래 이름(맨이름 또는 `<백엔드>_` 접두형)을 찾는다 — 다른 백엔드의 같은 이름은 보지 않는다."""
+        tools = self.load()
+        present, missing = [], []
+        for want in REQUIRED_TOOLS.get(kind, ()):
+            (present if backend and backend_tool_name(want, backend, tools) else missing).append(want)
+        return {"kind": kind, "app_key": backend, "reachable": bool(backend) and bool(present) and not missing,
+                "tools_present": present, "tools_missing": missing, "rest_ok": None,
+                "gateway_error": self._error, "warnings": [], "candidates": []}
 
     def close(self) -> None:
         if self._owns_client and self._client is not None:
@@ -246,7 +268,7 @@ def adapter_for(kind: str, app_key: str | None = None):
     if kind == "dyna_result":
         return dyna_adapter.DynaResultAdapter(app_key)
     if kind == "ecad":
-        return ecad_stub.EcadStubAdapter(app_key)
+        return ecad_adapter.EcadAdapter(app_key)
     raise AppError("E100", f"모르는 소스 kind — {kind!r}.", http_status=422)
 
 
@@ -255,7 +277,7 @@ def capture_all(*, sources: Sequence[Mapping[str, Any]], principal: Principal,
                 snapshot_id: str | None = None, kinds: Sequence[str] | None = None,
                 report_ids: Sequence[Any] | None = None,
                 detect_result_file_id: str | None = None,
-                tool_names: Sequence[str] = ()) -> dict:
+                tool_names: Sequence[str] = (), tool_map: Mapping[str, str] | None = None) -> dict:
     """등록된 소스 카드를 kind 순서로 캡처한다(plan §2.11.3 1~5단계).
 
     반환 `{snapshot_id, results, calls, context}`. snapshot_id 를 미리 정하는 이유는 provenance.call_id 가
@@ -264,7 +286,11 @@ def capture_all(*, sources: Sequence[Mapping[str, Any]], principal: Principal,
 
     `tool_names` 는 게이트웨이 실이름 목록이다(정본 §2.13.2 이름 해석). 여기서 직접 받아 오지 않는다 —
     자격을 아는 곳은 `clients_from_settings` 이고, 캡처가 스스로 발견 요청을 내보내면 캡처 경로가
-    '외부 호출 안 함' 계약을 깬다(E2E 스모크가 그것을 막는다). 비면 맨이름으로 부른다.
+    '외부 호출 안 함' 계약을 깬다(E2E 스모크가 그것을 막는다). 비면 맨이름으로 부른다. `tool_map` 은 같은 자리에서 받은
+    실이름 → 백엔드 지도다 — 호출을 그 소스의 백엔드 것으로 풀고(`base.backend_tool_name`), ecad 는 이것으로만 도구를 찾는다.
+
+    ecad 는 요청 kinds 에 없어도 결측 소스 행을 남긴다(스텁 시절과 같은 봉투 — 비교의 adapter_parity 가 흔들리지 않는다).
+    보드 카드를 읽는 것은 kinds 가 비었거나 ecad 를 담았을 때뿐이다.
     """
     sid = snapshot_id or new_uuid()
     by_kind: dict[str, dict] = {}
@@ -273,19 +299,25 @@ def capture_all(*, sources: Sequence[Mapping[str, Any]], principal: Principal,
         if kind in CAPTURE_ORDER and kind not in by_kind:
             by_kind[kind] = dict(row)
     wanted = [k for k in CAPTURE_ORDER if (kinds is None or k in kinds or k == "ecad")]
-    if not [k for k in wanted if k in by_kind]:
+    ecad_asked = kinds is None or "ecad" in kinds
+    if not [k for k in wanted if k in by_kind and (k != "ecad" or ecad_asked)]:
         # mcad 가 없어도 dyna 단독 스냅샷은 만든다(plan §2.2 primary_source) — 소스가 아예 0 일 때만 막는다.
         raise AppError("source_unreachable",
                        "연결된 소스가 없습니다 — 소스를 먼저 연결하세요.", http_status=409)
 
-    recorder = CallRecorder(sid, mcp=mcp_client, rest=rest_client, tool_names=tool_names)
+    recorder = CallRecorder(sid, mcp=mcp_client, rest=rest_client, tool_names=tool_names, tool_map=tool_map)
     results: list[dict] = []
     dyna_source_hash: str | None = None
     pid_to_nid: dict[str, str] = {}
     for kind in wanted:
         row = by_kind.get(kind)
         if kind == "ecad":
-            results.append(adapter_for("ecad").capture({}, principal, recorder))
+            if row is not None and not ecad_asked:
+                results.append(dict(ecad_adapter.absent_result(
+                    now_epoch(), message="이번 캡처는 ecad 를 읽지 않았다(요청 kinds 에 ecad 가 없다).")))
+                continue
+            results.append(dict(adapter_for("ecad", (row or {}).get("app_key")).capture(
+                dict((row or {}).get("ref") or {}), principal, recorder)))
             continue
         if row is None:
             continue
@@ -403,7 +435,7 @@ def clients_from_settings(settings, secrets: Mapping[str, str] | None = None, *,
     else:
         rest_token = heax_token if rest_kind == "caller_token" else service
         rest_client = RestGetClient(getattr(settings, "heax_base", ""), rest_token, client=http_client, timeout=timeout)
-    # 게이트웨이 실이름 목록(§2.13.2) — 자격이 있을 때만 받고 60 s 캐시를 탄다. 실패는 빈 튜플이다.
-    names = gateway_tool_names(token=token, client=http_client) if mcp_client is not None else ()
+    # 게이트웨이 실이름 → 백엔드 지도(§2.13.2) — 자격이 있을 때만 받고 60 s 캐시를 탄다. 실패는 빈 지도 · 빈 튜플이다.
+    tool_map = gateway_tool_map(token=token, client=http_client) if mcp_client is not None else {}
     return {"mcp": mcp_client, "rest": rest_client, "portal_pat": token, "service_pat": rest_token,
-            "rest_credential": rest_kind, "tool_names": names}
+            "rest_credential": rest_kind, "tool_names": tuple(sorted(tool_map)), "tool_map": tool_map}

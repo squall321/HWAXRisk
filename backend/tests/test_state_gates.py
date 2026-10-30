@@ -11,7 +11,7 @@ from app import diff as diff_module
 from app import ir_builder as ib
 from app import state as st
 from app.adapters import dyna as dyna_adapter
-from app.adapters import ecad_stub
+from app.adapters import ecad as ecad_adapter
 from tests.conftest import FIXTURES_DIR
 
 GATE_FIXTURES = FIXTURES_DIR / "ir" / "gates"
@@ -320,7 +320,7 @@ def test_summary_source_line_says_absent_for_a_source_row_that_carried_nothing()
     """
     mcad = json.loads((FIXTURES_DIR / "ir" / "adapter_mcad_basic.json").read_text(encoding="utf-8"))
     # 둘 다 어댑터가 실제로 내는 결과다 — 손으로 쓴 소스 행이 아니다.
-    stub = ecad_stub.EcadStubAdapter().capture({}, None, None)
+    stub = ecad_adapter.EcadAdapter().capture({}, None, None)      # 보드를 붙이지 않은 과제 — 스텁 시절과 같은 결측 행
     no_credential = dyna_adapter.DynaAdapter("heax-kooremapper_mcp").capture(
         {"session_id": "01JSES", "file_id": "01JFIL"}, None, None)
     assert stub["source"]["adapter_version"] == "0.0-stub" and stub["source"]["degraded"] == ["ecad_absent"]

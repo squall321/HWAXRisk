@@ -158,10 +158,10 @@ def test_absent_source_envelopes_also_validate(kind):
 
 
 def test_the_ecad_stub_envelope_validates():
-    """ecad 는 계약만 있는 스텁이라 늘 부재 소스를 낸다 — 가장 자주 도는 경로가 계약을 지켜야 한다."""
-    from app.adapters import ecad_stub
+    """보드를 붙이지 않은 과제의 ecad 는 스텁 시절과 같은 부재 소스를 낸다 — 가장 자주 도는 경로가 계약을 지켜야 한다."""
+    from app.adapters import ecad as ecad_adapter
 
-    result = ecad_stub.EcadStubAdapter(None).capture({}, None, _Recorder())
+    result = ecad_adapter.EcadAdapter(None).capture({}, None, _Recorder())
     ir = ir_builder.build_ir(project_id=PROJECT, owner_sub=OWNER, label="DV1",
                              adapter_results=[_mcad_result(), result], snapshot_id=SNAPSHOT,
                              captured_at=1756600000)

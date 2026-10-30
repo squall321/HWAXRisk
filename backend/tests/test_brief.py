@@ -8,7 +8,7 @@ import pytest
 
 from app import brief, common, field_source, ir_builder, narrative, render, state
 from app import diff as diff_module
-from app.adapters import ecad_stub
+from app.adapters import ecad as ecad_adapter
 from app.errors import AppError
 from app.ra_client import empty_sync
 from tests.conftest import FIXTURES_DIR
@@ -194,7 +194,7 @@ def seed_real_snap_target(store, *, dyna: bool = False) -> str:
     results = [load("adapter_mcad_basic.json")]
     if dyna:
         results += [load("adapter_dyna_basic.json"), load("adapter_dyna_result.json")]
-    results.append(ecad_stub.EcadStubAdapter().capture({}, None, None))
+    results.append(ecad_adapter.EcadAdapter().capture({}, None, None))      # 보드를 붙이지 않은 과제의 ecad 결측 행
     frozen = ir_builder.freeze_snapshot(store, project_id="p_real", owner_sub=OWNER, label="RV1",
                                         adapter_results=results, captured_at=1756600000)
     target_key = f"snap:{frozen['snapshot_id']}"

@@ -279,6 +279,21 @@ def resolve_tool_name(want: str, names: Sequence[str]) -> str:
     return hits[0] if len(hits) == 1 else want
 
 
+def backend_tool_name(want: str, backend: str | None, tool_map: Mapping[str, str]) -> str | None:
+    """원래 이름 하나 → 그 **백엔드**가 게이트웨이에 내놓은 이름(`/tools-map` 의 map — 도구 → 백엔드). 없으면 None.
+
+    게이트웨이는 이름이 겹치면 `backend.replace('-','') + '_'` 를 붙인다(HWAXMcpGateway 재집계 — odb-hub 의 `list_parts` 는
+    StepForge 와 겹쳐 `odbhub_list_parts` 다). 두 꼴 가운데 그 백엔드의 것만 본다 — 이름 suffix 를 모든 백엔드에 맞추면
+    겹친 이름이 다의가 되어 맨이름으로 나가고, 그 이름은 게이트웨이에 없다.
+    """
+    if not backend or not tool_map:
+        return None
+    for name in (want, f"{backend.replace('-', '')}_{want}"):
+        if tool_map.get(name) == backend:
+            return name
+    return None
+
+
 class CallRecorder:
     """어댑터의 모든 소스 호출을 실행하고 rr_snapshot_calls 행 초안으로 모은다(plan §2.11.4).
 
@@ -288,12 +303,14 @@ class CallRecorder:
 
     def __init__(self, snapshot_id: str, *, mcp: ToolChannel | None = None,
                  rest: RestGetClient | None = None, start_seq: int = 1,
-                 tool_names: Sequence[str] = ()) -> None:
+                 tool_names: Sequence[str] = (), tool_map: Mapping[str, str] | None = None) -> None:
         self.snapshot_id = snapshot_id
         self.mcp = mcp
         self.rest = rest
         # 게이트웨이가 노출하는 실이름들 — 비면 맨이름으로 부른다(발견 실패가 캡처를 막지 않는다).
         self.tool_names = tuple(tool_names)
+        # 실이름 → 백엔드(`/tools-map` 의 map). 있으면 그 호출의 app_key 백엔드 것으로 먼저 푼다(`backend_tool_name`).
+        self.tool_map = dict(tool_map or {})
         self.calls: list[dict] = []
         self._start_seq = int(start_seq)
         self._seq = int(start_seq)
@@ -312,8 +329,13 @@ class CallRecorder:
         return call_id
 
     def call(self, channel: str, tool: str, args: Mapping[str, Any] | None = None, *,
-             source_kind: str, app_key: str | None = None) -> dict:
-        """채널 하나를 호출하고 원문을 남긴다. 반환 {'ok', 'result'|'error', 'call_id', 'http_status'}."""
+             source_kind: str, app_key: str | None = None,
+             response_contract: Mapping[str, Mapping[str, str]] | None = None) -> dict:
+        """채널 하나를 호출하고 원문을 남긴다. 반환 {'ok', 'result'|'error', 'call_id', 'http_status'}.
+
+        `response_contract` 는 그 어댑터의 응답 계약표다(없으면 `RESPONSE_CONTRACT`) — 계약표는 맨이름 키라 다른 앱의 같은 이름
+        (StepForge `list_parts` 와 ODB 허브 `list_parts`)을 남의 계약으로 재지 않게 어댑터가 제 표를 넘긴다.
+        """
         args = dict(args or {})
         started = int(time.time())
         began = time.monotonic()
@@ -324,7 +346,10 @@ class CallRecorder:
             # 정본 §2.13.2 — 발견으로 얻은 **게이트웨이 실이름**(접두 포함형)을 호출 인자와
             # `rr_snapshot_calls.tool` 에 적는다. 맨이름으로 부르면 게이트웨이가 이름 충돌로 접두를
             # 붙이는 순간 호출이 조용히 전멸한다(probe 는 suffix 로 찾으니 '도구 있음' 으로 보고한다).
-            real = resolve_tool_name(tool, self.tool_names) if self.tool_names else tool
+            # 도구 지도가 있으면 그 호출의 백엔드(app_key) 것을 먼저 고른다 — suffix 만으로는 두 앱이 같은 이름을 낼 때 다의다.
+            real = backend_tool_name(tool, app_key, self.tool_map) if self.tool_map else None
+            if real is None:
+                real = resolve_tool_name(tool, self.tool_names) if self.tool_names else tool
             reply = self.mcp.call(real, args) if self.mcp is not None else {"ok": False, "error": "no_channel"}
             logged_tool = real
         else:
@@ -348,7 +373,7 @@ class CallRecorder:
             error = error.replace(own, timed_out, 1) if "own_error" in reply else timed_out
         # 응답 계약 검사(§2.13.1) — 위반은 예외가 아니라 행에 남는 표기다.
         # 계약표는 맨이름 키다 — 실이름으로 찾으면 전부 '계약 없는 도구' 가 되어 검사가 조용히 꺼진다.
-        contract = check_contract(tool, reply.get("result")) if ok else {
+        contract = check_contract(tool, reply.get("result"), response_contract) if ok else {
             "contract_ok": None, "missing": [], "type_mismatch": []}
         self.calls.append({
             "source_kind": source_kind, "app_key": app_key, "channel": channel, "tool": logged_tool,
