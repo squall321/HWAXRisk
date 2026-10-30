@@ -176,6 +176,20 @@ def test_ladder_fingerprint_same_domain_scores():
     assert renamed["evidence"]["geom_fp"] == "ff00"
 
 
+def test_ladder_fingerprint_keeps_running_for_mcad_when_ecad_nodes_are_present():
+    """4단계는 ecad 노드만 뺀다(ecad 는 1·5·7 단계만, §2.6.4) — ecad 노드가 실린 쌍 비교에서도 옮겨진 mcad 파트는 지문으로 잇는다.
+
+    종전에는 ecad 노드가 하나라도 있으면 단계를 통째로 꺼 이 쌍이 5단계(이름)로 내려갔다 — ECAD 1단계 전에는 ecad 노드가 없어
+    드러나지 않았다(포털 docs/design-risk-review/ecad-1031)."""
+    base = [mcad("b1", "/x/alpha", "alpha", geom_fp="ff00"), ecad("e1", "U1000")]
+    target = [mcad("t1", "/y/alpha", "alpha", geom_fp="ff00"), ecad("e1", "U1000")]
+    records = sameas.resolve(base, target, [], [], "pair", None)
+    moved = next(r for r in records if (r["a"], r["b"]) == ("b1", "t1"))
+    assert (moved["method"], moved["score"], moved["status"]) == ("fingerprint", 0.95, "auto")
+    # ecad 끼리는 지문이 아니라 이름(5단계)으로 잇는다.
+    assert next(r for r in records if r["a"] == "e1")["method"] == "name_norm"
+
+
 def test_ladder_fingerprint_one_to_many_falls_through_to_fuzzy():
     a = [mcad("b1", "/x/alpha", "alpha", geom_fp="ff00")]
     b = [mcad("t1", "/y/a1", "alpha_1", geom_fp="ff00"), mcad("t2", "/y/a2", "alpha_2", geom_fp="ff00")]

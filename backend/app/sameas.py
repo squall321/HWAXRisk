@@ -422,13 +422,13 @@ def resolve(
             taken_b.add(b_nid)
             uf.union(a_nid, b_nid)
 
-    def free_pairs() -> list[tuple[str, Mapping[str, Any], str, Mapping[str, Any]]]:
+    def free_pairs(without_ecad: bool = False) -> list[tuple[str, Mapping[str, Any], str, Mapping[str, Any]]]:
         out = []
         for a_nid, a in ((str(n["nid"]), n) for n in a_nodes):
-            if a_nid in taken_a:
+            if a_nid in taken_a or (without_ecad and _domain(a) == "ecad"):
                 continue
             for b_nid, b in ((str(n["nid"]), n) for n in b_nodes):
-                if b_nid in taken_b or (a_nid, b_nid) in blocked:
+                if b_nid in taken_b or (a_nid, b_nid) in blocked or (without_ecad and _domain(b) == "ecad"):
                     continue
                 out.append((a_nid, a, b_nid, b))
         return out
@@ -497,7 +497,8 @@ def resolve(
     # --- 3단계 exact_path — pair 스코프의 mcad 만.
     # dyna 는 canon_key 에 sha 가 들어 있어 대상이 아니고(5단계로), ecad 는 1차에서 1·5·7 단계만 허용한다(§2.6.4).
     if scope == "pair":
-        for a_nid, a, b_nid, b in free_pairs():
+        # mcad 끼리만 보는 단계라 ecad 노드를 짝 목록에 넣지 않는다 — 보드 부품 수천 개가 실리면 그 목록만 수백만 쌍이다.
+        for a_nid, a, b_nid, b in free_pairs(without_ecad=True):
             if a_nid in taken_a or b_nid in taken_b:
                 continue
             if _domain(a) != "mcad" or _domain(b) != "mcad":
@@ -506,48 +507,49 @@ def resolve(
                 accept(a_nid, b_nid, "exact_path", 1.0, {"canon_key": _canon_key(a)})
 
     # --- 4단계 fingerprint — 같은 도메인은 geom_fp, mcad↔dyna 는 size/volume 상대오차(§2.6.2).
-    if not ecad_here:
-        fp_pairs: list[tuple[str, str, float, str, dict]] = []
-        for a_nid, a, b_nid, b in free_pairs():
-            da, db = _domain(a), _domain(b)
-            if da == db and scope == "pair":
-                fp = a.get("geom_fp")
-                if fp and fp == b.get("geom_fp"):
-                    name_sim = _name_sim(a, b)
-                    if name_sim >= 0.5:
-                        fp_pairs.append((a_nid, b_nid, 0.95, "auto",
-                                         {"geom_fp": fp, "name_sim": round(name_sim, 6)}))
-                    else:
-                        fp_pairs.append((a_nid, b_nid, 0.85, "pending",
-                                         {"geom_fp": fp, "name_sim": round(name_sim, 6)}))
-            elif {da, db} == {"mcad", "dyna"} and scope == "intra":
-                sa, sb = _size_sorted(a), _size_sorted(b)
-                if len(sa) != 3 or len(sb) != 3 or min(sb) <= 0:
-                    continue
-                if any(abs(x - y) / y > 0.02 for x, y in zip(sa, sb)):
-                    continue
-                va, vb = _volume(a), _volume(b)
-                penalty = 0.0
-                if _is_solid(a) and _is_solid(b) and va is not None and vb is not None and vb > 0:
-                    if abs(va - vb) / vb > 0.03:
-                        continue
-                elif va is None or vb is None:
-                    penalty = 0.05
-                fp_pairs.append((a_nid, b_nid, 0.90 - penalty, "auto",
-                                 {"size_rel_max": round(max(abs(x - y) / y for x, y in zip(sa, sb)), 6),
-                                  "volume_penalty": penalty}))
-        # 1:1 인 쌍만 확정하고 1:N 은 6단계로 내린다(§2.6.2 4단계).
-        count_a: dict[str, int] = {}
-        count_b: dict[str, int] = {}
-        for a_nid, b_nid, _s, _st, _ev in fp_pairs:
-            count_a[a_nid] = count_a.get(a_nid, 0) + 1
-            count_b[b_nid] = count_b.get(b_nid, 0) + 1
-        for a_nid, b_nid, score, status, evidence in sorted(fp_pairs, key=lambda t: (-t[2], t[0], t[1])):
-            if a_nid in taken_a or b_nid in taken_b:
+    # ecad 노드는 이 단계에 들지 않는다(1차는 1·5·7 단계만, §2.6.4) — 그 노드만 뺀다. 단계를 통째로 끄면 ecad 가 실린 쌍 비교에서
+    # mcad·dyna 의 지문 대응까지 꺼진다(ECAD 1단계 전에는 ecad 노드가 없어 드러나지 않았다).
+    fp_pairs: list[tuple[str, str, float, str, dict]] = []
+    for a_nid, a, b_nid, b in free_pairs(without_ecad=True):
+        da, db = _domain(a), _domain(b)
+        if da == db and scope == "pair":
+            fp = a.get("geom_fp")
+            if fp and fp == b.get("geom_fp"):
+                name_sim = _name_sim(a, b)
+                if name_sim >= 0.5:
+                    fp_pairs.append((a_nid, b_nid, 0.95, "auto",
+                                     {"geom_fp": fp, "name_sim": round(name_sim, 6)}))
+                else:
+                    fp_pairs.append((a_nid, b_nid, 0.85, "pending",
+                                     {"geom_fp": fp, "name_sim": round(name_sim, 6)}))
+        elif {da, db} == {"mcad", "dyna"} and scope == "intra":
+            sa, sb = _size_sorted(a), _size_sorted(b)
+            if len(sa) != 3 or len(sb) != 3 or min(sb) <= 0:
                 continue
-            if count_a[a_nid] > 1 or count_b[b_nid] > 1:
+            if any(abs(x - y) / y > 0.02 for x, y in zip(sa, sb)):
                 continue
-            accept(a_nid, b_nid, "fingerprint", score, evidence, status)
+            va, vb = _volume(a), _volume(b)
+            penalty = 0.0
+            if _is_solid(a) and _is_solid(b) and va is not None and vb is not None and vb > 0:
+                if abs(va - vb) / vb > 0.03:
+                    continue
+            elif va is None or vb is None:
+                penalty = 0.05
+            fp_pairs.append((a_nid, b_nid, 0.90 - penalty, "auto",
+                             {"size_rel_max": round(max(abs(x - y) / y for x, y in zip(sa, sb)), 6),
+                              "volume_penalty": penalty}))
+    # 1:1 인 쌍만 확정하고 1:N 은 6단계로 내린다(§2.6.2 4단계).
+    count_a: dict[str, int] = {}
+    count_b: dict[str, int] = {}
+    for a_nid, b_nid, _s, _st, _ev in fp_pairs:
+        count_a[a_nid] = count_a.get(a_nid, 0) + 1
+        count_b[b_nid] = count_b.get(b_nid, 0) + 1
+    for a_nid, b_nid, score, status, evidence in sorted(fp_pairs, key=lambda t: (-t[2], t[0], t[1])):
+        if a_nid in taken_a or b_nid in taken_b:
+            continue
+        if count_a[a_nid] > 1 or count_b[b_nid] > 1:
+            continue
+        accept(a_nid, b_nid, "fingerprint", score, evidence, status)
 
     # --- 5단계 name_norm — name_norm_canon 완전 일치이고 후보가 1:1 일 때만.
     name_pairs: list[tuple[str, str]] = []
