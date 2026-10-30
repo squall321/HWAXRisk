@@ -2,7 +2,7 @@
 
 설계 리스크 심사 앱(HEAX 앱 id `hwax_risk`, 표시명 **HWAX Risk Review**).
 
-과제의 MCAD(StepForge)·Dyna(DynaForge)·ECAD(ODB 어댑터 계약, 스텁) 소스를 **읽기 전용**으로 읽어
+과제의 MCAD(StepForge)·Dyna(DynaForge)·ECAD(ODB 허브 1단계 — 보드·적층·분류된 부품) 소스를 **읽기 전용**으로 읽어
 불변 설계 IR 스냅샷(rr_ir)으로 동결하고, 단일 스냅샷의 상태(rr_state)와 두 스냅샷의 3층 diff(rr_diff)를
 결론 없이 코드가 정리하며, HW/XD 전문가 패널이 낸 finding·gain·성격 서술을 IR id 에 앵커된 원자로
 앱 DB 에 누적해 다음 과제의 심사 브리프에 되먹인다. 이름·경로·계약 정본은 포털 리포
@@ -10,7 +10,7 @@
 
 현재는 **P6(학습 루프)까지 구현** 단계다 — P1 IR 스냅샷·상태·게이트·규칙, P2 Dyna 어댑터·same-as·3층 diff, P3 패널 e2e·서술 저장,
 P4 커버리지·편성·배치 러너·통합 보고서, P5 재사용 루프(선례·브리프), P6 학습 루프(라벨·패턴·규칙·지표)가 코드와 테스트로 서 있다.
-남은 구멍은 E10 필드·VOC 근거(스텁)·라벨 자동 유입 4경로·프런트 화면 6종·P7 ODB 실연동이며 전부 [checklist.md](checklist.md) 에 있다.
+남은 구멍은 E10 필드·VOC 근거(스텁)·라벨 자동 유입 4경로·프런트 화면 6종·P7 ODB 2단계(부품 좌표·넷)이며 전부 [checklist.md](checklist.md) 에 있다.
 레이아웃은 HEAXHub `fastapi_react` 스택(`backend/` + `frontend/`, MaterialTwinWeb 선례)이다.
 
 ## 구성 요소
@@ -24,7 +24,7 @@ P4 커버리지·편성·배치 러너·통합 보고서, P5 재사용 루프(�
 | UI | `GET /` → `frontend/dist`(StaticFiles, html=True) — HashRouter 화면 6종 `RiskHomePage` · `ProjectPage` · `SnapshotPage` · `ComparePage` · `TargetPage` · `SettingsPage`. dist 가 없으면 `backend/app/static/index.html` 플레이스홀더 |
 | DB | `<data>/risk_review.db` — `PRAGMA user_version`=1, plan §5.2.2 `rr_*` 표 전문(**41표**) + 살림 표 `_schema_migrations` · `_user_credentials`, WAL |
 | 러너 | `backend/app/runner.py` — 데몬 스레드 `panel_loop`(패널 편성·심의 호출·회수) · `sync_loop`(RA·ADH 보류 op) · `nightly_loop`(00:30 지표 재합산·패턴 채굴·근접 중복 스캔), lifespan 이 start/stop |
-| 파이프라인 | 캡처 `adapters/{mcad,dyna,ecad_stub}.py` → `ir_builder.py`(rr_ir) → `state.py`(G1~G7·signals·rule_hits) · `sameas.py`(사다리 7단) → `diff.py`(3층) → `brief.py`(E0~E10) → `narrative.py`(risk_spec 파싱·서술 저장) → `registry.py`(병합·C1~C3·보고서) → `learning.py`·`metrics.py`·`nightly.py`(학습 루프) |
+| 파이프라인 | 캡처 `adapters/{mcad,dyna,ecad}.py` → `ir_builder.py`(rr_ir) → `state.py`(G1~G7·signals·rule_hits) · `sameas.py`(사다리 7단) → `diff.py`(3층) → `brief.py`(E0~E10) → `narrative.py`(risk_spec 파싱·서술 저장) → `registry.py`(병합·C1~C3·보고서) → `learning.py`·`metrics.py`·`nightly.py`(학습 루프) |
 | 스키마 | `backend/app/schemas/{rr_ir, rr_state, rr_diff, risk_spec, seat_opinion}.v1.json`(JSON Schema draft-07) |
 | 자산 | `backend/app/assets/{taxonomy, character-vocab, character-seed-rules, adjacency, rules-seed, seat-contract}.v1.json`(package-data) · `docs/odb-adapter-contract.md` |
 
@@ -175,7 +175,7 @@ HWAXRisk/
 │   ├── app/                  # 38모듈
 │   │   ├── main · cli · config · risk_store · identity · errors · common      # 골격·경계
 │   │   ├── routes(64경로) · mcp_server(7도구) · export · taxonomy            # 바깥으로 난 창
-│   │   ├── adapters/{base,registry,mcad,dyna,ecad_stub}                       # 소스 앱 읽기(읽기 전용)
+│   │   ├── adapters/{base,registry,mcad,dyna,ecad}                            # 소스 앱 읽기(읽기 전용)
 │   │   ├── ir_builder · state · sameas · diff                                 # IR·상태·비교
 │   │   ├── brief · narrative · registry · character · render · requirements   # 서술·등록부
 │   │   ├── runner · planner · roster · engine_client                          # 편성·심의 호출

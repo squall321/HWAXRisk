@@ -14,7 +14,7 @@
 | §0 | spine — 용어·식별자·저장 3층·파일·API·상수표 | 전체 이름 |
 | §0.5.1 · §0.5.2 · §0.5.3 | REST base `/api` 경로 목록 · MCP 도구 시그니처(6종 + P5 `risk_add_finding`) · Settings env `HWAXRISK_` | `backend/app/{routes,mcp_server,config}.py` |
 | §2 | rr_ir 봉투·노드·엣지·소스 매핑·same-as·ckey·dims_named·원장·ir_hash | `backend/app/schemas/rr_ir.v1.json` · `ir_builder.py` |
-| §2.5.3 · §2.13.5 | ODB 어댑터 계약 4도구·필드·상한, 스텁 동작 | `docs/odb-adapter-contract.md` · `adapters/ecad_stub.py` |
+| §2.5.3 · §2.13.5 | ODB 허브 어댑터 — 지금 도구·발견·두 단계·필드·표지(1단계, 2026-10-31 개정) | `docs/odb-adapter-contract.md` · `adapters/ecad.py` |
 | §2.11 · §2.13 | 캡처 잡·부분 실패·호출 예산·어댑터 실측 계약(suffix 매칭·타입 정규화·절단 감지) | `backend/app/adapters/{base,registry,mcad,dyna}.py` |
 | §3 | rr_state(G1~G7·signals·character_seed·feature_vector·rule_hits)·rr_diff 3층 | `backend/app/schemas/rr_state.v1.json` · `rr_diff.v1.json` |
 | §3.2 · §3.3 | 게이트·규칙 평가 · 3층 diff·의미 이벤트·비교 가능성 5키 | `backend/app/{state,sameas,diff}.py` |
@@ -41,7 +41,7 @@
 포털(HWAXPortal)                      HEAX 앱 hwax_risk(이 리포)                      소스 앱(읽기 전용)
  메뉴 타일 hwax-risk ─launch─▶ /apps/hwax_risk/ (Vite/React SPA, 화면 6종)            StepForge   heax-step_forge   (mcad)
  심의 Job 'risk-review'(L1)     /apps/hwax_risk/api/*     REST                DynaForge   heax-kooremapper_mcp (dyna)
-                                /apps/hwax_risk/mcp       MCP ──▶ 게이트웨이  ODB hub     계약만(ecad, 스텁)
+                                /apps/hwax_risk/mcp       MCP ──▶ 게이트웨이  ODB hub     odb-hub           (ecad, 1단계)
                                 $DATA/risk_review.db      앱 DB(단일 진실 원천)
                                                           ↕ appdata-to-drive.sh 백업 · cae00 이관
 ```
@@ -108,7 +108,7 @@
 단계별 상태와 잔여 백로그의 정본은 이 리포 `checklist.md` 다. 여기서는 계층만 적는다.
 
 - **계약** — JSON 스키마 5종(draft-07, 최상위만 `additionalProperties:false`)·자산 JSON 6종(`backend/app/assets/`)·ODB 어댑터 계약 문서·§5.2.2 DDL 41표.
-- **캡처·IR**(P1·P2) — `adapters/{base,registry,mcad,dyna,ecad_stub}` 가 소스 앱을 읽기 전용으로 열고 `ir_builder` 가 rr_ir 봉투를 동결한다.
+- **캡처·IR**(P1·P2 · ECAD 1단계) — `adapters/{base,registry,mcad,dyna,ecad}` 가 소스 앱을 읽기 전용으로 열고 `ir_builder` 가 rr_ir 봉투를 동결한다.
   표기층 위생·인젝션 어휘(`render.sanitize_source_text`·`INJECTION_LEXICON`)가 원문을 «…» 안에 가두고 적중분은 `suspect_text` 큐로 보낸다.
 - **상태·비교**(P1·P2) — `state`(G1~G7·signals·`character_seed`·`feature_vector`·`rule_hits`) · `sameas`(사다리 7단·헝가리안·원장 재적용) · `diff`(3층·의미 이벤트·`comparability` 5키).
 - **서술·등록부**(P3) — `brief`(E0~E10) → 심의 → `narrative`(risk_spec 파싱·cites·`evidence_grade`·좌석 의견) → `registry`(병합·별칭 체인·status 이력·기각 보존).

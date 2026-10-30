@@ -18,7 +18,7 @@
 | P4 커버리지·편성·배치·보고서 | §9.5 | **완료** | `planner.py` · `roster.py` · `runner.py` 배치 · C1~C3 · `GET /api/meta/metrics` |
 | P5 재사용 루프 | §9.6 | **완료**(합성 픽스처 기준) — E10·UI 3종 2026-09-25 에 닫음 | `brief.py` E5±·E6~E8 · `risk_add_finding` · `/api/precedents` |
 | P6 학습 루프 | §9.7 | **부분** — 라벨 자동 유입 4경로 미구현(의도적 노출) | `learning.py` · `metrics.py` · `nightly.py` · `bootstrap_*.py` |
-| P7 ODB 실연동 | §9.8 | **미착수**(조건부 — ODB hub 계약 합의 대기) | `adapters/ecad_stub.py` 만 |
+| P7 ODB 실연동 | §9.8 | **1단계 완료**(2026-10-31, 가지 `wt1031/ecad` — 보드·적층·분류된 부품) · 2단계(좌표·넷)는 ODB 허브 OH-01·OH-02 뒤 | `adapters/ecad.py` · 보드 고르기 REST·MCP(↓ 4장) |
 
 실측 규모 — 백엔드 `app/` 38모듈 25,018줄 · 프런트 `src/` 5,700여 줄 · REST 66경로 · MCP 7도구 · DDL `rr_*` 42표(v2) + 살림 2표 · 테스트 42파일.
 
@@ -318,11 +318,32 @@
 **HEAX 플랫폼 쪽 알림**(앱 버그 아님) — 헬스 프로브가 `/apps/hwax_risk/apps/hwax_risk/api/health` 로 접두를 두 번 붙여 404 를 3,756회 냈다
 (200 은 0회). `materialtwin_web`·`web_design_agents`·`voice_recorder` 로그에도 같은 이중 접두가 있어 플랫폼 공통 문제다. 앱은 정상 기동 중이다.
 
-## 4. P7 — 조건부, 미착수
+## 4. P7 — ODB 허브(ECAD)
 
-- [ ] `adapters/ecad.py`(계약 4도구, `registry.py` 도구명 발견) · ir_version 1.1(`MIGRATIONS` v2) · refdes↔파트 사전 UI · `ecad.*` 이벤트 · SedInput 어댑터
+> 1단계는 가지 `wt1031/ecad`(2026-10-31)다 — 요청서 정본은 포털 `docs/design-risk-review/ecad-1031/request.md`(ER-01 ~ ER-06 · OH-01 ~ OH-05),
+> 사용자 결정 D-1 = (가)(계약 4도구를 새로 내지 않고 허브가 지금 도구에 묶음 읽기를 더한다). 결정과 까닭은 context-notes 'ECAD 1단계' 절(EC-1~).
+> 계약은 `docs/odb-adapter-contract.md` 다.
+
+- [x] 선행 — 계약 합의 대신 지금 도구(게이트웨이 백엔드 `odb-hub` 39개)로 간다(D-1 = 가). 스텁 `ecad_stub.py` 는 지웠다
+- [x] ER-02 발견 — `/tools-map` 의 백엔드 `odb-hub` 와 원래 이름(접두 `odbhub_` 포함) · 상태 실측(ready · unavailable · planned, `contract_only` 없음) ·
+      캡처의 MCP 호출은 그 소스의 백엔드 이름으로(`backend_tool_name`) · 응답 계약은 어댑터마다 제 표로
+- [x] ER-03 `adapters/ecad.py` — `find_job` · `get_board_layers` · `check_job_stackup` · `get_volume_result` · `get_odb_download` 한 번씩 +
+      `list_parts` 100행씩 → board(소스 1건) · layer(5종, 위에서 아래 idx) · component(분류된 부품, 좌표·넷 없이) · ir_version 1.1
+- [x] ER-04 표지 열 개(`rr_ir.v1.json` degraded_code) · 붙은 보드를 못 읽으면 `ecad_capture_failed` · 허브 봉투형 오류는 경고만 ·
+      `sig:counts.ecad.nets` 는 0 이 아니라 미측정
+- [x] ER-01 보드 고르기 — `GET /api/ecad/boards` · `PUT · DELETE /api/projects/{id}/ecad-board` · MCP `risk_find_ecad_boards` · `risk_set_ecad_board`
+      (find_job 후보를 사람이 고르고, 붙이기는 find_job 에 있는 job_id 만 · 일반 소스 연결의 kind ecad 는 422 `ecad_board_route`)
+- [x] ER-05 `docs/odb-adapter-contract.md` 개정(지금 도구 · 발견 · 두 단계 · 사상 · 표지 · 의존 도메인 6) — 포털 plan §2.5.3 · §2.13.5 는 포털 몫
+- [x] same-as 4단계는 ecad 노드만 뺀다(종전에는 ecad 가 하나라도 있으면 단계를 통째로 꺼 쌍 비교의 mcad 지문 대응까지 꺼졌다) · 3단계도 ecad 를 짝 목록에서 뺀다
+- [x] 시험 — 부록 A 꼴 가짜 odb-hub(`tests/test_ecad_adapter.py`) · 남 숨김 표 · 변이 20/20 · 전체 3,427 통과 · xfail 4 · 실패 0(context-notes EC-13)
+- [ ] 화면 — ProjectPage 의 ECAD 카드에 보드 찾기 · 후보 고르기 · 떼기, SnapshotPage 의 표지 이름(화면 세션 몫)
+- [ ] 포털 plan §2.5.3 · §2.13.5(그리고 §2.3 attrs 머리 · §2.11.3 5단계 · §2.13.2 ecad 집합)를 1단계 글로(포털 세션)
+- [ ] cae00 다시 볼 시험(포털 요청서 6절 1단계 캡처) — ecad_absent 없음 · component 수 = list_parts total · layer 수 = 5종 행 수 · 빠진 칸은 표지
+- [ ] 결정 필요 — 한쪽에만 ECAD 가 있는 비교(앞 스냅샷에 보드가 없으면 부품·층이 전부 part.added) · 넷 의존 도메인(pwr · rf)을 2단계까지 deferred 로 둘지 ·
+      모델 크기 상한(risk_max_leaf)에 ECAD 부품 수를 셀지
+- [ ] 2단계 ER-06 — ODB 허브 OH-01 · OH-02(가능하면 OH-03 · OH-04) 뒤. 부품 좌표 · 넷 · net 노드 · component→net 엣지 · 분류 안 된 부품 · rot 정규화 · ecad↔mcad 기하 지문
+- [ ] refdes↔파트 사전 UI · `ecad.*` 이벤트 · SedInput 어댑터
 - [ ] 예측기 HEAX 앱 계획서(별도 리포·매니페스트, 라벨 원천 `GET /api/export`) — 활성화 게이트 `n_labeled ≥50`·`project ≥15`
-- [ ] 선행(§10 9·14a) — ODB hub 계약 합의, 명명 규칙. 그전에는 `ecad_stub.py` 가 `discover` 만 하고 `capture` 는 빈 결과 + `ecad_absent` 다
 
 ## 5. 운영·이관
 
