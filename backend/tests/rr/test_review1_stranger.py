@@ -145,6 +145,12 @@ CASES: dict[tuple[str, str], tuple[Call, tuple[str, ...]]] = {
     ("POST", P + "/projects/{project_id}/sources"): (
         lambda i, who: routes.add_source(i["project"], routes.SourceBody(kind="mcad", ref={"stepforge_project_id": "sf-x"}),
                                          ident=who), ("project",)),
+    # ECAD 보드(포털 docs/design-risk-review/ecad-1031 ER-01) — 과제 소유 검사가 ODB 허브를 부르기 전이다.
+    ("PUT", P + "/projects/{project_id}/ecad-board"): (
+        lambda i, who: routes.put_ecad_board(i["project"], routes.EcadBoardBody(odb_job_id="0123456789abcdef"), ident=who),
+        ("project",)),
+    ("DELETE", P + "/projects/{project_id}/ecad-board"): (
+        lambda i, who: routes.delete_ecad_board(i["project"], ident=who), ("project",)),
     ("POST", P + "/projects/{project_id}/snapshots"): (
         lambda i, who: routes.create_snapshot(i["project"], routes.SnapshotBody(kinds=["mcad"]), ident=who), ("project",)),
     ("POST", P + "/projects/{project_id}/dims"): (
@@ -362,6 +368,7 @@ GET_EXEMPT: dict[tuple[str, str], str] = {
     ("GET", P + "/export"): "제 행만 반출 — id 인자가 없다(아래 시험)",
     ("GET", P + "/curation"): "제 큐레이션 큐 — id 인자가 없다(아래 시험)",
     ("GET", P + "/patterns"): "제 패턴 — id 인자가 없다(아래 시험)",
+    ("GET", P + "/ecad/boards"): "ECAD 보드 찾기 — ODB 허브 find_job 후보뿐이고 과제 · 대상 인자가 없다(아래 시험)",
 }
 GET_CASES: dict[tuple[str, str], tuple[Call, tuple[str, ...]]] = {
     ("GET", P + "/projects/{project_id}"): (lambda i, who: routes.get_project(i["project"], ident=who), ("project",)),
@@ -453,7 +460,8 @@ def test_the_exempt_reading_routes_do_not_name_the_owners_project_or_target(ledg
              lambda: routes.list_targets(ident=stranger), lambda: routes.list_reports(ident=stranger),
              lambda: routes.get_curation(ident=stranger), lambda: routes.get_patterns(ident=stranger),
              lambda: routes.get_metrics(ident=stranger), lambda: routes.get_taxonomy(),
-             lambda: routes.get_vocab(), lambda: routes.get_adapters(ident=stranger))
+             lambda: routes.get_vocab(), lambda: routes.get_adapters(ident=stranger),
+             lambda: routes.get_ecad_boards(q="PRJ", ident=stranger))
     for read in reads:
         _no_leak(_answer(read)[2], ids, ())
     _no_leak(asyncio.run(_drain(routes.get_export(ident=stranger))), ids, ())
@@ -463,6 +471,7 @@ def test_the_exempt_reading_routes_do_not_name_the_owners_project_or_target(ledg
 MCP_EXEMPT: dict[str, str] = {
     "risk_list_projects": "발견 — id 인자가 없다(남의 과제가 목록에 없는지는 아래 시험이 본다)",
     "risk_taxonomy": "공용 어휘 — id 인자가 없다",
+    "risk_find_ecad_boards": "ECAD 보드 찾기 — ODB 허브 find_job 후보뿐이고 과제 · 대상 id 인자가 없다",
 }
 MCP_CASES: dict[str, tuple[Callable[[dict], Any], tuple[str, ...]]] = {
     "risk_create_project": (lambda i: srv.risk_create_project(code=f"p-{uuid.uuid4().hex[:8]}", name="남의 과제",
@@ -507,6 +516,8 @@ MCP_CASES: dict[str, tuple[Callable[[dict], Any], tuple[str, ...]]] = {
     "risk_get_expert_report": (lambda i: srv.risk_get_expert_report(target_key=i["target"], agent_key=rig.SEAL), ("target",)),
     "risk_get_issues": (lambda i: srv.risk_get_issues(target_key=i["target"]), ("target",)),
     "risk_get_report": (lambda i: srv.risk_get_report(target_key=i["target"]), ("target",)),
+    "risk_set_ecad_board": (lambda i: srv.risk_set_ecad_board(project_id=i["project"], odb_job_id="0123456789abcdef"),
+                            ("project",)),
 }
 
 
@@ -551,7 +562,7 @@ def test_the_exempt_mcp_tools_do_not_name_the_owners_project_or_target(ledger, m
     """면제한 발견 · 어휘 도구도 남에게 주인의 과제 id · 대상 열쇠를 싣지 않는다."""
     store, ids = ledger
     factories.act_as_delegate(monkeypatch, OTHER)
-    for fn in (lambda: srv.risk_list_projects(), lambda: srv.risk_taxonomy()):
+    for fn in (lambda: srv.risk_list_projects(), lambda: srv.risk_taxonomy(), lambda: srv.risk_find_ecad_boards(query="PRJ")):
         _no_leak(_mcp(fn)[2], ids, ())
 
 
