@@ -230,7 +230,7 @@ def test_two_panel_jobs_made_in_the_same_second_read_as_the_later_one(risk_store
     assert routes.coverage_payload(target_key)["job"]["id"] == second
 
 
-def test_the_c3_follow_up_of_a_claude_tier_b_job_stays_on_glm(risk_store, cfg, monkeypatch):
+def test_the_c3_follow_up_of_a_claude_tier_b_job_stays_on_glm_with_the_glm_credential_order(risk_store, cfg, monkeypatch):
     """정책(의도 — 바꾸지 않는다) — Claude 로 고른 Tier B 잡이 닫힘 레벨 C3 에서 끝나면 러너가 세우는 자동 후속 Tier C 는 판단 LLM 을
     물려받지 않고 GLM 으로 돈다. 반출 동의는 잡마다다(사용자 결정 10-15) — 사람이 그 잡에 동의하지 않았는데 시스템이 데이터를 Claude 로
     보내지 않는다. 후속 잡에는 llm · consent_external 칸이 없고 자격은 GLM 잡의 순서(요청자 → 소유자)다(context-notes RF-11)."""
