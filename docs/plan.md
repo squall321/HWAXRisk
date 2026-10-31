@@ -98,7 +98,8 @@
 - 신원·메타 — `GET /health {ok, app_version, schema_version}` · `GET /me`(+`box{hostname, secrets_valid, cred_key_present}`) ·
   `PUT /me/portal-pat {pat|null}`(익명 401, 422 6종) · `GET /meta/{taxonomy, adapters, vocab, metrics}` · `POST /meta/metrics/recompute`.
 - 과제·소스·스냅샷 — `projects`(생성·조회·`PATCH`(lifecycle·등급·`mcp_visibility`)·멤버·이양·폐기·감사·유사·dims·요구·`iface-ledger`) ·
-  `sources` · `snapshots`(조회·게이트 ack·`rule_hits`) · `sameas`(조회·`decide`) · `diffs`.
+  `sources` · `snapshots`(조회·게이트 ack·`rule_hits`) · `sameas`(조회·`decide` — 확정을 뒤집는 결정 · `merge_key` · 계면 별칭 철회
+  `revoke_iface_alias` 는 같은 트랜잭션에서 키 전파 `rekey` 를 돈다, §5.9.5) · `diffs`.
 - 심사 — `targets`(브리프·커버리지·편성 `jobs`·`refresh_roster`·`resync`·`findings`·`registry`·`verdict`) · `panels`(브리프·`complete`) ·
   `registry`(status·visibility·merge) · `findings`(수정·삭제·라벨) · `curation` · `patterns` · `precedents` · `refs/{ref:path}`.
 - 살림 — `vocab/{synonyms, stop-tokens}` · `jobs/{id}/{action}` · `GET /export` · `POST /import`.
@@ -112,6 +113,7 @@
   표기층 위생·인젝션 어휘(`render.sanitize_source_text`·`INJECTION_LEXICON`)가 원문을 «…» 안에 가두고 적중분은 `suspect_text` 큐로 보낸다.
 - **상태·비교**(P1·P2) — `state`(G1~G7·signals·`character_seed`·`feature_vector`·`rule_hits`) · `sameas`(사다리 7단·헝가리안·원장 재적용) · `diff`(3층·의미 이벤트·`comparability` 5키).
 - **서술·등록부**(P3) — `brief`(E0~E10) → 심의 → `narrative`(risk_spec 파싱·cites·`evidence_grade`·좌석 의견) → `registry`(병합·별칭 체인·status 이력·기각 보존).
+  `rekey`(§5.9.5) — 원장 확정이 뒤집히면(그리고 `merge_key` 면) 영향 원자의 주체를 지금 원장으로 다시 세어 원장 별칭을 맞추고 등록부를 다시 병합한다.
   원문은 `rr_panel_calls` 에 gzip 으로 남고 `rr_panels.brief_gz` 로 브리프 자체가 재현된다.
 - **편성·회계**(P4) — `planner`(Tier A/B/C·라운드로빈·인접·deferred·carried) · `roster` · `runner` 배치 · 완결 레벨 C1~C3 · 통합 보고서.
 - **재사용**(P5) — `brief` 의 E5+/E5−·E6~E8·kNN·유사 과제 · `rr_delta_priors` · `risk_add_finding` · `/api/precedents`.

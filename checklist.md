@@ -456,3 +456,24 @@
       검토 때와 같은 표면 고정 둘뿐 · GLM 출력은 종합 답의 llm: glm 말고 같다 — XR-18
 - [ ] 엔진 가지 x2-gate 를 main 에 합치기 전까지 이 가지의 사본 가드는 `HWAX_AGENT_SERVER_REPO=<x2-gate 작업 트리>` 로 돈다(delib_frames.json)
 - [ ] 포털 DelibOpts 가 target_key 를 선언 · 중계하면 strict xfail 이 스스로 꺼진다(코디네이터 몫 — 그 뒤 전체 시험 xfail 4)
+
+## 남은 일 10-31 — 리스크 엔진 B23 · B27 · B29(가지 `wt1031/bl-risk-engine`, 2026-10-31)
+
+> 포털 `docs/leftovers-1017/triage-1031.md` 표 B 의 세 줄(사용자 결정 10-31 — 표 B dev 작업). 결정과 까닭은 context-notes 'BE-1 ~ BE-10'.
+
+- [x] B23 ① 브리프 E0 요구 한 줄 — `요구 dim_limit n · 최소 여유 ±m 단위 [req:<이름>] · 시나리오 a/b` 또는 `요구 미등록`(BE-1 · BE-2)
+- [x] B23 ② E3 limit · margin 두 열 — 여유 오름차순, 미측정은 0 이 아니라 그 뒤, 요구 없는 치수는 `—`, 치수 없는 요구도 한 줄(BE-2)
+- [x] B23 ③ 원자 저장 — 여유 ≤0 인 요구를 가리키며 OK 면 undetermined + parse_warnings 1건, 패널 저장 행에 requirement_ref(BE-3)
+- [x] B27 로스터 동결 · 덧붙이기가 role_sha(원본 role 글 sha256[:12]) · persona_rev(그 앞 7자)를 채운다 — 원천은 list_agents(compact 끔)의
+      description(BE-4)
+- [x] B27 패널 의견 행에 로스터 판 사본 · nightly 스탬프에 persona_rev · E7 의 판이 다른 회수 의견에 `[이전 정의]`(둘 다 알 때만, BE-5)
+- [x] B29 rekey — 네 조작(same-as reject · unmerge_key · 계면 원장 rejected · 계면 별칭 revoke)과 짝 merge_key 가 한 트랜잭션에서 plan §5.9.5
+      여섯 걸음(원장 이력 · 주체 재계산 · 별칭 append/revoke · registry.merge · priors · 패턴 · 무효 큐 · rr_audit rekey)을 돈다(BE-6 · BE-7)
+- [x] B29 registry.merge — 원자가 옮겨 간 옛 행을 superseded 로 닫고 다시 서면 다시 연다 · 다른 대상의 닫힘 표지는 열지 않는다(BE-8)
+- [x] 시험 — 새 36(test_req_brief 8 · test_persona_rev 8 · test_rekey 20) · 옛 코드에서 32 붉음(나머지 넷은 지킴 시험) · 변이 31/31 ·
+      전체 3,540 통과 · xfail 4 · 실패 0(7630563, BE-9)
+- [ ] rr_states 의 요구 신호(동결 · 요구 편집의 상태 재계산) — 포털 106 줄의 다른 칸(BE-10)
+- [ ] 코드가 세운 병합(어휘 재계산 · 자동 승계)의 등록부 접기 · 사람 확정 계면 별칭의 길 · 원자가 지워져 빈 등록부 행(BE-10)
+- [ ] nightly 스탬프의 대상 전체 페르소나 판 · E7 AIDataHub 경로의 판(BE-10)
+- [ ] E7 앱 DB 경로의 상태 필터(dismissed · rejected_in_panel · superseded · recall_eligible=0 제외) — 포털 152 줄의 다른 칸(BE-10)
+- [ ] 화면 — SnapshotPage 여유 표 · 별칭 철회 버튼 · rekey 요약(화면 세션 몫)
