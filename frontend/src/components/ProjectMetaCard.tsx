@@ -76,8 +76,11 @@ export function ProjectMetaCard({
   const [confirmLife, setConfirmLife] = useState(false);
 
   const meta = knownMeta(detail.project, patched);
-  /** 닫은 때 — 방금 바꾼 답이 있으면 그것, 없으면 과제 상세의 열(과제를 다시 열어도 보인다). */
-  const closedAt = patched ? patched.closed_at : detail.project.closed_at;
+  /**
+   * 닫은 때 — 방금 바꾼 답이 있으면 그것, 없으면 과제 상세의 열(과제를 다시 열어도 보인다). 진행(active)이면 보이지 않는다 — 서버는 active 를
+   * 떠날 때만 찍고 되돌아와도 지우지 않아(열의 뜻이 'active 를 떠난 시각' 이다) 다시 연 과제에 지난 닫은 때가 남는다.
+   */
+  const closedAt = meta.lifecycle === "active" ? null : patched ? patched.closed_at : detail.project.closed_at;
   const control = visibilityControl(visibilityDenied ? "editor" : role, meta.mcp_visibility as McpVisibility | null);
   const editorLocked = role === "viewer";
   const withheld = withheldOps(detail);

@@ -33,6 +33,15 @@ test("과제 상세 — 구성원이 받은 실 응답의 메타 칸이 '모름'
   assert.equal(meta.myRole(detail.members, "editor@example.com"), "editor");
 });
 
+test("과제 상세 — 다시 진행(active)으로 돌린 과제는 서버에 남은 지난 닫은 때를 보이지 않는다", () => {
+  // 서버는 active 를 떠날 때만 closed_at 을 찍고 되돌아와도 지우지 않는다(열의 뜻 — active 를 떠난 시각). 실 응답 견본의 수명 주기만 바꿨다.
+  const reopened = { ...samples.projectDetailMember, project: { ...samples.projectDetailMember.project, lifecycle: "active" } };
+  assert.notEqual(reopened.project.closed_at, null);
+  const html = renderToStaticMarkup(h(ProjectMetaCard, { detail: reopened, role: "editor", onPatched() {} }));
+  assert.doesNotMatch(html, /닫은 때 /);
+  assert.equal(html.includes(NOT_SENT), false);
+});
+
 test("홈 카드 — 실 응답이 네 칸을 다 실어 거름이 열리고, 내 역할로 거른다", () => {
   const cards = samples.projectCardsMember.projects;
   assert.deepEqual(meta.homeFieldsAvailable(cards), { lifecycle: true, role: true, excluded: true, classification: true });
