@@ -108,6 +108,22 @@ def test_a_gate_ack_left_on_an_older_judgement_or_on_a_pair_is_not_carried(wired
     assert state["gates"]["G1"]["ack_by"] is None
 
 
+def test_a_gate_ack_row_of_anyone_but_the_snapshot_owner_is_not_carried(wired):
+    """ack 라우트는 스냅샷 주인만 쓴다 — 주인이 다른 ack 행(고침 전의 들여오기가 남의 스냅샷 id 로 남겼을 수 있는 행)은 게이트 · 신호 ·
+    요약에 싣지 않는다(그 사람이 ack_by 를 주인의 이메일로 적어도)."""
+    store = wired
+    project_id = factories.make_project(store)
+    sid = factories.make_snapshot(store, project_id, [factories.adapter_fixture(MCAD_ONLY)], label="남 ack")["snapshot_id"]
+    current = routes.get_snapshot(sid, part="state", ident=factories.ident(OWNER))["gates_hash"]
+    factories.seed_raw(store, "rr_gate_acks", {
+        "snapshot_id": sid, "gate": "G3", "owner_sub": STRANGER, "diff_id": None, "ack_by": OWNER, "ack_at": now_epoch(),
+        "ack_reason": "남이 적은 확인", "gates_hash": current},
+        reason="고침 전의 들여오기가 남의 스냅샷 id 로 남긴 ack 행 — 이제 들여오기는 parent_not_owned 로 막는다")
+    state = routes.get_snapshot(sid, part="state", ident=factories.ident(OWNER))
+    assert state["gates"]["G3"]["ack_by"] is None
+    assert state["signals"]["gates.summary"]["value"]["G3"]["ack"] is False
+
+
 # ---------------------------------------------------------------- 4. GET /part-keys/{ckey}
 def test_the_part_key_ledger_read_gives_the_key_state_to_its_owner_and_members(wired):
     """키 대장 한 행 — {ckey, status, merged_into, display_name, aliases[], decided_by, decided_at}. 주인은 다 보고, 그 키가 든 과제의

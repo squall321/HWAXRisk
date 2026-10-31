@@ -119,7 +119,8 @@ EXEMPT: dict[tuple[str, str], str] = {
     ("POST", P + "/vocab/synonyms"): "관리자 전용 공용 어휘 — 과제 · 대상 인자가 없다(남에게는 403)",
     ("POST", P + "/vocab/stop-tokens"): "관리자 전용 공용 어휘 — 과제 · 대상 인자가 없다(남에게는 403)",
     ("POST", P + "/import"): ("본문 행의 PK 는 부르는 사람이 준 값이다 — 남의 행과 PK 가 겹치면 그 줄만 owner_conflict 로 눕히고 값은 싣지"
-                              " 않는다(test_the_import_answer_names_only_the_supplied_key)"),
+                              " 않는다(test_the_import_answer_names_only_the_supplied_key). 남의(또는 없는) 과제 · 스냅샷 · 대상 · 비교에"
+                              " 매달린 줄은 parent_not_owned 로 눕는다(tests/test_project_reads.py 의 들여오기 시험)"),
 }
 
 

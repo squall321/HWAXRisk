@@ -574,6 +574,69 @@ def _diff_cols(local: dict, incoming: dict, cols: list[str]) -> list[str]:
     return [c for c in cols if _encode(local.get(c)) != incoming.get(c, None)]
 
 
+# 들여오는 줄이 매달리는 부모 — 과제 · 스냅샷 · 스냅샷 잡 · 대상 · 비교. 그 행의 주인(owner_sub)을 묻는다.
+_PARENT_SQL: dict[str, str] = {
+    "project": "SELECT owner_sub FROM rr_projects WHERE id = ?",
+    "snapshot": "SELECT owner_sub FROM rr_snapshots WHERE id = ?",
+    "snapshot_job": "SELECT owner_sub FROM rr_snapshot_jobs WHERE id = ?",
+    "target": "SELECT owner_sub FROM rr_targets WHERE target_key = ?",
+    "diff": "SELECT owner_sub FROM rr_diffs WHERE id = ?",
+}
+# 부모를 가리키는 열 — 표마다 이 이름의 열이 있으면 본다(rr_targets 의 target_key 는 자기 열쇠라 빼고, ref_id 는 kind 로 가른다).
+_PARENT_COLUMNS: dict[str, str] = {
+    "project_id": "project", "base_project_id": "project", "target_project_id": "project", "first_project_id": "project",
+    "snapshot_id": "snapshot", "base_snapshot_id": "snapshot", "target_snapshot_id": "snapshot",
+    "first_snapshot_id": "snapshot", "target_key": "target", "first_target_key": "target", "diff_id": "diff",
+}
+PARENT_NOT_OWNED = "parent_not_owned"
+OWNER_ROW_IMMUTABLE = "owner_row_immutable"
+
+
+def _scope_columns(table: str, cols: list[str], values: dict) -> tuple[str, ...]:
+    """그 줄의 범위를 정하는 부모 열 — 반출(`_select`)이 그 줄을 싣는 거름과 같은 차례다(과제 열 → 대상 열쇠 → 스냅샷 → 비교)."""
+    if table == "rr_projects":
+        return ()
+    if "project_id" in cols:
+        return ("project_id",)
+    if "target_key" in cols:
+        return ("target_key",)
+    if table == "rr_snapshot_calls":
+        return ("snapshot_id",) if values.get("snapshot_id") is not None else ("job_id",)
+    if "snapshot_id" in cols:
+        return ("snapshot_id",)
+    if table == "rr_diffs":
+        return ("base_project_id", "target_project_id")
+    if "diff_id" in cols:
+        return ("diff_id",)
+    return ()
+
+
+def _refusal(store: RiskStore, table: str, cols: list[str], values: dict, owner_sub: str) -> str | None:
+    """이 줄을 쓰면 남의 과제에 매달리는가 — 매달리면 그 까닭(conflicts[].reason), 아니면 None.
+
+    본문의 owner_sub 가 부른 사람이어도 project_id 같은 부모 열은 부르는 쪽이 적은 값이다 — 남의 과제 id 를 적은 멤버 행 하나로 그 과제의
+    구성원(owner 까지)이 됐고, 스냅샷 · 동결 잡 행으로 남의 과제 화면에 이름 · 판이 섰다(반대 검토 10-31 High). 범위 부모(반출이 그 줄을
+    싣는 거름의 열)는 이 박스에 있고 부른 사람 것이어야 한다 — 같은 들여오기에서 앞서 들어간 행도 된다(표 차례로 쓴다). 그 밖의 부모 열은
+    있으면 부른 사람 것이어야 한다(남의 스냅샷을 가리키는 내 대상으로 그 상태를 브리프로 읽는 길). 남의 것과 없는 것은 같은 까닭이다 —
+    부모가 있는지를 흘리지 않는다. 멤버 owner 행은 그 과제 주인의 것뿐이다(불변식 — 소유는 이양만이 바꾼다, routes.put_members 와 같다)."""
+    scope = _scope_columns(table, cols, values)
+    refs = [(c, _PARENT_COLUMNS[c]) for c in cols if c in _PARENT_COLUMNS and not (table == "rr_targets" and c == "target_key")]
+    if table == "rr_targets" and values.get("kind") in ("snap", "diff"):
+        refs.append(("ref_id", "snapshot" if values["kind"] == "snap" else "diff"))
+    if table == "rr_snapshot_calls":
+        refs.append(("job_id", "snapshot_job"))
+    for column, parent in refs:
+        value = values.get(column)
+        if value is None:
+            continue
+        row = store.query_one(_PARENT_SQL[parent], (value,))
+        if (row is None and column in scope) or (row is not None and row["owner_sub"] != owner_sub):
+            return PARENT_NOT_OWNED
+    if table == "rr_project_members" and values.get("role") == "owner" and values.get("email") != owner_sub:
+        return OWNER_ROW_IMMUTABLE
+    return None
+
+
 def import_jsonl(store: RiskStore, owner_sub: str, text: str) -> dict:
     """JSONL 을 병합한다 — {inserted, merged, skipped, skipped_global, recomputed_targets, conflicts[]}.
 
@@ -584,6 +647,8 @@ def import_jsonl(store: RiskStore, owner_sub: str, text: str) -> dict:
     조회·UPDATE 는 PK 가 아니라 (PK + 호출자 owner_sub) 로 건다 — PK 만으로 걸면 본문 owner_sub 만 자기 것으로
     적어 남의 행을 통째로 덮거나(권한 상승) 충돌 응답으로 읽어낼 수 있다. 소유자가 다른 같은 PK 는
     `owner_conflict`, UNIQUE 만 겹치는 새 행은 `unique_conflict` 로 그 줄만 눕히고 나머지는 계속 병합한다.
+    쓰는 줄(새 행 · 병합)이 남의(또는 없는) 과제 · 스냅샷 · 대상 · 비교에 매달리면 `parent_not_owned`, 남의 이메일로 적은 멤버 owner 행은
+    `owner_row_immutable` 로 그 줄만 눕힌다(`_refusal`). 줄은 표 차례(TABLE_ORDER — 부모 표가 먼저다)로 쓴다.
     """
     head, items = _parse(text)
     local_version = store.schema_version()
@@ -602,6 +667,10 @@ def import_jsonl(store: RiskStore, owner_sub: str, text: str) -> dict:
         if "owner_sub" in cols and str(row.get("owner_sub") or "") != owner_sub:
             raise AppError("owner_mismatch",
                            f"다른 소유자의 행이 들어 있습니다 — {table}.owner_sub={row.get('owner_sub')!r}.", 409)
+    # 부모 행이 자식보다 먼저 들어가야 자식의 부모 검사(_refusal)가 같은 들여오기의 부모를 본다 — 반출은 이미 이 차례이고, 손으로 만든
+    # 본문도 같은 차례로 쓴다(같은 표 안의 차례는 그대로 — 안정 정렬).
+    rank = {table: index for index, table in enumerate(TABLE_ORDER)}
+    items = sorted(items, key=lambda item: rank[item[0]])
 
     inserted = merged = skipped = skipped_global = 0
     conflicts: list[dict] = []
@@ -632,6 +701,11 @@ def import_jsonl(store: RiskStore, owner_sub: str, text: str) -> dict:
                     skipped += 1
                     conflicts.append({"table": table, "key": _key_of(row, pks), "reason": "owner_conflict"})
                     continue
+                refused = _refusal(store, table, cols, values, owner_sub)
+                if refused is not None:            # 남의(또는 없는) 과제 · 스냅샷 · 대상 · 비교에 매달린 줄 — 그 줄만 눕힌다.
+                    skipped += 1
+                    conflicts.append({"table": table, "key": _key_of(row, pks), "reason": refused})
+                    continue
                 # 본문에 없는 열은 INSERT 에서 뺀다 — 명시적 NULL 을 넣으면 NOT NULL DEFAULT 열(classification·
                 # lifecycle·status·mcp_visibility …)이 DEFAULT 를 못 받고 IntegrityError 로 눕는다. 내보내기는
                 # 언제나 전 열을 싣지만 손으로 만든 줄은 부분 열이라 이 갈래가 필요하다.
@@ -658,6 +732,11 @@ def import_jsonl(store: RiskStore, owner_sub: str, text: str) -> dict:
                 continue
             local_rank, incoming_rank = _human_rank(table, local), _human_rank(table, row)
             if incoming_rank > local_rank:
+                refused = _refusal(store, table, cols, values, owner_sub)
+                if refused is not None:            # 병합도 부모 열을 고쳐 쓴다 — 내 행을 남의 과제 · 스냅샷으로 옮기지 않는다.
+                    skipped += 1
+                    conflicts.append({"table": table, "key": _key_of(row, pks), "reason": refused})
+                    continue
                 # owner_sub 는 병합으로 바뀌지 않는다(소유자 이전은 이관의 일이 아니다).
                 assign = [c for c in cols if c not in pks and c != "owner_sub"]
                 store.execute(

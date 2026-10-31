@@ -909,9 +909,13 @@ def create_project(body: ProjectBody, ident: identity.Identity = Depends(identit
 
 
 def _project_sources(project_id: str) -> list[dict]:
+    """그 과제의 소스 — 과제 주인의 행만이다(하위 표의 owner_sub 는 rr_projects.owner_sub 의 복제다, plan §5.2.1). 주인이 다른 행은
+    남이 그 과제 id 를 적어 들여온 행이라(들여오기가 부모를 보기 전에 선 것) 싣지 않는다."""
     rows = get_store().query(
-        "SELECT id, kind, app_key, ref_json, ref_key, bridge_declared, probe_json, probe_at, adapter_version"
-        " FROM rr_sources WHERE project_id = ? ORDER BY kind, id", (project_id,),
+        "SELECT s.id AS id, s.kind AS kind, s.app_key AS app_key, s.ref_json AS ref_json, s.ref_key AS ref_key,"
+        " s.bridge_declared AS bridge_declared, s.probe_json AS probe_json, s.probe_at AS probe_at,"
+        " s.adapter_version AS adapter_version FROM rr_sources s JOIN rr_projects p ON p.id = s.project_id"
+        " WHERE s.project_id = ? AND s.owner_sub = p.owner_sub ORDER BY s.kind, s.id", (project_id,),
     )
     out = []
     for row in rows:
@@ -929,9 +933,10 @@ def list_projects(ident: identity.Identity = Depends(identity.current)) -> dict:
 
     부른 사람이 소유하거나 구성원(편집자 · 보기)인 과제다 — 조직 공개(org)만으로는 들지 않는다(MCP 의 visible_projects 와 다르다)."""
     email = _require_user(ident)
+    # 멤버 행은 편집자 · 보기만 센다 — owner 는 과제 행의 주인 열만 정한다(project_role 과 같은 판정).
     rows = get_store().query(
-        "SELECT id FROM rr_projects WHERE owner_sub = ? OR id IN (SELECT project_id FROM rr_project_members WHERE email = ?)",
-        (email, email))
+        "SELECT id FROM rr_projects WHERE owner_sub = ? OR id IN (SELECT project_id FROM rr_project_members"
+        " WHERE email = ? AND role IN ('viewer', 'editor'))", (email, email))
     return projects_payload(project_ids=[r["id"] for r in rows], viewer=email)
 
 
@@ -939,7 +944,8 @@ def projects_payload(*, project_ids: list[str], viewer: str | None = None) -> di
     """`GET /projects` 본체 — MCP `risk_list_projects` 와 같은 함수.
 
     범위는 부르는 쪽이 정한 과제 집합이다 — 웹은 소유 ∪ 구성원(`list_projects`), MCP 는 **볼 수 있는 과제 집합**(`visible_projects`)
-    이다. `viewer` 는 카드의 `my_role`(owner · editor · viewer, 구성원이 아니면 null — 조직 공개로만 보이는 과제)을 셀 사람이다.
+    이다. `viewer` 는 카드의 `my_role`(owner · editor · viewer, 구성원이 아니면 null — 조직 공개로만 보이는 과제)을 셀 사람이다 —
+    owner 는 과제 행의 주인 열만, 멤버 행은 편집자 · 보기만 센다(project_role 과 같은 판정).
     id 를 알아낼 길이 이것뿐이라(나머지 도구가 전부 id 를 인자로 받는다) 목록이 곧 진입점이다."""
     store = get_store()
     if not project_ids:
@@ -949,12 +955,14 @@ def projects_payload(*, project_ids: list[str], viewer: str | None = None) -> di
         f"SELECT id, code, name, stage, owner_sub, classification, lifecycle, corpus_excluded, created_at FROM rr_projects"
         f" WHERE id IN ({marks}) ORDER BY created_at DESC, id", tuple(project_ids))
     roles = ({r["project_id"]: r["role"] for r in store.query(
-        "SELECT project_id, role FROM rr_project_members WHERE email = ?", (viewer,))} if viewer else {})
+        "SELECT project_id, role FROM rr_project_members WHERE email = ? AND role IN ('viewer', 'editor')",
+        (viewer,))} if viewer else {})
     projects = []
     for row in rows:
         _own = row["owner_sub"]
+        # 스냅샷 · 소스도 대상처럼 과제 주인의 행만 센다(get_project 와 같은 거름).
         last = store.query_one(
-            "SELECT MAX(created_at) AS ts FROM rr_snapshots WHERE project_id = ?", (row["id"],))
+            "SELECT MAX(created_at) AS ts FROM rr_snapshots WHERE project_id = ? AND owner_sub = ?", (row["id"], _own))
         targets = [dict(t) for t in store.query(
             "SELECT target_key, level, created_at FROM rr_targets WHERE project_id = ? AND owner_sub = ?"
             " ORDER BY created_at DESC", (row["id"], _own))]
@@ -964,8 +972,8 @@ def projects_payload(*, project_ids: list[str], viewer: str | None = None) -> di
             if summary["roster_size"]:
                 coverage_pct = round(100.0 * summary["terminal_n"] / summary["roster_size"], 1)
         _snap = store.query_one(
-            "SELECT id FROM rr_snapshots WHERE project_id = ? ORDER BY created_at DESC, id LIMIT 1",
-            (row["id"],))
+            "SELECT id FROM rr_snapshots WHERE project_id = ? AND owner_sub = ? ORDER BY created_at DESC, id LIMIT 1",
+            (row["id"], _own))
         projects.append({
             "id": row["id"], "code": row["code"], "name": row["name"], "stage": row["stage"],
             "targets": [t["target_key"] for t in targets],
@@ -996,9 +1004,10 @@ def get_project(project_id: str, ident: identity.Identity = Depends(identity.cur
     """ProjectPage 한 화면 — 과제(메타 열까지)·멤버·소스·스냅샷 헤더·타깃 헤더·잡·성격 태그.
 
     구성원(보기 이상)이 연다 — 남은 없는 과제와 같은 404 다(require_role, 남 숨김). 과제 행의 `corpus_excluded` 는 bool, 제품 연결
-    (`product_refs_json`)은 푼 배열이다. 대상 · 잡은 부른 사람이 아니라 과제의 주인(신원 앵커 — 하위 표의 owner_sub 는 그 복제다)으로
-    고른다 — 구성원이 열어도 그 과제의 대상 · 잡이 보인다. 스냅샷 머리는 이름(그 스냅샷을 만든 동결 잡의 label — 동결 잡 없이 언 것은
-    null) · 앱 판 · 어댑터 판 · 강등 표지 전부(`degraded_json` — `degraded` 는 그 첫 값인 호환 열)를 함께 싣는다."""
+    (`product_refs_json`)은 푼 배열이다. 대상 · 잡 · 스냅샷 · 소스 · 성격 태그는 부른 사람이 아니라 과제의 주인(신원 앵커 — 하위 표의
+    owner_sub 는 그 복제다)의 행으로 고른다 — 구성원이 열어도 그 과제의 것이 보이고, 남이 그 과제 id 를 적어 들여온 행(주인이 다르다)은
+    싣지 않는다. 스냅샷 머리는 이름(그 스냅샷을 만든 동결 잡의 label — 같은 주인의 잡만, 동결 잡 없이 언 것은 null) · 앱 판 · 어댑터 판 ·
+    강등 표지 전부(`degraded_json` — `degraded` 는 그 첫 값인 호환 열)를 함께 싣는다."""
     email = _require_user(ident)
     require_role(project_id, email, "viewer")
     store = get_store()
@@ -1014,8 +1023,8 @@ def get_project(project_id: str, ident: identity.Identity = Depends(identity.cur
         " s.node_count AS node_count, s.edge_count AS edge_count, s.warnings_n AS warnings_n, s.degraded AS degraded,"
         " s.degraded_json AS degraded_json, s.app_versions_json AS app_versions_json,"
         " s.adapter_versions_json AS adapter_versions_json, s.created_at AS created_at, j.label AS label"
-        " FROM rr_snapshots s LEFT JOIN rr_snapshot_jobs j ON j.id = s.job_id"
-        " WHERE s.project_id = ? ORDER BY s.created_at DESC, s.id", (project_id,)):
+        " FROM rr_snapshots s LEFT JOIN rr_snapshot_jobs j ON j.id = s.job_id AND j.owner_sub = s.owner_sub"
+        " WHERE s.project_id = ? AND s.owner_sub = ? ORDER BY s.created_at DESC, s.id", (project_id, owner_sub)):
         head = dict(row)
         head["degraded_json"] = _loads(head["degraded_json"], [])
         head["app_versions"] = _loads(head.pop("app_versions_json"), {})
@@ -1036,8 +1045,8 @@ def get_project(project_id: str, ident: identity.Identity = Depends(identity.cur
         " ON t.target_key = j.target_key WHERE t.project_id = ? AND j.owner_sub = ?"
         " ORDER BY j.created_at DESC LIMIT 50", (project_id, owner_sub))]
     tags = [dict(r) for r in store.query(
-        "SELECT tag, COUNT(*) AS n FROM rr_character WHERE project_id = ? AND tag IS NOT NULL"
-        " GROUP BY tag ORDER BY n DESC, tag LIMIT 10", (project_id,))]
+        "SELECT tag, COUNT(*) AS n FROM rr_character WHERE project_id = ? AND owner_sub = ? AND tag IS NOT NULL"
+        " GROUP BY tag ORDER BY n DESC, tag LIMIT 10", (project_id, owner_sub))]
     return {
         "project": project,
         "members": [{"email": m["email"], "role": m["role"]} for m in _members_of(project_id)],
@@ -1066,7 +1075,10 @@ EXCLUDED_REASONS = ("fixture", "misregistered", "duplicate", "user")
 
 
 def project_role(project_id: str, email: str) -> str | None:
-    """그 과제에서 이 사람의 role — 소유자는 언제나 owner, 아니면 rr_project_members 행(없으면 None)."""
+    """그 과제에서 이 사람의 role — 소유자는 언제나 owner, 아니면 rr_project_members 의 편집자 · 보기 행(없으면 None).
+
+    owner 는 과제 행의 주인 열(신원 앵커)만 정한다 — owner 멤버 행은 그 주인의 것뿐이라(risk_store 불변식 · 소유는 이양만이 바꾼다) 다른
+    사람의 owner 행은 역할로 읽지 않는다. 그런 행은 남이 들여오기로 적은 것이었다(그 사람이 이양까지 했다 — 반대 검토 10-31 High)."""
     store = get_store()
     row = store.query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,))
     if row is None:
@@ -1075,7 +1087,7 @@ def project_role(project_id: str, email: str) -> str | None:
         return "owner"
     member = store.query_one(
         "SELECT role FROM rr_project_members WHERE project_id = ? AND email = ?", (project_id, email))
-    return member["role"] if member is not None else None
+    return member["role"] if member is not None and member["role"] in MEMBER_ROLES else None
 
 
 def require_role(project_id: str, email: str, need: str) -> str:
@@ -2452,12 +2464,14 @@ def _with_live_acks(store: Any, snapshot_id: str, state: dict) -> dict:
 
     ack 의 정본은 rr_gate_acks 다 — 취소된 것(revoked_at)과 단 때의 판정 지문이 지금 지문과 다른 것(판정이 다시 세어져 바뀐 뒤의 낡은
     ack — 그 표의 gates_hash 열)은 싣지 않는다. `gates_hash` 는 ack 칸을 뺀 판정만의 지문(state.gates_hash)이라 ack 로는 바뀌지 않고
-    ack 라우트가 gates_json 으로 세는 값과 같다 — 화면은 이 값을 ack 본문의 gates_hash 로 그대로 싣는다."""
+    ack 라우트가 gates_json 으로 세는 값과 같다 — 화면은 이 값을 ack 본문의 gates_hash 로 그대로 싣는다. ack 행은 그 스냅샷 주인의 것만
+    읽는다(ack 라우트는 주인만 쓴다 — 주인이 다른 행은 남이 들여오기로 적은 것이다)."""
     gates = state.get("gates") or {}
     current = state_module.gates_hash(gates)
     acks = {row["gate"]: row for row in store.query(
         "SELECT gate, ack_by, ack_at, ack_reason, gates_hash FROM rr_gate_acks"
-        " WHERE snapshot_id = ? AND diff_id IS NULL AND revoked_at IS NULL", (snapshot_id,))}
+        " WHERE snapshot_id = ? AND diff_id IS NULL AND revoked_at IS NULL"
+        " AND owner_sub = (SELECT owner_sub FROM rr_snapshots WHERE id = ?)", (snapshot_id, snapshot_id))}
     for key, record in gates.items():
         if not isinstance(record, dict):
             continue
