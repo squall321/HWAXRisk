@@ -321,12 +321,14 @@ def test_the_sameas_table_reads_the_owners_pair_ledger_for_members(two_projects,
                                                                                                                "<s>")), who
 
 
-def test_a_diff_opens_to_who_reads_both_projects_and_stays_its_makers_row_after_a_transfer(two_projects, monkeypatch):
+def test_a_diff_opens_to_who_reads_both_projects_and_follows_a_full_transfer(two_projects, monkeypatch):
     """비교는 두 과제(base · target)를 다 읽는 구성원이 연다(MCP 문지기와 같은 규칙) — 대상 과제만의 구성원에게는 없는 비교와 같다. 남이
-    그 두 과제를 적어 넣은 비교 행(고침 전의 들여오기)은 누구의 구성원 길로도 열리지 않고 목록에 서지 않는다. 뒤 과제를 넘겨도 비교는 만든
-    사람의 행으로 남아(이양은 rr_diffs 를 옮기지 않는다) 두 과제를 읽는 구성원과 만든 사람이 그대로 열고, 앞 과제를 못 읽는 새 주인은 못
-    연다(오늘 그대로). 두 과제를 다 넘기면 그 비교는 만든 사람(이제 두 과제의 편집자)의 제 행으로만 열린다 — 행 주인이 두 과제 어느 쪽의
-    주인도 아니라 구성원 길로는 들여온 남의 행과 가를 수 없다."""
+    그 두 과제를 적어 넣은 비교 행(고침 전의 들여오기)은 누구의 구성원 길로도 열리지 않고 목록에 서지 않는다. 뒤 과제만 넘기면 비교는 만든
+    사람의 행으로 남아 두 과제를 읽는 구성원과 만든 사람이 그대로 열고, 앞 과제를 못 읽는 새 주인은 못 연다(오늘 그대로). 두 과제를 다
+    넘기면 비교 · 그 변경 항목이 두 과제를 다 받은 사람의 행이 된다(사용자 결정 10-31 '둘 다 받은 사람에게 옮긴다', MB-15) — 새 주인 ·
+    구성원 · 넘겨 준 사람(이제 두 과제의 편집자)이 열고, 새 주인이 같은 쌍을 다시 만들면 그 비교다. 종전에는 만든 사람의 제 행으로만
+    열렸고(행 주인이 두 과제 어느 쪽의 주인도 아니다) 새 주인의 같은 쌍 만들기는 유일 열쇠에 걸려 500 이었다. 남이 적어 넣은 행은 따라가지
+    않는다(그 남은 두 과제의 주인이었던 적이 없다)."""
     w = two_projects
     store = w["store"]
     diff_id = factories.make_diff(store, w["base"], w["target"])["diff_id"]
@@ -371,16 +373,93 @@ def test_a_diff_opens_to_who_reads_both_projects_and_stays_its_makers_row_after_
         assert listed(who) == [diff_id], who
     assert reads(NEW_OWNER)[1] == 404 and listed(NEW_OWNER) == []
 
-    routes.transfer_project(w["base_project"], routes.TransferBody(to_email=NEW_OWNER, reason="앞 리비전도 넘긴다"),
-                            ident=factories.ident(OWNER))
-    got = reads(OWNER)
-    assert (got[1], listed(OWNER)) == (200, [diff_id]), got[:3]
-    factories.act_as_delegate(monkeypatch, OWNER)
-    assert _mcp(lambda: srv.risk_get_diff(diff_id=diff_id, part="summary"))[0] == "ok"
-    for who in (*MEMBERS, NEW_OWNER):
-        assert reads(who)[1] == 404 and listed(who) == [], who
+    out = routes.transfer_project(w["base_project"], routes.TransferBody(to_email=NEW_OWNER, reason="앞 리비전도 넘긴다"),
+                                  ident=factories.ident(OWNER))
+    assert out["rows_updated"]["tables"]["rr_diffs"] == 1, out
+    assert store.query_one("SELECT owner_sub FROM rr_diffs WHERE id = ?", (diff_id,))["owner_sub"] == NEW_OWNER
+    moved = reads(NEW_OWNER)
+    assert moved[1] == 200, moved[:3]
+    for who in (NEW_OWNER, OWNER, *MEMBERS):
+        got = reads(who)
+        assert got[1] == 200 and _body(got) == _body(moved), (who, got[:3])
+        assert listed(who) == [diff_id], who
         factories.act_as_delegate(monkeypatch, who)
-        assert _mcp(lambda: srv.risk_get_diff(diff_id=diff_id, part="summary"))[0] == "not_visible", who
+        assert _mcp(lambda: srv.risk_get_diff(diff_id=diff_id, part="summary"))[0] == "ok", who
+    assert store.query_one("SELECT owner_sub FROM rr_diffs WHERE id = ?", ("d" * 32,))["owner_sub"] == OTHER
+    again = routes.create_diff(routes.DiffBody(base_snapshot_id=w["base"], target_snapshot_id=w["target"]),
+                               ident=factories.ident(NEW_OWNER))
+    assert again["diff_id"] == diff_id
+
+
+def test_a_diff_follows_when_both_projects_reach_one_person_by_different_routes(two_projects):
+    """두 과제가 다른 길로 한 사람에게 모여도(앞 과제는 C 에게, 뒤 과제는 B 를 거쳐 C 에게) 마지막 이양에서 비교가 C 의 것이 된다 — 행 주인
+    (만든 사람)이 두 과제의 앞 주인이었다(이양 감사의 앞 주인). 한쪽만 모인 동안은 만든 사람의 행 그대로다."""
+    w = two_projects
+    store = w["store"]
+    diff_id = factories.make_diff(store, w["base"], w["target"])["diff_id"]
+    via, final = "via@example.com", "final@example.com"
+
+    def owner_of_diff() -> str:
+        return store.query_one("SELECT owner_sub FROM rr_diffs WHERE id = ?", (diff_id,))["owner_sub"]
+
+    routes.transfer_project(w["target_project"], routes.TransferBody(to_email=via, reason="뒤 리비전을 넘긴다"),
+                            ident=factories.ident(OWNER))
+    routes.transfer_project(w["base_project"], routes.TransferBody(to_email=final, reason="앞 리비전을 넘긴다"),
+                            ident=factories.ident(OWNER))
+    assert owner_of_diff() == OWNER
+    routes.transfer_project(w["target_project"], routes.TransferBody(to_email=final, reason="뒤 리비전도 모은다"),
+                            ident=factories.ident(via))
+    assert owner_of_diff() == final
+    assert _answer(lambda: routes.get_diff(diff_id, part="summary", ident=factories.ident(final)))[1] == 200
+
+
+def test_a_project_transfer_takes_its_own_revision_diffs(risk_store, monkeypatch):
+    """한 과제 안의 리비전 비교(앞 · 뒤 스냅샷이 같은 과제)는 그 과제를 넘기면 변경 항목과 함께 넘어간다 — 두 쪽이 다 받은 사람의 것이다.
+    종전에는 이양이 비교를 옮기지 않아 새 주인의 대상(diff:…)이 옛 주인의 비교를 가리켰고 새 주인은 그 비교를 열지 못했다. 넘겨 준 사람은
+    편집자로 남아 그대로 연다."""
+    store = risk_store
+    monkeypatch.setattr(routes, "get_store", lambda: store)
+    synth = factories.make_diff_target(store, 40, owner=OWNER)
+    events = store.query_one("SELECT COUNT(*) AS n FROM rr_diff_events WHERE diff_id = ?", (synth.diff_id,))["n"]
+    assert events > 0
+    out = routes.transfer_project(synth.project_id, routes.TransferBody(to_email=NEW_OWNER, reason="과제를 넘긴다"),
+                                  ident=factories.ident(OWNER))
+    assert (out["rows_updated"]["tables"]["rr_diffs"], out["rows_updated"]["tables"]["rr_diff_events"]) == (1, events), out
+    assert store.query_one("SELECT owner_sub FROM rr_diffs WHERE id = ?", (synth.diff_id,))["owner_sub"] == NEW_OWNER
+    assert [r["owner_sub"] for r in store.query("SELECT DISTINCT owner_sub FROM rr_diff_events WHERE diff_id = ?",
+                                                (synth.diff_id,))] == [NEW_OWNER]
+    for who in (NEW_OWNER, OWNER):
+        assert _answer(lambda who=who: routes.get_diff(synth.diff_id, part="summary", ident=factories.ident(who)))[1] == 200
+
+
+def test_the_sameas_ledger_follows_the_projects_it_belongs_to(two_projects):
+    """대응 원장 행도 비교와 같은 규칙으로 따라간다 — 과제 안(intra) 행은 그 과제를 넘기면, 두 과제(pair) 행은 두 과제가 한 사람에게 모이면 그
+    사람의 행이 된다. 그래야 새 주인의 대응표 · 비교가 앞 주인의 결정을 읽고 새 주인이 그 결정을 고칠 수 있다 — 종전에는 새 주인에게 결정이
+    사라졌고(원장은 주인으로 읽는다) 다시 정하면 남의 행이라 409 sameas_row_foreign 이었다(MB-13 의 덮지 않기)."""
+    w = two_projects
+    store = w["store"]
+    owner = factories.ident(OWNER)
+    table = routes.get_sameas(base=w["base"], target=w["target"], ident=owner)
+    row = table["pairs"][0]
+    pair = {"decision": "confirm", "scope": "pair", "pair_key": table["pair_key"], "a_stable": row["a_stable"],
+            "b_stable": row["b_stable"], "snapshot_id": w["target"]}
+    intra = {"decision": "confirm", "scope": "intra", "pair_key": w["target_project"], "a": "s:a", "b": "s:b"}
+    routes.post_sameas_decide([pair, intra], ident=owner)
+
+    def owners() -> dict[str, str]:
+        return {r["scope"]: r["owner_sub"] for r in store.query("SELECT scope, owner_sub FROM rr_sameas")}
+
+    routes.transfer_project(w["target_project"], routes.TransferBody(to_email=NEW_OWNER, reason="뒤 리비전을 넘긴다"),
+                            ident=owner)
+    assert owners() == {"pair": OWNER, "intra": NEW_OWNER}
+    newcomer = factories.ident(NEW_OWNER)
+    assert routes.post_sameas_decide([{**intra, "decision": "reject"}], ident=newcomer)["results"][0]["status"] == "rejected"
+    routes.transfer_project(w["base_project"], routes.TransferBody(to_email=NEW_OWNER, reason="앞 리비전도 넘긴다"),
+                            ident=owner)
+    assert owners() == {"pair": NEW_OWNER, "intra": NEW_OWNER}
+    assert routes.get_sameas(base=w["base"], target=w["target"], ident=newcomer)["pending_n"] == 0
+    out = routes.post_sameas_decide([{**pair, "decision": "reject"}], ident=newcomer)
+    assert out["results"][0]["status"] == "rejected" and out["results"][0]["rekey"] is not None
 
 
 # ---------------------------------------------------------------- 과제 스코프 없는 참조 — req · voc · paper

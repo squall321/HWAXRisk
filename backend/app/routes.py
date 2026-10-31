@@ -1464,6 +1464,50 @@ TRANSFER_DERIVED: tuple[tuple[str, str], ...] = (
     ("rr_close_acks", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_unit_live", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
 )
+
+
+def _gave_away(store: Any, project_id: str) -> set[str]:
+    """그 과제를 넘겨 준 적이 있는 사람들 — 이양 감사(project.transfer)의 앞 주인."""
+    found = (_loads(r["before_json"], {}).get("owner_sub") for r in store.query(
+        "SELECT before_json FROM rr_audit WHERE action = 'project.transfer' AND project_id = ?", (project_id,)))
+    return {str(owner) for owner in found if owner}
+
+
+def _follow_full_transfer(store: Any, project_id: str, to_email: str) -> dict[str, int]:
+    """두 과제를 다 받은 사람에게 비교 · 대응 원장을 옮긴다(사용자 결정 10-31 '둘 다 받은 사람에게 옮긴다', MB-15) — 고친 행 수(표마다).
+
+    이 과제를 한쪽으로 하는 비교(그 변경 항목과 함께)와 대응 원장 행(intra · pair) 가운데, 모든 쪽 과제가 이제 받는 사람의 것이고(과제 안
+    비교 · intra 행은 이 과제 하나뿐이다) 행 주인이 그 과제들을 다 넘겨 준 사람(이양 감사의 앞 주인)인 것만 옮긴다. 한쪽만 넘어간 것은 만든
+    사람의 행 그대로다(두 과제를 다 읽는 사람이 연다 — `_diff_reader`). 넘겨 준 적이 없는 사람의 행(남이 적어 넣은 것 — RD-10)은 따라가지
+    않는다. 비교 · 대응 원장은 유일 열쇠에 주인이 없어(같은 쌍은 한 행) 옮기지 않으면 받은 사람이 같은 쌍을 다시 만들 수도(유일 열쇠 500)
+    대응을 다시 정할 수도(sameas_row_foreign 409) 없다. ckey 원장 · global 대응은 과제에 묶이지 않아 옮기지 않는다(MB-8). 이번 이양의 감사
+    행을 쓴 뒤에 부른다 — 이번에 넘겨 준 사람도 앞 주인에 든다."""
+    owners: dict[str, Any] = {}
+    gave: dict[str, set[str]] = {}
+
+    def follows(row_owner: str, sides: set[str]) -> bool:
+        for side in sides:
+            if side not in owners:
+                found = store.query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (side,))
+                owners[side], gave[side] = (found["owner_sub"] if found is not None else None), _gave_away(store, side)
+            if owners[side] != to_email or row_owner not in gave[side]:
+                return False
+        return True
+
+    moved = {"rr_diffs": 0, "rr_diff_events": 0, "rr_sameas": 0}
+    for row in store.query("SELECT id, owner_sub, base_project_id, target_project_id FROM rr_diffs"
+                           " WHERE (base_project_id = ? OR target_project_id = ?) AND owner_sub <> ?",
+                           (project_id, project_id, to_email)):
+        if follows(row["owner_sub"], {row["base_project_id"], row["target_project_id"]}):
+            moved["rr_diffs"] += int(store.execute("UPDATE rr_diffs SET owner_sub = ? WHERE id = ?", (to_email, row["id"])) or 0)
+            moved["rr_diff_events"] += int(store.execute(
+                "UPDATE rr_diff_events SET owner_sub = ? WHERE diff_id = ?", (to_email, row["id"])) or 0)
+    for row in store.query("SELECT id, owner_sub, pair_key FROM rr_sameas WHERE scope IN ('intra', 'pair') AND owner_sub <> ?"
+                           " AND instr(pair_key, ?) > 0", (to_email, project_id)):
+        sides = set(str(row["pair_key"]).split("|"))
+        if project_id in sides and follows(row["owner_sub"], sides):
+            moved["rr_sameas"] += int(store.execute("UPDATE rr_sameas SET owner_sub = ? WHERE id = ?", (to_email, row["id"])) or 0)
+    return moved
 MEMBER_ROLES = ("viewer", "editor")
 RUNNING_JOB_STATES = ("queued", "running", "paused", "cancelling")
 
@@ -1556,7 +1600,8 @@ class TransferBody(BaseModel):
 @router.post("/projects/{project_id}/transfer")
 def transfer_project(project_id: str, body: TransferBody,
                      ident: identity.Identity = Depends(identity.current)) -> dict:
-    """소유권 이양 — 과제 행·멤버 두 행·하위 표 owner_sub 를 한 트랜잭션에서 옮긴다(plan §5.2.1)."""
+    """소유권 이양 — 과제 행·멤버 두 행·하위 표 owner_sub 를 한 트랜잭션에서 옮긴다(plan §5.2.1). 이 과제에 걸린 비교 · 대응 원장 행은
+    모든 쪽 과제가 받는 사람에게 모일 때 함께 옮긴다(`_follow_full_transfer` — 사용자 결정 10-31, MB-15)."""
     actor = _require_owner(project_id, ident)
     store = get_store()
     project = store.query_one("SELECT owner_sub, status FROM rr_projects WHERE id = ?", (project_id,))
@@ -1603,6 +1648,8 @@ def transfer_project(project_id: str, body: TransferBody,
         _audit(store, actor, scope="project", subject_id=project_id, project_id=project_id,
                action="project.transfer", before={"owner_sub": old_owner}, after={"owner_sub": to_email},
                reason=body.reason)
+        # 두 과제를 다 받은 사람에게 비교 · 대응 원장이 따라간다(MB-15) — 위 감사 행이 이번에 넘겨 준 사람을 앞 주인으로 세운 뒤다.
+        rows_updated.update(_follow_full_transfer(store, project_id, to_email))
     return {"from": old_owner, "to": to_email, "rows_updated": {"tables": rows_updated}, "ra_retract_ops": ra_ops}
 
 
