@@ -9,7 +9,7 @@ import { Badge, StatusBadge } from "./Badge";
 import { GateTable } from "./GateBanner";
 import { Banner, Button, FormField, Select } from "../ui/primitives";
 import { fmtNum } from "../format";
-import { pairDecision, samePairKey } from "../lib/compareView";
+import { pairDecision } from "../lib/compareView";
 import type { GateRecord, SameAsPair, SameAsPairDecision } from "../types";
 
 /** 일괄 수용의 문턱 — §8.2.4 가 정한 값이다. */
@@ -62,21 +62,10 @@ export function SameAsResolver({
     base !== "" && target !== "",
   );
   /**
-   * 쌍 원장의 열쇠를 지을 두 과제 id — 스냅샷 상태가 project_id 를 싣는다(IR 을 통째로 받지 않는다). `GET /sameas` 답에 pair_key 가
-   * 없어서다 — 종전 확정 · 거부는 그 칸 없이 노드 id 를 보내 늘 400 E100 이었다. 확정할 행이 있을 때만 받는다.
+   * 쌍 원장의 열쇠 — `GET /sameas` 답 머리의 `pair_key`(이 표가 원장을 읽은 열쇠)를 그대로 싣는다. 전에는 답에 그 칸이 없어 두 스냅샷
+   * 상태를 더 받아 과제 id 로 지었고, 그보다 앞서는 열쇠 없이 노드 id 를 보내 확정 · 거부가 늘 400 E100 이었다.
    */
-  const owners = useAsync(
-    async (signal) => {
-      const [a, b] = await Promise.all([
-        riskApi.getSnapshotState(base, { signal }),
-        riskApi.getSnapshotState(target, { signal }),
-      ]);
-      return { pairKey: samePairKey(a.project_id, b.project_id) };
-    },
-    [base, target],
-    base !== "" && target !== "" && (sameas.data?.pairs.length ?? 0) > 0,
-  );
-  const pairKey = owners.data?.pairKey ?? null;
+  const pairKey = sameas.data?.pair_key || null;
   const onG2Ref = useRef(onG2);
   onG2Ref.current = onG2;
   const loadedG2 = sameas.data?.G2 ?? null;
@@ -164,7 +153,7 @@ export function SameAsResolver({
       // 표 한 칸이라 size="sm" 으로 둔다 — 기본 높이면 행이 두 배로 두꺼워진다.
       cell: (p) => {
         // stable 키가 없는 행(한쪽 노드가 없다)과 쌍 열쇠를 아직 모를 때는 보내지 않는다.
-        const why = !p.a_stable || !p.b_stable ? "stable 키가 없는 행이라 원장에 적을 수 없습니다." : pairKey ? undefined : "두 스냅샷의 과제 id 를 아직 못 읽었습니다.";
+        const why = !p.a_stable || !p.b_stable ? "stable 키가 없는 행이라 원장에 적을 수 없습니다." : pairKey ? undefined : "쌍 원장 열쇠(pair_key)를 받지 못했습니다.";
         return (
           <span className="flex flex-wrap items-center gap-2">
             <Button
@@ -196,7 +185,6 @@ export function SameAsResolver({
   return (
     <div className="flex flex-col gap-3">
       <ErrorBanner error={error} />
-      {(sameas.data?.pairs.length ?? 0) > 0 ? <ErrorBanner error={owners.error} onRetry={owners.reload} /> : null}
       {isNotReady(sameas.error) ? (
         <NotReadyBlock what="same-as 매칭" />
       ) : (

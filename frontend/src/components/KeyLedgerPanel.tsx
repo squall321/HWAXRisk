@@ -1,9 +1,13 @@
 // 정규 키(ckey) 원장 조작 — 고른 노드의 키에 이름 붙이기 · 다른 키로 병합 · 병합 되돌리기 · 독립 키 확정(B34 149 · 계획 §2.7.3 · §5.9.2)
 import { useMemo, useState } from "react";
-import { riskApi } from "../api/risk.api";
+import { isApiError, riskApi } from "../api/risk.api";
+import { useAsync } from "../hooks/useAsync";
+import type { Async } from "../hooks/useAsync";
 import { ErrorBanner } from "./StateBlocks";
 import { Banner, Button, FormField, Input, Mono, Select, SubPanel } from "../ui/primitives";
-import type { CkeyLedgerDecision, IrNode, JsonObject } from "../types";
+import { fmtEpoch } from "../format";
+import { confirmKeyBlocked, partKeyLine } from "../lib/snapshotView";
+import type { CkeyLedgerDecision, IrNode, JsonObject, PartKey } from "../types";
 
 /** 정규 키 꼴(ir_builder — 'ck:' + sha1 앞 12자리). 다른 과제의 키를 손으로 적을 때 이 꼴만 받는다(서버는 into 를 검사하지 않는다). */
 export const CKEY_RE = /^ck:[0-9a-f]{12}$/;
@@ -22,10 +26,27 @@ function resultLine(row: JsonObject): string {
 
 /**
  * 고른 노드의 정규 키 원장(`POST /sameas/decide` 의 ckey 결정 넷). 병합 · 되돌리기는 원장에만 쓰고 이미 동결된 스냅샷의 ckey 는
- * 바뀌지 않는다 — 조회 · 회수는 유효 키(merged_into 를 따라간 키)로 잇는다. 지금 키 상태(병합 여부 · 붙은 이름)를 읽는 길은 이 서버에
- * 없어(rr_part_keys 조회 경로가 없다) 결과 줄로만 확인한다.
+ * 바뀌지 않는다 — 조회 · 회수는 유효 키(merged_into 를 따라간 키)로 잇는다. 지금 키 상태(병합 여부 · 붙은 이름 · 정한 사람)는
+ * `GET /part-keys/{ckey}` 로 읽고 결정마다 다시 읽는다. 병합된 키의 '독립 키로 확정' 은 서버가 409 key_merged 로 거절하므로 잠근다.
  */
 export function KeyLedgerPanel({ node, nodes, onClose }: { node: IrNode; nodes: IrNode[]; onClose: () => void }) {
+  // 키의 지금 상태 — 노드마다 다시 마운트되므로(FE-28) 열쇠는 이 노드의 ckey 하나다.
+  const keyState = useAsync((signal) => riskApi.getPartKey(node.ckey ?? "", { signal }), [node.ckey], Boolean(node.ckey));
+  return <KeyLedgerBody node={node} nodes={nodes} onClose={onClose} keyState={keyState} />;
+}
+
+/** 패널 본문 — 키의 지금 상태(`keyState`)를 받아 그린다(읽기는 KeyLedgerPanel 이 한다 — 시험은 서버 견본을 넣어 그린다). */
+export function KeyLedgerBody({
+  node,
+  nodes,
+  onClose,
+  keyState,
+}: {
+  node: IrNode;
+  nodes: IrNode[];
+  onClose: () => void;
+  keyState: Async<PartKey>;
+}) {
   const ckey = node.ckey;
   const [displayName, setDisplayName] = useState("");
   const [into, setInto] = useState("");
@@ -34,6 +55,8 @@ export function KeyLedgerPanel({ node, nodes, onClose }: { node: IrNode; nodes: 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [done, setDone] = useState<string | null>(null);
+  const absent = isApiError(keyState.error) && keyState.error.code === "E404";
+  const confirmBlock = confirmKeyBlocked(keyState.data);
 
   /** 이 스냅샷의 다른 정규 키(이름과 함께, 한 번씩). */
   const others = useMemo(() => {
@@ -65,6 +88,7 @@ export function KeyLedgerPanel({ node, nodes, onClose }: { node: IrNode; nodes: 
       setDone(out.results.map(resultLine).join(" "));
       setPending(null);
       setDisplayName("");
+      keyState.reload();
     } catch (err) {
       setError(err);
     } finally {
@@ -87,9 +111,24 @@ export function KeyLedgerPanel({ node, nodes, onClose }: { node: IrNode; nodes: 
       }
     >
       <p className="m-0 text-xs text-muted-foreground">
-        원장에만 씁니다 — 이미 동결된 스냅샷의 키는 그대로이고 조회 · 회수가 유효 키로 잇습니다. 이 서버는 키의 지금 상태(병합 ·
-        이름)를 읽는 길을 주지 않아 결과 줄로만 확인합니다.
+        원장에만 씁니다 — 이미 동결된 스냅샷의 키는 그대로이고 조회 · 회수가 유효 키로 잇습니다.
       </p>
+      <p className="m-0 text-sm" aria-live="polite">
+        <span className="text-muted-foreground">지금 상태 — </span>
+        {keyState.data ? (
+          <>
+            {partKeyLine(keyState.data)}
+            {keyState.data.decided_at ? <span className="text-muted-foreground"> · {fmtEpoch(keyState.data.decided_at)}</span> : null}
+          </>
+        ) : absent ? (
+          <span className="text-muted-foreground">원장에 이 키의 행이 없거나 내 원장이 아닙니다 — 결정도 받지 않습니다(404).</span>
+        ) : keyState.loading ? (
+          <span className="text-muted-foreground">읽는 중…</span>
+        ) : (
+          <span className="text-muted-foreground">모름(읽지 못했습니다)</span>
+        )}
+      </p>
+      {absent ? null : <ErrorBanner error={keyState.error} onRetry={keyState.reload} />}
       <ErrorBanner error={error} />
       {done ? <Banner tone="info" live="status" title={done} /> : null}
 
@@ -163,18 +202,20 @@ export function KeyLedgerPanel({ node, nodes, onClose }: { node: IrNode; nodes: 
           type="button"
           variant="ghost"
           size="sm"
-          disabled={busy}
+          disabled={busy || confirmBlock !== null}
+          title={confirmBlock ?? undefined}
           onClick={() =>
-            // 확정은 병합된 키에서 그 병합을 푼다 — 서버(sameas confirm_key)는 status 만 confirmed 로 바꾸고 유효 키 해석은 merged 일 때만
-            // merged_into 를 따른다. 이 서버는 키 상태를 읽어 주지 않아 병합 여부를 미리 보일 수 없으므로 되돌리기와 같은 확인을 받는다.
+            // 병합된 키의 확정은 서버가 409 key_merged 로 거절한다(종전에는 키 전파 없이 병합을 풀었다) — 상태를 읽었으면 단추를 잠그고,
+            // 못 읽었으면 보내고 거절 글을 그대로 보인다. 확정은 이 키를 독립 키로 정할 뿐 다른 키를 바꾸지 않는다.
             setPending({
               decision: { decision: "confirm_key", ckey },
-              confirm: `${ckey} 를 독립 키로 확정합니다 — 이 키가 다른 키로 병합돼 있으면 그 병합도 풀립니다(병합 되돌리기와 같은 결과). 이 서버는 키의 지금 상태를 읽어 주지 않아 병합 여부를 미리 보일 수 없습니다.`,
+              confirm: `${ckey} 를 독립 키로 확정합니다. 다른 키로 병합된 키면 서버가 거절합니다(먼저 병합 되돌리기).`,
             })
           }
         >
           독립 키로 확정…
         </Button>
+        {confirmBlock ? <span className="text-xs text-muted-foreground">{confirmBlock}</span> : null}
       </div>
 
       {pending ? (

@@ -76,6 +76,8 @@ export function ProjectMetaCard({
   const [confirmLife, setConfirmLife] = useState(false);
 
   const meta = knownMeta(detail.project, patched);
+  /** 닫은 때 — 방금 바꾼 답이 있으면 그것, 없으면 과제 상세의 열(과제를 다시 열어도 보인다). */
+  const closedAt = patched ? patched.closed_at : detail.project.closed_at;
   const control = visibilityControl(visibilityDenied ? "editor" : role, meta.mcp_visibility as McpVisibility | null);
   const editorLocked = role === "viewer";
   const withheld = withheldOps(detail);
@@ -294,7 +296,7 @@ export function ProjectMetaCard({
                 >
                   바꾸기
                 </Button>
-                {patched?.closed_at ? <span className="text-xs text-muted-foreground">닫은 때 {fmtEpoch(patched.closed_at)}</span> : null}
+                {closedAt ? <span className="text-xs text-muted-foreground">닫은 때 {fmtEpoch(closedAt)}</span> : null}
                 {confirmLife && lifeDraft !== "" ? (
                   <Banner
                     tone="warn"

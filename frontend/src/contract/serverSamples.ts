@@ -4,10 +4,16 @@ import type {
   CellsDisposed,
   ClosureCells,
   Coverage,
+  CoverageJob,
   IssueList,
   IssueRow,
+  PartKey,
+  ProjectDetail,
+  ProjectList,
   Registry,
+  SameAs,
   SnapshotHeader,
+  SnapshotState,
   SynthReportPage,
 } from "../types";
 
@@ -1973,30 +1979,554 @@ export const retryAdopted = sample<CellsDisposed>()({
 });
 
 /**
- * 과제 상세(GET /projects/{id})의 스냅샷 머리 둘 — `degraded` 는 bool 이 아니라 호환 열 그대로(degraded_json 의 첫 code | null)다.
- * 스크래치 백엔드에서 강등 표지가 있는 캡처 · 없는 캡처를 동결해 받았다.
+ * 과제 상세(GET /projects/{id})의 스냅샷 머리 둘 — `degraded` 는 bool 이 아니라 호환 열 그대로(`degraded_json` 의 첫 code | null)이고,
+ * `degraded_json` 은 전부다. 이름(label)은 그 스냅샷을 만든 동결 잡의 것이라 동결 잡 없이 언 손 픽스처는 null 이다. 스크래치 백엔드(가지
+ * wt1031/risk-reads)에서 동결 잡으로 얼린 것(DV1)과 손 픽스처를 받았다.
  */
 export const projectSnapshotHeaders = sample<SnapshotHeader[]>()([
   {
-    "id": "c1364a995ffe44869a48603efd1230e6",
+    "id": "5bff75c1afac45489edb1d979c1e28db",
     "ir_version": "1.0",
-    "ir_hash": "354c78c47bdf9c38ab5de19870547a672a1b249e31ada63dce4819921f5b7743",
-    "kinds_json": "[\"mcad\"]",
-    "node_count": 5,
+    "ir_hash": "a72492cca1ba6add7027edc23d121f65e1a2db076a6b5372effa8a5facd4d43d",
+    "kinds_json": "[\"mcad\",\"ecad\"]",
+    "node_count": 3,
     "edge_count": 3,
-    "warnings_n": 0,
-    "degraded": null,
-    "created_at": 1756600100
+    "warnings_n": 4,
+    "degraded": "app_version_unknown",
+    "degraded_json": [
+      "app_version_unknown",
+      "ecad_absent"
+    ],
+    "created_at": 1793441473,
+    "label": "DV1",
+    "app_versions": {
+      "ecad": {},
+      "mcad": {
+        "captured_via": null,
+        "extra": null,
+        "version": null
+      }
+    },
+    "adapter_versions": {
+      "ecad": "0.0-stub",
+      "mcad": "1.0"
+    }
   },
   {
-    "id": "04bd0b27d59d48cb934146c7536bcc2c",
+    "id": "129d7610f7794d71af4f64b54ca5c554",
     "ir_version": "1.0",
-    "ir_hash": "119c457224649ab2e98ff8dc95ad2b1eb77148371387ff7611ac987d52793249",
-    "kinds_json": "[\"mcad\",\"dyna\"]",
+    "ir_hash": "e54be20938709506e72c05d7d97453e76780a8778d077c17e6175d163366bfea",
+    "kinds_json": "[\"mcad\",\"dyna\",\"dyna_result\"]",
     "node_count": 7,
     "edge_count": 4,
     "warnings_n": 0,
-    "degraded": "mcp_degraded",
-    "created_at": 1756600000
+    "degraded": "no_secid",
+    "degraded_json": [
+      "no_secid"
+    ],
+    "created_at": 1756600000,
+    "label": null,
+    "app_versions": {
+      "dyna": {},
+      "dyna_result": {},
+      "mcad": {}
+    },
+    "adapter_versions": {
+      "dyna": "1.0",
+      "dyna_result": "1.0",
+      "mcad": "1.0"
+    }
   }
 ]);
+
+/**
+ * 과제 상세(GET /projects/{id}) — 편집자로 받았다(구성원이 연다 — 가지 wt1031/risk-reads). 과제 행의 메타 열(코퍼스 제외 bool · 제품 연결
+ * 배열 · 수명 주기를 shipped 로 바꿔 닫은 때가 찍혔다) · 멤버 표({email, role}) · 스냅샷 머리의 이름 · 판 · 강등 표지 전부. 스크래치 백엔드에서
+ * 동결 잡 둘(DV1 · DV2 — 같은 초)과 손 픽스처 하나를 얼려 받았다. 대상 표는 비었다 — 대상 머리 타입(`unseated_n` · `superseded_by`)은
+ * 이 응답이 싣지 않는 칸을 요구한다(FE-7 의 남긴 것, 이 견본 밖).
+ */
+export const projectDetailMember = sample<ProjectDetail>()({
+  "project": {
+    "id": "a3e072a3c6944e928d90a826f5907884",
+    "owner_sub": "syn@example.com",
+    "code": "DEMO-7",
+    "name": "시연 과제",
+    "stage": "DV1",
+    "predecessor_project_id": null,
+    "adh_team": null,
+    "adh_group": null,
+    "character_status": "seed",
+    "created_at": 1793441473,
+    "updated_at": 1793441473,
+    "classification": "confidential",
+    "lifecycle": "shipped",
+    "closed_at": 1793441473,
+    "corpus_excluded": false,
+    "excluded_reason": null,
+    "mcp_visibility": "private",
+    "product_code": "SM-X100",
+    "product_refs_json": [
+      {
+        "kind": "product_code",
+        "value": "SM-X100"
+      },
+      {
+        "kind": "ra_model",
+        "value": "X100"
+      }
+    ],
+    "predecessor_product_code": null,
+    "status": "active"
+  },
+  "members": [
+    {
+      "email": "editor@example.com",
+      "role": "editor"
+    },
+    {
+      "email": "syn@example.com",
+      "role": "owner"
+    },
+    {
+      "email": "viewer@example.com",
+      "role": "viewer"
+    }
+  ],
+  "sources": [
+    {
+      "id": "d56e75c97e92463d9fc2c94fa88b35de",
+      "kind": "mcad",
+      "app_key": "heax-step_forge",
+      "ref": {
+        "detect_job_id": "01JDET",
+        "stepforge_project_id": "001a02ba21cd51064a68c35"
+      },
+      "bridge_declared": false,
+      "probe": {
+        "capture_mode": "rest_primary",
+        "detail": "capture_ok calls=8 app_key=heax-step_forge",
+        "reachable": true,
+        "status": "linked"
+      },
+      "probe_at": 1793441473,
+      "status": "linked"
+    }
+  ],
+  "snapshots": [
+    {
+      "id": "5bff75c1afac45489edb1d979c1e28db",
+      "ir_version": "1.0",
+      "ir_hash": "a72492cca1ba6add7027edc23d121f65e1a2db076a6b5372effa8a5facd4d43d",
+      "kinds_json": "[\"mcad\",\"ecad\"]",
+      "node_count": 3,
+      "edge_count": 3,
+      "warnings_n": 4,
+      "degraded": "app_version_unknown",
+      "degraded_json": [
+        "app_version_unknown",
+        "ecad_absent"
+      ],
+      "created_at": 1793441473,
+      "label": "DV1",
+      "app_versions": {
+        "ecad": {},
+        "mcad": {
+          "captured_via": null,
+          "extra": null,
+          "version": null
+        }
+      },
+      "adapter_versions": {
+        "ecad": "0.0-stub",
+        "mcad": "1.0"
+      }
+    },
+    {
+      "id": "95644d3def2c4c338fb53ea095d4b45d",
+      "ir_version": "1.0",
+      "ir_hash": "a5d7e4bfd302672a2b0df6ccb0c853befbe916fdba432d99992bab11e6b8b0e5",
+      "kinds_json": "[\"mcad\",\"ecad\"]",
+      "node_count": 3,
+      "edge_count": 3,
+      "warnings_n": 4,
+      "degraded": "app_version_unknown",
+      "degraded_json": [
+        "app_version_unknown",
+        "ecad_absent"
+      ],
+      "created_at": 1793441473,
+      "label": "DV2",
+      "app_versions": {
+        "ecad": {},
+        "mcad": {
+          "captured_via": null,
+          "extra": null,
+          "version": null
+        }
+      },
+      "adapter_versions": {
+        "ecad": "0.0-stub",
+        "mcad": "1.0"
+      }
+    },
+    {
+      "id": "129d7610f7794d71af4f64b54ca5c554",
+      "ir_version": "1.0",
+      "ir_hash": "e54be20938709506e72c05d7d97453e76780a8778d077c17e6175d163366bfea",
+      "kinds_json": "[\"mcad\",\"dyna\",\"dyna_result\"]",
+      "node_count": 7,
+      "edge_count": 4,
+      "warnings_n": 0,
+      "degraded": "no_secid",
+      "degraded_json": [
+        "no_secid"
+      ],
+      "created_at": 1756600000,
+      "label": null,
+      "app_versions": {
+        "dyna": {},
+        "dyna_result": {},
+        "mcad": {}
+      },
+      "adapter_versions": {
+        "dyna": "1.0",
+        "dyna_result": "1.0",
+        "mcad": "1.0"
+      }
+    }
+  ],
+  "targets": [],
+  "jobs": [],
+  "character_top_tags": []
+});
+
+/** 과제 목록(GET /projects) — 편집자로 받았다. 제 과제(owner)와 구성원 과제(editor), 카드마다 등급 · 수명 주기 · 코퍼스 제외 · 내 역할. */
+export const projectCardsMember = sample<ProjectList>()({
+  "projects": [
+    {
+      "id": "2e480ea06bc24f7c8b1d62a21f4310e3",
+      "code": "ED-1",
+      "name": "편집자 과제",
+      "stage": null,
+      "targets": [],
+      "last_snapshot_id": null,
+      "sources": [],
+      "last_snapshot_at": null,
+      "open_targets": 0,
+      "coverage_pct": null,
+      "level": null,
+      "classification": "internal",
+      "lifecycle": "active",
+      "corpus_excluded": false,
+      "my_role": "owner"
+    },
+    {
+      "id": "a3e072a3c6944e928d90a826f5907884",
+      "code": "DEMO-7",
+      "name": "시연 과제",
+      "stage": "DV1",
+      "targets": [],
+      "last_snapshot_id": "5bff75c1afac45489edb1d979c1e28db",
+      "sources": [
+        {
+          "kind": "mcad",
+          "app_key": "heax-step_forge",
+          "status": "linked"
+        }
+      ],
+      "last_snapshot_at": 1793441473,
+      "open_targets": 0,
+      "coverage_pct": null,
+      "level": null,
+      "classification": "confidential",
+      "lifecycle": "shipped",
+      "corpus_excluded": false,
+      "my_role": "editor"
+    }
+  ]
+});
+
+/**
+ * 스냅샷 상태(GET /snapshots/{id}?part=state) — G3 에 ack 를 붙인 뒤 받았다. 게이트는 지금 살아 있는 ack 를 얹어 오고 `gates_hash` 는
+ * ack 답의 것과 같다. 신호 · 규칙 적중 · 성격 씨앗 · 특징 벡터는 앞 몇 개로 줄였다.
+ */
+export const snapshotStateAcked = sample<SnapshotState>()({
+  "blocked": false,
+  "character_seed": [
+    {
+      "cites": [
+        "p:8051c8e0492d"
+      ],
+      "rule": "seed.structure.rigid_frame_load_path",
+      "tag": "char:structure:rigid_frame_load_path",
+      "text": "PLATE_2 degree=2 / leaf 3"
+    }
+  ],
+  "feature_vector": {
+    "known": [
+      true,
+      true
+    ],
+    "names": [
+      "n_leaf",
+      "n_files"
+    ],
+    "transform": [
+      "log1p",
+      "log1p"
+    ],
+    "values": [
+      1.386294,
+      0.693147
+    ],
+    "version": "fv-1.0"
+  },
+  "gates": {
+    "G1": {
+      "ack_at": null,
+      "ack_by": null,
+      "ack_reason": null,
+      "blocking": false,
+      "count": 0,
+      "detail": [],
+      "effect": "none",
+      "key": "dup_or_anon_names",
+      "pass": true,
+      "reason": null,
+      "threshold": 5.0
+    },
+    "G2": {
+      "ack_at": null,
+      "ack_by": null,
+      "ack_reason": null,
+      "blocking": false,
+      "count": 0,
+      "detail": [],
+      "effect": "none",
+      "key": "sameas_pending",
+      "pass": true,
+      "reason": null,
+      "threshold": 0
+    },
+    "G3": {
+      "ack_at": 1793441473,
+      "ack_by": "syn@example.com",
+      "ack_reason": "계면 확인 뒤 진행",
+      "blocking": false,
+      "count": 1,
+      "detail": [
+        "e:c650f4ca3da5"
+      ],
+      "effect": "mark",
+      "key": "iface_unconfirmed",
+      "pass": false,
+      "reason": null,
+      "threshold": 0
+    },
+    "G4": {
+      "ack_at": null,
+      "ack_by": null,
+      "ack_reason": null,
+      "blocking": false,
+      "count": 0,
+      "detail": [],
+      "effect": "none",
+      "key": "coordinate",
+      "pass": true,
+      "reason": null,
+      "threshold": 0
+    },
+    "G5": {
+      "ack_at": null,
+      "ack_by": null,
+      "ack_reason": null,
+      "blocking": false,
+      "count": 0,
+      "detail": [],
+      "effect": "none",
+      "key": "partial_scope",
+      "pass": true,
+      "reason": null,
+      "threshold": 0
+    },
+    "G6": {
+      "ack_at": null,
+      "ack_by": null,
+      "ack_reason": null,
+      "blocking": true,
+      "count": 0,
+      "detail": [],
+      "effect": "none",
+      "key": "unit_scale",
+      "pass": true,
+      "reason": null,
+      "threshold": 0
+    }
+  },
+  "ir_hash": "e54be20938709506e72c05d7d97453e76780a8778d077c17e6175d163366bfea",
+  "missing": {
+    "dyna_absent": false,
+    "dyna_capture_failed": false,
+    "dyna_result_absent": false,
+    "ecad_absent": true,
+    "ecad_capture_failed": false,
+    "iface_kinds_absent": false,
+    "material_density_unsourced": false,
+    "mcad_absent": false,
+    "mcad_capture_failed": false,
+    "result_kind_mismatch": false,
+    "volume_null": false,
+    "world_transform_absent": false
+  },
+  "precedent": {
+    "corpus_n": 0,
+    "out_of_range_count": 0,
+    "per_feature": {}
+  },
+  "project_id": "a3e072a3c6944e928d90a826f5907884",
+  "rule_hits": [
+    {
+      "evaluable": true,
+      "fix_hint": "«set_interface 로 kind 확정 또는 형상 수정 후 재검출»",
+      "found": {
+        "count": 1,
+        "refs": [
+          "e:c650f4ca3da5"
+        ],
+        "text": "interference_auto_present 1건"
+      },
+      "not_evaluable_reason": null,
+      "pass": false,
+      "payload_hash": "f750af522107c4e40bba300036f14e39db6b894b5a70bdb6d889beb85652745c",
+      "refs": [
+        "e:c650f4ca3da5"
+      ],
+      "rule": "R-001",
+      "severity": "중대",
+      "version": "rules-1.0",
+      "why_it_matters": "«간섭이 auto 로 남아 있으면 억지끼움 의도인지 설계오류인지 확정되지 않은 것이다»"
+    }
+  ],
+  "rule_version": "rules-1.0",
+  "seed_rules_version": "seed-1.0",
+  "signals": {
+    "counts.leaf": {
+      "derived_from": [],
+      "kind": "count",
+      "known": true,
+      "refs": [],
+      "text": "leaf=3",
+      "unit": null,
+      "value": 3
+    },
+    "counts.edges.interference": {
+      "derived_from": [],
+      "kind": "count",
+      "known": true,
+      "refs": [],
+      "text": "interference=1",
+      "unit": null,
+      "value": 1
+    }
+  },
+  "snapshot_id": "129d7610f7794d71af4f64b54ca5c554",
+  "state_version": "1.0",
+  "summary_status": "ok",
+  "summary_text": "[대상] 스냅샷 129d7610 ir_hash=e54be2093870 소스 mcad=sha-mcad dyna=abcd12340000 dyna_result=sha-report ecad=absent\n[게이트] G1 pass · G2 pass · G3 fail(1, ack 없음) · G4 pass · G5 pass · G6 pass\n[구조] 파일 1 · 리프 3 · 어셈블리 1 · 엣지 tied 1 touching 0 clearance 0 interference 1 · 고아 0 · cross_file 0 [sig:counts.*]\n[상위 계면] PLATE_2↔BRACKET_L interference penetration_depth≥0.05 mm(lower_bound) status=auto(미확정 초안) [e:c650f4ca3da5] · 근접 간극 clearance 없음\n[치수] dims_named 없음\n[재료] 재질 종류 2 · 미기재 0 [sig:counts.material_null]\n[Dyna] pid 2 · {\"*CONTACT_TIED_SURFACE_TO_SURFACE\":1} · pid 1 worst_stress=231.4 MPa · pid 2 worst_stress=120.0 MPa\n[규칙] R-001 fail(1건) [rule:R-001] · R-002 pass [rule:R-002] · R-003 pass [rule:R-003] · R-004 pass [rule:R-004] · R-005 pass [rule:R-005] · R-006 pass [rule:R-006] · R-007 평가 불가(source_absent) [rule:R-007]\n[씨앗] char:structure:rigid_frame_load_path · char:interface:bracket_l_plate_2 · char:analysis:dyna_with_results\n[결측] ecad_absent",
+  "taxonomy_version": "1.2",
+  "computed_at": 1793441473,
+  "gates_hash": "83e79926329a"
+});
+
+/** 대응표(GET /sameas) — 같은 과제의 두 판(DV1 → DV2)이라 pair_key 가 같은 과제 id 둘이다. 행은 모두 자동 확정이라 없다. */
+export const sameAsPairKey = sample<SameAs>()({
+  "pair_key": "a3e072a3c6944e928d90a826f5907884|a3e072a3c6944e928d90a826f5907884",
+  "pairs": [],
+  "pending_n": 0,
+  "G2": {
+    "ack_at": null,
+    "ack_by": null,
+    "ack_reason": null,
+    "blocking": false,
+    "count": 0,
+    "detail": [],
+    "effect": "none",
+    "key": "sameas_pending",
+    "pass": true,
+    "reason": null,
+    "threshold": 0
+  }
+});
+
+/** 키 대장(GET /part-keys/{ckey}) — 보기 멤버로 받은 병합된 키. 별칭은 그 사람이 구성원인 과제의 것만이다. */
+export const partKeyMerged = sample<PartKey>()({
+  "ckey": "ck:5363abb47438",
+  "status": "merged",
+  "merged_into": "ck:4bbe8075874f",
+  "display_name": null,
+  "aliases": [
+    {
+      "domain": "mcad",
+      "label": "STACK_ASM",
+      "local_key": "/sif-e2e/a_stack.step/STACK_ASM",
+      "name_norm": "stack_asm",
+      "project_id": "a3e072a3c6944e928d90a826f5907884"
+    }
+  ],
+  "decided_by": "syn@example.com",
+  "decided_at": 1793441473
+});
+
+/** 키 대장 — 주인으로 받은 이름 붙은 후보 키(이름만 붙이면 status 는 candidate 그대로다). */
+export const partKeyNamed = sample<PartKey>()({
+  "ckey": "ck:4bbe8075874f",
+  "status": "candidate",
+  "merged_into": null,
+  "display_name": "보호 필름",
+  "aliases": [
+    {
+      "domain": "mcad",
+      "label": "PLATE_2",
+      "local_key": "/sif-e2e/a_stack.step/STACK_ASM/PLATE_2",
+      "name_norm": "plate_2",
+      "project_id": "a3e072a3c6944e928d90a826f5907884"
+    }
+  ],
+  "decided_by": "syn@example.com",
+  "decided_at": 1793441473
+});
+
+/** 진행판의 패널 잡(GET /targets/{key}/coverage → job) — 도는 패널 하나. `signals` 는 `signal` 과 같은 한 줄이다(러너가 대상마다 패널을 하나씩 돌린다). */
+export const coverageJobRunning = sample<NonNullable<CoverageJob>>()({
+  "id": "c89846800b9546ab851712d371ce4493",
+  "tier": "A",
+  "state": "running",
+  "pause_reason": null,
+  "panels_done": 0,
+  "panels_total": 1,
+  "error": null,
+  "signal": {
+    "frames": 12,
+    "last_event_at": 1793441473,
+    "last_frame_at": 1793441473,
+    "last_step": "1라운드 · 좌석 발언",
+    "panel_id": "dae1b44057504811ae7ec7eb01d42c10",
+    "panel_no": 1,
+    "started_at": 1793441473,
+    "frame_idle_s": 0,
+    "event_idle_s": 0
+  },
+  "signals": [
+    {
+      "frames": 12,
+      "last_event_at": 1793441473,
+      "last_frame_at": 1793441473,
+      "last_step": "1라운드 · 좌석 발언",
+      "panel_id": "dae1b44057504811ae7ec7eb01d42c10",
+      "panel_no": 1,
+      "started_at": 1793441473,
+      "frame_idle_s": 0,
+      "event_idle_s": 0
+    }
+  ]
+});
