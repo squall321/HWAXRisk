@@ -328,19 +328,30 @@
 - [x] ER-02 발견 — `/tools-map` 의 백엔드 `odb-hub` 와 원래 이름(접두 `odbhub_` 포함) · 상태 실측(ready · unavailable · planned, `contract_only` 없음) ·
       캡처의 MCP 호출은 그 소스의 백엔드 이름으로(`backend_tool_name`) · 응답 계약은 어댑터마다 제 표로
 - [x] ER-03 `adapters/ecad.py` — `find_job` · `get_board_layers` · `check_job_stackup` · `get_volume_result` · `get_odb_download` 한 번씩 +
-      `list_parts` 100행씩 → board(소스 1건) · layer(5종, 위에서 아래 idx) · component(분류된 부품, 좌표·넷 없이) · ir_version 1.1
-- [x] ER-04 표지 열 개(`rr_ir.v1.json` degraded_code) · 붙은 보드를 못 읽으면 `ecad_capture_failed` · 허브 봉투형 오류는 경고만 ·
-      `sig:counts.ecad.nets` 는 0 이 아니라 미측정
+      `list_parts` 100행씩 → board(소스 1건 + board 노드 1건 — EC-14) · layer(5종, 위에서 아래 idx) · component(분류된 부품, 좌표·넷 없이) · ir_version 1.1
+- [x] ER-04 표지 열두 개(`rr_ir.v1.json` degraded_code — 부품 · 층 가족이 통째로 빠지면 `components_unavailable` · `layers_unavailable`) ·
+      find_job 을 불러 못 읽으면 `ecad_capture_failed`, 호출 없이 끝나면 결측 + 경고(EC-16) · 허브 봉투형 오류는 경고만 · `sig:counts.ecad.nets` 는
+      0 이 아니라 미측정
 - [x] ER-01 보드 고르기 — `GET /api/ecad/boards` · `PUT · DELETE /api/projects/{id}/ecad-board` · MCP `risk_find_ecad_boards` · `risk_set_ecad_board`
       (find_job 후보를 사람이 고르고, 붙이기는 find_job 에 있는 job_id 만 · 일반 소스 연결의 kind ecad 는 422 `ecad_board_route`)
 - [x] ER-05 `docs/odb-adapter-contract.md` 개정(지금 도구 · 발견 · 두 단계 · 사상 · 표지 · 의존 도메인 6) — 포털 plan §2.5.3 · §2.13.5 는 포털 몫
 - [x] same-as 4단계는 ecad 노드만 뺀다(종전에는 ecad 가 하나라도 있으면 단계를 통째로 꺼 쌍 비교의 mcad 지문 대응까지 꺼졌다) · 3단계도 ecad 를 짝 목록에서 뺀다
 - [x] 시험 — 부록 A 꼴 가짜 odb-hub(`tests/test_ecad_adapter.py`) · 남 숨김 표 · 변이 20/20 · 전체 3,427 통과 · xfail 4 · 실패 0(context-notes EC-13)
+- [x] 블랙박스(`tests/test_bb_ecad_stage1.py`, 요청서만 보고 지은 23건) 들여오기 · 가정 도우미 A1 · A5 · A6 만 구현에 맞춤(EC-25)
+- [x] 반대 검토 고침(EC-14 ~ EC-23) — board 노드 · 쌍 비교의 ECAD 를 kind 별로(실패 · 한쪽만 · 세대) · diff 대상의 ECAD 의존 영역은 1단계 동안
+      deferred · 노드 가족 표지 · 서로 다른 행으로 다 받았나 · 쪽 상한 · 배치 수 count/counted · 못 읽은 도구 지도는 캐시하지 않음 · 보드만 붙은
+      과제의 못 읽은 보드는 409 · ECAD 카드는 어댑터 결과로 · same-as 5단계 이름 나눔
 - [ ] 화면 — ProjectPage 의 ECAD 카드에 보드 찾기 · 후보 고르기 · 떼기, SnapshotPage 의 표지 이름(화면 세션 몫)
+- [ ] 화면 — 보드가 붙은 과제의 웹 캡처 기본 kinds 에 ecad 를 담는다(지금 `['mcad']` 라 보드만 붙은 과제는 409, mcad 와 함께면 보드를 읽지 않는다 —
+      EC-22) · 노드 kind `board` 와 comparability.ecad 를 보인다(화면 세션 몫)
 - [ ] 포털 plan §2.5.3 · §2.13.5(그리고 §2.3 attrs 머리 · §2.11.3 5단계 · §2.13.2 ecad 집합)를 1단계 글로(포털 세션)
 - [ ] cae00 다시 볼 시험(포털 요청서 6절 1단계 캡처) — ecad_absent 없음 · component 수 = list_parts total · layer 수 = 5종 행 수 · 빠진 칸은 표지
-- [ ] 결정 필요 — 한쪽에만 ECAD 가 있는 비교(앞 스냅샷에 보드가 없으면 부품·층이 전부 part.added) · 넷 의존 도메인(pwr · rf)을 2단계까지 deferred 로 둘지 ·
-      모델 크기 상한(risk_max_leaf)에 ECAD 부품 수를 셀지
+- [ ] 결정 필요 — 넷 의존 도메인(pwr · rf)을 스냅샷 대상에서도 2단계까지 deferred 로 둘지 · 모델 크기 상한(risk_max_leaf)에 ECAD 부품 수를 셀지 ·
+      찾기 · 캡처 자격 — 그 사람의 PAT 만 쓸지 박스 PAT 로 내려가되 자격을 적을지(odb-hub 는 plat:odbhub 로만 막힌다, EC-15).
+      (한쪽에만 ECAD 가 있는 비교는 partial_scope 로 정했다 — EC-17)
+- [ ] 1단계 칸의 쌍 비교(층 두께 · 재료 · 품번 · 패키지 · 핀 수 · 높이)와 거르기 표의 행 — 표 승인과 함께. 그때 diff 대상의 ECAD deferred(EC-18)를 걷는다
+- [ ] 기존 결함 — 노드 provenance.call_id 접두(snapshot_id[:8])가 원장 rr_snapshot_calls 의 call_id 접두(job_id[:8])와 달라 `tool:<call_id>` 가
+      풀리지 않는다(mcad · dyna · ecad 모두, main 부터 — 반대 검토 14, EC-24)
 - [ ] 2단계 ER-06 — ODB 허브 OH-01 · OH-02(가능하면 OH-03 · OH-04) 뒤. 부품 좌표 · 넷 · net 노드 · component→net 엣지 · 분류 안 된 부품 · rot 정규화 · ecad↔mcad 기하 지문
 - [ ] refdes↔파트 사전 UI · `ecad.*` 이벤트 · SedInput 어댑터
 - [ ] 예측기 HEAX 앱 계획서(별도 리포·매니페스트, 라벨 원천 `GET /api/export`) — 활성화 게이트 `n_labeled ≥50`·`project ≥15`

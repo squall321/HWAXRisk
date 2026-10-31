@@ -2739,3 +2739,120 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
   배포하는 쪽이 맞춘다.
 - 전체 시험 둘째 판(고친 뒤) — 3,427 통과 · xfail 4 · 실패 0(rc 0, 11분 41초). ruff — 남은 하나는 main 에도 있는 `tests/test_backup_wrapper_run.py`
   의 안 쓰는 import 다(이 가지 몫이 아니다).
+
+## ECAD 1단계 — 블랙박스 · 반대 검토 뒤 고침(가지 `wt1031/ecad`, 2026-10-31)
+
+> 블랙박스 시험(7da7e5a, 요청서만 보고 지은 23건)을 들여오고(c4d9148) 반대 검토 지적 16건을 재현한 뒤 고쳤다. 재현은 반대 검토의 실험 17건을
+> 분리한 작업 트리에서 이 가지 위에 그대로 돌려 같은 값이 나오는 것을 본 뒤다. 판단 기준은 요청서다 — 요청서가 정한 것과 다르면 구현을
+> 고치고, 요청서가 열어 둔 인터페이스를 시험이 다르게 가정했으면 그 가정 도우미만 고쳤다.
+
+### EC-14. 보드는 소스 1건이면서 board 노드 1건이다(EC-5 뒤집음 · 반대 검토 1 높음)
+- 요청서 ER-03 · 4절은 'board · layer · component 노드' · 'board 1건' 이다. EC-5 는 그것을 소스 1건으로 읽었는데, ir_hash 는 노드 · 엣지만
+  보므로 보드의 정체(job_id · 판 · 원본 해시)가 해시 밖이었다 — 배치 · 배선만 바꾼 판(1단계 칸이 같다)으로 바꿔 붙여 캡처하면 앞 판의 스냅샷이
+  `reused` 로 돌아오고 그 스냅샷의 `sources[ecad].ref` 는 옛 보드를 가리켰다(반대 검토 E1 재현).
+- kind `board`(스키마 노드 kind 어휘에 더함 — `rr_ir_nodes.kind` 는 CHECK 없는 TEXT 라 스키마 판은 그대로다), canon_key `ecad:board`, label
+  `board`(판이 바뀌어도 같다 — 쌍 비교가 두 판의 보드를 5단계 이름으로 맞춘다), local_key = job_id(ecad↔mcad 이름 대응은 refdes · local_key
+  토큰이 상대 이름과 겹쳐야 해 'PCB' 라는 mcad 부품과 저절로 묶이지 않는다). attrs 는 계약 odb_get_board 의 칸 + 판정 · 적층 합 · 외곽 폭 ·
+  높이 · 배치 수다. `stats` 의 같은 값은 그대로 둔다(해시 밖 사본).
+- 부품 refdes 가 `board` · `layer:…` · `net:…` 이면 노드 열쇠가 겹쳐 IR 이 서지 않는다(canon_key 중복은 E100) — 싣지 않고 `refdes_reserved` 경고다.
+
+### EC-15. 찾기 · 캡처 자격은 사용자 결정으로 남긴다(반대 검토 7)
+- 등록된 PAT 가 없거나 곧 끝나면 찾기 · 붙이기 확인 · 캡처가 박스 PAT(`HWAXRISK_PORTAL_PAT`)로 내려간다. odb-hub 는 사람별 격리가 없고
+  게이트웨이의 `plat:odbhub` 로만 막히므로 그 문을 서비스 계정으로 지난다. 안 (a) 그 사람의 PAT 만(없으면 `ecad_pat_absent` · 409),
+  (b) 내려가되 답 · 스냅샷에 자격(`service`)을 적는다 — 고르지 않았다. 블랙박스 시험은 (b) 의 박스 PAT 로 돈다(가정 — 'odb-hub 는 서비스
+  토큰 하나로 붙은 백엔드'). 바꾼 것은 찾기의 설명 글(‘그 사람의 PAT 로 부른다’ 는 내려가는 경우에 틀렸다)뿐이다.
+
+### EC-16. 호출 없이 끝난 실패는 결측 + 경고다(EC-6 일부 뒤집음 · 반대 검토 2 · 8)
+- 자격 없음 · 도구 지도를 못 읽음 · 그 백엔드에 도구 없음은 find_job 을 부르지도 못했다 — dyna 의 자격 없음(`dyna_pat_absent`)과 같은 꼴로
+  `ecad_absent` + WARNING 경고다. `ecad_capture_failed` 는 find_job 이 실패했거나 그 job_id 가 없거나 응답을 못 읽었을 때만이다(§2.11.3 표).
+- 빈 도구 지도는 게이트웨이를 못 읽은 것이다(`ecad_gateway_unreadable` — 찾기는 409 같은 코드). 종전에는 '그 백엔드에 도구 여섯이 다 없다'
+  (`ecad_tools_missing`)로 적혀 고칠 곳이 ODB 허브 등록으로 보였다. 못 읽은 지도(전송 · HTTP 오류 · 빈 지도)는 캐시하지 않는다 — 한 번의
+  503 이 60 s 동안 모든 ECAD 캡처 · 찾기를 닫았다(E14 재현). 읽은 지도만 캐시한다.
+- 경고 severity 는 실패면 WARNING 이다(종전에는 기본값 INFO 가 실패에도 실렸다). 보드 없음 · kinds 에 ecad 없음은 INFO 그대로다.
+
+### EC-17. 쌍 비교의 ECAD 는 kind 별로 따진다(반대 검토 2 · 3)
+- 종전 — ecad_capture_failed 하나가 `capture_parity` 를 거짓으로 만들어 쌍 전체의 의미층(mcad `iface.*` 포함)을 지우고 파라메트릭 항목을 전부
+  capture_partial 로 만들었다(E4). ECAD 노드 771 개는 사유 없이 '삭제' 였다(E5b). 한쪽에만 보드가 있으면 결측 행 `0.0-stub` 대 `1.0` 이라
+  `adapter_parity` 가 거짓이 되어 mcad 이벤트까지 parser_differs · 등급 낮춤이었다(E5) — 웹 기본 캡처(kinds `['mcad']`)와 MCP 캡처를 견주면 흔하다.
+- 지금 — `comparability.ecad = {base, target, excluded_reason, adapter_parity}`. 쪽마다 present · absent · failed(못 읽음 또는 capture_partial ·
+  components_unavailable · layers_unavailable — 노드 집합을 믿을 수 없다). 한쪽이라도 failed 면 ECAD 항목에 `capture_partial`, 한쪽에만 실렸으면
+  `partial_scope` 를 의미층 **앞에서** 붙인다 — 항목은 남고 `part.added` · `part.removed` 가 생기지 않으며 검토 단위에서는 제외 단위로 간다.
+  세대 차이는 두 쪽 다 실렸을 때만 견주고 ECAD 항목 · 이벤트에만 caveat 다. 전역 `capture_parity` 는 ecad_capture_failed 를, 전역
+  `adapter_parity` 는 ecad 를 세지 않는다 — mcad · dyna 의 종전 동작(전역 효과)은 그대로다.
+- 한쪽에만 ECAD 가 있는 쌍을 partial_scope 로 남기는 것은 EC-12 가 결정 필요로 남긴 자리를 정한 것이다. 까닭 — §3.3.6 의 잣대가 다르면 사유를
+  붙여 남긴다는 규칙의 kind 별 적용이고, 남기지 않으면 첫 보드를 붙인 비교 하나가 부품 772 개짜리 '추가' 를 검토 단위로 만들어(units_max 60)
+  대상을 oversize 로 몬다. 되돌리려면 `_ecad_side` 의 absent ↔ present 를 사유 없음으로 두면 된다.
+- ECAD 항목의 판별은 구조층은 그 변경의 domain, 파라메트릭은 그 dn 의 노드가 모두 ecad 인가다(ecad↔mcad 로 묶인 클러스터는 mcad 쪽으로 둔다).
+
+### EC-18. diff 대상의 ECAD 의존 영역은 1단계 동안 deferred 다(EC-11 좁힘 · 반대 검토 4)
+- 1단계 쌍 비교는 ECAD 칸(층 두께 · 재료 · 품번 · 패키지 · 핀 수 · 높이)을 견주지 않는다 — 노드를 refdes · 층 이름으로 맞춰 추가 · 삭제만 본다(E11
+  재현 — 네 칸을 바꾼 두 판의 쌍 비교에 ECAD 항목 0). 그 비교를 받은 ECAD 좌석은 '회로 변경 없음' 으로 읽는다.
+- 고른 길 — 반대 검토의 두 안 가운데 '계획에 적고 diff 대상의 ECAD 의존 영역을 deferred 로 둔다' 다. 다른 안(1단계 칸의 파라메트릭 규칙과
+  이벤트)은 승인된 거르기 표(change-routing · D-56)에 없는 코드(`param.thickness` 따위)를 더해야 하고, 예약된 `ecad.*` 이벤트로는 품번 · 패키지
+  변경을 담을 코드가 없다(`ecad.component_moved` 는 배치다). 표를 사람 승인 없이 바꾸지 않는다.
+- `routes._ecad_absent_for_target` · `create_target` 은 diff 대상이면 참이다 — rank 1 외 deferred, 입력 결손 `ecad_absent`. 입력 결손의 어휘는
+  그대로 쓴다(엔진 · 마감 표가 `ecad_absent` 를 읽는다) — 대신 대상의 결측 블록 첫 줄(kind `ecad`)이 '칸 변화는 이 비교에 없다' 를 말하고,
+  입력 결손 전문가에게는 영역 실마리가 붙는다(`units._target_missing` · `gap_missing`). 스냅샷 대상은 종전대로 풀린다.
+
+### EC-19. 노드 가족이 통째로 빠지면 표지가 선다(반대 검토 5)
+- 허브의 봉투형 오류(200 + error — 분석을 돌리지 않은 보드)는 그 칸만 비는 경고(EC-6)지만, list_parts · get_board_layers 가 그러면 component ·
+  layer 가족이 통째로 없다(E18 — 표지 없이 '온전한 1단계' 로 보였다). `components_unavailable`(첫 쪽을 못 읽음) · `layers_unavailable`(층을 못
+  읽음 · 5종 행 없음)를 스키마 어휘에 더했다. 그 수(`stats.n_components` · `layer_rows` · `layer_rows_all`)는 미측정(null)이다. 호출 실패도
+  같은 표지가 선다(capture_partial 과 함께).
+
+### EC-20. 쪽 넘김 — 서로 다른 행 수로 견주고 쪽 수에 상한을 둔다(반대 검토 6 · 12)
+- 받은 행 수(겹친 행 포함)로 total 과 견주면 쪽 순서가 흔들리는 허브(sort 기본값)가 어떤 행은 두 번, 어떤 행은 한 번도 주지 않아도 다 받은
+  것으로 보였다(E9 — 748 가운데 569~575 개, 부분 표지 없음). 서로 다른 행(겹친 refdes 는 한 번, 빈 refdes 는 행마다)으로 견주고 모자라면
+  capture_partial + `components_incomplete`(받은 행 · 겹친 행 수를 함께)다. `duplicate_refdes` 글은 자료 탓만 하지 않는다.
+- 쪽 수 상한 ceil(min(total, 2000)/100)+1(total 을 모르면 2000 기준) — 쪽마다 새 행 하나만 주는 허브가 1,999 번 불렸다(E10). 닿으면
+  capture_partial + `odb_paging_capped`. 허브가 100 보다 작은 쪽을 주면 상한에 닿아 부분으로 적힌다 — 부록 B 는 100 이다.
+
+### EC-21. 배치 수는 count, 없으면 counted — 분류된 수보다 작으면 경고(반대 검토 11)
+- 부록 A 는 count, OH-02 는 counted 라 적었다. count 를 먼저 읽고 없을 때만 counted 다. 배치 수가 분류된 부품 수보다 작을 수는 없다 — 그 칸이
+  배치 수가 아니다(E7 — 큰 부품 10개 수). 경고 `placed_below_classified` 를 남기고 `components_unclassified_omitted` 는 같다고 확인될 때만 뺀다.
+
+### EC-22. 보드만 붙은 과제에서 보드를 못 읽으면 스냅샷을 만들지 않는다(반대 검토 9 · 10)
+- §2.11.3 표 — 필수 호출이 실패하고 남은 kind 가 없으면 잡 failed 다. `capture_all` 이 이번에 읽은 kind(`read_kinds`)를 돌려주고, 그것이 ecad
+  하나뿐인데 보드를 못 읽었으면(`missing.ecad_absent` — 호출 없이 끝난 것 포함) `create_snapshot` 이 409 `source_unreachable`(detail
+  `{kind:'ecad', reason:<경고 code>}`)로 닫는다. 잡 행은 failed(error.reason), 호출 원문은 스냅샷 없이 남긴다(find_job 의 답을 볼 수 있다).
+  capture_all 안에서 던지지 않은 까닭 — 던지면 그 호출 원문이 사라진다.
+- 붙은 카드는 있는데 kinds 가 그 종류를 뺐으면 409 글이 '연결하라' 가 아니라 kinds 를 고치라고 말한다(detail `{kinds, attached}`). 웹 화면의
+  기본 kinds 가 mcad 라 보드만 붙은 과제가 늘 여기 걸린다 — 화면 요청(checklist 4장).
+- ECAD 카드는 호출 전송이 아니라 어댑터 결과로 잰다(`refresh_source_probes(..., results)`) — find_job 이 200 이어도 그 job_id 가 없으면
+  unreachable · `capture_failed ecad_board_not_found — …` 이고, 호출 없이 끝난 실패도 카드에 남는다(종전에는 붙일 때의 find_job_ok 가 남았다).
+  실었지만 부분이면(선택 호출 실패 · 쪽 넘김) linked 이되 `capture_partial calls=N …` 이다.
+  capture_mode 는 그 kind 가 REST 로 읽었으면 rest_primary, 아니면 mcp 다(ECAD · dyna 에 rest_primary 가 박혀 있었다).
+
+### EC-23. same-as 5단계는 이름으로 나눠 짝을 찾는다(반대 검토 15)
+- 5단계는 name_norm_canon 이 같은 쌍만 보는데 모든 자유 쌍(free_pairs)을 펼쳤다 — 부품 2,000 개 보드 두 판의 쌍 비교가 5 초 · 최고 330 MB 였다
+  (E15). b 쪽을 이름으로 나눠 두고 a 마다 같은 이름 칸만 본다 — 짝 집합이 같고 받아들이는 순서는 sorted 가 정해 결과가 같다(0.2 초 · 수 MB,
+  시험은 50 MB 상한). 3 · 4단계의 free_pairs(ecad 제외)는 그대로다.
+
+### EC-24. 남긴 것
+- **provenance.call_id 가 원장 call_id 와 다르다(반대 검토 14, 기존 결함)** — CallRecorder 는 snapshot_id[:8], record_calls 는 job_id[:8] 접두라
+  노드 provenance 의 `tool:<call_id>` 가 풀리지 않는다. mcad · dyna 에도 main 부터 있던 것이고 모든 어댑터의 provenance · 참조 해석이 걸려 이
+  가지에서 고치지 않았다(checklist 4장).
+- 1단계 칸의 쌍 비교(층 두께 · 재료 · 품번 · 패키지 · 핀 수 · 높이)와 `ecad.*` 이벤트 · 거르기 표 행 — 표 승인과 함께 정한다. 그때 EC-18 의
+  diff 대상 deferred 를 걷는다.
+- 넷 의존 영역(pwr · rf)을 스냅샷 대상에서 2단계까지 deferred 로 둘지 · 모델 크기 상한에 ECAD 부품 수를 셀지 — 결정 필요 그대로(EC-11 · EC-12).
+
+### EC-25. 블랙박스 가정 도우미를 구현에 맞췄다
+- A1(보드를 붙이는 칸) — 요청서는 '칸을 둔다' 만 정했다. 구현은 같은 소스 카드를 PUT …/ecad-board {odb_job_id} 로만 적는다(EC-1). `_ecad_ref` ·
+  `_attach` 만 바꿨다 — job_id 없는 이름뿐인 카드는 일반 연결로 시도해 422 를 받고(그 시험의 뜻 '이름으로 고르지 않는다' 그대로) 붙인 답의
+  카드 probe 를 `probe` 로 옮긴다.
+- A5 · A6(단위) — 요청서 부록 A 는 원천의 단위(thickness_um, µm · total_thickness_mm × 1000)를 적었다. rr_ir 의 길이 단위는 mm(units.length)라
+  층 두께 · ecad_stackup_total 을 mm 로 싣는다(µm 를 mm 봉투에 실으면 단위가 거짓이 된다). 도우미가 µm 로 되돌려 견준다 — 층 두께 단언 한 줄은
+  도우미를 거치게만 바꿨다.
+- A3 · A4(board 노드 · 칸 이름)는 구현을 고쳤다(EC-14) — 요청서가 정한 것이다.
+
+### EC-26. 시험 · 변이 · 전체 시험(이 고침)
+- 블랙박스 23/23. `tests/test_ecad_adapter.py` 에 반대 검토 고침 시험 함수 19개(보드 노드 · 판 바꿔 붙이기 · 쌍 비교 셋 · diff 대상 deferred ·
+  노드 가족 표지 · 흔들리는 쪽 · 쪽 상한 · 배치 수 둘 · 지도 캐시 · 찾기의 지도 · 보드만 과제 409 · 정확한 job_id · 빈 job_id · 큰 보드 쌍 비교 ·
+  열쇠와 겹치는 refdes · 부분으로 읽은 카드), `tests/test_project_patch.py` 에 카드 capture_mode 하나. 바꾼 시험 — 못 읽은 보드 시험을 호출 없는 셋(결측 + 경고)과
+  호출한 둘(capture_failed)로 나눴고, 붙인 뒤 캡처의 노드 수에 board 1 · capture_mode mcp 를 더했다.
+- 재현 — 반대 검토 실험 17건을 분리한 작업 트리에서 이 가지(c4d9148) 위에 돌려 같은 값을 본 뒤 고쳤고, 고친 뒤 다시 돌려 결함 단언이 깨지는 것을
+  봤다(E1 reused 거짓 · E2 409 · E4 · E5 mcad 이벤트 그대로 · E7 표지와 경고 · E9 capture_partial · E10 21쪽 · E13 kinds 글 · E14 다음 캡처가
+  곧바로 산다 · E15 0.22 초 · 3.3 MB · E18 표지). E6(자격) · E11(칸 비교) · E12(call_id)는 남긴 것 그대로다.
+- 변이(분리한 작업 트리, 바이트코드 끔) 30개 — 첫 판 29개가 잡혔다. 산 하나는 ECAD 밖 카드의 capture_mode 를 rest_primary 로 되돌린 것이라
+  `test_the_card_capture_mode_follows_the_channel_that_read_it` 을 더해 잡았다. 작업 트리는 지웠다.
+- 전체 시험(고친 뒤 마지막 판) — 3,474 통과 · xfail 4 · 실패 0(rc 0, 11분 52초). ruff — 바꾼 파일은 깨끗하다.
