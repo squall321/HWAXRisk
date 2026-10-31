@@ -1,5 +1,5 @@
 // 완결 화면 — 완결 표기 · C1 · C2 · C3 조건 · 영역 깊이 · 잔여 표(막음/표기 · 확인 상태), 막음 잔여의 확인(사유 · basis_hash 그대로) · 확인 취소 · 다시 세기(포털 m3-frontend-request 6절)
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { riskApi } from "../api/risk.api";
 import { residualChangedOf } from "../api/reviewErrors";
@@ -60,7 +60,19 @@ export function ClosureCard({
   onOpenReport: () => void;
 }) {
   const [mode, setMode] = useState<{ fresh: boolean; n: number }>({ fresh: false, n: 0 });
-  const closure = useAsync((signal) => riskApi.getClosure(targetKey, mode.fresh, { signal }), [targetKey, mode.n], active);
+  /** fresh=1 을 이미 보낸 읽기 차례(mode.n). */
+  const freshSent = useRef(-1);
+  const closure = useAsync(
+    (signal) => {
+      // fresh=1(다시 세어 rr_targets 에 쓴다)은 '다시 세기' 와 409 residual_changed 뒤의 그 읽기 한 번만이다. 탭을 떠났다 돌아올 때는
+      // (useAsync 가 active 도 deps 로 본다) 캐시를 읽는다 — 전에는 한 번 누른 뒤 탭에 돌아올 때마다 다시 세어 썼다.
+      const fresh = mode.fresh && freshSent.current !== mode.n;
+      if (fresh) freshSent.current = mode.n;
+      return riskApi.getClosure(targetKey, fresh, { signal });
+    },
+    [targetKey, mode.n],
+    active,
+  );
   const [acking, setAcking] = useState<string | null>(null);
   const [revoking, setRevoking] = useState<string | null>(null);
   const [reason, setReason] = useState("");
