@@ -389,8 +389,9 @@ def test_e0_of_a_real_snapshot_keeps_its_four_tail_lines(risk_store, dyna):
     if dyna:
         assert "dyna «heax-kooremapper_mcp» file_id=«01JFIL» session_id=«01JSES»" in source
         assert "dyna_result «heax-kooremapper_mcp» report_ids=«['01JRPT']»" in source
-    # 줄 수는 그대로다 — 줄여서 넣은 것이지 뺀 것이 아니다.
-    assert len(lines) == 9
+    # 줄 수는 그대로다 — 줄여서 넣은 것이지 뺀 것이 아니다. 열째 줄은 요구 한 줄이다(이 과제는 요구 0건, §5.6.1).
+    assert "요구 미등록" in lines
+    assert len(lines) == 10
 
 
 def test_e0_borrows_only_the_room_the_other_items_left_unused(risk_store, monkeypatch):
@@ -1930,8 +1931,9 @@ def test_e3_diff_target_lists_named_dims(risk_store):
     e3 = _item(built, "E3").split("\n")[1:]
     body1 = render.split_trailing_refs(dims["plate1_t"]["text"])[0]
     body2 = render.split_trailing_refs(dims["plate2_t"]["text"])[0]
-    assert e3 == [f"[d:plate1_t] «{body1}» method=«{dims['plate1_t']['method']}»",          # 바뀐 것이 먼저
-                  f"[d:plate2_t] «{body2}» method=«{dims['plate2_t']['method']}» flag=noise"], e3
+    # 요구가 없는 치수라 요구 두 열(limit · margin)은 `—` 다(§5.6.1 E3).
+    assert e3 == [f"[d:plate1_t] «{body1}» method=«{dims['plate1_t']['method']}» | limit=— | margin=—",   # 바뀐 것이 먼저
+                  f"[d:plate2_t] «{body2}» method=«{dims['plate2_t']['method']}» flag=noise | limit=— | margin=—"], e3
     assert "(−30.0%)" in body1
     assert {"d:plate1_t", "d:plate2_t"} <= set(built["refs"])
 
@@ -1961,7 +1963,8 @@ def test_e3_snap_line_is_the_canonical_text(risk_store):
                                 irs={snap["snapshot_id"]: {"dims_named": {"plate1_t": row}}})
 
     e3 = _item(brief.build_brief(risk_store, key, owner_sub=factories.OWNER), "E3").split("\n")[1:]
-    assert e3 == [f"[d:plate1_t] «{narrative.canonical_text_for('d:plate1_t', ctx)}» method=«{row['method']}»"], e3
+    assert e3 == [f"[d:plate1_t] «{narrative.canonical_text_for('d:plate1_t', ctx)}» method=«{row['method']}»"
+                  " | limit=— | margin=—"], e3
 
 
 # ---------------------------------------------------------------- E7·E8·E9·E0(WP1 S8 · R-14 · R-16 · R-17 · R-20)

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
-from app import config, render, taxonomy
+from app import config, render, requirements, taxonomy
 from app.common import canonical_json, new_uuid, now_epoch, parse_ref, seat_key
 from app.errors import AppError
 
@@ -532,6 +532,92 @@ def _change_volume(store, diff) -> list[str]:
     return [f"변경 이벤트 {counts['total']}건(설계 관련 {counts['design']}){parts}"]
 
 
+# ---------------------------------------------------------------- 요구 대조(E0 요약 한 줄 · E3 두 열, plan §2.8b · §5.6.1)
+def _dims_list(named: Any) -> list[dict]:
+    """dims_named 의 두 모양(목록 · 이름 → 행)을 `requirements.compute_req_signals` 가 받는 목록으로 편다."""
+    if isinstance(named, Mapping):
+        return [{**(dict(v) if isinstance(v, Mapping) else {"value": v}), "name": k} for k, v in named.items()]
+    return [dict(i) for i in named or () if isinstance(i, Mapping)]
+
+
+def _req_view(store, ctx) -> dict | None:
+    """그 타깃 스냅샷(diff 면 뒤 스냅샷)의 요구 대조 — `requirements.compute_req_signals` 를 지금 원장으로 센다(한 브리프에 한 번).
+
+    저장된 rr_state 의 signals 를 읽지 않는다 — 동결(`ir_builder.freeze_snapshot`)이 요구를 대조하지 않고 상태를 저장하고, 요구를
+    고쳐도 상태를 다시 세지 않아 저장된 상태에는 `req.margin` 이 없거나 낡았다. 원자 저장의 보정(`narrative.SpecContext.req_margins`)도
+    같은 함수 · 같은 원장을 보므로 좌석이 받은 여유와 저장 때 대조한 여유가 같다.
+    """
+    if "_req" not in ctx:
+        project_id = _s(ctx["target"]["project_id"])
+        ir = _j(ctx["snapshot"]["ir_json"], {}) if ctx["snapshot"] is not None else {}
+        ir = ir if isinstance(ir, dict) else {}
+        ctx["_req"] = (requirements.compute_req_signals(store, project_id, {**ir, "dims_named": _dims_list(ir.get("dims_named"))})
+                       if project_id else None)
+    return ctx["_req"]
+
+
+def _margin_rows(req: Mapping[str, Any] | None) -> list[dict]:
+    return [dict(r) for r in ((req or {}).get("signals", {}).get("req.margin") or {}).get("value") or ()
+            if isinstance(r, Mapping)]
+
+
+def _signed(value: Any) -> str:
+    """여유의 부호 표기 — 양수 `+`, 음수 `−`(U+2212), 0 은 부호 없음. 수는 저장 값 그대로(반올림 6자리)다."""
+    v = float(value)
+    return ("+" if v > 0 else render.MINUS if v < 0 else "") + canonical_json(abs(value))
+
+
+def _margin_known(row: Mapping[str, Any]) -> bool:
+    return bool(row.get("known")) and isinstance(row.get("margin"), (int, float)) and not isinstance(row.get("margin"), bool)
+
+
+def _req_summary(req: Mapping[str, Any] | None) -> str:
+    """E0 의 요구 한 줄 — `요구 dim_limit n · 최소 여유 ±m 단위 [req:<이름>] · 시나리오 a/b` 또는 `요구 미등록`(§5.6.1).
+
+    요구가 한 건도 없으면(면제까지 0) `요구 미등록` 이다 — 좌석 계약(`_common`)이 그 판정 옆에 '내 경험 기준' 을 적게 하는 신호다.
+    여유를 모르는 한계(치수 미측정)만 있으면 `최소 여유 미측정` 이다 — 0 으로 두지 않는다.
+    """
+    if not req or (req.get("missing") or {}).get("req_absent"):
+        return "요구 미등록"
+    rows = _margin_rows(req)
+    parts = [f"요구 dim_limit {len(rows)}"]
+    if rows:
+        known = [r for r in rows if _margin_known(r)]
+        if known:
+            low = min(known, key=lambda r: (float(r["margin"]), _s(r.get("name"))))
+            unit = f" {low['unit']}" if low.get("unit") else ""
+            parts.append(f"최소 여유 {_signed(low['margin'])}{unit} [req:{_ref_name(low.get('name'))}]")
+        else:
+            parts.append("최소 여유 미측정")
+    coverage = ((req.get("signals") or {}).get("req.scenario_coverage") or {}).get("value") or {}
+    parts.append(f"시나리오 {int(coverage.get('covered_n') or 0)}/{int(coverage.get('required_n') or 0)}")
+    return " · ".join(parts)
+
+
+def _req_columns(row: Mapping[str, Any] | None) -> str:
+    """E3 줄 끝의 요구 두 열 — ` | limit=<op> <값> <단위> [req:<이름>] | margin=<±값> <단위>(위반|여유)`.
+
+    요구가 없는 치수는 두 열이 `—` 다. 치수가 없거나 미측정인 요구는 `margin=미측정` 이고 0 으로 두지 않는다. 한계의 꼴은 `req:` 의
+    정규 표기(`narrative.canonical_text_for` — `<op> <canonical_json(값)> <단위>`)와 같아 좌석이 옮긴 한계가 인용 대조를 지난다.
+    여유 ≤ 0 이 위반이다(R-007 `req_margin_negative` 와 같은 경계).
+    """
+    if row is None:
+        return " | limit=— | margin=—"
+    unit = f" {row['unit']}" if row.get("unit") else ""
+    limit = f"limit={_s(row.get('op'))} {canonical_json(row.get('limit'))}{unit} [req:{_ref_name(row.get('name'))}]"
+    if _margin_known(row):
+        margin = f"margin={_signed(row['margin'])}{unit}({'위반' if float(row['margin']) <= 0 else '여유'})"
+    else:
+        margin = "margin=미측정"
+    return f" | {limit} | {margin}"
+
+
+def _req_order(row: Mapping[str, Any]) -> tuple:
+    """요구가 걸린 E3 줄의 차례 — 여유 오름차순(위반 · 근접이 먼저 — 상한에 잘리지 않게), 미측정은 0 이 아니라 그 뒤, 같으면 이름."""
+    known = _margin_known(row)
+    return (0 if known else 1, float(row["margin"]) if known else 0.0, _s(row.get("name")))
+
+
 def _item_e0(store, ctx, external_ok: bool, model: str = "unknown") -> dict:
     target = ctx["target"]
     snapshot = ctx["snapshot"]
@@ -556,6 +642,8 @@ def _item_e0(store, ctx, external_ok: bool, model: str = "unknown") -> dict:
         f"게이트 {_gates_lines(gates)}",
         *_change_volume(store, diff),
         f"missing={json.dumps(missing, ensure_ascii=False, sort_keys=True) if missing else '[]'}",
+        # 요구 한 줄(§5.6.1) — 짧고 E0 에만 있는 줄이라 소스 id 줄보다 앞에 둔다.
+        _req_summary(_req_view(store, ctx)),
         f"외부 검색 가용={'true' if external_ok else 'false'}",
         f"{_tol_params(snapshot)} adapter_version={json.dumps(adapters, ensure_ascii=False, sort_keys=True)}",
         f"소스 {_source_apps(snapshot, missing)}",
@@ -1074,14 +1162,19 @@ def _param_tail(item: Mapping[str, Any]) -> str:
     return tail + (f" excluded_reason={reason}" if reason and reason != flag else "")
 
 
-def _item_e3(ctx) -> dict:
+def _item_e3(store, ctx) -> dict:
     """명명 치수 — 줄 몸통은 `d:` 의 정규 표기다(좌석이 «» 안을 옮기면 인용 대조를 통과한다, R-40).
 
     diff 타깃은 생산자가 쓴 `diff_json.parametric.dims_delta`(before·after·rel_delta·text)를 읽는다 — 종전에는 최상위의
-    `dims_delta` 를 base·target 키로 읽어 늘 '명명 치수 없음' 이었다(R-10). 바뀐 치수가 먼저다.
+    `dims_delta` 를 base·target 키로 읽어 늘 '명명 치수 없음' 이었다(R-10).
+
+    줄 끝에 요구 두 열(limit · margin, §5.6.1)을 붙인다 — 여유는 그 타깃 스냅샷(diff 면 뒤)의 값으로 센다. 차례는 요구가 걸린 줄이
+    여유 오름차순으로 먼저(위반 · 근접이 상한에 잘리지 않게, 미측정은 0 이 아니라 그 뒤), 요구가 없는 줄은 그 뒤에 종전 차례(바뀐
+    치수가 먼저)다. 이 스냅샷에 치수가 없는 요구도 줄 하나로 싣는다(`치수 없음 … margin=미측정`).
     """
     source = _SOURCES["E3"][0]
-    lines: list[str] = []
+    by_name = {_s(r.get("name")): r for r in _margin_rows(_req_view(store, ctx))}
+    entries: list[tuple[str, str]] = []                 # (치수 이름, 요구 열을 붙이기 전의 줄)
     if ctx["kind"] == "diff" and ctx["diff"] is not None:
         args = f"diff:{ctx['diff']['id']}"
         items = ((_j(ctx["diff"]["diff_json"], {}).get("parametric") or {}).get("dims_delta")) or []
@@ -1090,21 +1183,26 @@ def _item_e3(ctx) -> dict:
             text = _s(item.get("text"))
             body = render.split_trailing_refs(text)[0] if text else \
                 f"{name} " + render.fmt_change(item.get("before"), item.get("after"), item.get("unit") or "mm")
-            lines.append(f"[d:{_ref_name(name)}] {_q(body, 'note')} method={_q(item.get('method') or '-')}"
-                         f"{_param_tail(item)}")
+            entries.append((name, f"[d:{_ref_name(name)}] {_q(body, 'note')} method={_q(item.get('method') or '-')}"
+                                  f"{_param_tail(item)}"))
     else:
         args = f"snap:{_s(ctx['snapshot_id'])}"
         ir = _j(ctx["snapshot"]["ir_json"], {}) if ctx["snapshot"] is not None else {}
         named = ir.get("dims_named") or {}
-        entries = named.items() if isinstance(named, dict) else [
+        pairs = named.items() if isinstance(named, dict) else [
             (i.get("name"), i) for i in named if isinstance(i, dict)]
-        for name, item in sorted(entries, key=lambda kv: _s(kv[0])):
+        for name, item in sorted(pairs, key=lambda kv: _s(kv[0])):
             value = item.get("value") if isinstance(item, dict) else item
             unit = item.get("unit") if isinstance(item, dict) else ""
             method = item.get("method") if isinstance(item, dict) else None
             # snap 의 `d:` 정규 표기와 같은 몸통(`narrative.canonical_text_for`).
             body = f"{_s(name)}={render.fmt_value(value, unit or 'mm')}"
-            lines.append(f"[d:{_ref_name(name)}] {_q(body, 'note')} method={_q(method or '-')}")
+            entries.append((_s(name), f"[d:{_ref_name(name)}] {_q(body, 'note')} method={_q(method or '-')}"))
+    shown = {name for name, _line in entries}
+    bound = [(by_name[name], line) for name, line in entries if name in by_name]
+    bound += [(row, f"치수 없음 {_q(name)}") for name, row in by_name.items() if name not in shown]
+    lines = [line + _req_columns(row) for row, line in sorted(bound, key=lambda pair: _req_order(pair[0]))]
+    lines += [line + _req_columns(None) for name, line in entries if name not in by_name]
     if not lines:
         lines = ["[명명 치수 없음 — rr_dim_defs 0건]"]
     return {"key": "E3", "args": args, "result": _body(source, lines)}
@@ -2118,7 +2216,7 @@ def build_brief(store, target_key: str, *, seats: Sequence[Mapping[str, Any]] | 
             _item_e0c(seats),
             _item_e1(ctx),
             _item_e2(store, ctx, names),
-            _item_e3(ctx),
+            _item_e3(store, ctx),
             _item_e4(ctx, names),
             _item_e5(store, ctx, similar, owner_sub, field, profile),
             _item_e6(store, similar, ctx, profile),
