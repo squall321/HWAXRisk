@@ -456,3 +456,28 @@
       검토 때와 같은 표면 고정 둘뿐 · GLM 출력은 종합 답의 llm: glm 말고 같다 — XR-18
 - [ ] 엔진 가지 x2-gate 를 main 에 합치기 전까지 이 가지의 사본 가드는 `HWAX_AGENT_SERVER_REPO=<x2-gate 작업 트리>` 로 돈다(delib_frames.json)
 - [ ] 포털 DelibOpts 가 target_key 를 선언 · 중계하면 strict xfail 이 스스로 꺼진다(코디네이터 몫 — 그 뒤 전체 시험 xfail 4)
+
+## 10-31 백로그 B22 · B28 · B30 · B31 · A18(가지 `wt1031/bl-risk-api`, 2026-10-31)
+
+> 포털 `docs/leftovers-1017/triage-1031.md` 표 B(B22 · B28 · B30 · B31)와 표 A(A18 (A) — 사용자 결정 10-31)의 리스크 앱 백엔드 몫이다.
+> 결정과 까닭은 context-notes 의 '10-31 백로그' 절(BL-1~)에 적는다.
+
+- [x] B22 — `POST /projects/{id}/sources` 응답 `duplicate_of[{project_id, code, owner_sub, created_at}]`(막지 않는다 · 구성원 과제만 — BL-1) ·
+      MCP risk_add_source 같은 칸
+- [x] B30 — `GET /targets/{key}/audit`(action · since · until · offset · limit ≤200, 칸은 과제 감사와 같다 · viewer 이상 · 남은 404 — BL-2) ·
+      그 대상의 행을 고르는 조각 `registry.target_audit_clause`
+- [x] B31 ① — `POST /targets/{key}/jobs` 의 `exclude_evidence`(항목 키 E2~E9, 밖은 422 exclude_evidence_invalid) → params_json · 그 잡 패널
+      브리프에서 뺌 · `rr_panels.evidence_excluded_json` · `rr_audit(brief.exclude)` 한 행 · MCP risk_start_job 같은 인자(BL-3)
+- [x] B31 ② — 통합 보고서 minutes '[사람 개입 요약]'(그 대상 rr_audit 의 action 별 수) · 사람이 넘긴 skipped 칸에 decided_by(BL-4, P4 (13))
+- [x] B28 — MCP 길(미검증 actor) 패널마다 큐 항목(suspect_text · reason actor_unverified) · `PUT /curation/{id} {decision:'approve_recall'}` →
+      recall_eligible=1 · `rr_audit(recall.approve)` · 카드 대조 finding 은 종전대로(BL-5, P3 (21))
+- [x] A18 — 사람 finding 의 mechanism · domain 을 택소노미 어휘로 검사(422 taxonomy_invalid + 허용값 · unclassified 받음 · 코드 꼴은 대분류 +
+      세부로 나눠 적음 — BL-6) · MCP 인자 설명
+- [x] 시험 · 변이 — 새 시험 28(옛 코드 사본에서 24 짐) · 변이 32/32(BL-7)
+- [ ] 화면 몫(화면 세션 — 포털 트리아지 B34 · A32) — 대상 감사 '이력 탭' · RecallPreview 의 제외를 잡 본문 `exclude_evidence` 로 보내기
+      (지금 화면은 '미리보기용 — 서버에 반영되지 않는다' 고 적는다) · 소스 카드의 `duplicate_of` 배지 · 큐의 미검증 신원 항목 요약 칸과
+      approve_recall 설명
+- [ ] 감사 행을 남기지 않는 사람 조작 셋(잡 pause · resume · cancel · 등록부 status · verdict 확정 — 정본 §8.2.3 은 남기라 한다) — 남기면
+      '사람 개입 요약' 에 '잡 제어 · status 변경' 줄이 선다(BL-4, 결정 필요)
+- [ ] 포털 정본 문면(포털 세션) — plan §8.2.3 의 duplicate_of 범위(구성원 과제만) · 'E키 또는 ref' 와 §5.7 '항목 제외만' 의 어긋남 · 대상 감사의
+      남 답(404)과 칸(entries · total · offset)
