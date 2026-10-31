@@ -641,7 +641,7 @@ def compute_diff(base_ir: Mapping[str, Any], target_ir: Mapping[str, Any], *,
     # (plan §2.6.3). 받은 links 로 다시 읽으므로 원장으로 푼 대응(create_diff)에서도 같다.
     skip = sameas.fuzzy_skip(base_nodes, target_nodes, links)
     corr["fuzzy_skipped"] = None if skip is None else {
-        "rest_base": skip["rest_a"], "rest_target": skip["rest_b"], "limit": skip["limit"]}
+        "rest_base": skip["rest_a"], "rest_target": skip["rest_b"], "limit": skip["limit"], "side_limit": skip["side_limit"]}
     base_by, target_by = _by_nid(base_nodes), _by_nid(target_nodes)
 
     # base·target 노드를 하나의 dn 으로 접는다 — 엣지 조인과 cid 의 키다.

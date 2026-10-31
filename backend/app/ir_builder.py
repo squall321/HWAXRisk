@@ -1038,10 +1038,12 @@ def build_ir(
     # 건너뛴 사실은 그 두 도메인 소스의 degraded 와 경고 한 줄로 남는다 — sig:capture.fuzzy_skipped 가 이것을 읽는다(plan §2.6.3).
     # 둘 다 ir_hash 입력이 아니다(해시는 same_as 를 본다 — 건너뛰면 fuzzy 레코드가 없을 뿐 같은 입력이면 같은 해시다).
     for dom_a, dom_b, skip in fuzzy_skipped:
+        n_a, n_b = skip["rest_a"], skip["rest_b"]
         warnings.append({
             "severity": "WARNING", "code": "fuzzy_skipped_large",
-            "message": (f"same-as 6단계(헝가리안)를 건너뛰었다 — {dom_a}↔{dom_b} 남은 노드 {skip['rest_a']} × {skip['rest_b']} 가 "
-                        f"상한 {skip['limit']:,}(800×800)을 넘는다. 5단계까지의 대응으로 진행했고 남은 노드는 미대응이다."),
+            "message": (f"same-as 6단계(헝가리안)를 건너뛰었다 — {dom_a}↔{dom_b} 남은 노드 {n_a} × {n_b}(곱 {n_a * n_b:,} · "
+                        f"배정 행렬 변 {n_a + n_b:,}). 상한은 곱 {skip['limit']:,}(800×800) · 변 {skip['side_limit']:,} 이다. "
+                        "5단계까지의 대응으로 진행했고 남은 노드는 미대응이다."),
             "ref": f"{dom_a}~{dom_b}", "source_kind": "ir_builder",
         })
         for source in sources:

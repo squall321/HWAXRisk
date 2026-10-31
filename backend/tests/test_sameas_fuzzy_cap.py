@@ -2,6 +2,8 @@
 """B24(포털 docs/leftovers-1017/triage-1031.md · design-risk-review 108).
 
 - 상한은 `len(rest_a) × len(rest_b) > 800 × 800` 이다 — 801 × 801 은 건너뛰고 799 × 799(와 800 × 800)는 그대로 돈다.
+  배정 행렬의 변(`len(rest_a) + len(rest_b)`)도 1,600 을 넘으면 건너뛴다 — 헝가리안은 변의 세제곱이라 곱이 작은 기운 모양
+  (30 × 1,571)도 800 × 800 보다 무겁다(반대 검토 10-31, context-notes BL-6).
 - 건너뛰었는지는 `score_pair` 첩자로 본다. 옛 코드는 801 × 801 에서도 점수를 매기고(641,601번) 1,602 행렬의 순수 파이썬 헝가리안을
   돌린다 — 첩자가 첫 호출에서 실패시켜 그 길이 몇 시간 매달리지 않게 한다.
 - 스냅샷(intra)은 두 도메인 소스의 degraded 와 경고 한 줄, `sig:capture.fuzzy_skipped` 로, 쌍(pair)은 대응층의 `fuzzy_skipped` 와
@@ -25,7 +27,7 @@ IR_FIXTURES = FIXTURES_DIR / "ir"
 
 
 def _never(*_args, **_kwargs):
-    raise AssertionError("6단계 점수를 매겼다 — 남은 노드 곱이 800×800 을 넘는데 행렬을 짓는다")
+    raise AssertionError("6단계 점수를 매겼다 — 남은 노드가 상한(곱 800×800 · 행렬 변 1,600)을 넘는데 행렬을 짓는다")
 
 
 def _pruned(calls: list):
@@ -60,7 +62,7 @@ def test_801_by_801_skips_the_fuzzy_stage_and_says_how_large_the_rest_was(monkey
     links = sameas.resolve(base, target, [], [], "pair", None)
     # 1~5단계까지의 결과로 진행한다 — 3단계가 이은 셋만 있고 fuzzy 레코드는 없다(pending 이 없어 G2 에 세지 않는다).
     assert sorted(r["method"] for r in links) == ["exact_path"] * 3
-    assert sameas.fuzzy_skip(base, target, links) == {"rest_a": 801, "rest_b": 801, "limit": 640_000}
+    assert sameas.fuzzy_skip(base, target, links) == {"rest_a": 801, "rest_b": 801, "limit": 640_000, "side_limit": 1_600}
     # 같은 입력이면 같은 레코드다.
     assert canonical_json(sameas.resolve(base, target, [], [], "pair", None)) == canonical_json(links)
 
@@ -77,12 +79,34 @@ def test_799_by_799_and_800_by_800_still_score_every_pair(monkeypatch, n):
 
 
 @pytest.mark.parametrize("na,nb,skipped", [(800, 800, False), (800, 801, True), (801, 799, False), (801, 800, True),
-                                              (1, 640_000, False), (1, 640_001, True)])
-def test_the_cap_is_a_strict_product_bound(na, nb, skipped):
-    """`> 800 × 800` 이다 — 곱이 정확히 640,000 이면 돈다. 한쪽이 1 이어도 곱으로 잰다."""
+                                              (30, 1_570, False), (30, 1_571, True), (1, 1_599, False), (1, 1_600, True),
+                                              (1, 640_000, True), (1, 640_001, True)])
+def test_the_cap_bounds_the_product_and_the_matrix_side(na, nb, skipped):
+    """곱 `> 800 × 800` 이거나 배정 행렬의 변 `na + nb > 1,600` 이면 건너뛴다 — 곱이 정확히 640,000 인 800 × 800 은 돌고, 곱이 작아도
+    한쪽이 큰 기운 모양(30 × 1,571 · 1 × 1,600)은 변이 1,600 을 넘어 건너뛴다. 옛 규칙(곱만)은 1 × 640,000 을 640,001 변 행렬로 돌렸다."""
     a = [{"nid": f"p:a{i:011x}", "domain": "mcad"} for i in range(na)]
     b = [{"nid": f"p:b{i:011x}", "domain": "mcad"} for i in range(nb)]
-    assert (sameas.fuzzy_skip(a, b, []) is not None) is skipped
+    skip = sameas.fuzzy_skip(a, b, [])
+    assert (skip is not None) is skipped
+    if skipped:
+        assert skip == {"rest_a": na, "rest_b": nb, "limit": 640_000, "side_limit": 1_600}
+
+
+def test_a_lopsided_rest_beyond_the_matrix_side_is_skipped_although_its_product_is_small(monkeypatch):
+    """30 × 1,571 은 곱 47,130 이라 곱 상한 안이지만 배정 행렬이 1,601 변이다 — 점수도 행렬도 만들지 않는다(옛 코드는 1,601 변의
+    순수 파이썬 헝가리안을 돌렸다). 30 × 1,570(1,600 변)은 그대로 점수를 매긴다."""
+    monkeypatch.setattr(sameas, "score_pair", _never)
+    base, target = _mcad_nodes("a", 30, extra_exact=3), _mcad_nodes("b", 1_571, extra_exact=3)
+    links = sameas.resolve(base, target, [], [], "pair", None)
+    assert sorted(r["method"] for r in links) == ["exact_path"] * 3
+    assert sameas.fuzzy_skip(base, target, links) == {"rest_a": 30, "rest_b": 1_571, "limit": 640_000, "side_limit": 1_600}
+
+    calls: list = []
+    monkeypatch.setattr(sameas, "score_pair", _pruned(calls))
+    target = _mcad_nodes("b", 1_570, extra_exact=3)
+    links = sameas.resolve(base, target, [], [], "pair", None)
+    assert len(calls) == 30 * 1_570
+    assert sameas.fuzzy_skip(base, target, links) is None
 
 
 def test_rest_counts_follow_the_ladder_rules_ledger_ecad_and_low_scores():
@@ -98,12 +122,13 @@ def test_rest_counts_follow_the_ladder_rules_ledger_ecad_and_low_scores():
             {"a": a[5]["nid"], "b": b[5]["nid"], "method": "fuzzy", "status": "auto", "score": 0.97}]
     # 둘을 가져가 800 × 800 — 상한과 같아 건너뛰지 않는다. 하나만 가져가면 801 × 801 이라 건너뛴다.
     assert sameas.fuzzy_skip(a, b, taken + kept) is None
-    assert sameas.fuzzy_skip(a, b, taken[:1] + kept) == {"rest_a": 801, "rest_b": 801, "limit": 640_000}
+    assert sameas.fuzzy_skip(a, b, taken[:1] + kept) == {"rest_a": 801, "rest_b": 801, "limit": 640_000,
+                                                         "side_limit": 1_600}
 
 
 # ---------------------------------------------------------------- 스냅샷(intra) — degraded · 경고 · sig · ir_hash
-def _adapter_results(n: int) -> list[dict]:
-    """mcad 리프 n 개와 dyna pid n 개 — 이름 · 크기가 서로 닮지 않아 도메인 간 대응이 5단계까지 하나도 서지 않는다."""
+def _adapter_results(n: int, n_dyna: int | None = None) -> list[dict]:
+    """mcad 리프 n 개와 dyna pid n 개(`n_dyna` 를 주면 그 수) — 이름 · 크기가 서로 닮지 않아 도메인 간 대응이 5단계까지 하나도 서지 않는다."""
     mcad = json.loads((IR_FIXTURES / "adapter_mcad_basic.json").read_text(encoding="utf-8"))
     dyna = json.loads((IR_FIXTURES / "adapter_dyna_basic.json").read_text(encoding="utf-8"))
     part = next(node for node in mcad["nodes"] if node["kind"] == "part")
@@ -118,7 +143,7 @@ def _adapter_results(n: int) -> list[dict]:
         node["attrs"]["size_sorted"] = [50.0 + i, 40.0, 1.2]
         mcad["nodes"].append(node)
     dyna["nodes"], dyna["edges"] = [], []
-    for i in range(n):
+    for i in range(n if n_dyna is None else n_dyna):
         node = copy.deepcopy(pid)
         node["canon_key"] = f"dyna:abcd1234:{i + 1}"
         node["label"] = f"Stack\\DYQ_{i:04d}"
@@ -159,6 +184,22 @@ def test_a_snapshot_with_an_801_by_801_rest_records_the_skip_and_keeps_its_hash(
     assert "6단계 생략" in flag["text"] and "dyna·mcad" in flag["text"]
 
 
+def test_a_snapshot_with_a_lopsided_rest_records_the_skip(monkeypatch):
+    """dyna pid 1,600 개와 mcad 리프 3 개 — 곱은 8,000 이지만 배정 행렬이 1,605 변이라 건너뛴다. 모델 크기 상한(routes)은 dyna 를 세지
+    않고 캡처 예산도 이 단계를 끊지 않아, 옛 코드는 이 모양에서 1,605 변의 순수 파이썬 헝가리안을 돌렸다(dev 어림 2분 — 변의 세제곱으로 는다)."""
+    monkeypatch.setattr(sameas, "score_pair", _never)
+    ir = _build(_adapter_results(3, n_dyna=1_600))
+    n_dyna = sum(1 for node in ir["nodes"] if node["domain"] == "dyna")
+    n_mcad = sum(1 for node in ir["nodes"] if node["domain"] == "mcad")
+    assert (n_dyna, n_mcad) == (1_600, 5)
+    assert ir["same_as"] == []
+    for kind in ("mcad", "dyna"):
+        assert "fuzzy_skipped_large" in next(s for s in ir["sources"] if s["kind"] == kind)["degraded"], kind
+    warning = next(w for w in ir["warnings"] if w["code"] == "fuzzy_skipped_large")
+    assert f"{n_dyna} × {n_mcad}" in warning["message"] and "배정 행렬 변 1,605" in warning["message"]
+    assert state_module.build_state(ir)["signals"]["capture.fuzzy_skipped"]["value"] is True
+
+
 def test_a_small_snapshot_runs_the_fuzzy_stage_and_its_flag_is_false():
     ir = _build(_adapter_results(3))
     assert all("fuzzy_skipped_large" not in s["degraded"] for s in ir["sources"])
@@ -197,7 +238,7 @@ def test_a_pair_beyond_the_cap_carries_the_caveat_on_its_semantic_layer(monkeypa
     events = semantic["events"]
     assert {e["code"] for e in events} == {"part.added", "part.removed"} and len(events) == 2 * n
     if skipped:
-        assert corr["fuzzy_skipped"] == {"rest_base": n, "rest_target": n, "limit": 640_000}
+        assert corr["fuzzy_skipped"] == {"rest_base": n, "rest_target": n, "limit": 640_000, "side_limit": 1_600}
         assert semantic["caveat"] == "fuzzy_skipped_large"
         assert {e.get("caveat") for e in events} == {"fuzzy_skipped_large"}
         assert calls == []
