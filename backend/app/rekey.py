@@ -7,7 +7,8 @@
 살아 있는 `rr_iface_alias` 로 접은 값이다(`current_subject`). 같은 `cluster_key` 의 finding 은 동결 주체가 같으므로 다시 센 키도 같다 —
 그래서 별칭(옛 키 → 새 키)으로 옮길 수 있다. 다시 센 키가 동결 키와 다르면 원장 별칭(reason ckey_merge · iface_alias)을 세우고, 같으면
 그 옛 키에 원장이 세웠던 별칭을 거둔다(같은 사람 · 같은 시각). 사람이 세운 별칭(cluster_merge · taxonomy_major · dim_rename)은 건드리지 않는다.
-등록부는 별칭 해석으로 다시 병합된다 — 접힌 옛 행은 superseded 로 닫히고(registry._close_folded_rows) 다시 갈라지면 다시 열린다.
+등록부는 별칭 해석으로 다시 병합된다 — 접힌 옛 행은 superseded 로 닫히고(registry._close_vacated_rows) 다시 갈라지면 다시 열린다. 다시
+병합하는 대상은 주체로 닿는 원자의 대상과, 별칭 사슬이 바뀐 키를 지나는 키(사람 별칭 Q → Y 의 Q)를 동결 키로 가진 원자의 대상이다.
 
 한계. 동결 스냅샷의 노드 ckey 는 바뀌지 않는다(§2.7.3). 병합이 서 있던 동안 동결한 스냅샷의 노드는 이미 대표 키를 받았으므로 병합을
 풀어도 그 스냅샷 위 finding 의 주체는 대표 키 그대로다 — 갈라 보려면 '재해석 적용'(새 스냅샷)이 필요하다. intra · pair same-as 확정도 같은
@@ -75,8 +76,10 @@ def with_descendants(store: Any, ckeys: Iterable[str], owner_sub: str) -> set[st
     return out
 
 
-def touching_findings(store: Any, owner_sub: str, ckeys: Iterable[str] = (), pairs: Iterable[str] = ()) -> list[dict]:
-    """2걸음 — 그 소유자의 finding 가운데 동결 주체가 그 ckey 를 담거나 그 계면 쌍과 같은 것(`ix_rr_findings_subject`).
+def touching_findings(store: Any, owner_sub: str, ckeys: Iterable[str] = (), pairs: Iterable[str] = (),
+                      cluster_keys: Iterable[str] = ()) -> list[dict]:
+    """2걸음 — 그 소유자의 finding 가운데 동결 주체가 그 ckey 를 담거나 그 계면 쌍과 같은 것(`ix_rr_findings_subject`), 그리고 동결
+    cluster_key 가 `cluster_keys` 에 든 것(`ix_rr_findings_cluster` — 주체로는 닿지 않고 바뀐 별칭 사슬로만 닿는 원자).
 
     카드 대조 finding 도 센다 — 별칭은 소유자 단위의 키 사실이라 흐름을 가리지 않는다(등록부 병합이 흐름마다 거른다).
     """
@@ -88,6 +91,10 @@ def touching_findings(store: Any, owner_sub: str, ckeys: Iterable[str] = (), pai
     for pair in sorted({str(p) for p in pairs if p}):
         conds.append("subject_key = ?")
         params.append(pair)
+    frozen = sorted({str(k) for k in cluster_keys if k})
+    if frozen:
+        conds.append(f"cluster_key IN ({','.join('?' for _ in frozen)})")
+        params += frozen
     if not conds:
         return []
     where = " OR ".join(f"({c})" for c in conds)
@@ -119,18 +126,49 @@ def _active_alias(store: Any, owner_sub: str, old_key: str):
 
 
 # ---------------------------------------------------------------- 3걸음 — 별칭 맞추기
+def upstream_keys(store: Any, owner_sub: str, keys: Iterable[str]) -> set[str]:
+    """그 키들과, 살아 있는 별칭 사슬이 그 키들을 지나는 키 전부(그 소유자) — 그 키의 별칭이 바뀌면 함께 풀이가 바뀌는 키다.
+
+    앞 키에서 그 키에 닿기까지의 별칭은 이 맞추기가 건드리지 않는 키의 것이라 바꾸기 전과 뒤가 같다 — 그래서 바꾸기 전에 한 번 센다.
+    """
+    out = {str(k) for k in keys if k}
+    frontier = set(out)
+    for _ in range(registry.ALIAS_MAX_HOPS + 1):
+        if not frontier:
+            break
+        marks = ",".join("?" for _ in frontier)
+        rows = store.query(
+            "SELECT old_cluster_key FROM rr_cluster_alias WHERE owner_sub = ? AND revoked_at IS NULL"
+            f" AND new_cluster_key IN ({marks})", (owner_sub, *sorted(frontier)))
+        frontier = {str(r["old_cluster_key"]) for r in rows} - out
+        out |= frontier
+    return out
+
+
+def _check_chains(store: Any, owner_sub: str, keys: Iterable[str]) -> None:
+    """맞춘 뒤의 별칭으로 그 키들의 사슬이 5홉 안이고 순환하지 않는지 — 세울 때의 점검(`add_cluster_alias`)은 새 별칭 뒤만 세므로,
+    사람 별칭이 이 키로 이어 오는 앞 키(Q → Y 에 Y → X 가 서면 Q 의 사슬)가 넘는 것은 여기서 본다. 넘으면 409 다."""
+    for key in sorted(keys):
+        if registry._alias_hops(store, key, owner_sub) > registry.ALIAS_MAX_HOPS:
+            raise AppError("alias_chain_too_long",
+                           f"별칭 체인이 {registry.ALIAS_MAX_HOPS} 홉을 넘거나 순환합니다 — {key}.", 409)
+
+
 def reconcile_aliases(store: Any, owner_sub: str, findings: Iterable[Mapping[str, Any]], *, op: str, actor: str,
                       at: int) -> dict:
     """동결 cluster_key 마다 지금 원장의 키를 세어 원장 별칭을 맞춘다 — 다르면 append, 같으면 원장이 세웠던 별칭을 revoke.
 
-    반환 `{added[], revoked[], kept_human[], skipped[], targets[], keys[]}`. append 가 별칭 6홉 · 순환이면 409 를 그대로 올린다
-    (부르는 트랜잭션 전체가 되돌아간다).
+    맞춘 뒤 바뀐 키와 그 앞 키의 사슬을 한 번 더 본다(`_check_chains`). 반환 `{added[], revoked[], kept_human[], skipped[], targets[],
+    keys[], before{}, after{}}` — before · after 는 바뀐 키와 그 앞 키(`upstream_keys`)의 맞추기 전후 풀이다. 별칭 6홉 · 순환이면 409 를
+    그대로 올린다(부르는 트랜잭션 전체가 되돌아간다).
     """
     groups: dict[str, dict] = {}
     for row in findings:
         key = str(row.get("cluster_key") or "")
         if key:
             groups.setdefault(key, {"row": row, "targets": set()})["targets"].add(str(row.get("target_key") or ""))
+    closure = upstream_keys(store, owner_sub, groups)
+    before = {k: registry.resolve_cluster_key(store, k, owner_sub=owner_sub) for k in sorted(closure)}
     added: list[dict] = []
     revoked: list[dict] = []
     kept_human: list[dict] = []
@@ -162,9 +200,11 @@ def reconcile_aliases(store: Any, owner_sub: str, findings: Iterable[Mapping[str
                 store, key, want, owner_sub=owner_sub, reason=why, decided_by=actor, at=at,
                 evidence={"op": op, "subject_before": row.get("subject_key"), "subject_after": subject, "by": actor})
             added.append({"old": key, "new": want, "reason": why})
+    _check_chains(store, owner_sub, closure)
+    after = {k: registry.resolve_cluster_key(store, k, owner_sub=owner_sub) for k in sorted(closure)}
     targets = sorted({t for g in groups.values() for t in g["targets"] if t})
     return {"added": added, "revoked": revoked, "kept_human": kept_human, "skipped": skipped,
-            "targets": targets, "keys": sorted(groups)}
+            "targets": targets, "keys": sorted(groups), "before": before, "after": after}
 
 
 # ---------------------------------------------------------------- 5걸음 — 패턴 · 큐
@@ -227,6 +267,10 @@ def run(store: Any, *, op: str, owner_sub: str, actor: str | None = None, ckeys:
     2 그 키를 주체로 가진 finding(`touching_findings`) → 3 별칭 맞추기(`reconcile_aliases`) → 4 영향 대상마다 `registry.merge`(멱등 —
     support · contested · rejected · human_n 은 원자에서 다시 센다, 접힌 행은 superseded 로 닫힌다) → 5 기여 · priors 재합산(병합이 한다) ·
     패턴 merged_into · 무효 큐 닫기 → 6 rr_audit(scope='registry', action='rekey') 1행.
+
+    영향 대상은 주체로 닿는 원자의 대상과, 풀이가 바뀐 키(별칭 사슬이 바뀐 키를 지나는 앞 키 포함)를 동결 키로 가진 원자의 대상이다 —
+    사람 별칭(key(Q) → key(Y))으로만 Y 의 클러스터에 닿는 대상도 Y 가 X 에 접히면 함께 접힌다. 종전에는 주체로 닿는 대상만 다시 병합해
+    그 대상의 등록부 · priors 가 다음 병합까지 옛 별칭대로 남았다.
     """
     if op not in OPS:
         raise AppError("E100", f"rekey op 는 {list(OPS)} 중 하나여야 합니다 — {op!r}.", 422)
@@ -235,25 +279,30 @@ def run(store: Any, *, op: str, owner_sub: str, actor: str | None = None, ckeys:
     with store.tx():
         findings = touching_findings(store, owner_sub, ckeys, pairs)
         keys = {str(f["cluster_key"]) for f in findings if f.get("cluster_key")}
-        before = {k: registry.resolve_cluster_key(store, k, owner_sub=owner_sub) for k in sorted(keys)}
         aliases = reconcile_aliases(store, owner_sub, findings, op=op, actor=actor, at=at)
-        merged = {target: registry.merge(store, target, owner_sub=owner_sub) for target in aliases["targets"]}
-        after = {k: registry.resolve_cluster_key(store, k, owner_sub=owner_sub) for k in sorted(keys)}
-        touched = keys | set(before.values()) | set(after.values())
+        before, after = aliases["before"], aliases["after"]
+        moved = {k for k in before if before[k] != after[k]}
+        reached = touching_findings(store, owner_sub, cluster_keys=moved - keys)
+        targets = sorted(set(aliases["targets"]) | {str(f["target_key"]) for f in reached if f.get("target_key")})
+        merged = {target: registry.merge(store, target, owner_sub=owner_sub) for target in targets}
+        touched = set(before) | set(before.values()) | set(after.values())
         patterns = reinterpret_patterns(store, owner_sub, touched, at=at)
         queue_closed = close_invalid_merge_items(store, owner_sub, touched, actor=actor, at=at)
+        shown = sorted(keys | moved)
         audit_id = common.new_uuid()
         store.execute(
             "INSERT INTO rr_audit(id, owner_sub, actor, actor_verified, channel, scope, subject_id, project_id, action,"
             " before_json, after_json, reason, at) VALUES (?,?,?,1,?,'registry',?,?,'rekey',?,?,NULL,?)",
             (audit_id, owner_sub, actor, channel, subject_id, project_id,
-             common.canonical_json({"op": op, "ledger": dict(ledger or {}), "old_cluster_keys": before}),
-             common.canonical_json({"new_cluster_keys": after, "findings_n": len(findings),
-                                    "targets_n": len(aliases["targets"]), "aliases_added": aliases["added"],
-                                    "aliases_revoked": aliases["revoked"], "kept_human": aliases["kept_human"],
-                                    "skipped": aliases["skipped"], "patterns": patterns, "queue_closed": queue_closed}),
+             common.canonical_json({"op": op, "ledger": dict(ledger or {}),
+                                    "old_cluster_keys": {k: before[k] for k in shown}}),
+             common.canonical_json({"new_cluster_keys": {k: after[k] for k in shown},
+                                    "findings_n": len(findings) + len(reached), "targets_n": len(targets),
+                                    "aliases_added": aliases["added"], "aliases_revoked": aliases["revoked"],
+                                    "kept_human": aliases["kept_human"], "skipped": aliases["skipped"],
+                                    "patterns": patterns, "queue_closed": queue_closed}),
              at))
-    return {"op": op, "findings_n": len(findings), "targets": aliases["targets"],
+    return {"op": op, "findings_n": len(findings) + len(reached), "targets": targets,
             "aliases_added": aliases["added"], "aliases_revoked": aliases["revoked"],
             "kept_human": aliases["kept_human"], "skipped": aliases["skipped"],
             "folded": {t: m.get("folded", 0) for t, m in merged.items()},

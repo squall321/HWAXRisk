@@ -10,7 +10,7 @@ from app.errors import AppError
 from tests import factories
 
 OWNER = factories.OWNER
-X, Y, Z, W = "ck:" + "1" * 12, "ck:" + "2" * 12, "ck:" + "3" * 12, "ck:" + "4" * 12
+X, Y, Z, W, Q = "ck:" + "1" * 12, "ck:" + "2" * 12, "ck:" + "3" * 12, "ck:" + "4" * 12, "ck:" + "9" * 12
 A, B, C = "ck:" + "a" * 12, "ck:" + "b" * 12, "ck:" + "c" * 12
 MECH, DETAIL, CHANGE = "mechanical", "drop_stress", "dimension"
 
@@ -511,5 +511,61 @@ def test_a_folded_row_carries_the_subject_its_key_names_so_subject_recall_still_
     clock["t"] = 2000
     _decide(risk_store, decision="unmerge_key", ckey=Y)                 # 되돌리면 각자 제 주체로 돌아간다
     assert recalled() == ["P1"] and precedents() == [f"reg:snap:T1#{key_of(X)}"]
+
+
+def test_a_target_reached_only_through_a_human_alias_is_remerged_both_ways(risk_store, clock):
+    """사람 별칭(key(Q) → key(Y))으로만 Y 의 클러스터에 닿는 대상(TQ)도 다시 병합된다 — Y 가 X 에 접히면 TQ 의 Q · X 원자가 한 행이 되고
+    (지금 별칭으로 새로 센 병합과 같다) priors 가 그 접힘을 곧바로 센다. 되돌리면 TQ 도 다시 갈라진다. 종전에는 주체로 닿는 대상(T1 ·
+    T2)만 다시 병합해 TQ 의 등록부 · priors 가 다음 병합까지 옛 별칭대로 남았다."""
+    _world(risk_store)
+    _part(risk_store, Q)
+    _target(risk_store, "snap:TQ", "PQ")
+    _finding(risk_store, "snap:TQ", "G1", Q, panel="PQ1", severity="중대")
+    _finding(risk_store, "snap:TQ", "G2", X, panel="PQ1", severity="치명")
+    registry.add_cluster_alias(risk_store, key_of(Q), key_of(Y), owner_sub=OWNER, reason="cluster_merge")
+    registry.merge(risk_store, "snap:TQ", owner_sub=OWNER)
+    assert _live(risk_store, "snap:TQ") == {key_of(X): (1, "치명"), key_of(Y): (1, "중대")}
+    # 패턴 · 큐도 같은 키 집합으로 본다 — key(Q) 의 패턴과 key(Q) 를 낀 병합 제안.
+    for pid, norm in (("pat-q", key_of(Q)), ("pat-x", key_of(X))):
+        risk_store.execute("INSERT INTO rr_patterns(id, owner_sub, cluster_key_norm, status, created_at, updated_at)"
+                           " VALUES (?,?,?,'candidate',1,1)", (pid, OWNER, norm))
+    risk_store.execute("INSERT INTO rr_curation_queue(id, owner_sub, kind, payload_json, status, created_at)"
+                       " VALUES ('q-q',?,'cluster_merge',?,'open',1)",
+                       (OWNER, common.canonical_json({"a": key_of(Q), "b": key_of(W)})))
+
+    def pattern_q():
+        return risk_store.query_one("SELECT merged_into FROM rr_patterns WHERE id = 'pat-q'")["merged_into"]
+
+    out = _decide(risk_store, decision="merge_key", ckey_from=Y, ckey_into=X)["rekey"]
+    assert out["targets"] == ["snap:T1", "snap:T2", "snap:TQ"]
+    assert _live(risk_store, "snap:TQ") == _fresh(risk_store, "snap:TQ") == {key_of(X): (1, "치명")}
+    assert risk_store.query_one("SELECT subject_key FROM rr_registry WHERE target_key = 'snap:TQ' AND cluster_key = ?",
+                                (key_of(X),))["subject_key"] == X       # 동결 키가 key(X) 인 원자(G2)의 주체
+    assert registry.verdict_candidate(risk_store, "snap:TQ")["counts"]["clusters"] == 1
+    _assert_settled(risk_store)
+    audit = json.loads(_audits(risk_store)[-1]["after_json"])
+    assert (audit["new_cluster_keys"][key_of(Q)], audit["targets_n"]) == (key_of(X), 3)
+    assert pattern_q() == "pat-x" and out["queue_closed"] == ["q-q"]
+
+    clock["t"] = 2000
+    out = _decide(risk_store, decision="unmerge_key", ckey=Y)["rekey"]
+    assert out["targets"] == ["snap:T1", "snap:T2", "snap:TQ"]
+    assert _live(risk_store, "snap:TQ") == _fresh(risk_store, "snap:TQ") == {key_of(X): (1, "치명"), key_of(Y): (1, "중대")}
+    _assert_settled(risk_store)
+    assert pattern_q() is None
+
+
+def test_a_merge_that_pushes_an_upstream_human_chain_past_five_hops_is_409(risk_store):
+    """세울 때의 홉 점검은 새 별칭 뒤만 센다 — 사람 별칭 key(Q) → key(Y) 위에 Y → X(뒤로 사람 별칭 4홉)를 세우면 Q 의 사슬이
+    Q → Y → X → 4홉 = 6홉이다. 맞춘 뒤 바뀐 키의 앞 키까지 보아 409 이고 원장 병합 · 별칭 · 등록부 · 감사가 하나도 남지 않는다."""
+    _world(risk_store)
+    registry.add_cluster_alias(risk_store, key_of(Q), key_of(Y), owner_sub=OWNER, reason="cluster_merge")
+    _human_chain(risk_store, key_of(X), 4)
+    registry_before = _registry(risk_store)
+    with pytest.raises(AppError) as err:
+        _decide(risk_store, decision="merge_key", ckey_from=Y, ckey_into=X)
+    assert (err.value.code, err.value.http_status) == ("alias_chain_too_long", 409)
+    assert risk_store.query_one("SELECT status FROM rr_part_keys WHERE ckey = ?", (Y,))["status"] == "confirmed"
+    assert _alias(risk_store, key_of(Y)) is None and _audits(risk_store) == [] and _registry(risk_store) == registry_before
 
 
