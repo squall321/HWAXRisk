@@ -28,7 +28,8 @@ from app.risk_store import RiskStore
 from tests import factories
 from tests.rr.test_member_reads import (EDITOR, MCP_WRITES, ONE_SIDE, OTHER, OWNER, VIEWER, VIEWER_WRITES_OWN,  # noqa: F401
                                         _forge, two_projects)
-from tests.rr.test_review1_stranger import CAPS, CASES, MCP_CASES, P, PREPARE, _answer, _mcp, template  # noqa: F401
+from tests.rr.test_review1_stranger import (CAPS, CASES, MCP_CASES, P, PREPARE, _answer, _mcp, _missing, _normal,  # noqa: F401
+                                            template)
 from tests.synth import review_rig as rig
 
 ONE_SIDE_EDITOR = "one-side-editor@example.com"      # 대상 과제만의 편집자
@@ -501,6 +502,90 @@ def test_an_editors_alias_revoke_shows_in_the_owners_target_audit(copies):
     for who in (OWNER, EDITOR, VIEWER):
         rows = routes.get_target_audit(ids["target"], action="registry.merge.revoke", ident=factories.ident(who))["entries"]
         assert [r["actor"] for r in rows] == [EDITOR], (who, rows)
+
+
+# ---------------------------------------------------------------- 남이 과제에 매단 대상 — 쓰기 문 모두(MB-20)
+PLANTED = {"target": "diff:planted-by-other", "issue": "iss-planted-by-other", "panel": "panel-planted-by-other",
+           "job": "job-planted-by-other"}
+# 대상 · 쟁점 · 패널 · 잡으로 짚는 편집자 쓰기 — 기존 편집자 길(`_target_editor` · 다시 저장)과 새 쓰기 문(`_writer`) 둘 다.
+PLANTED_ROUTES: tuple[tuple[str, str], ...] = tuple(sorted(
+    case for case in EDITOR_WRITES if set(CASES[case][1]) <= set(PLANTED)))
+ADMIN = identity.Identity(email="admin@example.com", display_name="관리자", role="admin", organization="qa", anonymous=False,
+                          source="bearer")
+
+
+def _plant(store: RiskStore, ids: dict) -> dict:
+    """남이 주인의 과제에 매단 대상과 그 대상의 쟁점 · 패널 · 검토 잡 — 주인의 행을 본뜨고 열쇠 · 주인만 바꾼다(고침 전의 들여오기, RD-10).
+    부르는 칸의 id 표(대상 · 쟁점 · 패널 · 잡만 남이 매단 것)를 돌려준다."""
+    reason = "고침 전의 들여오기가 남이 주인의 과제에 매단 행 — 이제 들여오기는 parent_not_owned 로 막는다(RD-10)"
+    for table, key, source in (("rr_targets", "target_key", "target"), ("rr_issues", "issue_id", "issue"),
+                               ("rr_panels", "id", "panel"), ("rr_jobs", "id", "job")):
+        row = dict(store.query_one(f"SELECT * FROM {table} WHERE {key} = ?", (ids[source],)))
+        row.update({key: PLANTED[source], "owner_sub": OTHER})
+        if table != "rr_targets":
+            row["target_key"] = PLANTED["target"]
+        if table == "rr_jobs":
+            # 살아 있는 검토 잡 — MCP 잡 시작이 살아 있는 잡을 돌려주는 갈래(잡을 새로 만들지 않는다)도 문 뒤에 있는지 본다.
+            row["state"] = "queued"
+        factories.seed_raw(store, table, row, reason=reason)
+    return {**ids, **PLANTED}
+
+
+def test_the_planted_table_covers_the_older_editor_paths():
+    """남이 매단 대상 표는 대상 · 쟁점 · 패널 · 잡으로 짚는 편집자 쓰기 전부다 — 기존 편집자 길(잡 · 좌석 · 셀 · 쟁점 · 보고서 · 단위 · 방식 ·
+    사람 finding · 다시 저장)이 다 든다."""
+    older = {("POST", P + "/targets/{target_key}/jobs"), ("PUT", P + "/targets/{target_key}/coverage/{agent_key}"),
+             ("POST", P + "/targets/{target_key}/undefer"), ("POST", P + "/targets/{target_key}/cells/retry"),
+             ("POST", P + "/targets/{target_key}/cells/skip"), ("PUT", P + "/issues/{issue_id}"),
+             ("POST", P + "/targets/{target_key}/report"), ("POST", P + "/targets/{target_key}/units"),
+             ("POST", P + "/targets/{target_key}/flow"), ("POST", P + "/targets/{target_key}/findings"),
+             ("POST", P + "/panels/{panel_id}/repersist")}
+    assert older <= set(PLANTED_ROUTES), sorted(older - set(PLANTED_ROUTES))
+
+
+@pytest.mark.parametrize("case", PLANTED_ROUTES, ids=_case_id)
+def test_a_target_someone_else_hung_on_the_project_is_closed_to_every_writer(copies, case):
+    """남이 주인의 과제에 매단 대상(과 그 쟁점 · 패널 · 잡)에는 과제 주인 · 편집자 · 관리자 · 보기 누구도 쓰지 못한다 — 없는 대상과 같은 답이고
+    원장이 그대로다(새 쓰기 문 `_writer` 와 같은 규칙 — 그 행은 주인의 원장이 아니다). 종전 편집자 길(`_target_editor` · 다시 저장)은 과제의
+    구성원 검사만 해 그 대상에 잡 · 좌석 · 셀 · 쟁점 · 보고서 · 단위 · 방식 · 사람 finding 을 그 남의 이름으로 썼고, 보기는 403 이었다."""
+    call, supplied = CASES[case]
+    for who in (factories.ident(OWNER), factories.ident(EDITOR), factories.ident(VIEWER), ADMIN):
+        store, ids = copies(f"planted-{who.email.split('@')[0]}")
+        planted = _plant(store, ids)
+        before = _ledger(store)
+        theirs = _answer(lambda who=who: call(planted, who))
+        gone = _missing(ids, supplied)
+        missing = _answer(lambda who=who: call(gone, who))
+        assert theirs[1] == 404, (who.email, theirs[:3])
+        assert _normal(theirs, planted, supplied) == _normal(missing, gone, supplied), (who.email, theirs[:3], missing[:3])
+        assert _changed(before, _ledger(store)) == [], who.email
+
+
+PLANTED_MCP: dict[str, Any] = {
+    "risk_start_job": MCP_CASES["risk_start_job"][0],
+    "risk_add_finding": MCP_CASES["risk_add_finding"][0],
+    "risk_repersist_panel": MCP_CASES["risk_repersist_panel"][0],
+    "risk_job_action(retry_failed)": lambda i: srv.risk_job_action(job_id=i["job"], action="retry_failed"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(PLANTED_MCP))
+def test_the_mcp_entrances_close_a_planted_target_the_same_way(copies, monkeypatch, name):
+    """MCP 입구(잡 시작 · 사람 finding · 다시 저장 · 셀 처분)도 같은 문이다 — 과제 주인 · 편집자에게 남이 매단 대상은 없는 것과 같은 답이고
+    원장이 그대로다."""
+    call = PLANTED_MCP[name]
+    for who in (OWNER, EDITOR):
+        store, ids = copies(f"planted-mcp-{who.split('@')[0]}")
+        planted = _plant(store, ids)
+        supplied = tuple(k for k in PLANTED)
+        before = _ledger(store)
+        factories.act_as_delegate(monkeypatch, who)
+        theirs = _mcp(lambda: call(planted))
+        gone = _missing(ids, supplied)
+        missing = _mcp(lambda: call(gone))
+        assert theirs[0] in ("not_visible", "E404"), (who, theirs[:3])
+        assert _normal(theirs, planted, supplied) == _normal(missing, gone, supplied), (who, theirs[:3], missing[:3])
+        assert _changed(before, _ledger(store)) == [], who
 
 
 # ---------------------------------------------------------------- MCP 쓰기 도구 — 웹과 같은 셋

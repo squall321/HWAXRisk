@@ -369,13 +369,12 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = N
     제외와 다르면 `differs` 에 'exclude_evidence' 를 싣는다(바꾸지 않는다 — 취소한 뒤 새로). 돌려주는 살아 있는 잡이 빼는 항목은 늘
     `exclude_evidence` 로 싣는다(BL-12 — 빼지 않는 잡은 칸이 없다).
     """
-    email = require_delegate(ident)
+    require_delegate(ident)
     store = routes.get_store()
     target = store.query_one("SELECT owner_sub, project_id FROM rr_targets WHERE target_key = ?", (target_key,))
     if target is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
-    if not routes._is_admin(ident):
-        routes._target_editor(target_key, target["project_id"], email)      # 남에게는 없는 대상과 같은 답(남 숨김 훑기)
+    routes._target_editor(target_key, target, ident)      # 남 · 남이 매단 대상은 없는 대상과 같은 답(남 숨김 훑기 · MB-20)
     web = web_paths(project_id=target["project_id"], target_key=target_key)
     if mode == "reviews":
         return _start_review_job(ident, store, target_key, web, tier=tier, consent=consent, modifiers=modifiers,

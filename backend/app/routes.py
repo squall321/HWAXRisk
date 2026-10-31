@@ -3514,22 +3514,38 @@ class UnitsBody(BaseModel):
     reason: str | None = Field(default=None, max_length=300)
 
 
-def _target_editor(target_key: str, project_id: str, email: str) -> None:
-    """대상 쓰기의 권한 — 그 과제의 editor 이상. 구성원이 아니면 없는 대상과 같은 404 다(그 대상이 있다는 것과 과제 id 를 흘리지
-    않는다 — 반대 검토 LOW 17). 등급 미달은 그대로 403 role_insufficient 다(구성원은 대상이 있는 것을 안다)."""
-    _member_or_missing(project_id, email, "editor", AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404))
+def _owner_anchored(row_owner: Any, project_id: Any) -> bool:
+    """그 행이 과제 주인의 행인가 — 하위 표의 owner_sub 는 과제 주인의 복제라, 다르면 남이 과제에 매단 행이다(고침 전의 들여오기, RD-10)."""
+    anchor = get_store().query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,)) if project_id else None
+    return anchor is not None and anchor["owner_sub"] == row_owner
+
+
+def _target_editor(target_key: str, row: Any, ident: identity.Identity) -> str:
+    """대상 쓰기의 권한 — 그 대상 행(owner_sub · project_id)이 과제 주인의 행이고 부른 사람이 그 과제의 editor 이상(관리자 우회 — plan §0.6)
+    이다. 부른 사람 이메일을 돌려준다.
+
+    남이 과제에 매단 대상은 없는 대상과 같은 404 다 — 과제 주인 · 편집자 · 관리자에게도(그 행은 주인의 원장이 아니다, 새 쓰기 문 `_writer` 와
+    같은 규칙 — MB-20). 종전에는 과제의 구성원 검사만 해 그런 대상에 잡 · 좌석 · 셀 · 쟁점 · 보고서 · 단위 · 방식 · 사람 finding 을 그 남의
+    이름으로 썼다. 구성원이 아니면 없는 대상과 같은 404 다(그 대상이 있다는 것과 과제 id 를 흘리지 않는다 — 반대 검토 LOW 17). 등급 미달은
+    그대로 403 role_insufficient 다(구성원은 대상이 있는 것을 안다)."""
+    email = _require_user(ident)
+    missing = AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
+    if not _owner_anchored(row["owner_sub"], row["project_id"]):
+        raise missing
+    if not _is_admin(ident):
+        _member_or_missing(row["project_id"], email, "editor", missing)
+    return email
 
 
 def _editable_target(target_key: str, ident: identity.Identity) -> tuple[str, dict]:
-    """쓰기 문 — 잡을 세울 수 있는 사람(그 과제의 editor 이상, 관리자 우회)과 같다. (호출자 이메일, 타깃 행)."""
-    email = _require_user(ident)
+    """쓰기 문 — 잡을 세울 수 있는 사람(그 과제의 editor 이상, 관리자 우회 — 과제 주인의 대상만, `_target_editor`)과 같다. (호출자 이메일,
+    타깃 행)."""
+    _require_user(ident)
     row = get_store().query_one(
         "SELECT target_key, owner_sub, project_id, kind, ref_id, flow FROM rr_targets WHERE target_key = ?", (target_key,))
     if row is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
-    if not _is_admin(ident):
-        _target_editor(target_key, row["project_id"], email)
-    return email, dict(row)
+    return _target_editor(target_key, row, ident), dict(row)
 
 
 @router.post("/targets/{target_key}/units")
@@ -3736,8 +3752,7 @@ def create_job(target_key: str, body: JobBody,
         "SELECT owner_sub, project_id FROM rr_targets WHERE target_key = ?", (target_key,))
     if row is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
-    if not _is_admin(ident):
-        _target_editor(target_key, row["project_id"], email)
+    _target_editor(target_key, row, ident)
     # 게이트웨이 위임 단언(sso)은 게이트웨이만 받아 오므로 Claude 길이다(MCP 입구 risk_start_job · rest_call). 웹 화면은 쿠키다.
     # Bearer 는 개인 heax PAT 로 REST 를 직접 부른 것이라 웹 화면 동의가 아니다(3차 검토 발견 4). 그 밖의 출처는 그 값 그대로 남긴다.
     consent_source = CONSENT_SOURCES.get(ident.source, ident.source)
@@ -3877,8 +3892,7 @@ def put_coverage(target_key: str, agent_key: str, body: CoverageBody,
         "SELECT owner_sub, project_id FROM rr_targets WHERE target_key = ?", (target_key,))
     if row is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
-    if not _is_admin(ident):
-        _target_editor(target_key, row["project_id"], email)
+    _target_editor(target_key, row, ident)
     before = store.query_one(
         "SELECT status FROM rr_coverage WHERE target_key = ? AND agent_key = ?", (target_key, agent_key))
     if before is None:
@@ -3931,8 +3945,7 @@ def post_undefer(target_key: str, body: UndeferBody, ident: identity.Identity = 
     row = store.query_one("SELECT owner_sub, project_id FROM rr_targets WHERE target_key = ?", (target_key,))
     if row is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
-    if not _is_admin(ident):
-        _target_editor(target_key, row["project_id"], email)
+    _target_editor(target_key, row, ident)
     reason = _human_reason(body.reason)
     live = _live_jobs(store, target_key)
     if live:
@@ -3976,8 +3989,7 @@ def _dispose(target_key: str, ident: identity.Identity, *, action: str, cells: l
     row = store.query_one("SELECT owner_sub, project_id FROM rr_targets WHERE target_key = ?", (target_key,))
     if row is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
-    if not _is_admin(ident):
-        _target_editor(target_key, row["project_id"], email)
+    _target_editor(target_key, row, ident)
     note = _human_reason(reason) if (reason is not None or force or action == "skip") else None
     rows = review_cells.select_cells(store, target_key, cells=cells, filter=filter)
     channel = AUDIT_CHANNELS.get(ident.source, "rest")
@@ -5759,10 +5771,11 @@ def post_panel_repersist(panel_id: str, discard: bool = False,
     email = _require_user(ident)
     store = get_store()
     row = store.query_one(
-        "SELECT p.id, p.error, t.project_id FROM rr_panels p JOIN rr_targets t ON t.target_key = p.target_key"
-        " WHERE p.id = ?", (panel_id,))
+        "SELECT p.id, p.error, p.owner_sub AS owner_sub, t.project_id FROM rr_panels p"
+        " JOIN rr_targets t ON t.target_key = p.target_key WHERE p.id = ?", (panel_id,))
     missing = AppError("E404", f"패널을 찾을 수 없습니다 — {panel_id}.", 404)
-    if row is None:
+    # 과제 주인의 패널만 — 남이 과제에 매단 행은 없는 패널과 같다(결과 제출의 `_panel_writer` · `_target_editor` 와 같은 규칙, MB-20).
+    if row is None or not _owner_anchored(row["owner_sub"], row["project_id"]):
         raise missing
     if not _is_admin(ident):
         _member_or_missing(row["project_id"], email, "editor", missing)
@@ -6301,8 +6314,7 @@ def create_human_finding(target_key: str, body: HumanFindingBody,
         "SELECT owner_sub, project_id, kind, ref_id FROM rr_targets WHERE target_key = ?", (target_key,))
     if row is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
-    if not _is_admin(ident):
-        _target_editor(target_key, row["project_id"], email)
+    _target_editor(target_key, row, ident)
     if body.direction not in HUMAN_DIRECTIONS:
         raise AppError("E100", f"direction 은 {list(HUMAN_DIRECTIONS)} 중 하나여야 합니다.", 422)
     if body.severity is not None and body.severity not in HUMAN_SEVERITIES:
