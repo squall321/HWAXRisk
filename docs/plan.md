@@ -103,6 +103,11 @@
 - 심사 — `targets`(브리프·커버리지·편성 `jobs`(`exclude_evidence` — 브리프 항목 빼기)·`refresh_roster`·`resync`·`findings`(mechanism · domain 은 택소노미 어휘)·`registry`·`verdict`·`audit`(그 대상의 사람 행위 — 맨 클러스터 열쇠 행은 그 대상 소유자의 것만)) · `panels`(브리프·`complete`) ·
   `registry`(status·visibility·merge) · `findings`(수정·삭제·라벨) · `curation`(MCP 길 원자의 회수 복귀 `approve_recall` — 다른 격리가 남은 원자는 되돌리지 않고 `applied.held`) · `patterns` · `precedents` · `refs/{ref:path}`.
 - 살림 — `vocab/{synonyms, stop-tokens}` · `jobs/{id}/{action}` · `GET /export` · `POST /import`.
+- 사람 조작 감사(2026-10-31, 사용자 결정) — `jobs/{id}/{action}`(MCP `risk_job_action` 도 같은 함수) · `registry/{cluster}/status` ·
+  `targets/{key}/verdict` 는 rr_audit 한 행씩(`job.pause|resume|cancel` — 잡 행을 바꾼 조작만 · `registry.status` — 바꾼 대상 행마다
+  '<대상>#<클러스터>' · `verdict.final` — 확정마다)을 남겨 대상 감사와 통합 보고서 '사람 개입 요약' 에 선다. 행에는 코드 어휘(상태 · 보류 코드 ·
+  상태 기록 seq · 판정 값)만 싣고 사람이 쓴 글(note · evidence_ref)은 싣지 않는다. 코드가 일으킨 전이(일일 상한 · 코드 보류 · 자동 재개 · 엔진
+  쪽 멈춤 …)는 남기지 않는다 — 근거는 `../context-notes.md` AU-1 ~ AU-7.
 
 ## 외부 반영 — RA 보내는 쪽 · 거두기(RK-01, 2026-10-31)
 
