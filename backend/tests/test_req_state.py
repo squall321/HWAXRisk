@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 
@@ -123,6 +124,40 @@ def test_editing_requirements_recounts_every_snapshot_of_the_project_and_keeps_t
         routes.post_requirements_inherit(fresh, routes.InheritBody(from_project_id=other_project),
                                          ident=factories.ident(OWNER))
     assert _margins(risk_store, sid) == [("plate1_t", -0.2, "candidate")]
+
+
+def test_a_requirement_saved_while_a_snapshot_freezes_lands_in_that_snapshots_state(risk_store, monkeypatch):
+    """동결이 요구 원장을 읽은 뒤 스냅샷을 넣기 전에 다른 요청(다른 스레드)이 요구를 저장해도 새 스냅샷의 상태에 그 요구가 선다 — 원장
+    읽기와 스냅샷 넣기가 한 트랜잭션이라 요구 편집(같은 트랜잭션에서 그 과제 스냅샷을 다시 센다)과 줄을 선다(반대 검토 10-31). 종전에는
+    원장을 트랜잭션 앞에서 읽어, 그 틈에 커밋된 요구는 아직 없는 새 스냅샷을 다시 세지 못했고 그 스냅샷의 req.margin · R-007 이 다음 요구
+    편집까지 낡았다."""
+    project_id = _project(risk_store)
+    _post(risk_store, project_id, [PLATE2_GTE])
+    real = state_module.build_state
+    editors: list[threading.Thread] = []
+    errors: list[BaseException] = []
+
+    def save_requirement() -> None:
+        try:
+            _post(risk_store, project_id, [PLATE1_LTE])
+        except BaseException as exc:  # noqa: BLE001 — 시험 스레드의 실패를 본 스레드로 넘긴다
+            errors.append(exc)
+
+    def edit_in_between(ir, **kwargs):
+        # 동결의 freeze_state 가 원장을 읽은(req 를 센) 뒤 상태를 짓기 전이다 — 첫 부름 한 번만 다른 요청을 끼운다. 그 요청이 동결의
+        # 트랜잭션 잠금에 막히면(고친 뒤) 기다림이 시간을 넘기고 동결이 이어 간다.
+        if not editors:
+            editors.append(threading.Thread(target=save_requirement))
+            editors[0].start()
+            editors[0].join(timeout=1.0)
+        return real(ir, **kwargs)
+
+    monkeypatch.setattr(state_module, "build_state", edit_in_between)
+    sid = factories.make_snapshot(risk_store, project_id, factories.fixture_adapter_results(), label="DV1")["snapshot_id"]
+    editors[0].join(timeout=30)
+    assert not editors[0].is_alive() and errors == []
+    assert _margins(risk_store, sid) == [("plate1_t", -0.2, "candidate"), ("plate2_t", 0.1, "candidate")]
+    assert _r007(risk_store, sid) is False
 
 
 def test_a_refused_requirement_edit_recounts_nothing(risk_store, monkeypatch):
