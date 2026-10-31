@@ -469,7 +469,8 @@ _DISPOSE_ACTIONS = {"retry_failed": "retry", "skip_failed": "skip"}
 
 def job_action(ident: identity.Identity, *, job_id: str, action: str, reason: str | None = None,
                filter: dict | None = None, consent: bool = False) -> dict:
-    """`POST /api/jobs/{id}/{action}`(pause|resume|cancel). 이미 그 상태면 그대로 돌려준다(`changed: false`).
+    """`POST /api/jobs/{id}/{action}`(pause|resume|cancel). 이미 그 상태면 그대로 돌려준다(`changed: false`). `changed` 는 잡 행(상태 · 보류
+    코드)이 바뀌었는가이고 라우트가 감사 행을 쓰는 그 판정이다(`routes.job_control` — 행이 섰으면 참, 그때만 참, 사용자 결정 10-31).
 
     `retry_failed`·`skip_failed` 는 그 검토 잡이 찍은(run_id) 셀 가운데 `failed` 를 다시 열거나 사유와 함께 넘긴다 — `filter`
     ({agent_key?, unit_id?, domain?, error_code?, state?})로 좁히고 job_id 는 이 잡으로 못 박는다. 응답은 REST 처분과 같다
@@ -501,16 +502,15 @@ def job_action(ident: identity.Identity, *, job_id: str, action: str, reason: st
                                       ident=ident)
     if reason is not None or filter is not None:
         raise AppError("E100", "reason·filter 는 retry_failed·skip_failed 의 칸이다.", 422)
-    before = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job_id,))
     try:
-        out = routes.job_action(job_id, action, consent=consent, ident=ident)
+        out, changed = routes.job_control(job_id, action, consent=consent, ident=ident)
     except AppError as exc:
         # 라우트가 소유를 확인한 뒤에야 E100(상태 전이 불가)이 난다 — 여기서 상태를 읽어 돌려줘도 남의 잡을 흘리지 않는다.
         row = store.query_one("SELECT state, pause_reason FROM rr_jobs WHERE id = ?", (job_id,))
         if exc.code != "E100" or row is None or row["state"] not in _ALREADY.get(action, ()):
             raise
         return {"job_id": job_id, "state": row["state"], "pause_reason": row["pause_reason"], "changed": False}
-    return {**out, "changed": before is None or out.get("state") != before["state"]}
+    return {**out, "changed": changed}
 
 
 def repersist_panel(ident: identity.Identity, *, panel_id: str, discard: bool = False) -> dict:

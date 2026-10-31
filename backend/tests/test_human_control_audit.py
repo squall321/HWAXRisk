@@ -143,6 +143,44 @@ def test_mcp_job_control_is_an_unverified_mcp_actor_and_a_repeat_writes_nothing(
         "job.pause", OWNER, OWNER, "mcp", 0)
 
 
+def test_mcp_changed_says_what_the_audit_row_says_for_a_review_job_a_person_pauses_over_a_code_hold(risk_store,
+                                                                                                  monkeypatch, tmp_path):
+    """risk_job_action 의 changed 는 감사 행과 같은 판정이다 — 잡 행(상태 · 보류 코드)이 바뀌었으면 참이고 그때만 행이 선다. 코드 보류
+    (llm_outage)로 멈춘 검토 잡을 사람이 멈추면 상태는 paused 그대로 보류만 user 로 바뀐다(자동 재개가 다시 세우지 않는다 — P-10) —
+    종전에는 감사 행이 서는데 changed 는 상태만 견주어 false 였다(사람 조작 감사가 남긴 줄, 사용자 결정 10-31)."""
+    rig.configure(monkeypatch, risk_store, tmp_path)
+    key = rig.target(risk_store)
+    job_id = rig.job(risk_store, key)
+    assert rig.Rig(risk_store, FakeReviewEngine(rig.packs())).loop.hold(job_id, "llm_outage", "LLM 이 닿지 않는다(시험)")
+    factories.act_as_delegate(monkeypatch, rig.OWNER)
+
+    seen = []
+    for action in ("pause", "pause", "resume", "cancel", "cancel"):
+        rows = len(_rows(risk_store, *CONTROL))
+        out = _call("risk_job_action", job_id=job_id, action=action)
+        seen.append((action, out["state"], out.get("hold_code"), out["changed"], len(_rows(risk_store, *CONTROL)) - rows))
+    assert seen == [("pause", "paused", "user", True, 1), ("pause", "paused", None, False, 0),
+                    ("resume", "queued", None, True, 1), ("cancel", "cancelled", None, True, 1),
+                    ("cancel", "cancelled", None, False, 0)]
+
+
+def test_mcp_changed_is_false_with_no_row_when_the_job_finished_under_the_persons_cancel(seeded, monkeypatch):
+    """확인과 취소 사이에 러너가 잡을 끝냈으면 취소는 아무것도 쓰지 않는다 — 행이 없고 changed 도 false 다(종전 입구는 라우트 밖에서
+    읽은 앞 상태(queued)와 답의 상태(completed)를 견주어 true 라 했다 — 사람이 바꾼 것이 없는데)."""
+    store, target_key = seeded
+    job_id = _panel_job(target_key)
+    real = runner.cancel_job
+
+    def finished_first(store_, job_id_, **kwargs):
+        runner._set_job(store_, job_id_, "completed")          # 루프가 마지막 패널을 닫았다
+        return real(store_, job_id_, **kwargs)
+
+    monkeypatch.setitem(routes.JOB_ACTIONS, "cancel", finished_first)
+    factories.act_as_delegate(monkeypatch, OWNER)
+    out = _call("risk_job_action", job_id=job_id, action="cancel")
+    assert (out["state"], out["changed"], _rows(store, *CONTROL)) == ("completed", False, [])
+
+
 def test_a_review_jobs_rows_carry_the_hold_a_person_puts_or_clears(risk_store, monkeypatch, tmp_path):
     """검토 잡 — 코드가 건 보류(LLM 장애)는 사람 행위가 아니라 행이 없다. 그 위에 사람이 멈추면 상태는 paused 그대로이고 보류 코드만 user 로
     덮는다(자동 재개가 다시 세우지 않는다 — P-10) — 그것도 사람의 정지라 한 행이다. 재개는 보류를 비우고, 취소는 제 트랜잭션 밖에서 전문가

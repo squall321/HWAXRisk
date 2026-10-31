@@ -3360,22 +3360,53 @@ def _job_control_view(store: Any, job_id: str) -> dict:
     return {"state": row["state"], "hold_code": row["hold_code"]}
 
 
-def _audit_job_control(store: Any, ident: identity.Identity, actor: str, job_id: str, action: str, before: dict) -> None:
+def _audit_job_control(store: Any, ident: identity.Identity, actor: str, job_id: str, action: str, before: dict) -> bool:
     """사람의 잡 제어 한 번이 잡 행을 바꿨으면 rr_audit(scope job · action job.<조작>) 한 행(사용자 결정 10-31 — plan §8.2.3).
 
     러너가 전이를 쓴 그 트랜잭션 안에서 부른다 — 정지 · 재개는 라우트의 트랜잭션, 취소는 runner.cancel_job 의 on_change 다(반대 검토
     10-31). 앞 값(`before`)도 그 안에서 읽은 것이고 뒤 값도 여기서 읽어, 전이와 감사 행이 함께 커밋되고 러너의 다른 전이가 섞이지 않는다.
     끝난 잡의 취소처럼 러너가 쓰지 않은 조작은 부르지 않는다. 잡 상태나 보류 코드가 그대로면 행이 없다 — 도는 호출을 기다리는 검토 잡을
     다시 취소해도(cancelling 그대로) 그렇다. 자리는 그 잡이고(대상 감사가 rr_jobs.target_key 로 고른다) 과제 id 는 그 잡의 대상의 것이다.
-    MCP 길의 행위자는 actor_verified 0 이다(다른 MCP 감사 행과 같다)."""
+    MCP 길의 행위자는 actor_verified 0 이다(다른 MCP 감사 행과 같다). 행을 썼으면 참이다 — MCP 입구의 changed 가 이 판정이다(`job_control`)."""
     after = _job_control_view(store, job_id)
     if after == before:
-        return
+        return False
     target = store.query_one("SELECT t.project_id FROM rr_jobs j JOIN rr_targets t ON t.target_key = j.target_key"
                              " WHERE j.id = ?", (job_id,))
     channel = AUDIT_CHANNELS.get(ident.source, "rest")
     _audit(store, actor, scope="job", subject_id=job_id, project_id=target["project_id"] if target is not None else None,
            action=f"job.{action}", before=before, after=after, channel=channel, actor_verified=channel != "mcp")
+    return True
+
+
+def job_control(job_id: str, action: str, *, consent: bool = False, ident: identity.Identity) -> tuple[dict, bool]:
+    """잡 제어 한 번 — (러너의 답, 잡 행이 바뀌었는가). REST `POST /jobs/{id}/{action}` 의 본체이고 MCP 입구(entry.job_action)도 이것을 부른다.
+
+    바뀜은 감사 행과 같은 판정이다 — 그 행이 섰으면 참이고 그때만 참이다(`_audit_job_control`, 전이와 같은 트랜잭션 안의 앞 · 뒤 상태와
+    보류 코드). REST 는 답만 돌려주고(응답 계약 그대로) MCP 는 바뀜을 changed 로 싣는다. 종전 입구는 라우트 밖에서 읽은 상태만 견주어, 코드
+    보류로 멈춘 검토 잡의 사람 정지(보류만 user 로 — 행이 선다)에 false, 확인과 취소 사이에 러너가 끝낸 잡(행이 없다)에 true 라 했다(사람
+    조작 감사가 남긴 줄, 사용자 결정 10-31)."""
+    owner_sub = _require_user(ident)
+    if action not in JOB_ACTIONS:
+        raise AppError("E404", f"모르는 잡 조작입니다 — {action}.", 404)
+    _owned_row("SELECT id, owner_sub FROM rr_jobs WHERE id = ?", (job_id,), owner_sub, f"잡({job_id})")
+    store = get_store()
+    if action == "cancel":
+        # 검토 잡의 취소는 제 트랜잭션에서 닫고 그 밖에서 전문가 보고서를 다시 짓는다(runner.cancel_job · M3C-81) — 바깥 트랜잭션으로
+        # 감싸면 다시 짓는 동안 저장소를 쥔다. 그래서 감사 행은 러너가 전이를 쓰는 그 트랜잭션 안에서 쓴다(on_change — 반대 검토 10-31).
+        # 다시 짓기가 실패하거나 그 사이 앱이 멈춰도 취소와 함께 남고, 앞 · 뒤 값에 러너의 집기 · 마감이 섞이지 않는다. 러너가 쓰지 않은
+        # 취소(끝난 잡)에는 훅이 불리지 않아 바뀜도 없다.
+        wrote: list[bool] = []
+        out = JOB_ACTIONS[action](store, job_id, by=owner_sub, on_change=lambda before: wrote.append(_audit_job_control(
+            store, ident, owner_sub, job_id, action, before)))
+        return out, any(wrote)
+    with store.tx():
+        before = _job_control_view(store, job_id)
+        if action == "resume":
+            review_runner.resume_gate(store, job_id, consent=consent,
+                                      consent_source=CONSENT_SOURCES.get(ident.source, ident.source))
+        out = JOB_ACTIONS[action](store, job_id, by=owner_sub)
+        return out, _audit_job_control(store, ident, owner_sub, job_id, action, before)
 
 
 @router.post("/jobs/{job_id}/{action}")
@@ -3387,26 +3418,9 @@ def job_action(job_id: str, action: str, consent: bool = False, ident: identity.
     이 라우트를 지나지 않는다). 포털 화면의 '멈춤'(엔진 쪽 멈춤 A24)이 잡을 멈추는 것은 사람의 요청이라 러너가 그 사람의 job.pause 를
     쓴다(runner._audit_engine_stop — 반대 검토 10-31). 재개의 `consent`(쿼리 — 사람이 동의한 뒤에만
     true)는 검토 잡이 다시 연 셀의 몫을 넘어 멈췄을 때(consent_extra) 그 몫의 동의다 — 없으면 422 consent_required, 잡의 추정 합이
-    상한을 넘으면 동의와 상관없이 409 max_calls 다(반대 검토 4차 MEDIUM 2 · D-49 — review_runner.resume_gate)."""
-    owner_sub = _require_user(ident)
-    if action not in JOB_ACTIONS:
-        raise AppError("E404", f"모르는 잡 조작입니다 — {action}.", 404)
-    _owned_row("SELECT id, owner_sub FROM rr_jobs WHERE id = ?", (job_id,), owner_sub, f"잡({job_id})")
-    store = get_store()
-    if action == "cancel":
-        # 검토 잡의 취소는 제 트랜잭션에서 닫고 그 밖에서 전문가 보고서를 다시 짓는다(runner.cancel_job · M3C-81) — 바깥 트랜잭션으로
-        # 감싸면 다시 짓는 동안 저장소를 쥔다. 그래서 감사 행은 러너가 전이를 쓰는 그 트랜잭션 안에서 쓴다(on_change — 반대 검토 10-31).
-        # 다시 짓기가 실패하거나 그 사이 앱이 멈춰도 취소와 함께 남고, 앞 · 뒤 값에 러너의 집기 · 마감이 섞이지 않는다.
-        return JOB_ACTIONS[action](store, job_id, by=owner_sub, on_change=lambda before: _audit_job_control(
-            store, ident, owner_sub, job_id, action, before))
-    with store.tx():
-        before = _job_control_view(store, job_id)
-        if action == "resume":
-            review_runner.resume_gate(store, job_id, consent=consent,
-                                      consent_source=CONSENT_SOURCES.get(ident.source, ident.source))
-        out = JOB_ACTIONS[action](store, job_id, by=owner_sub)
-        _audit_job_control(store, ident, owner_sub, job_id, action, before)
-        return out
+    상한을 넘으면 동의와 상관없이 409 max_calls 다(반대 검토 4차 MEDIUM 2 · D-49 — review_runner.resume_gate). 본체는 `job_control` 이고
+    응답은 그 답의 러너 몫뿐이다(바뀜은 MCP 입구가 싣는다)."""
+    return job_control(job_id, action, consent=consent, ident=ident)[0]
 
 
 class CoverageBody(BaseModel):
