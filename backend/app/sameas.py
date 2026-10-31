@@ -1074,7 +1074,7 @@ DECISIONS = ("confirm", "reject", "merge_key", "rename_key", "confirm_key", "unm
 
 
 def record_decision(store, payload: Mapping[str, Any], *, owner_sub: str,
-                    decided_by: str | None = None) -> dict:
+                    decided_by: str | None = None, channel: str = "rest", actor_verified: bool = True) -> dict:
     """`POST /api/sameas/decide` 본문 하나를 원장에 기록한다.
 
     `confirm|reject` 는 `rr_sameas`(scope·pair_key·stable 키 쌍), `merge_key|rename_key|confirm_key|unmerge_key`
@@ -1083,7 +1083,8 @@ def record_decision(store, payload: Mapping[str, Any], *, owner_sub: str,
 
     확정을 뒤집는 조작(confirmed → rejected 인 reject · merged 를 푸는 unmerge_key · revoke_iface_alias)과 그 짝인 merge_key 는 같은
     트랜잭션에서 키 전파(`rekey.run`, plan §5.9.5)를 돈다 — 저장 키 · 등록부 · priors 가 원장을 따라오고 rr_audit(rekey) 1행이 남는다.
-    별칭 6홉 · 순환이면 409 이고 원장 변경도 함께 되돌아간다.
+    별칭 6홉 · 순환이면 409 이고 원장 변경도 함께 되돌아간다. 그 감사 행의 입구 · 행위자 검증은 `channel` · `actor_verified` 다(라우트가
+    신원 출처에서 정한다 — MCP risk_decide_sameas 는 mcp · 0, 사용자 결정 10-31).
     """
     from app import rekey  # noqa: PLC0415 — rekey 는 이 모듈(resolve_ckey)을 쓴다.
 
@@ -1097,7 +1098,8 @@ def record_decision(store, payload: Mapping[str, Any], *, owner_sub: str,
         alias_key = str(payload.get("alias_key") or "")
         if not alias_key:
             raise AppError("E100", "alias_key 가 필요합니다('<ckey_a>|<ckey_b>' 정렬).", 400)
-        out = rekey.revoke_iface_alias(store, alias_key, owner_sub=owner_sub, actor=actor, at=now)
+        out = rekey.revoke_iface_alias(store, alias_key, owner_sub=owner_sub, actor=actor, at=now, channel=channel,
+                                       actor_verified=actor_verified)
         return {"ok": True, "table": "rr_iface_alias", "decision": decision, **out}
 
     if decision in ("confirm", "reject"):
@@ -1141,6 +1143,7 @@ def record_decision(store, payload: Mapping[str, Any], *, owner_sub: str,
                 # 확정 → reject — 그 확정에서 자동 승계된 ckey 병합(§2.7.3)을 되돌리고 키 전파를 돈다.
                 unmerged = rekey.unmerge_auto_rows(store, prev["id"], owner_sub=owner_sub, actor=actor, at=now)
                 rekeyed = rekey.run(store, op="sameas_reject", owner_sub=owner_sub, actor=actor, at=now,
+                                    channel=channel, actor_verified=actor_verified,
                                     ckeys=rekey.with_descendants(store, unmerged, owner_sub),
                                     subject_id=f"sameas:{prev['id']}",
                                     ledger={"sameas_id": prev["id"], "scope": scope, "pair_key": pair_key,
@@ -1172,7 +1175,8 @@ def record_decision(store, payload: Mapping[str, Any], *, owner_sub: str,
             # 병합은 그 키(와 그 키에 매달린 키)를 주체로 가진 원자를 대표 키의 클러스터로 접는다 — 별칭(ckey_merge)이 서고
             # 등록부가 다시 병합된다. 이 짝이 있어야 unmerge_key 가 되돌릴 것이 생긴다(§4.3.2 · §5.9.5).
             detail = {"ckey": ckey, "merged_into": into, "rekey": rekey.run(
-                store, op="merge_key", owner_sub=owner_sub, actor=actor, at=now,
+                store, op="merge_key", owner_sub=owner_sub, actor=actor, at=now, channel=channel,
+                actor_verified=actor_verified,
                 ckeys=rekey.with_descendants(store, [ckey], owner_sub), subject_id=f"ckey:{ckey}",
                 ledger={"ckey": ckey, "merged_into": into, "before": {"status": row["status"],
                                                                        "merged_into": row["merged_into"]}})}
@@ -1186,7 +1190,8 @@ def record_decision(store, payload: Mapping[str, Any], *, owner_sub: str,
             detail = {"ckey": ckey, "merged_into": None}
             if row["status"] == "merged":
                 detail["rekey"] = rekey.run(
-                    store, op="unmerge_key", owner_sub=owner_sub, actor=actor, at=now,
+                    store, op="unmerge_key", owner_sub=owner_sub, actor=actor, at=now, channel=channel,
+                    actor_verified=actor_verified,
                     ckeys=rekey.with_descendants(store, [ckey], owner_sub), subject_id=f"ckey:{ckey}",
                     ledger={"ckey": ckey, "before": {"status": row["status"], "merged_into": row["merged_into"]}})
         elif decision == "confirm_key":

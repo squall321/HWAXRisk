@@ -1830,10 +1830,11 @@ def put_ecad_board(project_id: str, body: EcadBoardBody, ident: identity.Identit
                 (new_uuid(), project_id, owner_sub, app_key, canonical_json(ref), ref_key, canonical_json(probe), now,
                  ecad_adapter.ADAPTER_VERSION, now))
         if previous != job_id:
+            channel = AUDIT_CHANNELS.get(ident.source, "rest")
             _audit(store, owner_sub, scope="project", subject_id=project_id, project_id=project_id,
                    action="project.ecad_board", before={"odb_job_id": previous},
                    after={"odb_job_id": job_id, "name": board.get("name")},
-                   channel=AUDIT_CHANNELS.get(ident.source, "rest"))
+                   channel=channel, actor_verified=channel != "mcp")
     source = next(s for s in _project_sources(project_id) if s["kind"] == "ecad")
     return {"ok": True, "project_id": project_id, "ecad_board": board, "source": source,
             "previous_odb_job_id": previous, "changed": previous != job_id}
@@ -1851,9 +1852,10 @@ def delete_ecad_board(project_id: str, ident: identity.Identity = Depends(identi
         for row in rows:
             store.execute("DELETE FROM rr_sources WHERE id = ?", (row["id"],))
         if rows:
+            channel = AUDIT_CHANNELS.get(ident.source, "rest")
             _audit(store, owner_sub, scope="project", subject_id=project_id, project_id=project_id,
                    action="project.ecad_board", before={"odb_job_id": previous}, after={"odb_job_id": None},
-                   channel=AUDIT_CHANNELS.get(ident.source, "rest"))
+                   channel=channel, actor_verified=channel != "mcp")
     return {"ok": True, "project_id": project_id, "removed": len(rows), "previous_odb_job_id": previous}
 
 
@@ -2499,8 +2501,11 @@ def post_gate_ack(snapshot_id: str, gate: str, body: GateAckBody,
         )
         record = _save_gate_ack_state(store, snapshot_id, gates, gate,
                                       {"by": owner_sub, "at": now, "reason": reason})
+        # 입구 · 행위자 검증은 신원 출처에서 — MCP risk_ack_gate 는 (mcp, 0) 이다(사용자 결정 10-31 — 종전에는 둘 다 기본값 rest · 1).
+        channel = AUDIT_CHANNELS.get(ident.source, "rest")
         _audit(store, owner_sub, scope="snapshot", subject_id=snapshot_id, action="gate.ack",
-               after={"gate": gate, "gates_hash": current_hash}, reason=reason)
+               after={"gate": gate, "gates_hash": current_hash}, reason=reason, channel=channel,
+               actor_verified=channel != "mcp")
     return {"gate": gate, "ack_by": owner_sub, "ack_at": now, "ack_reason": reason,
             "gates_hash": current_hash, "pass": record.get("pass")}
 
@@ -2561,9 +2566,12 @@ def post_sameas_decide(body: list[dict], ident: identity.Identity = Depends(iden
     """same-as 확정과 ckey 원장 조작을 한 배열로 받는다(§2.6.2 7단계·§2.7.3)."""
     owner_sub = _require_user(ident)
     store = get_store()
+    # 키 전파의 감사 행(rekey)의 입구 · 행위자 검증 — MCP risk_decide_sameas 는 mcp · 0 이다(사용자 결정 10-31).
+    channel = AUDIT_CHANNELS.get(ident.source, "rest")
     # 배열은 한 트랜잭션이다 — 3번째 항목이 404 인데 앞 두 결정만 커밋되는 반쪽 적용을 막는다(내부 tx 는 합류한다).
     with store.tx():
-        results = [sameas.record_decision(store, item, owner_sub=owner_sub) for item in body]
+        results = [sameas.record_decision(store, item, owner_sub=owner_sub, channel=channel,
+                                          actor_verified=channel != "mcp") for item in body]
     return {"updated": len(results), "results": results, "G2": None}
 
 
@@ -3222,10 +3230,11 @@ def post_target_flow(target_key: str, body: FlowBody, ident: identity.Identity =
         before = store.query_one("SELECT close_level FROM rr_targets WHERE target_key = ?", (target_key,))["close_level"]
         store.execute("UPDATE rr_targets SET flow = ?, close_level = ?, updated_at = ? WHERE target_key = ?",
                       (body.to, close_level_for(body.to), now_epoch(), target_key))
+        channel = AUDIT_CHANNELS.get(ident.source, "rest")
         _audit(store, email, scope="target", subject_id=target_key, project_id=target["project_id"],
                action="target.flow", before={"flow": target["flow"], "close_level": before},
                after={"flow": body.to, "close_level": close_level_for(body.to)}, reason=body.reason,
-               channel=AUDIT_CHANNELS.get(ident.source, "rest"))
+               channel=channel, actor_verified=channel != "mcp")
     out = {"target_key": target_key, "flow": body.to, "changed": True}
     if body.to == "cells":
         out["units"] = units_module.summary_of(store, target_key)
@@ -3301,9 +3310,10 @@ def create_job(target_key: str, body: JobBody,
     # 게이트웨이 위임 단언(sso)은 게이트웨이만 받아 오므로 Claude 길이다(MCP 입구 risk_start_job · rest_call). 웹 화면은 쿠키다.
     # Bearer 는 개인 heax PAT 로 REST 를 직접 부른 것이라 웹 화면 동의가 아니다(3차 검토 발견 4). 그 밖의 출처는 그 값 그대로 남긴다.
     consent_source = CONSENT_SOURCES.get(ident.source, ident.source)
+    # 감사 행(job.create · brief.exclude)의 입구와 행위자 검증 — MCP 길은 actor_verified 0 이다(사용자 결정 10-31 — 종전에는 입구만 적었다).
+    channel = AUDIT_CHANNELS.get(ident.source, "rest")
     if body.mode == "reviews":
         store = get_store()
-        channel = AUDIT_CHANNELS.get(ident.source, "rest")
         out = review_runner.create_review_job(store, target_key, owner_sub=row["owner_sub"], requester_sub=email,
                                               scope=body.scope, user_memo=body.user_memo, consent=body.consent,
                                               consent_source=consent_source, channel=channel,
@@ -3317,7 +3327,7 @@ def create_job(target_key: str, body: JobBody,
                       "consent_source": params.get("consent_source"),
                       # 반출 동의(Claude 길 X-2) — 누가 · 언제 · 어느 입구로(claude 잡에만 — GLM 잡의 감사 행은 그대로)
                       **runner.llm_params(runner.job_llm(params), params.get("consent_external"))},
-               channel=AUDIT_CHANNELS.get(ident.source, "rest"))
+               channel=channel, actor_verified=channel != "mcp")
         return out
     store = get_store()
     out = runner.create_job(store, target_key, body.tier, owner_sub=row["owner_sub"],
@@ -3329,7 +3339,7 @@ def create_job(target_key: str, body: JobBody,
         # 사람이 브리프에서 뺀 항목(B31 · plan §8.2.3) — 잡마다 한 행이다. 통합 보고서 minutes 의 '사람 개입 요약' 이 이 행을 센다.
         _audit(store, email, scope="job", subject_id=out["job_id"], project_id=row["project_id"], action="brief.exclude",
                after={"target_key": target_key, "tier": body.tier, "exclude_evidence": out["exclude_evidence"]},
-               channel=AUDIT_CHANNELS.get(ident.source, "rest"))
+               channel=channel, actor_verified=channel != "mcp")
     if out.get("llm"):
         # 반출 동의(Claude 길 X-2) — Claude 로 고른 패널 잡만 감사 한 행(누가 · 언제 · 어느 입구로 — 검토 잡과 같은 칸). GLM 패널 잡은 종전대로
         # 감사 행을 남기지 않는다.
@@ -3337,7 +3347,7 @@ def create_job(target_key: str, body: JobBody,
                after={"mode": "panels", "target_key": target_key, "tier": body.tier, "consent": bool(body.consent),
                       "consent_source": consent_source if body.consent else None,
                       **runner.llm_params(out["llm"], out["consent_external"])},
-               channel=AUDIT_CHANNELS.get(ident.source, "rest"))
+               channel=channel, actor_verified=channel != "mcp")
     return out
 
 
@@ -5268,14 +5278,18 @@ def post_panel_repersist(panel_id: str, discard: bool = False,
         raise missing
     if not _is_admin(ident):
         _member_or_missing(row["project_id"], email, "editor", missing)
+    # MCP risk_repersist_panel 은 (mcp, 0) 이다(사용자 결정 10-31 — 종전에는 둘 다 기본값 rest · 1).
+    channel = AUDIT_CHANNELS.get(ident.source, "rest")
     if discard:
         out = runner.abandon_repersist(store, panel_id)
         _audit(store, email, scope="panel", subject_id=panel_id, project_id=row["project_id"],
-               action="panel.repersist_discard", before={"error": row["error"]}, after={"error": out["error"]})
+               action="panel.repersist_discard", before={"error": row["error"]}, after={"error": out["error"]},
+               channel=channel, actor_verified=channel != "mcp")
         return out
     out = runner.repersist_panel(store, config.settings, panel_id)
     _audit(store, email, scope="panel", subject_id=panel_id, project_id=row["project_id"], action="panel.repersist",
-           after={"status": out["status"], "level": out.get("level"), "findings_n": out.get("findings_n")})
+           after={"status": out["status"], "level": out.get("level"), "findings_n": out.get("findings_n")},
+           channel=channel, actor_verified=channel != "mcp")
     return out
 
 
@@ -5828,8 +5842,11 @@ def create_human_finding(target_key: str, body: HumanFindingBody,
                 (claim_uid, (info or {}).get("kind") or "unknown", ref, str(cite.get("quote") or ""),
                  row["owner_sub"], target_key, 0 if info else 1),
             )
+        # MCP risk_add_finding 은 (mcp, 0) 이다 — 작성자는 위임 신원이지만 앱이 확인한 신원이 아니다(사용자 결정 10-31).
+        channel = AUDIT_CHANNELS.get(ident.source, "rest")
         _audit(store, email, scope="finding", subject_id=finding_id, project_id=row["project_id"],
-               action="finding.create", after={"origin": "human", "claim_uid": claim_uid})
+               action="finding.create", after={"origin": "human", "claim_uid": claim_uid}, channel=channel,
+               actor_verified=channel != "mcp")
     registry_module.merge(get_store(), target_key)
     return {"finding_id": finding_id, "claim_uid": claim_uid, "cluster_key": cluster_key, "origin": "human"}
 

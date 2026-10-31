@@ -320,7 +320,8 @@ def close_invalid_merge_items(store: Any, owner_sub: str, keys: set[str], *, act
 # ---------------------------------------------------------------- 2~6걸음 한 벌
 def run(store: Any, *, op: str, owner_sub: str, actor: str | None = None, ckeys: Iterable[str] = (),
         pairs: Iterable[str] = (), subject_id: str, project_id: str | None = None,
-        ledger: Mapping[str, Any] | None = None, channel: str = "rest", at: int | None = None) -> dict:
+        ledger: Mapping[str, Any] | None = None, channel: str = "rest", actor_verified: bool = True,
+        at: int | None = None) -> dict:
     """§5.9.5 의 2~6걸음. 1걸음(원장 행의 이력 — prev_status · revoked_* · merged_into=NULL)은 부르는 쪽이 같은 트랜잭션에서 먼저 한다.
 
     2 그 키를 주체로 가진 finding(`touching_findings`) → 3 별칭 맞추기(`reconcile_aliases`) → 4 영향 대상마다 `registry.merge`(멱등 —
@@ -330,6 +331,9 @@ def run(store: Any, *, op: str, owner_sub: str, actor: str | None = None, ckeys:
     영향 대상은 주체로 닿는 원자의 대상과, 풀이가 바뀐 키(별칭 사슬이 바뀐 키를 지나는 앞 키 포함)를 동결 키로 가진 원자의 대상이다 —
     사람 별칭(key(Q) → key(Y))으로만 Y 의 클러스터에 닿는 대상도 Y 가 X 에 접히면 함께 접힌다. 종전에는 주체로 닿는 대상만 다시 병합해
     그 대상의 등록부 · priors 가 다음 병합까지 옛 별칭대로 남았다.
+
+    `channel` · `actor_verified` 는 감사 행의 입구와 행위자 검증이다 — 부르는 라우트가 신원 출처에서 정한다(MCP 길은 mcp · 0, 사용자 결정
+    10-31 — 종전에는 검증 1 이 글자로 박혀 MCP 의 same-as reject 도 검증된 행위자로 적혔다).
     """
     if op not in OPS:
         raise AppError("E100", f"rekey op 는 {list(OPS)} 중 하나여야 합니다 — {op!r}.", 422)
@@ -351,8 +355,8 @@ def run(store: Any, *, op: str, owner_sub: str, actor: str | None = None, ckeys:
         audit_id = common.new_uuid()
         store.execute(
             "INSERT INTO rr_audit(id, owner_sub, actor, actor_verified, channel, scope, subject_id, project_id, action,"
-            " before_json, after_json, reason, at) VALUES (?,?,?,1,?,'registry',?,?,'rekey',?,?,NULL,?)",
-            (audit_id, owner_sub, actor, channel, subject_id, project_id,
+            " before_json, after_json, reason, at) VALUES (?,?,?,?,?,'registry',?,?,'rekey',?,?,NULL,?)",
+            (audit_id, owner_sub, actor, int(bool(actor_verified)), channel, subject_id, project_id,
              common.canonical_json({"op": op, "ledger": dict(ledger or {}),
                                     "old_cluster_keys": {k: before[k] for k in shown}}),
              common.canonical_json({"new_cluster_keys": {k: after[k] for k in shown},
@@ -387,7 +391,7 @@ def unmerge_auto_rows(store: Any, sameas_id: str, *, owner_sub: str, actor: str,
 
 
 def revoke_iface_alias(store: Any, alias_key: str, *, owner_sub: str, actor: str | None = None,
-                       at: int | None = None, channel: str = "rest") -> dict:
+                       at: int | None = None, channel: str = "rest", actor_verified: bool = True) -> dict:
     """계면 별칭 revoke — rr_iface_alias.status='revoked' · revoked_by · revoked_at(행 삭제 없음)을 쓰고 같은 트랜잭션에서 재키를 돈다.
 
     영향 주체는 그 별칭의 두 키 · 대표 두 키에 걸린(병합 사슬 포함) 주체다. 철회 뒤 새 원자의 주체도 이 별칭으로 접히지 않는다
@@ -407,7 +411,8 @@ def revoke_iface_alias(store: Any, alias_key: str, *, owner_sub: str, actor: str
             "UPDATE rr_iface_alias SET status = 'revoked', revoked_by = ?, revoked_at = ?, updated_at = ?"
             " WHERE alias_key = ? AND owner_sub = ?", (actor, at, at, alias_key, owner_sub))
         parts = {*str(alias_key).split("|"), str(row["canonical_a"]), str(row["canonical_b"])}
-        out = run(store, op="iface_alias_revoke", owner_sub=owner_sub, actor=actor, channel=channel, at=at,
-                  ckeys=with_descendants(store, parts, owner_sub), subject_id=f"alias:{alias_key}",
+        out = run(store, op="iface_alias_revoke", owner_sub=owner_sub, actor=actor, channel=channel,
+                  actor_verified=actor_verified, at=at, ckeys=with_descendants(store, parts, owner_sub),
+                  subject_id=f"alias:{alias_key}",
                   ledger={"alias_key": alias_key, "canonical": [row["canonical_a"], row["canonical_b"]]})
     return {"alias_key": alias_key, "revoked": True, "revoked_at": at, "rekey": out}
