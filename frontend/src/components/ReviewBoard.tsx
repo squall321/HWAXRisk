@@ -1,5 +1,5 @@
 // 카드 대조 검토 진행판 — 셀 · 전문가 셈, 거르기 · 입력 결손 · 처분 줄, 검토 잡 줄(단계 · 기다림 · 다시 연 셀 몫 · 호출)과 보류의 재개(동의) · 넘김(포털 m3-frontend-request 2 · 3-5절)
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { riskApi } from "../api/risk.api";
 import { reopenedOf } from "../api/reviewErrors";
 import { Badge, JobStateBadge, LlmBadge, toneOf } from "./Badge";
@@ -11,6 +11,7 @@ import {
   CELL_STATES,
   callsLine,
   cellStateLabel,
+  consentAmountKey,
   dispositionsLine,
   disposeJobLine,
   filterLines,
@@ -64,7 +65,8 @@ function ConsentNumbers({ extra }: { extra: ReopenedExtra }) {
 function ReviewJobPanel({ job, targetKey, onChanged }: { job: ReviewJob; targetKey: string; onChanged: () => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [consent, setConsent] = useState(false);
+  /** 동의 체크 — 체크한 그 몫의 열쇠(consentAmountKey). 몫이 바뀌면 체크는 비어 보인다(미리 체크된 동의가 되지 않게). */
+  const [consentFor, setConsentFor] = useState<string | null>(null);
   const [skipping, setSkipping] = useState(false);
   const [reason, setReason] = useState("");
   const [result, setResult] = useState<string[] | null>(null);
@@ -73,11 +75,18 @@ function ReviewJobPanel({ job, targetKey, onChanged }: { job: ReviewJob; targetK
   // 그냥 재개가 422 consent_required 로 돌아오면(그사이 몫이 넘쳤다) 그 답의 몫으로 동의를 받는다.
   const askedExtra = reopenedOf(error);
   const consentExtra = hold.resume === "consent" ? extra : askedExtra;
+  const amountKey = consentExtra && (hold.resume === "consent" || askedExtra) ? consentAmountKey(job.id, consentExtra) : null;
+  const consent = amountKey !== null && consentFor === amountKey;
   const workers = job.signal?.workers.length ?? 0;
   const calls = callsLine(job.progress?.calls, extra?.expected, workers);
   const reopened = reopenedLine(extra);
   const live = job.state === "queued" || job.state === "running";
   const problem = reasonProblem(reason, true);
+
+  // 동의를 기다리는 몫이 없어지면(넘겼거나 이어 돈다) 체크를 걷는다 — 같은 크기의 몫으로 다시 멈춰도 체크된 채 열리지 않게.
+  useEffect(() => {
+    if (amountKey === null) setConsentFor(null);
+  }, [amountKey]);
 
   async function act(action: "pause" | "cancel" | "resume" | "resume_consent") {
     setBusy(true);
@@ -88,7 +97,7 @@ function ReviewJobPanel({ job, targetKey, onChanged }: { job: ReviewJob; targetK
       else if (action === "cancel") await riskApi.cancelJob(job.id);
       else if (action === "resume") await riskApi.resumeJob(job.id);
       else await riskApi.resumeJob(job.id, { consent: true });
-      setConsent(false);
+      setConsentFor(null);
       onChanged();
     } catch (err) {
       setError(err);
@@ -115,6 +124,8 @@ function ReviewJobPanel({ job, targetKey, onChanged }: { job: ReviewJob; targetK
       ]);
       setSkipping(false);
       setReason("");
+      // 넘긴 몫에 준 체크는 그 몫과 함께 끝난다 — 다음 멈춤의 몫은 다시 동의받는다.
+      setConsentFor(null);
       onChanged();
     } catch (err) {
       setError(err);
@@ -196,7 +207,7 @@ function ReviewJobPanel({ job, targetKey, onChanged }: { job: ReviewJob; targetK
         <div className="flex flex-col gap-2 rounded-md border-l-[3px] border-warn bg-warn/10 p-3 text-sm">
           <ConsentNumbers extra={consentExtra} />
           <label className="flex flex-wrap items-center gap-2">
-            <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} />
+            <input type="checkbox" checked={consent} onChange={(e) => setConsentFor(e.target.checked ? amountKey : null)} />
             <span className="font-medium">이 몫의 호출에 동의하고 이어 돌립니다.</span>
           </label>
           <span className="flex flex-wrap items-center gap-2">

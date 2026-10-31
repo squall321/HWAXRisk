@@ -256,6 +256,15 @@ export function holdView(job: Pick<ReviewJob, "state" | "progress"> | null | und
   return { reopenHold, resume: "plain", skipWaiting: false };
 }
 
+/**
+ * 동의 체크가 가리키는 몫 — 잡 · 다시 연 셀 · 동의한 셀 · 동의를 기다리는 셀과 그 추정 호출. 체크는 이 열쇠에 묶인다 — 몫이 바뀌면
+ * (기다리는 셀을 넘기고 이어 돌다 더 큰 몫으로 다시 멈추면) 체크가 비어 그 몫에 다시 동의받는다. 몫이 없으면 null.
+ */
+export function consentAmountKey(jobId: string, extra: ReopenedExtra | null | undefined): string | null {
+  if (!extra) return null;
+  return [jobId, extra.cells, extra.consented.cells, extra.unconsented.cells, extra.unconsented.calls_est].join(":");
+}
+
 // ── 3-3 · 3-4 — 처분 ─────────────────────────────────────────────────────────
 
 /** 처분 · 보류 풀기 사유(routes._human_reason) — 앞뒤 공백을 뗀 4~300자. 300자 초과는 FastAPI 422 라 화면이 먼저 막는다. */

@@ -164,6 +164,18 @@ test("보류 — reopened_extra.hold 로 가른다(consent_extra 는 동의 재�
   assert.equal(view.holdView({ ...job, state: "running" }).resume, null);
 });
 
+test("동의 체크의 몫 열쇠 — 몫(셀 · 추정 호출)이 바뀌면 다른 열쇠라 앞 체크가 새 몫에 넘어가지 않는다", () => {
+  const job = samples.coveragePausedConsent.review.job;
+  const extra = job.progress.reopened_extra;
+  const key = view.consentAmountKey(job.id, extra);
+  assert.equal(view.consentAmountKey(job.id, clone(extra)), key); // 폴링으로 새로 받은 같은 몫
+  const bigger = { ...extra, cells: 420, unconsented: { cells: 400, calls_est: 2100 } };
+  assert.notEqual(view.consentAmountKey(job.id, bigger), key);
+  assert.notEqual(view.consentAmountKey(job.id, { ...extra, unconsented: { ...extra.unconsented, calls_est: extra.unconsented.calls_est + 1 } }), key);
+  assert.notEqual(view.consentAmountKey("other-job", extra), key);
+  assert.equal(view.consentAmountKey(job.id, null), null);
+});
+
 test("진행판 렌더 — consent_extra 로 멈춘 잡: 몫 · 미리 체크하지 않은 동의 · 잠긴 '동의하고 재개' · 기다리는 셀 넘기기", () => {
   const cov = samples.coveragePausedConsent;
   const html = renderToStaticMarkup(h(ReviewBoard, { review: cov.review, targetKey: cov.target_key, onChanged: noop }));
