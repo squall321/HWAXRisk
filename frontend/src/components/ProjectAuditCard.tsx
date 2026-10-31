@@ -14,7 +14,10 @@ import type { AuditEntry, JsonValue } from "../types";
 /** 한 쪽의 줄 수(서버 상한 500). */
 const PAGE = 50;
 
-/** 알려진 행위의 사람 말 — 값은 글자 그대로 보이고 뜻만 붙인다. 모르는 행위는 글자 그대로다. */
+/**
+ * 알려진 행위의 사람 말 — 값은 글자 그대로 보이고 뜻만 붙인다. 모르는 행위는 글자 그대로다. 앱이 rr_audit 에 쓸 수 있는 행위는 전부 여기
+ * 있어야 한다 — backend tests/test_audit_action_labels.py 가 앱 소스에서 끌어낸 행위와 이 사전의 열쇠를 견준다.
+ */
 export const ACTION_LABEL: Record<string, string> = {
   "project.update": "메타 고침",
   "project.mcp_visibility": "조직 공개 바꿈",
@@ -32,6 +35,31 @@ export const ACTION_LABEL: Record<string, string> = {
   "job.cancel": "잡 취소",
   "registry.status": "등록부 상태 바꿈",
   "verdict.final": "판정 확정",
+  // 그 밖에 앱이 쓰는 행위 전부(이력 탭 이름표 후속 10-31). 말은 화면의 단추 · 안내 글을 따른다(ack · 다시 · 넘김 · 올리기 · 건너뛰기).
+  "gate.ack": "게이트 ack 붙이기 · 취소",
+  "target.flow": "심사 방식 바꿈",
+  "job.create": "잡 시작",
+  "brief.exclude": "브리프 항목 빼기",
+  "cells.retry": "셀 다시 열기",
+  "cells.skip": "셀 넘김",
+  "issue.queue": "쟁점 올리기",
+  "issue.skip": "쟁점 건너뛰기",
+  "close.ack": "잔여 확인",
+  "close.ack.revoke": "잔여 확인 취소",
+  "finding.create": "사람 finding 올림",
+  "finding.update": "사람 finding 고침",
+  "finding.delete": "사람 finding 지움",
+  "panel.repersist": "패널 다시 저장",
+  "panel.repersist_discard": "패널 다시 저장 포기",
+  "registry.merge": "등록부 병합",
+  "registry.merge.revoke": "등록부 병합 되돌리기",
+  "registry.visibility": "등록부 공개 바꿈",
+  "rekey": "키 전파",
+  "recall.approve": "회수 승인",
+  "curation.decide": "큐 결정",
+  "vocab.edit": "어휘 고침",
+  "ra.retract": "RA 거두기",
+  "ra.remark": "RA 다시 표기",
 };
 
 /** 앞 · 뒤 한쪽의 글 — 그 행위의 꼴이 아니면 null(그때는 JSON 그대로 보인다). */

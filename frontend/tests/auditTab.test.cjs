@@ -41,7 +41,7 @@ test("이력 탭 표 — 사람 조작 감사 행은 이름표가 붙고 전 →
   assert.match(html, /<code class="text-xs">paused · 보류 llm_outage → paused · 보류 user<\/code>/);
   assert.match(html, /<code class="text-xs">open → verified · 상태 기록 #2<\/code>/);
   assert.match(html, /<code class="text-xs">없음 → no-go<\/code>/);
-  // 이번 몫 밖의 행위는 종전대로 JSON(따옴표는 HTML 로 옮겨진다)
+  // 그 밖의 행위의 전 → 후는 종전대로 JSON(따옴표는 HTML 로 옮겨진다)
   assert.match(html, /<code class="text-xs">\{&quot;members&quot;:\[\]\} → \{&quot;members&quot;:\[&quot;b@x&quot;\]\}<\/code>/);
   assert.equal((html.match(/>미확인</g) ?? []).length, 1);
 });

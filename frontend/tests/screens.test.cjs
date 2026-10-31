@@ -207,7 +207,8 @@ test("이력 탭 — 사람 조작 감사 다섯(잡 제어 · 등록부 status 
     ["잡 일시정지", "잡 재개", "잡 취소", "등록부 상태 바꿈", "판정 확정"],
   );
   assert.equal(ACTION_LABEL["coverage.undefer"], "보류 풀기");
-  assert.equal(ACTION_LABEL["job.create"], undefined); // 이름표가 없는 행위는 글자 그대로 보인다(이번 몫 밖)
+  assert.equal(ACTION_LABEL["job.create"], "잡 시작"); // 앱이 쓰는 행위는 전부 이름표가 있다(backend test_audit_action_labels)
+  assert.equal(ACTION_LABEL["future.action"], undefined); // 모르는 행위는 이름표 없이 글자 그대로 보인다
   // 거름 선택지는 이름표 사전에서 선다 — 아직 읽지 않은 탭(active=false)도 다섯을 '말 코드' 꼴로 보인다.
   const html = renderToStaticMarkup(h(ProjectAuditCard, { projectId: "p1", active: false }));
   const five = [["job.pause", "잡 일시정지"], ["job.resume", "잡 재개"], ["job.cancel", "잡 취소"],
