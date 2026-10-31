@@ -215,7 +215,7 @@
         "penetration_volume": {"type": ["number", "null"]},
         "cross_file": {"type": "boolean"},
         "face_pairs_count": {"type": ["integer", "null"]},
-        "note": {"type": "string"},
+        "note": {"type": ["string", "null"]},
         "tol_config_hash": {"type": ["string", "null"]},
         "kind_source": {"type": "string"},
         "contact_index": {"type": "integer"},

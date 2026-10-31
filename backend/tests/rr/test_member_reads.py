@@ -200,9 +200,8 @@ def _forge(store, ids: dict) -> tuple[str, str]:
     """남이 주인의 과제에 매단 스냅샷 · 대상 행 하나씩(주인의 행을 본뜨고 열쇠 · 주인만 바꾼다) — (스냅샷 id, 대상 열쇠)."""
     snapshot = dict(store.query_one("SELECT * FROM rr_snapshots WHERE id = ?", (ids["target_snapshot"],)))
     snapshot.update(id="f" * 32, owner_sub=OTHER, ir_hash="f" * 12)        # (과제, ir_hash) 는 유일하다
-    # IR 은 주인의 스냅샷(합성기가 생산자 경로로 언 것) 그대로다 — 그 IR 의 엣지 attrs.note 가 null 이라 rr_ir.v1 검증을 지나지 못해
-    # 검증만 끈다(이 시험이 어기려는 칸이 아니다 — 생산자 IR 과 스키마의 어긋남은 context-notes MB 에 적었다).
-    factories.seed_raw(store, "rr_snapshots", snapshot, validate=False,
+    # IR 은 주인의 스냅샷(합성기가 생산자 경로로 언 것) 그대로다 — 계면 attrs.note 의 null 도 계약 안이다(MB-17).
+    factories.seed_raw(store, "rr_snapshots", snapshot,
                        reason="고침 전의 들여오기가 남긴 남의 스냅샷 행 — 이제 들여오기는 parent_not_owned 로 막는다(RD-10)")
     target = dict(store.query_one("SELECT * FROM rr_targets WHERE target_key = ?", (ids["target"],)))
     target.update(target_key="snap:forged-by-other", kind="snap", ref_id="f" * 32, owner_sub=OTHER)
@@ -355,6 +354,8 @@ def test_a_diff_opens_to_who_reads_both_projects_and_follows_a_full_transfer(two
     factories.make_project(store, owner=OTHER, code="OTHER-OWN")       # 비교를 들여온 남도 제 과제가 있다(과제 주인이긴 하다)
     forged = dict(store.query_one("SELECT * FROM rr_diffs WHERE id = ?", (diff_id,)))
     forged.update(id="d" * 32, owner_sub=OTHER, base_snapshot_id="b" * 32, target_snapshot_id="c" * 32)   # (base, target) 는 유일하다
+    # 비교 본문은 주인의 것(생산자 diff.create_diff 가 쓴 것) 그대로다 — 생산자 diff_json 이 rr_diff.v1 밖이라(최상위 pair_kind · 조립품
+    # 주체 asm:… — context-notes MB-17 '남긴 것') 검증만 끈다. 이 시험이 어기려는 칸이 아니다.
     factories.seed_raw(store, "rr_diffs", forged, validate=False,
                        reason="고침 전의 들여오기가 남긴 남의 비교 행(남의 두 과제를 적었다) — 이제 들여오기는 parent_not_owned 로 막는다(RD-10) ·"
                               " 비교 본문은 주인의 것을 그대로 본뜬다")
