@@ -20,6 +20,9 @@ from tests.conftest import REPO_ROOT
 # ================================================================ 가정 — 요청서가 이름을 정하지 않은 인터페이스(구현과 다르면 여기만 고친다)
 # A1 보드를 붙이는 칸 — ecad 소스 카드(POST /api/projects/{id}/sources, kind='ecad')의 ref 에 `job_id` 를 담는다.
 #    ER-01 「과제 대상에 ECAD 보드(job_id)를 담는 칸을 둔다」 와 계약의 job_ref(= odb-hub job_id, 16자리 16진)를 따른다.
+#    → 구현에 맞춤(2026-10-31 반대 검토 뒤) — 카드는 같지만 붙이는 길이 따로다. PUT /api/projects/{id}/ecad-board {odb_job_id}
+#      가 find_job 으로 확인한 뒤 ref {odb_job_id} 로 적고, 일반 연결의 kind ecad 는 422 ecad_board_route 다(job_id 없는 이름뿐인
+#      카드는 그 길로만 시도할 수 있다).
 # A2 사람이 고를 후보 창구 — 이 앱의 GET 경로 하나(경로에 ecad · odb · board 가운데 하나)가 find_job 후보를 돌려준다.
 #    검색어는 q 또는 query 로 받고, 후보는 응답에서 job_id 를 가진 객체 목록, 잘림 표지는 응답의 truncated 다.
 # A3 보드 노드 — rr_ir 노드 kind 'board' 1건이다(ER-03 「board · layer · component … 노드를 만든다」).
@@ -27,11 +30,13 @@ from tests.conftest import REPO_ROOT
 #    units · outline_bbox · thickness · layer_count · n_components · n_nets · odb_version), layer 는 {idx, name, type, thickness,
 #    material, copper_weight}, component 는 {refdes, part_number, footprint, side, x, y, rot, pin_count, nets, height, value}다.
 # A5 적층 두께 합 — 이름 `ecad_stackup_total`(계약 · 부록 A)로 dims_named 나 board attrs 에 싣는다.
+#    → 구현에 맞춤 — board attrs 의 ecad_stackup_total 은 rr_ir 길이 단위(units.length = mm)다.
+# A6 층 두께 단위 — 요청서는 원천(thickness_um, µm)만 적었다. 구현은 rr_ir 길이 단위 mm 로 싣는다 — µm 로 되돌려 견준다.
 
 
 def _ecad_ref(job_id: str) -> dict:
-    """A1 — 사람이 고른 보드를 담는 ecad 소스 카드의 ref."""
-    return {"job_id": job_id}
+    """A1 — 사람이 고른 보드를 담는 ecad 소스 카드의 ref(구현의 열쇠는 odb_job_id)."""
+    return {"odb_job_id": job_id}
 
 
 def _nodes(ir: dict, kind: str) -> list[dict]:
@@ -51,7 +56,13 @@ def _stackup_total_um(ir: dict) -> float | None:
         if dim.get("name") == "ecad_stackup_total" and dim.get("value") is not None:
             return float(dim["value"]) * (1000.0 if str(dim.get("unit") or "") == "mm" else 1.0)
     value = (_board(ir).get("attrs") or {}).get("ecad_stackup_total")
-    return None if value is None else float(value)
+    return None if value is None else float(value) * (1000.0 if ir["units"]["length"] == "mm" else 1.0)
+
+
+def _layer_thickness_um(node: dict) -> float | None:
+    """A6 — layer 노드 두께를 µm 로(rr_ir 길이 단위가 mm 면 × 1000). 실크 층의 null 은 그대로다."""
+    value = node["attrs"]["thickness"]
+    return None if value is None else round(float(value) * 1000.0, 6)
 
 
 def _board_search(client, ident: identity.Identity, project_id: str, query: str) -> dict:
@@ -526,7 +537,11 @@ def _new_project(box: Box, code: str) -> str:
 
 
 def _attach(box: Box, project_id: str, ref: dict) -> dict:
-    """웹 소스 카드처럼 붙인다 — app_key 는 /meta/adapters(발견)의 ecad 행 값을 그대로 보낸다."""
+    """A1 — 보드를 붙인다. job_id 가 있으면 보드 붙이기 길(PUT …/ecad-board)이고 답의 카드 probe 를 `probe` 로 옮긴다. 없으면
+    웹 소스 카드처럼 일반 연결로 시도한다 — app_key 는 /meta/adapters(발견)의 ecad 행 값을 그대로 보낸다."""
+    if ref.get("odb_job_id"):
+        out = routes.put_ecad_board(project_id, routes.EcadBoardBody(odb_job_id=ref["odb_job_id"]), ident=box.ident)
+        return {**out, "probe": out["source"]["probe"]}
     ecad = next(r for r in adapters_registry.discover_adapters(force=True) if r["kind"] == "ecad")
     return routes.add_source(project_id, routes.SourceBody(kind="ecad", app_key=ecad["app_key"], ref=ref),
                              ident=box.ident)
@@ -739,7 +754,7 @@ def test_layer_nodes_follow_physical_order_the_five_types_and_the_standard_stack
     assert idx[0] in (0, 1) and idx == list(range(idx[0], idx[0] + len(B1.five))), idx
     assert [n["attrs"]["name"] for n in layers] == [r["name"] for r in B1.five]
     assert [n["attrs"]["type"] for n in layers] == [FIVE[r["type"]] for r in B1.five]
-    assert [n["attrs"]["thickness"] for n in layers] == [r["thickness_um"] for r in B1.five]
+    assert [_layer_thickness_um(n) for n in layers] == [r["thickness_um"] for r in B1.five]
     assert [n["attrs"].get("material") for n in layers] == B1.materials()
     assert all(n["attrs"].get("copper_weight") is None for n in layers)
 
