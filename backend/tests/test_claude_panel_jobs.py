@@ -188,6 +188,29 @@ def test_a_claude_panel_without_a_worker_pauses_the_job_on_external_worker(risk_
         job["id"], "paused", None, "external_worker", None)
 
 
+def test_cancelling_a_held_claude_panel_job_clears_the_hold_on_its_coverage_line(risk_store, cfg, monkeypatch):
+    """보류 external_worker 로 멈춘 Claude 패널 잡을 주인이 취소하면(REST · MCP risk_job_action — 같은 runner.cancel_job) 보류 열을 비운다
+    — 재개와 검토 잡의 취소가 그렇듯. 종전에는 패널 갈래가 보류를 남겨, 취소된 잡의 진행판 줄이 hold_code external_worker 를 싣고 화면의
+    '멈춘 까닭' 이 '워크플로를 다시 돌린 뒤 재개' 를 말했다(반대 검토 10-31)."""
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    _peer_pat(risk_store)
+    X._probe(monkeypatch, X._external_fake())
+    _claude(risk_store, target_key, cfg)
+    job = runner.claim_next_job(risk_store, cfg)
+    failed = runner.EngineNoDecision("chair_failed", "의장 실패 — 외부 응답자가 없다", knob="EXTERNAL_LLM_WAIT_S",
+                                     cause="external_worker_absent", conv_id="conv-1")
+    runner.run_panel(risk_store, cfg, FakePanelEngine(raise_error=failed), job,
+                     narrative_mod=fake_narrative({}), registry_mod=fake_registry({}))
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    assert routes.coverage_payload(target_key)["job"]["hold_code"] == "external_worker"
+    assert routes.job_action(job["id"], "cancel", ident=factories.ident(OWNER))["state"] == "cancelled"
+    line = routes.coverage_payload(target_key)["job"]
+    assert (line["id"], line["state"], line["pause_reason"], line["hold_code"], line["hold_until"]) == (
+        job["id"], "cancelled", None, None, None)
+    assert risk_store.query_one("SELECT hold_n FROM rr_jobs WHERE id = ?", (job["id"],))["hold_n"] == 0
+
+
 def test_two_panel_jobs_made_in_the_same_second_read_as_the_later_one(risk_store, cfg, monkeypatch):
     """진행판의 패널 잡 줄은 마지막 패널 잡이다 — 같은 초에 선 둘이면 넣은 차례(rowid)로 가른다(검토 잡 줄 · 사슬 단계와 같다). 웹
     REST 는 부를 때마다 새 잡을 세운다(화면 세션 FE-27)."""

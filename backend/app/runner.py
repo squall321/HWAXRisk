@@ -1189,8 +1189,8 @@ def _set_job(store: Any, job_id: str, state: str, *, reason: str | None = None, 
     """잡 상태 전이 1건. `by` 는 주체다 — 사람은 email, 자동 정지는 'code:diminishing'·'code:daily_cap'(plan §0.6),
     엔진·좌석 탓이 아닌 중단으로 멈춘 것은 'code:<UNCHARGED_CODES 의 사유>' 다.
 
-    `hold` 는 검토 잡의 보류 열({code, until, n?}) — 주면 같은 문장에서 hold_code·hold_until(·hold_n)을 쓴다. 패널 잡은 주지
-    않는다(그 열을 건드리지 않는다 — 패널 경로의 문장은 종전 그대로다)."""
+    `hold` 는 보류 열({code, until, n?}) — 주면 같은 문장에서 hold_code·hold_until(·hold_n)을 쓰고, 주지 않으면 그 열을 건드리지
+    않는다. 검토 잡의 전이와, 패널 · 쟁점 잡의 코드 보류 · 그 보류를 비우는 재개 · 취소가 준다."""
     now = now_epoch()
     actor = by or (f"code:{reason}" if reason in ("diminishing", "daily_cap") else None)
     sets, params = ["state = ?", "pause_reason = ?", "error = ?"], [state, reason, error]
@@ -1265,7 +1265,9 @@ def cancel_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
         return {"job_id": job_id, "state": row["state"], "pause_reason": None}
     if row["mode"] in PANEL_RUNNER_MODES:
         state = "cancelling" if row["state"] == "running" else "cancelled"
-        out = _set_job(store, job_id, state, by=by)
+        # 코드 보류(external_worker · credential · external_config)로 멈춘 패널 · 쟁점 잡의 취소는 재개처럼 보류 열을 비운다 — 남기면 취소된
+        # 잡의 진행판 줄 · 사슬 단계가 보류를 싣고 화면이 '워크플로를 다시 돌린 뒤 재개' 를 말했다(반대 검토 10-31).
+        out = _set_job(store, job_id, state, by=by, hold=_HOLD_CLEARED if row["hold_code"] is not None else None)
         if state == "cancelled" and row["mode"] == "issues":
             _untry_after_cancel(store, row["target_key"], job_id)
         return out
