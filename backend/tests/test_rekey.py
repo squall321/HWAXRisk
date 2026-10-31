@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from app import brief, common, learning, narrative, registry, rekey, routes, sameas
+from app import brief, closure, common, issues, learning, narrative, registry, rekey, routes, sameas, synth
 from app.errors import AppError
 from tests import factories
 
@@ -641,5 +641,46 @@ def test_a_remap_step_it_cannot_reproduce_is_skipped_not_guessed(risk_store):
     out = _decide(risk_store, decision="merge_key", ckey_from=Y, ckey_into=X)["rekey"]
     assert out["skipped"] == [{"cluster_key": unclassified, "reason": "remap_not_reproducible", "at": unclassified}]
     assert out["aliases_added"] == [] and _alias(risk_store, key_of(Y)) is None
+
+
+def _cells_world(store) -> None:
+    """카드 대조 대상 TC — 리스크 F1 = Y · F2 = X(둘 다 치명), 개선 G1 = Y · G2 = X. 한 전문가 · 한 단위의 카드 대조 원자로 병합까지."""
+    for ck in (X, Y):
+        _part(store, ck)
+    _target(store, "snap:TC", "PC")
+    store.execute("UPDATE rr_targets SET flow = 'cells' WHERE target_key = 'snap:TC'")
+    for fid, subject, severity in (("F1", Y, "치명"), ("F2", X, "치명"), ("G1", Y, "경미"), ("G2", X, "경미")):
+        _finding(store, "snap:TC", fid, subject, panel="PN", severity=severity)
+    store.execute("UPDATE rr_findings SET direction = 'improvement' WHERE finding_id IN ('G1', 'G2')")
+    store.execute("UPDATE rr_findings SET source_kind = 'card_review', agent_key = 'mech-syn-0', unit_id = 'u1', panel_id = NULL"
+                  " WHERE target_key = 'snap:TC'")
+    registry.merge(store, "snap:TC", owner_sub=OWNER)
+
+
+def test_a_folded_away_row_is_not_counted_again_in_the_cells_flow(risk_store):
+    """카드 대조 대상에서 키 병합이 접은 옛 행(superseded · 같은 대상 표지)은 주의 등급도 닫힌 행의 값(D)이고, 클러스터를 세는 곳 —
+    종합 입력(A · B · 영역 행) · 보고서(주의 A · 개선 · 영역 쪽 · 메커니즘 표) · 마감 판 · 쟁점 후보 — 이 그 행을 다시 세지 않는다.
+    종전에는 닫을 때의 A 가 남아 같은 원자가 두 행으로 섰다(판정 후보는 1 인데 마감 판은 2 · 쟁점 후보는 같은 닻 둘)."""
+    _cells_world(risk_store)
+    _decide(risk_store, decision="merge_key", ckey_from=Y, ckey_into=X)
+    rows = {r["cluster_key"]: (r["status"], r["attention"]) for r in risk_store.query(
+        "SELECT cluster_key, status, attention FROM rr_registry WHERE target_key = 'snap:TC'")}
+    imp = registry.IMPROVEMENT_SUFFIX
+    assert rows == {key_of(X): ("open", "A"), key_of(Y): ("superseded", "D"),
+                    key_of(X) + imp: ("open", "C"), key_of(Y) + imp: ("superseded", "D")}
+    assert [r["cluster_key"] for r in synth.target_rows(risk_store, "snap:TC")] == [key_of(X)]
+    assert [r["cluster_key"] for r in synth.domain_rows(risk_store, "snap:TC", "mech")] == [key_of(X), key_of(X) + imp]
+    counts = closure.cell_counts(risk_store, "snap:TC")
+    assert counts["registry"]["clusters"] == 1 and counts["registry"]["attention"] == {"A": 1, "B": 0, "C": 0, "D": 0}
+    assert [c["anchor_cluster_key"] for c in issues.candidates(risk_store, "snap:TC")] == [key_of(X)]
+
+    report = synth.build_report(risk_store, "snap:TC", closure_result=closure.close_level_cells(risk_store, "snap:TC",
+                                                                                               persist=False),
+                                counts=counts, version_no=1)
+    pages = {(p["kind"], p["title"]): p["blocks"]["results"] for p in report["pages"]}
+    summary = next(lines for (kind, _title), lines in pages.items() if kind == "summary")
+    assert "## 주의 A 1건" in summary and "## 개선 상위 1건" in summary
+    assert "- 주의 C 1건 · D 0건(본문 표 없음)" in pages[("domain", "영역 mech")]
+    assert pages[("mechanisms", "메커니즘")][:2] == ["## 단위 × 메커니즘 대분류(결손 사냥 미실행)", "- u1 · mechanical · 1"]
 
 

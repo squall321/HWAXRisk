@@ -100,13 +100,19 @@ def row_line(store: RiskStore, row: Mapping[str, Any], *, line_max: int = LINE_M
     return (f"{head} · {_q(claim[:kept])}{mark.format(kept=kept)}")[:line_max]
 
 
+def _cluster_rows(store: RiskStore, target_key: str) -> list[dict]:
+    """그 대상의 클러스터 행 — 별칭 접힘으로 비어 닫힌 행(registry.vacated)은 뺀다. 그 행의 원자는 대표 키 행에 이미 있어, 실으면
+    종합 입력 · 보고서가 같은 원자를 두 줄로 센다(행 줄에는 상태가 없다)."""
+    return [r for r in registry.registry_rows(store, target_key) if not registry.vacated(r, target_key)]
+
+
 def _risk_rows(store: RiskStore, target_key: str) -> list[dict]:
     return [r for r in registry.registry_rows(store, target_key) if r["direction"] == "risk"]
 
 
 def domain_rows(store: RiskStore, target_key: str, domain: str) -> list[dict]:
     """그 영역이 제기에 참여한 등록부 행 전부(`merged.domains` 에 그 영역 — 개선 행 포함), 주의 등급 → 우선순위 → 키 순."""
-    rows = [r for r in registry.registry_rows(store, target_key) if domain in (r["merged"].get("domains") or ())]
+    rows = [r for r in _cluster_rows(store, target_key) if domain in (r["merged"].get("domains") or ())]
     return sorted(rows, key=_row_order)
 
 
@@ -804,7 +810,7 @@ def build_report(store: RiskStore, target_key: str, *, closure_result: Mapping[s
                  version_no: int) -> dict:
     """보고서 판 하나의 쪽(저장 모양) — 1 본문 · 영역 쪽(로스터 영역 전부) · 메커니즘 · 부록. 쪽 모양은 전문가 보고서와 같다."""
     latest, narrative_state = _summary_state(store, target_key)
-    rows = registry.registry_rows(store, target_key)
+    rows = _cluster_rows(store, target_key)
     risk = sorted([r for r in rows if r["direction"] == "risk"], key=_row_order)
     gains = sorted([r for r in rows if r["direction"] == "improvement"], key=lambda r: -float(r.get("priority") or 0))
     all_issues = issues.issue_rows(store, target_key)

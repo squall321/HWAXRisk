@@ -106,6 +106,13 @@ def target_flow(store: RiskStore, target_key: str) -> str:
     return "cells" if row is not None and row["flow"] == "cells" else "panels"
 
 
+def vacated(row: Mapping[str, Any], target_key: str) -> bool:
+    """별칭 접힘으로 비어 닫힌 행인가 — 같은 대상 표지의 superseded(`_close_vacated_rows`). 그 대상의 클러스터가 아니라 옛 `reg:`
+    인용을 받는 자리라 클러스터를 세는 곳(종합 입력 · 마감 판 · 쟁점 후보)은 건너뛴다. 다른 대상이 닫은 행(§4.8 T′#…)은 아니다."""
+    return (_clean_str(row.get("status")) == "superseded"
+            and _clean_str(row.get("superseded_by")).startswith(f"{target_key}#"))
+
+
 def finding_scope(alias: str = "") -> str:
     """`FINDING_SCOPE_SQL` 을 표 별칭 하나에 맞춘다(`alias='f'` → `f.source_kind`·`f.target_key`)."""
     if not alias:
@@ -615,8 +622,7 @@ def _write_registry_row(store: RiskStore, row: dict, now: int) -> str:
         status_row = store.query_one(
             "SELECT status, status_source, superseded_by FROM rr_registry WHERE target_key = ? AND cluster_key = ?",
             (row["target_key"], row["cluster_key"]))
-        reopen = (status_row is not None and status_row["status"] == "superseded"
-                  and _clean_str(status_row["superseded_by"]).startswith(f"{row['target_key']}#"))
+        reopen = status_row is not None and vacated(dict(status_row), row["target_key"])
         status_moves = (status_row is not None and status_row["status_source"] == "code"
                         and status_row["status"] != code_status
                         and (status_row["status"] in ("open", "rejected_in_panel") or reopen))
@@ -890,7 +896,12 @@ def _close_vacated_rows(store: RiskStore, target_key: str, rows: Sequence[Mappin
     빈 행(패널 재제출 · 사람 finding 삭제)은 여기서 다루지 않는다(종전 그대로). 행은 지우지 않는다 — 옛 `reg:<target>#<old>` 인용이 그
     행을 계속 찾는다(dangling 0). 닫는 것은 코드가 정한 열린 행뿐이다(사람 · 라벨 · §4.8 의 표지는 그대로). 그 클러스터가 다시 서면
     `_write_registry_row` 가 같은 대상 표지를 보고 다시 연다.
+
+    닫을 때 주의 등급도 닫힌 행의 값(`attention_of` — superseded 는 D)으로 쓴다. 다음 병합은 이 행을 다시 세지 않으므로(그 대상의
+    클러스터가 아니다) 닫을 때의 A 가 그대로 남아, 상태를 보지 않고 주의 등급으로 고르는 곳(종합 입력의 A · B · 보고서 '주의 A')이
+    같은 원자를 두 번 셌다. 쟁점 칸(issue_id · issue_state)은 rr_issues 의 거울(`issues._sync_registry`)이라 그대로 둔다.
     """
+    closed_attention = attention_of({"status": "superseded"})
     stored = {str(r["cluster_key"]) for r in rows}
     home: dict[str, str] = {}
     for row in rows:
@@ -912,8 +923,8 @@ def _close_vacated_rows(store: RiskStore, target_key: str, rows: Sequence[Mappin
         rep = home.get(str(merged.get("claim_finding_id") or ""))
         into = rep if rep in moved else sorted(moved)[0]
         store.execute(
-            "UPDATE rr_registry SET status = 'superseded', superseded_by = ?, updated_at = ?"
-            " WHERE target_key = ? AND cluster_key = ?", (f"{target_key}#{into}", now, target_key, key))
+            "UPDATE rr_registry SET status = 'superseded', superseded_by = ?, attention = ?, updated_at = ?"
+            " WHERE target_key = ? AND cluster_key = ?", (f"{target_key}#{into}", closed_attention, now, target_key, key))
         closed += 1
     return closed
 
