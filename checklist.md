@@ -919,8 +919,10 @@ B25 가 남긴 작은 것 하나(2026-10-31, context-notes BL-2) — 캡처가 �
       같은 갈래 짐 · 5/5(MB-18)
 - [x] finding 쓰기 문이 카드 대조 finding 을 거른다 · 그 거름 자리를 래칫 표에 — 전체 시험의 가드 둘이 잡았다(b9798ec, MB-14 · MB-18)
 - [x] 리스크 전체 시험(공유 잠금) — 3,979 통과 · xfail 4 · 실패 0(rc 0, b9798ec, 12분 47초 — 앞 두 판은 가드 하나씩 붉음, MB-18)
-- [ ] (결정) 기존 편집자 길(`_target_editor` — 잡 · 좌석 · 셀 · 쟁점 · 보고서 · 단위 · 방식 · 사람 finding 만들기)도 대상 행 주인 = 과제 주인을
-      볼지 — 남이 매단 대상에 편집자가 쓸 수 있다(MB-19)
+- [x] (결정) 기존 편집자 길(`_target_editor` — 잡 · 좌석 · 셀 · 쟁점 · 보고서 · 단위 · 방식 · 사람 finding 만들기)도 대상 행 주인 = 과제 주인을
+      볼지 — 남이 매단 대상에 편집자가 쓸 수 있다(MB-19) — 조정자 요청 10-31 · 845fdd5(다시 저장 · MCP 잡 시작까지, MB-20)
 - [ ] (결정) 생산자 diff_json 이 rr_diff.v1 밖(최상위 pair_kind · 조립품 주체 asm:…) — 계약을 넓힐지 생산자를 맞출지(MB-17)
 - [ ] (합칠 때) wt1031/risk-concurrency 의 progress_json panels 지도 — 과제 상세 jobs[].progress · 진행판 job.signal 이 그대로 보인다(MB-19)
-- [ ] (시험 lint · 이 가지 밖) tests/test_claude_panel_jobs.py 의 같은 이름 시험 둘(F811 — 앞의 것이 돌지 않는다) · test_backup_wrapper_run.py(MB-19)
+- [x] (시험 lint · 이 가지 밖) tests/test_claude_panel_jobs.py 의 같은 이름 시험 둘(F811 — 앞의 것이 돌지 않는다) · test_backup_wrapper_run.py(MB-19)
+      — 6f24240(앞의 것 이름을 바꿔 둘 다 통과 · 쓰지 않는 import, MB-21)
+- [x] 리스크 전체 시험(공유 잠금, 6f24240 — 조정자 요청 두 건 뒤) — 4,000 통과 · xfail 4 · 실패 0(rc 0, 12분 57초 — MB-21)
