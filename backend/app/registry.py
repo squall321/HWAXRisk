@@ -1147,7 +1147,7 @@ def invalidate(
 
 def _coverage_rows(store: RiskStore, target_key: str) -> list[dict]:
     return [dict(r) for r in store.query(
-        "SELECT agent_key, domain, origin, status, panel_id, opinion_id, reason FROM rr_coverage "
+        "SELECT agent_key, domain, origin, status, panel_id, opinion_id, reason, status_source, decided_by FROM rr_coverage "
         "WHERE target_key = ? ORDER BY agent_key",
         (target_key,),
     )]
@@ -1573,11 +1573,17 @@ def _minutes_lines(store: RiskStore, target_key: str, panels: list[dict], covera
 
     out.append("[커버리지 도메인×상태]")
     grid: dict[str, dict[str, int]] = {}
+    # 사람이 skipped 로 넘긴 좌석은 결정한 사람을 그 칸에 병기한다(plan §4.7.3 minutes · P4 (13)) — 코드가 넘긴 것(재시도 소진 등)은 아니다.
+    deciders: dict[str, set[str]] = {}
     for c in coverage:
         grid.setdefault(c["domain"], {})
         grid[c["domain"]][c["status"]] = grid[c["domain"]].get(c["status"], 0) + 1
+        if c["status"] == "skipped" and c.get("status_source") == "human" and c.get("decided_by"):
+            deciders.setdefault(c["domain"], set()).add(str(c["decided_by"]))
     for domain in sorted(grid):
-        counts = " ".join(f"{s}={n}" for s, n in sorted(grid[domain].items()))
+        counts = " ".join(f"{s}={n}" + (f"(decided_by: {', '.join(sorted(deciders[domain]))})"
+                                         if s == "skipped" and deciders.get(domain) else "")
+                          for s, n in sorted(grid[domain].items()))
         out.append(f"{domain} · {counts}")
     if not grid:
         out.append("(원장 행 없음)")
@@ -1598,6 +1604,11 @@ def _minutes_lines(store: RiskStore, target_key: str, panels: list[dict], covera
         if not p["risk_spec_parsed"] and p["status"] == "done" and "spec_parse_failed" not in listed:
             flags.append(f"panel_no={p['panel_no']} spec_parse_failed")
     out.extend(flags or ["(없음)"])
+
+    # 사람 개입 요약(plan §4.7.3 · P4 (13)) — 그 대상의 rr_audit 를 action 별로 센 수(조회 GET /targets/{key}/audit 와 같은 조각, B31).
+    # 게이트 ack · 좌석 넘김 · 브리프 제외 · 사람 finding · 회수 승인 … 이 각 한 줄이다. 감사 행을 남기지 않는 사람 조작은 여기에도 없다.
+    out.append("[사람 개입 요약]")
+    out.extend([f"{action}={n}" for action, n in target_audit_counts(store, target_key).items()] or ["(없음)"])
     return out
 
 

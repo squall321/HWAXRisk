@@ -3216,7 +3216,7 @@ def post_target_flow(target_key: str, body: FlowBody, ident: identity.Identity =
 class JobBody(BaseModel):
     """잡 본문 — `mode` 가 panels(기본 — Tier 패널 잡, tier 필수)·reviews(카드 대조 검토 잡, 재설계 M2 S12)를 가른다.
 
-    reviews 의 본문은 {mode, scope?, user_memo?, consent?, llm?, consent_external?} 다. 패널 칸(tier·modifiers·concurrency)을 주면
+    reviews 의 본문은 {mode, scope?, user_memo?, consent?, llm?, consent_external?} 다. 패널 칸(tier·modifiers·concurrency·exclude_evidence)을 주면
     422 다 — 범위는 scope.tiers 로 주고, 동시 수는 박스 손잡이(HWAXRISK_REVIEW_CONCURRENCY)다. 패널 잡에 scope 를 주어도 422 다(조용히
     버리지 않는다). `llm`(Claude 길 X-2)은 판단 LLM — glm(없음과 같다) · claude 이고 검토 잡 · 패널 잡 둘 다 받는다(패널 잡은 포털
     docs/claude-delib-parity C4 — 좌석 자유 조회는 글 왕복으로 돈다). claude 는 `consent_external` 이 JSON true 여야 한다
@@ -3234,6 +3234,9 @@ class JobBody(BaseModel):
     scope: dict[str, Any] | None = None            # {tiers?, domains?, agents?, unit_ids?} — review_runner.resolve_scope
     llm: Literal["glm", "claude"] | None = None    # 판단 LLM(Claude 길 X-2) — 없으면 glm
     consent_external: Any = None                   # claude 의 반출 동의 — JSON true 만(사람이 동의한 뒤에만)
+    # 패널 잡의 브리프에서 뺄 항목 키(B31 · plan §8.2.3 — 빼기만 · 더하기 없음, 헌법 P1). 허용값은 brief.EXCLUDABLE_ITEMS 이고
+    # 검사는 runner.create_job(brief.check_exclude) 가 한다. 종전에는 칸이 없어 본문의 이 값이 조용히 버려졌다.
+    exclude_evidence: list[str] | None = None
 
     @model_validator(mode="after")
     def _fields_of_the_mode(self) -> "JobBody":
@@ -3243,8 +3246,8 @@ class JobBody(BaseModel):
             if self.scope is not None:
                 raise ValueError("scope 는 카드 대조 검토 잡(mode='reviews')의 칸이다 — 패널 잡은 tier 로 범위를 정한다")
             return self
-        panel_only = sorted(k for k in ("tier", "modifiers", "concurrency")
-                            if k in self.model_fields_set and (k != "modifiers" or self.modifiers))
+        panel_only = sorted(k for k in ("tier", "modifiers", "concurrency", "exclude_evidence")
+                            if k in self.model_fields_set and (k not in ("modifiers", "exclude_evidence") or getattr(self, k)))
         if panel_only:
             raise ValueError(f"{', '.join(panel_only)} 는 패널 잡의 칸이다 — 검토 잡(mode='reviews')의 범위는"
                              " scope{tiers, domains, agents, unit_ids} 로, 동시 수는 HWAXRISK_REVIEW_CONCURRENCY 로 정한다")
@@ -3300,7 +3303,13 @@ def create_job(target_key: str, body: JobBody,
     out = runner.create_job(store, target_key, body.tier, owner_sub=row["owner_sub"],
                             modifiers=body.modifiers, user_memo=body.user_memo,
                             concurrency=body.concurrency, consent=body.consent, requester_sub=email,
-                            consent_source=consent_source, llm=body.llm, consent_external=body.consent_external)
+                            consent_source=consent_source, llm=body.llm, consent_external=body.consent_external,
+                            exclude_evidence=body.exclude_evidence)
+    if out.get("exclude_evidence"):
+        # 사람이 브리프에서 뺀 항목(B31 · plan §8.2.3) — 잡마다 한 행이다. 통합 보고서 minutes 의 '사람 개입 요약' 이 이 행을 센다.
+        _audit(store, email, scope="job", subject_id=out["job_id"], project_id=row["project_id"], action="brief.exclude",
+               after={"target_key": target_key, "tier": body.tier, "exclude_evidence": out["exclude_evidence"]},
+               channel=AUDIT_CHANNELS.get(ident.source, "rest"))
     if out.get("llm"):
         # 반출 동의(Claude 길 X-2) — Claude 로 고른 패널 잡만 감사 한 행(누가 · 언제 · 어느 입구로 — 검토 잡과 같은 칸). GLM 패널 잡은 종전대로
         # 감사 행을 남기지 않는다.

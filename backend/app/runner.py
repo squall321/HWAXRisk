@@ -772,6 +772,7 @@ def build_delib_opts(
     loss: dict | None = None,
     profile: Any | None = None,
     diff_ref: bool = False,
+    exclude: Sequence[str] = (),
 ) -> dict:
     """패널 1건의 delib_opts(plan §6.6.4). human_note·continue_summary·non_negotiables·search_sources·
     stop_after_round·build_plan 은 절대 싣지 않는다(불변식 extra_seats == ∅ 의 전제). voc 는 반대로
@@ -782,7 +783,8 @@ def build_delib_opts(
     자리표시자로 바꾼 줄), `brief_clipped`(항목마다 상한에 잘린 줄 수). 없으면 비어 있다. 호출자가 패널에 남긴다.
     `profile` 은 브리프의 크기다(`brief.web_profile` · `brief.PROFILE_MCP`, 안 주면 바닥) — 좌석 계약표(E0c)도 그 상한에 맞춘다.
     질문과 지식카드 검색어(`knowledge_query`)는 같은 변경 요지에서 나온다(WP1 S11) — 요지의 길이는 프로파일 배수로 는다.
-    검색어가 포털 상한(600자)을 넘어 잘렸으면 `loss["knowledge_query_cut"]` 에 남는다. `diff_ref` 는 `panel_question` 의 것이다."""
+    검색어가 포털 상한(600자)을 넘어 잘렸으면 `loss["knowledge_query_cut"]` 에 남는다. `diff_ref` 는 `panel_question` 의 것이다.
+    `exclude` 는 잡이 사람에게 받은 '뺄 항목 키'(B31 — `brief.check_exclude` 를 지난 값)이고 브리프 조립이 그 항목을 싣지 않는다."""
     profile = profile or brief.PROFILE_LEGACY
     seats = panel["seats"]
     if panel.get("kind") == "issue":
@@ -795,8 +797,10 @@ def build_delib_opts(
         if not callable(build):
             raise AppError("not_implemented", "narrative.prior_evidence 가 없습니다 — 브리프를 조립할 수 없습니다.", 501)
         brief_meta: dict = {}
+        # 뺄 항목이 없으면 칸을 넘기지 않는다 — 대역 조립(시험의 prior_evidence)이 그 칸 없이도 그대로 돈다.
         evidence = list(build(store, panel["target_key"], user_memo=user_memo,
-                              seats=seats, panel_id=panel["id"], meta_out=brief_meta, profile=profile))
+                              seats=seats, panel_id=panel["id"], meta_out=brief_meta, profile=profile,
+                              **({"exclude": tuple(exclude)} if exclude else {})))
         if loss is not None and brief_meta.get("shielded"):
             loss["brief_shielded"] = list(brief_meta["shielded"])
         # E10(현장 VOC·문헌)을 서비스 PAT 로 물었으면 그 패널 브리프에 남긴다 — 사람 자격이 없어 내려간 짧은 조회다(U-3).
@@ -1052,8 +1056,13 @@ def create_job(
     consent_source: str | None = None,
     llm: str | None = None,
     consent_external: Any = None,
+    exclude_evidence: Sequence[str] | None = None,
 ) -> dict:
     """배치 잡 1건을 만든다(POST /api/targets/{key}/jobs). Tier C 는 consent 필수, 러너 자격이 없으면 422.
+
+    `exclude_evidence` 는 이 잡의 패널 브리프에서 뺄 항목 키다(B31 · plan §8.2.3 — 빼기만, 헌법 P1). `brief.check_exclude` 가 받는 값을
+    가리고(밖이면 422 exclude_evidence_invalid) 비지 않았으면 params_json 에 남는다 — 러너가 패널마다 브리프에서 빼고
+    rr_panels.evidence_excluded_json 에 적는다. 감사 한 행(brief.exclude)은 사람의 입구(라우트)가 쓴다.
 
     `requester_sub` 는 잡을 만든 사람이다(동료 editor 일 수 있다) — 자격은 요청자 → 타깃 owner 의 포털 PAT 이고(서비스 계정으로
     내려가지 않는다, U-3) 첫 적중의 email 이 `rr_jobs.credential_email` 에 남는다(plan §0.1.6).
@@ -1070,6 +1079,7 @@ def create_job(
     cfg = config.settings if settings is None else settings
     if tier not in planner.TIERS:
         raise AppError("E100", f"모르는 tier — {tier!r}. 허용 {list(planner.TIERS)}.", 422)
+    excluded = brief.check_exclude(exclude_evidence)
     claude = review_runner.check_llm_choice(llm, consent_external)
     panel_job_gate(store, target_key, tier)
     if tier == "C" and not consent:
@@ -1099,6 +1109,8 @@ def create_job(
         "credential": credential["kind"],
         "requester": requester_sub,
         **llm_fields,
+        # 뺄 항목이 없는 잡의 params 는 종전 그대로다(칸을 싣지 않는다).
+        **({"exclude_evidence": excluded} if excluded else {}),
     }
     with store.tx():
         # 방식 바꾸기(routes.post_target_flow)와 겹치지 않게 같은 트랜잭션 안에서 문을 다시 본다 — 확인과 쓰기 사이에 대상이
@@ -1117,6 +1129,7 @@ def create_job(
         "credential": credential["kind"],
         "credential_email": credential.get("email"),
         **llm_fields,
+        **({"exclude_evidence": excluded} if excluded else {}),
     }
     # 등록한 PAT 가 있는데 수명 때문에 다른 자격으로 돈다 — 만든 사람에게 그 자리에서 알린다.
     if credential_note:
@@ -1795,11 +1808,17 @@ def run_panel(
                 loss["diff_ref_withheld"] = withheld
         diff_ref = bool(target is not None and target["kind"] == "diff" and "diff_ref_withheld" not in loss)
         store.execute("UPDATE rr_panels SET model_json = ? WHERE id = ?", (canonical_json(model_json), panel["id"]))
+        # 사람이 이 잡의 브리프에서 뺀 항목(B31) — 패널마다 적는다(통합 보고서의 '사람 개입 요약' 은 rr_audit brief.exclude 로 센다).
+        # 쟁점 잡은 사람이 만든 잡이 아니라 사슬이 세운 것이라 칸이 없다(쟁점 브리프는 항목 키도 다르다).
+        excluded = [] if issue_job else list(params.get("exclude_evidence") or ())
+        if excluded:
+            store.execute("UPDATE rr_panels SET evidence_excluded_json = ? WHERE id = ?",
+                          (canonical_json(excluded), panel["id"]))
         delib_opts = build_delib_opts(
             # 메모 없는 잡은 None 이 아니라 빈 문자열로 넘긴다 — None 은 '잡이 없는 길' 이라 브리프가 그 타깃의
             # 최근 잡 메모를 찾아 싣는다(같은 타깃에 메모를 단 잡이 또 있으면 그 메모가 이 패널에 실린다).
             store, settings, panel, user_memo=params.get("user_memo") or "", narrative_mod=narrative_mod, loss=loss,
-            profile=profile, diff_ref=diff_ref,
+            profile=profile, diff_ref=diff_ref, exclude=excluded,
         )
         if llm is not None:
             # 외부 응답자 심의 — 엔진은 동의 표지가 JSON true 여야 과제를 만든다(사람의 동의는 검토 잡을 만들 때 받아 잡에 물려 왔다).

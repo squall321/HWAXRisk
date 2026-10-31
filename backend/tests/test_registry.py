@@ -1091,7 +1091,8 @@ def test_report_minutes_carry_the_panel_quality_flags(risk_store, clock):
     _panel(risk_store, "T1", "PA3", 3, quality={"flags": []})
 
     minutes = "\n".join(registry.build_report(risk_store, "T1")["blocks"]["minutes"])
-    assert minutes.split("[품질 플래그]\n")[1].split("\n") == [
+    # [품질 플래그] 뒤에는 [사람 개입 요약](B31)이 온다 — 그 앞까지가 이 절이다.
+    assert minutes.split("[품질 플래그]\n")[1].split("\n[사람 개입 요약]")[0].split("\n") == [
         "panel_no=1 low_tool_use",
         'panel_no=1 evidence_dropped ["E9","X1"]',
         'panel_no=1 user_memo_cut {"chars":1500,"kept":266}',

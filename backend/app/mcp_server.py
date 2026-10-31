@@ -277,6 +277,9 @@ _A_SCOPE = (f"검토 잡의 범위(mode=reviews 만) — {{{', '.join(review_run
             "scope_invalid 다.")
 _A_LLM = (f"판단 LLM — {' · '.join(runner.LLM_CHOICES)}(비우면 glm). claude 는 mode=reviews · panels 둘 다 받고 consent_external 이 "
           "든다(반출 경고는 도구 설명).")
+_A_EXCLUDE_EVIDENCE = (f"패널 잡(mode=panels)의 브리프에서 뺄 항목 키(선택) — {' · '.join(brief.EXCLUDABLE_ITEMS)} 가운데이고 더할 수는 "
+                       "없다. 필수 E0 · E0c · E1 · 잡 메모 M · 그 밖의 값은 422 exclude_evidence_invalid 이고 검토 잡에 주면 422 다. 사용자가 "
+                       "고른 것만 준다(잡에 남고 감사 한 행이 선다).")
 _A_CONSENT_EXTERNAL = ("Claude 반출 동의 — 반출 사실(도구 설명)을 사용자에게 보이고 동의를 받은 뒤에만 JSON true 를 준다(글자 'true' · "
                        "1 은 거절한다). 자동으로 채우지 않는다.")
 _A_JOB_ID = ("잡 id — risk_start_job 응답의 job_id · risk_get_coverage 의 job.id(패널 잡) · review.job.id(검토 잡) · risk_next_step "
@@ -694,11 +697,12 @@ async def risk_start_job(target_key: Annotated[str, Field(description=_A_TARGET_
                          mode: Annotated[str, Field(description=_A_MODE)] = "panels",
                          scope: Annotated[dict | None, Field(description=_A_SCOPE)] = None,
                          llm: Annotated[str | None, Field(description=_A_LLM)] = None,
-                         consent_external: Annotated[StrictBool | None, Field(description=_A_CONSENT_EXTERNAL)] = None) -> dict:
-    """심사 잡 시작 — 쓰기: 범위와 비용(패널 수·LLM 호출 추정)을 사용자에게 확인한 뒤 부른다(Tier C 와 호출 추정이 큰 검토는 consent=true), mode=panels(기본 — tier 필수, Tier 는 누적이다 A 도메인 대표 → B → C 전원)|reviews(카드 대조 대상의 전문가별 카드 대조 — tier·modifiers·concurrency 없이 scope={agents·domains·tiers·unit_ids} 로 범위를 주고, 전문가는 risk_next_step 의 facts.review_order 를 보고 사용자가 고른다), 심사는 앱 러너가 돌리고 결과는 웹에 그대로 보인다, 같은 대상의 살아 있는 잡(panels 는 같은 Tier)이 있으면 그것을 돌려주고, 자격이 없으면 웹 설정 화면에서 등록하라는 fix 로 답한다. llm=glm(기본 — 빼도 같다)|claude(검토 잡 · 패널 잡 — 판단 LLM 이 사용자 본인의 Claude Code 워크플로 hwax-risk-claude 다, 좌석 조회는 글 왕복으로 엔진이 실행한다): 이 잡의 지식카드·설계 변경 원문과, 사슬이 이어 도는 쟁점 패널·종합 요약의 입력(이 대상 전체의 등록부 행·쟁점·요약 — 다른 사람의 검토 결과도 든다)이 Claude(외부)로 나갑니다(패널 잡은 그 패널의 브리프 · 좌석 조회 결과) — 사용자에게 그 사실을 보이고 동의를 받은 뒤에만 consent_external=true(JSON 참 — 글자 'true' · 1 은 받지 않는다)를 더한다(동의 없이 true 를 채우지 않는다 · 없으면 consent_external_required), 이 박스의 에이전트 서버가 그 길을 열지 않았으면 external_llm_unavailable, 잡은 동의한 사람의 PAT 로만 돌고 그 사람이 Claude Code 에서 워크플로를 돌려야 나아간다(멈추면 보류 external_worker), 사슬이 잇는 쟁점·종합 잡도 같은 선택과 동의를 물려받는다(쟁점 잡은 그 사슬이 고른 쟁점만 — 다른 사람의 GLM 일 · 사람이 올린 쟁점 · 보고서 다시 내기는 GLM 잡으로 간다), 같은 Tier 의 살아 있는 패널 잡이 판단 LLM 이 다르면 그 잡을 돌려주며 differs 에 llm 을 싣는다(바꾸지 않는다 — 취소한 뒤 새로)."""
+                         consent_external: Annotated[StrictBool | None, Field(description=_A_CONSENT_EXTERNAL)] = None,
+                         exclude_evidence: Annotated[list[str] | None, Field(description=_A_EXCLUDE_EVIDENCE)] = None) -> dict:
+    """심사 잡 시작 — 쓰기: 범위와 비용(패널 수·LLM 호출 추정)을 사용자에게 확인한 뒤 부른다(Tier C 와 호출 추정이 큰 검토는 consent=true), mode=panels(기본 — tier 필수, Tier 는 누적이다 A 도메인 대표 → B → C 전원)|reviews(카드 대조 대상의 전문가별 카드 대조 — tier·modifiers·concurrency 없이 scope={agents·domains·tiers·unit_ids} 로 범위를 주고, 전문가는 risk_next_step 의 facts.review_order 를 보고 사용자가 고른다), 심사는 앱 러너가 돌리고 결과는 웹에 그대로 보인다, 같은 대상의 살아 있는 잡(panels 는 같은 Tier)이 있으면 그것을 돌려주고, 자격이 없으면 웹 설정 화면에서 등록하라는 fix 로 답한다. llm=glm(기본 — 빼도 같다)|claude(검토 잡 · 패널 잡 — 판단 LLM 이 사용자 본인의 Claude Code 워크플로 hwax-risk-claude 다, 좌석 조회는 글 왕복으로 엔진이 실행한다): 이 잡의 지식카드·설계 변경 원문과, 사슬이 이어 도는 쟁점 패널·종합 요약의 입력(이 대상 전체의 등록부 행·쟁점·요약 — 다른 사람의 검토 결과도 든다)이 Claude(외부)로 나갑니다(패널 잡은 그 패널의 브리프 · 좌석 조회 결과) — 사용자에게 그 사실을 보이고 동의를 받은 뒤에만 consent_external=true(JSON 참 — 글자 'true' · 1 은 받지 않는다)를 더한다(동의 없이 true 를 채우지 않는다 · 없으면 consent_external_required), 이 박스의 에이전트 서버가 그 길을 열지 않았으면 external_llm_unavailable, 잡은 동의한 사람의 PAT 로만 돌고 그 사람이 Claude Code 에서 워크플로를 돌려야 나아간다(멈추면 보류 external_worker), 사슬이 잇는 쟁점·종합 잡도 같은 선택과 동의를 물려받는다(쟁점 잡은 그 사슬이 고른 쟁점만 — 다른 사람의 GLM 일 · 사람이 올린 쟁점 · 보고서 다시 내기는 GLM 잡으로 간다), 같은 Tier 의 살아 있는 패널 잡이 판단 LLM 이 다르면 그 잡을 돌려주며 differs 에 llm 을 싣는다(바꾸지 않는다 — 취소한 뒤 새로). exclude_evidence 는 사용자가 패널 브리프에서 뺀 항목 키(E2~E9)만 준다 — 그 잡의 패널 브리프에서 빠지고 감사 한 행이 서며, 살아 있는 잡과 다르면 differs 에 exclude_evidence 를 싣는다."""
     return await _entry(entry.start_job, target_key=target_key, tier=tier, consent=consent, modifiers=modifiers,
                         user_memo=user_memo, concurrency=concurrency, mode=mode, scope=scope, llm=llm,
-                        consent_external=consent_external)
+                        consent_external=consent_external, exclude_evidence=exclude_evidence)
 
 
 @mcp.tool()

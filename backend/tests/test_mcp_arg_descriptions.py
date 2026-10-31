@@ -133,6 +133,7 @@ VOCAB = [
     ("risk_start_job", "mode", _literal(routes.JobBody, "mode")),
     ("risk_start_job", "scope", review_runner.SCOPE_KEYS),
     ("risk_start_job", "llm", runner.LLM_CHOICES),
+    ("risk_start_job", "exclude_evidence", brief.EXCLUDABLE_ITEMS),
     ("risk_job_action", "action", (*routes.JOB_ACTIONS, *entry._DISPOSE_ACTIONS)),
     ("risk_job_action", "filter",
      tuple(k for k in review_cells.SELECTOR_FILTER_KEYS if k != "job_id") + review_cells.CELL_STATES),
