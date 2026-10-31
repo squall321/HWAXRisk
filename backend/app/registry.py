@@ -1117,6 +1117,7 @@ def set_status(
     쓰는 것은 status 5열(`status`·`status_source='human'`·`status_decided_by`·`status_decided_at`·
     `status_basis_json`)과 append-only `rr_registry_status_log` 1행이다. verified·dismissed·open 은
     `evidence_ref` 가, mitigated 는 `note` 가 없으면 422 다 — 근거 없는 사람 판정을 원장에 남기지 않는다.
+    `changes` 는 바꾼 행마다 {target_key, from_status, status_log_seq} 다 — 부르는 쪽(REST)이 그 행마다 감사 한 행을 쓴다(사용자 결정 10-31).
     """
     if status not in HUMAN_STATUSES:
         raise AppError("E100", f"등록부 상태 어휘 밖입니다: {status}", 422)
@@ -1144,6 +1145,7 @@ def set_status(
         raise AppError("E404", f"등록부 클러스터를 찾지 못했습니다: {cluster_key}", 404)
     updated = 0
     seqs: dict[str, int] = {}
+    changes: list[dict] = []
     decided_by = actor or owner_sub
     with store.tx():
         for row in rows:
@@ -1180,11 +1182,13 @@ def set_status(
                  common.canonical_json(basis)),
             )
             seqs[str(row["cluster_key"])] = seq
+            changes.append({"target_key": str(row["target_key"]), "from_status": _clean_str(row["status"]),
+                            "status_log_seq": seq})
             updated += 1
     return {"cluster_key": cluster_key, "status": status, "updated": updated,
             "status_source": "human", "decided_by": decided_by, "decided_at": now,
             "status_log_seq": max(seqs.values()) if seqs else 0,
-            "label_needed": status in ("verified", "dismissed")}
+            "label_needed": status in ("verified", "dismissed"), "changes": changes}
 
 
 # ---------------------------------------------------------------- §4.8 무효화(stale · superseded)
@@ -1738,7 +1742,8 @@ def _minutes_lines(store: RiskStore, target_key: str, panels: list[dict], covera
     out.extend(flags or ["(없음)"])
 
     # 사람 개입 요약(plan §4.7.3 · P4 (13)) — 그 대상의 rr_audit 를 action 별로 센 수(조회 GET /targets/{key}/audit 와 같은 조각, B31).
-    # 게이트 ack · 좌석 넘김 · 브리프 제외 · 사람 finding · 회수 승인 … 이 각 한 줄이다. 감사 행을 남기지 않는 사람 조작은 여기에도 없다.
+    # 게이트 ack · 좌석 넘김 · 브리프 제외 · 사람 finding · 회수 승인 · 잡 제어(job.pause|resume|cancel) · status 변경(registry.status) ·
+    # verdict 확정(verdict.final) … 이 각 한 줄이다(뒤의 셋은 사용자 결정 10-31). 감사 행을 남기지 않는 조작은 여기에도 없다.
     out.append("[사람 개입 요약]")
     out.extend([f"{action}={n}" for action, n in target_audit_counts(store, target_key).items()] or ["(없음)"])
     return out
