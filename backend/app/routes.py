@@ -3769,11 +3769,22 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
         job = dict(job)
         # 도는 패널의 마지막 신호(러너가 1분 간격으로 적는다) — 벽시계가 몇 시간이라, 이것이 없으면 진행판에서
         # 도는 패널과 멈춘 패널이 똑같이 'running' 이다. {panel_id, started_at, last_frame_at, last_event_at, last_step}.
-        job["signal"] = _live_signal(store, job["state"], _loads(job.pop("progress_json"), {}))
-        # 도는 패널마다 한 줄(`signal` 은 호환으로 그대로). 러너는 대상마다 패널을 하나씩만 돌리고(claim_next_job 의 도는 패널 검사 ·
-        # planner.check_invariants (2) — 잡의 concurrency 칸은 러너가 읽지 않는다) 잡 행에는 마지막에 적힌 신호 하나뿐이라, 지금은 많아야
-        # 한 줄이고 `signal` 과 같다. 한 잡이 패널을 함께 돌리게 되면 러너가 신호를 패널마다 적어야 이 목록이 는다.
-        job["signals"] = [job["signal"]] if job["signal"] else []
+        progress = _loads(job.pop("progress_json"), {})
+        panels = progress.pop(runner.PROGRESS_PANELS_KEY, None) if isinstance(progress, dict) else None
+        job["signal"] = _live_signal(store, job["state"], progress)
+        # 도는 패널마다 한 줄(`signal` 은 호환으로 그대로 — 마지막에 적힌 신호). 패널을 함께 돌리는 잡(잡의 concurrency 2 — 사용자 결정
+        # 10-31)은 러너가 패널마다 칸을 적는다(runner._progress_writer per_panel · HWAXRisk context-notes CC-9) — 그 칸의 도는 패널이 차례
+        # (panel_no)대로 서고, 맨 위 신호의 패널이 닫혔으면 `signal` 은 가장 늦게 시작한 도는 패널이다. 동시 1 잡은 칸이 없어 종전대로
+        # 많아야 한 줄이고 `signal` 과 같다.
+        if isinstance(panels, dict):
+            live = {s["panel_id"]: s for s in (_live_signal(store, job["state"], v) for v in panels.values()) if s}
+            if job["signal"] is not None:
+                live.setdefault(job["signal"]["panel_id"], job["signal"])
+            job["signals"] = sorted(live.values(), key=lambda s: (s.get("panel_no") or 0, str(s["panel_id"])))
+            if job["signal"] is None and job["signals"]:
+                job["signal"] = max(job["signals"], key=lambda s: (s.get("started_at") or 0, s.get("panel_no") or 0))
+        else:
+            job["signals"] = [job["signal"]] if job["signal"] else []
         # 판단 LLM(Claude 길 X-2 · 포털 docs/claude-delib-parity C4) — Claude 패널 잡이면 llm · consent_external(· llm_mismatch) 칸을
         # 더한다(보류 external_worker 의 까닭이 보이게). GLM 잡의 칸은 종전 그대로다.
         job.update(job_llm_view(_loads(job.pop("params_json"), {})))

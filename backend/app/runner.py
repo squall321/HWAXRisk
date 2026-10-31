@@ -9,7 +9,7 @@ import re
 import sqlite3
 import threading
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import Any, Protocol
 
 import httpx
@@ -47,10 +47,11 @@ QUALITY_ADVERSARY_OVERREJECT = 0.6
 STREAM_LOST_CODES: tuple[str, ...] = ("panel_timeout", "engine_silent", "engine_stream_cut", "cancelled")
 # 도는 패널이 잡의 취소·정지를 듣는 간격(초) — 프레임마다 잡 행을 읽으면 15초 ping 이 DB 를 두드린다. 한도가 아니라 주기다.
 STOP_POLL_INTERVAL_S = 5
-# 도는 패널을 닫게 하는 잡 상태와 패널에 적는 말. 패널이 도는 동안 이 상태로 가는 길은 사람의 조작뿐이다
-# (자동 정지는 패널이 닫힌 뒤에 일어난다).
+# 도는 패널을 닫게 하는 잡 상태와 패널에 적는 말. 동시 1 잡에서 패널이 도는 동안 이 상태로 가는 길은 사람의 조작뿐이다
+# (자동 정지는 패널이 닫힌 뒤에 일어난다). 동시 2 잡은 한 패널의 자동 정지 · 실패가 형제 패널을 닫는다 — 그 글은 `_stop_why` 가
+# 까닭(state_by · 보류 코드 · 실패 코드)으로 바꿔 적는다(CC-6).
 STOP_JOB_STATES: dict[str, str] = {"cancelling": "사용자가 잡을 취소했다", "cancelled": "사용자가 잡을 취소했다",
-                                   "paused": "사용자가 잡을 일시정지했다"}
+                                   "paused": "사용자가 잡을 일시정지했다", "failed": "잡이 실패로 끝났다"}
 # 앱이 재기동해 닫은 패널의 error 문구. 스트림을 놓은 것과 같은 부류다 — 엔진·좌석의 실패가 아니고, 앱만 다시 떴으면
 # 엔진 쪽 심의는 분리 태스크로 계속 돈다.
 RESTART_CODE = "restart"
@@ -487,6 +488,11 @@ def llm_params(llm: str | None, consent: Mapping[str, Any] | None) -> dict:
         return {}
     return {"llm": LLM_CLAUDE, "consent_external": dict(consent or {})}
 
+
+# claude 잡은 동시 1 이다(CC-5) — 동시 2 를 청했으면 잡 만들기 답의 concurrency_note 가 이 글이다.
+CLAUDE_CONCURRENCY_NOTE = ("판단 LLM 이 Claude(외부 응답자)인 잡은 패널을 하나씩 돈다(동시 1) — 패널의 판단 호출은 전부 동의한 사람의 Claude"
+                           " Code 워크플로 하나가 받는 사람 속도의 줄이라 둘을 함께 돌려도 빨라지지 않고 둘 다 늦어진다(엔진도 MCP 외부 응답자"
+                           " 심의를 주인마다 한 건씩 돌린다)")
 
 # claude 잡인데 동의 기록에 사람(by)이 없다 — 누구의 PAT 로도 돌지 않는다(요청자 · 대상 소유자로 대신하지 않는다, XR-15).
 NO_CONSENTER_NOTE = ("동의 기록(consent_external.by)에 사람이 없는 Claude 잡이다 — 요청자 · 대상 소유자 · 서비스 계정의 PAT 로 대신 돌지"
@@ -1037,6 +1043,20 @@ def _params(row: Mapping[str, Any]) -> dict:
     return value if isinstance(value, dict) else {}
 
 
+def job_slots(job: Mapping[str, Any], settings: Any | None = None) -> int:
+    """잡이 함께 돌릴 수 있는 패널 수(CC-1) — 잡의 concurrency(만들 때 박스의 전역 자리 수로 묶었다)를 지금의 전역 자리 수
+    (`risk_concurrency` — HWAXRISK_CONCURRENCY)로 다시 묶는다(만든 뒤에 그 손잡이를 낮췄을 수 있다). 전역 자리는 늘지 않는다 — 잡 하나가
+    그 자리를 둘까지 쓸 뿐이다. 판단 LLM 이 claude 인 잡(외부 응답자)은 1 이다(CC-5). 칸이 없는 잡(다시 저장의 잡 · 옛 행)은 1 — 종전과 같다."""
+    if job_llm(_job_params(job)) is not None:
+        return 1
+    cfg = config.settings if settings is None else settings
+    try:
+        want = int(job.get("concurrency") or 1)
+    except (TypeError, ValueError):
+        want = 1
+    return max(1, min(want, int(getattr(cfg, "risk_concurrency", 1) or 1)))
+
+
 def _local_midnight(ts: float | None = None) -> int:
     """서버 로컬 시각 기준 오늘 00:00 의 epoch 초(일일 상한·자동 재개 판정용).
 
@@ -1105,6 +1125,8 @@ def create_job(
     plan = planner.tier_plan(store, target_key, settings=cfg)
     row = next(t for t in plan["tiers"] if t["tier"] == tier)
     job_id = new_uuid()
+    # 동시 실행(CC-1) — 박스의 전역 자리 수로 묶는다(종전). claude 잡은 1 이다(CC-5) — 줄인 까닭은 답의 concurrency_note 가 말한다.
+    slots = 1 if claude else max(1, min(int(concurrency), int(cfg.risk_concurrency)))
     params = {
         "tier": tier,
         "modifiers": list(planner.resolve_modifiers(modifiers)),
@@ -1128,7 +1150,7 @@ def create_job(
         store.execute(
             "INSERT INTO rr_jobs(id, target_key, owner_sub, tier, state, concurrency, params_json, credential_email,"
             " panels_done, panels_total, created_at, updated_at) VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, 0, ?, ?, ?)",
-            (job_id, target_key, owner_sub, tier, max(1, min(int(concurrency), int(cfg.risk_concurrency))),
+            (job_id, target_key, owner_sub, tier, slots,
              canonical_json(params), credential.get("email"), row["panels"], now, now),
         )
     out = {
@@ -1143,6 +1165,11 @@ def create_job(
     # 등록한 PAT 가 있는데 수명 때문에 다른 자격으로 돈다 — 만든 사람에게 그 자리에서 알린다.
     if credential_note:
         out["credential_note"] = credential_note
+    # 청한 동시 실행보다 적게 돈다 — 만든 사람에게 까닭을 그 자리에서 알린다(종전에는 말없이 죄었다). 청한 만큼 돌면 칸이 없다.
+    if slots < int(concurrency):
+        out["concurrency_note"] = (CLAUDE_CONCURRENCY_NOTE if claude else
+                                   f"동시 {int(concurrency)} 를 청했지만 박스의 전역 자리 수(HWAXRISK_CONCURRENCY"
+                                   f" {int(cfg.risk_concurrency)})로 묶여 동시 {slots} 로 돈다")
     # 메모가 M 상한(또는 위 2,000자)을 넘으면 좌석은 앞부분만 받는다 — 패널이 돌기 전에, 쓴 사람에게 알린다.
     cut = brief.memo_cut({"result": brief.memo_result(target_key, user_memo)}) if user_memo else None
     if cut:
@@ -1225,8 +1252,9 @@ def _job_row(store: Any, job_id: str) -> Any:
 
 
 def pause_job(store: Any, job_id: str, *, reason: str = "user", by: str | None = None) -> dict:
-    """일시정지(reason ∈ diminishing|daily_cap|user). 도는 패널이 있으면 그 스트림을 닫는다(`_stop_reader`) —
-    패널 경계까지 기다리지 않는다. 닫힌 패널의 좌석은 차감 없이 pending 으로 돌아가고 재개하면 다시 편성된다.
+    """일시정지(reason ∈ diminishing|daily_cap|user). 도는 패널이 있으면(패널을 함께 돌리는 잡은 그 잡의 도는 패널 전부 — CC-6) 그
+    스트림을 닫는다(`_stop_reader`) — 패널 경계까지 기다리지 않는다. 닫힌 패널의 좌석은 차감 없이 pending 으로 돌아가고 재개하면 다시
+    편성된다.
 
     검토 잡은 사람의 정지가 보류 열을 hold_code='user'·hold_until=NULL 로 덮고, 코드가 멈춘(보류 코드가 사람이 아닌) paused
     에도 듣는다 — 사람이 멈춘 잡은 자동 재개가 다시 줄에 세우지 않는다(재설계 M2 S6, P-10)."""
@@ -1258,7 +1286,8 @@ def _changed(on_change: Callable[[dict], None] | None, before: Mapping[str, Any]
 
 def cancel_job(store: Any, job_id: str, *, by: str | None = None,
                on_change: Callable[[dict], None] | None = None) -> dict:
-    """취소. 도는 잡은 cancelling 이 되고, 도는 패널이 그것을 듣고 스트림을 닫은 뒤 다음 편성에서 cancelled 가 된다.
+    """취소. 도는 잡은 cancelling 이 되고, 도는 패널이 그것을 듣고 스트림을 닫은 뒤 다음 편성에서 cancelled 가 된다(러너는 그 잡의
+    패널이 여럿이면 다 닫힌 뒤에 — CC-6).
 
     종전에는 패널이 끝까지 갔다 — 벽시계가 12시간이라 취소한 잡의 패널이 러너 자리와 그 타깃의 직렬 순서를 최대
     12시간 붙들었다. 닫는 것은 앱의 구독이다. 엔진 쪽 심의는 분리 태스크라 끝까지 돌 수 있다.
@@ -1340,17 +1369,24 @@ def engine_drain(engine: Any) -> bool:
     return bool(isinstance(state, Mapping) and state.get("on"))
 
 
-def claim_next_job(store: Any, settings: Any | None = None, *, engine: Any | None = None) -> dict | None:
+def claim_next_job(store: Any, settings: Any | None = None, *, engine: Any | None = None,
+                   running: Callable[[str], Collection[str]] | None = None) -> dict | None:
     """다음에 패널을 돌릴 잡 1건을 집는다. 타깃당 직렬·일일 상한·자격·취소·비우기를 여기서 판정한다.
 
     패널 잡과 쟁점 잡만 본다(`rr_jobs.mode` 가 NULL·panels·issues — 한 표에 카드 대조 검토 잡이 같이 산다, 재설계 M2 S6). 검토 잡은
     그 러너가 집고 멈추고 취소를 닫는다. 그래도 다른 잡이 집히면 패널 러너로 돌리지 않고 예외로 드러낸다. 쟁점 잡은 하루 상한으로
     멈추지 않는다(M3 #27). `engine` 을 주면 에이전트 서버가 비우는 중(`drain.on` — 범위와 상관없이)인지 보고, 그동안 패널을 집지
     않는다(#50 — 잡은 줄에서 기다린다).
+
+    `running(job_id)` 은 러너가 그 잡으로 지금 돌리는 패널 id 다(닫는 중인 워커 몫까지 — RiskRunner 가 준다, CC-2). 주면 잡마다 제 자리 수
+    (`job_slots`)까지 패널을 함께 돌린다 — 둘째부터의 자리는 첫 패널을 기다리는 잡이 하나도 없을 때만 주고(CC-3), 그 자리는 하루 상한 ·
+    수확 체감 · 엔진 자리 없음 뒤의 쉼에 막히기만 한다(잡을 멈추지 않는다 — 도는 형제를 닫지 않게, CC-7). 잡의 앞 패널이 아직 닫히는
+    중이면 취소를 마감하지도(cancelled) 재개한 잡을 다시 집지도 않는다(CC-6). 안 주면(시험 · 단독 호출) 종전대로 대상에 도는 패널이
+    있으면 건너뛴다.
     """
     cfg = config.settings if settings is None else settings
     midnight = _local_midnight()
-    draining: bool | None = None
+    draining: list[bool] = []                  # 비우기 물음은 집기 한 번에 한 번만(첫 물음의 답을 담는다)
     for row in store.query(
         "SELECT id, target_key, owner_sub, tier, state, pause_reason, params_json, panels_done, updated_at"
         f" FROM rr_jobs WHERE state = 'paused' AND pause_reason = 'daily_cap' AND {PANEL_JOBS_SQL}"
@@ -1359,26 +1395,8 @@ def claim_next_job(store: Any, settings: Any | None = None, *, engine: Any | Non
         if int(row["updated_at"] or 0) < midnight:
             _set_job(store, row["id"], "queued")
 
-    for row in store.query(
-        "SELECT id, target_key, owner_sub, tier, state, params_json, panels_done, panels_total, error,"
-        " COALESCE(mode, 'panels') AS mode"
-        f" FROM rr_jobs WHERE state IN ('queued', 'running', 'cancelling') AND {RUNNER_JOBS_SQL}"
-        " ORDER BY created_at ASC, id ASC"
-    ):
-        job = dict(row)
-        last_error = job.pop("error")
-        if job["mode"] not in PANEL_RUNNER_MODES:
-            raise RuntimeError(f"패널 러너가 패널 잡이 아닌 잡({job['id']})을 집었다 — claim_next_job 의 mode 거름을 본다.")
-        if job["state"] == "cancelling":
-            _set_job(store, job["id"], "cancelled")
-            if job["mode"] == "issues":
-                _untry_after_cancel(store, job["target_key"], job["id"])
-            continue
-        busy = store.query_one(
-            "SELECT id FROM rr_panels WHERE target_key = ? AND status = 'running' LIMIT 1", (job["target_key"],)
-        )
-        if busy is not None:
-            continue
+    def take(job: dict, row: Any, last_error: str | None, *, first: bool) -> dict | None:
+        """대상이 빈(첫 자리) 잡 · 자리가 남은(둘째 자리) 잡을 마저 판정해 집는다 — 못 집으면 None."""
         waiting = awaiting_repersist(store, job["target_key"])
         if waiting:
             # 다시 저장을 기다리는 패널의 좌석은 pending 으로 돌아와 있다 — 이 잡이 편성하면 그 좌석을 가져가 저장해 둔
@@ -1386,19 +1404,26 @@ def claim_next_job(store: Any, settings: Any | None = None, *, engine: Any | Non
             note = repersist_pending_note(waiting)
             if last_error != note:
                 store.execute("UPDATE rr_jobs SET error = ?, updated_at = ? WHERE id = ?", (note, now_epoch(), job["id"]))
-            continue
+            return None
         if job["mode"] == "panels" and _panels_today(store, job["target_key"]) >= int(cfg.risk_daily_panel_cap):
-            _set_job(store, job["id"], "paused", reason="daily_cap")
-            continue
+            if first:
+                _set_job(store, job["id"], "paused", reason="daily_cap")
+            return None                         # 둘째 자리는 멈추지 않는다 — 도는 형제가 다 닫힌 뒤 첫 자리가 멈춘다(CC-7)
+        if not first and (_busy_backoff(store, job["target_key"], cfg)
+                          or (job["mode"] == "panels" and (_diminishing(store, job["target_key"])
+                                                           or not planner.has_pending(store, job["target_key"], job["tier"])))):
+            # 둘째 자리만 막는다 — 엔진 자리 없음 뒤의 쉼 · 수확 체감(CC-7 · CC-8), 그리고 편성할 좌석이 없는 꼬리(형제가 끝나면 첫 자리의
+            # 집기가 잡을 끝낸다 — 그동안 틱마다 집어 잡 행을 다시 쓰지 않는다, CC-4)
+            return None
         if engine is not None:
-            if draining is None:
-                draining = engine_drain(engine)
-            if draining:
+            if not draining:
+                draining.append(engine_drain(engine))
+            if draining[0]:
                 note = (f"{DRAIN_CODE}: 에이전트 서버가 비우는 중이다(update-all) — 새 패널을 집지 않는다."
                         " 비우기가 끝나면 이어 돈다")
                 if last_error != note:
                     store.execute("UPDATE rr_jobs SET error = ?, updated_at = ? WHERE id = ?", (note, now_epoch(), job["id"]))
-                continue
+                return None
         credential, credential_note = resolve_job_credential(
             store, cfg, job["owner_sub"], _params(row).get("requester"), _params(row))
         if credential is None:
@@ -1407,7 +1432,7 @@ def claim_next_job(store: Any, settings: Any | None = None, *, engine: Any | Non
             note = "pat_unavailable" + (f": {credential_note}" if credential_note else "")
             if last_error != note:
                 store.execute("UPDATE rr_jobs SET error = ?, updated_at = ? WHERE id = ?", (note, now_epoch(), job["id"]))
-            continue
+            return None
         if job["state"] != "running":
             _set_job(store, job["id"], "running")
             job["state"] = "running"
@@ -1419,7 +1444,57 @@ def claim_next_job(store: Any, settings: Any | None = None, *, engine: Any | Non
         store.execute("UPDATE rr_jobs SET credential_email = ?, error = ? WHERE id = ?",
                       (credential.get("email"), credential_note, job["id"]))
         return job
+
+    second: list[tuple[dict, Any, str | None]] = []
+    for row in store.query(
+        "SELECT id, target_key, owner_sub, tier, state, params_json, panels_done, panels_total, error, concurrency,"
+        " COALESCE(mode, 'panels') AS mode"
+        f" FROM rr_jobs WHERE state IN ('queued', 'running', 'cancelling') AND {RUNNER_JOBS_SQL}"
+        " ORDER BY created_at ASC, id ASC"
+    ):
+        job = dict(row)
+        last_error = job.pop("error")
+        if job["mode"] not in PANEL_RUNNER_MODES:
+            raise RuntimeError(f"패널 러너가 패널 잡이 아닌 잡({job['id']})을 집었다 — claim_next_job 의 mode 거름을 본다.")
+        mine = set(running(job["id"])) if running is not None else set()
+        if job["state"] == "cancelling":
+            if mine:
+                continue                        # 그 잡의 패널이 아직 닫히는 중이다 — 다 닫힌 뒤에 cancelled(CC-6)
+            _set_job(store, job["id"], "cancelled")
+            if job["mode"] == "issues":
+                _untry_after_cancel(store, job["target_key"], job["id"])
+            continue
+        if mine and job["state"] != "running":
+            continue                            # 멈췄다 재개한 잡의 앞 패널이 아직 닫히는 중이다 — 다 닫힌 뒤에 다시 집는다(CC-6)
+        busy = {r["id"] for r in store.query(
+            "SELECT id FROM rr_panels WHERE target_key = ? AND status = 'running'", (job["target_key"],))}
+        if busy - mine:
+            continue                            # 이 대상에 다른 잡(· MCP 길)의 패널이 돈다 — 대상 안에서 잡끼리는 직렬이다(종전)
+        if mine:
+            if len(mine) < job_slots(job, cfg):
+                second.append((job, row, last_error))
+            continue
+        claimed = take(job, row, last_error, first=True)
+        if claimed is not None:
+            return claimed
+    # 둘째 자리 — 첫 패널을 기다리는 잡이 하나도 없을 때만(먼저 선 잡부터). 도는 패널은 빼앗지 않는다(CC-3).
+    for job, row, last_error in second:
+        claimed = take(job, row, last_error, first=False)
+        if claimed is not None:
+            return claimed
     return None
+
+
+def _busy_backoff(store: Any, target_key: str, settings: Any | None = None) -> bool:
+    """이 대상의 가장 늦게 닫힌 error 패널이 엔진 자리 없음(engine_busy — 예산을 다 기다렸다)이고 그 예산 안인가 — 그 동안은 둘째 자리를
+    잡지 않는다(CC-8). 형제가 도는 동안 둘째 패널이 예산을 다 쓰면 잡을 멈추지 않고 그 패널만 닫으므로(run_panel), 이 쉼이 없으면 다음
+    틱이 곧바로 새 패널을 편성해 또 한 시간 429 를 기다린다(패널 행만 쌓인다)."""
+    row = store.query_one(
+        "SELECT error, ended_at FROM rr_panels WHERE target_key = ? AND status = 'error' AND ended_at IS NOT NULL"
+        " ORDER BY ended_at DESC, panel_no DESC LIMIT 1", (target_key,))
+    if row is None or _uncharged_code(row["error"]) != "engine_busy":
+        return False
+    return now_epoch() - int(row["ended_at"]) < config.engine_busy_max_wait_s(settings)
 
 
 # ---------------------------------------------------------------- 재기동 복구(plan §6.7.2 끝 문단)
@@ -1696,6 +1771,8 @@ def _finish_job(store: Any, job: Mapping[str, Any], settings: Any) -> dict:
                 store, job["target_key"], "C", owner_sub=job["owner_sub"],
                 modifiers=params.get("modifiers"),
                 user_memo=params.get("user_memo"),
+                # 동시 실행도 물려받는다(CC-11) — 사람이 B 잡에 고른 실행 손잡이다(동시 1 잡의 후속은 종전대로 1).
+                concurrency=int(job.get("concurrency") or 1),
                 consent=True, settings=settings, consent_source="close_level",
                 requester_sub=params.get("requester"),
                 exclude_evidence=params.get("exclude_evidence"), exclude_evidence_from=job["id"],
@@ -1749,8 +1826,11 @@ def _error_streak(store: Any, target_key: str) -> int:
     않고 건너뛴다 — 그 패널 때문에 진짜 실패 두 번이 세 번으로 세져 잡이 죽으면 안 된다.
     """
     streak = 0
+    # 도는 패널은 건너뛴다(CC-10) — 동시 2 잡은 실패한 패널 사이에 형제가 돌고 있어, 그것을 '실패가 아님' 으로 읽으면 연속 실패가 끝내
+    # 셋에 닿지 않는다(실패마다 좌석만 차감돼 skipped 로 굳는다). 동시 1 잡에서는 이 순간 대상에 도는 러너 패널이 없다(종전 그대로).
     for row in store.query(
-        "SELECT status, error FROM rr_panels WHERE target_key = ? ORDER BY panel_no DESC", (target_key,)
+        "SELECT status, error FROM rr_panels WHERE target_key = ? AND status <> 'running' ORDER BY panel_no DESC",
+        (target_key,)
     ):
         if row["status"] != "error":
             break
@@ -1776,17 +1856,14 @@ def missing_interfaces(narrative_mod: Any | None = None, registry_mod: Any | Non
     return out
 
 
-def run_panel(
-    store: Any,
-    settings: Any,
-    engine: PanelEngine,
-    job: Mapping[str, Any],
-    *,
-    narrative_mod: Any | None = None,
-    registry_mod: Any | None = None,
-    stop: threading.Event | None = None,
-) -> dict:
-    """패널 1건을 편성·실행·회수한다(plan §6.7.2). 반환 {panel_id|None, status, ...}."""
+def plan_job_panel(store: Any, settings: Any, job: Mapping[str, Any], *, narrative_mod: Any | None = None,
+                   registry_mod: Any | None = None, siblings: bool = False) -> tuple[dict | None, dict | None]:
+    """잡의 다음 패널 1건을 편성하고 시작한다(좌석 · 쟁점 running, plan §6.7.2 1단계 앞) — (패널, None) 이거나 돌 패널이 없으면 (None, 답).
+
+    러너는 이것을 틱 스레드에서 부른다 — 편성이 한 줄로 서야 한 잡의 두 자리가 같은 좌석을 두고 겨루지 않고(선점 rowcount 가 어긋나면
+    편성기가 None 을 내 잡이 끝난 것으로 읽힌다), 집기가 센 도는 패널 수가 곧 원장의 것이다(CC-4). `siblings` 는 그 잡의 다른 패널이 아직
+    돌거나 닫히는 중이라는 뜻이다 — 그때는 남은 좌석이 없어도 잡을 끝내지 않는다(그 패널이 실패하면 좌석이 돌아온다 — 형제가 다 닫힌 뒤의
+    집기가 마저 편성하거나 끝낸다, CC-4)."""
     params = job.get("params") or {}
     missing = missing_interfaces(narrative_mod, registry_mod)
     if missing:
@@ -1795,7 +1872,7 @@ def run_panel(
         _set_job(store, job["id"], "failed", error="missing_interface: " + ",".join(missing))
         if job.get("mode") == "issues":
             _issue_job_failed(store, job, "job_failed")
-        return {"panel_id": None, "status": "missing_interface", "missing": missing}
+        return None, {"panel_id": None, "status": "missing_interface", "missing": missing}
 
     issue_job = job.get("mode") == "issues"
     # 판단 LLM(Claude 길 X-2) — claude 잡(사슬이 물려준 쟁점 잡 · Claude 로 고른 패널 잡)이면 패널이 외부 응답자로 돈다(좌석 자유 조회는
@@ -1807,7 +1884,7 @@ def run_panel(
         if row is not None and row["state"] == "running":
             _set_job(store, job["id"], "paused", by=f"code:{EXTERNAL_CONFIG_HOLD}",
                      error=f"{EXTERNAL_CONFIG_HOLD}: {NO_CONSENTER_NOTE}", hold={"code": EXTERNAL_CONFIG_HOLD, "until": None})
-        return {"panel_id": None, "status": "paused", "error": EXTERNAL_CONFIG_HOLD}
+        return None, {"panel_id": None, "status": "paused", "error": EXTERNAL_CONFIG_HOLD}
     if issue_job:
         # 쟁점 잡(M3 S3-7) — 대기 쟁점 하나의 패널. 좌석 원장을 쓰지 않는다(편성 전후 rr_coverage 그대로).
         from app import issues  # noqa: PLC0415 — issues 는 이 모듈을 쓴다.
@@ -1818,12 +1895,50 @@ def run_panel(
             store, job["target_key"], job["tier"], modifiers=params.get("modifiers"), settings=settings
         )
     if panel is None:
-        return {"panel_id": None, "status": "no_panel", **_finish_job(store, job, settings)}
+        if siblings:
+            # 남은 좌석이 없어도 형제 패널이 돈다 — 잡을 끝내지 않는다(그 패널의 좌석이 실패로 돌아올 수 있다).
+            return None, {"panel_id": None, "status": "no_panel", "job_state": "running", "waiting": "siblings"}
+        return None, {"panel_id": None, "status": "no_panel", **_finish_job(store, job, settings)}
 
     if issue_job:
         issues.start_issue_panel(store, panel["id"])
     else:
         planner.start_panel_seats(store, panel["id"])
+    return panel, None
+
+
+def run_panel(
+    store: Any,
+    settings: Any,
+    engine: PanelEngine,
+    job: Mapping[str, Any],
+    *,
+    narrative_mod: Any | None = None,
+    registry_mod: Any | None = None,
+    stop: threading.Event | None = None,
+    panel: Mapping[str, Any] | None = None,
+) -> dict:
+    """패널 1건을 편성·실행·회수한다(plan §6.7.2). 반환 {panel_id|None, status, ...}.
+
+    `panel` 을 주면 편성하지 않고 그 패널(러너가 틱에서 `plan_job_panel` 로 편성하고 시작한 것)을 돈다. 패널이 닫히면 동시 2 잡의 그
+    패널 신호 칸을 지운다(CC-9 — 동시 1 잡은 종전대로 아무것도 지우지 않는다)."""
+    if panel is None:
+        panel, done = plan_job_panel(store, settings, job, narrative_mod=narrative_mod, registry_mod=registry_mod)
+        if panel is None:
+            return done
+    try:
+        return _run_planned_panel(store, settings, engine, job, panel, narrative_mod=narrative_mod,
+                                  registry_mod=registry_mod, stop=stop)
+    finally:
+        _drop_panel_signal(store, job, panel, settings)
+
+
+def _run_planned_panel(store: Any, settings: Any, engine: PanelEngine, job: Mapping[str, Any], panel: Mapping[str, Any],
+                       *, narrative_mod: Any | None, registry_mod: Any | None, stop: threading.Event | None) -> dict:
+    """편성 · 시작된 패널 하나를 돈다 — 브리프 · 엔진 호출 · 회수(plan §6.7.2 1~12단계)."""
+    params = job.get("params") or {}
+    issue_job = job.get("mode") == "issues"
+    llm = job_llm(params)
     try:
         model_json = snapshot_model(engine, llm=llm)
         # 브리프 크기는 엔진이 이 패널을 시작할 때 알려 준 근거 예산에서 정한다(WP1 S9) — 패널마다 다시 읽으므로 엔진 창이
@@ -1882,7 +1997,7 @@ def run_panel(
     optional: dict = {}
     run_params = _run_parameters(engine)
     if "on_progress" in run_params:
-        optional["on_progress"] = _progress_writer(store, job, panel)
+        optional["on_progress"] = _progress_writer(store, job, panel, per_panel=job_slots(job, settings) > 1)
         optional["on_progress"]({})                 # 첫 줄이 오기 전부터 '시작했고 아직 신호가 없다' 가 보인다
     # 포털 429(동시 실행 자리 없음)는 간격을 두고 다시 묻되 총 예산까지만 기다린다. 종전에는 30초 × 10회(5분)였고
     # 다 쓰면 엔진 실패로 닫아 좌석을 차감했다 — 심의가 SSE 자리를 몇 시간씩 쥐는 지금은 5분 넘게 자리가 안 나는
@@ -1916,10 +2031,13 @@ def run_panel(
                     error=f"cancelled: {why} — 엔진 자리를 기다리던 패널을 닫았다(심의는 시작되지 않았다)")
             left = busy_until - time.monotonic()
             if left <= 0:
+                # 같은 잡의 다른 패널이 돌면 잡을 멈추지 않는다 — 멈추면 자리를 얻어 잘 도는 그 패널까지 닫힌다(잡이 running 을 떠나면
+                # 도는 패널이 다 닫힌다). 이 패널만 닫고 그 대상의 둘째 자리는 예산 동안 쉰다(_busy_backoff, CC-8). 형제가 없으면 종전대로 멈춘다.
+                sibling = _sibling_running(store, job, panel, settings)
                 return _close_panel_unstarted(
-                    store, panel, job, "engine_busy", conv_id=conv_id, pause=True,
+                    store, panel, job, "engine_busy", conv_id=conv_id, pause=not sibling,
                     error=f"engine_busy: 포털 동시 실행 자리(MAX_CONCURRENT_CHATS)를 {busy_budget_s}초 기다렸지만"
-                          " 나지 않았다(HWAXRISK_ENGINE_BUSY_MAX_WAIT_S)")
+                          " 나지 않았다(HWAXRISK_ENGINE_BUSY_MAX_WAIT_S)" + (ENGINE_BUSY_SIBLING_NOTE if sibling else ""))
             if "conversation" in run_params:
                 optional["conversation"] = busy.conversation  # 앞 시도가 만든 대화를 다시 쓴다(시도마다 만들지 않는다)
             if "on_progress" in optional:
@@ -2215,6 +2333,22 @@ def _audit_engine_stop(store: Any, job: Mapping[str, Any], lost: EngineStreamLos
          canonical_json({"state": after["state"], "hold_code": after["hold_code"]}), now_epoch()))
 
 
+# 둘째 패널이 엔진 자리를 예산 내내 못 얻었는데 같은 잡의 다른 패널이 돌 때 — 그 패널 error 의 꼬리(코드 engine_busy 는 앞 그대로).
+ENGINE_BUSY_SIBLING_NOTE = (" — 같은 잡의 다른 패널이 돌고 있어 잡은 멈추지 않는다(이 대상의 둘째 자리는"
+                            " HWAXRISK_ENGINE_BUSY_MAX_WAIT_S 동안 다시 잡지 않는다)")
+
+
+def _sibling_running(store: Any, job: Mapping[str, Any], panel: Mapping[str, Any], settings: Any | None = None) -> bool:
+    """같은 잡의 다른 패널이 도는가 — 잡이 패널을 함께 돌릴 수 있을 때(`job_slots` > 1)만 본다. 동시 1 잡은 늘 거짓이다(종전 그대로).
+
+    패널 행에 잡 열이 없어(스키마 고정) 같은 대상의 도는 패널로 센다 — 대상 안에서 잡끼리는 직렬이라(claim_next_job) 러너의 도는
+    패널은 이 잡의 것이다(CC-2)."""
+    if job_slots(job, settings) <= 1:
+        return False
+    return store.query_one("SELECT 1 FROM rr_panels WHERE target_key = ? AND status = 'running' AND id <> ? LIMIT 1",
+                           (panel["target_key"], panel["id"])) is not None
+
+
 def _close_panel_unstarted(store: Any, panel: Mapping[str, Any], job: Mapping[str, Any], code: str, *,
                            error: str, conv_id: str | None, pause: bool) -> dict:
     """엔진이 받아 주지 않아 시작도 못 한 패널을 닫는다 — 좌석 재시도와 연속 실패에 세지 않는다.
@@ -2333,22 +2467,47 @@ def _stop_reader(store: Any, job: Mapping[str, Any]):
             return last["why"]
         last["read_at"] = now
         try:
-            row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job["id"],))
+            row = store.query_one("SELECT state, state_by, pause_reason, hold_code, error FROM rr_jobs WHERE id = ?",
+                                  (job["id"],))
         except Exception:  # noqa: BLE001 — 위 설명대로다.
             log.exception("잡 %s 상태 조회 실패(비치명) — 패널은 계속 돈다", job.get("id"))
             return last["why"]
-        last["why"] = STOP_JOB_STATES.get(row["state"]) if row is not None else None
+        last["why"] = _stop_why(row) if row is not None else None
         return last["why"]
 
     return should_stop
 
 
-def _progress_writer(store: Any, job: Mapping[str, Any], panel: Mapping[str, Any]):
+def _stop_why(row: Mapping[str, Any]) -> str | None:
+    """잡 행 → 도는 패널을 닫을 까닭(닫지 않으면 None). 사람의 정지 · 취소는 종전 글 그대로다. 코드가 멈추거나 실패로 끝낸 잡 — 동시 2
+    잡에서 한 패널의 일(보류 · 스트림 유실 · 의장 실패 · 연속 실패 …)이 잡을 옮겨 형제 패널이 닫힐 때다 — 은 '사용자가 …' 라 적지 않고
+    그 까닭을 적는다(CC-6)."""
+    state = row["state"]
+    if state not in STOP_JOB_STATES:
+        return None
+    by = str(row["state_by"] or "")
+    if state == "paused" and row["pause_reason"] != "user" and by.startswith("code:"):
+        code = by[len("code:"):]
+        if code == "cancelled":
+            # 엔진 쪽 멈춤(A24) — 사람이 포털 화면에서 같은 잡의 다른 패널 심의를 멈춰 러너가 잡을 멈췄다
+            return "잡이 멈췄다(사람이 포털에서 같은 잡의 다른 패널 심의를 멈췄다)"
+        hold = f" · 보류 {row['hold_code']}" if row["hold_code"] else ""
+        return f"잡이 멈췄다({code}{hold})"
+    if state == "failed":
+        return f"{STOP_JOB_STATES[state]}({str(row['error'] or '').split(':', 1)[0].strip() or '까닭 없음'})"
+    return STOP_JOB_STATES[state]
+
+
+def _progress_writer(store: Any, job: Mapping[str, Any], panel: Mapping[str, Any], *, per_panel: bool = False):
     """도는 패널의 '마지막 신호' 를 `rr_jobs.progress_json` 에 적는 콜백(PROGRESS_WRITE_INTERVAL_S 간격).
 
     패널 벽시계가 몇 시간이라 `status='running'` 과 시작 시각만으로는 도는 것과 멈춘 것을 가를 수 없다.
     `last_frame_at` 은 ping 을 포함한 아무 프레임(연결이 살아 있다), `last_event_at`·`last_step` 은 ping 이 아닌
     프레임(심의가 나아가고 있다)이다. 적는 데 실패해도 패널은 계속 돈다.
+
+    `per_panel`(패널을 함께 돌리는 잡 — job_slots > 1)이면 행의 맨 위 칸(마지막에 적은 신호 — 진행판 `signal`)과 함께 패널별 칸
+    `panels{패널 id: 신호}` 에도 적는다(CC-9) — 진행판 `signals` 가 도는 패널마다 한 줄이다. 두 워커가 같은 행을 쓰므로 읽고 고쳐 쓰기를
+    저장소 트랜잭션 하나로 한다(남의 칸을 덮지 않는다). 동시 1 잡의 행은 종전 그대로다(그 칸이 없다).
     """
     head = {"panel_id": panel["id"], "panel_no": panel.get("panel_no"), "started_at": now_epoch()}
     if panel.get("kind") == "issue":
@@ -2370,11 +2529,51 @@ def _progress_writer(store: Any, job: Mapping[str, Any], panel: Mapping[str, Any
             last["written_at"] = now
         body = {**head, "last_frame_at": None, "last_event_at": None, "last_step": "", "frames": 0, **frame}
         try:
-            store.execute("UPDATE rr_jobs SET progress_json = ? WHERE id = ?", (canonical_json(body), job["id"]))
+            if not per_panel:
+                store.execute("UPDATE rr_jobs SET progress_json = ? WHERE id = ?", (canonical_json(body), job["id"]))
+                return
+            with store.tx():
+                panels = _progress_panels(store, job["id"])
+                panels[str(panel["id"])] = body
+                store.execute("UPDATE rr_jobs SET progress_json = ? WHERE id = ?",
+                              (canonical_json({**body, PROGRESS_PANELS_KEY: panels}), job["id"]))
         except Exception:  # noqa: BLE001 — 진행 표시를 못 적었다고 몇 시간짜리 패널을 버리지 않는다.
             log.exception("패널 %s 진행 기록 실패(비치명)", panel["id"])
 
     return note
+
+
+# 패널을 함께 돌리는 잡의 progress_json 에서 도는 패널마다의 신호를 담는 칸(CC-9) — {패널 id: 신호}. 진행판 `signals` 의 원천이다.
+PROGRESS_PANELS_KEY = "panels"
+
+
+def _progress_panels(store: Any, job_id: str) -> dict:
+    """잡 행 progress_json 의 패널별 칸(없거나 깨졌으면 빈 사전) — 부르는 쪽이 트랜잭션 안에서 고쳐 쓴다."""
+    row = store.query_one("SELECT progress_json FROM rr_jobs WHERE id = ?", (job_id,))
+    try:
+        body = json.loads(row["progress_json"] or "{}") if row is not None else {}
+    except ValueError:
+        body = {}
+    panels = body.get(PROGRESS_PANELS_KEY) if isinstance(body, dict) else None
+    return dict(panels) if isinstance(panels, dict) else {}
+
+
+def _drop_panel_signal(store: Any, job: Mapping[str, Any], panel: Mapping[str, Any], settings: Any | None = None) -> None:
+    """닫힌 패널의 패널별 신호 칸을 지운다(CC-9) — 패널을 함께 돌리는 잡만이다. 동시 1 잡은 종전대로 아무것도 지우지 않는다(맨 위 칸은
+    두 경우 다 남는다 — 진행판이 그 패널이 도는지를 원장에서 보고 싣지 않는다). 못 지워도 패널 결과에는 상관없다(진행판이 거른다)."""
+    if job_slots(job, settings) <= 1:
+        return
+    try:
+        with store.tx():
+            panels = _progress_panels(store, job["id"])
+            if panels.pop(str(panel["id"]), None) is None:
+                return
+            row = store.query_one("SELECT progress_json FROM rr_jobs WHERE id = ?", (job["id"],))
+            body = json.loads(row["progress_json"] or "{}")
+            store.execute("UPDATE rr_jobs SET progress_json = ? WHERE id = ?",
+                          (canonical_json({**body, PROGRESS_PANELS_KEY: panels}), job["id"]))
+    except Exception:  # noqa: BLE001 — 위 설명대로다.
+        log.exception("패널 %s 신호 칸 지우기 실패(비치명)", panel.get("id"))
 
 
 def _note_issue_yield(store: Any, job: Mapping[str, Any], target_key: str) -> None:
@@ -2621,8 +2820,12 @@ def _complete_panel(
     if "over_budget" in quality["flags"]:
         log.info("패널 %s over_budget(llm_calls=%s)", panel["id"], llm_calls)
     if (touch_job and not issue_panel and level.get("level") not in (None, "C0")
-            and _diminishing(store, panel["target_key"])):
-        _set_job(store, job["id"], "paused", reason="diminishing")
+            and _diminishing(store, panel["target_key"]) and not _sibling_running(store, job, panel, settings)):
+        # 형제 패널이 돌면 멈추지 않는다 — 멈추면 그 패널이 닫힌다. 그동안 둘째 자리는 집기가 막고(_diminishing), 마지막 형제가 끝날 때
+        # 이 판정이 다시 돈다(CC-7). 그 사이 사람이 취소 · 정지했거나 잡이 실패로 끝났으면 그 전이를 덮지 않는다.
+        row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job["id"],))
+        if row is not None and row["state"] == "running":
+            _set_job(store, job["id"], "paused", reason="diminishing")
     if touch_job and issue_panel:
         _note_issue_yield(store, job, panel["target_key"])
 
@@ -2721,6 +2924,10 @@ class RiskRunner:
         self.external_sync_send = external_sync_send
         concurrency = int(getattr(settings, "risk_concurrency", 1) or 1) if settings is not None else 1
         self._sem = threading.Semaphore(max(1, concurrency))
+        # 잡 id → 러너가 그 잡으로 돌리는 패널 id(워커가 끝날 때 뺀다). 패널 행에 잡 열이 없어(스키마 고정) 집기가 '이 잡의 도는 패널' 을
+        # 여기서 센다(CC-2). 재기동하면 비고, 재기동 복구가 도는 패널을 다 닫으므로 원장과 어긋나지 않는다.
+        self._running: dict[str, set[str]] = {}
+        self._running_lock = threading.Lock()
         # 카드 대조 검토 잡의 루프(주입식 엔진 — None 이면 틱이 아무것도 하지 않는다). 동시 수는 HWAXRISK_REVIEW_CONCURRENCY 와 서버
         # 관문 limit 가운데 작은 것이고 패널 세마포어와 따로 센다. 선점 표지(lease_owner)의 머리는 러너 잠금의 boot_id 다.
         from app import review_runner  # noqa: PLC0415 — review_runner 는 이 모듈을 import 한다.
@@ -2797,7 +3004,10 @@ class RiskRunner:
                                            should_stop=self._stop.is_set)
 
     def _panel_tick(self) -> None:
-        """잡 1건을 집어 패널 1건을 돌릴 워커를 띄운다(세마포어 risk_concurrency, 타깃당 직렬)."""
+        """잡 1건을 집어 패널 1건을 편성하고 그 패널을 돌릴 워커를 띄운다(세마포어 risk_concurrency — 전역 자리 수).
+
+        잡마다 제 자리 수(`job_slots`)까지 패널을 함께 돌린다(CC-1) — 둘째 자리는 첫 패널을 기다리는 잡이 없을 때만이다(CC-3). 편성은
+        이 틱 스레드에서 한 줄로 한다(CC-4) — 워커는 편성된 패널을 돈다. 그 잡으로 도는 패널은 워커가 끝날 때까지 `_running` 에 남는다(CC-2)."""
         if self.store is None or self.settings is None or self.engine is None or self._stop.is_set():
             return
         self._workers = [t for t in self._workers if t.is_alive()]
@@ -2805,28 +3015,55 @@ class RiskRunner:
             return
         started = False
         try:
-            job = claim_next_job(self.store, self.settings, engine=self.engine)
+            job = claim_next_job(self.store, self.settings, engine=self.engine, running=self._running_of)
             if job is None:
                 return
+            panel, _done = plan_job_panel(self.store, self.settings, job, narrative_mod=self.narrative_mod,
+                                          registry_mod=self.registry_mod, siblings=bool(self._running_of(job["id"])))
+            if panel is None:
+                return
             worker = threading.Thread(
-                target=self._run_worker, args=(job,), name=f"panel-{str(job['id'])[:8]}", daemon=True
+                target=self._run_worker, args=(job, panel), name=f"panel-{str(job['id'])[:8]}", daemon=True
             )
+            with self._running_lock:
+                self._running.setdefault(str(job["id"]), set()).add(str(panel["id"]))
+            try:
+                worker.start()
+            except BaseException:
+                # 워커를 못 띄웠다 — 편성 · 시작한 패널을 시작 못 한 것으로 닫는다(좌석 차감 없음). 두면 그 대상이 running 패널에 막힌다.
+                self._forget(job["id"], panel["id"])
+                _close_panel_unstarted(self.store, panel, job, "stopped", conv_id=None, pause=False,
+                                       error="stopped: 패널 워커를 띄우지 못했다 — 심의는 시작되지 않았다(좌석 재시도는 차감하지 않았다)")
+                raise
             started = True
-            worker.start()
             self._workers.append(worker)
         finally:
             if not started:
                 self._sem.release()
 
-    def _run_worker(self, job: Mapping[str, Any]) -> None:
+    def _running_of(self, job_id: str) -> frozenset[str]:
+        """러너가 그 잡으로 지금 돌리는 패널 id(워커가 끝나기 전까지 — 닫는 중인 것까지)."""
+        with self._running_lock:
+            return frozenset(self._running.get(str(job_id), ()))
+
+    def _forget(self, job_id: str, panel_id: str) -> None:
+        with self._running_lock:
+            held = self._running.get(str(job_id))
+            if held is not None:
+                held.discard(str(panel_id))
+                if not held:
+                    del self._running[str(job_id)]
+
+    def _run_worker(self, job: Mapping[str, Any], panel: Mapping[str, Any]) -> None:
         try:
             run_panel(
                 self.store, self.settings, self.engine, job,
-                narrative_mod=self.narrative_mod, registry_mod=self.registry_mod, stop=self._stop,
+                narrative_mod=self.narrative_mod, registry_mod=self.registry_mod, stop=self._stop, panel=panel,
             )
         except Exception:  # noqa: BLE001 — 잡 하나의 실패로 러너가 멈추지 않는다.
-            log.exception("패널 실행 실패(job=%s)", job.get("id"))
+            log.exception("패널 실행 실패(job=%s, panel=%s)", job.get("id"), panel.get("id"))
         finally:
+            self._forget(job["id"], panel["id"])
             self._sem.release()
 
     # ------------------------------------------------------------ 수명
