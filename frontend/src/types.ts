@@ -175,23 +175,36 @@ export type Metrics = { metrics: MetricRow[] };
 
 export type AdhScope = { team: string; group: string };
 
+/** 과제 등급 — 반출 경계다(plan §5.2.5 (3a)). 등록할 때 사람이 고른다 — 빠지면 422 `classification_required`. */
+export type Classification = "internal" | "confidential";
+export const CLASSIFICATIONS: readonly Classification[] = ["internal", "confidential"];
+
 export type ProjectCreate = {
   code: string;
   name: string;
+  classification: Classification;
   stage?: string | null;
   predecessor_project_id?: string | null;
   adh_scope: AdhScope;
 };
 
+/**
+ * 과제 행(routes._project_row) — `POST /projects` 의 답이자 `GET /projects/{id}` 의 `project`.
+ * 서버 열 이름 그대로다 — `adh_scope` 는 보낼 때만의 꼴이고 받을 때는 `adh_team`·`adh_group` 두 열이다.
+ * 등급(classification)·반영 요약(external_sync)은 이 행에 실리지 않는다.
+ */
 export type Project = {
   id: string;
+  owner_sub: string;
   code: string;
   name: string;
   stage: string | null;
   predecessor_project_id: string | null;
-  adh_scope: AdhScope | null;
+  adh_team: string | null;
+  adh_group: string | null;
+  character_status: string | null;
   created_at: number;
-  external_sync?: ExternalSync | null;
+  updated_at: number;
 };
 
 export type ProjectSource = {

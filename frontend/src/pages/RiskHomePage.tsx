@@ -10,7 +10,10 @@ import { Banner, Button, Chip, FormField, FormGrid, Input, Select, TabBar } from
 import { DataTable } from "../components/DataTable";
 import type { Column } from "../components/DataTable";
 import { fmtDay, fmtEpoch, fmtPct } from "../format";
-import type { DiffListRow, ProjectCard, ReportListRow, SourceKind, TargetListRow } from "../types";
+import { projectCreateFieldError } from "../api/projectCreate";
+import type { ProjectField } from "../api/projectCreate";
+import { CLASSIFICATIONS } from "../types";
+import type { Classification, DiffListRow, ProjectCard, ReportListRow, SourceKind, TargetListRow } from "../types";
 
 /** 카드에 아이콘처럼 늘어놓는 소스 3종(해석 결과는 스냅샷 kinds 에서만 쓴다). */
 const CARD_KINDS: SourceKind[] = ["mcad", "dyna", "ecad"];
@@ -22,6 +25,12 @@ const KIND_LABEL: Record<string, string> = {
 };
 /** §8.2.4 의 stage 정규식. */
 const STAGE_RE = /^(pre|dv|pv|pra|mp)([123r])?$/;
+
+/** 등급 선택지의 말 — 값은 서버 어휘 그대로 보이고 뜻만 덧붙인다. */
+const CLASSIFICATION_LABEL: Record<Classification, string> = {
+  internal: "internal — 사내 일반",
+  confidential: "confidential — 기밀",
+};
 
 /** 홈 상단 탭 4개(정본 §8.2.4). 넷 다 서버 목록 경로가 있다. */
 type HomeTab = "projects" | "diffs" | "targets" | "reports";
@@ -109,28 +118,40 @@ function ProjectTile({ card }: { card: ProjectCard }) {
 function ProjectForm({ options, onCreated }: { options: ProjectCard[]; onCreated: () => void }) {
   const [code, setCode] = useState("");
   const [name, setName] = useState("");
+  // 등급은 미리 고르지 않는다 — 반출 경계라서 사람이 등록할 때 고른다(서버가 빠진 것을 422 로 거절한다).
+  const [classification, setClassification] = useState<Classification | "">("");
   const [stage, setStage] = useState("");
   const [predecessor, setPredecessor] = useState("");
   const [team, setTeam] = useState("");
   const [group, setGroup] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const [fieldError, setFieldError] = useState<{ field: ProjectField; message: string } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const stageInvalid = stage.trim() !== "" && !STAGE_RE.test(stage.trim());
   const canSubmit =
-    code.trim() !== "" && name.trim() !== "" && team.trim() !== "" && group.trim() !== "" && !stageInvalid && !busy;
+    code.trim() !== "" &&
+    name.trim() !== "" &&
+    classification !== "" &&
+    team.trim() !== "" &&
+    group.trim() !== "" &&
+    !stageInvalid &&
+    !busy;
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
+    // canSubmit 이 등급을 확인했다 — 여기서부터 classification 은 빈 값이 아니다(타입도 그렇게 좁혀진다).
     if (!canSubmit) return;
     setBusy(true);
     setError(null);
+    setFieldError(null);
     setNotice(null);
     try {
       const created = await riskApi.createProject({
         code: code.trim(),
         name: name.trim(),
+        classification,
         stage: stage.trim() === "" ? null : stage.trim(),
         predecessor_project_id: predecessor.trim() === "" ? null : predecessor.trim(),
         adh_scope: { team: team.trim(), group: group.trim() },
@@ -138,15 +159,21 @@ function ProjectForm({ options, onCreated }: { options: ProjectCard[]; onCreated
       setNotice(`과제 ${created.code} 를 만들었습니다.`);
       setCode("");
       setName("");
+      setClassification("");
       setStage("");
       setPredecessor("");
       onCreated();
     } catch (err) {
-      setError(err);
+      // 칸에 붙일 수 있는 거절(code 로 가른다)은 그 칸에서 말하고, 나머지는 배너가 말한다.
+      const onField = projectCreateFieldError(err);
+      if (onField) setFieldError(onField);
+      else setError(err);
     } finally {
       setBusy(false);
     }
   }
+
+  const errorOf = (field: ProjectField) => (fieldError?.field === field ? fieldError.message : undefined);
 
   return (
     <form className="mb-4 flex flex-col gap-3" onSubmit={submit}>
@@ -154,11 +181,27 @@ function ProjectForm({ options, onCreated }: { options: ProjectCard[]; onCreated
       {/* 등록 성공은 끼어들어 읽힐 일이 아니다 — status 로 둔다. */}
       {notice ? <Banner tone="info" live="status" title={notice} /> : null}
       <FormGrid>
-        <FormField label="code (≤40)">
+        <FormField label="code (≤40)" error={errorOf("code")}>
           <Input maxLength={40} value={code} onChange={(e) => setCode(e.target.value)} />
         </FormField>
         <FormField label="name (≤200)">
           <Input maxLength={200} value={name} onChange={(e) => setName(e.target.value)} />
+        </FormField>
+        <FormField label="등급" hint="classification · 필수" error={errorOf("classification")}>
+          <Select
+            required
+            value={classification}
+            onChange={(e) => setClassification(e.target.value as Classification | "")}
+          >
+            <option value="" disabled>
+              고르세요
+            </option>
+            {CLASSIFICATIONS.map((c) => (
+              <option key={c} value={c}>
+                {CLASSIFICATION_LABEL[c]}
+              </option>
+            ))}
+          </Select>
         </FormField>
         <FormField
           label="stage (pre · dv · pv · pra · mp + 1/2/3/r)"
@@ -166,7 +209,7 @@ function ProjectForm({ options, onCreated }: { options: ProjectCard[]; onCreated
         >
           <Input value={stage} onChange={(e) => setStage(e.target.value)} />
         </FormField>
-        <FormField label="predecessor_project_id (선택)">
+        <FormField label="predecessor_project_id (선택)" error={errorOf("predecessor")}>
           <Select value={predecessor} onChange={(e) => setPredecessor(e.target.value)}>
             <option value="">없음</option>
             {options.map((p) => (
@@ -189,6 +232,10 @@ function ProjectForm({ options, onCreated }: { options: ProjectCard[]; onCreated
         </Button>
         <span className="text-sm text-muted-foreground">adh_scope 는 자동으로 채우지 않습니다.</span>
       </div>
+      <p className="m-0 text-sm text-muted-foreground">
+        등급은 반출 경계입니다 — 백업 · 내보내기 · 바깥 투영의 등급 태그가 이 값을 따릅니다. 확실하지 않으면 confidential 을
+        고르세요.
+      </p>
     </form>
   );
 }

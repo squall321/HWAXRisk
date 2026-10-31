@@ -1108,7 +1108,6 @@ export default function ProjectPage() {
             <Mono>{projectId}</Mono>
           </span>
         }
-        actions={detail.data ? <ExternalSyncBadge sync={detail.data.project.external_sync ?? null} /> : null}
       />
 
       {/* 과제 조회 실패는 **탭 밖**에서 말한다. 탭 안에 두면 다른 탭에서는 경고도 재시도 버튼도 없이
@@ -1156,11 +1155,13 @@ export default function ProjectPage() {
                     ),
                   },
                   {
+                    // 보낼 때는 adh_scope{team, group} 이지만 과제 행은 두 열로 준다(routes._project_row).
                     label: "AIDataHub 범위",
-                    hint: "adh_scope",
-                    value: detail.data.project.adh_scope
-                      ? `${detail.data.project.adh_scope.team} / ${detail.data.project.adh_scope.group}`
-                      : UNKNOWN,
+                    hint: "adh_team · adh_group",
+                    value:
+                      detail.data.project.adh_team || detail.data.project.adh_group
+                        ? `${detail.data.project.adh_team ?? "—"} / ${detail.data.project.adh_group ?? "—"}`
+                        : UNKNOWN,
                   },
                   { label: "만든 때", hint: "created_at", value: fmtEpoch(detail.data.project.created_at) },
                   {
