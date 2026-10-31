@@ -362,7 +362,8 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = N
     잡을 돌려주는 갈래가 남의 대상의 잡을 흘리지 않게. `mode='reviews'` 는 카드 대조 검토 잡이다(`_start_review_job`).
     `llm`·`consent_external` 은 REST 본문과 같다(Claude 길 X-2 — claude 는 검토 잡 · 패널 잡, 동의는 사람이 한 뒤에만 true).
     `exclude_evidence` 도 REST 본문과 같다(B31 — 패널 잡의 브리프에서 뺄 항목 키). 살아 있는 잡을 돌려주기 전에 값을 검사하고, 그 잡의
-    제외와 다르면 `differs` 에 'exclude_evidence' 를 싣는다(바꾸지 않는다 — 취소한 뒤 새로).
+    제외와 다르면 `differs` 에 'exclude_evidence' 를 싣는다(바꾸지 않는다 — 취소한 뒤 새로). 돌려주는 살아 있는 잡이 빼는 항목은 늘
+    `exclude_evidence` 로 싣는다(BL-12 — 빼지 않는 잡은 칸이 없다).
     """
     email = require_delegate(ident)
     store = routes.get_store()
@@ -394,8 +395,12 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = N
         " ORDER BY created_at DESC, rowid DESC LIMIT 1", (target_key, tier, *LIVE_JOB_STATES))
     if live is not None:
         params = routes._loads(live["params_json"], {})
+        # 살아 있는 잡이 브리프에서 빼는 항목도 판단 LLM 칸처럼 싣는다 — 빼지 않은 호출이 그 잡을 받아 '보통 브리프로 돈다' 고 읽지
+        # 않게, 다른 값을 준 호출이 differs 와 함께 무엇이 살아 있는지 보게(BL-12). 빼지 않는 잡은 칸이 없다(종전 응답 그대로).
         out = {"job_id": live["id"], "created": False,
-               **{k: live[k] for k in live.keys() if k not in ("id", "params_json")}, **routes.job_llm_view(params), "web": web}
+               **{k: live[k] for k in live.keys() if k not in ("id", "params_json")}, **routes.job_llm_view(params),
+               **({"exclude_evidence": list(params["exclude_evidence"])} if params.get("exclude_evidence") else {}),
+               "web": web}
         differs = []
         if llm is not None and runner.job_llm({"llm": llm}) != runner.job_llm(params):
             differs.append("llm")                 # 고른 판단 LLM 이 살아 있는 잡과 다르다 — 바꾸지 않는다(그 잡을 취소한 뒤 새로)

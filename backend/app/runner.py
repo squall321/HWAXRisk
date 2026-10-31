@@ -1057,12 +1057,14 @@ def create_job(
     llm: str | None = None,
     consent_external: Any = None,
     exclude_evidence: Sequence[str] | None = None,
+    exclude_evidence_from: str | None = None,
 ) -> dict:
     """배치 잡 1건을 만든다(POST /api/targets/{key}/jobs). Tier C 는 consent 필수, 러너 자격이 없으면 422.
 
     `exclude_evidence` 는 이 잡의 패널 브리프에서 뺄 항목 키다(B31 · plan §8.2.3 — 빼기만, 헌법 P1). `brief.check_exclude` 가 받는 값을
     가리고(밖이면 422 exclude_evidence_invalid) 비지 않았으면 params_json 에 남는다 — 러너가 패널마다 브리프에서 빼고
-    rr_panels.evidence_excluded_json 에 적는다. 감사 한 행(brief.exclude)은 사람의 입구(라우트)가 쓴다.
+    rr_panels.evidence_excluded_json 에 적는다. 감사 한 행(brief.exclude)은 사람의 입구(라우트)가 쓴다. `exclude_evidence_from` 은 그
+    제외를 물려준 앞 잡이다(C3 자동 후속 — 사람의 결정은 그 잡의 감사 행에 있다, BL-10). 뺄 항목이 있을 때만 params 에 남는다.
 
     `requester_sub` 는 잡을 만든 사람이다(동료 editor 일 수 있다) — 자격은 요청자 → 타깃 owner 의 포털 PAT 이고(서비스 계정으로
     내려가지 않는다, U-3) 첫 적중의 email 이 `rr_jobs.credential_email` 에 남는다(plan §0.1.6).
@@ -1111,6 +1113,7 @@ def create_job(
         **llm_fields,
         # 뺄 항목이 없는 잡의 params 는 종전 그대로다(칸을 싣지 않는다).
         **({"exclude_evidence": excluded} if excluded else {}),
+        **({"exclude_evidence_from": exclude_evidence_from} if excluded and exclude_evidence_from else {}),
     }
     with store.tx():
         # 방식 바꾸기(routes.post_target_flow)와 겹치지 않게 같은 트랜잭션 안에서 문을 다시 본다 — 확인과 쓰기 사이에 대상이
@@ -1653,15 +1656,18 @@ def _finish_job(store: Any, job: Mapping[str, Any], settings: Any) -> dict:
     target = store.query_one("SELECT owner_sub, close_level FROM rr_targets WHERE target_key = ?", (job["target_key"],))
     close_level = (target["close_level"] if target and target["close_level"] else settings.risk_default_close_level)
     if job["tier"] == "B" and close_level == "C3":
+        params = job.get("params") or {}
         try:
             # 자격은 B 잡과 같은 사람 순서다(요청자 → 타깃 owner) — 서비스 계정으로 내려가지 않으므로(U-3) owner 만 넘기면
-            # 요청자 자격으로 돈 B 잡의 후속이 멈춘다.
+            # 요청자 자격으로 돈 B 잡의 후속이 멈춘다. 사람이 브리프에서 뺀 항목도 메모 · 층과 함께 물려받는다 — 물려받지 않으면 후속
+            # Tier C 패널에 그 항목이 다시 실리는데 보고서의 '사람 개입 요약' 은 brief.exclude 를 세어 그 항목 없이 돈 것처럼 읽힌다(BL-10).
             follow = create_job(
                 store, job["target_key"], "C", owner_sub=job["owner_sub"],
-                modifiers=(job.get("params") or {}).get("modifiers"),
-                user_memo=(job.get("params") or {}).get("user_memo"),
+                modifiers=params.get("modifiers"),
+                user_memo=params.get("user_memo"),
                 consent=True, settings=settings, consent_source="close_level",
-                requester_sub=(job.get("params") or {}).get("requester"),
+                requester_sub=params.get("requester"),
+                exclude_evidence=params.get("exclude_evidence"), exclude_evidence_from=job["id"],
             )
         except AppError as exc:
             if exc.code not in FOLLOW_UP_REFUSALS:

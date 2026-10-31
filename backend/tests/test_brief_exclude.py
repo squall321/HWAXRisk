@@ -105,6 +105,34 @@ def test_a_job_without_exclusions_leaves_the_panel_column_empty(seeded, tmp_path
                            (out["panel_id"],))["evidence_excluded_json"] is None
 
 
+def test_the_c3_follow_up_keeps_the_exclusion_of_the_job_it_follows(seeded, tmp_path):
+    """닫힘 레벨 C3 의 자동 후속 Tier C 는 앞 잡의 메모 · 층과 함께 사람이 뺀 항목도 물려받는다 — 후속 패널도 그 항목 없이 돌고 패널마다
+    적힌다. 물려받은 것은 params 의 exclude_evidence_from(앞 잡 id)이 말한다. 감사 행은 사람이 만든 앞 잡의 한 행 그대로다(후속은 코드가
+    세운 잡이라 사람 행위가 아니다)."""
+    store, target_key = seeded
+    store.execute("UPDATE rr_targets SET close_level = 'C3' WHERE target_key = ?", (target_key,))
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    first = _job(target_key, exclude_evidence=["E6", "E8"], modifiers=["toulmin"], user_memo="메모")
+    job = dict(store.query_one("SELECT id, target_key, tier, owner_sub, params_json FROM rr_jobs WHERE id = ?", (first["job_id"],)))
+    job["params"] = json.loads(job.pop("params_json"))
+
+    follow = runner._finish_job(store, job, cfg)["next_job"]
+
+    params = _params(store, follow)
+    assert (params["tier"], params["consent_source"]) == ("C", "close_level")
+    assert (params["exclude_evidence"], params["exclude_evidence_from"]) == (["E6", "E8"], first["job_id"])
+    assert (params["modifiers"], params["user_memo"]) == (["toulmin"], "메모")
+    claimed = runner.claim_next_job(store, cfg)
+    assert claimed["id"] == follow
+    engine = RealEngine()
+    out = runner.run_panel(store, cfg, engine, claimed)
+    assert out["status"] == "done"
+    assert [e["key"] for e in engine.calls[0]["evidence"]] == ["E0", "E0c", "E1", "E2", "E3", "E4", "E5", "E7", "E9", "M"]
+    panel = store.query_one("SELECT evidence_excluded_json FROM rr_panels WHERE id = ?", (out["panel_id"],))
+    assert json.loads(panel["evidence_excluded_json"]) == ["E6", "E8"]
+    assert [r["subject_id"] for r in _audits(store, "brief.exclude")] == [first["job_id"]]
+
+
 def test_the_mcp_entry_takes_the_exclusion_and_says_when_a_live_job_differs(seeded, monkeypatch):
     store, target_key = seeded
     factories.act_as_delegate(monkeypatch, OWNER)
@@ -116,8 +144,12 @@ def test_the_mcp_entry_takes_the_exclusion_and_says_when_a_live_job_differs(seed
 
     assert made["created"] is True and _params(store, made["job_id"])["exclude_evidence"] == ["E7"]
     assert _audits(store, "brief.exclude")[0]["subject_id"] == made["job_id"]
-    # 같은 Tier 의 살아 있는 잡을 돌려준다 — 제외가 다르면 differs 로 말하고 바꾸지 않는다.
+    # 같은 Tier 의 살아 있는 잡을 돌려준다 — 제외가 다르면 differs 로 말하고 바꾸지 않는다. 살아 있는 잡이 무엇을 빼는지 함께 싣는다.
     assert again["created"] is False and again["job_id"] == made["job_id"] and again["differs"] == ["exclude_evidence"]
+    assert again["exclude_evidence"] == ["E7"]
+    # 제외를 주지 않은 호출도 살아 있는 잡을 받는다 — differs 는 없지만 그 잡이 E7 을 뺀다는 것은 보인다(보통 브리프라고 읽지 않게).
+    plain = asyncio.run(srv.risk_start_job(target_key=target_key, tier="B"))
+    assert plain["created"] is False and "differs" not in plain and plain["exclude_evidence"] == ["E7"]
     assert bad["error"] == "exclude_evidence_invalid"
     assert review["error"] == "E100" and "exclude_evidence" in review["message"]
 
