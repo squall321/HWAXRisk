@@ -197,8 +197,9 @@ def test_claude_entry_runs_from_project_to_job_and_lands_in_the_web_ledger(box):
     assert opened["created"] is True and opened["roster_size"] == 0 and opened["roster_source"] == "unavailable"
     out = call("risk_next_step", project_id=pid)
     assert out["where"] == "roster"
-    # RA 로 아직 아무것도 보내지 않는다는 것이 길잡이 사실에 있다(R3 · U-4).
-    assert out["facts"]["external_sync"]["ra"]["reason"] == "sender_unwired"
+    # RA 로 아무것도 나가지 않는 까닭이 길잡이 사실에 있다 — 이 박스에는 쓰기 PAT 가 없어 보내는 쪽이 꺼져 있다(R3 · U-4 · RK-01).
+    assert out["facts"]["external_sync"]["ra"]["reason"] == "credential_missing:HWAXRISK_PORTAL_PAT_RW"
+    assert out["facts"]["external_sync"]["adh"]["reason"] == "sender_unwired"
     consent_left_to_the_user(out)
     blocked = {b["code"]: b for b in out["blocked"]}
     assert "#/settings" in blocked["roster_empty"]["fix"] and "포털에서 발급해 등록" in blocked["roster_empty"]["fix"]

@@ -55,7 +55,7 @@ def test_patch_toggles_mcp_visibility_and_releases_withheld(risk_store, monkeypa
 
     out = routes.patch_project(project_id, routes.ProjectPatchBody(mcp_visibility="org"), ident=_ident())
     assert out["project"]["mcp_visibility"] == "org"
-    assert out["resynced"] == {"targets": 1, "ra_ops_released": 1, "adh_retag_ops": 0}
+    assert out["resynced"] == {"targets": 1, "ra_ops_released": 1, "adh_retag_ops": 0, "ra_retract_ops": 0}
     assert ra_client.load_external_sync(risk_store, "snap:s1")["ra"]["state"] == "pending"
     assert risk_store.query_one(
         "SELECT COUNT(*) AS n FROM rr_audit WHERE action = 'project.mcp_visibility'")["n"] == 1
@@ -580,6 +580,33 @@ def test_purge_blanks_bodies_keeps_hashes_and_needs_the_project_code(risk_store,
     with pytest.raises(AppError) as again:
         routes.purge_project(project_id, routes.PurgeBody(code="PRJ-p1", reason="정리"), ident=_ident())
     assert (again.value.code, again.value.http_status) == ("already_purged", 409)
+
+
+def test_the_purge_report_queues_the_ra_retract_and_says_so(risk_store, monkeypatch):
+    """폐기는 RA 에 나간 객체(과제 · 등록부 risk_finding — rr_id_map 이 없으면 원본 표의 ra_entity_id)마다 거두기 op 를 쌓고(사용자 결정
+    10-31 (가)), 보고서의 RA 층은 그 셈을 말한다 — 폐기 응답 때는 아직 보내기 전이라 retract_pending 이다(보낸 뒤의 셈은 test_ra_sender).
+    종전에는 거두는 길이 없어 'not_retracted' 와 나간 수만 실었다. 보낸 것이 없으면 nothing_sent 다."""
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    sent, quiet = _project(risk_store, "p1"), _project(risk_store, "p2")
+    target_key = _target(risk_store, sent)
+    risk_store.execute("UPDATE rr_projects SET ra_entity_id = 501 WHERE id = ?", (sent,))
+    risk_store.execute(
+        "INSERT INTO rr_registry(target_key, cluster_key, owner_sub, merged_json, ra_entity_id, updated_at)"
+        " VALUES (?, 'ck1', ?, '{}', 502, 1), (?, 'ck2', ?, '{}', NULL, 1)", (target_key, OWNER, target_key, OWNER))
+
+    def ra_layer(project_id: str) -> dict:
+        out = routes.purge_project(project_id, routes.PurgeBody(code=f"PRJ-{project_id}", reason="정리"), ident=_ident())
+        return next(r for r in out["purge_report"]["remaining"] if r["layer"] == "ra")
+
+    layer = ra_layer(sent)
+    assert (layer["reason"], layer["objects"], layer["retracted"], layer["retract_pending"], layer["retract_failed"]) == (
+        "retract_pending", 2, 0, 2, 0)
+    assert "거두기를 기다린다" in layer["detail"] and "새로 보내지 않는다" in layer["detail"]
+    ops = ra_client.load_external_sync(risk_store, target_key)["ra"]["pending_ops"]
+    assert [(op["op"], op["reason"], op["kind"], op["portal_id"], op["by"]) for op in ops] == [
+        ("retract", "purged", "project", sent, OWNER), ("retract", "purged", "registry", f"{target_key}#ck1", OWNER)]
+    layer = ra_layer(quiet)
+    assert (layer["reason"], layer["objects"]) == ("nothing_sent", 0) and "나간 객체가 없다" in layer["detail"]
 
 
 def test_job_creation_is_open_to_an_editor_and_closed_to_a_viewer(risk_store, monkeypatch, tmp_path):

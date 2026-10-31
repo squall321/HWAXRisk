@@ -1152,6 +1152,9 @@ def patch_project(project_id: str, body: ProjectPatchBody,
         if visibility_changed:
             resynced = _release_withheld(store, project_id, now)
             resynced["adh_retag_ops"] = _queue_visibility_retag(store, project_id, values["mcp_visibility"])
+            # RA 에 나간 것 — 조직 공개를 떠나면 거두고, 다시 열면 거둔 것을 다시 표기한다(사용자 결정 10-31 (가), RK-01 거두기).
+            resynced["ra_retract_ops"] = ra_client.queue_retracts(
+                store, project_id, "org" if values["mcp_visibility"] == "org" else "private", by=owner_sub)
             _audit(store, owner_sub, scope="project", subject_id=project_id, project_id=project_id,
                    action="project.mcp_visibility", before={"mcp_visibility": before["mcp_visibility"]},
                    after={"mcp_visibility": values["mcp_visibility"]})
@@ -1382,10 +1385,12 @@ def transfer_project(project_id: str, body: TransferBody,
         for table, where in TRANSFER_DERIVED:
             rows_updated[table] = int(store.execute(
                 f"UPDATE {table} SET owner_sub = ? WHERE {where}", (to_email, project_id)) or 0)
+        # RA 에 나간 risk_finding 의 owner 를 새 소유자로 다시 표기한다(사용자 결정 10-31 (가) — 비공개면 거둔 꼴 그대로).
+        ra_ops = ra_client.queue_retracts(store, project_id, "owner", by=actor)
         _audit(store, actor, scope="project", subject_id=project_id, project_id=project_id,
                action="project.transfer", before={"owner_sub": old_owner}, after={"owner_sub": to_email},
                reason=body.reason)
-    return {"from": old_owner, "to": to_email, "rows_updated": {"tables": rows_updated}}
+    return {"from": old_owner, "to": to_email, "rows_updated": {"tables": rows_updated}, "ra_retract_ops": ra_ops}
 
 
 @router.get("/projects/{project_id}/audit")
@@ -1617,11 +1622,13 @@ def purge_project(project_id: str, body: PurgeBody,
         }
         layers["files"] = {"exports_removed": _purge_exports(project_id)}
 
+        # RA 층 — 나간 객체마다 거두기 op 를 쌓는다(사용자 결정 10-31 (가), RK-01 거두기). 보내는 쪽이 폐기된 과제의 보낼 op 는 버리고 거두기만
+        # 다음 동기 주기에 보내고, 이 보고서의 RA 층(거둔 수 · 대기 · 못 거둔 수와 까닭 낱말)은 그 결과로 다시 적힌다.
+        ra_client.queue_retracts(store, project_id, "purged", by=actor)
         remaining = [
             {"layer": "adh", "reason": "delete_api_absent",
              "detail": "AIDataHub 레코드는 같은 _external_id 로 빈 UPSERT 만 가능하고 임베딩 잔여 벡터는 재색인 전까지 남는다."},
-            {"layer": "ra", "reason": "no_delete_permission",
-             "detail": "RA 코드 무수정 원칙상 삭제 권한이 없는 객체는 status='retracted' 표기만 남는다."},
+            ra_client.purge_ra_layer(store, project_id),
             {"layer": "portal_conversations", "reason": "not_owned",
              "detail": "다른 사용자 소유 대화는 지울 수 없다."},
             {"layer": "drive", "reason": "retention_window",
@@ -3551,7 +3558,7 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
         "flow": target["flow"],
         "units": units_module.summary_of(store, target_key),
         "review": review_payload(store, target_key, target["flow"]),
-        # RA·AIDataHub 반영 요약 — {ra|adh: {state, pending_ops, reason, message}}. 보내는 쪽이 아직 없다(sender_unwired, M4).
+        # RA·AIDataHub 반영 요약 — {ra|adh: {state, pending_ops, dead_ops, reason, message}}. RA 는 실제 상태(RK-01), AIDataHub 는 sender_unwired(M4).
         "external_sync": ra_client.sync_summary(ra_client.parse_external_sync(target["external_sync_json"])),
         # 완결 표기와 잔여(M3 S3-8) · 사슬 단계와 마지막 보고서 판(S3-5) — 카드 대조 대상만 싣는다(패널 대상의 응답은 review 칸
         # 하나만 더해진 그대로다, D-24).

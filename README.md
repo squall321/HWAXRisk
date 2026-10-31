@@ -160,7 +160,7 @@ cd backend && .venv/bin/python -m pytest -q
 | 패널·편성 | `test_planner` · `test_roster` · `test_runner` · `test_runner_panel` · `test_persist_panel` · `test_engine_client` · `test_brief` |
 | 학습·야간 | `test_learning` · `test_learning_scenario` · `test_metrics` · `test_nightly` |
 | 경계·배선 | `test_identity` · `test_me` · `test_p6_routes` · `test_project_patch` · `test_no_write_tools` · `test_mcp_tools`(7종·exact `Route('/mcp')`) · `test_wiring_regressions` |
-| 통합 | `test_e2e_smoke` · `test_export_import` · `test_external_sync` · `test_bootstrap_scripts` · `test_parity` |
+| 통합 | `test_e2e_smoke` · `test_export_import` · `test_external_sync` · `test_ra_sender`(RA 보내는 쪽 · 거두기 — 부른 것을 적는 게이트웨이 · RA 대역, RK-01) · `test_bootstrap_scripts` · `test_parity` |
 
 외부 HTTP 실호출은 없다(heax·포털·RA·ADH·agent-server 전부 `httpx.MockTransport`, SSE 는 `tests/fixtures/sse/` 3종).
 `frontend/dist` 가 있든 없든 전부 통과해야 한다.

@@ -67,6 +67,39 @@ def test_ra_write_tools_live_on_the_write_channel():
             assert tool not in text, f"{name} 이 RA 쓰기 도구 {tool} 을 부른다"
 
 
+def test_the_one_sender_is_the_only_module_that_names_the_ra_write_tools():
+    """RA 쓰기는 보내는 쪽(ra_client.RaSender, RK-01) 하나뿐이다 — 앱의 다른 모듈은 쓰기 4종의 이름을 적지도 않는다(배선 main.py 포함)."""
+    write_tools = ("create_object", "update_object", "add_object_alias", "link_objects")
+    named = sorted(name for name, text in _sources().items() if any(tool in text for tool in write_tools))
+    assert named == ["ra_client.py"], named
+
+
+def test_the_box_write_pat_never_writes_an_ra_report():
+    """보고서는 사람 이름이다(사용자 결정 10-31 D-1 — 종합 보고서는 포털 챗 PAT 길, FU-D17). 박스 쓰기 PAT 는 지식 그래프 op 만 쓴다 —
+    RA 보고서 쓰기 도구의 이름은 앱 어디에도 없고, 박스 PAT 클라이언트는 보고서 도구를 계약 밖으로 거절한다. 종전에는 그 클라이언트의 계약에
+    보고서 초안 갱신이 남아 있어 종합 보고서를 서비스 계정 이름으로 저장하는 코드가 모든 가드를 지났다."""
+    report_writes = ("create_report_draft", "update_report_draft")
+    named = sorted(name for name, text in _sources().items() if any(tool in text for tool in report_writes))
+    assert named == [], f"{named} 가 RA 보고서 쓰기 도구를 적는다 — 보고서는 사람 이름(포털 챗 PAT 길)이다"
+    box_client = ra_client.ra_client_from_settings(config.settings, {WRITE_KEY: "fake-rw-pat-for-test"})
+    for tool in (*report_writes, "get_report"):
+        assert box_client.call_tool(tool, {"report_id": 1}) == {"ok": False, "error": "tool_not_contracted", "detail": tool}
+
+
+def test_the_sender_holds_only_the_box_write_pat():
+    """배경 잡의 자격은 박스 쓰기 PAT 하나다(사용자 결정 10-31 D-1 (가)) — ra_client 는 읽기 PAT 키 · 사람의 등록 PAT(_user_credentials ·
+    복호)를 잡지 않는다. 시험 test_ra_sender 가 게이트웨이 대역으로 실제 나간 Authorization 이 쓰기 PAT 뿐인지 본다."""
+    tree = ast.parse((APP_DIR / "ra_client.py").read_text(encoding="utf-8"))
+    strings = [n.value for n in ast.walk(tree) if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    assert READ_KEY not in strings
+    assert not [s for s in strings if "_user_credentials" in s or "portal_pat_enc" in s]
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {
+        n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    assert not names & {"identity", "credential_pat", "decrypt_pat", "unverified_claims", "upsert_credential"}
+    imported = {a.name for n in ast.walk(tree) if isinstance(n, (ast.Import, ast.ImportFrom)) for a in n.names}
+    assert "identity" not in imported
+
+
 # ---------------------------------------------------------------- MCP 쓰기 도구 목록(재설계 M2 S12 — 바뀌지 않는다)
 # 게이트웨이 위임 신원(entry.require_delegate)으로만 쓰는 도구. S12 의 검토 잡은 새 도구가 아니라 risk_start_job(mode='reviews')
 # 이고(M2.md 4.7), 새로 든 risk_get_cells·risk_get_expert_report 는 읽기다. risk_get_brief 는 읽기지만 결과를 낼 신원에게만 열어

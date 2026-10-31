@@ -174,6 +174,7 @@ def test_manual_label_applies_status_and_hooks(risk_store, clock):
     ra_ops = sync["ra"]["pending_ops"]
     assert [op["op"] for op in ra_ops] == ["merge_object", "link"]
     assert ra_ops[0]["props"] == {"status": "verified"}
+    assert ra_ops[0]["label_id"] == out["label_id"]          # 라벨마다 병합 op 가 다르다(머리 — RA 로 가는 값 밖, RK-01 반대 검토)
     assert ra_ops[1]["relation"] == "verified_by"
     assert ra_ops[1]["props"]["label_id"] == out["label_id"]
     assert out["ra_ops"] is True

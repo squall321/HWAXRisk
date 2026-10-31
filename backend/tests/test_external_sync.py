@@ -8,11 +8,11 @@ import pytest
 
 from app import common
 from app.adh_client import (EXTERNAL_SOURCE, IMPORT_PATH, MEMORY_AGENT, AdhClient, make_external_id)
-from app.ra_client import (RA_READ_TOOLS, RA_REPORT_TOOLS, RA_WRITE_TOOLS, SYNC_BASE_DELAY,
-                           SYNC_CHANNELS, SYNC_MAX_ATTEMPTS, SYNC_MAX_DELAY, McpHttpClient, RaClient,
+from app.ra_client import (RA_READ_TOOLS, RA_WRITE_TOOLS, SYNC_BASE_DELAY,
+                           SYNC_CHANNELS, SYNC_MAX_ATTEMPTS, SYNC_MAX_DELAY, WRITE_SECRET_KEY, McpHttpClient, RaClient,
                            complete_sync_ops, empty_sync, load_external_sync, mark_unavailable,
-                           note_sync_failure, parse_external_sync, queue_sync_ops, resync, save_external_sync,
-                           set_sync_state, sync_badge, sync_summary)
+                           note_sync_failure, parse_external_sync, queue_sync_ops, resync, save_external_sync, set_aside_sync_ops,
+                           sender_status, set_sync_state, sync_badge, sync_summary)
 
 OWNER = "me@example.com"
 TARGET = "diff:d1"
@@ -130,6 +130,15 @@ def test_queue_does_not_revive_an_unavailable_channel(target_store, frozen_clock
     assert entry["pending_ops"] == [{"op": "link_objects"}]  # op 는 잃지 않는다
 
 
+def test_queue_keeps_a_withheld_channel_withheld(target_store, frozen_clock):
+    """보류는 조직 공개로 풀 때까지다 — 새 op 가 쌓여도 pending 으로 돌아가지 않는다(§5.5.3 '새 패널 종료' 행)."""
+    set_sync_state(target_store, TARGET, "ra", "withheld")
+    queue_sync_ops(target_store, TARGET, "ra", [{"op": "link", "n": 1}])
+    entry = _sync_json(target_store)["ra"]
+    assert entry["state"] == "withheld" and entry["pending_ops"] == [{"op": "link", "n": 1}]
+    assert sync_badge(load_external_sync(target_store, TARGET)).startswith("RA 반영: withheld(1)")
+
+
 def test_resync_restores_both_channels(target_store, frozen_clock):
     mark_unavailable(target_store, TARGET, "ra", "no_credential")
     note_sync_failure(target_store, TARGET, "adh", "http_500")
@@ -140,17 +149,67 @@ def test_resync_restores_both_channels(target_store, frozen_clock):
         assert entry["attempts"] == 0 and entry["next_at"] == 0 and entry["last_error"] is None
 
 
-def test_the_external_sync_summary_says_nothing_is_sent_yet(target_store, frozen_clock):
-    """보내는 쪽(RA 쓰기·AIDataHub 반입)이 아직 배선되지 않았다 — 요약은 그 사유(sender_unwired)와 대기 건수, '보낸 것 없음' 을
-    말한다(리스크 앱 사람 자격 R3 · U-4). 종전에는 '대기' 로만 읽혀 언젠가 나가리라 오해했다."""
+def test_set_aside_ops_leave_the_queue_and_resync_puts_them_back_in_front(target_store, frozen_clock):
+    """따로 둔 op(그 op 에만 걸린 영구 거절)는 큐에서 빠져 dead_ops 에 까닭과 함께 있다 — 큐가 비면 done 이다. 재동기가 큐 앞으로 되돌린다
+    (따로 둔 op 는 큐에 남은 어느 op 보다 앞선 것이라 원래 순서다). 같은 꼴의 op 는 한 번만 되돌린다."""
+    a, b, c = {"op": "merge_object", "n": 1}, {"op": "link", "n": 2}, {"op": "link", "n": 3}
+    queue_sync_ops(target_store, TARGET, "ra", [a, b])
+    set_aside_sync_ops(target_store, TARGET, "ra", [{"op": a, "error": "value_collision: 겹침"}])
+    entry = _sync_json(target_store)["ra"]
+    assert entry["state"] == "pending" and entry["pending_ops"] == [b]
+    assert entry["dead_ops"] == [{"op": a, "error": "value_collision: 겹침", "at": NOW}]
+    set_aside_sync_ops(target_store, TARGET, "ra", [{"op": b, "error": "rejected: 축"}, {"op": a, "error": "value_collision: 또"}])
+    entry = _sync_json(target_store)["ra"]
+    assert entry["state"] == "done" and entry["pending_ops"] == []
+    assert [(d["op"], d["error"]) for d in entry["dead_ops"]] == [(a, "value_collision: 또"), (b, "rejected: 축")]
+
+    queue_sync_ops(target_store, TARGET, "ra", [c, a])                  # 같은 꼴의 op 가 다시 쌓였다
+    set_aside_sync_ops(target_store, TARGET, "ra", [{"op": c, "error": "rejected: 꼴"}])
+    assert _sync_json(target_store)["ra"]["pending_ops"] == [a]        # 이번에 따로 둔 것만 뺀다 — 예전 것과 같은 꼴이어도 새로 쌓인 op 는 남는다
+    resync(target_store, TARGET)
+    entry = _sync_json(target_store)["ra"]
+    assert entry["state"] == "pending" and entry["pending_ops"] == [a, b, c] and entry["dead_ops"] == []
+
+
+def test_the_external_sync_summary_says_why_nothing_is_sent(target_store, frozen_clock):
+    """RA 보내는 쪽은 박스 쓰기 PAT 가 있어야 켜진다(RK-01) — 없으면 요약은 그 까닭(credential_missing:<키>)과 대기 건수, '보낸 것
+    없음' 을 말한다(조용한 pending 이 아니다). AIDataHub 반입은 아직 보내는 쪽이 없어 sender_unwired 그대로다(R3 · U-4)."""
     queue_sync_ops(target_store, TARGET, "ra", [{"op": "create_object", "n": 1}, {"op": "create_object", "n": 2}])
-    summary = sync_summary(load_external_sync(target_store, TARGET))
+    off = sender_status(secrets={"HWAXRISK_PORTAL_PAT": "read-only"})
+    summary = sync_summary(load_external_sync(target_store, TARGET), status=off)
     assert summary == {
-        "ra": {"state": "pending", "pending_ops": 2, "reason": "sender_unwired",
-               "message": "RA 반영 안 됨 — 보내는 쪽이 아직 배선되지 않았다(M4). 대기 2건, 보낸 것 없음."},
-        "adh": {"state": "pending", "pending_ops": 0, "reason": "sender_unwired",
+        "ra": {"state": "pending", "pending_ops": 2, "dead_ops": 0, "reason": f"credential_missing:{WRITE_SECRET_KEY}",
+               "message": f"RA 반영 안 됨 — 박스에 RA 쓰기 자격({WRITE_SECRET_KEY})이 없어 보내는 쪽이 꺼져 있다. 대기 2건,"
+                          " 보낸 것 없음.",
+               # 거두기 셈(RK-01 거두기 — 사용자 결정 10-31 (가))은 RA 채널에 늘 실린다(객체 수 — RA 에 이미 없던 것은 따로 센다).
+               "retracted": 0, "retract_absent": 0, "retract_pending": 0, "retract_failed": 0, "retract_reasons": {}},
+        "adh": {"state": "pending", "pending_ops": 0, "dead_ops": 0, "reason": "sender_unwired",
                 "message": "AIDataHub 반영 안 됨 — 보내는 쪽이 아직 배선되지 않았다(M4). 대기 0건, 보낸 것 없음."}}
-    assert sync_summary(parse_external_sync("깨진 글")) == sync_summary(empty_sync())
+    assert sync_summary(parse_external_sync("깨진 글"), status=off) == sync_summary(empty_sync(), status=off)
+    # 설정 없이 부르면 지금 박스(시험 데이터 디렉터리 — secrets.env 없음)로 잰다.
+    assert sync_summary(load_external_sync(target_store, TARGET)) == summary
+
+
+def test_the_ra_summary_reason_follows_the_channel_state(target_store, frozen_clock):
+    """켜진 박스의 RA 요약 — 대기 · 재시도 대기 · 멈춤 · 보류 · 끝 · 없음이 reason 낱말과 글로 갈린다(last_error 의 앞 낱말)."""
+    on = sender_status(secrets={WRITE_SECRET_KEY: "rw"})
+
+    def ra():
+        return sync_summary(load_external_sync(target_store, TARGET), status=on)["ra"]
+
+    assert ra()["reason"] == "idle"
+    queue_sync_ops(target_store, TARGET, "ra", [{"op": "link", "n": 1}])
+    assert ra()["reason"] == "queued" and "대기 1건" in ra()["message"]
+    note_sync_failure(target_store, TARGET, "ra", "transient: create_object — 게이트웨이 HTTP 503 upstream")
+    assert ra()["reason"] == "transient" and "HTTP 503" in ra()["message"] and "실패 1회" in ra()["message"]
+    mark_unavailable(target_store, TARGET, "ra", "forbidden: create_object — 시스템 관리자 권한이 필요합니다.")
+    assert ra()["reason"] == "forbidden" and "재동기" in ra()["message"] and "시스템 관리자" in ra()["message"]
+    mark_unavailable(target_store, TARGET, "ra", "no_credential")              # 종전 꼴의 글은 거절로 읽고 글을 그대로 싣는다
+    assert ra()["reason"] == "rejected" and "no_credential" in ra()["message"]
+    set_sync_state(target_store, TARGET, "ra", "withheld")
+    assert ra()["reason"] == "withheld" and "조직 공개" in ra()["message"]
+    set_sync_state(target_store, TARGET, "ra", "done")
+    assert ra()["reason"] == "sent"
 
 
 def test_set_sync_state_rejects_unknown_channel(target_store):
@@ -248,22 +307,53 @@ def test_mcp_client_maps_failures_without_raising():
 def test_ra_client_without_pat_is_unavailable_and_silent():
     ra = RaClient("https://gw.test/mcp", None, client=_client(_boom))
     assert ra.available is False
-    assert ra.get_object(7) == {"ok": False, "error": "unavailable", "reason": "no_credential"}
-    assert ra.upsert_props(7, {"a": 1}) == {"ok": False, "error": "unavailable",
-                                            "reason": "no_credential"}
+    assert ra.get_object("risk_finding", 7) == {"ok": False, "error": "unavailable", "reason": "no_credential"}
+    assert ra.upsert_props("risk_finding", 7, {"a": 1}) == {"ok": False, "error": "unavailable",
+                                                            "reason": "no_credential"}
 
 
 def test_ra_client_only_calls_contracted_tools():
+    """계약은 지식 그래프 쓰기 4종 + 읽기 4종이다 — 보고서 도구는 박스 PAT 클라이언트의 계약 밖이다(보고서는 사람 이름, 사용자 결정 10-31)."""
     ra = RaClient("https://gw.test/mcp", "pat", client=_client(_boom))
-    assert ra.call_tool("delete_object", {}) == {"ok": False, "error": "tool_not_contracted",
-                                                 "detail": "delete_object"}
-    assert set(RA_WRITE_TOOLS + RA_READ_TOOLS + RA_REPORT_TOOLS) == {
+    for name in ("delete_object", "get_report", "update_report_draft"):
+        assert ra.call_tool(name, {}) == {"ok": False, "error": "tool_not_contracted", "detail": name}
+    assert set(RA_WRITE_TOOLS + RA_READ_TOOLS) == {
         "create_object", "update_object", "add_object_alias", "link_objects",
-        "get_object", "search_objects", "get_subgraph", "list_object_types",
-        "get_report", "update_report_draft"}
+        "get_object", "search_objects", "get_subgraph", "list_object_types"}
 
 
 def test_ra_upsert_props_merges_current_properties():
+    """RA MCP 의 인자 이름 그대로(get_object(type, id) · update_object(object_id, …)) 게이트웨이 별칭으로 부른다 — 가린 값은 되쓰지 않는다."""
+    calls: list[dict] = []
+    current = {"a": 1, "b": 2}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode())
+        if payload["method"] != "tools/call":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {}})
+        calls.append(payload["params"])
+        if payload["params"]["name"] == "reportarchive_get_object":
+            return _rpc_ok({"structuredContent": {"type": "risk_finding", "id": "7", "properties": current}})
+        return _rpc_ok({"structuredContent": {"updated": True}})
+
+    ra = RaClient("https://gw.test/mcp", "pat", client=_client(handler))
+    assert ra.upsert_props("risk_finding", 7, {"b": 9, "c": 3})["ok"] is True
+    assert [c["name"] for c in calls] == ["reportarchive_get_object", "reportarchive_update_object"]
+    assert calls[0]["arguments"] == {"type": "risk_finding", "id": "7"}
+    assert calls[1]["arguments"] == {"object_id": 7, "properties": {"a": 1, "b": 9, "c": 3}}
+
+    # 바뀔 것이 없으면 부르지 않는다 · 가린 칸은 patch 가 채우면 그 값, 못 채우면 보내지 않는다.
+    calls.clear()
+    assert ra.upsert_props("risk_finding", 7, {"a": 1}) == {"ok": True, "result": {"unchanged": True}}
+    current.update({"owner": "[가림:이름]", "memo": "연락 [가림:메일]"})
+    assert ra.upsert_props("risk_finding", 7, {"owner": "me@example.com"}) == {
+        "ok": False, "error": "masked_readback", "detail": ["memo"]}
+    assert [c["name"] for c in calls] == ["reportarchive_get_object", "reportarchive_get_object"]
+
+
+def test_ra_client_sends_the_ra_mcp_argument_names():
+    """래퍼의 인자 이름은 RA MCP 서명 그대로다(ReportArchive mcp_server — dev 사본 3ece194 기준). 종전에는 get_object 에 type 이 없고
+    update_object · add_object_alias 가 object_id 대신 id · entity_id, get_subgraph 가 entity_id 대신 id 를 보내 RA 가 받지 않았을 것이다."""
     calls: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -271,14 +361,54 @@ def test_ra_upsert_props_merges_current_properties():
         if payload["method"] != "tools/call":
             return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {}})
         calls.append(payload["params"])
-        if payload["params"]["name"] == "get_object":
-            return _rpc_ok({"structuredContent": {"object": {"properties": {"a": 1, "b": 2}}}})
         return _rpc_ok({"structuredContent": {"ok": True}})
 
     ra = RaClient("https://gw.test/mcp", "pat", client=_client(handler))
-    assert ra.upsert_props(7, {"b": 9, "c": 3})["ok"] is True
-    assert [c["name"] for c in calls] == ["get_object", "update_object"]
-    assert calls[1]["arguments"] == {"id": 7, "properties": {"a": 1, "b": 9, "c": 3}}
+    ra.get_object("incident", 5)
+    ra.get_subgraph("12", ["exhibits"], depth=2)
+    ra.create_object("design_trait", "char:a:b", "char:a:b", {"axis": "a"}, description="d")
+    ra.update_object("12", {"status": "vocab"})
+    ra.add_object_alias("12", "별칭")
+    ra.link_objects(1, 2, "exhibits", properties={"support": 2})
+    assert calls == [
+        {"name": "reportarchive_get_object", "arguments": {"type": "incident", "id": "5"}},
+        {"name": "reportarchive_get_subgraph", "arguments": {"entity_id": 12, "relations": ["exhibits"], "depth": 2}},
+        {"name": "reportarchive_create_object", "arguments": {"type_slug": "design_trait", "value": "char:a:b",
+                                                              "code": "char:a:b", "properties": {"axis": "a"},
+                                                              "description": "d"}},
+        {"name": "reportarchive_update_object", "arguments": {"object_id": 12, "properties": {"status": "vocab"}}},
+        {"name": "reportarchive_add_object_alias", "arguments": {"object_id": 12, "alias": "별칭"}},
+        {"name": "reportarchive_link_objects", "arguments": {"src_id": 1, "dst_id": 2, "relation": "exhibits",
+                                                             "properties": {"support": 2}}}]
+
+
+def test_ra_update_object_sends_only_the_fields_it_is_given():
+    """거두기(RK-01)는 RA update_object 의 value · description 을 쓴다(ReportArchive mcp_server — dev 사본 3ece194: object_id · value · code ·
+    description · properties, None 인 칸은 RA MCP 가 뺀다). 넘긴 칸만 싣고, 빈 설명은 빈 글 그대로 보낸다(RA 가 설명을 비운다)."""
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode())
+        if payload["method"] != "tools/call":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {}})
+        calls.append(payload["params"]["arguments"])
+        return _rpc_ok({"structuredContent": {"updated": True}})
+
+    ra = RaClient("https://gw.test/mcp", "pat", client=_client(handler))
+    ra.update_object("12", value="비공개@p1", description="")
+    ra.update_object(13, {"visibility": "private"}, value="비공개@t#c")
+    assert calls == [{"object_id": 12, "value": "비공개@p1", "description": ""},
+                     {"object_id": 13, "value": "비공개@t#c", "properties": {"visibility": "private"}}]
+
+
+def test_a_withheld_channel_whose_queue_empties_settles_done(target_store, frozen_clock):
+    """보류(withheld) 대상이 거두기 op 만 남았다가 그것을 다 보내면 보류할 것이 없다 — done 이다(대기 0건인 보류로 남지 않는다)."""
+    retract = {"op": "retract", "reason": "private", "kind": "project", "portal_id": "p_now", "project_id": "p_now", "by": OWNER}
+    queue_sync_ops(target_store, TARGET, "ra", [retract])
+    set_sync_state(target_store, TARGET, "ra", "withheld")
+    complete_sync_ops(target_store, TARGET, "ra", [retract])
+    entry = _sync_json(target_store)["ra"]
+    assert entry["state"] == "done" and entry["pending_ops"] == []
 
 
 def test_ra_401_is_recorded_as_unavailable_on_the_target(target_store, frozen_clock):

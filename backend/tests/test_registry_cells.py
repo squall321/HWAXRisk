@@ -233,6 +233,7 @@ CARD_REVIEW_SITES: dict[tuple[str, str], str] = {
     ("metrics.py", "_load_atoms"): "과제 가로지르는 지표 — M2 #9",
     ("metrics.py", "sync_labels"): "과제 가로지르는 지표 — M2 #9",
     ("nightly.py", "scan_unclassified"): "야간 미분류 스캔 — M2 #9",
+    ("ra_client.py", "_finding_object"): "라벨 op 의 등록부 행 — metrics._finding_row 와 같은 거름(RK-01)",
     ("routes.py", "_next_human_claim_uid"): "사람 finding 순번 — 카드 finding 이 걸릴 수 없다",
     ("routes.py", "put_curation"): "의심 문구 회수 — M2 #9",
     ("export.py", "clip_queue_payload"): "독스트링(거름 아님)",

@@ -42,6 +42,11 @@ def test_lifespan_wires_runner_and_box_state(client):
     assert isinstance(app.state.hostname, str) and app.state.hostname
     assert app.state.box_match is True
     assert app.state.secrets_valid is False  # 테스트 데이터 루트에는 secrets.env 가 없다.
+    # RA 보내는 쪽이 러너에 꽂혀 있다(RK-01) — 쓰기 PAT 가 없는 박스라 꺼져 있고 그 까닭을 말한다(아무것도 부르지 않는다).
+    from app import ra_client
+
+    assert isinstance(app.state.runner.external_sync_send, ra_client.RaSender)
+    assert app.state.runner.external_sync_send.off_reason() == f"credential_missing:{ra_client.WRITE_SECRET_KEY}"
     # /api/health 형식은 고정이고 러너 상태를 싣지 않는다.
     # /api/health 는 러너 상태를 싣지 않는다(경고는 backup_unencrypted 하나뿐, plan §5.2.5 (3a) ③).
     assert set(client.get("/api/health").json()) <= {"ok", "app_version", "schema_version", "warnings"}

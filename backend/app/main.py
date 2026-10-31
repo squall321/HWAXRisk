@@ -12,7 +12,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from app import config, engine_client, identity, review_quality, review_runner
+from app import config, engine_client, identity, ra_client, review_quality, review_runner
 from app.errors import AppError
 from app.mcp_server import mcp
 from app.risk_store import close_store, get_store
@@ -199,8 +199,12 @@ async def _lifespan(app: FastAPI):
     # ⑦ 러너 스레드. 엔진은 주입식이라 러너 자체는 LLM 을 부르지 않는다(plan §6.7.1 (A) 경로).
     # 검토 잡 진행판의 품질 칸 — 진행판이 60초마다 불러 progress_json.quality 에 넣는다(M2.md 5절 #16, S11).
     review_runner.QUALITY_HOOK = review_quality.progress_hook
+    # 외부 반영 보내는 쪽(RK-01 — 사용자 결정 10-31 D-1 (가)) — sync_loop 가 60초마다 RA 지식 그래프 op 를 박스 쓰기 PAT 하나로 보낸다.
+    # 키는 틱마다 다시 읽는다 — 없으면 아무것도 부르지 않고 sync_summary 가 그 사실을 말하며, 넣으면 재기동 없이 다음 주기부터 나간다.
+    ra_sender = ra_client.RaSender(settings)
+    log.info("%s", ra_client.sender_status(settings)["message"])
     runner = RiskRunner(store, settings, engine=engine_client.build_engine(store, settings), lock=runner_lock,
-                        review_engine=engine_client.build_review_engine(store, settings))
+                        review_engine=engine_client.build_review_engine(store, settings), external_sync_send=ra_sender)
     app.state.runner = runner
     try:
         async with mcp.session_manager.run():
