@@ -104,17 +104,18 @@ export function adviceText(advice: string | null | undefined): string | null {
 }
 
 /**
- * M2 시절 잡 뒤의 사슬 시작(요청서 1절) — M2 앱이 세운 검토 잡이 끝난 대상에는 쟁점 · 종합이 저절로 서지 않는다. 사슬도 판도 없고
- * 마지막 검토 잡이 끝났고 대기 셀이 없으면 '쟁점·종합 시작'(검토 잡을 한 번 더 — 셀이 다 닫혀 호출 없이 끝나고 그 끝에서 사슬이 선다).
+ * M2 시절 잡 뒤의 사슬 시작(요청서 1절) — M2 앱이 세운 검토 잡이 끝난 대상에는 쟁점 · 종합이 저절로 서지 않는다. 사슬이 없고 마지막
+ * 검토 잡이 사슬 표지 없이(`job.chain` false — 서버 칸, 10-31 risk-flow) 끝났고 대기 셀이 없으면 '쟁점·종합 시작'(검토 잡을 한 번 더 —
+ * 셀이 다 닫혀 호출 없이 끝나고 그 끝에서 사슬이 선다). 길잡이(entry)와 같은 판정이다 — 전에는 칸이 없어 '판도 없다' 로 어림했다.
  */
-export function chainStartVisible(coverage: Pick<Coverage, "stage" | "report" | "review" | "flow"> | null): boolean {
+export function chainStartVisible(coverage: Pick<Coverage, "stage" | "review" | "flow"> | null): boolean {
   if (!coverage || coverage.flow !== "cells") return false;
   const review = coverage.review;
   return (
     coverage.stage === null &&
-    coverage.report === null &&
     review !== null &&
     review.job?.state === "completed" &&
+    review.job.chain === false &&
     review.cells.by_state.pending === 0
   );
 }

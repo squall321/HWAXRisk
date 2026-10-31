@@ -90,11 +90,12 @@ export function IssueDetail({ row }: { row: IssueRow }) {
           {
             label: "결과 칸",
             hint: "outcome_json",
-            // 결과가 있는데 칸이 비면 서버가 이 행에 싣지 않은 것이다(routes._issue_row_out 이 늘 null 을 싣는다 — 백엔드에 청했다).
+            // 결과 칸은 원장 값 그대로 온다(10-31 risk-flow 전에는 서버가 늘 null 을 실었다). 결과가 있는데 칸이 비면 결정문을 읽지
+            // 못해 판정 못 함으로 끝난 쟁점처럼 원장에 칸이 없는 것이다.
             value: row.outcome_json ? (
               <code className="whitespace-pre-wrap">{fmtJson(row.outcome_json)}</code>
             ) : row.outcome ? (
-              <span className="text-muted-foreground">서버가 이 행에 결과 칸을 싣지 않았습니다 — 결과 낱말만 있습니다.</span>
+              <span className="text-muted-foreground">이 결과에는 결과 칸이 없습니다 — 결과 낱말만 있습니다.</span>
             ) : (
               "—"
             ),

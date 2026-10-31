@@ -15,7 +15,7 @@ function me(auto, extra = {}) {
   };
 }
 const AUTO = { enabled: true, due: true, due_reason: "absent", last_source: null, last_at: null, last_error: null,
-  last_error_kind: null, last_error_at: null, how_to_stop: "멈추려면 끈다" };
+  last_error_kind: null, last_error_at: null, paused_until: null, how_to_stop: "멈추려면 끈다" };
 
 test("자동 등록은 로그인한 사람의 enabled && due 일 때만이다", () => {
   assert.equal(autoRegisterWanted(me(AUTO)), true);
@@ -57,12 +57,14 @@ test("발급 청중은 mcp-gateway · step-forge 둘이고 이름은 hwax-risk �
   assert.deepEqual([...MINT_BODY.scopes], ["read"]);
 });
 
-// ── 등록이 실패한 뒤 — 방금 받은 PAT 를 버려 두지 않는다 · 이 브라우저의 쉼 ───────────────────────────────
+// ── 등록이 실패한 뒤 — 방금 받은 PAT 를 버려 두지 않는다 · 쉼은 서버가 든다 ─────────────────────────────
 
-const { AUTO_HELD_KEY, AUTO_HOLD_FINAL_MS, AUTO_HOLD_TRANSIENT_MS, createAutoHold } = load("api/autoPortalPat.js");
-const { PortalMintError, PortalRegisterError, autoHoldOf, refusedBeforeStore, registerFromPortal } = load("api/portalPat.js");
+const autoPortalPat = load("api/autoPortalPat.js");
+const { autoPausedUntil } = autoPortalPat;
+const { PortalMintError, PortalRegisterError, refusedBeforeStore, registerFromPortal } = load("api/portalPat.js");
 const { ApiError, NetworkError } = load("api/risk.api.js");
 const { describePatFailure } = load("api/patErrors.js");
+const samples = load("contract/serverSamples.js");
 
 test("자격 암호화 키가 Fernet 키가 아닌 박스는 자동으로 받지 않는다(등록은 반드시 422) — 키 없음 · 개발용 폴백은 등록이 되므로 막지 않는다", () => {
   const box = (codes) => ({ hostname: "h", secrets_valid: false, cred_key_present: true, portal_base: "x", reasons: codes.map((code) => ({ code })) });
@@ -71,39 +73,26 @@ test("자격 암호화 키가 Fernet 키가 아닌 박스는 자동으로 받지
   assert.equal(autoRegisterWanted(me(AUTO, { box: box(["missing_required"]) })), true);
 });
 
-test("쉼 표지 — {until, code} 만 담고, 지난 쉼 · 읽을 수 없는 값은 없는 것이며, 저장소가 던져도 이 페이지 안에서는 쉰다", () => {
-  const store = new Map();
-  const storage = {
-    getItem: (k) => (store.has(k) ? store.get(k) : null),
-    setItem: (k, v) => store.set(k, String(v)),
-    removeItem: (k) => store.delete(k),
-  };
-  const hold = createAutoHold(() => storage);
-  assert.equal(hold.current(1000), null);
-  hold.hold({ until: 5000, code: "portal_unreachable" });
-  assert.deepEqual(JSON.parse(store.get(AUTO_HELD_KEY)), { until: 5000, code: "portal_unreachable" });
-  assert.deepEqual(createAutoHold(() => storage).current(4999), { until: 5000, code: "portal_unreachable" }); // 다른 탭
-  assert.equal(hold.current(5000), null);
-  hold.clear();
-  assert.equal(store.has(AUTO_HELD_KEY), false);
-  store.set(AUTO_HELD_KEY, "{망가진");
-  assert.equal(hold.current(0), null);
-  const broken = createAutoHold(() => {
-    throw new Error("SecurityError");
-  });
-  broken.hold({ until: 9000, code: "pat_invalid" });
-  assert.deepEqual(broken.current(1), { until: 9000, code: "pat_invalid" });
+test("쉼은 서버가 든다 — 웹 등록이 거절되면 서버가 적고(last_error · paused_until) 쉬는 동안 due 가 false 라 앱을 열어도 받지 않는다", () => {
+  // 실 서버 견본(PUT /me/portal-pat source web 이 422 pat_email_mismatch 로 거절된 뒤의 GET /me portal_pat).
+  const auto = samples.portalPatPaused.auto;
+  assert.equal(auto.due, false);
+  assert.equal(auto.due_reason, "absent");
+  assert.match(auto.last_error, /^web-pat_email_mismatch: /);
+  assert.equal(autoRegisterWanted(me(auto)), false);
+  const until = auto.paused_until;
+  assert.equal(autoPausedUntil(auto, (until - 1) * 1000), until);
+  assert.equal(autoPausedUntil(auto, until * 1000), null); // 지난 쉼은 말하지 않는다(화면을 연 채 끝날 수 있다)
+  assert.equal(autoPausedUntil({ ...auto, enabled: false }, 0), null); // 꺼져 있으면 쉼이 아니다
+  assert.equal(autoPausedUntil(AUTO, 0), null);
+  assert.equal(autoPausedUntil(null, 0), null);
+  // 브라우저는 쉼을 들지 않는다 — localStorage 표지 · 쉼 길이 상수가 없다(서버의 쉼과 어긋날 두 벌이 없다).
+  for (const gone of ["AUTO_HELD_KEY", "AUTO_HOLD_TRANSIENT_MS", "AUTO_HOLD_FINAL_MS", "createAutoHold"]) {
+    assert.equal(autoPortalPat[gone], undefined, gone);
+  }
 });
 
-test("쉼의 길이 — 일시 실패(네트워크 · 5xx · portal_unreachable)는 10분, 사람이 고칠 거절은 6시간, 발급 단계의 실패는 쉬지 않는다", () => {
-  const now = 1_000_000;
-  const of = (rejection) => autoHoldOf(new PortalRegisterError(rejection, "jti-1", "revoked"), now);
-  assert.deepEqual(of(new ApiError(502, "portal_unreachable", "x")), { until: now + AUTO_HOLD_TRANSIENT_MS, code: "portal_unreachable" });
-  assert.deepEqual(of(new NetworkError("끊김")), { until: now + AUTO_HOLD_TRANSIENT_MS, code: "network" });
-  assert.deepEqual(of(new ApiError(422, "pat_email_mismatch", "x")), { until: now + AUTO_HOLD_FINAL_MS, code: "pat_email_mismatch" });
-  assert.equal(autoHoldOf(new PortalMintError(403, "권한"), now), null);
-  assert.equal(AUTO_HOLD_TRANSIENT_MS, 600_000); // 백엔드 AUTO_RETRY_TRANSIENT_S
-  // 저장 전 거절 — 4xx 와 502 portal_unreachable(포털 검증에 못 닿음). 다른 5xx · 네트워크는 저장됐을 수도 있다.
+test("저장 전 거절 — 4xx 와 502 portal_unreachable(포털 검증에 못 닿음)이고, 다른 5xx · 네트워크는 저장됐을 수도 있다", () => {
   assert.equal(refusedBeforeStore(new ApiError(422, "cred_key_absent", "x")), true);
   assert.equal(refusedBeforeStore(new ApiError(502, "portal_unreachable", "x")), true);
   assert.equal(refusedBeforeStore(new ApiError(500, "E500", "x")), false);

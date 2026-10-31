@@ -1,5 +1,5 @@
 // 대상 화면의 순수 판정 — 좌석 까닭 code 의 사람 말(ECAD 의존 영역) · 사람이 옮길 수 있는 좌석 · 도는 패널의 마지막 신호(ecad-1031 §9 · B34 143 · 486)
-import type { CoverageStatus, JobSignal, ReviewWorkerSignal, Seat } from "../types";
+import type { CoverageJob, CoverageStatus, JobSignal, ReviewWorkerSignal, Seat } from "../types";
 
 /**
  * 좌석 `reason` code 의 사람 말 — code 는 그대로 보이고 이 말을 덧붙인다. `ecad_absent` 는 대상 종류마다 뜻이 다르다(요청서 9절).
@@ -66,4 +66,24 @@ export function workerSignalView(worker: ReviewWorkerSignal): { worker: string; 
   const idle = worker.frame_idle_s;
   if (idle === null || idle === undefined) return { worker: who, text: "아직 신호 없음", stale: false };
   return { worker: who, text: `마지막 신호 ${idle}초 전`, stale: idle > SIGNAL_STALE_S };
+}
+
+/** 패널 잡이 멈춘 까닭 code 의 사람 말 — 모르는 code 는 code 그대로 보인다. */
+const PANEL_PAUSE_LABEL: Record<string, string> = {
+  user: "사람이 멈춤",
+  diminishing: "수확 체감",
+  daily_cap: "하루 상한",
+  external_worker: "외부 응답자 워커 없음 — 내 Claude Code 에서 워크플로를 다시 돌린 뒤 재개",
+};
+
+/**
+ * 진행판 패널 잡이 멈춘 까닭 — 정지 까닭(pause_reason)이 먼저이고 없으면 보류 코드(hold_code)다. 외부 응답자 패널이 워커가 없어 멈춘
+ * 잡은 pause_reason 이 비고 hold_code 가 external_worker 다 — 서버가 그 칸을 싣기 전(10-31 risk-flow)에는 '모름' 이었다. 둘 다 없으면 null.
+ */
+export function panelJobPause(
+  job: Pick<NonNullable<CoverageJob>, "pause_reason" | "hold_code">,
+): { code: string; label: string; externalWorker: boolean } | null {
+  const code = job.pause_reason ?? job.hold_code ?? null;
+  if (!code) return null;
+  return { code, label: PANEL_PAUSE_LABEL[code] ?? code, externalWorker: job.hold_code === "external_worker" };
 }

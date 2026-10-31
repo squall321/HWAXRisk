@@ -6,8 +6,10 @@ import type {
   Coverage,
   IssueList,
   IssueRow,
+  PortalPatSummary,
   Registry,
   SnapshotHeader,
+  SnapshotState,
   SynthReportPage,
 } from "../types";
 
@@ -182,6 +184,7 @@ export const coverageCells = sample<Coverage>()({
     "job": {
       "id": "7376fbf2e2ec421fb27f919a5ba13afb",
       "mode": "reviews",
+      "chain": true,
       "state": "queued",
       "hold_code": null,
       "hold_until": null,
@@ -514,6 +517,7 @@ export const coveragePausedConsent = sample<Coverage>()({
     "job": {
       "id": "24aa4b0cfde648c88587016781ad72df",
       "mode": "reviews",
+      "chain": true,
       "state": "paused",
       "hold_code": "consent_extra",
       "hold_until": null,
@@ -972,13 +976,16 @@ export const closureCells = sample<ClosureCells>()({
   ]
 });
 
-/** 쟁점 목록 — 끝난 쟁점 · 사람이 올린 쟁점 · 상한 밖 쟁점(행은 셋만). outcome_json 은 서버가 늘 null 로 싣는다(백엔드에 청했다). */
+/**
+ * 쟁점 목록 — 끝난 쟁점(상향 · 닻 원자 없어 판정 못 함)과 상한 밖 쟁점(행은 셋만, 10-31 risk-flow 하네스 응답). outcome_json 은
+ * 원장 값 그대로다 — 그 전 서버는 늘 null 을 실었다(routes._issue_row_out 의 `_loads(…, None)`).
+ */
 export const issueList = sample<IssueList>()({
-  "target_key": "diff:220d3f493372488c978fefa91334eb1e",
+  "target_key": "diff:c9ab40e90bbb423fbda517858a65ed20",
   "total": 5,
   "limit": 100,
   "offset": 0,
-  "ledger_rev": "dd1f00ca80331f67",
+  "ledger_rev": "eb3978db71d7ecbb",
   "cap": {
     "base": 2,
     "hard": 2,
@@ -986,7 +993,7 @@ export const issueList = sample<IssueList>()({
   },
   "rows": [
     {
-      "issue_id": "iss-4232cfa0e43d",
+      "issue_id": "iss-2a94004f3767",
       "rank": 1,
       "types": [
         "held_fail"
@@ -998,22 +1005,31 @@ export const issueList = sample<IssueList>()({
       "state": "resolved",
       "state_reason": null,
       "outcome": "escalated",
-      "outcome_json": null,
+      "outcome_json": {
+        "atom_finding_ids": [
+          "172a0bf9fcef43d89419beaa391d1c22#F1"
+        ],
+        "contest_note": "",
+        "grade_after": "경험칙",
+        "judgement_after": "FAIL",
+        "panel_id": "172a0bf9fcef43d89419beaa391d1c22",
+        "severity_after": "치명"
+      },
       "distribution": {
-        "raisers": 3,
+        "raisers": 4,
         "raisers_by_domain": {
           "mech": 2,
-          "xd": 1
+          "xd": 2
         },
         "by_judgement_claimed": {
-          "FAIL": 3
+          "FAIL": 4
         },
         "by_severity": {
-          "중대": 3
+          "중대": 4
         },
         "opposers": 0
       },
-      "panel_id": "cd8001176b084d08a926fa8736b4ba06",
+      "panel_id": "172a0bf9fcef43d89419beaa391d1c22",
       "seats": [
         {
           "key": "mech-test-seal",
@@ -1042,17 +1058,80 @@ export const issueList = sample<IssueList>()({
       "reargue": null
     },
     {
-      "issue_id": "iss-e200f9ff9f98",
-      "rank": 3,
+      "issue_id": "iss-b82ef4ca0007",
+      "rank": 2,
       "types": [
         "held_fail"
       ],
       "p_class": "P1",
       "priority": 3.36,
-      "anchor_cluster_key": "6d60a57e800f",
-      "unit_id": "u-d9cee7dd6041",
-      "state": "queued",
-      "state_reason": "human",
+      "anchor_cluster_key": "61aa2e165c3c",
+      "unit_id": "u-c6d4d4298036",
+      "state": "inconclusive",
+      "state_reason": "no_matching_atom",
+      "outcome": "undetermined",
+      "outcome_json": {
+        "atom_finding_ids": [],
+        "contest_note": "",
+        "grade_after": null,
+        "judgement_after": null,
+        "panel_id": "63ffa587c2594f009685dfafc9339560",
+        "severity_after": null
+      },
+      "distribution": {
+        "raisers": 4,
+        "raisers_by_domain": {
+          "mech": 2,
+          "xd": 2
+        },
+        "by_judgement_claimed": {
+          "FAIL": 4
+        },
+        "by_severity": {
+          "중대": 4
+        },
+        "opposers": 0
+      },
+      "panel_id": "63ffa587c2594f009685dfafc9339560",
+      "seats": [
+        {
+          "key": "mech-test-seal",
+          "domain": "mech",
+          "issue_role": "raiser"
+        },
+        {
+          "key": "xd-syn-0",
+          "domain": "xd",
+          "issue_role": "raiser"
+        },
+        {
+          "key": "sim-syn-0",
+          "domain": "sim",
+          "issue_role": "adjacent"
+        },
+        {
+          "key": "sim-syn-1",
+          "domain": "sim",
+          "issue_role": "adjacent"
+        }
+      ],
+      "selected_round": 1,
+      "attempts": 1,
+      "charged": 0,
+      "reargue": null
+    },
+    {
+      "issue_id": "iss-17052ec6e667",
+      "rank": 4,
+      "types": [
+        "held_fail"
+      ],
+      "p_class": "P1",
+      "priority": 3.36,
+      "anchor_cluster_key": "da7a96e22979",
+      "unit_id": "u-c15fc1038497",
+      "state": "untried_cap",
+      "state_reason": "cap",
       "outcome": null,
       "outcome_json": null,
       "distribution": {
@@ -1075,48 +1154,14 @@ export const issueList = sample<IssueList>()({
       "attempts": 0,
       "charged": 0,
       "reargue": null
-    },
-    {
-      "issue_id": "iss-e7fda2413e72",
-      "rank": 5,
-      "types": [
-        "held_fail"
-      ],
-      "p_class": "P1",
-      "priority": 3.36,
-      "anchor_cluster_key": "fa6d712bdc4e",
-      "unit_id": "u-9fd76670057f",
-      "state": "untried_cap",
-      "state_reason": "cap",
-      "outcome": null,
-      "outcome_json": null,
-      "distribution": {
-        "raisers": 3,
-        "raisers_by_domain": {
-          "mech": 2,
-          "xd": 1
-        },
-        "by_judgement_claimed": {
-          "FAIL": 3
-        },
-        "by_severity": {
-          "중대": 3
-        },
-        "opposers": 0
-      },
-      "panel_id": null,
-      "seats": [],
-      "selected_round": 1,
-      "attempts": 0,
-      "charged": 0,
-      "reargue": null
     }
   ]
 });
 
 /**
  * 다시 토의 표기가 선 쟁점 행 둘 — 근거가 바뀌어 선 표기(issues._reraise — 칸이 다 있다)와, 사람이 다시 올린 쟁점의 새 패널이
- * 판정 못 함을 낸 표기(issues._keep_verdict — label · new_panel_failed 뿐). 뒤의 꼴을 누르면 화면 전체가 백지였다(raisers_added.length).
+ * 판정 못 함을 낸 표기(issues._keep_verdict — 10-31 risk-flow 전에 선 행은 label · new_panel_failed 뿐, 뒤에는 at · round 도 선다 —
+ * issueRepanelFailedRow). 뒤의 꼴을 누르면 화면 전체가 백지였다(raisers_added.length).
  */
 export const issueReargueRows = sample<IssueRow[]>()([
   {
@@ -2000,3 +2045,263 @@ export const projectSnapshotHeaders = sample<SnapshotHeader[]>()([
     "created_at": 1756600000
   }
 ]);
+
+/** 사람이 다시 올린 결과 쟁점의 새 패널이 결정을 못 낸 행(issues._keep_verdict) — 10-31 risk-flow 뒤의 꼴(label · new_panel_failed ·
+ * at · round, 근거가 바뀐 표기와 같은 at · round 다). */
+export const issueRepanelFailedRow = sample<IssueRow>()({
+  "issue_id": "iss-2a94004f3767",
+  "rank": 1,
+  "types": [
+    "held_fail"
+  ],
+  "p_class": "P1",
+  "priority": 3.36,
+  "anchor_cluster_key": "34e330c1bddc",
+  "unit_id": "u-911b94d08006",
+  "state": "resolved",
+  "state_reason": null,
+  "outcome": "escalated",
+  "outcome_json": {
+    "atom_finding_ids": [
+      "172a0bf9fcef43d89419beaa391d1c22#F1"
+    ],
+    "contest_note": "",
+    "grade_after": "경험칙",
+    "judgement_after": "FAIL",
+    "panel_id": "172a0bf9fcef43d89419beaa391d1c22",
+    "severity_after": "치명"
+  },
+  "distribution": {
+    "raisers": 4,
+    "raisers_by_domain": {
+      "mech": 2,
+      "xd": 2
+    },
+    "by_judgement_claimed": {
+      "FAIL": 4
+    },
+    "by_severity": {
+      "중대": 4
+    },
+    "opposers": 0
+  },
+  "panel_id": "5050d76762f64e3795c77322def2cda8",
+  "seats": [
+    {
+      "key": "mech-test-seal",
+      "domain": "mech",
+      "issue_role": "raiser"
+    },
+    {
+      "key": "xd-syn-0",
+      "domain": "xd",
+      "issue_role": "raiser"
+    },
+    {
+      "key": "sim-syn-0",
+      "domain": "sim",
+      "issue_role": "adjacent"
+    },
+    {
+      "key": "sim-syn-1",
+      "domain": "sim",
+      "issue_role": "adjacent"
+    }
+  ],
+  "selected_round": 1,
+  "attempts": 2,
+  "charged": 0,
+  "reargue": {
+    "label": "패널 판정 — 근거 바뀜, 다시 토의 필요(새 패널 결정 못 함)",
+    "at": 1793442339,
+    "new_panel_failed": {
+      "at": 1793442339,
+      "panel_id": "5050d76762f64e3795c77322def2cda8",
+      "reason": "no_decision"
+    },
+    "round": 1
+  }
+});
+
+/** 패널 대상 진행판 — Claude 패널 잡이 외부 응답자 워커가 없어 멈췄다(pause_reason 없음 · hold_code external_worker — 10-31 risk-flow 에
+ * 생긴 두 칸). */
+export const coveragePanelHeld = sample<Coverage>()({
+  "target_key": "t1",
+  "job": {
+    "id": "f8befdcb27b34fc882d2a798f66ce36e",
+    "tier": "A",
+    "state": "paused",
+    "pause_reason": null,
+    "hold_code": "external_worker",
+    "hold_until": null,
+    "panels_done": 0,
+    "panels_total": 1,
+    "error": "chair_failed: 의장 실패 — 외부 응답자가 없다 — 설정 EXTERNAL_LLM_WAIT_S — 잡을 멈췄다(보류 external_worker · 좌석 재시도는 차감하지 않았다). 잡 주인의 Claude Code 에서 워크플로 hwax-risk-claude 를 그 사람의 PAT 로 (다시) 돌린 뒤 재개한다",
+    "signal": null,
+    "llm": "claude",
+    "consent_external": {
+      "at": 1793442339,
+      "by": "peer@x",
+      "source": "web"
+    }
+  },
+  "roster_size": 7,
+  "by_domain": {
+    "mech": {
+      "pending": 2
+    },
+    "pcb": {
+      "pending": 1
+    },
+    "rel": {
+      "pending": 1
+    },
+    "sim": {
+      "pending": 2
+    },
+    "xd": {
+      "pending": 1
+    }
+  },
+  "by_status": {
+    "abstain": 0,
+    "assigned": 0,
+    "carried": 0,
+    "deferred": 0,
+    "done": 0,
+    "done_weak": 0,
+    "failed": 0,
+    "pending": 7,
+    "running": 0,
+    "skipped": 0
+  },
+  "strong": {
+    "done": 0,
+    "done_weak": 0,
+    "ratio": null
+  },
+  "unseated_n": 7,
+  "level": "C0",
+  "close_level": "C2",
+  "flow": "panels",
+  "units": {
+    "status": "none"
+  },
+  "review": null,
+  "external_sync": {
+    "ra": {
+      "state": "pending",
+      "pending_ops": 0,
+      "dead_ops": 0,
+      "reason": "credential_missing:HWAXRISK_PORTAL_PAT_RW",
+      "message": "RA 반영 안 됨 — 박스에 RA 쓰기 자격(HWAXRISK_PORTAL_PAT_RW)이 없어 보내는 쪽이 꺼져 있다. 대기 0건, 보낸 것 없음.",
+      "retracted": 0,
+      "retract_absent": 0,
+      "retract_pending": 0,
+      "retract_failed": 0,
+      "retract_reasons": {}
+    },
+    "adh": {
+      "state": "pending",
+      "pending_ops": 0,
+      "dead_ops": 0,
+      "reason": "sender_unwired",
+      "message": "AIDataHub 반영 안 됨 — 보내는 쪽이 아직 배선되지 않았다(M4). 대기 0건, 보낸 것 없음."
+    }
+  }
+});
+
+/** `GET /me` 의 portal_pat — 웹 등록(source web)이 거절된 뒤 쉬는 중(last_error · paused_until, 10-31 risk-flow). 박스 칸은 싣지 않는다. */
+export const portalPatPaused = sample<PortalPatSummary>()({
+  "registered": false,
+  "email": null,
+  "groups": [],
+  "exp": null,
+  "auto": {
+    "enabled": true,
+    "due": false,
+    "due_reason": "absent",
+    "last_source": null,
+    "last_at": null,
+    "last_error": "web-pat_email_mismatch: PAT 의 email 이 현재 사용자와 다릅니다.",
+    "last_error_kind": "final",
+    "last_error_at": 1793442339,
+    "paused_until": 1793463939,
+    "how_to_stop": "자동 등록이 켜져 있는 동안은 등록된 PAT 를 지우거나 포털에서 폐기해도 웹 리스크 앱을 열 때나 Claude 에서 hwax_risk 도구를 부를 때 다시 만든다 — 멈추는 길은 웹 리스크 앱 설정 화면의 '자동 등록' 스위치다(끄면 화면도 게이트웨이도 저절로 받지 않는다)."
+  }
+});
+
+/** 스냅샷 상태의 요구 여유(`signals["req.margin"]`)와 결측 — 동결이 요구를 대조했다(10-31 risk-flow — 위반 · 여유 · 미측정 한 줄씩). */
+export const snapshotStateMargin = sample<Pick<SnapshotState, "signals" | "missing">>()({
+  "signals": {
+    "req.margin": {
+      "derived_from": [],
+      "kind": "table",
+      "known": true,
+      "refs": [
+        "req:plate1_t",
+        "req:plate2_t",
+        "req:ghost_t",
+        "d:plate1_t",
+        "d:plate2_t",
+        "d:ghost_t"
+      ],
+      "text": "req:plate1_t lte 1.0 mm actual=1.2 margin=-0.2 · req:plate2_t between [0.9,1.5] mm actual=1.0 margin=0.1 · req:ghost_t lte 2.0 mm actual=미측정 margin=미측정",
+      "unit": null,
+      "value": [
+        {
+          "actual": 1.2,
+          "known": true,
+          "limit": 1.0,
+          "margin": -0.2,
+          "name": "plate1_t",
+          "op": "lte",
+          "rel": -0.2,
+          "status": "candidate",
+          "unit": "mm"
+        },
+        {
+          "actual": 1.0,
+          "known": true,
+          "limit": [
+            0.9,
+            1.5
+          ],
+          "margin": 0.1,
+          "name": "plate2_t",
+          "op": "between",
+          "rel": 0.167,
+          "status": "candidate",
+          "unit": "mm"
+        },
+        {
+          "actual": null,
+          "known": false,
+          "limit": 2.0,
+          "margin": null,
+          "name": "ghost_t",
+          "op": "lte",
+          "rel": null,
+          "status": "candidate",
+          "unit": "mm"
+        }
+      ]
+    }
+  },
+  "missing": {
+    "dyna_absent": false,
+    "dyna_capture_failed": false,
+    "dyna_result_absent": false,
+    "ecad_absent": true,
+    "ecad_capture_failed": false,
+    "iface_kinds_absent": false,
+    "material_density_unsourced": false,
+    "mcad_absent": false,
+    "mcad_capture_failed": false,
+    "req_absent": false,
+    "result_kind_mismatch": false,
+    "scenario_uncovered": false,
+    "volume_null": false,
+    "world_transform_absent": false
+  }
+});
