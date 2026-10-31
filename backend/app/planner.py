@@ -1095,7 +1095,7 @@ def _runner_slots(store: Any, target_key: str) -> int:
     from app import runner  # noqa: PLC0415 — runner 는 이 모듈을 import 한다.
 
     rows = store.query(
-        "SELECT concurrency, params_json FROM rr_jobs WHERE target_key = ? AND state IN"
+        "SELECT concurrency, params_json, COALESCE(mode, 'panels') AS mode FROM rr_jobs WHERE target_key = ? AND state IN"
         f" ('queued', 'running', 'paused', 'cancelling') AND {runner.RUNNER_JOBS_SQL}", (target_key,))
     return max([1, *(runner.job_slots(dict(r)) for r in rows)])
 

@@ -701,6 +701,17 @@ def test_a_claude_panel_job_runs_one_panel_at_a_time(risk_store, tmp_path, monke
     assert _claim(risk_store, cfg, {made["job_id"]: {panel["id"]}}) is None
 
 
+def test_job_slots_follow_the_box_and_keep_issue_and_claude_jobs_at_one(tmp_path):
+    """잡의 자리 수 — 잡의 concurrency 를 지금의 전역 자리 수로 다시 묶는다(만든 뒤 손잡이를 낮춘 박스). 쟁점 잡(M3 — 대상 안에서 쟁점
+    패널은 한 줄) · Claude 잡은 행의 값과 상관없이 1 이다. 칸이 없는 잡은 1(종전)."""
+    wide, narrow = _cfg(tmp_path), dataclasses.replace(_cfg(tmp_path), risk_concurrency=1)
+    panels = {"mode": "panels", "concurrency": 2, "params_json": "{}"}
+    assert (runner.job_slots(panels, wide), runner.job_slots(panels, narrow)) == (2, 1)
+    assert runner.job_slots({**panels, "mode": "issues"}, wide) == 1
+    assert runner.job_slots({**panels, "params_json": json.dumps({"llm": "claude"})}, wide) == 1
+    assert runner.job_slots({"id": "j"}, wide) == 1
+
+
 def test_create_job_says_when_the_box_runs_fewer_panels_than_asked(risk_store, tmp_path):
     """청한 동시 실행이 박스의 전역 자리 수보다 크면 그 수로 죄고 답에 까닭을 싣는다(종전에는 말없이 죄었다). 청한 만큼 돌면 칸이 없다."""
     target_key = _seed(risk_store)

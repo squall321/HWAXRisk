@@ -1046,8 +1046,9 @@ def _params(row: Mapping[str, Any]) -> dict:
 def job_slots(job: Mapping[str, Any], settings: Any | None = None) -> int:
     """잡이 함께 돌릴 수 있는 패널 수(CC-1) — 잡의 concurrency(만들 때 박스의 전역 자리 수로 묶었다)를 지금의 전역 자리 수
     (`risk_concurrency` — HWAXRISK_CONCURRENCY)로 다시 묶는다(만든 뒤에 그 손잡이를 낮췄을 수 있다). 전역 자리는 늘지 않는다 — 잡 하나가
-    그 자리를 둘까지 쓸 뿐이다. 판단 LLM 이 claude 인 잡(외부 응답자)은 1 이다(CC-5). 칸이 없는 잡(다시 저장의 잡 · 옛 행)은 1 — 종전과 같다."""
-    if job_llm(_job_params(job)) is not None:
+    그 자리를 둘까지 쓸 뿐이다. 판단 LLM 이 claude 인 잡(외부 응답자)은 1 이다(CC-5). 쟁점 잡도 행의 값과 상관없이 1 이다(M3 — 대상 안에서
+    쟁점 패널은 한 줄로 돈다 · CC-13). 칸이 없는 잡(다시 저장의 잡 · 옛 행)은 1 — 종전과 같다."""
+    if job_llm(_job_params(job)) is not None or job.get("mode") == "issues":
         return 1
     cfg = config.settings if settings is None else settings
     try:
