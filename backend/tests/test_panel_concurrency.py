@@ -529,13 +529,15 @@ class _NoSlot:
 
 def test_an_engine_slot_that_never_comes_for_the_second_panel_does_not_pause_the_job(risk_store, tmp_path, monkeypatch):
     """둘째 패널이 엔진 자리(포털 429)를 예산 내내 못 얻었다 — 첫 패널이 돌고 있으니 잡을 멈추지 않는다(멈추면 잘 도는 첫 패널까지 닫힌다).
-    둘째 패널만 시작 못 한 것으로 닫고(좌석 차감 없음), 그 대상의 둘째 자리는 예산 동안 쉰다(곧바로 또 한 시간을 기다리지 않는다)."""
+    둘째 패널만 시작 못 한 것으로 닫고(좌석 차감 없음), 그 대상의 둘째 자리는 예산 동안 · 그때 돌던 첫 패널이 도는 동안 쉰다(곧바로 또 한
+    시간을 기다리지 않는다)."""
     monkeypatch.setattr(runner, "time", _Clock())
     target_key = _seed(risk_store)
     cfg = _cfg(tmp_path, risk_engine_busy_wait_s=30, risk_engine_busy_max_wait_s=90)
-    job_id = _panel_job(risk_store, target_key, cfg)
+    # Tier C(전원 18석) — 패널 셋을 앉혀도 좌석이 남는다(끝에서 둘째 자리를 다시 묻는 것이 남은 좌석에 막히지 않게).
+    job_id = runner.create_job(risk_store, target_key, "C", owner_sub=OWNER, settings=cfg, concurrency=2, consent=True)["job_id"]
     job = runner.claim_next_job(risk_store, cfg)
-    first = planner.plan_next_panel(risk_store, target_key, "A", settings=cfg)       # 첫 패널이 돈다(엔진은 부르지 않았다)
+    first = planner.plan_next_panel(risk_store, target_key, "C", settings=cfg)       # 첫 패널이 돈다(엔진은 부르지 않았다)
     planner.start_panel_seats(risk_store, first["id"])
 
     out = runner.run_panel(risk_store, cfg, _NoSlot(), job)                          # 둘째 패널 — 자리가 끝내 안 난다
@@ -549,10 +551,18 @@ def test_an_engine_slot_that_never_comes_for_the_second_panel_does_not_pause_the
 
     assert _claim(risk_store, cfg, {job_id: {first["id"]}}) is None          # 둘째 자리는 예산 동안 쉰다
     assert _job(risk_store, job_id)["state"] == "running"
-    later = common.now_epoch() + 91
-    previous = common.set_clock(lambda: later)
+    start = common.now_epoch()
+    clock = {"now": start + 10}
+    previous = common.set_clock(lambda: clock["now"])
     try:
-        assert _claim(risk_store, cfg, {job_id: {first["id"]}})["id"] == job_id
+        # 그때 돌던 첫 패널이 예산 안에 끝나고 새 패널이 섰다 — 예산이 지나기 전에는 둘째 자리를 다시 묻지 않는다.
+        risk_store.execute("UPDATE rr_panels SET status = 'done' WHERE id = ?", (first["id"],))
+        job = _claim(risk_store, cfg)
+        assert job["id"] == job_id
+        third, _ = runner.plan_job_panel(risk_store, cfg, job)
+        assert _claim(risk_store, cfg, {job_id: {third["id"]}}) is None
+        clock["now"] = start + 91                                            # 예산(90초)이 지났다 — 다시 묻는다
+        assert _claim(risk_store, cfg, {job_id: {third["id"]}})["id"] == job_id
     finally:
         common.set_clock(previous)
 
@@ -572,6 +582,28 @@ def test_a_concurrency_one_job_still_pauses_on_engine_busy_even_with_another_pat
     assert out["error"].startswith("engine_busy: ") and runner.ENGINE_BUSY_SIBLING_NOTE not in out["error"]
     row = _job(risk_store, job_id)
     assert (row["state"], row["state_by"]) == ("paused", "code:engine_busy")
+
+
+def test_a_box_that_does_not_wait_for_engine_slots_does_not_pile_up_second_panels(risk_store, tmp_path, monkeypatch):
+    """대기 예산 0(자리를 기다리지 않는 박스) — 둘째 패널은 첫 429 에 닫히고, 그때 돌던 첫 패널이 도는 동안은 예산이 지나도 둘째 자리를 다시
+    잡지 않는다(틱마다 패널 행이 쌓이지 않는다). 그 패널이 닫힌 뒤 새로 시작한 패널의 둘째 자리는 다시 묻는다."""
+    monkeypatch.setattr(runner, "time", _Clock())
+    target_key = _seed(risk_store)
+    cfg = _cfg(tmp_path, risk_engine_busy_max_wait_s=0)
+    job_id = runner.create_job(risk_store, target_key, "C", owner_sub=OWNER, settings=cfg, concurrency=2, consent=True)["job_id"]
+    job, first, second = _seat_two(risk_store, cfg, target_key, job_id)
+    out = runner.run_panel(risk_store, cfg, _NoSlot(), job, panel=second)
+    assert out["error"].startswith("engine_busy: ") and _job(risk_store, job_id)["state"] == "running"
+    later = common.now_epoch() + 600
+    previous = common.set_clock(lambda: later)
+    try:
+        assert _claim(risk_store, cfg, {job_id: {first["id"]}}) is None              # 그때 돌던 첫 패널이 아직 돈다
+        risk_store.execute("UPDATE rr_panels SET status = 'done' WHERE id = ?", (first["id"],))
+        job = _claim(risk_store, cfg)
+        third, _ = runner.plan_job_panel(risk_store, cfg, job)                       # 첫 패널이 닫힌 뒤 새로 시작한 패널
+        assert _claim(risk_store, cfg, {job_id: {third["id"]}})["id"] == job_id
+    finally:
+        common.set_clock(previous)
 
 
 def test_the_daily_cap_blocks_the_second_slot_without_pausing_the_running_panel(risk_store, tmp_path):

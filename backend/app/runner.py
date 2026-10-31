@@ -1495,7 +1495,11 @@ def _busy_backoff(store: Any, target_key: str, settings: Any | None = None) -> b
         " ORDER BY ended_at DESC, panel_no DESC LIMIT 1", (target_key,))
     if row is None or _uncharged_code(row["error"]) != "engine_busy":
         return False
-    return now_epoch() - int(row["ended_at"]) < config.engine_busy_max_wait_s(settings)
+    if now_epoch() - int(row["ended_at"]) < config.engine_busy_max_wait_s(settings):
+        return True
+    # 예산이 지났어도 그 패널이 자리를 포기할 때 돌던 형제가 아직 돌면 쉰다 — 예산 0(기다리지 않는 박스)에서 틱마다 패널 행이 쌓이지 않게.
+    return store.query_one("SELECT 1 FROM rr_panels WHERE target_key = ? AND status = 'running' AND started_at <= ? LIMIT 1",
+                           (target_key, int(row["ended_at"]))) is not None
 
 
 # ---------------------------------------------------------------- 재기동 복구(plan §6.7.2 끝 문단)
