@@ -74,11 +74,13 @@ test("동결 폼 기본 kinds — ECAD 카드가 붙어 있으면 ecad 를 더�
   assert.deepEqual(capture.defaultSnapshotKinds([{ kind: "ecad" }]), ["mcad", "ecad"]);
 });
 
-test("동결 본문 — report_ids 는 수, 수가 아니면 보내지 않고, allow_large 는 다시 보낼 때만 싣는다", () => {
+test("동결 본문 — report_ids 는 수, 수가 아니면 보내지 않고, allow_large 는 거절된 그 본문에만 붙인다", () => {
   const form = { label: " rev1 ", kinds: ["ecad"], reportIds: "12, 7", detectId: "" };
   assert.deepEqual(capture.snapshotBody(form), { kinds: ["ecad"], label: "rev1", report_ids: [12, 7] });
   assert.equal("allow_large" in capture.snapshotBody(form), false);
-  assert.equal(capture.snapshotBody(form, true).allow_large, true);
+  const rejected = { kinds: ["mcad"] };
+  assert.deepEqual(capture.allowLargeBody(rejected), { kinds: ["mcad"], allow_large: true });
+  assert.deepEqual(rejected, { kinds: ["mcad"] }); // 거절된 본문은 그대로 둔다
   assert.equal(capture.snapshotBody({ ...form, reportIds: "12, x7" }), null);
   assert.deepEqual(capture.snapshotBody({ label: "", kinds: ["mcad", "ecad"], reportIds: "", detectId: "" }), {
     kinds: ["mcad", "ecad"],

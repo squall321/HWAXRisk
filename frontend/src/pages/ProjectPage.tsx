@@ -39,6 +39,7 @@ import { fmtEpoch, fmtNum } from "../format";
 import { ecadSource } from "../api/ecadBoard";
 import {
   SNAPSHOT_KINDS,
+  allowLargeBody,
   defaultSnapshotKinds,
   describeSnapshotError,
   modelTooLargeLine,
@@ -59,6 +60,7 @@ import type {
   JobHeader,
   ProjectDetail,
   ProjectSource,
+  SnapshotCreate,
   SnapshotCreated,
   SnapshotHeader,
   SourceRef,
@@ -328,29 +330,41 @@ function SnapshotForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [failure, setFailure] = useState<SnapshotFailure | null>(null);
+  /** 거절된 그 본문 — '그래도 동결' 은 이것에 allow_large 만 더해 보낸다(지금 폼 값으로 다시 짓지 않는다). */
+  const [rejected, setRejected] = useState<SnapshotCreate | null>(null);
   const [created, setCreated] = useState<SnapshotCreated | null>(null);
+
+  /** 폼이 바뀌면 앞 거절의 배너 · '그래도 동결' 은 맞지 않는다 — 걷는다(바뀐 폼은 다시 동결해 새 답을 받는다). */
+  function formChanged() {
+    setFailure(null);
+    setRejected(null);
+  }
 
   // 보드를 붙이거나 뗀 뒤에도 사람이 체크를 만지지 않았으면 기본값을 따라간다(만졌으면 그 값이 이긴다).
   const hasEcad = sources.some((s) => s.kind === "ecad");
   useEffect(() => {
-    if (!touched) setKinds(defaultSnapshotKinds(sources));
+    if (!touched) {
+      setKinds(defaultSnapshotKinds(sources));
+      formChanged();
+    }
     // sources 전체가 아니라 ECAD 카드 유무만 기본값을 바꾼다.
   }, [hasEcad, touched]);
 
   function toggle(kind: SourceKind) {
     setTouched(true);
     setKinds((prev) => (prev.includes(kind) ? prev.filter((k) => k !== kind) : [...prev, kind]));
+    formChanged();
   }
 
   const form = { label, kinds, reportIds, detectId };
   const reportIdsBad = reportIds.trim() !== "" && snapshotBody(form) === null;
 
-  async function submit(allowLarge: boolean) {
-    const body = snapshotBody(form, allowLarge);
-    if (!body || kinds.length === 0) return;
+  async function submit(body: SnapshotCreate) {
+    if (body.kinds.length === 0) return;
     setBusy(true);
     setError(null);
     setFailure(null);
+    setRejected(null);
     setCreated(null);
     try {
       const out = await riskApi.createSnapshot(projectId, body);
@@ -360,6 +374,7 @@ function SnapshotForm({
       const known = describeSnapshotError(err);
       if (known.kind === "other") setError(err);
       else setFailure(known);
+      if (known.kind === "model_too_large") setRejected(body);
       onRejected();
     } finally {
       setBusy(false);
@@ -371,14 +386,15 @@ function SnapshotForm({
       className="mb-4 flex flex-col gap-3"
       onSubmit={(event) => {
         event.preventDefault();
-        void submit(false);
+        const body = snapshotBody(form);
+        if (body) void submit(body);
       }}
     >
       <ErrorBanner error={error} />
-      {failure?.kind === "model_too_large" ? (
-        // 상한은 MCAD 리프와 ECAD 부품의 합이다(결정 3) — 무엇이 넘겼는지 한 줄로 보이고, 확인 뒤 같은 요청에 allow_large 를 싣는다.
+      {failure?.kind === "model_too_large" && rejected ? (
+        // 상한은 MCAD 리프와 ECAD 부품의 합이다(결정 3) — 무엇이 넘겼는지 한 줄로 보이고, 확인 뒤 거절된 그 본문에 allow_large 를 싣는다.
         <Banner tone="warn" title="모델이 크기 상한을 넘습니다." detail={modelTooLargeLine(failure.detail)}>
-          <Button type="button" size="sm" disabled={busy} onClick={() => void submit(true)}>
+          <Button type="button" size="sm" disabled={busy} onClick={() => void submit(allowLargeBody(rejected))}>
             그래도 동결
           </Button>
         </Banner>
@@ -393,7 +409,7 @@ function SnapshotForm({
               onClick={() => {
                 setKinds(failure.attached);
                 setTouched(true);
-                setFailure(null);
+                formChanged();
               }}
             >
               {failure.attached.map((k) => KIND_LABEL[k]).join(" · ")} 로 바꾸기
@@ -438,17 +454,35 @@ function SnapshotForm({
       </div>
       <FormGrid>
         <FormField label="스냅샷 이름" hint="label · 선택">
-          <Input value={label} onChange={(e) => setLabel(e.target.value)} />
+          <Input
+            value={label}
+            onChange={(e) => {
+              setLabel(e.target.value);
+              formChanged();
+            }}
+          />
         </FormField>
         <FormField
           label="보고서 id"
           hint="report_ids · 쉼표 구분 · 수"
           error={reportIdsBad ? "보고서 id 는 수입니다." : undefined}
         >
-          <Input value={reportIds} onChange={(e) => setReportIds(e.target.value)} />
+          <Input
+            value={reportIds}
+            onChange={(e) => {
+              setReportIds(e.target.value);
+              formChanged();
+            }}
+          />
         </FormField>
         <FormField label="detect 결과 파일" hint="detect_result_file_id · 선택">
-          <Input value={detectId} onChange={(e) => setDetectId(e.target.value)} />
+          <Input
+            value={detectId}
+            onChange={(e) => {
+              setDetectId(e.target.value);
+              formChanged();
+            }}
+          />
         </FormField>
       </FormGrid>
       <Button type="submit" className="self-start" disabled={busy || kinds.length === 0 || reportIdsBad}>

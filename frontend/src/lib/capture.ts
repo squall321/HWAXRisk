@@ -19,17 +19,24 @@ export type SnapshotForm = { label: string; kinds: SourceKind[]; reportIds: stri
 
 /**
  * 본문 — `report_ids` 는 수 목록이다(서버 칸이 list[int]). 수가 아닌 조각이 있으면 null 을 돌려 화면이 보내기 전에 막는다.
- * `allow_large` 는 사람이 '그래도 동결' 을 고른 다시 보내기에만 싣는다.
+ * `allow_large` 는 싣지 않는다 — 그것은 거절된 본문에만 붙인다(allowLargeBody).
  */
-export function snapshotBody(form: SnapshotForm, allowLarge = false): SnapshotCreate | null {
+export function snapshotBody(form: SnapshotForm): SnapshotCreate | null {
   const parts = form.reportIds.split(",").map((s) => s.trim()).filter(Boolean);
   if (parts.some((p) => !/^\d+$/.test(p))) return null;
   const body: SnapshotCreate = { kinds: form.kinds };
   if (form.label.trim() !== "") body.label = form.label.trim();
   if (parts.length > 0) body.report_ids = parts.map(Number);
   if (form.detectId.trim() !== "") body.detect_result_file_id = form.detectId.trim();
-  if (allowLarge) body.allow_large = true;
   return body;
+}
+
+/**
+ * '그래도 동결' 의 본문 — 409 model_too_large 로 거절된 그 본문에 `allow_large` 만 더한다. 지금 폼 값으로 다시 짓지 않는다 — 거절 뒤에
+ * 종류를 더 고르면(ECAD 보드는 부품 500 ~ 750) 사람이 본 적 없는 크기에 상한을 넘기게 된다(요청서 6절 '같은 요청에 allow_large').
+ */
+export function allowLargeBody(rejected: SnapshotCreate): SnapshotCreate {
+  return { ...rejected, allow_large: true };
 }
 
 /** 동결 거절의 갈래 — 화면이 폼 안에서 처리하는 409 두 가지와 그 밖. */
