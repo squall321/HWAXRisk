@@ -34,7 +34,8 @@ import type {
   PanelTranscript,
   DiffListRow,
   Paged,
-  PortalPatSummary,
+  PortalPatAuto,
+  PortalPatPutResult,
   ReportListRow,
   TargetListRow,
   Precedents,
@@ -239,8 +240,18 @@ export const riskApi = {
   // ── 신원·메타 ──────────────────────────────────────────────────────────────
   getHealth: (o?: Opt) => request<Health>("health", o),
   getMe: (o?: Opt) => request<Me>("me", o),
-  putPortalPat: (pat: string | null, o?: Opt) =>
-    request<PortalPatSummary>("me/portal-pat", { method: "PUT", body: { pat }, ...o }),
+  /**
+   * `source` 는 앱이 받아 온 PAT(포털 발급 버튼 · 자동 등록)일 때만 `web` 을 싣는다 — 백엔드는 갈아 끼울 때 앞선 등록의 출처가
+   * web · gateway-exchange 일 때만 옛 PAT 를 폐기한다. 사람이 붙여 넣은 PAT 와 삭제(null)는 싣지 않는다(= manual).
+   */
+  putPortalPat: (pat: string | null, source?: "web", o?: Opt) =>
+    request<PortalPatPutResult>("me/portal-pat", {
+      method: "PUT",
+      body: source ? { pat, source } : { pat },
+      ...o,
+    }),
+  putPortalPatAuto: (enabled: boolean, o?: Opt) =>
+    request<PortalPatAuto>("me/portal-pat-auto", { method: "PUT", body: { enabled }, ...o }),
   getTaxonomy: (o?: Opt) => request<Taxonomy>("meta/taxonomy", o),
   getAdapters: (o?: Opt) => request<AdapterList>("meta/adapters", o),
   getVocab: (o?: Opt) => request<VocabIndex>("meta/vocab", o),

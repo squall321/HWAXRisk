@@ -109,19 +109,72 @@ export type ApiErrorBody = { error: { code: string; message: string } };
 
 export type Health = { ok: boolean; app_version: string; schema_version: number };
 
+/** 등록이 어디서 왔나(routes.PAT_SOURCES · GATEWAY_PAT_SOURCE). `PUT /me/portal-pat` 가 받는 것은 web · manual 뿐이다. */
+export type PortalPatSource = "web" | "gateway-exchange" | "manual";
+/** 지금 발급해 등록해야 하는 까닭(routes.pat_due_reason) — 앞의 것이 먼저다. audience 는 step-forge 청중이 없다는 뜻이다. */
+export type PortalPatDueReason = "absent" | "revoked" | "undecryptable" | "expiring" | "audience";
+
+/**
+ * `GET /me` 의 `portal_pat.auto`(routes.portal_pat_auto) — 자동 등록 스위치와 마지막 자동 등록 · 실패.
+ * `PUT /me/portal-pat-auto` 의 답도 이 꼴 하나다.
+ */
+export type PortalPatAuto = {
+  /** 사용자가 끄지 않았다. */
+  enabled: boolean;
+  /** 지금 발급해 등록해야 한다 — 화면은 `enabled && due` 면 조용히 한 번 한다. */
+  due: boolean;
+  due_reason: PortalPatDueReason | null;
+  last_source: PortalPatSource | null;
+  last_at: number | null;
+  /** `"<code>: <앱이 고른 글>"` — 할 일을 말한다. 글자 그대로 보인다. */
+  last_error: string | null;
+  /** transient 는 앱이 10분 뒤 다시 바란다 · final 은 사람이 고쳐야 한다. */
+  last_error_kind: "transient" | "final" | null;
+  last_error_at: number | null;
+  /** 켜져 있을 때만 — 지우거나 폐기해도 다시 만들어지니 멈추려면 끈다는 글. */
+  how_to_stop: string | null;
+};
+
+/**
+ * `GET /me` 의 `portal_pat` — 로그인한 사람에게는 늘 객체다(등록이 없으면 `registered:false` 와 `auto` 만 있다).
+ * 익명과 박스 불일치(이관 직후)는 `Me.portal_pat` 이 null 이다. PAT 원문·암호문은 응답에 없다.
+ */
 export type PortalPatSummary = {
   registered: boolean;
   email: string | null;
   groups: string[];
   exp: number | null;
-  /** 등록 시 강제된 PAT 스코프(계획 §8.2.7 — 읽기 전용 `['read']`). PAT 원문·암호문은 응답에 없다. */
+  /** 등록 시 강제된 PAT 스코프(계획 §8.2.7 — 읽기 전용 `['read']`). 등록이 있을 때만 온다. */
   scopes?: string[];
   /** 포털이 폐기한 PAT 는 시각이 찍힌다 — 화면은 '이 PAT 는 폐기됨 — 재등록하세요' 를 띄운다. */
   revoked_at?: number | null;
   /** 폐기 대조 키(§8.2.7). 포털 토큰 페이지의 항목과 대조한다. */
   jti?: string | null;
-  /** false 면 저장된 암호문을 현재 cred.key 로 풀 수 없다 — 화면엔 '등록됨' 인데 러너는 자격 (a) 로 강등된다. */
+  /** false 면 저장된 암호문을 현재 키로 풀 수 없다 — 화면엔 '등록됨' 인데 러너는 그 자격을 쓰지 못한다. */
   decryptable?: boolean;
+  auto: PortalPatAuto;
+};
+
+/**
+ * `PUT /me/portal-pat` 의 답(routes._register_portal_pat · 삭제) — `GET /me` 의 요약과 꼴이 다르다(`auto`·`revoked_at`·
+ * `decryptable` 이 없다). 그래서 화면은 등록 뒤 `GET /me` 를 다시 읽는다.
+ */
+export type PortalPatPutResult =
+  | { registered: true; email: string; groups: string[]; exp: number; scopes: string[]; jti: string }
+  | { registered: false; email: null; groups: string[]; exp: null };
+
+/** `GET /me` 의 `box.reasons[]`(config.box_assessment). 익명에게는 code 만 온다. */
+export type BoxReason = {
+  code:
+    | "host_mismatch"
+    | "missing_required"
+    | "cred_key_invalid"
+    | "cred_key_dev_fallback"
+    | "cred_key_path_missing"
+    | "missing_optional";
+  keys?: string[];
+  message?: string;
+  fix?: string;
 };
 
 export type Me = {
@@ -130,15 +183,18 @@ export type Me = {
   role: string | null;
   organization: string | null;
   anonymous: boolean;
-  source: "bearer" | "cookie" | "none";
+  source: "bearer" | "cookie" | "sso" | "none";
   portal_pat: PortalPatSummary | null;
   /** cred_key_present=false 면 PAT 등록이 422 `cred_key_absent` 로 거부된다(§8.2.7). */
   box: {
     hostname: string;
     secrets_valid: boolean;
-    cred_key_present?: boolean;
+    cred_key_present: boolean;
     /** 앱이 포털을 부르는 주소. 틀리면 PAT 등록·패널 실행이 전부 실패한다(비밀이 아니다). */
-    portal_base?: string;
+    portal_base: string;
+    reasons: BoxReason[];
+    /** 로그인한 사람에게만 온다. */
+    cred_key_source?: "secrets" | "env" | "path" | "dev_fallback" | "absent";
   };
 };
 

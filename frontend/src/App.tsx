@@ -13,6 +13,7 @@ import CurationQueuePage from "./pages/CurationQueuePage";
 import SettingsPage from "./pages/SettingsPage";
 import { SectionCard } from "./components/SectionCard";
 import { EmptyBlock } from "./components/StateBlocks";
+import { AutoPortalPatNotice, AutoPortalPatProvider } from "./components/AutoPortalPat";
 
 // 사이드바 — 아이콘은 글자를 대신하지 않고 **거든다**(글자를 지우면 어느 화면인지 못 읽는 사람이 생긴다).
 const NAV = [
@@ -111,6 +112,8 @@ function Shell() {
           내용(넓은 표)이 자식을 밀어 같은 증상이 난다. */}
       <main className="mx-auto flex min-w-0 flex-1 flex-col gap-4 px-4 pb-10 pt-14 sm:pt-6">
         <div className="mx-auto flex w-full max-w-[1180px] min-w-0 flex-col gap-4">
+        {/* 앱을 열 때의 포털 PAT 자동 등록 실패 한 줄 — 어느 화면에서 열었든 같은 자리에서 말한다. */}
+        <AutoPortalPatNotice />
         <Routes>
           <Route path="/" element={<RiskHomePage />} />
           <Route path="/projects/:id" element={<ProjectPage />} />
@@ -130,7 +133,10 @@ function Shell() {
 export default function App() {
   return (
     <HashRouter>
-      <Shell />
+      {/* 앱을 열 때 PAT 자동 등록을 한 번 — 알림 줄의 '설정' 링크가 라우터 안에 있어야 하므로 HashRouter 안에 둔다. */}
+      <AutoPortalPatProvider>
+        <Shell />
+      </AutoPortalPatProvider>
     </HashRouter>
   );
 }

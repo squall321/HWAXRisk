@@ -9,6 +9,8 @@
 //
 // 포털 코드는 한 줄도 바꾸지 않는다. scopes 관문(`risk_pat_require_read_only`)도 건드리지 않는다 —
 // 여기서 `scopes:['read']` 로 발급하므로 그 검사를 그대로 통과한다.
+import { riskApi } from "./risk.api";
+import type { PortalPatPutResult } from "../types";
 
 /** 포털 `POST /auth/pat` 응답(pat.py PatCreated). `token` 은 발급 시 한 번만 온다. */
 export type PortalPatMinted = {
@@ -20,10 +22,14 @@ export type PortalPatMinted = {
   exp: number;
 };
 
-/** 앱이 요구하는 발급 조건 — `aud ∋ mcp-gateway` · `scopes == ['read']`(§8.2.3·§8.2.7). */
+/**
+ * 앱이 요구하는 발급 조건 — `aud ∋ mcp-gateway` · `scopes == ['read']`(§8.2.3·§8.2.7). 청중 `step-forge` 는 위임 캡처의
+ * REST 다리(게이트웨이 `/api/step-forge`)가 요구한다 — 없으면 앱이 `due_reason: "audience"` 로 다시 받기를 바란다(백엔드
+ * routes.PORTAL_PAT_WANTED 와 같은 값이다). 이름 `hwax-risk` 는 백엔드가 갈아 끼울 때 옛 PAT 를 폐기하는 표지라 바꾸지 않는다.
+ */
 export const MINT_BODY = {
   name: "hwax-risk",
-  audiences: ["mcp-gateway"],
+  audiences: ["mcp-gateway", "step-forge"],
   scopes: ["read"],
   ttl_days: 90,
 } as const;
@@ -86,4 +92,15 @@ export async function mintPortalPat(): Promise<PortalPatMinted> {
     throw new PortalMintError(res.status, `포털 토큰 발급이 거부됐습니다 — ${detail}`);
   }
   return (await res.json()) as PortalPatMinted;
+}
+
+/**
+ * 포털에서 발급해 곧바로 앱에 등록한다(출처 `web`) — 설정의 「포털에서 발급해 등록」 · 앱을 열 때의 자동 등록 · 자동 스위치를
+ * 켤 때가 모두 이 길을 지난다. 출처를 `web` 으로 적어야 다음 갱신 때 백엔드가 이 PAT 를 폐기한다(`manual` 로 적히면 쌓인다).
+ * 토큰은 이 함수 안에서만 산다 — 화면 상태 · 저장소 · 로그에 남기지 않고 jti 만 돌려준다.
+ */
+export async function registerFromPortal(): Promise<{ jti: string; result: PortalPatPutResult }> {
+  const minted = await mintPortalPat();
+  const result = await riskApi.putPortalPat(minted.token, "web");
+  return { jti: minted.jti, result };
 }
