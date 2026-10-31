@@ -469,6 +469,11 @@ LLM_CHOICES: tuple[str, ...] = (LLM_GLM, LLM_CLAUDE)
 ENGINE_EXTERNAL = "external"
 EXTERNAL_WORKFLOW = "hwax-risk-claude"     # 잡 주인이 Claude Code 에서 돌리는 워크플로(포털 infra/pipeline — X-3)
 JUDGE_CLAUDE = "Claude(외부, 사용자 신고 모델)"   # 보고서 · 품질 글의 '판단 LLM' — 모델은 잡 주인이 Claude Code 에서 고른 것이다
+# 패널 잡의 반출 경고(422 consent_external_required 의 글) — 검토 잡(review_runner.EGRESS_WARNING)과 나가는 것이 다르다. 패널 잡은 그 잡이
+# 돌리는 패널마다 브리프와 좌석 조회 결과가 나가고 사슬이 없다 — C3 자동 후속 Tier C 는 판단 LLM 을 물려받지 않아 GLM 이다(`_finish_job`,
+# 동의는 잡마다 — 사용자 결정 10-15). 화면의 동의 글(frontend api/panelJob.ts PANEL_EGRESS_WARNING)과 같은 뜻이다.
+PANEL_EGRESS_WARNING = ("이 잡이 돌리는 패널마다 그 패널의 브리프(설계 변경 · 근거 · 메모 — 선례처럼 다른 사람의 검토 결과도 든다)와"
+                        " 좌석이 조회한 결과가 Claude(외부)로 나갑니다(동의는 이 잡에만 — C3 자동 후속 Tier C 는 GLM 으로 돈다)")
 
 
 def job_llm(params: Mapping[str, Any] | None) -> str | None:
@@ -1083,7 +1088,7 @@ def create_job(
     if tier not in planner.TIERS:
         raise AppError("E100", f"모르는 tier — {tier!r}. 허용 {list(planner.TIERS)}.", 422)
     excluded = brief.check_exclude(exclude_evidence)
-    claude = review_runner.check_llm_choice(llm, consent_external)
+    claude = review_runner.check_llm_choice(llm, consent_external, warning=PANEL_EGRESS_WARNING)
     panel_job_gate(store, target_key, tier)
     if tier == "C" and not consent:
         raise AppError("E100", "Tier C 는 consent:true 명시 승인이 필요합니다.", 422)
@@ -1662,6 +1667,8 @@ def _finish_job(store: Any, job: Mapping[str, Any], settings: Any) -> dict:
             # 자격은 B 잡과 같은 사람 순서다(요청자 → 타깃 owner) — 서비스 계정으로 내려가지 않으므로(U-3) owner 만 넘기면
             # 요청자 자격으로 돈 B 잡의 후속이 멈춘다. 사람이 브리프에서 뺀 항목도 메모 · 층과 함께 물려받는다 — 물려받지 않으면 후속
             # Tier C 패널에 그 항목이 다시 실리는데 보고서의 '사람 개입 요약' 은 brief.exclude 를 세어 그 항목 없이 돈 것처럼 읽힌다(BL-10).
+            # 판단 LLM(llm · consent_external)은 물려받지 않는다 — Claude 로 고른 B 잡의 후속도 GLM 이다. 반출 동의는 잡마다라(사용자 결정
+            # 10-15) 사람이 동의하지 않은 잡의 데이터를 시스템이 Claude 로 보내지 않는다(의도 — context-notes RF-11).
             follow = create_job(
                 store, job["target_key"], "C", owner_sub=job["owner_sub"],
                 modifiers=params.get("modifiers"),

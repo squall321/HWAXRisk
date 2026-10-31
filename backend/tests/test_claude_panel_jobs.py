@@ -92,6 +92,26 @@ def test_a_claude_panel_job_needs_a_strict_consent_and_the_consenters_own_pat(ri
     assert "params_json" not in job
 
 
+def test_a_panel_jobs_consent_refusal_says_what_a_panel_job_sends(risk_store, cfg, monkeypatch):
+    """패널 잡의 422 consent_external_required 글은 패널 잡이 내보내는 것(그 패널의 브리프 · 좌석 조회 결과)을 말한다 — 종전에는 검토 잡의
+    반출 글(지식카드 · 사슬이 이어 도는 쟁점 패널 · 종합 요약)을 그대로 썼다(화면 세션 청할 것). 동의는 그 잡에만이고 C3 자동 후속 Tier C
+    는 GLM 이다. 검토 잡의 글은 그대로다."""
+    from app import review_runner
+
+    target_key = seeded(risk_store)
+    _peer_pat(risk_store)
+    X._probe(monkeypatch, X._external_fake())
+    with pytest.raises(AppError) as refused:
+        _claude(risk_store, target_key, cfg, consent_external=None)
+    message = refused.value.message
+    assert runner.PANEL_EGRESS_WARNING in message and "그 패널의 브리프" in message and "좌석이 조회한 결과" in message
+    assert review_runner.EGRESS_WARNING not in message and "사슬이 이어 도는" not in message
+    assert "Tier C 는 GLM" in message
+    with pytest.raises(AppError) as review_refused:
+        review_runner.check_llm_choice("claude", None)
+    assert review_runner.EGRESS_WARNING in review_refused.value.message
+
+
 def test_a_claude_panel_job_is_refused_while_the_engine_keeps_the_external_path_closed(risk_store, cfg, monkeypatch):
     target_key = seeded(risk_store)
     _peer_pat(risk_store)
@@ -184,6 +204,28 @@ def test_two_panel_jobs_made_in_the_same_second_read_as_the_later_one(risk_store
     risk_store.execute("UPDATE rr_jobs SET created_at = 1793000000 WHERE target_key = ?", (target_key,))
     monkeypatch.setattr(routes, "get_store", lambda: risk_store)
     assert routes.coverage_payload(target_key)["job"]["id"] == second
+
+
+def test_the_c3_follow_up_of_a_claude_tier_b_job_stays_on_glm(risk_store, cfg, monkeypatch):
+    """정책(의도 — 바꾸지 않는다) — Claude 로 고른 Tier B 잡이 닫힘 레벨 C3 에서 끝나면 러너가 세우는 자동 후속 Tier C 는 판단 LLM 을
+    물려받지 않고 GLM 으로 돈다. 반출 동의는 잡마다다(사용자 결정 10-15) — 사람이 그 잡에 동의하지 않았는데 시스템이 데이터를 Claude 로
+    보내지 않는다. 후속 잡에는 llm · consent_external 칸이 없고 자격은 GLM 잡의 순서(요청자 → 소유자)다(context-notes RF-11)."""
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    _peer_pat(risk_store)
+    X._probe(monkeypatch, X._external_fake())
+    risk_store.execute("UPDATE rr_targets SET close_level = 'C3' WHERE target_key = ?", (target_key,))
+    made = runner.create_job(risk_store, target_key, "B", owner_sub=OWNER, settings=cfg, requester_sub=PEER, llm="claude",
+                             consent_source="web", consent_external=True)
+    assert made["llm"] == "claude"
+    job = dict(risk_store.query_one("SELECT id, target_key, tier, owner_sub, params_json FROM rr_jobs WHERE id = ?",
+                                    (made["job_id"],)))
+    job["params"] = json.loads(job.pop("params_json"))
+    follow = runner._finish_job(risk_store, job, cfg)["next_job"]
+    params = _params(risk_store, follow)
+    assert (params["tier"], params["consent_source"], params["requester"]) == ("C", "close_level", PEER)
+    assert "llm" not in params and "consent_external" not in params
+    assert risk_store.query_one("SELECT credential_email FROM rr_jobs WHERE id = ?", (follow,))["credential_email"] == PEER
 
 
 # ---------------------------------------------------------------- 보고서 · REST
