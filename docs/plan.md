@@ -106,23 +106,35 @@
 ## 외부 반영 — RA 보내는 쪽(RK-01, 2026-10-31)
 
 사용자 결정 10-31(포털 docs/request-1027 RK-01 D-1 (가)) — 지식 그래프 op 는 **박스 쓰기 PAT(`HWAXRISK_PORTAL_PAT_RW`, OB-18) 하나**로
-RA 에 쓴다. RA 에 적히는 주인은 그 PAT 의 계정이고 누가 했는지는 앱 DB 의 `owner_sub` 가 맡는다. 종합 보고서는 지금처럼 사람 이름(포털 챗 PAT 길)이다.
+RA 에 쓴다. RA 에 적히는 주인은 그 PAT 의 계정이고 누가 했는지는 앱 DB 의 `owner_sub` 가 맡는다. 종합 보고서는 지금처럼 사람 이름(포털 챗 PAT 길)이다 —
+박스 PAT 클라이언트(`ra_client_from_settings`)의 계약은 지식 그래프 쓰기 4종 + 읽기 4종뿐이고 보고서 도구는 계약 밖이다(`test_no_write_tools` 가 지킨다).
 
 - 자리 — `ra_client.RaSender`(쓰기 4종의 이름이 나오는 유일한 모듈) → `main.py` 가 `RiskRunner(external_sync_send=…)` 로 꽂는다 → `sync_loop`
   60초마다 `nightly.retry_external_sync`. 키는 틱마다 다시 읽는다(넣으면 재기동 없이 켜진다). 사람의 등록 PAT · 읽기 PAT 는 쓰지 않는다.
+  한 틱은 대상 50개 · 30초까지이고 러너의 정지 신호를 대상마다 본다(남은 대상은 상태 그대로 다음 틱) — 같은 루프의 PAT 폐기 대조가 밀리지 않게.
 - 번역 — `merge_object`(risk_finding · design_trait)는 `rr_id_map` 의 id 가 살아 있으면 get_object → 병합 → update_object, 없으면 code 로
   create_object(같은 code 면 RA 가 있는 것을 돌려준다). `link` 는 link_objects — verified_by · refuted_by 의 dst 는 근거 `inc:<RA 객체 id>` 가
   사고 · 시험일 때만(아니면 잇지 않고 건수 · 까닭을 남긴다), exhibits 의 src 는 과제(project, code = 과제 id). id 는 `rr_id_map`(RA 칸만)과
   원본 표의 `ra_entity_id`(rr_projects · rr_registry)에 적는다. risk_finding 의 단위는 등록부 행이다(code `<target_key>#<cluster_key>`).
+  라벨의 병합 op 는 머리에 label_id 를 실어 라벨마다 다르다(큐가 줄이지 않고 보내는 도중에 붙은 op 를 complete 가 지우지 않는다). risk_finding
+  의 status 는 op 에 적힌 라벨 때의 값이 아니라 **보낼 때의 등록부 값**이다(원칙 3) — 따로 둔 op 를 재동기로 늦게 보내도 새 값을 덮지 않는다.
 - RA 계약 — 도구는 게이트웨이 별칭 `reportarchive_<이름>`, 인자는 RA MCP 의 것(get_object(type, id) · update_object(object_id, …)). value 에
   code 를 꼬리로 단다(plan §5.3.1 의 꼴은 축 안 유니크가 아니다). 돌려받은 객체의 code 가 다르면 쓰지 않는다(value_collision). 게이트웨이가
-  가린 값(`[가림:…]`)은 되쓰지 않는다 — 앱이 쥔 칸(owner 등)은 앱 값으로, 모르는 칸이 가려졌으면 멈춘다(masked_readback).
-- 보류 · 실패 — 과제가 조직 공개가 아니면 아무것도 부르지 않고 `withheld`(op 는 큐에 그대로). 실패한 op 와 그 뒤 op 는 큐에 남고 last_error 가
-  `<낱말>: <글>` 이다. `transient`(전송 · 5xx · 기한 · 백엔드 불통)만 백오프로 다시 보내고(그 틱의 남은 대상은 미룬다) 나머지는 곧바로
-  `unavailable` — 사람이 고친 뒤 '재동기'.
+  가린 값(`[가림:…]`)은 되쓰지 않는다 — 앱이 쥔 칸(owner 등)은 앱 값으로, 모르는 칸이 가려졌으면 그 op 를 보내지 않는다(masked_readback).
+- 보류 · 실패 — 과제가 조직 공개가 아니면 아무것도 부르지 않고 `withheld`(op 는 큐에 그대로). 가시성 · 폐기는 틱 머리와 **호출마다** 다시
+  본다 — 보내는 도중 비공개로 돌리면 다음 호출부터 하지 않고 남은 op 는 보류, 폐기면 멈춘다. `transient`(전송 · 5xx · 기한 · 백엔드 불통)만
+  백오프로 다시 보낸다(그 틱의 남은 대상은 미룬다). 채널 전체가 막히는 실패(`unauthorized` · `read_only` · `forbidden` · `tool_missing` ·
+  `ontology_missing` · 게이트웨이의 그 밖 4xx · JSON-RPC 오류)는 곧바로 `unavailable` 이고 실패한 op 와 그 뒤 op 는 큐에 남는다(last_error
+  `<낱말>: <글>`). **op 하나에만 걸린 영구 거절**(RA 의 거절 — 관계 축 제약 · enum · 길이 · 닫힌 축, `value_collision` · `masked_readback` ·
+  꼴이 틀린 op)은 그 op 만 `dead_ops`(op · 까닭 · 시각)로 따로 두고 대상의 나머지 op 를 계속 보낸다. '재동기' 가 멈춘 채널을 되살리고 따로
+  둔 op 를 큐 앞으로 되돌린다(원래 순서). 멈춘 대상 · 따로 둔 op 는 틱마다 경고 한 줄씩 로그에 남긴다(사유 낱말과 수).
 - 요약 계약(`sync_summary` 의 `ra.reason`) — `withheld` · `sent` · `credential_missing:HWAXRISK_PORTAL_PAT_RW`(꺼짐) · `unauthorized` ·
   `read_only` · `forbidden` · `tool_missing` · `ontology_missing` · `masked_readback` · `value_collision` · `rejected` · `transient` · `queued` ·
-  `idle`. `message` 는 늘 사람이 읽을 글이다. AIDataHub 는 보내는 쪽이 없어 `sender_unwired` 그대로다(M4).
+  `idle`. `message` 는 늘 사람이 읽을 글이다. `dead_ops` 는 따로 둔 op 의 건수다 — `reason` 이 `sent` 여도 0 이 아니면 RA 에 가지 않은 것이
+  있다(화면은 경고로 그린다). AIDataHub 는 보내는 쪽이 없어 `sender_unwired` 그대로다(M4).
+- 거두기 없음(사용자 결정 대기 — checklist 6장 'RK-01 거두기') — 조직 공개를 비공개로 되돌리거나 폐기 · 이양해도 이미 나간 RA 객체(과제 설명의
+  과제 이름 · risk_finding 의 owner · visibility=org · status)는 그대로 남는다. 원칙 9 는 그만큼 지켜지지 않는다. 폐기 보고서의 RA 층은 그
+  사실과 나간 객체 수를 말한다(`not_retracted`).
 - 남은 것 — 패널 때 쓰는 투영(risk_finding 의 나머지 속성 · assessment · snapshot · diff, plan §5.3.5 쓰기 순서 ①~⑧)과 AIDataHub 반입은 M4 다.
 
 ## 구현 범위(현재 P6, 이 리포 몫)
