@@ -2775,17 +2775,54 @@ def get_sameas(base: str = Query(...), target: str = Query(...),
     }
 
 
+def _project_editor(project_id: str, ident: identity.Identity) -> str:
+    """그 과제의 편집자 이상(관리자는 편집자 — plan §0.6)이면 과제 주인(행에 적는 owner_sub), 남 · 없는 과제는 404, 보기는 403
+    role_insufficient. 부른 사람 자신의 행으로 내려가지 않는 문이다 — 남이 그 과제의 열쇠로 쓴 줄을 제 행으로 받지 않는다."""
+    email = _require_user(ident)
+    row = get_store().query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,))
+    if row is None:
+        raise AppError("E404", f"과제({project_id}) 를 찾을 수 없습니다.", 404)
+    if row["owner_sub"] != email and not _is_admin(ident):
+        require_role(project_id, email, "editor")
+    return str(row["owner_sub"])
+
+
+def _decision_owner(item: Any, ident: identity.Identity) -> str:
+    """대응 결정 한 줄을 적을 원장의 주인(MB-13). confirm · reject 의 intra · pair 는 pair_key 의 과제(intra 는 그 과제 하나, pair 는 정렬한
+    두 과제 둘 다)의 주인 · 편집자만 한다 — pair 결정은 두 과제의 노드를 잇고 두 과제 사이 비교의 대응이 되므로(plan §2.6.1 · §2.6.2) 한쪽만의
+    편집자는 남이다. 행은 그 과제 주인의 원장에 선다(그 주인의 대응표 · 비교 · 동결이 읽는다). 두 과제의 주인이 다르면 한 원장에 적을 수 없어
+    422 다. global 과 키 원장 결정(merge_key · rename_key · confirm_key · unmerge_key · revoke_iface_alias)은 과제가 아니라 부른 사람의 원장이다
+    (RD-11 그대로) — 어휘 밖도 부른 사람으로 넘겨 record_decision 이 거절한다."""
+    email = _require_user(ident)
+    if not isinstance(item, dict) or item.get("decision") not in ("confirm", "reject") or item.get("scope") not in ("intra", "pair"):
+        return email
+    pair_key = str(item.get("pair_key") or "")
+    if not pair_key:
+        return email                                   # record_decision 이 400 'pair_key 가 필요합니다' 로 거절한다
+    projects = pair_key.split("|") if item["scope"] == "pair" else [pair_key]
+    if (item["scope"] == "pair" and (len(projects) != 2 or not all(projects))) or (item["scope"] == "intra" and "|" in pair_key):
+        raise AppError("E100", "pair_key 는 intra 면 과제 id 하나, pair 면 정렬한 두 과제 id 를 '|' 로 이은 것이다.", 400)
+    owners = {_project_editor(project_id, ident) for project_id in dict.fromkeys(projects)}
+    if len(owners) != 1:
+        raise AppError("pair_owners_differ", "두 과제의 주인이 달라 대응 결정을 한 원장에 적을 수 없다.", 422)
+    return owners.pop()
+
+
 @router.post("/sameas/decide")
 def post_sameas_decide(body: list[dict], ident: identity.Identity = Depends(identity.current)) -> dict:
-    """same-as 확정과 ckey 원장 조작을 한 배열로 받는다(§2.6.2 7단계·§2.7.3)."""
-    owner_sub = _require_user(ident)
+    """same-as 확정과 ckey 원장 조작을 한 배열로 받는다(§2.6.2 7단계·§2.7.3).
+
+    대응 결정(confirm · reject)은 pair_key 의 과제의 주인 · 편집자만 하고 그 과제 주인의 원장 행으로 적는다(사용자 결정 10-31 '주인 · 편집자만,
+    주인으로 지킨다' — `_decision_owner`). 결정한 사람은 decided_by · 키 전파 감사의 행위자이고 키 전파는 행의 주인으로 돈다. 그 자리에 이미
+    다른 사람의 행이 있으면 덮지 않고 409 다(sameas.record_decision)."""
+    email = _require_user(ident)
     store = get_store()
     # 키 전파의 감사 행(rekey)의 입구 · 행위자 검증 — MCP risk_decide_sameas 는 mcp · 0 이다(사용자 결정 10-31).
     channel = AUDIT_CHANNELS.get(ident.source, "rest")
     # 배열은 한 트랜잭션이다 — 3번째 항목이 404 인데 앞 두 결정만 커밋되는 반쪽 적용을 막는다(내부 tx 는 합류한다).
     with store.tx():
-        results = [sameas.record_decision(store, item, owner_sub=owner_sub, channel=channel,
-                                          actor_verified=channel != "mcp") for item in body]
+        results = [sameas.record_decision(store, item, owner_sub=_decision_owner(item, ident), decided_by=email,
+                                          channel=channel, actor_verified=channel != "mcp") for item in body]
     return {"updated": len(results), "results": results, "G2": None}
 
 

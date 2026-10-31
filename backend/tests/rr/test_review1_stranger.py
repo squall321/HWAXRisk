@@ -261,9 +261,10 @@ PREPARE: dict[tuple[str, str], Callable[[dict, RiskStore], Any]] = {
         i["cluster"], routes.RegistryMergeBody(into=i["cluster2"], reason="cluster_merge"), ident=factories.ident(OWNER)),
     ("DELETE", P + "/targets/{target_key}/closure/acks/{item}"): lambda i, store: _owner_ack(i, store),
 }
-# 남이 받는 답 — 기본은 없는 것과 같은 404 다. 남의 것을 읽지 않고 제 행만 쓰는 경로는 성공한다(그 답에도 주인의 값이 없다). 새 과제는
-# 앞 과제로 남의 과제를 주면 없는 앞 과제와 같은 404 다(훑기 둘째 — 종전에는 그대로 만들어 계보가 남의 과제를 읽었다).
-EXPECT: dict[tuple[str, str], int] = {("POST", P + "/sameas/decide"): 200}
+# 남이 받는 답 — 기본은 없는 것과 같은 404 다. 새 과제는 앞 과제로 남의 과제를 주면 없는 앞 과제와 같은 404 다(훑기 둘째 — 종전에는
+# 그대로 만들어 계보가 남의 과제를 읽었다). 대응 결정도 이제 404 다 — 종전에는 '제 행만 쓴다' 로 200 이었는데 pair_key 의 과제를 보지
+# 않아 남의 결정 행까지 뒤집었다(MB-13 — 그 과제의 주인 · 편집자만 한다).
+EXPECT: dict[tuple[str, str], int] = {}
 
 
 def _owner_ack(ids: dict, store: RiskStore) -> Any:

@@ -56,11 +56,10 @@ MCP_WRITES: tuple[str, ...] = (
     "risk_ack_gate", "risk_decide_sameas", "risk_create_diff", "risk_open_target", "risk_start_job", "risk_job_action",
     "risk_repersist_panel", "risk_set_ecad_board",
 )
-# 보기가 지나는 쓰기 — 이 표의 부름은 남의 것을 가리키지 않고 부른 사람 자신의 행을 쓴다(남 시험 표의 EXPECT 와 같은 까닭).
+# 보기가 지나는 쓰기 — 남의 것을 가리키지 않고 부른 사람 자신의 행을 쓴다. 대응 결정은 그 과제의 주인 · 편집자만 하게 돼(MB-13) 이 표에서
+# 빠졌다.
 VIEWER_WRITES_OWN: dict[tuple[str, str], str] = {
     ("POST", P + "/projects"): "제 과제를 만든다(앞 과제가 구성원 과제라 계보가 선다 — 남이면 404)",
-    ("POST", P + "/sameas/decide"): ("새 대응 행이라 부른 사람의 행이 선다(키 결정은 부른 사람의 원장 행만 고친다) — 이미 있는 남의 대응 행은"
-                                     " 뒤집을 수 있다(종전부터 — context-notes MB-11, 결정 필요)"),
 }
 
 

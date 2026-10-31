@@ -289,8 +289,9 @@ def decide_sameas(ident: identity.Identity, *, base_snapshot_id: str, target_sna
     열쇠를 손으로 짓게 두면 한 글자만 어긋나도 결정이 아무 비교에도 닿지 않는다(오류 없이).
     """
     owner = require_delegate(ident)
-    base = routes._snapshot_row(base_snapshot_id, owner)
-    target = routes._snapshot_row(target_snapshot_id, owner)
+    # 두 스냅샷은 읽는 사람이면 열쇠를 짓는다 — 결정을 받을지(두 과제의 주인 · 편집자)는 웹 라우트의 문이 정한다(MB-13).
+    base = routes._snapshot_row(base_snapshot_id, routes._snapshot_reader(base_snapshot_id, owner))
+    target = routes._snapshot_row(target_snapshot_id, routes._snapshot_reader(target_snapshot_id, owner))
     pair_key = "|".join(sorted([str(base["project_id"]), str(target["project_id"])]))
     items = []
     for item in decisions or []:
