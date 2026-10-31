@@ -1,4 +1,4 @@
-// 과제 화면 — 머리말·구역 탭 4개(심사 · 요구·정의 · 성격·유사 · 사전)·소스 카드 3장(ECAD 는 보드 찾기 · 붙이기)·스냅샷 동결·스냅샷 목록·dims·iface-ledger·성격 프로파일·유사 과제(계획 §8.2.4 ProjectPage 행). ?snapshot= 이면 같은 화면에 SnapshotPage 를 그린다.
+// 과제 화면 — 머리말·구역 탭 6개(심사 · 요구·정의 · 성격·유사 · 사전 · 멤버 · 이력)·소스 카드 3장(ECAD 는 보드 찾기 · 붙이기)·스냅샷 동결·스냅샷 목록·dims·iface-ledger·성격 프로파일·유사 과제(계획 §8.2.4 ProjectPage 행). ?snapshot= 이면 같은 화면에 SnapshotPage 를 그린다.
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { ChevronRight, Link2, Plus, Snowflake, Trash2, X } from "lucide-react";
@@ -18,6 +18,9 @@ import {
   UnseatedBadge,
 } from "../components/Badge";
 import { EcadBoardCard } from "../components/EcadBoardCard";
+import { ProjectAuditCard } from "../components/ProjectAuditCard";
+import { ProjectMembersCard } from "../components/ProjectMembersCard";
+import { ProjectMetaCard } from "../components/ProjectMetaCard";
 import { GateVerdictBadge } from "../components/GateBanner";
 import {
   Banner,
@@ -42,6 +45,7 @@ import {
   snapshotBody,
 } from "../lib/capture";
 import type { SnapshotFailure } from "../lib/capture";
+import { myRole } from "../lib/projectMeta";
 import { FACET_ORDER } from "../types";
 import type {
   VocabBump,
@@ -129,19 +133,21 @@ function NONE() {
 }
 
 /**
- * 과제 화면의 구역 묶음 4개.
+ * 과제 화면의 구역 묶음 6개.
  *
  * 카드가 열세 장이라 한 줄로 쌓으면 아래 절반은 스크롤로만 닿는다. 그래서 묶되 — **심사를 시작하려면
  * 꼭 봐야 하는 것(소스·스냅샷 동결·스냅샷 목록·잡·타깃)은 기본 탭에 그대로 둔다.** 뒤로 보낸 것은
- * 가끔 고치는 정의(요구·dims·iface-ledger)와 참고용 맥락(성격·유사), 그리고 과제와 무관한 전사
- * 사전이다. 정보를 지운 것은 없고 자리만 옮겼다.
+ * 가끔 고치는 정의(요구·dims·iface-ledger)와 참고용 맥락(성격·유사), 과제와 무관한 전사 사전, 그리고
+ * 사람 관리(멤버 · 이양 · 폐기)와 감사 이력이다. 정보를 지운 것은 없고 자리만 옮겼다.
  */
-type ProjectTab = "review" | "spec" | "context" | "vocab";
+type ProjectTab = "review" | "spec" | "context" | "vocab" | "members" | "history";
 const PROJECT_TABS: Array<{ tab: ProjectTab; label: string }> = [
   { tab: "review", label: "심사" },
   { tab: "spec", label: "요구·정의" },
   { tab: "context", label: "성격·유사" },
   { tab: "vocab", label: "사전" },
+  { tab: "members", label: "멤버" },
+  { tab: "history", label: "이력" },
 ];
 
 /** 일반 연결의 참조 칸 — 서버 칸이 객체(dict)라 kind 마다 열쇠를 정해 받는다(어댑터가 읽는 열쇠 — adapters/mcad · dyna). */
@@ -156,6 +162,10 @@ const REF_FIELDS: Record<"mcad" | "dyna", Array<{ key: string; label: string; re
     { key: "sha256", label: "sha256", required: false },
   ],
 };
+
+/** StepForge 에는 사용자 격리가 없다 — 게이트웨이를 지나는 호출자 전원이 같은 자료를 본다(plan §2.13.3 · 서버 warnings 의 표지). */
+const STEPFORGE_NO_ISOLATION =
+  "이 원천은 앱 수준 격리가 없어 조직 내 누구나 읽을 수 있습니다(StepForge 에는 사용자별 격리가 없다 — stepforge_no_isolation).";
 
 function SourceCard({
   kind,
@@ -207,6 +217,10 @@ function SourceCard({
   const probe = source?.probe ?? {};
   return (
     <SubPanel title={KIND_LABEL[kind]} actions={<SourceStatusBadge value={source?.status ?? "unlinked"} />}>
+      {kind === "mcad" ? (
+        // 상시 경고 — 연결 응답의 warnings 에만 실리면 카드를 다시 열 때 사라진다(B34 114 · LO-D6).
+        <Banner tone="warn" live="none" title="격리 없음" detail={STEPFORGE_NO_ISOLATION} />
+      ) : null}
       {source ? (
         // 카드가 좁으므로 한 열로 읽는다. 라벨은 사람 말이고 서버 필드명은 hint 로 남긴다.
         <KeyValueTable
@@ -1052,13 +1066,16 @@ export default function ProjectPage() {
   const detail = useAsync((signal) => riskApi.getProject(projectId, { signal }), [projectId], projectId !== "");
   const adapters = useAsync((signal) => riskApi.getAdapters({ signal }), []);
   const me = useAsync((signal) => riskApi.getMe({ signal }), []);
+  // 멤버 표 — 멤버 탭이 그리고, 내 역할(조직 공개 토글의 잠금)도 여기서 센다.
+  const members = useAsync((signal) => riskApi.getMembers(projectId, { signal }), [projectId], projectId !== "");
 
   const jobs: JobHeader[] = detail.data?.jobs ?? [];
   const active = jobs.some((j) => j.state === "queued" || j.state === "running");
   useInterval(detail.reload, active ? POLL_MS : null);
 
   const email = me.data?.email ?? null;
-  /** 보드 바꾸기 · 떼기는 과제 주인만 — 과제 행의 소유자가 나인가. */
+  const role = useMemo(() => myRole(members.data?.members, email), [members.data, email]);
+  /** 바꾸기 · 떼기 · 멤버 고치기는 과제 주인만 — 과제 행의 소유자가 나인가(멤버 표가 늦어도 갈린다). */
   const isOwner = detail.data !== null && email !== null && detail.data.project.owner_sub === email;
 
   /**
@@ -1266,6 +1283,15 @@ export default function ProjectPage() {
             ) : null}
           </SectionCard>
 
+          <SectionCard
+            title="등급 · 수명 주기 · 공개"
+            subtitle="이 서버의 과제 상세가 싣지 않는 칸은 '모름' 으로 보이고, 바꾸면 그 답으로 압니다."
+          >
+            {detail.data ? (
+              <ProjectMetaCard detail={detail.data} role={role} onPatched={() => members.reload()} />
+            ) : null}
+          </SectionCard>
+
           <SectionCard title="소스" subtitle="unlinked → linked → unreachable. 소스 앱에 쓰기를 하지 않습니다.">
             <ErrorBanner error={adapters.error} onRetry={adapters.reload} />
             {detail.data ? (
@@ -1364,6 +1390,20 @@ export default function ProjectPage() {
       {/* 사전은 과제가 아니라 전사 자산이다 — 과제 구역과 섞이지 않게 탭을 따로 둔다. */}
       <TabPanel active={tab === "vocab"} tab="vocab" idPrefix="proj">
         <VocabCard />
+      </TabPanel>
+
+      <TabPanel active={tab === "members"} tab="members" idPrefix="proj">
+        <ProjectMembersCard
+          projectId={projectId}
+          projectCode={detail.data?.project.code ?? ""}
+          isOwner={isOwner}
+          members={members}
+        />
+      </TabPanel>
+
+      {/* 이력은 그 탭을 볼 때만 받는다 — 숨은 탭이 감사 표를 끌어오지 않게. */}
+      <TabPanel active={tab === "history"} tab="history" idPrefix="proj">
+        <ProjectAuditCard projectId={projectId} active={tab === "history"} />
       </TabPanel>
     </>
   );
