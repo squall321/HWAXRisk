@@ -1054,13 +1054,18 @@ export default function ProjectPage() {
       nowrap: true,
       width: "10rem",
       cell: (j) => {
-        const pct = Math.max(0, Math.min(100, Math.round(j.progress * 100)));
+        // progress 는 패널 수 객체다(done · total). total 이 없거나 0 이면 비율을 지어내지 않고 수만 보인다.
+        const done = j.progress.done ?? 0;
+        const total = j.progress.total ?? 0;
+        const pct = total > 0 ? Math.max(0, Math.min(100, Math.round((done / total) * 100))) : 0;
         return (
           <span className="flex items-center gap-2">
             <span aria-hidden="true" className="inline-block h-1.5 w-24 overflow-hidden rounded-full bg-muted">
               <span className="block h-full rounded-full bg-primary" style={{ width: `${pct}%` }} />
             </span>
-            <span className="tabular-nums">{pct}%</span>
+            <span className="tabular-nums">
+              {done} / {total}
+            </span>
           </span>
         );
       },
@@ -1167,8 +1172,9 @@ export default function ProjectPage() {
                       ) : (
                         <span className="inline-flex flex-wrap items-center gap-1">
                           {detail.data.character_top_tags.map((t) => (
-                            <Badge key={t} tone="neutral">
-                              {t}
+                            <Badge key={t.tag} tone="neutral" title={`진술 ${t.n}건`}>
+                              {t.tag}
+                              <span className="opacity-60">{t.n}</span>
                             </Badge>
                           ))}
                         </span>

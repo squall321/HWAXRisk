@@ -406,9 +406,9 @@ function ReportsTab() {
       nowrap: true,
       cell: (r) =>
         // `ra_state: string | null` — null 은 서버가 '아니다' 라고 한 게 아니라 **아직 모르는** 것이다.
-        // 0 이나 '-' 로 그리면 '반영 안 됨' 이라는 없는 판정이 생긴다.
+        // 0 이나 '-' 로 그리면 '반영 안 됨' 이라는 없는 판정이 생긴다. 반영된 값은 `done` 이다(ra_client — 전에 'synced' 를 찾았다).
         r.ra_state ? (
-          <Badge tone={r.ra_state === "synced" ? "ok" : "warn"}>{r.ra_state}</Badge>
+          <Badge tone={r.ra_state === "done" ? "ok" : "warn"}>{r.ra_state}</Badge>
         ) : (
           <span className="text-muted-foreground">모름</span>
         ),

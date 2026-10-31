@@ -11,6 +11,7 @@ import type {
   EvidenceGrade,
   ExternalSync,
   Judgement,
+  ResyncQueued,
   PanelStatus,
   RegistryStatus,
   Severity,
@@ -125,16 +126,21 @@ export const JobStateBadge = ({ value }: { value: SnapshotJobState | BatchJobSta
   <StatusBadge value={value} />
 );
 
-/** RA·AIDataHub 반영 상태 두 칸(§5.5.3). */
-export function ExternalSyncBadge({ sync }: { sync: ExternalSync | null | undefined }) {
+/**
+ * RA·AIDataHub 반영 상태 두 칸(§5.5.3) — 채널 값은 객체다. 요약(`state` · `message`)과 재동기 응답(`state` · `last_error`)을
+ * 함께 받는다. 글(message · last_error)은 배지의 title 로 글자 그대로 싣는다.
+ */
+export function ExternalSyncBadge({ sync }: { sync: ExternalSync | ResyncQueued | null | undefined }) {
   if (!sync) return null;
+  const note = (entry: ExternalSync["ra"] | ResyncQueued["ra"], fallback: string) =>
+    ("message" in entry ? entry.message : entry.last_error) || fallback;
   return (
     <span className="inline-flex flex-wrap items-center gap-1">
-      <Badge tone={toneOf(sync.ra)} title="ReportArchive 반영">
-        RA {sync.ra}
+      <Badge tone={toneOf(sync.ra.state)} title={note(sync.ra, "ReportArchive 반영")}>
+        RA {sync.ra.state}
       </Badge>
-      <Badge tone={toneOf(sync.adh)} title="AIDataHub 반영">
-        ADH {sync.adh}
+      <Badge tone={toneOf(sync.adh.state)} title={note(sync.adh, "AIDataHub 반영")}>
+        ADH {sync.adh.state}
       </Badge>
     </span>
   );

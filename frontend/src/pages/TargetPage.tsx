@@ -33,7 +33,7 @@ import {
   Button, FormField, FormGrid, Input, Mono, PageHeader, Select, SubPanel, TabBar, TabPanel,
 } from "../ui/primitives";
 import { cn } from "../lib/cn";
-import { fmtEpoch, fmtJson, fmtNum } from "../format";
+import { fmtCounts, fmtEpoch, fmtJson, fmtNum, fmtPct } from "../format";
 import type {
   BriefPanel,
   Coverage,
@@ -44,6 +44,7 @@ import type {
   Registry,
   RegistryRow,
   RegistryStatusInput,
+  ResyncQueued,
   Seat,
   Tier,
   Verdict,
@@ -388,32 +389,33 @@ function PanelsCard({ targetKey }: { targetKey: string }) {
     { key: "no", header: "패널", cell: (p) => `P${p.panel_no}`, nowrap: true },
     { key: "tier", header: "tier", cell: (p) => p.tier, nowrap: true },
     { key: "engine", header: "engine", cell: (p) => <StatusBadge value={p.engine} />, nowrap: true },
-    { key: "path", header: "call_path", cell: (p) => p.call_path, nowrap: true },
+    // call_path 는 패널 줄이 아니라 품질 칸에 있다(runner 의 품질 계산 — 끝나기 전 패널은 없다).
+    { key: "path", header: "call_path", cell: (p) => p.quality.call_path ?? <Unknown />, nowrap: true },
     { key: "mode", header: "tool_mode", cell: (p) => p.tool_mode, nowrap: true },
     { key: "status", header: "status", cell: (p) => <PanelStatusBadge value={p.status} />, nowrap: true },
     { key: "model", header: "model", cell: (p) => p.model?.model ?? "unknown", nowrap: true },
     {
       key: "tools",
       header: "도구 사용",
+      hint: "tool_use_rate",
+      align: "right",
       nowrap: true,
-      // SSE 귀속이 없으면 서버가 null 로 둔다(§6.11) — 화면이 0 으로 바꿔 읽지 않는다.
+      // 서버는 좌석 중 도구를 쓴 비율을 준다. 재지 못했으면(끝나기 전 · evidence_only) 칸이 없거나 null 이다 — 0 으로 바꿔 읽지 않는다.
       cell: (p) =>
-        p.quality.tool_calls_n === null || p.quality.tool_calls_n === undefined ? (
-          <span className="text-muted-foreground" title="도구 호출 기록 없음(evidence_only 또는 SSE 미귀속).">
+        p.quality.tool_use_rate === null || p.quality.tool_use_rate === undefined ? (
+          <span className="text-muted-foreground" title="도구 사용률 기록 없음(끝나기 전 · evidence_only).">
             기록 없음
           </span>
         ) : (
-          <span title={p.quality.used_tool === null ? "used_tool 미기록" : `used_tool ${String(p.quality.used_tool)}`}>
-            {p.quality.tool_calls_ok ?? "-"} / {p.quality.tool_calls_n}
-          </span>
+          fmtPct(p.quality.tool_use_rate * 100)
         ),
     },
     {
       key: "quality",
-      header: "quality.flag",
+      header: "quality.flags",
       cell: (p) => (
         <span className="inline-flex flex-wrap items-center gap-1">
-          {p.quality.flag.map((f) => (
+          {(p.quality.flags ?? []).map((f) => (
             <Badge key={f} tone="warn">
               {f}
             </Badge>
@@ -427,7 +429,12 @@ function PanelsCard({ targetKey }: { targetKey: string }) {
       align: "right",
       nowrap: true,
       // 귀속률 null 은 '0 귀속' 이 아니라 '재지 않았다' 다.
-      cell: (p) => (p.quality.attribution_rate === null ? <Unknown /> : fmtNum(p.quality.attribution_rate, 2)),
+      cell: (p) =>
+        p.quality.attribution_rate === null || p.quality.attribution_rate === undefined ? (
+          <Unknown />
+        ) : (
+          fmtNum(p.quality.attribution_rate, 2)
+        ),
     },
     { key: "seats", header: "좌석", cell: (p) => String(p.seats.length), align: "right", nowrap: true },
     { key: "started", header: "시작", cell: (p) => fmtEpoch(p.started_at), nowrap: true },
@@ -441,7 +448,7 @@ function PanelsCard({ targetKey }: { targetKey: string }) {
             type="button"
             variant="ghost"
             size="sm"
-            onClick={() => setOpenPanel((cur) => (cur === p.panel_id ? null : p.panel_id))}
+            onClick={() => setOpenPanel((cur) => (cur === p.id ? null : p.id))}
           >
             기록 열기
           </Button>
@@ -458,7 +465,7 @@ function PanelsCard({ targetKey }: { targetKey: string }) {
       {panels.loading && !panels.data ? <LoadingBlock /> : null}
       {panels.data ? (
         <>
-          <DataTable columns={columns} rows={rows} rowKey={(p) => p.panel_id} selectedKey={openPanel} empty="패널이 없습니다." />
+          <DataTable columns={columns} rows={rows} rowKey={(p) => p.id} selectedKey={openPanel} empty="패널이 없습니다." />
           <h3 className="m-0 mt-4 text-sm text-muted-foreground">모델 혼합</h3>
           <p className="text-sm text-muted-foreground">
             어떤 LLM 이 점검했는지 — `rr_panels.model_json.model` 기준으로 패널을 셉니다. captured 가
@@ -697,20 +704,25 @@ function RegistryCard({ targetKey, registry }: { targetKey: string; registry: As
                 hint: "verdict_candidate.verdict",
                 value: <VerdictBadge value={registry.data.verdict_candidate.verdict} />,
               },
-              { label: "후보 사유", hint: "reason", value: registry.data.verdict_candidate.reason },
               {
-                label: "조건",
-                hint: "conditions",
+                label: "후보 사유",
+                hint: "reasons",
                 value:
-                  registry.data.verdict_candidate.conditions.length === 0 ? (
+                  registry.data.verdict_candidate.reasons.length === 0 ? (
                     <Unknown>없음</Unknown>
                   ) : (
                     <ul className="m-0 list-disc pl-5 text-sm [&>li]:mb-1">
-                      {registry.data.verdict_candidate.conditions.map((c, i) => (
-                        <li key={i}>{c}</li>
+                      {registry.data.verdict_candidate.reasons.map((r, i) => (
+                        <li key={i}>{r}</li>
                       ))}
                     </ul>
                   ),
+              },
+              {
+                // 열린 · 검증된 클러스터만 센 수다 — 후보가 어디서 나왔는지 보이게 둔다.
+                label: "집계",
+                hint: "counts",
+                value: fmtCounts(registry.data.verdict_candidate.counts),
               },
               {
                 label: "확정값",
@@ -745,26 +757,43 @@ function RegistryCard({ targetKey, registry }: { targetKey: string; registry: As
 }
 
 /** 통합 보고서 — 레벨 상승마다 코드가 RA `deliberation` 템플릿으로 조립한다(§6.9). 조회 경로는 아직 없다. */
-function ConsolidatedReportCard({ level, sync }: { level: string | null; sync: ExternalSync | null }) {
+function ConsolidatedReportCard({
+  level,
+  summary,
+  resynced,
+}: {
+  level: string | null;
+  /** 진행판이 늘 싣는 반영 요약 — 재동기를 누르기 전에도 그 글(message)을 보인다. */
+  summary: ExternalSync | null;
+  /** 재동기를 누른 뒤의 채널 상태(있으면 상태는 이것이 앞선다). */
+  resynced: ResyncQueued | null;
+}) {
+  const shown = resynced ?? summary;
+  const channel = (key: "ra" | "adh") =>
+    shown ? (
+      <span className="flex flex-col gap-0.5">
+        <span>
+          <StatusBadge value={shown[key].state} />
+        </span>
+        {summary ? <span className="text-xs text-muted-foreground">{summary[key].message}</span> : null}
+        {resynced?.[key].last_error ? (
+          <span className="text-xs text-muted-foreground">{resynced[key].last_error}</span>
+        ) : null}
+      </span>
+    ) : (
+      <Unknown>진행판을 읽는 중입니다.</Unknown>
+    );
   return (
     <SectionCard
       title="통합 보고서"
       subtitle="레벨이 오를 때마다 v1(C1)·v2(C2)·v3(C3) 이 ReportArchive 에 쌓입니다."
-      actions={<ExternalSyncBadge sync={sync} />}
+      actions={<ExternalSyncBadge sync={shown} />}
     >
       <KeyValueTable
         rows={[
           { label: "현재 레벨", hint: "level", value: level ? <LevelBadge value={level} /> : <Unknown /> },
-          {
-            label: "RA 반영",
-            hint: "external_sync.ra",
-            value: sync ? <StatusBadge value={sync.ra} /> : <Unknown>재동기를 누르면 확인합니다.</Unknown>,
-          },
-          {
-            label: "AIDataHub 반영",
-            hint: "external_sync.adh",
-            value: sync ? <StatusBadge value={sync.adh} /> : <Unknown>재동기를 누르면 확인합니다.</Unknown>,
-          },
+          { label: "RA 반영", hint: "external_sync.ra", value: channel("ra") },
+          { label: "AIDataHub 반영", hint: "external_sync.adh", value: channel("adh") },
         ]}
       />
       <NotReadyBlock what="통합 보고서 링크(v1/v2/v3)" />
@@ -937,7 +966,8 @@ export default function TargetPage() {
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [sync, setSync] = useState<ExternalSync | null>(null);
+  // 재동기 응답(채널마다 op 목록까지) — 누르기 전에는 진행판의 반영 요약(coverage.external_sync)을 쓴다.
+  const [sync, setSync] = useState<ResyncQueued | null>(null);
   const [rosterNote, setRosterNote] = useState<string | null>(null);
   const [tab, setTab] = useState<TargetTab>("coverage");
 
@@ -1005,7 +1035,7 @@ export default function TargetPage() {
         actions={
           <>
             {coverage.data ? <UnseatedBadge n={coverage.data.unseated_n} /> : null}
-            <ExternalSyncBadge sync={sync} />
+            <ExternalSyncBadge sync={sync ?? coverage.data?.external_sync ?? null} />
             <Button type="button" variant="outline" onClick={resync} disabled={busy}>
               <RefreshCw className="size-4" aria-hidden="true" />
               재동기
@@ -1073,7 +1103,12 @@ export default function TargetPage() {
             {
               label: "외부 반영",
               hint: "external_sync",
-              value: sync ? <ExternalSyncBadge sync={sync} /> : <Unknown>재동기를 누르면 확인합니다.</Unknown>,
+              value:
+                sync ?? coverage.data?.external_sync ? (
+                  <ExternalSyncBadge sync={sync ?? coverage.data?.external_sync ?? null} />
+                ) : (
+                  <Unknown>진행판을 읽는 중입니다.</Unknown>
+                ),
             },
           ]}
         />
@@ -1119,7 +1154,11 @@ export default function TargetPage() {
         <RegistryCard targetKey={targetKey} registry={registry} />
       </TabPanel>
       <TabPanel active={tab === "report"} tab="report" idPrefix="tgt">
-        <ConsolidatedReportCard level={coverage.data?.level ?? null} sync={sync} />
+        <ConsolidatedReportCard
+          level={coverage.data?.level ?? null}
+          summary={coverage.data?.external_sync ?? null}
+          resynced={sync}
+        />
       </TabPanel>
       <TabPanel active={tab === "brief"} tab="brief" idPrefix="tgt">
         {/* active 를 넘긴다 — 이 호출은 서버에서 토큰을 **발급**하므로 보고 있을 때만 나가야 한다. */}

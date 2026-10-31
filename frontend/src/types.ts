@@ -41,8 +41,25 @@ export type CallPath = "portal" | "agent_direct";
 export type ToolMode = "tools" | "evidence_only";
 export type Credential = "service" | "owner";
 
+/** 반영 상태(ra_client — pending · done · unavailable). 화면은 모르는 값도 글자 그대로 보인다. */
 export type SyncState = "pending" | "done" | "unavailable";
-export type ExternalSync = { ra: SyncState; adh: SyncState };
+
+/**
+ * 반영 요약 한 채널(ra_client.sync_summary) — 과제 상세의 `targets[]` · `GET /targets` · 진행판이 싣는다. `pending_ops` 는 건수다.
+ * 전에 채널 값을 글자(SyncState)로 적어 두어 배지가 이 객체를 React 자식으로 그리다 과제 화면이 백지가 됐다(React #31).
+ */
+export type SyncSummary = { state: SyncState | (string & {}); pending_ops: number; reason: string | null; message: string };
+export type ExternalSync = { ra: SyncSummary; adh: SyncSummary };
+
+/** 재동기 응답의 한 채널(ra_client.resync — external_sync_json 그대로). `pending_ops` 는 op 목록이다(요약과 다르다). */
+export type SyncEntry = {
+  state: SyncState | (string & {});
+  attempts: number;
+  next_at: number;
+  last_error: string | null;
+  done_at: number | null;
+  pending_ops: JsonValue[];
+};
 
 export type RegistryStatus = "open" | "verified" | "dismissed" | "mitigated" | "superseded";
 /** 사람이 바꿀 수 있는 값만(§8.2.3 `PUT /registry/{cluster}/status`). superseded 는 코드가 붙인다. */
@@ -233,12 +250,20 @@ export type TargetHeader = {
   superseded_by: string | null;
 };
 
+/**
+ * 과제 상세의 잡 한 줄(`GET /projects/{id}` → `jobs[]`) — 대상에 묶인 패널 · 검토 잡이다(routes.get_project).
+ * `progress` 는 숫자가 아니라 객체다 — 패널 수(done · total)에 잡의 진행 기록(progress_json)이 펼쳐져 온다. 전에 숫자로 적어 두어
+ * 진행 칸이 'NaN%' 였다.
+ */
 export type JobHeader = {
   id: string;
-  kind: string;
+  target_key: string;
+  tier: string | null;
+  kind: "panel_batch" | "review_batch";
+  mode: string;
   state: SnapshotJobState | BatchJobState;
-  progress: number;
-  error?: string | null;
+  progress: { done: number | null; total: number | null; [key: string]: JsonValue | undefined };
+  error: string | null;
 };
 
 export type ProjectDetail = {
@@ -247,7 +272,8 @@ export type ProjectDetail = {
   snapshots: SnapshotHeader[];
   targets: TargetHeader[];
   jobs: JobHeader[];
-  character_top_tags: string[];
+  /** 성격 태그와 그 수(많은 순 10개) — 글자 목록이 아니라 `{tag, n}` 이다. 전에 글자로 적어 두어 태그가 있는 과제가 백지였다. */
+  character_top_tags: Array<{ tag: string; n: number }>;
 };
 
 export type SourceCreate = {
@@ -560,6 +586,8 @@ export type Coverage = {
   unseated_n: number;
   level: CoverageLevel;
   close_level: CloseLevel;
+  /** RA · AIDataHub 반영 요약 — 재동기를 누르기 전에도 늘 온다(보내는 쪽이 아직 없다는 것까지 message 가 말한다). */
+  external_sync: ExternalSync;
 };
 
 export type Seat = {
@@ -606,10 +634,16 @@ export type RegistryRow = {
   priority: number;
 };
 
+/**
+ * 등록부 집계가 낸 verdict 후보(registry.verdict_candidate) — 늘 객체다(클러스터가 0건이어도 undetermined 와 까닭 한 줄).
+ * 전에 `{reason, conditions[]}` 로 적어 두어 타깃 화면이 `conditions.length` 에서 백지가 됐다 — 서버는 `counts` · `reasons` 를 준다.
+ */
 export type VerdictCandidate = {
   verdict: Verdict;
-  reason: string;
-  conditions: string[];
+  /** 클러스터 수와 판정별 수(열린 · 검증된 행만 센다). */
+  counts: { clusters: number; FAIL: number; WARNING: number; OK: number; undetermined: number };
+  /** 후보의 까닭 — 줄마다 하나. */
+  reasons: string[];
 };
 
 export type Registry = {
@@ -617,7 +651,7 @@ export type Registry = {
   rows: RegistryRow[];
   /** limit 를 넘겨 잘렸는지(REST 조회는 limit 를 주지 않아 늘 false 다 — MCP 경로가 쓴다). */
   truncated: boolean;
-  verdict_candidate: VerdictCandidate | null;
+  verdict_candidate: VerdictCandidate;
   verdict_final: Verdict | null;
 };
 
@@ -630,37 +664,52 @@ export type RegistryStatusUpdate = {
 
 // ── 패널 ─────────────────────────────────────────────────────────────────────
 
+/**
+ * 패널 품질(rr_panels.quality_json — runner 의 품질 계산). 패널이 끝나기 전 · 실패한 패널은 빈 객체라 칸마다 없을 수 있다.
+ * 전에 `flag` · `tool_calls_n` 으로 적어 두어 끝난 패널이 하나라도 있으면 타깃 화면이 `flag.map` 에서 백지가 됐다.
+ */
 export type PanelQuality = {
-  flag: string[];
-  tool_calls_n: number | null;
-  tool_calls_ok: number | null;
-  used_tool: boolean | null;
-  attribution_rate: number | null;
+  /** 품질 표지 — low_tool_use · low_ir_cite · adversary_silent · adversary_overreject · spec_parse_failed · over_budget 따위. */
+  flags?: string[];
+  /** 좌석 중 도구를 쓴 비율(0~1). 재지 못했으면 null. */
+  tool_use_rate?: number | null;
+  ir_cite_rate?: number | null;
+  /** 귀속률(0~1) — null 은 '0 귀속' 이 아니라 '재지 않았다' 다. */
+  attribution_rate?: number | null;
   credential?: Credential;
+  call_path?: CallPath;
+  llm_calls_observed?: number;
 };
 
-/** 어떤 LLM 이 점검했는지 — `rr_panels.model_json`(§6.11 D6). */
+/** 어떤 LLM 이 점검했는지 — `rr_panels.model_json`(§6.11 D6). 기록이 없으면 빈 객체다. */
 export type PanelModel = {
-  model: string;
-  captured: "caller_reported" | "runner_observed" | "unknown";
+  model?: string;
+  /** health_snapshot · caller_reported · unavailable(DDL 주석) — 화면은 글자 그대로 보인다. */
+  captured?: string;
 };
 
+/** `GET /targets/{key}/panels` 의 패널 한 줄(routes.panels_payload — rr_panels 열 이름 그대로). */
 export type Panel = {
-  panel_id: string;
+  id: string;
   panel_no: number;
-  target_key: string;
-  tier: Tier;
-  engine: PanelEngine;
-  call_path: CallPath;
-  tool_mode: ToolMode;
+  /** Tier 패널은 A · B · C, 쟁점 패널(kind issue)은 그 밖의 값일 수 있다. */
+  tier: string | null;
+  kind: "coverage" | "issue";
+  issue_id: string | null;
+  engine: PanelEngine | null;
+  tool_mode: ToolMode | null;
   status: PanelStatus;
   conv_id: string | null;
-  report_id: string | null;
-  seats: string[];
+  report_id: number | null;
+  seats: JsonValue[];
+  modifiers: JsonValue[];
   quality: PanelQuality;
-  model: PanelModel | null;
+  model: PanelModel;
+  llm_calls: number | null;
+  retry: number | null;
+  error: string | null;
   started_at: number | null;
-  finished_at: number | null;
+  ended_at: number | null;
 };
 
 export type SeatTurn = {
@@ -794,7 +843,7 @@ export type RefResolution = {
   payload: JsonValue;
 };
 
-export type ResyncQueued = { ra: SyncState; adh: SyncState };
+export type ResyncQueued = { ra: SyncEntry; adh: SyncEntry };
 export type RosterRefreshed = { added_pending: number };
 
 export type ImportResult = {
