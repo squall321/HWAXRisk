@@ -932,11 +932,16 @@ export type SameAsPair = {
 
 export type SameAs = { pairs: SameAsPair[]; pending_n: number; G2: GateRecord | null };
 
+/**
+ * 대응 확정 · 거부 한 줄(sameas.record_decision) — 원장 열쇠는 노드 id(`a` · `b`)가 아니라 **stable 키**다. `pair_key` 는 scope 마다
+ * 다르고(intra = project_id · pair = 두 project_id 를 정렬해 '|' 로 이은 것 · global = '-') 빠지면 400 `E100` 이다.
+ */
 export type SameAsPairDecision = {
-  a: string;
-  b: string;
   decision: "confirm" | "reject";
   scope: "intra" | "pair" | "global";
+  a_stable: string;
+  b_stable: string;
+  pair_key: string;
 };
 
 export type CkeyLedgerDecision = {

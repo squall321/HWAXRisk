@@ -1,5 +1,5 @@
 // 비교 화면의 순수 판정 — 비교 가능성 줄 · ECAD 한 줄 · 제외 사유의 말 · '파서 세대 다름' · 3층 항목을 한 표의 줄로(ecad-1031 §8 · B34 107)
-import type { Comparability, DiffDoc, DiffLayer, JsonValue } from "../types";
+import type { Comparability, DiffDoc, DiffLayer, JsonValue, SameAsPair, SameAsPairDecision } from "../types";
 
 /** §3.3.6 excluded_reason 사전. 값은 서버 문자열 그대로 두고 뜻만 붙인다. */
 export const EXCLUDED_LABEL: Record<string, string> = {
@@ -155,4 +155,26 @@ export function excludedCounts(rows: DiffRow[]): Array<{ reason: string; isEcad:
     acc.set(key, cur);
   }
   return Array.from(acc.values());
+}
+
+/**
+ * 쌍 원장의 열쇠 — 두 과제 id 를 정렬해 '|' 로 잇는다(GET /sameas 가 원장을 읽는 열쇠이고, 빠지면 서버 글이 이 꼴을 말한다). 과제 id 를
+ * 하나라도 모르면 null 이다.
+ */
+export function samePairKey(baseProjectId: string | null | undefined, targetProjectId: string | null | undefined): string | null {
+  if (!baseProjectId || !targetProjectId) return null;
+  return [baseProjectId, targetProjectId].sort().join("|");
+}
+
+/**
+ * 대응 확정 · 거부 본문 한 줄 — stable 키로 보낸다(행의 `a` · `b` 는 노드 id 라 원장 열쇠가 아니다). stable 키가 없는 행(한쪽 노드가 없다)
+ * 이나 쌍 열쇠를 모를 때는 null 이다(보내지 않는다 — 보내면 400 이거나 엉뚱한 열쇠로 적힌다).
+ */
+export function pairDecision(
+  pair: Pick<SameAsPair, "a_stable" | "b_stable">,
+  decision: "confirm" | "reject",
+  pairKey: string | null,
+): SameAsPairDecision | null {
+  if (!pair.a_stable || !pair.b_stable || !pairKey) return null;
+  return { decision, scope: "pair", a_stable: pair.a_stable, b_stable: pair.b_stable, pair_key: pairKey };
 }

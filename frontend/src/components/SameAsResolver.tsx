@@ -9,7 +9,8 @@ import { Badge, StatusBadge } from "./Badge";
 import { GateTable } from "./GateBanner";
 import { Banner, Button, FormField, Select } from "../ui/primitives";
 import { fmtNum } from "../format";
-import type { GateRecord, SameAsDecision, SameAsPair } from "../types";
+import { pairDecision, samePairKey } from "../lib/compareView";
+import type { GateRecord, SameAsPair, SameAsPairDecision } from "../types";
 
 /** 일괄 수용의 문턱 — §8.2.4 가 정한 값이다. */
 const BULK_SCORE = 0.9;
@@ -60,6 +61,22 @@ export function SameAsResolver({
     [base, target],
     base !== "" && target !== "",
   );
+  /**
+   * 쌍 원장의 열쇠를 지을 두 과제 id — 스냅샷 상태가 project_id 를 싣는다(IR 을 통째로 받지 않는다). `GET /sameas` 답에 pair_key 가
+   * 없어서다 — 종전 확정 · 거부는 그 칸 없이 노드 id 를 보내 늘 400 E100 이었다. 확정할 행이 있을 때만 받는다.
+   */
+  const owners = useAsync(
+    async (signal) => {
+      const [a, b] = await Promise.all([
+        riskApi.getSnapshotState(base, { signal }),
+        riskApi.getSnapshotState(target, { signal }),
+      ]);
+      return { pairKey: samePairKey(a.project_id, b.project_id) };
+    },
+    [base, target],
+    base !== "" && target !== "" && (sameas.data?.pairs.length ?? 0) > 0,
+  );
+  const pairKey = owners.data?.pairKey ?? null;
   const onG2Ref = useRef(onG2);
   onG2Ref.current = onG2;
   const loadedG2 = sameas.data?.G2 ?? null;
@@ -73,8 +90,12 @@ export function SameAsResolver({
 
   const pairs = sameas.data?.pairs ?? [];
   const bulkCandidates = useMemo(
-    () => pairs.filter((p) => (p.status === "pending" || p.status === "candidate") && p.score >= BULK_SCORE),
-    [pairs],
+    () =>
+      pairs
+        .filter((p) => (p.status === "pending" || p.status === "candidate") && p.score >= BULK_SCORE)
+        .map((p) => pairDecision(p, "confirm", pairKey))
+        .filter((d): d is SameAsPairDecision => d !== null),
+    [pairs, pairKey],
   );
   const conflictN = useMemo(() => pairs.filter((p) => p.conflict || p.status === "conflict").length, [pairs]);
 
@@ -104,12 +125,13 @@ export function SameAsResolver({
     );
   }, [pairs, filter]);
 
-  async function decide(decisions: SameAsDecision[]) {
-    if (decisions.length === 0) return;
+  async function decide(decisions: Array<SameAsPairDecision | null>) {
+    const sendable = decisions.filter((d): d is SameAsPairDecision => d !== null);
+    if (sendable.length === 0) return;
     setBusy(true);
     setError(null);
     try {
-      const result = await riskApi.decideSameAs(decisions);
+      const result = await riskApi.decideSameAs(sendable);
       // 결정 답의 G2 는 지금 늘 null 이다 — 판정은 다시 읽은 표(GET /sameas)의 G2 가 정본이다.
       if (result.G2) onG2?.(result.G2);
       sameas.reload();
@@ -140,34 +162,41 @@ export function SameAsResolver({
       header: "확정",
       nowrap: true,
       // 표 한 칸이라 size="sm" 으로 둔다 — 기본 높이면 행이 두 배로 두꺼워진다.
-      cell: (p) => (
-        <span className="flex flex-wrap items-center gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={busy}
-            onClick={() => decide([{ a: p.a, b: p.b, decision: "confirm", scope: "pair" }])}
-          >
-            confirm
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={busy}
-            onClick={() => decide([{ a: p.a, b: p.b, decision: "reject", scope: "pair" }])}
-          >
-            reject
-          </Button>
-        </span>
-      ),
+      cell: (p) => {
+        // stable 키가 없는 행(한쪽 노드가 없다)과 쌍 열쇠를 아직 모를 때는 보내지 않는다.
+        const why = !p.a_stable || !p.b_stable ? "stable 키가 없는 행이라 원장에 적을 수 없습니다." : pairKey ? undefined : "두 스냅샷의 과제 id 를 아직 못 읽었습니다.";
+        return (
+          <span className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={busy || why !== undefined}
+              title={why}
+              onClick={() => decide([pairDecision(p, "confirm", pairKey)])}
+            >
+              confirm
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={busy || why !== undefined}
+              title={why}
+              onClick={() => decide([pairDecision(p, "reject", pairKey)])}
+            >
+              reject
+            </Button>
+          </span>
+        );
+      },
     },
   ];
 
   return (
     <div className="flex flex-col gap-3">
       <ErrorBanner error={error} />
+      {(sameas.data?.pairs.length ?? 0) > 0 ? <ErrorBanner error={owners.error} onRetry={owners.reload} /> : null}
       {isNotReady(sameas.error) ? (
         <NotReadyBlock what="same-as 매칭" />
       ) : (
@@ -184,9 +213,7 @@ export function SameAsResolver({
               type="button"
               variant="outline"
               disabled={busy || bulkCandidates.length === 0}
-              onClick={() =>
-                decide(bulkCandidates.map((p) => ({ a: p.a, b: p.b, decision: "confirm", scope: "pair" })))
-              }
+              onClick={() => decide(bulkCandidates)}
             >
               자동 매칭 전부 수용 (score ≥ {BULK_SCORE}, {bulkCandidates.length}건)
             </Button>
