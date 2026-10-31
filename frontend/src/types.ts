@@ -2255,8 +2255,14 @@ export type RegistryStatusSet = {
   label_needed: boolean;
   labels?: JsonObject[];
 };
+/**
+ * `PUT /registry/{cluster}/status` 의 본문(routes.RegistryStatusBody). `target_key` 를 늘 싣는다 — 빠지면 registry.set_status 가 그
+ * 사람의 같은 cluster_key 행 전부(cluster_key 는 메커니즘 · 주체 · 변경 종류의 해시라 같은 과제의 앞뒤 스냅샷 · diff 대상에서 같다)를
+ * 바꾸고, verified · dismissed 면 다른 대상의 finding 에도 라벨을 단다.
+ */
 export type RegistryStatusUpdate = {
   status: RegistryStatusInput;
+  target_key: string;
   evidence_ref?: string;
   note?: string;
 };

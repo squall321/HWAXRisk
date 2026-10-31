@@ -17,7 +17,7 @@ const samples = load("contract/serverSamples.js");
 const { MarkdownLines } = load("components/MarkdownLines.js");
 const { CellsHead } = load("components/CellsHead.js");
 const { ReviewBoard } = load("components/ReviewBoard.js");
-const { RegistryRowDetail, IssueCell, rowDomains, supportText } = load("components/RegistryCard.js");
+const { RegistryRowDetail, IssueCell, rowDomains, supportText, registryStatusBody } = load("components/RegistryCard.js");
 const { IssueDetail, ReargueNote } = load("components/IssuesCard.js");
 
 const h = React.createElement;
@@ -420,6 +420,18 @@ test("등록부 — 쟁점 패널이 덮은 행은 '원래 — 제기 N명(분�
   assert.match(cell, /원래 — 제기 3명\(FAIL 3\) → 쟁점 패널 상향/);
   const reraised = { ...covered, merged: { ...covered.merged, issue_reraised: { label: "패널 판정 — 근거 바뀜, 다시 토의 필요" } } };
   assert.match(renderToStaticMarkup(h(IssueCell, { row: reraised })), /<strong[^>]*>패널 판정 — 근거 바뀜, 다시 토의 필요<\/strong>/);
+});
+
+test("등록부 상태 변경 본문 — target_key 를 늘 싣는다(빠지면 같은 cluster_key 의 다른 대상 행까지 바뀐다), 빈 칸은 싣지 않는다", () => {
+  assert.equal(
+    JSON.stringify(registryStatusBody("diff:t2", "mitigated", "  ", " 완화 조치 ")),
+    '{"status":"mitigated","target_key":"diff:t2","note":"완화 조치"}',
+  );
+  assert.deepEqual(JSON.parse(JSON.stringify(registryStatusBody("snap:s1", "verified", " rpt:R-9 ", ""))), {
+    status: "verified",
+    target_key: "snap:s1",
+    evidence_ref: "rpt:R-9",
+  });
 });
 
 test("등록부 행의 영역 — 행에 domain 칸이 없다, 대표의 소유 영역이 먼저이고 제기 원자들의 영역이 뒤", () => {

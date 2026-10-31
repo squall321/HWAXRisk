@@ -20,12 +20,27 @@ import { ErrorBanner, LoadingBlock } from "./StateBlocks";
 import { Banner, Button, FormField, FormGrid, Input, Select, SubPanel } from "../ui/primitives";
 import { distributionText, labelOf, OUTCOME_LABEL, registryOverlayLine } from "../lib/issueView";
 import { fmtCounts, fmtJson, fmtNum } from "../format";
-import type { Registry, RegistryQuery, RegistryRow, RegistryStatusInput, Verdict } from "../types";
+import type { Registry, RegistryQuery, RegistryRow, RegistryStatusInput, RegistryStatusUpdate, Verdict } from "../types";
 
 const VERDICTS: Verdict[] = ["go", "conditional", "no-go", "undetermined"];
 const REGISTRY_STATUSES: RegistryStatusInput[] = ["verified", "dismissed", "mitigated"];
 const ATTENTIONS = ["A", "B", "C", "D"] as const;
 const ATTENTION_TONE: Record<string, "bad" | "warn" | "info" | "muted"> = { A: "bad", B: "warn", C: "info", D: "muted" };
+
+/** 상태 변경 본문 — 이 대상의 행만 바꾸게 target_key 를 늘 싣고, 빈 칸은 싣지 않는다(types RegistryStatusUpdate). */
+export function registryStatusBody(
+  targetKey: string,
+  status: RegistryStatusInput,
+  evidenceRef: string,
+  note: string,
+): RegistryStatusUpdate {
+  return {
+    status,
+    target_key: targetKey,
+    evidence_ref: evidenceRef.trim() === "" ? undefined : evidenceRef.trim(),
+    note: note.trim() === "" ? undefined : note.trim(),
+  };
+}
 
 /** 행의 영역 — 병합 행에는 domain 칸이 없다. 대표의 소유 영역(owner_domain), 없으면 제기 원자들의 영역(domains). */
 export function rowDomains(row: Pick<RegistryRow, "merged">): string[] {
@@ -213,11 +228,7 @@ export function RegistryCard({
     setBusy(true);
     setError(null);
     try {
-      await riskApi.putRegistryStatus(selectedRow.cluster_key, {
-        status: nextStatus,
-        evidence_ref: evidenceRef.trim() === "" ? undefined : evidenceRef.trim(),
-        note: note.trim() === "" ? undefined : note.trim(),
-      });
+      await riskApi.putRegistryStatus(selectedRow.cluster_key, registryStatusBody(targetKey, nextStatus, evidenceRef, note));
       registry.reload();
     } catch (err) {
       setError(err);
