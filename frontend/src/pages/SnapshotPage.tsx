@@ -585,7 +585,9 @@ export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
           <>
             <NodeTable nodes={nodes} onPick={(n) => setPickedNode((cur) => (cur?.nid === n.nid ? null : n))} picked={pickedNode?.nid ?? null} />
             {pickedNode ? (
-              <KeyLedgerPanel node={pickedNode} nodes={nodes} onClose={() => setPickedNode(null)} />
+              // 노드마다 다시 마운트한다 — 앞 노드에서 연 확인(병합 · 되돌리기 · 확정)과 고른 병합 대상이 새 노드의 패널 아래로 넘어가
+              // 앞 노드의 키를 바꾸지 않게(07e7af4 의 대상 화면과 같은 꼴).
+              <KeyLedgerPanel key={pickedNode.nid} node={pickedNode} nodes={nodes} onClose={() => setPickedNode(null)} />
             ) : null}
           </>
         ) : ir.loading ? (
