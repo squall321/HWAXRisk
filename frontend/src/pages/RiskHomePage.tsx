@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { riskApi } from "../api/risk.api";
 import { useAsync } from "../hooks/useAsync";
 import { CardGrid, SectionCard } from "../components/SectionCard";
+import { BoxReasons } from "../components/BoxReasons";
 import { EmptyBlock, ErrorBanner, LoadingBlock } from "../components/StateBlocks";
 import { Badge, LevelBadge, VerdictBadge } from "../components/Badge";
 import { Banner, Button, Chip, FormField, FormGrid, Input, Select, TabBar } from "../ui/primitives";
@@ -251,11 +252,17 @@ export default function RiskHomePage() {
     <>
       <ErrorBanner error={me.error} onRetry={me.reload} />
       {me.data && me.data.box.secrets_valid === false ? (
-        <Banner title="이 박스의 자격이 없습니다.">
-          <Link to="/settings" className="text-sm underline underline-offset-4">
-            설정
-          </Link>
-        </Banner>
+        <>
+          {/* 막는 까닭만 — 서버가 고른 글과 고칠 길 그대로(선택 키 없음 같은 정보는 설정 화면이 보인다). */}
+          <BoxReasons reasons={me.data.box.reasons} only="blocking" />
+          <p className="m-0 text-sm text-muted-foreground">
+            이 박스의 필수 자격이 갖춰지지 않았습니다 —{" "}
+            <Link to="/settings" className="underline underline-offset-4">
+              설정
+            </Link>
+            에서 자세히 봅니다.
+          </p>
+        </>
       ) : null}
 
       <TabBar tabs={HOME_TABS} value={tab} onChange={setTab} label="홈 탭" />

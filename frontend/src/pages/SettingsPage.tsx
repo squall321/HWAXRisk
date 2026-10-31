@@ -7,6 +7,7 @@ import { KeyValueTable } from "../components/DataTable";
 import { ErrorBanner, EmptyBlock, LoadingBlock, NotReadyBlock } from "../components/StateBlocks";
 import { Badge } from "../components/Badge";
 import { useAutoPortalPat } from "../components/AutoPortalPat";
+import { BoxReasons } from "../components/BoxReasons";
 import { Clock, KeyRound, ShieldAlert, ShieldCheck } from "lucide-react";
 import { Banner, Button, Chip, Field, FormField, Input, Mono, SubPanel } from "../ui/primitives";
 import { cn } from "../lib/cn";
@@ -407,7 +408,9 @@ function RunnerSection({ pat, secretsValid }: { pat: PortalPatSummary | null; se
           },
           { label: "내 PAT exp", value: fmtEpoch(pat?.exp ?? null) },
           {
-            label: "서비스 자격",
+            // 패널은 서비스 계정으로 내려가지 않는다(U-3) — 이 칸은 박스의 필수 자격(secrets_valid)이다.
+            label: "박스 필수 자격",
+            hint: "secrets_valid",
             value: secretsValid ? <Badge tone="ok">valid</Badge> : <Badge tone="bad">invalid</Badge>,
           },
         ]}
@@ -474,17 +477,15 @@ export default function SettingsPage() {
       <SectionCard title="이 박스">
         {me.data ? (
           <>
-            {me.data.box.secrets_valid ? null : (
-              <Banner
-                title="이 박스의 자격이 없습니다."
-                detail="저장된 비밀이 이 호스트에서 풀리지 않습니다."
-              />
-            )}
+            {/* 고정 문구 대신 서버가 고른 까닭(message)과 고칠 길(fix)을 그대로 — 빠진 키 · 키 폴백을 이관 문제로 읽지 않게. */}
+            <BoxReasons reasons={me.data.box.reasons} />
             <KeyValueTable
               rows={[
                 { label: "hostname", value: me.data.box.hostname },
                 {
-                  label: "secrets_valid",
+                  // 뜻은 '필수가 갖춰졌다' 다(호스트 일치 · 자격 암호화 키 있음 · 그 키가 개발용 폴백이 아님).
+                  label: "필수 자격",
+                  hint: "secrets_valid",
                   value: me.data.box.secrets_valid ? <Badge tone="ok">valid</Badge> : <Badge tone="bad">invalid</Badge>,
                 },
                 {
@@ -495,6 +496,9 @@ export default function SettingsPage() {
                     <Badge tone="bad">absent</Badge>
                   ),
                 },
+                ...(me.data.box.cred_key_source
+                  ? [{ label: "키 출처", hint: "cred_key_source", value: <code>{me.data.box.cred_key_source}</code> }]
+                  : []),
                 {
                   // 이 값이 틀리면 PAT 등록·패널 실행이 전부 실패한다 — 안 보이면 사람이 토큰을 의심한다.
                   label: "portal_base",
