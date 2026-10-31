@@ -119,6 +119,39 @@ test("노드 kind 거름 · 요구 여유 — 신호가 없으면 null(지어내
   assert.deepEqual(snap.marginRows({ signals: { "req.margin": { value: [row] } } }), [row]);
 });
 
+test("요구 여유 — 동결이 요구를 대조해 상태에 싣는다(실 서버 견본 · 10-31 risk-flow) — 위반 · 여유 · 미측정 차례 그대로", () => {
+  const samples = load("contract/serverSamples.js");
+  const rows = snap.marginRows(samples.snapshotStateMargin);
+  assert.deepEqual(rows.map((r) => [r.name, r.margin, r.known]), [["plate1_t", -0.2, true], ["plate2_t", 0.1, true], ["ghost_t", null, false]]);
+  assert.equal(samples.snapshotStateMargin.missing.req_absent, false);
+});
+
+test("진행판 패널 잡이 멈춘 까닭 — 정지 까닭이 없으면 보류 코드(실 서버 견본 · external_worker), 둘 다 없으면 null", () => {
+  const samples = load("contract/serverSamples.js");
+  const job = samples.coveragePanelHeld.job;
+  assert.equal(job.pause_reason, null);
+  const pause = tgt.panelJobPause(job);
+  assert.equal(pause.code, "external_worker");
+  assert.equal(pause.externalWorker, true);
+  assert.match(pause.label, /외부 응답자 워커 없음/);
+  assert.deepEqual(tgt.panelJobPause({ state: "paused", pause_reason: "user", hold_code: null }), { code: "user", label: "사람이 멈춤", externalWorker: false });
+  assert.equal(tgt.panelJobPause({ state: "paused", pause_reason: null, hold_code: "new_code" }).label, "new_code");
+  assert.equal(tgt.panelJobPause({ state: "paused", pause_reason: null, hold_code: null }), null);
+});
+
+test("진행판 패널 잡 — 멈춘 잡만 멈춘 까닭이 있다: 취소가 보류를 비운 줄(실 서버 견본)도, 그 전에 취소돼 보류가 남은 줄도 까닭이 없다(반대 검토 10-31)", () => {
+  const samples = load("contract/serverSamples.js");
+  const job = samples.coveragePanelCancelledAfterHold.job;
+  assert.deepEqual([job.state, job.pause_reason, job.hold_code, job.hold_until], ["cancelled", null, null, null]);
+  assert.equal(tgt.panelJobPause(job), null);
+  // 서버가 취소에서 보류를 비우기 전의 원장 — 취소된 잡에 external_worker 가 남아 있다. '워크플로를 다시 돌린 뒤 재개' 를 말하지 않는다.
+  assert.equal(tgt.panelJobPause({ ...job, hold_code: "external_worker" }), null);
+  for (const state of ["queued", "running", "cancelling", "completed", "failed"]) {
+    assert.equal(tgt.panelJobPause({ state, pause_reason: null, hold_code: "external_worker" }), null, state);
+  }
+  assert.equal(tgt.panelJobPause(samples.coveragePanelHeld.job).code, "external_worker"); // 멈춘 잡은 그대로
+});
+
 test("비교 — ECAD 항목의 partial_scope 는 '한쪽에만 보드', 한쪽 실패는 capture_partial 말", () => {
   assert.equal(cmp.excludedLabel("partial_scope", true), "한쪽 스냅샷에만 보드");
   assert.equal(cmp.excludedLabel("partial_scope", false), "부분 검출 범위 밖");

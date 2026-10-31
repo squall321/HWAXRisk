@@ -155,8 +155,9 @@ def _scope_sql(agent_key: str | None) -> tuple[str, list[Any]]:
 
 
 def _latest_review_job(store: Any, target_key: str) -> str | None:
+    # 같은 초에 선 잡은 넣은 차례(rowid)로 — 진행판 review.job 과 같은 잡이다(review_cells._latest_review_job 주석).
     row = store.query_one("SELECT id FROM rr_jobs WHERE target_key = ? AND mode = 'reviews'"
-                          " ORDER BY created_at DESC, id DESC LIMIT 1", (target_key,))
+                          " ORDER BY created_at DESC, rowid DESC LIMIT 1", (target_key,))
     return str(row["id"]) if row is not None else None
 
 

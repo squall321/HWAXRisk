@@ -4857,3 +4857,191 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
 - 하지 않은 것 — 서비스 · 인스턴스 기동 · 정지, push · 병합, 실 브라우저 확인.
 - 본 것(이번 범위 밖) — 손 픽스처(dyna 결과 포함)로 언 스냅샷의 ir_json 은 rr_ir.v1 스키마의 results `oneOf` 검증을 지나지 못한다(seed_raw 의
   검증이 잡았다 — 시험은 mcad 만의 스냅샷을 옮겨 심었다). 까닭은 보지 않았다.
+
+## 리스크 흐름 10-31 — 화면 세션이 청한 결함 · 잡 / 쟁점 흐름(가지 `wt1031/risk-flow`, main dbe5f93 위, 2026-10-31)
+
+> 화면 세션(FE-7 · FE-14 · FE-22 · FE-30 끝)이 백엔드에 청한 것 가운데 잡 · 쟁점 흐름 열 가지와 Tier C 후속 노트다. 화면이 '모름' 으로
+> 비워 둔 칸은 서버가 채운 뒤 화면을 고치지 않고 보이는지(읽는 칸 이름이 같은지)까지 봤다 — 같으면 낡은 글만 고쳤고, 읽는 칸이 없던
+> 셋(사슬 표지 · 패널 잡 보류 · 자동 등록 쉼)만 화면을 고쳤다. 같이 도는 가지 `wt1031/risk-audit`(잡 제어 · status 변경 감사)의 함수
+> (job_action · put_verdict · put_registry_status · registry.set_status)는 건드리지 않았다 — 두 가지의 코드는 글자 충돌 없이 합쳐지고
+> 작업 대장 두 파일의 끝 덧붙임만 겹친다. 커밋 046c327 ~ d4c565d.
+
+### RF-1. 쟁점 행의 결과 칸(outcome_json)은 원장 값 그대로다(046c327)
+- `routes._issue_row_out` 이 `_loads(…, None)` 을 불렀고 `_loads` 는 기본값과 같은 형만 돌려주므로 기본값 None 은 무엇을 읽어도 None 이었다
+  (DB 에는 있다). 기본값을 빈 객체로 읽고 비면 null 이다. REST `GET /targets/{key}/issues` 와 MCP `risk_get_issues` 가 같은 함수다.
+- 다른 모듈의 `_loads(…, None)`(closure · unit_live · synth)는 형 검사가 없는 다른 함수라 같은 결함이 아니다(확인만 했다).
+
+### RF-2. 쟁점 결정 뒤 완결 캐시를 같은 트랜잭션에서 새로 쓴다(14ebb56)
+- 올리기 · 건너뛰기가 완결의 수 · 잔여(쟁점 진행 · 미토의)를 바꾸는데 `rr_targets.closure_json` 이 그대로라 진행판 level_label ·
+  qualifiers 와 `GET …/closure` 가 앞 값을 냈고, 그 basis_hash 로 보낸 확인이 409 residual_changed 였다(FE-20 의 '한 번 다시 세기' 가
+  그것을 넘겼다 — 그 길은 그대로 둔다).
+- 쓰는 자리는 쟁점 쓰기 · 감사와 같은 트랜잭션이다. 사람이 올린 쟁점이 세우는 GLM 쟁점 잡은 사슬 표지(chain_json)가 없어 완결이
+  읽는 값(`_fresh` 의 사슬 잡 지문)을 바꾸지 않으므로 잡보다 먼저 써도 된다.
+
+### RF-3. 요구 여유 — 동결이 대조하고 요구 편집이 다시 센다(ac16932)
+- 종전에는 `freeze_snapshot` 이 `build_state(ir)` 만 불렀고 `compute_state_for_snapshot` 을 부르는 곳이 없었다 — rr_states 에
+  `sig:req.margin` 이 없어 스냅샷 화면의 요구 여유 표가 늘 비었고 R-007 은 늘 평가 불가였다(plan P1 (20) 의 기준이 이것이다).
+- `state.freeze_state` 를 동결과 다시 세기가 같이 쓴다 — 지금 요구 원장의 대조를 싣고 규칙은 동결 때와 같은 시드다(rules 를 주지
+  않는다). 다시 세기에 `compute_state_for_snapshot` 을 쓰지 않은 까닭 — 그 함수는 rr_rules 의 active 규칙(학습이 올린 규칙만 있으면
+  시드가 빠진다)으로 세므로 요구를 고쳤을 뿐인데 다른 규칙의 적중이 바뀔 수 있다. 규칙을 갈아 끼운 뒤의 재계산은 그 함수의 몫으로 둔다.
+- 요구는 IR 에 들지 않는다 — IR 로 옮기는 셋(게이트 · 성격 씨앗 · 특징 벡터)은 요구 신호를 읽지 않음을 확인했다(씨앗 DSL 의
+  `missing.*` 은 IR 의 결측을 읽는다). 그래서 ir_json · ir_hash 는 바이트 그대로다.
+- `state.recompute_project_states` — 요구 등록(POST) · 상태(PUT — waived 는 대조하지 않고 여유 행이 status 를 싣는다) · 승계가 요구
+  쓰기와 같은 트랜잭션에서 그 과제 스냅샷의 상태를 다시 센다. 검사에 걸린 편집은 상태도 다시 세지 않는다. 상태가 있는 스냅샷만이고
+  폐기로 비운 상태(state_json '')는 건너뛴다.
+- 게이트 ack — `save_state` 가 gates_json 을 통째로 덮으므로 지금 gates_json 에 붙은 ack 를 그대로 싣는다(빼면 사람이 붙인 ack 가
+  사라진다). 판정은 같은 IR 이라 그대로고 gates_hash 도 같아 ack 는 낡지 않는다. 다시 센 state_json 의 게이트에도 ack 가 실린다
+  (`part=state` 가 동결 때 원문이라 ack 를 싣지 않던 것 — FE-11 — 은 다시 센 스냅샷에서는 지금 값이 된다).
+- 동기로 센다(과제의 스냅샷 수 × 상태 계산 한 번). 큐는 짓지 않았다 — 동결 한 번이 이미 같은 계산을 동기로 한다.
+- 그 전에 언 스냅샷은 그 과제의 요구를 고치기 전까지 `req.margin` 이 없다 — 화면은 그 사실과 '요구를 저장하면 다시 센다' 를 보인다.
+
+### RF-4. 같은 초에 선 잡은 넣은 차례(rowid)로 가른다(a57ff8b · 83411f1)
+- 진행판 review.job(`review_payload`)과 셀 처분이 얹는 잡(`review_cells._latest_review_job`)이 `created_at DESC, id DESC` 라 같은 초면
+  uuid 가 큰 앞 잡을 골랐다(하네스에서 났다). 사슬 단계(`chain_stage`)처럼 `created_at DESC, rowid DESC` 다.
+- 같은 '마지막 검토 잡' 의 품질을 읽는 셋(`review_quality._latest_review_job` · `closure._quality` · `synth._quality_block`)도 함께
+  바꿨다 — 하나만 바꾸면 한 진행판 안에서 잡 줄과 품질 · 완결 잔여가 다른 잡을 읽는다. 시험 하나가 다섯 자리를 다 본다(변이 다섯이 다
+  잡혔다).
+- 진행판의 패널 잡 줄도 같은 결함이었다(순서 열쇠가 created_at 하나 — 같은 초면 앞 잡) — RF-6 에서 그 줄을 고치며 rowid 를 더했다.
+- 남긴 것 — 브리프의 패널 잡 메모(`brief.py` M 항목의 `created_at DESC, id DESC`)도 같은 꼴이다. 이번 범위(검토 잡)가 아니라 두었다.
+
+### RF-5. 진행판 검토 잡에 사슬 표지 칸 `chain`(896e7c8)
+- `params.chain is True`(M3 코드가 세운 잡) — 판정은 `chain.chain_marked` · 길잡이(`entry._chain_marked`)와 같다. 시험은 M3 잡(true)과
+  v4 원장의 M2 잡(false)을 본다.
+- 화면의 'M2 시절 잡 뒤의 사슬 시작' 은 그 칸으로 가른다(사슬 없음 · 마지막 검토 잡 completed · chain false · 대기 셀 0). 판 유무의
+  어림을 걷었다 — 사람이 '다시 내기' 로 코드 조립 판을 세운 M2 시절 대상에도 사슬은 서지 않았으므로 단추가 서야 한다(길잡이도 판을 보지
+  않는다).
+
+### RF-6. 진행판 패널 잡에 hold_code · hold_until(83411f1)
+- 외부 응답자 패널이 워커가 없어 멈춘 잡은 `pause_reason` 이 비고 `rr_jobs.hold_code` 가 external_worker 인데 줄에 그 칸이 없어 화면이
+  '멈춘 까닭 — 모름' 이었다. 검토 잡 줄과 같은 두 칸이다. 화면은 정지 까닭이 없으면 보류 코드와 자동 재개 시각을 보이고(`panelJobPause`),
+  external_worker 면 '워크플로를 다시 돌린 뒤 재개' 를 말한다.
+
+### RF-7. 패널 잡의 반출 동의 글(7d40238)
+- 패널 잡의 422 `consent_external_required` 가 검토 잡의 반출 글(지식카드 · 사슬이 이어 도는 쟁점 패널 · 종합 요약)을 썼다.
+  `runner.PANEL_EGRESS_WARNING` — 그 잡이 돌리는 패널마다 브리프와 좌석 조회 결과가 나가고, 동의는 그 잡에만이며 C3 자동 후속 Tier C 는
+  GLM 이다(RF-11). `check_llm_choice` 가 `warning` 을 받는다(검토 잡은 종전 글 그대로). 화면의 동의 글(`PANEL_EGRESS_WARNING`)은
+  고치지 않았다 — 같은 뜻이다.
+
+### RF-8. 자동 등록 안내의 꼬리를 뗐다(2172cb7)
+- 설정의 '자동 등록' 스위치와 앱을 열 때의 자동 등록(화면 세션 B35)이 나왔다 — `AUTO_STOP_HINT` · `pat_unavailable_guidance` 의
+  '곧 생긴다 — 그때까지는 운영자가 앱 데이터 DB 에서 끈다(켠다)' 와 포털 절차서 꼬리를 걷고, 등록 길에 '웹 리스크 앱을 열 때' 를 더했다.
+  `entry.fix_register_pat`(길잡이 · 잡 만들기의 pat_unavailable 고칠 곳)도 같은 길을 말한다. 쓰는 곳이 없어진 `AUTO_SWITCH_RUNBOOK` 은 걷었다.
+- '자동으로 등록된다' 낱말은 남겼다 — 다른 시험 다섯이 그 낱말로 안내를 알아본다.
+
+### RF-9. 웹 등록 실패를 서버가 적고 due 가 그 쉼을 본다 — 화면의 브라우저 쉼을 걷었다(30e002c · a3aaec2)
+- `PUT /me/portal-pat` 의 source web(브라우저가 받아 온 PAT — 앱을 열 때 · 설정의 버튼) 거절을 `web-<code>: <글>` 로 적는다(갈래는
+  교환 실패와 같다 — portal_unreachable 은 일시). 붙여 넣은 PAT(manual)의 거절은 자동 등록이 아니라 적지 않는다.
+- `auto_paused_until` — 게이트웨이 길(portal_pat_wanted, 종전 그대로)과 웹 길(GET /api/me 의 due)이 같은 쉼을 본다. due 는 받을 까닭이
+  있고 쉼 밖일 때만 참이며 `paused_until` 이 쉼의 끝이다. 설정의 버튼은 쉼과 상관없이 되고 성공하면 기록과 쉼을 지운다.
+- 기록이 하나라 쉼도 하나다(요청 그대로) — 게이트웨이 교환의 실패(Claude 에 넣은 PAT 탓 따위)도 앱을 열 때의 자동 등록을 쉬게 하고,
+  웹 등록의 실패도 게이트웨이의 바람을 쉬게 한다. 화면은 그때 쉼의 끝과 마지막 실패를 보이고 버튼은 된다. 길마다 쉼을 나누려면 열이
+  하나 더 든다(_user_prefs — 지금 열을 바꾸지 않았다, 결정 필요로 남긴다).
+- 화면 — localStorage 쉼(`AUTO_HELD_KEY` · `createAutoHold` · `autoHoldOf` · 쉼 길이 상수 둘)을 걷었다. 탭 세션마다 한 번 문
+  (sessionStorage)은 남겨 한 탭이 되풀이해 받지 않는다. 설정 화면은 서버의 쉼(`autoPausedUntil`)을 말한다. 이미 브라우저에 남은
+  옛 표지(값 `{until, code}` — 토큰 · 계정 없음)는 읽지 않을 뿐 지우지 않는다.
+- 서버가 적지 못하는 실패(네트워크 · 다른 5xx — 등록이 났는지 모름)는 쉼이 없다 — 새 탭이 다시 받는다. 그 PAT 는 FE-29 의 길(GET /me 의
+  jti 로 가른 뒤 폐기)이 그대로 치운다.
+
+### RF-10. 다시 토의 표기의 꼴을 하나로(f134686 · d4c565d)
+- `_keep_verdict` 가 비어 있던 표기(사람이 다시 올린 결과 쟁점)에 at(그 시각) · round(그 쟁점이 고른 회차)를 채운다 — 근거가 바뀌어
+  선 표기와 같은 칸이다. 이미 있는 at · round 는 그대로다(덮어쓰기 변이가 처음에 살아남아 시험을 더했다). 부르는 두 곳(resolve_issue ·
+  release_issue)이 selected_round 를 읽는다. 10-31 전에 선 행은 label · new_panel_failed 뿐이라 화면 타입은 선택 칸 그대로다.
+
+### RF-11. Claude Tier B 잡 뒤의 C3 자동 후속 Tier C 는 GLM 이다 — 정책(의도, 바꾸지 않는다)
+- 러너의 `_finish_job` 이 닫힘 레벨 C3 에서 Tier B 잡 뒤에 세우는 Tier C 는 메모 · 층 · 브리프 제외(BL-10)를 물려받지만 판단 LLM(llm ·
+  consent_external)은 물려받지 않는다. 반출 동의는 잡마다다(사용자 결정 10-15) — 사람이 그 잡에 동의하지 않았는데 시스템이 데이터를
+  Claude 로 보내지 않는다. 검토 잡의 사슬(쟁점 · 종합)이 판단 LLM 을 물려받는 것과 다르다 — 그쪽은 동의 글(EGRESS_WARNING)이 사슬이
+  내보내는 것까지 말하고 사람이 그 글에 동의한다. 패널 잡의 동의 글은 이제 '동의는 이 잡에만 — Tier C 후속은 GLM' 을 말한다(RF-7).
+- 고정 — `_finish_job` 주석과 시험(`test_the_c3_follow_up_of_a_claude_tier_b_job_stays_on_glm` — 후속 params 에 llm · consent_external 이
+  없고 자격은 GLM 잡의 순서). 바꾸려면 사람이 그 후속에 따로 동의하는 길이 먼저다.
+
+### RF-12. 화면 · 서버 견본(a3aaec2)
+- 읽는 칸 이름이 이미 서버와 같았던 둘 — 쟁점 결과 칸(`row.outcome_json` — 쟁점 한 줄의 덮은 값 · 펼친 칸)과 요구 여유
+  (`state.signals["req.margin"]`)는 화면 코드를 고치지 않고 서버 값이 보인다(고치기 전 화면 사본에 새 견본을 넣어 돌린 시험이 통과한다).
+  낡은 글(서버가 늘 null · 동결이 대조하지 않는다)만 고쳤다. 다시 토의 표기의 새 꼴도 그대로 그려진다(at · 회차 · 실패 줄).
+- 고친 셋 — 사슬 표지(`chainStartVisible`), 패널 잡 줄의 보류(`panelJobPause` · TargetPage), 자동 등록 쉼(RF-9).
+- 견본(`src/contract/serverSamples.ts`) — 이 가지 하네스(스크래치, 백엔드 시험 도구로 만든 원장)의 실 응답: 쟁점 목록을 새로 옮겼다
+  (상향 · 닻 원자 없어 판정 못 함 · 상한 밖 — 결과 칸이 원장 값이다), 다시 토의 표기의 새 꼴(`issueRepanelFailedRow`), 보류된 Claude 패널
+  잡의 진행판(`coveragePanelHeld`), 쉬는 PAT 요약(`portalPatPaused` — 박스 칸은 dev 호스트 이름이 들어 싣지 않았다), 상태의 요구 여유
+  (`snapshotStateMargin`). 검토 잡 줄 견본 둘에는 chain(M3 잡이라 true)을 더했다.
+
+### RF-13. 시험 · 변이 · 전체 시험 · 남긴 것
+- 백엔드 새 시험 18(쟁점 2 · 요구 상태 4 · 검토 잡 3 · 패널 잡 3 · PAT 자동 등록 4 · 다시 토의 표기 2)과 계약이 바뀐 시험 6(검토 잡 줄 칸 ·
+  패널 잡 줄 칸 · external_worker 보류 · /me auto 칸 · 안내 둘). 고치기 전 코드(dbe5f93 스크래치 사본)에 이 시험 파일을 넣으면 21이
+  붉다 — 새 15 와 바뀐 6 이고, 남은 새 셋은 지킴 시험이다(검사에 걸린 요구 편집은 다시 세지 않음 · Tier C 후속 GLM · 근거 바뀐 표기의
+  at · round 를 덮지 않음).
+- 화면 시험 87 → 89(브라우저 쉼 시험 둘을 걷고 서버 쉼 · 저장 전 거절 · 요구 여유 견본 · 패널 잡 보류 넷을 더했다). 고치기 전 화면
+  사본에 새 시험 · 견본을 넣으면 셋이 붉다(사슬 표지 · 패널 잡 보류 · 서버 쉼). `tsc -b` · `vite build` 통과.
+- 변이(스크래치 사본) — 백엔드 25/25(덮어쓰기 둘은 시험을 더한 뒤), 화면 6/6.
+- 리스크 전체 시험 한 번(공유 잠금) — 3,731 통과 · xfail 4 · 실패 0(rc 0, d260b83).
+- 남긴 것 — 길마다 자동 등록 쉼 나누기(RF-9, 열이 든다 — 결정 필요) · 브리프 패널 잡 메모의 같은 초 고르기(RF-4) · FE-14 청할 것의
+  나머지(과제 상세 메타 · 멤버 읽기 · 상태의 ack · 키 대장 · pair_key · 패널마다의 신호 · 스냅샷 머리 판 칸)와 FE-30 의 나머지(confirm_key
+  병합 키 · 스냅샷 머리 degraded_json · 키 대장)는 이 가지의 범위가 아니다. 요구 라우트 셋은 지금도 과제 소유자만이다(plan 은 editor —
+  접근 규칙은 바꾸지 않았다).
+
+### 반대 검토 10-31 — 세 지적(RF-14 ~ RF-17, 커밋 1b05177 ~ e269f7a)
+
+> 이 가지(8d42a84)를 본 반대 검토가 셋을 짚었다 — 셋 다 재현했고(고치기 전 코드에서 새 시험이 붉다) 고쳤다. routes.py 에서 손댄 곳은 자동
+> 등록 쉼(auto_paused_until · portal_pat_auto · portal_pat_wanted), PUT /me/portal-pat 의 웹 거절 기록, 과제 폐기의 주석 하나다 — main
+> b71a262(사람 조작 감사)이 바꾼 함수(job_action · put_verdict · put_registry_status · 감사 도우미)와 겹치지 않아 저절로 합쳐진다. 겹치는
+> 것은 runner.cancel_job 한 줄이다(RF-14 끝).
+
+### RF-14. 취소가 보류를 비운다 — 패널 · 쟁점 잡(1b05177 · e269f7a)
+- 지적 — 보류 external_worker 로 멈춘 Claude 패널 잡을 주인이 취소하면(REST · MCP risk_job_action — 같은 runner.cancel_job) 패널 갈래가
+  hold 를 주지 않아 hold_code 가 남았다. RF-6 이 진행판 패널 잡 줄에 보류를 실은 뒤로 cancelled 잡의 줄이 external_worker 를 싣고 화면의
+  '멈춘 까닭' 이 '워크플로를 다시 돌린 뒤 재개' 를 말했다. 쟁점 잡(credential · external_config · external_worker 보류)도 같아 사슬 단계가
+  취소된 잡에 보류를 실었다(길잡이 · 사슬 배지는 paused 일 때만 보류를 읽어 겉으로는 드러나지 않았다).
+- 고침 — cancel_job 의 패널 갈래가 resume_job 처럼 보류가 있으면 `_HOLD_CLEARED` 를 준다(보류가 없던 잡의 문장은 종전 그대로). 검토 잡의
+  취소와 과제 폐기는 이미 비웠다. 폐기 문장의 주석('패널 잡은 그 열이 늘 NULL')과 `_set_job` 의 hold 설명을 지금 사실로 고쳤다.
+- 화면 — `panelJobPause` 가 paused 일 때만 까닭을 낸다(사슬 배지 · 판단 LLM 줄과 같은 규칙). 서버를 고치기 전에 취소된 잡의 원장에는
+  보류가 남아 있어서다 — 원장은 고치지 않았다(이행을 더하지 않는다). 그런 줄이 있으면 화면은 '멈춘 까닭 — 모름' 이고 MCP 줄은 state
+  cancelled 와 남은 보류를 함께 싣는다.
+- 합칠 때 — main b71a262 이 같은 갈래를 트랜잭션(다시 읽기 · 쓰기 · on_change 감사)으로 감쌌다. 글자 충돌이 난다 — main 쪽을 두고 그 안의
+  `_set_job(store, job_id, state, by=by)` 에 `hold=_HOLD_CLEARED if row["hold_code"] is not None else None` 만 더한다(`row` 는 트랜잭션
+  안에서 다시 읽은 것, 주석 두 줄은 그 위로). 스크래치 클론에서 그렇게 풀어 합친 판의 관련 시험(사람 조작 감사 포함) 270 이 통과했고,
+  보류된 잡의 취소 감사 행은 앞 {paused, external_worker} · 뒤 {cancelled, null} 이었다.
+
+### RF-15. 자동 등록 쉼은 길마다 — 기록의 머리가 길을 말한다(659b251 · e269f7a)
+- 지적 — RF-9 의 기록 하나 · 쉼 하나가 두 길을 함께 쉬게 했다. (A) Claude 에 넣은 PAT 의 청중 탓 교환 실패(widen_audience)가 앱을 열 때의
+  자동 등록을 6시간 막았다 — 웹 길은 브라우저의 포털 세션으로 받아 Claude PAT 와 상관없는데 dbe5f93 에서는 due 가 참이었다. (B) 다른
+  계정의 포털 세션으로 누른 설정 버튼 하나(web-pat_email_mismatch)가 Claude 길의 바람을 6시간 멈췄다. (C) 웹 실패가 기록을 덮어 Claude 길
+  안내(pat_unavailable · risk_next_step · 잡 error)에서 Claude PAT 를 고치라는 글이 사라졌다.
+- 고침 — `auto_paused_until(prefs, path=…)` 가 마지막 실패가 그 길의 것일 때만 쉰다. 길은 글의 머리로 가른다 — `web-<code>` 는 웹 길(PUT
+  /me/portal-pat source web), 그 밖(교환 실패 `<code>` · 게이트웨이가 보낸 PAT 의 등록 거절 `register-<code>`)은 게이트웨이 길이다.
+  GET /api/me 의 `due` · `paused_until` 은 웹 길의 것이고(게이트웨이 실패에는 due 참 · paused_until null), portal_pat_wanted 는 게이트웨이
+  길의 쉼만 본다. 열은 더하지 않았다 — 머리가 이미 길을 말하고, _user_prefs 는 버전 밖 살림 표라 열을 더하면 옛 DB 에 ALTER 길이 든다.
+- 결정(지적이 물은 것) — 사람이 누른 버튼의 실패는 Claude 길을 쉬게 하지 않는다. 버튼도 앱을 열 때의 자동 등록과 같은 브라우저 세션으로
+  받으므로 웹 길만 쉰다(같은 까닭으로 또 거절될 PAT 를 새 탭마다 받지 않게 — 버튼 자체는 쉼과 상관없이 된다).
+- 대가 — 기록은 하나라 다른 길의 실패가 덮으면 쉼도 그 길로 넘어가고 덮인 길은 한 번 더 해 본다(실패하면 제 글을 다시 적는다 — (C) 는
+  다음 Claude 호출의 단언 발급에서 게이트웨이가 다시 실패하며 되찾는다). 두 길이 함께 실패하는 동안(박스 · 계정 탓 같은 까닭이거나 서로
+  다른 까닭) 길을 바꿀 때마다 한 번씩 더 든다 — 게이트웨이는 4xx 면 새 PAT 를 폐기하고 화면은 저장 전 거절이면 받은 PAT 를 폐기한다(둘 다
+  최선 노력이라 폐기가 실패하면 그 PAT 는 포털에 남는다 — 종전과 같은 길). 이것이 거슬리면 길마다 기록 열을 두는 것이 다음 걸음이다
+  (지금은 하지 않았다).
+- 화면 — 읽는 칸(`due` · `paused_until`)은 그대로라 동작은 고치지 않았다. 설정 글을 '앱을 열 때의 자동 등록을 쉰다 — Claude 에서 부를 때의
+  등록은 쉬지 않는다' 로, 타입 · `autoPausedUntil` 주석을 웹 길의 쉼으로 고쳤다. 견본 `portalPatGatewayFailed`(게이트웨이 교환 실패 뒤의 실
+  응답 — due 참 · paused_until null)에서 화면이 고치지 않고 받는다(`autoRegisterWanted` 참)는 시험을 더했다.
+- 게이트웨이가 보내는 code 가 `web-` 로 시작하면 웹 길로 읽힌다 — 게이트웨이 code 는 정해진 어휘(AUTO_ERROR_TEMPLATES · http_* · unknown)라
+  막지 않았다.
+
+### RF-16. 동결의 요구 원장 읽기를 스냅샷을 넣는 트랜잭션 안으로(3cf27f3)
+- 지적 — `freeze_snapshot` 이 `freeze_state`(요구 원장 대조)를 트랜잭션 앞에서 불렀다. 그 틈에 다른 요청이 요구를 저장하면 그 트랜잭션의
+  `recompute_project_states` 는 아직 없는 새 스냅샷을 보지 못하고, 새 스냅샷은 옛 원장으로 센 상태로 들어가 다음 요구 편집까지 req.margin ·
+  missing.req_absent · R-007 이 낡았다(드물지만 조용하다).
+- 고침 — 상태 계산(과 IR 로 옮기는 게이트 · 씨앗 · 특징)을 `with store.tx():` 안, INSERT 앞으로 옮겼다. 저장소의 RLock 과 BEGIN IMMEDIATE 가
+  동결과 요구 편집을 줄 세운다 — 요구 편집이 먼저면 동결이 새 원장을 읽고, 동결이 먼저면 요구 편집의 다시 세기가 새 스냅샷을 본다.
+- 비용 — 잠금 안에서 상태 계산 한 번이 더 돈다. 합성 모델(부품 1,450 · 노드 1,985 · 엣지 2,591)에서 `freeze_state` 19 ms(동결 전체 약 2 초 —
+  대부분 트랜잭션 밖 IR 조립)였다. 다른 시도(트랜잭션 안에서 요구 신호만 다시 세기)는 계산이 두 번이라 두지 않았다.
+- 시험 — 두 스레드로 끼운다. `build_state` 를 감싸 첫 부름(원장을 읽은 뒤)에서 다른 스레드가 요구를 저장하게 하고 1초까지 기다린다. 고치기
+  전에는 그 저장이 곧바로 끝나 새 스냅샷의 여유 행이 plate2_t 하나이고, 고친 뒤에는 저장이 동결의 잠금에 막혔다가 새 스냅샷까지 다시 센다
+  (같은 스레드로 끼우면 트랜잭션이 재진입으로 합쳐져 고친 뒤에도 붉으므로 다른 스레드다).
+
+### RF-17. 시험 · 변이 · 합친 판
+- 백엔드 새 시험 6(취소 둘 · 길마다 쉼 셋 · 동결 끼우기 하나)과 바뀐 시험 1(웹 실패 뒤에도 게이트웨이 길은 바란다). 고치기 전 코드에서 8 이
+  붉다(지적마다 재현 — 1: 2, 2: 5, 3: 1).
+- 화면 시험 89 → 91. 고치기 전 화면 사본에 새 시험 · 견본을 넣으면 '멈춘 잡만' 하나가 붉고, 게이트웨이 견본 시험은 화면을 고치지 않고
+  통과한다(읽는 칸 이름이 같다). 기존 패널 잡 시험의 손 견본에 state 'paused' 를 더했다. `tsc -b` · `vite build` 통과.
+- 변이(스크래치 사본) 백엔드 10/10 — 취소에서 안 비움 · 패널 잡만 비움 · 코드만 비움, 쉼 하나로 되돌림 · 뒤집음 · /me 가 게이트웨이 쉼을
+  읽음 · 바람이 웹 쉼을 읽음 · 웹 기록의 머리 뺌 · 일시 웹 실패 무시, 상태 계산을 트랜잭션 밖으로.
+- 합친 판 — 스크래치 클론에서 main b71a262 에 이 가지를 합치고 RF-14 의 한 줄로 풀어 관련 시험(사람 조작 감사 · Claude 패널 잡 · 외부 응답자
+  잡 · PAT 자동 등록 · 요구 상태 · 패널 러너 · P6 라우트) 270 이 통과했다. checklist.md · context-notes.md 는 두 가지의 끝 덧붙임이 겹친다(종전과 같다).
+- 리스크 전체 시험 한 번(공유 잠금) — 3,737 통과 · xfail 4 · 실패 0(rc 0, 963f661 — 종전 3,731 에 새 시험 6).

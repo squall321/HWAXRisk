@@ -4,6 +4,8 @@ synth.assemble_report 와 종합 잡(가짜 요약 엔진). 남의 과제는 새
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import app.mcp_server as srv
@@ -76,6 +78,26 @@ def test_the_issue_list_has_the_contract_fields_filters_and_pages(store):
     assert collected == [r["issue_id"] for r in out["rows"]]
 
 
+def test_a_decided_issue_row_carries_the_outcome_fields_it_stored(store):
+    """쟁점 행의 outcome_json 은 원장 값 그대로다(결과 칸 — 패널 · 원자 · 덮은 심각도 · 판정 · 등급 · 반론) — 종전에는 `_loads(…, None)`
+    의 형 검사가 늘 None 을 돌려 웹 화면과 MCP risk_get_issues 가 결과 칸을 못 봤다(화면 세션 FE-18 · 청할 것 1). 결과가 없는 쟁점은 null."""
+    key = _ledger(store)
+    rows = routes.issues_payload(key, owner_sub=OWNER)["rows"]
+    decided = [r for r in rows if r["outcome"]]
+    assert decided and any(not r["outcome"] for r in rows)
+    for row in decided:
+        stored = json.loads(store.query_one("SELECT outcome_json FROM rr_issues WHERE issue_id = ?",
+                                            (row["issue_id"],))["outcome_json"])
+        assert row["outcome_json"] == stored and row["outcome_json"]["panel_id"] == row["panel_id"]
+        assert {"severity_after", "judgement_after", "atom_finding_ids"} <= set(row["outcome_json"])
+    assert all(r["outcome_json"] is None for r in rows if not r["outcome"])
+    with factories.routes_store(store):
+        routes.patch_project(_project(store, key), routes.ProjectPatchBody(mcp_visibility="org"),
+                             ident=factories.ident(OWNER))
+    mcp_rows = {r["issue_id"]: r for r in srv.risk_get_issues(key)["rows"]}           # MCP 도 같은 함수다
+    assert all(mcp_rows[r["issue_id"]]["outcome_json"] == r["outcome_json"] for r in rows)
+
+
 def test_a_person_queues_an_untried_issue_or_skips_one_with_a_reason_and_an_audit_row(store):
     """PUT /issues/{id} — 편집자 이상(남의 쟁점은 없는 쟁점과 같은 404), 사유 필수(422), 편성·도는 쟁점은 409. queue 는 상한 밖 쟁점을 대기로 올리고 쟁점 잡을 세운다
     (상한을 넘기는 사람의 결정), skip 은 skipped(완결 잔여 '미토의' 에 든다). 행위마다 rr_audit 한 행."""
@@ -120,6 +142,28 @@ def test_a_person_queues_an_untried_issue_or_skips_one_with_a_reason_and_an_audi
 
 
 # ---------------------------------------------------------------- 보고서
+def test_an_issue_decision_rewrites_the_closure_cache_so_an_ack_read_from_it_holds(store):
+    """PUT /issues/{id} 뒤 완결 캐시(rr_targets.closure_json — 진행판 level_label · qualifiers 와 GET …/closure 가 읽는 값)를 새로 쓴다.
+    종전에는 캐시가 그대로라 진행판 표기가 낡고, 그 캐시의 basis_hash 로 보낸 확인이 409 residual_changed 였다(화면 세션 청할 것 2 —
+    화면은 fresh 로 한 번 다시 세어 넘겼다)."""
+    key = _ledger(store, run_issues=False)
+    closure.refresh(store, key)
+    queued = next(r for r in issues.issue_rows(store, key) if r["state"] == "queued")
+    with factories.routes_store(store):
+        routes.put_issue(queued["issue_id"], routes.IssueActionBody(action="skip", reason="다음 리비전에서 본다"),
+                         ident=factories.ident(OWNER))
+        cached = routes.closure_payload(key, owner_sub=OWNER)                      # 캐시 읽기(fresh 아님)
+        fresh = closure.close_level_cells(store, key, persist=False)
+        assert (cached["level_label"], cached["qualifiers"]) == (fresh["level_label"], fresh["qualifiers"])
+        assert routes.coverage_payload(key, owner_sub=OWNER)["level_label"] == fresh["level_label"]
+        untried = next(q for q in cached["qualifiers"] if q["item"] == "issues_untried")
+        acked = routes.post_closure_ack(key, "issues_untried",
+                                        routes.CloseAckBody(reason="상한 밖 쟁점은 다음 리비전에서 본다",
+                                                            basis_hash=untried["basis_hash"]),
+                                        ident=factories.ident(OWNER))
+    assert acked["basis_hash"] == untried["basis_hash"]
+
+
 def test_the_report_reads_by_pages_and_a_moved_version_is_409(store):
     """GET /targets/{key}/report — 판이 없으면 404 report_absent. 판이 서면 md 쪽(next_page 로 이어 받으면 part 전체), json 은 쪽 전체,
     version 이 지금 판과 다르면 409 report_version_moved. POST 는 코드 조립 판(refresh_summaries=false — 내용이 같으면 그 판 그대로)이나

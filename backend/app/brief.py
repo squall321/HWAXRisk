@@ -559,9 +559,9 @@ def _dims_list(named: Any) -> list[dict]:
 def _req_view(store, ctx) -> dict | None:
     """그 타깃 스냅샷(diff 면 뒤 스냅샷)의 요구 대조 — `requirements.compute_req_signals` 를 지금 원장으로 센다(한 브리프에 한 번).
 
-    저장된 rr_state 의 signals 를 읽지 않는다 — 동결(`ir_builder.freeze_snapshot`)이 요구를 대조하지 않고 상태를 저장하고, 요구를
-    고쳐도 상태를 다시 세지 않아 저장된 상태에는 `req.margin` 이 없거나 낡았다. 원자 저장의 보정(`narrative.SpecContext.req_margins`)도
-    같은 함수 · 같은 원장을 보므로 좌석이 받은 여유와 저장 때 대조한 여유가 같다.
+    저장된 rr_state 의 signals 를 읽지 않는다 — 동결과 요구 편집이 상태의 요구 대조를 다시 세지만(`state.freeze_state` ·
+    `recompute_project_states`) 그 전에 언 스냅샷의 상태에는 `req.margin` 이 없다(그 과제의 요구를 고치기 전까지). 원자 저장의
+    보정(`narrative.SpecContext.req_margins`)도 같은 함수 · 같은 원장을 보므로 좌석이 받은 여유와 저장 때 대조한 여유가 같다.
     """
     if "_req" not in ctx:
         project_id = _s(ctx["target"]["project_id"])

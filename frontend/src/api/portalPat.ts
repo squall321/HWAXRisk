@@ -9,9 +9,7 @@
 //
 // 포털 코드는 한 줄도 바꾸지 않는다. scopes 관문(`risk_pat_require_read_only`)도 건드리지 않는다 —
 // 여기서 `scopes:['read']` 로 발급하므로 그 검사를 그대로 통과한다.
-import { NetworkError, isApiError, riskApi } from "./risk.api";
-import type { AutoHold } from "./autoPortalPat";
-import { AUTO_HOLD_FINAL_MS, AUTO_HOLD_TRANSIENT_MS } from "./autoPortalPat";
+import { isApiError, riskApi } from "./risk.api";
 
 /** 포털 `POST /auth/pat` 응답(pat.py PatCreated). `token` 은 발급 시 한 번만 온다. */
 export type PortalPatMinted = {
@@ -170,16 +168,4 @@ export async function registerFromPortal(): Promise<{ jti: string }> {
     }
     throw new PortalRegisterError(err, minted.jti, (await revokeMinted(minted.token)) ? "revoked" : "revoke_failed");
   }
-}
-
-/**
- * 자동 등록이 등록에서 실패했을 때 이 브라우저가 쉬는 동안 — 일시 실패(네트워크 · 5xx · portal_unreachable)는 짧게, 사람이 고쳐야 하는
- * 실패는 길게(백엔드가 게이트웨이 교환 실패에 거는 쉼과 같은 두 값). 발급 단계의 실패는 PAT 를 만들지 않아 쉬지 않는다(null).
- */
-export function autoHoldOf(err: unknown, now: number): AutoHold | null {
-  if (!(err instanceof PortalRegisterError)) return null;
-  const rejection = err.rejection;
-  const code = isApiError(rejection) ? rejection.code : rejection instanceof NetworkError ? "network" : "unknown";
-  const transient = rejection instanceof NetworkError || (isApiError(rejection) && rejection.status >= 500);
-  return { until: now + (transient ? AUTO_HOLD_TRANSIENT_MS : AUTO_HOLD_FINAL_MS), code };
 }

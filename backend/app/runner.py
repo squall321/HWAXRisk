@@ -373,28 +373,26 @@ _CREDENTIAL_FALLBACK = {"owner": "타깃 소유자의 PAT 로 돈다", None: "�
 _SETTINGS_BUTTON = "포털에서 발급해 등록"
 
 
-# 자동 등록을 멈추는 길 — 켜져 있는 동안은 지우거나 포털에서 폐기한 PAT 도 Claude 에서 hwax_risk 도구를 부를 때 다시 만든다(의도다
-# — Claude 만 쓰는 사람에게는 다시 켤 스위치가 없다, D3). 멈추는 길은 설정의 자동 등록 스위치인데 화면에 아직 없다 — 그때까지는
-# 운영자가 앱 데이터 DB 의 _user_prefs 에서 끈다(포털 절차서 AUTO_SWITCH_RUNBOOK). 운영자가 그 사람으로 API 를 부를 길은 없어 말하지
-# 않는다(R3-4). 지금 있는 길만 말한다(웹 자동 등록도 아직 없다, R2-8). GET /api/me 의 portal_pat.auto.how_to_stop 과
-# pat_unavailable 안내가 같이 말한다.
-AUTO_SWITCH_RUNBOOK = "포털 docs/risk-review-redesign/server-setup-m1.md §7-2"
-AUTO_STOP_HINT = ("자동 등록이 켜져 있는 동안은 등록된 PAT 를 지우거나 포털에서 폐기해도 Claude 에서 hwax_risk 도구를 부를 때 다시"
-                  " 만든다 — 멈추는 길은 설정의 자동 등록 스위치다(곧 생긴다 — 그때까지는 운영자가 앱 데이터 DB 에서 끈다,"
-                  f" {AUTO_SWITCH_RUNBOOK}).")
+# 자동 등록을 멈추는 길 — 켜져 있는 동안은 지우거나 포털에서 폐기한 PAT 도 웹 리스크 앱을 열 때나 Claude 에서 hwax_risk 도구를 부를 때
+# 다시 만든다(의도다 — D3). 멈추는 길은 웹 설정 화면의 '자동 등록' 스위치다(화면 세션 B35 가 냈다 — 종전 글의 '곧 생긴다 — 그때까지는
+# 운영자가 앱 데이터 DB 에서 끈다' 꼬리를 걷었다). 운영자가 그 사람으로 API 를 부를 길은 없어 말하지 않는다(R3-4). 지금 있는 길만
+# 말한다(R2-8). GET /api/me 의 portal_pat.auto.how_to_stop 과 pat_unavailable 안내가 같이 말한다.
+AUTO_STOP_HINT = ("자동 등록이 켜져 있는 동안은 등록된 PAT 를 지우거나 포털에서 폐기해도 웹 리스크 앱을 열 때나 Claude 에서 hwax_risk"
+                  " 도구를 부를 때 다시 만든다 — 멈추는 길은 웹 리스크 앱 설정 화면의 '자동 등록' 스위치다(끄면 화면도 게이트웨이도"
+                  " 저절로 받지 않는다).")
 
 
 def pat_unavailable_guidance(store: Any, email: str | None) -> str:
     """사람 자격이 없을 때의 안내 — 자동 등록이 어떻게 일어나는지 · 직접 등록하는 곳 · 멈추는 길 · 그 사람의 마지막 자동 등록
     실패(U-3 · R1 · D3)."""
-    text = ("패널은 사람 자격(포털 PAT)으로만 돈다 — 서비스 계정으로 내려가지 않는다. Claude 에서 hwax_risk 도구를 아무거나 부르면"
-            " 자동으로 등록된다(게이트웨이가 그 사람의 PAT 를 좁혀 받아 넘긴다). 웹 리스크 앱 설정 화면의"
-            f" '{_SETTINGS_BUTTON}' 으로 직접 등록할 수도 있다.")
+    text = ("패널은 사람 자격(포털 PAT)으로만 돈다 — 서비스 계정으로 내려가지 않는다. 자동 등록이 켜져 있으면 웹 리스크 앱을 열 때(그"
+            " 브라우저의 포털 세션으로 받는다)나 Claude 에서 hwax_risk 도구를 아무거나 부를 때(게이트웨이가 그 사람의 PAT 를 좁혀 받아"
+            f" 넘긴다) 자동으로 등록된다. 웹 리스크 앱 설정 화면의 '{_SETTINGS_BUTTON}' 으로 직접 등록할 수도 있다.")
     get_prefs = getattr(store, "get_user_prefs", None)
     prefs = get_prefs(email) if email and callable(get_prefs) else None
     if prefs and not prefs.get("portal_pat_auto"):
-        text += (" 이 사람은 자동 등록을 꺼 두어 Claude 로 불러도 등록되지 않는다 — 설정 화면의 버튼으로 등록하거나 자동 등록을 다시"
-                 f" 켠다(설정의 스위치는 곧 생긴다 — 그때까지는 운영자가 앱 데이터 DB 에서 켠다, {AUTO_SWITCH_RUNBOOK}).")
+        text += (" 이 사람은 자동 등록을 꺼 두어 앱을 열거나 Claude 로 불러도 등록되지 않는다 — 설정 화면의 버튼으로 등록하거나 설정의"
+                 " '자동 등록' 스위치를 다시 켠다.")
     else:
         text += f" {AUTO_STOP_HINT}"
     if prefs and prefs.get("auto_error"):
@@ -471,6 +469,11 @@ LLM_CHOICES: tuple[str, ...] = (LLM_GLM, LLM_CLAUDE)
 ENGINE_EXTERNAL = "external"
 EXTERNAL_WORKFLOW = "hwax-risk-claude"     # 잡 주인이 Claude Code 에서 돌리는 워크플로(포털 infra/pipeline — X-3)
 JUDGE_CLAUDE = "Claude(외부, 사용자 신고 모델)"   # 보고서 · 품질 글의 '판단 LLM' — 모델은 잡 주인이 Claude Code 에서 고른 것이다
+# 패널 잡의 반출 경고(422 consent_external_required 의 글) — 검토 잡(review_runner.EGRESS_WARNING)과 나가는 것이 다르다. 패널 잡은 그 잡이
+# 돌리는 패널마다 브리프와 좌석 조회 결과가 나가고 사슬이 없다 — C3 자동 후속 Tier C 는 판단 LLM 을 물려받지 않아 GLM 이다(`_finish_job`,
+# 동의는 잡마다 — 사용자 결정 10-15). 화면의 동의 글(frontend api/panelJob.ts PANEL_EGRESS_WARNING)과 같은 뜻이다.
+PANEL_EGRESS_WARNING = ("이 잡이 돌리는 패널마다 그 패널의 브리프(설계 변경 · 근거 · 메모 — 선례처럼 다른 사람의 검토 결과도 든다)와"
+                        " 좌석이 조회한 결과가 Claude(외부)로 나갑니다(동의는 이 잡에만 — C3 자동 후속 Tier C 는 GLM 으로 돈다)")
 
 
 def job_llm(params: Mapping[str, Any] | None) -> str | None:
@@ -1085,7 +1088,7 @@ def create_job(
     if tier not in planner.TIERS:
         raise AppError("E100", f"모르는 tier — {tier!r}. 허용 {list(planner.TIERS)}.", 422)
     excluded = brief.check_exclude(exclude_evidence)
-    claude = review_runner.check_llm_choice(llm, consent_external)
+    claude = review_runner.check_llm_choice(llm, consent_external, warning=PANEL_EGRESS_WARNING)
     panel_job_gate(store, target_key, tier)
     if tier == "C" and not consent:
         raise AppError("E100", "Tier C 는 consent:true 명시 승인이 필요합니다.", 422)
@@ -1188,8 +1191,8 @@ def _set_job(store: Any, job_id: str, state: str, *, reason: str | None = None, 
     """잡 상태 전이 1건. `by` 는 주체다 — 사람은 email, 자동 정지는 'code:diminishing'·'code:daily_cap'(plan §0.6),
     엔진·좌석 탓이 아닌 중단으로 멈춘 것은 'code:<UNCHARGED_CODES 의 사유>' 다.
 
-    `hold` 는 검토 잡의 보류 열({code, until, n?}) — 주면 같은 문장에서 hold_code·hold_until(·hold_n)을 쓴다. 패널 잡은 주지
-    않는다(그 열을 건드리지 않는다 — 패널 경로의 문장은 종전 그대로다)."""
+    `hold` 는 보류 열({code, until, n?}) — 주면 같은 문장에서 hold_code·hold_until(·hold_n)을 쓰고, 주지 않으면 그 열을 건드리지
+    않는다. 검토 잡의 전이와, 패널 · 쟁점 잡의 코드 보류 · 그 보류를 비우는 재개 · 취소가 준다."""
     now = now_epoch()
     actor = by or (f"code:{reason}" if reason in ("diminishing", "daily_cap") else None)
     sets, params = ["state = ?", "pause_reason = ?", "error = ?"], [state, reason, error]
@@ -1280,7 +1283,9 @@ def cancel_job(store: Any, job_id: str, *, by: str | None = None,
             if row["state"] in ("cancelled", "completed", "failed"):
                 return {"job_id": job_id, "state": row["state"], "pause_reason": None}
             state = "cancelling" if row["state"] == "running" else "cancelled"
-            out = _set_job(store, job_id, state, by=by)
+            # 코드 보류(external_worker · credential · external_config)로 멈춘 패널 · 쟁점 잡의 취소는 재개처럼 보류 열을 비운다 — 남기면 취소된
+            # 잡의 진행판 줄 · 사슬 단계가 보류를 싣고 화면이 '워크플로를 다시 돌린 뒤 재개' 를 말했다(반대 검토 10-31).
+            out = _set_job(store, job_id, state, by=by, hold=_HOLD_CLEARED if row["hold_code"] is not None else None)
             _changed(on_change, row)
         if state == "cancelled" and row["mode"] == "issues":
             _untry_after_cancel(store, row["target_key"], job_id)
@@ -1684,8 +1689,9 @@ def _finish_job(store: Any, job: Mapping[str, Any], settings: Any) -> dict:
             # 자격은 B 잡과 같은 사람 순서다(요청자 → 타깃 owner) — 서비스 계정으로 내려가지 않으므로(U-3) owner 만 넘기면
             # 요청자 자격으로 돈 B 잡의 후속이 멈춘다. 사람이 브리프에서 뺀 항목도 메모 · 층과 함께 물려받는다 — 물려받지 않으면 후속
             # Tier C 패널에 그 항목이 다시 실리는데 보고서의 '사람 개입 요약' 은 brief.exclude 를 세어 그 항목 없이 돈 것처럼 읽힌다(BL-10).
-            # 판단 LLM(llm · consent_external)은 물려받지 않는다 — 의도된 동작이다. 반출 동의는 잡마다 사람이 한다(사용자 결정 10-15)라
-            # Claude 로 돈 B 잡의 후속도 GLM 이다 — 그 Tier C 를 Claude 로 돌리려면 사람이 그 잡을 만들며 동의한다(context-notes RD-7).
+            # 판단 LLM(llm · consent_external)은 물려받지 않는다 — 의도된 동작이다. Claude 로 고른 B 잡의 후속도 GLM 이다. 반출 동의는 잡마다
+            # 사람이 한다(사용자 결정 10-15) — 사람이 동의하지 않은 잡의 데이터를 시스템이 Claude 로 보내지 않는다. 그 Tier C 를 Claude 로 돌리려면
+            # 사람이 그 잡을 만들며 동의한다(context-notes RD-7 · RF-11).
             follow = create_job(
                 store, job["target_key"], "C", owner_sub=job["owner_sub"],
                 modifiers=params.get("modifiers"),

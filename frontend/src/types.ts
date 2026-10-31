@@ -125,7 +125,11 @@ export type PortalPatDueReason = "absent" | "revoked" | "undecryptable" | "expir
 export type PortalPatAuto = {
   /** 사용자가 끄지 않았다. */
   enabled: boolean;
-  /** 지금 발급해 등록해야 한다 — 화면은 `enabled && due` 면 조용히 한 번 한다. */
+  /**
+   * 지금 발급해 등록해야 한다 — 화면은 `enabled && due` 면 조용히 한 번 한다. 받을 까닭(due_reason)이 있어도 웹 길의 쉼 안이면 false 다
+   * (`paused_until`) — 서버가 웹 등록 실패도 적는다(10-31 risk-flow, 그 전에는 화면이 브라우저에 쉼을 따로 들었다). 게이트웨이 길(Claude 에
+   * 넣은 PAT 를 바꿔 받는다)의 실패는 이 길을 쉬게 하지 않는다(반대 검토 10-31) — 그때 `last_error` 는 차 있고 `due` 는 참일 수 있다.
+   */
   due: boolean;
   due_reason: PortalPatDueReason | null;
   last_source: PortalPatSource | null;
@@ -135,6 +139,11 @@ export type PortalPatAuto = {
   /** transient 는 앱이 10분 뒤 다시 바란다 · final 은 사람이 고쳐야 한다. */
   last_error_kind: "transient" | "final" | null;
   last_error_at: number | null;
+  /**
+   * 웹 길(앱을 열 때의 자동 등록)의 쉼이 끝나는 시각 — 마지막 자동 등록 실패가 웹 등록 거절(`last_error` 가 `web-` 로 시작)이고 쉬는 동안만
+   * 값이다(게이트웨이 길의 실패에는 null — 반대 검토 10-31). 설정의 버튼은 쉼과 상관없이 된다.
+   */
+  paused_until: number | null;
   /** 켜져 있을 때만 — 지우거나 폐기해도 다시 만들어지니 멈추려면 끈다는 글. */
   how_to_stop: string | null;
 };
@@ -1320,6 +1329,13 @@ export type CoverageJob = {
   state: BatchJobState;
   /** rr_jobs.pause_reason CHECK — 사람(user) · 수확 체감(diminishing) · 하루 상한(daily_cap). */
   pause_reason: "diminishing" | "daily_cap" | "user" | null;
+  /**
+   * 보류 코드 — 외부 응답자 패널이 워커가 없어 멈춘 잡은 pause_reason 이 비고 external_worker 다(10-31 risk-flow 에 생긴 칸). 멈춘 잡에만
+   * 값이다 — 재개 · 취소가 비운다(취소는 반대 검토 10-31 부터 — 그 전에 취소된 잡에는 남아 있을 수 있다).
+   */
+  hold_code: string | null;
+  /** 자동 재개 시각(없으면 사람이 재개한다). */
+  hold_until: number | null;
   panels_done: number;
   panels_total: number;
   error: string | null;
@@ -1517,6 +1533,11 @@ export type ReviewJob = {
   error: string | null;
   credential_email: string | null;
   scope: ReviewScope;
+  /**
+   * 사슬 표지(params.chain) — M3 코드가 세운 잡이면 true 라 끝나면 쟁점 → 종합이 저절로 선다. false 는 M2 시절 잡이라 사람이 사슬을
+   * 시작한다(10-31 risk-flow 에 생긴 칸 — 길잡이와 같은 판정).
+   */
+  chain: boolean;
   llm?: "claude";
   consent_external?: ConsentExternal;
   llm_mismatch?: number;
@@ -1926,8 +1947,9 @@ export type IssueOutcome = "upheld" | "downgraded" | "escalated" | "rejected" | 
 /**
  * 다시 토의 표기(routes._reargue_out — label 에 reraised_json 을 그대로 펼친다) — 새 패널이 정할 때까지 옛 판정이 보인다.
  * 칸은 표기가 선 길마다 다르다. 근거가 바뀌어 선 표기(issues._reraise)는 label 밖의 칸이 다 있고, 사람이 다시 올린 쟁점의 새 패널이
- * 결정을 못 낸 표기(issues._keep_verdict — reraised_json 이 비어 있던 쟁점)는 label · new_panel_failed 뿐이다. 그래서 label 밖은 다
- * 선택 칸이다 — 전에 다 요구 칸으로 적어 두어 그런 행을 누르면 `raisers_added.length` 에서 화면 전체가 백지였다.
+ * 결정을 못 낸 표기(issues._keep_verdict — reraised_json 이 비어 있던 쟁점)는 label · new_panel_failed · at · round 다(10-31 risk-flow
+ * 전에 선 행은 label · new_panel_failed 뿐이다). 그래서 label 밖은 다 선택 칸이다 — 전에 다 요구 칸으로 적어 두어 그런 행을 누르면
+ * `raisers_added.length` 에서 화면 전체가 백지였다.
  */
 export type IssueReargue = {
   label: string;

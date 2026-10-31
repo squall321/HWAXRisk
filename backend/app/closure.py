@@ -251,8 +251,9 @@ def cell_counts(store: RiskStore, target_key: str) -> dict:
 def _quality(store: RiskStore, target_key: str, review_quality: Any) -> Mapping[str, Any]:
     """품질 수치 — 검토 루프가 마지막 잡의 진행판에 넣어 둔 값(같은 compute 결과)을 읽는다. 진행판을 읽는 동안 품질 수치를 다시
     세지 않는다(M2 #16 · P-17-13). 진행판에 없을 때만(품질 훅이 없는 배선·옛 잡) 그 자리에서 센다."""
+    # 같은 초에 선 잡은 넣은 차례(rowid)로 — 진행판 review.job 과 같은 잡이다(review_cells._latest_review_job 주석).
     row = store.query_one("SELECT progress_json FROM rr_jobs WHERE target_key = ? AND mode = 'reviews'"
-                          " ORDER BY created_at DESC, id DESC LIMIT 1", (target_key,))
+                          " ORDER BY created_at DESC, rowid DESC LIMIT 1", (target_key,))
     board = ((_loads(row["progress_json"], {}) if row is not None else {}) or {}).get("quality") or {}
     data = board.get("json") if isinstance(board, Mapping) else None
     if isinstance(data, Mapping) and "out_of_bounds" in data:

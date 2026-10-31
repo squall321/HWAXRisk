@@ -233,9 +233,9 @@ export function filterNodes(nodes: IrNode[], kind: string, query: string): IrNod
 }
 
 /**
- * 요구 여유 행(`sig:req.margin`, requirements.compute_req_signals) — 서버가 margin 오름차순(미측정은 맨 뒤)으로 준다. 신호가 상태에
- * 없으면 null 이다 — 9bd5f48 은 동결 때 요구를 대조하지 않고(ir_builder.freeze_snapshot 이 build_state(ir) 만 부른다) 요구를 고쳐도
- * 다시 세지 않는다. 그때 화면은 '이 서버는 아직 대조하지 않는다' 를 보인다(값을 지어내지 않는다).
+ * 요구 여유 행(`sig:req.margin`, requirements.compute_req_signals) — 서버가 margin 오름차순(미측정은 맨 뒤)으로 준다. 동결이 요구를
+ * 대조해 상태에 싣고 요구를 고치면 그 과제 스냅샷의 상태를 다시 센다(10-31 risk-flow). 신호가 상태에 없으면 null 이다 — 그 전에 언
+ * 스냅샷이고 과제의 요구를 고치기 전이다. 그때 화면은 그 사실을 보인다(값을 지어내지 않는다).
  */
 export function marginRows(state: Pick<SnapshotState, "signals"> | null | undefined): ReqMarginRow[] | null {
   const signal = state?.signals?.["req.margin"];

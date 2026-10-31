@@ -92,6 +92,26 @@ def test_a_claude_panel_job_needs_a_strict_consent_and_the_consenters_own_pat(ri
     assert "params_json" not in job
 
 
+def test_a_panel_jobs_consent_refusal_says_what_a_panel_job_sends(risk_store, cfg, monkeypatch):
+    """패널 잡의 422 consent_external_required 글은 패널 잡이 내보내는 것(그 패널의 브리프 · 좌석 조회 결과)을 말한다 — 종전에는 검토 잡의
+    반출 글(지식카드 · 사슬이 이어 도는 쟁점 패널 · 종합 요약)을 그대로 썼다(화면 세션 청할 것). 동의는 그 잡에만이고 C3 자동 후속 Tier C
+    는 GLM 이다. 검토 잡의 글은 그대로다."""
+    from app import review_runner
+
+    target_key = seeded(risk_store)
+    _peer_pat(risk_store)
+    X._probe(monkeypatch, X._external_fake())
+    with pytest.raises(AppError) as refused:
+        _claude(risk_store, target_key, cfg, consent_external=None)
+    message = refused.value.message
+    assert runner.PANEL_EGRESS_WARNING in message and "그 패널의 브리프" in message and "좌석이 조회한 결과" in message
+    assert review_runner.EGRESS_WARNING not in message and "사슬이 이어 도는" not in message
+    assert "Tier C 는 GLM" in message
+    with pytest.raises(AppError) as review_refused:
+        review_runner.check_llm_choice("claude", None)
+    assert review_runner.EGRESS_WARNING in review_refused.value.message
+
+
 def test_a_claude_panel_job_is_refused_while_the_engine_keeps_the_external_path_closed(risk_store, cfg, monkeypatch):
     target_key = seeded(risk_store)
     _peer_pat(risk_store)
@@ -112,7 +132,10 @@ def test_a_glm_panel_job_keeps_its_old_params_and_reply(risk_store, cfg, monkeyp
     monkeypatch.setattr(routes, "get_store", lambda: risk_store)
     job = routes.coverage_payload(target_key)["job"]
     # 판단 LLM 칸(llm · consent_external)은 없다 — signals 는 도는 패널마다의 신호 목록이다(화면 세션 10-31, GLM · Claude 잡 모두).
-    assert set(job) == {"id", "tier", "state", "pause_reason", "panels_done", "panels_total", "error", "signal", "signals"}
+    # hold_code · hold_until — 보류 코드(external_worker 따위)를 code 로 가른다(화면 세션 청할 것, 검토 잡 줄과 같은 두 칸).
+    assert set(job) == {"id", "tier", "state", "pause_reason", "hold_code", "hold_until", "panels_done", "panels_total", "error",
+                        "signal", "signals"}
+    assert (job["hold_code"], job["hold_until"]) == (None, None)
 
 
 # ---------------------------------------------------------------- 돌리기
@@ -158,6 +181,75 @@ def test_a_claude_panel_without_a_worker_pauses_the_job_on_external_worker(risk_
     assert out["status"] == "error"
     row = risk_store.query_one("SELECT state, hold_code FROM rr_jobs WHERE id = ?", (job["id"],))
     assert (row["state"], row["hold_code"]) == ("paused", "external_worker")
+    # 진행판 · MCP risk_get_coverage 의 패널 잡 줄도 그 보류를 code 로 싣는다 — 종전에는 칸이 없어 pause_reason(null)뿐이라 화면이
+    # '모름' 이었다(화면 세션 청할 것). 자동 재개 시각이 없다(사람이 워크플로를 다시 돌리고 재개한다).
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    line = routes.coverage_payload(target_key)["job"]
+    assert (line["id"], line["state"], line["pause_reason"], line["hold_code"], line["hold_until"]) == (
+        job["id"], "paused", None, "external_worker", None)
+
+
+def test_cancelling_a_held_claude_panel_job_clears_the_hold_on_its_coverage_line(risk_store, cfg, monkeypatch):
+    """보류 external_worker 로 멈춘 Claude 패널 잡을 주인이 취소하면(REST · MCP risk_job_action — 같은 runner.cancel_job) 보류 열을 비운다
+    — 재개와 검토 잡의 취소가 그렇듯. 종전에는 패널 갈래가 보류를 남겨, 취소된 잡의 진행판 줄이 hold_code external_worker 를 싣고 화면의
+    '멈춘 까닭' 이 '워크플로를 다시 돌린 뒤 재개' 를 말했다(반대 검토 10-31)."""
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    _peer_pat(risk_store)
+    X._probe(monkeypatch, X._external_fake())
+    _claude(risk_store, target_key, cfg)
+    job = runner.claim_next_job(risk_store, cfg)
+    failed = runner.EngineNoDecision("chair_failed", "의장 실패 — 외부 응답자가 없다", knob="EXTERNAL_LLM_WAIT_S",
+                                     cause="external_worker_absent", conv_id="conv-1")
+    runner.run_panel(risk_store, cfg, FakePanelEngine(raise_error=failed), job,
+                     narrative_mod=fake_narrative({}), registry_mod=fake_registry({}))
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    assert routes.coverage_payload(target_key)["job"]["hold_code"] == "external_worker"
+    assert routes.job_action(job["id"], "cancel", ident=factories.ident(OWNER))["state"] == "cancelled"
+    line = routes.coverage_payload(target_key)["job"]
+    assert (line["id"], line["state"], line["pause_reason"], line["hold_code"], line["hold_until"]) == (
+        job["id"], "cancelled", None, None, None)
+    assert risk_store.query_one("SELECT hold_n FROM rr_jobs WHERE id = ?", (job["id"],))["hold_n"] == 0
+
+
+def test_two_panel_jobs_made_in_the_same_second_read_as_the_later_one(risk_store, cfg, monkeypatch):
+    """진행판의 패널 잡 줄은 마지막 패널 잡이다 — 같은 초에 선 둘이면 넣은 차례(rowid)로 가른다(검토 잡 줄 · 사슬 단계와 같다). 웹
+    REST 는 부를 때마다 새 잡을 세운다(화면 세션 FE-27)."""
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    made = runner.new_uuid
+    monkeypatch.setattr(runner, "new_uuid", lambda: "f" * 32)
+    first = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+    monkeypatch.setattr(runner, "new_uuid", made)
+    runner.cancel_job(risk_store, first, by=OWNER)
+    monkeypatch.setattr(runner, "new_uuid", lambda: "0" * 32)
+    second = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+    monkeypatch.setattr(runner, "new_uuid", made)
+    risk_store.execute("UPDATE rr_jobs SET created_at = 1793000000 WHERE target_key = ?", (target_key,))
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    assert routes.coverage_payload(target_key)["job"]["id"] == second
+
+
+def test_the_c3_follow_up_of_a_claude_tier_b_job_stays_on_glm(risk_store, cfg, monkeypatch):
+    """정책(의도 — 바꾸지 않는다) — Claude 로 고른 Tier B 잡이 닫힘 레벨 C3 에서 끝나면 러너가 세우는 자동 후속 Tier C 는 판단 LLM 을
+    물려받지 않고 GLM 으로 돈다. 반출 동의는 잡마다다(사용자 결정 10-15) — 사람이 그 잡에 동의하지 않았는데 시스템이 데이터를 Claude 로
+    보내지 않는다. 후속 잡에는 llm · consent_external 칸이 없고 자격은 GLM 잡의 순서(요청자 → 소유자)다(context-notes RF-11)."""
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    _peer_pat(risk_store)
+    X._probe(monkeypatch, X._external_fake())
+    risk_store.execute("UPDATE rr_targets SET close_level = 'C3' WHERE target_key = ?", (target_key,))
+    made = runner.create_job(risk_store, target_key, "B", owner_sub=OWNER, settings=cfg, requester_sub=PEER, llm="claude",
+                             consent_source="web", consent_external=True)
+    assert made["llm"] == "claude"
+    job = dict(risk_store.query_one("SELECT id, target_key, tier, owner_sub, params_json FROM rr_jobs WHERE id = ?",
+                                    (made["job_id"],)))
+    job["params"] = json.loads(job.pop("params_json"))
+    follow = runner._finish_job(risk_store, job, cfg)["next_job"]
+    params = _params(risk_store, follow)
+    assert (params["tier"], params["consent_source"], params["requester"]) == ("C", "close_level", PEER)
+    assert "llm" not in params and "consent_external" not in params
+    assert risk_store.query_one("SELECT credential_email FROM rr_jobs WHERE id = ?", (follow,))["credential_email"] == PEER
 
 
 # ---------------------------------------------------------------- 보고서 · REST

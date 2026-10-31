@@ -894,6 +894,20 @@ def test_a_repanel_that_judges_undetermined_keeps_the_old_verdict_and_says_so(st
     assert _row(store, key, anchor)["merged"]["issue_reraised"]["label"] == REPANEL_FAILED
 
 
+def test_a_failed_repanel_keeps_the_time_and_round_of_a_basis_change_mark(store, monkeypatch, tmp_path):
+    """근거가 바뀌어 선 표기(at · round 가 있다)에 새 패널이 결정을 못 내도 그 at · round 는 그대로다 — 표기가 처음 선 때와 회차다
+    (_keep_verdict 는 비어 있을 때만 채운다 — 화면 세션 청할 것 5). 시각이 같은 초에 겹치지 않게 표기의 값을 옛 값으로 둔다."""
+    key, anchor, _old, _engine = _escalated_then_reraised(store, monkeypatch, tmp_path, requeue=True)
+    issue_id = _issue(store, key, anchor)["issue_id"]
+    store.execute("UPDATE rr_issues SET reraised_json = json_set(reraised_json, '$.at', 1, '$.round', 7) WHERE issue_id = ?",
+                  (issue_id,))
+    _run_issues(store, config.settings, IssuePanelEngine(store, {"*": {"severity": "치명", "judgement": "undetermined"}}), key,
+                limit=1)
+    mark = json.loads(_issue(store, key, anchor)["reraised_json"])
+    assert (mark["at"], mark["round"], mark["new_panel_failed"]["reason"]) == (1, 7, "no_decision")
+    assert mark["basis_hash"]                                                   # 근거가 바뀐 표기 그대로다
+
+
 def test_a_charged_release_at_the_limit_keeps_the_old_verdict(store, monkeypatch, tmp_path):
     """M2 — 내용 탓 놓기(release_issue charge)가 한도에 닿아도 판정이 있던 쟁점은 옛 판정을 둔다(지금 러너는 차감 없이 놓지만 함수의
     약속이 같아야 한다 — 차감으로 부르는 날 M2 가 조용히 돌아오지 않게)."""
@@ -921,6 +935,30 @@ def test_a_human_requeue_resets_charged(store, monkeypatch, tmp_path):
                          ident=factories.ident(OWNER))
     again = _issue(store, key, anchor)
     assert (again["state"], again["charged"]) == ("queued", 0)
+
+
+def test_a_failed_repanel_of_a_requeued_issue_marks_reargue_with_at_and_round(store, monkeypatch, tmp_path):
+    """(화면 세션 청할 것 5 · 선택) 사람이 끝난 쟁점을 다시 올렸고(reraised_json 이 빈 채 대기) 새 패널이 결정하지 못했다 — 다시 토의
+    표기에 new_panel_failed 와 함께 at(그 시각) · round(그 쟁점이 고른 회차)가 선다. 근거가 바뀌어 선 표기(_reraise)와 같은 칸이라 화면이
+    길마다 가르지 않는다. 종전에는 label · new_panel_failed 뿐이었다(FE-23)."""
+    from tests import factories
+
+    key, (unit,) = _ledger(store)
+    anchor = _k01_anchor(store, key, unit)
+    _select(store, monkeypatch, tmp_path, key, cap=1)
+    _run_issues(store, config.settings, IssuePanelEngine(store, {"*": {"severity": "치명", "judgement": "FAIL"}}), key)
+    decided = _issue(store, key, anchor)
+    assert (decided["state"], decided["outcome"], decided["reraised_json"]) == ("resolved", "escalated", None)
+    with factories.routes_store(store):
+        routes.put_issue(decided["issue_id"], routes.IssueActionBody(action="queue", reason="다시 본다"),
+                         ident=factories.ident(OWNER))
+    _run_issues_existing(store, IssuePanelEngine(store, {"*": {"severity": "치명", "judgement": "undetermined"}}), limit=1)
+    held = _issue(store, key, anchor)
+    mark = json.loads(held["reraised_json"])
+    assert (held["state"], held["outcome"], mark["new_panel_failed"]["reason"]) == ("resolved", "escalated", "no_decision")
+    assert (mark["at"], mark["round"]) == (mark["new_panel_failed"]["at"], decided["selected_round"])
+    (row,) = [r for r in routes.issues_payload(key, owner_sub=OWNER)["rows"] if r["anchor_cluster_key"] == anchor]
+    assert {"label", "at", "round", "new_panel_failed"} <= set(row["reargue"])
 
 
 # ---------------------------------------------------------------- I6 — 제기 · 반대 측 카드 절이 번갈아 선다(재설계 D-57)

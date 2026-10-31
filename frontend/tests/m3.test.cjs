@@ -47,16 +47,23 @@ test("사슬 배지 — 단계 · 멈춤의 까닭(pat_unavailable · restart ·
   assert.equal(view.adviceText(undefined), null);
 });
 
-test("M2 시절 잡 뒤의 사슬 시작 — 사슬 · 판이 없고 마지막 검토 잡이 끝났고 대기 셀이 0 일 때만", () => {
+test("M2 시절 잡 뒤의 사슬 시작 — 사슬이 없고 마지막 검토 잡이 사슬 표지 없이(job.chain false) 끝났고 대기 셀이 0 일 때만", () => {
+  assert.equal(samples.coverageCells.review.job.chain, true); // 서버 칸(10-31 risk-flow) — M3 코드가 세운 잡
   const base = clone(samples.coverageCells);
   base.stage = null;
   base.report = null;
   base.review.job.state = "completed";
+  base.review.job.chain = false;
   base.review.cells.by_state.pending = 0;
   assert.equal(view.chainStartVisible(base), true);
   assert.equal(view.chainStartVisible({ ...base, flow: "panels" }), false);
   assert.equal(view.chainStartVisible({ ...base, stage: samples.coverageCells.stage }), false);
-  assert.equal(view.chainStartVisible({ ...base, report: samples.coverageCells.report }), false);
+  // 판이 있어도(사람이 '다시 내기' 로 코드 조립 판을 세웠다) 사슬은 서지 않았다 — 칸으로 가른다(전에는 '판 없음' 으로 어림했다).
+  assert.equal(view.chainStartVisible({ ...base, report: samples.coverageCells.report }), true);
+  // 사슬 표지가 있는 잡(M3)은 끝에서 사슬이 저절로 선다 — 단추가 없다.
+  const marked = clone(base);
+  marked.review.job.chain = true;
+  assert.equal(view.chainStartVisible(marked), false);
   const pending = clone(base);
   pending.review.cells.by_state.pending = 1;
   assert.equal(view.chainStartVisible(pending), false);
@@ -89,6 +96,7 @@ test("대상 머리 — 완결 표기는 서버 글 그대로, 확인 안 된 �
   m2.stage = null;
   m2.report = null;
   m2.review.job.state = "completed";
+  m2.review.job.chain = false;
   m2.review.cells.by_state.pending = 0;
   assert.match(routed(h(CellsHead, { coverage: m2, targetKey: cov.target_key, onChanged: noop, onOpenTab: noop })), /쟁점 · 종합 시작/);
 });
@@ -306,10 +314,16 @@ test("거절은 code 로 — 다음 걸음(동의 · 설정 · 다시 읽기 · 
 // ── 4절 — 쟁점 ───────────────────────────────────────────────────────────────
 
 test("쟁점 한 줄 — '제기 N명(분포) · 반대 M명 → 쟁점 패널 결과', 결과가 없으면 상태(사유)", () => {
+  // 서버가 결과 칸(outcome_json)을 원장 값 그대로 싣는다(10-31 risk-flow) — 덮은 값이 화면을 고치지 않고 붙는다.
   const [resolved] = samples.issueList.rows.filter((r) => r.state === "resolved");
-  assert.equal(issues.issueLine(resolved), "제기 3명(FAIL 3) · 반대 0명 → 쟁점 패널 상향");
-  const after = { ...resolved, outcome_json: { panel_id: "p", severity_after: "치명", judgement_after: "FAIL" } };
-  assert.equal(issues.issueLine(after), "제기 3명(FAIL 3) · 반대 0명 → 쟁점 패널 상향 치명/FAIL");
+  assert.equal(resolved.outcome_json.panel_id, resolved.panel_id);
+  assert.equal(issues.issueLine(resolved), "제기 4명(FAIL 4) · 반대 0명 → 쟁점 패널 상향 치명/FAIL");
+  assert.equal(issues.issueLine({ ...resolved, outcome_json: null }), "제기 4명(FAIL 4) · 반대 0명 → 쟁점 패널 상향"); // 그 전 서버
+  const undetermined = samples.issueList.rows.find((r) => r.state === "inconclusive");
+  assert.equal(issues.issueLine(undetermined), "제기 4명(FAIL 4) · 반대 0명 → 쟁점 패널 판정 못 함"); // 덮은 값이 없다(null)
+  const detail = renderToStaticMarkup(h(IssueDetail, { row: { ...resolved, panel_id: null } }));
+  assert.match(detail, /severity_after/);
+  assert.doesNotMatch(detail, /결과 칸이 없습니다/);
   const untried = samples.issueList.rows.find((r) => r.state === "untried_cap");
   assert.match(issues.issueLine(untried), /→ 미토의\(상한 밖\)$/);
   assert.equal(issues.distributionText({ OK: 1, FAIL: 9, WARNING: 3 }), "FAIL 9 · WARNING 3 · OK 1");
@@ -346,6 +360,13 @@ test("다시 토의 표기 — 서버가 보내는 두 꼴을 다 그린다(labe
   // 들고 남이 없는 근거 변화는 주장값이 바뀐 것이다.
   const still = { ...reraised.reargue, raisers_removed: [], opposers_added: [] };
   assert.match(renderToStaticMarkup(h(ReargueNote, { reargue: still })), /제기 · 반대는 그대로이고 주장값이 바뀌었습니다\./);
+  // 10-31 risk-flow 뒤의 꼴 — 같은 길의 표기도 at · round 가 선다(근거가 바뀐 표기와 같은 칸 — 길마다 가르지 않는다).
+  const fresh = samples.issueRepanelFailedRow.reargue;
+  assert.deepEqual(Object.keys(fresh).sort(), ["at", "label", "new_panel_failed", "round"]);
+  const c = renderToStaticMarkup(h(ReargueNote, { reargue: fresh }));
+  assert.match(c, /회차 1 · 새 패널이 정할 때까지 옛 판정이 보입니다\./);
+  assert.match(c, /이 결정을 못 냈습니다 — 결정 못 함\(no_decision\)/);
+  assert.doesNotMatch(c, /주장값이 바뀌었습니다|undefined|NaN/);
 });
 
 test("쪽 잇기 — ledger_rev 가 앞 쪽과 다르면 잇지 않는다(처음부터 다시), 순위대로 정렬은 화면이", () => {

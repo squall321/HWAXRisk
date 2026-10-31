@@ -42,7 +42,7 @@ import { IssuesCard } from "../components/IssuesCard";
 import { SynthReport } from "../components/SynthReport";
 import { ClosureCard } from "../components/ClosureCard";
 import { RegistryCard } from "../components/RegistryCard";
-import { seatActions, seatReasonLabel, skipReasonProblem } from "../lib/targetView";
+import { panelJobPause, seatActions, seatReasonLabel, skipReasonProblem } from "../lib/targetView";
 import { JobSignalLine, ReviewWorkers } from "../components/JobSignals";
 import { JobCancelConfirm } from "../components/JobCancelConfirm";
 import {
@@ -501,9 +501,26 @@ function JobLlm({ job }: { job: NonNullable<CoverageJob> }) {
       {live ? (
         <span className="text-xs text-muted-foreground">
           잡 주인의 Claude Code 에서 워크플로 <code>{EXTERNAL_WORKFLOW}</code> 가 돌아야 나아갑니다.
-          {job.state === "paused" ? " 멈췄다면 워크플로를 다시 돌린 뒤 '재개' 를 누르세요." : ""}
+          {job.state === "paused" && job.hold_code === "external_worker"
+            ? " 워커가 없어 멈췄습니다(보류 external_worker) — 워크플로를 다시 돌린 뒤 '재개' 를 누르세요."
+            : job.state === "paused"
+              ? " 멈췄다면 워크플로를 다시 돌린 뒤 '재개' 를 누르세요."
+              : ""}
         </span>
       ) : null}
+    </span>
+  );
+}
+
+/** 패널 잡이 멈춘 까닭 — 정지 까닭이 없으면 보류 코드(외부 응답자 워커 없음 따위)와 자동 재개 시각. 둘 다 없으면 '모름'. */
+function PanelJobPause({ job }: { job: NonNullable<CoverageJob> }) {
+  const pause = panelJobPause(job);
+  if (!pause) return <Unknown />;
+  return (
+    <span className="flex flex-wrap items-center gap-2">
+      <span>{pause.label}</span>
+      <code className="text-xs">{pause.code}</code>
+      {job.hold_until ? <span className="text-xs text-muted-foreground">자동 재개 {fmtEpoch(job.hold_until)}</span> : null}
     </span>
   );
 }
@@ -618,7 +635,11 @@ function PanelRunner({
             { label: "티어", hint: "tier", value: job.tier },
             { label: "상태", hint: "state", value: <JobStateBadge value={job.state} /> },
             { label: "판단 LLM", hint: "llm", value: <JobLlm job={job} /> },
-            { label: "멈춘 까닭", hint: "pause_reason", value: job.pause_reason ?? <Unknown /> },
+            {
+              label: "멈춘 까닭",
+              hint: "pause_reason · hold_code · hold_until",
+              value: <PanelJobPause job={job} />,
+            },
             { label: "도는 패널", hint: "signal", value: <JobSignalLine job={job} /> },
             {
               label: "진행",

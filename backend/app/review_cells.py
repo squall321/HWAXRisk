@@ -1399,8 +1399,9 @@ def expert_tally(store: Any, target_key: str, agent_key: str) -> dict:
 
 
 def _latest_review_job(store: Any, target_key: str) -> dict | None:
+    # 같은 초에 선 잡은 넣은 차례(rowid)로 가른다 — id(uuid)로 가르면 앞 잡을 고를 수 있다(화면 세션 청할 것 3, routes.chain_stage 와 같다).
     row = store.query_one("SELECT id, state, params_json FROM rr_jobs WHERE target_key = ? AND mode = 'reviews'"
-                          " ORDER BY created_at DESC, id DESC LIMIT 1", (target_key,))
+                          " ORDER BY created_at DESC, rowid DESC LIMIT 1", (target_key,))
     return dict(row) if row is not None else None
 
 

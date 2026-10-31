@@ -547,6 +547,20 @@ def test_a_closed_external_path_in_a_claude_panel_holds_external_config_uncharge
     assert issue["charged"] == 0
 
 
+def test_cancelling_a_held_issue_job_clears_the_hold_on_its_chain_stage(store, monkeypatch, tmp_path):
+    """코드 보류(external_config)로 멈춘 쟁점 잡을 취소하면 보류 열을 비운다 — 사슬 단계(진행판 review.stage · 길잡이가 읽는다)가 취소된
+    잡에 보류를 싣지 않는다. 패널 잡과 같은 갈래다(runner.cancel_job — 반대 검토 10-31)."""
+    key = _issue_ledger(store, monkeypatch, tmp_path)
+    rig.pat(store, EDITOR)
+    job_id = _claude_issues_job(store, key)
+    engine = ExternalPanelEngine(store, {"*": EngineRejected("external_llm_disabled", "외부 응답자 길이 닫혔다(가짜)")})
+    runner.run_panel(store, config.settings, engine, runner.claim_next_job(store, config.settings, engine=engine))
+    assert (routes.chain_stage(store, key)["state"], routes.chain_stage(store, key)["hold_code"]) == ("paused", "external_config")
+    assert runner.cancel_job(store, job_id, by=OWNER)["state"] == "cancelled"
+    stage = routes.chain_stage(store, key)
+    assert (stage["job_id"], stage["state"], stage["hold_code"]) == (job_id, "cancelled", None)
+
+
 def test_a_claude_panel_that_ran_on_glm_is_flagged_llm_mismatch(store, monkeypatch, tmp_path):
     key = _issue_ledger(store, monkeypatch, tmp_path)
     rig.pat(store, EDITOR)

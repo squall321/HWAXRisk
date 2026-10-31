@@ -68,16 +68,17 @@ EGRESS_WARNING = ("이 잡의 지식카드·설계 변경 원문과, 사슬이 �
                   " 다른 사람의 검토 결과도 든다)이 Claude(외부)로 나갑니다")
 
 
-def check_llm_choice(llm: Any, consent_external: Any) -> str | None:
+def check_llm_choice(llm: Any, consent_external: Any, *, warning: str = EGRESS_WARNING) -> str | None:
     """잡을 만들 때의 판단 LLM 선택 — 없음 · 'glm' 은 None(GLM, 종전), 'claude' 는 `consent_external` 이 JSON 참(True — 글자 'true' ·
     1 은 아니다)일 때만 'claude' 다(아니면 422 consent_external_required). 그 밖의 값은 422 E100 이다. 동의는 사람이 하는 것이다 — 코드가
-    채우지 않는다(길잡이 · 사슬도 — 사슬은 앞 잡의 기록을 물려받을 뿐이다)."""
+    채우지 않는다(길잡이 · 사슬도 — 사슬은 앞 잡의 기록을 물려받을 뿐이다). `warning` 은 거절 글에 싣는 반출 경고 — 그 잡이 내보내는
+    것이다(검토 잡은 EGRESS_WARNING, 패널 잡은 runner.PANEL_EGRESS_WARNING)."""
     if llm is None or llm == engine_client.LLM_GLM:
         return None
     if llm != engine_client.LLM_CLAUDE:
         raise AppError("E100", f"llm 은 {list(engine_client.LLM_CHOICES)} 가운데 하나다(없으면 glm) — {llm!r}.", 422)
     if consent_external is not True:
-        raise AppError("consent_external_required", f"판단 LLM 을 Claude 로 고르면 {EGRESS_WARNING} — 사용자에게 그 사실을 보이고 동의를"
+        raise AppError("consent_external_required", f"판단 LLM 을 Claude 로 고르면 {warning} — 사용자에게 그 사실을 보이고 동의를"
                        " 받은 뒤에만 consent_external: true(JSON 참)를 더해 다시 만든다. 동의하지 않으면 llm 을 빼고(GLM) 만든다.", 422,
                        detail={"llm": engine_client.LLM_CLAUDE, "got": repr(consent_external)[:80]})
     return engine_client.LLM_CLAUDE

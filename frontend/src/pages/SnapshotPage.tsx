@@ -333,7 +333,7 @@ function MarginCard({ rows, reqAbsent }: { rows: ReqMarginRow[] | null; reqAbsen
         <Banner
           tone="info"
           title="이 스냅샷의 상태에 요구 대조(sig:req.margin)가 없습니다."
-          detail="이 서버는 동결할 때 요구를 대조하지 않고, 요구를 고쳐도 상태를 다시 세지 않습니다 — 서버가 그 신호를 실으면 이 자리에 여유 표가 섭니다."
+          detail="요구 대조가 들어가기 전에 언 스냅샷입니다 — 과제의 요구를 저장(등록 · 상태 바꾸기 · 승계)하면 그 과제 스냅샷의 상태를 다시 세어 이 자리에 여유 표가 섭니다."
         />
       ) : rows.length === 0 ? (
         <Badge tone="muted">{reqAbsent ? "요구 미등록 — 판정은 좌석 기준" : "치수 한계 요구가 없습니다"}</Badge>

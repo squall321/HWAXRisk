@@ -161,26 +161,53 @@ def pat_due_reason(row: dict | None, *, now: int | None = None, cfg: Any | None 
     return "audience" if missing_audiences(pat) else None
 
 
+# 웹 등록 거절을 적는 글의 머리(PUT /api/me/portal-pat — `web-<code>: …`). 이 머리가 아닌 기록은 게이트웨이 길의 것이다 — 교환 실패
+# `<code>: …`(auto_error_text) · 게이트웨이가 보낸 PAT 의 등록 거절 `register-<code>: …`.
+WEB_AUTO_ERROR_PREFIX = "web-"
+
+
+def auto_paused_until(prefs: Any, *, path: str, now: int | None = None) -> int | None:
+    """그 길(`path` — web · gateway)의 자동 등록 쉼이 끝나는 시각 — 쉬는 중이 아니면 None. 일시 오류는 짧게(AUTO_RETRY_TRANSIENT_S —
+    손잡이가 그보다 짧으면 손잡이), 사람이 고쳐야 하는 실패는 손잡이(HWAXRISK_PAT_AUTO_RETRY_S)만큼 쉰다.
+
+    마지막 실패가 그 길의 것일 때만 쉰다(글의 머리 — WEB_AUTO_ERROR_PREFIX). 웹 길(GET /api/me 의 due — 앱을 열 때 · 설정의 버튼)은
+    브라우저의 포털 세션으로 받고, 게이트웨이 길(portal_pat_wanted)은 Claude 에 넣은 PAT 를 바꿔 받는다 — 한 길의 실패(Claude PAT 의
+    청중 · 브라우저가 다른 계정)가 다른 길을 쉬게 하지 않는다(반대 검토 10-31 — 종전에는 한 기록이 두 길을 함께 쉬게 했다). 기록은
+    하나라 다른 길의 실패가 덮으면 이 길의 쉼은 끝나고 이 길은 한 번 더 해 본다(실패하면 제 글을 다시 적는다)."""
+    if not prefs["auto_error_at"]:
+        return None
+    if str(prefs["auto_error"] or "").startswith(WEB_AUTO_ERROR_PREFIX) != (path == "web"):
+        return None
+    retry = config.pat_auto_retry_s()
+    held = min(AUTO_RETRY_TRANSIENT_S, retry) if prefs["auto_error_kind"] == "transient" else retry
+    until = int(prefs["auto_error_at"]) + held
+    return until if (now_epoch() if now is None else int(now)) < until else None
+
+
 def portal_pat_auto(store: Any, email: str, row: dict | None) -> dict:
     """GET /api/me 의 `portal_pat.auto` — {enabled, due, due_reason, last_source, last_at, last_error, last_error_kind,
-    last_error_at, how_to_stop}. last_error_kind 는 transient(짧게 쉬고 다시 바란다) · final(사람이 고쳐야 한다) · None.
-    how_to_stop 은 켜져 있을 때만 있다 — 지우거나 폐기한 PAT 도 다시 만들어지므로 멈추는 길(설정의 스위치 — 화면에 생기기 전까지는
-    운영자가 앱 데이터 DB 에서 끈다, runner.AUTO_SWITCH_RUNBOOK)을 말한다(D3 · R2-8 · R3-4).
+    last_error_at, paused_until, how_to_stop}. last_error_kind 는 transient(짧게 쉬고 다시 바란다) · final(사람이 고쳐야 한다) · None.
+    how_to_stop 은 켜져 있을 때만 있다 — 지우거나 폐기한 PAT 도 다시 만들어지므로 멈추는 길(웹 설정 화면의 '자동 등록' 스위치 —
+    runner.AUTO_STOP_HINT)을 말한다(D3 · R2-8 · R3-4).
 
     화면은 `enabled && due` 면 지금 버튼이 하는 일(포털 /auth/pat 발급 → PUT /api/me/portal-pat, source 'web')을 조용히 한 번 한다.
+    `due` 는 받을 까닭(due_reason)이 있고 웹 길의 쉼(마지막 실패가 웹 등록 거절일 때 — auto_paused_until) 밖일 때만 참이다 — 쉬는 동안은
+    `paused_until` 이 그 끝이다(종전에는 쉼을 보지 않아 화면이 브라우저에 쉼을 따로 들었다, 화면 세션 FE-29 · 청할 것). 게이트웨이 길의
+    실패는 웹 길을 쉬게 하지 않는다(반대 검토 10-31). 설정의 버튼은 쉼과 상관없이 된다.
     """
     prefs = store.get_user_prefs(email)
     reason = pat_due_reason(row)
-    return {"enabled": bool(prefs["portal_pat_auto"]), "due": reason is not None, "due_reason": reason,
+    paused = auto_paused_until(prefs, path="web")
+    return {"enabled": bool(prefs["portal_pat_auto"]), "due": reason is not None and paused is None, "due_reason": reason,
             "last_source": prefs["auto_source"], "last_at": prefs["auto_at"],
             "last_error": prefs["auto_error"], "last_error_kind": prefs["auto_error_kind"],
-            "last_error_at": prefs["auto_error_at"],
+            "last_error_at": prefs["auto_error_at"], "paused_until": paused,
             "how_to_stop": runner.AUTO_STOP_HINT if prefs["portal_pat_auto"] else None}
 
 
 def portal_pat_wanted(store: Any, email: str, *, now: int | None = None) -> dict | None:
-    """위임 단언 발급에 실을 `portal_pat_wanted` — 자동이 켜져 있고, 지금 받아야 하고(due), 마지막 자동 실패가 쉼
-    (HWAXRISK_PAT_AUTO_RETRY_S)보다 오래됐을 때만. 아니면 None.
+    """위임 단언 발급에 실을 `portal_pat_wanted` — 자동이 켜져 있고, 지금 받아야 하고(due), 게이트웨이 길의 쉼 밖일 때만(마지막 실패가
+    그 길의 것이면 쉼(HWAXRISK_PAT_AUTO_RETRY_S)보다 오래됐을 때 — 웹 등록 거절은 이 길을 쉬게 하지 않는다). 아니면 None.
 
     꼴은 `{name, audiences, scopes, ttl_days, min_remaining_s, reason, require_audiences?}` 이다. `reason` 은 due_reason 이고 늘 있다.
     `require_audiences` 는 reason 이 audience 일 때만 있고 등록된 PAT 에 모자란 청중이다 — 게이트웨이는 호출자 PAT 에 그 청중이
@@ -200,12 +227,11 @@ def portal_pat_wanted(store: Any, email: str, *, now: int | None = None) -> dict
     reason = pat_due_reason(row, now=now)
     if reason is None:
         return None
+    # 일시 오류는 짧게 쉰다(손잡이가 그보다 짧으면 손잡이) — 사람이 고쳐야 하는 실패만 손잡이만큼 쉰다(auto_paused_until — 게이트웨이
+    # 길의 실패만 이 길을 쉬게 한다, 웹 등록 거절은 아니다).
+    if auto_paused_until(prefs, path="gateway", now=now) is not None:
+        return None
     retry = config.pat_auto_retry_s()
-    if prefs["auto_error_at"]:
-        # 일시 오류는 짧게 쉰다(손잡이가 그보다 짧으면 손잡이) — 사람이 고쳐야 하는 실패만 손잡이만큼 쉰다.
-        held = min(AUTO_RETRY_TRANSIENT_S, retry) if prefs["auto_error_kind"] == "transient" else retry
-        if now - int(prefs["auto_error_at"]) < held:
-            return None
     if reason == "expiring" and prefs["auto_at"] and now - int(prefs["auto_at"]) < retry:
         return None
     wanted = json.loads(json.dumps(PORTAL_PAT_WANTED))       # 사본 — 호출자가 고쳐도 상수가 바뀌지 않게
@@ -593,7 +619,17 @@ def put_portal_pat(body: PortalPatBody, background: BackgroundTasks,
     source = body.source or "manual"
     if source not in PAT_SOURCES:
         raise AppError("E100", f"source 는 {list(PAT_SOURCES)} 중 하나입니다 — {source!r}.", 422)
-    return _register_portal_pat(store, owner_sub, body.pat, source=source, background=background)
+    if source != "web":
+        return _register_portal_pat(store, owner_sub, body.pat, source=source, background=background)
+    try:
+        return _register_portal_pat(store, owner_sub, body.pat, source=source, background=background)
+    except AppError as exc:
+        # 웹 등록(브라우저가 받아 온 PAT — 앱을 열 때의 자동 등록 · 설정의 버튼)의 거절은 자동 등록 실패로 적는다 — 게이트웨이 실패와
+        # 같은 기록이고 머리 `web-` 가 길을 말한다. 쉬는 것은 웹 길뿐이고 GET /api/me 의 due 가 그 쉼을 본다(화면 세션 FE-29 · 청할 것 —
+        # 종전에는 화면이 브라우저에 쉼을 따로 들었다). 게이트웨이 길은 쉬지 않는다 — 그 길은 브라우저의 포털 세션을 쓰지 않는다(반대 검토
+        # 10-31). 붙여 넣은 PAT(manual)의 거절은 자동 등록이 아니라 적지 않는다. 등록이 던지는 거절은 전부 저장 전이다.
+        store.note_portal_pat_error(owner_sub, f"{WEB_AUTO_ERROR_PREFIX}{exc.code}: {exc.message}", kind=auto_error_kind(exc.code))
+        raise
 
 
 @router.put("/me/portal-pat-auto")
@@ -1635,8 +1671,9 @@ def purge_project(project_id: str, body: PurgeBody,
         blanked: dict[str, int] = {}
         for table, sql in PURGE_BLANK_SQL:
             blanked[table] = int(store.execute(sql, (project_id,)) or 0)
-        # 검토 잡의 보류 열은 사람의 취소(runner.cancel_job)처럼 비운다(P-10 · X4-25) — 취소된 잡에 llm_outage·재개 시각이
-        # 남으면 자동 재개나 진행판이 '보류 중' 으로 읽는다. 패널 잡은 그 열이 늘 NULL·0 이라 문장 뜻이 바뀌지 않는다.
+        # 보류 열은 사람의 취소(runner.cancel_job)처럼 비운다(P-10 · X4-25) — 취소된 잡에 llm_outage·재개 시각이 남으면 자동 재개나
+        # 진행판이 '보류 중' 으로 읽는다. 패널 · 쟁점 잡도 코드 보류(external_worker · credential · external_config)로 멈출 수 있어
+        # 같다(반대 검토 10-31 — cancel_job 의 패널 갈래도 비운다).
         cancelled_n = store.execute(
             "UPDATE rr_jobs SET state = 'cancelled', state_by = ?, state_at = ?,"
             " hold_code = NULL, hold_until = NULL, hold_n = 0"
@@ -2302,18 +2339,24 @@ def get_requirements(project_id: str, kind: str | None = None, status: str | Non
 @router.post("/projects/{project_id}/requirements")
 def post_requirements(project_id: str, body: list[RequirementItem],
                       ident: identity.Identity = Depends(identity.current)) -> dict:
-    """요구 배열 UPSERT — `UNIQUE(project_id, kind, name)` 기준. 전건 선검사라 한 건이라도 틀리면 아무 행도 쓰지 않는다."""
+    """요구 배열 UPSERT — `UNIQUE(project_id, kind, name)` 기준. 전건 선검사라 한 건이라도 틀리면 아무 행도 쓰지 않는다. 쓰면 같은
+    트랜잭션에서 그 과제 스냅샷의 상태를 다시 센다(`recompute` 의 스냅샷 — 요구는 ir_hash 를 바꾸지 않는다, plan §2.8b (1))."""
     owner_sub = _require_user(ident)
     project = _project_row(project_id, owner_sub)
-    # owner_sub 는 호출자가 아니라 과제 소유 앵커다(plan §5.2.1 — 하위 표의 owner_sub 는 rr_projects 값의 복제다).
-    return requirements.upsert_requirements(
-        get_store(), project_id, project["owner_sub"], [item.model_dump() for item in body])
+    store = get_store()
+    with store.tx():
+        # owner_sub 는 호출자가 아니라 과제 소유 앵커다(plan §5.2.1 — 하위 표의 owner_sub 는 rr_projects 값의 복제다).
+        out = requirements.upsert_requirements(store, project_id, project["owner_sub"], [item.model_dump() for item in body])
+        if out["upserted"]:
+            state_module.recompute_project_states(store, project_id)
+    return out
 
 
 @router.put("/requirements/{requirement_id}")
 def put_requirement(requirement_id: str, body: RequirementDecision,
                     ident: identity.Identity = Depends(identity.current)) -> dict:
-    """요구 1건의 status 결정(candidate|confirmed|waived). waived 는 사유 필수이고 rr_audit 1행이 남는다."""
+    """요구 1건의 status 결정(candidate|confirmed|waived). waived 는 사유 필수이고 rr_audit 1행이 남는다. 같은 트랜잭션에서 그 과제
+    스냅샷의 상태를 다시 센다(waived 는 대조하지 않고, 여유 표의 행이 status 를 싣는다)."""
     owner_sub = _require_user(ident)
     store = get_store()
     before = store.query_one(
@@ -2327,20 +2370,23 @@ def put_requirement(requirement_id: str, body: RequirementDecision,
         if exc.http_status != 404:
             raise
         raise missing from None                     # 남의 요구는 없는 요구와 같다 — 과제 id 를 흘리지 않는다(남 숨김 훑기)
-    updated = requirements.decide_requirement(
-        store, requirement_id, status=body.status, waive_reason=body.waive_reason, actor_sub=owner_sub)
-    _audit(store, owner_sub, scope="project", subject_id=requirement_id, project_id=before["project_id"],
-           action="requirement.decide",
-           before={"status": before["status"], "waive_reason": before["waive_reason"]},
-           after={"status": updated["status"], "waive_reason": updated["waive_reason"]},
-           reason=body.waive_reason)
+    with store.tx():
+        updated = requirements.decide_requirement(
+            store, requirement_id, status=body.status, waive_reason=body.waive_reason, actor_sub=owner_sub)
+        _audit(store, owner_sub, scope="project", subject_id=requirement_id, project_id=before["project_id"],
+               action="requirement.decide",
+               before={"status": before["status"], "waive_reason": before["waive_reason"]},
+               after={"status": updated["status"], "waive_reason": updated["waive_reason"]},
+               reason=body.waive_reason)
+        state_module.recompute_project_states(store, before["project_id"])
     return updated
 
 
 @router.post("/projects/{project_id}/requirements/inherit")
 def post_requirements_inherit(project_id: str, body: InheritBody,
                               ident: identity.Identity = Depends(identity.current)) -> dict:
-    """계보 과제의 요구를 복사한다(status='candidate'·inherited_from, 멱등). 원본에도 조회 규약을 먼저 적용한다."""
+    """계보 과제의 요구를 복사한다(status='candidate'·inherited_from, 멱등). 원본에도 조회 규약을 먼저 적용한다. 복사한 것이 있으면
+    같은 트랜잭션에서 받는 과제 스냅샷의 상태를 다시 센다."""
     owner_sub = _require_user(ident)
     store = get_store()
     project = _project_row(project_id, owner_sub)
@@ -2351,7 +2397,11 @@ def post_requirements_inherit(project_id: str, body: InheritBody,
         if project_role(body.from_project_id, owner_sub) is None:
             raise requirements.source_missing(body.from_project_id)
         raise AppError("not_a_member", f"승계 원본 과제를 볼 수 없습니다 — {body.from_project_id}.", 403)
-    return requirements.inherit_requirements(store, project_id, project["owner_sub"], body.from_project_id)
+    with store.tx():
+        out = requirements.inherit_requirements(store, project_id, project["owner_sub"], body.from_project_id)
+        if out["copied"]:
+            state_module.recompute_project_states(store, project_id)
+    return out
 
 
 class LedgerItem(BaseModel):
@@ -3708,10 +3758,13 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
     # DB 를 바꾸지 않는다).
     level = ((closure_module.cached(store, target_key) or closure_module.close_level_cells(store, target_key, persist=False))
              if target["flow"] == "cells" else registry_module.close_level(store, target_key, persist=False))
-    # `job` 은 패널 잡이다(칸의 뜻 불변) — 카드 대조 검토 잡은 진행판의 제 칸(review)이 맡는다(재설계 M2 S6·S12).
+    # `job` 은 패널 잡이다(칸의 뜻 불변) — 카드 대조 검토 잡은 진행판의 제 칸(review)이 맡는다(재설계 M2 S6·S12). 보류 코드 ·
+    # 자동 재개 시각(hold_code · hold_until — 검토 잡 줄과 같은 두 칸)을 싣는다 — 외부 응답자 패널이 워커가 없어 멈춘 잡은
+    # pause_reason 이 비고 hold_code 가 external_worker 다(화면 세션 청할 것). 같은 초에 선 잡은 넣은 차례(rowid)로 가른다.
     job = store.query_one(
-        "SELECT id, tier, state, pause_reason, panels_done, panels_total, error, progress_json, params_json FROM rr_jobs"
-        f" WHERE target_key = ? AND {runner.PANEL_JOBS_SQL} ORDER BY created_at DESC LIMIT 1", (target_key,))
+        "SELECT id, tier, state, pause_reason, hold_code, hold_until, panels_done, panels_total, error, progress_json,"
+        f" params_json FROM rr_jobs WHERE target_key = ? AND {runner.PANEL_JOBS_SQL} ORDER BY created_at DESC, rowid DESC"
+        " LIMIT 1", (target_key,))
     if job is not None:
         job = dict(job)
         # 도는 패널의 마지막 신호(러너가 1분 간격으로 적는다) — 벽시계가 몇 시간이라, 이것이 없으면 진행판에서
@@ -3872,7 +3925,9 @@ def _issue_row_out(issue: dict) -> dict:
     return {"issue_id": issue["issue_id"], "rank": issue["rank"], "types": list(issue.get("types") or ()),
             "p_class": issue["p_class"], "priority": issue["priority"], "anchor_cluster_key": issue["anchor_cluster_key"],
             "unit_id": issue["unit_id"], "state": issue["state"], "state_reason": issue["state_reason"],
-            "outcome": issue["outcome"], "outcome_json": _loads(issue.get("outcome_json"), None),
+            # 결과 칸은 원장 값 그대로다(결과가 없으면 null) — `_loads` 는 기본값의 형만 받아 기본값을 None 으로 주면 늘 None 이었다
+            # (화면 세션 FE-18 · 청할 것 1).
+            "outcome": issue["outcome"], "outcome_json": _loads(issue.get("outcome_json"), {}) or None,
             "distribution": {"raisers": len(basis.get("raisers") or ()),
                              "raisers_by_domain": dist.get("raisers_by_domain") or {},
                              "by_judgement_claimed": dist.get("by_judgement_claimed") or {},
@@ -3973,6 +4028,10 @@ def put_issue(issue_id: str, body: IssueActionBody, ident: identity.Identity = D
         _audit(store, email, scope="target", subject_id=target["target_key"], action=f"issue.{body.action}",
                project_id=target["project_id"], before={"issue_id": issue_id, "state": row["state"]},
                after={"issue_id": issue_id, "state": state}, reason=reason)
+        # 쟁점 상태가 완결의 수 · 잔여(쟁점 진행 · 미토의)를 바꿨다 — 완결 캐시를 같은 트랜잭션에서 새로 쓴다. 종전에는 캐시가 그대로라
+        # 진행판 level_label · qualifiers 가 낡고 그 캐시의 basis_hash 로 보낸 확인이 409 residual_changed 였다(화면 세션 청할 것 2).
+        # 사람이 세우는 쟁점 잡은 사슬 표지가 없어(chain_json NULL) 완결이 읽는 값을 바꾸지 않는다 — 잡보다 먼저 써도 된다.
+        closure_module.refresh(store, target["target_key"])
     if body.action == "queue":
         # 사람이 올린 쟁점은 GLM 이다(XR-10 · XR-12) — 살아 있는 claude 쟁점 잡에 붙지 않는다(그 잡은 제 사슬 걸음의 몫만 돌고, 사람이
         # 정한 쟁점은 그 몫이 아니다). 살아 있는 GLM 쟁점 잡이 있으면 그 잡, 없으면 GLM 쟁점 잡을 세운다.
@@ -4212,6 +4271,9 @@ def _review_job_payload(job: dict) -> dict:
     return {"id": job["id"], "mode": review_runner.MODE, "state": job["state"], "hold_code": job["hold_code"],
             "hold_until": job["hold_until"], "hold_n": int(job["hold_n"] or 0), "error": job["error"],
             "credential_email": job["credential_email"], "scope": params.get("scope") or {},
+            # 사슬 표지(params.chain — M3 코드가 세운 잡) — 끝나면 쟁점 → 종합이 저절로 선다. false 는 M2 시절 잡이라 사람이 사슬을 시작한다
+            # (chain.chain_marked · 길잡이와 같은 판정 — 화면 세션 청할 것 4).
+            "chain": params.get("chain") is True,
             **job_llm_view(params),
             "phase": progress.get("phase"), "progress": {
                 **{k: progress.get(k) for k in REVIEW_JOB_PROGRESS_KEYS},
@@ -4284,9 +4346,10 @@ def review_payload(store: Any, target_key: str, flow: str | None) -> dict | None
     if flow != "cells" and not has_cells:
         return None
     summary = review_cells.review_summary(store, target_key)
+    # 같은 초에 선 두 검토 잡은 넣은 차례(rowid)로 가른다 — id(uuid)로 가르면 앞 잡을 보였다(화면 세션 청할 것 3, chain_stage 와 같다).
     job = store.query_one(
         "SELECT id, state, hold_code, hold_until, hold_n, error, credential_email, params_json, progress_json FROM rr_jobs"
-        " WHERE target_key = ? AND mode = ? ORDER BY created_at DESC, id DESC LIMIT 1", (target_key, review_runner.MODE))
+        " WHERE target_key = ? AND mode = ? ORDER BY created_at DESC, rowid DESC LIMIT 1", (target_key, review_runner.MODE))
     job = dict(job) if job is not None else None
     quality = _loads(job["progress_json"], {}).get("quality") if job is not None else None
     cards = (quality.get("json") or {}).get("cards") if isinstance(quality, dict) else None
