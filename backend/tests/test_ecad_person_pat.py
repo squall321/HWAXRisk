@@ -200,6 +200,8 @@ def test_a_board_only_capture_without_the_persons_pat_sends_nothing_and_freezes_
     남는다(EC-16 · EC-22 의 꼴)."""
     project_id = _attached(box, f"PAT-ONLY-{entrance}")
     _register(box.store, "none")
+    # 캡처는 붙인 뒤 한참 뒤다 — 붙일 때 받은 도구 지도(60 s 캐시)가 남아 있으면 박스 PAT 로 지도를 받으러 가는 것이 가려진다.
+    adapters_registry.reset_discovery_cache()
     box.gw.seen.clear()
     if entrance == "rest":
         with pytest.raises(AppError) as err:
