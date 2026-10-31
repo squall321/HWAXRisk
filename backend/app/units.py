@@ -2245,6 +2245,8 @@ _MISSING_NOTES: tuple[tuple[str, str, str], ...] = (
     ("mcad_absent", "mcad", "형상(MCAD) 소스가 없다 — 부품 형상·계면 변경은 이 비교에 없다"),
     ("dyna_absent", "dyna", "해석 모델(Dyna) 소스가 없다 — 해석 조건·결과 변경은 이 비교에 없다"),
 )
+_ECAD_DIFF_NOTE = ("회로(ECAD) 칸 변화(층 두께·재료·품번·패키지·핀 수·높이)는 이 비교에 없다 — ECAD 1단계 비교는 부품·층을 refdes·층"
+                   " 이름으로 맞춰 추가·삭제만 본다(두 리비전 모두 보드가 실렸다).")
 
 
 def _target_missing(store, target_key: str, blocked_by: str | None) -> list[dict]:
@@ -2258,9 +2260,11 @@ def _target_missing(store, target_key: str, blocked_by: str | None) -> list[dict
     elif target is not None:
         sids = [target["ref_id"]]
     sides: dict[str, list[str]] = {}
+    boards = 0                                            # 보드를 실은 쪽 수(missing.ecad_absent 가 거짓이라고 적힌 쪽만)
     for role, sid in zip(("base", "target") if len(sids) == 2 else ("target",), sids):
         row = store.query_one("SELECT missing_json FROM rr_snapshots WHERE id = ?", (sid,))
         missing = json.loads(row["missing_json"]) if row is not None and row["missing_json"] else {}
+        boards += missing.get("ecad_absent") is False
         for key, _kind, _note in _MISSING_NOTES:
             if missing.get(key):
                 sides.setdefault(key, []).append(role)
@@ -2270,6 +2274,10 @@ def _target_missing(store, target_key: str, blocked_by: str | None) -> list[dict
             where = "두 리비전 모두" if len(sides[key]) == 2 else ("앞 리비전" if sides[key] == ["base"] else
                                                                "뒤 리비전" if len(sids) == 2 else "이 스냅샷")
             out.append({"kind": kind, "note": f"{note}({where})."})
+    if len(sids) == 2 and boards == 2:
+        # 두 리비전에 다 보드가 실렸어도 1단계 쌍 비교는 ECAD 칸을 견주지 않는다 — 좌석이 '회로 변경 없음' 으로 읽지 않게 한다
+        # (ECAD 의존 영역이 이 대상에서 입력 결손인 까닭, routes._ecad_absent_for_target).
+        out.insert(0, {"kind": "ecad", "note": _ECAD_DIFF_NOTE})
     if blocked_by:
         out.append({"kind": "semantic_blocked",
                     "note": f"의미층 이벤트가 막힌 비교다(blocked_by={_bare(blocked_by)}) — 구조·파라메트릭 원자료로만 본다."})

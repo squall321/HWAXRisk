@@ -73,7 +73,7 @@
         "dyna_absent", "fuzzy_skipped_large",
         "ecad_nets_deferred", "component_xy_deferred", "components_unclassified_omitted", "outline_origin_unknown",
         "stackup_material_unmatched", "copper_weight_absent", "plane_type_unknown", "odb_version_absent",
-        "component_value_absent", "component_height_partial"
+        "component_value_absent", "component_height_partial", "components_unavailable", "layers_unavailable"
       ]
     },
     "source": {
@@ -145,7 +145,7 @@
         "nid": {"$ref": "#/definitions/nid"},
         "canon_key": {"type": "string", "pattern": "^(mcad|dyna|ecad):"},
         "domain": {"type": "string", "enum": ["mcad", "dyna", "ecad"]},
-        "kind": {"type": "string", "enum": ["part", "assembly", "file", "pid", "contact_set", "component", "net", "layer"]},
+        "kind": {"type": "string", "enum": ["part", "assembly", "file", "pid", "contact_set", "component", "net", "layer", "board"]},
         "label": {"type": "string"},
         "local_key": {"type": "string"},
         "name_norm": {"type": "string"},

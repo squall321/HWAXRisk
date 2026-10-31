@@ -158,6 +158,64 @@ def _source(ir: Mapping[str, Any], kind: str) -> Mapping[str, Any] | None:
     return None
 
 
+# 보드는 실렸는데 노드 집합을 믿을 수 없는 ecad 표지 — 빠진 부품 · 층이 쌍 비교에서 '삭제' 로 읽힌다.
+_ECAD_INCOMPLETE = frozenset({"capture_partial", "components_unavailable", "layers_unavailable"})
+
+
+def _ecad_side(ir: Mapping[str, Any]) -> str:
+    """한 스냅샷의 ECAD — `present`(보드를 온전히 실었다) · `absent`(보드 없음 · 읽지 않음) · `failed`(붙은 보드를 못 읽었거나
+    부분이다)."""
+    missing = ir.get("missing") or {}
+    if missing.get("ecad_capture_failed"):
+        return "failed"
+    if missing.get("ecad_absent", True):
+        return "absent"
+    degraded = set((_source(ir, "ecad") or {}).get("degraded") or ())
+    return "failed" if degraded & _ECAD_INCOMPLETE else "present"
+
+
+def _ecad_dns(base_by: Mapping[str, Mapping[str, Any]], target_by: Mapping[str, Mapping[str, Any]],
+              dn_of: Mapping[str, str]) -> set[str]:
+    """ECAD 노드로만 이뤄진 dn — 그 dn 의 파라메트릭 항목 · 의미 이벤트가 ECAD 항목이다(ecad↔mcad 로 묶인 클러스터는 아니다)."""
+    domains: dict[str, set[str]] = {}
+    for by in (base_by, target_by):
+        for nid, node in by.items():
+            domains.setdefault(dn_of.get(nid, nid), set()).add(str(node.get("domain") or ""))
+    return {dn for dn, found in domains.items() if found == {"ecad"}}
+
+
+def _apply_ecad_scope(comp: Mapping[str, Any], structural: dict, parametric: dict, ecad_dns: set[str]) -> None:
+    """ECAD 를 견줄 수 없는 쌍(comparability.ecad.excluded_reason)이면 ECAD 항목에 그 사유를 붙인다 — 의미층보다 먼저라 그
+    항목에서 `part.added` · `part.removed` 가 생기지 않는다. 다른 kind 의 항목은 건드리지 않는다. 2단계에서 net 엣지가 붙으면
+    엣지 항목도 같은 규칙에 든다."""
+    reason = (comp.get("ecad") or {}).get("excluded_reason")
+    if not reason:
+        return
+    for change in structural.get("node_changes") or ():
+        if change.get("domain") == "ecad" and not change.get("excluded_reason"):
+            change["excluded_reason"] = reason
+    for name in ("node_params", "materials"):
+        for item in parametric.get(name) or ():
+            if item.get("dn") in ecad_dns and not item.get("excluded_reason"):
+                item["excluded_reason"] = reason
+
+
+def _apply_ecad_caveat(comp: Mapping[str, Any], parametric: dict, semantic: dict, ecad_dns: set[str]) -> None:
+    """두 쪽 다 보드를 실었는데 ECAD 어댑터 세대가 다르면 ECAD 항목 · 이벤트에만 parser_differs 와 등급 한 단계 낮춤이다(§3.3.6
+    adapter_parity 를 kind 별로)."""
+    if (comp.get("ecad") or {}).get("adapter_parity", True):
+        return
+    for name in ("node_params", "materials"):
+        for item in parametric.get(name) or ():
+            if isinstance(item, dict) and item.get("dn") in ecad_dns:
+                item["caveat"] = "parser_differs"
+    for event in semantic.get("events") or ():
+        dns = list((event.get("subject") or {}).get("dns") or ())
+        if dns and all(dn in ecad_dns for dn in dns) and event.get("caveat") != "parser_differs":
+            event["caveat"] = "parser_differs"
+            event["confidence"] = _CONFIDENCE_DOWN.get(str(event.get("confidence")), "low")
+
+
 # ---------------------------------------------------------------- 정규 표기(§3.4.1)
 # render.py 가 정규 표기의 정본이다. 아직 없거나 해당 함수가 없으면 같은 형식 규칙으로 여기서 만든다.
 def _render_module():
@@ -258,7 +316,9 @@ def comparability(base_ir: Mapping[str, Any], target_ir: Mapping[str, Any],
 
     base_adapters = dict(_dig(base_ir, "versions", "adapter_versions") or {})
     target_adapters = dict(_dig(target_ir, "versions", "adapter_versions") or {})
-    adapter_parity = all(base_adapters.get(k) == target_adapters.get(k) for k in common_kinds) \
+    # ecad 는 아래 `ecad` 가 따로 따진다 — 결측 행(보드 없음 · 못 읽음, 세대 0.0-stub)이 늘 있어 공통 kind 로 세면 한쪽에만 보드가
+    # 실린 쌍마다 mcad 항목 · 이벤트까지 parser_differs 가 붙었다.
+    adapter_parity = all(base_adapters.get(k) == target_adapters.get(k) for k in common_kinds if k != "ecad") \
         if common_kinds else True
 
     drift_kinds = sorted({kind for kind, source in list(base_sources.items()) + list(target_sources.items())
@@ -267,11 +327,25 @@ def comparability(base_ir: Mapping[str, Any], target_ir: Mapping[str, Any],
 
     def _capture_ok(ir: Mapping[str, Any]) -> bool:
         missing = ir.get("missing") or {}
-        failed = [k for k in missing if str(k).endswith("_capture_failed") and missing[k]]
+        # ecad 의 실패는 ECAD 항목에만 효과를 준다(아래 `ecad`) — 여기서 세면 보드 하나를 못 읽은 쌍의 mcad 의미 이벤트가 다 지워진다.
+        failed = [k for k in missing if str(k).endswith("_capture_failed") and missing[k] and k != "ecad_capture_failed"]
         return not ir.get("capture_partial") and not ir.get("partial") and not failed
 
     capture_parity = _capture_ok(base_ir) and _capture_ok(target_ir)
     primary_source_parity = base_ir.get("primary_source") == target_ir.get("primary_source")
+
+    # ECAD — 두 쪽 다 보드를 온전히 실었을 때만 ECAD 항목을 견준다. 한쪽이라도 못 읽었거나 부분이면 capture_partial, 한쪽에만
+    # 실렸으면(첫 보드를 붙인 캡처 · kinds 에서 ecad 를 뺀 캡처) partial_scope 로 그 항목을 남기되 의미 이벤트를 만들지 않는다.
+    # 세대가 다르면(두 쪽 다 실렸을 때만 견준다) ECAD 항목에만 parser_differs 다.
+    base_ecad, target_ecad = _ecad_side(base_ir), _ecad_side(target_ir)
+    if "failed" in (base_ecad, target_ecad):
+        ecad_reason: str | None = "capture_partial"
+    elif base_ecad != target_ecad:
+        ecad_reason = "partial_scope"
+    else:
+        ecad_reason = None
+    ecad_adapter_parity = not (base_ecad == target_ecad == "present") \
+        or base_adapters.get("ecad") == target_adapters.get("ecad")
 
     base_scope = (base_mcad or {}).get("scope")
     target_scope = (target_mcad or {}).get("scope")
@@ -305,6 +379,8 @@ def comparability(base_ir: Mapping[str, Any], target_ir: Mapping[str, Any],
         "source_schema_drift_kinds": drift_kinds,
         "capture_parity": capture_parity,
         "primary_source_parity": primary_source_parity,
+        "ecad": {"base": base_ecad, "target": target_ecad, "excluded_reason": ecad_reason,
+                 "adapter_parity": ecad_adapter_parity},
         "G7": {"key": "yardstick_parity", "count": count, "threshold": 0, "pass": count == 0,
                "blocking": False, "effect": effect, "detail": sorted(set(detail))},
         "base_blocked": bool((base_state or {}).get("blocked")),
@@ -539,10 +615,13 @@ def compute_diff(base_ir: Mapping[str, Any], target_ir: Mapping[str, Any], *,
                              comp, g4_fail, g5_fail)
     parametric = _parametric(base_by, target_by, base_edges, target_edges, corr, dn_of, ckey_of,
                              base_ir, target_ir, comp, dim_tols or {}, g5_fail)
+    ecad_dns = _ecad_dns(base_by, target_by, dn_of)
+    _apply_ecad_scope(comp, structural, parametric, ecad_dns)
     semantic = _semantic(structural, parametric, corr, dn_of, ckey_of, method_of,
                          base_by, target_by, comp, g2_fail, g4_fail)
 
     _apply_source_parity(comp, structural, parametric, semantic)
+    _apply_ecad_caveat(comp, parametric, semantic, ecad_dns)
 
     events = semantic["events"]
     kinds: dict[str, int] = {}

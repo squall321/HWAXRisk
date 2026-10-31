@@ -128,7 +128,8 @@ def gateway_tool_map(*, token: str | None = None, client: httpx.Client | None = 
                      force: bool = False) -> dict[str, str]:
     """게이트웨이 `/tools-map` 의 map — 실제로 노출하는 도구 이름 → 백엔드. 실패는 예외가 아니라 빈 지도다.
 
-    발견과 같은 TTL 로 캐시한다 — 캡처 한 번에 지도를 여러 번 받아 오지 않는다.
+    발견과 같은 TTL 로 캐시한다 — 캡처 한 번에 지도를 여러 번 받아 오지 않는다. 못 읽은 지도(전송 · HTTP 오류, 빈 지도)는
+    캐시하지 않는다 — 한 번의 503 이 TTL 동안 모든 ECAD 캡처 · 찾기를 '도구 없음' 으로 닫던 자리다.
     """
     now = time.time()
     with _discovery_lock:
@@ -140,11 +141,13 @@ def gateway_tool_map(*, token: str | None = None, client: httpx.Client | None = 
     registry = GatewayRegistry(config.settings.gateway_mcp, token=token, client=client)
     try:
         tools = dict(registry.load())
+        unreadable = registry._error is not None or not tools
     finally:
         registry.close()
-    with _discovery_lock:
-        _discovery_cache["tool_map"] = tools
-        _discovery_cache["tool_map_at"] = now
+    if not unreadable:
+        with _discovery_lock:
+            _discovery_cache["tool_map"] = tools
+            _discovery_cache["tool_map_at"] = now
     return dict(tools)
 
 
@@ -280,9 +283,10 @@ def capture_all(*, sources: Sequence[Mapping[str, Any]], principal: Principal,
                 tool_names: Sequence[str] = (), tool_map: Mapping[str, str] | None = None) -> dict:
     """등록된 소스 카드를 kind 순서로 캡처한다(plan §2.11.3 1~5단계).
 
-    반환 `{snapshot_id, results, calls, context}`. snapshot_id 를 미리 정하는 이유는 provenance.call_id 가
-    동결 후 rr_snapshot_calls 의 실제 id 와 같아야 하기 때문이다(CallRecorder 참조).
-    mcad 소스가 없으면 409 다 — mcad 없는 스냅샷은 만들지 않는다.
+    반환 `{snapshot_id, results, calls, context, read_kinds}`. snapshot_id 를 미리 정하는 이유는 provenance.call_id 가
+    동결 후 rr_snapshot_calls 의 실제 id 와 같아야 하기 때문이다(CallRecorder 참조). `read_kinds` 는 이번에 카드를 읽은 kind 다
+    — 그것이 ecad 하나뿐인데 보드를 못 읽었으면 호출자(routes.create_snapshot)가 스냅샷을 만들지 않는다(§2.11.3).
+    읽을 카드가 하나도 없으면 409 다.
 
     `tool_names` 는 게이트웨이 실이름 목록이다(정본 §2.13.2 이름 해석). 여기서 직접 받아 오지 않는다 —
     자격을 아는 곳은 `clients_from_settings` 이고, 캡처가 스스로 발견 요청을 내보내면 캡처 경로가
@@ -300,8 +304,16 @@ def capture_all(*, sources: Sequence[Mapping[str, Any]], principal: Principal,
             by_kind[kind] = dict(row)
     wanted = [k for k in CAPTURE_ORDER if (kinds is None or k in kinds or k == "ecad")]
     ecad_asked = kinds is None or "ecad" in kinds
-    if not [k for k in wanted if k in by_kind and (k != "ecad" or ecad_asked)]:
+    read_kinds = [k for k in wanted if k in by_kind and (k != "ecad" or ecad_asked)]
+    if not read_kinds:
         # mcad 가 없어도 dyna 단독 스냅샷은 만든다(plan §2.2 primary_source) — 소스가 아예 0 일 때만 막는다.
+        attached = [k for k in CAPTURE_ORDER if k in by_kind]
+        if attached:
+            # 카드는 있는데 요청 kinds 가 그 종류를 뺐다 — '연결하라' 가 아니라 kinds 를 고칠 일이다(웹의 기본 kinds 는 mcad 다).
+            raise AppError("source_unreachable",
+                           f"요청한 kinds({', '.join(kinds or ())})에 연결된 소스가 없습니다 — 연결된 소스는 "
+                           f"{', '.join(attached)} 입니다. kinds 에 그 종류를 담거나 비워서 다시 캡처하세요.",
+                           http_status=409, detail={"kinds": list(kinds or ()), "attached": attached})
         raise AppError("source_unreachable",
                        "연결된 소스가 없습니다 — 소스를 먼저 연결하세요.", http_status=409)
 
@@ -352,7 +364,8 @@ def capture_all(*, sources: Sequence[Mapping[str, Any]], principal: Principal,
         context = dyna_adapter.corpus_context(
             recorder, app_key=str(dyna_row.get("app_key") or "") or default_app_key("dyna"),
             captured_at=now_epoch())
-    return {"snapshot_id": sid, "results": results, "calls": recorder.calls, "context": context}
+    return {"snapshot_id": sid, "results": results, "calls": recorder.calls, "context": context,
+            "read_kinds": read_kinds}
 
 
 # 캡처 REST 채널의 자격(리스크 앱 사람 자격 R2) — 앞의 것이 있으면 그것을 쓴다.

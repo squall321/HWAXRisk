@@ -962,6 +962,23 @@ def test_failed_capture_calls_leave_the_card_unreachable_with_the_reason(risk_st
     assert probe["mcad"]["detail"] == "capture_ok calls=1 app_key=heax-step_forge"
 
 
+def test_the_card_capture_mode_follows_the_channel_that_read_it(risk_store, monkeypatch):
+    """capture_mode 는 그 kind 가 REST 로 읽었으면 rest_primary, MCP 로만 읽었으면 mcp 다 — 종전에는 읽히기만 하면 rest_primary 로
+    박혀 dyna · ECAD(MCP 전용)까지 그렇게 적혔다(ECAD 1단계 반대 검토 10)."""
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    project_id = _project(risk_store)
+    _source(risk_store, project_id, "mcad", "src1")
+    _source(risk_store, project_id, "dyna", "src2")
+    calls = [
+        {"source_kind": "mcad", "app_key": "heax-step_forge", "channel": "rest", "tool": "GET /tree", "ok": True},
+        {"source_kind": "mcad", "app_key": "heax-step_forge", "channel": "mcp", "tool": "job_status", "ok": True},
+        {"source_kind": "dyna", "app_key": "heax-kooremapper_mcp", "channel": "mcp", "tool": "inspect_file", "ok": True},
+    ]
+    assert routes.refresh_source_probes(risk_store, project_id, calls) == 2
+    mode = {s["kind"]: s["probe"]["capture_mode"] for s in routes._project_sources(project_id)}
+    assert mode == {"mcad": "rest_primary", "dyna": "mcp"}
+
+
 def test_a_kind_with_no_calls_is_left_alone_and_system_status_does_not_count(risk_store, monkeypatch):
     """미측정은 실패가 아니다 — 부르지 않은 소스의 probe 를 건드리면 '안 읽혔다' 를 지어내는 것이다."""
     monkeypatch.setattr(routes, "get_store", lambda: risk_store)

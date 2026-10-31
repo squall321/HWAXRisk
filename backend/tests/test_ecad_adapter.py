@@ -8,9 +8,11 @@ dev 게이트웨이에는 odb-hub 가 없다 — 실물 확인은 cae00 다시 �
 from __future__ import annotations
 
 import asyncio
+import collections
 import copy
 import hashlib
 import json
+import tracemalloc
 from pathlib import Path
 
 import httpx
@@ -18,8 +20,10 @@ import pytest
 from jsonschema import Draft7Validator
 
 import app.mcp_server as srv
-from app import identity, ir_builder, routes
+from app import diff as diff_module
+from app import identity, ir_builder, planner, routes
 from app import state as state_module
+from app import units as units_module
 from app.adapters import base as adapters_base
 from app.adapters import ecad as ecad_adapter
 from app.adapters import mcad
@@ -29,6 +33,7 @@ from app.errors import AppError
 from app.ra_client import McpHttpClient
 from tests import factories
 from tests import test_adapters as recon
+from tests.test_diff import _load as _pair
 from tests.test_e2e_smoke import no_network  # noqa: F401 — autouse: 실제 소켓으로 나가는 httpx 를 막는다
 
 OWNER = "board-owner@example.com"
@@ -496,19 +501,38 @@ def test_a_board_left_out_of_the_requested_kinds_is_not_read(hub):
     assert err.value.code == "source_unreachable"
 
 
-@pytest.mark.parametrize("case", ["tool_missing", "no_channel", "not_found", "find_job_error"])
-def test_a_board_that_could_not_be_read_is_a_failed_capture_not_an_empty_board(hub, case):
-    """붙은 보드를 못 읽었으면 '회로가 없다' 가 아니다 — ecad_absent 와 ecad_capture_failed 가 함께 서고 까닭이 경고에 남는다."""
+@pytest.mark.parametrize("case", ["tool_missing", "no_channel", "map_unreadable"])
+def test_a_board_the_capture_never_reached_is_absent_with_its_reason(hub, case):
+    """호출 없이 끝난 실패(도구 없음 · 자격 없음 · 도구 지도를 못 읽음)는 결측 + 경고다 — dyna 의 자격 없음과 같은 꼴이고
+    capture_failed 가 아니다(그것은 find_job 을 불렀는데 실패했을 때만이다). 까닭은 경고의 code 로 갈린다."""
     if case == "tool_missing":
         hub.tools = tool_map(drop=("get_odb_download",))
         result, want = _ecad(_capture(hub, JOB_STD)), "ecad_tools_missing"
-        assert hub.calls == [] and "get_odb_download" in result["warnings"][0]["message"]
+        assert "get_odb_download" in result["warnings"][0]["message"]
     elif case == "no_channel":
         result = _ecad(adapters_registry.capture_all(
             sources=[{"kind": "ecad", "app_key": ODB, "ref": {"odb_job_id": JOB_STD}}], principal=Principal(owner_sub=OWNER),
             mcp_client=None, tool_map=hub.tools))
         want = "ecad_pat_absent"
-    elif case == "not_found":
+    else:
+        result = _ecad(adapters_registry.capture_all(
+            sources=[{"kind": "ecad", "app_key": ODB, "ref": {"odb_job_id": JOB_STD}}],
+            principal=Principal(owner_sub=OWNER, portal_pat="portal-pat"), mcp_client=hub.mcp(), tool_map={}))
+        want = "ecad_gateway_unreadable"
+    assert hub.calls == []
+    assert result["missing"] == {"ecad_absent": True}
+    assert result["nodes"] == [] and result["degraded"] == ["ecad_absent"]
+    assert (result["warnings"][0]["code"], result["warnings"][0]["severity"]) == (want, "WARNING")
+    assert result["source"]["adapter_version"] == "0.0-stub" and result["source"]["ref"] == {"board_id": JOB_STD}
+    ir = _build({"results": [result]})
+    assert ir["missing"]["ecad_absent"] is True and ir["missing"]["ecad_capture_failed"] is False and _errors(ir) == []
+
+
+@pytest.mark.parametrize("case", ["not_found", "find_job_error"])
+def test_a_board_that_could_not_be_read_is_a_failed_capture_not_an_empty_board(hub, case):
+    """find_job 을 불렀는데 실패했거나 그 job_id 가 없으면 '회로가 없다' 가 아니다 — ecad_absent 와 ecad_capture_failed 가 함께
+    서고 까닭이 경고에 남는다(§2.11.3 필수 호출 실패)."""
+    if case == "not_found":
         result, want = _ecad(_capture(hub, "0123456789abcdef")), "ecad_board_not_found"
         assert [n for n, _ in hub.calls] == ["find_job"] and "결과가 없습니다" in result["warnings"][0]["message"]
     else:
@@ -516,7 +540,8 @@ def test_a_board_that_could_not_be_read_is_a_failed_capture_not_an_empty_board(h
         result, want = _ecad(_capture(hub, JOB_STD)), "capture_call_failed"
     assert result["missing"] == {"ecad_absent": True, "ecad_capture_failed": True}
     assert result["nodes"] == [] and result["degraded"] == ["ecad_absent"]
-    assert result["warnings"][0]["code"] == want and result["source"]["adapter_version"] == "0.0-stub"
+    assert (result["warnings"][0]["code"], result["warnings"][0]["severity"]) == (want, "WARNING")
+    assert result["source"]["adapter_version"] == "0.0-stub"
     ir = _build({"results": [result]})
     assert ir["missing"]["ecad_absent"] is True and ir["missing"]["ecad_capture_failed"] is True and _errors(ir) == []
 
@@ -645,10 +670,12 @@ def test_capture_after_attaching_reads_the_board_into_the_snapshot(web_box, hub,
     assert json.loads(snap["missing_json"])["ecad_absent"] is False and snap["ir_version"] == "1.1"
     counts = {r["kind"]: r["n"] for r in risk_store.query(
         "SELECT kind, COUNT(*) AS n FROM rr_ir_nodes WHERE snapshot_id = ? GROUP BY kind", (out["snapshot_id"],))}
-    assert counts == {"component": 748, "layer": 23}
+    assert counts == {"board": 1, "component": 748, "layer": 23}
     assert len(hub.calls) - before == 13
     card = routes._project_sources(project_id)[0]
     assert card["probe"]["detail"].startswith("capture_ok calls=13") and card["probe"]["board"]["job_id"] == JOB_STD
+    # ECAD 는 MCP 로만 읽는다 — 카드의 capture_mode 도 그렇게 적는다(종전에는 rest_primary 로 박혀 있었다).
+    assert (card["status"], card["probe"]["capture_mode"]) == ("linked", "mcp")
 
 
 def test_the_routes_answer_over_http(client, web_box, hub):
@@ -694,3 +721,368 @@ def test_claude_finds_and_sets_the_board_through_the_same_routes(web_box, hub, r
     monkeypatch.setattr(srv, "_request", lambda: None)            # 신원 없는 호출(게이트웨이 위임 단언이 없다)
     assert _call("risk_find_ecad_boards", query="SM-X100")["error"] == "delegation_required"
     assert _call("risk_set_ecad_board", project_id=project_id, odb_job_id=JOB_STD)["error"] == "delegation_required"
+
+
+# ================================================================ 반대 검토(10-31) 뒤 고친 것
+def _ecad_ir(hub: FakeOdbHub, job_id: str) -> dict:
+    """보드 하나만 캡처한 IR(ECAD 결측 행 · 노드 · 세대의 원천)."""
+    return _build(_capture(hub, job_id))
+
+
+def _with_ecad(ir: dict, ecad_ir: dict) -> dict:
+    """mcad 쌍 픽스처(diff_pairs)에 ECAD 를 얹는다 — 소스 행 · 노드 · 결측 둘 · 어댑터 세대를 ECAD 만 캡처한 IR 에서 옮긴다."""
+    out = copy.deepcopy(ir)
+    out["nodes"] = [n for n in out["nodes"] if n["domain"] != "ecad"] + copy.deepcopy(ecad_ir["nodes"])
+    out["sources"] = [s for s in out["sources"] if s["kind"] != "ecad"] + copy.deepcopy(ecad_ir["sources"])
+    for key in ("ecad_absent", "ecad_capture_failed"):
+        out["missing"][key] = ecad_ir["missing"][key]
+    out["versions"]["adapter_versions"]["ecad"] = ecad_ir["versions"]["adapter_versions"]["ecad"]
+    return out
+
+
+def _events(d: dict) -> list[tuple]:
+    return [(e["code"], e["confidence"], e.get("caveat")) for e in d["semantic"]["events"]]
+
+
+def _clone_board(hub: FakeOdbHub, tag: str, revision: str) -> tuple[str, str]:
+    """JOB_STD 와 층 · 분류된 부품이 똑같고 정체(job_id · 원본 해시 · 판)만 다른 보드 — 배치 · 배선만 바꾼 판이다."""
+    sha = _sha(tag)
+    job_id = sha[:16]
+    board = copy.deepcopy(hub.boards[JOB_STD])
+    board["job"] = _job(job_id, revision, tag)
+    board["layers"]["job_id"] = job_id
+    board["download"] = {**board["download"], "job_id": job_id, "sha256": sha, "filename": tag}
+    hub.boards[job_id] = board
+    hub.jobs.append(board["job"])
+    return job_id, sha
+
+
+def test_the_board_is_one_board_node_with_the_contract_fields(hub):
+    """보드 1장 = 소스 1건 + board 노드 1건(요청서 ER-03 · 4절). 계약 odb_get_board 의 칸과 판정 · 적층 합 · 배치 수가 노드에
+    실린다 — 두께 · 적층 합은 rr_ir 길이 단위 mm 다. label 은 판이 바뀌어도 같고 local_key 는 job_id 다."""
+    ir = _ecad_ir(hub, JOB_STD)
+    boards = [n for n in ir["nodes"] if n["kind"] == "board"]
+    assert len(boards) == 1 and _errors(ir) == []
+    board = boards[0]
+    assert (board["canon_key"], board["label"], board["local_key"], board["domain"]) == ("ecad:board", "board", JOB_STD,
+                                                                                          "ecad")
+    assert board["attrs"] == {
+        "board_id": JOB_STD, "name": "PRJ-ALPHA / SM-X100 / Main / 0.7", "revision": "0.7", "units": "mm",
+        "outline_bbox": None, "outline": {"x_mm": 107.18, "y_mm": 72.9693, "area_mm2": 6065.3397}, "thickness": 0.59,
+        "stackup_verdict": "standard", "stackup_id": "SU47-0.59T-10L-001", "ecad_stackup_total": 0.59, "layer_count": 10,
+        "n_components": 748, "n_components_placed": 924, "n_nets": None, "odb_version": None, "source_hash": SHA_STD}
+    assert board["provenance"]["tool"] == "find_job" and board["geom_fp"] is None
+
+
+def test_swapping_in_a_revision_with_the_same_stage1_content_makes_a_new_snapshot(web_box, hub, risk_store):
+    """반대 검토 1(높음) — 배치 · 배선만 바꾼 판은 1단계 칸(층 · 분류된 부품)이 같다. 보드가 소스에만 있으면 ir_hash 가 같아 앞 판의
+    스냅샷이 옛 보드 이름 · 해시로 재사용됐다. 보드 노드가 ir_hash 에 들어 새 스냅샷이 서고, 같은 보드를 다시 캡처하면 재사용이다."""
+    project_id = web_box
+    twin, twin_sha = _clone_board(hub, "alpha_main_r09_layout_only.tgz", "0.9")
+    routes.put_ecad_board(project_id, routes.EcadBoardBody(odb_job_id=JOB_STD), ident=WEB)
+    first = routes.create_snapshot(project_id, routes.SnapshotBody(), ident=WEB)
+    again = routes.create_snapshot(project_id, routes.SnapshotBody(), ident=WEB)
+    assert (again["reused"], again["snapshot_id"]) == (True, first["snapshot_id"])
+    routes.put_ecad_board(project_id, routes.EcadBoardBody(odb_job_id=twin), ident=WEB)
+    second = routes.create_snapshot(project_id, routes.SnapshotBody(), ident=WEB)
+    assert second["reused"] is False and second["snapshot_id"] != first["snapshot_id"]
+    ir = ir_builder.load_ir(risk_store, second["snapshot_id"])
+    board = next(n for n in ir["nodes"] if n["kind"] == "board")
+    source = next(s for s in ir["sources"] if s["kind"] == "ecad")
+    assert (board["attrs"]["board_id"], board["attrs"]["revision"], board["attrs"]["source_hash"]) == (twin, "0.9", twin_sha)
+    assert (source["ref"]["board_id"], source["source_hash"]) == (twin, twin_sha)
+    # 두 판의 차이는 보드 노드 하나다 — 층 · 부품 노드는 그대로다.
+    def rest(snapshot_id: str) -> list:
+        return sorted((n["nid"], json.dumps(n["attrs"], sort_keys=True))
+                      for n in ir_builder.load_ir(risk_store, snapshot_id)["nodes"] if n["kind"] != "board")
+    assert rest(first["snapshot_id"]) == rest(second["snapshot_id"])
+
+
+@pytest.mark.parametrize("why", ["not_found", "partial"])
+def test_an_unread_board_leaves_the_mcad_meaning_of_a_pair_diff_alone(hub, why):
+    """반대 검토 2 — 보드를 못 읽었거나 부분이면 ECAD 항목에만 capture_partial 이 붙는다. mcad 의 의미 이벤트 · 수치는 보드가 없던
+    쌍과 같다(종전에는 ecad_capture_failed 하나가 쌍 전체의 의미층을 지웠고, ECAD 노드 771 개는 사유 없이 '삭제' 였다)."""
+    plain = diff_module.compute_diff(_pair("base"), _pair("pair_kind"))
+    loaded = _ecad_ir(hub, JOB_STD)
+    if why == "not_found":
+        broken = _ecad_ir(FakeOdbHub(), "0123456789abcdef")
+        assert broken["missing"]["ecad_capture_failed"] is True
+    else:
+        broken = copy.deepcopy(loaded)
+        source = next(s for s in broken["sources"] if s["kind"] == "ecad")
+        source["degraded"] = sorted({*source["degraded"], "capture_partial"})
+        broken["nodes"] = [n for n in broken["nodes"] if n["kind"] != "component" or n["local_key"] < "J"]
+    d = diff_module.compute_diff(_with_ecad(_pair("base"), loaded), _with_ecad(_pair("pair_kind"), broken))
+    comp = d["comparability"]
+    assert comp["capture_parity"] is True and comp["adapter_parity"] is True
+    assert comp["ecad"] == {"base": "present", "target": "failed", "excluded_reason": "capture_partial",
+                            "adapter_parity": True}
+    assert _events(d) == _events(plain) and _events(plain)
+    assert [p["excluded_reason"] for p in d["parametric"]["edge_params"]] == \
+        [p["excluded_reason"] for p in plain["parametric"]["edge_params"]]
+    ecad = [c for c in d["structural"]["node_changes"] if c["domain"] == "ecad"]
+    assert ecad and {c["op"] for c in ecad} == {"removed"} and {c["excluded_reason"] for c in ecad} == {"capture_partial"}
+    assert diff_module.changed_ckeys(d) == diff_module.changed_ckeys(plain)
+
+
+def test_a_board_on_one_side_only_neither_downgrades_mcad_nor_floods_part_added(hub):
+    """반대 검토 3 — 앞 스냅샷에 보드가 없고(결측 행 0.0-stub) 뒤에만 실렸다(1.0). mcad 항목 · 이벤트에 parser_differs 가 붙지
+    않고, ECAD 노드 772 개는 partial_scope 로 남되 part.added 를 만들지 않는다(웹 기본 kinds 캡처와 MCP 캡처를 견줄 때 흔하다)."""
+    plain = diff_module.compute_diff(_pair("base"), _pair("pair_kind"))
+    d = diff_module.compute_diff(_pair("base"), _with_ecad(_pair("pair_kind"), _ecad_ir(hub, JOB_STD)))
+    assert d["comparability"]["adapter_parity"] is True
+    assert d["comparability"]["ecad"] == {"base": "absent", "target": "present", "excluded_reason": "partial_scope",
+                                          "adapter_parity": True}
+    assert _events(d) == _events(plain)
+    ecad = [c for c in d["structural"]["node_changes"] if c["domain"] == "ecad"]
+    assert len(ecad) == 1 + 23 + 748 and {(c["op"], c["excluded_reason"]) for c in ecad} == {("added", "partial_scope")}
+    assert not [e for e in d["semantic"]["events"] if e["code"] == "part.added"]
+
+
+def test_an_ecad_generation_change_marks_only_ecad_items(hub):
+    """두 쪽 다 보드를 실었는데 ECAD 어댑터 세대가 다르면 ECAD 이벤트에만 parser_differs 와 등급 한 단계 낮춤이다 — mcad 는 그대로."""
+    plain = diff_module.compute_diff(_pair("base"), _pair("pair_kind"))
+    loaded = _ecad_ir(hub, JOB_STD)
+    newer = copy.deepcopy(loaded)
+    newer["versions"]["adapter_versions"]["ecad"] = "1.1"
+    gone = next(n for n in newer["nodes"] if n["kind"] == "component")
+    newer["nodes"].remove(gone)
+    d = diff_module.compute_diff(_with_ecad(_pair("base"), loaded), _with_ecad(_pair("pair_kind"), newer))
+    assert d["comparability"]["adapter_parity"] is True and d["comparability"]["ecad"]["adapter_parity"] is False
+    assert d["comparability"]["ecad"]["excluded_reason"] is None
+    removed = [e for e in d["semantic"]["events"] if e["code"] == "part.removed"]
+    assert [e["subject"]["dns"] for e in removed] == [[gone["dn"]]]
+    assert (removed[0]["caveat"], removed[0]["confidence"]) == ("parser_differs", "low")
+    assert [x for x in _events(d) if x[0] != "part.removed"] == _events(plain)
+
+
+def test_ecad_domains_wait_on_a_diff_target_and_are_told_why(hub, risk_store):
+    """반대 검토 4 — 1단계 쌍 비교는 ECAD 칸 변화를 싣지 않는다. diff 대상의 ECAD 의존 영역은 deferred · 입력 결손이고 결측
+    블록이 까닭을 말한다. 스냅샷 대상은 보드가 실렸으면 그대로 풀린다(ER-05)."""
+    project_id = factories.make_project(risk_store)
+    a = factories.make_snapshot(risk_store, project_id, _capture(hub, JOB_STD)["results"], label="A")
+    b = factories.make_snapshot(risk_store, project_id, _capture(hub, JOB_NON)["results"], label="B")
+    made = factories.make_diff(risk_store, a["snapshot_id"], b["snapshot_id"])
+    seats = factories.agents(("mech", "pcb"), 2)
+    diff_key = factories.make_target(risk_store, "diff", made["diff_id"], agents=seats)
+    order = {r["agent_key"]: r for r in planner.review_order(risk_store, diff_key)}
+    assert {k: r["input_gaps"] for k, r in order.items()} == {
+        "mech-syn-0": [], "mech-syn-1": [], "pcb-syn-0": ["ecad_absent"], "pcb-syn-1": ["ecad_absent"]}
+    assert {k for k, r in order.items() if r["deferred"]} == {"pcb-syn-1"}
+    missing = units_module._target_missing(risk_store, diff_key, None)
+    assert missing[0] == {"kind": "ecad", "note": units_module._ECAD_DIFF_NOTE}
+    assert units_module.gap_missing(missing, ["ecad_absent"], "pcb")[0]["note"].endswith(
+        f"이 영역이 볼 것 — {units_module.input_gap_hint('pcb')}.")
+
+    snap_key = factories.make_target(risk_store, "snap", b["snapshot_id"], agents=seats)
+    order = planner.review_order(risk_store, snap_key)
+    assert all(r["input_gaps"] == [] and not r["deferred"] for r in order)
+    assert [m for m in units_module._target_missing(risk_store, snap_key, None) if m["kind"] == "ecad"] == []
+
+
+@pytest.mark.parametrize("tool", ["list_parts", "get_board_layers"])
+def test_a_node_family_the_hub_did_not_give_is_marked_unavailable(hub, tool):
+    """반대 검토 5 — 허브가 부품 목록 · 층을 200 + error 로 답하면(분석을 돌리지 않은 보드) 그 노드 가족이 통째로 빠진다. 경고만
+    남기면 '보드에 없다' 로 읽히므로 components_unavailable · layers_unavailable 를 세우고 그 수는 미측정(null)이다."""
+    hub.fail[tool] = "envelope"
+    result = _ecad(_capture(hub, JOB_STD))
+    kinds = collections.Counter(n["kind"] for n in result["nodes"])
+    stats = result["source"]["stats"]
+    degraded = set(result["degraded"])
+    if tool == "list_parts":
+        assert "components_unavailable" in degraded and kinds["component"] == 0 and stats["n_components"] is None
+        assert not degraded & {"components_unclassified_omitted", "component_xy_deferred", "component_value_absent"}
+        assert len(hub.called("list_parts")) == 1
+    else:
+        assert "layers_unavailable" in degraded and kinds["layer"] == 0
+        assert (stats["layer_rows"], stats["layer_rows_all"]) == (None, None)
+        assert not degraded & {"copper_weight_absent", "plane_type_unknown", "stackup_material_unmatched"}
+    assert kinds["board"] == 1 and "capture_partial" not in degraded
+    assert [w["code"] for w in result["warnings"]] == ["odb_error_body"]
+    assert _errors(_build({"results": [result]})) == []
+
+
+def test_unstable_paging_that_drops_rows_is_a_partial_capture(hub, monkeypatch):
+    """반대 검토 6 — 쪽 순서가 쪽마다 다른 허브는 어떤 행을 두 번 주고 어떤 행은 주지 않는다. 받은 행 수가 total 과 같아도 서로
+    다른 행이 모자라면 부분 캡처다(종전에는 겹친 행을 '자료 탓' 경고로만 남기고 빠진 부품을 말하지 않았다)."""
+    def unstable(board: dict, args: dict) -> dict:
+        page = max(1, int(args.get("page") or 1))
+        ordered = sorted(board["parts"], key=lambda p: p["refdes"], reverse=page % 2 == 0)
+        rows = ordered[(page - 1) * 100: page * 100]
+        return {"job_id": board["job"]["job_id"], "rows": copy.deepcopy(rows), "total": len(board["parts"]), "page": page,
+                "page_size": 100, "returned": len(rows), "has_more": page * 100 < len(board["parts"])}
+
+    monkeypatch.setattr(hub, "_list_parts", unstable)
+    result = _ecad(_capture(hub, JOB_STD))
+    components = [n for n in result["nodes"] if n["kind"] == "component"]
+    assert len(components) < 748 and "capture_partial" in result["degraded"]
+    incomplete = next(w for w in result["warnings"] if w["code"] == "components_incomplete")
+    assert f"서로 다른 행 {len(components)}개" in incomplete["message"] and "받은 행 748" in incomplete["message"]
+    assert "duplicate_refdes" in [w["code"] for w in result["warnings"]]
+
+
+def test_a_hub_that_pages_forever_is_cut_at_the_page_cap(hub, monkeypatch):
+    """반대 검토 12 — has_more 를 늘 참으로 주고 쪽마다 새 행 하나만 주는 허브는 종전에 2,000 번 가까이 불렸다. 실을 수 있는
+    만큼(total · 상한 2000)의 쪽 수 + 1 에서 멈추고 부분 캡처라고 적는다."""
+    def endless(board: dict, args: dict) -> dict:
+        page = max(1, int(args.get("page") or 1))
+        rows = [dict(board["parts"][0])] * 99 + [{**board["parts"][0], "refdes": f"X{page:05d}"}]
+        return {"job_id": board["job"]["job_id"], "rows": rows, "total": 100000, "page": page, "page_size": 100,
+                "returned": 100, "has_more": True}
+
+    monkeypatch.setattr(hub, "_list_parts", endless)
+    result = _ecad(_capture(hub, JOB_STD))
+    assert len(hub.called("list_parts")) == ecad_adapter._page_cap(100000) == 21
+    assert "capture_partial" in result["degraded"] and "odb_paging_capped" in [w["code"] for w in result["warnings"]]
+
+
+def test_a_placed_count_below_the_classified_count_warns_and_keeps_the_marker(hub):
+    """반대 검토 11 — 면별 count 가 배치 수가 아니면(큰 부품 10개 수 따위) 배치 수가 분류된 부품 수보다 작다. 그럴 수 없으므로
+    경고하고, 분류 안 된 부품이 빠졌다는 표지는 그대로 둔다."""
+    volume = hub.boards[JOB_STD]["volume"]
+    for side in ("top", "bottom"):
+        volume[side]["count"] = len(volume[side]["largest_items"])
+    result = _ecad(_capture(hub, JOB_STD))
+    assert result["source"]["stats"]["n_components_placed"] == 20
+    assert "components_unclassified_omitted" in result["degraded"]
+    assert [w["code"] for w in result["warnings"]] == ["placed_below_classified"]
+
+
+def test_the_placed_count_falls_back_to_counted(hub):
+    """요청서 OH-02 는 배치 수를 counted 라 적었다 — count 가 없을 때만 그것을 읽는다(부록 A 는 count)."""
+    for side in ("top", "bottom"):
+        block = hub.boards[JOB_STD]["volume"][side]
+        block["counted"] = block.pop("count")
+    assert _ecad(_capture(hub, JOB_STD))["source"]["stats"]["n_components_placed"] == 924
+
+
+def test_a_tools_map_the_gateway_failed_to_give_is_not_cached():
+    """반대 검토 8 — 한 번 못 읽은 지도(503)를 60 초 캐시하면 그동안 모든 ECAD 캡처 · 찾기가 '도구 없음' 이다. 못 읽은 지도는
+    캐시하지 않고, 읽은 지도는 캐시한다(세 번째 부름은 게이트웨이에 가지 않는다 — 가면 응답이 바닥나 StopIteration)."""
+    answers = iter([httpx.Response(503, json={"detail": "busy"}), httpx.Response(200, json={"map": tool_map()})])
+    client = httpx.Client(transport=httpx.MockTransport(lambda request: next(answers)))
+    assert adapters_registry.gateway_tool_map(client=client) == {}
+    assert adapters_registry.gateway_tool_map(client=client) == tool_map()
+    assert adapters_registry.gateway_tool_map(client=client) == tool_map()
+
+
+def test_the_search_says_when_the_gateway_map_could_not_be_read(web_box, hub, monkeypatch):
+    """지도를 못 읽은 것은 'odb-hub 의 find_job 이 없다' 가 아니다 — 고칠 곳이 게이트웨이라 따로 말한다."""
+    monkeypatch.setattr(adapters_registry, "clients_from_settings", lambda *a, **k: {**hub.channels(), "tool_map": {}})
+    with pytest.raises(AppError) as err:
+        routes.get_ecad_boards(q="SM-X100", ident=WEB)
+    assert (err.value.code, err.value.http_status) == ("ecad_gateway_unreadable", 409) and hub.calls == []
+
+
+def test_a_board_only_project_whose_board_cannot_be_read_freezes_nothing(web_box, hub, risk_store):
+    """반대 검토 9 · 10 — 읽은 카드가 ECAD 하나뿐인데 보드를 못 읽었으면 노드 0 개짜리 스냅샷을 동결하지 않고 잡을 failed ·
+    409 source_unreachable 로 닫는다(§2.11.3). 호출 원문은 스냅샷 없이 남고 카드는 '연결됨' 이 아니라 그 까닭이다. 붙은 보드만
+    있는데 kinds 가 ecad 를 뺐으면 '연결하라' 가 아니라 kinds 를 고칠 일이라고 말한다."""
+    project_id = web_box
+    routes.put_ecad_board(project_id, routes.EcadBoardBody(odb_job_id=JOB_STD), ident=WEB)
+    ok = routes.create_snapshot(project_id, routes.SnapshotBody(), ident=WEB)
+    card = routes._project_sources(project_id)[0]
+    assert (card["status"], card["probe"]["capture_mode"]) == ("linked", "mcp")
+
+    hub.jobs = [j for j in hub.jobs if j["job_id"] != JOB_STD]             # 허브에서 보드가 지워졌다
+    with pytest.raises(AppError) as err:
+        routes.create_snapshot(project_id, routes.SnapshotBody(), ident=WEB)
+    assert (err.value.code, err.value.http_status) == ("source_unreachable", 409)
+    assert err.value.detail == {"kind": "ecad", "reason": "ecad_board_not_found"}
+    assert [r["id"] for r in risk_store.query("SELECT id FROM rr_snapshots WHERE project_id = ?", (project_id,))] == \
+        [ok["snapshot_id"]]
+    job = risk_store.query_one("SELECT state, error_json FROM rr_snapshot_jobs WHERE project_id = ? ORDER BY rowid DESC"
+                               " LIMIT 1", (project_id,))
+    assert job["state"] == "failed" and json.loads(job["error_json"])["reason"] == "ecad_board_not_found"
+    orphan = risk_store.query("SELECT tool FROM rr_snapshot_calls WHERE snapshot_id IS NULL", ())
+    assert [r["tool"] for r in orphan] == ["find_job"]
+    card = routes._project_sources(project_id)[0]
+    assert card["status"] == "unreachable" and card["probe"]["capture_mode"] is None
+    assert card["probe"]["detail"].startswith("capture_failed ecad_board_not_found")
+
+    with pytest.raises(AppError) as kinds:
+        routes.create_snapshot(project_id, routes.SnapshotBody(kinds=["mcad"]), ident=WEB)
+    assert kinds.value.code == "source_unreachable" and kinds.value.detail == {"kinds": ["mcad"], "attached": ["ecad"]}
+    assert "연결된 소스는 ecad" in kinds.value.message
+
+
+@pytest.mark.parametrize("reply", ["others_first", "only_others"])
+def test_the_board_is_the_exact_job_id_never_a_first_or_same_model_candidate(web_box, hub, reply):
+    """반대 검토 13 — find_job 이 다른 판을 앞에 내도 붙이기 · 캡처는 그 job_id 와 같은 행만 쓴다. 같은 행이 없으면 붙이지 않고
+    (ecad_board_not_found) 캡처도 보드를 읽지 않는다 — 첫 후보로 대신하면 모델 이름으로 고르는 것과 같다(ER-01)."""
+    rows = [hub.boards[JOB_NON]["job"]] + ([hub.boards[JOB_STD]["job"]] if reply == "others_first" else [])
+    hub._find_job = lambda args: {"query": args.get("query"), "jobs": copy.deepcopy(rows), "count": len(rows),
+                                  "truncated": False}
+    if reply == "others_first":
+        out = routes.put_ecad_board(web_box, routes.EcadBoardBody(odb_job_id=JOB_STD), ident=WEB)
+        assert out["source"]["ref"] == {"odb_job_id": JOB_STD} and out["ecad_board"]["job_id"] == JOB_STD
+    else:
+        with pytest.raises(AppError) as err:
+            routes.put_ecad_board(web_box, routes.EcadBoardBody(odb_job_id=JOB_STD), ident=WEB)
+        assert err.value.code == "ecad_board_not_found" and routes._project_sources(web_box) == []
+    mark = len(hub.calls)
+    result = _ecad(_capture(hub, JOB_STD))
+    after = hub.calls[mark:]
+    if reply == "others_first":
+        assert result["source"]["ref"]["board_id"] == JOB_STD
+        assert sum(1 for n in result["nodes"] if n["kind"] == "component") == 748
+        assert {a.get("job_id") for n, a in after if n != "find_job"} == {JOB_STD}
+    else:
+        assert result["missing"] == {"ecad_absent": True, "ecad_capture_failed": True}
+        assert result["warnings"][0]["code"] == "ecad_board_not_found" and [n for n, _ in after] == ["find_job"]
+
+
+def test_an_empty_job_id_does_not_detach_the_board(web_box, hub, monkeypatch):
+    """odb_job_id 가 null 일 때만 뗀다 — 빈 글자는 422 이고 붙은 보드는 그대로다."""
+    factories.act_as_delegate(monkeypatch, OWNER)
+    assert _call("risk_set_ecad_board", project_id=web_box, odb_job_id=JOB_STD)["ok"] is True
+    refused = _call("risk_set_ecad_board", project_id=web_box, odb_job_id="")
+    assert refused["error"] == "E100"
+    assert routes._project_sources(web_box)[0]["ref"] == {"odb_job_id": JOB_STD}
+
+
+def test_a_pair_diff_of_two_large_boards_does_not_build_the_full_name_product(hub):
+    """반대 검토 15 — same-as 5단계가 모든 쌍을 펼치면 부품 2,000 개 보드 두 판의 쌍 비교가 5 초 · 330 MB 였다. 이름으로 나눠
+    짝을 찾아도 대응은 같다(2,023 쌍 전부 name_norm)."""
+    def big(tag: str) -> dict:
+        board = copy.deepcopy(hub.boards[JOB_STD])
+        board["parts"] = _parts(2000, tag)
+        return board
+
+    hub.boards[JOB_STD] = big("PN")
+    base = _ecad_ir(hub, JOB_STD)
+    hub.boards[JOB_STD] = big("QN")
+    target = _ecad_ir(hub, JOB_STD)
+    tracemalloc.start()
+    try:
+        d = diff_module.compute_diff(base, target)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert len(d["correspondence"]["matched"]) == 1 + 23 + 2000
+    assert d["correspondence"]["method_counts"]["name_norm"] == 1 + 23 + 2000
+    assert peak < 50_000_000, f"쌍 비교 최고 메모리 {peak / 1e6:.0f} MB"
+
+
+def test_a_refdes_that_would_collide_with_a_node_key_is_not_loaded(hub):
+    """refdes 가 board · layer: · net: 꼴이면 보드 · 층 · 넷 노드의 canon_key(`ecad:board` · `ecad:layer:<idx>` · `ecad:net:…`)와 겹쳐
+    IR 이 서지 않는다(canon_key 중복은 E100) — 그 행만 싣지 않고 경고한다."""
+    parts = hub.boards[JOB_STD]["parts"]
+    parts[0]["refdes"], parts[1]["refdes"] = "board", "layer:1"
+    result = _ecad(_capture(hub, JOB_STD))
+    assert sum(1 for n in result["nodes"] if n["kind"] == "component") == 746
+    assert [w["code"] for w in result["warnings"]] == ["refdes_reserved"]
+    assert "capture_partial" not in result["degraded"]
+    ir = _build({"results": [result]})
+    assert sum(1 for n in ir["nodes"] if n["kind"] == "board") == 1 and _errors(ir) == []
+
+
+def test_a_partly_read_board_leaves_the_card_linked_but_says_partial(web_box, hub):
+    """보드를 실었지만 선택 호출이 실패했으면 카드는 연결됨이되 capture_partial 과 실패한 호출을 적는다(capture_ok 가 아니다)."""
+    routes.put_ecad_board(web_box, routes.EcadBoardBody(odb_job_id=JOB_STD), ident=WEB)
+    hub.fail["get_volume_result"] = "tool_error"
+    out = routes.create_snapshot(web_box, routes.SnapshotBody(), ident=WEB)
+    assert out["job_state"] == "partial"
+    card = routes._project_sources(web_box)[0]
+    assert (card["status"], card["probe"]["capture_mode"]) == ("linked", "mcp")
+    assert card["probe"]["detail"].startswith("capture_partial calls=12 app_key=odb-hub get_volume_result=")

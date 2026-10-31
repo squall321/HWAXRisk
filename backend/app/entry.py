@@ -218,7 +218,9 @@ def add_source(ident: identity.Identity, *, project_id: str, kind: str, ref: dic
 def find_ecad_boards(ident: identity.Identity, *, query: str) -> dict:
     """`GET /api/ecad/boards` — ODB 허브 find_job 후보(최대 10, truncated). 고르는 것은 사람이다.
 
-    읽기지만 쓰기와 같은 문을 지난다 — 찾기는 그 사람의 등록된 PAT 로 게이트웨이를 부르고, 찾는 까닭이 붙이기(쓰기)다.
+    읽기지만 쓰기와 같은 문을 지난다 — 찾는 까닭이 붙이기(쓰기)다. 게이트웨이 자격은 캡처와 같다 — 그 사람의 등록된 포털 PAT,
+    없거나 곧 끝나면 박스의 읽기 PAT(HWAXRISK_PORTAL_PAT)다. 박스 PAT 로 내려가면 게이트웨이의 plat:odbhub 문을 그 사람이 아니라
+    서비스 계정으로 지난다 — 그 사람의 PAT 만 쓸지는 사용자 결정으로 남겼다(context-notes EC-15).
     """
     owner = require_delegate(ident)
     out = routes.ecad_board_candidates(query, owner_sub=owner)
@@ -575,7 +577,9 @@ def _snapshot_jobs(store: Any, project_id: str) -> list[dict]:
 _CAPTURE_FIX = {
     "model_too_large": "모델이 상한을 넘는다 — 그래도 동결하려면 사용자 확인 뒤 risk_capture_snapshot(allow_large=true).",
     "detect_not_done": "StepForge 의 계면 검출 잡이 끝나지 않았다 — 소스 앱에서 검출을 마친 뒤 다시 캡처한다.",
-    "source_unreachable": "연결된 소스가 없다 — risk_add_source 로 먼저 붙인다.",
+    "source_unreachable": ("읽을 소스가 없다 — 소스가 없으면 risk_add_source(ECAD 보드는 risk_set_ecad_board)로 붙이고, 붙은 ECAD"
+                           " 보드를 못 읽었으면 잡 오류의 reason(ecad_board_not_found · ecad_tools_missing 등)을 고친 뒤 다시"
+                           " 캡처한다. 요청 kinds 가 붙은 소스를 뺐으면 kinds 를 비운다."),
 }
 
 

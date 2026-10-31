@@ -12,7 +12,7 @@ import re
 import secrets
 import sqlite3
 import time
-from typing import Any, Literal
+from typing import Any, Literal, Mapping, Sequence
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
@@ -1805,6 +1805,17 @@ class SnapshotBody(BaseModel):
 LARGE_BUDGET_S = 600
 
 
+def _ecad_only_unread(captured: Mapping[str, Any]) -> dict | None:
+    """이번 캡처가 읽은 카드가 ECAD 하나뿐이고 그 보드를 못 읽었으면 `{code, message}`(어댑터 경고), 아니면 None."""
+    if list(captured.get("read_kinds") or ()) != ["ecad"]:
+        return None
+    result = next((r for r in captured.get("results") or () if (r.get("source") or {}).get("kind") == "ecad"), None)
+    if result is None or not (result.get("missing") or {}).get("ecad_absent"):
+        return None
+    warning = next(iter(result.get("warnings") or ()), None) or {}
+    return {"code": warning.get("code"), "message": warning.get("message")}
+
+
 def _check_model_size(captured: dict, allow_large: bool) -> None:
     """리프·계면 수가 `risk_max_leaf`·`risk_max_interfaces` 를 넘으면 409 `model_too_large`(plan §2.11.3)."""
     leaves = 0
@@ -1889,7 +1900,8 @@ def reuse_prior_calls(store: Any, project_id: str, calls: list[dict]) -> int:
     return reused
 
 
-def refresh_source_probes(store: Any, project_id: str, calls: list[dict]) -> int:
+def refresh_source_probes(store: Any, project_id: str, calls: list[dict],
+                          results: Sequence[Mapping[str, Any]] = ()) -> int:
     """캡처가 실제로 본 것으로 소스 카드의 probe 를 갱신한다 — 측정값에 **나이**가 생기지 않게.
 
     probe 는 `POST /projects/{id}/sources` 가 연결하는 순간 한 번만 적혔다. 그래서 그때 게이트웨이를
@@ -1898,35 +1910,65 @@ def refresh_source_probes(store: Any, project_id: str, calls: list[dict]) -> int
     고쳤고, 이것은 시간이 지나면 되살아나던 쪽이다. 캡처 성공은 그 자체로 도달 측정이므로 되쓴다.
 
     `system_status`(선택 호출)와 전사 집계(`CONTEXT_CALL_KIND`)는 세지 않는다 — 캡처의 `failed_calls`
-    판정과 같은 제외다. 호출이 하나도 없던 kind 는 건드리지 않는다(미측정은 실패가 아니다).
+    판정과 같은 제외다. 호출이 하나도 없던 kind 는 건드리지 않는다(미측정은 실패가 아니다). capture_mode 는 그 kind 가 REST 로
+    읽었으면 rest_primary, 아니면 mcp 다.
+
+    ECAD 카드는 호출의 전송이 아니라 어댑터 결과(`results` 의 ecad)로 잰다 — find_job 이 200 으로 답해도 그 job_id 가 없으면 못
+    읽은 것이고, 호출 없이 끝난 실패(자격 · 도구 지도 · 도구 없음)도 카드에 남아야 '연결됨' 으로 남지 않는다.
     """
     seen: dict[str, dict] = {}
     for call in calls:
         kind = str(call.get("source_kind") or "")
         if not kind or kind == CONTEXT_CALL_KIND or str(call.get("tool") or "").endswith("system_status"):
             continue
-        slot = seen.setdefault(kind, {"ok": 0, "failed": [], "app_key": call.get("app_key")})
+        slot = seen.setdefault(kind, {"ok": 0, "failed": [], "app_key": call.get("app_key"), "rest": False})
         if call.get("ok", True):
             slot["ok"] += 1
+            slot["rest"] = slot["rest"] or call.get("channel") == "rest"
         else:
             slot["failed"].append(f"{call.get('tool')}={call.get('error') or 'error'}")
+    ecad_result = next((r for r in results if (r.get("source") or {}).get("kind") == "ecad"), None)
     updated = 0
     now = now_epoch()
     for row in store.query(
             "SELECT id, kind, probe_json FROM rr_sources WHERE project_id = ?", (project_id,)):
-        slot = seen.get(str(row["kind"]))
-        if slot is None:
-            continue
-        reachable = not slot["failed"]
-        detail = (f"capture_ok calls={slot['ok']} app_key={slot['app_key']}" if reachable
-                  else "capture_failed " + " ".join(slot["failed"][:3]))
-        probe = {**_loads(row["probe_json"], {}), "reachable": reachable, "detail": detail,
-                 "capture_mode": "rest_primary" if reachable else None,
-                 "status": "linked" if reachable else "unreachable"}
+        previous = _loads(row["probe_json"], {})
+        if row["kind"] == "ecad" and ecad_result is not None:
+            probe = _ecad_card_probe(previous, ecad_result, seen.get("ecad"))
+            if probe is None:
+                continue
+        else:
+            slot = seen.get(str(row["kind"]))
+            if slot is None:
+                continue
+            reachable = not slot["failed"]
+            detail = (f"capture_ok calls={slot['ok']} app_key={slot['app_key']}" if reachable
+                      else "capture_failed " + " ".join(slot["failed"][:3]))
+            probe = {**previous, "reachable": reachable, "detail": detail,
+                     "capture_mode": ("rest_primary" if slot["rest"] else "mcp") if reachable else None,
+                     "status": "linked" if reachable else "unreachable"}
         store.execute("UPDATE rr_sources SET probe_json = ?, probe_at = ? WHERE id = ?",
                       (canonical_json(probe), now, row["id"]))
         updated += 1
     return updated
+
+
+def _ecad_card_probe(previous: Mapping[str, Any], result: Mapping[str, Any], slot: Mapping[str, Any] | None) -> dict | None:
+    """ECAD 카드의 probe — 보드를 실었으면 linked(선택 호출이 실패했으면 capture_partial 과 실패 호출), 못 읽었으면 unreachable 과
+    그 까닭(어댑터 경고의 code · 글)이다. 보드를 읽지 않은 캡처(kinds 에 ecad 가 없다)는 측정이 아니라 None 이다."""
+    warning = next(iter(result.get("warnings") or ()), None) or {}
+    if (result.get("missing") or {}).get("ecad_absent"):
+        if warning.get("code") in (None, "ecad_absent"):
+            return None
+        return {**previous, "reachable": False, "detail": f"capture_failed {warning.get('code')} — {warning.get('message')}",
+                "capture_mode": None, "status": "unreachable"}
+    calls_ok = int((slot or {}).get("ok") or 0)
+    failed = list((slot or {}).get("failed") or ())
+    app_key = (slot or {}).get("app_key") or (result.get("source") or {}).get("app_key")
+    partial = bool(failed) or "capture_partial" in (result.get("degraded") or ())
+    detail = (f"capture_ok calls={calls_ok} app_key={app_key}" if not partial
+              else " ".join([f"capture_partial calls={calls_ok} app_key={app_key}", *failed[:3]]))
+    return {**previous, "reachable": True, "detail": detail, "capture_mode": "mcp", "status": "linked"}
 
 
 @router.post("/projects/{project_id}/snapshots")
@@ -1990,6 +2032,18 @@ def create_snapshot(project_id: str, body: SnapshotBody,
     failed_calls = [c for c in calls
                     if not c.get("ok", True) and not str(c.get("tool") or "").endswith("system_status")
                     and str(c.get("source_kind") or "") != CONTEXT_CALL_KIND]
+    unread = _ecad_only_unread(captured)
+    if unread is not None:
+        # 읽은 카드가 ECAD 하나뿐인데 보드를 못 읽었다 — 남은 kind 가 없으니 노드 0 개짜리 스냅샷을 동결하지 않는다(§2.11.3 표
+        # '필수 호출 실패 · 남은 kind 없음 → failed'). 호출 원문은 스냅샷 없이 남겨 까닭(find_job 의 답)을 볼 수 있게 한다.
+        message = f"붙은 ECAD 보드를 읽지 못해 스냅샷을 만들지 않았습니다 — {unread['message']}"
+        refresh_source_probes(store, project_id, calls, captured["results"])
+        ir_builder.record_calls(store, None, owner_sub, calls, job_id=job_id, start_seq=1)
+        _snapshot_job_finish(store, job_id, state="failed", started=started, calls=len(calls),
+                             calls_failed=len(failed_calls),
+                             error={"stage": "capture", "kind": "ecad", "code": "source_unreachable",
+                                    "reason": unread["code"], "message": message})
+        raise AppError("source_unreachable", message, 409, detail={"kind": "ecad", "reason": unread["code"]})
     try:
         _check_model_size(captured, body.allow_large)
     except AppError as exc:
@@ -2001,7 +2055,7 @@ def create_snapshot(project_id: str, body: SnapshotBody,
         raise
     reused = reuse_prior_calls(store, project_id, calls)
     # 카드가 '연결 안 됨' 이라 적힌 채 캡처는 돌고 있는 상태를 없앤다 — 측정은 방금 한 이 캡처다.
-    refresh_source_probes(store, project_id, calls)
+    refresh_source_probes(store, project_id, calls, captured["results"])
     prior = store.query_one(
         "SELECT id FROM rr_snapshots WHERE project_id = ? ORDER BY created_at DESC, id LIMIT 1", (project_id,))
     out = ir_builder.freeze_snapshot(
@@ -2606,14 +2660,17 @@ def _ecad_absent(snapshot: dict) -> bool:
 
 
 def _ecad_absent_for_target(store: Any, target: dict) -> bool:
-    """타깃이 가리키는 스냅샷(diff 면 target_snapshot)의 missing.ecad_absent. 못 찾으면 부재로 본다."""
-    snapshot_id = target["ref_id"]
+    """ECAD 의존 영역(HWAXRISK_ECAD_DOMAINS)을 deferred · 입력 결손으로 둘 타깃인가 — 스냅샷 타깃은 그 스냅샷의
+    missing.ecad_absent(못 찾으면 부재)다.
+
+    diff 타깃은 ECAD 1단계 동안 늘 참이다(포털 docs/design-risk-review/ecad-1031 ER-05). 1단계 쌍 비교는 ECAD 노드를 refdes · 층
+    이름으로 맞춰 추가 · 삭제만 보고 칸 변화(층 두께 · 재료 · 품번 · 패키지 · 핀 수 · 높이)를 싣지 않는다 — 그 비교를 받은 ECAD
+    좌석이 '회로 변경 없음' 으로 읽지 않게 한다. 대상의 결측 블록이 까닭을 싣는다(units._target_missing). 비교가 ECAD 칸을 보게
+    되면 이 분기를 걷는다.
+    """
     if target["kind"] == "diff":
-        row = store.query_one("SELECT target_snapshot_id FROM rr_diffs WHERE id = ?", (target["ref_id"],))
-        if row is None:
-            return True
-        snapshot_id = row["target_snapshot_id"]
-    row = store.query_one("SELECT missing_json FROM rr_snapshots WHERE id = ?", (snapshot_id,))
+        return True
+    row = store.query_one("SELECT missing_json FROM rr_snapshots WHERE id = ?", (target["ref_id"],))
     return True if row is None else _ecad_absent(dict(row))
 
 
@@ -2732,7 +2789,8 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
             raise AppError("E404", f"diff 를 찾을 수 없습니다 — {body.ref_id}.", 404)
         snapshot = _snapshot_row(row["target_snapshot_id"], owner_sub)
         project_id, base_project_id, ir_hash = row["target_project_id"], row["base_project_id"], snapshot["ir_hash"]
-        ecad_absent = _ecad_absent(snapshot)
+        # 1단계 쌍 비교는 ECAD 칸을 견주지 않는다 — ECAD 의존 영역은 deferred 다(_ecad_absent_for_target).
+        ecad_absent = True
         blocked_snapshots = [row["base_snapshot_id"], row["target_snapshot_id"]]
 
     # G6(unit_scale) 차단 스냅샷 위에는 타깃을 열지 않는다(plan §3.2.2 G6 effect — diff 409 와 같은 형식).

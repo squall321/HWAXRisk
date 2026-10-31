@@ -10,6 +10,9 @@
 - `get_odb_download` 1 — 원본 sha256(source_hash).
 - `list_parts` 100행씩 — 분류된 부품(component 노드, 좌표 · 넷 없이).
 
+보드 1장은 소스 1건이면서 board 노드 1건이다(요청서 ER-03 · 4절) — ir_hash 는 노드 · 엣지만 보므로 보드의 정체(job_id ·
+판 · 원본 해시)가 노드에 없으면 배치 · 배선만 바꾼 판으로 바꿔 붙였을 때 앞 판의 스냅샷이 재사용으로 돌아온다.
+
 못 채우는 칸은 지어내지 않고 `degraded` 표지로 남긴다(ER-04). 단위는 허브가 mm 로 맞춰 준다(층 두께만 µm 로 오고 여기서 mm 로
 바꾼다 — rr_ir 의 길이 단위는 mm 다).
 """
@@ -40,6 +43,11 @@ JOB_ID_RE = re.compile(r"^[0-9a-fA-F]{16}$")
 PARTS_PAGE_SIZE = 100
 # 컴포넌트 총 상한(계약 §2.5.3) — 넘으면 앞의 것만 싣고 components_truncated 다.
 MAX_COMPONENTS = 2000
+# board 노드 — 보드 1장에 1건이다. label 은 판이 바뀌어도 같은 값이라 쌍 비교가 두 판의 보드를 이름으로 맞춘다(same-as 5단계).
+# local_key 는 job_id 다 — ecad↔mcad 이름 대응은 refdes · local_key 토큰이 상대 이름과 겹쳐야 하므로 'PCB' 라는 mcad 부품과
+# 저절로 묶이지 않는다.
+BOARD_CANON_KEY = "ecad:board"
+BOARD_LABEL = "board"
 # find_job 은 10개까지 준다(부록 A) — 찾기 답도 이 수를 넘기지 않는다.
 SEARCH_MAX = 10
 # get_board_layers.layers[].type → layer 노드 type(§2.3 의 5종). 나머지(부품 · 페이스트 · 드릴 · 문서 층)는 뺀다.
@@ -150,6 +158,11 @@ def search_boards(channel: Any, tool_map: Mapping[str, str], query: str, *,
         raise AppError("ecad_credential_absent",
                        "게이트웨이 MCP 자격(그 사람의 포털 PAT 또는 박스의 읽기 PAT)이 없어 ODB 허브를 찾지 못합니다.", 409,
                        detail={"app_key": backend})
+    if not tool_map:
+        # 지도를 못 읽은 것과 그 백엔드에 도구가 없는 것은 고칠 곳이 다르다 — 앞은 게이트웨이, 뒤는 ODB 허브 등록이다.
+        raise AppError("ecad_gateway_unreadable",
+                       "게이트웨이 도구 지도(/tools-map)를 읽지 못해 ODB 허브를 찾지 못합니다 — 게이트웨이가 살아 있는지 본 뒤 다시"
+                       " 찾습니다.", 409, detail={"app_key": backend})
     tool = backend_tool_name("find_job", backend, tool_map)
     if tool is None:
         raise AppError("ecad_unavailable",
@@ -226,8 +239,11 @@ def _warn(code: str, message: str, ref: str | None = None, severity: str = "WARN
 def absent_result(captured_at: int, *, message: str = "과제에 ECAD 보드가 붙지 않아 ecad 소스를 싣지 않았다.",
                   code: str = "ecad_absent", severity: str = "INFO", board_id: str | None = None,
                   app_key: str | None = None, failed: bool = False, call_ids: Sequence[str] = ()) -> AdapterResult:
-    """노드를 하나도 만들지 않은 ecad 소스. 보드가 없으면 스텁 시절과 같은 봉투이고, 붙었는데 못 읽었으면 그 까닭과
-    `ecad_capture_failed` 가 선다 — 붙은 보드를 못 읽은 것은 '회로가 없다' 가 아니다(비교가 그 쪽을 바뀜으로 읽지 않게, §2.11.3)."""
+    """노드를 하나도 만들지 않은 ecad 소스. 보드가 없으면 스텁 시절과 같은 봉투이고, 붙었는데 못 읽었으면 그 까닭이 경고로 남는다.
+
+    `ecad_capture_failed`(failed)는 필수 호출 find_job 을 불렀는데 실패했거나 그 job_id 가 없을 때만이다(§2.11.3 표). 호출 없이
+    끝난 것(자격 · 도구 지도 · 도구 없음)은 dyna 의 자격 없음(`dyna_pat_absent`)과 같은 결측 + 경고다. 어느 쪽이든 쌍 비교는
+    ECAD 항목에만 효과를 준다(diff.comparability 의 `ecad`)."""
     missing = {"ecad_absent": True}
     if failed:
         missing["ecad_capture_failed"] = True
@@ -263,18 +279,23 @@ class EcadAdapter(SourceAdapter):
         if not job_id:
             return absent_result(captured_at)
         app_key = self.app_key or DEFAULT_APP_KEY
+        # 아래 셋은 호출 없이 끝난다 — 보드를 읽으러 가지도 못했으니 결측 + 경고이고 capture_failed 가 아니다(absent_result).
         if recorder is None or not getattr(recorder, "mcp_available", False):
-            return absent_result(captured_at, code="ecad_pat_absent", board_id=job_id, app_key=app_key, failed=True,
+            return absent_result(captured_at, code="ecad_pat_absent", severity="WARNING", board_id=job_id, app_key=app_key,
                                  message="게이트웨이 MCP 자격(포털 PAT)이 없어 붙은 ECAD 보드를 읽지 않았다.")
         # 이름은 게이트웨이 도구 지도(`/tools-map` 의 map)에서 그 백엔드 것으로만 찾는다 — 지도가 없으면 부르지 않는다
-        # (맨이름 `list_parts` 는 다른 앱의 도구일 수 있다).
+        # (맨이름 `list_parts` 는 다른 앱의 도구일 수 있다). 빈 지도는 게이트웨이를 못 읽은 것이다(도구가 없는 것과 고칠 곳이 다르다).
         tool_map = getattr(recorder, "tool_map", None) or {}
+        if not tool_map:
+            return absent_result(captured_at, code="ecad_gateway_unreadable", severity="WARNING", board_id=job_id,
+                                 app_key=app_key, message="게이트웨이 도구 지도(/tools-map)를 읽지 못해 붙은 ECAD 보드를 읽지"
+                                                          " 않았다 — 게이트웨이가 살아 있는지 본다.")
         names = {want: backend_tool_name(want, app_key, tool_map) for want in REQUIRED_TOOLS}
         missing_tools = [want for want, name in names.items() if name is None]
         if missing_tools:
-            return absent_result(captured_at, code="ecad_tools_missing", board_id=job_id, app_key=app_key, failed=True,
-                                 message=f"게이트웨이에 {app_key} 의 {'·'.join(missing_tools)} 가 없어 붙은 ECAD 보드를"
-                                         " 읽지 않았다.")
+            return absent_result(captured_at, code="ecad_tools_missing", severity="WARNING", board_id=job_id,
+                                 app_key=app_key, message=f"게이트웨이에 {app_key} 의 {'·'.join(missing_tools)} 가 없어 붙은"
+                                                          " ECAD 보드를 읽지 않았다.")
         return _capture(job_id, app_key, names, recorder, captured_at)
 
 
@@ -312,18 +333,21 @@ def _capture(job_id: str, app_key: str, names: Mapping[str, str], recorder: Call
     # ① find_job — 필수 호출. 못 읽거나 그 job_id 가 없으면 ecad 를 통째로 버린다(§2.11.3 표 '필수 호출 실패').
     found = call("find_job", {"query": job_id})
     if not found["ok"]:
-        return absent_result(captured_at, code="capture_call_failed", board_id=job_id, app_key=app_key, failed=True,
-                             message=f"{names['find_job']} 을 읽지 못했다 — {found['error']}",
+        return absent_result(captured_at, code="capture_call_failed", severity="WARNING", board_id=job_id,
+                             app_key=app_key, failed=True, message=f"{names['find_job']} 을 읽지 못했다 — {found['error']}",
                              call_ids=recorder.call_ids(KIND))
     rows = job_rows(found["result"]) if body_error(found["result"]) is None else []
     if rows is None:
-        return absent_result(captured_at, code="source_schema_drift", board_id=job_id, app_key=app_key, failed=True,
+        return absent_result(captured_at, code="source_schema_drift", severity="WARNING", board_id=job_id,
+                             app_key=app_key, failed=True,
                              message=f"{names['find_job']} 응답에서 잡 목록을 읽지 못했다(알려진 열쇠 "
                                      f"{'·'.join(JOB_LIST_KEYS)} 가 없다).", call_ids=recorder.call_ids(KIND))
+    # 후보 가운데 그 job_id 와 같은 행만 쓴다 — 첫 후보나 모델 이름이 같은 행으로 대신하지 않는다(ER-01).
     job = next((r for r in rows if _s(r.get("job_id")).lower() == job_id.lower()), None)
     if job is None:
         hub = body_error(found["result"])
-        return absent_result(captured_at, code="ecad_board_not_found", board_id=job_id, app_key=app_key, failed=True,
+        return absent_result(captured_at, code="ecad_board_not_found", severity="WARNING", board_id=job_id,
+                             app_key=app_key, failed=True,
                              message=f"{names['find_job']} 이 붙은 보드 {job_id} 를 찾지 못했다"
                                      + (f" — {hub}" if hub else "") + ".", call_ids=recorder.call_ids(KIND))
     jid = _s(job.get("job_id"))
@@ -379,14 +403,24 @@ def _capture(job_id: str, app_key: str, names: Mapping[str, str], recorder: Call
 
     # ER-04 표지 — 1단계에서 늘 비는 칸과 이번 보드에서 빈 칸.
     degraded.update({"ecad_nets_deferred", "odb_version_absent", "outline_origin_unknown"})
+    # 노드 가족이 통째로 빠졌다 — 허브의 봉투형 오류(분석을 돌리지 않은 보드)는 경고만 남기므로 표지가 없으면 빈 가족이 '보드에
+    # 그것이 없다' 로 읽힌다. 그 수(stats.layer_rows · n_components)는 미측정(null)이다.
+    if not layer_nodes:
+        degraded.add("layers_unavailable")
+    if not parts_read:
+        degraded.add("components_unavailable")
     if component_nodes:
         degraded.update({"component_xy_deferred", "component_value_absent"})
         if any(n["attrs"]["height"] is None for n in component_nodes):
             degraded.add("component_height_partial")
-    if parts_read and (placed is None or total is None or placed > total):
+    if parts_read and (placed is None or total is None or placed != total):
         # list_parts 는 분류된 부품만 낸다(저항 · 테스트 포인트 등 category Unknown 은 빠진다 — OH-02). 배치 수와 같다고
         # 확인되지 않으면 빠졌다고 적는다.
         degraded.add("components_unclassified_omitted")
+    if placed is not None and total is not None and placed < total:
+        # 배치 수는 분류된 부품을 포함하므로 그보다 작을 수 없다 — 그 칸이 배치 수가 아니다(부록 A 는 count, OH-02 는 counted).
+        warnings.append(_warn("placed_below_classified", f"get_volume_result 의 면별 배치 수 합 {placed} 이 분류된 부품 수"
+                              f" {total} 보다 작다 — 그 칸이 배치 수가 아닐 수 있다(cae00 에서 칸 이름을 확인한다).", jid))
     copper = [n for n in layer_nodes if n["attrs"]["type"] in ("signal", "plane")]
     if copper:
         degraded.add("copper_weight_absent")
@@ -396,18 +430,21 @@ def _capture(job_id: str, app_key: str, names: Mapping[str, str], recorder: Call
                         or any(n["attrs"]["material"] is None for n in layer_nodes if n["attrs"]["type"] != "silkscreen")):
         degraded.add("stackup_material_unmatched")
 
+    verdict = _s((stackup or {}).get("verdict")) or _s((layers or {}).get("stackup_verdict")) or None
+    stackup_id = _s((stackup or {}).get("chosen_id")) or None
+    # 동박층 수 — get_board_layers.layer_count 는 부품 · 실크 · 페이스트 · 드릴 · 문서 층까지 센다(부록 A).
+    layer_count = _int((layers or {}).get("signal_layer_count")) or _int((stackup or {}).get("layer_count"))
     stats = {
         "units": "mm",
         "board": {key: job.get(key) for key in ("project", "model", "board_type", "revision")},
         "thickness_mm": thickness,
         "thickness_source": (layers or {}).get("thickness_source"),
-        "stackup_verdict": _s((stackup or {}).get("verdict")) or _s((layers or {}).get("stackup_verdict")) or None,
-        "stackup_id": _s((stackup or {}).get("chosen_id")) or None,
+        "stackup_verdict": verdict,
+        "stackup_id": stackup_id,
         "stackup_total_mm": stackup_total,
-        # 동박층 수 — get_board_layers.layer_count 는 부품 · 실크 · 페이스트 · 드릴 · 문서 층까지 센다(부록 A).
-        "layer_count": _int((layers or {}).get("signal_layer_count")) or _int((stackup or {}).get("layer_count")),
-        "layer_rows": len(layer_nodes),
-        "layer_rows_all": len(_rows(layers, "layers")),
+        "layer_count": layer_count,
+        "layer_rows": len(layer_nodes) if layers is not None else None,
+        "layer_rows_all": len(_rows(layers, "layers")) if layers is not None else None,
         "outline": outline,
         "outline_bbox": None,
         # n_components 는 list_parts.total(분류된 부품 = component 노드의 원천)이다. 배치 수(분류 안 된 부품 포함)는 따로 싣는다.
@@ -419,39 +456,72 @@ def _capture(job_id: str, app_key: str, names: Mapping[str, str], recorder: Call
         "source_size_bytes": size_bytes,
         "list_parts_pages": pages,
     }
+    # board 노드 — 계약 odb_get_board 의 칸(board_id · name · units · outline_bbox · thickness · layer_count · n_components ·
+    # n_nets · odb_version · source_hash)과 판정 · 적층 합 · 외곽 폭 · 높이 · 배치 수. 노드라 ir_hash 에 든다 — 보드를 다른 판으로
+    # 바꿔 붙이면 1단계 칸(층 · 분류된 부품)이 같아도 새 스냅샷이다. 두께 · 적층 합은 rr_ir 길이 단위 mm 다.
+    board_node = {
+        "canon_key": BOARD_CANON_KEY, "domain": KIND, "kind": "board", "label": BOARD_LABEL, "local_key": jid,
+        "group": None, "status_flags": [],
+        "attrs": {
+            "board_id": jid, "name": name, "revision": _s(job.get("revision")) or None, "units": "mm",
+            "outline_bbox": None, "outline": outline, "thickness": thickness, "stackup_verdict": verdict,
+            "stackup_id": stackup_id, "ecad_stackup_total": stackup_total, "layer_count": layer_count,
+            "n_components": total, "n_components_placed": placed, "n_nets": None, "odb_version": None,
+            "source_hash": sha256,
+        },
+        "provenance": {"adapter": KIND, "app_key": app_key, "tool": names["find_job"], "call_id": found["call_id"],
+                       "captured_at": captured_at},
+    }
     source = {
         "kind": KIND, "app_key": app_key, "adapter_version": ADAPTER_VERSION, "channel": "mcp",
         "ref": {"board_id": jid, "name": name}, "source_hash": sha256, "stats": stats,
         "degraded": sorted(degraded), "captured_at": captured_at,
     }
-    return {"source": source, "nodes": layer_nodes + component_nodes, "edges": [], "warnings": warnings,
+    return {"source": source, "nodes": [board_node] + layer_nodes + component_nodes, "edges": [], "warnings": warnings,
             "degraded": sorted(degraded), "call_ids": recorder.call_ids(KIND), "missing": {"ecad_absent": False}}
+
+
+def _page_cap(total: int | None) -> int:
+    """list_parts 를 부를 쪽 수의 상한 — 실을 수 있는 만큼(total, 모르면 상한 MAX_COMPONENTS)을 100행씩 읽고 한 쪽 여유.
+    쪽마다 새 행이 하나씩만 오는 허브가 캡처 예산을 넘겨 수천 번 불리지 않게 한다."""
+    want = MAX_COMPONENTS if total is None else min(max(total, 0), MAX_COMPONENTS)
+    return -(-want // PARTS_PAGE_SIZE) + 1
 
 
 def _read_parts(jid: str, call, optional, names: Mapping[str, str], warnings: list[dict],
                 degraded: set[str]) -> tuple[list[tuple[dict, str]], bool, int | None, int]:
     """list_parts 를 끝까지 읽는다 — ([(행, call_id)], 첫 쪽을 읽었나, total, 부른 쪽 수). refdes 가 겹치는 행은 앞의 것만 싣는다
-    (canon_key 가 `ecad:<refdes>` 라 겹치면 IR 이 서지 않는다)."""
+    (canon_key 가 `ecad:<refdes>` 라 겹치면 IR 이 서지 않는다).
+
+    다 받았는지는 **서로 다른** 행 수(겹친 refdes 는 한 번, 빈 refdes 는 행마다)로 total 과 견준다 — 쪽 순서가 흔들리는 허브
+    (sort 기본값의 offset 쪽 넘김)는 어떤 행을 두 번 주고 어떤 행은 한 번도 주지 않아, 받은 행 수로 세면 빠진 행이 보이지 않는다.
+    """
     out: list[tuple[dict, str]] = []
     seen: set[str] = set()
     total: int | None = None
-    received = duplicates = blank = 0
-    page = pages = 0
+    received = duplicates = blank = reserved = 0
+    page = 0
+    cap = _page_cap(None)
     first_ok = False
     while True:
+        if page >= cap:
+            degraded.add("capture_partial")
+            warnings.append(_warn("odb_paging_capped", f"{names['list_parts']} 를 {page}쪽에서 멈췄다 — total {total} 의"
+                                  f" 쪽 상한 {cap} 에 닿았다(서로 다른 행 {len(seen) + blank} · 받은 행 {received}).", jid))
+            break
         page += 1
         reply = call("list_parts", {"job_id": jid, "category": "", "side": "", "sort": "", "page": page,
                                     "page_size": PARTS_PAGE_SIZE})
-        pages += 1
         body = optional("list_parts", reply)
         if body is None:
             break
-        first_ok = first_ok or page == 1
-        if total is None:
+        if page == 1:
+            first_ok = True
             total = _int(body.get("total"))
+            cap = _page_cap(total)
         rows = _rows(body, "rows")
         received += len(rows)
-        added = 0
+        before = len(seen) + blank
         for row in rows:
             refdes = _s(row.get("refdes"))
             if not refdes:
@@ -461,8 +531,10 @@ def _read_parts(jid: str, call, optional, names: Mapping[str, str], warnings: li
                 duplicates += 1
                 continue
             seen.add(refdes)
+            if refdes == BOARD_LABEL or refdes.startswith(("layer:", "net:")):
+                reserved += 1          # board · layer · net 노드의 canon_key(`ecad:board` · `ecad:layer:…` · `ecad:net:…`)와 겹친다
+                continue
             out.append((row, reply["call_id"]))
-            added += 1
         has_more = body.get("has_more")
         more = has_more if isinstance(has_more, bool) else (total is not None and received < total)
         if len(out) >= MAX_COMPONENTS:
@@ -473,21 +545,27 @@ def _read_parts(jid: str, call, optional, names: Mapping[str, str], warnings: li
             break
         if not more:
             break
-        if added == 0:
+        if len(seen) + blank == before:
             # 다음 쪽이 있다는데 새 행이 없다 — 허브가 page 를 듣지 않는 것이다. 같은 쪽을 끝없이 부르지 않는다.
             degraded.add("capture_partial")
             warnings.append(_warn("odb_paging_stalled", f"{names['list_parts']} {page}쪽에 새 행이 없어 멈췄다"
                                   f"(받은 {received} · total {total}).", reply["call_id"]))
             break
+    distinct = len(seen) + blank
     if duplicates:
-        warnings.append(_warn("duplicate_refdes", f"refdes 가 겹친 행 {duplicates}개는 앞의 것만 실었다.", jid))
+        warnings.append(_warn("duplicate_refdes", f"refdes 가 겹친 행 {duplicates}개는 앞의 것만 실었다 — 허브의 쪽 순서가"
+                              " 흔들렸거나 같은 refdes 가 두 번 있다.", jid))
     if blank:
         warnings.append(_warn("refdes_missing", f"refdes 가 빈 행 {blank}개는 싣지 않았다.", jid))
-    if first_ok and total is not None and received < min(total, MAX_COMPONENTS) and "capture_partial" not in degraded \
+    if reserved:
+        warnings.append(_warn("refdes_reserved", f"refdes 가 board · layer: · net: 꼴인 행 {reserved}개는 보드 · 층 · 넷 노드의"
+                              " 열쇠와 겹쳐 싣지 않았다.", jid))
+    if first_ok and total is not None and distinct < min(total, MAX_COMPONENTS) and "capture_partial" not in degraded \
             and "components_truncated" not in degraded:
         degraded.add("capture_partial")
-        warnings.append(_warn("components_incomplete", f"부품 total {total} 가운데 {received} 행만 받았다.", jid))
-    return out, first_ok, total, pages
+        warnings.append(_warn("components_incomplete", f"부품 total {total} 가운데 서로 다른 행 {distinct}개만 받았다(받은 행"
+                              f" {received} · refdes 가 겹친 행 {duplicates}).", jid))
+    return out, first_ok, total, page
 
 
 def _heights(volume: Mapping[str, Any] | None) -> dict[str, float]:
@@ -504,11 +582,17 @@ def _heights(volume: Mapping[str, Any] | None) -> dict[str, float]:
 
 
 def _placed(volume: Mapping[str, Any] | None) -> int | None:
-    """실제 배치 수(분류 안 된 부품 포함) — get_volume_result 의 top · bottom count 합. 한쪽이라도 없으면 None 이다."""
+    """실제 배치 수(분류 안 된 부품 포함) — get_volume_result 의 top · bottom count 합(부록 A). 요청서 OH-02 는 같은 값을 counted
+    라 적었다 — count 가 없을 때만 그것을 본다(cae00 에서 칸 이름을 확인한다). 한쪽이라도 없으면 None 이다."""
     counts = []
     for side in ("top", "bottom"):
         block = (volume or {}).get(side)
-        counts.append(_int(block.get("count")) if isinstance(block, Mapping) else None)
+        value = None
+        if isinstance(block, Mapping):
+            value = _int(block.get("count"))
+            if value is None:
+                value = _int(block.get("counted"))
+        counts.append(value)
     return None if any(c is None for c in counts) else sum(counts)
 
 

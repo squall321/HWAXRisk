@@ -552,21 +552,31 @@ def resolve(
         accept(a_nid, b_nid, "fingerprint", score, evidence, status)
 
     # --- 5단계 name_norm — name_norm_canon 완전 일치이고 후보가 1:1 일 때만.
+    # 같은 이름끼리만 짝이 되므로 b 쪽을 이름으로 나눠 둔다 — 모든 쌍(free_pairs)을 펼치면 보드 부품 2,000 개가 양쪽에 실린 쌍
+    # 비교에서 짝 목록만 4백만(약 330 MB)이다. 받아들이는 순서는 아래 sorted 가 정하므로 결과는 같다.
+    free_b: dict[str, list[tuple[str, Mapping[str, Any]]]] = {}
+    for b in b_nodes:
+        b_nid, cb = str(b["nid"]), _canon(b)
+        if b_nid not in taken_b and cb:
+            free_b.setdefault(cb, []).append((b_nid, b))
     name_pairs: list[tuple[str, str]] = []
-    for a_nid, a, b_nid, b in free_pairs():
-        ca, cb = _canon(a), _canon(b)
-        if not ca or ca != cb:
+    for a in a_nodes:
+        a_nid, ca = str(a["nid"]), _canon(a)
+        if a_nid in taken_a or not ca:
             continue
-        if "ecad" in (_domain(a), _domain(b)) and _domain(a) != _domain(b):
-            # ecad↔mcad/dyna 는 refdes 또는 part_number 토큰이 상대 name_norm_canon 토큰과 겹칠 때만(§2.6.2 5단계).
-            ecad_node = a if _domain(a) == "ecad" else b
-            other = b if ecad_node is a else a
-            at = _attrs(ecad_node)
-            tokens = _tokens(str(at.get("refdes") or ecad_node.get("local_key") or "").lower())
-            tokens |= _tokens(str(at.get("part_number") or "").lower())
-            if not (tokens & _tokens(_canon(other))):
+        for b_nid, b in free_b.get(ca, ()):
+            if (a_nid, b_nid) in blocked:
                 continue
-        name_pairs.append((a_nid, b_nid))
+            if "ecad" in (_domain(a), _domain(b)) and _domain(a) != _domain(b):
+                # ecad↔mcad/dyna 는 refdes 또는 part_number 토큰이 상대 name_norm_canon 토큰과 겹칠 때만(§2.6.2 5단계).
+                ecad_node = a if _domain(a) == "ecad" else b
+                other = b if ecad_node is a else a
+                at = _attrs(ecad_node)
+                tokens = _tokens(str(at.get("refdes") or ecad_node.get("local_key") or "").lower())
+                tokens |= _tokens(str(at.get("part_number") or "").lower())
+                if not (tokens & _tokens(_canon(other))):
+                    continue
+            name_pairs.append((a_nid, b_nid))
     count_a = {}
     count_b = {}
     for a_nid, b_nid in name_pairs:
