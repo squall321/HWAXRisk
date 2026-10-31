@@ -1,5 +1,5 @@
 // 카드 대조 셀 격자와 처분 — 전문가 × 단위 칸의 상태(거름 · 입력 결손 표기), 거른 까닭 말풍선, 길 · 상태 거름, 고른 셀 · 이 잡의 실패 셀의 다시 · 넘김(포털 m3-frontend-request 3-2 ~ 3-4절)
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { isApiError, riskApi } from "../api/risk.api";
 import { estimateOf } from "../api/reviewErrors";
@@ -144,6 +144,15 @@ export function CellGrid({
     const pairs = rows.filter((r) => selected.has(cellKey(r))).map((r) => [r.unit_id, r.agent_key] as [string, string]);
     return pairs.length > 0 ? { cells: pairs } : null;
   }
+
+  // 동의는 422 consent_required 가 추정을 준 그 요청에만 선다 — 고른 셀(거름 · 쪽 · 체크) · 이 잡 · force · start 가 하나라도 바뀌면
+  // 앞선 추정 · 동의를 걷는다. 전에는 셀 하나 · 1,600회에 체크한 동의가 force 와 검토함 셀 둘을 더한 요청에 consent:true 로 실렸다
+  // (서버는 consent:true 를 새 추정 없이 받아들인다).
+  const requestKey = JSON.stringify([action, selector(), force, start]);
+  useEffect(() => {
+    setAsked(null);
+    setConsent(false);
+  }, [requestKey]);
 
   async function send(withConsent: boolean) {
     const sel = selector();
