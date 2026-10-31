@@ -302,11 +302,6 @@ export function hitsLine(out: Pick<CellsDisposed, "hits" | "hits_by" | "hits_bas
   return `이미 판정된 걸림 ${out.hits}(카드 ${out.hits_by.card} · 카드 밖 ${out.hits_by.offcard} · 입력 결손 ${out.hits_by.noinput})`;
 }
 
-/** 대기 셀이 하나도 없는가 — 진행판 셀 셈으로 본다(검토 잡을 더 세울 일이 있나). */
-export function pendingCells(coverage: Pick<Coverage, "review"> | null | undefined): number {
-  return coverage?.review?.cells.by_state.pending ?? 0;
-}
-
 // ── 3-1 — 검토 잡 본문 ───────────────────────────────────────────────────────
 
 /** 검토 잡 만들기 폼의 값 — 목록 칸은 쉼표로 나눈 글이다(다듬기는 본문을 지을 때 한다). */
