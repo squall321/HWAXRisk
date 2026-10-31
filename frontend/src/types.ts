@@ -1604,7 +1604,8 @@ export type Coverage = {
   by_domain: Record<string, Partial<Record<CoverageStatus, number>>>;
   /** 전체 합계(도메인을 가로지른 상태별 수). */
   by_status: Partial<Record<CoverageStatus, number>>;
-  strong: number;
+  /** strong 비율(planner.coverage_summary) — done · done_weak 좌석 수와 그 비(분모 0 이면 null). 전에 number 로 적혀 있었다(견본이 잡았다). */
+  strong: { done: number; done_weak: number; ratio: number | null };
   unseated_n: number;
   level: CoverageLevel;
   close_level: CloseLevel;

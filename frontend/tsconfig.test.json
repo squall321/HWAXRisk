@@ -33,6 +33,17 @@
     "src/components/GateBanner.tsx",
     "src/components/ProjectMetaCard.tsx",
     "src/components/EcadBoardCard.tsx",
-    "src/components/JobSignals.tsx"
+    "src/components/JobSignals.tsx",
+    "src/contract/serverSamples.ts",
+    "src/api/reviewErrors.ts",
+    "src/lib/reviewView.ts",
+    "src/lib/cellView.ts",
+    "src/lib/issueView.ts",
+    "src/lib/closureView.ts",
+    "src/lib/reportView.ts",
+    "src/components/MarkdownLines.tsx",
+    "src/components/CellsHead.tsx",
+    "src/components/ReviewBoard.tsx",
+    "src/components/RegistryCard.tsx"
   ]
 }
