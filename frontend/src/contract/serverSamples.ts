@@ -2211,6 +2211,94 @@ export const coveragePanelHeld = sample<Coverage>()({
   }
 });
 
+/** 패널 대상 진행판 — 보류 external_worker 로 멈춘 Claude 패널 잡을 주인이 취소한 뒤(취소가 보류 열을 비운다 — 반대 검토 10-31, 그 전에는
+ * hold_code 가 남았다). */
+export const coveragePanelCancelledAfterHold = sample<Coverage>()({
+  "target_key": "t1",
+  "job": {
+    "id": "14b7390ea84a4d67a714880cf26e239f",
+    "tier": "A",
+    "state": "cancelled",
+    "pause_reason": null,
+    "hold_code": null,
+    "hold_until": null,
+    "panels_done": 0,
+    "panels_total": 1,
+    "error": null,
+    "signal": null,
+    "llm": "claude",
+    "consent_external": {
+      "at": 1793447741,
+      "by": "peer@x",
+      "source": "web"
+    }
+  },
+  "roster_size": 7,
+  "by_domain": {
+    "mech": {
+      "pending": 2
+    },
+    "pcb": {
+      "pending": 1
+    },
+    "rel": {
+      "pending": 1
+    },
+    "sim": {
+      "pending": 2
+    },
+    "xd": {
+      "pending": 1
+    }
+  },
+  "by_status": {
+    "abstain": 0,
+    "assigned": 0,
+    "carried": 0,
+    "deferred": 0,
+    "done": 0,
+    "done_weak": 0,
+    "failed": 0,
+    "pending": 7,
+    "running": 0,
+    "skipped": 0
+  },
+  "strong": {
+    "done": 0,
+    "done_weak": 0,
+    "ratio": null
+  },
+  "unseated_n": 7,
+  "level": "C0",
+  "close_level": "C2",
+  "flow": "panels",
+  "units": {
+    "status": "none"
+  },
+  "review": null,
+  "external_sync": {
+    "ra": {
+      "state": "pending",
+      "pending_ops": 0,
+      "dead_ops": 0,
+      "reason": "credential_missing:HWAXRISK_PORTAL_PAT_RW",
+      "message": "RA 반영 안 됨 — 박스에 RA 쓰기 자격(HWAXRISK_PORTAL_PAT_RW)이 없어 보내는 쪽이 꺼져 있다. 대기 0건, 보낸 것 없음.",
+      "retracted": 0,
+      "retract_absent": 0,
+      "retract_pending": 0,
+      "retract_failed": 0,
+      "retract_reasons": {}
+    },
+    "adh": {
+      "state": "pending",
+      "pending_ops": 0,
+      "dead_ops": 0,
+      "reason": "sender_unwired",
+      "message": "AIDataHub 반영 안 됨 — 보내는 쪽이 아직 배선되지 않았다(M4). 대기 0건, 보낸 것 없음."
+    }
+  }
+});
+
 /** `GET /me` 의 portal_pat — 웹 등록(source web)이 거절된 뒤 쉬는 중(last_error · paused_until, 10-31 risk-flow). 박스 칸은 싣지 않는다. */
 export const portalPatPaused = sample<PortalPatSummary>()({
   "registered": false,
@@ -2227,6 +2315,27 @@ export const portalPatPaused = sample<PortalPatSummary>()({
     "last_error_kind": "final",
     "last_error_at": 1793442339,
     "paused_until": 1793463939,
+    "how_to_stop": "자동 등록이 켜져 있는 동안은 등록된 PAT 를 지우거나 포털에서 폐기해도 웹 리스크 앱을 열 때나 Claude 에서 hwax_risk 도구를 부를 때 다시 만든다 — 멈추는 길은 웹 리스크 앱 설정 화면의 '자동 등록' 스위치다(끄면 화면도 게이트웨이도 저절로 받지 않는다)."
+  }
+});
+
+/** `GET /me` 의 portal_pat — 게이트웨이 교환이 실패한 뒤(Claude 에 넣은 PAT 의 청중이 모자라다). 쉬는 것은 게이트웨이 길뿐이라 웹 길은
+ * 받을 까닭을 그대로 말한다(due true · paused_until null — 반대 검토 10-31). 박스 칸은 싣지 않는다. */
+export const portalPatGatewayFailed = sample<PortalPatSummary>()({
+  "registered": false,
+  "email": null,
+  "groups": [],
+  "exp": null,
+  "auto": {
+    "enabled": true,
+    "due": true,
+    "due_reason": "absent",
+    "last_source": null,
+    "last_at": null,
+    "last_error": "widen_audience: Claude 에 넣은 PAT 의 청중이 모자라다 — 포털 토큰 화면에서 모든 청중(mcp-gateway·step-forge 포함)으로 새로 발급해 Claude 에 넣는다",
+    "last_error_kind": "final",
+    "last_error_at": 1793447742,
+    "paused_until": null,
     "how_to_stop": "자동 등록이 켜져 있는 동안은 등록된 PAT 를 지우거나 포털에서 폐기해도 웹 리스크 앱을 열 때나 Claude 에서 hwax_risk 도구를 부를 때 다시 만든다 — 멈추는 길은 웹 리스크 앱 설정 화면의 '자동 등록' 스위치다(끄면 화면도 게이트웨이도 저절로 받지 않는다)."
   }
 });

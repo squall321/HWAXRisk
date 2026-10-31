@@ -79,10 +79,13 @@ const PANEL_PAUSE_LABEL: Record<string, string> = {
 /**
  * 진행판 패널 잡이 멈춘 까닭 — 정지 까닭(pause_reason)이 먼저이고 없으면 보류 코드(hold_code)다. 외부 응답자 패널이 워커가 없어 멈춘
  * 잡은 pause_reason 이 비고 hold_code 가 external_worker 다 — 서버가 그 칸을 싣기 전(10-31 risk-flow)에는 '모름' 이었다. 둘 다 없으면 null.
+ * 멈춘(paused) 잡만이다 — 서버가 취소에서 보류를 비우기 전(반대 검토 10-31)에 취소된 잡은 보류 코드가 남아 있어, 그것을 까닭으로 읽으면
+ * 취소된 잡에 '워크플로를 다시 돌린 뒤 재개' 를 말한다(사슬 배지 · 판단 LLM 줄도 paused 일 때만 보류를 읽는다).
  */
 export function panelJobPause(
-  job: Pick<NonNullable<CoverageJob>, "pause_reason" | "hold_code">,
+  job: Pick<NonNullable<CoverageJob>, "state" | "pause_reason" | "hold_code">,
 ): { code: string; label: string; externalWorker: boolean } | null {
+  if (job.state !== "paused") return null;
   const code = job.pause_reason ?? job.hold_code ?? null;
   if (!code) return null;
   return { code, label: PANEL_PAUSE_LABEL[code] ?? code, externalWorker: job.hold_code === "external_worker" };

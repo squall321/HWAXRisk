@@ -126,8 +126,9 @@ export type PortalPatAuto = {
   /** 사용자가 끄지 않았다. */
   enabled: boolean;
   /**
-   * 지금 발급해 등록해야 한다 — 화면은 `enabled && due` 면 조용히 한 번 한다. 받을 까닭(due_reason)이 있어도 마지막 자동 등록 실패의
-   * 쉼 안이면 false 다(`paused_until`) — 서버가 웹 등록 실패도 적는다(10-31 risk-flow, 그 전에는 화면이 브라우저에 쉼을 따로 들었다).
+   * 지금 발급해 등록해야 한다 — 화면은 `enabled && due` 면 조용히 한 번 한다. 받을 까닭(due_reason)이 있어도 웹 길의 쉼 안이면 false 다
+   * (`paused_until`) — 서버가 웹 등록 실패도 적는다(10-31 risk-flow, 그 전에는 화면이 브라우저에 쉼을 따로 들었다). 게이트웨이 길(Claude 에
+   * 넣은 PAT 를 바꿔 받는다)의 실패는 이 길을 쉬게 하지 않는다(반대 검토 10-31) — 그때 `last_error` 는 차 있고 `due` 는 참일 수 있다.
    */
   due: boolean;
   due_reason: PortalPatDueReason | null;
@@ -138,7 +139,10 @@ export type PortalPatAuto = {
   /** transient 는 앱이 10분 뒤 다시 바란다 · final 은 사람이 고쳐야 한다. */
   last_error_kind: "transient" | "final" | null;
   last_error_at: number | null;
-  /** 마지막 자동 등록 실패(웹 등록 · 게이트웨이 교환)의 쉼이 끝나는 시각 — 쉬는 동안만 값이다. 설정의 버튼은 쉼과 상관없이 된다. */
+  /**
+   * 웹 길(앱을 열 때의 자동 등록)의 쉼이 끝나는 시각 — 마지막 자동 등록 실패가 웹 등록 거절(`last_error` 가 `web-` 로 시작)이고 쉬는 동안만
+   * 값이다(게이트웨이 길의 실패에는 null — 반대 검토 10-31). 설정의 버튼은 쉼과 상관없이 된다.
+   */
   paused_until: number | null;
   /** 켜져 있을 때만 — 지우거나 폐기해도 다시 만들어지니 멈추려면 끈다는 글. */
   how_to_stop: string | null;
@@ -1273,7 +1277,10 @@ export type CoverageJob = {
   state: BatchJobState;
   /** rr_jobs.pause_reason CHECK — 사람(user) · 수확 체감(diminishing) · 하루 상한(daily_cap). */
   pause_reason: "diminishing" | "daily_cap" | "user" | null;
-  /** 보류 코드 — 외부 응답자 패널이 워커가 없어 멈춘 잡은 pause_reason 이 비고 external_worker 다(10-31 risk-flow 에 생긴 칸). */
+  /**
+   * 보류 코드 — 외부 응답자 패널이 워커가 없어 멈춘 잡은 pause_reason 이 비고 external_worker 다(10-31 risk-flow 에 생긴 칸). 멈춘 잡에만
+   * 값이다 — 재개 · 취소가 비운다(취소는 반대 검토 10-31 부터 — 그 전에 취소된 잡에는 남아 있을 수 있다).
+   */
   hold_code: string | null;
   /** 자동 재개 시각(없으면 사람이 재개한다). */
   hold_until: number | null;

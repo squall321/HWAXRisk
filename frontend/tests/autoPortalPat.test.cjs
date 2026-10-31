@@ -92,6 +92,16 @@ test("쉼은 서버가 든다 — 웹 등록이 거절되면 서버가 적고(la
   }
 });
 
+test("게이트웨이 길의 실패는 앱을 열 때의 자동 등록을 쉬게 하지 않는다 — 실패 글은 보이고 due 가 참이라 받는다(실 서버 견본 · 반대 검토 10-31)", () => {
+  // 실 서버 견본(게이트웨이가 교환 실패 widen_audience 를 적은 뒤의 GET /me portal_pat) — Claude 에 넣은 PAT 탓이라 웹 길과 상관없다.
+  const auto = samples.portalPatGatewayFailed.auto;
+  assert.match(auto.last_error, /^widen_audience: /);
+  assert.equal(auto.last_error_kind, "final");
+  assert.equal(auto.paused_until, null);
+  assert.equal(autoRegisterWanted(me(auto)), true);
+  assert.equal(autoPausedUntil(auto, (auto.last_error_at + 60) * 1000), null);
+});
+
 test("저장 전 거절 — 4xx 와 502 portal_unreachable(포털 검증에 못 닿음)이고, 다른 5xx · 네트워크는 저장됐을 수도 있다", () => {
   assert.equal(refusedBeforeStore(new ApiError(422, "cred_key_absent", "x")), true);
   assert.equal(refusedBeforeStore(new ApiError(502, "portal_unreachable", "x")), true);

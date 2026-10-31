@@ -51,9 +51,10 @@ export function createOnceGate(storage: () => SessionStore | null | undefined) {
 }
 
 /**
- * 서버가 자동 등록을 쉬는 중이면 그 끝(`auto.paused_until` — 마지막 자동 등록 실패의 쉼, 웹 등록 · 게이트웨이 교환이 같은 기록이다).
- * 자동 등록이 꺼져 있거나 쉼이 지났으면(화면을 연 채 끝날 수 있다) null 이다. 쉬는 동안 서버의 `due` 는 false 라 앱을 열어도 받지
- * 않는다 — 전에는 서버가 웹 등록 실패를 적지 않아 이 브라우저가 localStorage 에 쉼을 따로 들었다(FE-29, 10-31 risk-flow 에 걷었다).
+ * 서버가 앱을 열 때의 자동 등록(웹 길)을 쉬는 중이면 그 끝(`auto.paused_until` — 마지막 실패가 웹 등록 거절일 때의 쉼). 게이트웨이 길
+ * (Claude 에 넣은 PAT 를 바꿔 받는다)의 실패는 웹 길을 쉬게 하지 않아 null 이다(반대 검토 10-31). 자동 등록이 꺼져 있거나 쉼이
+ * 지났으면(화면을 연 채 끝날 수 있다) null 이다. 쉬는 동안 서버의 `due` 는 false 라 앱을 열어도 받지 않는다 — 전에는 서버가 웹 등록
+ * 실패를 적지 않아 이 브라우저가 localStorage 에 쉼을 따로 들었다(FE-29, 10-31 risk-flow 에 걷었다).
  */
 export function autoPausedUntil(auto: Pick<PortalPatAuto, "enabled" | "paused_until"> | null | undefined, now: number): number | null {
   const until = auto?.paused_until ?? null;
