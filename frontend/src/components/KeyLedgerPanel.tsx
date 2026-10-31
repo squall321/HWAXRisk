@@ -164,9 +164,16 @@ export function KeyLedgerPanel({ node, nodes, onClose }: { node: IrNode; nodes: 
           variant="ghost"
           size="sm"
           disabled={busy}
-          onClick={() => void send({ decision: "confirm_key", ckey })}
+          onClick={() =>
+            // 확정은 병합된 키에서 그 병합을 푼다 — 서버(sameas confirm_key)는 status 만 confirmed 로 바꾸고 유효 키 해석은 merged 일 때만
+            // merged_into 를 따른다. 이 서버는 키 상태를 읽어 주지 않아 병합 여부를 미리 보일 수 없으므로 되돌리기와 같은 확인을 받는다.
+            setPending({
+              decision: { decision: "confirm_key", ckey },
+              confirm: `${ckey} 를 독립 키로 확정합니다 — 이 키가 다른 키로 병합돼 있으면 그 병합도 풀립니다(병합 되돌리기와 같은 결과). 이 서버는 키의 지금 상태를 읽어 주지 않아 병합 여부를 미리 보일 수 없습니다.`,
+            })
+          }
         >
-          독립 키로 확정
+          독립 키로 확정…
         </Button>
       </div>
 
