@@ -55,6 +55,8 @@ import type {
   ProjectTransferred,
   RefResolution,
   Registry,
+  RegistryQuery,
+  RegistryStatusSet,
   RegistryStatusUpdate,
   ResyncQueued,
   RosterRefreshed,
@@ -78,6 +80,7 @@ import type {
   TargetCreated,
   TargetJobCreate,
   TargetJobCreated,
+  VerdictSaved,
   VerdictUpdate,
   VocabBump,
   VocabIndex,
@@ -381,16 +384,17 @@ export const riskApi = {
       body,
       ...o,
     }),
-  getRegistry: (key: string, o?: Opt) => request<Registry>(`targets/${encodeTargetKey(key)}/registry`, o),
+  getRegistry: (key: string, query?: RegistryQuery, o?: Opt) =>
+    request<Registry>(`targets/${encodeTargetKey(key)}/registry`, { query, ...o }),
   getPanels: (key: string, o?: Opt) => request<PanelList>(`targets/${encodeTargetKey(key)}/panels`, o),
   getPanelTranscript: (panelId: string, o?: Opt) =>
     request<PanelTranscript>(`panels/${encodeURIComponent(panelId)}/transcript`, o),
   getBrief: (key: string, tier?: string, o?: Opt) =>
     request<Brief>(`targets/${encodeTargetKey(key)}/brief`, { query: { tier }, ...o }),
   putVerdict: (key: string, body: VerdictUpdate, o?: Opt) =>
-    request<Registry>(`targets/${encodeTargetKey(key)}/verdict`, { method: "PUT", body, ...o }),
+    request<VerdictSaved>(`targets/${encodeTargetKey(key)}/verdict`, { method: "PUT", body, ...o }),
   putRegistryStatus: (cluster: string, body: RegistryStatusUpdate, o?: Opt) =>
-    request<Registry>(`registry/${encodeURIComponent(cluster)}/status`, { method: "PUT", body, ...o }),
+    request<RegistryStatusSet>(`registry/${encodeURIComponent(cluster)}/status`, { method: "PUT", body, ...o }),
   completePanel: (panelId: string, body: PanelComplete, o?: Opt) =>
     request<PanelCompleted>(`panels/${encodeURIComponent(panelId)}/complete`, { method: "POST", body, ...o }),
   resyncTarget: (key: string, o?: Opt) =>

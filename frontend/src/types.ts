@@ -1312,6 +1312,8 @@ export type Coverage = {
   unseated_n: number;
   level: CoverageLevel;
   close_level: CloseLevel;
+  /** 심사 방식 — panels(Tier 패널) · cells(카드 대조). */
+  flow: "panels" | "cells";
   /** RA · AIDataHub 반영 요약 — 재동기를 누르기 전에도 늘 온다(보내는 쪽이 아직 없다는 것까지 message 가 말한다). */
   external_sync: ExternalSync;
 };
@@ -1354,26 +1356,138 @@ export type SeatUpdated = {
 
 // ── 등록부 · verdict ─────────────────────────────────────────────────────────
 
-export type Cite = { ref: string; quote: string; dangling?: boolean };
+/** 패널이 판정한 뒤 근거가 바뀐 쟁점(routes._reargue_out) — 새 패널이 정할 때까지 옛 판정이 보인다. */
+export type IssueReargue = {
+  label: string;
+  at: number;
+  round: number;
+  basis_hash: string;
+  panel_basis_hash: string;
+  raisers_added: string[];
+  raisers_removed: string[];
+  opposers_added: string[];
+  opposers_removed: string[];
+  claimed_before: JsonObject;
+  claimed_after: JsonObject;
+  /** 새 패널이 결정을 못 냈다 — 그 패널과 까닭. */
+  new_panel_failed?: { panel_id: string; reason: string; at: number };
+};
 
+/** 등록부 행의 카드 · 근거 인용(merged.cites) — 카드 인용은 판정당 200자이고 줄였으면 원래 길이가 quote_chars 에 있다. */
+export type Cite = { ref: string; quote: string; quote_chars?: number };
+
+/** 전문가 수로 센 주장값(cells 대상 — hold 가 등록부를 WARNING · 중대로 묶어도 원래 주장). */
+export type RegistryClaimed = {
+  judgement: Judgement | (string & {}) | null;
+  severity: Severity | (string & {}) | null;
+  sev3: number | null;
+  fail_experts: number;
+  critical_experts: number;
+  verified_fail_experts: number;
+};
+export type RegistryDistribution = {
+  by_judgement_claimed: Record<string, number>;
+  by_severity: Record<string, number>;
+  raisers_by_domain: Record<string, number>;
+};
+
+/**
+ * 등록부 행의 병합 본문(registry._merge_cluster 의 merged — REST 가 merged_json 을 풀어 싣는다). 옛 행 · 패널만 본 비교 보기에는 칸이
+ * 없을 수 있어 칸마다 선택이다. claimed · distribution · unit_ids · before_issue · issue_reraised 는 cells 대상만 있다.
+ */
+export type RegistryMerged = {
+  cluster_key?: string;
+  stored_cluster_key?: string;
+  direction?: string;
+  claim?: string;
+  claim_finding_id?: string;
+  warrant?: string;
+  /** 들여온 카드 대조 근거 문장의 원래 길이(줄였을 때). */
+  warrant_chars?: number;
+  severity_counts?: Record<string, number>;
+  precedent_counts?: Record<string, number>;
+  feature_snapshot?: JsonObject;
+  /** 쟁점 우선순위가 같은 가중을 쓴다(cells 대상). */
+  w_det?: number;
+  raised_by?: string[];
+  domains?: string[];
+  owner_domain?: string;
+  names?: string[];
+  cites?: Cite[];
+  member_ids?: string[];
+  rejected_refs?: string[];
+  human_refs?: string[];
+  panels?: string[];
+  contest_notes?: Array<{ finding_id: string; by: string[]; note: string }>;
+  resolving_checks?: string[];
+  trigger_condition?: string;
+  claimed?: RegistryClaimed;
+  distribution?: RegistryDistribution;
+  unit_ids?: string[];
+  /** 쟁점 패널이 행을 덮기 전 값 — 덮였을 때만(D-34 '덮되 분포를 남긴다'). */
+  before_issue?: {
+    severity: string;
+    sev3: number;
+    judgement: string;
+    evidence_grade: string;
+    claimed: RegistryClaimed | null;
+    distribution: RegistryDistribution | null;
+    support_experts: number | null;
+    support_domains: number | null;
+    support_units: number | null;
+    support_verified: number | null;
+  };
+  /** 패널이 판정한 뒤 근거가 바뀐 쟁점의 표기(쟁점 행의 reargue 와 같은 글). */
+  issue_reraised?: { label: string } & Partial<Omit<IssueReargue, "label">>;
+};
+
+/** 주의 등급 — 읽는 순서이지 판정이 아니다(registry.attention_of). */
+export type Attention = "A" | "B" | "C" | "D";
+
+/**
+ * 등록부 한 행(`GET /targets/{key}/registry` — rr_registry 열 이름 그대로 + 풀어 실은 merged). 주장 · 근거 · 영역은 행에 없고 merged
+ * 에 있다(전에 claim · cites · subject · domain 을 행 칸으로 적어 두어 행을 누르면 화면이 백지가 됐다). `source=panels` 비교 보기는
+ * 저장하지 않은 계산 행이라 저장 칸(verified_by_json …)이 없다.
+ */
 export type RegistryRow = {
+  target_key: string;
   cluster_key: string;
+  owner_sub: string;
+  visibility: string;
   direction: Direction;
-  domain: string;
   mechanism: string;
   mechanism_detail: string;
   change_kind: string;
-  subject: string;
-  severity: Severity;
-  judgement: Judgement;
-  evidence_grade: EvidenceGrade;
-  precedent: Precedent;
+  subject_key: string;
+  severity: Severity | (string & {});
+  sev3: number;
+  judgement: Judgement | (string & {});
+  evidence_grade: EvidenceGrade | (string & {});
+  precedent: Precedent | (string & {});
+  weak_subject: number;
+  priority: number;
   support: number;
   contested: number;
-  status: RegistryStatus;
-  claim: string;
-  cites: Cite[];
-  priority: number;
+  /** 사람 · 코드 상태 — 패널이 전원 기각한 클러스터는 rejected_in_panel 이다. */
+  status: RegistryStatus | "rejected_in_panel" | (string & {});
+  /** 저장 칸 — 패널만 본 비교 보기(저장하지 않은 계산 행)에는 없다. */
+  superseded_by?: string | null;
+  updated_at?: number | null;
+  verified_by_json?: string | null;
+  stale_json?: string | null;
+  ra_entity_id?: string | null;
+  /** 계산 칸 — 패널만 본 비교 보기에만 있다. */
+  rejected?: number;
+  human_n?: number;
+  family_key?: string;
+  support_experts: number | null;
+  support_domains: number | null;
+  support_units: number | null;
+  support_verified: number | null;
+  attention: Attention | null;
+  issue_id: string | null;
+  issue_state: string | null;
+  merged: RegistryMerged;
 };
 
 /**
@@ -1393,11 +1507,48 @@ export type Registry = {
   rows: RegistryRow[];
   /** limit 를 넘겨 잘렸는지(REST 조회는 limit 를 주지 않아 늘 false 다 — MCP 경로가 쓴다). */
   truncated: boolean;
+  /** 거른 뒤의 행 수(offset 앞까지 센다). */
+  total: number;
+  next_offset?: number;
+  /** 거른 목록 전체의 지문 — REST 는 한 번에 다 주므로 쪽을 잇지 않는다. */
+  ledger_rev: string;
   verdict_candidate: VerdictCandidate;
   verdict_final: Verdict | null;
 };
 
+/** 등록부 거름(`GET /targets/{key}/registry` 쿼리) — attention 은 쉼표로 여럿, source=panels 는 패널 finding 만으로 다시 센 비교 보기다. */
+export type RegistryQuery = {
+  status?: string;
+  severity?: string;
+  domain?: string;
+  attention?: string;
+  unit_id?: string;
+  source?: "panels";
+};
+
 export type VerdictUpdate = { verdict: Verdict; note: string };
+/** `PUT /targets/{key}/verdict` 의 답 — 대상 행(routes._target_row). 화면은 등록부를 다시 읽어 확정값을 보인다. */
+export type VerdictSaved = {
+  target_key: string;
+  level: string;
+  close_level: string | null;
+  verdict_candidate: string | null;
+  verdict_final: Verdict | null;
+  verdict_note: string | null;
+  flow: "panels" | "cells";
+};
+/** `PUT /registry/{cluster}/status` 의 답(registry.set_status) — verified · dismissed 는 라벨이 함께 선다. */
+export type RegistryStatusSet = {
+  cluster_key: string;
+  status: string;
+  updated: number;
+  status_source: "human";
+  decided_by: string;
+  decided_at: number;
+  status_log_seq: number;
+  label_needed: boolean;
+  labels?: JsonObject[];
+};
 export type RegistryStatusUpdate = {
   status: RegistryStatusInput;
   evidence_ref?: string;

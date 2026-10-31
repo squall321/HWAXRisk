@@ -12,39 +12,34 @@ import {
   panelJobReady,
 } from "../api/panelJob";
 import type { JudgeLlm, PanelJobForm } from "../api/panelJob";
-import type { Async } from "../hooks/useAsync";
 import { POLL_MS, useAsync, useInterval } from "../hooks/useAsync";
-import { SectionCard, VerbatimBlock } from "../components/SectionCard";
+import { SectionCard } from "../components/SectionCard";
 import type { Column } from "../components/DataTable";
 import { DataTable, KeyValueTable, TableScroll } from "../components/DataTable";
-import { HumanFindingForm } from "../components/HumanFindingForm";
 import { QualityCard } from "../components/QualityCard";
 import { EmptyBlock, ErrorBanner, LoadingBlock, NotReadyBlock } from "../components/StateBlocks";
 import {
   Badge,
   CoverageStatusBadge,
-  EvidenceGradeBadge,
   ExternalSyncBadge,
   JobStateBadge,
-  JudgementBadge,
   LevelBadge,
   LlmBadge,
   PanelStatusBadge,
-  RegistryStatusBadge,
-  SeverityBadge,
   StatusBadge,
   toneOf,
   UnseatedBadge,
   VerdictBadge,
 } from "../components/Badge";
 import { PanelTranscript } from "../components/PanelTranscript";
+import { RegistryCard } from "../components/RegistryCard";
 import { seatActions, seatReasonLabel, skipReasonProblem } from "../lib/targetView";
 import { JobSignalLine, ReviewWorkers } from "../components/JobSignals";
 import {
-  Banner, Button, FormField, FormGrid, Input, Mono, PageHeader, Select, SubPanel, TabBar, TabPanel,
+  Banner, Button, FormField, FormGrid, Input, Mono, PageHeader, Select, TabBar, TabPanel,
 } from "../ui/primitives";
 import { cn } from "../lib/cn";
-import { fmtCounts, fmtEpoch, fmtJson, fmtNum, fmtPct } from "../format";
+import { fmtEpoch, fmtNum, fmtPct } from "../format";
 import type {
   BriefPanel,
   Coverage,
@@ -53,14 +48,11 @@ import type {
   EvidenceItem,
   ExternalSync,
   Panel,
-  Registry,
-  RegistryRow,
-  RegistryStatusInput,
+  RegistryQuery,
   ResyncQueued,
   Seat,
   TargetJobCreated,
   Tier,
-  Verdict,
 } from "../types";
 
 const COVERAGE_STATUSES: CoverageStatus[] = [
@@ -76,8 +68,6 @@ const COVERAGE_STATUSES: CoverageStatus[] = [
   "carried",
 ];
 const TIERS: Tier[] = ["A", "B", "C"];
-const VERDICTS: Verdict[] = ["go", "conditional", "no-go", "undetermined"];
-const REGISTRY_STATUSES: RegistryStatusInput[] = ["verified", "dismissed", "mitigated"];
 const ACTIVE_JOB_STATES = new Set(["queued", "running", "cancelling"]);
 
 /** target_key 접두 → 사람이 읽는 이름. 모르는 접두는 그대로 보인다(어휘를 지어내지 않는다). */
@@ -95,31 +85,6 @@ type ModelMixRow = { key: string; model: string; captured: string; n: number; do
  */
 function Unknown({ children = "—" }: { children?: ReactNode }) {
   return <span className="text-muted-foreground">{children}</span>;
-}
-
-/** 참조 하나를 눌러서 펼쳐 보는 상자(`GET refs/{ref}`). */
-function RefPeek({ value }: { value: string }) {
-  const [open, setOpen] = useState(false);
-  const resolved = useAsync((signal) => riskApi.getRef(value, { signal }), [value], open);
-  return (
-    <div className="mt-3 flex flex-col gap-2">
-      <Button type="button" variant="ghost" size="sm" className="w-fit" onClick={() => setOpen((v) => !v)}>
-        <code>{value}</code>
-      </Button>
-      {open ? (
-        <>
-          <ErrorBanner error={resolved.error} onRetry={resolved.reload} />
-          {resolved.loading && !resolved.data ? <LoadingBlock /> : null}
-          {resolved.data ? (
-            <VerbatimBlock
-              text={fmtJson(resolved.data.payload)}
-              label={`${resolved.data.ref_type} · ${resolved.data.resolved ? "resolved" : "dangling"}`}
-            />
-          ) : null}
-        </>
-      ) : null}
-    </div>
-  );
 }
 
 /** 좌석 조작 거절 — 아는 code 는 제목을 고르고 서버 글은 글자 그대로 보인다. */
@@ -822,270 +787,6 @@ function PanelsCard({ targetKey }: { targetKey: string }) {
   );
 }
 
-function RegistryCard({ targetKey, registry }: { targetKey: string; registry: Async<Registry> }) {
-  // mechanism 선택지는 서버 택소노미에서 온다(§7.1) — 화면이 어휘를 따로 가지면 한쪽만 늙는다.
-  const taxonomy = useAsync((signal) => riskApi.getTaxonomy({ signal }), []);
-  const [severity, setSeverity] = useState("");
-  const [domain, setDomain] = useState("");
-  const [direction, setDirection] = useState("");
-  const [status, setStatus] = useState("");
-  const [selected, setSelected] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  const [nextStatus, setNextStatus] = useState<RegistryStatusInput>("verified");
-  const [evidenceRef, setEvidenceRef] = useState("");
-  const [note, setNote] = useState("");
-  const [verdict, setVerdict] = useState<Verdict>("undetermined");
-  const [verdictNote, setVerdictNote] = useState("");
-
-  const rows = registry.data?.rows ?? [];
-  const filtered = rows.filter(
-    (r) =>
-      (severity === "" || r.severity === severity) &&
-      (domain === "" || r.domain === domain) &&
-      (direction === "" || r.direction === direction) &&
-      (status === "" || r.status === status),
-  );
-  const selectedRow = rows.find((r) => r.cluster_key === selected) ?? null;
-  const domains = Array.from(new Set(rows.map((r) => r.domain))).sort();
-
-  async function saveStatus() {
-    if (!selectedRow) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await riskApi.putRegistryStatus(selectedRow.cluster_key, {
-        status: nextStatus,
-        evidence_ref: evidenceRef.trim() === "" ? undefined : evidenceRef.trim(),
-        note: note.trim() === "" ? undefined : note.trim(),
-      });
-      registry.reload();
-    } catch (err) {
-      setError(err);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  async function saveVerdict() {
-    setBusy(true);
-    setError(null);
-    try {
-      await riskApi.putVerdict(targetKey, { verdict, note: verdictNote });
-      registry.reload();
-    } catch (err) {
-      setError(err);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  const columns: Column<RegistryRow>[] = [
-    { key: "cluster", header: "cluster_key", cell: (r) => <code>{r.cluster_key}</code>, nowrap: true },
-    { key: "direction", header: "direction", cell: (r) => r.direction, nowrap: true },
-    { key: "domain", header: "domain", cell: (r) => r.domain, nowrap: true },
-    { key: "mechanism", header: "mechanism", cell: (r) => `${r.mechanism} · ${r.mechanism_detail}` },
-    { key: "change", header: "change_kind", cell: (r) => r.change_kind, nowrap: true },
-    { key: "subject", header: "subject", cell: (r) => r.subject },
-    { key: "severity", header: "severity", cell: (r) => <SeverityBadge value={r.severity} />, nowrap: true },
-    { key: "judgement", header: "judgement", cell: (r) => <JudgementBadge value={r.judgement} />, nowrap: true },
-    { key: "grade", header: "evidence_grade", cell: (r) => <EvidenceGradeBadge value={r.evidence_grade} />, nowrap: true },
-    { key: "precedent", header: "precedent", cell: (r) => r.precedent, nowrap: true },
-    {
-      key: "support",
-      header: "support / contested",
-      align: "right",
-      nowrap: true,
-      cell: (r) => `${r.support} / ${r.contested}`,
-    },
-    { key: "status", header: "status", cell: (r) => <RegistryStatusBadge value={r.status} />, nowrap: true },
-    { key: "priority", header: "priority", cell: (r) => fmtNum(r.priority), align: "right", nowrap: true },
-  ];
-
-  return (
-    <>
-      <SectionCard title="등록부" subtitle="행을 누르면 주장과 근거 참조가 펼쳐집니다.">
-        <ErrorBanner error={registry.error} onRetry={registry.reload} />
-        <ErrorBanner error={error} />
-        {registry.loading && !registry.data ? <LoadingBlock /> : null}
-        <HumanFindingForm
-          targetKey={targetKey}
-          mechanisms={taxonomy.data?.axes?.mechanism ?? []}
-          onCreated={registry.reload}
-        />
-        {/* 걸러내기 네 칸 — Select 는 기본이 w-full 이라 한 줄에 서려면 폭을 풀어 준다. */}
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <Select
-            className="w-auto min-w-[9rem]"
-            aria-label="severity 걸러내기"
-            value={severity}
-            onChange={(e) => setSeverity(e.target.value)}
-          >
-            <option value="">severity 전체</option>
-            {["경미", "중대", "치명"].map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </Select>
-          <Select
-            className="w-auto min-w-[9rem]"
-            aria-label="domain 걸러내기"
-            value={domain}
-            onChange={(e) => setDomain(e.target.value)}
-          >
-            <option value="">domain 전체</option>
-            {domains.map((d) => (
-              <option key={d} value={d}>
-                {d}
-              </option>
-            ))}
-          </Select>
-          <Select
-            className="w-auto min-w-[9rem]"
-            aria-label="direction 걸러내기"
-            value={direction}
-            onChange={(e) => setDirection(e.target.value)}
-          >
-            <option value="">direction 전체</option>
-            {["risk", "improvement", "neutral"].map((d) => (
-              <option key={d} value={d}>
-                {d}
-              </option>
-            ))}
-          </Select>
-          <Select
-            className="w-auto min-w-[9rem]"
-            aria-label="status 걸러내기"
-            value={status}
-            onChange={(e) => setStatus(e.target.value)}
-          >
-            <option value="">status 전체</option>
-            {["open", "verified", "dismissed", "mitigated", "superseded"].map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </Select>
-          <span className="text-sm text-muted-foreground">
-            {filtered.length} / {rows.length} 행
-          </span>
-        </div>
-        <DataTable
-          columns={columns}
-          rows={filtered}
-          rowKey={(r) => r.cluster_key}
-          selectedKey={selected}
-          onRowClick={(r) => setSelected((cur) => (cur === r.cluster_key ? null : r.cluster_key))}
-          empty="등록부 행이 없습니다."
-        />
-        {selectedRow ? (
-          <SubPanel
-            className="mt-3"
-            title={selectedRow.cluster_key}
-            actions={<RegistryStatusBadge value={selectedRow.status} />}
-          >
-            <VerbatimBlock text={selectedRow.claim} label="claim" />
-            <h3 className="m-0 text-sm text-muted-foreground">근거</h3>
-            {selectedRow.cites.length === 0 ? (
-              <p className="m-0 text-sm text-muted-foreground">근거 참조가 없습니다.</p>
-            ) : (
-              <ul className="m-0 list-disc pl-5 text-sm [&>li]:mb-1">
-                {selectedRow.cites.map((c, i) => (
-                  <li key={`${c.ref}#${i}`}>
-                    <RefPeek value={c.ref} />
-                    <span className="text-sm text-muted-foreground">{c.quote}</span>
-                    {c.dangling ? <Badge tone="bad">dangling</Badge> : null}
-                  </li>
-                ))}
-              </ul>
-            )}
-            <h3 className="m-0 text-sm text-muted-foreground">상태 변경</h3>
-            <FormGrid>
-              <FormField label="바꿀 상태" hint="status">
-                <Select value={nextStatus} onChange={(e) => setNextStatus(e.target.value as RegistryStatusInput)}>
-                  {REGISTRY_STATUSES.map((s) => (
-                    <option key={s} value={s}>
-                      {s}
-                    </option>
-                  ))}
-                </Select>
-              </FormField>
-              <FormField label="근거 참조" hint="evidence_ref · 선택">
-                <Input value={evidenceRef} onChange={(e) => setEvidenceRef(e.target.value)} />
-              </FormField>
-              <FormField label="메모" hint="note · 선택">
-                <Input value={note} onChange={(e) => setNote(e.target.value)} />
-              </FormField>
-            </FormGrid>
-            <Button type="button" variant="outline" className="w-fit" onClick={saveStatus} disabled={busy}>
-              상태 저장
-            </Button>
-          </SubPanel>
-        ) : null}
-      </SectionCard>
-
-      <SectionCard title="판정 확정" subtitle="후보는 집계일 뿐이고 확정은 사람이 합니다.">
-        {registry.data?.verdict_candidate ? (
-          <KeyValueTable
-            rows={[
-              {
-                label: "집계 후보",
-                hint: "verdict_candidate.verdict",
-                value: <VerdictBadge value={registry.data.verdict_candidate.verdict} />,
-              },
-              {
-                label: "후보 사유",
-                hint: "reasons",
-                value:
-                  registry.data.verdict_candidate.reasons.length === 0 ? (
-                    <Unknown>없음</Unknown>
-                  ) : (
-                    <ul className="m-0 list-disc pl-5 text-sm [&>li]:mb-1">
-                      {registry.data.verdict_candidate.reasons.map((r, i) => (
-                        <li key={i}>{r}</li>
-                      ))}
-                    </ul>
-                  ),
-              },
-              {
-                // 열린 · 검증된 클러스터만 센 수다 — 후보가 어디서 나왔는지 보이게 둔다.
-                label: "집계",
-                hint: "counts",
-                value: fmtCounts(registry.data.verdict_candidate.counts),
-              },
-              {
-                label: "확정값",
-                hint: "verdict_final",
-                value: <VerdictBadge value={registry.data.verdict_final ?? "undetermined"} />,
-              },
-            ]}
-          />
-        ) : (
-          <p className="text-sm text-muted-foreground">후보가 아직 없습니다.</p>
-        )}
-        <FormGrid>
-          <FormField label="판정" hint="verdict">
-            <Select value={verdict} onChange={(e) => setVerdict(e.target.value as Verdict)}>
-              {VERDICTS.map((v) => (
-                <option key={v} value={v}>
-                  {v}
-                </option>
-              ))}
-            </Select>
-          </FormField>
-          <FormField label="사유 메모" hint="note">
-            <Input value={verdictNote} onChange={(e) => setVerdictNote(e.target.value)} />
-          </FormField>
-        </FormGrid>
-        <Button type="button" className="mt-3" onClick={saveVerdict} disabled={busy}>
-          확정
-        </Button>
-      </SectionCard>
-    </>
-  );
-}
-
 /** 통합 보고서 — 레벨 상승마다 코드가 RA `deliberation` 템플릿으로 조립한다(§6.9). 조회 경로는 아직 없다. */
 function ConsolidatedReportCard({
   level,
@@ -1288,11 +989,19 @@ export default function TargetPage() {
     [targetKey],
     targetKey !== "",
   );
-  // 헤더의 verdict_final 과 등록부 카드가 같은 응답을 쓴다.
+  const flow = coverage.data?.flow ?? null;
+  // 등록부 거름 가운데 서버 쿼리(주의 등급 · 단위 · 패널만 본 비교 보기). 방식을 안 뒤에 처음 값을 정한다 — 카드 대조 대상은 주의 A · B
+  // 가 기본이다(요청서 7절). 헤더의 verdict_final 과 등록부 카드가 같은 응답을 쓴다(판정 칸은 거름과 상관없다).
+  const [registryQuery, setRegistryQuery] = useState<RegistryQuery | null>(null);
+  const [queryFlow, setQueryFlow] = useState<string | null>(null);
+  if (flow !== null && queryFlow !== `${targetKey}|${flow}`) {
+    setQueryFlow(`${targetKey}|${flow}`);
+    setRegistryQuery(flow === "cells" ? { attention: "A,B" } : {});
+  }
   const registry = useAsync(
-    (signal) => riskApi.getRegistry(targetKey, { signal }),
-    [targetKey],
-    targetKey !== "",
+    (signal) => riskApi.getRegistry(targetKey, registryQuery ?? {}, { signal }),
+    [targetKey, JSON.stringify(registryQuery)],
+    targetKey !== "" && registryQuery !== null,
   );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -1483,7 +1192,13 @@ export default function TargetPage() {
         <PanelsCard targetKey={targetKey} />
       </TabPanel>
       <TabPanel active={tab === "registry"} tab="registry" idPrefix="tgt">
-        <RegistryCard targetKey={targetKey} registry={registry} />
+        <RegistryCard
+          targetKey={targetKey}
+          registry={registry}
+          query={registryQuery ?? {}}
+          onQuery={setRegistryQuery}
+          cells={flow === "cells"}
+        />
       </TabPanel>
       <TabPanel active={tab === "report"} tab="report" idPrefix="tgt">
         <ConsolidatedReportCard
