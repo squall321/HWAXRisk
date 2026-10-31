@@ -162,7 +162,8 @@ def test_a_failed_web_registration_is_recorded_and_due_waits_out_its_pause(clien
     """웹 등록(source web — 앱을 열 때의 자동 등록 · 설정의 버튼, 브라우저가 받아 온 PAT)이 거절되면 portal_pat.auto 의 last_error ·
     last_error_kind · last_error_at 에 적고, `due` 가 그 쉼(게이트웨이 교환 실패와 같은 두 쉼 — 일시 600초 · 사람이 고칠 것은 손잡이)을
     본다 — 쉬는 동안 due 는 false 이고 `paused_until` 이 그 끝이다. 종전에는 게이트웨이 교환 실패만 적어 화면이 브라우저에 쉼을 따로
-    들었다(FE-29). 쉼은 한 기록이라 게이트웨이 길의 바람(portal_pat_wanted)도 같이 쉰다."""
+    들었다(FE-29). 게이트웨이 길의 바람(portal_pat_wanted)은 쉬지 않는다 — 그 길은 브라우저의 포털 세션이 아니라 Claude 에 넣은 PAT 를
+    바꿔 받는다(반대 검토 10-31 — 종전에는 한 기록이 두 길을 함께 쉬게 했다, 다른 계정으로 누른 버튼 하나가 Claude 길을 6시간 멈췄다)."""
     if case == "portal_down":
         box["portal_down"] = True
         pat = _jwt()
@@ -175,7 +176,7 @@ def test_a_failed_web_registration_is_recorded_and_due_waits_out_its_pause(clien
     assert abs(auto["last_error_at"] - now_epoch()) < 60 and auto["last_source"] is None
     held = min(routes.AUTO_RETRY_TRANSIENT_S, config.pat_auto_retry_s()) if kind == "transient" else config.pat_auto_retry_s()
     assert (auto["due"], auto["due_reason"], auto["paused_until"]) == (False, "absent", auto["last_error_at"] + held)
-    assert "portal_pat_wanted" not in _mint(client, GW)
+    assert _mint(client, GW)["portal_pat_wanted"]["reason"] == "absent"
     _age_last_error(held + 1)
     auto = _auto(client)
     assert (auto["due"], auto["paused_until"]) == (True, None) and auto["last_error"] is not None
@@ -197,6 +198,46 @@ def test_a_web_success_after_a_failure_clears_the_pause(client, box):
     assert client.put("/api/me/portal-pat", json={"pat": _jwt(), "source": "web"}, headers=AUTH).status_code == 200
     auto = _auto(client)
     assert (auto["last_error"], auto["last_error_at"], auto["paused_until"], auto["last_source"]) == (None, None, None, "web")
+
+
+@pytest.mark.parametrize("record", ["exchange", "register"])
+def test_a_gateway_failure_pauses_only_the_gateway_path(client, box, record):
+    """게이트웨이 길의 실패 — 교환 실패(`<code>` — Claude 에 넣은 PAT 의 청중 따위)든 게이트웨이가 보낸 PAT 의 등록 거절
+    (`register-<code>`)이든 — 는 그 길의 바람(portal_pat_wanted)만 쉬게 한다. 웹 길(GET /api/me 의 due — 앱을 열 때 브라우저의 포털
+    세션으로 받는다)은 Claude 의 PAT 를 쓰지 않으므로 받을 까닭을 그대로 말한다(반대 검토 10-31 — 종전에는 게이트웨이 실패가 앱을 열
+    때의 자동 등록을 6시간 쉬게 했다). 실패 글은 그대로 보이고(설정의 '마지막 자동 등록 실패'), 웹 등록이 되면 지워진다."""
+    if record == "exchange":
+        r = client.post("/api/auth/portal-pat", headers=GW, json={"error": "widen_audience", "message": "x"})
+    else:
+        r = client.post("/api/auth/portal-pat", headers=GW, json={"pat": _jwt(email="mallory@example.com")})
+    assert r.status_code == (200 if record == "exchange" else 422), r.text
+    auto = _auto(client)
+    assert auto["last_error"].startswith("widen_audience: " if record == "exchange" else "register-pat_email_mismatch: ")
+    assert (auto["last_error_kind"], auto["due"], auto["due_reason"], auto["paused_until"]) == ("final", True, "absent", None)
+    assert "portal_pat_wanted" not in _mint(client, GW)
+    assert client.put("/api/me/portal-pat", json={"pat": _jwt(), "source": "web"}, headers=AUTH).status_code == 200
+    assert _auto(client)["last_error"] is None
+
+
+def test_one_record_for_two_paths_an_overwrite_hands_the_pause_to_the_path_that_failed_last(client, box):
+    """실패 기록은 하나이고 글의 머리가 길을 말한다(`web-` 는 웹 길) — 다른 길의 실패가 덮으면 쉼도 그 길로 넘어가고, 덮인 길은 한 번 더
+    해 본다. 다시 실패하면 제 글을 다시 적으므로 Claude 길의 안내(pat_unavailable)가 Claude 에 넣은 PAT 를 고치라는 말을 되찾는다. 두 길이
+    서로 다른 까닭으로 함께 실패할 때 길을 바꿀 때마다 한 번씩 더 들 뿐이다(열을 더하지 않은 대가 — context-notes RF-15)."""
+    def gateway_fails() -> None:
+        assert client.post("/api/auth/portal-pat", headers=GW, json={"error": "widen_audience", "message": "x"}).status_code == 200
+
+    gateway_fails()
+    assert "portal_pat_wanted" not in _mint(client, GW) and _auto(client)["due"] is True
+    # 설정의 버튼 — 브라우저의 포털 세션이 다른 계정이다. 이제 웹 길이 쉬고 게이트웨이 길은 다시 바란다.
+    r = client.put("/api/me/portal-pat", json={"pat": _jwt(email="mallory@example.com"), "source": "web"}, headers=AUTH)
+    assert r.status_code == 422
+    auto = _auto(client)
+    assert auto["last_error"].startswith("web-pat_email_mismatch: ") and auto["due"] is False and auto["paused_until"]
+    assert _mint(client, GW)["portal_pat_wanted"]["reason"] == "absent"
+    gateway_fails()
+    assert routes.AUTO_ERROR_TEMPLATES["widen_audience"] in runner.pat_unavailable_guidance(get_store(), EMAIL)
+    auto = _auto(client)
+    assert (auto["due"], auto["paused_until"]) == (True, None) and "portal_pat_wanted" not in _mint(client, GW)
 
 
 # ---------------------------------------------------------------- 단언의 portal_pat_wanted

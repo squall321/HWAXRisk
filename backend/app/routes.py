@@ -161,11 +161,22 @@ def pat_due_reason(row: dict | None, *, now: int | None = None, cfg: Any | None 
     return "audience" if missing_audiences(pat) else None
 
 
-def auto_paused_until(prefs: Any, *, now: int | None = None) -> int | None:
-    """마지막 자동 등록 실패의 쉼이 끝나는 시각 — 쉬는 중이 아니면 None. 일시 오류는 짧게(AUTO_RETRY_TRANSIENT_S — 손잡이가 그보다
-    짧으면 손잡이), 사람이 고쳐야 하는 실패는 손잡이(HWAXRISK_PAT_AUTO_RETRY_S)만큼 쉰다. 실패 기록은 하나라 게이트웨이 길
-    (portal_pat_wanted)과 웹 길(GET /api/me 의 due)이 같은 쉼을 본다 — 웹 등록 실패도 적는다(PUT /api/me/portal-pat, 화면 세션 청할 것)."""
+# 웹 등록 거절을 적는 글의 머리(PUT /api/me/portal-pat — `web-<code>: …`). 이 머리가 아닌 기록은 게이트웨이 길의 것이다 — 교환 실패
+# `<code>: …`(auto_error_text) · 게이트웨이가 보낸 PAT 의 등록 거절 `register-<code>: …`.
+WEB_AUTO_ERROR_PREFIX = "web-"
+
+
+def auto_paused_until(prefs: Any, *, path: str, now: int | None = None) -> int | None:
+    """그 길(`path` — web · gateway)의 자동 등록 쉼이 끝나는 시각 — 쉬는 중이 아니면 None. 일시 오류는 짧게(AUTO_RETRY_TRANSIENT_S —
+    손잡이가 그보다 짧으면 손잡이), 사람이 고쳐야 하는 실패는 손잡이(HWAXRISK_PAT_AUTO_RETRY_S)만큼 쉰다.
+
+    마지막 실패가 그 길의 것일 때만 쉰다(글의 머리 — WEB_AUTO_ERROR_PREFIX). 웹 길(GET /api/me 의 due — 앱을 열 때 · 설정의 버튼)은
+    브라우저의 포털 세션으로 받고, 게이트웨이 길(portal_pat_wanted)은 Claude 에 넣은 PAT 를 바꿔 받는다 — 한 길의 실패(Claude PAT 의
+    청중 · 브라우저가 다른 계정)가 다른 길을 쉬게 하지 않는다(반대 검토 10-31 — 종전에는 한 기록이 두 길을 함께 쉬게 했다). 기록은
+    하나라 다른 길의 실패가 덮으면 이 길의 쉼은 끝나고 이 길은 한 번 더 해 본다(실패하면 제 글을 다시 적는다)."""
     if not prefs["auto_error_at"]:
+        return None
+    if str(prefs["auto_error"] or "").startswith(WEB_AUTO_ERROR_PREFIX) != (path == "web"):
         return None
     retry = config.pat_auto_retry_s()
     held = min(AUTO_RETRY_TRANSIENT_S, retry) if prefs["auto_error_kind"] == "transient" else retry
@@ -180,12 +191,13 @@ def portal_pat_auto(store: Any, email: str, row: dict | None) -> dict:
     runner.AUTO_STOP_HINT)을 말한다(D3 · R2-8 · R3-4).
 
     화면은 `enabled && due` 면 지금 버튼이 하는 일(포털 /auth/pat 발급 → PUT /api/me/portal-pat, source 'web')을 조용히 한 번 한다.
-    `due` 는 받을 까닭(due_reason)이 있고 마지막 자동 등록 실패의 쉼 밖일 때만 참이다 — 쉬는 동안은 `paused_until` 이 그 끝이다(종전에는
-    쉼을 보지 않아 화면이 브라우저에 쉼을 따로 들었다, 화면 세션 FE-29 · 청할 것). 설정의 버튼은 쉼과 상관없이 된다.
+    `due` 는 받을 까닭(due_reason)이 있고 웹 길의 쉼(마지막 실패가 웹 등록 거절일 때 — auto_paused_until) 밖일 때만 참이다 — 쉬는 동안은
+    `paused_until` 이 그 끝이다(종전에는 쉼을 보지 않아 화면이 브라우저에 쉼을 따로 들었다, 화면 세션 FE-29 · 청할 것). 게이트웨이 길의
+    실패는 웹 길을 쉬게 하지 않는다(반대 검토 10-31). 설정의 버튼은 쉼과 상관없이 된다.
     """
     prefs = store.get_user_prefs(email)
     reason = pat_due_reason(row)
-    paused = auto_paused_until(prefs)
+    paused = auto_paused_until(prefs, path="web")
     return {"enabled": bool(prefs["portal_pat_auto"]), "due": reason is not None and paused is None, "due_reason": reason,
             "last_source": prefs["auto_source"], "last_at": prefs["auto_at"],
             "last_error": prefs["auto_error"], "last_error_kind": prefs["auto_error_kind"],
@@ -194,8 +206,8 @@ def portal_pat_auto(store: Any, email: str, row: dict | None) -> dict:
 
 
 def portal_pat_wanted(store: Any, email: str, *, now: int | None = None) -> dict | None:
-    """위임 단언 발급에 실을 `portal_pat_wanted` — 자동이 켜져 있고, 지금 받아야 하고(due), 마지막 자동 실패가 쉼
-    (HWAXRISK_PAT_AUTO_RETRY_S)보다 오래됐을 때만. 아니면 None.
+    """위임 단언 발급에 실을 `portal_pat_wanted` — 자동이 켜져 있고, 지금 받아야 하고(due), 게이트웨이 길의 쉼 밖일 때만(마지막 실패가
+    그 길의 것이면 쉼(HWAXRISK_PAT_AUTO_RETRY_S)보다 오래됐을 때 — 웹 등록 거절은 이 길을 쉬게 하지 않는다). 아니면 None.
 
     꼴은 `{name, audiences, scopes, ttl_days, min_remaining_s, reason, require_audiences?}` 이다. `reason` 은 due_reason 이고 늘 있다.
     `require_audiences` 는 reason 이 audience 일 때만 있고 등록된 PAT 에 모자란 청중이다 — 게이트웨이는 호출자 PAT 에 그 청중이
@@ -215,8 +227,9 @@ def portal_pat_wanted(store: Any, email: str, *, now: int | None = None) -> dict
     reason = pat_due_reason(row, now=now)
     if reason is None:
         return None
-    # 일시 오류는 짧게 쉰다(손잡이가 그보다 짧으면 손잡이) — 사람이 고쳐야 하는 실패만 손잡이만큼 쉰다(auto_paused_until — 웹 due 와 같은 쉼).
-    if auto_paused_until(prefs, now=now) is not None:
+    # 일시 오류는 짧게 쉰다(손잡이가 그보다 짧으면 손잡이) — 사람이 고쳐야 하는 실패만 손잡이만큼 쉰다(auto_paused_until — 게이트웨이
+    # 길의 실패만 이 길을 쉬게 한다, 웹 등록 거절은 아니다).
+    if auto_paused_until(prefs, path="gateway", now=now) is not None:
         return None
     retry = config.pat_auto_retry_s()
     if reason == "expiring" and prefs["auto_at"] and now - int(prefs["auto_at"]) < retry:
@@ -611,10 +624,11 @@ def put_portal_pat(body: PortalPatBody, background: BackgroundTasks,
     try:
         return _register_portal_pat(store, owner_sub, body.pat, source=source, background=background)
     except AppError as exc:
-        # 웹 등록(브라우저가 받아 온 PAT — 앱을 열 때의 자동 등록 · 설정의 버튼)의 거절은 자동 등록 실패로 적는다 — 게이트웨이 교환 실패와
-        # 같은 기록 · 같은 쉼이고 GET /api/me 의 due 가 그 쉼을 본다(화면 세션 FE-29 · 청할 것 — 종전에는 화면이 브라우저에 쉼을 따로
-        # 들었다). 붙여 넣은 PAT(manual)의 거절은 자동 등록이 아니라 적지 않는다. 등록이 던지는 거절은 전부 저장 전이다.
-        store.note_portal_pat_error(owner_sub, f"web-{exc.code}: {exc.message}", kind=auto_error_kind(exc.code))
+        # 웹 등록(브라우저가 받아 온 PAT — 앱을 열 때의 자동 등록 · 설정의 버튼)의 거절은 자동 등록 실패로 적는다 — 게이트웨이 실패와
+        # 같은 기록이고 머리 `web-` 가 길을 말한다. 쉬는 것은 웹 길뿐이고 GET /api/me 의 due 가 그 쉼을 본다(화면 세션 FE-29 · 청할 것 —
+        # 종전에는 화면이 브라우저에 쉼을 따로 들었다). 게이트웨이 길은 쉬지 않는다 — 그 길은 브라우저의 포털 세션을 쓰지 않는다(반대 검토
+        # 10-31). 붙여 넣은 PAT(manual)의 거절은 자동 등록이 아니라 적지 않는다. 등록이 던지는 거절은 전부 저장 전이다.
+        store.note_portal_pat_error(owner_sub, f"{WEB_AUTO_ERROR_PREFIX}{exc.code}: {exc.message}", kind=auto_error_kind(exc.code))
         raise
 
 
