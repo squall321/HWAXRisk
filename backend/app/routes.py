@@ -3796,6 +3796,10 @@ def put_issue(issue_id: str, body: IssueActionBody, ident: identity.Identity = D
         _audit(store, email, scope="target", subject_id=target["target_key"], action=f"issue.{body.action}",
                project_id=target["project_id"], before={"issue_id": issue_id, "state": row["state"]},
                after={"issue_id": issue_id, "state": state}, reason=reason)
+        # 쟁점 상태가 완결의 수 · 잔여(쟁점 진행 · 미토의)를 바꿨다 — 완결 캐시를 같은 트랜잭션에서 새로 쓴다. 종전에는 캐시가 그대로라
+        # 진행판 level_label · qualifiers 가 낡고 그 캐시의 basis_hash 로 보낸 확인이 409 residual_changed 였다(화면 세션 청할 것 2).
+        # 사람이 세우는 쟁점 잡은 사슬 표지가 없어(chain_json NULL) 완결이 읽는 값을 바꾸지 않는다 — 잡보다 먼저 써도 된다.
+        closure_module.refresh(store, target["target_key"])
     if body.action == "queue":
         # 사람이 올린 쟁점은 GLM 이다(XR-10 · XR-12) — 살아 있는 claude 쟁점 잡에 붙지 않는다(그 잡은 제 사슬 걸음의 몫만 돌고, 사람이
         # 정한 쟁점은 그 몫이 아니다). 살아 있는 GLM 쟁점 잡이 있으면 그 잡, 없으면 GLM 쟁점 잡을 세운다.
