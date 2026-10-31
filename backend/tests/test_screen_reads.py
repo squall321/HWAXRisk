@@ -253,6 +253,32 @@ def test_the_sameas_table_names_the_pair_key_its_ledger_is_read_with(wired):
     assert routes.get_sameas(base=target, target=base, ident=factories.ident(OWNER))["pair_key"] == out["pair_key"]
 
 
+def test_the_sameas_g2_carries_the_live_ack_like_the_snapshot_state(wired):
+    """대응표의 G2 는 스냅샷 상태의 G2 와 같은 레코드다 — 지금 살아 있는 ack 를 얹는다(비교 화면의 게이트 표 · 배지가 record.ack_by 를
+    읽는다). 종전에는 상태 원문 그대로라 스냅샷 화면이 'fail(2) · ack' 일 때 비교 화면은 ack 없이 'fail(2)' 였다."""
+    store = wired
+    owner = factories.ident(OWNER)
+    a = factories.make_project(store, code="G2-A")
+    b = factories.make_project(store, code="G2-B")
+    results = factories.fixture_adapter_results()
+    base = factories.make_snapshot(store, a, results, label="A")["snapshot_id"]
+    target = factories.make_snapshot(store, b, results, label="B")["snapshot_id"]
+    # 의미층 대응 미확정이 남은 동결(G2 fail) — 픽스처가 그 꼴을 만들지 않아 저장된 상태 원문과 gates_json 의 G2 를 같은 값으로 바꾼다.
+    row = store.query_one("SELECT state_json, gates_json FROM rr_states WHERE snapshot_id = ?", (target,))
+    state_json, gates_json = json.loads(row["state_json"]), json.loads(row["gates_json"])
+    for gates in (state_json["gates"], gates_json):
+        gates["G2"].update({"pass": False, "count": 2, "effect": "mark"})
+    store.execute("UPDATE rr_states SET state_json = ?, gates_json = ? WHERE snapshot_id = ?",
+                  (json.dumps(state_json), json.dumps(gates_json), target))
+    routes.post_gate_ack(target, "G2", routes.GateAckBody(reason="대응 확인 중"), ident=owner)
+
+    in_state = routes.get_snapshot(target, part="state", ident=owner)["gates"]["G2"]
+    in_table = routes.get_sameas(base=base, target=target, ident=owner)["G2"]
+    assert in_table == in_state and (in_table["pass"], in_table["ack_by"]) == (False, OWNER)
+    routes.delete_gate_ack(target, "G2", ident=owner)
+    assert routes.get_sameas(base=base, target=target, ident=owner)["G2"]["ack_by"] is None
+
+
 # ---------------------------------------------------------------- 6. GET /targets/{key}/coverage — job.signals
 def test_the_panel_job_on_the_board_lists_one_signal_per_running_panel(risk_store, tmp_path, monkeypatch):
     """진행판 패널 잡의 `signals` 는 지금 도는 그 잡의 패널마다 한 줄이다(`signal` 은 호환으로 그대로). 러너는 대상마다 패널을 하나씩만

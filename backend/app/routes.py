@@ -2620,7 +2620,9 @@ def get_sameas(base: str = Query(...), target: str = Query(...),
         "pair", sameas.load_ledger(store, "pair", pair_key, owner_sub),
     )
     rows = sameas.review_rows(links, list(base_ir.get("nodes") or []), list(target_ir.get("nodes") or []))
-    target_state = state_module.load_state(store, target) or {}
+    # G2 는 스냅샷 상태(GET /snapshots/{id}?part=state)와 같은 레코드다 — 지금 살아 있는 ack 를 얹는다(두 화면이 같은 게이트를 달리 말하지 않게).
+    target_state = state_module.load_state(store, target)
+    target_state = _with_live_acks(store, target, target_state) if target_state is not None else {}
     return {
         # 이 표가 원장을 읽은 열쇠 — 확정 · 거부(POST /sameas/decide, scope pair)는 이 값을 그대로 싣는다(화면이 짓지 않는다).
         "pair_key": pair_key,
