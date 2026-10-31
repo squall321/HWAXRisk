@@ -106,8 +106,9 @@
 - 사람 조작 감사(2026-10-31, 사용자 결정) — `jobs/{id}/{action}`(MCP `risk_job_action` 도 같은 함수) · `registry/{cluster}/status` ·
   `targets/{key}/verdict` 는 rr_audit 한 행씩(`job.pause|resume|cancel` — 잡 행을 바꾼 조작만 · `registry.status` — 바꾼 대상 행마다
   '<대상>#<클러스터>' · `verdict.final` — 확정마다)을 남겨 대상 감사와 통합 보고서 '사람 개입 요약' 에 선다. 행에는 코드 어휘(상태 · 보류 코드 ·
-  상태 기록 seq · 판정 값)만 싣고 사람이 쓴 글(note · evidence_ref)은 싣지 않는다. 코드가 일으킨 전이(일일 상한 · 코드 보류 · 자동 재개 · 엔진
-  쪽 멈춤 …)는 남기지 않는다 — 근거는 `../context-notes.md` AU-1 ~ AU-7.
+  상태 기록 seq · 판정 값)만 싣고 사람이 쓴 글(note · evidence_ref)은 싣지 않는다. 코드가 일으킨 전이(일일 상한 · 코드 보류 · 자동 재개 …)는
+  남기지 않는다. 포털 화면의 '멈춤'(엔진 쪽 멈춤 A24)이 잡을 멈추면 엔진이 알린 그 사람의 `job.pause`(actor_verified 0 · web)다. 감사 행은 전이와
+  한 트랜잭션이다(취소도 — 전문가 보고서 다시 짓기보다 먼저) — 근거는 `../context-notes.md` AU-1 ~ AU-11.
 
 ## 외부 반영 — RA 보내는 쪽 · 거두기(RK-01, 2026-10-31)
 
