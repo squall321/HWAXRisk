@@ -1,4 +1,4 @@
-// 스냅샷 화면 — 개요·강등 플래그·게이트·노드/엣지·롤업·dims·rule_hits·character_seed·warnings·호출 로그(계획 §8.2.4 SnapshotPage 행). ProjectPage 가 ?snapshot= 일 때 그린다.
+// 스냅샷 화면 — 게이트(판정 불가 · ack)·개요·보드·강등 표지·요약 · 신호·요구 여유·노드(kind 거름 · 정규 키 원장)·엣지·롤업·dims·rule_hits·warnings·호출 로그(계획 §8.2.4 SnapshotPage 행). ProjectPage 가 ?snapshot= 일 때 그린다.
 import { useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { ExternalLink, Plus } from "lucide-react";
@@ -9,52 +9,24 @@ import type { Column } from "../components/DataTable";
 import { DataTable, KeyValueTable } from "../components/DataTable";
 import { EmptyBlock, ErrorBanner, LoadingBlock, NotReadyBlock } from "../components/StateBlocks";
 import { Badge, SeverityBadge, StatusBadge } from "../components/Badge";
-import { GateBanner, GateTable, isGateFailing } from "../components/GateBanner";
-import { Banner, Button, Input, Mono, PageHeader } from "../ui/primitives";
-import { fmtCell, fmtCounts, fmtEpoch, fmtJson, fmtNum } from "../format";
-import type { DimNamed, Gate, IrEdge, IrNode, IrWarning, JsonObject, RuleHit, SnapshotCall } from "../types";
-
-/** 스냅샷(단일) 에 나오는 게이트. G7 은 pair 전용이라 여기에 없다(§3.2.1). */
-const SNAP_GATE_IDS = ["G1", "G2", "G3", "G4", "G5", "G6"];
-
-/** 게이트 id → 계획 §3.2.2 의 이름. 판정·사유는 서버가 준 값(effect·message)이 정본이다. */
-const GATE_LABEL: Record<string, string> = {
-  G1: "dup_or_anon_names",
-  G2: "sameas_pending",
-  G3: "iface_unconfirmed",
-  G4: "coordinate",
-  G5: "partial_scope",
-  G6: "unit_scale",
-  G7: "yardstick_parity(pair 전용)",
-};
-
-/**
- * 강등·결측 플래그 사전 — `missing.*`(§3.2.1) 과 어댑터 `degraded[]` 코드(§2.2)를 한 자리에서 읽는다.
- * 사전에 없는 코드는 서버 문자열을 그대로 보인다.
- */
-const FLAG_LABEL: Record<string, string> = {
-  ecad_absent: "ecad 소스 없음",
-  dyna_absent: "dyna 소스 없음",
-  dyna_result_absent: "dyna 결과 리포트 없음",
-  result_kind_mismatch: "결과 kind 가 서로 다름",
-  world_transform_absent: "world 좌표 변환 없음",
-  volume_null: "부피 값 없음",
-  material_density_unsourced: "밀도 출처 없음",
-  mcp_degraded: "REST 원문 없이 MCP 로만 캡처",
-  no_world_transform: "어댑터가 world 좌표 변환을 얻지 못함",
-  no_node_id: "소스 노드 id 없음(이름으로 대응)",
-  volume_null_pre_d168: "부피·재질이 전부 null(재파싱 대상)",
-  tol_config_unknown: "공차 설정 해시 없음",
-  interfaces_truncated: "계면 목록 잘림",
-  edges_truncated: "엣지 목록 잘림",
-  components_truncated: "ecad 컴포넌트 목록 잘림",
-  nets_truncated: "ecad 넷 목록 잘림",
-  truncated_scan: "스캔 잘림",
-  no_secid: "secid 없음",
-  detect_absent: "detect 산출 없음",
-  report_parts_mismatch: "리포트 파트명과 K파일 이름 불일치",
-  unit_converted_mil: "mil 을 mm 로 환산",
-};
+import { GATE_LABEL, GateBanner, GateTable } from "../components/GateBanner";
+import { KeyLedgerPanel } from "../components/KeyLedgerPanel";
+import { Banner, Button, Input, Mono, PageHeader, Select } from "../ui/primitives";
+import { fmtCell, fmtEpoch, fmtJson, fmtNum } from "../format";
+import {
+  SNAP_GATE_IDS,
+  boardNode,
+  boardRows,
+  dimValue,
+  filterNodes,
+  marginRows,
+  nodeKindCounts,
+  ruleCounts,
+  ruleVerdict,
+  snapshotFlags,
+} from "../lib/snapshotView";
+import type { FlagChip } from "../lib/snapshotView";
+import type { DimNamed, IrEdge, IrNode, IrWarning, JsonObject, ReqMarginRow, RuleHit, SnapshotCall } from "../types";
 
 /** §2.9 rollups.by_assembly 한 행. 서버가 준 자유 JSON 을 열 이름으로만 읽는다. */
 const ROLLUP_COLUMNS: Array<{ key: string; header: string; align?: "right" }> = [
@@ -69,28 +41,40 @@ const ROLLUP_COLUMNS: Array<{ key: string; header: string; align?: "right" }> = 
 /** 배지 여러 개를 한 줄로 흘리는 묶음(기존 `.rr-badge-group`). 이 화면에서만 쓰므로 지역 상수로 둔다. */
 const BADGE_GROUP = "inline-flex flex-wrap items-center gap-1";
 
-function NodeTable({ nodes }: { nodes: IrNode[] }) {
+/** 노드 kind 의 사람 말 — 값은 그대로 보이고 뜻만 붙인다. 사전에 없는 kind 는 글자 그대로다. */
+const NODE_KIND_LABEL: Record<string, string> = {
+  part: "부품(MCAD)",
+  assembly: "어셈블리",
+  file: "파일",
+  pid: "PID(dyna)",
+  contact_set: "접촉(dyna)",
+  component: "부품(ECAD)",
+  layer: "층(ECAD)",
+  board: "보드(ECAD)",
+  net: "넷(ECAD)",
+};
+
+function NodeTable({ nodes, onPick, picked }: { nodes: IrNode[]; onPick: (node: IrNode) => void; picked: string | null }) {
   const [q, setQ] = useState("");
-  const filtered = useMemo(() => {
-    const needle = q.trim().toLowerCase();
-    if (!needle) return nodes;
-    return nodes.filter((n) =>
-      [n.nid, n.name, n.ckey ?? "", n.dn ?? "", n.geom_fp ?? ""].some((v) => v.toLowerCase().includes(needle)),
-    );
-  }, [nodes, q]);
+  const [kind, setKind] = useState("");
+  const kinds = useMemo(() => nodeKindCounts(nodes), [nodes]);
+  const filtered = useMemo(() => filterNodes(nodes, kind, q), [nodes, kind, q]);
 
   const columns: Column<IrNode>[] = [
     { key: "nid", header: "nid", cell: (n) => <code>{n.nid}</code>, nowrap: true },
-    { key: "name", header: "name", cell: (n) => n.name },
-    { key: "ckey", header: "ckey", cell: (n) => (n.ckey ? <code>{n.ckey}</code> : "-"), nowrap: true },
-    { key: "dn", header: "dn", cell: (n) => n.dn ?? "-" },
-    { key: "geom_fp", header: "geom_fp", cell: (n) => (n.geom_fp ? <code>{n.geom_fp}</code> : "-"), nowrap: true },
+    { key: "kind", header: "kind", cell: (n) => n.kind, nowrap: true },
+    { key: "label", header: "이름", hint: "label", cell: (n) => n.label },
+    { key: "domain", header: "도메인", hint: "domain", cell: (n) => n.domain, nowrap: true },
+    { key: "group", header: "묶음", hint: "group", cell: (n) => n.group ?? <span className="text-muted-foreground">—</span>, nowrap: true },
+    { key: "ckey", header: "정규 키", hint: "ckey", cell: (n) => (n.ckey ? <code>{n.ckey}</code> : "-"), nowrap: true },
+    { key: "dn", header: "dn", cell: (n) => (n.dn ? <code>{n.dn}</code> : "-"), nowrap: true },
     {
       key: "flags",
-      header: "flags",
+      header: "표지",
+      hint: "status_flags",
       cell: (n) => (
         <span className={BADGE_GROUP}>
-          {n.flags.map((f) => (
+          {n.status_flags.map((f) => (
             <Badge key={f} tone="neutral">
               {f}
             </Badge>
@@ -103,17 +87,33 @@ function NodeTable({ nodes }: { nodes: IrNode[] }) {
   return (
     <>
       <div className="mb-3 flex flex-wrap items-center gap-2">
+        <Select className="w-auto min-w-[12rem]" aria-label="노드 kind 거르기" value={kind} onChange={(e) => setKind(e.target.value)}>
+          <option value="">kind 전체</option>
+          {kinds.map((k) => (
+            <option key={k.kind} value={k.kind}>
+              {NODE_KIND_LABEL[k.kind] ? `${NODE_KIND_LABEL[k.kind]} ${k.kind}` : k.kind} · {k.n}
+            </option>
+          ))}
+        </Select>
         <Input
           className="max-w-xs"
-          placeholder="nid · name · ckey · dn 검색"
+          placeholder="nid · 이름 · ckey · dn 검색"
+          aria-label="노드 검색"
           value={q}
           onChange={(e) => setQ(e.target.value)}
         />
         <span className="text-sm text-muted-foreground">
-          {filtered.length} / {nodes.length} 개
+          {filtered.length} / {nodes.length} 개 — 행을 누르면 아래에 그 정규 키의 원장 조작이 열립니다.
         </span>
       </div>
-      <DataTable columns={columns} rows={filtered} rowKey={(n) => n.nid} empty="노드가 없습니다." />
+      <DataTable
+        columns={columns}
+        rows={filtered}
+        rowKey={(n) => n.nid}
+        selectedKey={picked}
+        onRowClick={onPick}
+        empty="노드가 없습니다."
+      />
     </>
   );
 }
@@ -124,18 +124,24 @@ function EdgeTable({ edges }: { edges: IrEdge[] }) {
     { key: "kind", header: "kind", cell: (e) => <StatusBadge value={e.kind} />, nowrap: true },
     { key: "status", header: "status", cell: (e) => <StatusBadge value={e.status} />, nowrap: true },
     { key: "a", header: "a", cell: (e) => <code>{e.a}</code>, nowrap: true },
-    { key: "b", header: "b", cell: (e) => <code>{e.b}</code>, nowrap: true },
-    { key: "min_gap", header: "min_gap", cell: (e) => fmtNum(e.min_gap), align: "right", nowrap: true },
+    { key: "b", header: "b", cell: (e) => (e.b ? <code>{e.b}</code> : "-"), nowrap: true },
+    {
+      key: "min_gap",
+      header: "min_gap",
+      cell: (e) => fmtNum(typeof e.attrs.min_gap === "number" ? e.attrs.min_gap : null),
+      align: "right",
+      nowrap: true,
+    },
     {
       key: "pen",
       header: "penetration_depth",
       align: "right",
       nowrap: true,
-      // 하한 표기는 서버 플래그를 그대로 옮긴 것이다.
+      // 하한 표기는 서버 플래그(attrs.penetration_depth_is_lower_bound)를 그대로 옮긴 것이다.
       cell: (e) =>
-        e.penetration_depth === null
+        typeof e.attrs.penetration_depth !== "number"
           ? "-"
-          : `${e.penetration_is_lower_bound ? "≥ " : ""}${fmtNum(e.penetration_depth)}`,
+          : `${e.attrs.penetration_depth_is_lower_bound ? "≥ " : ""}${fmtNum(e.attrs.penetration_depth)}`,
     },
   ];
   return <DataTable columns={columns} rows={edges} rowKey={(e) => e.eid} empty="엣지가 없습니다." />;
@@ -144,10 +150,10 @@ function EdgeTable({ edges }: { edges: IrEdge[] }) {
 function DimsTable({ dims }: { dims: DimNamed[] }) {
   const columns: Column<DimNamed>[] = [
     { key: "name", header: "name", cell: (d) => d.name, nowrap: true },
-    { key: "kind", header: "kind", cell: (d) => d.kind, nowrap: true },
-    { key: "unit", header: "unit", cell: (d) => d.unit ?? "-", nowrap: true },
-    { key: "value", header: "value", cell: (d) => fmtNum(d.value), align: "right", nowrap: true },
-    { key: "ref", header: "ref", cell: (d) => (d.ref ? <code>{d.ref}</code> : "-") },
+    { key: "method", header: "method", cell: (d) => d.method, nowrap: true },
+    { key: "value", header: "값", hint: "value · null_reason", cell: (d) => dimValue(d), align: "right", nowrap: true },
+    { key: "ref", header: "ref", cell: (d) => (d.ref ? <code>{fmtCell(d.ref)}</code> : "-") },
+    { key: "formula", header: "formula", cell: (d) => d.formula ?? "-" },
   ];
   return <DataTable columns={columns} rows={dims} rowKey={(d, i) => `${d.name}#${i}`} empty="dims_named 가 없습니다." />;
 }
@@ -163,80 +169,71 @@ function WarningTable({ warnings }: { warnings: IrWarning[] }) {
   return <DataTable columns={columns} rows={warnings} rowKey={(w, i) => `${w.code}#${i}`} empty="경고가 없습니다." />;
 }
 
+/** 규칙 적중 — 평가 불가(evaluable=false)는 회색 '평가 불가(사유)' 로 보이고 pass 집계에 들지 않는다(§3.2.6). */
 function RuleHitTable({ hits }: { hits: RuleHit[] }) {
+  const counts = ruleCounts(hits);
   const columns: Column<RuleHit>[] = [
     { key: "rule", header: "rule", cell: (h) => <code>{h.rule}</code>, nowrap: true },
     { key: "severity", header: "severity", cell: (h) => <SeverityBadge value={h.severity} />, nowrap: true },
     {
       key: "pass",
       header: "판정",
-      cell: (h) => <Badge tone={h.pass ? "ok" : "bad"}>{h.pass ? "pass" : "fail"}</Badge>,
+      cell: (h) => {
+        const v = ruleVerdict(h);
+        return (
+          <Badge tone={v.tone} title={v.title}>
+            {v.label}
+          </Badge>
+        );
+      },
       nowrap: true,
     },
-    { key: "found", header: "found", cell: (h) => h.found },
+    { key: "found", header: "found", cell: (h) => h.found?.text ?? "-" },
     { key: "why", header: "why_it_matters", cell: (h) => h.why_it_matters },
     { key: "fix", header: "fix_hint", cell: (h) => h.fix_hint },
   ];
-  return <DataTable columns={columns} rows={hits} rowKey={(h, i) => `${h.rule}#${i}`} empty="규칙 위반이 없습니다." />;
+  return (
+    <>
+      <p className="m-0 mb-2 text-sm text-muted-foreground">
+        pass {counts.pass} · fail {counts.fail} · 평가 불가 {counts.notEvaluable} — 평가 불가는 pass 로 세지 않습니다.
+      </p>
+      <DataTable columns={columns} rows={hits} rowKey={(h, i) => `${h.rule}#${i}`} empty="규칙 적중이 없습니다." />
+    </>
+  );
 }
 
 function CallTable({ calls }: { calls: SnapshotCall[] }) {
   const columns: Column<SnapshotCall>[] = [
     { key: "ref", header: "참조", cell: (c) => <code>{`tool:${c.call_id}`}</code>, nowrap: true },
-    { key: "app", header: "app_key", cell: (c) => c.app_key, nowrap: true },
+    { key: "kind", header: "source_kind", cell: (c) => c.source_kind ?? "-", nowrap: true },
+    { key: "app", header: "app_key", cell: (c) => c.app_key ?? "-", nowrap: true },
     { key: "tool", header: "tool", cell: (c) => c.tool, nowrap: true },
-    { key: "args", header: "args_digest", cell: (c) => (c.args_digest ? <code>{c.args_digest}</code> : "-") },
-    { key: "ok", header: "ok", cell: (c) => <Badge tone={c.ok ? "ok" : "bad"}>{c.ok ? "ok" : "fail"}</Badge>, nowrap: true },
-    { key: "at", header: "called_at", cell: (c) => fmtEpoch(c.called_at), nowrap: true },
+    { key: "args", header: "args", cell: (c) => <code className="text-xs">{fmtCell(c.args)}</code> },
+    {
+      key: "ok",
+      header: "ok",
+      cell: (c) => <Badge tone={c.ok ? "ok" : "bad"}>{c.ok ? "ok" : "fail"}</Badge>,
+      nowrap: true,
+    },
+    { key: "error", header: "error", cell: (c) => c.error ?? "-" },
+    { key: "at", header: "started_at", cell: (c) => fmtEpoch(c.started_at), nowrap: true },
   ];
   return <DataTable columns={columns} rows={calls} rowKey={(c) => c.call_id} empty="호출 로그가 없습니다." />;
 }
 
-/** 강등·결측 플래그 칩. 뜻은 사전에서 붙이고 값 자체는 서버 문자열 그대로다. */
-function FlagList({ flags }: { flags: string[] }) {
-  if (flags.length === 0) return <p className="m-0 text-sm text-muted-foreground">강등·결측 플래그가 없습니다.</p>;
+/** 강등 · 결측 표지 칩. 뜻은 사전에서 붙이고 값 자체는 서버 문자열 그대로다. */
+function FlagList({ flags }: { flags: FlagChip[] }) {
+  if (flags.length === 0) return <p className="m-0 text-sm text-muted-foreground">강등 · 결측 표지가 없습니다.</p>;
   return (
     <span className={BADGE_GROUP}>
       {flags.map((f) => (
-        <Badge key={f} tone="warn" title={FLAG_LABEL[f] ?? "사전에 없는 코드입니다."}>
-          {f}
-          {FLAG_LABEL[f] ? ` — ${FLAG_LABEL[f]}` : null}
+        <Badge key={`${f.where}:${f.code}`} tone="warn" title={f.label ?? "사전에 없는 코드입니다."}>
+          {f.where === "missing" ? "" : `${f.where} · `}
+          {f.code}
+          {f.label ? ` — ${f.label}` : null}
         </Badge>
       ))}
     </span>
-  );
-}
-
-/** 판정표가 담지 못하는 세 가지 — 게이트 이름, 이번 응답에 오지 않은 게이트, 값이 비어 있는 게이트. */
-function GateSupplement({ gates }: { gates: Gate[] }) {
-  const seen = new Set(gates.map((g) => g.id));
-  const notJudged = SNAP_GATE_IDS.filter((id) => !seen.has(id));
-  const unknown = gates.filter((g) => g.value === null).map((g) => g.id);
-  return (
-    <ul className="m-0 list-disc pl-5 text-sm [&>li]:mb-1">
-      <li className="text-muted-foreground">
-        {SNAP_GATE_IDS.map((id) => `${id} ${GATE_LABEL[id]}`).join(" · ")}
-      </li>
-      {notJudged.length > 0 ? (
-        <li>
-          이번 응답에 오지 않은 게이트 —{" "}
-          <span className={BADGE_GROUP}>
-            {notJudged.map((id) => (
-              <Badge key={id} tone="muted" title={GATE_LABEL[id]}>
-                {id}
-              </Badge>
-            ))}
-          </span>
-        </li>
-      ) : null}
-      {unknown.length > 0 ? (
-        <li>
-          값이 비어 있는 게이트 — <code>{unknown.join(" · ")}</code>{" "}
-          <span className="text-muted-foreground">이 게이트의 값이 비어 있습니다.</span>
-        </li>
-      ) : null}
-      <li className="text-muted-foreground">G7 {GATE_LABEL.G7} 은 두 스냅샷을 비교할 때만 나옵니다.</li>
-    </ul>
   );
 }
 
@@ -269,6 +266,84 @@ function RollupBlock({ rollups }: { rollups: JsonObject }) {
   );
 }
 
+/** 보드 묶음(ecad-1031 §7) — board 노드의 attrs 를 사람 말 라벨로. null 은 '없음', 2단계 칸에는 '2단계' 를 붙인다. */
+function BoardCard({ node }: { node: IrNode }) {
+  return (
+    <SectionCard title="보드" subtitle="ODB 허브에서 실은 ECAD 보드 — 1단계는 보드 · 적층 · 분류된 부품까지입니다.">
+      <KeyValueTable
+        rows={boardRows(node).map((r) => ({
+          label: r.label,
+          hint: r.hint,
+          value: (
+            <span className="inline-flex flex-wrap items-center gap-1.5">
+              {r.value === null ? <span className="text-muted-foreground">없음</span> : r.value}
+              {r.phase2 ? (
+                <Badge tone="muted" title="부품 좌표 · 넷 · 외곽 원점은 ODB 허브 쪽 도구가 붙은 뒤(2단계)에 실린다">
+                  2단계
+                </Badge>
+              ) : null}
+            </span>
+          ),
+        }))}
+      />
+    </SectionCard>
+  );
+}
+
+/** 요구 여유 표(`sig:req.margin`) — margin 오름차순, 미측정은 0 이 아니라 '미측정' 이다(§2.8b · §3.2.3). */
+function MarginCard({ rows, reqAbsent }: { rows: ReqMarginRow[] | null; reqAbsent: boolean | undefined }) {
+  const columns: Column<ReqMarginRow>[] = [
+    { key: "name", header: "요구", hint: "name", cell: (r) => <code>{`req:${r.name}`}</code>, nowrap: true },
+    { key: "op", header: "비교", hint: "op", cell: (r) => r.op ?? "-", nowrap: true },
+    { key: "limit", header: "한계", hint: "limit", cell: (r) => `${fmtCell(r.limit)}${r.unit ? ` ${r.unit}` : ""}`, nowrap: true },
+    {
+      key: "actual",
+      header: "실측",
+      hint: "actual",
+      align: "right",
+      nowrap: true,
+      cell: (r) => (r.known && r.actual !== null ? fmtNum(r.actual) : <span className="text-muted-foreground">미측정</span>),
+    },
+    {
+      key: "margin",
+      header: "여유",
+      hint: "margin",
+      align: "right",
+      nowrap: true,
+      cell: (r) =>
+        r.margin === null ? (
+          <span className="text-muted-foreground">미측정</span>
+        ) : (
+          <Badge tone={r.margin <= 0 ? "bad" : "ok"}>{fmtNum(r.margin)}</Badge>
+        ),
+    },
+    {
+      key: "rel",
+      header: "상대 여유",
+      hint: "rel",
+      align: "right",
+      nowrap: true,
+      cell: (r) => (r.rel === null ? <span className="text-muted-foreground">—</span> : `${(r.rel * 100).toFixed(1)}%`),
+    },
+    { key: "status", header: "상태", hint: "status", cell: (r) => <StatusBadge value={r.status} />, nowrap: true },
+  ];
+  return (
+    <SectionCard title="요구 여유" subtitle="sig:req.margin 을 여유 오름차순으로 — 서버가 정렬한 그대로이고 미측정은 맨 뒤입니다.">
+      {rows === null ? (
+        <Banner
+          tone="info"
+          title="이 스냅샷의 상태에 요구 대조(sig:req.margin)가 없습니다."
+          detail="이 서버는 동결할 때 요구를 대조하지 않고, 요구를 고쳐도 상태를 다시 세지 않습니다 — 서버가 그 신호를 실으면 이 자리에 여유 표가 섭니다."
+        />
+      ) : rows.length === 0 ? (
+        <Badge tone="muted">{reqAbsent ? "요구 미등록 — 판정은 좌석 기준" : "치수 한계 요구가 없습니다"}</Badge>
+      ) : (
+        <DataTable columns={columns} rows={rows} rowKey={(r) => r.name} empty="요구 여유가 없습니다." />
+      )}
+    </SectionCard>
+  );
+}
+
 export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
   const navigate = useNavigate();
   const ir = useAsync((signal) => riskApi.getSnapshotIr(snapshotId, { signal }), [snapshotId]);
@@ -279,22 +354,25 @@ export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<unknown>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [pickedNode, setPickedNode] = useState<IrNode | null>(null);
 
   // 서버가 아직 없는 동안 필드가 비어 와도 화면이 살아 있게 기본값을 둔다.
   const dims = ir.data?.dims_named ?? [];
   const nodes = ir.data?.nodes ?? [];
   const edges = ir.data?.edges ?? [];
   const warnings = ir.data?.warnings ?? [];
-  const missing = ir.data?.missing ?? [];
   const rollups = ir.data?.rollups ?? {};
-  const gates = state.data?.gates ?? [];
-  /** G6 fail 이면 서버가 diff·타깃 생성을 409 로 막는다(§3.2.2 effect=block). 화면은 그 사실만 옮긴다. */
-  const blocked = isGateFailing(gates, "G6");
-  /** §8.2.4 — volume·material 이 전부 null 이면 소스 앱에서 재파싱하라고만 알린다(앱은 쓰기를 하지 않는다). */
-  const needsReparse = useMemo(() => {
-    const relevant = dims.filter((d) => d.kind === "volume" || d.kind === "material");
-    return relevant.length > 0 && relevant.every((d) => d.value === null);
-  }, [dims]);
+  const flags = useMemo(() => snapshotFlags(ir.data), [ir.data]);
+  const board = useMemo(() => boardNode(ir.data), [ir.data]);
+  const kinds = useMemo(() => (ir.data?.sources ?? []).map((s) => String(s.kind)), [ir.data]);
+  const gates = state.data?.gates ?? null;
+  /**
+   * 서버가 센 차단(state.is_blocked — G6 fail 이거나 G6 판정 불가 unit_unknown)이면 diff · 타깃 만들기가 409 로 막힌다(§2.12).
+   * 화면은 그 사실만 옮긴다 — 판정 불가 일반(null)은 차단이 아니다.
+   */
+  const blocked = state.data?.blocked === true;
+  /** §8.2.4 — mcad 부품의 부피 · 재질이 전부 null 이면 소스 앱에서 재파싱하라고만 알린다(앱은 쓰기를 하지 않는다). */
+  const needsReparse = ir.data?.missing?.volume_null === true;
 
   async function openSingleReview() {
     const text = state.data?.summary_text;
@@ -324,6 +402,7 @@ export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
 
   /** 돌아갈 과제. id 는 IR 응답에만 있으므로 아직 오지 않았으면 링크를 만들지 않는다(없는 주소를 지어내지 않는다). */
   const projectId = ir.data?.project_id ?? null;
+  const signals = Object.entries(state.data?.signals ?? {}).sort(([a], [b]) => a.localeCompare(b));
 
   return (
     <>
@@ -341,7 +420,7 @@ export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
             <span>과제</span>
           )
         }
-        title="스냅샷"
+        title={ir.data?.label ? `스냅샷 ${ir.data.label}` : "스냅샷"}
         subtitle={
           // id 는 제목이 아니라 보조 사실이다 — 사람이 읽는 이름은 '스냅샷' 이고 id 는 서버와 대조할 때 쓴다.
           <span className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
@@ -350,7 +429,7 @@ export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
               <span className="font-mono opacity-60">snapshot_id</span> <Mono>{snapshotId}</Mono>
             </span>
             {ir.data ? <span>동결 {fmtEpoch(ir.data.captured_at)}</span> : null}
-            {ir.data && ir.data.kinds.length > 0 ? <span>소스 {ir.data.kinds.join(" · ")}</span> : null}
+            {kinds.length > 0 ? <span>소스 {kinds.join(" · ")}</span> : null}
           </span>
         }
         actions={
@@ -364,7 +443,7 @@ export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
               type="button"
               onClick={createTarget}
               disabled={busy || blocked}
-              title={blocked ? "G6 fail 인 스냅샷은 타깃을 만들 수 없습니다." : undefined}
+              title={blocked ? "G6 로 차단된 스냅샷은 타깃을 만들 수 없습니다." : undefined}
             >
               <Plus aria-hidden="true" />
               타깃 만들기
@@ -377,9 +456,11 @@ export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
       <ErrorBanner error={actionError} />
       {notice ? <p className="mb-3 text-sm text-muted-foreground">{notice}</p> : null}
 
-      {/* 순서를 바꿨다 — 게이트를 첫 카드로 올렸다. G6 fail 하나가 '타깃 만들기' 를 막으므로 이 화면에서
-          사람이 가장 먼저 알아야 할 판정이고, 예전에는 세 번째 카드에 묻혀 있었다. 아래 카드들은 그대로다. */}
-      <SectionCard title="게이트" subtitle="G1~G6 판정은 서버가 계산한 값입니다(G7 은 비교 전용).">
+      {/* 게이트를 첫 카드로 둔다 — G6 차단 하나가 '타깃 만들기' 를 막으므로 이 화면에서 사람이 가장 먼저 알아야 할 판정이다. */}
+      <SectionCard
+        title="게이트"
+        subtitle="G1~G6 판정은 서버가 계산한 값입니다 — 판정 불가는 fail 이 아니라 검문할 입력이 없었다는 뜻입니다(G7 은 비교 전용)."
+      >
         {isNotReady(state.error) ? (
           <NotReadyBlock what="게이트 판정" />
         ) : (
@@ -390,13 +471,19 @@ export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
           <>
             {blocked ? (
               <Banner
-                title="blocked — G6 fail."
-                detail="diff 생성과 타깃 만들기가 409 로 막힙니다. 소스를 고쳐 새 스냅샷을 만들어야 합니다."
+                title="차단 — G6."
+                detail={
+                  gates?.G6?.pass === null
+                    ? "단위를 몰라(unit_unknown) 차단을 유지합니다. REST 원문으로 다시 캡처해야 풀립니다 — diff 생성과 타깃 만들기가 409 로 막힙니다."
+                    : "diff 생성과 타깃 만들기가 409 로 막힙니다. 소스를 고쳐 새 스냅샷을 만들어야 합니다."
+                }
               />
             ) : null}
             <GateBanner gates={gates} />
-            <GateTable gates={gates} />
-            <GateSupplement gates={gates} />
+            <GateTable gates={gates} snapshotId={snapshotId} onChanged={state.reload} />
+            <p className="m-0 mt-2 text-xs text-muted-foreground">
+              {SNAP_GATE_IDS.map((id) => `${id} ${GATE_LABEL[id]}`).join(" · ")}
+            </p>
           </>
         ) : null}
       </SectionCard>
@@ -405,7 +492,7 @@ export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
         {isNotReady(ir.error) ? <NotReadyBlock what="스냅샷 IR" /> : <ErrorBanner error={ir.error} onRetry={ir.reload} />}
         {ir.loading && !ir.data ? <LoadingBlock /> : null}
         {needsReparse ? (
-          <Banner tone="info" title="재파싱이 필요합니다." detail="volume · material 값이 비어 있습니다.">
+          <Banner tone="info" title="재파싱이 필요합니다." detail="mcad 부품의 부피 값이 전부 비어 있습니다(missing.volume_null).">
             <a
               href="/apps/step_forge/"
               target="_blank"
@@ -424,25 +511,33 @@ export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
             rows={[
               { label: "IR 해시", hint: "ir_hash", value: <code>{ir.data.ir_hash}</code> },
               { label: "IR 버전", hint: "ir_version", value: ir.data.ir_version },
-              { label: "소스", hint: "kinds", value: ir.data.kinds.join(" · ") || "-" },
+              {
+                label: "소스",
+                hint: "sources[].kind · adapter_version",
+                value:
+                  ir.data.sources.length === 0
+                    ? "-"
+                    : ir.data.sources.map((s) => `${s.kind} ${s.adapter_version}`).join(" · "),
+              },
+              { label: "주 소스", hint: "primary_source", value: ir.data.primary_source ?? "-" },
               { label: "동결 시각", hint: "captured_at", value: fmtEpoch(ir.data.captured_at) },
-              { label: "항목 수", hint: "counts", value: fmtCounts(ir.data.counts) },
               {
                 label: "노드 · 엣지 · 명명 치수",
                 hint: "nodes · edges · dims_named",
                 value: `${nodes.length} · ${edges.length} · ${dims.length}`,
               },
+              { label: "부분 범위", hint: "partial", value: ir.data.partial ? <Badge tone="warn">partial</Badge> : "아님" },
               { label: "경고", hint: "warnings", value: `${warnings.length}건` },
             ]}
           />
         ) : null}
       </SectionCard>
 
-      <SectionCard
-        title="강등 플래그"
-        subtitle="missing.* 와 어댑터 강등 코드(mcp_degraded 등)를 그대로 보입니다."
-      >
-        {ir.data ? <FlagList flags={missing} /> : ir.loading ? <LoadingBlock /> : null}
+      {/* 보드가 없으면 이 묶음을 그리지 않는다(ecad-1031 §7). */}
+      {board ? <BoardCard node={board} /> : null}
+
+      <SectionCard title="강등 · 결측 표지" subtitle="missing.* 의 참인 열쇠와 소스마다 degraded 코드를 그대로 보입니다.">
+        {ir.data ? <FlagList flags={flags} /> : ir.loading ? <LoadingBlock /> : null}
       </SectionCard>
 
       <SectionCard title="요약 · 신호 · 성격 seed" subtitle="코드가 만든 원문을 그대로 보입니다.">
@@ -450,14 +545,14 @@ export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
           <>
             <VerbatimBlock text={state.data.summary_text} label="summary_text" />
             <div className="mt-3 flex flex-col gap-2">
-              <h3 className="m-0 text-sm text-muted-foreground">신호</h3>
-              {state.data.signals.length === 0 ? (
+              <h3 className="m-0 text-sm text-muted-foreground">신호 {signals.length}개</h3>
+              {signals.length === 0 ? (
                 <p className="m-0 text-sm text-muted-foreground">신호가 없습니다.</p>
               ) : (
                 <ul className="m-0 list-disc pl-5 text-sm [&>li]:mb-1">
-                  {state.data.signals.map((s) => (
-                    <li key={s.key}>
-                      <code>{s.key}</code> {s.text} {s.ref ? <code>{s.ref}</code> : null}
+                  {signals.map(([key, s]) => (
+                    <li key={key} className={s.known ? undefined : "text-muted-foreground"}>
+                      <code>{`sig:${key}`}</code> {s.text}
                     </li>
                   ))}
                 </ul>
@@ -483,8 +578,21 @@ export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
         )}
       </SectionCard>
 
-      <SectionCard title="노드" subtitle="IR 노드 표(part=ir 응답의 nodes).">
-        {ir.data ? <NodeTable nodes={nodes} /> : ir.loading ? <LoadingBlock /> : <EmptyBlock title="노드가 없습니다." />}
+      {state.data ? <MarginCard rows={marginRows(state.data)} reqAbsent={state.data.missing?.req_absent} /> : null}
+
+      <SectionCard title="노드" subtitle="IR 노드 표(part=ir 응답의 nodes) — kind 로 거릅니다.">
+        {ir.data ? (
+          <>
+            <NodeTable nodes={nodes} onPick={(n) => setPickedNode((cur) => (cur?.nid === n.nid ? null : n))} picked={pickedNode?.nid ?? null} />
+            {pickedNode ? (
+              <KeyLedgerPanel node={pickedNode} nodes={nodes} onClose={() => setPickedNode(null)} />
+            ) : null}
+          </>
+        ) : ir.loading ? (
+          <LoadingBlock />
+        ) : (
+          <EmptyBlock title="노드가 없습니다." />
+        )}
       </SectionCard>
 
       <SectionCard title="엣지" subtitle="관통 깊이는 하한일 때 ≥ 로 표기합니다.">

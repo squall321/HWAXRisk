@@ -9,7 +9,7 @@ import { Badge, StatusBadge } from "./Badge";
 import { GateTable } from "./GateBanner";
 import { Banner, Button, FormField, Select } from "../ui/primitives";
 import { fmtNum } from "../format";
-import type { Gate, SameAsDecision, SameAsPair } from "../types";
+import type { GateRecord, SameAsDecision, SameAsPair } from "../types";
 
 /** 일괄 수용의 문턱 — §8.2.4 가 정한 값이다. */
 const BULK_SCORE = 0.9;
@@ -26,18 +26,21 @@ const METHODS: Array<{ method: string; label: string }> = [
 ];
 const METHOD_INDEX: Record<string, number> = Object.fromEntries(METHODS.map((m, i) => [m.method, i]));
 
-/** 사람이 먼저 봐야 하는 순서 — 충돌 · 미확정이 위로 온다. */
-const STATUS_RANK: Record<SameAsPair["status"], number> = {
+/** 사람이 먼저 봐야 하는 순서 — 충돌 · 미확정이 위로 온다. 서버 행의 status 는 pending · auto(fuzzy) · confirmed · rejected 다. */
+const STATUS_RANK: Record<string, number> = {
   conflict: 0,
+  pending: 1,
   candidate: 1,
-  confirmed: 2,
-  rejected: 3,
+  auto: 2,
+  confirmed: 3,
+  rejected: 4,
 };
+const rankOf = (p: SameAsPair) => (p.conflict ? 0 : STATUS_RANK[p.status] ?? 5);
 
 type Filter = "all" | "todo" | "confirmed" | "rejected";
 const FILTERS: Array<{ value: Filter; label: string }> = [
   { value: "all", label: "전체" },
-  { value: "todo", label: "확정 필요(candidate · conflict)" },
+  { value: "todo", label: "확정 필요(pending · 충돌)" },
   { value: "confirmed", label: "확정됨" },
   { value: "rejected", label: "거부됨" },
 ];
@@ -50,7 +53,7 @@ export function SameAsResolver({
   base: string;
   target: string;
   /** 조회 직후와 확정 직후의 G2 판정을 비교 화면에 그대로 올린다. */
-  onG2?: (g2: Gate) => void;
+  onG2?: (g2: GateRecord) => void;
 }) {
   const sameas = useAsync(
     (signal) => riskApi.getSameAs(base, target, { signal }),
@@ -70,10 +73,10 @@ export function SameAsResolver({
 
   const pairs = sameas.data?.pairs ?? [];
   const bulkCandidates = useMemo(
-    () => pairs.filter((p) => p.status === "candidate" && p.score >= BULK_SCORE),
+    () => pairs.filter((p) => (p.status === "pending" || p.status === "candidate") && p.score >= BULK_SCORE),
     [pairs],
   );
-  const conflictN = useMemo(() => pairs.filter((p) => p.status === "conflict").length, [pairs]);
+  const conflictN = useMemo(() => pairs.filter((p) => p.conflict || p.status === "conflict").length, [pairs]);
 
   /** 단계별 건수 — 사다리 어디에서 대응이 나왔는지 그대로 센다. */
   const byMethod = useMemo(() => {
@@ -89,12 +92,12 @@ export function SameAsResolver({
   const rows = useMemo(() => {
     const kept = pairs.filter((p) => {
       if (filter === "all") return true;
-      if (filter === "todo") return p.status === "candidate" || p.status === "conflict";
+      if (filter === "todo") return p.status === "pending" || p.status === "candidate" || p.conflict;
       return p.status === filter;
     });
     return [...kept].sort(
       (a, b) =>
-        STATUS_RANK[a.status] - STATUS_RANK[b.status] ||
+        rankOf(a) - rankOf(b) ||
         (METHOD_INDEX[a.method] ?? METHODS.length) - (METHOD_INDEX[b.method] ?? METHODS.length) ||
         b.score - a.score ||
         a.a.localeCompare(b.a),
@@ -107,7 +110,8 @@ export function SameAsResolver({
     setError(null);
     try {
       const result = await riskApi.decideSameAs(decisions);
-      onG2?.(result.G2);
+      // 결정 답의 G2 는 지금 늘 null 이다 — 판정은 다시 읽은 표(GET /sameas)의 G2 가 정본이다.
+      if (result.G2) onG2?.(result.G2);
       sameas.reload();
     } catch (err) {
       setError(err);
@@ -222,7 +226,7 @@ export function SameAsResolver({
             </Select>
           </FormField>
 
-          {sameas.data.G2 ? <GateTable gates={[sameas.data.G2]} /> : null}
+          {sameas.data.G2 ? <GateTable gates={{ G2: sameas.data.G2 }} /> : null}
           <DataTable
             columns={columns}
             rows={rows}

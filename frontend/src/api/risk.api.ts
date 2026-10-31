@@ -2,6 +2,7 @@
 import type {
   AdapterList,
   ApiErrorBody,
+  AuditPage,
   Brief,
   CharacterProfile,
   Coverage,
@@ -13,18 +14,21 @@ import type {
   DiffCreate,
   DiffCreated,
   DiffDoc,
-  DiffEvent,
+  DiffEvents,
   DiffSummary,
   DimDef,
   DimDefCreate,
+  EcadBoardDeleted,
+  EcadBoardPut,
+  EcadBoardSearch,
+  GateAcked,
+  GateId,
   Requirement,
   RequirementCreate,
   RequirementList,
   Health,
   IfaceLedgerRow,
   ImportResult,
-  IrEdge,
-  IrNode,
   JobStateResponse,
   Me,
   Metrics,
@@ -43,6 +47,12 @@ import type {
   ProjectCreate,
   ProjectDetail,
   ProjectList,
+  ProjectMembers,
+  ProjectMembersPut,
+  ProjectPatch,
+  ProjectPatched,
+  ProjectPurged,
+  ProjectTransferred,
   RefResolution,
   Registry,
   RegistryStatusUpdate,
@@ -53,10 +63,12 @@ import type {
   SameAsDecided,
   SameAsDecision,
   SeatList,
+  SeatUpdate,
+  SeatUpdated,
   Similar,
-  SnapshotAccepted,
   SnapshotCallList,
   SnapshotCreate,
+  SnapshotCreated,
   SnapshotIr,
   SnapshotState,
   SourceCreate,
@@ -261,18 +273,43 @@ export const riskApi = {
   listProjects: (o?: Opt) => request<ProjectList>("projects", o),
   createProject: (body: ProjectCreate, o?: Opt) => request<Project>("projects", { method: "POST", body, ...o }),
   getProject: (id: string, o?: Opt) => request<ProjectDetail>(`projects/${encodeURIComponent(id)}`, o),
+  /** 과제 메타(editor, `mcp_visibility` 는 owner 만 — 아니면 403 role_insufficient). */
+  patchProject: (id: string, body: ProjectPatch, o?: Opt) =>
+    request<ProjectPatched>(`projects/${encodeURIComponent(id)}`, { method: "PATCH", body, ...o }),
+  getMembers: (id: string, o?: Opt) => request<ProjectMembers>(`projects/${encodeURIComponent(id)}/members`, o),
+  putMembers: (id: string, body: ProjectMembersPut, o?: Opt) =>
+    request<ProjectMembers>(`projects/${encodeURIComponent(id)}/members`, { method: "PUT", body, ...o }),
+  transferProject: (id: string, body: { to_email: string; reason: string }, o?: Opt) =>
+    request<ProjectTransferred>(`projects/${encodeURIComponent(id)}/transfer`, { method: "POST", body, ...o }),
+  purgeProject: (id: string, body: { code: string; reason: string }, o?: Opt) =>
+    request<ProjectPurged>(`projects/${encodeURIComponent(id)}/purge`, { method: "POST", body, ...o }),
+  getProjectAudit: (id: string, q?: { action?: string; limit?: number; offset?: number }, o?: Opt) =>
+    request<AuditPage>(`projects/${encodeURIComponent(id)}/audit`, { query: q, ...o }),
   addSource: (id: string, body: SourceCreate, o?: Opt) =>
     request<SourceCreated>(`projects/${encodeURIComponent(id)}/sources`, { method: "POST", body, ...o }),
+  // ECAD 보드 — 찾기는 과제에 묶이지 않는다. 붙이기 · 떼기는 과제 주인만(남이면 없는 것과 같은 404).
+  findEcadBoards: (q: string, o?: Opt) => request<EcadBoardSearch>("ecad/boards", { query: { q }, ...o }),
+  putEcadBoard: (id: string, odbJobId: string, o?: Opt) =>
+    request<EcadBoardPut>(`projects/${encodeURIComponent(id)}/ecad-board`, {
+      method: "PUT",
+      body: { odb_job_id: odbJobId },
+      ...o,
+    }),
+  deleteEcadBoard: (id: string, o?: Opt) =>
+    request<EcadBoardDeleted>(`projects/${encodeURIComponent(id)}/ecad-board`, { method: "DELETE", ...o }),
   createSnapshot: (id: string, body: SnapshotCreate, o?: Opt) =>
-    request<SnapshotAccepted>(`projects/${encodeURIComponent(id)}/snapshots`, { method: "POST", body, ...o }),
+    request<SnapshotCreated>(`projects/${encodeURIComponent(id)}/snapshots`, { method: "POST", body, ...o }),
   listRequirements: (id: string, o?: Opt) =>
     request<RequirementList>(`projects/${encodeURIComponent(id)}/requirements`, o),
   upsertRequirements: (id: string, body: RequirementCreate[], o?: Opt) =>
-    request<RequirementList>(`projects/${encodeURIComponent(id)}/requirements`, { method: "POST", body, ...o }),
+    request<{ upserted: number; rows: Requirement[]; recompute: string[] }>(
+      `projects/${encodeURIComponent(id)}/requirements`,
+      { method: "POST", body, ...o },
+    ),
   decideRequirement: (rid: string, body: { status: string; waive_reason?: string | null }, o?: Opt) =>
     request<Requirement>(`requirements/${encodeURIComponent(rid)}`, { method: "PUT", body, ...o }),
   inheritRequirements: (id: string, fromProjectId: string, o?: Opt) =>
-    request<RequirementList>(`projects/${encodeURIComponent(id)}/requirements/inherit`, {
+    request<{ copied: number; skipped: number }>(`projects/${encodeURIComponent(id)}/requirements/inherit`, {
       method: "POST",
       body: { from_project_id: fromProjectId },
       ...o,
@@ -289,14 +326,19 @@ export const riskApi = {
     request<SnapshotIr>(`snapshots/${encodeURIComponent(id)}`, { query: { part: "ir" }, ...o }),
   getSnapshotState: (id: string, o?: Opt) =>
     request<SnapshotState>(`snapshots/${encodeURIComponent(id)}`, { query: { part: "state" }, ...o }),
-  getSnapshotNodes: (id: string, o?: Opt) =>
-    request<IrNode[]>(`snapshots/${encodeURIComponent(id)}`, { query: { part: "nodes" }, ...o }),
-  getSnapshotEdges: (id: string, o?: Opt) =>
-    request<IrEdge[]>(`snapshots/${encodeURIComponent(id)}`, { query: { part: "edges" }, ...o }),
   getSnapshotCalls: (id: string, o?: Opt) =>
     request<SnapshotCallList>(`snapshots/${encodeURIComponent(id)}`, { query: { part: "calls" }, ...o }),
   getRuleHits: (id: string, o?: Opt) =>
     request<RuleHitList>(`snapshots/${encodeURIComponent(id)}/rule_hits`, o),
+  /** fail 게이트에 사유를 적고 진행한다(G6 은 422 gate_blocking). ack 해도 pass 는 그대로다. */
+  ackGate: (id: string, gate: GateId, reason: string, o?: Opt) =>
+    request<GateAcked>(`snapshots/${encodeURIComponent(id)}/gates/${gate}/ack`, {
+      method: "POST",
+      body: { reason },
+      ...o,
+    }),
+  revokeGateAck: (id: string, gate: GateId, o?: Opt) =>
+    request<GateAcked>(`snapshots/${encodeURIComponent(id)}/gates/${gate}/ack`, { method: "DELETE", ...o }),
 
   // ── same-as · diff ────────────────────────────────────────────────────────
   getSameAs: (base: string, target: string, o?: Opt) => request<SameAs>("sameas", { query: { base, target }, ...o }),
@@ -315,7 +357,7 @@ export const riskApi = {
   getDiffSummary: (id: string, o?: Opt) =>
     request<DiffSummary>(`diffs/${encodeURIComponent(id)}`, { query: { part: "summary" }, ...o }),
   getDiffEvents: (id: string, o?: Opt) =>
-    request<DiffEvent[]>(`diffs/${encodeURIComponent(id)}`, { query: { part: "events" }, ...o }),
+    request<DiffEvents>(`diffs/${encodeURIComponent(id)}`, { query: { part: "events" }, ...o }),
   getPrecedents: (diffId: string, o?: Opt) => request<Precedents>("precedents", { query: { diff_id: diffId }, ...o }),
 
   // ── 타깃 · 잡 ─────────────────────────────────────────────────────────────
@@ -332,6 +374,13 @@ export const riskApi = {
   getCoverage: (key: string, o?: Opt) => request<Coverage>(`targets/${encodeTargetKey(key)}/coverage`, o),
   getSeats: (key: string, domain: string, o?: Opt) =>
     request<SeatList>(`targets/${encodeTargetKey(key)}/seats`, { query: { domain }, ...o }),
+  /** 좌석을 사람이 옮긴다 — skipped(사유 필수) · carried 되돌리기(pending). */
+  putSeat: (key: string, agentKey: string, body: SeatUpdate, o?: Opt) =>
+    request<SeatUpdated>(`targets/${encodeTargetKey(key)}/coverage/${encodeURIComponent(agentKey)}`, {
+      method: "PUT",
+      body,
+      ...o,
+    }),
   getRegistry: (key: string, o?: Opt) => request<Registry>(`targets/${encodeTargetKey(key)}/registry`, o),
   getPanels: (key: string, o?: Opt) => request<PanelList>(`targets/${encodeTargetKey(key)}/panels`, o),
   getPanelTranscript: (panelId: string, o?: Opt) =>

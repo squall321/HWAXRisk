@@ -202,11 +202,24 @@ export type Me = {
   };
 };
 
-export type Adapter = { kind: string; app_key: string | null; status: string };
-
-/** `GET /meta/adapters` 의 P1 확장형 — 소스 카드 선택지(§8.2.3 각주). */
+/** `GET /meta/adapters` 의 소스 카드 선택지(§8.2.3 각주) — 지금 서버는 늘 빈 배열이다(소스 앱 도구를 불러야 채워진다). */
 export type AdapterChoice = { value: string; label: string; detail?: string | null };
-export type AdapterEntry = Adapter & { tools_ok?: boolean; choices?: AdapterChoice[] };
+/**
+ * `GET /meta/adapters` 의 kind 한 줄(adapters/registry.discover_adapters — 게이트웨이 `/tools-map` 실측, 60초 캐시).
+ * `status` 는 ready(도구가 다 보인다) · unavailable(빠진 원래 이름이 `tools_missing`) · planned(게이트웨이 도구 지도를 못 읽었다)다.
+ * '도구가 없다' 와 '못 물어봤다' 는 다르다 — 앞은 운영자 몫, 뒤는 잠시 뒤 다시.
+ */
+export type AdapterEntry = {
+  kind: string;
+  app_key: string | null;
+  status: AdapterStatus | (string & {});
+  tools_ok: boolean;
+  tools_missing: string[];
+  gateway_error: string | null;
+  /** 발견 경고(`ambiguous_tool_name` 따위). */
+  warnings: string[];
+  choices: AdapterChoice[];
+};
 export type AdapterList = { apps: AdapterEntry[] };
 
 export type TaxonomyAxis = { code: string; label: string; [key: string]: JsonValue | undefined };
@@ -239,19 +252,40 @@ export type AdhScope = { team: string; group: string };
 export type Classification = "internal" | "confidential";
 export const CLASSIFICATIONS: readonly Classification[] = ["internal", "confidential"];
 
+/** 과제 수명 주기(routes.LIFECYCLES) — active 를 떠나면 서버가 closed_at 을 찍는다. */
+export type Lifecycle = "active" | "shipped" | "cancelled" | "archived";
+export const LIFECYCLES: readonly Lifecycle[] = ["active", "shipped", "cancelled", "archived"];
+/** MCP 공개 범위(routes.MCP_VISIBILITIES) — private 는 소유자 · 구성원만, org 는 조직의 다른 심의 도구도 본다. 소유자만 바꾼다. */
+export type McpVisibility = "private" | "org";
+/** 코퍼스 제외 사유(routes.EXCLUDED_REASONS). */
+export type ExcludedReason = "fixture" | "misregistered" | "duplicate" | "user";
+export const EXCLUDED_REASONS: readonly ExcludedReason[] = ["fixture", "misregistered", "duplicate", "user"];
+/** 과제에서의 역할(routes.ROLE_RANK) — 소유자는 늘 owner 이고 멤버 행은 viewer · editor 다. */
+export type ProjectRole = "owner" | "editor" | "viewer";
+
+/**
+ * 제품 연결 한 행(plan §8.2.4 RiskHomePage — `product_refs_json`). `kind` 는 ra_model(RA 모델 엔티티) · product_code(VOC · 필드 조회
+ * 키)다. 서버는 `kind='product_code'` 인 첫 행을 대표값 `product_code` 로 쓴다(routes.create_project).
+ */
+export type ProductRef = { kind: "ra_model" | "product_code"; value: string };
+
 export type ProjectCreate = {
   code: string;
   name: string;
   classification: Classification;
   stage?: string | null;
   predecessor_project_id?: string | null;
+  /** 제품 연결 — 비면 보내지 않는다(빈 배열과 '안 보냄' 이 서버에서 같은 값이 되게). */
+  product_refs_json?: ProductRef[];
   adh_scope: AdhScope;
 };
 
 /**
  * 과제 행(routes._project_row) — `POST /projects` 의 답이자 `GET /projects/{id}` 의 `project`.
  * 서버 열 이름 그대로다 — `adh_scope` 는 보낼 때만의 꼴이고 받을 때는 `adh_team`·`adh_group` 두 열이다.
- * 등급(classification)·반영 요약(external_sync)은 이 행에 실리지 않는다.
+ *
+ * 물음표 칸은 계약(plan §8.2.3 · §8.2.4 ProjectPage 머리)에 있지만 9bd5f48 의 `_project_row` 가 싣지 않는 열이다 — 화면은 오면 쓰고,
+ * 없으면 '이 서버가 주지 않는다' 로 보인다(값을 지어내지 않는다). `PATCH` 의 답(`ProjectMeta`)은 이 열들을 싣는다.
  */
 export type Project = {
   id: string;
@@ -265,29 +299,149 @@ export type Project = {
   character_status: string | null;
   created_at: number;
   updated_at: number;
+  classification?: Classification | null;
+  lifecycle?: Lifecycle | null;
+  closed_at?: number | null;
+  corpus_excluded?: boolean | number | null;
+  excluded_reason?: ExcludedReason | null;
+  mcp_visibility?: McpVisibility | null;
+  product_code?: string | null;
+  /** 서버 열은 JSON 글자다(canonical_json) — 받을 때 배열로 올 수도 글자로 올 수도 있어 화면이 푼다. */
+  product_refs_json?: ProductRef[] | string | null;
+  predecessor_product_code?: string | null;
+  status?: string | null;
 };
 
+/**
+ * `PATCH /projects/{id}` 의 `project`(routes.patch_project — rr_projects 열 그대로). `corpus_excluded` 는 0 · 1,
+ * `product_refs_json` 은 JSON 글자다.
+ */
+export type ProjectMeta = {
+  id: string;
+  owner_sub: string;
+  code: string;
+  name: string;
+  stage: string | null;
+  lifecycle: Lifecycle | (string & {}) | null;
+  closed_at: number | null;
+  corpus_excluded: number;
+  excluded_reason: ExcludedReason | (string & {}) | null;
+  classification: Classification | (string & {}) | null;
+  mcp_visibility: McpVisibility | (string & {}) | null;
+  product_code: string | null;
+  product_refs_json: string | null;
+  predecessor_product_code: string | null;
+  status: string | null;
+  created_at: number;
+  updated_at: number;
+};
+
+export type ProjectPatch = {
+  lifecycle?: Lifecycle;
+  corpus_excluded?: boolean;
+  excluded_reason?: ExcludedReason;
+  classification?: Classification;
+  mcp_visibility?: McpVisibility;
+  product_code?: string | null;
+  product_refs_json?: ProductRef[] | null;
+  predecessor_product_code?: string | null;
+};
+
+export type ProjectPatched = {
+  project: ProjectMeta;
+  recomputed: { delta_priors_rows: number; patterns_rows: number };
+  /** mcp_visibility 를 바꿨을 때만 — RA 보류(withheld)에서 풀린 대상 수 · op 수와 AIDataHub 태그 재부착 op 수. */
+  resynced?: { targets: number; ra_ops_released: number; adh_retag_ops?: number };
+};
+
+/** 멤버 한 줄(routes._members_of). 소유자 행(role owner)도 함께 온다. */
+export type ProjectMember = {
+  project_id: string;
+  email: string;
+  role: ProjectRole | (string & {});
+  added_by: string | null;
+  added_at: number | null;
+  updated_at: number | null;
+};
+export type ProjectMembers = { project_id: string; members: ProjectMember[] };
+/** `PUT /projects/{id}/members` 본문(routes.MembersBody) — 넣거나 바꿀 멤버(viewer · editor)와 뺄 이메일. 소유자 행은 못 바꾼다. */
+export type ProjectMembersPut = { members: Array<{ email: string; role: "viewer" | "editor" }>; remove: string[] };
+
+/** `POST /projects/{id}/transfer` 의 답 — 하위 표마다 옮긴 행 수. */
+export type ProjectTransferred = { from: string; to: string; rows_updated: { tables: Record<string, number> } };
+
+/** `POST /projects/{id}/purge` 의 답(routes.purge_project — 동기로 끝난다). */
+export type ProjectPurged = {
+  job_id: string;
+  status: "purged";
+  purge_report: {
+    project_id: string;
+    purged_at: number;
+    by: string;
+    reason: string;
+    layers: JsonObject;
+    remaining: Array<{ layer: string; reason: string; detail: string }>;
+  };
+};
+
+/** `GET /projects/{id}/audit` 한 줄(routes.get_project_audit — rr_audit 행, before · after 는 풀린 객체). */
+export type AuditEntry = {
+  id: string;
+  actor: string;
+  actor_verified: boolean;
+  channel: string | null;
+  scope: string;
+  subject_id: string | null;
+  project_id: string | null;
+  action: string;
+  before: JsonValue;
+  after: JsonValue;
+  reason: string | null;
+  at: number;
+};
+export type AuditPage = { project_id: string; total: number; limit: number; offset: number; entries: AuditEntry[] };
+
+/**
+ * 과제 상세의 소스 카드 한 장(routes._project_sources). `probe` 는 연결 · 캡처가 잰 값이고 비어 있을 수 있다({}) — 그때 `status` 는
+ * unlinked 다. ECAD 카드는 과제마다 많아야 한 장이고 `ref` 가 `{odb_job_id}`, `probe.board` 가 붙은 보드의 정체다.
+ */
 export type ProjectSource = {
+  id: string;
   kind: SourceKind;
   app_key: string | null;
-  status: SourceStatus;
-  /** 서버가 파싱해 보내는 객체다 — 문자열이 아니다(`SourceRef` 주석 참조). */
-  ref?: SourceRef | null;
-  bridge_declared?: boolean | null;
-  probe?: SourceProbe | null;
+  /** 서버가 파싱해 보내는 객체다 — 문자열이 아니다(`SourceRef` 주석 참조). 없으면 빈 객체다. */
+  ref: SourceRef;
+  bridge_declared: boolean;
+  probe: SourceProbe;
+  probe_at: number | null;
+  status: SourceStatus | (string & {});
 };
 
-/** `GET /projects` 의 카드 1장. */
+/** `GET /projects` 카드의 소스 줄 — 상태만 싣는다. */
+export type ProjectSourceBrief = { kind: string; app_key: string | null; status: SourceStatus | (string & {}) };
+
+/**
+ * `GET /projects` 의 카드 1장(routes.projects_payload). 물음표 칸(등급 · 수명 주기 · 코퍼스 제외 · 내 역할)은 계약(plan §8.2.3)에
+ * 있지만 9bd5f48 서버가 싣지 않는다 — 화면은 오면 칩을 그리고, 없으면 거름을 잠근다.
+ */
 export type ProjectCard = {
   id: string;
   code: string;
   name: string;
   stage: string | null;
-  sources: ProjectSource[];
+  targets: string[];
+  last_snapshot_id: string | null;
+  sources: ProjectSourceBrief[];
   last_snapshot_at: number | null;
   open_targets: number;
-  coverage_pct: number;
-  level: CoverageLevel;
+  /** 대상이 없거나 로스터가 비면 null 이다(0 이 아니다). */
+  coverage_pct: number | null;
+  /** 대상이 없으면 null 이다. */
+  level: CoverageLevel | null;
+  classification?: Classification | null;
+  lifecycle?: Lifecycle | null;
+  corpus_excluded?: boolean | number | null;
+  my_role?: ProjectRole | null;
 };
 
 export type ProjectList = { projects: ProjectCard[] };
@@ -341,6 +495,8 @@ export type JobHeader = {
 
 export type ProjectDetail = {
   project: Project;
+  /** 계약(plan §8.2.3)에는 있지만 9bd5f48 서버는 싣지 않는다 — 멤버 탭은 `GET /projects/{id}/members` 를 따로 부른다. */
+  members?: Array<{ email: string; role: string }>;
   sources: ProjectSource[];
   snapshots: SnapshotHeader[];
   targets: TargetHeader[];
@@ -349,11 +505,14 @@ export type ProjectDetail = {
   character_top_tags: Array<{ tag: string; n: number }>;
 };
 
+/**
+ * 일반 소스 연결(routes.SourceBody) — `ref` 는 **객체**다(서버 칸이 dict 다). 전에 글자로 보내 늘 422 였다. ECAD 는 이 길로 붙이지
+ * 않는다(422 `ecad_board_route` — 보드 찾기 · 붙이기 길을 쓴다).
+ */
 export type SourceCreate = {
-  kind: SourceKind;
+  kind: Exclude<SourceKind, "ecad">;
   app_key: string;
-  /** 보낼 때는 문자열이다(사람이 입력란에 적은 값). 받을 때는 아래 `SourceRef` 로 파싱돼 온다. */
-  ref: string;
+  ref: Record<string, string>;
   bridge_declared?: boolean;
 };
 
@@ -361,61 +520,212 @@ export type SourceCreate = {
  * 연결된 소스의 `ref` — 서버는 `_loads(row["ref_json"], {})` 로 **파싱한 객체**를 준다
  * (routes.py `_project_sources`). 전에 `ref: string` 이라 적어 두어 화면이 이 객체를 React
  * 자식으로 그리다 통째로 백지가 됐다(React error #31). 모양은 kind 마다 다르다 —
- * mcad 는 `{stepforge_project_id, detect_job_id}`, dyna 는 `{session_id, file_id, sha256}`.
+ * mcad 는 `{stepforge_project_id, detect_job_id}`, dyna 는 `{session_id, file_id, sha256}`, ecad 는 `{odb_job_id}`.
  */
 export type SourceRef = Record<string, string | number | boolean | null>;
 
-export type SourceProbe = { reachable: boolean; detail: string; capture_mode: string };
-export type SourceCreated = { ok: boolean; probe: SourceProbe };
+/**
+ * 소스 카드의 도달 측정(probe_json). 연결 때 한 번 적고 캡처가 다시 잰다. 카드가 막 생겼거나 잰 적이 없으면 빈 객체라 칸마다 없을
+ * 수 있다. ECAD 카드는 `board`(붙인 보드의 정체 — 캡처 뒤에도 남는다)를 싣는다.
+ */
+export type SourceProbe = {
+  reachable?: boolean;
+  detail?: string;
+  capture_mode?: string | null;
+  status?: SourceStatus | (string & {});
+  board?: EcadBoard;
+};
+/** `POST /projects/{id}/sources` 의 답 — mcad 면 `warnings ∋ stepforge_no_isolation`(StepForge 에는 사용자 격리가 없다). */
+export type SourceCreated = { ok: boolean; probe: SourceProbe; warnings?: string[] };
+
+// ── ECAD 보드(포털 docs/design-risk-review/ecad-1031 frontend-request — main 9bd5f48) ──────────────
+
+/** find_job 후보 한 줄(adapters/ecad.candidate_of) — 허브 칸 그대로이고 `name` 만 과제 · 모델 · 보드 종류 · 판을 ` / ` 로 엮었다. */
+export type EcadBoard = {
+  job_id: string | null;
+  /** 넷 다 비면 null 이다(지어내지 않는다). */
+  name: string | null;
+  project: string | null;
+  model: string | null;
+  board_type: string | null;
+  revision: string | null;
+  original_filename: string | null;
+  uploaded_at: string | null;
+};
+
+/** `GET /ecad/boards?q=` 의 답 — 많아야 10개이고 `truncated` 면 더 있다. 허브가 '없다' 를 봉투 오류로 답하면 `hub_message`. */
+export type EcadBoardSearch = {
+  query: string;
+  app_key: string;
+  tool: string;
+  candidates: EcadBoard[];
+  truncated: boolean;
+  hub_message?: string;
+};
+
+/** `PUT /projects/{id}/ecad-board {odb_job_id}` 의 답 — `source` 는 새로 적힌 ECAD 카드다. */
+export type EcadBoardPut = {
+  ok: true;
+  project_id: string;
+  ecad_board: EcadBoard;
+  source: ProjectSource;
+  previous_odb_job_id: string | null;
+  changed: boolean;
+};
+
+/** `DELETE /projects/{id}/ecad-board` 의 답 — 붙은 것이 없었으면 `removed: 0` 이다. */
+export type EcadBoardDeleted = { ok: true; project_id: string; removed: number; previous_odb_job_id: string | null };
 
 // ── 스냅샷 ────────────────────────────────────────────────────────────────────
 
+/**
+ * 스냅샷 동결 본문(routes.SnapshotBody). `kinds` 가 비면 붙은 카드 전부를 읽는다. `report_ids` 는 수다(서버 칸이 list[int]).
+ * `allow_large` 는 409 `model_too_large` 를 본 사람이 '그래도 동결' 을 고른 뒤에만 싣는다.
+ */
 export type SnapshotCreate = {
   label?: string;
   kinds: SourceKind[];
-  report_ids?: string[];
+  report_ids?: number[];
   detect_result_file_id?: string;
+  allow_large?: true;
 };
 
-/** 202 이면 `job_id` 만, 동일 `ir_hash` 재요청이면 200 으로 기존 스냅샷이 온다(§8.2.3 409 행). */
-export type SnapshotAccepted = {
-  job_id?: string;
-  snapshot_id?: string;
-  ir_hash?: string;
-  gates?: Gate[];
-  degraded?: boolean;
+/**
+ * 스냅샷 동결의 답(routes.create_snapshot — **동기**다, 202 잡이 아니다). 같은 ir_hash 가 이미 있으면 `reused` 다.
+ * `gates_summary` 는 게이트마다 true · false · null(검문할 입력이 없었다 — 위반이 아니다)이다.
+ */
+export type SnapshotCreated = {
+  snapshot_id: string;
+  ir_hash: string;
+  reused: boolean;
+  partial: boolean;
+  blocked: boolean;
+  gates_summary: Partial<Record<GateId, boolean | null>>;
+  degraded: string[];
+  job_id: string;
+  job_state: "done" | "partial" | (string & {});
+  calls_reused: number;
+  /** 이번 캡처가 읽은 자격 — mcp 는 user(본인 포털 PAT) · service(박스 읽기 PAT) · null. */
+  credentials: { mcp: string | null; rest: string | null; rest_ok: boolean; rest_bridge?: JsonObject };
+  context?: JsonObject;
+  context_frozen_at?: number | null;
+  context_changed?: boolean | null;
 };
 
-export type Gate = {
-  id: string;
-  pass: boolean;
-  value: JsonValue;
-  threshold: JsonValue;
+/** 409 `model_too_large` 의 detail(routes._check_model_size) — `leaf` 는 MCAD 리프와 ECAD 부품의 합이다(사용자 결정 10-31). */
+export type ModelTooLarge = {
+  leaf: number;
+  leaf_mcad: number;
+  leaf_ecad: number;
+  interfaces: number;
+  max_leaf: number;
+  max_interfaces: number;
+  budget_s: number;
+};
+
+/**
+ * 409 `source_unreachable` 의 detail — 붙은 카드를 kinds 가 다 뺐으면 `{kinds, attached}`(kinds 를 고칠 일), 이번 캡처가 읽은 카드가
+ * ECAD 하나뿐인데 보드를 못 읽었으면 `{kind: "ecad", reason}`(어댑터 경고 code — ecad_pat_absent · ecad_board_not_found 따위)이다.
+ */
+export type SourceUnreachable = { kinds?: string[]; attached?: string[]; kind?: string; reason?: string | null };
+
+/** 단일 스냅샷 게이트 G1 ~ G6 과 비교 전용 G7. */
+export type GateId = "G1" | "G2" | "G3" | "G4" | "G5" | "G6" | "G7";
+
+/**
+ * 게이트 한 칸(state.compute_gates — rr_state.gates 의 값). `pass` 는 true · false · **null** 이고 null 은 검문할 입력이 통째로 없다는
+ * 뜻이다(`reason` 이 까닭 — mcad_absent · capture_partial · unit_only · warnings_unavailable · unit_unknown). null 은 fail 이 아니다 —
+ * 다만 G6 의 unit_unknown 은 차단을 유지한다(unknown_blocking). ack 는 판정(pass)을 바꾸지 않는다.
+ */
+export type GateRecord = {
+  key: string;
+  count: number | null;
+  threshold: number | null;
+  pass: boolean | null;
+  reason?: string | null;
+  blocking: boolean;
   effect: string;
-  message: string;
+  ack_by?: string | null;
+  ack_at?: number | null;
+  ack_reason?: string | null;
+  detail: JsonValue[];
+};
+export type Gates = Partial<Record<GateId, GateRecord>>;
+
+/** `POST /snapshots/{id}/gates/{G}/ack` 의 답. ack 해도 pass 는 그대로다. */
+export type GateAcked = {
+  gate: GateId;
+  ack_by: string | null;
+  ack_at: number | null;
+  ack_reason: string | null;
+  gates_hash: string;
+  pass: boolean | null;
+  revoked_by?: string;
+  revoked_at?: number;
 };
 
+/** rr_ir 노드(rr_ir.v1.json definitions.node). `attrs` 는 도메인 · kind 마다 칸이 다르다(board 노드는 `EcadBoardAttrs`). */
 export type IrNode = {
   nid: string;
-  name: string;
+  canon_key: string;
+  domain: "mcad" | "dyna" | "ecad" | (string & {});
+  /** part · assembly · file · pid · contact_set · component · net · layer · board. */
+  kind: string;
+  label: string;
+  local_key: string;
+  name_norm: string;
+  name_norm_canon: string;
+  group: string | null;
   ckey: string | null;
   dn: string | null;
+  parent_nid: string | null;
+  asm_key: string | null;
+  attrs: JsonObject;
   geom_fp: string | null;
-  flags: string[];
-  kind?: string | null;
-  [key: string]: JsonValue | undefined;
+  status_flags: string[];
+  provenance?: JsonObject;
 };
 
+/**
+ * board 노드의 attrs(adapters/ecad — 길이는 mm, 없는 값은 null 이고 0 이 아니다). `outline_bbox` · `n_nets` · `odb_version` 은 2단계
+ * (ODB 허브 OH-01 ~ OH-04 뒤) 칸이라 1단계에서는 늘 null 이다.
+ */
+export type EcadBoardAttrs = {
+  board_id: string | null;
+  name: string | null;
+  revision: string | null;
+  units: string | null;
+  thickness: number | null;
+  stackup_verdict: string | null;
+  stackup_id: string | null;
+  ecad_stackup_total: number | null;
+  layer_count: number | null;
+  n_components: number | null;
+  n_components_placed: number | null;
+  outline: { x_mm?: number | null; y_mm?: number | null; area_mm2?: number | null } | null;
+  outline_bbox: JsonValue;
+  n_nets: number | null;
+  odb_version: string | null;
+  source_hash: string | null;
+};
+
+/** rr_ir 엣지(definitions.edge) — 간극 · 관통 깊이 따위는 `attrs` 안에 있다. */
 export type IrEdge = {
   eid: string;
   kind: string;
-  status: string;
+  kind_family: string;
   a: string;
-  b: string;
-  min_gap: number | null;
-  penetration_depth: number | null;
-  penetration_is_lower_bound?: boolean | null;
-  [key: string]: JsonValue | undefined;
+  b: string | null;
+  members?: string[];
+  domain: string;
+  status: string;
+  attrs: {
+    min_gap?: number | null;
+    penetration_depth?: number | null;
+    penetration_depth_is_lower_bound?: boolean;
+    [key: string]: JsonValue | undefined;
+  };
+  provenance?: JsonObject;
 };
 
 export type IrWarning = {
@@ -426,62 +736,142 @@ export type IrWarning = {
   source_kind: string | null;
 };
 
+/** 명명 치수(definitions.dim_named) — 값이 null 이면 `null_reason` 이 까닭이다. */
 export type DimNamed = {
   name: string;
-  kind: string;
-  unit: string | null;
   value: number | null;
-  ref: string | null;
+  unit: string | null;
+  method: "measured" | "derived" | "declared" | (string & {});
+  ref: string | string[] | null;
+  formula: string | null;
+  owner_sub?: string;
+  null_reason: string | null;
 };
 
-/** `GET /snapshots/{id}?part=ir` — 봉투는 §2.2, 내부 구조는 화면이 해석하지 않고 표로만 그린다. */
+/** 스냅샷 봉투의 소스 한 줄(definitions.source). ECAD 소스의 `stats` 는 보드 두께 · 적층 · 부품 수 따위다. */
+export type IrSource = {
+  kind: SourceKind | (string & {});
+  app_key: string | null;
+  adapter_version: string;
+  channel: string | null;
+  ref: JsonObject;
+  source_hash: string | null;
+  tol_config_hash?: string | null;
+  scope?: JsonValue;
+  stats?: JsonObject;
+  app_version?: { version?: string | null; captured_via?: string | null; extra?: JsonValue } | null;
+  degraded: string[];
+  captured_at: number | null;
+};
+
+/**
+ * `GET /snapshots/{id}?part=ir` — 동결된 rr_ir 원본 그대로(rr_ir.v1.json). `missing` 은 **bool 사전**이다(전에 글자 목록으로 적어
+ * 두었다). 소스 종류 · 수는 `sources` 에서 센다(봉투에 kinds · counts 칸이 없다 — 그 칸을 읽어 화면이 백지였다).
+ */
 export type SnapshotIr = {
   ir_version: string;
   snapshot_id: string;
   project_id: string;
-  ir_hash: string;
+  owner_sub: string;
+  label: string | null;
   captured_at: number;
-  kinds: SourceKind[];
-  counts: Record<string, number>;
-  missing: string[];
+  derived_from: string | null;
+  partial: boolean;
+  sources: IrSource[];
+  primary_source: string | null;
+  units: Record<string, string>;
   nodes: IrNode[];
   edges: IrEdge[];
   dims_named: DimNamed[];
   rollups: JsonObject;
-  results: JsonObject;
+  results: JsonObject | null;
+  missing: Record<string, boolean>;
   warnings: IrWarning[];
+  versions: { adapter_versions?: Record<string, string>; [key: string]: JsonValue | undefined };
+  ir_hash: string;
 };
 
-export type Signal = { key: string; text: string; ref: string | null };
+/** 신호 한 칸(state.compute_signals · requirements.compute_req_signals) — 사전의 열쇠가 `sig:` 뒤의 이름이다. */
+export type SignalRecord = {
+  kind: string;
+  value: JsonValue;
+  unit: string | null;
+  refs: string[];
+  text: string;
+  derived_from: string[];
+  known: boolean;
+};
 export type CharacterSeed = { tag: string; rule: string; cites: string[]; text: string };
 
-/** `GET /snapshots/{id}?part=state`. */
+/** `sig:req.margin` 한 행(requirements.compute_req_signals) — 서버가 margin 오름차순으로 주고 미측정(known=false)은 맨 뒤다. */
+export type ReqMarginRow = {
+  name: string;
+  op: string | null;
+  limit: JsonValue;
+  unit: string | null;
+  actual: number | null;
+  margin: number | null;
+  rel: number | null;
+  known: boolean;
+  status: string;
+};
+
+/**
+ * `GET /snapshots/{id}?part=state`(state.build_state — rr_state.v1.json). `gates` 와 `signals` 는 **사전**이다(전에 배열로 적어
+ * 두어 스냅샷 화면이 `gates.some` 에서 백지였다).
+ */
 export type SnapshotState = {
   state_version: string;
   snapshot_id: string;
-  gates: Gate[];
-  signals: Signal[];
+  ir_hash: string;
+  project_id: string;
+  rule_version: string;
+  computed_at: number;
+  blocked: boolean;
+  gates: Gates;
+  missing: Record<string, boolean>;
+  signals: Record<string, SignalRecord>;
   character_seed: CharacterSeed[];
-  feature_vector: number[];
+  feature_vector: JsonObject;
+  rule_hits: RuleHit[];
   summary_text: string | null;
+  summary_status: string;
 };
 
+/** 호출 로그 한 줄(ir_builder.load_calls — 응답 원문은 싣지 않는다). */
 export type SnapshotCall = {
   call_id: string;
-  app_key: string;
+  seq: number;
+  source_kind: string | null;
+  app_key: string | null;
+  channel: string | null;
   tool: string;
-  args_digest: string | null;
+  args: JsonObject;
   ok: boolean;
-  called_at: number;
+  http_status: number | null;
+  response_sha256: string | null;
+  response_bytes: number | null;
+  started_at: number | null;
+  duration_ms: number | null;
+  error: string | null;
 };
 
+/**
+ * 규칙 적중 한 줄(state.evaluate_rules). `evaluable` 이 거짓이면 `pass` 는 null 이고 `not_evaluable_reason`(source_absent ·
+ * degraded · truncated)이 까닭이다 — '이상 없음' 이 아니라 '평가 불가' 다. `found` 는 객체다(글자가 아니다).
+ */
 export type RuleHit = {
   rule: string;
+  version: string;
   severity: Severity | string;
-  pass: boolean;
-  found: string;
+  pass: boolean | null;
+  evaluable: boolean;
+  not_evaluable_reason: string | null;
+  found: { count: number; refs: string[]; text: string };
   why_it_matters: string;
   fix_hint: string;
+  payload_hash?: string;
+  refs: string[];
 };
 
 // ── 요구 규격(rr_requirements, plan §2.8b) ─────────────────────────────────────
@@ -495,31 +885,52 @@ export type RequirementCreate = {
   unit?: string | null;
   source_ref?: string | null;
 };
-export type Requirement = RequirementCreate & {
+/** 요구 한 줄(requirements._public) — 받을 때는 `value_json` 이 아니라 푼 값 `value` 다(전에 value_json 을 읽어 늘 null 이었다). */
+export type Requirement = {
   id: string;
-  project_id: string;
+  kind: RequirementKind;
+  name: string;
+  op: string | null;
+  value: JsonValue;
+  unit: string | null;
+  source_ref: string | null;
   status: RequirementStatus;
-  waive_reason?: string | null;
-  inherited_from?: string | null;
-  decided_by?: string | null;
-  decided_at?: number | null;
+  waive_reason: string | null;
+  inherited_from: string | null;
+  decided_by: string | null;
+  decided_at: number | null;
 };
-export type RequirementList = { project_id: string; requirements: Requirement[] };
+export type RequirementList = { requirements: Requirement[] };
 
 export type DimDefCreate = { name: string; kind: string; unit: string; extractor: string };
 export type DimDef = DimDefCreate & { id: string; project_id: string; vocab_status: string };
 
 // ── same-as · 원장 ────────────────────────────────────────────────────────────
 
+/**
+ * same-as 확인 행(sameas.review_rows) — pending · fuzzy 자동 · 충돌에 걸린 대응만 온다. `a` · `b` 는 nid, 원장 열쇠는
+ * `a_stable` · `b_stable` 이다.
+ */
 export type SameAsPair = {
+  id: string | null;
+  scope: string | null;
   a: string;
   b: string;
+  a_stable: string | null;
+  b_stable: string | null;
+  a_label: string | null;
+  b_label: string | null;
+  a_domain: string | null;
+  b_domain: string | null;
   method: string;
   score: number;
-  status: "candidate" | "confirmed" | "rejected" | "conflict";
+  /** pending · auto(fuzzy) · confirmed · rejected — 화면은 모르는 값도 글자 그대로 보인다. */
+  status: string;
+  conflict: boolean;
+  evidence: JsonValue;
 };
 
-export type SameAs = { pairs: SameAsPair[]; pending_n: number; G2: Gate };
+export type SameAs = { pairs: SameAsPair[]; pending_n: number; G2: GateRecord | null };
 
 export type SameAsPairDecision = {
   a: string;
@@ -538,7 +949,11 @@ export type CkeyLedgerDecision = {
 
 /** 한 배열에 두 종류를 섞어 보낼 수 있다(§8.2.3). */
 export type SameAsDecision = SameAsPairDecision | CkeyLedgerDecision;
-export type SameAsDecided = { updated: number; G2: Gate };
+/**
+ * `POST /sameas/decide` 의 답(routes.post_sameas_decide — 배열은 한 트랜잭션이다). ckey 결정의 결과 줄은
+ * `{ok, table: "rr_part_keys", decision, ckey, merged_into? | display_name? | status?}` 다. `G2` 는 지금 늘 null 이다.
+ */
+export type SameAsDecided = { updated: number; results: JsonObject[]; G2: GateRecord | null };
 
 export type IfaceLedgerRow = {
   pair_key: string;
@@ -551,61 +966,215 @@ export type IfaceLedgerRow = {
 
 export type DiffCreate = { base_snapshot_id: string; target_snapshot_id: string };
 
-export type Comparability = { ok: boolean; excluded_reason: string | null; note: string | null };
+/**
+ * 쌍 비교의 ECAD 칸(diff.comparability — ecad-1031 §8). 쪽마다 present(보드를 온전히 실었다) · absent(보드 없음 · 읽지 않음) ·
+ * failed(못 읽었거나 부분). 한쪽이라도 failed 면 `capture_partial`, 한쪽에만 보드가 실렸으면 `partial_scope` 이고 그때 ECAD 항목은
+ * 남되 의미 사건을 만들지 않는다. `adapter_parity` 가 거짓이면 ECAD 항목 · 사건에만 caveat parser_differs 다.
+ */
+export type ComparabilityEcad = {
+  base: "present" | "absent" | "failed" | (string & {});
+  target: "present" | "absent" | "failed" | (string & {});
+  excluded_reason: "capture_partial" | "partial_scope" | null | (string & {});
+  adapter_parity: boolean;
+};
 
+/**
+ * 쌍 비교의 비교 가능성(diff._comparability). 전에 `{ok, excluded_reason, note}` 로 적어 두어 '비교 가능' 배지가 늘 'no' 였다 —
+ * 서버는 잣대마다 parity 를 주고 G7 이 그 요약이다. parity 의 null 은 '모름'(잴 입력이 없었다)이다.
+ */
+export type Comparability = {
+  tol_parity: boolean | null;
+  tol_keys_known: boolean;
+  unit_parity: boolean;
+  result_parity: boolean | null;
+  result_present?: boolean;
+  result_reason?: string | null;
+  scope_parity: boolean;
+  coordinate_ok: boolean;
+  partial_any: boolean;
+  ir_version_parity?: boolean;
+  /** 소스 앱 판(system_status) — 공통 kind 가운데 하나라도 다르면 false, 모르면 null. */
+  app_version_parity?: boolean | null;
+  /** 어댑터(파서) 세대 — ecad 는 아래 `ecad.adapter_parity` 가 따로 본다. */
+  adapter_parity?: boolean;
+  source_schema_parity?: boolean;
+  source_schema_drift_kinds?: string[];
+  capture_parity?: boolean;
+  primary_source_parity?: boolean;
+  ecad?: ComparabilityEcad;
+  G7: GateRecord;
+  base_blocked: boolean;
+  target_blocked: boolean;
+};
+
+/** `POST /diffs` 의 답(routes.create_diff) — 같은 쌍이 이미 있으면 그것이다. */
 export type DiffCreated = {
   diff_id: string;
-  counts: Record<string, number>;
+  counts: Record<string, JsonValue>;
   comparability: Comparability;
 };
 
-/** 409 본문 — G6 fail 로 diff 생성이 막혔을 때 `ApiError.body` 에 실린다. */
-export type DiffBlocked = { gates: Gate[] };
+/**
+ * 409 `gate_blocked` 의 본문(diff.check_pair_blocked) — 막힌 쪽(base · target)의 G6 레코드와 까닭(unit_mismatch · unit_unknown).
+ * 오류 본문은 `{error, …detail}` 이라 이 칸들이 최상위에 펼쳐진다.
+ */
+export type DiffBlocked = { gates: { base?: GateRecord; target?: GateRecord }; reason: string };
 
 export type DiffLayer = "structural" | "parametric" | "semantic";
 
-export type DiffItem = {
+/** 구조층 노드 변화(definitions.node_change). `domain` 이 ecad 면 ECAD 항목이다. */
+export type DiffNodeChange = {
   cid: string;
-  layer: DiffLayer;
-  code: string;
-  subject: string;
-  before: JsonValue;
-  after: JsonValue;
-  delta: JsonValue;
-  ref: string | null;
-  [key: string]: JsonValue | undefined;
+  op: string;
+  dn: string;
+  nid_base: string | null;
+  nid_target: string | null;
+  ckey: string | null;
+  label: string;
+  kind: string;
+  domain: string;
+  correspondence_method: string | null;
+  confidence: string;
+  excluded_reason?: string | null;
+  caveat?: string;
+  text?: string;
 };
 
+/** 구조층 엣지 변화(definitions.edge_change). */
+export type DiffEdgeChange = {
+  cid: string;
+  op: string;
+  eid_base: string | null;
+  eid_target: string | null;
+  dn_a: string;
+  dn_b: string | null;
+  kind_family?: string;
+  kind_from: string | null;
+  kind_to: string | null;
+  status_from: string | null;
+  status_to: string | null;
+  cross_file: boolean;
+  excluded_reason: string | null;
+  confidence: string;
+  text?: string;
+};
+
+/** 파라메트릭 한 칸(definitions.param_item · result_item · material_item 을 화면이 읽는 칸만). */
+export type DiffParam = {
+  cid: string;
+  dn?: string;
+  eid?: string;
+  name?: string;
+  attr?: string;
+  field?: string;
+  metric?: string;
+  before: JsonValue;
+  after: JsonValue;
+  delta?: number | null;
+  rel_delta?: number | null;
+  unit?: string | null;
+  flag?: string;
+  excluded_reason?: string | null;
+  caveat?: string;
+  text?: string;
+};
+
+/** 의미층 사건(definitions.event). */
+export type DiffEventItem = {
+  cid: string;
+  code: string;
+  change_kind: string;
+  subject: { dns?: string[]; ckeys?: Array<string | null>; names?: string[] };
+  subject_key: string;
+  confidence: string;
+  design_relevant: boolean;
+  unconfirmed: boolean;
+  excluded_reason: string | null;
+  caveat?: string;
+  text: string;
+};
+
+/** `GET /diffs/{id}?part=diff` — rr_diff 원본 그대로(rr_diff.v1.json). 전에 `items` 하나로 적어 두어 3층이 늘 비었다. */
 export type DiffDoc = {
   diff_version: string;
   diff_id: string;
-  base_snapshot_id: string;
-  target_snapshot_id: string;
+  project_id: string;
+  pair_kind: "same_project_revision" | "cross_project" | null;
+  base: { snapshot_id: string; ir_hash: string; label: string | null };
+  target: { snapshot_id: string; ir_hash: string; label: string | null };
   comparability: Comparability;
-  items: DiffItem[];
-  counts: Record<string, number>;
+  correspondence: { pending_n: number; method_counts: Record<string, number> };
+  structural: { node_changes: DiffNodeChange[]; edge_changes: DiffEdgeChange[] };
+  parametric: {
+    node_params: DiffParam[];
+    edge_params: DiffParam[];
+    materials: DiffParam[];
+    dims_delta: DiffParam[];
+    result_delta: DiffParam[];
+    rollup_delta: JsonObject[];
+  };
+  semantic: { blocked_by: string | null; events: DiffEventItem[] };
+  stats: Record<string, JsonValue>;
+  summary_text: string;
+  summary_status: string;
+  created_at: number;
 };
 
-/** `?part=summary` — `summary_text` 는 코드가 만든 원문이라 화면이 다시 쓰지 않는다. */
-export type DiffSummary = { diff_id: string; summary_text: string; lines: string[] };
-
-export type DiffEvent = {
-  cid: string;
-  code: string;
-  text: string;
-  refs: string[];
-  [key: string]: JsonValue | undefined;
-};
-
-export type Precedents = {
+/** `?part=summary` — `summary_text` 는 코드가 만든 원문이라 화면이 다시 쓰지 않는다. 줄은 글을 줄바꿈으로 나눈 것이다. */
+export type DiffSummary = {
   diff_id: string;
-  rows: Array<{
-    cluster_key: string;
-    n: number;
-    in_range: number;
-    out_of_range: number;
-    [key: string]: JsonValue;
+  summary_text: string;
+  summary_status: string;
+  stats: Record<string, JsonValue>;
+  comparability: Comparability;
+  diff_hash: string | null;
+  created_at: number;
+};
+
+/** `?part=events` 의 펼침 표 한 줄(rr_diff_events 열 그대로 — 0 · 1 은 SQLite 의 참거짓이다). */
+export type DiffEventRow = {
+  diff_id: string;
+  cid: string;
+  layer: string;
+  code: string;
+  change_kind: string | null;
+  subject_key: string | null;
+  ckeys_json: string | null;
+  magnitude: number | null;
+  unit: string | null;
+  rel: number | null;
+  confidence: string | null;
+  design_relevant: number;
+  unconfirmed: number;
+  excluded_reason: string | null;
+  text: string;
+};
+export type DiffEvents = { diff_id: string; events: DiffEventRow[] };
+
+/** `GET /precedents?diff_id=` 의 답(brief.precedents) — 변화 종류별 선례 수치와 같은 주체의 등록부 행. */
+export type Precedents = {
+  delta_priors: Array<{
+    change_kind: string;
+    mechanism: string | null;
+    mechanism_detail: string | null;
+    n_raised: number;
+    n_targets: number;
+    n_verified: number;
+    n_dismissed: number;
   }>;
+  clusters: Array<{
+    reg_ref: string;
+    target_key: string;
+    project_code: string | null;
+    cluster_key: string;
+    subject_names: JsonValue;
+    severity: string | null;
+    status: string;
+    support: number | null;
+    claim: string | null;
+    path: JsonValue;
+  }>;
+  rule_hits: RuleHit[];
 };
 
 // ── 타깃 · 잡 ────────────────────────────────────────────────────────────────
@@ -700,9 +1269,35 @@ export type CoverageJob = {
   llm_mismatch?: number;
 } | null;
 
+/**
+ * 카드 대조 검토 잡의 일꾼 한 명(routes._review_job_payload — 도는 호출마다의 마지막 신호). `*_idle_s` 는 서버 시계로 잰 초다.
+ */
+export type ReviewWorkerSignal = {
+  agent_key?: string;
+  purpose?: string;
+  unit_id?: string | null;
+  call_kind?: string;
+  started_at?: number | null;
+  last_frame_at: number | null;
+  last_event_at: number | null;
+  last_step?: string;
+  frame_idle_s: number | null;
+  event_idle_s: number | null;
+};
+
+/**
+ * 진행판의 카드 대조 검토 칸(routes.review_payload — 패널 대상은 null). 이 화면은 잡의 일꾼별 마지막 신호만 읽는다 — 셀 · 거르기 ·
+ * 동의 같은 나머지 칸은 M3 화면 요청서 2절의 몫이라 여기 적지 않았다.
+ */
+export type CoverageReview = {
+  job: { id: string; state: BatchJobState; signal: { workers: ReviewWorkerSignal[] } | null } | null;
+};
+
 export type Coverage = {
   target_key: string;
   job: CoverageJob;
+  /** 카드 대조 대상만 객체다(패널 대상은 null). */
+  review?: CoverageReview | null;
   roster_size: number;
   /** 도메인 코드 → 커버리지 상태별 좌석 수. */
   by_domain: Record<string, Partial<Record<CoverageStatus, number>>>;
@@ -735,6 +1330,22 @@ export type Seat = {
 };
 
 export type SeatList = { target_key: string; domain: string | null; seats: Seat[] };
+
+/**
+ * 좌석을 사람이 옮긴다(`PUT /targets/{key}/coverage/{agent_key}` — routes.put_coverage). skipped 는 사유가 필수이고(빈 사유는 422
+ * E100), pending 은 carried 되돌리기다. 허용되지 않는 전이는 409 E100 이다(planner.ALLOWED_TRANSITIONS).
+ */
+export type SeatUpdate = { status: "skipped" | "pending"; reason?: string };
+export type SeatUpdated = {
+  target_key: string;
+  agent_key: string;
+  status: CoverageStatus;
+  reason?: string;
+  cycle?: number;
+  status_source: "human" | "code";
+  decided_by: string | null;
+  decided_at: number | null;
+};
 
 // ── 등록부 · verdict ─────────────────────────────────────────────────────────
 
@@ -1078,7 +1689,8 @@ export type DiffListRow = {
   diff_version: string;
   summary_status: "ok" | "lint_failed" | null;
   stats: Record<string, unknown>;
-  comparability: Record<string, unknown>;
+  /** diff 본문의 비교 가능성 그대로(읽지 못하면 빈 객체) — 목록에서 '파서 세대 다름' 을 가른다. */
+  comparability: Partial<Comparability>;
   /** 게이트가 막았나 — 이 diff 를 믿어도 되는지의 판정이다(§2.12). */
   blocked: boolean;
   gates_failed: string[];

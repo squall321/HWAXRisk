@@ -1,4 +1,4 @@
-// 과제 화면 — 머리말·구역 탭 4개(심사 · 요구·정의 · 성격·유사 · 사전)·소스 카드 3장·스냅샷 동결·스냅샷 목록·dims·iface-ledger·성격 프로파일·유사 과제(계획 §8.2.4 ProjectPage 행). ?snapshot= 이면 같은 화면에 SnapshotPage 를 그린다.
+// 과제 화면 — 머리말·구역 탭 4개(심사 · 요구·정의 · 성격·유사 · 사전)·소스 카드 3장(ECAD 는 보드 찾기 · 붙이기)·스냅샷 동결·스냅샷 목록·dims·iface-ledger·성격 프로파일·유사 과제(계획 §8.2.4 ProjectPage 행). ?snapshot= 이면 같은 화면에 SnapshotPage 를 그린다.
 import { useEffect, useMemo, useState } from "react";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { ChevronRight, Link2, Plus, Snowflake, Trash2, X } from "lucide-react";
@@ -7,7 +7,6 @@ import { POLL_MS, useAsync, useInterval } from "../hooks/useAsync";
 import { CardGrid, SectionCard } from "../components/SectionCard";
 import type { Column } from "../components/DataTable";
 import { DataTable, KeyValueTable } from "../components/DataTable";
-import { GateBanner, GateTable } from "../components/GateBanner";
 import { EmptyBlock, ErrorBanner, LoadingBlock } from "../components/StateBlocks";
 import {
   Badge,
@@ -18,6 +17,8 @@ import {
   StatusBadge,
   UnseatedBadge,
 } from "../components/Badge";
+import { EcadBoardCard } from "../components/EcadBoardCard";
+import { GateVerdictBadge } from "../components/GateBanner";
 import {
   Banner,
   Button,
@@ -32,6 +33,15 @@ import {
   TabPanel,
 } from "../ui/primitives";
 import { fmtEpoch, fmtNum } from "../format";
+import { ecadSource } from "../api/ecadBoard";
+import {
+  SNAPSHOT_KINDS,
+  defaultSnapshotKinds,
+  describeSnapshotError,
+  modelTooLargeLine,
+  snapshotBody,
+} from "../lib/capture";
+import type { SnapshotFailure } from "../lib/capture";
 import { FACET_ORDER } from "../types";
 import type {
   VocabBump,
@@ -40,10 +50,12 @@ import type {
   RequirementKind,
   RequirementStatus,
   CharacterStatement,
-  Gate,
+  GateId,
   IfaceLedgerRow,
   JobHeader,
   ProjectDetail,
+  ProjectSource,
+  SnapshotCreated,
   SnapshotHeader,
   SourceRef,
   SourceKind,
@@ -51,8 +63,8 @@ import type {
 } from "../types";
 import SnapshotPage from "./SnapshotPage";
 
-const SOURCE_KINDS: SourceKind[] = ["mcad", "dyna", "ecad"];
-const SNAPSHOT_KINDS: SourceKind[] = ["mcad", "dyna", "dyna_result", "ecad"];
+/** 일반 연결 폼을 쓰는 소스 — ECAD 는 일반 연결로 붙이지 않는다(서버 422 ecad_board_route, 보드 찾기 · 붙이기 길을 쓴다). */
+const GENERIC_SOURCE_KINDS: Array<Exclude<SourceKind, "ecad" | "dyna_result">> = ["mcad", "dyna"];
 const KIND_LABEL: Record<SourceKind, string> = {
   mcad: "MCAD",
   dyna: "DynaForge",
@@ -132,41 +144,58 @@ const PROJECT_TABS: Array<{ tab: ProjectTab; label: string }> = [
   { tab: "vocab", label: "사전" },
 ];
 
+/** 일반 연결의 참조 칸 — 서버 칸이 객체(dict)라 kind 마다 열쇠를 정해 받는다(어댑터가 읽는 열쇠 — adapters/mcad · dyna). */
+const REF_FIELDS: Record<"mcad" | "dyna", Array<{ key: string; label: string; required: boolean }>> = {
+  mcad: [
+    { key: "stepforge_project_id", label: "StepForge 프로젝트 id", required: true },
+    { key: "detect_job_id", label: "detect 잡 id", required: false },
+  ],
+  dyna: [
+    { key: "session_id", label: "DynaForge 세션 id", required: true },
+    { key: "file_id", label: "K파일 id", required: true },
+    { key: "sha256", label: "sha256", required: false },
+  ],
+};
+
 function SourceCard({
   kind,
   detail,
   adapters,
   onChanged,
 }: {
-  kind: SourceKind;
+  kind: "mcad" | "dyna";
   detail: ProjectDetail;
   adapters: AdapterEntry[];
   onChanged: () => void;
 }) {
   const source = detail.sources.find((s) => s.kind === kind);
   const candidates = adapters.filter((a) => a.kind === kind);
+  const fields = REF_FIELDS[kind];
   const [appKey, setAppKey] = useState("");
-  const [ref, setRef] = useState("");
+  const [ref, setRef] = useState<Record<string, string>>({});
   const [bridge, setBridge] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const [warnings, setWarnings] = useState<string[]>([]);
 
-  const chosen = candidates.find((a) => (a.app_key ?? "") === appKey);
-  const choices = chosen?.choices ?? [];
-  const stub = kind === "ecad" && candidates.length === 0;
+  const refBody = Object.fromEntries(
+    fields.map((f) => [f.key, (ref[f.key] ?? "").trim()]).filter(([, v]) => v !== ""),
+  ) as Record<string, string>;
+  const ready = appKey !== "" && fields.every((f) => !f.required || (refBody[f.key] ?? "") !== "");
 
   async function link(event: React.FormEvent) {
     event.preventDefault();
-    if (appKey.trim() === "" || ref.trim() === "") return;
+    if (!ready) return;
     setBusy(true);
     setError(null);
     try {
-      await riskApi.addSource(detail.project.id, {
+      const out = await riskApi.addSource(detail.project.id, {
         kind,
-        app_key: appKey.trim(),
-        ref: ref.trim(),
+        app_key: appKey,
+        ref: refBody,
         bridge_declared: bridge,
       });
+      setWarnings(out.warnings ?? []);
       onChanged();
     } catch (err) {
       setError(err);
@@ -175,11 +204,9 @@ function SourceCard({
     }
   }
 
+  const probe = source?.probe ?? {};
   return (
     <SubPanel title={KIND_LABEL[kind]} actions={<SourceStatusBadge value={source?.status ?? "unlinked"} />}>
-      {stub ? (
-        <p className="m-0 text-sm text-muted-foreground">연결 대기(스텁) — 어댑터를 찾지 못했습니다.</p>
-      ) : null}
       {source ? (
         // 카드가 좁으므로 한 열로 읽는다. 라벨은 사람 말이고 서버 필드명은 hint 로 남긴다.
         <KeyValueTable
@@ -191,31 +218,23 @@ function SourceCard({
               hint: "ref",
               // 서버는 파싱된 객체를 준다(`{stepforge_project_id: …}` 등). 그대로 그리면 React 가
               // 터져 화면이 통째로 백지가 된다 — 실제로 그랬다. 키=값 줄로 편다.
-              value: source.ref ? <RefPairs ref_={source.ref} /> : UNKNOWN,
+              value: Object.keys(source.ref ?? {}).length > 0 ? <RefPairs ref_={source.ref} /> : UNKNOWN,
             },
-            {
-              label: "브리지 선언",
-              hint: "bridge_declared",
-              // null·undefined 를 "false" 로 단정하지 않는다 — 안 적힌 것과 아니라고 적힌 것은 다르다.
-              value: source.bridge_declared === undefined || source.bridge_declared === null
-                ? UNKNOWN
-                : source.bridge_declared ? "true" : "false",
-            },
+            { label: "브리지 선언", hint: "bridge_declared", value: source.bridge_declared ? "true" : "false" },
             {
               label: "도달 측정",
               hint: "probe",
-              value: source.probe ? (
-                <span className="flex flex-wrap items-center gap-2">
-                  <Badge tone={source.probe.reachable ? "ok" : "bad"}>
-                    {source.probe.reachable ? "reachable" : "unreachable"}
-                  </Badge>
-                  <span className="text-muted-foreground">
-                    {source.probe.detail} · {source.probe.capture_mode}
+              value:
+                probe.reachable === undefined ? (
+                  <span className="text-muted-foreground">잰 적 없음</span>
+                ) : (
+                  <span className="flex flex-wrap items-center gap-2">
+                    <Badge tone={probe.reachable ? "ok" : "bad"}>{probe.reachable ? "reachable" : "unreachable"}</Badge>
+                    <span className="text-muted-foreground">
+                      {probe.detail ?? "-"} · {probe.capture_mode ?? "-"}
+                    </span>
                   </span>
-                </span>
-              ) : (
-                UNKNOWN
-              ),
+                ),
             },
           ]}
         />
@@ -224,6 +243,9 @@ function SourceCard({
       )}
       <form className="mb-4 flex flex-col gap-3" onSubmit={link}>
         <ErrorBanner error={error} />
+        {warnings.length > 0 ? (
+          <p className="m-0 text-sm text-muted-foreground">연결 응답의 경고 — {warnings.join(" · ")}</p>
+        ) : null}
         <FormField label="어댑터" hint="app_key">
           <Select value={appKey} onChange={(e) => setAppKey(e.target.value)}>
             <option value="">선택</option>
@@ -234,26 +256,16 @@ function SourceCard({
             ))}
           </Select>
         </FormField>
-        <FormField label="참조" hint="ref">
-          {choices.length > 0 ? (
-            <Select value={ref} onChange={(e) => setRef(e.target.value)}>
-              <option value="">선택</option>
-              {choices.map((c) => (
-                <option key={c.value} value={c.value}>
-                  {c.label}
-                  {c.detail ? ` — ${c.detail}` : ""}
-                </option>
-              ))}
-            </Select>
-          ) : (
-            <Input value={ref} onChange={(e) => setRef(e.target.value)} />
-          )}
-        </FormField>
+        {fields.map((f) => (
+          <FormField key={f.key} label={f.label} hint={`ref.${f.key}${f.required ? " · 필수" : " · 선택"}`}>
+            <Input value={ref[f.key] ?? ""} onChange={(e) => setRef((prev) => ({ ...prev, [f.key]: e.target.value }))} />
+          </FormField>
+        ))}
         <label className="flex flex-wrap items-center gap-2">
           <input type="checkbox" checked={bridge} onChange={(e) => setBridge(e.target.checked)} />
           <span className="text-sm text-muted-foreground">bridge_declared</span>
         </label>
-        <Button type="submit" variant="outline" className="self-start" disabled={busy || appKey === "" || ref === ""}>
+        <Button type="submit" variant="outline" className="self-start" disabled={busy || !ready}>
           <Link2 className="size-4" aria-hidden="true" />
           연결
         </Button>
@@ -262,77 +274,147 @@ function SourceCard({
   );
 }
 
+/** 동결 결과의 게이트 요약 — true · false · null(판정 불가 — 위반이 아니다). */
+function GatesSummary({ summary }: { summary: SnapshotCreated["gates_summary"] }) {
+  const entries = Object.entries(summary) as Array<[GateId, boolean | null]>;
+  if (entries.length === 0) return null;
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1">
+      {entries.map(([id, pass]) => (
+        <span key={id} className="inline-flex items-center gap-1 text-xs">
+          {id}
+          <GateVerdictBadge
+            record={{ key: id, count: null, threshold: null, pass, blocking: false, effect: "", detail: [] }}
+          />
+        </span>
+      ))}
+    </span>
+  );
+}
+
 function SnapshotForm({
   projectId,
-  onQueued,
-  onOpenSnapshot,
+  sources,
+  onFrozen,
+  onRejected,
 }: {
   projectId: string;
-  /** 202 로 잡이 걸렸을 때 — 화면이 그 잡을 좇아 완료 시 스냅샷을 연다. */
-  onQueued: (jobId: string | null) => void;
-  onOpenSnapshot: (snapshotId: string) => void;
+  /** 과제의 소스 카드 — ECAD 카드가 붙어 있으면 기본 kinds 에 ecad 를 넣는다(ecad-1031 §6). */
+  sources: ProjectSource[];
+  /** 동결은 동기다(202 잡이 아니다) — 답의 스냅샷을 연다. */
+  onFrozen: (snapshotId: string) => void;
+  /** 거절된 캡처도 서버가 소스 카드를 다시 잰다(보드를 못 읽으면 카드가 '못 읽음') — 과제를 다시 받는다. */
+  onRejected: () => void;
 }) {
   const [label, setLabel] = useState("");
-  const [kinds, setKinds] = useState<SourceKind[]>(["mcad"]);
+  const [kinds, setKinds] = useState<SourceKind[]>(() => defaultSnapshotKinds(sources));
+  const [touched, setTouched] = useState(false);
   const [reportIds, setReportIds] = useState("");
   const [detectId, setDetectId] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [notice, setNotice] = useState<string | null>(null);
-  const [gates, setGates] = useState<Gate[] | null>(null);
-  const [degraded, setDegraded] = useState(false);
+  const [failure, setFailure] = useState<SnapshotFailure | null>(null);
+  const [created, setCreated] = useState<SnapshotCreated | null>(null);
+
+  // 보드를 붙이거나 뗀 뒤에도 사람이 체크를 만지지 않았으면 기본값을 따라간다(만졌으면 그 값이 이긴다).
+  const hasEcad = sources.some((s) => s.kind === "ecad");
+  useEffect(() => {
+    if (!touched) setKinds(defaultSnapshotKinds(sources));
+    // sources 전체가 아니라 ECAD 카드 유무만 기본값을 바꾼다.
+  }, [hasEcad, touched]);
 
   function toggle(kind: SourceKind) {
+    setTouched(true);
     setKinds((prev) => (prev.includes(kind) ? prev.filter((k) => k !== kind) : [...prev, kind]));
   }
 
-  async function submit(event: React.FormEvent) {
-    event.preventDefault();
-    if (kinds.length === 0) return;
+  const form = { label, kinds, reportIds, detectId };
+  const reportIdsBad = reportIds.trim() !== "" && snapshotBody(form) === null;
+
+  async function submit(allowLarge: boolean) {
+    const body = snapshotBody(form, allowLarge);
+    if (!body || kinds.length === 0) return;
     setBusy(true);
     setError(null);
-    setNotice(null);
-    setGates(null);
-    setDegraded(false);
+    setFailure(null);
+    setCreated(null);
     try {
-      const accepted = await riskApi.createSnapshot(projectId, {
-        label: label.trim() === "" ? undefined : label.trim(),
-        kinds,
-        report_ids: reportIds.trim() === "" ? undefined : reportIds.split(",").map((s) => s.trim()).filter(Boolean),
-        detect_result_file_id: detectId.trim() === "" ? undefined : detectId.trim(),
-      });
-      setGates(accepted.gates ?? null);
-      setDegraded(accepted.degraded === true);
-      if (accepted.snapshot_id) {
-        // 같은 ir_hash 라 서버가 200 으로 기존 스냅샷을 돌려준 경우다(§8.2.3 409 행).
-        setNotice(`같은 ir_hash 의 기존 스냅샷을 씁니다 — ${accepted.snapshot_id}.`);
-        onOpenSnapshot(accepted.snapshot_id);
-      } else {
-        setNotice(`동결 잡을 시작했습니다 — ${accepted.job_id ?? "job"}. 완료되면 아래에 스냅샷이 열립니다.`);
-      }
-      onQueued(accepted.snapshot_id ? null : accepted.job_id ?? null);
+      const out = await riskApi.createSnapshot(projectId, body);
+      setCreated(out);
+      onFrozen(out.snapshot_id);
     } catch (err) {
-      setError(err);
+      const known = describeSnapshotError(err);
+      if (known.kind === "other") setError(err);
+      else setFailure(known);
+      onRejected();
     } finally {
       setBusy(false);
     }
   }
 
   return (
-    <form className="mb-4 flex flex-col gap-3" onSubmit={submit}>
+    <form
+      className="mb-4 flex flex-col gap-3"
+      onSubmit={(event) => {
+        event.preventDefault();
+        void submit(false);
+      }}
+    >
       <ErrorBanner error={error} />
-      {notice ? <p className="m-0 text-sm text-muted-foreground">{notice}</p> : null}
-      {/* degraded 는 서버가 준 사실이다 — 동결은 됐지만 온전히 읽지 못했다는 것을 지우지 않는다. */}
-      {degraded ? (
-        <Banner tone="warn" title="degraded" detail="일부 소스를 온전히 읽지 못한 채 동결했습니다." />
+      {failure?.kind === "model_too_large" ? (
+        // 상한은 MCAD 리프와 ECAD 부품의 합이다(결정 3) — 무엇이 넘겼는지 한 줄로 보이고, 확인 뒤 같은 요청에 allow_large 를 싣는다.
+        <Banner tone="warn" title="모델이 크기 상한을 넘습니다." detail={modelTooLargeLine(failure.detail)}>
+          <Button type="button" size="sm" disabled={busy} onClick={() => void submit(true)}>
+            그래도 동결
+          </Button>
+        </Banner>
       ) : null}
-      {gates ? (
-        <>
-          <GateBanner gates={gates} />
-          <GateTable gates={gates} />
-        </>
+      {failure?.kind === "kinds_excluded" ? (
+        <Banner tone="warn" title="고른 종류에 붙은 소스가 없습니다." detail={failure.message}>
+          {failure.attached.length > 0 ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setKinds(failure.attached);
+                setTouched(true);
+                setFailure(null);
+              }}
+            >
+              {failure.attached.map((k) => KIND_LABEL[k]).join(" · ")} 로 바꾸기
+            </Button>
+          ) : null}
+        </Banner>
       ) : null}
-      <div className="flex flex-wrap items-center gap-2">
+      {failure?.kind === "ecad_unread" ? (
+        <Banner title="ECAD 보드를 못 읽었습니다." detail={failure.message}>
+          {failure.reason === "ecad_pat_absent" ? (
+            <Link to="/settings" className="text-sm underline underline-offset-4">
+              설정에서 내 포털 PAT 등록
+            </Link>
+          ) : null}
+        </Banner>
+      ) : null}
+      {created ? (
+        <Banner
+          tone={created.blocked || created.job_state !== "done" ? "warn" : "info"}
+          live="status"
+          title={
+            created.reused
+              ? `같은 ir_hash 의 기존 스냅샷을 씁니다 — ${created.snapshot_id}.`
+              : `동결했습니다 — ${created.snapshot_id}(${created.job_state}).`
+          }
+          detail={
+            <span className="flex flex-col gap-1">
+              <GatesSummary summary={created.gates_summary} />
+              {created.blocked ? <span>G6 로 차단된 스냅샷입니다 — diff · 타깃을 만들 수 없습니다.</span> : null}
+              {created.degraded.length > 0 ? <span>강등 표지 {created.degraded.join(" · ")}</span> : null}
+            </span>
+          }
+        />
+      ) : null}
+      <div className="flex flex-wrap items-center gap-2" role="group" aria-label="동결할 소스 종류">
         {SNAPSHOT_KINDS.map((kind) => (
           <label key={kind} className="flex flex-wrap items-center gap-2">
             <input type="checkbox" checked={kinds.includes(kind)} onChange={() => toggle(kind)} />
@@ -344,16 +426,20 @@ function SnapshotForm({
         <FormField label="스냅샷 이름" hint="label · 선택">
           <Input value={label} onChange={(e) => setLabel(e.target.value)} />
         </FormField>
-        <FormField label="보고서 id" hint="report_ids · 쉼표 구분">
+        <FormField
+          label="보고서 id"
+          hint="report_ids · 쉼표 구분 · 수"
+          error={reportIdsBad ? "보고서 id 는 수입니다." : undefined}
+        >
           <Input value={reportIds} onChange={(e) => setReportIds(e.target.value)} />
         </FormField>
         <FormField label="detect 결과 파일" hint="detect_result_file_id · 선택">
           <Input value={detectId} onChange={(e) => setDetectId(e.target.value)} />
         </FormField>
       </FormGrid>
-      <Button type="submit" className="self-start" disabled={busy || kinds.length === 0}>
+      <Button type="submit" className="self-start" disabled={busy || kinds.length === 0 || reportIdsBad}>
         <Snowflake className="size-4" aria-hidden="true" />
-        스냅샷 동결
+        {busy ? "동결하는 중…" : "스냅샷 동결"}
       </Button>
     </form>
   );
@@ -486,7 +572,8 @@ function RequirementsCard({ projectId, predecessorId }: { projectId: string; pre
     { key: "kind", header: "종류", hint: "kind", cell: (r) => r.kind, nowrap: true },
     { key: "name", header: "이름", hint: "name", cell: (r) => r.name },
     { key: "op", header: "비교", hint: "op", cell: (r) => r.op ?? UNKNOWN, nowrap: true },
-    { key: "value", header: "값", hint: "value", cell: (r) => JSON.stringify(r.value_json ?? null) },
+    // 받을 때는 푼 값 `value` 다(requirements._public) — 전에 value_json 을 읽어 늘 null 이었다.
+    { key: "value", header: "값", hint: "value", cell: (r) => JSON.stringify(r.value ?? null) },
     { key: "unit", header: "단위", hint: "unit", cell: (r) => r.unit ?? UNKNOWN, nowrap: true },
     { key: "status", header: "status", cell: (r) => <StatusBadge value={r.status} />, nowrap: true },
     { key: "waive_reason", header: "사유", cell: (r) => r.waive_reason ?? UNKNOWN },
@@ -964,33 +1051,26 @@ export default function ProjectPage() {
 
   const detail = useAsync((signal) => riskApi.getProject(projectId, { signal }), [projectId], projectId !== "");
   const adapters = useAsync((signal) => riskApi.getAdapters({ signal }), []);
+  const me = useAsync((signal) => riskApi.getMe({ signal }), []);
 
   const jobs: JobHeader[] = detail.data?.jobs ?? [];
   const active = jobs.some((j) => j.state === "queued" || j.state === "running");
   useInterval(detail.reload, active ? POLL_MS : null);
 
-  /** 방금 건 동결 잡. 끝나면 §8.2.4 대로 `?snapshot=` 을 열어 준다. */
-  const [pendingJob, setPendingJob] = useState<string | null>(null);
-  /** 방금 동결돼 열린 스냅샷 id. 탭을 뺏는 대신 이것으로 알린다. 사용자가 닫으면 사라진다. */
+  const email = me.data?.email ?? null;
+  /** 보드 바꾸기 · 떼기는 과제 주인만 — 과제 행의 소유자가 나인가. */
+  const isOwner = detail.data !== null && email !== null && detail.data.project.owner_sub === email;
+
+  /**
+   * 방금 동결돼 열린 스냅샷 id. 탭을 뺏는 대신 이것으로 알린다. 사용자가 닫으면 사라진다. 동결은 동기라(202 잡이 아니다) 답의
+   * 스냅샷을 곧바로 연다 — 전에는 스냅샷 잡을 과제 잡 목록(`jobs[]`)에서 찾다 늘 못 찾아 이 알림이 서지 않았다.
+   */
   const [frozen, setFrozen] = useState<string | null>(null);
-  useEffect(() => {
-    if (pendingJob === null || !detail.data) return;
-    const job = detail.data.jobs.find((j) => j.id === pendingJob);
-    if (job && (job.state === "queued" || job.state === "running")) return;
-    setPendingJob(null);
-    if (!job || job.state !== "done") return;
-    const newest = detail.data.snapshots.reduce<SnapshotHeader | null>(
-      (best, s) => (best === null || s.created_at > best.created_at ? s : best),
-      null,
-    );
-    if (newest) {
-      // 스냅샷은 열어 두되 **탭은 뺏지 않는다.** 이 effect 는 5초 폴링이 깨우므로, 탭을 옮기면
-      // 사용자가 아무것도 누르지 않았는데 보던 화면이 바뀐다. 다른 탭에서 입력 중이었다면
-      // 그 입력이 눈앞에서 사라지는 것으로 보인다. 동결이 끝났다는 사실은 아래 배너로 말한다.
-      setParams({ snapshot: newest.id });
-      setFrozen(newest.id);
-    }
-  }, [pendingJob, detail.data, setParams]);
+  function openFrozen(id: string) {
+    setParams({ snapshot: id });
+    setFrozen(id);
+    detail.reload();
+  }
 
   const snapshotColumns: Column<SnapshotHeader>[] = [
     { key: "id", header: "스냅샷", hint: "snapshot_id", cell: (s) => <Mono>{s.id}</Mono>, nowrap: true },
@@ -1190,7 +1270,7 @@ export default function ProjectPage() {
             <ErrorBanner error={adapters.error} onRetry={adapters.reload} />
             {detail.data ? (
               <CardGrid min="20rem">
-                {SOURCE_KINDS.map((kind) => (
+                {GENERIC_SOURCE_KINDS.map((kind) => (
                   <SourceCard
                     key={kind}
                     kind={kind}
@@ -1199,6 +1279,15 @@ export default function ProjectPage() {
                     onChanged={detail.reload}
                   />
                 ))}
+                <EcadBoardCard
+                  projectId={projectId}
+                  source={ecadSource(detail.data.sources)}
+                  adapters={adapters.data?.apps ?? null}
+                  adaptersLoading={adapters.loading}
+                  isOwner={isOwner}
+                  onAdaptersRetry={adapters.reload}
+                  onChanged={detail.reload}
+                />
               </CardGrid>
             ) : null}
           </SectionCard>
@@ -1206,11 +1295,9 @@ export default function ProjectPage() {
           <SectionCard title="스냅샷 동결" subtitle="소스 앱의 parse · detect 는 각 앱 화면에서 먼저 실행하세요.">
             <SnapshotForm
               projectId={projectId}
-              onQueued={(jobId) => {
-                setPendingJob(jobId);
-                detail.reload();
-              }}
-              onOpenSnapshot={(id) => setParams({ snapshot: id })}
+              sources={detail.data?.sources ?? []}
+              onFrozen={openFrozen}
+              onRejected={detail.reload}
             />
           </SectionCard>
 
