@@ -543,6 +543,15 @@ def _pick_seats(queues: dict[str, list[dict]], tier: str, adj: Mapping[str, Sequ
     return seats
 
 
+def has_pending(store: Any, target_key: str, tier: str) -> bool:
+    """그 Tier 범위에 아직 편성할 pending 좌석이 있나(`plan_next_panel` 이 읽는 큐 그대로) — 러너가 형제가 도는 잡의 둘째 자리를 편성할
+    거리 없이 틱마다 집지 않게 본다(잡을 끝내는 판정은 편성기 몫 그대로, HWAXRisk context-notes CC-4)."""
+    if tier not in TIERS:
+        return False
+    rows = _roster_rows(store, target_key)
+    return bool(_queues(rows, tier, _domain_sizes(rows)))
+
+
 def plan_next_panel(
     store: Any,
     target_key: str,
@@ -1079,6 +1088,18 @@ def coverage_summary(store: Any, target_key: str) -> dict:
     }
 
 
+def _runner_slots(store: Any, target_key: str) -> int:
+    """그 대상에서 함께 도는 패널의 상한 — 살아 있는 패널 · 쟁점 잡 가운데 가장 큰 자리 수(`runner.job_slots`), 없으면 1(종전 불변식).
+    러너는 대상 안에서 잡끼리 직렬이고 잡 하나는 제 자리 수까지 패널을 함께 돌린다(잡의 concurrency — 사용자 결정 10-31, HWAXRisk
+    context-notes CC-1)."""
+    from app import runner  # noqa: PLC0415 — runner 는 이 모듈을 import 한다.
+
+    rows = store.query(
+        "SELECT concurrency, params_json, COALESCE(mode, 'panels') AS mode FROM rr_jobs WHERE target_key = ? AND state IN"
+        f" ('queued', 'running', 'paused', 'cancelling') AND {runner.RUNNER_JOBS_SQL}", (target_key,))
+    return max([1, *(runner.job_slots(dict(r)) for r in rows)])
+
+
 def check_invariants(store: Any, target_key: str) -> list[str]:
     """plan §6.8.3 의 원장 불변식 위반 목록(빈 리스트 = 통과). 4·6·7 은 러너·테스트가 따로 검사한다."""
     problems: list[str] = []
@@ -1091,8 +1112,9 @@ def check_invariants(store: Any, target_key: str) -> list[str]:
         "SELECT id FROM rr_panels WHERE target_key = ? AND status = 'running' ORDER BY panel_no ASC", (target_key,)
     )
     running_seats = summary["by_status"].get("running", 0)
-    if len(running_panels) > 1:
-        problems.append(f"(2) 타깃당 running 패널이 {len(running_panels)} 개다(≤1).")
+    allowed = _runner_slots(store, target_key)
+    if len(running_panels) > allowed:
+        problems.append(f"(2) 타깃당 running 패널이 {len(running_panels)} 개다(≤{allowed} — 살아 있는 잡의 동시 실행).")
     if running_seats > ROSTER_SEATS * max(1, len(running_panels)) or (running_seats and not running_panels):
         problems.append(f"(2) running 좌석 {running_seats} 이 running 패널 {len(running_panels)} 개의 상한을 넘는다.")
 

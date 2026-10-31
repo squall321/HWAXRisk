@@ -640,7 +640,7 @@ function PanelRunner({
               hint: "pause_reason · hold_code · hold_until",
               value: <PanelJobPause job={job} />,
             },
-            { label: "도는 패널", hint: "signal", value: <JobSignalLine job={job} /> },
+            { label: "도는 패널", hint: "signals", value: <JobSignalLine job={job} /> },
             {
               label: "진행",
               hint: "panels_done / panels_total",
@@ -746,6 +746,7 @@ function PanelRunner({
             {created.credential_email ? <Mono>{created.credential_email}</Mono> : null}
           </div>
           {created.credential_note ? <p className="m-0 text-sm text-muted-foreground">{created.credential_note}</p> : null}
+          {created.concurrency_note ? <p className="m-0 text-sm text-muted-foreground">{created.concurrency_note}</p> : null}
           {created.user_memo_cut ? (
             <p className="m-0 text-sm text-muted-foreground">
               메모가 길어 좌석은 앞 {created.user_memo_cut.kept}자만 받습니다(원문 {created.user_memo_cut.chars}자).

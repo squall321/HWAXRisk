@@ -1295,6 +1295,8 @@ export type TargetJobCreated = {
   credential_note?: string;
   /** 메모가 브리프 M 상한을 넘어 좌석이 앞부분만 받는다 — 원문 길이와 실린 길이. */
   user_memo_cut?: { chars: number; kept: number };
+  /** 청한 동시 실행보다 적게 돈다 — 그 까닭(박스의 전역 자리 수 · Claude 잡은 동시 1). 청한 만큼 돌면 칸이 없다. */
+  concurrency_note?: string;
   /** Claude 로 고른 잡에만 있다(GLM 잡의 답은 이 칸이 없다). */
   llm?: "claude";
   consent_external?: ConsentExternal;
@@ -1341,8 +1343,8 @@ export type CoverageJob = {
   error: string | null;
   signal: JobSignal | null;
   /**
-   * 도는 패널마다의 신호(가지 wt1031/risk-reads 부터). 러너는 대상마다 패널을 하나씩만 돌려(잡의 concurrency 는 러너가 읽지 않는다) 지금은
-   * 많아야 한 줄이고 `signal` 과 같다.
+   * 도는 패널마다의 신호(가지 wt1031/risk-reads 부터) — 패널 차례(panel_no)대로. 동시 2 잡(잡의 concurrency — 사용자 결정 10-31,
+   * 가지 wt1031/risk-concurrency)은 둘까지이고 `signal` 은 그 가운데 마지막에 적힌 것이다. 동시 1 잡은 많아야 한 줄이고 `signal` 과 같다.
    */
   signals: JobSignal[];
   llm?: "claude";

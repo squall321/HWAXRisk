@@ -388,9 +388,10 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = N
     # 뺄 항목도 살아 있는 잡을 돌려주기 전에 본다 — 틀린 값을 준 호출이 살아 있는 잡을 받아 '받아들여졌다' 고 읽지 않게(B31).
     excluded = brief.check_exclude(exclude_evidence) if exclude_evidence is not None else None
     extra = {**llm_fields, **({"exclude_evidence": exclude_evidence} if exclude_evidence is not None else {})}
+    # 범위 밖 concurrency 도 살아 있는 잡을 돌려주기 전에 본다 — 도구 스키마가 1 ~ 2 를 싣고 검사는 본문(JobBody)이 한다(CC-33).
     body = (_body(routes.JobBody, tier=tier, concurrency=concurrency, modifiers=modifiers, user_memo=user_memo,
                   consent=consent, mode=mode, **({"scope": scope} if scope is not None else {}), **extra)
-            if llm_fields else None)
+            if llm_fields or not 1 <= concurrency <= runner.MAX_JOB_CONCURRENCY else None)
     live = store.query_one(
         "SELECT id, tier, state, pause_reason, panels_done, panels_total, error, credential_email, params_json FROM rr_jobs"
         f" WHERE target_key = ? AND tier = ? AND {runner.PANEL_JOBS_SQL}"

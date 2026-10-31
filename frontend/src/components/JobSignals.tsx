@@ -3,21 +3,35 @@ import { Badge } from "./Badge";
 import { SectionCard } from "./SectionCard";
 import { Mono } from "../ui/primitives";
 import { SIGNAL_STALE_S, signalView, workerSignalView } from "../lib/targetView";
-import type { CoverageJob, CoverageReview } from "../types";
+import type { CoverageJob, CoverageReview, JobSignal } from "../types";
 
 /**
  * 도는 패널의 마지막 신호(routes._live_signal — 그 패널이 지금 도는 동안에만 온다). 러너가 1분 간격으로 적어 건강한 패널도 80초
  * 안팎까지 가므로 80초를 넘을 때만 강조한다 — 도는 패널과 멈춘 패널이 둘 다 running 으로만 보이던 자리다(B34 486).
+ * 도는 패널마다 한 줄이다(`signals` — 동시 2 잡은 둘까지, 패널 차례대로). `signals` 가 없는 응답은 `signal` 한 줄이다.
  */
 export function JobSignalLine({ job }: { job: NonNullable<CoverageJob> }) {
-  const view = signalView(job.signal);
-  if (!view) {
+  const signals = job.signals?.length ? job.signals : job.signal ? [job.signal] : [];
+  if (signals.length === 0) {
     return (
       <span className="text-muted-foreground">
         {job.state === "running" ? "지금 도는 패널이 없습니다(패널 사이 · 자리 기다림)." : "—"}
       </span>
     );
   }
+  if (signals.length === 1) return <PanelSignal signal={signals[0]} />;
+  return (
+    <span className="flex flex-col gap-1">
+      {signals.map((signal) => (
+        <PanelSignal key={signal.panel_id} signal={signal} />
+      ))}
+    </span>
+  );
+}
+
+function PanelSignal({ signal }: { signal: JobSignal }) {
+  const view = signalView(signal);
+  if (!view) return null;
   return (
     <span className="flex flex-wrap items-center gap-2">
       <Mono>{view.worker}</Mono>
@@ -29,7 +43,7 @@ export function JobSignalLine({ job }: { job: NonNullable<CoverageJob> }) {
         <span>{view.text}</span>
       )}
       {view.step ? <span className="text-xs text-muted-foreground">단계 {view.step}</span> : null}
-      {job.signal?.advice ? <Badge tone="info">{job.signal.advice}</Badge> : null}
+      {signal.advice ? <Badge tone="info">{signal.advice}</Badge> : null}
     </span>
   );
 }
