@@ -217,30 +217,111 @@ def _truncated_kinds(ir: Mapping[str, Any]) -> set[str]:
 
 
 def _apply_truncation(kinds: set[str], structural: dict, parametric: dict,
-                      base_edges: Sequence[Mapping[str, Any]], target_edges: Sequence[Mapping[str, Any]]) -> None:
-    """쌍의 한쪽이라도 목록이 잘린 kind 의 엣지 변경 · 파라메트릭 delta 에 `excluded_reason='truncated'`(plan §2.5.1 · §3.3.6).
+                      base_ir: Mapping[str, Any], target_ir: Mapping[str, Any], dn_of: Mapping[str, str]) -> None:
+    """쌍의 한쪽이라도 목록이 잘린 kind 의 변화에 `excluded_reason='truncated'`(plan §2.5.1 · §3.3.6).
 
     잘린 쪽에는 그 kind 의 행이 일부만 있어 빠진 행이 '간섭이 사라졌다'(iface.removed · interference_cleared) 같은 가짜 사건이 된다.
     항목은 수치째 diff_json 에 남고 의미 이벤트만 만들지 않는다 — 의미층보다 먼저 붙인다. 다른 사유가 먼저 붙은 항목은 그대로 둔다.
-    조립 단위 롤업의 엣지 수는 잘린 행이 빠진 채 세므로(어느 단위의 행이 빠졌는지 모른다) 수가 움직인 행을 함께 뺀다."""
+    닿는 곳은 엣지 변경 · 엣지 파라메트릭, 그 kind 의 계면을 읽는 명명 치수(`_truncated_dims`), 조립 단위 롤업(`_truncate_rollups`),
+    고아 전이(`_truncate_orphans`)다 — 앞의 둘만 빼면 같은 '사라졌다' 가 치수 미측정 · 롤업 · 고아 표지로 셀에 간다(반대 검토 10-31)."""
     if not kinds:
         return
     for change in structural.get("edge_changes") or ():
         if change.get("kind_family") == "iface" and {change.get("kind_from"), change.get("kind_to")} & kinds \
                 and not change.get("excluded_reason"):
             change["excluded_reason"] = "truncated"
-    base_kind = {str(e.get("eid")): str(e.get("kind") or "") for e in base_edges}
-    target_kind = {str(e.get("eid")): str(e.get("kind") or "") for e in target_edges}
+    # eid → kind 는 스냅샷의 엣지 전부에서 읽는다(eid 는 스냅샷 안에서 유일하다) — 명명 치수는 rejected 계면도 읽는다.
+    kind_of = {side: {str(e.get("eid")): str(e.get("kind") or "") for e in ir.get("edges") or () if isinstance(e, Mapping)}
+               for side, ir in (("base", base_ir), ("target", target_ir))}
     for item in parametric.get("edge_params") or ():
         if item.get("kind_family") != "iface" or item.get("excluded_reason"):
             continue
-        if {base_kind.get(str(item.get("eid_base"))), target_kind.get(str(item.get("eid_target")))} & kinds:
+        if {kind_of["base"].get(str(item.get("eid_base"))), kind_of["target"].get(str(item.get("eid_target")))} & kinds:
             item["excluded_reason"] = "truncated"
+    cut_dims = _truncated_dims(kinds, base_ir, target_ir, kind_of)
+    for item in parametric.get("dims_delta") or ():
+        # 한쪽 미측정(null_one_side)이라도 까닭이 목록 절단이면 truncated 가 이긴다 — 'ref 소실' 사건(dim.named_unmeasured)이 아니다.
+        if item.get("name") in cut_dims and item.get("excluded_reason") in (None, "null_one_side"):
+            item["excluded_reason"] = "truncated"
+    _truncate_rollups(kinds, parametric, base_ir, target_ir)
+    _truncate_orphans(kinds, structural, base_ir, target_ir, dn_of)
+
+
+def _truncated_dims(kinds: set[str], base_ir: Mapping[str, Any], target_ir: Mapping[str, Any],
+                    kind_of: Mapping[str, Mapping[str, str]]) -> set[str]:
+    """잘린 kind 의 계면을 읽는 명명 치수의 이름(plan §2.8 · ir_builder.evaluate_dims).
+
+    `edge[…]` 정의식의 치수는 `ref` 가 읽은 계면의 eid 다 — 어느 쪽이든 그 계면이 잘린 kind 면 그 치수다. 잘린 쪽에서는 행이 빠져
+    `ref` 가 비고 null_reason 이 ref_missing 이 되므로 남은 쪽의 `ref` 로 알아본다. 파생 치수(`dim(a) op dim(b)`)는 `ref` 에 읽는 치수
+    이름 둘을 적는다 — 그런 치수를 읽으면 그것도 잘린 값이라 정의 사슬을 따라 함께 든다."""
+    rows = [(side, row) for side, ir in (("base", base_ir), ("target", target_ir))
+            for row in ir.get("dims_named") or () if isinstance(row, Mapping) and row.get("name")]
+    cut = {str(row["name"]) for side, row in rows
+           if str(row.get("formula") or "").startswith("edge[") and kind_of[side].get(str(row.get("ref"))) in kinds}
+    grew = bool(cut)
+    while grew:
+        grew = False
+        for _side, row in rows:
+            refs = row.get("ref")
+            if str(row["name"]) in cut or not str(row.get("formula") or "").startswith("dim(") \
+                    or not isinstance(refs, (list, tuple)):
+                continue
+            if cut & {str(ref) for ref in refs}:
+                cut.add(str(row["name"]))
+                grew = True
+    return cut
+
+
+def _truncate_rollups(kinds: set[str], parametric: dict, base_ir: Mapping[str, Any], target_ir: Mapping[str, Any]) -> None:
+    """조립 단위 롤업 — 행의 kind 별 엣지 수를 IR 에서 다시 읽어 잘린 kind 를 따로 본다(diff 항목은 kind 를 합친 수다).
+
+    잘린 kind 의 수가 두 쪽에서 다르면 그 행은 truncated 다(어느 단위의 행이 빠졌는지 모른다). 같으면 행은 비교 대상으로 남고
+    엣지 수를 잘리지 않은 kind 로만 다시 센다 — 잘린 쪽의 그 kind 수는 일부라 합에 넣으면 숫자가 틀린다. 그때 뺀 kind 는
+    `truncated_kinds` 에 적는다. 잘린 kind 가 그 행에 없으면(clearance 만 잘렸는데 그 단위에 clearance 가 없다) 행은 그대로다 —
+    종전에는 수가 움직인 행을 kind 와 무관하게 뺐다."""
+    rows = [{str(row["path_prefix"]): row for row in _dig(ir, "rollups", "by_assembly") or ()
+             if isinstance(row, Mapping) and row.get("path_prefix")} for ir in (base_ir, target_ir)]
+
+    def count(row: Mapping[str, Any], field: str, kind: str) -> int:
+        value = row.get(field)
+        return int(value.get(kind) or 0) if isinstance(value, Mapping) else 0
+
     for item in parametric.get("rollup_delta") or ():
-        moved = any((item.get(field) or {}).get("before") != (item.get(field) or {}).get("after")
-                    for field in ("edges_internal", "edges_external"))
-        if moved and not item.get("excluded_reason"):
+        if item.get("excluded_reason"):
+            continue
+        before, after = (side.get(str(item.get("path_prefix"))) or {} for side in rows)
+        if any(count(before, field, kind) != count(after, field, kind) for field in _ROLLUP_EDGE_FIELDS for kind in kinds):
             item["excluded_reason"] = "truncated"
+            continue
+        present = sorted(kind for kind in kinds
+                         if any(count(row, field, kind) for row in (before, after) for field in _ROLLUP_EDGE_FIELDS))
+        if present:
+            for field in _ROLLUP_EDGE_FIELDS:
+                item[field] = {"before": _rollup_total(before, field, kinds), "after": _rollup_total(after, field, kinds)}
+            item["truncated_kinds"] = present
+
+
+def _truncate_orphans(kinds: set[str], structural: dict, base_ir: Mapping[str, Any], target_ir: Mapping[str, Any],
+                      dn_of: Mapping[str, str]) -> None:
+    """고아 전이(§3.3.3 orphans_delta) — 고아가 아닌 쪽에서 잘린 kind 의 계면에 끼어 있던 부품은 고아 쪽에서 그 행이 잘렸을 수 있어
+    전이를 말할 수 없다. 그 전이는 `became_orphan` · `left_orphan` 에서 빼 `truncated` 에 옮긴다(목록 base · target 은 그대로다).
+
+    고아 차수는 clearance 를 세지 않으므로 clearance 만 잘린 쌍은 고아 전이에 닿지 않는다. 잘리지 않은 kind 의 계면을 잃어 고아가 된
+    부품은 그대로 전이다 — 그 계면 변화가 사건(iface.removed)인 것과 같다."""
+    orphans = structural.get("orphans_delta")
+    if not isinstance(orphans, dict):
+        return
+    counted = kinds - {"clearance"}
+    held = {}
+    for side, ir in (("base", base_ir), ("target", target_ir)):
+        held[side] = {dn_of.get(str(nid), str(nid))
+                      for e in ir.get("edges") or () if isinstance(e, Mapping) and str(e.get("kind") or "") in counted
+                      and str(e.get("status") or "") != "rejected"
+                      for nid in (e.get("a"), e.get("b")) if nid}
+    became, left = set(orphans.get("became_orphan") or ()), set(orphans.get("left_orphan") or ())
+    orphans["became_orphan"] = sorted(became - held["base"])
+    orphans["left_orphan"] = sorted(left - held["target"])
+    orphans["truncated"] = {"became_orphan": sorted(became & held["base"]), "left_orphan": sorted(left & held["target"])}
 
 
 def _apply_fuzzy_caveat(semantic: dict) -> None:
@@ -675,7 +756,7 @@ def compute_diff(base_ir: Mapping[str, Any], target_ir: Mapping[str, Any], *,
     ecad_dns = _ecad_dns(base_by, target_by, dn_of)
     _apply_ecad_scope(comp, structural, parametric, ecad_dns)
     _apply_truncation(_truncated_kinds(base_ir) | _truncated_kinds(target_ir), structural, parametric,
-                      base_edges, target_edges)
+                      base_ir, target_ir, dn_of)
     semantic = _semantic(structural, parametric, corr, dn_of, ckey_of, method_of,
                          base_by, target_by, comp, g2_fail, g4_fail)
 
@@ -1319,6 +1400,17 @@ def _result_delta(base_ir, target_ir, dn_of, ckey_of, comp) -> list[dict]:
     return items
 
 
+_ROLLUP_EDGE_FIELDS = ("edges_internal", "edges_external")
+
+
+def _rollup_total(row: Mapping[str, Any], field: str, without: set[str] | frozenset[str] = frozenset()) -> int | None:
+    """롤업 행의 kind 별 엣지 수 합(`without` 의 kind 는 뺀다). 그 칸이 없으면(그쪽에 행이 없다) None."""
+    value = row.get(field)
+    if isinstance(value, Mapping):
+        return sum(int(v) for k, v in value.items() if isinstance(v, int) and str(k) not in without)
+    return None
+
+
 def _rollup_delta(base_ir, target_ir) -> list[dict]:
     def index(ir) -> dict[str, Mapping[str, Any]]:
         out: dict[str, Mapping[str, Any]] = {}
@@ -1331,19 +1423,14 @@ def _rollup_delta(base_ir, target_ir) -> list[dict]:
     items: list[dict] = []
     for prefix in sorted(set(base_index) | set(target_index)):
         before, after = base_index.get(prefix, {}), target_index.get(prefix, {})
-
-        def total(row, field) -> int | None:
-            value = row.get(field)
-            if isinstance(value, Mapping):
-                return sum(int(v) for v in value.values() if isinstance(v, int))
-            return None
-
         cid = cid_for("parametric", "rollup", f"asm:{prefix}", "", "")
         items.append({
             "cid": cid, "asm_key": prefix, "path_prefix": prefix,
             "n_leaf": {"before": before.get("n_leaf"), "after": after.get("n_leaf")},
-            "edges_internal": {"before": total(before, "edges_internal"), "after": total(after, "edges_internal")},
-            "edges_external": {"before": total(before, "edges_external"), "after": total(after, "edges_external")},
+            "edges_internal": {"before": _rollup_total(before, "edges_internal"),
+                               "after": _rollup_total(after, "edges_internal")},
+            "edges_external": {"before": _rollup_total(before, "edges_external"),
+                               "after": _rollup_total(after, "edges_external")},
             "orphan_leaf": {"before": before.get("orphan_leaf"), "after": after.get("orphan_leaf")},
             "excluded_reason": None, "design_relevant": True,
             "text": f"asm:{prefix} 리프 {before.get('n_leaf')}→{after.get('n_leaf')} [{cid}]",
@@ -1587,6 +1674,7 @@ def _semantic(structural, parametric, corr, dn_of, ckey_of, method_of, base_by, 
 
     # --- 명명 치수·롤업·결과
     for item in parametric["dims_delta"]:
+        # 목록이 잘린 kind 의 계면을 읽는 치수(truncated)는 바뀜도 미측정도 사건이 아니다 — 잘린 쪽에서 행이 빠져 ref 가 비었을 뿐이다.
         if item["flag"] == "changed" and not item["excluded_reason"]:
             events.append(_event("dim.named_changed", "dimension", dns=[item["subject_key"]], ckeys=[],
                                  subject_key=item["subject_key"], names=[item["name"]],
@@ -1594,7 +1682,8 @@ def _semantic(structural, parametric, corr, dn_of, ckey_of, method_of, base_by, 
                                  magnitude={"value": item["delta"], "unit": item["unit"], "rel": item["rel_delta"]},
                                  derived_from=[item["cid"]],
                                  text=item["text"].rsplit(" [c:", 1)[0]))
-        elif item["flag"] == "null_one_side" and item["before"] is not None and item["after"] is None:
+        elif item["flag"] == "null_one_side" and item["excluded_reason"] in (None, "null_one_side") \
+                and item["before"] is not None and item["after"] is None:
             # §3.3.5 는 `ref 소실` 만 이 코드로 낸다 — 양쪽 다 null 이면 소실이 아니라서 self-diff 가 0 건이어야 한다.
             events.append(_event("dim.named_unmeasured", "consistency", dns=[item["subject_key"]], ckeys=[],
                                  subject_key=item["subject_key"], names=[item["name"]],
@@ -1613,13 +1702,16 @@ def _semantic(structural, parametric, corr, dn_of, ckey_of, method_of, base_by, 
             return b is not None and a is not None and abs(a - b) >= 1
 
         if moved(internal) or moved(external):
+            # 잘린 kind 를 뺀 수면 그 사실을 글에 남긴다(_truncate_rollups — 잘린 쪽의 그 kind 수는 일부다).
+            cut = item.get("truncated_kinds") or ()
             events.append(_event("asm.rollup_changed", "topology", dns=[f"asm:{item['asm_key']}"], ckeys=[],
                                  subject_key=f"asm:{item['asm_key']}", names=[item["asm_key"]],
                                  before=internal.get("before"), after=internal.get("after"),
                                  derived_from=[item["cid"]],
                                  text=f"asm:{item['asm_key']} edges_internal "
                                       f"{internal.get('before')}→{internal.get('after')} · external "
-                                      f"{external.get('before')}→{external.get('after')}"))
+                                      f"{external.get('before')}→{external.get('after')}"
+                                      + (f" (목록이 잘린 kind {'·'.join(cut)} 는 세지 않았다)" if cut else "")))
 
     if comp["result_parity"]:
         for item in parametric["result_delta"]:

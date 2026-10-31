@@ -315,6 +315,9 @@ def _collect(diff_obj: Mapping[str, Any]) -> tuple[list[dict], dict]:
         # 보였다(RA-5). 바뀐 칸만 적는다. 롤업은 의미 이벤트가 아니라 risk_get_diff 줄 대조 대상이 아니다.
         text = f"asm:{prefix} " + " · ".join(f"{_ROLLUP_LABEL[f]} {_count(before[f])}→{_count(after[f])}"
                                               for f in _ROLLUP_FIELDS if f in before and before[f] != after[f])
+        cut = [_s(kind) for kind in src.get("truncated_kinds") or ()]
+        if cut:                                           # 계면 수가 잘린 kind 를 뺀 수다(diff._truncate_rollups)
+            text += f" (목록이 잘린 kind {'·'.join(cut)} 는 세지 않았다)"
         items.append(_item(src["cid"], "parametric", "rollup_delta", "param.rollup", "topology", src,
                            before=before, after=after, asm=prefix, section="rollup", names_raw=[prefix], text=text))
     for src in rows(semantic.get("events")):
@@ -1685,7 +1688,7 @@ def evidence_lines(unit: Mapping[str, Any], ir_view: Mapping[str, Any], diff_obj
 
     dn_of = _Nodes(diff_obj, ir_view).dn_of
     mine_dn = {str(part["dn"]) for part in unit.get("parts") or ()}
-    changed_keys, scope_changed = _diff_edge_changes(diff_obj)
+    changed_keys, scope_changed, cut_keys = _diff_edge_changes(diff_obj)
     groups: dict[tuple, tuple[list, list]] = {}
     for idx, side in enumerate(("base", "target")):
         for edge in sorted(ir_view[side]["edges"], key=lambda e: str(e.get("eid"))):
@@ -1704,7 +1707,10 @@ def evidence_lines(unit: Mapping[str, Any], ir_view: Mapping[str, Any], diff_obj
     auto_interference = lower_bound = False
     for edge_key, before, after in pairs:
         edge = after or before
-        ab, at = _attrs(before), _attrs(after)
+        # 목록이 잘린 kind 라 한쪽에만 있는 계면(diff 가 truncated 로 뺀 구조 변경)은 추가 · 삭제가 아니다 — 있는 쪽 값만 적고
+        # '목록 절단 — 비교 불가' 로 둔다. 종전에는 '삭제' 와 '0.050→미측정' 으로 실려 잘린 간섭이 사라진 것으로 읽혔다(반대 검토 10-31).
+        cut = (before is None or after is None) and edge_key in cut_keys
+        ab, at = (_attrs(edge), _attrs(edge)) if cut else (_attrs(before), _attrs(after))
         kind_b, kind_a = _s((before or {}).get("kind")), _s((after or {}).get("kind"))
         kind = kind_a or kind_b
         if kind == "scope":
@@ -1730,13 +1736,15 @@ def evidence_lines(unit: Mapping[str, Any], ir_view: Mapping[str, Any], diff_obj
         parts.append(f" · status={status_a or status_b}" if status_b == status_a or not (status_a and status_b)
                      else f" · status={status_b}→{status_a}")
         auto_interference = auto_interference or (kind == "interference" and (status_a or status_b) == "auto")
-        if before is None or after is None:
+        if cut:
+            state = f"목록 절단 — 비교 불가({'base' if after is None else 'target'} 에만 있다)"
+        elif before is None or after is None:
             state = "추가" if before is None else "삭제"
         elif edge_key in changed_keys or (kind == "scope" and at.get("contact_index") in scope_changed):
             state = "바뀜"
         else:
             state = "변경 없음(임계 밑 차이)" if _edge_state(before) != _edge_state(after) else "변경 없음"
-        changed = not state.startswith("변경 없음")
+        changed = not cut and not state.startswith("변경 없음")
         parts.append(f" · {state}")
         gap = _num(at.get("min_gap") if after is not None else ab.get("min_gap"))
         eid = str(edge["eid"])
@@ -1799,22 +1807,27 @@ def evidence_lines(unit: Mapping[str, Any], ir_view: Mapping[str, Any], diff_obj
     return done("ok", None, rows, notes)
 
 
-def _diff_edge_changes(diff_obj: Mapping[str, Any]) -> tuple[set[tuple], set[Any]]:
-    """diff 가 '바뀜' 으로 본 계면 — ({(kind_family, dn_a, dn_b)}, {바뀐 접촉 범위의 contact_index}).
+def _diff_edge_changes(diff_obj: Mapping[str, Any]) -> tuple[set[tuple], set[Any], set[tuple]]:
+    """diff 가 '바뀜' 으로 본 계면 — ({(kind_family, dn_a, dn_b)}, {바뀐 접촉 범위의 contact_index}, {목록 절단으로 뺀 계면}).
 
     구조 변경(`edge_changes` — 추가·삭제·종류·상태)과 변화로 본 수치(`edge_params` — noise 와 값이 같은 표지 항목은 뺀다)의
-    열쇠는 diff 가 엣지를 이은 열쇠(`diff._edge_key`) 그대로다. 접촉 범위 구성 변경은 contact_index 로 적힌다."""
+    열쇠는 diff 가 엣지를 이은 열쇠(`diff._edge_key`) 그대로다. 접촉 범위 구성 변경은 contact_index 로 적힌다. 목록이 잘린 kind 의
+    구조 변경(`excluded_reason='truncated'`)은 셋째 집합에도 든다 — 그 계면이 한쪽에만 있는 것은 추가 · 삭제가 아니다."""
     structural = diff_obj.get("structural") or {}
     keys: set[tuple] = set()
+    cut: set[tuple] = set()
     for change in structural.get("edge_changes") or ():
         if isinstance(change, Mapping):
-            keys.add((_s(change.get("kind_family")), _s(change.get("dn_a")), _s(change.get("dn_b"))))
+            key = (_s(change.get("kind_family")), _s(change.get("dn_a")), _s(change.get("dn_b")))
+            keys.add(key)
+            if change.get("excluded_reason") == "truncated":
+                cut.add(key)
     for param in (diff_obj.get("parametric") or {}).get("edge_params") or ():
         if isinstance(param, Mapping) and not _non_change(param) and not _same_value(param):
             keys.add((_s(param.get("kind_family")), _s(param.get("dn_a")), _s(param.get("dn_b"))))
     scopes = {s.get("contact_index") for s in (structural.get("dyna") or {}).get("scope_changed") or ()
               if isinstance(s, Mapping)}
-    return keys, scopes
+    return keys, scopes, cut
 
 
 def _edge_state(edge: Mapping[str, Any]) -> tuple:
