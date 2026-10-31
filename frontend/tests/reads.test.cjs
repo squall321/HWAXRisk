@@ -76,6 +76,21 @@ test("키 대장 — 지금 상태 한 줄과, 병합된 키의 확정은 잠그
   assert.equal(snap.partKeyLine({ ...named, status: "odd", display_name: null, decided_by: null }), "odd · 이름 없음");
 });
 
+test("키 대장 — 결정 넷을 잠그는 것은 상태가 아니라 내 원장 행인가(mine)와 404 다", () => {
+  // 보기 멤버가 받은 병합된 키는 주인의 원장 행이다 — 어느 결정이든 404 라 넷 다 잠근다. 같은 키를 주인이 받으면 확정만 잠근다.
+  assert.equal(samples.partKeyMerged.mine, false);
+  assert.match(snap.keyDecisionsBlocked(samples.partKeyMerged, false), /다른 사람.*원장입니다/);
+  assert.equal(samples.partKeyMergedOwn.mine, true);
+  assert.equal(snap.keyDecisionsBlocked(samples.partKeyMergedOwn, false), null);
+  assert.match(snap.confirmKeyBlocked(samples.partKeyMergedOwn), /병합돼 있어 확정할 수 없습니다/);
+  assert.equal(snap.keyDecisionsBlocked(samples.partKeyNamed, false), null);
+  // 원장에 없는 키(404)도 결정을 받지 않는다. 못 읽은 것(그 밖의 실패)은 잠그지 않는다.
+  assert.match(snap.keyDecisionsBlocked(null, true), /결정을 받지 않습니다\(404\)/);
+  assert.equal(snap.keyDecisionsBlocked(null, false), null);
+  // 남의 행이면 상태가 후보 · 확정이어도 잠근다(상태로 가르지 않는다).
+  assert.notEqual(snap.keyDecisionsBlocked({ ...samples.partKeyNamed, mine: false }, false), null);
+});
+
 test("진행판 패널 잡 — signals 는 도는 패널마다 한 줄이고 지금은 signal 과 같다, 신호 줄은 그 값으로 그린다", () => {
   const job = samples.coverageJobRunning;
   assert.deepEqual(job.signals, [job.signal]);
@@ -91,20 +106,51 @@ const keyPanel = (key, extra = {}) => {
   return renderToStaticMarkup(h(KeyLedgerBody, { node, nodes: [node], onClose() {}, keyState }));
 };
 
-test("키 대장 패널 — 서버가 준 지금 상태를 보이고, 병합된 키면 '독립 키로 확정' 이 잠기고 까닭을 말한다", () => {
-  const merged = keyPanel(samples.partKeyMerged);
+/** 그 단추가 잠겼는가 — 정적 렌더의 disabled 속성. */
+const locked = (html, label) => new RegExp(`<button[^>]*disabled=""[^>]*>${label}</button>`).test(html);
+/** 그 단추에 원장 잠금의 까닭(title)이 붙었는가 — 이름 붙이기 · 병합은 빈 입력으로도 잠겨 있어 까닭으로 가른다. */
+const ledgerTitled = (html, label) => new RegExp(`<button[^>]*title="[^"]*(원장입니다|결정을 받지 않습니다)[^"]*"[^>]*>${label}</button>`).test(html);
+const DECISIONS = ["이름 붙이기", "병합…", "병합 되돌리기…", "독립 키로 확정…"];
+
+test("키 대장 패널 — 내 원장의 병합된 키면 '독립 키로 확정' 만 잠기고 까닭을 말한다", () => {
+  const merged = keyPanel(samples.partKeyMergedOwn);
   assert.match(merged, /다른 키로 병합됨 · 대표 키 ck:[0-9a-f]{12}/);
-  assert.match(merged, /<button[^>]*disabled=""[^>]*>독립 키로 확정…<\/button>/);
+  assert.doesNotMatch(merged, /다른 사람의 원장 행/);
+  assert.equal(locked(merged, "독립 키로 확정…"), true);
   assert.match(merged, /병합돼 있어 확정할 수 없습니다/);
+  assert.equal(locked(merged, "병합 되돌리기…"), false);
+  assert.deepEqual(DECISIONS.map((d) => ledgerTitled(merged, d)), [false, false, false, false]);
   assert.doesNotMatch(merged, /읽는 길을 주지 않아/);
   const named = keyPanel(samples.partKeyNamed);
   assert.match(named, /이름 «보호 필름»/);
-  assert.doesNotMatch(named, /<button[^>]*disabled=""[^>]*>독립 키로 확정…<\/button>/);
-  // 원장에 없는(또는 남의) 키는 404 E404 — 그렇게 말한다. 그 밖의 실패는 '모름' 이다(잠그지 않는다 — 서버가 409 로 말한다).
+  assert.equal(locked(named, "독립 키로 확정…"), false);
+  assert.equal(locked(named, "병합 되돌리기…"), false);
+});
+
+test("키 대장 패널 — 남의 원장 행(mine false)이면 다른 사람의 행이라 말하고 결정 넷을 모두 잠근다", () => {
+  // 보기 멤버 · 이양받은 새 주인이 본 키 — 서버는 부른 사람의 원장 행만 고쳐 어느 결정이든 404 다. 상태(병합됨)로 가르지 않는다.
+  const theirs = keyPanel(samples.partKeyMerged);
+  assert.match(theirs, /지금 상태 — <\/span><span[^>]*>다른 사람의 원장 행 — <\/span>다른 키로 병합됨/);
+  // 까닭은 단추의 title 말고는 패널 글(알림)로 한 번만 선다 — 요소 내용(> 뒤)으로 센다(확정 단추 옆에 되풀이하지 않는다).
+  assert.equal((theirs.match(/>이 행은 다른 사람\(그 키를 처음 적립한 사람\)의 원장입니다/g) ?? []).length, 1);
+  assert.deepEqual(DECISIONS.map((d) => locked(theirs, d)), [true, true, true, true]);
+  assert.deepEqual(DECISIONS.map((d) => ledgerTitled(theirs, d)), [true, true, true, true]);
+  assert.doesNotMatch(theirs, /병합돼 있어 확정할 수 없습니다/);   // 병합 까닭이 아니라 원장 까닭이다
+  const candidate = keyPanel({ ...samples.partKeyNamed, mine: false });
+  assert.deepEqual(DECISIONS.map((d) => locked(candidate, d)), [true, true, true, true]);
+});
+
+test("키 대장 패널 — 원장에 없는 키(404)는 그렇게 말하고 결정을 잠그며, 못 읽은 것은 '모름' 이고 잠그지 않는다", () => {
   const { NotReadyError } = load("api/risk.api.js");
   const absent = keyPanel(samples.partKeyMerged, { data: null, error: new NotReadyError(404, "E404", "정규 키를 찾을 수 없습니다") });
   assert.match(absent, /원장에 이 키의 행이 없거나 내 원장이 아닙니다/);
-  assert.doesNotMatch(absent, /<button[^>]*disabled=""[^>]*>독립 키로 확정…<\/button>/);
+  assert.deepEqual(DECISIONS.map((d) => locked(absent, d)), [true, true, true, true]);
+  assert.deepEqual(DECISIONS.map((d) => ledgerTitled(absent, d)), [true, true, true, true]);
+  assert.doesNotMatch(absent, />원장에 내 행이 없는 키라/);   // 지금 상태 줄이 이미 말한다 — 확정 단추 옆에 되풀이하지 않는다
+  // 그 밖의 실패는 '모름' 이다 — 잠그지 않는다(서버가 결정의 거절 code 로 말한다).
   const failed = keyPanel(samples.partKeyMerged, { data: null, error: new Error("network") });
   assert.match(failed, /모름\(읽지 못했습니다\)/);
+  assert.equal(locked(failed, "독립 키로 확정…"), false);
+  assert.equal(locked(failed, "병합 되돌리기…"), false);
+  assert.deepEqual(DECISIONS.map((d) => ledgerTitled(failed, d)), [false, false, false, false]);
 });

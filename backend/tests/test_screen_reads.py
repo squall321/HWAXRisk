@@ -138,13 +138,15 @@ def test_the_part_key_ledger_read_gives_the_key_state_to_its_owner_and_members(w
     first, second = _node_ckeys(store, sid)[:2]
 
     out = routes.get_part_key(first, ident=owner)
-    assert set(out) == {"ckey", "status", "merged_into", "display_name", "aliases", "decided_by", "decided_at"}
+    assert set(out) == {"ckey", "status", "merged_into", "display_name", "aliases", "decided_by", "decided_at", "mine"}
     assert (out["ckey"], out["status"], out["merged_into"], out["display_name"]) == (first, "candidate", None, None)
+    assert out["mine"] is True
     assert (out["decided_by"], out["decided_at"]) == (None, None)
     assert {a["project_id"] for a in out["aliases"]} == {shared, elsewhere}
     for who in (EDITOR, VIEWER):
         seen = routes.get_part_key(first, ident=factories.ident(who))
         assert {a["project_id"] for a in seen["aliases"]} == {shared}, who
+        assert seen["mine"] is False, who                               # 주인의 원장 행이다 — 그 사람의 결정은 404 다
         assert elsewhere not in json.dumps(seen, ensure_ascii=False)
 
     routes.post_sameas_decide([{"decision": "rename_key", "ckey": first, "display_name": "보호 필름"},
@@ -159,6 +161,29 @@ def test_the_part_key_ledger_read_gives_the_key_state_to_its_owner_and_members(w
     assert theirs[:2] == ("E404", 404)
     assert (theirs[0], theirs[1], theirs[2].replace(first, "<k>")) == (gone[0], gone[1], gone[2].replace("ck:000000000000", "<k>"))
     assert _refused(lambda: routes.get_part_key("ck:000000000000", ident=owner))[:2] == ("E404", 404)
+
+
+def test_the_part_key_read_says_the_row_is_not_mine_after_a_transfer(wired):
+    """원장 행은 그 키를 처음 적립한 사람의 것이고 이양은 옮기지 않는다(TRANSFER_PROJECT_TABLES 에 rr_part_keys 가 없다 — 키는 과제가 아니라
+    사람의 원장이다). 이양받은 새 주인은 그 과제의 키 행을 읽지만 mine=false 다 — 키 결정(이름 · 병합 · 되돌리기 · 확정)은 주인의 행만
+    고쳐 새 주인의 결정은 404 이고, 새 주인의 유효 키 해석은 그 병합을 따르지 않는다. 화면은 mine 으로 결정을 잠근다(상태로 가르지 않는다)."""
+    store = wired
+    owner = factories.ident(OWNER)
+    project_id = _shared_project("XFER-1")
+    sid = factories.make_snapshot(store, project_id, [factories.adapter_fixture(MCAD_ONLY)], label="동결")["snapshot_id"]
+    first, second = _node_ckeys(store, sid)[:2]
+    routes.post_sameas_decide([{"decision": "merge_key", "ckey_from": second, "ckey_into": first}], ident=owner)
+    routes.transfer_project(project_id, routes.TransferBody(to_email=EDITOR, reason="이양"), ident=owner)
+
+    seen = routes.get_part_key(second, ident=factories.ident(EDITOR))
+    assert (seen["status"], seen["merged_into"], seen["decided_by"], seen["mine"]) == ("merged", first, OWNER, False)
+    assert sameas.resolve_ckey(store, second, EDITOR) == second
+    for decision in ({"decision": "unmerge_key", "ckey": second}, {"decision": "confirm_key", "ckey": second},
+                     {"decision": "rename_key", "ckey": second, "display_name": "새 이름"},
+                     {"decision": "merge_key", "ckey_from": second, "ckey_into": first}):
+        assert _refused(lambda: routes.post_sameas_decide([decision], ident=factories.ident(EDITOR)))[:2] == ("E404", 404)
+    # 옛 주인(이제 편집자)에게는 여전히 제 행이다.
+    assert routes.get_part_key(second, ident=owner)["mine"] is True
 
 
 def test_the_part_key_read_unfolds_aliases_that_carry_merge_proposals(wired):

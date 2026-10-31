@@ -992,7 +992,7 @@ export type PartKeyAlias = {
 /**
  * `GET /part-keys/{ckey}`(routes.part_key_payload — 가지 wt1031/risk-reads) — 키 대장 한 행의 지금 상태. 주인은 별칭을 다 보고, 구성원은
  * 자기가 구성원인 과제의 별칭만 본다. 원장에 없는 키 · 볼 수 없는 키는 404 `E404` 다. `merged_into` 는 `status` 가 merged 일 때만 유효 키
- * 해석이 따른다 — 화면은 status 로 가른다.
+ * 해석이 따른다 — 화면은 status 로 가른다. 결정을 받는지는 status 가 아니라 `mine` 으로 가른다(남의 원장 행이면 어느 결정이든 404).
  */
 export type PartKey = {
   ckey: string;
@@ -1003,6 +1003,11 @@ export type PartKey = {
   /** 마지막으로 정한 사람(사용자 이메일) 또는 코드(`code:pair_correspondence` — 자동 승계). 정한 적이 없으면 null. */
   decided_by: string | null;
   decided_at: number | null;
+  /**
+   * 이 행이 부른 사람의 원장 행인가. 원장 행은 그 키를 처음 적립한 사람의 것이라(ckey 가 열쇠 하나다) 구성원으로 본 키 · 이양받은 과제의
+   * 키는 false 다 — 그때 이 행의 병합 · 이름은 내 키 상태가 아니고 내 결정(이름 · 병합 · 되돌리기 · 확정)은 404 다. 화면은 이 값으로 잠근다.
+   */
+  mine: boolean;
 };
 
 /**

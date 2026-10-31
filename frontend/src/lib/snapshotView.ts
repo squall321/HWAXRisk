@@ -276,3 +276,16 @@ export function confirmKeyBlocked(key: PartKey | null | undefined): string | nul
   if (!key || key.status !== "merged") return null;
   return `${key.ckey} 는 ${key.merged_into ?? "다른 키"} 로 병합돼 있어 확정할 수 없습니다 — 먼저 '병합 되돌리기' 를 하세요(되돌린 키는 이미 독립 확정 키입니다).`;
 }
+
+/**
+ * 키 결정 넷(이름 붙이기 · 병합 · 병합 되돌리기 · 독립 키 확정)을 모두 잠글 까닭 — 서버(sameas.record_decision)는 부른 사람의 원장 행만
+ * 고친다. 그 행이 남의 것이거나(`mine` false — 그 키를 처음 적립한 사람의 행 · 이양받은 과제의 키) 원장에 없거나 볼 수 없으면(`absent`
+ * — 404) 어느 결정이든 404 다. 상태(status)로 가르지 않는다. 상태를 못 읽었으면 null 이다(잠그지 않고 서버의 거절 code 로 말한다).
+ */
+export function keyDecisionsBlocked(key: PartKey | null | undefined, absent: boolean): string | null {
+  if (absent) return "원장에 내 행이 없는 키라 결정을 받지 않습니다(404).";
+  if (key && !key.mine) {
+    return "이 행은 다른 사람(그 키를 처음 적립한 사람)의 원장입니다 — 내 결정은 받지 않아(404) 이름 · 병합 · 되돌리기 · 확정을 잠갔습니다. 내 키 해석은 이 행의 병합을 따르지 않습니다.";
+  }
+  return null;
+}

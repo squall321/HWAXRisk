@@ -6,7 +6,7 @@ import type { Async } from "../hooks/useAsync";
 import { ErrorBanner } from "./StateBlocks";
 import { Banner, Button, FormField, Input, Mono, Select, SubPanel } from "../ui/primitives";
 import { fmtEpoch } from "../format";
-import { confirmKeyBlocked, partKeyLine } from "../lib/snapshotView";
+import { confirmKeyBlocked, keyDecisionsBlocked, partKeyLine } from "../lib/snapshotView";
 import type { CkeyLedgerDecision, IrNode, JsonObject, PartKey } from "../types";
 
 /** 정규 키 꼴(ir_builder — 'ck:' + sha1 앞 12자리). 다른 과제의 키를 손으로 적을 때 이 꼴만 받는다(서버는 into 를 검사하지 않는다). */
@@ -28,6 +28,8 @@ function resultLine(row: JsonObject): string {
  * 고른 노드의 정규 키 원장(`POST /sameas/decide` 의 ckey 결정 넷). 병합 · 되돌리기는 원장에만 쓰고 이미 동결된 스냅샷의 ckey 는
  * 바뀌지 않는다 — 조회 · 회수는 유효 키(merged_into 를 따라간 키)로 잇는다. 지금 키 상태(병합 여부 · 붙은 이름 · 정한 사람)는
  * `GET /part-keys/{ckey}` 로 읽고 결정마다 다시 읽는다. 병합된 키의 '독립 키로 확정' 은 서버가 409 key_merged 로 거절하므로 잠근다.
+ * 그 행이 남의 원장 행이거나(`mine` false — 구성원으로 본 키 · 이양받은 과제의 키) 원장에 없으면(404) 결정 넷을 모두 잠근다 — 서버는 부른
+ * 사람의 원장 행만 고쳐 어느 결정이든 404 다.
  */
 export function KeyLedgerPanel({ node, nodes, onClose }: { node: IrNode; nodes: IrNode[]; onClose: () => void }) {
   // 키의 지금 상태 — 노드마다 다시 마운트되므로(FE-28) 열쇠는 이 노드의 ckey 하나다.
@@ -56,7 +58,10 @@ export function KeyLedgerBody({
   const [error, setError] = useState<unknown>(null);
   const [done, setDone] = useState<string | null>(null);
   const absent = isApiError(keyState.error) && keyState.error.code === "E404";
-  const confirmBlock = confirmKeyBlocked(keyState.data);
+  /** 결정 넷을 모두 잠글 까닭(남의 원장 행 · 원장에 없음) — 있으면 확정의 까닭도 이것이다. */
+  const ledgerBlock = keyDecisionsBlocked(keyState.data, absent);
+  const foreign = keyState.data ? !keyState.data.mine : false;
+  const confirmBlock = ledgerBlock ?? confirmKeyBlocked(keyState.data);
 
   /** 이 스냅샷의 다른 정규 키(이름과 함께, 한 번씩). */
   const others = useMemo(() => {
@@ -117,6 +122,7 @@ export function KeyLedgerBody({
         <span className="text-muted-foreground">지금 상태 — </span>
         {keyState.data ? (
           <>
+            {foreign ? <span className="font-medium">다른 사람의 원장 행 — </span> : null}
             {partKeyLine(keyState.data)}
             {keyState.data.decided_at ? <span className="text-muted-foreground"> · {fmtEpoch(keyState.data.decided_at)}</span> : null}
           </>
@@ -128,6 +134,7 @@ export function KeyLedgerBody({
           <span className="text-muted-foreground">모름(읽지 못했습니다)</span>
         )}
       </p>
+      {foreign && ledgerBlock ? <Banner tone="info" live="status" title={ledgerBlock} /> : null}
       {absent ? null : <ErrorBanner error={keyState.error} onRetry={keyState.reload} />}
       <ErrorBanner error={error} />
       {done ? <Banner tone="info" live="status" title={done} /> : null}
@@ -143,7 +150,13 @@ export function KeyLedgerBody({
         <FormField label="표시 이름" hint="rename_key · display_name" className="min-w-[14rem]">
           <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} />
         </FormField>
-        <Button type="submit" variant="outline" size="sm" disabled={busy || displayName.trim() === ""}>
+        <Button
+          type="submit"
+          variant="outline"
+          size="sm"
+          disabled={busy || ledgerBlock !== null || displayName.trim() === ""}
+          title={ledgerBlock ?? undefined}
+        >
           이름 붙이기
         </Button>
       </form>
@@ -171,7 +184,8 @@ export function KeyLedgerBody({
           type="button"
           variant="outline"
           size="sm"
-          disabled={busy || target === "" || typedBad || target === ckey}
+          disabled={busy || ledgerBlock !== null || target === "" || typedBad || target === ckey}
+          title={ledgerBlock ?? undefined}
           onClick={() =>
             setPending({
               decision: { decision: "merge_key", ckey_from: ckey, ckey_into: target },
@@ -188,7 +202,8 @@ export function KeyLedgerBody({
           type="button"
           variant="outline"
           size="sm"
-          disabled={busy}
+          disabled={busy || ledgerBlock !== null}
+          title={ledgerBlock ?? undefined}
           onClick={() =>
             setPending({
               decision: { decision: "unmerge_key", ckey },
@@ -215,7 +230,7 @@ export function KeyLedgerBody({
         >
           독립 키로 확정…
         </Button>
-        {confirmBlock ? <span className="text-xs text-muted-foreground">{confirmBlock}</span> : null}
+        {confirmBlock && !ledgerBlock ? <span className="text-xs text-muted-foreground">{confirmBlock}</span> : null}
       </div>
 
       {pending ? (

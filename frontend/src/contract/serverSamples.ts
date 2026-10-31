@@ -2458,7 +2458,10 @@ export const sameAsPairKey = sample<SameAs>()({
   }
 });
 
-/** 키 대장(GET /part-keys/{ckey}) — 보기 멤버로 받은 병합된 키. 별칭은 그 사람이 구성원인 과제의 것만이다. */
+/**
+ * 키 대장(GET /part-keys/{ckey}) — 보기 멤버로 받은 병합된 키. 별칭은 그 사람이 구성원인 과제의 것만이고, 원장 행은 주인의 것이라 `mine` 은
+ * false 다(이 사람의 결정은 404 — 화면이 결정을 잠근다).
+ */
 export const partKeyMerged = sample<PartKey>()({
   "ckey": "ck:5363abb47438",
   "status": "merged",
@@ -2474,7 +2477,28 @@ export const partKeyMerged = sample<PartKey>()({
     }
   ],
   "decided_by": "syn@example.com",
-  "decided_at": 1793441473
+  "decided_at": 1793441473,
+  "mine": false
+});
+
+/** 키 대장 — 같은 병합된 키를 주인으로 받았다(`mine` true — 확정만 잠기고 되돌리기 · 이름 · 병합은 열린다). */
+export const partKeyMergedOwn = sample<PartKey>()({
+  "ckey": "ck:5363abb47438",
+  "status": "merged",
+  "merged_into": "ck:4bbe8075874f",
+  "display_name": null,
+  "aliases": [
+    {
+      "domain": "mcad",
+      "label": "STACK_ASM",
+      "local_key": "/sif-e2e/a_stack.step/STACK_ASM",
+      "name_norm": "stack_asm",
+      "project_id": "a3e072a3c6944e928d90a826f5907884"
+    }
+  ],
+  "decided_by": "syn@example.com",
+  "decided_at": 1793441473,
+  "mine": true
 });
 
 /** 키 대장 — 주인으로 받은 이름 붙은 후보 키(이름만 붙이면 status 는 candidate 그대로다). */
@@ -2493,7 +2517,8 @@ export const partKeyNamed = sample<PartKey>()({
     }
   ],
   "decided_by": "syn@example.com",
-  "decided_at": 1793441473
+  "decided_at": 1793441473,
+  "mine": true
 });
 
 /** 진행판의 패널 잡(GET /targets/{key}/coverage → job) — 도는 패널 하나. `signals` 는 `signal` 과 같은 한 줄이다(러너가 대상마다 패널을 하나씩 돌린다). */

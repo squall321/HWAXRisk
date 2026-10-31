@@ -2642,7 +2642,7 @@ def post_sameas_decide(body: list[dict], ident: identity.Identity = Depends(iden
 
 @router.get("/part-keys/{ckey}")
 def get_part_key(ckey: str, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """정규 키 원장 한 행(plan §2.7.3 키 대장) — {ckey, status, merged_into, display_name, aliases[], decided_by, decided_at}."""
+    """정규 키 원장 한 행(plan §2.7.3 키 대장) — {ckey, status, merged_into, display_name, aliases[], decided_by, decided_at, mine}."""
     return part_key_payload(ckey, _require_user(ident))
 
 
@@ -2653,7 +2653,9 @@ def part_key_payload(ckey: str, email: str) -> dict:
     구성원(보기 이상)은 자기가 구성원인 과제의 별칭만 본다 — 주인의 다른 과제 이름 · 부품 이름을 흘리지 않는다. 같은 ckey 를 남의
     스냅샷 노드가 달고 있어도(ckey 는 이름 · 크기 · 재질의 해시라 사람 사이에 겹친다) 그 노드의 과제로는 열지 않는다 — 남의 원장 행이다.
     별칭 열은 목록이거나 자동 승계 제안을 품은 객체(`{items, merged_candidates}` — sameas.inherit_ckeys)라 둘 다 목록으로 편다.
-    남과 없는 키는 같은 404 다(남 숨김)."""
+    남과 없는 키는 같은 404 다(남 숨김). `mine` 은 그 행이 부른 사람의 원장 행인가다 — 키 결정(sameas.record_decision)은 주인의
+    행만 고치고 유효 키 해석(resolve_ckey)도 주인의 행만 따르므로, false 면 이 행의 병합 · 이름은 부른 사람의 키 상태가 아니고 그 사람의
+    결정은 404 다(구성원 · 이양받은 새 주인 — 원장 행은 처음 적립한 사람에게 남는다). 화면은 그때 결정을 잠근다."""
     row = get_store().query_one(
         "SELECT ckey, owner_sub, status, merged_into, display_name, aliases_json, first_project_id, decided_by, decided_at"
         " FROM rr_part_keys WHERE ckey = ?", (ckey,))
@@ -2674,7 +2676,7 @@ def part_key_payload(ckey: str, email: str) -> dict:
         aliases = [a for a in aliases if a.get("project_id") in mine]
     return {"ckey": row["ckey"], "status": row["status"], "merged_into": row["merged_into"],
             "display_name": row["display_name"], "aliases": aliases, "decided_by": row["decided_by"],
-            "decided_at": row["decided_at"]}
+            "decided_at": row["decided_at"], "mine": row["owner_sub"] == email}
 
 
 # ================================================================ diff
