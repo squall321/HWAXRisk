@@ -5,10 +5,15 @@ taxonomy_invalid 와 허용값이고 아무것도 쓰지 않는다. mechanism �
 """
 from __future__ import annotations
 
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
 import pytest
 
 import app.mcp_server as srv
-from app import routes, taxonomy
+from app import registry, routes, taxonomy
 from app.errors import AppError
 from tests import factories
 from tests.test_project_patch import OWNER, _human_body, _ident, _seeded_target
@@ -80,3 +85,55 @@ def test_the_mcp_tool_answers_the_same_422(risk_store, monkeypatch):
     assert out["error"] == "taxonomy_invalid" and out["detail"]["field"] == "mechanism"
     assert "thermal" in out["detail"]["allowed"]
     assert _human_n(risk_store) == 0
+
+
+def _rekey_script():
+    """backend/scripts/rekey_human_codes.py — 실행자 셸 전용 파일이라 모듈로 읽어 온다(test_bootstrap_scripts 와 같은 길)."""
+    path = Path(__file__).resolve().parent.parent / "scripts" / "rekey_human_codes.py"
+    spec = importlib.util.spec_from_file_location("hwaxrisk_scripts_rekey_human_codes", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_code_form_rows_from_before_the_check_join_the_split_form_through_an_alias(risk_store, monkeypatch):
+    """A18 전 입구는 웹 폼의 코드 꼴을 mechanism 에 그대로 적었다 — 그 행이 남은 대상에서는 같은 위험의 새 finding 이 다른 묶음 열쇠의
+    등록부 행에 선다. 한 번 도는 재열쇠(scripts/rekey_human_codes.py — dry-run 기본)는 finding 행의 cluster_key 를 고치지 않고(plan
+    §4.3.2 삽입 시 동결) 그 소유자의 별칭(옛 열쇠 → 대분류 + 세부 열쇠) 한 행을 세운 뒤 그 열쇠의 사람 finding 이 있는 대상을 모두 다시
+    병합한다 — 같은 위험의 finding 이 한 행에 든다. 코드와 다른 세부를 같이 적은 행은 코드가 고르지 않고 알린다. 다시 돌려도 새 별칭이
+    없고, 사람이 철회한 별칭도 되살리지 않는다."""
+    target_key = _seeded_target(risk_store, monkeypatch, extra="diff:d2")
+    split = routes.human_mechanism
+    monkeypatch.setattr(routes, "human_mechanism", lambda mechanism, detail: (mechanism, detail))   # A18 전 입구
+    legacy = _create(target_key, mechanism="interface.clearance", mechanism_detail=None)
+    legacy_too = routes.create_human_finding("diff:d2", _human_body(mechanism="interface.clearance", mechanism_detail=None),
+                                             ident=_ident())
+    tied = _create(target_key, mechanism="interface.clearance", mechanism_detail="tied", subject_key="sk:2")
+    monkeypatch.setattr(routes, "human_mechanism", split)
+    fresh = _create(target_key, mechanism="interface.clearance", mechanism_detail=None)
+    assert legacy["cluster_key"] == legacy_too["cluster_key"] != fresh["cluster_key"]
+    script = _rekey_script()
+
+    plan = script.plan_rows(risk_store)
+
+    assert sorted((r["finding_id"], r["old_cluster_key"], r["new_cluster_key"]) for r in plan["rows"]) == sorted([
+        (legacy["finding_id"], legacy["cluster_key"], fresh["cluster_key"]),
+        (legacy_too["finding_id"], legacy["cluster_key"], fresh["cluster_key"])])
+    assert plan["skipped"] == [{"finding_id": tied["finding_id"], "mechanism": "interface.clearance", "mechanism_detail": "tied",
+                                "reason": "detail_differs"}]
+    assert risk_store.query_one("SELECT COUNT(*) AS n FROM rr_cluster_alias")["n"] == 0      # 계획은 쓰지 않는다
+
+    out = script.apply_rows(risk_store, plan["rows"])
+
+    assert out == {"aliases_written": 1, "targets_merged": sorted([target_key, "diff:d2"])}
+    for key, members in ((target_key, {legacy["finding_id"], fresh["finding_id"]}), ("diff:d2", {legacy_too["finding_id"]})):
+        row = risk_store.query_one("SELECT human_n, merged_json FROM rr_registry WHERE target_key = ? AND cluster_key = ?",
+                                   (key, fresh["cluster_key"]))
+        assert row["human_n"] == len(members) and members <= set(json.loads(row["merged_json"])["member_ids"])
+    assert _row(risk_store, legacy["finding_id"])["cluster_key"] == legacy["cluster_key"]       # 삽입 시 동결
+    assert script.apply_rows(risk_store, script.plan_rows(risk_store)["rows"]) == {"aliases_written": 0, "targets_merged": []}
+    # 사람이 철회한 별칭은 다시 돌려도 되살리지 않는다.
+    registry.revoke_cluster_alias(risk_store, legacy["cluster_key"], owner_sub=OWNER)
+    assert script.apply_rows(risk_store, script.plan_rows(risk_store)["rows"]) == {"aliases_written": 0, "targets_merged": []}
+    assert risk_store.query_one("SELECT revoked_at FROM rr_cluster_alias")["revoked_at"] is not None
