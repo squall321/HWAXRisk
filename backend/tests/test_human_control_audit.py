@@ -10,9 +10,10 @@
   '<대상>#<클러스터>', verdict 는 scope target · 대상 열쇠. 셋 다 그 대상의 과제 id 를 싣는다(과제 감사에도 선다).
 - 행에는 코드 어휘(잡 상태 · 보류 코드 · 등록부 status · 상태 기록 seq · 판정 값)만 싣는다. 사람이 쓴 글(등록부 note · evidence_ref,
   verdict note)은 싣지 않는다 — 그 글은 원래 자리(상태 기록 · 대상 행)에 그대로 있다.
-- 코드가 일으킨 전이(일일 상한 · 집기 · 취소의 마감 · 코드 보류 · 엔진 쪽 멈춤 A24)는 사람 행위가 아니라 남기지 않는다 — 코드의 정지 ·
-  보류는 잡 행의 state_by 에 'code:…' 를 적고, 집기 · 취소의 마감은 주체를 적지 않는다(state_by 는 앞 값 그대로).
-- 반대 검토 10-31 — 감사 행은 전이를 쓰는 그 트랜잭션 안에서 선다(검토 잡의 취소도 — 전문가 보고서 다시 짓기보다 먼저).
+- 코드가 일으킨 전이(일일 상한 · 집기 · 취소의 마감 · 코드 보류)는 사람 행위가 아니라 남기지 않는다 — 코드의 정지 · 보류는 잡 행의
+  state_by 에 'code:…' 를 적고, 집기 · 취소의 마감은 주체를 적지 않는다(state_by 는 앞 값 그대로).
+- 반대 검토 10-31 — 감사 행은 전이를 쓰는 그 트랜잭션 안에서 선다(검토 잡의 취소도 — 전문가 보고서 다시 짓기보다 먼저). 포털 화면의 '멈춤'
+  (엔진 쪽 멈춤 A24)이 잡을 멈추면 엔진이 알린 그 사람의 job.pause 한 행이다(사람의 요청으로 같은 일을 하는 러너 길 — 사용자 결정 10-31).
 """
 from __future__ import annotations
 
@@ -275,8 +276,7 @@ def test_a_cancel_decides_and_writes_on_the_job_it_reads_again_inside_its_transa
 
 def test_runner_transitions_are_not_human_actions_and_leave_no_row(seeded, tmp_path):
     """코드가 일으킨 전이는 감사하지 않는다(rr_audit 는 사람 행위 한정 — plan §0.6). 일일 상한 정지 · 집기(queued → running) · 사람이 건
-    취소의 마감(cancelling → cancelled) · 엔진 쪽 멈춤(A24 — 포털 화면에서 사람이 심의를 멈춰도 잡을 멈추는 것은 러너의 반응이고 state_by 는
-    code:cancelled 다)이 그렇다. 사람의 재개 · 취소만 한 행씩이다."""
+    취소의 마감(cancelling → cancelled)이 그렇다. 사람의 재개 · 취소만 한 행씩이다(엔진 쪽 멈춤 A24 는 아래 — 사람의 요청이다)."""
     store, target_key = seeded
     cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
     job_id = _panel_job(target_key)
@@ -289,18 +289,63 @@ def test_runner_transitions_are_not_human_actions_and_leave_no_row(seeded, tmp_p
     assert runner.claim_next_job(store, cfg) is None                                  # 코드 — 취소의 마감
     assert _job(store, job_id)["state"] == "cancelled"
 
-    second = _panel_job(target_key)
-    engine = _portal_engine(store, cfg, {}, _sse(
-        ("delib", {"kind": "stage", "stage": "r1", "run_id": "0a1b2c3d4e5f6a7b"}),
-        ("delib", {"kind": "cancelled", "by": OWNER, "run_id": "0a1b2c3d4e5f6a7b", "message": "사람이 멈췄다(시험)"}),
-        ("done", {})))
-    out = runner.run_panel(store, cfg, engine, runner.claim_next_job(store, cfg))
-    assert out["status"] == "error" and _job(store, second) == {"state": "paused", "state_by": "code:cancelled",
-                                                                "hold_code": None}
-
     rows = _rows(store, *CONTROL)
     assert [(r["action"], r["subject_id"], r["before"]["state"], r["after"]["state"]) for r in rows] == [
         ("job.resume", job_id, "paused", "queued"), ("job.cancel", job_id, "running", "cancelling")]
+
+
+RUN = "0a1b2c3d4e5f6a7b"
+
+
+def _stopped_on_the_portal(store, cfg, by: str | None, *, between=None) -> dict:
+    """도는 패널 심의를 엔진 쪽에서 멈춘 스트림(에이전트 서버 delib cancelled — by 는 포털이 채운 멈춘 사람의 메일, 운영의 루프백이면
+    '운영')으로 패널 하나를 돌린다. `between` 은 첫 프레임(러너가 잡을 물은 뒤)과 멈춤 사건 사이에 부른다(그 사이 사람이 앱에서 한 조작 —
+    러너의 물음은 5초 동안 앞 답을 쓰므로 멈춤 사건이 먼저 닿는다)."""
+    stopped = {"kind": "cancelled", "run_id": RUN, "message": "사람이 멈췄다(시험)", **({} if by is None else {"by": by})}
+
+    def stream():
+        yield _sse(("delib", {"kind": "stage", "stage": "r1", "run_id": RUN})).encode()
+        if between is not None:
+            between()
+        yield _sse(("delib", stopped), ("done", {})).encode()
+
+    return runner.run_panel(store, cfg, _portal_engine(store, cfg, {}, stream), runner.claim_next_job(store, cfg))
+
+
+@pytest.mark.parametrize(("by", "actor"), [(OWNER, OWNER), (" Owner@Example.COM ", OWNER), ("운영", None), (None, None)])
+def test_a_portal_stop_that_pauses_the_job_is_that_persons_job_pause(seeded, tmp_path, by, actor):
+    """포털 화면의 '멈춤'(대화 주인 — A24)이 도는 패널 심의를 멈추면 러너가 잡을 멈춘다 — 사람의 요청으로 잡을 멈추는 러너 길이라 그 사람의
+    job.pause 한 행이다(사용자 결정 10-31 · 반대 검토). 행위자는 엔진이 알린 메일(앱이 확인한 신원이 아니라 actor_verified 0 · 소문자),
+    입구는 포털 화면(web), 앞 · 뒤는 잡 상태와 보류 코드뿐이다(멈춤 글은 싣지 않는다). 메일이 아닌 값(운영의 루프백 '운영' · 없음)은 신원이
+    없어 행이 없다. 잡 행의 state_by 는 종전대로 code:cancelled 다."""
+    store, target_key = seeded
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = _panel_job(target_key)
+
+    assert _stopped_on_the_portal(store, cfg, by)["status"] == "error"
+    assert _job(store, job_id) == {"state": "paused", "state_by": "code:cancelled", "hold_code": None}
+
+    rows = [(r["action"], r["owner_sub"], r["actor"], r["actor_verified"], r["channel"], r["scope"], r["subject_id"],
+             r["project_id"], r["before"], r["after"], r["reason"]) for r in _rows(store, *CONTROL)]
+    assert rows == ([("job.pause", actor, actor, 0, "web", "job", job_id, "p1", {"state": "running", "hold_code": None},
+                      {"state": "paused", "hold_code": None}, None)] if actor else [])
+    assert "사람이 멈췄다(시험)" not in _audit_text(store)
+    assert _summary(store, target_key) == (["job.pause=1"] if actor else ["(없음)"])
+
+
+def test_a_portal_stop_on_a_job_the_person_already_paused_in_the_app_writes_no_second_row(seeded, tmp_path):
+    """사람이 앱에서 먼저 멈춘 잡(그 행은 라우트가 썼다)에 엔진 쪽 멈춤이 뒤따라 와도 러너는 잡을 다시 멈추지 않아 행이 하나다 — 한 번
+    멈춘 것을 두 번 세지 않는다(러너는 잡이 아직 돌 때만 멈추고 그 트랜잭션에서만 쓴다)."""
+    store, target_key = seeded
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = _panel_job(target_key)
+
+    out = _stopped_on_the_portal(store, cfg, OWNER,
+                                 between=lambda: routes.job_action(job_id, "pause", ident=_ident(source="cookie")))
+    assert out["status"] == "error" and out["error"].startswith(f"cancelled: 엔진 쪽 심의를 사람이 멈췄다({OWNER})")
+    assert _job(store, job_id)["state_by"] == OWNER
+    assert [(r["action"], r["channel"], r["actor_verified"], r["before"]["state"], r["after"]["state"])
+            for r in _rows(store, *CONTROL)] == [("job.pause", "web", 1, "running", "paused")]
 
 
 # ---------------------------------------------------------------- 등록부 status

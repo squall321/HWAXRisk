@@ -171,13 +171,15 @@ class EngineStreamLost(EngineError):
     엔진이 실패한 것이 아니다. 엔진은 심의를 분리 태스크로 돌려 구독이 끊겨도 끝까지 간다 — 그래서 패널은
     error 로 닫되 좌석 재시도와 연속 실패에 세지 않고 잡을 멈춘다(run_panel). `conv_id` 는 그 심의의 포털
     대화다(끊긴 뒤의 발언은 거기에만 남는다). 'cancelled' 는 엔진 쪽 멈춤이기도 하다 — 사람이 포털 화면의 '멈춤'이나 운영 창구로
-    그 심의를 멈췄다(engine_client.collect_stream 이 멈춤 사건에서 올린다). 그때는 엔진도 그 심의를 더 돌리지 않는다.
+    그 심의를 멈췄다(engine_client.collect_stream 이 멈춤 사건에서 올린다). 그때는 엔진도 그 심의를 더 돌리지 않는다. `by` 는 그때
+    엔진이 알린 멈춘 사람(포털이 채운 그 사람의 메일, 운영의 루프백이면 '운영')이다 — 앱이 확인한 신원이 아니다. 앱이 놓은 스트림은 None 이다.
     """
 
-    def __init__(self, code: str, message: str, *, conv_id: str | None = None) -> None:
+    def __init__(self, code: str, message: str, *, conv_id: str | None = None, by: str | None = None) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code
         self.conv_id = conv_id
+        self.by = by
 
 
 class EngineNoDecision(EngineError):
@@ -2163,6 +2165,8 @@ def _close_panel_stream_lost(store: Any, panel: Mapping[str, Any], job: Mapping[
     편성했다 — 같은 심의가 엔진에 겹쳐 돌아 공유 LLM 부하가 배가 되고(연속 3패널이면 잡이 죽으니 셋까지),
     좌석은 제 탓이 아닌 일로 세 번째에 skipped 로 굳었다. 그래서 좌석은 차감 없이 pending 으로 돌리고 잡을
     멈춘다. 사유는 잡의 error 에 적는다(pause_reason 은 CHECK 로 세 값만 받는다). 사람이 재개하면 이어 돈다.
+
+    엔진 쪽 멈춤(포털 화면의 '멈춤' — A24)이 도는 잡을 멈추면 그 사람의 job.pause 감사 행도 같은 트랜잭션에서 쓴다(`_audit_engine_stop`).
     """
     error = str(lost)
     _release_panel(store, panel, charge=False)
@@ -2170,12 +2174,37 @@ def _close_panel_stream_lost(store: Any, panel: Mapping[str, Any], job: Mapping[
         "UPDATE rr_panels SET status = 'error', error = ?, conv_id = ?, ended_at = ? WHERE id = ?",
         (error, lost.conv_id, now_epoch(), panel["id"]),
     )
-    # 그 사이 사람이 취소했으면(cancelling) 그 전이를 덮지 않는다 — 다음 편성에서 cancelled 가 된다.
-    row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job["id"],))
-    if row is not None and row["state"] == "running":
-        _set_job(store, job["id"], "paused", by=f"code:{lost.code}",
-                 error=f"{error} — 잡을 멈췄다(좌석 재시도는 차감하지 않았다). 재개하면 이어 돈다")
+    with store.tx():
+        # 그 사이 사람이 취소했으면(cancelling) 그 전이를 덮지 않는다 — 다음 편성에서 cancelled 가 된다. 확인 · 전이 · 감사 행을 한
+        # 트랜잭션으로 한다(사람이 앱에서 먼저 멈춘 잡은 다시 멈추지 않아 행도 없다 — 그 행은 라우트가 썼다).
+        row = store.query_one("SELECT state, hold_code FROM rr_jobs WHERE id = ?", (job["id"],))
+        if row is not None and row["state"] == "running":
+            _set_job(store, job["id"], "paused", by=f"code:{lost.code}",
+                     error=f"{error} — 잡을 멈췄다(좌석 재시도는 차감하지 않았다). 재개하면 이어 돈다")
+            _audit_engine_stop(store, job, lost, row)
     return {"panel_id": panel["id"], "status": "error", "error": error}
+
+
+# 엔진 쪽 멈춤의 감사 입구 — 사람이 포털 웹 화면의 '멈춤' 을 눌렀다(rr_audit.channel 어휘 안).
+ENGINE_STOP_CHANNEL = "web"
+
+
+def _audit_engine_stop(store: Any, job: Mapping[str, Any], lost: EngineStreamLost, before: Mapping[str, Any]) -> None:
+    """엔진 쪽 멈춤(A24 — 포털 화면의 '멈춤')이 도는 잡을 멈췄으면 그 사람의 job.pause 한 행(사용자 결정 10-31 — 사람의 요청으로 잡을
+    멈추는 러너 길, 반대 검토). 멈춘 사람은 엔진이 알린 값이라 앱이 확인한 신원이 아니다(actor_verified 0 · 소문자로 적는다). 입구는 포털
+    화면(web)이다. 메일이 아닌 값(운영의 루프백 '운영' · 없음)은 신원이 없어 쓰지 않는다. 앞 · 뒤는 잡 상태와 보류 코드뿐이다(라우트의
+    잡 제어 행과 같은 칸) — 멈춤 글(패널 · 잡의 error)은 싣지 않는다. 잡을 멈춘 그 트랜잭션 안에서 부른다."""
+    actor = (lost.by or "").strip().lower()
+    if lost.code != "cancelled" or "@" not in actor:
+        return
+    after = store.query_one("SELECT state, hold_code FROM rr_jobs WHERE id = ?", (job["id"],))
+    target = store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (job["target_key"],))
+    store.execute(
+        "INSERT INTO rr_audit(id, owner_sub, actor, actor_verified, channel, scope, subject_id, project_id, action,"
+        " before_json, after_json, reason, at) VALUES (?,?,?,0,?,'job',?,?,'job.pause',?,?,NULL,?)",
+        (new_uuid(), actor, actor, ENGINE_STOP_CHANNEL, job["id"], target["project_id"] if target is not None else None,
+         canonical_json({"state": before["state"], "hold_code": before["hold_code"]}),
+         canonical_json({"state": after["state"], "hold_code": after["hold_code"]}), now_epoch()))
 
 
 def _close_panel_unstarted(store: Any, panel: Mapping[str, Any], job: Mapping[str, Any], code: str, *,

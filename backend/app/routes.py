@@ -3372,9 +3372,10 @@ def _audit_job_control(store: Any, ident: identity.Identity, actor: str, job_id:
 def job_action(job_id: str, action: str, consent: bool = False, ident: identity.Identity = Depends(identity.current)) -> dict:
     """일시정지·재개·취소. 취소·일시정지는 도는 패널의 스트림을 닫는다(패널 경계까지 기다리지 않는다 — 벽시계가
     12시간이다). 주체는 rr_jobs.state_by 에 남고(plan §0.6), 잡 행을 바꾼 조작은 rr_audit(job.pause|resume|cancel) 한 행도 남긴다
-    (사용자 결정 10-31 — `_audit_job_control`). 코드가 일으킨 전이(일일 상한 · 줄어드는 수확 · 코드 보류 · 자동 재개 · 재기동 복구 · 엔진
-    쪽 멈춤 · 집기 · 취소의 마감)는 사람 행위가 아니라 감사하지 않는다 — 코드의 정지 · 보류는 state_by 에 'code:…' 를 적는다(러너 몫,
-    이 라우트를 지나지 않는다). 재개의 `consent`(쿼리 — 사람이 동의한 뒤에만
+    (사용자 결정 10-31 — `_audit_job_control`). 코드가 일으킨 전이(일일 상한 · 줄어드는 수확 · 코드 보류 · 자동 재개 · 재기동 복구 ·
+    집기 · 취소의 마감)는 사람 행위가 아니라 감사하지 않는다 — 코드의 정지 · 보류는 state_by 에 'code:…' 를 적는다(러너 몫,
+    이 라우트를 지나지 않는다). 포털 화면의 '멈춤'(엔진 쪽 멈춤 A24)이 잡을 멈추는 것은 사람의 요청이라 러너가 그 사람의 job.pause 를
+    쓴다(runner._audit_engine_stop — 반대 검토 10-31). 재개의 `consent`(쿼리 — 사람이 동의한 뒤에만
     true)는 검토 잡이 다시 연 셀의 몫을 넘어 멈췄을 때(consent_extra) 그 몫의 동의다 — 없으면 422 consent_required, 잡의 추정 합이
     상한을 넘으면 동의와 상관없이 409 max_calls 다(반대 검토 4차 MEDIUM 2 · D-49 — review_runner.resume_gate)."""
     owner_sub = _require_user(ident)
