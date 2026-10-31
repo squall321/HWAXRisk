@@ -569,3 +569,28 @@ def test_a_merge_that_pushes_an_upstream_human_chain_past_five_hops_is_409(risk_
     assert _alias(risk_store, key_of(Y)) is None and _audits(risk_store) == [] and _registry(risk_store) == registry_before
 
 
+@pytest.mark.parametrize("middle,leaf", [(Y, Z), (Z, Y)], ids=["leaf-key-sorts-first", "middle-key-sorts-first"])
+def test_an_unmerge_does_not_depend_on_which_key_sorts_first(risk_store, clock, middle, leaf):
+    """되돌리기는 거둘 원장 별칭을 먼저 다 거두고 새 별칭을 세운다 — 세울 때의 홉 점검이 곧 거둘 별칭(key(middle) → key(X))을 세지
+    않는다. 종전에는 키마다 거두고 세워, 같은 모양(뒤로 사람 별칭 4홉인 X 에 middle · leaf 를 차례로 병합한 뒤 middle 을 풀기)이 키 해시
+    차례에 따라 409 가 됐다(key(leaf) 가 먼저면)."""
+    assert key_of(Z) < key_of(Y)                                         # 두 매개가 서로 다른 처리 차례를 덮는다
+    for ck in (X, Y, Z):
+        _part(risk_store, ck)
+    _target(risk_store, "snap:T1", "P1")
+    _finding(risk_store, "snap:T1", "FM", middle, panel="PN1")
+    _finding(risk_store, "snap:T1", "FL", leaf, panel="PN2")
+    _finding(risk_store, "snap:T1", "FX", X, panel="PN3")
+    registry.merge(risk_store, "snap:T1", owner_sub=OWNER)
+    _human_chain(risk_store, key_of(X), 4)
+    _decide(risk_store, decision="merge_key", ckey_from=middle, ckey_into=X)
+    _decide(risk_store, decision="merge_key", ckey_from=leaf, ckey_into=middle)
+
+    clock["t"] = 2000
+    out = _decide(risk_store, decision="unmerge_key", ckey=middle)["rekey"]
+    assert out["aliases_added"] == [{"old": key_of(leaf), "new": key_of(middle), "reason": "ckey_merge"}]
+    assert sorted(a["old"] for a in out["aliases_revoked"]) == sorted([key_of(leaf), key_of(middle)])
+    assert (registry._alias_hops(risk_store, key_of(leaf), OWNER), registry._alias_hops(risk_store, key_of(middle), OWNER)) == (1, 0)
+    assert _live(risk_store, "snap:T1") == _fresh(risk_store, "snap:T1")
+
+

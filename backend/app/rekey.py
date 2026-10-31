@@ -145,32 +145,14 @@ def upstream_keys(store: Any, owner_sub: str, keys: Iterable[str]) -> set[str]:
     return out
 
 
-def _check_chains(store: Any, owner_sub: str, keys: Iterable[str]) -> None:
-    """맞춘 뒤의 별칭으로 그 키들의 사슬이 5홉 안이고 순환하지 않는지 — 세울 때의 점검(`add_cluster_alias`)은 새 별칭 뒤만 세므로,
-    사람 별칭이 이 키로 이어 오는 앞 키(Q → Y 에 Y → X 가 서면 Q 의 사슬)가 넘는 것은 여기서 본다. 넘으면 409 다."""
-    for key in sorted(keys):
-        if registry._alias_hops(store, key, owner_sub) > registry.ALIAS_MAX_HOPS:
-            raise AppError("alias_chain_too_long",
-                           f"별칭 체인이 {registry.ALIAS_MAX_HOPS} 홉을 넘거나 순환합니다 — {key}.", 409)
-
-
-def reconcile_aliases(store: Any, owner_sub: str, findings: Iterable[Mapping[str, Any]], *, op: str, actor: str,
-                      at: int) -> dict:
-    """동결 cluster_key 마다 지금 원장의 키를 세어 원장 별칭을 맞춘다 — 다르면 append, 같으면 원장이 세웠던 별칭을 revoke.
-
-    맞춘 뒤 바뀐 키와 그 앞 키의 사슬을 한 번 더 본다(`_check_chains`). 반환 `{added[], revoked[], kept_human[], skipped[], targets[],
-    keys[], before{}, after{}}` — before · after 는 바뀐 키와 그 앞 키(`upstream_keys`)의 맞추기 전후 풀이다. 별칭 6홉 · 순환이면 409 를
-    그대로 올린다(부르는 트랜잭션 전체가 되돌아간다).
-    """
+def _plan(store: Any, owner_sub: str, findings: Iterable[Mapping[str, Any]]) -> dict:
+    """동결 cluster_key 마다 원장이 원하는 키를 센다(아무것도 쓰지 않는다)."""
     groups: dict[str, dict] = {}
     for row in findings:
         key = str(row.get("cluster_key") or "")
         if key:
             groups.setdefault(key, {"row": row, "targets": set()})["targets"].add(str(row.get("target_key") or ""))
-    closure = upstream_keys(store, owner_sub, groups)
-    before = {k: registry.resolve_cluster_key(store, k, owner_sub=owner_sub) for k in sorted(closure)}
-    added: list[dict] = []
-    revoked: list[dict] = []
+    decisions: dict[str, dict] = {}
     kept_human: list[dict] = []
     skipped: list[dict] = []
     for key in sorted(groups):
@@ -191,20 +173,54 @@ def reconcile_aliases(store: Any, owner_sub: str, findings: Iterable[Mapping[str
                 kept_human.append({"cluster_key": key, "alias": str(alias["new_cluster_key"]), "reason": alias["reason"],
                                    "ledger_wants": want})
             continue
+        decisions[key] = {"want": want, "why": why, "subject_before": row.get("subject_key"), "subject_after": subject}
+    return {"decisions": decisions, "kept_human": kept_human, "skipped": skipped, "keys": sorted(groups),
+            "targets": sorted({t for g in groups.values() for t in g["targets"] if t})}
+
+
+def _check_chains(store: Any, owner_sub: str, keys: Iterable[str]) -> None:
+    """맞춘 뒤의 별칭으로 그 키들의 사슬이 5홉 안이고 순환하지 않는지 — 세울 때의 점검(`add_cluster_alias`)은 새 별칭 뒤만 세므로,
+    사람 별칭이 이 키로 이어 오는 앞 키(Q → Y 에 Y → X 가 서면 Q 의 사슬)가 넘는 것은 여기서 본다. 넘으면 409 다."""
+    for key in sorted(keys):
+        if registry._alias_hops(store, key, owner_sub) > registry.ALIAS_MAX_HOPS:
+            raise AppError("alias_chain_too_long",
+                           f"별칭 체인이 {registry.ALIAS_MAX_HOPS} 홉을 넘거나 순환합니다 — {key}.", 409)
+
+
+def reconcile_aliases(store: Any, owner_sub: str, findings: Iterable[Mapping[str, Any]], *, op: str, actor: str,
+                      at: int) -> dict:
+    """동결 cluster_key 마다 지금 원장의 키를 세어 원장 별칭을 맞춘다 — 다르면 append, 같으면 원장이 세웠던 별칭을 revoke.
+
+    거둘 별칭을 먼저 다 거두고 그 뒤에 세운다 — 세울 때의 홉 · 순환 점검이 같은 맞추기가 곧 거둘 별칭을 세지 않게 한다(종전에는 키
+    마다 거두고 세워, 같은 모양이 키 해시 차례에 따라 409 가 됐다). 맞춘 뒤 바뀐 키와 그 앞 키의 사슬을 한 번 더 본다(`_check_chains`).
+    반환 `{added[], revoked[], kept_human[], skipped[], targets[], keys[], before{}, after{}}` — before · after 는 바뀐 키와 그 앞 키
+    (`upstream_keys`)의 맞추기 전후 풀이다. 별칭 6홉 · 순환이면 409 를 그대로 올린다(부르는 트랜잭션 전체가 되돌아간다).
+    """
+    plan = _plan(store, owner_sub, findings)
+    closure = upstream_keys(store, owner_sub, plan["keys"])
+    before = {k: registry.resolve_cluster_key(store, k, owner_sub=owner_sub) for k in sorted(closure)}
+    revoked: list[dict] = []
+    adding: list[str] = []
+    for key in sorted(plan["decisions"]):
+        want = plan["decisions"][key]["want"]
+        alias = _active_alias(store, owner_sub, key)
         if alias is not None and alias["new_cluster_key"] != want:
             registry.revoke_cluster_alias(store, key, owner_sub=owner_sub, revoked_by=actor, at=at)
             revoked.append({"old": key, "new": str(alias["new_cluster_key"]), "reason": str(alias["reason"])})
             alias = None
         if want is not None and alias is None:
-            registry.add_cluster_alias(
-                store, key, want, owner_sub=owner_sub, reason=why, decided_by=actor, at=at,
-                evidence={"op": op, "subject_before": row.get("subject_key"), "subject_after": subject, "by": actor})
-            added.append({"old": key, "new": want, "reason": why})
+            adding.append(key)
+    added: list[dict] = []
+    for key in adding:
+        item = plan["decisions"][key]
+        evidence = {"op": op, "subject_before": item["subject_before"], "subject_after": item["subject_after"], "by": actor}
+        registry.add_cluster_alias(store, key, item["want"], owner_sub=owner_sub, reason=item["why"], decided_by=actor,
+                                   at=at, evidence=evidence)
+        added.append({"old": key, "new": item["want"], "reason": item["why"]})
     _check_chains(store, owner_sub, closure)
     after = {k: registry.resolve_cluster_key(store, k, owner_sub=owner_sub) for k in sorted(closure)}
-    targets = sorted({t for g in groups.values() for t in g["targets"] if t})
-    return {"added": added, "revoked": revoked, "kept_human": kept_human, "skipped": skipped,
-            "targets": targets, "keys": sorted(groups), "before": before, "after": after}
+    return {"added": added, "revoked": revoked, "kept_human": plan["kept_human"], "skipped": plan["skipped"],
+            "targets": plan["targets"], "keys": plan["keys"], "before": before, "after": after}
 
 
 # ---------------------------------------------------------------- 5걸음 — 패턴 · 큐
