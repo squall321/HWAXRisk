@@ -925,28 +925,31 @@ def _project_sources(project_id: str) -> list[dict]:
 
 @router.get("/projects")
 def list_projects(ident: identity.Identity = Depends(identity.current)) -> dict:
-    """과제 카드 그리드의 원천 — 소스 상태·최근 스냅샷·열린 타깃·커버리지·level."""
-    return projects_payload(owner_sub=_require_user(ident))
+    """과제 카드 그리드의 원천 — 소스 상태·최근 스냅샷·열린 타깃·커버리지·level, 그리고 등급 · 수명 주기 · 코퍼스 제외 · 내 역할.
+
+    부른 사람이 소유하거나 구성원(편집자 · 보기)인 과제다 — 조직 공개(org)만으로는 들지 않는다(MCP 의 visible_projects 와 다르다)."""
+    email = _require_user(ident)
+    rows = get_store().query(
+        "SELECT id FROM rr_projects WHERE owner_sub = ? OR id IN (SELECT project_id FROM rr_project_members WHERE email = ?)",
+        (email, email))
+    return projects_payload(project_ids=[r["id"] for r in rows], viewer=email)
 
 
-def projects_payload(*, owner_sub: str | None = None, project_ids: list[str] | None = None) -> dict:
+def projects_payload(*, project_ids: list[str], viewer: str | None = None) -> dict:
     """`GET /projects` 본체 — MCP `risk_list_projects` 와 같은 함수.
 
-    웹은 `owner_sub` 로 자기 과제만 본다. MCP 는 단일 소유자가 아니라 **볼 수 있는 과제 집합**
-    (`visible_projects`)이 범위라 `project_ids` 로 받는다 — 그래서 두 인자가 따로 있다.
+    범위는 부르는 쪽이 정한 과제 집합이다 — 웹은 소유 ∪ 구성원(`list_projects`), MCP 는 **볼 수 있는 과제 집합**(`visible_projects`)
+    이다. `viewer` 는 카드의 `my_role`(owner · editor · viewer, 구성원이 아니면 null — 조직 공개로만 보이는 과제)을 셀 사람이다.
     id 를 알아낼 길이 이것뿐이라(나머지 도구가 전부 id 를 인자로 받는다) 목록이 곧 진입점이다."""
     store = get_store()
-    if project_ids is not None:
-        if not project_ids:
-            return {"projects": []}
-        marks = ",".join("?" for _ in project_ids)
-        rows = store.query(
-            f"SELECT id, code, name, stage, owner_sub, created_at FROM rr_projects WHERE id IN ({marks})"
-            " ORDER BY created_at DESC, id", tuple(project_ids))
-    else:
-        rows = store.query(
-            "SELECT id, code, name, stage, owner_sub, created_at FROM rr_projects WHERE owner_sub = ?"
-            " ORDER BY created_at DESC, id", (owner_sub,))
+    if not project_ids:
+        return {"projects": []}
+    marks = ",".join("?" for _ in project_ids)
+    rows = store.query(
+        f"SELECT id, code, name, stage, owner_sub, classification, lifecycle, corpus_excluded, created_at FROM rr_projects"
+        f" WHERE id IN ({marks}) ORDER BY created_at DESC, id", tuple(project_ids))
+    roles = ({r["project_id"]: r["role"] for r in store.query(
+        "SELECT project_id, role FROM rr_project_members WHERE email = ?", (viewer,))} if viewer else {})
     projects = []
     for row in rows:
         _own = row["owner_sub"]
@@ -973,19 +976,51 @@ def projects_payload(*, owner_sub: str | None = None, project_ids: list[str] | N
             "open_targets": sum(1 for t in targets if t["level"] != "C2(closed)"),
             "coverage_pct": coverage_pct,
             "level": targets[0]["level"] if targets else None,
+            "classification": row["classification"],
+            "lifecycle": row["lifecycle"],
+            "corpus_excluded": bool(row["corpus_excluded"]),
+            "my_role": "owner" if viewer is not None and _own == viewer else roles.get(row["id"]),
         })
     return {"projects": projects}
 
 
+# 과제 상세의 과제 행에 더 싣는 메타 열(plan §8.2.3 · §8.2.4 ProjectPage 머리 — PATCH 가 바꾸는 열과 상태).
+PROJECT_META_COLS: tuple[str, ...] = (
+    "classification", "lifecycle", "closed_at", "corpus_excluded", "excluded_reason", "mcp_visibility",
+    "product_code", "product_refs_json", "predecessor_product_code", "status",
+)
+
+
 @router.get("/projects/{project_id}")
 def get_project(project_id: str, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """ProjectPage 한 화면 — 과제·소스·스냅샷 헤더·타깃 헤더·잡·성격 태그."""
-    owner_sub = _require_user(ident)
-    project = _project_row(project_id, owner_sub)
+    """ProjectPage 한 화면 — 과제(메타 열까지)·멤버·소스·스냅샷 헤더·타깃 헤더·잡·성격 태그.
+
+    구성원(보기 이상)이 연다 — 남은 없는 과제와 같은 404 다(require_role, 남 숨김). 과제 행의 `corpus_excluded` 는 bool, 제품 연결
+    (`product_refs_json`)은 푼 배열이다. 대상 · 잡은 부른 사람이 아니라 과제의 주인(신원 앵커 — 하위 표의 owner_sub 는 그 복제다)으로
+    고른다 — 구성원이 열어도 그 과제의 대상 · 잡이 보인다. 스냅샷 머리는 이름(그 스냅샷을 만든 동결 잡의 label — 동결 잡 없이 언 것은
+    null) · 앱 판 · 어댑터 판 · 강등 표지 전부(`degraded_json` — `degraded` 는 그 첫 값인 호환 열)를 함께 싣는다."""
+    email = _require_user(ident)
+    require_role(project_id, email, "viewer")
     store = get_store()
-    snapshots = [dict(r) for r in store.query(
-        "SELECT id, ir_version, ir_hash, kinds_json, node_count, edge_count, warnings_n, degraded, created_at"
-        " FROM rr_snapshots WHERE project_id = ? ORDER BY created_at DESC, id", (project_id,))]
+    project = dict(store.query_one(
+        "SELECT id, owner_sub, code, name, stage, predecessor_project_id, adh_team, adh_group, character_status,"
+        f" created_at, updated_at, {', '.join(PROJECT_META_COLS)} FROM rr_projects WHERE id = ?", (project_id,)))
+    project["corpus_excluded"] = bool(project["corpus_excluded"])
+    project["product_refs_json"] = _loads(project["product_refs_json"], [])
+    owner_sub = project["owner_sub"]
+    snapshots = []
+    for row in store.query(
+        "SELECT s.id AS id, s.ir_version AS ir_version, s.ir_hash AS ir_hash, s.kinds_json AS kinds_json,"
+        " s.node_count AS node_count, s.edge_count AS edge_count, s.warnings_n AS warnings_n, s.degraded AS degraded,"
+        " s.degraded_json AS degraded_json, s.app_versions_json AS app_versions_json,"
+        " s.adapter_versions_json AS adapter_versions_json, s.created_at AS created_at, j.label AS label"
+        " FROM rr_snapshots s LEFT JOIN rr_snapshot_jobs j ON j.id = s.job_id"
+        " WHERE s.project_id = ? ORDER BY s.created_at DESC, s.id", (project_id,)):
+        head = dict(row)
+        head["degraded_json"] = _loads(head["degraded_json"], [])
+        head["app_versions"] = _loads(head.pop("app_versions_json"), {})
+        head["adapter_versions"] = _loads(head.pop("adapter_versions_json"), {})
+        snapshots.append(head)
     targets = [dict(r) for r in store.query(
         "SELECT target_key, kind, ref_id, level, close_level, verdict_candidate, verdict_final, created_at,"
         " external_sync_json FROM rr_targets WHERE project_id = ? AND owner_sub = ? ORDER BY created_at DESC",
@@ -1005,6 +1040,7 @@ def get_project(project_id: str, ident: identity.Identity = Depends(identity.cur
         " GROUP BY tag ORDER BY n DESC, tag LIMIT 10", (project_id,))]
     return {
         "project": project,
+        "members": [{"email": m["email"], "role": m["role"]} for m in _members_of(project_id)],
         "sources": _project_sources(project_id),
         "snapshots": snapshots,
         "targets": targets,

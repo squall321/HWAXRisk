@@ -330,8 +330,12 @@ _A_ECAD_JOB_ID = ("붙일 보드의 ODB 허브 job_id(16자리 16진) — risk_f
 def risk_list_projects() -> dict:
     """여기서 시작한다 — 볼 수 있는 심사 과제 목록(targets[]=target_key · last_snapshot_id · 커버리지 · level)."""
     # 다른 도구가 전부 id 를 인자로 받는데 그 id 를 알아낼 길이 이것뿐이다(발견 도구 부재가 나머지를 잠근다).
-    return _guarded(lambda: routes.projects_payload(
-        project_ids=routes.visible_projects(_caller())))
+    def listing() -> dict:
+        caller = _caller()
+        # 카드의 my_role 은 부른 사람의 역할이다 — service · 조직 공개로만 보이는 과제는 null.
+        return routes.projects_payload(project_ids=routes.visible_projects(caller), viewer=caller.get("email"))
+
+    return _guarded(listing)
 
 
 @mcp.tool()
