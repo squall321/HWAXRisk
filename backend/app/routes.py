@@ -4124,9 +4124,10 @@ def review_payload(store: Any, target_key: str, flow: str | None) -> dict | None
     if flow != "cells" and not has_cells:
         return None
     summary = review_cells.review_summary(store, target_key)
+    # 같은 초에 선 두 검토 잡은 넣은 차례(rowid)로 가른다 — id(uuid)로 가르면 앞 잡을 보였다(화면 세션 청할 것 3, chain_stage 와 같다).
     job = store.query_one(
         "SELECT id, state, hold_code, hold_until, hold_n, error, credential_email, params_json, progress_json FROM rr_jobs"
-        " WHERE target_key = ? AND mode = ? ORDER BY created_at DESC, id DESC LIMIT 1", (target_key, review_runner.MODE))
+        " WHERE target_key = ? AND mode = ? ORDER BY created_at DESC, rowid DESC LIMIT 1", (target_key, review_runner.MODE))
     job = dict(job) if job is not None else None
     quality = _loads(job["progress_json"], {}).get("quality") if job is not None else None
     cards = (quality.get("json") or {}).get("cards") if isinstance(quality, dict) else None

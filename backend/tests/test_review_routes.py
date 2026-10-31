@@ -189,6 +189,33 @@ def test_a_running_review_job_carries_each_workers_last_signal(store, monkeypatc
     r.finish(job_id)
 
 
+def test_two_review_jobs_made_in_the_same_second_read_as_the_later_one(store, monkeypatch):
+    """같은 초에 선 두 검토 잡 — 진행판 review.job 과 '마지막 검토 잡' 을 읽는 곳(셀 처분이 얹는 잡 · 품질 원장 · 완결의 품질 · 보고서의
+    품질 블록)이 다 나중에 선 잡을 고른다. 종전에는 `created_at DESC, id DESC` 라 같은 초면 uuid 가 큰 쪽(앞 잡일 수 있다)을 골랐다
+    (화면 세션 청할 것 3 — 하네스에서 났다). 사슬 단계(chain_stage)처럼 같은 초 안은 rowid(넣은 차례)로 가른다."""
+    from app import closure, review_cells, runner, synth
+
+    key = rig.target(store)
+    rig.pat(store)
+    made = review_runner.new_uuid
+    monkeypatch.setattr(review_runner, "new_uuid", lambda: "f" * 32)            # 앞 잡의 id 가 더 크다
+    first = rig.job(store, key)
+    monkeypatch.setattr(review_runner, "new_uuid", made)
+    runner.cancel_job(store, first, by=OWNER)
+    monkeypatch.setattr(review_runner, "new_uuid", lambda: "0" * 32)
+    second = rig.job(store, key)
+    monkeypatch.setattr(review_runner, "new_uuid", made)
+    store.execute("UPDATE rr_jobs SET created_at = 1793000000 WHERE target_key = ? AND mode = 'reviews'", (key,))
+    for job_id, word in ((first, "앞 잡"), (second, "뒤 잡")):
+        store.execute("UPDATE rr_jobs SET progress_json = ? WHERE id = ?",
+                      (json.dumps({"quality": {"text": word, "json": {"out_of_bounds": [word]}}}), job_id))
+    assert routes.coverage_payload(key, owner_sub=OWNER)["review"]["job"]["id"] == second
+    assert review_cells._latest_review_job(store, key)["id"] == second
+    assert review_quality._latest_review_job(store, key) == second
+    assert closure._quality(store, key, review_quality)["out_of_bounds"] == ["뒤 잡"]
+    assert synth._quality_block(store, key) == "뒤 잡"
+
+
 # ---------------------------------------------------------------- 셀
 def test_the_cells_list_is_the_grid_in_review_order_with_s1_columns_filters_and_paging(store):
     """GET /targets/{key}/cells — 격자 전부(로스터 6 × 단위 5)를 검토 순서 → 단위 순번으로, 행 열은 S1 이름 그대로(JSON 열·선점 없음).

@@ -798,8 +798,9 @@ def _quality_block(store: RiskStore, target_key: str) -> str:
     """품질 블록 — 이 판의 고정본(WP5b 3.11.1 · C10). 진행판에 있으면 그 값, 없으면 그 자리에서 센 값."""
     from app import review_quality  # noqa: PLC0415
 
+    # 같은 초에 선 잡은 넣은 차례(rowid)로 — 진행판 review.job 과 같은 잡이다(review_cells._latest_review_job 주석).
     row = store.query_one("SELECT progress_json FROM rr_jobs WHERE target_key = ? AND mode = 'reviews'"
-                          " ORDER BY created_at DESC, id DESC LIMIT 1", (target_key,))
+                          " ORDER BY created_at DESC, rowid DESC LIMIT 1", (target_key,))
     board = ((_loads(row["progress_json"], {}) if row is not None else {}) or {}).get("quality") or {}
     if isinstance(board, Mapping) and board.get("text"):
         return str(board["text"])
