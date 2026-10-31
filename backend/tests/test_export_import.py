@@ -51,8 +51,10 @@ def _seed(store: RiskStore, owner: str = ALICE, at: int = 1_000) -> None:
                                          "source_kind": "mcad", "channel": "rest", "tool": "/tree", "ok": 1,
                                          "response_gz": BLOB, "response_bytes": len(BLOB), "started_at": at})
     for nid in ("n1", "n2"):
+        # n1 이 아래 정규 키를 단다 — 키 원장 행은 노드가 쓰는 키에서 적립된다(들여오기도 제 과제가 쓰는 키의 새 행만 받는다, MB-6).
         _insert(store, "rr_ir_nodes", {"snapshot_id": sid, "nid": nid, "owner_sub": owner, "kind": "part",
-                                       "source_kind": "mcad", "name": nid.upper(), "name_norm": nid})
+                                       "source_kind": "mcad", "name": nid.upper(), "name_norm": nid,
+                                       "ckey": f"ck-{owner[:3]}" if nid == "n1" else None})
     _insert(store, "rr_ir_edges", {"snapshot_id": sid, "eid": "e1", "owner_sub": owner, "kind": "interference",
                                    "kind_family": "contact", "a": "n1", "b": "n2", "status": "auto"})
     _insert(store, "rr_part_keys", {"ckey": f"ck-{owner[:3]}", "owner_sub": owner, "status": "candidate",
