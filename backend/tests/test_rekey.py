@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from app import common, narrative, registry, rekey, routes, sameas
+from app import brief, common, narrative, registry, rekey, routes, sameas
 from app.errors import AppError
 from tests import factories
 
@@ -453,3 +453,63 @@ def test_merge_does_not_reopen_a_row_another_target_closed(risk_store):
                        " AND cluster_key = ?", (f"snap:T9#{key_of(X)}", key_of(X)))
     registry.merge(risk_store, "snap:T1", owner_sub=OWNER)
     assert _registry(risk_store)[("snap:T1", key_of(X))][:2] == ("superseded", f"snap:T9#{key_of(X)}")
+
+
+# ---------------------------------------------------------------- 검토 후속(10-31) — 접힌 행의 주체 · 별칭으로만 닿는 대상 · 닫힌 행의
+# 주의 등급 · 한 트랜잭션 병합 · 키 차례 · 재매핑 · 재검토 표기
+def _live(store, target: str) -> dict:
+    return {r["cluster_key"]: (r["support"], r["severity"]) for r in store.query(
+        "SELECT cluster_key, support, severity FROM rr_registry WHERE target_key = ? AND status IN ('open', 'rejected_in_panel')",
+        (target,))}
+
+
+def _fresh(store, target: str) -> dict:
+    """지금 별칭으로 새로 센 병합(아무것도 쓰지 않는다)."""
+    return {r["cluster_key"]: (r["support"], r["severity"])
+            for r in registry.merge(store, target, owner_sub=OWNER, persist=False)["rows"]}
+
+
+def _assert_settled(store) -> None:
+    """모든 대상을 지금 별칭으로 다시 병합해도 등록부 · 기여 · priors 가 그대로다 — 재키가 영향 대상을 빠짐없이 다시 병합했다."""
+    before = (_registry(store), _contrib(store), _priors(store))
+    for row in store.query("SELECT target_key FROM rr_targets ORDER BY target_key"):
+        registry.merge(store, row["target_key"], owner_sub=OWNER)
+    assert (_registry(store), _contrib(store), _priors(store)) == before
+
+
+def test_a_folded_row_carries_the_subject_its_key_names_so_subject_recall_still_finds_it(risk_store, clock):
+    """접힌 등록부 행의 주체는 그 행의 키가 가리키는 주체다 — 대표 원자(F1)가 병합으로 사라진 주체 Y 라도 접힌 key(X) 행의 주체는 X 라,
+    X 로 찾는 §5.9.4 회수(`_subject_path` · precedents)가 병합 뒤에도 그 행을 찾는다. 원자가 전부 별칭으로 들어온 행(T2)은 대표 주체를
+    지금 원장으로 다시 센 값이다. 종전에는 대표 원자의 동결 주체(Y)를 써 merge_key 가 X 의 회수에서 T1 을 지웠다."""
+    _world(risk_store)
+    # 회수하는 쪽 — 생산자 경로로 뜬 다른 과제의 diff. 그 뒤 스냅샷의 한 파트가 X 와 같은 파트라고 원장에서 확정해 둔다(노드가 X 로 풀린다).
+    project_id = factories.make_project(risk_store, code="P-RECALL")
+    adapter_results = factories.fixture_adapter_results()
+    first = factories.make_snapshot(risk_store, project_id, adapter_results, label="DV1")
+    second = factories.make_snapshot(risk_store, project_id, adapter_results, label="DV2",
+                                     captured_at=factories.CAPTURED_AT + 86400)
+    diff_id = factories.make_diff(risk_store, first["snapshot_id"], second["snapshot_id"])["diff_id"]
+    part = risk_store.query_one("SELECT ckey FROM rr_ir_nodes WHERE snapshot_id = ? AND ckey LIKE 'ck:%' ORDER BY nid",
+                                (second["snapshot_id"],))["ckey"]
+    _decide(risk_store, decision="merge_key", ckey_from=part, ckey_into=X)
+    visible = brief._member_project_ids(risk_store, OWNER)
+
+    def recalled() -> list[str]:
+        return sorted(p for hit in brief._subject_path(risk_store, second["snapshot_id"], OWNER, visible)
+                      for p in hit["project_ids"])
+
+    def precedents() -> list[str]:
+        return sorted(c["reg_ref"] for c in brief.precedents(risk_store, diff_id, owner_sub=OWNER)["clusters"])
+
+    assert recalled() == ["P1"] and precedents() == [f"reg:snap:T1#{key_of(X)}"]
+    _decide(risk_store, decision="merge_key", ckey_from=Y, ckey_into=X)
+    open_subjects = {(r["target_key"], r["cluster_key"]): r["subject_key"] for r in risk_store.query(
+        "SELECT target_key, cluster_key, subject_key FROM rr_registry WHERE status = 'open'")}
+    assert open_subjects == {("snap:T1", key_of(X)): X, ("snap:T2", key_of(X)): X}
+    assert recalled() == ["P1", "P2"]
+    assert precedents() == [f"reg:snap:T1#{key_of(X)}", f"reg:snap:T2#{key_of(X)}"]
+    clock["t"] = 2000
+    _decide(risk_store, decision="unmerge_key", ckey=Y)                 # 되돌리면 각자 제 주체로 돌아간다
+    assert recalled() == ["P1"] and precedents() == [f"reg:snap:T1#{key_of(X)}"]
+
+

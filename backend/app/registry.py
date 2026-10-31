@@ -808,6 +808,8 @@ def merge(store: RiskStore, target_key: str, *, owner_sub: str | None = None, pe
                              issue=issues.get(base) if bucket == "risk" else None)
         if not row["owner_sub"]:
             row["owner_sub"] = owner_sub
+        if any(_clean_str(m.get("cluster_key")) != base for m in members):
+            row["subject_key"] = _folded_subject(store, base, members, row["subject_key"], owner_sub)
         rows.append(row)
 
     # 주의 등급은 행의 마지막 상태로 센다 — 사람이 정한 상태가 있으면 그것, 없으면 병합이 세운 코드 상태다.
@@ -858,6 +860,24 @@ def merge(store: RiskStore, target_key: str, *, owner_sub: str | None = None, pe
         "verdict_candidate": candidate["verdict"],
         "escalated": escalated,
     }
+
+
+def _folded_subject(store: RiskStore, base_key: str, members: Sequence[Mapping[str, Any]], rep_subject: str,
+                    owner_sub: str | None) -> str:
+    """별칭으로 접힌 클러스터 행의 주체 — 그 행의 키(base)가 가리키는 주체다(§5.9.4 회수는 지금 원장의 주체로 행을 찾는다).
+
+    동결 키가 base 인 원자가 있으면 그 원자의 주체(같은 키면 같은 주체다), 없으면(원자가 전부 별칭으로 들어왔다) 대표 원자의 주체를
+    지금 원장으로 다시 센 값이다(`rekey.current_subject` — 원장 별칭은 그 주체로 base 를 셌다). 종전에는 대표 원자의 동결 주체를
+    그대로 써, 병합으로 사라진 주체(Y → X 의 Y)가 접힌 행의 주체가 되면 X 로 찾는 회수(`brief._subject_path` · E5 · precedents)에서
+    그 행이 빠졌다. 접히지 않은 행은 종전 그대로 대표 원자의 주체다.
+    """
+    native = sorted((m for m in members if _clean_str(m.get("cluster_key")) == base_key),
+                    key=lambda m: _clean_str(m.get("finding_id")))
+    if native:
+        return _clean_str(native[0].get("subject_key"))
+    from app import rekey  # noqa: PLC0415 — rekey 는 registry 를 import 한다(부를 때 들인다).
+
+    return rekey.current_subject(store, rep_subject, owner_sub or "")[0]
 
 
 def _close_vacated_rows(store: RiskStore, target_key: str, rows: Sequence[Mapping[str, Any]], now: int) -> int:
