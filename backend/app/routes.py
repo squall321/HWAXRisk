@@ -289,14 +289,15 @@ def _require_user(ident: identity.Identity) -> str:
 
 def _audit(store: Any, owner_sub: str, *, scope: str, subject_id: str, action: str,
            project_id: str | None = None, before: Any = None, after: Any = None,
-           reason: str | None = None, channel: str = "rest", actor_verified: bool = True) -> str:
+           reason: str | None = None, channel: str = "rest", actor_verified: bool = True, actor: str | None = None) -> str:
     """rr_audit 1행(append-only, 사람 행위 한정 — plan §0.6) — 그 행의 id. 열람(GET)은 남기지 않는다. MCP 길의 행위자는
-    `actor_verified=False`(§6.11 — 게이트웨이가 넘긴 신원이다)."""
+    `actor_verified=False`(§6.11 — 게이트웨이가 넘긴 신원이다). 행위자는 `owner_sub` 와 같은 사람이다 — `actor` 를 주면 owner_sub 는 그
+    행위가 바꾼 원장의 주인이다(맨 클러스터 열쇠 자리처럼 대상 감사가 원장 주인으로 고르는 행 — rekey 의 감사 행과 같은 꼴, MB-14)."""
     audit_id = new_uuid()
     store.execute(
         "INSERT INTO rr_audit(id, owner_sub, actor, actor_verified, channel, scope, subject_id, project_id,"
         " action, before_json, after_json, reason, at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
-        (audit_id, owner_sub, owner_sub, int(bool(actor_verified)), channel, scope, subject_id, project_id, action,
+        (audit_id, owner_sub, actor or owner_sub, int(bool(actor_verified)), channel, scope, subject_id, project_id, action,
          canonical_json(before) if before is not None else None,
          canonical_json(after) if after is not None else None, reason, now_epoch()),
     )
@@ -1217,6 +1218,49 @@ def _panel_reader(panel_id: str, email: str) -> str:
     return _reader(row["owner_sub"], row["project_id"], email) if row is not None else email
 
 
+def _writer(row_owner: Any, project_id: Any, ident: identity.Identity) -> str:
+    """과제에 딸린 행 하나에 쓸 owner_sub(사용자 결정 10-31 '계획서대로 편집자도 쓴다', MB-14) — 부른 사람이 그 과제의 편집자 이상(관리자는
+    편집자 — plan §0.6, 기존 편집자 길 `_editable_target` 과 같다)이고 그 행이 과제 주인의 행이면 행의 주인이다. 쓰는 행은 과제 주인의 것이고
+    (하위 표의 owner_sub 는 과제 주인의 복제다) 부른 사람은 decided_by · 감사 행위자로 남는다.
+
+    구성원이 아닌 남 · 없는 행 · 주인이 다른 행(들여오기가 남긴 것)이면 부른 사람을 돌려줘 본체의 주인 검사가 오늘과 같은 404 를 낸다(남과
+    없는 것이 같은 답). 보기는 403 role_insufficient 다(plan §5.2.1 — 구성원의 등급 미달은 404 가 아니라 403). 행 주인이 부른 사람이면 문을
+    보지 않는다(주인의 길 그대로)."""
+    email = _require_user(ident)
+    if not row_owner or row_owner == email or not project_id:
+        return email
+    anchor = get_store().query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,))
+    if anchor is None or anchor["owner_sub"] != row_owner:
+        return email
+    if not _is_admin(ident):
+        if project_role(str(project_id), email) is None:
+            return email
+        require_role(str(project_id), email, "editor")
+    return str(row_owner)
+
+
+def _project_writer(project_id: str, ident: identity.Identity) -> str:
+    row = get_store().query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,))
+    return _writer(row["owner_sub"] if row is not None else None, project_id, ident)
+
+
+def _snapshot_writer(snapshot_id: str, ident: identity.Identity) -> str:
+    row = get_store().query_one("SELECT owner_sub, project_id FROM rr_snapshots WHERE id = ?", (snapshot_id,))
+    return _writer(row["owner_sub"] if row is not None else None, row["project_id"] if row is not None else None, ident)
+
+
+def _target_writer(target_key: str, ident: identity.Identity) -> str:
+    row = get_store().query_one("SELECT owner_sub, project_id FROM rr_targets WHERE target_key = ?", (target_key,))
+    return _writer(row["owner_sub"] if row is not None else None, row["project_id"] if row is not None else None, ident)
+
+
+def _panel_writer(panel_id: str, ident: identity.Identity) -> str:
+    row = get_store().query_one(
+        "SELECT p.owner_sub AS owner_sub, t.project_id AS project_id FROM rr_panels p"
+        " LEFT JOIN rr_targets t ON t.target_key = p.target_key WHERE p.id = ?", (panel_id,))
+    return _writer(row["owner_sub"] if row is not None else None, row["project_id"] if row is not None else None, ident)
+
+
 def _diff_reader(diff_id: str, email: str) -> str:
     """비교는 두 과제(base · target)를 다 읽는 사람이 연다(MCP mcp_scope_owner 와 같은 규칙 — 한쪽만 읽는 사람에게 다른 쪽 내용을 싣지
     않는다). 행 주인은 두 과제 가운데 하나의 주인이어야 한다 — 비교는 이양이 옮기지 않아(TRANSFER_PROJECT_TABLES 밖) 한쪽 과제를 넘긴
@@ -1827,8 +1871,10 @@ SOURCE_KINDS = ("mcad", "dyna", "dyna_result", "ecad")
 @router.post("/projects/{project_id}/sources")
 def add_source(project_id: str, body: SourceBody,
                ident: identity.Identity = Depends(identity.current)) -> dict:
-    """소스 카드 연결. probe 는 adapters/registry 가 아는 상태만 적는다(앱은 소스 앱에 쓰기를 하지 않는다)."""
-    owner_sub = _require_user(ident)
+    """소스 카드 연결. probe 는 adapters/registry 가 아는 상태만 적는다(앱은 소스 앱에 쓰기를 하지 않는다). 그 과제의 편집자 이상이
+    붙인다(MB-14) — 소스 행은 과제 주인의 것이고 같은 원천의 다른 과제(`duplicate_of`)는 부른 사람이 읽는 과제만이다."""
+    actor = _require_user(ident)
+    owner_sub = _project_writer(project_id, ident)
     _project_row(project_id, owner_sub)
     if body.kind not in SOURCE_KINDS:
         raise AppError("E100", f"kind 는 {list(SOURCE_KINDS)} 중 하나여야 합니다 — {body.kind!r}.", 422)
@@ -1870,7 +1916,7 @@ def add_source(project_id: str, body: SourceBody,
         # StepForge 에는 사용자 격리가 없다 — owner 칸도 per_user_sso 도 없어 게이트웨이를 지나는 호출자 전원이 같은 /data 를
         # 본다(2026-08-31 실측). 그래서 남의 프로젝트도 붙일 수 있고, 이 앱이 세울 경계는 이 경고와 classification 필수뿐이다(plan §2.13.3).
         out["warnings"] = ["stepforge_no_isolation"]
-    duplicates = _source_duplicates(ref_key, project_id, owner_sub)
+    duplicates = _source_duplicates(ref_key, project_id, actor)
     if duplicates:
         out["duplicate_of"] = duplicates
     return out
@@ -2230,7 +2276,10 @@ def create_snapshot(project_id: str, body: SnapshotBody,
     반환은 `{snapshot_id, ir_hash, reused, partial, blocked, gates_summary, degraded, job_id, job_state}` 다.
     `gates_summary` 의 값은 true·false·null 이다 — null 은 그 게이트를 검문할 입력이 없었다는 뜻이고 위반이 아니다.
     """
-    owner_sub = _require_user(ident)
+    actor = _require_user(ident)
+    # 그 과제의 편집자 이상이 동결한다(plan §9.2 (14) · MB-14) — 스냅샷 · 동결 잡 · 호출 원문은 과제 주인의 행이고, 캡처 자격은 시작한 사람의
+    # 것이다(아래 credential · 위임 다리 · ECAD 는 그 사람의 PAT 로만).
+    owner_sub = _project_writer(project_id, ident)
     _project_row(project_id, owner_sub)
     store = get_store()
     job_id = new_uuid()
@@ -2243,7 +2292,7 @@ def create_snapshot(project_id: str, body: SnapshotBody,
                                 "allow_large": bool(body.allow_large)}, budget_s=budget_s)
     # 만료 PAT 는 쓰지 않는다 — 값이 있기만 하면 쓰면 서비스 PAT 폴백이 죽어 게이트웨이 401 로 강등된다
     # (runner.resolve_credential·roster.credential 과 같은 규칙).
-    credential = store.get_credential(owner_sub) or {}
+    credential = store.get_credential(actor) or {}
     portal_pat = identity.credential_pat(credential)
     if int(credential.get("pat_exp") or 0) <= now_epoch() + runner.CREDENTIAL_MARGIN_S:
         portal_pat = None
@@ -2368,8 +2417,10 @@ DIM_KINDS = ("overall", "thickness", "gap", "offset", "count", "param", "result"
 
 @router.post("/projects/{project_id}/dims")
 def add_dim(project_id: str, body: DimBody, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """명명 치수 정의 1건. name 이 rr_dim_vocab 에 없으면 candidate 로 함께 등록한다."""
-    owner_sub = _require_user(ident)
+    """명명 치수 정의 1건. name 이 rr_dim_vocab 에 없으면 candidate 로 함께 등록한다. 그 과제의 편집자 이상이 쓴다(MB-14) — 정의 행은 과제
+    주인의 것이고 만든 사람은 created_by 다."""
+    actor = _require_user(ident)
+    owner_sub = _project_writer(project_id, ident)
     _project_row(project_id, owner_sub)
     extractor = body.extractor.strip()
     if not any(rx.match(extractor) for rx in _DIM_EXTRACTOR_RES):
@@ -2381,11 +2432,11 @@ def add_dim(project_id: str, body: DimBody, ident: identity.Identity = Depends(i
     with store.tx():
         store.execute(
             "INSERT OR IGNORE INTO rr_dim_vocab(name, kind, unit, description, vocab_version, created_by, created_at)"
-            " VALUES (?,?,?,NULL,'candidate',?,?)", (body.name, body.kind, body.unit, owner_sub, now))
+            " VALUES (?,?,?,NULL,'candidate',?,?)", (body.name, body.kind, body.unit, actor, now))
         store.execute(
             "INSERT INTO rr_dim_defs(project_id, name, owner_sub, extractor, created_by, created_at, updated_at)"
             " VALUES (?,?,?,?,?,?,?) ON CONFLICT(project_id, name) DO UPDATE SET extractor=excluded.extractor,"
-            " updated_at=excluded.updated_at", (project_id, body.name, owner_sub, extractor, owner_sub, now, now))
+            " updated_at=excluded.updated_at", (project_id, body.name, owner_sub, extractor, actor, now, now))
     row = store.query_one(
         "SELECT project_id, name, owner_sub, extractor, created_at, updated_at FROM rr_dim_defs"
         " WHERE project_id = ? AND name = ?", (project_id, body.name))
@@ -2425,9 +2476,9 @@ def get_requirements(project_id: str, kind: str | None = None, status: str | Non
 def post_requirements(project_id: str, body: list[RequirementItem],
                       ident: identity.Identity = Depends(identity.current)) -> dict:
     """요구 배열 UPSERT — `UNIQUE(project_id, kind, name)` 기준. 전건 선검사라 한 건이라도 틀리면 아무 행도 쓰지 않는다. 쓰면 같은
-    트랜잭션에서 그 과제 스냅샷의 상태를 다시 센다(`recompute` 의 스냅샷 — 요구는 ir_hash 를 바꾸지 않는다, plan §2.8b (1))."""
-    owner_sub = _require_user(ident)
-    project = _project_row(project_id, owner_sub)
+    트랜잭션에서 그 과제 스냅샷의 상태를 다시 센다(`recompute` 의 스냅샷 — 요구는 ir_hash 를 바꾸지 않는다, plan §2.8b (1)). 그 과제의
+    편집자 이상이 쓴다(plan §8.2.3 — MB-14)."""
+    project = _project_row(project_id, _project_writer(project_id, ident))
     store = get_store()
     with store.tx():
         # owner_sub 는 호출자가 아니라 과제 소유 앵커다(plan §5.2.1 — 하위 표의 owner_sub 는 rr_projects 값의 복제다).
@@ -2441,8 +2492,9 @@ def post_requirements(project_id: str, body: list[RequirementItem],
 def put_requirement(requirement_id: str, body: RequirementDecision,
                     ident: identity.Identity = Depends(identity.current)) -> dict:
     """요구 1건의 status 결정(candidate|confirmed|waived). waived 는 사유 필수이고 rr_audit 1행이 남는다. 같은 트랜잭션에서 그 과제
-    스냅샷의 상태를 다시 센다(waived 는 대조하지 않고, 여유 표의 행이 status 를 싣는다)."""
-    owner_sub = _require_user(ident)
+    스냅샷의 상태를 다시 센다(waived 는 대조하지 않고, 여유 표의 행이 status 를 싣는다). 그 과제의 편집자 이상이 정한다(plan §8.2.3 —
+    MB-14) — 정한 사람(decided_by · 감사 행위자)은 부른 사람이다."""
+    actor = _require_user(ident)
     store = get_store()
     before = store.query_one(
         "SELECT id, project_id, status, waive_reason FROM rr_requirements WHERE id = ?", (requirement_id,))
@@ -2450,15 +2502,15 @@ def put_requirement(requirement_id: str, body: RequirementDecision,
     if before is None:
         raise missing
     try:
-        _project_row(before["project_id"], owner_sub)
+        _project_row(before["project_id"], _project_writer(before["project_id"], ident))
     except AppError as exc:
         if exc.http_status != 404:
             raise
         raise missing from None                     # 남의 요구는 없는 요구와 같다 — 과제 id 를 흘리지 않는다(남 숨김 훑기)
     with store.tx():
         updated = requirements.decide_requirement(
-            store, requirement_id, status=body.status, waive_reason=body.waive_reason, actor_sub=owner_sub)
-        _audit(store, owner_sub, scope="project", subject_id=requirement_id, project_id=before["project_id"],
+            store, requirement_id, status=body.status, waive_reason=body.waive_reason, actor_sub=actor)
+        _audit(store, actor, scope="project", subject_id=requirement_id, project_id=before["project_id"],
                action="requirement.decide",
                before={"status": before["status"], "waive_reason": before["waive_reason"]},
                after={"status": updated["status"], "waive_reason": updated["waive_reason"]},
@@ -2471,17 +2523,17 @@ def put_requirement(requirement_id: str, body: RequirementDecision,
 def post_requirements_inherit(project_id: str, body: InheritBody,
                               ident: identity.Identity = Depends(identity.current)) -> dict:
     """계보 과제의 요구를 복사한다(status='candidate'·inherited_from, 멱등). 원본에도 조회 규약을 먼저 적용한다. 복사한 것이 있으면
-    같은 트랜잭션에서 받는 과제 스냅샷의 상태를 다시 센다."""
-    owner_sub = _require_user(ident)
+    같은 트랜잭션에서 받는 과제 스냅샷의 상태를 다시 센다. 받는 과제의 편집자 이상이 하고(plan §8.2.3 — MB-14) 원본은 부른 사람이 읽는
+    과제(소유 · 구성원)여야 한다(구성원 읽기 — MB-1)."""
+    caller = _require_user(ident)
     store = get_store()
-    project = _project_row(project_id, owner_sub)
+    project = _project_row(project_id, _project_writer(project_id, ident))
     source = store.query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (body.from_project_id,))
     # 존재 여부는 모듈이 404 source_project_not_found 로 가른다 — 여기서는 있는 과제의 조회 규약만 본다. 구성원이 아닌 남의 과제는
-    # 없는 과제와 같은 답이다(그 과제가 있다는 것을 흘리지 않는다 — 남 숨김 훑기).
-    if source is not None and source["owner_sub"] != owner_sub:
-        if project_role(body.from_project_id, owner_sub) is None:
-            raise requirements.source_missing(body.from_project_id)
-        raise AppError("not_a_member", f"승계 원본 과제를 볼 수 없습니다 — {body.from_project_id}.", 403)
+    # 없는 과제와 같은 답이다(그 과제가 있다는 것을 흘리지 않는다 — 남 숨김 훑기). 구성원이면 그 요구를 읽으므로 승계도 받는다(종전에는
+    # 구성원에게 403 not_a_member 였다 — 원본을 읽지 못하던 때의 규칙).
+    if source is not None and source["owner_sub"] != caller and project_role(body.from_project_id, caller) is None:
+        raise requirements.source_missing(body.from_project_id)
     with store.tx():
         out = requirements.inherit_requirements(store, project_id, project["owner_sub"], body.from_project_id)
         if out["copied"]:
@@ -2506,7 +2558,9 @@ def put_iface_ledger(project_id: str, body: list[LedgerItem],
     """
     from app import rekey  # noqa: PLC0415 — 이 경로에서만 쓴다.
 
-    owner_sub = _require_user(ident)
+    # 그 과제의 편집자 이상이 쓴다(MB-14) — 원장 행 · 키 전파는 과제 주인의 것이고 정한 사람(decided_by · 감사 행위자)은 부른 사람이다.
+    actor = _require_user(ident)
+    owner_sub = _project_writer(project_id, ident)
     _project_row(project_id, owner_sub)
     now = now_epoch()
     store = get_store()
@@ -2521,9 +2575,9 @@ def put_iface_ledger(project_id: str, body: list[LedgerItem],
                 " decided_by, decided_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(project_id, pair_key) DO UPDATE SET"
                 " kind_override=excluded.kind_override, status=excluded.status, note=excluded.note,"
                 " decided_by=excluded.decided_by, decided_at=excluded.decided_at",
-                (project_id, item.pair_key, owner_sub, item.kind_override, item.status, item.note, owner_sub, now))
+                (project_id, item.pair_key, owner_sub, item.kind_override, item.status, item.note, actor, now))
             if prev is not None and prev["status"] in ("confirmed", "manual") and item.status == "rejected":
-                rekey.run(store, op="iface_ledger_reject", owner_sub=owner_sub, actor=owner_sub, at=now,
+                rekey.run(store, op="iface_ledger_reject", owner_sub=owner_sub, actor=actor, at=now,
                           subject_id=f"ledger:{project_id}:{item.pair_key}", project_id=project_id,
                           ledger={"project_id": project_id, "pair_key": item.pair_key, "before": prev["status"]})
     rows = store.query(
@@ -2684,11 +2738,13 @@ def _save_gate_ack_state(store: Any, snapshot_id: str, gates: dict, gate: str, a
 @router.post("/snapshots/{snapshot_id}/gates/{gate}/ack")
 def post_gate_ack(snapshot_id: str, gate: str, body: GateAckBody,
                   ident: identity.Identity = Depends(identity.current)) -> dict:
-    """fail 게이트에 사유를 적고 진행한다. ack 가 붙어도 `pass` 는 false 로 남는다(plan §3.2.2)."""
-    owner_sub = _require_user(ident)
+    """fail 게이트에 사유를 적고 진행한다. ack 가 붙어도 `pass` 는 false 로 남는다(plan §3.2.2). 그 과제의 편집자 이상이 단다(plan §8.2.3
+    — MB-14) — ack 행은 스냅샷 주인의 것이고 단 사람(ack_by · 감사 행위자)은 부른 사람이다."""
+    actor = _require_user(ident)
     reason = (body.reason or "").strip()
     if not reason:
         raise AppError("reason_required", "ack 에는 사유가 필요합니다(≤300자).", 422)
+    owner_sub = _snapshot_writer(snapshot_id, ident)
     gates, record = _gate_state(snapshot_id, gate, owner_sub)
     current_hash = state_module.gates_hash(gates)
     if body.gates_hash and body.gates_hash != current_hash:
@@ -2703,25 +2759,26 @@ def post_gate_ack(snapshot_id: str, gate: str, body: GateAckBody,
             " ON CONFLICT(snapshot_id, gate) DO UPDATE SET ack_by=excluded.ack_by, ack_at=excluded.ack_at,"
             " ack_reason=excluded.ack_reason, gates_hash=excluded.gates_hash,"
             " revoked_by=NULL, revoked_at=NULL",
-            (snapshot_id, gate, owner_sub, owner_sub, now, reason, current_hash),
+            (snapshot_id, gate, owner_sub, actor, now, reason, current_hash),
         )
         record = _save_gate_ack_state(store, snapshot_id, gates, gate,
-                                      {"by": owner_sub, "at": now, "reason": reason})
+                                      {"by": actor, "at": now, "reason": reason})
         # 입구 · 행위자 검증은 신원 출처에서 — MCP risk_ack_gate 는 (mcp, 0) 이다(사용자 결정 10-31 — 종전에는 둘 다 기본값 rest · 1).
         channel = AUDIT_CHANNELS.get(ident.source, "rest")
-        _audit(store, owner_sub, scope="snapshot", subject_id=snapshot_id, action="gate.ack",
+        _audit(store, actor, scope="snapshot", subject_id=snapshot_id, action="gate.ack",
                after={"gate": gate, "gates_hash": current_hash}, reason=reason, channel=channel,
                actor_verified=channel != "mcp")
-    return {"gate": gate, "ack_by": owner_sub, "ack_at": now, "ack_reason": reason,
+    return {"gate": gate, "ack_by": actor, "ack_at": now, "ack_reason": reason,
             "gates_hash": current_hash, "pass": record.get("pass")}
 
 
 @router.delete("/snapshots/{snapshot_id}/gates/{gate}/ack")
 def delete_gate_ack(snapshot_id: str, gate: str,
                     ident: identity.Identity = Depends(identity.current)) -> dict:
-    """ack 취소 — 행을 지우지 않고 `revoked_by`·`revoked_at` 을 찍는다(plan §5.2.1 삭제 없음)."""
-    owner_sub = _require_user(ident)
-    gates, _ = _gate_state(snapshot_id, gate, owner_sub)
+    """ack 취소 — 행을 지우지 않고 `revoked_by`·`revoked_at` 을 찍는다(plan §5.2.1 삭제 없음). 다는 것과 같은 문(편집자 이상 — MB-14)이고
+    취소한 사람(revoked_by · 감사 행위자)은 부른 사람이다."""
+    actor = _require_user(ident)
+    gates, _ = _gate_state(snapshot_id, gate, _snapshot_writer(snapshot_id, ident))
     store = get_store()
     row = store.query_one(
         "SELECT ack_by, ack_at, revoked_at FROM rr_gate_acks WHERE snapshot_id = ? AND gate = ?",
@@ -2732,13 +2789,13 @@ def delete_gate_ack(snapshot_id: str, gate: str,
     with store.tx():
         store.execute(
             "UPDATE rr_gate_acks SET revoked_by = ?, revoked_at = ? WHERE snapshot_id = ? AND gate = ?",
-            (owner_sub, now, snapshot_id, gate))
+            (actor, now, snapshot_id, gate))
         record = _save_gate_ack_state(store, snapshot_id, gates, gate, None)
-        _audit(store, owner_sub, scope="snapshot", subject_id=snapshot_id, action="gate.ack",
+        _audit(store, actor, scope="snapshot", subject_id=snapshot_id, action="gate.ack",
                before={"gate": gate, "ack_by": row["ack_by"]}, after={"gate": gate, "revoked": True})
     return {"gate": gate, "ack_by": None, "ack_at": None, "ack_reason": None,
             "gates_hash": state_module.gates_hash(gates), "pass": record.get("pass"),
-            "revoked_by": owner_sub, "revoked_at": now}
+            "revoked_by": actor, "revoked_at": now}
 
 
 # ================================================================ same-as·원장
@@ -2871,10 +2928,29 @@ class DiffBody(BaseModel):
     target_snapshot_id: str
 
 
+def _diff_pair_owner(base_snapshot_id: str, target_snapshot_id: str, ident: identity.Identity) -> str:
+    """비교를 만들 owner_sub(MB-14) — 두 스냅샷 과제의 편집자 이상이면 그 과제 주인이다. 두 스냅샷의 주인이 다르면(두 사람의 과제를 다 편집한다)
+    한 비교 행으로 만들 수 없어 422 pair_owners_differ 다. 한쪽이라도 쓸 수 없는(남 · 없는) 스냅샷이면 부른 사람으로 내려가 diff 모듈이 오늘과
+    같은 없는 스냅샷 404 를 낸다."""
+    email = _require_user(ident)
+    store = get_store()
+    owners = []
+    for snapshot_id in (base_snapshot_id, target_snapshot_id):
+        owner = _snapshot_writer(snapshot_id, ident)
+        row = store.query_one("SELECT owner_sub FROM rr_snapshots WHERE id = ?", (snapshot_id,))
+        if row is None or row["owner_sub"] != owner:
+            return email
+        owners.append(owner)
+    if owners[0] != owners[1]:
+        raise AppError("pair_owners_differ", "두 스냅샷의 주인이 달라 한 비교로 만들 수 없다.", 422)
+    return owners[0]
+
+
 @router.post("/diffs")
 def create_diff(body: DiffBody, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """3층 diff 생성. G6 차단은 409, 같은 쌍이 이미 있으면 저장된 것을 그대로 돌려준다."""
-    owner_sub = _require_user(ident)
+    """3층 diff 생성. G6 차단은 409, 같은 쌍이 이미 있으면 저장된 것을 그대로 돌려준다. 두 스냅샷 과제의 편집자 이상이 만들고(MB-14) 비교
+    행은 그 과제 주인의 것이다."""
+    owner_sub = _diff_pair_owner(body.base_snapshot_id, body.target_snapshot_id, ident)
     result = diff_module.create_diff(get_store(), body.base_snapshot_id, body.target_snapshot_id,
                                      owner_sub=owner_sub)
     return {"diff_id": result["diff_id"], "counts": result.get("stats") or {},
@@ -3175,8 +3251,12 @@ def _flag_character_needs_review(store: Any, project_id: str, changed: set[str],
 
 @router.post("/targets")
 def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """심사 타깃 1건. principal_json 은 신원 스냅샷일 뿐 러너가 이것으로 PAT 를 발급하지 않는다(§6.7 3단계)."""
-    owner_sub = _require_user(ident)
+    """심사 타깃 1건. principal_json 은 신원 스냅샷일 뿐 러너가 이것으로 PAT 를 발급하지 않는다(§6.7 3단계).
+
+    그 과제의 편집자 이상이 연다(plan §0.6 '타깃' — MB-14). 대상 · 명단 · 단위 행은 과제 주인의 것이고(명단 조회 자격도 대상 주인의 것 —
+    `_roster_report`), 연 사람은 principal_json · 단위 빌드의 built_by 다. 비교 대상은 그 비교를 읽고(두 과제) 대상 과제의 편집자 이상이며
+    비교 행이 대상 과제 주인의 것이어야 연다."""
+    actor = _require_user(ident)
     if body.kind not in ("snap", "diff"):
         raise AppError("E100", f"kind 는 snap|diff 여야 합니다 — {body.kind!r}.", 422)
     if body.consent is not True:
@@ -3186,6 +3266,7 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
     store = get_store()
     blocked_snapshots: list[str] = []
     if body.kind == "snap":
+        owner_sub = _snapshot_writer(body.ref_id, ident)
         snapshot = _snapshot_row(body.ref_id, owner_sub)
         project_id, base_project_id, ir_hash = snapshot["project_id"], None, snapshot["ir_hash"]
         ecad_absent = _ecad_absent(snapshot)
@@ -3194,6 +3275,9 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
         row = store.query_one(
             "SELECT id, owner_sub, base_snapshot_id, target_snapshot_id, base_project_id, target_project_id"
             " FROM rr_diffs WHERE id = ?", (body.ref_id,))
+        owner_sub = actor
+        if row is not None and row["owner_sub"] != actor and _diff_reader(body.ref_id, actor) == row["owner_sub"]:
+            owner_sub = _writer(row["owner_sub"], row["target_project_id"], ident)
         if row is None or row["owner_sub"] != owner_sub:
             raise AppError("E404", f"diff 를 찾을 수 없습니다 — {body.ref_id}.", 404)
         snapshot = _snapshot_row(row["target_snapshot_id"], owner_sub)
@@ -3262,7 +3346,7 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
         # 타깃·로스터 트랜잭션이 닫힌 뒤 제 트랜잭션에서 단위를 얹는다. 던지면 아직 아무것도 안 돌았으니 옛 흐름으로 되돌리고
         # 실패한 빌드 행을 남긴다(W2-24) — 대상은 그대로 열려 있다.
         try:
-            units_out = _units_opened(units_module.persist(store, target_key, owner_sub, built, built_by=owner_sub,
+            units_out = _units_opened(units_module.persist(store, target_key, owner_sub, built, built_by=actor,
                                                            reason="target_open"))
         except Exception as exc:  # noqa: BLE001
             log.exception("대상 %s 의 단위를 얹지 못해 panels 로 연다", target_key)
@@ -3272,14 +3356,14 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
             failed = {**built, "status": "failed", "error": "persist_error", "error_detail": f"{type(exc).__name__}: {exc}",
                       "units": [], "unit_ids": [], "evidence": {}, "suspects": []}
             try:
-                units_module.persist(store, target_key, owner_sub, failed, built_by=owner_sub, reason="target_open")
+                units_module.persist(store, target_key, owner_sub, failed, built_by=actor, reason="target_open")
             except Exception:  # noqa: BLE001 — 실패 기록마저 못 쓰면 로그에만 남는다(대상은 panels 로 열렸다).
                 log.exception("대상 %s 의 실패한 단위 빌드 행도 쓰지 못했다", target_key)
     elif built is not None and built["status"] == "failed":
         # cells 로 열려다 단위가 안 서 panels 로 연 대상 — 실패한 빌드를 원장에 남겨 어느 까닭(불변식·현황·IR 없음·계산 실패)인지
         # 보이게 한다(RC-6, 바꾸기 길과 같다). 실패 빌드는 활성 빌드가 되지 않는다. 기록마저 못 쓰면 로그에만 남는다.
         try:
-            units_module.persist(store, target_key, owner_sub, built, built_by=owner_sub, reason="target_open")
+            units_module.persist(store, target_key, owner_sub, built, built_by=actor, reason="target_open")
         except Exception:  # noqa: BLE001
             log.exception("대상 %s 의 실패한 단위 빌드 행을 쓰지 못했다", target_key)
     plan = planner.tier_plan(store, target_key) if roster["roster_size"] else None
@@ -3357,9 +3441,10 @@ def refresh_roster(target_key: str, body: RosterBody = RosterBody(),
 
     본문 없는 호출도 받는다(plan §0.5.1·§8.2.3 — 인자 없이 `{added_pending}`). 본문 agents 가 있으면 그것이 우선이고,
     없으면 게이트웨이 `list_agents`·`recommend_agents` 를 조회한다(자격이 없으면 갱신 0건 + roster_source='unavailable').
-    조회가 어떻게 끝났는지는 타깃 생성과 같은 칸으로 싣는다(`_roster_report`).
+    조회가 어떻게 끝났는지는 타깃 생성과 같은 칸으로 싣는다(`_roster_report`). 그 과제의 편집자 이상이 한다(MB-14) — 명단 행과 조회 자격은
+    대상 주인의 것이다.
     """
-    owner_sub = _require_user(ident)
+    owner_sub = _target_writer(target_key, ident)
     target = _target_row(target_key, owner_sub)
     store = get_store()
     agents: list[dict] = [dict(a) for a in ((body or RosterBody()).agents or [])]
@@ -3684,10 +3769,15 @@ def job_control(job_id: str, action: str, *, consent: bool = False, ident: ident
     바뀜은 감사 행과 같은 판정이다 — 그 행이 섰으면 참이고 그때만 참이다(`_audit_job_control`, 전이와 같은 트랜잭션 안의 앞 · 뒤 상태와
     보류 코드). REST 는 답만 돌려주고(응답 계약 그대로) MCP 는 바뀜을 changed 로 싣는다. 종전 입구는 라우트 밖에서 읽은 상태만 견주어, 코드
     보류로 멈춘 검토 잡의 사람 정지(보류만 user 로 — 행이 선다)에 false, 확인과 취소 사이에 러너가 끝낸 잡(행이 없다)에 true 라 했다(사람
-    조작 감사가 남긴 줄, 사용자 결정 10-31)."""
-    owner_sub = _require_user(ident)
+    조작 감사가 남긴 줄, 사용자 결정 10-31). 그 대상 과제의 편집자 이상이 한다(plan §0.6 '잡' — MB-14) — 잡 행은 대상 주인의 것이고 조작한
+    사람(state_by · 감사 행위자)은 부른 사람이다."""
+    actor = _require_user(ident)
     if action not in JOB_ACTIONS:
         raise AppError("E404", f"모르는 잡 조작입니다 — {action}.", 404)
+    job = get_store().query_one(
+        "SELECT j.owner_sub AS owner_sub, t.project_id AS project_id FROM rr_jobs j"
+        " LEFT JOIN rr_targets t ON t.target_key = j.target_key WHERE j.id = ?", (job_id,))
+    owner_sub = _writer(job["owner_sub"] if job is not None else None, job["project_id"] if job is not None else None, ident)
     _owned_row("SELECT id, owner_sub FROM rr_jobs WHERE id = ?", (job_id,), owner_sub, f"잡({job_id})")
     store = get_store()
     if action == "cancel":
@@ -3696,16 +3786,16 @@ def job_control(job_id: str, action: str, *, consent: bool = False, ident: ident
         # 다시 짓기가 실패하거나 그 사이 앱이 멈춰도 취소와 함께 남고, 앞 · 뒤 값에 러너의 집기 · 마감이 섞이지 않는다. 러너가 쓰지 않은
         # 취소(끝난 잡)에는 훅이 불리지 않아 바뀜도 없다.
         wrote: list[bool] = []
-        out = JOB_ACTIONS[action](store, job_id, by=owner_sub, on_change=lambda before: wrote.append(_audit_job_control(
-            store, ident, owner_sub, job_id, action, before)))
+        out = JOB_ACTIONS[action](store, job_id, by=actor, on_change=lambda before: wrote.append(_audit_job_control(
+            store, ident, actor, job_id, action, before)))
         return out, any(wrote)
     with store.tx():
         before = _job_control_view(store, job_id)
         if action == "resume":
             review_runner.resume_gate(store, job_id, consent=consent,
                                       consent_source=CONSENT_SOURCES.get(ident.source, ident.source))
-        out = JOB_ACTIONS[action](store, job_id, by=owner_sub)
-        return out, _audit_job_control(store, ident, owner_sub, job_id, action, before)
+        out = JOB_ACTIONS[action](store, job_id, by=actor)
+        return out, _audit_job_control(store, ident, actor, job_id, action, before)
 
 
 @router.post("/jobs/{job_id}/{action}")
@@ -4885,8 +4975,10 @@ def put_verdict(target_key: str, body: VerdictBody,
 
     확정마다 같은 트랜잭션에서 rr_audit(scope target · 대상 열쇠 · action verdict.final) 한 행을 남긴다(사용자 결정 10-31 — plan §8.2.3).
     같은 값으로 다시 확정해도 사람의 확정이라 한 행이다(확정한 사람 · 시각을 다시 찍는다). 앞 · 뒤는 판정 값뿐이고 note 는 싣지 않는다 —
-    사람이 쓴 글은 rr_targets.verdict_note 에 있다."""
-    owner_sub = _require_user(ident)
+    사람이 쓴 글은 rr_targets.verdict_note 에 있다. 그 과제의 편집자 이상이 확정한다(MB-14) — 확정한 사람(verdict_by · 감사 행위자)은
+    부른 사람이다."""
+    actor = _require_user(ident)
+    owner_sub = _target_writer(target_key, ident)
     _target_row(target_key, owner_sub)
     if body.verdict not in ("go", "conditional", "no-go", "undetermined"):
         raise AppError("E100", f"verdict 어휘 밖입니다 — {body.verdict!r}.", 422)
@@ -4898,8 +4990,8 @@ def put_verdict(target_key: str, body: VerdictBody,
         store.execute(
             "UPDATE rr_targets SET verdict_final = ?, verdict_note = ?, verdict_by = ?, verdict_at = ?,"
             " updated_at = ? WHERE target_key = ?",
-            (body.verdict, body.note, owner_sub, now, now, target_key))
-        _audit(store, owner_sub, scope="target", subject_id=target_key, project_id=before["project_id"],
+            (body.verdict, body.note, actor, now, now, target_key))
+        _audit(store, actor, scope="target", subject_id=target_key, project_id=before["project_id"],
                action="verdict.final", before={"verdict_final": before["verdict_final"]},
                after={"verdict_final": body.verdict}, channel=channel, actor_verified=channel != "mcp")
     return _target_row(target_key, owner_sub)
@@ -4942,16 +5034,19 @@ def put_registry_status(cluster_key: str, body: RegistryStatusBody,
     쓴 글은 상태 기록(rr_registry_status_log)에 있다. 자리는 그 대상의 것이라(대상을 고른 공개 토글 · 병합과 같은 꼴) 같은 클러스터 열쇠의
     다른 대상 감사에는 실리지 않는다(BL-8).
     """
-    owner_sub = _require_user(ident)
+    actor = _require_user(ident)
+    # 대상을 주면 그 과제의 편집자 이상이 그 대상 행을 바꾼다(plan §0.6 'status' — MB-14). 대상 없이 부르면 부른 사람의 모든 대상의 행이라
+    # (주인의 다른 과제까지 걸친다) 종전처럼 부른 사람 자신의 행이다.
+    owner_sub = _target_writer(body.target_key, ident) if body.target_key else actor
     store = get_store()
     channel = AUDIT_CHANNELS.get(ident.source, "rest")
     with store.tx():
         out = registry_module.set_status(store, cluster_key, body.status, owner_sub=owner_sub,
                                          target_key=body.target_key, evidence_ref=body.evidence_ref,
-                                         note=body.note, actor=owner_sub)
+                                         note=body.note, actor=actor)
         for change in out.pop("changes"):
             target = store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (change["target_key"],))
-            _audit(store, owner_sub, scope="registry", subject_id=f"{change['target_key']}#{cluster_key}",
+            _audit(store, actor, scope="registry", subject_id=f"{change['target_key']}#{cluster_key}",
                    project_id=target["project_id"] if target is not None else None, action="registry.status",
                    before={"status": change["from_status"]},
                    after={"status": out["status"], "status_log_seq": change["status_log_seq"]},
@@ -4962,7 +5057,7 @@ def put_registry_status(cluster_key: str, body: RegistryStatusBody,
                 metrics.record_label(
                     store, finding_id=finding_id, source="expert_review", outcome=outcome,
                     evidence_ref=body.evidence_ref or "", owner_sub=owner_sub,
-                    labeled_by=owner_sub, evidence_note=body.note)
+                    labeled_by=actor, evidence_note=body.note)
                 for finding_id in _cluster_finding_ids(store, cluster_key, owner_sub, body.target_key)]
     return out
 
@@ -4979,9 +5074,11 @@ def put_registry_merge(cluster_key: str, body: RegistryMergeBody,
     """두 클러스터를 사람 확정으로 잇는다 — 별칭 1행 + 그 타깃 재병합(plan §4.3.2·§0.9 P3-22).
 
     finding 행의 `cluster_key` 는 바이트 불변이고 병합은 조회 시 별칭 해석으로 이뤄진다. family_key 가
-    다르면 422 — 메커니즘이 다른 두 클러스터를 한 행으로 접지 않는다.
+    다르면 422 — 메커니즘이 다른 두 클러스터를 한 행으로 접지 않는다. 대상을 주면 그 과제의 편집자 이상이 그 주인의 별칭으로 잇는다
+    (plan §8.2.3 '(editor)' — MB-14, 별칭은 주인의 원장이라 그 주인의 다른 대상에도 걸린다). 대상 없이 부르면 부른 사람 자신의 클러스터다.
     """
-    owner_sub = _require_user(ident)
+    actor = _require_user(ident)
+    owner_sub = _target_writer(body.target_key, ident) if body.target_key else actor
     store = get_store()
     left = store.query_one(
         "SELECT target_key, family_key FROM rr_registry WHERE cluster_key = ? AND owner_sub = ? LIMIT 1",
@@ -4999,8 +5096,8 @@ def put_registry_merge(cluster_key: str, body: RegistryMergeBody,
     with store.tx():
         alias = registry_module.add_cluster_alias(
             store, cluster_key, body.into, owner_sub=owner_sub, reason=body.reason,
-            evidence={"from": cluster_key, "to": body.into, "by": owner_sub})
-        _audit(store, owner_sub, scope="registry", subject_id=f"{left['target_key']}#{cluster_key}",
+            evidence={"from": cluster_key, "to": body.into, "by": actor}, decided_by=actor)
+        _audit(store, actor, scope="registry", subject_id=f"{left['target_key']}#{cluster_key}",
                action="registry.merge", before={"cluster_key": cluster_key},
                after={"cluster_key": body.into})
     merged = registry_module.merge(store, target["target_key"], owner_sub=target["owner_sub"])
@@ -5010,8 +5107,10 @@ def put_registry_merge(cluster_key: str, body: RegistryMergeBody,
 @router.delete("/registry/{cluster_key:path}/merge")
 def delete_registry_merge(cluster_key: str, target_key: str | None = None,
                           ident: identity.Identity = Depends(identity.current)) -> dict:
-    """별칭 철회 — 행은 남고 revoked_at 만 찍히며 재병합에서 다시 갈린다."""
-    owner_sub = _require_user(ident)
+    """별칭 철회 — 행은 남고 revoked_at 만 찍히며 재병합에서 다시 갈린다. 대상을 주면 그 과제의 편집자 이상이 그 주인의 별칭을 걷는다
+    (병합과 같은 문 — MB-14)."""
+    actor = _require_user(ident)
+    owner_sub = _target_writer(target_key, ident) if target_key else actor
     store = get_store()
     row = store.query_one(
         "SELECT target_key FROM rr_registry WHERE cluster_key = ? AND owner_sub = ? LIMIT 1",
@@ -5019,8 +5118,10 @@ def delete_registry_merge(cluster_key: str, target_key: str | None = None,
     # 다시 병합할 대상은 부른 사람의 것이어야 한다 — 남의 대상은 없는 대상과 같은 404 이고 철회도 하지 않는다(조합 검토 H1).
     target = _target_row(target_key or row["target_key"], owner_sub) if (target_key or row is not None) else None
     with store.tx():
-        out = registry_module.revoke_cluster_alias(store, cluster_key, owner_sub=owner_sub)
-        _audit(store, owner_sub, scope="registry", subject_id=cluster_key,
+        out = registry_module.revoke_cluster_alias(store, cluster_key, owner_sub=owner_sub, revoked_by=actor)
+        # 자리는 맨 클러스터 열쇠라 대상 감사가 '그 대상 소유자의 행위' 로 고른다(registry.target_audit_clause · BL-8) — 행은 별칭 주인의
+        # 원장 행위로 적고 행위자는 걷은 사람이다(편집자가 걷어도 주인 · 구성원의 대상 감사에 보인다).
+        _audit(store, owner_sub, actor=actor, scope="registry", subject_id=cluster_key,
                action="registry.merge.revoke", before={"cluster_key": cluster_key}, after=out)
     if row is not None and target is not None:
         registry_module.merge(store, target["target_key"], owner_sub=target["owner_sub"])
@@ -5176,11 +5277,13 @@ def _cells_flow_web_only() -> AppError:
                     " 러너가 돈다. 패널로 보려면 패널 방식 대상에서 연다.", 422, detail={"flow": "cells"})
 
 
-def brief_by_token(target_key: str, brief_token: str | None, tier: str = "B", *, owner_sub: str | None = None) -> dict:
+def brief_by_token(target_key: str, brief_token: str | None, tier: str = "B", *,
+                   writer: identity.Identity | None = None) -> dict:
     """MCP `risk_get_brief` 본체 — caller 판정 대신 brief_token 대조로 연다(plan §8.2.5).
 
-    `owner_sub` 를 주면(MCP 도구는 게이트웨이 위임으로 확인된 이메일을 준다) 토큰의 패널이 그 사람 것일 때만 연다 — 결과 제출이
-    패널 소유자만 받으므로(complete_panel 의 `_panel_row`), 낼 수 없는 신원에게 동결·품질 쓰기를 하지 않고 E404 로 답한다(RV-1).
+    `writer` 를 주면(MCP 도구는 게이트웨이 위임으로 확인된 신원을 준다) 그 사람이 토큰의 패널에 결과를 낼 수 있을 때만 연다 — 결과 제출과
+    같은 문(`_writer` — 그 대상 과제의 주인 · 편집자, MB-14)이라 낼 수 없는 신원에게 동결 · 품질 쓰기를 하지 않는다(RV-1). 남은 E404,
+    보기는 403 role_insufficient 다.
 
     토큰은 UI·REST `GET /targets/{key}/brief` 가 그 패널 1건·`risk_brief_token_ttl_s` 동안만 위임한 열쇠다.
     이 조립이 L2 오케스트레이터가 좌석에 싣는 것이라 **그 토큰의 패널**에 여기서 동결한다(WP1 P-09 · R-21) — 화면이 토큰을
@@ -5194,9 +5297,11 @@ def brief_by_token(target_key: str, brief_token: str | None, tier: str = "B", *,
     """
     store = get_store()
     panel = resolve_brief_token(target_key, brief_token)
-    if owner_sub is not None and panel["owner_sub"] != owner_sub:
-        raise AppError("E404", f"이 브리프 토큰의 패널을 {owner_sub} 으로 찾을 수 없습니다 — 결과 제출은 패널 소유자만 하므로,"
-                       " 토큰을 받은 그 사람의 Claude(게이트웨이 위임)로 부릅니다.", 404)
+    if writer is not None:
+        target = store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (panel["target_key"],))
+        if _writer(panel["owner_sub"], target["project_id"] if target is not None else None, writer) != panel["owner_sub"]:
+            raise AppError("E404", f"이 브리프 토큰의 패널을 {writer.email} 으로 찾을 수 없습니다 — 결과 제출은 그 대상 과제의 주인 ·"
+                           " 편집자만 하므로, 토큰을 받은 그 사람의 Claude(게이트웨이 위임)로 부릅니다.", 404)
 
     def not_planned(status: str) -> AppError:
         return AppError("brief_panel_not_planned",
@@ -5329,9 +5434,9 @@ def get_brief(target_key: str, tier: str = "B",
               ident: identity.Identity = Depends(identity.current)) -> dict:
     """패널 브리프 + 패널마다 1건의 `brief_token`(MCP `risk_get_brief` 의 열쇠, §8.2.5).
 
-    읽기가 아니다 — 패널을 편성하고 토큰을 새로 낸다(결과를 낼 패널 주인의 열쇠다). 그래서 구성원 읽기(MB-1)에 열지 않고 주인만 그대로다."""
-    owner_sub = _require_user(ident)
-    return brief_payload(target_key, tier, owner_sub=owner_sub, issue_token=True)
+    읽기가 아니다 — 패널을 편성하고 토큰을 새로 낸다(결과를 낼 사람의 열쇠다). 그래서 구성원 읽기(MB-1)가 아니라 쓰기 문이다 — 그 대상
+    과제의 편집자 이상(결과를 낼 수 있는 사람 — MB-14)이고 보기는 403 이다."""
+    return brief_payload(target_key, tier, owner_sub=_target_writer(target_key, ident), issue_token=True)
 
 
 # ================================================================ 패널 결과 회수(REST·MCP 공용)
@@ -5584,10 +5689,12 @@ class PanelCompleteBody(BaseModel):
 @router.post("/panels/{panel_id}/complete")
 def post_panel_complete(panel_id: str, body: PanelCompleteBody,
                         ident: identity.Identity = Depends(identity.current)) -> dict:
-    owner_sub = _require_user(ident)
+    """패널 결과 제출 · 재제출 — 그 대상 과제의 편집자 이상이 낸다(plan §0.6 '잡' — MB-14). owner_sub 는 패널 행(대상 주인)을 승계하고 낸
+    사람은 actor 다(§6.11)."""
+    actor = _require_user(ident)
     return complete_panel(panel_id, engine=body.engine, decision_text=body.decision_text, turns=body.turns,
                           report_id=body.report_id, conv_id=body.conv_id, events=body.events,
-                          model=body.model, actor=owner_sub, actor_verified=True, owner_sub=owner_sub)
+                          model=body.model, actor=actor, actor_verified=True, owner_sub=_panel_writer(panel_id, ident))
 
 
 @router.post("/panels/{panel_id}/repersist")
@@ -6113,6 +6220,12 @@ def _next_human_claim_uid(store: Any, target_key: str) -> str:
     return f"{target_key}#H{(max(used) + 1) if used else 1}"
 
 
+def _finding_writer(store: Any, finding_id: str, ident: identity.Identity) -> str:
+    """finding 한 건에 쓸 owner_sub — 그 과제의 편집자 이상이면 과제 주인(`_writer`), 남 · 없는 finding 은 부른 사람(본체가 404)이다."""
+    row = store.query_one("SELECT owner_sub, project_id FROM rr_findings WHERE finding_id = ?", (finding_id,))
+    return _writer(row["owner_sub"] if row is not None else None, row["project_id"] if row is not None else None, ident)
+
+
 def _human_finding_row(store: Any, finding_id: str, owner_sub: str) -> dict:
     row = store.query_one(
         "SELECT finding_id, claim_uid, target_key, project_id, owner_sub, origin, author_sub, direction,"
@@ -6208,12 +6321,13 @@ def create_human_finding(target_key: str, body: HumanFindingBody,
 @router.put("/findings/{finding_id}")
 def update_human_finding(finding_id: str, body: HumanFindingBody,
                          ident: identity.Identity = Depends(identity.current)) -> dict:
-    """작성자만 고칠 수 있다 — 패널이 낸 llm 행은 422 다."""
+    """작성자 본인 또는 과제 주인만 고친다(plan §8.2.3 — MB-14) — 작성자는 지금도 그 과제의 편집자 이상이어야 한다(보기는 쓰지 않는다). 패널이
+    낸 llm 행은 422 다."""
     email = _require_user(ident)
     store = get_store()
-    row = _human_finding_row(store, finding_id, _require_user(ident))
-    if row["author_sub"] != email and not _is_admin(ident):
-        raise AppError("role_insufficient", "작성자만 고칠 수 있습니다.", 403)
+    row = _human_finding_row(store, finding_id, _finding_writer(store, finding_id, ident))
+    if row["author_sub"] != email and row["owner_sub"] != email and not _is_admin(ident):
+        raise AppError("role_insufficient", "작성자 또는 과제 주인만 고칠 수 있습니다.", 403)
     cites = [c for c in body.cites if isinstance(c, dict) and str(c.get("ref") or "").strip()]
     if not cites:
         raise AppError("cites_required", "사람 finding 도 인용이 최소 1건 필요합니다(§4.3.1).", 422)
@@ -6237,12 +6351,12 @@ def update_human_finding(finding_id: str, body: HumanFindingBody,
 
 @router.delete("/findings/{finding_id}")
 def delete_human_finding(finding_id: str, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """작성자 삭제 — 인용 역색인도 함께 지운다. 패널이 낸 행은 422 다."""
+    """작성자 본인 또는 과제 주인의 삭제(plan §8.2.3 — MB-14) — 인용 역색인도 함께 지운다. 패널이 낸 행은 422 다."""
     email = _require_user(ident)
     store = get_store()
-    row = _human_finding_row(store, finding_id, email)
-    if row["author_sub"] != email and not _is_admin(ident):
-        raise AppError("role_insufficient", "작성자만 지울 수 있습니다.", 403)
+    row = _human_finding_row(store, finding_id, _finding_writer(store, finding_id, ident))
+    if row["author_sub"] != email and row["owner_sub"] != email and not _is_admin(ident):
+        raise AppError("role_insufficient", "작성자 또는 과제 주인만 지울 수 있습니다.", 403)
     with store.tx():
         store.execute("DELETE FROM rr_claim_refs WHERE claim_uid = ?", (row["claim_uid"],))
         store.execute("DELETE FROM rr_findings WHERE finding_id = ?", (finding_id,))
@@ -6259,16 +6373,18 @@ def post_finding_label(finding_id: str, body: LabelBody,
 
     자동 4경로(incident·test_run·sim·voc)는 야간 잡의 입구라 REST 로는 받지 않는다 — 사람 손으로
     `matched_by='auto'` 라벨을 세우면 3항 매칭 없이 자동 확정 통계가 부풀기 때문이다.
-    어휘 422·남의 finding 404 와 훅(상태 전이·선례·패턴 카운트)은 `metrics.record_label` 이 낸다.
+    어휘 422·남의 finding 404 와 훅(상태 전이·선례·패턴 카운트)은 `metrics.record_label` 이 낸다. 그 과제의 편집자 이상이 붙인다(등록부
+    status 와 같은 문 — MB-14) — 라벨은 finding 주인의 원장에 서고 붙인 사람은 labeled_by 다.
     """
-    owner_sub = _require_user(ident)
+    actor = _require_user(ident)
     if body.source not in metrics.MANUAL_SOURCES:
         raise AppError("E100", f"사람 라벨의 source 는 {sorted(metrics.MANUAL_SOURCES)} 뿐입니다 — {body.source!r}.", 422)
+    store = get_store()
     return metrics.record_label(
-        get_store(), finding_id=finding_id, source=body.source, outcome=body.outcome,
-        evidence_ref=body.evidence_ref, owner_sub=owner_sub, severity_observed=body.severity_observed,
-        occurred_at=body.occurred_at, evidence_note=body.evidence_note, labeled_by=owner_sub,
-        pattern_id=body.pattern_id)
+        store, finding_id=finding_id, source=body.source, outcome=body.outcome,
+        evidence_ref=body.evidence_ref, owner_sub=_finding_writer(store, finding_id, ident),
+        severity_observed=body.severity_observed, occurred_at=body.occurred_at, evidence_note=body.evidence_note,
+        labeled_by=actor, pattern_id=body.pattern_id)
 
 
 # 큐 kind 별 결정 어휘(§7.7 표). 여기 없는 kind 는 적용 함수가 아직 없어 501 이다(라우트가 로직을 지어내지 않는다).

@@ -32,24 +32,26 @@ MEMBERS = (EDITOR, VIEWER)
 # 구성원이 주인과 같은 답을 받지 않는 읽기 — 까닭이 있는 것만.
 MEMBER_GET_EXEMPT: dict[tuple[str, str], str] = {
     ("GET", P + "/targets/{target_key}/brief"): (
-        "읽기가 아니다 — 패널을 편성하고 패널마다 brief_token 을 새로 낸다(앞서 복사한 토큰이 무효가 된다). 토큰은 결과를 낼 패널 주인의"
-        " 열쇠라(risk_get_brief · complete_panel 이 패널 주인만 받는다) 주인만 그대로 둔다"),
+        "읽기가 아니다 — 패널을 편성하고 패널마다 brief_token 을 새로 낸다(앞서 복사한 토큰이 무효가 된다). 토큰은 결과를 낼 사람의 열쇠라"
+        " 쓰기 문(그 대상 과제의 편집자 이상 — MB-14)이다 — 보기는 403"),
 }
 # 부른 사람에 매인 칸 — 구성원과 주인의 답이 이 칸에서만 갈린다.
 CALLER_FIELDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("GET", P + "/part-keys/{ckey}"): ("mine",),
 }
 
-# MCP — 읽기 도구는 구성원이 주인과 같은 답을 받는다. 주인만 그대로인 것과 쓰기 도구는 까닭과 함께 따로 적는다(새 도구는 셋 가운데
-# 하나로 들어와야 한다).
+# MCP — 읽기 도구는 구성원이 주인과 같은 답을 받는다. 구성원이 주인과 같은 답을 받지 않는 것과 쓰기 도구는 까닭과 함께 따로 적는다(새
+# 도구는 셋 가운데 하나로 들어와야 한다).
 MCP_READS: tuple[str, ...] = (
     "risk_get_coverage", "risk_list_panels", "risk_get_panel_transcript", "risk_get_precedents", "risk_similar_projects",
     "risk_get_snapshot", "risk_get_diff", "risk_get_registry", "risk_claims_for_ref", "risk_get_sameas", "risk_get_units",
     "risk_get_cells", "risk_get_expert_report", "risk_get_issues", "risk_get_report",
 )
-MCP_OWNER_ONLY: dict[str, str] = {
-    "risk_get_brief": "브리프 토큰의 패널을 동결하고 패널 품질을 쓴다 — 결과를 낼 수 있는 그 패널 주인만이다(RV-1)",
-    "risk_next_step": "주인의 진행 길잡이 — 다음 걸음이 주인의 쓰기(소스 · 캡처 · 대상 · 잡)라 구성원에게 열지 않았다(남긴 것)",
+MCP_MEMBER_EXEMPT: dict[str, str] = {
+    "risk_get_brief": ("브리프 토큰의 패널을 동결하고 패널 품질을 쓴다 — 결과를 낼 수 있는 사람(그 대상 과제의 주인 · 편집자, MB-14)만이고"
+                       " 보기는 role_insufficient 다(RV-1 — tests/rr/test_editor_writes.py)"),
+    "risk_next_step": ("주인의 진행 길잡이 — 주인 과제의 단계만 걷는다. 편집자도 그 쓰기(소스 · 캡처 · 대상 · 잡)를 하게 됐지만(MB-14)"
+                       " 길잡이는 넓히지 않았다(남긴 것)"),
 }
 MCP_WRITES: tuple[str, ...] = (
     "risk_create_project", "risk_submit_panel_result", "risk_add_finding", "risk_add_source", "risk_capture_snapshot",
@@ -60,6 +62,8 @@ MCP_WRITES: tuple[str, ...] = (
 # 빠졌다.
 VIEWER_WRITES_OWN: dict[tuple[str, str], str] = {
     ("POST", P + "/projects"): "제 과제를 만든다(앞 과제가 구성원 과제라 계보가 선다 — 남이면 404)",
+    ("POST", P + "/projects/{project_id}/requirements/inherit"): (
+        "제 과제로 승계한다 — 원본은 보기가 읽는 구성원 과제이고 쓰는 것은 제 과제의 요구다(MB-14)"),
 }
 
 
@@ -107,17 +111,21 @@ def test_editors_and_viewers_read_what_the_owner_reads(members, case):
         assert _body(stranger)["total"] == 0 and _body(owner)["total"] > 0, (case, owner[2][:200])
 
 
-def test_the_owner_only_brief_answers_members_like_a_missing_target(members):
-    """면제한 브리프(패널 편성 · 토큰 발급)는 주인만이다 — 구성원은 없는 대상과 같은 404 를 받고 패널 · 토큰이 서지 않는다."""
+def test_the_brief_is_a_write_that_editors_get_and_viewers_do_not(members):
+    """면제한 브리프(패널 편성 · 토큰 발급)는 쓰기 문이다(MB-14) — 편집자는 주인과 같은 답(이 카드 대조 대상은 422 웹 전용)이고, 보기는 403
+    role_insufficient, 남은 없는 대상과 같은 404 다. 보기 · 남의 부름은 패널 · 토큰을 세우지 않는다."""
     store, ids = members
     before = [dict(r) for r in store.query("SELECT id, status, brief_token_hash FROM rr_panels ORDER BY id")]
     owner = _answer(lambda: routes.get_brief(ids["target"], ident=factories.ident(OWNER)))
-    missing = _answer(lambda: routes.get_brief("no-such-target", ident=factories.ident(VIEWER)))
     assert owner[1] != 404, owner                              # 카드 대조 대상이라 주인은 422(웹 전용)다 — 404 가 아니다
-    for who in MEMBERS:
-        got = _answer(lambda who=who: routes.get_brief(ids["target"], ident=factories.ident(who)))
-        assert (got[0], got[1], got[2].replace(ids["target"], "<t>")) == (
-            missing[0], missing[1], missing[2].replace("no-such-target", "<t>")), (who, got[:3])
+    editor = _answer(lambda: routes.get_brief(ids["target"], ident=factories.ident(EDITOR)))
+    assert (editor[0], editor[1]) == (owner[0], owner[1]), editor[:3]
+    viewer = _answer(lambda: routes.get_brief(ids["target"], ident=factories.ident(VIEWER)))
+    assert (viewer[0], viewer[1]) == ("role_insufficient", 403), viewer[:3]
+    missing = _answer(lambda: routes.get_brief("no-such-target", ident=factories.ident(OTHER)))
+    theirs = _answer(lambda: routes.get_brief(ids["target"], ident=factories.ident(OTHER)))
+    assert (theirs[0], theirs[1], theirs[2].replace(ids["target"], "<t>")) == (
+        missing[0], missing[1], missing[2].replace("no-such-target", "<t>")), theirs[:3]
     assert [dict(r) for r in store.query("SELECT id, status, brief_token_hash FROM rr_panels ORDER BY id")] == before
 
 
@@ -157,10 +165,10 @@ def test_member_refs_resolve_in_the_snapshot_and_diff_scope(members):
 
 
 # ---------------------------------------------------------------- MCP 읽기 도구
-def test_every_mcp_tool_is_a_member_read_an_owner_only_read_or_a_write():
-    """MCP 도구 == 읽기 ∪ 주인만 ∪ 쓰기 ∪ 남 시험의 면제(인자 없는 목록 · 어휘) — 새 도구는 이 셋 가운데 하나로 들어와야 한다."""
-    names = set(MCP_READS) | set(MCP_OWNER_ONLY) | set(MCP_WRITES)
-    assert len(names) == len(MCP_READS) + len(MCP_OWNER_ONLY) + len(MCP_WRITES)
+def test_every_mcp_tool_is_a_member_read_an_exempt_read_or_a_write():
+    """MCP 도구 == 읽기 ∪ 면제 ∪ 쓰기 ∪ 남 시험의 면제(인자 없는 목록 · 어휘) — 새 도구는 이 셋 가운데 하나로 들어와야 한다."""
+    names = set(MCP_READS) | set(MCP_MEMBER_EXEMPT) | set(MCP_WRITES)
+    assert len(names) == len(MCP_READS) + len(MCP_MEMBER_EXEMPT) + len(MCP_WRITES) and all(MCP_MEMBER_EXEMPT.values())
     assert names == set(MCP_CASES) and not names & set(MCP_EXEMPT)
 
 

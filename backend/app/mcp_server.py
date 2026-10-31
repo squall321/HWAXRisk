@@ -517,16 +517,18 @@ def risk_claims_for_ref(ref: Annotated[str, Field(description=_A_REF)],
 def risk_get_brief(target_key: Annotated[str, Field(description=_A_BRIEF_TARGET)],
                    brief_token: Annotated[str, Field(description=_A_BRIEF_TOKEN)],
                    tier: Annotated[str, Field(description=_A_BRIEF_TIER)] = "B") -> dict:
-    """토큰의 패널 브리프 1건 조회(panels[0].delib_opts.evidence 가 근거 E0~E9 이고 항목의 result_chars 는 옮겨 적기 대조용 원문 길이, 옛 한도에 잘린 것은 brief_clipped·brief_notice) — 열쇠는 brief_token 이고 결과를 낼 수 있는 신원(게이트웨이 위임으로 확인된 그 패널 소유자)에게만 열며 tier='A' 는 웹 전용."""
+    """토큰의 패널 브리프 1건 조회(panels[0].delib_opts.evidence 가 근거 E0~E9 이고 항목의 result_chars 는 옮겨 적기 대조용 원문 길이, 옛 한도에 잘린 것은 brief_clipped·brief_notice) — 열쇠는 brief_token 이고 결과를 낼 수 있는 신원(게이트웨이 위임으로 확인된 그 대상 과제의 주인 · 편집자)에게만 열며 tier='A' 는 웹 전용."""
     if tier == "A":
         return {"error": "tier_a_web_only"}
 
     def call() -> dict:
         # 토큰의 쓰임은 이 신원의 결과 제출(risk_submit_panel_result)뿐이다 — 제출이 거절될 신원이면 동결·패널 품질을 쓰기 전에
         # 제출과 같은 코드로 거절한다. 종전에는 토큰만 대조해 브리프를 내주고, 몇 시간 심의 뒤 제출에서야 거절됐다(RV-1).
-        owner_sub = entry.require_delegate(routes.mcp_identity(_request()))
-        # 그다음은 UI·REST 가 발급한 토큰 대조다 — 불일치·만료는 {error:'brief_token_invalid'}(§8.2.5), 남의 패널 토큰은 E404.
-        return routes.brief_by_token(target_key, brief_token, tier, owner_sub=owner_sub)
+        ident = routes.mcp_identity(_request())
+        entry.require_delegate(ident)
+        # 그다음은 UI·REST 가 발급한 토큰 대조다 — 불일치·만료는 {error:'brief_token_invalid'}(§8.2.5), 결과를 낼 수 없는 신원(남)의 패널
+        # 토큰은 E404 · 보기는 role_insufficient(제출과 같은 문 — 그 대상 과제의 주인 · 편집자, MB-14).
+        return routes.brief_by_token(target_key, brief_token, tier, writer=ident)
 
     return _guarded(call)
 
@@ -543,11 +545,14 @@ def risk_submit_panel_result(
     model: Annotated[str | None, Field(description=_A_MODEL)] = None,
     evidence_omitted: Annotated[list[dict] | None, Field(description=_A_OMITTED)] = None,
 ) -> dict:
-    """패널 결과 제출(REST POST /api/panels/{id}/complete 와 같은 함수, 게이트웨이 위임으로 확인된 그 패널 소유자만 낸다, actor 는 미검증 표기, evidence_omitted=[{source,text}] 는 좌석에 못 간 근거)."""
+    """패널 결과 제출(REST POST /api/panels/{id}/complete 와 같은 함수, 게이트웨이 위임으로 확인된 그 대상 과제의 주인 · 편집자만 낸다, actor 는 미검증 표기, evidence_omitted=[{source,text}] 는 좌석에 못 간 근거)."""
     def call() -> dict:
         # 소유권은 도달한 위임 신원이 정한다 — 자칭 actor 를 열쇠로 쓰면 남이 actor=<소유자> 로 남의 패널을 종결한다(SEC-5).
-        owner_sub = entry.require_delegate(routes.mcp_identity(_request()))
-        routes._panel_row(panel_id, owner_sub)       # 남의 패널은 없는 패널과 같다 — 종류도 말하지 않는다(남 숨김 훑기)
+        ident = routes.mcp_identity(_request())
+        entry.require_delegate(ident)
+        # 그 대상 과제의 주인 · 편집자가 낸다(웹 제출과 같은 문 — MB-14). 남의 패널은 없는 패널과 같다 — 종류도 말하지 않는다(남 숨김 훑기).
+        owner_sub = routes._panel_writer(panel_id, ident)
+        routes._panel_row(panel_id, owner_sub)
         # 쟁점 패널(M3 S3-7)은 웹 러너가 돌리고 고쳐 다시 내는 것도 웹·REST 다 — Claude 에서는 지켜본다(risk_get_issues).
         if routes.panel_kind(panel_id) == "issue":
             return {"error": "issue_panel_web_only",

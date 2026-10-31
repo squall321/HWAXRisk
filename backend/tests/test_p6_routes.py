@@ -19,7 +19,8 @@ CK_A = "ck:aaaaaaaaaaaa"
 
 def _ident(email: str | None = OWNER):
     # 웹 화면 신원(쿠키)의 모양 — 등록부 status 의 감사 행이 source 로 입구를 가른다(사용자 결정 10-31).
-    return type("I", (), {"anonymous": email is None, "email": email, "source": "cookie",
+    # role 칸은 진짜 Identity 에 늘 있다 — 쓰기 문(routes._writer)이 관리자 우회를 볼 때 읽는다(MB-14).
+    return type("I", (), {"anonymous": email is None, "email": email, "role": None, "source": "cookie",
                           "to_dict": lambda self: {"email": email}})()
 
 
