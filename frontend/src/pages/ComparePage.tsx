@@ -14,6 +14,7 @@ import { SameAsResolver } from "../components/SameAsResolver";
 import { Banner, Button, FormField, FormGrid, Mono, PageHeader, Select, SubPanel } from "../ui/primitives";
 import { fmtCell, fmtEpoch } from "../format";
 import {
+  caveatTitle,
   diffRows,
   ecadComparabilityLine,
   excludedCounts,
@@ -256,7 +257,7 @@ function DiffView({
       nowrap: true,
       cell: (d) =>
         d.caveat ? (
-          <Badge tone="warn" title={d.caveat === "parser_differs" ? "ECAD 어댑터 세대가 달라 등급을 한 단계 낮췄습니다." : d.caveat}>
+          <Badge tone="warn" title={caveatTitle(d, doc.data?.comparability) ?? undefined}>
             {d.caveat === "parser_differs" ? "파서 세대 다름" : d.caveat}
           </Badge>
         ) : (

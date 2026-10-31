@@ -144,6 +144,22 @@ test("'파서 세대 다름' — parity 가 정말 false 일 때만(모름은 �
   assert.deepEqual(cmp.parityWord(null), { tone: "muted", label: "모름" });
 });
 
+test("caveat 말 — parser_differs 의 까닭을 행마다 비교 가능성에서 고른다(ECAD 말을 MCAD 행에 붙이지 않는다)", () => {
+  const mcadItem = { caveat: "parser_differs", isEcad: false, layer: "parametric" };
+  const ecadEvent = { caveat: "parser_differs", isEcad: true, layer: "semantic" };
+  const appDiffers = { app_version_parity: false, adapter_parity: true, ecad: { adapter_parity: true } };
+  assert.equal(cmp.caveatTitle(mcadItem, appDiffers), "소스 앱 판이 다름 — 이 변화의 일부가 파서 차이일 수 있습니다.");
+  assert.doesNotMatch(cmp.caveatTitle(mcadItem, appDiffers), /ECAD/);
+  // 두 출처가 겹쳐도 MCAD 행에는 ECAD 까닭을 붙이지 않는다.
+  const both = { app_version_parity: false, adapter_parity: true, ecad: { adapter_parity: false } };
+  assert.equal(cmp.caveatTitle(mcadItem, both), "소스 앱 판이 다름 — 이 변화의 일부가 파서 차이일 수 있습니다.");
+  const ecadOnly = { app_version_parity: true, adapter_parity: true, ecad: { adapter_parity: false } };
+  assert.equal(cmp.caveatTitle(ecadEvent, ecadOnly), "ECAD 어댑터 세대가 다름 — 이 사건의 신뢰 등급을 한 단계 낮췄습니다.");
+  assert.match(cmp.caveatTitle(mcadItem, null), /^두 스냅샷의 파서 세대가 다름/);
+  assert.equal(cmp.caveatTitle({ caveat: "other_note", isEcad: false, layer: "structural" }, appDiffers), "other_note");
+  assert.equal(cmp.caveatTitle({ caveat: null, isEcad: false, layer: "structural" }, appDiffers), null);
+});
+
 test("diff 3층을 한 표 줄로 — ECAD 노드 변화와 그 dn 의 파라메트릭 · 사건은 ECAD 항목이다", () => {
   const doc = {
     structural: {

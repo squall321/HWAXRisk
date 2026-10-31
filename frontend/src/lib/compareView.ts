@@ -73,6 +73,26 @@ export function parserGenerationNote(comp: Partial<Comparability> | null | undef
     : "파서 세대가 같습니다.";
 }
 
+/**
+ * 항목 · 사건의 caveat 말. `parser_differs` 는 출처가 둘이다(diff.py) — 소스 앱 판 · 어댑터 세대가 다르면 **모든** 항목 · 사건에, ECAD
+ * 어댑터 세대만 다르면 ECAD 항목 · 사건에만 붙는다. 그래서 그 행의 까닭을 비교 가능성에서 골라 말한다(ECAD 말을 MCAD 행에 붙이지 않는다).
+ * 등급을 낮추는 것은 사건이다(항목은 표지만 붙는다). 다른 caveat 는 서버 글자 그대로다.
+ */
+export function caveatTitle(
+  row: Pick<DiffRow, "caveat" | "isEcad" | "layer">,
+  comp: Partial<Comparability> | null | undefined,
+): string | null {
+  if (row.caveat !== "parser_differs") return row.caveat;
+  const parts: string[] = [];
+  if (comp?.app_version_parity === false) parts.push("소스 앱 판이 다름");
+  if (comp?.adapter_parity === false) parts.push("어댑터 세대가 다름");
+  if (row.isEcad && comp?.ecad?.adapter_parity === false) parts.push("ECAD 어댑터 세대가 다름");
+  const why = parts.length > 0 ? parts.join(" · ") : "두 스냅샷의 파서 세대가 다름";
+  return row.layer === "semantic"
+    ? `${why} — 이 사건의 신뢰 등급을 한 단계 낮췄습니다.`
+    : `${why} — 이 변화의 일부가 파서 차이일 수 있습니다.`;
+}
+
 /** parity 한 칸의 표기 — true 같음 · false 다름 · null 모름(잴 입력이 없었다). */
 export function parityWord(value: boolean | null | undefined): { tone: "ok" | "bad" | "muted"; label: string } {
   if (value === true) return { tone: "ok", label: "같음" };
