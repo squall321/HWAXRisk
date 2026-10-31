@@ -5846,6 +5846,39 @@ CURATION_AUDIT_SCOPE: dict[str, str] = {"label_match": "finding", "pattern_candi
 CURATION_LIMIT_MAX = 200
 
 
+# recall_eligible 한 칸에 격리의 까닭이 둘이다 — 의심 문구(plan §3.4.1, claim 마다 항목)와 미검증 신원(B28, 패널마다 항목). 한 항목의 승인은
+# 제 격리만 풀고, 다른 격리가 남은 finding 은 되돌리지 않는다(BL-9). 아래 둘은 그 격리가 아직 걸려 있는지를 큐에서 다시 읽는다 — `settled`
+# 는 지금 승인하는 항목의 id 라 승인된 것으로 본다. 항목마다 가장 최근 것이 그 자리의 결정이다(기각 뒤 재제출로 다시 선 항목이 이긴다).
+def _actor_hold(store: Any, panel_id: str | None, owner_sub: str, settled: str) -> bool:
+    """그 패널의 원자에 미검증 신원 격리가 남아 있나 — 그 패널의 가장 최근 미검증 신원 항목이 열려 있거나 기각(격리 유지)됐으면 남아
+    있다. 항목이 없는 패널(웹 길 · 격리를 끈 박스)은 걸려 있지 않다."""
+    if not panel_id:
+        return False
+    row = store.query_one(
+        "SELECT id, status FROM rr_curation_queue WHERE kind = 'suspect_text' AND owner_sub = ?"
+        " AND json_extract(payload_json, '$.reason') = ? AND json_extract(payload_json, '$.panel_id') = ?"
+        " ORDER BY created_at DESC, rowid DESC LIMIT 1", (owner_sub, ACTOR_UNVERIFIED, panel_id))
+    return row is not None and row["id"] != settled and row["status"] != "done"
+
+
+def _suspect_hold(store: Any, finding: Mapping[str, Any], owner_sub: str, settled: str) -> bool:
+    """그 finding 에 의심 문구 격리가 남아 있나 — 지금 본문의 글을 가리키는 그 claim 의 가장 최근 의심 문구 항목이 열려 있거나 기각됐으면,
+    또는 본문이 지금 인젝션 어휘에 걸리는데 그 글(sha1)을 승인한 항목이 없으면 남아 있다. 같은 sha1 의 항목이 이미 열려 있어 제 항목이
+    서지 않은 원자도 그래서 격리로 남는다(승인할 항목이 없다 — 미검증 신원 승인이 인젝션 글을 회수로 되돌리지 않게)."""
+    atom = _loads(finding["finding_json"], {}) or {}
+    current = narrative.suspect_field_shas(atom)
+    items = [("done" if row["id"] == settled else str(row["status"]), str(_loads(row["payload_json"], {}).get("sha1") or ""))
+             for row in store.query(
+                 "SELECT id, status, payload_json FROM rr_curation_queue WHERE kind = 'suspect_text' AND owner_sub = ?"
+                 " AND json_extract(payload_json, '$.claim_uid') = ? ORDER BY created_at DESC, rowid DESC",
+                 (owner_sub, finding["claim_uid"]))]
+    items = [(status, sha1) for status, sha1 in items if sha1 in current]          # 재제출로 바뀐 옛 글의 항목은 뺀다
+    if items and items[0][0] != "done":
+        return True
+    hit = narrative.suspect_hit(atom)
+    return hit is not None and (("done", hit["sha1"]) not in items)
+
+
 def _bump_minor(version: str) -> str:
     """`1.0` → `1.1` — 택소노미 마이너 승급(이전 값은 결정 기록에 남는다, plan §7.7)."""
     try:
@@ -5923,20 +5956,30 @@ def put_curation(queue_id: str, body: CurationDecisionBody,
             # approve 는 원문 복원 + 회수 복귀, approve_recall 은 회수 복귀만이다(plan §3.4.1). 의심 문구 항목은 그 claim 의 finding 을,
             # 미검증 신원 항목(B28)은 그 패널의 원자(finding · 성격 진술)를 되돌린다. 카드 대조 finding 은 회수 자격을 올리지 않는다
             # (M2.md 5절 #9 — 형식 승인 전 산출이 다른 과제의 선례·통계로 새지 않게, R3B-8). 그것을 여는 일은 M3 의 형식 승인 뒤 일괄 절차다.
+            # 이 항목이 푸는 격리 말고 다른 격리(의심 문구 · 미검증 신원)가 남은 finding 은 되돌리지 않고 applied.held 에 까닭과 함께 싣는다
+            # (BL-9) — 그 격리의 항목을 승인할 때 돌아간다. 성격 진술에는 의심 문구 격리가 없다.
             panel_key = str(payload.get("panel_id") or "") if actor_item else ""
             column, key = ("panel_id", panel_key) if actor_item else ("claim_uid", str(payload.get("claim_uid") or ""))
-            restored = 0
-            if key:
-                restored = int(store.execute(
-                    f"UPDATE rr_findings SET recall_eligible = 1, updated_at = ? WHERE {column} = ? AND owner_sub = ?"
-                    # 카드 대조 거름 그대로(M3 S3-4) — 카드 대조 finding 이 걸릴 수 없는 자리다(사람 finding 순번·의심 문구 회수)
-                    " AND COALESCE(source_kind, '') <> 'card_review'",
-                    (now_epoch(), key, owner_sub)) or 0)
+            found = store.query(
+                f"SELECT finding_id, claim_uid, panel_id, finding_json FROM rr_findings WHERE {column} = ? AND owner_sub = ?"
+                # 카드 대조 거름 그대로(M3 S3-4) — 카드 대조 finding 이 걸릴 수 없는 자리다(사람 finding 순번·의심 문구 회수)
+                " AND COALESCE(source_kind, '') <> 'card_review' ORDER BY finding_id", (key, owner_sub)) if key else []
+            restored, held = 0, []
+            for finding in found:
+                hold = ("suspect_text" if _suspect_hold(store, finding, owner_sub, queue_id)
+                        else ACTOR_UNVERIFIED if _actor_hold(store, finding["panel_id"], owner_sub, queue_id) else None)
+                if hold is not None:
+                    held.append({"claim_uid": finding["claim_uid"], "reason": hold})
+                    continue
+                restored += int(store.execute("UPDATE rr_findings SET recall_eligible = 1, updated_at = ? WHERE finding_id = ?",
+                                              (now_epoch(), finding["finding_id"])) or 0)
             applied = {"findings_recalled": restored}
             if actor_item:
                 applied["characters_recalled"] = int(store.execute(
                     "UPDATE rr_character SET recall_eligible = 1, updated_at = ? WHERE id LIKE ? AND owner_sub = ?",
                     (now_epoch(), f"{panel_key}#%", owner_sub)) or 0) if panel_key else 0
+            if held:
+                applied["held"] = held
             if body.decision == "approve":
                 applied = {"restored_text": payload.get("raw"), "sha1": payload.get("sha1"), **applied}
         if kind == "unclassified_code" and body.decision in ("map", "new"):
