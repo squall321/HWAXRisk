@@ -521,6 +521,47 @@ def test_a_stream_is_closed_when_the_runner_says_the_job_was_stopped(tmp_path):
     assert _engine(tmp_path, handler).run({"question": "q"}, should_stop=lambda: None)["decision_text"] == "결정문"
 
 
+# 엔진 쪽 심의를 사람이 멈췄을 때 에이전트 서버가 내는 꼴 그대로다(HWAXAgentServer app._detach_stream — 멈춤 사건 delib kind=cancelled 와 done,
+# error 는 없다). 포털 화면의 '멈춤'(POST /agent/deliberate/cancel — 대화 주인)이나 운영의 루프백 호출(POST /deliberate/cancel)이 낸다.
+CANCELLED_STREAM = (
+    'event: delib\ndata: {"kind": "stage", "stage": "r1", "run_id": "0a1b2c3d4e5f6a7b"}\n\n'
+    'event: delib\ndata: {"kind": "personas", "personas": [{"key": "xd-a0", "origin": "primary"}]}\n\n'
+    'event: delib\ndata: {"kind": "turn", "round": 1, "persona": "xd-a0", "say": "간극이 좁다", "stance": "oppose"}\n\n'
+    + 'event: delib\ndata: %s\n\n' % json.dumps(
+        {"kind": "cancelled", "by": "owner@example.com", "run_id": "0a1b2c3d4e5f6a7b",
+         "message": "사람이 멈췄다 — 의장이 결정문을 내기 전에 멈춰 이 단의 결정문 · 보고서는 없다"}, ensure_ascii=False)
+    + "event: done\ndata: {}\n\n"
+)
+
+
+def test_a_deliberation_stopped_on_the_engine_side_is_a_cancelled_stream_not_a_finished_panel(tmp_path):
+    """엔진 쪽에서 사람이 멈춘 심의(delib kind=cancelled 뒤 done — error 는 없다)는 결정문 없이 끝난 패널이 아니다.
+
+    종전에는 멈춤 사건을 모르고 done 에서 끊어 성공으로 돌려줬다 — 러너는 빈 결정문을 그대로 원장에 앉혀 패널을 done 으로
+    닫았다(HWAXPortal A24 검토). 이제는 앱이 스트림을 놓은 것과 같은 부류(`EngineStreamLost('cancelled')`)로 올린다 — 좌석을 차감하지
+    않고 잡을 멈춘다. 다른 점은 엔진이 그 심의를 더 돌리지 않는다는 것이다.
+    """
+    with pytest.raises(EngineStreamLost) as lost:
+        engine_client.collect_stream(engine_client.parse_sse(CANCELLED_STREAM.splitlines()))
+    assert lost.value.code == "cancelled" and lost.value.conv_id is None
+    said = str(lost.value)
+    assert said.startswith("cancelled: 엔진 쪽 심의를 사람이 멈췄다(owner@example.com)"), said
+    assert "결정문 없이 닫혔다" in said and "엔진은 이 심의를 더 돌리지 않는다" in said
+    assert "계속 돌 수 있다" not in said
+
+    # 포털 경로로 받으면 그 심의의 대화를 싣는다(끊기기 전까지의 발언이 거기 있다)
+    _service_pat(tmp_path)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/agent/conversations":
+            return httpx.Response(200, json={"id": "conv-5"})
+        return httpx.Response(200, text=CANCELLED_STREAM, headers={"content-type": "text/event-stream"})
+
+    with pytest.raises(EngineStreamLost) as lost:
+        _engine(tmp_path, handler).run({"question": "q"})
+    assert lost.value.code == "cancelled" and lost.value.conv_id == "conv-5"
+
+
 PING = 'event: ping\ndata: {"idle_s": 15, "ts": 1}\n\n'
 
 

@@ -571,6 +571,35 @@ def test_lost_streams_do_not_count_toward_the_engine_fail_streak(risk_store, tmp
     assert (lost["conv_id"], lost["retry"]) == ("conv-7", 0)
 
 
+def test_a_panel_whose_deliberation_was_stopped_on_the_engine_side_closes_cancelled_not_done(risk_store, tmp_path):
+    """포털 화면의 '멈춤'(대화 주인)이나 운영의 루프백 호출이 리스크 패널의 심의를 엔진 쪽에서 멈추면, 러너가 아직 읽고 있던 그 패널은
+    결정문 없는 done 이 아니라 cancelled 로 닫힌다 — 좌석은 차감하지 않고(pending · retry 0) 잡은 멈춘다(사람이 재개한다).
+
+    종전에는 스트림이 멈춤 사건과 done 으로 끝나 성공으로 읽혀, 빈 결정문이 원장에 앉고 패널이 done 으로 닫혔다(HWAXPortal A24 검토).
+    """
+    target_key = _seed(risk_store)
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+    seen: dict = {}
+    engine = _portal_engine(risk_store, cfg, seen, _sse(
+        ("delib", {"kind": "stage", "stage": "r1", "run_id": "0a1b2c3d4e5f6a7b"}),
+        ("delib", {"kind": "turn", "round": 1, "persona": "mech-a000", "say": "간극이 좁다", "stance": "oppose"}),
+        ("delib", {"kind": "cancelled", "by": OWNER, "run_id": "0a1b2c3d4e5f6a7b",
+                   "message": "사람이 멈췄다 — 의장이 결정문을 내기 전에 멈춰 이 단의 결정문 · 보고서는 없다"}),
+        ("done", {})))
+    out = runner.run_panel(risk_store, cfg, engine, runner.claim_next_job(risk_store, cfg))
+    assert out["status"] == "error" and out["error"].startswith(f"cancelled: 엔진 쪽 심의를 사람이 멈췄다({OWNER})"), out
+    panel = risk_store.query_one("SELECT status, error, retry, conv_id, decision_text FROM rr_panels WHERE id = ?",
+                                 (out["panel_id"],))
+    assert (panel["status"], panel["retry"], panel["conv_id"]) == ("error", 0, "conv-1"), dict(panel)
+    assert not panel["decision_text"], "멈춘 심의의 빈 결정문을 원장에 앉혔다"
+    seats = risk_store.query("SELECT status, retry FROM rr_coverage WHERE target_key = ?", (target_key,))
+    assert {(r["status"], r["retry"]) for r in seats} == {("pending", 0)}, "멈춘 심의로 좌석을 차감했다"
+    assert runner._error_streak(risk_store, target_key) == 0
+    job = risk_store.query_one("SELECT state, error FROM rr_jobs WHERE id = ?", (job_id,))
+    assert job["state"] == "paused" and job["error"].endswith("재개하면 이어 돈다"), dict(job)
+
+
 # ---------------------------------------------------------------- 포털 429(동시 실행 자리 없음) 대기(plan §6.7.2 6단계)
 class _Clock:
     """러너의 `time` 을 대신하는 가짜 시계 — sleep 은 자지 않고 monotonic 만 민다(대기 예산은 monotonic 으로 잰다)."""

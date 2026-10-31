@@ -179,7 +179,8 @@ def collect_stream(frames: Iterable[tuple[str, dict]]) -> dict:
     """심의 SSE 프레임을 러너 계약 dict 로 모은다(plan §6.7.2 7단계 표).
 
     반환 {decision_text, turns, events, report_id, pat_degraded}. `error` 프레임은 EngineError 로 올린다 — 의장이
-    결정문을 못 낸 것(NO_DECISION_CODES)은 그때까지 받은 것을 실은 EngineNoDecision 으로 가른다.
+    결정문을 못 낸 것(NO_DECISION_CODES)은 그때까지 받은 것을 실은 EngineNoDecision 으로 가른다. 엔진 쪽에서 사람이 멈춘 심의(delib
+    kind=cancelled — error 없이 done 으로 닫힌다)는 EngineStreamLost('cancelled') 다.
 
     자르지 않는다(WP1 S13 · 사용자 지침 가). 발언은 엔진이 줄이기 전의 원문(`say_full`)을 받는다 — `say` 는 회의 버블용으로
     줄인 글이라 뒤쪽 인용이 좌석 원장에서 사라졌다(R-63). 엔진이 '못 실었다' 고 알린 사유와 고칠 설정(`knob`)도 통째로
@@ -240,6 +241,13 @@ def collect_stream(frames: Iterable[tuple[str, dict]]) -> dict:
                 decision_text = str(data.get("text") or "")
             elif kind == "outcome":
                 report_id = data.get("report_id")
+            elif kind == "cancelled":
+                # 사람이 엔진 쪽 심의를 멈췄다(에이전트 서버 POST /deliberate/cancel — 포털 화면의 '멈춤'(대화 주인) 또는 운영의 루프백 호출).
+                # 뒤에는 done 만 오고 error 는 없다 — 성공으로 돌려주면 러너가 빈 결정문을 원장에 앉혀 패널을 done 으로 닫는다(HWAXPortal
+                # docs/leftovers-1017 triage A24 검토). 앱이 스트림을 놓은 것과 같은 부류로 올린다(좌석 차감 없음 · 잡 멈춤 — 사람이 재개한다).
+                # 다른 점은 엔진이 이 심의를 더 돌리지 않는다는 것이다. 그 심의의 대화는 run 이 싣는다.
+                raise EngineStreamLost("cancelled", f"엔진 쪽 심의를 사람이 멈췄다({_text(data.get('by')) or '누군지 모름'}) — 결정문 "
+                                                    "없이 닫혔다. 엔진은 이 심의를 더 돌리지 않는다")
         elif name == "result":
             if isinstance(data.get("content"), str):
                 result_text = data["content"]
@@ -475,6 +483,10 @@ class PortalPanelEngine:
             raise
         except EngineNoDecision as exc:
             exc.conv_id = conv_id                  # 그 심의의 발언 전부가 남은 포털 대화다
+            raise
+        except EngineStreamLost as exc:
+            if exc.conv_id is None:                # 엔진 쪽 멈춤(collect_stream) — 멈추기 전까지의 발언이 남은 포털 대화다
+                exc.conv_id = conv_id
             raise
         except httpx.ReadTimeout as exc:
             raise watch.lost(

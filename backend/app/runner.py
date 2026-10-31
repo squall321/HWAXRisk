@@ -170,7 +170,8 @@ class EngineStreamLost(EngineError):
 
     엔진이 실패한 것이 아니다. 엔진은 심의를 분리 태스크로 돌려 구독이 끊겨도 끝까지 간다 — 그래서 패널은
     error 로 닫되 좌석 재시도와 연속 실패에 세지 않고 잡을 멈춘다(run_panel). `conv_id` 는 그 심의의 포털
-    대화다(끊긴 뒤의 발언은 거기에만 남는다).
+    대화다(끊긴 뒤의 발언은 거기에만 남는다). 'cancelled' 는 엔진 쪽 멈춤이기도 하다 — 사람이 포털 화면의 '멈춤'이나 운영 창구로
+    그 심의를 멈췄다(engine_client.collect_stream 이 멈춤 사건에서 올린다). 그때는 엔진도 그 심의를 더 돌리지 않는다.
     """
 
     def __init__(self, code: str, message: str, *, conv_id: str | None = None) -> None:
