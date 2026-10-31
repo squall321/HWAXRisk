@@ -38,6 +38,8 @@ import {
   VerdictBadge,
 } from "../components/Badge";
 import { PanelTranscript } from "../components/PanelTranscript";
+import { seatActions, seatReasonLabel, skipReasonProblem } from "../lib/targetView";
+import { JobSignalLine, ReviewWorkers } from "../components/JobSignals";
 import {
   Banner, Button, FormField, FormGrid, Input, Mono, PageHeader, Select, SubPanel, TabBar, TabPanel,
 } from "../ui/primitives";
@@ -120,13 +122,110 @@ function RefPeek({ value }: { value: string }) {
   );
 }
 
-function CoverageHeatmap({ coverage, targetKey }: { coverage: Coverage; targetKey: string }) {
+/** 좌석 조작 거절 — 아는 code 는 제목을 고르고 서버 글은 글자 그대로 보인다. */
+function SeatErrorBanner({ error }: { error: unknown }) {
+  if (error === null || error === undefined) return null;
+  if (isApiError(error) && error.code === "role_insufficient") {
+    return <Banner title="편집자 이상만 좌석을 옮깁니다." detail={error.message} />;
+  }
+  if (isApiError(error) && error.code === "E100" && error.status === 409) {
+    return <Banner title="이 좌석은 그렇게 옮길 수 없습니다." detail={error.message} />;
+  }
+  return <ErrorBanner error={error} />;
+}
+
+/**
+ * 좌석 한 줄의 사람 조작(routes.put_coverage) — 넘기기(skipped, 사유 필수)와 carried 되돌리기(pending). 처리 뒤 행에는
+ * status_source 'human' · decided_by 가 남는다(§6.8.2).
+ */
+function SeatActionForm({
+  targetKey,
+  seat,
+  mode,
+  onDone,
+  onCancel,
+}: {
+  targetKey: string;
+  seat: Seat;
+  mode: "skip" | "revert";
+  onDone: (note: string) => void;
+  onCancel: () => void;
+}) {
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  const problem = mode === "skip" ? skipReasonProblem(reason) : null;
+
+  async function send(event: React.FormEvent) {
+    event.preventDefault();
+    if (problem) return;
+    setBusy(true);
+    setError(null);
+    try {
+      const out = await riskApi.putSeat(targetKey, seat.agent_key, {
+        status: mode === "skip" ? "skipped" : "pending",
+        reason: reason.trim() === "" ? undefined : reason.trim(),
+      });
+      onDone(
+        mode === "skip"
+          ? `${out.agent_key} 를 넘겼습니다(skipped) — ${out.decided_by ?? "나"} 의 결정으로 남습니다.`
+          : `${out.agent_key} 를 다시 심사 대기(pending)로 되돌렸습니다.`,
+      );
+    } catch (err) {
+      setError(err);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <form className="mt-3 flex flex-col gap-2 rounded-md border border-border p-3" onSubmit={send}>
+      <SeatErrorBanner error={error} />
+      <p className="m-0 text-sm">
+        <code>{seat.agent_key}</code>{" "}
+        {mode === "skip"
+          ? "을(를) 넘깁니다 — 이 좌석은 이 대상에서 더 심사하지 않고 까닭이 원장에 남습니다."
+          : "을(를) 다시 심사 대기로 되돌립니다 — 이어받은(carried) 의견 대신 새로 심사합니다."}
+      </p>
+      <FormField
+        label={mode === "skip" ? "넘기는 까닭" : "되돌리는 까닭"}
+        hint={mode === "skip" ? "필수" : "선택"}
+        error={reason !== "" && problem ? problem : undefined}
+      >
+        <Input value={reason} onChange={(e) => setReason(e.target.value)} aria-label="좌석 조작 사유" />
+      </FormField>
+      <span className="flex flex-wrap items-center gap-2">
+        <Button type="submit" size="sm" disabled={busy || problem !== null}>
+          {mode === "skip" ? "넘기기" : "되돌리기"}
+        </Button>
+        <Button type="button" variant="ghost" size="sm" onClick={onCancel}>
+          그만두기
+        </Button>
+      </span>
+    </form>
+  );
+}
+
+function CoverageHeatmap({
+  coverage,
+  targetKey,
+  targetKind,
+  onChanged,
+}: {
+  coverage: Coverage;
+  targetKey: string;
+  /** 대상 종류(snap · diff) — 좌석 까닭 ecad_absent 의 뜻이 갈린다(ecad-1031 §9). */
+  targetKind: string;
+  onChanged: () => void;
+}) {
   const [domain, setDomain] = useState<string | null>(null);
   const seats = useAsync(
     (signal) => riskApi.getSeats(targetKey, domain ?? "", { signal }),
     [targetKey, domain],
     domain !== null,
   );
+  const [acting, setActing] = useState<{ seat: Seat; mode: "skip" | "revert" } | null>(null);
+  const [seatNote, setSeatNote] = useState<string | null>(null);
 
   const domains = Object.keys(coverage.by_domain);
   /** 열별 합계 — 도메인 행을 더한 값이다(새 판정이 아니다). */
@@ -137,8 +236,37 @@ function CoverageHeatmap({ coverage, targetKey }: { coverage: Coverage; targetKe
   }
   const seatColumns: Column<Seat>[] = [
     { key: "agent", header: "agent_key", cell: (s) => <code>{s.agent_key}</code>, nowrap: true },
-    { key: "status", header: "status", cell: (s) => <CoverageStatusBadge value={s.status} />, nowrap: true },
-    { key: "reason", header: "reason", cell: (s) => s.reason ?? <Unknown /> },
+    {
+      key: "status",
+      header: "status",
+      nowrap: true,
+      cell: (s) => (
+        <span className="inline-flex items-center gap-1">
+          <CoverageStatusBadge value={s.status} />
+          {s.status_source === "human" ? (
+            <Badge tone="info" title={`${s.decided_by ?? "?"} · ${fmtEpoch(s.decided_at)}`}>
+              사람
+            </Badge>
+          ) : null}
+        </span>
+      ),
+    },
+    {
+      key: "reason",
+      header: "reason",
+      cell: (s) => {
+        if (!s.reason) return <Unknown />;
+        // code 는 그대로 보이고 사람 말을 덧붙인다(ECAD 의존 영역 — 대상 종류마다 뜻이 다르다).
+        const label = seatReasonLabel(s.reason, targetKind);
+        // 까닭 code(snake_case)는 고정폭으로, 사람이 적은 넘김 사유는 글 그대로 보인다.
+        return (
+          <span>
+            {/^[a-z0-9_]+$/.test(s.reason) ? <code>{s.reason}</code> : s.reason}
+            {label ? <span className="text-muted-foreground"> — {label}</span> : null}
+          </span>
+        );
+      },
+    },
     {
       key: "panel",
       header: "panel_id",
@@ -150,6 +278,29 @@ function CoverageHeatmap({ coverage, targetKey }: { coverage: Coverage; targetKe
       header: "opinion_id",
       nowrap: true,
       cell: (s) => (s.opinion_id ? <code>{s.opinion_id}</code> : <Unknown />),
+    },
+    {
+      key: "act",
+      header: "조작",
+      nowrap: true,
+      cell: (s) => {
+        const can = seatActions(s);
+        if (!can.skip && !can.revert) return null;
+        return (
+          <span className="flex flex-wrap items-center gap-1">
+            {can.skip ? (
+              <Button type="button" variant="ghost" size="sm" onClick={() => setActing({ seat: s, mode: "skip" })}>
+                넘기기…
+              </Button>
+            ) : null}
+            {can.revert ? (
+              <Button type="button" variant="ghost" size="sm" onClick={() => setActing({ seat: s, mode: "revert" })}>
+                되돌리기…
+              </Button>
+            ) : null}
+          </span>
+        );
+      },
     },
   ];
 
@@ -234,11 +385,28 @@ function CoverageHeatmap({ coverage, targetKey }: { coverage: Coverage; targetKe
           <h3 className="m-0 text-sm text-muted-foreground">{domain} 좌석</h3>
           <ErrorBanner error={seats.error} onRetry={seats.reload} />
           {seats.loading && !seats.data ? <LoadingBlock /> : null}
+          {seatNote ? <Banner tone="info" live="status" title={seatNote} /> : null}
           {seats.data ? (
             <DataTable columns={seatColumns} rows={seats.data.seats} rowKey={(s) => s.agent_key} empty="좌석이 없습니다." />
           ) : null}
+          {acting ? (
+            <SeatActionForm
+              key={`${acting.seat.agent_key}:${acting.mode}`}
+              targetKey={targetKey}
+              seat={acting.seat}
+              mode={acting.mode}
+              onCancel={() => setActing(null)}
+              onDone={(note) => {
+                setActing(null);
+                setSeatNote(note);
+                seats.reload();
+                onChanged();
+              }}
+            />
+          ) : null}
           <p className="m-0 text-sm text-muted-foreground">
-            좌석 상태 되돌리기 · skipped 사유 입력 경로는 아직 서버에 없습니다.
+            넘기기는 pending · assigned · running · failed 좌석에, 되돌리기는 carried 좌석에만 열립니다. 보류(deferred) 좌석은 보류 풀기로
+            풉니다.
           </p>
         </div>
       ) : null}
@@ -441,6 +609,7 @@ function PanelRunner({ targetKey, coverage, onChanged }: { targetKey: string; co
             { label: "상태", hint: "state", value: <JobStateBadge value={job.state} /> },
             { label: "판단 LLM", hint: "llm", value: <JobLlm job={job} /> },
             { label: "멈춘 까닭", hint: "pause_reason", value: job.pause_reason ?? <Unknown /> },
+            { label: "도는 패널", hint: "signal", value: <JobSignalLine job={job} /> },
             {
               label: "진행",
               hint: "panels_done / panels_total",
@@ -1297,11 +1466,13 @@ export default function TargetPage() {
         <SectionCard title="진행판" subtitle="행 = 도메인, 열 = 커버리지 상태. 행을 누르면 좌석 목록이 열립니다.">
           {coverage.loading && !coverage.data ? <LoadingBlock /> : null}
           {coverage.data ? (
-            <CoverageHeatmap coverage={coverage.data} targetKey={targetKey} />
+            <CoverageHeatmap coverage={coverage.data} targetKey={targetKey} targetKind={kind} onChanged={coverage.reload} />
           ) : coverage.loading ? null : (
             <EmptyBlock title="커버리지가 아직 없습니다." hint="타깃이 편성되면 도메인별 좌석 상태가 여기 쌓입니다." />
           )}
         </SectionCard>
+
+        <ReviewWorkers review={coverage.data?.review} />
 
         <SectionCard title="패널 실행" subtitle={polling ? "진행 중 — 5초마다 갱신합니다." : undefined}>
           <PanelRunner targetKey={targetKey} coverage={coverage.data} onChanged={coverage.reload} />
