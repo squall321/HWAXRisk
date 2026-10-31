@@ -2016,7 +2016,8 @@ export const retryAdopted = sample<CellsDisposed>()({
     "job_id": "24aa4b0cfde648c88587016781ad72df",
     "adopted": 1,
     "waiting": 0,
-    "hold": "consent_extra"
+    "hold": "consent_extra",
+    "signals": []
   },
   "audit_id": "98e5660aa5de458eb0759d08ed0c1fc5"
 });
@@ -2174,6 +2175,7 @@ export const coveragePanelHeld = sample<Coverage>()({
     "panels_total": 1,
     "error": "chair_failed: 의장 실패 — 외부 응답자가 없다 — 설정 EXTERNAL_LLM_WAIT_S — 잡을 멈췄다(보류 external_worker · 좌석 재시도는 차감하지 않았다). 잡 주인의 Claude Code 에서 워크플로 hwax-risk-claude 를 그 사람의 PAT 로 (다시) 돌린 뒤 재개한다",
     "signal": null,
+    "signals": [],
     "llm": "claude",
     "consent_external": {
       "at": 1793442339,
@@ -2262,6 +2264,7 @@ export const coveragePanelCancelledAfterHold = sample<Coverage>()({
     "panels_total": 1,
     "error": null,
     "signal": null,
+    "signals": [],
     "llm": "claude",
     "consent_external": {
       "at": 1793447741,
@@ -2987,6 +2990,8 @@ export const coverageJobRunning = sample<NonNullable<CoverageJob>>()({
   "tier": "A",
   "state": "running",
   "pause_reason": null,
+  "hold_code": null,
+  "hold_until": null,
   "panels_done": 0,
   "panels_total": 1,
   "error": null,
