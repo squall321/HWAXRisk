@@ -1651,7 +1651,22 @@ def add_source(project_id: str, body: SourceBody,
         # StepForge 에는 사용자 격리가 없다 — owner 칸도 per_user_sso 도 없어 게이트웨이를 지나는 호출자 전원이 같은 /data 를
         # 본다(2026-08-31 실측). 그래서 남의 프로젝트도 붙일 수 있고, 이 앱이 세울 경계는 이 경고와 classification 필수뿐이다(plan §2.13.3).
         out["warnings"] = ["stepforge_no_isolation"]
+    duplicates = _source_duplicates(ref_key, project_id, owner_sub)
+    if duplicates:
+        out["duplicate_of"] = duplicates
     return out
+
+
+def _source_duplicates(ref_key: str, project_id: str, email: str) -> list[dict]:
+    """같은 원천(`ref_key`)이 붙은 다른 과제 — 등록은 막지 않고 알린다(plan §8.2.3 `duplicate_of` — 같은 CAD 를 두 관점으로 심사하는
+    것이 정당할 수 있다). 부른 사람이 구성원(소유 · 멤버)인 과제만 싣는다 — 남의 과제는 목록에도 수로도 드러내지 않는다(context-notes
+    D45 '구성원은 하나'). `created_at` 은 그 과제에 그 원천이 붙은 시각이다."""
+    rows = get_store().query(
+        "SELECT s.project_id, p.code, p.owner_sub, s.created_at FROM rr_sources s JOIN rr_projects p ON p.id = s.project_id"
+        " WHERE s.ref_key = ? AND s.project_id <> ?"
+        " AND (p.owner_sub = ? OR p.id IN (SELECT project_id FROM rr_project_members WHERE email = ?))"
+        " ORDER BY s.created_at, s.project_id", (ref_key, project_id, email, email))
+    return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------- ECAD 보드(ODB 허브 job_id, 포털 docs/design-risk-review/ecad-1031 ER-01)

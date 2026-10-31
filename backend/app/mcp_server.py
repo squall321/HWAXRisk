@@ -621,7 +621,7 @@ async def risk_add_source(project_id: Annotated[str, Field(description=_A_PROJEC
                           ref: Annotated[dict, Field(description=_A_SOURCE_REF)],
                           app_key: Annotated[str | None, Field(description=_A_APP_KEY)] = None,
                           bridge_declared: Annotated[bool, Field(description=_A_BRIDGE)] = False) -> dict:
-    """과제에 소스 연결 — 쓰기: 어느 과제에 어떤 소스를 붙일지 사용자에게 확인한 뒤 부른다, kind=mcad ref={stepforge_project_id, detect_job_id?}(StepForge) · dyna ref={session_id, file_id}(DynaForge, 본인 세션) · dyna_result ref={report_ids[]}, 같은 소스는 기존 행을 돌려주고 같은 kind 의 다른 소스는 거절한다(캡처는 종류마다 하나만 읽고 소스는 지울 수 없다)."""
+    """과제에 소스 연결 — 쓰기: 어느 과제에 어떤 소스를 붙일지 사용자에게 확인한 뒤 부른다, kind=mcad ref={stepforge_project_id, detect_job_id?}(StepForge) · dyna ref={session_id, file_id}(DynaForge, 본인 세션) · dyna_result ref={report_ids[]}, 같은 소스는 기존 행을 돌려주고 같은 kind 의 다른 소스는 거절한다(캡처는 종류마다 하나만 읽고 소스는 지울 수 없다), 내가 구성원인 다른 과제에 같은 소스가 이미 붙어 있으면 막지 않고 duplicate_of[{project_id, code, owner_sub, created_at}] 로 알린다(사용자에게 보인다)."""
     return await _entry(entry.add_source, project_id=project_id, kind=kind, ref=ref, app_key=app_key,
                         bridge_declared=bridge_declared)
 
