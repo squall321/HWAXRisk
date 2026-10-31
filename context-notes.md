@@ -4406,7 +4406,8 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
   'ack 는 stale')을 따랐다.
 - `gates_hash` 를 응답에 싣는다 — ack 칸을 뺀 판정만의 지문(state.gates_hash)이라 ack 로는 바뀌지 않고, ack 라우트가 gates_json 으로 세는 값과
   같다(시험이 같음을 보고 그 값을 실어 다시 ack 해도 409 가 아니다). MCP `risk_get_snapshot(part='state')` 도 같은 함수라 같이 받는다.
-- `GET /sameas` 의 G2 는 그대로 load_state 원문이다(이번 범위 밖 — 그 G2 의 ack 를 읽는 화면이 없다).
+- `GET /sameas` 의 G2 도 지금 ack 를 얹는다(RD-13 에서 고쳤다). 이 줄은 처음에 '그대로 load_state 원문이다(이번 범위 밖 — 그 G2 의 ack 를
+  읽는 화면이 없다)' 였는데 틀렸다 — SameAsResolver 가 그 G2 를 게이트 표로 그리고 배지 · ack 열이 record.ack_by 를 읽는다(반대 검토 10-31).
 
 ### RD-4. 키 대장 읽기 — `GET /part-keys/{ckey}`
 - 경로 꼴 하나만 열었다(`?ckey=` 는 두지 않았다 — 같은 일을 두 길로 열지 않는다). 답은 `{ckey, status, merged_into, display_name, aliases[],
@@ -4482,3 +4483,90 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
   4. 같은 초에 선 두 패널 잡이면 진행판의 `job` 이 uuid 순으로 앞 잡을 고를 수 있다(coverage_payload 의 `ORDER BY created_at DESC LIMIT 1` — FE-22
      끝 3 의 검토 잡과 같은 꼴, 시험을 짜다 났다).
   5. 이번 범위 밖의 청할 것 — FE-14 끝 4(동결 때 요구 대조) · FE-30 끝 2 · 5 · FE-22 끝 1 ~ 4 · 1차 걸음의 셋.
+
+### 화면 읽기 완결 — 반대 검토 고침(10-31)
+
+> 반대 검토가 확인한 지적 다섯(High 1 · Medium 1 · Low 3)을 고쳤다. 다섯 다 스크래치 사본에서 그 검토의 탐침(A ~ H)으로 먼저 재현했고,
+> 고친 뒤 같은 탐침이 반대로 나온다. 커밋 — f560f34(들여오기 · 과제 읽기) · a73f7ca(키 대장 mine) · 956812c(게이트 글) · c1edf3c(대응표 G2) ·
+> 7ac4ea7(닫은 때). routes.py 에서 손댄 함수는 `_project_sources` · `list_projects` · `projects_payload` · `get_project` · `project_role` ·
+> `_with_live_acks` · `get_sameas` · `part_key_payload`(+ `get_part_key` 글) — 같은 때 도는 `wt1031/risk-audit`(`job_action` · `put_verdict` ·
+> `put_registry_status`)와 겹치지 않는다. 그 밖에는 export.py(`import_jsonl` · 새 `_refusal`)와 state.py(새 `gate_line` · `restate_gate_acks`).
+
+### RD-10. 들여오기는 남의 과제에 매달린 줄을 받지 않는다(High — 뿌리는 이 가지 앞, 이 가지가 넓혔다)
+- 재현(탐침 A · D · G, HEAD 77e2525) — 남이 `{table: rr_project_members, row: {project_id: 주인의 과제, owner_sub: 자기, role: owner}}` 한 줄을
+  들여오면 `inserted 1` 이었다(본문 owner_sub 가 부른 사람이면 받았고 project_id 는 보지 않았다). 그 뒤 과제 상세 200(기밀 메타 · 멤버 · 대상) ·
+  목록 my_role owner · 키 대장 200, 스냅샷 · 동결 잡 줄로 주인과 구성원의 스냅샷 머리에 남이 지은 이름 · 판이 섰다. main dbe5f93 에서도 같은
+  행으로 이양이 됐다(남이 과제를 가져가는 길 — 이 가지 앞부터).
+- 고침 — `export._refusal` 이 쓰는 줄(새 행 · 사람 확정 병합 둘 다 — 병합도 부모 열을 고쳐 쓴다)의 부모 열을 본다. 범위 부모(반출 `_select`
+  가 그 줄을 싣는 거름의 차례 — 과제 열 → 대상 열쇠 → 스냅샷(스냅샷 없는 호출 원문은 동결 잡) → 비교의 두 과제 → 비교)는 이 박스에 있고
+  부른 사람 것이어야 하고, 그 밖의 부모 열(base · target · first 의 과제 · 스냅샷, first_target_key, rr_targets.ref_id — kind 로 스냅샷 ·
+  비교)은 있으면 부른 사람 것이어야 한다(제 대상으로 남의 스냅샷을 가리켜 그 상태를 브리프로 읽는 길). 남의 것과 없는 것은 같은 까닭
+  `parent_not_owned` 다 — 있는지를 흘리지 않고, 없는 부모를 받으면 주인이 뒤에 옮겨 올 과제 · 대상 id 에 미리 심어 둘 수 있다(예 —
+  'snap:<스냅샷 id>' 대상의 queued 잡). 같은 들여오기에서 앞서 들어간 부모도 된다 — 줄을 TABLE_ORDER 로 안정 정렬해 쓴다(반출은 이미 그
+  차례다). 멤버 owner 행은 그 과제 주인의 이메일만 받는다(`owner_row_immutable` — put_members 와 같은 규칙). predecessor_project_id 는 보지
+  않는다(D44 — 계보 읽기가 거른다).
+- 읽기 쪽(고침 전에 이미 선 행 몫 — 이제 들여오기로는 못 만든다) — `project_role` 은 owner 를 과제 행의 주인 열에서만 준다(주인 아닌 사람의
+  owner 멤버 행은 역할이 아니다 — 이양 · 상세가 그 행으로 열렸다). 목록 · 카드의 내 역할도 같은 판정이다(멤버 행은 편집자 · 보기만 — RD-2 의
+  '주인 열이 먼저, 아니면 멤버 행' 을 좁혔다). 과제 상세 · 목록은 대상 · 잡처럼 스냅샷 · 소스 · 성격 태그 · 카드의 마지막 스냅샷도 과제 주인의
+  행만 싣고, 스냅샷 머리의 이름은 같은 주인의 동결 잡만 잇는다(RD-1 의 LEFT JOIN — 옮겨 온 스냅샷의 끊긴 잡 id 에 남이 제 과제의 잡 행을
+  들여와 이름을 다는 길이 남는다, 그 들여오기는 제 과제라 받는다). 스냅샷 상태의 ack 행도 그 스냅샷 주인의 것만 얹는다(RD-3 의 새 읽기 —
+  ack 라우트는 주인만 쓴다). `_project_sources` 는 JOIN 으로 고쳐 다른 부르는 곳(MCP 입구 · 동결 · ECAD)도 같다 — 생산자는 소스 행을 과제
+  주인으로만 쓴다(add_source · put_ecad_board 가 주인 검사).
+- 남긴 것 — 고침 전에 선 남의 편집자 · 보기 멤버 행은 아직 역할이다(project_role 뿐 아니라 MCP visible_projects · brief 구성원 · runner 도
+  멤버 행을 그대로 믿는다). 그런 행을 만드는 길은 들여오기뿐이었다. 박스에서 센다 — 생산자(create · put_members · transfer)는 멤버 행의
+  owner_sub 를 늘 과제 주인으로 쓰므로 `SELECT m.project_id, m.email, m.role FROM rr_project_members m JOIN rr_projects p ON p.id = m.project_id
+  WHERE m.owner_sub <> p.owner_sub` 가 0 이어야 한다(하위 표도 같은 꼴 — owner_sub ≠ 과제 주인). 나오면 지울지는 사람이 정한다.
+  화면 타입 ImportResult 의 conflicts 꼴은 쓰는 화면이 없어 고치지 않았다(owner_conflict 때부터 reason 칸을 모른다).
+- 검사가 막는 정상 줄 하나 — 옛 주인의 키 대장 행(first_project_id)은 이양으로 옮겨 가지 않아 이양된 과제를 가리킨다. 새 주인의 그 과제가 이
+  박스에 있으면 그 행은 parent_not_owned 로 눕는다(없으면 받는다 — 충돌 목록에 선다). 거꾸로 키 대장 행은 과제 범위가 없어, 남의 부품 ckey(이름 ·
+  크기 · 재질의 해시)로 키 행을 미리 들여와 그 키의 주인이 되는 줄은 부모 검사로 막지 못한다 — 열쇠가 ckey 하나라 먼저 적립한 사람이 주인이
+  되는 RD-11 남긴 것과 같은 뿌리다.
+
+### RD-11. 키 대장 읽기의 `mine` — 결정은 내 원장 행만(Medium)
+- 재현(탐침 B · E) — 동료 과제의 편집자, 이양받은 새 주인이 키 행을 읽으면 200(병합 · 이름 · 정한 사람)인데 결정 넷은 다 404 였고(record_decision 은
+  owner_sub = 부른 사람인 행만 고친다), 화면은 그 병합을 내 키처럼 말하며 '병합 되돌리기' 로 이끌었다. 그 사람의 유효 키 해석(resolve_ckey)은
+  그 병합을 따르지 않는다.
+- 고침 — 답에 `mine`(행 주인 == 부른 사람). 읽기 범위는 그대로다(구성원이 그 키의 상태를 보는 것이 화면 세션이 청한 일). 화면은
+  `keyDecisionsBlocked` 로 결정 넷(이름 · 병합 · 되돌리기 · 확정)을 잠그고 '다른 사람의 원장 행' 이라 말한다 — 상태(status)로 가르지 않는다.
+  404 도 잠근다 — 종전 화면은 404 에서 '결정도 받지 않습니다' 라 말하면서 단추는 열어 두었다(반대 검토는 404 갈래가 잠근다고 적었는데 실제로는
+  열려 있었다 — 서버는 두 경우 다 404 라 함께 잠갔다). 못 읽은 것(그 밖의 실패)은 잠그지 않는다(결정의 거절 code 로 말한다).
+- 견본 — partKeyMerged(보기 멤버로 받은 것 — mine false) · partKeyNamed(주인 — true)에 칸을 더하고 partKeyMergedOwn(같은 병합 키를 주인으로 —
+  확정만 잠긴다)을 더했다. 스크래치에서 같은 장면(같은 과제 id · 시각)을 고친 백엔드로 다시 세워 받았고 바이트까지 같다(mine 칸만 더해졌다).
+- 남긴 것 — 이양은 rr_part_keys 를 옮기지 않는다(TRANSFER_PROJECT_TABLES 밖 — 원장 행은 그 키를 처음 적립한 사람의 것이고 열쇠가 ckey
+  하나라 두 번째 주인의 행은 생기지 않는다, ir_builder 의 적립). 그래서 이양받은 새 주인은 그 과제의 키를 결정할 수 없다(옛 주인만 —
+  시험이 그 404 를 적어 둔다). 고치려면 원장 열쇠를 (ckey, owner_sub) 로 넓히거나 이양이 키 행을 옮겨야 하는데, 둘 다 스키마(v5 블록)와 한
+  사람의 여러 과제가 함께 쓰는 키 행이 걸려 결정이 필요하다.
+
+### RD-12. 스냅샷 상태의 게이트 글도 지금 ack 를 말한다(Low)
+- 재현(탐침 F) — G3 에 ack 를 붙인 뒤 gates.G3.ack_by 는 섰는데 같은 답의 `signals['gates.summary']` 값 G3.ack 은 false, 글과 summary_text 의
+  [게이트] 줄은 'G3 fail(1, ack 없음)' 이었다(화면의 요약 카드 · 신호 목록 · '단발 심사 열기' 복사가 그 글을 그대로 쓴다).
+- 고침 — `state.restate_gate_acks` 가 얹은 ack 로 그 신호의 값(ack) · 글과 [게이트] 줄을 다시 쓴다(같은 표기 `state.gate_line` — 동결 때의
+  compute_signals · _summary_lines 도 이 함수를 쓴다). 게이트 줄은 고정 어휘라 판단어 린터에 걸리지 않아(네 꼴 실측) 동결 때에도 싸이지 않는다
+  — 줄 머리로 갈아 끼운다. 저장된 원문은 그대로다. 화면은 고치지 않았다 — 상태 견본의 두 칸을 고친 백엔드의 실 응답으로 바꾸고 화면 시험이 그
+  일치(게이트 표 · 신호 · 요약 줄)를 본다.
+
+### RD-13. `GET /sameas` 의 G2 도 지금 ack(Low)
+- 재현(탐침 C — 픽스처가 G2 fail 을 만들지 않아 상태 원문과 gates_json 의 G2 를 fail 로 바꿨다) — 상태 G2 ack_by 는 섰는데 대응표 G2 는 None.
+  RD-3 의 '그 G2 의 ack 를 읽는 화면이 없다' 는 틀렸다(SameAsResolver 가 GateTable 로 그린다 — RD-3 에 고쳐 적었다).
+- 고침 — get_sameas 가 대상 상태를 `_with_live_acks` 로 지난다. 시험이 대응표 G2 와 상태 G2 가 같은 레코드임을 본다(취소도).
+
+### RD-14. 과제 메타의 닫은 때는 진행(active)이면 보이지 않는다(Low)
+- 재현(탐침 H) — shipped 뒤 active 로 되돌려도 closed_at 이 남고, 화면이 이 가지부터 상세의 열도 읽어 '진행 active … 닫은 때 …' 가 섰다.
+- 고침 — 화면이 lifecycle 이 active 면 닫은 때를 보이지 않는다. 서버 열은 고치지 않았다 — 열의 뜻이 'active 를 떠난 시각'(DDL 주석 · 포털
+  plan)이고 PATCH 감사에 before/after 가 남는다.
+
+### RD-15. 시험 · 확인
+- 백엔드 — 새 시험 열(test_project_reads 여섯 · test_screen_reads 넷)과 고친 하나(키 대장 키 집합에 mine). 옛 코드(77e2525 의 app/)에 얹으면
+  열하나 다 진다. 변이(스크래치 사본, 바이트코드 끔) 26/26 — 부모 검사 여섯(새 행 · 병합 · 없는 범위 부모 · 남의 부모 · 대상 ref_id · 멤버
+  owner 행) · 범위 셋(대상 · 스냅샷 · 호출 원문의 잡) · 표 차례 · project_role · 목록 · 카드 역할 · 머리 · 이름 잇기 · 소스 · 성격 · 카드 마지막
+  스냅샷 둘 · mine · ack 주인 · 게이트 글 넷 · 대응표 G2.
+- 화면 — tests/reads.test.cjs 다섯을 더하고 키 대장 패널 시험 하나를 고쳐 나눴다(94 → 99). 옛 화면 코드에 얹으면 넷(새 견본) · 여섯(옛
+  견본)이 지고, 새 타입은 옛 견본을 tsc 로 거절한다(mine 없음). 변이 10/10. `tsc -b` · `vite build` · `pnpm test` 통과. 실 응답 견본 넷(키 셋 ·
+  상태의 두 칸)은 고친 백엔드의 응답과 같음을 확인했다.
+- 전체 시험(공유 잠금 아래 한 번) — 3,734 통과 · xfail 4 · 실패 0(rc 0, 17분 49초). 코드는 7ac4ea7 과 같은 작업 트리다 — 남 시험 표의
+  들여오기 면제 까닭 글만 수집 뒤에 고쳤고, 그 파일은 아래 커밋마다의 시험에서 돌았다. 커밋 다섯마다 그 판을 따로 풀어 대상 시험
+  (test_project_reads · test_screen_reads · rr/test_review1_stranger · test_export_import)과 화면 시험 전체를 돌렸다 — 다 통과(백엔드 165 →
+  168, 화면 94 → 99).
+- 하지 않은 것 — 서비스 · 인스턴스 기동 · 정지, push · 병합, 실 브라우저 확인.
+- 본 것(이번 범위 밖) — 손 픽스처(dyna 결과 포함)로 언 스냅샷의 ir_json 은 rr_ir.v1 스키마의 results `oneOf` 검증을 지나지 못한다(seed_raw 의
+  검증이 잡았다 — 시험은 mcad 만의 스냅샷을 옮겨 심었다). 까닭은 보지 않았다.
