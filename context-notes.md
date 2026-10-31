@@ -2902,3 +2902,16 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
 - 시험 — `test_ecad_adapter.py` 셋(1단계 보드 대상의 보류 둘 · 응답 deferred 2 · tier_plan · input_gaps 넷 · 보드 없는 대상의 ecad_absent 여섯,
   늦은 첫 고정, 스위치 2 에서 풀림). `test_planner.py` 의 '보드가 실리면 입력 결손이 없다' 시험은 결정대로 'pwr · rf 만 남는다 · 스위치 2 면
   없다' 로 고쳤다.
+
+### EC-29. 모델 크기 상한은 ECAD 부품도 센다(사용자 결정 10-31, EC-12 · EC-24 닫음)
+- 결정 — `risk_max_leaf`(1,500)의 리프는 MCAD 리프 + ECAD 부품 노드다(plan §2.11.3 이 적은 그대로). 층 · board 노드는 세지 않는다. 넘으면 종전
+  길 그대로 409 `model_too_large` 이고 `allow_large=true` 로만 동결한다.
+- 센 것 — `routes._check_model_size` 가 MCAD 는 종전처럼 소스 stats 의 `leaf_instances`(mcad 만 싣는다)를, ECAD 는 그 결과의 kind `component`
+  노드 수를 더한다. 정본이 적은 `odb_get_board.n_components`(= stats.n_components, list_parts total)가 아니라 노드 수인 까닭 — 결정이 'ECAD
+  component nodes' 이고, 상한이 지키려는 것은 실제로 실려 쌍 비교 · 검토 단위가 다루는 수다(2,000 상한 · 겹친 refdes · 열쇠와 겹치는 refdes 를
+  뺀 뒤). 못 읽은 보드(결측 행)는 노드가 없어 0 이다. dyna 는 종전대로 세지 않는다(그 stats 에 leaf_instances 가 없다 — 바꾸지 않았다).
+- 알림 — 409 의 글이 `리프 N/상한(MCAD 리프 m · ECAD 부품 e)` 로, detail 이 `leaf`(합) · `leaf_mcad` · `leaf_ecad` 로 나눠 말한다. 잡 오류
+  (error_json.message)도 같은 글이라 길잡이(risk_next_step)의 capture_failed 막힘에 그대로 실린다. MCP 인자 설명(allow_large)도 고쳤다.
+- 뒤탈 — 분류된 부품이 1,500 개를 넘는 보드는 보드만 붙여도 allow_large 가 든다(부록 A 의 두 표본 보드는 748 · 528 이라 들지 않는다).
+- 시험 — `test_ecad_adapter.py` 셋: 보드만(부품 748 · 층 23 · board 1)으로 상한 748 통과 · 747 은 409(0 · 748) · allow_large 통과, mcad 리프 2 +
+  부품 748 로 750 통과 · 749 는 409(2 · 748) · 못 읽은 보드는 0, REST 캡처의 409 · 잡 failed(stage model_size, 글에 몫) · allow_large 로 748 이 실린다.

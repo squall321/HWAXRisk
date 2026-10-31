@@ -190,8 +190,11 @@ ECAD 카드(소스 카드 probe)는 호출의 전송이 아니라 어댑터 결�
   단계를 통째로 꺼 쌍 비교에서 mcad 지문 대응까지 꺼졌다 — ecad 노드가 없던 동안에는 드러나지 않았다).
 - **예약 치수** — `dims_named` 의 예약 이름 `ecad_stackup_total` 은 아직 자동 정의되지 않는다(예약 치수 시드는 mcad 도 없다). 값은
   `stats.stackup_total_mm` 에 있다.
-- **모델 크기 상한** — `risk_max_leaf` 는 지금 mcad 리프만 센다(§2.11.3 은 ECAD 부품 수도 세라고 적었다 — 결정 필요). same-as 5단계는
-  이름으로 나눠 짝을 찾는다 — 모든 쌍을 펼치던 때는 부품 2,000 개 보드 두 판의 쌍 비교가 5 초 · 330 MB 였고, 지금은 0.2 초 · 수 MB 다(dev 실측).
+- **모델 크기 상한** — `risk_max_leaf`(1,500)는 MCAD 리프(`stats.leaf_instances`)와 ECAD 부품 노드(kind `component`)의 합을 센다(§2.11.3,
+  사용자 결정 10-31 — context-notes EC-29). 층 · board 노드는 세지 않는다. 넘으면 종전 길 그대로 409 `model_too_large` 이고 `allow_large=true`
+  로만 동결하며, 글과 detail(`leaf` = `leaf_mcad` + `leaf_ecad`)이 몇이 MCAD · ECAD 에서 왔는지 나눠 말한다(잡 오류 글도 같다). 그래서 분류된
+  부품이 1,500 개를 넘는 보드는 보드만 붙여도 allow_large 가 든다. same-as 5단계는 이름으로 나눠 짝을 찾는다 — 모든 쌍을 펼치던 때는 부품
+  2,000 개 보드 두 판의 쌍 비교가 5 초 · 330 MB 였고, 지금은 0.2 초 · 수 MB 다(dev 실측).
 
 ## 계약 조건
 

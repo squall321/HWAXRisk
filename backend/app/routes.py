@@ -1820,13 +1820,21 @@ def _ecad_only_unread(captured: Mapping[str, Any]) -> dict | None:
 
 
 def _check_model_size(captured: dict, allow_large: bool) -> None:
-    """리프·계면 수가 `risk_max_leaf`·`risk_max_interfaces` 를 넘으면 409 `model_too_large`(plan §2.11.3)."""
-    leaves = 0
+    """리프·계면 수가 `risk_max_leaf`·`risk_max_interfaces` 를 넘으면 409 `model_too_large`(plan §2.11.3).
+
+    리프는 MCAD 리프(`stats.leaf_instances` — mcad 소스만 싣는다)와 ECAD 부품 노드(kind component)의 합이다 — 층 · board 노드는 세지
+    않는다(사용자 결정 10-31). 넘으면 글과 detail(`leaf_mcad` · `leaf_ecad`)이 몇이 어디서 왔는지 나눠 말한다."""
+    mcad_leaves = 0
+    ecad_leaves = 0
     interfaces = 0
     for result in captured.get("results") or ():
-        stats = (result.get("source") or {}).get("stats") or {}
-        leaves += int(stats.get("leaf_instances") or 0)
+        source = result.get("source") or {}
+        stats = source.get("stats") or {}
+        mcad_leaves += int(stats.get("leaf_instances") or 0)
         interfaces += int(stats.get("interfaces") or 0)
+        if source.get("kind") == "ecad":
+            ecad_leaves += sum(1 for node in result.get("nodes") or () if node.get("kind") == "component")
+    leaves = mcad_leaves + ecad_leaves
     max_leaf = int(config.settings.risk_max_leaf)
     max_iface = int(config.settings.risk_max_interfaces)
     if leaves <= max_leaf and interfaces <= max_iface:
@@ -1835,11 +1843,11 @@ def _check_model_size(captured: dict, allow_large: bool) -> None:
         return
     raise AppError(
         "model_too_large",
-        f"모델이 상한을 넘습니다 — 리프 {leaves}/{max_leaf} · 계면 {interfaces}/{max_iface}."
-        " 그래도 동결하려면 allow_large=true 로 다시 보내세요.",
+        f"모델이 상한을 넘습니다 — 리프 {leaves}/{max_leaf}(MCAD 리프 {mcad_leaves} · ECAD 부품 {ecad_leaves}) · 계면"
+        f" {interfaces}/{max_iface}. 그래도 동결하려면 allow_large=true 로 다시 보내세요.",
         409,
-        detail={"leaf": leaves, "interfaces": interfaces, "max_leaf": max_leaf,
-                "max_interfaces": max_iface, "budget_s": LARGE_BUDGET_S},
+        detail={"leaf": leaves, "leaf_mcad": mcad_leaves, "leaf_ecad": ecad_leaves, "interfaces": interfaces,
+                "max_leaf": max_leaf, "max_interfaces": max_iface, "budget_s": LARGE_BUDGET_S},
     )
 
 

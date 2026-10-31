@@ -350,8 +350,11 @@
       결측 + 경고 `ecad_pat_absent` 이고 박스 PAT 로 내려가지 않는다(REST · MCP, mcad · dyna 폴백은 그대로 — EC-27, EC-15 닫음)
 - [x] 결정(사용자 10-31) — 넷 · 배치 의존 도메인 pwr · rf 는 스냅샷 대상에서도 2단계까지 deferred 다(대표 1석만, 사유 · 입력 결손
       `ecad_nets_deferred`). 1단계 보드 캡처 뒤 pcb · soc · passive · mem 은 편성된다. 단계 스위치는 `adapters/ecad.STAGE` 하나다(EC-28)
-- [ ] 결정 필요 — 모델 크기 상한(risk_max_leaf)에 ECAD 부품 수를 셀지.
+- [x] 결정(사용자 10-31) — 모델 크기 상한 risk_max_leaf(1,500)는 MCAD 리프 + ECAD 부품 노드를 센다(층 · board 노드는 빼고). 넘으면 종전
+      allow_large 길이고 409 의 글 · detail(`leaf_mcad` · `leaf_ecad`)이 몫을 나눠 말한다(EC-29).
       (한쪽에만 ECAD 가 있는 비교는 partial_scope 로 정했다 — EC-17)
+- [ ] 화면 — 409 `model_too_large` 의 detail `leaf_mcad` · `leaf_ecad` 를 보이고(보드만 붙은 과제도 부품 1,500 개를 넘으면 든다),
+      allow_large 확인으로 잇는다(화면 세션 몫)
 - [ ] 화면 — ECAD 찾기 · 붙이기의 409 `ecad_pat_absent`(그 사람의 포털 PAT 가 없다 · 곧 끝난다 — detail.fix `portal_pat`)를 설정 화면의
       PAT 등록으로 잇는다. 종전 코드 `ecad_credential_absent` 는 없어졌다(화면 세션 몫)
 - [ ] 1단계 칸의 쌍 비교(층 두께 · 재료 · 품번 · 패키지 · 핀 수 · 높이)와 거르기 표의 행 — 표 승인과 함께. 그때 diff 대상의 ECAD deferred(EC-18)를 걷는다

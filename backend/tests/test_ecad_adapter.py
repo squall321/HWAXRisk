@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import copy
+import dataclasses
 import hashlib
 import json
 import tracemalloc
@@ -21,7 +22,7 @@ from jsonschema import Draft7Validator
 
 import app.mcp_server as srv
 from app import diff as diff_module
-from app import identity, ir_builder, planner, routes
+from app import config, identity, ir_builder, planner, routes
 from app import state as state_module
 from app import units as units_module
 from app.adapters import base as adapters_base
@@ -1146,3 +1147,70 @@ def test_a_partly_read_board_leaves_the_card_linked_but_says_partial(web_box, hu
     card = routes._project_sources(web_box)[0]
     assert (card["status"], card["probe"]["capture_mode"]) == ("linked", "mcp")
     assert card["probe"]["detail"].startswith("capture_partial calls=12 app_key=odb-hub get_volume_result=")
+
+
+# ---------------------------------------------------------------- 사용자 결정 10-31 — 모델 크기 상한은 ECAD 부품도 센다(EC-29)
+def _cap(monkeypatch, max_leaf: int) -> None:
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_max_leaf=max_leaf))
+
+
+def _mixed(hub: FakeOdbHub) -> dict:
+    """mcad(리프 2 — recon 픽스처 summary.leaf_instances) + 보드 1(분류된 부품 748 · 층 23 · board 1)의 캡처."""
+    hub.others = {name: body for name, body in recon.MCP_TOOLS_FULL.items()}
+    hub.others["heaxstep_forge_list_parts"] = recon.MCP_TOOLS_FULL["list_parts"]
+    mcad_card = {"kind": "mcad", "app_key": recon.APP_KEY,
+                 "ref": {"stepforge_project_id": recon.SF_PROJECT, "detect_job_id": "01JDET"}}
+    return _capture(hub, JOB_STD, extra_sources=[mcad_card], rest=recon._rest(recon.REST_ROUTES))
+
+
+def test_the_leaf_cap_counts_ecad_components_but_not_layers_or_the_board(hub, monkeypatch):
+    """§2.11.3 — 리프는 MCAD 리프 + ECAD 부품 노드다. 층(23) · board 노드(1)는 세지 않는다 — 상한이 부품 수와 같으면 통과하고 하나
+    모자라면 409 model_too_large 이며, 글과 detail 이 MCAD · ECAD 몫을 나눠 말한다. allow_large 는 종전대로 통과시킨다."""
+    captured = _capture(hub, JOB_STD)
+    assert collections.Counter(n["kind"] for n in _ecad(captured)["nodes"]) == {"component": 748, "layer": 23, "board": 1}
+    _cap(monkeypatch, 748)
+    routes._check_model_size(captured, False)
+    _cap(monkeypatch, 747)
+    with pytest.raises(AppError) as err:
+        routes._check_model_size(captured, False)
+    assert (err.value.code, err.value.http_status) == ("model_too_large", 409)
+    assert {k: err.value.detail[k] for k in ("leaf", "leaf_mcad", "leaf_ecad", "max_leaf")} == {
+        "leaf": 748, "leaf_mcad": 0, "leaf_ecad": 748, "max_leaf": 747}
+    assert "리프 748/747(MCAD 리프 0 · ECAD 부품 748)" in err.value.message and "allow_large=true" in err.value.message
+    routes._check_model_size(captured, True)
+
+
+def test_the_leaf_cap_adds_mcad_leaves_and_ecad_components_at_the_boundary(hub, monkeypatch):
+    """mcad 리프 2 + ECAD 부품 748 = 750 — 750 이면 통과, 749 면 409 이고 detail 이 2 · 748 로 나눈다. 보드를 싣지 못한 ecad(결측 행)는
+    0 이다."""
+    captured = _mixed(hub)
+    assert [r["source"]["kind"] for r in captured["results"]] == ["mcad", "ecad"]
+    _cap(monkeypatch, 750)
+    routes._check_model_size(captured, False)
+    _cap(monkeypatch, 749)
+    with pytest.raises(AppError) as err:
+        routes._check_model_size(captured, False)
+    assert {k: err.value.detail[k] for k in ("leaf", "leaf_mcad", "leaf_ecad")} == {"leaf": 750, "leaf_mcad": 2, "leaf_ecad": 748}
+    unread = {"results": [captured["results"][0], ecad_adapter.absent_result(1761800000, code="ecad_pat_absent")]}
+    _cap(monkeypatch, 2)
+    routes._check_model_size(unread, False)
+
+
+def test_a_board_over_the_leaf_cap_is_refused_until_allow_large(web_box, hub, risk_store, monkeypatch):
+    """보드만 붙은 과제도 부품 수가 상한을 넘으면 409 model_too_large 이고 잡은 failed(stage model_size, 글에 MCAD · ECAD 몫)다.
+    allow_large=true 로 다시 보내면 부품 748 개가 실린다."""
+    routes.put_ecad_board(web_box, routes.EcadBoardBody(odb_job_id=JOB_STD), ident=WEB)
+    _cap(monkeypatch, 700)
+    with pytest.raises(AppError) as err:
+        routes.create_snapshot(web_box, routes.SnapshotBody(label="big"), ident=WEB)
+    assert err.value.code == "model_too_large" and err.value.detail["leaf_ecad"] == 748
+    job = risk_store.query_one("SELECT state, snapshot_id, error_json FROM rr_snapshot_jobs WHERE project_id = ?"
+                               " ORDER BY created_at DESC, rowid DESC LIMIT 1", (web_box,))
+    error = json.loads(job["error_json"])
+    assert (job["state"], job["snapshot_id"], error["stage"]) == ("failed", None, "model_size")
+    assert "ECAD 부품 748" in error["message"]
+    out = routes.create_snapshot(web_box, routes.SnapshotBody(label="big", allow_large=True), ident=WEB)
+    assert out["job_state"] == "done"
+    count = risk_store.query_one("SELECT COUNT(*) AS n FROM rr_ir_nodes WHERE snapshot_id = ? AND kind = 'component'",
+                                 (out["snapshot_id"],))["n"]
+    assert count == 748

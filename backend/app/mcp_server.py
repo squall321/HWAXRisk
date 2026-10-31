@@ -237,8 +237,9 @@ _A_REPORT_IDS = (f"dyna_result 소스로 읽을 결과 리포트 id(선택, 최�
                  "읽는다) — 주면 소스 ref 의 report_ids 를 덮는다.")
 _A_DETECT_FILE = ("dyna 소스의 검출(detect) 결과 파일 id(선택, 그 DynaForge 세션 안) — 소스 ref 에 없을 때 써서 기하 간섭 엣지를 더 "
                   "읽는다.")
-_A_ALLOW_LARGE = ("참이면 리프 · 계면 수가 박스 상한(HWAXRISK_MAX_LEAF · HWAXRISK_MAX_INTERFACES)을 넘어도 동결한다 — 거짓이면 넘을 때 "
-                  "409 model_too_large 다. 사용자 확인 뒤에만 참으로 준다.")
+_A_ALLOW_LARGE = ("참이면 리프(MCAD 리프 + ECAD 부품) · 계면 수가 박스 상한(HWAXRISK_MAX_LEAF · HWAXRISK_MAX_INTERFACES)을 넘어도 "
+                  "동결한다 — 거짓이면 넘을 때 409 model_too_large 다(detail 이 leaf_mcad · leaf_ecad 로 나눠 말한다). 사용자 확인 뒤에만 "
+                  "참으로 준다.")
 _A_GATE = (f"게이트 — {' · '.join(k for k in routes.GATE_KEYS if k != 'G6')} 가운데 통과하지 않은 것(pass 가 false · null). G6 · "
            "차단 게이트는 422 gate_blocking, 통과한 게이트는 422 gate_passing 이다.")
 _A_GATE_REASON = f"사유(필수, 최대 {routes.GATE_ACK_REASON_MAX}자) — 공백뿐이면 422 reason_required 다."
