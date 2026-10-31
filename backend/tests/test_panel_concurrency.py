@@ -36,21 +36,12 @@ WAIT_S = 30.0
 
 
 # ---------------------------------------------------------------- 원장
-def _seed(store, target_key: str = "diff:d1", project_id: str = "p1") -> str:
-    now = common.now_epoch()
-    store.execute("INSERT INTO rr_projects(id, owner_sub, code, name, created_at, updated_at) VALUES (?, ?, ?, '동시 과제', ?, ?)",
-                  (project_id, OWNER, f"PRJ-{project_id}", now, now))
-    diff_id = f"d-{project_id}"
-    store.execute(
-        "INSERT INTO rr_diffs(id, target_project_id, base_project_id, target_snapshot_id, base_snapshot_id, owner_sub,"
-        " diff_version, diff_json, summary_text, created_at) VALUES (?, ?, 'p0', ?, ?, ?, '1.0', '{}', ?, ?)",
-        (diff_id, project_id, f"s1-{project_id}", f"s0-{project_id}", OWNER, "구조 3건·치수 2건이 바뀌었다.", now))
-    store.execute(
-        "INSERT INTO rr_targets(target_key, owner_sub, kind, ref_id, project_id, ir_hash, external_sync_json,"
-        " report_ids_json, level, created_at, updated_at) VALUES (?, ?, 'diff', ?, ?, 'h1', '{}', '[]', 'C0', ?, ?)",
-        (target_key, OWNER, diff_id, project_id, now, now))
-    planner.freeze_roster(store, target_key, OWNER, [
-        {"key": f"{dom}-a{i:03d}", "domain": dom, "relevance": (2 - i) / 100.0} for dom in DOMAINS for i in range(2)])
+def _seed(store) -> str:
+    """합성 diff 대상 하나 — 생산자 경로(factories.make_diff_target — 과제 · 스냅샷 둘 · diff · 대상 · 로스터 동결)다. 부를 때마다 새 과제 ·
+    새 대상이다. 잡 주인의 포털 PAT 도 둔다(러너 자격)."""
+    target_key = factories.make_diff_target(store, 3, owner=OWNER, agents=[
+        {"key": f"{dom}-a{i:03d}", "domain": dom, "relevance": round(0.9 - 0.1 * i, 3)} for dom in DOMAINS for i in range(2)]
+    ).target_key
     if store.get_credential(OWNER) is None:
         store.upsert_credential(OWNER, identity.encrypt_pat("pat-secret").decode("ascii"), "sub-1", OWNER, "[]",
                                 common.now_epoch() + 30 * 86400)
@@ -623,7 +614,7 @@ def test_the_daily_cap_blocks_the_second_slot_without_pausing_the_running_panel(
     assert (row["state"], row["pause_reason"]) == ("paused", "daily_cap")
 
 
-def test_diminishing_returns_wait_for_the_running_sibling(risk_store, tmp_path):
+def test_diminishing_returns_wait_for_the_running_sibling(risk_store, tmp_path, monkeypatch):
     """수확 체감 — 첫 패널이 끝날 때 형제가 돌면 잡을 멈추지 않고(멈추면 형제가 닫힌다) 둘째 자리만 막는다. 마지막 형제가 끝날 때 멈춘다."""
     target_key = _seed(risk_store)
     cfg = _cfg(tmp_path)
@@ -631,17 +622,14 @@ def test_diminishing_returns_wait_for_the_running_sibling(risk_store, tmp_path):
     job_id = runner.create_job(risk_store, target_key, "C", owner_sub=OWNER, settings=cfg, concurrency=2, consent=True)["job_id"]
     job, first, second = _seat_two(risk_store, cfg, target_key, job_id)
     assert planner.has_pending(risk_store, target_key, "C")
-    now = common.now_epoch()
-    for n in range(runner.DIMINISHING_WINDOW):
-        risk_store.execute(
-            "INSERT INTO rr_panels(id, target_key, owner_sub, panel_no, seats_json, status, quality_json, created_at)"
-            " VALUES (?, ?, ?, ?, '[]', 'done', ?, ?)", (f"old-{n}", target_key, OWNER, 90 + n, '{"new_clusters": 0}', now))
+    # 수확 체감 판정 자체(최근 패널 셋의 new_clusters)는 test_runner_panel 이 본다 — 여기서는 그 판정이 섰을 때 형제를 어떻게 다루나다.
+    monkeypatch.setattr(runner, "_diminishing", lambda store, target_key: True)
     rec: dict = {}
     dull = {"narrative_mod": fake_narrative(rec), "registry_mod": fake_registry(rec, level="C1", new_clusters=0)}
 
     assert runner.run_panel(risk_store, cfg, FakePanelEngine(), job, panel=first, **dull)["status"] == "done"
     assert _job(risk_store, job_id)["state"] == "running"
-    assert [p["status"] for p in _panels(risk_store, target_key) if not str(p["id"]).startswith("old-")] == ["done", "running"]
+    assert [p["status"] for p in _panels(risk_store, target_key)] == ["done", "running"]
     assert _claim(risk_store, cfg, {job_id: {second["id"]}}) is None              # 둘째 자리는 막힌다
 
     assert runner.run_panel(risk_store, cfg, FakePanelEngine(), job, panel=second, **dull)["status"] == "done"
@@ -669,7 +657,7 @@ def test_a_resumed_job_whose_stopped_panel_is_still_closing_is_not_claimed(risk_
     runner.cancel_job(risk_store, job_id, by=OWNER)
     assert _claim(risk_store, cfg) is None and _job(risk_store, job_id)["state"] == "cancelled"   # 도는 패널이 없다 — 곧바로 마감
 
-    other = _seed(risk_store, "diff:d2", "p2")
+    other = _seed(risk_store)
     later = _panel_job(risk_store, other, cfg)
     job = _claim(risk_store, cfg)
     assert job["id"] == later
@@ -685,7 +673,7 @@ def test_a_resumed_job_whose_stopped_panel_is_still_closing_is_not_claimed(risk_
 def test_a_second_slot_waits_while_another_job_waits_for_its_first_panel(risk_store, tmp_path):
     """둘째 자리는 첫 패널을 기다리는 잡이 없을 때만이다 — 먼저 선 동시 2 잡이 있어도 다른 대상의 잡이 첫 자리를 먼저 받는다."""
     first_target = _seed(risk_store)
-    other_target = _seed(risk_store, "diff:d2", "p2")
+    other_target = _seed(risk_store)
     cfg = _cfg(tmp_path)
     wide = _panel_job(risk_store, first_target, cfg)
     job = _claim(risk_store, cfg)
@@ -791,10 +779,8 @@ def test_check_invariants_allows_as_many_running_panels_as_the_live_job_runs(ris
 def test_the_engine_fail_streak_counts_across_a_running_sibling(risk_store):
     """연속 실패 셈은 도는 패널을 건너뛴다 — 실패한 패널 사이에 형제가 돌아도 셋이면 셋이다(종전에는 도는 패널에서 끊겨 끝내 셋에 닿지 않았다)."""
     target_key = _seed(risk_store)
-    now = common.now_epoch()
-    for no, status in ((1, "error"), (2, "error"), (3, "running"), (4, "error")):
-        risk_store.execute(
-            "INSERT INTO rr_panels(id, target_key, owner_sub, panel_no, seats_json, status, error, created_at)"
-            " VALUES (?, ?, ?, ?, '[]', ?, ?, ?)",
-            (f"p-{no}", target_key, OWNER, no, status, "engine_error: 연결 끊김" if status == "error" else None, now))
+    for status in ("error", "error", "running", "error"):                     # panel_no 1 · 2 · 3 · 4(Tier C 18석이라 넷이 선다)
+        panel = planner.plan_next_panel(risk_store, target_key, "C")
+        risk_store.execute("UPDATE rr_panels SET status = ?, error = ? WHERE id = ?",
+                           (status, "engine_error: 연결 끊김" if status == "error" else None, panel["id"]))
     assert runner._error_streak(risk_store, target_key) == runner.ENGINE_FAIL_STREAK
