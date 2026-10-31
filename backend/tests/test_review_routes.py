@@ -35,7 +35,7 @@ REVIEW_EXPERTS_KEYS = {"total", "by_state"}
 ORDER_KEYS = {"order", "agent_key", "domain", "rank_in_domain", "tier", "deferred", "input_gaps", "state", "cards_total",
               "checkable_n"}
 JOB_KEYS = {"id", "mode", "state", "hold_code", "hold_until", "hold_n", "error", "credential_email", "scope", "phase",
-            "progress", "waiting", "signal"}
+            "progress", "waiting", "signal", "chain"}     # chain — 사슬 표지(params.chain, 화면 세션 청할 것 4)
 JOB_PROGRESS_KEYS = {"packs", "experts", "cells", "calls", "breaker", "server", "reopened_extra"}   # 다시 연 셀의 몫(4차 MEDIUM 2)
 WORKER_KEYS = {"agent_key", "purpose", "unit_id", "call_kind", "variant", "deck_id", "started_at", "last_frame_at",
                "last_event_at", "last_step", "frame_idle_s", "event_idle_s"}
@@ -214,6 +214,32 @@ def test_two_review_jobs_made_in_the_same_second_read_as_the_later_one(store, mo
     assert review_quality._latest_review_job(store, key) == second
     assert closure._quality(store, key, review_quality)["out_of_bounds"] == ["뒤 잡"]
     assert synth._quality_block(store, key) == "뒤 잡"
+
+
+def test_the_review_job_line_says_whether_it_carries_the_chain_mark(store):
+    """진행판 review.job 의 `chain` — M3 코드가 세운 검토 잡(만들 때 사슬 표지 params.chain 을 단다)은 true 다. 화면이 'M2 시절 잡 뒤의
+    사슬 시작' 을 판 · 사슬 유무의 어림이 아니라 이 칸으로 가른다(화면 세션 청할 것 4 — 길잡이 entry._chain_marked 와 같은 판정)."""
+    key, job_id, _fake = _reviewed(store)
+    job = routes.coverage_payload(key, owner_sub=OWNER)["review"]["job"]
+    assert (job["id"], job["chain"]) == (job_id, True)
+
+
+def test_an_m2_era_review_job_reads_without_the_chain_mark(tmp_path, monkeypatch):
+    """v4(M2 코드)가 끝낸 검토 잡 — 사슬 표지가 없어 `chain` 이 false 다(그 잡 뒤에는 쟁점 · 종합이 저절로 서지 않는다 — review1 M8)."""
+    from app.risk_store import RiskStore
+    from tests.rr import v4_build
+    from tests.rr.test_v4_upgrade import _thaw
+
+    v4 = RiskStore(_thaw(v4_build.V4_DIR / v4_build.DB_GZ, tmp_path))
+    v4.open()
+    v4.migrate()
+    try:
+        rig.configure(monkeypatch, v4, tmp_path)
+        reviewed = json.loads((v4_build.V4_DIR / "manifest.json").read_text(encoding="utf-8"))["targets"]["reviewed"]
+        job = routes.coverage_payload(reviewed["target_key"])["review"]["job"]
+        assert (job["id"], job["state"], job["chain"]) == (reviewed["job_id"], "completed", False)
+    finally:
+        v4.close()
 
 
 # ---------------------------------------------------------------- 셀

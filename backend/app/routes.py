@@ -4052,6 +4052,9 @@ def _review_job_payload(job: dict) -> dict:
     return {"id": job["id"], "mode": review_runner.MODE, "state": job["state"], "hold_code": job["hold_code"],
             "hold_until": job["hold_until"], "hold_n": int(job["hold_n"] or 0), "error": job["error"],
             "credential_email": job["credential_email"], "scope": params.get("scope") or {},
+            # 사슬 표지(params.chain — M3 코드가 세운 잡) — 끝나면 쟁점 → 종합이 저절로 선다. false 는 M2 시절 잡이라 사람이 사슬을 시작한다
+            # (chain.chain_marked · 길잡이와 같은 판정 — 화면 세션 청할 것 4).
+            "chain": params.get("chain") is True,
             **job_llm_view(params),
             "phase": progress.get("phase"), "progress": {
                 **{k: progress.get(k) for k in REVIEW_JOB_PROGRESS_KEYS},
