@@ -33,7 +33,7 @@ ALLOWED_SKIPS: tuple[tuple[str, str, str], ...] = (
 SIBLING_ONLY: tuple[str, ...] = ("tests/test_parity.py", "tests/test_atoms.py", "tests/test_wiring_regressions.py",
                                  "tests/test_stream_attribution.py", "tests/test_card_contract_copies.py",
                                  "tests/test_review_verify.py", "tests/test_card_review_request_contract.py",
-                                 "tests/rr/test_injection.py")
+                                 "tests/rr/test_injection.py", "tests/test_card_window_census.py")
 
 _skipped: list[tuple[str, str]] = []
 _strict_xfail: set[str] = set()      # strict 인 xfail 표식이 붙은 시험(nodeid) — 이것만 건너뜀으로 세지 않는다
