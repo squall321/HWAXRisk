@@ -62,6 +62,24 @@ export const ACTION_LABEL: Record<string, string> = {
   "ra.remark": "RA 다시 표기",
 };
 
+/**
+ * '미확인' 배지의 풀이 — 행위자가 앱이 직접 확인한 신원이 아닌 까닭은 행을 쓴 길마다 다르다(백엔드가 actor_verified 0 을 쓰는 자리 셋).
+ * MCP(Claude) 길은 게이트웨이가 위임으로 넘긴 신원이고(앱은 게이트웨이의 서명만 본다), 웹의 job.pause 미확인 행은 포털 화면의 '멈춤'(엔진
+ * 쪽 멈춤 A24)으로 에이전트 서버가 알린 사람이며, system 은 누가 했는지 모르는 RA 뒤처리(거두기 · 다시 표기)다.
+ */
+export function unverifiedTitle(entry: Pick<AuditEntry, "channel" | "action" | "actor">): string {
+  if (entry.channel === "mcp") {
+    return "Claude(MCP) 길 — 게이트웨이가 위임으로 넘긴 신원입니다. 앱은 게이트웨이의 서명만 확인했고 그 사람을 직접 확인하지는 않았습니다.";
+  }
+  if (entry.channel === "web" && entry.action === "job.pause") {
+    return "포털 화면의 '멈춤'으로 멈춘 잡 — 에이전트 서버가 알린, 심의를 멈춘 사람입니다. 앱이 직접 확인한 신원은 아닙니다.";
+  }
+  if (entry.actor === "system") {
+    return "누가 했는지 모르는 뒤처리입니다 — 사람으로 적지 않고 system 으로 적었습니다.";
+  }
+  return `앱이 직접 확인한 신원이 아닙니다(입구 ${entry.channel ?? "-"}).`;
+}
+
 /** 앞 · 뒤 한쪽의 글 — 그 행위의 꼴이 아니면 null(그때는 JSON 그대로 보인다). */
 type ChangeSide = (value: JsonValue) => string | null;
 
@@ -135,7 +153,7 @@ export function ProjectAuditCard({ projectId, active }: { projectId: string; act
         <span className="inline-flex items-center gap-1">
           {e.actor}
           {e.actor_verified ? null : (
-            <Badge tone="warn" title="게이트웨이 위임으로 확인되지 않은 행위자(자칭)">
+            <Badge tone="warn" title={unverifiedTitle(e)}>
               미확인
             </Badge>
           )}
