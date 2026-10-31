@@ -584,7 +584,7 @@ B25 가 남긴 작은 것 하나(2026-10-31, context-notes BL-2) — 캡처가 �
 - [x] B29 registry.merge — 원자가 옮겨 간 옛 행을 superseded 로 닫고 다시 서면 다시 연다 · 다른 대상의 닫힘 표지는 열지 않는다(BE-8)
 - [x] 시험 — 새 36(test_req_brief 8 · test_persona_rev 8 · test_rekey 20) · 옛 코드에서 32 붉음(나머지 넷은 지킴 시험) · 변이 31/31 ·
       전체 3,540 통과 · xfail 4 · 실패 0(7630563, BE-9)
-- [ ] rr_states 의 요구 신호(동결 · 요구 편집의 상태 재계산) — 포털 106 줄의 다른 칸(BE-10)
+- [x] rr_states 의 요구 신호(동결 · 요구 편집의 상태 재계산) — 포털 106 줄의 다른 칸(BE-10) — 가지 `wt1031/risk-flow` ac16932(RF-3)
 - [ ] 코드가 세운 병합(어휘 재계산 · 자동 승계)의 등록부 접기 · 사람 확정 계면 별칭의 길 · 원자가 지워져 빈 등록부 행(BE-10)
 - [ ] nightly 스탬프의 대상 전체 페르소나 판 · E7 AIDataHub 경로의 판(BE-10)
 - [ ] E7 앱 DB 경로의 상태 필터(dismissed · rejected_in_panel · superseded · recall_eligible=0 제외) — 포털 152 줄의 다른 칸(BE-10)
@@ -622,9 +622,9 @@ B25 가 남긴 작은 것 하나(2026-10-31, context-notes BL-2) — 캡처가 �
       `{tag, n}` · 잡 진행 객체 'NaN%') · 잡 만들기 답(호출 어림 `{low, high}` · 자격 requester · owner)(FE-5)
 - [x] 시험 — 순수 함수 · 배지 렌더(node:test, 새 의존 없이 tsc 로 옮겨 돈다) 14건 · 변이 16/16 · 실 백엔드 하네스 + 브라우저(스크래치 데이터 · 빈
       포트, FE-7)
-- [ ] 백엔드에 청할 것 — `how_to_stop` · `pat_unavailable` 안내의 '설정의 스위치는 곧 생긴다 — 운영자가 DB 에서' 꼬리 떼기와 '웹에서 앱을 열면
+- [x] 백엔드에 청할 것 — `how_to_stop` · `pat_unavailable` 안내의 '설정의 스위치는 곧 생긴다 — 운영자가 DB 에서' 꼬리 떼기와 '웹에서 앱을 열면
       자동 등록' 더하기(요청서 1절 끝) · 패널 잡의 422 `consent_external_required` 글이 검토 잡 반출 글이다 · 진행판 패널 잡에 `hold_code` 가
-      없어 보류 external_worker 를 code 로 가를 수 없다
+      없어 보류 external_worker 를 code 로 가를 수 없다 — 가지 `wt1031/risk-flow` 2172cb7 · 7d40238 · 83411f1(RF-6 ~ RF-8)
 - [ ] 화면 — 등록부 행 타입(`claim` · `cites` · `subject` · `domain` 없음, `merged` 있음 — 행을 누르면 죽는다, M3 요청서 7절) · 과제 화면 대상 표의
       `unseated_n` · `superseded_by`(그 응답에 없다) · 과제 화면 동결 알림(스냅샷 잡은 `rr_snapshot_jobs` 라 `jobs[]` 에 없다) — 동결 알림은 2차 걸음에서 닫았다(FE-10)
 
@@ -646,7 +646,8 @@ B25 가 남긴 작은 것 하나(2026-10-31, context-notes BL-2) — 캡처가 �
       좌석 넘기기 · 되돌리기 · 틀린 문구 걷기 · 마지막 신호(80초) · 홈 칩 · 거름 · 등록 폼 제품 행 · 비교 목록 배지(FE-12 · FE-13)
 - [x] 시험 36건 더해 50건 · 변이 20/20(하나는 처음에 살아남아 단언을 더했다) · 실 백엔드 하네스 + 브라우저(FE-14)
 - [ ] 백엔드에 청할 것(FE-14 끝) — 과제 상세 · 목록에 메타 칸과 멤버 읽기 · 상태에 ack · 동결 때 요구 대조 · 키 대장 읽기 · `GET /sameas` 의
-      pair_key · 도는 패널마다의 신호 · 과제 상세 스냅샷 머리의 판 칸
+      pair_key · 도는 패널마다의 신호 · 과제 상세 스냅샷 머리의 판 칸 — '동결 때 요구 대조' 는 닫았다(가지 `wt1031/risk-flow` ac16932 — 요구를
+      고친 뒤 다시 세기까지, RF-3), 나머지는 열려 있다
 - [ ] 브라우저로 못 본 것 — 편집자로 과제 화면 열기(서버가 주인만 준다) · 도는 검토 잡의 일꾼 줄 · 대응 확정 단추(하네스에 후보 쌍이 없다) ·
       실제 ODB 허브 · 게이트웨이
 
@@ -680,8 +681,8 @@ B25 가 남긴 작은 것 하나(2026-10-31, context-notes BL-2) — 캡처가 �
 - [x] 대상이 바뀌면 화면 상태를 처음부터(같은 라우트라 앞 대상의 고른 셀 · 탭이 넘어갔다 — 합성 대상은 단위 id 까지 같았다)(FE-15)
 - [x] 서버 견본(`src/contract/serverSamples.ts` — 실 응답을 줄여 tsc 가 타입과 견준다) · 시험 25건 더해 75건 · 변이 33/33 · 타입 변이 7/8 ·
       실 백엔드 하네스 + 브라우저(FE-22)
-- [ ] 백엔드에 청할 것(FE-22 끝) — 쟁점 행 `outcome_json` 이 늘 null(`_loads` 기본값 None) · 쟁점 결정 뒤 완결 캐시 새로 쓰기 · 같은 초에 선
-      검토 잡의 고르기(`id DESC`) · 사슬 표지 칸
+- [x] 백엔드에 청할 것(FE-22 끝) — 쟁점 행 `outcome_json` 이 늘 null(`_loads` 기본값 None) · 쟁점 결정 뒤 완결 캐시 새로 쓰기 · 같은 초에 선
+      검토 잡의 고르기(`id DESC`) · 사슬 표지 칸 — 가지 `wt1031/risk-flow` 046c327 · 14ebb56 · a57ff8b · 896e7c8(RF-1 · RF-2 · RF-4 · RF-5)
 - [ ] 짓지 않은 것 — 검토 잡의 판단 LLM 고르기(요청서 8절 — 화면은 Claude 잡이면 배지만), 셀 하나 경로(판정 행 · 호출 목록)
 - [ ] 브라우저로 못 본 것 — 편집자 · 보기 역할의 403(하네스 신원이 하나다) · 도는 잡의 기다림(health_unknown · draining) · max_calls 보류 ·
       거른 셀이 있는 대상(하네스 대상은 거름 0) · 다시 토의 표기가 선 쟁점 · 실제 에이전트 서버 · 포털
@@ -701,5 +702,36 @@ B25 가 남긴 작은 것 하나(2026-10-31, context-notes BL-2) — 캡처가 �
       않는다(FE-29)
 - [x] 시험 12건 더해 87건 · 변이 8/8 · jsdom 하네스로 13건 · 실 Chromium 셋(FE-30)
 - [ ] 백엔드에 청할 것(FE-30 끝) — confirm_key 의 병합 키 · 웹 등록 실패 기록 · 스냅샷 머리 degraded_json · 키 대장 읽기 · (선택) 다시 토의
-      표기 꼴 하나로
+      표기 꼴 하나로 — '웹 등록 실패 기록'(브라우저 쉼도 걷었다)과 '다시 토의 표기 꼴' 은 닫았다(가지 `wt1031/risk-flow` 30e002c · a3aaec2 ·
+      f134686, RF-9 · RF-10), 나머지는 열려 있다
 - [ ] 브라우저로 못 본 것 — 실 백엔드 · 실 포털의 revoke-self · 동의 · 확인 조작들의 실 브라우저 클릭(jsdom 으로 봤다)
+
+## 리스크 흐름 10-31 — 화면 세션이 청한 결함 · 잡 / 쟁점 흐름(가지 `wt1031/risk-flow`, main dbe5f93 위)
+
+> 화면 세션(FE-7 · FE-14 · FE-22 · FE-30 끝)이 백엔드에 청한 것 가운데 잡 · 쟁점 흐름 열 가지다. 화면이 '모름' 으로 비워 둔 칸은 서버가
+> 채우면 화면이 고치지 않고 보이는지(읽는 칸 이름)까지 봤다. 결정과 까닭은 context-notes 'RF-1 ~ RF-13'. 같이 도는 가지 `wt1031/risk-audit`
+> (잡 제어 · status 변경 감사)의 함수(job_action · put_verdict · put_registry_status · registry.set_status)는 건드리지 않았다.
+
+- [x] 1 쟁점 행의 `outcome_json` 이 늘 null(`_loads(…, None)` 의 형 검사) — 원장 값을 싣는다(REST · MCP risk_get_issues 같은 함수, 046c327 — RF-1)
+- [x] 2 `PUT /issues/{id}` 뒤 완결 캐시를 같은 트랜잭션에서 새로 쓴다 — 진행판 level_label · qualifiers 와 그 캐시로 보낸 확인의 409(14ebb56 — RF-2)
+- [x] 3 요구 여유 — 동결이 요구를 대조(sig:req.margin)하고 요구를 고치면(등록 · 상태 · 승계) 그 과제 스냅샷의 상태를 같은 트랜잭션에서 다시
+      센다 · 게이트 ack 는 그대로(ac16932 — RF-3)
+- [x] 4 같은 초에 선 두 검토 잡 — 진행판 review.job · review_cells._latest_review_job 과 같은 잡의 품질을 읽는 셋을 rowid 로(a57ff8b — RF-4)
+- [x] 5 진행판 검토 잡에 사슬 표지 `chain`(params.chain) · 화면의 'M2 시절 잡 뒤 사슬 시작' 을 그 칸으로(896e7c8 · a3aaec2 — RF-5)
+- [x] 6 진행판 패널 잡에 `hold_code` · `hold_until`(같은 초는 rowid) · 화면의 '멈춘 까닭' 이 보류 코드를 보인다(83411f1 · a3aaec2 — RF-6)
+- [x] 7 패널 잡의 422 `consent_external_required` 글을 패널 잡의 것으로(runner.PANEL_EGRESS_WARNING, 7d40238 — RF-7)
+- [x] 8 `how_to_stop` · `pat_unavailable` 안내(과 entry.fix_register_pat)의 '스위치는 곧 생긴다 — 운영자가 DB 에서' 꼬리 떼기 · '웹 리스크 앱을
+      열 때' 더하기(2172cb7 — RF-8)
+- [x] 9 `PUT /me/portal-pat` 의 웹 등록 거절을 portal_pat.auto 에 적기 · `due` 가 그 쉼을 본다(`paused_until`) · 화면의 브라우저 쉼 걷기(탭마다
+      한 번 문은 남김)(30e002c · a3aaec2 — RF-9)
+- [x] 10 (선택) `_keep_verdict` 도 at · round 를 적는다(있는 값은 그대로)(f134686 · d4c565d — RF-10)
+- [x] Tier C 후속 노트 — Claude Tier B 잡 뒤 C3 자동 후속 Tier C 는 GLM 이다(잡마다 반출 동의, 사용자 결정 10-15 — 의도, 바꾸지 않았다) ·
+      `_finish_job` 주석 · 고정 시험(7d40238 — RF-11)
+- [x] 서버 견본(화면 tsc 가 견주는 것) — 쟁점 목록 · 다시 토의 표기 새 꼴 · 보류된 패널 잡 진행판 · 쉬는 PAT 요약 · 상태의 요구 여유를 이 가지
+      하네스의 실 응답으로(a3aaec2 — RF-12)
+- [x] 시험 · 변이 — 백엔드 새 18 · 바뀐 6(고치기 전 사본에서 21 붉음 · 지킴 셋), 화면 87 → 89(고치기 전 사본에서 셋 붉음), 변이 백엔드
+      25/25 · 화면 6/6, `tsc -b` · `vite build` · `pnpm test` 통과(RF-13)
+- [ ] 리스크 전체 시험 한 번(공유 잠금)
+- [ ] 길마다 자동 등록 쉼 나누기 — 지금은 기록 하나 · 쉼 하나라 게이트웨이 교환 실패도 앱을 열 때의 자동 등록을 쉬게 한다(RF-9, _user_prefs 에
+      열이 든다 — 결정 필요)
+- [ ] 브리프의 패널 잡 메모 고르기(`brief.py` M 항목 — `created_at DESC, id DESC`)도 같은 초면 앞 잡일 수 있다(RF-4, 이번 범위 밖)
