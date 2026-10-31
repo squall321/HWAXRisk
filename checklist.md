@@ -473,7 +473,7 @@
       recall_eligible=1 · `rr_audit(recall.approve)` · 카드 대조 finding 은 종전대로(BL-5, P3 (21))
 - [x] A18 — 사람 finding 의 mechanism · domain 을 택소노미 어휘로 검사(422 taxonomy_invalid + 허용값 · unclassified 받음 · 코드 꼴은 대분류 +
       세부로 나눠 적음 — BL-6) · MCP 인자 설명
-- [x] 시험 · 변이 — 새 시험 28(옛 코드 사본에서 24 짐) · 변이 32/32(BL-7)
+- [x] 시험 · 변이 — 새 시험 28(옛 코드 사본에서 24 짐) · 변이 32/32 · 전체 3,536 통과 · xfail 4(rc 0, 공유 잠금 — BL-7)
 - [ ] 화면 몫(화면 세션 — 포털 트리아지 B34 · A32) — 대상 감사 '이력 탭' · RecallPreview 의 제외를 잡 본문 `exclude_evidence` 로 보내기
       (지금 화면은 '미리보기용 — 서버에 반영되지 않는다' 고 적는다) · 소스 카드의 `duplicate_of` 배지 · 큐의 미검증 신원 항목 요약 칸과
       approve_recall 설명
