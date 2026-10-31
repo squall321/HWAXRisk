@@ -339,6 +339,36 @@ def test_mcp_lists_only_projects_both_the_owner_and_the_calling_member_can_see(w
     assert sorted(c["cluster_key"] for c in srv.risk_get_precedents(diff_id=diff_id)["clusters"]) == ["clu-hidden", "clu-mine"]
 
 
+def test_rest_gives_a_member_the_same_both_can_see_answer_as_mcp(world, monkeypatch):
+    """웹(REST)의 유사 과제 · 선례도 구성원에게 MCP 와 같은 답이다 — 다른 과제는 주인과 그 사람 둘 다 읽는 것만이다(D46). 종전에는 웹이
+    주인 검사라 구성원이 404 였다(사용자 결정 10-31 — 계획서대로 구성원도 읽는다, MB-1). 주인의 웹 답은 주인의 시야 그대로다."""
+    store, project, mine = world["store"], world["project"], world["mine"]
+    owner = factories.ident(OWNER)
+    step1 = routes.create_project(routes.ProjectBody(code="P-NEXT", name="다음 리비전", classification="internal",
+                                                     predecessor_project_id=project), ident=owner)["id"]
+    step2 = routes.create_project(routes.ProjectBody(code="P-NEXT2", name="그다음 리비전", classification="internal",
+                                                     predecessor_project_id=step1), ident=owner)["id"]
+    for seen_by_member in (project, mine[0], step2):
+        _members(seen_by_member, OWNER, MEMBER)
+    _registry(store, _target(store, _snapshot_of(store, mine[1]), OWNER), OWNER, "clu-hidden", world["subject"])
+    diff_id = factories.make_diff(store, _snapshot_of(store, mine[0]), _snapshot_of(store, project))["diff_id"]
+    hidden = [*mine[1:], world["shared"], step1]
+
+    member = factories.ident(MEMBER)
+    similar = routes.get_similar(project, k=K, ident=member)
+    found = routes.get_precedents(diff_id=diff_id, ident=member)
+    assert [pid for pid in hidden if pid in json.dumps([similar, found])] == []
+    assert (similar["corpus_n"], similar["vector"], similar["lineage"]) == (2, [], [])
+    assert [c["cluster_key"] for c in found["clusters"]] == ["clu-mine"]
+    factories.act_as_delegate(monkeypatch, MEMBER)
+    assert (similar, found) == (srv.risk_similar_projects(project_id=project, k=K), srv.risk_get_precedents(diff_id=diff_id))
+
+    owners = routes.get_similar(project, k=K, ident=owner)
+    assert owners["corpus_n"] == 6 and [(e["project_id"], e["hops"]) for e in owners["lineage"]] == [(step1, 1), (step2, 2)]
+    assert sorted(c["cluster_key"] for c in routes.get_precedents(diff_id=diff_id, ident=owner)["clusters"]) == [
+        "clu-hidden", "clu-mine"]
+
+
 # ---------------------------------------------------------------- AIDataHub(D46 — 과제 거름 없이는 찾지 않는다)
 def test_aidatahub_recall_is_skipped_without_a_project_filter_and_carries_one_otherwise(world):
     """과제 거름을 밝히지 않은 AIDataHub 클라이언트를 넘기면(배선하면) 서술 경로와 좌석 기억 2차 경로는 찾지 않고 까닭을 남긴다 — 전체

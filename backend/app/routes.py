@@ -822,13 +822,16 @@ def mcp_caller(request: Any) -> dict:
 
 
 def visible_projects(caller: dict) -> list[str]:
-    """caller 가 MCP 로 볼 수 있는 과제 id — user 는 자기 소유 ∪ 멤버 ∪ `mcp_visibility='org'`, service 는 org 만."""
+    """caller 가 MCP 로 볼 수 있는 과제 id — user 는 자기 소유 ∪ 멤버 ∪ `mcp_visibility='org'`, service 는 org 만.
+
+    멤버는 project_role 과 같은 판정이다 — 편집자 · 보기 행만 센다(owner 는 과제 행의 주인 열만 정한다 — 주인 아닌 사람의 owner 멤버 행은
+    고침 전의 들여오기가 남긴 것이라 역할이 아니다, RD-10 · MB-1)."""
     email = caller.get("email") if caller.get("kind") == "user" else None
     if email:
         rows = get_store().query(
             "SELECT id FROM rr_projects WHERE owner_sub = ? OR mcp_visibility = 'org'"
-            " OR id IN (SELECT project_id FROM rr_project_members WHERE email = ?) ORDER BY id",
-            (email, email))
+            " OR id IN (SELECT project_id FROM rr_project_members WHERE email = ? AND role IN ('viewer', 'editor'))"
+            " ORDER BY id", (email, email))
     else:
         rows = get_store().query("SELECT id FROM rr_projects WHERE mcp_visibility = 'org' ORDER BY id")
     return [r["id"] for r in rows]
@@ -847,7 +850,9 @@ def _not_visible(what: str) -> AppError:
 def mcp_scope_owner(kind: str, key: str, caller: dict) -> str:
     """읽기 4종의 문지기 — 통과하면 그 행의 owner_sub, 범위 밖·부재는 `not_visible`(존재를 숨긴다).
 
-    diff 는 base·target 두 과제가 모두 범위 안이어야 열린다(한쪽만 공개된 비교는 닫힌 쪽을 흘린다).
+    diff 는 base·target 두 과제가 모두 범위 안이어야 열린다(한쪽만 공개된 비교는 닫힌 쪽을 흘린다). 행은 그 과제 주인의 행이어야 한다
+    (diff 는 두 과제 가운데 하나의 주인 — 웹 `_diff_reader` 와 같다) — 하위 표의 owner_sub 는 과제 주인의 복제라 주인이 다른 행은 고침
+    전의 들여오기가 남의 과제에 매단 것이고, 그 행은 들여온 사람 자신에게만 연다(웹의 구성원 읽기와 같은 규칙, MB-1).
     """
     store = get_store()
     if kind == "snapshot":
@@ -870,6 +875,10 @@ def mcp_scope_owner(kind: str, key: str, caller: dict) -> str:
         row = store.query_one("SELECT owner_sub, project_id FROM rr_targets WHERE target_key = ?", (key,))
         projects = [row["project_id"]] if row is not None else []
     if row is None or not all(p in set(visible_projects(caller)) for p in projects):
+        raise _not_visible(key)
+    owners = {r["owner_sub"] for r in store.query(
+        f"SELECT owner_sub FROM rr_projects WHERE id IN ({','.join('?' for _ in projects)})", tuple(projects))}
+    if row["owner_sub"] != caller.get("email") and row["owner_sub"] not in owners:
         raise _not_visible(key)
     return row["owner_sub"]
 
@@ -1145,6 +1154,82 @@ def _member_or_missing(project_id: str, email: str, need: str, missing: AppError
         if exc.http_status != 404:
             raise
         raise missing from None
+
+
+# ---------------------------------------------------------------- 구성원 읽기(사용자 결정 10-31 — 계획서대로 구성원도 읽는다, context-notes MB-1)
+# 부른 사람이 구성원(편집자 · 보기)인 과제 — project_role 의 멤버 갈래와 같은 판정이다(owner 는 과제 행의 주인 열만 정한다, RD-10).
+# 자리표 하나(email).
+_MEMBER_PROJECTS_SQL = "SELECT project_id FROM rr_project_members WHERE email = ? AND role IN ('viewer', 'editor')"
+# 부른 사람이 웹으로 읽는 과제 — 소유 ∪ 구성원(과제 목록과 같은 범위, 조직 공개만으로는 들지 않는다). 자리표 둘(email, email).
+_READABLE_PROJECTS_SQL = f"SELECT id FROM rr_projects WHERE owner_sub = ? OR id IN ({_MEMBER_PROJECTS_SQL})"
+
+
+def readable_project_ids(email: str) -> set[str]:
+    """부른 사람이 웹으로 읽는 과제 id — 소유 ∪ 구성원(편집자 · 보기)."""
+    return {r["id"] for r in get_store().query(_READABLE_PROJECTS_SQL, (email, email))}
+
+
+def _member_row_sql(table: str) -> str:
+    """과제 열이 있는 표에서 구성원 길로 읽는 행 — 부른 사람이 구성원인 과제의, 그 과제 주인의 행. 자리표 하나(email).
+
+    하위 표의 owner_sub 는 과제 주인의 복제다(plan §5.2.1) — 주인이 다른 행은 고침 전의 들여오기가 남의 과제에 매단 것이라(RD-10) 이
+    길로는 싣지 않는다. 부른 사람 자신의 행(오늘의 주인 길)은 부르는 쪽이 `owner_sub = ?` 로 따로 잇는다."""
+    return (f"({table}.project_id IN ({_MEMBER_PROJECTS_SQL})"
+            f" AND {table}.owner_sub = (SELECT p.owner_sub FROM rr_projects p WHERE p.id = {table}.project_id))")
+
+
+def _reader(row_owner: Any, project_id: Any, email: str) -> str:
+    """과제에 딸린 행 하나를 읽을 owner_sub — 부른 사람이 그 과제의 구성원(보기 이상 — project_role)이고 그 행이 과제 주인의 행이면 행의
+    주인, 아니면 부른 사람이다.
+
+    부른 사람을 돌려주면 본체의 주인 검사(`_project_row` · `_snapshot_row` · `_target_row` · …)가 오늘과 같은 404 를 낸다 — 남과 없는
+    행은 글자까지 같은 답이고(남 숨김) 주인의 길은 그대로다. 구성원이면 본체가 그 과제 주인의 행으로 고르므로 주인과 같은 답이다(RD-1 이
+    과제 상세에 한 것과 같다). 행 주인이 과제 주인과 다르면 구성원 길로 열지 않는다(`_member_row_sql` 과 같은 까닭)."""
+    if not row_owner or row_owner == email or not project_id:
+        return email
+    if project_role(str(project_id), email) is None:
+        return email
+    anchor = get_store().query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,))
+    return str(row_owner) if anchor is not None and anchor["owner_sub"] == row_owner else email
+
+
+def _project_reader(project_id: str, email: str) -> str:
+    row = get_store().query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,))
+    return _reader(row["owner_sub"], project_id, email) if row is not None else email
+
+
+def _snapshot_reader(snapshot_id: str, email: str) -> str:
+    row = get_store().query_one("SELECT owner_sub, project_id FROM rr_snapshots WHERE id = ?", (snapshot_id,))
+    return _reader(row["owner_sub"], row["project_id"], email) if row is not None else email
+
+
+def _target_reader(target_key: str, email: str) -> str:
+    """대상은 그 과제(rr_targets.project_id)로 본다 — 비교 대상의 base 과제는 보지 않는다(MCP mcp_scope_owner · 반출과 같은 규칙, D50)."""
+    row = get_store().query_one("SELECT owner_sub, project_id FROM rr_targets WHERE target_key = ?", (target_key,))
+    return _reader(row["owner_sub"], row["project_id"], email) if row is not None else email
+
+
+def _panel_reader(panel_id: str, email: str) -> str:
+    """패널은 과제를 직접 안 들고 대상을 거친다 — 그 대상의 과제로 본다."""
+    row = get_store().query_one(
+        "SELECT p.owner_sub AS owner_sub, t.project_id AS project_id FROM rr_panels p"
+        " LEFT JOIN rr_targets t ON t.target_key = p.target_key WHERE p.id = ?", (panel_id,))
+    return _reader(row["owner_sub"], row["project_id"], email) if row is not None else email
+
+
+def _diff_reader(diff_id: str, email: str) -> str:
+    """비교는 두 과제(base · target)를 다 읽는 사람이 연다(MCP mcp_scope_owner 와 같은 규칙 — 한쪽만 읽는 사람에게 다른 쪽 내용을 싣지
+    않는다). 행 주인은 두 과제 가운데 하나의 주인이어야 한다 — 비교는 이양이 옮기지 않아(TRANSFER_PROJECT_TABLES 밖) 한쪽 과제를 넘긴
+    뒤에도 만든 사람의 행으로 남고, 두 과제 어느 쪽의 주인도 아닌 행은 고침 전의 들여오기가 남의 과제를 적어 넣은 것이다(RD-10)."""
+    store = get_store()
+    row = store.query_one("SELECT owner_sub, base_project_id, target_project_id FROM rr_diffs WHERE id = ?", (diff_id,))
+    if row is None or row["owner_sub"] == email:
+        return email
+    projects = (row["base_project_id"], row["target_project_id"])
+    if not all(p and project_role(str(p), email) is not None for p in projects):
+        return email
+    owners = {r["owner_sub"] for r in store.query("SELECT owner_sub FROM rr_projects WHERE id IN (?, ?)", projects)}
+    return str(row["owner_sub"]) if row["owner_sub"] in owners else email
 
 
 class ProjectPatchBody(BaseModel):
@@ -2330,9 +2415,9 @@ class InheritBody(BaseModel):
 @router.get("/projects/{project_id}/requirements")
 def get_requirements(project_id: str, kind: str | None = None, status: str | None = None,
                      ident: identity.Identity = Depends(identity.current)) -> dict:
-    """과제의 요구 목록(kind·status 필터). 판정·여유 계산은 state 가 하고 여기서는 원장만 읽는다."""
-    owner_sub = _require_user(ident)
-    _project_row(project_id, owner_sub)
+    """과제의 요구 목록(kind·status 필터). 판정·여유 계산은 state 가 하고 여기서는 원장만 읽는다. 구성원(보기 이상)이 읽는다(MB-1)."""
+    email = _require_user(ident)
+    _project_row(project_id, _project_reader(project_id, email))
     return requirements.list_requirements(get_store(), project_id, kind=kind, status=status)
 
 
@@ -2538,15 +2623,14 @@ def _with_live_acks(store: Any, snapshot_id: str, state: dict) -> dict:
 @router.get("/snapshots/{snapshot_id}")
 def get_snapshot(snapshot_id: str, part: str = "ir",
                  ident: identity.Identity = Depends(identity.current)) -> dict:
-    owner_sub = _require_user(ident)
-    return snapshot_part(snapshot_id, part, owner_sub=owner_sub)
+    """스냅샷 조회 — 그 과제의 구성원(보기 이상)이 읽는다(MB-1)."""
+    return snapshot_part(snapshot_id, part, owner_sub=_snapshot_reader(snapshot_id, _require_user(ident)))
 
 
 @router.get("/snapshots/{snapshot_id}/rule_hits")
 def get_rule_hits(snapshot_id: str, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """규칙 적중 표(§3.2.6). rr_states 가 없으면 404."""
-    owner_sub = _require_user(ident)
-    _snapshot_row(snapshot_id, owner_sub)
+    """규칙 적중 표(§3.2.6). rr_states 가 없으면 404. 구성원(보기 이상)이 읽는다(MB-1)."""
+    _snapshot_row(snapshot_id, _snapshot_reader(snapshot_id, _require_user(ident)))
     row = get_store().query_one(
         "SELECT rule_hits_json, rule_version FROM rr_states WHERE snapshot_id = ?", (snapshot_id,))
     if row is None:
@@ -2661,9 +2745,13 @@ def delete_gate_ack(snapshot_id: str, gate: str,
 @router.get("/sameas")
 def get_sameas(base: str = Query(...), target: str = Query(...),
                ident: identity.Identity = Depends(identity.current)) -> dict:
-    """SameAsResolver 표(§2.6.4) — 자동 매칭·pending·conflict 를 사람이 볼 행으로 준다."""
-    owner_sub = _require_user(ident)
-    _snapshot_row(base, owner_sub)
+    """SameAsResolver 표(§2.6.4) — 자동 매칭·pending·conflict 를 사람이 볼 행으로 준다.
+
+    두 스냅샷을 다 읽는 사람(각 스냅샷 과제의 구성원 — MB-1)이 연다. 쌍 원장은 대상 스냅샷 주인의 것으로 읽는다(주인의 길은 그대로 — 두
+    스냅샷 다 부른 사람의 것이다)."""
+    email = _require_user(ident)
+    _snapshot_row(base, _snapshot_reader(base, email))
+    owner_sub = _snapshot_reader(target, email)
     _snapshot_row(target, owner_sub)
     store = get_store()
     base_ir = ir_builder.load_ir(store, base)
@@ -2799,12 +2887,16 @@ def _list_window(limit: int, offset: int) -> tuple[int, int]:
 @router.get("/diffs")
 def list_diffs(project_id: str | None = None, limit: int = LIST_LIMIT_DEFAULT, offset: int = 0,
                ident: identity.Identity = Depends(identity.current)) -> dict:
-    """비교 목록 — 최신순. `project_id` 는 base·target 어느 쪽이든 그 과제가 걸린 diff 를 고른다."""
-    owner_sub = _require_user(ident)
+    """비교 목록 — 최신순. `project_id` 는 base·target 어느 쪽이든 그 과제가 걸린 diff 를 고른다.
+
+    제 비교 ∪ 두 과제를 다 읽는 비교(구성원 — MB-1, 행 주인은 두 과제 가운데 하나의 주인 — `_diff_reader` 와 같은 규칙)다."""
+    email = _require_user(ident)
     take, skip = _list_window(limit, offset)
     store = get_store()
-    where = ["owner_sub = ?"]
-    params: list[Any] = [owner_sub]
+    where = [f"(owner_sub = ? OR (base_project_id IN ({_READABLE_PROJECTS_SQL})"
+             f" AND target_project_id IN ({_READABLE_PROJECTS_SQL}) AND owner_sub IN (SELECT p.owner_sub FROM rr_projects p"
+             " WHERE p.id IN (rr_diffs.base_project_id, rr_diffs.target_project_id))))"]
+    params: list[Any] = [email, email, email, email, email]
     if project_id:
         where.append("(base_project_id = ? OR target_project_id = ?)")
         params += [project_id, project_id]
@@ -2832,12 +2924,13 @@ def list_diffs(project_id: str | None = None, limit: int = LIST_LIMIT_DEFAULT, o
 def list_targets(project_id: str | None = None, include_superseded: bool = False,
                  limit: int = LIST_LIMIT_DEFAULT, offset: int = 0,
                  ident: identity.Identity = Depends(identity.current)) -> dict:
-    """타깃 목록 — 최신순. 기본은 살아 있는 타깃만이다(§4.8 로 닫힌 것은 `include_superseded` 로 본다)."""
-    owner_sub = _require_user(ident)
+    """타깃 목록 — 최신순. 기본은 살아 있는 타깃만이다(§4.8 로 닫힌 것은 `include_superseded` 로 본다). 제 타깃 ∪ 구성원 과제의 타깃
+    (그 과제 주인의 행 — MB-1)이다."""
+    email = _require_user(ident)
     take, skip = _list_window(limit, offset)
     store = get_store()
-    where = ["owner_sub = ?"]
-    params: list[Any] = [owner_sub]
+    where = [f"(owner_sub = ? OR {_member_row_sql('rr_targets')})"]
+    params: list[Any] = [email, email]
     if project_id:
         where.append("project_id = ?")
         params.append(project_id)
@@ -2871,13 +2964,13 @@ def list_reports(project_id: str | None = None, limit: int = LIST_LIMIT_DEFAULT,
     """보고서 목록 — 앱은 보고서를 소유하지 않는다(§5.3 외부 투영). RA `rpt:` 포인터를 타깃에서 모은다.
 
     그래서 이 목록은 '어느 타깃이 어떤 보고서를 냈나' 이고, 전문은 RA 가 갖는다 — 앱이 사본을 두지 않는다.
-    보고서를 낸 적 없는 타깃은 빠진다(빈 줄로 목록을 채우지 않는다).
+    보고서를 낸 적 없는 타깃은 빠진다(빈 줄로 목록을 채우지 않는다). 타깃은 타깃 목록과 같은 범위다(제 것 ∪ 구성원 과제 — MB-1).
     """
-    owner_sub = _require_user(ident)
+    email = _require_user(ident)
     take, skip = _list_window(limit, offset)
     store = get_store()
-    where = ["owner_sub = ?", "report_ids_json IS NOT NULL", "report_ids_json <> '[]'"]
-    params: list[Any] = [owner_sub]
+    where = [f"(owner_sub = ? OR {_member_row_sql('rr_targets')})", "report_ids_json IS NOT NULL", "report_ids_json <> '[]'"]
+    params: list[Any] = [email, email]
     if project_id:
         where.append("project_id = ?")
         params.append(project_id)
@@ -2906,15 +2999,19 @@ def list_reports(project_id: str | None = None, limit: int = LIST_LIMIT_DEFAULT,
 def get_diff(diff_id: str, part: str = "diff", change_kind: str | None = None, q: str | None = None,
              offset: int = 0, limit: int | None = None,
              ident: identity.Identity = Depends(identity.current)) -> dict:
-    owner_sub = _require_user(ident)
-    return diff_part(diff_id, part, owner_sub=owner_sub, change_kind=change_kind, q=q, offset=offset, limit=limit)
+    """비교 조회 — 두 과제를 다 읽는 사람(구성원 — MB-1)이 연다(`_diff_reader`)."""
+    return diff_part(diff_id, part, owner_sub=_diff_reader(diff_id, _require_user(ident)), change_kind=change_kind, q=q,
+                     offset=offset, limit=limit)
 
 
 @router.get("/precedents")
 def get_precedents(diff_id: str = Query(...), ident: identity.Identity = Depends(identity.current)) -> dict:
-    """선례 패널(§5.7) — rr_delta_priors 수치와 같은 subject 의 등록부 행."""
-    owner_sub = _require_user(ident)
-    return brief_module.precedents(get_store(), diff_id, owner_sub=owner_sub)
+    """선례 패널(§5.7) — rr_delta_priors 수치와 같은 subject 의 등록부 행. 그 비교를 읽는 구성원(MB-1)에게는 다른 과제의 행을 주인과 그
+    사람 둘 다 읽는 과제의 것만 싣는다(MCP risk_get_precedents 와 같은 규칙, D46). 주인의 답은 그대로다."""
+    email = _require_user(ident)
+    owner_sub = _diff_reader(diff_id, email)
+    return brief_module.precedents(get_store(), diff_id, owner_sub=owner_sub,
+                                   caller_projects=None if owner_sub == email else readable_project_ids(email))
 
 
 # ================================================================ 타깃·로스터
@@ -3295,15 +3392,15 @@ def unit_payload(target_key: str, unit_id: str, part: str = "summary", *, owner_
 @router.get("/targets/{target_key}/units")
 def get_units(target_key: str, offset: int = 0, limit: int | None = None,
               ident: identity.Identity = Depends(identity.current)) -> dict:
-    """활성 빌드의 검토 단위 목록(seq 순) — 단위가 없는 대상은 `{status:'none'}` 이다."""
-    return units_payload(target_key, owner_sub=_require_user(ident), offset=offset, limit=limit)
+    """활성 빌드의 검토 단위 목록(seq 순) — 단위가 없는 대상은 `{status:'none'}` 이다. 대상 읽기는 그 과제의 구성원이 한다(MB-1)."""
+    return units_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident)), offset=offset, limit=limit)
 
 
 @router.get("/targets/{target_key}/units/{unit_id}")
 def get_target_unit(target_key: str, unit_id: str, part: str = "summary",
                     ident: identity.Identity = Depends(identity.current)) -> dict:
     """단위 하나 — part ∈ summary(요약 글) · lines(소유 줄 + 문맥 줄) · evidence(동결 근거)."""
-    return unit_payload(target_key, unit_id, part, owner_sub=_require_user(ident))
+    return unit_payload(target_key, unit_id, part, owner_sub=_target_reader(target_key, _require_user(ident)))
 
 
 # ================================================================ 심사 방식 바꾸기(D-24 · M2.md 5절 #3)
@@ -3741,7 +3838,7 @@ def post_cells_skip(target_key: str, body: CellsSkipBody, ident: identity.Identi
 @router.get("/targets/{target_key}/coverage")
 def get_coverage(target_key: str, ident: identity.Identity = Depends(identity.current)) -> dict:
     """진행판 — 도메인별 상태·미착석 수·완결 레벨(레벨 계산은 registry.close_level)."""
-    return coverage_payload(target_key, owner_sub=_require_user(ident))
+    return coverage_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident)))
 
 
 def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
@@ -3858,8 +3955,9 @@ def closure_payload(target_key: str, *, owner_sub: str | None = None, fresh: boo
 
 @router.get("/targets/{target_key}/closure")
 def get_closure(target_key: str, fresh: int = 0, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """완결 판정 — 레벨·잔여·표기·수(M3 S3-8). 진행판·MCP 는 캐시를 읽고 `fresh=1` 만 그 자리에서 다시 센다."""
-    return closure_payload(target_key, owner_sub=_require_user(ident), fresh=bool(fresh))
+    """완결 판정 — 레벨·잔여·표기·수(M3 S3-8). 진행판·MCP 는 캐시를 읽고 `fresh=1` 만 그 자리에서 다시 센다(파생 캐시를 다시 쓸 뿐
+    사람 결정이 아니라 구성원의 읽기에도 연다 — 캐시가 없을 때의 첫 읽기도 같은 캐시를 쓴다, MB-1)."""
+    return closure_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident)), fresh=bool(fresh))
 
 
 def _closure_owner(target_key: str, ident: identity.Identity) -> tuple[str, dict]:
@@ -3983,8 +4081,8 @@ def get_issues(target_key: str, state: str | None = None, p_class: str | None = 
                limit: int = ISSUE_LIST_LIMIT, offset: int = 0,
                ident: identity.Identity = Depends(identity.current)) -> dict:
     """쟁점 목록 — 유형·등급·상태·결과·분포·좌석(근거 원문은 싣지 않는다)."""
-    return issues_payload(target_key, owner_sub=_require_user(ident), state=state, p_class=p_class, type=type,
-                          limit=limit, offset=offset)
+    return issues_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident)), state=state,
+                          p_class=p_class, type=type, limit=limit, offset=offset)
 
 
 class IssueActionBody(BaseModel):
@@ -4090,7 +4188,8 @@ def report_payload(target_key: str, *, owner_sub: str | None = None, version: in
 def get_report(target_key: str, version: int | None = None, page: int = 1, part: str = "summary", format: str = "md",  # noqa: A002
                ident: identity.Identity = Depends(identity.current)) -> dict:
     """종합 보고서(앱 사본이 정본) — 쪽마다 25,000자 안, 쪽을 이으면 part 전체다."""
-    return report_payload(target_key, owner_sub=_require_user(ident), version=version, page=page, part=part, format=format)
+    return report_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident)), version=version, page=page,
+                          part=part, format=format)
 
 
 class ReportBody(BaseModel):
@@ -4548,21 +4647,21 @@ def get_cells(target_key: str, agent_key: str | None = None, unit_id: str | None
               route: str | None = None, ident: identity.Identity = Depends(identity.current)) -> dict:
     """카드 대조 셀 목록(limit 기본 500 · 최대 2000, next_offset 으로 이어 받는다, job_id 는 그 검토 잡 범위의 셀만, route 는 거르기
     분류의 길 — review · filtered · audit · noinput)."""
-    return cells_payload(target_key, owner_sub=_require_user(ident), agent_key=agent_key, unit_id=unit_id, domain=domain,
-                         state=state, limit=limit, offset=offset, job_id=job_id, route=route)
+    return cells_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident)), agent_key=agent_key,
+                         unit_id=unit_id, domain=domain, state=state, limit=limit, offset=offset, job_id=job_id, route=route)
 
 
 @router.get("/targets/{target_key}/cells/{unit_id}/{agent_key}")
 def get_cell(target_key: str, unit_id: str, agent_key: str, ident: identity.Identity = Depends(identity.current)) -> dict:
     """셀 하나 — 셀 행·판정 행 전부·호출 목록(result 본문 제외)."""
-    return cell_payload(target_key, unit_id, agent_key, owner_sub=_require_user(ident))
+    return cell_payload(target_key, unit_id, agent_key, owner_sub=_target_reader(target_key, _require_user(ident)))
 
 
 @router.get("/targets/{target_key}/experts")
 def get_experts(target_key: str, domain: str | None = None, state: str | None = None,
                 ident: identity.Identity = Depends(identity.current)) -> dict:
     """카드 대조 전문가 머리 목록(검토 순서)."""
-    return experts_payload(target_key, owner_sub=_require_user(ident), domain=domain, state=state)
+    return experts_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident)), domain=domain, state=state)
 
 
 @router.get("/targets/{target_key}/experts/{agent_key}/report")
@@ -4570,8 +4669,8 @@ def get_expert_report(target_key: str, agent_key: str, format: str = "md", part:
                       unit_id: str | None = None, version: int | None = None, page: int | None = None,
                       ident: identity.Identity = Depends(identity.current)) -> dict:
     """전문가 보고서 — format=md 는 쪽(part·unit_id·page), format=json 은 보고서 JSON 전체."""
-    return expert_report_payload(target_key, agent_key, owner_sub=_require_user(ident), format=format, part=part,
-                                 unit_id=unit_id, version=version, page=page)
+    return expert_report_payload(target_key, agent_key, owner_sub=_target_reader(target_key, _require_user(ident)),
+                                 format=format, part=part, unit_id=unit_id, version=version, page=page)
 
 
 def seats_payload(target_key: str, domain: str | None = None, *, owner_sub: str | None = None) -> dict:
@@ -4706,9 +4805,9 @@ def get_registry(target_key: str, status: str | None = None, severity: str | Non
                  domain: str | None = None, attention: str | None = None, unit_id: str | None = None,
                  source: str | None = None, offset: int = 0,
                  ident: identity.Identity = Depends(identity.current)) -> dict:
-    owner_sub = _require_user(ident)
-    return registry_payload(target_key, owner_sub=owner_sub, status=status, severity=severity, domain=domain,
-                            attention=attention, unit_id=unit_id, source=source, offset=offset)
+    """대상 등록부 — 그 과제의 구성원(보기 이상)이 읽는다(MB-1)."""
+    return registry_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident)), status=status,
+                            severity=severity, domain=domain, attention=attention, unit_id=unit_id, source=source, offset=offset)
 
 
 @router.get("/targets/{target_key}/seats")
@@ -4718,13 +4817,13 @@ def get_seats(target_key: str, domain: str | None = None,
 
     `GET coverage` 는 도메인×상태 카운트만 준다(5 s 폴링이라 가볍게 둔다). 여기서만 행을 편다.
     """
-    return seats_payload(target_key, domain, owner_sub=_require_user(ident))
+    return seats_payload(target_key, domain, owner_sub=_target_reader(target_key, _require_user(ident)))
 
 
 @router.get("/targets/{target_key}/panels")
 def get_panels(target_key: str, kind: str | None = None, ident: identity.Identity = Depends(identity.current)) -> dict:
     """패널 목록(conv_id · report_id · quality_json · model_json · kind · issue_id)."""
-    return panels_payload(target_key, owner_sub=_require_user(ident), kind=kind)
+    return panels_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident)), kind=kind)
 
 
 @router.get("/panels/{panel_id}/transcript")
@@ -4732,9 +4831,9 @@ def get_panel_transcript(panel_id: str, ident: identity.Identity = Depends(ident
     """`PanelTranscript` '발언' 탭 — 앱 DB 의 좌석 발언·결정문·risk_spec(§8.2.4).
 
     포털 conv_store 를 읽지 않는다. 발언은 `rr_seat_opinions.opinion_json.turns` 를 좌석마다 펴서
-    라운드 순으로 합친 것이고, 결정문·risk_spec 은 `rr_panels` 원문 그대로다.
+    라운드 순으로 합친 것이고, 결정문·risk_spec 은 `rr_panels` 원문 그대로다. 그 대상 과제의 구성원이 읽는다(MB-1).
     """
-    return panel_transcript_payload(panel_id, owner_sub=_require_user(ident))
+    return panel_transcript_payload(panel_id, owner_sub=_panel_reader(panel_id, _require_user(ident)))
 
 
 class VerdictBody(BaseModel):
@@ -4917,9 +5016,9 @@ def put_registry_visibility(cluster_key: str, body: RegistryVisibilityBody,
 
 @router.get("/panels/{panel_id}/brief")
 def get_panel_brief(panel_id: str, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """그 패널이 실제로 받은 브리프 — 재조립이 아니라 동결본을 돌려준다(plan §5.6.1·§0.9 P3-19)."""
-    owner_sub = _require_user(ident)
-    _panel_row(panel_id, owner_sub)
+    """그 패널이 실제로 받은 브리프 — 재조립이 아니라 동결본을 돌려준다(plan §5.6.1·§0.9 P3-19). 동결본 읽기라 그 대상 과제의 구성원이
+    읽는다(MB-1) — 편성 · 토큰을 내는 `GET /targets/{key}/brief` 는 주인만 그대로다."""
+    _panel_row(panel_id, _panel_reader(panel_id, _require_user(ident)))
     return runner.load_brief(get_store(), panel_id)
 
 
@@ -5191,7 +5290,9 @@ def brief_payload(target_key: str, tier: str = "B", *, owner_sub: str | None = N
 @router.get("/targets/{target_key}/brief")
 def get_brief(target_key: str, tier: str = "B",
               ident: identity.Identity = Depends(identity.current)) -> dict:
-    """패널 브리프 + 패널마다 1건의 `brief_token`(MCP `risk_get_brief` 의 열쇠, §8.2.5)."""
+    """패널 브리프 + 패널마다 1건의 `brief_token`(MCP `risk_get_brief` 의 열쇠, §8.2.5).
+
+    읽기가 아니다 — 패널을 편성하고 토큰을 새로 낸다(결과를 낼 패널 주인의 열쇠다). 그래서 구성원 읽기(MB-1)에 열지 않고 주인만 그대로다."""
     owner_sub = _require_user(ident)
     return brief_payload(target_key, tier, owner_sub=owner_sub, issue_token=True)
 
@@ -5492,9 +5593,9 @@ def post_panel_repersist(panel_id: str, discard: bool = False,
 # ================================================================ 성격·유사·참조
 @router.get("/projects/{project_id}/character")
 def get_character(project_id: str, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """성격 프로파일 3층(seed · panel · confirmed)을 섞지 않고 그대로 준다(§4.6.4)."""
-    owner_sub = _require_user(ident)
-    project = _project_row(project_id, owner_sub)
+    """성격 프로파일 3층(seed · panel · confirmed)을 섞지 않고 그대로 준다(§4.6.4). 구성원(보기 이상)이 읽는다(MB-1)."""
+    email = _require_user(ident)
+    project = _project_row(project_id, _project_reader(project_id, email))
     rows = get_store().query(
         "SELECT id, facet, tag, tags_json, statement, polarity, cites_json, by_json, support_panels,"
         " support_targets, confidence, needs_review, status, first_target_key, updated_at"
@@ -5511,10 +5612,15 @@ def get_character(project_id: str, ident: identity.Identity = Depends(identity.c
 
 @router.get("/projects/{project_id}/similar")
 def get_similar(project_id: str, k: int = 5, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """출처별 top-k(계보·벡터·서술·subject). 경로를 섞지 않는다(§5.7)."""
-    owner_sub = _require_user(ident)
+    """출처별 top-k(계보·벡터·서술·subject). 경로를 섞지 않는다(§5.7).
+
+    구성원(보기 이상)이 읽는다(MB-1) — 그때 다른 과제는 주인과 부른 사람 둘 다 읽는 것만 싣는다(MCP risk_similar_projects 와 같은 규칙,
+    D46 — 구성원이 주인만 보는 과제를 알게 되지 않는다). 주인의 답은 그대로다."""
+    email = _require_user(ident)
+    owner_sub = _project_reader(project_id, email)
     _project_row(project_id, owner_sub)
-    return brief_module.similar_projects(get_store(), project_id, k, owner_sub=owner_sub)
+    return brief_module.similar_projects(get_store(), project_id, k, owner_sub=owner_sub,
+                                         caller_projects=None if owner_sub == email else readable_project_ids(email))
 
 
 def _first_member_row(sql: str, params: tuple, email: str) -> dict | None:
@@ -5531,21 +5637,35 @@ def _first_member_row(sql: str, params: tuple, email: str) -> dict | None:
 
 def _ref_from_store(info: dict, owner_sub: str) -> dict | None:
     """스냅샷 스코프 없이 전역으로 주소가 잡히는 참조(reg·narr·tool·rpt·inc·card·req·voc·paper)를 원장에서 찾는다. reg · narr · tool 은
-    그 과제의 구성원이 연다(`_first_member_row`) — 남에게는 없는 참조와 같다."""
+    그 과제의 구성원이 연다(`_first_member_row`) — 남에게는 없는 참조와 같다. req · voc · paper 는 과제 스코프가 참조에 없어 부른 사람의
+    것을 먼저 보고(오늘 그대로), 없으면 구성원인 과제(그 과제 주인의 행)의 것을 본다(MB-1)."""
     store = get_store()
     kind = info["kind"]
     if kind == "req":
         # 과제 스코프는 참조 문자열에 없다 — 호출자 소유 요구에서 찾는다. 범위·정렬은 인용 해석과 같다
         # (waived 제외·kind 순서, §2.8b) — 갈리면 인용은 해석되는데 REST 가 404 가 된다.
+        cols = "id, project_id, name, kind, op, value_json, unit, status, source_ref"
         row = store.query_one(
-            "SELECT id, project_id, name, kind, op, value_json, unit, status, source_ref FROM rr_requirements"
+            f"SELECT {cols} FROM rr_requirements"
             " WHERE name = ? AND owner_sub = ? AND status IN ('candidate','confirmed')"
             " ORDER BY kind LIMIT 1", (info["name"], owner_sub))
+        if row is None:
+            row = store.query_one(
+                f"SELECT {cols} FROM rr_requirements WHERE name = ? AND status IN ('candidate','confirmed')"
+                f" AND {_member_row_sql('rr_requirements')} ORDER BY kind, project_id LIMIT 1", (info["name"], owner_sub))
         return dict(row) if row is not None else None
     if kind in ("voc", "paper"):
-        return narrative.find_field_item(
-            store, kind, info["issue_key"] if kind == "voc" else info["paper_id"],
-            product_code=info.get("product_code"), owner_sub=owner_sub)
+        key = info["issue_key"] if kind == "voc" else info["paper_id"]
+        found = narrative.find_field_item(store, kind, key, product_code=info.get("product_code"), owner_sub=owner_sub)
+        if found is None:
+            # 브리프 호출 원장은 대상마다 그 대상 주인의 행이다 — 구성원인 과제의 대상마다 찾는다(새 대상부터).
+            for row in store.query(f"SELECT target_key, owner_sub FROM rr_targets WHERE {_member_row_sql('rr_targets')}"
+                                   " ORDER BY created_at DESC, target_key", (owner_sub,)):
+                found = narrative.find_field_item(store, kind, key, product_code=info.get("product_code"),
+                                                  target_key=row["target_key"], owner_sub=row["owner_sub"])
+                if found is not None:
+                    break
+        return found
     if kind == "reg":
         return _first_member_row(
             "SELECT target_key, cluster_key, merged_json, severity, judgement, status, support, contested,"
@@ -5669,7 +5789,8 @@ def claims_for_ref(ref: str, *, owner_sub: str | None = None, limit: int = 100,
 @router.get("/refs/{ref:path}")
 def get_ref(ref: str, snapshot_id: str | None = None, diff_id: str | None = None,
             ident: identity.Identity = Depends(identity.current)) -> dict:
-    """참조 1건 해석(§0.2.1 문법). 스냅샷·diff 스코프가 필요한 스킴은 쿼리로 스코프를 받는다."""
+    """참조 1건 해석(§0.2.1 문법). 스냅샷·diff 스코프가 필요한 스킴은 쿼리로 스코프를 받는다 — 스코프는 그 스냅샷 · 비교를 읽는 구성원도
+    연다(MB-1, 스냅샷 · 비교 조회와 같은 문)."""
     owner_sub = _require_user(ident)
     info = parse_ref(ref)
     if info is None:
@@ -5679,13 +5800,13 @@ def get_ref(ref: str, snapshot_id: str | None = None, diff_id: str | None = None
     if payload is None and (snapshot_id or diff_id):
         ctx = narrative.SpecContext(owner_sub=owner_sub, store=store)
         if snapshot_id:
-            _snapshot_row(snapshot_id, owner_sub)
+            _snapshot_row(snapshot_id, _snapshot_reader(snapshot_id, owner_sub))
             ctx.snapshot_ids = (snapshot_id,)
             ctx.irs = {snapshot_id: narrative.scope_ir(ir_builder.load_ir(store, snapshot_id))}
             ctx.states = {snapshot_id: state_module.load_state(store, snapshot_id) or {}}
         if diff_id:
             ctx.diff_id = diff_id
-            ctx.diff = diff_module.get_diff(store, diff_id, owner_sub=owner_sub, part="diff")
+            ctx.diff = diff_module.get_diff(store, diff_id, owner_sub=_diff_reader(diff_id, owner_sub), part="diff")
         text = narrative.canonical_text_for(info["ref"], ctx)
         payload = {"text": text} if text is not None else None
     if payload is None:

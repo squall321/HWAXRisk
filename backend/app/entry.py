@@ -276,7 +276,7 @@ def ack_gate(ident: identity.Identity, *, snapshot_id: str, gate: str, reason: s
 
 
 def get_sameas(ident: identity.Identity, *, base_snapshot_id: str, target_snapshot_id: str) -> dict:
-    """`GET /api/sameas` — 두 스냅샷 모두 호출자 소유여야 한다."""
+    """`GET /api/sameas` — 두 스냅샷을 다 읽는 사람(각 스냅샷 과제의 구성원 — 웹과 같은 문, MB-1)이 연다."""
     routes._require_user(ident)
     return routes.get_sameas(base=base_snapshot_id, target=target_snapshot_id, ident=ident)
 
