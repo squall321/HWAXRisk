@@ -4,6 +4,8 @@ synth.assemble_report 와 종합 잡(가짜 요약 엔진). 남의 과제는 새
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import app.mcp_server as srv
@@ -74,6 +76,26 @@ def test_the_issue_list_has_the_contract_fields_filters_and_pages(store):
             break
         offset = page["next_offset"]
     assert collected == [r["issue_id"] for r in out["rows"]]
+
+
+def test_a_decided_issue_row_carries_the_outcome_fields_it_stored(store):
+    """쟁점 행의 outcome_json 은 원장 값 그대로다(결과 칸 — 패널 · 원자 · 덮은 심각도 · 판정 · 등급 · 반론) — 종전에는 `_loads(…, None)`
+    의 형 검사가 늘 None 을 돌려 웹 화면과 MCP risk_get_issues 가 결과 칸을 못 봤다(화면 세션 FE-18 · 청할 것 1). 결과가 없는 쟁점은 null."""
+    key = _ledger(store)
+    rows = routes.issues_payload(key, owner_sub=OWNER)["rows"]
+    decided = [r for r in rows if r["outcome"]]
+    assert decided and any(not r["outcome"] for r in rows)
+    for row in decided:
+        stored = json.loads(store.query_one("SELECT outcome_json FROM rr_issues WHERE issue_id = ?",
+                                            (row["issue_id"],))["outcome_json"])
+        assert row["outcome_json"] == stored and row["outcome_json"]["panel_id"] == row["panel_id"]
+        assert {"severity_after", "judgement_after", "atom_finding_ids"} <= set(row["outcome_json"])
+    assert all(r["outcome_json"] is None for r in rows if not r["outcome"])
+    with factories.routes_store(store):
+        routes.patch_project(_project(store, key), routes.ProjectPatchBody(mcp_visibility="org"),
+                             ident=factories.ident(OWNER))
+    mcp_rows = {r["issue_id"]: r for r in srv.risk_get_issues(key)["rows"]}           # MCP 도 같은 함수다
+    assert all(mcp_rows[r["issue_id"]]["outcome_json"] == r["outcome_json"] for r in rows)
 
 
 def test_a_person_queues_an_untried_issue_or_skips_one_with_a_reason_and_an_audit_row(store):

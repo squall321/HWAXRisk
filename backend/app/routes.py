@@ -3693,7 +3693,9 @@ def _issue_row_out(issue: dict) -> dict:
     return {"issue_id": issue["issue_id"], "rank": issue["rank"], "types": list(issue.get("types") or ()),
             "p_class": issue["p_class"], "priority": issue["priority"], "anchor_cluster_key": issue["anchor_cluster_key"],
             "unit_id": issue["unit_id"], "state": issue["state"], "state_reason": issue["state_reason"],
-            "outcome": issue["outcome"], "outcome_json": _loads(issue.get("outcome_json"), None),
+            # 결과 칸은 원장 값 그대로다(결과가 없으면 null) — `_loads` 는 기본값의 형만 받아 기본값을 None 으로 주면 늘 None 이었다
+            # (화면 세션 FE-18 · 청할 것 1).
+            "outcome": issue["outcome"], "outcome_json": _loads(issue.get("outcome_json"), {}) or None,
             "distribution": {"raisers": len(basis.get("raisers") or ()),
                              "raisers_by_domain": dist.get("raisers_by_domain") or {},
                              "by_judgement_claimed": dist.get("by_judgement_claimed") or {},
