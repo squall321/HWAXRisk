@@ -46,7 +46,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 OK, CANT_MEASURE = 0, 2
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -265,7 +265,7 @@ def measure_expert(cr: Any, agent: str, records: list[dict], windows: dict[str, 
 
 def run(fetch: Callable[[str], Any], cr: Any, windows_spec: list[tuple[str, int, int]], *,
         agents: list[str] | None = None, sample: int | None = None, seed: int | None = None,
-        include: list[str] = (), per_expert: bool = False, progress: Callable[[str], None] | None = None) -> dict:
+        include: Sequence[str] = (), per_expert: bool = False, progress: Callable[[str], None] | None = None) -> dict:
     """명단을 받고 전문가마다 읽어 잰 결과(JSON 으로 낼 사전). fetch 는 GET 경로 → JSON 이다(시험이 가짜를 꽂는다)."""
     listed = fetch("/api/agents")
     if not isinstance(listed, list):
