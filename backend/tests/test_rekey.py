@@ -313,6 +313,8 @@ def test_a_confirm_then_reject_round_trip_restores_the_registry_and_old_reg_refs
             return [r for r in refs if routes._ref_from_store(r, OWNER) is None]
 
     _decide(risk_store, decision="merge_key", ckey_from=Y, ckey_into=X)
+    # 확정이 등록부까지 왔다 — 옛 키의 행이 닫히고 priors 가 접힌 값이다(이것이 없으면 왕복은 아무것도 보지 않는다).
+    assert _registry(risk_store)[("snap:T1", key_of(Y))][0] == "superseded" and _priors(risk_store) != priors_before
     assert dangling() == []
     _decide(risk_store, decision="unmerge_key", ckey=Y)
     assert dangling() == []
@@ -369,6 +371,10 @@ def test_the_decide_route_is_one_transaction_with_its_rekeys(risk_store):
     assert err.value.http_status == 404
     assert risk_store.query_one("SELECT status FROM rr_part_keys WHERE ckey = ?", (Y,))["status"] == "confirmed"
     assert _alias(risk_store, key_of(Y)) is None and _audits(risk_store) == [] and _registry(risk_store) == registry_before
+    # 맞대 보기 — 앞 항목만 보내면 같은 경로가 병합 · 별칭 · 감사를 남긴다(위의 '없음' 이 되돌림 때문임을 본다).
+    with factories.routes_store(risk_store):
+        routes.post_sameas_decide([{"decision": "merge_key", "ckey_from": Y, "ckey_into": X}], ident=factories.ident(OWNER))
+    assert _alias(risk_store, key_of(Y))["new_cluster_key"] == key_of(X) and len(_audits(risk_store)) == 1
 
 
 # ---------------------------------------------------------------- 네 조작 — same-as reject · 계면 원장 · 계면 별칭
