@@ -553,8 +553,8 @@ def _trait_target(box, i: int) -> str:
 
 
 def test_a_status_that_turns_back_while_held_reaches_ra_as_the_app_has_it(box):
-    """보류 중 확정 → 반증 → 다시 확정이면 RA 의 status 도 확정이다. 큐는 같은 꼴의 셋째 병합을 버리지만(내용이 같은 op 는 한 번만 쌓인다)
-    보내는 쪽은 보낼 때의 등록부 status 를 싣는다(원칙 3 — 투영은 정본을 따라간다). 종전에는 RA 가 dismissed 로 끝나고 요약은 sent 였다."""
+    """보류 중 확정 → 반증 → 다시 확정이면 RA 의 status 도 확정이다 — 라벨마다 병합 op 가 달라(머리의 label_id) 셋 다 남고, 보내는 쪽은 보낼
+    때의 등록부 status 를 싣는다(원칙 3). 종전에는 큐가 같은 꼴의 셋째를 버려(내용이 같은 op 는 한 번만) RA 가 dismissed 로 끝나고 요약은 sent 였다."""
     from app import routes
 
     box.store.execute("UPDATE rr_projects SET mcp_visibility = 'private' WHERE id = ?", (PROJECT,))
@@ -570,8 +570,8 @@ def test_a_status_that_turns_back_while_held_reaches_ra_as_the_app_has_it(box):
 
 
 def test_a_status_flip_during_the_send_is_not_lost(box):
-    """보내는 틱 도중에 상태가 뒤집혀도(반증 뒤 다시 확정) 다음 틱이 그때의 등록부 status 로 맞춘다 — 보낸 op 를 내용으로 지우는
-    complete 가 같은 꼴의 새 op 를 함께 지워도, 남는 op 가 보낼 때의 정본을 싣는다."""
+    """보내는 틱 도중에 상태가 뒤집혀도(반증 뒤 다시 확정) 다음 틱이 그때의 등록부 status 로 맞춘다 — 도중에 쌓인 op 는 보낸 op 와 함께
+    지워지지 않고 남아 보낼 때의 정본을 싣는다."""
     label(box, "근거 1", outcome="confirmed")
     real = box.fake._create_object
     flipped: list[bool] = []
@@ -589,6 +589,45 @@ def test_a_status_flip_during_the_send_is_not_lost(box):
     assert ra_entry(box)["pending_ops"]                                     # 도중에 쌓인 op 가 남았다
     assert tick(box)["sent"] == 1 and ra_entry(box)["state"] == "done"
     assert _registry_status(box) == "verified" == _ra_finding(box)["properties"]["status"]
+
+
+def test_a_label_during_the_send_whose_op_matches_one_in_flight_is_not_lost(box):
+    """보내는 도중에 붙은 라벨의 병합 op 가 지금 보내는 op 와 같은 꼴이어도 잃지 않는다 — 라벨마다 op 가 다르다(머리의 label_id). 그렇지 않으면
+    큐가 새 op 를 버리고(같은 꼴은 한 번만) 보낸 op 를 내용으로 지우는 complete 가 그것까지 지워, 앞서 읽은 값(dismissed)이 RA 에 남는다."""
+    from app import routes
+
+    box.store.execute("UPDATE rr_projects SET mcp_visibility = 'private' WHERE id = ?", (PROJECT,))
+    label(box, "근거 1", outcome="confirmed")
+    label(box, "근거 2", outcome="refuted")
+    box.store.execute("UPDATE rr_projects SET mcp_visibility = 'org' WHERE id = ?", (PROJECT,))
+    routes._release_withheld(box.store, PROJECT, NOW)
+    real = box.fake._get_object
+    labelled: list[bool] = []
+
+    def get_then_label(args):                                          # 둘째 병합이 등록부(dismissed)를 읽은 뒤에 다시 확정한다
+        out = real(args)
+        if not labelled:
+            labelled.append(True)
+            label(box, "근거 3", outcome="confirmed")
+        return out
+
+    box.fake._get_object = get_then_label
+    assert tick(box)["sent"] == 1 and _ra_finding(box)["properties"]["status"] == "dismissed"
+    assert tick(box)["sent"] == 1 and ra_entry(box)["state"] == "done"
+    assert _registry_status(box) == "verified" == _ra_finding(box)["properties"]["status"]
+
+
+def test_a_set_aside_status_merge_sent_late_does_not_undo_a_newer_status(box):
+    """따로 둔 status 병합을 재동기로 늦게 보내도 그 사이 나간 새 status 를 덮지 않는다 — 보낼 때의 등록부 값을 싣는다(원칙 3)."""
+    box.fake.fail["reportarchive_create_object"] = [("ra_error", "enum 값이 아니다: status")]
+    label(box, "근거 1", outcome="confirmed")
+    assert tick(box)["sent"] == 1 and len(ra_entry(box)["dead_ops"]) == 1
+    label(box, "근거 2", outcome="refuted")
+    assert tick(box)["sent"] == 1 and _ra_finding(box)["properties"]["status"] == "dismissed"
+    ra_client.resync(box.store, TARGET)
+    assert [op["op"] for op in ra_entry(box)["pending_ops"]] == ["merge_object"]
+    assert tick(box)["sent"] == 1
+    assert _registry_status(box) == "dismissed" == _ra_finding(box)["properties"]["status"]
 
 
 def test_an_op_ra_refuses_is_set_aside_and_the_rest_of_the_target_still_goes_out(box):

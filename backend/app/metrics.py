@@ -228,7 +228,9 @@ def _queue_ra_status(store: RiskStore, finding: Mapping[str, Any], *, status: st
                      source: str, outcome: str, score: float | None, evidence_ref: str) -> bool:
     """RA `risk_finding.status` 병합 op 와 verified_by|refuted_by 링크 op(plan §7.6 경로 1·2).
 
-    보내는 것은 야간 ⑦ 재시도의 몫이고 여기서는 두 op 를 `external_sync.ra.pending_ops` 에 올리기만 한다.
+    보내는 것은 야간 ⑦ 재시도의 몫이고 여기서는 두 op 를 `external_sync.ra.pending_ops` 에 올리기만 한다. 병합 op 머리에 label_id 를 싣는다
+    (props 밖이라 RA 로 가는 값은 그대로다) — 라벨마다 op 가 달라야 큐가 같은 꼴의 op 를 하나로 줄이지 않고, 보낸 op 를 내용으로 지우는 complete 가
+    보내는 도중에 붙은 라벨의 op 를 함께 지우지 않는다(RK-01 반대 검토).
     """
     target_key = _s(finding.get("target_key"))
     if not target_key:
@@ -239,6 +241,7 @@ def _queue_ra_status(store: RiskStore, finding: Mapping[str, Any], *, status: st
         "reason": "label_status",
         "type": "risk_finding",
         "finding_id": _s(finding.get("finding_id")),
+        "label_id": label_id,
         "props": {"status": status},
     }, {
         "op": "link",

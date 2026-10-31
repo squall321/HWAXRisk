@@ -671,9 +671,9 @@ def _send_op(store, ra: RaClient, target: Mapping[str, Any], projects: Mapping[s
         obj = _finding_object(store, project, op.get("finding_id"))
         if obj is None:
             return "registry_absent"
-        # status 는 보낼 때의 등록부 값이다(원칙 3 — 투영은 정본을 따라간다). op 에 적힌 값은 라벨 때의 값이라 낡는다 — 큐는 같은 꼴의 op 를
-        # 한 번만 쌓아 확정 → 반증 → 확정의 셋째를 버리고, 보내는 틱 도중에 뒤집힌 새 op 는 내용으로 지우는 complete 에 함께 지워지며,
-        # 따로 둔 op 는 재동기 때 늦게 나간다. 그때의 등록부 값을 실으면 어느 op 가 마지막에 나가도 RA 가 앱과 같다.
+        # status 는 보낼 때의 등록부 값이다(원칙 3 — 투영은 정본을 따라간다). 라벨의 병합 op 는 라벨마다 달라(머리의 label_id) 큐가 줄이거나
+        # complete 가 함께 지우지 않지만, op 에 적힌 값은 라벨 때의 값이라 따로 둔 op 를 재동기로 늦게 보내면 그 사이 나간 새 값을 덮는다.
+        # 그때의 등록부 값을 실으면 어느 op 가 마지막에 나가도 RA 가 앱과 같다.
         patch = _props(op)
         if obj["status"]:
             patch["status"] = obj["status"]
