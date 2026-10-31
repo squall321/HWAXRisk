@@ -11,6 +11,7 @@ const { ProjectMembersCard } = load("components/ProjectMembersCard.js");
 const { MemoryRouter } = require("react-router-dom");
 const { EcadBoardCard, CandidateTable } = load("components/EcadBoardCard.js");
 const { JobSignalLine, ReviewWorkers } = load("components/JobSignals.js");
+const { ACTION_LABEL, ProjectAuditCard, auditChange } = load("components/ProjectAuditCard.js");
 
 const h = React.createElement;
 const count = (html, re) => (html.match(new RegExp(re, "g")) ?? []).length;
@@ -195,4 +196,50 @@ test("검토 잡 일꾼마다 마지막 신호 — 넘긴 일꾼만 강조한다
   assert.equal(count(html, "멈췄을 수 있다"), 1);
   assert.match(html, /mech-2 · scan/);
   assert.equal(renderToStaticMarkup(h(ReviewWorkers, { review: { job: null } })), "");
+});
+
+/** 사람 조작 감사 행의 앞 · 뒤 — 서버가 싣는 꼴 그대로(routes._job_control_view · put_registry_status · put_verdict, canonical_json 의 키 차례). */
+const audit = (action, before, after) => ({ action, before, after });
+
+test("이력 탭 — 사람 조작 감사 다섯(잡 제어 · 등록부 status · verdict 확정)에 이름표가 있고 종전 이름표는 그대로다", () => {
+  assert.deepEqual(
+    ["job.pause", "job.resume", "job.cancel", "registry.status", "verdict.final"].map((a) => ACTION_LABEL[a]),
+    ["잡 일시정지", "잡 재개", "잡 취소", "등록부 상태 바꿈", "판정 확정"],
+  );
+  assert.equal(ACTION_LABEL["coverage.undefer"], "보류 풀기");
+  assert.equal(ACTION_LABEL["job.create"], undefined); // 이름표가 없는 행위는 글자 그대로 보인다(이번 몫 밖)
+  // 거름 선택지는 이름표 사전에서 선다 — 아직 읽지 않은 탭(active=false)도 다섯을 '말 코드' 꼴로 보인다.
+  const html = renderToStaticMarkup(h(ProjectAuditCard, { projectId: "p1", active: false }));
+  const five = [["job.pause", "잡 일시정지"], ["job.resume", "잡 재개"], ["job.cancel", "잡 취소"],
+    ["registry.status", "등록부 상태 바꿈"], ["verdict.final", "판정 확정"]];
+  for (const [code, label] of five) {
+    assert.match(html, new RegExp(`<option value="${code.replace(".", "\\.")}">${label} ${code.replace(".", "\\.")}</option>`));
+  }
+});
+
+test("이력 탭 전 → 후 — 다섯 행위는 코드 어휘를 글자 그대로 잇고, 그 밖과 꼴이 다른 값은 종전대로 JSON 이다", () => {
+  const job = (state, hold = null) => ({ hold_code: hold, state });
+  assert.equal(auditChange(audit("job.pause", job("queued"), job("paused"))), "queued → paused");
+  assert.equal(auditChange(audit("job.resume", job("paused", "user"), job("queued"))), "paused · 보류 user → queued");
+  // 코드 보류 위의 사람 정지 — 상태는 그대로 보류만 바뀐다(그래서 행이 선다)
+  assert.equal(
+    auditChange(audit("job.pause", job("paused", "llm_outage"), job("paused", "user"))),
+    "paused · 보류 llm_outage → paused · 보류 user",
+  );
+  assert.equal(auditChange(audit("job.cancel", job("running"), job("cancelling"))), "running → cancelling");
+  assert.equal(
+    auditChange(audit("registry.status", { status: "open" }, { status: "mitigated", status_log_seq: 3 })),
+    "open → mitigated · 상태 기록 #3",
+  );
+  assert.equal(auditChange(audit("verdict.final", { verdict_final: null }, { verdict_final: "go" })), "없음 → go");
+  assert.equal(
+    auditChange(audit("verdict.final", { verdict_final: "go" }, { verdict_final: "conditional" })),
+    "go → conditional",
+  );
+  assert.equal(
+    auditChange(audit("member.put", { members: [] }, { members: ["a@x"] })),
+    '{"members":[]} → {"members":["a@x"]}',
+  );
+  assert.equal(auditChange(audit("job.pause", null, job("paused"))), '- → {"hold_code":null,"state":"paused"}');
+  assert.equal(auditChange(audit("verdict.final", {}, { verdict_final: "go" })), '{} → {"verdict_final":"go"}');
 });

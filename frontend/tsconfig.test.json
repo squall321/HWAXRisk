@@ -34,6 +34,7 @@
     "src/components/ProjectMetaCard.tsx",
     "src/components/ProjectMembersCard.tsx",
     "src/components/EcadBoardCard.tsx",
+    "src/components/ProjectAuditCard.tsx",
     "src/components/JobSignals.tsx",
     "src/contract/serverSamples.ts",
     "src/api/reviewErrors.ts",

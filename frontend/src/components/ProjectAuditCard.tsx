@@ -9,13 +9,13 @@ import { SectionCard } from "./SectionCard";
 import { ErrorBanner, LoadingBlock } from "./StateBlocks";
 import { Button, Select } from "../ui/primitives";
 import { fmtCell, fmtEpoch } from "../format";
-import type { AuditEntry } from "../types";
+import type { AuditEntry, JsonValue } from "../types";
 
 /** 한 쪽의 줄 수(서버 상한 500). */
 const PAGE = 50;
 
 /** 알려진 행위의 사람 말 — 값은 글자 그대로 보이고 뜻만 붙인다. 모르는 행위는 글자 그대로다. */
-const ACTION_LABEL: Record<string, string> = {
+export const ACTION_LABEL: Record<string, string> = {
   "project.update": "메타 고침",
   "project.mcp_visibility": "조직 공개 바꿈",
   "project.transfer": "소유권 이양",
@@ -26,7 +26,60 @@ const ACTION_LABEL: Record<string, string> = {
   "coverage.skip": "좌석 넘김",
   "coverage.uncarry": "좌석 되돌리기",
   "coverage.undefer": "보류 풀기",
+  // 사람 조작 감사(백엔드 사용자 결정 10-31) — 잡 제어 · 등록부 status · verdict 확정. 말은 그 조작의 단추 이름을 따른다.
+  "job.pause": "잡 일시정지",
+  "job.resume": "잡 재개",
+  "job.cancel": "잡 취소",
+  "registry.status": "등록부 상태 바꿈",
+  "verdict.final": "판정 확정",
 };
+
+/** 앞 · 뒤 한쪽의 글 — 그 행위의 꼴이 아니면 null(그때는 JSON 그대로 보인다). */
+type ChangeSide = (value: JsonValue) => string | null;
+
+const fields = (value: JsonValue): { [key: string]: JsonValue } | null =>
+  value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
+
+/** 잡 제어의 {state, hold_code} — 상태에 보류 코드가 있으면 붙인다(코드 보류 위의 사람 정지는 보류만 바뀐다). */
+const jobSide: ChangeSide = (value) => {
+  const v = fields(value);
+  if (!v || typeof v.state !== "string") return null;
+  return typeof v.hold_code === "string" ? `${v.state} · 보류 ${v.hold_code}` : v.state;
+};
+
+/** 등록부 status 의 {status}(앞) · {status, status_log_seq}(뒤) — 뒤에는 그 결정의 상태 기록 번호를 붙인다(사람이 쓴 글은 거기 있다). */
+const registrySide: ChangeSide = (value) => {
+  const v = fields(value);
+  if (!v || typeof v.status !== "string") return null;
+  return typeof v.status_log_seq === "number" ? `${v.status} · 상태 기록 #${v.status_log_seq}` : v.status;
+};
+
+/** verdict 확정의 {verdict_final} — 처음 확정이면 앞이 비었다(없음). */
+const verdictSide: ChangeSide = (value) => {
+  const v = fields(value);
+  if (!v || !("verdict_final" in v)) return null;
+  return typeof v.verdict_final === "string" ? v.verdict_final : "없음";
+};
+
+const CHANGE_SIDE: Record<string, ChangeSide> = {
+  "job.pause": jobSide,
+  "job.resume": jobSide,
+  "job.cancel": jobSide,
+  "registry.status": registrySide,
+  "verdict.final": verdictSide,
+};
+
+/**
+ * 전 → 후 칸의 글. 사람 조작 감사 셋의 앞 · 뒤는 코드 어휘 몇 칸뿐이라 그 값을 글자 그대로 잇는다(잡 상태 · 보류 코드, 등록부 status ·
+ * 상태 기록 번호, 판정 값). 그 밖의 행위와, 꼴이 다른 값(옛 행 따위)은 종전대로 JSON 이다.
+ */
+export function auditChange(entry: Pick<AuditEntry, "action" | "before" | "after">): string {
+  const side = CHANGE_SIDE[entry.action];
+  const before = side ? side(entry.before) : null;
+  const after = side ? side(entry.after) : null;
+  if (before === null || after === null) return `${fmtCell(entry.before)} → ${fmtCell(entry.after)}`;
+  return `${before} → ${after}`;
+}
 
 export function ProjectAuditCard({ projectId, active }: { projectId: string; active: boolean }) {
   const [action, setAction] = useState("");
@@ -78,11 +131,7 @@ export function ProjectAuditCard({ projectId, active }: { projectId: string; act
       key: "change",
       header: "전 → 후",
       hint: "before · after",
-      cell: (e) => (
-        <code className="text-xs">
-          {fmtCell(e.before)} → {fmtCell(e.after)}
-        </code>
-      ),
+      cell: (e) => <code className="text-xs">{auditChange(e)}</code>,
     },
     { key: "reason", header: "사유", hint: "reason", cell: (e) => e.reason ?? <span className="text-muted-foreground">—</span> },
   ];
