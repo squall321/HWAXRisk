@@ -156,7 +156,7 @@ cd backend && .venv/bin/python -m pytest -q
 | 기동·설정·스토어 | `test_boot`(`/api/health` 3키·`POST /mcp` initialize+세션 헤더·`/` text/html, dist 유무 분기) · `test_config_datadir` · `test_store`(user_version 1·rr_ 41표+살림 2·멱등·pre-migrate 사본) · `test_manifest` |
 | 계약·파서 | `test_schemas`(스키마 5종 × 유효/무효) · `test_parser` · `test_sanitize`(표기층 위생·인젝션) · `test_common` |
 | 캡처·IR·상태 | `test_adapters` · `test_ir_builder` · `test_state_gates` · `test_gate_ack` · `test_requirements` · `test_render` |
-| 비교·서술 | `test_sameas` · `test_diff` · `test_atoms` · `test_registry` · `test_character` |
+| 비교·서술 | `test_sameas` · `test_diff` · `test_atoms` · `test_registry` · `test_character` · `test_rekey` · `test_req_brief` · `test_persona_rev` |
 | 패널·편성 | `test_planner` · `test_roster` · `test_runner` · `test_runner_panel` · `test_persist_panel` · `test_engine_client` · `test_brief` |
 | 학습·야간 | `test_learning` · `test_learning_scenario` · `test_metrics` · `test_nightly` |
 | 경계·배선 | `test_identity` · `test_me` · `test_p6_routes` · `test_project_patch` · `test_no_write_tools` · `test_mcp_tools`(7종·exact `Route('/mcp')`) · `test_wiring_regressions` |

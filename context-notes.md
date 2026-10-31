@@ -3322,3 +3322,259 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
 - 하지 않은 것 — 배선 리허설(`tests/synth/rehearsal_d.py`)은 프로세스를 띄우는 일이라 돌리지 않았다. 카드 대조 사슬에서 바뀐 것은 검토 단위의
   근거 줄(한쪽만의 잘린 계면)과 롤업 줄 글뿐이다. stats.edges_removed · 요약의 '계면 −N' 은 제외된 구조 변경도 센다 — 모든 제외 사유가 그렇고
   [제외] 줄이 함께 실려 이 일의 몫으로 두지 않았다. 서비스 재기동 · push · 병합은 없다.
+
+## 남은 일 10-31 리스크 엔진 — B23 · B27 · B29(가지 `wt1031/bl-risk-engine`, main 9bd5f48 위, 2026-10-31)
+
+> 포털 `docs/leftovers-1017/triage-1031.md` 표 B 의 세 줄이다 — B23(포털 design-risk-review checklist 106 ① ~ ③) · B27(132 · 152) ·
+> B29(135). 사용자 결정 10-31 — 표 A 추천 전부를 받고 표 B 의 dev 작업을 한다. 계획 정본은 포털 plan.md §2.8b · §5.6.1 · §5.2.2 ·
+> §7.7 · §4.3.2 · §5.9.5 다. B29 는 계획 글(plan.md 3339-3346 의 여섯 걸음)에서 먼저 설계했고(BE-6 · BE-7) 걸음마다 시험을 따로 세웠다.
+
+### BE-1. 요구 대조는 저장된 상태가 아니라 지금 원장으로 센다(B23)
+- 브리프 E0 · E3 와 원자 저장 보정이 같은 함수(`requirements.compute_req_signals`)로 그 대상 스냅샷(diff 면 뒤 스냅샷)의 명명 치수와 지금
+  rr_requirements 를 대조한다. 브리프는 한 번만 센다(`brief._req_view` — ctx 에 둔다), 저장은 `SpecContext.requirement_view` 가 한 번 센다.
+- 까닭 — 동결(`ir_builder.freeze_snapshot`)이 `state.build_state(ir)` 를 요구 없이 불러 rr_states 에 `req.margin` 이 서지 않는다. 요구를
+  고쳐도 상태를 다시 세지 않는다(`upsert_requirements` 가 `recompute` 목록을 돌려줄 뿐 부르는 곳이 없다). 저장된 상태를 읽었으면 E0 는 늘
+  '요구 미등록' 이었고 E3 에는 여유가 한 번도 서지 않았을 것이다.
+- 고치지 않은 것 — rr_states 의 `sig:req.margin` · `missing.req_absent` · R-007 은 그대로 비어 있다. 포털 106 줄의 'state.py 대조 · 요구 편집은
+  rr_states 재계산' 칸이고 B23(① ~ ③)의 범위 밖이다(BE-10).
+
+### BE-2. E0 요구 한 줄과 E3 두 열의 꼴(B23)
+- E0 — `요구 dim_limit n · 최소 여유 ±m 단위 [req:<이름>] · 시나리오 a/b` 또는 `요구 미등록`. 미등록은 요구 행이 하나도 없을 때다(면제까지 0 —
+  compute_req_signals 의 req_absent 와 같다). 한계만 있고 여유를 모르면 `최소 여유 미측정` 이다. missing 줄 뒤 · 소스 id 줄 앞에 둔다 — 짧고
+  E0 에만 있는 줄이라 상한에 걸리면 소스 줄이 먼저 잘린다.
+- E3 — 줄 끝에 ` | limit=<op> <값> <단위> [req:<이름>] | margin=<±값> <단위>(위반|여유)`, 요구 없는 치수는 ` | limit=— | margin=—` 다.
+  한계 꼴은 `req:` 의 정규 표기(`narrative.canonical_text_for` — `<op> <canonical_json(값)> <단위>`)와 같아 좌석이 옮긴 한계가 인용 대조를
+  지난다. 여유 ≤ 0 이 위반이다(R-007 `req_margin_negative` 와 같은 경계). 여유 값은 저장 값(반올림 6자리) 그대로에 부호(+ · U+2212)를 붙인다.
+- 차례 — 요구가 걸린 줄이 여유 오름차순으로 먼저(위반 · 근접이 상한에 잘리지 않게), 미측정은 0 이 아니라 그 뒤, 요구 없는 줄은 그 뒤에 종전
+  차례(바뀐 치수가 먼저)다. 이 스냅샷에 치수가 없는 요구도 `치수 없음 «<이름>» | … | margin=미측정` 한 줄로 선다 — `d:` 참조는 만들지 않는다
+  (스코프에 없는 치수를 가리키면 dangling 이다).
+- 이름은 `[req:<이름>]` 토큰으로 싣는다(`_ref_name` — 위생을 지나고 린터 제외 구간이다). 계획 예시는 `(battery_to_frame_gap)` 처럼 맨 이름이지만
+  사람이 지은 이름이라 토큰으로 바꿨다. 규격(standard) 요구 수는 싣지 않았다 — 줄 꼴이 dim_limit 과 시나리오만 적는다.
+
+### BE-3. 원자 저장 보정은 요구 인용이 있는 원자만(B23)
+- `narrative._normalize_finding` 이 인용 해석 뒤 `_check_requirement` → `requirements.check_finding_requirement`(지금까지 시험만 부르던 함수)를
+  부른다. 요구 인용(requirement_ref 또는 `req:` cite)이 있는 원자만이다. 여유 ≤ 0 인 요구를 가리키며 OK 면 undetermined 로 보정하고
+  parse_warnings 1건이다. 유효 요구는 candidate · confirmed 다(인용 해석 `SpecContext.requirement` 와 같은 범위 — waived 는 근거가 아니다).
+- 요구 인용이 없는 원자는 손대지 않는다 — check 함수는 빈 requirement_ref 칸을 세우므로 그대로 부르면 모든 finding_json 의 바이트가 바뀐다.
+- 패널 저장 행에 requirement_ref 열을 쓴다(지표 req_consistency 가 이 열을 읽는다 — 종전에는 패널 원자에서 늘 NULL). 카드 대조 저장 행
+  (`expert_report._finding_row`)의 열은 그대로다 — 값은 finding_json 에 있고, 그 표의 열 비교 목록(`_FINDING_CODE_COLUMNS`)은 넓히지 않았다.
+  보정 자체는 같은 정규화를 지나는 카드 대조 원자에도 걸린다.
+- 사람 finding(POST /targets/{key}/findings)의 판정은 고치지 않는다 — 계획 문면이 '파서' 의 보정이고, 사람이 정한 판정을 코드가 덮지 않는다.
+
+### BE-4. role_sha · persona_rev(B27)
+- 원천은 `list_agents(compact=False, domain)` 의 description 이다 — 엔진 `_restore_role` 이 좌석에 되살리는 글(AIDataHub Agent.description)과
+  같은 칸이다. 압축 응답(agent_type · name · common_tags)에는 그 글이 없어 두 칸을 채울 수 없었다. 늘어나는 것은 전문가당 역할 글 한 칸이다
+  (dev 의 전문가 정의 사본 754명 — 중앙값 약 410자 · 최대 714자).
+- role_sha = sha256(글)[:12], persona_rev = 그 앞 7자(`planner.persona_stamp`). 글이 없거나 공백뿐이면 둘 다 NULL 이다 — 빈 글의 해시로 적지
+  않는다. description 이 빈 전문가는 엔진이 system_prompt 의 역할 문서로 앉히는데 그 글은 list_agents 에 없어 NULL 로 둔다. 역할 글 자체는
+  저장하지 않는다(해시만).
+- persona_rev 를 박스마다 세는 차례 번호(r1 · r2 …)로 두지 않은 까닭 — 계획은 '사람이 읽는 판번호' 라 적지만 AIDataHub 에 전문가의 판 칸이
+  없고, rr_roster · rr_seat_opinions 는 dev ↔ cae00 반출 · 들여오기로 박스를 넘는다. 박스마다 따로 매긴 번호는 같은 역할을 다른 번호로, 다른
+  역할을 같은 번호로 적어 E7 의 판 비교를 틀리게 한다. 글에서 바로 나온 짧은 해시는 어느 박스에서도 같다(git 짧은 해시 꼴).
+- 덧붙이기(refresh_roster)도 새 행에 같은 칸을 쓴다. 기존 행은 불변이다(§6.3).
+
+### BE-5. 의견 행 사본 · nightly 스탬프 · E7 [이전 정의](B27)
+- 패널 저장이 rr_seat_opinions.persona_rev 에 그 좌석 로스터 행의 판을 베낀다(원장 좌석만 — 반대석 · 추가 좌석은 NULL). 카드 대조 의견은
+  종전부터 베꼈고(`expert_report._write_opinion`) 이제 로스터에 값이 있다.
+- nightly 스탬프는 손대지 않았다 — rk01 가지가 그 파일을 고치는 중이고, 로스터의 첫 판(agent_key 순)을 읽는 종전 식이 이제 값을 낸다.
+  대상 전체의 페르소나를 한 값으로 접는 일(전 좌석 판의 해시 등)은 열린 항목이다(BE-10).
+- E7 — 회수한 의견의 판과 그 좌석의 지금 로스터 판을 둘 다 알고 서로 다르면 줄 앞에 `[이전 정의] ` 를 붙이고 220자 안에서 그 길이만큼 발췌가
+  준다(`_seat_line(marker=)`). 한쪽이라도 모르면 붙이지 않는다 — 옛 의견(판 이전) · 역할 글 없는 로스터를 '정의가 바뀌었다' 로 적지 않는다
+  (E5 의 변경 주체 접두와 같은 원칙 — 모름과 바뀜을 같은 글자로 쓰지 않는다). 줄 머리가 `[…] narr:` 꼴이라 린터의 인용 줄(`_QUOTE_LINE`)로
+  읽힌다.
+- AIDataHub 회수 경로(`_adh_seat_memory`)는 판정하지 않는다 — 그 레코드를 보내는 쪽(M4)이 아직 없어 판이 실릴 자리가 정해지지 않았다.
+
+### BE-6. rekey 모델 — 계획 글에서 지은 설계(B29)
+- 저장 키는 바뀌지 않는다. rr_findings.subject_key 는 저장 때 그 스냅샷 노드의 ckey(동결 시점의 유효 ckey — `assign_ckeys` 가 resolve_ckey 를
+  지난 값)이고 cluster_key 도 삽입 시 동결이다(§4.3.2 1).
+- '지금 원장으로 다시 센 주체'(`rekey.current_subject`) = 동결 주체의 `ck:` 조각을 지금 merged_into 사슬로 풀고(≤5단, 그 소유자의 원장)
+  계면이면 살아 있는 rr_iface_alias 로 접은 값이다. dim: · asm: · 미해석('')은 원장과 무관해 그대로다.
+- 같은 cluster_key 의 원자는 동결 입력(메커니즘 · 세부 · 주체 · 변경 종류)이 같으므로 다시 센 키도 같다 — 그래서 옮김을 별칭(옛 키 → 새 키)
+  으로 적을 수 있다. 계획 3걸음의 'finding 마다 다시 계산' 을 키마다 셌다. 계획 문면을 원자마다 노드의 '계산 ckey' 로 다시 세는 뜻으로 읽으면
+  한 cluster_key 안의 원자(대표 X 의 원자와 병합 중 X 로 들어온 Q 의 원자)가 서로 다른 새 키를 원하는데 별칭은 키 단위라 적을 자리가 없다.
+- 맞추기(3걸음, `reconcile_aliases`) — 다시 센 키가 동결 키와 다르면 원장 별칭을 append 한다(reason ckey_merge — 파트 키가 풀린 탓 · iface_alias
+  — 계면 별칭 탓). 같으면 그 옛 키에 원장이 세웠던 별칭(ckey_merge · iface_alias)을 같은 사람 · 같은 시각으로 revoke 한다(§5.9.5 3 의 문면).
+  사람 · 재매핑이 세운 별칭(cluster_merge · taxonomy_major · dim_rename)은 거두지도 덮지도 않고 결과에 kept_human 으로 남긴다. 동결 키를 같은 식
+  으로 다시 만들 수 없는 원자는 옮기지 않는다(skipped `key_not_reproducible` — 생산자마다 빈 값의 꼴(None · '')이 달라 둘 다 대본다).
+- 왜 되돌리기만이 아닌가 — 되돌릴 별칭은 확정 때 섰어야 한다. 그래서 merge_key 도 같은 길(`run(op='merge_key')`)을 돈다 — 병합이 등록부를
+  접고(ckey_merge 별칭) unmerge_key 가 그것을 거둔다. 이 짝 없이 되돌리기만 지으면 '확정 → reject 왕복' 시험은 아무것도 보지 않는다 — 실제로
+  옛 코드에서 처음 쓴 왕복 시험이 헛통과해 맞대 보기(확정 뒤 옛 키 행 superseded · priors 바뀜)를 더했다.
+- 한계 — 병합이 서 있던 동안 동결한 스냅샷의 노드는 대표 키를 받았다. 병합을 풀어도 그 스냅샷 위 원자의 주체는 대표 키 그대로다 — 갈라 보려면
+  '재해석 적용'(새 스냅샷)이 필요하다(§2.7.3 '기존 스냅샷의 ckey 는 바뀌지 않는다'). intra · pair same-as 확정도 같은 까닭으로 동결 때 노드
+  ckey 에 흡수된다 — reject 의 키 효과는 그 확정에서 자동 승계된 rr_part_keys 행(§2.7.3)을 되돌리는 것뿐이다.
+
+### BE-7. 네 조작과 짝 · 한 트랜잭션 · 감사(B29)
+- same-as reject — 1걸음 · 결정이 뒤집힐 때 prev_status · prev_decided_by · prev_decided_at 에 직전 값을 남긴다(UPSERT 의 CASE — 같은 결정을
+  다시 내면 그대로, 행은 하나). confirmed → rejected 면 그 rr_sameas 행에서 자동 승계된 rr_part_keys 행(decided_by code:pair_correspondence ·
+  merge_evidence_json.ledger_id = 그 행 id)을 되돌린다(status confirmed · merged_into NULL · merge_evidence_json NULL). 승계 근거에 ledger_id 를
+  싣게 `inherit_ckeys` 를 고쳤다(원장 1단계 대응에서 온 링크만 — 다른 승계 근거의 바이트는 그대로). inherit_ckeys 는 아직 파이프라인에서
+  부르지 않는다(test_sameas 의 strict xfail) — 지금 운영에서 reject 의 키 효과는 0 이고 감사 1행이 남는다.
+- unmerge_key — 1걸음은 종전 그대로(자동 승계 행 포함). merged 였을 때만 재키를 돈다. 영향 범위는 그 키와 그 키에 매달린 키(`with_descendants`)다.
+- 계면 원장 confirmed · manual → rejected(PUT /projects/{id}/iface-ledger) — 계면 원장은 다음 동결의 엣지만 바꾸고 저장 키(ckey · 계면 별칭)를
+  바꾸지 않아 별칭 · 등록부는 그대로이고 감사 1행이 남는다. 계면 별칭 사전은 과제를 가로지르는 이름 원장이라 한 과제의 거절로 거두지 않았다.
+- 계면 별칭 revoke — 계획의 REST 목록에 길이 없어 POST /sameas/decide 의 새 결정 `revoke_iface_alias {alias_key}` 로 열었다(남의 별칭은 404,
+  이미 철회면 already). status revoked · revoked_by · revoked_at 을 쓰고 영향 범위는 별칭 키 둘 · 대표 둘(매달린 키 포함)이다. 지금 별칭은 전부
+  자동 · 항등(대표 = 키 자체)이라 주체가 바뀌지 않는다 — 사람 확정 별칭(근접 별칭 확정 → source human · 대표 병합, §5.9.3)은 아직 길이 없다.
+  저장 때 정규화(`narrative._iface_alias`)도 이제 살아 있는 별칭만 본다 — 종전에는 철회한 별칭으로도 새 원자의 주체를 접었다.
+- 한 트랜잭션 — `record_decision` 의 원장 쓰기와 `rekey.run` 이 같은 store.tx 이고, 라우트는 배열 전체를 바깥 tx 로 감싼다(재진입 tx). 별칭
+  6홉 · 순환은 `add_cluster_alias` 의 409 alias_chain_too_long 이 그대로 올라와 원장 변경까지 되돌린다. 되돌리기도 별칭을 세울 수 있어
+  (Z → Y → X 에서 Y 를 풀면 Z 의 원자는 Y 의 클러스터로 간다) 그 길에서도 409 가 난다.
+- 감사(6걸음) — scope registry · action rekey · subject_id `ckey:<ckey>` · `sameas:<id>` · `alias:<alias_key>` · `ledger:<project>:<pair_key>`,
+  before {op, ledger, old_cluster_keys{옛 키: 그때 풀린 키}} · after {new_cluster_keys, findings_n, targets_n, aliases_added · aliases_revoked,
+  kept_human, skipped, patterns, queue_closed}. 뒤집을 확정이 없던 조작(이미 confirmed 인 unmerge · 확정 아니던 쌍의 reject)은 재키도 감사도
+  하지 않는다. merge_key 는 매번 남긴다(사람 조작이다).
+
+### BE-8. 등록부 병합의 옛 행 · 5걸음(B29)
+- 접힌 · 빈 옛 행 — 원자가 별칭으로 다른 클러스터로 옮겨 간 행(그 행의 옛 구성원 merged_json.member_ids · rejected_refs 가 이번 병합의 다른 행에
+  있다)을 superseded · superseded_by='<대상>#<원자가 간 곳>' 으로 닫는다(`registry._close_vacated_rows`, §4.3.2 3). 접힘의 옛 키와, 갈라질 때
+  접힘으로만 섰던 대표 키 행(다른 대상에서 접힘이 새로 세운 행) 둘 다다. 원자가 지워져 빈 행(패널 재제출 · 사람 finding 삭제)은 종전 그대로
+  열려 있다(BE-10). 행은 지우지 않는다 — GET /refs 의 `reg:` 는 정확한 키로 찾으므로 옛 인용이 두 방향 모두 해석된다(dangling 0). 코드가 정한
+  열린 행(open · rejected_in_panel)만 닫는다.
+- 다시 열기 — 닫힌 클러스터가 다시 서면 superseded_by 가 같은 대상 표지인 행을 코드 상태로 다시 열고 superseded_by 를 비운다(`_write_registry_row`).
+- 다른 대상의 닫힘 표지 — 코드 출처 status 옮기기를 open ↔ rejected_in_panel 로 좁혔다(주석이 말하던 범위). 종전에는 §4.8 이 닫은 옛 대상의 행
+  (superseded · superseded_by=T′#…)을 다시 병합하면 open 으로 돌아갔다 — rekey 가 옛 대상까지 다시 병합해 드러났다.
+- 이 병합 규칙은 사람의 클러스터 병합(PUT /registry/{k}/merge · cluster_merge 큐 결정)에도 걸린다 — 종전에는 접힌 옛 행이 열린 채 남아 판정
+  후보 · 회수가 같은 지지를 두 번 셌다.
+- 5걸음 — 기여 · priors 는 병합이 원자에서 다시 센다(증분 없음). 패턴은 cluster_key_norm 이 별칭으로 다른 키에 접히면 그 키의 패턴 id 를
+  merged_into 에, 갈라지면 NULL 로 둔다 — 대표 키에 패턴이 아직 없으면 비워 둔다(다음 야간 마이너가 세운다). n_* 재합산은 야간 마이너의
+  몫이다(접힌 패턴은 마이너가 건너뛴다). 열린 cluster_merge 큐 가운데 두 키가 이제 한 키로 풀리거나 한쪽이 다른 키에 접혀 홀로 서지 않는
+  항목은 rejected · decision_json.reason='rekey' 로 닫는다.
+
+### BE-9. 시험 · 변이(B23 · B27 · B29)
+- 새 시험 — `tests/test_req_brief.py` 8 · `tests/test_persona_rev.py` 8(모름 셋은 매개) · `tests/test_rekey.py` 20. 고친 시험 — test_brief(E0 줄 수
+  9 → 10, E3 의 옛 줄 꼴 둘) · test_roster(compact 끔 응답 꼴, 게이트웨이 → 동결의 판 대조).
+- 옛 코드에서 붉은지(9bd5f48 의 스크래치 사본에 새 시험을 얹어) — test_req_brief 7/8 · test_persona_rev 5/8 이 붉고, 초록 넷은 지킴 시험이다(요구
+  인용 없는 원자의 바이트 · E7 이 모름을 바뀜으로 적지 않는 셋 — 옛 코드는 접두를 아예 붙이지 않는다). test_rekey 는 rekey 모듈이 없어 모으기에서
+  깨지고, 사본에 빈 자리 모듈을 두면 20/20 이 붉다(등록부 'open' ≠ 'superseded' · prev_status None · 철회한 별칭으로 접음 · 감사 0 · 6홉 DID NOT
+  RAISE 등 까닭대로). 고친 옛 시험 여섯(test_brief 4 · test_roster 2)도 옛 코드에서 붉다.
+- 변이 31(스크래치 사본, 바이트코드 끔, 변이마다 되돌리고 __pycache__ 를 지운다) — 31/31 잡힘. B23 일곱(E0 줄 · 여유 차례 · 미측정을 0 으로 ·
+  0 을 여유로 · 치수 없는 요구 줄 · 저장 보정 · requirement_ref 열) · B27 여섯(판번호 · compact · 정규화의 역할 · 의견 사본 · 접두 · 모름을 바뀜으로)
+  · B29 열여덟(prev_status · reject 재키 · unmerge 재키 · revoke · revoke 의 사람 · 시각 · append · 사람 별칭 · 재현 확인 · 재병합 · 패턴 · 큐 ·
+  감사 · 자동 승계 행 고르기 · 옛 행 닫기 · 다시 열기 · 다른 대상 표지 · 철회한 별칭 정규화 · 계면 원장 재키). 사본은 끝에 작업 트리와 바이트가 같다.
+- 전체 시험(공유 잠금 아래) — 첫 판(1de79d1)은 3,539 통과 · 실패 1 이었다. rr_findings 읽기 가드(test_review_findings)가 새 읽기
+  `rekey.touching_findings` 를 잡았다 — 카드 대조 원자를 일부러 읽는 자리라 까닭과 함께 면제 목록에 넣었다(7630563, 별칭은 소유자 단위의 키
+  사실이고 다시 병합할 때 등록부가 대상의 흐름대로 거른다). 다시 돈 판(7630563) — 3,540 통과 · xfail 4 · 실패 0(rc 0, 11분 58초 — 앞 판 3,504 에
+  새 시험 36). ruff — 바꾼 파일은 깨끗하다.
+- 하지 않은 것 — 배선 리허설(`tests/synth/rehearsal_d.py`)은 프로세스를 띄우는 일이라 돌리지 않았다(카드 대조 사슬은 바꾸지 않았다 — 보정이 같은
+  정규화를 지나는 카드 대조 원자에 걸리는 것 말고). 서비스 재기동 · push · 병합은 없다.
+
+### BE-10. 남긴 것(열린 항목)
+- rr_states 의 요구 신호 — 동결이 요구를 대조하지 않고 요구 편집이 상태를 다시 세지 않는다(포털 106 줄의 다른 칸). E0 · E3 · 저장 보정은 BE-1
+  대로 돌지만 SnapshotPage 여유 표 · R-007 · character_seed(`requirement_tight`)는 비어 있다.
+- 코드가 세운 병합(어휘 재계산 code:vocab_recompute · 자동 승계 code:pair_correspondence)은 등록부를 접지 않는다 — 재키를 사람 조작에만 걸었다
+  (rr_audit 은 사람 행위 한정이다). 접게 하려면 감사 없이 맞추기만 부르는 길을 더한다(inherit_ckeys 를 파이프라인에 걸 때 함께).
+- 사람 확정 계면 별칭(근접 별칭 확정 → source human · 대표 병합)의 길 — 생기면 그 확정도 맞추기를 불러야 revoke 가 거둘 것이 생긴다.
+- 원자가 지워져 빈 등록부 행(패널 재제출 · 사람 finding 삭제)을 닫는 일.
+- nightly 스탬프의 persona_rev 가 대상 전체를 대표하지 못한다(첫 좌석의 판) — rk01 가지가 nightly.py 를 마친 뒤.
+- E7 의 AIDataHub 회수 경로 판정 — 보내는 쪽(M4)이 레코드에 persona_rev 를 실을 때.
+- E7 앱 DB 경로의 상태 필터(포털 152 줄의 다른 칸, B27 글 밖 — 이번에 보고 적는다) — `_seat_memory_line` 의 SQL 은 의견이 올린 finding 의
+  status(dismissed · rejected_in_panel · superseded 제외)도 recall_eligible 도 보지 않는다. AIDataHub 경로만 제외 태그를 건다
+  (RECALL_EXCLUDE_TAGS). 계획 P5 (12) 의 'E7 은 그 좌석의 dismissed · rejected_in_panel · superseded 발췌를 싣지 않는다' 를 지키는 시험도 없다.
+- 화면(화면 세션) — SnapshotPage 여유 표(포털 B34 · 106 ④) · 별칭 철회 버튼 · 되돌리기 결과(rekey 요약 · kept_human)를 보이기.
+- 포털 plan 문면(포털 세션) — E0 예시의 맨 이름 → `[req:]` 토큰 · persona_rev 꼴 · rekey 의 키 단위 해석과 merge_key 짝 · revoke_iface_alias 결정.
+
+## 검토 후속 10-31 — rekey 가지의 확인된 일곱 건(가지 `wt1031/bl-risk-engine`, 0ee9fb1 위, 2026-10-31)
+
+> 이 가지(0ee9fb1)를 반대 검토가 일곱 건으로 짚었고 전부 재현됐다(검토 탐침을 이 가지의 스크래치 사본에서 그대로 돌렸다). 건마다 옛 코드
+> (0ee9fb1 사본)에서 붉고 고친 코드에서 푸른 시험을 `tests/test_rekey.py` 에 더했다. 포털 문서와 rk01 가지의 파일(ra_client · nightly ·
+> main · config)은 건드리지 않았다.
+
+### BE-11. 접힌 등록부 행의 주체는 그 행 키의 주체다(검토 1)
+- 무엇이 틀렸나 — 병합 행의 subject_key 는 대표 원자(근거 등급 → 제기 좌석 수 → 최신 → id)의 동결 주체였다. merge_key Y → X 로 T1 의 key(X)
+  행이 [F1(Y) · F2(X)] 로 접히면 대표가 F1 일 때 행의 주체가 Y 가 되는데, 회수(`brief._subject_path` · E5 주체 경로 · precedents)는 지금 원장으로
+  푼 X 로만 찾고 옛 key(Y) 행은 superseded 라 T1 이 회수에서 빠졌다. 병합이 '같은 파트' 라고 말한 그 파트의 위험을 회수에서 지웠다.
+- 고친 것 — `registry._folded_subject`. 원자가 별칭으로 들어온(접힌) 행만 주체를 다시 정한다 — 동결 키가 그 행 키인 원자가 있으면 그 원자의
+  주체(같은 키면 같은 주체다), 없으면(원자가 전부 별칭으로 들어왔다 — T2) 대표 주체를 지금 원장으로 다시 센 값(`rekey.current_subject` — 원장
+  별칭은 그 주체로 행 키를 셌다). 접히지 않은 행은 바이트 그대로다.
+- 고르지 않은 것 — 모든 행의 주체를 지금 원장으로 다시 세기. 코드가 세운 병합(어휘 재계산 · 자동 승계)은 별칭 없이 ckey 만 이어(BE-10) 그런
+  행의 주체도 회수에서 빠지지만, 접힘과 무관한 행의 바이트가 바뀌는 다른 빈칸이다.
+- 남는 것 — 사람 별칭(cluster_merge)으로만 들어온 원자뿐인 행은 그 별칭 끝 키의 주체를 이 대상의 원자로는 모른다 — 대표 주체를 지금 원장으로
+  센 값이고 종전과 같은 결과다.
+
+### BE-12. 별칭 사슬로만 닿는 대상도 다시 병합하고, 맞춘 뒤 앞 키의 사슬을 본다(검토 2)
+- 무엇이 틀렸나 — 영향 대상은 주체가 그 ckey 를 담은 원자의 대상뿐이었다. 사람 별칭 key(Q) → key(Y) 로 Y 의 클러스터에 닿는 대상 TQ 는 Y 가
+  X 에 접혀 key(Q) 의 풀이가 바뀌어도 다시 병합되지 않아 열린 행 둘 · 판정 후보 2 · priors(n_raised 4 — 새로 세면 3)가 다음 병합까지 남았다.
+  되돌릴 때도 같은 구멍으로 그 사이에 접힌 채 다시 병합된 TQ 가 그대로 접혀 있었다.
+- 고친 것 — `rekey.upstream_keys`. 별칭이 바뀔 수 있는 키(동결 키 · 재매핑 끝 자리, BE-16)와 살아 있는 별칭 사슬이 그 키를 지나는 앞 키
+  전부다(소유자 단위, `ix_rr_cluster_alias_owner_new`). 맞추기 전에 한 번 센다 — 앞 키에서 그 키에 닿기까지의 별칭은 이 맞추기가 건드리지
+  않는 키의 것이라 바꾸기 전과 뒤의 집합이 같다(검토가 권한 '바꾸기 전 또는 뒤에 살아 있던 별칭의 역폐포' 와 같은 집합이다). 풀이가
+  바뀐 키를 동결 키로 가진 원자의 대상(`touching_findings(cluster_keys=…)` — 이미 rr_findings 읽기 가드의 면제 목록에 있는 같은 함수)도
+  다시 병합하고, 패턴 재해석 · 무효 큐 닫기도 같은 키 집합을 본다. 감사의 old/new_cluster_keys 에 풀이가 바뀐 앞 키를, findings_n ·
+  targets_n 에 별칭으로 닿은 원자 · 대상을 더한다.
+- 덧붙인 것(검토 4 의 '마지막 별칭 집합으로 점검' 갈래) — `_check_chains`. 맞춘 뒤 그 키 집합의 사슬이 5홉 안이고 순환하지 않는지 본다.
+  세울 때의 점검(`add_cluster_alias`)은 새 별칭 뒤만 세어, key(Q) → key(Y) 위에 key(Y) → key(X)(뒤로 사람 4홉)를 세우면 Q 의 사슬이 6홉이 돼도
+  지나갔다(Q 는 5홉에서 끊긴 중간 키로 풀린다). 별칭으로 닿는 대상을 이제 곧바로 다시 병합하므로 그 틀린 풀이가 등록부에 실린다 — 그래서
+  함께 넣었다. 409 면 원장 변경까지 되돌아간다.
+- 넣지 않은 것 — 사람이 세우는 별칭(PUT /registry/{k}/merge · cluster_merge 큐 결정)의 같은 앞 키 점검. 키 전파 밖의 길이라 열린 항목으로 둔다.
+
+### BE-13. 접혀 닫힌 행은 주의 D 이고, 클러스터를 세는 곳이 건너뛴다(검토 3)
+- 무엇이 틀렸나 — `_close_vacated_rows` 가 status · superseded_by 만 쓰고 attention 은 닫을 때의 A 로 남겼다. 다음 병합은 그 행을 다시 세지
+  않아(그 대상의 클러스터가 아니다) 고쳐지지 않는다. 상태를 보지 않는 카드 대조 쪽 소비처가 같은 원자를 두 번 셌다 — 종합 입력(A 둘) ·
+  마감 판(clusters 2 · A 2) · 쟁점 후보(같은 닻 둘 → 고르기 candidates 2) · 보고서. 판정 후보(open · verified 만)는 1 이었다. 이 가지 전에는
+  merge_key 가 접지 않아 원자가 한 번씩만 섰다 — 이 가지의 접힘이 만든 이중 셈이다.
+- 고친 것 — 닫을 때 attention 을 `attention_of({'status': 'superseded'})`(D)로 쓴다. `registry.vacated(row, target)` = 같은 대상 표지의
+  superseded(그 대상 안에서 접혀 닫힌 행 — §4.8 의 T′# 닫힘은 아니다)를 두고 클러스터를 세는 곳이 건너뛴다 — `closure.cell_counts` 의 등록부 수
+  (clusters · attention · card_fail_claimed) · `issues.candidates` · 종합의 `domain_rows` 와 보고서 `build_report`(주의 A · B 는 등급으로도 빠지지만
+  개선 상위 · 영역 쪽 C/D · 메커니즘 표는 등급을 보지 않는다). `_write_registry_row` 의 다시 열기도 같은 판정을 쓴다.
+- 쟁점 칸(issue_id · issue_state)은 지우지 않았다(검토가 함께 권한 것과 다르다) — rr_issues 의 거울이라 `issues._sync_registry` 가 쟁점 고르기마다
+  닻 키의 행에 다시 쓴다. 지우면 다음 고르기가 되살리고 그 사이에는 거울이 rr_issues 와 어긋난다. 소비처가 그 행을 건너뛰므로 세지 않는다.
+- 건드리지 않은 것 — 상태 열을 함께 적는 줄(쟁점 브리프 I8 · 통합 보고서 표)은 그 행을 `superseded` 로 보인다(세는 것이 아니라 이력이다).
+  종합 `_risk_rows`(target_rows 의 A · B 고르기)는 D 로 이미 빠져 따로 거르지 않았다. 등록부 조회(GET …/registry · risk_get_registry)는 계약대로
+  전 행이다.
+
+### BE-14. 별칭 맞추기는 두 걸음이다 — 다 거두고 세운다(검토 4)
+- 무엇이 틀렸나 — 동결 키를 정렬 차례로 돌며 키마다 거두고 세웠다. 뒤로 사람 4홉인 X 에 middle → X · leaf → middle 을 병합한 뒤 middle 을
+  풀면, key(leaf) → key(middle) 을 세울 때 같은 맞추기가 곧 거둘 key(middle) → key(X) 를 세어 6홉 409 가 났다 — key(leaf) 가 먼저 정렬될 때만
+  (키 해시 차례). 이름만 바꾼 같은 모양은 지나갔다.
+- 고친 것 — `_plan`(할 일을 센다, 쓰지 않는다) → 거둘 원장 별칭을 다 거둔다 → 세운다 → 맞춘 뒤 점검(BE-12). 세우는 동안의 별칭은 마지막
+  별칭 집합의 부분이라 세울 때의 홉 · 순환 점검이 거짓으로 걸리지 않는다. 시험은 두 이름 차례를 다 본다.
+
+### BE-15. 쓰는 병합은 읽기부터 한 트랜잭션이다(검토 5)
+- 무엇이 틀렸나 — `registry.merge` 가 원자 · 별칭을 트랜잭션 밖에서 읽고 행을 센 뒤 쓰기만 트랜잭션에 넣었다. 저장소 락은 쿼리마다 풀리므로
+  그 사이에 다른 요청의 키 전파(별칭 · 접힘 · 커밋)가 끝날 수 있고, 낡은 행이 그 접힘을 덮어 닫힌 옛 행을 다시 열었다(이 가지의 다시 열기
+  규칙이 같은 대상 표지를 다시 연다) — 별칭은 살아 있는데 등록부는 접히지 않은 채 다음 병합까지 남았다. 트랜잭션 밖 계산은 이 가지 전부터
+  있었고 PUT /registry/{k}/merge 도 같은 경합이었다 — 키 전파의 모든 길이 이제 그 경합에 닿는다. 트랜잭션 밖에서 병합을 부르는 곳은
+  `chain.py`(러너 스레드)와 사람 finding 만들기 · 고치기 · 지우기 라우트다.
+- 고친 것 — `merge(persist=True)` 가 `store.tx()` 를 맨 앞에서 연다(본체는 `_merge`). RLock · BEGIN IMMEDIATE 가 병합과 키 전파를 줄 세운다.
+  안쪽 쓰기 tx 는 재진입이라 그대로고 `persist=False`(비교 보기)는 트랜잭션이 없다.
+- 대가 — 병합이 세는 동안에도 저장소 락을 쥔다(종전에는 쓰는 동안만). 헬스는 `try_lock` 이라 기다리지 않지만 큰 cells 대상을 병합하는 동안
+  다른 요청의 저장소 접근은 그만큼 기다린다.
+- 시험 — 바깥 트랜잭션을 여는 순간 '락을 먼저 잡은 다른 요청' 이 키 병합을 끝까지 돌려 커밋하게 store.tx 를 감싼다. 옛 코드는 그 순간이
+  읽기 뒤라 낡은 행을 쓰고, 고친 코드는 읽기 앞이라 새 원장으로 센다.
+
+### BE-16. 재매핑 별칭(taxonomy_major)의 끝에 원장 별칭을 이어 붙인다(검토 6)
+- 무엇이 틀렸나 — 맞추기가 원장이 세우지 않은 별칭을 전부 사람 별칭으로 보아 건너뛰었다(kept_human). 재매핑(`learning.apply_remap` —
+  key(unclassified, Y) → key(drop_stress, Y))을 거친 원자는 어떤 파트 병합도 따라가지 않았다 — 같은 파트의 재매핑 안 된 원자는 따라갔다.
+- 고친 것 — `_landing`. 동결 키에서 재매핑 별칭을 따라가 그 끝(원장 별칭이 설 자리)을 찾는다. 한 걸음마다 근거의 to_detail 로 다음 키를
+  같은 식으로 다시 만들어 보고(`_reproduce` — 빈 값 두 꼴), 못 만들면 건너뛴다(skipped `remap_not_reproducible` — 다른 식의 키를 지어 잇지
+  않는다, 동결 키를 못 만들 때와 같은 규칙). 끝 자리에서 원장이 원하는 키는 끝의 세부와 지금 주체로 센 키다 — 그 자리에 원장 별칭을 세우거나
+  거둔다. 재매핑 별칭 자체는 건드리지 않는다. 새 별칭 근거에 via(그 원자의 동결 키)를 싣는다.
+- 사람 결정이 이기는 것은 cluster_merge · dim_rename 이다. dim_rename 은 `dim:` 주체의 이름 바꾸기라 ck 주체를 다시 세는 키 전파에 닿지
+  않는다(그 별칭을 짓는 코드도 아직 없다) — 이어 붙이는 대상에 넣지 않았다.
+
+### BE-17. 재검토 표기는 세운 대상의 근거가 남아 있을 때만이다(검토 7)
+- 무엇이 틀렸나 — `_flag_escalations` 는 표기를 세우기만 했다. merge_key 가 T1 의 key(X) 지지를 늘려 T9 의 사람 기각 행에 표기를 세운 뒤
+  unmerge_key 로 지지가 돌아와도 표기가 남아, 없어진 근거를 들어 재검토를 청했다.
+- 고친 것 — `_retract_escalations`. 병합마다 이 대상이 세운 표기(by_target = 이 대상) 가운데 이 대상의 지금 행으로 더 서지 않는 것(그 클러스터가
+  없어졌거나 더 강하지 않다)을 다시 본다. 다른 대상의 지금 행(접혀 닫힌 행 빼고)이 여전히 더 강하면 그 대상으로 옮기고 — 표기는 한 칸이라
+  뒤 대상이 앞 대상의 표기를 덮어 썼으니 덮은 대상의 근거가 없어졌다고 앞 대상의 근거까지 지우지 않는다 — 없으면 끈다.
+- 계획과의 관계 — 계획 §4.7.1 은 '사람이 status 를 다시 확정하면 꺼진다' 만 적었다. 코드가 거두는 것은 표기의 근거(by_target 의 행)가 없어졌을
+  때뿐이고 사람 확정으로 꺼지는 것은 그대로다. 왕복만이 아니라 원자 삭제 · 패널 재제출로 약해진 대상에도 같은 규칙이다.
+- 고르지 않은 것 — 키 전파가 제 병합이 세운 표기를 적어 두었다가 되돌릴 때 거두기. 왕복 사이에 다른 병합이 같은 표기를 다시 세웠는지 가를
+  수 없다.
+
+### BE-18. 시험 · 변이 · 전체 시험(검토 후속)
+- 새 시험 — test_rekey 11(매개 둘 포함, 20 → 31). 옛 코드(0ee9fb1 사본)에서 10 이 까닭대로 붉다(접힌 행 주체 Y · 대상 TQ 빠짐 · 앞 키 6홉 통과 ·
+  키 차례 409 · 재매핑 kept_human · 재매핑 건너뛰기 없음 · 주의 A · 다시 열림 · 표기 남음 · 접힌 행으로 옮김). 초록 하나는 지킴 시험이다(middle 이
+  먼저 정렬되는 차례 — 옛 코드도 지나갔다).
+- 변이 21(스크래치 사본, 바이트코드 끔, 변이마다 되돌리고 __pycache__ 를 지운다) — 21/21 잡힘. 주체 셋(그 줄 · 동결 키 원자 · 지금 원장
+  폴백) · 대상 넷(별칭 대상 · 앞 키 집합 · 사슬 점검 · 패턴 · 큐 키 집합) · 닫힌 행 다섯(D · 마감 판 · 쟁점 후보 · 종합 행 · 보고서) · 두 걸음(키마다
+  거두고 세우는 한 걸음으로 되돌린 변이 — 그 차례 시험만 붉다) · 한 트랜잭션 · 재매핑 둘(사람 별칭 취급 · 재현 확인 없음) · 표기 넷(거두기 ·
+  옮기기 · 더 강한지 · 접힌 행 건너뛰기) · 다시 열기 판정. 사본은 끝에 작업 트리와 바이트가 같다.
+- 회수 시험(BE-11)의 diff 는 생산자 경로로 뜬다(make_project → make_snapshot 둘 → make_diff) — 그 뒤 스냅샷의 한 파트를 원장 merge_key 로
+  X 에 이어 노드가 X 로 풀린다. 첫 판에서는 rr_diffs 행을 손으로 써서 씨앗 출처 래칫(`tests/rr/test_fixture_provenance` — 손 INSERT
+  rr_diffs 8 → 9)에 걸렸다. 커밋은 건마다 나눴고(일곱 + 문서), 커밋마다 그 커밋의 새 시험이 앞 커밋의 코드에서 붉고(차례 지킴 하나 빼고)
+  그 커밋에서 test_rekey · rr_findings 읽기 가드 · ruff 가 푸른 것을 스크래치 사본으로 봤다.
+- 전체 시험(공유 잠금 아래) — 첫 판 3,550 통과 · 실패 1(위 래칫) · xfail 4(rc 1, 12분 57초). 고친 판 — 3,551 통과 · xfail 4 ·
+  실패 0(rc 0, 12분 04초 — 앞 판 3,540 에 새 시험 11). ruff — 바꾼 파일은 깨끗하다. 배선 리허설(`tests/synth/rehearsal_d.py`)은 프로세스를
+  띄우는 일이라 돌리지 않았다. 서비스 재기동 · push · 병합은 없다.

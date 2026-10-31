@@ -303,6 +303,7 @@ class SpecContext:
     # 대상의 방식(panels | cells). 'cells' 면 미분류 finding 의 클러스터 키를 자유 기술로 쪼갠다(M3.md #30 — `review_scope` 만 채운다).
     flow: str = "panels"
     _names: dict | None = field(default=None, repr=False, compare=False)   # part_names() 의 한 번 읽은 값
+    _req: dict | None = field(default=None, repr=False, compare=False)     # requirement_view() 의 한 번 센 값
 
     # ------------------------------------------------ 조회
     def field_evidence(self, kind: str, key: str, product_code: str | None = None) -> dict | None:
@@ -335,6 +336,30 @@ class SpecContext:
             " WHERE project_id = ? AND name = ? AND status IN ('candidate','confirmed')"
             " ORDER BY kind LIMIT 1", (self.project_id, name))
         return dict(rows[0]) if rows else None
+
+    def requirement_view(self) -> dict:
+        """원자 저장의 요구 대조 — `{'active': 이름 → 행(candidate · confirmed), 'margins': 이름 → 여유(미측정은 None)}`.
+
+        여유는 브리프 E0 · E3 와 같은 함수(`requirements.compute_req_signals`)로 그 스코프의 대상 스냅샷(diff 면 뒤 스냅샷)의 명명 치수와
+        지금 원장을 대조해 센다 — 좌석이 받은 여유와 저장 때 보정하는 여유가 같은 값이다. 한 번만 센다.
+        """
+        if self._req is None:
+            from app import requirements  # noqa: PLC0415 — 요구 인용이 있는 원자에서만 쓴다.
+
+            view: dict = {"active": {}, "margins": {}}
+            if self.store is not None and self.project_id:
+                view["active"] = {str(r["name"]): dict(r) for r in self._rows(
+                    "SELECT id, name, kind, op, value_json, unit, status, source_ref FROM rr_requirements"
+                    " WHERE project_id = ? AND status IN ('candidate','confirmed') ORDER BY kind DESC, name",
+                    (self.project_id,))}
+                sid = self.snapshot_ids[-1] if self.snapshot_ids else ""
+                dims = ((self.irs.get(sid) or {}).get("dims_named")) or {}
+                rows = dims.values() if isinstance(dims, Mapping) else dims
+                out = requirements.compute_req_signals(
+                    self.store, self.project_id, {"dims_named": [dict(d) for d in rows if isinstance(d, Mapping)]})
+                view["margins"] = requirements.margins_by_name(out["signals"]["req.margin"]["value"])
+            self._req = view
+        return self._req
 
     def _rows(self, sql: str, params: Sequence) -> list:
         if self.store is None:
@@ -1073,13 +1098,14 @@ def precedent_from_snapshot(feature_snapshot: dict, ctx: SpecContext) -> tuple[s
 
 # ================================================================ §4.3.2 subject_key · cluster_key
 def _iface_alias(ckeys: Sequence[str], ctx: SpecContext) -> tuple[str, str] | None:
-    """rr_iface_alias 에 별칭이 있으면 정규 쌍을 돌려준다."""
+    """rr_iface_alias 에 살아 있는 별칭이 있으면 정규 쌍을 돌려준다 — 철회한 별칭(status='revoked', plan §5.9.5)으로는 접지 않는다
+    (브리프 회수 `_alias_expand` · 성격 값과 같은 거름 — 종전에는 철회한 별칭으로도 새 원자의 주체를 접었다)."""
     if ctx.store is None or len(ckeys) != 2:
         return None
     alias_key = "|".join(sorted(ckeys))
     rows = ctx.store.query(
-        "SELECT alias_key, canonical_a, canonical_b FROM rr_iface_alias WHERE alias_key = ?", (alias_key,)
-    )
+        "SELECT alias_key, canonical_a, canonical_b FROM rr_iface_alias WHERE alias_key = ? AND status = 'active'",
+        (alias_key,))
     if not rows:
         return None
     row = rows[0]
@@ -1252,6 +1278,25 @@ def _keep_whole(value: Any, limit: int, where: str, warnings: list[str]) -> str:
     return text
 
 
+def _check_requirement(finding: dict, path: str, ctx: SpecContext, warnings: list[str]) -> None:
+    """요구 인용(`requirement_ref` · `req:` cite)이 있는 원자의 저장 대조(plan §4.3.1 requirement_ref · §2.8b (5) · P1 (20)).
+
+    `requirement_ref` 를 세우고, 가리킨 요구가 이 과제의 유효 요구(candidate · confirmed)가 아니면 dangling 에 더하고, 그 요구의 여유가
+    0 이하인데 judgement=OK 면 undetermined 로 보정해 parse_warnings 에 남긴다 — 요구 위반을 좌석 재량으로 지우지 않는다.
+    요구 인용이 없는 원자는 건드리지 않는다(원자 바이트 그대로 — 빈 requirement_ref 칸을 더하지 않는다).
+    """
+    from app import requirements  # noqa: PLC0415 — 요구 인용이 있는 원자에서만 쓴다.
+
+    named = requirements.parse_requirement_ref(finding.get("requirement_ref")) or any(
+        requirements.parse_requirement_ref(c.get("ref") if isinstance(c, Mapping) else c)
+        for c in finding.get("cites") or ())
+    if not named or ctx.store is None or not ctx.project_id:
+        return
+    view = ctx.requirement_view()
+    warnings.extend(f"{path}: {w}" for w in requirements.check_finding_requirement(
+        finding, by_name=view["active"], margins=view["margins"]))
+
+
 def _normalize_finding(finding: dict, path: str, ctx: SpecContext, *, is_gain: bool,
                        invalid: list[dict], warnings: list[str], curation: list[dict]) -> dict:
     finding = dict(finding)
@@ -1308,6 +1353,7 @@ def _normalize_finding(finding: dict, path: str, ctx: SpecContext, *, is_gain: b
     finding["quote_mismatch"] = resolved["quote_mismatch"]
     finding["unverified_refs"] = resolved["unverified"]
     finding["unquoted_numbers"] = resolved["unquoted_numbers"]
+    _check_requirement(finding, path, ctx, warnings)
 
     claimed = _fix_enum(finding.get("evidence_grade"), "evidence_grade", path, invalid)
     computed = evidence_grade_from_cites(resolved, ctx)
@@ -2152,6 +2198,12 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
         r["agent_key"]: int(r["cycle"] or 1)
         for r in store.query("SELECT agent_key, cycle FROM rr_coverage WHERE target_key = ?", (target_key,))
     }
+    # 그 좌석의 페르소나 판번호(rr_roster.persona_rev 사본) — 다음 브리프 E7 이 이 의견을 회수할 때 지금 로스터의 판과 견줘 다르면
+    # [이전 정의] 를 붙인다(plan §5.6.1). 로스터 밖 좌석(반대석 · 추가 좌석)과 판을 모르는 좌석은 NULL 이다.
+    persona_revs = {
+        r["agent_key"]: r["persona_rev"]
+        for r in store.query("SELECT agent_key, persona_rev FROM rr_roster WHERE target_key = ?", (target_key,))
+    }
     nonledger_cycle = NONLEDGER_CYCLE_BASE + int(panel["panel_no"] or 0)
     # 쟁점 패널(M3 S3-7)은 좌석 원장을 쓰지 않는다 — 모든 좌석이 원장 밖 회차이고 성격 진술을 앉히지 않는다(WP4 3.7).
     issue_panel = panel.get("kind") == "issue"
@@ -2224,6 +2276,7 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
         }
         opinion_rows.append((
             opinion_id, target_key, panel_id, owner_sub, agent_key, domain,
+            persona_revs.get(agent_key) if seated else None,
             origin if origin in ("primary", "counter", "adversary", "new") else "new", cycle,
             canonical_json(opinion),
             final_stance, state.get("tool_calls_n"), state.get("tool_calls_ok"), state.get("knowledge_hits_n"),
@@ -2240,12 +2293,12 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
 
     with store.tx():
         store.execute("DELETE FROM rr_seat_opinions WHERE panel_id = ?", (panel_id,))
-        _release_ledger_cycles(store, target_key, panel_id, [(row[4], row[7]) for row in opinion_rows])
+        _release_ledger_cycles(store, target_key, panel_id, [(row[4], row[8]) for row in opinion_rows])
         store.executemany(
-            "INSERT INTO rr_seat_opinions(opinion_id, target_key, panel_id, owner_sub, agent_key, domain, origin,"
-            " cycle, opinion_json, final_stance, tool_calls_n, tool_calls_ok, knowledge_hits_n, cited_refs_json,"
+            "INSERT INTO rr_seat_opinions(opinion_id, target_key, panel_id, owner_sub, agent_key, domain, persona_rev,"
+            " origin, cycle, opinion_json, final_stance, tool_calls_n, tool_calls_ok, knowledge_hits_n, cited_refs_json,"
             " quality_json, raised_finding_ids_json, excerpt_for_rag, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             opinion_rows,
         )
 
@@ -2266,9 +2319,9 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
                 "INSERT INTO rr_findings(finding_id, claim_uid, target_key, panel_id, opinion_id, project_id,"
                 " snapshot_id, diff_id, owner_sub, visibility, direction, domain, mechanism, mechanism_detail,"
                 " mechanism_free, change_kind, subject_key, ckeys_json, trigger_condition, severity, sev3,"
-                " judgement, detectability, detect_tool, evidence_grade, precedent, dangling, cluster_key,"
+                " judgement, detectability, detect_tool, evidence_grade, precedent, requirement_ref, dangling, cluster_key,"
                 " finding_json, recall_eligible, status, taxonomy_version, rule_version, ir_version, diff_version,"
-                " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     uid, uid, target_key, panel_id,
                     next((opinion_of[k] for k in raised if k in opinion_of), None), project_id,
@@ -2280,7 +2333,9 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
                     atom.get("trigger_condition"), atom.get("severity"), atom.get("sev3"),
                     atom.get("judgement"), (atom.get("detectability") or {}).get("level"),
                     (atom.get("detectability") or {}).get("tool"), atom.get("evidence_grade"),
-                    atom.get("precedent"), 1 if atom.get("dangling") else 0, atom.get("cluster_key"),
+                    # 무슨 요구를 어겼나(§2.8b (5)) — 정규화가 요구 인용에서 세운 값이다(없으면 NULL).
+                    atom.get("precedent"), atom.get("requirement_ref") or None,
+                    1 if atom.get("dangling") else 0, atom.get("cluster_key"),
                     json.dumps(atom, ensure_ascii=False, sort_keys=True),
                     # 상태 열은 정규화가 보존한 원자의 상태다(open | rejected_in_panel) — 병합은 이 열로 기각을 센다.
                     # 'open' 을 박던 동안 패널의 기각이 등록부에 한 번도 닿지 않았다(WP4 2.2 ②).

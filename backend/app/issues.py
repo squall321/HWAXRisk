@@ -250,6 +250,8 @@ def candidates(store: RiskStore, target_key: str, *, settings: Any = None) -> li
         key = str(row["cluster_key"])
         if row["direction"] != "risk" or key.endswith(registry.IMPROVEMENT_SUFFIX) or sources.get(key, "code") != "code":
             continue
+        if registry.vacated(row, target_key):
+            continue                # 별칭 접힘으로 비어 닫힌 행 — 그 원자는 닻(대표 키) 행에 이미 있다(같은 닻을 두 번 올리지 않는다)
         members = {fid: atoms[fid] for fid in row["merged"].get("member_ids") or () if fid in atoms}
         types, opposers = issue_types(row, list(members.values()), verdicts, cell_mechs,
                                       min_opposers=int(cfg.risk_issue_split_min_opposers))

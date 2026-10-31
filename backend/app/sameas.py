@@ -969,7 +969,9 @@ def inherit_ckeys(store, links: Sequence[Mapping[str, Any]],
             )
             evidence = {"method": method, "score": score,
                         "base_snapshot_id": base_snapshot_id, "target_snapshot_id": target_snapshot_id,
-                        "base_nid": a_nid, "target_nid": b_nid}
+                        "base_nid": a_nid, "target_nid": b_nid,
+                        # 사람 확정(원장 1단계)에서 온 대응이면 그 rr_sameas 행 — 그 확정을 reject 하면 이 승계 행도 되돌린다(§5.9.5).
+                        **({"ledger_id": link["ledger_id"]} if link.get("ledger_id") else {})}
             if pair_kind == "same_project_revision":
                 if row is not None and (row["status"] == "confirmed"
                                         or (row["status"] == "merged" and row["decided_by"] != "code:pair_correspondence")):
@@ -1068,7 +1070,7 @@ def record_iface_aliases(store, nodes: Sequence[Mapping[str, Any]], edges: Seque
 
 
 # ---------------------------------------------------------------- 사람 확정(§2.6.2 7단계 · §2.7.3)
-DECISIONS = ("confirm", "reject", "merge_key", "rename_key", "confirm_key", "unmerge_key")
+DECISIONS = ("confirm", "reject", "merge_key", "rename_key", "confirm_key", "unmerge_key", "revoke_iface_alias")
 
 
 def record_decision(store, payload: Mapping[str, Any], *, owner_sub: str,
@@ -1076,13 +1078,27 @@ def record_decision(store, payload: Mapping[str, Any], *, owner_sub: str,
     """`POST /api/sameas/decide` 본문 하나를 원장에 기록한다.
 
     `confirm|reject` 는 `rr_sameas`(scope·pair_key·stable 키 쌍), `merge_key|rename_key|confirm_key|unmerge_key`
-    는 `rr_part_keys` 에 쓴다. 스냅샷은 바뀌지 않고 다음 스냅샷·'재해석 적용' 이 1단계에서 흡수한다.
+    는 `rr_part_keys`, `revoke_iface_alias` 는 `rr_iface_alias` 에 쓴다. 스냅샷은 바뀌지 않고 다음 스냅샷·'재해석 적용' 이 1단계에서
+    흡수한다.
+
+    확정을 뒤집는 조작(confirmed → rejected 인 reject · merged 를 푸는 unmerge_key · revoke_iface_alias)과 그 짝인 merge_key 는 같은
+    트랜잭션에서 키 전파(`rekey.run`, plan §5.9.5)를 돈다 — 저장 키 · 등록부 · priors 가 원장을 따라오고 rr_audit(rekey) 1행이 남는다.
+    별칭 6홉 · 순환이면 409 이고 원장 변경도 함께 되돌아간다.
     """
+    from app import rekey  # noqa: PLC0415 — rekey 는 이 모듈(resolve_ckey)을 쓴다.
+
     decision = str(payload.get("decision") or "")
     if decision not in DECISIONS:
         raise AppError("E100", f"decision 은 {list(DECISIONS)} 중 하나여야 합니다 — {decision!r}.", 400)
     now = now_epoch()
     actor = decided_by or owner_sub
+
+    if decision == "revoke_iface_alias":
+        alias_key = str(payload.get("alias_key") or "")
+        if not alias_key:
+            raise AppError("E100", "alias_key 가 필요합니다('<ckey_a>|<ckey_b>' 정렬).", 400)
+        out = rekey.revoke_iface_alias(store, alias_key, owner_sub=owner_sub, actor=actor, at=now)
+        return {"ok": True, "table": "rr_iface_alias", "decision": decision, **out}
 
     if decision in ("confirm", "reject"):
         scope = str(payload.get("scope") or "")
@@ -1098,12 +1114,22 @@ def record_decision(store, payload: Mapping[str, Any], *, owner_sub: str,
             raise AppError("E100", "pair_key 가 필요합니다(intra=project_id, pair=정렬한 두 project_id).", 400)
         status = "confirmed" if decision == "confirm" else "rejected"
         evidence = payload.get("evidence")
+        rekeyed = None
         with store.tx():
+            prev = store.query_one(
+                "SELECT id, status FROM rr_sameas WHERE scope=? AND pair_key=? AND a_stable=? AND b_stable=?",
+                (scope, pair_key, a_stable, b_stable))
+            # 1걸음(§5.9.5) — 결정이 뒤집히면 직전 값을 prev_* 에 남긴다(번복 이력, 행 하나로 유지). 같은 결정을 다시 내면 그대로다.
             store.execute(
                 "INSERT INTO rr_sameas (id, owner_sub, scope, pair_key, a_stable, b_stable, method, score,"
                 " status, evidence, decided_by, decided_at, snapshot_id_at_decision)"
                 " VALUES (?,?,?,?,?,?,'manual',1.0,?,?,?,?,?)"
                 " ON CONFLICT(scope, pair_key, a_stable, b_stable) DO UPDATE SET"
+                " prev_status=CASE WHEN rr_sameas.status <> excluded.status THEN rr_sameas.status ELSE rr_sameas.prev_status END,"
+                " prev_decided_by=CASE WHEN rr_sameas.status <> excluded.status THEN rr_sameas.decided_by"
+                " ELSE rr_sameas.prev_decided_by END,"
+                " prev_decided_at=CASE WHEN rr_sameas.status <> excluded.status THEN rr_sameas.decided_at"
+                " ELSE rr_sameas.prev_decided_at END,"
                 " status=excluded.status, method='manual', score=1.0, evidence=excluded.evidence,"
                 " decided_by=excluded.decided_by, decided_at=excluded.decided_at,"
                 " snapshot_id_at_decision=excluded.snapshot_id_at_decision",
@@ -1111,13 +1137,23 @@ def record_decision(store, payload: Mapping[str, Any], *, owner_sub: str,
                  canonical_json(evidence) if evidence is not None else None,
                  actor, now, payload.get("snapshot_id")),
             )
+            if prev is not None and prev["status"] == "confirmed" and status == "rejected":
+                # 확정 → reject — 그 확정에서 자동 승계된 ckey 병합(§2.7.3)을 되돌리고 키 전파를 돈다.
+                unmerged = rekey.unmerge_auto_rows(store, prev["id"], owner_sub=owner_sub, actor=actor, at=now)
+                rekeyed = rekey.run(store, op="sameas_reject", owner_sub=owner_sub, actor=actor, at=now,
+                                    ckeys=rekey.with_descendants(store, unmerged, owner_sub),
+                                    subject_id=f"sameas:{prev['id']}",
+                                    ledger={"sameas_id": prev["id"], "scope": scope, "pair_key": pair_key,
+                                            "a_stable": a_stable, "b_stable": b_stable, "unmerged": unmerged})
         return {"ok": True, "table": "rr_sameas", "scope": scope,
-                "a_stable": a_stable, "b_stable": b_stable, "status": status}
+                "a_stable": a_stable, "b_stable": b_stable, "status": status,
+                **({"rekey": rekeyed} if rekeyed is not None else {})}
 
     ckey = str(payload.get("ckey") or payload.get("ckey_from") or "")
     if not ckey:
         raise AppError("E100", "ckey(또는 ckey_from)가 필요합니다.", 400)
-    row = store.query_one("SELECT ckey FROM rr_part_keys WHERE ckey=? AND owner_sub=?", (ckey, owner_sub))
+    row = store.query_one("SELECT ckey, status, merged_into FROM rr_part_keys WHERE ckey=? AND owner_sub=?",
+                          (ckey, owner_sub))
     if row is None:
         raise AppError("E404", f"rr_part_keys 에 없는 ckey 입니다 — {ckey}.", 404)
 
@@ -1133,14 +1169,26 @@ def record_decision(store, payload: Mapping[str, Any], *, owner_sub: str,
                 " decided_by=?, decided_at=?, updated_at=? WHERE ckey=? AND owner_sub=?",
                 (into, actor, now, now, ckey, owner_sub),
             )
-            detail = {"ckey": ckey, "merged_into": into}
+            # 병합은 그 키(와 그 키에 매달린 키)를 주체로 가진 원자를 대표 키의 클러스터로 접는다 — 별칭(ckey_merge)이 서고
+            # 등록부가 다시 병합된다. 이 짝이 있어야 unmerge_key 가 되돌릴 것이 생긴다(§4.3.2 · §5.9.5).
+            detail = {"ckey": ckey, "merged_into": into, "rekey": rekey.run(
+                store, op="merge_key", owner_sub=owner_sub, actor=actor, at=now,
+                ckeys=rekey.with_descendants(store, [ckey], owner_sub), subject_id=f"ckey:{ckey}",
+                ledger={"ckey": ckey, "merged_into": into, "before": {"status": row["status"],
+                                                                       "merged_into": row["merged_into"]}})}
         elif decision == "unmerge_key":
+            # 1걸음(§5.9.5) — merged_into=NULL · status='confirmed' · merge_evidence_json=NULL(자동 승계 행 포함, 행 삭제 없음).
             store.execute(
                 "UPDATE rr_part_keys SET status='confirmed', merged_into=NULL, merge_evidence_json=NULL,"
                 " decided_by=?, decided_at=?, updated_at=? WHERE ckey=? AND owner_sub=?",
                 (actor, now, now, ckey, owner_sub),
             )
             detail = {"ckey": ckey, "merged_into": None}
+            if row["status"] == "merged":
+                detail["rekey"] = rekey.run(
+                    store, op="unmerge_key", owner_sub=owner_sub, actor=actor, at=now,
+                    ckeys=rekey.with_descendants(store, [ckey], owner_sub), subject_id=f"ckey:{ckey}",
+                    ledger={"ckey": ckey, "before": {"status": row["status"], "merged_into": row["merged_into"]}})
         elif decision == "confirm_key":
             store.execute(
                 "UPDATE rr_part_keys SET status='confirmed', decided_by=?, decided_at=?, updated_at=?"

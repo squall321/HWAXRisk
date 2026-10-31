@@ -130,7 +130,7 @@ def closing_hash(store: RiskStore, target_key: str) -> str:
 # ---------------------------------------------------------------- 수
 def cell_counts(store: RiskStore, target_key: str) -> dict:
     """완결 판정과 보고서 머리가 같이 쓰는 수(3.8 응답의 counts) — 셀·단위·전문가·쟁점·등록부·넘김·품질."""
-    from app import planner, review_quality, units  # noqa: PLC0415 — 무거운 모듈은 쓸 때만.
+    from app import planner, registry, review_quality, units  # noqa: PLC0415 — 무거운 모듈은 쓸 때만.
 
     cells = closure_cells(store, target_key)
     rows = cells.pop("_rows", None) or [dict(r) for r in store.query(
@@ -194,8 +194,10 @@ def cell_counts(store: RiskStore, target_key: str) -> dict:
     held = [r for r in issue_rows if "held_fail" in _loads(r["types_json"], [])]
     p1 = [r for r in issue_rows if r["p_class"] == "P1"]
 
+    # 별칭 접힘으로 비어 닫힌 행은 그 대상의 클러스터가 아니다(registry.vacated) — 세면 접힌 원자가 두 번 선다.
     registry_rows = [dict(r) for r in store.query(
-        "SELECT attention, merged_json FROM rr_registry WHERE target_key = ? AND direction = 'risk'", (target_key,))]
+        "SELECT attention, merged_json, status, superseded_by FROM rr_registry WHERE target_key = ? AND direction = 'risk'",
+        (target_key,)) if not registry.vacated(dict(r), target_key)]
     attention = {g: sum(1 for r in registry_rows if r["attention"] == g) for g in ("A", "B", "C", "D")}
     card_fail_claimed = sum(1 for r in registry_rows
                             if ((_loads(r["merged_json"], {}).get("claimed") or {}).get("judgement") == "FAIL"))

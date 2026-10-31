@@ -514,3 +514,37 @@ B25 가 남긴 작은 것 하나(2026-10-31, context-notes BL-2) — 캡처가 �
       본다) 뒤 `--apply`(BL-13)
 - [ ] 등록부 병합이 별칭으로 접힌 옛 (대상, 옛 열쇠) 행을 닫지 않는다 — 정본 plan §4.3.2 3 의 `superseded` · `superseded_by` 가 없어 옛 행이
       open 으로 남아 판정 후보에 든다(종전부터 — 재열쇠 · cluster_merge · PUT merge · 재매핑 공통, BL-13, 결정 필요)
+
+## 남은 일 10-31 — 리스크 엔진 B23 · B27 · B29(가지 `wt1031/bl-risk-engine`, 2026-10-31)
+
+> 포털 `docs/leftovers-1017/triage-1031.md` 표 B 의 세 줄(사용자 결정 10-31 — 표 B dev 작업). 결정과 까닭은 context-notes 'BE-1 ~ BE-10'.
+
+- [x] B23 ① 브리프 E0 요구 한 줄 — `요구 dim_limit n · 최소 여유 ±m 단위 [req:<이름>] · 시나리오 a/b` 또는 `요구 미등록`(BE-1 · BE-2)
+- [x] B23 ② E3 limit · margin 두 열 — 여유 오름차순, 미측정은 0 이 아니라 그 뒤, 요구 없는 치수는 `—`, 치수 없는 요구도 한 줄(BE-2)
+- [x] B23 ③ 원자 저장 — 여유 ≤0 인 요구를 가리키며 OK 면 undetermined + parse_warnings 1건, 패널 저장 행에 requirement_ref(BE-3)
+- [x] B27 로스터 동결 · 덧붙이기가 role_sha(원본 role 글 sha256[:12]) · persona_rev(그 앞 7자)를 채운다 — 원천은 list_agents(compact 끔)의
+      description(BE-4)
+- [x] B27 패널 의견 행에 로스터 판 사본 · nightly 스탬프에 persona_rev · E7 의 판이 다른 회수 의견에 `[이전 정의]`(둘 다 알 때만, BE-5)
+- [x] B29 rekey — 네 조작(same-as reject · unmerge_key · 계면 원장 rejected · 계면 별칭 revoke)과 짝 merge_key 가 한 트랜잭션에서 plan §5.9.5
+      여섯 걸음(원장 이력 · 주체 재계산 · 별칭 append/revoke · registry.merge · priors · 패턴 · 무효 큐 · rr_audit rekey)을 돈다(BE-6 · BE-7)
+- [x] B29 registry.merge — 원자가 옮겨 간 옛 행을 superseded 로 닫고 다시 서면 다시 연다 · 다른 대상의 닫힘 표지는 열지 않는다(BE-8)
+- [x] 시험 — 새 36(test_req_brief 8 · test_persona_rev 8 · test_rekey 20) · 옛 코드에서 32 붉음(나머지 넷은 지킴 시험) · 변이 31/31 ·
+      전체 3,540 통과 · xfail 4 · 실패 0(7630563, BE-9)
+- [ ] rr_states 의 요구 신호(동결 · 요구 편집의 상태 재계산) — 포털 106 줄의 다른 칸(BE-10)
+- [ ] 코드가 세운 병합(어휘 재계산 · 자동 승계)의 등록부 접기 · 사람 확정 계면 별칭의 길 · 원자가 지워져 빈 등록부 행(BE-10)
+- [ ] nightly 스탬프의 대상 전체 페르소나 판 · E7 AIDataHub 경로의 판(BE-10)
+- [ ] E7 앱 DB 경로의 상태 필터(dismissed · rejected_in_panel · superseded · recall_eligible=0 제외) — 포털 152 줄의 다른 칸(BE-10)
+- [ ] 화면 — SnapshotPage 여유 표 · 별칭 철회 버튼 · rekey 요약(화면 세션 몫)
+
+### 검토 후속(10-31, 같은 가지) — 확인된 일곱 건(BE-11 ~ BE-18)
+
+- [x] 접힌 행의 주체 — 동결 키가 그 행 키인 원자의 주체, 없으면 대표 주체를 지금 원장으로(병합 뒤에도 §5.9.4 회수가 X 로 찾는다, BE-11)
+- [x] 별칭 사슬로만 닿는 대상 — 바뀐 키의 앞 키(upstream_keys)를 동결 키로 가진 원자의 대상도 다시 병합 · 패턴 · 큐도 같은 키 집합(BE-12)
+- [x] 맞춘 뒤 앞 키 사슬의 5홉 점검(_check_chains) — 사람 별칭 Q → Y 위의 Y → X 가 Q 를 6홉으로 만들면 409(BE-12)
+- [x] 접혀 닫힌 행의 주의 등급 D · 클러스터를 세는 곳(마감 판 · 쟁점 후보 · 종합 영역 행 · 보고서)이 registry.vacated 행을 건너뛴다(BE-13)
+- [x] 별칭 맞추기 두 걸음 — 다 거두고 세운다(키 해시 차례로 409 가 갈리지 않는다, BE-14)
+- [x] 쓰는 registry.merge 를 읽기부터 한 트랜잭션으로(동시 병합이 키 전파의 접힘을 덮지 않는다, BE-15)
+- [x] 재매핑 별칭(taxonomy_major)의 끝에 원장 별칭을 이어 붙인다 — 재매핑 별칭은 그대로, 못 다시 만들면 건너뛴다(BE-16)
+- [x] 재검토 표기는 세운 대상의 지금 행이 여전히 더 강할 때만 — 아니면 다른 대상의 더 강한 행으로 옮기거나 끈다(BE-17)
+- [x] 시험 — test_rekey 새 11(옛 코드에서 10 붉음 · 지킴 1) · 변이 21/21 · 전체 3,551 통과 · xfail 4 · 실패 0(BE-18)
+- [ ] 사람 별칭 세우기(PUT /registry/{k}/merge · cluster_merge 큐)의 앞 키 사슬 점검 — 키 전파 밖이라 이번에 넣지 않았다(BE-18)

@@ -106,6 +106,13 @@ def target_flow(store: RiskStore, target_key: str) -> str:
     return "cells" if row is not None and row["flow"] == "cells" else "panels"
 
 
+def vacated(row: Mapping[str, Any], target_key: str) -> bool:
+    """별칭 접힘으로 비어 닫힌 행인가 — 같은 대상 표지의 superseded(`_close_vacated_rows`). 그 대상의 클러스터가 아니라 옛 `reg:`
+    인용을 받는 자리라 클러스터를 세는 곳(종합 입력 · 마감 판 · 쟁점 후보)은 건너뛴다. 다른 대상이 닫은 행(§4.8 T′#…)은 아니다."""
+    return (_clean_str(row.get("status")) == "superseded"
+            and _clean_str(row.get("superseded_by")).startswith(f"{target_key}#"))
+
+
 def finding_scope(alias: str = "") -> str:
     """`FINDING_SCOPE_SQL` 을 표 별칭 하나에 맞춘다(`alias='f'` → `f.source_kind`·`f.target_key`)."""
     if not alias:
@@ -607,13 +614,18 @@ def _write_registry_row(store: RiskStore, row: dict, now: int) -> str:
         (row["target_key"], row["cluster_key"]),
     )
     if existing is not None:
-        # 사람·라벨이 정한 status 는 병합이 건드리지 않는다 — 코드 출처일 때만 rejected_in_panel↔open 을 옮긴다.
+        # 사람·라벨이 정한 status 는 병합이 건드리지 않는다 — 코드 출처일 때만 rejected_in_panel↔open 을 옮긴다. 별칭으로 접혀
+        # 이 병합이 닫았던 행(superseded · superseded_by 가 같은 대상)은 그 클러스터가 다시 서면 코드 상태로 다시 연다(§4.3.2 3 ·
+        # §5.9.5 4 — '다시 갈라진다'). 다른 대상이 닫은 행(§4.8 superseded_by=T′#…)은 그대로다 — 종전에는 그 옛 대상을 다시 병합하면
+        # superseded 가 open 으로 돌아갔다(rekey 가 옛 대상까지 다시 병합해 드러났다).
         code_status = row.get("code_status") or "open"
         status_row = store.query_one(
-            "SELECT status, status_source FROM rr_registry WHERE target_key = ? AND cluster_key = ?",
+            "SELECT status, status_source, superseded_by FROM rr_registry WHERE target_key = ? AND cluster_key = ?",
             (row["target_key"], row["cluster_key"]))
+        reopen = status_row is not None and vacated(dict(status_row), row["target_key"])
         status_moves = (status_row is not None and status_row["status_source"] == "code"
-                        and status_row["status"] != code_status)
+                        and status_row["status"] != code_status
+                        and (status_row["status"] in ("open", "rejected_in_panel") or reopen))
         same = all(existing[col] == row[col] for col in _MERGE_OWNED_COLUMNS)
         if same and not status_moves:
             return "unchanged"
@@ -621,7 +633,7 @@ def _write_registry_row(store: RiskStore, row: dict, now: int) -> str:
         params = {col: row[col] for col in _MERGE_OWNED_COLUMNS}
         params.update({"target_key": row["target_key"], "cluster_key": row["cluster_key"], "updated_at": now})
         if status_moves:
-            sets += ", status = :code_status"
+            sets += ", status = :code_status" + (", superseded_by = NULL" if reopen else "")
             params["code_status"] = code_status
         store.execute(
             f"UPDATE rr_registry SET {sets}, updated_at = :updated_at "
@@ -770,7 +782,19 @@ def merge(store: RiskStore, target_key: str, *, owner_sub: str | None = None, pe
     수로 세며, 끝난 쟁점의 결과를 닻 행에 얹고, 과제를 가로지르는 기여(rr_delta_contrib)에는 넣지 않는다(M3 #57 — 그 대상의
     기여 행을 비운다). `persist=False` 는 아무것도 쓰지 않고 계산한 행을 `rows` 로 돌려준다 — `include_card=False` 와 함께
     '패널만 본 등록부' 비교 보기(`GET …/registry?source=panels`)가 쓴다.
+
+    쓰는 병합(`persist=True`)은 원자 · 별칭을 읽는 데서부터 쓰기까지 한 트랜잭션이다(저장소 락 · BEGIN IMMEDIATE). 종전에는 트랜잭션
+    밖에서 읽고 센 행을 나중에 썼다 — 그 사이에 다른 요청의 키 전파(rekey)가 별칭을 세우고 등록부를 접어 커밋하면, 낡은 행이 그
+    접힘을 덮고(닫힌 옛 행이 다시 열린다) 별칭과 등록부가 어긋난 채 남았다.
     """
+    if not persist:
+        return _merge(store, target_key, owner_sub=owner_sub, persist=False, include_card=include_card)
+    with store.tx():
+        return _merge(store, target_key, owner_sub=owner_sub, persist=True, include_card=include_card)
+
+
+def _merge(store: RiskStore, target_key: str, *, owner_sub: str | None, persist: bool, include_card: bool) -> dict:
+    """`merge` 의 본체 — 쓰는 병합이면 부르는 쪽이 트랜잭션을 열었다."""
     now = common.now_epoch()
     flow = target_flow(store, target_key) if include_card else "panels"
     findings = _load_findings(store, target_key, include_card=include_card)
@@ -802,6 +826,8 @@ def merge(store: RiskStore, target_key: str, *, owner_sub: str | None = None, pe
                              issue=issues.get(base) if bucket == "risk" else None)
         if not row["owner_sub"]:
             row["owner_sub"] = owner_sub
+        if any(_clean_str(m.get("cluster_key")) != base for m in members):
+            row["subject_key"] = _folded_subject(store, base, members, row["subject_key"], owner_sub)
         rows.append(row)
 
     # 주의 등급은 행의 마지막 상태로 센다 — 사람이 정한 상태가 있으면 그것, 없으면 병합이 세운 코드 상태다.
@@ -826,6 +852,7 @@ def merge(store: RiskStore, target_key: str, *, owner_sub: str | None = None, pe
     with store.tx():
         for row in rows:
             counts[_write_registry_row(store, row, now)] += 1
+        folded = _close_vacated_rows(store, target_key, rows, now)
         escalated = _flag_escalations(store, rows, target_key, now, flow=flow, owner_sub=owner_sub)
         # cells 대상은 M3 동안 과제를 가로지르는 선례 통계에 기여하지 않는다(M3 #57 · 7절 (a)-2) — 그 대상의 기여 행을 비운다.
         affected = _recompute_contrib(store, target_key, owner_sub or "", rows if flow != "cells" else [], now)
@@ -846,10 +873,72 @@ def merge(store: RiskStore, target_key: str, *, owner_sub: str | None = None, pe
         "inserted": counts["inserted"],
         "updated": counts["updated"],
         "unchanged": counts["unchanged"],
+        "folded": folded,
         "priors_written": priors_written,
         "verdict_candidate": candidate["verdict"],
         "escalated": escalated,
     }
+
+
+def _folded_subject(store: RiskStore, base_key: str, members: Sequence[Mapping[str, Any]], rep_subject: str,
+                    owner_sub: str | None) -> str:
+    """별칭으로 접힌 클러스터 행의 주체 — 그 행의 키(base)가 가리키는 주체다(§5.9.4 회수는 지금 원장의 주체로 행을 찾는다).
+
+    동결 키가 base 인 원자가 있으면 그 원자의 주체(같은 키면 같은 주체다), 없으면(원자가 전부 별칭으로 들어왔다) 대표 원자의 주체를
+    지금 원장으로 다시 센 값이다(`rekey.current_subject` — 원장 별칭은 그 주체로 base 를 셌다). 종전에는 대표 원자의 동결 주체를
+    그대로 써, 병합으로 사라진 주체(Y → X 의 Y)가 접힌 행의 주체가 되면 X 로 찾는 회수(`brief._subject_path` · E5 · precedents)에서
+    그 행이 빠졌다. 접히지 않은 행은 종전 그대로 대표 원자의 주체다.
+    """
+    native = sorted((m for m in members if _clean_str(m.get("cluster_key")) == base_key),
+                    key=lambda m: _clean_str(m.get("finding_id")))
+    if native:
+        return _clean_str(native[0].get("subject_key"))
+    from app import rekey  # noqa: PLC0415 — rekey 는 registry 를 import 한다(부를 때 들인다).
+
+    return rekey.current_subject(store, rep_subject, owner_sub or "")[0]
+
+
+def _close_vacated_rows(store: RiskStore, target_key: str, rows: Sequence[Mapping[str, Any]], now: int) -> int:
+    """원자가 다른 클러스터로 옮겨 간 옛 행을 닫는다(plan §4.3.2 3 · §5.9.5 4) — `status='superseded'` ·
+    `superseded_by='<target>#<원자가 간 클러스터>'`.
+
+    원자의 동결 cluster_key 는 바뀌지 않으므로 원자가 옮기는 길은 별칭뿐이다 — 별칭으로 접히면 옛 키의 행이, 별칭을 거두면 접혔던
+    대표 키에만 서 있던 행이 비는데, 종전에는 그 행이 열린 채 남아 같은 지지가 두 행에 함께 섰다(판정 후보 · 회수가 두 번 셌다).
+    비었는지는 그 행의 옛 구성원(merged_json.member_ids · rejected_refs)이 이번 병합의 다른 행에 있는지로 본다 — 원자가 지워져
+    빈 행(패널 재제출 · 사람 finding 삭제)은 여기서 다루지 않는다(종전 그대로). 행은 지우지 않는다 — 옛 `reg:<target>#<old>` 인용이 그
+    행을 계속 찾는다(dangling 0). 닫는 것은 코드가 정한 열린 행뿐이다(사람 · 라벨 · §4.8 의 표지는 그대로). 그 클러스터가 다시 서면
+    `_write_registry_row` 가 같은 대상 표지를 보고 다시 연다.
+
+    닫을 때 주의 등급도 닫힌 행의 값(`attention_of` — superseded 는 D)으로 쓴다. 다음 병합은 이 행을 다시 세지 않으므로(그 대상의
+    클러스터가 아니다) 닫을 때의 A 가 그대로 남아, 상태를 보지 않고 주의 등급으로 고르는 곳(종합 입력의 A · B · 보고서 '주의 A')이
+    같은 원자를 두 번 셌다. 쟁점 칸(issue_id · issue_state)은 rr_issues 의 거울(`issues._sync_registry`)이라 그대로 둔다.
+    """
+    closed_attention = attention_of({"status": "superseded"})
+    stored = {str(r["cluster_key"]) for r in rows}
+    home: dict[str, str] = {}
+    for row in rows:
+        merged = _loads(row["merged_json"], {})
+        for fid in _as_list(merged.get("member_ids")) + _as_list(merged.get("rejected_refs")):
+            home[str(fid)] = str(row["cluster_key"])
+    closed = 0
+    for row in store.query(
+            "SELECT cluster_key, merged_json, status, status_source FROM rr_registry WHERE target_key = ?"
+            " ORDER BY cluster_key", (target_key,)):
+        key = _clean_str(row["cluster_key"])
+        if key in stored or row["status_source"] != "code" or row["status"] not in ("open", "rejected_in_panel"):
+            continue
+        merged = _loads(row["merged_json"], {})
+        moved = {home[str(fid)] for fid in _as_list(merged.get("member_ids")) + _as_list(merged.get("rejected_refs"))
+                 if str(fid) in home}
+        if not moved:
+            continue
+        rep = home.get(str(merged.get("claim_finding_id") or ""))
+        into = rep if rep in moved else sorted(moved)[0]
+        store.execute(
+            "UPDATE rr_registry SET status = 'superseded', superseded_by = ?, attention = ?, updated_at = ?"
+            " WHERE target_key = ? AND cluster_key = ?", (f"{target_key}#{into}", closed_attention, now, target_key, key))
+        closed += 1
+    return closed
 
 
 # 재제기 강도 비교 축(plan §4.7.1) — 하나라도 기준선보다 크면 '더 강한 근거' 다.
@@ -902,7 +991,45 @@ def _flag_escalations(store: RiskStore, rows: Sequence[Mapping[str, Any]], targe
                 (common.canonical_json(note), now, other["target_key"], other["cluster_key"]),
             )
             flagged.append(str(other["cluster_key"]))
+    if owner_sub:
+        _retract_escalations(store, rows, target_key, now, flow=flow, owner_sub=owner_sub)
     return flagged
+
+
+def _retract_escalations(store: RiskStore, rows: Sequence[Mapping[str, Any]], target_key: str, now: int, *,
+                         flow: str, owner_sub: str) -> None:
+    """이 대상이 세운 재검토 표기(by_target = 이 대상) 가운데 이 대상의 지금 행으로는 더 서지 않는 것을 거둔다 — 그 클러스터가 이
+    대상에서 사라졌거나(접힘이 풀렸다 · 원자가 지워졌다) 더 강하지 않다. 종전에는 표기가 한 번 서면 사람이 다시 확정할 때까지 남아,
+    키 병합 → 되돌리기 왕복 뒤에도 없어진 근거(접힘으로 늘었던 지지)를 들어 재검토를 청했다.
+
+    다른 대상의 지금 행이 여전히 더 강하면 표기를 그 대상으로 옮긴다 — 표기는 한 칸이라 뒤에 선 대상이 앞 대상의 표기를 덮어 썼으니,
+    덮은 대상의 근거가 없어졌다고 앞 대상의 근거까지 지우지 않는다. 사람이 status 를 다시 확정하면 꺼지는 것은 그대로다(set_status).
+    """
+    live = {str(r["cluster_key"]): r for r in rows}
+    for other in store.query(
+            "SELECT target_key, cluster_key, status_basis_json, needs_review_json FROM rr_registry"
+            " WHERE owner_sub = ? AND target_key != ? AND needs_review_json IS NOT NULL ORDER BY target_key, cluster_key",
+            (owner_sub, target_key)):
+        if _clean_str(_loads(other["needs_review_json"], {}).get("by_target")) != target_key:
+            continue
+        basis = _loads(other["status_basis_json"], {})
+        row = live.get(str(other["cluster_key"]))
+        if row is not None and _is_stronger(row, basis, flow=flow) is not None:
+            continue
+        note = None
+        for cand in store.query(
+                "SELECT target_key, cluster_key, status, superseded_by, sev3, support, support_domains, evidence_grade"
+                " FROM rr_registry WHERE cluster_key = ? AND owner_sub = ? AND target_key NOT IN (?, ?) ORDER BY target_key",
+                (other["cluster_key"], owner_sub, other["target_key"], target_key)):
+            if vacated(dict(cand), str(cand["target_key"])):
+                continue                  # 접힘으로 비어 닫힌 행은 그 대상의 클러스터가 아니다
+            delta = _is_stronger(dict(cand), basis, flow=target_flow(store, str(cand["target_key"])))
+            if delta is not None:
+                note = {"escalated": True, "since": now, "by_target": str(cand["target_key"]), "delta": delta}
+                break
+        store.execute(
+            "UPDATE rr_registry SET needs_review_json = ?, updated_at = ? WHERE target_key = ? AND cluster_key = ?",
+            (common.canonical_json(note) if note else None, now, other["target_key"], other["cluster_key"]))
 
 
 # ---------------------------------------------------------------- §4.7.2 verdict 후보
@@ -1843,10 +1970,12 @@ def _alias_hops(store: RiskStore, start: str, owner_sub: str) -> int:
 
 
 def add_cluster_alias(store: RiskStore, old_cluster_key: str, new_cluster_key: str, *, owner_sub: str,
-                      reason: str = "cluster_merge", evidence: Mapping[str, Any] | None = None) -> dict:
+                      reason: str = "cluster_merge", evidence: Mapping[str, Any] | None = None,
+                      decided_by: str | None = None, at: int | None = None) -> dict:
     """사람 확정으로 옛 키 → 새 키 별칭 1행(plan §4.3.2). 6홉·순환은 409 다.
 
-    행을 지우지 않는다 — 철회는 `revoke_cluster_alias` 가 `revoked_at` 을 찍고 병합이 다시 갈린다.
+    행을 지우지 않는다 — 철회는 `revoke_cluster_alias` 가 `revoked_at` 을 찍고 병합이 다시 갈린다. `decided_by`·`at` 은 확정한 사람과
+    시각이다(안 주면 소유자 · 지금) — 키 전파(rekey)가 그 조작의 사람 · 시각을 그대로 적는다.
     """
     old_key, new_key = _clean_str(old_cluster_key), _clean_str(new_cluster_key)
     if not old_key or not new_key:
@@ -1866,17 +1995,22 @@ def add_cluster_alias(store: RiskStore, old_cluster_key: str, new_cluster_key: s
             or resolve_cluster_key(store, new_key, owner_sub=owner_sub) == old_key):
         raise AppError("alias_chain_too_long",
                        f"별칭 체인이 {ALIAS_MAX_HOPS} 홉을 넘거나 순환합니다 — {old_key} → {new_key}.", 409)
-    now = common.now_epoch()
+    now = common.now_epoch() if at is None else int(at)
     store.execute(
         "INSERT OR REPLACE INTO rr_cluster_alias(old_cluster_key, new_cluster_key, owner_sub, reason,"
         " evidence_json, decided_by, decided_at, revoked_by, revoked_at) VALUES (?,?,?,?,?,?,?, NULL, NULL)",
-        (old_key, new_key, owner_sub, reason, common.canonical_json(dict(evidence or {})), owner_sub, now),
+        (old_key, new_key, owner_sub, reason, common.canonical_json(dict(evidence or {})), decided_by or owner_sub, now),
     )
     return {"old_cluster_key": old_key, "new_cluster_key": new_key, "reason": reason, "decided_at": now}
 
 
-def revoke_cluster_alias(store: RiskStore, old_cluster_key: str, *, owner_sub: str) -> dict:
-    """별칭 철회 — 행을 지우지 않고 `revoked_at` 만 찍는다(§5.2.1). 이후 병합은 다시 두 행으로 갈린다."""
+def revoke_cluster_alias(store: RiskStore, old_cluster_key: str, *, owner_sub: str, revoked_by: str | None = None,
+                         at: int | None = None) -> dict:
+    """별칭 철회 — 행을 지우지 않고 `revoked_at` 만 찍는다(§5.2.1). 이후 병합은 다시 두 행으로 갈린다.
+
+    `revoked_by`·`at` 은 철회한 사람 · 시각이다(안 주면 소유자 · 지금) — 원장 되돌리기가 만든 별칭을 같은 사람 · 같은 시각으로 거둔다
+    (plan §5.9.5 3).
+    """
     old_key = _clean_str(old_cluster_key)
     row = store.query_one(
         "SELECT new_cluster_key, revoked_at FROM rr_cluster_alias WHERE old_cluster_key = ? AND owner_sub = ?",
@@ -1885,8 +2019,8 @@ def revoke_cluster_alias(store: RiskStore, old_cluster_key: str, *, owner_sub: s
         raise AppError("E404", f"별칭이 없습니다 — {old_key}.", 404)
     if row["revoked_at"] is not None:
         return {"old_cluster_key": old_key, "revoked": False, "already": True}
-    now = common.now_epoch()
+    now = common.now_epoch() if at is None else int(at)
     store.execute(
         "UPDATE rr_cluster_alias SET revoked_by = ?, revoked_at = ? WHERE owner_sub = ? AND old_cluster_key = ?",
-        (owner_sub, now, owner_sub, old_key))
+        (revoked_by or owner_sub, now, owner_sub, old_key))
     return {"old_cluster_key": old_key, "revoked": True, "revoked_at": now}

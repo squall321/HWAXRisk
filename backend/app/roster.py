@@ -72,7 +72,11 @@ def _rows(payload: Any) -> list[Mapping[str, Any]]:
 
 
 def parse_agent_list(payload: Any, domain: str) -> list[dict]:
-    """`list_agents` 응답 → [{key, domain}]. domain 필드가 있으면 그것을 쓰고 없으면 질의한 도메인이다(plan §6.3)."""
+    """`list_agents` 응답 → [{key, domain[, role]}]. domain 필드가 있으면 그것을 쓰고 없으면 질의한 도메인이다(plan §6.3).
+
+    `role` 은 그 전문가의 원본 역할 글(`description` — 엔진 `_restore_role` 이 좌석에 앉힐 때 되살리는 글과 같은 칸)이고, 비었으면
+    싣지 않는다. 로스터를 얼릴 때 그 글의 해시와 판번호(`planner.persona_stamp`)가 된다.
+    """
     out: list[dict] = []
     seen: set[str] = set()
     for row in _rows(payload):
@@ -81,7 +85,11 @@ def parse_agent_list(payload: Any, domain: str) -> list[dict]:
             continue
         seen.add(key)
         dom = str(row.get("domain") or "").strip().lower() or domain
-        out.append({"key": key, "domain": dom})
+        item = {"key": key, "domain": dom}
+        role = row.get("description")
+        if isinstance(role, str) and role.strip():
+            item["role"] = role
+        out.append(item)
     return out
 
 
@@ -128,10 +136,12 @@ class RosterSource:
 
     def fetch(self, domains: Sequence[str], query_text: str = "", *,
               top_k: int = RECOMMEND_TOP_K, deadline_s: float | None = None) -> dict:
-        """도메인마다 `list_agents(compact, domain)` 로 키를 모으고 `recommend_agents` 점수를 relevance 로 붙인다.
+        """도메인마다 `list_agents(compact=False, domain)` 로 키와 원본 역할 글을 모으고 `recommend_agents` 점수를 relevance 로 붙인다.
 
-        반환 `agents` 는 `planner.freeze_roster` 가 받는 [{key, domain, relevance}] 다 —
+        반환 `agents` 는 `planner.freeze_roster` 가 받는 [{key, domain, relevance[, role]}] 다 —
         `target_key` 는 그 함수의 인자이고 `rank_in_domain` 은 그 함수가 (relevance desc, key asc) 로 매긴다.
+        compact 를 끈 까닭 — 압축 응답(agent_type · name · common_tags)에는 역할 글(description)이 없어 로스터의 role_sha · persona_rev
+        (plan §5.2.2 rr_roster — 그 좌석의 원본 role 글 해시와 판번호)를 채울 수 없었다. 늘어나는 것은 전문가당 역할 글 한 칸이다.
 
         `deadline_s` 는 이 조회 전체의 벽시계 기한이다. 호출 사이에서만 보면 모자란다 — 침묵 한도는 게이트웨이의
         ping 이 되감아 호출 하나가 게이트웨이 한도(600초)까지 간다. 그래서 같은 기한을 모든 호출에 넘긴다
@@ -161,7 +171,7 @@ class RosterSource:
         domains_ok: list[str] = []
         domains_failed: list[str] = []
         for domain in domains:
-            reply = self._mcp.call(LIST_AGENTS, {"compact": True, "domain": domain}, **within)
+            reply = self._mcp.call(LIST_AGENTS, {"compact": False, "domain": domain}, **within)
             if not reply.get("ok"):
                 domains_failed.append(domain)
                 expired = expired or reply.get("error") == DEADLINE_EXCEEDED
@@ -172,7 +182,8 @@ class RosterSource:
                     continue
                 seen.add(row["key"])
                 agents.append({"key": row["key"], "domain": row["domain"],
-                               "relevance": float(scores.get(row["key"], 0.0))})
+                               "relevance": float(scores.get(row["key"], 0.0)),
+                               **({"role": row["role"]} if row.get("role") else {})})
         if not domains_ok:
             if expired:
                 return {**self._empty("deadline"), "domains_failed": domains_failed, "deadline_exceeded": True}
