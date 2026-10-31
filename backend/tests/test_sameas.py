@@ -6,9 +6,10 @@ import json
 
 import pytest
 
-from app import sameas
+from app import routes, sameas
 from app.common import canonical_json
 from app.errors import AppError
+from tests import factories
 from tests.conftest import FIXTURES_DIR
 
 OWNER = "user@example.com"
@@ -591,6 +592,35 @@ def test_record_decision_ckey_operations(risk_store):
     back = risk_store.query_one("SELECT status, merged_into FROM rr_part_keys WHERE ckey=?", (other_ckey,))
     assert (back["status"], back["merged_into"]) == ("confirmed", None)
     assert sameas.resolve_ckey(risk_store, other_ckey, OWNER) == other_ckey
+
+
+def test_confirm_key_refuses_a_merged_key_and_keeps_the_merge(risk_store, monkeypatch):
+    """병합된 키에 confirm_key 는 409 key_merged 다(화면 세션 10-31 이 청한 것 — context-notes FE-30 끝 1). 종전에는 status 만 confirmed
+    로 바꾸고 merged_into 를 남겨, 유효 키 해석(merged 일 때만 merged_into 를 따른다)은 병합을 푼 것으로 읽는데 키 전파(rekey)는 돌지 않은
+    행이 됐다. 병합을 푸는 길은 unmerge_key 하나이고 되돌린 키는 이미 확정이다. REST 배열은 한 트랜잭션이라 함께 보낸 결정도 되돌아간다."""
+    ckey = sameas.assign_ckeys(risk_store, [mcad("m1", "/x/plate", "plate")], [], owner_sub=OWNER,
+                               project_id="p1", snapshot_id="s1")["ckeys"]["m1"]
+    other = sameas.assign_ckeys(risk_store, [mcad("m2", "/x/plate2", "plate_2")], [], owner_sub=OWNER,
+                                project_id="p1", snapshot_id="s1")["ckeys"]["m2"]
+    sameas.record_decision(risk_store, {"decision": "merge_key", "ckey_from": other, "ckey_into": ckey}, owner_sub=OWNER)
+
+    with pytest.raises(AppError) as refused:
+        sameas.record_decision(risk_store, {"decision": "confirm_key", "ckey": other}, owner_sub=OWNER)
+    assert (refused.value.code, refused.value.http_status) == ("key_merged", 409)
+    assert refused.value.detail == {"ckey": other, "merged_into": ckey} and "unmerge_key" in refused.value.message
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    with pytest.raises(AppError) as batch:
+        routes.post_sameas_decide([{"decision": "rename_key", "ckey": other, "display_name": "새 이름"},
+                                   {"decision": "confirm_key", "ckey": other}], ident=factories.ident(OWNER))
+    assert batch.value.code == "key_merged"
+    row = risk_store.query_one("SELECT status, merged_into, display_name FROM rr_part_keys WHERE ckey=?", (other,))
+    assert (row["status"], row["merged_into"], row["display_name"]) == ("merged", ckey, None)
+    assert sameas.resolve_ckey(risk_store, other, OWNER) == ckey
+
+    sameas.record_decision(risk_store, {"decision": "unmerge_key", "ckey": other}, owner_sub=OWNER)
+    assert sameas.record_decision(risk_store, {"decision": "confirm_key", "ckey": other}, owner_sub=OWNER)["status"] == "confirmed"
+    back = risk_store.query_one("SELECT status, merged_into FROM rr_part_keys WHERE ckey=?", (other,))
+    assert (back["status"], back["merged_into"]) == ("confirmed", None)
 
 
 def test_record_decision_validates_the_vocabulary(risk_store):
