@@ -481,3 +481,14 @@
       '사람 개입 요약' 에 '잡 제어 · status 변경' 줄이 선다(BL-4, 결정 필요)
 - [ ] 포털 정본 문면(포털 세션) — plan §8.2.3 의 duplicate_of 범위(구성원 과제만) · 'E키 또는 ref' 와 §5.7 '항목 제외만' 의 어긋남 · 대상 감사의
       남 답(404)과 칸(entries · total · offset)
+- [x] 반대 검토 높음 — 대상 감사 · '사람 개입 요약' 에 남의 같은 클러스터 열쇠 행(공개 토글 · 큐 결정 사유)이 실림 → 맨 열쇠 행은 그 대상
+      소유자의 것만 · 대상을 고른 공개 토글은 '<대상>#<클러스터>' 자리(BL-8)
+- [x] 반대 검토 중간 — 한 항목의 승인이 다른 격리(의심 문구 · 미검증 신원)까지 풂 → 남은 격리를 큐 · 본문에서 다시 읽고 `applied.held`(BL-9)
+- [x] 반대 검토 중간 — C3 자동 후속 Tier C 가 사람의 브리프 제외를 버림 → 물려받고 params `exclude_evidence_from`(BL-10, BL-3 일부 뒤집음)
+- [x] 반대 검토 낮음 — `duplicate_of` 에 폐기 과제(BL-11) · MCP 가 돌려주는 살아 있는 잡의 제외(BL-12) · A18 전 코드 꼴 사람 finding 의
+      재열쇠 스크립트 `backend/scripts/rekey_human_codes.py`(BL-13)
+- [x] 시험 · 변이 — 새 시험 12 · 고친 시험 1(옛 코드 사본에서 11 짐) · 변이 18/18 · 전체 3,548 통과 · xfail 4(rc 0, 공유 잠금 — BL-14)
+- [ ] cae00 배치 한 번(사람) — 앱 환경(HWAXRISK_DATA_DIR)에서 `python3 backend/scripts/rekey_human_codes.py`(dry-run — planned · skipped 를
+      본다) 뒤 `--apply`(BL-13)
+- [ ] 등록부 병합이 별칭으로 접힌 옛 (대상, 옛 열쇠) 행을 닫지 않는다 — 정본 plan §4.3.2 3 의 `superseded` · `superseded_by` 가 없어 옛 행이
+      open 으로 남아 판정 후보에 든다(종전부터 — 재열쇠 · cluster_merge · PUT merge · 재매핑 공통, BL-13, 결정 필요)

@@ -98,9 +98,9 @@
 - 신원·메타 — `GET /health {ok, app_version, schema_version}` · `GET /me`(+`box{hostname, secrets_valid, cred_key_present}`) ·
   `PUT /me/portal-pat {pat|null}`(익명 401, 422 6종) · `GET /meta/{taxonomy, adapters, vocab, metrics}` · `POST /meta/metrics/recompute`.
 - 과제·소스·스냅샷 — `projects`(생성·조회·`PATCH`(lifecycle·등급·`mcp_visibility`)·멤버·이양·폐기·감사·유사·dims·요구·`iface-ledger`) ·
-  `sources`(같은 원천이 붙은 내 다른 과제는 `duplicate_of` 로 알림) · `snapshots`(조회·게이트 ack·`rule_hits`) · `sameas`(조회·`decide`) · `diffs`.
-- 심사 — `targets`(브리프·커버리지·편성 `jobs`(`exclude_evidence` — 브리프 항목 빼기)·`refresh_roster`·`resync`·`findings`(mechanism · domain 은 택소노미 어휘)·`registry`·`verdict`·`audit`(그 대상의 사람 행위)) · `panels`(브리프·`complete`) ·
-  `registry`(status·visibility·merge) · `findings`(수정·삭제·라벨) · `curation`(MCP 길 원자의 회수 복귀 `approve_recall`) · `patterns` · `precedents` · `refs/{ref:path}`.
+  `sources`(같은 원천이 붙은 내 다른 과제(폐기 과제 제외)는 `duplicate_of` 로 알림) · `snapshots`(조회·게이트 ack·`rule_hits`) · `sameas`(조회·`decide`) · `diffs`.
+- 심사 — `targets`(브리프·커버리지·편성 `jobs`(`exclude_evidence` — 브리프 항목 빼기)·`refresh_roster`·`resync`·`findings`(mechanism · domain 은 택소노미 어휘)·`registry`·`verdict`·`audit`(그 대상의 사람 행위 — 맨 클러스터 열쇠 행은 그 대상 소유자의 것만)) · `panels`(브리프·`complete`) ·
+  `registry`(status·visibility·merge) · `findings`(수정·삭제·라벨) · `curation`(MCP 길 원자의 회수 복귀 `approve_recall` — 다른 격리가 남은 원자는 되돌리지 않고 `applied.held`) · `patterns` · `precedents` · `refs/{ref:path}`.
 - 살림 — `vocab/{synonyms, stop-tokens}` · `jobs/{id}/{action}` · `GET /export` · `POST /import`.
 
 ## 구현 범위(현재 P6, 이 리포 몫)
