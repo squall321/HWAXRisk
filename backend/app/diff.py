@@ -200,6 +200,15 @@ def _apply_ecad_scope(comp: Mapping[str, Any], structural: dict, parametric: dic
                 item["excluded_reason"] = reason
 
 
+def _apply_fuzzy_caveat(semantic: dict) -> None:
+    """same-as 6단계를 건너뛴 쌍(plan §2.6.3) — 짝 없는 부품의 추가 · 삭제는 개명이었을 수 있다. 의미층과 그 이벤트에
+    `caveat='fuzzy_skipped_large'` 를 단다. 다른 주의(세대가 섞인 `parser_differs`)가 먼저 붙은 이벤트는 그대로 두고 층 표지로 남긴다."""
+    semantic["caveat"] = sameas.FUZZY_SKIPPED
+    for event in semantic.get("events") or ():
+        if isinstance(event, dict) and not event.get("caveat"):
+            event["caveat"] = sameas.FUZZY_SKIPPED
+
+
 def _apply_ecad_caveat(comp: Mapping[str, Any], parametric: dict, semantic: dict, ecad_dns: set[str]) -> None:
     """두 쪽 다 보드를 실었는데 ECAD 어댑터 세대가 다르면 ECAD 항목 · 이벤트에만 parser_differs 와 등급 한 단계 낮춤이다(§3.3.6
     adapter_parity 를 kind 별로)."""
@@ -585,6 +594,11 @@ def compute_diff(base_ir: Mapping[str, Any], target_ir: Mapping[str, Any], *,
 
     comp = comparability(base_ir, target_ir, base_state, target_state)
     corr = _correspondence(base_nodes, target_nodes, links)
+    # same-as 6단계를 크기 때문에 건너뛴 쌍이면 대응이 5단계까지다 — 남은 노드 수와 상한을 대응층에 적고 의미층에 caveat 를 단다
+    # (plan §2.6.3). 받은 links 로 다시 읽으므로 원장으로 푼 대응(create_diff)에서도 같다.
+    skip = sameas.fuzzy_skip(base_nodes, target_nodes, links)
+    corr["fuzzy_skipped"] = None if skip is None else {
+        "rest_base": skip["rest_a"], "rest_target": skip["rest_b"], "limit": skip["limit"]}
     base_by, target_by = _by_nid(base_nodes), _by_nid(target_nodes)
 
     # base·target 노드를 하나의 dn 으로 접는다 — 엣지 조인과 cid 의 키다.
@@ -622,6 +636,8 @@ def compute_diff(base_ir: Mapping[str, Any], target_ir: Mapping[str, Any], *,
 
     _apply_source_parity(comp, structural, parametric, semantic)
     _apply_ecad_caveat(comp, parametric, semantic, ecad_dns)
+    if corr["fuzzy_skipped"] is not None:
+        _apply_fuzzy_caveat(semantic)
 
     events = semantic["events"]
     kinds: dict[str, int] = {}

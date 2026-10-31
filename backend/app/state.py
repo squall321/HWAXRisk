@@ -571,6 +571,15 @@ def compute_signals(ir: Mapping[str, Any], gates: Mapping[str, Mapping[str, Any]
                                  [f"warn:{w.get('code')}#{w.get('ref')}" for w in (ir.get("warnings") or [])[:_TOP_K]],
                                  " · ".join(f"{code} {row['n']}건" for code, row in sorted(by_code.items())) or "warnings 없음"))
 
+    # same-as 6단계(헝가리안)를 크기 때문에 건너뛴 스냅샷이면 도메인 간 대응이 5단계까지의 결과다(plan §2.6.3 · §3.2.3).
+    skipped = sorted({str(s.get("kind")) for s in ir.get("sources") or []
+                      if "fuzzy_skipped_large" in (s.get("degraded") or ())})
+    skip_refs = [f"warn:{w.get('code')}#{w.get('ref')}" for w in ir.get("warnings") or []
+                 if w.get("code") == "fuzzy_skipped_large"]
+    put("capture.fuzzy_skipped", _rec("flag", bool(skipped), None, skip_refs,
+                                      f"fuzzy_skipped=true (same-as 6단계 생략 — {'·'.join(skipped)}, 대응은 5단계까지)"
+                                      if skipped else "fuzzy_skipped=false"))
+
     dims = [dict(d) for d in ir.get("dims_named") or []]
     put("dims_named", _rec("table", dims, None, [f"d:{d['name']}" for d in dims],
                            " · ".join(
