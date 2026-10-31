@@ -5579,6 +5579,39 @@ HUMAN_DIRECTIONS = ("risk", "improvement", "neutral")
 HUMAN_SEVERITIES = ("경미", "중대", "치명")
 HUMAN_JUDGEMENTS = ("OK", "WARNING", "FAIL", "undetermined")
 _SEV3_OF = {"경미": 1, "중대": 2, "치명": 3}
+# 사람 finding 의 mechanism 기본값 — 택소노미 밖이지만 받는 유일한 값이다(A18).
+HUMAN_UNCLASSIFIED = "unclassified"
+
+
+def human_domains() -> tuple[str, ...]:
+    """사람 finding 의 domain 이 받는 값 — 택소노미 domain 축의 코드(차례 그대로)."""
+    return tuple(str(item["code"]) for item in taxonomy.load_taxonomy()["axes"]["domain"])
+
+
+def human_mechanism(mechanism: str, detail: str | None) -> tuple[str, str | None]:
+    """사람 finding 의 (mechanism, mechanism_detail) — 택소노미 어휘와 맞추고 정본 꼴로 낸다(A18).
+
+    mechanism 은 대분류(risk_taxonomy 의 mechanism 칸 — thermal · mechanical …) · 'unclassified' · 코드('<대분류>.<세부>' — 웹 폼이
+    보내는 꼴)를 받는다. 코드는 패널 원자와 같은 꼴(대분류 + 세부)로 나눠 적는다 — 그대로 두면 같은 메커니즘이 패널 원자 · 대분류 꼴과
+    다른 등록부 묶음 열쇠(cluster_key)로 갈린다. 그 밖은 422 taxonomy_invalid 와 허용값이다(오타가 묶음 열쇠를 쪼개지 않게). 세부는
+    코드 꼴일 때만 그 코드의 세부와 맞는지 본다 — 대분류 꼴의 세부는 종전대로 받는다."""
+    doc = taxonomy.load_taxonomy()
+    majors = taxonomy.mechanism_majors(doc)
+    if mechanism == HUMAN_UNCLASSIFIED or mechanism in majors:
+        return mechanism, detail
+    codes = {str(item["code"]): item for item in doc["axes"]["mechanism"]}
+    row = codes.get(mechanism)
+    if row is None:
+        raise AppError("taxonomy_invalid", f"mechanism 이 택소노미 어휘가 아닙니다 — {mechanism!r}. 대분류 · 'unclassified' · 코드"
+                       "('<대분류>.<세부>', risk_taxonomy 의 mechanism 행 code) 가운데 하나를 줍니다.", 422,
+                       detail={"field": "mechanism", "value": mechanism, "allowed": [HUMAN_UNCLASSIFIED, *majors],
+                               "codes": list(codes)})
+    major, code_detail = str(row["mechanism"]), str(row["detail"])
+    if detail not in (None, "", code_detail):
+        raise AppError("taxonomy_invalid", f"mechanism 코드 {mechanism!r} 의 세부는 {code_detail!r} 인데 mechanism_detail 이"
+                       f" {detail!r} 입니다 — 둘 중 하나만 주거나 같게 줍니다.", 422,
+                       detail={"field": "mechanism_detail", "value": detail, "allowed": [code_detail]})
+    return major, code_detail
 
 
 def _next_human_claim_uid(store: Any, target_key: str) -> str:
@@ -5628,6 +5661,11 @@ def create_human_finding(target_key: str, body: HumanFindingBody,
         raise AppError("E100", f"severity 는 {list(HUMAN_SEVERITIES)} 중 하나여야 합니다.", 422)
     if body.judgement is not None and body.judgement not in HUMAN_JUDGEMENTS:
         raise AppError("E100", f"judgement 는 {list(HUMAN_JUDGEMENTS)} 중 하나여야 합니다.", 422)
+    # 택소노미 어휘(A18) — 오타가 등록부 묶음 열쇠(cluster_key)를 쪼개지 않게 밖의 값은 허용값과 함께 422 다.
+    mechanism, mechanism_detail = human_mechanism(body.mechanism, body.mechanism_detail)
+    if body.domain is not None and body.domain not in human_domains():
+        raise AppError("taxonomy_invalid", f"domain 이 택소노미 어휘가 아닙니다 — {body.domain!r}.", 422,
+                       detail={"field": "domain", "value": body.domain, "allowed": list(human_domains())})
     cites = [c for c in body.cites if isinstance(c, dict) and str(c.get("ref") or "").strip()]
     if not cites:
         raise AppError("cites_required", "사람 finding 도 인용이 최소 1건 필요합니다(§4.3.1).", 422)
@@ -5639,12 +5677,11 @@ def create_human_finding(target_key: str, body: HumanFindingBody,
     finding_id = claim_uid
     severity = body.severity or "경미"
     subject_key = (body.subject_key or "").strip()
-    cluster_key = narrative.cluster_key_of(body.mechanism, body.mechanism_detail or "", subject_key,
-                                           body.change_kind or "")
+    cluster_key = narrative.cluster_key_of(mechanism, mechanism_detail or "", subject_key, body.change_kind or "")
     finding_json = {
         "id": claim_uid, "origin": "human", "author_sub": email,
-        "direction": body.direction, "domain": body.domain, "mechanism": body.mechanism,
-        "mechanism_detail": body.mechanism_detail, "change_kind": body.change_kind,
+        "direction": body.direction, "domain": body.domain, "mechanism": mechanism,
+        "mechanism_detail": mechanism_detail, "change_kind": body.change_kind,
         "subject": {"ckeys": [], "names": list(body.subject_names)},
         "subject_key": subject_key, "severity": severity, "judgement": body.judgement or "undetermined",
         "trigger_condition": body.trigger_condition, "claim": body.claim, "warrant": body.warrant or "",
@@ -5660,7 +5697,7 @@ def create_human_finding(target_key: str, body: HumanFindingBody,
             " VALUES (?,?, 'human', ?, ?, NULL, NULL, ?, ?, 'private', ?,?,?,?,?,?, '[]', ?,?,?,?, '경험칙',"
             " 'none', ?, 0, ?, ?, 1, 'open', 'code', ?, ?)",
             (finding_id, claim_uid, email, target_key, row["project_id"], row["owner_sub"],
-             body.direction, body.domain, body.mechanism, body.mechanism_detail, body.change_kind,
+             body.direction, body.domain, mechanism, mechanism_detail, body.change_kind,
              subject_key, body.trigger_condition, severity, _SEV3_OF.get(severity, 1),
              body.judgement or "undetermined", body.requirement_ref, cluster_key,
              canonical_json(finding_json), now, now),

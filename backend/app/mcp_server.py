@@ -11,7 +11,8 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field, StrictBool
 from mcp.server.transport_security import TransportSecuritySettings
 
-from app import brief, common, entry, expert_report, issues, planner, registry, review_cells, review_runner, routes, runner, synth
+from app import (brief, common, entry, expert_report, issues, planner, registry, review_cells, review_runner, routes, runner, synth,
+                 taxonomy)
 from app.adapters import dyna as dyna_adapter
 from app.adapters import ecad as ecad_adapter
 from app.errors import AppError
@@ -31,7 +32,7 @@ _INSTRUCTIONS = """HWAX Risk Review — 설계 리스크 심사 앱의 MCP 서�
       risk_get_expert_report(전문가 보고서 — 마크다운 쪽, next_page 로 이어 받으며 쪽을 다 이으면 part='full' 과 같다) ·
       risk_get_issues(카드 대조 대상의 쟁점 — 유형·등급·상태·결과·분포, 쟁점 패널은 웹 러너가 돌린다 — Claude 에서는 지켜본다) ·
       risk_get_report(종합 보고서 판 — 완결 표기·잔여·영역 요약·쟁점 결과, part=summary|domains|mechanisms|appendix|full 의 쪽)
-어휘: risk_taxonomy — severity·judgement·direction 의 허용값(추측해서 넣으면 422 다)
+어휘: risk_taxonomy — severity·judgement·direction·mechanism·domain 의 허용값(추측해서 넣으면 422 다)
 심사: risk_get_brief(열쇠는 brief_token, tier 'A' 는 웹 전용 — 결과를 낼 신원에게만 연다) · risk_submit_panel_result(engine='mcp' 는
       evidence_only 등급) · risk_add_finding — 둘 다 쓰기라 아래 신원 규칙을 따르고 actor 는 신원이 아니다(표기)
 
@@ -202,10 +203,13 @@ _A_CITES = ("인용 [{ref, quote}] — ref 가 든 항목이 1건 이상이어�
             "ref 와 같고, 문법 밖 ref 는 dangling 으로 남는다.")
 _A_FINDING_ACTOR = "옛 계약의 자칭 표기(필수) — 받기만 하고 쓰지 않는다. 작성자는 게이트웨이 위임으로 확인된 신원이다."
 _A_DIRECTION = f"방향 — {' · '.join(routes.HUMAN_DIRECTIONS)}."
-_A_FINDING_DOMAIN = f"영역 코드(선택, {_A_DOMAIN_CODE}) — 검사하지 않고 그대로 적는다."
-_A_MECHANISM = ("메커니즘 계열(risk_taxonomy 의 mechanism 행의 mechanism 칸 — 예 thermal · mechanical) — 검사하지 않고, 세부 · 대상 · "
-                "변경 종류와 함께 등록부 묶음 열쇠(cluster_key)가 된다.")
-_A_MECH_DETAIL = "메커니즘 세부(선택, 같은 행의 detail — 예 cte_mismatch)."
+_A_FINDING_DOMAIN = (f"영역 코드(선택) — {' · '.join(routes.human_domains())} 가운데 하나다(risk_taxonomy 의 domain). 밖의 값은 422 "
+                     "taxonomy_invalid 이고 detail.allowed 가 허용값이다.")
+_A_MECHANISM = (f"메커니즘 — 대분류 {' · '.join(taxonomy.mechanism_majors())} · {routes.HUMAN_UNCLASSIFIED}(기본) 가운데 하나이거나 "
+                "코드('<대분류>.<세부>', risk_taxonomy 의 mechanism 행 code — 대분류와 세부로 나눠 적는다)다. 밖의 값은 422 taxonomy_invalid "
+                "이고 detail 이 허용값(allowed · codes)을 준다. 세부 · 대상 · 변경 종류와 함께 등록부 묶음 열쇠(cluster_key)가 된다.")
+_A_MECH_DETAIL = ("메커니즘 세부(선택, 같은 행의 detail — 예 cte_mismatch). mechanism 을 코드로 주면 비우거나 그 코드의 세부와 같게 준다"
+                  "(다르면 422 taxonomy_invalid).")
 _A_FINDING_CHANGE = "변경 종류(선택, risk_taxonomy 의 change_kind — 예 dimension · topology)."
 _A_SUBJECT_KEY = ("대상 열쇠(선택) — 패널 finding 과 같은 꼴(부품 ckey · 두 ckey 를 '|' 로 이은 계면 · asm:<조립 키> · dim:<치수 이름>)"
                   "이면 같은 등록부 행으로 묶인다. 풀지 않고 그대로 쓴다.")
