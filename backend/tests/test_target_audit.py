@@ -14,6 +14,7 @@ from app import planner, registry, routes
 from app.common import now_epoch
 from app.errors import AppError
 from tests import factories
+from tests.test_project_patch import _submit
 from tests.test_wiring_regressions import _agents, _seed
 
 OWNER = "owner@example.com"
@@ -40,6 +41,8 @@ def ledger(risk_store, monkeypatch):
         " 'C0', ?, ?)", (OWNER, now, now))
     planner.freeze_roster(risk_store, "diff:d10", OWNER, _agents({"mech": 1}))
     panel = planner.plan_next_panel(risk_store, TARGET, "B")
+    # 패널 결과 하나 — 그 finding · 등록부 클러스터를 가리키는 행(큐 결정 · 공개 토글)도 이 대상의 것이다.
+    finding = _submit(risk_store, panel, "web", TARGET)
     risk_store.execute(
         "INSERT INTO rr_jobs(id, target_key, owner_sub, tier, state, created_at, updated_at)"
         " VALUES ('job-mine', ?, ?, 'B', 'queued', ?, ?), ('job-other', 'diff:d10', ?, 'B', 'queued', ?, ?)",
@@ -55,6 +58,8 @@ def ledger(risk_store, monkeypatch):
         dict(scope="panel", subject_id=panel["id"], project_id="p1", action="panel.repersist", at=170),
         # 지운 사람 finding 은 rr_findings 에 없다 — 대상 열쇠 접두로 이 대상의 것이다.
         dict(scope="finding", subject_id=f"{TARGET}#H1", project_id="p1", action="finding.delete", at=180),
+        dict(scope="finding", subject_id=finding["finding_id"], action="curation.decide", at=185),
+        dict(scope="registry", subject_id=finding["cluster_key"], action="registry.visibility", at=187),
     ]
     theirs = [
         dict(scope="target", subject_id="diff:d10", project_id="p1", action="target.flow", at=105),
@@ -62,6 +67,8 @@ def ledger(risk_store, monkeypatch):
         dict(scope="coverage", subject_id="diff:d10#mech-a000", project_id="p1", action="coverage.skip", at=115),
         dict(scope="job", subject_id="job-other", project_id="p1", action="brief.exclude", at=165),
         dict(scope="snapshot", subject_id="s9", action="gate.ack", at=145),
+        dict(scope="finding", subject_id="other-panel#F1", action="curation.decide", at=186),
+        dict(scope="registry", subject_id="c0ffeec0ffee", action="registry.visibility", at=188),
         # 과제 단위 행은 과제 감사의 몫이다.
         dict(scope="project", subject_id="p1", project_id="p1", action="member.put", at=190),
     ]
@@ -83,7 +90,7 @@ def test_a_member_reads_only_this_targets_human_actions(ledger):
         viewer = routes.get_target_audit(TARGET, ident=factories.ident(VIEWER))
 
     want = {(r["scope"], r["subject_id"], r["action"]) for r in mine}
-    assert _seen(owner) == want and owner["total"] == len(mine) == 9
+    assert _seen(owner) == want and owner["total"] == len(mine) == 11
     assert viewer["entries"] == owner["entries"]
     # 최근 것이 먼저이고 칸은 과제 감사와 같다.
     assert [e["at"] for e in owner["entries"]] == sorted((r["at"] for r in mine), reverse=True)
@@ -113,7 +120,7 @@ def test_filters_and_the_limit_ceiling(ledger):
         wide = routes.get_target_audit(TARGET, limit=10_000, ident=factories.ident(OWNER))
 
     assert _seen(acks) == {("snapshot", "s1", "gate.ack"), ("snapshot", "s0", "gate.ack")} and acks["total"] == 2
-    assert [e["at"] for e in late["entries"]] == [180, 170, 160, 150]
+    assert [e["at"] for e in late["entries"]] == [187, 185, 180, 170, 160, 150]
     assert [e["at"] for e in window["entries"]] == [130, 120, 110]
-    assert [e["at"] for e in page["entries"]] == [170, 160] and page["total"] == 9
+    assert [e["at"] for e in page["entries"]] == [185, 180] and page["total"] == 11
     assert wide["limit"] == routes.TARGET_AUDIT_LIMIT_MAX == 200
