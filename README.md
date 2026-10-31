@@ -185,7 +185,7 @@ HWAXRisk/
 │   │   ├── ra_client · adh_client                                             # 외부 투영(RA·AIDataHub)
 │   │   └── schemas/ · assets/ · static/
 │   ├── tests/                # 42파일 + fixtures/{rr_ir,rr_state,rr_diff,risk_spec,seat_opinion,diff_pairs,incidents,ir,sse}
-│   ├── scripts/              # heaxhub-build.sh(SIF 훅) · bootstrap_{ra_ontology,adh}.py · recompute_part_keys.py · remap_findings.py · backup-to-drive.sh
+│   ├── scripts/              # heaxhub-build.sh(SIF 훅) · bootstrap_{ra_ontology,adh}.py · recompute_part_keys.py · remap_findings.py · rekey_human_codes.py · backup-to-drive.sh
 │   └── .venv/                # git 제외
 ├── frontend/                 # Vite+React(TS) — src/{App,main,types,format} · pages/(6) · components/(6) · api/risk.api.ts · dist/(git 제외)
 ├── checklist.md              # 진척과 잔여 백로그(작업 대장)

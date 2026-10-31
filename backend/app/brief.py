@@ -46,6 +46,22 @@ E5_POSITIVE_CAP, E5_NEGATIVE_CAP, E5_FIELD_CAP = 700, 300, 340
 # 버려 맨 뒤 E10 이 통째로 사라진다. 주석으로만 두면 다시 틀어지므로 시험이 이 부등식을 지킨다.
 E5_STRUCTURAL = 159
 ITEM_ORDER: tuple[str, ...] = ("E0", "E0c", "E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9", "M")
+# 사람이 잡 브리프에서 뺄 수 있는 항목(POST jobs 의 exclude_evidence — B31 · plan §8.2.3). 필수 셋(E0 스코프 · E0c 좌석 계약 · E1 요약 —
+# plan §5.6.2 '필수')과 잡 메모(M — 그 잡을 만드는 사람이 쓴다)는 뺄 수 없다. 빼기만 하고 더하지 않는다(헌법 P1).
+EXCLUDABLE_ITEMS: tuple[str, ...] = tuple(k for k in ITEM_ORDER if k not in ("E0", "E0c", "E1", "M"))
+
+
+def check_exclude(items: Sequence[Any] | None) -> list[str]:
+    """잡 브리프에서 뺄 항목 키 — 겹침 없이 항목 차례(ITEM_ORDER)로. 뺄 수 없는 값이 하나라도 있으면 422 exclude_evidence_invalid 와
+    그 값 · 허용값이다(조용히 버리지 않는다). 참조(ref) 단위 빼기는 받지 않는다 — 항목 안의 줄을 고치면 항목 편집이 된다(plan §5.7
+    RecallPreview '항목 제외만 · 편집 불가')."""
+    given = [str(x) for x in (items or ())]
+    invalid = [x for x in dict.fromkeys(given) if x not in EXCLUDABLE_ITEMS]
+    if invalid:
+        raise AppError("exclude_evidence_invalid", f"브리프에서 뺄 수 있는 항목 키가 아닙니다 — {invalid}. 허용 {list(EXCLUDABLE_ITEMS)}"
+                       " (필수 E0 · E0c · E1 과 잡 메모 M 은 뺄 수 없다).", 422,
+                       detail={"invalid": invalid, "allowed": list(EXCLUDABLE_ITEMS)})
+    return [k for k in EXCLUDABLE_ITEMS if k in set(given)]
 
 # E7 좌석 줄 상한(plan §5.6.3 — 바닥 220자, 프로파일 배수로 는다). 좌석 줄의 합은 E7 항목 상한이 줄 단위로 묶는다.
 E7_SEAT_LINE = 220

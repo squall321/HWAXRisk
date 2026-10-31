@@ -19,7 +19,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 import app.mcp_server as srv
 from app import (brief, common, entry, expert_report, issues, narrative, planner, registry, review_cells, review_runner,
-                 routes, runner, synth, units)
+                 routes, runner, synth, taxonomy, units)
 from app.adapters import dyna as dyna_adapter
 
 CONTRACT = Path(__file__).resolve().parent / "fixtures" / "mcp_arg_contract.json"
@@ -120,6 +120,9 @@ VOCAB = [
     ("risk_add_finding", "direction", routes.HUMAN_DIRECTIONS),
     ("risk_add_finding", "severity", routes.HUMAN_SEVERITIES),
     ("risk_add_finding", "judgement", routes.HUMAN_JUDGEMENTS),
+    # 택소노미 어휘(A18) — 서버가 검사하는 허용값을 설명이 다 말한다.
+    ("risk_add_finding", "mechanism", (routes.HUMAN_UNCLASSIFIED, *taxonomy.mechanism_majors())),
+    ("risk_add_finding", "domain", routes.human_domains()),
     ("risk_create_project", "classification", routes.CLASSIFICATIONS),
     ("risk_add_source", "kind", routes.SOURCE_KINDS),
     ("risk_add_source", "ref", tuple(key for keys in entry.REF_REQUIRED.values() for key in keys)),
@@ -130,6 +133,7 @@ VOCAB = [
     ("risk_start_job", "mode", _literal(routes.JobBody, "mode")),
     ("risk_start_job", "scope", review_runner.SCOPE_KEYS),
     ("risk_start_job", "llm", runner.LLM_CHOICES),
+    ("risk_start_job", "exclude_evidence", brief.EXCLUDABLE_ITEMS),
     ("risk_job_action", "action", (*routes.JOB_ACTIONS, *entry._DISPOSE_ACTIONS)),
     ("risk_job_action", "filter",
      tuple(k for k in review_cells.SELECTOR_FILTER_KEYS if k != "job_id") + review_cells.CELL_STATES),

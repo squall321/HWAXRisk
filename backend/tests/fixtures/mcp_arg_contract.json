@@ -230,7 +230,7 @@
    }
   },
   "risk_start_job": {
-   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["tier", "POSITIONAL_OR_KEYWORD"], ["consent", "POSITIONAL_OR_KEYWORD"], ["modifiers", "POSITIONAL_OR_KEYWORD"], ["user_memo", "POSITIONAL_OR_KEYWORD"], ["concurrency", "POSITIONAL_OR_KEYWORD"], ["mode", "POSITIONAL_OR_KEYWORD"], ["scope", "POSITIONAL_OR_KEYWORD"], ["llm", "POSITIONAL_OR_KEYWORD"], ["consent_external", "POSITIONAL_OR_KEYWORD"]],
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["tier", "POSITIONAL_OR_KEYWORD"], ["consent", "POSITIONAL_OR_KEYWORD"], ["modifiers", "POSITIONAL_OR_KEYWORD"], ["user_memo", "POSITIONAL_OR_KEYWORD"], ["concurrency", "POSITIONAL_OR_KEYWORD"], ["mode", "POSITIONAL_OR_KEYWORD"], ["scope", "POSITIONAL_OR_KEYWORD"], ["llm", "POSITIONAL_OR_KEYWORD"], ["consent_external", "POSITIONAL_OR_KEYWORD"], ["exclude_evidence", "POSITIONAL_OR_KEYWORD"]],
    "required": ["target_key"],
    "properties": {
     "target_key": {"title": "Target Key", "type": "string"},
@@ -242,7 +242,8 @@
     "mode": {"default": "panels", "title": "Mode", "type": "string"},
     "scope": {"anyOf": [{"additionalProperties": true, "type": "object"}, {"type": "null"}], "default": null, "title": "Scope"},
     "llm": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Llm"},
-    "consent_external": {"anyOf": [{"type": "boolean"}, {"type": "null"}], "default": null, "title": "Consent External"}
+    "consent_external": {"anyOf": [{"type": "boolean"}, {"type": "null"}], "default": null, "title": "Consent External"},
+    "exclude_evidence": {"anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}], "default": null, "title": "Exclude Evidence"}
    }
   },
   "risk_job_action": {

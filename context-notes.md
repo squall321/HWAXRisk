@@ -2926,3 +2926,184 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
 - 전체 시험(공유 잠금 아래, HEAD) — 3,504 통과 · xfail 4 · 실패 0(rc 0, 11분 16초 — 앞 판 3,474 에 새 시험 30). ruff — 바꾼 파일은 깨끗하다.
 - 하지 않은 것 — 배선 리허설(`tests/synth/rehearsal_d.py`)은 프로세스를 띄우는 일이라 돌리지 않았다. 카드 대조 사슬의 바뀐 곳은 없다(EC-28 —
   새 사유가 그 길에 닿지 않는다). 서비스 재기동 · push · 병합은 없다.
+
+## 10-31 백로그 — B22 · B28 · B30 · B31 · A18(가지 `wt1031/bl-risk-api`, main 9bd5f48 위, 2026-10-31)
+
+> 포털 `docs/leftovers-1017/triage-1031.md` 의 다섯 줄(사용자 결정 10-31 — 표 A 의 추천을 받아들이고 표 B 의 dev 작업을 한다)이다.
+> 원천 줄은 포털 `docs/design-risk-review/checklist.md` 104 ② · 134 · 136 · 143 ① ② 와 `docs/procedures/checklist.md` 622 다.
+
+### BL-1. 같은 원천의 다른 과제는 알리되 구성원 과제만 싣는다(B22)
+- `POST /projects/{id}/sources` 가 같은 `ref_key` 의 다른 과제를 `duplicate_of[{project_id, code, owner_sub, created_at}]` 로 알린다 — 등록은
+  막지 않는다(plan §8.2.3 — 같은 CAD 를 두 관점으로 심사하는 것이 정당할 수 있다). `created_at` 은 그 과제에 그 원천이 붙은 시각이다.
+  알림이 없으면 칸을 싣지 않는다(종전 응답 그대로).
+- 정본과 다른 곳 — 싣는 것은 부른 사람이 구성원(소유 · 멤버)인 과제뿐이다. 정본은 다른 과제를 가리지 않고 싣는데 그대로 하면 남의 과제
+  id · 코드 · 소유자 메일을 흘린다 — D45 '구성원은 하나'(남의 과제는 목록에도 수로도 드러내지 않는다)를 따랐다. 남끼리 같은 CAD 를 붙인
+  것은 알리지 못한다 — 알리려면 조직 공개 선택지를 따로 만든다(D45 와 같은 답). 포털 plan §8.2.3 의 그 칸 글은 포털 세션 몫이다.
+- `ref_key` 는 `kind:app_key:ref` 라 app_key 를 비워 붙인 소스(`-`)와 채워 붙인 소스는 같은 원천이어도 다른 열쇠다. 웹 · MCP 둘 다 app_key 를
+  채우므로(웹은 폼 필수, MCP 는 발견값 · 기본값) 실제로는 갈리지 않는다 — 열쇠 규칙은 정본대로 두었다.
+- MCP `risk_add_source` 는 같은 라우트를 감싸 같은 칸을 싣는다(도구 설명에 한 구절). 시험 `tests/test_source_duplicates.py` 넷.
+
+### BL-2. 대상 감사는 행위의 자리로 가린다 — 과제 감사와 같은 칸, 남에게는 404(B30)
+- `GET /targets/{key}/audit` — 감사 표에는 대상 열이 없다(DDL 을 바꾸지 않는다). `registry.target_audit_clause` 하나가 그 대상의 행을
+  고른다 — 대상 그 자체(scope target) · '<대상>#' 자리(좌석 `<대상>#<전문가>` · 등록부 `<대상>#<클러스터>` · 사람 finding `<대상>#H<n>` —
+  지운 사람 finding 도) · 대상 열쇠 그대로인 좌석 처분(보류 풀기 · 셀 처분) · 그 대상의 잡 · 패널 · finding · 등록부 클러스터(맨 cluster_key 를
+  쓰는 별칭 철회 · 공개 토글 · 큐 결정) · 그 대상이 가리키는 스냅샷(게이트 ack — diff 대상은 앞 · 뒤 스냅샷)이다. 과제 단위 행(멤버 · 수명주기 ·
+  요구 · 어휘)은 과제 감사의 몫이라 뺐다. 접두는 '#' 까지 본다(`diff:d1` 이 `diff:d10#…` 를 집지 않게, LIKE 대신 substr).
+- 통합 보고서의 '사람 개입 요약'(BL-4)도 같은 조각을 센다(`target_audit_counts`) — 조회와 보고서의 수가 갈리지 않는다.
+- 칸 · 거름은 과제 감사(`GET /projects/{id}/audit`)와 같다 — `{target_key, total, limit, offset, entries[{id, actor, actor_verified, channel,
+  scope, subject_id, project_id, action, before, after, reason, at}]}`, `action · since · until · offset`, 최근 것 먼저. limit 은 1~200 으로 죈다
+  (트리아지 줄 '≤200' — 과제 감사는 500). 정본 §8.2.3 의 `rows · next_since` 꼴은 앱의 과제 감사가 이미 쓰지 않는 꼴이라 따르지 않았다 —
+  화면(B34 '이력 탭')이 두 감사를 한 그림으로 그리게 같은 칸을 냈다.
+- 권한은 viewer 이상(과제 감사와 같다) · 관리자 우회. 트리아지 받아들임은 '비멤버 403' 인데 남에게는 없는 대상과 같은 404 다 — 앱의 남 숨김
+  규칙(D43 `_member_or_missing`, 시험 `tests/rr/test_review1_stranger.py` 가 모든 읽기 경로에서 404 · 없는 id 와 같은 답을 요구한다)을 따랐다.
+  viewer 가 바닥이라 구성원의 403 은 생기지 않는다. 남 시험 표에 칸을 더했다.
+- finding 하위 조회는 카드 대조 finding 을 거르지 않는다 — 카드 대조 finding 의 큐 결정도 그 대상의 사람 행위다. 거름 래칫
+  (`tests/test_review_findings.py` REVIEW_READERS)에 까닭과 함께 한 자리를 더했다.
+
+### BL-3. 잡 브리프 제외는 항목 단위만 · 필수 셋과 메모는 못 뺀다(B31 ①)
+- `JobBody.exclude_evidence` — 종전에는 본문 모델에 칸이 없어 pydantic 이 조용히 버렸다. `brief.check_exclude` 가 뺄 수 있는 항목
+  `brief.EXCLUDABLE_ITEMS`(E2~E9)만 받고 겹침 없이 항목 차례로 남긴다. 밖이면 422 `exclude_evidence_invalid{invalid, allowed}` 다.
+- 필수 셋(E0 스코프 · E0c 좌석 계약 · E1 요약 — plan §5.6.2 '필수')과 잡 메모(M — 그 잡을 만드는 사람이 쓴다, 빼도 폴백이 다시 붙인다)는
+  뺄 수 없다. 참조(ref) 단위 빼기는 받지 않는다 — 정본 §8.2.3 은 'E키 또는 ref' 라 적지만 §5.7 RecallPreview 는 '항목 제외만 · 추가 · 편집
+  불가' 라 적는다. 항목 안의 줄을 고치면 항목 편집이고, E2 는 꼬리 줄이 전체 · 실림 · 생략 수를 말해 줄을 빼면 그 수가 거짓이 된다. ref 를
+  주면 422 로 까닭을 말한다(조용히 버리지 않는다). 정본 두 절의 어긋남은 포털 세션에 넘긴다.
+- 흐름 — `runner.create_job(exclude_evidence=)` 가 비지 않은 값을 params_json 과 응답에 남긴다(빼지 않은 잡의 params · 응답은 종전 그대로).
+  러너가 패널마다 `build_delib_opts(exclude=)` → `prior_evidence(exclude=)` 로 그 항목을 싣지 않고 `rr_panels.evidence_excluded_json` 에 적는다
+  (동결 브리프 brief_gz 도 뺀 꼴이다). 라우트가 `rr_audit(scope job, action brief.exclude, after{target_key, tier, exclude_evidence})` 한 행을
+  쓴다 — 잡마다 한 행(정본 §8.2.3 '1행'). 검토 잡(mode reviews)에 주면 422(본문 검증 — 패널 칸)이고, 쟁점 잡 · C3 자동 후속 잡은 사람이 만든
+  잡이 아니라 칸이 없다(후속 잡은 앞 잡의 제외를 물려받지 않는다 — '그 잡의 패널 브리프').
+- MCP `risk_start_job` 에 같은 인자를 뒤에 더했다(도구 수 33 그대로 · 인자 계약 고정본과 도구 칸 시험을 고쳤다). 살아 있는 같은 Tier 잡을
+  돌려주기 전에 값을 보고(틀린 값이 살아 있는 잡을 받아 '받아들여졌다' 고 읽히지 않게), 그 잡의 제외와 다르면 `differs` 에
+  exclude_evidence 를 싣는다(바꾸지 않는다 — 판단 LLM 과 같은 규칙).
+
+### BL-4. 통합 보고서 minutes 의 '사람 개입 요약'(B31 ② · P4 (13))
+- `registry._minutes_lines` 끝에 `[사람 개입 요약]` — 그 대상 rr_audit 를 action 별로 센 `<action>=<n>` 줄(action 순), 없으면 `(없음)`.
+  BL-2 의 조각을 그대로 쓴다. 커버리지 칸에는 사람이 넘긴 skipped 에 `(decided_by: …)` 를 병기한다(코드가 넘긴 것은 아니다, plan §4.7.3).
+- 옛 타깃 골든의 minutes 행 수가 늘었다(12→14 · 10→12 · 10→13) — `tests/fixtures/legacy/CHANGES.md` 에 칸과 까닭을 적었다. 품질 플래그
+  절을 읽는 시험은 새 절 앞에서 끊는다.
+- 남긴 것(보고) — 요약은 rr_audit 를 센 수라 감사 행을 남기지 않는 사람 조작은 여기에도 없다. 정본 §8.2.3 은 셋을 감사하라 하는데 지금
+  코드는 쓰지 않는다 — 잡 제어(`POST /jobs/{id}/pause|resume|cancel` → `job.pause|resume|cancel`, 주체는 rr_jobs.state_by 에만), 등록부 상태
+  (`PUT /registry/{cluster}/status` → `registry.status`, rr_registry_status_log 에만), verdict 확정(`PUT /targets/{key}/verdict` → `verdict.final`).
+  그래서 정본 요약의 '잡 제어 n · status 변경 n' 줄은 지금 늘 없다. 이번 다섯 줄 밖이라 고치지 않았다.
+
+### BL-5. MCP 길 원자의 회수 복귀는 suspect_text 큐의 approve_recall(B28)
+- MCP 길(`actor_verified=false`) 패널이 원자(finding · 성격 진술)를 recall_eligible=0 으로 앉힐 때(`risk_recall_require_verified_actor` 켬) 그
+  패널마다 큐 한 항목을 세운다. kind 는 DDL 어휘 안의 `suspect_text` 다 — 새 kind(recall_review)는 CHECK 를 바꾸는 이행이라 하지 않았고, 정본도
+  격리된 원자의 큐를 suspect_text 로 적는다(plan §5.2.3). `payload.reason='actor_unverified'` 가 의심 문구 항목과 가르고 target_key · panel_id ·
+  actor(신고값) · findings_n · characters_n 을 싣는다. 같은 결과를 다시 내도 열린 항목은 하나다(수만 고친다).
+- 결정 어휘 — suspect_text 에 `approve_recall`(회수만, 원문 복원 없음 — 정본 §3.4.1 의 그 이름)을 더했다. 미검증 신원 항목은 되살릴 원문이
+  없어 approve_recall · reject 뿐이고 approve 는 422 `decision_not_allowed_for_kind` 다. approve_recall 은 미검증 신원 항목이면 그 패널의
+  finding · 성격 진술을, 의심 문구 항목이면 그 claim 의 finding 을 되돌린다. 카드 대조 finding 은 어느 결정으로도 올리지 않는다(M2.md 5절 #9).
+- 감사 — 회수 복귀는 `rr_audit(action='recall.approve')` 한 행(정본 §6.11 · P3 (21) — curation.decide 와 겹쳐 쓰지 않는다), 미검증 신원
+  항목의 자리는 scope panel · 그 패널 id 다. 그 밖의 결정은 종전대로 curation.decide.
+- 화면 — 결정 어휘 사본(`frontend/src/pages/CurationQueuePage.tsx` KINDS, 서버와 같은 집합을 `test_p6_routes` 가 본다)에 한 줄을 더했다.
+  미검증 신원 항목의 요약 칸(지금 raw · sha1 을 보여 빈칸이 된다)과 설명 글은 화면 세션 몫이다.
+
+### BL-6. 사람 finding 의 mechanism · domain 은 택소노미 어휘다(A18)
+- `POST /targets/{key}/findings`(MCP risk_add_finding 도 같은 함수)가 쓰기 전에 대조한다 — 밖이면 422 `taxonomy_invalid`, detail 에 field ·
+  value · allowed(mechanism 은 codes 도)다. 아무것도 쓰지 않는다. 오타가 등록부 묶음 열쇠(cluster_key)를 쪼개는 것을 막는다(트리아지 A18 (A)).
+- mechanism 은 대분류(택소노미 mechanism 축의 mechanism 칸 — 아홉) · `unclassified`(기본) · 코드(`<대분류>.<세부>`)다. 코드는 패널 원자와
+  같은 꼴(대분류 + 세부)로 나눠 적는다 — 웹 폼(HumanFindingForm)이 코드를 mechanism 에 실어 보내 종전에는 같은 메커니즘이 MCP · 패널 원자와
+  다른 묶음 열쇠로 갈렸다. 코드의 세부와 다른 mechanism_detail 을 같이 주면 422 다. 대분류 꼴의 세부는 종전대로 받는다(A18 의 범위는 mechanism ·
+  domain 이고, 세부가 자유인 시험 원장도 있다 — 세부 대조는 다음 결정이다).
+- domain 은 택소노미 domain 코드(열다섯)이거나 비운다. `PUT /findings/{id}` 는 mechanism · domain 을 바꾸지 않아 검사하지 않는다.
+- MCP 인자 설명(mechanism · mechanism_detail · domain)이 허용값을 코드에서 읽고 '검사하지 않는다' 를 걷었다 — 설명 시험(VOCAB)에 두 칸.
+
+### BL-7. 시험 · 변이 · 전체 시험
+- 새 시험 다섯 파일 28건 — `test_source_duplicates`(4) · `test_target_audit`(3) · `test_human_taxonomy`(5) · `test_recall_approve`(4) ·
+  `test_brief_exclude`(12). 옛 코드(9bd5f48)의 스크래치 사본에 새 시험만 얹어 돌리면 24건이 지고 4건이 지난다 — 지나는 넷은 일부러 둔 회귀
+  가드다(남의 과제가 안 실림 · 격리를 끄면 항목 없음 · 종전 값이 그대로 지남 · 빼지 않은 잡의 칸이 빔).
+- 고친 옛 시험 — 남 시험 표(대상 감사 칸) · 거름 래칫(한 자리) · MCP 인자 설명(VOCAB 셋) · 인자 계약 고정본 · 도구 칸(risk_start_job) ·
+  품질 플래그 절(새 절 앞에서 끊음) · 옛 타깃 골든 셋(minutes 행 수).
+- 변이(새 코드의 스크래치 사본, 바꾼 뒤 __pycache__ 를 지운다) 32개가 전부 잡혔다 — B22 셋 · B30 아홉 · A18 넷 · B28 여섯 · B31 열.
+  사본은 HEAD 와 바이트 같게 되돌렸다(diff 0).
+- 전체 시험(공유 잠금 아래, 0cf4787 — 이 줄을 더한 커밋과 코드가 같다) — 3,536 통과 · xfail 4 · 실패 0(rc 0, 12분 33초). 앞 판 3,504 에
+  새 시험 28 과 늘어난 매개 칸 넷(인자 설명 VOCAB 셋 · 남 시험 표 하나)이다. ruff — 바꾼 파일은 깨끗하다(종전부터 있던
+  `tests/test_backup_wrapper_run.py` 의 F401 하나는 그대로 두었다).
+- 하지 않은 것 — 배선 리허설(`tests/synth/rehearsal_d.py`)은 프로세스를 띄우는 일이라 돌리지 않았다(카드 대조 사슬은 바꾸지 않았다).
+  화면 빌드(tsc)는 이 작업 트리에 node_modules 가 없어 돌리지 않았다 — 바꾼 것은 결정 어휘 사본 한 줄이고 옆 줄과 같은 꼴이다. 서비스
+  재기동 · push · 병합은 없다. 가지 wt1031/rk01 과 겹치는 것은 context-notes 끝의 덧붙임 하나뿐이다(merge-tree — 코드 파일은 깨끗이 합쳐진다).
+
+## 10-31 백로그 — 반대 검토 뒤 고침(가지 `wt1031/bl-risk-api`, 66fc6da 위, 2026-10-31)
+
+> 반대 검토 지적 여섯(높음 1 · 중간 2 · 낮음 3)을 옛 코드(66fc6da)의 스크래치 사본에서 시험으로 먼저 재현했다 — 여섯 다 재현됐다. 고친 뒤
+> 같은 시험이 지난다. 지적마다 아래 한 절이고 BL-2 · BL-3 의 일부를 뒤집는다.
+
+### BL-8. 대상 감사의 맨 클러스터 열쇠 행은 그 대상 소유자의 행위만이다(BL-2 일부 뒤집음 · 반대 검토 높음)
+- 재현 — 남의 과제 대상과 내 대상에 웹 폼 꼴(코드 · 대상 없음)의 사람 finding 을 하나씩 내면 묶음 열쇠가 같다(cluster_key 에 대상이
+  없다). 남이 자기 행의 공개 토글과 cluster_merge 큐 기각(사유 글)을 하면 내 대상 감사(그 과제의 viewer 누구나)와 통합 보고서 minutes 의
+  '사람 개입 요약' 에 남의 행(행위자 메일 · 사유)이 실렸다. 거꾸로도 같다. 같은 CAD 를 두 과제에 붙인 패널 finding(같은 부품 ckey)도 같다.
+- 까닭 — rr_registry 의 열쇠는 (target_key, cluster_key)라 한 열쇠가 여러 대상 · 소유자에 산다. 공개 토글 · 별칭 철회 · 큐 결정
+  (cluster_merge · pattern_candidate)은 감사 자리에 맨 클러스터 열쇠만 적고(project_id NULL), BL-2 의 조각에는 소유자 조건이 없었다.
+  시험의 '남' 행은 겹치지 않는 열쇠(`c0ffeec0ffee`)라 이것을 보지 못했다.
+- 고침 — 맨 열쇠 갈래에 `rr_audit.owner_sub = 그 대상의 owner_sub` 를 더했다. 그 길들은 부른 사람 자신의 등록부 행 · 별칭만 바꾸므로(남의
+  행은 404) 소유자 단위 행위(대상을 고르지 않은 토글 · 별칭 철회 · 큐 결정)는 그 소유자의 같은 열쇠 대상마다 실린다. 대상을 골라 한 공개
+  토글(`PUT /registry/{ck}/visibility {target_key}`)은 그 대상의 행만 바꾸므로 감사 자리를 '<대상>#<클러스터>'(병합과 같은 꼴)로 적는다 —
+  맨 열쇠로 적으면 같은 열쇠를 가진 내 다른 대상(다른 과제일 수 있다 — 그 과제의 viewer 가 본다)에도 실렸다.
+- 남긴 것 — (1) 이양 뒤에는 대상 소유자가 바뀌어 옛 소유자의 맨 열쇠 행(소유자 단위 행위)이 그 대상 감사에서 빠진다. 별칭도 소유자마다라
+  옛 소유자의 별칭은 이양 뒤 그 대상의 병합에 듣지 않는다 — 지금 그 대상에 듣는 행위만 남는 셈이다. 대상을 고른 행은 자리가 대상이라
+  남는다. (2) 이 고침 전에 대상을 골라 한 공개 토글의 감사 행은 맨 열쇠라 그 소유자의 같은 열쇠 대상마다 실린다(화면 · MCP 는 이 경로를
+  부르지 않아 운영 행은 드물다). (3) `PUT /registry/{ck}/merge` 의 감사 자리는 그 소유자의 아무 대상 하나(LIMIT 1)다 — 별칭은 소유자
+  단위인데 한 대상에만 실린다(종전부터, 이번 지적 밖이라 두었다).
+
+### BL-9. 회수 격리의 두 까닭 — 한 항목의 승인은 제 격리만 푼다(BL-5 보탬 · 반대 검토 중간)
+- 재현 — MCP 길 패널이 깨끗한 F1 과 인젝션 문구의 F2 를 내면 둘 다 recall_eligible=0 이고 큐 항목이 둘(F2 의 의심 문구 · 그 패널의 미검증
+  신원)이다. 의심 문구를 기각(격리 유지)한 뒤 신원 항목을 approve_recall 하면 패널 단위 UPDATE 가 F2 도 1 로 되돌렸다(finding_json.claim 에
+  인젝션 원문). 거꾸로 신원 항목이 열린 채 의심 문구를 approve_recall 하면 F2 가 1 이 되고 뒤의 신원 기각은 0 으로 되돌리지 않았다.
+- 고침 — 승인은 후보 finding 마다 남은 격리를 큐에서 다시 읽는다(`routes._suspect_hold` · `_actor_hold`, 지금 승인하는 항목은 승인된 것으로
+  본다). 의심 문구 격리는 그 claim 의 가장 최근 항목(지금 본문의 글 sha1 을 가리키는 것)이 열렸거나 기각됐으면, 또는 본문이 지금 인젝션
+  어휘에 걸리는데 그 글을 승인한 항목이 없으면 남는다. 미검증 신원 격리는 그 패널의 가장 최근 신원 항목이 열렸거나 기각됐으면 남는다.
+  남은 finding 은 되돌리지 않고 `applied.held[{claim_uid, reason}]` 로 말한다 — 그 격리의 항목을 승인할 때 돌아간다. 기각은 종전대로
+  아무것도 쓰지 않는다(승인이 미리 풀지 않으므로 되돌릴 것이 없다). 성격 진술에는 의심 문구 격리가 없어 신원 승인이 종전대로 되돌린다.
+- 큐 항목만 보지 않고 본문을 다시 대는 까닭 — 같은 sha1 의 항목이 이미 열려 있으면 의심 문구 항목이 다시 서지 않아(narrative persist 의
+  중복 막기) 제 항목이 없는 인젝션 원자가 있다. 항목만 보면 신원 승인이 그것을 되돌린다(시험). '가장 최근' — 기각 뒤 재제출로 다시 선
+  항목이 그 자리의 결정이고, 재제출로 글이 바뀐 옛 항목은 지금 finding 을 묶지 않는다.
+- 남긴 것 — 같은 글을 승인받은 다른 원자(같은 sha1 · 제 항목 없음)는 격리로 남는다(B28 전에도 그 원자는 0 에 머물렀다). 인젝션 어휘판
+  (INJECTION_VERSION)이 바뀌어 새로 걸리는 원자도 항목이 없어 격리로 남는다(안전한 쪽). 의심 문구 항목의 중복 막기는 소유자를 가리지 않고
+  sha1 만 본다(종전부터) — 남의 열린 항목 때문에 내 원자의 항목이 서지 않을 수 있다(이번 지적 밖). 패널을 MCP 길로 낸 뒤 웹 길로 다시
+  내도 앞의 신원 항목(열림 · 기각)은 그대로라 그 패널의 의심 문구 원자는 그 항목을 승인할 때까지 격리로 남는다(안전한 쪽 — 깨끗한 원자는 웹
+  재제출이 곧바로 1 로 앉힌다).
+
+### BL-10. C3 자동 후속 Tier C 는 앞 잡의 브리프 제외를 물려받는다(BL-3 일부 뒤집음 · 반대 검토 중간)
+- 재현 — 닫힘 레벨 C3 대상에서 E6 · E8 을 뺀 Tier B 잡이 끝나면 `_finish_job` 이 세우는 Tier C 가 메모 · 층(modifiers) · 요청자는 물려받고
+  제외는 버렸다 — 후속 패널 브리프에 E6 · E8 이 실리고 evidence_excluded_json 이 NULL 인데 minutes 의 요약은 brief.exclude=1 이라 그 항목
+  없이 돈 것처럼 읽혔다. BL-3 의 '후속 잡은 사람이 만든 잡이 아니라 물려받지 않는다' 는 같은 후속이 사람의 메모 · 층을 물려받는 것과 어긋난다.
+- 고침 — 후속에 params.exclude_evidence 를 넘기고 `exclude_evidence_from=<앞 잡 id>` 를 params 에 남긴다(물려받은 것의 표지, 뺄 항목이 있을
+  때만). 감사 행은 더 쓰지 않는다 — 감사는 사람 행위 한정이고 사람의 결정은 앞 잡의 brief.exclude 한 행이다(요약의 수도 1 그대로).
+
+### BL-11. 같은 원천 알림에서 폐기 과제는 뺀다(BL-1 보탬 · 반대 검토 낮음)
+- purge 는 status='purged' 묘비만 남기고 rr_sources · 멤버 행은 그대로라 `duplicate_of` 에 실렸다(코드 · 소유자 · 시각). 조회에
+  `p.status = 'active'` 를 더했다 — 수명주기(lifecycle)가 닫힌 과제(shipped · cancelled · archived)는 원문이 있어 그대로 싣는다.
+
+### BL-12. MCP risk_start_job 이 돌려주는 살아 있는 잡의 제외를 싣는다(BL-3 보탬 · 반대 검토 낮음)
+- 살아 있는 잡을 돌려주는 갈래는 판단 LLM 은 `job_llm_view` 로 실었지만 제외는 싣지 않았다 — 빼지 않은 호출은 그 잡이 E7 을 뺀다는 것을
+  몰랐고(보통 브리프로 읽는다), 다른 값을 준 호출은 differs 만 받고 무엇이 살아 있는지 몰랐다. params 의 exclude_evidence 가 비지 않았으면
+  `exclude_evidence` 칸으로 싣는다(빼지 않는 잡은 칸 없음 — 종전 응답 그대로). 도구 설명에 한 구절을 더했다.
+
+### BL-13. A18 전 코드 꼴 사람 finding 의 재열쇠(BL-6 보탬 · 반대 검토 낮음)
+- 재현 — A18 전 웹 폼 꼴('thermal.cte_mismatch' · 세부 빈칸)로 적힌 행과 A18 뒤 같은 입력('thermal' · 'cte_mismatch')의 새 행이 한 대상에서
+  다른 등록부 행(human_n 1 · 1)으로 갈린다. 옛 행은 처음부터 패널 원자와도 갈려 있었다(A18 이 고치려던 것). 옛 행을 옮기는 것이 없었다.
+- 고침 — `backend/scripts/rekey_human_codes.py`(dry-run 기본 · `--apply`). finding 행의 cluster_key 는 고치지 않고(plan §4.3.2 1 삽입 시
+  동결) 그 소유자의 별칭 한 행(옛 열쇠 → 대분류 + 세부 열쇠, reason taxonomy_major · evidence {from, to, by: code:human_code_rekey})을
+  세운 뒤 그 열쇠의 사람 finding 이 있는 대상을 모두 다시 병합한다 — 같은 위험의 finding 이 한 행에 든다. 코드와 다른 세부를 같이 적은 행은
+  skipped(detail_differs)로 알린다(코드가 고르지 않는다). 그 소유자의 별칭 행이 이미 있는 옛 열쇠(이 스크립트가 이은 것 · 사람이 다른 곳으로
+  이었거나 철회한 것)는 건드리지 않는다. 패턴 통계는 야간 ③ 이 다시 센다(remap_findings.py 와 달리 바로 캐지 않는다).
+- cae00 배치 한 번(사람 몫 — 체크리스트 열린 줄) — 앱 환경(HWAXRISK_DATA_DIR)에서 dry-run 으로 planned · skipped 를 본 뒤 `--apply`.
+- 남긴 것(결정 필요) — 등록부 병합은 별칭으로 접힌 옛 (대상, 옛 열쇠) 행을 닫지 않는다. 정본 plan §4.3.2 3 은 `status='superseded'` ·
+  `superseded_by='<대상>#<새 열쇠>'` 로 닫으라 하는데 지금 `registry.merge` 는 그 일을 하지 않아, 재열쇠 뒤에도 옛 행(정지된 집계 · open)이
+  남아 등록부 목록과 판정 후보에 든다. 사람의 cluster_merge · `PUT /registry/{ck}/merge` · 택소노미 재매핑이 다 같다(종전부터 — 스크래치
+  탐침: 별칭 뒤 재병합의 clusters=1 인데 rr_registry 에는 두 행). 사람이 정한 status 를 덮을지 · 별칭 철회 때 되살릴지가 걸려 이번 줄 밖으로 둔다.
+
+### BL-14. 시험 · 변이 · 전체 시험(반대 검토 고침)
+- 새 시험 12 · 고친 시험 1 — `test_target_audit`(1) · `test_recall_approve`(8 — 두 차례 넷 · 같은 글 재제출 · 옛 글 항목 · 가장 최근 신원
+  항목 · 제 항목 없는 인젝션) · `test_brief_exclude`(후속 1 + MCP 시험에 살아 있는 잡의 제외 단언) · `test_source_duplicates`(1) ·
+  `test_human_taxonomy`(재열쇠 1). 옛 코드(66fc6da)의 스크래치 사본에 얹으면 11 이 지고 2 가 지난다 — 지나는 둘(옛 글 항목 · 가장 최근
+  신원 항목)은 새 격리 읽기의 회귀 가드다(옛 코드는 패널을 통째로 되돌려 지난다).
+- 변이(새 코드의 스크래치 사본, 바꾼 뒤 __pycache__ 를 지운다) 18 개가 전부 잡혔다 — 감사 조각 둘 · 회수 격리 여덟 · 후속 제외 둘 · 폐기
+  과제 · 살아 있는 잡 칸 · 재열쇠 넷. 사본은 작업 트리와 바이트 같게 되돌렸다(diff 0).
+- 커밋을 다섯으로 나눴다(대상 감사 → 회수 격리 → 브리프 제외 → 소스 중복 → 재열쇠) — 스크래치 사본에서 판마다 다섯 시험 파일과 MCP 도구 ·
+  인자 시험이 지난다(143 → 154).
+- 전체 시험(공유 잠금 아래, 그 다섯 커밋과 코드가 같은 작업 트리) — 3,548 통과 · xfail 4 · 실패 0(rc 0, 12분 39초). 앞 판 3,536 에 새
+  시험 12 다. ruff — 바꾼 파일은 깨끗하다. 재열쇠 스크립트의 dry-run 을 빈 데이터 디렉터리에서 돌렸다(planned 0 · rc 0).
+- 하지 않은 것 — 배선 리허설 · 화면 빌드 · 서비스 재기동 · push · 병합은 없다. 가지 wt1031/rk01 의 파일(ra_client · nightly · main ·
+  config)은 건드리지 않았다. 포털 문서(트리아지 원천 줄)는 고치지 않았다 — 포털 세션 몫이다.

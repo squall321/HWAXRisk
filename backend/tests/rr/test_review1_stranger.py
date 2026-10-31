@@ -375,6 +375,8 @@ GET_CASES: dict[tuple[str, str], tuple[Call, tuple[str, ...]]] = {
     ("GET", P + "/projects/{project_id}/members"): (lambda i, who: routes.get_members(i["project"], ident=who), ("project",)),
     ("GET", P + "/projects/{project_id}/audit"): (
         lambda i, who: routes.get_project_audit(i["project"], ident=who), ("project",)),
+    ("GET", P + "/targets/{target_key}/audit"): (
+        lambda i, who: routes.get_target_audit(i["target"], ident=who), ("target",)),
     ("GET", P + "/projects/{project_id}/requirements"): (
         lambda i, who: routes.get_requirements(i["project"], ident=who), ("project",)),
     ("GET", P + "/projects/{project_id}/character"): (

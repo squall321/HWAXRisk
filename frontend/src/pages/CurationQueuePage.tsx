@@ -40,6 +40,7 @@ const KINDS: Array<{
     what: "소스 원문에서 지시문처럼 읽히는 조각을 자리표시자로 가둔 것. 승인하면 원문을 복원하고 그 finding 을 회수로 되돌린다.",
     decisions: [
       { value: "approve", label: "승인(원문 복원)", tone: "ok" },
+      { value: "approve_recall", label: "회수만 승인", tone: "ok" },
       { value: "reject", label: "기각(격리 유지)", tone: "bad" },
     ],
   },

@@ -19,7 +19,7 @@ from urllib.parse import quote
 
 from pydantic import BaseModel, ValidationError
 
-from app import config, identity, planner, review_cells, review_ops, review_runner, routes, runner
+from app import brief, config, identity, planner, review_cells, review_ops, review_runner, routes, runner
 from app import roster as roster_module
 from app import units as units_module
 from app import state as state_module
@@ -355,12 +355,15 @@ def open_target(ident: identity.Identity, *, kind: str, ref_id: str, consent: bo
 def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = None, consent: bool = False,
               modifiers: list[str] | None = None, user_memo: str | None = None, concurrency: int = 1,
               mode: str = "panels", scope: dict | None = None, llm: str | None = None,
-              consent_external: Any = None) -> dict:
+              consent_external: Any = None, exclude_evidence: list[str] | None = None) -> dict:
     """`POST /api/targets/{key}/jobs`. 같은 대상·같은 Tier 의 살아 있는 잡이 있으면 그것을 돌려준다.
 
     라우트는 부를 때마다 잡 행을 하나 더 만든다(중복 검사 없음). 역할 검사는 라우트와 같은 함수로 먼저 한다 — 살아 있는
     잡을 돌려주는 갈래가 남의 대상의 잡을 흘리지 않게. `mode='reviews'` 는 카드 대조 검토 잡이다(`_start_review_job`).
     `llm`·`consent_external` 은 REST 본문과 같다(Claude 길 X-2 — claude 는 검토 잡 · 패널 잡, 동의는 사람이 한 뒤에만 true).
+    `exclude_evidence` 도 REST 본문과 같다(B31 — 패널 잡의 브리프에서 뺄 항목 키). 살아 있는 잡을 돌려주기 전에 값을 검사하고, 그 잡의
+    제외와 다르면 `differs` 에 'exclude_evidence' 를 싣는다(바꾸지 않는다 — 취소한 뒤 새로). 돌려주는 살아 있는 잡이 빼는 항목은 늘
+    `exclude_evidence` 로 싣는다(BL-12 — 빼지 않는 잡은 칸이 없다).
     """
     email = require_delegate(ident)
     store = routes.get_store()
@@ -373,14 +376,17 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = N
     if mode == "reviews":
         return _start_review_job(ident, store, target_key, web, tier=tier, consent=consent, modifiers=modifiers,
                                  user_memo=user_memo, concurrency=concurrency, scope=scope, llm=llm,
-                                 consent_external=consent_external)
+                                 consent_external=consent_external, exclude_evidence=exclude_evidence)
     # 판단 LLM 칸(llm · consent_external)을 준 패널 잡 요청은 살아 있는 잡을 돌려주기 전에 본문을 검증한다(XR-14 — 검토 잡과 같은 차례).
     # 살아 있는 잡을 돌려줄 때 고른 판단 LLM 이 그 잡과 다르면 differs 에 'llm' 을 싣는다(바꾸지 않는다 — 검토 잡과 같다). 동의 칸 검사는
     # 잡을 만들 때다(살아 있는 잡을 돌려주는 갈래는 아무것도 보내지 않는다).
     llm_fields = {**({"llm": llm} if llm is not None else {}),
                   **({"consent_external": consent_external} if consent_external is not None else {})}
+    # 뺄 항목도 살아 있는 잡을 돌려주기 전에 본다 — 틀린 값을 준 호출이 살아 있는 잡을 받아 '받아들여졌다' 고 읽지 않게(B31).
+    excluded = brief.check_exclude(exclude_evidence) if exclude_evidence is not None else None
+    extra = {**llm_fields, **({"exclude_evidence": exclude_evidence} if exclude_evidence is not None else {})}
     body = (_body(routes.JobBody, tier=tier, concurrency=concurrency, modifiers=modifiers, user_memo=user_memo,
-                  consent=consent, mode=mode, **({"scope": scope} if scope is not None else {}), **llm_fields)
+                  consent=consent, mode=mode, **({"scope": scope} if scope is not None else {}), **extra)
             if llm_fields else None)
     live = store.query_one(
         "SELECT id, tier, state, pause_reason, panels_done, panels_total, error, credential_email, params_json FROM rr_jobs"
@@ -389,14 +395,23 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = N
         " ORDER BY created_at DESC, rowid DESC LIMIT 1", (target_key, tier, *LIVE_JOB_STATES))
     if live is not None:
         params = routes._loads(live["params_json"], {})
+        # 살아 있는 잡이 브리프에서 빼는 항목도 판단 LLM 칸처럼 싣는다 — 빼지 않은 호출이 그 잡을 받아 '보통 브리프로 돈다' 고 읽지
+        # 않게, 다른 값을 준 호출이 differs 와 함께 무엇이 살아 있는지 보게(BL-12). 빼지 않는 잡은 칸이 없다(종전 응답 그대로).
         out = {"job_id": live["id"], "created": False,
-               **{k: live[k] for k in live.keys() if k not in ("id", "params_json")}, **routes.job_llm_view(params), "web": web}
+               **{k: live[k] for k in live.keys() if k not in ("id", "params_json")}, **routes.job_llm_view(params),
+               **({"exclude_evidence": list(params["exclude_evidence"])} if params.get("exclude_evidence") else {}),
+               "web": web}
+        differs = []
         if llm is not None and runner.job_llm({"llm": llm}) != runner.job_llm(params):
-            out["differs"] = ["llm"]              # 고른 판단 LLM 이 살아 있는 잡과 다르다 — 바꾸지 않는다(그 잡을 취소한 뒤 새로)
+            differs.append("llm")                 # 고른 판단 LLM 이 살아 있는 잡과 다르다 — 바꾸지 않는다(그 잡을 취소한 뒤 새로)
+        if excluded is not None and excluded != list(params.get("exclude_evidence") or ()):
+            differs.append("exclude_evidence")    # 뺄 항목이 살아 있는 잡과 다르다 — 바꾸지 않는다(그 잡을 취소한 뒤 새로)
+        if differs:
+            out["differs"] = differs
         return out
     if body is None:
         body = _body(routes.JobBody, tier=tier, concurrency=concurrency, modifiers=modifiers, user_memo=user_memo,
-                     consent=consent, mode=mode, **({"scope": scope} if scope is not None else {}))
+                     consent=consent, mode=mode, **({"scope": scope} if scope is not None else {}), **extra)
     return {**_create_job(ident, target_key, body), "created": True, "web": web}
 
 
@@ -412,7 +427,8 @@ def _create_job(ident: identity.Identity, target_key: str, body: Any) -> dict:
 
 def _start_review_job(ident: identity.Identity, store: Any, target_key: str, web: dict, *, tier: str | None,
                       consent: bool, modifiers: list[str] | None, user_memo: str | None, concurrency: int,
-                      scope: dict | None, llm: str | None = None, consent_external: Any = None) -> dict:
+                      scope: dict | None, llm: str | None = None, consent_external: Any = None,
+                      exclude_evidence: list[str] | None = None) -> dict:
     """검토 잡 — 같은 대상의 살아 있는 검토 잡이 있으면 그것을 돌려준다(`created: false` — 범위가 다르면 `differs: ['scope']`,
     판단 LLM 이 다르면 `differs` 에 'llm', 바꾸지 않는다). 패널 칸은 준 것만 본문에 싣는다 — 주면 본문 검증이 422 로 까닭을 말한다
     (조용히 버리지 않는다). 본문 검증은 살아 있는 잡을 돌려주기 전에 한다(claude 의 동의 칸 검사는 잡을 만들 때 — 살아 있는 잡을
@@ -420,7 +436,7 @@ def _start_review_job(ident: identity.Identity, store: Any, target_key: str, web
     fields: dict[str, Any] = {"mode": "reviews", "user_memo": user_memo, "consent": consent}
     for name, value, unset in (("scope", scope, None), ("tier", tier, None), ("modifiers", modifiers, None),
                                ("concurrency", concurrency, 1), ("llm", llm, None),
-                               ("consent_external", consent_external, None)):
+                               ("consent_external", consent_external, None), ("exclude_evidence", exclude_evidence, None)):
         if value != unset:
             fields[name] = value
     body = _body(routes.JobBody, **fields)

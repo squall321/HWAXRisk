@@ -223,8 +223,9 @@ def test_entry_tool_signatures():
     assert required("risk_open_target") == {"kind", "ref_id"}
     # 검토 잡은 새 도구가 아니라 mode·scope 다(M2.md 4.7) — tier 는 패널 잡에만 필요해 선택 인자가 됐다.
     # 판단 LLM 선택과 반출 동의(Claude 길 X-2) — 둘 다 선택 인자이고 동의는 사람이 한 뒤에만 true 다
+    # 패널 브리프에서 뺄 항목(B31 — 사용자가 고른 것만)
     assert props("risk_start_job") == {"target_key", "tier", "consent", "modifiers", "user_memo", "concurrency", "mode",
-                                       "scope", "llm", "consent_external"}
+                                       "scope", "llm", "consent_external", "exclude_evidence"}
     assert required("risk_start_job") == {"target_key"}
     assert tools["risk_start_job"].inputSchema["properties"]["mode"]["default"] == "panels"
     assert props("risk_job_action") == {"job_id", "action", "reason", "filter", "consent"}    # 실패 셀 처분(재설계 M3 C3-4) · 다시의 동의(MEDIUM 13)

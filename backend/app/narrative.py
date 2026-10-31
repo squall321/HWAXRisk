@@ -2026,6 +2026,13 @@ def suspect_hit(atom: Mapping[str, Any]) -> dict | None:
     return None
 
 
+def suspect_field_shas(atom: Mapping[str, Any]) -> set[str]:
+    """원자 본문 필드(SUSPECT_FIELDS) 글마다의 sha1 — 의심 문구 큐 항목(payload.sha1)이 지금 본문의 글을 가리키는지(재제출로 바뀐 옛 글이
+    아닌지) 가를 때 쓴다."""
+    return {render.source_sha1(value) for name in SUSPECT_FIELDS
+            if isinstance(value := atom.get(name), str) and value}
+
+
 def _release_ledger_cycles(store, target_key: str, panel_id: str, keys: Sequence[tuple[str, int]]) -> None:
     """이 패널이 쓰려는 (좌석, 회차) 를 다른 패널의 행이 쥐고 있으면 비킨다 — 좌석 원장이 받지 않은 행만.
 

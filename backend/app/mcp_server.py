@@ -11,7 +11,8 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field, StrictBool
 from mcp.server.transport_security import TransportSecuritySettings
 
-from app import brief, common, entry, expert_report, issues, planner, registry, review_cells, review_runner, routes, runner, synth
+from app import (brief, common, entry, expert_report, issues, planner, registry, review_cells, review_runner, routes, runner, synth,
+                 taxonomy)
 from app.adapters import dyna as dyna_adapter
 from app.adapters import ecad as ecad_adapter
 from app.errors import AppError
@@ -31,7 +32,7 @@ _INSTRUCTIONS = """HWAX Risk Review — 설계 리스크 심사 앱의 MCP 서�
       risk_get_expert_report(전문가 보고서 — 마크다운 쪽, next_page 로 이어 받으며 쪽을 다 이으면 part='full' 과 같다) ·
       risk_get_issues(카드 대조 대상의 쟁점 — 유형·등급·상태·결과·분포, 쟁점 패널은 웹 러너가 돌린다 — Claude 에서는 지켜본다) ·
       risk_get_report(종합 보고서 판 — 완결 표기·잔여·영역 요약·쟁점 결과, part=summary|domains|mechanisms|appendix|full 의 쪽)
-어휘: risk_taxonomy — severity·judgement·direction 의 허용값(추측해서 넣으면 422 다)
+어휘: risk_taxonomy — severity·judgement·direction·mechanism·domain 의 허용값(추측해서 넣으면 422 다)
 심사: risk_get_brief(열쇠는 brief_token, tier 'A' 는 웹 전용 — 결과를 낼 신원에게만 연다) · risk_submit_panel_result(engine='mcp' 는
       evidence_only 등급) · risk_add_finding — 둘 다 쓰기라 아래 신원 규칙을 따르고 actor 는 신원이 아니다(표기)
 
@@ -202,10 +203,13 @@ _A_CITES = ("인용 [{ref, quote}] — ref 가 든 항목이 1건 이상이어�
             "ref 와 같고, 문법 밖 ref 는 dangling 으로 남는다.")
 _A_FINDING_ACTOR = "옛 계약의 자칭 표기(필수) — 받기만 하고 쓰지 않는다. 작성자는 게이트웨이 위임으로 확인된 신원이다."
 _A_DIRECTION = f"방향 — {' · '.join(routes.HUMAN_DIRECTIONS)}."
-_A_FINDING_DOMAIN = f"영역 코드(선택, {_A_DOMAIN_CODE}) — 검사하지 않고 그대로 적는다."
-_A_MECHANISM = ("메커니즘 계열(risk_taxonomy 의 mechanism 행의 mechanism 칸 — 예 thermal · mechanical) — 검사하지 않고, 세부 · 대상 · "
-                "변경 종류와 함께 등록부 묶음 열쇠(cluster_key)가 된다.")
-_A_MECH_DETAIL = "메커니즘 세부(선택, 같은 행의 detail — 예 cte_mismatch)."
+_A_FINDING_DOMAIN = (f"영역 코드(선택) — {' · '.join(routes.human_domains())} 가운데 하나다(risk_taxonomy 의 domain). 밖의 값은 422 "
+                     "taxonomy_invalid 이고 detail.allowed 가 허용값이다.")
+_A_MECHANISM = (f"메커니즘 — 대분류 {' · '.join(taxonomy.mechanism_majors())} · {routes.HUMAN_UNCLASSIFIED}(기본) 가운데 하나이거나 "
+                "코드('<대분류>.<세부>', risk_taxonomy 의 mechanism 행 code — 대분류와 세부로 나눠 적는다)다. 밖의 값은 422 taxonomy_invalid "
+                "이고 detail 이 허용값(allowed · codes)을 준다. 세부 · 대상 · 변경 종류와 함께 등록부 묶음 열쇠(cluster_key)가 된다.")
+_A_MECH_DETAIL = ("메커니즘 세부(선택, 같은 행의 detail — 예 cte_mismatch). mechanism 을 코드로 주면 비우거나 그 코드의 세부와 같게 준다"
+                  "(다르면 422 taxonomy_invalid).")
 _A_FINDING_CHANGE = "변경 종류(선택, risk_taxonomy 의 change_kind — 예 dimension · topology)."
 _A_SUBJECT_KEY = ("대상 열쇠(선택) — 패널 finding 과 같은 꼴(부품 ckey · 두 ckey 를 '|' 로 이은 계면 · asm:<조립 키> · dim:<치수 이름>)"
                   "이면 같은 등록부 행으로 묶인다. 풀지 않고 그대로 쓴다.")
@@ -273,6 +277,9 @@ _A_SCOPE = (f"검토 잡의 범위(mode=reviews 만) — {{{', '.join(review_run
             "scope_invalid 다.")
 _A_LLM = (f"판단 LLM — {' · '.join(runner.LLM_CHOICES)}(비우면 glm). claude 는 mode=reviews · panels 둘 다 받고 consent_external 이 "
           "든다(반출 경고는 도구 설명).")
+_A_EXCLUDE_EVIDENCE = (f"패널 잡(mode=panels)의 브리프에서 뺄 항목 키(선택) — {' · '.join(brief.EXCLUDABLE_ITEMS)} 가운데이고 더할 수는 "
+                       "없다. 필수 E0 · E0c · E1 · 잡 메모 M · 그 밖의 값은 422 exclude_evidence_invalid 이고 검토 잡에 주면 422 다. 사용자가 "
+                       "고른 것만 준다(잡에 남고 감사 한 행이 선다).")
 _A_CONSENT_EXTERNAL = ("Claude 반출 동의 — 반출 사실(도구 설명)을 사용자에게 보이고 동의를 받은 뒤에만 JSON true 를 준다(글자 'true' · "
                        "1 은 거절한다). 자동으로 채우지 않는다.")
 _A_JOB_ID = ("잡 id — risk_start_job 응답의 job_id · risk_get_coverage 의 job.id(패널 잡) · review.job.id(검토 잡) · risk_next_step "
@@ -621,7 +628,7 @@ async def risk_add_source(project_id: Annotated[str, Field(description=_A_PROJEC
                           ref: Annotated[dict, Field(description=_A_SOURCE_REF)],
                           app_key: Annotated[str | None, Field(description=_A_APP_KEY)] = None,
                           bridge_declared: Annotated[bool, Field(description=_A_BRIDGE)] = False) -> dict:
-    """과제에 소스 연결 — 쓰기: 어느 과제에 어떤 소스를 붙일지 사용자에게 확인한 뒤 부른다, kind=mcad ref={stepforge_project_id, detect_job_id?}(StepForge) · dyna ref={session_id, file_id}(DynaForge, 본인 세션) · dyna_result ref={report_ids[]}, 같은 소스는 기존 행을 돌려주고 같은 kind 의 다른 소스는 거절한다(캡처는 종류마다 하나만 읽고 소스는 지울 수 없다)."""
+    """과제에 소스 연결 — 쓰기: 어느 과제에 어떤 소스를 붙일지 사용자에게 확인한 뒤 부른다, kind=mcad ref={stepforge_project_id, detect_job_id?}(StepForge) · dyna ref={session_id, file_id}(DynaForge, 본인 세션) · dyna_result ref={report_ids[]}, 같은 소스는 기존 행을 돌려주고 같은 kind 의 다른 소스는 거절한다(캡처는 종류마다 하나만 읽고 소스는 지울 수 없다), 내가 구성원인 다른 과제에 같은 소스가 이미 붙어 있으면 막지 않고 duplicate_of[{project_id, code, owner_sub, created_at}] 로 알린다(사용자에게 보인다)."""
     return await _entry(entry.add_source, project_id=project_id, kind=kind, ref=ref, app_key=app_key,
                         bridge_declared=bridge_declared)
 
@@ -690,11 +697,12 @@ async def risk_start_job(target_key: Annotated[str, Field(description=_A_TARGET_
                          mode: Annotated[str, Field(description=_A_MODE)] = "panels",
                          scope: Annotated[dict | None, Field(description=_A_SCOPE)] = None,
                          llm: Annotated[str | None, Field(description=_A_LLM)] = None,
-                         consent_external: Annotated[StrictBool | None, Field(description=_A_CONSENT_EXTERNAL)] = None) -> dict:
-    """심사 잡 시작 — 쓰기: 범위와 비용(패널 수·LLM 호출 추정)을 사용자에게 확인한 뒤 부른다(Tier C 와 호출 추정이 큰 검토는 consent=true), mode=panels(기본 — tier 필수, Tier 는 누적이다 A 도메인 대표 → B → C 전원)|reviews(카드 대조 대상의 전문가별 카드 대조 — tier·modifiers·concurrency 없이 scope={agents·domains·tiers·unit_ids} 로 범위를 주고, 전문가는 risk_next_step 의 facts.review_order 를 보고 사용자가 고른다), 심사는 앱 러너가 돌리고 결과는 웹에 그대로 보인다, 같은 대상의 살아 있는 잡(panels 는 같은 Tier)이 있으면 그것을 돌려주고, 자격이 없으면 웹 설정 화면에서 등록하라는 fix 로 답한다. llm=glm(기본 — 빼도 같다)|claude(검토 잡 · 패널 잡 — 판단 LLM 이 사용자 본인의 Claude Code 워크플로 hwax-risk-claude 다, 좌석 조회는 글 왕복으로 엔진이 실행한다): 이 잡의 지식카드·설계 변경 원문과, 사슬이 이어 도는 쟁점 패널·종합 요약의 입력(이 대상 전체의 등록부 행·쟁점·요약 — 다른 사람의 검토 결과도 든다)이 Claude(외부)로 나갑니다(패널 잡은 그 패널의 브리프 · 좌석 조회 결과) — 사용자에게 그 사실을 보이고 동의를 받은 뒤에만 consent_external=true(JSON 참 — 글자 'true' · 1 은 받지 않는다)를 더한다(동의 없이 true 를 채우지 않는다 · 없으면 consent_external_required), 이 박스의 에이전트 서버가 그 길을 열지 않았으면 external_llm_unavailable, 잡은 동의한 사람의 PAT 로만 돌고 그 사람이 Claude Code 에서 워크플로를 돌려야 나아간다(멈추면 보류 external_worker), 사슬이 잇는 쟁점·종합 잡도 같은 선택과 동의를 물려받는다(쟁점 잡은 그 사슬이 고른 쟁점만 — 다른 사람의 GLM 일 · 사람이 올린 쟁점 · 보고서 다시 내기는 GLM 잡으로 간다), 같은 Tier 의 살아 있는 패널 잡이 판단 LLM 이 다르면 그 잡을 돌려주며 differs 에 llm 을 싣는다(바꾸지 않는다 — 취소한 뒤 새로)."""
+                         consent_external: Annotated[StrictBool | None, Field(description=_A_CONSENT_EXTERNAL)] = None,
+                         exclude_evidence: Annotated[list[str] | None, Field(description=_A_EXCLUDE_EVIDENCE)] = None) -> dict:
+    """심사 잡 시작 — 쓰기: 범위와 비용(패널 수·LLM 호출 추정)을 사용자에게 확인한 뒤 부른다(Tier C 와 호출 추정이 큰 검토는 consent=true), mode=panels(기본 — tier 필수, Tier 는 누적이다 A 도메인 대표 → B → C 전원)|reviews(카드 대조 대상의 전문가별 카드 대조 — tier·modifiers·concurrency 없이 scope={agents·domains·tiers·unit_ids} 로 범위를 주고, 전문가는 risk_next_step 의 facts.review_order 를 보고 사용자가 고른다), 심사는 앱 러너가 돌리고 결과는 웹에 그대로 보인다, 같은 대상의 살아 있는 잡(panels 는 같은 Tier)이 있으면 그것을 돌려주고, 자격이 없으면 웹 설정 화면에서 등록하라는 fix 로 답한다. llm=glm(기본 — 빼도 같다)|claude(검토 잡 · 패널 잡 — 판단 LLM 이 사용자 본인의 Claude Code 워크플로 hwax-risk-claude 다, 좌석 조회는 글 왕복으로 엔진이 실행한다): 이 잡의 지식카드·설계 변경 원문과, 사슬이 이어 도는 쟁점 패널·종합 요약의 입력(이 대상 전체의 등록부 행·쟁점·요약 — 다른 사람의 검토 결과도 든다)이 Claude(외부)로 나갑니다(패널 잡은 그 패널의 브리프 · 좌석 조회 결과) — 사용자에게 그 사실을 보이고 동의를 받은 뒤에만 consent_external=true(JSON 참 — 글자 'true' · 1 은 받지 않는다)를 더한다(동의 없이 true 를 채우지 않는다 · 없으면 consent_external_required), 이 박스의 에이전트 서버가 그 길을 열지 않았으면 external_llm_unavailable, 잡은 동의한 사람의 PAT 로만 돌고 그 사람이 Claude Code 에서 워크플로를 돌려야 나아간다(멈추면 보류 external_worker), 사슬이 잇는 쟁점·종합 잡도 같은 선택과 동의를 물려받는다(쟁점 잡은 그 사슬이 고른 쟁점만 — 다른 사람의 GLM 일 · 사람이 올린 쟁점 · 보고서 다시 내기는 GLM 잡으로 간다), 같은 Tier 의 살아 있는 패널 잡이 판단 LLM 이 다르면 그 잡을 돌려주며 differs 에 llm 을 싣는다(바꾸지 않는다 — 취소한 뒤 새로). exclude_evidence 는 사용자가 패널 브리프에서 뺀 항목 키(E2~E9)만 준다 — 그 잡의 패널 브리프에서 빠지고 감사 한 행이 서며, 살아 있는 잡을 돌려줄 때는 그 잡이 빼는 항목을 exclude_evidence 로 싣고(빼지 않는 잡은 칸이 없다) 준 값과 다르면 differs 에 exclude_evidence 를 싣는다."""
     return await _entry(entry.start_job, target_key=target_key, tier=tier, consent=consent, modifiers=modifiers,
                         user_memo=user_memo, concurrency=concurrency, mode=mode, scope=scope, llm=llm,
-                        consent_external=consent_external)
+                        consent_external=consent_external, exclude_evidence=exclude_evidence)
 
 
 @mcp.tool()

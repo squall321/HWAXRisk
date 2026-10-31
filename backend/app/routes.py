@@ -1422,6 +1422,48 @@ def get_project_audit(project_id: str, action: str | None = None, since: int = 0
             "entries": entries}
 
 
+TARGET_AUDIT_LIMIT_MAX = 200
+
+
+@router.get("/targets/{target_key}/audit")
+def get_target_audit(target_key: str, action: str | None = None, since: int = 0, until: int | None = None,
+                     limit: int = 100, offset: int = 0, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """그 대상의 사람 행위 감사(plan §8.2.3, viewer 이상) — 칸 · 거름은 과제 감사와 같고 limit 은 1~200 으로 죈다.
+
+    어느 행이 그 대상의 것인지는 `registry.target_audit_clause` 하나가 정한다(통합 보고서의 '사람 개입 요약' 과 같은 조각). 구성원이
+    아닌 남에게는 없는 대상과 같은 404 다 — 그 대상이 있다는 것을 흘리지 않는다(남 숨김, viewer 가 바닥이라 등급 미달은 없다)."""
+    email = _require_user(ident)
+    store = get_store()
+    row = store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (target_key,))
+    missing = AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
+    if row is None:
+        raise missing
+    if not _is_admin(ident):
+        _member_or_missing(row["project_id"], email, "viewer", missing)
+    limit = max(1, min(int(limit), TARGET_AUDIT_LIMIT_MAX))
+    offset = max(0, int(offset))
+    clause, params = registry_module.target_audit_clause(store, target_key)
+    where = f" FROM rr_audit WHERE {clause} AND at >= ?"
+    params = [*params, int(since)]
+    if action:
+        where += " AND action = ?"
+        params.append(action)
+    if until is not None:
+        where += " AND at <= ?"
+        params.append(int(until))
+    total = store.query_one("SELECT COUNT(*) AS n" + where, tuple(params))
+    rows = store.query("SELECT id, actor, actor_verified, channel, scope, subject_id, project_id, action, before_json,"
+                       " after_json, reason, at" + where + " ORDER BY at DESC, id DESC LIMIT ? OFFSET ?",
+                       (*params, limit, offset))
+    entries = []
+    for item in (dict(r) for r in rows):
+        item["before"] = _loads(item.pop("before_json"), {})
+        item["after"] = _loads(item.pop("after_json"), {})
+        item["actor_verified"] = bool(item["actor_verified"])
+        entries.append(item)
+    return {"target_key": target_key, "total": int(total["n"] or 0), "limit": limit, "offset": offset, "entries": entries}
+
+
 class PurgeBody(BaseModel):
     code: str = Field(max_length=40)
     reason: str = Field(max_length=300)
@@ -1651,7 +1693,23 @@ def add_source(project_id: str, body: SourceBody,
         # StepForge 에는 사용자 격리가 없다 — owner 칸도 per_user_sso 도 없어 게이트웨이를 지나는 호출자 전원이 같은 /data 를
         # 본다(2026-08-31 실측). 그래서 남의 프로젝트도 붙일 수 있고, 이 앱이 세울 경계는 이 경고와 classification 필수뿐이다(plan §2.13.3).
         out["warnings"] = ["stepforge_no_isolation"]
+    duplicates = _source_duplicates(ref_key, project_id, owner_sub)
+    if duplicates:
+        out["duplicate_of"] = duplicates
     return out
+
+
+def _source_duplicates(ref_key: str, project_id: str, email: str) -> list[dict]:
+    """같은 원천(`ref_key`)이 붙은 다른 과제 — 등록은 막지 않고 알린다(plan §8.2.3 `duplicate_of` — 같은 CAD 를 두 관점으로 심사하는
+    것이 정당할 수 있다). 부른 사람이 구성원(소유 · 멤버)인 과제만 싣는다 — 남의 과제는 목록에도 수로도 드러내지 않는다(context-notes
+    D45 '구성원은 하나'). `created_at` 은 그 과제에 그 원천이 붙은 시각이다. 폐기(purge)된 과제는 싣지 않는다 — 소스 · 멤버 행은 남지만
+    원문을 비운 묘비라 같은 원천으로 심사한 과제가 아니다(BL-11)."""
+    rows = get_store().query(
+        "SELECT s.project_id, p.code, p.owner_sub, s.created_at FROM rr_sources s JOIN rr_projects p ON p.id = s.project_id"
+        " WHERE s.ref_key = ? AND s.project_id <> ? AND p.status = 'active'"
+        " AND (p.owner_sub = ? OR p.id IN (SELECT project_id FROM rr_project_members WHERE email = ?))"
+        " ORDER BY s.created_at, s.project_id", (ref_key, project_id, email, email))
+    return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------- ECAD 보드(ODB 허브 job_id, 포털 docs/design-risk-review/ecad-1031 ER-01)
@@ -3159,7 +3217,7 @@ def post_target_flow(target_key: str, body: FlowBody, ident: identity.Identity =
 class JobBody(BaseModel):
     """잡 본문 — `mode` 가 panels(기본 — Tier 패널 잡, tier 필수)·reviews(카드 대조 검토 잡, 재설계 M2 S12)를 가른다.
 
-    reviews 의 본문은 {mode, scope?, user_memo?, consent?, llm?, consent_external?} 다. 패널 칸(tier·modifiers·concurrency)을 주면
+    reviews 의 본문은 {mode, scope?, user_memo?, consent?, llm?, consent_external?} 다. 패널 칸(tier·modifiers·concurrency·exclude_evidence)을 주면
     422 다 — 범위는 scope.tiers 로 주고, 동시 수는 박스 손잡이(HWAXRISK_REVIEW_CONCURRENCY)다. 패널 잡에 scope 를 주어도 422 다(조용히
     버리지 않는다). `llm`(Claude 길 X-2)은 판단 LLM — glm(없음과 같다) · claude 이고 검토 잡 · 패널 잡 둘 다 받는다(패널 잡은 포털
     docs/claude-delib-parity C4 — 좌석 자유 조회는 글 왕복으로 돈다). claude 는 `consent_external` 이 JSON true 여야 한다
@@ -3177,6 +3235,9 @@ class JobBody(BaseModel):
     scope: dict[str, Any] | None = None            # {tiers?, domains?, agents?, unit_ids?} — review_runner.resolve_scope
     llm: Literal["glm", "claude"] | None = None    # 판단 LLM(Claude 길 X-2) — 없으면 glm
     consent_external: Any = None                   # claude 의 반출 동의 — JSON true 만(사람이 동의한 뒤에만)
+    # 패널 잡의 브리프에서 뺄 항목 키(B31 · plan §8.2.3 — 빼기만 · 더하기 없음, 헌법 P1). 허용값은 brief.EXCLUDABLE_ITEMS 이고
+    # 검사는 runner.create_job(brief.check_exclude) 가 한다. 종전에는 칸이 없어 본문의 이 값이 조용히 버려졌다.
+    exclude_evidence: list[str] | None = None
 
     @model_validator(mode="after")
     def _fields_of_the_mode(self) -> "JobBody":
@@ -3186,8 +3247,8 @@ class JobBody(BaseModel):
             if self.scope is not None:
                 raise ValueError("scope 는 카드 대조 검토 잡(mode='reviews')의 칸이다 — 패널 잡은 tier 로 범위를 정한다")
             return self
-        panel_only = sorted(k for k in ("tier", "modifiers", "concurrency")
-                            if k in self.model_fields_set and (k != "modifiers" or self.modifiers))
+        panel_only = sorted(k for k in ("tier", "modifiers", "concurrency", "exclude_evidence")
+                            if k in self.model_fields_set and (k not in ("modifiers", "exclude_evidence") or getattr(self, k)))
         if panel_only:
             raise ValueError(f"{', '.join(panel_only)} 는 패널 잡의 칸이다 — 검토 잡(mode='reviews')의 범위는"
                              " scope{tiers, domains, agents, unit_ids} 로, 동시 수는 HWAXRISK_REVIEW_CONCURRENCY 로 정한다")
@@ -3243,7 +3304,13 @@ def create_job(target_key: str, body: JobBody,
     out = runner.create_job(store, target_key, body.tier, owner_sub=row["owner_sub"],
                             modifiers=body.modifiers, user_memo=body.user_memo,
                             concurrency=body.concurrency, consent=body.consent, requester_sub=email,
-                            consent_source=consent_source, llm=body.llm, consent_external=body.consent_external)
+                            consent_source=consent_source, llm=body.llm, consent_external=body.consent_external,
+                            exclude_evidence=body.exclude_evidence)
+    if out.get("exclude_evidence"):
+        # 사람이 브리프에서 뺀 항목(B31 · plan §8.2.3) — 잡마다 한 행이다. 통합 보고서 minutes 의 '사람 개입 요약' 이 이 행을 센다.
+        _audit(store, email, scope="job", subject_id=out["job_id"], project_id=row["project_id"], action="brief.exclude",
+               after={"target_key": target_key, "tier": body.tier, "exclude_evidence": out["exclude_evidence"]},
+               channel=AUDIT_CHANNELS.get(ident.source, "rest"))
     if out.get("llm"):
         # 반출 동의(Claude 길 X-2) — Claude 로 고른 패널 잡만 감사 한 행(누가 · 언제 · 어느 입구로 — 검토 잡과 같은 칸). GLM 패널 잡은 종전대로
         # 감사 행을 남기지 않는다.
@@ -4547,13 +4614,17 @@ class RegistryVisibilityBody(BaseModel):
 @router.put("/registry/{cluster_key:path}/visibility")
 def put_registry_visibility(cluster_key: str, body: RegistryVisibilityBody,
                             ident: identity.Identity = Depends(identity.current)) -> dict:
-    """등록부 행의 조직 공개 토글(소유자 전용) — rr_audit 1행을 남긴다(plan §0.9 P6-8)."""
+    """등록부 행의 조직 공개 토글(소유자 전용) — rr_audit 1행을 남긴다(plan §0.9 P6-8).
+
+    대상을 골라 바꾼 토글은 그 대상의 행만 바꾸므로 감사 자리도 '<대상>#<클러스터>' 다(병합과 같은 꼴) — 맨 클러스터 열쇠로 적으면 같은
+    열쇠를 가진 내 다른 대상의 감사에도 실린다(BL-8). 대상을 고르지 않은 토글은 그 열쇠의 내 행 전부를 바꾸어 맨 열쇠 그대로다."""
     owner_sub = _require_user(ident)
     store = get_store()
     with store.tx():
         out = registry_module.set_visibility(store, cluster_key, body.visibility,
                                              owner_sub=owner_sub, target_key=body.target_key)
-        _audit(store, owner_sub, scope="registry", subject_id=cluster_key,
+        _audit(store, owner_sub, scope="registry",
+               subject_id=f"{body.target_key}#{cluster_key}" if body.target_key else cluster_key,
                action="registry.visibility", before={"visibility": out["before"]},
                after={"visibility": out["visibility"]})
     return out
@@ -4886,6 +4957,27 @@ def _seat_contract_rev() -> str:
     return sha256_hex(taxonomy.asset_path("seat-contract").read_bytes())[:12]
 
 
+# MCP 길(미검증 actor) 패널의 회수 격리를 사람이 푸는 큐 항목의 표지(B28 · plan §3.4.1 · §6.11). 큐 kind 는 DDL 어휘 안에서 고른다 —
+# 격리된 원자의 큐는 suspect_text 이고(plan §5.2.3 '브리프에 실을 수 없는(격리된) 원자'), payload.reason 이 의심 문구 항목과 가른다.
+ACTOR_UNVERIFIED = "actor_unverified"
+
+
+def _queue_actor_recall(store: Any, panel: dict, *, actor: str | None, findings_n: int, characters_n: int) -> None:
+    """그 패널의 격리를 풀 큐 항목 하나(소유자는 패널의 소유자) — 같은 패널의 열린 항목이 있으면 그 항목의 수만 고친다(같은 결과를 다시
+    내도 항목은 하나다)."""
+    payload = canonical_json({"reason": ACTOR_UNVERIFIED, "target_key": panel["target_key"], "panel_id": panel["id"],
+                              "actor": actor, "findings_n": int(findings_n), "characters_n": int(characters_n)})
+    opened = store.query_one(
+        "SELECT id FROM rr_curation_queue WHERE kind = 'suspect_text' AND status = 'open'"
+        " AND json_extract(payload_json, '$.reason') = ? AND json_extract(payload_json, '$.panel_id') = ?",
+        (ACTOR_UNVERIFIED, panel["id"]))
+    if opened is not None:
+        store.execute("UPDATE rr_curation_queue SET payload_json = ? WHERE id = ?", (payload, opened["id"]))
+        return
+    store.execute("INSERT INTO rr_curation_queue(id, owner_sub, kind, payload_json, status, created_at)"
+                  " VALUES (?, ?, 'suspect_text', ?, 'open', ?)", (new_uuid(), panel["owner_sub"], payload, now_epoch()))
+
+
 def complete_panel(panel_id: str, *, engine: str, decision_text: str, turns: list[dict],
                    report_id: Any = None, conv_id: str | None = None,
                    events: list[dict] | None = None, model: str | None = None,
@@ -5031,8 +5123,11 @@ def complete_panel(panel_id: str, *, engine: str, decision_text: str, turns: lis
         # 미검증 actor(MCP 경로)가 낸 원자는 회수에서 격리한다 — 이 타깃 등록부·보고서에는 그대로 남고
         # 다른 과제 브리프의 E5·E6·E7 후보에서만 빠진다(plan §3.4.1 회수 격리·§6.11).
         if not actor_verified and config.settings.risk_recall_require_verified_actor:
-            store.execute("UPDATE rr_findings SET recall_eligible = 0 WHERE panel_id = ?", (panel_id,))
-            store.execute("UPDATE rr_character SET recall_eligible = 0 WHERE id LIKE ?", (f"{panel_id}#%",))
+            findings_n = store.execute("UPDATE rr_findings SET recall_eligible = 0 WHERE panel_id = ?", (panel_id,))
+            characters_n = store.execute("UPDATE rr_character SET recall_eligible = 0 WHERE id LIKE ?", (f"{panel_id}#%",))
+            # 되돌리는 길(B28) — 사람이 큐에서 approve_recall 로 푼다. 격리한 원자가 있을 때만, 열린 항목이 없을 때만 세운다.
+            if findings_n or characters_n:
+                _queue_actor_recall(store, panel, actor=actor, findings_n=findings_n, characters_n=characters_n)
 
         merged = registry_module.merge(store, panel["target_key"])
         level = registry_module.close_level(store, panel["target_key"])
@@ -5522,6 +5617,39 @@ HUMAN_DIRECTIONS = ("risk", "improvement", "neutral")
 HUMAN_SEVERITIES = ("경미", "중대", "치명")
 HUMAN_JUDGEMENTS = ("OK", "WARNING", "FAIL", "undetermined")
 _SEV3_OF = {"경미": 1, "중대": 2, "치명": 3}
+# 사람 finding 의 mechanism 기본값 — 택소노미 밖이지만 받는 유일한 값이다(A18).
+HUMAN_UNCLASSIFIED = "unclassified"
+
+
+def human_domains() -> tuple[str, ...]:
+    """사람 finding 의 domain 이 받는 값 — 택소노미 domain 축의 코드(차례 그대로)."""
+    return tuple(str(item["code"]) for item in taxonomy.load_taxonomy()["axes"]["domain"])
+
+
+def human_mechanism(mechanism: str, detail: str | None) -> tuple[str, str | None]:
+    """사람 finding 의 (mechanism, mechanism_detail) — 택소노미 어휘와 맞추고 정본 꼴로 낸다(A18).
+
+    mechanism 은 대분류(risk_taxonomy 의 mechanism 칸 — thermal · mechanical …) · 'unclassified' · 코드('<대분류>.<세부>' — 웹 폼이
+    보내는 꼴)를 받는다. 코드는 패널 원자와 같은 꼴(대분류 + 세부)로 나눠 적는다 — 그대로 두면 같은 메커니즘이 패널 원자 · 대분류 꼴과
+    다른 등록부 묶음 열쇠(cluster_key)로 갈린다. 그 밖은 422 taxonomy_invalid 와 허용값이다(오타가 묶음 열쇠를 쪼개지 않게). 세부는
+    코드 꼴일 때만 그 코드의 세부와 맞는지 본다 — 대분류 꼴의 세부는 종전대로 받는다."""
+    doc = taxonomy.load_taxonomy()
+    majors = taxonomy.mechanism_majors(doc)
+    if mechanism == HUMAN_UNCLASSIFIED or mechanism in majors:
+        return mechanism, detail
+    codes = {str(item["code"]): item for item in doc["axes"]["mechanism"]}
+    row = codes.get(mechanism)
+    if row is None:
+        raise AppError("taxonomy_invalid", f"mechanism 이 택소노미 어휘가 아닙니다 — {mechanism!r}. 대분류 · 'unclassified' · 코드"
+                       "('<대분류>.<세부>', risk_taxonomy 의 mechanism 행 code) 가운데 하나를 줍니다.", 422,
+                       detail={"field": "mechanism", "value": mechanism, "allowed": [HUMAN_UNCLASSIFIED, *majors],
+                               "codes": list(codes)})
+    major, code_detail = str(row["mechanism"]), str(row["detail"])
+    if detail not in (None, "", code_detail):
+        raise AppError("taxonomy_invalid", f"mechanism 코드 {mechanism!r} 의 세부는 {code_detail!r} 인데 mechanism_detail 이"
+                       f" {detail!r} 입니다 — 둘 중 하나만 주거나 같게 줍니다.", 422,
+                       detail={"field": "mechanism_detail", "value": detail, "allowed": [code_detail]})
+    return major, code_detail
 
 
 def _next_human_claim_uid(store: Any, target_key: str) -> str:
@@ -5571,6 +5699,11 @@ def create_human_finding(target_key: str, body: HumanFindingBody,
         raise AppError("E100", f"severity 는 {list(HUMAN_SEVERITIES)} 중 하나여야 합니다.", 422)
     if body.judgement is not None and body.judgement not in HUMAN_JUDGEMENTS:
         raise AppError("E100", f"judgement 는 {list(HUMAN_JUDGEMENTS)} 중 하나여야 합니다.", 422)
+    # 택소노미 어휘(A18) — 오타가 등록부 묶음 열쇠(cluster_key)를 쪼개지 않게 밖의 값은 허용값과 함께 422 다.
+    mechanism, mechanism_detail = human_mechanism(body.mechanism, body.mechanism_detail)
+    if body.domain is not None and body.domain not in human_domains():
+        raise AppError("taxonomy_invalid", f"domain 이 택소노미 어휘가 아닙니다 — {body.domain!r}.", 422,
+                       detail={"field": "domain", "value": body.domain, "allowed": list(human_domains())})
     cites = [c for c in body.cites if isinstance(c, dict) and str(c.get("ref") or "").strip()]
     if not cites:
         raise AppError("cites_required", "사람 finding 도 인용이 최소 1건 필요합니다(§4.3.1).", 422)
@@ -5582,12 +5715,11 @@ def create_human_finding(target_key: str, body: HumanFindingBody,
     finding_id = claim_uid
     severity = body.severity or "경미"
     subject_key = (body.subject_key or "").strip()
-    cluster_key = narrative.cluster_key_of(body.mechanism, body.mechanism_detail or "", subject_key,
-                                           body.change_kind or "")
+    cluster_key = narrative.cluster_key_of(mechanism, mechanism_detail or "", subject_key, body.change_kind or "")
     finding_json = {
         "id": claim_uid, "origin": "human", "author_sub": email,
-        "direction": body.direction, "domain": body.domain, "mechanism": body.mechanism,
-        "mechanism_detail": body.mechanism_detail, "change_kind": body.change_kind,
+        "direction": body.direction, "domain": body.domain, "mechanism": mechanism,
+        "mechanism_detail": mechanism_detail, "change_kind": body.change_kind,
         "subject": {"ckeys": [], "names": list(body.subject_names)},
         "subject_key": subject_key, "severity": severity, "judgement": body.judgement or "undetermined",
         "trigger_condition": body.trigger_condition, "claim": body.claim, "warrant": body.warrant or "",
@@ -5603,7 +5735,7 @@ def create_human_finding(target_key: str, body: HumanFindingBody,
             " VALUES (?,?, 'human', ?, ?, NULL, NULL, ?, ?, 'private', ?,?,?,?,?,?, '[]', ?,?,?,?, '경험칙',"
             " 'none', ?, 0, ?, ?, 1, 'open', 'code', ?, ?)",
             (finding_id, claim_uid, email, target_key, row["project_id"], row["owner_sub"],
-             body.direction, body.domain, body.mechanism, body.mechanism_detail, body.change_kind,
+             body.direction, body.domain, mechanism, mechanism_detail, body.change_kind,
              subject_key, body.trigger_condition, severity, _SEV3_OF.get(severity, 1),
              body.judgement or "undetermined", body.requirement_ref, cluster_key,
              canonical_json(finding_json), now, now),
@@ -5693,8 +5825,9 @@ def post_finding_label(finding_id: str, body: LabelBody,
 CURATION_DECISIONS: dict[str, tuple[str, ...]] = {
     "label_match": ("confirmed", "refuted", "inconclusive", "reject"),
     "pattern_candidate": ("known", "rule", "predictor", "suspended", "deprecated", "reject"),
-    # 의심 문구는 사람이 원문을 보고 승인(원문 복원 + 회수 복귀)하거나 기각(격리 유지)한다(§3.4.1).
-    "suspect_text": ("approve", "reject"),
+    # 의심 문구는 사람이 원문을 보고 승인(원문 복원 + 회수 복귀)하거나 회수만 되돌리거나(approve_recall) 기각(격리 유지)한다(§3.4.1).
+    # MCP 길(미검증 actor) 패널의 격리 항목(payload.reason='actor_unverified', B28)은 되살릴 원문이 없어 approve_recall · reject 뿐이다.
+    "suspect_text": ("approve", "approve_recall", "reject"),
     # 근접 중복 클러스터 — merge 는 별칭 1행 + 재병합, reject 는 그대로 두 행이다
     # (payload {"suppress": true} 로 기각하면 다음 스캔이 그 쌍을 다시 올리지 않는다, §7.7 표).
     "cluster_merge": ("merge", "reject"),
@@ -5703,6 +5836,8 @@ CURATION_DECISIONS: dict[str, tuple[str, ...]] = {
     # 자유 태그 승격 — promote 는 payload.axis 로 `char:<axis>:<value>` 를 만들고, reject 는 그 태그를 다시 올리지 않는다.
     "x_tag_promote": ("promote", "reject"),
 }
+# 미검증 신원 격리 항목(payload.reason='actor_unverified', B28)이 받는 결정 — suspect_text 어휘의 부분집합이다(되살릴 원문이 없다).
+ACTOR_RECALL_DECISIONS: tuple[str, ...] = ("approve_recall", "reject")
 # 감사 로그의 scope 는 rr_audit CHECK 어휘 안에서 고른다(§5.2.2 — 'curation' 은 그 어휘에 없다).
 CURATION_AUDIT_SCOPE: dict[str, str] = {"label_match": "finding", "pattern_candidate": "registry",
                                         "suspect_text": "finding", "cluster_merge": "registry",
@@ -5710,6 +5845,39 @@ CURATION_AUDIT_SCOPE: dict[str, str] = {"label_match": "finding", "pattern_candi
                                         # 승격은 한 과제가 아니라 소유자 코퍼스의 진술을 건드린다 — 가장 가까운 어휘가 'project' 다.
                                         "x_tag_promote": "project"}
 CURATION_LIMIT_MAX = 200
+
+
+# recall_eligible 한 칸에 격리의 까닭이 둘이다 — 의심 문구(plan §3.4.1, claim 마다 항목)와 미검증 신원(B28, 패널마다 항목). 한 항목의 승인은
+# 제 격리만 풀고, 다른 격리가 남은 finding 은 되돌리지 않는다(BL-9). 아래 둘은 그 격리가 아직 걸려 있는지를 큐에서 다시 읽는다 — `settled`
+# 는 지금 승인하는 항목의 id 라 승인된 것으로 본다. 항목마다 가장 최근 것이 그 자리의 결정이다(기각 뒤 재제출로 다시 선 항목이 이긴다).
+def _actor_hold(store: Any, panel_id: str | None, owner_sub: str, settled: str) -> bool:
+    """그 패널의 원자에 미검증 신원 격리가 남아 있나 — 그 패널의 가장 최근 미검증 신원 항목이 열려 있거나 기각(격리 유지)됐으면 남아
+    있다. 항목이 없는 패널(웹 길 · 격리를 끈 박스)은 걸려 있지 않다."""
+    if not panel_id:
+        return False
+    row = store.query_one(
+        "SELECT id, status FROM rr_curation_queue WHERE kind = 'suspect_text' AND owner_sub = ?"
+        " AND json_extract(payload_json, '$.reason') = ? AND json_extract(payload_json, '$.panel_id') = ?"
+        " ORDER BY created_at DESC, rowid DESC LIMIT 1", (owner_sub, ACTOR_UNVERIFIED, panel_id))
+    return row is not None and row["id"] != settled and row["status"] != "done"
+
+
+def _suspect_hold(store: Any, finding: Mapping[str, Any], owner_sub: str, settled: str) -> bool:
+    """그 finding 에 의심 문구 격리가 남아 있나 — 지금 본문의 글을 가리키는 그 claim 의 가장 최근 의심 문구 항목이 열려 있거나 기각됐으면,
+    또는 본문이 지금 인젝션 어휘에 걸리는데 그 글(sha1)을 승인한 항목이 없으면 남아 있다. 같은 sha1 의 항목이 이미 열려 있어 제 항목이
+    서지 않은 원자도 그래서 격리로 남는다(승인할 항목이 없다 — 미검증 신원 승인이 인젝션 글을 회수로 되돌리지 않게)."""
+    atom = _loads(finding["finding_json"], {}) or {}
+    current = narrative.suspect_field_shas(atom)
+    items = [("done" if row["id"] == settled else str(row["status"]), str(_loads(row["payload_json"], {}).get("sha1") or ""))
+             for row in store.query(
+                 "SELECT id, status, payload_json FROM rr_curation_queue WHERE kind = 'suspect_text' AND owner_sub = ?"
+                 " AND json_extract(payload_json, '$.claim_uid') = ? ORDER BY created_at DESC, rowid DESC",
+                 (owner_sub, finding["claim_uid"]))]
+    items = [(status, sha1) for status, sha1 in items if sha1 in current]          # 재제출로 바뀐 옛 글의 항목은 뺀다
+    if items and items[0][0] != "done":
+        return True
+    hit = narrative.suspect_hit(atom)
+    return hit is not None and (("done", hit["sha1"]) not in items)
 
 
 def _bump_minor(version: str) -> str:
@@ -5777,24 +5945,44 @@ def put_curation(queue_id: str, body: CurationDecisionBody,
         raise AppError("E409", f"이미 결정된 항목입니다 — status={row['status']}.", 409)
 
     payload = _loads(row["payload_json"], {})
+    actor_item = kind == "suspect_text" and payload.get("reason") == ACTOR_UNVERIFIED
+    if actor_item and body.decision not in ACTOR_RECALL_DECISIONS:
+        raise AppError("decision_not_allowed_for_kind",
+                       f"미검증 신원(MCP 길) 격리 항목에는 되살릴 원문이 없습니다 — 결정은 {list(ACTOR_RECALL_DECISIONS)} 입니다.", 422)
     decision_json = {"decision": body.decision, "reason": body.reason, "payload": body.payload or {}}
     status = "rejected" if body.decision == "reject" else "done"
     applied: dict = {}
     with store.tx():
-        if kind == "suspect_text" and body.decision == "approve":
-            # 승인은 원문 복원이다 — 자리표시자가 가리키던 sha1 의 원문을 돌려주고 그 finding 을 회수로 되돌린다. 카드 대조 finding 은
-            # 회수 자격을 올리지 않는다(M2.md 5절 #9 — 형식 승인 전 산출이 다른 과제의 선례·통계로 새지 않게, R3B-8). 그것을 여는 일은
-            # M3 의 형식 승인 뒤 일괄 절차다.
-            claim_uid = str(payload.get("claim_uid") or "")
-            restored = 0
-            if claim_uid:
-                restored = int(store.execute(
-                    "UPDATE rr_findings SET recall_eligible = 1, updated_at = ?"
-                    # 카드 대조 거름 그대로(M3 S3-4) — 카드 대조 finding 이 걸릴 수 없는 자리다(사람 finding 순번·의심 문구 회수)
-                    " WHERE claim_uid = ? AND owner_sub = ? AND COALESCE(source_kind, '') <> 'card_review'",
-                    (now_epoch(), claim_uid, owner_sub)) or 0)
-            applied = {"restored_text": payload.get("raw"), "sha1": payload.get("sha1"),
-                       "findings_recalled": restored}
+        if kind == "suspect_text" and body.decision in ("approve", "approve_recall"):
+            # approve 는 원문 복원 + 회수 복귀, approve_recall 은 회수 복귀만이다(plan §3.4.1). 의심 문구 항목은 그 claim 의 finding 을,
+            # 미검증 신원 항목(B28)은 그 패널의 원자(finding · 성격 진술)를 되돌린다. 카드 대조 finding 은 회수 자격을 올리지 않는다
+            # (M2.md 5절 #9 — 형식 승인 전 산출이 다른 과제의 선례·통계로 새지 않게, R3B-8). 그것을 여는 일은 M3 의 형식 승인 뒤 일괄 절차다.
+            # 이 항목이 푸는 격리 말고 다른 격리(의심 문구 · 미검증 신원)가 남은 finding 은 되돌리지 않고 applied.held 에 까닭과 함께 싣는다
+            # (BL-9) — 그 격리의 항목을 승인할 때 돌아간다. 성격 진술에는 의심 문구 격리가 없다.
+            panel_key = str(payload.get("panel_id") or "") if actor_item else ""
+            column, key = ("panel_id", panel_key) if actor_item else ("claim_uid", str(payload.get("claim_uid") or ""))
+            found = store.query(
+                f"SELECT finding_id, claim_uid, panel_id, finding_json FROM rr_findings WHERE {column} = ? AND owner_sub = ?"
+                # 카드 대조 거름 그대로(M3 S3-4) — 카드 대조 finding 이 걸릴 수 없는 자리다(사람 finding 순번·의심 문구 회수)
+                " AND COALESCE(source_kind, '') <> 'card_review' ORDER BY finding_id", (key, owner_sub)) if key else []
+            restored, held = 0, []
+            for finding in found:
+                hold = ("suspect_text" if _suspect_hold(store, finding, owner_sub, queue_id)
+                        else ACTOR_UNVERIFIED if _actor_hold(store, finding["panel_id"], owner_sub, queue_id) else None)
+                if hold is not None:
+                    held.append({"claim_uid": finding["claim_uid"], "reason": hold})
+                    continue
+                restored += int(store.execute("UPDATE rr_findings SET recall_eligible = 1, updated_at = ? WHERE finding_id = ?",
+                                              (now_epoch(), finding["finding_id"])) or 0)
+            applied = {"findings_recalled": restored}
+            if actor_item:
+                applied["characters_recalled"] = int(store.execute(
+                    "UPDATE rr_character SET recall_eligible = 1, updated_at = ? WHERE id LIKE ? AND owner_sub = ?",
+                    (now_epoch(), f"{panel_key}#%", owner_sub)) or 0) if panel_key else 0
+            if held:
+                applied["held"] = held
+            if body.decision == "approve":
+                applied = {"restored_text": payload.get("raw"), "sha1": payload.get("sha1"), **applied}
         if kind == "unclassified_code" and body.decision in ("map", "new"):
             # 미분류 코드를 택소노미 값으로 옮긴다 — finding 의 cluster_key 는 불변이고 별칭만 더한다(§4.3.2).
             detail = str((body.payload or {}).get("mechanism_detail") or "").strip()
@@ -5849,11 +6037,14 @@ def put_curation(queue_id: str, body: CurationDecisionBody,
         store.execute(
             "UPDATE rr_curation_queue SET status = ?, decision_json = ?, decided_by = ?, decided_at = ?"
             " WHERE id = ?", (status, canonical_json(decision_json), owner_sub, now_epoch(), queue_id))
-        _audit(store, owner_sub, scope=CURATION_AUDIT_SCOPE[kind],
-               subject_id=str(payload.get("finding_id") or payload.get("cluster_key_norm")
-                              or payload.get("a") or payload.get("tag") or queue_id),
-               action="curation.decide", before={"kind": kind, "status": "open"},
-               after={"status": status, "decision": body.decision}, reason=body.reason)
+        # 회수 복귀는 recall.approve 한 행이다(plan §6.11 · P3 (21)) — 그 밖의 결정은 curation.decide. 미검증 신원 항목의 자리는 그 패널이다.
+        _audit(store, owner_sub, scope="panel" if actor_item else CURATION_AUDIT_SCOPE[kind],
+               subject_id=str(payload.get("panel_id") if actor_item else (
+                   payload.get("finding_id") or payload.get("cluster_key_norm") or payload.get("a") or payload.get("tag")
+                   or queue_id)),
+               action="recall.approve" if body.decision == "approve_recall" else "curation.decide",
+               before={"kind": kind, "status": "open"}, after={"status": status, "decision": body.decision},
+               reason=body.reason)
     return {"status": status, "decision_json": decision_json, "applied": applied}
 
 

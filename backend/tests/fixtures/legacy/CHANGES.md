@@ -9,3 +9,4 @@ DB 는 다시 만들지 않는다. 새 코드로 만들면 '옛 DB 를 새 코�
 | 커밋 | 칸 | 까닭 |
 |---|---|---|
 | (얼림) | 전부 | `7248651` 에서 받았다 |
+| `feat(브리프 제외 · 사람 개입 요약 B31)` | `golden/{done,planned,human}.json` 의 `report.block_lines.minutes`(12→14 · 10→12 · 10→13) | 통합 보고서 minutes 끝에 '[사람 개입 요약]'(plan §4.7.3 — 그 대상 rr_audit 의 action 별 수, 없으면 '(없음)')이 붙었다. human 은 사람 finding · 게이트 ack 두 줄이다 |
