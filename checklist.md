@@ -269,6 +269,14 @@
   **앱 전체 가로 밀림**(flex 자식에 `w-full`, 전환 이전부터 있던 결함).
   **그리고 타입이 서버와 달라 `tsc` 가 거짓을 지켜 주고 있었다** — 배포본이 백지였고, 선언을
   서버 열 이름에 맞추자 호출처 9곳이 드러났다.
+- [x] **same-as 6단계 상한**(2026-10-31, 포털 triage-1031 B24 · context-notes BL-1) — 남은 노드 수의 곱이 800×800 을 넘으면
+  점수도 헝가리안 행렬도 만들지 않고 5단계까지의 대응으로 진행한다(`sameas.FUZZY_MAX_PAIRS` · `fuzzy_skip`). 스냅샷은 두 도메인
+  소스의 degraded `fuzzy_skipped_large` · 경고 한 줄 · `sig:capture.fuzzy_skipped`, 쌍은 `correspondence.fuzzy_skipped` 와 의미층 ·
+  이벤트 `caveat='fuzzy_skipped_large'`. 801×801 건너뜀 · 799×799 · 800×800 그대로 · ir_hash 결정론(시험 15 · 변이 11/11).
+- [x] **계면 목록 절단의 kind 별 수와 제외 사유**(2026-10-31, B25 · BL-2) — mcad 캡처가 `stats.interfaces_truncated{kind: n}` 을 남기고
+  (안 잘렸으면 `{}`), 쌍의 한쪽이라도 잘린 kind 의 엣지 변경 · 엣지 파라메트릭 · 수가 움직인 롤업 행이 `excluded_reason='truncated'`
+  다 — 잘린 쪽에서 빠진 간섭이 '사라졌다' 는 가짜 사건을 내지 않는다. 종류별 수가 없는 옛 캡처는 네 kind 전부. 검토 단위에서는
+  제외 단위가 갖는다(시험 9 · 변이 9/9). 규칙 R-001 · R-002 의 `truncated` 판정은 아직 kind 를 보지 않는다(↓ 다음 수).
 - [ ] 골든 `backend/tests/golden/sif-e2e.ir.json` 부재 — 선행 B2(골든 프로젝트 재파싱)가 닫혀야 만들 수 있다(↓ 2장).
 
 ## 2. 실환경 실측 대기 — 자격·선행 조건이 필요한 것
@@ -294,7 +302,11 @@
 - [ ] 통과 기준 실측 — P0 (4) StepForge 직접 읽기 · (9) 러너 자격 3항 · (16) app-data 왕복(`appdata-to-drive.sh` → 복원 `integrity_check ok`) ·
   (17) 신원 해석 라이브 · (18) 자격 최소 권한·암호 보관 4항
 - [ ] P3 엔진 실호출 실측 — 포털 `/agent/chat` 경로 (A) 로 패널 1건 완주 · SSE 귀속 ≥95% · 도구 사용률 ≥80% · IR 인용 ≥50%
-- [ ] 성능 실측 — 500·2000 diff <5 s + RSS 피크 기록(§10 27) · 500파트 캡처 ≤10 s
+- [x] 성능 실측 diff — 500·2000 diff <5 s + 피크 기록(§10 27) — 2026-10-31 B26 · BL-3: 노드 505 · 엣지 2,084 합성 쌍
+  `compute_diff` 0.20 s · tracemalloc 피크 20 MB · 새 프로세스 RSS 피크 97 MB → 매니페스트 `memory_gb 2` 그대로(`tests/test_diff_scale.py`)
+- [ ] 성능 실측 캡처 — 500파트 캡처 ≤10 s(가짜 소스로 dev 가 먼저 할 수 있다 — 포털 design-risk-review 118)
+- [ ] **cae00 카드 분포 측정 한 번(사람)** — `backend/scripts/card_window_census.py`(B32 · context-notes W-D 절)를 cae00 명단 전원으로.
+  절차는 context-notes 「W-D — 리스크 20만 창 카드 분포」의 'cae00 에서 한 번' 이다
 
 **이미 실측된 것**(다시 하지 않는다) — SIF 빌드·기동·Caddy 라우트·게이트웨이 `heax-hwax_risk` 자동 흡수(`POST /mcp` 200 · `tools/list` 응답,
 `var/logs/integration_hwax_risk.log`) · `var/app_data/hwax_risk/` 생성과 DB 지속 · 로컬 기동 3점.
@@ -412,6 +424,10 @@
 
 남은 UI 구멍 하나 더 — `TargetPage` 가 '좌석 상태 되돌리기 · skipped 사유 입력 경로는 아직 서버에 없습니다' 라고 적어 두었는데
 `PUT /targets/{key}/coverage/{agent_key}` 는 서버에 있다(클라이언트에 함수가 없을 뿐이다). §8.2.4 가 요구하는 폼이라 다음 차례다.
+
+B25 가 남긴 작은 것 하나(2026-10-31, context-notes BL-2) — 캡처가 이제 kind 별 잘린 수를 남기므로 규칙 R-001 · R-002 의
+`not_evaluable_reason='truncated'` 를 정본 §3.2.6 표대로 그 kind(R-001 interference · R-002 clearance)가 잘렸을 때만 세울 수 있다.
+지금 `state.not_evaluable_reason` 은 `interfaces_truncated` 하나로 둘 다 평가 불가로 둔다(안전한 쪽이다).
 
 ## 완료 기록 — P0 (2026-08-31)
 

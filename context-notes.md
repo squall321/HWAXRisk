@@ -2926,3 +2926,142 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
 - 전체 시험(공유 잠금 아래, HEAD) — 3,504 통과 · xfail 4 · 실패 0(rc 0, 11분 16초 — 앞 판 3,474 에 새 시험 30). ruff — 바꾼 파일은 깨끗하다.
 - 하지 않은 것 — 배선 리허설(`tests/synth/rehearsal_d.py`)은 프로세스를 띄우는 일이라 돌리지 않았다. 카드 대조 사슬의 바뀐 곳은 없다(EC-28 —
   새 사유가 그 길에 닿지 않는다). 서비스 재기동 · push · 병합은 없다.
+
+## 캡처 · diff 백로그 넷(가지 `wt1031/bl-risk-capture`, main 9bd5f48 위, 2026-10-31)
+
+> 포털 `docs/leftovers-1017/triage-1031.md` 의 B24 · B25 · B26 · B32 다(사용자 결정 10-31 — 표 2 의 추천을 다 받고 표 3 의 dev 일을 한다).
+> 원줄은 포털 design-risk-review 체크리스트 108 · 125 · 126 과 risk-200k 체크리스트 7 이다. 포털 문서는 이 리포가 고치지 않는다(문서
+> 워크플로가 이 절을 근거로 단다).
+
+### BL-1. same-as 6단계 상한 — 남은 노드 곱이 800×800 을 넘으면 헝가리안을 건너뛴다(B24, 224c8fe)
+- 정본 §2.6.3 문장 그대로다 — `len(rest_a) × len(rest_b) > 800 × 800` 이면 6단계의 점수 · 행렬을 만들지 않고 5단계까지의 대응으로 간다.
+  곱이 정확히 640,000 이면 돈다. 남은 노드는 미대응이고 pending 을 만들지 않았으므로 G2 에 세지 않는다.
+- 건너뛴 사실을 담는 길 — resolve 의 반환(레코드 목록)에 칸을 지어내지 않고 `fuzzy_skip(nodes_a, nodes_b, links)` 이 같은 규칙으로 레코드에서
+  다시 읽는다. 규칙은 한 곳이다 — `_takes`(confirmed · auto 이고 score ≥ 0.90)와 `_fuzzy_rest`(가져가지 않은 비 ecad 노드)를 resolve 와 함께
+  쓰고, 원장 행은 사다리 1단계처럼 confirmed 만 가져간다. 그래서 links 를 따로 받는 `create_diff`(원장으로 푼 대응)에서도 같은 답이다.
+  resolve 에 출력 인자를 더하지 않은 까닭 — ir_builder 의 `sameas_resolve` 주입(시험 첩자)이 인자 여섯으로 고정돼 있다.
+- 스냅샷(intra) — 건너뛴 도메인 쌍의 두 소스 degraded 에 `fuzzy_skipped_large`, 경고 한 줄(ref `dyna~mcad` · 남은 노드 수 · 상한),
+  `sig:capture.fuzzy_skipped`(flag — 그 경고를 인용). 셋 다 ir_hash 입력이 아니다 — 같은 입력이면 같은 해시다(시험). 도메인 쌍은 그 도메인의
+  노드 전부를 본다(mcad 쪽에 파일 · 조립 노드가 든다 — 리프 801 이면 801 × 803).
+- 쌍(pair) — `correspondence.fuzzy_skipped{rest_base, rest_target, limit}` 와 의미층 `caveat='fuzzy_skipped_large'`, 그 이벤트마다 같은 caveat.
+  짝 없는 부품의 사건에만이 아니라 층 전체에 단 까닭은 정본 문장('pair 의미층은 caveat 를 단다')이고, 검토 단위가 줄마다 `caveat=` 로 보인다.
+  세대가 섞인 쌍의 `parser_differs`(등급을 낮춘다)가 먼저 붙은 이벤트는 그대로 두고 층 표지로만 남긴다.
+- 실측(dev, 순수 파이썬 — 앱 venv 에 scipy 가 없다) — score_pair 한 번 약 40 µs, 동봉 헝가리안은 남은 노드 200 × 200(행렬 400) 0.52 s ·
+  300 × 300(행렬 600) 1.81 s 로 세제곱이다. 800 × 800 이면 점수 64만 번(약 26 s)과 1,600 행렬(약 35 s)로 1분 남짓, 1,500 × 1,500 이면 5분을
+  넘는다. 상한은 정본의 값이고 그 아래는 종전 그대로 돈다(799 × 799 · 800 × 800 시험).
+- 시험 — `tests/test_sameas_fuzzy_cap.py` 15건. 점수 첩자가 801 × 801 에서 첫 호출에 실패시킨다(옛 코드는 64만 번 점수와 1,602 행렬로 매달린다).
+
+### BL-2. 계면 목록 절단 — 잘린 kind 의 변화는 truncated 로 뺀다(B25, 5a59ca9)
+- 캡처 — counts 합이 받은 행보다 크면(종전 판정 그대로) kind 마다 counts − 받은 행 수를 `stats.interfaces_truncated{kind: n}` 에 남긴다(n > 0 인
+  kind 만, 안 잘렸으면 `{}`). counts 는 REST counts → graph.json counts → interface_graph counts 의 종전 차례다. MCP 폴백은 kind 마다 부른 행을
+  그 kind 로 센다. 합이 받은 행보다 크면 적어도 한 kind 의 수가 양수다.
+- 쌍 비교 — 두 스냅샷의 잘린 kind 합집합 K 로 (1) 엣지 변경(kind_from · kind_to 가 K 에 — added · removed · kind_changed · status_changed 모두),
+  (2) 엣지 파라메트릭(그 엣지의 kind 를 base · target 의 eid 로 찾는다 — 항목 꼴을 바꾸지 않는다), (3) 엣지 수가 움직인 롤업 행(롤업은 kind 를
+  가리지 않고 잘린 행이 빠진 채 세며 어느 조립 단위의 행이 빠졌는지 모른다)에 `excluded_reason='truncated'`. 의미층보다 먼저 단다 — capture_partial
+  처럼 뒤에서 이벤트를 비우면 잘리지 않은 kind 의 사건까지 지운다. 다른 사유가 먼저 붙은 항목은 그대로 둔다(다른 제외 단계와 같다).
+  의미층의 롤업 고리가 이제 제외 사유를 본다 — 종전에는 보지 않았고, 롤업에 사유를 붙이는 단계가 의미층 뒤뿐이라 드러나지 않았다.
+- 옛 캡처 — 종류별 수가 없고 degraded 에 `interfaces_truncated` 만 있으면 어느 kind 인지 몰라 네 kind 전부다. 모르는 것을 '안 잘렸다' 로
+  읽으면 빠진 간섭이 '해소' 가 된다. 잘리지 않은 kind 는 그대로 사건이다(tied 만 잘린 쌍에서 사라진 간섭은 iface.removed 다 — 시험).
+- 검토 단위 — `units.EXCLUDED_POLICY["none"]` 에 truncated. 설계서 3.4.1 의 none 은 '한쪽 스냅샷에 없거나 캡처가 깨져 생긴 겉보기 차이' 이고
+  truncated 가 바로 그것이다. 목록에 없으면 모르는 사유라 단서(caveat) 줄로 셀에 가서 '사라졌다' 가 검토에 실린다(옛 코드는 bundle 단위가
+  가졌다 — 시험이 본다).
+- 어휘 — `diff.EXCLUDED_REASONS` 와 rr_diff 스키마 열거에 truncated 를 더했다. source_drift · capture_partial 은 생산자가 실제로 붙이는데 두 목록에
+  없다(units 의 주석이 이미 그렇게 적는다) — 이 일의 몫이 아니라 그대로 두었다.
+- 남긴 것 — 규칙 R-001 · R-002 의 `not_evaluable_reason='truncated'` 는 아직 `interfaces_truncated` 하나로 둘 다 평가 불가다. 정본 §3.2.6 은 그 kind
+  (interference · clearance)가 잘렸을 때만이고 이제 kind 별 수가 있어 좁힐 수 있다(작업 대장 '다음 수' — 지금이 안전한 쪽이다).
+- 시험 — `tests/test_diff_truncation.py` 6건(한쪽만 잘린 합성 쌍 — target · base · 파라메트릭 · 잘리지 않은 kind · 옛 캡처 · 검토 단위)과
+  `tests/test_adapters.py` 새 3건(REST · MCP 폴백의 kind 별 수 · 안 잘림) · 기존 절단 시험의 kind 별 수 단언.
+
+### BL-3. 노드 500 · 엣지 2,000 diff 의 시간 · 메모리(B26, cbd3bf6)
+- 쌍 — 합성기(`devseed` — 리프 362 · 조립 단위 8 · dyna 짝 35% · 계면 밀도 9.0 · 무작위 변경 50, 씨앗 20261031)가 어댑터 결과를 만들고 IR · 대응 ·
+  diff 는 실제 생산자가 만든다. 한쪽마다 노드 505 · 504, 엣지 2,084 · 2,081(tied 638 · clearance 492 · part_of 373 · touching 341 · interference 173 ·
+  contact 65 · scope 2), 의미 사건 124 · 막힘 없음.
+- 실측(dev, 2026-10-31 — 부하 평균 7.8 / 32코어, 파이썬 3.12) — `compute_diff`(대응 사다리 포함) 다섯 번 0.200 ~ 0.218 s(중앙 0.204 s), tracemalloc
+  피크 20.0 MB(다섯 번 같다), 새 프로세스의 RSS 피크 97 MB(시작 36 MB · 쌍을 짓고 54 MB). 쌍을 짓는 데 1.1 s 다.
+- 결론 — 피크가 1.5 GB 에 한참 못 미쳐 매니페스트 `memory_gb 2` 그대로다(§10 #27). 시험은 5 s · 1.5 GiB 를 단언한다.
+- 시험 — `tests/test_diff_scale.py` 1건. 막힌 diff(의미층을 건너뛰어 빨라 보인다)가 아닌지 먼저 본다. 측정이라 '고치기 전 깨지는' 시험이 아니다 —
+  옛 코드에서도 통과한다.
+
+### BL-4. 카드 창 측정 스크립트(B32, 111b34e)
+- `backend/scripts/card_window_census.py` — 읽기 전용(GET 두 경로 — `/api/agents` 와 전문가마다 `/api/agents/{agent}/records`). 엔진은 형제 리포를
+  들인다(`../HWAXAgentServer`, 스크립트 위치에서 리포 루트를 유도한다 — 박스 경로를 박지 않는다). 앱은 카드를 정규화하지 않는다는 원칙(cardpack)과
+  어긋나지 않는다 — 운영 경로가 아닌 측정 도구라 엔진 함수를 그대로 쓴다(W-D2 와 같다).
+- 창 — 1M 은 1,048,576 토큰 · 출력 상한 없음이다. W-D2 의 1M 한 장 자리 84.5만 · 81.7만 자와 입력 결손 몫 138,117자가 이 값에서만 나온다
+  (1,000,000 · 32,000 이면 78.9만 · 76.3만 · 131,622 — 거꾸로 맞춰 확인했다). 20만은 엔진 external_llm 기본(200,000 · 32,000)을 읽는다. 손잡이는
+  env={} 로 엔진 기본이다 — 박스 env 를 읽으면 같은 카드도 박스마다 수가 달라진다.
+- 보기 둘 — W-D2 는 `/records` 가 내는 기록 전부를 셌는데 엔진 팩(`build_pack`)은 list_records(doc_type=expert_knowledge_card)로 지식카드만 싣는다
+  (get_record 도 doc_type 이 다르면 받지 않는다). 두 보기를 함께 내야 W-D2 를 재현하면서 실제 심사가 보는 수를 본다(↓ W-D).
+- 무겁다 — 전문가마다 기록 전문을 받는다. dev 명단 전원 796명이 5분 · RSS 피크 747 MB(한 명이 3,564만 자)였다. 한 명씩 차례로 돌고 그 글을 버린다.
+- 시험 — `tests/test_card_window_census.py` 6건. 하위 프로세스로 돌린다 — 엔진 모듈(card_review · deliberation …)이 이 시험 세션의 sys.path ·
+  sys.modules 에 섞이지 않게(포털 계약 시험이 엔진을 들여 생긴 일이 있다). AIDataHub 는 시험이 띄운 루프백 서버라 dev 의 실 서비스를 부르지 않는다.
+  엔진이 곁에 없을 때만 건너뛴다(`skip_budget.SIBLING_ONLY`).
+
+### BL-5. 시험 · 변이 · 전체 시험
+- 새 시험 31 — `test_sameas_fuzzy_cap.py` 15 · `test_diff_truncation.py` 6 · `test_diff_scale.py` 1 · `test_card_window_census.py` 6 ·
+  `test_adapters.py` 3(기존 절단 시험에 kind 별 수 단언도 더했다).
+- 고치기 전 — 옛 코드(9bd5f48 사본)에 새 시험을 얹으면 31건이 붉다(B24 15 · B25 10 · B32 6 — 까닭은 '6단계 점수를 매겼다' · 가짜
+  iface.removed · iface.added · iface.penetration_changed · asm.rollup_changed · 검토 단위 bundle · kind 별 수 없음 · 스크립트 없음). B26 은 측정이라
+  옛 코드에서도 통과한다.
+- 변이(스크래치 사본, 끝나면 지웠다) 25개 전부 잡혔다 — B24 11(상한 없음 · 경계 < 둘 · 원장 rejected 를 가져감 · fuzzy 레코드를 셈 · ecad 를
+  남은 노드로 · degraded · 경고 · sig · 쌍 caveat · parser_differs 덮어씀) · B25 9(엣지 변경 · 엣지 파라메트릭 · 롤업 · 의미층 롤업 고리 · 옛 캡처
+  폴백 · target 만 봄 · 검토 단위 정책 · kind 별 수 대신 counts · 0 인 kind 도 적음) · B32 5(조각을 한 번으로 · 지식카드 거르기 없음 · 입력 결손
+  몫을 1M 값으로 · 키를 안 실음 · 낡은 엔진 확인 없음).
+- 전체 시험(공유 잠금 아래, 38c5b3f) — 3,535 통과 · xfail 4 · 실패 0 · 건너뜀 0(rc 0, 12분 51초 — 앞 판 3,504 에 새 시험 31). ruff — 바꾼 파일은
+  깨끗하다.
+- 하지 않은 것 — 배선 리허설(`tests/synth/rehearsal_d.py`)은 프로세스를 띄우는 일이라 돌리지 않았다. 카드 대조 사슬에서 바뀐 것은 검토 단위의
+  제외 정책에 새 사유 하나(truncated)뿐이다. 서비스 재기동 · push · 병합은 없다.
+
+## W-D — 리스크 20만 창 카드 분포(W-D2 재현 · 명단 전원, 2026-10-31)
+
+> 포털 `docs/risk-200k/context-notes.md` W-D2 의 측정을 BL-4 스크립트로 다시 했다. 엔진 8dd579a(api cr-1 · norm cr-n1 · 식 cr-l2) · dev AIDataHub
+> (전문가 796명) · 창은 1M = 1,048,576 · 출력 상한 없음, 20만 = 200,000 · 32,000(한 장 자리 126,012자 · 입력 결손 몫 24,648자 — W-D2 와 같다).
+
+### W-D2 재현 — dev 표본(`--wd2` — 정렬한 키에서 시드 20261020 으로 30명 + xd-yield-ramp · material-twin-analyst)
+
+| | W-D2(10-20) | 같은 방법 오늘(records) | 지식카드만(knowledge_cards) |
+|---|---|---|---|
+| 기록(렌더) | 5,716(5,711) | 6,779(6,775) | 969(969) |
+| 20만 한 장 자리 초과 | 143장 | 200장(특허 129 · 논문 71) · 조각 어림 418 | 0 |
+| 그런 카드가 있는 전문가 | 19/32 | **19/32** | 0/32 |
+| 20만 입력 결손 몫 초과 | 31/32 | **31/32** | 31/32 |
+| 셀당 판정 호출 1M → 20만 | 중앙 26 → 65 · 최대 519 → 1,469 | 53 → 87 · 520 → 1,466(전문가별 배수 중앙 1.79 · 최대 2.82) | 2 → 2 |
+| 훑기 호출 합 1M → 20만 | 470 → 2,120 | 630 → 3,293 | 31 → 31 |
+
+- 19/32 · 31/32 는 그대로 나온다. 143 이 200 인 까닭은 경로가 바뀐 것이다 — AIDataHub `539d06b`(10-30, AD-20)가 `GET /api/agents/{agent}/records` 를
+  agent_records 표에서 정본 records.agents 로 바꿨다(자동 바인딩 · PATCH 로 묶인 기록이 들고 지운 기록은 빠진다). 표본의 기록이 1,063건 늘었는데
+  10-20 이전 적재분만 걸러도 렌더 6,775장 그대로다 — 새 적재가 아니라 묶음이 는 것이다. 옛 목록(agent_records)을 읽는 API 가 이제 없어 143 자체는
+  API 로 다시 낼 수 없다.
+- **넘는 것은 지식카드가 아니다.** 20만에서 넘는 200장은 전부 논문 · 특허다. 엔진 팩은 지식카드만 싣으므로(BL-4) 실제 심사가 보는 카드는 표본에서
+  한 장도 넘지 않는다 — 가장 긴 지식카드 2,372자, 전문가 합 최대 52,065자.
+
+### 명단 전원 — dev 796명(5분)
+
+| | records(기록 전부) | knowledge_cards(엔진 팩) |
+|---|---|---|
+| 카드가 있는 전문가 | 775/796 | 774/796(HE 팀 운영자 등 22명은 지식카드 0) |
+| 기록(렌더 · 절 없음) | 72,252(71,812 · 440) | 23,418(23,418 · 0) |
+| 종류 | 논문 37,770 · 지식카드 23,418 · 특허 6,535 · 물성 2,688 · 규격 1,399 · 백서 431 · 그 밖 11 | 지식카드 |
+| 전문가 글자 합 | 중앙 102만 · 최대 3,564만 | 중앙 28,900 · 최대 58,699 |
+| 가장 긴 한 장 | 578,728자 | 3,198자 |
+| 20만 한 장 자리 초과 | 3,128장(특허 1,848 · 논문 1,096 · 규격 184) · 398명 · 조각 어림 6,748 | 0 |
+| 1M 한 장 자리 초과 | 0 | 0 |
+| 입력 결손 몫 초과 1M · 20만 | 578명 · 755명 | 0 · 715명 |
+| 셀당 판정 호출 1M → 20만 | 중앙 12 → 21 · 최대 520 → 1,466(전문가별 배수 중앙 1.63 · 최대 3.83) | 2 → 2(1.0배) |
+| 훑기 호출 합 1M → 20만 | 8,021 → 38,653(4.8배) | 774 → 774 |
+| 계획의 oversize.cards | 0 | 0 |
+
+- 읽는 법 — 엔진 팩 기준으로 20만에서 달라지는 것은 입력 결손 몫 하나다(카드 있는 774명 가운데 715명이 24,648자를 넘는다 — W2 의 must_full 쪽
+  나누기가 받는 자리다). 한 장 자리 초과(조각 · W1)와 판정 · 훑기 호출 배수는 지식카드에서 생기지 않는다(지식카드 한 장은 3,198자가 최대다).
+  W-D2 의 L1('19/32명이 멈춘다')과 호출 배수(2.6배 · 4.5배)는 팩이 싣지 않는 논문 · 특허 · 규격 · 물성 카드에서 나온 수다. W1 조각은 틀린 장치가
+  아니다 — 카드가 길어지면 그대로 받는다. 다만 지금 dev 의 팩에서는 돌지 않는다.
+- 운영(cae00)은 명단 · 카드가 다르다 — 아래 걸음으로 한 번 잰다. 전문가 키 목록(`over_slot_experts`)은 이 공개 리포에 옮기지 않는다.
+
+### cae00 에서 한 번(사람)
+1. 이 가지가 main 에 합쳐진 뒤 `git -C ~/Projects/HWAXRisk pull --ff-only`(스크립트가 든 판). 엔진은 risk-200k W1(5aa33fc) 이상이어야 한다 —
+   낡았으면 스크립트가 종료 2 와 그 말로 멈춘다.
+2. 리스크 심사 잡이 도는 때는 피한다 — 전문가마다 AIDataHub 의 기록 전문을 읽는다(dev 796명에 5분 · RSS 0.75 GB).
+3. `cd ~/Projects/HWAXRisk && ../HWAXAgentServer/.venv/bin/python backend/scripts/card_window_census.py --out ~/census-cae00.json`
+   - 종료 2 · 'HTTP 401' 이면 그 박스의 AIDataHub 가 키를 요구한다 — `read -rs AIDH_API_KEY && export AIDH_API_KEY` 뒤 다시 돌린다(키는 셸에만).
+   - AIDataHub 가 127.0.0.1:8001 이 아니면 `--base` 로(또는 `HWAXRISK_AIDH_BASE`).
+4. 가져올 것 — 출력의 `roster` · `engine` · `failed` 와 `views.records.windows` · `views.knowledge_cards.windows` 두 블록의 수. dev 로 가져오면 이 절에
+   cae00 열로 적는다.
