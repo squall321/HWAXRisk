@@ -181,8 +181,8 @@ def test_the_external_sync_summary_says_why_nothing_is_sent(target_store, frozen
         "ra": {"state": "pending", "pending_ops": 2, "dead_ops": 0, "reason": f"credential_missing:{WRITE_SECRET_KEY}",
                "message": f"RA 반영 안 됨 — 박스에 RA 쓰기 자격({WRITE_SECRET_KEY})이 없어 보내는 쪽이 꺼져 있다. 대기 2건,"
                           " 보낸 것 없음.",
-               # 거두기 셈(RK-01 거두기 — 사용자 결정 10-31 (가))은 RA 채널에 늘 실린다.
-               "retracted": 0, "retract_pending": 0, "retract_failed": 0, "retract_reasons": {}},
+               # 거두기 셈(RK-01 거두기 — 사용자 결정 10-31 (가))은 RA 채널에 늘 실린다(객체 수 — RA 에 이미 없던 것은 따로 센다).
+               "retracted": 0, "retract_absent": 0, "retract_pending": 0, "retract_failed": 0, "retract_reasons": {}},
         "adh": {"state": "pending", "pending_ops": 0, "dead_ops": 0, "reason": "sender_unwired",
                 "message": "AIDataHub 반영 안 됨 — 보내는 쪽이 아직 배선되지 않았다(M4). 대기 0건, 보낸 것 없음."}}
     assert sync_summary(parse_external_sync("깨진 글"), status=off) == sync_summary(empty_sync(), status=off)

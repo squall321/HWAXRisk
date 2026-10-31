@@ -1580,8 +1580,8 @@ def purge_project(project_id: str, body: PurgeBody,
         }
         layers["files"] = {"exports_removed": _purge_exports(project_id)}
 
-        # RA 층 — 나간 객체마다 거두기 op 를 쌓는다(사용자 결정 10-31 (가), RK-01 거두기). 보내는 쪽이 폐기 멈춤을 건너뛰어 다음 동기
-        # 주기에 보내고, 이 보고서의 RA 층(거둔 수 · 대기 · 못 거둔 수와 까닭 낱말)은 그 결과로 다시 적힌다.
+        # RA 층 — 나간 객체마다 거두기 op 를 쌓는다(사용자 결정 10-31 (가), RK-01 거두기). 보내는 쪽이 폐기된 과제의 보낼 op 는 버리고 거두기만
+        # 다음 동기 주기에 보내고, 이 보고서의 RA 층(거둔 수 · 대기 · 못 거둔 수와 까닭 낱말)은 그 결과로 다시 적힌다.
         ra_client.queue_retracts(store, project_id, "purged", by=actor)
         remaining = [
             {"layer": "adh", "reason": "delete_api_absent",
