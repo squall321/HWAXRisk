@@ -73,6 +73,9 @@ class Principal:
     owner_sub: str
     portal_pat: str | None = None    # 게이트웨이 MCP 호출용(사용자 포털 PAT 또는 앱 PAT).
     service_pat: str | None = None   # heax Caddy REST GET 용 서비스 PAT.
+    # 게이트웨이 MCP 채널의 자격 — user(그 사람의 등록된 포털 PAT) · service(박스 읽기 PAT) · None. ECAD 는 user 일 때만 부른다(사용자
+    # 결정 10-31 — odb-hub 는 사람별 격리가 없고 게이트웨이 plat:odbhub 로만 막혀, 박스 PAT 로 내려가면 그 문을 서비스 계정으로 지난다).
+    mcp_credential: str | None = None
 
 
 class ToolChannel(Protocol):

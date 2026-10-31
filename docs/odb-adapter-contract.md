@@ -39,17 +39,18 @@ ODB 허브의 **지금 도구**로 읽는다. 근거와 실측(cae00 10-31, 표�
 | 떼기 | `DELETE /api/projects/{id}/ecad-board` | `risk_set_ecad_board(project_id, null)` |
 
 - 찾기는 `find_job` 한 번의 후보 `{job_id, project, model, board_type, revision, original_filename, uploaded_at, name}` 를 최대 10개와
-  `truncated` 로 준다. 허브의 봉투형 오류(찾는 것이 없다)는 빈 후보와 `hub_message` 다. 자격 없음 · 도구 없음 · 호출 실패는 409
-  (`ecad_credential_absent` · `ecad_unavailable` · `ecad_unreachable`)다.
+  `truncated` 로 준다. 허브의 봉투형 오류(찾는 것이 없다)는 빈 후보와 `hub_message` 다. 그 사람의 PAT 없음 · 도구 없음 · 호출 실패는 409
+  (`ecad_pat_absent` · `ecad_unavailable` · `ecad_unreachable`)다.
 - 붙이기는 그 job_id 가 `find_job` 후보에 실제로 있을 때만 적는다(없으면 422 `ecad_board_not_found`, 꼴이 16자리 16진이 아니면 422 `E100`).
   카드는 과제마다 한 장이라 다른 보드를 주면 같은 카드를 바꾸고, 바뀌면 감사 `project.ecad_board` 한 줄이 남는다. 같은 보드를 다시 주면
   `changed:false` 다. 카드의 `probe.board` 에 찾은 보드 정보가 남는다.
 - 떼기는 카드를 지울 뿐이다. 이미 동결된 스냅샷은 그대로이고 다음 캡처의 ecad 는 결측이다.
 - 일반 소스 연결(`POST /api/projects/{id}/sources` · `risk_add_source`)은 kind `ecad` 를 422 `ecad_board_route` 로 거절한다 — 확인 없이
   붙거나 카드가 둘이 되면 어느 보드를 읽을지 uuid 순서가 정한다.
-- 자격은 캡처와 같다 — 그 사람의 등록된 포털 PAT, 없거나 곧 끝나면 박스의 읽기 PAT(`HWAXRISK_PORTAL_PAT`). 그래서 찾아진 보드는 캡처도 읽는다.
-  odb-hub 는 사람별 격리가 없고 게이트웨이의 `plat:odbhub` 로만 막힌다 — 박스 PAT 로 내려가면 그 문을 서비스 계정으로 지난다. 그 사람의 PAT 만
-  쓸지(없으면 `ecad_pat_absent`) 박스 PAT 로 내려가되 답 · 스냅샷에 자격을 적을지는 **사용자 결정**으로 남겼다(context-notes EC-15).
+- 자격은 캡처와 같다 — **그 사람의 등록된 포털 PAT 하나**다(사용자 결정 10-31, context-notes EC-27). 그래서 찾아진 보드는 캡처도 읽는다.
+  없거나 폐기됐거나 풀리지 않거나 곧 끝나면(캡처와 같은 여유 `CREDENTIAL_MARGIN_S` 1800 s) 찾기 · 붙이기는 게이트웨이에 아무것도 보내기
+  전에(도구 지도도 받지 않는다) 409 `ecad_pat_absent`(detail `{app_key, fix: 'portal_pat'}`)다. 박스의 읽기 PAT(`HWAXRISK_PORTAL_PAT`)로
+  내려가지 않는다 — odb-hub 는 사람별 격리가 없고 게이트웨이의 `plat:odbhub` 로만 막혀, 내려가면 그 문을 서비스 계정으로 지난다.
 - 게이트웨이 도구 지도(`/tools-map`)를 못 읽었으면 찾기는 409 `ecad_gateway_unreadable` 이다 — '그 백엔드에 find_job 이 없다'(`ecad_unavailable`)와
   고칠 곳이 다르다. 못 읽은 지도는 캐시하지 않는다(읽은 지도만 60 s 캐시).
 
@@ -129,9 +130,9 @@ ODB 허브의 **지금 도구**로 읽는다. 근거와 실측(cae00 10-31, 표�
 |---|---|
 | 보드를 붙이지 않았다 | `ecad_absent`(INFO) — 스텁 시절과 같다 |
 | 캡처 요청 kinds 에 ecad 가 없다 | 결측 행만 남기고 보드를 읽지 않는다 — ECAD 없는 앞 스냅샷과 견줄 캡처를 사람이 고를 수 있다 |
-| 보드는 붙었는데 호출 없이 끝났다 — MCP 자격이 없다 · 게이트웨이 도구 지도를 못 읽었다 · 그 백엔드에 1단계 도구가 다 없다 | `missing.ecad_absent` + 경고(WARNING) `ecad_pat_absent` · `ecad_gateway_unreadable` · `ecad_tools_missing` — dyna 의 자격 없음(`dyna_pat_absent`)과 같은 결측 + 경고이고 `ecad_capture_failed` 가 아니다 |
+| 보드는 붙었는데 호출 없이 끝났다 — 그 사람의 포털 PAT 가 없다(박스 읽기 PAT 는 세지 않는다 — mcad · dyna 와 함께 읽는 캡처에서 그 둘이 박스 PAT 로 읽혀도 보드는 읽지 않는다, EC-27) · 게이트웨이 도구 지도를 못 읽었다 · 그 백엔드에 1단계 도구가 다 없다 | `missing.ecad_absent` + 경고(WARNING) `ecad_pat_absent` · `ecad_gateway_unreadable` · `ecad_tools_missing` — dyna 의 자격 없음(`dyna_pat_absent`)과 같은 결측 + 경고이고 `ecad_capture_failed` 가 아니다 |
 | 보드는 붙었는데 `find_job` 이 실패했다 · 그 job_id 가 없다 · 응답을 못 읽었다 | `missing.ecad_absent` + `missing.ecad_capture_failed`, 경고(WARNING) `capture_call_failed` · `ecad_board_not_found` · `source_schema_drift` — 붙은 보드를 못 읽은 것은 '회로가 없다' 가 아니다(§2.11.3 필수 호출 실패) |
-| 위 두 줄인데 이번 캡처가 읽은 카드가 ECAD 하나뿐이다 | 스냅샷을 만들지 않는다 — 409 `source_unreachable`(detail `{kind:'ecad', reason:<경고 code>}`), 잡 `failed`, 호출 원문은 스냅샷 없이 남는다(§2.11.3 '남은 kind 없음') |
+| 위 두 줄인데 이번 캡처가 읽은 카드가 ECAD 하나뿐이다 | 스냅샷을 만들지 않는다 — 409 `source_unreachable`(detail `{kind:'ecad', reason:<경고 code>}`), 잡 `failed`, 호출 원문은 스냅샷 없이 남는다(§2.11.3 '남은 kind 없음'). 그 사람의 PAT 가 없으면 게이트웨이에 아무것도 보내지 않는다 — 박스 PAT 로 도구 지도를 받으러 가지도 않는다(reason `ecad_pat_absent`) |
 | 선택 호출(`get_board_layers` · `check_job_stackup` · `get_volume_result` · `get_odb_download` · `list_parts` 쪽)이 실패했다 | 그 칸만 비고 `capture_partial` + 경고 `capture_call_failed`, 잡은 partial |
 | 허브가 200 + `{error, hint}`(봉투형 오류 — 분석을 돌리지 않은 보드)로 답했다 | 그 칸만 비고 경고 `odb_error_body` — 허브에 그 값이 없다는 뜻이라 부분 캡처가 아니다. 부품 목록 · 층이 그러면 노드 가족이 통째로 빠지므로 `components_unavailable` · `layers_unavailable` 를 세운다 |
 
@@ -187,7 +188,8 @@ ECAD 카드(소스 카드 probe)는 호출의 전송이 아니라 어댑터 결�
 ## 계약 조건
 
 1. 부르는 도구는 전부 읽기다. 잡을 시작하거나 값을 바꾸는 도구(`run_*` · 업로드)는 부르지 않는다.
-2. 인증은 게이트웨이 PAT 전달 규약(DynaForge 와 같음)을 따른다 — 캡처의 다른 MCP 호출과 같은 채널이다.
+2. 인증은 게이트웨이 PAT 전달 규약(DynaForge 와 같음)을 따른다 — 캡처의 다른 MCP 호출과 같은 채널이되, 그 채널의 자격이 그 사람의
+   포털 PAT 일 때만 부른다(박스 읽기 PAT 로 내려가지 않는다 — 사용자 결정 10-31, EC-27).
 3. 응답은 JSON 이고 단위는 mm 다(층 두께만 µm → mm).
 4. ecad↔mcad/dyna same-as 는 1차에서 `ledger · name_norm(refdes 또는 part_number 토큰)` 만 허용한다. 기하 지문(footprint bbox ↔ mcad part
    bbox)은 2단계에서 켠다(좌표가 와야 한다).

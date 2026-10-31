@@ -14,6 +14,7 @@ from jsonschema import Draft7Validator
 
 from app import config, identity, ir_builder, routes
 from app.adapters import registry as adapters_registry
+from app.common import now_epoch
 from app.errors import AppError
 from tests.conftest import REPO_ROOT
 
@@ -32,6 +33,9 @@ from tests.conftest import REPO_ROOT
 # A5 적층 두께 합 — 이름 `ecad_stackup_total`(계약 · 부록 A)로 dims_named 나 board attrs 에 싣는다.
 #    → 구현에 맞춤 — board attrs 의 ecad_stackup_total 은 rr_ir 길이 단위(units.length = mm)다.
 # A6 층 두께 단위 — 요청서는 원천(thickness_um, µm)만 적었다. 구현은 rr_ir 길이 단위 mm 로 싣는다 — µm 로 되돌려 견준다.
+# A7 게이트웨이 자격 — 처음에는 'odb-hub 는 서비스 토큰 하나로 붙은 백엔드' 로 보고 박스 secrets.env 의 앱 PAT 만 두었다.
+#    → 사용자 결정 10-31 에 맞춤 — ECAD 찾기 · 붙이기 확인 · 캡처는 그 사람의 등록된 포털 PAT 로만 부른다(박스 PAT 로 내려가지 않는다).
+#      그래서 그 사람의 PAT 를 등록해 둔다. 박스 PAT 자리도 그대로 채워 둔다 — 쓰이지 않아야 한다(tests/test_ecad_person_pat.py 가 본다).
 
 
 def _ecad_ref(job_id: str) -> dict:
@@ -102,6 +106,7 @@ def _candidates(body) -> list[dict]:
 # get_volume_result 면별 배치 수의 키(부록 A 는 count, OH-02 는 counted 라 적었다 — 둘 다 같은 값으로 싣는다).
 OWNER = "ecad-bb@example.com"
 APP_PAT = "app-portal-pat-not-real"          # 박스 secrets.env 의 HWAXRISK_PORTAL_PAT 자리(가짜 값)
+PERSON_PAT = "person-portal-pat-not-real"    # 그 사람이 등록한 포털 PAT 자리(가짜 값, 가정 A7)
 ODB, SF, STE, OTHER = "odb-hub", "heax-step_forge", "smart-twin-cluster", "heax-other_app"
 STAGE1_TOOLS = ("find_job", "get_board_layers", "check_job_stackup", "get_volume_result", "get_odb_download", "list_parts")
 CONTRACT_TOOLS = ("odb_get_board", "odb_list_components", "odb_list_nets", "odb_get_stackup")
@@ -505,7 +510,8 @@ class Box:
 def box(risk_store, monkeypatch) -> Box:
     """dev 게이트웨이에는 odb-hub 가 없다 — httpx 전송 한 곳에서 앱의 모든 HTTP 를 가짜로 받는다. 비동기 전송은 막는다.
 
-    MCP 자격은 박스 secrets.env 의 앱 PAT 자리(HWAXRISK_PORTAL_PAT)에 둔다 — odb-hub 는 서비스 토큰 하나로 붙은 백엔드다.
+    MCP 자격은 그 사람이 등록한 포털 PAT 다(가정 A7 — 사용자 결정 10-31). 박스 secrets.env 의 앱 PAT 자리(HWAXRISK_PORTAL_PAT)도
+    채워 둔다 — ECAD 는 그것으로 내려가지 않아야 한다.
     """
     gw = FakeGateway(map=gateway_map())
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", lambda _self, request: gw.handle(request))
@@ -516,6 +522,8 @@ def box(risk_store, monkeypatch) -> Box:
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", _no_async)
     monkeypatch.setattr(config, "load_secrets", lambda *_a, **_k: {"HWAXRISK_PORTAL_PAT": APP_PAT})
     monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    risk_store.upsert_credential(OWNER, identity.encrypt_pat(PERSON_PAT).decode("ascii"), "sub-ecad-bb", OWNER, "[]",
+                                 now_epoch() + 30 * 86400)
     ident = identity.Identity(email=OWNER, display_name="ECAD BB", role="user", organization="qa", anonymous=False,
                               source="bearer")
     return Box(store=risk_store, gw=gw, ident=ident)

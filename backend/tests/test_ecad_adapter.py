@@ -29,6 +29,7 @@ from app.adapters import ecad as ecad_adapter
 from app.adapters import mcad
 from app.adapters import registry as adapters_registry
 from app.adapters.base import CallRecorder, Principal, RestGetClient
+from app.common import now_epoch
 from app.errors import AppError
 from app.ra_client import McpHttpClient
 from tests import factories
@@ -284,8 +285,8 @@ def _capture(hub: FakeOdbHub, job_id: str | None, *, kinds=None, extra_sources=(
     if job_id is not None:
         sources.append({"kind": "ecad", "app_key": ODB, "ref": {"odb_job_id": job_id}})
     return adapters_registry.capture_all(
-        sources=sources, principal=Principal(owner_sub=OWNER, portal_pat="portal-pat"), mcp_client=hub.mcp(),
-        rest_client=rest, kinds=kinds, tool_names=tuple(sorted(hub.tools)), tool_map=hub.tools)
+        sources=sources, principal=Principal(owner_sub=OWNER, portal_pat="portal-pat", mcp_credential="user"),
+        mcp_client=hub.mcp(), rest_client=rest, kinds=kinds, tool_names=tuple(sorted(hub.tools)), tool_map=hub.tools)
 
 
 def _ecad(captured: dict) -> dict:
@@ -517,7 +518,8 @@ def test_a_board_the_capture_never_reached_is_absent_with_its_reason(hub, case):
     else:
         result = _ecad(adapters_registry.capture_all(
             sources=[{"kind": "ecad", "app_key": ODB, "ref": {"odb_job_id": JOB_STD}}],
-            principal=Principal(owner_sub=OWNER, portal_pat="portal-pat"), mcp_client=hub.mcp(), tool_map={}))
+            principal=Principal(owner_sub=OWNER, portal_pat="portal-pat", mcp_credential="user"), mcp_client=hub.mcp(),
+            tool_map={}))
         want = "ecad_gateway_unreadable"
     assert hub.calls == []
     assert result["missing"] == {"ecad_absent": True}
@@ -591,6 +593,9 @@ WEB = identity.Identity(email=OWNER, display_name=OWNER, role="user", organizati
 def web_box(risk_store, monkeypatch, hub):
     monkeypatch.setattr(routes, "get_store", lambda: risk_store)
     monkeypatch.setattr(adapters_registry, "clients_from_settings", lambda *a, **k: hub.channels())
+    # ECAD 보드는 그 사람의 등록된 포털 PAT 로만 찾고 읽는다(사용자 결정 10-31) — 웹 설정 화면이 남기는 것과 같은 자격 행.
+    risk_store.upsert_credential(OWNER, identity.encrypt_pat("pat-board-owner").decode("ascii"), "sub-owner", OWNER, "[]",
+                                 now_epoch() + 30 * 86400)
     project = routes.create_project(routes.ProjectBody(code="EC-1", name="보드 과제", classification="internal"), ident=WEB)
     return project["id"]
 

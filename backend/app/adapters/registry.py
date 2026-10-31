@@ -417,20 +417,24 @@ def clients_from_settings(settings, secrets: Mapping[str, str] | None = None, *,
                           portal_pat: str | None = None, heax_token: str | None = None,
                           gateway_pat: str | None = None,
                           http_client: httpx.Client | None = None,
-                          timeout: float | httpx.Timeout | None = None) -> dict:
+                          timeout: float | httpx.Timeout | None = None,
+                          box_pat_fallback: bool = True) -> dict:
     """Settings·secrets.env 로 캡처 채널을 만든다 — 게이트웨이 MCP(포털 PAT)와 소스 앱 REST.
 
     포털 PAT 가 없으면 mcp_client 는 None 이다. REST 채널의 자격은 `rest_channel_kind` 순서다 — ① 웹 호출자 본인의 heax 토큰
     (`heax_token`) ② 게이트웨이 위임 호출이면 그 사람의 포털 PAT 로 게이트웨이 REST 다리(`gateway_pat` — 호출자가
     `gateway_rest_pat` 로 고른다) ③ 서비스 PAT(`HWAXRISK_HEAX_SERVICE_PAT`) ④ 없음(mcp_degraded). 고른 자격은 `rest_credential`
     로 돌려준다. 소스 앱은 읽기 전용이고 StepForge 는 per-user 격리가 없으므로(정찰 실측) 대리 읽기의 권한 확대는 없다.
+
+    `box_pat_fallback` 이 거짓이면 그 사람의 포털 PAT 가 없을 때 박스 읽기 PAT(`HWAXRISK_PORTAL_PAT`)로 내려가지 않는다 — MCP 채널도
+    도구 지도도 없고 게이트웨이에 아무것도 보내지 않는다(ECAD 만 부르는 길 — 사용자 결정 10-31).
     """
     from app.ra_client import McpHttpClient  # noqa: PLC0415 — 순환 임포트를 피하려 지연 임포트한다.
 
     if timeout is None:
         timeout = source_timeout(settings)
     secrets = dict(secrets or {})
-    token = portal_pat or secrets.get("HWAXRISK_PORTAL_PAT")
+    token = portal_pat or (secrets.get("HWAXRISK_PORTAL_PAT") if box_pat_fallback else None)
     service = secrets.get("HWAXRISK_HEAX_SERVICE_PAT") or None
     rest_kind = rest_channel_kind(heax_token=heax_token, gateway_pat=gateway_pat, service_pat=service)
     mcp_client = None

@@ -84,6 +84,8 @@ env 접두는 `HWAXRISK_`(plan §8.2.6). 데이터 루트 우선순위 `HWAXRISK
 시크릿은 `<data>/secrets.env`(0600, `KEY=VALUE`) 의 5키다 — `HWAXRISK_PORTAL_PAT`(scopes `read` 전용) · `HWAXRISK_PORTAL_PAT_RW`(RA·ADH 쓰기 전용) ·
 `HWAXRISK_HEAX_SERVICE_PAT` · `HWAXRISK_AIDH_API_KEY` · `HWAXRISK_CRED_KEY`(Fernet). 값은 로그에 싣지 않는다.
 `GET /api/me.box.secrets_valid` 는 다섯 값이 다 있고 `origin.json.hostname` 이 현재 호스트와 같을 때만 true 다.
+ECAD 보드(ODB 허브 찾기 · 붙이기 · 캡처)는 `HWAXRISK_PORTAL_PAT` 로 내려가지 않는다 — 그 사람의 등록된 포털 PAT 로만 부르고, 없으면
+찾기 · 붙이기는 409 `ecad_pat_absent`, 캡처는 보드가 빈 채(경고 `ecad_pat_absent`)다(사용자 결정 10-31, `docs/odb-adapter-contract.md`).
 
 사용자 포털 PAT 는 `PUT /api/me/portal-pat {pat}` 로 등록한다(email 일치 → aud `mcp-gateway`+scope → 만료 ≥24 h → 포털
 `GET /agent/conversations?limit=1` 200 순으로 검증, 실패 코드 6종 `pat_email_mismatch · pat_audience · pat_scope_too_broad · pat_expiring ·

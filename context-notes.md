@@ -2856,3 +2856,27 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
 - 변이(분리한 작업 트리, 바이트코드 끔) 30개 — 첫 판 29개가 잡혔다. 산 하나는 ECAD 밖 카드의 capture_mode 를 rest_primary 로 되돌린 것이라
   `test_the_card_capture_mode_follows_the_channel_that_read_it` 을 더해 잡았다. 작업 트리는 지웠다.
 - 전체 시험(고친 뒤 마지막 판) — 3,474 통과 · xfail 4 · 실패 0(rc 0, 11분 52초). ruff — 바꾼 파일은 깨끗하다.
+
+## ECAD 1단계 — 사용자 결정 10-31 셋(가지 `wt1031/ecad`, 76fe9a8 위, 2026-10-31)
+
+> 포털 세션에서 사용자가 답한 셋이다 — EC-15(자격) · EC-11 · EC-24(넷 의존 영역) · EC-12 · EC-24(모델 크기 상한)가 남긴 결정 필요를
+> 닫는다. 앞 항목은 그때의 기록이라 고치지 않고 여기서 닫는다.
+
+### EC-27. ECAD 는 그 사람의 PAT 로만 — 박스 읽기 PAT 로 내려가지 않는다(사용자 결정 10-31, EC-15 닫음)
+- 결정은 안 (a)다. 찾기 · 붙이기 확인 · 캡처는 그 사람의 등록된 포털 PAT 하나로 부른다. 쓸 PAT 가 없으면(없음 · 폐기 · 풀리지 않음 ·
+  남은 수명이 CREDENTIAL_MARGIN_S 이하) 찾기 · 붙이기는 409 `ecad_pat_absent`(detail `{app_key, fix: 'portal_pat'}`)이고, 캡처는 결측 +
+  WARNING 경고 `ecad_pat_absent` 다(EC-16 의 호출 없는 실패와 같은 꼴). 종전 409 `ecad_credential_absent`(PAT 가 둘 다 없을 때만)는 없앴다.
+- 찾기 · 붙이기(`routes._ecad_mcp_channel`)는 PAT 를 먼저 보고 게이트웨이에 아무것도 보내기 전에 거절한다(도구 지도도 받지 않는다).
+  캡처는 채널 하나를 kind 들이 나눠 쓰므로 `Principal.mcp_credential`(user · service · None — create_snapshot 이 그 사람의 PAT 로 정한다,
+  답의 `credentials.mcp` 와 같은 값)을 어댑터가 보고 user 가 아니면 부르지 않는다. mcad · dyna 의 MCP 폴백은 그대로 박스 PAT 다.
+- 보드만 읽는 캡처(ECAD 말고 읽을 카드가 없다)는 `clients_from_settings(box_pat_fallback=False)` 로 채널을 아예 만들지 않는다 — 그때
+  박스 PAT 로 `/tools-map` 을 받으러 가는 요청은 ECAD 때문에만 나가는 것이라 함께 막았다. 결과는 EC-22 의 409 `source_unreachable`
+  (reason `ecad_pat_absent`)이고 잡 · 카드에 까닭이 남는다.
+- 길잡이(risk_next_step)는 보드가 붙은 과제에 본인 PAT 가 없으면 notes 에 그 사실과 고칠 곳(`fix_register_pat`)을 싣는다 — dyna 의 같은
+  줄 옆이다. 설정 화면의 선택 키 설명(`HWAXRISK_PORTAL_PAT`)도 ECAD 를 뺐다. MCP 도구 설명 둘(찾기 · 붙이기)은 그 사람의 PAT 로만 부른다고 말한다.
+- 시험 — 새 `tests/test_ecad_person_pat.py`(게이트웨이 대역이 요청마다 Authorization 을 적는다). 찾기 · 붙이기 × REST · MCP × PAT 없음 · 곧
+  끝남 · 폐기 · 풀리지 않음 16건이 요청 0 · 카드 없음이고, PAT 가 있으면 도구 지도 · 세션 · odb-hub 호출이 전부 그 PAT 다(박스 PAT 0).
+  보드만 붙은 과제의 캡처는 요청 0 · 409 · 잡 · 카드 까닭, mcad 와 함께면 박스 PAT 는 StepForge 도구에만 나가고 보드는 경고 하나, 어댑터
+  문(user · service · 모름), 폴백 끔의 채널 없음, 길잡이 notes 를 본다. 블랙박스의 가정 A7(박스 PAT 만 두던 것)은 그 사람의 PAT 를
+  등록하는 쪽으로 고쳤고 단언은 그대로다 — 박스 PAT 자리도 채워 두어 쓰이지 않는지는 새 시험이 본다. `test_ecad_adapter.py` 는 어댑터를
+  곧바로 부르는 두 곳에 mcp_credential='user' 를, web_box 에 그 사람의 PAT 행을 더했다.

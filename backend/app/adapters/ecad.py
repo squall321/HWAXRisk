@@ -143,21 +143,31 @@ def candidate_of(row: Mapping[str, Any]) -> dict:
 
 
 # ---------------------------------------------------------------- 보드 찾기(ER-01 — 사람이 고른다)
+def pat_absent_error(app_key: str | None = None) -> AppError:
+    """그 사람의 포털 PAT 가 없어(없음 · 폐기 · 풀리지 않음 · 곧 끝남) ODB 허브를 부르지 않는다 — 409 `ecad_pat_absent`.
+
+    ECAD 보드의 찾기 · 붙이기 확인 · 캡처는 그 사람의 PAT 로만 부른다(사용자 결정 10-31). 박스 읽기 PAT 로 내려가지 않는다 — odb-hub 는
+    사람별 격리가 없고 게이트웨이 plat:odbhub 로만 막혀, 내려가면 그 문을 서비스 계정으로 지난다."""
+    return AppError("ecad_pat_absent",
+                    "그 사람의 포털 PAT 가 없거나 곧 끝나 ODB 허브를 부르지 않습니다 — ECAD 보드는 그 사람의 PAT 로만 찾고 읽습니다(박스"
+                    " 읽기 PAT 로 내려가지 않습니다). 웹 설정 화면에서 포털 PAT 를 등록하거나 Claude 에서 hwax_risk 도구를 다시 불러 자동"
+                    " 등록한 뒤 다시 합니다.", 409, detail={"app_key": app_key or DEFAULT_APP_KEY, "fix": "portal_pat"})
+
+
 def search_boards(channel: Any, tool_map: Mapping[str, str], query: str, *,
                   app_key: str | None = None) -> dict:
     """find_job 한 번을 감싼다 — 후보(최대 `SEARCH_MAX`)와 `truncated` 를 돌려줄 뿐 고르지 않는다(모델 이름만으로 정하지 않는다).
 
     같은 모델의 다른 판이 함께 나올 수 있어 고르는 것은 사람이다. 허브의 봉투형 오류(찾는 것이 없다 따위)는 실패가 아니라 빈
-    후보와 그 글(`hub_message`)이다. 자격 · 도구 · 호출 실패는 까닭을 말하는 409 다.
+    후보와 그 글(`hub_message`)이다. 자격 · 도구 · 호출 실패는 까닭을 말하는 409 다. `channel` 은 그 사람의 PAT 로 연 채널이어야 한다
+    (routes 가 PAT 를 먼저 본다) — 없으면 `pat_absent_error` 다.
     """
     query = _s(query)
     if not query:
         raise AppError("E100", "찾을 말(query)이 비었습니다 — 과제 · 모델 · 파일 이름이나 job_id 를 줍니다.", 422)
     backend = app_key or DEFAULT_APP_KEY
     if channel is None:
-        raise AppError("ecad_credential_absent",
-                       "게이트웨이 MCP 자격(그 사람의 포털 PAT 또는 박스의 읽기 PAT)이 없어 ODB 허브를 찾지 못합니다.", 409,
-                       detail={"app_key": backend})
+        raise pat_absent_error(backend)
     if not tool_map:
         # 지도를 못 읽은 것과 그 백엔드에 도구가 없는 것은 고칠 곳이 다르다 — 앞은 게이트웨이, 뒤는 ODB 허브 등록이다.
         raise AppError("ecad_gateway_unreadable",
@@ -258,7 +268,8 @@ def absent_result(captured_at: int, *, message: str = "과제에 ECAD 보드가 
 
 
 class EcadAdapter(SourceAdapter):
-    """ODB 허브 보드 1장을 ecad 소스 하나로 읽는다(1단계). 허브에 쓰기는 하지 않는다 — 부르는 도구는 전부 읽기다."""
+    """ODB 허브 보드 1장을 ecad 소스 하나로 읽는다(1단계). 허브에 쓰기는 하지 않는다 — 부르는 도구는 전부 읽기다. 그 사람의 포털 PAT
+    채널로만 부른다(사용자 결정 10-31 — 박스 읽기 PAT 의 채널로는 부르지 않는다)."""
 
     kind = KIND
     version = ADAPTER_VERSION
@@ -272,17 +283,22 @@ class EcadAdapter(SourceAdapter):
 
     def capture(self, ref: Mapping[str, Any], principal: Principal | None,
                 recorder: CallRecorder | None) -> AdapterResult:
-        """ref = {odb_job_id} — 소스 카드는 `PUT /api/projects/{id}/ecad-board` 가 find_job 으로 확인한 뒤에만 적는다."""
-        del principal          # 자격은 recorder 의 게이트웨이 MCP 채널이 정한다(캡처의 다른 MCP 호출과 같다).
+        """ref = {odb_job_id} — 소스 카드는 `PUT /api/projects/{id}/ecad-board` 가 find_job 으로 확인한 뒤에만 적는다.
+
+        recorder 의 게이트웨이 MCP 채널은 캡처의 다른 kind 와 같은 것이다 — mcad · dyna 는 그 사람의 PAT 가 없으면 박스 읽기 PAT 로
+        내려가지만 ECAD 는 내려가지 않는다. `principal.mcp_credential` 이 user(그 사람의 PAT)가 아니면 부르지 않고 결측 + 경고
+        `ecad_pat_absent` 다(odb-hub 는 사람별 격리가 없고 게이트웨이 plat:odbhub 로만 막힌다)."""
         captured_at = now_epoch()
         job_id = _s((ref or {}).get("odb_job_id"))
         if not job_id:
             return absent_result(captured_at)
         app_key = self.app_key or DEFAULT_APP_KEY
         # 아래 셋은 호출 없이 끝난다 — 보드를 읽으러 가지도 못했으니 결측 + 경고이고 capture_failed 가 아니다(absent_result).
-        if recorder is None or not getattr(recorder, "mcp_available", False):
+        if recorder is None or not getattr(recorder, "mcp_available", False) \
+                or getattr(principal, "mcp_credential", None) != "user":
             return absent_result(captured_at, code="ecad_pat_absent", severity="WARNING", board_id=job_id, app_key=app_key,
-                                 message="게이트웨이 MCP 자격(포털 PAT)이 없어 붙은 ECAD 보드를 읽지 않았다.")
+                                 message="그 사람의 포털 PAT 가 없거나 곧 끝나 붙은 ECAD 보드를 읽지 않았다 — ECAD 는 그 사람의 PAT"
+                                         " 로만 읽는다(박스 읽기 PAT 로 내려가지 않는다).")
         # 이름은 게이트웨이 도구 지도(`/tools-map` 의 map)에서 그 백엔드 것으로만 찾는다 — 지도가 없으면 부르지 않는다
         # (맨이름 `list_parts` 는 다른 앱의 도구일 수 있다). 빈 지도는 게이트웨이를 못 읽은 것이다(도구가 없는 것과 고칠 곳이 다르다).
         tool_map = getattr(recorder, "tool_map", None) or {}

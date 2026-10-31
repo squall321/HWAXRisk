@@ -218,9 +218,9 @@ def add_source(ident: identity.Identity, *, project_id: str, kind: str, ref: dic
 def find_ecad_boards(ident: identity.Identity, *, query: str) -> dict:
     """`GET /api/ecad/boards` — ODB 허브 find_job 후보(최대 10, truncated). 고르는 것은 사람이다.
 
-    읽기지만 쓰기와 같은 문을 지난다 — 찾는 까닭이 붙이기(쓰기)다. 게이트웨이 자격은 캡처와 같다 — 그 사람의 등록된 포털 PAT,
-    없거나 곧 끝나면 박스의 읽기 PAT(HWAXRISK_PORTAL_PAT)다. 박스 PAT 로 내려가면 게이트웨이의 plat:odbhub 문을 그 사람이 아니라
-    서비스 계정으로 지난다 — 그 사람의 PAT 만 쓸지는 사용자 결정으로 남겼다(context-notes EC-15).
+    읽기지만 쓰기와 같은 문을 지난다 — 찾는 까닭이 붙이기(쓰기)다. 게이트웨이 자격은 캡처와 같다 — 그 사람의 등록된 포털 PAT
+    하나이고, 없거나 곧 끝나면 게이트웨이를 부르지 않고 409 ecad_pat_absent 다. 박스의 읽기 PAT(HWAXRISK_PORTAL_PAT)로 내려가지
+    않는다 — 내려가면 게이트웨이의 plat:odbhub 문을 그 사람이 아니라 서비스 계정으로 지난다(사용자 결정 10-31, context-notes EC-27).
     """
     owner = require_delegate(ident)
     out = routes.ecad_board_candidates(query, owner_sub=owner)
@@ -714,6 +714,9 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
                                     source_id=source["id"]))
     if {"dyna", "dyna_result"} & set(kinds) and creds["capture_mcp"] != "user_pat":
         notes.append("dyna 는 사람별 세션이라 본인 PAT 가 있어야 읽힌다 — 없으면 dyna 가 빈 채 캡처된다. " + fix_register_pat())
+    if "ecad" in kinds and creds["capture_mcp"] != "user_pat":
+        notes.append("ECAD 보드는 본인 PAT 로만 읽는다(박스 읽기 PAT 로 내려가지 않는다) — 없으면 보드가 빈 채(ecad_pat_absent) 캡처되고,"
+                     " 보드만 붙은 과제는 스냅샷이 서지 않는다. " + fix_register_pat())
     capture_blockers = ([_rest_channel_absent(project_id, creds["capture_rest_note"], creds["capture_rest_code"])]
                         if "mcad" in kinds and creds["capture_rest"] is None else [])
 

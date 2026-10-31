@@ -1675,14 +1675,17 @@ def ecad_board_route_error(project_id: str) -> AppError:
 
 
 def _ecad_mcp_channel(owner_sub: str) -> tuple[Any, dict]:
-    """ECAD 보드 찾기 · 붙이기 확인의 게이트웨이 MCP 채널과 도구 지도 — 캡처와 같은 자격(그 사람의 등록된 포털 PAT, 없거나 곧
-    끝나면 박스의 읽기 PAT)이라 찾아진 보드는 캡처도 읽는다."""
+    """ECAD 보드 찾기 · 붙이기 확인의 게이트웨이 MCP 채널과 도구 지도 — 그 사람의 등록된 포털 PAT 하나다(사용자 결정 10-31). 없거나
+    폐기됐거나 풀리지 않거나 곧 끝나면(캡처와 같은 여유 CREDENTIAL_MARGIN_S) 게이트웨이에 아무것도 보내기 전에 409 ecad_pat_absent 다 —
+    박스 읽기 PAT(HWAXRISK_PORTAL_PAT)로 내려가지 않는다. 캡처도 같은 자격이라 찾아진 보드는 캡처도 읽는다."""
     credential = get_store().get_credential(owner_sub) or {}
     portal_pat = identity.credential_pat(credential)
     if int(credential.get("pat_exp") or 0) <= now_epoch() + runner.CREDENTIAL_MARGIN_S:
         portal_pat = None
+    if portal_pat is None:
+        raise ecad_adapter.pat_absent_error()
     channels = adapters_registry.clients_from_settings(
-        config.settings, config.load_secrets(config.settings.data_dir), portal_pat=portal_pat)
+        config.settings, config.load_secrets(config.settings.data_dir), portal_pat=portal_pat, box_pat_fallback=False)
     if channels.get("rest") is not None:
         channels["rest"].close()          # 찾기는 REST 를 쓰지 않는다 — 만든 소켓은 닫는다
     return channels.get("mcp"), dict(channels.get("tool_map") or {})
@@ -2003,15 +2006,22 @@ def create_snapshot(project_id: str, body: SnapshotBody,
     # 다리 ③ 서비스 PAT 순이다(R2). 위임 신원은 heax 토큰이 없어 종전에는 서비스 PAT 가 없는 박스에서 늘 MCP 폴백이었다.
     gateway_pat = (adapters_registry.gateway_rest_pat(credential, margin_s=runner.CREDENTIAL_MARGIN_S)[0]
                    if ident.source == "sso" and ident.delegated else None)
+    sources = _project_sources(project_id)
+    kinds = list(body.kinds) or None
+    # ECAD 보드는 그 사람의 PAT 로만 읽는다(사용자 결정 10-31) — 이번 캡처가 ECAD 말고 읽을 카드가 없으면 박스 읽기 PAT 로 게이트웨이를
+    # 부를 까닭이 없다(채널도 도구 지도도 만들지 않는다). mcad · dyna 를 함께 읽으면 그 둘의 MCP 폴백은 종전대로 박스 PAT 다.
+    box_fallback = any(s["kind"] != "ecad" and (kinds is None or s["kind"] in kinds) for s in sources)
     channels = adapters_registry.clients_from_settings(
         config.settings, config.load_secrets(config.settings.data_dir), portal_pat=portal_pat,
-        heax_token=ident.token, gateway_pat=gateway_pat)
+        heax_token=ident.token, gateway_pat=gateway_pat, box_pat_fallback=box_fallback)
+    # 게이트웨이 MCP 채널의 자격 — user(본인 포털 PAT) · service(박스 읽기 PAT) · None. ECAD 어댑터는 user 일 때만 부른다.
+    mcp_credential = "user" if portal_pat else ("service" if channels.get("portal_pat") else None)
     principal = adapters_base.Principal(owner_sub=owner_sub, portal_pat=channels["portal_pat"],
-                                        service_pat=channels["service_pat"])
+                                        service_pat=channels["service_pat"], mcp_credential=mcp_credential)
     try:
         captured = adapters_registry.capture_all(
-            sources=_project_sources(project_id), principal=principal, mcp_client=channels["mcp"],
-            rest_client=channels["rest"], kinds=list(body.kinds) or None, report_ids=body.report_ids,
+            sources=sources, principal=principal, mcp_client=channels["mcp"],
+            rest_client=channels["rest"], kinds=kinds, report_ids=body.report_ids,
             detect_result_file_id=body.detect_result_file_id,
             tool_names=channels.get("tool_names") or (), tool_map=channels.get("tool_map") or {})
     except AppError as exc:
@@ -2087,7 +2097,7 @@ def create_snapshot(project_id: str, body: SnapshotBody,
     # 읽었든 못 읽었든 user_pat_gateway 라 이것으로 가른다(R2-10). REST 를 부르지 않은 캡처(REST 자격 없음·REST 를 안 쓰는 소스)도 false 다.
     rest_used = getattr(channels["rest"], "used", None)
     rest_calls = [c for c in calls if c.get("channel") == "rest"]
-    credentials = {"mcp": "user" if portal_pat else ("service" if channels.get("portal_pat") else None),
+    credentials = {"mcp": mcp_credential,
                    "rest": "→".join(rest_used) if rest_used else channels.get("rest_credential"),
                    "rest_ok": bool(rest_calls) and all(c.get("ok") for c in rest_calls)}
     if bridge_failure:

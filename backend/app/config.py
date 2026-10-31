@@ -73,8 +73,8 @@ OPTIONAL_SECRET_KEYS: tuple[str, ...] = (
 )
 # 선택 키가 없으면 무엇이 안 되는가 — 설정 화면(GET /api/me 의 box.reasons missing_optional)이 그대로 싣는다.
 OPTIONAL_KEY_EFFECTS: dict[str, str] = {
-    "HWAXRISK_PORTAL_PAT": ("사람 자격이 없을 때의 짧은 조회(전문가 명단·현장 VOC·문헌 E10·캡처의 MCP 폴백)가 닫힌다 — 패널 잡은"
-                            " 이 키를 쓰지 않는다(사람 PAT 만)."),
+    "HWAXRISK_PORTAL_PAT": ("사람 자격이 없을 때의 짧은 조회(전문가 명단·현장 VOC·문헌 E10·mcad · dyna 캡처의 MCP 폴백)가 닫힌다 —"
+                            " 패널 잡과 ECAD 보드(찾기·붙이기·캡처)는 이 키를 쓰지 않는다(사람 PAT 만)."),
     "HWAXRISK_PORTAL_PAT_RW": "RA 쓰기 자격 — 보내는 쪽이 아직 배선되지 않아(M4) 지금은 없어도 달라지는 것이 없다.",
     "HWAXRISK_HEAX_SERVICE_PAT": ("StepForge REST 의 마지막 자격 — 웹 로그인 토큰도 게이트웨이 경유 본인 PAT 도 없는 캡처는 mcad 를"
                                   " MCP 폴백으로 읽어 G6 이 unit_unknown 으로 막힌다."),

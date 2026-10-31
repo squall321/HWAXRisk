@@ -906,12 +906,12 @@ def risk_get_report(target_key: Annotated[str, Field(description=_A_TARGET_KEY)]
 # 과제의 ECAD 보드는 사람이 고른다 — 찾기는 find_job 후보를 보일 뿐이고, 붙이기는 그 job_id 가 find_job 에 있을 때만 적는다.
 @mcp.tool()
 async def risk_find_ecad_boards(query: Annotated[str, Field(description=_A_ECAD_QUERY)]) -> dict:
-    """ECAD 보드 찾기(읽기 전용) — ODB 허브 find_job(과제 · 모델 · 파일 이름이나 job_id)의 후보(job_id · project · model · board_type · revision · 이름 · 파일 · 올린 시각, 최대 10개 · truncated)를 준다, 같은 모델의 다른 판이 함께 나올 수 있으니 후보를 사용자에게 보이고 사용자가 고른 job_id 로 risk_set_ecad_board 를 부른다(모델 이름만으로 고르지 않는다), 게이트웨이 위임으로 확인된 신원으로만 찾는다."""
+    """ECAD 보드 찾기(읽기 전용) — ODB 허브 find_job(과제 · 모델 · 파일 이름이나 job_id)의 후보(job_id · project · model · board_type · revision · 이름 · 파일 · 올린 시각, 최대 10개 · truncated)를 준다, 같은 모델의 다른 판이 함께 나올 수 있으니 후보를 사용자에게 보이고 사용자가 고른 job_id 로 risk_set_ecad_board 를 부른다(모델 이름만으로 고르지 않는다), 게이트웨이 위임으로 확인된 신원의 등록된 포털 PAT 로만 찾는다(박스 읽기 PAT 로 내려가지 않는다 — 없거나 곧 끝나면 ecad_pat_absent)."""
     return await _entry(entry.find_ecad_boards, query=query)
 
 
 @mcp.tool()
 async def risk_set_ecad_board(project_id: Annotated[str, Field(description=_A_PROJECT_ID)],
                               odb_job_id: Annotated[str | None, Field(description=_A_ECAD_JOB_ID)]) -> dict:
-    """과제에 ECAD 보드 붙이기 · 바꾸기 · 떼기 — 쓰기: risk_find_ecad_boards 의 후보를 사용자에게 보이고 사용자가 고른 job_id 와 과제를 확인한 뒤 부른다, 그 job_id 가 find_job 에 실제로 있을 때만 붙이고(없으면 ecad_board_not_found) odb_job_id=null 이면 뗀다, 카드는 과제마다 한 장이라 다른 보드를 주면 바꾼다(감사 한 줄), 이미 동결된 스냅샷은 그대로이고 다음 risk_capture_snapshot 부터 보드 · 적층 · 분류된 부품을 읽는다(부품 좌표 · 넷은 아직 없다 — 표지로 남는다)."""
+    """과제에 ECAD 보드 붙이기 · 바꾸기 · 떼기 — 쓰기: risk_find_ecad_boards 의 후보를 사용자에게 보이고 사용자가 고른 job_id 와 과제를 확인한 뒤 부른다, 그 job_id 가 find_job 에 실제로 있을 때만 붙이고(없으면 ecad_board_not_found — 확인과 이후 캡처는 그 사람의 포털 PAT 로만 하고 없거나 곧 끝나면 ecad_pat_absent) odb_job_id=null 이면 뗀다, 카드는 과제마다 한 장이라 다른 보드를 주면 바꾼다(감사 한 줄), 이미 동결된 스냅샷은 그대로이고 다음 risk_capture_snapshot 부터 보드 · 적층 · 분류된 부품을 읽는다(부품 좌표 · 넷은 아직 없다 — 표지로 남는다)."""
     return await _entry(entry.set_ecad_board, project_id=project_id, odb_job_id=odb_job_id)
