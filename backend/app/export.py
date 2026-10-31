@@ -590,6 +590,7 @@ _PARENT_COLUMNS: dict[str, str] = {
 }
 PARENT_NOT_OWNED = "parent_not_owned"
 OWNER_ROW_IMMUTABLE = "owner_row_immutable"
+CKEY_NOT_REFERENCED = "ckey_not_referenced"
 
 
 def _scope_columns(table: str, cols: list[str], values: dict) -> tuple[str, ...]:
@@ -637,6 +638,22 @@ def _refusal(store: RiskStore, table: str, cols: list[str], values: dict, owner_
     return None
 
 
+def _unreferenced_part_key(store: RiskStore, values: dict, owner_sub: str) -> bool:
+    """새 정규 키 원장 행(rr_part_keys)을 부른 사람의 과제가 쓰지 않는가 — 쓰지 않으면 받지 않는다(사용자 결정 10-31 '들여오기 선점만
+    막는다', context-notes MB-6).
+
+    원장은 열쇠가 ckey 하나인 과제 공용 표라 처음 적립한 사람이 그 행의 주인이 된다(ir_builder._upsert_part_keys — 뒤에 같은 키를 적립하는
+    사람은 행을 얻지 못한다). 들여오기가 아무 ckey 의 새 행이나 받으면 남이 그 키를 쓰는 과제보다 먼저 행을 쥐어 그 주인의 키 결정이 다 404
+    가 된다. 그래서 새 행은 그 ckey 가 부른 사람의 과제(그 사람 소유의 과제 · 스냅샷 · 노드)에 실려 있을 때만 받는다 — 이 박스에 이미
+    있거나 같은 들여오기에서 앞서 들어간 노드(줄은 TABLE_ORDER 로 쓰고 rr_ir_nodes 가 rr_part_keys 앞이다)다. 적립과 같은 근거라
+    들여오기가 적립보다 더 쥐지 못한다. 부른 사람의 기존 행 병합은 그대로다(이 검사는 새 행만 — import_jsonl)."""
+    row = store.query_one(
+        "SELECT 1 FROM rr_ir_nodes n JOIN rr_snapshots s ON s.id = n.snapshot_id JOIN rr_projects p ON p.id = s.project_id"
+        " WHERE n.ckey = ? AND n.owner_sub = ? AND s.owner_sub = ? AND p.owner_sub = ? LIMIT 1",
+        (values.get("ckey"), owner_sub, owner_sub, owner_sub))
+    return row is None
+
+
 def import_jsonl(store: RiskStore, owner_sub: str, text: str) -> dict:
     """JSONL 을 병합한다 — {inserted, merged, skipped, skipped_global, recomputed_targets, conflicts[]}.
 
@@ -648,7 +665,8 @@ def import_jsonl(store: RiskStore, owner_sub: str, text: str) -> dict:
     적어 남의 행을 통째로 덮거나(권한 상승) 충돌 응답으로 읽어낼 수 있다. 소유자가 다른 같은 PK 는
     `owner_conflict`, UNIQUE 만 겹치는 새 행은 `unique_conflict` 로 그 줄만 눕히고 나머지는 계속 병합한다.
     쓰는 줄(새 행 · 병합)이 남의(또는 없는) 과제 · 스냅샷 · 대상 · 비교에 매달리면 `parent_not_owned`, 남의 이메일로 적은 멤버 owner 행은
-    `owner_row_immutable` 로 그 줄만 눕힌다(`_refusal`). 줄은 표 차례(TABLE_ORDER — 부모 표가 먼저다)로 쓴다.
+    `owner_row_immutable` 로 그 줄만 눕힌다(`_refusal`). 정규 키 원장의 새 행은 그 ckey 를 부른 사람의 과제가 쓸 때만 받고 아니면
+    `ckey_not_referenced` 다(`_unreferenced_part_key` — 남의 키 선점을 막는다). 줄은 표 차례(TABLE_ORDER — 부모 표가 먼저다)로 쓴다.
     """
     head, items = _parse(text)
     local_version = store.schema_version()
@@ -702,6 +720,8 @@ def import_jsonl(store: RiskStore, owner_sub: str, text: str) -> dict:
                     conflicts.append({"table": table, "key": _key_of(row, pks), "reason": "owner_conflict"})
                     continue
                 refused = _refusal(store, table, cols, values, owner_sub)
+                if refused is None and table == "rr_part_keys" and _unreferenced_part_key(store, values, owner_sub):
+                    refused = CKEY_NOT_REFERENCED     # 제 과제가 쓰지 않는 정규 키의 새 행 — 남의 키를 선점하지 못한다
                 if refused is not None:            # 남의(또는 없는) 과제 · 스냅샷 · 대상 · 비교에 매달린 줄 — 그 줄만 눕힌다.
                     skipped += 1
                     conflicts.append({"table": table, "key": _key_of(row, pks), "reason": refused})

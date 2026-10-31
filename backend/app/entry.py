@@ -181,8 +181,9 @@ def add_source(ident: identity.Identity, *, project_id: str, kind: str, ref: dic
     캡처는 kind 마다 첫 행만 쓰고(`capture_all`, `ORDER BY kind, id` — id 는 uuid) 소스를 지우는 REST 가 없다. 둘째 행이
     생기면 어느 쪽이 캡처될지 uuid 순서가 정하고 되돌릴 길이 없다.
     """
-    owner = require_delegate(ident)
-    routes._project_row(project_id, owner)
+    require_delegate(ident)
+    # 그 과제의 편집자 이상이 붙인다 — 웹 라우트와 같은 문(MB-14). 남은 없는 과제와 같은 404, 보기는 403 이다.
+    routes._project_row(project_id, routes._project_writer(project_id, ident))
     if kind not in routes.SOURCE_KINDS:
         raise AppError("E100", f"kind 는 {list(routes.SOURCE_KINDS)} 중 하나여야 합니다 — {kind!r}.", 422)
     if kind == "ecad":
@@ -250,8 +251,8 @@ def capture_snapshot(ident: identity.Identity, *, project_id: str, label: str | 
                      kinds: list[str] | None = None, report_ids: list[int] | None = None,
                      detect_result_file_id: str | None = None, allow_large: bool = False) -> dict:
     """`POST /api/projects/{id}/snapshots`(동기 캡처). 같은 내용이면 앱이 기존 스냅샷을 돌려준다(reused)."""
-    owner = require_delegate(ident)
-    routes._project_row(project_id, owner)
+    require_delegate(ident)
+    routes._project_row(project_id, routes._project_writer(project_id, ident))     # 편집자 이상 — 웹 동결과 같은 문(MB-14)
     body = _body(routes.SnapshotBody, label=label, kinds=list(kinds or []), report_ids=report_ids,
                  detect_result_file_id=detect_result_file_id, allow_large=allow_large)
     with _capturing_lock:
@@ -276,7 +277,7 @@ def ack_gate(ident: identity.Identity, *, snapshot_id: str, gate: str, reason: s
 
 
 def get_sameas(ident: identity.Identity, *, base_snapshot_id: str, target_snapshot_id: str) -> dict:
-    """`GET /api/sameas` — 두 스냅샷 모두 호출자 소유여야 한다."""
+    """`GET /api/sameas` — 두 스냅샷을 다 읽는 사람(각 스냅샷 과제의 구성원 — 웹과 같은 문, MB-1)이 연다."""
     routes._require_user(ident)
     return routes.get_sameas(base=base_snapshot_id, target=target_snapshot_id, ident=ident)
 
@@ -289,8 +290,9 @@ def decide_sameas(ident: identity.Identity, *, base_snapshot_id: str, target_sna
     열쇠를 손으로 짓게 두면 한 글자만 어긋나도 결정이 아무 비교에도 닿지 않는다(오류 없이).
     """
     owner = require_delegate(ident)
-    base = routes._snapshot_row(base_snapshot_id, owner)
-    target = routes._snapshot_row(target_snapshot_id, owner)
+    # 두 스냅샷은 읽는 사람이면 열쇠를 짓는다 — 결정을 받을지(두 과제의 주인 · 편집자)는 웹 라우트의 문이 정한다(MB-13).
+    base = routes._snapshot_row(base_snapshot_id, routes._snapshot_reader(base_snapshot_id, owner))
+    target = routes._snapshot_row(target_snapshot_id, routes._snapshot_reader(target_snapshot_id, owner))
     pair_key = "|".join(sorted([str(base["project_id"]), str(target["project_id"])]))
     items = []
     for item in decisions or []:
@@ -307,10 +309,11 @@ def decide_sameas(ident: identity.Identity, *, base_snapshot_id: str, target_sna
 
 def create_diff(ident: identity.Identity, *, base_snapshot_id: str, target_snapshot_id: str) -> dict:
     """`POST /api/diffs` — 같은 쌍은 저장된 비교를 돌려준다(앱이 원래 멱등이다)."""
-    owner = require_delegate(ident)
+    require_delegate(ident)
+    # 같은 쌍의 비교는 하나다(유일 열쇠 — 편집자가 만들면 과제 주인의 행이다, MB-14). 받을지는 웹 라우트의 문이 정하고 그 뒤에만 답한다.
     existed = routes.get_store().query_one(
-        "SELECT id FROM rr_diffs WHERE base_snapshot_id = ? AND target_snapshot_id = ? AND owner_sub = ?",
-        (base_snapshot_id, target_snapshot_id, owner)) is not None
+        "SELECT id FROM rr_diffs WHERE base_snapshot_id = ? AND target_snapshot_id = ?",
+        (base_snapshot_id, target_snapshot_id)) is not None
     out = routes.create_diff(_body(routes.DiffBody, base_snapshot_id=base_snapshot_id,
                                    target_snapshot_id=target_snapshot_id), ident=ident)
     return {**out, "created": not existed}
@@ -333,7 +336,7 @@ def open_target(ident: identity.Identity, *, kind: str, ref_id: str, consent: bo
     `flow` 는 심사 방식이다(D-24) — 새 대상은 그 방식으로 열고(없으면 panels), 이미 연 내 대상인데 방식이 다르면 웹과 같은
     바꾸기 함수(`POST /targets/{key}/flow`)를 지난다(감사 channel mcp). None 이면 방식을 건드리지 않는다.
     """
-    owner = require_delegate(ident)
+    require_delegate(ident)
     body = _body(routes.TargetBody, kind=kind, ref_id=ref_id, consent=consent, flow=flow or "panels")
     try:
         out = {**routes.create_target(body, ident=ident), "created": True}
@@ -341,7 +344,7 @@ def open_target(ident: identity.Identity, *, kind: str, ref_id: str, consent: bo
         if exc.code != "E409":
             raise
         key = f"{kind}:{ref_id}"
-        row = routes._target_row(key, owner)
+        row = routes._target_row(key, routes._target_writer(key, ident))      # 편집자 이상 — 연 대상(MB-14)
         out = {"target_key": key, "created": False, "superseded_by": row["superseded_by"], "flow": row["flow"]}
         if flow is not None and flow != row["flow"]:
             change = routes.post_target_flow(key, _body(routes.FlowBody, to=flow, reason=reason), ident=ident)
@@ -349,7 +352,7 @@ def open_target(ident: identity.Identity, *, kind: str, ref_id: str, consent: bo
         if planner.coverage_summary(routes.get_store(), key)["roster_size"] == 0:
             out["roster_refresh"] = routes.refresh_roster(key, routes.RosterBody(), ident=ident)
         out.update(_target_summary(key))
-    row = routes._target_row(out["target_key"], owner)
+    row = routes._target_row(out["target_key"], routes._target_writer(out["target_key"], ident))
     return {**out, "web": web_paths(project_id=row["project_id"], target_key=out["target_key"])}
 
 
@@ -366,13 +369,12 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = N
     제외와 다르면 `differs` 에 'exclude_evidence' 를 싣는다(바꾸지 않는다 — 취소한 뒤 새로). 돌려주는 살아 있는 잡이 빼는 항목은 늘
     `exclude_evidence` 로 싣는다(BL-12 — 빼지 않는 잡은 칸이 없다).
     """
-    email = require_delegate(ident)
+    require_delegate(ident)
     store = routes.get_store()
     target = store.query_one("SELECT owner_sub, project_id FROM rr_targets WHERE target_key = ?", (target_key,))
     if target is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
-    if not routes._is_admin(ident):
-        routes._target_editor(target_key, target["project_id"], email)      # 남에게는 없는 대상과 같은 답(남 숨김 훑기)
+    routes._target_editor(target_key, target, ident)      # 남 · 남이 매단 대상은 없는 대상과 같은 답(남 숨김 훑기 · MB-20)
     web = web_paths(project_id=target["project_id"], target_key=target_key)
     if mode == "reviews":
         return _start_review_job(ident, store, target_key, web, tier=tier, consent=consent, modifiers=modifiers,

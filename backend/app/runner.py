@@ -672,8 +672,10 @@ def diff_ref_withheld(store: Any, diff_id: str, credential_kind: str | None, ema
             continue
         if credential_kind == "service" or not email:
             return withheld("service_credential")
+        # 구성원 행은 편집자 · 보기만이다 — owner 는 과제 행의 주인 열만 정한다(routes.project_role 과 같은 규칙 · RD-10, MB-16).
         if project["owner_sub"] != email and store.query_one(
-                "SELECT 1 FROM rr_project_members WHERE project_id = ? AND email = ?", (project_id, email)) is None:
+                "SELECT 1 FROM rr_project_members WHERE project_id = ? AND email = ? AND role IN ('viewer', 'editor')",
+                (project_id, email)) is None:
             return withheld("not_member")
         private = True
     if private:

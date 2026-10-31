@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping, Sequence
 
 from app import ir_builder
+from app.adapters import dyna as dyna_adapter
 from app.adapters import mcad as mcad_adapter
 
 ADAPTER_VERSION = "1.0"
@@ -390,7 +391,9 @@ def to_adapter_results(d: Design, *, captured_at: int = CAPTURED_AT) -> list[dic
                    "binding": {"bound_to_dyna_source_hash": d.sha, "method": "user_declared"}, "degraded": []},
         "nodes": [], "edges": [], "warnings": [], "degraded": [], "call_ids": ["syn-result-001"],
         "results": {
-            "report_ids": ["SYNRPT"], "kind": "sphere", "sim_params_hash": "simp-syn", "summary": "합성 구 낙하",
+            # 해석 조건 해시는 실제 어댑터와 같은 함수다(64자 sha256 — rr_ir.v1 계약, MB-17). 종전 'simp-syn' 은 계약 밖이었다.
+            "report_ids": ["SYNRPT"], "kind": "sphere", "summary": "합성 구 낙하",
+            "sim_params_hash": dyna_adapter._sim_params_hash({"kind": "sphere", "sim_params": {"drop_height": 1.2}}),
             "parts_map": pid_to_nid,
             "part_risk": [{"nid": pid_to_nid[str(p.pid)], "pid": p.pid,
                            "worst_stress": {"value": p.result["worst_stress"], "case_key": "c1"},

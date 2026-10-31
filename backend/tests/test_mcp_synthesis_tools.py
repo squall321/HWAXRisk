@@ -85,7 +85,7 @@ def test_the_issue_tool_pages_under_a_tight_wire_limit_and_covers_every_issue(st
 
 def test_an_issue_panel_result_is_not_submitted_from_claude(store, monkeypatch):
     """risk_submit_panel_result — 쟁점 패널은 웹 러너가 돌리고 고쳐 다시 내는 것도 웹·REST 다(issue_panel_web_only). 위임 신원은
-    tests/test_mcp_write_identity.py 가 보는 게이트웨이 단언 대신 그 문의 결과(소유자)로 세운다."""
+    게이트웨이 단언을 실은 요청으로 세운다(factories.act_as_delegate — 도구가 문의 결과가 아니라 그 신원으로 쓰기 문을 본다, MB-14)."""
     key = rig.target(store)
     job_id = rig.job(store, key)
     fake = FakeReviewEngine(rig.packs())
@@ -99,7 +99,7 @@ def test_an_issue_panel_result_is_not_submitted_from_claude(store, monkeypatch):
     runner.run_panel(store, config.settings, engine, runner.claim_next_job(store, config.settings, engine=engine))
     panel_id = store.query_one("SELECT id FROM rr_panels WHERE target_key = ? AND kind = 'issue'", (key,))["id"]
     before = dict(store.query_one("SELECT * FROM rr_panels WHERE id = ?", (panel_id,)))
-    monkeypatch.setattr(srv.entry, "require_delegate", lambda _identity: OWNER)
+    factories.act_as_delegate(monkeypatch, OWNER)
     out = srv.risk_submit_panel_result(panel_id, "mcp", "결정문", [], actor=OWNER)
     assert out.get("error") == "issue_panel_web_only", out
     assert dict(store.query_one("SELECT * FROM rr_panels WHERE id = ?", (panel_id,))) == before

@@ -1119,8 +1119,13 @@ def record_decision(store, payload: Mapping[str, Any], *, owner_sub: str,
         rekeyed = None
         with store.tx():
             prev = store.query_one(
-                "SELECT id, status FROM rr_sameas WHERE scope=? AND pair_key=? AND a_stable=? AND b_stable=?",
+                "SELECT id, status, owner_sub FROM rr_sameas WHERE scope=? AND pair_key=? AND a_stable=? AND b_stable=?",
                 (scope, pair_key, a_stable, b_stable))
+            # 유일 열쇠가 (scope, pair_key, 두 stable 키)라 그 자리의 행은 하나다 — 다른 사람의 행이면 덮지 않고 거절한다(조용히 넘기지 않는다,
+            # 사용자 결정 10-31 · MB-13). 종전에는 아래 upsert 가 주인을 보지 않아 그 네 값을 아는 누구나 남의 결정을 뒤집었다.
+            if prev is not None and prev["owner_sub"] != owner_sub:
+                raise AppError("sameas_row_foreign", "이 대응 자리(scope · 열쇠 · 두 stable 키)의 원장 행은 다른 사람의 것이라 고치지 않았다.",
+                               409, detail={"scope": scope, "a_stable": a_stable, "b_stable": b_stable})
             # 1걸음(§5.9.5) — 결정이 뒤집히면 직전 값을 prev_* 에 남긴다(번복 이력, 행 하나로 유지). 같은 결정을 다시 내면 그대로다.
             store.execute(
                 "INSERT INTO rr_sameas (id, owner_sub, scope, pair_key, a_stable, b_stable, method, score,"
@@ -1134,7 +1139,8 @@ def record_decision(store, payload: Mapping[str, Any], *, owner_sub: str,
                 " ELSE rr_sameas.prev_decided_at END,"
                 " status=excluded.status, method='manual', score=1.0, evidence=excluded.evidence,"
                 " decided_by=excluded.decided_by, decided_at=excluded.decided_at,"
-                " snapshot_id_at_decision=excluded.snapshot_id_at_decision",
+                " snapshot_id_at_decision=excluded.snapshot_id_at_decision"
+                " WHERE rr_sameas.owner_sub = excluded.owner_sub",
                 (new_uuid(), owner_sub, scope, pair_key, a_stable, b_stable, status,
                  canonical_json(evidence) if evidence is not None else None,
                  actor, now, payload.get("snapshot_id")),

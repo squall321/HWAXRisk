@@ -16,6 +16,7 @@ import app.mcp_server as srv
 from app import export, ir_builder, routes
 from app.adapters import registry as adapters_registry
 from app.errors import AppError
+from app.risk_store import RiskStore
 from tests import factories
 from tests import test_adapters as recon
 from tests.test_e2e_smoke import FakeSourceApps, no_network, seeded_discovery  # noqa: F401 — autouse 픽스처
@@ -342,3 +343,111 @@ def test_project_reads_keep_to_the_owners_snapshots_sources_and_character(wired)
         assert "char:forged" not in {t["tag"] for t in page["character_top_tags"]}
         (card,) = [c for c in routes.list_projects(ident=factories.ident(who))["projects"] if c["id"] == victim]
         assert (card["last_snapshot_id"], card["last_snapshot_at"], card["sources"]) == ("s-moved", 1_800_000_000, [])
+
+
+# ---------------------------------------------------------------- 4. 들여오기는 정규 키를 선점하지 못한다(사용자 결정 10-31 '들여오기 선점만 막는다')
+MOVER = "mover@example.com"
+NEW_OWNER = "new-owner@example.com"
+
+
+def _own_lines(tmp_path, who: str, code: str) -> list[dict]:
+    """그 사람이 다른 박스에서 동결한 과제 하나의 반출 줄(머리 뺀) — 과제 · 멤버 · 스냅샷 · 노드와 그 동결이 적립한 키 원장 행."""
+    scratch = RiskStore(tmp_path / f"{code}.db")
+    scratch.open()
+    scratch.migrate()
+    try:
+        project_id = factories.make_project(scratch, owner=who, code=code)
+        factories.make_snapshot(scratch, project_id, [factories.adapter_fixture(MCAD_ONLY)], label="동결", owner=who)
+        return [json.loads(line) for line in list(export.iter_lines(scratch, who, 0))[1:]]
+    finally:
+        scratch.close()
+
+
+def _keys(lines: list[dict]) -> list[str]:
+    return sorted(line["row"]["ckey"] for line in lines if line["table"] == "rr_part_keys")
+
+
+def test_an_import_cannot_claim_a_part_key_no_project_of_the_caller_carries(wired, tmp_path):
+    """정규 키 원장은 열쇠가 ckey 하나인 과제 공용 표라 처음 적립한 사람이 주인이다. 들여오기는 아무 ckey 의 새 행이나 받아, 남이 주인의
+    키(이름 · 크기 · 재질의 해시라 짐작할 수 있다)를 주인이 적립하기 전에 쥐면 주인의 동결은 그 행을 얻지 못하고 키 결정이 다 404 였다.
+    이제 새 행은 부른 사람의 과제(그 사람의 과제 · 스냅샷 · 노드)가 그 키를 쓸 때만 받고 아니면 ckey_not_referenced 다 — 관계없는 키도,
+    주인의 노드가 이미 이 박스에 있는 키도, 남이 주인의 스냅샷에 매단 노드(고침 전의 들여오기)로 걸친 키도 같다. 주인은 뒤에 그대로
+    적립한다."""
+    store = wired
+    victim_lines = _own_lines(tmp_path, OWNER, "LATER-1")
+    planned = _keys(victim_lines)
+    assert planned, "동결이 적립한 키가 있어야 시험이 뜻이 있다"
+    own = routes.create_project(routes.ProjectBody(code="OWN-7", name="제 과제", classification="internal"),
+                                ident=factories.ident(STRANGER))["id"]          # 남도 제 과제는 있다 — 그 노드는 이 키를 쓰지 않는다
+
+    def squat(ckey: str) -> dict:
+        return {"table": "rr_part_keys", "row": {
+            "ckey": ckey, "owner_sub": STRANGER, "status": "confirmed", "display_name": "선점", "name_norm_canon": "x",
+            "geom_bucket": "b", "material_norm": "m", "first_project_id": own, "decided_by": STRANGER, "decided_at": 1,
+            "created_at": 1, "updated_at": 1}}
+
+    # ① 주인의 과제가 아직 이 박스에 없다 — 주인이 옮겨 올(또는 동결할) 키와 관계없는 키.
+    out = _import(store, STRANGER, [squat(planned[0]), squat("ck:unrelated0001")])
+    assert (out["inserted"], [(c["table"], c["key"], c["reason"]) for c in out["conflicts"]]) == (
+        0, [("rr_part_keys", planned[0], "ckey_not_referenced"), ("rr_part_keys", "ck:unrelated0001", "ckey_not_referenced")])
+    assert all(set(c) == {"table", "key", "reason"} for c in out["conflicts"])
+    assert store.query_one("SELECT COUNT(*) AS n FROM rr_part_keys")["n"] == 0
+    # ② 주인의 과제 · 노드는 먼저 옮겨 왔고 키 줄은 아직이다 — 노드가 남의 것이라 남은 쥐지 못한다. 남이 주인의 스냅샷에 매단 노드(제 이름의
+    # 노드 행)로 걸쳐도 그 스냅샷 · 과제가 남의 것이 아니라 같다.
+    assert _import(store, OWNER, [line for line in victim_lines if line["table"] != "rr_part_keys"])["conflicts"] == []
+    victim_sid = store.query_one("SELECT id FROM rr_snapshots WHERE owner_sub = ?", (OWNER,))["id"]
+    factories.seed_raw(store, "rr_ir_nodes", {"snapshot_id": victim_sid, "nid": "n-forged", "owner_sub": STRANGER, "kind": "part",
+                                              "source_kind": "mcad", "name": "FORGED", "name_norm": "forged", "ckey": planned[0]},
+                       reason="고침 전의 들여오기가 주인의 스냅샷에 매단 남의 노드 행 — 이제 들여오기는 parent_not_owned 로 막는다(RD-10)")
+    again = _import(store, STRANGER, [squat(key) for key in planned])
+    assert (again["inserted"], {c["reason"] for c in again["conflicts"]}) == (0, {"ckey_not_referenced"})
+    # 주인은 제 키를 그대로 받는다 — 행의 주인이 그 사람이고 키 대장 읽기가 '내 원장 행' 이라 말한다(결정을 받는다).
+    taken = _import(store, OWNER, [line for line in victim_lines if line["table"] == "rr_part_keys"])
+    assert (taken["inserted"], taken["conflicts"]) == (len(planned), [])
+    assert {r["owner_sub"] for r in store.query("SELECT owner_sub FROM rr_part_keys")} == {OWNER}
+    assert routes.get_part_key(planned[0], ident=factories.ident(OWNER))["mine"] is True
+
+
+def test_an_import_takes_a_part_key_the_callers_own_snapshot_carries_already_here(wired, tmp_path):
+    """부른 사람의 과제 · 스냅샷 · 노드가 이미 이 박스에 있으면(앞선 들여오기 — 두 번에 나눠 옮긴다) 그 노드가 쓰는 키의 새 행을 받는다."""
+    store = wired
+    lines = _own_lines(tmp_path, MOVER, "MOVE-1")
+    first = _import(store, MOVER, [line for line in lines if line["table"] != "rr_part_keys"])
+    assert first["conflicts"] == []
+    second = _import(store, MOVER, [line for line in lines if line["table"] == "rr_part_keys"])
+    assert (second["inserted"], second["conflicts"]) == (len(_keys(lines)), [])
+    assert [r["ckey"] for r in store.query("SELECT ckey FROM rr_part_keys WHERE owner_sub = ? ORDER BY ckey", (MOVER,))] == _keys(lines)
+
+
+def test_an_import_takes_a_part_key_its_own_snapshot_brings_in_the_same_body(wired, tmp_path):
+    """같은 들여오기에서 앞서 들어가는 제 노드도 된다 — 줄은 표 차례(TABLE_ORDER — rr_ir_nodes 가 rr_part_keys 앞)로 쓰므로 키 줄을 본문
+    맨 앞에 두어도 받는다."""
+    store = wired
+    lines = _own_lines(tmp_path, MOVER, "MOVE-2")
+    keys_first = [line for line in lines if line["table"] == "rr_part_keys"] + [line for line in lines if line["table"] != "rr_part_keys"]
+    out = _import(store, MOVER, keys_first)
+    assert out["conflicts"] == [] and out["inserted"] == len(lines)
+    assert [r["ckey"] for r in store.query("SELECT ckey FROM rr_part_keys WHERE owner_sub = ? ORDER BY ckey", (MOVER,))] == _keys(lines)
+
+
+def test_a_part_key_stays_with_whoever_accrued_it_across_a_transfer_and_its_own_row_still_merges(wired):
+    """이양은 키 원장 행을 옮기지 않는다(설계 — 행은 그 키를 처음 적립한 사람의 것이다, TRANSFER_PROJECT_TABLES 밖). 새 주인은 그 키의 새
+    행을 들여오지 못한다(열쇠가 ckey 하나라 owner_conflict — 종전 그대로). 새 행 검사는 새 행에만 걸린다 — 과제를 넘긴 옛 주인의 행은 이제
+    제 과제가 쓰지 않는 키지만 제 행의 병합(사람 확정이 자동을 이긴다)은 그대로 받는다. 병합 줄은 판정만 싣는다 — 옛 과제를 가리키는 칸
+    (first_*)을 그대로 실으면 그 과제가 이제 남의 것이라 RD-10 의 parent_not_owned 다(종전 그대로)."""
+    store = wired
+    project_id = factories.make_project(store, code="MOVE-3")
+    sid = factories.make_snapshot(store, project_id, [factories.adapter_fixture(MCAD_ONLY)], label="동결")["snapshot_id"]
+    ckey = _first_ckey(store, sid)
+    routes.transfer_project(project_id, routes.TransferBody(to_email=NEW_OWNER, reason="넘긴다"), ident=factories.ident(OWNER))
+    assert store.query_one("SELECT owner_sub FROM rr_part_keys WHERE ckey = ?", (ckey,))["owner_sub"] == OWNER
+    assert store.query_one("SELECT COUNT(*) AS n FROM rr_ir_nodes WHERE ckey = ? AND owner_sub = ?", (ckey, OWNER))["n"] == 0
+    row = dict(store.query_one("SELECT * FROM rr_part_keys WHERE ckey = ?", (ckey,)))
+    theirs = _import(store, NEW_OWNER, [{"table": "rr_part_keys", "row": {**row, "owner_sub": NEW_OWNER}}])
+    assert [(c["key"], c["reason"]) for c in theirs["conflicts"]] == [(ckey, "owner_conflict")]
+    decided = {k: v for k, v in row.items() if not k.startswith("first_")}
+    out = _import(store, OWNER, [{"table": "rr_part_keys", "row": {
+        **decided, "status": "confirmed", "display_name": "커버", "decided_by": OWNER, "decided_at": 2, "updated_at": 2}}])
+    assert (out["merged"], out["conflicts"]) == (1, [])
+    assert dict(store.query_one("SELECT owner_sub, status, display_name FROM rr_part_keys WHERE ckey = ?", (ckey,))) == {
+        "owner_sub": OWNER, "status": "confirmed", "display_name": "커버"}

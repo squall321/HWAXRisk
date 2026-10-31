@@ -2,7 +2,6 @@
 #
 # 가짜 허브 루트(HEAXHUB_ROOT)에 데이터 폴더와 대역 appdata-to-drive.sh(받은 환경을 적는다)를 두고, age 는 대역(받은 평문을 그대로
 # 남긴다 — 그 사본이 앱이 쓰는 중인 WAL 의 행까지 담았는지 본다)이다. 실제 Drive · 실제 키는 쓰지 않는다.
-import os
 import sqlite3
 import subprocess
 from pathlib import Path

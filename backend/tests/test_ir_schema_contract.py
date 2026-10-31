@@ -10,6 +10,7 @@ from jsonschema import Draft7Validator
 from app import ir_builder
 from app.adapters import base as adapters_base
 from app.adapters import dyna as dyna_adapter
+from app.adapters import mcad as mcad_adapter
 
 SCHEMA = json.loads(
     (Path(ir_builder.__file__).parent / "schemas" / "rr_ir.v1.json").read_text(encoding="utf-8"))
@@ -168,3 +169,30 @@ def test_the_ecad_stub_envelope_validates():
 
     assert _errors(ir) == []
     assert "ecad_absent" in ir["sources"][1]["degraded"]
+
+
+def test_an_interface_row_without_a_note_validates():
+    """계면 행에 note 가 없으면(StepForge 계면 표가 비운 칸) mcad 어댑터는 attrs.note 를 null 로 싣는다 — 합성기(devseed)도 같은 꼴이다.
+    계약도 null 을 받는다(이웃 칸 tol_config_hash 처럼). 종전 계약은 문자열만 받아 그런 IR 이 자기 계약 밖이었다(MB-17)."""
+    nodes = [{"kind": "part", "label": "A", "canon_key": "c:a"}, {"kind": "part", "label": "B", "canon_key": "c:b"}]
+    edges, warnings = mcad_adapter._edges_from_interfaces(
+        [{"kind": "contact", "node_a": "n1", "node_b": "n2", "min_gap": 0.2, "cross_file": 0}], nodes=nodes,
+        id_to_canon={"n1": "c:a", "n2": "c:b"}, app_key="heax-step_forge", call_by_kind={}, tol_hash=None)
+    assert warnings == [] and edges[0]["attrs"]["note"] is None
+    attrs = {**SCHEMA["definitions"]["edge_attrs"], "definitions": SCHEMA["definitions"]}
+    assert [e.message for e in Draft7Validator(attrs).iter_errors(edges[0]["attrs"])] == []
+
+
+def test_the_synthetic_generator_builds_ir_inside_its_contract():
+    """합성기(devseed — 합성 다건 변경 타깃 · dev 주입)가 짓는 앞 · 뒤 IR 도 rr_ir.v1 안이다 — 손으로 심는 행의 검증(factories.seed_raw)이
+    합성 IR 을 받으려면 합성기가 계약을 지켜야 한다. 종전에는 계면 note null(계약이 문자열만 받았다)과 해석 조건 해시 'simp-syn'(64자 sha256
+    이 아니다)으로 계약 밖이었다(MB-17)."""
+    from app import devseed  # noqa: PLC0415 — 합성기는 이 시험만 쓴다.
+    from tests.synth import scripts  # noqa: PLC0415
+
+    base, target, _records = devseed.apply_script(devseed.build_design(scripts.spec_for(40, scripts.SEED)),
+                                                  list(scripts.script_for(40, scripts.SEED)), scripts.SEED)
+    for design in (base, target):
+        ir = ir_builder.build_ir(project_id=PROJECT, owner_sub=OWNER, label="DV1", snapshot_id=SNAPSHOT,
+                                 captured_at=1756600000, adapter_results=devseed.to_adapter_results(design))
+        assert _errors(ir) == []
