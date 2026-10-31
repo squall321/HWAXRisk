@@ -582,6 +582,29 @@ def test_purge_blanks_bodies_keeps_hashes_and_needs_the_project_code(risk_store,
     assert (again.value.code, again.value.http_status) == ("already_purged", 409)
 
 
+def test_the_purge_report_says_what_stays_in_ra(risk_store, monkeypatch):
+    """폐기 보고서의 RA 층은 실제 동작을 말한다(RK-01 반대 검토) — 이미 나간 객체(과제 · 등록부 risk_finding — 원본 표의 ra_entity_id)는
+    그대로 남고 그 수를 싣는다. 종전 글은 'status=retracted 표기만 남는다' 였지만 그 표기를 하는 코드도, 부트스트랩의 status enum 에 그 값도
+    없다(거두는 길은 사용자 결정 대기 — checklist 6장 'RK-01 거두기'). 보낸 것이 없으면 그렇게 말한다."""
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    sent, quiet = _project(risk_store, "p1"), _project(risk_store, "p2")
+    target_key = _target(risk_store, sent)
+    risk_store.execute("UPDATE rr_projects SET ra_entity_id = 501 WHERE id = ?", (sent,))
+    risk_store.execute(
+        "INSERT INTO rr_registry(target_key, cluster_key, owner_sub, merged_json, ra_entity_id, updated_at)"
+        " VALUES (?, 'ck1', ?, '{}', 502, 1), (?, 'ck2', ?, '{}', NULL, 1)", (target_key, OWNER, target_key, OWNER))
+
+    def ra_layer(project_id: str) -> dict:
+        out = routes.purge_project(project_id, routes.PurgeBody(code=f"PRJ-{project_id}", reason="정리"), ident=_ident())
+        return next(r for r in out["purge_report"]["remaining"] if r["layer"] == "ra")
+
+    layer = ra_layer(sent)
+    assert (layer["reason"], layer["objects"]) == ("not_retracted", 2)
+    assert "retracted" not in layer["detail"] and "그대로 남는다" in layer["detail"] and "새로 보내지 않는다" in layer["detail"]
+    layer = ra_layer(quiet)
+    assert (layer["reason"], layer["objects"]) == ("not_retracted", 0) and "나간 객체가 없다" in layer["detail"]
+
+
 def test_job_creation_is_open_to_an_editor_and_closed_to_a_viewer(risk_store, monkeypatch, tmp_path):
     """동료가 만든 잡 — editor 는 통과하고 viewer 는 403 이다(plan §0.9 P4-14)."""
     monkeypatch.setattr(routes, "get_store", lambda: risk_store)

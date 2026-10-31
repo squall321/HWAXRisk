@@ -1516,6 +1516,16 @@ def _purge_exports(project_id: str) -> int:
     return removed
 
 
+def _ra_projection_count(store: Any, project_id: str) -> int:
+    """그 과제에서 RA 로 나간 객체 수 — 과제 객체와 등록부 risk_finding(원본 표의 ra_entity_id, plan §5.5.2). 성격 태그(design_trait)는
+    과제를 가로지르는 어휘 객체라 세지 않는다(그 연결 exhibits 는 과제 객체에 걸려 있다)."""
+    row = store.query_one(
+        "SELECT (SELECT COUNT(*) FROM rr_projects WHERE id = ? AND ra_entity_id IS NOT NULL)"
+        " + (SELECT COUNT(*) FROM rr_registry WHERE ra_entity_id IS NOT NULL"
+        " AND target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)) AS n", (project_id, project_id))
+    return int(row["n"] or 0) if row is not None else 0
+
+
 @router.post("/projects/{project_id}/purge")
 def purge_project(project_id: str, body: PurgeBody,
                   ident: identity.Identity = Depends(identity.current)) -> dict:
@@ -1575,11 +1585,17 @@ def purge_project(project_id: str, body: PurgeBody,
         }
         layers["files"] = {"exports_removed": _purge_exports(project_id)}
 
+        # RA 층은 실제 동작을 말한다(RK-01 반대 검토) — 보내는 쪽은 폐기된 과제를 더 보내지 않지만, 이미 나간 객체를 거두는 길은 아직 없다
+        # (status='retracted' 표기는 하는 코드도 부트스트랩 status enum 의 값도 없다 — 거두기 · 막기 · 그대로는 사용자 결정 대기).
+        ra_objects = _ra_projection_count(store, project_id)
         remaining = [
             {"layer": "adh", "reason": "delete_api_absent",
              "detail": "AIDataHub 레코드는 같은 _external_id 로 빈 UPSERT 만 가능하고 임베딩 잔여 벡터는 재색인 전까지 남는다."},
-            {"layer": "ra", "reason": "no_delete_permission",
-             "detail": "RA 코드 무수정 원칙상 삭제 권한이 없는 객체는 status='retracted' 표기만 남는다."},
+            {"layer": "ra", "reason": "not_retracted", "objects": ra_objects,
+             "detail": (f"RA 에 이미 나간 객체 {ra_objects}개(과제 · 등록부 risk_finding)는 그대로 남는다 — 앱에는 RA 객체를 거두는 길이"
+                        " 아직 없고(RA 코드 무수정 원칙상 지우지도 못한다) 공개 범위 · 상태 표기도 그때 값 그대로다. 폐기 뒤에는 새로"
+                        " 보내지 않는다." if ra_objects else
+                        "RA 로 나간 객체가 없다 — 폐기 뒤에는 새로 보내지 않는다.")},
             {"layer": "portal_conversations", "reason": "not_owned",
              "detail": "다른 사용자 소유 대화는 지울 수 없다."},
             {"layer": "drive", "reason": "retention_window",
