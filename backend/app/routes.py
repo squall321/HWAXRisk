@@ -1422,6 +1422,48 @@ def get_project_audit(project_id: str, action: str | None = None, since: int = 0
             "entries": entries}
 
 
+TARGET_AUDIT_LIMIT_MAX = 200
+
+
+@router.get("/targets/{target_key}/audit")
+def get_target_audit(target_key: str, action: str | None = None, since: int = 0, until: int | None = None,
+                     limit: int = 100, offset: int = 0, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """그 대상의 사람 행위 감사(plan §8.2.3, viewer 이상) — 칸 · 거름은 과제 감사와 같고 limit 은 1~200 으로 죈다.
+
+    어느 행이 그 대상의 것인지는 `registry.target_audit_clause` 하나가 정한다(통합 보고서의 '사람 개입 요약' 과 같은 조각). 구성원이
+    아닌 남에게는 없는 대상과 같은 404 다 — 그 대상이 있다는 것을 흘리지 않는다(남 숨김, viewer 가 바닥이라 등급 미달은 없다)."""
+    email = _require_user(ident)
+    store = get_store()
+    row = store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (target_key,))
+    missing = AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
+    if row is None:
+        raise missing
+    if not _is_admin(ident):
+        _member_or_missing(row["project_id"], email, "viewer", missing)
+    limit = max(1, min(int(limit), TARGET_AUDIT_LIMIT_MAX))
+    offset = max(0, int(offset))
+    clause, params = registry_module.target_audit_clause(store, target_key)
+    where = f" FROM rr_audit WHERE {clause} AND at >= ?"
+    params = [*params, int(since)]
+    if action:
+        where += " AND action = ?"
+        params.append(action)
+    if until is not None:
+        where += " AND at <= ?"
+        params.append(int(until))
+    total = store.query_one("SELECT COUNT(*) AS n" + where, tuple(params))
+    rows = store.query("SELECT id, actor, actor_verified, channel, scope, subject_id, project_id, action, before_json,"
+                       " after_json, reason, at" + where + " ORDER BY at DESC, id DESC LIMIT ? OFFSET ?",
+                       (*params, limit, offset))
+    entries = []
+    for item in (dict(r) for r in rows):
+        item["before"] = _loads(item.pop("before_json"), {})
+        item["after"] = _loads(item.pop("after_json"), {})
+        item["actor_verified"] = bool(item["actor_verified"])
+        entries.append(item)
+    return {"target_key": target_key, "total": int(total["n"] or 0), "limit": limit, "offset": offset, "entries": entries}
+
+
 class PurgeBody(BaseModel):
     code: str = Field(max_length=40)
     reason: str = Field(max_length=300)
