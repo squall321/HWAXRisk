@@ -102,7 +102,12 @@
   `revoke_iface_alias` 는 같은 트랜잭션에서 키 전파 `rekey` 를 돈다, §5.9.5 · 병합된 키의 `confirm_key` 는 409 `key_merged`) · `part-keys/{ckey}`(키 대장 한 행 — 주인 · 그 키가 든 과제의 구성원, `mine` 은 내 원장 행인가 — 아니면 결정은 404) · `diffs`.
 - 심사 — `targets`(브리프·커버리지(패널 잡의 `signal` · 도는 패널마다의 `signals`)·편성 `jobs`(`exclude_evidence` — 브리프 항목 빼기)·`refresh_roster`·`resync`·`findings`(mechanism · domain 은 택소노미 어휘)·`registry`·`verdict`·`audit`(그 대상의 사람 행위 — 맨 클러스터 열쇠 행은 그 대상 소유자의 것만)) · `panels`(브리프·`complete`) ·
   `registry`(status·visibility·merge) · `findings`(수정·삭제·라벨) · `curation`(MCP 길 원자의 회수 복귀 `approve_recall` — 다른 격리가 남은 원자는 되돌리지 않고 `applied.held`) · `patterns` · `precedents` · `refs/{ref:path}`.
-- 살림 — `vocab/{synonyms, stop-tokens}` · `jobs/{id}/{action}` · `GET /export` · `POST /import`(내 과제 · 스냅샷 · 대상 · 비교에 매달린 줄만 — 남의(또는 없는) 부모에 매달린 줄은 `parent_not_owned`, 남의 이메일로 적은 멤버 owner 행은 `owner_row_immutable` 로 그 줄만 눕는다).
+- 살림 — `vocab/{synonyms, stop-tokens}` · `jobs/{id}/{action}` · `GET /export` · `POST /import`(내 과제 · 스냅샷 · 대상 · 비교에 매달린 줄만 — 남의(또는 없는) 부모에 매달린 줄은 `parent_not_owned`, 남의 이메일로 적은 멤버 owner 행은 `owner_row_immutable`, 내 과제가 쓰지 않는 정규 키의 새 키 대장 행은 `ckey_not_referenced` 로 그 줄만
+  눕는다 — 키 선점을 막는다).
+- 구성원 읽기(2026-10-31, 사용자 결정 '계획서대로') — 과제에 딸린 읽기 전부(스냅샷 · 대상의 진행판 · 등록부 · 패널 · 보고서 · 셀 · 전문가 ·
+  성격 · 유사 · 요구 · 비교 · 대응표 · 선례 · 참조 · 목록 셋)를 편집자 · 보기가 주인과 같은 답으로 연다(그 과제 주인의 행을 고른다 — 남은
+  없는 것과 같은 404). 비교는 두 과제를 다 읽어야 한다. MCP 읽기 도구도 같은 판정이다. 쓰기는 그대로이고 패널을 편성 · 토큰을 내는
+  `GET /targets/{key}/brief` 는 주인만이다(context-notes MB-1 ~ MB-7).
 - 사람 조작 감사(2026-10-31, 사용자 결정) — `jobs/{id}/{action}`(MCP `risk_job_action` 도 같은 함수) · `registry/{cluster}/status` ·
   `targets/{key}/verdict` 는 rr_audit 한 행씩(`job.pause|resume|cancel` — 잡 행을 바꾼 조작만 · `registry.status` — 바꾼 대상 행마다
   '<대상>#<클러스터>' · `verdict.final` — 확정마다)을 남겨 대상 감사와 통합 보고서 '사람 개입 요약' 에 선다. 행에는 코드 어휘(상태 · 보류 코드 ·
