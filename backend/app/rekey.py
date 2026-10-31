@@ -6,7 +6,8 @@
 '지금 원장으로 다시 센 주체' 는 그 동결 주체의 ckey 를 지금의 `rr_part_keys.merged_into` 사슬로 풀고(`sameas.resolve_ckey`) 계면이면
 살아 있는 `rr_iface_alias` 로 접은 값이다(`current_subject`). 같은 `cluster_key` 의 finding 은 동결 주체가 같으므로 다시 센 키도 같다 —
 그래서 별칭(옛 키 → 새 키)으로 옮길 수 있다. 다시 센 키가 동결 키와 다르면 원장 별칭(reason ckey_merge · iface_alias)을 세우고, 같으면
-그 옛 키에 원장이 세웠던 별칭을 거둔다(같은 사람 · 같은 시각). 사람이 세운 별칭(cluster_merge · taxonomy_major · dim_rename)은 건드리지 않는다.
+그 옛 키에 원장이 세웠던 별칭을 거둔다(같은 사람 · 같은 시각). 사람이 세운 별칭(cluster_merge · dim_rename)은 건드리지 않는다. 재매핑
+별칭(taxonomy_major)은 사람 결정이 아니라 키 계보라 그 끝 키에서 원장 별칭을 이어 붙인다(재매핑 별칭 자체는 그대로).
 등록부는 별칭 해석으로 다시 병합된다 — 접힌 옛 행은 superseded 로 닫히고(registry._close_vacated_rows) 다시 갈라지면 다시 열린다. 다시
 병합하는 대상은 주체로 닿는 원자의 대상과, 별칭 사슬이 바뀐 키를 지나는 키(사람 별칭 Q → Y 의 Q)를 동결 키로 가진 원자의 대상이다.
 
@@ -111,18 +112,51 @@ def _key_inputs(row: Mapping[str, Any]) -> tuple[Any, Any, Any] | None:
     """
     finding = _loads(row.get("finding_json"))
     subject, frozen = str(row.get("subject_key") or ""), str(row.get("cluster_key") or "")
-    mech, change = row.get("mechanism"), row.get("change_kind")
     for detail in dict.fromkeys((finding.get("key_detail"), row.get("mechanism_detail"))):
-        for inputs in ((mech, detail, change), (mech or "", detail or "", change or "")):
-            if narrative.cluster_key_of(inputs[0], inputs[1], subject, inputs[2]) == frozen:
-                return inputs
+        inputs = _reproduce(row.get("mechanism"), detail, subject, row.get("change_kind"), frozen)
+        if inputs is not None:
+            return inputs
+    return None
+
+
+def _reproduce(mech: Any, detail: Any, subject: str, change: Any, expected: str) -> tuple[Any, Any, Any] | None:
+    """(mechanism, 세부, change_kind) 로 `expected` 키를 다시 만들 수 있으면 그 입력 — 빈 값의 두 꼴(None · '')을 다 대본다."""
+    for inputs in ((mech, detail, change), (mech or "", detail or "", change or "")):
+        if narrative.cluster_key_of(inputs[0], inputs[1], subject, inputs[2]) == expected:
+            return inputs
     return None
 
 
 def _active_alias(store: Any, owner_sub: str, old_key: str):
     return store.query_one(
-        "SELECT new_cluster_key, reason FROM rr_cluster_alias WHERE owner_sub = ? AND old_cluster_key = ? AND revoked_at IS NULL",
-        (owner_sub, old_key))
+        "SELECT new_cluster_key, reason, evidence_json FROM rr_cluster_alias"
+        " WHERE owner_sub = ? AND old_cluster_key = ? AND revoked_at IS NULL", (owner_sub, old_key))
+
+
+def _landing(store: Any, owner_sub: str, key: str, inputs: tuple | None, subject: str) -> tuple[str, tuple | None, Any, bool]:
+    """원장 별칭이 설 자리 — 동결 키에서 재매핑 별칭(taxonomy_major)을 따라간 끝. (자리, 그 자리의 키 입력, 그 자리의 사람 별칭, 됨).
+
+    재매핑 별칭은 사람 판단이 아니라 키 계보다(같은 원자의 메커니즘 세부만 바꾼 새 키, `learning.apply_remap`) — 그 별칭을 거두거나
+    덮지 않고 그 끝 키에서 원장 별칭을 이어 붙여야 재매핑한 원자도 파트 병합을 따라간다. 사람 별칭(cluster_merge · dim_rename)에
+    닿으면 그 자리에서 멈춘다(사람 결정이 이긴다). `inputs` 가 있으면 재매핑 한 걸음마다 그 근거의 to_detail 로 다음 키를 같은 식으로
+    다시 만들어 보고, 못 만들면 됨=False 다(다른 식의 키를 지어 잇지 않는다). `inputs` 가 없으면(원장이 원하는 키가 없는 되돌리기)
+    끝 자리만 찾는다.
+    """
+    current = key
+    for _ in range(registry.ALIAS_MAX_HOPS + 1):
+        alias = _active_alias(store, owner_sub, current)
+        if alias is None or alias["reason"] in LEDGER_REASONS:
+            return current, inputs, None, True
+        if alias["reason"] != "taxonomy_major":
+            return current, inputs, alias, True
+        nxt = str(alias["new_cluster_key"])
+        if inputs is not None:
+            to_detail = _loads(alias["evidence_json"]).get("to_detail")
+            inputs = _reproduce(inputs[0], to_detail, subject, inputs[2], nxt) if to_detail else None
+            if inputs is None:
+                return current, None, None, False
+        current = nxt
+    return current, None, None, False                 # 5홉을 넘는 재매핑 사슬 — 끝을 모른다
 
 
 # ---------------------------------------------------------------- 3걸음 — 별칭 맞추기
@@ -146,7 +180,7 @@ def upstream_keys(store: Any, owner_sub: str, keys: Iterable[str]) -> set[str]:
 
 
 def _plan(store: Any, owner_sub: str, findings: Iterable[Mapping[str, Any]]) -> dict:
-    """동결 cluster_key 마다 원장이 원하는 키를 센다(아무것도 쓰지 않는다)."""
+    """동결 cluster_key 마다 원장 별칭이 설 자리와 원장이 원하는 키를 센다(아무것도 쓰지 않는다)."""
     groups: dict[str, dict] = {}
     for row in findings:
         key = str(row.get("cluster_key") or "")
@@ -157,23 +191,30 @@ def _plan(store: Any, owner_sub: str, findings: Iterable[Mapping[str, Any]]) -> 
     skipped: list[dict] = []
     for key in sorted(groups):
         row = groups[key]["row"]
-        subject, why = current_subject(store, row.get("subject_key"), owner_sub)
-        want = None
+        frozen_subject = str(row.get("subject_key") or "")
+        subject, why = current_subject(store, frozen_subject, owner_sub)
+        inputs = None
         if why:
             inputs = _key_inputs(row)
             if inputs is None:
                 skipped.append({"cluster_key": key, "reason": "key_not_reproducible"})
                 continue
+        landing, inputs, human, ok = _landing(store, owner_sub, key, inputs, frozen_subject)
+        if not ok:
+            skipped.append({"cluster_key": key, "reason": "remap_not_reproducible", "at": landing})
+            continue
+        want = None
+        if why:
             want = narrative.cluster_key_of(inputs[0], inputs[1], subject, inputs[2])
-            want = None if want == key else want
-        alias = _active_alias(store, owner_sub, key)
-        if alias is not None and alias["reason"] not in LEDGER_REASONS:
+            want = None if want == landing else want
+        if human is not None:
             # 사람이 세운 별칭은 원장 되돌리기가 거두거나 덮지 않는다 — 원장이 다른 키를 가리켜도 사람 결정이 이긴다.
-            if want is not None and alias["new_cluster_key"] != want:
-                kept_human.append({"cluster_key": key, "alias": str(alias["new_cluster_key"]), "reason": alias["reason"],
+            if want is not None and human["new_cluster_key"] != want:
+                kept_human.append({"cluster_key": landing, "alias": str(human["new_cluster_key"]), "reason": human["reason"],
                                    "ledger_wants": want})
             continue
-        decisions[key] = {"want": want, "why": why, "subject_before": row.get("subject_key"), "subject_after": subject}
+        decisions.setdefault(landing, {"want": want, "why": why, "via": key, "subject_before": row.get("subject_key"),
+                                       "subject_after": subject})
     return {"decisions": decisions, "kept_human": kept_human, "skipped": skipped, "keys": sorted(groups),
             "targets": sorted({t for g in groups.values() for t in g["targets"] if t})}
 
@@ -197,26 +238,28 @@ def reconcile_aliases(store: Any, owner_sub: str, findings: Iterable[Mapping[str
     (`upstream_keys`)의 맞추기 전후 풀이다. 별칭 6홉 · 순환이면 409 를 그대로 올린다(부르는 트랜잭션 전체가 되돌아간다).
     """
     plan = _plan(store, owner_sub, findings)
-    closure = upstream_keys(store, owner_sub, plan["keys"])
+    closure = upstream_keys(store, owner_sub, set(plan["keys"]) | set(plan["decisions"]))
     before = {k: registry.resolve_cluster_key(store, k, owner_sub=owner_sub) for k in sorted(closure)}
     revoked: list[dict] = []
     adding: list[str] = []
-    for key in sorted(plan["decisions"]):
-        want = plan["decisions"][key]["want"]
-        alias = _active_alias(store, owner_sub, key)
+    for landing in sorted(plan["decisions"]):
+        want = plan["decisions"][landing]["want"]
+        alias = _active_alias(store, owner_sub, landing)
         if alias is not None and alias["new_cluster_key"] != want:
-            registry.revoke_cluster_alias(store, key, owner_sub=owner_sub, revoked_by=actor, at=at)
-            revoked.append({"old": key, "new": str(alias["new_cluster_key"]), "reason": str(alias["reason"])})
+            registry.revoke_cluster_alias(store, landing, owner_sub=owner_sub, revoked_by=actor, at=at)
+            revoked.append({"old": landing, "new": str(alias["new_cluster_key"]), "reason": str(alias["reason"])})
             alias = None
         if want is not None and alias is None:
-            adding.append(key)
+            adding.append(landing)
     added: list[dict] = []
-    for key in adding:
-        item = plan["decisions"][key]
+    for landing in adding:
+        item = plan["decisions"][landing]
         evidence = {"op": op, "subject_before": item["subject_before"], "subject_after": item["subject_after"], "by": actor}
-        registry.add_cluster_alias(store, key, item["want"], owner_sub=owner_sub, reason=item["why"], decided_by=actor,
+        if item["via"] != landing:
+            evidence["via"] = item["via"]           # 재매핑 별칭 끝에 이어 붙였다 — 그 원자의 동결 키
+        registry.add_cluster_alias(store, landing, item["want"], owner_sub=owner_sub, reason=item["why"], decided_by=actor,
                                    at=at, evidence=evidence)
-        added.append({"old": key, "new": item["want"], "reason": item["why"]})
+        added.append({"old": landing, "new": item["want"], "reason": item["why"]})
     _check_chains(store, owner_sub, closure)
     after = {k: registry.resolve_cluster_key(store, k, owner_sub=owner_sub) for k in sorted(closure)}
     return {"added": added, "revoked": revoked, "kept_human": plan["kept_human"], "skipped": plan["skipped"],

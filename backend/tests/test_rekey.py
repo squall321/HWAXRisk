@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from app import brief, common, narrative, registry, rekey, routes, sameas
+from app import brief, common, learning, narrative, registry, rekey, routes, sameas
 from app.errors import AppError
 from tests import factories
 
@@ -592,5 +592,54 @@ def test_an_unmerge_does_not_depend_on_which_key_sorts_first(risk_store, clock, 
     assert sorted(a["old"] for a in out["aliases_revoked"]) == sorted([key_of(leaf), key_of(middle)])
     assert (registry._alias_hops(risk_store, key_of(leaf), OWNER), registry._alias_hops(risk_store, key_of(middle), OWNER)) == (1, 0)
     assert _live(risk_store, "snap:T1") == _fresh(risk_store, "snap:T1")
+
+
+def test_findings_moved_by_a_taxonomy_remap_follow_a_part_merge_and_split_back(risk_store, clock):
+    """재매핑 별칭(taxonomy_major — `learning.apply_remap`)은 사람 결정이 아니라 키 계보다. 파트 병합은 그 끝 키(key(drop_stress, Y))에서
+    원장 별칭을 이어 붙여 재매핑한 원자도 X 의 같은 메커니즘 클러스터로 접는다 — 재매핑 별칭은 그대로다. 되돌리면 끝의 원장 별칭만
+    거둔다. 종전에는 재매핑 별칭을 사람 별칭으로 보고 건너뛰어(kept_human) 재매핑한 원자는 어떤 파트 병합도 따라가지 않았다."""
+    def k(detail: str, subject: str) -> str:
+        return narrative.cluster_key_of(MECH, detail, subject, CHANGE)
+
+    for ck in (X, Y):
+        _part(risk_store, ck)
+    _target(risk_store, "snap:T1", "P1")
+    _finding(risk_store, "snap:T1", "F1", Y, panel="PN1", cluster_key=k("unclassified", Y))
+    risk_store.execute("UPDATE rr_findings SET mechanism_detail = 'unclassified' WHERE finding_id = 'F1'")
+    _finding(risk_store, "snap:T1", "F2", X, panel="PN2")
+    learning.apply_remap(risk_store, learning.plan_remap(risk_store, mechanism=MECH, from_detail="unclassified",
+                                                         to_detail=DETAIL), owner_sub=OWNER)
+    remap = dict(_alias(risk_store, k("unclassified", Y)))
+    assert (remap["new_cluster_key"], remap["reason"]) == (k(DETAIL, Y), "taxonomy_major")
+    registry.merge(risk_store, "snap:T1", owner_sub=OWNER)
+    assert _live(risk_store, "snap:T1") == {k(DETAIL, X): (1, "중대"), k(DETAIL, Y): (1, "중대")}
+
+    out = _decide(risk_store, decision="merge_key", ckey_from=Y, ckey_into=X)["rekey"]
+    assert out["kept_human"] == [] and out["aliases_added"] == [
+        {"old": k(DETAIL, Y), "new": k(DETAIL, X), "reason": "ckey_merge"}]
+    assert dict(_alias(risk_store, k("unclassified", Y))) == remap
+    assert _live(risk_store, "snap:T1") == {k(DETAIL, X): (2, "중대")}
+
+    clock["t"] = 2000
+    out = _decide(risk_store, decision="unmerge_key", ckey=Y)["rekey"]
+    assert out["aliases_revoked"] == [{"old": k(DETAIL, Y), "new": k(DETAIL, X), "reason": "ckey_merge"}]
+    assert dict(_alias(risk_store, k("unclassified", Y))) == remap
+    assert _live(risk_store, "snap:T1") == {k(DETAIL, X): (1, "중대"), k(DETAIL, Y): (1, "중대")}
+
+
+def test_a_remap_step_it_cannot_reproduce_is_skipped_not_guessed(risk_store):
+    """재매핑 한 걸음을 같은 식으로 다시 만들 수 없으면(근거에 to_detail 이 없다) 그 끝에 원장 별칭을 짓지 않고 건너뛴다 — 다른 식의
+    키를 지어 잇지 않는다(동결 키를 다시 만들 수 없을 때와 같은 규칙)."""
+    unclassified = narrative.cluster_key_of(MECH, "unclassified", Y, CHANGE)
+    for ck in (X, Y):
+        _part(risk_store, ck)
+    _target(risk_store, "snap:T1", "P1")
+    _finding(risk_store, "snap:T1", "F1", Y, panel="PN1", cluster_key=unclassified)
+    risk_store.execute("UPDATE rr_findings SET mechanism_detail = 'unclassified' WHERE finding_id = 'F1'")
+    registry.add_cluster_alias(risk_store, unclassified, key_of(Y), owner_sub=OWNER, reason="taxonomy_major", evidence={})
+    registry.merge(risk_store, "snap:T1", owner_sub=OWNER)
+    out = _decide(risk_store, decision="merge_key", ckey_from=Y, ckey_into=X)["rekey"]
+    assert out["skipped"] == [{"cluster_key": unclassified, "reason": "remap_not_reproducible", "at": unclassified}]
+    assert out["aliases_added"] == [] and _alias(risk_store, key_of(Y)) is None
 
 
