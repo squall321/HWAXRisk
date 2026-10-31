@@ -1,4 +1,4 @@
-// 타깃 화면 — 판정 요약(verdict·완결 레벨)을 맨 위에 고정하고 그 아래 탭으로 진행판·패널·등록부·보고서·브리프·품질을 묶는다(계획 §8.2.4 TargetPage 행). :key 는 snap:<id>/diff:<id> 다.
+// 타깃 화면 — 판정 요약(verdict·완결 레벨)을 맨 위에 고정하고 그 아래 탭으로 진행판·패널·등록부·보고서·브리프·품질을 묶는다(계획 §8.2.4 TargetPage 행). 카드 대조 대상은 셀 격자 · 전문가 · 쟁점 · 완결 탭과 종합 보고서가 더해진다(재설계 M3). :key 는 snap:<id>/diff:<id> 다.
 import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
@@ -32,6 +32,15 @@ import {
   VerdictBadge,
 } from "../components/Badge";
 import { PanelTranscript } from "../components/PanelTranscript";
+import { CellsHead } from "../components/CellsHead";
+import { ReviewBoard } from "../components/ReviewBoard";
+import { ReviewJobFormCard } from "../components/ReviewJobForm";
+import { CellGrid } from "../components/CellGrid";
+import { ExpertReports } from "../components/ExpertReports";
+import { UndeferForm } from "../components/UndeferForm";
+import { IssuesCard } from "../components/IssuesCard";
+import { SynthReport } from "../components/SynthReport";
+import { ClosureCard } from "../components/ClosureCard";
 import { RegistryCard } from "../components/RegistryCard";
 import { seatActions, seatReasonLabel, skipReasonProblem } from "../lib/targetView";
 import { JobSignalLine, ReviewWorkers } from "../components/JobSignals";
@@ -74,7 +83,27 @@ const ACTIVE_JOB_STATES = new Set(["queued", "running", "cancelling"]);
 const KIND_LABEL: Record<string, string> = { snap: "스냅샷", diff: "비교" };
 
 /** 화면 구역 탭 — 카드 여덟 개가 한 줄로 쌓여 있던 것을 묶는다. 판정·커버리지는 탭 밖에 남는다. */
-type TargetTab = "coverage" | "panels" | "registry" | "report" | "brief" | "quality";
+type TargetTab =
+  | "coverage"
+  | "cells"
+  | "experts"
+  | "issues"
+  | "closure"
+  | "panels"
+  | "registry"
+  | "report"
+  | "brief"
+  | "quality";
+
+/**
+ * 진행판을 5초마다 다시 읽나 — 패널 잡 · 검토 잡 · 사슬(쟁점 · 종합) 잡 가운데 하나라도 돌거나 줄에 섰으면. 멈춘(paused) 잡은
+ * 사람이 움직일 때까지 그대로라 읽지 않는다(누르면 화면이 다시 읽는다).
+ */
+function isPolling(coverage: Coverage | null): boolean {
+  if (!coverage) return false;
+  const live = (state: string | undefined) => state !== undefined && ACTIVE_JOB_STATES.has(state);
+  return live(coverage.job?.state) || live(coverage.review?.job?.state) || live(coverage.stage?.state ?? undefined);
+}
 
 /** 모델 혼합 표 한 줄 — 패널을 센 값만 담는다. */
 type ModelMixRow = { key: string; model: string; captured: string; n: number; done: number };
@@ -499,7 +528,18 @@ function JobErrorBanner({ error, onUseGlm }: { error: unknown; onUseGlm: () => v
   );
 }
 
-function PanelRunner({ targetKey, coverage, onChanged }: { targetKey: string; coverage: Coverage | null; onChanged: () => void }) {
+function PanelRunner({
+  targetKey,
+  coverage,
+  onChanged,
+  creatable = true,
+}: {
+  targetKey: string;
+  coverage: Coverage | null;
+  onChanged: () => void;
+  /** 카드 대조 대상은 Tier 패널 잡을 세우지 않는다(422 flow_mismatch) — 만들기 칸을 두지 않고 남은 패널 잡의 줄 · 조작만 보인다. */
+  creatable?: boolean;
+}) {
   const [tier, setTier] = useState<Tier>("B");
   const [concurrency, setConcurrency] = useState(1);
   const [modifiers, setModifiers] = useState("");
@@ -586,6 +626,8 @@ function PanelRunner({ targetKey, coverage, onChanged }: { targetKey: string; co
       ) : (
         <p className="text-sm text-muted-foreground">진행 중인 배치 잡이 없습니다.</p>
       )}
+      {creatable ? (
+      <>
       <FormGrid>
         <FormField label="티어" hint="tier">
           <Select value={tier} onChange={(e) => setTier(e.target.value as Tier)}>
@@ -619,10 +661,19 @@ function PanelRunner({ targetKey, coverage, onChanged }: { targetKey: string; co
           <span>Tier C 는 명시 승인이 필요합니다.</span>
         </label>
       ) : null}
+      </>
+      ) : (
+        <p className="m-0 mt-3 text-sm text-muted-foreground">
+          카드 대조 대상은 Tier 패널 잡을 세우지 않습니다(flow_mismatch) — 검토 잡은 위 '검토 잡 만들기' 에서 시작합니다. 아래는 방식을
+          바꾸기 전에 선 패널 잡입니다.
+        </p>
+      )}
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button type="button" onClick={start} disabled={busy || !ready}>
-          시작
-        </Button>
+        {creatable ? (
+          <Button type="button" onClick={start} disabled={busy || !ready}>
+            시작
+          </Button>
+        ) : null}
         <Button type="button" variant="outline" onClick={() => control("pause")} disabled={busy || !job}>
           일시정지
         </Button>
@@ -632,7 +683,7 @@ function PanelRunner({ targetKey, coverage, onChanged }: { targetKey: string; co
         <Button type="button" variant="outline" onClick={() => control("cancel")} disabled={busy || !job}>
           취소
         </Button>
-        {llm === "claude" && !externalConsent ? (
+        {creatable && llm === "claude" && !externalConsent ? (
           <span className="text-sm text-muted-foreground">반출 동의에 체크해야 시작할 수 있습니다.</span>
         ) : null}
       </div>
@@ -661,7 +712,7 @@ function PanelRunner({ targetKey, coverage, onChanged }: { targetKey: string; co
 }
 
 function PanelsCard({ targetKey }: { targetKey: string }) {
-  const panels = useAsync((signal) => riskApi.getPanels(targetKey, { signal }), [targetKey]);
+  const panels = useAsync((signal) => riskApi.getPanels(targetKey, undefined, { signal }), [targetKey]);
   const [openPanel, setOpenPanel] = useState<string | null>(null);
 
   const rows = panels.data?.panels ?? [];
@@ -682,7 +733,23 @@ function PanelsCard({ targetKey }: { targetKey: string }) {
 
   const columns: Column<Panel>[] = [
     { key: "no", header: "패널", cell: (p) => `P${p.panel_no}`, nowrap: true },
-    { key: "tier", header: "tier", cell: (p) => p.tier, nowrap: true },
+    { key: "tier", header: "tier", cell: (p) => p.tier ?? "—", nowrap: true },
+    {
+      key: "kind",
+      header: "종류",
+      hint: "kind · issue_id",
+      nowrap: true,
+      // 쟁점 패널(kind issue · tier I)은 그 쟁점 id 를 단다 — 쟁점 탭의 행과 잇는다(재설계 M3 S3-10).
+      cell: (p) =>
+        p.kind === "issue" ? (
+          <span className="flex flex-col gap-0.5">
+            <Badge tone="info">쟁점 패널</Badge>
+            {p.issue_id ? <code className="text-xs">{p.issue_id}</code> : null}
+          </span>
+        ) : (
+          <span className="text-muted-foreground">Tier 패널</span>
+        ),
+    },
     { key: "engine", header: "engine", cell: (p) => <StatusBadge value={p.engine} />, nowrap: true },
     // call_path 는 패널 줄이 아니라 품질 칸에 있다(runner 의 품질 계산 — 끝나기 전 패널은 없다).
     { key: "path", header: "call_path", cell: (p) => p.quality.call_path ?? <Unknown />, nowrap: true },
@@ -990,6 +1057,7 @@ export default function TargetPage() {
     targetKey !== "",
   );
   const flow = coverage.data?.flow ?? null;
+  const cells = flow === "cells";
   // 등록부 거름 가운데 서버 쿼리(주의 등급 · 단위 · 패널만 본 비교 보기). 방식을 안 뒤에 처음 값을 정한다 — 카드 대조 대상은 주의 A · B
   // 가 기본이다(요청서 7절). 헤더의 verdict_final 과 등록부 카드가 같은 응답을 쓴다(판정 칸은 거름과 상관없다).
   const [registryQuery, setRegistryQuery] = useState<RegistryQuery | null>(null);
@@ -1011,13 +1079,19 @@ export default function TargetPage() {
   const [tab, setTab] = useState<TargetTab>("coverage");
 
   const job = coverage.data?.job ?? null;
-  const polling = job !== null && ACTIVE_JOB_STATES.has(job.state);
+  const polling = isPolling(coverage.data);
   useInterval(coverage.reload, polling ? POLL_MS : null);
 
   const [kind, refId] = useMemo(() => {
     const idx = targetKey.indexOf(":");
     return idx === -1 ? [targetKey, ""] : [targetKey.slice(0, idx), targetKey.slice(idx + 1)];
   }, [targetKey]);
+
+  /** 진행판과 등록부를 같이 다시 읽는다 — 처분 · 확인 · 쟁점 결정이 표기 · 등록부를 바꾼다. */
+  function reloadAll() {
+    coverage.reload();
+    registry.reload();
+  }
 
   async function resync() {
     setBusy(true);
@@ -1053,6 +1127,25 @@ export default function TargetPage() {
     );
   }
 
+  const review = coverage.data?.review ?? null;
+  const deferred = coverage.data?.by_status.deferred ?? 0;
+  const tabs: Array<{ tab: TargetTab; label: string; count?: number | null }> = [
+    { tab: "coverage", label: "진행판", count: coverage.data ? Object.keys(coverage.data.by_domain).length : null },
+    ...(cells
+      ? ([
+          { tab: "cells", label: "셀 격자", count: review ? review.cells.total : null },
+          { tab: "experts", label: "전문가", count: review ? review.experts.total : null },
+          { tab: "issues", label: "쟁점" },
+          { tab: "closure", label: "완결" },
+        ] as Array<{ tab: TargetTab; label: string; count?: number | null }>)
+      : []),
+    { tab: "panels", label: "패널" },
+    { tab: "registry", label: "등록부", count: registry.data ? registry.data.rows.length : null },
+    { tab: "report", label: "보고서" },
+    { tab: "brief", label: "브리프" },
+    { tab: "quality", label: "품질" },
+  ];
+
   return (
     <>
       <PageHeader
@@ -1069,6 +1162,7 @@ export default function TargetPage() {
           <span className="flex flex-wrap items-center gap-x-2">
             <Mono>{targetKey}</Mono>
             {coverage.data ? <span>좌석 {coverage.data.roster_size}석</span> : null}
+            {flow ? <span>{cells ? "카드 대조(cells)" : "패널(panels)"}</span> : null}
           </span>
         }
         actions={
@@ -1151,22 +1245,13 @@ export default function TargetPage() {
             },
           ]}
         />
+        {cells && coverage.data ? (
+          <CellsHead coverage={coverage.data} targetKey={targetKey} onChanged={reloadAll} onOpenTab={setTab} />
+        ) : null}
         <NotReadyBlock what="ir_hash · 과제 링크 · superseded_by" />
       </SectionCard>
 
-      <TabBar idPrefix="tgt"
-        label="타깃 구역 탭"
-        value={tab}
-        onChange={setTab}
-        tabs={[
-          { tab: "coverage", label: "진행판", count: coverage.data ? Object.keys(coverage.data.by_domain).length : null },
-          { tab: "panels", label: "패널" },
-          { tab: "registry", label: "등록부", count: registry.data ? registry.data.rows.length : null },
-          { tab: "report", label: "보고서" },
-          { tab: "brief", label: "브리프" },
-          { tab: "quality", label: "품질" },
-        ]}
-      />
+      <TabBar idPrefix="tgt" label="타깃 구역 탭" value={tab} onChange={setTab} tabs={tabs} />
 
       {/* 탭은 **보이는 것만** 바꾼다. 조건부 렌더로 쓰면 저장 전 폼(등록부 상태 변경·판정 메모)과
           실행 직후 경고(credential === "service")가 탭 전환만으로 날아가고, 브리프는 재진입마다
@@ -1179,14 +1264,45 @@ export default function TargetPage() {
           ) : coverage.loading ? null : (
             <EmptyBlock title="커버리지가 아직 없습니다." hint="타깃이 편성되면 도메인별 좌석 상태가 여기 쌓입니다." />
           )}
+          {/* 보류 풀기는 패널 대상의 길이다 — 카드 대조 대상은 검토 잡을 만들 때 범위 안 보류가 저절로 풀린다(요청서 3-6). */}
+          {coverage.data && !cells ? <UndeferForm targetKey={targetKey} deferred={deferred} onChanged={reloadAll} /> : null}
         </SectionCard>
 
-        <ReviewWorkers review={coverage.data?.review} />
+        {review ? <ReviewBoard review={review} targetKey={targetKey} onChanged={reloadAll} /> : null}
 
-        <SectionCard title="패널 실행" subtitle={polling ? "진행 중 — 5초마다 갱신합니다." : undefined}>
-          <PanelRunner targetKey={targetKey} coverage={coverage.data} onChanged={coverage.reload} />
-        </SectionCard>
+        <ReviewWorkers review={review} />
+
+        {cells && review ? <ReviewJobFormCard targetKey={targetKey} review={review} onChanged={reloadAll} /> : null}
+
+        {!cells || job ? (
+          <SectionCard title="패널 실행" subtitle={polling ? "진행 중 — 5초마다 갱신합니다." : undefined}>
+            <PanelRunner targetKey={targetKey} coverage={coverage.data} onChanged={coverage.reload} creatable={!cells} />
+          </SectionCard>
+        ) : null}
       </TabPanel>
+
+      {cells ? (
+        <>
+          <TabPanel active={tab === "cells"} tab="cells" idPrefix="tgt">
+            {review ? <CellGrid targetKey={targetKey} review={review} active={tab === "cells"} onChanged={reloadAll} /> : null}
+          </TabPanel>
+          <TabPanel active={tab === "experts"} tab="experts" idPrefix="tgt">
+            {/* 열 때만 받는다 — 전문가 359명 목록을 진행판과 함께 늘 받지 않는다. */}
+            {tab === "experts" ? <ExpertReports targetKey={targetKey} /> : null}
+          </TabPanel>
+          <TabPanel active={tab === "issues"} tab="issues" idPrefix="tgt">
+            <IssuesCard targetKey={targetKey} active={tab === "issues"} onChanged={reloadAll} />
+          </TabPanel>
+          <TabPanel active={tab === "closure"} tab="closure" idPrefix="tgt">
+            <ClosureCard
+              targetKey={targetKey}
+              active={tab === "closure"}
+              onChanged={reloadAll}
+              onOpenReport={() => setTab("report")}
+            />
+          </TabPanel>
+        </>
+      ) : null}
 
       <TabPanel active={tab === "panels"} tab="panels" idPrefix="tgt">
         <PanelsCard targetKey={targetKey} />
@@ -1197,19 +1313,33 @@ export default function TargetPage() {
           registry={registry}
           query={registryQuery ?? {}}
           onQuery={setRegistryQuery}
-          cells={flow === "cells"}
+          cells={cells}
         />
       </TabPanel>
       <TabPanel active={tab === "report"} tab="report" idPrefix="tgt">
-        <ConsolidatedReportCard
-          level={coverage.data?.level ?? null}
-          summary={coverage.data?.external_sync ?? null}
-          resynced={sync}
-        />
+        {cells ? (
+          // 종합 보고서는 판이 바뀌면 처음 쪽부터 받으므로 볼 때만 그린다(확인 · 사슬이 판을 세운 뒤 다시 열면 새 판이다).
+          tab === "report" ? <SynthReport targetKey={targetKey} stage={coverage.data?.stage ?? null} onChanged={reloadAll} /> : null
+        ) : (
+          <ConsolidatedReportCard
+            level={coverage.data?.level ?? null}
+            summary={coverage.data?.external_sync ?? null}
+            resynced={sync}
+          />
+        )}
       </TabPanel>
       <TabPanel active={tab === "brief"} tab="brief" idPrefix="tgt">
-        {/* active 를 넘긴다 — 이 호출은 서버에서 토큰을 **발급**하므로 보고 있을 때만 나가야 한다. */}
-        <RecallPreview targetKey={targetKey} active={tab === "brief"} />
+        {cells ? (
+          <SectionCard title="브리프(RecallPreview)">
+            <EmptyBlock
+              title="카드 대조 대상은 패널 브리프를 내지 않습니다."
+              hint="검토 근거는 셀 격자 · 전문가 보고서에 있습니다(서버도 cells_flow_web_only 로 거절합니다)."
+            />
+          </SectionCard>
+        ) : (
+          // active 를 넘긴다 — 이 호출은 서버에서 토큰을 **발급**하므로 보고 있을 때만 나가야 한다.
+          <RecallPreview targetKey={targetKey} active={tab === "brief"} />
+        )}
       </TabPanel>
       <TabPanel active={tab === "quality"} tab="quality" idPrefix="tgt">
         <QualityCard />

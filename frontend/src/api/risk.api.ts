@@ -2,6 +2,30 @@
 import type {
   AdapterList,
   ApiErrorBody,
+  CellList,
+  CellsDisposed,
+  CellsRetryBody,
+  CellsSkipBody,
+  CellState,
+  CloseAcked,
+  CloseAckRevoked,
+  Closure,
+  ExpertList,
+  ExpertReportPage,
+  ExpertReportPart,
+  IssueActed,
+  IssueAction,
+  IssueList,
+  RegistryQuery,
+  RegistryStatusSet,
+  ReportAssembled,
+  ReviewJobCreate,
+  ReviewJobCreated,
+  SynthJobCreated,
+  SynthPart,
+  SynthReportPage,
+  Undeferred,
+  UnitManifest,
   AuditPage,
   Brief,
   CharacterProfile,
@@ -55,8 +79,6 @@ import type {
   ProjectTransferred,
   RefResolution,
   Registry,
-  RegistryQuery,
-  RegistryStatusSet,
   RegistryStatusUpdate,
   ResyncQueued,
   RosterRefreshed,
@@ -369,8 +391,16 @@ export const riskApi = {
     request<TargetJobCreated>(`targets/${encodeTargetKey(key)}/jobs`, { method: "POST", body, ...o }),
   pauseJob: (jobId: string, o?: Opt) =>
     request<JobStateResponse>(`jobs/${encodeURIComponent(jobId)}/pause`, { method: "POST", ...o }),
-  resumeJob: (jobId: string, o?: Opt) =>
-    request<JobStateResponse>(`jobs/${encodeURIComponent(jobId)}/resume`, { method: "POST", ...o }),
+  /**
+   * 재개 — `consent` 는 검토 잡이 다시 연 셀의 몫을 넘어 멈췄을 때(reopened_extra.hold consent_extra) 사람이 그 몫에 동의한 뒤에만
+   * 참이다(쿼리 consent=true). 그 밖의 재개는 쿼리를 싣지 않는다.
+   */
+  resumeJob: (jobId: string, o?: Opt & { consent?: true }) =>
+    request<JobStateResponse>(`jobs/${encodeURIComponent(jobId)}/resume`, {
+      method: "POST",
+      query: o?.consent ? { consent: true } : undefined,
+      signal: o?.signal,
+    }),
   cancelJob: (jobId: string, o?: Opt) =>
     request<JobStateResponse>(`jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST", ...o }),
 
@@ -386,7 +416,9 @@ export const riskApi = {
     }),
   getRegistry: (key: string, query?: RegistryQuery, o?: Opt) =>
     request<Registry>(`targets/${encodeTargetKey(key)}/registry`, { query, ...o }),
-  getPanels: (key: string, o?: Opt) => request<PanelList>(`targets/${encodeTargetKey(key)}/panels`, o),
+  /** `kind` — coverage(Tier 패널) · issue(쟁점 패널). 없으면 둘 다. */
+  getPanels: (key: string, kind?: "coverage" | "issue", o?: Opt) =>
+    request<PanelList>(`targets/${encodeTargetKey(key)}/panels`, { query: { kind }, ...o }),
   getPanelTranscript: (panelId: string, o?: Opt) =>
     request<PanelTranscript>(`panels/${encodeURIComponent(panelId)}/transcript`, o),
   getBrief: (key: string, tier?: string, o?: Opt) =>
@@ -397,6 +429,82 @@ export const riskApi = {
     request<RegistryStatusSet>(`registry/${encodeURIComponent(cluster)}/status`, { method: "PUT", body, ...o }),
   completePanel: (panelId: string, body: PanelComplete, o?: Opt) =>
     request<PanelCompleted>(`panels/${encodeURIComponent(panelId)}/complete`, { method: "POST", body, ...o }),
+  // ── 카드 대조 검토 · 쟁점 · 종합 보고서 · 완결(재설계 M2 · M3 — 포털 m3-frontend-request.md) ─────────────
+  /** 검토 잡(mode reviews) — 동의 문턱을 넘는 추정이면 consent 없이는 아무것도 바꾸기 전에 422 consent_required 다. */
+  createReviewJob: (key: string, body: ReviewJobCreate, o?: Opt) =>
+    request<ReviewJobCreated>(`targets/${encodeTargetKey(key)}/jobs`, { method: "POST", body, ...o }),
+  getUnits: (key: string, o?: Opt) => request<UnitManifest>(`targets/${encodeTargetKey(key)}/units`, o),
+  getCells: (
+    key: string,
+    query: {
+      agent_key?: string;
+      unit_id?: string;
+      domain?: string;
+      state?: CellState;
+      job_id?: string;
+      route?: string;
+      limit?: number;
+      offset?: number;
+    },
+    o?: Opt,
+  ) => request<CellList>(`targets/${encodeTargetKey(key)}/cells`, { query, ...o }),
+  retryCells: (key: string, body: CellsRetryBody, o?: Opt) =>
+    request<CellsDisposed>(`targets/${encodeTargetKey(key)}/cells/retry`, { method: "POST", body, ...o }),
+  skipCells: (key: string, body: CellsSkipBody, o?: Opt) =>
+    request<CellsDisposed>(`targets/${encodeTargetKey(key)}/cells/skip`, { method: "POST", body, ...o }),
+  /** 패널 대상의 보류(deferred) 좌석을 사람이 푼다 — 사유 4~300자, 도는 잡이 있으면 409 job_live. */
+  undefer: (key: string, reason: string, o?: Opt) =>
+    request<Undeferred>(`targets/${encodeTargetKey(key)}/undefer`, { method: "POST", body: { reason }, ...o }),
+  getExperts: (key: string, o?: Opt) => request<ExpertList>(`targets/${encodeTargetKey(key)}/experts`, o),
+  /** 전문가 보고서 쪽 — 둘째 쪽부터 첫 쪽의 version 을 실어 보낸다(그사이 다시 마감되면 409 report_version_moved). */
+  getExpertReport: (
+    key: string,
+    agentKey: string,
+    query: { part: ExpertReportPart; page: number; version?: number },
+    o?: Opt,
+  ) =>
+    request<ExpertReportPage>(`targets/${encodeTargetKey(key)}/experts/${encodeURIComponent(agentKey)}/report`, {
+      query: { format: "md", ...query },
+      ...o,
+    }),
+  getIssues: (
+    key: string,
+    query: { state?: string; p_class?: string; type?: string; limit?: number; offset?: number },
+    o?: Opt,
+  ) => request<IssueList>(`targets/${encodeTargetKey(key)}/issues`, { query, ...o }),
+  putIssue: (issueId: string, body: IssueAction, o?: Opt) =>
+    request<IssueActed>(`issues/${encodeURIComponent(issueId)}`, { method: "PUT", body, ...o }),
+  /** 종합 보고서 쪽 — 지금 판만 읽힌다. `version` 은 대조 칸이다(둘째 쪽부터 첫 쪽의 판을 싣는다). */
+  getReport: (key: string, query: { part: SynthPart; page: number; version?: number }, o?: Opt) =>
+    request<SynthReportPage>(`targets/${encodeTargetKey(key)}/report`, { query: { format: "md", ...query }, ...o }),
+  /** 다시 내기 — false 는 코드 조립 판(그 자리에서), true 는 종합 잡(영역 요약 → 과제 종합 → 판). */
+  assembleReport: (key: string, o?: Opt) =>
+    request<ReportAssembled>(`targets/${encodeTargetKey(key)}/report`, {
+      method: "POST",
+      body: { refresh_summaries: false },
+      ...o,
+    }),
+  createSynthJob: (key: string, o?: Opt) =>
+    request<SynthJobCreated>(`targets/${encodeTargetKey(key)}/report`, {
+      method: "POST",
+      body: { refresh_summaries: true },
+      ...o,
+    }),
+  /** 완결 판정 — 진행판과 같은 캐시를 읽고 `fresh` 면 그 자리에서 다시 센다(버튼으로만). */
+  getClosure: (key: string, fresh = false, o?: Opt) =>
+    request<Closure>(`targets/${encodeTargetKey(key)}/closure`, { query: { fresh: fresh ? 1 : undefined }, ...o }),
+  /** 막음 잔여 확인 — `basisHash` 는 지금 읽은 그 잔여 행의 값 그대로(그사이 바뀌었으면 409 residual_changed). */
+  ackClosure: (key: string, item: string, reason: string, basisHash: string, o?: Opt) =>
+    request<CloseAcked>(`targets/${encodeTargetKey(key)}/closure/acks/${encodeURIComponent(item)}`, {
+      method: "POST",
+      body: { reason, basis_hash: basisHash },
+      ...o,
+    }),
+  revokeClosureAck: (key: string, item: string, o?: Opt) =>
+    request<CloseAckRevoked>(`targets/${encodeTargetKey(key)}/closure/acks/${encodeURIComponent(item)}`, {
+      method: "DELETE",
+      ...o,
+    }),
   resyncTarget: (key: string, o?: Opt) =>
     request<ResyncQueued>(`targets/${encodeTargetKey(key)}/resync`, { method: "POST", ...o }),
   refreshRoster: (key: string, o?: Opt) =>

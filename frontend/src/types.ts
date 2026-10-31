@@ -1290,19 +1290,315 @@ export type ReviewWorkerSignal = {
   event_idle_s: number | null;
 };
 
-/**
- * 진행판의 카드 대조 검토 칸(routes.review_payload — 패널 대상은 null). 이 화면은 잡의 일꾼별 마지막 신호만 읽는다 — 셀 · 거르기 ·
- * 동의 같은 나머지 칸은 M3 화면 요청서 2절의 몫이라 여기 적지 않았다.
- */
-export type CoverageReview = {
-  job: { id: string; state: BatchJobState; signal: { workers: ReviewWorkerSignal[] } | null } | null;
+// ── 카드 대조 검토(재설계 M2 · M3 — 포털 docs/risk-review-redesign/m3-frontend-request.md) ─────────────────
+
+/** 셀 상태(review_cells.CELL_STATES) — 화면은 na_irrelevant 를 '거름', no_input 을 '입력 결손 — 판정 못 함' 으로 보인다(이름은 그대로). */
+export type CellState = "pending" | "running" | "reviewed" | "na_irrelevant" | "no_input" | "failed" | "skipped";
+/** 검토한 셀을 무엇으로 봤나(review_cells.CELL_BASES). */
+export type CellBasis = "cards" | "background" | "role_only" | "search_only" | "noinput";
+/** 거르기 분류의 길 — 셀 목록의 `route` 쿼리와 같은 어휘다. */
+export type CellRoute = "review" | "filtered" | "audit" | "noinput";
+/** 전문가 머리 상태(review_cells.EXPERT_STATES). */
+export type ExpertState = "planned" | "running" | "ready" | "partial" | "blocked";
+
+/** 품질 블록의 비율 하나(review_quality.rate) — den 이 표본 바닥 미만이면 value 가 null 이다(0 이 아니다). */
+export type RateMetric = {
+  value: number | null;
+  num: number;
+  den: number;
+  upper95?: number | null;
+  min_n?: number;
+  threshold?: JsonObject;
+  within?: boolean | null;
 };
+
+/** 셀 셈(review_cells.review_summary — 활성 단위만). */
+export type ReviewCellCounts = {
+  total: number;
+  by_state: Record<CellState, number>;
+  /** reviewed 셀의 바탕 — 어휘 밖 값은 unset 으로 센다(있을 때만 온다). */
+  by_basis: Record<CellBasis, number> & { unset?: number };
+  /** 가장 최근 검토 잡이 찍은 셀(잡이 없으면 null). */
+  in_scope: { job_id: string; total: number; by_state: Record<CellState, number> } | null;
+  out_of_scope_pending: number;
+  /** 사람이 처분하지 않은 failed 셀. */
+  failed_open: number;
+};
+
+/** 진행판 review.cells — 셀 셈에 품질 블록이 센 '형식만 채운 칸'(품질을 아직 세지 않았으면 null)을 더한다. */
+export type ReviewCellsSummary = ReviewCellCounts & { form_only: RateMetric | null };
+
+export type ReviewExpertsSummary = { total: number; by_state: Record<ExpertState, number> };
+
+/** 검토 순서 한 줄(routes.review_order_payload — planner.review_order + 머리 상태 · 얼린 묶음의 카드 수). */
+export type ReviewOrderRow = {
+  order: number;
+  agent_key: string;
+  domain: string;
+  rank_in_domain: number | null;
+  tier: Tier;
+  deferred: boolean;
+  /** ECAD 에 기대는데 ECAD 가 없다(ecad_absent) · 넷 · 배치가 필요하다(ecad_nets_deferred). */
+  input_gaps: string[];
+  state: ExpertState | null;
+  cards_total: number | null;
+  checkable_n: number | null;
+};
+
+/** 진행판 review.quality(routes._quality_summary) — 문면과 기준 밖 항목. 수치는 문면 줄에 있다. */
+export type ReviewQualitySummary = {
+  job_id: string | null;
+  computed_at: number | null;
+  title: string | null;
+  text: string | null;
+  policy_version: string | null;
+  ledger_hash: string | null;
+  out_of_bounds: string[];
+  unchecked: string[];
+};
+
+/** 거른 셀 표본(review_cells.closure_cells 의 filtered.audit 가운데 진행판이 싣는 칸). upper95 는 0~1, 표본이 없으면 null. */
+export type ReviewFilterAudit = {
+  risk_miss: number;
+  relevance_miss: number;
+  undetermined: number;
+  kept: number;
+  upper95: number | null;
+  upper95_conservative: number | null;
+  n_audit: number;
+  floor_met: boolean;
+  pending: number;
+};
+
+/** 진행판 review.filter(재설계 M3 C3-8) — mode · approved 는 가장 최근 검토 잡이 얼린 값이다(잡이 없으면 off · null). */
+export type ReviewFilter = {
+  mode: "off" | "shadow" | "on" | (string & {});
+  /** 배정표 승인 문 — false 면 아무 셀도 걸러지지 않는다. 검토 잡 전에는 null. */
+  approved: boolean | null;
+  would_filter: number;
+  filtered: number;
+  audited: number;
+  audit: ReviewFilterAudit;
+  shadow: { would_filter: number; sampled: number; risk_miss: number; upper95: number | null };
+  widened: string[];
+  off: boolean;
+  /** 거른 셀이 아낀 호출의 어림. */
+  saved_calls_est: number;
+};
+
+/** 입력 결손(재설계 M3 C3-3) — 판정 대신 두 질문으로 닫힌 셀의 셈. */
+export type ReviewNoInput = {
+  experts: number;
+  cells: number;
+  by_outcome: { impact: number; unknown: number; request: number; none: number };
+};
+
+/** 다시 연 셀의 몫(review_runner.reopen_budget — 진행판 review.job.progress.reopened_extra). */
+export type ReopenedExtra = {
+  cells: number;
+  runs: number;
+  calls_est: number;
+  consented: { cells: number; calls_est: number };
+  unconsented: { cells: number; calls_est: number };
+  allowance: number;
+  /** 잡을 만들 때 동의받은 추정(calls_estimate.expected — 거르기 없음 가정). */
+  expected: number;
+  max_calls: number;
+  hold: "consent_extra" | "max_calls" | null;
+};
+
+/** 검토 잡의 호출 셈(rr_review_calls 상태별) — 진행판을 아직 세지 않았으면 칸이 비어 있을 수 있다. */
+export type ReviewCalls = {
+  ok: number;
+  infra_fail: number;
+  content_fail: number;
+  wait: number;
+  aborted: number;
+  last_ok_at: number | null;
+  avg_ok_s: number | null;
+};
+
+/**
+ * 검토 잡의 진행판(routes._review_job_payload 가 progress_json 에서 옮긴 칸). 막 선 잡은 진행판을 아직 세지 않아 칸이 null 이거나
+ * 빈 객체다 — 칸마다 없을 수 있다(0 으로 읽지 않는다).
+ */
+export type ReviewJobProgress = {
+  packs: Partial<{ total: number; todo: number; ok: number; empty: number; error: number; blocked: number }> | null;
+  experts: Partial<ReviewExpertsSummary> | null;
+  cells: Partial<ReviewCellCounts & { failed: number }> | null;
+  calls: Partial<ReviewCalls> | null;
+  breaker: Partial<{ state: string; trips: number; hold_until: number | null; since: number | null }> | null;
+  server: JsonObject | null;
+  reopened_extra: ReopenedExtra;
+};
+
+/** 기다림(잡은 running 이고 보류가 아니다) — health_unknown · draining 은 note 에 백엔드 문장이 있다. */
+export type ReviewWaiting = {
+  reason: string;
+  since?: number | null;
+  retry_at?: number | null;
+  note?: string;
+  source?: string;
+};
+
+/** 검토 잡 범위(정규 표기 — 칸끼리 AND, 빠진 칸은 전부). */
+export type ReviewScope = { tiers?: string[]; domains?: string[]; agents?: string[]; unit_ids?: string[] };
+
+/** 진행판의 검토 잡 한 줄(routes._review_job_payload). Claude 잡이면 `llm` · `consent_external`(· `llm_mismatch`)이 붙는다. */
+export type ReviewJob = {
+  id: string;
+  mode: "reviews";
+  state: BatchJobState;
+  /** 보류 코드(review_ops.HOLD_CODES) — consent_extra · max_calls 는 자동 재개가 없다. */
+  hold_code: string | null;
+  hold_until: number | null;
+  hold_n: number;
+  error: string | null;
+  credential_email: string | null;
+  scope: ReviewScope;
+  llm?: "claude";
+  consent_external?: ConsentExternal;
+  llm_mismatch?: number;
+  /** live(근거 꾸러미 실호출) → pack → review, 끝나면 그 상태 이름. 진행판 전이면 null. */
+  phase: string | null;
+  progress: ReviewJobProgress;
+  waiting: ReviewWaiting | null;
+  /** 도는 호출마다의 마지막 신호 — 끝난 잡은 null. */
+  signal: { workers: ReviewWorkerSignal[] } | null;
+};
+
+/** 진행판의 카드 대조 검토 칸(routes.review_payload) — 셀 원장이 없는 패널 대상은 null 이다. */
+export type CoverageReview = {
+  units: number;
+  cells: ReviewCellsSummary;
+  experts: ReviewExpertsSummary;
+  /** 카드 폭포(품질 블록 json.cards) — 이 화면은 그리지 않는다. */
+  cards: JsonObject | null;
+  quality: ReviewQualitySummary | null;
+  order: ReviewOrderRow[];
+  dispositions: { retried: number; skipped: number };
+  filter: ReviewFilter;
+  noinput: ReviewNoInput;
+  job: ReviewJob | null;
+};
+
+/** 완결 잔여 낱말(closure.RESIDUAL_ITEMS — 응답의 차례 그대로). */
+export type QualifierItem =
+  | "input_gap"
+  | "failed"
+  | "skipped"
+  | "issues_untried"
+  | "issues_reraised"
+  | "filtered"
+  | "unit_excluded"
+  | "quality"
+  | "undetermined"
+  | "no_cards"
+  | "depth_no_cards"
+  | "cross_not_run"
+  | "mech_not_run";
+
+export type AckState = "valid" | "stale" | "revoked";
+
+/**
+ * 완결 잔여 한 줄(closure.residuals + 확인 표기). `blocking` 이고 `acked` 가 아니면 저장 레벨이 오르지 않는다. 낱말마다 더 실리는
+ * 칸은 그 낱말에만 있다.
+ */
+export type Qualifier = {
+  item: QualifierItem | (string & {});
+  n: number;
+  label: string;
+  blocking: boolean;
+  acked: boolean;
+  basis_n: number;
+  basis_hash: string;
+  ack?: { state: AckState; by: string; at: number; reason: string };
+  experts?: number;
+  domains?: string[];
+  by_code?: Record<string, number>;
+  crowded?: string[];
+  p1?: number;
+  held_fail?: number;
+  sentences?: string[];
+  issue_ids?: string[];
+  audit?: JsonObject;
+  off?: boolean;
+  by_reason?: Record<string, number>;
+  others?: Record<string, number>;
+  out_of_bounds?: string[];
+  strong_ratio_cells?: number | null;
+  of?: number;
+  ratio?: number;
+  mixed?: Record<string, number>;
+  pairs?: number;
+};
+
+/** 사슬 단계(routes.chain_stage) — 살아 있는(없으면 마지막) 쟁점 · 종합 잡. */
+export type ChainStage = {
+  mode: "issues" | "synth";
+  job_id: string;
+  state: BatchJobState;
+  hold_code: string | null;
+  pause_reason: string | null;
+  /** `pat_unavailable:` · `restart:` · `draining:` 로 시작하면 그 뜻이다(요청서 1절). */
+  error: string | null;
+  advice?: string;
+  llm?: "claude";
+  consent_external?: ConsentExternal;
+  llm_mismatch?: number;
+};
+
+export type ReportTrigger =
+  | "reviews_partial"
+  | "reviews_closed"
+  | "issues_closed"
+  | "synth_done"
+  | "ack"
+  | "manual"
+  | "level_up";
+export type NarrativeState = "none" | "partial" | "full";
+
+/** 마지막 종합 보고서 판의 머리(routes.report_head). */
+export type ReportHead = {
+  version_no: number;
+  trigger: ReportTrigger | (string & {});
+  narrative_state: NarrativeState | (string & {});
+  created_at: number;
+};
+
+/** 검토 단위 목록 한 줄(units.manifest) — 단위 행을 들여오지 않은 박스는 `row_absent` 만 있다. */
+export type UnitManifestItem = {
+  unit_id: string;
+  seq: number;
+  row_absent?: true;
+  kind?: string;
+  reviewable?: boolean;
+  title?: string;
+  n_changes?: number;
+};
+/** `GET /targets/{key}/units` — 단위가 없는 대상은 status none · units []. */
+export type UnitManifest = {
+  target_key: string;
+  flow: "panels" | "cells";
+  status: string;
+  total: number;
+  offset: number;
+  returned: number;
+  next_offset?: number;
+  units: UnitManifestItem[];
+};
+
+/** 검토 단위 빌드 한 줄(units.summary_of). */
+export type UnitsSummary =
+  | { rev: number; status: string; reviewable_n: number }
+  | { rev: number; status: string; error: string | null }
+  | { status: "none" };
 
 export type Coverage = {
   target_key: string;
   job: CoverageJob;
-  /** 카드 대조 대상만 객체다(패널 대상은 null). */
-  review?: CoverageReview | null;
+  /** 셀 원장이 있는 대상만 객체다(패널 대상은 null). */
+  review: CoverageReview | null;
   roster_size: number;
   /** 도메인 코드 → 커버리지 상태별 좌석 수. */
   by_domain: Record<string, Partial<Record<CoverageStatus, number>>>;
@@ -1314,8 +1610,429 @@ export type Coverage = {
   close_level: CloseLevel;
   /** 심사 방식 — panels(Tier 패널) · cells(카드 대조). */
   flow: "panels" | "cells";
+  units: UnitsSummary;
   /** RA · AIDataHub 반영 요약 — 재동기를 누르기 전에도 늘 온다(보내는 쪽이 아직 없다는 것까지 message 가 말한다). */
   external_sync: ExternalSync;
+  /** 아래 넷은 카드 대조 대상(flow cells)만 싣는다 — 패널 대상의 응답에는 칸이 없다. 완결 표기 "<레벨>(<막힌 까닭 · 잔여>)". */
+  level_label?: string;
+  qualifiers?: Qualifier[];
+  stage?: ChainStage | null;
+  report?: ReportHead | null;
+};
+
+// ── 검토 잡 만들기 · 셀 처분(M3 3절) ─────────────────────────────────────────
+
+/** 검토 잡 본문(`POST /targets/{key}/jobs` mode reviews) — 패널 칸(tier · modifiers · concurrency)을 실으면 422 다. */
+export type ReviewJobCreate = { mode: "reviews"; scope?: ReviewScope; user_memo?: string; consent?: true };
+
+/** 호출 수 추정 — 동의 문턱 · 상한은 expected(거르기 없음 가정)와 견준다. */
+export type CallsEstimate = { low: number; expected: number; high: number; basis: string };
+
+/** `POST /targets/{key}/jobs` 검토 잡의 답(review_runner.create_review_job). */
+export type ReviewJobCreated = {
+  job_id: string;
+  mode: "reviews";
+  cells_total: number;
+  cells_in_scope: number;
+  experts_in_scope: number;
+  units: number;
+  calls_estimate: CallsEstimate;
+  credential: { kind: "requester" | "owner"; email: string; exp: number };
+  /** 범위 안에서 저절로 풀린 보류 좌석 수. */
+  undeferred: number;
+  credential_note?: string;
+  llm?: "claude";
+  consent_external?: ConsentExternal;
+};
+
+/** 처분할 셀 — 쌍 목록과 거름 가운데 정확히 하나(review_cells.select_cells). */
+export type CellsFilter = {
+  job_id?: string;
+  agent_key?: string;
+  unit_id?: string;
+  domain?: string;
+  error_code?: string;
+  state?: CellState;
+};
+export type CellsSelector = { cells: Array<[string, string]> } | { filter: CellsFilter };
+
+export type CellsRetryBody = CellsSelector & { reason?: string; force?: true; start?: false; consent?: true };
+export type CellsSkipBody = CellsSelector & { reason: string };
+
+/** 처분이 그 셀을 집을 잡에 한 일(review_runner.dispose_cells 의 job). */
+export type DisposeJob = {
+  action: "created" | "adopted" | "waiting" | "none";
+  job_id?: string;
+  calls_estimate?: CallsEstimate;
+  adopted?: number;
+  waiting?: number;
+  /** 살아 있는 잡에 얹은 셀 몫 때문에 그 잡이 멈췄다. */
+  hold?: "consent_extra" | "max_calls";
+  /** 넘김으로 몫이 여유 안으로 돌아와 그 잡이 이어 돈다. */
+  resumed?: boolean;
+};
+
+/** 다시 · 넘김의 답 — 넘김은 걸림 셈(hits · hits_by · hits_basis · hits_note?)을 더한다. */
+export type CellsDisposed = {
+  target_key: string;
+  matched: number;
+  retried?: number;
+  skipped?: number;
+  not_failed: number;
+  keys_total: number;
+  keys: Array<[string, string]>;
+  experts: number;
+  changed: boolean;
+  audit_id: string | null;
+  job: DisposeJob;
+  hits?: number | null;
+  hits_by?: { card: number; offcard: number; noinput: number } | null;
+  hits_basis?: "members" | "pack_missing";
+  hits_note?: string;
+};
+
+/** 셀 목록 한 행(routes.cells_payload — rr_review_cells 열 이름 그대로, 선점 · JSON 열은 빠진다)에 거른 까닭 한 줄. */
+export type ReviewCellRow = {
+  target_key: string;
+  unit_id: string;
+  agent_key: string;
+  domain: string;
+  unit_seq: number;
+  state: CellState;
+  route: CellRoute | (string & {}) | null;
+  /** 거르지 않은 까닭 — rank1 · global_unit · no_cards · input_gap · widened · filter_off · handoff · human_retry · … */
+  route_forced: string | null;
+  basis: CellBasis | (string & {}) | null;
+  run_id: string | null;
+  tries: number;
+  charged: number;
+  error_code: string | null;
+  error: string | null;
+  cards_expected: number | null;
+  cards_judged: number | null;
+  n_fail: number;
+  n_warning: number;
+  n_undetermined: number;
+  n_offcard: number;
+  truncated: number | null;
+  status_source: "code" | "human";
+  decided_by: string | null;
+  decided_at: number | null;
+  decide_note: string | null;
+  reopened_n: number;
+  updated_at: number | null;
+  /** 두 신호가 다 무관이라 거른(거를 수 있던) 셀만 한 줄, 아니면 null. «» 안은 위생 처리한 LLM 글이다. */
+  filter_reason: string | null;
+};
+
+export type CellList = {
+  target_key: string;
+  total: number;
+  limit: number;
+  offset: number;
+  next_offset?: number;
+  rows: ReviewCellRow[];
+};
+
+/** `POST /targets/{key}/undefer`(패널 대상) — 저장된 레벨은 내려가지 않는다(depth 가 지금의 깊이). */
+export type Undeferred = {
+  target_key: string;
+  undeferred: number;
+  agents: string[];
+  agents_total: number;
+  changed: boolean;
+  level: CoverageLevel;
+  note: string;
+  /** 영역마다 지금의 깊이 — 패널 대상은 {need, have, roster, deferred}(registry._close_level_panels). */
+  depth: Record<string, { need: number; have: number; roster?: number; deferred?: number }> | null;
+};
+
+// ── 전문가 보고서 · 종합 보고서 쪽(M2 3-7 · M3 5절) ─────────────────────────
+
+/** 보고서 쪽 하나 — 블록 넷 가운데 하나만 차 있고, 값은 마크다운 조각 배열이다(조각 안에 줄바꿈이 있을 수 있다). */
+export type ReportPage = {
+  page_no: number;
+  kind: string;
+  title: string;
+  blocks: { background: string[]; results: string[]; recommendation: string[]; minutes: string[] };
+};
+
+export type ExpertHead = {
+  agent_key: string;
+  domain: string;
+  rank_in_domain: number | null;
+  tier: string | null;
+  review_order: number | null;
+  state: ExpertState;
+  run_id: string | null;
+  pack_status: string;
+  pack_error: string | null;
+  /** cards · background · none — 묶음 전이면 null. */
+  card_basis: string | null;
+  sweep_state: string;
+  cells_total: number;
+  revision: number;
+  findings_n: number | null;
+  coverage_status: string | null;
+  error: string | null;
+  finalized_at: number | null;
+  /** 얼린 묶음의 카드 수 — 묶음 전이면 null. */
+  cards: { cards_total: number; checkable_n: number; background_n: number; unrenderable_n: number } | null;
+  cells: { total: number; by_state: Record<CellState, number> };
+};
+export type ExpertList = { target_key: string; total: number; experts: ExpertHead[] };
+
+export type ExpertReportPart = "summary" | "units" | "cards" | "full";
+/** 전문가 보고서 쪽(routes.expert_report_envelope). `version` 은 마감 판(revision)이다. */
+export type ExpertReportPage = {
+  target_key: string;
+  agent_key: string;
+  state: ExpertState;
+  version: number;
+  report_hash: string | null;
+  finalized_at: number | null;
+  coverage_status: string | null;
+  opinion_id: string | null;
+  review_id: string | null;
+  /** 막힌 전문가(blocked)의 까닭 — 앞 보고서는 덮지 않는다. */
+  state_why: string | null;
+  format: "md";
+  part: ExpertReportPart;
+  unit_id: string | null;
+  pages_total: number;
+  page_no: number;
+  next_page?: number;
+  page: ReportPage;
+};
+
+export type SynthPart = "summary" | "domains" | "mechanisms" | "appendix" | "full";
+/** 종합 보고서 쪽(routes.report_envelope) — 머리는 쪽마다 같다. `version` 은 고르는 칸이 아니라 대조 칸이다. */
+export type SynthReportPage = {
+  target_key: string;
+  version: number;
+  report_uid: string;
+  title: string;
+  level_label: string;
+  narrative_state: NarrativeState | (string & {});
+  trigger: ReportTrigger | (string & {});
+  counts: JsonObject;
+  created_at: number;
+  format: "md";
+  part: SynthPart;
+  pages_total: number;
+  page_no: number;
+  next_page?: number;
+  page: ReportPage;
+};
+
+/** `POST /targets/{key}/report {refresh_summaries:false}` — 코드 조립 판(같은 내용이면 created false 로 그 판). */
+export type ReportAssembled = {
+  target_key: string;
+  report_uid: string;
+  version_no: number;
+  pages_n: number;
+  level_label: string;
+  counts: JsonObject;
+  narrative_state: NarrativeState | (string & {});
+  created: boolean;
+};
+/** `POST /targets/{key}/report {refresh_summaries:true}` — 종합 잡(같은 길의 대기 잡이 있으면 그 잡, created false). */
+export type SynthJobCreated = {
+  target_key: string;
+  job_id: string;
+  created: boolean;
+  credential: string | null;
+  /** 사용자 PAT 가 없으면 잡은 서고 `pat_unavailable: …` 가 실린다(등록하면 집힌다). */
+  error?: string;
+  llm: "glm" | "claude";
+  consent_external?: ConsentExternal;
+};
+
+// ── 쟁점(M3 4절) ────────────────────────────────────────────────────────────
+
+export type IssueState =
+  | "queued"
+  | "planned"
+  | "running"
+  | "resolved"
+  | "inconclusive"
+  | "untried_cap"
+  | "withdrawn"
+  | "skipped";
+export type IssueOutcome = "upheld" | "downgraded" | "escalated" | "rejected" | "undetermined";
+
+/** 패널이 판정한 뒤 근거가 바뀐 쟁점(routes._reargue_out) — 새 패널이 정할 때까지 옛 판정이 보인다. */
+export type IssueReargue = {
+  label: string;
+  at: number;
+  round: number;
+  basis_hash: string;
+  panel_basis_hash: string;
+  raisers_added: string[];
+  raisers_removed: string[];
+  opposers_added: string[];
+  opposers_removed: string[];
+  claimed_before: JsonObject;
+  claimed_after: JsonObject;
+  /** 새 패널이 결정을 못 냈다 — 그 패널과 까닭. */
+  new_panel_failed?: { panel_id: string; reason: string; at: number };
+};
+
+export type IssueRow = {
+  issue_id: string;
+  rank: number | null;
+  types: string[];
+  p_class: "P1" | "P2" | "P3" | (string & {});
+  priority: number;
+  anchor_cluster_key: string;
+  unit_id: string | null;
+  state: IssueState | (string & {});
+  state_reason: string | null;
+  outcome: IssueOutcome | (string & {}) | null;
+  outcome_json: {
+    panel_id?: string;
+    atom_finding_ids?: string[];
+    severity_after?: string | null;
+    judgement_after?: string | null;
+    grade_after?: string | null;
+    contest_note?: string;
+  } | null;
+  distribution: {
+    raisers: number;
+    raisers_by_domain: Record<string, number>;
+    by_judgement_claimed: Record<string, number>;
+    by_severity: Record<string, number>;
+    opposers: number;
+  };
+  panel_id: string | null;
+  seats: Array<{ key: string | null; domain: string | null; issue_role: string | null }>;
+  selected_round: number | null;
+  attempts: number;
+  charged: number;
+  reargue: IssueReargue | null;
+};
+
+export type IssueList = {
+  target_key: string;
+  total: number;
+  limit: number;
+  offset: number;
+  next_offset?: number;
+  /** 거른 목록 전체의 지문 — 앞 쪽과 다르면 그사이 원장이 바뀐 것이라 offset 0 부터 다시 받는다. */
+  ledger_rev: string;
+  cap: { base: number; hard: number; run: number };
+  rows: IssueRow[];
+};
+export type IssueAction = { action: "queue" | "skip"; reason: string };
+export type IssueActed = { issue_id: string; state: "queued" | "skipped"; job_id: string | null };
+
+// ── 완결과 확인(M3 6절) ─────────────────────────────────────────────────────
+
+/** 영역 깊이 — 분모는 카드로 본 전문가다. 카드 없는 영역은 exempt no_cards(막지 않고 표기 잔여). */
+export type DepthRow = { active: number; have: number; need: number; cardless: number; exempt?: "no_cards" };
+
+export type CloseAck = {
+  item: string;
+  ack_at: number;
+  ack_by: string;
+  ack_reason: string;
+  basis_n: number;
+  basis_hash: string;
+  revoked_by: string | null;
+  revoked_at: number | null;
+  state: AckState;
+};
+
+/** 완결 판정의 수(closure.cell_counts — 밑줄 칸은 빠진다). 화면이 읽는 칸만 적었다. */
+export type ClosureCounts = {
+  roster: number;
+  units: { reviewable: number; excluded_by_reason: Record<string, number>; unassigned: number };
+  cells: {
+    expected: number;
+    actual: number;
+    by_state: Record<string, number>;
+    reviewed_by_basis: Record<string, number>;
+    verdict_gaps: number;
+  };
+  experts: { reports: { expected: number; ready: number; partial: number; blocked: number; missing: number } };
+  issues: {
+    by_state: Record<string, number>;
+    by_outcome: Record<string, number>;
+    open: number;
+    cap: { base: number; hard: number };
+  };
+  registry: { clusters: number; attention: { A: number; B: number; C: number; D: number }; card_fail_claimed: number };
+  handoffs: { lines: number; pairs: number };
+  invariants: string[];
+};
+
+/** `GET /targets/{key}/closure` — 카드 대조 대상(closure.close_level_cells 캐시 + 확인 목록). */
+export type ClosureCells = {
+  target_key: string;
+  flow: "cells";
+  level: CoverageLevel;
+  previous_level: CoverageLevel;
+  raised: boolean;
+  close_level: CloseLevel;
+  /** 지금 계산한 레벨 — 저장 레벨(level)은 내려가지 않는다. */
+  level_current: CoverageLevel;
+  regressed: boolean;
+  level_label: string;
+  c1: boolean;
+  c2: boolean;
+  c3: boolean;
+  qualifiers: Qualifier[];
+  counts: ClosureCounts;
+  roster_size: number;
+  status_counts: Record<string, number>;
+  unseated_n: number;
+  detail: {
+    depth: Record<string, DepthRow>;
+    strong_ratio_cells: number | null;
+    skipped_ratio: number;
+    cells_hash: string;
+    fresh: {
+      issues: boolean;
+      report: boolean;
+      report_version: number | null;
+      synth_version: number | null;
+      selected: boolean;
+      reopened_since: number | null;
+    };
+  };
+  acks: CloseAck[];
+};
+/** 패널 대상의 같은 경로 — 패널 판정(registry._close_level_panels)에 flow 가 붙는다. 확인 길은 없다. */
+export type ClosurePanels = {
+  target_key: string;
+  flow: "panels";
+  level: CoverageLevel;
+  close_level: CloseLevel;
+  c1: boolean;
+  c2: boolean;
+  c3: boolean;
+  detail: JsonObject;
+};
+export type Closure = ClosureCells | ClosurePanels;
+
+/** 확인 · 확인 취소의 답 — 둘 다 보고서 판(trigger ack)을 세우고 그 번호(같은 내용이면 앞 판, 조립 실패면 null)를 돌려준다. */
+export type CloseAcked = {
+  item: string;
+  ack_at: number;
+  ack_by: string;
+  basis_hash: string;
+  basis_n: number;
+  level: CoverageLevel;
+  level_label: string;
+  report_version: number | null;
+};
+export type CloseAckRevoked = {
+  item: string;
+  revoked_by: string;
+  revoked_at: number;
+  level: CoverageLevel;
+  level_label: string;
+  report_version: number | null;
 };
 
 export type Seat = {
@@ -1355,23 +2072,6 @@ export type SeatUpdated = {
 };
 
 // ── 등록부 · verdict ─────────────────────────────────────────────────────────
-
-/** 패널이 판정한 뒤 근거가 바뀐 쟁점(routes._reargue_out) — 새 패널이 정할 때까지 옛 판정이 보인다. */
-export type IssueReargue = {
-  label: string;
-  at: number;
-  round: number;
-  basis_hash: string;
-  panel_basis_hash: string;
-  raisers_added: string[];
-  raisers_removed: string[];
-  opposers_added: string[];
-  opposers_removed: string[];
-  claimed_before: JsonObject;
-  claimed_after: JsonObject;
-  /** 새 패널이 결정을 못 냈다 — 그 패널과 까닭. */
-  new_panel_failed?: { panel_id: string; reason: string; at: number };
-};
 
 /** 등록부 행의 카드 · 근거 인용(merged.cites) — 카드 인용은 판정당 200자이고 줄였으면 원래 길이가 quote_chars 에 있다. */
 export type Cite = { ref: string; quote: string; quote_chars?: number };
