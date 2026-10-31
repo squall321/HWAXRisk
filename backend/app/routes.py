@@ -6268,8 +6268,11 @@ def _next_human_claim_uid(store: Any, target_key: str) -> str:
 
 
 def _finding_writer(store: Any, finding_id: str, ident: identity.Identity) -> str:
-    """finding 한 건에 쓸 owner_sub — 그 과제의 편집자 이상이면 과제 주인(`_writer`), 남 · 없는 finding 은 부른 사람(본체가 404)이다."""
-    row = store.query_one("SELECT owner_sub, project_id FROM rr_findings WHERE finding_id = ?", (finding_id,))
+    """finding 한 건에 쓸 owner_sub — 그 과제의 편집자 이상이면 과제 주인(`_writer`), 남 · 없는 finding 은 부른 사람(본체가 404)이다.
+    카드 대조 finding 은 이 길들(사람 finding 고치기 · 지우기 · 라벨)이 쓰지 않는다 — 라벨은 그 원자를 없는 것과 같이 본다(metrics._finding_row ·
+    M2 5절 #20). 여기서도 걸러 부른 사람으로 내려가 오늘과 같은 답이다."""
+    row = store.query_one("SELECT owner_sub, project_id FROM rr_findings WHERE finding_id = ?"
+                          " AND COALESCE(source_kind, '') <> 'card_review'", (finding_id,))
     return _writer(row["owner_sub"] if row is not None else None, row["project_id"] if row is not None else None, ident)
 
 

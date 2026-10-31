@@ -236,6 +236,8 @@ CARD_REVIEW_SITES: dict[tuple[str, str], str] = {
     ("ra_client.py", "_finding_object"): "라벨 op 의 등록부 행 — metrics._finding_row 와 같은 거름(RK-01)",
     ("routes.py", "_next_human_claim_uid"): "사람 finding 순번 — 카드 finding 이 걸릴 수 없다",
     ("routes.py", "put_curation"): "의심 문구 회수 — M2 #9",
+    ("routes.py", "_finding_writer"): ("finding 쓰기 문(사람 finding 고치기 · 지우기 · 라벨 — 편집자 쓰기 MB-14) — 라벨은 metrics._finding_row 와 같은"
+                                       " 거름, 사람 finding 은 카드 finding 이 걸릴 수 없다"),
     ("export.py", "clip_queue_payload"): "독스트링(거름 아님)",
     ("expert_report.py", "<module>"): "모듈 독스트링(거름 아님)",
 }
