@@ -1702,10 +1702,11 @@ def add_source(project_id: str, body: SourceBody,
 def _source_duplicates(ref_key: str, project_id: str, email: str) -> list[dict]:
     """같은 원천(`ref_key`)이 붙은 다른 과제 — 등록은 막지 않고 알린다(plan §8.2.3 `duplicate_of` — 같은 CAD 를 두 관점으로 심사하는
     것이 정당할 수 있다). 부른 사람이 구성원(소유 · 멤버)인 과제만 싣는다 — 남의 과제는 목록에도 수로도 드러내지 않는다(context-notes
-    D45 '구성원은 하나'). `created_at` 은 그 과제에 그 원천이 붙은 시각이다."""
+    D45 '구성원은 하나'). `created_at` 은 그 과제에 그 원천이 붙은 시각이다. 폐기(purge)된 과제는 싣지 않는다 — 소스 · 멤버 행은 남지만
+    원문을 비운 묘비라 같은 원천으로 심사한 과제가 아니다(BL-11)."""
     rows = get_store().query(
         "SELECT s.project_id, p.code, p.owner_sub, s.created_at FROM rr_sources s JOIN rr_projects p ON p.id = s.project_id"
-        " WHERE s.ref_key = ? AND s.project_id <> ?"
+        " WHERE s.ref_key = ? AND s.project_id <> ? AND p.status = 'active'"
         " AND (p.owner_sub = ? OR p.id IN (SELECT project_id FROM rr_project_members WHERE email = ?))"
         " ORDER BY s.created_at, s.project_id", (ref_key, project_id, email, email))
     return [dict(r) for r in rows]

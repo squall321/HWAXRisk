@@ -72,6 +72,23 @@ def test_a_member_is_told_about_the_project_they_belong_to(risk_store):
     assert [(d["project_id"], d["owner_sub"]) for d in out["duplicate_of"]] == [(shared, OWNER)]
 
 
+def test_a_purged_project_is_not_reported(risk_store):
+    """폐기(purge)는 원문을 비운 묘비만 남긴다 — 그 소스 · 멤버 행이 남아도 같은 원천의 다른 과제로 알리지 않는다."""
+    gone = factories.make_project(risk_store)
+    _add(risk_store, gone, OWNER)
+    code = risk_store.query_one("SELECT code FROM rr_projects WHERE id = ?", (gone,))["code"]
+    with factories.routes_store(risk_store):
+        routes.purge_project(gone, routes.PurgeBody(code=code, reason="잘못 등록"), ident=factories.ident(OWNER))
+    assert risk_store.query_one("SELECT status FROM rr_projects WHERE id = ?", (gone,))["status"] == "purged"
+    kept = factories.make_project(risk_store)
+    _add(risk_store, kept, OWNER)
+    fresh = factories.make_project(risk_store)
+
+    out = _add(risk_store, fresh, OWNER)
+
+    assert [d["project_id"] for d in out["duplicate_of"]] == [kept]
+
+
 def test_the_mcp_entry_carries_the_same_notice(risk_store, monkeypatch):
     """MCP risk_add_source 는 같은 라우트를 감싼다 — 알림이 그대로 실린다."""
     import asyncio
