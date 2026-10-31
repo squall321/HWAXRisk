@@ -54,12 +54,13 @@ def web_paths(*, project_id: str | None = None, target_key: str | None = None) -
 
 
 def fix_register_pat() -> str:
-    """러너·명단·dyna 캡처 자격이 없을 때의 고칠 곳 — 자동 등록(Claude 에서 다시 부르기)이 먼저, 안 되면 웹 설정 화면의 버튼 하나
-    (리스크 앱 사람 자격 R1). 웹 자동 등록·자동 등록 스위치는 화면에 아직 없어 말하지 않는다(R2-8)."""
-    return ("포털 PAT 는 Claude 에서 hwax_risk 도구를 다시 부르면 저절로 등록된다(게이트웨이가 그 사람의 PAT 를 좁혀 받아 넘긴다 —"
-            f" 자동 등록이 켜져 있을 때). 안 되면 웹 리스크 앱 설정 화면({web_paths()['settings']})에서 '{SETTINGS_BUTTON}' 을 누른다"
-            " — 그 브라우저의 포털 세션으로 읽기 전용 PAT 를 발급해 이 앱에 등록한다. PAT 는 도구 인자로 받지 않는다(게이트웨이·대화"
-            " 기록에 남는다).")
+    """러너·명단·dyna 캡처 자격이 없을 때의 고칠 곳 — 자동 등록(Claude 에서 다시 부르기 · 웹 리스크 앱 열기)이 먼저, 안 되면 웹 설정
+    화면의 버튼 하나(리스크 앱 사람 자격 R1). 웹 자동 등록은 화면 세션 B35 가 냈다 — 그 길도 말한다(종전에는 화면에 없어 말하지 않았다,
+    R2-8)."""
+    return ("포털 PAT 는 Claude 에서 hwax_risk 도구를 다시 부르거나 웹 리스크 앱을 열면 저절로 등록된다(자동 등록이 켜져 있을 때 —"
+            " Claude 길은 게이트웨이가 그 사람의 PAT 를 좁혀 받아 넘기고, 앱은 그 브라우저의 포털 세션으로 받는다). 안 되면 웹 리스크 앱"
+            f" 설정 화면({web_paths()['settings']})에서 '{SETTINGS_BUTTON}' 을 누른다 — 그 브라우저의 포털 세션으로 읽기 전용 PAT 를"
+            " 발급해 이 앱에 등록한다. PAT 는 도구 인자로 받지 않는다(게이트웨이·대화 기록에 남는다).")
 
 
 def _delegated(ident: identity.Identity) -> bool:

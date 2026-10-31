@@ -371,28 +371,26 @@ _CREDENTIAL_FALLBACK = {"owner": "타깃 소유자의 PAT 로 돈다", None: "�
 _SETTINGS_BUTTON = "포털에서 발급해 등록"
 
 
-# 자동 등록을 멈추는 길 — 켜져 있는 동안은 지우거나 포털에서 폐기한 PAT 도 Claude 에서 hwax_risk 도구를 부를 때 다시 만든다(의도다
-# — Claude 만 쓰는 사람에게는 다시 켤 스위치가 없다, D3). 멈추는 길은 설정의 자동 등록 스위치인데 화면에 아직 없다 — 그때까지는
-# 운영자가 앱 데이터 DB 의 _user_prefs 에서 끈다(포털 절차서 AUTO_SWITCH_RUNBOOK). 운영자가 그 사람으로 API 를 부를 길은 없어 말하지
-# 않는다(R3-4). 지금 있는 길만 말한다(웹 자동 등록도 아직 없다, R2-8). GET /api/me 의 portal_pat.auto.how_to_stop 과
-# pat_unavailable 안내가 같이 말한다.
-AUTO_SWITCH_RUNBOOK = "포털 docs/risk-review-redesign/server-setup-m1.md §7-2"
-AUTO_STOP_HINT = ("자동 등록이 켜져 있는 동안은 등록된 PAT 를 지우거나 포털에서 폐기해도 Claude 에서 hwax_risk 도구를 부를 때 다시"
-                  " 만든다 — 멈추는 길은 설정의 자동 등록 스위치다(곧 생긴다 — 그때까지는 운영자가 앱 데이터 DB 에서 끈다,"
-                  f" {AUTO_SWITCH_RUNBOOK}).")
+# 자동 등록을 멈추는 길 — 켜져 있는 동안은 지우거나 포털에서 폐기한 PAT 도 웹 리스크 앱을 열 때나 Claude 에서 hwax_risk 도구를 부를 때
+# 다시 만든다(의도다 — D3). 멈추는 길은 웹 설정 화면의 '자동 등록' 스위치다(화면 세션 B35 가 냈다 — 종전 글의 '곧 생긴다 — 그때까지는
+# 운영자가 앱 데이터 DB 에서 끈다' 꼬리를 걷었다). 운영자가 그 사람으로 API 를 부를 길은 없어 말하지 않는다(R3-4). 지금 있는 길만
+# 말한다(R2-8). GET /api/me 의 portal_pat.auto.how_to_stop 과 pat_unavailable 안내가 같이 말한다.
+AUTO_STOP_HINT = ("자동 등록이 켜져 있는 동안은 등록된 PAT 를 지우거나 포털에서 폐기해도 웹 리스크 앱을 열 때나 Claude 에서 hwax_risk"
+                  " 도구를 부를 때 다시 만든다 — 멈추는 길은 웹 리스크 앱 설정 화면의 '자동 등록' 스위치다(끄면 화면도 게이트웨이도"
+                  " 저절로 받지 않는다).")
 
 
 def pat_unavailable_guidance(store: Any, email: str | None) -> str:
     """사람 자격이 없을 때의 안내 — 자동 등록이 어떻게 일어나는지 · 직접 등록하는 곳 · 멈추는 길 · 그 사람의 마지막 자동 등록
     실패(U-3 · R1 · D3)."""
-    text = ("패널은 사람 자격(포털 PAT)으로만 돈다 — 서비스 계정으로 내려가지 않는다. Claude 에서 hwax_risk 도구를 아무거나 부르면"
-            " 자동으로 등록된다(게이트웨이가 그 사람의 PAT 를 좁혀 받아 넘긴다). 웹 리스크 앱 설정 화면의"
-            f" '{_SETTINGS_BUTTON}' 으로 직접 등록할 수도 있다.")
+    text = ("패널은 사람 자격(포털 PAT)으로만 돈다 — 서비스 계정으로 내려가지 않는다. 자동 등록이 켜져 있으면 웹 리스크 앱을 열 때(그"
+            " 브라우저의 포털 세션으로 받는다)나 Claude 에서 hwax_risk 도구를 아무거나 부를 때(게이트웨이가 그 사람의 PAT 를 좁혀 받아"
+            f" 넘긴다) 자동으로 등록된다. 웹 리스크 앱 설정 화면의 '{_SETTINGS_BUTTON}' 으로 직접 등록할 수도 있다.")
     get_prefs = getattr(store, "get_user_prefs", None)
     prefs = get_prefs(email) if email and callable(get_prefs) else None
     if prefs and not prefs.get("portal_pat_auto"):
-        text += (" 이 사람은 자동 등록을 꺼 두어 Claude 로 불러도 등록되지 않는다 — 설정 화면의 버튼으로 등록하거나 자동 등록을 다시"
-                 f" 켠다(설정의 스위치는 곧 생긴다 — 그때까지는 운영자가 앱 데이터 DB 에서 켠다, {AUTO_SWITCH_RUNBOOK}).")
+        text += (" 이 사람은 자동 등록을 꺼 두어 앱을 열거나 Claude 로 불러도 등록되지 않는다 — 설정 화면의 버튼으로 등록하거나 설정의"
+                 " '자동 등록' 스위치를 다시 켠다.")
     else:
         text += f" {AUTO_STOP_HINT}"
     if prefs and prefs.get("auto_error"):
