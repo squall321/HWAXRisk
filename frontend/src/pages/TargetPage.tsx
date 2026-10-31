@@ -1048,9 +1048,16 @@ function RecallPreview({ targetKey, active }: { targetKey: string; active: boole
   );
 }
 
+/**
+ * 대상이 바뀌면 화면 상태(탭 · 셀 고르기 · 폼 · 등록부 거름)를 처음부터 — 같은 라우트라 컴포넌트가 다시 마운트되지 않아 앞 대상에서 고른
+ * 셀 · 탭이 다음 대상으로 넘어갔다(고른 셀 열쇠는 대상마다 다르다). 대상 열쇠로 다시 마운트한다.
+ */
 export default function TargetPage() {
   const { key } = useParams<{ key: string }>();
-  const targetKey = key ?? "";
+  return <TargetView key={key ?? ""} targetKey={key ?? ""} />;
+}
+
+function TargetView({ targetKey }: { targetKey: string }) {
   const coverage = useAsync(
     (signal) => riskApi.getCoverage(targetKey, { signal }),
     [targetKey],
