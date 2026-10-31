@@ -710,3 +710,77 @@ def test_a_merge_reads_and_writes_in_one_transaction_so_a_rekey_cannot_slip_betw
     assert _live(risk_store, "snap:T1") == _fresh(risk_store, "snap:T1") == {key_of(X): (1, "치명")}
 
 
+def _dismissed(store, target: str, fid: str, subject: str, *, basis: dict) -> None:
+    """사람이 dismissed 로 닫은 행 하나(그 대상의 원자 하나로) — 그때의 기준선을 status_basis_json 에 둔다."""
+    _finding(store, target, fid, subject, panel=f"P{fid}", severity="치명")
+    registry.merge(store, target, owner_sub=OWNER)
+    store.execute("UPDATE rr_registry SET status = 'dismissed', status_source = 'human', status_basis_json = ?"
+                  " WHERE target_key = ?", (common.canonical_json(basis), target))
+
+
+def test_a_merge_round_trip_does_not_leave_an_escalation_flag_on_another_target(risk_store, clock):
+    """키 병합이 T1 의 key(X) 지지를 늘려 T9 의 사람 기각 행에 재검토 표기를 세웠으면, 되돌려 지지가 돌아온 T1 을 다시 병합할 때 그
+    표기를 거둔다 — 없어진 근거를 들어 재검토를 청하지 않는다. 다른 대상(T5)의 지금 행이 여전히 더 강하면 표기를 그 대상으로 옮긴다
+    (표기는 한 칸이라 T1 이 T5 의 표기를 덮어 썼다). 종전에는 표기가 사람이 다시 확정할 때까지 그대로 남았다."""
+    for ck in (X, Y):
+        _part(risk_store, ck)
+    for target, project in (("snap:T1", "P1"), ("snap:T5", "P5"), ("snap:T9", "P9")):
+        _target(risk_store, target, project)
+    _dismissed(risk_store, "snap:T9", "H1", X,
+               basis={"support_at_decision": 1, "sev3_at_decision": 3, "grade_at_decision": "도구예측"})
+    _finding(risk_store, "snap:T1", "F1", Y, panel="PN1")
+    _finding(risk_store, "snap:T1", "F2", X, panel="PN2", severity="치명")
+    registry.merge(risk_store, "snap:T1", owner_sub=OWNER)
+
+    def flag() -> dict | None:
+        return json.loads(risk_store.query_one(
+            "SELECT needs_review_json FROM rr_registry WHERE target_key = 'snap:T9'")["needs_review_json"] or "null")
+
+    assert flag() is None
+    _decide(risk_store, decision="merge_key", ckey_from=Y, ckey_into=X)
+    assert (flag()["by_target"], flag()["delta"]["support"]) == ("snap:T1", 1)
+    clock["t"] = 2000
+    _decide(risk_store, decision="unmerge_key", ckey=Y)
+    assert flag() is None
+
+    # T5 가 같은 클러스터를 더 강하게(두 패널) 올려 둔 뒤 같은 왕복을 하면 표기는 T5 로 돌아간다.
+    for fid, panel in (("E1", "PE1"), ("E2", "PE2")):
+        _finding(risk_store, "snap:T5", fid, X, panel=panel, severity="치명")
+    registry.merge(risk_store, "snap:T5", owner_sub=OWNER)
+    assert flag()["by_target"] == "snap:T5"
+    clock["t"] = 3000
+    _decide(risk_store, decision="merge_key", ckey_from=Y, ckey_into=X)
+    assert flag()["by_target"] == "snap:T1"
+    clock["t"] = 4000
+    _decide(risk_store, decision="unmerge_key", ckey=Y)
+    assert (flag()["by_target"], flag()["delta"]["support"]) == ("snap:T5", 1)
+
+
+def test_an_escalation_is_not_handed_to_a_row_that_was_folded_away(risk_store, clock):
+    """표기를 다른 대상으로 옮길 때 접힘으로 비어 닫힌 행(registry.vacated)은 그 대상의 클러스터가 아니라 건너뛴다 — 그 행의 지지는
+    접혔던 때의 값이다. T3 의 key(X) 행은 왕복 뒤 닫혔고(지지 2 가 남아 있다), 표기를 세운 T1 이 약해지면 표기는 꺼진다."""
+    for ck in (X, Y):
+        _part(risk_store, ck)
+    for target, project in (("snap:T1", "P1"), ("snap:T3", "P3"), ("snap:T9", "P9")):
+        _target(risk_store, target, project)
+    _dismissed(risk_store, "snap:T9", "H1", X,
+               basis={"support_at_decision": 1, "sev3_at_decision": 3, "grade_at_decision": "도구예측"})
+    for fid, panel in (("C1", "PC1"), ("C2", "PC2")):
+        _finding(risk_store, "snap:T3", fid, Y, panel=panel, severity="치명")
+    registry.merge(risk_store, "snap:T3", owner_sub=OWNER)
+    _decide(risk_store, decision="merge_key", ckey_from=Y, ckey_into=X)
+    clock["t"] = 2000
+    _decide(risk_store, decision="unmerge_key", ckey=Y)
+    assert _registry(risk_store)[("snap:T3", key_of(X))] == ("superseded", f"snap:T3#{key_of(Y)}", 2, "치명")
+
+    for fid, panel in (("D1", "PD1"), ("D2", "PD2")):
+        _finding(risk_store, "snap:T1", fid, X, panel=panel, severity="치명")
+    registry.merge(risk_store, "snap:T1", owner_sub=OWNER)
+
+    def flag() -> str | None:
+        return risk_store.query_one("SELECT needs_review_json FROM rr_registry WHERE target_key = 'snap:T9'")[0]
+
+    assert json.loads(flag())["by_target"] == "snap:T1"
+    risk_store.execute("DELETE FROM rr_findings WHERE finding_id = 'D2'")
+    registry.merge(risk_store, "snap:T1", owner_sub=OWNER)
+    assert flag() is None

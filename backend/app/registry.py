@@ -991,7 +991,45 @@ def _flag_escalations(store: RiskStore, rows: Sequence[Mapping[str, Any]], targe
                 (common.canonical_json(note), now, other["target_key"], other["cluster_key"]),
             )
             flagged.append(str(other["cluster_key"]))
+    if owner_sub:
+        _retract_escalations(store, rows, target_key, now, flow=flow, owner_sub=owner_sub)
     return flagged
+
+
+def _retract_escalations(store: RiskStore, rows: Sequence[Mapping[str, Any]], target_key: str, now: int, *,
+                         flow: str, owner_sub: str) -> None:
+    """이 대상이 세운 재검토 표기(by_target = 이 대상) 가운데 이 대상의 지금 행으로는 더 서지 않는 것을 거둔다 — 그 클러스터가 이
+    대상에서 사라졌거나(접힘이 풀렸다 · 원자가 지워졌다) 더 강하지 않다. 종전에는 표기가 한 번 서면 사람이 다시 확정할 때까지 남아,
+    키 병합 → 되돌리기 왕복 뒤에도 없어진 근거(접힘으로 늘었던 지지)를 들어 재검토를 청했다.
+
+    다른 대상의 지금 행이 여전히 더 강하면 표기를 그 대상으로 옮긴다 — 표기는 한 칸이라 뒤에 선 대상이 앞 대상의 표기를 덮어 썼으니,
+    덮은 대상의 근거가 없어졌다고 앞 대상의 근거까지 지우지 않는다. 사람이 status 를 다시 확정하면 꺼지는 것은 그대로다(set_status).
+    """
+    live = {str(r["cluster_key"]): r for r in rows}
+    for other in store.query(
+            "SELECT target_key, cluster_key, status_basis_json, needs_review_json FROM rr_registry"
+            " WHERE owner_sub = ? AND target_key != ? AND needs_review_json IS NOT NULL ORDER BY target_key, cluster_key",
+            (owner_sub, target_key)):
+        if _clean_str(_loads(other["needs_review_json"], {}).get("by_target")) != target_key:
+            continue
+        basis = _loads(other["status_basis_json"], {})
+        row = live.get(str(other["cluster_key"]))
+        if row is not None and _is_stronger(row, basis, flow=flow) is not None:
+            continue
+        note = None
+        for cand in store.query(
+                "SELECT target_key, cluster_key, status, superseded_by, sev3, support, support_domains, evidence_grade"
+                " FROM rr_registry WHERE cluster_key = ? AND owner_sub = ? AND target_key NOT IN (?, ?) ORDER BY target_key",
+                (other["cluster_key"], owner_sub, other["target_key"], target_key)):
+            if vacated(dict(cand), str(cand["target_key"])):
+                continue                  # 접힘으로 비어 닫힌 행은 그 대상의 클러스터가 아니다
+            delta = _is_stronger(dict(cand), basis, flow=target_flow(store, str(cand["target_key"])))
+            if delta is not None:
+                note = {"escalated": True, "since": now, "by_target": str(cand["target_key"]), "delta": delta}
+                break
+        store.execute(
+            "UPDATE rr_registry SET needs_review_json = ?, updated_at = ? WHERE target_key = ? AND cluster_key = ?",
+            (common.canonical_json(note) if note else None, now, other["target_key"], other["cluster_key"]))
 
 
 # ---------------------------------------------------------------- §4.7.2 verdict 후보
