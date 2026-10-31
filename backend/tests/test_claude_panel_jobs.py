@@ -195,3 +195,28 @@ def test_the_rest_route_takes_a_claude_panel_job_and_audits_the_consent(risk_sto
     assert "llm" not in glm
     assert risk_store.query_one("SELECT COUNT(*) AS n FROM rr_audit WHERE action = 'job.create'")["n"] == 1, \
         "GLM 패널 잡은 종전대로 감사 행이 없다"
+
+
+# ---------------------------------------------------------------- C3 자동 후속 — 의도된 동작(사용자 결정 10-15)
+def test_the_c3_follow_up_of_a_claude_tier_b_job_stays_on_glm(risk_store, cfg, monkeypatch):
+    """Claude 로 돈 Tier B 잡 뒤에 러너가 세우는 C3 자동 후속 Tier C 는 판단 LLM 을 물려받지 않는다 — GLM 이다. 반출 동의는 잡마다
+    사람이 하는 것이라(사용자 결정 10-15) 사람이 동의하지 않은 후속 잡이 그 대상의 자료를 Claude 로 보내지 않는다. 사람이 그 Tier C 도
+    Claude 로 돌리려면 그 잡을 손으로 만들며 동의한다. 메모 · 층 · 뺀 항목은 물려받는다(BL-10 — test_brief_exclude)."""
+    target_key = seeded(risk_store)
+    risk_store.execute("UPDATE rr_targets SET close_level = 'C3' WHERE target_key = ?", (target_key,))
+    give_credential(risk_store)
+    _peer_pat(risk_store)
+    X._probe(monkeypatch, X._external_fake())
+    made = runner.create_job(risk_store, target_key, "B", owner_sub=OWNER, settings=cfg, requester_sub=PEER, llm="claude",
+                             consent_source="web", consent_external=True)
+    assert made["llm"] == "claude"
+    job = dict(risk_store.query_one("SELECT id, target_key, tier, owner_sub, params_json FROM rr_jobs WHERE id = ?",
+                                    (made["job_id"],)))
+    job["params"] = json.loads(job.pop("params_json"))
+
+    follow = runner._finish_job(risk_store, job, cfg)["next_job"]
+
+    params = _params(risk_store, follow)
+    assert (params["tier"], params["consent_source"], params["requester"]) == ("C", "close_level", PEER)
+    assert "llm" not in params and "consent_external" not in params, "사람이 동의하지 않은 후속 잡이 Claude 로 돈다"
+    assert runner.job_llm(params) is None

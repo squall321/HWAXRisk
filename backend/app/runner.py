@@ -1662,6 +1662,8 @@ def _finish_job(store: Any, job: Mapping[str, Any], settings: Any) -> dict:
             # 자격은 B 잡과 같은 사람 순서다(요청자 → 타깃 owner) — 서비스 계정으로 내려가지 않으므로(U-3) owner 만 넘기면
             # 요청자 자격으로 돈 B 잡의 후속이 멈춘다. 사람이 브리프에서 뺀 항목도 메모 · 층과 함께 물려받는다 — 물려받지 않으면 후속
             # Tier C 패널에 그 항목이 다시 실리는데 보고서의 '사람 개입 요약' 은 brief.exclude 를 세어 그 항목 없이 돈 것처럼 읽힌다(BL-10).
+            # 판단 LLM(llm · consent_external)은 물려받지 않는다 — 의도된 동작이다. 반출 동의는 잡마다 사람이 한다(사용자 결정 10-15)라
+            # Claude 로 돈 B 잡의 후속도 GLM 이다 — 그 Tier C 를 Claude 로 돌리려면 사람이 그 잡을 만들며 동의한다(context-notes RD-7).
             follow = create_job(
                 store, job["target_key"], "C", owner_sub=job["owner_sub"],
                 modifiers=params.get("modifiers"),
