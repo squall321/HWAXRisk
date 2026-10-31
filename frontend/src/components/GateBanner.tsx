@@ -102,14 +102,14 @@ function GateAckCell({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   /**
-   * 방금 붙이거나 취소한 ack 의 답 — 9bd5f48 의 `GET snapshots/{id}?part=state` 는 동결 때의 상태 원문(state_json)을 줘서 ack 를
-   * 싣지 않는다(ack 는 gates_json 열 · rr_gate_acks 에만 남는다). 그래서 답을 이 칸에 들고 있고, 서버가 ack 를 실으면 그 값이 이긴다.
+   * 방금 붙이거나 취소한 ack 의 답 — 상태를 다시 읽기(onChanged) 전 한동안 이 칸을 채운다. `GET snapshots/{id}?part=state` 는 지금 살아
+   * 있는 ack 를 게이트에 얹어 주므로(가지 wt1031/risk-reads — 그 전에는 동결 때의 원문이라 늘 null 이었다) 다시 읽은 서버 값이 이긴다.
    */
   const [local, setLocal] = useState<GateAcked | null>(null);
   const shown = record.ack_by
-    ? { by: record.ack_by, at: record.ack_at ?? null, reason: record.ack_reason ?? null, fromServer: true }
+    ? { by: record.ack_by, at: record.ack_at ?? null, reason: record.ack_reason ?? null }
     : local && local.ack_by
-      ? { by: local.ack_by, at: local.ack_at, reason: local.ack_reason, fromServer: false }
+      ? { by: local.ack_by, at: local.ack_at, reason: local.ack_reason }
       : null;
   const acked = shown !== null;
 
@@ -131,7 +131,6 @@ function GateAckCell({
   const ackLine = shown ? (
     <span className="text-xs text-muted-foreground">
       {shown.by} · {fmtEpoch(shown.at)} · {shown.reason}
-      {shown.fromServer ? null : " — 이 서버의 스냅샷 상태는 ack 를 다시 싣지 않아 새로 열면 이 줄이 보이지 않습니다."}
     </span>
   ) : null;
 

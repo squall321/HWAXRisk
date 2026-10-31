@@ -60,6 +60,7 @@ import type {
   PanelComplete,
   PanelCompleted,
   PanelTranscript,
+  PartKey,
   DiffListRow,
   Paged,
   PortalPatAuto,
@@ -369,6 +370,8 @@ export const riskApi = {
   getSameAs: (base: string, target: string, o?: Opt) => request<SameAs>("sameas", { query: { base, target }, ...o }),
   decideSameAs: (decisions: SameAsDecision[], o?: Opt) =>
     request<SameAsDecided>("sameas/decide", { method: "POST", body: decisions, ...o }),
+  /** 키 대장 한 행의 지금 상태(병합 · 이름 · 정한 사람) — 원장에 없거나 볼 수 없으면 404 `E404`. */
+  getPartKey: (ckey: string, o?: Opt) => request<PartKey>(`part-keys/${encodeURIComponent(ckey)}`, o),
   createDiff: (body: DiffCreate, o?: Opt) => request<DiffCreated>("diffs", { method: "POST", body, ...o }),
   // 목록 3종 — 홈 탭 3개가 이 셋이 없어 '아직 없습니다' 였다(정본 §8.2.4).
   listDiffs: (q?: { project_id?: string; limit?: number; offset?: number }, o?: Opt) =>

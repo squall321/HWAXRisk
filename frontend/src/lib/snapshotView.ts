@@ -7,6 +7,7 @@ import type {
   Gates,
   IrNode,
   JsonValue,
+  PartKey,
   ReqMarginRow,
   RuleHit,
   SnapshotIr,
@@ -246,4 +247,45 @@ export function marginRows(state: Pick<SnapshotState, "signals"> | null | undefi
 export function dimValue(dim: DimNamed): string {
   if (dim.value === null || dim.value === undefined) return dim.null_reason ? `미측정(${dim.null_reason})` : "미측정";
   return `${dim.value}${dim.unit ? ` ${dim.unit}` : ""}`;
+}
+
+/** 키 대장 상태의 말(rr_part_keys.status — 모르는 값은 글자 그대로). */
+export const PART_KEY_STATUS_LABEL: Record<string, string> = {
+  candidate: "후보 — 아직 아무도 정하지 않았다",
+  confirmed: "독립 확정 키",
+  merged: "다른 키로 병합됨",
+};
+
+/**
+ * 키 대장 한 행의 지금 상태 한 줄(GET /part-keys/{ckey}) — 상태 · 붙은 이름 · 병합 대상(merged 일 때만 — 유효 키 해석이 따르는 것은 그때뿐이다) ·
+ * 정한 사람. 시각은 화면이 따로 붙인다.
+ */
+export function partKeyLine(key: PartKey): string {
+  const parts = [PART_KEY_STATUS_LABEL[key.status] ?? key.status];
+  if (key.status === "merged") parts.push(`대표 키 ${key.merged_into ?? "모름"}`);
+  parts.push(key.display_name ? `이름 «${key.display_name}»` : "이름 없음");
+  if (key.decided_by) parts.push(`정한 사람 ${key.decided_by}`);
+  return parts.join(" · ");
+}
+
+/**
+ * '독립 키로 확정' 을 잠글 까닭 — 병합된 키는 서버가 409 key_merged 로 거절한다(확정이 병합을 키 전파 없이 풀던 결함을 막는다). 푸는 길은
+ * '병합 되돌리기' 이고 되돌린 키는 이미 독립 확정 키다. 상태를 못 읽었으면 null 이다(잠그지 않고 서버의 거절 code 로 말한다).
+ */
+export function confirmKeyBlocked(key: PartKey | null | undefined): string | null {
+  if (!key || key.status !== "merged") return null;
+  return `${key.ckey} 는 ${key.merged_into ?? "다른 키"} 로 병합돼 있어 확정할 수 없습니다 — 먼저 '병합 되돌리기' 를 하세요(되돌린 키는 이미 독립 확정 키입니다).`;
+}
+
+/**
+ * 키 결정 넷(이름 붙이기 · 병합 · 병합 되돌리기 · 독립 키 확정)을 모두 잠글 까닭 — 서버(sameas.record_decision)는 부른 사람의 원장 행만
+ * 고친다. 그 행이 남의 것이거나(`mine` false — 그 키를 처음 적립한 사람의 행 · 이양받은 과제의 키) 원장에 없거나 볼 수 없으면(`absent`
+ * — 404) 어느 결정이든 404 다. 상태(status)로 가르지 않는다. 상태를 못 읽었으면 null 이다(잠그지 않고 서버의 거절 code 로 말한다).
+ */
+export function keyDecisionsBlocked(key: PartKey | null | undefined, absent: boolean): string | null {
+  if (absent) return "원장에 내 행이 없는 키라 결정을 받지 않습니다(404).";
+  if (key && !key.mine) {
+    return "이 행은 다른 사람(그 키를 처음 적립한 사람)의 원장입니다 — 내 결정은 받지 않아(404) 이름 · 병합 · 되돌리기 · 확정을 잠갔습니다. 내 키 해석은 이 행의 병합을 따르지 않습니다.";
+  }
+  return null;
 }

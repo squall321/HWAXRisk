@@ -284,8 +284,9 @@ export type ProjectCreate = {
  * 과제 행(routes._project_row) — `POST /projects` 의 답이자 `GET /projects/{id}` 의 `project`.
  * 서버 열 이름 그대로다 — `adh_scope` 는 보낼 때만의 꼴이고 받을 때는 `adh_team`·`adh_group` 두 열이다.
  *
- * 물음표 칸은 계약(plan §8.2.3 · §8.2.4 ProjectPage 머리)에 있지만 9bd5f48 의 `_project_row` 가 싣지 않는 열이다 — 화면은 오면 쓰고,
- * 없으면 '이 서버가 주지 않는다' 로 보인다(값을 지어내지 않는다). `PATCH` 의 답(`ProjectMeta`)은 이 열들을 싣는다.
+ * 물음표 칸은 메타 열(plan §8.2.3 · §8.2.4 ProjectPage 머리)이다 — `GET /projects/{id}` 는 싣고(routes.PROJECT_META_COLS — 가지
+ * wt1031/risk-reads 부터, `corpus_excluded` 는 bool · `product_refs_json` 은 푼 배열) `POST /projects` 의 답은 싣지 않는다. 화면은 오면 쓰고,
+ * 없으면 '이 서버가 주지 않는다' 로 보인다(값을 지어내지 않는다 — 옛 서버). `PATCH` 의 답(`ProjectMeta`)도 이 열들을 싣는다.
  */
 export type Project = {
   id: string;
@@ -421,8 +422,9 @@ export type ProjectSource = {
 export type ProjectSourceBrief = { kind: string; app_key: string | null; status: SourceStatus | (string & {}) };
 
 /**
- * `GET /projects` 의 카드 1장(routes.projects_payload). 물음표 칸(등급 · 수명 주기 · 코퍼스 제외 · 내 역할)은 계약(plan §8.2.3)에
- * 있지만 9bd5f48 서버가 싣지 않는다 — 화면은 오면 칩을 그리고, 없으면 거름을 잠근다.
+ * `GET /projects` 의 카드 1장(routes.projects_payload) — 부른 사람이 소유하거나 구성원인 과제다. 등급 · 수명 주기 · 코퍼스 제외(bool) ·
+ * 내 역할(구성원이 아니면 null — MCP 목록의 조직 공개 과제)을 싣는다(가지 wt1031/risk-reads 부터). 화면은 옛 서버가 칸을 주지 않으면
+ * 거름을 잠근다.
  */
 export type ProjectCard = {
   id: string;
@@ -438,10 +440,10 @@ export type ProjectCard = {
   coverage_pct: number | null;
   /** 대상이 없으면 null 이다. */
   level: CoverageLevel | null;
-  classification?: Classification | null;
-  lifecycle?: Lifecycle | null;
-  corpus_excluded?: boolean | number | null;
-  my_role?: ProjectRole | null;
+  classification: Classification | null;
+  lifecycle: Lifecycle | null;
+  corpus_excluded: boolean | null;
+  my_role: ProjectRole | null;
 };
 
 export type ProjectList = { projects: ProjectCard[] };
@@ -449,9 +451,10 @@ export type ProjectList = { projects: ProjectCard[] };
 /**
  * 과제 상세의 스냅샷 한 줄(`GET /projects/{id}` → `snapshots[]`).
  *
- * **서버 열 이름 그대로 둔다.** 여기에 서버에 없는 이름(`label`·`captured_at`·`kinds`)을 적어
+ * **서버 열 이름 그대로 둔다.** 여기에 서버에 없는 이름(`captured_at`·`kinds`)을 적어
  * 두었더니 `tsc` 가 통과하고 화면은 런타임에 깨졌다 — `s.kinds.join()` 이 undefined 를 불렀다.
- * 타입이 거짓이면 타입검사는 거짓을 지켜 준다.
+ * 타입이 거짓이면 타입검사는 거짓을 지켜 준다. `label` · `app_versions` · `adapter_versions` · `degraded_json` 은 가지 wt1031/risk-reads 가
+ * 더한 칸이다(그 전 서버에는 없었다).
  */
 export type SnapshotHeader = {
   id: string;
@@ -462,11 +465,16 @@ export type SnapshotHeader = {
   node_count: number;
   edge_count: number;
   warnings_n: number;
-  /**
-   * 강등 표지 — bool 이 아니라 rr_snapshots 의 호환 열 그대로다(degraded_json 의 첫 code, 없으면 null). 이 응답은 목록 전체를 싣지
-   * 않는다(스냅샷 화면의 상태 · 동결 답이 싣는다).
-   */
+  /** 강등 표지 — bool 이 아니라 rr_snapshots 의 호환 열 그대로다(`degraded_json` 의 첫 code, 없으면 null). */
   degraded: string | null;
+  /** 강등 표지 전부(소스별 목록의 합집합, 정렬) — 없으면 빈 배열이다. */
+  degraded_json: string[];
+  /** 이 스냅샷을 만든 동결 잡의 이름(label) — 동결 잡 없이 언 것(손 픽스처 · 옮겨 온 것)이나 이름 없이 언 것은 null 이다. */
+  label: string | null;
+  /** 소스 kind → 소스 앱 판(adapters 의 probe — 모르면 빈 객체). '파서 세대 다름' 을 미리 견줄 칸이다. */
+  app_versions: Record<string, { version?: string | null; captured_via?: string | null; extra?: JsonValue }>;
+  /** 소스 kind → 어댑터 판. */
+  adapter_versions: Record<string, string>;
   created_at: number;
 };
 
@@ -499,8 +507,11 @@ export type JobHeader = {
 
 export type ProjectDetail = {
   project: Project;
-  /** 계약(plan §8.2.3)에는 있지만 9bd5f48 서버는 싣지 않는다 — 멤버 탭은 `GET /projects/{id}/members` 를 따로 부른다. */
-  members?: Array<{ email: string; role: string }>;
+  /**
+   * 멤버 표(소유자 행 포함, routes._members_of 차례) — 가지 wt1031/risk-reads 부터 싣는다. 멤버 탭은 추가 · 시각 칸이 있는
+   * `GET /projects/{id}/members` 를 따로 부른다.
+   */
+  members: Array<{ email: string; role: ProjectRole | (string & {}) }>;
   sources: ProjectSource[];
   snapshots: SnapshotHeader[];
   targets: TargetHeader[];
@@ -832,7 +843,13 @@ export type SnapshotState = {
   rule_version: string;
   computed_at: number;
   blocked: boolean;
+  /**
+   * 게이트 — 동결 때의 판정에 지금 살아 있는 ack(취소되지 않았고 단 때의 판정 지문이 지금과 같은 것)의 누가 · 언제 · 사유를 얹어
+   * 온다(routes._with_live_acks — 가지 wt1031/risk-reads 부터, 그 전에는 ack 칸이 늘 null 이었다).
+   */
   gates: Gates;
+  /** 게이트 판정만의 지문(ack 칸 제외) — ack 로는 바뀌지 않는다. ack 본문의 `gates_hash` 로 그대로 싣는다. */
+  gates_hash: string;
   missing: Record<string, boolean>;
   signals: Record<string, SignalRecord>;
   character_seed: CharacterSeed[];
@@ -934,7 +951,11 @@ export type SameAsPair = {
   evidence: JsonValue;
 };
 
-export type SameAs = { pairs: SameAsPair[]; pending_n: number; G2: GateRecord | null };
+/**
+ * `GET /sameas` — `pair_key` 는 이 표가 쌍 원장을 읽은 열쇠다(정렬한 두 과제 id 를 '|' 로 이은 것 — 가지 wt1031/risk-reads 부터). 확정 ·
+ * 거부는 이 값을 그대로 싣는다.
+ */
+export type SameAs = { pair_key: string; pairs: SameAsPair[]; pending_n: number; G2: GateRecord | null };
 
 /**
  * 대응 확정 · 거부 한 줄(sameas.record_decision) — 원장 열쇠는 노드 id(`a` · `b`)가 아니라 **stable 키**다. `pair_key` 는 scope 마다
@@ -958,6 +979,37 @@ export type CkeyLedgerDecision = {
 
 /** 한 배열에 두 종류를 섞어 보낼 수 있다(§8.2.3). */
 export type SameAsDecision = SameAsPairDecision | CkeyLedgerDecision;
+
+/** 정규 키의 별칭 한 줄(rr_part_keys.aliases_json) — 이 키를 단 노드가 어느 과제에서 어떤 이름이었나. */
+export type PartKeyAlias = {
+  project_id: string;
+  domain: string;
+  label: string | null;
+  local_key: string | null;
+  name_norm: string | null;
+};
+
+/**
+ * `GET /part-keys/{ckey}`(routes.part_key_payload — 가지 wt1031/risk-reads) — 키 대장 한 행의 지금 상태. 주인은 별칭을 다 보고, 구성원은
+ * 자기가 구성원인 과제의 별칭만 본다. 원장에 없는 키 · 볼 수 없는 키는 404 `E404` 다. `merged_into` 는 `status` 가 merged 일 때만 유효 키
+ * 해석이 따른다 — 화면은 status 로 가른다. 결정을 받는지는 status 가 아니라 `mine` 으로 가른다(남의 원장 행이면 어느 결정이든 404).
+ */
+export type PartKey = {
+  ckey: string;
+  status: "candidate" | "confirmed" | "merged" | (string & {});
+  merged_into: string | null;
+  display_name: string | null;
+  aliases: PartKeyAlias[];
+  /** 마지막으로 정한 사람(사용자 이메일) 또는 코드(`code:pair_correspondence` — 자동 승계). 정한 적이 없으면 null. */
+  decided_by: string | null;
+  decided_at: number | null;
+  /**
+   * 이 행이 부른 사람의 원장 행인가. 원장 행은 그 키를 처음 적립한 사람의 것이라(ckey 가 열쇠 하나다) 구성원으로 본 키 · 이양받은 과제의
+   * 키는 false 다 — 그때 이 행의 병합 · 이름은 내 키 상태가 아니고 내 결정(이름 · 병합 · 되돌리기 · 확정)은 404 다. 화면은 이 값으로 잠근다.
+   */
+  mine: boolean;
+};
+
 /**
  * `POST /sameas/decide` 의 답(routes.post_sameas_decide — 배열은 한 트랜잭션이다). ckey 결정의 결과 줄은
  * `{ok, table: "rr_part_keys", decision, ckey, merged_into? | display_name? | status?}` 다. `G2` 는 지금 늘 null 이다.
@@ -1272,6 +1324,11 @@ export type CoverageJob = {
   panels_total: number;
   error: string | null;
   signal: JobSignal | null;
+  /**
+   * 도는 패널마다의 신호(가지 wt1031/risk-reads 부터). 러너는 대상마다 패널을 하나씩만 돌려(잡의 concurrency 는 러너가 읽지 않는다) 지금은
+   * 많아야 한 줄이고 `signal` 과 같다.
+   */
+  signals: JobSignal[];
   llm?: "claude";
   consent_external?: ConsentExternal;
   /** Claude 잡인데 외부 응답자 답이 아니었던 호출 · 패널 수. */

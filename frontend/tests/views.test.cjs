@@ -191,10 +191,7 @@ test("diff 3층을 한 표 줄로 — ECAD 노드 변화와 그 dn 의 파라메
   assert.deepEqual(cmp.excludedCounts(rows), [{ reason: "partial_scope", isEcad: true, n: 1 }]);
 });
 
-test("대응 확정 본문 — stable 키와 정렬한 두 과제 id 의 pair_key, 하나라도 없으면 보내지 않는다", () => {
-  assert.equal(cmp.samePairKey("p-b", "p-a"), "p-a|p-b");
-  assert.equal(cmp.samePairKey("p-a", "p-a"), "p-a|p-a");
-  assert.equal(cmp.samePairKey("p-a", null), null);
+test("대응 확정 본문 — stable 키와 서버가 준 pair_key, 하나라도 없으면 보내지 않는다", () => {
   const row = { a: "p:1", b: "p:9", a_stable: "st:x", b_stable: "st:y" };
   assert.deepEqual(cmp.pairDecision(row, "reject", "p-a|p-b"), {
     decision: "reject", scope: "pair", a_stable: "st:x", b_stable: "st:y", pair_key: "p-a|p-b",

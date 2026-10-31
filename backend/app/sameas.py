@@ -1159,6 +1159,13 @@ def record_decision(store, payload: Mapping[str, Any], *, owner_sub: str,
                           (ckey, owner_sub))
     if row is None:
         raise AppError("E404", f"rr_part_keys 에 없는 ckey 입니다 — {ckey}.", 404)
+    if decision == "confirm_key" and row["status"] == "merged":
+        # 병합된 키의 확정은 병합을 푸는 일이다 — 종전에는 status 만 confirmed 로 바꿔 merged_into 가 남았다. 유효 키 해석(resolve_ckey —
+        # merged 일 때만 merged_into 를 따른다)은 병합이 풀린 것으로 읽는데 키 전파(rekey)는 돌지 않아 저장 키 · 등록부가 병합된 채였다.
+        # 푸는 길은 unmerge_key 하나다(키 전파 · rr_audit 가 함께 돈다). 배열은 한 트랜잭션이라 함께 보낸 결정도 되돌아간다.
+        raise AppError("key_merged", f"이 키는 {row['merged_into']} 로 병합돼 있습니다 — 독립 키로 두려면 먼저 병합 되돌리기"
+                       "(unmerge_key)를 하세요. 되돌린 키는 이미 확정 상태입니다.", 409,
+                       detail={"ckey": ckey, "merged_into": row["merged_into"]})
 
     with store.tx():
         if decision == "merge_key":

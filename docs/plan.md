@@ -94,15 +94,15 @@
 
 ## REST
 
-- base `/apps/hwax_risk/api`(앱 내부 `/api`, `backend/app/routes.py`), 모든 핸들러는 `Depends(identity.current)`. 정본 §8.2.3 의 경로를 포함해 **96개**가 배선돼 있다(2026-10-31 실측 — 재설계 M2 · M3 와 ECAD · 백로그 경로 포함).
+- base `/apps/hwax_risk/api`(앱 내부 `/api`, `backend/app/routes.py`), 모든 핸들러는 `Depends(identity.current)`. 정본 §8.2.3 의 경로를 포함해 **97개**가 배선돼 있다(2026-10-31 실측 — 재설계 M2 · M3 와 ECAD · 백로그 경로 · 키 대장 읽기 포함).
 - 신원·메타 — `GET /health {ok, app_version, schema_version}` · `GET /me`(+`box{hostname, secrets_valid, cred_key_present}`) ·
   `PUT /me/portal-pat {pat|null}`(익명 401, 422 6종) · `GET /meta/{taxonomy, adapters, vocab, metrics}` · `POST /meta/metrics/recompute`.
-- 과제·소스·스냅샷 — `projects`(생성·조회·`PATCH`(lifecycle·등급·`mcp_visibility`)·멤버·이양·폐기·감사·유사·dims·요구·`iface-ledger`) ·
-  `sources`(같은 원천이 붙은 내 다른 과제(폐기 과제 제외)는 `duplicate_of` 로 알림) · `snapshots`(조회·게이트 ack·`rule_hits`) · `sameas`(조회·`decide` — 확정을 뒤집는 결정 · `merge_key` · 계면 별칭 철회
-  `revoke_iface_alias` 는 같은 트랜잭션에서 키 전파 `rekey` 를 돈다, §5.9.5) · `diffs`.
-- 심사 — `targets`(브리프·커버리지·편성 `jobs`(`exclude_evidence` — 브리프 항목 빼기)·`refresh_roster`·`resync`·`findings`(mechanism · domain 은 택소노미 어휘)·`registry`·`verdict`·`audit`(그 대상의 사람 행위 — 맨 클러스터 열쇠 행은 그 대상 소유자의 것만)) · `panels`(브리프·`complete`) ·
+- 과제·소스·스냅샷 — `projects`(생성·조회(목록 · 상세는 구성원도 — 메타 열 · 멤버 · 내 역할)·`PATCH`(lifecycle·등급·`mcp_visibility`)·멤버·이양·폐기·감사·유사·dims·요구·`iface-ledger`) ·
+  `sources`(같은 원천이 붙은 내 다른 과제(폐기 과제 제외)는 `duplicate_of` 로 알림) · `snapshots`(조회 — 상태는 지금 살아 있는 게이트 ack · `gates_hash` 를 얹는다·게이트 ack·`rule_hits`) · `sameas`(조회 — 답 머리에 `pair_key`·`decide` — 확정을 뒤집는 결정 · `merge_key` · 계면 별칭 철회
+  `revoke_iface_alias` 는 같은 트랜잭션에서 키 전파 `rekey` 를 돈다, §5.9.5 · 병합된 키의 `confirm_key` 는 409 `key_merged`) · `part-keys/{ckey}`(키 대장 한 행 — 주인 · 그 키가 든 과제의 구성원, `mine` 은 내 원장 행인가 — 아니면 결정은 404) · `diffs`.
+- 심사 — `targets`(브리프·커버리지(패널 잡의 `signal` · 도는 패널마다의 `signals`)·편성 `jobs`(`exclude_evidence` — 브리프 항목 빼기)·`refresh_roster`·`resync`·`findings`(mechanism · domain 은 택소노미 어휘)·`registry`·`verdict`·`audit`(그 대상의 사람 행위 — 맨 클러스터 열쇠 행은 그 대상 소유자의 것만)) · `panels`(브리프·`complete`) ·
   `registry`(status·visibility·merge) · `findings`(수정·삭제·라벨) · `curation`(MCP 길 원자의 회수 복귀 `approve_recall` — 다른 격리가 남은 원자는 되돌리지 않고 `applied.held`) · `patterns` · `precedents` · `refs/{ref:path}`.
-- 살림 — `vocab/{synonyms, stop-tokens}` · `jobs/{id}/{action}` · `GET /export` · `POST /import`.
+- 살림 — `vocab/{synonyms, stop-tokens}` · `jobs/{id}/{action}` · `GET /export` · `POST /import`(내 과제 · 스냅샷 · 대상 · 비교에 매달린 줄만 — 남의(또는 없는) 부모에 매달린 줄은 `parent_not_owned`, 남의 이메일로 적은 멤버 owner 행은 `owner_row_immutable` 로 그 줄만 눕는다).
 - 사람 조작 감사(2026-10-31, 사용자 결정) — `jobs/{id}/{action}`(MCP `risk_job_action` 도 같은 함수) · `registry/{cluster}/status` ·
   `targets/{key}/verdict` 는 rr_audit 한 행씩(`job.pause|resume|cancel` — 잡 행을 바꾼 조작만 · `registry.status` — 바꾼 대상 행마다
   '<대상>#<클러스터>' · `verdict.final` — 확정마다)을 남겨 대상 감사와 통합 보고서 '사람 개입 요약' 에 선다. 행에는 코드 어휘(상태 · 보류 코드 ·

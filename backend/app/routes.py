@@ -909,9 +909,13 @@ def create_project(body: ProjectBody, ident: identity.Identity = Depends(identit
 
 
 def _project_sources(project_id: str) -> list[dict]:
+    """그 과제의 소스 — 과제 주인의 행만이다(하위 표의 owner_sub 는 rr_projects.owner_sub 의 복제다, plan §5.2.1). 주인이 다른 행은
+    남이 그 과제 id 를 적어 들여온 행이라(들여오기가 부모를 보기 전에 선 것) 싣지 않는다."""
     rows = get_store().query(
-        "SELECT id, kind, app_key, ref_json, ref_key, bridge_declared, probe_json, probe_at, adapter_version"
-        " FROM rr_sources WHERE project_id = ? ORDER BY kind, id", (project_id,),
+        "SELECT s.id AS id, s.kind AS kind, s.app_key AS app_key, s.ref_json AS ref_json, s.ref_key AS ref_key,"
+        " s.bridge_declared AS bridge_declared, s.probe_json AS probe_json, s.probe_at AS probe_at,"
+        " s.adapter_version AS adapter_version FROM rr_sources s JOIN rr_projects p ON p.id = s.project_id"
+        " WHERE s.project_id = ? AND s.owner_sub = p.owner_sub ORDER BY s.kind, s.id", (project_id,),
     )
     out = []
     for row in rows:
@@ -925,33 +929,40 @@ def _project_sources(project_id: str) -> list[dict]:
 
 @router.get("/projects")
 def list_projects(ident: identity.Identity = Depends(identity.current)) -> dict:
-    """과제 카드 그리드의 원천 — 소스 상태·최근 스냅샷·열린 타깃·커버리지·level."""
-    return projects_payload(owner_sub=_require_user(ident))
+    """과제 카드 그리드의 원천 — 소스 상태·최근 스냅샷·열린 타깃·커버리지·level, 그리고 등급 · 수명 주기 · 코퍼스 제외 · 내 역할.
+
+    부른 사람이 소유하거나 구성원(편집자 · 보기)인 과제다 — 조직 공개(org)만으로는 들지 않는다(MCP 의 visible_projects 와 다르다)."""
+    email = _require_user(ident)
+    # 멤버 행은 편집자 · 보기만 센다 — owner 는 과제 행의 주인 열만 정한다(project_role 과 같은 판정).
+    rows = get_store().query(
+        "SELECT id FROM rr_projects WHERE owner_sub = ? OR id IN (SELECT project_id FROM rr_project_members"
+        " WHERE email = ? AND role IN ('viewer', 'editor'))", (email, email))
+    return projects_payload(project_ids=[r["id"] for r in rows], viewer=email)
 
 
-def projects_payload(*, owner_sub: str | None = None, project_ids: list[str] | None = None) -> dict:
+def projects_payload(*, project_ids: list[str], viewer: str | None = None) -> dict:
     """`GET /projects` 본체 — MCP `risk_list_projects` 와 같은 함수.
 
-    웹은 `owner_sub` 로 자기 과제만 본다. MCP 는 단일 소유자가 아니라 **볼 수 있는 과제 집합**
-    (`visible_projects`)이 범위라 `project_ids` 로 받는다 — 그래서 두 인자가 따로 있다.
+    범위는 부르는 쪽이 정한 과제 집합이다 — 웹은 소유 ∪ 구성원(`list_projects`), MCP 는 **볼 수 있는 과제 집합**(`visible_projects`)
+    이다. `viewer` 는 카드의 `my_role`(owner · editor · viewer, 구성원이 아니면 null — 조직 공개로만 보이는 과제)을 셀 사람이다 —
+    owner 는 과제 행의 주인 열만, 멤버 행은 편집자 · 보기만 센다(project_role 과 같은 판정).
     id 를 알아낼 길이 이것뿐이라(나머지 도구가 전부 id 를 인자로 받는다) 목록이 곧 진입점이다."""
     store = get_store()
-    if project_ids is not None:
-        if not project_ids:
-            return {"projects": []}
-        marks = ",".join("?" for _ in project_ids)
-        rows = store.query(
-            f"SELECT id, code, name, stage, owner_sub, created_at FROM rr_projects WHERE id IN ({marks})"
-            " ORDER BY created_at DESC, id", tuple(project_ids))
-    else:
-        rows = store.query(
-            "SELECT id, code, name, stage, owner_sub, created_at FROM rr_projects WHERE owner_sub = ?"
-            " ORDER BY created_at DESC, id", (owner_sub,))
+    if not project_ids:
+        return {"projects": []}
+    marks = ",".join("?" for _ in project_ids)
+    rows = store.query(
+        f"SELECT id, code, name, stage, owner_sub, classification, lifecycle, corpus_excluded, created_at FROM rr_projects"
+        f" WHERE id IN ({marks}) ORDER BY created_at DESC, id", tuple(project_ids))
+    roles = ({r["project_id"]: r["role"] for r in store.query(
+        "SELECT project_id, role FROM rr_project_members WHERE email = ? AND role IN ('viewer', 'editor')",
+        (viewer,))} if viewer else {})
     projects = []
     for row in rows:
         _own = row["owner_sub"]
+        # 스냅샷 · 소스도 대상처럼 과제 주인의 행만 센다(get_project 와 같은 거름).
         last = store.query_one(
-            "SELECT MAX(created_at) AS ts FROM rr_snapshots WHERE project_id = ?", (row["id"],))
+            "SELECT MAX(created_at) AS ts FROM rr_snapshots WHERE project_id = ? AND owner_sub = ?", (row["id"], _own))
         targets = [dict(t) for t in store.query(
             "SELECT target_key, level, created_at FROM rr_targets WHERE project_id = ? AND owner_sub = ?"
             " ORDER BY created_at DESC", (row["id"], _own))]
@@ -961,8 +972,8 @@ def projects_payload(*, owner_sub: str | None = None, project_ids: list[str] | N
             if summary["roster_size"]:
                 coverage_pct = round(100.0 * summary["terminal_n"] / summary["roster_size"], 1)
         _snap = store.query_one(
-            "SELECT id FROM rr_snapshots WHERE project_id = ? ORDER BY created_at DESC, id LIMIT 1",
-            (row["id"],))
+            "SELECT id FROM rr_snapshots WHERE project_id = ? AND owner_sub = ? ORDER BY created_at DESC, id LIMIT 1",
+            (row["id"], _own))
         projects.append({
             "id": row["id"], "code": row["code"], "name": row["name"], "stage": row["stage"],
             "targets": [t["target_key"] for t in targets],
@@ -973,19 +984,52 @@ def projects_payload(*, owner_sub: str | None = None, project_ids: list[str] | N
             "open_targets": sum(1 for t in targets if t["level"] != "C2(closed)"),
             "coverage_pct": coverage_pct,
             "level": targets[0]["level"] if targets else None,
+            "classification": row["classification"],
+            "lifecycle": row["lifecycle"],
+            "corpus_excluded": bool(row["corpus_excluded"]),
+            "my_role": "owner" if viewer is not None and _own == viewer else roles.get(row["id"]),
         })
     return {"projects": projects}
 
 
+# 과제 상세의 과제 행에 더 싣는 메타 열(plan §8.2.3 · §8.2.4 ProjectPage 머리 — PATCH 가 바꾸는 열과 상태).
+PROJECT_META_COLS: tuple[str, ...] = (
+    "classification", "lifecycle", "closed_at", "corpus_excluded", "excluded_reason", "mcp_visibility",
+    "product_code", "product_refs_json", "predecessor_product_code", "status",
+)
+
+
 @router.get("/projects/{project_id}")
 def get_project(project_id: str, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """ProjectPage 한 화면 — 과제·소스·스냅샷 헤더·타깃 헤더·잡·성격 태그."""
-    owner_sub = _require_user(ident)
-    project = _project_row(project_id, owner_sub)
+    """ProjectPage 한 화면 — 과제(메타 열까지)·멤버·소스·스냅샷 헤더·타깃 헤더·잡·성격 태그.
+
+    구성원(보기 이상)이 연다 — 남은 없는 과제와 같은 404 다(require_role, 남 숨김). 과제 행의 `corpus_excluded` 는 bool, 제품 연결
+    (`product_refs_json`)은 푼 배열이다. 대상 · 잡 · 스냅샷 · 소스 · 성격 태그는 부른 사람이 아니라 과제의 주인(신원 앵커 — 하위 표의
+    owner_sub 는 그 복제다)의 행으로 고른다 — 구성원이 열어도 그 과제의 것이 보이고, 남이 그 과제 id 를 적어 들여온 행(주인이 다르다)은
+    싣지 않는다. 스냅샷 머리는 이름(그 스냅샷을 만든 동결 잡의 label — 같은 주인의 잡만, 동결 잡 없이 언 것은 null) · 앱 판 · 어댑터 판 ·
+    강등 표지 전부(`degraded_json` — `degraded` 는 그 첫 값인 호환 열)를 함께 싣는다."""
+    email = _require_user(ident)
+    require_role(project_id, email, "viewer")
     store = get_store()
-    snapshots = [dict(r) for r in store.query(
-        "SELECT id, ir_version, ir_hash, kinds_json, node_count, edge_count, warnings_n, degraded, created_at"
-        " FROM rr_snapshots WHERE project_id = ? ORDER BY created_at DESC, id", (project_id,))]
+    project = dict(store.query_one(
+        "SELECT id, owner_sub, code, name, stage, predecessor_project_id, adh_team, adh_group, character_status,"
+        f" created_at, updated_at, {', '.join(PROJECT_META_COLS)} FROM rr_projects WHERE id = ?", (project_id,)))
+    project["corpus_excluded"] = bool(project["corpus_excluded"])
+    project["product_refs_json"] = _loads(project["product_refs_json"], [])
+    owner_sub = project["owner_sub"]
+    snapshots = []
+    for row in store.query(
+        "SELECT s.id AS id, s.ir_version AS ir_version, s.ir_hash AS ir_hash, s.kinds_json AS kinds_json,"
+        " s.node_count AS node_count, s.edge_count AS edge_count, s.warnings_n AS warnings_n, s.degraded AS degraded,"
+        " s.degraded_json AS degraded_json, s.app_versions_json AS app_versions_json,"
+        " s.adapter_versions_json AS adapter_versions_json, s.created_at AS created_at, j.label AS label"
+        " FROM rr_snapshots s LEFT JOIN rr_snapshot_jobs j ON j.id = s.job_id AND j.owner_sub = s.owner_sub"
+        " WHERE s.project_id = ? AND s.owner_sub = ? ORDER BY s.created_at DESC, s.id", (project_id, owner_sub)):
+        head = dict(row)
+        head["degraded_json"] = _loads(head["degraded_json"], [])
+        head["app_versions"] = _loads(head.pop("app_versions_json"), {})
+        head["adapter_versions"] = _loads(head.pop("adapter_versions_json"), {})
+        snapshots.append(head)
     targets = [dict(r) for r in store.query(
         "SELECT target_key, kind, ref_id, level, close_level, verdict_candidate, verdict_final, created_at,"
         " external_sync_json FROM rr_targets WHERE project_id = ? AND owner_sub = ? ORDER BY created_at DESC",
@@ -1001,10 +1045,11 @@ def get_project(project_id: str, ident: identity.Identity = Depends(identity.cur
         " ON t.target_key = j.target_key WHERE t.project_id = ? AND j.owner_sub = ?"
         " ORDER BY j.created_at DESC LIMIT 50", (project_id, owner_sub))]
     tags = [dict(r) for r in store.query(
-        "SELECT tag, COUNT(*) AS n FROM rr_character WHERE project_id = ? AND tag IS NOT NULL"
-        " GROUP BY tag ORDER BY n DESC, tag LIMIT 10", (project_id,))]
+        "SELECT tag, COUNT(*) AS n FROM rr_character WHERE project_id = ? AND owner_sub = ? AND tag IS NOT NULL"
+        " GROUP BY tag ORDER BY n DESC, tag LIMIT 10", (project_id, owner_sub))]
     return {
         "project": project,
+        "members": [{"email": m["email"], "role": m["role"]} for m in _members_of(project_id)],
         "sources": _project_sources(project_id),
         "snapshots": snapshots,
         "targets": targets,
@@ -1030,7 +1075,10 @@ EXCLUDED_REASONS = ("fixture", "misregistered", "duplicate", "user")
 
 
 def project_role(project_id: str, email: str) -> str | None:
-    """그 과제에서 이 사람의 role — 소유자는 언제나 owner, 아니면 rr_project_members 행(없으면 None)."""
+    """그 과제에서 이 사람의 role — 소유자는 언제나 owner, 아니면 rr_project_members 의 편집자 · 보기 행(없으면 None).
+
+    owner 는 과제 행의 주인 열(신원 앵커)만 정한다 — owner 멤버 행은 그 주인의 것뿐이라(risk_store 불변식 · 소유는 이양만이 바꾼다) 다른
+    사람의 owner 행은 역할로 읽지 않는다. 그런 행은 남이 들여오기로 적은 것이었다(그 사람이 이양까지 했다 — 반대 검토 10-31 High)."""
     store = get_store()
     row = store.query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,))
     if row is None:
@@ -1039,7 +1087,7 @@ def project_role(project_id: str, email: str) -> str | None:
         return "owner"
     member = store.query_one(
         "SELECT role FROM rr_project_members WHERE project_id = ? AND email = ?", (project_id, email))
-    return member["role"] if member is not None else None
+    return member["role"] if member is not None and member["role"] in MEMBER_ROLES else None
 
 
 def require_role(project_id: str, email: str, need: str) -> str:
@@ -2370,7 +2418,7 @@ def snapshot_part(snapshot_id: str, part: str, *, owner_sub: str | None = None,
         saved = state_module.load_state(store, snapshot_id)
         if saved is None:
             raise AppError("E404", f"rr_state 가 없습니다 — {snapshot_id}.", 404)
-        return saved
+        return _with_live_acks(store, snapshot_id, saved)
     if part == "calls":
         return {"snapshot_id": snapshot_id,
                 "calls": ir_builder.load_calls(store, snapshot_id, include_response=False)}
@@ -2411,6 +2459,30 @@ def snapshot_part(snapshot_id: str, part: str, *, owner_sub: str | None = None,
     if truncated:
         out["next_offset"] = start + len(items)
     return out
+
+
+def _with_live_acks(store: Any, snapshot_id: str, state: dict) -> dict:
+    """동결 때의 상태 원문(state_json — 게이트의 ack 칸은 동결 때의 null 이다)에 지금 살아 있는 게이트 ack 와 판정 지문을 얹는다.
+
+    ack 의 정본은 rr_gate_acks 다 — 취소된 것(revoked_at)과 단 때의 판정 지문이 지금 지문과 다른 것(판정이 다시 세어져 바뀐 뒤의 낡은
+    ack — 그 표의 gates_hash 열)은 싣지 않는다. `gates_hash` 는 ack 칸을 뺀 판정만의 지문(state.gates_hash)이라 ack 로는 바뀌지 않고
+    ack 라우트가 gates_json 으로 세는 값과 같다 — 화면은 이 값을 ack 본문의 gates_hash 로 그대로 싣는다. ack 행은 그 스냅샷 주인의 것만
+    읽는다(ack 라우트는 주인만 쓴다 — 주인이 다른 행은 남이 들여오기로 적은 것이다). 게이트에서 만든 글(gates.summary 신호 · summary_text 의
+    [게이트] 줄)도 얹은 ack 에 맞춘다(state.restate_gate_acks)."""
+    gates = state.get("gates") or {}
+    current = state_module.gates_hash(gates)
+    acks = {row["gate"]: row for row in store.query(
+        "SELECT gate, ack_by, ack_at, ack_reason, gates_hash FROM rr_gate_acks"
+        " WHERE snapshot_id = ? AND diff_id IS NULL AND revoked_at IS NULL"
+        " AND owner_sub = (SELECT owner_sub FROM rr_snapshots WHERE id = ?)", (snapshot_id, snapshot_id))}
+    for key, record in gates.items():
+        if not isinstance(record, dict):
+            continue
+        ack = acks.get(key)
+        live = ack is not None and ack["gates_hash"] == current
+        for col in ("ack_by", "ack_at", "ack_reason"):
+            record[col] = ack[col] if live else None
+    return state_module.restate_gate_acks({**state, "gates_hash": current})
 
 
 @router.get("/snapshots/{snapshot_id}")
@@ -2553,8 +2625,12 @@ def get_sameas(base: str = Query(...), target: str = Query(...),
         "pair", sameas.load_ledger(store, "pair", pair_key, owner_sub),
     )
     rows = sameas.review_rows(links, list(base_ir.get("nodes") or []), list(target_ir.get("nodes") or []))
-    target_state = state_module.load_state(store, target) or {}
+    # G2 는 스냅샷 상태(GET /snapshots/{id}?part=state)와 같은 레코드다 — 지금 살아 있는 ack 를 얹는다(두 화면이 같은 게이트를 달리 말하지 않게).
+    target_state = state_module.load_state(store, target)
+    target_state = _with_live_acks(store, target, target_state) if target_state is not None else {}
     return {
+        # 이 표가 원장을 읽은 열쇠 — 확정 · 거부(POST /sameas/decide, scope pair)는 이 값을 그대로 싣는다(화면이 짓지 않는다).
+        "pair_key": pair_key,
         "pairs": rows,
         "pending_n": sum(1 for r in rows if r["status"] == "pending"),
         "G2": (target_state.get("gates") or {}).get("G2"),
@@ -2573,6 +2649,45 @@ def post_sameas_decide(body: list[dict], ident: identity.Identity = Depends(iden
         results = [sameas.record_decision(store, item, owner_sub=owner_sub, channel=channel,
                                           actor_verified=channel != "mcp") for item in body]
     return {"updated": len(results), "results": results, "G2": None}
+
+
+@router.get("/part-keys/{ckey}")
+def get_part_key(ckey: str, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """정규 키 원장 한 행(plan §2.7.3 키 대장) — {ckey, status, merged_into, display_name, aliases[], decided_by, decided_at, mine}."""
+    return part_key_payload(ckey, _require_user(ident))
+
+
+def part_key_payload(ckey: str, email: str) -> dict:
+    """`GET /part-keys/{ckey}` 본체 — 키의 지금 상태(병합됐는가 · 붙은 이름 · 누가 언제 정했나)와 별칭.
+
+    원장 행은 주인(owner_sub — 그 키를 처음 적립한 과제 주인)의 것이다. 주인은 다 보고, 그 키가 든 과제(행의 첫 과제 · 별칭의 과제)의
+    구성원(보기 이상)은 자기가 구성원인 과제의 별칭만 본다 — 주인의 다른 과제 이름 · 부품 이름을 흘리지 않는다. 같은 ckey 를 남의
+    스냅샷 노드가 달고 있어도(ckey 는 이름 · 크기 · 재질의 해시라 사람 사이에 겹친다) 그 노드의 과제로는 열지 않는다 — 남의 원장 행이다.
+    별칭 열은 목록이거나 자동 승계 제안을 품은 객체(`{items, merged_candidates}` — sameas.inherit_ckeys)라 둘 다 목록으로 편다.
+    남과 없는 키는 같은 404 다(남 숨김). `mine` 은 그 행이 부른 사람의 원장 행인가다 — 키 결정(sameas.record_decision)은 주인의
+    행만 고치고 유효 키 해석(resolve_ckey)도 주인의 행만 따르므로, false 면 이 행의 병합 · 이름은 부른 사람의 키 상태가 아니고 그 사람의
+    결정은 404 다(구성원 · 이양받은 새 주인 — 원장 행은 처음 적립한 사람에게 남는다). 화면은 그때 결정을 잠근다."""
+    row = get_store().query_one(
+        "SELECT ckey, owner_sub, status, merged_into, display_name, aliases_json, first_project_id, decided_by, decided_at"
+        " FROM rr_part_keys WHERE ckey = ?", (ckey,))
+    missing = AppError("E404", f"정규 키를 찾을 수 없습니다 — {ckey}.", 404)
+    if row is None:
+        raise missing
+    try:
+        raw = json.loads(row["aliases_json"]) if row["aliases_json"] else []
+    except (TypeError, ValueError):
+        raw = []
+    items = raw.get("items") if isinstance(raw, dict) else raw
+    aliases = [a for a in (items if isinstance(items, list) else []) if isinstance(a, dict)]
+    if row["owner_sub"] != email:
+        projects = {str(p) for p in (row["first_project_id"], *(a.get("project_id") for a in aliases)) if p}
+        mine = {p for p in projects if project_role(p, email) is not None}
+        if not mine:
+            raise missing
+        aliases = [a for a in aliases if a.get("project_id") in mine]
+    return {"ckey": row["ckey"], "status": row["status"], "merged_into": row["merged_into"],
+            "display_name": row["display_name"], "aliases": aliases, "decided_by": row["decided_by"],
+            "decided_at": row["decided_at"], "mine": row["owner_sub"] == email}
 
 
 # ================================================================ diff
@@ -3602,6 +3717,10 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
         # 도는 패널의 마지막 신호(러너가 1분 간격으로 적는다) — 벽시계가 몇 시간이라, 이것이 없으면 진행판에서
         # 도는 패널과 멈춘 패널이 똑같이 'running' 이다. {panel_id, started_at, last_frame_at, last_event_at, last_step}.
         job["signal"] = _live_signal(store, job["state"], _loads(job.pop("progress_json"), {}))
+        # 도는 패널마다 한 줄(`signal` 은 호환으로 그대로). 러너는 대상마다 패널을 하나씩만 돌리고(claim_next_job 의 도는 패널 검사 ·
+        # planner.check_invariants (2) — 잡의 concurrency 칸은 러너가 읽지 않는다) 잡 행에는 마지막에 적힌 신호 하나뿐이라, 지금은 많아야
+        # 한 줄이고 `signal` 과 같다. 한 잡이 패널을 함께 돌리게 되면 러너가 신호를 패널마다 적어야 이 목록이 는다.
+        job["signals"] = [job["signal"]] if job["signal"] else []
         # 판단 LLM(Claude 길 X-2 · 포털 docs/claude-delib-parity C4) — Claude 패널 잡이면 llm · consent_external(· llm_mismatch) 칸을
         # 더한다(보류 external_worker 의 까닭이 보이게). GLM 잡의 칸은 종전 그대로다.
         job.update(job_llm_view(_loads(job.pop("params_json"), {})))

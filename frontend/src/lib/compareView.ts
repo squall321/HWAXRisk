@@ -178,15 +178,6 @@ export function excludedCounts(rows: DiffRow[]): Array<{ reason: string; isEcad:
 }
 
 /**
- * 쌍 원장의 열쇠 — 두 과제 id 를 정렬해 '|' 로 잇는다(GET /sameas 가 원장을 읽는 열쇠이고, 빠지면 서버 글이 이 꼴을 말한다). 과제 id 를
- * 하나라도 모르면 null 이다.
- */
-export function samePairKey(baseProjectId: string | null | undefined, targetProjectId: string | null | undefined): string | null {
-  if (!baseProjectId || !targetProjectId) return null;
-  return [baseProjectId, targetProjectId].sort().join("|");
-}
-
-/**
  * 대응 확정 · 거부 본문 한 줄 — stable 키로 보낸다(행의 `a` · `b` 는 노드 id 라 원장 열쇠가 아니다). stable 키가 없는 행(한쪽 노드가 없다)
  * 이나 쌍 열쇠를 모를 때는 null 이다(보내지 않는다 — 보내면 400 이거나 엉뚱한 열쇠로 적힌다).
  */

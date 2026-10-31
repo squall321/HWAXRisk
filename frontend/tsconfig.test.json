@@ -47,6 +47,7 @@
     "src/components/CellsHead.tsx",
     "src/components/ReviewBoard.tsx",
     "src/components/RegistryCard.tsx",
-    "src/components/IssuesCard.tsx"
+    "src/components/IssuesCard.tsx",
+    "src/components/KeyLedgerPanel.tsx"
   ]
 }
