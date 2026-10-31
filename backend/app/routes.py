@@ -3420,7 +3420,8 @@ class JobBody(BaseModel):
     """
 
     tier: str | None = None
-    concurrency: int = 1
+    # 잡이 함께 돌릴 패널 수 — 1 ~ runner.MAX_JOB_CONCURRENCY(2). 넘으면 422 다(화면 · 계약 '≤2', HWAXRisk context-notes CC-23).
+    concurrency: int = Field(default=1, ge=1, le=runner.MAX_JOB_CONCURRENCY)
     modifiers: list[str] | None = None
     user_memo: str | None = None
     consent: bool = False

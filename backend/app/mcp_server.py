@@ -269,9 +269,9 @@ _A_MODIFIERS = (f"얹을 심의 층(mode=panels 만) — {' · '.join(planner.MO
                 f"{' · '.join(planner.DEFAULT_MODIFIERS)} 은 늘 든다. 검토 잡에 비지 않은 목록을 주면 422 다.")
 _A_USER_MEMO = ("잡에 남기는 사람 메모(선택) — 패널 잡이면 좌석 브리프의 M 항목으로 간다. 자르지 않고 저장하고, 브리프 상한을 넘으면 "
                 "앞부분만 가며 응답의 user_memo_cut 이 알린다.")
-_A_CONCURRENCY = ("패널 잡이 함께 돌릴 패널 수(mode=panels 만) — 1 과 박스 상한(HWAXRISK_CONCURRENCY) 사이로 죄고 llm=claude 잡은 1 이다"
-                  "(줄였으면 답의 concurrency_note). 박스의 자리 수는 늘지 않아 둘째 패널은 다른 잡이 자리를 기다리지 않을 때만 돈다. 검토 잡에"
-                  " 1 이 아닌 값을 주면 422 다.")
+_A_CONCURRENCY = (f"패널 잡이 함께 돌릴 패널 수(mode=panels 만) — 1 ~ {runner.MAX_JOB_CONCURRENCY}(밖이면 422)이고 박스 상한"
+                  "(HWAXRISK_CONCURRENCY)으로 더 죄며 llm=claude 잡은 1 이다(줄였으면 답의 concurrency_note). 박스의 자리 수는 늘지 않아 둘째 패널은"
+                  " 다른 잡이 자리를 기다리지 않을 때만 돈다. 검토 잡에 1 이 아닌 값을 주면 422 다.")
 _A_MODE = "잡 종류 — panels(Tier 패널 잡) · reviews(카드 대조 대상의 전문가별 검토 잡 — 범위는 scope)."
 _A_SCOPE = (f"검토 잡의 범위(mode=reviews 만) — {{{', '.join(review_runner.SCOPE_KEYS)}}} 칸마다 비지 않은 목록이고 칸끼리는 AND, 뺀 "
             "칸은 전부다. 전문가는 risk_next_step 의 facts.review_order 를 보고 사용자가 고르며, 모르는 칸 · 이 대상에 없는 값은 422 "
