@@ -4605,3 +4605,52 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
 - 전체 시험(공유 잠금, 77e5480 — 이 줄을 더한 커밋과 코드가 같다) — 3,743 통과 · xfail 4 · 실패 0(rc 0, 14분 5초 — 앞 판 3,730 에 새 시험
   항목 13). ruff — 바꾼 파일은 깨끗하다.
 - 하지 않은 것 — 서비스 재기동 · push · 병합 · 실 브라우저(표는 서버 렌더로 봤다) · 배선 리허설(카드 대조 사슬은 바꾸지 않았다).
+
+## 이력 탭 이름표 전부 · '미확인' 풀이(가지 `wt1031/risk-labels`, main 4145b2c 위, 2026-10-31)
+
+> 사용자 결정 10-31(사람 조작 감사 이름표와 같은 갈래 — 메인 세션 후속) — AU-14 가 남긴 둘을 고친다. 앱이 쓸 수 있는 감사 행위 전부에
+> 이름표를 붙이고 빠지면 지는 시험을 둔다 · '미확인' 배지 풀이를 행을 쓴 길마다 바로 적는다. 코드 커밋은 01a9f8d(1) · 88d32d9(2)다.
+
+### AU-17. 이름표 — 앱이 쓰는 행위 39 가지 전부
+- 행위 목록은 앱 소스에서 끌어냈다. rr_audit 에 쓰는 자리는 넷이다 — routes._audit 의 INSERT · rekey.run 의 SQL 글자 'rekey' ·
+  runner._audit_engine_stop 의 SQL 글자 'job.pause'(A24) · ra_client._audit_retract 의 매개 조건식(ra.retract | ra.remark). routes._audit 을
+  부르는 곳은 routes · planner · review_runner 이고, 행위는 글자 · 조건식(recall.approve | curation.decide) · 함수 안 대입(put_coverage 의
+  coverage.skip | uncarry) · f-string 셋(job.{JOB_ACTIONS} · issue.{ISSUE_ACTIONS} · cells.{dispose_cells 가 받는 retry | skip})이다. 모두 39
+  가지 — 이름표가 있던 것 15, 더한 것 24.
+- 말은 화면의 단추 · 안내 글을 따랐다 — gate.ack '게이트 ack 붙이기 · 취소'(ack 취소도 같은 행위 이름으로 쓴다 — after.revoked) · cells '셀
+  다시 열기 · 셀 넘김' · issue '쟁점 올리기 · 건너뛰기' · close.ack '잔여 확인(취소)' · finding '사람 finding 올림 · 고침 · 지움' · rekey '키
+  전파' · ra 'RA 거두기 · 다시 표기' 따위. DDL 주석에만 있는 이름(project.lifecycle · project.classification · gate.ack.revoke ·
+  finding.add|edit|delete · import.conflict)은 앱이 쓰지 않아 붙이지 않았다(실제로 쓰는 이름은 project.update · gate.ack ·
+  finding.create|update|delete).
+- 다 이 탭에 서는 것은 아니다 — 과제 이력(GET /projects/{id}/audit)은 project_id 로 고른다. 과제 id 를 싣지 않는 행(gate.ack ·
+  registry.merge(.revoke) · registry.visibility · vocab.edit · 과제 id 없는 rekey)은 대상 감사(REST)에만 선다. 사전은 행위의 뜻이라 다 둔다.
+
+### AU-18. 빠지면 지는 시험 — 백엔드 시험이 앱 소스(AST)와 화면 사전을 견준다
+- 자리는 `backend/tests/test_audit_action_labels.py` 다. 화면 시험(node)은 파이썬 소스를 믿을 만하게 읽지 못하고 백엔드는 AST 로 쓰는 자리를
+  정확히 훑는다. 화면 소스를 읽는 백엔드 시험은 이미 있다(test_client_contract 가 risk.api.ts 를 읽는다). 그래서 앱 코드도 공유 목록 파일도
+  더하지 않았다 — 백엔드 변경은 시험 하나다.
+- 끌어내는 법 — `INSERT INTO rr_audit` SQL 을 부르는 호출마다 action 칸(열 목록에서 그 자리를 찾는다)을 읽는다. SQL 글자면 그것, 자리표면
+  매개 튜플의 그 자리 식을 푼다. 그 식이 감싼 함수의 매개면(routes._audit) 그 함수를 부르는 곳의 action 인자를 푼다. 푸는 꼴은 글자 ·
+  조건식 · 함수 안 대입 · f-string(앞 글자마다 앱의 열거 — FAMILIES)이고, 풀 수 없는 식 · 모르는 f-string 꼴은 실패한다(조용히 빠뜨리지
+  않는다). 쓰는 꼴마다 하나씩 실제로 찾는지 따로 본다(훑기가 녹슬어 빈손으로 지나가지 않게).
+- 화면 사전은 정규식으로 읽는다(ACTION_LABEL 블록의 "열쇠": "말"). 사전이 옮겨 가면 그 자리를 알리며 진다. 말이 빈 이름표도 없는 것으로 센다.
+- 이 시험은 백엔드 전체 시험에서 돈다 — 화면만 고치는 세션의 `pnpm test` 는 이것을 보지 않는다(화면 시험에는 'job.create 이름표' 와
+  '모르는 행위는 이름표 없음' 만 남겼다).
+
+### AU-19. '미확인' 배지 풀이 — 행을 쓴 길마다
+- 종전 '게이트웨이 위임으로 확인되지 않은 행위자(자칭)' 는 틀렸다. MCP 행의 행위자는 바로 게이트웨이가 위임으로 넘긴 신원이고(앱은
+  게이트웨이의 서명만 본다 — 그 사람을 직접 확인하지 않아 0), A24 행은 에이전트 서버가 알린 사람이다. 어느 쪽도 자칭이 아니다.
+- 백엔드가 actor_verified 0 을 쓰는 자리는 셋이다 — MCP 길(입구 mcp, AU-12) · 포털 '멈춤'(입구 web 의 job.pause, AU-9) · RA 거두기의 모르는
+  행위자(actor system, 입구 rest — RS-36). `unverifiedTitle` 이 그 셋을 가르고 그 밖은 '앱이 직접 확인한 신원이 아닙니다(입구 …)' 다. '멈춤'
+  풀이는 웹의 job.pause 에만 준다 — 웹의 다른 행위나 다른 입구의 job.pause 에 빌려 주지 않는다. 배지 글은 그대로 '미확인' 이다.
+
+### AU-20. 시험 · 변이
+- 1 — 4145b2c 사본에서 이름표 시험이 진다(빠진 24 를 쓰는 자리와 함께 말한다). 변이 14/14 — 화면 쪽 셋(이름표 뺌 · 말 비움 · 열쇠 오타)과
+  앱 쪽 열하나(RA 조건식 갈래 · JOB_ACTIONS 하나 더 · dispose_cells 검사 하나 더 · ISSUE_ACTIONS 하나 더 · 함수 안 대입 · SQL 글자 둘 ·
+  쓰는 함수 글자 · 새 f-string 꼴 · 조건식 갈래 · 쓰는 함수 이름 — 마지막은 녹슮 지킴이 잡았다). 화면 시험 하나를 고쳤다(job.create 에 이름표가
+  생겼다).
+- 2 — 01a9f8d 사본에서 화면 시험 둘이 진다(89 는 지난다). 변이 7/7 — 처음 판에서 '멈춤 갈래의 입구 조건 뺌' 이 살았다(오늘 쓰는 행으로는 같은
+  답이다). 다른 입구의 job.pause 단언을 더해 죽였다.
+- 화면 — pnpm test 91 · tsc -b · vite build 통과(각각 rc 0). 백엔드 — 이름표 시험 · test_client_contract 통과, ruff 깨끗. 앱 코드를 바꾸지
+  않아 백엔드 전체 시험은 돌리지 않았다. 변이는 스크래치 사본에서만 바꾸고 되돌린 뒤 __pycache__ 를 지웠다(사본과 작업 트리 diff 0).
+- 하지 않은 것 — push · 병합 · 재배포 · 실 브라우저(표는 서버 렌더로 봤다).
