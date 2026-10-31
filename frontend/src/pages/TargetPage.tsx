@@ -44,6 +44,7 @@ import { ClosureCard } from "../components/ClosureCard";
 import { RegistryCard } from "../components/RegistryCard";
 import { seatActions, seatReasonLabel, skipReasonProblem } from "../lib/targetView";
 import { JobSignalLine, ReviewWorkers } from "../components/JobSignals";
+import { JobCancelConfirm } from "../components/JobCancelConfirm";
 import {
   Banner, Button, FormField, FormGrid, Input, Mono, PageHeader, Select, TabBar, TabPanel,
 } from "../ui/primitives";
@@ -550,6 +551,8 @@ function PanelRunner({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [created, setCreated] = useState<TargetJobCreated | null>(null);
+  /** 취소 확인을 연 잡 — 그 잡이 지금 줄의 잡일 때만 확인 줄을 보인다. */
+  const [cancelFor, setCancelFor] = useState<string | null>(null);
 
   const job = coverage?.job ?? null;
   const needsConsent = tier === "C";
@@ -680,13 +683,27 @@ function PanelRunner({
         <Button type="button" variant="outline" onClick={() => control("resume")} disabled={busy || !job}>
           재개
         </Button>
-        <Button type="button" variant="outline" onClick={() => control("cancel")} disabled={busy || !job}>
-          취소
+        <Button type="button" variant="outline" onClick={() => job && setCancelFor(job.id)} disabled={busy || !job}>
+          취소…
         </Button>
         {creatable && llm === "claude" && !externalConsent ? (
           <span className="text-sm text-muted-foreground">반출 동의에 체크해야 시작할 수 있습니다.</span>
         ) : null}
       </div>
+      {job && cancelFor === job.id ? (
+        <div className="mt-3">
+          <JobCancelConfirm
+            what="패널 잡"
+            jobId={job.id}
+            busy={busy}
+            onConfirm={() => {
+              setCancelFor(null);
+              void control("cancel");
+            }}
+            onClose={() => setCancelFor(null)}
+          />
+        </div>
+      ) : null}
       {created ? (
         <div className="mt-3 flex flex-col gap-2">
           <p className="m-0 text-sm text-muted-foreground">

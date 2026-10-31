@@ -19,6 +19,7 @@ const { CellsHead } = load("components/CellsHead.js");
 const { ReviewBoard } = load("components/ReviewBoard.js");
 const { RegistryRowDetail, IssueCell, rowDomains, supportText, registryStatusBody } = load("components/RegistryCard.js");
 const { IssueDetail, ReargueNote } = load("components/IssuesCard.js");
+const { JobCancelConfirm } = load("components/JobCancelConfirm.js");
 
 const h = React.createElement;
 const clone = (v) => JSON.parse(JSON.stringify(v));
@@ -193,6 +194,21 @@ test("진행판 렌더 — consent_extra 로 멈춘 잡: 몫 · 미리 체크하
   assert.match(m, /<button[^>]*disabled=""[^>]*>재개\(상한 넘음\)<\/button>/);
   assert.doesNotMatch(m, /동의하고 재개/);
   assert.match(m, /기다리는 셀 넘기기…/);
+});
+
+test("잡 취소는 확인 뒤에 — 줄의 단추는 '취소…' 이고, 확인 줄은 잡을 이름으로 부르며 재개되지 않는다 · 일시정지를 말한다", () => {
+  const review = clone(samples.coveragePausedConsent.review);
+  review.job.state = "running";
+  review.job.hold_code = null;
+  review.job.progress.reopened_extra.hold = null;
+  const html = renderToStaticMarkup(h(ReviewBoard, { review, targetKey: "t", onChanged: noop }));
+  assert.match(html, />취소…<\/button>/);
+  assert.doesNotMatch(html, /잡 취소/);
+  const confirm = renderToStaticMarkup(h(JobCancelConfirm, { what: "검토 잡", jobId: "j-1", busy: false, onConfirm: noop, onClose: noop }));
+  assert.match(confirm, /검토 잡 j-1 을 취소합니다 — 되돌릴 수 없습니다\./);
+  assert.match(confirm, /재개되지 않습니다/);
+  assert.match(confirm, /일시정지를 쓰세요/);
+  assert.match(confirm, />잡 취소<\/button>/);
 });
 
 test("진행판 렌더 — 셀 상태 말(거름 · 입력 결손 — 판정 못 함), 끝난 잡의 글은 '오류' 가 아니라 잡이 남긴 글", () => {

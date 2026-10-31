@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { riskApi } from "../api/risk.api";
 import { reopenedOf } from "../api/reviewErrors";
 import { Badge, JobStateBadge, LlmBadge, toneOf } from "./Badge";
+import { JobCancelConfirm } from "./JobCancelConfirm";
 import { KeyValueTable } from "./DataTable";
 import { ReviewErrorBanner } from "./ReviewErrorBanner";
 import { SectionCard, VerbatimBlock } from "./SectionCard";
@@ -68,6 +69,8 @@ function ReviewJobPanel({ job, targetKey, onChanged }: { job: ReviewJob; targetK
   /** 동의 체크 — 체크한 그 몫의 열쇠(consentAmountKey). 몫이 바뀌면 체크는 비어 보인다(미리 체크된 동의가 되지 않게). */
   const [consentFor, setConsentFor] = useState<string | null>(null);
   const [skipping, setSkipping] = useState(false);
+  /** 취소 확인을 연 잡 — 그 잡이 지금 줄의 잡일 때만 확인 줄을 보인다(다른 잡으로 넘어가지 않게). */
+  const [cancelFor, setCancelFor] = useState<string | null>(null);
   const [reason, setReason] = useState("");
   const [result, setResult] = useState<string[] | null>(null);
   const hold = holdView(job);
@@ -246,11 +249,24 @@ function ReviewJobPanel({ job, targetKey, onChanged }: { job: ReviewJob; targetK
           </Button>
         ) : null}
         {live || job.state === "paused" ? (
-          <Button type="button" variant="outline" onClick={() => act("cancel")} disabled={busy}>
-            취소
+          <Button type="button" variant="outline" onClick={() => setCancelFor(job.id)} disabled={busy}>
+            취소…
           </Button>
         ) : null}
       </div>
+      {cancelFor === job.id && (live || job.state === "paused") ? (
+        <JobCancelConfirm
+          what="검토 잡"
+          jobId={job.id}
+          busy={busy}
+          note="새 잡의 호출 추정이 동의 문턱을 넘으면 다시 동의합니다."
+          onConfirm={() => {
+            setCancelFor(null);
+            void act("cancel");
+          }}
+          onClose={() => setCancelFor(null)}
+        />
+      ) : null}
       {skipping ? (
         <form className="flex flex-col gap-2 rounded-md border border-border p-3" onSubmit={skipWaiting}>
           <p className="m-0 text-sm">
