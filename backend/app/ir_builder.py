@@ -1464,7 +1464,10 @@ def freeze_snapshot(
     if with_state:
         from app import state as state_module  # noqa: PLC0415 — state 는 IR 을 읽으므로 조립 후에 부른다.
 
-        state = state_module.build_state(ir)
+        # 요구 대조(sig:req.* · missing.req_*)는 지금 요구 원장으로 센다 — 상태에만 살고 IR 에는 들지 않는다(ir_hash 불변, plan §2.11.3
+        # 7단계 · §2.8b). 종전에는 build_state(ir) 만 불러 요구 여유 표가 늘 비었다(화면 세션 FE-11). 아래 IR 로 옮기는 셋(게이트 ·
+        # 씨앗 · 특징)은 요구 신호를 읽지 않는다.
+        state = state_module.freeze_state(store, ir)
         ir["gates"] = state["gates"]
         ir["character_seed"] = state["character_seed"]
         ir["feature_vector"] = state["feature_vector"]

@@ -25,6 +25,8 @@ __all__ = [
     "save_state",
     "load_state",
     "compute_state_for_snapshot",
+    "freeze_state",
+    "recompute_project_states",
 ]
 
 STATE_VERSION = "1.0"
@@ -1164,6 +1166,34 @@ def load_state(store, snapshot_id: str) -> dict | None:
     if isinstance(state, dict) and "computed_at" not in state:
         state["computed_at"] = row["computed_at"]
     return state
+
+
+def freeze_state(store, ir: Mapping[str, Any], *, acks: Mapping[str, Mapping[str, Any]] | None = None) -> dict:
+    """동결과 요구를 고친 뒤의 다시 세기가 함께 쓰는 상태 — 그 과제의 지금 요구 원장을 IR 과 대조해(sig:req.* · missing.req_*) 싣는다
+    (plan §2.11.3 7단계 · §2.8b). 요구는 IR 에 복사되지 않아 ir_hash 는 그대로다. 규칙은 동결 때와 같은 시드다(rules 를 주지 않는다) —
+    규칙을 갈아 끼운 뒤의 재계산은 `compute_state_for_snapshot` 의 몫이다."""
+    from app import requirements  # noqa: PLC0415 — 순환 임포트를 피하려 지연 임포트한다.
+
+    return build_state(ir, acks=acks, req=requirements.compute_req_signals(store, ir["project_id"], ir))
+
+
+def recompute_project_states(store, project_id: str) -> list[str]:
+    """요구를 고친 뒤(등록 · 상태 · 승계) 그 과제 스냅샷의 rr_states 를 다시 센다(plan §2.8b (1) · P1 (20)) — ir_json · ir_hash 는 그대로이고
+    상태의 요구 대조와 computed_at 이 바뀐다. 상태가 있는 스냅샷만이다(폐기로 비운 상태는 건너뛴다). 게이트 ack 는 지금 gates_json 에
+    붙은 것을 그대로 싣는다 — save_state 가 gates_json 을 통째로 덮으므로 빼면 사람이 붙인 ack 가 사라진다(판정은 같은 IR 이라 그대로다).
+    부르는 쪽이 요구 쓰기와 같은 트랜잭션에서 부른다. 반환은 다시 센 스냅샷 id(동결 차례)."""
+    from app.ir_builder import load_ir  # noqa: PLC0415 — 순환 임포트를 피하려 지연 임포트한다.
+
+    done: list[str] = []
+    for row in store.query(
+            "SELECT s.id, st.gates_json FROM rr_snapshots s JOIN rr_states st ON st.snapshot_id = s.id"
+            " WHERE s.project_id = ? AND st.state_json <> '' ORDER BY s.created_at, s.id", (project_id,)):
+        saved = json.loads(row["gates_json"] or "{}")
+        acks = {str(g["key"]): {"by": g.get("ack_by"), "at": g.get("ack_at"), "reason": g.get("ack_reason")}
+                for g in saved.values() if isinstance(g, Mapping) and g.get("key") and g.get("ack_by")}
+        save_state(store, freeze_state(store, load_ir(store, row["id"]), acks=acks))
+        done.append(str(row["id"]))
+    return done
 
 
 def compute_state_for_snapshot(store, snapshot_id: str, *, rules: Sequence[Mapping[str, Any]] | None = None,

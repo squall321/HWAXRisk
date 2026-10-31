@@ -2252,18 +2252,24 @@ def get_requirements(project_id: str, kind: str | None = None, status: str | Non
 @router.post("/projects/{project_id}/requirements")
 def post_requirements(project_id: str, body: list[RequirementItem],
                       ident: identity.Identity = Depends(identity.current)) -> dict:
-    """요구 배열 UPSERT — `UNIQUE(project_id, kind, name)` 기준. 전건 선검사라 한 건이라도 틀리면 아무 행도 쓰지 않는다."""
+    """요구 배열 UPSERT — `UNIQUE(project_id, kind, name)` 기준. 전건 선검사라 한 건이라도 틀리면 아무 행도 쓰지 않는다. 쓰면 같은
+    트랜잭션에서 그 과제 스냅샷의 상태를 다시 센다(`recompute` 의 스냅샷 — 요구는 ir_hash 를 바꾸지 않는다, plan §2.8b (1))."""
     owner_sub = _require_user(ident)
     project = _project_row(project_id, owner_sub)
-    # owner_sub 는 호출자가 아니라 과제 소유 앵커다(plan §5.2.1 — 하위 표의 owner_sub 는 rr_projects 값의 복제다).
-    return requirements.upsert_requirements(
-        get_store(), project_id, project["owner_sub"], [item.model_dump() for item in body])
+    store = get_store()
+    with store.tx():
+        # owner_sub 는 호출자가 아니라 과제 소유 앵커다(plan §5.2.1 — 하위 표의 owner_sub 는 rr_projects 값의 복제다).
+        out = requirements.upsert_requirements(store, project_id, project["owner_sub"], [item.model_dump() for item in body])
+        if out["upserted"]:
+            state_module.recompute_project_states(store, project_id)
+    return out
 
 
 @router.put("/requirements/{requirement_id}")
 def put_requirement(requirement_id: str, body: RequirementDecision,
                     ident: identity.Identity = Depends(identity.current)) -> dict:
-    """요구 1건의 status 결정(candidate|confirmed|waived). waived 는 사유 필수이고 rr_audit 1행이 남는다."""
+    """요구 1건의 status 결정(candidate|confirmed|waived). waived 는 사유 필수이고 rr_audit 1행이 남는다. 같은 트랜잭션에서 그 과제
+    스냅샷의 상태를 다시 센다(waived 는 대조하지 않고, 여유 표의 행이 status 를 싣는다)."""
     owner_sub = _require_user(ident)
     store = get_store()
     before = store.query_one(
@@ -2277,20 +2283,23 @@ def put_requirement(requirement_id: str, body: RequirementDecision,
         if exc.http_status != 404:
             raise
         raise missing from None                     # 남의 요구는 없는 요구와 같다 — 과제 id 를 흘리지 않는다(남 숨김 훑기)
-    updated = requirements.decide_requirement(
-        store, requirement_id, status=body.status, waive_reason=body.waive_reason, actor_sub=owner_sub)
-    _audit(store, owner_sub, scope="project", subject_id=requirement_id, project_id=before["project_id"],
-           action="requirement.decide",
-           before={"status": before["status"], "waive_reason": before["waive_reason"]},
-           after={"status": updated["status"], "waive_reason": updated["waive_reason"]},
-           reason=body.waive_reason)
+    with store.tx():
+        updated = requirements.decide_requirement(
+            store, requirement_id, status=body.status, waive_reason=body.waive_reason, actor_sub=owner_sub)
+        _audit(store, owner_sub, scope="project", subject_id=requirement_id, project_id=before["project_id"],
+               action="requirement.decide",
+               before={"status": before["status"], "waive_reason": before["waive_reason"]},
+               after={"status": updated["status"], "waive_reason": updated["waive_reason"]},
+               reason=body.waive_reason)
+        state_module.recompute_project_states(store, before["project_id"])
     return updated
 
 
 @router.post("/projects/{project_id}/requirements/inherit")
 def post_requirements_inherit(project_id: str, body: InheritBody,
                               ident: identity.Identity = Depends(identity.current)) -> dict:
-    """계보 과제의 요구를 복사한다(status='candidate'·inherited_from, 멱등). 원본에도 조회 규약을 먼저 적용한다."""
+    """계보 과제의 요구를 복사한다(status='candidate'·inherited_from, 멱등). 원본에도 조회 규약을 먼저 적용한다. 복사한 것이 있으면
+    같은 트랜잭션에서 받는 과제 스냅샷의 상태를 다시 센다."""
     owner_sub = _require_user(ident)
     store = get_store()
     project = _project_row(project_id, owner_sub)
@@ -2301,7 +2310,11 @@ def post_requirements_inherit(project_id: str, body: InheritBody,
         if project_role(body.from_project_id, owner_sub) is None:
             raise requirements.source_missing(body.from_project_id)
         raise AppError("not_a_member", f"승계 원본 과제를 볼 수 없습니다 — {body.from_project_id}.", 403)
-    return requirements.inherit_requirements(store, project_id, project["owner_sub"], body.from_project_id)
+    with store.tx():
+        out = requirements.inherit_requirements(store, project_id, project["owner_sub"], body.from_project_id)
+        if out["copied"]:
+            state_module.recompute_project_states(store, project_id)
+    return out
 
 
 class LedgerItem(BaseModel):
