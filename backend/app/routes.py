@@ -3488,7 +3488,7 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
         "flow": target["flow"],
         "units": units_module.summary_of(store, target_key),
         "review": review_payload(store, target_key, target["flow"]),
-        # RA·AIDataHub 반영 요약 — {ra|adh: {state, pending_ops, reason, message}}. RA 는 실제 상태(RK-01), AIDataHub 는 sender_unwired(M4).
+        # RA·AIDataHub 반영 요약 — {ra|adh: {state, pending_ops, dead_ops, reason, message}}. RA 는 실제 상태(RK-01), AIDataHub 는 sender_unwired(M4).
         "external_sync": ra_client.sync_summary(ra_client.parse_external_sync(target["external_sync_json"])),
         # 완결 표기와 잔여(M3 S3-8) · 사슬 단계와 마지막 보고서 판(S3-5) — 카드 대조 대상만 싣는다(패널 대상의 응답은 review 칸
         # 하나만 더해진 그대로다, D-24).

@@ -8,10 +8,10 @@ import pytest
 
 from app import common
 from app.adh_client import (EXTERNAL_SOURCE, IMPORT_PATH, MEMORY_AGENT, AdhClient, make_external_id)
-from app.ra_client import (RA_READ_TOOLS, RA_REPORT_TOOLS, RA_WRITE_TOOLS, SYNC_BASE_DELAY,
+from app.ra_client import (RA_READ_TOOLS, RA_WRITE_TOOLS, SYNC_BASE_DELAY,
                            SYNC_CHANNELS, SYNC_MAX_ATTEMPTS, SYNC_MAX_DELAY, WRITE_SECRET_KEY, McpHttpClient, RaClient,
                            complete_sync_ops, empty_sync, load_external_sync, mark_unavailable,
-                           note_sync_failure, parse_external_sync, queue_sync_ops, resync, save_external_sync,
+                           note_sync_failure, parse_external_sync, queue_sync_ops, resync, save_external_sync, set_aside_sync_ops,
                            sender_status, set_sync_state, sync_badge, sync_summary)
 
 OWNER = "me@example.com"
@@ -149,6 +149,28 @@ def test_resync_restores_both_channels(target_store, frozen_clock):
         assert entry["attempts"] == 0 and entry["next_at"] == 0 and entry["last_error"] is None
 
 
+def test_set_aside_ops_leave_the_queue_and_resync_puts_them_back_in_front(target_store, frozen_clock):
+    """따로 둔 op(그 op 에만 걸린 영구 거절)는 큐에서 빠져 dead_ops 에 까닭과 함께 있다 — 큐가 비면 done 이다. 재동기가 큐 앞으로 되돌린다
+    (따로 둔 op 는 큐에 남은 어느 op 보다 앞선 것이라 원래 순서다). 같은 꼴의 op 는 한 번만 되돌린다."""
+    a, b, c = {"op": "merge_object", "n": 1}, {"op": "link", "n": 2}, {"op": "link", "n": 3}
+    queue_sync_ops(target_store, TARGET, "ra", [a, b])
+    set_aside_sync_ops(target_store, TARGET, "ra", [{"op": a, "error": "value_collision: 겹침"}])
+    entry = _sync_json(target_store)["ra"]
+    assert entry["state"] == "pending" and entry["pending_ops"] == [b]
+    assert entry["dead_ops"] == [{"op": a, "error": "value_collision: 겹침", "at": NOW}]
+    set_aside_sync_ops(target_store, TARGET, "ra", [{"op": b, "error": "rejected: 축"}, {"op": a, "error": "value_collision: 또"}])
+    entry = _sync_json(target_store)["ra"]
+    assert entry["state"] == "done" and entry["pending_ops"] == []
+    assert [(d["op"], d["error"]) for d in entry["dead_ops"]] == [(a, "value_collision: 또"), (b, "rejected: 축")]
+
+    queue_sync_ops(target_store, TARGET, "ra", [c, a])                  # 같은 꼴의 op 가 다시 쌓였다
+    set_aside_sync_ops(target_store, TARGET, "ra", [{"op": c, "error": "rejected: 꼴"}])
+    assert _sync_json(target_store)["ra"]["pending_ops"] == [a]        # 이번에 따로 둔 것만 뺀다 — 예전 것과 같은 꼴이어도 새로 쌓인 op 는 남는다
+    resync(target_store, TARGET)
+    entry = _sync_json(target_store)["ra"]
+    assert entry["state"] == "pending" and entry["pending_ops"] == [a, b, c] and entry["dead_ops"] == []
+
+
 def test_the_external_sync_summary_says_why_nothing_is_sent(target_store, frozen_clock):
     """RA 보내는 쪽은 박스 쓰기 PAT 가 있어야 켜진다(RK-01) — 없으면 요약은 그 까닭(credential_missing:<키>)과 대기 건수, '보낸 것
     없음' 을 말한다(조용한 pending 이 아니다). AIDataHub 반입은 아직 보내는 쪽이 없어 sender_unwired 그대로다(R3 · U-4)."""
@@ -156,10 +178,10 @@ def test_the_external_sync_summary_says_why_nothing_is_sent(target_store, frozen
     off = sender_status(secrets={"HWAXRISK_PORTAL_PAT": "read-only"})
     summary = sync_summary(load_external_sync(target_store, TARGET), status=off)
     assert summary == {
-        "ra": {"state": "pending", "pending_ops": 2, "reason": f"credential_missing:{WRITE_SECRET_KEY}",
+        "ra": {"state": "pending", "pending_ops": 2, "dead_ops": 0, "reason": f"credential_missing:{WRITE_SECRET_KEY}",
                "message": f"RA 반영 안 됨 — 박스에 RA 쓰기 자격({WRITE_SECRET_KEY})이 없어 보내는 쪽이 꺼져 있다. 대기 2건,"
                           " 보낸 것 없음."},
-        "adh": {"state": "pending", "pending_ops": 0, "reason": "sender_unwired",
+        "adh": {"state": "pending", "pending_ops": 0, "dead_ops": 0, "reason": "sender_unwired",
                 "message": "AIDataHub 반영 안 됨 — 보내는 쪽이 아직 배선되지 않았다(M4). 대기 0건, 보낸 것 없음."}}
     assert sync_summary(parse_external_sync("깨진 글"), status=off) == sync_summary(empty_sync(), status=off)
     # 설정 없이 부르면 지금 박스(시험 데이터 디렉터리 — secrets.env 없음)로 잰다.
@@ -289,13 +311,13 @@ def test_ra_client_without_pat_is_unavailable_and_silent():
 
 
 def test_ra_client_only_calls_contracted_tools():
+    """계약은 지식 그래프 쓰기 4종 + 읽기 4종이다 — 보고서 도구는 박스 PAT 클라이언트의 계약 밖이다(보고서는 사람 이름, 사용자 결정 10-31)."""
     ra = RaClient("https://gw.test/mcp", "pat", client=_client(_boom))
-    assert ra.call_tool("delete_object", {}) == {"ok": False, "error": "tool_not_contracted",
-                                                 "detail": "delete_object"}
-    assert set(RA_WRITE_TOOLS + RA_READ_TOOLS + RA_REPORT_TOOLS) == {
+    for name in ("delete_object", "get_report", "update_report_draft"):
+        assert ra.call_tool(name, {}) == {"ok": False, "error": "tool_not_contracted", "detail": name}
+    assert set(RA_WRITE_TOOLS + RA_READ_TOOLS) == {
         "create_object", "update_object", "add_object_alias", "link_objects",
-        "get_object", "search_objects", "get_subgraph", "list_object_types",
-        "get_report", "update_report_draft"}
+        "get_object", "search_objects", "get_subgraph", "list_object_types"}
 
 
 def test_ra_upsert_props_merges_current_properties():

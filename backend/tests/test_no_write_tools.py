@@ -74,6 +74,18 @@ def test_the_one_sender_is_the_only_module_that_names_the_ra_write_tools():
     assert named == ["ra_client.py"], named
 
 
+def test_the_box_write_pat_never_writes_an_ra_report():
+    """보고서는 사람 이름이다(사용자 결정 10-31 D-1 — 종합 보고서는 포털 챗 PAT 길, FU-D17). 박스 쓰기 PAT 는 지식 그래프 op 만 쓴다 —
+    RA 보고서 쓰기 도구의 이름은 앱 어디에도 없고, 박스 PAT 클라이언트는 보고서 도구를 계약 밖으로 거절한다. 종전에는 그 클라이언트의 계약에
+    보고서 초안 갱신이 남아 있어 종합 보고서를 서비스 계정 이름으로 저장하는 코드가 모든 가드를 지났다."""
+    report_writes = ("create_report_draft", "update_report_draft")
+    named = sorted(name for name, text in _sources().items() if any(tool in text for tool in report_writes))
+    assert named == [], f"{named} 가 RA 보고서 쓰기 도구를 적는다 — 보고서는 사람 이름(포털 챗 PAT 길)이다"
+    box_client = ra_client.ra_client_from_settings(config.settings, {WRITE_KEY: "fake-rw-pat-for-test"})
+    for tool in (*report_writes, "get_report"):
+        assert box_client.call_tool(tool, {"report_id": 1}) == {"ok": False, "error": "tool_not_contracted", "detail": tool}
+
+
 def test_the_sender_holds_only_the_box_write_pat():
     """배경 잡의 자격은 박스 쓰기 PAT 하나다(사용자 결정 10-31 D-1 (가)) — ra_client 는 읽기 PAT 키 · 사람의 등록 PAT(_user_credentials ·
     복호)를 잡지 않는다. 시험 test_ra_sender 가 게이트웨이 대역으로 실제 나간 Authorization 이 쓰기 PAT 뿐인지 본다."""

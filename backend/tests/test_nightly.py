@@ -345,6 +345,27 @@ def test_external_sync_applies_a_senders_result(risk_store):
     assert (t3["state"], t3["pending_ops"]) == ("done", [])
 
 
+def test_external_sync_sets_aside_what_the_sender_could_not_send(risk_store):
+    """전송기가 dead(그 op 에만 걸린 영구 거절)로 답하면 그 op 는 까닭과 함께 따로 두고 나간 op 와 함께 큐에서 뺀다 — 다 빠지면 done 이다."""
+    from app import ra_client
+
+    a, b, c = {"op": "merge_object", "n": 1}, {"op": "link", "n": 2}, {"op": "link", "n": 3}
+    add_target(risk_store, "T1", sync=_pending([a, b, c]))
+    add_target(risk_store, "T2", sync=_pending([a]))
+    answers = {"T1": {"done": [a, c], "skipped": [], "dead": [{"op": b, "error": "rejected: link_objects — 축"}]},
+               "T2": {"done": [], "dead": [{"op": a, "error": "value_collision: create_object — 겹침"}]}}
+
+    def send(store, target_key, channel, ops):
+        return answers[target_key]
+
+    send.channels = ("ra",)
+    assert nightly.retry_external_sync(risk_store, now=NOW, send=send) == {"due": 2, "sent": 2, "failed": 0}
+    t1, t2 = (ra_client.load_external_sync(risk_store, key)["ra"] for key in ("T1", "T2"))
+    assert (t1["state"], t1["pending_ops"], [d["op"] for d in t1["dead_ops"]]) == ("done", [], [b])
+    assert (t2["state"], t2["pending_ops"], [d["error"] for d in t2["dead_ops"]]) == (
+        "done", [], ["value_collision: create_object — 겹침"])
+
+
 def test_external_sync_stops_the_tick_when_off_or_after_a_retryable_failure(risk_store):
     """off_reason() 이 글을 주면 아무것도 부르지 않는다. 다시 보낼 실패(retry)가 나면 그 틱의 남은 대상은 미루고, 다른 채널은 세기만 한다."""
     from app import ra_client

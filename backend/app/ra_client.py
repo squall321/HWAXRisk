@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import httpx
 
@@ -19,10 +19,10 @@ DEADLINE_EXCEEDED = "deadline_exceeded"
 # MCP streamable-http 프로토콜 버전(mcp>=1.10 서버가 받는 값).
 PROTOCOL_VERSION = "2025-06-18"
 
-# plan §5.3.5 표의 쓰기 4종 + 읽기 4종 + 보고서 2종. 여기 없는 도구는 부르지 않는다.
+# plan §5.3.5 표의 지식 그래프 쓰기 4종 + 읽기 4종. 여기 없는 도구는 부르지 않는다 — 보고서 도구는 이 클라이언트(박스 쓰기 PAT)의
+# 계약 밖이다. 보고서는 사람 이름이다(사용자 결정 10-31 D-1 — 종합 보고서는 포털 챗 PAT 길, FU-D17).
 RA_WRITE_TOOLS = ("create_object", "update_object", "add_object_alias", "link_objects")
 RA_READ_TOOLS = ("get_object", "search_objects", "get_subgraph", "list_object_types")
-RA_REPORT_TOOLS = ("get_report", "update_report_draft")
 
 # external_sync 재시도 규칙(plan §5.5.3) — next_at = now + min(15분 × 2^attempts, 6시간), attempts ≥ 8 이면 unavailable.
 SYNC_BASE_DELAY = 15 * 60
@@ -278,13 +278,16 @@ class RaClient:
 
     자격이 없으면 어떤 호출도 하지 않고 {'ok': False, 'error': 'unavailable'} 로 조용히 지나간다. 인자 이름은 RA MCP 의 것이다
     (ReportArchive mcp_server — get_object(type, id) · update_object(object_id, …) · link_objects(src_id, dst_id, relation, …)).
+    `gate` 는 부를 때마다 묻는 문이다 — 거짓이면 부르지 않고 {'ok': False, 'error': 'closed'} 다(보내는 쪽이 보내는 도중 과제가 조직
+    공개를 떠났는지 · 폐기됐는지 본다).
     """
 
     def __init__(self, endpoint: str, token: str | None, *, client: httpx.Client | None = None,
                  timeout: float = DEFAULT_TIMEOUT, mcp: McpHttpClient | None = None,
-                 deadline_s: float | None = None) -> None:
+                 deadline_s: float | None = None, gate: Callable[[], bool] | None = None) -> None:
         self.endpoint = endpoint
         self._token = token or ""
+        self._gate = gate
         self._mcp = mcp
         if self._mcp is None and self._token:
             self._mcp = McpHttpClient(endpoint, headers={"Authorization": f"Bearer {self._token}"},
@@ -301,8 +304,10 @@ class RaClient:
     def call_tool(self, name: str, arguments: Mapping[str, Any] | None = None) -> dict:
         if not self.available:
             return self._unavailable()
-        if name not in RA_WRITE_TOOLS + RA_READ_TOOLS + RA_REPORT_TOOLS:
+        if name not in RA_WRITE_TOOLS + RA_READ_TOOLS:
             return {"ok": False, "error": "tool_not_contracted", "detail": name}
+        if self._gate is not None and not self._gate():
+            return {"ok": False, "error": "closed"}
         return self._mcp.call(GATEWAY_ALIAS_PREFIX + name, arguments)
 
     # -- 읽기 ---------------------------------------------------------------
@@ -377,33 +382,26 @@ class RaClient:
         """같은 축 안 정규화 유니크. 이미 그 엔티티의 별칭이면 멱등, 다른 엔티티와 충돌하면 error 다."""
         return self.call_tool("add_object_alias", {"object_id": int(entity_id), "alias": alias})
 
-    # -- 보고서 -------------------------------------------------------------
-    def get_report(self, report_id: int | str) -> dict:
-        return self.call_tool("get_report", {"report_id": report_id})
-
-    def update_report_draft(self, report_id: int | str, patch: Mapping[str, Any]) -> dict:
-        """전체 교체 API 라 호출자가 get_report 결과와 합쳐서 보낸다(§5.3.5 ⑧)."""
-        return self.call_tool("update_report_draft", {"report_id": report_id, **dict(patch)})
-
     def close(self) -> None:
         if self._mcp is not None:
             self._mcp.close()
 
 
-# RA 인스턴스·보고서 쓰기 전용 자격. 읽기용 HWAXRISK_PORTAL_PAT(scopes ['read'])와 절대 섞지 않는다(plan §8.2.7).
+# RA 지식 그래프 쓰기 전용 자격. 읽기용 HWAXRISK_PORTAL_PAT(scopes ['read'])와 절대 섞지 않는다(plan §8.2.7).
 WRITE_SECRET_KEY = "HWAXRISK_PORTAL_PAT_RW"
 
 
 def ra_client_from_settings(settings, secrets: Mapping[str, str] | None = None, *,
-                            client: httpx.Client | None = None, deadline_s: float | None = None) -> RaClient:
+                            client: httpx.Client | None = None, deadline_s: float | None = None,
+                            gate: Callable[[], bool] | None = None) -> RaClient:
     """Settings·secrets.env 로 RaClient 를 만든다 — 쓰기 키 `HWAXRISK_PORTAL_PAT_RW` 만 쓴다(§5.1 원칙 10).
 
-    이 클라이언트는 create_object·update_object·add_object_alias·link_objects·보고서 초안까지 부르므로
-    좌석 자유조회가 쓰는 읽기 전용 PAT 로는 열지 않는다. 키가 없으면 available=False 인 객체가 나온다 — 보내는 쪽(RaSender)은
-    그때 꺼져 있고 sync_summary 가 그 사실(credential_missing)을 말한다.
+    이 클라이언트는 create_object·update_object·add_object_alias·link_objects 를 부르므로 좌석 자유조회가 쓰는 읽기 전용 PAT 로는
+    열지 않는다. 보고서 도구는 계약 밖이다(보고서는 사람 이름 — 사용자 결정 10-31). 키가 없으면 available=False 인 객체가 나온다 —
+    보내는 쪽(RaSender)은 그때 꺼져 있고 sync_summary 가 그 사실(credential_missing)을 말한다.
     """
     token = (secrets or {}).get(WRITE_SECRET_KEY)
-    return RaClient(getattr(settings, "gateway_mcp", ""), token, client=client, deadline_s=deadline_s)
+    return RaClient(getattr(settings, "gateway_mcp", ""), token, client=client, deadline_s=deadline_s, gate=gate)
 
 
 # ---------------------------------------------------------------- 보내는 쪽(RK-01 — 사용자 결정 10-31 D-1 (가))
@@ -414,14 +412,20 @@ def ra_client_from_settings(settings, secrets: Mapping[str, str] | None = None, 
 SENDER_CHANNELS = ("ra",)
 # 호출 한 건의 벽시계 기한(초) — 게이트웨이의 RA 호출 한도(GATEWAY_CALL_TIMEOUT, plan §5.3.5 120 s)와 같다. 넘기면 transient 다.
 SEND_DEADLINE_S = 120.0
+# 한 동기 주기(sync_loop 60초)에 보내는 대상 수 · 벽시계 초의 상한 — 넘으면 남은 대상은 상태 그대로 다음 주기로 미룬다. 처음 키를 넣은 박스 ·
+# 오래 보류됐다 풀린 과제의 대상 수백 개를 한 틱에 비우는 동안 같은 루프의 PAT 폐기 대조(60초)가 멈추지 않게 한다.
+SEND_TICK_MAX_TARGETS = 50
+SEND_TICK_BUDGET_S = 30.0
 LABEL_RELATIONS = ("verified_by", "refuted_by")
 # verified_by · refuted_by 의 dst 축(plan §5.3.2). 라벨 근거 `inc:<RA 객체 id>` 가 이 축의 객체일 때만 잇는다.
 LABEL_DST_TYPES = ("incident", "test_run")
 # 다시 보내 볼 HTTP 상태 — 그 밖의 4xx 는 고치기 전에는 같은 답이다.
 _RETRY_HTTP = frozenset({408, 425, 429})
 _HTTP_5XX_RX = re.compile(r"\bHTTP 5\d\d\b")
-# 실패 사유 낱말(sync_summary 의 reason) — 이 낱말로 last_error 를 `<낱말>: <글>` 꼴로 적는다. transient 만 백오프로 다시 보내고
-# 나머지는 곧바로 unavailable 이다(사람이 고친 뒤 '재동기').
+# 실패 사유 낱말(sync_summary 의 reason) — 이 낱말로 last_error 를 `<낱말>: <글>` 꼴로 적는다. transient 만 백오프로 다시 보낸다.
+# 채널 전체가 막히는 실패(unauthorized · read_only · forbidden · tool_missing · ontology_missing · 게이트웨이의 그 밖 4xx)는 그 대상을 곧바로
+# unavailable 로 멈춘다. op 하나에만 걸린 영구 거절(RA 의 거절 · value_collision · masked_readback · 꼴이 틀린 op)은 그 op 만 dead_ops 에
+# 까닭과 함께 따로 두고 대상의 나머지 op 를 계속 보낸다 — 멈추면 그 op 가 맨 앞에 남아 대상의 RA 채널이 영영 막힌다. 둘 다 사람이 고친 뒤 '재동기'.
 FAIL_TEXT: dict[str, str] = {
     "unauthorized": "게이트웨이 · RA 가 박스 쓰기 PAT 를 받지 않는다(만료 · 폐기 · 다른 박스의 토큰)",
     "read_only": "박스 쓰기 PAT 가 읽기 전용이다(scopes 에 write 가 없다)",
@@ -454,12 +458,14 @@ def sender_status(settings=None, secrets: Mapping[str, str] | None = None) -> di
 
 
 class _Stop(Exception):
-    """op 하나를 보내다 멈춘 까닭 — code 는 FAIL_TEXT 의 낱말이고 retry 면 백오프, 아니면 unavailable 이다."""
+    """op 하나를 보내다 멈춘 까닭 — code 는 FAIL_TEXT 의 낱말이다. retry 면 백오프, op_only 면 그 op 만 따로 두고 다음 op 로 간다,
+    둘 다 아니면 그 대상을 unavailable 로 멈춘다. code 'closed' 는 보내는 도중 과제가 닫혔다는 표지다(부르지 않았다)."""
 
-    def __init__(self, code: str, detail: str, *, retry: bool = False) -> None:
+    def __init__(self, code: str, detail: str, *, retry: bool = False, op_only: bool = False) -> None:
         super().__init__(detail)
         self.code = code
         self.retry = retry
+        self.op_only = op_only
         self.text = f"{code}: {' '.join(str(detail).split())[:240]}"
 
 
@@ -486,19 +492,20 @@ def _gateway_refusal(tool: str, text: str) -> _Stop:
 
 
 def _ra_refusal(tool: str, payload: Mapping[str, Any]) -> _Stop:
-    """RA 가 성공 답 안에 실은 {'error': …} — RA MCP 는 HTTP 상태를 글로만 넘긴다(ReportArchive mcp_server._unwrap)."""
+    """RA 가 성공 답 안에 실은 {'error': …} — RA MCP 는 HTTP 상태를 글로만 넘긴다(ReportArchive mcp_server._unwrap). 관리자 · 온톨로지 ·
+    토큰 글은 채널 전체이고, 객체를 못 찾음 · 그 밖의 거절(관계 축 제약 · enum · 길이 · 닫힌 축)은 그 op 에만 걸린 것이다."""
     text = " ".join(f"{payload.get('error')} {_flat(payload.get('detail'))}".split())
     if "시스템 관리자" in text:                 # 온톨로지 쓰기는 시스템 관리자 전용(require_system_admin)
         return _Stop("forbidden", f"{tool} — {text}")
     if "알 수 없는 타입" in text:
         return _Stop("ontology_missing", f"{tool} — {text}")
     if "찾을 수 없습니다" in text:
-        return _Stop("not_found", f"{tool} — {text}")
+        return _Stop("not_found", f"{tool} — {text}", op_only=True)
     if "토큰" in text or "인증" in text:
         return _Stop("unauthorized", f"{tool} — {text}")
     if "Internal server error" in text or _HTTP_5XX_RX.search(text):
         return _Stop("transient", f"{tool} — {text}", retry=True)
-    return _Stop("rejected", f"{tool} — {text}")
+    return _Stop("rejected", f"{tool} — {text}", op_only=True)
 
 
 def _result(reply: Mapping[str, Any], tool: str) -> dict:
@@ -517,8 +524,10 @@ def _result(reply: Mapping[str, Any], tool: str) -> dict:
             raise _Stop("transient", f"{tool} — {error} {detail}", retry=True)
         if error == "tool_error":
             raise _gateway_refusal(tool, detail)
-        if error == "masked_readback":
-            raise _Stop("masked_readback", f"{tool} — 가린 칸 {detail}")
+        if error == "masked_readback":                                  # 그 객체의 속성에만 걸린 것이다
+            raise _Stop("masked_readback", f"{tool} — 가린 칸 {detail}", op_only=True)
+        if error == "closed":
+            raise _Stop("closed", f"{tool} — 보내는 도중 과제가 조직 공개를 떠났거나 폐기됐다(부르지 않았다)")
         raise _Stop("rejected", f"{tool} — {error} {detail}")          # rpc_error(인자 꼴) · tool_not_contracted
     payload = reply.get("result")
     if isinstance(payload, Mapping) and payload.get("error"):
@@ -553,7 +562,7 @@ def _finding_object(store, project: Mapping[str, Any], finding_id: Any) -> dict 
     base = learning.resolve_cluster_key(store, str(row["cluster_key"]), owner_sub=str(row["owner_sub"])) or str(row["cluster_key"])
     key = base + registry.IMPROVEMENT_SUFFIX if row["direction"] == "improvement" else base
     reg = store.query_one(
-        "SELECT target_key, cluster_key, owner_sub, mechanism, mechanism_detail FROM rr_registry"
+        "SELECT target_key, cluster_key, owner_sub, mechanism, mechanism_detail, status FROM rr_registry"
         " WHERE target_key = ? AND cluster_key = ?", (row["target_key"], key))
     if reg is None:
         return None
@@ -563,7 +572,7 @@ def _finding_object(store, project: Mapping[str, Any], finding_id: Any) -> dict 
     owned = {"cluster_key": reg["cluster_key"], "portal_registry_key": code, "owner": project["owner_sub"],
              "visibility": project["mcp_visibility"]}
     return {"type_slug": "risk_finding", "code": code, "value": _value(head, code), "owned": owned,
-            "kind": "registry", "portal_id": code, "owner_sub": reg["owner_sub"],
+            "kind": "registry", "portal_id": code, "owner_sub": reg["owner_sub"], "status": reg["status"],
             "mirror": ("UPDATE rr_registry SET ra_entity_id = ? WHERE target_key = ? AND cluster_key = ?",
                        (reg["target_key"], reg["cluster_key"]))}
 
@@ -573,7 +582,7 @@ def _trait_object(op: Mapping[str, Any], owner_sub: str) -> dict:
     tag = str(op.get("tag") or "")
     parts = tag.split(":", 2)
     if len(parts) != 3 or parts[0] != "char" or not parts[1] or not parts[2]:
-        raise _Stop("rejected", f"설계 성격 태그가 char:<축>:<값> 꼴이 아니다 — {tag!r}")
+        raise _Stop("rejected", f"설계 성격 태그가 char:<축>:<값> 꼴이 아니다 — {tag!r}", op_only=True)
     return {"type_slug": "design_trait", "code": tag, "value": tag, "owned": {"axis": parts[1], "token": parts[2]},
             "kind": "trait", "portal_id": tag, "owner_sub": owner_sub, "mirror": None}
 
@@ -624,7 +633,7 @@ def _ensure(store, ra: RaClient, obj: Mapping[str, Any], patch: Mapping[str, Any
         current = made.get("object") if isinstance(made.get("object"), Mapping) else {}
         if str(current.get("code") or "").casefold() != obj["code"].casefold() or current.get("id") is None:
             raise _Stop("value_collision", f"create_object — code {obj['code']} 대신 id {current.get('id')} ·"
-                                           f" code {current.get('code')!r} 가 돌아왔다(값 {obj['value']!r})")
+                                           f" code {current.get('code')!r} 가 돌아왔다(값 {obj['value']!r})", op_only=True)
         ra_id = int(current["id"])
         if made.get("created"):
             _record_id(store, obj, ra_id)
@@ -662,7 +671,13 @@ def _send_op(store, ra: RaClient, target: Mapping[str, Any], projects: Mapping[s
         obj = _finding_object(store, project, op.get("finding_id"))
         if obj is None:
             return "registry_absent"
-        _ensure(store, ra, obj, _props(op))
+        # status 는 보낼 때의 등록부 값이다(원칙 3 — 투영은 정본을 따라간다). op 에 적힌 값은 라벨 때의 값이라 낡는다 — 큐는 같은 꼴의 op 를
+        # 한 번만 쌓아 확정 → 반증 → 확정의 셋째를 버리고, 보내는 틱 도중에 뒤집힌 새 op 는 내용으로 지우는 complete 에 함께 지워지며,
+        # 따로 둔 op 는 재동기 때 늦게 나간다. 그때의 등록부 값을 실으면 어느 op 가 마지막에 나가도 RA 가 앱과 같다.
+        patch = _props(op)
+        if obj["status"]:
+            patch["status"] = obj["status"]
+        _ensure(store, ra, obj, patch)
         return None
     if kind == "merge_object" and what == "design_trait":
         _ensure(store, ra, _trait_object(op, str(target["owner_sub"])), _props(op))
@@ -681,19 +696,37 @@ def _send_op(store, ra: RaClient, target: Mapping[str, Any], projects: Mapping[s
         dst = _ensure(store, ra, _trait_object(op, str(target["owner_sub"])))
         _result(ra.link_objects(src, dst, "exhibits", properties=_props(op)), "link_objects")
         return None
-    raise _Stop("rejected", f"모르는 op — {kind}:{what}")
+    raise _Stop("rejected", f"모르는 op — {kind}:{what}", op_only=True)
+
+
+def _projects(store, ids: Sequence[str]) -> dict[str, Mapping[str, Any] | None]:
+    return {pid: store.query_one("SELECT id, owner_sub, code, name, status, mcp_visibility FROM rr_projects WHERE id = ?", (pid,))
+            for pid in ids}
+
+
+def _closed(target: Mapping[str, Any] | None, projects: Mapping[str, Mapping[str, Any] | None]) -> dict | None:
+    """대상과 그 op 가 가리키는 과제가 지금 보낼 수 없으면 그 결과(폐기 · 없음은 거절, 조직 공개가 아니면 보류), 보낼 수 있으면 None."""
+    if target is None or any(p is None or p["status"] == "purged" for p in projects.values()):
+        return {"error": "rejected: 대상이나 그 과제가 없거나 폐기됐다 — RA 에 올리지 않는다", "retry": False}
+    if any(p["mcp_visibility"] != "org" for p in projects.values()):
+        return {"hold": "withheld"}
+    return None
 
 
 class RaSender:
     """retry_external_sync 의 전송기 — 타깃 하나의 external_sync.ra 대기 op 를 순서대로 RA 도구 호출로 보내고 결과를 dict 로 돌려준다.
 
-    결과 — done(큐에서 뺄 op: 보냈거나 RA 에 잇지 않기로 한 것) · skipped(그 가운데 잇지 않은 것의 까닭 낱말) · hold('withheld' — 과제가
-    조직 공개가 아니다, plan §5.5.3) · error('<낱말>: <글>' — 그 op 와 뒤의 op 는 큐에 남는다) · retry(참이면 백오프, 거짓이면 unavailable) ·
-    off(자격이 없어 아무것도 부르지 않았다). 상태 전이는 retry_external_sync 가 한다. 호출마다 새 MCP 세션을 연다 — 게이트웨이가 다시
-    뜨면 묵은 세션 id 는 받지 않는다.
+    결과 — done(큐에서 뺄 op: 보냈거나 RA 에 잇지 않기로 한 것) · skipped(그 가운데 잇지 않은 것의 까닭 낱말) · dead(그 op 에만 걸린 영구
+    거절 — {op, error}, 큐에서 빼 따로 둔다) · hold('withheld' — 과제가 조직 공개가 아니다, plan §5.5.3) · error('<낱말>: <글>' — 채널 전체가
+    막혔다, 그 op 와 뒤의 op 는 큐에 남는다) · retry(참이면 백오프, 거짓이면 unavailable) · off(자격이 없어 아무것도 부르지 않았다). 상태 전이는
+    retry_external_sync 가 한다. 과제의 가시성 · 폐기는 틱 머리와 **호출마다** 다시 본다 — 보내는 도중 비공개로 돌리거나 폐기하면 다음
+    호출부터 하지 않는다(원칙 9). 호출마다 새 MCP 세션을 연다 — 게이트웨이가 다시 뜨면 묵은 세션 id 는 받지 않는다.
     """
 
     channels = SENDER_CHANNELS
+    # 한 틱의 크기 — nightly.retry_external_sync 가 읽는다(대상 수 · 벽시계 초).
+    tick_max_targets = SEND_TICK_MAX_TARGETS
+    tick_budget_s = SEND_TICK_BUDGET_S
 
     def __init__(self, settings, *, client: httpx.Client | None = None) -> None:
         self.settings = settings
@@ -709,32 +742,41 @@ class RaSender:
                                  (target_key,))
         ids = sorted({str(target["project_id"]) if target is not None else "",
                       *(str(op["project_id"]) for op in ops if op.get("project_id"))})
-        projects = {pid: store.query_one("SELECT id, owner_sub, code, name, status, mcp_visibility FROM rr_projects"
-                                         " WHERE id = ?", (pid,)) for pid in ids}
-        if target is None or any(p is None or p["status"] == "purged" for p in projects.values()):
-            return {"error": "rejected: 대상이나 그 과제가 없거나 폐기됐다 — RA 에 올리지 않는다", "retry": False}
-        if any(p["mcp_visibility"] != "org" for p in projects.values()):
-            return {"hold": "withheld"}
+        projects = _projects(store, ids)
+        closed = _closed(target, projects)
+        if closed is not None:
+            return closed
+
+        def still_open() -> bool:
+            return _closed(target, _projects(store, ids)) is None
+
         ra = ra_client_from_settings(self.settings, config.load_secrets(self.settings.data_dir), client=self._client,
-                                     deadline_s=SEND_DEADLINE_S)
+                                     deadline_s=SEND_DEADLINE_S, gate=still_open)
         if not ra.available:
             return {"off": sender_status(self.settings)["reason"]}
         done: list[Mapping[str, Any]] = []
         skipped: list[str] = []
+        dead: list[dict] = []
         try:
             for op in ops:
                 try:
                     skip = _send_op(store, ra, target, projects, op)
                 except _Stop as stop:
+                    if stop.code == "closed":
+                        # 다시 열렸으면(그 사이 되돌렸다) 보류하지 않는다 — 보류는 공개 토글만 풀어 그대로 두면 영영 멈춘다.
+                        return {"done": done, "skipped": skipped, "dead": dead, **(_closed(target, _projects(store, ids)) or {})}
                     # 여기까지 올라온 not_found(찾았던 객체가 잇는 사이에 사라졌다)는 거절과 같다 — 낱말은 FAIL_TEXT 안에서만 쓴다.
                     text = stop.text if stop.code in FAIL_TEXT else f"rejected: {stop.text}"
-                    return {"done": done, "skipped": skipped, "error": text, "retry": stop.retry}
+                    if stop.op_only:
+                        dead.append({"op": dict(op), "error": text})
+                        continue
+                    return {"done": done, "skipped": skipped, "dead": dead, "error": text, "retry": stop.retry}
                 done.append(op)
                 if skip:
                     skipped.append(skip)
         finally:
             ra.close()
-        return {"done": done, "skipped": skipped}
+        return {"done": done, "skipped": skipped, "dead": dead}
 
 
 # ---------------------------------------------------------------- external_sync 상태기계(§5.5.3)
@@ -820,6 +862,15 @@ def queue_sync_ops(store, target_key: str, channel: str, ops: Sequence[Mapping[s
     return sync
 
 
+def _settle(entry: dict) -> None:
+    """큐가 빈 pending 채널을 done 으로 옮긴다."""
+    if not entry.get("pending_ops") and entry["state"] == "pending":
+        entry["state"] = "done"
+        entry["attempts"] = 0
+        entry["next_at"] = 0
+        entry["done_at"] = now_epoch()
+
+
 def complete_sync_ops(store, target_key: str, channel: str,
                       ops: Sequence[Mapping[str, Any]]) -> dict:
     """보낸 op 를 큐에서 지운다. 큐가 비면 done 으로 옮긴다."""
@@ -828,11 +879,31 @@ def complete_sync_ops(store, target_key: str, channel: str,
     done = {canonical_json(dict(op)) for op in ops}
     entry["pending_ops"] = [op for op in entry.get("pending_ops") or []
                             if canonical_json(dict(op)) not in done]
-    if not entry["pending_ops"] and entry["state"] == "pending":
-        entry["state"] = "done"
-        entry["attempts"] = 0
-        entry["next_at"] = 0
-        entry["done_at"] = now_epoch()
+    _settle(entry)
+    save_external_sync(store, target_key, sync)
+    return sync
+
+
+def set_aside_sync_ops(store, target_key: str, channel: str, dead: Sequence[Mapping[str, Any]]) -> dict:
+    """그 op 에만 걸린 영구 거절({op, error})을 큐에서 빼 dead_ops 에 까닭 · 시각과 함께 둔다 — 대상의 나머지 op 는 계속 나간다. 같은 꼴의
+    op 가 이미 있으면 까닭만 새로 적는다. 큐가 비면 done 이다. 재동기(resync)가 큐 앞으로 되돌린다."""
+    sync = load_external_sync(store, target_key)
+    entry = sync[channel]
+    kept = list(entry.get("dead_ops") or [])
+    where = {canonical_json(dict(item.get("op") or {})): i for i, item in enumerate(kept)}
+    for item in dead:
+        op = dict(item.get("op") or {})
+        row = {"op": op, "error": str(item.get("error") or ""), "at": now_epoch()}
+        key = canonical_json(op)
+        if key in where:
+            kept[where[key]] = row
+        else:
+            where[key] = len(kept)
+            kept.append(row)
+    entry["dead_ops"] = kept
+    gone = {canonical_json(dict(item.get("op") or {})) for item in dead}
+    entry["pending_ops"] = [op for op in entry.get("pending_ops") or [] if canonical_json(dict(op)) not in gone]
+    _settle(entry)
     save_external_sync(store, target_key, sync)
     return sync
 
@@ -865,10 +936,22 @@ def note_sync_failure(store, target_key: str, channel: str, error: str) -> dict:
 
 
 def resync(store, target_key: str) -> dict:
-    """타깃 화면 '재동기' — unavailable 두 채널을 pending(attempts=0, next_at=0) 으로 되돌린다."""
+    """타깃 화면 '재동기' — unavailable 두 채널을 pending(attempts=0, next_at=0) 으로 되돌리고, 따로 둔 op(dead_ops)를 큐 앞으로 되돌린다.
+    따로 둔 op 는 큐에 남은 어느 op 보다 앞선 것이라(op 는 순서대로 보내고 걸린 자리에서 뺀다) 앞에 두어야 원래 순서다. 같은 꼴은 한 번만."""
     sync = load_external_sync(store, target_key)
     for channel in SYNC_CHANNELS:
         entry = sync[channel]
+        revived = [dict(item["op"]) for item in entry.get("dead_ops") or [] if isinstance(item, Mapping) and item.get("op")]
+        if revived:
+            seen: set[str] = set()
+            merged = []
+            for op in revived + list(entry.get("pending_ops") or []):
+                key = canonical_json(dict(op))
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(op)
+            entry["pending_ops"] = merged
+            entry["dead_ops"] = []
         entry["state"] = "pending"
         entry["attempts"] = 0
         entry["next_at"] = 0
@@ -887,11 +970,23 @@ def _error_parts(last_error: Any) -> tuple[str | None, str]:
     return (code, detail) if code in FAIL_TEXT else (None, text)
 
 
+def fail_word(last_error: Any) -> str:
+    """last_error 의 사유 낱말 — FAIL_TEXT 밖의 글(종전 꼴 · 예외 글)은 요약처럼 'rejected' 로 읽는다(야간 재시도의 경고 줄이 센다)."""
+    return _error_parts(last_error)[0] or "rejected"
+
+
 def _ra_summary(entry: Mapping[str, Any], state: str, n: int, status: Mapping[str, Any]) -> tuple[str, str]:
-    """RA 채널의 (reason, message) — 보류 · 끝 · 꺼짐 · 멈춤 · 재시도 대기 · 대기 · 없음 순으로 하나를 고른다."""
+    """RA 채널의 (reason, message) — 보류 · 끝 · 꺼짐 · 멈춤 · 재시도 대기 · 대기 · 없음 순으로 하나를 고른다. 따로 둔 op 는 어느 상태에서나
+    글 끝에 건수와 마지막 까닭을 단다(요약의 dead_ops 칸이 건수다)."""
     skipped = int(entry.get("skipped_n") or 0)
     tail = (f" RA 에 잇지 않은 것 {skipped}건 — 마지막 까닭: {SKIP_TEXT.get(str(entry.get('last_skip')), entry.get('last_skip'))}."
             if skipped else "")
+    dead = [item for item in entry.get("dead_ops") or [] if isinstance(item, Mapping)]
+    if dead:
+        code, detail = _error_parts(dead[-1].get("error"))
+        why = f"{code} — {FAIL_TEXT[code]}" if code else "rejected"
+        tail += (f" RA 가 받지 않아 따로 둔 op {len(dead)}건 — 마지막 까닭: {why}{f' ({detail})' if detail else ''}. 고친 뒤 '재동기' 로"
+                 f" 다시 보낸다(대상의 나머지 op 는 계속 나간다).")
     if state == "withheld":
         return "withheld", (f"RA 반영 보류 — 과제가 조직 공개가 아니라(mcp_visibility=private) RA 에 올리지 않는다. 조직 공개로 바꾸면"
                             f" 대기 {n}건이 순서대로 나간다.{tail}")
@@ -914,12 +1009,13 @@ def _ra_summary(entry: Mapping[str, Any], state: str, n: int, status: Mapping[st
 
 
 def sync_summary(sync: Mapping[str, Any], *, status: Mapping[str, Any] | None = None) -> dict:
-    """과제·대상 응답·진행판(risk_get_coverage)·길잡이(risk_next_step)가 싣는 반영 요약 — {ra|adh: {state, pending_ops, reason, message}}.
+    """과제·대상 응답·진행판(risk_get_coverage)·길잡이(risk_next_step)가 싣는 반영 요약 — {ra|adh: {state, pending_ops, dead_ops, reason, message}}.
 
     RA 는 보내는 쪽(RaSender)이 붙어 있어 reason 이 실제 상태다 — withheld(과제 비공개) · sent · credential_missing:<키>(박스 쓰기 PAT
     없음 — 보내는 쪽이 꺼져 있다) · FAIL_TEXT 의 낱말(멈춤 · 재시도 대기 — last_error 의 앞 낱말) · queued · idle. 종전에는 늘
     'sender_unwired' 였다. `status` 는 sender_status() 의 답이다(없으면 지금 secrets.env 로 잰다). AIDataHub 반입은 아직 보내는 쪽이
-    없어 'sender_unwired' 그대로다(M4). `pending_ops` 는 건수다(op 본문은 GET /api/reports 의 ra_state·재동기 응답이 준다).
+    없어 'sender_unwired' 그대로다(M4). `pending_ops` 는 건수다(op 본문은 GET /api/reports 의 ra_state·재동기 응답이 준다). `dead_ops` 는
+    RA 가 받지 않아 따로 둔 op 의 건수다 — reason 이 sent 여도 0 이 아니면 RA 에 가지 않은 것이 있다(화면은 이 칸을 경고로 그린다).
     """
     ra_status = sender_status() if status is None else status
     out: dict[str, dict] = {}
@@ -932,7 +1028,8 @@ def sync_summary(sync: Mapping[str, Any], *, status: Mapping[str, Any] | None = 
         else:
             reason = "sender_unwired"
             message = f"{SYNC_LABELS[channel]} 반영 안 됨 — 보내는 쪽이 아직 배선되지 않았다(M4). 대기 {n}건, 보낸 것 없음."
-        out[channel] = {"state": state, "pending_ops": n, "reason": reason, "message": message}
+        out[channel] = {"state": state, "pending_ops": n, "dead_ops": len(entry.get("dead_ops") or []),
+                        "reason": reason, "message": message}
     return out
 
 

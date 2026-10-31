@@ -2703,13 +2703,15 @@ class RiskRunner:
     def _external_sync_tick(self) -> dict:
         """`next_at` 이 지난 pending 채널을 1회 재시도한다(plan §5.5.3 — sync_loop 주기 60 s).
 
-        전송기(`send`)는 주입식이라 러너 자체는 외부를 열지 않는다. 없으면 due 만 세고 지나간다.
+        전송기(`send`)는 주입식이라 러너 자체는 외부를 열지 않는다. 없으면 due 만 세고 지나간다. 러너의 정지 신호를 넘긴다 — 멈추면
+        대상 사이에서 틱을 끝낸다(stop() 이 러너 잠금을 놓은 뒤에 큐 비우기가 이어지지 않게).
         """
         if self.store is None or self.settings is None:
             return {"due": 0, "sent": 0, "skipped": "store 없음"}
         from app import nightly  # noqa: PLC0415 — nightly 는 runner 를 import 하지 않는다.
 
-        return nightly.retry_external_sync(self.store, now=now_epoch(), send=self.external_sync_send)
+        return nightly.retry_external_sync(self.store, now=now_epoch(), send=self.external_sync_send,
+                                           should_stop=self._stop.is_set)
 
     def _panel_tick(self) -> None:
         """잡 1건을 집어 패널 1건을 돌릴 워커를 띄운다(세마포어 risk_concurrency, 타깃당 직렬)."""
