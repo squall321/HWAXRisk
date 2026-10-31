@@ -20,7 +20,7 @@ import pytest
 
 import app.mcp_server as srv
 from app import brief as brief_module
-from app import field_source, routes
+from app import field_source, routes, runner
 from tests import factories
 from tests.rr.test_review1_stranger import (CASES, GET_CASES, GET_EXPECT, MCP_CASES, MCP_EXEMPT, OTHER, OWNER, P, _answer,
                                             _mcp, ledger, template)  # noqa: F401 — 원장 픽스처 둘을 이 모듈에서 쓴다
@@ -247,6 +247,26 @@ def test_an_owner_member_row_of_a_non_owner_opens_nothing_over_mcp(members, monk
     for read in (routes.list_targets, routes.list_diffs, routes.list_reports):
         assert _body(_answer(lambda read=read: read(ident=stranger)))["total"] == 0, read.__name__
     assert _answer(lambda: routes.get_coverage(ids["target"], ident=stranger))[1] == 404
+
+
+def test_the_brief_and_the_seat_diff_ref_do_not_read_an_owner_row_of_a_non_owner_as_membership(members):
+    """브리프의 구성원 판정(E6 유사 · E7 좌석 기억 · E8 선례 코퍼스 · 계보 — brief._member · _MEMBER_OF)과 러너가 좌석에 diff_id 를 실을지
+    가르는 판정(runner.diff_ref_withheld)도 project_role 과 같은 규칙이다 — owner 는 과제 행의 주인 열만 정하고 구성원 행은 편집자 · 보기만
+    이다(RD-10). 종전에는 멤버 행이면 역할을 보지 않아, 주인 아닌 사람의 owner 멤버 행(고침 전의 들여오기)으로 그 사람의 대상 브리프가 이
+    과제의 의견 · 성격 · 선례를 읽었고 그 사람 자격의 좌석에 이 과제의 diff 를 열 수 있다고 보았다."""
+    store, ids = members
+    factories.seed_raw(store, "rr_project_members", {
+        "project_id": ids["project"], "owner_sub": OTHER, "email": OTHER, "role": "owner", "added_by": OTHER,
+        "added_at": 1, "updated_at": 1},
+        reason="고침 전의 들여오기가 남긴 남의 owner 멤버 행 — 이제 들여오기는 parent_not_owned 로 막고 put_members 는 owner 를 받지 않는다")
+    assert not brief_module._member(store, ids["project"], OTHER)
+    assert ids["project"] not in brief_module._member_project_ids(store, OTHER)
+    for who in (OWNER, *MEMBERS):
+        assert brief_module._member(store, ids["project"], who), who
+        assert ids["project"] in brief_module._member_project_ids(store, who), who
+    assert (runner.diff_ref_withheld(store, ids["diff"], "user", OTHER) or {}).get("reason") == "not_member"
+    for who in (OWNER, *MEMBERS):
+        assert (runner.diff_ref_withheld(store, ids["diff"], "user", who) or {}).get("reason") != "not_member", who
 
 
 # ---------------------------------------------------------------- 쓰기는 그대로다

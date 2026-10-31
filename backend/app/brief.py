@@ -1688,17 +1688,21 @@ def _item_e6(store, similar: Mapping[str, Any], ctx, profile: "BriefProfile | No
 
 # ---------------------------------------------------------------- E7 좌석 개인 기억(고정 슬롯)
 def _member(store, project_id: str, email: str) -> bool:
-    """email 이 그 과제의 구성원(소유자 · rr_project_members)인가."""
+    """email 이 그 과제의 구성원(소유자 · rr_project_members 의 편집자 · 보기)인가 — owner 는 과제 행의 주인 열만 정한다(routes.project_role
+    과 같은 규칙 · RD-10 — 주인 아닌 사람의 owner 멤버 행은 고침 전의 들여오기가 남긴 것이라 역할로 읽지 않는다, MB-16)."""
     row = store.query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,))
     if row is None:
         return False
     return row["owner_sub"] == email or store.query_one(
-        "SELECT 1 FROM rr_project_members WHERE project_id = ? AND email = ?", (project_id, email)) is not None
+        "SELECT 1 FROM rr_project_members WHERE project_id = ? AND email = ? AND role IN ('viewer', 'editor')",
+        (project_id, email)) is not None
 
 
 # `_member` 를 rr_projects 위의 조건 하나로 쓴 것(자리표 둘 = 그 사람 email 두 번) — 좌석 기억(E7)의 SQL 과 유사 과제의 거름이
 # 같은 뜻을 쓴다(남 숨김 훑기 셋째, D45). 조직 공개(mcp_visibility)는 넣지 않는다 — 남의 과제를 건너 찾는 것은 기본 기능이 아니다.
-_MEMBER_OF = "owner_sub = ? OR id IN (SELECT project_id FROM rr_project_members WHERE email = ?)"
+# 구성원 행은 편집자 · 보기만이다(`_member` 와 같다 — MB-16).
+_MEMBER_OF = ("owner_sub = ? OR id IN (SELECT project_id FROM rr_project_members WHERE email = ?"
+              " AND role IN ('viewer', 'editor'))")
 
 
 def _member_project_ids(store, email: str | None) -> set[str]:
