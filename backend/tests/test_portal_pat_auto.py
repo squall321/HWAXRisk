@@ -96,7 +96,7 @@ def test_me_says_a_pat_is_due_when_none_is_registered(client, box):
     pat = client.get("/api/me", headers=AUTH).json()["portal_pat"]
     assert pat["registered"] is False and pat["email"] is None
     assert pat["auto"] == {"enabled": True, "due": True, "due_reason": "absent", "last_source": None, "last_at": None,
-                           "last_error": None, "last_error_kind": None, "last_error_at": None,
+                           "last_error": None, "last_error_kind": None, "last_error_at": None, "paused_until": None,
                            "how_to_stop": runner.AUTO_STOP_HINT}
     # 익명에는 자동 칸이 없다(누구의 것도 아니다).
     assert client.get("/api/me").json()["portal_pat"] is None
@@ -153,6 +153,50 @@ def test_put_records_the_source_and_clears_the_last_auto_error(client, box):
     r = client.put("/api/me/portal-pat", json={"pat": _jwt(), "source": "gateway-exchange"}, headers=AUTH)
     assert r.status_code == 422 and r.json()["error"]["code"] == "E100"
     assert _auto(client)["last_source"] == "manual"
+
+
+# ---------------------------------------------------------------- 웹 등록 실패의 기록과 쉼(화면 세션 청할 것 — FE-29 · FE-30)
+@pytest.mark.parametrize("case,code,kind", [("other_email", "pat_email_mismatch", "final"),
+                                            ("portal_down", "portal_unreachable", "transient")])
+def test_a_failed_web_registration_is_recorded_and_due_waits_out_its_pause(client, box, case, code, kind):
+    """웹 등록(source web — 앱을 열 때의 자동 등록 · 설정의 버튼, 브라우저가 받아 온 PAT)이 거절되면 portal_pat.auto 의 last_error ·
+    last_error_kind · last_error_at 에 적고, `due` 가 그 쉼(게이트웨이 교환 실패와 같은 두 쉼 — 일시 600초 · 사람이 고칠 것은 손잡이)을
+    본다 — 쉬는 동안 due 는 false 이고 `paused_until` 이 그 끝이다. 종전에는 게이트웨이 교환 실패만 적어 화면이 브라우저에 쉼을 따로
+    들었다(FE-29). 쉼은 한 기록이라 게이트웨이 길의 바람(portal_pat_wanted)도 같이 쉰다."""
+    if case == "portal_down":
+        box["portal_down"] = True
+        pat = _jwt()
+    else:
+        pat = _jwt(email="mallory@example.com")
+    r = client.put("/api/me/portal-pat", json={"pat": pat, "source": "web"}, headers=AUTH)
+    assert r.status_code == (502 if case == "portal_down" else 422) and r.json()["error"]["code"] == code, r.text
+    auto = _auto(client)
+    assert auto["last_error"].startswith(f"web-{code}: ") and auto["last_error_kind"] == kind
+    assert abs(auto["last_error_at"] - now_epoch()) < 60 and auto["last_source"] is None
+    held = min(routes.AUTO_RETRY_TRANSIENT_S, config.pat_auto_retry_s()) if kind == "transient" else config.pat_auto_retry_s()
+    assert (auto["due"], auto["due_reason"], auto["paused_until"]) == (False, "absent", auto["last_error_at"] + held)
+    assert "portal_pat_wanted" not in _mint(client, GW)
+    _age_last_error(held + 1)
+    auto = _auto(client)
+    assert (auto["due"], auto["paused_until"]) == (True, None) and auto["last_error"] is not None
+    assert _mint(client, GW)["portal_pat_wanted"]["reason"] == "absent"
+
+
+def test_a_pasted_pat_that_fails_is_not_an_auto_registration_failure(client, box):
+    """붙여 넣은 PAT(source 없음 = manual)의 거절은 자동 등록 실패가 아니다 — 적지 않고 쉬지 않는다(앱을 열 때의 자동 등록은 그대로 바란다)."""
+    r = client.put("/api/me/portal-pat", json={"pat": _jwt(email="mallory@example.com")}, headers=AUTH)
+    assert r.status_code == 422
+    auto = _auto(client)
+    assert (auto["last_error"], auto["last_error_at"], auto["due"], auto["paused_until"]) == (None, None, True, None)
+
+
+def test_a_web_success_after_a_failure_clears_the_pause(client, box):
+    """웹 등록이 실패해 쉬는 중에도 설정의 버튼(같은 source web)은 된다 — 성공하면 실패 기록과 쉼을 지운다."""
+    client.put("/api/me/portal-pat", json={"pat": _jwt(email="mallory@example.com"), "source": "web"}, headers=AUTH)
+    assert _auto(client)["paused_until"] is not None
+    assert client.put("/api/me/portal-pat", json={"pat": _jwt(), "source": "web"}, headers=AUTH).status_code == 200
+    auto = _auto(client)
+    assert (auto["last_error"], auto["last_error_at"], auto["paused_until"], auto["last_source"]) == (None, None, None, "web")
 
 
 # ---------------------------------------------------------------- 단언의 portal_pat_wanted
