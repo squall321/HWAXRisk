@@ -282,6 +282,14 @@
   op 하나에만 걸린 영구 거절은 `dead_ops` 로 따로 두고 나머지를 보낸다(재동기가 되돌린다) · 가시성 · 폐기를 호출마다 본다 · 멈춤 · 따로 둠을
   틱마다 경고 한 줄 · 한 틱 대상 50 · 30초 · 정지 신호 · 박스 PAT 클라이언트에서 보고서 도구를 뺐다 · 폐기 보고서의 RA 층 글을 실제 동작으로.
   남은 것 — ↓ 6장 'RK-01 거두기' 결정, 화면의 `dead_ops` 칸(프런트 세션).
+- [x] **RK-01 거두기**(2026-10-31, 같은 가지, ↓ 6장 (가) 사용자 결정 10-31 — context-notes 'RK-01 거두기' 절 RS-21~) — 비공개 전환 · 폐기 ·
+  이양 · 다시 공개 때 `ra_client.queue_retracts` 가 RA 에 나간 객체(과제 · 등록부 risk_finding)마다 거두기 op 를 큐 끝에 쌓고, 보내는 쪽이
+  보류 · 폐기 멈춤을 건너뛰어 보낸다. 꼴은 보낼 때의 정본 범위로 — 닫힌 과제면 값 '비공개@<code>' · 과제 설명 비움 · risk_finding 은
+  visibility=private 와 열쇠만(owner · status 를 뺀다), 열린 과제면 나간 꼴(이양 뒤 owner · 다시 연 과제). 남의 객체는 쓰지 않고(`id_mismatch`)
+  비공개 순간에 만들어진 객체도 뒤따라 거둔다. 요약에 `retracted` · `retract_pending` · `retract_failed` · `retract_reasons`, 폐기 보고서
+  RA 층은 거둔 수 · 대기 · 못 거둔 수와 까닭 낱말(`not_retracted` 를 갈음), 거두기마다 rr_audit(`ra.retract` · `ra.remark`). RA 에 지우기 ·
+  끊기가 없어 객체 껍데기와 연결은 남는다. 남은 것 — ↓ 2장 cae00 확인 ⑦, 화면의 거두기 칸(프런트 세션), 포털 정본 §5.2.6 4층 · §5.1 원칙 9
+  글(포털 몫 — `status='retracted'` 는 RA 가 받지 않는다).
 
 ## 2. 실환경 실측 대기 — 자격·선행 조건이 필요한 것
 
@@ -310,10 +318,15 @@
   **호출 전용이라 `tools/list` · `/tools-map` 에 나오지 않는다**(목록에서 찾으면 RA 가 멀쩡해도 '없다' 로 보인다). 박스 쓰기 PAT 로 게이트웨이에
   MCP `initialize` → `tools/call` 로 `reportarchive_list_object_types` 를 직접 불러 답이 오는지 본다. 인자 이름은 `tools/list` 의 맨
   `create_object` · `update_object` · `get_object` 항목(다른 백엔드와 이름이 겹치면 `reportarchive_` 접두가 붙은 항목)의 inputSchema 로
-  `update_object(object_id)` · `get_object(type, id)` 인지 본다(dev RA 사본 3ece194 기준으로 지었다). `/tools-map` 의 `map` 에서 값이
-  `reportarchive` 인 도구도 함께 본다. ④ 위 부트스트랩이 돌았는지(아니면 `ontology_missing`). ⑤ 과제는 기본이 비공개라 조직 공개로 바꾼
-  과제만 나간다(나머지는 `withheld`). ⑥ 첫 동기 주기 뒤 앱 로그에 `외부 반영 RA 멈춤` 경고가 없는지 본다(있으면 그 사유 낱말을 고친 뒤 대상
-  화면의 '재동기').
+  `update_object(object_id, value, description, properties)` · `get_object(type, id)` 인지 본다(dev RA 사본 3ece194 기준으로 지었다 — 거두기가
+  value · description 을 쓴다). `/tools-map` 의 `map` 에서 값이 `reportarchive` 인 도구도 함께 본다. ④ 위 부트스트랩이 돌았는지(아니면
+  `ontology_missing`) — 거두기는 risk_finding 의 `visibility` 속성(enum private · org)을 쓰므로 그 속성이 박스 RA 에 있는지도 본다(없으면
+  거두기가 `rejected`('정의되지 않은 속성')로 따로 두어진다). ⑤ 과제는 기본이 비공개라 조직 공개로 바꾼 과제만 나간다(나머지는 `withheld`).
+  ⑥ 첫 동기 주기 뒤 앱 로그에 `외부 반영 RA 멈춤` 경고가 없는지 본다(있으면 그 사유 낱말을 고친 뒤 대상 화면의 '재동기'). ⑦ 거두기 —
+  RA 에 나간 조직 공개 과제 하나(시험용)를 비공개로 돌리고 다음 동기 주기(60초) 뒤 그 과제의 RA risk_finding 이 값 `비공개@<code>` ·
+  속성 visibility=private 와 열쇠 둘뿐인지, 과제 객체의 값이 `비공개@<과제 id>` 이고 설명이 비었는지 본다(RA 화면 · `reportarchive_get_object`).
+  앱에서는 대상 요약의 `retracted` 수와 과제 감사(`GET /api/projects/{id}/audit?action=ra.retract`)를 본다. 다시 조직 공개로 돌리면 나간 꼴로
+  돌아오는지도 본다. `id_mismatch` 로 따로 두어지면 다른 박스에서 들여온 사상이다 — 그 박스의 RA 가 아니므로 쓰지 않은 것이다.
 - [ ] 통과 기준 실측 — P0 (4) StepForge 직접 읽기 · (9) 러너 자격 3항 · (16) app-data 왕복(`appdata-to-drive.sh` → 복원 `integrity_check ok`) ·
   (17) 신원 해석 라이브 · (18) 자격 최소 권한·암호 보관 4항
 - [ ] P3 엔진 실호출 실측 — 포털 `/agent/chat` 경로 (A) 로 패널 1건 완주 · SSE 귀속 ≥95% · 도구 사용률 ≥80% · IR 인용 ≥50%
@@ -401,12 +414,13 @@
 
 - [x] **RK-01 D-1 지식 그래프 쓰기 주체**(포털 docs/request-1027 review-07 3절) — (가) 박스 쓰기 PAT(서비스 계정)로 쓰고 누가 했는지는
   `owner_sub` 가 맡는다. 종합 보고서는 사람 이름 그대로(포털 챗 PAT 길). 사용자 결정 10-31.
-- [ ] **RK-01 거두기**(반대 검토 10-31, context-notes RS-18) — 조직 공개였던 과제를 비공개로 되돌리거나 폐기 · 이양해도 RA 에 이미 나간 객체
-  (과제 설명의 과제 이름 · risk_finding 의 owner · visibility=org · status · exhibits)가 그대로 남아 원칙 9('정본에서 못 보는 것은 투영에서도
-  못 본다')가 깨진다. 고를 것 — (a) 비공개 전환 · 폐기 · 이양 때 보류를 건너뛰는 '거두기' op 를 쌓는다(visibility=private 로 다시 표기하거나
-  설명을 비우고 status 를 표기 — 부트스트랩 status enum 에 retracted 가 없어 그 값을 쓰려면 enum 도 정한다), (b) 한 번이라도 RA 에 나간 과제는
-  비공개 전환을 422 로 막는다, (c) 지금처럼 두고 원칙 9 의 글을 고친다. 지금(기본) — 거두지 않고 폐기 보고서의 RA 층이 그 사실과 나간 객체
-  수를 말한다(`not_retracted`).
+- [x] **RK-01 거두기**(반대 검토 10-31, context-notes RS-18 → RS-21~) — **(가) 사용자 결정 10-31**. 조직 공개였던 과제를 비공개로 되돌리거나
+  폐기 · 이양하면 보류를 건너뛰는 '거두기' op 를 쌓아 RA 에 나간 객체를 다시 표기한다 — RA 가 허락하는 만큼(risk_finding 은 visibility=private
+  와 되짚을 열쇠만 남기고 owner · status 를 뺀다, 과제는 설명을 비운다, 둘 다 값은 '비공개@<code>'). 이양은 owner 를 새 소유자로 다시 표기하고,
+  다시 조직 공개로 열면 보낼 op 가 이어 나가고 거둔 것은 나간 꼴로 돌아온다. (b) 비공개 전환 막기 · (c) 그대로 두고 원칙 고치기는 고르지
+  않았다. RA 에 지우기 · 끊기가 없고 MCP update 가 엔티티 상태(deprecated)를 넘기지 않아 객체 껍데기와 연결(exhibits · verified_by ·
+  refuted_by)은 남는다. risk_finding 의 status 속성은 enum 에 retracted 를 더하는 대신 뺐다(결정의 '칸을 비운다' — enum 을 바꾸면 박스
+  부트스트랩을 다시 돌려야 한다).
 - [ ] #17 MCP 쓰기 귀속 — `actor` 미검증(`actor_verified:false`) 유지 vs 게이트웨이 `x-hwax-user` 전달 (기본 미채택)
 - [ ] #18b 데이터 등급 — `confidential` 이면 조직 공개를 막을지 (현재 등급과 `mcp_visibility` 는 분리돼 있다)
 - [ ] #29 과제 공유 기본값 — 명시 초대만(기본) vs 부서 자동 viewer / 열람 감사 로그 (기본 안 남김)

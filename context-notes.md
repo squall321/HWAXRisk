@@ -3122,3 +3122,115 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
 - 전체 시험(공유 잠금 아래 한 번, HEAD f227b19 + 이 문서들, 12분 38초) — 3,545 통과 · 실패 0 · xfail 4(rc 0). 앞 판의 3,525 통과 ·
   실패 1(거름 가드)에 새 시험 19. ruff — 바꾼 파일은 깨끗하다.
 - 하지 않은 것 — 서비스 · 인스턴스 기동 · 정지, push · 병합, 진짜 RA 호출.
+
+## RK-01 거두기(가지 `wt1031/rk01`, 39a2dab 위, 2026-10-31)
+
+> RK-01 반대 검토 뒤 포털 세션에서 사용자가 고른 답이다 — checklist 6장 'RK-01 거두기' 의 **(가)**(사용자 결정 10-31). 박스 서비스 계정으로
+> RA 에 나간 객체를 가진 과제가 비공개 · 폐기 · 이양되면 보류를 건너뛰는 '거두기' op 를 쌓아 RA 객체를 다시 표기한다 — visibility=private, 또는
+> 그것을 못 하면 status · 설명 칸을 비운다(RA 객체 모델이 받는 쪽으로). (b) 비공개 전환 막기 · (c) 그대로 두기는 고르지 않았다.
+
+### RS-21. RA 가 허락하는 것 — dev 사본(3ece194)을 읽기만 했다
+- MCP 온톨로지 쓰기는 넷뿐이다 — create_object · update_object · add_object_alias · link_objects(ReportArchive `mcp_server/server.py`
+  1823 ~ 1912, 실행 화이트리스트 `backend/app/modules/ai/routes.py` 712 ~ 717). 라우트가 `require_system_admin`(728)이라 시스템 관리자의
+  토큰만 쓴다(박스 확인 ② 그대로). 객체를 지우거나 연결을 끊는 MCP 도구는 없다(`remove_rows` 는 보고서 표의 줄이다).
+- `update_object`(server.py 1858 ~ 1878)는 object_id · value · code · description · properties 를 받고 None 인 칸은 뺀다. 실행부
+  `_w_update_object`(`backend/app/ai/agent_tools.py` 849 ~ 869)는 그 넷만 넘긴다(859 ~ 862). 스키마 `EntityUpdate`
+  (`backend/app/modules/entities/schemas.py` 382 ~ 395)에 status(active · deprecated, 389)가 있지만 MCP 로는 닿지 않는다 — 객체를 숨기는
+  deprecated 도 못 한다.
+- `update_entity`(`backend/app/modules/entities/services.py` 859 ~ 898) — value 를 바꾸면 같은 축 값 겹침(대소문자 무시)을 보고
+  `이미 같은 값이 있습니다`(878), description 은 빈 글도 그대로 적고(883 ~ 884), properties 는 축 속성 정의로 검증해 통째로 바꾼다(894).
+  `_validate_props`(739 ~ 765)는 정의 밖 칸을 거절하고(746 ~ 748) 빈 값(None · '' · [])을 저장하지 않는다(752 ~ 756).
+- 엔티티에 공개 범위 열은 없다(`entities/models.py` Entity 190 ~ 249, 상태 enum 52 ~ 57). visibility 는 이 앱의 부트스트랩이 네 record 축에 단
+  속성이다(`backend/scripts/bootstrap_ra_ontology.py` `_VISIBILITY` 52, risk_finding 176). 과제(project)는 RA 기존 축이라 그 속성이 없고,
+  risk_finding status enum 에 retracted 가 없다(169 ~ 172).
+- 그래서 — risk_finding 은 visibility=private 로 다시 표기하고 속성을 통째로 바꿔 owner · status 를 뺀다(되짚을 열쇠 cluster_key ·
+  portal_registry_key 만 남긴다). 과제는 표기할 칸이 없어 설명(과제 이름)을 비운다. value 는 비울 수 없어(최소 1자) 과제 코드 · 메커니즘을 뺀
+  `비공개@<code>` 로 바꾼다 — 투영이 채운 칸을 RA 가 받는 만큼 비웠다. 객체 자체와 연결은 남는다. status enum 에 retracted 를 더하지는
+  않았다 — 결정이 '칸을 비운다' 이고, enum 을 바꾸면 박스 부트스트랩(시스템 관리자)을 다시 돌려야 한다.
+- 계획 정본 §5.2.6 4층의 `update_object(status='retracted')` 는 이 RA 가 받지 않는다(MCP 가 상태를 넘기지 않고 enum 에 값도 없다) — 정본
+  글은 포털 몫이라 돌려주는 글에 적었다.
+
+### RS-22. op 꼴 — 무엇을 쓸지는 op 가 아니라 보낼 때의 정본 범위다
+- op 는 `{op: retract, reason: private|purged|owner|org, kind: project|registry, portal_id, project_id, by}` 다. reason · by 는 기록(감사 ·
+  셈)이고 꼴은 보낼 때 과제의 상태로 고른다 — 조직 공개가 아니거나 폐기면 거둔 꼴, 조직 공개면 나간 꼴. RS-12 의 '보낼 때의 등록부 값' 과
+  같은 자세다(원칙 3). 그래서 큐가 같은 꼴을 한 번만 쌓아도, 비공개 → 공개 → 비공개를 틱 사이에 오가도 마지막에 나간 op 가 정본을 따른다.
+  보내는 도중 닫혔다 다시 열린 경우는 비공개 도중 시험의 끝이 본다(거두지 않고 나간 꼴 그대로).
+- 이양(owner)과 다시 공개(org)를 같은 op 로 했다 — 둘 다 '정본 범위로 다시 표기' 라 꼴을 고르는 길이 같다. 셈(retract_pending ·
+  retract_failed · 폐기 보고서)은 거두기(private · purged)만 센다 — 다시 표기를 거두기 대기로 세면 다시 연 과제의 화면이 '거두기 대기' 를 말한다.
+- 다시 공개는 지금 거둔 꼴인 객체(대상의 retracted)만 다시 표기한다 — 지시의 '다시 조직 공개면 보통 보내기가 이어진다' 에 더해, 거둔 값 ·
+  설명 · visibility 가 정본(조직 공개)과 어긋난 채 남지 않게 했다. 보류된 보낼 op 는 그 앞에서 순서대로 나간다.
+
+### RS-23. 보류 · 폐기 멈춤을 건너뛴다 — 큐 순서는 지킨다
+- RaSender 는 닫힌 과제여도 큐에 거두기 op 가 있으면 MCP 세션을 열고 거두기 op 만 큐 순서대로 보낸다(보낼 op 는 보류 · 멈춤 그대로). 열린
+  과제면 큐 순서대로 다 보내므로 거두기 op 는 같은 대상의 앞에 쌓인 보낼 op 다음에 나간다. 큐 끝에 붙이는 것은 queue_sync_ops 다.
+- 호출마다 보는 문(RS-14)은 거두기 op 에 걸지 않는다 — 걸면 비공개가 된 순간 거두기 자신이 막힌다. 보낼 op 가 문에 걸리면 그 뒤로는 거두기
+  op 만 보내고(종전에는 그 자리에서 끝냈다) 끝에 보류 · 멈춤을 단다(그 사이 다시 열렸으면 종전처럼 보류하지 않는다).
+- retry_external_sync 는 보류 채널을 집지 않았다(공개 토글만 푼다) — 거두기 op 가 있으면 집는다(next_at 는 보지 않는다 — 보류에는 백오프가
+  없다). 보류 대상이 거두기 op 만 남았다가 다 보내면 done 이다(종전 _settle 은 pending 만 옮겨 '대기 0건인 보류' 가 남았을 것이다).
+- 채널 전체가 막히는 실패(관리자 아님 · 토큰 · 도구 없음 · 온톨로지 없음)에는 거두기도 다른 op 처럼 멈추고 재동기를 기다린다 — 같은 거절을
+  틱마다 두드리지 않는다. 그동안 요약 · 폐기 보고서가 그 사유 낱말을 단다.
+
+### RS-24. 무엇을 거두나
+- 과제 객체와 등록부 risk_finding — rr_id_map(정본)과 원본 표의 ra_entity_id(조회 편의용 중복)를 둘 다 본다(쌓을 때 · 보낼 때). 공개 범위를
+  지키는 일이라 사상 한 칸이 어긋났다고 나간 객체를 남겨 두지 않는다. risk_finding op 는 그 행의 대상 큐에, 과제 객체 op 는 과제의 첫
+  대상(만든 순서 — 대상이 늘어도 바뀌지 않는다)에 둔다.
+- 성격 태그(design_trait)는 거두지 않는다 — 과제를 가로지르는 통제 어휘라 다른 과제도 같은 객체를 잇는다. 과제 → 태그 exhibits 와
+  verified_by · refuted_by 연결(속성 label_id · match_score · source)도 남는다 — 끊는 도구가 없다. 연결 속성은 빈 속성으로 link_objects 를
+  다시 부르면 비울 수 있지만(RA add_relation 이 넘긴 속성으로 바꾼다) 연결이 남아 얻는 것이 적어 하지 않았다. 폐기 보고서 글이 그렇게 말한다.
+
+### RS-25. 남의 객체를 쓰지 않는다(id_mismatch)
+- 거둔 꼴은 value · properties 를 통째로 바꾸므로 사상된 id 가 남의 객체면 그 객체를 망친다. 반출 · 들여오기가 rr_id_map · ra_entity_id 를
+  싣는다(export 의 rr_id_map) — 다른 박스의 RA id 가 이 박스의 RA 에서 다른 객체를 가리킬 수 있다. get_object 는 code 를 주지 않으므로 값
+  (label)의 꼬리로 본다 — 이 앱은 값 끝에 늘 `@<code>` 를 단다(RS-4). 게이트웨이 가림(HG-20 — 메일 · 계정 꼴, gateway.py `_EMAIL_RX` ·
+  `_ACCOUNT_RX`)은 값 머리에 걸려도 code 꼬리(`diff:<hex>#<cluster>` · 과제 id)는 그 꼴이 아니라 남는다.
+- 종전 보내는 길(_ensure)에도 같은 빈틈이 있다 — 사상된 id 로 get_object 가 되면 code 를 보지 않고 병합한다. 그 길은 병합이라 피해가 작고 이
+  일 밖이라 그대로 뒀다(RS-29).
+
+### RS-26. 비공개로 돌리는 순간의 경합 — 뒤따라 쌓기
+- 비공개로 돌리는 순간 RA 에 만드는 호출(create_object)이 나가 있으면, 라우트가 거두기 op 를 쌓을 때 그 객체의 id 는 아직 적히지 않았다
+  (_ensure 가 답을 받은 뒤 적는다). 그대로면 그 객체만 visibility=org 로 남는다. 보내는 쪽이 결과를 적는 트랜잭션(record_retracts)에서 닫힌
+  과제의 객체 가운데 거둔 꼴도 아니고 거두기 op 도 따로 둔 것도 없는 것에 거두기 op 를 뒤따라 쌓는다 — 다음 틱에 보류를 건너뛰어 거둔다.
+  따로 둔 것은 다시 쌓지 않는다(재동기를 기다린다 — 쌓으면 틱마다 같은 거절을 두드린다). 행위자가 없어 감사 행은 과제 소유자로 적는다.
+- 시험을 짜다 스스로 찾았다 — 종전 비공개 도중 시험 둘(남은 op 는 link 하나)이 뒤따른 거두기 op 를 하나 더 보게 되어 기대를 고쳤다.
+
+### RS-27. 셈 · 폐기 보고서 · 감사
+- 대상 RA 채널에 `retracted`(지금 거둔 꼴인 객체 → 시각)를 둔다(있을 때만 — 빈 꼴의 바이트는 그대로다). 나간 꼴로 다시 표기하면 지운다.
+  요약은 retracted · retract_pending · retract_failed · retract_reasons 를 RA 채널에 늘 싣는다(화면 계약). 글은 '거두기(비공개 · 폐기) — RA 에서
+  거둔 객체 n개 · 대기 n건 · 못 거둔 것 n건(까닭 n)'. 보류 글의 '대기 n건' 은 보류된 op 수다(거두기 op 는 보류되지 않는다).
+- 폐기는 요청 안에서 RA 를 부르지 않는다 — 앱의 외부 쓰기는 sync_loop 한 곳이다(정본 §5.2.6 도 '202 응답 후 러너가 순서대로 돈다').
+  그래서 폐기 응답의 RA 층은 대기(retract_pending)이고, 거두기 결과를 적을 때마다 purge_report_json 의 RA 층을 다시 짓는다
+  (refresh_purge_report — 객체마다 대기 · 못 거둠(까닭) · 거둠 · 쌓이지 않음을 큐 · 따로 둠 · retracted 에서 다시 센다). 읽는 길은 늘리지 않았다
+  — 폐기 응답, 저장된 보고서, 대상 요약이 말한다.
+- rr_audit 는 사람 행위 한정이지만 거두기는 사람(비공개 · 폐기 · 이양을 한 사람)의 행위를 동기 주기가 마저 하는 것이라 그 사람을 행위자로
+  거두기 op 마다 한 행 남긴다 — `ra.retract`(거둔 꼴) · `ra.remark`(나간 꼴), 채널 rest(그 행위가 들어온 입구 — DDL CHECK 가 넷뿐이다), 범위는
+  과제 · 등록부(subject `<target_key>#<cluster_key>`), after 에 RA id · 꼴 · 결과(retracted · remarked · unchanged · absent · failed 와 까닭).
+  쌓을 때가 아니라 RA 에 닿았거나 받지 않았을 때 남긴다 — 쌓은 사실은 그 행위의 감사 행(project.mcp_visibility · purge · transfer)이 이미 있다.
+
+### RS-28. routes.py 에서 바꾼 곳(병렬 가지 `wt1031/bl-risk-api` 가 같은 파일을 고친다)
+- `patch_project` — `if visibility_changed:` 안, `_queue_visibility_retag` 다음 한 줄(응답 `resynced.ra_retract_ops`).
+- `transfer_project` — TRANSFER_DERIVED 갱신 다음 · 감사 앞 한 줄과 응답의 `ra_retract_ops`.
+- `purge_project` — RA 층 주석과 `not_retracted` 항목을 `queue_retracts` 한 줄과 `ra_client.purge_ra_layer` 로 바꿨고, 쓰지 않게 된
+  `_ra_projection_count`(이 가지 a070e14 가 넣었다)를 지웠다. 그 가지의 routes 덩어리(get_project_audit 뒤 · add_source · 잡 · 사람 finding ·
+  큐레이션)와 겹치는 줄은 없다.
+
+### RS-29. 하지 않은 것 · 남긴 것
+- RA 객체 · 연결 지우기, 엔티티 상태(deprecated) — RA MCP 에 없다(RS-21). RA 리포는 손대지 않는다.
+- 화면의 거두기 칸(retracted · retract_pending · retract_failed · retract_reasons, 폐기 보고서 RA 층) — 프런트 세션 몫.
+- 포털 정본 §5.1 원칙 9 · §5.2.6 4층 글 — 포털 몫(status='retracted' 는 RA 가 받지 않는다, 거두기는 다시 표기다).
+- AIDataHub 쪽 회수(가시성 태그 재부착 · 빈 UPSERT)는 보내는 쪽이 없어 그대로다(M4).
+- 종전 보내는 길(_ensure)의 사상 id 대조(RS-25), RA 에는 생겼지만 답을 잃어 id 를 모르는 객체(code 로 찾으려면 search_objects 계약을 넓혀야
+  한다) — 따로 할 일로 남긴다.
+
+### RS-30. 시험 · 변이 · 전체 시험
+- 새 시험 15 — test_ra_sender 12(게이트웨이 · RA 대역의 update_object 를 RA 그대로 고쳤다 — 넘긴 칸만 · 값 겹침 · 빈 값 빼기) ·
+  test_external_sync 2 · test_nightly 1. 고쳐 쓴 것 — test_project_patch 의 폐기 보고서(not_retracted → retract_pending · nothing_sent). 기대를
+  고친 것 넷 — 비공개 도중 시험 둘(뒤따른 거두기 op, RS-26) · 요약 칸 · PATCH 응답 칸.
+- 고치기 전 판(39a2dab)에 새 시험 파일 넷을 얹으면 20건이 실패한다(새 15 · 고쳐 쓴 1 · 기대를 고친 4). 고친 판에서는 다 통과한다.
+- 변이(스크래치 사본, 바이트코드 끔) 31개가 다 잡혔다 — 보류 건너뜀 · 문 · 보류 채널 집기 · id 대조 · 거둔 꼴의 통째 교체 · value · 설명 ·
+  꼴을 op 로 고름 · 다시 공개 · 이양 · 비공개 · 폐기의 쌓기 · 감사 · 보고서 다시 짓기 · 뒤따라 쌓기 · 따로 둔 것 다시 쌓기 · 보류 정리 · 셈의
+  까닭 거름 · 값 겹침 낱말 · 빈 설명 · 같은 꼴 한 번 · 바뀐 것 없으면 부르지 않음 · 원본 표 폴백 · 보고서 낱말 · 다시 표기 뒤 표시 지움 ·
+  행위자 폴백 · 거둔 뒤 보류 · 큐 순서 · 이양에 과제 객체 · 요약 칸 · 결과 적기.
+- 전체 시험(공유 잠금 아래 한 번, 코드 HEAD 74f695f, 11분 59초) — 3,560 통과 · 실패 0 · xfail 4(rc 0). 앞 판의 3,545 에 새 시험 15. ruff — 바꾼
+  파일은 깨끗하다.
+- 하지 않은 것 — 서비스 · 인스턴스 기동 · 정지, push · 병합, 진짜 RA 호출(RA 는 dev 사본을 읽기만 했다). 배선 리허설(rehearsal_d)은 카드 대조
+  사슬을 바꾸지 않아 돌리지 않았다.
