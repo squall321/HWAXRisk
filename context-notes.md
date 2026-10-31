@@ -3219,3 +3219,78 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
   4. 진행판에 마지막 검토 잡의 사슬 표지(`params.chain`) 칸 — 'M2 시절 잡 뒤의 사슬 시작' 을 요청서의 어림이 아니라 그 칸으로 가르게.
 - 포털 요청서에 고칠 말 — 2절의 '`by_basis` 의 `unset` 은 search_only 셀을 함께 센다' 는 지금 코드와 다르다(CELL_BASES 에 search_only 가
   있어 따로 센다).
+
+## 화면 세션 10-31 4차 걸음 — 리뷰 후속(가지 `wt1031/riskfe`, 2026-10-31)
+
+> 이 가지 전체를 본 리뷰가 검증해 넘긴 지적 13건이다(높음 1 · 중간 1 · 낮음 2 · 그 밖 9). 지적마다 먼저 재현했다 — 스크래치 jsdom 하네스(리뷰의
+> 재현 스크립트를 이 가지의 컴파일 산출물에 대고) · 스크래치 백엔드 사본(이 가지의 코드, 바이트코드 끔, 공용 시험 픽스처) · 스크래치 SQLite. 13건
+> 다 재현됐고 다 고쳤다. 백엔드는 고치지 않았다. 커밋 5ea092f ~ 1021e30.
+
+### FE-23. 쟁점 다시 토의 표기의 두 꼴 · 화면 자리의 오류 경계
+- 사람이 끝난 쟁점을 올리면(PUT /issues queue) reraised_json 이 빈 채로 대기가 되고, 새 패널이 판정 못 함이면 issues._keep_verdict 가
+  `{new_panel_failed}` 만 적는다 — 쟁점 행의 reargue 는 label · new_panel_failed 뿐이다(스크래치 백엔드 사본에서 그 길을 돌려 받은 행). 타입이
+  label 밖을 다 요구 칸으로 적어 두어 그 행을 누르면 `raisers_added.length` 에서 #root 가 내려갔다(jsdom · 실 Chromium 둘 다 재현).
+- label 밖은 선택 칸이다. 근거가 바뀐 표기(basis_hash 가 있다)만 들고 남 · '주장값이 바뀌었다' · 시각 · 회차를 보이고, 새 패널 실패는 그
+  패널 · 까닭(말과 code) · 시각이다(`ReargueNote`). 견본 `issueReargueRows` 가 두 꼴을 tsc 와 시험에 싣는다.
+- 오류 경계(`ErrorBoundary`)를 Routes 둘레에 둔다 — 이 가지에서만 서버 꼴 하나로 앱 전체가 백지가 된 일이 넷이었다(FE-5 · FE-10 · 9055a0a ·
+  이것). 주소(pathname)가 바뀌면 멈춤을 걷고, 아이들을 다시 마운트하지 않아 평소 동작은 그대로다.
+
+### FE-24. 등록부 상태 변경에 target_key
+- 9bd5f48 부터 본문에 target_key 가 없어 registry.set_status 가 그 사람의 같은 cluster_key 행 전부(앞뒤 스냅샷 · diff 대상)를 바꾸고
+  verified · dismissed 면 다른 대상의 finding 에 라벨까지 달았다(스크래치 백엔드 — updated 2, target_key 를 실으면 1). 본문은
+  `registryStatusBody` 한 곳에서 늘 싣는다.
+
+### FE-25. 완결 fresh=1 은 그 읽기 한 번
+- `mode.fresh` 가 참으로 남고 useAsync 가 active 도 deps 로 보아 완결 탭에 돌아올 때마다 fresh=1(다시 세어 rr_targets 에 쓴다)이 나갔다.
+  그 읽기 차례(mode.n)에 이미 보냈으면 캐시를 읽는다. FE-20 의 '409 residual_changed 뒤 한 번' 은 그대로다.
+
+### FE-26. 과제 스냅샷 머리의 degraded
+- bool 이 아니라 호환 열 그대로(degraded_json 의 첫 code | null)다. 배지에 code 를 보이고(첫 값이라 전부는 스냅샷 화면), null 은 '없음' 이다.
+  견본 `projectSnapshotHeaders` — 타입을 boolean 으로 되돌리면 tsc 가 깨진다(확인).
+
+### FE-27. 동의는 받은 그 요청 · 그 몫에만
+- 셀 격자 — 요청 열쇠(동작 · 고른 셀 또는 이 잡의 실패 셀 · force · start)가 바뀌면 추정 · 동의를 걷는다. 바뀐 요청은 동의 없이 다시 가서
+  새 추정을 받는다.
+- 진행판 consent_extra — 체크는 몫의 열쇠(`consentAmountKey` — 잡 · 다시 연 셀 · 동의한 셀 · 기다리는 셀과 그 추정 호출)에 묶인다. 몫이
+  바뀌면 빈 체크로 보이고, 넘김 · 재개 뒤와 기다리는 몫이 없어지면 걷는다. ReviewJobPanel 은 잡 · 보류마다 다시 마운트되지 않아 상태가 넘어갔다.
+- 패널 잡 Tier C 승인 — 잡을 만든 뒤와 티어를 바꿀 때 걷는다(웹 REST 는 부를 때마다 새 잡을 세운다).
+
+### FE-28. 확인 뒤에만 쓰는 조작
+- 키 대장 — 고른 노드마다 다시 마운트한다(앞 노드에서 연 '되돌리기' 확인이 새 노드 아래로 넘어가 앞 노드의 키를 되돌렸다, 07e7af4 와 같은 꼴).
+  '독립 키로 확정' 도 확인 뒤다 — sameas confirm_key 는 status 만 confirmed 로 바꾸고 유효 키 해석은 merged 일 때만 merged_into 를 따라,
+  병합된 키를 확정하면 그 병합이 풀린다(스크래치 SQLite 로 백엔드 코드 실행). 키 상태를 읽을 길이 없어 '병합돼 있으면 풀린다' 로 말한다.
+- 잡 취소 — 검토 잡 · 패널 잡 모두 잡을 id 로 부르고 '재개되지 않는다 · 잠시 세우려면 일시정지' 를 말하는 확인(`JobCancelConfirm`) 뒤에만.
+  확인은 연 그 잡에 묶인다.
+- 과제 — 멤버 빼기는 그 사람을 부르는 확인 뒤, 역할은 고른 뒤 '적용', 등급은 고른 뒤 '바꾸기'(기밀 또는 모름 → internal 은 반출 머리의 최고
+  등급 말과 함께 확인), 수명 주기는 고른 뒤 '바꾸기'(active 를 떠나면 closed_at 이 찍힌다는 확인). 고르기만으로는(화살표 키의 change 도) 쓰지 않는다.
+- 동결 — '그래도 동결' 은 거절된 그 본문에 allow_large 만 더한다(`capture.allowLargeBody` — snapshotBody 는 allow_large 를 싣지 않는다). 폼을
+  바꾸면 거절 배너와 단추를 걷는다.
+
+### FE-29. PAT 자동 등록 — 받은 PAT 를 버려 두지 않는다
+- 등록이 실패하면 — 저장 전 거절(4xx · 502 portal_unreachable — routes._register_portal_pat 은 검사를 다 지난 뒤 저장한다)이면 포털
+  `POST /auth/pat/revoke-self`(Bearer 그 PAT, 쿠키 · CSRF 없이 — 백엔드가 갈아 끼운 PAT 를 폐기하는 길과 같다)로 곧바로 폐기한다. 저장됐을 수도
+  있는 실패(다른 5xx · 네트워크)는 GET /me 의 jti 로 가른다 — 같으면 성공, 다르면 폐기, 못 읽거나 portal_pat 이 null 이면 두고(등록된 자격을
+  폐기하지 않게) 사람에게 jti 를 대조하라고 말한다. 실패는 `PortalRegisterError` 이고 알림은 거절의 글에 그 처리를 붙인다.
+- 이 브라우저의 쉼 — 등록 단계의 실패 뒤 localStorage `{until, code}`(토큰 · 계정 없음)로 일시 실패 10분 · 사람이 고칠 거절 6시간(백엔드가 게이트웨이
+  교환 실패에 거는 두 쉼) 동안 새 탭이 발급하지 않는다. 버튼 · 스위치 성공이 걷고, 설정은 그동안 '앱을 열면 저절로 받는다' 대신 쉼을 말한다.
+  발급 단계의 실패는 PAT 를 만들지 않아 쉬지 않는다.
+- box.reasons 에 cred_key_invalid 가 있으면 자동으로 받지 않는다(등록은 반드시 422 cred_key_absent 인데 그 전에 새 PAT 가 포털 검증에 나간다).
+  리뷰가 제안한 `secrets_valid` 로는 막지 않았다 — 키 없음(missing_required) · 개발용 폴백(cred_key_dev_fallback)에서도 거짓인데 그때 등록은 되므로
+  dev 박스의 자동 등록이 꺼진다.
+- 쉼은 웹 실패를 서버가 적지 않아 화면이 들고 있는 것이다 — 서버가 웹 실패도 auto.last_error 에 적으면(백엔드에 청할 것 2) 걷는다.
+
+### FE-30. 시험 · 확인 · 남긴 것 · 백엔드에 청할 것
+- 시험 12건을 더해 87건(`pnpm test`). 컴파일 산출물 변이 — 쟁점 1 · 등록부 1 · PAT 6 이 다 잡혔다. `tsc -b && vite build` 통과.
+- jsdom 하네스(스크래치, 리뷰 스크립트와 고친 뒤의 길 스크립트) — 13건 전부의 고친 뒤 동작과 정상 길(같은 몫의 동의 재개 · 폼 그대로의 '그래도
+  동결' · 409 뒤 fresh 한 번 · 500 뒤 저장된 PAT 는 그대로). 실 Chromium(빌드한 dist, API 는 Playwright 경로 가로채기로 흉내 — 서비스 · 프로세스를
+  띄우지 않았다) — 쟁점 행 누르기(백지 아님 · 페이지 오류 0) · 완결 탭 오가기(closure · fresh=1 · closure · closure) · 등록부 상태 저장 본문의
+  target_key.
+- 브라우저로 못 본 것 — 실 백엔드 · 실 포털(revoke-self 를 실제 포털에 보내 보지 않았다 — 포털 코드로 Bearer 만 · CSRF 없음 · 청중 mcp-gateway 를
+  맞췄다), 동의 · 확인 조작들의 실 브라우저 클릭(jsdom 으로 봤다).
+- 백엔드에 청할 것 —
+  1. sameas confirm_key — 병합된 키(status merged)면 거절하거나 merged_into 를 비운다(지금은 confirmed 인데 merged_into 가 남는 행이 된다).
+  2. PUT /me/portal-pat 의 웹 등록 실패도 portal_pat.auto 의 last_error · last_error_kind · last_error_at 에 적기(지금은 게이트웨이 교환 실패만 적는다) —
+     due 판정이 그 쉼을 보면 화면의 브라우저 쉼을 걷는다.
+  3. GET /projects/{id} 의 스냅샷 머리에 degraded_json(목록 전체).
+  4. 키 대장 읽기(FE-14 청할 것 5) — 있으면 확정 확인이 '병합돼 있으면' 대신 지금 상태를 말한다.
+  5. (선택) 다시 토의 표기의 꼴을 하나로 — _keep_verdict 가 비어 있던 쟁점에도 at · round 를 적으면 화면이 길마다 가르지 않아도 된다.
