@@ -115,12 +115,20 @@ test("키 대장 — 결정 넷을 잠그는 것은 상태가 아니라 내 원�
   assert.notEqual(snap.keyDecisionsBlocked({ ...samples.partKeyNamed, mine: false }, false), null);
 });
 
-test("진행판 패널 잡 — signals 는 도는 패널마다 한 줄이고 지금은 signal 과 같다, 신호 줄은 그 값으로 그린다", () => {
+test("진행판 패널 잡 — signals 는 도는 패널마다 한 줄이고 동시 1 잡은 signal 과 같다, 신호 줄은 그 값으로 그린다", () => {
   const job = samples.coverageJobRunning;
   assert.deepEqual(job.signals, [job.signal]);
   const html = renderToStaticMarkup(h(JobSignalLine, { job }));
   assert.match(html, /P1/);
   assert.match(html, /마지막 신호 0초 전/);
+});
+
+test("동시 2 잡 — 도는 패널 둘이 차례대로 한 줄씩 서고 줄마다 제 단계다(signal 하나만 그리지 않는다)", () => {
+  const job = samples.coverageJobTwoPanels;
+  assert.deepEqual(job.signals.map((s) => s.panel_no), [1, 2]);
+  const html = renderToStaticMarkup(h(JobSignalLine, { job }));
+  const rows = [...html.matchAll(/<span class="flex flex-wrap items-center gap-2">(.*?)단계 ([^<]*)<\/span><\/span>/g)];
+  assert.deepEqual(rows.map((m) => [/P\d/.exec(m[1])[0], m[2]]), [["P1", "2라운드 · 좌석 발언"], ["P2", "1라운드 · 좌석 조회"]]);
 });
 
 /** 키 대장 패널 본문 — 노드 하나와 키 상태(useAsync 꼴)를 넣어 그린다. */

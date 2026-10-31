@@ -2984,7 +2984,7 @@ export const partKeyNamed = sample<PartKey>()({
   "mine": true
 });
 
-/** 진행판의 패널 잡(GET /targets/{key}/coverage → job) — 도는 패널 하나. `signals` 는 `signal` 과 같은 한 줄이다(러너가 대상마다 패널을 하나씩 돌린다). */
+/** 진행판의 패널 잡(GET /targets/{key}/coverage → job) — 동시 1 잡의 도는 패널 하나. `signals` 는 `signal` 과 같은 한 줄이다. */
 export const coverageJobRunning = sample<NonNullable<CoverageJob>>()({
   "id": "c89846800b9546ab851712d371ce4493",
   "tier": "A",
@@ -3015,6 +3015,57 @@ export const coverageJobRunning = sample<NonNullable<CoverageJob>>()({
       "panel_id": "dae1b44057504811ae7ec7eb01d42c10",
       "panel_no": 1,
       "started_at": 1793441473,
+      "frame_idle_s": 0,
+      "event_idle_s": 0
+    }
+  ]
+});
+
+/**
+ * 진행판의 패널 잡 — 동시 2 잡(잡의 concurrency, 사용자 결정 10-31 · 가지 wt1031/risk-concurrency)이 패널 둘을 함께 돌린다. `signals` 는
+ * 패널 차례대로 두 줄이고 `signal` 은 마지막에 적힌 하나다(실 백엔드 하네스의 응답).
+ */
+export const coverageJobTwoPanels = sample<NonNullable<CoverageJob>>()({
+  "id": "74ba8c229cbc4f73883c60638f3b2509",
+  "tier": "A",
+  "state": "running",
+  "pause_reason": null,
+  "hold_code": null,
+  "hold_until": null,
+  "panels_done": 0,
+  "panels_total": 2,
+  "error": null,
+  "signal": {
+    "frames": 1,
+    "last_event_at": 1793453979,
+    "last_frame_at": 1793453979,
+    "last_step": "1라운드 · 좌석 조회",
+    "panel_id": "fb0e1c812c3346d3a6e4c425ff578ece",
+    "panel_no": 2,
+    "started_at": 1793453979,
+    "frame_idle_s": 0,
+    "event_idle_s": 0
+  },
+  "signals": [
+    {
+      "frames": 2,
+      "last_event_at": 1793453979,
+      "last_frame_at": 1793453979,
+      "last_step": "2라운드 · 좌석 발언",
+      "panel_id": "31ee04675f604d159a78fcba293c7288",
+      "panel_no": 1,
+      "started_at": 1793453979,
+      "frame_idle_s": 0,
+      "event_idle_s": 0
+    },
+    {
+      "frames": 1,
+      "last_event_at": 1793453979,
+      "last_frame_at": 1793453979,
+      "last_step": "1라운드 · 좌석 조회",
+      "panel_id": "fb0e1c812c3346d3a6e4c425ff578ece",
+      "panel_no": 2,
+      "started_at": 1793453979,
       "frame_idle_s": 0,
       "event_idle_s": 0
     }
