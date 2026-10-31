@@ -14,7 +14,10 @@ import type { AuditEntry, JsonValue } from "../types";
 /** 한 쪽의 줄 수(서버 상한 500). */
 const PAGE = 50;
 
-/** 알려진 행위의 사람 말 — 값은 글자 그대로 보이고 뜻만 붙인다. 모르는 행위는 글자 그대로다. */
+/**
+ * 알려진 행위의 사람 말 — 값은 글자 그대로 보이고 뜻만 붙인다. 모르는 행위는 글자 그대로다. 앱이 rr_audit 에 쓸 수 있는 행위는 전부 여기
+ * 있어야 한다 — backend tests/test_audit_action_labels.py 가 앱 소스에서 끌어낸 행위와 이 사전의 열쇠를 견준다.
+ */
 export const ACTION_LABEL: Record<string, string> = {
   "project.update": "메타 고침",
   "project.mcp_visibility": "조직 공개 바꿈",
@@ -32,7 +35,50 @@ export const ACTION_LABEL: Record<string, string> = {
   "job.cancel": "잡 취소",
   "registry.status": "등록부 상태 바꿈",
   "verdict.final": "판정 확정",
+  // 그 밖에 앱이 쓰는 행위 전부(이력 탭 이름표 후속 10-31). 말은 화면의 단추 · 안내 글을 따른다(ack · 다시 · 넘김 · 올리기 · 건너뛰기).
+  "gate.ack": "게이트 ack 붙이기 · 취소",
+  "target.flow": "심사 방식 바꿈",
+  "job.create": "잡 시작",
+  "brief.exclude": "브리프 항목 빼기",
+  "cells.retry": "셀 다시 열기",
+  "cells.skip": "셀 넘김",
+  "issue.queue": "쟁점 올리기",
+  "issue.skip": "쟁점 건너뛰기",
+  "close.ack": "잔여 확인",
+  "close.ack.revoke": "잔여 확인 취소",
+  "finding.create": "사람 finding 올림",
+  "finding.update": "사람 finding 고침",
+  "finding.delete": "사람 finding 지움",
+  "panel.repersist": "패널 다시 저장",
+  "panel.repersist_discard": "패널 다시 저장 포기",
+  "registry.merge": "등록부 병합",
+  "registry.merge.revoke": "등록부 병합 되돌리기",
+  "registry.visibility": "등록부 공개 바꿈",
+  "rekey": "키 전파",
+  "recall.approve": "회수 승인",
+  "curation.decide": "큐 결정",
+  "vocab.edit": "어휘 고침",
+  "ra.retract": "RA 거두기",
+  "ra.remark": "RA 다시 표기",
 };
+
+/**
+ * '미확인' 배지의 풀이 — 행위자가 앱이 직접 확인한 신원이 아닌 까닭은 행을 쓴 길마다 다르다(백엔드가 actor_verified 0 을 쓰는 자리 셋).
+ * MCP(Claude) 길은 게이트웨이가 위임으로 넘긴 신원이고(앱은 게이트웨이의 서명만 본다), 웹의 job.pause 미확인 행은 포털 화면의 '멈춤'(엔진
+ * 쪽 멈춤 A24)으로 에이전트 서버가 알린 사람이며, system 은 누가 했는지 모르는 RA 뒤처리(거두기 · 다시 표기)다.
+ */
+export function unverifiedTitle(entry: Pick<AuditEntry, "channel" | "action" | "actor">): string {
+  if (entry.channel === "mcp") {
+    return "Claude(MCP) 길 — 게이트웨이가 위임으로 넘긴 신원입니다. 앱은 게이트웨이의 서명만 확인했고 그 사람을 직접 확인하지는 않았습니다.";
+  }
+  if (entry.channel === "web" && entry.action === "job.pause") {
+    return "포털 화면의 '멈춤'으로 멈춘 잡 — 에이전트 서버가 알린, 심의를 멈춘 사람입니다. 앱이 직접 확인한 신원은 아닙니다.";
+  }
+  if (entry.actor === "system") {
+    return "누가 했는지 모르는 뒤처리입니다 — 사람으로 적지 않고 system 으로 적었습니다.";
+  }
+  return `앱이 직접 확인한 신원이 아닙니다(입구 ${entry.channel ?? "-"}).`;
+}
 
 /** 앞 · 뒤 한쪽의 글 — 그 행위의 꼴이 아니면 null(그때는 JSON 그대로 보인다). */
 type ChangeSide = (value: JsonValue) => string | null;
@@ -107,7 +153,7 @@ export function ProjectAuditCard({ projectId, active }: { projectId: string; act
         <span className="inline-flex items-center gap-1">
           {e.actor}
           {e.actor_verified ? null : (
-            <Badge tone="warn" title="게이트웨이 위임으로 확인되지 않은 행위자(자칭)">
+            <Badge tone="warn" title={unverifiedTitle(e)}>
               미확인
             </Badge>
           )}

@@ -11,7 +11,7 @@ const { ProjectMembersCard } = load("components/ProjectMembersCard.js");
 const { MemoryRouter } = require("react-router-dom");
 const { EcadBoardCard, CandidateTable } = load("components/EcadBoardCard.js");
 const { JobSignalLine, ReviewWorkers } = load("components/JobSignals.js");
-const { ACTION_LABEL, ProjectAuditCard, auditChange } = load("components/ProjectAuditCard.js");
+const { ACTION_LABEL, ProjectAuditCard, auditChange, unverifiedTitle } = load("components/ProjectAuditCard.js");
 
 const h = React.createElement;
 const count = (html, re) => (html.match(new RegExp(re, "g")) ?? []).length;
@@ -207,7 +207,8 @@ test("이력 탭 — 사람 조작 감사 다섯(잡 제어 · 등록부 status 
     ["잡 일시정지", "잡 재개", "잡 취소", "등록부 상태 바꿈", "판정 확정"],
   );
   assert.equal(ACTION_LABEL["coverage.undefer"], "보류 풀기");
-  assert.equal(ACTION_LABEL["job.create"], undefined); // 이름표가 없는 행위는 글자 그대로 보인다(이번 몫 밖)
+  assert.equal(ACTION_LABEL["job.create"], "잡 시작"); // 앱이 쓰는 행위는 전부 이름표가 있다(backend test_audit_action_labels)
+  assert.equal(ACTION_LABEL["future.action"], undefined); // 모르는 행위는 이름표 없이 글자 그대로 보인다
   // 거름 선택지는 이름표 사전에서 선다 — 아직 읽지 않은 탭(active=false)도 다섯을 '말 코드' 꼴로 보인다.
   const html = renderToStaticMarkup(h(ProjectAuditCard, { projectId: "p1", active: false }));
   const five = [["job.pause", "잡 일시정지"], ["job.resume", "잡 재개"], ["job.cancel", "잡 취소"],
@@ -242,4 +243,20 @@ test("이력 탭 전 → 후 — 다섯 행위는 코드 어휘를 글자 그대
   );
   assert.equal(auditChange(audit("job.pause", null, job("paused"))), '- → {"hold_code":null,"state":"paused"}');
   assert.equal(auditChange(audit("verdict.final", {}, { verdict_final: "go" })), '{} → {"verdict_final":"go"}');
+});
+
+test("이력 탭 '미확인' 풀이 — 행을 쓴 길마다 까닭이 다르다(MCP 위임 · 포털 '멈춤' · 모르는 뒤처리), 옛 '자칭' 풀이는 없다", () => {
+  const mcp = unverifiedTitle({ channel: "mcp", action: "job.create", actor: "a@x" });
+  const stop = unverifiedTitle({ channel: "web", action: "job.pause", actor: "a@x" });
+  const system = unverifiedTitle({ channel: "rest", action: "ra.retract", actor: "system" });
+  const other = unverifiedTitle({ channel: "rest", action: "gate.ack", actor: "a@x" });
+  assert.match(mcp, /^Claude\(MCP\) 길 — 게이트웨이가 위임으로 넘긴 신원입니다\./);
+  assert.match(stop, /^포털 화면의 '멈춤'으로 멈춘 잡 — 에이전트 서버가 알린/);
+  assert.match(system, /누가 했는지 모르는 뒤처리입니다 — 사람으로 적지 않고 system 으로 적었습니다\./);
+  assert.equal(other, "앱이 직접 확인한 신원이 아닙니다(입구 rest).");
+  // 웹의 다른 행위는 포털 '멈춤' 이 아니다 — 그 풀이를 빌리지 않는다
+  assert.equal(unverifiedTitle({ channel: "web", action: "job.cancel", actor: "a@x" }), "앱이 직접 확인한 신원이 아닙니다(입구 web).");
+  // 포털 '멈춤' 풀이는 웹 행에만 — 다른 입구의 job.pause 미확인 행에 빌려 주지 않는다
+  assert.equal(unverifiedTitle({ channel: "rest", action: "job.pause", actor: "a@x" }), "앱이 직접 확인한 신원이 아닙니다(입구 rest).");
+  for (const text of [mcp, stop, system, other]) assert.doesNotMatch(text, /자칭|위임으로 확인되지 않은/);
 });

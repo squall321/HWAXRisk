@@ -28,7 +28,7 @@ function renderPage(entries) {
   }
 }
 
-test("이력 탭 표 — 사람 조작 감사 행은 이름표가 붙고 전 → 후 칸이 코드 어휘 그대로다(MCP 행은 미확인 배지)", () => {
+test("이력 탭 표 — 사람 조작 감사 행은 이름표가 붙고 전 → 후 칸이 코드 어휘 그대로다(미확인 배지는 행을 쓴 길마다 풀이)", () => {
   const html = renderPage([
     row("job.pause", { hold_code: "llm_outage", state: "paused" }, { hold_code: "user", state: "paused" },
       { channel: "mcp", actor_verified: false }),
@@ -36,12 +36,20 @@ test("이력 탭 표 — 사람 조작 감사 행은 이름표가 붙고 전 →
       { scope: "registry", subject_id: "diff:d1#k1" }),
     row("verdict.final", { verdict_final: null }, { verdict_final: "no-go" }, { scope: "target", subject_id: "diff:d1" }),
     row("member.put", { members: [] }, { members: ["b@x"] }, { scope: "project", subject_id: "p1" }),
+    // 포털 화면의 '멈춤'(A24) — 에이전트 서버가 알린 사람 · web · 미확인, RA 거두기의 모르는 행위자 — system · rest · 미확인
+    row("job.pause", { hold_code: null, state: "running" }, { hold_code: null, state: "paused" }, { actor_verified: false }),
+    row("ra.retract", null, { form: "retracted" }, { actor: "system", channel: "rest", actor_verified: false, scope: "project" }),
   ]);
   assert.match(html, /<code>job\.pause<\/code><span class="text-muted-foreground"> (<!-- -->)?잡 일시정지<\/span>/);
   assert.match(html, /<code class="text-xs">paused · 보류 llm_outage → paused · 보류 user<\/code>/);
   assert.match(html, /<code class="text-xs">open → verified · 상태 기록 #2<\/code>/);
   assert.match(html, /<code class="text-xs">없음 → no-go<\/code>/);
-  // 이번 몫 밖의 행위는 종전대로 JSON(따옴표는 HTML 로 옮겨진다)
+  // 그 밖의 행위의 전 → 후는 종전대로 JSON(따옴표는 HTML 로 옮겨진다)
   assert.match(html, /<code class="text-xs">\{&quot;members&quot;:\[\]\} → \{&quot;members&quot;:\[&quot;b@x&quot;\]\}<\/code>/);
-  assert.equal((html.match(/>미확인</g) ?? []).length, 1);
+  assert.equal((html.match(/>미확인</g) ?? []).length, 3);
+  // 배지 풀이는 행을 쓴 길마다 — MCP 위임 · 포털 '멈춤' · 모르는 뒤처리(옛 '자칭' 풀이는 없다)
+  assert.match(html, /title="Claude\(MCP\) 길 — 게이트웨이가 위임으로 넘긴 신원입니다\.[^"]*"[^>]*>미확인</);
+  assert.match(html, /title="포털 화면의 &#x27;멈춤&#x27;으로 멈춘 잡 — 에이전트 서버가 알린[^"]*"[^>]*>미확인</);
+  assert.match(html, /title="누가 했는지 모르는 뒤처리입니다[^"]*"[^>]*>미확인</);
+  assert.doesNotMatch(html, /자칭/);
 });
