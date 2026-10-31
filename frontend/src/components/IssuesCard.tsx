@@ -26,12 +26,42 @@ import {
   labelOf,
 } from "../lib/issueView";
 import { fmtEpoch, fmtJson } from "../format";
-import type { IssueActed, IssueRow } from "../types";
+import type { IssueActed, IssueReargue, IssueRow } from "../types";
 
 const LIMIT = 100;
 const STATES = ["queued", "planned", "running", "resolved", "inconclusive", "untried_cap", "withdrawn", "skipped"];
 
-function IssueDetail({ row }: { row: IssueRow }) {
+/**
+ * 다시 토의 표기 — 칸은 표기가 선 길마다 다르다(types IssueReargue). 근거가 바뀐 표기(basis_hash 가 있다)는 제기 · 반대의 들고 남과
+ * 시각 · 회차를, 사람이 다시 올린 쟁점의 새 패널이 결정을 못 낸 표기는 그 패널과 까닭만 보인다 — 없는 칸을 읽지 않는다.
+ */
+export function ReargueNote({ reargue: r }: { reargue: IssueReargue }) {
+  const moved = [
+    r.raisers_added?.length ? `제기 + ${r.raisers_added.join(", ")}` : null,
+    r.raisers_removed?.length ? `제기 − ${r.raisers_removed.join(", ")}` : null,
+    r.opposers_added?.length ? `반대 + ${r.opposers_added.join(", ")}` : null,
+    r.opposers_removed?.length ? `반대 − ${r.opposers_removed.join(", ")}` : null,
+  ].filter(Boolean);
+  const changes = moved.length > 0 ? moved.join(" · ") : r.basis_hash ? "제기 · 반대는 그대로이고 주장값이 바뀌었습니다." : null;
+  const failed = r.new_panel_failed;
+  return (
+    <div className="rounded-md border-l-[3px] border-warn bg-warn/10 p-3 text-sm">
+      <p className="m-0 font-semibold">{r.label}</p>
+      {changes ? <p className="m-0">{changes}</p> : null}
+      <p className="m-0 text-xs text-muted-foreground">
+        {r.at !== undefined ? `${fmtEpoch(r.at)} · ` : ""}
+        {r.round !== undefined ? `회차 ${r.round} · ` : ""}
+        새 패널이 정할 때까지 옛 판정이 보입니다.
+        {failed
+          ? ` 새 패널(${failed.panel_id})이 결정을 못 냈습니다 — ${labelOf(STATE_REASON_LABEL, failed.reason)}(${failed.reason}) · ${fmtEpoch(failed.at)}.`
+          : ""}
+      </p>
+    </div>
+  );
+}
+
+/** 쟁점 한 행을 펼친 칸 — 시험이 서버 견본으로 그린다. */
+export function IssueDetail({ row }: { row: IssueRow }) {
   const r = row.reargue;
   return (
     <div className="flex flex-col gap-2">
@@ -71,25 +101,7 @@ function IssueDetail({ row }: { row: IssueRow }) {
           },
         ]}
       />
-      {r ? (
-        <div className="rounded-md border-l-[3px] border-warn bg-warn/10 p-3 text-sm">
-          <p className="m-0 font-semibold">{r.label}</p>
-          <p className="m-0">
-            {[
-              r.raisers_added.length ? `제기 + ${r.raisers_added.join(", ")}` : null,
-              r.raisers_removed.length ? `제기 − ${r.raisers_removed.join(", ")}` : null,
-              r.opposers_added.length ? `반대 + ${r.opposers_added.join(", ")}` : null,
-              r.opposers_removed.length ? `반대 − ${r.opposers_removed.join(", ")}` : null,
-            ]
-              .filter(Boolean)
-              .join(" · ") || "제기 · 반대는 그대로이고 주장값이 바뀌었습니다."}
-          </p>
-          <p className="m-0 text-xs text-muted-foreground">
-            {fmtEpoch(r.at)} · 회차 {r.round} · 새 패널이 정할 때까지 옛 판정이 보입니다.
-            {r.new_panel_failed ? ` 새 패널(${r.new_panel_failed.panel_id})이 결정을 못 냈습니다 — ${r.new_panel_failed.reason}.` : ""}
-          </p>
-        </div>
-      ) : null}
+      {r ? <ReargueNote reargue={r} /> : null}
       {row.panel_id ? <PanelTranscript panelId={row.panel_id} /> : null}
     </div>
   );

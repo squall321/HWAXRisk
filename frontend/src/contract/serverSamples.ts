@@ -5,6 +5,7 @@ import type {
   ClosureCells,
   Coverage,
   IssueList,
+  IssueRow,
   Registry,
   SynthReportPage,
 } from "../types";
@@ -1111,6 +1112,160 @@ export const issueList = sample<IssueList>()({
     }
   ]
 });
+
+/**
+ * 다시 토의 표기가 선 쟁점 행 둘 — 근거가 바뀌어 선 표기(issues._reraise — 칸이 다 있다)와, 사람이 다시 올린 쟁점의 새 패널이
+ * 판정 못 함을 낸 표기(issues._keep_verdict — label · new_panel_failed 뿐). 뒤의 꼴을 누르면 화면 전체가 백지였다(raisers_added.length).
+ */
+export const issueReargueRows = sample<IssueRow[]>()([
+  {
+    "issue_id": "iss-3e52cbc31f8e",
+    "rank": 1,
+    "types": [
+      "held_fail"
+    ],
+    "p_class": "P1",
+    "priority": 4.032,
+    "anchor_cluster_key": "34e330c1bddc",
+    "unit_id": "u-911b94d08006",
+    "state": "resolved",
+    "state_reason": null,
+    "outcome": "escalated",
+    "outcome_json": null,
+    "distribution": {
+      "raisers": 2,
+      "raisers_by_domain": {
+        "mech": 2
+      },
+      "by_judgement_claimed": {
+        "FAIL": 2
+      },
+      "by_severity": {
+        "중대": 2
+      },
+      "opposers": 2
+    },
+    "panel_id": "2ccc63fe4b5f401f9b304426a6ce68b9",
+    "seats": [
+      {
+        "key": "mech-test-seal",
+        "domain": "mech",
+        "issue_role": "raiser"
+      },
+      {
+        "key": "mech-syn-0",
+        "domain": "mech",
+        "issue_role": "raiser"
+      },
+      {
+        "key": "xd-syn-0",
+        "domain": "xd",
+        "issue_role": "opposer"
+      },
+      {
+        "key": "xd-syn-1",
+        "domain": "xd",
+        "issue_role": "opposer"
+      }
+    ],
+    "selected_round": 1,
+    "attempts": 1,
+    "charged": 0,
+    "reargue": {
+      "label": "패널 판정 — 근거 바뀜, 다시 토의 필요",
+      "at": 1793437945,
+      "basis_hash": "0b8613ac135b61e8",
+      "claimed_after": {
+        "critical_experts": 0,
+        "fail_experts": 1,
+        "judgement": "FAIL",
+        "sev3": 2,
+        "severity": "중대",
+        "verified_fail_experts": 1
+      },
+      "claimed_before": {
+        "critical_experts": 0,
+        "fail_experts": 2,
+        "judgement": "FAIL",
+        "sev3": 2,
+        "severity": "중대",
+        "verified_fail_experts": 2
+      },
+      "opposers_added": [
+        "mech-syn-0"
+      ],
+      "opposers_removed": [],
+      "panel_basis_hash": "b280a3550b18ed0c",
+      "raisers_added": [],
+      "raisers_removed": [
+        "mech-syn-0"
+      ],
+      "round": 1
+    }
+  },
+  {
+    "issue_id": "iss-5d1f8db2af1f",
+    "rank": 1,
+    "types": [
+      "held_fail"
+    ],
+    "p_class": "P1",
+    "priority": 4.032,
+    "anchor_cluster_key": "34e330c1bddc",
+    "unit_id": "u-911b94d08006",
+    "state": "resolved",
+    "state_reason": null,
+    "outcome": "escalated",
+    "outcome_json": null,
+    "distribution": {
+      "raisers": 2,
+      "raisers_by_domain": {
+        "mech": 2
+      },
+      "by_judgement_claimed": {
+        "FAIL": 2
+      },
+      "by_severity": {
+        "중대": 2
+      },
+      "opposers": 2
+    },
+    "panel_id": "4602acf204094fa7877999fac5d0fc93",
+    "seats": [
+      {
+        "key": "mech-test-seal",
+        "domain": "mech",
+        "issue_role": "raiser"
+      },
+      {
+        "key": "mech-syn-0",
+        "domain": "mech",
+        "issue_role": "raiser"
+      },
+      {
+        "key": "xd-syn-0",
+        "domain": "xd",
+        "issue_role": "opposer"
+      },
+      {
+        "key": "xd-syn-1",
+        "domain": "xd",
+        "issue_role": "opposer"
+      }
+    ],
+    "selected_round": 1,
+    "attempts": 2,
+    "charged": 0,
+    "reargue": {
+      "label": "패널 판정 — 근거 바뀜, 다시 토의 필요(새 패널 결정 못 함)",
+      "new_panel_failed": {
+        "at": 1793437946,
+        "panel_id": "4602acf204094fa7877999fac5d0fc93",
+        "reason": "no_decision"
+      }
+    }
+  }
+]);
 
 /** 등록부(attention=A,B) — 쟁점 패널이 덮은 행(before_issue)과 보통 행 둘(목록 칸은 앞 셋만). */
 export const registryAB = sample<Registry>()({

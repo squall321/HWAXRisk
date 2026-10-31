@@ -18,6 +18,7 @@ const { MarkdownLines } = load("components/MarkdownLines.js");
 const { CellsHead } = load("components/CellsHead.js");
 const { ReviewBoard } = load("components/ReviewBoard.js");
 const { RegistryRowDetail, IssueCell, rowDomains, supportText } = load("components/RegistryCard.js");
+const { IssueDetail, ReargueNote } = load("components/IssuesCard.js");
 
 const h = React.createElement;
 const clone = (v) => JSON.parse(JSON.stringify(v));
@@ -295,6 +296,28 @@ test("쟁점 결정 버튼 — 편성 · 도는 쟁점은 둘 다 끄고, 대기
   assert.match(issues.issueReasonProblem(" "), /사유를 적으세요/);
   assert.equal(issues.issueReasonProblem("a"), null); // 쟁점 사유는 1~300자
   assert.match(issues.issueReasonProblem("가".repeat(301)), /300자까지/);
+});
+
+test("다시 토의 표기 — 서버가 보내는 두 꼴을 다 그린다(label · new_panel_failed 뿐인 행을 누르면 화면 전체가 백지였다)", () => {
+  const [reraised, failed] = samples.issueReargueRows;
+  // 근거가 바뀌어 선 표기 — 제기 · 반대의 들고 남과 시각 · 회차.
+  assert.ok(reraised.reargue.basis_hash);
+  const a = renderToStaticMarkup(h(IssueDetail, { row: reraised }));
+  assert.match(a, /패널 판정 — 근거 바뀜, 다시 토의 필요/);
+  assert.match(a, /제기 − mech-syn-0 · 반대 \+ mech-syn-0/);
+  assert.match(a, /회차 1 · 새 패널이 정할 때까지 옛 판정이 보입니다\./);
+  // 사람이 다시 올린 쟁점의 새 패널이 판정 못 함 — label · new_panel_failed 뿐(시각 · 회차 · 들고 남이 없다).
+  assert.deepEqual(Object.keys(failed.reargue).sort(), ["label", "new_panel_failed"]);
+  const b = renderToStaticMarkup(h(IssueDetail, { row: failed }));
+  assert.match(b, /다시 토의 필요\(새 패널 결정 못 함\)/);
+  assert.match(b, /이 결정을 못 냈습니다 — 결정 못 함\(no_decision\)/);
+  assert.doesNotMatch(b, /undefined|NaN/);
+  const note = renderToStaticMarkup(h(ReargueNote, { reargue: failed.reargue }));
+  assert.doesNotMatch(note, /회차/);
+  assert.doesNotMatch(note, /주장값이 바뀌었습니다/); // 근거가 바뀐 것이 아니다
+  // 들고 남이 없는 근거 변화는 주장값이 바뀐 것이다.
+  const still = { ...reraised.reargue, raisers_removed: [], opposers_added: [] };
+  assert.match(renderToStaticMarkup(h(ReargueNote, { reargue: still })), /제기 · 반대는 그대로이고 주장값이 바뀌었습니다\./);
 });
 
 test("쪽 잇기 — ledger_rev 가 앞 쪽과 다르면 잇지 않는다(처음부터 다시), 순위대로 정렬은 화면이", () => {

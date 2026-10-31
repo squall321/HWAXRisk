@@ -1862,19 +1862,24 @@ export type IssueState =
   | "skipped";
 export type IssueOutcome = "upheld" | "downgraded" | "escalated" | "rejected" | "undetermined";
 
-/** 패널이 판정한 뒤 근거가 바뀐 쟁점(routes._reargue_out) — 새 패널이 정할 때까지 옛 판정이 보인다. */
+/**
+ * 다시 토의 표기(routes._reargue_out — label 에 reraised_json 을 그대로 펼친다) — 새 패널이 정할 때까지 옛 판정이 보인다.
+ * 칸은 표기가 선 길마다 다르다. 근거가 바뀌어 선 표기(issues._reraise)는 label 밖의 칸이 다 있고, 사람이 다시 올린 쟁점의 새 패널이
+ * 결정을 못 낸 표기(issues._keep_verdict — reraised_json 이 비어 있던 쟁점)는 label · new_panel_failed 뿐이다. 그래서 label 밖은 다
+ * 선택 칸이다 — 전에 다 요구 칸으로 적어 두어 그런 행을 누르면 `raisers_added.length` 에서 화면 전체가 백지였다.
+ */
 export type IssueReargue = {
   label: string;
-  at: number;
-  round: number;
-  basis_hash: string;
-  panel_basis_hash: string;
-  raisers_added: string[];
-  raisers_removed: string[];
-  opposers_added: string[];
-  opposers_removed: string[];
-  claimed_before: JsonObject;
-  claimed_after: JsonObject;
+  at?: number;
+  round?: number;
+  basis_hash?: string;
+  panel_basis_hash?: string;
+  raisers_added?: string[];
+  raisers_removed?: string[];
+  opposers_added?: string[];
+  opposers_removed?: string[];
+  claimed_before?: JsonObject;
+  claimed_after?: JsonObject;
   /** 새 패널이 결정을 못 냈다 — 그 패널과 까닭. */
   new_panel_failed?: { panel_id: string; reason: string; at: number };
 };

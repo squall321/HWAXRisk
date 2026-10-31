@@ -44,6 +44,7 @@
     "src/components/MarkdownLines.tsx",
     "src/components/CellsHead.tsx",
     "src/components/ReviewBoard.tsx",
-    "src/components/RegistryCard.tsx"
+    "src/components/RegistryCard.tsx",
+    "src/components/IssuesCard.tsx"
   ]
 }
