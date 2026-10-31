@@ -4521,3 +4521,87 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
 - AU-7 의 사람 라벨 경로 · 포털 정본 문면 · 화면 이름표는 그대로 열려 있다. 포털 정본 문면에는 A24 멈춤의 job.pause(엔진이 알린 사람 ·
   actor_verified 0 · web) 한 줄이 더 붙는다.
 - A24 로 멈춘 잡 행의 state_by 는 code:cancelled 그대로라 감사 행(사람)과 다르다 — state_by 까지 사람으로 바꾸는 것은 이번 지적 밖이다.
+
+## 사람 조작 감사 — 남긴 줄 셋 고침(가지 `wt1031/risk-gaps`, int1031/risk4 b71a262 위, 2026-10-31)
+
+> 사용자 결정 10-31 — 사람 조작 감사(AU-7 · AU-11)가 남긴 줄 가운데 셋을 지금 고친다. MCP 로 만든 잡의 job.create 가 actor_verified 1 ·
+> 코드 보류로 멈춘 검토 잡을 MCP 로 멈추면 감사 행은 서는데 changed 는 false · 이력 탭에 새 행위 다섯의 이름표가 없다. 가지는 감사 가지
+> (6f345d0)에서 떴는데 화면 파일(B34 이력 탭)이 그 판에 없어, 아무것도 올리기 전에 통합 판 int1031/risk4(b71a262 — 백엔드는 6f345d0 과 바이트가
+> 같다)로 앞감기한 뒤 일했다. 코드 커밋은 4eea6b6(1) · c232e55(2) · 29a3bc3(1 · 2 지킴 시험) · 77e5480(3)이다.
+
+### AU-12. MCP 길의 감사 행은 입구 mcp · actor_verified 0 이다 — 같은 실수를 MCP 가 닿는 자리 전부에서(남긴 줄 1)
+- 규칙은 하나다(AU-1 · M3C-8) — channel 은 신원 출처(`AUDIT_CHANNELS` — 쿠키 web · Bearer rest · 게이트웨이 위임 mcp)이고 actor_verified 는
+  channel != 'mcp' 다. 잡 제어 · 보류 풀기(coverage.undefer) · 셀 처분(cells.*)은 그렇게 적었다.
+- 훑은 범위 — 앱의 MCP 쓰기 도구(mcp_server · entry)가 부르는 라우트와 그 아래(sameas · rekey)에서 rr_audit 를 쓰는 자리 전부. 모든 MCP 쓰기는
+  위임 단언(source sso)으로만 오므로(entry.require_delegate) 이 자리의 행은 늘 mcp · 0 이어야 한다.
+  - 입구만 적고 검증을 빠뜨린 자리 — job.create(검토 잡 · Claude 패널 잡, risk_start_job) · brief.exclude(같은 도구) · target.flow
+    (risk_open_target 의 flow) · project.ecad_board(risk_set_ecad_board 의 붙이기 · 떼기).
+  - 둘 다 기본값(rest · 1)이던 자리 — gate.ack(risk_ack_gate) · finding.create(risk_add_finding) · panel.repersist · panel.repersist_discard
+    (risk_repersist_panel) · rekey(risk_decide_sameas 가 확정을 reject 로 뒤집을 때 — rekey.run 이 검증 1 을 SQL 에 글자로 박았다).
+- 고침 — 그 자리마다 같은 꼴(channel = AUDIT_CHANNELS.get(ident.source, 'rest') · actor_verified = channel != 'mcp'). rekey.run ·
+  rekey.revoke_iface_alias 가 actor_verified 를 받고, sameas.record_decision 이 channel · actor_verified 를 받아 키 전파 넷(reject · merge_key ·
+  unmerge_key · revoke_iface_alias)에 넘긴다. post_sameas_decide 가 신원 출처에서 한 번 정한다 — 한 요청의 행은 한 입구다(MCP 도구가 닿는 것은
+  확정 · reject 뿐이지만 같은 라우트의 다른 갈래만 기본값으로 남기면 한 요청 안에서 입구가 갈린다).
+- 웹에도 바뀐 것 — 웹(쿠키)으로 한 gate.ack · finding.create · panel.repersist(_discard) · rekey 는 이제 입구 web 이다(종전에는 칸을 주지 않아
+  rest). 규칙을 하나로 쓰면 따라오는 바뀜이라 그대로 두었다 — 입구 칸으로 걸러 세는 곳은 없다(대상 감사 · 과제 감사 · '사람 개입 요약' 은
+  action 으로 센다). Bearer 는 그대로 rest · 1 이다.
+- 바꾸지 않은 것 — MCP 도구가 닿지 않는 REST 전용 감사 자리(project.update · project.mcp_visibility · member.put · project.transfer ·
+  project.purge · requirement.decide · gate.ack 취소 · coverage.skip|uncarry · close.ack(.revoke) · issue.* · registry.merge(.revoke) ·
+  registry.visibility · finding.update · finding.delete · recall.approve · curation.decide · vocab.edit · 계면 원장 reject 의 rekey)는 종전대로
+  기본값이다. entry · mcp_server 가 그 함수들을 부르지 않는 것을 확인했다. 이 앱의 REST 를 게이트웨이 rest_call 의 사람별 단언으로 열면 그
+  자리들도 rest · 1 로 적힌다 — dev 게이트웨이의 REST 사이트 표에는 이 앱이 없다. 열게 되면 같은 꼴로 고친다. ra_client 의 ra.retract ·
+  ra.remark 는 REST 조작(비공개 전환 · 폐기 · 이양)을 뒤따라 쓰는 행이라 MCP 가 닿지 않는다.
+
+### AU-13. MCP risk_job_action 의 changed 는 감사 행과 같은 판정이다(남긴 줄 2)
+- 틀린 쪽은 changed 다. 행은 계획대로다(AU-3) — 코드 보류(llm_outage 따위)로 멈춘 검토 잡을 사람이 멈추면 상태는 paused 그대로 보류만 user 로
+  바뀐다. 자동 재개가 다시 세우지 않게 하는 사람의 정지(P-10 · runner.pause_job)라 한 행이다. 입구는 라우트 밖에서 읽은 상태만 견주어 false 라
+  했다(답의 hold_code 는 user 인데).
+- 같은 뿌리의 반대 어긋남도 있었다 — 확인과 취소 사이에 러너가 잡을 끝냈으면 취소는 아무것도 쓰지 않아 행이 없는데, 입구는 앞 상태(queued)와
+  답(completed)을 견주어 changed true 라 했다(시험으로 재현).
+- 고침 — `routes.job_control` 이 (러너의 답, 바뀜)을 돌려준다. 바뀜은 `_audit_job_control` 이 행을 썼는가다(전이와 같은 트랜잭션 안의 앞 · 뒤
+  {state, hold_code}). 취소는 on_change 훅이 불렸고 그 훅이 썼는가다(끝난 잡의 취소는 훅이 불리지 않는다). REST 라우트는 답만 돌려준다 —
+  응답 계약 그대로이고 REST 에 changed 칸을 더하지 않았다. 입구는 그 바뀜을 changed 로 싣고 라우트 밖의 앞 상태 읽기를 뺐다. 이미 그 상태(라우트
+  409)는 종전대로 changed false · 행 없음이다.
+- MCP 도구 설명('이미 그 상태면 그대로 돌려주고(changed:false)')은 그대로 맞아 바꾸지 않았다 — 코드 보류 위의 사람 정지는 '이미 그 상태' 가
+  아니다(보류가 user 로 바뀐다).
+
+### AU-14. 화면 — 이력 탭의 이름표와 전 → 후(남긴 줄 3)
+- 자리 — 화면에 대상 감사 탭은 따로 없다. B34 의 이력 탭은 과제 이력(`ProjectAuditCard` — GET /projects/{id}/audit)이고, 다섯 행은 그 대상의 과제
+  id 를 실어 거기에 선다(AU-1).
+- 이름표 — 종전 사전(코드는 글자 그대로, 뜻만 붙인다)에 다섯을 더했다 — 잡 일시정지 · 잡 재개 · 잡 취소 · 등록부 상태 바꿈 · 판정 확정. 말은 그
+  조작의 단추(일시정지 · 재개 · 취소… · 상태 저장 · 확정)를 따랐다. 거름 선택지에도 '말 코드' 로 선다.
+- 전 → 후 — 종전에는 canonical JSON(키 차례)이라 잡 행이 `{"hold_code":null,"state":"queued"} → …` 였다. 다섯의 앞 · 뒤는 코드 어휘 몇 칸뿐이라
+  값을 글자 그대로 잇는다 — 잡은 상태(보류 코드가 있으면 '· 보류 <코드>'), 등록부는 status(뒤에는 '· 상태 기록 #<seq>' — 사람이 쓴 글은 그 기록에
+  있다), 판정은 값(처음 확정의 앞은 '없음'). 코드에 한국어 뜻을 덧붙이지 않았다 — 배지와 같은 '저장 값 = 보이는 글' 규칙이다(Badge.tsx · §8.2.4).
+  그 밖의 행위와 꼴이 다른 값은 종전대로 JSON 이다(`auditChange`).
+- 시험 — 이름표 사전과 거름 선택지(아직 읽지 않은 탭을 서버 렌더로 그린다) · auditChange 의 다섯 꼴과 되돌림 · 서버 꼴의 한 쪽으로 그린 표
+  (`tests/auditTab.test.cjs` — 탭이 읽는 useAsync 를 그 파일 안에서만 바꿔 끼운다. node --test 는 시험 파일마다 프로세스를 따로 띄운다). 표 시험이
+  없으면 '전 → 후 칸을 JSON 으로 되돌림' 변이가 산다(처음 판에서 살았다).
+- 남긴 것 — '미확인' 배지의 풀이('게이트웨이 위임으로 확인되지 않은 행위자(자칭)')는 MCP 행에도 A24 멈춤 행(엔진이 알린 사람 · web)에도 꼭 맞지
+  않는다(화면 세션 몫). 이름표가 없는 다른 행위(job.create · brief.exclude · gate.ack · finding.* · target.flow · cells.* · close.ack · issue.* ·
+  panel.repersist · recall.approve · curation.decide · rekey · ra.* · registry.merge · registry.visibility …)는 이번 몫 밖이라 그대로다.
+
+### AU-15. 사람 라벨 경로의 감사 — 닫음(메인 세션 10-31 의 plan §0.6 읽기)
+- AU-7 의 '사람 라벨(`POST /findings/{id}/labels`)이 등록부 status 를 label_manual 로 바꾸는 것은 감사 행이 없다 — 결정 필요' 는 결정이 필요
+  없다. 포털 정본 plan §0.6 '사람 개입 기록' 이 사람의 상태 변경은 rr_audit 한 행이되 '자동(코드·라벨 훅) 전이는 rr_audit 에 넣지 않고 각 표의
+  *_source 열로 구분한다' 고 한다. 라벨이 일으킨 status 변경은 라벨 훅 전이(status_source label_manual)이고 라벨 자체는 rr_labels(labeled_by)에
+  남는다. 그래서 감사 행 없이 둔다(코드 변경 없음).
+
+### AU-16. 시험 · 변이 · 전체 시험
+- 백엔드 새 시험 — `tests/test_mcp_audit_actor.py` 여덟 함수(열 항목 — 도구마다 MCP 행 (mcp, 0)과 웹 · REST 의 (web, 1) · (rest, 1), 키 전파 세
+  갈래는 웹 · Bearer · 위임 단언 매개 셋) · `tests/test_human_control_audit.py` 셋(코드 보류 위의 사람 정지에서 다시 취소까지 changed 가 행 수의
+  변화와 같다 · 도는 호출을 기다리는 검토 잡의 다시 취소 · 확인과 취소 사이에 끝난 잡). 옛 코드(b71a262)의 스크래치 사본에 얹으면 열하나가 진다 —
+  지나는 둘(키 전파 Bearer 매개 · 다시 취소)은 지킴 시험이다. 고친 시험 하나 — test_gate_ack 의 손 신원에 source 칸(진짜 Identity 의 꼴).
+- 지킴 시험 둘은 변이를 세다 더했다(29a3bc3) — MCP 가 닿지 않는 키 전파 세 갈래는 검증된 신원(웹 · Bearer)으로만 보면 검증 넘김을 빼도 살고,
+  훅이 불렸는데 바뀐 것이 없는 경우가 없으면 '앞뒤가 같아도 참' 이 산다. 변이 결과에서 그 다섯은 각각 그 매개 · 그 시험이 처음 잡았다.
+- 백엔드 변이 33/33 — 입구 25(create_job 입구 고정 · job.create 둘 · brief.exclude · target.flow · ECAD 둘의 검증 뺌, gate.ack 입구 고정 · 검증
+  1 · 검증 0, finding.create 입구 고정 · 검증 1, repersist 입구 고정 · 둘의 검증 뺌, sameas 라우트 입구 고정 · 검증 1, record_decision 의 넷
+  넘김 뺌 여섯, rekey INSERT 의 1 박기, revoke_iface_alias 안 run 의 넘김 뺌) · changed 8(행을 써도 거짓 · 같아도 참 · 취소 바뀜 늘 참 · 늘 거짓 ·
+  정지 재개 뒤집기 · 입구 늘 참 · 이미 그 상태도 참 · 상태만 보던 옛 판정). 스크래치 사본에서만 바꾸고(바이트코드를 쓰지 않고) 되돌린 뒤
+  __pycache__ 를 지웠다(사본과 작업 트리 diff 0).
+- 화면 — `pnpm test` 90 통과(87 + 3) · `tsc -b && vite build` 통과(크기 경고는 종전 그대로, 이 프런트에는 eslint 설정이 없다). 옛 화면(b71a262)
+  사본에 새 시험을 얹으면 셋 다 진다(87 은 지난다). 변이 12/12 — 이름표 뺌 · 바꿈 · 보류 코드 · 상태 기록 번호 · '없음' · job.cancel 꼴 뺌 ·
+  되돌림 조건 · verdict_final 칸 확인 · 표 칸을 JSON 으로 · 거름 선택지 이름표 뺌 · 형 확인 둘(tsc).
+- 전체 시험(공유 잠금, 77e5480 — 이 줄을 더한 커밋과 코드가 같다) — 3,743 통과 · xfail 4 · 실패 0(rc 0, 14분 5초 — 앞 판 3,730 에 새 시험
+  항목 13). ruff — 바꾼 파일은 깨끗하다.
+- 하지 않은 것 — 서비스 재기동 · push · 병합 · 실 브라우저(표는 서버 렌더로 봤다) · 배선 리허설(카드 대조 사슬은 바꾸지 않았다).
