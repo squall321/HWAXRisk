@@ -573,8 +573,10 @@ function PanelRunner({
     try {
       const out = await riskApi.createTargetJob(targetKey, panelJobBody(form));
       setCreated(out);
-      // 다음 잡은 다시 동의받는다 — 체크를 남겨 두면 다음 잡에 미리 체크된 동의가 된다.
+      // 다음 잡은 다시 동의받는다 — 체크를 남겨 두면 다음 잡에 미리 체크된 동의가 된다. Tier C 승인도 본문의 consent 로 가므로 같다
+      // (웹 REST 는 부를 때마다 새 잡을 세운다 — 두 번째 '시작' 이 승인 없이 가장 비싼 티어 잡을 하나 더 세웠다).
       setExternalConsent(false);
+      setConsent(false);
       onChanged();
     } catch (err) {
       setError(err);
@@ -633,7 +635,14 @@ function PanelRunner({
       <>
       <FormGrid>
         <FormField label="티어" hint="tier">
-          <Select value={tier} onChange={(e) => setTier(e.target.value as Tier)}>
+          <Select
+            value={tier}
+            onChange={(e) => {
+              setTier(e.target.value as Tier);
+              // 승인은 고른 그 티어에 준 것이다 — 티어를 바꾸면 다시 받는다.
+              setConsent(false);
+            }}
+          >
             {TIERS.map((t) => (
               <option key={t} value={t}>
                 {t}
