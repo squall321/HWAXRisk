@@ -3008,3 +3008,101 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
   `cites.length` 에서 죽는다, M3 화면 요청서 7절 몫) · 과제 화면 대상 표의 `unseated_n` · `superseded_by` 는 그 응답에 없다('미착석 명') ·
   과제 화면의 동결 알림은 스냅샷 잡이 그 목록(`jobs[]`)에 없고 상태 `done` 을 찾아 서지 않는다 · 좌석 드릴다운 · 브리프 탭의 타입은 대조하지
   않았다.
+
+## 화면 세션 10-31 2차 걸음 — ECAD 화면 · B34 묶음(가지 `wt1031/riskfe`, 2026-10-31)
+
+> 포털 `docs/design-risk-review/ecad-1031/frontend-request.md` 1 ~ 10절(계약은 그 '반영' — main 9bd5f48)과 B34 묶음이다. 백엔드는 고치지
+> 않았다. 서버에 없는 칸은 지어내지 않고 '이 서버는 주지 않는다' 로 보였고, 청할 것은 FE-14 끝에 모았다.
+
+### FE-8. ECAD 카드 · 스냅샷 · 비교 · 대상의 ECAD(요청서 1 ~ 5 · 7 ~ 9절)
+- 카드의 길은 `GET /meta/adapters` 의 ecad 줄 `status` 하나로 가른다(`api/ecadBoard.ts` `ecadRoute`) — ready 면 찾기 칸, unavailable 이면 빠진
+  도구와 '운영자 몫', planned 면 '다시 읽기'. 줄이 없거나 모르는 값(옛 `contract_only`)이면 길을 열지 않는다(unknown). 붙은 보드의 정체는
+  `probe.board` 이고 job_id 는 그것이 없으면 `ref.odb_job_id` 다. 도구가 없어도 붙은 보드는 보인다(떼기는 PAT 없이도 된다).
+- 바꾸기 · 떼기 · 찾기는 과제 주인에게만 — 과제 행의 `owner_sub` 가 `GET /me` 의 email 인가로 가른다(서버도 남이면 404). 찾기 칸은 보드가
+  없으면 열려 있고, 붙어 있으면 '바꾸기' 를 눌러야 열린다.
+- 후보 표는 판 · 올린 시각을 앞 열에 두고 미리 고른 행이 없다. 지금 붙은 보드는 단추 대신 '붙은 보드' 배지다. job_id 가 16자리 16진이 아니면
+  단추를 잠근다(서버는 422 E100 — 5절의 '화면이 먼저 막는다'). 붙은 보드가 있을 때만 '앞 보드(판) → 새 보드(판)' 확인을 받는다.
+- 거절은 code 로만 가른다(`describeEcadError`) — 같은 서버 글이라도 code 가 다르면 다른 갈래다. 옛 판의 `ecad_credential_absent` 는
+  `ecad_pat_absent` 와 같은 안내(설정 길)다. 422 `ecad_board_not_found` 는 본문 `candidates` · `hub_message` 를 후보 표로 다시 보이고 고르지
+  않는다. 404 는 공용 '없음' 이다.
+- 스냅샷의 '보드' 묶음은 board 노드 `attrs` 에서 읽는다(노드 표 경로 part `nodes` 는 attrs 를 싣지 않는다). null 은 '없음'(0 이 아니다),
+  `n_nets` · `odb_version` · `outline_bbox` 옆에 '2단계'. 노드 표는 IR 노드에서 kind 거름 · 찾기(nid · 이름 · 정규 이름 · canon_key · ckey · dn)다.
+- 비교의 ECAD 여부는 서버가 행에 적지 않아 화면이 가른다(`diffRows`) — 구조층 노드 변화는 `domain`, 엣지는 `kind_family: net`, 파라메트릭
+  항목은 그 dn 이 ECAD 노드 변화에 있는가, 사건은 주체 dn 이 다 ECAD 인가다. 1단계는 ECAD 칸 변화를 싣지 않아(요청서 8절) 이것으로 넉넉하다 —
+  2단계에서 ECAD 파라메트릭 항목이 생기면 서버가 행에 domain 을 싣는 편이 맞다.
+- 좌석 까닭(9절)은 code 를 그대로 두고 사람 말을 붙인다(`lib/targetView.ts`). 사람이 적은 넘김 사유는 snake_case code 꼴이 아니면 글 그대로다.
+
+### FE-9. 동결 폼 — 기본 kinds · 409 두 갈래(요청서 6절)
+- ECAD 카드가 있으면 기본 kinds 에 ecad 를 넣는다. 사람이 체크를 한 번이라도 만지면 카드가 나중에 생겨도 덮지 않는다.
+- 409 `model_too_large` — detail 의 `leaf_mcad` · `leaf_ecad` 로 무엇이 넘겼는지 한 줄을 적고 '그래도 동결' 확인 뒤에만 같은 본문에
+  `allow_large: true` 를 싣는다. 예산 초(`budget_s`)는 적지 않는다 — '600초에 끊긴다' 로 읽혔다는 백엔드 주석(routes.LARGE_BUDGET_S)을 따랐다.
+- 409 `source_unreachable` 은 detail 의 꼴로 가른다 — `{kinds, attached}` 면 kinds 를 붙은 종류로 바꾸는 단추, `{kind: "ecad", reason}` 이면
+  'ECAD 보드를 못 읽었습니다'(reason 이 `ecad_pat_absent` 면 설정 길). 둘 다 아니면 공용 배너다. 거절 뒤 과제를 다시 받아 카드의 '못 읽음' 을 보인다.
+
+### FE-10. 서버 꼴 — 스냅샷 · 비교 화면이 백지였다(요청서 10절과 그 둘레)
+- 띄워 보니 스냅샷 화면은 'e.some is not a function', 비교 화면은 't.map is not a function' 으로 백지였다. `missing` 은 배열이 아니라 bool
+  사전이고, 상태의 게이트는 사전(G1 ~ G6 레코드)이며 신호도 사전(열쇠에 'sig:' 가 없다), 비교 가능성은 `{ok, excluded_reason, note}` 가 아니라
+  parity 칸 열댓 개다. diff 는 3층 문서, 사건 부분은 `{diff_id, events[]}`, 요약 부분에는 줄이 없다(summary_text 를 줄로 나눈다).
+- 동결(`POST /projects/{id}/snapshots`)은 동기다 — 답의 snapshot_id 로 곧바로 연다. 1차 걸음에서 남긴 '동결 알림이 서지 않는다' 는 이것으로 닫았다.
+- 일반 연결의 `ref` 는 객체다(서버 칸이 dict) — 글자로 보내 늘 422 였다. kind 마다 어댑터가 읽는 열쇠를 칸으로 받는다(mcad
+  `stepforge_project_id` · `detect_job_id`, dyna `session_id` · `file_id` · `sha256`).
+- 요구 목록의 값 칸은 `value` 다(`value_json` 이 아니다). 타입이 틀린 채 쓰는 곳이 없던 `getSnapshotNodes` · `getSnapshotEdges` 는 걷었다.
+
+### FE-11. B34 — 스냅샷 · 비교 화면
+- 게이트 `pass: null` 은 중립색 '판정 불가(까닭)' 이고 fail 배너에 세지 않는다(따로 '판정 불가 … — fail 이 아닙니다' 정보 줄). 까닭이 없는 자리
+  (동결 답의 요약)에서는 까닭을 지어내지 않는다 — 처음에 'unknown' 을 붙였다가 걷었다.
+- 규칙은 `evaluable=false` 가 이긴다 — '평가 불가(사유)' 이고 pass · fail 집계 밖이다. 변이 하나(집계에서 evaluable 검사 빼기)가 살아남아
+  'pass 칸에 값이 남아 와도 평가 불가' 단언을 더했다.
+- ack — fail 이고 차단이 아닌 게이트에만 '사유 적고 진행(ack)'(사유 300자, `POST …/gates/{gate}/ack {reason}`), 붙은 ack 에는 '확인 취소'
+  (DELETE). G6 은 차단이라 단추 대신 '다시 캡처' 안내다(unit_unknown 이면 REST 원문으로). 9bd5f48 의 `part=state` 는 동결 때의 상태 원문이라
+  ack 를 다시 싣지 않는다 — 그래서 답을 그 칸에 들고 있고 '새로 열면 이 줄이 보이지 않는다' 고 적었다(서버가 실으면 서버 값이 이긴다).
+- 요구 여유(`sig:req.margin`) — 9bd5f48 은 동결 때 요구를 대조하지 않는다(`freeze_snapshot` 은 `build_state(ir)` 만 부르고
+  `compute_state_for_snapshot` 을 부르는 곳이 없다). 신호가 없으면 표를 짓지 않고 '이 스냅샷의 상태에 요구 대조가 없습니다' 를 보인다.
+- 키 대장 — 노드를 누르면 그 ckey 의 이름 바꾸기 · 병합(같은 스냅샷의 다른 ckey 고르기 또는 적기, 확인) · 되돌리기(확인) · 확정이다
+  (`POST /sameas/decide` 의 ckey 결정). 키의 지금 상태(병합됐는가 · 표시 이름)를 읽을 길이 없어 답의 결과 줄만 보인다.
+- '파서 세대 다름' 은 parity 가 정말 거짓일 때만이다(null 은 모름). 항목 · 사건의 `parser_differs` 는 출처가 둘이라(소스 앱 판 · 어댑터 →
+  모든 행, ECAD 어댑터 → ECAD 행) 행마다 까닭을 비교 가능성에서 고른다 — 처음에는 모든 행에 'ECAD 어댑터' 말이 붙었다.
+- 대응 확정표의 confirm · reject 는 늘 400 E100 이었다 — 노드 id 만 보내고 pair_key 가 없었다. stable 키와 '|' 로 이은 정렬한 두 과제 id
+  (서버 글이 정한 꼴, GET /sameas 가 원장을 읽는 열쇠와 같다)로 보낸다. 과제 id 는 확정할 행이 있을 때만 두 스냅샷의 상태에서 읽는다.
+
+### FE-12. B34 — 과제 화면
+- 등급 · 수명 주기 · 코퍼스 제외 · 조직 공개 · 제품 연결은 9bd5f48 의 과제 상세(`_project_row`)에 없다 — '모름(이 서버가 과제 상세에 싣지
+  않음)' 으로 보이고, 바꾸면 PATCH 답(열 그대로 — `corpus_excluded` 0/1 · `product_refs_json` 글자)이 이긴다.
+- '조직 공개' 는 소유자만 — 편집자 · 보기에게 잠그고 까닭을 말한다. 역할을 모르면(멤버 표를 못 받음) 잠그지 않되 403 `role_insufficient` 를
+  code 로 받으면 잠근다. 공개 전에 확인을 받고(보류 RA op 수) 답의 `resynced` 를 한 줄로 보인다.
+- 과제 상세가 주인에게만 열린다(`_project_row` 가 소유 검사) — 편집자는 이 화면을 열지 못해 잠금은 브라우저로 못 보고 렌더 시험으로 본다.
+- 멤버 탭 · 이양 · 폐기 · 이력 탭 — 거절은 code 로, 폐기는 과제 코드를 다시 적어야 하고 답의 `purge_report.remaining` 을 보인다. 이력은 그
+  탭을 볼 때만 받는다.
+- mcad 소스 카드의 '격리 없음' 경고는 상시다 — 연결 답의 `warnings`(`stepforge_no_isolation`)에만 실리면 카드를 다시 열 때 사라진다.
+
+### FE-13. B34 — 대상 · 홈
+- 좌석 넘기기(skipped)는 사유가 있어야 보낸다(빈 사유는 서버도 422). pending · assigned · running · failed 에만, 되돌리기는 carried 에만 연다
+  (planner 의 허용 전이). 보류(deferred)는 되돌리기로 풀지 않는다. '좌석 상태 되돌리기 · skipped 사유 입력 경로는 아직 서버에 없습니다' 는
+  틀린 글이라 걷었다.
+- 마지막 신호는 서버 시계로 잰 초(`frame_idle_s`)를 쓴다. 러너가 1분 간격으로 적어 건강한 패널도 80초 안팎까지 가므로 80초를 넘을 때만
+  경고 배지다. 시험이 닿게 두 줄 컴포넌트를 `components/JobSignals.tsx` 로 뗐다(페이지는 mermaid 를 끌어 node 시험에 못 싣는다).
+- 홈 칩 · 거름은 카드가 그 칸을 줄 때만 — 하나도 안 주면 거름을 잠그고 까닭을 적는다(모르는 값으로 카드를 숨기지 않는다). 등급 칩 말은
+  과제 화면의 사전과 같게 '기밀' 이다(처음에 '대외비' 로 적었다가 맞췄다).
+
+### FE-14. 시험 · 확인 · 남긴 것 · 백엔드에 청할 것
+- 시험 36건을 더해 50건(`pnpm test`) — ECAD 9 · 판정 18 · 렌더 9. 컴파일 산출물에 넣은 변이 20개가 다 잡혔다(하나는 FE-11 의 단언을 더한 뒤).
+  `tsc -b && vite build` 통과. 커밋마다(첫 넷은 그 상태로 되돌려) 타입 검사 · 빌드 · 시험을 돌렸다.
+- 실 백엔드 하네스(이 가지의 코드 · 스크래치 데이터 · 빈 루프백 포트 · 소켓 가드, 게이트웨이는 백엔드 시험의 FakeGateway)로 브라우저에서 본 것 —
+  ECAD 카드의 세 갈래 · 찾기 → 후보 표 · 붙이기 · 바꾸기 확인 · 떼기 · 거절 code(하네스 스위치로 PAT 없음 · 게이트웨이 끊김 · find_job 없음 ·
+  호출 실패 · 꼴 바뀜 · 허브에서 사라진 보드),
+  동결 폼의 기본 kinds · 모델 크기 409 와 '그래도 동결' · kinds 밖 409 · 보드를 못 읽은 409, 스냅샷의 보드 묶음 · 표지 · 노드 거름, 비교의 ECAD 줄 ·
+  '파서 세대 다름'(판이 다른 두 스냅샷), mcp_degraded 스냅샷의 G3 · G4 '판정 불가' · R-004 · R-005 '평가 불가', ack 와 취소, 요구 여유 없음 배너,
+  키 대장, 과제 메타 PATCH · 조직 공개(주인) · 멤버 · 이양 · 폐기 · 이력, 좌석 넘기기 · 되돌리기, 도는 패널의 마지막 신호(80초 넘김). 대응 확정은
+  하네스에 후보 쌍이 없어 단추를 못 눌렀고 본문만 서버에 보내 봤다(옛 본문 400 · 새 본문 200).
+- 브라우저로 못 본 것 — 편집자로 과제 화면(FE-12), 도는 검토 잡의 일꾼 줄(렌더 시험), 찾기의 `hub_message`(꺼내기만 시험), 실제 ODB 허브 ·
+  게이트웨이 · 포털.
+- 백엔드에 청할 것 —
+  1. `GET /projects/{id}` 의 과제 행에 `classification` · `lifecycle` · `closed_at` · `corpus_excluded` · `excluded_reason` · `mcp_visibility` ·
+     `product_code` · `product_refs_json` · `predecessor_product_code` · `status` 와 계약의 `members`, 그리고 멤버(편집자 · 보기)도 읽게(지금 남은 404).
+  2. `GET /projects` 카드에 `classification` · `lifecycle` · `corpus_excluded` · `my_role`, 그리고 멤버로 든 과제.
+  3. `GET /snapshots/{id}?part=state` 가 ack(`ack_by` · `ack_at` · `ack_reason`)와 `gates_hash` 를 지금 값으로 싣기(rr_gate_acks · gates_json).
+  4. 동결 때 요구 대조(`sig:req.margin`)와 요구를 고친 뒤 다시 세기(`compute_state_for_snapshot`).
+  5. 키 대장 읽기 — 예 `GET /api/part-keys?ckey=` → `{ckey, status, merged_into, display_name, aliases}`, 없으면 404.
+  6. `GET /sameas` 의 답(또는 행)에 `pair_key` — 화면이 서버 글의 꼴로 짓고 있다.
+  7. 도는 패널마다의 신호 — 진행판 `job.signal` 은 마지막에 적힌 하나라 동시 2 에서 덮인다(`signals: [...]`).
+  8. 과제 상세의 스냅샷 머리에 판 칸(`app_versions` · `adapter_versions`) — 과제 화면 목록에서 '파서 세대 다름' 을 미리 보일 수 없다.

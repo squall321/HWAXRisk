@@ -480,4 +480,26 @@
       자동 등록' 더하기(요청서 1절 끝) · 패널 잡의 422 `consent_external_required` 글이 검토 잡 반출 글이다 · 진행판 패널 잡에 `hold_code` 가
       없어 보류 external_worker 를 code 로 가를 수 없다
 - [ ] 화면 — 등록부 행 타입(`claim` · `cites` · `subject` · `domain` 없음, `merged` 있음 — 행을 누르면 죽는다, M3 요청서 7절) · 과제 화면 대상 표의
-      `unseated_n` · `superseded_by`(그 응답에 없다) · 과제 화면 동결 알림(스냅샷 잡은 `rr_snapshot_jobs` 라 `jobs[]` 에 없다)
+      `unseated_n` · `superseded_by`(그 응답에 없다) · 과제 화면 동결 알림(스냅샷 잡은 `rr_snapshot_jobs` 라 `jobs[]` 에 없다) — 동결 알림은 2차 걸음에서 닫았다(FE-10)
+
+### 2차 걸음 — ECAD 화면(포털 ecad-1031 화면 요청서) · B34 묶음(2026-10-31)
+
+> 계약은 main 9bd5f48 의 '반영' 이다. 타입은 라우트 · 모델을 읽어 서버가 보내는 칸 그대로 두었다. 결정과 까닭은 context-notes FE-8 ~ FE-14.
+
+- [x] ECAD 카드(요청서 1 ~ 5절) — `meta/adapters` 의 ecad status 로 갈래(ready 찾기 칸 · unavailable 빠진 도구 · planned 다시 읽기) · 붙은 보드의
+      정체 · 찾기 칸 → 후보 표(판 · 올린 시각이 앞 열, 미리 고르지 않음, 16자리 16진이 아닌 job_id 는 잠금) · 바꾸기 · 떼기 확인 · 주인만 ·
+      거절은 code 로(`ecad_pat_absent` 는 설정 길, `ecad_board_not_found` 는 후보 다시)(FE-8)
+- [x] 동결 폼(6절) — 기본 kinds 에 ecad · 409 `model_too_large`(`leaf_mcad` · `leaf_ecad` 한 줄, '그래도 동결' 때만 `allow_large`) · 409
+      `source_unreachable` 두 꼴(`{kinds, attached}` 는 kinds 바꾸기, `{kind: ecad, reason}` 은 보드를 못 읽음)(FE-9)
+- [x] 스냅샷(7절) 보드 묶음 · 표지 열둘과 `ecad_capture_failed` · 노드 kind 거름, 비교(8절) ECAD 한 줄 · 제외 사유 말, 대상(9절) 좌석 까닭 말(FE-8)
+- [x] 10절과 그 둘레 — `missing` bool 사전 · `Comparability` 전 칸 · 상태 · diff · 사건 · 동결 답(동기) · 일반 연결 ref(객체). 스냅샷 · 비교 화면이
+      서버 값에서 백지였다. 과제 화면 동결 알림도 동결 답으로 연다(FE-10)
+- [x] B34 스냅샷 · 비교 — 게이트 null 은 중립 '판정 불가' · 규칙 evaluable=false 는 '평가 불가' · fail 게이트 ack · 취소 · 요구 여유 표 · 키 대장 ·
+      '파서 세대 다름'(행마다 까닭을 비교 가능성에서) · 대응 확정의 본문(늘 400 이던 것)(FE-11)
+- [x] B34 과제 · 대상 · 홈 — 등급 · 수명 주기 · 코퍼스 제외 · 조직 공개(편집자 잠금) · 제품 연결 · 멤버 · 이력 · 이양 · 폐기 · mcad 격리 상시 경고 ·
+      좌석 넘기기 · 되돌리기 · 틀린 문구 걷기 · 마지막 신호(80초) · 홈 칩 · 거름 · 등록 폼 제품 행 · 비교 목록 배지(FE-12 · FE-13)
+- [x] 시험 36건 더해 50건 · 변이 20/20(하나는 처음에 살아남아 단언을 더했다) · 실 백엔드 하네스 + 브라우저(FE-14)
+- [ ] 백엔드에 청할 것(FE-14 끝) — 과제 상세 · 목록에 메타 칸과 멤버 읽기 · 상태에 ack · 동결 때 요구 대조 · 키 대장 읽기 · `GET /sameas` 의
+      pair_key · 도는 패널마다의 신호 · 과제 상세 스냅샷 머리의 판 칸
+- [ ] 브라우저로 못 본 것 — 편집자로 과제 화면 열기(서버가 주인만 준다) · 도는 검토 잡의 일꾼 줄 · 대응 확정 단추(하네스에 후보 쌍이 없다) ·
+      실제 ODB 허브 · 게이트웨이
