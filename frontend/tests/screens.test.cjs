@@ -7,6 +7,8 @@ const load = require("./load.cjs");
 
 const { GateTable, GateBanner } = load("components/GateBanner.js");
 const { ProjectMetaCard } = load("components/ProjectMetaCard.js");
+const { ProjectMembersCard } = load("components/ProjectMembersCard.js");
+const { MemoryRouter } = require("react-router-dom");
 const { EcadBoardCard, CandidateTable } = load("components/EcadBoardCard.js");
 const { JobSignalLine, ReviewWorkers } = load("components/JobSignals.js");
 
@@ -73,6 +75,20 @@ test("조직 공개 토글 — 편집자에게는 잠기고(단추 없음) 소�
   assert.match(owner, />조직에 공개</);
   assert.match(owner, /보류 op 3건/);
   assert.doesNotMatch(owner, /소유자만 바꿉니다\(지금/);
+});
+
+test("고르기만으로 쓰지 않는다 — 등급 · 수명 주기는 고른 뒤 '바꾸기'(처음엔 잠김), 멤버는 '빼기…'(확인) · 역할은 고른 뒤 '적용'", () => {
+  const owner = renderToStaticMarkup(h(ProjectMetaCard, { detail: DETAIL({ classification: "confidential", lifecycle: "active" }), role: "owner", onPatched() {} }));
+  assert.equal(count(owner, '<button[^>]*disabled=""[^>]*>바꾸기</button>'), 2);
+  assert.match(owner, /<option value="" selected="">바꿀 등급…<\/option>/);
+  const members = {
+    data: { project_id: "p1", members: [{ email: "owner@x", role: "owner", added_by: null, added_at: 1 }, { email: "ed@x", role: "editor", added_by: "owner@x", added_at: 2 }] },
+    loading: false, error: null, reload() {},
+  };
+  const card = renderToStaticMarkup(h(MemoryRouter, null, h(ProjectMembersCard, { projectId: "p1", projectCode: "C", isOwner: true, members })));
+  assert.match(card, /빼기…<\/button>/);
+  assert.doesNotMatch(card, />적용</); // 역할을 고르기 전에는 적용 단추가 없다
+  assert.doesNotMatch(card, /을 멤버에서 뺍니다/);
 });
 
 test("과제 메타 — 서버가 칸을 주지 않으면 '모름', 제품 연결이 비었다고 말하면 '제품 연결 없음' 배지", () => {

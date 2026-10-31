@@ -32,6 +32,7 @@
     "src/components/BoxReasons.tsx",
     "src/components/GateBanner.tsx",
     "src/components/ProjectMetaCard.tsx",
+    "src/components/ProjectMembersCard.tsx",
     "src/components/EcadBoardCard.tsx",
     "src/components/JobSignals.tsx",
     "src/contract/serverSamples.ts",

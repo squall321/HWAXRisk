@@ -69,6 +69,11 @@ export function ProjectMetaCard({
   const [visibilityDenied, setVisibilityDenied] = useState(false);
   const [confirmOrg, setConfirmOrg] = useState(false);
   const [excludeReason, setExcludeReason] = useState<ExcludedReason | "">("");
+  // 등급 · 수명 주기는 고른 뒤 '바꾸기' 로만 쓴다 — 전에는 고르기만 해도(화살표 키의 change 도) 곧바로 PATCH 가 나갔다.
+  const [classDraft, setClassDraft] = useState<Classification | "">("");
+  const [lifeDraft, setLifeDraft] = useState<Lifecycle | "">("");
+  const [confirmClass, setConfirmClass] = useState(false);
+  const [confirmLife, setConfirmLife] = useState(false);
 
   const meta = knownMeta(detail.project, patched);
   const control = visibilityControl(visibilityDenied ? "editor" : role, meta.mcp_visibility as McpVisibility | null);
@@ -83,6 +88,8 @@ export function ProjectMetaCard({
       const out = await riskApi.patchProject(projectId, body);
       setPatched(out.project);
       if (what === "visibility") setResynced(out.resynced ?? null);
+      if ("classification" in body) setClassDraft("");
+      if ("lifecycle" in body) setLifeDraft("");
       onPatched(out.project);
     } catch (err) {
       // 소유자가 아니면 403 role_insufficient — code 로 토글을 잠근다(문구로 가르지 않는다).
@@ -91,6 +98,25 @@ export function ProjectMetaCard({
     } finally {
       setBusy(false);
       setConfirmOrg(false);
+      setConfirmClass(false);
+      setConfirmLife(false);
+    }
+  }
+
+  /** 등급 바꾸기 — confidential(또는 모름 — 등록 때 기본이 기밀이다)에서 internal 로 낮추는 것은 반출 경계를 넓히므로 확인받는다. */
+  function applyClassification() {
+    if (classDraft === "") return;
+    if (classDraft === "internal" && meta.classification !== "internal") setConfirmClass(true);
+    else void patch({ classification: classDraft });
+  }
+
+  /** 수명 주기 바꾸기 — 진행(active)을 떠나면 서버가 닫은 때(closed_at)를 찍으므로 확인받는다. */
+  function applyLifecycle() {
+    if (lifeDraft === "") return;
+    if (lifeDraft !== "active" && meta.lifecycle !== lifeDraft && (meta.lifecycle === "active" || meta.lifecycle === undefined)) {
+      setConfirmLife(true);
+    } else {
+      void patch({ lifecycle: lifeDraft });
     }
   }
 
@@ -184,20 +210,49 @@ export function ProjectMetaCard({
                 <Select
                   className="w-auto min-w-[10rem]"
                   aria-label="등급 바꾸기"
-                  value=""
+                  value={classDraft}
                   disabled={busy || editorLocked}
                   onChange={(e) => {
-                    if (e.target.value) void patch({ classification: e.target.value as Classification });
+                    setClassDraft(e.target.value as Classification | "");
+                    setConfirmClass(false);
                   }}
                 >
-                  <option value="">바꾸기…</option>
+                  <option value="">바꿀 등급…</option>
                   {CLASSIFICATIONS.map((c) => (
                     <option key={c} value={c}>
                       {CLASSIFICATION_LABEL[c]}
                     </option>
                   ))}
                 </Select>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={busy || editorLocked || classDraft === "" || classDraft === meta.classification}
+                  onClick={applyClassification}
+                >
+                  바꾸기
+                </Button>
                 <span className="text-xs text-muted-foreground">confidential → internal 은 소유자만 합니다.</span>
+                {confirmClass ? (
+                  <Banner
+                    tone="warn"
+                    live="status"
+                    title="등급을 internal(사내 일반)로 낮춥니다."
+                    detail={`등급은 반출 경계입니다 — 낮추면 이 과제는 내보내기의 최고 등급(X-Risk-Classification-Max)에서 기밀로 세어지지 않습니다.${
+                      meta.classification === undefined ? " 이 서버는 지금 등급을 과제 상세에 싣지 않아, 등록 때 기본인 기밀일 수 있다고 보고 묻습니다." : ""
+                    }`}
+                  >
+                    <span className="flex flex-wrap items-center gap-2">
+                      <Button type="button" size="sm" disabled={busy} onClick={() => void patch({ classification: "internal" })}>
+                        낮추기
+                      </Button>
+                      <Button type="button" variant="ghost" size="sm" onClick={() => setConfirmClass(false)}>
+                        그만두기
+                      </Button>
+                    </span>
+                  </Banner>
+                ) : null}
               </span>
             ),
           },
@@ -216,20 +271,47 @@ export function ProjectMetaCard({
                 <Select
                   className="w-auto min-w-[10rem]"
                   aria-label="수명 주기 바꾸기"
-                  value=""
+                  value={lifeDraft}
                   disabled={busy || editorLocked}
                   onChange={(e) => {
-                    if (e.target.value) void patch({ lifecycle: e.target.value as Lifecycle });
+                    setLifeDraft(e.target.value as Lifecycle | "");
+                    setConfirmLife(false);
                   }}
                 >
-                  <option value="">바꾸기…</option>
+                  <option value="">바꿀 수명 주기…</option>
                   {LIFECYCLES.map((l) => (
                     <option key={l} value={l}>
                       {LIFECYCLE_LABEL[l]} {l}
                     </option>
                   ))}
                 </Select>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={busy || editorLocked || lifeDraft === "" || lifeDraft === meta.lifecycle}
+                  onClick={applyLifecycle}
+                >
+                  바꾸기
+                </Button>
                 {patched?.closed_at ? <span className="text-xs text-muted-foreground">닫은 때 {fmtEpoch(patched.closed_at)}</span> : null}
+                {confirmLife && lifeDraft !== "" ? (
+                  <Banner
+                    tone="warn"
+                    live="status"
+                    title={`수명 주기를 바꿉니다 — ${LIFECYCLE_LABEL[lifeDraft]}(${lifeDraft}).`}
+                    detail="진행(active)을 떠나면 서버가 닫은 때(closed_at)를 지금으로 찍습니다."
+                  >
+                    <span className="flex flex-wrap items-center gap-2">
+                      <Button type="button" size="sm" disabled={busy} onClick={() => void patch({ lifecycle: lifeDraft })}>
+                        바꾸기
+                      </Button>
+                      <Button type="button" variant="ghost" size="sm" onClick={() => setConfirmLife(false)}>
+                        그만두기
+                      </Button>
+                    </span>
+                  </Banner>
+                ) : null}
               </span>
             ),
           },

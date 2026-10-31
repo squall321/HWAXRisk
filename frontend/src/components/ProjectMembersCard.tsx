@@ -56,6 +56,9 @@ export function ProjectMembersCard({
   const [role, setRole] = useState<"viewer" | "editor">("viewer");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  // 역할은 고른 뒤 '적용' 으로만 쓴다(전에는 고르기만 해도 — 화살표 키의 change 도 — 곧바로 PUT 이 나갔다). 빼기는 확인 뒤에만.
+  const [roleDraft, setRoleDraft] = useState<Record<string, "viewer" | "editor">>({});
+  const [removing, setRemoving] = useState<string | null>(null);
 
   async function put(body: { members: Array<{ email: string; role: "viewer" | "editor" }>; remove: string[] }) {
     setBusy(true);
@@ -63,6 +66,12 @@ export function ProjectMembersCard({
     try {
       await riskApi.putMembers(projectId, body);
       setEmail("");
+      setRoleDraft((prev) => {
+        const next = { ...prev };
+        for (const m of body.members) delete next[m.email];
+        return next;
+      });
+      setRemoving(null);
       members.reload();
     } catch (err) {
       setError(err);
@@ -78,23 +87,36 @@ export function ProjectMembersCard({
       header: "역할",
       hint: "role",
       nowrap: true,
-      cell: (m) =>
-        isOwner && m.role !== "owner" ? (
-          <Select
-            className="w-auto min-w-[8rem]"
-            aria-label={`${m.email} 역할`}
-            value={m.role}
-            disabled={busy}
-            onChange={(e) => void put({ members: [{ email: m.email, role: e.target.value as "viewer" | "editor" }], remove: [] })}
-          >
-            <option value="viewer">{ROLE_LABEL.viewer} viewer</option>
-            <option value="editor">{ROLE_LABEL.editor} editor</option>
-          </Select>
-        ) : (
+      cell: (m) => {
+        if (isOwner && m.role !== "owner") {
+          const draft = roleDraft[m.email];
+          const changed = draft !== undefined && draft !== m.role;
+          return (
+            <span className="flex items-center gap-1">
+              <Select
+                className="w-auto min-w-[8rem]"
+                aria-label={`${m.email} 역할`}
+                value={draft ?? m.role}
+                disabled={busy}
+                onChange={(e) => setRoleDraft((prev) => ({ ...prev, [m.email]: e.target.value as "viewer" | "editor" }))}
+              >
+                <option value="viewer">{ROLE_LABEL.viewer} viewer</option>
+                <option value="editor">{ROLE_LABEL.editor} editor</option>
+              </Select>
+              {changed ? (
+                <Button type="button" variant="outline" size="sm" disabled={busy} onClick={() => void put({ members: [{ email: m.email, role: draft }], remove: [] })}>
+                  적용
+                </Button>
+              ) : null}
+            </span>
+          );
+        }
+        return (
           <Badge tone={m.role === "owner" ? "info" : "neutral"}>
             {ROLE_LABEL[m.role as ProjectRole] ?? m.role} {m.role}
           </Badge>
-        ),
+        );
+      },
     },
     { key: "by", header: "추가한 사람", hint: "added_by", cell: (m) => m.added_by ?? "-", nowrap: true },
     { key: "at", header: "추가한 때", hint: "added_at", cell: (m) => fmtEpoch(m.added_at), nowrap: true },
@@ -104,9 +126,9 @@ export function ProjectMembersCard({
       nowrap: true,
       cell: (m) =>
         isOwner && m.role !== "owner" ? (
-          <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => void put({ members: [], remove: [m.email] })}>
+          <Button type="button" variant="ghost" size="sm" disabled={busy} onClick={() => setRemoving(m.email)}>
             <Trash2 aria-hidden="true" />
-            빼기
+            빼기…
           </Button>
         ) : null,
     },
@@ -122,6 +144,18 @@ export function ProjectMembersCard({
         {members.loading && !members.data ? <LoadingBlock /> : null}
         {members.data ? (
           <DataTable columns={columns} rows={members.data.members} rowKey={(m) => m.email} empty="멤버가 없습니다." />
+        ) : null}
+        {removing ? (
+          <Banner tone="warn" live="status" title={`${removing} 을 멤버에서 뺍니다.`} detail="그 사람은 이 과제를 더는 열지 못합니다 — 다시 넣으려면 멤버로 추가합니다.">
+            <span className="flex flex-wrap items-center gap-2">
+              <Button type="button" variant="destructive" size="sm" disabled={busy} onClick={() => void put({ members: [], remove: [removing] })}>
+                빼기
+              </Button>
+              <Button type="button" variant="ghost" size="sm" onClick={() => setRemoving(null)}>
+                그만두기
+              </Button>
+            </span>
+          </Banner>
         ) : null}
         {isOwner ? (
           <form
