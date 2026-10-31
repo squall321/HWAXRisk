@@ -782,7 +782,19 @@ def merge(store: RiskStore, target_key: str, *, owner_sub: str | None = None, pe
     수로 세며, 끝난 쟁점의 결과를 닻 행에 얹고, 과제를 가로지르는 기여(rr_delta_contrib)에는 넣지 않는다(M3 #57 — 그 대상의
     기여 행을 비운다). `persist=False` 는 아무것도 쓰지 않고 계산한 행을 `rows` 로 돌려준다 — `include_card=False` 와 함께
     '패널만 본 등록부' 비교 보기(`GET …/registry?source=panels`)가 쓴다.
+
+    쓰는 병합(`persist=True`)은 원자 · 별칭을 읽는 데서부터 쓰기까지 한 트랜잭션이다(저장소 락 · BEGIN IMMEDIATE). 종전에는 트랜잭션
+    밖에서 읽고 센 행을 나중에 썼다 — 그 사이에 다른 요청의 키 전파(rekey)가 별칭을 세우고 등록부를 접어 커밋하면, 낡은 행이 그
+    접힘을 덮고(닫힌 옛 행이 다시 열린다) 별칭과 등록부가 어긋난 채 남았다.
     """
+    if not persist:
+        return _merge(store, target_key, owner_sub=owner_sub, persist=False, include_card=include_card)
+    with store.tx():
+        return _merge(store, target_key, owner_sub=owner_sub, persist=True, include_card=include_card)
+
+
+def _merge(store: RiskStore, target_key: str, *, owner_sub: str | None, persist: bool, include_card: bool) -> dict:
+    """`merge` 의 본체 — 쓰는 병합이면 부르는 쪽이 트랜잭션을 열었다."""
     now = common.now_epoch()
     flow = target_flow(store, target_key) if include_card else "panels"
     findings = _load_findings(store, target_key, include_card=include_card)

@@ -1,6 +1,7 @@
 # 확정 되돌리기의 키 전파(rekey) — §5.9.5 여섯 걸음을 걸음마다 · 확정 → 되돌리기 왕복 · 6홉 409 · 한 트랜잭션(plan §5.9.5 · §4.3.2 · P3 (22))
 from __future__ import annotations
 
+import contextlib
 import json
 
 import pytest
@@ -682,5 +683,30 @@ def test_a_folded_away_row_is_not_counted_again_in_the_cells_flow(risk_store):
     assert "## 주의 A 1건" in summary and "## 개선 상위 1건" in summary
     assert "- 주의 C 1건 · D 0건(본문 표 없음)" in pages[("domain", "영역 mech")]
     assert pages[("mechanisms", "메커니즘")][:2] == ["## 단위 × 메커니즘 대분류(결손 사냥 미실행)", "- u1 · mechanical · 1"]
+
+
+def test_a_merge_reads_and_writes_in_one_transaction_so_a_rekey_cannot_slip_between(risk_store, monkeypatch):
+    """쓰는 병합은 원자 · 별칭을 읽는 데서부터 쓰기까지 한 트랜잭션이다 — 다른 요청의 키 병합이 병합의 트랜잭션이 열리기 직전에 끝나
+    커밋해도 병합은 그 뒤의 원장으로 센다. 종전에는 트랜잭션 밖에서 읽고 센 행을 나중에 써, 그 사이에 끝난 키 병합이 닫은 옛 행
+    (key(Y))을 다시 열었다 — 별칭은 살아 있는데 등록부는 접히지 않은 채로 남았다."""
+    _world(risk_store)
+    real_tx = risk_store.tx
+    raced: list[bool] = []
+
+    @contextlib.contextmanager
+    def tx_after_a_rival_commit():
+        # 바깥 트랜잭션을 열기 직전 — 락을 먼저 잡은 다른 요청이 키 병합을 끝까지 돌려 커밋했다.
+        if not raced and risk_store._tx_depth == 0:
+            raced.append(True)
+            monkeypatch.setattr(risk_store, "tx", real_tx)
+            _decide(risk_store, decision="merge_key", ckey_from=Y, ckey_into=X)
+        with real_tx() as conn:
+            yield conn
+
+    monkeypatch.setattr(risk_store, "tx", tx_after_a_rival_commit)
+    registry.merge(risk_store, "snap:T1", owner_sub=OWNER)
+    assert raced and _alias(risk_store, key_of(Y))["revoked_at"] is None
+    assert _registry(risk_store)[("snap:T1", key_of(Y))][:2] == ("superseded", f"snap:T1#{key_of(X)}")
+    assert _live(risk_store, "snap:T1") == _fresh(risk_store, "snap:T1") == {key_of(X): (1, "치명")}
 
 
