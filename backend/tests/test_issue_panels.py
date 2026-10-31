@@ -894,6 +894,20 @@ def test_a_repanel_that_judges_undetermined_keeps_the_old_verdict_and_says_so(st
     assert _row(store, key, anchor)["merged"]["issue_reraised"]["label"] == REPANEL_FAILED
 
 
+def test_a_failed_repanel_keeps_the_time_and_round_of_a_basis_change_mark(store, monkeypatch, tmp_path):
+    """근거가 바뀌어 선 표기(at · round 가 있다)에 새 패널이 결정을 못 내도 그 at · round 는 그대로다 — 표기가 처음 선 때와 회차다
+    (_keep_verdict 는 비어 있을 때만 채운다 — 화면 세션 청할 것 5). 시각이 같은 초에 겹치지 않게 표기의 값을 옛 값으로 둔다."""
+    key, anchor, _old, _engine = _escalated_then_reraised(store, monkeypatch, tmp_path, requeue=True)
+    issue_id = _issue(store, key, anchor)["issue_id"]
+    store.execute("UPDATE rr_issues SET reraised_json = json_set(reraised_json, '$.at', 1, '$.round', 7) WHERE issue_id = ?",
+                  (issue_id,))
+    _run_issues(store, config.settings, IssuePanelEngine(store, {"*": {"severity": "치명", "judgement": "undetermined"}}), key,
+                limit=1)
+    mark = json.loads(_issue(store, key, anchor)["reraised_json"])
+    assert (mark["at"], mark["round"], mark["new_panel_failed"]["reason"]) == (1, 7, "no_decision")
+    assert mark["basis_hash"]                                                   # 근거가 바뀐 표기 그대로다
+
+
 def test_a_charged_release_at_the_limit_keeps_the_old_verdict(store, monkeypatch, tmp_path):
     """M2 — 내용 탓 놓기(release_issue charge)가 한도에 닿아도 판정이 있던 쟁점은 옛 판정을 둔다(지금 러너는 차감 없이 놓지만 함수의
     약속이 같아야 한다 — 차감으로 부르는 날 M2 가 조용히 돌아오지 않게)."""
