@@ -2249,7 +2249,13 @@ class LedgerItem(BaseModel):
 @router.put("/projects/{project_id}/iface-ledger")
 def put_iface_ledger(project_id: str, body: list[LedgerItem],
                      ident: identity.Identity = Depends(identity.current)) -> dict:
-    """계면 확정 원장(§2.10). 스냅샷은 바뀌지 않고 다음 동결이 이 원장을 흡수한다."""
+    """계면 확정 원장(§2.10). 스냅샷은 바뀌지 않고 다음 동결이 이 원장을 흡수한다.
+
+    확정(confirmed · manual)을 rejected 로 뒤집는 행은 같은 트랜잭션에서 키 전파(`rekey.run`, plan §5.9.5)를 돈다 — 계면 원장은
+    저장 키(ckey · 계면 별칭)를 바꾸지 않아 별칭 · 등록부는 그대로이고 rr_audit(rekey) 1행이 그 번복을 남긴다.
+    """
+    from app import rekey  # noqa: PLC0415 — 이 경로에서만 쓴다.
+
     owner_sub = _require_user(ident)
     _project_row(project_id, owner_sub)
     now = now_epoch()
@@ -2258,12 +2264,18 @@ def put_iface_ledger(project_id: str, body: list[LedgerItem],
         for item in body:
             if item.status not in ("confirmed", "rejected", "manual"):
                 raise AppError("E100", f"status 는 confirmed|rejected|manual 여야 합니다 — {item.status!r}.", 422)
+            prev = store.query_one("SELECT status FROM rr_iface_ledger WHERE project_id = ? AND pair_key = ?",
+                                   (project_id, item.pair_key))
             store.execute(
                 "INSERT INTO rr_iface_ledger(project_id, pair_key, owner_sub, kind_override, status, note,"
                 " decided_by, decided_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(project_id, pair_key) DO UPDATE SET"
                 " kind_override=excluded.kind_override, status=excluded.status, note=excluded.note,"
                 " decided_by=excluded.decided_by, decided_at=excluded.decided_at",
                 (project_id, item.pair_key, owner_sub, item.kind_override, item.status, item.note, owner_sub, now))
+            if prev is not None and prev["status"] in ("confirmed", "manual") and item.status == "rejected":
+                rekey.run(store, op="iface_ledger_reject", owner_sub=owner_sub, actor=owner_sub, at=now,
+                          subject_id=f"ledger:{project_id}:{item.pair_key}", project_id=project_id,
+                          ledger={"project_id": project_id, "pair_key": item.pair_key, "before": prev["status"]})
     rows = store.query(
         "SELECT project_id, pair_key, kind_override, status, note, decided_by, decided_at"
         " FROM rr_iface_ledger WHERE project_id = ? ORDER BY pair_key", (project_id,))

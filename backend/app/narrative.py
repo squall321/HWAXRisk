@@ -1098,13 +1098,14 @@ def precedent_from_snapshot(feature_snapshot: dict, ctx: SpecContext) -> tuple[s
 
 # ================================================================ §4.3.2 subject_key · cluster_key
 def _iface_alias(ckeys: Sequence[str], ctx: SpecContext) -> tuple[str, str] | None:
-    """rr_iface_alias 에 별칭이 있으면 정규 쌍을 돌려준다."""
+    """rr_iface_alias 에 살아 있는 별칭이 있으면 정규 쌍을 돌려준다 — 철회한 별칭(status='revoked', plan §5.9.5)으로는 접지 않는다
+    (브리프 회수 `_alias_expand` · 성격 값과 같은 거름 — 종전에는 철회한 별칭으로도 새 원자의 주체를 접었다)."""
     if ctx.store is None or len(ckeys) != 2:
         return None
     alias_key = "|".join(sorted(ckeys))
     rows = ctx.store.query(
-        "SELECT alias_key, canonical_a, canonical_b FROM rr_iface_alias WHERE alias_key = ?", (alias_key,)
-    )
+        "SELECT alias_key, canonical_a, canonical_b FROM rr_iface_alias WHERE alias_key = ? AND status = 'active'",
+        (alias_key,))
     if not rows:
         return None
     row = rows[0]
