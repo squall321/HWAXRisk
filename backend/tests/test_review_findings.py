@@ -386,6 +386,8 @@ REVIEW_READERS: dict[tuple[str, str], str] = {
     ("issues.py", "_card_atoms"): "카드 대조 원자만 읽는다(source_kind = 카드 대조 — 쟁점 유형의 원천, M3 S3-6)",
     ("issues.py", "_panel_atoms"): "쟁점 패널 자신의 원자(panel_id + source_kind = issue_panel — 결과 판정, M3 S3-7)",
     ("brief.py", "_issue_side"): "쟁점 근거 I4 — 제기자의 finding 을 id 로 짚는다(카드 밖 지적의 주장 줄, M3 S3-7)",
+    ("rekey.py", "touching_findings"): "키 전파(§5.9.5) — 별칭은 소유자 단위의 키 사실이라 흐름을 가리지 않는다(카드 대조 원자의 동결 키도 "
+                                       "같은 별칭을 따르고, 다시 병합할 때 등록부가 대상의 흐름대로 거른다)",
 }
 _READ_SQL = re.compile(r"\b(?:FROM|JOIN)\s+rr_findings\b", re.IGNORECASE)
 
