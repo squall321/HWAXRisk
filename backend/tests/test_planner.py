@@ -261,11 +261,18 @@ def test_review_order_reports_input_gaps_and_deferral_without_dropping_anyone(ri
     assert len(deferred) == 104 and all(row["rank_in_domain"] != 1 for row in order if row["deferred"])
 
 
-def test_review_order_has_no_input_gaps_when_the_target_has_ecad(risk_store, monkeypatch):
+def test_review_order_keeps_only_the_net_domains_as_input_gaps_when_the_target_has_a_stage1_board(risk_store, monkeypatch):
+    """보드가 실린 대상(ECAD 1단계)에서는 넷 · 배치에 기대는 pwr · rf 만 입력 결손(ecad_nets_deferred)이다 — 나머지 ECAD 의존
+    영역(pcb · soc · passive · mem)과 다른 영역은 결손이 없다(사용자 결정 10-31). 단계 스위치를 2 로 올리면 결손이 없다."""
     from app import routes
+    from app.adapters import ecad as ecad_adapter
 
     target_key = _plan_sized_target(risk_store)
     monkeypatch.setattr(routes, "_ecad_absent_for_target", lambda store, target: False)
+    order = planner.review_order(risk_store, target_key)
+    assert {row["domain"] for row in order if row["input_gaps"]} == {"pwr", "rf"}
+    assert all(row["input_gaps"] == ["ecad_nets_deferred"] for row in order if row["domain"] in ("pwr", "rf"))
+    monkeypatch.setattr(ecad_adapter, "STAGE", 2)
     assert all(row["input_gaps"] == [] for row in planner.review_order(risk_store, target_key))
 
 

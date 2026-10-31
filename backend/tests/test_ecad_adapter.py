@@ -863,7 +863,8 @@ def test_an_ecad_generation_change_marks_only_ecad_items(hub):
 
 def test_ecad_domains_wait_on_a_diff_target_and_are_told_why(hub, risk_store):
     """반대 검토 4 — 1단계 쌍 비교는 ECAD 칸 변화를 싣지 않는다. diff 대상의 ECAD 의존 영역은 deferred · 입력 결손이고 결측
-    블록이 까닭을 말한다. 스냅샷 대상은 보드가 실렸으면 그대로 풀린다(ER-05)."""
+    블록이 까닭을 말한다. 스냅샷 대상은 보드가 실렸으면 넷에 기대지 않는 영역(pcb 등)이 풀린다(ER-05 — 넷 · 배치 의존 영역은
+    아래 EC-28 시험)."""
     project_id = factories.make_project(risk_store)
     a = factories.make_snapshot(risk_store, project_id, _capture(hub, JOB_STD)["results"], label="A")
     b = factories.make_snapshot(risk_store, project_id, _capture(hub, JOB_NON)["results"], label="B")
@@ -883,6 +884,60 @@ def test_ecad_domains_wait_on_a_diff_target_and_are_told_why(hub, risk_store):
     order = planner.review_order(risk_store, snap_key)
     assert all(r["input_gaps"] == [] and not r["deferred"] for r in order)
     assert [m for m in units_module._target_missing(risk_store, snap_key, None) if m["kind"] == "ecad"] == []
+
+
+# ---------------------------------------------------------------- 사용자 결정 10-31 — 넷 · 배치 의존 영역은 2단계까지 기다린다(EC-28)
+NET_SEATS = factories.agents(("pcb", "soc", "passive", "mem", "pwr", "rf", "mech"), 2)
+
+
+def _board_snapshot(hub: FakeOdbHub, store, job_id: str | None) -> str:
+    """새 과제 하나에 보드(job_id) 하나를 실은 스냅샷 — job_id 가 None 이면 보드가 없는(mcad 만) 스냅샷이다."""
+    project_id = factories.make_project(store)
+    results = (_capture(hub, job_id)["results"] if job_id is not None
+               else [factories.adapter_fixture("adapter_mcad_basic.json")])
+    return factories.make_snapshot(store, project_id, results, label="S")["snapshot_id"]
+
+
+def _deferred(store, target_key: str) -> dict[str, str]:
+    return {r["agent_key"]: r["reason"] for r in store.query(
+        "SELECT agent_key, reason FROM rr_coverage WHERE target_key = ? AND status = 'deferred'", (target_key,))}
+
+
+def test_a_stage1_board_plans_pcb_soc_passive_mem_and_keeps_pwr_rf_deferred(hub, risk_store):
+    """1단계 보드를 실은 스냅샷 대상 — pcb · soc · passive · mem 은 전원 편성되고, 넷 · 배치에 기대는 pwr · rf 는 대표 1석만 앉고
+    나머지는 deferred(사유 ecad_nets_deferred)다. 입력 결손도 pwr · rf 뿐이다. 보드가 없는 스냅샷은 종전대로 여섯 다 ecad_absent 다."""
+    with factories.routes_store(risk_store):
+        out = routes.create_target(routes.TargetBody(kind="snap", ref_id=_board_snapshot(hub, risk_store, JOB_STD),
+                                                     consent=True, agents=NET_SEATS), ident=factories.ident())
+    key = out["target_key"]
+    assert _deferred(risk_store, key) == {"pwr-syn-1": "ecad_nets_deferred", "rf-syn-1": "ecad_nets_deferred"}
+    assert out["deferred"] == 2 and planner.tier_plan(risk_store, key)["deferred"] == 2
+    gaps = {r["agent_key"]: r["input_gaps"] for r in planner.review_order(risk_store, key)}
+    assert {k: g for k, g in gaps.items() if g} == {k: ["ecad_nets_deferred"] for k in
+                                                     ("pwr-syn-0", "pwr-syn-1", "rf-syn-0", "rf-syn-1")}
+
+    bare = factories.make_target(risk_store, "snap", _board_snapshot(hub, risk_store, None), agents=NET_SEATS)
+    assert _deferred(risk_store, bare) == {f"{d}-syn-1": "ecad_absent" for d in ("pcb", "soc", "passive", "mem", "pwr", "rf")}
+
+
+def test_a_roster_first_frozen_late_keeps_pwr_rf_deferred_on_a_stage1_board(hub, risk_store):
+    """명단을 못 받아 로스터 없이 연 대상을 나중에 처음 고정해도(refresh_roster) 같은 규칙이다."""
+    key = factories.make_target(risk_store, "snap", _board_snapshot(hub, risk_store, JOB_STD), agents=[])
+    assert risk_store.query_one("SELECT roster_frozen_at FROM rr_targets WHERE target_key = ?", (key,))[0] is None
+    with factories.routes_store(risk_store):
+        routes.refresh_roster(key, routes.RosterBody(agents=NET_SEATS), ident=factories.ident())
+    assert _deferred(risk_store, key) == {"pwr-syn-1": "ecad_nets_deferred", "rf-syn-1": "ecad_nets_deferred"}
+
+
+def test_the_stage_switch_releases_the_net_domains_in_one_place(hub, risk_store, monkeypatch):
+    """단계 스위치(adapters/ecad.STAGE)를 2 로 올리면 보드가 실린 대상의 pwr · rf 도 풀린다 — 편성 · 입력 결손이 그 하나를 읽는다.
+    보드가 없는 대상은 단계와 상관없이 여섯 다 ecad_absent 다."""
+    monkeypatch.setattr(ecad_adapter, "STAGE", 2)
+    key = factories.make_target(risk_store, "snap", _board_snapshot(hub, risk_store, JOB_NON), agents=NET_SEATS)
+    assert _deferred(risk_store, key) == {}
+    assert all(r["input_gaps"] == [] for r in planner.review_order(risk_store, key))
+    bare = factories.make_target(risk_store, "snap", _board_snapshot(hub, risk_store, None), agents=NET_SEATS)
+    assert set(_deferred(risk_store, bare).values()) == {"ecad_absent"} and len(_deferred(risk_store, bare)) == 6
 
 
 @pytest.mark.parametrize("tool", ["list_parts", "get_board_layers"])

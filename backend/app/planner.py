@@ -7,10 +7,14 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from app import config, taxonomy
+from app.adapters import ecad as ecad_adapter
 from app.common import canonical_json, new_uuid, now_epoch, sha256_hex
 from app.errors import AppError
 
 PLANNER_VERSION = "planner-1.0"
+# ECAD 입력 결손의 사유(rr_coverage.reason · review_order 의 input_gaps) — 대상에 ECAD 가 없다(ecad_absent), 보드는 실렸지만 그 영역이
+# 기대는 넷 · 부품 좌표가 이 단계에 없다(ecad.NETS_DEFERRED — 단계 스위치는 adapters/ecad.STAGE 하나다, 사용자 결정 10-31).
+ECAD_ABSENT = "ecad_absent"
 
 # ---------------------------------------------------------------- 편성 상수(plan §0.6 공유 상수표)
 CHAIR_TEMPLATE = "risk-review"
@@ -111,6 +115,18 @@ def _normalize_agents(agents: Iterable[Mapping[str, Any]], allowed_domains: Sequ
     return rows
 
 
+def ecad_input_gaps(domains: Iterable[str], *, ecad_absent: bool) -> dict[str, str]:
+    """ECAD 에 기대는 영역 → 입력 결손 사유. 대상에 ECAD 가 없으면 전부 `ECAD_ABSENT` 다. 보드가 실렸으면 그 단계가 아직 싣지 않는
+    넷 · 배치에 기대는 영역만이다(`ecad.stage_gap` — 1단계는 pwr · rf 가 ecad_nets_deferred, 사용자 결정 10-31). 결손이 없는 영역은
+    싣지 않는다."""
+    out: dict[str, str] = {}
+    for domain in domains:
+        gap = ECAD_ABSENT if ecad_absent else ecad_adapter.stage_gap(str(domain))
+        if gap:
+            out[str(domain)] = gap
+    return out
+
+
 def freeze_roster(
     store: Any,
     target_key: str,
@@ -118,17 +134,26 @@ def freeze_roster(
     agents: Iterable[Mapping[str, Any]],
     *,
     ecad_absent: bool = False,
+    ecad_gaps: Mapping[str, str] | None = None,
     settings: Any | None = None,
 ) -> dict:
-    """rr_roster 를 고정하고 rr_coverage 를 pending(ECAD 부재 도메인의 rank≠1 은 deferred)으로 만든다.
+    """rr_roster 를 고정하고 rr_coverage 를 pending(ECAD 입력 결손 영역의 rank≠1 은 deferred)으로 만든다.
 
     agents 는 호출자(라우트·어댑터)가 이미 조회한 `list_agents`+`recommend_agents` 결과다 — 이 함수는 네트워크를 부르지 않는다.
     같은 agents 집합이면 같은 rank_in_domain 이 나온다(정렬 relevance desc, agent_key asc).
     이미 고정된 타깃에 다시 부르면 기존 행을 덮지 않는다(INSERT OR IGNORE).
+
+    `ecad_gaps` 는 ECAD 의존 영역 → 입력 결손 사유(`ecad_input_gaps` — 대상에서 센 것)이고 deferred 행의 reason 이 된다. 라우트는 늘
+    이것을 준다 — 보드가 실린 1단계 대상에서 넷 · 배치 의존 영역(pwr · rf)이 ecad_nets_deferred 로 남는 길이다. 주지 않으면
+    `ecad_absent` 하나로 정한다(참이면 ECAD 의존 영역 전부 ecad_absent, 거짓이면 결손 없음).
     """
     cfg = _cfg(settings)
     rows = _normalize_agents(agents, cfg.risk_roster_domains)
     ecad_domains = set(cfg.risk_ecad_domains)
+    if ecad_gaps is not None:
+        gaps = dict(ecad_gaps)
+    else:
+        gaps = ecad_input_gaps(ecad_domains, ecad_absent=True) if ecad_absent else {}
     now = now_epoch()
 
     roster_params: list[tuple] = []
@@ -142,8 +167,9 @@ def freeze_roster(
         rank += 1
         ecad_dep = 1 if row["domain"] in ecad_domains else 0
         roster_params.append((target_key, row["key"], owner_sub, row["domain"], row["relevance"], rank, ecad_dep, now))
-        if ecad_dep and ecad_absent and rank != 1:
-            status, reason = "deferred", "ecad_absent"
+        gap = gaps.get(row["domain"]) if ecad_dep else None
+        if gap and rank != 1:
+            status, reason = "deferred", gap
             deferred += 1
         else:
             status, reason = "pending", None
@@ -374,8 +400,9 @@ def review_order(store: Any, target_key: str) -> list[dict]:
 
     정렬 키는 (tier A→B→C, rank_in_domain, domain, agent_key)이고 tier 는 `tier_rank_cap` 의 라벨이다(영역 크기는 로스터 전원).
     `deferred` 는 그 좌석의 `rr_coverage.status` 가 `deferred` 인가다 — 걸러 내지 않는다(로스터 동결 규칙은 그대로).
-    `input_gaps` 는 저장하지 않고 센다 — ECAD 의존 영역이고 타깃에 ECAD 가 없으면 `['ecad_absent']` 다. M2 의 검토 격자는
-    `input_gaps` 가 빈 전문가만 받는다(입력 결손 호출은 M3). 같은 원장이면 같은 순서다.
+    `input_gaps` 는 저장하지 않고 센다 — ECAD 의존 영역이고 타깃에 ECAD 가 없으면 `['ecad_absent']`, 보드가 실렸어도 이 단계가 아직
+    싣지 않는 넷 · 배치에 기대는 영역이면 `['ecad_nets_deferred']` 다(`ecad_input_gaps`). M2 의 검토 격자는 `input_gaps` 가 빈
+    전문가만 받는다(입력 결손 호출은 M3). 같은 원장이면 같은 순서다.
     """
     from app import routes  # noqa: PLC0415 — routes 는 planner 를 import 한다.
 
@@ -384,7 +411,8 @@ def review_order(store: Any, target_key: str) -> list[dict]:
         raise AppError("E404", f"타깃이 없습니다: {target_key}", 404)
     rows = _roster_rows(store, target_key)
     sizes = _domain_sizes(rows)
-    ecad_absent = routes._ecad_absent_for_target(store, dict(target))
+    gaps = ecad_input_gaps({r["domain"] for r in rows if r["ecad_dependent"]},
+                           ecad_absent=routes._ecad_absent_for_target(store, dict(target)))
 
     def tier_of(row: Mapping[str, Any]) -> str:
         return next(t for t in TIERS if _in_tier(row["rank_in_domain"], tier_rank_cap(t, sizes[row["domain"]])))
@@ -394,7 +422,7 @@ def review_order(store: Any, target_key: str) -> list[dict]:
                                       pair[1]["agent_key"]))
     return [{"order": n, "agent_key": row["agent_key"], "domain": row["domain"],
              "rank_in_domain": row["rank_in_domain"], "tier": tier, "deferred": row["status"] == "deferred",
-             "input_gaps": ["ecad_absent"] if row["ecad_dependent"] and ecad_absent else []}
+             "input_gaps": [gaps[row["domain"]]] if row["ecad_dependent"] and row["domain"] in gaps else []}
             for n, (tier, row) in enumerate(ranked, start=1)]
 
 

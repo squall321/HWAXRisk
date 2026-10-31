@@ -143,11 +143,14 @@ ECAD 카드(소스 카드 probe)는 호출의 전송이 아니라 어댑터 결�
 
 ## ECAD 의존 도메인 6(ER-05)
 
-`pcb · pwr · rf · soc · passive · mem`(`HWAXRISK_ECAD_DOMAINS`)은 편성 규칙(`planner`)이 `routes._ecad_absent_for_target` 하나로 가른다.
+`pcb · pwr · rf · soc · passive · mem`(`HWAXRISK_ECAD_DOMAINS`)은 편성 규칙(`planner`)이 영역마다 입력 결손 사유(`planner.ecad_input_gaps`)로
+가른다 — 대상에 ECAD 가 없는지(`routes._ecad_absent_for_target`)와 이 어댑터의 단계(`adapters/ecad.STAGE`)다. 결손이 있는 영역은 대표 1석
+(rank 1)만 앉고 나머지는 `deferred`(reason = 그 사유)이며, 검토 순서의 `input_gaps` 도 그 사유다.
 
-- **스냅샷 대상** — 그 스냅샷의 `missing.ecad_absent` 다. 1단계 캡처는 ECAD 를 실으므로(`ecad_absent=false`) **여섯 다 deferred 에서 풀린다** —
-  대표 1석만이 아니라 전원이 편성되고, 카드 대조의 입력 결손(`input_gaps: ['ecad_absent']`)도 사라진다. 빠진 칸은 표지로 E0 · 단위 근거 줄에
-  실려 좌석이 '없다' 가 아니라 '안 실렸다' 로 읽는다.
+- **스냅샷 대상** — 그 스냅샷의 `missing.ecad_absent` 다. 1단계 캡처는 ECAD 를 실으므로(`ecad_absent=false`) **pcb · soc · passive · mem 은
+  deferred 에서 풀린다** — 대표 1석만이 아니라 전원이 편성되고 입력 결손도 없다. 빠진 칸은 표지로 E0 · 단위 근거 줄에 실려 좌석이 '없다' 가
+  아니라 '안 실렸다' 로 읽는다. **넷 · 배치에 기대는 pwr · rf 는 2단계까지 deferred 다**(reason · 입력 결손 `ecad_nets_deferred` — 사용자 결정
+  10-31, context-notes EC-28). 보드가 없는 스냅샷은 여섯 다 `ecad_absent` 다.
 - **diff 대상** — 1단계 동안 늘 ECAD 부재로 본다(여섯 다 rank 1 외 deferred · 입력 결손). 1단계 쌍 비교는 ECAD 노드를 refdes · 층 이름으로 맞춰
   추가 · 삭제만 보고 칸 변화(층 두께 · 재료 · 품번 · 패키지 · 핀 수 · 높이)를 싣지 않는다 — 그 비교를 받은 ECAD 좌석이 '회로 변경 없음' 으로
   읽지 않게 한다. 두 리비전 모두 보드가 실렸으면 대상의 결측 블록 첫 줄(kind `ecad`)이 그 까닭을 말하고 입력 결손 전문가에게는 그 영역의
@@ -156,14 +159,19 @@ ECAD 카드(소스 카드 probe)는 호출의 전송이 아니라 어댑터 결�
 | 도메인 | 1단계로 보는 것 | 아직 못 보는 것(2단계) |
 |---|---|---|
 | pcb | 적층 · 층별 두께 · 판정 · 동박층 수 · 외곽 폭 · 높이 · 면마다 부품 수 | 부품 좌표 · 외곽 원점 · 동박 무게 · plane 구분 |
-| pwr | 전원 부품(분류된 IC · 인덕터 · 캐패시터)의 품번 · 패키지 · 핀 수 · 동박층 | 전원 · 그라운드 넷 · plane 구분 |
-| rf | RF 부품의 품번 · 패키지 · 적층 | 배치 좌표 · 넷 |
+| pwr(2단계까지 대표 1석만) | 전원 부품(분류된 IC · 인덕터 · 캐패시터)의 품번 · 패키지 · 핀 수 · 동박층 | 전원 · 그라운드 넷 · plane 구분 · 배치 |
+| rf(2단계까지 대표 1석만) | RF 부품의 품번 · 패키지 · 적층 | 배치 좌표 · 넷 |
 | soc | AP · IC 의 품번 · 패키지 · 핀 수 | 좌표 · 넷 |
 | passive | 분류된 수동 소자(캐패시터 · 인덕터)의 품번 · 패키지 | 분류 안 된 부품(저항 등) · 값 · 좌표 |
 | mem | 메모리 IC 의 품번 · 패키지 | 좌표 · 넷 |
 
-넷 · 배치가 꼭 필요한 판단(pwr · rf 의 넷 · 거리)은 2단계까지 `undetermined` 가 맞다. 넷이 없는 도메인을 deferred 로 남기는 규칙(넷 의존
-도메인을 따로 두는 것)은 두지 않았다 — 두려면 편성 규칙과 설정을 함께 바꾼다.
+넷 · 배치가 꼭 필요한 판단(pwr · rf 의 넷 · 거리)은 2단계까지 `undetermined` 가 맞다 — 그래서 그 둘은 대표 1석만 앉는다.
+
+**단계 스위치** — `adapters/ecad.py` 의 `STAGE`(지금 1)와 `NET_DOMAINS`(`pwr · rf`)가 한 곳이다(`stage_gap`). 2단계(ER-06)가 넷 · 좌표를
+실으면 `STAGE` 를 2 로 올린다 — 편성(`freeze_roster`)과 검토 순서의 입력 결손이 그 하나를 읽어, 보드가 실린 대상에서 pwr · rf 도 풀린다.
+그때 볼 것 — 이미 1단계로 동결된 스냅샷에는 넷이 없다. 그 위에 새로 여는 대상까지 풀지 않으려면 판정을 그 스냅샷의 표지
+(`ecad_nets_deferred`)로 좁힌다. 카드 대조(cells)는 diff 대상에서만 열려(현황 대상은 `snap_not_supported`) 이 사유가 그 길(입력 결손 호출의
+결측 글 · 보류 풀기 · 마감 사유)에 닿지 않는다 — diff 대상의 deferred 를 걷을 때 함께 본다.
 
 ## 1단계 뒤 주의
 

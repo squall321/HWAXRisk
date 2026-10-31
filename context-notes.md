@@ -2880,3 +2880,25 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
   문(user · service · 모름), 폴백 끔의 채널 없음, 길잡이 notes 를 본다. 블랙박스의 가정 A7(박스 PAT 만 두던 것)은 그 사람의 PAT 를
   등록하는 쪽으로 고쳤고 단언은 그대로다 — 박스 PAT 자리도 채워 두어 쓰이지 않는지는 새 시험이 본다. `test_ecad_adapter.py` 는 어댑터를
   곧바로 부르는 두 곳에 mcp_credential='user' 를, web_box 에 그 사람의 PAT 행을 더했다.
+
+### EC-28. 넷 · 배치 의존 영역(pwr · rf)은 2단계까지 deferred — 단계 스위치는 한 곳(사용자 결정 10-31, EC-11 · EC-24 닫음)
+- 결정 — 1단계 보드 캡처 뒤 스냅샷 대상에서 pcb · soc · passive · mem 은 편성되고 pwr · rf 는 2단계(넷 · 좌표 — ODB 허브 OH-01 ~ OH-04 뒤)까지
+  deferred 다. 꼴은 ECAD 가 없을 때와 같다 — 대표 1석(rank 1)만 앉고 나머지는 deferred 이며, reason 과 검토 순서의 input_gaps 는
+  `ecad_nets_deferred` 다(ER-04 표지와 같은 낱말 — '넷 · component→net 엣지가 없다(2단계)'). 보드가 없는 대상은 종전대로 여섯 다 `ecad_absent` 다.
+  `ecad_absent` 로 적지 않은 까닭 — 보드가 실렸는데 진행판 reason 칸에 'ECAD 없음' 이 서면 거짓이다(화면은 그 칸을 그대로 보인다).
+- 스위치 — `adapters/ecad.py` 의 `STAGE = 1` · `NET_DOMAINS = ("pwr", "rf")` · `stage_gap(domain)` 이 한 곳이고, `planner.ecad_input_gaps`
+  (영역 → 사유)가 그것을 읽는다. 편성(`freeze_roster(ecad_gaps=…)` — 라우트 `create_target` · 늦은 첫 고정 `refresh_roster` 가 `_ecad_gaps` 로
+  준다)과 `review_order` 의 input_gaps 가 같은 함수다. 2단계가 넷 · 좌표를 실으면 STAGE 를 2 로 올린다. 어댑터 모듈에 둔 까닭 — 단계는 어댑터가
+  무엇을 싣는가이고 ADAPTER_VERSION 과 함께 올라간다.
+- `freeze_roster` 의 `ecad_absent` 인자는 그대로 두었다 — 주지 않으면(시험의 일반 로스터) 종전처럼 결손이 없다. 기본값을 '보드가 실렸다' 로
+  읽게 바꾸면 ECAD 와 무관한 편성 시험(plan §6.4.1 의 15 · 114 · 359)의 pwr · rf 가 보류로 바뀐다. 실제 대상은 라우트가 늘 `ecad_gaps` 를 준다.
+- 닿지 않는 길 — 카드 대조(cells)는 diff 대상에서만 열린다(현황 대상은 `units.compute` 가 snap_not_supported). diff 대상은 1단계 동안 ECAD
+  의존 영역 전부가 `ecad_absent` 라(EC-18) 새 사유가 입력 결손 호출의 결측 글(`units.gap_missing` 은 ecad_absent 에만 실마리) · 검토 잡의
+  보류 풀기(`undefer(reasons=('ecad_absent',))`) · 마감 사유(`review_rollup` 의 input_gap:ecad_absent)에 닿지 않는다. 그래서 그 셋은 고치지
+  않았다 — EC-18 을 걷거나 현황 대상에 카드 대조를 열 때 함께 본다(noinput 은 unit.missing 이 비면 엔진이 거절한다 — 넷 결손 영역에는 결측 글이 있어야 한다).
+- 2단계에서 볼 것 — STAGE 를 올리면 이미 1단계로 동결된 스냅샷 위에 새로 여는 대상에서도 pwr · rf 가 풀린다(그 스냅샷에는 넷이 없다). 막으려면
+  판정을 그 스냅샷의 표지(`ecad_nets_deferred`)로 좁힌다. 지금은 1단계뿐이라 둘이 같다.
+- 손대지 않은 것 — `planner.refresh_roster` 의 덧붙이기(새로 생긴 전문가는 결손과 상관없이 pending)는 ECAD 가 없는 대상에서도 종전부터 그랬다.
+- 시험 — `test_ecad_adapter.py` 셋(1단계 보드 대상의 보류 둘 · 응답 deferred 2 · tier_plan · input_gaps 넷 · 보드 없는 대상의 ecad_absent 여섯,
+  늦은 첫 고정, 스위치 2 에서 풀림). `test_planner.py` 의 '보드가 실리면 입력 결손이 없다' 시험은 결정대로 'pwr · rf 만 남는다 · 스위치 2 면
+  없다' 로 고쳤다.

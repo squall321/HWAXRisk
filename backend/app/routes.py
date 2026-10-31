@@ -2670,8 +2670,9 @@ def _ecad_absent(snapshot: dict) -> bool:
 
 
 def _ecad_absent_for_target(store: Any, target: dict) -> bool:
-    """ECAD 의존 영역(HWAXRISK_ECAD_DOMAINS)을 deferred · 입력 결손으로 둘 타깃인가 — 스냅샷 타깃은 그 스냅샷의
-    missing.ecad_absent(못 찾으면 부재)다.
+    """ECAD 가 없는 것으로 볼 타깃인가 — 참이면 ECAD 의존 영역(HWAXRISK_ECAD_DOMAINS) 전부가, 거짓이면(보드가 실린 스냅샷 타깃) 이
+    단계가 아직 싣지 않는 넷 · 배치에 기대는 영역만 deferred · 입력 결손이다(`_ecad_gaps` — 1단계는 pwr · rf, 사용자 결정 10-31).
+    스냅샷 타깃은 그 스냅샷의 missing.ecad_absent(못 찾으면 부재)다.
 
     diff 타깃은 ECAD 1단계 동안 늘 참이다(포털 docs/design-risk-review/ecad-1031 ER-05). 1단계 쌍 비교는 ECAD 노드를 refdes · 층
     이름으로 맞춰 추가 · 삭제만 보고 칸 변화(층 두께 · 재료 · 품번 · 패키지 · 핀 수 · 높이)를 싣지 않는다 — 그 비교를 받은 ECAD
@@ -2682,6 +2683,12 @@ def _ecad_absent_for_target(store: Any, target: dict) -> bool:
         return True
     row = store.query_one("SELECT missing_json FROM rr_snapshots WHERE id = ?", (target["ref_id"],))
     return True if row is None else _ecad_absent(dict(row))
+
+
+def _ecad_gaps(ecad_absent: bool) -> dict[str, str]:
+    """로스터를 고정할 때의 ECAD 입력 결손 — ECAD 의존 영역 → 사유(planner.ecad_input_gaps). ECAD 가 없으면 여섯 다 ecad_absent, 보드가
+    실린 1단계 대상이면 넷 · 배치 의존 영역만 ecad_nets_deferred 다(단계 스위치 adapters/ecad.STAGE)."""
+    return planner.ecad_input_gaps(config.settings.risk_ecad_domains, ecad_absent=ecad_absent)
 
 
 class TargetBody(BaseModel):
@@ -2853,7 +2860,7 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
              canonical_json(ra_client.empty_sync()), flow, now, now),
         )
         if agents:
-            roster = planner.freeze_roster(store, target_key, owner_sub, agents, ecad_absent=ecad_absent)
+            roster = planner.freeze_roster(store, target_key, owner_sub, agents, ecad_gaps=_ecad_gaps(ecad_absent))
         # §4.8 — 옛 타깃을 닫고 승계를 정한다. 로스터 고정 **뒤**여야 carried 가 T′ 좌석 행에 앉는다.
         superseded = _supersede_previous_target(
             store, project_id=project_id, new_target_key=target_key,
@@ -2973,7 +2980,7 @@ def refresh_roster(target_key: str, body: RosterBody = RosterBody(),
         # 고정된 적이 없는 타깃(생성 때 게이트웨이가 불통이었다)은 덧붙이기가 아니라 최초 고정이다 —
         # ECAD 부재 반영과 roster_frozen_at 갱신이 여기서 같이 일어나야 로스터 0 짜리 타깃이 남지 않는다.
         frozen = planner.freeze_roster(store, target_key, owner_sub, agents,
-                                       ecad_absent=_ecad_absent_for_target(store, target))
+                                       ecad_gaps=_ecad_gaps(_ecad_absent_for_target(store, target)))
         return {"added_pending": frozen["roster_size"], **_roster_report(fetched)}
     return {**planner.refresh_roster(store, target_key, agents), **_roster_report(fetched)}
 

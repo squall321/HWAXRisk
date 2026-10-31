@@ -28,6 +28,13 @@ from app.errors import AppError
 KIND = "ecad"
 # 1단계 매핑(요청서 부록 A)의 세대. 2단계(좌표 · 넷)가 붙으면 올린다 — 같은 보드라도 실리는 칸이 달라진다.
 ADAPTER_VERSION = "1.0"
+# 단계 스위치(사용자 결정 10-31) — 이 어댑터가 싣는 단계다. 1단계는 보드 · 적층 · 분류된 부품이고 부품 좌표 · 넷은 2단계(ER-06 — ODB
+# 허브 OH-01 ~ OH-04 뒤)다. 넷 · 배치에 기대는 영역(NET_DOMAINS)은 2단계 전에는 보드가 실려도 입력 결손이다 — 편성은 대표 1석만 앉히고
+# 나머지를 deferred(사유 NETS_DEFERRED)로 둔다(planner.ecad_input_gaps). 2단계가 넷 · 좌표를 실으면 STAGE 를 2 로 올린다 — 고칠 곳은
+# 여기 하나다(그때 볼 것 — 이미 1단계로 동결된 스냅샷에는 넷이 없다, context-notes EC-28).
+STAGE = 1
+NET_DOMAINS: tuple[str, ...] = ("pwr", "rf")
+NETS_DEFERRED = "ecad_nets_deferred"
 # 보드를 싣지 못한 소스의 세대 — 스텁 시절과 같은 값이다. 노드를 하나도 만들지 않은 소스에는 매핑표가 없고, 값을 바꾸면 스텁
 # 시절 스냅샷과의 모든 비교에 parser_differs 가 붙는다(diff.comparability 의 adapter_parity 는 공통 kind 전부를 본다).
 ABSENT_VERSION = "0.0-stub"
@@ -75,6 +82,12 @@ CANDIDATE_KEYS: tuple[str, ...] = (
 )
 # find_job 응답에서 후보 목록을 찾는 열쇠(앞의 것이 먼저) — list_jobs 는 `jobs` 다(허브 레퍼런스 4.2).
 JOB_LIST_KEYS: tuple[str, ...] = ("jobs", "matches", "results", "items")
+
+
+def stage_gap(domain: str) -> str | None:
+    """보드가 실린 대상에서 그 영역이 아직 못 보는 ECAD 입력의 사유 — 이 단계가 넷 · 배치를 싣지 않고(STAGE < 2) 그 영역이 넷 · 배치에
+    기대면(NET_DOMAINS) `NETS_DEFERRED`, 아니면 None 이다."""
+    return NETS_DEFERRED if STAGE < 2 and domain in NET_DOMAINS else None
 
 
 # ---------------------------------------------------------------- 값 다듬기
