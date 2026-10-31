@@ -2926,3 +2926,84 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
 - 전체 시험(공유 잠금 아래, HEAD) — 3,504 통과 · xfail 4 · 실패 0(rc 0, 11분 16초 — 앞 판 3,474 에 새 시험 30). ruff — 바꾼 파일은 깨끗하다.
 - 하지 않은 것 — 배선 리허설(`tests/synth/rehearsal_d.py`)은 프로세스를 띄우는 일이라 돌리지 않았다. 카드 대조 사슬의 바뀐 곳은 없다(EC-28 —
   새 사유가 그 길에 닿지 않는다). 서비스 재기동 · push · 병합은 없다.
+
+## 화면 세션 10-31(가지 `wt1031/riskfe`, main 9bd5f48 위, 2026-10-31)
+
+> 사용자 결정 10-31 A32 (가) — 리스크 앱 화면 일을 한 세션으로 묶는다. 1차 걸음은 B33(과제 등급) · B35(포털 `docs/risk-credentials/frontend-request.md`
+> 대로 — 자동 등록 · 박스 까닭 · 반영 요약) · B36(포털 `docs/claude-delib-parity/frontend-request.md` 1 · 2절 — 패널 잡 판단 LLM)이다.
+> 백엔드는 고치지 않았다. 확인은 실 백엔드(이 가지의 코드)를 스크래치 하네스로 띄워 브라우저로 눌러 봤다(FE-6).
+
+### FE-1. 과제 등급은 미리 고르지 않는다(B33)
+- 폼에 등급(internal · confidential)을 두되 첫 값은 '고르세요'(비활성)다. 정본이 '기본 confidential, 등록 화면에서 필수로 고른다' 이고 서버도 빠지면
+  422 `classification_required` 로 거절한다 — 화면이 기본값을 채우면 사람이 고르지 않은 채 반출 경계가 정해진다(동의 체크를 미리 해 두는 것과 같은 일).
+  고르기 전에는 '과제 등록' 이 잠기고, 모르면 confidential 을 고르라고 한 줄 적었다.
+- 거절은 code 로 그 칸에 붙인다 — `classification_required` → 등급, `E409` → code(이미 있는 과제 코드), `E404` → 앞 과제. 그 밖(401 · 어휘 밖
+  `E100`)은 배너다(`api/projectCreate.ts`).
+- 과제 행 타입을 서버 열(`routes._project_row`) 그대로 고쳤다 — `adh_scope` 는 보낼 때만의 꼴이고 받을 때는 `adh_team` · `adh_group` 이다.
+  그래서 과제 개요의 'AIDataHub 범위' 는 늘 '모름' 이었다. 과제 행에 없는 `external_sync` 를 읽던 머리 배지는 늘 비어 있어 걷었다.
+
+### FE-2. 포털 PAT 자동 등록은 탭 세션마다 한 번이다(B35 요청서 1절)
+- 앱 셸(`components/AutoPortalPat.tsx`)이 첫 마운트에 `GET /me` 를 읽어 `auto.enabled && auto.due` 면 설정 버튼과 같은 일(`/auth/pat` 발급 →
+  `PUT /me/portal-pat`, 출처 web)을 조용히 한 번 한다. 성공은 말하지 않고(설정 화면은 끝날 때 `GET /me` 를 다시 읽는다) 실패만 한 줄로 알린다.
+- '같은 세션에서 되풀이하지 않는다' 는 sessionStorage 표지 하나(값 "1")다 — 토큰 · 계정은 담지 않는다. 저장소를 못 쓰는 창에서도 메모리 표지로
+  그 페이지 안에서는 한 번이다. 실패한 시도도 센다(다시 하는 길은 설정의 버튼이다). 표지는 발급을 시작할 때 닫는다 — StrictMode 의 두 번 마운트는
+  첫 `GET /me` 를 끊으므로 발급이 두 번 나가지 않는다. 같은 탭에서 계정을 바꾸면 그 탭에서는 다시 하지 않는다(드문 일이라 남긴다).
+- 판정은 서버가 한다 — 화면은 `enabled` · `due` 두 칸만 읽고 `due_reason`(absent · revoked · undecryptable · expiring · audience)은 보이기만 한다.
+  audience 는 등록된 PAT 에 step-forge 청중이 없다는 뜻이라 두 청중으로 새로 받으면 된다.
+- 발급 청중을 `["mcp-gateway", "step-forge"]` 로(백엔드 `PORTAL_PAT_WANTED` 와 같다) — 손 버튼 · 자동 등록 · 스위치 켜기가 한 함수
+  (`registerFromPortal`)를 지난다. 이름 `hwax-risk` 는 백엔드가 갈아 끼울 때 옛 PAT 를 폐기하는 표지라 그대로다.
+
+### FE-3. 출처 — 앱이 받아 온 PAT 만 web 이다(B35)
+- 손 버튼 · 자동 등록은 `source: "web"` 을 싣는다. 붙여 넣은 PAT 는 싣지 않는다(= manual) — 그 사람의 Claude PAT 일 수 있어 백엔드가 폐기하지
+  않아야 한다. 종전 버튼은 아무것도 싣지 않아 manual 로 적혔고, 그러면 다음 갱신 때 폐기되지 않고 쌓였다. 삭제(`{pat: null}`)도 싣지 않는다.
+
+### FE-4. 자동 등록 스위치 · 지우기(B35)
+- 설정 화면에 스위치(`auto.enabled`)를 두고 그 옆에 `how_to_stop` 을 글자 그대로 보인다. 스위치의 이름은 '자동 등록' 하나(상태는 aria-checked)이고
+  설명 · 멈추는 길은 aria-describedby 로 잇는다. `last_source` · `last_at` · `last_error`(갈래 transient · final 과 시각)를 보인다.
+- 켜서 지금 받아야 하면(due) 그 자리에서 발급해 등록한다 — 켠 것은 사람의 손이라 결과를 보인다(앱을 다시 열 때까지 기다리게 두면 '켰는데 없다').
+- 자동이 켜진 채 지우면 다음에 앱을 열 때 다시 등록된다(요청서) — 그래서 지울 때 '자동 등록도 끄고 지우기 · 지우기만 · 그만두기' 를 묻는다. 함께
+  끄면 스위치를 먼저 내린 뒤 지운다(그 사이에 게이트웨이가 다시 등록하지 않게).
+
+### FE-5. 띄워 보니 과제 · 타깃 화면이 백지였다 — 타입이 서버와 달랐다
+- 실 백엔드를 띄워 B36 을 보려 했더니 타깃 화면이 통째로 백지였다. `verdict_candidate` 를 `{reason, conditions[]}` 로 적어 두었는데 서버는 늘
+  `{verdict, counts, reasons[]}` 를 준다(08-31 부터) — `conditions.length` 에서 죽는다. 패널 품질은 `flags`(복수)인데 `flag.map` 을 읽어, 끝난
+  패널이 하나라도 있으면 같은 꼴로 죽었다. 패널 열쇠는 `id` 이지 `panel_id` 가 아니고, `call_path` 는 품질 칸 안에 있으며, `tool_calls_n` 같은
+  칸은 없다(도구 사용률 `tool_use_rate` 다).
+- 과제 화면도 대상이 하나라도 있으면 백지였다 — 반영 요약 `external_sync` 의 채널 값이 객체(`{state, pending_ops, reason, message}`)인데 배지가
+  그것을 React 자식으로 그렸다(React #31). 요청서 3절의 결함이다. 재동기 응답은 채널마다 `{state, attempts, next_at, last_error, done_at,
+  pending_ops[]}` 라 둘을 다른 타입으로 두었다. 성격 태그도 글자가 아니라 `{tag, n}` 이라 태그가 있는 과제는 같은 꼴로 죽었고, 잡 진행은 숫자가 아니라
+  `{done, total, …}` 이라 'NaN%' 였다. 보고서 목록의 반영 값은 `done` 인데 화면이 `synced` 를 찾았다.
+- 잡 만들기 답의 `llm_calls_estimate` 는 `{low, high}` 라 '[object Object]' 였고, 자격 갈래는 U-3 뒤 `requester` · `owner` 다('service' 문구는 걷었다).
+  진행판 잡의 `reason` · `progress` · `daily_remaining` 은 서버에 없다 — `pause_reason` · `panels_done/panels_total` · `signal` 이다.
+- 25d7b07 의 교훈 그대로다 — 타입이 거짓이면 tsc 는 그 거짓을 지켜 준다. 이번에 손댄 호출(과제 만들기 · `GET /me` · PAT 셋 · 잡 만들기 · 진행판 ·
+  패널 목록 · 등록부 후보 · 재동기 · 과제 상세의 잡 · 태그)은 백엔드 코드와 실 응답으로 맞췄다. 손대지 않은 칸의 거짓은 FE-7 에 적는다.
+
+### FE-6. 패널 잡의 판단 LLM(B36)
+- '판단 LLM' 은 이 박스의 LLM(GLM)이 기본이고 Claude 를 고르면 반출 경고와 동의 체크가 열린다. 경고 글은 검토 잡의 것에 '패널 잡은 그 패널의 브리프 ·
+  좌석 조회 결과' 를 붙인 뜻이다. 체크는 늘 비어서 시작하고, GLM 으로 돌렸다 다시 고를 때와 잡을 만든 뒤에도 비운다(다음 잡의 미리 체크된 동의가
+  되지 않게). 체크하기 전에는 시작이 잠기고 까닭을 한 줄 보인다.
+- 본문은 `api/panelJob.ts` 한 함수가 짓는다 — 앞 다섯 칸(tier · concurrency · modifiers · user_memo · consent)은 종전 본문과 같은 순서 · 같은 값이라
+  GLM 잡의 JSON 이 바이트로 같다. Claude 일 때만 `llm: "claude"` 를, 체크했을 때만 `consent_external: true` 를 뒤에 붙인다.
+- 거절은 code 로 — 422 `consent_external_required` · 422 `pat_unavailable`(설정으로 가는 길) · 409 `external_llm_unavailable`('GLM 으로 고르기') ·
+  422 `flow_mismatch` · 409 `review_job_running`. 서버 글은 고칠 곳까지 말하므로 제목만 화면이 고르고 글은 글자 그대로 보인다.
+- 만든 뒤 — 내 Claude Code 에서 워크플로 `hwax-risk-claude` 를 인자 `{"targetKey": …}` 로 돌려야 나아가고, 돌지 않으면 보류 external_worker 로
+  멈추며 다시 돌린 뒤 재개한다는 안내. 진행판 잡 줄에 'Claude' 배지(검토 잡 줄도 쓸 `LlmBadge`) · 반출 동의 기록(누가 · 언제 · 입구) ·
+  `llm_mismatch` 수를 보인다.
+
+### FE-7. 시험 · 확인 · 남긴 것
+- 시험(`pnpm test`) — 새 의존 없이 tsc 로 순수 모듈 · 배지 컴포넌트를 CommonJS 로 옮겨(`tsconfig.test.json`, 산출물은 node_modules/.cache)
+  node:test 로 돈다. 14건 — GLM 본문 288 조합이 종전 본문과 바이트로 같음 · Claude 본문의 동의 칸 · 시작 가능 여부 · 거절 code · 자동 등록 판정과
+  한 번 문(저장소가 던져도) · 발급 청중 · 과제 거절 칸 · PAT 실패 문구 · 반영 배지(요약 · 재동기 응답)와 박스 까닭(react-dom/server 로 그림).
+  변이 16개(스크래치 사본) 16/16 이 잡혔다.
+- 실 백엔드 확인 — 이 가지의 백엔드를 스크래치 데이터 · 빈 루프백 포트로 띄우고(가짜 포털 `/auth/pat` · heax · 에이전트 `/health`, 소켓 가드로
+  자기 포트 밖 연결 0) 브라우저(Playwright)로 눌렀다. 앱을 열면 발급 1 · 등록 1(source web, 청중 둘) · 같은 탭 새로 고침에 0 · PAT 없이 설정
+  화면을 열면 한 번 등록 · 발급 403 은 한 줄 알림이고 되풀이 없음 · 스위치 끄기 · 켜기(켜면 발급) · 붙여 넣기는 `{pat}` 만 · '자동 등록도 끄고 지우기'
+  는 끄기 → 지우기 순서. 과제 만들기 200(등급 실림) · 같은 code 는 code 칸에. 패널 잡 GLM 본문 `{"tier":"B","concurrency":1}` · Claude 는 체크
+  전 시작 잠김 · 체크 뒤 `…"llm":"claude","consent_external":true}` · 409 · 422 의 글 · 진행판 'Claude' 배지와 동의 기록. 하네스는 리포에 넣지
+  않았다(스크래치).
+- 브라우저로 못 본 것 — 실제 포털의 `/auth/pat`(CSRF · feat:api-token)과 게이트웨이 교환 길, 실제 에이전트 서버의 외부 응답자 길, 끝난 패널이 있는
+  타깃의 패널 표(패널을 돌리지 않았다 — 그 칸은 서버 코드로 맞췄다).
+- 남긴 것(이 걸음 밖) — 등록부 행 타입도 서버와 다르다(`claim` · `cites` · `subject` · `domain` 이 없고 `merged` 가 있다 — 행을 누르면
+  `cites.length` 에서 죽는다, M3 화면 요청서 7절 몫) · 과제 화면 대상 표의 `unseated_n` · `superseded_by` 는 그 응답에 없다('미착석 명') ·
+  과제 화면의 동결 알림은 스냅샷 잡이 그 목록(`jobs[]`)에 없고 상태 `done` 을 찾아 서지 않는다 · 좌석 드릴다운 · 브리프 탭의 타입은 대조하지
+  않았다.

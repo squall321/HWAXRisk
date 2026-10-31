@@ -456,3 +456,28 @@
       검토 때와 같은 표면 고정 둘뿐 · GLM 출력은 종합 답의 llm: glm 말고 같다 — XR-18
 - [ ] 엔진 가지 x2-gate 를 main 에 합치기 전까지 이 가지의 사본 가드는 `HWAX_AGENT_SERVER_REPO=<x2-gate 작업 트리>` 로 돈다(delib_frames.json)
 - [ ] 포털 DelibOpts 가 target_key 를 선언 · 중계하면 strict xfail 이 스스로 꺼진다(코디네이터 몫 — 그 뒤 전체 시험 xfail 4)
+
+## 화면 세션 10-31(A32 — 가지 `wt1031/riskfe`)
+
+> 사용자 결정 10-31 A32 (가) — 리스크 앱 화면 일을 한 세션으로 묶어 돌린다(포털 `docs/leftovers-1017/triage-1031.md` 3절 B33 ~ B36 ·
+> 요청서 넷 — risk-credentials · claude-delib-parity · ecad-1031 · m3). 1차 걸음은 B33 · B35 · B36 이다. 백엔드는 고치지 않는다.
+> 결정과 까닭은 context-notes '화면 세션 10-31' 절(FE-1~)에 적는다.
+
+- [x] B33 과제 만들기 등급 — 폼에 classification(internal · confidential, 미리 고르지 않는다) · 422 `classification_required` · 409 `E409` ·
+      404 `E404` 는 code 로 그 칸에 · 과제 행 타입을 서버 열(`_project_row`) 그대로(FE-1)
+- [x] B35 포털 PAT 자동 등록(risk-credentials 요청서 1절) — 앱을 열 때 `auto.enabled && due` 면 조용히 한 번(source web, 같은 탭 세션에서
+      되풀이하지 않는다) · 발급 청중 mcp-gateway · step-forge(손 버튼도) · 손 버튼은 source web · 붙여 넣기는 source 없이(manual) ·
+      설정에 자동 스위치와 last_source · last_at · last_error · how_to_stop · 지울 때 자동도 끄는 길(FE-2 ~ FE-4)
+- [x] B35 요청서 2절 — 박스 자격 까닭(`box.reasons` 의 message · fix 를 그대로, fix 의 백틱 명령은 코드 모양, 선택 키 없음은 정보, 익명은 code 만)
+- [x] B35 요청서 3절 — 반영 요약 · 재동기 응답의 채널 값이 객체(과제 화면 백지 React #31) · 보고서 반영 값 `done` · 재동기 전에도 message(FE-5)
+- [x] B36 패널 잡 판단 LLM(claude-delib-parity 요청서 1 · 2절) — GLM 기본 · Claude 는 반출 경고와 미리 체크하지 않은 동의 · 체크했을
+      때만 `llm` · `consent_external` · 422 · 409 는 code 로 · hwax-risk-claude 안내 · 진행판 'Claude' 배지 · GLM 본문은 바이트 그대로(FE-6)
+- [x] 띄워 보고 잡은 백지 — 타깃 화면(판정 후보 `{counts, reasons}` · 패널 품질 `flags` · 패널 `id`) · 과제 화면(반영 요약 객체 · 성격 태그
+      `{tag, n}` · 잡 진행 객체 'NaN%') · 잡 만들기 답(호출 어림 `{low, high}` · 자격 requester · owner)(FE-5)
+- [x] 시험 — 순수 함수 · 배지 렌더(node:test, 새 의존 없이 tsc 로 옮겨 돈다) 14건 · 변이 16/16 · 실 백엔드 하네스 + 브라우저(스크래치 데이터 · 빈
+      포트, FE-7)
+- [ ] 백엔드에 청할 것 — `how_to_stop` · `pat_unavailable` 안내의 '설정의 스위치는 곧 생긴다 — 운영자가 DB 에서' 꼬리 떼기와 '웹에서 앱을 열면
+      자동 등록' 더하기(요청서 1절 끝) · 패널 잡의 422 `consent_external_required` 글이 검토 잡 반출 글이다 · 진행판 패널 잡에 `hold_code` 가
+      없어 보류 external_worker 를 code 로 가를 수 없다
+- [ ] 화면 — 등록부 행 타입(`claim` · `cites` · `subject` · `domain` 없음, `merged` 있음 — 행을 누르면 죽는다, M3 요청서 7절) · 과제 화면 대상 표의
+      `unseated_n` · `superseded_by`(그 응답에 없다) · 과제 화면 동결 알림(스냅샷 잡은 `rr_snapshot_jobs` 라 `jobs[]` 에 없다)
