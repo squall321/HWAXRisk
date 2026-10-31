@@ -5182,3 +5182,19 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
   형제 끝내기 둘 · signal 대체) 시험을 더했다. 화면 4/4. 사본과 작업 트리는 diff 0, __pycache__ 없음.
 - 화면 — 시험 107 → 108(옛 신호 줄에 얹으면 진다 — 한 줄만 그린다), `tsc -b` · `vite build` · `pnpm test` 통과. 서버 견본 coverageJobTwoPanels
   는 이 가지의 실 백엔드 하네스 응답이다.
+- 리스크 전체 시험(공유 잠금 아래 한 번, 31df680) — 3,811 통과 · xfail 4 · 실패 0(rc 0, 12분 41초). 그 앞 판의 한 번은 씨앗 출처 래칫 하나가
+  붉어(위) 고친 뒤 다시 돌렸다. ruff — 바꾼 파이썬 파일은 깨끗하다.
+- 하지 않은 것 — 서비스 · 인스턴스 기동 · 정지 · 재배포, push · 병합, 배선 리허설(`tests/synth/rehearsal_d.py` — 프로세스를 띄운다 · 카드 대조
+  사슬은 바꾸지 않았다), 실 엔진 · 포털로 두 패널 돌리기(가짜 포털 스트림까지만).
+
+### CC-15. 남긴 것
+- 포털 정본 문면(포털 세션) — design-risk-review/plan.md §6.4 '타깃당 패널은 직렬 · 서버 전역 동시 패널은 타깃이 다를 때만', Settings 표의
+  HWAXRISK_CONCURRENCY '타깃 다를 때만', §6.7 · §8.2.9 의 '타깃당 직렬' 을 CC-1 의 뜻으로.
+- MCP `risk_start_job` 이 같은 Tier 의 살아 있는 잡을 돌려줄 때 그 잡의 concurrency 를 싣지 않고 다른 값을 청해도 differs 에 넣지 않는다
+  (entry.start_job — 결정 필요).
+- 종전부터 — 편성기의 선점 경합(PlanConflict — MCP 브리프 편성 · 사람의 좌석 넘기기가 읽기와 선점 사이에 끼면)이 None 을 내면 첫 자리의
+  run_panel · plan_job_panel 은 '남은 좌석 없음' 으로 읽어 잡을 끝낸다(좌석이 남은 채). 러너 쪽 편성은 틱 한 줄이라 이번 일로 늘지 않았다.
+- 종전부터 — 에이전트 서버의 '새 심의 멈춤'(delib_paused — SSE error)을 러너는 비우기(drain.on)처럼 듣지 않아 패널이 차감되는 engine_error 로
+  닫힌다. 동시 2 잡이면 연속 실패 셈이 두 배 빠르게 찬다.
+- 종전부터 — 편성과 시작 사이(틱 안의 몇 ms)에 앱이 죽으면 planned 러너 패널의 좌석이 assigned 로 남는다(재기동 복구는 running 만 본다).
+- 화면 — 잡 만들기 답의 concurrency_note 줄은 렌더 시험이 없다(credential_note 줄과 같은 한 줄 그리기).
