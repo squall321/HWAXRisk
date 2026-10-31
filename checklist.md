@@ -269,14 +269,20 @@
   **앱 전체 가로 밀림**(flex 자식에 `w-full`, 전환 이전부터 있던 결함).
   **그리고 타입이 서버와 달라 `tsc` 가 거짓을 지켜 주고 있었다** — 배포본이 백지였고, 선언을
   서버 열 이름에 맞추자 호출처 9곳이 드러났다.
-- [x] **same-as 6단계 상한**(2026-10-31, 포털 triage-1031 B24 · context-notes BL-1) — 남은 노드 수의 곱이 800×800 을 넘으면
-  점수도 헝가리안 행렬도 만들지 않고 5단계까지의 대응으로 진행한다(`sameas.FUZZY_MAX_PAIRS` · `fuzzy_skip`). 스냅샷은 두 도메인
-  소스의 degraded `fuzzy_skipped_large` · 경고 한 줄 · `sig:capture.fuzzy_skipped`, 쌍은 `correspondence.fuzzy_skipped` 와 의미층 ·
-  이벤트 `caveat='fuzzy_skipped_large'`. 801×801 건너뜀 · 799×799 · 800×800 그대로 · ir_hash 결정론(시험 15 · 변이 11/11).
-- [x] **계면 목록 절단의 kind 별 수와 제외 사유**(2026-10-31, B25 · BL-2) — mcad 캡처가 `stats.interfaces_truncated{kind: n}` 을 남기고
-  (안 잘렸으면 `{}`), 쌍의 한쪽이라도 잘린 kind 의 엣지 변경 · 엣지 파라메트릭 · 수가 움직인 롤업 행이 `excluded_reason='truncated'`
-  다 — 잘린 쪽에서 빠진 간섭이 '사라졌다' 는 가짜 사건을 내지 않는다. 종류별 수가 없는 옛 캡처는 네 kind 전부. 검토 단위에서는
-  제외 단위가 갖는다(시험 9 · 변이 9/9). 규칙 R-001 · R-002 의 `truncated` 판정은 아직 kind 를 보지 않는다(↓ 다음 수).
+- [x] **same-as 6단계 상한**(2026-10-31, 포털 triage-1031 B24 · context-notes BL-1 · BL-6) — 남은 노드 수의 곱이 800×800 을 넘거나
+  배정 행렬의 변(남은 a + 남은 b)이 1,600 을 넘으면 점수도 헝가리안 행렬도 만들지 않고 5단계까지의 대응으로 진행한다
+  (`sameas.FUZZY_MAX_PAIRS` · `FUZZY_MAX_SIDE` · `fuzzy_skip`). 스냅샷은 두 도메인 소스의 degraded `fuzzy_skipped_large` · 경고 한 줄 ·
+  `sig:capture.fuzzy_skipped`, 쌍은 `correspondence.fuzzy_skipped{…, limit, side_limit}` 와 의미층 · 이벤트 `caveat='fuzzy_skipped_large'`.
+  801×801 건너뜀 · 799×799 · 800×800 그대로 · ir_hash 결정론. 변 상한은 반대 검토(10-31)가 더했다 — 곱만 보면 30 × 3,000(곱 9만)이
+  3,030 변 행렬로 10분을 넘는다(30 × 1,571 · 1 × 1,600 건너뜀, 30 × 1,570 그대로 — 시험 21 · 변이 11/11 · 반대 검토 뒤 5/5).
+- [x] **계면 목록 절단의 kind 별 수와 제외 사유**(2026-10-31, B25 · BL-2 · BL-7 ~ BL-9) — mcad 캡처가 `stats.interfaces_truncated{kind: n}` 을
+  남기고(안 잘렸으면 `{}`), 쌍의 한쪽이라도 잘린 kind 의 엣지 변경 · 엣지 파라메트릭 · 그 계면을 읽는 명명 치수(파생 치수 포함)가
+  `excluded_reason='truncated'` 다 — 잘린 쪽에서 빠진 간섭이 '사라졌다'(iface.removed · dim.named_unmeasured) 는 가짜 사건을 내지 않는다.
+  롤업은 kind 별이다 — 잘린 kind 의 수가 두 쪽에서 다를 때만 빼고, 같으면 계면 수를 잘리지 않은 kind 로만 센다(`truncated_kinds`).
+  고아 전이는 고아가 아닌 쪽에서 잘린 kind 에 끼어 있었으면 `orphans_delta.truncated` 로 옮기고, 검토 근거 줄은 한쪽만의 잘린 계면을
+  '목록 절단 — 비교 불가' 로 적는다. 요약 [치수] 도 truncated 치수를 싣지 않는다. 종류별 수가 없는 옛 캡처는 네 kind 전부. 검토
+  단위에서는 제외 단위가 갖는다(시험 17 — 절단 14 · 어댑터 3, 변이 9/9 · 반대 검토 뒤 14/14 — 치수 · 고아 · 롤업 셋은 반대 검토 10-31 이
+  찾았다). 규칙 R-001 · R-002 의 `truncated` 판정은 아직 kind 를 보지 않는다(↓ 다음 수).
 - [ ] 골든 `backend/tests/golden/sif-e2e.ir.json` 부재 — 선행 B2(골든 프로젝트 재파싱)가 닫혀야 만들 수 있다(↓ 2장).
 
 ## 2. 실환경 실측 대기 — 자격·선행 조건이 필요한 것
