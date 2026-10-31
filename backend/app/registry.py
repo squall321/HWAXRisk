@@ -1506,6 +1506,9 @@ def target_audit_clause(store: RiskStore, target_key: str) -> tuple[str, list[An
     `<대상>#<전문가>` · 등록부 `<대상>#<클러스터>` · 사람 finding `<대상>#H<n>` — 지운 사람 finding 도 이것으로 잡힌다), 대상 열쇠 그대로인
     좌석 처분(보류 풀기 · 셀 처분), 그 대상의 잡 · 패널 · finding · 등록부 클러스터, 그 대상이 가리키는 스냅샷(게이트 ack — diff 대상은
     앞 · 뒤 스냅샷)이다. 과제 단위 행(멤버 · 수명주기 · 요구 · 어휘)은 싣지 않는다 — 과제 감사(`GET /projects/{id}/audit`)의 몫이다.
+    맨 클러스터 열쇠의 행(별칭 철회 · 대상을 고르지 않은 공개 토글 · 큐 결정)은 그 대상 소유자가 한 것만이다 — 클러스터 열쇠는 내용
+    해시라 대상 · 소유자를 가로질러 같고(rr_registry 의 열쇠는 (target_key, cluster_key)), 그 길들은 부른 사람 자신의 등록부 행 · 별칭만
+    바꾼다. 남의 같은 열쇠 행위(사유 글까지)가 이 대상의 감사와 보고서에 실리던 것을 막는다(BL-8).
     조회와 통합 보고서의 '사람 개입 요약' 이 이 조각 하나를 쓴다 — 둘의 수가 갈리지 않는다."""
     target = store.query_one("SELECT kind, ref_id FROM rr_targets WHERE target_key = ?", (target_key,))
     snapshots: list[str] = []
@@ -1523,11 +1526,13 @@ def target_audit_clause(store: RiskStore, target_key: str) -> tuple[str, list[An
         " OR (scope = 'panel' AND subject_id IN (SELECT id FROM rr_panels WHERE target_key = ?))"
         # 큐 결정(라벨 대조 · 의심 문구 · 미분류 코드)이 가리키는 패널 · 카드 대조 finding 도 그 대상의 사람 행위다(카드 거름 없음).
         " OR (scope = 'finding' AND subject_id IN (SELECT finding_id FROM rr_findings WHERE target_key = ?))"
-        " OR (scope = 'registry' AND subject_id IN (SELECT cluster_key FROM rr_registry WHERE target_key = ?))"
+        # 맨 클러스터 열쇠는 그 대상 소유자의 행위만(위 docstring) — 대상을 고른 공개 토글은 '<대상>#<클러스터>' 자리로 앞에서 잡힌다.
+        " OR (scope = 'registry' AND rr_audit.owner_sub = (SELECT owner_sub FROM rr_targets WHERE target_key = ?)"
+        " AND subject_id IN (SELECT cluster_key FROM rr_registry WHERE target_key = ?))"
         f" OR (scope = 'snapshot' AND subject_id IN ({marks})))"
     )
     params: list[Any] = [target_key, target_key, len(prefix), prefix, target_key, target_key, target_key, target_key,
-                         *snapshots]
+                         target_key, *snapshots]
     return clause, params
 
 

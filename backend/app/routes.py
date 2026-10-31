@@ -4613,13 +4613,17 @@ class RegistryVisibilityBody(BaseModel):
 @router.put("/registry/{cluster_key:path}/visibility")
 def put_registry_visibility(cluster_key: str, body: RegistryVisibilityBody,
                             ident: identity.Identity = Depends(identity.current)) -> dict:
-    """등록부 행의 조직 공개 토글(소유자 전용) — rr_audit 1행을 남긴다(plan §0.9 P6-8)."""
+    """등록부 행의 조직 공개 토글(소유자 전용) — rr_audit 1행을 남긴다(plan §0.9 P6-8).
+
+    대상을 골라 바꾼 토글은 그 대상의 행만 바꾸므로 감사 자리도 '<대상>#<클러스터>' 다(병합과 같은 꼴) — 맨 클러스터 열쇠로 적으면 같은
+    열쇠를 가진 내 다른 대상의 감사에도 실린다(BL-8). 대상을 고르지 않은 토글은 그 열쇠의 내 행 전부를 바꾸어 맨 열쇠 그대로다."""
     owner_sub = _require_user(ident)
     store = get_store()
     with store.tx():
         out = registry_module.set_visibility(store, cluster_key, body.visibility,
                                              owner_sub=owner_sub, target_key=body.target_key)
-        _audit(store, owner_sub, scope="registry", subject_id=cluster_key,
+        _audit(store, owner_sub, scope="registry",
+               subject_id=f"{body.target_key}#{cluster_key}" if body.target_key else cluster_key,
                action="registry.visibility", before={"visibility": out["before"]},
                after={"visibility": out["visibility"]})
     return out
