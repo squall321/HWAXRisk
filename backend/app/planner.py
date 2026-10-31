@@ -95,8 +95,31 @@ def adjacency(settings: Any | None = None) -> dict[str, tuple[str, ...]]:
 
 
 # ---------------------------------------------------------------- 로스터 고정(plan §6.3)
+# 판번호 길이 — persona_rev 는 role_sha(원본 role 글 sha256[:12])의 앞 7자다(git 짧은 해시 꼴). 박스마다 세는 차례 번호(r1 · r2 …)로 두지
+# 않는 까닭 — rr_roster · rr_seat_opinions 는 dev ↔ cae00 반출 · 들여오기로 박스를 넘는데, 차례 번호는 박스마다 따로 매겨져 같은 역할이
+# 다른 번호, 다른 역할이 같은 번호가 되고 E7 의 [이전 정의] 판정(번호 비교)이 틀린다. 역할 글에서 바로 나온 값이면 어느 박스에서도 같다.
+PERSONA_REV_CHARS = 7
+
+
+def persona_stamp(role: Any) -> tuple[str | None, str | None]:
+    """(role_sha, persona_rev) — 좌석 원본 role 글의 sha256[:12] 와 그 판번호(plan §5.2.2 rr_roster · §7.7 스탬프).
+
+    role 은 `list_agents` 의 description 이다(엔진 `_restore_role` 이 좌석에 앉힐 때 되살리는 글과 같은 칸). 글이 없거나 공백뿐이면
+    (None, None) 이다 — 모르는 것을 빈 글의 해시로 적지 않는다.
+    """
+    text = role if isinstance(role, str) else ""
+    if not text.strip():
+        return None, None
+    role_sha = sha256_hex(text)[:12]
+    return role_sha, role_sha[:PERSONA_REV_CHARS]
+
+
 def _normalize_agents(agents: Iterable[Mapping[str, Any]], allowed_domains: Sequence[str]) -> list[dict]:
-    """[{key, domain, relevance}] 로 정규화하고 도메인 화이트리스트 밖·중복 키를 정리한다(같은 집합이면 같은 결과)."""
+    """[{key, domain, relevance, role}] 로 정규화하고 도메인 화이트리스트 밖·중복 키를 정리한다(같은 집합이면 같은 결과).
+
+    `role`(원본 역할 글 — 원천 행의 role 또는 description)은 없으면 None 이다. 같은 키가 둘이면 relevance 가 큰 쪽의 글이고, 그 쪽이
+    비었으면 다른 쪽의 글을 쓴다.
+    """
     allow = set(allowed_domains)
     best: dict[str, dict] = {}
     for item in agents:
@@ -108,9 +131,13 @@ def _normalize_agents(agents: Iterable[Mapping[str, Any]], allowed_domains: Sequ
             continue
         rel = item.get("relevance")
         rel = float(rel) if isinstance(rel, (int, float)) else 0.0
+        role = item.get("role") if isinstance(item.get("role"), str) else item.get("description")
+        role = role if isinstance(role, str) and role.strip() else None
         prev = best.get(key)
         if prev is None or rel > prev["relevance"]:
-            best[key] = {"key": key, "domain": dom, "relevance": rel}
+            best[key] = {"key": key, "domain": dom, "relevance": rel, "role": role or (prev or {}).get("role")}
+        elif prev["role"] is None and role:
+            prev["role"] = role
     rows = sorted(best.values(), key=lambda r: (r["domain"], -r["relevance"], r["key"]))
     return rows
 
@@ -166,7 +193,8 @@ def freeze_roster(
             prev_domain, rank = row["domain"], 0
         rank += 1
         ecad_dep = 1 if row["domain"] in ecad_domains else 0
-        roster_params.append((target_key, row["key"], owner_sub, row["domain"], row["relevance"], rank, ecad_dep, now))
+        roster_params.append((target_key, row["key"], owner_sub, row["domain"], row["relevance"], rank, ecad_dep,
+                              *persona_stamp(row["role"]), now))
         gap = gaps.get(row["domain"]) if ecad_dep else None
         if gap and rank != 1:
             status, reason = "deferred", gap
@@ -178,7 +206,7 @@ def freeze_roster(
     with store.tx() as conn:
         conn.executemany(
             "INSERT OR IGNORE INTO rr_roster(target_key, agent_key, owner_sub, domain, relevance, rank_in_domain,"
-            " ecad_dependent, frozen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " ecad_dependent, role_sha, persona_rev, frozen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             roster_params,
         )
         conn.executemany(
@@ -224,13 +252,14 @@ def refresh_roster(
         rank = max_rank.get(row["domain"], 0) + 1
         max_rank[row["domain"]] = rank
         ecad_dep = 1 if row["domain"] in ecad_domains else 0
-        roster_params.append((target_key, row["key"], owner_sub, row["domain"], row["relevance"], rank, ecad_dep, now))
+        roster_params.append((target_key, row["key"], owner_sub, row["domain"], row["relevance"], rank, ecad_dep,
+                              *persona_stamp(row["role"]), now))
         coverage_params.append((target_key, row["key"], owner_sub, row["domain"], "pending", None, now))
     if roster_params:
         with store.tx() as conn:
             conn.executemany(
                 "INSERT OR IGNORE INTO rr_roster(target_key, agent_key, owner_sub, domain, relevance, rank_in_domain,"
-                " ecad_dependent, frozen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                " ecad_dependent, role_sha, persona_rev, frozen_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 roster_params,
             )
             conn.executemany(

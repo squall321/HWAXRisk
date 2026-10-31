@@ -1786,13 +1786,18 @@ def _quoted_excerpt(text: Any, room: int) -> tuple[str, str | None]:
     return render.quote_source(shown) + mark, None
 
 
-def _seat_line(store, row, excerpt: str, line_max: int = E7_SEAT_LINE) -> tuple[str, str | None]:
-    """좌석 줄 — `narr:<opinion_id>#<finding_id> | <agent_key> | <과제코드>/<target 앞12> | «<발췌>»` ≤ line_max 자.
-    (줄, 발췌를 자리표시자로 바꿨으면 그 어휘 id)."""
+# 회수한 발췌의 페르소나 판번호가 그 좌석의 지금 로스터 판과 다를 때 줄 앞에 붙는 표지(plan §5.6.1) — 페르소나가 바뀐 뒤의 자기 인용을
+# 지금 정의의 발언으로 읽지 않게 한다. 220자 안에서 표지 길이만큼 발췌가 준다.
+PRIOR_DEFINITION = "[이전 정의] "
+
+
+def _seat_line(store, row, excerpt: str, line_max: int = E7_SEAT_LINE, *, marker: str = "") -> tuple[str, str | None]:
+    """좌석 줄 — `[<표지>] narr:<opinion_id>#<finding_id> | <agent_key> | <과제코드>/<target 앞12> | «<발췌>»` ≤ line_max 자.
+    (줄, 발췌를 자리표시자로 바꿨으면 그 어휘 id). 표지(`marker`)는 발췌 자리에서 뺀다."""
     findings = _j(row["raised_finding_ids_json"], [])
     finding_id = str(findings[0]) if isinstance(findings, list) and findings else ""
     project_code = _project_code(store, row["project_id"] if "project_id" in row.keys() else None)
-    prefix = (f"narr:{row['opinion_id']}#{finding_id} | {row['agent_key']} | "
+    prefix = (f"{marker}narr:{row['opinion_id']}#{finding_id} | {row['agent_key']} | "
               f"{project_code}/{_s(row['target_key'])[:12]} | ")
     quoted, hit = _quoted_excerpt(excerpt, max(0, line_max - len(prefix)))
     return prefix + quoted, hit
@@ -1828,7 +1833,7 @@ def _seat_memory_line(store, agent_key: str, target_key: str, lineage: set[str],
     owner = _s(ctx["target"]["owner_sub"])
     rows = store.query(
         "SELECT o.opinion_id, o.agent_key, o.target_key, o.raised_finding_ids_json, o.excerpt_for_rag, "
-        "o.created_at, t.project_id FROM rr_seat_opinions AS o "
+        "o.created_at, o.persona_rev, t.project_id FROM rr_seat_opinions AS o "
         "LEFT JOIN rr_targets AS t ON t.target_key = o.target_key "
         "WHERE o.agent_key = ? AND o.target_key <> ? "
         f"AND t.project_id IN (SELECT id FROM rr_projects WHERE ({_MEMBER_OF})"
@@ -1846,7 +1851,12 @@ def _seat_memory_line(store, agent_key: str, target_key: str, lineage: set[str],
                 overlap = 0 if finding_subjects & subjects else 1
             return (in_lineage, overlap, -(row["created_at"] or 0), _s(row["opinion_id"]))
         best = sorted(rows, key=rank)[0]
-        return _seat_line(store, best, _s(best["excerpt_for_rag"]), line_max)
+        # 판을 둘 다 알 때만 견준다 — 한쪽이라도 모르면(옛 의견 · 역할 글 없는 로스터) 바뀌었다고 적지 않는다(모름을 '바뀜' 으로 쓰지 않는다).
+        now = store.query_one("SELECT persona_rev FROM rr_roster WHERE target_key = ? AND agent_key = ?",
+                              (target_key, agent_key))
+        then, current = _s(best["persona_rev"]), _s(now["persona_rev"]) if now is not None else ""
+        marker = PRIOR_DEFINITION if then and current and then != current else ""
+        return _seat_line(store, best, _s(best["excerpt_for_rag"]), line_max, marker=marker)
     recalled = _adh_seat_memory(store, adh, agent_key, ctx, line_max)
     if recalled is not None:
         return recalled

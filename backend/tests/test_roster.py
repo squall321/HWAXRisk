@@ -18,14 +18,17 @@ def _enc(pat: str) -> str:
 GATEWAY = "https://gw.test/mcp"
 DOMAINS = ("mech", "sim", "xd")
 
-# 게이트웨이 실측 응답 형상 — list_agents 는 {'result': [{agent_type, name, common_tags}]},
-# recommend_agents 는 {'query', 'agents': [{agent_type, score, …}], …} 다.
+# 게이트웨이 실측 응답 형상 — list_agents 는 {'result': [{agent_type, name, common_tags}]}(compact) 이고 compact 를 끄면 description ·
+# data_types · updated_at 이 더 온다(AIDataHub mcp_runtime.list_agents). recommend_agents 는 {'query', 'agents': [{agent_type, score, …}], …} 다.
 CATALOG = {
     "mech": ["mech-frame", "mech-surface-treatment"],
     "sim": ["sim-drop", "sim-thermal"],
     "xd": ["xd-assembly"],
 }
 SCORES = {"mech-frame": 2.6, "sim-drop": 2.35, "xd-assembly": 0.5}
+# 원본 역할 글(description) — 비어 있는 전문가(sim-thermal)는 역할을 모르는 좌석이다.
+ROLES = {"mech-frame": "프레임 강성 전문가", "mech-surface-treatment": "표면 처리 전문가", "sim-drop": "낙하 해석 전문가",
+         "sim-thermal": "", "xd-assembly": "조립 설계 전문가"}
 
 
 def _client(handler) -> httpx.Client:
@@ -63,7 +66,9 @@ def _gateway_handler(calls: list[dict] | None = None, *, fail: set[str] | None =
             domain = args["domain"]
             if domain in fail_domains:
                 return _rpc_ok({"isError": True, "content": [{"type": "text", "text": "boom"}]})
-            rows = [{"agent_type": key, "name": key, "common_tags": [domain]}
+            rows = [{"agent_type": key, "name": key, "common_tags": [domain],
+                     **({} if args.get("compact") else {"description": ROLES.get(key, ""), "data_types": [],
+                                                        "updated_at": "2026-10-31T00:00:00"})}
                     for key in CATALOG.get(domain, [])]
             return _rpc_ok({"structuredContent": {"result": rows}})
         raise AssertionError(f"계약 밖 도구를 불렀다: {name}")
@@ -113,18 +118,20 @@ def test_fetch_collects_pool_per_domain_and_attaches_relevance():
 
     assert out["source"] == "gateway" and out["relevance_source"] == "recommend_agents"
     assert out["domains_ok"] == list(DOMAINS) and out["domains_failed"] == []
+    # 원본 역할 글(description)이 role 로 실린다 — 빈 글(sim-thermal)은 싣지 않는다(로스터의 role_sha · persona_rev 원천).
     assert out["agents"] == [
-        {"key": "mech-frame", "domain": "mech", "relevance": 2.6},
-        {"key": "mech-surface-treatment", "domain": "mech", "relevance": 0.0},   # 추천 목록 밖은 0
-        {"key": "sim-drop", "domain": "sim", "relevance": 2.35},
+        {"key": "mech-frame", "domain": "mech", "relevance": 2.6, "role": "프레임 강성 전문가"},
+        {"key": "mech-surface-treatment", "domain": "mech", "relevance": 0.0, "role": "표면 처리 전문가"},  # 추천 목록 밖은 0
+        {"key": "sim-drop", "domain": "sim", "relevance": 2.35, "role": "낙하 해석 전문가"},
         {"key": "sim-thermal", "domain": "sim", "relevance": 0.0},
-        {"key": "xd-assembly", "domain": "xd", "relevance": 0.5},
+        {"key": "xd-assembly", "domain": "xd", "relevance": 0.5, "role": "조립 설계 전문가"},
     ]
     # 호출은 recommend_agents 1회 + 도메인당 list_agents 1회이고 질의문은 500자로 잘린다.
     assert [c["name"] for c in calls] == [roster.RECOMMEND_AGENTS] + [roster.LIST_AGENTS] * 3
     assert len(calls[0]["arguments"]["q"]) == roster.QUERY_TEXT_MAX == 500
     assert calls[0]["arguments"]["top_k"] == roster.RECOMMEND_TOP_K == 60
-    assert [c["arguments"] for c in calls[1:]] == [{"compact": True, "domain": d} for d in DOMAINS]
+    # compact 를 끈다 — 압축 응답에는 역할 글(description)이 없다.
+    assert [c["arguments"] for c in calls[1:]] == [{"compact": False, "domain": d} for d in DOMAINS]
 
 
 def test_recommend_failure_degrades_relevance_but_keeps_the_pool():
@@ -313,6 +320,11 @@ def test_fetched_rows_feed_freeze_roster_and_rank_by_relevance(risk_store):
         ("sim", 1, "sim-drop"), ("sim", 2, "sim-thermal"),
         ("xd", 1, "xd-assembly")]
     assert rows[0]["relevance"] == pytest.approx(2.6)
+    # 게이트웨이가 준 역할 글이 로스터의 판이 된다 — 역할 글이 빈 전문가는 모른다(NULL).
+    stamps = {r["agent_key"]: (r["role_sha"], r["persona_rev"]) for r in risk_store.query(
+        "SELECT agent_key, role_sha, persona_rev FROM rr_roster WHERE target_key = ?", ("snap:s1",))}
+    assert stamps["mech-frame"] == planner.persona_stamp(ROLES["mech-frame"]) != (None, None)
+    assert stamps["sim-thermal"] == (None, None)
 
 
 # ---------------------------------------------------------------- 자격·질의문

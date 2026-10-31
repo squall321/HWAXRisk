@@ -2190,6 +2190,12 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
         r["agent_key"]: int(r["cycle"] or 1)
         for r in store.query("SELECT agent_key, cycle FROM rr_coverage WHERE target_key = ?", (target_key,))
     }
+    # 그 좌석의 페르소나 판번호(rr_roster.persona_rev 사본) — 다음 브리프 E7 이 이 의견을 회수할 때 지금 로스터의 판과 견줘 다르면
+    # [이전 정의] 를 붙인다(plan §5.6.1). 로스터 밖 좌석(반대석 · 추가 좌석)과 판을 모르는 좌석은 NULL 이다.
+    persona_revs = {
+        r["agent_key"]: r["persona_rev"]
+        for r in store.query("SELECT agent_key, persona_rev FROM rr_roster WHERE target_key = ?", (target_key,))
+    }
     nonledger_cycle = NONLEDGER_CYCLE_BASE + int(panel["panel_no"] or 0)
     # 쟁점 패널(M3 S3-7)은 좌석 원장을 쓰지 않는다 — 모든 좌석이 원장 밖 회차이고 성격 진술을 앉히지 않는다(WP4 3.7).
     issue_panel = panel.get("kind") == "issue"
@@ -2262,6 +2268,7 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
         }
         opinion_rows.append((
             opinion_id, target_key, panel_id, owner_sub, agent_key, domain,
+            persona_revs.get(agent_key) if seated else None,
             origin if origin in ("primary", "counter", "adversary", "new") else "new", cycle,
             canonical_json(opinion),
             final_stance, state.get("tool_calls_n"), state.get("tool_calls_ok"), state.get("knowledge_hits_n"),
@@ -2278,12 +2285,12 @@ def persist_panel_result(store, panel_id: str, *, decision_text: str = "", spec:
 
     with store.tx():
         store.execute("DELETE FROM rr_seat_opinions WHERE panel_id = ?", (panel_id,))
-        _release_ledger_cycles(store, target_key, panel_id, [(row[4], row[7]) for row in opinion_rows])
+        _release_ledger_cycles(store, target_key, panel_id, [(row[4], row[8]) for row in opinion_rows])
         store.executemany(
-            "INSERT INTO rr_seat_opinions(opinion_id, target_key, panel_id, owner_sub, agent_key, domain, origin,"
-            " cycle, opinion_json, final_stance, tool_calls_n, tool_calls_ok, knowledge_hits_n, cited_refs_json,"
+            "INSERT INTO rr_seat_opinions(opinion_id, target_key, panel_id, owner_sub, agent_key, domain, persona_rev,"
+            " origin, cycle, opinion_json, final_stance, tool_calls_n, tool_calls_ok, knowledge_hits_n, cited_refs_json,"
             " quality_json, raised_finding_ids_json, excerpt_for_rag, created_at)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             opinion_rows,
         )
 
