@@ -482,16 +482,28 @@ class _DiesMidStream(FakePanelEngine):
         raise _Killed()
 
 
+class _DuringFailed(BaseException):
+    """엔진 호출 도중에 부른 `during` 안의 실패(단언 포함) — 러너의 `except Exception`(엔진 실패로 읽고 패널만 닫는다)을 지나 시험을 그대로
+    실패시킨다. 종전에는 그 안의 단언이 엔진 실패로 삼켜져, 바깥 단언이 최종 상태만 보면 시험이 통과했다(반대 검토 2차 때 찾았다 — CC-36)."""
+
+
+def _during(call) -> None:
+    try:
+        call()
+    except Exception as exc:  # noqa: BLE001 — 위 설명대로 러너가 삼키지 못하게 바꿔 올린다.
+        raise _DuringFailed(f"{type(exc).__name__}: {exc}") from exc
+
+
 class _InFlight(FakePanelEngine):
     """도는 형제 — 엔진 호출 도중에(스트림이 흐르는 사이 — 시작 전 물음은 이미 지났다) `during` 을 부른 뒤 끝난다(raise_error 를 주면 그
-    실패로). 러너 없이 '형제가 도는 동안 다른 패널이 닫힌다' 를 한 스레드로 짓는다."""
+    실패로). 러너 없이 '형제가 도는 동안 다른 패널이 닫힌다' 를 한 스레드로 짓는다. `during` 안의 실패는 `_DuringFailed` 로 올라온다."""
 
     def __init__(self, during, **kwargs) -> None:
         super().__init__(**kwargs)
         self.during = during
 
     def run(self, delib_opts, *, owner_sub=None):
-        self.during()
+        _during(self.during)
         return super().run(delib_opts, owner_sub=owner_sub)
 
 
@@ -1314,3 +1326,315 @@ def test_f10_streaks_follow_the_close_time_not_the_panel_number(risk_store):
     _closed_panels(risk_store, third, [("done", base + 30, None, None), ("error", base + 10, retry, None),
                                        ("error", base + 20, retry, None)])
     assert runner._brief_retry_streak(risk_store, third) == 0                   # 가장 늦게 닫힌 패널이 잘 끝났다
+
+
+# ---------------------------------------------------------------- 반대 검토 2차 10-31 고침(R2-1 ~ R2-7 · N31 — context-notes CC-28 부터)
+class _BusyOnce(FakePanelEngine):
+    """첫 부름은 포털 자리 없음(429)이다 — 그 대기 사이에 `meanwhile` 을 부른다(형제가 잡의 멈춤을 미룬다). 다음 부름부터는 자리가 나 심의가
+    돈다(그때만 `calls` 에 적힌다)."""
+
+    def __init__(self, meanwhile, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.meanwhile = meanwhile
+        self.busy = 0
+
+    def run(self, delib_opts, *, owner_sub=None):
+        if not self.busy:
+            self.busy += 1
+            _during(self.meanwhile)
+            raise runner.EngineBusy("포털 agent_semaphore 초과(429)")
+        return super().run(delib_opts, owner_sub=owner_sub)
+
+
+def _progress(store, job_id: str) -> dict:
+    return json.loads(_job(store, job_id)["progress_json"] or "{}")
+
+
+def test_r2_a_panel_waiting_for_an_engine_slot_closes_when_its_sibling_deferred_a_stop(risk_store, tmp_path, monkeypatch):
+    """R2-1 — 둘째 패널이 포털 자리(429)를 기다리는 사이 형제(첫 패널)가 의장 실패로 끝나 잡의 멈춤을 미뤘다 — 기다리던 패널은 다음 물음에서
+    그 멈춤을 읽고 시작 못 한 것으로 닫힌다(좌석 차감 없음 · 심의를 보내지 않는다). 그 패널이 마지막 형제라 잡이 그때 멈춘다. 종전에는 대기
+    루프가 사람의 취소 · 정지만 물어, 자리가 나자 그 패널의 심의 전체를 돌았다."""
+    monkeypatch.setattr(runner, "time", _Clock())
+    target_key = _seed(risk_store)
+    cfg = _cfg(tmp_path, risk_engine_busy_wait_s=30, risk_engine_busy_max_wait_s=3600)
+    job_id = _tier_c_job(risk_store, target_key, cfg)
+    job, first, second = _seat_two(risk_store, cfg, target_key, job_id)
+    stop = runner.EngineNoDecision("chair_failed", "의장이 결정문을 내지 못했다")
+
+    def first_fails_meanwhile():
+        runner.run_panel(risk_store, cfg, FakePanelEngine(raise_error=stop), job, panel=first)
+        assert _job(risk_store, job_id)["state"] == "running"                   # 형제(둘째)가 자리를 기다린다 — 미뤘다
+
+    engine = _BusyOnce(first_fails_meanwhile)
+    out = runner.run_panel(risk_store, cfg, engine, job, panel=second)
+    assert engine.calls == [], "멈출 잡의 기다리던 패널이 심의를 보냈다"
+    assert out["status"] == "error" and out["error"].startswith("cancelled: 잡이 멈출 참이다(chair_failed)"), out
+    assert {_coverage(risk_store, target_key)[s["key"]] for s in second["seats"]} == {("pending", 0)}
+    row = _job(risk_store, job_id)
+    assert (row["state"], row["state_by"]) == ("paused", "code:chair_failed")
+    assert runner.DEFERRED_KEY not in _progress(risk_store, job_id)
+
+
+@pytest.mark.parametrize("cause", ["chair_failed", "panel_timeout", "brief_error"])
+def test_r2_while_a_stop_waits_the_job_error_does_not_say_the_job_stopped(risk_store, tmp_path, cause):
+    """R2-1 — 미뤄 둔 동안(잡은 running) 잡 행 error 는 '잡을 멈췄다' 를 말하지 않는다 — 까닭과 '그 패널이 끝나면 잡을 멈춘다' 다. 마지막 형제가
+    끝나 옮긴 뒤에야 원래 글(… 잡을 멈췄다 …) 그대로다. 종전에는 미룬 동안에도 부르는 쪽의 '잡을 멈췄다' 꼬리가 앞에 섰다."""
+    target_key = _seed(risk_store)
+    cfg = _cfg(tmp_path)
+    job_id = _tier_c_job(risk_store, target_key, cfg)
+    job, first, second = _seat_two(risk_store, cfg, target_key, job_id)
+    mods = _quiet()
+    if cause == "brief_error":
+        def prior_evidence(*args, **kwargs):
+            raise ValueError("브리프 린터 위반(시험)")
+
+        mods["narrative_mod"].prior_evidence = prior_evidence
+        engine = FakePanelEngine()
+    elif cause == "chair_failed":
+        engine = FakePanelEngine(raise_error=runner.EngineNoDecision(cause, "의장이 결정문을 내지 못했다"))
+    else:
+        engine = FakePanelEngine(raise_error=runner.EngineStreamLost(cause, "스트림을 놓았다(시험)"))
+
+    def second_stops_meanwhile():
+        runner.run_panel(risk_store, cfg, engine, job, panel=second, **mods)
+        row = _job(risk_store, job_id)
+        assert row["state"] == "running" and row["error"].startswith(f"{cause}: "), row
+        assert "잡을 멈췄다" not in row["error"] and "그 패널이 끝나면 잡을 멈춘다" in row["error"], row["error"]
+
+    runner.run_panel(risk_store, cfg, _InFlight(second_stops_meanwhile), job, panel=first, **_quiet())
+    row = _job(risk_store, job_id)
+    assert (row["state"], row["state_by"]) == ("paused", f"code:{cause}")
+    assert row["error"].startswith(f"{cause}: ") and "잡을 멈췄다" in row["error"], row["error"]
+
+
+def test_r2_a_restart_before_the_last_sibling_moved_the_job_applies_its_deferred_stop(risk_store, tmp_path):
+    """R2-2 — 마지막 형제의 패널 행은 닫혔는데 그 워커가 미뤄 둔 멈춤을 옮기기 전에 앱이 내려갔다 — 기동 복구가 그 멈춤을 옮긴다(도는 패널이 없는
+    대상의 잡이라 종전에는 queued 로 돌리며 error 를 지웠고, 집기의 안전망이 'running 일 때만' 쓰기에 실패한 채 칸만 걷어 잡이 다시 돌았다)."""
+    target_key = _seed(risk_store)
+    cfg = _cfg(tmp_path)
+    job_id = _tier_c_job(risk_store, target_key, cfg)
+    job, first, second = _seat_two(risk_store, cfg, target_key, job_id)
+    stop = runner.EngineNoDecision("chair_failed", "의장이 결정문을 내지 못했다")
+    runner.run_panel(risk_store, cfg, FakePanelEngine(raise_error=stop), job, panel=second)      # 첫 패널이 돈다 — 미뤘다
+    assert _job(risk_store, job_id)["state"] == "running"
+    risk_store.execute("UPDATE rr_panels SET status = 'done', ended_at = ? WHERE id = ?", (common.now_epoch(), first["id"]))
+    assert runner.recover_running_panels(risk_store)["recovered"] == 0
+    row = _job(risk_store, job_id)
+    assert (row["state"], row["state_by"]) == ("paused", "code:chair_failed")
+    assert row["error"].startswith("chair_failed: 의장이 결정문을 내지 못했다") and "잡을 멈췄다" in row["error"], row["error"]
+    assert runner.DEFERRED_KEY not in _progress(risk_store, job_id)
+    assert _claim(risk_store, cfg) is None and _job(risk_store, job_id)["state"] == "paused"
+
+
+def test_r2_a_deferred_stop_is_dropped_only_when_it_is_applied(risk_store, tmp_path):
+    """R2-2 — 미뤄 둔 멈춤은 옮겨야 걷는다. 줄에 선(queued) 잡에 칸이 남았으면 집기의 안전망이 그 멈춤을 옮긴다(종전에는 'running 일 때만' 쓰기가
+    0 행인데 칸을 걷어 그 잡을 다시 집었다). 사람이 옮긴 잡(멈춤)에는 쓰지 않고 칸도 남긴다 — 그 사람의 재개가 걷는다."""
+    target_key = _seed(risk_store)
+    cfg = _cfg(tmp_path)
+    job_id = _tier_c_job(risk_store, target_key, cfg)
+    left = {runner.DEFERRED_KEY: {"state": "paused", "by": "code:chair_failed", "reason": None,
+                                  "error": "chair_failed: 남은 멈춤(시험)", "panel_id": "p-gone", "at": 0}}
+    risk_store.execute("UPDATE rr_jobs SET progress_json = ? WHERE id = ?", (json.dumps(left), job_id))
+    assert _claim(risk_store, cfg) is None
+    row = _job(risk_store, job_id)
+    assert (row["state"], row["state_by"], row["error"]) == ("paused", "code:chair_failed", "chair_failed: 남은 멈춤(시험)")
+    assert runner.DEFERRED_KEY not in _progress(risk_store, job_id)
+
+    other = _seed(risk_store)
+    held = _tier_c_job(risk_store, other, cfg)
+    runner.pause_job(risk_store, held, by=OWNER)
+    risk_store.execute("UPDATE rr_jobs SET progress_json = ? WHERE id = ?", (json.dumps(left), held))
+    runner._apply_deferred_stop(risk_store, {"id": held, "target_key": other})
+    row = _job(risk_store, held)
+    assert (row["state"], row["state_by"]) == ("paused", OWNER)
+    assert runner.DEFERRED_KEY in _progress(risk_store, held)                  # 옮기지 않은 칸은 걷지 않는다
+    runner.resume_job(risk_store, held, by=OWNER)
+    assert runner.DEFERRED_KEY not in _progress(risk_store, held)
+    assert _claim(risk_store, cfg)["id"] == held
+
+
+def test_r2_a_pat_failure_after_two_engine_errors_still_fails_the_job_as_pat_unavailable(risk_store, tmp_path):
+    """R2-3 — 동시 1 잡 · 엔진 실패 둘 뒤의 자격 실패 — 잡은 failed/pat_unavailable 이다(자격 실패가 이긴다 — 2229b32 까지의 결과). 그 패널은
+    차감으로 닫히고 연속 실패에도 세지만, 연속 실패의 failed/engine_fail_streak 가 먼저 서서 자격 실패가 묻히지 않는다."""
+    target_key = _seed(risk_store)
+    cfg = _cfg(tmp_path)
+    job_id = _panel_job(risk_store, target_key, cfg, concurrency=1)
+    job = _claim(risk_store, cfg)
+    for _ in range(runner.ENGINE_FAIL_STREAK - 1):
+        out = runner.run_panel(risk_store, cfg, FakePanelEngine(raise_error=runner.EngineError("연결 끊김")), job)
+        assert out["error"].startswith("engine_error: ") and _job(risk_store, job_id)["state"] == "running", out
+    out = runner.run_panel(risk_store, cfg, FakePanelEngine(raise_error=runner.PatUnavailable("PAT 만료(시험)")), job)
+    assert out["error"] == "pat_unavailable"
+    row = _job(risk_store, job_id)
+    assert (row["state"], row["error"]) == ("failed", "pat_unavailable")
+    assert _panels(risk_store, target_key)[-1]["error"].startswith("pat_unavailable: ")
+    assert runner._error_streak(risk_store, target_key) == runner.ENGINE_FAIL_STREAK
+
+
+def test_r2_a_cancel_between_claim_and_planning_is_not_completed_and_starts_no_follow_up(risk_store, tmp_path):
+    """R2-4 — 집은 뒤 편성 전에 사람이 취소했고 남은 좌석이 없다 — 잡을 completed 로 덮지 않고(cancelling → 다음 집기가 cancelled) C3 자동 후속
+    Tier C 도 세우지 않는다. 종전에는 잡 마감이 상태를 보지 않고 completed 를 써 사람의 취소를 덮고 후속 잡까지 세웠다."""
+    target_key = _seed(risk_store)
+    risk_store.execute("UPDATE rr_targets SET close_level = 'C3' WHERE target_key = ?", (target_key,))
+    cfg = _cfg(tmp_path)
+    job_id = _panel_job(risk_store, target_key, cfg, tier="B", concurrency=1)
+    job = _claim(risk_store, cfg)
+    risk_store.execute("UPDATE rr_coverage SET status = 'skipped', reason = '시험' WHERE target_key = ? AND status = 'pending'",
+                       (target_key,))
+    runner.cancel_job(risk_store, job_id, by=OWNER)
+    panel, done = runner.plan_job_panel(risk_store, cfg, job)
+    assert panel is None and done["next_job"] is None, done
+    assert _job(risk_store, job_id)["state"] == "cancelling"
+    assert risk_store.query("SELECT id FROM rr_jobs WHERE target_key = ? AND tier = 'C'", (target_key,)) == []
+    assert _claim(risk_store, cfg) is None and _job(risk_store, job_id)["state"] == "cancelled"
+
+
+def test_r2_a_cancel_between_claim_and_planning_does_not_start_the_issue_chain(risk_store, tmp_path, monkeypatch):
+    """R2-4 — 쟁점 잡도 같다 — 대기 쟁점이 없어 끝날 참에 사람이 취소했으면 사슬(종합 잡)을 잇지 않는다."""
+    from app import chain, issues
+
+    target_key = _seed(risk_store)
+    cfg = _cfg(tmp_path)
+    job_id = issues.create_issues_job(risk_store, target_key, owner_sub=OWNER, settings=cfg)["job_id"]
+    job = _claim(risk_store, cfg)
+    assert job["id"] == job_id and job["mode"] == "issues"
+    closed: list[str] = []
+    monkeypatch.setattr(chain, "on_issues_closed", lambda store, job_: closed.append(job_["id"]) or {"created": False})
+    runner.cancel_job(risk_store, job_id, by=OWNER)
+    panel, done = runner.plan_job_panel(risk_store, cfg, job)
+    assert panel is None and done["next_job"] is None, done
+    assert closed == [] and _job(risk_store, job_id)["state"] == "cancelling"
+
+
+def test_r2_a_human_pause_keeps_the_deferred_failure_in_the_note_and_drops_the_mark(risk_store, tmp_path):
+    """R2-6 — 미뤄 둔 실패가 있는 잡을 사람이 멈추면 사람의 정지가 이기되(재개할 수 있다) 그 실패의 까닭을 잡 error 에 남긴다 — 소리 없이
+    재개되지 않게. 칸은 그 정지가 걷는다."""
+    target_key = _seed(risk_store)
+    cfg = _cfg(tmp_path)
+    job_id = _tier_c_job(risk_store, target_key, cfg)
+    job, first, second = _seat_two(risk_store, cfg, target_key, job_id)
+    assert runner._stop_job(risk_store, job, second, cfg, state="failed", error="engine_fail_streak") == "deferred"
+    runner.pause_job(risk_store, job_id, by=OWNER)
+    row = _job(risk_store, job_id)
+    assert (row["state"], row["pause_reason"], row["state_by"]) == ("paused", "user", OWNER)
+    assert row["error"] == "앞서 미룬 실패 — engine_fail_streak", row["error"]
+    assert runner.DEFERRED_KEY not in _progress(risk_store, job_id)
+
+
+def test_r2_a_portal_stop_keeps_the_deferred_reason_in_the_note_and_drops_the_mark(risk_store, tmp_path):
+    """R2-6 — 엔진 쪽 멈춤(A24 — 사람이 포털에서 한 패널을 멈췄다)도 미뤄 둔 멈춤을 걷되 그 까닭을 멈춤 글 끝에 붙인다. 감사 행은 그 사람의
+    job.pause 하나다."""
+    target_key = _seed(risk_store)
+    cfg = _cfg(tmp_path)
+    job_id = _tier_c_job(risk_store, target_key, cfg)
+    job, first, second = _seat_two(risk_store, cfg, target_key, job_id)
+    stop = runner.EngineNoDecision("chair_failed", "의장이 결정문을 내지 못했다")
+    runner.run_panel(risk_store, cfg, FakePanelEngine(raise_error=stop), job, panel=second)      # 첫 패널이 돈다 — 미뤘다
+    assert runner.DEFERRED_KEY in _progress(risk_store, job_id)
+    lost = runner.EngineStreamLost("cancelled", "사람이 포털에서 멈췄다(시험)", by="human@example.com")
+    runner._close_panel_stream_lost(risk_store, first, job, lost, cfg)
+    row = _job(risk_store, job_id)
+    assert (row["state"], row["state_by"]) == ("paused", "code:cancelled")
+    assert row["error"].startswith("cancelled: 사람이 포털에서 멈췄다(시험)"), row["error"]
+    assert row["error"].endswith(" · 앞서 미룬 멈춤 — chair_failed: 의장이 결정문을 내지 못했다 — 잡을 멈췄다(좌석 재시도는 차감하지"
+                                 " 않았다). 재개하면 이어 돈다"), row["error"]
+    assert runner.DEFERRED_KEY not in _progress(risk_store, job_id)
+    rows = risk_store.query("SELECT action FROM rr_audit WHERE scope = 'job' AND subject_id = ?", (job_id,))
+    assert [r["action"] for r in rows] == ["job.pause"]
+
+
+def test_r2_a_cancel_drops_the_deferred_mark(risk_store, tmp_path):
+    """R2-6 — 사람의 취소는 미뤄 둔 멈춤을 걷는다(형제가 닫히는 동안 · 마감 뒤에 칸이 남아 진행판에 실리지 않게)."""
+    target_key = _seed(risk_store)
+    cfg = _cfg(tmp_path)
+    job_id = _tier_c_job(risk_store, target_key, cfg)
+    job, first, second = _seat_two(risk_store, cfg, target_key, job_id)
+    assert runner._stop_job(risk_store, job, second, cfg, state="paused", by="code:chair_failed",
+                            error="chair_failed: 시험") == "deferred"
+    assert runner.cancel_job(risk_store, job_id, by=OWNER)["state"] == "cancelling"
+    assert runner.DEFERRED_KEY not in _progress(risk_store, job_id)
+
+
+def test_r2_the_deferred_mark_does_not_leak_into_signals_or_the_project_job_list(risk_store, tmp_path, monkeypatch):
+    """R2-6 — 미뤄 둔 멈춤 칸은 러너 안쪽 칸이다 — 진행판의 signal · signals 와 과제 상세의 잡 목록 progress 에 싣지 않는다(까닭은 잡 error
+    가 말한다). 종전에는 신호 칸을 통째로 펴 그 객체가 실렸다."""
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    target_key = _seed(risk_store)
+    cfg = _cfg(tmp_path)
+    job_id = _tier_c_job(risk_store, target_key, cfg)
+    job, first, second = _seat_two(risk_store, cfg, target_key, job_id)
+    runner._progress_writer(risk_store, job, first, per_panel=True)({}, force=True)
+    assert runner._stop_job(risk_store, job, second, cfg, state="paused", by="code:chair_failed",
+                            error="chair_failed: 시험") == "deferred"
+    assert runner.DEFERRED_KEY in _progress(risk_store, job_id)
+    board = routes.coverage_payload(target_key)["job"]
+    assert board["signal"] and runner.DEFERRED_KEY not in board["signal"], board["signal"]
+    assert board["signals"] and all(runner.DEFERRED_KEY not in s for s in board["signals"]), board["signals"]
+    project_id = risk_store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (target_key,))["project_id"]
+    listed = [j for j in routes.get_project(project_id, ident=_ident())["jobs"] if j["id"] == job_id]
+    assert listed and runner.DEFERRED_KEY not in listed[0]["progress"], listed
+
+
+def test_r2_the_concurrency_bounds_are_in_the_mcp_schema_and_review_jobs_keep_their_own_message():
+    """R2-7 — MCP risk_start_job 의 concurrency 스키마가 1 ~ 2 를 싣는다. 검토 잡(mode=reviews)에 준 concurrency 는 값이 얼마든 '패널 잡의 칸'
+    이라는 한국어 까닭이다(REST 본문 · MCP 입구 같다 — 종전에는 2 를 넘으면 pydantic 의 일반 글이 먼저 섰다). 패널 잡의 0 · 음수 · 3 은 1 ~ 2 를
+    말하는 422 다."""
+    import asyncio
+
+    from pydantic import ValidationError
+
+    from app import entry
+    from app import mcp_server as srv
+
+    tools = {t.name: t for t in asyncio.run(srv.mcp.list_tools())}
+    prop = tools["risk_start_job"].inputSchema["properties"]["concurrency"]
+    assert (prop.get("minimum"), prop.get("maximum")) == (1, runner.MAX_JOB_CONCURRENCY), prop
+    for value in (1, 2, 3):
+        with pytest.raises(ValidationError, match="패널 잡의 칸이다"):
+            routes.JobBody(mode="reviews", concurrency=value)
+        with pytest.raises(runner.AppError) as refused:
+            entry._body(routes.JobBody, mode="reviews", concurrency=value)
+        assert refused.value.http_status == 422 and "패널 잡의 칸이다" in refused.value.message, refused.value.message
+    for bad in (0, -1, 3):
+        with pytest.raises(ValidationError, match=f"concurrency 는 1 ~ {runner.MAX_JOB_CONCURRENCY}"):
+            routes.JobBody(tier="A", concurrency=bad)
+    assert routes.JobBody(tier="A", concurrency=runner.MAX_JOB_CONCURRENCY).concurrency == runner.MAX_JOB_CONCURRENCY
+
+
+def test_r2_the_mcp_entry_refuses_an_out_of_range_concurrency_before_returning_a_live_job(risk_store, monkeypatch, tmp_path):
+    """R2-7 — 도구 스키마의 1 ~ 2 는 MCP 입구가 살아 있는 잡을 돌려주는 갈래에서도 지킨다(검사는 본문 JobBody — 한국어 까닭). 범위 안의 값은
+    종전대로 살아 있는 잡을 돌려준다."""
+    from app import entry
+    from tests import test_external_llm_jobs as X
+    from tests.synth import review_rig
+
+    review_rig.configure(monkeypatch, risk_store, tmp_path)
+    review_rig.pat(risk_store)
+    target = factories.make_diff_target(risk_store, 3)
+    ident = X._delegate()
+    first = entry.start_job(ident, target_key=target.target_key, tier="A")
+    assert first["created"] is True
+    for bad in (0, runner.MAX_JOB_CONCURRENCY + 1):
+        with pytest.raises(runner.AppError) as refused:
+            entry.start_job(ident, target_key=target.target_key, tier="A", concurrency=bad)
+        assert refused.value.http_status == 422 and "concurrency 는 1 ~ " in refused.value.message, refused.value.message
+    again = entry.start_job(ident, target_key=target.target_key, tier="A", concurrency=runner.MAX_JOB_CONCURRENCY)
+    assert (again["job_id"], again["created"]) == (first["job_id"], False)
+
+
+def test_n31_a_later_deferred_pause_does_not_replace_a_deferred_failure(risk_store, tmp_path):
+    """N31 고정 — 미뤄 둔 실패는 나중에 미루는 멈춤이 덮지 않는다(실패가 멈춤을 이긴다). 잡이 패널을 둘까지만 돌리는 동안에는 미룸이 둘 쌓이지
+    않아 같은 판이다 — 셋째 도는 패널(다른 길)을 세워 규칙을 직접 묶는다."""
+    target_key = _seed(risk_store)
+    cfg = _cfg(tmp_path)
+    job_id = _tier_c_job(risk_store, target_key, cfg)
+    job, first, second = _seat_two(risk_store, cfg, target_key, job_id)
+    third = planner.plan_next_panel(risk_store, target_key, "C", settings=cfg)
+    planner.start_panel_seats(risk_store, third["id"])
+    assert runner._stop_job(risk_store, job, first, cfg, state="failed", error="engine_fail_streak") == "deferred"
+    assert runner._stop_job(risk_store, job, second, cfg, state="paused", by="code:chair_failed",
+                            error="chair_failed: 시험") == "deferred"
+    mark = _progress(risk_store, job_id)[runner.DEFERRED_KEY]
+    assert (mark["state"], mark["error"]) == ("failed", "engine_fail_streak")
+    row = _job(risk_store, job_id)
+    assert row["state"] == "running" and row["error"].startswith("engine_fail_streak — ") and "실패로 끝낸다" in row["error"]

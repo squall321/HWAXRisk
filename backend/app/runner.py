@@ -1276,7 +1276,11 @@ def pause_job(store: Any, job_id: str, *, reason: str = "user", by: str | None =
         return _set_job(store, job_id, "paused", reason="user", by=by, hold={"code": "user", "until": None})
     if row["state"] not in ("queued", "running"):
         raise AppError("E100", f"일시정지할 수 없는 상태입니다 — {row['state']}.", 409)
-    return _set_job(store, job_id, "paused", reason=reason, by=by)
+    with store.tx():
+        # 미뤄 둔 멈춤(CC-18)은 사람의 정지가 걷는다 — 사람의 뜻이 이기되 그 까닭(실패면 실패)을 잡 error 에 남긴다(CC-32 — 미뤄 둔 실패가
+        # 소리 없이 재개되지 않게). 칸이 없으면 종전 그대로다(error 를 비운다).
+        earlier = _clear_deferred(store, job_id)
+        return _set_job(store, job_id, "paused", reason=reason, by=by, error=_earlier_note(earlier) if earlier else None)
 
 
 def resume_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
@@ -1326,6 +1330,7 @@ def cancel_job(store: Any, job_id: str, *, by: str | None = None,
             if row["state"] in ("cancelled", "completed", "failed"):
                 return {"job_id": job_id, "state": row["state"], "pause_reason": None}
             state = "cancelling" if row["state"] == "running" else "cancelled"
+            _clear_deferred(store, job_id)       # 미뤄 둔 멈춤은 사람의 취소가 걷는다(CC-32 — 닫히는 동안 · 마감 뒤 진행판에 남지 않게)
             # 코드 보류(external_worker · credential · external_config)로 멈춘 패널 · 쟁점 잡의 취소는 재개처럼 보류 열을 비운다 — 남기면 취소된
             # 잡의 진행판 줄 · 사슬 단계가 보류를 싣고 화면이 '워크플로를 다시 돌린 뒤 재개' 를 말했다(반대 검토 10-31).
             out = _set_job(store, job_id, state, by=by, hold=_HOLD_CLEARED if row["hold_code"] is not None else None)
@@ -1669,7 +1674,10 @@ def recover_running_panels(store: Any) -> dict:
                            " 잡을 멈췄다(좌석 재시도는 차감하지 않았다)." + tail)
             paused += 1
         else:
-            _set_job(store, job["id"], "queued")
+            # 마지막 형제의 패널 행은 닫혔는데 그 워커가 미뤄 둔 멈춤을 옮기기 전에 앱이 내려갔다 — 여기서 옮긴다(CC-29). 종전에는 queued 로
+            # 돌리며 error 를 지웠고, 집기의 안전망은 'running 일 때만' 쓰기에 실패한 채 칸을 걷어 그 잡이 다시 돌았다.
+            _apply_deferred_stop(store, dict(job))
+            _set_job(store, job["id"], "queued", expect="running")
     return {"recovered": len(rows), "paused": paused}
 
 
@@ -1791,10 +1799,15 @@ def _quality(
     }
 
 
-def _finish_job(store: Any, job: Mapping[str, Any], settings: Any) -> dict:
+def _finish_job(store: Any, job: Mapping[str, Any], settings: Any, *, expect: str | None = None) -> dict:
     """Tier 범위 소진 — 잡을 completed 로 닫고, close_level 이 C3 이면 Tier B 뒤에 Tier C 를 자동 큐잉한다. 쟁점 잡(M3 S3-5)은
-    대기 쟁점이 바닥난 것이고 사슬이 종합 잡을 잇는다."""
-    _set_job(store, job["id"], "completed")
+    대기 쟁점이 바닥난 것이고 사슬이 종합 잡을 잇는다.
+
+    `expect` 를 주면 잡이 아직 그 상태일 때만 닫는다 — 편성기(plan_job_panel)는 'running' 을 준다. 집은 뒤 편성 전에 사람이 취소 · 정지한
+    잡을 completed 로 덮지 않고 C3 자동 후속 · 사슬도 잇지 않는다(CC-31). 시험이 행 상태를 맞추지 않고 후속만 보려고 부르는 길은 주지 않는다."""
+    if _set_job(store, job["id"], "completed", expect=expect) is None:
+        row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job["id"],))
+        return {"job_state": row["state"] if row is not None else None, "next_job": None}
     if job.get("mode") == "issues":
         from app import chain  # noqa: PLC0415 — chain 은 종합·쟁점을 거쳐 무겁다.
 
@@ -1944,7 +1957,7 @@ def plan_job_panel(store: Any, settings: Any, job: Mapping[str, Any], *, narrati
             # 편성기가 고른 좌석을 선점하기 전에 다른 쓰기(사람의 좌석 넘기기 · MCP 브리프 편성)가 끼어 선점이 어긋났다(PlanConflict —
             # 편성기는 None 을 낸다). 좌석이 남았으니 끝내지 않는다 — 다음 집기가 다시 편성한다(CC-22, 종전에는 잡이 completed 였다).
             return None, {"panel_id": None, "status": "no_panel", "job_state": "running", "waiting": "plan_conflict"}
-        return None, {"panel_id": None, "status": "no_panel", **_finish_job(store, job, settings)}
+        return None, {"panel_id": None, "status": "no_panel", **_finish_job(store, job, settings, expect="running")}
 
     if issue_job:
         issues.start_issue_panel(store, panel["id"])
@@ -2078,10 +2091,11 @@ def _run_planned_panel(store: Any, settings: Any, engine: PanelEngine, job: Mapp
             if busy_n == 1:
                 busy_until = time.monotonic() + busy_budget_s
             conv_id = busy.conversation[0] if busy.conversation else None
-            why = should_stop()
+            why = should_stop() or (_deferred_why(store, job) if job_slots(job, settings) > 1 else None)
             if why:
                 # 자리를 기다리는 중의 취소·정지 — 예산(기본 한 시간)을 다 기다린 뒤에 듣지 않는다. 잡은 사람이
-                # 이미 옮겼으므로 건드리지 않는다.
+                # 이미 옮겼으므로 건드리지 않는다. 형제가 잡의 멈춤을 미뤘어도 닫는다 — 자리가 나도 시작하지 않는다(시작 전 물음과
+                # 같다 — CC-28). 이 패널이 마지막 형제면 run_panel 의 끝이 그 멈춤을 옮긴다.
                 return _close_panel_unstarted(
                     store, panel, job, "cancelled", conv_id=conv_id, pause=False,
                     error=f"cancelled: {why} — 엔진 자리를 기다리던 패널을 닫았다(심의는 시작되지 않았다)")
@@ -2110,9 +2124,11 @@ def _run_planned_panel(store: Any, settings: Any, engine: PanelEngine, job: Mapp
         except PatUnavailable as exc:
             if issue_job:
                 return _hold_issue_job_for_credential(store, panel, job, exc)
-            # 자격 문제는 폴백·재시도 대상이 아니다 — 잡을 멈추고 좌석을 되돌린다(plan §6.7.1).
-            out = _close_panel_error(store, panel, job, f"pat_unavailable: {exc}", settings)
+            # 자격 문제는 폴백·재시도 대상이 아니다 — 잡을 멈추고 좌석을 되돌린다(plan §6.7.1). 잡을 먼저 옮긴다 — 패널을 먼저 닫으면 그
+            # 셈으로 연속 실패가 서(엔진 실패 둘 뒤) 잡이 engine_fail_streak 로 끝나고 자격 실패가 묻혔다(CC-30 — 2229b32 까지는 뒤에 쓴
+            # pat_unavailable 이 이겼다). 패널은 종전대로 차감으로 닫힌다.
             _stop_job(store, job, panel, settings, state="failed", error="pat_unavailable", defer=False)
+            out = _close_panel_error(store, panel, job, f"pat_unavailable: {exc}", settings)
             return {**out, "error": "pat_unavailable"}
         except EngineStreamLost as exc:
             return _close_panel_stream_lost(store, panel, job, exc, settings)
@@ -2359,8 +2375,11 @@ def _close_panel_stream_lost(store: Any, panel: Mapping[str, Any], job: Mapping[
         if row is not None and row["state"] == "running":
             tail = f"{error} — 잡을 멈췄다(좌석 재시도는 차감하지 않았다). 재개하면 이어 돈다"
             if lost.code == "cancelled":
-                # 엔진 쪽 멈춤(A24) — 사람의 요청이라 곧바로 잡을 멈추고(형제도 닫힌다) 그 사람의 job.pause 를 쓴다.
-                _set_job(store, job["id"], "paused", by=f"code:{lost.code}", error=tail)
+                # 엔진 쪽 멈춤(A24) — 사람의 요청이라 곧바로 잡을 멈추고(형제도 닫힌다) 그 사람의 job.pause 를 쓴다. 미뤄 둔 멈춤은 걷고 그
+                # 까닭을 글 끝에 붙인다(CC-32 — 사람의 정지와 같다).
+                earlier = _clear_deferred(store, job["id"])
+                _set_job(store, job["id"], "paused", by=f"code:{lost.code}",
+                         error=tail + (f" · {_earlier_note(earlier)}" if earlier else ""))
                 _audit_engine_stop(store, job, lost, row)
             else:
                 # 패널 하나의 스트림(벽시계 · 침묵 · 절단) — 형제가 돌면 미룬다(CC-18).
@@ -2669,12 +2688,24 @@ def _clear_deferred(store: Any, job_id: str) -> dict | None:
     return dict(mark) if isinstance(mark, Mapping) else None
 
 
+# 부르는 쪽 멈춤 글의 꼬리(' — 잡을 멈췄다(…). 재개하면 …') — 옮길 때(잡이 멈출 때)의 글이라 미뤄 둔 동안에는 뺀다(CC-28).
+STOPPED_TAIL = " — 잡을 멈췄다"
+
+
 def _deferred_note(mark: Mapping[str, Any]) -> str:
-    """미뤄 둔 동안 잡 행 error 에 보이는 글 — 원래 까닭이 앞에 온다."""
-    what = mark.get("error") or str(mark.get("reason") or mark.get("by") or "")
+    """미뤄 둔 동안 잡 행 error 에 보이는 글 — 원래 까닭이 앞에 온다. 잡은 아직 running 이라 부르는 쪽 글의 '— 잡을 멈췄다…' 꼬리는 빼고
+    '그 패널이 끝나면 잡을 멈춘다' 를 붙인다(CC-28). 옮길 때는 부르는 쪽 글 그대로 선다."""
+    what = (mark.get("error") or str(mark.get("reason") or mark.get("by") or "")).split(STOPPED_TAIL, 1)[0]
     verb = "실패로 끝낸다" if mark.get("state") == "failed" else "멈춘다"
     return (f"{what} — 같은 잡의 다른 패널이 돌고 있어 그 패널이 끝나면 잡을 {verb}(그동안 새 패널은 시작하지 않는다 ·"
             " 사람이 멈췄다 재개하면 이 멈춤은 걷힌다)")
+
+
+def _earlier_note(mark: Mapping[str, Any]) -> str:
+    """곧바로 옮기는 멈춤(사람의 정지 · 엔진 쪽 멈춤 · 그 밖의 곧바로)이 걷은 미뤄 둔 멈춤의 까닭 — 잡 error 에 붙인다(까닭을 잃지 않게 —
+    미뤄 둔 실패가 소리 없이 재개되지 않는다, CC-32)."""
+    kind = "실패" if mark.get("state") == "failed" else "멈춤"
+    return f"앞서 미룬 {kind} — {mark.get('error') or mark.get('reason') or mark.get('by')}"
 
 
 def _deferred_why(store: Any, job: Mapping[str, Any]) -> str | None:
@@ -2713,15 +2744,21 @@ def _stop_job(store: Any, job: Mapping[str, Any], panel: Mapping[str, Any] | Non
         if earlier is not None and earlier.get("state") == "failed" and state != "failed":
             state, reason, by, error, hold = "failed", earlier.get("reason"), earlier.get("by"), earlier.get("error"), None
         elif earlier is not None and (earlier.get("state"), earlier.get("by"), earlier.get("reason")) != (state, by, reason):
-            error = (error or str(reason or "")) + f" · 앞서 미룬 멈춤 — {earlier.get('error') or earlier.get('reason')}"
+            error = (error or str(reason or "")) + f" · {_earlier_note(earlier)}"
         _set_job(store, job["id"], state, reason=reason, by=by, error=error, hold=hold)
         return "applied"
 
 
+# 미뤄 둔 멈춤을 옮길 수 있는 잡 상태 — running(마지막 형제가 닫혔다)과 queued(러너 밖의 자동 길이 줄에 세운 잡 — 사람의 재개는 칸을
+# 걷는다). 사람이 멈춤 · 취소한 잡은 그 조작이 칸을 걷는다(CC-32).
+DEFERRED_APPLY_STATES: tuple[str, ...] = ("running", "queued")
+
+
 def _apply_deferred_stop(store: Any, job: Mapping[str, Any]) -> None:
-    """미뤄 둔 멈춤을 옮긴다 — 그 대상에 도는 패널이 더 없을 때만(마지막 형제가 닫혔다). 잡이 아직 running 이면 그 멈춤을 쓰고, 그 사이
-    사람이 옮긴 잡이면 쓰지 않는다. 어느 쪽이든 칸은 걷는다. run_panel 의 끝(패널을 함께 돌리는 잡)과 집기의 첫 자리(러너가 그 잡의 패널을
-    다 놓았는데 칸이 남았다 — 다른 길의 패널이 마지막이었다)가 부른다. 못 해도 패널 결과에는 상관없다(다음 집기가 다시 본다)."""
+    """미뤄 둔 멈춤을 옮긴다 — 그 대상에 도는 패널이 더 없을 때만(마지막 형제가 닫혔다). 잡이 running · queued 이면 그 멈춤을 쓰고 칸을
+    걷는다. 옮기지 못한 칸은 걷지 않는다(CC-29 — 종전에는 'running 일 때만' 쓰기가 0 행이어도 걷어, 기동 복구가 줄에 세운 잡이 그 멈춤 없이
+    다시 돌았다). run_panel 의 끝(패널을 함께 돌리는 잡) · 집기의 첫 자리(러너가 그 잡의 패널을 다 놓았는데 칸이 남았다 — 다른 길의 패널이
+    마지막이었다) · 기동 복구가 부른다. 못 해도 패널 결과에는 상관없다(다음 집기가 다시 본다)."""
     try:
         with store.tx():
             mark = _deferred(store, job["id"])
@@ -2730,9 +2767,12 @@ def _apply_deferred_stop(store: Any, job: Mapping[str, Any]) -> None:
             if store.query_one("SELECT 1 FROM rr_panels WHERE target_key = ? AND status = 'running' LIMIT 1",
                                (job["target_key"],)) is not None:
                 return                                   # 형제가 아직 돈다 — 마지막 형제가 옮긴다
+            row = store.query_one("SELECT state FROM rr_jobs WHERE id = ?", (job["id"],))
+            if row is None or row["state"] not in DEFERRED_APPLY_STATES:
+                return                                   # 사람이 옮긴 잡 — 쓰지 않고 칸도 그대로(그 사람의 재개 · 취소가 걷는다)
             _clear_deferred(store, job["id"])
             _set_job(store, job["id"], str(mark.get("state") or "paused"), reason=mark.get("reason"), by=mark.get("by"),
-                     error=mark.get("error"), expect="running")
+                     error=mark.get("error"), expect=row["state"])
     except Exception:  # noqa: BLE001 — 위 설명대로다.
         log.exception("잡 %s 의 미뤄 둔 멈춤을 옮기지 못했다(비치명 — 다음 집기가 다시 본다)", job.get("id"))
 

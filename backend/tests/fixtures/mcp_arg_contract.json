@@ -238,7 +238,7 @@
     "consent": {"default": false, "title": "Consent", "type": "boolean"},
     "modifiers": {"anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}], "default": null, "title": "Modifiers"},
     "user_memo": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "User Memo"},
-    "concurrency": {"default": 1, "title": "Concurrency", "type": "integer"},
+    "concurrency": {"default": 1, "maximum": 2, "minimum": 1, "title": "Concurrency", "type": "integer"},
     "mode": {"default": "panels", "title": "Mode", "type": "string"},
     "scope": {"anyOf": [{"additionalProperties": true, "type": "object"}, {"type": "null"}], "default": null, "title": "Scope"},
     "llm": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Llm"},

@@ -1094,7 +1094,9 @@ def get_project(project_id: str, ident: identity.Identity = Depends(identity.cur
                   "kind": "panel_batch" if j["mode"] == "panels" else "review_batch", "mode": j["mode"],
                   "error": j["error"],
                   "progress": {"done": j["panels_done"], "total": j["panels_total"],
-                               **_loads(j["progress_json"], {})}} for j in jobs],
+                               # 미뤄 둔 멈춤 칸은 러너 안쪽 칸이다 — 싣지 않는다(까닭은 잡 error, HWAXRisk context-notes CC-32)
+                               **{k: v for k, v in _loads(j["progress_json"], {}).items() if k != runner.DEFERRED_KEY}}}
+                 for j in jobs],
         "character_top_tags": tags,
     }
 
@@ -3420,8 +3422,10 @@ class JobBody(BaseModel):
     """
 
     tier: str | None = None
-    # 잡이 함께 돌릴 패널 수 — 1 ~ runner.MAX_JOB_CONCURRENCY(2). 넘으면 422 다(화면 · 계약 '≤2', HWAXRisk context-notes CC-23).
-    concurrency: int = Field(default=1, ge=1, le=runner.MAX_JOB_CONCURRENCY)
+    # 잡이 함께 돌릴 패널 수 — 1 ~ runner.MAX_JOB_CONCURRENCY(2). 밖이면 422 다(화면 · 계약 '≤2', HWAXRisk context-notes CC-23). 검사는 아래
+    # 모드 검사가 한다 — 칸의 ge · le 로 걸면 검토 잡에 준 값(3)이 '패널 잡의 칸' 이라는 까닭보다 pydantic 의 일반 글로 먼저 졌다(CC-33).
+    # 스키마에는 범위를 싣는다.
+    concurrency: int = Field(default=1, json_schema_extra={"minimum": 1, "maximum": runner.MAX_JOB_CONCURRENCY})
     modifiers: list[str] | None = None
     user_memo: str | None = None
     consent: bool = False
@@ -3440,6 +3444,9 @@ class JobBody(BaseModel):
                 raise ValueError("tier 가 필요하다 — 패널 잡(mode='panels')은 Tier(A·B·C)를 받는다")
             if self.scope is not None:
                 raise ValueError("scope 는 카드 대조 검토 잡(mode='reviews')의 칸이다 — 패널 잡은 tier 로 범위를 정한다")
+            if not 1 <= self.concurrency <= runner.MAX_JOB_CONCURRENCY:
+                raise ValueError(f"concurrency 는 1 ~ {runner.MAX_JOB_CONCURRENCY} 다 — 패널 잡이 함께 돌릴 패널 수(박스 상한"
+                                 " HWAXRISK_CONCURRENCY 로 더 죈다)")
             return self
         panel_only = sorted(k for k in ("tier", "modifiers", "concurrency", "exclude_evidence")
                             if k in self.model_fields_set and (k not in ("modifiers", "exclude_evidence") or getattr(self, k)))
@@ -3772,6 +3779,8 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
         # 도는 패널과 멈춘 패널이 똑같이 'running' 이다. {panel_id, started_at, last_frame_at, last_event_at, last_step}.
         progress = _loads(job.pop("progress_json"), {})
         panels = progress.pop(runner.PROGRESS_PANELS_KEY, None) if isinstance(progress, dict) else None
+        if isinstance(progress, dict):
+            progress.pop(runner.DEFERRED_KEY, None)    # 미뤄 둔 멈춤 칸은 신호가 아니다 — 까닭은 잡 error 가 말한다(CC-32)
         job["signal"] = _live_signal(store, job["state"], progress)
         # 도는 패널마다 한 줄(`signal` 은 호환으로 그대로 — 마지막에 적힌 신호). 패널을 함께 돌리는 잡(잡의 concurrency 2 — 사용자 결정
         # 10-31)은 러너가 패널마다 칸을 적는다(runner._progress_writer per_panel · HWAXRisk context-notes CC-9) — 그 칸의 도는 패널이 차례
