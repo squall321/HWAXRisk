@@ -4943,6 +4943,27 @@ def _seat_contract_rev() -> str:
     return sha256_hex(taxonomy.asset_path("seat-contract").read_bytes())[:12]
 
 
+# MCP 길(미검증 actor) 패널의 회수 격리를 사람이 푸는 큐 항목의 표지(B28 · plan §3.4.1 · §6.11). 큐 kind 는 DDL 어휘 안에서 고른다 —
+# 격리된 원자의 큐는 suspect_text 이고(plan §5.2.3 '브리프에 실을 수 없는(격리된) 원자'), payload.reason 이 의심 문구 항목과 가른다.
+ACTOR_UNVERIFIED = "actor_unverified"
+
+
+def _queue_actor_recall(store: Any, panel: dict, *, actor: str | None, findings_n: int, characters_n: int) -> None:
+    """그 패널의 격리를 풀 큐 항목 하나(소유자는 패널의 소유자) — 같은 패널의 열린 항목이 있으면 그 항목의 수만 고친다(같은 결과를 다시
+    내도 항목은 하나다)."""
+    payload = canonical_json({"reason": ACTOR_UNVERIFIED, "target_key": panel["target_key"], "panel_id": panel["id"],
+                              "actor": actor, "findings_n": int(findings_n), "characters_n": int(characters_n)})
+    opened = store.query_one(
+        "SELECT id FROM rr_curation_queue WHERE kind = 'suspect_text' AND status = 'open'"
+        " AND json_extract(payload_json, '$.reason') = ? AND json_extract(payload_json, '$.panel_id') = ?",
+        (ACTOR_UNVERIFIED, panel["id"]))
+    if opened is not None:
+        store.execute("UPDATE rr_curation_queue SET payload_json = ? WHERE id = ?", (payload, opened["id"]))
+        return
+    store.execute("INSERT INTO rr_curation_queue(id, owner_sub, kind, payload_json, status, created_at)"
+                  " VALUES (?, ?, 'suspect_text', ?, 'open', ?)", (new_uuid(), panel["owner_sub"], payload, now_epoch()))
+
+
 def complete_panel(panel_id: str, *, engine: str, decision_text: str, turns: list[dict],
                    report_id: Any = None, conv_id: str | None = None,
                    events: list[dict] | None = None, model: str | None = None,
@@ -5088,8 +5109,11 @@ def complete_panel(panel_id: str, *, engine: str, decision_text: str, turns: lis
         # 미검증 actor(MCP 경로)가 낸 원자는 회수에서 격리한다 — 이 타깃 등록부·보고서에는 그대로 남고
         # 다른 과제 브리프의 E5·E6·E7 후보에서만 빠진다(plan §3.4.1 회수 격리·§6.11).
         if not actor_verified and config.settings.risk_recall_require_verified_actor:
-            store.execute("UPDATE rr_findings SET recall_eligible = 0 WHERE panel_id = ?", (panel_id,))
-            store.execute("UPDATE rr_character SET recall_eligible = 0 WHERE id LIKE ?", (f"{panel_id}#%",))
+            findings_n = store.execute("UPDATE rr_findings SET recall_eligible = 0 WHERE panel_id = ?", (panel_id,))
+            characters_n = store.execute("UPDATE rr_character SET recall_eligible = 0 WHERE id LIKE ?", (f"{panel_id}#%",))
+            # 되돌리는 길(B28) — 사람이 큐에서 approve_recall 로 푼다. 격리한 원자가 있을 때만, 열린 항목이 없을 때만 세운다.
+            if findings_n or characters_n:
+                _queue_actor_recall(store, panel, actor=actor, findings_n=findings_n, characters_n=characters_n)
 
         merged = registry_module.merge(store, panel["target_key"])
         level = registry_module.close_level(store, panel["target_key"])
@@ -5787,8 +5811,9 @@ def post_finding_label(finding_id: str, body: LabelBody,
 CURATION_DECISIONS: dict[str, tuple[str, ...]] = {
     "label_match": ("confirmed", "refuted", "inconclusive", "reject"),
     "pattern_candidate": ("known", "rule", "predictor", "suspended", "deprecated", "reject"),
-    # 의심 문구는 사람이 원문을 보고 승인(원문 복원 + 회수 복귀)하거나 기각(격리 유지)한다(§3.4.1).
-    "suspect_text": ("approve", "reject"),
+    # 의심 문구는 사람이 원문을 보고 승인(원문 복원 + 회수 복귀)하거나 회수만 되돌리거나(approve_recall) 기각(격리 유지)한다(§3.4.1).
+    # MCP 길(미검증 actor) 패널의 격리 항목(payload.reason='actor_unverified', B28)은 되살릴 원문이 없어 approve_recall · reject 뿐이다.
+    "suspect_text": ("approve", "approve_recall", "reject"),
     # 근접 중복 클러스터 — merge 는 별칭 1행 + 재병합, reject 는 그대로 두 행이다
     # (payload {"suppress": true} 로 기각하면 다음 스캔이 그 쌍을 다시 올리지 않는다, §7.7 표).
     "cluster_merge": ("merge", "reject"),
@@ -5797,6 +5822,8 @@ CURATION_DECISIONS: dict[str, tuple[str, ...]] = {
     # 자유 태그 승격 — promote 는 payload.axis 로 `char:<axis>:<value>` 를 만들고, reject 는 그 태그를 다시 올리지 않는다.
     "x_tag_promote": ("promote", "reject"),
 }
+# 미검증 신원 격리 항목(payload.reason='actor_unverified', B28)이 받는 결정 — suspect_text 어휘의 부분집합이다(되살릴 원문이 없다).
+ACTOR_RECALL_DECISIONS: tuple[str, ...] = ("approve_recall", "reject")
 # 감사 로그의 scope 는 rr_audit CHECK 어휘 안에서 고른다(§5.2.2 — 'curation' 은 그 어휘에 없다).
 CURATION_AUDIT_SCOPE: dict[str, str] = {"label_match": "finding", "pattern_candidate": "registry",
                                         "suspect_text": "finding", "cluster_merge": "registry",
@@ -5871,24 +5898,34 @@ def put_curation(queue_id: str, body: CurationDecisionBody,
         raise AppError("E409", f"이미 결정된 항목입니다 — status={row['status']}.", 409)
 
     payload = _loads(row["payload_json"], {})
+    actor_item = kind == "suspect_text" and payload.get("reason") == ACTOR_UNVERIFIED
+    if actor_item and body.decision not in ACTOR_RECALL_DECISIONS:
+        raise AppError("decision_not_allowed_for_kind",
+                       f"미검증 신원(MCP 길) 격리 항목에는 되살릴 원문이 없습니다 — 결정은 {list(ACTOR_RECALL_DECISIONS)} 입니다.", 422)
     decision_json = {"decision": body.decision, "reason": body.reason, "payload": body.payload or {}}
     status = "rejected" if body.decision == "reject" else "done"
     applied: dict = {}
     with store.tx():
-        if kind == "suspect_text" and body.decision == "approve":
-            # 승인은 원문 복원이다 — 자리표시자가 가리키던 sha1 의 원문을 돌려주고 그 finding 을 회수로 되돌린다. 카드 대조 finding 은
-            # 회수 자격을 올리지 않는다(M2.md 5절 #9 — 형식 승인 전 산출이 다른 과제의 선례·통계로 새지 않게, R3B-8). 그것을 여는 일은
-            # M3 의 형식 승인 뒤 일괄 절차다.
-            claim_uid = str(payload.get("claim_uid") or "")
+        if kind == "suspect_text" and body.decision in ("approve", "approve_recall"):
+            # approve 는 원문 복원 + 회수 복귀, approve_recall 은 회수 복귀만이다(plan §3.4.1). 의심 문구 항목은 그 claim 의 finding 을,
+            # 미검증 신원 항목(B28)은 그 패널의 원자(finding · 성격 진술)를 되돌린다. 카드 대조 finding 은 회수 자격을 올리지 않는다
+            # (M2.md 5절 #9 — 형식 승인 전 산출이 다른 과제의 선례·통계로 새지 않게, R3B-8). 그것을 여는 일은 M3 의 형식 승인 뒤 일괄 절차다.
+            panel_key = str(payload.get("panel_id") or "") if actor_item else ""
+            column, key = ("panel_id", panel_key) if actor_item else ("claim_uid", str(payload.get("claim_uid") or ""))
             restored = 0
-            if claim_uid:
+            if key:
                 restored = int(store.execute(
-                    "UPDATE rr_findings SET recall_eligible = 1, updated_at = ?"
+                    f"UPDATE rr_findings SET recall_eligible = 1, updated_at = ? WHERE {column} = ? AND owner_sub = ?"
                     # 카드 대조 거름 그대로(M3 S3-4) — 카드 대조 finding 이 걸릴 수 없는 자리다(사람 finding 순번·의심 문구 회수)
-                    " WHERE claim_uid = ? AND owner_sub = ? AND COALESCE(source_kind, '') <> 'card_review'",
-                    (now_epoch(), claim_uid, owner_sub)) or 0)
-            applied = {"restored_text": payload.get("raw"), "sha1": payload.get("sha1"),
-                       "findings_recalled": restored}
+                    " AND COALESCE(source_kind, '') <> 'card_review'",
+                    (now_epoch(), key, owner_sub)) or 0)
+            applied = {"findings_recalled": restored}
+            if actor_item:
+                applied["characters_recalled"] = int(store.execute(
+                    "UPDATE rr_character SET recall_eligible = 1, updated_at = ? WHERE id LIKE ? AND owner_sub = ?",
+                    (now_epoch(), f"{panel_key}#%", owner_sub)) or 0) if panel_key else 0
+            if body.decision == "approve":
+                applied = {"restored_text": payload.get("raw"), "sha1": payload.get("sha1"), **applied}
         if kind == "unclassified_code" and body.decision in ("map", "new"):
             # 미분류 코드를 택소노미 값으로 옮긴다 — finding 의 cluster_key 는 불변이고 별칭만 더한다(§4.3.2).
             detail = str((body.payload or {}).get("mechanism_detail") or "").strip()
@@ -5943,11 +5980,14 @@ def put_curation(queue_id: str, body: CurationDecisionBody,
         store.execute(
             "UPDATE rr_curation_queue SET status = ?, decision_json = ?, decided_by = ?, decided_at = ?"
             " WHERE id = ?", (status, canonical_json(decision_json), owner_sub, now_epoch(), queue_id))
-        _audit(store, owner_sub, scope=CURATION_AUDIT_SCOPE[kind],
-               subject_id=str(payload.get("finding_id") or payload.get("cluster_key_norm")
-                              or payload.get("a") or payload.get("tag") or queue_id),
-               action="curation.decide", before={"kind": kind, "status": "open"},
-               after={"status": status, "decision": body.decision}, reason=body.reason)
+        # 회수 복귀는 recall.approve 한 행이다(plan §6.11 · P3 (21)) — 그 밖의 결정은 curation.decide. 미검증 신원 항목의 자리는 그 패널이다.
+        _audit(store, owner_sub, scope="panel" if actor_item else CURATION_AUDIT_SCOPE[kind],
+               subject_id=str(payload.get("panel_id") if actor_item else (
+                   payload.get("finding_id") or payload.get("cluster_key_norm") or payload.get("a") or payload.get("tag")
+                   or queue_id)),
+               action="recall.approve" if body.decision == "approve_recall" else "curation.decide",
+               before={"kind": kind, "status": "open"}, after={"status": status, "decision": body.decision},
+               reason=body.reason)
     return {"status": status, "decision_json": decision_json, "applied": applied}
 
 
