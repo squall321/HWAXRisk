@@ -9,7 +9,7 @@ import re
 import sqlite3
 import threading
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 
 import httpx
@@ -1245,7 +1245,14 @@ def resume_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
     return _set_job(store, job_id, "queued", by=by, hold=_HOLD_CLEARED if clear else None)
 
 
-def cancel_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
+def _changed(on_change: Callable[[dict], None] | None, before: Mapping[str, Any]) -> None:
+    """잡 행을 쓴 바로 뒤, 그 트랜잭션 안에서 부르는 쪽의 훅(사람 조작 감사 — cancel_job 의 on_change)에 앞 값을 넘긴다."""
+    if on_change is not None:
+        on_change({"state": before["state"], "hold_code": before["hold_code"]})
+
+
+def cancel_job(store: Any, job_id: str, *, by: str | None = None,
+               on_change: Callable[[dict], None] | None = None) -> dict:
     """취소. 도는 잡은 cancelling 이 되고, 도는 패널이 그것을 듣고 스트림을 닫은 뒤 다음 편성에서 cancelled 가 된다.
 
     종전에는 패널이 끝까지 갔다 — 벽시계가 12시간이라 취소한 잡의 패널이 러너 자리와 그 타깃의 직렬 순서를 최대
@@ -1256,13 +1263,23 @@ def cancel_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
     잡이 살아 있어 새 잡이 그 셀을 범위에서 잃지 않는다(반대 검토 R3A-1). 도는 것이 없으면 곧바로 cancelled 이고 진행판을 끝난
     모양(phase cancelled · 워커 없음)으로 적는다. 그 뒤 트랜잭션 밖에서 그 잡이 건드린 전문가 보고서를 다시 짓는다(M3C-81 —
     review_runner.refresh_cancelled, 전문가마다 제 트랜잭션).
+
+    `on_change(before)` 는 이 취소가 잡 행을 쓴 바로 뒤에 그 쓰기와 같은 트랜잭션 안에서 불린다 — before 는 그 트랜잭션 안에서 읽은 잡의
+    {state, hold_code} 다. 사람의 취소를 감사하는 라우트가 그 행을 여기서 쓴다(사용자 결정 10-31 · 반대 검토) — 전이와 감사 행이 함께
+    커밋되고(검토 잡의 전문가 보고서 다시 짓기보다 먼저), 앞 · 뒤 값에 러너의 전이(집기 · 취소의 마감)가 섞이지 않는다. 쓰지 않은
+    취소(끝난 잡)에는 부르지 않는다. 패널 · 쟁점 잡도 확인과 쓰기를 한 트랜잭션으로 한다.
     """
     row = _job_row(store, job_id)
     if row["state"] in ("cancelled", "completed", "failed"):
         return {"job_id": job_id, "state": row["state"], "pause_reason": None}
     if row["mode"] in PANEL_RUNNER_MODES:
-        state = "cancelling" if row["state"] == "running" else "cancelled"
-        out = _set_job(store, job_id, state, by=by)
+        with store.tx():
+            row = _job_row(store, job_id)
+            if row["state"] in ("cancelled", "completed", "failed"):
+                return {"job_id": job_id, "state": row["state"], "pause_reason": None}
+            state = "cancelling" if row["state"] == "running" else "cancelled"
+            out = _set_job(store, job_id, state, by=by)
+            _changed(on_change, row)
         if state == "cancelled" and row["mode"] == "issues":
             _untry_after_cancel(store, row["target_key"], job_id)
         return out
@@ -1275,8 +1292,11 @@ def cancel_job(store: Any, job_id: str, *, by: str | None = None) -> dict:
             return {"job_id": job_id, "state": row["state"], "pause_reason": None}
         busy = review_runner.in_flight(store, job_id=job_id)
         if busy["heads"] or busy["cells"]:
-            return _set_job(store, job_id, "cancelling", by=by, hold=_HOLD_CLEARED)
+            out = _set_job(store, job_id, "cancelling", by=by, hold=_HOLD_CLEARED)
+            _changed(on_change, row)
+            return out
         out = _set_job(store, job_id, "cancelled", by=by, hold=_HOLD_CLEARED)
+        _changed(on_change, row)
         review_runner.close_progress(store, job_id, "cancelled")
     review_runner.refresh_cancelled(store, job_id)
     return out

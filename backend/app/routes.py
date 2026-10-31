@@ -3350,15 +3350,16 @@ def _job_control_view(store: Any, job_id: str) -> dict:
     return {"state": row["state"], "hold_code": row["hold_code"]}
 
 
-def _audit_job_control(store: Any, ident: identity.Identity, actor: str, job_id: str, action: str, before: dict,
-                       out: Mapping[str, Any]) -> None:
+def _audit_job_control(store: Any, ident: identity.Identity, actor: str, job_id: str, action: str, before: dict) -> None:
     """사람의 잡 제어 한 번이 잡 행을 바꿨으면 rr_audit(scope job · action job.<조작>) 한 행(사용자 결정 10-31 — plan §8.2.3).
 
-    바꿨다는 것은 러너가 전이를 썼고(결과에 state_at — `runner._set_job`, 끝난 잡의 취소는 쓰지 않는다) 잡 상태나 보류 코드가
-    달라졌다는 것이다 — 도는 호출을 기다리는 검토 잡을 다시 취소해도(cancelling 그대로) 행이 없다. 자리는 그 잡이고(대상 감사가
-    rr_jobs.target_key 로 고른다) 과제 id 는 그 잡의 대상의 것이다. MCP 길의 행위자는 actor_verified 0 이다(다른 MCP 감사 행과 같다)."""
+    러너가 전이를 쓴 그 트랜잭션 안에서 부른다 — 정지 · 재개는 라우트의 트랜잭션, 취소는 runner.cancel_job 의 on_change 다(반대 검토
+    10-31). 앞 값(`before`)도 그 안에서 읽은 것이고 뒤 값도 여기서 읽어, 전이와 감사 행이 함께 커밋되고 러너의 다른 전이가 섞이지 않는다.
+    끝난 잡의 취소처럼 러너가 쓰지 않은 조작은 부르지 않는다. 잡 상태나 보류 코드가 그대로면 행이 없다 — 도는 호출을 기다리는 검토 잡을
+    다시 취소해도(cancelling 그대로) 그렇다. 자리는 그 잡이고(대상 감사가 rr_jobs.target_key 로 고른다) 과제 id 는 그 잡의 대상의 것이다.
+    MCP 길의 행위자는 actor_verified 0 이다(다른 MCP 감사 행과 같다)."""
     after = _job_control_view(store, job_id)
-    if "state_at" not in out or after == before:
+    if after == before:
         return
     target = store.query_one("SELECT t.project_id FROM rr_jobs j JOIN rr_targets t ON t.target_key = j.target_key"
                              " WHERE j.id = ?", (job_id,))
@@ -3383,18 +3384,17 @@ def job_action(job_id: str, action: str, consent: bool = False, ident: identity.
     store = get_store()
     if action == "cancel":
         # 검토 잡의 취소는 제 트랜잭션에서 닫고 그 밖에서 전문가 보고서를 다시 짓는다(runner.cancel_job · M3C-81) — 바깥 트랜잭션으로
-        # 감싸면 다시 짓는 동안 저장소를 쥔다. 그래서 감사 행은 취소가 커밋된 뒤에 쓴다.
-        before = _job_control_view(store, job_id)
-        out = JOB_ACTIONS[action](store, job_id, by=owner_sub)
-        _audit_job_control(store, ident, owner_sub, job_id, action, before, out)
-        return out
+        # 감싸면 다시 짓는 동안 저장소를 쥔다. 그래서 감사 행은 러너가 전이를 쓰는 그 트랜잭션 안에서 쓴다(on_change — 반대 검토 10-31).
+        # 다시 짓기가 실패하거나 그 사이 앱이 멈춰도 취소와 함께 남고, 앞 · 뒤 값에 러너의 집기 · 마감이 섞이지 않는다.
+        return JOB_ACTIONS[action](store, job_id, by=owner_sub, on_change=lambda before: _audit_job_control(
+            store, ident, owner_sub, job_id, action, before))
     with store.tx():
         before = _job_control_view(store, job_id)
         if action == "resume":
             review_runner.resume_gate(store, job_id, consent=consent,
                                       consent_source=CONSENT_SOURCES.get(ident.source, ident.source))
         out = JOB_ACTIONS[action](store, job_id, by=owner_sub)
-        _audit_job_control(store, ident, owner_sub, job_id, action, before, out)
+        _audit_job_control(store, ident, owner_sub, job_id, action, before)
         return out
 
 

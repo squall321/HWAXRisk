@@ -12,6 +12,7 @@
   verdict note)은 싣지 않는다 — 그 글은 원래 자리(상태 기록 · 대상 행)에 그대로 있다.
 - 코드가 일으킨 전이(일일 상한 · 집기 · 취소의 마감 · 코드 보류 · 엔진 쪽 멈춤 A24)는 사람 행위가 아니라 남기지 않는다 — 코드의 정지 ·
   보류는 잡 행의 state_by 에 'code:…' 를 적고, 집기 · 취소의 마감은 주체를 적지 않는다(state_by 는 앞 값 그대로).
+- 반대 검토 10-31 — 감사 행은 전이를 쓰는 그 트랜잭션 안에서 선다(검토 잡의 취소도 — 전문가 보고서 다시 짓기보다 먼저).
 """
 from __future__ import annotations
 
@@ -22,7 +23,7 @@ import json
 import pytest
 
 import app.mcp_server as srv
-from app import config, registry, routes, runner
+from app import config, registry, review_runner, routes, runner
 from app.common import now_epoch
 from app.errors import AppError
 from tests import factories
@@ -199,6 +200,77 @@ def test_a_cancel_that_finds_the_job_already_finished_writes_nothing(seeded, mon
     monkeypatch.setitem(routes.JOB_ACTIONS, "cancel", finished_first)
     assert routes.job_action(job_id, "cancel", ident=_ident())["state"] == "completed"
     assert _rows(store, *CONTROL) == []
+
+
+def test_a_review_jobs_cancel_row_commits_with_the_cancel_before_its_reports_are_rebuilt(risk_store, monkeypatch, tmp_path):
+    """검토 잡의 취소는 제 트랜잭션에서 닫고 그 밖에서 전문가 보고서를 다시 짓는다(M3C-81). 감사 행은 그 취소와 같은 트랜잭션에서 선다 —
+    다시 짓는 동안 이미 있고, 다시 짓기가 실패해도(또는 그 사이 앱이 멈춰도) 사람의 취소와 함께 남는다(반대 검토 10-31 — 종전에는 다시
+    짓기가 끝난 뒤에 써서, 그 사이의 실패 · 멈춤이 취소만 남기고 행을 잃었다)."""
+    rig.configure(monkeypatch, risk_store, tmp_path)
+    key = rig.target(risk_store)
+    job_id = rig.job(risk_store, key)
+    seen: dict = {}
+
+    def rebuild_fails(store, jid):
+        seen["state"] = rig.state(store, jid)
+        seen["rows"] = [(r["action"], r["before"], r["after"]) for r in _rows(store, *CONTROL)]
+        raise RuntimeError("다시 짓기 실패(시험)")
+
+    monkeypatch.setattr(review_runner, "refresh_cancelled", rebuild_fails)
+    with pytest.raises(RuntimeError):
+        routes.job_action(job_id, "cancel", ident=factories.ident(rig.OWNER))
+
+    row = ("job.cancel", {"state": "queued", "hold_code": None}, {"state": "cancelled", "hold_code": None})
+    assert seen == {"state": "cancelled", "rows": [row]}
+    assert [(r["action"], r["before"], r["after"]) for r in _rows(risk_store, *CONTROL)] == [row]
+    assert _job(risk_store, job_id)["state_by"] == rig.OWNER
+
+
+def test_a_cancels_row_holds_only_the_persons_transition_while_the_runner_moves_the_job_around_it(seeded, monkeypatch,
+                                                                                                 tmp_path):
+    """앞 · 뒤 값은 취소가 쓰는 그 트랜잭션 안에서 잡는다 — 라우트가 확인한 뒤 러너가 잡을 집고(queued → running) 취소 바로 뒤에 그 취소를
+    닫아도(cancelling → cancelled) 사람의 행은 running → cancelling 하나다(반대 검토 10-31 — 종전에는 트랜잭션 밖에서 읽어 앞 값이 한
+    걸음 늦은 queued, 뒤 값이 사람 행위가 아닌 러너의 마감 cancelled 였다)."""
+    store, target_key = seeded
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = _panel_job(target_key)
+    real = runner.cancel_job
+
+    def runner_moves_around_the_cancel(store_, job_id_, **kwargs):
+        assert runner.claim_next_job(store_, cfg)["id"] == job_id_        # 러너 — 집기(사람의 취소보다 먼저 락을 잡았다)
+        out = real(store_, job_id_, **kwargs)                              # 사람 — running → cancelling
+        assert runner.claim_next_job(store_, cfg) is None                  # 러너 — 취소의 마감(cancelling → cancelled)
+        return out
+
+    monkeypatch.setitem(routes.JOB_ACTIONS, "cancel", runner_moves_around_the_cancel)
+    assert routes.job_action(job_id, "cancel", ident=_ident())["state"] == "cancelling"
+    assert _job(store, job_id)["state"] == "cancelled"
+    assert [(r["action"], r["before"], r["after"]) for r in _rows(store, *CONTROL)] == [
+        ("job.cancel", {"state": "running", "hold_code": None}, {"state": "cancelling", "hold_code": None})]
+
+
+def test_a_cancel_decides_and_writes_on_the_job_it_reads_again_inside_its_transaction(seeded, monkeypatch, tmp_path):
+    """취소는 잡을 그 트랜잭션 안에서 다시 읽고 그 값으로 정하고 쓴다 — 첫 확인과 쓰기 사이에 러너가 잡을 집었으면(queued → running) 도는
+    패널이 듣고 닫도록 cancelling 이고, 사람의 행은 running → cancelling 이다(반대 검토 10-31 — 종전 패널 갈래는 트랜잭션 없이 첫 확인의
+    queued 로 곧바로 cancelled 를 써, 행도 queued → cancelled 였다)."""
+    store, target_key = seeded
+    cfg = dataclasses.replace(config.settings, data_dir=tmp_path)
+    job_id = _panel_job(target_key)
+    real = runner._job_row
+    looks: list[str] = []
+
+    def runner_claims_right_after_the_first_look(store_, job_id_):
+        row = real(store_, job_id_)
+        looks.append(row["state"])
+        if len(looks) == 1:
+            assert runner.claim_next_job(store_, cfg)["id"] == job_id_      # 러너 — 첫 확인 바로 뒤의 집기
+        return row
+
+    monkeypatch.setattr(runner, "_job_row", runner_claims_right_after_the_first_look)
+    assert routes.job_action(job_id, "cancel", ident=_ident())["state"] == "cancelling"
+    assert _job(store, job_id)["state"] == "cancelling"
+    assert [(r["action"], r["before"], r["after"]) for r in _rows(store, *CONTROL)] == [
+        ("job.cancel", {"state": "running", "hold_code": None}, {"state": "cancelling", "hold_code": None})]
 
 
 def test_runner_transitions_are_not_human_actions_and_leave_no_row(seeded, tmp_path):
