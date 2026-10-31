@@ -900,7 +900,10 @@ def _summarize_diff(diff: dict, context: dict) -> str:
         semantic_weights.append(len(lines))
 
     # 치수는 바뀐 것과 한쪽만 잰 것만 싣는다 — 변하지 않았거나 양쪽 다 못 잰 치수까지 실으면 섹션 상한을 그 줄들이 먹는다.
-    dims_all = [item for item in parametric.get("dims_delta") or () if isinstance(item, dict)]
+    # 목록이 잘린 계면을 읽는 치수(truncated)는 싣지 않는다 — 한쪽 값이 빈 것은 잘린 탓이라 '0.050→미측정' 이 '사라졌다' 로 읽힌다.
+    # 그 수는 [비교가능성] 의 '제외 truncated N건' 에 든다(plan §3.3.6 — 제외 항목은 건수만).
+    dims_all = [item for item in parametric.get("dims_delta") or ()
+                if isinstance(item, dict) and item.get("excluded_reason") != "truncated"]
     dims_shown = [item for item in dims_all if item.get("flag") == "changed"
                   or (item.get("before") is None) != (item.get("after") is None)]
     dims_items = [_src_line(param_text(item)) for item in dims_shown]

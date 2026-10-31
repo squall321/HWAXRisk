@@ -170,7 +170,7 @@
     "sameas_method": {"type": "string", "enum": ["ledger", "pid_map", "exact_path", "fingerprint", "name_norm", "fuzzy", "manual"]},
     "excluded_reason": {
       "type": ["string", "null"],
-      "enum": ["tol_differs", "tol_unknown", "result_kind_differs", "sim_params_differ", "unit_scale", "partial_scope", "suspect_coords", "null_one_side", "sameas_pending", "bridge_stale", null]
+      "enum": ["tol_differs", "tol_unknown", "result_kind_differs", "sim_params_differ", "unit_scale", "partial_scope", "suspect_coords", "null_one_side", "sameas_pending", "bridge_stale", "truncated", null]
     },
     "side": {
       "type": "object",

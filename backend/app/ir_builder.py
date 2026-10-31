@@ -1006,7 +1006,10 @@ def build_ir(
     # --- same-as 사다리(intra) → 클러스터 → dn·ckey(plan §2.6·§2.7.3·§2.7.5)
     domains = sorted({n["domain"] for n in nodes})
     same_as: list[dict] = []
+    fuzzy_skipped: list[tuple[str, str, dict]] = []
     if len(domains) >= 2:
+        from app import sameas  # noqa: PLC0415 — _default_sameas_resolve 와 같은 지연 임포트다.
+
         resolver = sameas_resolve or _default_sameas_resolve
         # 사다리 1단계가 보는 원장은 rr_sameas(stable 키 쌍 → 행)이지 rr_iface_ledger 가 아니다(plan §2.6.2·§2.10).
         # intra 는 도메인 쌍(mcad↔dyna·mcad↔ecad·dyna↔ecad)마다 부른다 — 양쪽에 같은 목록을 넣으면
@@ -1017,7 +1020,12 @@ def build_ir(
             for dom_b in domains[i + 1:]:
                 if not by_domain[dom_a] or not by_domain[dom_b]:
                     continue
-                for record in resolver(by_domain[dom_a], by_domain[dom_b], edges, edges, "intra", sameas_ledger):
+                records = list(resolver(by_domain[dom_a], by_domain[dom_b], edges, edges, "intra", sameas_ledger))
+                # 6단계(헝가리안)를 크기 때문에 건너뛴 도메인 쌍 — 남은 노드는 미대응이고 G2 에 세지 않는다(plan §2.6.3).
+                skip = sameas.fuzzy_skip(by_domain[dom_a], by_domain[dom_b], records)
+                if skip is not None:
+                    fuzzy_skipped.append((dom_a, dom_b, skip))
+                for record in records:
                     item = dict(record)
                     if item.get("a") == item.get("b"):
                         continue
@@ -1027,6 +1035,20 @@ def build_ir(
                     seen.add(key)
                     same_as.append(item)
         same_as.sort(key=lambda r: (str(r.get("a")), str(r.get("b")), str(r.get("method"))))
+    # 건너뛴 사실은 그 두 도메인 소스의 degraded 와 경고 한 줄로 남는다 — sig:capture.fuzzy_skipped 가 이것을 읽는다(plan §2.6.3).
+    # 둘 다 ir_hash 입력이 아니다(해시는 same_as 를 본다 — 건너뛰면 fuzzy 레코드가 없을 뿐 같은 입력이면 같은 해시다).
+    for dom_a, dom_b, skip in fuzzy_skipped:
+        n_a, n_b = skip["rest_a"], skip["rest_b"]
+        warnings.append({
+            "severity": "WARNING", "code": "fuzzy_skipped_large",
+            "message": (f"same-as 6단계(헝가리안)를 건너뛰었다 — {dom_a}↔{dom_b} 남은 노드 {n_a} × {n_b}(곱 {n_a * n_b:,} · "
+                        f"배정 행렬 변 {n_a + n_b:,}). 상한은 곱 {skip['limit']:,}(800×800) · 변 {skip['side_limit']:,} 이다. "
+                        "5단계까지의 대응으로 진행했고 남은 노드는 미대응이다."),
+            "ref": f"{dom_a}~{dom_b}", "source_kind": "ir_builder",
+        })
+        for source in sources:
+            if source["kind"] in (dom_a, dom_b) and "fuzzy_skipped_large" not in source["degraded"]:
+                source["degraded"] = sorted(source["degraded"] + ["fuzzy_skipped_large"])
 
     union = _Union()
     for nid in by_nid:

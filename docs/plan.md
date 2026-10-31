@@ -111,6 +111,10 @@
 - **캡처·IR**(P1·P2 · ECAD 1단계) — `adapters/{base,registry,mcad,dyna,ecad}` 가 소스 앱을 읽기 전용으로 열고 `ir_builder` 가 rr_ir 봉투를 동결한다.
   표기층 위생·인젝션 어휘(`render.sanitize_source_text`·`INJECTION_LEXICON`)가 원문을 «…» 안에 가두고 적중분은 `suspect_text` 큐로 보낸다.
 - **상태·비교**(P1·P2) — `state`(G1~G7·signals·`character_seed`·`feature_vector`·`rule_hits`) · `sameas`(사다리 7단·헝가리안·원장 재적용) · `diff`(3층·의미 이벤트·`comparability` 5키).
+  2026-10-31 — §2.6.3 의 6단계 상한(남은 노드 곱 > 800×800 또는 배정 행렬 변 > 1,600 이면 헝가리안을 건너뛰고 degraded · 경고 ·
+  `sig:capture.fuzzy_skipped` · 쌍 caveat — 변 상한은 정본에 없는 앱 결정, BL-6)과 §2.5.1 · §3.3.6 의 계면 절단(`stats.interfaces_truncated{kind:n}` ·
+  잘린 kind 의 엣지 · 파라메트릭 · 명명 치수는 `excluded_reason='truncated'`, 롤업은 kind 별, 고아 전이는 `orphans_delta.truncated`)이 코드에 섰다.
+  노드 500 · 엣지 2,000 diff 는 0.2 s · 피크 20 MB 다(§10 #27 — `memory_gb 2` 그대로). 근거는 `../context-notes.md` BL-1 ~ BL-3 · BL-6 ~ BL-9.
 - **서술·등록부**(P3) — `brief`(E0~E10) → 심의 → `narrative`(risk_spec 파싱·cites·`evidence_grade`·좌석 의견) → `registry`(병합·별칭 체인·status 이력·기각 보존).
   원문은 `rr_panel_calls` 에 gzip 으로 남고 `rr_panels.brief_gz` 로 브리프 자체가 재현된다.
 - **편성·회계**(P4) — `planner`(Tier A/B/C·라운드로빈·인접·deferred·carried) · `roster` · `runner` 배치 · 완결 레벨 C1~C3 · 통합 보고서.

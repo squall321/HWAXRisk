@@ -19,9 +19,13 @@ __all__ = [
     "AUTO_SCORE",
     "PENDING_SCORE",
     "FUZZY_WEIGHTS",
+    "FUZZY_MAX_PAIRS",
+    "FUZZY_MAX_SIDE",
+    "FUZZY_SKIPPED",
     "stable_key",
     "load_ledger",
     "resolve",
+    "fuzzy_skip",
     "score_pair",
     "build_clusters",
     "material_norm_of",
@@ -45,6 +49,15 @@ FUZZY_WEIGHTS = {"name": 0.35, "geom": 0.35, "material": 0.10, "neighbor": 0.20}
 DUMMY_COST = 1.0 - PENDING_SCORE   # 헝가리안 미배정 더미 비용 0.30(§2.6.3).
 PRUNE_MIN = 0.5            # geom_sim ≥ 0.5 OR name_sim ≥ 0.5 인 쌍만 비용 행렬에 넣는다.
 _BIG = 1.0e6               # 가지치기된 쌍의 유한 비용(무한대는 포텐셜 계산을 깨뜨린다).
+# 6단계 상한(§2.6.3) — 양쪽 잔여 노드 수의 곱이 이보다 크면 점수도 행렬도 만들지 않고 5단계까지의 대응으로 진행한다.
+# 앱 venv 에 scipy 가 없어 동봉한 순수 파이썬 O(n³) 헝가리안이 돈다 — 800 × 800 이면 점수 64만 번(약 26 s)에 1,600 행렬(약 35 s)이고
+# 그 위로는 세제곱으로 늘어 캡처 예산(§2.11.3)을 통째로 먹는다(2026-10-31 dev 실측, context-notes BL-1).
+FUZZY_MAX_PAIRS = 800 * 800
+# 배정 행렬의 변 상한(2026-10-31 반대 검토, context-notes BL-6) — 헝가리안은 미배정 더미를 붙인 (남은 a + 남은 b) 변의 정사각 행렬에서
+# 돌아 시간이 곱이 아니라 변의 세제곱이다. 곱만 보면 기운 모양이 빠진다 — 30 × 3,000 은 곱 9만인데 3,030 행렬이라 10분을 넘는다.
+# 800 × 800 이 짓는 1,600 변까지만 돈다. 지금 두 값에서는 변 ≤ 1,600 이면 곱 ≤ 640,000 이 따라 나온다(na·nb ≤ ((na+nb)/2)²).
+FUZZY_MAX_SIDE = 800 + 800
+FUZZY_SKIPPED = "fuzzy_skipped_large"   # 그때의 degraded · warnings 코드이자 쌍 의미층의 caveat(§2.6.3)
 
 # 이웃 유사도에 쓰는 엣지 계열(§2.6.3 — iface·contact family 1홉).
 NEIGHBOR_FAMILIES: tuple[str, ...] = ("iface", "contact")
@@ -383,6 +396,49 @@ def _status_for(method: str, score: float) -> str:
     return "auto" if score >= AUTO_SCORE else "pending"
 
 
+def _takes(status: str, score: float) -> bool:
+    """대응 하나가 두 노드를 뒤 단계 후보에서 빼는가 — confirmed·auto 이고 score ≥ 0.90 이다(§2.6.1 · 클러스터 규칙)."""
+    return status in ("confirmed", "auto") and score >= AUTO_SCORE
+
+
+def _fuzzy_rest(a_nodes: Sequence[Mapping[str, Any]], b_nodes: Sequence[Mapping[str, Any]],
+                taken_a: set[str], taken_b: set[str]) -> tuple[list, list]:
+    """6단계 후보 — 앞 단계가 가져가지 않은 노드(ecad 는 1차에서 6단계에 들지 않는다, §2.6.4)."""
+    rest_a = [n for n in a_nodes if str(n["nid"]) not in taken_a and _domain(n) != "ecad"]
+    rest_b = [n for n in b_nodes if str(n["nid"]) not in taken_b and _domain(n) != "ecad"]
+    return rest_a, rest_b
+
+
+def _fuzzy_too_large(n_a: int, n_b: int) -> bool:
+    """6단계를 건너뛸 크기인가 — 남은 노드 곱이 FUZZY_MAX_PAIRS 를 넘거나(§2.6.3) 배정 행렬의 변(n_a + n_b)이 FUZZY_MAX_SIDE 를
+    넘는다. resolve 와 fuzzy_skip 이 이 한 곳을 같이 쓴다."""
+    return n_a * n_b > FUZZY_MAX_PAIRS or n_a + n_b > FUZZY_MAX_SIDE
+
+
+def fuzzy_skip(nodes_a: Sequence[Mapping[str, Any]], nodes_b: Sequence[Mapping[str, Any]],
+               links: Sequence[Mapping[str, Any]]) -> dict | None:
+    """6단계를 크기 때문에 건너뛴 쌍이면 `{rest_a, rest_b, limit, side_limit}`, 아니면 None(§2.6.3).
+
+    `resolve` 와 같은 규칙으로 레코드에서 다시 읽는다 — fuzzy 가 아닌 레코드가 가져간 노드를 빼고 남은 노드 수가 상한(곱 `limit` ·
+    배정 행렬 변 `side_limit`)을 넘는가다. 그래서 대응을 따로 받은 호출(원장으로 푼 `create_diff` 의 links)에서도 같은 답이 나오고,
+    건너뛴 사실을 담을 칸을 레코드 목록에 지어내지 않는다. 원장 행은 사다리 1단계처럼 confirmed 만 가져간다.
+    """
+    taken_a: set[str] = set()
+    taken_b: set[str] = set()
+    for rec in links:
+        if rec.get("method") == "fuzzy":
+            continue
+        status = str(rec.get("status") or "")
+        took = status == "confirmed" if rec.get("method") == "ledger" else _takes(status, float(rec.get("score") or 0.0))
+        if took:
+            taken_a.add(str(rec.get("a")))
+            taken_b.add(str(rec.get("b")))
+    rest_a, rest_b = _fuzzy_rest(nodes_a, nodes_b, taken_a, taken_b)
+    if not rest_a or not rest_b or not _fuzzy_too_large(len(rest_a), len(rest_b)):
+        return None
+    return {"rest_a": len(rest_a), "rest_b": len(rest_b), "limit": FUZZY_MAX_PAIRS, "side_limit": FUZZY_MAX_SIDE}
+
+
 def resolve(
     nodes_a: Sequence[Mapping[str, Any]],
     nodes_b: Sequence[Mapping[str, Any]],
@@ -417,7 +473,7 @@ def resolve(
             return                       # intra 는 도메인 쌍 호출이라 같은 nid 쌍이 없다(pair 의 자기-diff 는 정상).
         st = status or _status_for(method, score)
         records.append(_record(scope, a_nid, b_nid, method, score, st, evidence))
-        if st in ("confirmed", "auto") and score >= AUTO_SCORE:
+        if _takes(st, score):
             taken_a.add(a_nid)
             taken_b.add(b_nid)
             uf.union(a_nid, b_nid)
@@ -590,9 +646,11 @@ def resolve(
         accept(a_nid, b_nid, "name_norm", 0.95, {"name_norm_canon": _canon(a_by_nid[a_nid])})
 
     # --- 6단계 fuzzy — 남은 노드로 이분 그래프를 만들어 헝가리안 배정(ecad 는 제외, §2.6.4).
-    rest_a = [n for n in a_nodes if str(n["nid"]) not in taken_a and _domain(n) != "ecad"]
-    rest_b = [n for n in b_nodes if str(n["nid"]) not in taken_b and _domain(n) != "ecad"]
-    if rest_a and rest_b:
+    # 남은 노드 수의 곱이 FUZZY_MAX_PAIRS 를, 또는 배정 행렬의 변(남은 a + 남은 b)이 FUZZY_MAX_SIDE 를 넘으면 점수도 행렬도
+    # 만들지 않는다 — 남은 노드는 미대응이고 pending 이 없어 G2 에 세지 않는다. 건너뛴 사실은 fuzzy_skip() 이 같은 규칙으로 읽어
+    # 스냅샷(degraded · warnings · sig)과 쌍(caveat)에 단다(§2.6.3).
+    rest_a, rest_b = _fuzzy_rest(a_nodes, b_nodes, taken_a, taken_b)
+    if rest_a and rest_b and not _fuzzy_too_large(len(rest_a), len(rest_b)):
         scores: dict[tuple[str, str], dict] = {}
         for a in rest_a:
             a_nid = str(a["nid"])
