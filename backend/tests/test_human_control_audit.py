@@ -164,6 +164,22 @@ def test_mcp_changed_says_what_the_audit_row_says_for_a_review_job_a_person_paus
                     ("cancel", "cancelled", None, False, 0)]
 
 
+def test_mcp_cancel_again_while_the_review_call_is_in_flight_is_unchanged_like_its_audit(risk_store, monkeypatch, tmp_path):
+    """도는 호출을 기다리는 검토 잡을 MCP 로 다시 취소하면 러너는 같은 cancelling 을 다시 쓸 뿐이다 — 훅은 불리지만 바뀐 것이 없어 행이
+    없고 changed 도 false 다(처음 취소는 둘 다 참). 지킴 시험이다."""
+    rig.configure(monkeypatch, risk_store, tmp_path)
+    key = rig.target(risk_store)
+    job_id = rig.job(risk_store, key, scope={"agents": [rig.SEAL]})
+    risk_store.execute("UPDATE rr_expert_reports SET state = 'running', lease_owner = 'worker' WHERE target_key = ?"
+                       " AND agent_key = ?", (key, rig.SEAL))
+    factories.act_as_delegate(monkeypatch, rig.OWNER)
+
+    first = _call("risk_job_action", job_id=job_id, action="cancel")
+    again = _call("risk_job_action", job_id=job_id, action="cancel")
+    assert [(o["state"], o["changed"]) for o in (first, again)] == [("cancelling", True), ("cancelling", False)]
+    assert len(_rows(risk_store, *CONTROL)) == 1
+
+
 def test_mcp_changed_is_false_with_no_row_when_the_job_finished_under_the_persons_cancel(seeded, monkeypatch):
     """확인과 취소 사이에 러너가 잡을 끝냈으면 취소는 아무것도 쓰지 않는다 — 행이 없고 changed 도 false 다(종전 입구는 라우트 밖에서
     읽은 앞 상태(queued)와 답의 상태(completed)를 견주어 true 라 했다 — 사람이 바꾼 것이 없는데)."""

@@ -170,9 +170,11 @@ def test_a_same_as_reject_through_mcp_writes_an_unverified_mcp_rekey_row(store, 
     assert _rows(store, "rekey") == [("rekey", "mcp", 0, OWNER), ("rekey", "web", 1, OWNER)]
 
 
-def test_one_decide_request_carries_its_entrance_to_every_rekey_it_runs(store):
-    """POST /sameas/decide 의 입구는 그 요청의 키 전파 행 전부에 같다 — MCP 가 닿지 않는 키 병합 · 풀기 · 계면 별칭 철회도 웹에서 하면
-    (web, 1) 이다(종전에는 셋 다 기본값 rest 였다). 같은 조작을 REST(Bearer)로 하면 (rest, 1)."""
+@pytest.mark.parametrize(("who", "entrance"), [(_web(), ("web", 1)), (factories.ident(OWNER), ("rest", 1)),
+                                               (external._delegate(OWNER), ("mcp", 0))], ids=["web", "rest", "mcp"])
+def test_one_decide_request_carries_its_entrance_to_every_rekey_it_runs(store, who, entrance):
+    """POST /sameas/decide 의 입구는 그 요청이 도는 키 전파 행 전부에 같다 — MCP 도구가 닿는 것은 확정 · reject 뿐이지만 키 병합 · 풀기 ·
+    계면 별칭 철회도 같은 라우트라 그 요청의 입구를 받는다(웹 · Bearer · 게이트웨이 위임 단언). 종전에는 셋 다 기본값 rest · 1 이었다."""
     test_rekey._world(store)
     store.execute("INSERT INTO rr_iface_alias(alias_key, canonical_a, canonical_b, owner_sub, aliases_json, source, score)"
                   " VALUES (?,?,?,?,'[]','auto',1.0)", (f"{test_rekey.X}|{test_rekey.Z}", test_rekey.X, test_rekey.Z, OWNER))
@@ -180,8 +182,6 @@ def test_one_decide_request_carries_its_entrance_to_every_rekey_it_runs(store):
     routes.post_sameas_decide([{"decision": "merge_key", "ckey_from": test_rekey.Y, "ckey_into": test_rekey.X},
                                {"decision": "unmerge_key", "ckey": test_rekey.Y},
                                {"decision": "revoke_iface_alias", "alias_key": f"{test_rekey.X}|{test_rekey.Z}"}],
-                              ident=_web())
-    routes.post_sameas_decide([{"decision": "merge_key", "ckey_from": test_rekey.W, "ckey_into": test_rekey.X}],
-                              ident=factories.ident(OWNER))
+                              ident=who)
 
-    assert _rows(store, "rekey") == [("rekey", "web", 1, OWNER)] * 3 + [("rekey", "rest", 1, OWNER)]
+    assert _rows(store, "rekey") == [("rekey", *entrance, OWNER)] * 3
