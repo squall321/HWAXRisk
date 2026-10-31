@@ -9,8 +9,9 @@
 //
 // 포털 코드는 한 줄도 바꾸지 않는다. scopes 관문(`risk_pat_require_read_only`)도 건드리지 않는다 —
 // 여기서 `scopes:['read']` 로 발급하므로 그 검사를 그대로 통과한다.
-import { riskApi } from "./risk.api";
-import type { PortalPatPutResult } from "../types";
+import { NetworkError, isApiError, riskApi } from "./risk.api";
+import type { AutoHold } from "./autoPortalPat";
+import { AUTO_HOLD_FINAL_MS, AUTO_HOLD_TRANSIENT_MS } from "./autoPortalPat";
 
 /** 포털 `POST /auth/pat` 응답(pat.py PatCreated). `token` 은 발급 시 한 번만 온다. */
 export type PortalPatMinted = {
@@ -94,13 +95,91 @@ export async function mintPortalPat(): Promise<PortalPatMinted> {
   return (await res.json()) as PortalPatMinted;
 }
 
+/** 방금 받은 PAT 를 등록하지 못한 뒤 그 PAT 를 어떻게 했나 — 포털에서 폐기함 · 폐기하지 못함 · 등록됐는지 몰라 건드리지 않음. */
+export type MintedFate = "revoked" | "revoke_failed" | "unknown";
+
+/**
+ * 발급은 됐는데 앱 등록이 실패했다 — 원래 거절(`rejection`)과 방금 받은 PAT 의 처리(`minted`)를 함께 싣는다. 받은 PAT 는 90일짜리
+ * 자격이고 쥔 곳이 없으므로 그대로 두지 않는다(registerFromPortal).
+ */
+export class PortalRegisterError extends Error {
+  readonly rejection: unknown;
+  readonly jti: string;
+  readonly minted: MintedFate;
+  constructor(rejection: unknown, jti: string, minted: MintedFate) {
+    super(rejection instanceof Error ? rejection.message : String(rejection));
+    this.name = "PortalRegisterError";
+    this.rejection = rejection;
+    this.jti = jti;
+    this.minted = minted;
+  }
+}
+
+/**
+ * 등록 거절이 저장 전에 났나 — 앱이 답한 4xx(검사 · 포털 검증 거부 · 암호키)와 502 portal_unreachable(포털 검증에 못 닿음)은 저장 전이다
+ * (routes._register_portal_pat 은 검사를 다 지난 뒤에 저장한다). 그 밖(다른 5xx · 네트워크 · 읽을 수 없는 답)은 저장됐을 수도 있다.
+ */
+export function refusedBeforeStore(err: unknown): boolean {
+  return isApiError(err) && ((err.status >= 400 && err.status < 500) || err.code === "portal_unreachable");
+}
+
+/**
+ * 방금 받은 PAT 를 그 토큰 자신으로 폐기한다 — 포털 `POST /auth/pat/revoke-self`(Bearer 그 PAT · 청중 mcp-gateway, 쿠키 · CSRF 를 쓰지
+ * 않는다 — 백엔드가 갈아 끼운 PAT 를 폐기하는 길과 같다). 최선 노력이라 던지지 않는다.
+ */
+async function revokeMinted(token: string): Promise<boolean> {
+  try {
+    const res = await fetch("/auth/pat/revoke-self", {
+      method: "POST",
+      credentials: "omit",
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * 포털에서 발급해 곧바로 앱에 등록한다(출처 `web`) — 설정의 「포털에서 발급해 등록」 · 앱을 열 때의 자동 등록 · 자동 스위치를
  * 켤 때가 모두 이 길을 지난다. 출처를 `web` 으로 적어야 다음 갱신 때 백엔드가 이 PAT 를 폐기한다(`manual` 로 적히면 쌓인다).
  * 토큰은 이 함수 안에서만 산다 — 화면 상태 · 저장소 · 로그에 남기지 않고 jti 만 돌려준다.
+ *
+ * 등록이 실패하면 방금 받은 PAT 를 버려 두지 않는다 — 전에는 앱이 등록을 거절하는 박스(포털 주소 오지정 · 계정 불일치 따위)에서 새 탭마다
+ * 쥔 곳 없는 90일 PAT 가 하나씩 포털에 쌓였다. 저장 전 거절이면 곧바로 폐기하고, 저장됐을 수도 있는 실패면 `GET /me` 로 그 jti 가
+ * 등록됐는지 보고(됐으면 성공) 아니면 폐기한다. 등록 여부를 못 읽으면 건드리지 않는다(등록된 자격을 폐기하지 않게). 실패는
+ * `PortalRegisterError` 로 올린다.
  */
-export async function registerFromPortal(): Promise<{ jti: string; result: PortalPatPutResult }> {
+export async function registerFromPortal(): Promise<{ jti: string }> {
   const minted = await mintPortalPat();
-  const result = await riskApi.putPortalPat(minted.token, "web");
-  return { jti: minted.jti, result };
+  try {
+    await riskApi.putPortalPat(minted.token, "web");
+    return { jti: minted.jti };
+  } catch (err) {
+    if (!refusedBeforeStore(err)) {
+      let stored: boolean | null = null;
+      try {
+        const pat = (await riskApi.getMe()).portal_pat;
+        // portal_pat 이 null 이면(익명 · 박스 불일치) 등록 여부를 모른다.
+        stored = pat ? pat.jti === minted.jti : null;
+      } catch {
+        stored = null;
+      }
+      if (stored === true) return { jti: minted.jti };
+      if (stored === null) throw new PortalRegisterError(err, minted.jti, "unknown");
+    }
+    throw new PortalRegisterError(err, minted.jti, (await revokeMinted(minted.token)) ? "revoked" : "revoke_failed");
+  }
+}
+
+/**
+ * 자동 등록이 등록에서 실패했을 때 이 브라우저가 쉬는 동안 — 일시 실패(네트워크 · 5xx · portal_unreachable)는 짧게, 사람이 고쳐야 하는
+ * 실패는 길게(백엔드가 게이트웨이 교환 실패에 거는 쉼과 같은 두 값). 발급 단계의 실패는 PAT 를 만들지 않아 쉬지 않는다(null).
+ */
+export function autoHoldOf(err: unknown, now: number): AutoHold | null {
+  if (!(err instanceof PortalRegisterError)) return null;
+  const rejection = err.rejection;
+  const code = isApiError(rejection) ? rejection.code : rejection instanceof NetworkError ? "network" : "unknown";
+  const transient = rejection instanceof NetworkError || (isApiError(rejection) && rejection.status >= 500);
+  return { until: now + (transient ? AUTO_HOLD_TRANSIENT_MS : AUTO_HOLD_FINAL_MS), code };
 }

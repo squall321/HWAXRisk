@@ -1,6 +1,6 @@
 // 포털 PAT 발급 · 등록 실패를 사람이 읽는 문구로 — 설정 화면과 앱을 열 때의 자동 등록 알림이 같은 표를 쓴다(code 로 가른다).
-import { isApiError } from "./risk.api";
-import { PortalMintError } from "./portalPat";
+import { describeError, isApiError } from "./risk.api";
+import { PortalMintError, PortalRegisterError } from "./portalPat";
 
 export type PatFailureText = { title: string; detail: string };
 
@@ -41,12 +41,27 @@ export const PAT_ERRORS: Record<string, PatFailureText> = {
   },
 };
 
+/** 발급은 됐는데 등록이 실패했을 때 방금 받은 PAT 를 어떻게 했나 — 사람이 포털 토큰 화면에서 할 일이 있는지 말한다. */
+export function mintedNote(err: PortalRegisterError): string {
+  const jti = err.jti.slice(0, 12);
+  if (err.minted === "revoked") return `방금 포털에서 받은 PAT(jti ${jti})는 등록하지 못해 포털에서 폐기했습니다 — 다시 하면 새로 발급합니다.`;
+  if (err.minted === "revoke_failed") {
+    return `방금 포털에서 받은 PAT(jti ${jti})를 폐기하지 못했습니다 — 포털 토큰 화면에서 그 jti 를 폐기하세요(쥔 곳 없는 90일 자격으로 남습니다).`;
+  }
+  return `방금 받은 PAT(jti ${jti})가 등록됐는지 확인하지 못했습니다 — 설정의 토큰 식별자가 그 jti 가 아니면 포털 토큰 화면에서 폐기하세요.`;
+}
+
 /**
  * 발급 단계의 실패(포털 세션 없음 · `feat:api-token` 없음 · 로그인 만료 — 문구가 곧 사유다)와 등록 단계의 아는 거절은 전용
- * 문구로, 그 밖은 null 이다 — 호출자가 공용 배너(describeError)로 접는다.
+ * 문구로, 그 밖은 null 이다 — 호출자가 공용 배너(describeError)로 접는다. 발급 뒤 등록 실패(PortalRegisterError)는 그 거절의 문구에
+ * 방금 받은 PAT 의 처리를 붙인다(늘 문구가 있다).
  */
 export function describePatFailure(err: unknown): PatFailureText | null {
   if (err instanceof PortalMintError) return { title: "포털에서 PAT 를 발급하지 못했습니다.", detail: err.message };
+  if (err instanceof PortalRegisterError) {
+    const base = describePatFailure(err.rejection) ?? describeError(err.rejection);
+    return { title: base.title, detail: `${base.detail} ${mintedNote(err)}` };
+  }
   if (isApiError(err)) return PAT_ERRORS[err.code] ?? null;
   return null;
 }

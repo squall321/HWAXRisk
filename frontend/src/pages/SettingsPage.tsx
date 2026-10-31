@@ -14,6 +14,7 @@ import { cn } from "../lib/cn";
 import { fmtEpoch } from "../format";
 import type { PortalPatAuto, PortalPatDueReason, PortalPatSource, PortalPatSummary } from "../types";
 import { MINT_BODY, registerFromPortal } from "../api/portalPat";
+import type { AutoHold } from "../api/autoPortalPat";
 import { describePatFailure } from "../api/patErrors";
 
 /** `identity.current` 가 신원을 어디서 읽었나(§8.2.1) — 코드값을 그대로 보이지 않는다. */
@@ -66,7 +67,7 @@ const PAT_SOURCE: Record<PortalPatSource, string> = {
  * 조용히 queued 에 쌓인다) 화면이 먼저 말해야 한다. 서버가 주는데 안 그리던 `revoked_at`·`scopes`·
  * `jti` 도 함께 낸다 — 포털에서 폐기했는데 화면이 'registered' 라고 말하는 일이 없게.
  */
-function PatStatus({ summary }: { summary: PortalPatSummary | null }) {
+function PatStatus({ summary, held }: { summary: PortalPatSummary | null; held: AutoHold | null }) {
   if (!summary?.registered) {
     return (
       <div className="flex items-start gap-3 rounded-md border border-border bg-muted/40 px-4 py-3">
@@ -75,9 +76,11 @@ function PatStatus({ summary }: { summary: PortalPatSummary | null }) {
           <div className="font-medium">등록된 PAT 이 없습니다.</div>
           <p className="mt-0.5 text-muted-foreground">
             이 자격이 없으면 무인 패널이 돌지 않습니다 —{" "}
-            {summary?.auto.enabled
-              ? "자동 등록이 켜져 있어 앱을 열 때 저절로 받아 등록합니다. 지금 하려면 아래 버튼을 누르세요."
-              : "아래 버튼 한 번이면 포털에서 받아 등록합니다."}
+            {summary?.auto.enabled && held
+              ? `자동 등록이 켜져 있지만 앞 시도가 등록에서 거절돼(${held.code}) 이 브라우저는 ${fmtEpoch(held.until)}까지 저절로 받지 않습니다. 지금 하려면 아래 버튼을 누르세요.`
+              : summary?.auto.enabled
+                ? "자동 등록이 켜져 있어 앱을 열 때 저절로 받아 등록합니다. 지금 하려면 아래 버튼을 누르세요."
+                : "아래 버튼 한 번이면 포털에서 받아 등록합니다."}
           </p>
         </div>
       </div>
@@ -165,11 +168,14 @@ function AutoPanel({
   auto,
   busy,
   running,
+  held,
   onToggle,
 }: {
   auto: PortalPatAuto;
   busy: boolean;
   running: boolean;
+  /** 이 브라우저의 쉼(앞선 자동 등록이 등록에서 실패했다) — 서버의 last_error 는 게이트웨이 교환의 실패만 적는다. */
+  held: AutoHold | null;
   onToggle: (enabled: boolean) => void;
 }) {
   const describedBy = useId();
@@ -204,6 +210,13 @@ function AutoPanel({
         {running ? (
           <p className="m-0 text-sm text-muted-foreground" role="status">
             지금 자동으로 등록하는 중입니다.
+          </p>
+        ) : null}
+        {held && auto.enabled ? (
+          <p className="m-0 text-sm text-muted-foreground">
+            이 브라우저는 {fmtEpoch(held.until)}까지 자동 등록을 쉽니다 — 앞 시도가 등록에서 거절됐습니다(
+            <code>{held.code}</code>). 같은 까닭으로 또 거절될 PAT 를 새 탭마다 받지 않으려는 것이고, 아래 '포털에서 발급해 등록' 은
+            지금도 됩니다.
           </p>
         ) : null}
       </div>
@@ -263,6 +276,8 @@ function PatSection({ summary, onChanged }: { summary: PortalPatSummary | null; 
   const [confirmDelete, setConfirmDelete] = useState(false);
   const auto = summary?.auto ?? null;
   const locked = busy || autoPat.running;
+  // 지난 쉼은 말하지 않는다(화면을 연 채 쉼이 끝날 수 있다).
+  const held = autoPat.held && autoPat.held.until > Date.now() ? autoPat.held : null;
 
   /** 한 동작 — 성공하면 알림, 실패하면 배너. 어느 쪽이든 서버 상태를 다시 읽는다(PUT 의 답은 `GET /me` 와 꼴이 다르다). */
   async function act(run: () => Promise<string>) {
@@ -287,6 +302,7 @@ function PatSection({ summary, onChanged }: { summary: PortalPatSummary | null; 
   const mintAndSave = () =>
     act(async () => {
       const { jti } = await registerFromPortal();
+      autoPat.clearHold();
       return `포털에서 발급해 등록했습니다 — jti ${jti}`;
     });
 
@@ -314,6 +330,7 @@ function PatSection({ summary, onChanged }: { summary: PortalPatSummary | null; 
       if (!enabled) return "자동 등록을 껐습니다 — 이제 PAT 를 지우거나 폐기해도 저절로 다시 만들어지지 않습니다.";
       if (!next.due) return "자동 등록을 켰습니다.";
       const { jti } = await registerFromPortal();
+      autoPat.clearHold();
       return `자동 등록을 켜고 포털에서 발급해 등록했습니다 — jti ${jti}`;
     });
 
@@ -329,8 +346,8 @@ function PatSection({ summary, onChanged }: { summary: PortalPatSummary | null; 
           detail="PAT 값 자체는 저장 뒤 어디에도 다시 표시되지 않습니다."
         />
       ) : null}
-      <PatStatus summary={summary} />
-      {auto ? <AutoPanel auto={auto} busy={busy} running={autoPat.running} onToggle={toggleAuto} /> : null}
+      <PatStatus summary={summary} held={held} />
+      {auto ? <AutoPanel auto={auto} busy={busy} running={autoPat.running} held={held} onToggle={toggleAuto} /> : null}
       <FormField label="포털 PAT">
         <Input
           type="password"

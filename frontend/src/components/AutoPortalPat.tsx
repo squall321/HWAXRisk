@@ -3,8 +3,9 @@ import { createContext, useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { describeError, riskApi } from "../api/risk.api";
-import { registerFromPortal } from "../api/portalPat";
-import { autoRegisterWanted, createOnceGate } from "../api/autoPortalPat";
+import { autoHoldOf, registerFromPortal } from "../api/portalPat";
+import { autoRegisterWanted, createAutoHold, createOnceGate } from "../api/autoPortalPat";
+import type { AutoHold } from "../api/autoPortalPat";
 import { describePatFailure } from "../api/patErrors";
 import type { PatFailureText } from "../api/patErrors";
 import { Banner, Button } from "../ui/primitives";
@@ -16,6 +17,10 @@ type AutoPortalPatState = {
   running: boolean;
   failure: PatFailureText | null;
   dismiss: () => void;
+  /** 앞선 자동 등록이 등록에서 실패해 이 브라우저가 쉬는 중이면 그 표지 — 설정 화면이 '앱을 열면 저절로 받는다' 대신 이것을 말한다. */
+  held: AutoHold | null;
+  /** 사람이 버튼 · 스위치로 등록에 성공하면 쉼을 걷는다. */
+  clearHold: () => void;
 };
 
 const AutoPortalPatContext = createContext<AutoPortalPatState>({
@@ -23,10 +28,14 @@ const AutoPortalPatContext = createContext<AutoPortalPatState>({
   running: false,
   failure: null,
   dismiss: () => undefined,
+  held: null,
+  clearHold: () => undefined,
 });
 
 // 탭 세션마다 한 번 — sessionStorage 를 못 쓰는 창에서도 이 페이지 안에서는 한 번이다(createOnceGate 주석).
 const gate = createOnceGate(() => window.sessionStorage);
+// 등록에서 실패한 뒤의 쉼 — 탭을 가로지른다(localStorage, {until, code} 만).
+const autoHold = createAutoHold(() => window.localStorage);
 
 function describeAutoFailure(err: unknown): PatFailureText {
   const known = describePatFailure(err);
@@ -45,6 +54,7 @@ export function AutoPortalPatProvider({ children }: { children: ReactNode }) {
   const [version, setVersion] = useState(0);
   const [running, setRunning] = useState(false);
   const [failure, setFailure] = useState<PatFailureText | null>(null);
+  const [held, setHeld] = useState<AutoHold | null>(() => autoHold.current(Date.now()));
 
   useEffect(() => {
     if (gate.tried()) return;
@@ -58,11 +68,24 @@ export function AutoPortalPatProvider({ children }: { children: ReactNode }) {
         return;
       }
       if (controller.signal.aborted || !wanted || gate.tried()) return;
+      // 앞선 자동 등록이 등록에서 실패해 쉬는 중이면 새 PAT 를 받지 않는다 — 앱이 같은 까닭으로 또 거절할 PAT 를 새 탭마다 받았다.
+      const resting = autoHold.current(Date.now());
+      if (resting) {
+        setHeld(resting);
+        return;
+      }
       gate.mark();
       setRunning(true);
       try {
         await registerFromPortal();
+        autoHold.clear();
+        setHeld(null);
       } catch (err) {
+        const next = autoHoldOf(err, Date.now());
+        if (next) {
+          autoHold.hold(next);
+          setHeld(next);
+        }
         setFailure(describeAutoFailure(err));
       } finally {
         setRunning(false);
@@ -72,8 +95,13 @@ export function AutoPortalPatProvider({ children }: { children: ReactNode }) {
     return () => controller.abort();
   }, []);
 
+  const clearHold = () => {
+    autoHold.clear();
+    setHeld(null);
+  };
+
   return (
-    <AutoPortalPatContext.Provider value={{ version, running, failure, dismiss: () => setFailure(null) }}>
+    <AutoPortalPatContext.Provider value={{ version, running, failure, dismiss: () => setFailure(null), held, clearHold }}>
       {children}
     </AutoPortalPatContext.Provider>
   );
