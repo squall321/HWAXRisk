@@ -2926,3 +2926,107 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
 - 전체 시험(공유 잠금 아래, HEAD) — 3,504 통과 · xfail 4 · 실패 0(rc 0, 11분 16초 — 앞 판 3,474 에 새 시험 30). ruff — 바꾼 파일은 깨끗하다.
 - 하지 않은 것 — 배선 리허설(`tests/synth/rehearsal_d.py`)은 프로세스를 띄우는 일이라 돌리지 않았다. 카드 대조 사슬의 바뀐 곳은 없다(EC-28 —
   새 사유가 그 길에 닿지 않는다). 서비스 재기동 · push · 병합은 없다.
+
+## RK-01 RA 보내는 쪽(가지 `wt1031/rk01`, main 9bd5f48 위, 2026-10-31)
+
+> 포털 세션에서 사용자가 답한 결정이다 — 포털 `docs/request-1027/review-07-hwax-risk.md` 3절 D-1 의 (가), 기록은 같은 폴더 context-notes
+> 'RK-01 D-1' 절. 지식 그래프 op 는 박스 쓰기 PAT(`HWAXRISK_PORTAL_PAT_RW`, OB-18) 하나로 RA 에 쓰고, 누가 했는지는 앱 DB 의 owner_sub 가
+> 맡는다(정본 plan.md 원칙 10 · §5.3.5 · §8.2.7 그대로). 종합 보고서는 지금처럼 사람 이름이다(포털 챗 PAT 길 — FU-D17). 짓는 길은 검토의
+> '권하는 길 2 · 3' 이다.
+
+### RS-1. 보내는 쪽은 ra_client 한 곳이고 박스 쓰기 PAT 만 잡는다
+- `ra_client.RaSender` 를 `main.py` 가 `RiskRunner(external_sync_send=…)` 로 꽂는다 — sync_loop 가 60초마다 `nightly.retry_external_sync` 로
+  부른다(야간 nightly_loop 는 여전히 비어 있다 — 검토 0절 '요청서 밖' 셋째 줄, 이 일과 따로다). 쓰기 4종의 이름은 앱에서 ra_client.py 에만
+  나오고(`test_no_write_tools` 가 새로 본다), 배선한 main.py 에도 쓰기 키 글자가 없다. 사람의 등록 PAT(_user_credentials · 복호)와 읽기 PAT 는
+  ra_client 가 잡지 않는다 — 정적 검사 하나와, 게이트웨이 대역이 실제로 나간 Authorization 이 쓰기 PAT 뿐인지 보는 시험이 지킨다.
+- 키는 틱마다 secrets.env 에서 다시 읽는다 — 이 앱의 다른 선택 키(backup_key 등)와 같은 꼴이다. 키가 없으면 `off_reason()` 이
+  `credential_missing:HWAXRISK_PORTAL_PAT_RW` 를 주고 retry_external_sync 는 아무것도 부르지 않는다(상태도 바꾸지 않는다). 넣으면 재기동 없이
+  다음 주기부터 나간다. 기동 로그에 켜짐 · 꺼짐 한 줄을 남긴다(검토 '권하는 길 3' 마지막 줄).
+- 호스트 불일치(origin.json)로는 막지 않았다 — 이 앱의 다른 박스 자격(읽기 PAT · 서비스 PAT)도 런타임에서 그것으로 막지 않는다. 옮겨 온
+  PAT 가 새 박스에서 무효면 게이트웨이 401 → `unauthorized` 로 멈추고 그렇게 말한다.
+
+### RS-2. 번역 — op 넷이 RA 도구 호출 몇 개가 되나
+- `merge_object` risk_finding(라벨 상태) — finding 이 실린 **등록부 행**이 RA 객체다(plan §5.3.1 — 단위는 클러스터, code `<target_key>#<cluster_key>`).
+  행은 registry.merge 와 같은 규칙으로 고른다(별칭을 거친 대표 키 · improvement 는 `.imp` 행). rr_id_map 에 id 가 있으면 get_object → 병합 →
+  update_object, 없으면 code 로 create_object(같은 code 면 RA 가 있는 것을 돌려준다 — created:false 면 그 속성에 병합).
+- `merge_object` design_trait(X태그 승격) — value = code = `char:<axis>:<value>`, 속성 axis · token · status. 어휘 객체라 주인이 따로 없다.
+- `link` verified_by|refuted_by — dst 는 근거 `inc:<RA 객체 id>` 가 RA 사고 · 시험일 때만이다(get_object 로 incident 다음 test_run 을 본다).
+  글 근거 · 다른 축의 객체면 잇지 않는다 — concerns → part 를 RA 에 part 가 있을 때만 잇는 정본 규칙(§5.3.5 ⑥)과 같은 자세이고, 사고 · 시험
+  객체를 만들지 않는다. 그 op 는 큐에서 빼되 채널에 `skipped_n` · `last_skip` 을 남기고 요약 글이 'RA 에 잇지 않은 것 n건' 을 말한다. 큐에
+  남겨 두면 사람 라벨(대부분 글 근거)마다 그 대상의 RA 채널이 영영 막힌다.
+- `link` exhibits — src 는 과제(project, code = 과제 id, 속성 없음), dst 는 design_trait. 관계 속성은 op 의 props 그대로(값 없는 칸은 뺀다 —
+  사람 라벨의 match_score 는 None 이다).
+- 원칙 9 의 투영 범위 표기(owner · visibility)와 되짚을 열쇠(cluster_key · portal_registry_key)만 앱이 쥔 속성으로 싣는다. risk_finding 의
+  나머지 투영 속성(severity · mechanism 등 enum)은 패널 때 쓰는 쪽(M4 쓰기 순서 ⑥)의 몫으로 남겼다 — 지금 실으면 박스 온톨로지가 계획표와
+  어긋날 때(drift) 라벨 하나가 enum 검증에 걸려 대상의 채널을 멈춘다.
+
+### RS-3. RA 의 실제 계약에 맞췄다 — 래퍼가 틀려 있었다
+- dev 의 RA 사본(3ece194) mcp_server · ai/agent_tools 를 읽어 보니 래퍼의 인자 넷이 RA 와 달랐다 — get_object 에 type 이 없었고(RA 는
+  `type` · `id` 둘 다 필수, 축이 다르면 없는 것으로 답한다), update_object · add_object_alias 는 `object_id` 대신 id · entity_id, get_subgraph 는
+  `entity_id` 대신 id 를 보냈다. 런타임에서 부르는 곳이 없어 드러나지 않았다. 고쳤고 인자 표를 시험으로 고정했다. cae00 의 RA 판은 보지
+  못했다 — 박스 확인 줄에 `tools/list` 대조를 넣었다.
+- 도구 이름은 게이트웨이의 호출 전용 별칭 `reportarchive_<이름>` 이다 — 맨 이름은 다른 백엔드가 같은 이름을 내면 둘 다 접두가 붙어 바뀐다
+  (노출 이름이 제3자 앱의 가동 여부로 뒤집힌다 — 게이트웨이 bdd05b2). 무인 배경 잡이 그 뒤집힘에 흔들리지 않게 했다. 계약 목록(RA_*_TOOLS)은
+  맨 이름 그대로다.
+- RA 는 실패를 성공 답 안의 `{"error": …}` 로 준다(RA MCP 가 HTTP 상태를 글로만 넘긴다) — 래퍼가 그것을 성공으로 읽지 않게 했다.
+
+### RS-4. value 에 code 를 꼬리로 단다(plan §5.3.1 의 꼴을 따르지 않은 까닭)
+- RA 의 resolve_existing 은 code 가 맞는 객체가 없으면 **value(대소문자 무시) · 별칭**으로 찾는다. 계획표의 risk_finding value
+  `<과제코드>@<mechanism>.<detail>@<cluster_key>` 는 같은 과제의 다른 대상(같은 클러스터 내용) · 같은 과제 코드를 쓰는 다른 주인과 겹친다 —
+  그러면 create_object 가 남의 객체를 created:false 로 돌려주고, 그대로 병합하면 남의 객체를 고친다. 과제 value(계획은 '과제 표시명')도 같다.
+  그래서 value 는 `<계획의 머리>@<code>` 이고(≤255), 돌려받은 객체의 code 가 우리 code 가 아니면 쓰지 않고 `value_collision` 으로 멈춘다.
+  과제 표시명은 description 에 싣는다. 포털 정본 표를 고칠지는 포털 몫이다(돌려주는 글에 적었다).
+
+### RS-5. 가린 값을 되쓰지 않는다
+- 게이트웨이(HG-20)는 나가는 모든 백엔드 답에서 owner 칸 · 메일 꼴 · 계정 꼴을 `[가림:…]` 로 바꾼다. update_object 는 통째 교체라 get_object 로
+  읽은 속성을 그대로 병합해 보내면 가린 글이 RA 원본(owner = 과제 주인 이메일)을 덮는다. upsert_props 는 가린 칸을 patch(앱이 쥔 값)가 채우면
+  그 값을 쓰고, 못 채우는 칸이 남으면 보내지 않고 `masked_readback` 으로 멈춘다(그 칸 이름을 남긴다). 바뀔 것이 없으면 부르지 않는다.
+  risk_finding 의 owner 는 앱이 쥔 칸이라 늘 앱 값으로 되돌아간다.
+
+### RS-6. 보류는 대상 단위 — 비공개면 부르지도 않는다
+- 상태기계(§5.5.3)가 대상 단위라 그 대상의 op 가 가리키는 과제 가운데 하나라도 조직 공개가 아니면 MCP 세션조차 열지 않고 `withheld` 로 둔다
+  (op 는 큐에 그대로). 과제 축은 정본상 비공개에서도 만들 수 있지만 대상의 op 를 나눠 보내는 상태가 없어 함께 보류했다 — 조직 공개로 풀면
+  (`routes._release_withheld`) 쌓인 op 가 순서대로 나간다. 폐기된 과제 · 없는 대상은 `rejected` 로 멈춘다(폐기 뒤에 RA 객체를 새로 만들지 않게).
+- queue_sync_ops 가 withheld 를 pending 으로 되돌리던 것을 막았다 — 정본 '새 패널 종료' 행이 'withheld 면 withheld 유지' 다. 그동안 withheld 를
+  세우는 코드가 없어 드러나지 않았다. sync_badge 도 withheld(n) 를 센다(정본 표기).
+
+### RS-7. 실패 — 큐에 남기고 까닭을 적는다
+- 한 대상의 op 는 순서대로 보내고 처음 실패한 자리에서 멈춘다 — 나간 것만 큐에서 빼고, 실패한 op 와 뒤의 op 는 남는다(뒤의 연결이 앞의 객체에
+  기대므로). last_error 는 `<낱말>: <글>` 이고 sync_summary 의 reason 이 그 낱말이다(검토 '권하는 길 3' 의 갈래 — credential_missing · read_only
+  · forbidden · transient · withheld — 에 unauthorized · tool_missing · ontology_missing · masked_readback · value_collision · rejected 를 더했다).
+- `transient`(전송 실패 · 5xx · 408/425/429 · 기한 초과 · 게이트웨이의 백엔드 불통 · 사람별 위임 실패)만 지수 백오프로 다시 보낸다(8회 뒤
+  unavailable — 종전 규칙). 그 틱의 남은 대상은 미룬다(deferred) — 죽은 RA 를 대상마다 기한(120초)까지 두드리면 같은 sync_loop 의 PAT 폐기 대조가
+  밀린다. 나머지는 곧바로 unavailable 이고 사람이 고친 뒤 '재동기' 로 되살린다(검토 그대로). RA 의 'Internal server error' · 'HTTP 5xx' 글은
+  transient, '시스템 관리자' 는 forbidden, '알 수 없는 타입' 은 ontology_missing(부트스트랩 전), 토큰 · 인증 글은 unauthorized, 그 밖의 RA 거절은
+  rejected 다. 게이트웨이 거절은 글 머리(read_only: · forbidden: · unknown tool:)와 외부 연결 미등록 글로 가르고 그 밖은 transient 다.
+- 상태 전이는 retry_external_sync 가 한 트랜잭션으로 한다(`_apply_outcome`) — 네트워크 호출은 트랜잭션 밖이다(저장소 락은 RLock 이라 tx 가
+  쥐는 동안 다른 스레드가 선다).
+
+### RS-8. retry_external_sync 의 전송기 계약을 넓혔다(종전 꼴은 그대로)
+- bool 을 돌려주는 전송기는 종전대로 읽는다. dict 를 돌려주면 done · skipped · hold · error · retry · off 를 본다. 전송기에 `channels` 가 있으면
+  그 채널만 보낸다 — RaSender 는 ra 만이고 AIDataHub 대기는 세기만 한다(unwired, 요약은 sender_unwired 그대로 — M4). `off_reason()` 이 있으면
+  틱 앞에서 한 번 묻는다. 결과의 새 칸(held · unwired · deferred)은 0 이 아닐 때만 실어 종전 답 꼴(시험 · 야간 단계 보고)이 바뀌지 않는다.
+
+### RS-9. 하지 않은 것 · 남긴 것
+- 패널 때 쓰는 투영(project · snapshot · diff · expert · assessment · risk_finding 의 나머지 속성 · 패널 보고서 update_report_draft — 쓰기 순서
+  ①~⑧)과 AIDataHub 반입은 M4 다. 그 op 를 만드는 쪽이 아직 없다.
+- 야간 nightly_loop · run_nightly 배선은 이 일 밖이다(검토 0절). 화면이 reason 낱말을 그리는 일은 프런트 세션 몫이다(요약 글 `message` 는 늘 있다).
+- cae00 사람 몫은 checklist 2장 'RK-01 cae00 확인' 이다 — 핵심은 쓰기 PAT 주인이 RA 시스템 관리자인지다(RA 온톨로지 쓰기가 관리자 전용).
+
+### RS-10. 시험 · 변이 · 전체 시험
+- 새 시험 22 — `tests/test_ra_sender.py` 15건(부른 것을 적는 게이트웨이 · RA 대역 — RA 의 실제 인자 · 별칭만 받는 도구 이름 · 관리자만 쓰기 ·
+  성공 답 안의 error · owner · 메일 가림을 흉내 낸다. 진짜 RA 는 부르지 않는다) · `test_external_sync.py` 3(보류 유지 · 상태별 reason · 래퍼 인자 표)
+  · `test_nightly.py` 2(전송기 결과 적용 · 꺼짐 · 미룸 · 채널) · `test_no_write_tools.py` 2(쓰기 4종 이름은 ra_client 하나 · 보내는 쪽은 쓰기 PAT
+  만 — 이 둘은 앞 판에서도 통과하는 경계 가드다). 기대를 고친 것 — 요약 시험 하나(sender_unwired → credential_missing, 이름도 바꿨다) ·
+  upsert_props · 자격 없는 래퍼(새 서명) · test_mcp_entry · test_mcp_tools(RA reason) · test_runner(러너에 RaSender 가 꽂혔다).
+- 앞 판(9bd5f48)에 새 시험을 얹으면 test_ra_sender 15건이 오류(RaSender 없음), test_external_sync 6건 · test_nightly 2건 · test_runner ·
+  test_mcp_entry · test_mcp_tools 각 1건이 실패한다.
+- 변이(스크래치 사본, 바이트코드 끔) 23개가 다 잡혔다 — 맨 이름 호출 · update_object 의 id · 가림 검사 없음 · code 대조 없음 · 비공개도 보냄 ·
+  읽기 PAT 로 켜짐 · 재시도 뒤 틱 계속 · 쌓으면 보류 풀림 · 멈춤도 백오프 · 근거 축 안 봄 · 원본 표 id 안 적음 · 관리자 거절 못 알아봄 · 요약
+  늘 미배선 · 러너에 안 꽂음 · 빈 속성 실음 · 건너뜀 안 셈 · 멈추면 나간 것도 남김 · 낡은 사상 안 풂 · .imp 안 붙임 · 읽기 전용 거절 못 알아봄 ·
+  5xx 안 다시 보냄 · 별칭 없이 행 고름 · 꺼짐을 알리지 않고 부름. 마지막 판(아래 고침 뒤)에서 다시 돌려 23/23 이다.
+- 전체 시험(공유 잠금 아래 한 번, 12분 1초) — 3,525 통과 · 실패 1 · xfail 4(앞 판 3,504 에 새 시험 22). 실패는
+  `test_review_findings::test_every_panel_path_reader_of_rr_findings_filters_card_review_findings` 였다 — `_finding_object` 의 rr_findings 조회가
+  카드 대조 원자를 거르지 않았다(M2 #20 가드). 라벨 op 를 낸 쪽(metrics._finding_row)과 같은 거름을 달았고, 가드 파일과 바꾼 시험 파일들을 다시
+  돌려 243 통과다. 전체 시험은 다시 돌리지 않았다(한 번 — 지시).
+- 하지 않은 것 — 서비스 · 인스턴스 기동 · 정지, push · 병합, 진짜 RA 호출. 배선 리허설(rehearsal_d)은 카드 대조 사슬을 바꾸지 않아 돌리지 않았다.

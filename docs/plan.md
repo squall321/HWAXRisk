@@ -103,6 +103,28 @@
   `registry`(status·visibility·merge) · `findings`(수정·삭제·라벨) · `curation` · `patterns` · `precedents` · `refs/{ref:path}`.
 - 살림 — `vocab/{synonyms, stop-tokens}` · `jobs/{id}/{action}` · `GET /export` · `POST /import`.
 
+## 외부 반영 — RA 보내는 쪽(RK-01, 2026-10-31)
+
+사용자 결정 10-31(포털 docs/request-1027 RK-01 D-1 (가)) — 지식 그래프 op 는 **박스 쓰기 PAT(`HWAXRISK_PORTAL_PAT_RW`, OB-18) 하나**로
+RA 에 쓴다. RA 에 적히는 주인은 그 PAT 의 계정이고 누가 했는지는 앱 DB 의 `owner_sub` 가 맡는다. 종합 보고서는 지금처럼 사람 이름(포털 챗 PAT 길)이다.
+
+- 자리 — `ra_client.RaSender`(쓰기 4종의 이름이 나오는 유일한 모듈) → `main.py` 가 `RiskRunner(external_sync_send=…)` 로 꽂는다 → `sync_loop`
+  60초마다 `nightly.retry_external_sync`. 키는 틱마다 다시 읽는다(넣으면 재기동 없이 켜진다). 사람의 등록 PAT · 읽기 PAT 는 쓰지 않는다.
+- 번역 — `merge_object`(risk_finding · design_trait)는 `rr_id_map` 의 id 가 살아 있으면 get_object → 병합 → update_object, 없으면 code 로
+  create_object(같은 code 면 RA 가 있는 것을 돌려준다). `link` 는 link_objects — verified_by · refuted_by 의 dst 는 근거 `inc:<RA 객체 id>` 가
+  사고 · 시험일 때만(아니면 잇지 않고 건수 · 까닭을 남긴다), exhibits 의 src 는 과제(project, code = 과제 id). id 는 `rr_id_map`(RA 칸만)과
+  원본 표의 `ra_entity_id`(rr_projects · rr_registry)에 적는다. risk_finding 의 단위는 등록부 행이다(code `<target_key>#<cluster_key>`).
+- RA 계약 — 도구는 게이트웨이 별칭 `reportarchive_<이름>`, 인자는 RA MCP 의 것(get_object(type, id) · update_object(object_id, …)). value 에
+  code 를 꼬리로 단다(plan §5.3.1 의 꼴은 축 안 유니크가 아니다). 돌려받은 객체의 code 가 다르면 쓰지 않는다(value_collision). 게이트웨이가
+  가린 값(`[가림:…]`)은 되쓰지 않는다 — 앱이 쥔 칸(owner 등)은 앱 값으로, 모르는 칸이 가려졌으면 멈춘다(masked_readback).
+- 보류 · 실패 — 과제가 조직 공개가 아니면 아무것도 부르지 않고 `withheld`(op 는 큐에 그대로). 실패한 op 와 그 뒤 op 는 큐에 남고 last_error 가
+  `<낱말>: <글>` 이다. `transient`(전송 · 5xx · 기한 · 백엔드 불통)만 백오프로 다시 보내고(그 틱의 남은 대상은 미룬다) 나머지는 곧바로
+  `unavailable` — 사람이 고친 뒤 '재동기'.
+- 요약 계약(`sync_summary` 의 `ra.reason`) — `withheld` · `sent` · `credential_missing:HWAXRISK_PORTAL_PAT_RW`(꺼짐) · `unauthorized` ·
+  `read_only` · `forbidden` · `tool_missing` · `ontology_missing` · `masked_readback` · `value_collision` · `rejected` · `transient` · `queued` ·
+  `idle`. `message` 는 늘 사람이 읽을 글이다. AIDataHub 는 보내는 쪽이 없어 `sender_unwired` 그대로다(M4).
+- 남은 것 — 패널 때 쓰는 투영(risk_finding 의 나머지 속성 · assessment · snapshot · diff, plan §5.3.5 쓰기 순서 ①~⑧)과 AIDataHub 반입은 M4 다.
+
 ## 구현 범위(현재 P6, 이 리포 몫)
 
 단계별 상태와 잔여 백로그의 정본은 이 리포 `checklist.md` 다. 여기서는 계층만 적는다.
@@ -117,7 +139,8 @@
 - **재사용**(P5) — `brief` 의 E5+/E5−·E6~E8·kNN·유사 과제 · `rr_delta_priors` · `risk_add_finding` · `/api/precedents`.
 - **학습**(P6) — `learning`(라벨·조건 DSL·백테스트·패턴 승격) · `metrics`(코퍼스 전체 1회 계산) · `nightly`(00:30 재합산·채굴·근접 중복 스캔) ·
   `bootstrap_{ra_ontology,adh}.py`.
-- **경계** — `identity`(되묻기+TTL 캐시) · `visible_projects` 투영 · `_user_credentials` Fernet 암호문 · `ra_client`/`adh_client` 의 `withheld`+보류 op.
+- **경계** — `identity`(되묻기+TTL 캐시) · `visible_projects` 투영 · `_user_credentials` Fernet 암호문 · `ra_client`/`adh_client` 의 `withheld`+보류 op ·
+  RA 보내는 쪽(`ra_client.RaSender`, 박스 쓰기 PAT 하나 — 위 절).
 
 지금 얻는 것 — 과제 등록부터 스냅샷·비교·패널 심사·등록부 누적·다음 과제 브리프 되먹임까지의 폐루프가 앱 DB 안에서 돈다.
 아직 못 얻는 것 — 실소스 자격(B1~B6)이 없어 통과 기준 상당수가 합성 픽스처로만 채워져 있고, 필드·VOC 근거(E10)와 라벨 자동 유입은 비어 있다.

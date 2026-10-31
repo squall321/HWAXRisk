@@ -270,6 +270,13 @@
   **그리고 타입이 서버와 달라 `tsc` 가 거짓을 지켜 주고 있었다** — 배포본이 백지였고, 선언을
   서버 열 이름에 맞추자 호출처 9곳이 드러났다.
 - [ ] 골든 `backend/tests/golden/sif-e2e.ir.json` 부재 — 선행 B2(골든 프로젝트 재파싱)가 닫혀야 만들 수 있다(↓ 2장).
+- [x] **RK-01 RA 보내는 쪽**(2026-10-31, 가지 `wt1031/rk01`, 사용자 결정 10-31 D-1 (가) — context-notes 'RK-01' 절 RS-1~) —
+  `ra_client.RaSender` 가 external_sync.ra 의 대기 op(라벨 상태 병합 · verified_by|refuted_by · X태그 승격의 design_trait · exhibits)를
+  RA 도구 호출로 옮겨 박스 쓰기 PAT 하나로 보낸다. `main.py` 가 `RiskRunner(external_sync_send=…)` 로 꽂고 sync_loop 가 60초마다 부른다.
+  id 는 `rr_id_map` 과 원본 표 `ra_entity_id` 에, 비공개 과제는 `withheld`, 쓰기 PAT 가 없으면 꺼진 채 요약이 `credential_missing` 으로 말한다.
+  실패한 op 는 까닭과 함께 큐에 남는다(transient 만 백오프). RA 래퍼의 인자 이름을 RA MCP 의 것으로 바로잡았다(get_object 의 type ·
+  update_object · add_object_alias 의 object_id · get_subgraph 의 entity_id). 남은 것 — ↓ 2장 cae00 확인, 패널 때 투영(M4), 화면의
+  reason 낱말(프런트 세션).
 
 ## 2. 실환경 실측 대기 — 자격·선행 조건이 필요한 것
 
@@ -291,6 +298,12 @@
 - [ ] `var/app_data/hwax_risk/secrets.env`(0600) 5키 — `HWAXRISK_PORTAL_PAT`(scopes read) · `HWAXRISK_PORTAL_PAT_RW` · `HWAXRISK_HEAX_SERVICE_PAT` ·
   `HWAXRISK_AIDH_API_KEY` · `HWAXRISK_CRED_KEY`(Fernet) → `redeploy-app.sh hwax-risk`. 현재 `cred.key` 만 있다
 - [ ] `bootstrap_ra_ontology.py --base <RA> --apply`(env `RA_ADMIN_PAT`, §10 #1 승인 선행) · `bootstrap_adh.py`(§10 #10 확인 선행) 1회 실행
+- [ ] **RK-01 cae00 확인**(사람 몫) — ① `HWAXRISK_PORTAL_PAT_RW`(aud mcp-gateway · scopes read · write)를 secrets.env 에 넣는다(재기동은
+  필요 없다 — 다음 동기 주기부터 켜진다). ② **그 PAT 주인 계정이 RA 시스템 관리자인지** — RA 온톨로지 쓰기는 `require_system_admin`
+  이라 아니면 모든 대상이 `forbidden: … 시스템 관리자 권한이 필요합니다` 로 멈춘다(RA 사람별 위임이 켜진 박스는 그 이메일의 RA 계정,
+  꺼진 박스는 포털 '외부 연결' 에 등록한 rat_ 의 주인). ③ 게이트웨이 `tools/list` 에 `reportarchive_create_object` 별칭이 서는지 · 인자가
+  `update_object(object_id)` · `get_object(type, id)` 인지(dev RA 사본 3ece194 기준으로 지었다). ④ 위 부트스트랩이 돌았는지(아니면
+  `ontology_missing`). ⑤ 과제는 기본이 비공개라 조직 공개로 바꾼 과제만 나간다(나머지는 `withheld`).
 - [ ] 통과 기준 실측 — P0 (4) StepForge 직접 읽기 · (9) 러너 자격 3항 · (16) app-data 왕복(`appdata-to-drive.sh` → 복원 `integrity_check ok`) ·
   (17) 신원 해석 라이브 · (18) 자격 최소 권한·암호 보관 4항
 - [ ] P3 엔진 실호출 실측 — 포털 `/agent/chat` 경로 (A) 로 패널 1건 완주 · SSE 귀속 ≥95% · 도구 사용률 ≥80% · IR 인용 ≥50%
@@ -376,6 +389,8 @@
 
 포털 `checklist.md` '착수 전 — 사용자 결정' 절의 미결 항목 중 앱 동작을 바꾸는 것만 옮겨 적는다. 코드는 각 항의 **기본값**으로 이미 돌고 있다.
 
+- [x] **RK-01 D-1 지식 그래프 쓰기 주체**(포털 docs/request-1027 review-07 3절) — (가) 박스 쓰기 PAT(서비스 계정)로 쓰고 누가 했는지는
+  `owner_sub` 가 맡는다. 종합 보고서는 사람 이름 그대로(포털 챗 PAT 길). 사용자 결정 10-31.
 - [ ] #17 MCP 쓰기 귀속 — `actor` 미검증(`actor_verified:false`) 유지 vs 게이트웨이 `x-hwax-user` 전달 (기본 미채택)
 - [ ] #18b 데이터 등급 — `confidential` 이면 조직 공개를 막을지 (현재 등급과 `mcp_visibility` 는 분리돼 있다)
 - [ ] #29 과제 공유 기본값 — 명시 초대만(기본) vs 부서 자동 viewer / 열람 감사 로그 (기본 안 남김)
