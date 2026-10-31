@@ -63,7 +63,7 @@ CRED_KEY_FILENAME = "cred.key"
 # 키(RA 쓰기·AIDataHub — 보내는 쪽이 아직 배선되지 않았다, M4)까지 모자라다고 해 어느 박스든 경고가 떴다.
 SECRET_KEYS: tuple[str, ...] = ("HWAXRISK_CRED_KEY",)
 # 있으면 읽지만 없어도 기동을 막지 않는 키. PORTAL_PAT 는 scopes ['read'] 전용이고, RA 객체·보고서 쓰기는 PORTAL_PAT_RW 만 쓰며
-# (§5.1 원칙 10) AIDataHub 반입은 HWAXRISK_AIDH_API_KEY 를 쓴다 — 둘 다 보내는 쪽이 아직 배선되지 않았다(M4).
+# (§5.1 원칙 10 — 보내는 쪽 ra_client.RaSender, RK-01) AIDataHub 반입은 HWAXRISK_AIDH_API_KEY 를 쓴다(보내는 쪽은 아직 없다, M4).
 # HEAX_GATEWAY_SECRET: MCP 게이트웨이와만 나눠 갖는 이 앱 전용 값. 있어야 /auth/sso·/auth/portal-pat 가 열린다(없으면 404).
 #   HEAXHub 의 gateway_shared_secret 을 재사용하지 않는다 — 그 값은 portal_auth 라우트에서 Caddy 가
 #   모든 요청에 주입하므로, 같은 값을 쓰면 로그인한 아무나 남의 이메일로 단언을 발급받을 수 있다.
@@ -75,7 +75,8 @@ OPTIONAL_SECRET_KEYS: tuple[str, ...] = (
 OPTIONAL_KEY_EFFECTS: dict[str, str] = {
     "HWAXRISK_PORTAL_PAT": ("사람 자격이 없을 때의 짧은 조회(전문가 명단·현장 VOC·문헌 E10·mcad · dyna 캡처의 MCP 폴백)가 닫힌다 —"
                             " 패널 잡과 ECAD 보드(찾기·붙이기·캡처)는 이 키를 쓰지 않는다(사람 PAT 만)."),
-    "HWAXRISK_PORTAL_PAT_RW": "RA 쓰기 자격 — 보내는 쪽이 아직 배선되지 않아(M4) 지금은 없어도 달라지는 것이 없다.",
+    "HWAXRISK_PORTAL_PAT_RW": ("RA 쓰기 자격 — 라벨 상태 · X태그 승격을 RA 지식 그래프로 보내는 쪽이 꺼진다(대기만 쌓이고 과제 · 대상 화면의"
+                               " RA 반영 요약이 credential_missing 으로 말한다). 넣으면 재기동 없이 다음 동기 주기부터 나간다."),
     "HWAXRISK_HEAX_SERVICE_PAT": ("StepForge REST 의 마지막 자격 — 웹 로그인 토큰도 게이트웨이 경유 본인 PAT 도 없는 캡처는 mcad 를"
                                   " MCP 폴백으로 읽어 G6 이 unit_unknown 으로 막힌다."),
     "HWAXRISK_AIDH_API_KEY": "AIDataHub 반입 키 — 반입하는 쪽이 아직 배선되지 않아(M4) 지금은 없어도 달라지는 것이 없다.",

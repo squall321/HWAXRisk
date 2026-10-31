@@ -390,12 +390,36 @@ def scan_unclassified(store: Any, *, now: int) -> dict:
 
 
 # ---------------------------------------------------------------- ⑦ external_sync 재시도
+def _apply_outcome(store: Any, target_key: str, channel: str, outcome: Mapping[str, Any]) -> str:
+    """전송기의 결과 dict 를 상태기계에 옮긴다(한 트랜잭션) — 'held' · 'failed' · 'sent' 가운데 하나를 돌려준다."""
+    from app import ra_client
+
+    with store.tx():
+        if outcome.get("done"):
+            ra_client.complete_sync_ops(store, target_key, channel, list(outcome["done"]))
+        if outcome.get("skipped"):
+            ra_client.note_sync_skips(store, target_key, channel, list(outcome["skipped"]))
+        if outcome.get("hold"):
+            ra_client.set_sync_state(store, target_key, channel, str(outcome["hold"]))
+            return "held"
+        if outcome.get("error"):
+            mark = ra_client.note_sync_failure if outcome.get("retry") else ra_client.mark_unavailable
+            mark(store, target_key, channel, str(outcome["error"]))
+            return "failed"
+    return "sent"
+
+
 def retry_external_sync(store: Any, *, now: int,
-                        send: Callable[[Any, str, str, Sequence[Mapping[str, Any]]], bool] | None = None) -> dict:
+                        send: Callable[[Any, str, str, Sequence[Mapping[str, Any]]], Any] | None = None) -> dict:
     """next_at ≤ now 인 pending 채널의 op 를 다시 보낸다(§5.5.3).
 
     send 가 없으면(러너가 아직 클라이언트를 물리지 않았으면) 보내지 않고 대기 건수만 센다 — 이 모듈은
-    스스로 외부 연결을 열지 않는다.
+    스스로 외부 연결을 열지 않는다. send 는 둘 가운데 하나를 돌려준다.
+    - bool(종전 꼴) — 참이면 그 op 가 전부 끝, 거짓이면 실패 1회(백오프).
+    - dict(ra_client.RaSender) — done(큐에서 뺄 op) · skipped(RA 에 잇지 않은 것의 까닭) · hold('withheld') · error('<낱말>: <글>' —
+      남은 op 는 큐에 그대로) · retry(참이면 백오프, 거짓이면 곧바로 unavailable) · off(자격이 없어 부르지 않았다 — 상태를 바꾸지 않는다).
+    send 에 `channels` 가 있으면 그 채널만 보내고 나머지는 센다(unwired). `off_reason()` 이 글을 주면 아무것도 보내지 않는다. 다시 보낼
+    실패(retry)가 나면 그 틱의 남은 타깃은 다음 틱으로 미룬다(deferred — 죽은 상대를 타깃마다 기한까지 두드리지 않는다).
     """
     from app import ra_client
 
@@ -411,22 +435,40 @@ def retry_external_sync(store: Any, *, now: int,
 
     if send is None:
         return {"due": len(due), "sent": 0, "skipped": "sender 미배선"}
+    off_reason = getattr(send, "off_reason", None)
+    off = off_reason() if callable(off_reason) else None
+    if off:
+        return {"due": len(due), "sent": 0, "skipped": off}
 
-    sent = failed = 0
-    for target_key, channel, ops in due:
+    channels = tuple(getattr(send, "channels", ra_client.SYNC_CHANNELS))
+    counts = {"sent": 0, "failed": 0, "held": 0, "unwired": sum(1 for _, ch, _ in due if ch not in channels), "deferred": 0}
+    for index, (target_key, channel, ops) in enumerate(due):
+        if channel not in channels:
+            continue
         try:
-            ok = send(store, target_key, channel, ops)
+            outcome = send(store, target_key, channel, ops)
         except Exception as exc:  # noqa: BLE001 — 한 채널의 실패가 다른 타깃을 막지 않는다.
             ra_client.note_sync_failure(store, target_key, channel, f"{type(exc).__name__}: {exc}")
-            failed += 1
+            counts["failed"] += 1
             continue
-        if ok:
-            ra_client.complete_sync_ops(store, target_key, channel, ops)
-            sent += 1
-        else:
-            ra_client.note_sync_failure(store, target_key, channel, "send 실패")
-            failed += 1
-    return {"due": len(due), "sent": sent, "failed": failed}
+        if not isinstance(outcome, Mapping):
+            if outcome:
+                ra_client.complete_sync_ops(store, target_key, channel, ops)
+                counts["sent"] += 1
+            else:
+                ra_client.note_sync_failure(store, target_key, channel, "send 실패")
+                counts["failed"] += 1
+            continue
+        if outcome.get("off"):
+            counts["deferred"] += sum(1 for _, ch, _ in due[index:] if ch in channels)
+            break
+        counts[_apply_outcome(store, target_key, channel, outcome)] += 1
+        if outcome.get("error") and outcome.get("retry"):
+            counts["deferred"] += sum(1 for _, ch, _ in due[index + 1:] if ch in channels)
+            break
+    out = {"due": len(due), "sent": counts["sent"], "failed": counts["failed"]}
+    out.update({k: counts[k] for k in ("held", "unwired", "deferred") if counts[k]})
+    return out
 
 
 # ---------------------------------------------------------------- ⑧ rr_id_map 정합 검사

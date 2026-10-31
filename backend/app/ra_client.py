@@ -1,13 +1,15 @@
-# ReportArchive KG 인스턴스 쓰기·읽기를 게이트웨이 MCP 로 부르는 래퍼(plan §5.3.5) + external_sync 상태기계(§5.5.3)
+# ReportArchive KG 인스턴스 쓰기·읽기를 게이트웨이 MCP 로 부르는 래퍼(plan §5.3.5) + 대기 op 를 보내는 쪽(RK-01) + external_sync 상태기계(§5.5.3)
 from __future__ import annotations
 
 import json
+import re
 import time
 from typing import Any, Mapping, Sequence
 
 import httpx
 
-from app.common import canonical_json, http_client, now_epoch
+from app import config
+from app.common import canonical_json, http_client, now_epoch, parse_ref
 
 # 응답 침묵 한도다 — 호출 길이의 상한이 아니다. 게이트웨이가 도구가 도는 동안 15초마다 ping 을 흘리므로 이 값은
 # 죽은 게이트웨이만 잡고, 호출 길이는 게이트웨이의 GATEWAY_CALL_TIMEOUT 이 정한다(호출 길이를 묶으려면 기한을 준다).
@@ -253,20 +255,40 @@ class McpHttpClient:
 
 
 # ---------------------------------------------------------------- RA 래퍼
+# 게이트웨이의 호출 전용 별칭 `<백엔드 키(하이픈 뺌)>_<원래 이름>` — 맨 이름은 다른 백엔드에 같은 이름이 붙으면 둘 다 접두가 붙어 바뀌고
+# (노출 이름이 제3자 앱의 가동 여부로 뒤집힌다 — 게이트웨이 bdd05b2), 별칭은 겹침과 무관하게 늘 RA 로 간다. 계약 이름(RA_*_TOOLS)은 맨 이름이다.
+GATEWAY_ALIAS_PREFIX = "reportarchive_"
+# 가린 값의 표지 — 게이트웨이가 나가는 응답의 사람 이름 · 메일 · 계정 꼴을 `[가림:<종류>]` 로 바꾼다(HWAXPortal docs/request-1027 HG-20).
+MASK_MARK = "[가림:"
+
+
+def is_masked(value: Any) -> bool:
+    """게이트웨이가 가린 값인가(글 · 목록 · 객체 안까지)."""
+    if isinstance(value, str):
+        return MASK_MARK in value
+    if isinstance(value, Mapping):
+        return any(is_masked(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(is_masked(v) for v in value)
+    return False
+
+
 class RaClient:
     """앱 → 게이트웨이 MCP `reportarchive` 도구 래퍼. RA 토큰은 보유하지 않는다(포털 PAT 만 쓴다).
 
-    자격이 없으면 어떤 호출도 하지 않고 {'ok': False, 'error': 'unavailable'} 로 조용히 지나간다.
+    자격이 없으면 어떤 호출도 하지 않고 {'ok': False, 'error': 'unavailable'} 로 조용히 지나간다. 인자 이름은 RA MCP 의 것이다
+    (ReportArchive mcp_server — get_object(type, id) · update_object(object_id, …) · link_objects(src_id, dst_id, relation, …)).
     """
 
     def __init__(self, endpoint: str, token: str | None, *, client: httpx.Client | None = None,
-                 timeout: float = DEFAULT_TIMEOUT, mcp: McpHttpClient | None = None) -> None:
+                 timeout: float = DEFAULT_TIMEOUT, mcp: McpHttpClient | None = None,
+                 deadline_s: float | None = None) -> None:
         self.endpoint = endpoint
         self._token = token or ""
         self._mcp = mcp
         if self._mcp is None and self._token:
             self._mcp = McpHttpClient(endpoint, headers={"Authorization": f"Bearer {self._token}"},
-                                      client=client, timeout=timeout)
+                                      client=client, timeout=timeout, deadline_s=deadline_s)
 
     @property
     def available(self) -> bool:
@@ -281,45 +303,64 @@ class RaClient:
             return self._unavailable()
         if name not in RA_WRITE_TOOLS + RA_READ_TOOLS + RA_REPORT_TOOLS:
             return {"ok": False, "error": "tool_not_contracted", "detail": name}
-        return self._mcp.call(name, arguments)
+        return self._mcp.call(GATEWAY_ALIAS_PREFIX + name, arguments)
 
     # -- 읽기 ---------------------------------------------------------------
-    def get_object(self, object_id: int | str) -> dict:
-        return self.call_tool("get_object", {"id": object_id})
+    def get_object(self, type_slug: str, object_id: int | str) -> dict:
+        """RA 는 축 slug 와 id 로 지목하고 축이 다르면 없는 것으로 답한다(`객체를 찾을 수 없습니다`)."""
+        return self.call_tool("get_object", {"type": type_slug, "id": str(object_id)})
 
     def search_objects(self, **kwargs: Any) -> dict:
         return self.call_tool("search_objects", kwargs)
 
     def get_subgraph(self, object_id: int | str, relations: Sequence[str], depth: int = 3) -> dict:
         return self.call_tool("get_subgraph",
-                              {"id": object_id, "relations": list(relations), "depth": depth})
+                              {"entity_id": int(object_id), "relations": list(relations), "depth": depth})
 
     def list_object_types(self) -> dict:
         return self.call_tool("list_object_types", {})
 
     # -- 쓰기 4종 -----------------------------------------------------------
     def create_object(self, type_slug: str, value: str, code: str,
-                      properties: Mapping[str, Any] | None = None) -> dict:
-        """같은 code 로 재호출해도 안전하다(RA 가 resolve_existing 으로 created:false 를 돌려준다)."""
-        return self.call_tool("create_object", {"type_slug": type_slug, "value": value, "code": code,
-                                                "properties": dict(properties or {})})
+                      properties: Mapping[str, Any] | None = None, *, description: str | None = None) -> dict:
+        """같은 code 로 재호출해도 안전하다(RA 가 resolve_existing 으로 created:false 를 돌려준다).
+
+        RA 의 resolve_existing 은 code 가 맞는 객체가 없으면 value(대소문자 무시) · 별칭으로 찾는다 — 돌려준 객체의 code 가 다르면
+        값이 겹친 남의 객체다(부르는 쪽이 code 를 견준다)."""
+        args: dict[str, Any] = {"type_slug": type_slug, "value": value, "code": code,
+                                "properties": dict(properties or {})}
+        if description:
+            args["description"] = description
+        return self.call_tool("create_object", args)
 
     def update_object(self, object_id: int | str, properties: Mapping[str, Any]) -> dict:
         """properties 를 통째로 교체한다 — 부분 갱신은 upsert_props 를 쓴다."""
-        return self.call_tool("update_object", {"id": object_id, "properties": dict(properties)})
+        return self.call_tool("update_object", {"object_id": int(object_id), "properties": dict(properties)})
 
-    def upsert_props(self, object_id: int | str, patch: Mapping[str, Any]) -> dict:
-        """get_object 로 현재 속성을 읽어 patch 를 병합한 뒤 update_object 로 보낸다(§5.3.5 멱등 규칙)."""
+    def upsert_props(self, type_slug: str, object_id: int | str, patch: Mapping[str, Any], *,
+                     current: Mapping[str, Any] | None = None) -> dict:
+        """get_object 로 현재 속성을 읽어 patch 를 병합한 뒤 update_object 로 보낸다(§5.3.5 멱등 규칙).
+
+        `current` 는 이미 읽은 객체(get_object 답 · create_object 의 object)다 — 주면 다시 읽지 않는다. 게이트웨이가 가린 값
+        (`[가림:…]`)은 되쓰지 않는다 — update_object 는 통째 교체라 그대로 보내면 가린 글이 RA 원본을 덮는다. patch 가 그 칸을 채우면
+        patch 값이 들어가고, 못 채우는 칸이 남으면 보내지 않고 {'ok': False, 'error': 'masked_readback', 'detail': [칸]} 이다.
+        병합한 결과가 지금 속성과 같으면 부르지 않는다({'ok': True, 'result': {'unchanged': True}}).
+        """
         if not self.available:
             return self._unavailable()
-        current = self.get_object(object_id)
-        if not current.get("ok"):
-            return current
-        payload = current.get("result") or {}
-        obj = payload.get("object") if isinstance(payload, Mapping) and "object" in payload else payload
-        props = dict((obj or {}).get("properties") or {}) if isinstance(obj, Mapping) else {}
-        props.update(dict(patch))
-        return self.update_object(object_id, props)
+        if current is None:
+            reply = self.get_object(type_slug, object_id)
+            if not reply.get("ok"):
+                return reply
+            current = reply.get("result") if isinstance(reply.get("result"), Mapping) else {}
+        props = dict(current.get("properties") or {}) if isinstance(current.get("properties"), Mapping) else {}
+        lost = sorted(k for k, v in props.items() if is_masked(v) and k not in patch)
+        if lost:
+            return {"ok": False, "error": "masked_readback", "detail": lost}
+        merged = {**props, **dict(patch)}
+        if merged == props:
+            return {"ok": True, "result": {"unchanged": True}}
+        return self.update_object(object_id, merged)
 
     def link_objects(self, src_id: int | str, dst_id: int | str, relation: str, *,
                      properties: Mapping[str, Any] | None = None,
@@ -334,7 +375,7 @@ class RaClient:
 
     def add_object_alias(self, entity_id: int | str, alias: str) -> dict:
         """같은 축 안 정규화 유니크. 이미 그 엔티티의 별칭이면 멱등, 다른 엔티티와 충돌하면 error 다."""
-        return self.call_tool("add_object_alias", {"entity_id": entity_id, "alias": alias})
+        return self.call_tool("add_object_alias", {"object_id": int(entity_id), "alias": alias})
 
     # -- 보고서 -------------------------------------------------------------
     def get_report(self, report_id: int | str) -> dict:
@@ -354,15 +395,346 @@ WRITE_SECRET_KEY = "HWAXRISK_PORTAL_PAT_RW"
 
 
 def ra_client_from_settings(settings, secrets: Mapping[str, str] | None = None, *,
-                            client: httpx.Client | None = None) -> RaClient:
+                            client: httpx.Client | None = None, deadline_s: float | None = None) -> RaClient:
     """Settings·secrets.env 로 RaClient 를 만든다 — 쓰기 키 `HWAXRISK_PORTAL_PAT_RW` 만 쓴다(§5.1 원칙 10).
 
     이 클라이언트는 create_object·update_object·add_object_alias·link_objects·보고서 초안까지 부르므로
-    좌석 자유조회가 쓰는 읽기 전용 PAT 로는 열지 않는다. 키가 없으면 available=False 인 객체가 나오고
-    external_sync 는 조용히 pending 으로 남는다(폴백 규약 그대로).
+    좌석 자유조회가 쓰는 읽기 전용 PAT 로는 열지 않는다. 키가 없으면 available=False 인 객체가 나온다 — 보내는 쪽(RaSender)은
+    그때 꺼져 있고 sync_summary 가 그 사실(credential_missing)을 말한다.
     """
     token = (secrets or {}).get(WRITE_SECRET_KEY)
-    return RaClient(getattr(settings, "gateway_mcp", ""), token, client=client)
+    return RaClient(getattr(settings, "gateway_mcp", ""), token, client=client, deadline_s=deadline_s)
+
+
+# ---------------------------------------------------------------- 보내는 쪽(RK-01 — 사용자 결정 10-31 D-1 (가))
+# external_sync.ra 에 쌓인 op(라벨 상태 병합 · verified_by|refuted_by 연결 — metrics, X태그 승격의 design_trait · exhibits —
+# character)를 RA 도구 호출로 옮긴다. 자격은 박스 쓰기 PAT 하나다 — 사람이 없는 배경 잡이라 사람의 등록 PAT(_user_credentials)도
+# 읽기 PAT 도 쓰지 않는다. RA 에 적히는 주인은 그 PAT 의 계정이고, 누가 했는지는 앱 DB 의 owner_sub 가 맡는다(plan §5.3.5).
+# 키는 틱마다 다시 읽는다 — 넣으면 재기동 없이 다음 동기 주기부터 켜지고, 없으면 아무것도 부르지 않는다.
+SENDER_CHANNELS = ("ra",)
+# 호출 한 건의 벽시계 기한(초) — 게이트웨이의 RA 호출 한도(GATEWAY_CALL_TIMEOUT, plan §5.3.5 120 s)와 같다. 넘기면 transient 다.
+SEND_DEADLINE_S = 120.0
+LABEL_RELATIONS = ("verified_by", "refuted_by")
+# verified_by · refuted_by 의 dst 축(plan §5.3.2). 라벨 근거 `inc:<RA 객체 id>` 가 이 축의 객체일 때만 잇는다.
+LABEL_DST_TYPES = ("incident", "test_run")
+# 다시 보내 볼 HTTP 상태 — 그 밖의 4xx 는 고치기 전에는 같은 답이다.
+_RETRY_HTTP = frozenset({408, 425, 429})
+_HTTP_5XX_RX = re.compile(r"\bHTTP 5\d\d\b")
+# 실패 사유 낱말(sync_summary 의 reason) — 이 낱말로 last_error 를 `<낱말>: <글>` 꼴로 적는다. transient 만 백오프로 다시 보내고
+# 나머지는 곧바로 unavailable 이다(사람이 고친 뒤 '재동기').
+FAIL_TEXT: dict[str, str] = {
+    "unauthorized": "게이트웨이 · RA 가 박스 쓰기 PAT 를 받지 않는다(만료 · 폐기 · 다른 박스의 토큰)",
+    "read_only": "박스 쓰기 PAT 가 읽기 전용이다(scopes 에 write 가 없다)",
+    "forbidden": "그 PAT 의 계정에 RA 쓰기 권한이 없다(RA 시스템 관리자 · 포털 권한표 · 외부 연결 등록을 본다)",
+    "tool_missing": "게이트웨이에 RA 도구가 없다(RA 백엔드가 붙어 있지 않다)",
+    "ontology_missing": "RA 에 리스크 축 · 관계가 없다(bootstrap_ra_ontology.py --apply 를 아직 돌리지 않았다)",
+    "masked_readback": "게이트웨이가 가린 속성 값을 되쓰게 되어 멈췄다(통째 교체라 가린 글이 RA 원본을 덮는다)",
+    "value_collision": "RA 가 같은 code 대신 값이 겹친 다른 객체를 돌려줬다",
+    "rejected": "RA 가 이 op 를 받지 않았다",
+    "transient": "여러 번 보내지 못했다(게이트웨이 · RA 불통 · 시간 초과)",
+}
+# RA 에 잇지 않기로 한 op 의 까닭 — 큐에서는 빼고 건수와 마지막 까닭을 채널에 남긴다(skipped_n · last_skip).
+SKIP_TEXT: dict[str, str] = {
+    "evidence_not_ra_object": "라벨 근거가 RA 사고 · 시험 객체(inc:<RA 객체 id>)가 아니다",
+    "evidence_not_incident_or_test_run": "근거로 적은 RA 객체가 사고 · 시험이 아니거나 없다",
+    "registry_absent": "그 finding 이 실린 등록부 행이 없다",
+}
+
+
+def sender_status(settings=None, secrets: Mapping[str, str] | None = None) -> dict:
+    """RA 보내는 쪽의 지금 상태 — {on, reason, message}. 박스 쓰기 PAT 가 있으면 켜져 있다(그 밖의 자격은 보지 않는다)."""
+    cfg = config.settings if settings is None else settings
+    values = config.load_secrets(cfg.data_dir) if secrets is None else secrets
+    if (values.get(WRITE_SECRET_KEY) or "").strip():
+        return {"on": True, "reason": "wired",
+                "message": f"RA 보내는 쪽 켜짐 — 박스 쓰기 PAT({WRITE_SECRET_KEY})로 게이트웨이를 거쳐 RA 지식 그래프에 쓴다."}
+    return {"on": False, "reason": f"credential_missing:{WRITE_SECRET_KEY}",
+            "message": (f"RA 보내는 쪽 꺼짐 — 박스에 RA 쓰기 자격({WRITE_SECRET_KEY})이 없다. secrets.env 에 넣으면 다음 동기"
+                        " 주기부터 나간다(재기동은 필요 없다).")}
+
+
+class _Stop(Exception):
+    """op 하나를 보내다 멈춘 까닭 — code 는 FAIL_TEXT 의 낱말이고 retry 면 백오프, 아니면 unavailable 이다."""
+
+    def __init__(self, code: str, detail: str, *, retry: bool = False) -> None:
+        super().__init__(detail)
+        self.code = code
+        self.retry = retry
+        self.text = f"{code}: {' '.join(str(detail).split())[:240]}"
+
+
+def _flat(value: Any) -> str:
+    if isinstance(value, (Mapping, list, tuple)):
+        try:
+            return canonical_json(value)
+        except (TypeError, ValueError):
+            return str(value)
+    return "" if value is None else str(value)
+
+
+def _gateway_refusal(tool: str, text: str) -> _Stop:
+    """게이트웨이가 isError 로 돌려준 글 — 거절 넷은 사람이 고칠 것이고, 나머지(백엔드 불통 · 시간 초과 · 위임 실패)는 다시 보낸다."""
+    if text.startswith("read_only:"):
+        return _Stop("read_only", f"{tool} — {text}")
+    if text.startswith("forbidden:"):
+        return _Stop("forbidden", f"{tool} — {text}")
+    if text.startswith("unknown tool:"):
+        return _Stop("tool_missing", f"{tool} — {text}")
+    if "등록되어 있지 않습니다" in text:          # 위임이 꺼진 박스 — 포털 외부 연결에 그 계정의 RA 토큰이 없다
+        return _Stop("forbidden", f"{tool} — {text}")
+    return _Stop("transient", f"{tool} — {text}", retry=True)
+
+
+def _ra_refusal(tool: str, payload: Mapping[str, Any]) -> _Stop:
+    """RA 가 성공 답 안에 실은 {'error': …} — RA MCP 는 HTTP 상태를 글로만 넘긴다(ReportArchive mcp_server._unwrap)."""
+    text = " ".join(f"{payload.get('error')} {_flat(payload.get('detail'))}".split())
+    if "시스템 관리자" in text:                 # 온톨로지 쓰기는 시스템 관리자 전용(require_system_admin)
+        return _Stop("forbidden", f"{tool} — {text}")
+    if "알 수 없는 타입" in text:
+        return _Stop("ontology_missing", f"{tool} — {text}")
+    if "찾을 수 없습니다" in text:
+        return _Stop("not_found", f"{tool} — {text}")
+    if "토큰" in text or "인증" in text:
+        return _Stop("unauthorized", f"{tool} — {text}")
+    if "Internal server error" in text or _HTTP_5XX_RX.search(text):
+        return _Stop("transient", f"{tool} — {text}", retry=True)
+    return _Stop("rejected", f"{tool} — {text}")
+
+
+def _result(reply: Mapping[str, Any], tool: str) -> dict:
+    """도구 답 → 값. 실패면 _Stop 을 던진다 — 전송 · 게이트웨이 · RA 세 층의 실패를 사유 낱말로 가른다."""
+    if not reply.get("ok"):
+        error, detail = str(reply.get("error") or ""), _flat(reply.get("detail"))
+        if error == "http_401":
+            raise _Stop("unauthorized", f"{tool} — 게이트웨이 HTTP 401 {detail}")
+        if error == "http_403":
+            raise _Stop("forbidden", f"{tool} — 게이트웨이 HTTP 403 {detail}")
+        if error.startswith("http_"):
+            status = int(reply.get("status") or 0)
+            retry = status >= 500 or status in _RETRY_HTTP
+            raise _Stop("transient" if retry else "rejected", f"{tool} — 게이트웨이 HTTP {status} {detail}", retry=retry)
+        if error in ("transport_error", DEADLINE_EXCEEDED, "unparsable_response"):
+            raise _Stop("transient", f"{tool} — {error} {detail}", retry=True)
+        if error == "tool_error":
+            raise _gateway_refusal(tool, detail)
+        if error == "masked_readback":
+            raise _Stop("masked_readback", f"{tool} — 가린 칸 {detail}")
+        raise _Stop("rejected", f"{tool} — {error} {detail}")          # rpc_error(인자 꼴) · tool_not_contracted
+    payload = reply.get("result")
+    if isinstance(payload, Mapping) and payload.get("error"):
+        raise _ra_refusal(tool, payload)
+    if not isinstance(payload, Mapping):
+        raise _Stop("rejected", f"{tool} — 객체가 아닌 답 {_flat(payload)[:120]}")
+    return dict(payload)
+
+
+def _props(op: Mapping[str, Any]) -> dict:
+    """op 의 속성 — 값이 없는 칸은 싣지 않는다(RA 속성 스키마가 null 을 받지 않을 수 있다)."""
+    return {k: v for k, v in dict(op.get("props") or {}).items() if v is not None}
+
+
+def _value(head: str, code: str) -> str:
+    """value(≤255)는 축 안에서 대소문자 무시 유니크라 code 를 꼬리에 단다 — plan §5.3.1 의 꼴만으로는 같은 과제의 다른 대상 · 같은 과제
+    코드의 다른 주인과 겹쳐, code 가 맞는 객체가 없을 때 RA 가 값이 겹친 남의 객체를 돌려준다(resolve_existing)."""
+    return f"{head[:max(0, 254 - len(code))]}@{code}"
+
+
+def _finding_object(store, project: Mapping[str, Any], finding_id: Any) -> dict | None:
+    """라벨 op 의 finding → 그 finding 이 실린 등록부 행의 RA risk_finding(plan §5.3.1 — 단위는 등록부 클러스터, code
+    `<target_key>#<cluster_key>`). 행을 고르는 규칙은 registry.merge 와 같다(별칭을 거친 대표 키 · improvement 는 접미 행)."""
+    from app import learning, registry  # noqa: PLC0415 — 둘 다 무겁고 metrics 가 이 모듈을 먼저 부른다.
+
+    # 라벨 op 를 낸 쪽(metrics._finding_row)과 같은 거름 — 카드 대조 원자에는 라벨이 붙지 않는다(M2 #20).
+    row = store.query_one(
+        "SELECT target_key, cluster_key, owner_sub, direction FROM rr_findings WHERE finding_id = ?"
+        " AND COALESCE(source_kind, '') <> 'card_review'", (str(finding_id or ""),))
+    if row is None:
+        return None
+    base = learning.resolve_cluster_key(store, str(row["cluster_key"]), owner_sub=str(row["owner_sub"])) or str(row["cluster_key"])
+    key = base + registry.IMPROVEMENT_SUFFIX if row["direction"] == "improvement" else base
+    reg = store.query_one(
+        "SELECT target_key, cluster_key, owner_sub, mechanism, mechanism_detail FROM rr_registry"
+        " WHERE target_key = ? AND cluster_key = ?", (row["target_key"], key))
+    if reg is None:
+        return None
+    code = f"{reg['target_key']}#{reg['cluster_key']}"
+    head = f"{project['code']}@{reg['mechanism'] or 'unclassified'}.{reg['mechanism_detail'] or 'unclassified'}"
+    # 원칙 9 의 투영 범위 표기(owner · visibility)와 되짚을 열쇠만 앱이 쥔다 — 나머지 투영 속성은 패널 때 쓰는 쪽(M4)의 몫이다.
+    owned = {"cluster_key": reg["cluster_key"], "portal_registry_key": code, "owner": project["owner_sub"],
+             "visibility": project["mcp_visibility"]}
+    return {"type_slug": "risk_finding", "code": code, "value": _value(head, code), "owned": owned,
+            "kind": "registry", "portal_id": code, "owner_sub": reg["owner_sub"],
+            "mirror": ("UPDATE rr_registry SET ra_entity_id = ? WHERE target_key = ? AND cluster_key = ?",
+                       (reg["target_key"], reg["cluster_key"]))}
+
+
+def _trait_object(op: Mapping[str, Any], owner_sub: str) -> dict:
+    """X태그 승격 op 의 통제 태그 → RA design_trait(value = code = `char:<axis>:<value>`, plan §5.3.1). 어휘 객체라 주인이 따로 없다."""
+    tag = str(op.get("tag") or "")
+    parts = tag.split(":", 2)
+    if len(parts) != 3 or parts[0] != "char" or not parts[1] or not parts[2]:
+        raise _Stop("rejected", f"설계 성격 태그가 char:<축>:<값> 꼴이 아니다 — {tag!r}")
+    return {"type_slug": "design_trait", "code": tag, "value": tag, "owned": {"axis": parts[1], "token": parts[2]},
+            "kind": "trait", "portal_id": tag, "owner_sub": owner_sub, "mirror": None}
+
+
+def _project_object(project: Mapping[str, Any]) -> dict:
+    """과제 → RA project(code = 과제 id, plan §5.3.5 ①). 속성은 싣지 않는다 — 기존 축이라 앱이 정한 속성이 없다."""
+    code = str(project["id"])
+    return {"type_slug": "project", "code": code, "value": _value(str(project["code"]), code), "owned": {},
+            "description": f"HWAX 리스크 심사 과제 — {project['name'] or project['code']}",
+            "kind": "project", "portal_id": code, "owner_sub": project["owner_sub"],
+            "mirror": ("UPDATE rr_projects SET ra_entity_id = ? WHERE id = ?", (code,))}
+
+
+def _mapped_id(store, obj: Mapping[str, Any]) -> int | None:
+    row = store.query_one("SELECT ra_entity_id FROM rr_id_map WHERE portal_kind = ? AND portal_id = ?",
+                          (obj["kind"], obj["portal_id"]))
+    return int(row["ra_entity_id"]) if row is not None and row["ra_entity_id"] is not None else None
+
+
+def _record_id(store, obj: Mapping[str, Any], ra_id: int) -> None:
+    """rr_id_map 의 RA 칸과 원본 표의 ra_entity_id(조회 편의용 중복)를 함께 적는다(plan §5.5.2) — AIDataHub 칸은 건드리지 않는다."""
+    with store.tx():
+        store.execute(
+            "INSERT INTO rr_id_map(portal_kind, portal_id, owner_sub, ra_entity_id, ra_type_slug, ra_synced_at)"
+            " VALUES (?,?,?,?,?,?) ON CONFLICT(portal_kind, portal_id) DO UPDATE SET"
+            " ra_entity_id = excluded.ra_entity_id, ra_type_slug = excluded.ra_type_slug, ra_synced_at = excluded.ra_synced_at",
+            (obj["kind"], obj["portal_id"], obj["owner_sub"], ra_id, obj["type_slug"], now_epoch()))
+        if obj.get("mirror"):
+            sql, params = obj["mirror"]
+            store.execute(sql, (ra_id, *params))
+
+
+def _ensure(store, ra: RaClient, obj: Mapping[str, Any], patch: Mapping[str, Any] | None = None) -> int:
+    """객체의 RA id. rr_id_map 에 있으면 get_object 로 살아 있는지 보고, 없으면(또는 RA 에서 사라졌으면) code 로 create_object 한다.
+    patch 가 있으면(merge_object) 앱이 쥔 속성과 함께 그 객체의 지금 속성에 병합해 update_object 로 보낸다(upsert_props)."""
+    want = {k: v for k, v in {**obj["owned"], **dict(patch or {})}.items() if v is not None}
+    ra_id, current = _mapped_id(store, obj), None
+    if ra_id is not None:
+        try:
+            current = _result(ra.get_object(obj["type_slug"], ra_id), "get_object")
+        except _Stop as stop:
+            if stop.code != "not_found":
+                raise
+            ra_id = None
+    if ra_id is None:
+        made = _result(ra.create_object(obj["type_slug"], obj["value"], obj["code"], want,
+                                        description=obj.get("description")), "create_object")
+        current = made.get("object") if isinstance(made.get("object"), Mapping) else {}
+        if str(current.get("code") or "").casefold() != obj["code"].casefold() or current.get("id") is None:
+            raise _Stop("value_collision", f"create_object — code {obj['code']} 대신 id {current.get('id')} ·"
+                                           f" code {current.get('code')!r} 가 돌아왔다(값 {obj['value']!r})")
+        ra_id = int(current["id"])
+        if made.get("created"):
+            _record_id(store, obj, ra_id)
+            return ra_id
+    if patch is not None:
+        _result(ra.upsert_props(obj["type_slug"], ra_id, want, current=current), "update_object")
+    _record_id(store, obj, ra_id)
+    return ra_id
+
+
+def _label_dst(ra: RaClient, evidence_ref: Any) -> int | str:
+    """라벨 근거 → verified_by · refuted_by 의 dst(RA 사고 · 시험 객체 id). 그런 객체가 아니면 잇지 않고 까닭 낱말을 돌려준다 —
+    concerns → part 를 RA 에 part 가 있을 때만 잇는 것(plan §5.3.5 ⑥)과 같은 규칙이다. 사고 · 시험 객체를 만들지 않는다."""
+    ref = parse_ref(str(evidence_ref or ""))
+    oid = str((ref or {}).get("object_id") or "")
+    if not ref or ref.get("kind") != "inc" or not oid.isdigit():
+        return "evidence_not_ra_object"
+    for type_slug in LABEL_DST_TYPES:
+        try:
+            _result(ra.get_object(type_slug, oid), "get_object")
+        except _Stop as stop:
+            if stop.code == "not_found":
+                continue
+            raise
+        return int(oid)
+    return "evidence_not_incident_or_test_run"
+
+
+def _send_op(store, ra: RaClient, target: Mapping[str, Any], projects: Mapping[str, Mapping[str, Any]],
+             op: Mapping[str, Any]) -> str | None:
+    """op 하나 → RA 도구 호출. 보냈으면 None, RA 에 잇지 않기로 했으면 그 까닭 낱말(SKIP_TEXT), 멈춰야 하면 _Stop 을 던진다."""
+    kind, what = op.get("op"), op.get("type") or op.get("relation")
+    project = projects[str(op.get("project_id") or target["project_id"])]
+    if kind == "merge_object" and what == "risk_finding":
+        obj = _finding_object(store, project, op.get("finding_id"))
+        if obj is None:
+            return "registry_absent"
+        _ensure(store, ra, obj, _props(op))
+        return None
+    if kind == "merge_object" and what == "design_trait":
+        _ensure(store, ra, _trait_object(op, str(target["owner_sub"])), _props(op))
+        return None
+    if kind == "link" and what in LABEL_RELATIONS:
+        obj = _finding_object(store, project, op.get("finding_id"))
+        if obj is None:
+            return "registry_absent"
+        dst = _label_dst(ra, op.get("evidence_ref"))
+        if isinstance(dst, str):
+            return dst
+        _result(ra.link_objects(_ensure(store, ra, obj), dst, str(what), properties=_props(op)), "link_objects")
+        return None
+    if kind == "link" and what == "exhibits":
+        src = _ensure(store, ra, _project_object(project))
+        dst = _ensure(store, ra, _trait_object(op, str(target["owner_sub"])))
+        _result(ra.link_objects(src, dst, "exhibits", properties=_props(op)), "link_objects")
+        return None
+    raise _Stop("rejected", f"모르는 op — {kind}:{what}")
+
+
+class RaSender:
+    """retry_external_sync 의 전송기 — 타깃 하나의 external_sync.ra 대기 op 를 순서대로 RA 도구 호출로 보내고 결과를 dict 로 돌려준다.
+
+    결과 — done(큐에서 뺄 op: 보냈거나 RA 에 잇지 않기로 한 것) · skipped(그 가운데 잇지 않은 것의 까닭 낱말) · hold('withheld' — 과제가
+    조직 공개가 아니다, plan §5.5.3) · error('<낱말>: <글>' — 그 op 와 뒤의 op 는 큐에 남는다) · retry(참이면 백오프, 거짓이면 unavailable) ·
+    off(자격이 없어 아무것도 부르지 않았다). 상태 전이는 retry_external_sync 가 한다. 호출마다 새 MCP 세션을 연다 — 게이트웨이가 다시
+    뜨면 묵은 세션 id 는 받지 않는다.
+    """
+
+    channels = SENDER_CHANNELS
+
+    def __init__(self, settings, *, client: httpx.Client | None = None) -> None:
+        self.settings = settings
+        self._client = client          # 시험이 MockTransport 를 싣는다. None 이면 부를 때마다 새 연결이다.
+
+    def off_reason(self) -> str | None:
+        """꺼져 있으면 그 까닭(sync_summary 의 reason 과 같은 낱말), 켜져 있으면 None."""
+        status = sender_status(self.settings)
+        return None if status["on"] else status["reason"]
+
+    def __call__(self, store, target_key: str, channel: str, ops: Sequence[Mapping[str, Any]]) -> dict:
+        target = store.query_one("SELECT target_key, owner_sub, project_id FROM rr_targets WHERE target_key = ?",
+                                 (target_key,))
+        ids = sorted({str(target["project_id"]) if target is not None else "",
+                      *(str(op["project_id"]) for op in ops if op.get("project_id"))})
+        projects = {pid: store.query_one("SELECT id, owner_sub, code, name, status, mcp_visibility FROM rr_projects"
+                                         " WHERE id = ?", (pid,)) for pid in ids}
+        if target is None or any(p is None or p["status"] == "purged" for p in projects.values()):
+            return {"error": "rejected: 대상이나 그 과제가 없거나 폐기됐다 — RA 에 올리지 않는다", "retry": False}
+        if any(p["mcp_visibility"] != "org" for p in projects.values()):
+            return {"hold": "withheld"}
+        ra = ra_client_from_settings(self.settings, config.load_secrets(self.settings.data_dir), client=self._client,
+                                     deadline_s=SEND_DEADLINE_S)
+        if not ra.available:
+            return {"off": sender_status(self.settings)["reason"]}
+        done: list[Mapping[str, Any]] = []
+        skipped: list[str] = []
+        try:
+            for op in ops:
+                try:
+                    skip = _send_op(store, ra, target, projects, op)
+                except _Stop as stop:
+                    # 여기까지 올라온 not_found(찾았던 객체가 잇는 사이에 사라졌다)는 거절과 같다 — 낱말은 FAIL_TEXT 안에서만 쓴다.
+                    text = stop.text if stop.code in FAIL_TEXT else f"rejected: {stop.text}"
+                    return {"done": done, "skipped": skipped, "error": text, "retry": stop.retry}
+                done.append(op)
+                if skip:
+                    skipped.append(skip)
+        finally:
+            ra.close()
+        return {"done": done, "skipped": skipped}
 
 
 # ---------------------------------------------------------------- external_sync 상태기계(§5.5.3)
@@ -429,7 +801,8 @@ def mark_unavailable(store, target_key: str, channel: str, reason: str) -> dict:
 
 
 def queue_sync_ops(store, target_key: str, channel: str, ops: Sequence[Mapping[str, Any]]) -> dict:
-    """새 op 를 쌓는다. done 이었어도 pending 으로 돌아간다(§5.5.3 마지막 전이)."""
+    """새 op 를 쌓는다. done 이었어도 pending 으로 돌아가고, unavailable · withheld 는 그대로다(§5.5.3 마지막 전이 — 보류는 조직 공개로
+    풀 때까지, 멈춤은 재동기까지)."""
     if channel not in SYNC_CHANNELS:
         raise ValueError(f"모르는 external_sync 채널: {channel!r}")
     sync = load_external_sync(store, target_key)
@@ -440,7 +813,7 @@ def queue_sync_ops(store, target_key: str, channel: str, ops: Sequence[Mapping[s
         if text not in existing:
             existing.add(text)
             entry.setdefault("pending_ops", []).append(dict(op))
-    if entry["state"] != "unavailable" and entry.get("pending_ops"):
+    if entry["state"] not in ("unavailable", "withheld") and entry.get("pending_ops"):
         entry["state"] = "pending"
         entry["done_at"] = None
     save_external_sync(store, target_key, sync)
@@ -461,6 +834,17 @@ def complete_sync_ops(store, target_key: str, channel: str,
         entry["next_at"] = 0
         entry["done_at"] = now_epoch()
     save_external_sync(store, target_key, sync)
+    return sync
+
+
+def note_sync_skips(store, target_key: str, channel: str, reasons: Sequence[str]) -> dict:
+    """RA 에 잇지 않기로 한 op 의 건수와 마지막 까닭(SKIP_TEXT 낱말)을 채널에 더한다 — op 는 큐에서 빠지지만 조용히 사라지지 않는다."""
+    sync = load_external_sync(store, target_key)
+    entry = sync[channel]
+    if reasons:
+        entry["skipped_n"] = int(entry.get("skipped_n") or 0) + len(reasons)
+        entry["last_skip"] = str(reasons[-1])
+        save_external_sync(store, target_key, sync)
     return sync
 
 
@@ -496,31 +880,69 @@ def resync(store, target_key: str) -> dict:
 SYNC_LABELS = {"ra": "RA", "adh": "AIDataHub"}
 
 
-def sync_summary(sync: Mapping[str, Any]) -> dict:
+def _error_parts(last_error: Any) -> tuple[str | None, str]:
+    """last_error `<낱말>: <글>` → (낱말, 글). 낱말이 FAIL_TEXT 에 없으면(종전 꼴 'send 실패' · 'http_500' …) (None, 전체 글)."""
+    text = str(last_error or "")
+    code, _, detail = text.partition(": ")
+    return (code, detail) if code in FAIL_TEXT else (None, text)
+
+
+def _ra_summary(entry: Mapping[str, Any], state: str, n: int, status: Mapping[str, Any]) -> tuple[str, str]:
+    """RA 채널의 (reason, message) — 보류 · 끝 · 꺼짐 · 멈춤 · 재시도 대기 · 대기 · 없음 순으로 하나를 고른다."""
+    skipped = int(entry.get("skipped_n") or 0)
+    tail = (f" RA 에 잇지 않은 것 {skipped}건 — 마지막 까닭: {SKIP_TEXT.get(str(entry.get('last_skip')), entry.get('last_skip'))}."
+            if skipped else "")
+    if state == "withheld":
+        return "withheld", (f"RA 반영 보류 — 과제가 조직 공개가 아니라(mcp_visibility=private) RA 에 올리지 않는다. 조직 공개로 바꾸면"
+                            f" 대기 {n}건이 순서대로 나간다.{tail}")
+    if state == "done":
+        return "sent", f"RA 반영 끝 — 대기 0건.{tail}"
+    if not status.get("on"):
+        return str(status.get("reason")), (f"RA 반영 안 됨 — 박스에 RA 쓰기 자격({WRITE_SECRET_KEY})이 없어 보내는 쪽이 꺼져 있다."
+                                           f" 대기 {n}건, 보낸 것 없음.{tail}")
+    code, detail = _error_parts(entry.get("last_error"))
+    why = f" — {detail}" if detail else ""
+    if state == "unavailable":
+        return code or "rejected", (f"RA 반영 멈춤 — {FAIL_TEXT[code or 'rejected']}{why}. 대기 {n}건은 큐에 남아 있다 — 고친 뒤"
+                                    f" '재동기' 로 다시 보낸다.{tail}")
+    if entry.get("last_error"):
+        return code or "transient", (f"RA 반영 재시도 대기 — 마지막 시도가 실패했다{why}. 대기 {n}건, 실패"
+                                     f" {int(entry.get('attempts') or 0)}회 — 다음 시도는 저절로 한다.{tail}")
+    if n:
+        return "queued", f"RA 반영 대기 {n}건 — 다음 동기 주기에 보낸다.{tail}"
+    return "idle", f"RA 로 보낼 것이 아직 없다 — 대기 0건.{tail}"
+
+
+def sync_summary(sync: Mapping[str, Any], *, status: Mapping[str, Any] | None = None) -> dict:
     """과제·대상 응답·진행판(risk_get_coverage)·길잡이(risk_next_step)가 싣는 반영 요약 — {ra|adh: {state, pending_ops, reason, message}}.
 
-    RA 쓰기·AIDataHub 반입을 보내는 쪽이 아직 배선되지 않았다(nightly.retry_external_sync 의 send 가 없다 — M4, 리스크 앱 사람
-    자격 U-4). 그래서 쌓인 일은 하나도 나가지 않는데, 종전에는 그 사실이 어디에도 보이지 않아 '반영 대기' 로만 읽혔다. 지금은
-    reason 이 늘 'sender_unwired' 이고 message 가 대기 건수와 '보낸 것 없음' 을 말한다. M4 가 배선하면 여기서 사유를 가른다.
-    `pending_ops` 는 건수다(op 본문은 GET /api/reports 의 ra_state·재동기 응답이 준다).
+    RA 는 보내는 쪽(RaSender)이 붙어 있어 reason 이 실제 상태다 — withheld(과제 비공개) · sent · credential_missing:<키>(박스 쓰기 PAT
+    없음 — 보내는 쪽이 꺼져 있다) · FAIL_TEXT 의 낱말(멈춤 · 재시도 대기 — last_error 의 앞 낱말) · queued · idle. 종전에는 늘
+    'sender_unwired' 였다. `status` 는 sender_status() 의 답이다(없으면 지금 secrets.env 로 잰다). AIDataHub 반입은 아직 보내는 쪽이
+    없어 'sender_unwired' 그대로다(M4). `pending_ops` 는 건수다(op 본문은 GET /api/reports 의 ra_state·재동기 응답이 준다).
     """
+    ra_status = sender_status() if status is None else status
     out: dict[str, dict] = {}
     for channel in SYNC_CHANNELS:
         entry = sync.get(channel) or {}
         n = len(entry.get("pending_ops") or [])
-        out[channel] = {"state": str(entry.get("state") or "pending"), "pending_ops": n, "reason": "sender_unwired",
-                        "message": f"{SYNC_LABELS[channel]} 반영 안 됨 — 보내는 쪽이 아직 배선되지 않았다(M4). 대기 {n}건,"
-                                   " 보낸 것 없음."}
+        state = str(entry.get("state") or "pending")
+        if channel == "ra":
+            reason, message = _ra_summary(entry, state, n, ra_status)
+        else:
+            reason = "sender_unwired"
+            message = f"{SYNC_LABELS[channel]} 반영 안 됨 — 보내는 쪽이 아직 배선되지 않았다(M4). 대기 {n}건, 보낸 것 없음."
+        out[channel] = {"state": state, "pending_ops": n, "reason": reason, "message": message}
     return out
 
 
 def sync_badge(sync: Mapping[str, Any]) -> str:
-    """타깃 화면·통합 보고서 헤더 표기 — `RA 반영: done|pending(n)|unavailable · AIDataHub 반영: …`."""
+    """타깃 화면·통합 보고서 헤더 표기 — `RA 반영: done|pending(n)|unavailable|withheld(n) · AIDataHub 반영: …`(§5.5.3)."""
     labels = {"ra": "RA 반영", "adh": "AIDataHub 반영"}
     parts = []
     for channel in SYNC_CHANNELS:
         entry = sync.get(channel) or {}
         state = str(entry.get("state") or "pending")
         n = len(entry.get("pending_ops") or [])
-        parts.append(f"{labels[channel]}: {state}" + (f"({n})" if state == "pending" and n else ""))
+        parts.append(f"{labels[channel]}: {state}" + (f"({n})" if state in ("pending", "withheld") and n else ""))
     return " · ".join(parts)
