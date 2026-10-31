@@ -180,7 +180,9 @@ def test_the_external_sync_summary_says_why_nothing_is_sent(target_store, frozen
     assert summary == {
         "ra": {"state": "pending", "pending_ops": 2, "dead_ops": 0, "reason": f"credential_missing:{WRITE_SECRET_KEY}",
                "message": f"RA 반영 안 됨 — 박스에 RA 쓰기 자격({WRITE_SECRET_KEY})이 없어 보내는 쪽이 꺼져 있다. 대기 2건,"
-                          " 보낸 것 없음."},
+                          " 보낸 것 없음.",
+               # 거두기 셈(RK-01 거두기 — 사용자 결정 10-31 (가))은 RA 채널에 늘 실린다.
+               "retracted": 0, "retract_pending": 0, "retract_failed": 0, "retract_reasons": {}},
         "adh": {"state": "pending", "pending_ops": 0, "dead_ops": 0, "reason": "sender_unwired",
                 "message": "AIDataHub 반영 안 됨 — 보내는 쪽이 아직 배선되지 않았다(M4). 대기 0건, 보낸 것 없음."}}
     assert sync_summary(parse_external_sync("깨진 글"), status=off) == sync_summary(empty_sync(), status=off)
@@ -378,6 +380,35 @@ def test_ra_client_sends_the_ra_mcp_argument_names():
         {"name": "reportarchive_add_object_alias", "arguments": {"object_id": 12, "alias": "별칭"}},
         {"name": "reportarchive_link_objects", "arguments": {"src_id": 1, "dst_id": 2, "relation": "exhibits",
                                                              "properties": {"support": 2}}}]
+
+
+def test_ra_update_object_sends_only_the_fields_it_is_given():
+    """거두기(RK-01)는 RA update_object 의 value · description 을 쓴다(ReportArchive mcp_server — dev 사본 3ece194: object_id · value · code ·
+    description · properties, None 인 칸은 RA MCP 가 뺀다). 넘긴 칸만 싣고, 빈 설명은 빈 글 그대로 보낸다(RA 가 설명을 비운다)."""
+    calls: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode())
+        if payload["method"] != "tools/call":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {}})
+        calls.append(payload["params"]["arguments"])
+        return _rpc_ok({"structuredContent": {"updated": True}})
+
+    ra = RaClient("https://gw.test/mcp", "pat", client=_client(handler))
+    ra.update_object("12", value="비공개@p1", description="")
+    ra.update_object(13, {"visibility": "private"}, value="비공개@t#c")
+    assert calls == [{"object_id": 12, "value": "비공개@p1", "description": ""},
+                     {"object_id": 13, "value": "비공개@t#c", "properties": {"visibility": "private"}}]
+
+
+def test_a_withheld_channel_whose_queue_empties_settles_done(target_store, frozen_clock):
+    """보류(withheld) 대상이 거두기 op 만 남았다가 그것을 다 보내면 보류할 것이 없다 — done 이다(대기 0건인 보류로 남지 않는다)."""
+    retract = {"op": "retract", "reason": "private", "kind": "project", "portal_id": "p_now", "project_id": "p_now", "by": OWNER}
+    queue_sync_ops(target_store, TARGET, "ra", [retract])
+    set_sync_state(target_store, TARGET, "ra", "withheld")
+    complete_sync_ops(target_store, TARGET, "ra", [retract])
+    entry = _sync_json(target_store)["ra"]
+    assert entry["state"] == "done" and entry["pending_ops"] == []
 
 
 def test_ra_401_is_recorded_as_unavailable_on_the_target(target_store, frozen_clock):

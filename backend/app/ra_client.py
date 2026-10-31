@@ -4,12 +4,13 @@ from __future__ import annotations
 import json
 import re
 import time
+from collections import Counter
 from typing import Any, Callable, Mapping, Sequence
 
 import httpx
 
 from app import config
-from app.common import canonical_json, http_client, now_epoch, parse_ref
+from app.common import canonical_json, http_client, new_uuid, now_epoch, parse_ref
 
 # 응답 침묵 한도다 — 호출 길이의 상한이 아니다. 게이트웨이가 도구가 도는 동안 15초마다 ping 을 흘리므로 이 값은
 # 죽은 게이트웨이만 잡고, 호출 길이는 게이트웨이의 GATEWAY_CALL_TIMEOUT 이 정한다(호출 길이를 묶으려면 기한을 준다).
@@ -338,9 +339,19 @@ class RaClient:
             args["description"] = description
         return self.call_tool("create_object", args)
 
-    def update_object(self, object_id: int | str, properties: Mapping[str, Any]) -> dict:
-        """properties 를 통째로 교체한다 — 부분 갱신은 upsert_props 를 쓴다."""
-        return self.call_tool("update_object", {"object_id": int(object_id), "properties": dict(properties)})
+    def update_object(self, object_id: int | str, properties: Mapping[str, Any] | None = None, *,
+                      value: str | None = None, description: str | None = None) -> dict:
+        """넘긴 칸만 바뀐다(RA update_object — value · description · properties). properties 는 통째로 교체한다 — 부분 갱신은
+        upsert_props 를 쓴다. description 에 빈 글을 넘기면 RA 가 설명을 비운다(RA MCP 는 None 인 칸만 뺀다). value 를 바꾸면 RA 가 같은
+        축의 값 겹침을 본다('이미 같은 값이 있습니다')."""
+        args: dict[str, Any] = {"object_id": int(object_id)}
+        if value is not None:
+            args["value"] = value
+        if description is not None:
+            args["description"] = description
+        if properties is not None:
+            args["properties"] = dict(properties)
+        return self.call_tool("update_object", args)
 
     def upsert_props(self, type_slug: str, object_id: int | str, patch: Mapping[str, Any], *,
                      current: Mapping[str, Any] | None = None) -> dict:
@@ -434,6 +445,7 @@ FAIL_TEXT: dict[str, str] = {
     "ontology_missing": "RA 에 리스크 축 · 관계가 없다(bootstrap_ra_ontology.py --apply 를 아직 돌리지 않았다)",
     "masked_readback": "게이트웨이가 가린 속성 값을 되쓰게 되어 멈췄다(통째 교체라 가린 글이 RA 원본을 덮는다)",
     "value_collision": "RA 가 같은 code 대신 값이 겹친 다른 객체를 돌려줬다",
+    "id_mismatch": "사상된 RA id 의 객체가 이 앱의 것이 아니다(값이 @<code> 로 끝나지 않는다 — 다른 박스에서 들여온 사상이거나 RA 에서 바뀌었다)",
     "rejected": "RA 가 이 op 를 받지 않았다",
     "transient": "여러 번 보내지 못했다(게이트웨이 · RA 불통 · 시간 초과)",
 }
@@ -443,6 +455,21 @@ SKIP_TEXT: dict[str, str] = {
     "evidence_not_incident_or_test_run": "근거로 적은 RA 객체가 사고 · 시험이 아니거나 없다",
     "registry_absent": "그 finding 이 실린 등록부 행이 없다",
 }
+
+# 거두기(RK-01 — 사용자 결정 10-31 (가)). 과제가 조직 공개를 떠나거나(비공개) 폐기 · 이양되면 RA 에 나간 객체(과제 · 등록부 risk_finding)마다
+# 거두기 op 를 쌓는다 — {op: retract, reason, kind(rr_id_map 의 portal_kind), portal_id, project_id, by(그렇게 한 사람)}. 보류(withheld) ·
+# 폐기 멈춤을 건너뛰어 나가고, 다시 표기할 꼴은 op 가 아니라 **보낼 때의 정본 범위**로 정한다(원칙 3) — 조직 공개가 아니거나 폐기면 거둔 꼴,
+# 조직 공개면 나간 꼴(이양 뒤의 owner · 다시 연 과제). 그래서 큐의 같은 꼴 버림 · 순서와 상관없이 마지막에 나간 op 가 정본을 따른다.
+# RA 의 객체 모델(dev 사본 3ece194)이 허락하는 것만 한다 — MCP 쓰기는 create · update · alias · link 넷뿐이라 객체를 지우거나 연결을 끊지
+# 못하고, 엔티티 상태(deprecated)도 MCP update 가 넘기지 않는다. update 로 바꿀 수 있는 value · description · properties(통째 교체,
+# 빈 값은 RA 가 뺀다)로 거둔다.
+RETRACT_OP = "retract"
+# private · purged 는 거두기, owner · org 는 다시 표기(이양 뒤 owner · 다시 연 과제)다 — 셋 다 보낼 때의 정본 범위로 꼴을 고른다.
+RETRACT_REASONS = ("private", "purged", "owner", "org")
+PULL_BACK_REASONS = ("private", "purged")
+# 거둔 꼴의 value 머리 — value 는 RA 가 비워 두지 못하므로(최소 1자) 과제 코드 · 메커니즘을 뺀 '비공개@<code>' 로 바꾼다(축 안 유니크는 code 가 맡는다).
+RETRACT_HEAD = "비공개"
+RETRACT_TYPES = {"project": "project", "registry": "risk_finding"}
 
 
 def sender_status(settings=None, secrets: Mapping[str, str] | None = None) -> dict:
@@ -501,6 +528,8 @@ def _ra_refusal(tool: str, payload: Mapping[str, Any]) -> _Stop:
         return _Stop("ontology_missing", f"{tool} — {text}")
     if "찾을 수 없습니다" in text:
         return _Stop("not_found", f"{tool} — {text}", op_only=True)
+    if "이미 같은 값이 있습니다" in text:          # value 를 바꾸는 update_object 의 같은 축 값 겹침(RA update_entity)
+        return _Stop("value_collision", f"{tool} — {text}", op_only=True)
     if "토큰" in text or "인증" in text:
         return _Stop("unauthorized", f"{tool} — {text}")
     if "Internal server error" in text or _HTTP_5XX_RX.search(text):
@@ -561,11 +590,18 @@ def _finding_object(store, project: Mapping[str, Any], finding_id: Any) -> dict 
         return None
     base = learning.resolve_cluster_key(store, str(row["cluster_key"]), owner_sub=str(row["owner_sub"])) or str(row["cluster_key"])
     key = base + registry.IMPROVEMENT_SUFFIX if row["direction"] == "improvement" else base
-    reg = store.query_one(
+    reg = _registry_row(store, str(row["target_key"]), key)
+    return None if reg is None else _registry_object(project, reg)
+
+
+def _registry_row(store, target_key: str, cluster_key: str) -> Mapping[str, Any] | None:
+    return store.query_one(
         "SELECT target_key, cluster_key, owner_sub, mechanism, mechanism_detail, status FROM rr_registry"
-        " WHERE target_key = ? AND cluster_key = ?", (row["target_key"], key))
-    if reg is None:
-        return None
+        " WHERE target_key = ? AND cluster_key = ?", (target_key, cluster_key))
+
+
+def _registry_object(project: Mapping[str, Any], reg: Mapping[str, Any]) -> dict:
+    """등록부 행 → RA risk_finding 의 나간 꼴(value · 앱이 쥔 속성 · 보낼 때의 status)."""
     code = f"{reg['target_key']}#{reg['cluster_key']}"
     head = f"{project['code']}@{reg['mechanism'] or 'unclassified'}.{reg['mechanism_detail'] or 'unclassified'}"
     # 원칙 9 의 투영 범위 표기(owner · visibility)와 되짚을 열쇠만 앱이 쥔다 — 나머지 투영 속성은 패널 때 쓰는 쪽(M4)의 몫이다.
@@ -699,6 +735,94 @@ def _send_op(store, ra: RaClient, target: Mapping[str, Any], projects: Mapping[s
     raise _Stop("rejected", f"모르는 op — {kind}:{what}", op_only=True)
 
 
+def is_retract_op(op: Any) -> bool:
+    return isinstance(op, Mapping) and op.get("op") == RETRACT_OP
+
+
+def _pulls_back(op: Any) -> bool:
+    """거두기(비공개 · 폐기)로 쌓인 op 인가 — 요약 · 폐기 보고서가 센다. 이양 · 다시 공개의 다시 표기는 세지 않는다."""
+    return is_retract_op(op) and op.get("reason") in PULL_BACK_REASONS
+
+
+def _retract_key(op: Mapping[str, Any]) -> str:
+    return f"{op.get('kind')}:{op.get('portal_id')}"
+
+
+def _retract_id(store, kind: str, code: str) -> int | None:
+    """거둘 객체의 RA id — rr_id_map(정본)이 없으면 원본 표의 ra_entity_id(조회 편의용 중복)를 본다."""
+    found = _mapped_id(store, {"kind": kind, "portal_id": code})
+    if found is not None:
+        return found
+    if kind == "project":
+        row = store.query_one("SELECT ra_entity_id FROM rr_projects WHERE id = ?", (code,))
+    else:
+        target_key, _, cluster_key = code.partition("#")
+        row = store.query_one("SELECT ra_entity_id FROM rr_registry WHERE target_key = ? AND cluster_key = ?",
+                              (target_key, cluster_key))
+    return int(row["ra_entity_id"]) if row is not None and row["ra_entity_id"] is not None else None
+
+
+def _retract_op(store, ra: RaClient, op: Mapping[str, Any]) -> dict:
+    """거두기 op 하나 → RA 객체 하나를 보낼 때의 정본 범위로 다시 표기한다. 결과 {op, form, outcome, ra_id, type}.
+
+    - 거둔 꼴(과제가 조직 공개가 아니거나 폐기) — value 를 '비공개@<code>' 로, 과제는 설명을 비우고, risk_finding 은 속성을 되짚을 열쇠 둘과
+      visibility=private 만 남긴다(owner · status 를 뺀다 — 통째 교체라 가린 값을 되쓸 일도 없다).
+    - 나간 꼴(조직 공개) — value · 과제 설명을 되돌리고 risk_finding 은 지금 속성에 owner · visibility=org · 보낼 때의 등록부 status 를 병합한다.
+    outcome 은 retracted(거뒀다) · remarked(다시 표기했다) · unchanged(이미 그 꼴이라 부르지 않았다) · absent(RA 에 그 객체가 없다 — 거둘 것이
+    없다). 사상된 id 의 객체 값이 @<code> 로 끝나지 않으면 남의 객체라 쓰지 않는다(id_mismatch — 그 op 만 따로 둔다).
+    """
+    kind, code = str(op.get("kind") or ""), str(op.get("portal_id") or "")
+    type_slug = RETRACT_TYPES.get(kind)
+    if type_slug is None or not code or (kind == "registry" and "#" not in code):
+        raise _Stop("rejected", f"거두기 op 의 꼴이 틀렸다 — {kind}:{code}", op_only=True)
+    project = store.query_one("SELECT id, owner_sub, code, name, status, mcp_visibility FROM rr_projects WHERE id = ?",
+                              (str(op.get("project_id") or ""),))
+    form = "shared" if project is not None and project["status"] != "purged" and project["mcp_visibility"] == "org" \
+        else "retracted"
+    result = {"op": dict(op), "form": form, "type": type_slug, "ra_id": None}
+    ra_id = _retract_id(store, kind, code)
+    if ra_id is None:
+        return {**result, "outcome": "absent"}
+    result["ra_id"] = ra_id
+    try:
+        current = _result(ra.get_object(type_slug, ra_id), "get_object")
+    except _Stop as stop:
+        if stop.code != "not_found":
+            raise
+        return {**result, "outcome": "absent"}
+    label = str(current.get("label") or "")
+    if not label.casefold().endswith(f"@{code}".casefold()):
+        raise _Stop("id_mismatch", f"get_object — {type_slug} id {ra_id} 의 값 {label[:120]!r} 이 @{code} 로 끝나지 않는다",
+                    op_only=True)
+    props = dict(current.get("properties") or {}) if isinstance(current.get("properties"), Mapping) else {}
+    description: str | None = None
+    properties: dict | None = None
+    if form == "retracted":
+        value = _value(RETRACT_HEAD, code)
+        if kind == "project":
+            description = ""
+        else:
+            properties = {"cluster_key": code.partition("#")[2], "portal_registry_key": code, "visibility": "private"}
+    elif kind == "project":
+        shared = _project_object(project)
+        value, description = shared["value"], shared["description"]
+    else:
+        target_key, _, cluster_key = code.partition("#")
+        reg = _registry_row(store, target_key, cluster_key)
+        if reg is None:
+            raise _Stop("rejected", f"다시 표기할 등록부 행이 없다 — {code}", op_only=True)
+        shared = _registry_object(project, reg)
+        want = {k: v for k, v in {**shared["owned"], "status": shared["status"]}.items() if v is not None}
+        lost = sorted(k for k, v in props.items() if is_masked(v) and k not in want)
+        if lost:
+            raise _Stop("masked_readback", f"update_object — 가린 칸 {lost}", op_only=True)
+        value, properties = shared["value"], {**props, **want}
+    if description is None and value == label and (properties is None or properties == props):
+        return {**result, "outcome": "unchanged"}
+    _result(ra.update_object(ra_id, properties, value=value, description=description), "update_object")
+    return {**result, "outcome": "retracted" if form == "retracted" else "remarked"}
+
+
 def _projects(store, ids: Sequence[str]) -> dict[str, Mapping[str, Any] | None]:
     return {pid: store.query_one("SELECT id, owner_sub, code, name, status, mcp_visibility FROM rr_projects WHERE id = ?", (pid,))
             for pid in ids}
@@ -717,10 +841,12 @@ class RaSender:
     """retry_external_sync 의 전송기 — 타깃 하나의 external_sync.ra 대기 op 를 순서대로 RA 도구 호출로 보내고 결과를 dict 로 돌려준다.
 
     결과 — done(큐에서 뺄 op: 보냈거나 RA 에 잇지 않기로 한 것) · skipped(그 가운데 잇지 않은 것의 까닭 낱말) · dead(그 op 에만 걸린 영구
-    거절 — {op, error}, 큐에서 빼 따로 둔다) · hold('withheld' — 과제가 조직 공개가 아니다, plan §5.5.3) · error('<낱말>: <글>' — 채널 전체가
-    막혔다, 그 op 와 뒤의 op 는 큐에 남는다) · retry(참이면 백오프, 거짓이면 unavailable) · off(자격이 없어 아무것도 부르지 않았다). 상태 전이는
-    retry_external_sync 가 한다. 과제의 가시성 · 폐기는 틱 머리와 **호출마다** 다시 본다 — 보내는 도중 비공개로 돌리거나 폐기하면 다음
-    호출부터 하지 않는다(원칙 9). 호출마다 새 MCP 세션을 연다 — 게이트웨이가 다시 뜨면 묵은 세션 id 는 받지 않는다.
+    거절 — {op, error}, 큐에서 빼 따로 둔다) · retracts(나간 거두기 op 의 결과 — _retract_op) · hold('withheld' — 과제가 조직 공개가 아니다,
+    plan §5.5.3) · error('<낱말>: <글>' — 채널 전체가 막혔다, 그 op 와 뒤의 op 는 큐에 남는다) · retry(참이면 백오프, 거짓이면 unavailable) ·
+    off(자격이 없어 아무것도 부르지 않았다). 상태 전이는 retry_external_sync 가 한다. 과제의 가시성 · 폐기는 틱 머리와 **호출마다** 다시 본다 —
+    보내는 도중 비공개로 돌리거나 폐기하면 다음 호출부터 하지 않는다(원칙 9). 거두기 op 만은 그 문을 지나지 않는다 — 닫힌 과제에서도 큐 순서대로
+    나가고(앞에 쌓인 보낼 op 는 보류 · 멈춤 그대로), 열린 과제에서는 앞에 쌓인 op 다음에 나간다. 호출마다 새 MCP 세션을 연다 — 게이트웨이가
+    다시 뜨면 묵은 세션 id 는 받지 않는다.
     """
 
     channels = SENDER_CHANNELS
@@ -744,11 +870,13 @@ class RaSender:
                       *(str(op["project_id"]) for op in ops if op.get("project_id"))})
         projects = _projects(store, ids)
         closed = _closed(target, projects)
-        if closed is not None:
+        # 거두기 op 는 보류 · 폐기 멈춤을 건너뛴다(사용자 결정 10-31 (가)) — 닫힌 과제면 거두기 op 만 보내고 나머지는 큐에 그대로 둔다.
+        if closed is not None and (target is None or not any(is_retract_op(op) for op in ops)):
             return closed
+        gated = [True]                     # 지금 보내는 op 가 문을 지나야 하는가 — 거두기 op 는 닫힌 과제에도 나간다
 
         def still_open() -> bool:
-            return _closed(target, _projects(store, ids)) is None
+            return not gated[0] or _closed(target, _projects(store, ids)) is None
 
         ra = ra_client_from_settings(self.settings, config.load_secrets(self.settings.data_dir), client=self._client,
                                      deadline_s=SEND_DEADLINE_S, gate=still_open)
@@ -757,26 +885,42 @@ class RaSender:
         done: list[Mapping[str, Any]] = []
         skipped: list[str] = []
         dead: list[dict] = []
+        retracts: list[dict] = []
+        held = closed is not None          # 닫혔다 — 여기서부터 거두기 op 만 보낸다
         try:
             for op in ops:
+                retract = is_retract_op(op)
+                if held and not retract:
+                    continue
+                gated[0] = not retract
                 try:
-                    skip = _send_op(store, ra, target, projects, op)
+                    if retract:
+                        retracts.append(_retract_op(store, ra, op))
+                        skip = None
+                    else:
+                        skip = _send_op(store, ra, target, projects, op)
                 except _Stop as stop:
                     if stop.code == "closed":
-                        # 다시 열렸으면(그 사이 되돌렸다) 보류하지 않는다 — 보류는 공개 토글만 풀어 그대로 두면 영영 멈춘다.
-                        return {"done": done, "skipped": skipped, "dead": dead, **(_closed(target, _projects(store, ids)) or {})}
+                        held = True
+                        continue
                     # 여기까지 올라온 not_found(찾았던 객체가 잇는 사이에 사라졌다)는 거절과 같다 — 낱말은 FAIL_TEXT 안에서만 쓴다.
                     text = stop.text if stop.code in FAIL_TEXT else f"rejected: {stop.text}"
                     if stop.op_only:
                         dead.append({"op": dict(op), "error": text})
                         continue
-                    return {"done": done, "skipped": skipped, "dead": dead, "error": text, "retry": stop.retry}
+                    return {"done": done, "skipped": skipped, "dead": dead, "retracts": retracts, "error": text,
+                            "retry": stop.retry}
                 done.append(op)
                 if skip:
                     skipped.append(skip)
         finally:
             ra.close()
-        return {"done": done, "skipped": skipped, "dead": dead}
+        out = {"done": done, "skipped": skipped, "dead": dead, "retracts": retracts}
+        set_aside = [item["op"] for item in dead]
+        if held and any(not is_retract_op(op) and op not in done and op not in set_aside for op in ops):
+            # 남은 op 는 보류(비공개) · 멈춤(폐기)이다. 그 사이 다시 열렸으면 보류하지 않는다 — 보류는 공개 토글만 풀어 그대로 두면 영영 멈춘다.
+            out.update(_closed(target, _projects(store, ids)) or {})
+        return out
 
 
 # ---------------------------------------------------------------- external_sync 상태기계(§5.5.3)
@@ -863,8 +1007,8 @@ def queue_sync_ops(store, target_key: str, channel: str, ops: Sequence[Mapping[s
 
 
 def _settle(entry: dict) -> None:
-    """큐가 빈 pending 채널을 done 으로 옮긴다."""
-    if not entry.get("pending_ops") and entry["state"] == "pending":
+    """큐가 빈 pending 채널을 done 으로 옮긴다. 보류(withheld)도 같다 — 거두기 op 만 남았던 비공개 대상이 그것을 다 보내면 보류할 것이 없다."""
+    if not entry.get("pending_ops") and entry["state"] in ("pending", "withheld"):
         entry["state"] = "done"
         entry["attempts"] = 0
         entry["next_at"] = 0
@@ -960,6 +1104,216 @@ def resync(store, target_key: str) -> dict:
     return sync
 
 
+# ---------------------------------------------------------------- 거두기(RK-01 — 사용자 결정 10-31 (가))
+def projected_objects(store, project_id: str) -> list[tuple[str, str, str]]:
+    """그 과제에서 RA 로 나간 객체 — (kind, portal_id, 거두기 op 를 둘 대상). rr_id_map(정본)과 원본 표의 ra_entity_id(조회 편의용 중복)를
+    함께 본다. 등록부 risk_finding 은 그 행의 대상에, 과제 객체는 과제의 첫 대상(만든 순서 — 새 대상이 생겨도 바뀌지 않는다)에 둔다. 성격
+    태그(design_trait)는 과제를 가로지르는 어휘 객체라 거두지 않는다."""
+    targets = [str(r["target_key"]) for r in store.query(
+        "SELECT target_key FROM rr_targets WHERE project_id = ? ORDER BY created_at, target_key", (project_id,))]
+    if not targets:
+        return []
+    out: list[tuple[str, str, str]] = []
+    sent = store.query_one(
+        "SELECT (SELECT COUNT(*) FROM rr_id_map WHERE portal_kind = 'project' AND portal_id = ? AND ra_entity_id IS NOT NULL)"
+        " + (SELECT COUNT(*) FROM rr_projects WHERE id = ? AND ra_entity_id IS NOT NULL) AS n", (project_id, project_id))
+    if sent is not None and int(sent["n"] or 0):
+        out.append(("project", project_id, targets[0]))
+    rows = store.query(
+        "SELECT m.portal_id AS code FROM rr_id_map m JOIN rr_targets t"
+        " ON substr(m.portal_id, 1, length(t.target_key) + 1) = t.target_key || '#'"
+        " WHERE m.portal_kind = 'registry' AND m.ra_entity_id IS NOT NULL AND t.project_id = ?"
+        " UNION SELECT r.target_key || '#' || r.cluster_key FROM rr_registry r JOIN rr_targets t ON t.target_key = r.target_key"
+        " WHERE r.ra_entity_id IS NOT NULL AND t.project_id = ? ORDER BY 1", (project_id, project_id))
+    out += [("registry", str(r["code"]), str(r["code"]).partition("#")[0]) for r in rows]
+    return out
+
+
+def queue_retracts(store, project_id: str, reason: str, *, by: str) -> int:
+    """과제의 RA 객체마다 거두기 op 를 쌓고 그 수를 돌려준다(같은 트랜잭션에서 부른다 — 비공개 전환 · 폐기 · 이양 · 다시 공개).
+
+    private · purged 는 나간 객체 전부, owner 는 owner 속성이 있는 등록부 risk_finding 만, org 는 지금 거둔 꼴인 것(대상의 retracted)만이다.
+    op 는 큐 끝에 붙어 앞에 쌓인 보낼 op 다음에 나가고, 같은 꼴은 한 번만 쌓인다(queue_sync_ops). 보류(withheld)인 대상도 그대로 두지만
+    거두기 op 가 있으면 동기 주기가 집는다(nightly.retry_external_sync). 멈춘(unavailable) 대상은 재동기까지 기다린다.
+    """
+    if reason not in RETRACT_REASONS:
+        raise ValueError(f"모르는 거두기 까닭: {reason!r}")
+    if reason == "org":
+        picked = []
+        for row in store.query("SELECT target_key FROM rr_targets WHERE project_id = ? ORDER BY target_key", (project_id,)):
+            for key in sorted(load_external_sync(store, str(row["target_key"]))["ra"].get("retracted") or {}):
+                kind, _, code = key.partition(":")
+                picked.append((kind, code, str(row["target_key"])))
+    else:
+        picked = [item for item in projected_objects(store, project_id) if reason != "owner" or item[0] == "registry"]
+    by_target: dict[str, list[dict]] = {}
+    for kind, code, target_key in picked:
+        by_target.setdefault(target_key, []).append({"op": RETRACT_OP, "reason": reason, "kind": kind, "portal_id": code,
+                                                     "project_id": project_id, "by": by})
+    for target_key, ops in by_target.items():
+        queue_sync_ops(store, target_key, "ra", ops)
+    return len(picked)
+
+
+def _audit_retract(store, op: Mapping[str, Any], after: Mapping[str, Any]) -> None:
+    """거두기 op 하나의 결과를 rr_audit 에 한 행 남긴다 — 행위자는 그 op 를 쌓게 한 사람(비공개 전환 · 폐기 · 이양을 한 사람, REST)이다.
+    거둔 꼴이면 'ra.retract', 나간 꼴로 다시 표기했으면 'ra.remark'. 과제 객체는 과제 범위, risk_finding 은 등록부 범위(<target_key>#<cluster_key>)."""
+    project_id = str(op.get("project_id") or "")
+    actor = str(op.get("by") or "")
+    if not actor:
+        row = store.query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,))
+        actor = str(row["owner_sub"]) if row is not None else "unknown"
+    retracted = (after.get("form") == "retracted") if after.get("form") else _pulls_back(op)
+    store.execute(
+        "INSERT INTO rr_audit(id, owner_sub, actor, actor_verified, channel, scope, subject_id, project_id, action, before_json,"
+        " after_json, reason, at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (new_uuid(), actor, actor, 1, "rest", "project" if op.get("kind") == "project" else "registry",
+         str(op.get("portal_id") or ""), project_id, "ra.retract" if retracted else "ra.remark", None,
+         canonical_json(dict(after)), str(op.get("reason") or ""), now_epoch()))
+
+
+def record_retracts(store, target_key: str, outcome: Mapping[str, Any]) -> None:
+    """전송기 결과의 거두기 몫을 적는다(retry_external_sync 의 트랜잭션 안) — 대상의 retracted(지금 거둔 꼴인 객체 → 시각)를 고치고, 거두기
+    op 마다(나갔거나 RA 가 받지 않아 따로 둔 것) rr_audit 한 행을 남기며, 폐기된 과제면 폐기 보고서의 RA 층을 다시 짓는다."""
+    applied = [item for item in outcome.get("retracts") or () if isinstance(item, Mapping) and is_retract_op(item.get("op"))]
+    refused = [item for item in outcome.get("dead") or () if isinstance(item, Mapping) and is_retract_op(item.get("op"))]
+    if applied or refused:
+        sync = load_external_sync(store, target_key)
+        entry = sync["ra"]
+        kept = dict(entry.get("retracted") or {})
+        for item in applied:
+            if item.get("form") == "retracted":
+                kept[_retract_key(item["op"])] = now_epoch()
+            else:
+                kept.pop(_retract_key(item["op"]), None)
+            _audit_retract(store, item["op"], {"kind": item["op"].get("kind"), "type": item.get("type"),
+                                               "ra_entity_id": item.get("ra_id"), "form": item.get("form"),
+                                               "outcome": item.get("outcome")})
+        for item in refused:
+            _audit_retract(store, item["op"], {"kind": item["op"].get("kind"), "outcome": "failed",
+                                               "error": fail_word(item.get("error"))})
+        if kept:
+            entry["retracted"] = kept
+        else:
+            entry.pop("retracted", None)
+        save_external_sync(store, target_key, sync)
+    row = store.query_one("SELECT p.id AS id, p.status AS status, p.mcp_visibility AS visibility FROM rr_targets t"
+                          " JOIN rr_projects p ON p.id = t.project_id WHERE t.target_key = ?", (target_key,))
+    if row is None:
+        return
+    if row["status"] == "purged" or row["visibility"] != "org":
+        _catch_up_retracts(store, str(row["id"]), "purged" if row["status"] == "purged" else "private")
+    if row["status"] == "purged":
+        refresh_purge_report(store, str(row["id"]))
+
+
+def _project_ra_entries(store, project_id: str) -> dict[str, dict]:
+    return {str(r["target_key"]): load_external_sync(store, str(r["target_key"]))["ra"] for r in store.query(
+        "SELECT target_key FROM rr_targets WHERE project_id = ? ORDER BY target_key", (project_id,))}
+
+
+def _retract_state(entries: Mapping[str, Mapping[str, Any]], key: str) -> tuple[str, str | None]:
+    """한 객체의 거두기 처지 — ('pending', 멈춘 채널이면 그 사유 낱말) · ('failed', 까닭 낱말) · ('retracted', None) · ('none', None)."""
+    queued = [e for e in entries.values() if any(_pulls_back(op) and _retract_key(op) == key for op in e.get("pending_ops") or ())]
+    if queued:
+        stopped = [e for e in queued if e.get("state") == "unavailable"]
+        return "pending", fail_word(stopped[0].get("last_error")) if stopped else None
+    refused = [item for e in entries.values() for item in e.get("dead_ops") or ()
+               if isinstance(item, Mapping) and _pulls_back(item.get("op")) and _retract_key(item["op"]) == key]
+    if refused:
+        return "failed", fail_word(refused[-1].get("error"))
+    if any(key in (e.get("retracted") or {}) for e in entries.values()):
+        return "retracted", None
+    return "none", None
+
+
+def _catch_up_retracts(store, project_id: str, reason: str) -> int:
+    """닫힌 과제(비공개 · 폐기)에 거둔 꼴도 아니고 거두기 op 도 없는 RA 객체가 있으면 거두기 op 를 쌓는다 — 비공개로 돌리는 순간 RA 에 만드는
+    호출이 나가 있었으면 그 객체의 id 는 거두기 op 를 쌓은 뒤에야 적혀 빠진다. 받지 않아 따로 둔 것은 다시 쌓지 않는다(재동기를 기다린다).
+    행위자는 비워 둔다(감사 행은 과제 소유자로 적는다 — 사람이 한 것이 아니라 앞선 전환의 뒤처리다)."""
+    entries = _project_ra_entries(store, project_id)
+    missing = [(kind, code, target_key) for kind, code, target_key in projected_objects(store, project_id)
+               if _retract_state(entries, f"{kind}:{code}")[0] == "none"]
+    by_target: dict[str, list[dict]] = {}
+    for kind, code, target_key in missing:
+        by_target.setdefault(target_key, []).append({"op": RETRACT_OP, "reason": reason, "kind": kind, "portal_id": code,
+                                                     "project_id": project_id, "by": ""})
+    for target_key, ops in by_target.items():
+        queue_sync_ops(store, target_key, "ra", ops)
+    return len(missing)
+
+
+def purge_ra_layer(store, project_id: str) -> dict:
+    """폐기 보고서 remaining 의 RA 층 — 나간 객체 수(objects)와 거둔 수(retracted) · 거두기 대기(retract_pending) · 못 거둔 수
+    (retract_failed), 거두지 못했거나 멈춘 채널에서 기다리는 객체의 까닭 낱말별 수(reasons). reason 낱말은 nothing_sent(나간 것이 없다) ·
+    retract_pending · retract_failed · retracted 가운데 하나다(종전의 not_retracted 를 갈음한다)."""
+    objects = projected_objects(store, project_id)
+    entries = _project_ra_entries(store, project_id)
+    retracted = pending = 0
+    reasons: Counter = Counter()
+    for kind, code, _target in objects:
+        state, why = _retract_state(entries, f"{kind}:{code}")
+        if state == "retracted":
+            retracted += 1
+            continue
+        if state == "pending":
+            pending += 1
+        if why or state != "pending":                     # 멈춘 채널에서 기다리는 것 · 못 거둔 것 · 쌓이지 않은 것의 까닭
+            reasons[why or "not_queued"] += 1
+    n = len(objects)
+    failed = n - retracted - pending
+    words = " · ".join(f"{name} {count}" for name, count in sorted(reasons.items()))
+    if not n:
+        word, detail = "nothing_sent", "RA 로 나간 객체가 없다 — 폐기 뒤에는 새로 보내지 않는다."
+    else:
+        word = "retract_pending" if pending else "retract_failed" if failed else "retracted"
+        detail = (f"RA 에 나간 객체 {n}개(과제 · 등록부 risk_finding) 가운데 {retracted}개를 거뒀다 — 값을 '{RETRACT_HEAD}@<code>' 로"
+                  " 바꾸고 과제 설명을 비웠으며 risk_finding 은 visibility=private 와 되짚을 열쇠만 남겼다(owner · status 를 뺐다).")
+        if pending:
+            detail += (f" {pending}개는 거두기를 기다린다 — 다음 동기 주기에 나가고, 멈춘 채널이면 고친 뒤 대상 화면의 '재동기' 로"
+                       " 다시 보낸다.")
+        if failed:
+            detail += f" {failed}개는 거두지 못했다."
+        if words:
+            detail += f" 까닭 — {words}."
+        detail += (" 객체 자체와 연결(exhibits · verified_by · refuted_by)은 RA MCP 에 지우거나 끊는 도구가 없어 남는다(RA 코드 무수정)."
+                   " 폐기 뒤에는 새로 보내지 않는다.")
+    return {"layer": "ra", "reason": word, "objects": n, "retracted": retracted, "retract_pending": pending,
+            "retract_failed": failed, "reasons": dict(sorted(reasons.items())), "detail": detail}
+
+
+def refresh_purge_report(store, project_id: str) -> None:
+    """폐기된 과제의 purge_report_json 에서 RA 층을 지금 셈으로 바꿔 적는다 — 거두기는 폐기 응답 뒤 동기 주기에 나가므로 보고서가 따라간다."""
+    row = store.query_one("SELECT status, purge_report_json FROM rr_projects WHERE id = ?", (project_id,))
+    if row is None or row["status"] != "purged" or not row["purge_report_json"]:
+        return
+    try:
+        report = json.loads(row["purge_report_json"])
+    except (TypeError, ValueError):
+        return
+    if not isinstance(report, dict):
+        return
+    layer = purge_ra_layer(store, project_id)
+    remaining = [item for item in report.get("remaining") or [] if isinstance(item, Mapping)]
+    at = next((i for i, item in enumerate(remaining) if item.get("layer") == "ra"), None)
+    if at is None:
+        remaining.append(layer)
+    else:
+        remaining[at] = layer
+    report["remaining"] = remaining
+    store.execute("UPDATE rr_projects SET purge_report_json = ? WHERE id = ?", (canonical_json(report), project_id))
+
+
+def retract_counts(entry: Mapping[str, Any]) -> dict:
+    """RA 채널의 거두기 셈(요약의 칸) — retracted(지금 거둔 꼴인 객체) · retract_pending(비공개 · 폐기로 쌓인 거두기 op) · retract_failed(RA 가
+    받지 않아 따로 둔 거두기 op) · retract_reasons(그 까닭 낱말별 수)."""
+    failed = [fail_word(item.get("error")) for item in entry.get("dead_ops") or ()
+              if isinstance(item, Mapping) and _pulls_back(item.get("op"))]
+    return {"retracted": len(entry.get("retracted") or {}),
+            "retract_pending": sum(1 for op in entry.get("pending_ops") or () if _pulls_back(op)),
+            "retract_failed": len(failed), "retract_reasons": dict(sorted(Counter(failed).items()))}
+
+
 SYNC_LABELS = {"ra": "RA", "adh": "AIDataHub"}
 
 
@@ -987,9 +1341,15 @@ def _ra_summary(entry: Mapping[str, Any], state: str, n: int, status: Mapping[st
         why = f"{code} — {FAIL_TEXT[code]}" if code else "rejected"
         tail += (f" RA 가 받지 않아 따로 둔 op {len(dead)}건 — 마지막 까닭: {why}{f' ({detail})' if detail else ''}. 고친 뒤 '재동기' 로"
                  f" 다시 보낸다(대상의 나머지 op 는 계속 나간다).")
+    counts = retract_counts(entry)
+    if counts["retracted"] or counts["retract_pending"] or counts["retract_failed"]:
+        why = " · ".join(f"{word} {count}" for word, count in counts["retract_reasons"].items())
+        tail += (f" 거두기(비공개 · 폐기) — RA 에서 거둔 객체 {counts['retracted']}개 · 대기 {counts['retract_pending']}건 ·"
+                 f" 못 거둔 것 {counts['retract_failed']}건{f'({why})' if why else ''}.")
     if state == "withheld":
+        held = sum(1 for op in entry.get("pending_ops") or () if not is_retract_op(op))
         return "withheld", (f"RA 반영 보류 — 과제가 조직 공개가 아니라(mcp_visibility=private) RA 에 올리지 않는다. 조직 공개로 바꾸면"
-                            f" 대기 {n}건이 순서대로 나간다.{tail}")
+                            f" 대기 {held}건이 순서대로 나간다.{tail}")
     if state == "done":
         return "sent", f"RA 반영 끝 — 대기 0건.{tail}"
     if not status.get("on"):
@@ -1016,6 +1376,7 @@ def sync_summary(sync: Mapping[str, Any], *, status: Mapping[str, Any] | None = 
     'sender_unwired' 였다. `status` 는 sender_status() 의 답이다(없으면 지금 secrets.env 로 잰다). AIDataHub 반입은 아직 보내는 쪽이
     없어 'sender_unwired' 그대로다(M4). `pending_ops` 는 건수다(op 본문은 GET /api/reports 의 ra_state·재동기 응답이 준다). `dead_ops` 는
     RA 가 받지 않아 따로 둔 op 의 건수다 — reason 이 sent 여도 0 이 아니면 RA 에 가지 않은 것이 있다(화면은 이 칸을 경고로 그린다).
+    RA 채널에는 거두기 셈(retract_counts — retracted · retract_pending · retract_failed · retract_reasons)이 늘 함께 실린다.
     """
     ra_status = sender_status() if status is None else status
     out: dict[str, dict] = {}
@@ -1030,6 +1391,8 @@ def sync_summary(sync: Mapping[str, Any], *, status: Mapping[str, Any] | None = 
             message = f"{SYNC_LABELS[channel]} 반영 안 됨 — 보내는 쪽이 아직 배선되지 않았다(M4). 대기 {n}건, 보낸 것 없음."
         out[channel] = {"state": state, "pending_ops": n, "dead_ops": len(entry.get("dead_ops") or []),
                         "reason": reason, "message": message}
+        if channel == "ra":
+            out[channel].update(retract_counts(entry))
     return out
 
 

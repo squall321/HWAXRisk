@@ -1,6 +1,7 @@
 # RA 보내는 쪽(RK-01 — 사용자 결정 10-31 D-1 (가)) 검증 — 부른 것을 적는 게이트웨이 · RA 대역으로 번역 · id 사상 · 보류 · 꺼짐 · 실패 사유를 본다
 from __future__ import annotations
 
+import copy
 import json
 import re
 import types
@@ -9,6 +10,7 @@ import httpx
 import pytest
 
 from app import character, common, metrics, nightly, ra_client
+from tests import factories
 
 OWNER = "owner@example.com"
 PROJECT = "p-rk01"
@@ -88,11 +90,31 @@ class FakeGateway:
                 "properties": dict(obj["properties"]), "relations": [], "reports": []}
 
     def _update_object(self, args: dict) -> dict:
-        obj = self.objects.get(int(args["object_id"]))
+        """RA _w_update_object · update_entity 그대로 — 넘긴 칸(value · code · description · properties)만 바뀐다. value 는 같은 축의 값
+        겹침(대소문자 무시)을 보고, properties 는 통째로 교체하되 빈 값(None · '' · [])은 저장하지 않는다(_validate_props)."""
+        oid = int(args["object_id"])
+        obj = self.objects.get(oid)
         if obj is None:
             return {"error": f"객체를 찾을 수 없습니다: {args['object_id']}"}
-        obj["properties"] = dict(args.get("properties") or {})
-        return {"updated": True, "object": self._brief(int(args["object_id"]))}
+        provided = {k: args[k] for k in ("value", "code", "description", "properties") if k in args}
+        if not provided:
+            return {"error": "수정할 필드(value/code/description/properties)가 없습니다."}
+        if "value" in provided:
+            value = str(provided["value"]).strip()
+            if not value:
+                return {"error": "값은 비워둘 수 없습니다."}
+            clash = next((o for i, o in self.objects.items() if i != oid and o["type_slug"] == obj["type_slug"]
+                          and str(o["value"]).casefold() == value.casefold()), None)
+            if clash is not None:
+                return {"error": f"이미 같은 값이 있습니다: {clash['value']}"}
+            obj["value"] = value
+        if "code" in provided:
+            obj["code"] = (provided["code"] or "").strip() or None
+        if provided.get("description") is not None:
+            obj["description"] = str(provided["description"]).strip()
+        if "properties" in provided:
+            obj["properties"] = {k: v for k, v in dict(provided["properties"] or {}).items() if v not in (None, "", [])}
+        return {"updated": True, "object": self._brief(oid)}
 
     def _link_objects(self, args: dict) -> dict:
         src, dst = self.objects.get(int(args["src_id"])), self.objects.get(int(args["dst_id"]))
@@ -674,7 +696,8 @@ def test_a_target_whose_only_op_is_refused_settles_with_it_set_aside(box):
 
 def test_a_project_made_private_mid_send_stops_the_next_call_and_holds_the_rest(box):
     """보내는 도중 소유자가 과제를 비공개로 돌리면 다음 호출부터 하지 않는다 — 가시성을 호출마다 다시 본다. 종전에는 틱 머리에서 한 번만
-    봐 그 대상의 남은 조회 · 연결이 계속 나갔다. 남은 op 는 보류(withheld)로 큐에 그대로이고 다시 조직 공개로 풀면 나간다."""
+    봐 그 대상의 남은 조회 · 연결이 계속 나갔다. 남은 op 는 보류(withheld)로 큐에 그대로이고 다시 조직 공개로 풀면 나간다. 비공개 사이에
+    만들어진 객체에는 거두기 op 가 뒤따라 쌓인다(RK-01 거두기 — 그 객체의 id 는 비공개 전환보다 늦게 적혔다)."""
     from app import routes
 
     incident = box.fake.seed("incident", "사고 1")
@@ -690,17 +713,20 @@ def test_a_project_made_private_mid_send_stops_the_next_call_and_holds_the_rest(
     assert tick(box) == {"due": 1, "sent": 0, "failed": 0, "held": 1}
     assert box.fake.tools() == ["reportarchive_create_object"]
     entry = ra_entry(box)
-    assert entry["state"] == "withheld" and [op["op"] for op in entry["pending_ops"]] == ["link"]
+    assert entry["state"] == "withheld" and [op["op"] for op in entry["pending_ops"]] == ["link", "retract"]
 
     box.fake._create_object = real
     box.store.execute("UPDATE rr_projects SET mcp_visibility = 'org' WHERE id = ?", (PROJECT,))
     routes._release_withheld(box.store, PROJECT, NOW)
     assert tick(box)["sent"] == 1
     assert (_ra_finding(box)["id"], incident, "verified_by") in box.fake.links
+    # 거두기 op 는 쌓인 때가 아니라 보낼 때의 정본 범위를 따른다 — 그 사이 다시 열렸으니 거두지 않고 나간 꼴 그대로다.
+    assert _ra_finding(box)["properties"]["visibility"] == "org" and summary(box)["retracted"] == 0
 
 
 def test_a_project_made_private_inside_an_op_stops_before_its_next_write(box):
-    """op 하나 안에서도 호출마다 본다 — exhibits 연결이 과제 객체를 만든 직후 비공개가 되면 성격 태그 조회 · 연결을 하지 않는다."""
+    """op 하나 안에서도 호출마다 본다 — exhibits 연결이 과제 객체를 만든 직후 비공개가 되면 성격 태그 조회 · 연결을 하지 않는다(그 사이
+    만들어진 과제 객체에는 거두기 op 가 뒤따라 쌓인다 — RK-01 거두기)."""
     _promote_stack_budget(box)
     real = box.fake._create_object
 
@@ -713,7 +739,7 @@ def test_a_project_made_private_inside_an_op_stops_before_its_next_write(box):
     box.fake._create_object = create_then_hide
     assert tick(box)["held"] == 1
     assert [name.removeprefix("reportarchive_") for name in box.fake.tools()] == ["create_object", "create_object"]
-    assert box.fake.links == {} and [op["op"] for op in ra_entry(box)["pending_ops"]] == ["link"]
+    assert box.fake.links == {} and [op["op"] for op in ra_entry(box)["pending_ops"]] == ["link", "retract"]
 
 
 def test_a_project_reopened_right_after_the_gate_closed_is_not_left_withheld(box, monkeypatch):
@@ -820,3 +846,305 @@ def test_the_tick_budget_and_the_stop_signal_end_the_tick_between_targets(box):
     assert len(box.fake.calls) == calls
     risk_runner._stop.clear()
     assert risk_runner._external_sync_tick() == {"due": 2, "sent": 2, "failed": 0}
+
+
+# ---------------------------------------------------------------- 거두기(RK-01 — 사용자 결정 10-31 (가))
+NEW_OWNER = "next-owner@example.com"
+SHARED_VALUE = f"P-RK01@thermal.cte_mismatch@{CODE}"
+SHARED_PROJECT = (f"P-RK01@{PROJECT}", "HWAX 리스크 심사 과제 — 합성 과제")
+ALIAS = ra_client.GATEWAY_ALIAS_PREFIX
+
+
+def _share(box) -> tuple[int, int]:
+    """조직 공개 과제의 객체 둘(등록부 risk_finding · 과제)을 RA 에 실제로 보낸다 — 라벨 op 와 X태그 승격 op 를 한 틱에. (risk_finding id, 과제 id)."""
+    _promote_stack_budget(box)
+    label(box, "검토 회의에서 확인")
+    assert tick(box)["sent"] == 1
+    project = next(oid for oid, obj in box.fake.objects.items() if obj["type_slug"] == "project")
+    finding = _ra_finding(box)["id"]
+    assert box.fake.objects[finding]["properties"] == {"cluster_key": CK, "portal_registry_key": CODE, "owner": OWNER,
+                                                       "visibility": "org", "status": "verified"}
+    assert (box.fake.objects[project]["value"], box.fake.objects[project]["description"]) == SHARED_PROJECT
+    return finding, project
+
+
+def _routes(box, monkeypatch):
+    from app import routes
+
+    monkeypatch.setattr(routes, "get_store", lambda: box.store)
+    return routes
+
+
+def _set_visibility(box, monkeypatch, value: str) -> dict:
+    routes = _routes(box, monkeypatch)
+    return routes.patch_project(PROJECT, routes.ProjectPatchBody(mcp_visibility=value), ident=factories.ident(OWNER))
+
+
+def _tools_since(box, calls: int) -> list[str]:
+    return [name.removeprefix(ALIAS) for name, _args, _bearer in box.fake.calls[calls:]]
+
+
+def _ra_audits(box) -> list[tuple]:
+    """거두기가 남긴 감사 행 — (행위자, 채널, 범위, 대상, 행위, 까닭, 결과)."""
+    return [(r["actor"], r["channel"], r["scope"], r["subject_id"], r["action"], r["reason"], json.loads(r["after_json"]))
+            for r in box.store.query("SELECT * FROM rr_audit WHERE action LIKE 'ra.%' ORDER BY action, scope, subject_id, reason, rowid")]
+
+
+def _stored_ra_layer(box) -> dict:
+    report = json.loads(box.store.query_one("SELECT purge_report_json FROM rr_projects WHERE id = ?", (PROJECT,))["purge_report_json"])
+    return next(r for r in report["remaining"] if r["layer"] == "ra")
+
+
+def _counts(layer: dict) -> tuple:
+    return (layer["reason"], layer["objects"], layer["retracted"], layer["retract_pending"], layer["retract_failed"], layer["reasons"])
+
+
+def test_making_a_shared_project_private_retracts_what_ra_already_has_past_the_hold(box, monkeypatch):
+    """조직 공개였던 과제를 비공개로 돌리면 RA 에 나간 객체를 거둔다(사용자 결정 10-31 (가)) — 거두기 op 는 보류를 건너뛰어 나가고, 비공개
+    뒤에 쌓인 보낼 op 는 그대로 보류다. risk_finding 은 값이 '비공개@<code>' 로 바뀌고 속성은 되짚을 열쇠 둘과 visibility=private 만 남는다
+    (owner · status 를 뺀다). 과제는 값이 '비공개@<과제 id>' 로 바뀌고 설명이 빈다. 거둔 것마다 rr_audit 한 행이다. 종전에는 그대로
+    남았다(RS-18)."""
+    finding, project = _share(box)
+    assert _set_visibility(box, monkeypatch, "private")["resynced"]["ra_retract_ops"] == 2
+    label(box, "비공개 뒤의 라벨", outcome="refuted")                       # 비공개 뒤에 쌓인 보낼 op — 보류된다
+    assert [op["op"] for op in ra_entry(box)["pending_ops"]] == ["retract", "retract", "merge_object", "link"]
+    calls = len(box.fake.calls)
+
+    assert tick(box) == {"due": 1, "sent": 0, "failed": 0, "held": 1}
+    assert _tools_since(box, calls) == ["get_object", "update_object", "get_object", "update_object"]
+    assert box.fake.objects[finding]["value"] == f"비공개@{CODE}"
+    assert box.fake.objects[finding]["properties"] == {"cluster_key": CK, "portal_registry_key": CODE, "visibility": "private"}
+    assert (box.fake.objects[project]["value"], box.fake.objects[project]["description"]) == (f"비공개@{PROJECT}", "")
+    entry = ra_entry(box)
+    assert entry["state"] == "withheld" and [op["op"] for op in entry["pending_ops"]] == ["merge_object", "link"]
+    got = summary(box)
+    assert (got["reason"], got["retracted"], got["retract_pending"], got["retract_failed"]) == ("withheld", 2, 0, 0)
+    assert "거둔 객체 2개" in got["message"] and "대기 2건이 순서대로" in got["message"]
+    assert _ra_audits(box) == [
+        (OWNER, "rest", "project", PROJECT, "ra.retract", "private",
+         {"kind": "project", "type": "project", "ra_entity_id": project, "form": "retracted", "outcome": "retracted"}),
+        (OWNER, "rest", "registry", CODE, "ra.retract", "private",
+         {"kind": "registry", "type": "risk_finding", "ra_entity_id": finding, "form": "retracted", "outcome": "retracted"})]
+    assert tick(box)["due"] == 0                                            # 거두기 op 가 없는 보류는 다시 집지 않는다
+
+
+def test_an_owner_change_re_marks_the_owner_property_in_ra(box, monkeypatch):
+    """이양은 RA risk_finding 의 owner 를 새 소유자로 다시 표기한다(사용자 결정 10-31 (가)) — 과제는 조직 공개 그대로라 나간 꼴이고 값 ·
+    visibility · status 는 그대로다. 과제 객체에는 owner 칸이 없어 쌓지 않는다. 종전에는 옛 소유자가 RA 에 남았다."""
+    finding, _project = _share(box)
+    routes = _routes(box, monkeypatch)
+    out = routes.transfer_project(PROJECT, routes.TransferBody(to_email=NEW_OWNER, reason="담당 교체"), ident=factories.ident(OWNER))
+    assert out["ra_retract_ops"] == 1
+    assert tick(box)["sent"] == 1
+    assert box.fake.objects[finding]["value"] == SHARED_VALUE
+    assert box.fake.objects[finding]["properties"] == {"cluster_key": CK, "portal_registry_key": CODE, "owner": NEW_OWNER,
+                                                       "visibility": "org", "status": "verified"}
+    assert summary(box)["retracted"] == 0
+    assert [(a[0], a[2], a[4], a[5], a[6]["outcome"]) for a in _ra_audits(box)] == [
+        (OWNER, "registry", "ra.remark", "owner", "remarked")]
+
+
+def test_an_owner_change_on_a_private_project_keeps_what_was_retracted(box, monkeypatch):
+    """비공개 과제의 이양은 거둔 객체를 다시 열지 않는다 — 이양의 다시 표기도 보낼 때의 정본 범위(비공개)를 따라 거둔 꼴 그대로이고 새
+    소유자도 RA 에 싣지 않는다."""
+    finding, _project = _share(box)
+    _set_visibility(box, monkeypatch, "private")
+    assert tick(box)["sent"] == 1
+    routes = _routes(box, monkeypatch)
+    routes.transfer_project(PROJECT, routes.TransferBody(to_email=NEW_OWNER, reason="담당 교체"), ident=factories.ident(OWNER))
+    assert tick(box)["sent"] == 1
+    assert box.fake.objects[finding]["value"] == f"비공개@{CODE}"
+    assert box.fake.objects[finding]["properties"] == {"cluster_key": CK, "portal_registry_key": CODE, "visibility": "private"}
+    assert summary(box)["retracted"] == 2
+
+
+def test_retract_ops_go_out_after_the_sends_queued_before_them(box, monkeypatch):
+    """거두기 op 는 같은 대상의 큐 끝에 붙어 앞에 쌓인 보낼 op 다음에 나간다 — 이양 전에 붙은 라벨의 병합 · 연결이 먼저, owner 다시 표기가
+    마지막이다."""
+    finding, _project = _share(box)
+    incident = box.fake.seed("incident", "사고 1")
+    label(box, f"inc:{incident}", outcome="refuted")
+    routes = _routes(box, monkeypatch)
+    routes.transfer_project(PROJECT, routes.TransferBody(to_email=NEW_OWNER, reason="담당 교체"), ident=factories.ident(OWNER))
+    assert [op["op"] for op in ra_entry(box)["pending_ops"]] == ["merge_object", "link", "retract"]
+    calls = len(box.fake.calls)
+    assert tick(box)["sent"] == 1
+    assert _tools_since(box, calls) == ["get_object", "update_object", "get_object", "get_object", "link_objects",
+                                        "get_object", "update_object"]
+    last = box.fake.calls[-1][1]
+    assert last["object_id"] == finding and last["value"] == SHARED_VALUE and last["properties"]["owner"] == NEW_OWNER
+    assert (finding, incident, "refuted_by") in box.fake.links
+
+
+def test_purging_a_shared_project_retracts_it_and_the_purge_report_counts_what_was_pulled_back(box, monkeypatch):
+    """폐기는 나간 객체마다 거두기 op 를 쌓고(보내는 쪽은 폐기 멈춤을 건너뛴다) 폐기 보고서의 RA 층이 그 결과를 말한다 — 폐기 응답 때는
+    거두기 대기 2, 동기 주기 뒤에는 거둔 객체 2(보고서가 다시 적힌다). 폐기 앞에 쌓인 보낼 op 는 나가지 않고 그 대상은 rejected 로
+    멈춘다. 종전 보고서는 not_retracted 와 나간 수만 말했다."""
+    finding, project = _share(box)
+    label(box, "폐기 전의 라벨", outcome="refuted")
+    routes = _routes(box, monkeypatch)
+    out = routes.purge_project(PROJECT, routes.PurgeBody(code="P-RK01", reason="정리"), ident=factories.ident(OWNER))
+    layer = next(r for r in out["purge_report"]["remaining"] if r["layer"] == "ra")
+    assert _counts(layer) == ("retract_pending", 2, 0, 2, 0, {})
+    calls = len(box.fake.calls)
+
+    assert tick(box) == {"due": 1, "sent": 0, "failed": 1}
+    assert _tools_since(box, calls) == ["get_object", "update_object", "get_object", "update_object"]
+    assert (box.fake.objects[finding]["value"], box.fake.objects[project]["value"]) == (f"비공개@{CODE}", f"비공개@{PROJECT}")
+    assert box.fake.objects[finding]["properties"] == {"cluster_key": CK, "portal_registry_key": CODE, "visibility": "private"}
+    assert box.fake.objects[project]["description"] == ""
+    entry = ra_entry(box)
+    assert entry["state"] == "unavailable" and "폐기" in entry["last_error"]
+    assert [op["op"] for op in entry["pending_ops"]] == ["merge_object", "link"]
+    layer = _stored_ra_layer(box)
+    assert _counts(layer) == ("retracted", 2, 2, 0, 0, {})
+    assert "가운데 2개를 거뒀다" in layer["detail"] and "not_retracted" not in json.dumps(layer, ensure_ascii=False)
+    assert [(a[4], a[5], a[6]["outcome"]) for a in _ra_audits(box)] == [("ra.retract", "purged", "retracted")] * 2
+
+
+def test_a_retract_never_rewrites_an_object_that_is_not_ours(box, monkeypatch):
+    """사상된 id 의 RA 객체가 우리 것이 아니면(값이 @<code> 로 끝나지 않는다 — 다른 박스에서 들여온 사상 · RA 에서 바뀐 값) 거두지 않는다 —
+    그 op 만 id_mismatch 로 따로 두고 나머지는 거둔다. 요약 · 폐기 보고서가 못 거둔 수와 그 까닭 낱말을 말하고 감사에 실패 행이 남는다."""
+    finding, project = _share(box)
+    box.fake.objects[project]["value"] = "남의 과제"                        # RA 에서 누군가 그 객체의 값을 바꿨다
+    routes = _routes(box, monkeypatch)
+    routes.purge_project(PROJECT, routes.PurgeBody(code="P-RK01", reason="정리"), ident=factories.ident(OWNER))
+    assert tick(box) == {"due": 1, "sent": 1, "failed": 0}
+    assert (box.fake.objects[project]["value"], box.fake.objects[project]["description"]) == ("남의 과제", SHARED_PROJECT[1])
+    assert box.fake.objects[finding]["value"] == f"비공개@{CODE}"
+    entry = ra_entry(box)
+    assert [(d["op"]["kind"], d["error"].split(":")[0]) for d in entry["dead_ops"]] == [("project", "id_mismatch")]
+    got = summary(box)
+    assert (got["retracted"], got["retract_pending"], got["retract_failed"], got["retract_reasons"]) == (1, 0, 1, {"id_mismatch": 1})
+    assert "못 거둔 것 1건(id_mismatch 1)" in got["message"]
+    assert _counts(_stored_ra_layer(box)) == ("retract_failed", 2, 1, 0, 1, {"id_mismatch": 1})
+    assert [(a[2], a[6]["outcome"], a[6].get("error")) for a in _ra_audits(box)] == [
+        ("project", "failed", "id_mismatch"), ("registry", "retracted", None)]
+
+
+def test_a_retract_ra_refuses_is_set_aside_counted_and_sent_again_after_resync(box, monkeypatch):
+    """RA 가 거두기 하나를 받지 않으면(값 바꾸기가 같은 축의 다른 값과 겹친다 — '이미 같은 값이 있습니다') 그 op 만 value_collision 으로
+    따로 두고 나머지는 거둔다. 요약은 못 거둔 수와 까닭 낱말을 말하고, 고친 뒤 재동기하면 다시 보낸다."""
+    finding, project = _share(box)
+    blocker = box.fake.seed("risk_finding", f"비공개@{CODE}", "남의 code")
+    _set_visibility(box, monkeypatch, "private")
+    assert tick(box)["sent"] == 1
+    assert box.fake.objects[project]["value"] == f"비공개@{PROJECT}"
+    assert box.fake.objects[finding]["value"] == SHARED_VALUE and box.fake.objects[finding]["properties"]["visibility"] == "org"
+    got = summary(box)
+    assert (got["retracted"], got["retract_failed"], got["retract_reasons"]) == (1, 1, {"value_collision": 1})
+
+    del box.fake.objects[blocker]                                          # 운영자가 RA 에서 겹친 값을 정리했다
+    ra_client.resync(box.store, TARGET)
+    assert tick(box)["sent"] == 1
+    assert box.fake.objects[finding]["properties"] == {"cluster_key": CK, "portal_registry_key": CODE, "visibility": "private"}
+    got = summary(box)
+    assert (got["retracted"], got["retract_pending"], got["retract_failed"]) == (2, 0, 0)
+
+
+def test_reopening_a_retracted_project_resumes_normal_sends_and_reshares_what_was_pulled_back(box, monkeypatch):
+    """다시 조직 공개로 열면 보류된 보낼 op 가 순서대로 나가고(종전 그대로), 거둔 객체는 나간 꼴로 다시 표기된다 — 값 · 과제 설명 · owner ·
+    visibility=org · 보낼 때의 등록부 status. 대상의 거둔 객체 수는 0 으로 돌아간다."""
+    finding, project = _share(box)
+    _set_visibility(box, monkeypatch, "private")
+    label(box, "비공개 뒤의 라벨", outcome="refuted")
+    assert tick(box)["held"] == 1 and summary(box)["retracted"] == 2
+
+    out = _set_visibility(box, monkeypatch, "org")
+    assert (out["resynced"]["ra_ops_released"], out["resynced"]["ra_retract_ops"]) == (2, 2)
+    assert [op["op"] for op in ra_entry(box)["pending_ops"]] == ["merge_object", "link", "retract", "retract"]
+    assert summary(box)["retract_pending"] == 0                           # 다시 표기는 거두기 대기로 세지 않는다
+    assert tick(box) == {"due": 1, "sent": 1, "failed": 0}
+    assert box.fake.objects[finding]["value"] == SHARED_VALUE
+    assert box.fake.objects[finding]["properties"] == {"cluster_key": CK, "portal_registry_key": CODE, "owner": OWNER,
+                                                       "visibility": "org", "status": "dismissed"}
+    assert (box.fake.objects[project]["value"], box.fake.objects[project]["description"]) == SHARED_PROJECT
+    entry = ra_entry(box)
+    assert entry["state"] == "done" and not entry.get("retracted")
+    got = summary(box)
+    assert (got["reason"], got["retracted"], got["retract_pending"], got["retract_failed"]) == ("sent", 0, 0, 0)
+    assert [(a[4], a[5], a[6]["outcome"]) for a in _ra_audits(box)] == [("ra.remark", "org", "remarked")] * 2 + [
+        ("ra.retract", "private", "retracted")] * 2
+
+
+def test_a_retract_is_queued_once_and_sending_it_again_changes_nothing(box):
+    """거두기 op 는 멱등이다 — 같은 꼴은 한 번만 쌓이고, 이미 거둔 객체에 다시 보내도 RA 가 같다(risk_finding 은 읽어 본 값 · 속성이 이미
+    거둔 꼴이라 쓰지 않는다 — 과제 설명은 읽을 수 없어 다시 비운다)."""
+    _share(box)
+    box.store.execute("UPDATE rr_projects SET mcp_visibility = 'private' WHERE id = ?", (PROJECT,))
+    assert ra_client.queue_retracts(box.store, PROJECT, "private", by=OWNER) == 2
+    assert ra_client.queue_retracts(box.store, PROJECT, "private", by=OWNER) == 2
+    assert [op["op"] for op in ra_entry(box)["pending_ops"]] == ["retract", "retract"]
+    assert tick(box)["sent"] == 1
+    after = copy.deepcopy(box.fake.objects)
+
+    ra_client.queue_retracts(box.store, PROJECT, "private", by=OWNER)
+    calls = len(box.fake.calls)
+    assert tick(box)["sent"] == 1
+    assert box.fake.objects == after
+    assert _tools_since(box, calls) == ["get_object", "update_object", "get_object"]
+    assert summary(box)["retracted"] == 2
+    assert [a[6]["outcome"] for a in _ra_audits(box) if a[2] == "registry"] == ["retracted", "unchanged"]
+    with pytest.raises(ValueError):
+        ra_client.queue_retracts(box.store, PROJECT, "hidden", by=OWNER)
+
+
+def test_a_retract_on_a_stopped_channel_waits_for_resync_and_says_why(box, monkeypatch):
+    """거두기 op 도 채널 전체가 막히는 실패(PAT 주인이 RA 관리자가 아니다)에는 멈추고 재동기를 기다린다 — 요약은 그 사유와 거두기 대기 수를
+    말하고, 폐기 보고서도 그 낱말을 단다. 고친 뒤 재동기하면 거둔다."""
+    finding, _project = _share(box)
+    box.fake.admins = set()
+    routes = _routes(box, monkeypatch)
+    routes.purge_project(PROJECT, routes.PurgeBody(code="P-RK01", reason="정리"), ident=factories.ident(OWNER))
+    assert tick(box) == {"due": 1, "sent": 0, "failed": 1}
+    got = summary(box)
+    assert (got["reason"], got["retract_pending"], got["retracted"]) == ("forbidden", 2, 0)
+    assert "거두기(비공개 · 폐기)" in got["message"] and "대기 2건" in got["message"]
+    assert _counts(_stored_ra_layer(box)) == ("retract_pending", 2, 0, 2, 0, {"forbidden": 2})
+    assert tick(box)["due"] == 0
+
+    box.fake.admins = {RW}
+    ra_client.resync(box.store, TARGET)
+    assert tick(box)["sent"] == 1
+    assert box.fake.objects[finding]["properties"]["visibility"] == "private" and summary(box)["retracted"] == 2
+    assert _counts(_stored_ra_layer(box)) == ("retracted", 2, 2, 0, 0, {})
+
+
+def test_an_object_created_while_the_project_goes_private_is_retracted_too(box, monkeypatch):
+    """비공개로 돌리는 순간 RA 에 만드는 호출이 나가 있었으면 그 객체의 id 는 거두기 op 를 쌓은 뒤에야 적힌다 — 보내는 쪽이 결과를 적을 때
+    닫힌 과제의 거두지 않은 객체에 거두기 op 를 뒤따라 쌓아(보류된 대상이라도) 다음 틱에 거둔다. 행위자 없는 뒤처리는 과제 소유자로 적는다."""
+    routes = _routes(box, monkeypatch)
+    incident = box.fake.seed("incident", "사고 1")
+    label(box, f"inc:{incident}")
+    real = box.fake._create_object
+
+    def create_then_hide(args):
+        out = real(args)
+        patched = routes.patch_project(PROJECT, routes.ProjectPatchBody(mcp_visibility="private"), ident=factories.ident(OWNER))
+        assert patched["resynced"]["ra_retract_ops"] == 0                  # 아직 id 가 적히지 않아 쌓을 것이 없다
+        return out
+
+    box.fake._create_object = create_then_hide
+    assert tick(box) == {"due": 1, "sent": 0, "failed": 0, "held": 1}
+    box.fake._create_object = real
+    entry = ra_entry(box)
+    assert entry["state"] == "withheld"
+    assert [(op["op"], op["reason"]) for op in entry["pending_ops"]] == [("link", "label_link"), ("retract", "private")]
+
+    assert tick(box) == {"due": 1, "sent": 0, "failed": 0, "held": 1}
+    found = _ra_finding(box)
+    assert found["value"] == f"비공개@{CODE}" and found["properties"]["visibility"] == "private"
+    assert [op["op"] for op in ra_entry(box)["pending_ops"]] == ["link"] and box.fake.links == {}
+    assert [(a[0], a[4], a[5]) for a in _ra_audits(box)] == [(OWNER, "ra.retract", "private")]
+
+
+def test_a_retract_finds_the_object_through_the_source_rows_when_the_id_map_lacks_it(box):
+    """rr_id_map 이 비어도(어긋남) 원본 표의 ra_entity_id(조회 편의용 중복)로 거둘 객체를 찾는다 — 쌓을 때도 보낼 때도. 거두기는 공개 범위를
+    지키는 일이라 사상 한 칸이 빠졌다고 나간 객체를 남겨 두지 않는다."""
+    finding, project = _share(box)
+    box.store.execute("DELETE FROM rr_id_map")
+    box.store.execute("UPDATE rr_projects SET mcp_visibility = 'private' WHERE id = ?", (PROJECT,))
+    assert ra_client.queue_retracts(box.store, PROJECT, "private", by=OWNER) == 2
+    assert tick(box)["sent"] == 1
+    assert (box.fake.objects[finding]["value"], box.fake.objects[project]["value"]) == (f"비공개@{CODE}", f"비공개@{PROJECT}")
+    assert summary(box)["retracted"] == 2

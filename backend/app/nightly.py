@@ -392,9 +392,11 @@ def scan_unclassified(store: Any, *, now: int) -> dict:
 
 # ---------------------------------------------------------------- ⑦ external_sync 재시도
 def _apply_outcome(store: Any, target_key: str, channel: str, outcome: Mapping[str, Any]) -> str:
-    """전송기의 결과 dict 를 상태기계에 옮긴다(한 트랜잭션) — 'held' · 'failed' · 'sent' 가운데 하나를 돌려준다."""
+    """전송기의 결과 dict 를 상태기계에 옮긴다(한 트랜잭션) — 'held' · 'failed' · 'sent' 가운데 하나를 돌려준다. RA 채널이면 거두기 몫
+    (대상의 거둔 객체 · 감사 행 · 폐기 보고서의 RA 층)도 같은 트랜잭션에서 적는다(ra_client.record_retracts)."""
     from app import ra_client
 
+    result = "sent"
     with store.tx():
         if outcome.get("dead"):
             ra_client.set_aside_sync_ops(store, target_key, channel, list(outcome["dead"]))
@@ -404,12 +406,14 @@ def _apply_outcome(store: Any, target_key: str, channel: str, outcome: Mapping[s
             ra_client.note_sync_skips(store, target_key, channel, list(outcome["skipped"]))
         if outcome.get("hold"):
             ra_client.set_sync_state(store, target_key, channel, str(outcome["hold"]))
-            return "held"
-        if outcome.get("error"):
+            result = "held"
+        elif outcome.get("error"):
             mark = ra_client.note_sync_failure if outcome.get("retry") else ra_client.mark_unavailable
             mark(store, target_key, channel, str(outcome["error"]))
-            return "failed"
-    return "sent"
+            result = "failed"
+        if channel == "ra":
+            ra_client.record_retracts(store, target_key, outcome)
+    return result
 
 
 def _note_stop(store: Any, target_key: str, channel: str, stopped: dict[str, Counter]) -> None:
@@ -439,14 +443,14 @@ def _warn_tick(stopped: Mapping[str, Counter], set_aside: Mapping[str, Counter])
 def retry_external_sync(store: Any, *, now: int,
                         send: Callable[[Any, str, str, Sequence[Mapping[str, Any]]], Any] | None = None,
                         should_stop: Callable[[], bool] | None = None) -> dict:
-    """next_at ≤ now 인 pending 채널의 op 를 다시 보낸다(§5.5.3).
+    """next_at ≤ now 인 pending 채널의 op 를 다시 보낸다(§5.5.3). 거두기 op 가 쌓인 보류(withheld) 채널도 집는다(RK-01 거두기).
 
     send 가 없으면(러너가 아직 클라이언트를 물리지 않았으면) 보내지 않고 대기 건수만 센다 — 이 모듈은
     스스로 외부 연결을 열지 않는다. send 는 둘 가운데 하나를 돌려준다.
     - bool(종전 꼴) — 참이면 그 op 가 전부 끝, 거짓이면 실패 1회(백오프).
     - dict(ra_client.RaSender) — done(큐에서 뺄 op) · skipped(RA 에 잇지 않은 것의 까닭) · dead(그 op 에만 걸린 영구 거절 — 따로 둔다) ·
-      hold('withheld') · error('<낱말>: <글>' — 남은 op 는 큐에 그대로) · retry(참이면 백오프, 거짓이면 곧바로 unavailable) · off(자격이 없어
-      부르지 않았다 — 상태를 바꾸지 않는다).
+      retracts(나간 거두기 op 의 결과) · hold('withheld') · error('<낱말>: <글>' — 남은 op 는 큐에 그대로) · retry(참이면 백오프, 거짓이면
+      곧바로 unavailable) · off(자격이 없어 부르지 않았다 — 상태를 바꾸지 않는다).
     send 에 `channels` 가 있으면 그 채널만 보내고 나머지는 센다(unwired). `off_reason()` 이 글을 주면 아무것도 보내지 않는다. 다시 보낼
     실패(retry)가 나면 그 틱의 남은 타깃은 다음 틱으로 미룬다(deferred — 죽은 상대를 타깃마다 기한까지 두드리지 않는다).
     한 틱의 크기는 send 의 `tick_max_targets`(대상 수) · `tick_budget_s`(벽시계 초)로 묶고 `should_stop()`(러너 정지 신호)을 대상마다 본다 —
@@ -462,7 +466,10 @@ def retry_external_sync(store: Any, *, now: int,
         for channel in ra_client.SYNC_CHANNELS:
             entry = sync.get(channel) or {}
             ops = list(entry.get("pending_ops") or [])
-            if entry.get("state") == "pending" and ops and int(entry.get("next_at") or 0) <= now:
+            state = entry.get("state")
+            # 보류(withheld)는 공개 토글이 풀 때까지 집지 않는다 — 거두기 op 가 쌓였으면 그것만은 보류를 건너뛰어 나간다(RK-01 거두기).
+            if ops and ((state == "pending" and int(entry.get("next_at") or 0) <= now)
+                        or (state == "withheld" and any(ra_client.is_retract_op(op) for op in ops))):
                 due.append((str(row["target_key"]), channel, ops))
 
     if send is None:

@@ -394,6 +394,30 @@ def test_external_sync_stops_the_tick_when_off_or_after_a_retryable_failure(risk
     assert ra_client.load_external_sync(risk_store, "T2")["ra"]["attempts"] == 0
 
 
+def test_external_sync_picks_a_withheld_channel_only_for_its_retract_ops(risk_store):
+    """보류(withheld)는 공개 토글이 풀 때까지 집지 않는다 — 거두기 op 가 쌓였으면 그것만은 보류를 건너뛰어 나간다(RK-01 거두기, 사용자 결정
+    10-31 (가)). 전송기가 거둔 결과(retracts)는 대상의 거둔 객체로 적히고, 보류된 op 는 큐에 남는다."""
+    from app import ra_client
+
+    held = {"op": "merge_object", "n": 1}
+    retract = {"op": "retract", "reason": "private", "kind": "registry", "portal_id": "T2#ck", "project_id": "PRJ1", "by": OWNER}
+    add_target(risk_store, "T1", sync={"ra": {"state": "withheld", "pending_ops": [held]}})
+    add_target(risk_store, "T2", sync={"ra": {"state": "withheld", "pending_ops": [held, retract]}})
+    seen: list[tuple] = []
+
+    def send(store, target_key, channel, ops):
+        seen.append((target_key, [op["op"] for op in ops]))
+        return {"done": [retract], "hold": "withheld",
+                "retracts": [{"op": retract, "form": "retracted", "outcome": "retracted", "ra_id": 7, "type": "risk_finding"}]}
+
+    send.channels = ("ra",)
+    assert nightly.retry_external_sync(risk_store, now=NOW, send=send) == {"due": 1, "sent": 0, "failed": 0, "held": 1}
+    assert seen == [("T2", ["merge_object", "retract"])]
+    t2 = ra_client.load_external_sync(risk_store, "T2")["ra"]
+    assert (t2["state"], t2["pending_ops"], list(t2["retracted"])) == ("withheld", [held], ["registry:T2#ck"])
+    assert nightly.retry_external_sync(risk_store, now=NOW, send=send)["due"] == 0
+
+
 # ---------------------------------------------------------------- ⑧ rr_id_map 정합
 def test_id_map_drift_detects_missing_and_mismatch(risk_store):
     risk_store.execute(
