@@ -17,6 +17,7 @@ import pytest
 
 import app.mcp_server as srv
 from app import config, identity, ir_builder, routes, runner
+from app.adapters import ecad as ecad_adapter
 from app.adapters import registry as adapters_registry
 from app.adapters.base import Principal
 from app.common import now_epoch
@@ -253,6 +254,11 @@ def test_the_adapter_reads_the_board_only_on_the_persons_channel():
         assert hub.calls == [] and captured["calls"] == []
         assert result["missing"] == {"ecad_absent": True} and result["nodes"] == []
         assert (result["warnings"][0]["code"], result["warnings"][0]["severity"]) == ("ecad_pat_absent", "WARNING")
+    # 찾기 본체도 채널이 없으면(그 사람의 PAT 로 열지 못했다) 같은 409 다 — 라우트는 그 앞에서 PAT 를 본다.
+    with pytest.raises(AppError) as err:
+        ecad_adapter.search_boards(None, FakeOdbHub().tools, "SM-X100")
+    assert (err.value.code, err.value.http_status, err.value.detail) == ("ecad_pat_absent", 409,
+                                                                         {"app_key": ODB, "fix": "portal_pat"})
 
 
 def test_without_the_box_fallback_no_channel_is_built_and_nothing_is_sent(box):

@@ -1685,7 +1685,7 @@ def _ecad_mcp_channel(owner_sub: str) -> tuple[Any, dict]:
     if portal_pat is None:
         raise ecad_adapter.pat_absent_error()
     channels = adapters_registry.clients_from_settings(
-        config.settings, config.load_secrets(config.settings.data_dir), portal_pat=portal_pat, box_pat_fallback=False)
+        config.settings, config.load_secrets(config.settings.data_dir), portal_pat=portal_pat)
     if channels.get("rest") is not None:
         channels["rest"].close()          # 찾기는 REST 를 쓰지 않는다 — 만든 소켓은 닫는다
     return channels.get("mcp"), dict(channels.get("tool_map") or {})
