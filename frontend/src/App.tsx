@@ -1,5 +1,5 @@
 // 앱 셸 — 사이드바·커맨드 팔레트(⌘K)·HashRouter 라우트 7개. 딥링크는 /apps/hwax_risk/#/targets/<key> 형식이라 새로고침에 안전하다(계획 §8.2.4).
-import { HashRouter, Link, NavLink, Route, Routes, useParams } from "react-router-dom";
+import { HashRouter, Link, NavLink, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { FileDiff, LayoutGrid, ListChecks, Settings as SettingsIcon } from "lucide-react";
 import { Button } from "./ui/primitives";
 import { CommandPalette } from "./ui/CommandPalette";
@@ -14,6 +14,7 @@ import SettingsPage from "./pages/SettingsPage";
 import { SectionCard } from "./components/SectionCard";
 import { EmptyBlock } from "./components/StateBlocks";
 import { AutoPortalPatNotice, AutoPortalPatProvider } from "./components/AutoPortalPat";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 
 // 사이드바 — 아이콘은 글자를 대신하지 않고 **거든다**(글자를 지우면 어느 화면인지 못 읽는 사람이 생긴다).
 const NAV = [
@@ -54,6 +55,7 @@ function NotFoundPage() {
 }
 
 function Shell() {
+  const location = useLocation();
   return (
     <div className="flex min-h-screen bg-background text-foreground">
       <CommandPalette />
@@ -114,6 +116,8 @@ function Shell() {
         <div className="mx-auto flex w-full max-w-[1180px] min-w-0 flex-col gap-4">
         {/* 앱을 열 때의 포털 PAT 자동 등록 실패 한 줄 — 어느 화면에서 열었든 같은 자리에서 말한다. */}
         <AutoPortalPatNotice />
+        {/* 한 화면이 그리다 멈춰도(서버 꼴이 타입과 다른 행 따위) 사이드바와 다른 화면은 남는다 — 주소가 바뀌면 다시 그린다. */}
+        <ErrorBoundary resetKey={location.pathname}>
         <Routes>
           <Route path="/" element={<RiskHomePage />} />
           <Route path="/projects/:id" element={<ProjectPage />} />
@@ -124,6 +128,7 @@ function Shell() {
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="*" element={<NotFoundPage />} />
         </Routes>
+        </ErrorBoundary>
         </div>
       </main>
     </div>
