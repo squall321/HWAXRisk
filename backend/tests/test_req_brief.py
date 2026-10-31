@@ -103,6 +103,17 @@ def test_e3_carries_limit_and_margin_columns_in_margin_order(risk_store, no_fiel
     assert e3[3].startswith("[d:plate2_copy_t] ") and e3[3].endswith(" | limit=— | margin=—"), e3
 
 
+def test_a_margin_of_exactly_zero_is_a_violation(risk_store, no_field):
+    """여유 0 은 위반이다 — R-007 `req_margin_negative`(여유 ≤ 0)와 같은 경계다. 부호 없이 `0.0` 으로 적는다."""
+    project_id = _project(risk_store)
+    _requirements(risk_store, project_id, [
+        {"kind": "dim_limit", "name": "plate2_t", "op": "gte", "value_json": 1.0, "unit": "mm"}])   # 1.0 − 1.0 = 0
+    key, _ = _snap_target(risk_store, project_id)
+    built = brief.build_brief(risk_store, key, strict_lint=True)
+    assert _item(built, "E3")[0].endswith(" | limit=gte 1.0 mm [req:plate2_t] | margin=0.0 mm(위반)")
+    assert "요구 dim_limit 1 · 최소 여유 0.0 mm [req:plate2_t] · 시나리오 0/0" in _item(built, "E0")
+
+
 def test_e3_margin_in_a_diff_uses_the_target_value_and_lists_requirements_without_a_dim(risk_store, no_field):
     """diff 의 여유는 뒤 스냅샷 값으로 센다 — 1.2 → 0.84 에 gte 0.9 면 0.84 − 0.9 = −0.06(위반). 치수 정의가 없는 요구도 실린다."""
     project_id = _project(risk_store, {"plate1_t": DIMS["plate1_t"]})
