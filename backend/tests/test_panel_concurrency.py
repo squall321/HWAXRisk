@@ -238,7 +238,7 @@ def _panel_job(store, target_key: str, cfg, *, concurrency: int = 2, tier: str =
 
 
 # ---------------------------------------------------------------- 두 패널이 함께 돈다
-def test_a_concurrency_two_job_runs_two_of_its_panels_at_once_and_their_streams_interleave(rig):
+def test_a_concurrency_two_job_runs_two_of_its_panels_at_once_and_their_streams_interleave(rig, monkeypatch):
     """동시 2 잡은 제 패널 둘을 함께 돌린다 — 좌석이 겹치지 않고(9석 = 5 + 4), 두 스트림이 섞여 흘러도 신호 · 결과가 제 패널에 앉고,
     늦게 시작한 패널이 먼저 끝나도 셈(panels_done · 좌석 · 불변식)이 맞는다. 남은 좌석이 없어도 형제가 도는 동안은 잡을 끝내지 않는다."""
     store = rig.store
@@ -277,17 +277,27 @@ def test_a_concurrency_two_job_runs_two_of_its_panels_at_once_and_their_streams_
     assert board["signal"] is not None and board["signal"]["panel_id"] in {p["id"] for p in panels}
     assert set(json.loads(_job(store, job_id)["progress_json"])[runner.PROGRESS_PANELS_KEY]) == {p["id"] for p in panels}
 
-    # 늦게 시작한 패널이 먼저 끝난다 — 첫 패널은 그대로 돈다.
+    # 늦게 시작한 패널이 먼저 끝난다 — 첫 패널은 그대로 돈다. 첫 패널은 잠시 조용하다(맨 위 신호는 끝난 둘째 패널의 것으로 남는다).
+    first.quiet.set()
+    time.sleep(0.2)
     second.finish()
     rig.settle(job_id, 1)
     assert [p["status"] for p in _panels(store, target_key)] == ["running", "done"]
     assert _job(store, job_id)["panels_done"] == 1 and not first.closed.is_set()
-    assert [s["panel_no"] for s in routes.coverage_payload(target_key)["job"]["signals"]] == [1]
+    board = routes.coverage_payload(target_key)["job"]
+    assert json.loads(_job(store, job_id)["progress_json"])["panel_id"] == panels[1]["id"]      # 맨 위 칸은 닫힌 패널의 것
+    assert [s["panel_no"] for s in board["signals"]] == [1] and board["signal"]["panel_no"] == 1  # signal 은 도는 패널로 선다
     # 남은 좌석이 없지만 형제가 돈다 — 둘째 자리는 편성할 것이 없어 집지 않고(틱마다 잡 행을 다시 쓰지 않는다) 잡을 끝내지 않는다.
     assert runner.claim_next_job(store, rig.cfg, running=rig.rr._running_of) is None
     rig.tick()
     assert len(rig.portal.streams) == 2 and _job(store, job_id)["state"] == "running"
+    # 집기가 본 남은 좌석이 편성 전에 사라져도(사람의 좌석 넘기기 · MCP 편성과의 경합) 형제가 돌면 잡을 끝내지 않는다.
+    with monkeypatch.context() as race:
+        race.setattr(planner, "has_pending", lambda *a, **k: True)
+        rig.tick()
+    assert len(rig.portal.streams) == 2 and _job(store, job_id)["state"] == "running"
 
+    first.quiet.clear()
     first.finish()
     rig.settle(job_id, 0)
     rig.tick()                                             # 첫 자리 — 남은 좌석이 없고 도는 형제도 없다: 잡을 끝낸다
@@ -547,6 +557,23 @@ def test_an_engine_slot_that_never_comes_for_the_second_panel_does_not_pause_the
         common.set_clock(previous)
 
 
+def test_a_concurrency_one_job_still_pauses_on_engine_busy_even_with_another_paths_panel_running(risk_store, tmp_path,
+                                                                                                 monkeypatch):
+    """동시 1 잡은 종전 그대로다 — 같은 대상에 다른 길(MCP 보충 회차)의 패널이 돌아도 그것을 형제로 읽지 않는다. 엔진 자리를 예산 내내 못
+    얻으면 잡을 멈춘다(종전)."""
+    monkeypatch.setattr(runner, "time", _Clock())
+    target_key = _seed(risk_store)
+    cfg = _cfg(tmp_path, risk_engine_busy_wait_s=30, risk_engine_busy_max_wait_s=90)
+    job_id = _panel_job(risk_store, target_key, cfg, concurrency=1)
+    job = runner.claim_next_job(risk_store, cfg)
+    mcp = planner.plan_next_panel(risk_store, target_key, "A", settings=cfg)          # 다른 길의 패널이 돈다
+    planner.start_panel_seats(risk_store, mcp["id"])
+    out = runner.run_panel(risk_store, cfg, _NoSlot(), job)
+    assert out["error"].startswith("engine_busy: ") and runner.ENGINE_BUSY_SIBLING_NOTE not in out["error"]
+    row = _job(risk_store, job_id)
+    assert (row["state"], row["state_by"]) == ("paused", "code:engine_busy")
+
+
 def test_the_daily_cap_blocks_the_second_slot_without_pausing_the_running_panel(risk_store, tmp_path):
     """하루 상한에 닿았다 — 첫 패널이 도는 동안은 둘째 자리만 막고 잡을 멈추지 않는다(멈추면 그 패널이 닫힌다). 도는 패널이 없을 때의
     첫 자리가 종전대로 daily_cap 으로 멈춘다."""
@@ -568,8 +595,10 @@ def test_diminishing_returns_wait_for_the_running_sibling(risk_store, tmp_path):
     """수확 체감 — 첫 패널이 끝날 때 형제가 돌면 잡을 멈추지 않고(멈추면 형제가 닫힌다) 둘째 자리만 막는다. 마지막 형제가 끝날 때 멈춘다."""
     target_key = _seed(risk_store)
     cfg = _cfg(tmp_path)
-    job_id = _panel_job(risk_store, target_key, cfg)
+    # Tier C(전원 18석) — 두 패널을 앉혀도 좌석이 남는다(둘째 자리를 막는 것이 남은 좌석이 아니라 수확 체감이게).
+    job_id = runner.create_job(risk_store, target_key, "C", owner_sub=OWNER, settings=cfg, concurrency=2, consent=True)["job_id"]
     job, first, second = _seat_two(risk_store, cfg, target_key, job_id)
+    assert planner.has_pending(risk_store, target_key, "C")
     now = common.now_epoch()
     for n in range(runner.DIMINISHING_WINDOW):
         risk_store.execute(
