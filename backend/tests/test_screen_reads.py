@@ -108,6 +108,43 @@ def test_a_gate_ack_left_on_an_older_judgement_or_on_a_pair_is_not_carried(wired
     assert state["gates"]["G1"]["ack_by"] is None
 
 
+def test_the_gate_summary_signal_and_the_summary_line_follow_the_live_ack(wired):
+    """게이트에서 만든 글 — gates.summary 신호(값마다 ack · 글)와 summary_text 의 [게이트] 줄 — 도 얹은 ack 를 따른다. 종전에는 게이트 표가
+    'fail(1) · ack' 인 같은 답의 신호 · 요약이 'G3 fail(1, ack 없음)' 이었다('단발 심사 열기' 가 그 요약을 복사한다). 다른 줄과 저장된 상태
+    원문(동결 때 그대로)은 바뀌지 않는다."""
+    store = wired
+    owner = factories.ident(OWNER)
+    project_id = factories.make_project(store)
+    sid = factories.make_snapshot(store, project_id, [factories.adapter_fixture(MCAD_ONLY)], label="ack")["snapshot_id"]
+
+    def gate_lines(state: dict) -> list[str]:
+        return [line for line in state["summary_text"].split("\n") if line.startswith("[게이트] ")]
+
+    def other_lines(state: dict) -> list[str]:
+        return [line for line in state["summary_text"].split("\n") if not line.startswith("[게이트] ")]
+
+    frozen = routes.get_snapshot(sid, part="state", ident=owner)
+    assert frozen["signals"]["gates.summary"]["value"]["G3"] == {"pass": False, "count": 1, "ack": False}
+    routes.post_gate_ack(sid, "G3", routes.GateAckBody(reason="계면 확인 뒤 진행"), ident=owner)
+
+    state = routes.get_snapshot(sid, part="state", ident=owner)
+    summary = state["signals"]["gates.summary"]
+    assert summary["value"]["G3"] == {"pass": False, "count": 1, "ack": True}
+    assert "G3 fail(1, ack 있음)" in summary["text"] and "ack 없음" not in summary["text"]
+    assert gate_lines(state) == ["[게이트] " + summary["text"]]
+    assert other_lines(state) == other_lines(frozen)
+    stored = json.loads(store.query_one("SELECT state_json FROM rr_states WHERE snapshot_id = ?", (sid,))["state_json"])
+    assert "G3 fail(1, ack 없음)" in stored["summary_text"]
+    assert stored["signals"]["gates.summary"]["value"]["G3"]["ack"] is False
+    # MCP risk_get_snapshot(part='state') 도 같은 함수다.
+    assert routes.snapshot_part(sid, "state", owner_sub=OWNER)["signals"]["gates.summary"]["text"] == summary["text"]
+
+    routes.delete_gate_ack(sid, "G3", ident=owner)
+    revoked = routes.get_snapshot(sid, part="state", ident=owner)
+    assert revoked["signals"]["gates.summary"] == frozen["signals"]["gates.summary"]
+    assert revoked["summary_text"] == frozen["summary_text"]
+
+
 def test_a_gate_ack_row_of_anyone_but_the_snapshot_owner_is_not_carried(wired):
     """ack 라우트는 스냅샷 주인만 쓴다 — 주인이 다른 ack 행(고침 전의 들여오기가 남의 스냅샷 id 로 남겼을 수 있는 행)은 게이트 · 신호 ·
     요약에 싣지 않는다(그 사람이 ack_by 를 주인의 이메일로 적어도)."""

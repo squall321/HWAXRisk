@@ -2248,7 +2248,8 @@ export const projectCardsMember = sample<ProjectList>()({
 
 /**
  * 스냅샷 상태(GET /snapshots/{id}?part=state) — G3 에 ack 를 붙인 뒤 받았다. 게이트는 지금 살아 있는 ack 를 얹어 오고 `gates_hash` 는
- * ack 답의 것과 같다. 신호 · 규칙 적중 · 성격 씨앗 · 특징 벡터는 앞 몇 개로 줄였다.
+ * ack 답의 것과 같다. 게이트에서 만든 글(신호 `gates.summary` 의 값 · 글과 summary_text 의 [게이트] 줄)도 그 ack 를 말한다(반대 검토 10-31 —
+ * 같은 게이트를 고친 백엔드에서 다시 받아 그 둘을 옮겼다). 신호 · 규칙 적중 · 성격 씨앗 · 특징 벡터는 앞 몇 개로 줄였다.
  */
 export const snapshotStateAcked = sample<SnapshotState>()({
   "blocked": false,
@@ -2410,6 +2411,53 @@ export const snapshotStateAcked = sample<SnapshotState>()({
   "rule_version": "rules-1.0",
   "seed_rules_version": "seed-1.0",
   "signals": {
+    "gates.summary": {
+      "derived_from": [],
+      "kind": "table",
+      "known": true,
+      "refs": [
+        "gate:G1",
+        "gate:G2",
+        "gate:G3",
+        "gate:G4",
+        "gate:G5",
+        "gate:G6"
+      ],
+      "text": "G1 pass · G2 pass · G3 fail(1, ack 있음) · G4 pass · G5 pass · G6 pass",
+      "unit": null,
+      "value": {
+        "G1": {
+          "ack": false,
+          "count": 0,
+          "pass": true
+        },
+        "G2": {
+          "ack": false,
+          "count": 0,
+          "pass": true
+        },
+        "G3": {
+          "ack": true,
+          "count": 1,
+          "pass": false
+        },
+        "G4": {
+          "ack": false,
+          "count": 0,
+          "pass": true
+        },
+        "G5": {
+          "ack": false,
+          "count": 0,
+          "pass": true
+        },
+        "G6": {
+          "ack": false,
+          "count": 0,
+          "pass": true
+        }
+      }
+    },
     "counts.leaf": {
       "derived_from": [],
       "kind": "count",
@@ -2432,7 +2480,7 @@ export const snapshotStateAcked = sample<SnapshotState>()({
   "snapshot_id": "129d7610f7794d71af4f64b54ca5c554",
   "state_version": "1.0",
   "summary_status": "ok",
-  "summary_text": "[대상] 스냅샷 129d7610 ir_hash=e54be2093870 소스 mcad=sha-mcad dyna=abcd12340000 dyna_result=sha-report ecad=absent\n[게이트] G1 pass · G2 pass · G3 fail(1, ack 없음) · G4 pass · G5 pass · G6 pass\n[구조] 파일 1 · 리프 3 · 어셈블리 1 · 엣지 tied 1 touching 0 clearance 0 interference 1 · 고아 0 · cross_file 0 [sig:counts.*]\n[상위 계면] PLATE_2↔BRACKET_L interference penetration_depth≥0.05 mm(lower_bound) status=auto(미확정 초안) [e:c650f4ca3da5] · 근접 간극 clearance 없음\n[치수] dims_named 없음\n[재료] 재질 종류 2 · 미기재 0 [sig:counts.material_null]\n[Dyna] pid 2 · {\"*CONTACT_TIED_SURFACE_TO_SURFACE\":1} · pid 1 worst_stress=231.4 MPa · pid 2 worst_stress=120.0 MPa\n[규칙] R-001 fail(1건) [rule:R-001] · R-002 pass [rule:R-002] · R-003 pass [rule:R-003] · R-004 pass [rule:R-004] · R-005 pass [rule:R-005] · R-006 pass [rule:R-006] · R-007 평가 불가(source_absent) [rule:R-007]\n[씨앗] char:structure:rigid_frame_load_path · char:interface:bracket_l_plate_2 · char:analysis:dyna_with_results\n[결측] ecad_absent",
+  "summary_text": "[대상] 스냅샷 129d7610 ir_hash=e54be2093870 소스 mcad=sha-mcad dyna=abcd12340000 dyna_result=sha-report ecad=absent\n[게이트] G1 pass · G2 pass · G3 fail(1, ack 있음) · G4 pass · G5 pass · G6 pass\n[구조] 파일 1 · 리프 3 · 어셈블리 1 · 엣지 tied 1 touching 0 clearance 0 interference 1 · 고아 0 · cross_file 0 [sig:counts.*]\n[상위 계면] PLATE_2↔BRACKET_L interference penetration_depth≥0.05 mm(lower_bound) status=auto(미확정 초안) [e:c650f4ca3da5] · 근접 간극 clearance 없음\n[치수] dims_named 없음\n[재료] 재질 종류 2 · 미기재 0 [sig:counts.material_null]\n[Dyna] pid 2 · {\"*CONTACT_TIED_SURFACE_TO_SURFACE\":1} · pid 1 worst_stress=231.4 MPa · pid 2 worst_stress=120.0 MPa\n[규칙] R-001 fail(1건) [rule:R-001] · R-002 pass [rule:R-002] · R-003 pass [rule:R-003] · R-004 pass [rule:R-004] · R-005 pass [rule:R-005] · R-006 pass [rule:R-006] · R-007 평가 불가(source_absent) [rule:R-007]\n[씨앗] char:structure:rigid_frame_load_path · char:interface:bracket_l_plate_2 · char:analysis:dyna_with_results\n[결측] ecad_absent",
   "taxonomy_version": "1.2",
   "computed_at": 1793441473,
   "gates_hash": "83e79926329a"

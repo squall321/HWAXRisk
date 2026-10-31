@@ -52,6 +52,21 @@ test("스냅샷 상태 — 서버가 얹은 ack 를 게이트 표가 그대로 �
   assert.match(state.gates_hash, /^[0-9a-f]{12}$/);
 });
 
+test("스냅샷 상태 — 요약 카드 · 신호 목록이 그대로 보이는 게이트 글도 게이트 표와 같은 ack 를 말한다", () => {
+  // 화면은 summary_text 와 신호 글을 고치지 않고 보인다(요약 카드 · '단발 심사 열기' 복사) — 서버가 얹은 ack 를 그 글도 따라야 한다.
+  const state = samples.snapshotStateAcked;
+  const summary = state.signals["gates.summary"];
+  const gateLine = state.summary_text.split("\n").find((line) => line.startsWith("[게이트] "));
+  assert.equal(gateLine, `[게이트] ${summary.text}`);
+  for (const [id, record] of Object.entries(state.gates)) {
+    if (record.pass !== false) continue;
+    const word = record.ack_by ? "ack 있음" : "ack 없음";
+    assert.match(summary.text, new RegExp(`${id} fail\\(${record.count}, ${word}\\)`), id);
+    assert.equal(summary.value[id].ack, Boolean(record.ack_by), id);
+  }
+  assert.match(gateLine, /G3 fail\(1, ack 있음\)/);
+});
+
 test("대응표 — 확정 본문은 서버가 준 pair_key 를 그대로 싣는다", () => {
   const table = samples.sameAsPairKey;
   const body = cmp.pairDecision({ a_stable: "mcad:/a", b_stable: "mcad:/b" }, "confirm", table.pair_key);

@@ -2465,7 +2465,8 @@ def _with_live_acks(store: Any, snapshot_id: str, state: dict) -> dict:
     ack 의 정본은 rr_gate_acks 다 — 취소된 것(revoked_at)과 단 때의 판정 지문이 지금 지문과 다른 것(판정이 다시 세어져 바뀐 뒤의 낡은
     ack — 그 표의 gates_hash 열)은 싣지 않는다. `gates_hash` 는 ack 칸을 뺀 판정만의 지문(state.gates_hash)이라 ack 로는 바뀌지 않고
     ack 라우트가 gates_json 으로 세는 값과 같다 — 화면은 이 값을 ack 본문의 gates_hash 로 그대로 싣는다. ack 행은 그 스냅샷 주인의 것만
-    읽는다(ack 라우트는 주인만 쓴다 — 주인이 다른 행은 남이 들여오기로 적은 것이다)."""
+    읽는다(ack 라우트는 주인만 쓴다 — 주인이 다른 행은 남이 들여오기로 적은 것이다). 게이트에서 만든 글(gates.summary 신호 · summary_text 의
+    [게이트] 줄)도 얹은 ack 에 맞춘다(state.restate_gate_acks)."""
     gates = state.get("gates") or {}
     current = state_module.gates_hash(gates)
     acks = {row["gate"]: row for row in store.query(
@@ -2479,7 +2480,7 @@ def _with_live_acks(store: Any, snapshot_id: str, state: dict) -> dict:
         live = ack is not None and ack["gates_hash"] == current
         for col in ("ack_by", "ack_at", "ack_reason"):
             record[col] = ack[col] if live else None
-    return {**state, "gates_hash": current}
+    return state_module.restate_gate_acks({**state, "gates_hash": current})
 
 
 @router.get("/snapshots/{snapshot_id}")

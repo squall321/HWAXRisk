@@ -136,6 +136,11 @@ def _gate_word(record: Mapping[str, Any]) -> str:
     return "fail(" + str(record.get("count")) + ", " + ack + ")"
 
 
+def gate_line(gates: Mapping[str, Any]) -> str:
+    """게이트 줄(`G1 pass · G3 fail(1, ack 없음) · …`) — summary_text 의 [게이트] 줄과 gates.summary 신호의 글이 이 한 표기다."""
+    return " · ".join(f"{key} {_gate_word(g)}" for key, g in sorted(gates.items()))
+
+
 def _rule_word(hit: Mapping[str, Any]) -> str:
     """규칙 한 칸의 표기 — pass · 평가 불가(사유) · fail(N건)(plan §3.2.6)."""
     if hit.get("evaluable") is False or hit.get("pass") is None:
@@ -177,6 +182,29 @@ def gates_hash(gates: Mapping[str, Any] | None) -> str:
         for key, record in sorted((gates or {}).items()) if isinstance(record, Mapping)
     }
     return sha256_hex(canonical_json(stripped))[:12]
+
+
+GATE_LINE_HEAD = "[게이트] "
+
+
+def restate_gate_acks(state: dict) -> dict:
+    """게이트의 ack 칸을 고친 상태(routes._with_live_acks — 동결 뒤 붙거나 취소된 ack 를 얹는다)의 글을 그 ack 에 맞춘다 — gates.summary
+    신호(값마다 ack · 글)와 summary_text 의 [게이트] 줄. 둘 다 동결 때 게이트로 만든 표기라 그대로 두면 같은 답이 게이트에서는 ack 를,
+    신호 · 요약에서는 'ack 없음' 을 말한다(반대 검토 10-31). 판정(pass · count)과 다른 줄은 그대로다. 게이트 줄은 고정 어휘라(게이트 id ·
+    pass · n/a(사유) · fail(건수, ack 있음|없음)) 판단어 린터에 걸리지 않아 동결 때에도 싸이지 않는다 — 줄 머리로 찾아 갈아 끼운다. 받은 상태를
+    고쳐 돌려준다."""
+    gates = state.get("gates") or {}
+    line = gate_line(gates)
+    signal = (state.get("signals") or {}).get("gates.summary")
+    if signal is not None:
+        for key, row in signal["value"].items():
+            row["ack"] = bool((gates.get(key) or {}).get("ack_by"))
+        signal["text"] = line
+    text = state.get("summary_text")
+    if isinstance(text, str):
+        state["summary_text"] = "\n".join(GATE_LINE_HEAD + line if old.startswith(GATE_LINE_HEAD) else old
+                                          for old in text.split("\n"))
+    return state
 
 
 def blocked_reason(gates: Mapping[str, Any] | None) -> str | None:
@@ -594,8 +622,7 @@ def compute_signals(ir: Mapping[str, Any], gates: Mapping[str, Mapping[str, Any]
               "ack": bool(g.get("ack_by"))}
         for key, g in sorted(gates.items())
     }
-    put("gates.summary", _rec("table", summary, None, [f"gate:{k}" for k in sorted(gates)],
-                              " · ".join(f"{k} {_gate_word(g)}" for k, g in sorted(gates.items()))))
+    put("gates.summary", _rec("table", summary, None, [f"gate:{k}" for k in sorted(gates)], gate_line(gates)))
     return signals
 
 
@@ -1035,7 +1062,6 @@ def _summary_lines(ir: Mapping[str, Any], state: Mapping[str, Any]) -> list[str]
         return str(sources[kind].get("source_hash") or "present")[:12]
 
     source_line = " ".join(f"{kind}={source_word(kind)}" for kind in ("mcad", "dyna", "dyna_result", "ecad"))
-    gate_line = " · ".join(f"{key} {_gate_word(g)}" for key, g in sorted(gates.items()))
     dyna_line = "[Dyna] absent"
     if not (ir.get("missing") or {}).get("dyna_absent", True):
         dyna_line = f"[Dyna] pid {value('counts.dyna.pids')} · {text('counts.dyna.contacts_by_type')} · {text('results.part_risk_top')}"
@@ -1044,7 +1070,7 @@ def _summary_lines(ir: Mapping[str, Any], state: Mapping[str, Any]) -> list[str]
     return [
         # 소스 해시는 앞 12자만 싣는다(WP1 S10) — 64자리 넷이 [대상] 줄을 채웠다. 전체 해시는 IR 의 sources 에 있다.
         f"[대상] 스냅샷 {ir['snapshot_id'][:8]} ir_hash={ir['ir_hash'][:12]} 소스 {source_line}",
-        f"[게이트] {gate_line}",
+        GATE_LINE_HEAD + gate_line(gates),
         f"[구조] 파일 {value('counts.files')} · 리프 {value('counts.leaf')} · 어셈블리 {value('counts.assemblies')} · "
         f"엣지 tied {value('counts.edges.tied')} touching {value('counts.edges.touching')} "
         f"clearance {value('counts.edges.clearance')} interference {value('counts.edges.interference')} · "
