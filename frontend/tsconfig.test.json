@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "node10",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "strict": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "node_modules/.cache/hwax-risk-tests",
+    "jsx": "react-jsx",
+    "esModuleInterop": true
+  },
+  "files": [
+    "src/api/panelJob.ts",
+    "src/api/autoPortalPat.ts",
+    "src/api/projectCreate.ts",
+    "src/api/patErrors.ts",
+    "src/components/Badge.tsx",
+    "src/components/BoxReasons.tsx"
+  ]
+}
