@@ -4367,3 +4367,157 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
   3. GET /projects/{id} 의 스냅샷 머리에 degraded_json(목록 전체).
   4. 키 대장 읽기(FE-14 청할 것 5) — 있으면 확정 확인이 '병합돼 있으면' 대신 지금 상태를 말한다.
   5. (선택) 다시 토의 표기의 꼴을 하나로 — _keep_verdict 가 비어 있던 쟁점에도 at · round 를 적으면 화면이 길마다 가르지 않아도 된다.
+
+## 사람 조작 감사 — 잡 제어 · 등록부 status · verdict 확정(가지 `wt1031/risk-audit`, int1031/risk2 7b1042d 위, 2026-10-31)
+
+> 사용자 결정 10-31(포털 세션의 답) — 심사의 길을 바꾸는 사람 조작은 정본 plan §8.2.3 대로 rr_audit 를 남긴다. '10-31 백로그' BL-4 가 남긴
+> 줄(잡 제어 · 등록부 status · verdict 확정이 감사 행을 남기지 않아 대상 감사와 보고서 '사람 개입 요약' 에 늘 없다)을 닫는다.
+
+### AU-1. 셋과 그 자리
+- 잡 제어 — `POST /jobs/{id}/pause|resume|cancel` → `rr_audit(scope job · subject 잡 id · action job.pause|resume|cancel)`. MCP
+  `risk_job_action` 의 pause · resume · cancel 은 같은 라우트 함수(`entry.job_action` → `routes.job_action`)라 같은 행이 선다. 대상 감사는
+  `rr_jobs.target_key` 로 그 잡을 고른다(BL-2 의 job 갈래).
+- 등록부 status — `PUT /registry/{cluster}/status` → 바꾼 (대상, 클러스터) 행마다 `rr_audit(scope registry · subject '<대상>#<클러스터>' ·
+  action registry.status)`. 대상을 고르지 않은 전이는 그 열쇠의 내 행 전부를 바꾸므로(`registry.set_status`) 내 대상마다 한 행이다 — 맨
+  열쇠 한 행으로 적으면 그 열쇠를 나중에 갖게 된 내 다른 대상(바뀐 적 없는 행)의 감사에도 실린다. 대상을 고른 공개 토글 · 병합과 같은
+  꼴이라 BL-8 의 소유자 조건 갈래를 타지 않고, 남의 같은 열쇠 행에는 닿지 않는다.
+- verdict 확정 — `PUT /targets/{key}/verdict` → `rr_audit(scope target · subject 대상 열쇠 · action verdict.final)`.
+- 셋 다 project_id 는 그 대상의 과제다 — 과제 감사(`GET /projects/{id}/audit`)에도 선다(잡 · 좌석 · finding 행과 같다).
+- 행위자는 부른 사람이다 — `routes._audit` 가 owner_sub · actor 둘 다에 적는다(다른 감사 행과 같다). 셋 다 소유자만 부를 수 있는 길이라
+  (`_owned_row` · `set_status(owner_sub=)` · `_target_row`) 행위자가 곧 그 대상 소유자다. 입구는 `AUDIT_CHANNELS`(쿠키 web · Bearer rest ·
+  게이트웨이 위임 mcp)이고 mcp 길은 actor_verified 0 이다(M3C-8 의 규칙).
+
+### AU-2. 행의 칸 — 코드 어휘만, 사람이 쓴 글은 싣지 않는다
+- 잡 — before · after `{state, hold_code}`. 잡의 error 글(러너 · 엔진의 글 — 엔진 쪽 멈춤 글에는 멈춘 사람의 메일이 든다)은 싣지 않는다.
+  라우트는 사유를 받지 않는다(정본 §8.2.3 의 `{reason≤200}` 본문은 앱에 없다 — 이번에 더하지 않았다).
+- 등록부 — before `{status}` · after `{status, status_log_seq}`. note · evidence_ref 는 싣지 않는다 — 그 글은 그 seq 의 상태 기록
+  (`rr_registry_status_log`)과 등록부 행(status_note · verified_by_json)에 그대로 있고, 감사 행은 seq 로 그 자리를 가리킨다. evidence_ref 도
+  자유 글이다(record_label 은 빈 값만 막는다).
+- verdict — before · after `{verdict_final}`. note 는 rr_targets.verdict_note 에 있다.
+- 까닭 — 사용자 결정의 '다른 감사 행이 이미 싣는 것 밖의, 개인 정보가 될 수 있는 자유 글은 싣지 않는다'. 감사 행은 폐기(purge)가
+  비우지 않는다(plan §5.2.6 — 감사 기록은 폐기 대상이 아니다). 다른 감사 행의 reason(좌석 넘김 · 완결 확인 · 쟁점 · 큐 결정의 사유)은 사람이
+  그 조작에서 쓴 4~300자 사유인데, 등록부 note · verdict note 는 길이 제한이 없고 그 글의 자리가 따로 있다. 그래서 셋의 reason 은 늘 NULL 이다.
+
+### AU-3. 언제 한 행인가
+- 잡 — 러너가 전이를 썼고(결과에 state_at — `runner._set_job`) 잡 상태나 보류 코드가 달라졌을 때만. 끝난 잡의 취소(러너가 쓰지 않는다) ·
+  멈출 수 없는 상태(409) · 남의 잡 · 모르는 조작(404) · 이미 그 상태(MCP changed:false — 라우트가 409 로 거절한 것을 입구가 돌려준다)는
+  행이 없다. 도는 호출을 기다리는 검토 잡을 다시 취소하면 러너는 같은 cancelling 을 다시 쓰지만 바뀐 것이 없어 행이 없다. 코드 보류
+  (llm_outage 따위)로 멈춘 검토 잡을 사람이 멈추면 상태는 paused 그대로 보류 코드만 user 로 바뀐다 — 자동 재개가 다시 세우지 않게 하는 사람의
+  정지라 한 행이다.
+- 등록부 — 바꾼 행마다 늘 한 행이다(같은 status 로 다시 정해도). 그 PUT 은 상태 기록 한 행을 새로 쓰고 verified · dismissed 면 새 근거의
+  라벨을 세운다 — 사람의 결정 한 번이다.
+- verdict — 확정마다 한 행이다(같은 값이어도). 라우트가 verdict_by · verdict_at 을 다시 찍는 사람의 확정이다.
+- 둘의 차이 — 잡 제어는 전이라 바뀐 것이 없으면 조작이 아니고, status · verdict 는 결정이라 결정마다 기록(상태 기록 · 확정 시각)이 선다.
+
+### AU-4. 사람 조작이 아닌 것 — 남기지 않는다(고른 쪽)
+- 코드가 일으킨 전이는 감사하지 않는다 — 'system' 으로 표시해 싣는 쪽이 아니라 빼는 쪽을 골랐다. rr_audit 는 사람 행위 한정이고(DDL 주석 ·
+  plan §0.6 — 자동 전이는 각 표의 *_source · state_by 로 가른다), 시스템 행을 넣으면 '사람 개입 요약' 과 대상 감사가 그것을 다시 걸러야
+  한다. 일일 상한 정지와 그 자정 재개 · 줄어드는 수확 · 코드 보류(검토 잡) · 자동 재개 · 재기동 복구 · 집기(queued → running) · 취소의
+  마감(cancelling → cancelled) · 야간 잡이 그렇다. 코드의 정지 · 보류는 rr_jobs.state_by 에 'code:…' 를 적는다(종전 그대로). 집기 · 취소의
+  마감은 주체를 적지 않는다(state_by 는 앞 값 그대로 — 종전부터).
+- 엔진 쪽 멈춤(A24) — 포털 화면 · 운영 창구에서 사람이 패널 심의를 멈추면 러너가 그 패널을 닫고 잡을 멈춘다(state_by code:cancelled).
+  사람의 행위는 에이전트 서버에서 일어났고 앱의 잡 정지는 러너의 반응이라 남기지 않았다. 멈춘 사람은 엔진이 알린 값으로 패널 · 잡의
+  error 글에 남는다(앱이 확인한 신원이 아니다).
+- 다른 사람 조작에 딸린 효과 — 폐기는 진행 중 잡을 cancelled 로 닫지만 그 사람 행위는 project.purge 한 행(폐기 보고서의 jobs_cancelled)이고
+  잡마다 job.cancel 을 더 쓰지 않았다(한 행위를 두 번 세지 않는다). 실패 셀 넘김(cells.skip)이 동의를 기다리던 잡을 이어 돌리는 재개도 그
+  행의 after.job.resumed 로 이미 남는다(D-49).
+- 사람 라벨(`POST /findings/{id}/labels`)이 등록부 status 를 label_manual 로 바꾸는 길은 이번 셋 밖이다 — 그 행위는 rr_labels(labeled_by)와
+  상태 기록에 남는다(AU-7).
+
+### AU-5. 트랜잭션과 계약
+- 정지 · 재개 · 등록부 status · verdict 는 전이와 감사 행이 한 트랜잭션이다(재개의 동의 몫 옮기기 resume_gate 도 같이 — 거절되면 아무것도
+  남지 않는다). 등록부 status 의 라벨이 422 로 되돌아가면 감사 행도 같이 되돌아간다. 정지는 종전에 트랜잭션 없이 읽고 썼다 — 이제 한
+  트랜잭션이다.
+- 취소는 커밋 뒤에 쓴다 — 검토 잡의 취소는 제 트랜잭션에서 닫고 그 밖에서 전문가 보고서를 다시 짓는다(runner.cancel_job · M3C-81). 바깥
+  트랜잭션으로 감싸면 다시 짓는 동안 저장소를 쥔다. 그래서 앞 값은 취소 직전에 읽고(그 사이 루프가 상태를 바꾸면 앞 값이 한 걸음 늦을 수
+  있다), 확인과 취소 사이에 루프가 잡을 끝냈으면 러너가 쓰지 않아 행이 없다(시험).
+- 잡 제어 셋을 `JOB_ACTIONS` 하나로 부른다(종전 재개만 runner.resume_job 을 바로 불렀다 — 같은 함수다).
+- `registry.set_status` 가 `changes[{target_key, from_status, status_log_seq}]` 를 돌려주고 라우트가 그것으로 행을 쓴 뒤 응답에서 뺀다 — REST
+  응답 · MCP 계약 · 화면은 그대로다. status_log_seq 는 라벨 훅의 applied=0 기록이 붙기 전의 그 행 자신의 seq 다(응답의 status_log_seq 는
+  종전처럼 마지막 행의 것).
+- '사람 개입 요약' 은 action 별 한 줄(BL-4 의 꼴)이라 job.cancel · job.pause · job.resume · registry.status · verdict.final 줄이 선다. 정본
+  §4.7.3 의 '잡 제어 n · status 변경 n' 은 이 action 줄들이다 — 묶어 세는 줄은 만들지 않았다(옛 타깃 골든은 이 길을 지나지 않아 그대로다).
+
+### AU-6. 시험 · 변이 · 전체 시험
+- 새 시험 `tests/test_human_control_audit.py` 아홉 — 잡 셋(입구 web · rest, 대상 감사 · 요약) · 거절과 할 일 없는 조작 · MCP(mcp ·
+  actor_verified 0 · 다시 부름) · 검토 잡의 보류 코드(코드 보류 → 사람 정지 → 재개 → 취소) · 도는 호출을 기다리는 검토 잡의 다시 취소 · 확인과
+  취소 사이에 끝난 잡 · 러너 전이(일일 상한 · 집기 · 취소의 마감 · 엔진 쪽 멈춤 A24 — 사람 행 둘만) · 등록부 status(대상마다 · 남의 같은 열쇠 ·
+  글 없음 · 과제 감사) · verdict(확정마다 · 글 없음). 옛 코드(7b1042d)의 스크래치 사본에 얹으면 여덟이 진다(행 없음) — 지나는 하나(확인과
+  취소 사이에 끝난 잡)는 지킴 시험이다.
+- 고친 옛 시험 하나 — `test_p6_routes` 의 손 신원(type('I'))에 source 칸을 더했다(진짜 Identity 의 꼴 — test_project_patch 의 손 신원과 같은
+  고침). 등록부 status 라우트가 이제 신원 출처로 입구를 가른다.
+- 변이 22/22 — 잡(state_at 조건 · 앞뒤 같음 조건 · 보류 코드 · MCP 검증 · 과제 id · action 이름 · 취소 감사 · 정지 재개 감사 · 입구 · 재개의
+  앞 값) · 등록부(맨 열쇠 자리 · seq · note 를 reason 에 · 앞 status · set_status 의 앞 status · 과제 id · 감사 뺌 · 입구와 검증) · verdict(쓴
+  뒤 읽은 앞 · note 를 reason 에 · 입구 · 감사 뺌). 스크래치 사본에서만 바꾸고 되돌린 뒤 __pycache__ 를 지웠다(사본과 작업 트리 diff 0).
+- 전체 시험(공유 잠금, e21ca9a — 이 줄을 더한 커밋과 코드가 같다) — 3,722 통과 · xfail 4 · 실패 0(rc 0, 12분 56초). ruff — 바꾼 파일은
+  깨끗하다.
+- 하지 않은 것 — 배선 리허설(`tests/synth/rehearsal_d.py`)은 프로세스를 띄우는 일이라 돌리지 않았다(카드 대조 사슬은 바꾸지 않았다). 서비스
+  재기동 · push · 병합은 없다.
+
+### AU-7. 남긴 것
+- 사람 라벨 경로(`POST /findings/{id}/labels` — 정본 §7.6 경로 5)가 등록부 status 를 label_manual 로 바꾸는 것은 감사 행이 없다 — 그 행위는
+  rr_labels(labeled_by)와 상태 기록에 남는다. 화면 · MCP 가 부르지 않는 REST 길이다(결정 필요 — 남기면 registry.status 와 같은 꼴로 바꾼 행마다).
+- 엔진 쪽 멈춤(A24)을 사람 행위로 셀지(엔진이 알린 사람을 검증되지 않은 행위자로 — 입구 어휘에 엔진 자리가 없다) — 지금은 러너의 반응으로
+  둔다(AU-4, 결정 필요).
+- MCP risk_job_action 의 changed 는 상태만 견준다 — 코드 보류로 멈춘 검토 잡을 사람이 멈추면 감사 행은 서는데 changed 는 false 다(종전부터 —
+  이번 줄 밖).
+- MCP 입구로 만든 잡의 job.create 행은 actor_verified 1 이다(종전부터 — 같은 입구의 다른 행은 0, 이번 줄 밖).
+- 포털 정본 문면(포털 세션) — §8.2.3 잡 제어 본문의 `{reason≤200}`(앱은 사유를 받지 않는다) · '사람 개입 요약' 의 묶음 이름(앱은 action 줄) ·
+  등록부 status 감사의 자리(바꾼 대상마다 '<대상>#<클러스터>')와 칸(글 없음).
+- 화면(화면 세션) — 대상 감사 '이력 탭'(B34)에 새 action 셋(job.pause|resume|cancel · registry.status · verdict.final)의 이름표.
+
+## 사람 조작 감사 — 반대 검토 뒤 고침(가지 `wt1031/risk-audit`, 16f2595 위, 2026-10-31)
+
+> 반대 검토 지적 둘(중간 1 · 낮음~중간 1)을 고치기 전 코드(16f2595)에서 시험으로 먼저 재현했다 — 둘 다 재현됐다. 고친 뒤 같은 시험이 지난다.
+> 지적마다 아래 한 절이고 AU-4 · AU-5 · AU-7 의 일부를 뒤집는다. 코드 커밋은 bcff65e(지적 1) · 69e18d6(지적 2)다.
+
+### AU-8. 잡 취소의 감사 행은 취소를 쓰는 그 트랜잭션 안에서 쓴다(AU-5 일부 뒤집음 · 반대 검토 중간)
+- 재현 — 도는 호출이 없는 검토 잡을 취소하면 runner.cancel_job 이 제 트랜잭션에서 cancelled 를 커밋하고, 건드린 전문가 보고서를 전문가마다
+  다시 지은 뒤에야 돌아왔다. 라우트는 그 뒤에 job.cancel 을 썼다. refresh_cancelled 를 예외로 바꾸면 다시 짓는 동안 원장은 cancelled · 행 0
+  이고 끝난 뒤에도 행이 없었다(그 사이 앱이 멈춰도 같다). 앞 · 뒤를 트랜잭션 밖에서 읽어, 라우트가 확인한 뒤 러너가 집고(queued → running)
+  취소 바로 뒤에 마감하면(cancelling → cancelled) 사람 행이 queued → cancelled 였다. 패널 갈래는 트랜잭션 없이 첫 확인의 상태로 정해, 첫
+  확인 바로 뒤에 집힌 잡에도 곧바로 cancelled 를 썼다(도는 패널이 있는데 cancelling 을 건너뛴다).
+- 고침 — `runner.cancel_job(…, on_change=)` 가 `_set_job` 바로 뒤, 같은 `store.tx()` 안에서 훅을 부른다. 앞 값은 그 트랜잭션 안의
+  `_job_row` 로 읽은 {state, hold_code} 다. 패널 · 쟁점 갈래도 잡을 그 트랜잭션 안에서 다시 읽고 그 값으로 정하고 쓴다(`_untry_after_cancel`
+  은 종전처럼 그 뒤). `refresh_cancelled` 는 종전처럼 커밋 뒤다 — 다시 짓는 동안 저장소를 쥐지 않는다(M3C-81). 라우트의 취소 갈래는 그 훅으로
+  `_audit_job_control` 을 부른다. 끝난 잡의 취소에는 훅을 부르지 않는다.
+- 뒤 값 — 지적은 `_set_job` 결과로 잡으라 했다. 같은 트랜잭션 안에서 잡 행을 다시 읽는 것(`_job_control_view`)과 값이 같고(그 사이 다른 쓰기가
+  끼지 못한다 — 저장소 잠금 · BEGIN IMMEDIATE), 패널 잡의 `_set_job` 결과에는 보류 코드가 없어 읽는 쪽을 골랐다. 정지 · 재개와 같은 함수다.
+- `_audit_job_control` 의 결과 state_at 조건(끝난 잡의 취소를 거르던 것)은 훅이 대신해 뺐다 — 정지 · 재개는 늘 쓰거나 거절한다.
+- AU-5 의 '취소는 커밋 뒤에 쓴다 · 앞 값이 한 걸음 늦을 수 있다' 는 더는 맞지 않는다. 확인과 취소 사이에 끝난 잡은 종전대로 행이 없다.
+
+### AU-9. 포털 화면의 '멈춤'(엔진 쪽 멈춤 A24)이 잡을 멈추면 그 사람의 job.pause 다(AU-4 · AU-7 일부 뒤집음 · 반대 검토 낮음~중간)
+- 결정의 근거 — 사용자 결정 10-31 은 포털 세션의 물음 '잡 멈춤 · 재개 · 취소, 등록부 상태 변경, 판정 확정 같은 사람 행동도 감사 행으로
+  남길까요?' 에 대한 사용자의 답 '남긴다 — 계획서대로' 다. 이 작업에 전달된 범위는 `/jobs/{id}/{action}` 과 '사람의 요청으로 같은 일을 하는
+  MCP · 러너 길' 이다. A24 는 사람이 포털 화면에서 누른 '멈춤' 으로 러너가 잡을 멈추는 길이라 그 범위에 든다. 반대 검토는 (가) 메일일 때만
+  job.pause 를 쓴다 · (나) 지금처럼 빼고 '사용자가 확인함' 을 남긴다 가운데 사용자 확인을 권했다. 이 고침은 전달된 범위대로 (가)를 했다. 사용자가
+  (나)를 고르면 69e18d6 하나를 되돌린다(AU-4 의 뺌으로 돌아간다).
+- 재현 — Tier B 패널이 도는 동안 delib cancelled(by 멈춘 사람의 메일)가 오면 러너는 잡을 paused · state_by code:cancelled 로 멈추는데 rr_audit 에
+  행이 없었다. 멈춘 사람의 메일은 잡 · 패널의 error 글에만 있었다.
+- 고침 — `engine_client.collect_stream` 이 by 를 `EngineStreamLost.by` 따로 된 칸으로 넘긴다(앱이 놓은 스트림은 None). `runner._close_panel_stream_lost`
+  가 잡의 확인 · 정지와 감사 행을 한 트랜잭션으로 하고, `_audit_engine_stop` 이 by 가 메일('@' — 신원 모듈이 SSO 단언에 쓰는 잣대)일 때만
+  `rr_audit(scope job · action job.pause · actor_verified 0 · channel web)` 한 행을 쓴다. 행위자는 소문자로 적는다(다른 감사 행과 같다). 앞 · 뒤는
+  잡 상태와 보류 코드뿐이고 멈춤 글은 싣지 않는다. '운영'(운영의 루프백) · 빈 값은 신원이 없어 쓰지 않는다.
+- 칸을 고른 까닭 — 앱이 확인한 신원이 아니라 엔진이 알린 값이라 actor_verified 0 이다(포털은 세션 + CSRF 로 그 대화의 주인만 받는다).
+  입구 어휘(web · rest · mcp · import — CHECK)에 엔진 자리가 없고 사람이 누른 곳이 포털 웹 화면이라 web 이다.
+- 두 번 세지 않는다 — 사람이 앱에서 먼저 멈춘 잡(라우트가 행을 썼다)에 멈춤 사건이 뒤따라도 러너는 잡이 아직 돌 때만 멈추므로 행이 없다. 앱이
+  놓은 스트림(정지 · 취소를 들은 should_stop)은 by 가 없어 쓰지 않는다.
+- 잡 행의 state_by 는 종전대로 code:cancelled 다 — 이 고침은 감사 행만 더한다. 쟁점 잡의 패널도 같은 함수를 지난다.
+
+### AU-10. 시험 · 변이 · 전체 시험(반대 검토 고침)
+- 새 시험 다섯 함수(여덟 항목, `tests/test_human_control_audit.py`) — 지적 1 셋(다시 짓기 실패에도 남는 행 · 러너가 취소 앞뒤로 옮기는 잡 · 첫
+  확인 바로 뒤에 집힌 잡) · 지적 2 둘(멈춘 사람 매개 넷 — 메일 · 대소문자 섞인 메일 · '운영' · 없음, 앱에서 먼저 멈춘 잡). 고친 시험 하나 — 러너
+  전이 시험에서 A24 를 '행 없음' 으로 보던 몫을 뺐다(새 시험이 그 자리를 본다). 고치기 전 코드(16f2595)의 스크래치 사본에 얹으면 다섯이 진다 —
+  지나는 셋('운영' · 없음 · 앱에서 먼저 멈춘 잡)은 지킴 시험이다. 지적 1 만 고친 코드(bcff65e)에서는 메일 둘이 진다.
+- 변이 17/17 — 지적 1 일곱(취소 감사를 다시 짓기 뒤로 · 검토 취소 훅을 커밋 뒤로 · 패널 취소의 트랜잭션 안 다시 읽기 뺌 · 앞 값을 쓰기 뒤에 읽음
+  · 패널 훅 뺌 · 검토 cancelling 훅 뺌 · 앞뒤 같음 조건 뺌) · 지적 2 열(by 안 넘김 · 감사 호출 뺌 · 메일 검사 뺌 · 소문자 뺌 · 검증됨 · 입구 rest ·
+  과제 id 없음 · 앞 값을 뒤 값으로 · 도는 잡이 아니어도 씀 · 멈춤 글을 reason 에). 스크래치 사본에서만 바꾸고 되돌린 뒤 __pycache__ 를 지웠다(사본과
+  작업 트리 diff 0). 처음 판의 지킴 시험은 '도는 잡이 아니어도 씀' 을 살렸다 — 사람이 스트림 전에 멈추면 러너의 물음(should_stop)이 먼저 스트림을
+  닫아 멈춤 사건에 닿지 않았다. 첫 프레임과 멈춤 사건 사이에 멈추게 고쳐(물음은 5초 동안 앞 답을 쓴다) 죽였다.
+- 전체 시험(공유 잠금, 69e18d6 — 이 줄을 더한 커밋과 코드가 같다) — 3,730 통과 · xfail 4 · 실패 0(rc 0, 12분 15초). ruff — 바꾼 파일은 깨끗하다.
+- 하지 않은 것 — 서비스 재기동 · push · 병합 · 배선 리허설(카드 대조 사슬은 바꾸지 않았다).
+
+### AU-11. 남긴 것
+- AU-7 의 사람 라벨 경로 · 포털 정본 문면 · 화면 이름표는 그대로 열려 있다. 포털 정본 문면에는 A24 멈춤의 job.pause(엔진이 알린 사람 ·
+  actor_verified 0 · web) 한 줄이 더 붙는다.
+- A24 로 멈춘 잡 행의 state_by 는 code:cancelled 그대로라 감사 행(사람)과 다르다 — state_by 까지 사람으로 바꾸는 것은 이번 지적 밖이다.

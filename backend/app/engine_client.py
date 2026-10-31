@@ -245,9 +245,11 @@ def collect_stream(frames: Iterable[tuple[str, dict]]) -> dict:
                 # 사람이 엔진 쪽 심의를 멈췄다(에이전트 서버 POST /deliberate/cancel — 포털 화면의 '멈춤'(대화 주인) 또는 운영의 루프백 호출).
                 # 뒤에는 done 만 오고 error 는 없다 — 성공으로 돌려주면 러너가 빈 결정문을 원장에 앉혀 패널을 done 으로 닫는다(HWAXPortal
                 # docs/leftovers-1017 triage A24 검토). 앱이 스트림을 놓은 것과 같은 부류로 올린다(좌석 차감 없음 · 잡 멈춤 — 사람이 재개한다).
-                # 다른 점은 엔진이 이 심의를 더 돌리지 않는다는 것이다. 그 심의의 대화는 run 이 싣는다.
-                raise EngineStreamLost("cancelled", f"엔진 쪽 심의를 사람이 멈췄다({_text(data.get('by')) or '누군지 모름'}) — 결정문 "
-                                                    "없이 닫혔다. 엔진은 이 심의를 더 돌리지 않는다")
+                # 다른 점은 엔진이 이 심의를 더 돌리지 않는다는 것이다. 그 심의의 대화는 run 이 싣는다. 멈춘 사람(by)은 따로 된 칸으로도
+                # 넘긴다 — 러너가 그 멈춤으로 잡을 멈추면 그 사람의 job.pause 감사 행을 쓴다(사용자 결정 10-31 · 반대 검토).
+                who = _text(data.get("by"))
+                raise EngineStreamLost("cancelled", f"엔진 쪽 심의를 사람이 멈췄다({who or '누군지 모름'}) — 결정문 "
+                                                    "없이 닫혔다. 엔진은 이 심의를 더 돌리지 않는다", by=who)
         elif name == "result":
             if isinstance(data.get("content"), str):
                 result_text = data["content"]

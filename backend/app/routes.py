@@ -3344,23 +3344,59 @@ def create_job(target_key: str, body: JobBody,
 JOB_ACTIONS = {"pause": runner.pause_job, "resume": runner.resume_job, "cancel": runner.cancel_job}
 
 
+def _job_control_view(store: Any, job_id: str) -> dict:
+    """잡 제어 감사 행의 앞 · 뒤 — 잡 상태와 보류 코드(코드 어휘)뿐이다. 잡의 오류 글(error)은 싣지 않는다(사용자 결정 10-31)."""
+    row = store.query_one("SELECT state, hold_code FROM rr_jobs WHERE id = ?", (job_id,))
+    return {"state": row["state"], "hold_code": row["hold_code"]}
+
+
+def _audit_job_control(store: Any, ident: identity.Identity, actor: str, job_id: str, action: str, before: dict) -> None:
+    """사람의 잡 제어 한 번이 잡 행을 바꿨으면 rr_audit(scope job · action job.<조작>) 한 행(사용자 결정 10-31 — plan §8.2.3).
+
+    러너가 전이를 쓴 그 트랜잭션 안에서 부른다 — 정지 · 재개는 라우트의 트랜잭션, 취소는 runner.cancel_job 의 on_change 다(반대 검토
+    10-31). 앞 값(`before`)도 그 안에서 읽은 것이고 뒤 값도 여기서 읽어, 전이와 감사 행이 함께 커밋되고 러너의 다른 전이가 섞이지 않는다.
+    끝난 잡의 취소처럼 러너가 쓰지 않은 조작은 부르지 않는다. 잡 상태나 보류 코드가 그대로면 행이 없다 — 도는 호출을 기다리는 검토 잡을
+    다시 취소해도(cancelling 그대로) 그렇다. 자리는 그 잡이고(대상 감사가 rr_jobs.target_key 로 고른다) 과제 id 는 그 잡의 대상의 것이다.
+    MCP 길의 행위자는 actor_verified 0 이다(다른 MCP 감사 행과 같다)."""
+    after = _job_control_view(store, job_id)
+    if after == before:
+        return
+    target = store.query_one("SELECT t.project_id FROM rr_jobs j JOIN rr_targets t ON t.target_key = j.target_key"
+                             " WHERE j.id = ?", (job_id,))
+    channel = AUDIT_CHANNELS.get(ident.source, "rest")
+    _audit(store, actor, scope="job", subject_id=job_id, project_id=target["project_id"] if target is not None else None,
+           action=f"job.{action}", before=before, after=after, channel=channel, actor_verified=channel != "mcp")
+
+
 @router.post("/jobs/{job_id}/{action}")
 def job_action(job_id: str, action: str, consent: bool = False, ident: identity.Identity = Depends(identity.current)) -> dict:
     """일시정지·재개·취소. 취소·일시정지는 도는 패널의 스트림을 닫는다(패널 경계까지 기다리지 않는다 — 벽시계가
-    12시간이다). 주체는 rr_jobs.state_by 에 남는다(plan §0.6). 재개의 `consent`(쿼리 — 사람이 동의한 뒤에만 true)는 검토 잡이 다시 연
-    셀의 몫을 넘어 멈췄을 때(consent_extra) 그 몫의 동의다 — 없으면 422 consent_required, 잡의 추정 합이 상한을 넘으면 동의와
-    상관없이 409 max_calls 다(반대 검토 4차 MEDIUM 2 · D-49 — review_runner.resume_gate)."""
+    12시간이다). 주체는 rr_jobs.state_by 에 남고(plan §0.6), 잡 행을 바꾼 조작은 rr_audit(job.pause|resume|cancel) 한 행도 남긴다
+    (사용자 결정 10-31 — `_audit_job_control`). 코드가 일으킨 전이(일일 상한 · 줄어드는 수확 · 코드 보류 · 자동 재개 · 재기동 복구 ·
+    집기 · 취소의 마감)는 사람 행위가 아니라 감사하지 않는다 — 코드의 정지 · 보류는 state_by 에 'code:…' 를 적는다(러너 몫,
+    이 라우트를 지나지 않는다). 포털 화면의 '멈춤'(엔진 쪽 멈춤 A24)이 잡을 멈추는 것은 사람의 요청이라 러너가 그 사람의 job.pause 를
+    쓴다(runner._audit_engine_stop — 반대 검토 10-31). 재개의 `consent`(쿼리 — 사람이 동의한 뒤에만
+    true)는 검토 잡이 다시 연 셀의 몫을 넘어 멈췄을 때(consent_extra) 그 몫의 동의다 — 없으면 422 consent_required, 잡의 추정 합이
+    상한을 넘으면 동의와 상관없이 409 max_calls 다(반대 검토 4차 MEDIUM 2 · D-49 — review_runner.resume_gate)."""
     owner_sub = _require_user(ident)
     if action not in JOB_ACTIONS:
         raise AppError("E404", f"모르는 잡 조작입니다 — {action}.", 404)
     _owned_row("SELECT id, owner_sub FROM rr_jobs WHERE id = ?", (job_id,), owner_sub, f"잡({job_id})")
     store = get_store()
-    if action != "resume":
-        return JOB_ACTIONS[action](store, job_id, by=owner_sub)
+    if action == "cancel":
+        # 검토 잡의 취소는 제 트랜잭션에서 닫고 그 밖에서 전문가 보고서를 다시 짓는다(runner.cancel_job · M3C-81) — 바깥 트랜잭션으로
+        # 감싸면 다시 짓는 동안 저장소를 쥔다. 그래서 감사 행은 러너가 전이를 쓰는 그 트랜잭션 안에서 쓴다(on_change — 반대 검토 10-31).
+        # 다시 짓기가 실패하거나 그 사이 앱이 멈춰도 취소와 함께 남고, 앞 · 뒤 값에 러너의 집기 · 마감이 섞이지 않는다.
+        return JOB_ACTIONS[action](store, job_id, by=owner_sub, on_change=lambda before: _audit_job_control(
+            store, ident, owner_sub, job_id, action, before))
     with store.tx():
-        review_runner.resume_gate(store, job_id, consent=consent,
-                                  consent_source=CONSENT_SOURCES.get(ident.source, ident.source))
-        return runner.resume_job(store, job_id, by=owner_sub)
+        before = _job_control_view(store, job_id)
+        if action == "resume":
+            review_runner.resume_gate(store, job_id, consent=consent,
+                                      consent_source=CONSENT_SOURCES.get(ident.source, ident.source))
+        out = JOB_ACTIONS[action](store, job_id, by=owner_sub)
+        _audit_job_control(store, ident, owner_sub, job_id, action, before)
+        return out
 
 
 class CoverageBody(BaseModel):
@@ -4503,16 +4539,27 @@ class VerdictBody(BaseModel):
 @router.put("/targets/{target_key}/verdict")
 def put_verdict(target_key: str, body: VerdictBody,
                 ident: identity.Identity = Depends(identity.current)) -> dict:
-    """사람 확정(자동 승인 없음 — 코드가 내는 것은 후보뿐이다)."""
+    """사람 확정(자동 승인 없음 — 코드가 내는 것은 후보뿐이다).
+
+    확정마다 같은 트랜잭션에서 rr_audit(scope target · 대상 열쇠 · action verdict.final) 한 행을 남긴다(사용자 결정 10-31 — plan §8.2.3).
+    같은 값으로 다시 확정해도 사람의 확정이라 한 행이다(확정한 사람 · 시각을 다시 찍는다). 앞 · 뒤는 판정 값뿐이고 note 는 싣지 않는다 —
+    사람이 쓴 글은 rr_targets.verdict_note 에 있다."""
     owner_sub = _require_user(ident)
     _target_row(target_key, owner_sub)
     if body.verdict not in ("go", "conditional", "no-go", "undetermined"):
         raise AppError("E100", f"verdict 어휘 밖입니다 — {body.verdict!r}.", 422)
+    store = get_store()
     now = now_epoch()
-    get_store().execute(
-        "UPDATE rr_targets SET verdict_final = ?, verdict_note = ?, verdict_by = ?, verdict_at = ?,"
-        " updated_at = ? WHERE target_key = ?",
-        (body.verdict, body.note, owner_sub, now, now, target_key))
+    channel = AUDIT_CHANNELS.get(ident.source, "rest")
+    with store.tx():
+        before = store.query_one("SELECT verdict_final, project_id FROM rr_targets WHERE target_key = ?", (target_key,))
+        store.execute(
+            "UPDATE rr_targets SET verdict_final = ?, verdict_note = ?, verdict_by = ?, verdict_at = ?,"
+            " updated_at = ? WHERE target_key = ?",
+            (body.verdict, body.note, owner_sub, now, now, target_key))
+        _audit(store, owner_sub, scope="target", subject_id=target_key, project_id=before["project_id"],
+               action="verdict.final", before={"verdict_final": before["verdict_final"]},
+               after={"verdict_final": body.verdict}, channel=channel, actor_verified=channel != "mcp")
     return _target_row(target_key, owner_sub)
 
 
@@ -4547,13 +4594,26 @@ def put_registry_status(cluster_key: str, body: RegistryStatusBody,
     finding 마다 잇는다 — 그 함수가 `rr_labels`·`rr_registry_status_log`·`rr_delta_priors`·패턴 카운트·
     AIDataHub 재부착 op 를 한 번에 처리한다. 근거 없는 확정은 record_label 이 422 로 막고 그때는
     등록부 갱신도 함께 되돌아간다(사람 확정만 남고 라벨이 없는 상태를 만들지 않는다).
+
+    바꾼 (대상, 클러스터) 행마다 같은 트랜잭션에서 rr_audit(scope registry · '<대상>#<클러스터>' · action registry.status) 한 행을
+    남긴다(사용자 결정 10-31 — plan §8.2.3). 앞 · 뒤는 status 와 그 행의 상태 기록 seq 뿐이고 note · evidence_ref 는 싣지 않는다 — 사람이
+    쓴 글은 상태 기록(rr_registry_status_log)에 있다. 자리는 그 대상의 것이라(대상을 고른 공개 토글 · 병합과 같은 꼴) 같은 클러스터 열쇠의
+    다른 대상 감사에는 실리지 않는다(BL-8).
     """
     owner_sub = _require_user(ident)
     store = get_store()
+    channel = AUDIT_CHANNELS.get(ident.source, "rest")
     with store.tx():
         out = registry_module.set_status(store, cluster_key, body.status, owner_sub=owner_sub,
                                          target_key=body.target_key, evidence_ref=body.evidence_ref,
                                          note=body.note, actor=owner_sub)
+        for change in out.pop("changes"):
+            target = store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (change["target_key"],))
+            _audit(store, owner_sub, scope="registry", subject_id=f"{change['target_key']}#{cluster_key}",
+                   project_id=target["project_id"] if target is not None else None, action="registry.status",
+                   before={"status": change["from_status"]},
+                   after={"status": out["status"], "status_log_seq": change["status_log_seq"]},
+                   channel=channel, actor_verified=channel != "mcp")
         if out.get("label_needed"):
             outcome = REGISTRY_LABEL_OUTCOME[out["status"]]
             out["labels"] = [

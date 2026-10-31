@@ -553,8 +553,8 @@ B25 가 남긴 작은 것 하나(2026-10-31, context-notes BL-2) — 캡처가 �
 - [ ] 화면 몫(화면 세션 — 포털 트리아지 B34 · A32) — 대상 감사 '이력 탭' · RecallPreview 의 제외를 잡 본문 `exclude_evidence` 로 보내기
       (지금 화면은 '미리보기용 — 서버에 반영되지 않는다' 고 적는다) · 소스 카드의 `duplicate_of` 배지 · 큐의 미검증 신원 항목 요약 칸과
       approve_recall 설명
-- [ ] 감사 행을 남기지 않는 사람 조작 셋(잡 pause · resume · cancel · 등록부 status · verdict 확정 — 정본 §8.2.3 은 남기라 한다) — 남기면
-      '사람 개입 요약' 에 '잡 제어 · status 변경' 줄이 선다(BL-4, 결정 필요)
+- [x] 감사 행을 남기지 않는 사람 조작 셋(잡 pause · resume · cancel · 등록부 status · verdict 확정 — 정본 §8.2.3 은 남기라 한다) — 남기면
+      '사람 개입 요약' 에 '잡 제어 · status 변경' 줄이 선다(BL-4) — 사용자 결정 10-31 로 남긴다(아래 '사람 조작 감사' 절 · AU-1 ~)
 - [ ] 포털 정본 문면(포털 세션) — plan §8.2.3 의 duplicate_of 범위(구성원 과제만) · 'E키 또는 ref' 와 §5.7 '항목 제외만' 의 어긋남 · 대상 감사의
       남 답(404)과 칸(entries · total · offset)
 - [x] 반대 검토 높음 — 대상 감사 · '사람 개입 요약' 에 남의 같은 클러스터 열쇠 행(공개 토글 · 큐 결정 사유)이 실림 → 맨 열쇠 행은 그 대상
@@ -703,3 +703,40 @@ B25 가 남긴 작은 것 하나(2026-10-31, context-notes BL-2) — 캡처가 �
 - [ ] 백엔드에 청할 것(FE-30 끝) — confirm_key 의 병합 키 · 웹 등록 실패 기록 · 스냅샷 머리 degraded_json · 키 대장 읽기 · (선택) 다시 토의
       표기 꼴 하나로
 - [ ] 브라우저로 못 본 것 — 실 백엔드 · 실 포털의 revoke-self · 동의 · 확인 조작들의 실 브라우저 클릭(jsdom 으로 봤다)
+
+## 사람 조작 감사 — 잡 제어 · 등록부 status · verdict 확정(가지 `wt1031/risk-audit`, int1031/risk2 7b1042d 위, 2026-10-31)
+
+> 사용자 결정 10-31(포털 세션의 답) — 심사의 길을 바꾸는 사람 조작은 정본 plan §8.2.3 대로 rr_audit 를 남긴다. 위 '10-31 백로그' 의 열린 줄
+> '감사 행을 남기지 않는 사람 조작 셋'(BL-4)을 닫는다. 결정과 까닭은 context-notes 의 '사람 조작 감사' 절(AU-1~)에 적는다.
+
+- [x] 잡 제어 — `POST /jobs/{id}/pause|resume|cancel`(MCP `risk_job_action` 은 같은 함수) → `rr_audit(scope job, action job.pause|resume|cancel)`
+      한 행 · 앞 · 뒤는 상태와 보류 코드뿐 · 바꾼 것이 없는 조작(끝난 잡의 취소 · 이미 그 상태 · 도는 호출을 기다리는 검토 잡의 다시 취소)과
+      거절된 조작은 남기지 않는다 · 정지 · 재개는 같은 트랜잭션, 취소는 커밋 뒤(AU-1 · AU-3 · AU-5 — 반대 검토 고침에서 취소도 전이와 한
+      트랜잭션으로, AU-8)
+- [x] 등록부 status — `PUT /registry/{cluster}/status` → 바뀐 (대상, 클러스터) 행마다 `rr_audit(scope registry, subject '<대상>#<클러스터>',
+      action registry.status)` 한 행 · 앞 · 뒤는 status 와 상태 기록 seq 뿐(note · evidence_ref 는 싣지 않는다) · `registry.set_status` 의
+      `changes`(REST 응답에서는 뺀다 — AU-2 · AU-5)
+- [x] verdict 확정 — `PUT /targets/{key}/verdict` → 확정마다 `rr_audit(scope target, action verdict.final)` 한 행 · 앞 · 뒤는 판정 값뿐(note 는
+      싣지 않는다)
+- [x] 세 행이 `GET /targets/{key}/audit` · 과제 감사와 통합 보고서 minutes '[사람 개입 요약]' 에 선다(같은 조각 `registry.target_audit_clause` —
+      action 줄 job.cancel · job.pause · job.resume · registry.status · verdict.final)
+- [x] 코드가 일으킨 전이(일일 상한 · 줄어드는 수확 · 코드 보류 · 자동 재개 · 재기동 복구 · 집기 · 취소의 마감 · 엔진 쪽 멈춤 A24)는 남기지
+      않는다 — 'system' 표시가 아니라 빼는 쪽(AU-4) · 폐기의 잡 취소와 셀 넘김의 재개는 그 행위의 행에 이미 있다(A24 는 반대 검토 고침에서
+      사람의 job.pause 로 — AU-9)
+- [x] 시험 · 변이 · 전체 시험 — 새 시험 9(옛 코드 사본에서 8 짐 · 지킴 1) · 고친 시험 1(test_p6_routes 손 신원의 source) · 변이 22/22 · 전체
+      3,722 통과 · xfail 4 · 실패 0(rc 0, e21ca9a, 공유 잠금 — AU-6)
+- [ ] 사람 라벨(`POST /findings/{id}/labels`)의 등록부 status 변경 감사(AU-7, 결정 필요) — 엔진 쪽 멈춤(A24)은 반대 검토 고침에서 남긴다(AU-9)
+- [ ] 포털 정본 문면(포털 세션) — §8.2.3 잡 제어의 `{reason≤200}`(앱은 받지 않는다) · 요약의 묶음 이름 · 등록부 status 감사의 자리와 칸(AU-7) ·
+      A24 멈춤의 job.pause(엔진이 알린 사람 · actor_verified 0 · web — AU-11)
+- [ ] 화면(화면 세션) — 대상 감사 '이력 탭'(B34)에 새 action 셋의 이름표(AU-7)
+
+### 반대 검토 고침(10-31, 같은 가지 — 16f2595 위) — 지적 둘(AU-8 ~ AU-11)
+
+- [x] 반대 검토 중간 — 검토 잡 취소의 감사 행이 취소 트랜잭션 밖(전문가 보고서 다시 짓기 뒤)이라 그 사이 실패 · 멈춤에 사라지고 앞 · 뒤에
+      러너의 집기 · 마감이 섞임 → `runner.cancel_job(on_change=)` 가 전이와 같은 트랜잭션에서 행을 쓴다 · 패널 · 쟁점 갈래도 그 트랜잭션 안에서
+      잡을 다시 읽고 정한다(AU-8, AU-5 일부 뒤집음)
+- [x] 반대 검토 낮음~중간 — 포털 화면의 '멈춤'(엔진 쪽 멈춤 A24)이 잡을 멈춰도 감사 행이 없음 → 멈춘 사람이 메일이면 그 사람의 job.pause
+      (actor_verified 0 · web, '운영' · 빈 값은 없음) — 사용자 결정 10-31 의 '사람의 요청으로 같은 일을 하는 러너 길'(AU-9, AU-4 일부 뒤집음 ·
+      사용자가 (나) 뺌을 고르면 69e18d6 을 되돌린다)
+- [x] 시험 · 변이 · 전체 시험 — 새 시험 8(옛 코드 사본에서 5 짐 · 지킴 3) · 고친 시험 1 · 변이 17/17 · 전체 3,730 통과 · xfail 4 · 실패 0
+      (rc 0, 69e18d6, 공유 잠금 — AU-10)
