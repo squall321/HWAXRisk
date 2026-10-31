@@ -90,7 +90,7 @@ function SnapshotPicker({
           {(detail.data?.snapshots ?? []).map((s) => (
             <option key={s.id} value={s.id}>
               {s.id} · {fmtEpoch(s.created_at)}
-              {s.degraded ? " · degraded" : ""}
+              {s.degraded ? ` · 강등 ${s.degraded}` : ""}
             </option>
           ))}
         </Select>

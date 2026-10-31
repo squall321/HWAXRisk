@@ -7,6 +7,7 @@ import type {
   IssueList,
   IssueRow,
   Registry,
+  SnapshotHeader,
   SynthReportPage,
 } from "../types";
 
@@ -1970,3 +1971,32 @@ export const retryAdopted = sample<CellsDisposed>()({
   },
   "audit_id": "98e5660aa5de458eb0759d08ed0c1fc5"
 });
+
+/**
+ * 과제 상세(GET /projects/{id})의 스냅샷 머리 둘 — `degraded` 는 bool 이 아니라 호환 열 그대로(degraded_json 의 첫 code | null)다.
+ * 스크래치 백엔드에서 강등 표지가 있는 캡처 · 없는 캡처를 동결해 받았다.
+ */
+export const projectSnapshotHeaders = sample<SnapshotHeader[]>()([
+  {
+    "id": "c1364a995ffe44869a48603efd1230e6",
+    "ir_version": "1.0",
+    "ir_hash": "354c78c47bdf9c38ab5de19870547a672a1b249e31ada63dce4819921f5b7743",
+    "kinds_json": "[\"mcad\"]",
+    "node_count": 5,
+    "edge_count": 3,
+    "warnings_n": 0,
+    "degraded": null,
+    "created_at": 1756600100
+  },
+  {
+    "id": "04bd0b27d59d48cb934146c7536bcc2c",
+    "ir_version": "1.0",
+    "ir_hash": "119c457224649ab2e98ff8dc95ad2b1eb77148371387ff7611ac987d52793249",
+    "kinds_json": "[\"mcad\",\"dyna\"]",
+    "node_count": 7,
+    "edge_count": 4,
+    "warnings_n": 0,
+    "degraded": "mcp_degraded",
+    "created_at": 1756600000
+  }
+]);

@@ -462,7 +462,11 @@ export type SnapshotHeader = {
   node_count: number;
   edge_count: number;
   warnings_n: number;
-  degraded: boolean;
+  /**
+   * 강등 표지 — bool 이 아니라 rr_snapshots 의 호환 열 그대로다(degraded_json 의 첫 code, 없으면 null). 이 응답은 목록 전체를 싣지
+   * 않는다(스냅샷 화면의 상태 · 동결 답이 싣는다).
+   */
+  degraded: string | null;
   created_at: number;
 };
 

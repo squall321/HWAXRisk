@@ -1104,9 +1104,16 @@ export default function ProjectPage() {
     {
       key: "degraded",
       header: "degraded",
-      // `degraded: boolean` 은 서버가 **재서** 아니라고 말한 값이다 — UNKNOWN(모름) 을 쓰면
-      // 측정 안 된 것과 측정해서 아니었던 것이 한 기호로 합쳐진다. 그건 이 앱 제1 규율의 반대다.
-      cell: (s) => (s.degraded ? <Badge tone="warn">degraded</Badge> : <NONE />),
+      // 서버는 첫 강등 code(글자) 또는 null 을 준다(bool 이 아니다). null 은 동결 때 강등 표지가 없었다는 잰 값이라 UNKNOWN(모름)이
+      // 아니다 — 측정 안 된 것과 측정해서 아니었던 것을 한 기호로 합치지 않는다. code 는 첫 값이라 전부는 스냅샷 화면에서 본다.
+      cell: (s) =>
+        s.degraded ? (
+          <Badge tone="warn" title="강등 표지의 첫 값 — 전부는 스냅샷 화면에서 봅니다">
+            {s.degraded}
+          </Badge>
+        ) : (
+          <NONE />
+        ),
       nowrap: true,
     },
   ];
