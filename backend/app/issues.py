@@ -857,7 +857,7 @@ def release_issue(store: RiskStore, panel_id: str, *, charge: bool, reason: str 
     영영 '쟁점 진행' 으로 남는다. `untry_queued` 와 같은 길로 놓는다(chain_cancelled · job_failed). 앞 패널의 결과가 있는 쟁점은
     결과를 잃지 않는다(review1 H3 — 판정 못 함으로 끝날 때만 결과가 바뀐다)."""
     cfg = settings or config.settings
-    row = store.query_one("SELECT issue_id, target_key, state, charged, outcome, reraised_json FROM rr_issues"
+    row = store.query_one("SELECT issue_id, target_key, state, charged, outcome, reraised_json, selected_round FROM rr_issues"
                           " WHERE panel_id = ?", (panel_id,))
     if row is None or _str(row["state"]) not in IN_FLIGHT_STATES:
         return None
@@ -888,8 +888,13 @@ PANEL_VERDICTS: tuple[str, ...] = ("upheld", "downgraded", "escalated", "rejecte
 def _keep_verdict(store: RiskStore, issue: Mapping[str, Any], panel_id: str, reason: str, charged: int, now: int) -> str:
     """새 패널이 결정하지 못했다(읽을 수 없는 결정문 한도 · 판정 못 함 · 닻 원자 없음) — 옛 판정(outcome · outcome_json)을 둔 채
     결과 쟁점으로 돌아가고, 다시 토의 표기(reraised_json)에 new_panel_failed 를 단다 — '패널 판정 — 근거 바뀜, 다시 토의 필요(새 패널
-    결정 못 함)' 로 보인다. 표기는 새 패널이 결정하거나 근거가 패널 때로 돌아올 때만 내려간다."""
+    결정 못 함)' 로 보인다. 표기는 새 패널이 결정하거나 근거가 패널 때로 돌아올 때만 내려간다.
+
+    사람이 다시 올린 쟁점(reraised_json 이 빈 채 대기)이면 표기가 여기서 처음 선다 — 근거가 바뀌어 선 표기(`_reraise`)와 같은 at · round
+    (그 시각 · 그 쟁점이 고른 회차)를 적어 표기의 꼴을 하나로 둔다(화면 세션 청할 것 5). 이미 있는 at · round 는 그대로다."""
     reraised = _loads(issue["reraised_json"], {}) or {}
+    reraised.setdefault("at", now)
+    reraised.setdefault("round", issue["selected_round"])
     reraised["new_panel_failed"] = {"panel_id": panel_id, "reason": reason, "at": now}
     store.execute(f"UPDATE rr_issues SET state = {_DONE_OF_OUTCOME}, reraised_json = ?, charged = ?, updated_at = ?"
                   " WHERE issue_id = ?", (common.canonical_json(reraised), charged, now, issue["issue_id"]))
@@ -938,7 +943,8 @@ def resolve_issue(store: RiskStore, panel_id: str, *, settings: Any = None) -> d
     if panel is None or not panel["issue_id"]:
         return {"issue_id": None, "state": None, "outcome": None}
     issue = store.query_one("SELECT issue_id, target_key, owner_sub, anchor_cluster_key, state, panel_id, charged, basis_json,"
-                            " outcome, outcome_json, reraised_json FROM rr_issues WHERE issue_id = ?", (panel["issue_id"],))
+                            " outcome, outcome_json, reraised_json, selected_round FROM rr_issues WHERE issue_id = ?",
+                            (panel["issue_id"],))
     if issue is None:
         return {"issue_id": panel["issue_id"], "state": None, "outcome": None}
     if _str(issue["panel_id"]) != panel_id or _str(issue["state"]) in _UNRESOLVABLE_STATES:

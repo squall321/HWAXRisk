@@ -923,6 +923,30 @@ def test_a_human_requeue_resets_charged(store, monkeypatch, tmp_path):
     assert (again["state"], again["charged"]) == ("queued", 0)
 
 
+def test_a_failed_repanel_of_a_requeued_issue_marks_reargue_with_at_and_round(store, monkeypatch, tmp_path):
+    """(화면 세션 청할 것 5 · 선택) 사람이 끝난 쟁점을 다시 올렸고(reraised_json 이 빈 채 대기) 새 패널이 결정하지 못했다 — 다시 토의
+    표기에 new_panel_failed 와 함께 at(그 시각) · round(그 쟁점이 고른 회차)가 선다. 근거가 바뀌어 선 표기(_reraise)와 같은 칸이라 화면이
+    길마다 가르지 않는다. 종전에는 label · new_panel_failed 뿐이었다(FE-23)."""
+    from tests import factories
+
+    key, (unit,) = _ledger(store)
+    anchor = _k01_anchor(store, key, unit)
+    _select(store, monkeypatch, tmp_path, key, cap=1)
+    _run_issues(store, config.settings, IssuePanelEngine(store, {"*": {"severity": "치명", "judgement": "FAIL"}}), key)
+    decided = _issue(store, key, anchor)
+    assert (decided["state"], decided["outcome"], decided["reraised_json"]) == ("resolved", "escalated", None)
+    with factories.routes_store(store):
+        routes.put_issue(decided["issue_id"], routes.IssueActionBody(action="queue", reason="다시 본다"),
+                         ident=factories.ident(OWNER))
+    _run_issues_existing(store, IssuePanelEngine(store, {"*": {"severity": "치명", "judgement": "undetermined"}}), limit=1)
+    held = _issue(store, key, anchor)
+    mark = json.loads(held["reraised_json"])
+    assert (held["state"], held["outcome"], mark["new_panel_failed"]["reason"]) == ("resolved", "escalated", "no_decision")
+    assert (mark["at"], mark["round"]) == (mark["new_panel_failed"]["at"], decided["selected_round"])
+    (row,) = [r for r in routes.issues_payload(key, owner_sub=OWNER)["rows"] if r["anchor_cluster_key"] == anchor]
+    assert {"label", "at", "round", "new_panel_failed"} <= set(row["reargue"])
+
+
 # ---------------------------------------------------------------- I6 — 제기 · 반대 측 카드 절이 번갈아 선다(재설계 D-57)
 def _side_cards(raisers: list[tuple[str, str]], opposers: list[tuple[str, str]]) -> list[dict]:
     """`_issue_side` 가 cards_out 에 싣는 꼴 — 제기 측(SEAL)과 반대 측(xd-syn-0)이 인용한 (별칭, 절)."""
