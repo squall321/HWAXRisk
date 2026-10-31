@@ -155,3 +155,22 @@ export function UnseatedBadge({ n }: { n: number }) {
     </Badge>
   );
 }
+
+/**
+ * 판단 LLM — `llm: "claude"` 면 'Claude' 배지, 칸이 없으면(GLM, 종전 응답) 이 박스의 LLM 이다. 패널 잡 줄과 검토 잡 줄이 같은
+ * 배지를 쓴다(포털 docs/claude-delib-parity/frontend-request.md 2절 4).
+ */
+export function LlmBadge({ llm }: { llm?: string | null }) {
+  if (llm === "claude") {
+    return (
+      <Badge tone="info" title="판단 LLM 이 잡 주인의 Claude Code 워크플로(hwax-risk-claude)다 — 입력이 Claude(외부)로 나간다">
+        Claude
+      </Badge>
+    );
+  }
+  return (
+    <Badge tone="muted" title="판단 LLM 이 이 박스의 LLM(GLM)이다">
+      GLM
+    </Badge>
+  );
+}

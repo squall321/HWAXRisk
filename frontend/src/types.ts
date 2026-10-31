@@ -39,7 +39,11 @@ export type PanelStatus = "planned" | "running" | "done" | "error";
 export type PanelEngine = "web" | "mcp";
 export type CallPath = "portal" | "agent_direct";
 export type ToolMode = "tools" | "evidence_only";
-export type Credential = "service" | "owner";
+/**
+ * 잡 · 패널이 쓴 자격의 갈래 — 잡을 만든 사람(requester) · 대상 소유자(owner). 패널은 서비스 계정으로 내려가지 않는다
+ * (runner.resolve_credential_with_note · U-3). `service` 는 그 전에 돈 패널의 quality 에만 남아 있을 수 있다.
+ */
+export type Credential = "requester" | "owner" | "service";
 
 /** 반영 상태(ra_client — pending · done · unavailable). 화면은 모르는 값도 글자 그대로 보인다. */
 export type SyncState = "pending" | "done" | "unavailable";
@@ -618,33 +622,86 @@ export type TargetCreated = {
   cost_estimate: { llm_calls: number; gpu_hours: number | null };
 };
 
+/**
+ * 패널 잡 본문(`POST /targets/{key}/jobs` 의 mode 기본 panels — routes.JobBody). `mode` 는 싣지 않는다(기본이 panels 다).
+ * 판단 LLM 두 칸은 Claude 를 골랐을 때만 싣는다 — GLM 잡의 본문은 이 칸이 생기기 전과 바이트로 같다.
+ */
 export type TargetJobCreate = {
   tier: Tier;
   concurrency?: number;
   modifiers?: string[];
   user_memo?: string;
   consent?: boolean;
+  /** 판단 LLM — 없으면 GLM(이 박스의 LLM)이다. */
+  llm?: "claude";
+  /** 반출 동의 — 사람이 경고를 보고 체크했을 때만. JSON true 만 받는다(글자 'true'·1 은 거절된다). */
+  consent_external?: true;
 };
 
+/**
+ * Claude 잡의 반출 동의 기록(runner.llm_params) — 누가 · 언제 · 어느 입구로(web · mcp · api). 잡을 만들 때 셋 다 적히지만,
+ * 진행판은 잡 params 의 기록을 그대로 옮기므로(`dict(consent or {})`) 기록이 없으면 빈 객체다 — 칸마다 없을 수 있다.
+ */
+export type ConsentExternal = { by?: string | null; at?: number | null; source?: string | null };
+
+/** `POST /targets/{key}/jobs` 패널 잡의 답(runner.create_job). */
 export type TargetJobCreated = {
   job_id: string;
   panels_planned: number;
-  llm_calls_estimate: number;
+  /** 호출 수 어림의 아래 · 위(planner.tier_plan 의 llm_calls_low · llm_calls_high). */
+  llm_calls_estimate: { low: number; high: number };
   credential: Credential;
+  credential_email: string | null;
+  /** 등록한 PAT 가 있는데 수명 때문에 다른 사람 자격으로 돈다 — 그 까닭. */
+  credential_note?: string;
+  /** 메모가 브리프 M 상한을 넘어 좌석이 앞부분만 받는다 — 원문 길이와 실린 길이. */
+  user_memo_cut?: { chars: number; kept: number };
+  /** Claude 로 고른 잡에만 있다(GLM 잡의 답은 이 칸이 없다). */
+  llm?: "claude";
+  consent_external?: ConsentExternal;
 };
 
 export type JobStateResponse = { state: BatchJobState };
 
+/**
+ * 도는 패널의 마지막 신호(routes._live_signal) — 그 패널이 지금 도는 동안에만 온다. `*_idle_s` 는 서버 시계로 잰 초다.
+ * 러너가 1분 간격으로 적으므로 건강한 패널도 `frame_idle_s` 가 80초 안팎까지 간다.
+ */
+export type JobSignal = {
+  panel_id: string;
+  panel_no: number | null;
+  started_at: number;
+  last_frame_at: number | null;
+  last_event_at: number | null;
+  last_step: string;
+  frames: number;
+  frame_idle_s: number | null;
+  event_idle_s: number | null;
+  advice?: string;
+};
+
+/**
+ * 진행판의 패널 잡(`GET /targets/{key}/coverage` 의 `job` — routes.coverage_payload). 카드 대조 검토 잡은 `review` 칸이 맡는다.
+ * Claude 잡이면 `llm` · `consent_external`(· `llm_mismatch`)이 붙고 GLM 잡은 그 칸이 없다.
+ */
 export type CoverageJob = {
   id: string;
+  tier: Tier;
   state: BatchJobState;
-  reason: string | null;
-  progress: number;
+  /** rr_jobs.pause_reason CHECK — 사람(user) · 수확 체감(diminishing) · 하루 상한(daily_cap). */
+  pause_reason: "diminishing" | "daily_cap" | "user" | null;
+  panels_done: number;
+  panels_total: number;
   error: string | null;
-  daily_remaining: number;
+  signal: JobSignal | null;
+  llm?: "claude";
+  consent_external?: ConsentExternal;
+  /** Claude 잡인데 외부 응답자 답이 아니었던 호출 · 패널 수. */
+  llm_mismatch?: number;
 } | null;
 
 export type Coverage = {
+  target_key: string;
   job: CoverageJob;
   roster_size: number;
   /** 도메인 코드 → 커버리지 상태별 좌석 수. */

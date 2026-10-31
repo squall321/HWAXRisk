@@ -3,7 +3,15 @@ import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ChevronLeft, RefreshCw, Users } from "lucide-react";
-import { riskApi } from "../api/risk.api";
+import { isApiError, riskApi } from "../api/risk.api";
+import {
+  EXTERNAL_WORKFLOW,
+  PANEL_EGRESS_WARNING,
+  describeJobError,
+  panelJobBody,
+  panelJobReady,
+} from "../api/panelJob";
+import type { JudgeLlm, PanelJobForm } from "../api/panelJob";
 import type { Async } from "../hooks/useAsync";
 import { POLL_MS, useAsync, useInterval } from "../hooks/useAsync";
 import { SectionCard, VerbatimBlock } from "../components/SectionCard";
@@ -20,6 +28,7 @@ import {
   JobStateBadge,
   JudgementBadge,
   LevelBadge,
+  LlmBadge,
   PanelStatusBadge,
   RegistryStatusBadge,
   SeverityBadge,
@@ -30,13 +39,14 @@ import {
 } from "../components/Badge";
 import { PanelTranscript } from "../components/PanelTranscript";
 import {
-  Button, FormField, FormGrid, Input, Mono, PageHeader, Select, SubPanel, TabBar, TabPanel,
+  Banner, Button, FormField, FormGrid, Input, Mono, PageHeader, Select, SubPanel, TabBar, TabPanel,
 } from "../ui/primitives";
 import { cn } from "../lib/cn";
 import { fmtCounts, fmtEpoch, fmtJson, fmtNum, fmtPct } from "../format";
 import type {
   BriefPanel,
   Coverage,
+  CoverageJob,
   CoverageStatus,
   EvidenceItem,
   ExternalSync,
@@ -46,6 +56,7 @@ import type {
   RegistryStatusInput,
   ResyncQueued,
   Seat,
+  TargetJobCreated,
   Tier,
   Verdict,
 } from "../types";
@@ -235,33 +246,159 @@ function CoverageHeatmap({ coverage, targetKey }: { coverage: Coverage; targetKe
   );
 }
 
+/** 러너 자격의 말 — 값은 배지로 그대로 보이고 뜻을 덧붙인다(runner.resolve_credential_with_note · U-3). */
+const CREDENTIAL_LABEL: Record<string, string> = {
+  requester: "잡을 만든 사람의 PAT 로 돕니다.",
+  owner: "대상 소유자의 PAT 로 돕니다.",
+  service: "서비스 계정으로 돌았습니다.",
+};
+
+/** 반출 동의가 들어온 입구(routes.CONSENT_SOURCES) — 모르는 값은 그대로 보인다. */
+const CONSENT_SOURCE_LABEL: Record<string, string> = { web: "웹 화면", mcp: "Claude(MCP)", api: "REST(개인 PAT)" };
+
+/** 판단 LLM 고르기 — 기본은 이 박스의 LLM 이다. Claude 를 고르면 반출 경고와 동의 체크가 열린다(체크는 늘 비어서 시작한다). */
+function LlmChoice({
+  llm,
+  consent,
+  onLlm,
+  onConsent,
+}: {
+  llm: JudgeLlm;
+  consent: boolean;
+  onLlm: (llm: JudgeLlm) => void;
+  onConsent: (consent: boolean) => void;
+}) {
+  return (
+    <fieldset className="mt-3 flex flex-col gap-2 rounded-md border border-border p-3">
+      <legend className="px-1 text-xs font-medium text-muted-foreground">
+        판단 LLM <span className="font-normal opacity-75">llm</span>
+      </legend>
+      <label className="flex flex-wrap items-center gap-2 text-sm">
+        <input type="radio" name="panel-job-llm" value="glm" checked={llm === "glm"} onChange={() => onLlm("glm")} />
+        <span>이 박스의 LLM(GLM) — 기본</span>
+      </label>
+      <label className="flex flex-wrap items-center gap-2 text-sm">
+        <input type="radio" name="panel-job-llm" value="claude" checked={llm === "claude"} onChange={() => onLlm("claude")} />
+        <span>Claude — 내 Claude Code 의 워크플로가 판단합니다(외부)</span>
+      </label>
+      {llm === "claude" ? (
+        <div className="flex flex-col gap-2 rounded-md border-l-[3px] border-warn bg-warn/10 p-3 text-sm">
+          <p className="m-0">{PANEL_EGRESS_WARNING}</p>
+          <label className="flex flex-wrap items-center gap-2">
+            <input type="checkbox" checked={consent} onChange={(e) => onConsent(e.target.checked)} />
+            <span className="font-medium">위 내용이 Claude(외부)로 나가는 데 동의합니다.</span>
+          </label>
+          <p className="m-0 text-xs text-muted-foreground">
+            만든 뒤에는 내 Claude Code 에서 워크플로 <code>{EXTERNAL_WORKFLOW}</code> 를 이 대상으로 돌려야 잡이 나아갑니다.
+          </p>
+        </div>
+      ) : null}
+    </fieldset>
+  );
+}
+
+/** Claude 잡을 만든 직후의 안내 — 워크플로를 돌려야 나아가고, 돌지 않으면 보류로 멈춘다. */
+function ClaudeWorkflowGuide({ targetKey }: { targetKey: string }) {
+  return (
+    <Banner
+      tone="info"
+      live="status"
+      title="Claude 잡을 만들었습니다 — 내 Claude Code 에서 워크플로를 돌려야 나아갑니다."
+      detail={
+        <>
+          이 잡에 동의한 내 PAT 로 게이트웨이에 붙은 Claude Code 에서 워크플로 <code>{EXTERNAL_WORKFLOW}</code> 를 인자{" "}
+          <code>{JSON.stringify({ targetKey })}</code> 로 돌리세요. 돌지 않으면 잡이 기다림 한도 뒤 보류(external_worker)로
+          멈춥니다 — 워크플로를 다시 돌린 뒤 '재개' 를 누르면 이어 돕니다(차감 없음).
+        </>
+      }
+    />
+  );
+}
+
+/** 진행판 잡 줄의 판단 LLM — Claude 잡이면 배지 · 동의 기록 · 외부 응답이 아니었던 수 · 워크플로 안내. */
+function JobLlm({ job }: { job: NonNullable<CoverageJob> }) {
+  if (job.llm !== "claude") return <LlmBadge llm={job.llm} />;
+  const consent = job.consent_external ?? {};
+  const live = job.state === "queued" || job.state === "running" || job.state === "paused";
+  return (
+    <span className="flex flex-col gap-1">
+      <span className="flex flex-wrap items-center gap-2">
+        <LlmBadge llm={job.llm} />
+        <span className="text-xs text-muted-foreground">
+          반출 동의 {consent.by ?? "기록 없음"}
+          {consent.at ? ` · ${fmtEpoch(consent.at)}` : ""}
+          {consent.source ? ` · ${CONSENT_SOURCE_LABEL[consent.source] ?? consent.source}` : ""}
+        </span>
+        {job.llm_mismatch ? (
+          <Badge tone="warn" title="Claude 잡인데 외부 응답자 답이 아니었던 호출 · 패널 수(llm_mismatch)">
+            외부 응답 아님 {job.llm_mismatch}
+          </Badge>
+        ) : null}
+      </span>
+      {live ? (
+        <span className="text-xs text-muted-foreground">
+          잡 주인의 Claude Code 에서 워크플로 <code>{EXTERNAL_WORKFLOW}</code> 가 돌아야 나아갑니다.
+          {job.state === "paused" ? " 멈췄다면 워크플로를 다시 돌린 뒤 '재개' 를 누르세요." : ""}
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+/** 잡 만들기 거절 — 아는 code 는 제목과 다음 걸음을 붙이고, 서버 글(고칠 곳까지 말한다)은 글자 그대로 보인다. */
+function JobErrorBanner({ error, onUseGlm }: { error: unknown; onUseGlm: () => void }) {
+  if (error === null || error === undefined) return null;
+  const known = describeJobError(error);
+  if (!known) return <ErrorBanner error={error} />;
+  return (
+    <Banner title={known.title} detail={isApiError(error) ? error.message : undefined}>
+      {known.next === "settings" ? (
+        <Link to="/settings" className="text-sm underline underline-offset-4">
+          설정에서 PAT 등록
+        </Link>
+      ) : null}
+      {known.next === "use_glm" ? (
+        <Button type="button" variant="outline" size="sm" onClick={onUseGlm}>
+          GLM 으로 고르기
+        </Button>
+      ) : null}
+    </Banner>
+  );
+}
+
 function PanelRunner({ targetKey, coverage, onChanged }: { targetKey: string; coverage: Coverage | null; onChanged: () => void }) {
   const [tier, setTier] = useState<Tier>("B");
   const [concurrency, setConcurrency] = useState(1);
   const [modifiers, setModifiers] = useState("");
   const [memo, setMemo] = useState("");
   const [consent, setConsent] = useState(false);
+  const [llm, setLlm] = useState<JudgeLlm>("glm");
+  const [externalConsent, setExternalConsent] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
-  const [credential, setCredential] = useState<string | null>(null);
-  const [planned, setPlanned] = useState<string | null>(null);
+  const [created, setCreated] = useState<TargetJobCreated | null>(null);
 
   const job = coverage?.job ?? null;
   const needsConsent = tier === "C";
+  const form: PanelJobForm = { tier, concurrency, modifiers, memo, tierConsent: consent, llm, externalConsent };
+  const ready = panelJobReady(form);
+
+  function chooseLlm(next: JudgeLlm) {
+    setLlm(next);
+    // 동의는 고를 때마다 새로 받는다 — GLM 으로 돌렸다가 다시 Claude 를 고르면 다시 체크해야 한다.
+    setExternalConsent(false);
+  }
 
   async function start() {
+    if (!ready) return;
     setBusy(true);
     setError(null);
+    setCreated(null);
     try {
-      const created = await riskApi.createTargetJob(targetKey, {
-        tier,
-        concurrency,
-        modifiers: modifiers.trim() === "" ? undefined : modifiers.split(",").map((s) => s.trim()).filter(Boolean),
-        user_memo: memo.trim() === "" ? undefined : memo.trim(),
-        consent: needsConsent ? consent : undefined,
-      });
-      setCredential(created.credential);
-      setPlanned(`패널 ${created.panels_planned}개 · LLM 호출 추정 ${created.llm_calls_estimate}`);
+      const out = await riskApi.createTargetJob(targetKey, panelJobBody(form));
+      setCreated(out);
+      // 다음 잡은 다시 동의받는다 — 체크를 남겨 두면 다음 잡에 미리 체크된 동의가 된다.
+      setExternalConsent(false);
       onChanged();
     } catch (err) {
       setError(err);
@@ -288,16 +425,28 @@ function PanelRunner({ targetKey, coverage, onChanged }: { targetKey: string; co
 
   return (
     <>
-      <ErrorBanner error={error} />
+      <JobErrorBanner
+        error={error}
+        onUseGlm={() => {
+          // GLM 으로 바꾸면 그 거절(Claude 길이 닫힘)은 더 맞지 않는다 — 배너도 걷는다.
+          chooseLlm("glm");
+          setError(null);
+        }}
+      />
       {job ? (
         <KeyValueTable
           rows={[
             { label: "잡 id", hint: "job_id", value: <code>{job.id}</code> },
+            { label: "티어", hint: "tier", value: job.tier },
             { label: "상태", hint: "state", value: <JobStateBadge value={job.state} /> },
-            { label: "사유", hint: "reason", value: job.reason ?? <Unknown /> },
-            { label: "진행", hint: "progress", value: `${Math.round(job.progress * 100)}%` },
+            { label: "판단 LLM", hint: "llm", value: <JobLlm job={job} /> },
+            { label: "멈춘 까닭", hint: "pause_reason", value: job.pause_reason ?? <Unknown /> },
+            {
+              label: "진행",
+              hint: "panels_done / panels_total",
+              value: `${job.panels_done} / ${job.panels_total} 패널`,
+            },
             { label: "오류", hint: "error", value: job.error ?? <Unknown /> },
-            { label: "일일 상한 잔량", hint: "daily_remaining", value: String(job.daily_remaining) },
           ]}
         />
       ) : (
@@ -329,6 +478,7 @@ function PanelRunner({ targetKey, coverage, onChanged }: { targetKey: string; co
           <Input value={memo} onChange={(e) => setMemo(e.target.value)} />
         </FormField>
       </FormGrid>
+      <LlmChoice llm={llm} consent={externalConsent} onLlm={chooseLlm} onConsent={setExternalConsent} />
       {needsConsent ? (
         <label className="mt-3 flex flex-wrap items-center gap-2 text-sm">
           <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} />
@@ -336,7 +486,7 @@ function PanelRunner({ targetKey, coverage, onChanged }: { targetKey: string; co
         </label>
       ) : null}
       <div className="mt-3 flex flex-wrap items-center gap-2">
-        <Button type="button" onClick={start} disabled={busy || (needsConsent && !consent)}>
+        <Button type="button" onClick={start} disabled={busy || !ready}>
           시작
         </Button>
         <Button type="button" variant="outline" onClick={() => control("pause")} disabled={busy || !job}>
@@ -348,17 +498,28 @@ function PanelRunner({ targetKey, coverage, onChanged }: { targetKey: string; co
         <Button type="button" variant="outline" onClick={() => control("cancel")} disabled={busy || !job}>
           취소
         </Button>
+        {llm === "claude" && !externalConsent ? (
+          <span className="text-sm text-muted-foreground">반출 동의에 체크해야 시작할 수 있습니다.</span>
+        ) : null}
       </div>
-      {planned ? <p className="text-sm text-muted-foreground">{planned}</p> : null}
-      {credential ? (
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <span className="text-sm text-muted-foreground">러너 자격</span>
-          <StatusBadge value={credential} />
-          {credential === "service" ? (
-            <span className="text-sm text-muted-foreground">
-              포털 PAT 미등록 — DynaForge 사용자 데이터는 서비스 시야로 읽습니다.
-            </span>
+      {created ? (
+        <div className="mt-3 flex flex-col gap-2">
+          <p className="m-0 text-sm text-muted-foreground">
+            패널 {created.panels_planned}개 · LLM 호출 추정 {created.llm_calls_estimate.low}~{created.llm_calls_estimate.high}회
+          </p>
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            <span className="text-muted-foreground">러너 자격</span>
+            <StatusBadge value={created.credential} />
+            <span className="text-muted-foreground">{CREDENTIAL_LABEL[created.credential] ?? ""}</span>
+            {created.credential_email ? <Mono>{created.credential_email}</Mono> : null}
+          </div>
+          {created.credential_note ? <p className="m-0 text-sm text-muted-foreground">{created.credential_note}</p> : null}
+          {created.user_memo_cut ? (
+            <p className="m-0 text-sm text-muted-foreground">
+              메모가 길어 좌석은 앞 {created.user_memo_cut.kept}자만 받습니다(원문 {created.user_memo_cut.chars}자).
+            </p>
           ) : null}
+          {created.llm === "claude" ? <ClaudeWorkflowGuide targetKey={targetKey} /> : null}
         </div>
       ) : null}
     </>
