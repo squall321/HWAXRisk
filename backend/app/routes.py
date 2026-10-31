@@ -2404,7 +2404,7 @@ def snapshot_part(snapshot_id: str, part: str, *, owner_sub: str | None = None,
         saved = state_module.load_state(store, snapshot_id)
         if saved is None:
             raise AppError("E404", f"rr_state 가 없습니다 — {snapshot_id}.", 404)
-        return saved
+        return _with_live_acks(store, snapshot_id, saved)
     if part == "calls":
         return {"snapshot_id": snapshot_id,
                 "calls": ir_builder.load_calls(store, snapshot_id, include_response=False)}
@@ -2445,6 +2445,27 @@ def snapshot_part(snapshot_id: str, part: str, *, owner_sub: str | None = None,
     if truncated:
         out["next_offset"] = start + len(items)
     return out
+
+
+def _with_live_acks(store: Any, snapshot_id: str, state: dict) -> dict:
+    """동결 때의 상태 원문(state_json — 게이트의 ack 칸은 동결 때의 null 이다)에 지금 살아 있는 게이트 ack 와 판정 지문을 얹는다.
+
+    ack 의 정본은 rr_gate_acks 다 — 취소된 것(revoked_at)과 단 때의 판정 지문이 지금 지문과 다른 것(판정이 다시 세어져 바뀐 뒤의 낡은
+    ack — 그 표의 gates_hash 열)은 싣지 않는다. `gates_hash` 는 ack 칸을 뺀 판정만의 지문(state.gates_hash)이라 ack 로는 바뀌지 않고
+    ack 라우트가 gates_json 으로 세는 값과 같다 — 화면은 이 값을 ack 본문의 gates_hash 로 그대로 싣는다."""
+    gates = state.get("gates") or {}
+    current = state_module.gates_hash(gates)
+    acks = {row["gate"]: row for row in store.query(
+        "SELECT gate, ack_by, ack_at, ack_reason, gates_hash FROM rr_gate_acks"
+        " WHERE snapshot_id = ? AND diff_id IS NULL AND revoked_at IS NULL", (snapshot_id,))}
+    for key, record in gates.items():
+        if not isinstance(record, dict):
+            continue
+        ack = acks.get(key)
+        live = ack is not None and ack["gates_hash"] == current
+        for col in ("ack_by", "ack_at", "ack_reason"):
+            record[col] = ack[col] if live else None
+    return {**state, "gates_hash": current}
 
 
 @router.get("/snapshots/{snapshot_id}")
@@ -2586,6 +2607,8 @@ def get_sameas(base: str = Query(...), target: str = Query(...),
     rows = sameas.review_rows(links, list(base_ir.get("nodes") or []), list(target_ir.get("nodes") or []))
     target_state = state_module.load_state(store, target) or {}
     return {
+        # 이 표가 원장을 읽은 열쇠 — 확정 · 거부(POST /sameas/decide, scope pair)는 이 값을 그대로 싣는다(화면이 짓지 않는다).
+        "pair_key": pair_key,
         "pairs": rows,
         "pending_n": sum(1 for r in rows if r["status"] == "pending"),
         "G2": (target_state.get("gates") or {}).get("G2"),
@@ -2601,6 +2624,43 @@ def post_sameas_decide(body: list[dict], ident: identity.Identity = Depends(iden
     with store.tx():
         results = [sameas.record_decision(store, item, owner_sub=owner_sub) for item in body]
     return {"updated": len(results), "results": results, "G2": None}
+
+
+@router.get("/part-keys/{ckey}")
+def get_part_key(ckey: str, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """정규 키 원장 한 행(plan §2.7.3 키 대장) — {ckey, status, merged_into, display_name, aliases[], decided_by, decided_at}."""
+    return part_key_payload(ckey, _require_user(ident))
+
+
+def part_key_payload(ckey: str, email: str) -> dict:
+    """`GET /part-keys/{ckey}` 본체 — 키의 지금 상태(병합됐는가 · 붙은 이름 · 누가 언제 정했나)와 별칭.
+
+    원장 행은 주인(owner_sub — 그 키를 처음 적립한 과제 주인)의 것이다. 주인은 다 보고, 그 키가 든 과제(행의 첫 과제 · 별칭의 과제)의
+    구성원(보기 이상)은 자기가 구성원인 과제의 별칭만 본다 — 주인의 다른 과제 이름 · 부품 이름을 흘리지 않는다. 같은 ckey 를 남의
+    스냅샷 노드가 달고 있어도(ckey 는 이름 · 크기 · 재질의 해시라 사람 사이에 겹친다) 그 노드의 과제로는 열지 않는다 — 남의 원장 행이다.
+    별칭 열은 목록이거나 자동 승계 제안을 품은 객체(`{items, merged_candidates}` — sameas.inherit_ckeys)라 둘 다 목록으로 편다.
+    남과 없는 키는 같은 404 다(남 숨김)."""
+    row = get_store().query_one(
+        "SELECT ckey, owner_sub, status, merged_into, display_name, aliases_json, first_project_id, decided_by, decided_at"
+        " FROM rr_part_keys WHERE ckey = ?", (ckey,))
+    missing = AppError("E404", f"정규 키를 찾을 수 없습니다 — {ckey}.", 404)
+    if row is None:
+        raise missing
+    try:
+        raw = json.loads(row["aliases_json"]) if row["aliases_json"] else []
+    except (TypeError, ValueError):
+        raw = []
+    items = raw.get("items") if isinstance(raw, dict) else raw
+    aliases = [a for a in (items if isinstance(items, list) else []) if isinstance(a, dict)]
+    if row["owner_sub"] != email:
+        projects = {str(p) for p in (row["first_project_id"], *(a.get("project_id") for a in aliases)) if p}
+        mine = {p for p in projects if project_role(p, email) is not None}
+        if not mine:
+            raise missing
+        aliases = [a for a in aliases if a.get("project_id") in mine]
+    return {"ckey": row["ckey"], "status": row["status"], "merged_into": row["merged_into"],
+            "display_name": row["display_name"], "aliases": aliases, "decided_by": row["decided_by"],
+            "decided_at": row["decided_at"]}
 
 
 # ================================================================ diff
@@ -3578,6 +3638,10 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
         # 도는 패널의 마지막 신호(러너가 1분 간격으로 적는다) — 벽시계가 몇 시간이라, 이것이 없으면 진행판에서
         # 도는 패널과 멈춘 패널이 똑같이 'running' 이다. {panel_id, started_at, last_frame_at, last_event_at, last_step}.
         job["signal"] = _live_signal(store, job["state"], _loads(job.pop("progress_json"), {}))
+        # 도는 패널마다 한 줄(`signal` 은 호환으로 그대로). 러너는 대상마다 패널을 하나씩만 돌리고(claim_next_job 의 도는 패널 검사 ·
+        # planner.check_invariants (2) — 잡의 concurrency 칸은 러너가 읽지 않는다) 잡 행에는 마지막에 적힌 신호 하나뿐이라, 지금은 많아야
+        # 한 줄이고 `signal` 과 같다. 한 잡이 패널을 함께 돌리게 되면 러너가 신호를 패널마다 적어야 이 목록이 는다.
+        job["signals"] = [job["signal"]] if job["signal"] else []
         # 판단 LLM(Claude 길 X-2 · 포털 docs/claude-delib-parity C4) — Claude 패널 잡이면 llm · consent_external(· llm_mismatch) 칸을
         # 더한다(보류 external_worker 의 까닭이 보이게). GLM 잡의 칸은 종전 그대로다.
         job.update(job_llm_view(_loads(job.pop("params_json"), {})))

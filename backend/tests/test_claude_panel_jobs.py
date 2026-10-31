@@ -111,7 +111,8 @@ def test_a_glm_panel_job_keeps_its_old_params_and_reply(risk_store, cfg, monkeyp
     assert "llm" not in params and "consent_external" not in params
     monkeypatch.setattr(routes, "get_store", lambda: risk_store)
     job = routes.coverage_payload(target_key)["job"]
-    assert set(job) == {"id", "tier", "state", "pause_reason", "panels_done", "panels_total", "error", "signal"}
+    # 판단 LLM 칸(llm · consent_external)은 없다 — signals 는 도는 패널마다의 신호 목록이다(화면 세션 10-31, GLM · Claude 잡 모두).
+    assert set(job) == {"id", "tier", "state", "pause_reason", "panels_done", "panels_total", "error", "signal", "signals"}
 
 
 # ---------------------------------------------------------------- 돌리기

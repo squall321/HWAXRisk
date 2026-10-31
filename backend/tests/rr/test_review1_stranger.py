@@ -70,6 +70,10 @@ def _ids(store: RiskStore, key: str) -> dict[str, str]:
         "narr_ref": "narr:{opinion_id}#{finding_id}".format(**store.query_one(
             "SELECT opinion_id, finding_id FROM rr_findings WHERE target_key = ? AND opinion_id IS NOT NULL ORDER BY finding_id"
             " LIMIT 1", (key,))),
+        # 주인의 정규 키 원장 한 행(동결이 적립한 키 — 대상 스냅샷의 노드가 단 것).
+        "ckey": store.query_one("SELECT n.ckey AS ckey FROM rr_ir_nodes n JOIN rr_part_keys k ON k.ckey = n.ckey"
+                                " WHERE n.snapshot_id = ? AND k.owner_sub = ? ORDER BY n.ckey LIMIT 1",
+                                (diff["target_snapshot_id"], OWNER))["ckey"],
     }
 
 
@@ -288,7 +292,7 @@ def _answer(call: Callable[[], Any]) -> tuple:
 
 
 # 없는 값 — 문법이 있는 칸(참조)은 문법에 맞는 없는 값이다(문법 오류로 먼저 갈리지 않게).
-MISSING_VALUES = {"ref": "c:000000000000", "narr_ref": "narr:no-such-opinion#no-such-finding"}
+MISSING_VALUES = {"ref": "c:000000000000", "narr_ref": "narr:no-such-opinion#no-such-finding", "ckey": "ck:000000000000"}
 
 
 def _missing(ids: dict, supplied: tuple[str, ...]) -> dict:
@@ -389,6 +393,7 @@ GET_CASES: dict[tuple[str, str], tuple[Call, tuple[str, ...]]] = {
     ("GET", P + "/sameas"): (
         lambda i, who: routes.get_sameas(base=i["base_snapshot"], target=i["target_snapshot"], ident=who),
         ("base_snapshot", "target_snapshot")),
+    ("GET", P + "/part-keys/{ckey}"): (lambda i, who: routes.get_part_key(i["ckey"], ident=who), ("ckey",)),
     ("GET", P + "/diffs"): (lambda i, who: routes.list_diffs(project_id=i["project"], ident=who), ("project",)),
     ("GET", P + "/targets"): (lambda i, who: routes.list_targets(project_id=i["project"], ident=who), ("project",)),
     ("GET", P + "/reports"): (lambda i, who: routes.list_reports(project_id=i["project"], ident=who), ("project",)),
