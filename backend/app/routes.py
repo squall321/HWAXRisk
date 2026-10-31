@@ -3546,10 +3546,13 @@ def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
     # DB 를 바꾸지 않는다).
     level = ((closure_module.cached(store, target_key) or closure_module.close_level_cells(store, target_key, persist=False))
              if target["flow"] == "cells" else registry_module.close_level(store, target_key, persist=False))
-    # `job` 은 패널 잡이다(칸의 뜻 불변) — 카드 대조 검토 잡은 진행판의 제 칸(review)이 맡는다(재설계 M2 S6·S12).
+    # `job` 은 패널 잡이다(칸의 뜻 불변) — 카드 대조 검토 잡은 진행판의 제 칸(review)이 맡는다(재설계 M2 S6·S12). 보류 코드 ·
+    # 자동 재개 시각(hold_code · hold_until — 검토 잡 줄과 같은 두 칸)을 싣는다 — 외부 응답자 패널이 워커가 없어 멈춘 잡은
+    # pause_reason 이 비고 hold_code 가 external_worker 다(화면 세션 청할 것). 같은 초에 선 잡은 넣은 차례(rowid)로 가른다.
     job = store.query_one(
-        "SELECT id, tier, state, pause_reason, panels_done, panels_total, error, progress_json, params_json FROM rr_jobs"
-        f" WHERE target_key = ? AND {runner.PANEL_JOBS_SQL} ORDER BY created_at DESC LIMIT 1", (target_key,))
+        "SELECT id, tier, state, pause_reason, hold_code, hold_until, panels_done, panels_total, error, progress_json,"
+        f" params_json FROM rr_jobs WHERE target_key = ? AND {runner.PANEL_JOBS_SQL} ORDER BY created_at DESC, rowid DESC"
+        " LIMIT 1", (target_key,))
     if job is not None:
         job = dict(job)
         # 도는 패널의 마지막 신호(러너가 1분 간격으로 적는다) — 벽시계가 몇 시간이라, 이것이 없으면 진행판에서

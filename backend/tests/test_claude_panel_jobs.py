@@ -111,7 +111,10 @@ def test_a_glm_panel_job_keeps_its_old_params_and_reply(risk_store, cfg, monkeyp
     assert "llm" not in params and "consent_external" not in params
     monkeypatch.setattr(routes, "get_store", lambda: risk_store)
     job = routes.coverage_payload(target_key)["job"]
-    assert set(job) == {"id", "tier", "state", "pause_reason", "panels_done", "panels_total", "error", "signal"}
+    # hold_code · hold_until — 보류 코드(external_worker 따위)를 code 로 가른다(화면 세션 청할 것, 검토 잡 줄과 같은 두 칸).
+    assert set(job) == {"id", "tier", "state", "pause_reason", "hold_code", "hold_until", "panels_done", "panels_total", "error",
+                        "signal"}
+    assert (job["hold_code"], job["hold_until"]) == (None, None)
 
 
 # ---------------------------------------------------------------- 돌리기
@@ -157,6 +160,30 @@ def test_a_claude_panel_without_a_worker_pauses_the_job_on_external_worker(risk_
     assert out["status"] == "error"
     row = risk_store.query_one("SELECT state, hold_code FROM rr_jobs WHERE id = ?", (job["id"],))
     assert (row["state"], row["hold_code"]) == ("paused", "external_worker")
+    # 진행판 · MCP risk_get_coverage 의 패널 잡 줄도 그 보류를 code 로 싣는다 — 종전에는 칸이 없어 pause_reason(null)뿐이라 화면이
+    # '모름' 이었다(화면 세션 청할 것). 자동 재개 시각이 없다(사람이 워크플로를 다시 돌리고 재개한다).
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    line = routes.coverage_payload(target_key)["job"]
+    assert (line["id"], line["state"], line["pause_reason"], line["hold_code"], line["hold_until"]) == (
+        job["id"], "paused", None, "external_worker", None)
+
+
+def test_two_panel_jobs_made_in_the_same_second_read_as_the_later_one(risk_store, cfg, monkeypatch):
+    """진행판의 패널 잡 줄은 마지막 패널 잡이다 — 같은 초에 선 둘이면 넣은 차례(rowid)로 가른다(검토 잡 줄 · 사슬 단계와 같다). 웹
+    REST 는 부를 때마다 새 잡을 세운다(화면 세션 FE-27)."""
+    target_key = seeded(risk_store)
+    give_credential(risk_store)
+    made = runner.new_uuid
+    monkeypatch.setattr(runner, "new_uuid", lambda: "f" * 32)
+    first = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+    monkeypatch.setattr(runner, "new_uuid", made)
+    runner.cancel_job(risk_store, first, by=OWNER)
+    monkeypatch.setattr(runner, "new_uuid", lambda: "0" * 32)
+    second = runner.create_job(risk_store, target_key, "A", owner_sub=OWNER, settings=cfg)["job_id"]
+    monkeypatch.setattr(runner, "new_uuid", made)
+    risk_store.execute("UPDATE rr_jobs SET created_at = 1793000000 WHERE target_key = ?", (target_key,))
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    assert routes.coverage_payload(target_key)["job"]["id"] == second
 
 
 # ---------------------------------------------------------------- 보고서 · REST
