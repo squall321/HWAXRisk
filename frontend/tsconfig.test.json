@@ -22,7 +22,17 @@
     "src/api/autoPortalPat.ts",
     "src/api/projectCreate.ts",
     "src/api/patErrors.ts",
+    "src/api/ecadBoard.ts",
+    "src/lib/capture.ts",
+    "src/lib/snapshotView.ts",
+    "src/lib/compareView.ts",
+    "src/lib/targetView.ts",
+    "src/lib/projectMeta.ts",
     "src/components/Badge.tsx",
-    "src/components/BoxReasons.tsx"
+    "src/components/BoxReasons.tsx",
+    "src/components/GateBanner.tsx",
+    "src/components/ProjectMetaCard.tsx",
+    "src/components/EcadBoardCard.tsx",
+    "src/components/JobSignals.tsx"
   ]
 }
