@@ -4367,3 +4367,118 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
   3. GET /projects/{id} 의 스냅샷 머리에 degraded_json(목록 전체).
   4. 키 대장 읽기(FE-14 청할 것 5) — 있으면 확정 확인이 '병합돼 있으면' 대신 지금 상태를 말한다.
   5. (선택) 다시 토의 표기의 꼴을 하나로 — _keep_verdict 가 비어 있던 쟁점에도 at · round 를 적으면 화면이 길마다 가르지 않아도 된다.
+
+## 화면 읽기 완결 10-31(가지 `wt1031/risk-reads`, main dbe5f93 위, 2026-10-31)
+
+> 화면 세션(FE-14 · FE-30 끝)이 청한 읽기 일곱이다 — 과제 상세 · 목록 · 스냅샷 상태의 ack · 키 대장 읽기 · `GET /sameas` 의 pair_key · 진행판
+> signals · 병합된 키의 confirm_key. 화면은 '모름' 이던 칸이 서면 고치지 않고 보이는지를 실 응답 견본으로 확인했고, 서버 동작이 바뀌어 거짓이 된
+> 글과 서버 값으로 바꿀 자리만 고쳤다. 커밋 — 212f4a4(과제) · f4e9a96(스냅샷 · 키 · 대응 · 진행판) · a9e9cb3(confirm_key 409) · 1d0c88a(화면) ·
+> 2bb6314(C3 자동 후속 — 의도된 동작). 같은 때 도는 가지 `wt1031/risk-audit` 와 routes.py 에서 겹치는 함수는 없다 — 이 가지는
+> `list_projects` · `projects_payload` · `get_project` · `snapshot_part` · `get_sameas` · `coverage_payload` 를 고치고 `_with_live_acks` ·
+> `get_part_key` · `part_key_payload` 를 더했다(그 가지는 `job_action` · `put_verdict` · `put_registry_status`).
+
+### RD-1. 과제 상세는 구성원이 연다 — 주인 검사 → 구성원 검사
+- `GET /projects/{id}` 는 `_project_row`(주인 검사) 대신 `require_role(viewer)` 를 지난다 — 편집자 · 보기는 200, 남은 없는 과제와 같은 404 다
+  (글자까지 같다 — 시험이 견준다). `_project_row` 는 그대로 둔다 — 같은 함수를 쓰는 다른 길(POST /projects 의 답 · 성격 · 유사 · 요구 · MCP
+  쓰기 입구)은 주인 검사 그대로다.
+- 대상 · 잡은 부른 사람이 아니라 과제의 주인(rr_projects.owner_sub — 하위 표 owner_sub 는 그 복제다)으로 고른다. 종전처럼 부른 사람으로
+  고르면 구성원에게 대상 · 잡이 빈 표다(변이로 확인했다).
+- 과제 행에 메타 열(routes.PROJECT_META_COLS) — `corpus_excluded` 는 bool, `product_refs_json` 은 푼 배열(없으면 [])이다. PATCH 의 답은 종전대로
+  열 그대로(0/1 · JSON 글자)다 — 화면의 knownMeta 가 둘 다 푼다.
+- `members` 는 응답 머리의 칸이다(plan §8.2.3 표의 `{project, members[{email, role}], …}` · 화면 타입 ProjectDetail.members 의 자리) — 과제 행 안이
+  아니다. 소유자 행도 실린다(_members_of 차례).
+- 스냅샷 머리 — `label`(그 스냅샷을 만든 동결 잡의 이름 — rr_snapshot_jobs 를 LEFT JOIN, MCP 길잡이 `entry._snapshots` 와 같은 출처. 동결 잡 없이
+  언 것 · 옮겨 온 것(반출에 동결 잡이 없다)은 null) · `app_versions` · `adapter_versions`(푼 객체) · `degraded_json`(푼 배열 — `degraded` 는 첫 값인
+  호환 열 그대로). IR 의 label 은 읽지 않았다(스냅샷마다 IR 전체를 풀어야 한다).
+
+### RD-2. 과제 목록 — 소유 ∪ 구성원, 카드마다 내 역할
+- 웹 목록은 소유하거나 구성원인 과제다 — 조직 공개(org)만으로는 들지 않는다(MCP `visible_projects` 와 다르다). `projects_payload` 는 과제 id
+  목록과 viewer 를 받는다(쓰는 곳이 없어진 owner_sub 인자는 걷었다). MCP `risk_list_projects` 도 부른 사람을 viewer 로 넘긴다 — service · 조직
+  공개로만 보이는 과제는 my_role null.
+- `my_role` 은 `project_role` 과 같은 판정이다 — 주인 열이 먼저, 아니면 멤버 행. owner 멤버 행이 없는 과제도 주인에게 owner 다(시험은
+  seed_raw — 생산자는 owner 행을 늘 함께 쓴다).
+
+### RD-3. 스냅샷 상태의 ack — rr_gate_acks 가 정본, 낡은 ack 는 싣지 않는다
+- `part=state` 는 동결 때의 state_json 이라 ack 칸이 늘 null 이었다(ack 는 gates_json · rr_gate_acks 에만 갔다). 응답에서만 rr_gate_acks 의 지금
+  ack 를 게이트에 얹는다 — state_json · gates_json 은 바꾸지 않는다. 취소된 것(revoked_at) · 비교 스코프(diff_id 가 선 것) · 단 때의 판정
+  지문(rr_gate_acks.gates_hash)이 지금 지문과 다른 것은 싣지 않는다. 판정은 IR 만의 함수라 지금은 지문이 바뀌지 않지만(다시 세는
+  compute_state_for_snapshot 을 부르는 곳이 없다) 판이 바뀐 계산이 다시 세면 앞 판정에 단 ack 를 새 판정에 붙이지 않게 그 열의 뜻(DDL 주석 —
+  'ack 는 stale')을 따랐다.
+- `gates_hash` 를 응답에 싣는다 — ack 칸을 뺀 판정만의 지문(state.gates_hash)이라 ack 로는 바뀌지 않고, ack 라우트가 gates_json 으로 세는 값과
+  같다(시험이 같음을 보고 그 값을 실어 다시 ack 해도 409 가 아니다). MCP `risk_get_snapshot(part='state')` 도 같은 함수라 같이 받는다.
+- `GET /sameas` 의 G2 는 그대로 load_state 원문이다(이번 범위 밖 — 그 G2 의 ack 를 읽는 화면이 없다).
+
+### RD-4. 키 대장 읽기 — `GET /part-keys/{ckey}`
+- 경로 꼴 하나만 열었다(`?ckey=` 는 두지 않았다 — 같은 일을 두 길로 열지 않는다). 답은 `{ckey, status, merged_into, display_name, aliases[],
+  decided_by, decided_at}`.
+- 범위 — 원장 행은 주인(owner_sub — 그 키를 처음 적립한 과제 주인)의 것이다(쓰기 결정도 주인만 — record_decision 이 owner_sub 로 건다). 주인은
+  별칭 전부, 그 키가 든 과제(행의 first_project_id · 별칭의 project_id)의 구성원은 제 과제의 별칭만 본다(주인의 다른 과제 id · 부품 이름을 흘리지
+  않는다). ckey 는 이름 · 크기 · 재질의 해시라 사람 사이에 겹친다 — 남의 스냅샷 노드가 같은 ckey 를 달아도 그 노드의 과제로는 열지 않는다(남의
+  원장 행의 이름 · 결정자를 흘린다). 남과 없는 키는 같은 404 E404 다 — 남 시험 표(tests/rr/test_review1_stranger.py)에 경로를 더했다.
+- 별칭 열은 목록이거나 cross_project 승계 제안을 품은 객체(`{items, merged_candidates}` — sameas.inherit_ckeys)라 items 를 편다. 제안은 싣지 않는다
+  (청한 칸 밖).
+- `merged_into` 는 열 그대로다 — 유효 키 해석은 status merged 일 때만 따르므로 화면은 status 로 가른다(RD-6 의 옛 행).
+
+### RD-5. `GET /sameas` 의 pair_key · 진행판 `job.signals`
+- `pair_key` 는 그 표가 쌍 원장을 읽은 열쇠 그대로다. 화면은 확정 · 거부 본문에 그 값을 싣고, 두 스냅샷 상태를 더 받아 과제 id 로 짓던
+  길(compareView.samePairKey)은 걷었다 — 화면과 서버는 한 앱(SIF 하나 · 서버가 frontend/dist 를 낸다)이라 옛 서버 갈래를 둘 일이 없다.
+- `signals` — 러너는 대상마다 패널을 하나씩만 돌린다(claim_next_job 이 그 대상에 도는 패널이 있으면 건너뛴다 · planner.check_invariants (2)
+  'running 패널 ≤1'). 잡의 concurrency 칸(화면 '동시 실행 ≤2')은 저장만 되고 러너가 읽지 않는다 — risk_concurrency(2)는 대상 둘을 함께 돌리는
+  전역 자리 수다. 그래서 FE-14 청할 것 7 의 '동시 2 에서 덮인다' 는 한 잡 안에서는 일어나지 않고, signals 는 많아야 한 줄이며 signal 과 같다.
+  계약은 목록으로 열어 두었다 — 한 잡이 패널을 함께 돌리게 되면 러너가 신호를 패널마다 적어야 한다(_progress_writer 는 잡 행 하나를 덮어쓴다).
+  화면의 신호 줄(JobSignalLine)은 고치지 않았다 — 보이는 것이 같다.
+
+### RD-6. confirm_key 의 병합 키 — 409 key_merged(merged_into 를 비우지 않는다)
+- 두 길 가운데 거절을 골랐다. merged_into 만 비우면 행은 confirmed · 병합 없음으로 맞아 보이지만 병합 때 돈 키 전파(rekey — 저장 키 · 등록부 ·
+  별칭)가 되돌아가지 않아 원장과 파생이 어긋난다. 비우면서 키 전파까지 돌리면 unmerge_key 와 같은 일을 이름이 다른 결정이 하게 돼, '확정' 을 누른
+  사람의 병합이 풀린다(화면은 그때 키 상태를 몰랐다). 거절은 병합을 푸는 길을 키 전파 · 감사(rr_audit rekey)가 함께 도는 unmerge_key 하나로
+  남긴다 — 되돌린 키는 이미 confirmed 라 따로 확정할 일도 없다. detail `{ckey, merged_into}`. 배열(POST /sameas/decide)은 한 트랜잭션이라 함께
+  보낸 결정도 되돌아간다(시험).
+- 옛 행 — 이 고침 전의 confirm_key 가 남긴 행(status confirmed · merged_into 남음)은 유효 키 해석으로는 독립 키지만 병합 때의 키 전파는 그대로다.
+  고치는 길은 넣지 않았다(남은 것 — unmerge_key 는 status 가 merged 일 때만 키 전파를 돈다). 박스에서
+  `SELECT ckey, merged_into FROM rr_part_keys WHERE status <> 'merged' AND merged_into IS NOT NULL` 로 셀 수 있다.
+- 화면 — 키 대장 패널이 키 상태를 읽어 병합된 키의 '독립 키로 확정' 을 잠그고 까닭(먼저 병합 되돌리기)을 말한다. 확인 글의 '병합돼 있으면 그
+  병합도 풀립니다' 는 이제 거짓이라 걷었다.
+
+### RD-7. C3 자동 후속 Tier C 는 GLM 이다 — 의도된 동작(바꾸지 않는다)
+- Claude 로 돈 Tier B 잡 뒤에 러너가 세우는 C3 자동 후속(_finish_job → create_job, consent_source close_level)은 llm · consent_external 을 물려받지
+  않는다 — GLM 이다. 반출 동의는 잡마다 사람이 한다(사용자 결정 10-15) — 사람이 동의하지 않은 잡이 그 대상의 자료(브리프 · 좌석 조회 결과)를
+  Claude 로 보내지 않는다. 그 Tier C 도 Claude 로 돌리려면 사람이 그 잡을 만들며 동의한다. 메모 · 층 · 뺀 항목은 물려받는다(BL-10).
+- 지키는 시험 — test_claude_panel_jobs.py `test_the_c3_follow_up_of_a_claude_tier_b_job_stays_on_glm`(옛 코드에서도 통과한다 — 동작을 굳힌 것)과
+  runner._finish_job 의 그 자리 주석.
+
+### RD-8. 화면 — '모름' 칸과 거짓이 된 글
+- 이름 그대로 읽는 것을 실 응답 견본으로 확인했다 — 과제 메타 카드(knownMeta 가 detail.project 의 열 이름을 읽는다 — '모름' 이 없어진다) · 홈
+  카드 거름(네 칸) · 게이트 표(record.ack_by — 다시 읽은 서버 값이 이긴다) · 신호 줄. 고치지 않고 선다(옛 화면 코드에서도 그 시험 넷이 통과).
+- 고친 것 — 닫은 때(closed_at)는 PATCH 답에서만 읽어 과제를 다시 열면 사라졌다(상세의 열도 읽는다) · 게이트 ack 의 '새로 열면 이 줄이 보이지
+  않습니다' 꼬리(거짓이 됐다) · 대응표의 pair_key(서버 값) · 키 대장 패널(지금 상태 줄 · 404 E404 는 '원장에 없거나 내 원장이 아니다' · 병합된
+  키의 확정 잠금 — 패널을 읽기(KeyLedgerPanel)와 본문(KeyLedgerBody)으로 나눠 본문을 견본으로 그려 시험한다).
+- 타입 — Project 메타는 물음표 그대로(POST /projects 의 답은 싣지 않는다). ProjectCard 넷 · ProjectDetail.members · SnapshotHeader 넷 ·
+  SnapshotState.gates_hash · SameAs.pair_key · CoverageJob.signals 는 필수, 새 PartKey · PartKeyAlias. 견본 일곱(과제 상세(편집자) · 목록 · 상태(ack) ·
+  대응표 · 키 둘 · 패널 잡)을 스크래치 백엔드의 실 응답에서 옮겼고(상태는 신호 · 규칙 · 씨앗 · 특징 벡터를 앞 몇 개로 줄였다) 스냅샷 머리 견본은
+  새 칸으로 다시 받았다.
+- 고치지 않은 것(화면 세션 몫) — 과제 화면 스냅샷 표에 이름 · 판 · 강등 표지 전부 · '파서 세대 다름' 을 미리 보이는 일(서버는 이제 싣는다) ·
+  대상 표의 unseated_n · superseded_by(이 응답에 없다 — FE-7 의 남긴 것).
+
+### RD-9. 시험 · 확인 · 남긴 것
+- 백엔드 새 시험 아홉 — tests/test_project_reads.py 둘 · tests/test_screen_reads.py 여섯 · test_sameas.py 하나. 옛 코드(dbe5f93 의 app/) 사본에
+  얹으면 아홉 다 진다(KeyError classification · 구성원 과제 없음 · ack null · gates_hash 없음 · get_part_key 없음 · pair_key 없음 · signals 없음 ·
+  DID NOT RAISE). 고친 시험 둘(GLM 잡 진행판 칸 집합에 signals · 남 시험 표의 경로 — 둘 다 옛 코드에서 진다), 지키는 시험 하나(RD-7, 옛 코드에서
+  통과).
+- 변이(스크래치 사본, 바이트코드 끔) — 백엔드 22/22(구성원 검사 · 대상 거름 · bool · 배열 · 멤버 · 이름 · 강등 표지 · 목록 범위 · 내 역할 · 카드
+  bool · 취소된 ack · 낡은 ack · 비교 스코프 ack · 지문 · 구성원 별칭 · 남 열기 · 객체 별칭 · pair_key 정렬 · signals 둘 · confirm_key 둘), 화면
+  컴파일 산출물 7/7.
+- 화면 — tests/reads.test.cjs 일곱(87 → 94). 옛 화면 코드에 얹으면 tsc 가 깨지고(PartKey 없음) 셋이 진다(닫은 때 · 키 줄 · 키 패널). `tsc -b` ·
+  `vite build` · `pnpm test` 통과.
+- 전체 시험(공유 잠금 아래 한 번, 코드 HEAD 2bb6314, 12분 52초) — 3,724 통과 · 실패 0 · xfail 4(rc 0). ruff — 바꾼 파이썬 파일은 깨끗하다.
+- 하지 않은 것 — 서비스 · 인스턴스 기동 · 정지, push · 병합, 실 브라우저 확인(견본 렌더 · 계약 시험만 — 편집자로 과제 화면 열기 · 키 대장 패널 ·
+  대응 확정 단추는 브라우저로 보지 않았다).
+- 남긴 것 —
+  1. 구성원 읽기는 과제 상세 · 목록(과 이미 열려 있던 멤버 · 이력 · 대상 감사)까지다. 스냅샷 · 대상 · 진행판 · 성격 · 유사 · 요구 · 등록부 읽기는
+     아직 주인만이라(`_snapshot_row` · `_target_row` · `_project_row` 의 주인 검사) 편집자가 과제 화면을 열면 스냅샷 · 대상 링크와 성격 · 유사 탭이
+     404 를 받는다 — plan §14 의 두 계정 시나리오는 구성원이 스냅샷 · 타깃 · 등록부를 읽는다고 적는다(다음 걸음 — 읽기 전부를 구성원에게 열지 결정).
+  2. 옛 confirm_key 가 남긴 행(RD-6) 고치기.
+  3. 잡의 concurrency 칸은 러너가 읽지 않는다(RD-5) — 화면 '동시 실행 ≤2' 칸과 계약을 둘지(결정 필요).
+  4. 같은 초에 선 두 패널 잡이면 진행판의 `job` 이 uuid 순으로 앞 잡을 고를 수 있다(coverage_payload 의 `ORDER BY created_at DESC LIMIT 1` — FE-22
+     끝 3 의 검토 잡과 같은 꼴, 시험을 짜다 났다).
+  5. 이번 범위 밖의 청할 것 — FE-14 끝 4(동결 때 요구 대조) · FE-30 끝 2 · 5 · FE-22 끝 1 ~ 4 · 1차 걸음의 셋.
