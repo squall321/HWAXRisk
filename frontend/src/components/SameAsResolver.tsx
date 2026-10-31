@@ -9,7 +9,8 @@ import { Badge, StatusBadge } from "./Badge";
 import { GateTable } from "./GateBanner";
 import { Banner, Button, FormField, Select } from "../ui/primitives";
 import { fmtNum } from "../format";
-import type { Gate, SameAsDecision, SameAsPair } from "../types";
+import { pairDecision, samePairKey } from "../lib/compareView";
+import type { GateRecord, SameAsPair, SameAsPairDecision } from "../types";
 
 /** 일괄 수용의 문턱 — §8.2.4 가 정한 값이다. */
 const BULK_SCORE = 0.9;
@@ -26,18 +27,21 @@ const METHODS: Array<{ method: string; label: string }> = [
 ];
 const METHOD_INDEX: Record<string, number> = Object.fromEntries(METHODS.map((m, i) => [m.method, i]));
 
-/** 사람이 먼저 봐야 하는 순서 — 충돌 · 미확정이 위로 온다. */
-const STATUS_RANK: Record<SameAsPair["status"], number> = {
+/** 사람이 먼저 봐야 하는 순서 — 충돌 · 미확정이 위로 온다. 서버 행의 status 는 pending · auto(fuzzy) · confirmed · rejected 다. */
+const STATUS_RANK: Record<string, number> = {
   conflict: 0,
+  pending: 1,
   candidate: 1,
-  confirmed: 2,
-  rejected: 3,
+  auto: 2,
+  confirmed: 3,
+  rejected: 4,
 };
+const rankOf = (p: SameAsPair) => (p.conflict ? 0 : STATUS_RANK[p.status] ?? 5);
 
 type Filter = "all" | "todo" | "confirmed" | "rejected";
 const FILTERS: Array<{ value: Filter; label: string }> = [
   { value: "all", label: "전체" },
-  { value: "todo", label: "확정 필요(candidate · conflict)" },
+  { value: "todo", label: "확정 필요(pending · 충돌)" },
   { value: "confirmed", label: "확정됨" },
   { value: "rejected", label: "거부됨" },
 ];
@@ -50,13 +54,29 @@ export function SameAsResolver({
   base: string;
   target: string;
   /** 조회 직후와 확정 직후의 G2 판정을 비교 화면에 그대로 올린다. */
-  onG2?: (g2: Gate) => void;
+  onG2?: (g2: GateRecord) => void;
 }) {
   const sameas = useAsync(
     (signal) => riskApi.getSameAs(base, target, { signal }),
     [base, target],
     base !== "" && target !== "",
   );
+  /**
+   * 쌍 원장의 열쇠를 지을 두 과제 id — 스냅샷 상태가 project_id 를 싣는다(IR 을 통째로 받지 않는다). `GET /sameas` 답에 pair_key 가
+   * 없어서다 — 종전 확정 · 거부는 그 칸 없이 노드 id 를 보내 늘 400 E100 이었다. 확정할 행이 있을 때만 받는다.
+   */
+  const owners = useAsync(
+    async (signal) => {
+      const [a, b] = await Promise.all([
+        riskApi.getSnapshotState(base, { signal }),
+        riskApi.getSnapshotState(target, { signal }),
+      ]);
+      return { pairKey: samePairKey(a.project_id, b.project_id) };
+    },
+    [base, target],
+    base !== "" && target !== "" && (sameas.data?.pairs.length ?? 0) > 0,
+  );
+  const pairKey = owners.data?.pairKey ?? null;
   const onG2Ref = useRef(onG2);
   onG2Ref.current = onG2;
   const loadedG2 = sameas.data?.G2 ?? null;
@@ -70,10 +90,14 @@ export function SameAsResolver({
 
   const pairs = sameas.data?.pairs ?? [];
   const bulkCandidates = useMemo(
-    () => pairs.filter((p) => p.status === "candidate" && p.score >= BULK_SCORE),
-    [pairs],
+    () =>
+      pairs
+        .filter((p) => (p.status === "pending" || p.status === "candidate") && p.score >= BULK_SCORE)
+        .map((p) => pairDecision(p, "confirm", pairKey))
+        .filter((d): d is SameAsPairDecision => d !== null),
+    [pairs, pairKey],
   );
-  const conflictN = useMemo(() => pairs.filter((p) => p.status === "conflict").length, [pairs]);
+  const conflictN = useMemo(() => pairs.filter((p) => p.conflict || p.status === "conflict").length, [pairs]);
 
   /** 단계별 건수 — 사다리 어디에서 대응이 나왔는지 그대로 센다. */
   const byMethod = useMemo(() => {
@@ -89,25 +113,27 @@ export function SameAsResolver({
   const rows = useMemo(() => {
     const kept = pairs.filter((p) => {
       if (filter === "all") return true;
-      if (filter === "todo") return p.status === "candidate" || p.status === "conflict";
+      if (filter === "todo") return p.status === "pending" || p.status === "candidate" || p.conflict;
       return p.status === filter;
     });
     return [...kept].sort(
       (a, b) =>
-        STATUS_RANK[a.status] - STATUS_RANK[b.status] ||
+        rankOf(a) - rankOf(b) ||
         (METHOD_INDEX[a.method] ?? METHODS.length) - (METHOD_INDEX[b.method] ?? METHODS.length) ||
         b.score - a.score ||
         a.a.localeCompare(b.a),
     );
   }, [pairs, filter]);
 
-  async function decide(decisions: SameAsDecision[]) {
-    if (decisions.length === 0) return;
+  async function decide(decisions: Array<SameAsPairDecision | null>) {
+    const sendable = decisions.filter((d): d is SameAsPairDecision => d !== null);
+    if (sendable.length === 0) return;
     setBusy(true);
     setError(null);
     try {
-      const result = await riskApi.decideSameAs(decisions);
-      onG2?.(result.G2);
+      const result = await riskApi.decideSameAs(sendable);
+      // 결정 답의 G2 는 지금 늘 null 이다 — 판정은 다시 읽은 표(GET /sameas)의 G2 가 정본이다.
+      if (result.G2) onG2?.(result.G2);
       sameas.reload();
     } catch (err) {
       setError(err);
@@ -136,34 +162,41 @@ export function SameAsResolver({
       header: "확정",
       nowrap: true,
       // 표 한 칸이라 size="sm" 으로 둔다 — 기본 높이면 행이 두 배로 두꺼워진다.
-      cell: (p) => (
-        <span className="flex flex-wrap items-center gap-2">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={busy}
-            onClick={() => decide([{ a: p.a, b: p.b, decision: "confirm", scope: "pair" }])}
-          >
-            confirm
-          </Button>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            disabled={busy}
-            onClick={() => decide([{ a: p.a, b: p.b, decision: "reject", scope: "pair" }])}
-          >
-            reject
-          </Button>
-        </span>
-      ),
+      cell: (p) => {
+        // stable 키가 없는 행(한쪽 노드가 없다)과 쌍 열쇠를 아직 모를 때는 보내지 않는다.
+        const why = !p.a_stable || !p.b_stable ? "stable 키가 없는 행이라 원장에 적을 수 없습니다." : pairKey ? undefined : "두 스냅샷의 과제 id 를 아직 못 읽었습니다.";
+        return (
+          <span className="flex flex-wrap items-center gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={busy || why !== undefined}
+              title={why}
+              onClick={() => decide([pairDecision(p, "confirm", pairKey)])}
+            >
+              confirm
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={busy || why !== undefined}
+              title={why}
+              onClick={() => decide([pairDecision(p, "reject", pairKey)])}
+            >
+              reject
+            </Button>
+          </span>
+        );
+      },
     },
   ];
 
   return (
     <div className="flex flex-col gap-3">
       <ErrorBanner error={error} />
+      {(sameas.data?.pairs.length ?? 0) > 0 ? <ErrorBanner error={owners.error} onRetry={owners.reload} /> : null}
       {isNotReady(sameas.error) ? (
         <NotReadyBlock what="same-as 매칭" />
       ) : (
@@ -180,9 +213,7 @@ export function SameAsResolver({
               type="button"
               variant="outline"
               disabled={busy || bulkCandidates.length === 0}
-              onClick={() =>
-                decide(bulkCandidates.map((p) => ({ a: p.a, b: p.b, decision: "confirm", scope: "pair" })))
-              }
+              onClick={() => decide(bulkCandidates)}
             >
               자동 매칭 전부 수용 (score ≥ {BULK_SCORE}, {bulkCandidates.length}건)
             </Button>
@@ -222,7 +253,7 @@ export function SameAsResolver({
             </Select>
           </FormField>
 
-          {sameas.data.G2 ? <GateTable gates={[sameas.data.G2]} /> : null}
+          {sameas.data.G2 ? <GateTable gates={{ G2: sameas.data.G2 }} /> : null}
           <DataTable
             columns={columns}
             rows={rows}

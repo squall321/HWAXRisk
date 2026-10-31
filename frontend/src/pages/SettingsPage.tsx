@@ -1,17 +1,21 @@
 // 설정 화면 — 내 신원·포털 PAT 등록/삭제·이 박스 상태·동의 문구(계획 §8.2.4 SettingsPage 행).
-import { useState } from "react";
-import { isApiError, riskApi } from "../api/risk.api";
+import { useId, useState } from "react";
+import { riskApi } from "../api/risk.api";
 import { useAsync } from "../hooks/useAsync";
 import { SectionCard } from "../components/SectionCard";
 import { KeyValueTable } from "../components/DataTable";
 import { ErrorBanner, EmptyBlock, LoadingBlock, NotReadyBlock } from "../components/StateBlocks";
 import { Badge } from "../components/Badge";
+import { useAutoPortalPat } from "../components/AutoPortalPat";
+import { BoxReasons } from "../components/BoxReasons";
 import { Clock, KeyRound, ShieldAlert, ShieldCheck } from "lucide-react";
-import { Banner, Button, Chip, Field, FormField, Input, Mono } from "../ui/primitives";
+import { Banner, Button, Chip, Field, FormField, Input, Mono, SubPanel } from "../ui/primitives";
 import { cn } from "../lib/cn";
 import { fmtEpoch } from "../format";
-import type { PortalPatSummary } from "../types";
-import { PortalMintError, mintPortalPat } from "../api/portalPat";
+import type { PortalPatAuto, PortalPatDueReason, PortalPatSource, PortalPatSummary } from "../types";
+import { MINT_BODY, registerFromPortal } from "../api/portalPat";
+import type { AutoHold } from "../api/autoPortalPat";
+import { describePatFailure } from "../api/patErrors";
 
 /** `identity.current` 가 신원을 어디서 읽었나(§8.2.1) — 코드값을 그대로 보이지 않는다. */
 const ME_SOURCE: Record<string, string> = {
@@ -31,50 +35,29 @@ const CONSENT_TEXT =
   "다만 포털은 아직 PAT 의 scopes 를 요청 단계에서 강제하지 않으므로 이 토큰 자체의 권한은 발급 시 선택한 범위보다 넓을 수 있습니다 — " +
   "쓰기를 막으려면 포털 토큰 페이지에서 폐기하세요.";
 
-/** `PUT /me/portal-pat` 422 네 가지(§8.2.3) — 서버 code 를 사람이 읽는 문구와 다음 할 일로 바꾼다. */
-const PAT_ERRORS: Record<string, { title: string; detail: string }> = {
-  pat_invalid: {
-    title: "포털이 이 PAT 를 받지 않았습니다.",
-    detail: "형식이 포털 PAT(JWT 3분절)가 아니거나 포털 검증 호출이 거부했습니다. 값을 다시 복사하거나 포털에서 새로 발급하세요.",
-  },
-  pat_email_mismatch: {
-    title: "내 계정의 PAT 가 아닙니다.",
-    detail: "PAT 안의 email 이 지금 로그인한 계정과 다릅니다. 내 계정으로 로그인한 상태에서 발급한 PAT 를 넣으세요.",
-  },
-  pat_audience: {
-    title: "발급 조건이 맞지 않습니다.",
-    detail: "aud 에 mcp-gateway 가 없거나 scope 가 api 가 아닙니다. 발급 화면에서 두 값을 맞춰 다시 발급하세요.",
-  },
-  pat_expiring: {
-    title: "곧 만료되는 PAT 입니다.",
-    detail: "만료까지 24시간이 채 남지 않았습니다. ttl 을 365일 이하 범위에서 넉넉히 잡아 다시 발급하세요.",
-  },
-  // 포털 발급 화면이 scopes 를 ['read','write'] 로 주므로 링크를 그대로 따라간 사용자가 만나는 코드다.
-  pat_scope_too_broad: {
-    title: "범위가 넓은 PAT 입니다.",
-    detail:
-      "이 앱은 scopes 가 ['read'] 인 PAT 만 등록합니다. 위의 '포털에서 발급해 등록' 을 쓰면 그 범위로 바로 만들어 줍니다.",
-  },
-  cred_key_absent: {
-    title: "이 박스에 자격 암호키가 없습니다.",
-    detail:
-      "PAT 를 평문으로 저장하지 않으므로 키가 없으면 등록하지 않습니다. 운영자가 데이터 디렉터리의 cred.key 를 만들어야 합니다.",
-  },
-  // 설정 문제를 토큰 문제로 읽지 않게 따로 적는다(502).
-  portal_unreachable: {
-    title: "포털에 닿지 못했습니다 — PAT 문제가 아닙니다.",
-    detail:
-      "앱이 포털을 부르는 주소(HWAXRISK_PORTAL_BASE)가 실제 포털 오리진을 가리키지 않습니다. 토큰을 다시 발급해도 같은 오류가 납니다 — 운영자가 그 설정을 고쳐야 합니다.",
-  },
-};
-
-/** 4종은 전용 문구로, 나머지는 공용 배너로 접는다. */
+/** 발급 · 등록 실패 — 아는 것(발급 단계 · 등록 거절 code)은 전용 문구로, 나머지는 공용 배너로 접는다(api/patErrors). */
 function PatErrorBanner({ error }: { error: unknown }) {
   if (error === null || error === undefined) return null;
-  const known = isApiError(error) ? PAT_ERRORS[error.code] : undefined;
+  const known = describePatFailure(error);
   if (!known) return <ErrorBanner error={error} />;
   return <Banner title={known.title} detail={known.detail} />;
 }
+
+/** `auto.due_reason` 의 말 — 앞의 것이 먼저다(routes.pat_due_reason). */
+const DUE_REASON: Record<PortalPatDueReason, string> = {
+  absent: "등록된 PAT 가 없습니다",
+  revoked: "포털에서 폐기됐습니다",
+  undecryptable: "이 박스의 키로 풀리지 않습니다",
+  expiring: "곧 끝납니다(갱신 문턱 밑)",
+  audience: "청중 step-forge 가 없습니다 — 위임 캡처의 REST 다리가 닫힙니다",
+};
+
+/** `auto.last_source` 의 말 — 값은 hint 로 함께 보인다. */
+const PAT_SOURCE: Record<PortalPatSource, string> = {
+  web: "웹 화면에서 발급(web)",
+  "gateway-exchange": "Claude 길 — 게이트웨이 교환(gateway-exchange)",
+  manual: "붙여 넣은 PAT(manual)",
+};
 
 /**
  * PAT 상태를 **소리 내 말하는** 띠.
@@ -84,7 +67,7 @@ function PatErrorBanner({ error }: { error: unknown }) {
  * 조용히 queued 에 쌓인다) 화면이 먼저 말해야 한다. 서버가 주는데 안 그리던 `revoked_at`·`scopes`·
  * `jti` 도 함께 낸다 — 포털에서 폐기했는데 화면이 'registered' 라고 말하는 일이 없게.
  */
-function PatStatus({ summary }: { summary: PortalPatSummary | null }) {
+function PatStatus({ summary, held }: { summary: PortalPatSummary | null; held: AutoHold | null }) {
   if (!summary?.registered) {
     return (
       <div className="flex items-start gap-3 rounded-md border border-border bg-muted/40 px-4 py-3">
@@ -92,7 +75,12 @@ function PatStatus({ summary }: { summary: PortalPatSummary | null }) {
         <div className="text-sm">
           <div className="font-medium">등록된 PAT 이 없습니다.</div>
           <p className="mt-0.5 text-muted-foreground">
-            이 자격이 없으면 무인 패널이 돌지 않습니다 — 아래 버튼 한 번이면 포털에서 받아 등록합니다.
+            이 자격이 없으면 무인 패널이 돌지 않습니다 —{" "}
+            {summary?.auto.enabled && held
+              ? `자동 등록이 켜져 있지만 앞 시도가 등록에서 거절돼(${held.code}) 이 브라우저는 ${fmtEpoch(held.until)}까지 저절로 받지 않습니다. 지금 하려면 아래 버튼을 누르세요.`
+              : summary?.auto.enabled
+                ? "자동 등록이 켜져 있어 앱을 열 때 저절로 받아 등록합니다. 지금 하려면 아래 버튼을 누르세요."
+                : "아래 버튼 한 번이면 포털에서 받아 등록합니다."}
           </p>
         </div>
       </div>
@@ -172,57 +160,179 @@ function PatStatus({ summary }: { summary: PortalPatSummary | null }) {
   );
 }
 
+/**
+ * 자동 등록 — 스위치(`auto.enabled`)와 마지막 등록 · 마지막 자동 실패. 스위치 옆에 멈추는 길(`how_to_stop`)을 그대로 보인다.
+ * 글(`last_error` · `how_to_stop`)은 서버가 고른 문장이라 글자 그대로 텍스트로 보인다.
+ */
+function AutoPanel({
+  auto,
+  busy,
+  running,
+  held,
+  onToggle,
+}: {
+  auto: PortalPatAuto;
+  busy: boolean;
+  running: boolean;
+  /** 이 브라우저의 쉼(앞선 자동 등록이 등록에서 실패했다) — 서버의 last_error 는 게이트웨이 교환의 실패만 적는다. */
+  held: AutoHold | null;
+  onToggle: (enabled: boolean) => void;
+}) {
+  const describedBy = useId();
+  return (
+    <SubPanel title="자동 등록">
+      <div className="flex flex-col gap-1.5">
+        {/* 스위치의 이름은 짧게 두고(상태는 aria-checked 가 말한다) 설명 · 멈추는 길은 aria-describedby 로 잇는다. */}
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <label className="flex items-center gap-2">
+            <input
+              type="checkbox"
+              role="switch"
+              aria-checked={auto.enabled}
+              aria-describedby={describedBy}
+              checked={auto.enabled}
+              disabled={busy || running}
+              onChange={(e) => onToggle(e.target.checked)}
+            />
+            <span className="font-medium">자동 등록</span>
+          </label>
+          <Chip tone={auto.enabled ? "ok" : "muted"} aria-hidden="true">
+            {auto.enabled ? "켜짐" : "꺼짐"}
+          </Chip>
+        </div>
+        <div id={describedBy} className="flex flex-col gap-1 text-sm text-muted-foreground">
+          <p className="m-0">
+            앱을 열 때 PAT 가 없거나 곧 끝나면 이 브라우저가 포털에서 새로 받아 조용히 등록합니다(출처 web). Claude 에서 hwax_risk
+            도구를 부를 때는 게이트웨이가 같은 일을 합니다.
+          </p>
+          {auto.how_to_stop ? <p className="m-0">{auto.how_to_stop}</p> : null}
+        </div>
+        {running ? (
+          <p className="m-0 text-sm text-muted-foreground" role="status">
+            지금 자동으로 등록하는 중입니다.
+          </p>
+        ) : null}
+        {held && auto.enabled ? (
+          <p className="m-0 text-sm text-muted-foreground">
+            이 브라우저는 {fmtEpoch(held.until)}까지 자동 등록을 쉽니다 — 앞 시도가 등록에서 거절됐습니다(
+            <code>{held.code}</code>). 같은 까닭으로 또 거절될 PAT 를 새 탭마다 받지 않으려는 것이고, 아래 '포털에서 발급해 등록' 은
+            지금도 됩니다.
+          </p>
+        ) : null}
+      </div>
+      <dl className="m-0 grid gap-x-6 sm:grid-cols-3">
+        <Field label="지금 받아야 하나" hint="due · due_reason">
+          {auto.due ? (
+            <span>
+              <Chip tone="warn">필요</Chip> {auto.due_reason ? DUE_REASON[auto.due_reason] ?? auto.due_reason : null}
+            </span>
+          ) : (
+            <Chip tone="ok">아니오</Chip>
+          )}
+        </Field>
+        <Field label="마지막 등록" hint="last_source · last_at">
+          {auto.last_source || auto.last_at ? (
+            <span>
+              {auto.last_source ? PAT_SOURCE[auto.last_source] ?? auto.last_source : "출처 모름"}
+              {auto.last_at ? <span className="ml-1.5 text-xs text-muted-foreground">{fmtEpoch(auto.last_at)}</span> : null}
+            </span>
+          ) : (
+            <span className="text-muted-foreground">기록 없음</span>
+          )}
+        </Field>
+        <Field label="마지막 자동 등록 실패" hint="last_error · last_error_kind · last_error_at">
+          {auto.last_error ? (
+            <span className="flex flex-col gap-0.5">
+              <span>
+                <Chip tone={auto.last_error_kind === "transient" ? "warn" : "bad"}>
+                  {auto.last_error_kind === "transient"
+                    ? "일시 — 10분 뒤 다시 바랍니다"
+                    : auto.last_error_kind === "final"
+                      ? "사람이 고칠 것"
+                      : "갈래 모름"}
+                </Chip>
+                {auto.last_error_at ? (
+                  <span className="ml-1.5 text-xs text-muted-foreground">{fmtEpoch(auto.last_error_at)}</span>
+                ) : null}
+              </span>
+              <span className="break-words">{auto.last_error}</span>
+            </span>
+          ) : (
+            <span className="text-muted-foreground">없음</span>
+          )}
+        </Field>
+      </dl>
+    </SubPanel>
+  );
+}
+
 function PatSection({ summary, onChanged }: { summary: PortalPatSummary | null; onChanged: () => void }) {
+  const autoPat = useAutoPortalPat();
   const [pat, setPat] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [result, setResult] = useState<PortalPatSummary | null>(null);
+  // 자동 등록이 켜진 채 지우면 다음에 앱을 열 때 다시 등록된다 — 지울 때 자동도 끌지 묻는 자리.
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const auto = summary?.auto ?? null;
+  const locked = busy || autoPat.running;
+  // 지난 쉼은 말하지 않는다(화면을 연 채 쉼이 끝날 수 있다).
+  const held = autoPat.held && autoPat.held.until > Date.now() ? autoPat.held : null;
 
-  async function save(value: string | null) {
+  /** 한 동작 — 성공하면 알림, 실패하면 배너. 어느 쪽이든 서버 상태를 다시 읽는다(PUT 의 답은 `GET /me` 와 꼴이 다르다). */
+  async function act(run: () => Promise<string>) {
     setBusy(true);
     setError(null);
     setNotice(null);
     try {
-      const next = await riskApi.putPortalPat(value);
-      setResult(next);
-      setPat("");
-      setNotice(next.registered ? "PAT 를 등록했습니다." : "등록된 PAT 를 삭제했습니다.");
-      onChanged();
+      setNotice(await run());
     } catch (err) {
       setError(err);
     } finally {
       setBusy(false);
+      onChanged();
     }
   }
 
   /**
-   * 포털에서 발급받아 그대로 등록한다 — 사람이 값을 손으로 옮기는 단계를 없앤다.
-   *
-   * 발급은 **브라우저가** 한다. 앱 서버는 포털 `require_csrf`(double-submit)를 만족할 수 없어
-   * 사용자를 대신해 발급할 수 없다. 앱 SPA 는 포털과 같은 오리진이라 세션 쿠키와 CSRF 를 그대로 쓴다.
+   * 포털에서 발급받아 그대로 등록한다 — 사람이 값을 손으로 옮기는 단계를 없앤다. 출처는 web 이다(앱이 받아 온 PAT 라 다음
+   * 갱신 때 백엔드가 폐기한다). 발급은 **브라우저가** 한다 — 앱 서버는 포털 `require_csrf`(double-submit)를 만족할 수 없다.
    * 받은 값은 곧바로 서버로 넘기고 화면 상태에 담지 않는다(입력란에도 넣지 않는다).
    */
-  async function mintAndSave() {
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      const minted = await mintPortalPat();
-      const next = await riskApi.putPortalPat(minted.token);
-      setResult(next);
-      setPat("");
-      setNotice(`포털에서 발급해 등록했습니다 — jti ${minted.jti}`);
-      onChanged();
-    } catch (err) {
-      // 발급 단계 실패는 문구가 곧 사유다(권한·세션). 등록 단계 실패는 기존 422 표에 걸린다.
-      setError(err instanceof PortalMintError ? new Error(err.message) : err);
-    } finally {
-      setBusy(false);
-    }
-  }
+  const mintAndSave = () =>
+    act(async () => {
+      const { jti } = await registerFromPortal();
+      autoPat.clearHold();
+      return `포털에서 발급해 등록했습니다 — jti ${jti}`;
+    });
 
-  const shown = result ?? summary;
+  /** 붙여 넣은 값 — 그 사람의 Claude PAT 일 수 있어 출처를 싣지 않는다(= manual, 백엔드가 폐기하지 않는다). */
+  const savePasted = () =>
+    act(async () => {
+      await riskApi.putPortalPat(pat.trim());
+      setPat("");
+      return "PAT 를 등록했습니다.";
+    });
+
+  /** 지우기 — 자동도 끄면 스위치를 먼저 내린다(그 사이에 다시 등록되지 않게). */
+  const remove = (alsoStopAuto: boolean) =>
+    act(async () => {
+      setConfirmDelete(false);
+      if (alsoStopAuto) await riskApi.putPortalPatAuto(false);
+      await riskApi.putPortalPat(null);
+      return alsoStopAuto ? "자동 등록을 끄고 등록된 PAT 를 지웠습니다." : "등록된 PAT 를 지웠습니다.";
+    });
+
+  /** 스위치 — 켜서 지금 받아야 하면(due) 그 자리에서 버튼과 같은 일을 한다. 켠 것은 사람의 손이라 결과를 보인다. */
+  const toggleAuto = (enabled: boolean) =>
+    act(async () => {
+      const next = await riskApi.putPortalPatAuto(enabled);
+      if (!enabled) return "자동 등록을 껐습니다 — 이제 PAT 를 지우거나 폐기해도 저절로 다시 만들어지지 않습니다.";
+      if (!next.due) return "자동 등록을 켰습니다.";
+      const { jti } = await registerFromPortal();
+      autoPat.clearHold();
+      return `자동 등록을 켜고 포털에서 발급해 등록했습니다 — jti ${jti}`;
+    });
 
   return (
     <>
@@ -236,7 +346,8 @@ function PatSection({ summary, onChanged }: { summary: PortalPatSummary | null; 
           detail="PAT 값 자체는 저장 뒤 어디에도 다시 표시되지 않습니다."
         />
       ) : null}
-      <PatStatus summary={shown} />
+      <PatStatus summary={summary} held={held} />
+      {auto ? <AutoPanel auto={auto} busy={busy} running={autoPat.running} held={held} onToggle={toggleAuto} /> : null}
       <FormField label="포털 PAT">
         <Input
           type="password"
@@ -248,30 +359,52 @@ function PatSection({ summary, onChanged }: { summary: PortalPatSummary | null; 
         />
       </FormField>
       <div className="flex flex-wrap items-center gap-2">
-        <Button type="button" onClick={mintAndSave} disabled={busy}>
+        <Button type="button" onClick={mintAndSave} disabled={locked}>
           {busy ? "처리 중." : "포털에서 발급해 등록"}
+        </Button>
+        <Button type="button" variant="outline" onClick={savePasted} disabled={locked || pat.trim() === ""}>
+          붙여넣은 값으로 등록
         </Button>
         <Button
           type="button"
           variant="outline"
-          onClick={() => save(pat.trim())}
-          disabled={busy || pat.trim() === ""}
+          onClick={() => (auto?.enabled ? setConfirmDelete(true) : remove(false))}
+          disabled={locked || !summary?.registered}
         >
-          붙여넣은 값으로 등록
-        </Button>
-        <Button type="button" variant="outline" onClick={() => save(null)} disabled={busy || !shown?.registered}>
           삭제
         </Button>
         <a href="/tokens" target="_blank" rel="noreferrer">
           포털 토큰 화면
         </a>
       </div>
+      {confirmDelete ? (
+        <SubPanel title="등록된 PAT 를 지웁니다.">
+          <p className="m-0 text-sm text-muted-foreground">
+            자동 등록이 켜져 있어 지워도 다음에 앱을 열 때(또는 Claude 에서 hwax_risk 도구를 부를 때) 다시 등록됩니다. 지운 채
+            두려면 자동 등록도 끄세요.
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button type="button" variant="destructive" onClick={() => remove(true)} disabled={locked}>
+              자동 등록도 끄고 지우기
+            </Button>
+            <Button type="button" variant="outline" onClick={() => remove(false)} disabled={locked}>
+              지우기만
+            </Button>
+            <Button type="button" variant="ghost" onClick={() => setConfirmDelete(false)}>
+              그만두기
+            </Button>
+          </div>
+        </SubPanel>
+      ) : null}
       <p className="text-sm text-muted-foreground">
         '포털에서 발급해 등록' 은 이 브라우저의 포털 세션으로 <code>scopes ['read']</code> ·{" "}
-        <code>aud mcp-gateway</code> · ttl 90일 PAT 을 만들어 그대로 등록합니다 — 값이 화면에 보이지 않습니다.
-        포털이 토큰 발급 권한(<code>feat:api-token</code>)을 요구하면 관리자에게 그 권한을 먼저 받으세요.
+        <code>aud {MINT_BODY.audiences.join(" · ")}</code> · ttl {MINT_BODY.ttl_days}일 PAT 을 만들어 그대로 등록합니다 — 값이
+        화면에 보이지 않습니다. 포털이 토큰 발급 권한(<code>feat:api-token</code>)을 요구하면 관리자에게 그 권한을 먼저 받으세요.
       </p>
-      <p className="text-sm text-muted-foreground">직접 발급할 때의 조건 — aud 에 mcp-gateway 포함 · scope api · ttl 365일 이하.</p>
+      <p className="text-sm text-muted-foreground">
+        직접 발급할 때의 조건 — aud 에 mcp-gateway 포함(위임 캡처의 REST 다리까지 쓰려면 step-forge 도) · scope api · ttl
+        365일 이하.
+      </p>
       {/* index.css `.rr-consent` 와 같은 값 — 왼쪽 굵은 선 3px · 연한 배경 · 작은 글씨. */}
       <p className="mt-2 rounded-md border-l-[3px] border-border bg-muted/40 p-3 text-sm text-muted-foreground">
         {CONSENT_TEXT}
@@ -292,7 +425,9 @@ function RunnerSection({ pat, secretsValid }: { pat: PortalPatSummary | null; se
           },
           { label: "내 PAT exp", value: fmtEpoch(pat?.exp ?? null) },
           {
-            label: "서비스 자격",
+            // 패널은 서비스 계정으로 내려가지 않는다(U-3) — 이 칸은 박스의 필수 자격(secrets_valid)이다.
+            label: "박스 필수 자격",
+            hint: "secrets_valid",
             value: secretsValid ? <Badge tone="ok">valid</Badge> : <Badge tone="bad">invalid</Badge>,
           },
         ]}
@@ -307,7 +442,9 @@ function RunnerSection({ pat, secretsValid }: { pat: PortalPatSummary | null; se
 }
 
 export default function SettingsPage() {
-  const me = useAsync((signal) => riskApi.getMe({ signal }), []);
+  // 앱을 열 때의 자동 등록이 끝나면(version) 다시 읽는다 — PAT 없이 이 화면을 열면 등록된 모습으로 바뀐다.
+  const { version: autoVersion } = useAutoPortalPat();
+  const me = useAsync((signal) => riskApi.getMe({ signal }), [autoVersion]);
   const health = useAsync((signal) => riskApi.getHealth({ signal }), []);
 
   return (
@@ -357,17 +494,15 @@ export default function SettingsPage() {
       <SectionCard title="이 박스">
         {me.data ? (
           <>
-            {me.data.box.secrets_valid ? null : (
-              <Banner
-                title="이 박스의 자격이 없습니다."
-                detail="저장된 비밀이 이 호스트에서 풀리지 않습니다."
-              />
-            )}
+            {/* 고정 문구 대신 서버가 고른 까닭(message)과 고칠 길(fix)을 그대로 — 빠진 키 · 키 폴백을 이관 문제로 읽지 않게. */}
+            <BoxReasons reasons={me.data.box.reasons} />
             <KeyValueTable
               rows={[
                 { label: "hostname", value: me.data.box.hostname },
                 {
-                  label: "secrets_valid",
+                  // 뜻은 '필수가 갖춰졌다' 다(호스트 일치 · 자격 암호화 키 있음 · 그 키가 개발용 폴백이 아님).
+                  label: "필수 자격",
+                  hint: "secrets_valid",
                   value: me.data.box.secrets_valid ? <Badge tone="ok">valid</Badge> : <Badge tone="bad">invalid</Badge>,
                 },
                 {
@@ -378,6 +513,9 @@ export default function SettingsPage() {
                     <Badge tone="bad">absent</Badge>
                   ),
                 },
+                ...(me.data.box.cred_key_source
+                  ? [{ label: "키 출처", hint: "cred_key_source", value: <code>{me.data.box.cred_key_source}</code> }]
+                  : []),
                 {
                   // 이 값이 틀리면 PAT 등록·패널 실행이 전부 실패한다 — 안 보이면 사람이 토큰을 의심한다.
                   label: "portal_base",

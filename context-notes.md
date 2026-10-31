@@ -3999,3 +3999,371 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
 - 전체 시험(공유 잠금 아래 한 번, 코드 HEAD 1409d86, 12분 40초) — 3,575 통과 · 실패 0 · xfail 4(rc 0). 앞 판의 3,560 에 새 시험 15. ruff — 바꾼
   파일은 깨끗하다.
 - 하지 않은 것 — 서비스 · 인스턴스 기동 · 정지, push · 병합, 진짜 RA 호출(RA 는 dev 사본 3ece194 를 읽기만 했다).
+
+## 화면 세션 10-31(가지 `wt1031/riskfe`, main 9bd5f48 위, 2026-10-31)
+
+> 사용자 결정 10-31 A32 (가) — 리스크 앱 화면 일을 한 세션으로 묶는다. 1차 걸음은 B33(과제 등급) · B35(포털 `docs/risk-credentials/frontend-request.md`
+> 대로 — 자동 등록 · 박스 까닭 · 반영 요약) · B36(포털 `docs/claude-delib-parity/frontend-request.md` 1 · 2절 — 패널 잡 판단 LLM)이다.
+> 백엔드는 고치지 않았다. 확인은 실 백엔드(이 가지의 코드)를 스크래치 하네스로 띄워 브라우저로 눌러 봤다(FE-6).
+
+### FE-1. 과제 등급은 미리 고르지 않는다(B33)
+- 폼에 등급(internal · confidential)을 두되 첫 값은 '고르세요'(비활성)다. 정본이 '기본 confidential, 등록 화면에서 필수로 고른다' 이고 서버도 빠지면
+  422 `classification_required` 로 거절한다 — 화면이 기본값을 채우면 사람이 고르지 않은 채 반출 경계가 정해진다(동의 체크를 미리 해 두는 것과 같은 일).
+  고르기 전에는 '과제 등록' 이 잠기고, 모르면 confidential 을 고르라고 한 줄 적었다.
+- 거절은 code 로 그 칸에 붙인다 — `classification_required` → 등급, `E409` → code(이미 있는 과제 코드), `E404` → 앞 과제. 그 밖(401 · 어휘 밖
+  `E100`)은 배너다(`api/projectCreate.ts`).
+- 과제 행 타입을 서버 열(`routes._project_row`) 그대로 고쳤다 — `adh_scope` 는 보낼 때만의 꼴이고 받을 때는 `adh_team` · `adh_group` 이다.
+  그래서 과제 개요의 'AIDataHub 범위' 는 늘 '모름' 이었다. 과제 행에 없는 `external_sync` 를 읽던 머리 배지는 늘 비어 있어 걷었다.
+
+### FE-2. 포털 PAT 자동 등록은 탭 세션마다 한 번이다(B35 요청서 1절)
+- 앱 셸(`components/AutoPortalPat.tsx`)이 첫 마운트에 `GET /me` 를 읽어 `auto.enabled && auto.due` 면 설정 버튼과 같은 일(`/auth/pat` 발급 →
+  `PUT /me/portal-pat`, 출처 web)을 조용히 한 번 한다. 성공은 말하지 않고(설정 화면은 끝날 때 `GET /me` 를 다시 읽는다) 실패만 한 줄로 알린다.
+- '같은 세션에서 되풀이하지 않는다' 는 sessionStorage 표지 하나(값 "1")다 — 토큰 · 계정은 담지 않는다. 저장소를 못 쓰는 창에서도 메모리 표지로
+  그 페이지 안에서는 한 번이다. 실패한 시도도 센다(다시 하는 길은 설정의 버튼이다). 표지는 발급을 시작할 때 닫는다 — StrictMode 의 두 번 마운트는
+  첫 `GET /me` 를 끊으므로 발급이 두 번 나가지 않는다. 같은 탭에서 계정을 바꾸면 그 탭에서는 다시 하지 않는다(드문 일이라 남긴다).
+- 판정은 서버가 한다 — 화면은 `enabled` · `due` 두 칸만 읽고 `due_reason`(absent · revoked · undecryptable · expiring · audience)은 보이기만 한다.
+  audience 는 등록된 PAT 에 step-forge 청중이 없다는 뜻이라 두 청중으로 새로 받으면 된다.
+- 발급 청중을 `["mcp-gateway", "step-forge"]` 로(백엔드 `PORTAL_PAT_WANTED` 와 같다) — 손 버튼 · 자동 등록 · 스위치 켜기가 한 함수
+  (`registerFromPortal`)를 지난다. 이름 `hwax-risk` 는 백엔드가 갈아 끼울 때 옛 PAT 를 폐기하는 표지라 그대로다.
+
+### FE-3. 출처 — 앱이 받아 온 PAT 만 web 이다(B35)
+- 손 버튼 · 자동 등록은 `source: "web"` 을 싣는다. 붙여 넣은 PAT 는 싣지 않는다(= manual) — 그 사람의 Claude PAT 일 수 있어 백엔드가 폐기하지
+  않아야 한다. 종전 버튼은 아무것도 싣지 않아 manual 로 적혔고, 그러면 다음 갱신 때 폐기되지 않고 쌓였다. 삭제(`{pat: null}`)도 싣지 않는다.
+
+### FE-4. 자동 등록 스위치 · 지우기(B35)
+- 설정 화면에 스위치(`auto.enabled`)를 두고 그 옆에 `how_to_stop` 을 글자 그대로 보인다. 스위치의 이름은 '자동 등록' 하나(상태는 aria-checked)이고
+  설명 · 멈추는 길은 aria-describedby 로 잇는다. `last_source` · `last_at` · `last_error`(갈래 transient · final 과 시각)를 보인다.
+- 켜서 지금 받아야 하면(due) 그 자리에서 발급해 등록한다 — 켠 것은 사람의 손이라 결과를 보인다(앱을 다시 열 때까지 기다리게 두면 '켰는데 없다').
+- 자동이 켜진 채 지우면 다음에 앱을 열 때 다시 등록된다(요청서) — 그래서 지울 때 '자동 등록도 끄고 지우기 · 지우기만 · 그만두기' 를 묻는다. 함께
+  끄면 스위치를 먼저 내린 뒤 지운다(그 사이에 게이트웨이가 다시 등록하지 않게).
+
+### FE-5. 띄워 보니 과제 · 타깃 화면이 백지였다 — 타입이 서버와 달랐다
+- 실 백엔드를 띄워 B36 을 보려 했더니 타깃 화면이 통째로 백지였다. `verdict_candidate` 를 `{reason, conditions[]}` 로 적어 두었는데 서버는 늘
+  `{verdict, counts, reasons[]}` 를 준다(08-31 부터) — `conditions.length` 에서 죽는다. 패널 품질은 `flags`(복수)인데 `flag.map` 을 읽어, 끝난
+  패널이 하나라도 있으면 같은 꼴로 죽었다. 패널 열쇠는 `id` 이지 `panel_id` 가 아니고, `call_path` 는 품질 칸 안에 있으며, `tool_calls_n` 같은
+  칸은 없다(도구 사용률 `tool_use_rate` 다).
+- 과제 화면도 대상이 하나라도 있으면 백지였다 — 반영 요약 `external_sync` 의 채널 값이 객체(`{state, pending_ops, reason, message}`)인데 배지가
+  그것을 React 자식으로 그렸다(React #31). 요청서 3절의 결함이다. 재동기 응답은 채널마다 `{state, attempts, next_at, last_error, done_at,
+  pending_ops[]}` 라 둘을 다른 타입으로 두었다. 성격 태그도 글자가 아니라 `{tag, n}` 이라 태그가 있는 과제는 같은 꼴로 죽었고, 잡 진행은 숫자가 아니라
+  `{done, total, …}` 이라 'NaN%' 였다. 보고서 목록의 반영 값은 `done` 인데 화면이 `synced` 를 찾았다.
+- 잡 만들기 답의 `llm_calls_estimate` 는 `{low, high}` 라 '[object Object]' 였고, 자격 갈래는 U-3 뒤 `requester` · `owner` 다('service' 문구는 걷었다).
+  진행판 잡의 `reason` · `progress` · `daily_remaining` 은 서버에 없다 — `pause_reason` · `panels_done/panels_total` · `signal` 이다.
+- 25d7b07 의 교훈 그대로다 — 타입이 거짓이면 tsc 는 그 거짓을 지켜 준다. 이번에 손댄 호출(과제 만들기 · `GET /me` · PAT 셋 · 잡 만들기 · 진행판 ·
+  패널 목록 · 등록부 후보 · 재동기 · 과제 상세의 잡 · 태그)은 백엔드 코드와 실 응답으로 맞췄다. 손대지 않은 칸의 거짓은 FE-7 에 적는다.
+
+### FE-6. 패널 잡의 판단 LLM(B36)
+- '판단 LLM' 은 이 박스의 LLM(GLM)이 기본이고 Claude 를 고르면 반출 경고와 동의 체크가 열린다. 경고 글은 검토 잡의 것에 '패널 잡은 그 패널의 브리프 ·
+  좌석 조회 결과' 를 붙인 뜻이다. 체크는 늘 비어서 시작하고, GLM 으로 돌렸다 다시 고를 때와 잡을 만든 뒤에도 비운다(다음 잡의 미리 체크된 동의가
+  되지 않게). 체크하기 전에는 시작이 잠기고 까닭을 한 줄 보인다.
+- 본문은 `api/panelJob.ts` 한 함수가 짓는다 — 앞 다섯 칸(tier · concurrency · modifiers · user_memo · consent)은 종전 본문과 같은 순서 · 같은 값이라
+  GLM 잡의 JSON 이 바이트로 같다. Claude 일 때만 `llm: "claude"` 를, 체크했을 때만 `consent_external: true` 를 뒤에 붙인다.
+- 거절은 code 로 — 422 `consent_external_required` · 422 `pat_unavailable`(설정으로 가는 길) · 409 `external_llm_unavailable`('GLM 으로 고르기') ·
+  422 `flow_mismatch` · 409 `review_job_running`. 서버 글은 고칠 곳까지 말하므로 제목만 화면이 고르고 글은 글자 그대로 보인다.
+- 만든 뒤 — 내 Claude Code 에서 워크플로 `hwax-risk-claude` 를 인자 `{"targetKey": …}` 로 돌려야 나아가고, 돌지 않으면 보류 external_worker 로
+  멈추며 다시 돌린 뒤 재개한다는 안내. 진행판 잡 줄에 'Claude' 배지(검토 잡 줄도 쓸 `LlmBadge`) · 반출 동의 기록(누가 · 언제 · 입구) ·
+  `llm_mismatch` 수를 보인다.
+
+### FE-7. 시험 · 확인 · 남긴 것
+- 시험(`pnpm test`) — 새 의존 없이 tsc 로 순수 모듈 · 배지 컴포넌트를 CommonJS 로 옮겨(`tsconfig.test.json`, 산출물은 node_modules/.cache)
+  node:test 로 돈다. 14건 — GLM 본문 288 조합이 종전 본문과 바이트로 같음 · Claude 본문의 동의 칸 · 시작 가능 여부 · 거절 code · 자동 등록 판정과
+  한 번 문(저장소가 던져도) · 발급 청중 · 과제 거절 칸 · PAT 실패 문구 · 반영 배지(요약 · 재동기 응답)와 박스 까닭(react-dom/server 로 그림).
+  변이 16개(스크래치 사본) 16/16 이 잡혔다. node --test 는 시험 파일마다 프로세스를 함께 띄운다 — 처음에는 파일마다 CommonJS 표지
+  (package.json)를 덮어써서 다른 프로세스가 반쯤 쓴 표지를 읽고 한 번 죽었다. 이미 있으면 두고 없으면 임시 파일에 쓴 뒤 이름을 바꾼다(4c52c51).
+- 실 백엔드 확인 — 이 가지의 백엔드를 스크래치 데이터 · 빈 루프백 포트로 띄우고(가짜 포털 `/auth/pat` · heax · 에이전트 `/health`, 소켓 가드로
+  자기 포트 밖 연결 0) 브라우저(Playwright)로 눌렀다. 앱을 열면 발급 1 · 등록 1(source web, 청중 둘) · 같은 탭 새로 고침에 0 · PAT 없이 설정
+  화면을 열면 한 번 등록 · 발급 403 은 한 줄 알림이고 되풀이 없음 · 스위치 끄기 · 켜기(켜면 발급) · 붙여 넣기는 `{pat}` 만 · '자동 등록도 끄고 지우기'
+  는 끄기 → 지우기 순서. 과제 만들기 200(등급 실림) · 같은 code 는 code 칸에. 패널 잡 GLM 본문 `{"tier":"B","concurrency":1}` · Claude 는 체크
+  전 시작 잠김 · 체크 뒤 `…"llm":"claude","consent_external":true}` · 409 · 422 의 글 · 진행판 'Claude' 배지와 동의 기록. 하네스는 리포에 넣지
+  않았다(스크래치).
+- 브라우저로 못 본 것 — 실제 포털의 `/auth/pat`(CSRF · feat:api-token)과 게이트웨이 교환 길, 실제 에이전트 서버의 외부 응답자 길, 끝난 패널이 있는
+  타깃의 패널 표(패널을 돌리지 않았다 — 그 칸은 서버 코드로 맞췄다).
+- 남긴 것(이 걸음 밖) — 등록부 행 타입도 서버와 다르다(`claim` · `cites` · `subject` · `domain` 이 없고 `merged` 가 있다 — 행을 누르면
+  `cites.length` 에서 죽는다, M3 화면 요청서 7절 몫) · 과제 화면 대상 표의 `unseated_n` · `superseded_by` 는 그 응답에 없다('미착석 명') ·
+  과제 화면의 동결 알림은 스냅샷 잡이 그 목록(`jobs[]`)에 없고 상태 `done` 을 찾아 서지 않는다 · 좌석 드릴다운 · 브리프 탭의 타입은 대조하지
+  않았다.
+
+## 화면 세션 10-31 2차 걸음 — ECAD 화면 · B34 묶음(가지 `wt1031/riskfe`, 2026-10-31)
+
+> 포털 `docs/design-risk-review/ecad-1031/frontend-request.md` 1 ~ 10절(계약은 그 '반영' — main 9bd5f48)과 B34 묶음이다. 백엔드는 고치지
+> 않았다. 서버에 없는 칸은 지어내지 않고 '이 서버는 주지 않는다' 로 보였고, 청할 것은 FE-14 끝에 모았다.
+
+### FE-8. ECAD 카드 · 스냅샷 · 비교 · 대상의 ECAD(요청서 1 ~ 5 · 7 ~ 9절)
+- 카드의 길은 `GET /meta/adapters` 의 ecad 줄 `status` 하나로 가른다(`api/ecadBoard.ts` `ecadRoute`) — ready 면 찾기 칸, unavailable 이면 빠진
+  도구와 '운영자 몫', planned 면 '다시 읽기'. 줄이 없거나 모르는 값(옛 `contract_only`)이면 길을 열지 않는다(unknown). 붙은 보드의 정체는
+  `probe.board` 이고 job_id 는 그것이 없으면 `ref.odb_job_id` 다. 도구가 없어도 붙은 보드는 보인다(떼기는 PAT 없이도 된다).
+- 바꾸기 · 떼기 · 찾기는 과제 주인에게만 — 과제 행의 `owner_sub` 가 `GET /me` 의 email 인가로 가른다(서버도 남이면 404). 찾기 칸은 보드가
+  없으면 열려 있고, 붙어 있으면 '바꾸기' 를 눌러야 열린다.
+- 후보 표는 판 · 올린 시각을 앞 열에 두고 미리 고른 행이 없다. 지금 붙은 보드는 단추 대신 '붙은 보드' 배지다. job_id 가 16자리 16진이 아니면
+  단추를 잠근다(서버는 422 E100 — 5절의 '화면이 먼저 막는다'). 붙은 보드가 있을 때만 '앞 보드(판) → 새 보드(판)' 확인을 받는다.
+- 거절은 code 로만 가른다(`describeEcadError`) — 같은 서버 글이라도 code 가 다르면 다른 갈래다. 옛 판의 `ecad_credential_absent` 는
+  `ecad_pat_absent` 와 같은 안내(설정 길)다. 422 `ecad_board_not_found` 는 본문 `candidates` · `hub_message` 를 후보 표로 다시 보이고 고르지
+  않는다. 404 는 공용 '없음' 이다.
+- 스냅샷의 '보드' 묶음은 board 노드 `attrs` 에서 읽는다(노드 표 경로 part `nodes` 는 attrs 를 싣지 않는다). null 은 '없음'(0 이 아니다),
+  `n_nets` · `odb_version` · `outline_bbox` 옆에 '2단계'. 노드 표는 IR 노드에서 kind 거름 · 찾기(nid · 이름 · 정규 이름 · canon_key · ckey · dn)다.
+- 비교의 ECAD 여부는 서버가 행에 적지 않아 화면이 가른다(`diffRows`) — 구조층 노드 변화는 `domain`, 엣지는 `kind_family: net`, 파라메트릭
+  항목은 그 dn 이 ECAD 노드 변화에 있는가, 사건은 주체 dn 이 다 ECAD 인가다. 1단계는 ECAD 칸 변화를 싣지 않아(요청서 8절) 이것으로 넉넉하다 —
+  2단계에서 ECAD 파라메트릭 항목이 생기면 서버가 행에 domain 을 싣는 편이 맞다.
+- 좌석 까닭(9절)은 code 를 그대로 두고 사람 말을 붙인다(`lib/targetView.ts`). 사람이 적은 넘김 사유는 snake_case code 꼴이 아니면 글 그대로다.
+
+### FE-9. 동결 폼 — 기본 kinds · 409 두 갈래(요청서 6절)
+- ECAD 카드가 있으면 기본 kinds 에 ecad 를 넣는다. 사람이 체크를 한 번이라도 만지면 카드가 나중에 생겨도 덮지 않는다.
+- 409 `model_too_large` — detail 의 `leaf_mcad` · `leaf_ecad` 로 무엇이 넘겼는지 한 줄을 적고 '그래도 동결' 확인 뒤에만 같은 본문에
+  `allow_large: true` 를 싣는다. 예산 초(`budget_s`)는 적지 않는다 — '600초에 끊긴다' 로 읽혔다는 백엔드 주석(routes.LARGE_BUDGET_S)을 따랐다.
+- 409 `source_unreachable` 은 detail 의 꼴로 가른다 — `{kinds, attached}` 면 kinds 를 붙은 종류로 바꾸는 단추, `{kind: "ecad", reason}` 이면
+  'ECAD 보드를 못 읽었습니다'(reason 이 `ecad_pat_absent` 면 설정 길). 둘 다 아니면 공용 배너다. 거절 뒤 과제를 다시 받아 카드의 '못 읽음' 을 보인다.
+
+### FE-10. 서버 꼴 — 스냅샷 · 비교 화면이 백지였다(요청서 10절과 그 둘레)
+- 띄워 보니 스냅샷 화면은 'e.some is not a function', 비교 화면은 't.map is not a function' 으로 백지였다. `missing` 은 배열이 아니라 bool
+  사전이고, 상태의 게이트는 사전(G1 ~ G6 레코드)이며 신호도 사전(열쇠에 'sig:' 가 없다), 비교 가능성은 `{ok, excluded_reason, note}` 가 아니라
+  parity 칸 열댓 개다. diff 는 3층 문서, 사건 부분은 `{diff_id, events[]}`, 요약 부분에는 줄이 없다(summary_text 를 줄로 나눈다).
+- 동결(`POST /projects/{id}/snapshots`)은 동기다 — 답의 snapshot_id 로 곧바로 연다. 1차 걸음에서 남긴 '동결 알림이 서지 않는다' 는 이것으로 닫았다.
+- 일반 연결의 `ref` 는 객체다(서버 칸이 dict) — 글자로 보내 늘 422 였다. kind 마다 어댑터가 읽는 열쇠를 칸으로 받는다(mcad
+  `stepforge_project_id` · `detect_job_id`, dyna `session_id` · `file_id` · `sha256`).
+- 요구 목록의 값 칸은 `value` 다(`value_json` 이 아니다). 타입이 틀린 채 쓰는 곳이 없던 `getSnapshotNodes` · `getSnapshotEdges` 는 걷었다.
+
+### FE-11. B34 — 스냅샷 · 비교 화면
+- 게이트 `pass: null` 은 중립색 '판정 불가(까닭)' 이고 fail 배너에 세지 않는다(따로 '판정 불가 … — fail 이 아닙니다' 정보 줄). 까닭이 없는 자리
+  (동결 답의 요약)에서는 까닭을 지어내지 않는다 — 처음에 'unknown' 을 붙였다가 걷었다.
+- 규칙은 `evaluable=false` 가 이긴다 — '평가 불가(사유)' 이고 pass · fail 집계 밖이다. 변이 하나(집계에서 evaluable 검사 빼기)가 살아남아
+  'pass 칸에 값이 남아 와도 평가 불가' 단언을 더했다.
+- ack — fail 이고 차단이 아닌 게이트에만 '사유 적고 진행(ack)'(사유 300자, `POST …/gates/{gate}/ack {reason}`), 붙은 ack 에는 '확인 취소'
+  (DELETE). G6 은 차단이라 단추 대신 '다시 캡처' 안내다(unit_unknown 이면 REST 원문으로). 9bd5f48 의 `part=state` 는 동결 때의 상태 원문이라
+  ack 를 다시 싣지 않는다 — 그래서 답을 그 칸에 들고 있고 '새로 열면 이 줄이 보이지 않는다' 고 적었다(서버가 실으면 서버 값이 이긴다).
+- 요구 여유(`sig:req.margin`) — 9bd5f48 은 동결 때 요구를 대조하지 않는다(`freeze_snapshot` 은 `build_state(ir)` 만 부르고
+  `compute_state_for_snapshot` 을 부르는 곳이 없다). 신호가 없으면 표를 짓지 않고 '이 스냅샷의 상태에 요구 대조가 없습니다' 를 보인다.
+- 키 대장 — 노드를 누르면 그 ckey 의 이름 바꾸기 · 병합(같은 스냅샷의 다른 ckey 고르기 또는 적기, 확인) · 되돌리기(확인) · 확정이다
+  (`POST /sameas/decide` 의 ckey 결정). 키의 지금 상태(병합됐는가 · 표시 이름)를 읽을 길이 없어 답의 결과 줄만 보인다.
+- '파서 세대 다름' 은 parity 가 정말 거짓일 때만이다(null 은 모름). 항목 · 사건의 `parser_differs` 는 출처가 둘이라(소스 앱 판 · 어댑터 →
+  모든 행, ECAD 어댑터 → ECAD 행) 행마다 까닭을 비교 가능성에서 고른다 — 처음에는 모든 행에 'ECAD 어댑터' 말이 붙었다.
+- 대응 확정표의 confirm · reject 는 늘 400 E100 이었다 — 노드 id 만 보내고 pair_key 가 없었다. stable 키와 '|' 로 이은 정렬한 두 과제 id
+  (서버 글이 정한 꼴, GET /sameas 가 원장을 읽는 열쇠와 같다)로 보낸다. 과제 id 는 확정할 행이 있을 때만 두 스냅샷의 상태에서 읽는다.
+
+### FE-12. B34 — 과제 화면
+- 등급 · 수명 주기 · 코퍼스 제외 · 조직 공개 · 제품 연결은 9bd5f48 의 과제 상세(`_project_row`)에 없다 — '모름(이 서버가 과제 상세에 싣지
+  않음)' 으로 보이고, 바꾸면 PATCH 답(열 그대로 — `corpus_excluded` 0/1 · `product_refs_json` 글자)이 이긴다.
+- '조직 공개' 는 소유자만 — 편집자 · 보기에게 잠그고 까닭을 말한다. 역할을 모르면(멤버 표를 못 받음) 잠그지 않되 403 `role_insufficient` 를
+  code 로 받으면 잠근다. 공개 전에 확인을 받고(보류 RA op 수) 답의 `resynced` 를 한 줄로 보인다.
+- 과제 상세가 주인에게만 열린다(`_project_row` 가 소유 검사) — 편집자는 이 화면을 열지 못해 잠금은 브라우저로 못 보고 렌더 시험으로 본다.
+- 멤버 탭 · 이양 · 폐기 · 이력 탭 — 거절은 code 로, 폐기는 과제 코드를 다시 적어야 하고 답의 `purge_report.remaining` 을 보인다. 이력은 그
+  탭을 볼 때만 받는다.
+- mcad 소스 카드의 '격리 없음' 경고는 상시다 — 연결 답의 `warnings`(`stepforge_no_isolation`)에만 실리면 카드를 다시 열 때 사라진다.
+
+### FE-13. B34 — 대상 · 홈
+- 좌석 넘기기(skipped)는 사유가 있어야 보낸다(빈 사유는 서버도 422). pending · assigned · running · failed 에만, 되돌리기는 carried 에만 연다
+  (planner 의 허용 전이). 보류(deferred)는 되돌리기로 풀지 않는다. '좌석 상태 되돌리기 · skipped 사유 입력 경로는 아직 서버에 없습니다' 는
+  틀린 글이라 걷었다.
+- 마지막 신호는 서버 시계로 잰 초(`frame_idle_s`)를 쓴다. 러너가 1분 간격으로 적어 건강한 패널도 80초 안팎까지 가므로 80초를 넘을 때만
+  경고 배지다. 시험이 닿게 두 줄 컴포넌트를 `components/JobSignals.tsx` 로 뗐다(페이지는 mermaid 를 끌어 node 시험에 못 싣는다).
+- 홈 칩 · 거름은 카드가 그 칸을 줄 때만 — 하나도 안 주면 거름을 잠그고 까닭을 적는다(모르는 값으로 카드를 숨기지 않는다). 등급 칩 말은
+  과제 화면의 사전과 같게 '기밀' 이다(처음에 '대외비' 로 적었다가 맞췄다).
+
+### FE-14. 시험 · 확인 · 남긴 것 · 백엔드에 청할 것
+- 시험 36건을 더해 50건(`pnpm test`) — ECAD 9 · 판정 18 · 렌더 9. 컴파일 산출물에 넣은 변이 20개가 다 잡혔다(하나는 FE-11 의 단언을 더한 뒤).
+  `tsc -b && vite build` 통과. 커밋마다(첫 넷은 그 상태로 되돌려) 타입 검사 · 빌드 · 시험을 돌렸다.
+- 실 백엔드 하네스(이 가지의 코드 · 스크래치 데이터 · 빈 루프백 포트 · 소켓 가드, 게이트웨이는 백엔드 시험의 FakeGateway)로 브라우저에서 본 것 —
+  ECAD 카드의 세 갈래 · 찾기 → 후보 표 · 붙이기 · 바꾸기 확인 · 떼기 · 거절 code(하네스 스위치로 PAT 없음 · 게이트웨이 끊김 · find_job 없음 ·
+  호출 실패 · 꼴 바뀜 · 허브에서 사라진 보드),
+  동결 폼의 기본 kinds · 모델 크기 409 와 '그래도 동결' · kinds 밖 409 · 보드를 못 읽은 409, 스냅샷의 보드 묶음 · 표지 · 노드 거름, 비교의 ECAD 줄 ·
+  '파서 세대 다름'(판이 다른 두 스냅샷), mcp_degraded 스냅샷의 G3 · G4 '판정 불가' · R-004 · R-005 '평가 불가', ack 와 취소, 요구 여유 없음 배너,
+  키 대장, 과제 메타 PATCH · 조직 공개(주인) · 멤버 · 이양 · 폐기 · 이력, 좌석 넘기기 · 되돌리기, 도는 패널의 마지막 신호(80초 넘김). 대응 확정은
+  하네스에 후보 쌍이 없어 단추를 못 눌렀고 본문만 서버에 보내 봤다(옛 본문 400 · 새 본문 200).
+- 브라우저로 못 본 것 — 편집자로 과제 화면(FE-12), 도는 검토 잡의 일꾼 줄(렌더 시험), 찾기의 `hub_message`(꺼내기만 시험), 실제 ODB 허브 ·
+  게이트웨이 · 포털.
+- 백엔드에 청할 것 —
+  1. `GET /projects/{id}` 의 과제 행에 `classification` · `lifecycle` · `closed_at` · `corpus_excluded` · `excluded_reason` · `mcp_visibility` ·
+     `product_code` · `product_refs_json` · `predecessor_product_code` · `status` 와 계약의 `members`, 그리고 멤버(편집자 · 보기)도 읽게(지금 남은 404).
+  2. `GET /projects` 카드에 `classification` · `lifecycle` · `corpus_excluded` · `my_role`, 그리고 멤버로 든 과제.
+  3. `GET /snapshots/{id}?part=state` 가 ack(`ack_by` · `ack_at` · `ack_reason`)와 `gates_hash` 를 지금 값으로 싣기(rr_gate_acks · gates_json).
+  4. 동결 때 요구 대조(`sig:req.margin`)와 요구를 고친 뒤 다시 세기(`compute_state_for_snapshot`).
+  5. 키 대장 읽기 — 예 `GET /api/part-keys?ckey=` → `{ckey, status, merged_into, display_name, aliases}`, 없으면 404.
+  6. `GET /sameas` 의 답(또는 행)에 `pair_key` — 화면이 서버 글의 꼴로 짓고 있다.
+  7. 도는 패널마다의 신호 — 진행판 `job.signal` 은 마지막에 적힌 하나라 동시 2 에서 덮인다(`signals: [...]`).
+  8. 과제 상세의 스냅샷 머리에 판 칸(`app_versions` · `adapter_versions`) — 과제 화면 목록에서 '파서 세대 다름' 을 미리 보일 수 없다.
+
+## 화면 세션 10-31 3차 걸음 — M3 화면(가지 `wt1031/riskfe`, 2026-10-31)
+
+> 포털 `docs/risk-review-redesign/m3-frontend-request.md` 1 ~ 7절이다. 요청서는 a27e569(가지 m3)를 대조했고 이 걸음은 그 뒤 main 에 합쳐진
+> 이 가지의 백엔드 코드를 계약으로 읽었다 — 칸이 다르면 코드를 따랐다. 백엔드는 고치지 않았다. 확인은 실 백엔드를 스크래치 하네스(가짜 검토 ·
+> 쟁점 패널 · 요약 엔진으로 원장을 만든 카드 대조 대상 넷과 패널 대상 하나)로 띄워 브라우저로 눌렀다(FE-22). 커밋 — 9055a0a(7절 등록부) ·
+> bc580e8(1 ~ 6절) · 07e7af4(대상마다 다시 마운트) · 7cc4464(서버 견본 · 시험).
+
+### FE-15. 자리 — 카드 대조 대상의 탭과 대상 열쇠마다 다시 마운트
+- 카드 대조 대상(진행판 `flow: "cells"`)에만 셀 격자 · 전문가 · 쟁점 · 완결 탭이 더해지고, 보고서 탭은 종합 보고서가 된다(패널 대상은 통합
+  보고서 그대로). 브리프 탭은 카드 대조 대상이면 서버가 `cells_flow_web_only` 로 거절하므로 부르지 않고 그 말을 보인다.
+- 카드 대조 대상은 Tier 패널 잡을 세우지 않는다(422 `flow_mismatch`) — '패널 실행' 카드는 방식을 바꾸기 전에 선 패널 잡이 있을 때만 그 줄 ·
+  조작으로 남기고 만들기 칸은 두지 않는다. 검토 잡은 진행판의 '검토 잡 만들기' 에서 만든다.
+- 대상이 바뀌어도 같은 라우트라 TargetPage 가 다시 마운트되지 않아 앞 대상의 탭 · 고른 셀 · 폼이 넘어갔다 — 하네스의 합성 대상들은 단위
+  id 까지 같아 고른 셀이 그대로 다음 대상의 셀로 보였다. 대상 열쇠를 React key 로 둔다(`TargetView`).
+- 셀 격자 · 쟁점 · 완결은 탭을 볼 때만(볼 때마다) 읽고 마운트는 남긴다 — 적던 사유 · 고른 셀은 탭을 바꿔도 남는다(TabPanel 주석의 규칙).
+  전문가 보고서 · 종합 보고서는 입력이 없어 볼 때만 그린다(새 판을 처음 쪽부터 받는다).
+- 요청서 8절대로 검토 잡의 판단 LLM 고르기(llm · consent_external)는 짓지 않았다. 진행판이 Claude 검토 잡을 실어 오면 'Claude' 배지만
+  보인다(MCP 로 만든 잡).
+
+### FE-16. 1 · 2절 — 사슬 머리 · 검토 진행판
+- 완결 표기는 서버 글(`level_label`)을 그대로 보인다 — 화면이 잔여로 표기를 다시 짓지 않는다. 막음이고 확인되지 않은 잔여(`blocking &&
+  !acked`)를 세어 '확인 안 된 막음 잔여 N — 완결 화면' 단추를 단다.
+- 사슬 배지는 `stage.state` 로, 멈춤의 까닭은 `error` 머리로 가른다 — `pat_unavailable:` 은 설정 길, `restart:` 는 '사람이 재개', `draining:`
+  은 비우는 동안. 멈춘 사슬 잡의 재개는 종전 `resumeJob` 그대로다. `advice` 가 `issue_yield_low` 면 알림만(잡은 멈추지 않는다).
+- M2 시절 잡 뒤의 '쟁점 · 종합 시작' 은 요청서의 조건 그대로다(사슬 · 판 없음 · 마지막 검토 잡 completed · 대기 셀 0). 그 잡이 사슬 표지를
+  가졌는지는 칸이 없어 가르지 못한다(백엔드에 청할 것 4).
+- 거르기 줄 — `approved` false 면 '배정표 승인 전 — 거르지 않는다', null(검토 잡 전)이면 그 말, 95% 상한이 null 이면 '표본 없음'(0% 로
+  적지 않는다). 그림자 모드 · 기다리는 표본 · 넓힌 영역 · 끔은 한 줄씩이다.
+- 잡 줄 — 단계(live 는 '근거 꾸러미 실호출'), 기다림의 `note` 글 그대로, 다시 연 셀 몫, 호출 'ok N / 추정 E' 와 남은 시간 어림(남은 호출 ×
+  평균 호출 초 ÷ 지금 도는 호출 수 — 추정이 거르기 없음 가정이라 실제보다 길다고 적는다). 진행판을 아직 세지 않은 잡은 칸이 null · 빈
+  객체라 '셈 전' 이다. 끝난 잡도 `error` 칸에 사람이 할 일을 남기므로(실패 셀 처분) '오류' 가 아니라 '잡이 남긴 글' 로 부른다.
+- 진행판 5초 폴링을 검토 잡 · 사슬 잡이 돌거나 줄에 섰을 때까지 넓혔다(멈춤은 사람이 움직일 때까지 그대로라 읽지 않는다).
+
+### FE-17. 3절 — 검토 잡 · 셀 처분 · 동의 · 보류 풀기
+- 검토 잡 본문은 빈 범위 칸을 싣지 않는다(빈 목록은 서버가 422 `scope_invalid`) — 다 비면 scope 없이 로스터 전원이다. 동의는 늘 비어서
+  시작하고, 422 `consent_required`(아무것도 바꾸기 전)를 받아야 추정과 체크가 열린다. 범위를 바꾸면 앞선 추정 · 동의를 걷는다.
+- 셀 격자는 서버가 검토 순서 → 단위 순번으로 주는 쪽(500칸)을 전문가 × 단위로 편다 — 쪽 경계에서 전문가 하나가 단위 일부만 가질 수 있다.
+  칸의 짧은 말은 상태 말에 '표본'(route audit) · '사람'(human_retry) · '↺n'(다시 연 횟수)을 붙이고, 말풍선에 거른 까닭 · 길 · 오류 ·
+  사람의 처분을 서버 글 그대로 싣는다. 고른 셀은 그 쪽의 셀만이고 거름 · 쪽을 바꾸면 걷는다.
+- 다시는 기본 실패 셀만(나머지는 서버가 not_failed 로 센다) · force 는 검토함 · 입력 결손도 열고 판정 행을 지우므로 사유가 필수 · 사유는 주면
+  4~300자. 넘김은 사유 필수다. '이 잡의 실패 셀 전부' 는 `filter {job_id, state: "failed"}` 이고 잡은 진행판의 가장 최근 검토 잡이다(처분이
+  잡을 세우면 그 잡으로 바뀐다 — 앞 잡의 실패 셀은 고른 셀로 처분한다).
+- 처분 답의 잡 줄 — 넘김이 세운 잡은 돌 셀이 없는 마감 잡이라 그렇게 말한다(처음에 '검토 잡을 세웠다' 로 적었다가 띄워 보고 고쳤다).
+  걸림 셈이 `pack_missing` 이면 0 이 아니라 '모름' 과 서버의 까닭이다.
+- 3-5 — 재개 갈래는 보류 코드가 아니라 `progress.reopened_extra.hold` 로 가른다(사람이 멈춘 잡도 몫이 넘쳐 있으면 동의가 든다).
+  consent_extra 는 동의를 기다리는 셀 수 · 추정 호출 · 여유 · 처음 동의한 추정을 보이고 체크 뒤 `resume?consent=true`, max_calls 는 재개를
+  잠그고(409) 기다리는 셀 넘기기를 앞에 둔다. 그냥 재개가 422 `consent_required` 로 돌아오면(그사이 몫이 넘쳤다) 그 답의 몫으로 같은 동의
+  칸을 연다.
+- 보류 풀기는 패널 대상의 진행판에만 둔다(카드 대조 대상은 검토 잡이 범위 안 보류를 저절로 푼다). 답의 note · depth 를 그대로 보인다.
+
+### FE-18. 4절 — 쟁점
+- 서버는 쟁점 id 순(쪽을 잇는 안정 열쇠)으로 주고 화면이 순위대로 정렬한다(기본 켬). '더 받기' 의 `ledger_rev` 가 첫 쪽과 다르면 잇지 않고
+  처음부터 다시 받는다.
+- 버튼 — 편성 · 도는 쟁점은 둘 다 잠그고(409 `issue_in_flight`) 이유를 말한다. 이미 대기인 쟁점에 올리기, 이미 건너뛴 쟁점에 건너뛰기는 하는
+  일이 없어 두지 않는다. 쟁점 사유는 1~300자다(처분 사유 4~300자와 다르다 — routes.put_issue).
+- 행의 `outcome_json` 은 서버가 늘 null 로 싣는다 — `routes._issue_row_out` 이 `_loads(…, None)` 을 부르고 `_loads` 가 `type(default)` 가
+  아니면 기본값을 돌려준다(DB 에는 있다). 그래서 쟁점 한 줄은 결과 낱말까지이고 펼친 칸에 '서버가 결과 칸을 싣지 않았다' 고 적었다(백엔드에
+  청할 것 1). 칸이 오면 '상향 치명/FAIL' 꼴로 덮은 값을 붙인다.
+
+### FE-19. 5절 · 3-7 — 종합 보고서 · 전문가 보고서 쪽
+- 두 보고서가 `components/ReportPager.tsx` 하나로 쪽을 넘긴다 — 첫 쪽은 판을 싣지 않고 첫 쪽의 `version` 을 둘째 쪽부터 싣는다. 409
+  `report_version_moved` 면 '판이 vA 에서 vB 로 바뀌었다' 를 보이고 1쪽부터 다시 받는다(하네스에서 확인 한 번으로 v5 → v6 을 만들어 봤다).
+  part 를 바꾸면 1쪽부터다. 422 E100 의 `pages_total: 0` 은 '이 부분에는 쪽이 없다' 다.
+- 쪽의 블록 값은 마크다운 조각 배열이고 조각 안에 줄바꿈이 있다(전문가 보고서). `MarkdownLines` 는 제목 · 목록(들여쓰기 깊이) · 굵게 ·
+  고정폭만 글 노드로 그린다 — 서버 글을 HTML 로 해석하지 않는다(새 의존 없음).
+- 판이 없으면(404 `report_absent`) '다시 내기'(코드 조립 판)를 안내한다. '요약부터 다시' 는 진행판의 사슬 단계가 살아 있는 종합 잡이면
+  잠근다(서버는 막지 않고 새 잡을 세운다). 종합 잡 답의 `error` 가 `pat_unavailable` 이면 설정 길을 단다.
+
+### FE-20. 6절 — 완결과 확인
+- 확인은 지금 읽은 잔여 행의 `basis_hash` 를 그대로 보낸다. 409 `residual_changed` 면 `?fresh=1` 로 한 번 다시 세어 지금 집합을 보이고 다시
+  확인받는다 — 요청서는 fresh 를 '버튼으로만' 부른다고 했지만 캐시가 낡은 채면(쟁점 결정이 캐시를 새로 쓰지 않는다 — 백엔드에 청할 것 2)
+  캐시를 다시 읽어도 같은 해시라 409 가 되풀이된다. 사람이 누른 확인의 뒤끝이라 한 번만 센다. 하네스에서 이 길이 실제로 났다(올린 쟁점 뒤
+  '미토의 4건' 캐시 → 409 → 지금 3건).
+- 확인 취소는 행을 지우지 않는다 — 한 번 더 묻고 보낸다. 확인 · 취소의 답으로 표기를 보이고 `report_version` 이 있으면 보고서 탭 단추, null
+  이면 '판 조립 실패(확인 자체는 섰다)' 다.
+- 잔여 표는 내용 폭이라 미토의 쟁점 문장이 확인 칸을 화면 밖으로 밀었다 — 글 칸만 폭을 묶어 접어 쓴다(등록부의 쟁점 칸도 같다).
+
+### FE-21. 7절 — 등록부
+- 행 타입을 서버 꼴로 고쳤다 — 주장 · 근거 · 영역은 행이 아니라 `merged`(claim · cites · domains · owner_domain)에 있다. 전에 행 칸으로 적어
+  두어 행을 누르면 `cites.length` 에서 백지였다(FE-7). 영역은 대표의 소유 영역이 먼저이고 제기 원자들의 영역이 뒤다. 패널만 본 비교 보기는
+  저장하지 않은 계산 행이라 저장 칸이 없고 상태 변경 폼을 두지 않는다.
+- 주의 · 단위 · 패널만 본 비교 보기는 서버 쿼리이고(대상 화면이 들고 머리의 판정도 같은 응답에서 읽는다), 카드 대조 대상의 기본은 주의
+  A · B 다. 패널 대상에는 기본 거름을 걸지 않는다(그 대상의 주의 등급은 참고값).
+- 쟁점 칸 — 쟁점 패널이 덮은 행(`merged.before_issue`)은 덮기 전의 지지 전문가 수와 분포로 '원래 — 제기 N명(FAIL a · WARNING b) → 쟁점 패널
+  결과', 덮지 않는 결과(기각 · 판정 못 함)는 지금 분포로 센다. `issue_reraised.label` 은 굵게. 열은 읽는 차례(주의 · 키 · 영역 · 심각도 ·
+  판정 · 쟁점 · 지지)로 앞에 둔다.
+
+### FE-22. 서버 견본 · 시험 · 확인 · 남긴 것 · 백엔드에 청할 것
+- `src/contract/serverSamples.ts` — 하네스의 실 응답(진행판 둘 · 완결 · 쟁점 · 등록부 · 보고서 쪽 · 셀 목록 · 처분 답)을 줄여 옮기고 tsc 가
+  타입과 견준다(요구 칸이 빠지거나 값 종류가 다르면 빌드가 깨진다, 서버가 더 싣는 칸은 받는다). 화면 코드는 import 하지 않아 번들에 들지
+  않는다. 이것이 둘을 잡았다 — 진행판 `strong` 은 숫자가 아니라 `{done, done_weak, ratio}` 이고, 등록부 행 · merged 에 적지 않은 칸이
+  있었다. 타입을 일부러 틀리게 바꾼 8가지 가운데 7가지를 잡는다(주의 등급 null 은 견본에 그런 행이 없다).
+- 시험(`pnpm test`) — 25건을 더해 75건. 순수 판정(사슬 배지 · 사슬 시작 · 거르기 · 입력 결손 · 호출 어림 · 보류 갈래 · 잡 본문 · 사유 ·
+  처분 답 · 걸림 셈 · 셀 격자 · 거절 code · 쟁점 줄 · 버튼 · 쪽 잇기 · 보고서 쪽 물음 · 마크다운 · 확인 상태 · 깊이 · 등록부 줄)과 견본으로 그린
+  조각(대상 머리 · 진행판 · 등록부 쟁점 칸 · 행 펼침). 컴파일 산출물에 넣은 변이 33개가 다 잡혔다(둘은 처음에 살아남아 단언을 더했다).
+- 실 백엔드 하네스에서 브라우저로 본 것 — 대상 머리(표기 · 잔여 표지 · 사슬 · 판 링크) · 진행판 · 셀 격자의 넘김(답의 마감 잡 · 걸림 0) ·
+  다시(살아 있는 잡의 범위 밖 → 다음 잡) · force 다시(사유 4자 미만 잠금 → 살아 있는 잡에 얹혀 consent_extra) · 동의 재개
+  (`resume?consent=true`) · 기다리는 셀 넘기기(잡이 이어 돈다) · 검토 잡 만들기(422 → 추정 · 동의 → 200) · M2 시절 잡 뒤 사슬 시작 · 보류 풀기 ·
+  쟁점 올리기 · 발언 · 완결 확인(409 → 다시 세기 → 200, 보고서 v4) · 확인 취소(v5) · 보고서 쪽(v5 둘째 쪽 409 → v6 1쪽) · 영역 part · 전문가
+  보고서 · 등록부 쟁점 칸 · 행 펼침 · 패널만 본 비교 보기. 쓰기 본문은 하네스 기록으로 요청서와 견줬다. 자기 포트 밖 연결 0.
+- 브라우저로 못 본 것 — 편집자 · 보기 역할(하네스 신원이 하나다 — 403 은 code · 공용 배너), 기다림(health_unknown · draining — 러너를 하네스가
+  잠갔다), max_calls 보류(렌더 시험), 거른 셀이 있는 대상(거름 0), 다시 토의 표기가 선 쟁점, 실제 에이전트 서버 · 포털.
+- 백엔드에 청할 것 —
+  1. `GET /targets/{key}/issues`(와 MCP `risk_get_issues`)의 `outcome_json` 이 늘 null — `routes._issue_row_out` 의 `_loads(…, None)`(DB 값은
+     있다). `{}` 기본값으로 읽고 비면 null 로 싣거나 `_loads` 의 형 검사를 그 자리에서 건너뛴다.
+  2. `PUT /issues/{id}` 뒤 `closure.refresh` — 지금은 완결 캐시가 그대로라 진행판 `level_label` · `qualifiers` 와 `GET …/closure` 가 낡고, 그
+     캐시로 보낸 확인이 409 `residual_changed` 다(화면은 한 번 다시 세어 넘긴다).
+  3. 진행판 `review.job`(routes.review_payload)과 `review_cells._latest_review_job` 의 `ORDER BY created_at DESC, id DESC` — 같은 초에 선 두
+     검토 잡이면 uuid 순이라 앞 잡을 고를 수 있다(하네스에서 났다). 사슬 단계처럼 `rowid DESC` 로.
+  4. 진행판에 마지막 검토 잡의 사슬 표지(`params.chain`) 칸 — 'M2 시절 잡 뒤의 사슬 시작' 을 요청서의 어림이 아니라 그 칸으로 가르게.
+- 포털 요청서에 고칠 말 — 2절의 '`by_basis` 의 `unset` 은 search_only 셀을 함께 센다' 는 지금 코드와 다르다(CELL_BASES 에 search_only 가
+  있어 따로 센다).
+
+## 화면 세션 10-31 4차 걸음 — 리뷰 후속(가지 `wt1031/riskfe`, 2026-10-31)
+
+> 이 가지 전체를 본 리뷰가 검증해 넘긴 지적 13건이다(높음 1 · 중간 1 · 낮음 2 · 그 밖 9). 지적마다 먼저 재현했다 — 스크래치 jsdom 하네스(리뷰의
+> 재현 스크립트를 이 가지의 컴파일 산출물에 대고) · 스크래치 백엔드 사본(이 가지의 코드, 바이트코드 끔, 공용 시험 픽스처) · 스크래치 SQLite. 13건
+> 다 재현됐고 다 고쳤다. 백엔드는 고치지 않았다. 커밋 5ea092f ~ 1021e30.
+
+### FE-23. 쟁점 다시 토의 표기의 두 꼴 · 화면 자리의 오류 경계
+- 사람이 끝난 쟁점을 올리면(PUT /issues queue) reraised_json 이 빈 채로 대기가 되고, 새 패널이 판정 못 함이면 issues._keep_verdict 가
+  `{new_panel_failed}` 만 적는다 — 쟁점 행의 reargue 는 label · new_panel_failed 뿐이다(스크래치 백엔드 사본에서 그 길을 돌려 받은 행). 타입이
+  label 밖을 다 요구 칸으로 적어 두어 그 행을 누르면 `raisers_added.length` 에서 #root 가 내려갔다(jsdom · 실 Chromium 둘 다 재현).
+- label 밖은 선택 칸이다. 근거가 바뀐 표기(basis_hash 가 있다)만 들고 남 · '주장값이 바뀌었다' · 시각 · 회차를 보이고, 새 패널 실패는 그
+  패널 · 까닭(말과 code) · 시각이다(`ReargueNote`). 견본 `issueReargueRows` 가 두 꼴을 tsc 와 시험에 싣는다.
+- 오류 경계(`ErrorBoundary`)를 Routes 둘레에 둔다 — 이 가지에서만 서버 꼴 하나로 앱 전체가 백지가 된 일이 넷이었다(FE-5 · FE-10 · 9055a0a ·
+  이것). 주소(pathname)가 바뀌면 멈춤을 걷고, 아이들을 다시 마운트하지 않아 평소 동작은 그대로다.
+
+### FE-24. 등록부 상태 변경에 target_key
+- 9bd5f48 부터 본문에 target_key 가 없어 registry.set_status 가 그 사람의 같은 cluster_key 행 전부(앞뒤 스냅샷 · diff 대상)를 바꾸고
+  verified · dismissed 면 다른 대상의 finding 에 라벨까지 달았다(스크래치 백엔드 — updated 2, target_key 를 실으면 1). 본문은
+  `registryStatusBody` 한 곳에서 늘 싣는다.
+
+### FE-25. 완결 fresh=1 은 그 읽기 한 번
+- `mode.fresh` 가 참으로 남고 useAsync 가 active 도 deps 로 보아 완결 탭에 돌아올 때마다 fresh=1(다시 세어 rr_targets 에 쓴다)이 나갔다.
+  그 읽기 차례(mode.n)에 이미 보냈으면 캐시를 읽는다. FE-20 의 '409 residual_changed 뒤 한 번' 은 그대로다.
+
+### FE-26. 과제 스냅샷 머리의 degraded
+- bool 이 아니라 호환 열 그대로(degraded_json 의 첫 code | null)다. 배지에 code 를 보이고(첫 값이라 전부는 스냅샷 화면), null 은 '없음' 이다.
+  견본 `projectSnapshotHeaders` — 타입을 boolean 으로 되돌리면 tsc 가 깨진다(확인).
+
+### FE-27. 동의는 받은 그 요청 · 그 몫에만
+- 셀 격자 — 요청 열쇠(동작 · 고른 셀 또는 이 잡의 실패 셀 · force · start)가 바뀌면 추정 · 동의를 걷는다. 바뀐 요청은 동의 없이 다시 가서
+  새 추정을 받는다.
+- 진행판 consent_extra — 체크는 몫의 열쇠(`consentAmountKey` — 잡 · 다시 연 셀 · 동의한 셀 · 기다리는 셀과 그 추정 호출)에 묶인다. 몫이
+  바뀌면 빈 체크로 보이고, 넘김 · 재개 뒤와 기다리는 몫이 없어지면 걷는다. ReviewJobPanel 은 잡 · 보류마다 다시 마운트되지 않아 상태가 넘어갔다.
+- 패널 잡 Tier C 승인 — 잡을 만든 뒤와 티어를 바꿀 때 걷는다(웹 REST 는 부를 때마다 새 잡을 세운다).
+
+### FE-28. 확인 뒤에만 쓰는 조작
+- 키 대장 — 고른 노드마다 다시 마운트한다(앞 노드에서 연 '되돌리기' 확인이 새 노드 아래로 넘어가 앞 노드의 키를 되돌렸다, 07e7af4 와 같은 꼴).
+  '독립 키로 확정' 도 확인 뒤다 — sameas confirm_key 는 status 만 confirmed 로 바꾸고 유효 키 해석은 merged 일 때만 merged_into 를 따라,
+  병합된 키를 확정하면 그 병합이 풀린다(스크래치 SQLite 로 백엔드 코드 실행). 키 상태를 읽을 길이 없어 '병합돼 있으면 풀린다' 로 말한다.
+- 잡 취소 — 검토 잡 · 패널 잡 모두 잡을 id 로 부르고 '재개되지 않는다 · 잠시 세우려면 일시정지' 를 말하는 확인(`JobCancelConfirm`) 뒤에만.
+  확인은 연 그 잡에 묶인다.
+- 과제 — 멤버 빼기는 그 사람을 부르는 확인 뒤, 역할은 고른 뒤 '적용', 등급은 고른 뒤 '바꾸기'(기밀 또는 모름 → internal 은 반출 머리의 최고
+  등급 말과 함께 확인), 수명 주기는 고른 뒤 '바꾸기'(active 를 떠나면 closed_at 이 찍힌다는 확인). 고르기만으로는(화살표 키의 change 도) 쓰지 않는다.
+- 동결 — '그래도 동결' 은 거절된 그 본문에 allow_large 만 더한다(`capture.allowLargeBody` — snapshotBody 는 allow_large 를 싣지 않는다). 폼을
+  바꾸면 거절 배너와 단추를 걷는다.
+
+### FE-29. PAT 자동 등록 — 받은 PAT 를 버려 두지 않는다
+- 등록이 실패하면 — 저장 전 거절(4xx · 502 portal_unreachable — routes._register_portal_pat 은 검사를 다 지난 뒤 저장한다)이면 포털
+  `POST /auth/pat/revoke-self`(Bearer 그 PAT, 쿠키 · CSRF 없이 — 백엔드가 갈아 끼운 PAT 를 폐기하는 길과 같다)로 곧바로 폐기한다. 저장됐을 수도
+  있는 실패(다른 5xx · 네트워크)는 GET /me 의 jti 로 가른다 — 같으면 성공, 다르면 폐기, 못 읽거나 portal_pat 이 null 이면 두고(등록된 자격을
+  폐기하지 않게) 사람에게 jti 를 대조하라고 말한다. 실패는 `PortalRegisterError` 이고 알림은 거절의 글에 그 처리를 붙인다.
+- 이 브라우저의 쉼 — 등록 단계의 실패 뒤 localStorage `{until, code}`(토큰 · 계정 없음)로 일시 실패 10분 · 사람이 고칠 거절 6시간(백엔드가 게이트웨이
+  교환 실패에 거는 두 쉼) 동안 새 탭이 발급하지 않는다. 버튼 · 스위치 성공이 걷고, 설정은 그동안 '앱을 열면 저절로 받는다' 대신 쉼을 말한다.
+  발급 단계의 실패는 PAT 를 만들지 않아 쉬지 않는다.
+- box.reasons 에 cred_key_invalid 가 있으면 자동으로 받지 않는다(등록은 반드시 422 cred_key_absent 인데 그 전에 새 PAT 가 포털 검증에 나간다).
+  리뷰가 제안한 `secrets_valid` 로는 막지 않았다 — 키 없음(missing_required) · 개발용 폴백(cred_key_dev_fallback)에서도 거짓인데 그때 등록은 되므로
+  dev 박스의 자동 등록이 꺼진다.
+- 쉼은 웹 실패를 서버가 적지 않아 화면이 들고 있는 것이다 — 서버가 웹 실패도 auto.last_error 에 적으면(백엔드에 청할 것 2) 걷는다.
+
+### FE-30. 시험 · 확인 · 남긴 것 · 백엔드에 청할 것
+- 시험 12건을 더해 87건(`pnpm test`). 컴파일 산출물 변이 — 쟁점 1 · 등록부 1 · PAT 6 이 다 잡혔다. `tsc -b && vite build` 통과.
+- jsdom 하네스(스크래치, 리뷰 스크립트와 고친 뒤의 길 스크립트) — 13건 전부의 고친 뒤 동작과 정상 길(같은 몫의 동의 재개 · 폼 그대로의 '그래도
+  동결' · 409 뒤 fresh 한 번 · 500 뒤 저장된 PAT 는 그대로). 실 Chromium(빌드한 dist, API 는 Playwright 경로 가로채기로 흉내 — 서비스 · 프로세스를
+  띄우지 않았다) — 쟁점 행 누르기(백지 아님 · 페이지 오류 0) · 완결 탭 오가기(closure · fresh=1 · closure · closure) · 등록부 상태 저장 본문의
+  target_key.
+- 브라우저로 못 본 것 — 실 백엔드 · 실 포털(revoke-self 를 실제 포털에 보내 보지 않았다 — 포털 코드로 Bearer 만 · CSRF 없음 · 청중 mcp-gateway 를
+  맞췄다), 동의 · 확인 조작들의 실 브라우저 클릭(jsdom 으로 봤다).
+- 백엔드에 청할 것 —
+  1. sameas confirm_key — 병합된 키(status merged)면 거절하거나 merged_into 를 비운다(지금은 confirmed 인데 merged_into 가 남는 행이 된다).
+  2. PUT /me/portal-pat 의 웹 등록 실패도 portal_pat.auto 의 last_error · last_error_kind · last_error_at 에 적기(지금은 게이트웨이 교환 실패만 적는다) —
+     due 판정이 그 쉼을 보면 화면의 브라우저 쉼을 걷는다.
+  3. GET /projects/{id} 의 스냅샷 머리에 degraded_json(목록 전체).
+  4. 키 대장 읽기(FE-14 청할 것 5) — 있으면 확정 확인이 '병합돼 있으면' 대신 지금 상태를 말한다.
+  5. (선택) 다시 토의 표기의 꼴을 하나로 — _keep_verdict 가 비어 있던 쟁점에도 at · round 를 적으면 화면이 길마다 가르지 않아도 된다.

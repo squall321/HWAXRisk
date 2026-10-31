@@ -4,13 +4,37 @@ import { Link } from "react-router-dom";
 import { riskApi } from "../api/risk.api";
 import { useAsync } from "../hooks/useAsync";
 import { CardGrid, SectionCard } from "../components/SectionCard";
+import { BoxReasons } from "../components/BoxReasons";
 import { EmptyBlock, ErrorBanner, LoadingBlock } from "../components/StateBlocks";
 import { Badge, LevelBadge, VerdictBadge } from "../components/Badge";
 import { Banner, Button, Chip, FormField, FormGrid, Input, Select, TabBar } from "../ui/primitives";
 import { DataTable } from "../components/DataTable";
 import type { Column } from "../components/DataTable";
 import { fmtDay, fmtEpoch, fmtPct } from "../format";
-import type { DiffListRow, ProjectCard, ReportListRow, SourceKind, TargetListRow } from "../types";
+import { projectCreateFieldError } from "../api/projectCreate";
+import type { ProjectField } from "../api/projectCreate";
+import {
+  CLASSIFICATION_LABEL,
+  LIFECYCLE_LABEL,
+  ROLE_LABEL,
+  filterCards,
+  homeFieldsAvailable,
+  productRefsBody,
+} from "../lib/projectMeta";
+import type { HomeFilter } from "../lib/projectMeta";
+import { parserGenerationDiffers, parserGenerationNote } from "../lib/compareView";
+import { CLASSIFICATIONS, LIFECYCLES } from "../types";
+import type {
+  Classification,
+  DiffListRow,
+  Lifecycle,
+  ProductRef,
+  ProjectCard,
+  ProjectRole,
+  ReportListRow,
+  SourceKind,
+  TargetListRow,
+} from "../types";
 
 /** 카드에 아이콘처럼 늘어놓는 소스 3종(해석 결과는 스냅샷 kinds 에서만 쓴다). */
 const CARD_KINDS: SourceKind[] = ["mcad", "dyna", "ecad"];
@@ -56,10 +80,12 @@ function ProjectTile({ card }: { card: ProjectCard }) {
     const status = card.sources.find((s) => s.kind === k)?.status ?? "unlinked";
     return status !== "unlinked";
   }).length;
+  // 코퍼스에서 뺀 과제는 흐리게(계획 §8.2.4) — 서버가 그 칸을 줄 때만이다.
+  const excluded = Boolean(card.corpus_excluded);
   return (
     <Link
       to={`/projects/${encodeURIComponent(card.id)}`}
-      className="group flex flex-col gap-3 rounded-lg border border-border bg-card p-4 shadow-sm no-underline transition-all hover:border-primary/50 hover:shadow-md"
+      className={`group flex flex-col gap-3 rounded-lg border border-border bg-card p-4 shadow-sm no-underline transition-all hover:border-primary/50 hover:shadow-md${excluded ? " opacity-60" : ""}`}
     >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
@@ -72,6 +98,28 @@ function ProjectTile({ card }: { card: ProjectCard }) {
         {/* level 은 타깃이 생겨야 정해진다 — 없을 때 '-' 배지를 그리면 '등급이 하이픈' 으로 읽힌다. */}
         {card.level ? <LevelBadge value={card.level} /> : null}
       </div>
+
+      {/* 등급 · 수명 주기 · 내 역할 · 코퍼스 제외 칩 — 서버가 그 칸을 줄 때만 그린다(9bd5f48 은 싣지 않는다). */}
+      {card.classification || card.lifecycle || card.my_role || excluded ? (
+        <div className="flex flex-wrap items-center gap-1">
+          {card.classification ? (
+            <Chip tone={card.classification === "confidential" ? "warn" : "neutral"} title="등급(classification)">
+              {card.classification === "confidential" ? "기밀" : "internal"}
+            </Chip>
+          ) : null}
+          {card.lifecycle ? (
+            <Chip tone={card.lifecycle === "active" ? "ok" : "muted"} title={`수명 주기 ${card.lifecycle}`}>
+              {LIFECYCLE_LABEL[card.lifecycle as Lifecycle] ?? card.lifecycle}
+            </Chip>
+          ) : null}
+          {card.my_role ? (
+            <Chip tone="info" title={`내 역할 ${card.my_role}`}>
+              {ROLE_LABEL[card.my_role as ProjectRole] ?? card.my_role}
+            </Chip>
+          ) : null}
+          {excluded ? <Chip tone="muted">코퍼스 제외</Chip> : null}
+        </div>
+      ) : null}
 
       {/* 소스 — '지금 심사할 수 있나' 의 답이라 맨 위다. */}
       <div className="flex flex-wrap items-center gap-1">
@@ -109,44 +157,66 @@ function ProjectTile({ card }: { card: ProjectCard }) {
 function ProjectForm({ options, onCreated }: { options: ProjectCard[]; onCreated: () => void }) {
   const [code, setCode] = useState("");
   const [name, setName] = useState("");
+  // 등급은 미리 고르지 않는다 — 반출 경계라서 사람이 등록할 때 고른다(서버가 빠진 것을 422 로 거절한다).
+  const [classification, setClassification] = useState<Classification | "">("");
   const [stage, setStage] = useState("");
   const [predecessor, setPredecessor] = useState("");
   const [team, setTeam] = useState("");
   const [group, setGroup] = useState("");
+  // 제품 연결(다중) — 첫 product_code 행이 대표값이 된다(서버). 비우면 보내지 않고 과제는 '제품 연결 없음' 이 된다.
+  const [products, setProducts] = useState<ProductRef[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
+  const [fieldError, setFieldError] = useState<{ field: ProjectField; message: string } | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
   const stageInvalid = stage.trim() !== "" && !STAGE_RE.test(stage.trim());
   const canSubmit =
-    code.trim() !== "" && name.trim() !== "" && team.trim() !== "" && group.trim() !== "" && !stageInvalid && !busy;
+    code.trim() !== "" &&
+    name.trim() !== "" &&
+    classification !== "" &&
+    team.trim() !== "" &&
+    group.trim() !== "" &&
+    !stageInvalid &&
+    !busy;
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
+    // canSubmit 이 등급을 확인했다 — 여기서부터 classification 은 빈 값이 아니다(타입도 그렇게 좁혀진다).
     if (!canSubmit) return;
     setBusy(true);
     setError(null);
+    setFieldError(null);
     setNotice(null);
     try {
       const created = await riskApi.createProject({
         code: code.trim(),
         name: name.trim(),
+        classification,
         stage: stage.trim() === "" ? null : stage.trim(),
         predecessor_project_id: predecessor.trim() === "" ? null : predecessor.trim(),
+        ...(productRefsBody(products) ? { product_refs_json: productRefsBody(products) } : {}),
         adh_scope: { team: team.trim(), group: group.trim() },
       });
       setNotice(`과제 ${created.code} 를 만들었습니다.`);
       setCode("");
       setName("");
+      setClassification("");
       setStage("");
       setPredecessor("");
+      setProducts([]);
       onCreated();
     } catch (err) {
-      setError(err);
+      // 칸에 붙일 수 있는 거절(code 로 가른다)은 그 칸에서 말하고, 나머지는 배너가 말한다.
+      const onField = projectCreateFieldError(err);
+      if (onField) setFieldError(onField);
+      else setError(err);
     } finally {
       setBusy(false);
     }
   }
+
+  const errorOf = (field: ProjectField) => (fieldError?.field === field ? fieldError.message : undefined);
 
   return (
     <form className="mb-4 flex flex-col gap-3" onSubmit={submit}>
@@ -154,11 +224,27 @@ function ProjectForm({ options, onCreated }: { options: ProjectCard[]; onCreated
       {/* 등록 성공은 끼어들어 읽힐 일이 아니다 — status 로 둔다. */}
       {notice ? <Banner tone="info" live="status" title={notice} /> : null}
       <FormGrid>
-        <FormField label="code (≤40)">
+        <FormField label="code (≤40)" error={errorOf("code")}>
           <Input maxLength={40} value={code} onChange={(e) => setCode(e.target.value)} />
         </FormField>
         <FormField label="name (≤200)">
           <Input maxLength={200} value={name} onChange={(e) => setName(e.target.value)} />
+        </FormField>
+        <FormField label="등급" hint="classification · 필수" error={errorOf("classification")}>
+          <Select
+            required
+            value={classification}
+            onChange={(e) => setClassification(e.target.value as Classification | "")}
+          >
+            <option value="" disabled>
+              고르세요
+            </option>
+            {CLASSIFICATIONS.map((c) => (
+              <option key={c} value={c}>
+                {CLASSIFICATION_LABEL[c]}
+              </option>
+            ))}
+          </Select>
         </FormField>
         <FormField
           label="stage (pre · dv · pv · pra · mp + 1/2/3/r)"
@@ -166,7 +252,7 @@ function ProjectForm({ options, onCreated }: { options: ProjectCard[]; onCreated
         >
           <Input value={stage} onChange={(e) => setStage(e.target.value)} />
         </FormField>
-        <FormField label="predecessor_project_id (선택)">
+        <FormField label="predecessor_project_id (선택)" error={errorOf("predecessor")}>
           <Select value={predecessor} onChange={(e) => setPredecessor(e.target.value)}>
             <option value="">없음</option>
             {options.map((p) => (
@@ -183,12 +269,59 @@ function ProjectForm({ options, onCreated }: { options: ProjectCard[]; onCreated
           <Input value={group} onChange={(e) => setGroup(e.target.value)} />
         </FormField>
       </FormGrid>
+      <fieldset className="flex flex-col gap-2 rounded-md border border-border p-3">
+        <legend className="px-1 text-xs font-medium text-muted-foreground">
+          제품 연결 <span className="font-normal opacity-75">product_refs_json · 여럿</span>
+        </legend>
+        {products.length === 0 ? (
+          <p className="m-0 text-sm text-muted-foreground">
+            제품 연결 없음 — 비워 두면 라벨 경로의 제품 일치가 늘 0 이라 자동 확정이 안 됩니다.
+          </p>
+        ) : null}
+        {products.map((row, i) => (
+          <div key={i} className="flex flex-wrap items-end gap-2">
+            <FormField label="종류" hint="kind">
+              <Select
+                value={row.kind}
+                onChange={(e) =>
+                  setProducts((prev) => prev.map((r, j) => (j === i ? { ...r, kind: e.target.value as ProductRef["kind"] } : r)))
+                }
+              >
+                <option value="product_code">product_code — 제품 코드(VOC · 필드 조회 키)</option>
+                <option value="ra_model">ra_model — RA 모델 엔티티</option>
+              </Select>
+            </FormField>
+            <FormField label="값" hint="value" className="min-w-[12rem]">
+              <Input
+                value={row.value}
+                onChange={(e) => setProducts((prev) => prev.map((r, j) => (j === i ? { ...r, value: e.target.value } : r)))}
+              />
+            </FormField>
+            <Button type="button" variant="ghost" size="sm" onClick={() => setProducts((prev) => prev.filter((_, j) => j !== i))}>
+              빼기
+            </Button>
+          </div>
+        ))}
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="self-start"
+          onClick={() => setProducts((prev) => [...prev, { kind: "product_code", value: "" }])}
+        >
+          제품 더하기
+        </Button>
+      </fieldset>
       <div className="flex flex-wrap items-center gap-2">
         <Button type="submit" disabled={!canSubmit}>
           과제 등록
         </Button>
         <span className="text-sm text-muted-foreground">adh_scope 는 자동으로 채우지 않습니다.</span>
       </div>
+      <p className="m-0 text-sm text-muted-foreground">
+        등급은 반출 경계입니다 — 백업 · 내보내기 · 바깥 투영의 등급 태그가 이 값을 따릅니다. 확실하지 않으면 confidential 을
+        고르세요.
+      </p>
     </form>
   );
 }
@@ -198,17 +331,26 @@ export default function RiskHomePage() {
   const projects = useAsync((signal) => riskApi.listProjects({ signal }), []);
   const [formOpen, setFormOpen] = useState(false);
   const [tab, setTab] = useState<HomeTab>("projects");
+  const [filter, setFilter] = useState<HomeFilter>({ lifecycle: "", role: "", includeExcluded: false });
   const cards = projects.data?.projects ?? [];
+  const available = homeFieldsAvailable(cards);
+  const shown = filterCards(cards, filter);
 
   return (
     <>
       <ErrorBanner error={me.error} onRetry={me.reload} />
       {me.data && me.data.box.secrets_valid === false ? (
-        <Banner title="이 박스의 자격이 없습니다.">
-          <Link to="/settings" className="text-sm underline underline-offset-4">
-            설정
-          </Link>
-        </Banner>
+        <>
+          {/* 막는 까닭만 — 서버가 고른 글과 고칠 길 그대로(선택 키 없음 같은 정보는 설정 화면이 보인다). */}
+          <BoxReasons reasons={me.data.box.reasons} only="blocking" />
+          <p className="m-0 text-sm text-muted-foreground">
+            이 박스의 필수 자격이 갖춰지지 않았습니다 —{" "}
+            <Link to="/settings" className="underline underline-offset-4">
+              설정
+            </Link>
+            에서 자세히 봅니다.
+          </p>
+        </>
       ) : null}
 
       <TabBar tabs={HOME_TABS} value={tab} onChange={setTab} label="홈 탭" />
@@ -242,11 +384,62 @@ export default function RiskHomePage() {
             />
           ) : null}
           {cards.length > 0 ? (
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <Select
+                className="w-auto min-w-[9rem]"
+                aria-label="수명 주기 거르기"
+                value={filter.lifecycle}
+                disabled={!available.lifecycle}
+                onChange={(e) => setFilter((f) => ({ ...f, lifecycle: e.target.value as Lifecycle | "" }))}
+              >
+                <option value="">수명 주기 전체</option>
+                {LIFECYCLES.map((l) => (
+                  <option key={l} value={l}>
+                    {LIFECYCLE_LABEL[l]} {l}
+                  </option>
+                ))}
+              </Select>
+              <Select
+                className="w-auto min-w-[9rem]"
+                aria-label="내 역할 거르기"
+                value={filter.role}
+                disabled={!available.role}
+                onChange={(e) => setFilter((f) => ({ ...f, role: e.target.value as ProjectRole | "" }))}
+              >
+                <option value="">내 역할 전체</option>
+                {(["owner", "editor", "viewer"] as ProjectRole[]).map((r) => (
+                  <option key={r} value={r}>
+                    {ROLE_LABEL[r]} {r}
+                  </option>
+                ))}
+              </Select>
+              <label className="flex flex-wrap items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={filter.includeExcluded}
+                  disabled={!available.excluded}
+                  onChange={(e) => setFilter((f) => ({ ...f, includeExcluded: e.target.checked }))}
+                />
+                코퍼스 제외 포함
+              </label>
+              <span className="text-sm text-muted-foreground">
+                {shown.length} / {cards.length} 개
+              </span>
+              {!available.lifecycle && !available.role && !available.excluded ? (
+                <span className="text-xs text-muted-foreground">
+                  이 서버의 과제 목록은 등급 · 수명 주기 · 내 역할 · 코퍼스 제외를 싣지 않아 거름이 잠깁니다.
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+          {shown.length > 0 ? (
             <CardGrid>
-              {cards.map((card) => (
+              {shown.map((card) => (
                 <ProjectTile key={card.id} card={card} />
               ))}
             </CardGrid>
+          ) : cards.length > 0 ? (
+            <EmptyBlock title="거름에 맞는 과제가 없습니다." />
           ) : null}
         </SectionCard>
       ) : null}
@@ -271,13 +464,20 @@ function DiffsTab() {
       header: "상태",
       nowrap: true,
       cell: (d) =>
-        d.blocked ? (
-          <Badge tone="bad">차단 {d.gates_failed.join("·")}</Badge>
-        ) : d.summary_status === "lint_failed" ? (
-          <Badge tone="warn">요약 린트 실패</Badge>
-        ) : (
-          <Badge tone="ok">열람 가능</Badge>
-        ),
+        <span className="inline-flex flex-wrap items-center gap-1">
+          {d.blocked ? (
+            <Badge tone="bad">차단 {d.gates_failed.join("·")}</Badge>
+          ) : d.summary_status === "lint_failed" ? (
+            <Badge tone="warn">요약 린트 실패</Badge>
+          ) : (
+            <Badge tone="ok">열람 가능</Badge>
+          )}
+          {parserGenerationDiffers(d.comparability) ? (
+            <Badge tone="warn" title={parserGenerationNote(d.comparability)}>
+              파서 세대 다름
+            </Badge>
+          ) : null}
+        </span>,
     },
     {
       key: "pair",
@@ -406,9 +606,9 @@ function ReportsTab() {
       nowrap: true,
       cell: (r) =>
         // `ra_state: string | null` — null 은 서버가 '아니다' 라고 한 게 아니라 **아직 모르는** 것이다.
-        // 0 이나 '-' 로 그리면 '반영 안 됨' 이라는 없는 판정이 생긴다.
+        // 0 이나 '-' 로 그리면 '반영 안 됨' 이라는 없는 판정이 생긴다. 반영된 값은 `done` 이다(ra_client — 전에 'synced' 를 찾았다).
         r.ra_state ? (
-          <Badge tone={r.ra_state === "synced" ? "ok" : "warn"}>{r.ra_state}</Badge>
+          <Badge tone={r.ra_state === "done" ? "ok" : "warn"}>{r.ra_state}</Badge>
         ) : (
           <span className="text-muted-foreground">모름</span>
         ),

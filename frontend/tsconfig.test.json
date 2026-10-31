@@ -1,0 +1,51 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "CommonJS",
+    "moduleResolution": "node10",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "strict": true,
+    "skipLibCheck": true,
+    "isolatedModules": true,
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "node_modules/.cache/hwax-risk-tests",
+    "jsx": "react-jsx",
+    "esModuleInterop": true
+  },
+  "files": [
+    "src/api/panelJob.ts",
+    "src/api/autoPortalPat.ts",
+    "src/api/projectCreate.ts",
+    "src/api/patErrors.ts",
+    "src/api/ecadBoard.ts",
+    "src/lib/capture.ts",
+    "src/lib/snapshotView.ts",
+    "src/lib/compareView.ts",
+    "src/lib/targetView.ts",
+    "src/lib/projectMeta.ts",
+    "src/components/Badge.tsx",
+    "src/components/BoxReasons.tsx",
+    "src/components/GateBanner.tsx",
+    "src/components/ProjectMetaCard.tsx",
+    "src/components/ProjectMembersCard.tsx",
+    "src/components/EcadBoardCard.tsx",
+    "src/components/JobSignals.tsx",
+    "src/contract/serverSamples.ts",
+    "src/api/reviewErrors.ts",
+    "src/lib/reviewView.ts",
+    "src/lib/cellView.ts",
+    "src/lib/issueView.ts",
+    "src/lib/closureView.ts",
+    "src/lib/reportView.ts",
+    "src/components/MarkdownLines.tsx",
+    "src/components/CellsHead.tsx",
+    "src/components/ReviewBoard.tsx",
+    "src/components/RegistryCard.tsx",
+    "src/components/IssuesCard.tsx"
+  ]
+}
