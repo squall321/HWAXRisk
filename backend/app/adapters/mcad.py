@@ -511,8 +511,17 @@ class McadAdapter(SourceAdapter):
             if isinstance(graph.get("counts"), Mapping):
                 graph_counts = _norm_counts(graph["counts"])
         # 소스가 truncated 플래그를 주지 않으므로 counts 합과 수신 행 수로 판정한다(recon §4 4항).
+        # 잘렸으면 kind 마다 못 받은 수를 stats.interfaces_truncated{kind: n} 에 남긴다(plan §2.5.1) — 쌍 비교가 그 kind 의 계면
+        # 변화를 truncated 로 빼야 잘린 쪽에서 빠진 행이 '간섭이 사라졌다' 는 가짜 사건이 되지 않는다(diff._apply_truncation).
+        iface_truncated: dict[str, int] = {}
         if sum(graph_counts.values()) > len(iface_rows):
             degraded.add("interfaces_truncated")
+            received = {kind: 0 for kind in IFACE_KINDS}
+            for row in iface_rows:
+                if str(row.get("kind") or "") in received:
+                    received[str(row["kind"])] += 1
+            iface_truncated = {kind: graph_counts[kind] - received[kind]
+                               for kind in IFACE_KINDS if graph_counts[kind] > received[kind]}
 
         tol_hash, tol_keys = _tol_hash(tol_config, job_params)
         if tol_hash is None:
@@ -579,7 +588,7 @@ class McadAdapter(SourceAdapter):
             "tol_config_hash": tol_hash,
             "tol_known_keys": tol_keys,
             "scope": dict(scope) if isinstance(scope, Mapping) else None,
-            "stats": _stats(tree, mcp_tree, nodes, len(iface_rows), orphan_n, graph_counts),
+            "stats": _stats(tree, mcp_tree, nodes, len(iface_rows), orphan_n, graph_counts, iface_truncated),
             # 소스 앱 버전은 ir_hash 입력이 아니다 — 쌍의 comparability.app_version_parity 가 이 값을 본다(§2.2).
             "app_version": app_version,
             "degraded": sorted(degraded),
@@ -890,8 +899,8 @@ def _part_of_edges(nodes: Sequence[Mapping[str, Any]]) -> list[dict]:
 
 def _stats(tree: Mapping[str, Any] | None, mcp_tree: Mapping[str, Any] | None,
            nodes: Sequence[Mapping[str, Any]], interfaces: int, orphans: int,
-           counts: Mapping[str, int]) -> dict:
-    """봉투 stats — 카운트만 담고 ir_hash 에서 빠진다(plan §2.2)."""
+           counts: Mapping[str, int], truncated: Mapping[str, int] | None = None) -> dict:
+    """봉투 stats — 카운트만 담고 ir_hash 에서 빠진다(plan §2.2). `interfaces_truncated` 는 잘린 kind 만의 못 받은 수다(안 잘렸으면 {})."""
     summary = ((tree or {}).get("summary") if isinstance((tree or {}).get("summary"), Mapping)
                else (mcp_tree or {}).get("summary"))
     summary = summary if isinstance(summary, Mapping) else {}
@@ -906,4 +915,5 @@ def _stats(tree: Mapping[str, Any] | None, mcp_tree: Mapping[str, Any] | None,
         "interfaces": interfaces,
         "orphans": orphans,
         "interface_counts": dict(counts),
+        "interfaces_truncated": dict(sorted((truncated or {}).items())),
     }

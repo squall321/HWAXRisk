@@ -30,8 +30,10 @@ DIFF_VERSION = "1.0"
 # §3.3.6 제외 사유 어휘. 제외된 항목은 diff_json 에 수치와 함께 남고 의미 이벤트만 만들지 않는다.
 EXCLUDED_REASONS: tuple[str, ...] = (
     "tol_differs", "tol_unknown", "result_kind_differs", "sim_params_differ", "unit_scale",
-    "partial_scope", "suspect_coords", "null_one_side", "sameas_pending", "bridge_stale",
+    "partial_scope", "suspect_coords", "null_one_side", "sameas_pending", "bridge_stale", "truncated",
 )
+# 소스가 행 상한에서 자를 수 있는 계면 kind(StepForge list_interfaces · REST /interfaces — plan §2.5.1 · §2.13.3).
+TRUNCATABLE_KINDS: tuple[str, ...] = ("tied", "touching", "clearance", "interference")
 
 # §2.4 kind 강도 순위(StepForge compare_interfaces 규약). geometric 은 touching 과 같은 1.
 RANK: dict[str, int] = {"interference": 3, "tied": 2, "touching": 1, "geometric": 1, "clearance": 0}
@@ -198,6 +200,47 @@ def _apply_ecad_scope(comp: Mapping[str, Any], structural: dict, parametric: dic
         for item in parametric.get(name) or ():
             if item.get("dn") in ecad_dns and not item.get("excluded_reason"):
                 item["excluded_reason"] = reason
+
+
+def _truncated_kinds(ir: Mapping[str, Any]) -> set[str]:
+    """그 스냅샷에서 목록이 잘린 계면 kind — mcad `stats.interfaces_truncated{kind: n}` 의 n > 0 인 kind(plan §2.5.1).
+
+    종류별 수가 없는 옛 캡처(degraded 에 `interfaces_truncated` 만 있다)는 어느 kind 가 잘렸는지 모르므로 네 kind 전부다 —
+    모르는 것을 '안 잘렸다' 로 읽으면 잘린 쪽에서 없어진 간섭이 '해소' 사건이 된다."""
+    mcad = _source(ir, "mcad") or {}
+    by_kind = (mcad.get("stats") or {}).get("interfaces_truncated")
+    known = {str(k) for k, n in by_kind.items()
+             if isinstance(n, int) and not isinstance(n, bool) and n > 0} if isinstance(by_kind, Mapping) else set()
+    if not known and "interfaces_truncated" in (mcad.get("degraded") or ()):
+        return set(TRUNCATABLE_KINDS)
+    return known
+
+
+def _apply_truncation(kinds: set[str], structural: dict, parametric: dict,
+                      base_edges: Sequence[Mapping[str, Any]], target_edges: Sequence[Mapping[str, Any]]) -> None:
+    """쌍의 한쪽이라도 목록이 잘린 kind 의 엣지 변경 · 파라메트릭 delta 에 `excluded_reason='truncated'`(plan §2.5.1 · §3.3.6).
+
+    잘린 쪽에는 그 kind 의 행이 일부만 있어 빠진 행이 '간섭이 사라졌다'(iface.removed · interference_cleared) 같은 가짜 사건이 된다.
+    항목은 수치째 diff_json 에 남고 의미 이벤트만 만들지 않는다 — 의미층보다 먼저 붙인다. 다른 사유가 먼저 붙은 항목은 그대로 둔다.
+    조립 단위 롤업의 엣지 수는 잘린 행이 빠진 채 세므로(어느 단위의 행이 빠졌는지 모른다) 수가 움직인 행을 함께 뺀다."""
+    if not kinds:
+        return
+    for change in structural.get("edge_changes") or ():
+        if change.get("kind_family") == "iface" and {change.get("kind_from"), change.get("kind_to")} & kinds \
+                and not change.get("excluded_reason"):
+            change["excluded_reason"] = "truncated"
+    base_kind = {str(e.get("eid")): str(e.get("kind") or "") for e in base_edges}
+    target_kind = {str(e.get("eid")): str(e.get("kind") or "") for e in target_edges}
+    for item in parametric.get("edge_params") or ():
+        if item.get("kind_family") != "iface" or item.get("excluded_reason"):
+            continue
+        if {base_kind.get(str(item.get("eid_base"))), target_kind.get(str(item.get("eid_target")))} & kinds:
+            item["excluded_reason"] = "truncated"
+    for item in parametric.get("rollup_delta") or ():
+        moved = any((item.get(field) or {}).get("before") != (item.get(field) or {}).get("after")
+                    for field in ("edges_internal", "edges_external"))
+        if moved and not item.get("excluded_reason"):
+            item["excluded_reason"] = "truncated"
 
 
 def _apply_fuzzy_caveat(semantic: dict) -> None:
@@ -631,6 +674,8 @@ def compute_diff(base_ir: Mapping[str, Any], target_ir: Mapping[str, Any], *,
                              base_ir, target_ir, comp, dim_tols or {}, g5_fail)
     ecad_dns = _ecad_dns(base_by, target_by, dn_of)
     _apply_ecad_scope(comp, structural, parametric, ecad_dns)
+    _apply_truncation(_truncated_kinds(base_ir) | _truncated_kinds(target_ir), structural, parametric,
+                      base_edges, target_edges)
     semantic = _semantic(structural, parametric, corr, dn_of, ckey_of, method_of,
                          base_by, target_by, comp, g2_fail, g4_fail)
 
@@ -1558,6 +1603,8 @@ def _semantic(structural, parametric, corr, dn_of, ckey_of, method_of, base_by, 
                                  text=f"{item['name']} 미측정 (null_reason={item.get('null_reason')})"))
 
     for item in parametric["rollup_delta"]:
+        if item.get("excluded_reason"):          # 목록이 잘린 쌍의 엣지 수(truncated)는 사건이 아니다
+            continue
         internal = item["edges_internal"]
         external = item["edges_external"]
 

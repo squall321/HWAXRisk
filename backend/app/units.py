@@ -71,11 +71,13 @@ UNIT_KINDS: tuple[str, ...] = ("bundle", "boundary", "global", "excluded")
 LAYERS: tuple[str, ...] = ("semantic", "structural", "parametric")
 
 # 제외 사유의 처리(설계서 3.4.1 의 권고값). 목록에 없는 사유는 '검토에 싣는다' 쪽(caveat)으로 떨어진다 —
-# diff 는 EXCLUDED_REASONS 10종 밖의 source_drift·capture_partial 도 실제로 붙인다(사유 어휘를 닫힌 집합으로 믿지 않는다).
+# diff 는 EXCLUDED_REASONS 밖의 source_drift·capture_partial 도 실제로 붙인다(사유 어휘를 닫힌 집합으로 믿지 않는다).
+# truncated(계면 목록이 잘린 kind, 2026-10-31)는 capture_partial 과 같은 '캡처가 깨져 생긴 겉보기 차이' 라 검토에 싣지 않는다 —
+# 단서 줄로 실으면 잘린 쪽에서 빠진 간섭이 '사라졌다' 는 줄로 셀에 간다.
 EXCLUDED_POLICY: dict[str, tuple[str, ...]] = {
     "caveat": ("tol_unknown", "tol_differs", "null_one_side", "result_kind_differs", "sim_params_differ"),
-    "none": ("partial_scope", "capture_partial", "source_drift", "not_design_relevant", "incomparable_same",
-             "null_both"),
+    "none": ("partial_scope", "capture_partial", "source_drift", "truncated", "not_design_relevant",
+             "incomparable_same", "null_both"),
 }
 _NOT_DESIGN = ("not_design_relevant", "status_changed")
 

@@ -801,6 +801,41 @@ def test_mcad_detects_truncation_by_interface_graph_counts():
     assert "interfaces_truncated" in degraded_only["source"]["degraded"]
     # counts 는 0 인 kind 키가 생략돼 와도 4키 고정으로 정규화한다.
     assert set(result["source"]["stats"]["interface_counts"]) == set(mcad.IFACE_KINDS)
+    # 잘린 kind 의 못 받은 수가 남는다 — 쌍 비교가 그 kind 의 계면 변화를 truncated 로 뺀다(plan §2.5.1).
+    assert result["source"]["stats"]["interfaces_truncated"] == {"tied": 1}
+    assert degraded_only["source"]["stats"]["interfaces_truncated"] == {"tied": 1}
+
+
+def _iface_row(kind: str, n: int) -> dict:
+    return dict(IFACE_TIED["interfaces"][0], kind=kind, id=100 + n, note=f"{kind} {n}")
+
+
+def test_mcad_counts_what_it_missed_per_kind_on_the_rest_channel():
+    """REST 한 번(limit 5000)이 kind 를 섞어 잘라도 kind 마다 못 받은 수를 센다 — 받은 행 수 합이 아니라 kind 별 대조다."""
+    counts = {"tied": 2, "interference": 3, "clearance": 1}
+    rows = [_iface_row("tied", 0), _iface_row("tied", 1), _iface_row("interference", 2), _iface_row("clearance", 3)]
+    graph = dict(GRAPH_JSON, counts=counts)
+    routes = dict(REST_ROUTES, **{f"{BASE}/interfaces": {"counts": counts, "interfaces": rows},
+                                  f"{BASE}/artifacts/graph/": graph})
+    result, _ = _capture_mcad(routes=routes)
+    stats = result["source"]["stats"]
+    assert "interfaces_truncated" in result["source"]["degraded"]
+    assert stats["interfaces_truncated"] == {"interference": 2}
+    assert stats["interfaces"] == 4 and sum(stats["interface_counts"].values()) == 6
+
+
+def test_mcad_counts_what_it_missed_per_kind_on_the_mcp_fallback():
+    """MCP 폴백(kind 마다 limit 500)은 interface_graph 의 counts 가 기준이다 — 받은 kind 의 행만 그 kind 로 센다."""
+    graph = dict(IFACE_GRAPH, counts={"tied": 1, "touching": 0, "clearance": 0, "interference": 4})
+    result, _ = _capture_mcad(tools=dict(MCP_TOOLS_FULL, interface_graph=graph), rest_token=None)
+    assert result["source"]["stats"]["interfaces_truncated"] == {"interference": 4}
+    assert "interfaces_truncated" in result["source"]["degraded"]
+
+
+def test_mcad_reports_no_truncated_kind_when_nothing_was_cut():
+    result, _ = _capture_mcad()
+    assert result["source"]["stats"]["interfaces_truncated"] == {}
+    assert "interfaces_truncated" not in result["source"]["degraded"]
 
 
 def test_mcad_asks_for_every_part_and_flags_a_short_list():
