@@ -355,6 +355,8 @@
       (한쪽에만 ECAD 가 있는 비교는 partial_scope 로 정했다 — EC-17)
 - [ ] 화면 — 409 `model_too_large` 의 detail `leaf_mcad` · `leaf_ecad` 를 보이고(보드만 붙은 과제도 부품 1,500 개를 넘으면 든다),
       allow_large 확인으로 잇는다(화면 세션 몫)
+- [x] 사용자 결정 10-31 셋의 시험 — 새 시험 30(test_ecad_person_pat 24 · test_ecad_adapter 6) · 변이 23/23 · 전체 3,504 통과 · xfail 4 ·
+      실패 0(EC-30)
 - [ ] 화면 — ECAD 찾기 · 붙이기의 409 `ecad_pat_absent`(그 사람의 포털 PAT 가 없다 · 곧 끝난다 — detail.fix `portal_pat`)를 설정 화면의
       PAT 등록으로 잇는다. 종전 코드 `ecad_credential_absent` 는 없어졌다(화면 세션 몫)
 - [ ] 1단계 칸의 쌍 비교(층 두께 · 재료 · 품번 · 패키지 · 핀 수 · 높이)와 거르기 표의 행 — 표 승인과 함께. 그때 diff 대상의 ECAD deferred(EC-18)를 걷는다
