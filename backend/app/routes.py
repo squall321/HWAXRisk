@@ -289,10 +289,15 @@ def _require_user(ident: identity.Identity) -> str:
 
 def _audit(store: Any, owner_sub: str, *, scope: str, subject_id: str, action: str,
            project_id: str | None = None, before: Any = None, after: Any = None,
-           reason: str | None = None, channel: str = "rest", actor_verified: bool = True, actor: str | None = None) -> str:
+           reason: str | None = None, channel: str = "rest", actor_verified: bool = True, actor: str | None = None,
+           via: str | None = None) -> str:
     """rr_audit 1행(append-only, 사람 행위 한정 — plan §0.6) — 그 행의 id. 열람(GET)은 남기지 않는다. MCP 길의 행위자는
-    `actor_verified=False`(§6.11 — 게이트웨이가 넘긴 신원이다). 행위자는 `owner_sub` 와 같은 사람이다 — `actor` 를 주면 owner_sub 는 그
-    행위가 바꾼 원장의 주인이다(맨 클러스터 열쇠 자리처럼 대상 감사가 원장 주인으로 고르는 행 — rekey 의 감사 행과 같은 꼴, MB-14)."""
+    `actor_verified=False`(§6.11 — 게이트웨이가 넘긴 신원이다).
+    행위자는 `owner_sub` 와 같은 사람이다 — `actor` 를 주면 owner_sub 는 그 행위가 바꾼 원장의 주인이다(맨 클러스터 열쇠 자리처럼 대상
+    감사가 원장 주인으로 고르는 행 — rekey 의 감사 행과 같은 꼴, MB-14). `via`(`_admin_via` — "admin")는 그 쓰기가 관리자 우회로만 들었다는
+    표시이고 after 의 `via` 칸에 싣는다(DDL 그대로 — 조회는 그 칸을 entry.via 로 올린다, `_audit_entry`)."""
+    if via is not None:
+        after = {**(after or {}), AUDIT_VIA_KEY: via}
     audit_id = new_uuid()
     store.execute(
         "INSERT INTO rr_audit(id, owner_sub, actor, actor_verified, channel, scope, subject_id, project_id,"
@@ -1278,6 +1283,12 @@ def _panel_writer(panel_id: str, ident: identity.Identity) -> str:
     return _writer(row["owner_sub"] if row is not None else None, row["project_id"] if row is not None else None, ident)
 
 
+def _snapshot_project(snapshot_id: str) -> str | None:
+    """스냅샷의 과제 — 없는 스냅샷이면 None."""
+    row = get_store().query_one("SELECT project_id FROM rr_snapshots WHERE id = ?", (snapshot_id,))
+    return row["project_id"] if row is not None else None
+
+
 def _diff_reader(diff_id: str, email: str, *, admin: bool = False) -> str:
     """비교는 두 과제(base · target)를 다 읽는 사람이 연다(MCP mcp_scope_owner 와 같은 규칙 — 한쪽만 읽는 사람에게 다른 쪽 내용을 싣지
     않는다). 행 주인은 두 과제 가운데 하나의 주인이어야 한다 — 비교는 이양이 옮기지 않아(TRANSFER_PROJECT_TABLES 밖) 한쪽 과제를 넘긴
@@ -1534,6 +1545,26 @@ def _is_admin(ident: identity.Identity) -> bool:
     return bool(ident.role) and ident.role in tuple(config.settings.risk_admin_roles)
 
 
+# ---------------------------------------------------------------- 관리자 접근 감사(사용자 결정 11-01 '쓰기 표시 + 읽기 하루 한 줄' — 포털 plan
+# §5.2.1 '그 접근도 rr_audit 에 남는다', HWAXRisk context-notes AA-1 ~)
+ADMIN_VIA = "admin"                  # 쓰기 감사 행의 표시 값 — 그 쓰기는 관리자 우회로만 들었다
+AUDIT_VIA_KEY = "via"                # 그 값이 앉는 after 의 칸 — rr_audit 에 표시 열이 없고 DDL 은 나간 판이라 그대로 둔다
+
+
+def _admin_via(ident: identity.Identity, project_id: Any, need: str = "editor") -> str | None:
+    """쓰기 감사 행의 관리자 표시 — 부른 사람이 관리자(risk_admin_roles)이고 그 과제에서의 역할(`project_role` — 구성원이 아니면 없음)이
+    `need` 에 못 미치면 "admin", 아니면 None.
+
+    쓰기 문(`_writer` · `_require_owner` · `_target_editor` · `_closure_owner` · `_project_editor` …)이 관리자를 들인 것이 역할이 아니라
+    관리자이기 때문일 때만 싣는다 — 구성원으로도 할 수 있는 쓰기(편집자의 편집자 쓰기 · 주인의 주인 쓰기)에는 싣지 않는다. `need` 는 그 쓰기의
+    문이 요구한 역할이다(편집자 쓰기 editor · 주인 쓰기 owner). 쓰기가 역할을 바꾸기 전(문을 지난 곳)에 부른다 — 이양 · 멤버 고치기가 제
+    역할을 바꾼 뒤에 재면 우회가 가려진다."""
+    if not project_id or not _is_admin(ident):
+        return None
+    role = project_role(str(project_id), str(ident.email or ""))
+    return ADMIN_VIA if ROLE_RANK.get(role or "", 0) < ROLE_RANK[need] else None
+
+
 def _require_owner(project_id: str, ident: identity.Identity) -> str:
     """owner 전용 경로 — admin role 은 owner 와 동등하게 통과한다."""
     email = _require_user(ident)
@@ -1576,6 +1607,7 @@ def put_members(project_id: str, body: MembersBody,
                 ident: identity.Identity = Depends(identity.current)) -> dict:
     """멤버 배열 UPSERT·삭제(owner 전용). owner 행은 여기서 바뀌지 않는다 — 이양(`/transfer`)만이 바꾼다."""
     owner_sub = _require_owner(project_id, ident)
+    via = _admin_via(ident, project_id, "owner")       # 멤버를 고치기 전의 역할로 — 관리자 우회 표시(사용자 결정 11-01)
     store = get_store()
     project = store.query_one("SELECT owner_sub, status FROM rr_projects WHERE id = ?", (project_id,))
     if project is None:
@@ -1605,7 +1637,7 @@ def put_members(project_id: str, body: MembersBody,
                           (project_id, email))
         after = _members_of(project_id)
         _audit(store, owner_sub, scope="project", subject_id=project_id, project_id=project_id,
-               action="member.put", before={"members": before}, after={"members": after})
+               action="member.put", before={"members": before}, after={"members": after}, via=via)
     return {"project_id": project_id, "members": after}
 
 
@@ -1620,6 +1652,7 @@ def transfer_project(project_id: str, body: TransferBody,
     """소유권 이양 — 과제 행·멤버 두 행·하위 표 owner_sub 를 한 트랜잭션에서 옮긴다(plan §5.2.1). 이 과제에 걸린 비교 · 대응 원장 행은
     모든 쪽 과제가 받는 사람에게 모일 때 함께 옮긴다(`_follow_full_transfer` — 사용자 결정 10-31, MB-15)."""
     actor = _require_owner(project_id, ident)
+    via = _admin_via(ident, project_id, "owner")       # 넘기기 전의 역할로(제게 넘기는 관리자도 우회다)
     store = get_store()
     project = store.query_one("SELECT owner_sub, status FROM rr_projects WHERE id = ?", (project_id,))
     if project is None:
@@ -1664,7 +1697,7 @@ def transfer_project(project_id: str, body: TransferBody,
         ra_ops = ra_client.queue_retracts(store, project_id, "owner", by=actor)
         _audit(store, actor, scope="project", subject_id=project_id, project_id=project_id,
                action="project.transfer", before={"owner_sub": old_owner}, after={"owner_sub": to_email},
-               reason=body.reason)
+               reason=body.reason, via=via)
         # 두 과제를 다 받은 사람에게 비교 · 대응 원장이 따라간다(MB-15) — 위 감사 행이 이번에 넘겨 준 사람을 앞 주인으로 세운 뒤다.
         rows_updated.update(_follow_full_transfer(store, project_id, to_email))
     return {"from": old_owner, "to": to_email, "rows_updated": {"tables": rows_updated}, "ra_retract_ops": ra_ops}
@@ -1674,7 +1707,8 @@ def transfer_project(project_id: str, body: TransferBody,
 def get_project_audit(project_id: str, action: str | None = None, since: int = 0,
                       until: int | None = None, limit: int = 100, offset: int = 0,
                       ident: identity.Identity = Depends(identity.current)) -> dict:
-    """사람 행위 감사 로그 조회(viewer 이상). 자동 전이는 애초에 rr_audit 에 들어가지 않는다(plan §0.6)."""
+    """사람 행위 감사 로그 조회(viewer 이상). 자동 전이는 애초에 rr_audit 에 들어가지 않는다(plan §0.6). 줄마다 `via` 는 쓰기의 관리자
+    표시다(`_audit_entry` — 사용자 결정 11-01)."""
     email = _require_user(ident)
     if not _is_admin(ident):
         require_role(project_id, email, "viewer")
@@ -1693,15 +1727,8 @@ def get_project_audit(project_id: str, action: str | None = None, since: int = 0
         "SELECT id, actor, actor_verified, channel, scope, subject_id, project_id, action, before_json,"
         " after_json, reason, at FROM", "SELECT COUNT(*) AS n FROM", 1), tuple(params))
     rows = get_store().query(sql + " ORDER BY at DESC, id DESC LIMIT ? OFFSET ?", (*params, limit, offset))
-    entries = []
-    for row in rows:
-        item = dict(row)
-        item["before"] = _loads(item.pop("before_json"), {})
-        item["after"] = _loads(item.pop("after_json"), {})
-        item["actor_verified"] = bool(item["actor_verified"])
-        entries.append(item)
     return {"project_id": project_id, "total": int(total["n"] or 0), "limit": limit, "offset": offset,
-            "entries": entries}
+            "entries": [_audit_entry(row) for row in rows]}
 
 
 TARGET_AUDIT_LIMIT_MAX = 200
@@ -1737,13 +1764,20 @@ def get_target_audit(target_key: str, action: str | None = None, since: int = 0,
     rows = store.query("SELECT id, actor, actor_verified, channel, scope, subject_id, project_id, action, before_json,"
                        " after_json, reason, at" + where + " ORDER BY at DESC, id DESC LIMIT ? OFFSET ?",
                        (*params, limit, offset))
-    entries = []
-    for item in (dict(r) for r in rows):
-        item["before"] = _loads(item.pop("before_json"), {})
-        item["after"] = _loads(item.pop("after_json"), {})
-        item["actor_verified"] = bool(item["actor_verified"])
-        entries.append(item)
-    return {"target_key": target_key, "total": int(total["n"] or 0), "limit": limit, "offset": offset, "entries": entries}
+    return {"target_key": target_key, "total": int(total["n"] or 0), "limit": limit, "offset": offset,
+            "entries": [_audit_entry(row) for row in rows]}
+
+
+def _audit_entry(row: Any) -> dict:
+    """감사 조회(과제 · 대상)의 한 줄 — 앞 · 뒤를 풀어 싣고, 쓰기의 관리자 표시(after 의 via 칸 — `_audit`)는 `via` 로 올린다(없으면
+    null). 앞 · 뒤에는 그 조작의 값만 남는다."""
+    item = dict(row)
+    item["before"] = _loads(item.pop("before_json"), {})
+    after = _loads(item.pop("after_json"), {})
+    item["via"] = after.pop(AUDIT_VIA_KEY, None) if isinstance(after, dict) else None
+    item["after"] = after
+    item["actor_verified"] = bool(item["actor_verified"])
+    return item
 
 
 class PurgeBody(BaseModel):
@@ -1849,6 +1883,7 @@ def purge_project(project_id: str, body: PurgeBody,
     dangling 이 아니라 '폐기된 과제 — 원문 없음' 으로 해석된다.
     """
     actor = _require_owner(project_id, ident)
+    via = _admin_via(ident, project_id, "owner")
     store = get_store()
     project = store.query_one("SELECT code, status FROM rr_projects WHERE id = ?", (project_id,))
     if project is None:
@@ -1918,7 +1953,7 @@ def purge_project(project_id: str, body: PurgeBody,
                       (canonical_json(report), project_id))
         _audit(store, actor, scope="project", subject_id=project_id, project_id=project_id,
                action="project.purge", before={"status": project["status"]}, after={"status": "purged"},
-               reason=body.reason)
+               reason=body.reason, via=via)
     return {"job_id": project_id, "status": "purged", "purge_report": report}
 
 
@@ -2571,6 +2606,7 @@ def put_requirement(requirement_id: str, body: RequirementDecision,
         if exc.http_status != 404:
             raise
         raise missing from None                     # 남의 요구는 없는 요구와 같다 — 과제 id 를 흘리지 않는다(남 숨김 훑기)
+    via = _admin_via(ident, before["project_id"])
     with store.tx():
         updated = requirements.decide_requirement(
             store, requirement_id, status=body.status, waive_reason=body.waive_reason, actor_sub=actor)
@@ -2578,7 +2614,7 @@ def put_requirement(requirement_id: str, body: RequirementDecision,
                action="requirement.decide",
                before={"status": before["status"], "waive_reason": before["waive_reason"]},
                after={"status": updated["status"], "waive_reason": updated["waive_reason"]},
-               reason=body.waive_reason)
+               reason=body.waive_reason, via=via)
         state_module.recompute_project_states(store, before["project_id"])
     return updated
 
@@ -2626,6 +2662,7 @@ def put_iface_ledger(project_id: str, body: list[LedgerItem],
     actor = _require_user(ident)
     owner_sub = _project_writer(project_id, ident)
     _project_row(project_id, owner_sub)
+    via = _admin_via(ident, project_id)               # 키 전파 감사 행의 관리자 우회 표시(사용자 결정 11-01)
     now = now_epoch()
     store = get_store()
     with store.tx():
@@ -2641,7 +2678,7 @@ def put_iface_ledger(project_id: str, body: list[LedgerItem],
                 " decided_by=excluded.decided_by, decided_at=excluded.decided_at",
                 (project_id, item.pair_key, owner_sub, item.kind_override, item.status, item.note, actor, now))
             if prev is not None and prev["status"] in ("confirmed", "manual") and item.status == "rejected":
-                rekey.run(store, op="iface_ledger_reject", owner_sub=owner_sub, actor=actor, at=now,
+                rekey.run(store, op="iface_ledger_reject", owner_sub=owner_sub, actor=actor, at=now, via=via,
                           subject_id=f"ledger:{project_id}:{item.pair_key}", project_id=project_id,
                           ledger={"project_id": project_id, "pair_key": item.pair_key, "before": prev["status"]})
     rows = store.query(
@@ -2810,6 +2847,7 @@ def post_gate_ack(snapshot_id: str, gate: str, body: GateAckBody,
         raise AppError("reason_required", "ack 에는 사유가 필요합니다(≤300자).", 422)
     owner_sub = _snapshot_writer(snapshot_id, ident)
     gates, record = _gate_state(snapshot_id, gate, owner_sub)
+    via = _admin_via(ident, _snapshot_project(snapshot_id))
     current_hash = state_module.gates_hash(gates)
     if body.gates_hash and body.gates_hash != current_hash:
         raise AppError("gates_hash_stale", "그 사이 게이트가 재계산됐습니다 — 다시 읽고 ack 하세요.", 409,
@@ -2831,7 +2869,7 @@ def post_gate_ack(snapshot_id: str, gate: str, body: GateAckBody,
         channel = AUDIT_CHANNELS.get(ident.source, "rest")
         _audit(store, actor, scope="snapshot", subject_id=snapshot_id, action="gate.ack",
                after={"gate": gate, "gates_hash": current_hash}, reason=reason, channel=channel,
-               actor_verified=channel != "mcp")
+               actor_verified=channel != "mcp", via=via)
     return {"gate": gate, "ack_by": actor, "ack_at": now, "ack_reason": reason,
             "gates_hash": current_hash, "pass": record.get("pass")}
 
@@ -2843,6 +2881,7 @@ def delete_gate_ack(snapshot_id: str, gate: str,
     취소한 사람(revoked_by · 감사 행위자)은 부른 사람이다."""
     actor = _require_user(ident)
     gates, _ = _gate_state(snapshot_id, gate, _snapshot_writer(snapshot_id, ident))
+    via = _admin_via(ident, _snapshot_project(snapshot_id))
     store = get_store()
     row = store.query_one(
         "SELECT ack_by, ack_at, revoked_at FROM rr_gate_acks WHERE snapshot_id = ? AND gate = ?",
@@ -2856,7 +2895,7 @@ def delete_gate_ack(snapshot_id: str, gate: str,
             (actor, now, snapshot_id, gate))
         record = _save_gate_ack_state(store, snapshot_id, gates, gate, None)
         _audit(store, actor, scope="snapshot", subject_id=snapshot_id, action="gate.ack",
-               before={"gate": gate, "ack_by": row["ack_by"]}, after={"gate": gate, "revoked": True})
+               before={"gate": gate, "ack_by": row["ack_by"]}, after={"gate": gate, "revoked": True}, via=via)
     return {"gate": gate, "ack_by": None, "ack_at": None, "ack_reason": None,
             "gates_hash": state_module.gates_hash(gates), "pass": record.get("pass"),
             "revoked_by": actor, "revoked_at": now}
@@ -2908,25 +2947,28 @@ def _project_editor(project_id: str, ident: identity.Identity) -> str:
     return str(row["owner_sub"])
 
 
-def _decision_owner(item: Any, ident: identity.Identity) -> str:
+def _decision_owner(item: Any, ident: identity.Identity) -> tuple[str, str | None]:
     """대응 결정 한 줄을 적을 원장의 주인(MB-13). confirm · reject 의 intra · pair 는 pair_key 의 과제(intra 는 그 과제 하나, pair 는 정렬한
     두 과제 둘 다)의 주인 · 편집자만 한다 — pair 결정은 두 과제의 노드를 잇고 두 과제 사이 비교의 대응이 되므로(plan §2.6.1 · §2.6.2) 한쪽만의
     편집자는 남이다. 행은 그 과제 주인의 원장에 선다(그 주인의 대응표 · 비교 · 동결이 읽는다). 두 과제의 주인이 다르면 한 원장에 적을 수 없어
     422 다. global 과 키 원장 결정(merge_key · rename_key · confirm_key · unmerge_key · revoke_iface_alias)은 과제가 아니라 부른 사람의 원장이다
-    (RD-11 그대로) — 어휘 밖도 부른 사람으로 넘겨 record_decision 이 거절한다."""
+    (RD-11 그대로) — 어휘 밖도 부른 사람으로 넘겨 record_decision 이 거절한다.
+
+    (주인, 관리자 표시) 다 — 그 과제(pair 는 둘 가운데 하나라도)의 편집자가 아닌 관리자가 우회로 든 결정이면 "admin"(`_admin_via` — 그 결정의
+    키 전파 감사 행에 싣는다, 사용자 결정 11-01). 부른 사람의 원장 결정은 우회가 없어 늘 None 이다."""
     email = _require_user(ident)
     if not isinstance(item, dict) or item.get("decision") not in ("confirm", "reject") or item.get("scope") not in ("intra", "pair"):
-        return email
+        return email, None
     pair_key = str(item.get("pair_key") or "")
     if not pair_key:
-        return email                                   # record_decision 이 400 'pair_key 가 필요합니다' 로 거절한다
+        return email, None                             # record_decision 이 400 'pair_key 가 필요합니다' 로 거절한다
     projects = pair_key.split("|") if item["scope"] == "pair" else [pair_key]
     if (item["scope"] == "pair" and (len(projects) != 2 or not all(projects))) or (item["scope"] == "intra" and "|" in pair_key):
         raise AppError("E100", "pair_key 는 intra 면 과제 id 하나, pair 면 정렬한 두 과제 id 를 '|' 로 이은 것이다.", 400)
     owners = {_project_editor(project_id, ident) for project_id in dict.fromkeys(projects)}
     if len(owners) != 1:
         raise AppError("pair_owners_differ", "두 과제의 주인이 달라 대응 결정을 한 원장에 적을 수 없다.", 422)
-    return owners.pop()
+    return owners.pop(), ADMIN_VIA if any(_admin_via(ident, project_id) for project_id in dict.fromkeys(projects)) else None
 
 
 @router.post("/sameas/decide")
@@ -2942,8 +2984,11 @@ def post_sameas_decide(body: list[dict], ident: identity.Identity = Depends(iden
     channel = AUDIT_CHANNELS.get(ident.source, "rest")
     # 배열은 한 트랜잭션이다 — 3번째 항목이 404 인데 앞 두 결정만 커밋되는 반쪽 적용을 막는다(내부 tx 는 합류한다).
     with store.tx():
-        results = [sameas.record_decision(store, item, owner_sub=_decision_owner(item, ident), decided_by=email,
-                                          channel=channel, actor_verified=channel != "mcp") for item in body]
+        results = []
+        for item in body:
+            owner_sub, via = _decision_owner(item, ident)
+            results.append(sameas.record_decision(store, item, owner_sub=owner_sub, decided_by=email, channel=channel,
+                                                  actor_verified=channel != "mcp", via=via))
     return {"updated": len(results), "results": results, "G2": None}
 
 
@@ -3672,6 +3717,7 @@ def post_target_flow(target_key: str, body: FlowBody, ident: identity.Identity =
     action='target.flow') 한 행을 남긴다(방식·마감 레벨 앞뒤). 같은 방식이면 아무것도 쓰지 않는다(changed:false).
     """
     email, target = _editable_target(target_key, ident)
+    via = _admin_via(ident, target["project_id"])
     store = get_store()
     if target["flow"] == body.to:
         return {"target_key": target_key, "flow": body.to, "changed": False}
@@ -3701,7 +3747,7 @@ def post_target_flow(target_key: str, body: FlowBody, ident: identity.Identity =
         _audit(store, email, scope="target", subject_id=target_key, project_id=target["project_id"],
                action="target.flow", before={"flow": target["flow"], "close_level": before},
                after={"flow": body.to, "close_level": close_level_for(body.to)}, reason=body.reason,
-               channel=channel, actor_verified=channel != "mcp")
+               channel=channel, actor_verified=channel != "mcp", via=via)
     out = {"target_key": target_key, "flow": body.to, "changed": True}
     if body.to == "cells":
         out["units"] = units_module.summary_of(store, target_key)
@@ -3779,6 +3825,7 @@ def create_job(target_key: str, body: JobBody,
     if row is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
     _target_editor(target_key, row, ident)
+    via = _admin_via(ident, row["project_id"])          # 이 잡이 남기는 감사 행 전부의 관리자 우회 표시(사용자 결정 11-01)
     # 게이트웨이 위임 단언(sso)은 게이트웨이만 받아 오므로 Claude 길이다(MCP 입구 risk_start_job · rest_call). 웹 화면은 쿠키다.
     # Bearer 는 개인 heax PAT 로 REST 를 직접 부른 것이라 웹 화면 동의가 아니다(3차 검토 발견 4). 그 밖의 출처는 그 값 그대로 남긴다.
     consent_source = CONSENT_SOURCES.get(ident.source, ident.source)
@@ -3790,7 +3837,7 @@ def create_job(target_key: str, body: JobBody,
                                               scope=body.scope, user_memo=body.user_memo, consent=body.consent,
                                               consent_source=consent_source, channel=channel,
                                               actor_verified=channel != "mcp", llm=body.llm,
-                                              consent_external=body.consent_external)
+                                              consent_external=body.consent_external, via=via)
         params = _loads(store.query_one("SELECT params_json FROM rr_jobs WHERE id = ?", (out["job_id"],))["params_json"], {})
         _audit(store, email, scope="job", subject_id=out["job_id"], project_id=row["project_id"], action="job.create",
                after={"mode": out["mode"], "target_key": target_key, "scope": params.get("scope") or {},
@@ -3799,7 +3846,7 @@ def create_job(target_key: str, body: JobBody,
                       "consent_source": params.get("consent_source"),
                       # 반출 동의(Claude 길 X-2) — 누가 · 언제 · 어느 입구로(claude 잡에만 — GLM 잡의 감사 행은 그대로)
                       **runner.llm_params(runner.job_llm(params), params.get("consent_external"))},
-               channel=channel, actor_verified=channel != "mcp")
+               channel=channel, actor_verified=channel != "mcp", via=via)
         return out
     store = get_store()
     out = runner.create_job(store, target_key, body.tier, owner_sub=row["owner_sub"],
@@ -3811,7 +3858,7 @@ def create_job(target_key: str, body: JobBody,
         # 사람이 브리프에서 뺀 항목(B31 · plan §8.2.3) — 잡마다 한 행이다. 통합 보고서 minutes 의 '사람 개입 요약' 이 이 행을 센다.
         _audit(store, email, scope="job", subject_id=out["job_id"], project_id=row["project_id"], action="brief.exclude",
                after={"target_key": target_key, "tier": body.tier, "exclude_evidence": out["exclude_evidence"]},
-               channel=channel, actor_verified=channel != "mcp")
+               channel=channel, actor_verified=channel != "mcp", via=via)
     if out.get("llm"):
         # 반출 동의(Claude 길 X-2) — Claude 로 고른 패널 잡만 감사 한 행(누가 · 언제 · 어느 입구로 — 검토 잡과 같은 칸). GLM 패널 잡은 종전대로
         # 감사 행을 남기지 않는다.
@@ -3819,7 +3866,7 @@ def create_job(target_key: str, body: JobBody,
                after={"mode": "panels", "target_key": target_key, "tier": body.tier, "consent": bool(body.consent),
                       "consent_source": consent_source if body.consent else None,
                       **runner.llm_params(out["llm"], out["consent_external"])},
-               channel=channel, actor_verified=channel != "mcp")
+               channel=channel, actor_verified=channel != "mcp", via=via)
     return out
 
 
@@ -3839,15 +3886,17 @@ def _audit_job_control(store: Any, ident: identity.Identity, actor: str, job_id:
     10-31). 앞 값(`before`)도 그 안에서 읽은 것이고 뒤 값도 여기서 읽어, 전이와 감사 행이 함께 커밋되고 러너의 다른 전이가 섞이지 않는다.
     끝난 잡의 취소처럼 러너가 쓰지 않은 조작은 부르지 않는다. 잡 상태나 보류 코드가 그대로면 행이 없다 — 도는 호출을 기다리는 검토 잡을
     다시 취소해도(cancelling 그대로) 그렇다. 자리는 그 잡이고(대상 감사가 rr_jobs.target_key 로 고른다) 과제 id 는 그 잡의 대상의 것이다.
-    MCP 길의 행위자는 actor_verified 0 이다(다른 MCP 감사 행과 같다). 행을 썼으면 참이다 — MCP 입구의 changed 가 이 판정이다(`job_control`)."""
+    MCP 길의 행위자는 actor_verified 0 이다(다른 MCP 감사 행과 같다). 행을 썼으면 참이다 — MCP 입구의 changed 가 이 판정이다(`job_control`).
+    구성원이 아닌(보기인) 관리자가 우회로 한 조작이면 관리자 표시를 싣는다(`_admin_via` — 사용자 결정 11-01)."""
     after = _job_control_view(store, job_id)
     if after == before:
         return False
     target = store.query_one("SELECT t.project_id FROM rr_jobs j JOIN rr_targets t ON t.target_key = j.target_key"
                              " WHERE j.id = ?", (job_id,))
     channel = AUDIT_CHANNELS.get(ident.source, "rest")
-    _audit(store, actor, scope="job", subject_id=job_id, project_id=target["project_id"] if target is not None else None,
-           action=f"job.{action}", before=before, after=after, channel=channel, actor_verified=channel != "mcp")
+    project_id = target["project_id"] if target is not None else None
+    _audit(store, actor, scope="job", subject_id=job_id, project_id=project_id, action=f"job.{action}", before=before,
+           after=after, channel=channel, actor_verified=channel != "mcp", via=_admin_via(ident, project_id))
     return True
 
 
@@ -3919,6 +3968,7 @@ def put_coverage(target_key: str, agent_key: str, body: CoverageBody,
     if row is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
     _target_editor(target_key, row, ident)
+    via = _admin_via(ident, row["project_id"])
     before = store.query_one(
         "SELECT status FROM rr_coverage WHERE target_key = ? AND agent_key = ?", (target_key, agent_key))
     if before is None:
@@ -3935,7 +3985,7 @@ def put_coverage(target_key: str, agent_key: str, body: CoverageBody,
             action = "coverage.uncarry"
         _audit(store, email, scope="coverage", subject_id=f"{target_key}#{agent_key}",
                project_id=row["project_id"], action=action, before={"status": before["status"]},
-               after={"status": out["status"]}, reason=body.reason)
+               after={"status": out["status"]}, reason=body.reason, via=via)
     return out
 
 
@@ -3980,7 +4030,7 @@ def post_undefer(target_key: str, body: UndeferBody, ident: identity.Identity = 
                                                               for j in live]})
     channel = AUDIT_CHANNELS.get(ident.source, "rest")
     out = planner.undefer(store, target_key, decided_by=email, reason=reason, channel=channel,
-                          actor_verified=channel != "mcp")
+                          actor_verified=channel != "mcp", via=_admin_via(ident, row["project_id"]))
     if out["undeferred"]:
         closure_module.refresh(store, target_key)   # 카드 대조 대상이면 완결 캐시를 새로 쓴다(패널 대상은 아무것도 쓰지 않는다)
     level = registry_module.close_level(store, target_key, persist=False)
@@ -4023,7 +4073,8 @@ def _dispose(target_key: str, ident: identity.Identity, *, action: str, cells: l
     return review_runner.dispose_cells(store, target_key, action=action, rows=rows, decided_by=email,
                                        owner_sub=row["owner_sub"], note=note, force=force, start=start, consent=consent,
                                        consent_source=CONSENT_SOURCES.get(ident.source, ident.source), channel=channel,
-                                       actor_verified=channel != "mcp", selector=selector)
+                                       actor_verified=channel != "mcp", selector=selector,
+                                       via=_admin_via(ident, row["project_id"]))
 
 
 @router.post("/targets/{target_key}/cells/retry")
@@ -4217,7 +4268,7 @@ def post_closure_ack(target_key: str, item: str, body: CloseAckBody,
                                           basis_hash=body.basis_hash)
         _audit(store, email, scope="target", subject_id=target_key, action="close.ack", project_id=row["project_id"],
                after={"item": item, "basis_hash": out["basis_hash"], "basis_n": out["basis_n"]},
-               reason=body.reason.strip())
+               reason=body.reason.strip(), via=_admin_via(ident, row["project_id"], "owner"))
         level = closure_module.refresh(store, target_key)
     # 확인이 표기를 바꿨다 — 보고서 판(trigger ack)도 그 표기로 선다(review1 M4). 조립이 터져도 확인은 무르지 않는다.
     report = synth_module.safe_assemble(store, target_key, trigger="ack")
@@ -4233,7 +4284,8 @@ def delete_closure_ack(target_key: str, item: str, ident: identity.Identity = De
     with store.tx():
         out = closure_module.revoke_ack(store, target_key, item, by=email)
         _audit(store, email, scope="target", subject_id=target_key, action="close.ack.revoke",
-               project_id=row["project_id"], before={"item": item}, after={"item": item, "revoked": True})
+               project_id=row["project_id"], before={"item": item}, after={"item": item, "revoked": True},
+               via=_admin_via(ident, row["project_id"], "owner"))
         level = closure_module.refresh(store, target_key)
     report = synth_module.safe_assemble(store, target_key, trigger="ack")
     return {**out, "level": level["level"], "level_label": level["level_label"],
@@ -4356,7 +4408,7 @@ def put_issue(issue_id: str, body: IssueActionBody, ident: identity.Identity = D
         issues_module._sync_registry(store, target["target_key"])
         _audit(store, email, scope="target", subject_id=target["target_key"], action=f"issue.{body.action}",
                project_id=target["project_id"], before={"issue_id": issue_id, "state": row["state"]},
-               after={"issue_id": issue_id, "state": state}, reason=reason)
+               after={"issue_id": issue_id, "state": state}, reason=reason, via=_admin_via(ident, target["project_id"]))
         # 쟁점 상태가 완결의 수 · 잔여(쟁점 진행 · 미토의)를 바꿨다 — 완결 캐시를 같은 트랜잭션에서 새로 쓴다. 종전에는 캐시가 그대로라
         # 진행판 level_label · qualifiers 가 낡고 그 캐시의 basis_hash 로 보낸 확인이 409 residual_changed 였다(화면 세션 청할 것 2).
         # 사람이 세우는 쟁점 잡은 사슬 표지가 없어(chain_json NULL) 완결이 읽는 값을 바꾸지 않는다 — 잡보다 먼저 써도 된다.
@@ -5083,7 +5135,7 @@ def put_verdict(target_key: str, body: VerdictBody,
     부른 사람이다."""
     actor = _require_user(ident)
     owner_sub = _target_writer(target_key, ident)
-    _target_row(target_key, owner_sub)
+    via = _admin_via(ident, _target_row(target_key, owner_sub)["project_id"])
     if body.verdict not in ("go", "conditional", "no-go", "undetermined"):
         raise AppError("E100", f"verdict 어휘 밖입니다 — {body.verdict!r}.", 422)
     store = get_store()
@@ -5097,7 +5149,7 @@ def put_verdict(target_key: str, body: VerdictBody,
             (body.verdict, body.note, actor, now, now, target_key))
         _audit(store, actor, scope="target", subject_id=target_key, project_id=before["project_id"],
                action="verdict.final", before={"verdict_final": before["verdict_final"]},
-               after={"verdict_final": body.verdict}, channel=channel, actor_verified=channel != "mcp")
+               after={"verdict_final": body.verdict}, channel=channel, actor_verified=channel != "mcp", via=via)
     return _target_row(target_key, owner_sub)
 
 
@@ -5154,7 +5206,8 @@ def put_registry_status(cluster_key: str, body: RegistryStatusBody,
                    project_id=target["project_id"] if target is not None else None, action="registry.status",
                    before={"status": change["from_status"]},
                    after={"status": out["status"], "status_log_seq": change["status_log_seq"]},
-                   channel=channel, actor_verified=channel != "mcp")
+                   channel=channel, actor_verified=channel != "mcp",
+                   via=_admin_via(ident, target["project_id"]) if body.target_key and target is not None else None)
         if out.get("label_needed"):
             outcome = REGISTRY_LABEL_OUTCOME[out["status"]]
             out["labels"] = [
@@ -5196,6 +5249,7 @@ def put_registry_merge(cluster_key: str, body: RegistryMergeBody,
         raise AppError("family_key_differs", "family_key 가 다른 클러스터는 병합할 수 없습니다.", 422)
     # 다시 병합할 대상은 부른 사람의 것이어야 한다 — 남의 대상은 없는 대상과 같은 404 이고 아무것도 쓰지 않는다(조합 검토 H1).
     target = _target_row(body.target_key or left["target_key"], owner_sub)
+    via = _admin_via(ident, target["project_id"]) if body.target_key else None     # 대상을 고른 길만 편집자 문을 지난다
 
     with store.tx():
         alias = registry_module.add_cluster_alias(
@@ -5203,7 +5257,7 @@ def put_registry_merge(cluster_key: str, body: RegistryMergeBody,
             evidence={"from": cluster_key, "to": body.into, "by": actor}, decided_by=actor)
         _audit(store, actor, scope="registry", subject_id=f"{left['target_key']}#{cluster_key}",
                action="registry.merge", before={"cluster_key": cluster_key},
-               after={"cluster_key": body.into})
+               after={"cluster_key": body.into}, via=via)
     merged = registry_module.merge(store, target["target_key"], owner_sub=target["owner_sub"])
     return {"alias": alias, "merged": {k: merged[k] for k in ("clusters", "inserted", "updated", "unchanged")}}
 
@@ -5226,7 +5280,8 @@ def delete_registry_merge(cluster_key: str, target_key: str | None = None,
         # 자리는 맨 클러스터 열쇠라 대상 감사가 '그 대상 소유자의 행위' 로 고른다(registry.target_audit_clause · BL-8) — 행은 별칭 주인의
         # 원장 행위로 적고 행위자는 걷은 사람이다(편집자가 걷어도 주인 · 구성원의 대상 감사에 보인다).
         _audit(store, owner_sub, actor=actor, scope="registry", subject_id=cluster_key,
-               action="registry.merge.revoke", before={"cluster_key": cluster_key}, after=out)
+               action="registry.merge.revoke", before={"cluster_key": cluster_key}, after=out,
+               via=_admin_via(ident, target["project_id"]) if target_key and target is not None else None)
     if row is not None and target is not None:
         registry_module.merge(store, target["target_key"], owner_sub=target["owner_sub"])
     return out
@@ -5824,18 +5879,19 @@ def post_panel_repersist(panel_id: str, discard: bool = False,
         raise missing
     if not _is_admin(ident):
         _member_or_missing(row["project_id"], email, "editor", missing)
+    via = _admin_via(ident, row["project_id"])
     # MCP risk_repersist_panel 은 (mcp, 0) 이다(사용자 결정 10-31 — 종전에는 둘 다 기본값 rest · 1).
     channel = AUDIT_CHANNELS.get(ident.source, "rest")
     if discard:
         out = runner.abandon_repersist(store, panel_id)
         _audit(store, email, scope="panel", subject_id=panel_id, project_id=row["project_id"],
                action="panel.repersist_discard", before={"error": row["error"]}, after={"error": out["error"]},
-               channel=channel, actor_verified=channel != "mcp")
+               channel=channel, actor_verified=channel != "mcp", via=via)
         return out
     out = runner.repersist_panel(store, config.settings, panel_id)
     _audit(store, email, scope="panel", subject_id=panel_id, project_id=row["project_id"], action="panel.repersist",
            after={"status": out["status"], "level": out.get("level"), "findings_n": out.get("findings_n")},
-           channel=channel, actor_verified=channel != "mcp")
+           channel=channel, actor_verified=channel != "mcp", via=via)
     return out
 
 
@@ -6341,6 +6397,14 @@ def _finding_writer(store: Any, finding_id: str, ident: identity.Identity) -> st
     return _writer(row["owner_sub"] if row is not None else None, row["project_id"] if row is not None else None, ident)
 
 
+def _finding_via(ident: identity.Identity, row: Mapping[str, Any]) -> str | None:
+    """사람 finding 고치기 · 지우기의 관리자 표시 — 문이 둘이다(그 과제의 편집자 이상 `_finding_writer` · 작성자 또는 과제 주인). 관리자가
+    어느 하나라도 관리자이기 때문에 지났으면 "admin" 이다 — 편집자 구성원이어도 작성자 · 주인이 아니면 우회다(사용자 결정 11-01)."""
+    if _admin_via(ident, row["project_id"]) is not None:
+        return ADMIN_VIA
+    return ADMIN_VIA if _is_admin(ident) and ident.email not in (row["author_sub"], row["owner_sub"]) else None
+
+
 def _human_finding_row(store: Any, finding_id: str, owner_sub: str) -> dict:
     row = store.query_one(
         "SELECT finding_id, claim_uid, target_key, project_id, owner_sub, origin, author_sub, direction,"
@@ -6367,6 +6431,7 @@ def create_human_finding(target_key: str, body: HumanFindingBody,
     if row is None:
         raise AppError("E404", f"타깃({target_key}) 을 찾을 수 없습니다.", 404)
     _target_editor(target_key, row, ident)
+    via = _admin_via(ident, row["project_id"])
     if body.direction not in HUMAN_DIRECTIONS:
         raise AppError("E100", f"direction 은 {list(HUMAN_DIRECTIONS)} 중 하나여야 합니다.", 422)
     if body.severity is not None and body.severity not in HUMAN_SEVERITIES:
@@ -6427,7 +6492,7 @@ def create_human_finding(target_key: str, body: HumanFindingBody,
         channel = AUDIT_CHANNELS.get(ident.source, "rest")
         _audit(store, email, scope="finding", subject_id=finding_id, project_id=row["project_id"],
                action="finding.create", after={"origin": "human", "claim_uid": claim_uid}, channel=channel,
-               actor_verified=channel != "mcp")
+               actor_verified=channel != "mcp", via=via)
     registry_module.merge(get_store(), target_key)
     return {"finding_id": finding_id, "claim_uid": claim_uid, "cluster_key": cluster_key, "origin": "human"}
 
@@ -6442,6 +6507,7 @@ def update_human_finding(finding_id: str, body: HumanFindingBody,
     row = _human_finding_row(store, finding_id, _finding_writer(store, finding_id, ident))
     if row["author_sub"] != email and row["owner_sub"] != email and not _is_admin(ident):
         raise AppError("role_insufficient", "작성자 또는 과제 주인만 고칠 수 있습니다.", 403)
+    via = _finding_via(ident, row)
     cites = [c for c in body.cites if isinstance(c, dict) and str(c.get("ref") or "").strip()]
     if not cites:
         raise AppError("cites_required", "사람 finding 도 인용이 최소 1건 필요합니다(§4.3.1).", 422)
@@ -6458,7 +6524,7 @@ def update_human_finding(finding_id: str, body: HumanFindingBody,
              canonical_json(finding_json), now, finding_id))
         _audit(store, email, scope="finding", subject_id=finding_id, project_id=row["project_id"],
                action="finding.update", before={"claim": _loads(row["finding_json"], {}).get("claim")},
-               after={"claim": body.claim})
+               after={"claim": body.claim}, via=via)
     registry_module.merge(store, row["target_key"])
     return {"finding_id": finding_id, "updated": True}
 
@@ -6471,11 +6537,12 @@ def delete_human_finding(finding_id: str, ident: identity.Identity = Depends(ide
     row = _human_finding_row(store, finding_id, _finding_writer(store, finding_id, ident))
     if row["author_sub"] != email and row["owner_sub"] != email and not _is_admin(ident):
         raise AppError("role_insufficient", "작성자 또는 과제 주인만 지울 수 있습니다.", 403)
+    via = _finding_via(ident, row)
     with store.tx():
         store.execute("DELETE FROM rr_claim_refs WHERE claim_uid = ?", (row["claim_uid"],))
         store.execute("DELETE FROM rr_findings WHERE finding_id = ?", (finding_id,))
         _audit(store, email, scope="finding", subject_id=finding_id, project_id=row["project_id"],
-               action="finding.delete", before={"claim_uid": row["claim_uid"]})
+               action="finding.delete", before={"claim_uid": row["claim_uid"]}, via=via)
     registry_module.merge(store, row["target_key"])
     return {"finding_id": finding_id, "deleted": True}
 

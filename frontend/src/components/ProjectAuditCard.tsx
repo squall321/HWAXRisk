@@ -62,6 +62,10 @@ export const ACTION_LABEL: Record<string, string> = {
   "ra.remark": "RA 다시 표기",
 };
 
+/** 쓰기의 관리자 우회 표시(entry.via "admin")의 풀이 — 배지 글은 '관리자 권한' 이다. */
+export const ADMIN_VIA_TITLE =
+  "구성원이 아니거나 그 쓰기에 모자란 역할의 관리자(risk_admin_roles)가 관리자 권한으로 한 쓰기입니다 — 구성원으로도 할 수 있는 쓰기에는 붙지 않습니다.";
+
 /**
  * '미확인' 배지의 풀이 — 행위자가 앱이 직접 확인한 신원이 아닌 까닭은 행을 쓴 길마다 다르다(백엔드가 actor_verified 0 을 쓰는 자리 셋).
  * MCP(Claude) 길은 게이트웨이가 위임으로 넘긴 신원이고(앱은 게이트웨이의 서명만 본다), 웹의 job.pause 미확인 행은 포털 화면의 '멈춤'(엔진
@@ -147,7 +151,7 @@ export function ProjectAuditCard({ projectId, active }: { projectId: string; act
     {
       key: "actor",
       header: "행위자",
-      hint: "actor · actor_verified",
+      hint: "actor · actor_verified · via",
       nowrap: true,
       cell: (e) => (
         <span className="inline-flex items-center gap-1">
@@ -157,6 +161,11 @@ export function ProjectAuditCard({ projectId, active }: { projectId: string; act
               미확인
             </Badge>
           )}
+          {e.via === "admin" ? (
+            <Badge tone="info" title={ADMIN_VIA_TITLE}>
+              관리자 권한
+            </Badge>
+          ) : null}
         </span>
       ),
     },
