@@ -1622,6 +1622,44 @@ def test_r2_the_mcp_entry_refuses_an_out_of_range_concurrency_before_returning_a
     assert (again["job_id"], again["created"]) == (first["job_id"], False)
 
 
+def test_oi4_a_returned_live_job_carries_its_concurrency_and_differs_on_another_value(risk_store, monkeypatch, tmp_path):
+    """OI-4(CC-15 남긴 것 · 사용자 결정 11-01) — MCP 입구가 같은 Tier 의 살아 있는 패널 잡을 돌려줄 때 그 잡이 도는 자리 수를 concurrency 로
+    싣고, 청한 값으로 새 잡이 받을 자리 수가 그와 다르면 differs 에 concurrency 를 싣는다(바꾸지 않는다). 종전에는 칸이 없고 다른 값을 청해도
+    differs 가 비었다. 박스의 전역 자리 · claude 가 새 잡도 같은 수로 죄면 differs 가 아니라 잡 만들기 답과 같은 concurrency_note 다."""
+    from app import entry
+    from tests import test_external_llm_jobs as X
+    from tests.synth import review_rig
+
+    review_rig.configure(monkeypatch, risk_store, tmp_path)
+    review_rig.pat(risk_store)
+    target = factories.make_diff_target(risk_store, 3)
+    ident = X._delegate()
+    first = entry.start_job(ident, target_key=target.target_key, tier="A", concurrency=2)
+    assert first["created"] is True and "concurrency_note" not in first
+    same = entry.start_job(ident, target_key=target.target_key, tier="A", concurrency=2)
+    assert (same["job_id"], same["created"], same["concurrency"]) == (first["job_id"], False, 2)
+    assert "differs" not in same and "concurrency_note" not in same
+    other = entry.start_job(ident, target_key=target.target_key, tier="A")          # 기본 1 — 살아 있는 잡은 2 로 돈다
+    assert (other["job_id"], other["concurrency"], other["differs"]) == (first["job_id"], 2, ["concurrency"])
+    assert _job(risk_store, first["job_id"])["concurrency"] == 2                     # 바꾸지 않는다
+    # 박스의 전역 자리가 1 이 되면 그 잡도 새 잡도 1 로 돈다 — 다르지 않고 까닭을 싣는다.
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_concurrency=1))
+    boxed = entry.start_job(ident, target_key=target.target_key, tier="A", concurrency=2)
+    assert (boxed["concurrency"], "differs" in boxed) == (1, False), boxed
+    assert "HWAXRISK_CONCURRENCY 1" in boxed["concurrency_note"]
+    assert "differs" not in entry.start_job(ident, target_key=target.target_key, tier="A")
+    # claude 잡은 1 로 돈다 — 판단 LLM 을 주지 않은 호출도 그 잡의 판단 LLM 으로 견준다(다르지 않다 · 까닭은 claude 글).
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_concurrency=2))
+    X._probe(monkeypatch, X._external_fake())
+    claude = entry.start_job(ident, target_key=target.target_key, tier="B", concurrency=2, llm="claude", consent_external=True)
+    assert claude["created"] is True and claude["concurrency_note"] == runner.CLAUDE_CONCURRENCY_NOTE
+    held = entry.start_job(ident, target_key=target.target_key, tier="B", concurrency=2)
+    assert (held["job_id"], held["concurrency"], "differs" in held) == (claude["job_id"], 1, False), held
+    assert held["concurrency_note"] == runner.CLAUDE_CONCURRENCY_NOTE
+    glm = entry.start_job(ident, target_key=target.target_key, tier="B", concurrency=2, llm="glm")
+    assert glm["differs"] == ["llm", "concurrency"], glm
+
+
 def test_n31_a_later_deferred_pause_does_not_replace_a_deferred_failure(risk_store, tmp_path):
     """N31 고정 — 미뤄 둔 실패는 나중에 미루는 멈춤이 덮지 않는다(실패가 멈춤을 이긴다). 잡이 패널을 둘까지만 돌리는 동안에는 미룸이 둘 쌓이지
     않아 같은 판이다 — 셋째 도는 패널(다른 길)을 세워 규칙을 직접 묶는다."""

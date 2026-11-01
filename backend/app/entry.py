@@ -367,7 +367,9 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = N
     `llm`·`consent_external` 은 REST 본문과 같다(Claude 길 X-2 — claude 는 검토 잡 · 패널 잡, 동의는 사람이 한 뒤에만 true).
     `exclude_evidence` 도 REST 본문과 같다(B31 — 패널 잡의 브리프에서 뺄 항목 키). 살아 있는 잡을 돌려주기 전에 값을 검사하고, 그 잡의
     제외와 다르면 `differs` 에 'exclude_evidence' 를 싣는다(바꾸지 않는다 — 취소한 뒤 새로). 돌려주는 살아 있는 잡이 빼는 항목은 늘
-    `exclude_evidence` 로 싣는다(BL-12 — 빼지 않는 잡은 칸이 없다).
+    `exclude_evidence` 로 싣는다(BL-12 — 빼지 않는 잡은 칸이 없다). 돌려주는 살아 있는 패널 잡은 도는 자리 수(`runner.job_slots`)를
+    `concurrency` 로 싣고, 청한 `concurrency` 로 새 잡이 받을 자리 수가 그와 다르면 `differs` 에 'concurrency' 를 싣는다(바꾸지 않는다 —
+    취소한 뒤 새로, OI-4). 같으면서 청한 값보다 적게 돌면 그 까닭을 `concurrency_note` 로 싣는다(잡 만들기 답과 같은 글).
     """
     require_delegate(ident)
     store = routes.get_store()
@@ -393,16 +395,19 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = N
                   consent=consent, mode=mode, **({"scope": scope} if scope is not None else {}), **extra)
             if llm_fields or not 1 <= concurrency <= runner.MAX_JOB_CONCURRENCY else None)
     live = store.query_one(
-        "SELECT id, tier, state, pause_reason, panels_done, panels_total, error, credential_email, params_json FROM rr_jobs"
-        f" WHERE target_key = ? AND tier = ? AND {runner.PANEL_JOBS_SQL}"
+        "SELECT id, tier, state, pause_reason, panels_done, panels_total, error, credential_email, params_json, concurrency"
+        f" FROM rr_jobs WHERE target_key = ? AND tier = ? AND {runner.PANEL_JOBS_SQL}"
         f" AND state IN ({','.join('?' for _ in LIVE_JOB_STATES)})"
         " ORDER BY created_at DESC, rowid DESC LIMIT 1", (target_key, tier, *LIVE_JOB_STATES))
     if live is not None:
         params = routes._loads(live["params_json"], {})
         # 살아 있는 잡이 브리프에서 빼는 항목도 판단 LLM 칸처럼 싣는다 — 빼지 않은 호출이 그 잡을 받아 '보통 브리프로 돈다' 고 읽지
         # 않게, 다른 값을 준 호출이 differs 와 함께 무엇이 살아 있는지 보게(BL-12). 빼지 않는 잡은 칸이 없다(종전 응답 그대로).
+        # 동시 실행은 그 잡이 실제로 도는 자리 수다(runner.job_slots — 러너가 집을 때 읽는 값, OI-4).
+        runs = runner.job_slots(dict(live))
         out = {"job_id": live["id"], "created": False,
-               **{k: live[k] for k in live.keys() if k not in ("id", "params_json")}, **routes.job_llm_view(params),
+               **{k: live[k] for k in live.keys() if k not in ("id", "params_json", "concurrency")},
+               "concurrency": runs, **routes.job_llm_view(params),
                **({"exclude_evidence": list(params["exclude_evidence"])} if params.get("exclude_evidence") else {}),
                "web": web}
         differs = []
@@ -410,6 +415,17 @@ def start_job(ident: identity.Identity, *, target_key: str, tier: str | None = N
             differs.append("llm")                 # 고른 판단 LLM 이 살아 있는 잡과 다르다 — 바꾸지 않는다(그 잡을 취소한 뒤 새로)
         if excluded is not None and excluded != list(params.get("exclude_evidence") or ()):
             differs.append("exclude_evidence")    # 뺄 항목이 살아 있는 잡과 다르다 — 바꾸지 않는다(그 잡을 취소한 뒤 새로)
+        # 청한 동시 실행을 새 잡이 받을 자리 수로 견준다(같은 job_slots — 박스의 전역 자리 · claude 1 로 죈 값). 판단 LLM 을 주지 않은
+        # 호출은 살아 있는 잡의 판단 LLM 으로 본다(위 llm 칸처럼 준 것만 견준다). 다르면 differs — 바꾸지 않는다(그 잡을 취소한 뒤 새로).
+        asked = int(concurrency)
+        would = runner.job_slots({"concurrency": asked, "params": {"llm": llm} if llm is not None else params})
+        if would != runs:
+            differs.append("concurrency")
+        elif asked > runs:
+            # 새로 만들어도 이 자리 수다 — 까닭은 잡 만들기 답의 concurrency_note 와 같은 글이다(말없이 죄지 않는다, CC-5).
+            out["concurrency_note"] = (runner.CLAUDE_CONCURRENCY_NOTE if runner.job_llm(params) else
+                                       f"동시 {asked} 를 청했지만 잡 상한({runner.MAX_JOB_CONCURRENCY})과 박스의 전역 자리 수"
+                                       f"(HWAXRISK_CONCURRENCY {int(config.settings.risk_concurrency)})로 묶여 동시 {runs} 로 돈다")
         if differs:
             out["differs"] = differs
         return out

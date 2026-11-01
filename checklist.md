@@ -956,8 +956,8 @@ B25 가 남긴 작은 것 하나(2026-10-31, context-notes BL-2) — 캡처가 �
       하나가 붉었다(새 시험의 손 INSERT — 52088fa 에서 생산자 경로로 걷었다, CC-14)
 - [ ] 포털 정본 문면(포털 세션) — design-risk-review/plan.md §6.4 '타깃당 패널은 직렬 · 서버 전역 동시 패널은 타깃이 다를 때만' · Settings 표의
       HWAXRISK_CONCURRENCY '타깃 다를 때만' · §6.7 의 '타깃당 직렬' 을 CC-1 의 뜻으로(대상 안에서 잡끼리는 직렬, 잡 하나는 제 자리 수까지)
-- [ ] MCP risk_start_job 이 같은 Tier 의 살아 있는 잡을 돌려줄 때 그 잡의 concurrency 를 싣지 않고 differs 에도 넣지 않는다(entry.start_job —
-      이번 범위 밖, 결정 필요)
+- [x] MCP risk_start_job 이 같은 Tier 의 살아 있는 잡을 돌려줄 때 그 잡의 concurrency 를 싣지 않고 differs 에도 넣지 않는다(entry.start_job —
+      이번 범위 밖, 결정 필요) — 사용자 결정 11-01 · 도는 자리 수를 싣고 다르면 differs(context-notes OI-4)
 
 ### 반대 검토 10-31 고침(같은 가지 — 2229b32 위, context-notes CC-16 ~ CC-27)
 
@@ -1001,3 +1001,14 @@ B25 가 남긴 작은 것 하나(2026-10-31, context-notes BL-2) — 캡처가 �
 - [x] 변이 24/24 · 관련 시험 532 통과(CC-36)
 - [x] 리스크 전체 시험 한 번(공유 잠금) — 3,853 통과 · xfail 4 · 실패 0(rc 0, e91db9b, 13분 15초)
 
+
+## 남은 일 다섯 11-01(가지 `wt1101/risk-open`, main 2460cd0 위)
+
+> 사용자 승인 11-01 — 결정과 까닭은 context-notes 'OI-1' 부터(줄 번호 = OI 번호).
+
+- [ ] ① 생산자 diff_json 이 `rr_diff.v1` 밖 — 계약을 정본에 맞추고 실제 생산자 산출을 검증하는 계약 시험 · 구성원 시험의 검증 끔을 걷음(OI-1)
+- [ ] ② 보기 · 서버가 거절할 사람에게 쓰기 단추를 잠그고 까닭을 보인다 — 편집자는 계획이 연 것, 주인만의 것은 주인만(OI-2)
+- [ ] ③ `risk_next_step` 을 구성원에게 — 읽기 문으로, 쓰기 걸음은 편집자 규칙으로(OI-3)
+- [x] ④ MCP 살아 있는 잡을 돌려줄 때 도는 자리 수(concurrency)를 싣고 새 잡이 받을 자리 수와 다르면 differs · 같은데 적게 돌면
+      concurrency_note(OI-4)
+- [ ] ⑤ 관리자 읽기 우회 — 계획서가 관리자를 전 과제 읽기로 적었으면 읽기 문에도(OI-5)
