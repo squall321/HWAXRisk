@@ -572,6 +572,8 @@ def get_me(request: Request, ident: identity.Identity = Depends(identity.current
 def _me_payload(request: Request, ident: identity.Identity) -> dict:
     state = request.app.state
     payload = ident.to_dict()
+    # 사전 편집 · 큐레이션 같은 관리자 쓰기를 화면이 미리 가르는 칸(risk_admin_roles — 서버의 거절은 그대로, OI-2).
+    payload["risk_admin"] = (not ident.anonymous) and _is_admin(ident)
     portal_pat = None
     # 박스 불일치(이관 직후)면 _user_credentials 전부 무효(plan §5.2.5 (5)).
     if not ident.anonymous and state.box_match:
@@ -1055,7 +1057,10 @@ def get_project(project_id: str, ident: identity.Identity = Depends(identity.cur
     싣지 않는다. 스냅샷 머리는 이름(그 스냅샷을 만든 동결 잡의 label — 같은 주인의 잡만, 동결 잡 없이 언 것은 null) · 앱 판 · 어댑터 판 ·
     강등 표지 전부(`degraded_json` — `degraded` 는 그 첫 값인 호환 열)를 함께 싣는다."""
     email = _require_user(ident)
-    require_role(project_id, email, "viewer")
+    if not _is_admin(ident):                     # 관리자는 전 과제를 읽는다(OI-5 — 포털 plan §0.6 · §5.2.1)
+        require_role(project_id, email, "viewer")
+    elif get_store().query_one("SELECT id FROM rr_projects WHERE id = ?", (project_id,)) is None:
+        raise AppError("E404", f"과제({project_id}) 를 찾을 수 없습니다.", 404)
     store = get_store()
     project = dict(store.query_one(
         "SELECT id, owner_sub, code, name, stage, predecessor_project_id, adh_team, adh_group, character_status,"
@@ -1108,6 +1113,9 @@ def get_project(project_id: str, ident: identity.Identity = Depends(identity.cur
                                **{k: v for k, v in _loads(j["progress_json"], {}).items() if k != runner.DEFERRED_KEY}}}
                  for j in jobs],
         "character_top_tags": tags,
+        # 부른 사람의 역할(owner · editor · viewer — 과제 목록 카드의 my_role 과 같은 판정, 구성원이 아닌 관리자는 null) — 화면이 쓰기
+        # 단추를 이 값으로 가른다(보기는 잠그고 까닭을 보인다, OI-2). 서버의 거절은 그대로다(화면은 미리 알릴 뿐이다).
+        "my_role": project_role(project_id, email),
     }
 
 
@@ -1172,52 +1180,59 @@ def readable_project_ids(email: str) -> set[str]:
     return {r["id"] for r in get_store().query(_READABLE_PROJECTS_SQL, (email, email))}
 
 
-def _member_row_sql(table: str) -> str:
+def _member_row_sql(table: str, *, admin: bool = False) -> str:
     """과제 열이 있는 표에서 구성원 길로 읽는 행 — 부른 사람이 구성원인 과제의, 그 과제 주인의 행. 자리표 하나(email).
 
     하위 표의 owner_sub 는 과제 주인의 복제다(plan §5.2.1) — 주인이 다른 행은 고침 전의 들여오기가 남의 과제에 매단 것이라(RD-10) 이
-    길로는 싣지 않는다. 부른 사람 자신의 행(오늘의 주인 길)은 부르는 쪽이 `owner_sub = ?` 로 따로 잇는다."""
-    return (f"({table}.project_id IN ({_MEMBER_PROJECTS_SQL})"
-            f" AND {table}.owner_sub = (SELECT p.owner_sub FROM rr_projects p WHERE p.id = {table}.project_id))")
+    길로는 싣지 않는다. 부른 사람 자신의 행(오늘의 주인 길)은 부르는 쪽이 `owner_sub = ?` 로 따로 잇는다. `admin` 이면 전 과제(그 과제
+    주인의 행)다 — 관리자는 전 과제의 구성원처럼 읽는다(OI-5). 자리표 하나는 그대로 받는다(부르는 쪽의 인자 꼴이 같게)."""
+    owner_rows = f"{table}.owner_sub = (SELECT p.owner_sub FROM rr_projects p WHERE p.id = {table}.project_id)"
+    if admin:
+        return f"(? IS NOT NULL AND {owner_rows})"
+    return f"({table}.project_id IN ({_MEMBER_PROJECTS_SQL}) AND {owner_rows})"
 
 
-def _reader(row_owner: Any, project_id: Any, email: str) -> str:
+def _reader(row_owner: Any, project_id: Any, email: str, *, admin: bool = False) -> str:
     """과제에 딸린 행 하나를 읽을 owner_sub — 부른 사람이 그 과제의 구성원(보기 이상 — project_role)이고 그 행이 과제 주인의 행이면 행의
     주인, 아니면 부른 사람이다.
 
     부른 사람을 돌려주면 본체의 주인 검사(`_project_row` · `_snapshot_row` · `_target_row` · …)가 오늘과 같은 404 를 낸다 — 남과 없는
     행은 글자까지 같은 답이고(남 숨김) 주인의 길은 그대로다. 구성원이면 본체가 그 과제 주인의 행으로 고르므로 주인과 같은 답이다(RD-1 이
-    과제 상세에 한 것과 같다). 행 주인이 과제 주인과 다르면 구성원 길로 열지 않는다(`_member_row_sql` 과 같은 까닭)."""
+    과제 상세에 한 것과 같다). 행 주인이 과제 주인과 다르면 구성원 길로 열지 않는다(`_member_row_sql` 과 같은 까닭).
+
+    `admin`(부른 사람이 risk_admin_roles — `_is_admin`)이면 구성원 검사를 건너뛴다 — 관리자는 전 과제의 편집자다(포털 plan §0.6 — owner ⊃
+    editor ⊃ viewer(읽기), §5.2.1 '멤버 행 없이 editor 로 통과'). 쓰기 문(`_writer`)의 관리자 우회와 같다(OI-5). 행 주인 대조는 그대로라
+    남이 매단 행은 관리자에게도 열리지 않는다. MCP 길에는 관리자가 없다(mcp_identity 가 역할을 뗀다 — SEC-2)."""
     if not row_owner or row_owner == email or not project_id:
         return email
-    if project_role(str(project_id), email) is None:
+    if not admin and project_role(str(project_id), email) is None:
         return email
     anchor = get_store().query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,))
     return str(row_owner) if anchor is not None and anchor["owner_sub"] == row_owner else email
 
 
-def _project_reader(project_id: str, email: str) -> str:
+def _project_reader(project_id: str, email: str, *, admin: bool = False) -> str:
     row = get_store().query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,))
-    return _reader(row["owner_sub"], project_id, email) if row is not None else email
+    return _reader(row["owner_sub"], project_id, email, admin=admin) if row is not None else email
 
 
-def _snapshot_reader(snapshot_id: str, email: str) -> str:
+def _snapshot_reader(snapshot_id: str, email: str, *, admin: bool = False) -> str:
     row = get_store().query_one("SELECT owner_sub, project_id FROM rr_snapshots WHERE id = ?", (snapshot_id,))
-    return _reader(row["owner_sub"], row["project_id"], email) if row is not None else email
+    return _reader(row["owner_sub"], row["project_id"], email, admin=admin) if row is not None else email
 
 
-def _target_reader(target_key: str, email: str) -> str:
+def _target_reader(target_key: str, email: str, *, admin: bool = False) -> str:
     """대상은 그 과제(rr_targets.project_id)로 본다 — 비교 대상의 base 과제는 보지 않는다(MCP mcp_scope_owner · 반출과 같은 규칙, D50)."""
     row = get_store().query_one("SELECT owner_sub, project_id FROM rr_targets WHERE target_key = ?", (target_key,))
-    return _reader(row["owner_sub"], row["project_id"], email) if row is not None else email
+    return _reader(row["owner_sub"], row["project_id"], email, admin=admin) if row is not None else email
 
 
-def _panel_reader(panel_id: str, email: str) -> str:
+def _panel_reader(panel_id: str, email: str, *, admin: bool = False) -> str:
     """패널은 과제를 직접 안 들고 대상을 거친다 — 그 대상의 과제로 본다."""
     row = get_store().query_one(
         "SELECT p.owner_sub AS owner_sub, t.project_id AS project_id FROM rr_panels p"
         " LEFT JOIN rr_targets t ON t.target_key = p.target_key WHERE p.id = ?", (panel_id,))
-    return _reader(row["owner_sub"], row["project_id"], email) if row is not None else email
+    return _reader(row["owner_sub"], row["project_id"], email, admin=admin) if row is not None else email
 
 
 def _writer(row_owner: Any, project_id: Any, ident: identity.Identity) -> str:
@@ -1263,7 +1278,7 @@ def _panel_writer(panel_id: str, ident: identity.Identity) -> str:
     return _writer(row["owner_sub"] if row is not None else None, row["project_id"] if row is not None else None, ident)
 
 
-def _diff_reader(diff_id: str, email: str) -> str:
+def _diff_reader(diff_id: str, email: str, *, admin: bool = False) -> str:
     """비교는 두 과제(base · target)를 다 읽는 사람이 연다(MCP mcp_scope_owner 와 같은 규칙 — 한쪽만 읽는 사람에게 다른 쪽 내용을 싣지
     않는다). 행 주인은 두 과제 가운데 하나의 주인이어야 한다 — 비교는 이양이 옮기지 않아(TRANSFER_PROJECT_TABLES 밖) 한쪽 과제를 넘긴
     뒤에도 만든 사람의 행으로 남고, 두 과제 어느 쪽의 주인도 아닌 행은 고침 전의 들여오기가 남의 과제를 적어 넣은 것이다(RD-10)."""
@@ -1272,7 +1287,7 @@ def _diff_reader(diff_id: str, email: str) -> str:
     if row is None or row["owner_sub"] == email:
         return email
     projects = (row["base_project_id"], row["target_project_id"])
-    if not all(p and project_role(str(p), email) is not None for p in projects):
+    if not all(p and (admin or project_role(str(p), email) is not None) for p in projects):   # 관리자는 두 과제를 다 읽는다(OI-5)
         return email
     owners = {r["owner_sub"] for r in store.query("SELECT owner_sub FROM rr_projects WHERE id IN (?, ?)", projects)}
     return str(row["owner_sub"]) if row["owner_sub"] in owners else email
@@ -2517,7 +2532,7 @@ def get_requirements(project_id: str, kind: str | None = None, status: str | Non
                      ident: identity.Identity = Depends(identity.current)) -> dict:
     """과제의 요구 목록(kind·status 필터). 판정·여유 계산은 state 가 하고 여기서는 원장만 읽는다. 구성원(보기 이상)이 읽는다(MB-1)."""
     email = _require_user(ident)
-    _project_row(project_id, _project_reader(project_id, email))
+    _project_row(project_id, _project_reader(project_id, email, admin=_is_admin(ident)))
     return requirements.list_requirements(get_store(), project_id, kind=kind, status=status)
 
 
@@ -2727,13 +2742,13 @@ def _with_live_acks(store: Any, snapshot_id: str, state: dict) -> dict:
 def get_snapshot(snapshot_id: str, part: str = "ir",
                  ident: identity.Identity = Depends(identity.current)) -> dict:
     """스냅샷 조회 — 그 과제의 구성원(보기 이상)이 읽는다(MB-1)."""
-    return snapshot_part(snapshot_id, part, owner_sub=_snapshot_reader(snapshot_id, _require_user(ident)))
+    return snapshot_part(snapshot_id, part, owner_sub=_snapshot_reader(snapshot_id, _require_user(ident), admin=_is_admin(ident)))
 
 
 @router.get("/snapshots/{snapshot_id}/rule_hits")
 def get_rule_hits(snapshot_id: str, ident: identity.Identity = Depends(identity.current)) -> dict:
     """규칙 적중 표(§3.2.6). rr_states 가 없으면 404. 구성원(보기 이상)이 읽는다(MB-1)."""
-    _snapshot_row(snapshot_id, _snapshot_reader(snapshot_id, _require_user(ident)))
+    _snapshot_row(snapshot_id, _snapshot_reader(snapshot_id, _require_user(ident), admin=_is_admin(ident)))
     row = get_store().query_one(
         "SELECT rule_hits_json, rule_version FROM rr_states WHERE snapshot_id = ?", (snapshot_id,))
     if row is None:
@@ -2856,8 +2871,8 @@ def get_sameas(base: str = Query(...), target: str = Query(...),
     두 스냅샷을 다 읽는 사람(각 스냅샷 과제의 구성원 — MB-1)이 연다. 쌍 원장은 대상 스냅샷 주인의 것으로 읽는다(주인의 길은 그대로 — 두
     스냅샷 다 부른 사람의 것이다)."""
     email = _require_user(ident)
-    _snapshot_row(base, _snapshot_reader(base, email))
-    owner_sub = _snapshot_reader(target, email)
+    _snapshot_row(base, _snapshot_reader(base, email, admin=_is_admin(ident)))
+    owner_sub = _snapshot_reader(target, email, admin=_is_admin(ident))
     _snapshot_row(target, owner_sub)
     store = get_store()
     base_ir = ir_builder.load_ir(store, base)
@@ -2935,10 +2950,10 @@ def post_sameas_decide(body: list[dict], ident: identity.Identity = Depends(iden
 @router.get("/part-keys/{ckey}")
 def get_part_key(ckey: str, ident: identity.Identity = Depends(identity.current)) -> dict:
     """정규 키 원장 한 행(plan §2.7.3 키 대장) — {ckey, status, merged_into, display_name, aliases[], decided_by, decided_at, mine}."""
-    return part_key_payload(ckey, _require_user(ident))
+    return part_key_payload(ckey, _require_user(ident), admin=_is_admin(ident))
 
 
-def part_key_payload(ckey: str, email: str) -> dict:
+def part_key_payload(ckey: str, email: str, *, admin: bool = False) -> dict:
     """`GET /part-keys/{ckey}` 본체 — 키의 지금 상태(병합됐는가 · 붙은 이름 · 누가 언제 정했나)와 별칭.
 
     원장 행은 주인(owner_sub — 그 키를 처음 적립한 과제 주인)의 것이다. 주인은 다 보고, 그 키가 든 과제(행의 첫 과제 · 별칭의 과제)의
@@ -2962,7 +2977,7 @@ def part_key_payload(ckey: str, email: str) -> dict:
     aliases = [a for a in (items if isinstance(items, list) else []) if isinstance(a, dict)]
     if row["owner_sub"] != email:
         projects = {str(p) for p in (row["first_project_id"], *(a.get("project_id") for a in aliases)) if p}
-        mine = {p for p in projects if project_role(p, email) is not None}
+        mine = {p for p in projects if admin or project_role(p, email) is not None}     # 관리자는 전 과제(OI-5)
         if not mine:
             raise missing
         aliases = [a for a in aliases if a.get("project_id") in mine]
@@ -3162,7 +3177,7 @@ def get_diff(diff_id: str, part: str = "diff", change_kind: str | None = None, q
              offset: int = 0, limit: int | None = None,
              ident: identity.Identity = Depends(identity.current)) -> dict:
     """비교 조회 — 두 과제를 다 읽는 사람(구성원 — MB-1)이 연다(`_diff_reader`)."""
-    return diff_part(diff_id, part, owner_sub=_diff_reader(diff_id, _require_user(ident)), change_kind=change_kind, q=q,
+    return diff_part(diff_id, part, owner_sub=_diff_reader(diff_id, _require_user(ident), admin=_is_admin(ident)), change_kind=change_kind, q=q,
                      offset=offset, limit=limit)
 
 
@@ -3171,9 +3186,11 @@ def get_precedents(diff_id: str = Query(...), ident: identity.Identity = Depends
     """선례 패널(§5.7) — rr_delta_priors 수치와 같은 subject 의 등록부 행. 그 비교를 읽는 구성원(MB-1)에게는 다른 과제의 행을 주인과 그
     사람 둘 다 읽는 과제의 것만 싣는다(MCP risk_get_precedents 와 같은 규칙, D46). 주인의 답은 그대로다."""
     email = _require_user(ident)
-    owner_sub = _diff_reader(diff_id, email)
+    admin = _is_admin(ident)
+    owner_sub = _diff_reader(diff_id, email, admin=admin)
+    # 관리자는 전 과제를 읽는다(OI-5) — 다른 과제의 행을 그 사람이 읽는 과제로 좁히지 않고 주인의 답이다.
     return brief_module.precedents(get_store(), diff_id, owner_sub=owner_sub,
-                                   caller_projects=None if owner_sub == email else readable_project_ids(email))
+                                   caller_projects=None if owner_sub == email or admin else readable_project_ids(email))
 
 
 # ================================================================ 타깃·로스터
@@ -3325,7 +3342,8 @@ def create_target(body: TargetBody, ident: identity.Identity = Depends(identity.
             "SELECT id, owner_sub, base_snapshot_id, target_snapshot_id, base_project_id, target_project_id"
             " FROM rr_diffs WHERE id = ?", (body.ref_id,))
         owner_sub = actor
-        if row is not None and row["owner_sub"] != actor and _diff_reader(body.ref_id, actor) == row["owner_sub"]:
+        if row is not None and row["owner_sub"] != actor and _diff_reader(body.ref_id, actor,
+                                                                           admin=_is_admin(ident)) == row["owner_sub"]:
             owner_sub = _writer(row["owner_sub"], row["target_project_id"], ident)
         if row is None or row["owner_sub"] != owner_sub:
             raise AppError("E404", f"diff 를 찾을 수 없습니다 — {body.ref_id}.", 404)
@@ -3580,14 +3598,14 @@ def unit_payload(target_key: str, unit_id: str, part: str = "summary", *, owner_
 def get_units(target_key: str, offset: int = 0, limit: int | None = None,
               ident: identity.Identity = Depends(identity.current)) -> dict:
     """활성 빌드의 검토 단위 목록(seq 순) — 단위가 없는 대상은 `{status:'none'}` 이다. 대상 읽기는 그 과제의 구성원이 한다(MB-1)."""
-    return units_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident)), offset=offset, limit=limit)
+    return units_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident), admin=_is_admin(ident)), offset=offset, limit=limit)
 
 
 @router.get("/targets/{target_key}/units/{unit_id}")
 def get_target_unit(target_key: str, unit_id: str, part: str = "summary",
                     ident: identity.Identity = Depends(identity.current)) -> dict:
     """단위 하나 — part ∈ summary(요약 글) · lines(소유 줄 + 문맥 줄) · evidence(동결 근거)."""
-    return unit_payload(target_key, unit_id, part, owner_sub=_target_reader(target_key, _require_user(ident)))
+    return unit_payload(target_key, unit_id, part, owner_sub=_target_reader(target_key, _require_user(ident), admin=_is_admin(ident)))
 
 
 # ================================================================ 심사 방식 바꾸기(D-24 · M2.md 5절 #3)
@@ -4031,8 +4049,14 @@ def post_cells_skip(target_key: str, body: CellsSkipBody, ident: identity.Identi
 # ================================================================ 커버리지·등록부·패널
 @router.get("/targets/{target_key}/coverage")
 def get_coverage(target_key: str, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """진행판 — 도메인별 상태·미착석 수·완결 레벨(레벨 계산은 registry.close_level)."""
-    return coverage_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident)))
+    """진행판 — 도메인별 상태·미착석 수·완결 레벨(레벨 계산은 registry.close_level).
+
+    `my_role` 은 부른 사람의 그 대상 과제 역할이다(과제 상세와 같은 판정 — 구성원이 아닌 관리자는 null). 대상 화면이 쓰기 단추를 이 값으로
+    가른다(OI-2) — MCP risk_get_coverage(같은 본체 coverage_payload)에는 싣지 않는다(MCP 신원은 역할을 쓰지 않는다)."""
+    email = _require_user(ident)
+    payload = coverage_payload(target_key, owner_sub=_target_reader(target_key, email, admin=_is_admin(ident)))
+    row = get_store().query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (target_key,))
+    return {**payload, "my_role": project_role(str(row["project_id"]), email) if row is not None else None}
 
 
 def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:
@@ -4164,7 +4188,7 @@ def closure_payload(target_key: str, *, owner_sub: str | None = None, fresh: boo
 def get_closure(target_key: str, fresh: int = 0, ident: identity.Identity = Depends(identity.current)) -> dict:
     """완결 판정 — 레벨·잔여·표기·수(M3 S3-8). 진행판·MCP 는 캐시를 읽고 `fresh=1` 만 그 자리에서 다시 센다(파생 캐시를 다시 쓸 뿐
     사람 결정이 아니라 구성원의 읽기에도 연다 — 캐시가 없을 때의 첫 읽기도 같은 캐시를 쓴다, MB-1)."""
-    return closure_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident)), fresh=bool(fresh))
+    return closure_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident), admin=_is_admin(ident)), fresh=bool(fresh))
 
 
 def _closure_owner(target_key: str, ident: identity.Identity) -> tuple[str, dict]:
@@ -4288,7 +4312,7 @@ def get_issues(target_key: str, state: str | None = None, p_class: str | None = 
                limit: int = ISSUE_LIST_LIMIT, offset: int = 0,
                ident: identity.Identity = Depends(identity.current)) -> dict:
     """쟁점 목록 — 유형·등급·상태·결과·분포·좌석(근거 원문은 싣지 않는다)."""
-    return issues_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident)), state=state,
+    return issues_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident), admin=_is_admin(ident)), state=state,
                           p_class=p_class, type=type, limit=limit, offset=offset)
 
 
@@ -4395,7 +4419,7 @@ def report_payload(target_key: str, *, owner_sub: str | None = None, version: in
 def get_report(target_key: str, version: int | None = None, page: int = 1, part: str = "summary", format: str = "md",  # noqa: A002
                ident: identity.Identity = Depends(identity.current)) -> dict:
     """종합 보고서(앱 사본이 정본) — 쪽마다 25,000자 안, 쪽을 이으면 part 전체다."""
-    return report_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident)), version=version, page=page,
+    return report_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident), admin=_is_admin(ident)), version=version, page=page,
                           part=part, format=format)
 
 
@@ -4854,21 +4878,21 @@ def get_cells(target_key: str, agent_key: str | None = None, unit_id: str | None
               route: str | None = None, ident: identity.Identity = Depends(identity.current)) -> dict:
     """카드 대조 셀 목록(limit 기본 500 · 최대 2000, next_offset 으로 이어 받는다, job_id 는 그 검토 잡 범위의 셀만, route 는 거르기
     분류의 길 — review · filtered · audit · noinput)."""
-    return cells_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident)), agent_key=agent_key,
+    return cells_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident), admin=_is_admin(ident)), agent_key=agent_key,
                          unit_id=unit_id, domain=domain, state=state, limit=limit, offset=offset, job_id=job_id, route=route)
 
 
 @router.get("/targets/{target_key}/cells/{unit_id}/{agent_key}")
 def get_cell(target_key: str, unit_id: str, agent_key: str, ident: identity.Identity = Depends(identity.current)) -> dict:
     """셀 하나 — 셀 행·판정 행 전부·호출 목록(result 본문 제외)."""
-    return cell_payload(target_key, unit_id, agent_key, owner_sub=_target_reader(target_key, _require_user(ident)))
+    return cell_payload(target_key, unit_id, agent_key, owner_sub=_target_reader(target_key, _require_user(ident), admin=_is_admin(ident)))
 
 
 @router.get("/targets/{target_key}/experts")
 def get_experts(target_key: str, domain: str | None = None, state: str | None = None,
                 ident: identity.Identity = Depends(identity.current)) -> dict:
     """카드 대조 전문가 머리 목록(검토 순서)."""
-    return experts_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident)), domain=domain, state=state)
+    return experts_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident), admin=_is_admin(ident)), domain=domain, state=state)
 
 
 @router.get("/targets/{target_key}/experts/{agent_key}/report")
@@ -4876,7 +4900,7 @@ def get_expert_report(target_key: str, agent_key: str, format: str = "md", part:
                       unit_id: str | None = None, version: int | None = None, page: int | None = None,
                       ident: identity.Identity = Depends(identity.current)) -> dict:
     """전문가 보고서 — format=md 는 쪽(part·unit_id·page), format=json 은 보고서 JSON 전체."""
-    return expert_report_payload(target_key, agent_key, owner_sub=_target_reader(target_key, _require_user(ident)),
+    return expert_report_payload(target_key, agent_key, owner_sub=_target_reader(target_key, _require_user(ident), admin=_is_admin(ident)),
                                  format=format, part=part, unit_id=unit_id, version=version, page=page)
 
 
@@ -5013,7 +5037,7 @@ def get_registry(target_key: str, status: str | None = None, severity: str | Non
                  source: str | None = None, offset: int = 0,
                  ident: identity.Identity = Depends(identity.current)) -> dict:
     """대상 등록부 — 그 과제의 구성원(보기 이상)이 읽는다(MB-1)."""
-    return registry_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident)), status=status,
+    return registry_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident), admin=_is_admin(ident)), status=status,
                             severity=severity, domain=domain, attention=attention, unit_id=unit_id, source=source, offset=offset)
 
 
@@ -5024,13 +5048,13 @@ def get_seats(target_key: str, domain: str | None = None,
 
     `GET coverage` 는 도메인×상태 카운트만 준다(5 s 폴링이라 가볍게 둔다). 여기서만 행을 편다.
     """
-    return seats_payload(target_key, domain, owner_sub=_target_reader(target_key, _require_user(ident)))
+    return seats_payload(target_key, domain, owner_sub=_target_reader(target_key, _require_user(ident), admin=_is_admin(ident)))
 
 
 @router.get("/targets/{target_key}/panels")
 def get_panels(target_key: str, kind: str | None = None, ident: identity.Identity = Depends(identity.current)) -> dict:
     """패널 목록(conv_id · report_id · quality_json · model_json · kind · issue_id)."""
-    return panels_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident)), kind=kind)
+    return panels_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident), admin=_is_admin(ident)), kind=kind)
 
 
 @router.get("/panels/{panel_id}/transcript")
@@ -5040,7 +5064,7 @@ def get_panel_transcript(panel_id: str, ident: identity.Identity = Depends(ident
     포털 conv_store 를 읽지 않는다. 발언은 `rr_seat_opinions.opinion_json.turns` 를 좌석마다 펴서
     라운드 순으로 합친 것이고, 결정문·risk_spec 은 `rr_panels` 원문 그대로다. 그 대상 과제의 구성원이 읽는다(MB-1).
     """
-    return panel_transcript_payload(panel_id, owner_sub=_panel_reader(panel_id, _require_user(ident)))
+    return panel_transcript_payload(panel_id, owner_sub=_panel_reader(panel_id, _require_user(ident), admin=_is_admin(ident)))
 
 
 class VerdictBody(BaseModel):
@@ -5236,7 +5260,7 @@ def put_registry_visibility(cluster_key: str, body: RegistryVisibilityBody,
 def get_panel_brief(panel_id: str, ident: identity.Identity = Depends(identity.current)) -> dict:
     """그 패널이 실제로 받은 브리프 — 재조립이 아니라 동결본을 돌려준다(plan §5.6.1·§0.9 P3-19). 동결본 읽기라 그 대상 과제의 구성원이
     읽는다(MB-1) — 편성 · 토큰을 내는 `GET /targets/{key}/brief` 는 주인만 그대로다."""
-    _panel_row(panel_id, _panel_reader(panel_id, _require_user(ident)))
+    _panel_row(panel_id, _panel_reader(panel_id, _require_user(ident), admin=_is_admin(ident)))
     return runner.load_brief(get_store(), panel_id)
 
 
@@ -5820,7 +5844,7 @@ def post_panel_repersist(panel_id: str, discard: bool = False,
 def get_character(project_id: str, ident: identity.Identity = Depends(identity.current)) -> dict:
     """성격 프로파일 3층(seed · panel · confirmed)을 섞지 않고 그대로 준다(§4.6.4). 구성원(보기 이상)이 읽는다(MB-1)."""
     email = _require_user(ident)
-    project = _project_row(project_id, _project_reader(project_id, email))
+    project = _project_row(project_id, _project_reader(project_id, email, admin=_is_admin(ident)))
     rows = get_store().query(
         "SELECT id, facet, tag, tags_json, statement, polarity, cites_json, by_json, support_panels,"
         " support_targets, confidence, needs_review, status, first_target_key, updated_at"
@@ -5842,25 +5866,28 @@ def get_similar(project_id: str, k: int = 5, ident: identity.Identity = Depends(
     구성원(보기 이상)이 읽는다(MB-1) — 그때 다른 과제는 주인과 부른 사람 둘 다 읽는 것만 싣는다(MCP risk_similar_projects 와 같은 규칙,
     D46 — 구성원이 주인만 보는 과제를 알게 되지 않는다). 주인의 답은 그대로다."""
     email = _require_user(ident)
-    owner_sub = _project_reader(project_id, email)
+    admin = _is_admin(ident)
+    owner_sub = _project_reader(project_id, email, admin=admin)
     _project_row(project_id, owner_sub)
+    # 관리자는 전 과제를 읽는다(OI-5) — 주인의 답이다.
     return brief_module.similar_projects(get_store(), project_id, k, owner_sub=owner_sub,
-                                         caller_projects=None if owner_sub == email else readable_project_ids(email))
+                                         caller_projects=None if owner_sub == email or admin else readable_project_ids(email))
 
 
-def _first_member_row(sql: str, params: tuple, email: str) -> dict | None:
+def _first_member_row(sql: str, params: tuple, email: str, *, admin: bool = False) -> dict | None:
     """원장 참조 행 가운데 부른 사람이 열 수 있는 첫 행 — 그 과제의 구성원(project_role — 소유자 · rr_project_members, 보기 권한도)이다
     (D50 — 종전에는 행의 owner_sub 로만 걸러 구성원이 못 열었다). 과제는 SQL 의 `_ref_project` 칸(행 · 대상 · 스냅샷 · 스냅샷 잡의
     과제)으로 받아 응답에서 뗀다. 과제를 모르는 행은 그 행의 주인(`_ref_owner`)만 연다."""
     for row in get_store().query(sql, params):
         item = dict(row)
         owner, project = item.pop("_ref_owner"), item.pop("_ref_project")
-        if (project_role(str(project), email) is not None) if project else owner == email:
+        # 관리자는 전 과제의 구성원처럼 연다(OI-5) — 과제를 모르는 행은 그대로 그 행의 주인만이다.
+        if (admin or project_role(str(project), email) is not None) if project else owner == email:
             return item
     return None
 
 
-def _ref_from_store(info: dict, owner_sub: str) -> dict | None:
+def _ref_from_store(info: dict, owner_sub: str, *, admin: bool = False) -> dict | None:
     """스냅샷 스코프 없이 전역으로 주소가 잡히는 참조(reg·narr·tool·rpt·inc·card·req·voc·paper)를 원장에서 찾는다. reg · narr · tool 은
     그 과제의 구성원이 연다(`_first_member_row`) — 남에게는 없는 참조와 같다. req · voc · paper 는 과제 스코프가 참조에 없어 부른 사람의
     것을 먼저 보고(오늘 그대로), 없으면 구성원인 과제(그 과제 주인의 행)의 것을 본다(MB-1)."""
@@ -5877,14 +5904,15 @@ def _ref_from_store(info: dict, owner_sub: str) -> dict | None:
         if row is None:
             row = store.query_one(
                 f"SELECT {cols} FROM rr_requirements WHERE name = ? AND status IN ('candidate','confirmed')"
-                f" AND {_member_row_sql('rr_requirements')} ORDER BY kind, project_id LIMIT 1", (info["name"], owner_sub))
+                f" AND {_member_row_sql('rr_requirements', admin=admin)} ORDER BY kind, project_id LIMIT 1",
+                (info["name"], owner_sub))
         return dict(row) if row is not None else None
     if kind in ("voc", "paper"):
         key = info["issue_key"] if kind == "voc" else info["paper_id"]
         found = narrative.find_field_item(store, kind, key, product_code=info.get("product_code"), owner_sub=owner_sub)
         if found is None:
             # 브리프 호출 원장은 대상마다 그 대상 주인의 행이다 — 구성원인 과제의 대상마다 찾는다(새 대상부터).
-            for row in store.query(f"SELECT target_key, owner_sub FROM rr_targets WHERE {_member_row_sql('rr_targets')}"
+            for row in store.query(f"SELECT target_key, owner_sub FROM rr_targets WHERE {_member_row_sql('rr_targets', admin=admin)}"
                                    " ORDER BY created_at DESC, target_key", (owner_sub,)):
                 found = narrative.find_field_item(store, kind, key, product_code=info.get("product_code"),
                                                   target_key=row["target_key"], owner_sub=row["owner_sub"])
@@ -5896,30 +5924,31 @@ def _ref_from_store(info: dict, owner_sub: str) -> dict | None:
             "SELECT target_key, cluster_key, merged_json, severity, judgement, status, support, contested,"
             " owner_sub AS _ref_owner, (SELECT project_id FROM rr_targets t WHERE t.target_key = rr_registry.target_key)"
             " AS _ref_project FROM rr_registry WHERE target_key = ? AND cluster_key = ?",
-            (info["target_key"], info["cluster_key"]), owner_sub)
+            (info["target_key"], info["cluster_key"]), owner_sub, admin=admin)
     if kind == "narr" and "finding_id" in info:
         return _first_member_row(
             "SELECT finding_id, claim_uid, opinion_id, cluster_key, severity, judgement, status, finding_json,"
             " owner_sub AS _ref_owner, project_id AS _ref_project FROM rr_findings WHERE finding_id = ?",
-            (info["finding_id"],), owner_sub)
+            (info["finding_id"],), owner_sub, admin=admin)
     if kind == "narr":
         return _first_member_row(
             "SELECT id, project_id, facet, tag, statement, status, owner_sub AS _ref_owner, project_id AS _ref_project"
-            " FROM rr_character WHERE id = ?", (info["character_id"],), owner_sub)
+            " FROM rr_character WHERE id = ?", (info["character_id"],), owner_sub, admin=admin)
     if kind == "tool" and "conv_id" in info:
         # 레거시 참조 — 포털 대화가 지워져도 rr_panel_calls(conv_id, activity_idx)로 해석한다(§6.7.2 7단계).
         row = _first_member_row(
             "SELECT call_id, panel_id, target_key, seq, agent_key, tool, result_gz, result_bytes, sha256,"
             " conv_id, activity_idx, owner_sub AS _ref_owner, (SELECT project_id FROM rr_targets t"
             " WHERE t.target_key = rr_panel_calls.target_key) AS _ref_project FROM rr_panel_calls"
-            " WHERE conv_id = ? AND activity_idx = ? ORDER BY call_id", (info["conv_id"], int(info["idx"])), owner_sub)
+            " WHERE conv_id = ? AND activity_idx = ? ORDER BY call_id", (info["conv_id"], int(info["idx"])), owner_sub,
+            admin=admin)
         return _panel_call_payload(row) if row is not None else None
     if kind == "tool" and str(info.get("call_id") or "").startswith("panel:"):
         row = _first_member_row(
             "SELECT call_id, panel_id, target_key, seq, agent_key, tool, result_gz, result_bytes, sha256,"
             " conv_id, activity_idx, owner_sub AS _ref_owner, (SELECT project_id FROM rr_targets t"
             " WHERE t.target_key = rr_panel_calls.target_key) AS _ref_project FROM rr_panel_calls WHERE call_id = ?",
-            (str(info["call_id"])[len("panel:"):],), owner_sub)
+            (str(info["call_id"])[len("panel:"):],), owner_sub, admin=admin)
         return _panel_call_payload(row) if row is not None else None
     if kind == "tool" and "call_id" in info:
         # 스냅샷이 없는 호출(실패 · 부분 잡의 원문)은 그 스냅샷 잡의 과제를 따른다.
@@ -5928,7 +5957,7 @@ def _ref_from_store(info: dict, owner_sub: str) -> dict | None:
             " response_sha256, response_gz, response_bytes, started_at, duration_ms, error, owner_sub AS _ref_owner,"
             " COALESCE((SELECT project_id FROM rr_snapshots s WHERE s.id = rr_snapshot_calls.snapshot_id),"
             " (SELECT project_id FROM rr_snapshot_jobs j WHERE j.id = rr_snapshot_calls.job_id)) AS _ref_project"
-            " FROM rr_snapshot_calls WHERE call_id = ?", (info["call_id"],), owner_sub)
+            " FROM rr_snapshot_calls WHERE call_id = ?", (info["call_id"],), owner_sub, admin=admin)
         return _tool_call_payload(row) if row is not None else None
     return None
 
@@ -6017,21 +6046,23 @@ def get_ref(ref: str, snapshot_id: str | None = None, diff_id: str | None = None
     """참조 1건 해석(§0.2.1 문법). 스냅샷·diff 스코프가 필요한 스킴은 쿼리로 스코프를 받는다 — 스코프는 그 스냅샷 · 비교를 읽는 구성원도
     연다(MB-1, 스냅샷 · 비교 조회와 같은 문)."""
     owner_sub = _require_user(ident)
+    admin = _is_admin(ident)                     # 관리자는 전 과제를 구성원처럼 읽는다(OI-5)
     info = parse_ref(ref)
     if info is None:
         raise AppError("E100", f"참조 문법(plan §0.2.1)에 맞지 않습니다 — {ref!r}.", 422)
     store = get_store()
-    payload: Any = _ref_from_store(info, owner_sub)
+    payload: Any = _ref_from_store(info, owner_sub, admin=admin)
     if payload is None and (snapshot_id or diff_id):
         ctx = narrative.SpecContext(owner_sub=owner_sub, store=store)
         if snapshot_id:
-            _snapshot_row(snapshot_id, _snapshot_reader(snapshot_id, owner_sub))
+            _snapshot_row(snapshot_id, _snapshot_reader(snapshot_id, owner_sub, admin=admin))
             ctx.snapshot_ids = (snapshot_id,)
             ctx.irs = {snapshot_id: narrative.scope_ir(ir_builder.load_ir(store, snapshot_id))}
             ctx.states = {snapshot_id: state_module.load_state(store, snapshot_id) or {}}
         if diff_id:
             ctx.diff_id = diff_id
-            ctx.diff = diff_module.get_diff(store, diff_id, owner_sub=_diff_reader(diff_id, owner_sub), part="diff")
+            ctx.diff = diff_module.get_diff(store, diff_id, owner_sub=_diff_reader(diff_id, owner_sub, admin=admin),
+                                            part="diff")
         text = narrative.canonical_text_for(info["ref"], ctx)
         payload = {"text": text} if text is not None else None
     if payload is None:

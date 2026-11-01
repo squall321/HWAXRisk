@@ -5,6 +5,7 @@ import type {
   ClosureCells,
   Coverage,
   CoverageJob,
+  DiffDoc,
   IssueList,
   IssueRow,
   PartKey,
@@ -26,9 +27,11 @@ import type {
 function sample<T>() {
   return <U extends T>(value: U): T => value;
 }
-/** 카드 대조 대상 진행판 — 사슬(쟁점 잡 대기) · 종합 보고서 판 · 잔여 · 끝난 검토 잡(검토 순서는 앞 둘만). */
+/** 카드 대조 대상 진행판 — 사슬(쟁점 잡 대기) · 종합 보고서 판 · 잔여 · 끝난 검토 잡(검토 순서는 앞 둘만). 주인으로 받았다 — 웹 진행판이 싣는
+ * 부른 사람의 역할(my_role, 가지 wt1101/risk-open)을 더했다. */
 export const coverageCells = sample<Coverage>()({
   "target_key": "diff:220d3f493372488c978fefa91334eb1e",
+  "my_role": "owner",
   "job": null,
   "roster_size": 6,
   "by_domain": {
@@ -2458,7 +2461,8 @@ export const snapshotStateMargin = sample<Pick<SnapshotState, "signals" | "missi
  * 과제 상세(GET /projects/{id}) — 편집자로 받았다(구성원이 연다 — 가지 wt1031/risk-reads). 과제 행의 메타 열(코퍼스 제외 bool · 제품 연결
  * 배열 · 수명 주기를 shipped 로 바꿔 닫은 때가 찍혔다) · 멤버 표({email, role}) · 스냅샷 머리의 이름 · 판 · 강등 표지 전부. 스크래치 백엔드에서
  * 동결 잡 둘(DV1 · DV2 — 같은 초)과 손 픽스처 하나를 얼려 받았다. 대상 표는 비었다 — 대상 머리 타입(`unseated_n` · `superseded_by`)은
- * 이 응답이 싣지 않는 칸을 요구한다(FE-7 의 남긴 것, 이 견본 밖).
+ * 이 응답이 싣지 않는 칸을 요구한다(FE-7 의 남긴 것, 이 견본 밖). 부른 사람의 역할(my_role — 편집자)은 가지 wt1101/risk-open 이
+ * 더한 칸이다(쓰기 단추를 가른다).
  */
 export const projectDetailMember = sample<ProjectDetail>()({
   "project": {
@@ -2612,7 +2616,8 @@ export const projectDetailMember = sample<ProjectDetail>()({
   ],
   "targets": [],
   "jobs": [],
-  "character_top_tags": []
+  "character_top_tags": [],
+  "my_role": "editor"
 });
 
 /** 과제 목록(GET /projects) — 편집자로 받았다. 제 과제(owner)와 구성원 과제(editor), 카드마다 등급 · 수명 주기 · 코퍼스 제외 · 내 역할. */
@@ -3070,4 +3075,587 @@ export const coverageJobTwoPanels = sample<NonNullable<CoverageJob>>()({
       "event_idle_s": 0
     }
   ]
+});
+
+/**
+ * 비교 본문(GET /diffs/{id}?part=diff — MCP risk_get_diff(part='diff') 와 같은 함수) — 이 가지의 실제 생산자(합성 다건 syn40 기본 씨앗 →
+ * 동결 → create_diff)가 쓴 것을 층마다 앞 항목 하나 · 사건은 주체 열쇠 꼴(부품 dn · asm: · contact# · dim: · [dn, metric])마다 하나로
+ * 줄였다(요약문은 앞 네 줄, stats 는 줄이기 전 그대로). 최상위 pair_kind 와 노드가 아닌 주체 열쇠 넷은 rr_diff.v1 계약에 적혔다
+ * (HWAXRisk context-notes OI-1).
+ */
+export const diffDocSyn40 = sample<DiffDoc>()({
+  "base": {
+    "ir_hash": "27a577d0712db2b726ffecfa49ec2eba70c2c054b8b2ef988506c82e7e31576e",
+    "label": "DV1",
+    "snapshot_id": "fc136c2947d5408aa5fc678231225938"
+  },
+  "character_seed": [
+    {
+      "cites": [
+        "c:6c26910abc0f",
+        "c:b26fea6947bb",
+        "c:d077d6aa6b52"
+      ],
+      "tag": "char:change_style:topology_change",
+      "text": "change_kind topology 25건"
+    }
+  ],
+  "comparability": {
+    "G7": {
+      "blocking": false,
+      "count": 0,
+      "detail": [
+        "reason=tol_keys_partial(4)"
+      ],
+      "effect": "none",
+      "key": "yardstick_parity",
+      "pass": true,
+      "threshold": 0
+    },
+    "adapter_parity": true,
+    "app_version_parity": null,
+    "base_blocked": false,
+    "capture_parity": true,
+    "coordinate_ok": true,
+    "ecad": {
+      "adapter_parity": true,
+      "base": "absent",
+      "excluded_reason": null,
+      "target": "absent"
+    },
+    "ir_version_parity": true,
+    "partial_any": false,
+    "primary_source_parity": true,
+    "result_parity": true,
+    "result_present": true,
+    "result_reason": null,
+    "scope_parity": true,
+    "source_schema_drift_kinds": [],
+    "source_schema_parity": true,
+    "target_blocked": false,
+    "tol_keys_known": true,
+    "tol_parity": true,
+    "unit_parity": true
+  },
+  "correspondence": {
+    "fuzzy_skipped": null,
+    "matched": [
+      {
+        "ckey": "ck:ffff81eb3ae7",
+        "dn": "p:016702820e11",
+        "method": "exact_path",
+        "nid_base": "p:016702820e11",
+        "nid_target": "p:016702820e11",
+        "score": 1.0,
+        "status": "auto"
+      }
+    ],
+    "method_counts": {
+      "exact_path": 72,
+      "fingerprint": 26,
+      "fuzzy": 0,
+      "ledger": 0,
+      "manual": 0,
+      "name_norm": 4,
+      "pid_map": 0
+    },
+    "pending_n": 0,
+    "unmatched_base": [
+      "p:22ed6efeab7f"
+    ],
+    "unmatched_target": [
+      "p:1efba85c7d22"
+    ]
+  },
+  "created_at": 1793510615,
+  "diff_id": "ffd9b846579942b9a973f2951604194d",
+  "diff_version": "1.0",
+  "pair_kind": "same_project_revision",
+  "parametric": {
+    "dims_delta": [
+      {
+        "after": 1.96,
+        "attr": "value",
+        "before": 1.96,
+        "cid": "c:e74662569e88",
+        "delta": 0.0,
+        "design_relevant": true,
+        "excluded_reason": null,
+        "flag": "noise",
+        "lower_bound": false,
+        "method": "measured",
+        "name": "bg_t1",
+        "null_reason": null,
+        "rel_delta": 0.0,
+        "size_pct": null,
+        "subject_key": "dim:bg_t1",
+        "text": "bg_t1 1.960→1.960 mm (+0.0%) [c:e74662569e88] [d:bg_t1]",
+        "unit": "mm"
+      }
+    ],
+    "edge_params": [
+      {
+        "after": 70.0,
+        "attr": "contact_area_est",
+        "before": null,
+        "cid": "c:01f0a307c2ad",
+        "ckey_a": "ck:59d75fb78cf9",
+        "ckey_b": "ck:5d9066b47c17",
+        "delta": null,
+        "design_relevant": true,
+        "dn_a": "p:6bd67913cd71",
+        "dn_b": "p:f523152dd621",
+        "eid_base": "e:d3bd671cb5a8",
+        "eid_target": "e:d3bd671cb5a8",
+        "excluded_reason": "null_one_side",
+        "flag": "null_one_side",
+        "kind_family": "iface",
+        "lower_bound": false,
+        "rel_delta": null,
+        "size_pct": null,
+        "subject_key": "ck:59d75fb78cf9|ck:5d9066b47c17",
+        "text": "p:6bd67913cd71↔p:f523152dd621 contact_area_est 미측정→70.0 mm2(밴드면적) [c:01f0a307c2ad]",
+        "unit": "mm2"
+      }
+    ],
+    "materials": [
+      {
+        "after": "al6061",
+        "before": "abs",
+        "cid": "c:4a8fbd5ba876",
+        "ckey": "ck:63cc6c0ebda5",
+        "design_relevant": true,
+        "dn": "p:db1f4dca286d",
+        "excluded_reason": null,
+        "field": "material_norm",
+        "flag": "changed",
+        "text": "강화유리 WINDOW material.material_norm abs→al6061 [c:4a8fbd5ba876]"
+      }
+    ],
+    "node_params": [
+      {
+        "after": 0.675,
+        "attr": "centroid_world[2]",
+        "before": 0.675,
+        "cid": "c:00176f8037b5",
+        "ckey": "ck:2bb6a3e8be43",
+        "delta": 0.0,
+        "design_relevant": true,
+        "dn": "p:9e8f04705e92",
+        "excluded_reason": null,
+        "flag": "noise",
+        "lower_bound": false,
+        "rel_delta": 0.0,
+        "size_pct": 85,
+        "subject_key": "ck:2bb6a3e8be43",
+        "text": "SPRING_PERADA centroid_world_z 0.675→0.675 mm (+0.0%) [c:00176f8037b5]",
+        "unit": "mm"
+      }
+    ],
+    "result_delta": [
+      {
+        "after": 0.108,
+        "attr": "worst_disp",
+        "before": 0.108,
+        "case_key_after": null,
+        "case_key_before": null,
+        "cid": "c:0133919eb378",
+        "ckey": "ck:22148f7afff6",
+        "delta": 0.0,
+        "design_relevant": true,
+        "dn": "p:8316fcc3edcb",
+        "excluded_reason": null,
+        "flag": "noise",
+        "kind": "sphere",
+        "lower_bound": false,
+        "metric": "worst_disp",
+        "pid_after": 3,
+        "pid_before": 3,
+        "rel_delta": 0.0,
+        "size_pct": null,
+        "subject_key": "ck:22148f7afff6",
+        "text": "p:8316fcc3edcb worst_disp 0.108→0.108 mm (+0.0%) [c:0133919eb378]",
+        "unit": "mm"
+      }
+    ],
+    "rollup_delta": [
+      {
+        "asm_key": "syn_phone",
+        "cid": "c:09f695202b80",
+        "design_relevant": true,
+        "edges_external": {
+          "after": 0,
+          "before": 0
+        },
+        "edges_internal": {
+          "after": 47,
+          "before": 47
+        },
+        "excluded_reason": null,
+        "n_leaf": {
+          "after": 69,
+          "before": 70
+        },
+        "orphan_leaf": {
+          "after": 27,
+          "before": 29
+        },
+        "path_prefix": "syn_phone",
+        "text": "asm:syn_phone 리프 70→69 [c:09f695202b80]"
+      }
+    ]
+  },
+  "project_id": "c88db46ea9f1408e8f33af6a5dfcf6ba",
+  "rule_version": "rules-1.0",
+  "semantic": {
+    "blocked_by": null,
+    "events": [
+      {
+        "after": 6,
+        "before": 5,
+        "change_kind": "topology",
+        "cid": "c:6c26910abc0f",
+        "code": "asm.rollup_changed",
+        "confidence": "high",
+        "derived_from": [
+          "c:7fac4e30e937"
+        ],
+        "design_relevant": true,
+        "excluded_reason": null,
+        "lower_bound": false,
+        "magnitude": {
+          "rel": null,
+          "unit": null,
+          "value": null
+        },
+        "neighborhood": {
+          "ckeys": [],
+          "k": 1
+        },
+        "subject": {
+          "ckeys": [],
+          "dns": [
+            "asm:syn_phone/rear_asm"
+          ],
+          "eids": {},
+          "names": [
+            "syn_phone/rear_asm"
+          ]
+        },
+        "subject_key": "asm:syn_phone/rear_asm",
+        "text": "asm:syn_phone/rear_asm edges_internal 5→6 · external 3→3 [c:6c26910abc0f]",
+        "unconfirmed": false
+      },
+      {
+        "after": null,
+        "before": null,
+        "change_kind": "topology",
+        "cid": "c:f63d73bbc718",
+        "code": "contact.added",
+        "confidence": "medium",
+        "derived_from": [
+          "c:74cc28f72ab6"
+        ],
+        "design_relevant": true,
+        "excluded_reason": null,
+        "lower_bound": false,
+        "magnitude": {
+          "rel": null,
+          "unit": null,
+          "value": null
+        },
+        "neighborhood": {
+          "ckeys": [],
+          "k": 1
+        },
+        "subject": {
+          "ckeys": [
+            "ck:cbb23e443f48",
+            "ck:1d5150b2dd17"
+          ],
+          "dns": [
+            "p:b72f6a187949",
+            "p:f478722bb7ed"
+          ],
+          "eids": {
+            "base": null,
+            "target": "e:060fd94d4ed2"
+          },
+          "names": [
+            "p:b72f6a187949",
+            "p:f478722bb7ed"
+          ]
+        },
+        "subject_key": "ck:1d5150b2dd17|ck:cbb23e443f48",
+        "text": "p:b72f6a187949↔p:f478722bb7ed contact.added [c:f63d73bbc718]",
+        "unconfirmed": false
+      },
+      {
+        "after": 3,
+        "before": 2,
+        "change_kind": "topology",
+        "cid": "c:384d67c74cee",
+        "code": "contact.scope_changed",
+        "confidence": "high",
+        "derived_from": [
+          "c:ba132c316770"
+        ],
+        "design_relevant": true,
+        "excluded_reason": null,
+        "lower_bound": false,
+        "magnitude": {
+          "rel": null,
+          "unit": null,
+          "value": null
+        },
+        "neighborhood": {
+          "ckeys": [],
+          "k": 1
+        },
+        "subject": {
+          "ckeys": [],
+          "dns": [
+            "contact#16"
+          ],
+          "eids": {},
+          "names": [
+            "contact#16"
+          ]
+        },
+        "subject_key": "contact#16",
+        "text": "contact#16 scope 멤버 2→3 [c:384d67c74cee]",
+        "unconfirmed": false
+      },
+      {
+        "after": 1.222,
+        "before": 1.63,
+        "change_kind": "dimension",
+        "cid": "c:6535ff633104",
+        "code": "dim.named_changed",
+        "confidence": "high",
+        "derived_from": [
+          "c:089e51f7bd08"
+        ],
+        "design_relevant": true,
+        "excluded_reason": null,
+        "lower_bound": false,
+        "magnitude": {
+          "rel": -0.250307,
+          "unit": "mm",
+          "value": -0.408
+        },
+        "neighborhood": {
+          "ckeys": [],
+          "k": 1
+        },
+        "subject": {
+          "ckeys": [],
+          "dns": [
+            "dim:syn_holder_tinuda"
+          ],
+          "eids": {},
+          "names": [
+            "syn_holder_tinuda"
+          ]
+        },
+        "subject_key": "dim:syn_holder_tinuda",
+        "text": "syn_holder_tinuda 1.630→1.222 mm (−25.0%) [c:6535ff633104]",
+        "unconfirmed": false
+      },
+      {
+        "after": 0.734,
+        "before": 0.565,
+        "change_kind": "result",
+        "cid": "c:33036e3ffdff",
+        "code": "result.part_metric_shift",
+        "confidence": "high",
+        "derived_from": [
+          "c:ac8699e1dfa2"
+        ],
+        "design_relevant": true,
+        "excluded_reason": null,
+        "lower_bound": false,
+        "magnitude": {
+          "rel": 0.299115,
+          "unit": "mm",
+          "value": 0.169
+        },
+        "neighborhood": {
+          "ckeys": [],
+          "k": 1
+        },
+        "subject": {
+          "ckeys": [
+            "ck:db8062fcff37"
+          ],
+          "dns": [
+            "p:65bf9cd8552b",
+            "worst_disp"
+          ],
+          "eids": {},
+          "names": [
+            "p:65bf9cd8552b"
+          ]
+        },
+        "subject_key": "ck:db8062fcff37",
+        "text": "p:65bf9cd8552b worst_disp 0.565→0.734 mm (+29.9%) [c:33036e3ffdff]",
+        "unconfirmed": false
+      }
+    ]
+  },
+  "stats": {
+    "edges_added": 12,
+    "edges_kind_changed": 4,
+    "edges_removed": 13,
+    "events": 54,
+    "events_by_change_kind": {
+      "consistency": 1,
+      "count": 5,
+      "dimension": 14,
+      "discretization": 1,
+      "material": 1,
+      "parameter": 1,
+      "placement": 2,
+      "result": 3,
+      "topology": 25,
+      "type": 1
+    },
+    "events_by_confidence": {
+      "high": 24,
+      "low": 4,
+      "medium": 26
+    },
+    "excluded_by_reason": {
+      "null_one_side": 6
+    },
+    "nodes_added": 1,
+    "nodes_matched": 102,
+    "nodes_removed": 2,
+    "params_changed": 48,
+    "params_excluded": 6,
+    "params_noise": 1011
+  },
+  "structural": {
+    "dyna": {
+      "contacts_added": [
+        "c:74cc28f72ab6"
+      ],
+      "contacts_removed": [
+        "c:402e8a44a508"
+      ],
+      "scope_changed": [
+        {
+          "cid": "c:ba132c316770",
+          "contact_index": 16,
+          "dns_after": [
+            "p:38d7f8fdd922",
+            "p:8316fcc3edcb",
+            "p:b2d7508f0dc1"
+          ],
+          "dns_before": [
+            "p:8316fcc3edcb",
+            "p:b2d7508f0dc1"
+          ],
+          "pids_after": [
+            "p:03d11e0181c5",
+            "p:a864133aef88",
+            "p:fc934073360a"
+          ],
+          "pids_before": [
+            "p:a864133aef88",
+            "p:fc934073360a"
+          ],
+          "text": "contact#16 scope 멤버 2→3 [c:ba132c316770]"
+        }
+      ]
+    },
+    "edge_changes": [
+      {
+        "cid": "c:10c7075f20ce",
+        "ckey_a": "ck:339b26192529",
+        "ckey_b": "ck:859370414198",
+        "confidence": "medium",
+        "cross_file": false,
+        "dn_a": "p:9a33cdde40ba",
+        "dn_b": "p:b6c465121a88",
+        "eid_base": "e:1cf154c06c8b",
+        "eid_target": null,
+        "excluded_reason": null,
+        "kind_family": "hier",
+        "kind_from": "part_of",
+        "kind_to": null,
+        "op": "removed",
+        "rank_delta": null,
+        "rank_from": null,
+        "rank_to": null,
+        "status_from": "auto",
+        "status_to": null,
+        "text": "p:9a33cdde40ba↔p:b6c465121a88 hier removed [c:10c7075f20ce]"
+      }
+    ],
+    "hierarchy_moves": [
+      {
+        "asm_key_from": "syn_phone/camera_asm",
+        "asm_key_to": "syn_phone/display_asm",
+        "cid": "c:24b1fd05c5d2",
+        "ckey": "ck:7d9c64a3ee61",
+        "confidence": "medium",
+        "correspondence_method": "fingerprint",
+        "correspondence_score": 0.95,
+        "dn": "p:48e65655f30c",
+        "domain": "mcad",
+        "excluded_reason": null,
+        "kind": "part",
+        "label": "PLATE_VUNUDA",
+        "neighborhood_1hop": [],
+        "nid_base": "p:48e65655f30c",
+        "nid_target": "p:90ec62f071ae",
+        "op": "moved_in_tree",
+        "text": "PLATE_VUNUDA moved_in_tree [c:24b1fd05c5d2]"
+      }
+    ],
+    "node_changes": [
+      {
+        "asm_key_from": "syn_phone/camera_asm",
+        "asm_key_to": "syn_phone/display_asm",
+        "cid": "c:24b1fd05c5d2",
+        "ckey": "ck:7d9c64a3ee61",
+        "confidence": "medium",
+        "correspondence_method": "fingerprint",
+        "correspondence_score": 0.95,
+        "dn": "p:48e65655f30c",
+        "domain": "mcad",
+        "excluded_reason": null,
+        "kind": "part",
+        "label": "PLATE_VUNUDA",
+        "neighborhood_1hop": [],
+        "nid_base": "p:48e65655f30c",
+        "nid_target": "p:90ec62f071ae",
+        "op": "moved_in_tree",
+        "text": "PLATE_VUNUDA moved_in_tree [c:24b1fd05c5d2]"
+      }
+    ],
+    "orphans_delta": {
+      "base": [
+        "p:016702820e11"
+      ],
+      "became_orphan": [
+        "p:1efba85c7d22"
+      ],
+      "left_orphan": [
+        "p:22ed6efeab7f"
+      ],
+      "target": [
+        "p:016702820e11"
+      ]
+    }
+  },
+  "summary_status": "ok",
+  "summary_text": "[대상] base «DV1» fc136c29 ir=27a577d0712d → target «DV2» 664a7fcf ir=8f567d6e6526 [sig:ir_hash]\n[비교가능성] tol_parity=true · result_parity=true · unit_parity=true · scope_parity=true · coordinate_ok=true · same-as pending 0 · 제외 null_one_side 6건 [gate:G7]\n[구조] +1파트 −2파트 교체 1 [c:372c494ddc0c] · 계면 +12 −13 [c:10c7075f20ce] · rank 상승 1 하락 1 [c:23b06a04d77d] · 간섭 신규 1 해소 1 · 고아 +4 −6 · 롤업 변화 9 [c:09f695202b80]\n[의미] topology: «p:6bd67913cd71↔p:f523152dd621 kind interference→tied (rank 3→2)» [c:14f07f347510] · «p:23a0f1887d58↔p:844488beab72 kind tied→touching (rank 2→1)» [c:bdf1d0e48e9e] · «p:77032ce25f2d↔p:ab8d0f9797a4 kind tied→interference (rank 2→3)» [c:4ff9b96c5122] · «p:16b0a01db0cc↔p:ed91f6c1b142 kind touching→tied (rank 1→2)» [c:b557f2434e6f] · «p:3a639645d76e↔p:90153dc5b73b iface.clearance_cleared (clearance)» [c:09ef5a2e10a7] · … 외 20건 | type: «CLAMP_RADADA part.replaced» [c:4329999c9a74] (confidence=low) | … 외 28건",
+  "target": {
+    "ir_hash": "8f567d6e6526467fbd377e50fdf600270453cb83aa73036b329590205a2ac402",
+    "label": "DV2",
+    "snapshot_id": "664a7fcf3c8d48e39127e828b4d8fae3"
+  },
+  "taxonomy_version": "1.2"
 });

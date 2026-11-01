@@ -4,8 +4,10 @@ import { isApiError, riskApi } from "../api/risk.api";
 import { KeyValueTable } from "./DataTable";
 import { Badge } from "./Badge";
 import { ErrorBanner } from "./StateBlocks";
+import { LockNote } from "./LockNote";
 import { Banner, Button, Mono, Select } from "../ui/primitives";
 import { fmtEpoch } from "../format";
+import { lowerClassificationLock, writeAccess } from "../lib/access";
 import {
   CLASSIFICATION_LABEL,
   LIFECYCLE_LABEL,
@@ -83,6 +85,10 @@ export function ProjectMetaCard({
   const closedAt = meta.lifecycle === "active" ? null : patched ? patched.closed_at : detail.project.closed_at;
   const control = visibilityControl(visibilityDenied ? "editor" : role, meta.mcp_visibility as McpVisibility | null);
   const editorLocked = role === "viewer";
+  // 보기는 메타를 바꾸지 못한다(편집자 이상) — 까닭을 카드 머리에 한 줄 보인다(OI-2).
+  const access = writeAccess(role);
+  // confidential → internal 은 주인만이다(plan §8.2.3 PATCH — 편집자는 403) — 편집자가 고른 낮추기는 '바꾸기' 를 잠근다(OI-2).
+  const lowerLock = lowerClassificationLock(role, classDraft, meta.classification);
   const withheld = withheldOps(detail);
   const noProduct = noProductLink(meta);
 
@@ -191,13 +197,14 @@ export function ProjectMetaCard({
 
   return (
     <>
+      <LockNote access={access} />
       <ErrorBanner error={error} />
       <KeyValueTable
         rows={[
           { label: "소유자", hint: "owner_sub", value: <Mono>{detail.project.owner_sub}</Mono> },
           {
             label: "내 역할",
-            hint: "members[me].role",
+            hint: "my_role",
             value: role ? <Badge tone="neutral">{ROLE_LABEL[role]}</Badge> : <span className="text-muted-foreground">모름</span>,
           },
           {
@@ -233,7 +240,8 @@ export function ProjectMetaCard({
                   type="button"
                   variant="outline"
                   size="sm"
-                  disabled={busy || editorLocked || classDraft === "" || classDraft === meta.classification}
+                  disabled={busy || editorLocked || lowerLock !== null || classDraft === "" || classDraft === meta.classification}
+                  title={lowerLock ?? access.reason ?? undefined}
                   onClick={applyClassification}
                 >
                   바꾸기

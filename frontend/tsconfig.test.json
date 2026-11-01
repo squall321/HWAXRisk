@@ -48,6 +48,15 @@
     "src/components/ReviewBoard.tsx",
     "src/components/RegistryCard.tsx",
     "src/components/IssuesCard.tsx",
-    "src/components/KeyLedgerPanel.tsx"
+    "src/components/KeyLedgerPanel.tsx",
+    "src/lib/access.ts",
+    "src/components/LockNote.tsx",
+    "src/components/UndeferForm.tsx",
+    "src/components/ReviewJobForm.tsx",
+    "src/components/HumanFindingForm.tsx",
+    "src/components/ClosureCard.tsx",
+    "src/components/SynthReport.tsx",
+    "src/components/CellGrid.tsx",
+    "src/components/SameAsResolver.tsx"
   ]
 }

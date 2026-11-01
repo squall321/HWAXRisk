@@ -17,7 +17,7 @@ from typing import Any
 import pytest
 
 import app.mcp_server as srv
-from app import brief, registry, routes
+from app import brief, identity, registry, routes
 from app.adh_client import AdhClient
 from tests import factories
 
@@ -367,6 +367,23 @@ def test_rest_gives_a_member_the_same_both_can_see_answer_as_mcp(world, monkeypa
     assert owners["corpus_n"] == 6 and [(e["project_id"], e["hops"]) for e in owners["lineage"]] == [(step1, 1), (step2, 2)]
     assert sorted(c["cluster_key"] for c in routes.get_precedents(diff_id=diff_id, ident=owner)["clusters"]) == [
         "clu-hidden", "clu-mine"]
+
+
+def test_rest_gives_an_admin_the_owners_answer(world):
+    """관리자(risk_admin_roles — 구성원이 아니다)는 전 과제를 읽는다(포털 plan §0.6 · §5.2.1, 사용자 결정 11-01 · OI-5) — 웹의 유사 과제 ·
+    선례는 주인의 답 그대로다(다른 과제를 관리자의 소유 ∪ 구성원 과제로 좁히지 않는다). 종전에는 둘 다 404 였다."""
+    store, project, mine = world["store"], world["project"], world["mine"]
+    owner = factories.ident(OWNER)
+    admin = identity.Identity(email="admin@example.com", display_name="관리자", role="admin", organization="qa",
+                              anonymous=False, source="bearer")
+    step1 = routes.create_project(routes.ProjectBody(code="P-NEXT", name="다음 리비전", classification="internal",
+                                                     predecessor_project_id=project), ident=owner)["id"]
+    _registry(store, _target(store, _snapshot_of(store, mine[1]), OWNER), OWNER, "clu-hidden", world["subject"])
+    diff_id = factories.make_diff(store, _snapshot_of(store, mine[0]), _snapshot_of(store, project))["diff_id"]
+    owners = (routes.get_similar(project, k=K, ident=owner), routes.get_precedents(diff_id=diff_id, ident=owner))
+    assert owners[0]["corpus_n"] == 6 and [e["project_id"] for e in owners[0]["lineage"]] == [step1]
+    assert sorted(c["cluster_key"] for c in owners[1]["clusters"]) == ["clu-hidden", "clu-mine"]
+    assert (routes.get_similar(project, k=K, ident=admin), routes.get_precedents(diff_id=diff_id, ident=admin)) == owners
 
 
 # ---------------------------------------------------------------- AIDataHub(D46 — 과제 거름 없이는 찾지 않는다)

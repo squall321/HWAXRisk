@@ -20,7 +20,7 @@ import pytest
 
 import app.mcp_server as srv
 from app import brief as brief_module
-from app import field_source, routes, runner
+from app import common, field_source, identity, routes, runner
 from tests import factories
 from tests.rr.test_review1_stranger import (CASES, GET_CASES, GET_EXPECT, MCP_CASES, MCP_EXEMPT, OTHER, OWNER, P, _answer,
                                             _mcp, ledger, template)  # noqa: F401 — 원장 픽스처 둘을 이 모듈에서 쓴다
@@ -38,6 +38,9 @@ MEMBER_GET_EXEMPT: dict[tuple[str, str], str] = {
 # 부른 사람에 매인 칸 — 구성원과 주인의 답이 이 칸에서만 갈린다.
 CALLER_FIELDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("GET", P + "/part-keys/{ckey}"): ("mine",),
+    # 부른 사람의 역할 — 화면이 쓰기 단추를 가른다(OI-2).
+    ("GET", P + "/projects/{project_id}"): ("my_role",),
+    ("GET", P + "/targets/{target_key}/coverage"): ("my_role",),
 }
 
 # MCP — 읽기 도구는 구성원이 주인과 같은 답을 받는다. 구성원이 주인과 같은 답을 받지 않는 것과 쓰기 도구는 까닭과 함께 따로 적는다(새
@@ -50,8 +53,8 @@ MCP_READS: tuple[str, ...] = (
 MCP_MEMBER_EXEMPT: dict[str, str] = {
     "risk_get_brief": ("브리프 토큰의 패널을 동결하고 패널 품질을 쓴다 — 결과를 낼 수 있는 사람(그 대상 과제의 주인 · 편집자, MB-14)만이고"
                        " 보기는 role_insufficient 다(RV-1 — tests/rr/test_editor_writes.py)"),
-    "risk_next_step": ("주인의 진행 길잡이 — 주인 과제의 단계만 걷는다. 편집자도 그 쓰기(소스 · 캡처 · 대상 · 잡)를 하게 됐지만(MB-14)"
-                       " 길잡이는 넓히지 않았다(남긴 것)"),
+    "risk_next_step": ("구성원에게도 연다(OI-3) — 그러나 답이 부른 사람에게 매인다(project.my_role · 자격 칸은 부른 사람의 등록 · 보기는"
+                       " 쓰기 걸음 대신 role_insufficient 막힘)라 주인과 같은 답이 아니다 — 아래 길잡이 시험이 따로 본다"),
 }
 MCP_WRITES: tuple[str, ...] = (
     "risk_create_project", "risk_submit_panel_result", "risk_add_finding", "risk_add_source", "risk_capture_snapshot",
@@ -111,6 +114,17 @@ def test_editors_and_viewers_read_what_the_owner_reads(members, case):
         assert _body(stranger)["total"] == 0 and _body(owner)["total"] > 0, (case, owner[2][:200])
 
 
+def test_the_project_and_target_screens_carry_the_callers_role(members):
+    """과제 상세 · 진행판의 `my_role` 은 부른 사람의 역할이다(과제 목록 카드와 같은 판정 — owner 는 과제 행의 주인 열, 구성원은 편집자 ·
+    보기 행, 구성원이 아닌 관리자는 null) — 화면이 쓰기 단추를 이 값으로 가른다(OI-2). 남은 그대로 없는 것과 같은 404 다."""
+    store, ids = members
+    for who, role in ((factories.ident(OWNER), "owner"), (factories.ident(EDITOR), "editor"), (factories.ident(VIEWER), "viewer"),
+                      (ADMIN, None)):
+        assert routes.get_project(ids["project"], ident=who)["my_role"] == role, who.email
+        assert routes.get_coverage(ids["target"], ident=who)["my_role"] == role, who.email
+    assert _answer(lambda: routes.get_project(ids["project"], ident=factories.ident(OTHER)))[1] == 404
+
+
 def test_the_brief_is_a_write_that_editors_get_and_viewers_do_not(members):
     """면제한 브리프(패널 편성 · 토큰 발급)는 쓰기 문이다(MB-14) — 편집자는 주인과 같은 답(이 카드 대조 대상은 422 웹 전용)이고, 보기는 403
     role_insufficient, 남은 없는 대상과 같은 404 다. 보기 · 남의 부름은 패널 · 토큰을 세우지 않는다."""
@@ -143,7 +157,7 @@ def test_the_lists_without_a_project_filter_carry_the_member_projects(members):
 
 def test_member_refs_resolve_in_the_snapshot_and_diff_scope(members):
     """스냅샷 · 비교 스코프의 참조(게이트 · 변경 항목)도 구성원이 연다 — 종전에는 스코프를 주인으로만 봐(D50 '그대로 둔 것') 구성원이
-    404 였다. 남은 없는 스냅샷 · 비교와 같은 404 다."""
+    404 였다. 관리자(risk_admin_roles — 구성원이 아니다)도 같은 답이다(OI-5). 남은 없는 스냅샷 · 비교와 같은 404 다."""
     store, ids = members
     cid = store.query_one("SELECT cid FROM rr_diff_events WHERE diff_id = ? ORDER BY cid LIMIT 1", (ids["diff"],))["cid"]
     scoped = {
@@ -153,8 +167,8 @@ def test_member_refs_resolve_in_the_snapshot_and_diff_scope(members):
     for name, call in scoped.items():
         owner = _answer(lambda call=call: call(ids, factories.ident(OWNER)))
         assert owner[1] == 200, (name, owner[:3])
-        for who in MEMBERS:
-            got = _answer(lambda call=call, who=who: call(ids, factories.ident(who)))
+        for who in (*MEMBERS, ADMIN):
+            got = _answer(lambda call=call, who=who: call(ids, who if isinstance(who, identity.Identity) else factories.ident(who)))
             assert got[1] == 200, (name, who, got[:3])
             assert _body(got) == _body(owner), (name, who)
         theirs = _answer(lambda call=call: call(ids, factories.ident(OTHER)))
@@ -193,6 +207,175 @@ def test_the_mcp_project_list_gives_members_their_role(members, monkeypatch):
     for who, role in ((OWNER, "owner"), (EDITOR, "editor"), (VIEWER, "viewer")):
         factories.act_as_delegate(monkeypatch, who)
         assert [(c["id"], c["my_role"]) for c in srv.risk_list_projects()["projects"]] == [(ids["project"], role)], who
+
+
+# ---------------------------------------------------------------- 길잡이(risk_next_step) — 구성원에게(OI-3)
+def _guide(monkeypatch, who: str, **kwargs) -> dict:
+    factories.act_as_delegate(monkeypatch, who)
+    code, _status, text, _ = _mcp(lambda: srv.risk_next_step(**kwargs))
+    out = json.loads(text)
+    assert code == "ok" or "error" in out, out
+    return out
+
+
+def _same_walk(owner: dict, member: dict) -> None:
+    assert (member["where"], member["web"], member["notes"]) == (owner["where"], owner["web"], owner["notes"])
+    assert {k: v for k, v in member["project"].items() if k != "my_role"} == {
+        k: v for k, v in owner["project"].items() if k != "my_role"}
+    assert {k: v for k, v in member["facts"].items() if k != "credentials"} == {
+        k: v for k, v in owner["facts"].items() if k != "credentials"}
+
+
+def test_the_guide_opens_to_members_and_a_viewer_gets_no_write_steps(members, monkeypatch):
+    """길잡이는 구성원도 연다(사용자 결정 11-01 · OI-3) — 웹 구성원 읽기와 같은 문으로 과제 주인의 행을 걷는다(같은 단계 · 사실). 편집자는
+    주인과 같은 걸음이고(쓰기는 편집자 이상 — MB-14), 보기는 쓰기 걸음 대신 role_insufficient 막힘 하나다(그 걸음의 도구를 싣는다 —
+    조용히 빼지 않는다). 종전에는 구성원이 없는 과제와 같은 E404 였다. 세 단계를 걷는다 — 소스가 없다(걸음이 쓰기뿐), 소스를 붙여 끝까지
+    걷는다(종합 보고서까지 선 대상 — 걸음이 읽기뿐이라 보기도 같다), 새 리비전을 얼렸다(앞 단계를 다 지나 비교를 만드는 쓰기 걸음)."""
+    store, ids = members
+    for phase in ("sources", "done", "diff"):
+        if phase == "done":
+            routes.add_source(ids["project"], routes.SourceBody(kind="mcad", ref={"stepforge_project_id": "sf-1"}),
+                              ident=factories.ident(OWNER))
+        elif phase == "diff":
+            factories.make_snapshot(store, ids["project"], factories.fixture_adapter_results(), label="DV3",
+                                    captured_at=factories.CAPTURED_AT + 3 * 86400)
+        owner = _guide(monkeypatch, OWNER, project_id=ids["project"])
+        editor = _guide(monkeypatch, EDITOR, project_id=ids["project"])
+        viewer = _guide(monkeypatch, VIEWER, project_id=ids["project"])
+        assert owner["where"] == phase, (phase, owner["where"])
+        assert [g["project"]["my_role"] for g in (owner, editor, viewer)] == ["owner", "editor", "viewer"]
+        for member in (editor, viewer):
+            _same_walk(owner, member)
+        assert (editor["next"], editor["blocked"]) == (owner["next"], owner["blocked"]), phase
+        writes = [s for s in owner["next"] if s["write"]]
+        assert bool(writes) == (phase != "done"), (phase, owner["next"])      # 보기의 갈림이 빈 통과가 아니다
+        assert viewer["next"] == [s for s in owner["next"] if not s["write"]], phase
+        refused = [b for b in viewer["blocked"] if b["code"] == "role_insufficient"]
+        assert [b["tools"] for b in refused] == ([list(dict.fromkeys(s["tool"] for s in writes))] if writes else []), refused
+        assert [b for b in viewer["blocked"] if b["code"] != "role_insufficient"] == owner["blocked"]
+    assert "coverage" not in owner["facts"] and owner["facts"]["pair"]["target_snapshot_id"] != ids["target_snapshot"]
+
+
+def test_the_guide_lists_member_projects_and_keeps_strangers_out(members, monkeypatch):
+    """과제 없이 부르면 내 과제 목록이다 — 구성원 과제가 역할과 함께 서고, 남은 그 과제를 목록에서도 열어서도 보지 못한다(없는 과제와 같은
+    답 — 남 숨김)."""
+    store, ids = members
+    for who, role in ((OWNER, "owner"), (EDITOR, "editor"), (VIEWER, "viewer")):
+        listed = _guide(monkeypatch, who)["projects"]
+        assert [(p["id"], p["my_role"]) for p in listed] == [(ids["project"], role)], who
+    assert _guide(monkeypatch, OTHER)["projects"] == []
+    theirs = _guide(monkeypatch, OTHER, project_id=ids["project"])
+    missing = _guide(monkeypatch, OTHER, project_id="no-such-project")
+    assert theirs["error"] == missing["error"] == "E404"
+    assert json.dumps(theirs).replace(ids["project"], "<p>") == json.dumps(missing).replace("no-such-project", "<p>")
+
+
+def test_the_guide_reads_the_callers_own_registration(members, monkeypatch):
+    """자격 칸 — 등록 · 캡처는 부른 사람의 등록(동결은 시작한 사람의 PAT 로 읽는다 — MB-14), 러너는 요청자(부른 사람) → 잡 주인(과제 주인)
+    순서다. 주인만 PAT 가 있으면 편집자의 길잡이는 등록 없음 · 러너는 주인의 PAT 이고, 편집자가 등록하면 그 사람의 것이 된다."""
+    store, ids = members
+    owner = _guide(monkeypatch, OWNER, project_id=ids["project"])["facts"]["credentials"]
+    editor = _guide(monkeypatch, EDITOR, project_id=ids["project"])["facts"]["credentials"]
+    assert (owner["portal_pat"]["registered"], editor["portal_pat"]["registered"]) == (True, False)
+    assert (editor["runner"]["kind"], editor["runner"]["email"], editor["capture_mcp"]) == ("owner", OWNER, "service_pat")
+    store.upsert_credential(EDITOR, identity.encrypt_pat("pat-editor").decode("ascii"), "sub-e", EDITOR, "[]",
+                            common.now_epoch() + 30 * 86400)
+    editor = _guide(monkeypatch, EDITOR, project_id=ids["project"])["facts"]["credentials"]
+    assert (editor["portal_pat"]["registered"], editor["capture_mcp"]) == (True, "user_pat")
+    assert (editor["runner"]["kind"], editor["runner"]["email"]) == ("requester", EDITOR)
+
+
+def test_the_guide_does_not_walk_a_predecessor_the_member_cannot_read(members, monkeypatch):
+    """계보 과제(앞 리비전)는 과제 주인의 것이어야 하고(비교는 두 스냅샷의 주인이 같다) 구성원은 그 과제도 읽어야 한다 — 대응표 · 비교는 두
+    과제를 다 읽는 사람이 연다(MB-2). 뒤 과제만의 구성원에게 길잡이는 앞 과제의 스냅샷을 싣지 않고 까닭을 말한다(종전 코드는 구성원에게
+    열리지 않았다)."""
+    store, ids = members
+    later = routes.create_project(routes.ProjectBody(code="NEXT-REV", name="뒤 리비전", classification="internal",
+                                                     predecessor_project_id=ids["project"]), ident=factories.ident(OWNER))["id"]
+    routes.add_source(later, routes.SourceBody(kind="mcad", ref={"stepforge_project_id": "sf-2"}), ident=factories.ident(OWNER))
+    factories.make_snapshot(store, later, factories.fixture_adapter_results(), label="DV3")
+    routes.put_members(later, routes.MembersBody(members=[routes.MemberItem(email=ONE_SIDE, role="editor")]),
+                       ident=factories.ident(OWNER))
+    owner = _guide(monkeypatch, OWNER, project_id=later)
+    one_side = _guide(monkeypatch, ONE_SIDE, project_id=later)
+    assert owner["facts"]["pair"]["base_snapshot_id"] in {s["id"] for s in _guide(
+        monkeypatch, OWNER, project_id=ids["project"])["facts"]["snapshots"]}
+    assert "pair" not in one_side["facts"] and one_side["where"] == "revision", one_side["where"]
+    assert any("계보 과제(앞 리비전)를 읽을 수 없어" in n for n in one_side["notes"]), one_side["notes"]
+
+
+def test_the_guide_walks_only_the_owners_rows(members, monkeypatch):
+    """길잡이의 스냅샷 · 동결 잡은 과제 주인의 행만이다(과제 상세 · 구성원 읽기와 같은 거름) — 남이 주인의 과제에 매단 스냅샷(고침 전의
+    들여오기 — RD-10)은 싣지 않는다. 종전에는 그 행이 최신 스냅샷으로 서 주인의 길잡이가 대응표 조회에서 E404 로 끊겼다."""
+    store, ids = members
+    routes.add_source(ids["project"], routes.SourceBody(kind="mcad", ref={"stepforge_project_id": "sf-1"}),
+                      ident=factories.ident(OWNER))
+    forged_snapshot, _forged_target = _forge(store, ids)
+    factories.seed_raw(store, "rr_snapshot_jobs", {
+        "id": "j" * 32, "project_id": ids["project"], "owner_sub": OTHER, "label": "남의 동결", "kinds_json": '["mcad"]',
+        "state": "failed", "error_json": '{"stage": "capture", "message": "남의 잡"}', "created_at": common.now_epoch()},
+        reason="고침 전의 들여오기가 남긴 남의 동결 잡 행 — 이제 들여오기는 parent_not_owned 로 막는다(RD-10)")
+    for who in (OWNER, *MEMBERS):
+        out = _guide(monkeypatch, who, project_id=ids["project"])
+        assert "error" not in out, (who, out)
+        assert forged_snapshot not in {s["id"] for s in out["facts"]["snapshots"]}, who
+        assert "j" * 32 not in {j["id"] for j in out["facts"]["snapshot_jobs"]}, who
+        assert (out["where"], out["facts"]["pair"]["target_snapshot_id"]) == ("done", ids["target_snapshot"]), who
+
+
+# ---------------------------------------------------------------- 관리자 읽기 우회(OI-5 — 포털 plan §0.6 · §5.2.1)
+ADMIN = identity.Identity(email="admin@example.com", display_name="관리자", role="admin", organization="qa", anonymous=False,
+                          source="bearer")
+# 관리자가 주인과 같은 답을 받지 않는 읽기 — 까닭이 있는 것만. 목록 셋은 발견이라 소유 ∪ 구성원 그대로다(관리자도 — 넓히지 않았다, OI-5).
+ADMIN_GET_EXEMPT: dict[tuple[str, str], str] = {
+    **MEMBER_GET_EXEMPT,
+    **{case: "발견 목록 — 소유 ∪ 구성원(MB-3) 그대로다. 관리자는 과제를 링크 · id 로 연다(OI-5 남긴 것)" for case in GET_EXPECT},
+}
+
+
+@pytest.mark.parametrize("case", sorted(set(GET_CASES) - set(ADMIN_GET_EXEMPT)), ids=lambda c: f"{c[0]} {c[1][len(P):]}")
+def test_an_admin_reads_what_the_owner_reads(members, case):
+    """관리자(risk_admin_roles)는 전 과제의 편집자이고(포털 plan §0.6 — owner ⊃ editor ⊃ viewer(읽기), §5.2.1 '멤버 행 없이 editor 로
+    통과') 쓰기에서는 이미 그랬다(MB-14) — 읽기도 구성원과 같은 문으로 연다(사용자 결정 11-01 · OI-5). 구성원이 아닌 관리자가 주인과 같은
+    답(200, 글 전체)을 받는다. 종전에는 과제 상세부터 없는 것과 같은 404 라 관리자가 쓰는 대상의 읽기 화면이 404 였다(MB-19)."""
+    store, ids = members
+    call, _supplied = GET_CASES[case]
+    drop = CALLER_FIELDS.get(case, ())
+    owner = _answer(lambda: call(ids, factories.ident(OWNER)))
+    got = _answer(lambda: call(ids, ADMIN))
+    assert got[1] == 200, (case, got[:3])
+    assert _body(got, drop) == _body(owner, drop), case
+
+
+def test_an_admin_opens_a_target_on_a_diff_it_now_reads(members):
+    """대상(diff) 만들기는 그 비교를 읽고(관리자는 이제 읽는다) 대상 과제의 편집자 이상이다(관리자는 편집자 — MB-14) — 관리자는 주인과 같은
+    답이다(이 비교에는 대상이 이미 열려 있어 둘 다 409 E409). 종전에는 비교를 읽는 판정이 관리자를 몰라 쓰기 문(_writer)의 관리자 우회까지
+    닿지 못하고 없는 비교와 같은 404 였다."""
+    store, ids = members
+    body = routes.TargetBody(kind="diff", ref_id=ids["diff"], consent=True)
+    owner = _answer(lambda: routes.create_target(body, ident=factories.ident(OWNER)))
+    got = _answer(lambda: routes.create_target(body, ident=ADMIN))
+    assert owner[:3] == got[:3] == ("E409", 409, f"이미 열린 타깃입니다 — {ids['target']}.{{}}"), (owner[:3], got[:3])
+
+
+def test_an_admin_keeps_the_discovery_lists_and_does_not_open_planted_rows(members, monkeypatch):
+    """넓히지 않은 것 — 목록 셋은 소유 ∪ 구성원 그대로라 구성원이 아닌 관리자에게 빈 목록이고, 남이 주인의 과제에 매단 행(RD-10)은 관리자에게도
+    없는 것과 같다(구성원 길과 같은 거름). MCP 길에는 관리자 우회가 없다(SEC-2 — 역할을 뗀다)."""
+    store, ids = members
+    for case in GET_EXPECT:
+        call, _supplied = GET_CASES[case]
+        assert _body(_answer(lambda call=call: call(ids, ADMIN)))["total"] == 0, case
+    forged_snapshot, forged_target = _forge(store, ids)
+    assert _answer(lambda: routes.get_snapshot(forged_snapshot, ident=ADMIN))[1] == 404
+    assert _answer(lambda: routes.get_coverage(forged_target, ident=ADMIN))[1] == 404
+    # 과제에 매이지 않은 원장 행(스냅샷 · 동결 잡이 없는 호출 원문)은 그 행의 주인만 연다 — 관리자가 읽는 것은 전 '과제' 다.
+    factories.seed_raw(store, "rr_snapshot_calls", {"call_id": "orphan-001", "job_id": "no-such-job", "owner_sub": OWNER, "seq": 1,
+                                                     "source_kind": "mcad", "channel": "mcp", "tool": "get_tree"},
+                       reason="과제를 가리키지 않는 호출 원문(잡 행이 지워진 옛 원장) — 생산자는 늘 잡 · 스냅샷과 함께 쓴다")
+    assert _answer(lambda: routes.get_ref("tool:orphan-001", ident=factories.ident(OWNER)))[1] == 200
+    assert _answer(lambda: routes.get_ref("tool:orphan-001", ident=ADMIN))[1] == 404
+    factories.act_as_delegate(monkeypatch, ADMIN.email)
+    assert _mcp(lambda: srv.risk_get_coverage(target_key=ids["target"]))[0] == "not_visible"
 
 
 # ---------------------------------------------------------------- 남이 그 과제에 매단 행(고침 전의 들여오기 — RD-10)
@@ -354,9 +537,8 @@ def test_a_diff_opens_to_who_reads_both_projects_and_follows_a_full_transfer(two
     factories.make_project(store, owner=OTHER, code="OTHER-OWN")       # 비교를 들여온 남도 제 과제가 있다(과제 주인이긴 하다)
     forged = dict(store.query_one("SELECT * FROM rr_diffs WHERE id = ?", (diff_id,)))
     forged.update(id="d" * 32, owner_sub=OTHER, base_snapshot_id="b" * 32, target_snapshot_id="c" * 32)   # (base, target) 는 유일하다
-    # 비교 본문은 주인의 것(생산자 diff.create_diff 가 쓴 것) 그대로다 — 생산자 diff_json 이 rr_diff.v1 밖이라(최상위 pair_kind · 조립품
-    # 주체 asm:… — context-notes MB-17 '남긴 것') 검증만 끈다. 이 시험이 어기려는 칸이 아니다.
-    factories.seed_raw(store, "rr_diffs", forged, validate=False,
+    # 비교 본문은 주인의 것(생산자 diff.create_diff 가 쓴 것) 그대로다 — rr_diff.v1 계약 안이라 검증을 지난다(context-notes OI-1).
+    factories.seed_raw(store, "rr_diffs", forged,
                        reason="고침 전의 들여오기가 남긴 남의 비교 행(남의 두 과제를 적었다) — 이제 들여오기는 parent_not_owned 로 막는다(RD-10) ·"
                               " 비교 본문은 주인의 것을 그대로 본뜬다")
 
@@ -495,7 +677,8 @@ class _Field:
 
 def test_requirement_voc_and_paper_refs_resolve_for_members(risk_store, monkeypatch):
     """과제 스코프가 참조 글에 없는 req · voc · paper 도 구성원이 연다 — 부른 사람의 것이 없으면 구성원인 과제(그 과제 주인의 행)의 요구 ·
-    브리프 호출 원장에서 찾는다(D50 '그대로 둔 것' 을 닫았다 — 등록부 인용을 눌러 보는 구성원이 404 였다). 남은 없는 참조와 같은 404 다."""
+    브리프 호출 원장에서 찾는다(D50 '그대로 둔 것' 을 닫았다 — 등록부 인용을 눌러 보는 구성원이 404 였다). 관리자(구성원이 아니다)도 같은
+    답이다 — 전 과제(그 과제 주인의 행)에서 찾는다(OI-5). 남은 없는 참조와 같은 404 다."""
     store = risk_store
     monkeypatch.setattr(routes, "get_store", lambda: store)
     owner = factories.ident(OWNER)
@@ -520,8 +703,9 @@ def test_requirement_voc_and_paper_refs_resolve_for_members(risk_store, monkeypa
                         ("paper:10.1000/xyz", "paper:10.1000/nope")):
         mine = _answer(lambda ref=ref: routes.get_ref(ref, ident=owner))
         assert mine[1] == 200, (ref, mine[:3])
-        for who in MEMBERS:
-            got = _answer(lambda ref=ref, who=who: routes.get_ref(ref, ident=factories.ident(who)))
+        for who in (*MEMBERS, ADMIN):
+            got = _answer(lambda ref=ref, who=who: routes.get_ref(
+                ref, ident=who if isinstance(who, identity.Identity) else factories.ident(who)))
             assert got[1] == 200, (ref, who, got[:3])
             assert _body(got) == _body(mine), (ref, who)
         theirs = _answer(lambda ref=ref: routes.get_ref(ref, ident=factories.ident(OTHER)))

@@ -3,9 +3,11 @@ import { useState } from "react";
 import { Plus } from "lucide-react";
 import { riskApi } from "../api/risk.api";
 import { ErrorBanner } from "./StateBlocks";
+import { LockNote } from "./LockNote";
 import { Badge } from "./Badge";
 import { Banner, Button, FormField, FormGrid, Input, Select, Textarea } from "../ui/primitives";
-import type { Direction, HumanFindingCreate, Judgement, Severity, TaxonomyAxis } from "../types";
+import { writeAccess } from "../lib/access";
+import type { Direction, HumanFindingCreate, Judgement, ProjectRole, Severity, TaxonomyAxis } from "../types";
 
 const DIRECTIONS: Direction[] = ["risk", "improvement", "neutral"];
 const SEVERITIES: Severity[] = ["경미", "중대", "치명"];
@@ -19,12 +21,16 @@ export function HumanFindingForm({
   targetKey,
   mechanisms,
   onCreated,
+  role = null,
 }: {
   targetKey: string;
   /** `GET /meta/taxonomy` 의 mechanism 축 — 어휘를 화면이 따로 갖지 않는다. */
   mechanisms: TaxonomyAxis[];
   onCreated: () => void;
+  /** 대상 과제의 내 역할 — 사람 finding 등록은 편집자 이상이다(OI-2, 모르면 잠그지 않는다). */
+  role?: ProjectRole | null;
 }) {
+  const access = writeAccess(role);
   const [open, setOpen] = useState(false);
   const [direction, setDirection] = useState<Direction>("risk");
   const [mechanism, setMechanism] = useState("unclassified");
@@ -85,10 +91,12 @@ export function HumanFindingForm({
   if (!open) {
     return (
       <div className="flex flex-wrap items-center gap-2">
-        <Button type="button" variant="outline" onClick={() => setOpen(true)}>
+        <Button type="button" variant="outline" onClick={() => setOpen(true)} disabled={!access.allowed}
+                title={access.reason ?? undefined}>
           <Plus className="size-4" aria-hidden="true" />
           리스크 직접 등록
         </Button>
+        <LockNote access={access} />
         <span className="text-sm text-muted-foreground">
           좌석이 못 본 것을 사람이 올립니다. 등록한 행은 표에 <Badge tone="info">사람</Badge> 로 보이고
           전문가 지지로 세지 않습니다.

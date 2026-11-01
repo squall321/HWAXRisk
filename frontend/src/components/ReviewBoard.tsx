@@ -4,6 +4,7 @@ import { riskApi } from "../api/risk.api";
 import { reopenedOf } from "../api/reviewErrors";
 import { Badge, JobStateBadge, LlmBadge, toneOf } from "./Badge";
 import { JobCancelConfirm } from "./JobCancelConfirm";
+import { LockNote } from "./LockNote";
 import { KeyValueTable } from "./DataTable";
 import { ReviewErrorBanner } from "./ReviewErrorBanner";
 import { SectionCard, VerbatimBlock } from "./SectionCard";
@@ -24,7 +25,8 @@ import {
   reopenedLine,
 } from "../lib/reviewView";
 import { fmtEpoch } from "../format";
-import type { CoverageReview, ReopenedExtra, ReviewJob, ReviewScope } from "../types";
+import { writeAccess, type WriteAccess } from "../lib/access";
+import type { CoverageReview, ProjectRole, ReopenedExtra, ReviewJob, ReviewScope } from "../types";
 
 /** 셈 칩 한 줄 — 0 은 흐리게(서버가 센 0 이라 '모름' 이 아니다). */
 function StateChips({ counts }: { counts: Record<string, number> }) {
@@ -63,7 +65,17 @@ function ConsentNumbers({ extra }: { extra: ReopenedExtra }) {
  * 검토 잡 한 줄과 조작. 보류는 `reopened_extra.hold` 로 가른다(holdView) — consent_extra 는 몫을 보이고 체크(미리 체크하지 않는다)한 뒤
  * `resume?consent=true`, max_calls 는 재개가 풀리지 않아 기다리는 셀 넘기기를 앞에 둔다. 일시정지 · 재개 · 취소는 잡 주인만이다.
  */
-function ReviewJobPanel({ job, targetKey, onChanged }: { job: ReviewJob; targetKey: string; onChanged: () => void }) {
+function ReviewJobPanel({
+  job,
+  targetKey,
+  onChanged,
+  access,
+}: {
+  job: ReviewJob;
+  targetKey: string;
+  onChanged: () => void;
+  access: WriteAccess;
+}) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
   /** 동의 체크 — 체크한 그 몫의 열쇠(consentAmountKey). 몫이 바뀌면 체크는 비어 보인다(미리 체크된 동의가 되지 않게). */
@@ -214,7 +226,8 @@ function ReviewJobPanel({ job, targetKey, onChanged }: { job: ReviewJob; targetK
             <span className="font-medium">이 몫의 호출에 동의하고 이어 돌립니다.</span>
           </label>
           <span className="flex flex-wrap items-center gap-2">
-            <Button type="button" size="sm" onClick={() => act("resume_consent")} disabled={busy || !consent}>
+            <Button type="button" size="sm" onClick={() => act("resume_consent")} disabled={busy || !consent || !access.allowed}
+                    title={access.reason ?? undefined}>
               동의하고 재개
             </Button>
             <span className="text-xs text-muted-foreground">동의하지 않으면 아래 '기다리는 셀 넘기기' 로 그 셀을 넘깁니다(차감 없음).</span>
@@ -227,14 +240,17 @@ function ReviewJobPanel({ job, targetKey, onChanged }: { job: ReviewJob; targetK
           재개합니다.
         </p>
       ) : null}
+      <LockNote access={access} />
       <div className="flex flex-wrap items-center gap-2">
         {hold.skipWaiting ? (
-          <Button type="button" onClick={() => setSkipping((v) => !v)} disabled={busy}>
+          <Button type="button" onClick={() => setSkipping((v) => !v)} disabled={busy || !access.allowed}
+                  title={access.reason ?? undefined}>
             기다리는 셀 넘기기…
           </Button>
         ) : null}
         {hold.resume === "plain" ? (
-          <Button type="button" variant="outline" onClick={() => act("resume")} disabled={busy}>
+          <Button type="button" variant="outline" onClick={() => act("resume")} disabled={busy || !access.allowed}
+                  title={access.reason ?? undefined}>
             재개
           </Button>
         ) : null}
@@ -244,12 +260,14 @@ function ReviewJobPanel({ job, targetKey, onChanged }: { job: ReviewJob; targetK
           </Button>
         ) : null}
         {live ? (
-          <Button type="button" variant="outline" onClick={() => act("pause")} disabled={busy}>
+          <Button type="button" variant="outline" onClick={() => act("pause")} disabled={busy || !access.allowed}
+                  title={access.reason ?? undefined}>
             일시정지
           </Button>
         ) : null}
         {live || job.state === "paused" ? (
-          <Button type="button" variant="outline" onClick={() => setCancelFor(job.id)} disabled={busy}>
+          <Button type="button" variant="outline" onClick={() => setCancelFor(job.id)} disabled={busy || !access.allowed}
+                  title={access.reason ?? undefined}>
             취소…
           </Button>
         ) : null}
@@ -294,11 +312,15 @@ export function ReviewBoard({
   review,
   targetKey,
   onChanged,
+  role = null,
 }: {
   review: CoverageReview;
   targetKey: string;
   onChanged: () => void;
+  /** 대상 과제의 내 역할(진행판 my_role) — 잡 조작 · 넘기기는 편집자 이상이다(OI-2, 모르면 잠그지 않는다). */
+  role?: ProjectRole | null;
 }) {
+  const access = writeAccess(role);
   const cells = review.cells;
   const job = review.job;
   return (
@@ -354,7 +376,7 @@ export function ReviewBoard({
         ]}
       />
       {job ? (
-        <ReviewJobPanel job={job} targetKey={targetKey} onChanged={onChanged} />
+        <ReviewJobPanel job={job} targetKey={targetKey} onChanged={onChanged} access={access} />
       ) : (
         <p className="m-0 mt-3 text-sm text-muted-foreground">검토 잡이 아직 없습니다 — 아래 '검토 잡 만들기' 에서 범위를 골라 시작합니다.</p>
       )}

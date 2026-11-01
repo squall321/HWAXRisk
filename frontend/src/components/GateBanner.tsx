@@ -4,11 +4,13 @@ import type { Column } from "./DataTable";
 import { DataTable } from "./DataTable";
 import { Badge } from "./Badge";
 import { ErrorBanner } from "./StateBlocks";
+import { LockNote } from "./LockNote";
 import { Banner, Button, FormField, Input } from "../ui/primitives";
 import { fmtCell, fmtEpoch } from "../format";
 import { riskApi } from "../api/risk.api";
 import { gateAckable, gateRows, gateVerdict } from "../lib/snapshotView";
-import type { GateAcked, GateId, GateRecord, Gates } from "../types";
+import { writeAccess, type WriteAccess } from "../lib/access";
+import type { GateAcked, GateId, GateRecord, Gates, ProjectRole } from "../types";
 
 /** 게이트 id → 계획 §3.2.2 의 이름. 판정 · 까닭은 서버 값이 정본이다. */
 export const GATE_LABEL: Record<string, string> = {
@@ -38,18 +40,22 @@ type GateRow = { id: GateId; record: GateRecord };
 
 /**
  * 판정표. `snapshotId` 를 주면 fail(차단이 아닌) 게이트마다 '사유 적고 진행(ack)' 과 이미 붙은 ack 의 '확인 취소' 를 둔다 — G6 은
- * 차단이라 버튼이 없다(서버도 422 gate_blocking). ack 해도 판정은 fail 로 남는다(§3.2.2).
+ * 차단이라 버튼이 없다(서버도 422 gate_blocking). ack 해도 판정은 fail 로 남는다(§3.2.2). `role` 은 그 스냅샷 과제의 내 역할이다 — ack 는
+ * 편집자 이상이라 보기에게는 단추를 잠그고 표 위에 까닭을 한 줄 보인다(OI-2, 모르면 잠그지 않는다).
  */
 export function GateTable({
   gates,
   snapshotId,
   onChanged,
+  role = null,
 }: {
   gates: Gates | null | undefined;
   snapshotId?: string;
   onChanged?: () => void;
+  role?: ProjectRole | null;
 }) {
   const rows = gateRows(gates);
+  const access = writeAccess(role);
   const columns: Column<GateRow>[] = [
     {
       key: "id",
@@ -79,10 +85,17 @@ export function GateTable({
     {
       key: "ack",
       header: "ack",
-      cell: (g) => <GateAckCell id={g.id} record={g.record} snapshotId={snapshotId} onChanged={onChanged} />,
+      cell: (g) => (
+        <GateAckCell id={g.id} record={g.record} snapshotId={snapshotId} onChanged={onChanged} access={access} />
+      ),
     },
   ];
-  return <DataTable columns={columns} rows={rows} rowKey={(g) => g.id} empty="게이트 판정이 없습니다." />;
+  return (
+    <>
+      {snapshotId ? <LockNote access={access} /> : null}
+      <DataTable columns={columns} rows={rows} rowKey={(g) => g.id} empty="게이트 판정이 없습니다." />
+    </>
+  );
 }
 
 /** ack 칸 — 붙은 ack 의 누가 · 언제 · 사유, 그리고 (스냅샷 화면이면) 붙이기 · 취소. */
@@ -91,11 +104,13 @@ function GateAckCell({
   record,
   snapshotId,
   onChanged,
+  access,
 }: {
   id: GateId;
   record: GateRecord;
   snapshotId?: string;
   onChanged?: () => void;
+  access: WriteAccess;
 }) {
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState("");
@@ -153,7 +168,8 @@ function GateAckCell({
           variant="ghost"
           size="sm"
           className="w-fit"
-          disabled={busy}
+          disabled={busy || !access.allowed}
+          title={access.reason ?? undefined}
           onClick={() => run(() => riskApi.revokeGateAck(snapshotId, id))}
         >
           확인 취소
@@ -193,7 +209,15 @@ function GateAckCell({
           <span className="text-xs text-muted-foreground">ack 해도 판정은 fail 로 남습니다.</span>
         </form>
       ) : (
-        <Button type="button" variant="outline" size="sm" className="w-fit" onClick={() => setOpen(true)}>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          className="w-fit"
+          disabled={!access.allowed}
+          title={access.reason ?? undefined}
+          onClick={() => setOpen(true)}
+        >
           사유 적고 진행(ack)
         </Button>
       )}

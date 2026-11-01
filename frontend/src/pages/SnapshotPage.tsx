@@ -11,6 +11,7 @@ import { EmptyBlock, ErrorBanner, LoadingBlock, NotReadyBlock } from "../compone
 import { Badge, SeverityBadge, StatusBadge } from "../components/Badge";
 import { GATE_LABEL, GateBanner, GateTable } from "../components/GateBanner";
 import { KeyLedgerPanel } from "../components/KeyLedgerPanel";
+import { LockNote } from "../components/LockNote";
 import { Banner, Button, Input, Mono, PageHeader, Select } from "../ui/primitives";
 import { fmtCell, fmtEpoch, fmtJson, fmtNum } from "../format";
 import {
@@ -26,7 +27,18 @@ import {
   snapshotFlags,
 } from "../lib/snapshotView";
 import type { FlagChip } from "../lib/snapshotView";
-import type { DimNamed, IrEdge, IrNode, IrWarning, JsonObject, ReqMarginRow, RuleHit, SnapshotCall } from "../types";
+import { writeAccess } from "../lib/access";
+import type {
+  DimNamed,
+  IrEdge,
+  IrNode,
+  IrWarning,
+  JsonObject,
+  ProjectRole,
+  ReqMarginRow,
+  RuleHit,
+  SnapshotCall,
+} from "../types";
 
 /** §2.9 rollups.by_assembly 한 행. 서버가 준 자유 JSON 을 열 이름으로만 읽는다. */
 const ROLLUP_COLUMNS: Array<{ key: string; header: string; align?: "right" }> = [
@@ -344,9 +356,21 @@ function MarginCard({ rows, reqAbsent }: { rows: ReqMarginRow[] | null; reqAbsen
   );
 }
 
-export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
+export default function SnapshotPage({ snapshotId, role }: { snapshotId: string; role?: ProjectRole | null }) {
   const navigate = useNavigate();
   const ir = useAsync((signal) => riskApi.getSnapshotIr(snapshotId, { signal }), [snapshotId]);
+  /**
+   * 내 역할 — 과제 화면 안이면 그 화면이 준 값(과제 상세 my_role)이고, 딥링크(#/snapshots/<id>)로 홀로 열면 그 과제 상세를 받아 센다. ack ·
+   * 타깃 만들기는 편집자 이상이라 보기에게는 잠그고 까닭을 보인다(OI-2, 모르면 잠그지 않는다).
+   */
+  const ownProject = ir.data?.project_id ?? "";
+  const project = useAsync(
+    (signal) => riskApi.getProject(ownProject, { signal }),
+    [ownProject],
+    role === undefined && ownProject !== "",
+  );
+  const myRole = role !== undefined ? role : project.data?.my_role ?? null;
+  const access = writeAccess(myRole);
   const state = useAsync((signal) => riskApi.getSnapshotState(snapshotId, { signal }), [snapshotId]);
   const calls = useAsync((signal) => riskApi.getSnapshotCalls(snapshotId, { signal }), [snapshotId]);
   const ruleHits = useAsync((signal) => riskApi.getRuleHits(snapshotId, { signal }), [snapshotId]);
@@ -442,8 +466,8 @@ export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
             <Button
               type="button"
               onClick={createTarget}
-              disabled={busy || blocked}
-              title={blocked ? "G6 로 차단된 스냅샷은 타깃을 만들 수 없습니다." : undefined}
+              disabled={busy || blocked || !access.allowed}
+              title={blocked ? "G6 로 차단된 스냅샷은 타깃을 만들 수 없습니다." : access.reason ?? undefined}
             >
               <Plus aria-hidden="true" />
               타깃 만들기
@@ -451,6 +475,7 @@ export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
           </>
         }
       />
+      <LockNote access={access} />
 
       {/* 두 버튼이 머리말로 올라갔으니 그 결과(오류·안내)도 버튼 옆에서 말한다 — 아래 카드에 두면 눌린 자리와 멀어진다. */}
       <ErrorBanner error={actionError} />
@@ -480,7 +505,7 @@ export default function SnapshotPage({ snapshotId }: { snapshotId: string }) {
               />
             ) : null}
             <GateBanner gates={gates} />
-            <GateTable gates={gates} snapshotId={snapshotId} onChanged={state.reload} />
+            <GateTable gates={gates} snapshotId={snapshotId} onChanged={state.reload} role={myRole} />
             <p className="m-0 mt-2 text-xs text-muted-foreground">
               {SNAP_GATE_IDS.map((id) => `${id} ${GATE_LABEL[id]}`).join(" · ")}
             </p>

@@ -2,6 +2,7 @@
  "diff_version": "1.0",
  "diff_id": "da8c7cb20d21358086e16acd9114785b",
  "project_id": "e73c023a2e8e90349bb4d853730e1bfc",
+ "pair_kind": "same_project_revision",
  "base": {
   "snapshot_id": "c3ff832377ee3e0bcdd66aa561bdfa33",
   "ir_hash": "2b05f03a9274122eb5ff1a8bf49def9b02c59923e996f3a2a9d59f2fcf6b142d",

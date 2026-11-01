@@ -97,6 +97,8 @@
 - base `/apps/hwax_risk/api`(앱 내부 `/api`, `backend/app/routes.py`), 모든 핸들러는 `Depends(identity.current)`. 정본 §8.2.3 의 경로를 포함해 **97개**가 배선돼 있다(2026-10-31 실측 — 재설계 M2 · M3 와 ECAD · 백로그 경로 · 키 대장 읽기 포함).
 - 신원·메타 — `GET /health {ok, app_version, schema_version}` · `GET /me`(+`box{hostname, secrets_valid, cred_key_present}`) ·
   `PUT /me/portal-pat {pat|null}`(익명 401, 422 6종) · `GET /meta/{taxonomy, adapters, vocab, metrics}` · `POST /meta/metrics/recompute`.
+  화면의 쓰기 단추는 서버가 주는 역할로 가른다(2026-11-01) — 과제 상세 · 진행판(`GET /targets/{key}/coverage`)의 `my_role`(owner · editor ·
+  viewer, 구성원이 아닌 관리자는 null)과 `GET /me` 의 `risk_admin` — 보기는 잠기고 까닭 한 줄이 선다(서버의 거절은 그대로, context-notes OI-2).
 - 과제·소스·스냅샷 — `projects`(생성·조회(목록 · 상세는 구성원도 — 메타 열 · 멤버 · 내 역할)·`PATCH`(lifecycle·등급·`mcp_visibility`)·멤버·이양·폐기·감사·유사·dims·요구·`iface-ledger`) ·
   `sources`(같은 원천이 붙은 내 다른 과제(폐기 과제 제외)는 `duplicate_of` 로 알림) · `snapshots`(조회 — 상태는 지금 살아 있는 게이트 ack · `gates_hash` 를 얹는다·게이트 ack·`rule_hits`) · `sameas`(조회 — 답 머리에 `pair_key`·`decide` — 확정을 뒤집는 결정 · `merge_key` · 계면 별칭 철회
   `revoke_iface_alias` 는 같은 트랜잭션에서 키 전파 `rekey` 를 돈다, §5.9.5 · 병합된 키의 `confirm_key` 는 409 `key_merged`) · `part-keys/{ckey}`(키 대장 한 행 — 주인 · 그 키가 든 과제의 구성원, `mine` 은 내 원장 행인가 — 아니면 결정은 404) · `diffs`.
@@ -107,6 +109,8 @@
 - 구성원 읽기(2026-10-31, 사용자 결정 '계획서대로') — 과제에 딸린 읽기 전부(스냅샷 · 대상의 진행판 · 등록부 · 패널 · 보고서 · 셀 · 전문가 ·
   성격 · 유사 · 요구 · 비교 · 대응표 · 선례 · 참조 · 목록 셋)를 편집자 · 보기가 주인과 같은 답으로 연다(그 과제 주인의 행을 고른다 — 남은
   없는 것과 같은 404). 비교는 두 과제를 다 읽어야 한다. MCP 읽기 도구도 같은 판정이다(context-notes MB-1 ~ MB-7).
+  관리자(risk_admin_roles)는 웹에서 전 과제를 같은 문으로 읽는다(2026-11-01, 포털 plan §0.6 · §5.2.1 — 전 과제의 편집자) — 발견 목록은
+  소유 ∪ 구성원 그대로이고, 남이 매단 행 · 과제에 매이지 않은 원장 행은 관리자에게도 닫히며, MCP 길에는 관리자가 없다(context-notes OI-5).
 - 편집자 쓰기(2026-10-31, 사용자 결정 '계획서대로 편집자도 쓴다') — 계획(§8.2.3 · §0.6)이 편집자에게 연 쓰기(소스 · 동결 · 치수 · 요구 ·
   계면 원장 · 게이트 ack · 대응 결정 · 비교 · 대상 · 명단 · 잡 · 판정 · 등록부 status · 병합 · 철회 · 패널 결과 · 브리프 · 라벨)는 그 과제의
   편집자 이상(관리자 포함)이 한다 — 행은 과제 주인의 원장이고 사람 칸 · 감사 행위자는 부른 사람, 보기는 403 `role_insufficient`, 남은 없는

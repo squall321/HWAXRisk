@@ -3,13 +3,15 @@ import { useMemo, useState } from "react";
 import { isApiError, riskApi } from "../api/risk.api";
 import { estimateOf } from "../api/reviewErrors";
 import { ReviewErrorBanner } from "./ReviewErrorBanner";
+import { LockNote } from "./LockNote";
 import { SectionCard } from "./SectionCard";
 import { KeyValueTable } from "./DataTable";
 import { Banner, Button, FormField, FormGrid, Input, Mono } from "../ui/primitives";
 import { LIVE_STATES, reviewJobBody } from "../lib/reviewView";
 import type { ReviewJobForm } from "../lib/reviewView";
 import { fmtEpoch } from "../format";
-import type { CallsEstimate, CoverageReview, ReviewJobCreated } from "../types";
+import { writeAccess } from "../lib/access";
+import type { CallsEstimate, CoverageReview, ProjectRole, ReviewJobCreated } from "../types";
 
 const TIERS = ["A", "B", "C"] as const;
 
@@ -30,11 +32,15 @@ export function ReviewJobFormCard({
   targetKey,
   review,
   onChanged,
+  role = null,
 }: {
   targetKey: string;
   review: CoverageReview;
   onChanged: () => void;
+  /** 대상 과제의 내 역할(진행판 my_role) — 검토 잡 만들기는 편집자 이상이다(OI-2, 모르면 잠그지 않는다). */
+  role?: ProjectRole | null;
 }) {
+  const access = writeAccess(role);
   const [tiers, setTiers] = useState<string[]>([]);
   const [domains, setDomains] = useState<string[]>([]);
   const [agents, setAgents] = useState("");
@@ -158,14 +164,17 @@ export function ReviewJobFormCard({
         ) : null}
         <div className="flex flex-wrap items-center gap-2">
           {asked ? (
-            <Button type="button" onClick={() => start(true)} disabled={live || busy || !consent}>
+            <Button type="button" onClick={() => start(true)} disabled={live || busy || !consent || !access.allowed}
+                    title={access.reason ?? undefined}>
               동의하고 시작
             </Button>
           ) : (
-            <Button type="button" onClick={() => start(false)} disabled={live || busy}>
+            <Button type="button" onClick={() => start(false)} disabled={live || busy || !access.allowed}
+                    title={access.reason ?? undefined}>
               검토 잡 시작
             </Button>
           )}
+          <LockNote access={access} />
           {asked && !consent ? <span className="text-sm text-muted-foreground">동의에 체크해야 시작할 수 있습니다.</span> : null}
         </div>
       </fieldset>

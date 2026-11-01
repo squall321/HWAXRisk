@@ -2,15 +2,28 @@
 import { useState } from "react";
 import { riskApi } from "../api/risk.api";
 import { ReviewErrorBanner } from "./ReviewErrorBanner";
+import { LockNote } from "./LockNote";
 import { Banner, Button, FormField, Input } from "../ui/primitives";
 import { reasonProblem } from "../lib/reviewView";
-import type { Undeferred } from "../types";
+import { writeAccess } from "../lib/access";
+import type { ProjectRole, Undeferred } from "../types";
 
 /**
  * 카드 대조 대상은 검토 잡을 만들 때 범위 안 보류가 저절로 풀리므로 이 버튼은 패널 대상(검토를 얹은 대상 포함)에만 둔다. 푼 좌석이
- * 영역 깊이의 분모에 든다 — 답의 depth 가 지금의 깊이다.
+ * 영역 깊이의 분모에 든다 — 답의 depth 가 지금의 깊이다. 보류 풀기는 편집자 이상이라 보기에게는 잠그고 까닭을 보인다(OI-2).
  */
-export function UndeferForm({ targetKey, deferred, onChanged }: { targetKey: string; deferred: number; onChanged: () => void }) {
+export function UndeferForm({
+  targetKey,
+  deferred,
+  onChanged,
+  role = null,
+}: {
+  targetKey: string;
+  deferred: number;
+  onChanged: () => void;
+  role?: ProjectRole | null;
+}) {
+  const access = writeAccess(role);
   const [open, setOpen] = useState(false);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState(false);
@@ -40,9 +53,11 @@ export function UndeferForm({ targetKey, deferred, onChanged }: { targetKey: str
     <div className="mt-3 flex flex-col gap-2">
       <div className="flex flex-wrap items-center gap-2 text-sm">
         <span>보류(deferred) 좌석 {deferred}석</span>
-        <Button type="button" variant="outline" size="sm" onClick={() => setOpen((v) => !v)} disabled={deferred === 0}>
+        <Button type="button" variant="outline" size="sm" onClick={() => setOpen((v) => !v)}
+                disabled={deferred === 0 || !access.allowed} title={access.reason ?? undefined}>
           보류 풀기…
         </Button>
+        {deferred > 0 ? <LockNote access={access} /> : null}
       </div>
       {result ? (
         <Banner

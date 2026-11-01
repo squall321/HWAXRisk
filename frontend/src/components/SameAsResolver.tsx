@@ -5,12 +5,14 @@ import { useAsync } from "../hooks/useAsync";
 import type { Column } from "./DataTable";
 import { DataTable } from "./DataTable";
 import { ErrorBanner, LoadingBlock, NotReadyBlock } from "./StateBlocks";
+import { LockNote } from "./LockNote";
 import { Badge, StatusBadge } from "./Badge";
 import { GateTable } from "./GateBanner";
 import { Banner, Button, FormField, Select } from "../ui/primitives";
 import { fmtNum } from "../format";
 import { pairDecision } from "../lib/compareView";
-import type { GateRecord, SameAsPair, SameAsPairDecision } from "../types";
+import { writeAccess } from "../lib/access";
+import type { GateRecord, ProjectRole, SameAsPair, SameAsPairDecision } from "../types";
 
 /** 일괄 수용의 문턱 — §8.2.4 가 정한 값이다. */
 const BULK_SCORE = 0.9;
@@ -50,12 +52,19 @@ export function SameAsResolver({
   base,
   target,
   onG2,
+  role = null,
 }: {
   base: string;
   target: string;
   /** 조회 직후와 확정 직후의 G2 판정을 비교 화면에 그대로 올린다. */
   onG2?: (g2: GateRecord) => void;
+  /**
+   * 두 스냅샷 과제에서의 내 역할 가운데 약한 것(lib/access weakerRole) — 쌍 대응 결정은 두 과제의 주인 · 편집자만 한다(MB-13). 보기면
+   * 확정 · 거부 · 일괄 수용을 잠그고 까닭을 보인다(OI-2, 모르면 잠그지 않는다).
+   */
+  role?: ProjectRole | null;
 }) {
+  const access = writeAccess(role);
   const sameas = useAsync(
     (signal) => riskApi.getSameAs(base, target, { signal }),
     [base, target],
@@ -153,7 +162,13 @@ export function SameAsResolver({
       // 표 한 칸이라 size="sm" 으로 둔다 — 기본 높이면 행이 두 배로 두꺼워진다.
       cell: (p) => {
         // stable 키가 없는 행(한쪽 노드가 없다)과 쌍 열쇠를 아직 모를 때는 보내지 않는다.
-        const why = !p.a_stable || !p.b_stable ? "stable 키가 없는 행이라 원장에 적을 수 없습니다." : pairKey ? undefined : "쌍 원장 열쇠(pair_key)를 받지 못했습니다.";
+        const why = !access.allowed
+          ? access.reason ?? undefined
+          : !p.a_stable || !p.b_stable
+            ? "stable 키가 없는 행이라 원장에 적을 수 없습니다."
+            : pairKey
+              ? undefined
+              : "쌍 원장 열쇠(pair_key)를 받지 못했습니다.";
         return (
           <span className="flex flex-wrap items-center gap-2">
             <Button
@@ -184,6 +199,7 @@ export function SameAsResolver({
 
   return (
     <div className="flex flex-col gap-3">
+      <LockNote access={access} />
       <ErrorBanner error={error} />
       {isNotReady(sameas.error) ? (
         <NotReadyBlock what="same-as 매칭" />
@@ -200,7 +216,8 @@ export function SameAsResolver({
             <Button
               type="button"
               variant="outline"
-              disabled={busy || bulkCandidates.length === 0}
+              disabled={busy || bulkCandidates.length === 0 || !access.allowed}
+              title={access.reason ?? undefined}
               onClick={() => decide(bulkCandidates)}
             >
               자동 매칭 전부 수용 (score ≥ {BULK_SCORE}, {bulkCandidates.length}건)

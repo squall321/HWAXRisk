@@ -7,11 +7,13 @@ import { ReportPager, isAbsent } from "./ReportPager";
 import { ReviewErrorBanner } from "./ReviewErrorBanner";
 import { SectionCard } from "./SectionCard";
 import { EmptyBlock } from "./StateBlocks";
+import { LockNote } from "./LockNote";
 import { Banner, Button, Mono } from "../ui/primitives";
 import { LIVE_STATES } from "../lib/reviewView";
 import { narrativeNote, triggerLabel } from "../lib/reportView";
 import { fmtEpoch } from "../format";
-import type { ChainStage, ReportAssembled, SynthJobCreated, SynthPart } from "../types";
+import { writeAccess } from "../lib/access";
+import type { ChainStage, ProjectRole, ReportAssembled, SynthJobCreated, SynthPart } from "../types";
 
 const PARTS: ReadonlyArray<{ part: SynthPart; label: string }> = [
   { part: "summary", label: "본문" },
@@ -28,12 +30,16 @@ export function SynthReport({
   targetKey,
   stage,
   onChanged,
+  role = null,
 }: {
   targetKey: string;
   /** 진행판의 사슬 단계 — 살아 있는 종합 잡이 있으면 '요약부터 다시' 를 끈다(서버는 막지 않고 새 잡을 세운다). */
   stage: ChainStage | null;
   onChanged: () => void;
+  /** 대상 과제의 내 역할(진행판 my_role) — 다시 내기 · 요약부터 다시는 편집자 이상이다(OI-2, 모르면 잠그지 않는다). */
+  role?: ProjectRole | null;
 }) {
+  const access = writeAccess(role);
   const [nonce, setNonce] = useState(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -77,7 +83,8 @@ export function SynthReport({
       subtitle="사슬의 단계마다 앱이 판을 세웁니다(앱 사본이 정본). 표 · 수는 코드이고 서술만 LLM 입니다."
       actions={
         <>
-          <Button type="button" variant="outline" size="sm" onClick={assemble} disabled={busy}>
+          <Button type="button" variant="outline" size="sm" onClick={assemble} disabled={busy || !access.allowed}
+                  title={access.reason ?? undefined}>
             다시 내기
           </Button>
           <Button
@@ -85,14 +92,15 @@ export function SynthReport({
             variant="outline"
             size="sm"
             onClick={refresh}
-            disabled={busy || synthLive}
-            title={synthLive ? "살아 있는 종합 잡이 있습니다 — 그 잡이 끝난 뒤 다시 냅니다." : undefined}
+            disabled={busy || synthLive || !access.allowed}
+            title={synthLive ? "살아 있는 종합 잡이 있습니다 — 그 잡이 끝난 뒤 다시 냅니다." : access.reason ?? undefined}
           >
             요약부터 다시
           </Button>
         </>
       }
     >
+      <LockNote access={access} />
       <ReviewErrorBanner error={error} />
       {synthLive ? (
         <p className="m-0 mb-2 text-sm text-muted-foreground">

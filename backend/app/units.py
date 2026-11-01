@@ -71,7 +71,7 @@ UNIT_KINDS: tuple[str, ...] = ("bundle", "boundary", "global", "excluded")
 LAYERS: tuple[str, ...] = ("semantic", "structural", "parametric")
 
 # 제외 사유의 처리(설계서 3.4.1 의 권고값). 목록에 없는 사유는 '검토에 싣는다' 쪽(caveat)으로 떨어진다 —
-# diff 는 EXCLUDED_REASONS 밖의 source_drift·capture_partial 도 실제로 붙인다(사유 어휘를 닫힌 집합으로 믿지 않는다).
+# 사유 어휘를 닫힌 집합으로 믿지 않는다(diff 의 source_drift·capture_partial 이 diff.EXCLUDED_REASONS 밖이던 때가 있었다 — OI-1).
 # truncated(계면 목록이 잘린 kind, 2026-10-31)는 capture_partial 과 같은 '캡처가 깨져 생긴 겉보기 차이' 라 검토에 싣지 않는다 —
 # 단서 줄로 실으면 잘린 쪽에서 빠진 간섭이 '사라졌다' 는 줄로 셀에 간다.
 EXCLUDED_POLICY: dict[str, tuple[str, ...]] = {

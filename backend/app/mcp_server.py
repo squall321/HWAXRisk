@@ -218,7 +218,8 @@ _A_SEVERITY = f"심각도 — {' · '.join(routes.HUMAN_SEVERITIES)}(비우면 �
 _A_JUDGEMENT = f"판정 — {' · '.join(routes.HUMAN_JUDGEMENTS)}(비우면 undetermined)."
 _A_WARRANT = "논거(선택) — 인용이 주장을 어떻게 받치는지 적는다."
 # Claude 입구
-_A_NEXT_PROJECT = "과제 id(risk_list_projects 의 projects[].id). 비우면 내가 소유한 과제 목록과 새 과제 만들기 안내를 준다."
+_A_NEXT_PROJECT = ("과제 id(risk_list_projects 의 projects[].id) — 내 과제이거나 내가 구성원(편집자 · 보기)인 과제다. 비우면 그 과제 목록"
+                   "(projects[].my_role)과 새 과제 만들기 안내를 준다.")
 _A_CODE = (f"과제 코드(필수, 최대 {_max_len(routes.ProjectBody, 'code')}자) — 같은 사람이 같은 코드를 다시 보내면 기존 과제를 "
            "돌려준다(created:false).")
 _A_NAME = f"과제 이름(필수, 최대 {_max_len(routes.ProjectBody, 'name')}자)."
@@ -271,7 +272,9 @@ _A_USER_MEMO = ("잡에 남기는 사람 메모(선택) — 패널 잡이면 좌
                 "앞부분만 가며 응답의 user_memo_cut 이 알린다.")
 _A_CONCURRENCY = (f"패널 잡이 함께 돌릴 패널 수(mode=panels 만) — 1 ~ {runner.MAX_JOB_CONCURRENCY}(밖이면 422)이고 박스 상한"
                   "(HWAXRISK_CONCURRENCY)으로 더 죄며 llm=claude 잡은 1 이다(줄였으면 답의 concurrency_note). 박스의 자리 수는 늘지 않아 둘째 패널은"
-                  " 다른 잡이 자리를 기다리지 않을 때만 돈다. 검토 잡에 1 이 아닌 값을 주면 422 다.")
+                  " 다른 잡이 자리를 기다리지 않을 때만 돈다. 살아 있는 잡을 돌려주면 그 잡이 도는 자리 수를 concurrency 로 싣고, 새 잡이"
+                  " 받을 자리 수가 그와 다르면 differs 에 concurrency 를 싣는다(바꾸지 않는다 — 취소한 뒤 새로). 검토 잡에 1 이 아닌 값을"
+                  " 주면 422 다.")
 # 스키마의 범위(1 ~ 2) — 검사는 REST 와 같은 JobBody 가 한다(검토 잡에 준 값에는 '패널 잡의 칸' 이라는 까닭이 먼저 서게 — FastMCP 의 칸
 # 검증은 일반 글이다, HWAXRisk context-notes CC-33).
 _CONCURRENCY_RANGE = {"minimum": 1, "maximum": runner.MAX_JOB_CONCURRENCY}
@@ -617,7 +620,7 @@ def risk_add_finding(
 # 같은 호출을 두 번 해도 같은 행이다 — 게이트웨이의 사람별 길은 실패하면 한 번 더 부른다.
 @mcp.tool()
 async def risk_next_step(project_id: Annotated[str | None, Field(description=_A_NEXT_PROJECT)] = None) -> dict:
-    """Claude 입구의 길잡이(읽기 전용) — 과제가 어느 단계(소스·캡처·리비전·same-as·비교·심사 대상·명단·잡·결과)이고 무엇이 막혔는지(고칠 곳 fix)와 다음에 부를 도구·인자(next)를 한 번에 준다, project_id 없이 부르면 내 과제 목록이고 acting_as 는 이 호출이 누구로 해석됐는지다."""
+    """Claude 입구의 길잡이(읽기 전용) — 과제가 어느 단계(소스·캡처·리비전·same-as·비교·심사 대상·명단·잡·결과)이고 무엇이 막혔는지(고칠 곳 fix)와 다음에 부를 도구·인자(next)를 한 번에 준다, project_id 없이 부르면 내 과제 목록이고 acting_as 는 이 호출이 누구로 해석됐는지다, 과제 구성원(편집자 · 보기)도 부를 수 있고 project.my_role 이 내 역할이다 — 보기에게는 쓰기 걸음 대신 role_insufficient 막힘이 선다(쓰기는 과제 주인 · 편집자만)."""
     return _fit_guide(await _entry(entry.next_step, project_id=project_id))
 
 
@@ -712,7 +715,7 @@ async def risk_start_job(target_key: Annotated[str, Field(description=_A_TARGET_
                          llm: Annotated[str | None, Field(description=_A_LLM)] = None,
                          consent_external: Annotated[StrictBool | None, Field(description=_A_CONSENT_EXTERNAL)] = None,
                          exclude_evidence: Annotated[list[str] | None, Field(description=_A_EXCLUDE_EVIDENCE)] = None) -> dict:
-    """심사 잡 시작 — 쓰기: 범위와 비용(패널 수·LLM 호출 추정)을 사용자에게 확인한 뒤 부른다(Tier C 와 호출 추정이 큰 검토는 consent=true), mode=panels(기본 — tier 필수, Tier 는 누적이다 A 도메인 대표 → B → C 전원)|reviews(카드 대조 대상의 전문가별 카드 대조 — tier·modifiers·concurrency 없이 scope={agents·domains·tiers·unit_ids} 로 범위를 주고, 전문가는 risk_next_step 의 facts.review_order 를 보고 사용자가 고른다), 심사는 앱 러너가 돌리고 결과는 웹에 그대로 보인다, 같은 대상의 살아 있는 잡(panels 는 같은 Tier)이 있으면 그것을 돌려주고, 자격이 없으면 웹 설정 화면에서 등록하라는 fix 로 답한다. llm=glm(기본 — 빼도 같다)|claude(검토 잡 · 패널 잡 — 판단 LLM 이 사용자 본인의 Claude Code 워크플로 hwax-risk-claude 다, 좌석 조회는 글 왕복으로 엔진이 실행한다): 이 잡의 지식카드·설계 변경 원문과, 사슬이 이어 도는 쟁점 패널·종합 요약의 입력(이 대상 전체의 등록부 행·쟁점·요약 — 다른 사람의 검토 결과도 든다)이 Claude(외부)로 나갑니다(패널 잡은 그 패널의 브리프 · 좌석 조회 결과) — 사용자에게 그 사실을 보이고 동의를 받은 뒤에만 consent_external=true(JSON 참 — 글자 'true' · 1 은 받지 않는다)를 더한다(동의 없이 true 를 채우지 않는다 · 없으면 consent_external_required), 이 박스의 에이전트 서버가 그 길을 열지 않았으면 external_llm_unavailable, 잡은 동의한 사람의 PAT 로만 돌고 그 사람이 Claude Code 에서 워크플로를 돌려야 나아간다(멈추면 보류 external_worker), 사슬이 잇는 쟁점·종합 잡도 같은 선택과 동의를 물려받는다(쟁점 잡은 그 사슬이 고른 쟁점만 — 다른 사람의 GLM 일 · 사람이 올린 쟁점 · 보고서 다시 내기는 GLM 잡으로 간다), 같은 Tier 의 살아 있는 패널 잡이 판단 LLM 이 다르면 그 잡을 돌려주며 differs 에 llm 을 싣는다(바꾸지 않는다 — 취소한 뒤 새로). exclude_evidence 는 사용자가 패널 브리프에서 뺀 항목 키(E2~E9)만 준다 — 그 잡의 패널 브리프에서 빠지고 감사 한 행이 서며, 살아 있는 잡을 돌려줄 때는 그 잡이 빼는 항목을 exclude_evidence 로 싣고(빼지 않는 잡은 칸이 없다) 준 값과 다르면 differs 에 exclude_evidence 를 싣는다."""
+    """심사 잡 시작 — 쓰기: 범위와 비용(패널 수·LLM 호출 추정)을 사용자에게 확인한 뒤 부른다(Tier C 와 호출 추정이 큰 검토는 consent=true), mode=panels(기본 — tier 필수, Tier 는 누적이다 A 도메인 대표 → B → C 전원)|reviews(카드 대조 대상의 전문가별 카드 대조 — tier·modifiers·concurrency 없이 scope={agents·domains·tiers·unit_ids} 로 범위를 주고, 전문가는 risk_next_step 의 facts.review_order 를 보고 사용자가 고른다), 심사는 앱 러너가 돌리고 결과는 웹에 그대로 보인다, 같은 대상의 살아 있는 잡(panels 는 같은 Tier)이 있으면 그것을 돌려주고, 자격이 없으면 웹 설정 화면에서 등록하라는 fix 로 답한다. llm=glm(기본 — 빼도 같다)|claude(검토 잡 · 패널 잡 — 판단 LLM 이 사용자 본인의 Claude Code 워크플로 hwax-risk-claude 다, 좌석 조회는 글 왕복으로 엔진이 실행한다): 이 잡의 지식카드·설계 변경 원문과, 사슬이 이어 도는 쟁점 패널·종합 요약의 입력(이 대상 전체의 등록부 행·쟁점·요약 — 다른 사람의 검토 결과도 든다)이 Claude(외부)로 나갑니다(패널 잡은 그 패널의 브리프 · 좌석 조회 결과) — 사용자에게 그 사실을 보이고 동의를 받은 뒤에만 consent_external=true(JSON 참 — 글자 'true' · 1 은 받지 않는다)를 더한다(동의 없이 true 를 채우지 않는다 · 없으면 consent_external_required), 이 박스의 에이전트 서버가 그 길을 열지 않았으면 external_llm_unavailable, 잡은 동의한 사람의 PAT 로만 돌고 그 사람이 Claude Code 에서 워크플로를 돌려야 나아간다(멈추면 보류 external_worker), 사슬이 잇는 쟁점·종합 잡도 같은 선택과 동의를 물려받는다(쟁점 잡은 그 사슬이 고른 쟁점만 — 다른 사람의 GLM 일 · 사람이 올린 쟁점 · 보고서 다시 내기는 GLM 잡으로 간다), 같은 Tier 의 살아 있는 패널 잡이 판단 LLM 이 다르면 그 잡을 돌려주며 differs 에 llm 을 싣는다(바꾸지 않는다 — 취소한 뒤 새로). 살아 있는 패널 잡을 돌려줄 때는 그 잡이 도는 동시 실행(concurrency)을 싣고 청한 값으로 새 잡이 받을 자리 수와 다르면 differs 에 concurrency 를 싣는다. exclude_evidence 는 사용자가 패널 브리프에서 뺀 항목 키(E2~E9)만 준다 — 그 잡의 패널 브리프에서 빠지고 감사 한 행이 서며, 살아 있는 잡을 돌려줄 때는 그 잡이 빼는 항목을 exclude_evidence 로 싣고(빼지 않는 잡은 칸이 없다) 준 값과 다르면 differs 에 exclude_evidence 를 싣는다."""
     return await _entry(entry.start_job, target_key=target_key, tier=tier, consent=consent, modifiers=modifiers,
                         user_memo=user_memo, concurrency=concurrency, mode=mode, scope=scope, llm=llm,
                         consent_external=consent_external, exclude_evidence=exclude_evidence)
