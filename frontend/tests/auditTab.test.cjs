@@ -76,3 +76,12 @@ test("이력 탭 표 — 관리자 열람 줄은 이름표 '관리자 열람' �
   assert.match(html, /<code class="text-xs">2026-11-01\(KST\) 하루 한 줄<\/code>/);
   assert.doesNotMatch(html, />관리자 권한</);
 });
+
+test("이력 탭 표 — 관리자 쓰기 줄은 이름표 '관리자 쓰기' 와 그 한국 날이고 배지는 없다(줄 자체가 관리자 우회의 쓰기 문이다, 사용자 결정 11-01)", () => {
+  const html = renderPage([
+    row("admin.write", {}, { day: "2026-11-02" }, { actor: "admin@x", channel: "web", scope: "project", subject_id: "p1" }),
+  ]);
+  assert.match(html, /<code>admin\.write<\/code><span class="text-muted-foreground"> (<!-- -->)?관리자 쓰기<\/span>/);
+  assert.match(html, /<code class="text-xs">2026-11-02\(KST\) 하루 한 줄<\/code>/);
+  assert.doesNotMatch(html, />관리자 권한</);
+});

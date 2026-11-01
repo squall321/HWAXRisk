@@ -152,10 +152,13 @@ def test_every_audit_action_the_app_can_write_has_a_label_on_the_history_tab():
 
 
 def test_the_scan_reaches_every_kind_of_audit_write():
-    """훑기가 녹슬어 빈손으로 지나가지 않게 — 쓰는 꼴마다 하나씩 실제로 찾는다(SQL 글자 rekey · 엔진 쪽 멈춤 job.pause · 관리자 열람
-    admin.read(INSERT … SELECT), 매개 튜플의 조건식 ra.*, 쓰는 함수의 글자 · 조건식 · 함수 안 대입 · f-string 셋)."""
+    """훑기가 녹슬어 빈손으로 지나가지 않게 — 쓰는 꼴마다 하나씩 실제로 찾는다(SQL 글자 rekey · 엔진 쪽 멈춤 job.pause · 관리자 접근 줄
+    admin.read · admin.write(INSERT … SELECT 를 쓰는 함수의 매개), 매개 튜플의 조건식 ra.*, 쓰는 함수의 글자 · 조건식 · 함수 안 대입 ·
+    f-string 셋)."""
     actions = backend_actions()
     assert {"rekey", "job.pause", "ra.retract", "ra.remark", "gate.ack", "recall.approve", "curation.decide",
-            "coverage.uncarry", "job.create", "issue.queue", "cells.skip", "coverage.undefer", "admin.read"} <= set(actions)
+            "coverage.uncarry", "job.create", "issue.queue", "cells.skip", "coverage.undefer", "admin.read",
+            "admin.write"} <= set(actions)
     assert any(where.startswith("runner.py:") for where in actions["job.pause"])     # 포털 '멈춤'(A24)의 SQL 글자
-    assert all(where.startswith("routes.py:") for where in actions["admin.read"])   # 관리자 열람 줄의 SQL 글자(SELECT 꼴)
+    # 관리자 접근 줄(열람 · 쓰기 문) — SELECT 꼴의 한 문장을 쓰는 함수가 행위를 매개로 받는다(그 함수를 부르는 곳의 글자)
+    assert all(where.startswith("routes.py:") for name in ("admin.read", "admin.write") for where in actions[name])

@@ -292,7 +292,8 @@ def _audit(store: Any, owner_sub: str, *, scope: str, subject_id: str, action: s
            reason: str | None = None, channel: str = "rest", actor_verified: bool = True, actor: str | None = None,
            via: str | None = None) -> str:
     """rr_audit 1행(append-only, 사람 행위 한정 — plan §0.6) — 그 행의 id. 열람(GET)은 남기지 않는다 — 관리자 우회로만 열린 열람만
-    (관리자, 과제, 날) 한 줄이다(`_note_admin_read`). MCP 길의 행위자는 `actor_verified=False`(§6.11 — 게이트웨이가 넘긴 신원이다).
+    (관리자, 과제, 날) 한 줄이다(`_note_admin_read` — 관리자 우회로 지난 쓰기 문도 같은 꼴로 `_note_admin_write`). MCP 길의 행위자는
+    `actor_verified=False`(§6.11 — 게이트웨이가 넘긴 신원이다).
     행위자는 `owner_sub` 와 같은 사람이다 — `actor` 를 주면 owner_sub 는 그 행위가 바꾼 원장의 주인이다(맨 클러스터 열쇠 자리처럼 대상
     감사가 원장 주인으로 고르는 행 — rekey 의 감사 행과 같은 꼴, MB-14). `via`(`_admin_via` — "admin")는 그 쓰기가 관리자 우회로만 들었다는
     표시이고 after 의 `via` 칸에 싣는다(DDL 그대로 — 조회는 그 칸을 entry.via 로 올린다, `_audit_entry`)."""
@@ -1255,7 +1256,7 @@ def _writer(row_owner: Any, project_id: Any, ident: identity.Identity) -> str:
 
     구성원이 아닌 남 · 없는 행 · 주인이 다른 행(들여오기가 남긴 것)이면 부른 사람을 돌려줘 본체의 주인 검사가 오늘과 같은 404 를 낸다(남과
     없는 것이 같은 답). 보기는 403 role_insufficient 다(plan §5.2.1 — 구성원의 등급 미달은 404 가 아니라 403). 행 주인이 부른 사람이면 문을
-    보지 않는다(주인의 길 그대로)."""
+    보지 않는다(주인의 길 그대로). 관리자가 편집자에 못 미쳐 우회로 지나면 그 과제의 관리자 쓰기 줄을 남긴다(`_note_admin_write`)."""
     email = _require_user(ident)
     if not row_owner or row_owner == email or not project_id:
         return email
@@ -1266,6 +1267,7 @@ def _writer(row_owner: Any, project_id: Any, ident: identity.Identity) -> str:
         if project_role(str(project_id), email) is None:
             return email
         require_role(str(project_id), email, "editor")
+    _note_admin_write(ident, project_id)
     return str(row_owner)
 
 
@@ -1564,9 +1566,9 @@ AUDIT_VIA_KEY = "via"                # 그 값이 앉는 after 의 칸 — rr_au
 # 관리자 열람 줄의 하루 — 한국 표준시(UTC+9 · 일광 절약 없음)의 달력 날이다. 컨테이너의 TZ 에 매이지 않게 고정 오프셋으로 센다(AA-4).
 AUDIT_DAY_OFFSET_S = 9 * 3600
 DAY_S = 86400
-# 오늘(한국 날) 그 관리자의 그 과제 열람 줄 — 자리표 넷(과제, 날의 처음, 다음 날의 처음, 관리자). 아래 INSERT 의 NOT EXISTS 와 같은 조각이다.
-_ADMIN_READ_TODAY_SQL = ("SELECT 1 FROM rr_audit WHERE project_id = ? AND at >= ? AND at < ? AND action = 'admin.read'"
-                         " AND actor = ?")
+# 오늘(한국 날) 그 관리자의 그 과제 접근 줄(열람 admin.read · 쓰기 문 admin.write) — 자리표 다섯(과제, 날의 처음, 다음 날의 처음, 행위,
+# 관리자). 아래 INSERT 의 NOT EXISTS 와 같은 조각이다.
+_ADMIN_ACCESS_TODAY_SQL = "SELECT 1 FROM rr_audit WHERE project_id = ? AND at >= ? AND at < ? AND action = ? AND actor = ?"
 
 
 def _admin_via(ident: identity.Identity, project_id: Any, need: str = "editor") -> str | None:
@@ -1576,7 +1578,7 @@ def _admin_via(ident: identity.Identity, project_id: Any, need: str = "editor") 
     쓰기 문(`_writer` · `_require_owner` · `_target_editor` · `_closure_owner` · `_project_editor` …)이 관리자를 들인 것이 역할이 아니라
     관리자이기 때문일 때만 싣는다 — 구성원으로도 할 수 있는 쓰기(편집자의 편집자 쓰기 · 주인의 주인 쓰기)에는 싣지 않는다. `need` 는 그 쓰기의
     문이 요구한 역할이다(편집자 쓰기 editor · 주인 쓰기 owner). 쓰기가 역할을 바꾸기 전(문을 지난 곳)에 부른다 — 이양 · 멤버 고치기가 제
-    역할을 바꾼 뒤에 재면 우회가 가려진다."""
+    역할을 바꾼 뒤에 재면 우회가 가려진다. 쓰기 문은 같은 판정으로 관리자 쓰기 줄을 남긴다(`_note_admin_write`)."""
     if not project_id or not _is_admin(ident):
         return None
     role = project_role(str(project_id), str(ident.email or ""))
@@ -1604,32 +1606,46 @@ def audit_day_start(at: int) -> int:
 
 
 def _note_admin_read(admin: AdminRead | None, project_id: Any) -> None:
-    """관리자 우회로만 열린 과제 읽기를 남긴다 — (관리자, 과제, 한국 날)마다 많아야 rr_audit 한 행(scope project · action admin.read ·
-    after {day} — 사람이 쓴 글은 없다, 사용자 결정 11-01).
+    """관리자 우회로만 열린 과제 읽기를 남긴다 — (관리자, 과제, 한국 날)마다 많아야 rr_audit 한 행(`admin.read`, `_admin_access`).
 
-    구성원(주인 포함 — 보기 행 하나로도 읽는다)의 읽기는 우회가 아니라 쓰지 않는다. 없는 과제도 쓰지 않는다. 읽기 문은 열어 준 곳에서만
-    부른다 — 남이 매단 행처럼 열지 않은 읽기는 남지 않는다. 오늘 줄이 이미 있으면 읽기만 하고 돌아간다(진행판의 5초 폴링이 쓰기 잠금을 잡지
-    않는다). 쓰기는 한 문장(INSERT … SELECT … WHERE NOT EXISTS)이라 함께 든 두 읽기가 둘 다 '없음' 을 보아도 한 행이다. 행 주인은 행위자인
-    관리자다(다른 감사 행과 같다 — 그 과제 주인의 반출에는 실리지 않는다)."""
+    구성원(주인 포함 — 보기 행 하나로도 읽는다)의 읽기는 우회가 아니라 쓰지 않는다. 읽기 문은 열어 준 곳에서만 부른다 — 남이 매단 행처럼
+    열지 않은 읽기는 남지 않는다."""
+    if admin is None or not project_id or project_role(str(project_id), admin.email) is not None:
+        return
+    _admin_access(admin, project_id, "admin.read")
+
+
+def _note_admin_write(ident: identity.Identity, project_id: Any, need: str = "editor") -> None:
+    """쓰기 문이 관리자를 우회로만 들였으면(`_admin_via` — 그 문이 요구한 역할 `need` 에 못 미치는 관리자) (관리자, 과제, 한국 날)마다 많아야
+    rr_audit 한 행(`admin.write`, `_admin_access` — 사용자 결정 11-01, 계획서 §5.2.1 '그 접근도 rr_audit 에 남는다'). 문 안에서 부른다 — 그
+    쓰기가 제 감사 행을 남기든 아니든, 문을 지난 뒤 거절되든(422 · 409) 문을 지난 것이 접근이고 어느 쓰기 길도 건너뛰지 못한다(AA-8)."""
+    if _admin_via(ident, project_id, need) is not None:
+        _admin_access(_admin_reader(ident), project_id, "admin.write")
+
+
+def _admin_access(admin: AdminRead | None, project_id: Any, action: str) -> None:
+    """관리자 접근 줄 한 행(열람 admin.read · 쓰기 문 admin.write) — (관리자, 과제, 한국 날, 행위)마다 많아야 rr_audit 한 행(scope project ·
+    after {day} — 사람이 쓴 글은 없다, 사용자 결정 11-01). 누가 우회를 썼는지는 부르는 쪽(`_note_admin_read` · `_note_admin_write`)이 가른다.
+
+    없는 과제는 쓰지 않는다. 오늘 줄이 이미 있으면 읽기만 하고 돌아간다(진행판의 5초 폴링이 쓰기 잠금을 잡지 않는다). 쓰기는 한 문장
+    (INSERT … SELECT … WHERE NOT EXISTS)이라 함께 든 두 요청이 둘 다 '없음' 을 보아도 한 행이다. 행 주인은 행위자인 관리자다(다른 감사 행과
+    같다 — 그 과제 주인의 반출에는 실리지 않는다)."""
     if admin is None or not project_id:
         return
     project_id = str(project_id)
     store = get_store()
     if store.query_one("SELECT id FROM rr_projects WHERE id = ?", (project_id,)) is None:
         return
-    if project_role(project_id, admin.email) is not None:
-        return
     at = now_epoch()
     start = audit_day_start(at)
-    today = (project_id, start, start + DAY_S, admin.email)
-    if store.query_one(_ADMIN_READ_TODAY_SQL, today) is not None:
+    today = (project_id, start, start + DAY_S, action, admin.email)
+    if store.query_one(_ADMIN_ACCESS_TODAY_SQL, today) is not None:
         return
     store.execute(
         "INSERT INTO rr_audit(id, owner_sub, actor, actor_verified, channel, scope, subject_id, project_id, action,"
-        " before_json, after_json, reason, at) SELECT ?, ?, ?, ?, ?, 'project', ?, ?, 'admin.read', NULL, ?, NULL, ?"
-        " WHERE NOT EXISTS (SELECT 1 FROM rr_audit WHERE project_id = ? AND at >= ? AND at < ? AND action = 'admin.read'"
-        " AND actor = ?)",
-        (new_uuid(), admin.email, admin.email, int(admin.channel != "mcp"), admin.channel, project_id, project_id,
+        " before_json, after_json, reason, at) SELECT ?, ?, ?, ?, ?, 'project', ?, ?, ?, NULL, ?, NULL, ?"
+        " WHERE NOT EXISTS (SELECT 1 FROM rr_audit WHERE project_id = ? AND at >= ? AND at < ? AND action = ? AND actor = ?)",
+        (new_uuid(), admin.email, admin.email, int(admin.channel != "mcp"), admin.channel, project_id, project_id, action,
          canonical_json({"day": time.strftime("%Y-%m-%d", time.gmtime(start + AUDIT_DAY_OFFSET_S))}), at, *today))
 
 
@@ -1640,11 +1656,12 @@ def _note_admin_reads(admin: AdminRead | None, project_ids: Any) -> None:
 
 
 def _require_owner(project_id: str, ident: identity.Identity) -> str:
-    """owner 전용 경로 — admin role 은 owner 와 동등하게 통과한다."""
+    """owner 전용 경로 — admin role 은 owner 와 동등하게 통과한다(주인이 아니면 관리자 쓰기 줄 — `_note_admin_write`)."""
     email = _require_user(ident)
     if _is_admin(ident):
         if get_store().query_one("SELECT id FROM rr_projects WHERE id = ?", (project_id,)) is None:
             raise AppError("E404", f"과제({project_id}) 를 찾을 수 없습니다.", 404)
+        _note_admin_write(ident, project_id, "owner")
         return email
     require_role(project_id, email, "owner")
     return email
@@ -3023,6 +3040,7 @@ def _project_editor(project_id: str, ident: identity.Identity) -> str:
         raise AppError("E404", f"과제({project_id}) 를 찾을 수 없습니다.", 404)
     if row["owner_sub"] != email and not _is_admin(ident):
         require_role(project_id, email, "editor")
+    _note_admin_write(ident, project_id)
     return str(row["owner_sub"])
 
 
@@ -3061,13 +3079,14 @@ def post_sameas_decide(body: list[dict], ident: identity.Identity = Depends(iden
     store = get_store()
     # 키 전파의 감사 행(rekey)의 입구 · 행위자 검증 — MCP risk_decide_sameas 는 mcp · 0 이다(사용자 결정 10-31).
     channel = AUDIT_CHANNELS.get(ident.source, "rest")
+    # 문 판정(항목마다 그 과제의 주인 · 편집자)은 트랜잭션 앞에서 다 한다 — 거절되면 아무 결정도 쓰지 않는 것은 종전과 같고, 관리자 우회로 지난
+    # 문의 관리자 쓰기 줄은 뒤 항목의 거절이 되돌리지 않는다(다른 쓰기 문과 같이 문을 지난 것이 접근이다, AA-8).
+    owners = [_decision_owner(item, ident) for item in body]
     # 배열은 한 트랜잭션이다 — 3번째 항목이 404 인데 앞 두 결정만 커밋되는 반쪽 적용을 막는다(내부 tx 는 합류한다).
     with store.tx():
-        results = []
-        for item in body:
-            owner_sub, via = _decision_owner(item, ident)
-            results.append(sameas.record_decision(store, item, owner_sub=owner_sub, decided_by=email, channel=channel,
-                                                  actor_verified=channel != "mcp", via=via))
+        results = [sameas.record_decision(store, item, owner_sub=owner_sub, decided_by=email, channel=channel,
+                                          actor_verified=channel != "mcp", via=via)
+                   for item, (owner_sub, via) in zip(body, owners)]
     return {"updated": len(results), "results": results, "G2": None}
 
 
@@ -3695,6 +3714,7 @@ def _target_editor(target_key: str, row: Any, ident: identity.Identity) -> str:
         raise missing
     if not _is_admin(ident):
         _member_or_missing(row["project_id"], email, "editor", missing)
+    _note_admin_write(ident, row["project_id"])
     return email
 
 
@@ -4347,6 +4367,7 @@ def _closure_owner(target_key: str, ident: identity.Identity) -> tuple[str, dict
         raise missing
     if not _is_admin(ident):
         _member_or_missing(row["project_id"], email, "owner", missing)      # 남에게 과제 id 를 흘리지 않는다(review1 L2)
+    _note_admin_write(ident, row["project_id"], "owner")
     if row["flow"] != "cells":
         raise AppError("ack_not_allowed", "완결 잔여 확인은 카드 대조 대상(flow='cells')에만 있다.", 422)
     return email, dict(row)
@@ -5975,6 +5996,7 @@ def post_panel_repersist(panel_id: str, discard: bool = False,
         raise missing
     if not _is_admin(ident):
         _member_or_missing(row["project_id"], email, "editor", missing)
+    _note_admin_write(ident, row["project_id"])
     via = _admin_via(ident, row["project_id"])
     # MCP risk_repersist_panel 은 (mcp, 0) 이다(사용자 결정 10-31 — 종전에는 둘 다 기본값 rest · 1).
     channel = AUDIT_CHANNELS.get(ident.source, "rest")
@@ -6614,8 +6636,10 @@ def update_human_finding(finding_id: str, body: HumanFindingBody,
     email = _require_user(ident)
     store = get_store()
     row = _human_finding_row(store, finding_id, _finding_writer(store, finding_id, ident))
-    if row["author_sub"] != email and row["owner_sub"] != email and not _is_admin(ident):
-        raise AppError("role_insufficient", "작성자 또는 과제 주인만 고칠 수 있습니다.", 403)
+    if row["author_sub"] != email and row["owner_sub"] != email:
+        if not _is_admin(ident):
+            raise AppError("role_insufficient", "작성자 또는 과제 주인만 고칠 수 있습니다.", 403)
+        _note_admin_write(ident, row["project_id"], "owner")    # 작성자 · 주인이 아닌 관리자 — 관리자라서 지난다
     via = _finding_via(ident, row)
     cites = [c for c in body.cites if isinstance(c, dict) and str(c.get("ref") or "").strip()]
     if not cites:
@@ -6644,8 +6668,10 @@ def delete_human_finding(finding_id: str, ident: identity.Identity = Depends(ide
     email = _require_user(ident)
     store = get_store()
     row = _human_finding_row(store, finding_id, _finding_writer(store, finding_id, ident))
-    if row["author_sub"] != email and row["owner_sub"] != email and not _is_admin(ident):
-        raise AppError("role_insufficient", "작성자 또는 과제 주인만 지울 수 있습니다.", 403)
+    if row["author_sub"] != email and row["owner_sub"] != email:
+        if not _is_admin(ident):
+            raise AppError("role_insufficient", "작성자 또는 과제 주인만 지울 수 있습니다.", 403)
+        _note_admin_write(ident, row["project_id"], "owner")    # 작성자 · 주인이 아닌 관리자 — 관리자라서 지난다
     via = _finding_via(ident, row)
     with store.tx():
         store.execute("DELETE FROM rr_claim_refs WHERE claim_uid = ?", (row["claim_uid"],))
