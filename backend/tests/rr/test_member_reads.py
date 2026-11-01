@@ -20,7 +20,7 @@ import pytest
 
 import app.mcp_server as srv
 from app import brief as brief_module
-from app import field_source, routes, runner
+from app import common, field_source, identity, routes, runner
 from tests import factories
 from tests.rr.test_review1_stranger import (CASES, GET_CASES, GET_EXPECT, MCP_CASES, MCP_EXEMPT, OTHER, OWNER, P, _answer,
                                             _mcp, ledger, template)  # noqa: F401 — 원장 픽스처 둘을 이 모듈에서 쓴다
@@ -50,8 +50,8 @@ MCP_READS: tuple[str, ...] = (
 MCP_MEMBER_EXEMPT: dict[str, str] = {
     "risk_get_brief": ("브리프 토큰의 패널을 동결하고 패널 품질을 쓴다 — 결과를 낼 수 있는 사람(그 대상 과제의 주인 · 편집자, MB-14)만이고"
                        " 보기는 role_insufficient 다(RV-1 — tests/rr/test_editor_writes.py)"),
-    "risk_next_step": ("주인의 진행 길잡이 — 주인 과제의 단계만 걷는다. 편집자도 그 쓰기(소스 · 캡처 · 대상 · 잡)를 하게 됐지만(MB-14)"
-                       " 길잡이는 넓히지 않았다(남긴 것)"),
+    "risk_next_step": ("구성원에게도 연다(OI-3) — 그러나 답이 부른 사람에게 매인다(project.my_role · 자격 칸은 부른 사람의 등록 · 보기는"
+                       " 쓰기 걸음 대신 role_insufficient 막힘)라 주인과 같은 답이 아니다 — 아래 길잡이 시험이 따로 본다"),
 }
 MCP_WRITES: tuple[str, ...] = (
     "risk_create_project", "risk_submit_panel_result", "risk_add_finding", "risk_add_source", "risk_capture_snapshot",
@@ -193,6 +193,120 @@ def test_the_mcp_project_list_gives_members_their_role(members, monkeypatch):
     for who, role in ((OWNER, "owner"), (EDITOR, "editor"), (VIEWER, "viewer")):
         factories.act_as_delegate(monkeypatch, who)
         assert [(c["id"], c["my_role"]) for c in srv.risk_list_projects()["projects"]] == [(ids["project"], role)], who
+
+
+# ---------------------------------------------------------------- 길잡이(risk_next_step) — 구성원에게(OI-3)
+def _guide(monkeypatch, who: str, **kwargs) -> dict:
+    factories.act_as_delegate(monkeypatch, who)
+    code, _status, text, _ = _mcp(lambda: srv.risk_next_step(**kwargs))
+    out = json.loads(text)
+    assert code == "ok" or "error" in out, out
+    return out
+
+
+def _same_walk(owner: dict, member: dict) -> None:
+    assert (member["where"], member["web"], member["notes"]) == (owner["where"], owner["web"], owner["notes"])
+    assert {k: v for k, v in member["project"].items() if k != "my_role"} == {
+        k: v for k, v in owner["project"].items() if k != "my_role"}
+    assert {k: v for k, v in member["facts"].items() if k != "credentials"} == {
+        k: v for k, v in owner["facts"].items() if k != "credentials"}
+
+
+def test_the_guide_opens_to_members_and_a_viewer_gets_no_write_steps(members, monkeypatch):
+    """길잡이는 구성원도 연다(사용자 결정 11-01 · OI-3) — 웹 구성원 읽기와 같은 문으로 과제 주인의 행을 걷는다(같은 단계 · 사실). 편집자는
+    주인과 같은 걸음이고(쓰기는 편집자 이상 — MB-14), 보기는 쓰기 걸음 대신 role_insufficient 막힘 하나다(그 걸음의 도구를 싣는다 —
+    조용히 빼지 않는다). 종전에는 구성원이 없는 과제와 같은 E404 였다. 세 단계를 걷는다 — 소스가 없다(걸음이 쓰기뿐), 소스를 붙여 끝까지
+    걷는다(종합 보고서까지 선 대상 — 걸음이 읽기뿐이라 보기도 같다), 새 리비전을 얼렸다(앞 단계를 다 지나 비교를 만드는 쓰기 걸음)."""
+    store, ids = members
+    for phase in ("sources", "done", "diff"):
+        if phase == "done":
+            routes.add_source(ids["project"], routes.SourceBody(kind="mcad", ref={"stepforge_project_id": "sf-1"}),
+                              ident=factories.ident(OWNER))
+        elif phase == "diff":
+            factories.make_snapshot(store, ids["project"], factories.fixture_adapter_results(), label="DV3",
+                                    captured_at=factories.CAPTURED_AT + 3 * 86400)
+        owner = _guide(monkeypatch, OWNER, project_id=ids["project"])
+        editor = _guide(monkeypatch, EDITOR, project_id=ids["project"])
+        viewer = _guide(monkeypatch, VIEWER, project_id=ids["project"])
+        assert owner["where"] == phase, (phase, owner["where"])
+        assert [g["project"]["my_role"] for g in (owner, editor, viewer)] == ["owner", "editor", "viewer"]
+        for member in (editor, viewer):
+            _same_walk(owner, member)
+        assert (editor["next"], editor["blocked"]) == (owner["next"], owner["blocked"]), phase
+        writes = [s for s in owner["next"] if s["write"]]
+        assert bool(writes) == (phase != "done"), (phase, owner["next"])      # 보기의 갈림이 빈 통과가 아니다
+        assert viewer["next"] == [s for s in owner["next"] if not s["write"]], phase
+        refused = [b for b in viewer["blocked"] if b["code"] == "role_insufficient"]
+        assert [b["tools"] for b in refused] == ([list(dict.fromkeys(s["tool"] for s in writes))] if writes else []), refused
+        assert [b for b in viewer["blocked"] if b["code"] != "role_insufficient"] == owner["blocked"]
+    assert "coverage" not in owner["facts"] and owner["facts"]["pair"]["target_snapshot_id"] != ids["target_snapshot"]
+
+
+def test_the_guide_lists_member_projects_and_keeps_strangers_out(members, monkeypatch):
+    """과제 없이 부르면 내 과제 목록이다 — 구성원 과제가 역할과 함께 서고, 남은 그 과제를 목록에서도 열어서도 보지 못한다(없는 과제와 같은
+    답 — 남 숨김)."""
+    store, ids = members
+    for who, role in ((OWNER, "owner"), (EDITOR, "editor"), (VIEWER, "viewer")):
+        listed = _guide(monkeypatch, who)["projects"]
+        assert [(p["id"], p["my_role"]) for p in listed] == [(ids["project"], role)], who
+    assert _guide(monkeypatch, OTHER)["projects"] == []
+    theirs = _guide(monkeypatch, OTHER, project_id=ids["project"])
+    missing = _guide(monkeypatch, OTHER, project_id="no-such-project")
+    assert theirs["error"] == missing["error"] == "E404"
+    assert json.dumps(theirs).replace(ids["project"], "<p>") == json.dumps(missing).replace("no-such-project", "<p>")
+
+
+def test_the_guide_reads_the_callers_own_registration(members, monkeypatch):
+    """자격 칸 — 등록 · 캡처는 부른 사람의 등록(동결은 시작한 사람의 PAT 로 읽는다 — MB-14), 러너는 요청자(부른 사람) → 잡 주인(과제 주인)
+    순서다. 주인만 PAT 가 있으면 편집자의 길잡이는 등록 없음 · 러너는 주인의 PAT 이고, 편집자가 등록하면 그 사람의 것이 된다."""
+    store, ids = members
+    owner = _guide(monkeypatch, OWNER, project_id=ids["project"])["facts"]["credentials"]
+    editor = _guide(monkeypatch, EDITOR, project_id=ids["project"])["facts"]["credentials"]
+    assert (owner["portal_pat"]["registered"], editor["portal_pat"]["registered"]) == (True, False)
+    assert (editor["runner"]["kind"], editor["runner"]["email"], editor["capture_mcp"]) == ("owner", OWNER, "service_pat")
+    store.upsert_credential(EDITOR, identity.encrypt_pat("pat-editor").decode("ascii"), "sub-e", EDITOR, "[]",
+                            common.now_epoch() + 30 * 86400)
+    editor = _guide(monkeypatch, EDITOR, project_id=ids["project"])["facts"]["credentials"]
+    assert (editor["portal_pat"]["registered"], editor["capture_mcp"]) == (True, "user_pat")
+    assert (editor["runner"]["kind"], editor["runner"]["email"]) == ("requester", EDITOR)
+
+
+def test_the_guide_does_not_walk_a_predecessor_the_member_cannot_read(members, monkeypatch):
+    """계보 과제(앞 리비전)는 과제 주인의 것이어야 하고(비교는 두 스냅샷의 주인이 같다) 구성원은 그 과제도 읽어야 한다 — 대응표 · 비교는 두
+    과제를 다 읽는 사람이 연다(MB-2). 뒤 과제만의 구성원에게 길잡이는 앞 과제의 스냅샷을 싣지 않고 까닭을 말한다(종전 코드는 구성원에게
+    열리지 않았다)."""
+    store, ids = members
+    later = routes.create_project(routes.ProjectBody(code="NEXT-REV", name="뒤 리비전", classification="internal",
+                                                     predecessor_project_id=ids["project"]), ident=factories.ident(OWNER))["id"]
+    routes.add_source(later, routes.SourceBody(kind="mcad", ref={"stepforge_project_id": "sf-2"}), ident=factories.ident(OWNER))
+    factories.make_snapshot(store, later, factories.fixture_adapter_results(), label="DV3")
+    routes.put_members(later, routes.MembersBody(members=[routes.MemberItem(email=ONE_SIDE, role="editor")]),
+                       ident=factories.ident(OWNER))
+    owner = _guide(monkeypatch, OWNER, project_id=later)
+    one_side = _guide(monkeypatch, ONE_SIDE, project_id=later)
+    assert owner["facts"]["pair"]["base_snapshot_id"] in {s["id"] for s in _guide(
+        monkeypatch, OWNER, project_id=ids["project"])["facts"]["snapshots"]}
+    assert "pair" not in one_side["facts"] and one_side["where"] == "revision", one_side["where"]
+    assert any("계보 과제(앞 리비전)를 읽을 수 없어" in n for n in one_side["notes"]), one_side["notes"]
+
+
+def test_the_guide_walks_only_the_owners_rows(members, monkeypatch):
+    """길잡이의 스냅샷 · 동결 잡은 과제 주인의 행만이다(과제 상세 · 구성원 읽기와 같은 거름) — 남이 주인의 과제에 매단 스냅샷(고침 전의
+    들여오기 — RD-10)은 싣지 않는다. 종전에는 그 행이 최신 스냅샷으로 서 주인의 길잡이가 대응표 조회에서 E404 로 끊겼다."""
+    store, ids = members
+    routes.add_source(ids["project"], routes.SourceBody(kind="mcad", ref={"stepforge_project_id": "sf-1"}),
+                      ident=factories.ident(OWNER))
+    forged_snapshot, _forged_target = _forge(store, ids)
+    factories.seed_raw(store, "rr_snapshot_jobs", {
+        "id": "j" * 32, "project_id": ids["project"], "owner_sub": OTHER, "label": "남의 동결", "kinds_json": '["mcad"]',
+        "state": "failed", "error_json": '{"stage": "capture", "message": "남의 잡"}', "created_at": common.now_epoch()},
+        reason="고침 전의 들여오기가 남긴 남의 동결 잡 행 — 이제 들여오기는 parent_not_owned 로 막는다(RD-10)")
+    for who in (OWNER, *MEMBERS):
+        out = _guide(monkeypatch, who, project_id=ids["project"])
+        assert "error" not in out, (who, out)
+        assert forged_snapshot not in {s["id"] for s in out["facts"]["snapshots"]}, who
+        assert "j" * 32 not in {j["id"] for j in out["facts"]["snapshot_jobs"]}, who
+        assert (out["where"], out["facts"]["pair"]["target_snapshot_id"]) == ("done", ids["target_snapshot"]), who
 
 
 # ---------------------------------------------------------------- 남이 그 과제에 매단 행(고침 전의 들여오기 — RD-10)

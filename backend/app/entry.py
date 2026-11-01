@@ -545,9 +545,12 @@ def repersist_panel(ident: identity.Identity, *, panel_id: str, discard: bool = 
 
 # ---------------------------------------------------------------- 길잡이 — 어디까지 왔고 무엇이 막혔고 다음에 무엇을 부르나
 def _credentials(store: Any, ident: identity.Identity, owner: str) -> dict:
-    """자격 현황 — 값은 싣지 않고 있음·쓸 수 있음·남은 수명만. 규칙은 각 소비처의 것을 그대로 부른다."""
+    """자격 현황 — 값은 싣지 않고 있음·쓸 수 있음·남은 수명만. 규칙은 각 소비처의 것을 그대로 부른다.
+
+    `owner` 는 과제 주인이다(구성원이 부르면 부른 사람과 다르다 — OI-3). 등록 · 캡처 칸은 부른 사람의 등록이고(동결은 시작한 사람의 PAT 로
+    읽는다 — MB-14), 러너는 잡 주인(과제 주인)과 요청자(부른 사람), 명단은 대상 주인(과제 주인)의 것이다 — 각 소비처의 규칙 그대로다."""
     secrets = config.load_secrets(config.settings.data_dir)
-    row = store.get_credential(owner)
+    row = store.get_credential(ident.email)
     usable = row is not None and identity.credential_pat(row) is not None
     left = int(row.get("pat_exp") or 0) - now_epoch() if row is not None else None
     runner_credential, runner_note = runner.resolve_credential_with_note(store, None, owner, ident.email)
@@ -583,11 +586,13 @@ def _gate_view(gates: dict) -> dict:
 
 
 def _snapshots(store: Any, project_id: str) -> list[dict]:
-    """최신이 앞이다. 같은 초에 찍힌 둘은 rowid(넣은 순서)로 가른다 — uuid 순서는 무작위다."""
+    """최신이 앞이다. 같은 초에 찍힌 둘은 rowid(넣은 순서)로 가른다 — uuid 순서는 무작위다. 과제 주인의 행만이다(하위 표의 owner_sub 는
+    과제 주인의 복제 — 남이 그 과제 id 를 적어 매단 행은 과제 상세 · 구성원 읽기처럼 싣지 않는다, MB-1 · OI-3)."""
     rows = store.query(
         "SELECT s.id AS id, s.created_at AS created_at, s.node_count AS node_count, s.edge_count AS edge_count,"
         " s.capture_partial AS capture_partial, s.degraded_json AS degraded_json, j.label AS label,"
         " st.gates_json AS gates_json, st.blocked AS blocked FROM rr_snapshots s"
+        " JOIN rr_projects p ON p.id = s.project_id AND p.owner_sub = s.owner_sub"
         " LEFT JOIN rr_snapshot_jobs j ON j.id = s.job_id LEFT JOIN rr_states st ON st.snapshot_id = s.id"
         " WHERE s.project_id = ? ORDER BY s.created_at DESC, s.rowid DESC", (project_id,))
     out = []
@@ -603,9 +608,12 @@ def _snapshots(store: Any, project_id: str) -> list[dict]:
 
 
 def _snapshot_jobs(store: Any, project_id: str) -> list[dict]:
+    """그 과제의 동결 잡 — 과제 주인의 행만이다(편집자가 시작한 동결도 과제 주인의 행이다 — MB-14, `_snapshots` 와 같은 거름)."""
     rows = store.query(
-        "SELECT id, label, state, snapshot_id, error_json, started_at, finished_at FROM rr_snapshot_jobs"
-        " WHERE project_id = ? ORDER BY created_at DESC, rowid DESC", (project_id,))
+        "SELECT j.id AS id, j.label AS label, j.state AS state, j.snapshot_id AS snapshot_id, j.error_json AS error_json,"
+        " j.started_at AS started_at, j.finished_at AS finished_at FROM rr_snapshot_jobs j"
+        " JOIN rr_projects p ON p.id = j.project_id AND p.owner_sub = j.owner_sub"
+        " WHERE j.project_id = ? ORDER BY j.created_at DESC, j.rowid DESC", (project_id,))
     return [{**{k: row[k] for k in row.keys() if k != "error_json"}, "error": routes._loads(row["error_json"], {}) or None}
             for row in rows]
 
@@ -693,17 +701,39 @@ def _job_step(target_key: str, tier: str, plan_tiers: list[dict]) -> dict:
     return _step("risk_start_job", args, why)
 
 
+# 보기 구성원에게 길잡이가 쓰기 걸음 대신 주는 막힘의 고칠 곳(OI-3).
+VIEWER_FIX = "과제 주인에게 편집자 권한을 청하거나, 그 걸음을 과제 주인 · 편집자에게 부탁한다(웹 과제 화면의 멤버 탭)."
+
+
+def _viewer_steps(steps: list[dict], blocked: list[dict]) -> list[dict]:
+    """보기 구성원의 걸음 — 쓰기 걸음(write)은 편집자 이상만 한다(편집자 쓰기 규칙 MB-14 — 따라가면 403 role_insufficient 다). 그 걸음은 빼고
+    무엇을 뺐는지 막힘 하나로 말한다(조용히 빼지 않는다). 읽기 걸음은 그대로다."""
+    writes = [s for s in steps if s["write"]]
+    if writes and not any(b["code"] == "role_insufficient" for b in blocked):
+        tools = list(dict.fromkeys(s["tool"] for s in writes))
+        blocked.append(_blocked("role_insufficient", f"이 과제의 보기 구성원이다 — 다음 걸음({' · '.join(tools)})은 쓰기라 과제 주인 ·"
+                                " 편집자만 한다.", VIEWER_FIX, role="viewer", tools=tools))
+    return [s for s in steps if not s["write"]]
+
+
 def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dict:
-    """과제 하나의 단계를 걸어 where·blocked·next·facts 를 준다. project_id 가 없으면 내 과제 목록이다. 읽기 전용이다."""
-    owner = routes._require_user(ident)
+    """과제 하나의 단계를 걸어 where·blocked·next·facts 를 준다. project_id 가 없으면 내 과제(소유 ∪ 구성원) 목록이다. 읽기 전용이다.
+
+    구성원(편집자 · 보기)도 연다(사용자 결정 11-01 · OI-3) — 웹 구성원 읽기와 같은 문(`routes._project_reader`)으로 그 과제 주인의 행을
+    걷고 남은 종전대로 없는 과제와 같은 404 다. 걸음은 부른 사람이 할 수 있는 것만 싣는다 — 쓰기는 편집자 이상이라 보기에게는 쓰기 걸음
+    대신 `role_insufficient` 막힘이다(`_viewer_steps`). 답의 `project.my_role` 이 부른 사람의 역할이다."""
+    email = routes._require_user(ident)
     store = routes.get_store()
     head = {"acting_as": acting_as(ident)}
     # 쓰기가 거절될 신원이면 그것이 첫 막힘이다 — next 의 쓰기 단계를 따라가도 delegation_required 로 막힌다.
     refusal = _delegation_block(ident)
     if not project_id:
+        # 소유 ∪ 구성원(편집자 · 보기 행 — owner 는 과제 행의 주인 열만 정한다, project_role 과 같은 판정) — 웹 과제 목록과 같은 범위다.
         projects = [dict(r) for r in store.query(
-            "SELECT id, code, name, stage, created_at FROM rr_projects WHERE owner_sub = ?"
-            " ORDER BY created_at DESC, rowid DESC", (owner,))]
+            "SELECT p.id AS id, p.code AS code, p.name AS name, p.stage AS stage, p.created_at AS created_at,"
+            " CASE WHEN p.owner_sub = ? THEN 'owner' ELSE m.role END AS my_role FROM rr_projects p"
+            " LEFT JOIN rr_project_members m ON m.project_id = p.id AND m.email = ? AND m.role IN ('viewer', 'editor')"
+            " WHERE p.owner_sub = ? OR m.role IS NOT NULL ORDER BY p.created_at DESC, p.rowid DESC", (email, email, email))]
         steps = [_step("risk_next_step", {"project_id": p["id"]}, f"{p['code']} 가 어디까지 왔는지", write=False)
                  for p in projects]
         steps.append(_step("risk_create_project", {"code": "<과제 코드>", "name": "<과제 이름>",
@@ -711,7 +741,10 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
                            "새 과제 — 코드·이름·등급(반출 경계)을 사용자에게 받아 만든다."))
         return {**head, "projects": projects, "web": web_paths(), "blocked": [refusal] if refusal else [], "next": steps}
 
+    # 구성원이면 과제 주인, 아니면 부른 사람이다 — 남은 _project_row 가 종전과 같은 404 를 낸다(남과 없는 과제가 같은 답).
+    owner = routes._project_reader(project_id, email)
     project = routes._project_row(project_id, owner)
+    role = "owner" if owner == email else routes.project_role(project_id, email)
     sources = routes._project_sources(project_id)
     snapshots = _snapshots(store, project_id)
     creds = _credentials(store, ident, owner)
@@ -726,7 +759,10 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
     web = web_paths(project_id=project_id)
 
     def answer(where: str, steps: list[dict]) -> dict:
-        return {**head, "project": {k: project[k] for k in ("id", "code", "name", "stage", "predecessor_project_id")},
+        if role == "viewer":
+            steps = _viewer_steps(steps, blocked)
+        return {**head, "project": {**{k: project[k] for k in ("id", "code", "name", "stage", "predecessor_project_id")},
+                                    "my_role": role},
                 "web": web, "where": where, "blocked": blocked, "next": steps, "notes": notes, "facts": facts}
 
     # 1. 소스
@@ -792,10 +828,15 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
     # 3. 리비전 — 변경 비교의 앞 스냅샷. 같은 과제의 앞 캡처가 먼저고, 없으면 계보 과제의 최신 캡처다.
     base = snapshots[1] if len(snapshots) > 1 else None
     if base is None and project.get("predecessor_project_id"):
-        # 계보 과제도 호출자 것이어야 한다 — diff 가 두 스냅샷 모두 호출자 소유를 요구한다(diff._load_ir).
-        if store.query_one("SELECT id FROM rr_projects WHERE id = ? AND owner_sub = ?",
-                           (project["predecessor_project_id"], owner)) is not None:
-            base = next(iter(_snapshots(store, project["predecessor_project_id"])), None)
+        # 계보 과제도 과제 주인의 것이어야 한다 — diff 가 두 스냅샷의 주인이 같기를 요구한다(diff._load_ir · pair_owners_differ). 구성원은
+        # 그 과제도 읽어야 한다 — 대응표 · 비교는 두 과제를 다 읽는 사람이 연다(MB-2). 못 읽으면 그 과제의 스냅샷을 싣지 않는다(OI-3).
+        predecessor = project["predecessor_project_id"]
+        if store.query_one("SELECT id FROM rr_projects WHERE id = ? AND owner_sub = ?", (predecessor, owner)) is not None:
+            if owner == email or routes.project_role(predecessor, email) is not None:
+                base = next(iter(_snapshots(store, predecessor)), None)
+            else:
+                notes.append("계보 과제(앞 리비전)를 읽을 수 없어 변경 비교 단계를 건너뛴다 — 비교와 대응표는 두 과제를 다 읽는 구성원이"
+                             " 본다(그 과제 주인에게 구성원 권한을 청한다).")
     targets = [dict(r) for r in store.query(
         "SELECT target_key, kind, ref_id, superseded_by, roster_frozen_at, level, flow, created_at FROM rr_targets"
         " WHERE project_id = ? AND owner_sub = ? ORDER BY created_at DESC, rowid DESC", (project_id, owner))]

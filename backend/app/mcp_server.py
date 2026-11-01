@@ -218,7 +218,8 @@ _A_SEVERITY = f"심각도 — {' · '.join(routes.HUMAN_SEVERITIES)}(비우면 �
 _A_JUDGEMENT = f"판정 — {' · '.join(routes.HUMAN_JUDGEMENTS)}(비우면 undetermined)."
 _A_WARRANT = "논거(선택) — 인용이 주장을 어떻게 받치는지 적는다."
 # Claude 입구
-_A_NEXT_PROJECT = "과제 id(risk_list_projects 의 projects[].id). 비우면 내가 소유한 과제 목록과 새 과제 만들기 안내를 준다."
+_A_NEXT_PROJECT = ("과제 id(risk_list_projects 의 projects[].id) — 내 과제이거나 내가 구성원(편집자 · 보기)인 과제다. 비우면 그 과제 목록"
+                   "(projects[].my_role)과 새 과제 만들기 안내를 준다.")
 _A_CODE = (f"과제 코드(필수, 최대 {_max_len(routes.ProjectBody, 'code')}자) — 같은 사람이 같은 코드를 다시 보내면 기존 과제를 "
            "돌려준다(created:false).")
 _A_NAME = f"과제 이름(필수, 최대 {_max_len(routes.ProjectBody, 'name')}자)."
@@ -619,7 +620,7 @@ def risk_add_finding(
 # 같은 호출을 두 번 해도 같은 행이다 — 게이트웨이의 사람별 길은 실패하면 한 번 더 부른다.
 @mcp.tool()
 async def risk_next_step(project_id: Annotated[str | None, Field(description=_A_NEXT_PROJECT)] = None) -> dict:
-    """Claude 입구의 길잡이(읽기 전용) — 과제가 어느 단계(소스·캡처·리비전·same-as·비교·심사 대상·명단·잡·결과)이고 무엇이 막혔는지(고칠 곳 fix)와 다음에 부를 도구·인자(next)를 한 번에 준다, project_id 없이 부르면 내 과제 목록이고 acting_as 는 이 호출이 누구로 해석됐는지다."""
+    """Claude 입구의 길잡이(읽기 전용) — 과제가 어느 단계(소스·캡처·리비전·same-as·비교·심사 대상·명단·잡·결과)이고 무엇이 막혔는지(고칠 곳 fix)와 다음에 부를 도구·인자(next)를 한 번에 준다, project_id 없이 부르면 내 과제 목록이고 acting_as 는 이 호출이 누구로 해석됐는지다, 과제 구성원(편집자 · 보기)도 부를 수 있고 project.my_role 이 내 역할이다 — 보기에게는 쓰기 걸음 대신 role_insufficient 막힘이 선다(쓰기는 과제 주인 · 편집자만)."""
     return _fit_guide(await _entry(entry.next_step, project_id=project_id))
 
 
