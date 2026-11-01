@@ -27,10 +27,13 @@ __all__ = [
 
 DIFF_VERSION = "1.0"
 
-# §3.3.6 제외 사유 어휘. 제외된 항목은 diff_json 에 수치와 함께 남고 의미 이벤트만 만들지 않는다.
+# §3.3.6 제외 사유 어휘(13종 — 계약 rr_diff.v1 의 excluded_reason 과 같다, tests/test_diff_contract.py). 제외된 항목은 diff_json 에
+# 수치와 함께 남고 의미 이벤트만 만들지 않는다. source_drift · capture_partial 은 `_apply_source_parity` 가 붙인다(OI-1 — 이 목록에서
+# 빠져 있었다).
 EXCLUDED_REASONS: tuple[str, ...] = (
     "tol_differs", "tol_unknown", "result_kind_differs", "sim_params_differ", "unit_scale",
-    "partial_scope", "suspect_coords", "null_one_side", "sameas_pending", "bridge_stale", "truncated",
+    "partial_scope", "suspect_coords", "null_one_side", "sameas_pending", "bridge_stale", "source_drift",
+    "capture_partial", "truncated",
 )
 # 소스가 행 상한에서 자를 수 있는 계면 kind(StepForge list_interfaces · REST /interfaces — plan §2.5.1 · §2.13.3).
 TRUNCATABLE_KINDS: tuple[str, ...] = ("tied", "touching", "clearance", "interference")

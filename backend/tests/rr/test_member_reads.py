@@ -354,9 +354,8 @@ def test_a_diff_opens_to_who_reads_both_projects_and_follows_a_full_transfer(two
     factories.make_project(store, owner=OTHER, code="OTHER-OWN")       # 비교를 들여온 남도 제 과제가 있다(과제 주인이긴 하다)
     forged = dict(store.query_one("SELECT * FROM rr_diffs WHERE id = ?", (diff_id,)))
     forged.update(id="d" * 32, owner_sub=OTHER, base_snapshot_id="b" * 32, target_snapshot_id="c" * 32)   # (base, target) 는 유일하다
-    # 비교 본문은 주인의 것(생산자 diff.create_diff 가 쓴 것) 그대로다 — 생산자 diff_json 이 rr_diff.v1 밖이라(최상위 pair_kind · 조립품
-    # 주체 asm:… — context-notes MB-17 '남긴 것') 검증만 끈다. 이 시험이 어기려는 칸이 아니다.
-    factories.seed_raw(store, "rr_diffs", forged, validate=False,
+    # 비교 본문은 주인의 것(생산자 diff.create_diff 가 쓴 것) 그대로다 — rr_diff.v1 계약 안이라 검증을 지난다(context-notes OI-1).
+    factories.seed_raw(store, "rr_diffs", forged,
                        reason="고침 전의 들여오기가 남긴 남의 비교 행(남의 두 과제를 적었다) — 이제 들여오기는 parent_not_owned 로 막는다(RD-10) ·"
                               " 비교 본문은 주인의 것을 그대로 본뜬다")
 

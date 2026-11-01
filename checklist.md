@@ -921,7 +921,8 @@ B25 가 남긴 작은 것 하나(2026-10-31, context-notes BL-2) — 캡처가 �
 - [x] 리스크 전체 시험(공유 잠금) — 3,979 통과 · xfail 4 · 실패 0(rc 0, b9798ec, 12분 47초 — 앞 두 판은 가드 하나씩 붉음, MB-18)
 - [x] (결정) 기존 편집자 길(`_target_editor` — 잡 · 좌석 · 셀 · 쟁점 · 보고서 · 단위 · 방식 · 사람 finding 만들기)도 대상 행 주인 = 과제 주인을
       볼지 — 남이 매단 대상에 편집자가 쓸 수 있다(MB-19) — 조정자 요청 10-31 · 845fdd5(다시 저장 · MCP 잡 시작까지, MB-20)
-- [ ] (결정) 생산자 diff_json 이 rr_diff.v1 밖(최상위 pair_kind · 조립품 주체 asm:…) — 계약을 넓힐지 생산자를 맞출지(MB-17)
+- [x] (결정) 생산자 diff_json 이 rr_diff.v1 밖(최상위 pair_kind · 조립품 주체 asm:…) — 계약을 넓힐지 생산자를 맞출지(MB-17) — 사용자
+      결정 11-01 · 계약을 생산자 · 정본 쪽으로(context-notes OI-1)
 - [ ] (합칠 때) wt1031/risk-concurrency 의 progress_json panels 지도 — 과제 상세 jobs[].progress · 진행판 job.signal 이 그대로 보인다(MB-19)
 - [x] (시험 lint · 이 가지 밖) tests/test_claude_panel_jobs.py 의 같은 이름 시험 둘(F811 — 앞의 것이 돌지 않는다) · test_backup_wrapper_run.py(MB-19)
       — 6f24240(앞의 것 이름을 바꿔 둘 다 통과 · 쓰지 않는 import, MB-21)
@@ -1006,9 +1007,11 @@ B25 가 남긴 작은 것 하나(2026-10-31, context-notes BL-2) — 캡처가 �
 
 > 사용자 승인 11-01 — 결정과 까닭은 context-notes 'OI-1' 부터(줄 번호 = OI 번호).
 
-- [ ] ① 생산자 diff_json 이 `rr_diff.v1` 밖 — 계약을 정본에 맞추고 실제 생산자 산출을 검증하는 계약 시험 · 구성원 시험의 검증 끔을 걷음(OI-1)
+- [x] ① 생산자 diff_json 이 `rr_diff.v1` 밖 — 계약을 정본 · 생산자에 맞춤(pair_kind 필수 · 사건 주체 열쇠 code 마다 · 제외 사유 13종 ·
+      차단 capture_partial), 실제 생산자 본문 여섯을 검증하는 계약 시험 · 구성원 시험의 검증 끔을 걷음 · 화면 견본(OI-1)
 - [ ] ② 보기 · 서버가 거절할 사람에게 쓰기 단추를 잠그고 까닭을 보인다 — 편집자는 계획이 연 것, 주인만의 것은 주인만(OI-2)
 - [ ] ③ `risk_next_step` 을 구성원에게 — 읽기 문으로, 쓰기 걸음은 편집자 규칙으로(OI-3)
 - [x] ④ MCP 살아 있는 잡을 돌려줄 때 도는 자리 수(concurrency)를 싣고 새 잡이 받을 자리 수와 다르면 differs · 같은데 적게 돌면
       concurrency_note(OI-4)
 - [ ] ⑤ 관리자 읽기 우회 — 계획서가 관리자를 전 과제 읽기로 적었으면 읽기 문에도(OI-5)
+- [ ] 포털 정본 문면(포털 세션) — plan §3.3.1 봉투의 pair_kind · §3.3.5 사건의 subject.dns 꼴(OI-1)

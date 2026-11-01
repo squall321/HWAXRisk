@@ -5750,6 +5750,50 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
 > CC-33 남긴 것) ⑤ 관리자 읽기 우회(MB-1 남긴 것 — 계획서가 그렇게 적었을 때만). 줄마다 커밋 하나이고 번호는 줄 번호와 같다(OI-1 = ①).
 > 고친 동작마다 고치기 전 코드의 스크래치 사본에서 지는 시험을 먼저 보고, 변이는 스크래치 사본에서만 걸었다.
 
+### OI-1. 생산자 diff 본문과 `rr_diff.v1` — 계약을 생산자 쪽으로 고쳤다(사용자 결정 11-01 · MB-17 남긴 것)
+- 정본 — 앱 docs/plan.md 는 포털 plan 을 계약 정본으로 가리키고 `rr_diff.v1.json` 을 그 §3 의 옮김으로 적는다. 포털 plan §3.3.1 봉투에는
+  pair_kind 가 없다(열은 §5.2.2 rr_diffs.pair_kind, RA design_diff 칸은 §5.3.3). §3.3.2 의 cid 열쇠는 노드 dn · 명명 치수 `dim:<name>` · 롤업
+  `asm:<asm_key>` · 결과 `dn|metric` 이고, §3.3.5 사건 레코드의 subject.dns 는 노드 예만 보인다. §3.3.6 제외 사유는 13종이다(source_drift ·
+  capture_partial 포함). 계약 파일은 P0 비계(4cf8ed5)에서 정본의 예를 옮겨 적은 것이고 생산자가 자라며(소스 5키 · 롤업 · 결과) 어긋났다.
+- 탐침 — 시험 전체(2460cd0 스크래치 사본 · 4,040 통과)에서 `diff.compute_diff` 산출 1,077 개를 계약으로 검증했다(감싼 플러그인 · 원장은
+  그대로). 갈래 — 최상위 pair_kind(1,077 전부) · 사건 주체 열쇠(asm: 4,585 · [dn, metric] 2,364 · dim: 1,509 + 770 · contact#<n> 1,502) · 제외
+  사유 capture_partial(파라메트릭 323 · 구조 엣지 2) · 의미층 차단 capture_partial 4 · rule_version null 111 · diff_id 빈 글 110 · 결과
+  kind 'drop' 9. MB-17 의 '15건' 은 syn40 기본 씨앗 하나의 것이다(pair_kind 1 · 노드 아닌 주체 열쇠 14).
+- 판정 — 생산자를 고친 곳은 없다(본문 바이트째 그대로).
+  - pair_kind — rr_diffs.pair_kind 열의 사본이고 비교 화면 '짝' 칸이 본문(`doc.pair_kind`)에서 읽는다. 생산자에서 빼면 화면이 다른 과제
+    비교를 '같은 과제 리비전' 으로 보이고, 저장된 본문(dev · cae00)에는 이미 있다 — 계약에 넣고 필수로 했다(생산자가 늘 싣는다).
+  - 주체 열쇠 — 생산자는 cid 의 key_a · key_b(§3.3.2)를 subject.dns 에 싣는다. 노드만 싣게 고치면 cid 는 지킬 수 있지만 저장된 본문은
+    옛 꼴이라 계약이 두 꼴을 다 받아야 하고, 소비처(브리프 이름 후보 · ECAD caveat · 화면 ECAD 판정)는 노드가 아닌 열쇠에도 그대로 돈다 —
+    계약이 code 마다 꼴을 묶는다(아래 4). 합집합 하나로 넓히면 부품 사건에 asm: 가 와도 지나가 종전의 노드 검사를 잃는다.
+  - 제외 사유 · 의미층 차단 — 정본 §3.3.6 그대로다. 생산자의 어휘 상수 `diff.EXCLUDED_REASONS`(쓰는 곳 없는 기록)에도 둘을 더했다 — 화면
+    `compareView.EXCLUDED_LABEL` 은 이미 13종이었다. blocked_by capture_partial 은 capture_parity 거짓의 '의미 이벤트 미생성' 을 생산자가
+    적는 자리다(검토 단위 표 blocked_by 열 주석도 'G2' · 'capture_partial').
+  - 계약 밖에 둔 셋 — rule_version null(상태 행 없이 손으로 심은 스냅샷 — test_diff 의 create_diff 시험 하나), diff_id 빈 글(생산자 함수를
+    직접 부른 단위 시험 — create_diff 는 늘 id 를 준다), 결과 kind 'drop'(rr_ir 밖의 손 IR 을 먹인 시험 — rr_ir 도 deep · sphere · impact
+    만 받는다). 운영 경로(동결 → 상태 → create_diff)는 내지 않는다.
+- 계약이 바뀐 것(정확히) —
+  1. 최상위 `pair_kind` — `{"type": "string", "enum": ["same_project_revision", "cross_project"]}`, `required` 에 든다.
+  2. `semantic.blocked_by` — enum `["G2", "capture_partial", null]`(capture_partial 이 더해졌다).
+  3. `definitions.excluded_reason` — enum 에 `source_drift` · `capture_partial` 을 더해 13종 + null(차례는 정본 §3.3.6).
+  4. `definitions.event` — `subject.dns.items` 를 nid 에서 string 으로 풀고 `allOf` 다섯이 code 마다 묶는다 — asm.rollup_changed →
+     `^asm:.+` · dim.named_changed · dim.named_unmeasured → `^dim:.+` · contact.scope_changed → `^contact#[0-9]+$` · result.part_metric_shift →
+     `[nid, result_metric]`(둘 — `additionalItems: false`) · 그 밖의 code → nid(종전 그대로).
+  5. 새 definitions 넷 — `result_metric`(result_item.metric 과 같은 넷 — 시험이 같음을 본다) · `dim_key` · `asm_key_ref` · `contact_scope_key`.
+  손 픽스처 넷(valid 둘 · invalid 둘)에 pair_kind 를 넣었다 — 무효 픽스처가 제 까닭으로만 거부되게.
+- 소비처 — 본문이 바뀌지 않았다. REST GET /diffs/{id}?part=diff 와 MCP risk_get_diff(part='diff') 는 같은 함수(routes.diff_part →
+  diff.get_diff)로 저장된 본문을 그대로 내고(lines · events · summary 는 열 · 펼침 표를 읽는다), 등록부 · 서술(narrative 의 대상 맥락) ·
+  단위 · 브리프 · 러너는 열(pair_kind · summary_text · comparability_json) 또는 본문의 층을 읽어 바뀐 곳이 없다. 화면 타입(DiffDoc)은
+  pair_kind · `subject.dns: string[]` 로 이미 맞다 — 실제 생산자 본문 견본(serverSamples `diffDocSyn40` — 층마다 앞 항목 하나 · 사건은 주체
+  열쇠 꼴마다 하나)을 더해 tsc 가 타입과 견주고 views 시험이 그 사건 줄(이름 · ECAD 아님)을 그린다.
+- 시험 — 새 tests/test_diff_contract.py 20(생산자 본문 여섯 — syn40 씨앗 셋 · 다른 과제 쌍(G2) · 뒤 캡처가 부분인 쌍(어댑터가 싣는 scope) ·
+  소스 꼴이 바뀐 쌍(schema_drift) — 오류 0 · 넓힌 자리를 다 지나는가 · MCP 본문 · 제외 어휘가 생산자 상수와 하나 · 계약이 여전히 거절하는
+  것 열하나). 구성원 시험의 남이 적어 넣은 비교 행 사본은 이제 검증을 지난다(`validate=False` 와 그 까닭 글을 걷었다). 고치기 전 코드(2460cd0
+  사본)에서 9 가 진다(본문 여섯 — 옛 계약 오류 syn40 15 · 16 · 14 · 다른 과제 1 · 부분 59 · 꼴 바뀜 52, MCP 본문, 어휘, 구성원 시험) — 11 은
+  지킴(넓힌 자리 도달 · 거절 열). 변이 16/16(pair_kind 칸 · 필수 · 어휘, 차단 capture_partial · 어휘, 제외 둘 · 어휘, 롤업 · 치수 · 접촉
+  범위 · 결과 꼴, 노드 사건의 else, 결과 셋째 열쇠, 생산자 어휘 상수, 결과 지표 어휘). 관련 시험 15 파일 542 통과 · xfail 2, 화면 tsc ·
+  pnpm test 109 통과.
+- 포털 정본 문면(포털 세션 몫) — plan §3.3.1 봉투에 pair_kind 를, §3.3.5 사건 레코드에 subject.dns 의 꼴(노드가 아닌 열쇠 넷)을 적는다.
+
 ### OI-4. MCP 입구가 돌려주는 살아 있는 잡 — 도는 자리 수를 싣고 다르면 differs(사용자 결정 11-01)
 - 무엇이 비었나 — `entry.start_job` 은 같은 대상 · 같은 Tier 의 살아 있는 패널 잡을 돌려줄 때 그 잡의 concurrency 를 싣지 않았고, 범위 안의
   다른 값(1 ↔ 2)을 청해도 differs 가 비었다(CC-15 · CC-33 — 범위 밖 값만 422 로 막았다). 부른 쪽은 청한 동시 실행이 받아들여졌다고 읽는다.

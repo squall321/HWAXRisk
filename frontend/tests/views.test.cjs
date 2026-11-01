@@ -224,6 +224,21 @@ test("diff 3층을 한 표 줄로 — ECAD 노드 변화와 그 dn 의 파라메
   assert.deepEqual(cmp.excludedCounts(rows), [{ reason: "partial_scope", isEcad: true, n: 1 }]);
 });
 
+test("실제 생산자 비교 본문 — 노드가 아닌 주체 열쇠(asm: · contact# · dim: · [dn, metric])의 사건도 이름으로 한 줄이고 ECAD 가 아니다", () => {
+  const doc = load("contract/serverSamples.js").diffDocSyn40;
+  assert.equal(doc.pair_kind, "same_project_revision"); // 비교 화면의 '짝' 칸이 본문에서 읽는다(계약 rr_diff.v1 — OI-1)
+  const events = Object.fromEntries(cmp.diffRows(doc).filter((r) => r.layer === "semantic").map((r) => [r.code, r]));
+  for (const [code, subject] of [
+    ["asm.rollup_changed", "syn_phone/rear_asm"], ["contact.scope_changed", "contact#16"],
+    ["dim.named_changed", "syn_holder_tinuda"], ["result.part_metric_shift", "p:65bf9cd8552b"],
+  ]) {
+    assert.ok(events[code], code);
+    assert.equal(events[code].subject, subject, code);
+    assert.equal(events[code].isEcad, false, code);
+  }
+  assert.equal(events["contact.added"].isEcad, false);
+});
+
 test("대응 확정 본문 — stable 키와 서버가 준 pair_key, 하나라도 없으면 보내지 않는다", () => {
   const row = { a: "p:1", b: "p:9", a_stable: "st:x", b_stable: "st:y" };
   assert.deepEqual(cmp.pairDecision(row, "reject", "p-a|p-b"), {
