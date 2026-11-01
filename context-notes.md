@@ -5920,3 +5920,130 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
   differs 에 든다(OI-4, 인자 계약은 바꾸지 않았다).
 - (길잡이) 보기의 자격 칸도 그 사람의 등록을 싣는다 — 쓰지 못하는 보기에게 카드 대조의 pat_unavailable 막힘이 설 수 있다(쓰기 걸음은
   빠지고 role_insufficient 가 함께 선다 — OI-3).
+
+## 관리자 접근 감사 11-01(가지 `wt1101/risk-admin-audit`, main bcfa535 위, 2026-11-01)
+
+> 사용자 결정 11-01 — 포털 plan §5.2.1 '멤버십' 행의 "`identity.role ∈ risk_admin_roles` 는 멤버 행 없이 editor 로 통과하며 그 접근도
+> `rr_audit` 에 남는다"(§0.6 '과제 접근·역할' 의 관리자와 같다)를 고른 안 '쓰기 표시 + 읽기 하루 한 줄' 로 닫는다(OI-5 · OI-7 이 남긴 줄).
+> 관리자의 발견 목록은 그대로다(소유 ∪ 구성원 — 같은 결정). 코드 커밋은 둘(쓰기 표시 · 읽기 한 줄)이고 번호는 AA-1 부터다.
+
+### AA-1. 무엇이 비었나
+- 쓰기 — 관리자 우회가 있는 쓰기 문(`_writer` 계열 · `_require_owner` · `_target_editor` · `_closure_owner` · `_project_editor` · 다시 저장의
+  문 · 사람 finding 고치기 · 지우기의 작성자 검사)을 관리자이기 때문에 지난 쓰기는 감사 행의 행위자로만 남아 구성원의 쓰기와 가를 수
+  없었다(MB-14 부터).
+- 읽기 — 웹 읽기 문의 관리자 우회(OI-5 · 그 전부터의 멤버 표 · 과제 이력 · 대상 감사 · 앞 과제)는 아무 흔적이 없었다. DDL 주석은
+  '열람(GET) 로그는 남기지 않는다 — §10 #29' 다. 나간 판이라 고치지 않는다 — 이 결정이 관리자 우회 열람만 예외로 연다.
+
+### AA-2. 쓰기 표시 — after 의 `via` 칸
+- 꼴 — 관리자 우회로만 든 쓰기가 남기는 감사 행마다 after_json 에 `"via": "admin"`(`_audit(via=)` · `rekey.run(via=)`). 표 · 열 · 색인은
+  그대로다(rr_audit 에 표시 열이 없고 channel 은 CHECK 어휘, reason 은 사람이 쓴 사유의 자리다). 조회 두 길(`GET /projects/{id}/audit` ·
+  `GET /targets/{key}/audit`)은 그 칸을 줄의 `via` 로 올리고 after 에서 뺀다(`_audit_entry` — 앞 · 뒤에는 그 조작의 값만, 표시 없는 줄은
+  null). 반출 JSONL 은 저장 그대로다(after_json 안).
+- 판정 — `_admin_via(ident, project_id, need)`. 관리자이고 그 과제에서의 역할(project_role — 구성원이 아니면 없음)이 그 쓰기의 문이 요구한
+  역할(편집자 쓰기 editor · 주인 쓰기 owner)에 못 미치면 "admin" 이다. 구성원으로도 할 수 있는 쓰기(편집자 구성원의 편집자 쓰기 · 주인의
+  주인 쓰기)에는 싣지 않는다. 문을 지난 바로 뒤에 잰다 — 이양 · 멤버 고치기는 그 쓰기가 제 역할을 바꾸므로(제게 넘기는 관리자 · 제 멤버
+  행을 넣는 관리자) 쓰기 뒤에 재면 우회가 가려진다.
+- 자리 —
+  - 주인 쓰기(owner) — member.put · project.transfer · project.purge · close.ack · close.ack.revoke.
+  - 편집자 쓰기(editor) — requirement.decide · gate.ack(붙이기 · 취소) · target.flow · job.create(검토 잡 · Claude 패널 잡) · brief.exclude ·
+    job.pause|resume|cancel(`_audit_job_control` — 취소의 on_change 훅도) · coverage.skip|uncarry · coverage.undefer(라우트 · 검토 잡이
+    함께 푸는 보류 — `planner.undefer` · `review_runner.create_review_job`) · cells.retry|skip(`review_runner.dispose_cells` 와 그 처분이
+    세우는 잡) · issue.queue|skip · verdict.final · registry.status · registry.merge · registry.merge.revoke(뒤의 셋은 대상을 고른 길만 —
+    대상 없이 부르면 부른 사람 자신의 행이라 문이 없다) · panel.repersist(_discard) · finding.create · rekey(계면 원장 reject · 대응 결정
+    reject — `rekey.run` · `sameas.record_decision`).
+  - 작성자 또는 주인 — finding.update · finding.delete(`_finding_via` — 문이 둘이라 어느 하나라도 관리자라서 지났으면 표시다. 편집자 구성원인
+    관리자가 남의 finding 을 고치면 표시, 제 finding 이면 없음, 보기로 내려간 작성자면 표시).
+  - 두 과제 대응 결정(pair) — 두 과제 가운데 하나라도 편집자가 아니면 표시다(`_decision_owner` 가 (주인, 표시) 를 돌려준다).
+- 싣지 않는 것 — vocab.edit(관리자 전용 조작이라 구성원 우회가 아니다 — 행위 이름이 곧 관리자다), MCP 길(신원에 역할이 없다 — 관리자
+  우회가 없다, SEC-2), 포털 '멈춤'(A24 — 엔진이 알린 사람이고 앱의 문을 지나지 않는다), ra.retract · ra.remark(동기 주기가 뒤따라 쓰는 행 —
+  그 쓰기의 행(project.purge · project.transfer)이 표시를 싣는다, AA-7).
+- 받아들인 것 — 관리자가 남의 과제에 매단 제 행(RD-10 — 행 주인의 길로 지난다)에 쓰면 그 과제의 역할이 없어 표시가 선다(우회가 아닌데).
+  그런 행은 고침 전의 들여오기가 남긴 것뿐이다. 관리자가 아닌 사람은 같은 길에서 표시가 없다(시험).
+
+### AA-3. 읽기 한 줄 — (관리자, 과제, 한국 날)마다 많아야 한 행
+- 꼴 — rr_audit(scope project · subject_id = project_id = 그 과제 · action `admin.read` · owner_sub = actor = 관리자 · actor_verified 1 ·
+  channel 은 신원 출처(쿠키 web · Bearer rest) · before NULL · after `{"day": "YYYY-MM-DD"}`(그 한국 날) · reason NULL). 사람이 쓴 글 ·
+  경로 · 질의는 싣지 않는다(코드 어휘 · id · 날).
+- 언제 — 웹 읽기 문이 관리자를 우회로 들인 곳에서 `_note_admin_read`. 그 함수가 구성원(주인 포함 — 보기 행 하나로도 읽는다)을 다시 걸러
+  구성원의 읽기는 남지 않는다. 없는 과제 · 열지 않은 읽기(남이 매단 행의 404 · 과제 없는 원장 행)는 남지 않는다.
+- 한 번만 — 먼저 오늘 줄을 읽기로 본다(있으면 돌아간다 — 진행판의 5초 폴링이 쓰기 잠금을 잡지 않는다). 없을 때만 한 문장
+  `INSERT … SELECT … WHERE NOT EXISTS (같은 조각)`. 두 요청이 함께 '없음' 을 보아도 sqlite 의 한 문장은 쓰기 잠금 안에서 확인과 쓰기를 같이
+  하므로 늦은 쪽은 0 행이다(앱의 저장소 RLock 도 문장 단위다). 확인은 `ix_rr_audit_project(project_id, at)` 가 받는다. UPDATE · DELETE 는
+  없다(append-only — plan §9.2 (18)).
+- 읽기 문 — OI-5 의 것과 그 전부터의 관리자 우회 전부다.
+  - `_reader`(과제 · 스냅샷 · 대상 · 패널) — 요구 · 성격 · 스냅샷 · 규칙 적중 · 대응표 · 단위 · 진행판 · 완결 · 쟁점 · 보고서 · 셀 · 전문가 ·
+    전문가 보고서 · 등록부 · 좌석 · 패널 · 발언 · 패널 브리프.
+  - `_diff_reader` — 비교 · 선례 · 참조의 diff 스코프 · 대상(diff) 만들기의 읽기 판정. 두 과제 가운데 구성원이 아닌 과제마다.
+  - 과제 상세, 멤버 표 · 과제 이력 · 대상 감사(P1 · 10-31 부터의 관리자 우회 — 대상 감사는 그 대상의 과제).
+  - 키 대장 — 그 키가 든 과제 가운데 구성원이 아닌 과제마다.
+  - 유사 · 선례의 넓힌 답 — 관리자에게는 다른 과제를 좁히지 않는다(OI-5). 답에 실린 다른 과제마다다 — 관리자가 문 과제의 구성원이어도
+    넓힌 몫은 우회다(유사는 경로마다의 project_id · subject 의 project_ids, 선례는 등록부 행의 과제). 선례의 패턴 후보는 집계(수 · 정밀도)만
+    싣고 과제를 드러내지 않아 세지 않았다. 조직 공개(org) 행만으로 실린 과제에도 한 줄이 설 수 있다(넘치는 쪽 — 빠지는 쪽보다 낫다).
+  - 원장 참조 — reg · narr · tool 은 연 행의 과제, req · voc · paper 는 찾은 행 · 대상의 과제.
+  - 새 과제의 앞 과제 — 관리자는 있는 과제면 된다(그 과제를 우회로 가리켰다).
+- 넓히지 않은 것(같은 결정) — 발견 목록 넷, MCP(역할이 없다), 쓰기 문(브리프 `GET /targets/{key}/brief` 는 편성 · 토큰을 내는 쓰기 문이라
+  읽기 줄을 쓰지 않는다 — AA-7).
+
+### AA-4. 하루의 경계 — 한국 표준시(UTC+9)
+- 까닭 — 쓰는 사람 · 운영이 한국이다(cae00 · 화면 · 포털 이력이 KST 로 말한다). UTC 날이면 09:00 KST 에 날이 갈려 한 근무일의 열람이 두 줄이
+  된다. 앱의 다른 '하루'(일일 패널 상한 — runner._local_midnight)는 서버 로컬 시각이라 컨테이너 TZ 에 매인다. 감사 줄은 박스마다 같은 뜻이어야
+  해 고정 오프셋(UTC+9 — 한국은 일광 절약이 없다)으로 센다. zoneinfo 는 SIF 의 tzdata 에 매여 쓰지 않았다.
+- `audit_day_start(at) = at − (at + 9h) mod 1일`, after.day 는 그 날의 KST 날짜다.
+
+### AA-5. 소비처 — 사람 개입으로 세는 곳에 읽기 줄은 들지 않는다
+- 대상 감사(`GET /targets/{key}/audit`)와 통합 보고서 minutes 의 '사람 개입 요약'(registry.target_audit_counts) — 같은 조각
+  (`target_audit_clause`)이 scope target · coverage · registry · finding · job · panel · snapshot 만 고른다. admin.read 는 scope project 라
+  들지 않는다(조각은 그대로 — 시험이 지킨다). RA 에 나가는 보고서도 그 minutes 다.
+- 과제 이력(`GET /projects/{id}/audit` — 화면 '이력' 탭)은 project_id 로 고르므로 선다 — 이름표 '관리자 열람', 전 → 후 칸은 '<날>(KST) 하루
+  한 줄'. 구성원이 아닌 관리자가 그 이력을 열면 제 열람 줄이 그 답에 먼저 선다(test_member_reads 의 관리자 표가 그 한 줄을 빼고 주인과
+  견준다). 쓰기 표시는 같은 탭의 행위자 칸에 '관리자 권한' 배지(풀이 한 줄)로 선다. 탭 머리글에 '구성원이 아닌 관리자의 열람은 관리자 ·
+  날(KST)마다 한 줄로 남습니다' 를 더했다.
+- 반출(JSONL) — 행 주인이 관리자라 그 과제 주인의 반출에 실리지 않는다(관리자의 반출에도 — 과제가 관리자의 것이 아니다). 편집자 · 관리자가 쓴
+  다른 감사 행과 같은 규칙이다(종전부터).
+- 이양 뒤 따라가기(`_follow_full_transfer` — project.transfer 의 앞 주인 읽기)는 action 으로 고른다 — 영향이 없다.
+- 그 밖에 rr_audit 를 읽는 곳은 없다(훑음 — routes 의 두 조회 · registry 조각 · 이양의 앞 주인 읽기 · 반출/들여오기 · RA 는 쓰기만).
+- 이름표 시험(AU-18)의 훑기가 `INSERT … SELECT … WHERE` 꼴도 읽게 고쳤다 — 그 꼴을 놓치면 admin.read 의 이름표가 빠져도 지나갔다(처음
+  돌림에서 그랬다). 훑기가 admin.read 를 찾는지 따로 본다.
+
+### AA-6. 시험 · 변이 · 전체 시험
+- 새 시험 `tests/rr/test_admin_access_audit.py` 109 항목 — 쓰기 71(감사 행을 남기는 쓰기 29 가지 × 구성원이 아닌 관리자 · 편집자 구성원인
+  관리자, 주인 · 작성자 쓰기 일곱은 제 과제의 관리자까지 — 행 전부의 표시와 행위자 / 제 finding 의 작성자 관리자(보기로 내려가면 표시) / 보기
+  구성원인 관리자 / 관리자가 아닌 사람의 제 행(RD-10) / 두 과제 대응 결정의 한쪽 우회 / 처분이 세우는 잡에 넘기는 표시 / 조회가 올리는 via)
+  · 읽기 38(관리자 읽기 표의 경로 29 마다 두 번 읽어 한 행 · 구성원과 구성원인 관리자는 없음 · 목록 · 남이 매단 행 · 없는 과제 · MCP 는 없음 ·
+  KST 날의 경계(UTC 자정을 넘어도 한 날) · 함께 든 읽기(앞선 확인 뒤 다른 요청의 줄이 커밋된 꼴) · 유사 · 선례의 넓힌 과제 · req · voc ·
+  paper · 앞 과제(웹 입구) · 대상(diff) 만들기 · 소비처 — 대상 감사 · '사람 개입 요약' · 반출에 없고 과제 이력에 있다).
+- 고친 옛 시험 셋 — test_member_reads 의 관리자 읽기 표(과제 이력 경로는 관리자 제 열람 줄 한 줄을 빼고 주인과 견준다), test_target_audit 의
+  줄 칸 목록(via), test_audit_action_labels 의 훑기(`INSERT … SELECT … WHERE` 꼴 · 훑기가 admin.read 를 찾는지).
+- 고치기 전 코드(bcfa535)의 스크래치 사본에 새 시험을 얹으면 77 이 진다 — 지나는 32 는 지킴 시험이다(표시가 없어야 하는 자리 29 · 구성원의
+  읽기 · 목록 · 관리자가 아닌 사람의 제 행).
+- 변이 81/81 — 백엔드 75(쓰기 50 — 표시 끔 · 칸 이름 · 역할 비교 <= · 관리자 검사 뺌 · 판정 뒤집기 · 주인 쓰기 need 다섯 · 자리마다 표시
+  넘김 뺌 서른다섯 · finding 표시 두 갈래 · pair any → all · 조회의 올림 둘 / 읽기 25 — 구성원 거름 · 없는 과제 거름 · 앞선 확인 · NOT EXISTS
+  무력 · 날의 경계 UTC · 날 글자 · 문마다 줄 뺌 열셋 · 입구 rest 박기 · 검증 0 · 행 주인 · 자리 · 관리자 표지 없음 · 대상 만들기 판정) · 화면
+  6(이름표 · 날 칸 · 배지 조건 넓힘 · 배지 풀이 · 형 칸 · 배지 뺌). 변이를 짜면서 선례의 줄 뺌 · req · voc · paper 의 줄 뺌 · finding 표시
+  첫 갈래 · 관리자 검사 뺌을 잡을 시험이 없는 것을 보고 넷을 더한 뒤 돌렸다(선례를 유사보다 먼저 · 날을 바꿔 가며 참조 셋 · 보기로 내려간 작성자 · 관리자가
+  아닌 사람의 제 행). 스크래치 사본에서만 바꾸고(PYTHONDONTWRITEBYTECODE · __pycache__ 지움) 되돌렸다(사본 · 원본 · 작업 트리 diff 0).
+- 관련 시험 24 파일 965 통과(rc 0). 화면 — `pnpm exec tsc -b` rc 0 · `pnpm test` 120 통과(118 + 2) · `pnpm exec vite build` rc 0(덩어리 500 kB
+  경고는 종전 그대로). 커밋마다(쓰기 표시만의 판 · 최종 판) 관련 시험 · 화면 시험을 따로 돌렸다(839 · 965 통과, 화면 119 · 120).
+- 리스크 전체 시험 한 번(공유 잠금, -q 없이, 2aa345d 의 트리) — 4,233 통과 · xfail 4 · 실패 0(rc 0, 13분 29초 — 08:33:28 ~ 08:46:59 UTC,
+  앞 판 4,124 에 새 시험 109). 건너뜀 0.
+- 하지 않은 것 — 서비스 · 인스턴스 기동 · 정지 · 재배포, push · 병합, 배선 리허설(카드 대조 사슬은 바꾸지 않았다), 실 브라우저 확인.
+
+### AA-7. 남긴 것(결정 · 다른 세션 몫)
+- (결정) 쓰기 표시는 '이미 남기는 감사 행' 에만 선다 — 감사 행이 없는 관리자 우회 쓰기는 rr_audit 에 흔적이 없다. 소스 연결 · 동결 · 치수 ·
+  요구 올림 · 요구 승계(받는 과제) · 계면 원장(확정 뒤집기 말고) · 대응 결정(reject 뒤집기 말고) · 비교 만들기 · 대상 만들기 · 명단 갱신 ·
+  단위 세우기 · GLM 패널 잡 만들기(빼기가 없을 때) · 보고서 다시 내기 · 브리프(편성 · 토큰 — GET 이지만 쓰기 문) · 패널 결과 제출 · 사람 라벨이다.
+  계획 §0.6 '사람 개입 기록' 의 목록(멤버십 · 이양 · lifecycle · 등급 · MCP 노출 · 폐기 · 게이트 ack · 커버리지 skipped · 잡 제어 · 브리프 제외 ·
+  등록부 status · verdict · 사람 finding · import 충돌)에 드는 길로 관리자 우회가 닿는 것은 다 행이 있다(라벨은 AU-15 — 라벨 훅, import 충돌은
+  앱에 없다) — §0.6 이 요구하는데 빠진 행은 없다. 웹 화면으로 쓰면 그날 열람 줄이 대개 먼저 서지만 REST 로 곧장 쓰면 그 과제에 아무것도
+  남지 않는다. 남기려면 쓰기 문이 우회를 쓴 때도 같은 하루 한 줄(또는 action 하나 더)을 남긴다 — 사용자 결정이 필요하다.
+- (받아들인 것) 유사 · 선례에서 조직 공개(org) 행만으로 실린 과제에도 열람 줄이 설 수 있다(넘치는 쪽). 관리자가 남의 과제에 매단 제 행(RD-10)에
+  쓰면 표시가 선다(AA-2).
+- (뒤따름) ra.retract · ra.remark 는 표시를 싣지 않는다 — 동기 주기가 op 를 보고 쓴다. 실으려면 거두기 op JSON 에 칸 하나(queue_retracts 의
+  by 옆)를 둔다.
+- (포털 세션) plan §5.2.1 '멤버십' 행의 문면 — 구현이 무엇을 남기는지 이렇게 적으면 맞다. "`identity.role ∈ risk_admin_roles` 는 멤버 행 없이
+  editor 로 통과하며 그 접근도 `rr_audit` 에 남는다 — 관리자이기 때문에 든 쓰기(구성원이 아니거나 그 쓰기의 역할이 모자람)는 그 쓰기가
+  남기는 감사 행의 after 에 `via: "admin"` 을 싣고(조회는 줄의 `via` 로 올린다), 관리자 우회로만 열린 웹 읽기는 (관리자, 과제, 한국 날)마다
+  `rr_audit(scope='project', action='admin.read', after={day})` 한 행이다(한 문장 INSERT … WHERE NOT EXISTS — 대상 감사 · '사람 개입 요약' 에는
+  들지 않고 과제 이력에만 선다, HWAXRisk context-notes AA-1 ~)."
+- (화면) 이력 탭의 열람 줄 · 배지는 서버 렌더 시험까지다 — 브라우저로 보지 않았다.
+- (DDL) rr_audit 의 action 주석 · '열람(GET) 로그는 남기지 않는다' 는 나간 판이라 그대로다 — 관리자 우회 열람만 예외다(이 절).

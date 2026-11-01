@@ -1561,7 +1561,7 @@ def _is_admin(ident: identity.Identity) -> bool:
 # §5.2.1 '그 접근도 rr_audit 에 남는다', HWAXRisk context-notes AA-1 ~)
 ADMIN_VIA = "admin"                  # 쓰기 감사 행의 표시 값 — 그 쓰기는 관리자 우회로만 들었다
 AUDIT_VIA_KEY = "via"                # 그 값이 앉는 after 의 칸 — rr_audit 에 표시 열이 없고 DDL 은 나간 판이라 그대로 둔다
-# 관리자 열람 줄의 하루 — 한국 표준시(UTC+9 · 일광 절약 없음)의 달력 날이다. 컨테이너의 TZ 에 매이지 않게 고정 오프셋으로 센다(AA-3).
+# 관리자 열람 줄의 하루 — 한국 표준시(UTC+9 · 일광 절약 없음)의 달력 날이다. 컨테이너의 TZ 에 매이지 않게 고정 오프셋으로 센다(AA-4).
 AUDIT_DAY_OFFSET_S = 9 * 3600
 DAY_S = 86400
 # 오늘(한국 날) 그 관리자의 그 과제 열람 줄 — 자리표 넷(과제, 날의 처음, 다음 날의 처음, 관리자). 아래 INSERT 의 NOT EXISTS 와 같은 조각이다.
