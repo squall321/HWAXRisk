@@ -95,8 +95,9 @@ def test_a_member_reads_only_this_targets_human_actions(ledger):
     assert viewer["entries"] == owner["entries"]
     # 최근 것이 먼저이고 칸은 과제 감사와 같다.
     assert [e["at"] for e in owner["entries"]] == sorted((r["at"] for r in mine), reverse=True)
+    # via — 쓰기의 관리자 우회 표시(after 의 via 칸을 올린 것, 없으면 null — 사용자 결정 11-01).
     assert set(owner["entries"][0]) == {"id", "actor", "actor_verified", "channel", "scope", "subject_id", "project_id",
-                                        "action", "before", "after", "reason", "at"}
+                                        "action", "before", "after", "reason", "at", "via"}
     # 보고서의 '사람 개입 요약' 이 세는 수와 같은 조각이다.
     assert registry.target_audit_counts(store, TARGET) == dict(Counter(r["action"] for r in mine))
 

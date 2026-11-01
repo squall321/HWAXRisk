@@ -1074,7 +1074,8 @@ DECISIONS = ("confirm", "reject", "merge_key", "rename_key", "confirm_key", "unm
 
 
 def record_decision(store, payload: Mapping[str, Any], *, owner_sub: str,
-                    decided_by: str | None = None, channel: str = "rest", actor_verified: bool = True) -> dict:
+                    decided_by: str | None = None, channel: str = "rest", actor_verified: bool = True,
+                    via: str | None = None) -> dict:
     """`POST /api/sameas/decide` 본문 하나를 원장에 기록한다.
 
     `confirm|reject` 는 `rr_sameas`(scope·pair_key·stable 키 쌍), `merge_key|rename_key|confirm_key|unmerge_key`
@@ -1084,7 +1085,8 @@ def record_decision(store, payload: Mapping[str, Any], *, owner_sub: str,
     확정을 뒤집는 조작(confirmed → rejected 인 reject · merged 를 푸는 unmerge_key · revoke_iface_alias)과 그 짝인 merge_key 는 같은
     트랜잭션에서 키 전파(`rekey.run`, plan §5.9.5)를 돈다 — 저장 키 · 등록부 · priors 가 원장을 따라오고 rr_audit(rekey) 1행이 남는다.
     별칭 6홉 · 순환이면 409 이고 원장 변경도 함께 되돌아간다. 그 감사 행의 입구 · 행위자 검증은 `channel` · `actor_verified` 다(라우트가
-    신원 출처에서 정한다 — MCP risk_decide_sameas 는 mcp · 0, 사용자 결정 10-31).
+    신원 출처에서 정한다 — MCP risk_decide_sameas 는 mcp · 0, 사용자 결정 10-31). `via` 는 대응 결정(confirm · reject)을 관리자 우회로만
+    들였다는 표시다(routes._decision_owner — 그 키 전파 감사 행에 싣는다, 사용자 결정 11-01). 키 원장 결정은 부른 사람의 원장이라 우회가 없다.
     """
     from app import rekey  # noqa: PLC0415 — rekey 는 이 모듈(resolve_ckey)을 쓴다.
 
@@ -1149,7 +1151,7 @@ def record_decision(store, payload: Mapping[str, Any], *, owner_sub: str,
                 # 확정 → reject — 그 확정에서 자동 승계된 ckey 병합(§2.7.3)을 되돌리고 키 전파를 돈다.
                 unmerged = rekey.unmerge_auto_rows(store, prev["id"], owner_sub=owner_sub, actor=actor, at=now)
                 rekeyed = rekey.run(store, op="sameas_reject", owner_sub=owner_sub, actor=actor, at=now,
-                                    channel=channel, actor_verified=actor_verified,
+                                    channel=channel, actor_verified=actor_verified, via=via,
                                     ckeys=rekey.with_descendants(store, unmerged, owner_sub),
                                     subject_id=f"sameas:{prev['id']}",
                                     ledger={"sameas_id": prev["id"], "scope": scope, "pair_key": pair_key,

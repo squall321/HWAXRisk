@@ -537,7 +537,7 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
                       scope: Mapping[str, Any] | None = None, user_memo: str | None = None, consent: bool = False,
                       consent_source: str | None = None, settings: Any | None = None, channel: str = "rest",
                       actor_verified: bool = True, cells: Sequence[Sequence[str]] | None = None,
-                      llm: str | None = None, consent_external: Any = None) -> dict:
+                      llm: str | None = None, consent_external: Any = None, via: str | None = None) -> dict:
     """검토 잡 1건을 세운다 — 네트워크를 부르지 않는다(격자와 범위는 여기서, 카드 묶음·호출은 루프가). claude 잡만 에이전트 서버
     /health 를 한 번 묻는다(외부 응답자 길이 열렸나 — 트랜잭션 밖).
 
@@ -553,6 +553,7 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
     반환 {job_id, mode, cells_total, cells_in_scope, experts_in_scope, units, calls_estimate{low, expected, high, basis},
     credential{kind, email, exp}, undeferred, credential_note?}. 추정 소요(기대 호출 수 × 300초 ÷ 동시 수)가 PAT 남은 수명보다 길거나
     요청자 PAT 를 수명 때문에 건너뛰었으면 `credential_note` 로 미리 알린다. `channel`·`actor_verified` 는 보류 해제 감사 행의 입구다.
+    `via` 는 그 잡을 관리자 우회로만 세웠다는 표시다(routes._admin_via — 보류 해제 감사 행에도 싣는다, 사용자 결정 11-01).
     `cells`([[unit_id, agent_key], …])를 주면 범위의 전문가 × 단위 대신 그 셀만 이 잡에 묶고(상태와 상관없이 · 머리는 찍지 않는다)
     추정도 그 가운데 pending 인 셀로만 센다 — 처분(넘김 · 다시)이 세우는 잡이 그 처분의 셀만 묶는다(M3 묶음 검토 M5 · D-52 · M3C-80).
     범위(`scope`)는
@@ -649,7 +650,7 @@ def create_review_job(store: Any, target_key: str, *, owner_sub: str, requester_
             review_cells.assign_scope(store, target_key, job_id, agents=agents, unit_ids=picked["unit_ids"], now=now)
         undeferred = (planner.undefer(store, target_key, decided_by=requester_sub or owner_sub, reason="review_scope",
                                       agents=agents, reasons=("ecad_absent",), channel=channel,
-                                      actor_verified=actor_verified)["undeferred"]
+                                      actor_verified=actor_verified, via=via)["undeferred"]
                       if target["flow"] == "cells" else 0)
         store.execute(
             "INSERT INTO rr_jobs(id, target_key, owner_sub, tier, state, concurrency, params_json, progress_json,"
@@ -691,7 +692,7 @@ def scope_covers(scope: Mapping[str, Any], expert: Mapping[str, Any], unit_id: s
 def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Mapping[str, Any]], decided_by: str,
                   owner_sub: str, note: str | None, force: bool = False, start: bool = True, consent: bool = False,
                   consent_source: str | None = None, channel: str = "rest", actor_verified: bool = True,
-                  selector: Mapping[str, Any] | None = None, settings: Any | None = None) -> dict:
+                  selector: Mapping[str, Any] | None = None, settings: Any | None = None, via: str | None = None) -> dict:
     """사람의 처분 한 번 — 다시(`retry`) 또는 넘김(`skip`) — 과 그 셀을 집을 잡을 한 트랜잭션으로(재설계 M3 C3-4 · m3-cells 3.7).
 
     다시 — 살아 있는 검토 잡의 범위가 그 셀을 덮으면 그 잡이 집는다(`adopted` — 셀의 run_id 를 그 잡으로), 덮지 않으면 다음 잡을
@@ -699,7 +700,8 @@ def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Ma
     문턱은 그대로다, M3C-80). 넘김 — 살아 있는 잡이 있으면 넘긴 셀을 그 잡에 묶어 그 전문가가 그 잡에서 다시 마감되게 하고
     (`adopted`), 없으면 넘긴 셀만 묶은 마감 잡을 만든다(돌 셀은 0 이다). 머리는 범위로 찍지 않는다
     (반대 검토 3차 MEDIUM 3 · D-47 — 그 잡의 몫은 묶인 셀로 가린다). 잡을 만들다 거절(동의·자격·스위치)되면 처분도
-    되돌린다 — 아무것도 바꾸기 전에 거절한 것과 같다. 바꾼 셀이 있으면 감사 한 행(scope coverage · cells.retry|cells.skip).
+    되돌린다 — 아무것도 바꾸기 전에 거절한 것과 같다. 바꾼 셀이 있으면 감사 한 행(scope coverage · cells.retry|cells.skip). `via` 는 그 처분을
+    관리자 우회로만 들였다는 표시다 — 그 행과 처분이 세우는 잡의 보류 해제 행에 싣는다(routes._admin_via, 사용자 결정 11-01).
     살아 있는 잡에 얹은 다시는 그 잡의 다시 연 셀 몫에 들고(넘으면 그 잡이 멈춘다 — job.hold), 다시 연 셀 몫으로 멈춘 잡에서 동의를
     기다리는 셀은 넘김이 pending 그대로 넘긴다 — 그 몫이 여유 안으로 돌아오면 그 잡이 이어 돈다(job.resumed — 4차 MEDIUM 2 · D-49).
     반환 {target_key, matched, retried|skipped, not_failed, keys_total, keys[≤50], experts, job{action, job_id?, calls_estimate?},
@@ -790,7 +792,7 @@ def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Ma
                                      scope={"agents": agents, "unit_ids": unit_ids},
                                      consent=consent if action == "retry" else False,
                                      consent_source=consent_source if action == "retry" else None, settings=settings,
-                                     channel=channel, actor_verified=actor_verified, cells=keys)
+                                     channel=channel, actor_verified=actor_verified, cells=keys, via=via)
             out["job"] = {"action": "created", "job_id": made["job_id"], "calls_estimate": made["calls_estimate"]}
         else:
             out["job"] = {"action": "none"}
@@ -801,7 +803,7 @@ def dispose_cells(store: Any, target_key: str, *, action: str, rows: Sequence[Ma
             after={"n": len(changed), "selector": dict(selector or {}), "force": bool(force) if action == "retry" else None,
                    "keys_sha": sha256_hex(canonical_json(keys))[:16], "keys": keys[:DISPOSE_AUDIT_KEYS],
                    "job": out["job"]},
-            reason=note, channel=channel, actor_verified=actor_verified)
+            reason=note, channel=channel, actor_verified=actor_verified, via=via)
     # 셀 상태가 바뀌었다 — 완결 판정 캐시(레벨·잔여 표기)를 새로 쓴다(M3 S3-8 · 병합 메모 3). 패널 대상이면 아무것도 쓰지 않는다.
     from app import closure  # noqa: PLC0415 — closure 는 등록부·품질을 읽어 무겁다.
 

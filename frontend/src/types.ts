@@ -410,6 +410,11 @@ export type AuditEntry = {
   after: JsonValue;
   reason: string | null;
   at: number;
+  /**
+   * 쓰기의 관리자 우회 표시 — "admin" 이면 구성원이 아니거나 그 쓰기의 역할이 모자란 관리자(risk_admin_roles)가 관리자이기 때문에 한
+   * 쓰기다(서버가 after 의 via 칸을 올린 것 — 사용자 결정 11-01). 없거나 null 이면 표시 없음.
+   */
+  via?: string | null;
 };
 export type AuditPage = { project_id: string; total: number; limit: number; offset: number; entries: AuditEntry[] };
 

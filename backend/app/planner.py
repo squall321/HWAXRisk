@@ -884,11 +884,13 @@ UNDEFER_AUDIT_KEYS = 200            # 감사 행에 싣는 전문가 키 수의 
 
 
 def undefer(store: Any, target_key: str, *, decided_by: str, reason: str, agents: Sequence[str] | None = None,
-            reasons: Sequence[str] | None = None, channel: str = "rest", actor_verified: bool = True) -> dict:
+            reasons: Sequence[str] | None = None, channel: str = "rest", actor_verified: bool = True,
+            via: str | None = None) -> dict:
     """보류(deferred) 좌석을 pending 으로 푼다 — 같은 트랜잭션에 `rr_audit` 한 행(scope coverage · action coverage.undefer).
 
     `agents` 를 주면 그 전문가만, `reasons` 를 주면 그 보류 사유(`rr_coverage.reason`)만 푼다. 푼 행에는 `status_source='human'`·
-    `decided_by`·`decided_at` 이 남는다(보류를 푸는 것은 사람의 잡 만들기·REST 다). 바꿀 것이 없으면 감사도 쓰지 않는다.
+    `decided_by`·`decided_at` 이 남는다(보류를 푸는 것은 사람의 잡 만들기·REST 다). 바꿀 것이 없으면 감사도 쓰지 않는다. `via` 는 그 사람의
+    쓰기를 관리자 우회로만 들였다는 표시다(routes._admin_via — 감사 행에 싣는다, 사용자 결정 11-01).
     반환 {undeferred(수), agents(푼 전문가 — 로스터 순)}.
     """
     from app import routes  # noqa: PLC0415 — routes 는 무겁다(_audit · 과제 id).
@@ -915,7 +917,7 @@ def undefer(store: Any, target_key: str, *, decided_by: str, reason: str, agents
                       project_id=target["project_id"] if target is not None else None,
                       after={"n": len(picked), "agents": picked[:UNDEFER_AUDIT_KEYS],
                              "agents_sha": sha256_hex("\n".join(picked))[:16]},
-                      reason=reason, channel=channel, actor_verified=actor_verified)
+                      reason=reason, channel=channel, actor_verified=actor_verified, via=via)
     return {"undeferred": len(picked), "agents": picked}
 
 

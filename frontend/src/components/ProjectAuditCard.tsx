@@ -60,7 +60,14 @@ export const ACTION_LABEL: Record<string, string> = {
   "vocab.edit": "어휘 고침",
   "ra.retract": "RA 거두기",
   "ra.remark": "RA 다시 표기",
+  // 관리자 접근 감사(사용자 결정 11-01) — 관리자 우회로만 지난 읽기 문 · 쓰기 문은 관리자 · 과제 · 날(KST)마다 한 줄씩이다.
+  "admin.read": "관리자 열람",
+  "admin.write": "관리자 쓰기",
 };
+
+/** 쓰기의 관리자 우회 표시(entry.via "admin")의 풀이 — 배지 글은 '관리자 권한' 이다. */
+export const ADMIN_VIA_TITLE =
+  "구성원이 아니거나 그 쓰기에 모자란 역할의 관리자(risk_admin_roles)가 관리자 권한으로 한 쓰기입니다 — 구성원으로도 할 수 있는 쓰기에는 붙지 않습니다.";
 
 /**
  * '미확인' 배지의 풀이 — 행위자가 앱이 직접 확인한 신원이 아닌 까닭은 행을 쓴 길마다 다르다(백엔드가 actor_verified 0 을 쓰는 자리 셋).
@@ -120,6 +127,11 @@ const CHANGE_SIDE: Record<string, ChangeSide> = {
  * 상태 기록 번호, 판정 값). 그 밖의 행위와, 꼴이 다른 값(옛 행 따위)은 종전대로 JSON 이다.
  */
 export function auditChange(entry: Pick<AuditEntry, "action" | "before" | "after">): string {
+  if (entry.action === "admin.read" || entry.action === "admin.write") {
+    // 접근 줄은 바뀐 것이 없다 — 그 줄이 맡은 한국 날만 보인다(그날 첫 열람 · 첫 쓰기 문에만 한 줄이 선다). 쓰기의 내용은 그 쓰기의 행에 있다.
+    const day = fields(entry.after)?.day;
+    if (typeof day === "string") return `${day}(KST) 하루 한 줄`;
+  }
   const side = CHANGE_SIDE[entry.action];
   const before = side ? side(entry.before) : null;
   const after = side ? side(entry.after) : null;
@@ -147,7 +159,7 @@ export function ProjectAuditCard({ projectId, active }: { projectId: string; act
     {
       key: "actor",
       header: "행위자",
-      hint: "actor · actor_verified",
+      hint: "actor · actor_verified · via",
       nowrap: true,
       cell: (e) => (
         <span className="inline-flex items-center gap-1">
@@ -157,6 +169,11 @@ export function ProjectAuditCard({ projectId, active }: { projectId: string; act
               미확인
             </Badge>
           )}
+          {e.via === "admin" ? (
+            <Badge tone="info" title={ADMIN_VIA_TITLE}>
+              관리자 권한
+            </Badge>
+          ) : null}
         </span>
       ),
     },
@@ -184,7 +201,10 @@ export function ProjectAuditCard({ projectId, active }: { projectId: string; act
 
   const total = page.data?.total ?? 0;
   return (
-    <SectionCard title="이력" subtitle="사람 행위만 남습니다 — 자동 전이는 감사에 들어가지 않습니다.">
+    <SectionCard
+      title="이력"
+      subtitle="사람 행위만 남습니다 — 자동 전이는 감사에 들어가지 않습니다. 관리자 권한으로만 한 열람 · 쓰기는 관리자 · 날(KST)마다 한 줄씩 남습니다."
+    >
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <Select
           className="w-auto min-w-[14rem]"

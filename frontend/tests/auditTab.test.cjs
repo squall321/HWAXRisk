@@ -53,3 +53,35 @@ test("이력 탭 표 — 사람 조작 감사 행은 이름표가 붙고 전 →
   assert.match(html, /title="누가 했는지 모르는 뒤처리입니다[^"]*"[^>]*>미확인</);
   assert.doesNotMatch(html, /자칭/);
 });
+
+test("이력 탭 표 — 관리자 우회로 든 쓰기에만 '관리자 권한' 배지가 붙고 앞 · 뒤 칸은 그대로다(사용자 결정 11-01)", () => {
+  const html = renderPage([
+    row("verdict.final", { verdict_final: null }, { verdict_final: "go" },
+      { actor: "admin@x", scope: "target", subject_id: "diff:d1", via: "admin" }),
+    row("verdict.final", { verdict_final: "go" }, { verdict_final: "no-go" }, { scope: "target", subject_id: "diff:d1", via: null }),
+  ]);
+  // 배지는 표시된 쓰기 한 줄에만 — 표시 없는 쓰기(null)에는 없다
+  assert.equal((html.match(/>관리자 권한</g) ?? []).length, 1);
+  assert.match(html, /title="구성원이 아니거나 그 쓰기에 모자란 역할의 관리자[^"]*"[^>]*>관리자 권한</);
+  // 표시는 앞 · 뒤 칸에 섞이지 않는다(서버가 after 에서 올린 칸이다)
+  assert.match(html, /<code class="text-xs">없음 → go<\/code>/);
+  assert.match(html, /<code class="text-xs">go → no-go<\/code>/);
+});
+
+test("이력 탭 표 — 관리자 열람 줄은 이름표 '관리자 열람' 과 그 한국 날이고 배지는 없다(줄 자체가 관리자 열람이다, 사용자 결정 11-01)", () => {
+  const html = renderPage([
+    row("admin.read", {}, { day: "2026-11-01" }, { actor: "admin@x", channel: "rest", scope: "project", subject_id: "p1" }),
+  ]);
+  assert.match(html, /<code>admin\.read<\/code><span class="text-muted-foreground"> (<!-- -->)?관리자 열람<\/span>/);
+  assert.match(html, /<code class="text-xs">2026-11-01\(KST\) 하루 한 줄<\/code>/);
+  assert.doesNotMatch(html, />관리자 권한</);
+});
+
+test("이력 탭 표 — 관리자 쓰기 줄은 이름표 '관리자 쓰기' 와 그 한국 날이고 배지는 없다(줄 자체가 관리자 우회의 쓰기 문이다, 사용자 결정 11-01)", () => {
+  const html = renderPage([
+    row("admin.write", {}, { day: "2026-11-02" }, { actor: "admin@x", channel: "web", scope: "project", subject_id: "p1" }),
+  ]);
+  assert.match(html, /<code>admin\.write<\/code><span class="text-muted-foreground"> (<!-- -->)?관리자 쓰기<\/span>/);
+  assert.match(html, /<code class="text-xs">2026-11-02\(KST\) 하루 한 줄<\/code>/);
+  assert.doesNotMatch(html, />관리자 권한</);
+});

@@ -321,7 +321,7 @@ def close_invalid_merge_items(store: Any, owner_sub: str, keys: set[str], *, act
 def run(store: Any, *, op: str, owner_sub: str, actor: str | None = None, ckeys: Iterable[str] = (),
         pairs: Iterable[str] = (), subject_id: str, project_id: str | None = None,
         ledger: Mapping[str, Any] | None = None, channel: str = "rest", actor_verified: bool = True,
-        at: int | None = None) -> dict:
+        at: int | None = None, via: str | None = None) -> dict:
     """§5.9.5 의 2~6걸음. 1걸음(원장 행의 이력 — prev_status · revoked_* · merged_into=NULL)은 부르는 쪽이 같은 트랜잭션에서 먼저 한다.
 
     2 그 키를 주체로 가진 finding(`touching_findings`) → 3 별칭 맞추기(`reconcile_aliases`) → 4 영향 대상마다 `registry.merge`(멱등 —
@@ -333,7 +333,8 @@ def run(store: Any, *, op: str, owner_sub: str, actor: str | None = None, ckeys:
     그 대상의 등록부 · priors 가 다음 병합까지 옛 별칭대로 남았다.
 
     `channel` · `actor_verified` 는 감사 행의 입구와 행위자 검증이다 — 부르는 라우트가 신원 출처에서 정한다(MCP 길은 mcp · 0, 사용자 결정
-    10-31 — 종전에는 검증 1 이 글자로 박혀 MCP 의 same-as reject 도 검증된 행위자로 적혔다).
+    10-31 — 종전에는 검증 1 이 글자로 박혀 MCP 의 same-as reject 도 검증된 행위자로 적혔다). `via`("admin")는 그 조작을 관리자 우회로만
+    들였다는 표시다 — 감사 행 after 의 `via` 칸에 싣는다(routes._audit 과 같은 칸, 사용자 결정 11-01).
     """
     if op not in OPS:
         raise AppError("E100", f"rekey op 는 {list(OPS)} 중 하나여야 합니다 — {op!r}.", 422)
@@ -363,7 +364,8 @@ def run(store: Any, *, op: str, owner_sub: str, actor: str | None = None, ckeys:
                                     "findings_n": len(findings) + len(reached), "targets_n": len(targets),
                                     "aliases_added": aliases["added"], "aliases_revoked": aliases["revoked"],
                                     "kept_human": aliases["kept_human"], "skipped": aliases["skipped"],
-                                    "patterns": patterns, "queue_closed": queue_closed}),
+                                    "patterns": patterns, "queue_closed": queue_closed,
+                                    **({"via": via} if via is not None else {})}),
              at))
     return {"op": op, "findings_n": len(findings) + len(reached), "targets": targets,
             "aliases_added": aliases["added"], "aliases_revoked": aliases["revoked"],
