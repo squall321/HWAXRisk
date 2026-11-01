@@ -1,37 +1,49 @@
-# 관리자 접근 감사(사용자 결정 11-01 '쓰기 표시 + 읽기 하루 한 줄') — 관리자 우회로만 든 쓰기의 감사 행에는 표시
+# 관리자 접근 감사(사용자 결정 11-01 '쓰기 표시 + 읽기 하루 한 줄') — 관리자 우회로만 든 쓰기의 감사 행에는 표시, 우회로만 열린 읽기는 관리자 · 과제 · 날마다 한 줄
 """포털 plan §5.2.1 '멤버십' 행 — `identity.role ∈ risk_admin_roles` 는 멤버 행 없이 editor 로 통과하며 그 접근도 rr_audit 에 남는다. 앱은
 쓰기 문(MB-14)과 웹 읽기 문(OI-5)에 관리자 우회를 두었지만 어느 쪽도 남기지 않았다 — 관리자의 쓰기는 감사 행의 행위자로만 남아 구성원의
 쓰기와 가를 수 없었고 읽기는 흔적이 없었다(context-notes OI-5 · OI-7). 사용자 결정 11-01 이 고른 안이 이 파일의 계약이다.
 
 - 쓰기 — 관리자가 아니었다면 막혔을 쓰기(구성원이 아니거나 그 쓰기에 모자란 역할)가 남기는 감사 행마다 after 의 `via` 칸이 "admin" 이다.
   조회(`GET /projects/{id}/audit` · `GET /targets/{key}/audit`)는 그 칸을 entry.via 로 올린다. 구성원으로도 할 수 있는 쓰기에는 싣지 않는다.
+- 읽기 — 관리자 우회로만 열린 읽기마다 (관리자, 과제, 한국 날) 많아야 한 행이다(scope project · action admin.read · after {day}). 쓰기는 한
+  문장(INSERT … SELECT … WHERE NOT EXISTS)이라 함께 든 읽기도 둘을 쓰지 않는다. 구성원(주인 포함) · 발견 목록 · MCP 는 남기지 않는다.
+- 사람 개입으로 세는 곳(대상 감사 · 통합 보고서 '사람 개입 요약')에 읽기 줄은 들지 않는다 — 과제 이력에만 이름표와 함께 선다.
 
   실행:  .venv/bin/python -m pytest tests/rr/test_admin_access_audit.py
 """
 from __future__ import annotations
 
+import calendar
 import dataclasses
 import json
+import time
 from collections.abc import Callable
 from typing import Any
 
 import pytest
 
-from app import closure, identity, review_runner, routes, runner
+import app.mcp_server as srv
+from app import brief as brief_module
+from app import closure, common, export, field_source, identity, registry, review_runner, routes, runner
 from tests import factories
 from tests import test_external_llm_jobs as external
 from tests.rr import test_member_reads as member_reads
 from tests.rr import test_review1_stranger as stranger
-from tests.rr.test_member_reads import ADMIN, _forge
-from tests.rr.test_review1_stranger import OTHER, OWNER
+from tests.rr import test_review1_stranger_recall as recall
+from tests.rr.test_member_reads import ADMIN, ADMIN_GET_EXEMPT, MEMBERS, _body, _Field, _forge
+from tests.rr.test_review1_stranger import GET_CASES, GET_EXPECT, OTHER, OWNER, P, _answer, _mcp
+from tests.rr.test_review1_stranger_recall import K, _registry, _snapshot_of
+from tests.rr.test_review1_stranger_recall import _target as _snap_target
 from tests.synth import review_rig as rig
+from tests.test_human_control_audit import _summary
 from tests.test_review_cells import _target as _review_target
 
-# 원장 픽스처 — 남 시험 표의 원장(검토 → 쟁점 → 종합) 사본에 편집자 · 보기를 들인 것, 두 과제(앞 · 뒤 리비전).
+# 원장 픽스처 — 남 시험 표의 원장(검토 → 쟁점 → 종합) 사본에 편집자 · 보기를 들인 것, 두 과제(앞 · 뒤 리비전), 유사 · 선례의 주인 쪽 원장.
 template = stranger.template
 ledger = stranger.ledger
 members = member_reads.members
 two_projects = member_reads.two_projects
+world = recall.world
 
 
 def _who(email: str, *, role: str = "admin", source: str = "cookie") -> identity.Identity:
@@ -353,3 +365,211 @@ def test_the_audit_reads_lift_the_mark_into_the_entry(members):
             ("verdict.final", ADMIN.email, "admin", {"verdict_final": "go"})]
         assert all("via" in e for e in page["entries"])
 
+
+# ---------------------------------------------------------------- 관리자 열람 줄(admin.read) — 날은 한국 표준시(UTC+9)
+KST = 9 * 3600
+DAY = 86400
+
+
+def _kst_day(at: int) -> str:
+    return time.strftime("%Y-%m-%d", time.gmtime(at + KST))
+
+
+def _read_rows(store) -> list[dict]:
+    """관리자 열람 줄 — 적힌 차례."""
+    return [dict(r) for r in store.query(
+        "SELECT owner_sub, actor, actor_verified, channel, scope, subject_id, project_id, before_json, after_json, reason, at"
+        " FROM rr_audit WHERE action = 'admin.read' ORDER BY at, rowid")]
+
+
+def _read_projects(store) -> list[str]:
+    return [r["project_id"] for r in _read_rows(store)]
+
+
+# ---------------------------------------------------------------- 읽기 — (관리자, 과제, 날) 한 줄
+@pytest.mark.parametrize("case", sorted(set(GET_CASES) - set(ADMIN_GET_EXEMPT)), ids=lambda c: f"{c[0]} {c[1][len(P):]}")
+def test_every_read_door_an_admin_opens_only_by_the_bypass_leaves_one_row_a_day(members, case):
+    """관리자 읽기 표(test_member_reads 의 관리자 표 — 남 시험 표의 읽기 경로 전부 − 브리프 · 발견 목록 셋)의 경로마다, 구성원이 아닌 관리자가
+    두 번 읽으면 그 과제의 열람 줄이 한 행이다 — 행위자 · 행 주인은 관리자, 입구는 신원 출처(Bearer rest), 자리는 과제, 뒤 값은 그 한국
+    날뿐(사람이 쓴 글 없음)."""
+    store, ids = members
+    call, _supplied = GET_CASES[case]
+    assert _read_rows(store) == []
+    for _ in range(2):
+        got = _answer(lambda: call(ids, ADMIN))
+        assert got[1] == 200, (case, got[:3])
+    rows = _read_rows(store)
+    assert [(r["owner_sub"], r["actor"], r["actor_verified"], r["channel"], r["scope"], r["subject_id"], r["project_id"],
+             r["before_json"], r["reason"]) for r in rows] == [
+        (ADMIN.email, ADMIN.email, 1, "rest", "project", ids["project"], ids["project"], None, None)], case
+    assert json.loads(rows[0]["after_json"]) == {"day": _kst_day(rows[0]["at"])}
+
+
+def test_owners_members_and_admins_who_are_members_leave_no_read_row(members):
+    """구성원(주인 · 편집자 · 보기)의 읽기는 우회가 아니다 — 보기 행 하나만 있는 관리자도 구성원으로 읽는다. 표의 읽기 경로 전부(면제 포함)를
+    걸어도 열람 줄이 없다."""
+    store, ids = members
+    _add(store, ids["project"], ADMIN_VIEWER.email, "viewer")
+    for case in sorted(GET_CASES):
+        call, _supplied = GET_CASES[case]
+        for who in (factories.ident(OWNER), *(factories.ident(m) for m in MEMBERS), ADMIN_VIEWER):
+            _answer(lambda call=call, who=who: call(ids, who))
+    assert _read_rows(store) == []
+
+
+def test_lists_rows_hung_by_someone_else_missing_projects_and_mcp_leave_no_read_row(members, monkeypatch):
+    """발견 목록(관리자에게도 소유 ∪ 구성원 — 빈 목록) · 남이 매단 행(관리자에게도 404) · 없는 과제 · MCP(관리자 우회가 없다)는 아무것도 열지
+    않아 열람 줄이 없다."""
+    store, ids = members
+    for case in GET_EXPECT:
+        call, _supplied = GET_CASES[case]
+        assert _body(_answer(lambda call=call: call(ids, ADMIN)))["total"] == 0, case
+    forged_snapshot, forged_target = _forge(store, ids)
+    assert _answer(lambda: routes.get_snapshot(forged_snapshot, ident=ADMIN))[1] == 404
+    assert _answer(lambda: routes.get_coverage(forged_target, ident=ADMIN))[1] == 404
+    assert _answer(lambda: routes.get_project("no-such-project", ident=ADMIN))[1] == 404
+    _answer(lambda: routes.get_members("no-such-project", ident=ADMIN))
+    _answer(lambda: routes.get_project_audit("no-such-project", ident=ADMIN))
+    factories.act_as_delegate(monkeypatch, ADMIN.email)
+    assert _mcp(lambda: srv.risk_get_coverage(target_key=ids["target"]))[0] == "not_visible"
+    assert _read_rows(store) == []
+
+
+def test_the_day_is_the_korean_calendar_day(members):
+    """하루는 한국 표준시(UTC+9) 날이다 — 23:59:59 와 00:00:00 KST 는 두 날이고, 그날 09:00 KST(UTC 자정)를 넘어도 한 날이다(UTC 날이면
+    아침 아홉 시에 둘로 갈린다)."""
+    store, ids = members
+    midnight = calendar.timegm((2026, 11, 1, 15, 0, 0))          # 2026-11-02 00:00 KST
+    previous = common.set_clock(lambda: midnight - 1)
+    try:
+        for at in (midnight - 1, midnight, midnight + 9 * 3600 - 1, midnight + 9 * 3600 + 1, midnight + 86400 - 1):
+            common.set_clock(lambda at=at: at)
+            assert routes.get_project(ids["project"], ident=ADMIN)["project"]["id"] == ids["project"]
+    finally:
+        common.set_clock(previous)
+    rows = _read_rows(store)
+    assert [(r["at"], json.loads(r["after_json"])["day"]) for r in rows] == [
+        (midnight - 1, "2026-11-01"), (midnight, "2026-11-02")]
+
+
+def test_a_read_that_races_another_writes_no_second_row(members, monkeypatch):
+    """두 읽기가 함께 들면 둘 다 '오늘 줄 없음' 을 보고 쓰려 한다 — 쓰기가 한 문장(INSERT … WHERE NOT EXISTS)이라 늦은 쪽은 아무것도 쓰지
+    않는다. 앞선 확인이 '없음' 을 본 바로 뒤에 다른 요청의 줄이 커밋된 꼴을 저장소 대역으로 만든다."""
+    store, ids = members
+    real = store.query_one
+    raced: list[bool] = []
+
+    def query_one(sql, params=()):
+        out = real(sql, params)
+        if "admin.read" in sql and out is None and not raced:
+            raced.append(True)
+            routes.get_project(ids["project"], ident=ADMIN)       # 다른 요청 — 제 확인 · 쓰기를 다 마친다
+        return out
+
+    monkeypatch.setattr(store, "query_one", query_one)
+    routes.get_project(ids["project"], ident=ADMIN)
+    assert raced == [True]
+    assert len(_read_rows(store)) == 1
+
+
+def test_the_widened_similar_and_precedents_note_each_project_they_show_only_by_the_bypass(world):
+    """유사 과제 · 선례는 관리자에게 주인의 답이다(다른 과제를 관리자가 읽는 과제로 좁히지 않는다 — OI-5). 관리자가 그 과제의 구성원이어도 넓힌
+    답에 실린 다른 과제는 우회로 본 것이라 그 과제마다 한 줄이다 — 구성원인 과제는 줄이 없다."""
+    store, project, mine = world["store"], world["project"], world["mine"]
+    owner = factories.ident(OWNER)
+    step1 = routes.create_project(routes.ProjectBody(code="P-NEXT", name="다음 리비전", classification="internal",
+                                                     predecessor_project_id=project), ident=owner)["id"]
+    _registry(store, _snap_target(store, _snapshot_of(store, mine[1]), OWNER), OWNER, "clu-hidden", world["subject"])
+    diff_id = factories.make_diff(store, _snapshot_of(store, mine[0]), _snapshot_of(store, project))["diff_id"]
+    for gate_project in (project, mine[0]):
+        _add(store, gate_project, ADMIN.email, "viewer")
+
+    found = routes.get_precedents(diff_id=diff_id, ident=ADMIN)    # 선례 먼저 — 유사가 같은 과제를 먼저 남기면 선례의 줄이 가려진다
+    clusters = {store.query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (c["target_key"],))["project_id"]
+                for c in found["clusters"]}
+    assert mine[1] in clusters, clusters                         # 넓힌 답이 실제로 남의 과제를 싣는다(빈손으로 지나가지 않게)
+    assert sorted(_read_projects(store)) == sorted(clusters - {project, mine[0]})
+    similar = routes.get_similar(project, k=K, ident=ADMIN)
+    shown = (clusters | {e["project_id"] for part in ("lineage", "vector", "text", "merged") for e in similar[part]}
+             | {pid for e in similar["subject"] for pid in e["project_ids"]})
+    assert step1 in shown, shown
+    projects = _read_projects(store)
+    assert sorted(projects) == sorted(shown - {project, mine[0]}), (projects, shown)
+
+
+def test_refs_without_a_project_scope_note_the_project_they_were_found_in(risk_store, monkeypatch):
+    """과제 스코프가 참조 글에 없는 req · voc · paper 도 관리자는 전 과제에서 찾는다(OI-5) — 찾은 행의 과제에 열람 줄이 선다. 갈래마다 따로
+    보이게 날(KST)을 바꿔 가며 부른다(한 날 한 줄이라 같은 날이면 첫 갈래만 보인다). 원장은 test_member_reads 의 참조 시험과 같다."""
+    store = risk_store
+    monkeypatch.setattr(routes, "get_store", lambda: store)
+    owner = factories.ident(OWNER)
+    project_id = routes.create_project(routes.ProjectBody(code="REFS-AA", name="참조", stage="DV1", classification="internal",
+                                                          product_code="F7-2024"), ident=owner)["id"]
+    routes.post_requirements(project_id, [routes.RequirementItem(kind="scenario", name="drop_1_2m_corner",
+                                                                 value_json={"taxonomy_key": "deep", "required": True})],
+                             ident=owner)
+    snapshot = factories.make_snapshot(store, project_id, factories.fixture_adapter_results(), label="DV1")["snapshot_id"]
+    target_key = factories.make_target(store, "snap", snapshot, agents=factories.agents())
+    factories.seed_raw(store, "rr_character", {
+        "id": "C1", "project_id": project_id, "owner_sub": OWNER, "facet": "intent", "tag": "char:structure:thin_stack",
+        "tags_json": "[]", "statement": "s", "polarity": "observation", "by_json": "[]", "support_panels": 2, "support_targets": 1,
+        "recall_eligible": 1, "needs_review": 0, "status": "panel", "created_at": 1, "updated_at": 1},
+        reason="문헌 검색어(scholar_query)의 성격 태그 — 생산자는 패널 한 판 전부라 읽는 칸만 손으로 쓴다(test_member_reads 의 참조 시험과 같다)")
+    brief_module._field_evidence_lines(store, brief_module._target_context(store, target_key), field_source.FieldSource(_Field()))
+    noon = calendar.timegm((2026, 11, 3, 3, 0, 0))               # 2026-11-03 12:00 KST
+    previous = common.set_clock(lambda: noon)
+    try:
+        for n, ref in enumerate(("req:drop_1_2m_corner", "voc:F7-2024#ISS-1", "paper:10.1000/xyz")):
+            common.set_clock(lambda n=n: noon + n * DAY)
+            assert routes.get_ref(ref, ident=ADMIN)["resolved"] is True, ref
+    finally:
+        common.set_clock(previous)
+    assert [(r["project_id"], json.loads(r["after_json"])["day"]) for r in _read_rows(store)] == [
+        (project_id, "2026-11-03"), (project_id, "2026-11-04"), (project_id, "2026-11-05")]
+
+
+def test_a_predecessor_an_admin_names_by_the_bypass_is_noted(members):
+    """앞 과제는 부른 사람이 구성원인 과제여야 하고 관리자는 있는 과제면 된다 — 그 과제를 우회로 가리킨 것이라 그 과제의 열람 줄이 선다.
+    웹 화면(쿠키)의 관리자면 입구가 web 이다."""
+    store, ids = members
+    web_admin = _who(ADMIN.email)
+    made = routes.create_project(routes.ProjectBody(code="ADM-NEXT", name="관리자의 다음 과제", classification="internal",
+                                                    predecessor_project_id=ids["project"]), ident=web_admin)
+    assert made["predecessor_project_id"] == ids["project"]
+    assert [(r["project_id"], r["channel"], r["actor_verified"]) for r in _read_rows(store)] == [(ids["project"], "web", 1)]
+
+
+def test_opening_a_target_on_a_diff_reads_the_diff_by_the_bypass(members):
+    """대상(diff) 만들기는 그 비교를 읽는다(관리자는 우회로 읽는다 — OI-5) — 그 비교의 과제에 열람 줄이 선다(이 비교에는 대상이 이미 열려
+    있어 409 지만 그 대상 열쇠까지 읽었다)."""
+    store, ids = members
+    got = _answer(lambda: routes.create_target(routes.TargetBody(kind="diff", ref_id=ids["diff"], consent=True), ident=ADMIN))
+    assert got[:2] == ("E409", 409), got[:3]
+    assert _read_projects(store) == [ids["project"]]
+
+
+# ---------------------------------------------------------------- 소비처 — 읽기는 사람 개입이 아니다
+def test_a_read_row_never_counts_as_human_intervention(members):
+    """대상 감사와 통합 보고서 '사람 개입 요약'(같은 조각 registry.target_audit_clause)에 열람 줄이 들지 않는다 — 과제 단위 자리(scope
+    project)다. 과제 이력에는 선다(표시 없이 — 줄 자체가 관리자 열람이다). 반출에는 실리지 않는다(행 주인이 관리자다 — 다른 사람이 쓴 감사
+    행과 같은 규칙)."""
+    store, ids = members
+    owner = factories.ident(OWNER)
+    target_before = routes.get_target_audit(ids["target"], ident=owner)
+    counts_before = registry.target_audit_counts(store, ids["target"])
+    summary_before = _summary(store, ids["target"])
+
+    for read in (routes.get_coverage, routes.get_registry, routes.get_report):
+        read(ids["target"], ident=ADMIN)
+    assert len(_read_rows(store)) == 1
+
+    assert routes.get_target_audit(ids["target"], ident=owner) == target_before
+    assert registry.target_audit_counts(store, ids["target"]) == counts_before
+    assert _summary(store, ids["target"]) == summary_before
+    assert not any(line.startswith("admin.read") for line in summary_before)
+    entries = routes.get_project_audit(ids["project"], ident=owner)["entries"]
+    read = [e for e in entries if e["action"] == "admin.read"]
+    assert [(e["actor"], e["scope"], e["subject_id"], e["after"], e["via"]) for e in read] == [
+        (ADMIN.email, "project", ids["project"], {"day": _kst_day(read[0]["at"])}, None)]
+    lines = [json.loads(line) for line in export.iter_lines(store, OWNER, 0)][1:]
+    assert not [line for line in lines if line["table"] == "rr_audit" and line["row"]["action"] == "admin.read"]

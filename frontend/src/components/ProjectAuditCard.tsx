@@ -60,6 +60,8 @@ export const ACTION_LABEL: Record<string, string> = {
   "vocab.edit": "어휘 고침",
   "ra.retract": "RA 거두기",
   "ra.remark": "RA 다시 표기",
+  // 관리자 접근 감사(사용자 결정 11-01) — 구성원이 아닌 관리자의 읽기는 관리자 · 과제 · 날(KST)마다 한 줄이다.
+  "admin.read": "관리자 열람",
 };
 
 /** 쓰기의 관리자 우회 표시(entry.via "admin")의 풀이 — 배지 글은 '관리자 권한' 이다. */
@@ -124,6 +126,11 @@ const CHANGE_SIDE: Record<string, ChangeSide> = {
  * 상태 기록 번호, 판정 값). 그 밖의 행위와, 꼴이 다른 값(옛 행 따위)은 종전대로 JSON 이다.
  */
 export function auditChange(entry: Pick<AuditEntry, "action" | "before" | "after">): string {
+  if (entry.action === "admin.read") {
+    // 열람 줄은 바뀐 것이 없다 — 그 줄이 맡은 한국 날만 보인다(그날 첫 열람에만 한 줄이 선다).
+    const day = fields(entry.after)?.day;
+    if (typeof day === "string") return `${day}(KST) 하루 한 줄`;
+  }
   const side = CHANGE_SIDE[entry.action];
   const before = side ? side(entry.before) : null;
   const after = side ? side(entry.after) : null;
@@ -193,7 +200,10 @@ export function ProjectAuditCard({ projectId, active }: { projectId: string; act
 
   const total = page.data?.total ?? 0;
   return (
-    <SectionCard title="이력" subtitle="사람 행위만 남습니다 — 자동 전이는 감사에 들어가지 않습니다.">
+    <SectionCard
+      title="이력"
+      subtitle="사람 행위만 남습니다 — 자동 전이는 감사에 들어가지 않습니다. 구성원이 아닌 관리자의 열람은 관리자 · 날(KST)마다 한 줄로 남습니다."
+    >
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <Select
           className="w-auto min-w-[14rem]"

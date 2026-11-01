@@ -5,6 +5,7 @@
 
 행위 목록은 손으로 적지 않고 앱 소스에서 끌어낸다 — rr_audit 에 쓰는 자리를 AST 로 훑는다.
 1. `INSERT INTO rr_audit` 를 싣는 SQL 을 부르는 호출마다 action 칸을 읽는다 — SQL 글자면 그것, 자리표(?)면 매개 튜플의 그 자리 식이다.
+   값 목록은 `VALUES (…)` 이거나 한 문장으로 '없을 때만' 쓰는 `SELECT … WHERE NOT EXISTS (…)` 다(관리자 열람 줄 — 사용자 결정 11-01).
    그 식이 감싼 함수의 매개(routes._audit 의 action)면 그 함수를 '쓰는 함수' 로 삼는다.
 2. 쓰는 함수를 부르는 곳마다 action 인자를 푼다 — 글자 · 조건식(두 갈래) · 그 함수 안에서 글자로만 정해지는 이름 · f-string(앞 글자마다
    앱의 열거로 펼친다 — FAMILIES).
@@ -21,7 +22,7 @@ from app import routes
 
 APP = Path(__file__).resolve().parents[1] / "app"
 LABELS = Path(__file__).resolve().parents[2] / "frontend" / "src" / "components" / "ProjectAuditCard.tsx"
-_INSERT = re.compile(r"INSERT\s+INTO\s+rr_audit\s*\(([^)]*)\)\s*VALUES\s*\(([^)]*)\)", re.S)
+_INSERT = re.compile(r"INSERT\s+INTO\s+rr_audit\s*\(([^)]*)\)\s*(?:VALUES\s*\(([^)]*)\)|SELECT\s+(.*?)\s+WHERE\b)", re.S)
 
 
 def _modules() -> dict[str, ast.Module]:
@@ -102,7 +103,8 @@ def backend_actions() -> dict[str, set[str]]:
                     continue
                 where = f"{rel}:{call.lineno}"
                 columns = [c.strip() for c in match.group(1).split(",")]
-                values = [v.strip() for v in match.group(2).split(",")]
+                values = [v.strip() for v in (match.group(2) or match.group(3)).split(",")]
+                assert len(values) == len(columns), f"{where}: 값 목록이 열 목록과 길이가 다르다 — 이 시험이 action 칸을 읽지 못한다"
                 slot = values[columns.index("action")]
                 if slot != "?":
                     note({slot.strip("'")}, where)
@@ -150,9 +152,10 @@ def test_every_audit_action_the_app_can_write_has_a_label_on_the_history_tab():
 
 
 def test_the_scan_reaches_every_kind_of_audit_write():
-    """훑기가 녹슬어 빈손으로 지나가지 않게 — 쓰는 꼴마다 하나씩 실제로 찾는다(SQL 글자 rekey · 엔진 쪽 멈춤 job.pause, 매개 튜플의
-    조건식 ra.*, 쓰는 함수의 글자 · 조건식 · 함수 안 대입 · f-string 셋)."""
+    """훑기가 녹슬어 빈손으로 지나가지 않게 — 쓰는 꼴마다 하나씩 실제로 찾는다(SQL 글자 rekey · 엔진 쪽 멈춤 job.pause · 관리자 열람
+    admin.read(INSERT … SELECT), 매개 튜플의 조건식 ra.*, 쓰는 함수의 글자 · 조건식 · 함수 안 대입 · f-string 셋)."""
     actions = backend_actions()
     assert {"rekey", "job.pause", "ra.retract", "ra.remark", "gate.ack", "recall.approve", "curation.decide",
-            "coverage.uncarry", "job.create", "issue.queue", "cells.skip", "coverage.undefer"} <= set(actions)
+            "coverage.uncarry", "job.create", "issue.queue", "cells.skip", "coverage.undefer", "admin.read"} <= set(actions)
     assert any(where.startswith("runner.py:") for where in actions["job.pause"])     # 포털 '멈춤'(A24)의 SQL 글자
+    assert all(where.startswith("routes.py:") for where in actions["admin.read"])   # 관리자 열람 줄의 SQL 글자(SELECT 꼴)

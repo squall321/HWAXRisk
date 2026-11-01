@@ -344,7 +344,14 @@ def test_an_admin_reads_what_the_owner_reads(members, case):
     owner = _answer(lambda: call(ids, factories.ident(OWNER)))
     got = _answer(lambda: call(ids, ADMIN))
     assert got[1] == 200, (case, got[:3])
-    assert _body(got, drop) == _body(owner, drop), case
+    body = _body(got, drop)
+    if case == ("GET", P + "/projects/{project_id}/audit"):
+        # 구성원이 아닌 관리자의 읽기는 그 과제의 열람 줄을 먼저 세운다(사용자 결정 11-01 — tests/rr/test_admin_access_audit.py) — 그 한 줄
+        # 말고는 주인과 같은 답이다.
+        mine = [e for e in body["entries"] if e["action"] == "admin.read"]
+        assert [(e["actor"], e["subject_id"]) for e in mine] == [(ADMIN.email, ids["project"])], mine
+        body = {**body, "entries": [e for e in body["entries"] if e["action"] != "admin.read"], "total": body["total"] - 1}
+    assert body == _body(owner, drop), case
 
 
 def test_an_admin_opens_a_target_on_a_diff_it_now_reads(members):

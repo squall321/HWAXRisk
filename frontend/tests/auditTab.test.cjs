@@ -67,3 +67,12 @@ test("이력 탭 표 — 관리자 우회로 든 쓰기에만 '관리자 권한'
   assert.match(html, /<code class="text-xs">없음 → go<\/code>/);
   assert.match(html, /<code class="text-xs">go → no-go<\/code>/);
 });
+
+test("이력 탭 표 — 관리자 열람 줄은 이름표 '관리자 열람' 과 그 한국 날이고 배지는 없다(줄 자체가 관리자 열람이다, 사용자 결정 11-01)", () => {
+  const html = renderPage([
+    row("admin.read", {}, { day: "2026-11-01" }, { actor: "admin@x", channel: "rest", scope: "project", subject_id: "p1" }),
+  ]);
+  assert.match(html, /<code>admin\.read<\/code><span class="text-muted-foreground"> (<!-- -->)?관리자 열람<\/span>/);
+  assert.match(html, /<code class="text-xs">2026-11-01\(KST\) 하루 한 줄<\/code>/);
+  assert.doesNotMatch(html, />관리자 권한</);
+});
