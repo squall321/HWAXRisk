@@ -17,10 +17,20 @@ import type { Column } from "./DataTable";
 import { HumanFindingForm } from "./HumanFindingForm";
 import { SectionCard, VerbatimBlock } from "./SectionCard";
 import { ErrorBanner, LoadingBlock } from "./StateBlocks";
+import { LockNote } from "./LockNote";
 import { Banner, Button, FormField, FormGrid, Input, Select, SubPanel } from "../ui/primitives";
 import { distributionText, labelOf, OUTCOME_LABEL, registryOverlayLine } from "../lib/issueView";
 import { fmtCounts, fmtJson, fmtNum } from "../format";
-import type { Registry, RegistryQuery, RegistryRow, RegistryStatusInput, RegistryStatusUpdate, Verdict } from "../types";
+import { writeAccess } from "../lib/access";
+import type {
+  ProjectRole,
+  Registry,
+  RegistryQuery,
+  RegistryRow,
+  RegistryStatusInput,
+  RegistryStatusUpdate,
+  Verdict,
+} from "../types";
 
 const VERDICTS: Verdict[] = ["go", "conditional", "no-go", "undetermined"];
 const REGISTRY_STATUSES: RegistryStatusInput[] = ["verified", "dismissed", "mitigated"];
@@ -180,6 +190,7 @@ export function RegistryCard({
   query,
   onQuery,
   cells,
+  role = null,
 }: {
   targetKey: string;
   registry: Async<Registry>;
@@ -187,7 +198,10 @@ export function RegistryCard({
   onQuery: (next: RegistryQuery) => void;
   /** 카드 대조 대상인가 — 주의 등급 · 지지 수가 그 대상에서 뜻이 있다(패널 대상은 참고값). */
   cells: boolean;
+  /** 대상 과제의 내 역할(진행판 my_role) — 상태 · 판정 확정 · 사람 finding 은 편집자 이상이다(OI-2, 모르면 잠그지 않는다). */
+  role?: ProjectRole | null;
 }) {
+  const access = writeAccess(role);
   // mechanism 선택지는 서버 택소노미에서 온다(§7.1) — 화면이 어휘를 따로 가지면 한쪽만 늙는다.
   const taxonomy = useAsync((signal) => riskApi.getTaxonomy({ signal }), []);
   const [severity, setSeverity] = useState("");
@@ -304,6 +318,7 @@ export function RegistryCard({
           targetKey={targetKey}
           mechanisms={taxonomy.data?.axes?.mechanism ?? []}
           onCreated={registry.reload}
+          role={role}
         />
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <span className="text-xs font-medium text-muted-foreground">주의 등급</span>
@@ -408,7 +423,9 @@ export function RegistryCard({
                     <Input value={note} onChange={(e) => setNote(e.target.value)} />
                   </FormField>
                 </FormGrid>
-                <Button type="button" variant="outline" className="w-fit" onClick={saveStatus} disabled={busy}>
+                <LockNote access={access} />
+                <Button type="button" variant="outline" className="w-fit" onClick={saveStatus} disabled={busy || !access.allowed}
+                        title={access.reason ?? undefined}>
                   상태 저장
                 </Button>
               </>
@@ -470,7 +487,9 @@ export function RegistryCard({
             <Input value={verdictNote} onChange={(e) => setVerdictNote(e.target.value)} />
           </FormField>
         </FormGrid>
-        <Button type="button" className="mt-3" onClick={saveVerdict} disabled={busy}>
+        <LockNote access={access} />
+        <Button type="button" className="mt-3" onClick={saveVerdict} disabled={busy || !access.allowed}
+                title={access.reason ?? undefined}>
           확정
         </Button>
       </SectionCard>

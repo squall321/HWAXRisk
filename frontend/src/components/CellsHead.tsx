@@ -5,17 +5,20 @@ import { riskApi } from "../api/risk.api";
 import { Badge, LevelBadge, LlmBadge } from "./Badge";
 import { KeyValueTable } from "./DataTable";
 import { ReviewErrorBanner } from "./ReviewErrorBanner";
+import { LockNote } from "./LockNote";
 import { Button, Mono } from "../ui/primitives";
 import { adviceText, blockingUnacked, chainStartVisible, stageView } from "../lib/reviewView";
 import { narrativeNote, triggerLabel } from "../lib/reportView";
 import { fmtEpoch } from "../format";
+import { writeAccess } from "../lib/access";
 import type { Coverage } from "../types";
 
 export type CellsTab = "closure" | "report";
 
 /**
  * 완결 표기는 서버 글(`level_label`) 그대로다 — '무엇이 남아 C3 가 아닌지' 를 말한다. 막음이고 확인되지 않은 잔여가 있으면 완결
- * 화면으로 가는 표지를 단다. 사슬 배지는 `stage`, 보고서 링크는 `report`(마지막 판의 머리)로 그린다.
+ * 화면으로 가는 표지를 단다. 사슬 배지는 `stage`, 보고서 링크는 `report`(마지막 판의 머리)로 그린다. 재개 · 사슬 시작은 편집자 이상이라
+ * 진행판의 `my_role` 이 보기면 잠그고 까닭을 보인다(OI-2).
  */
 export function CellsHead({
   coverage,
@@ -36,6 +39,7 @@ export function CellsHead({
   const report = coverage.report ?? null;
   const unacked = blockingUnacked(coverage.qualifiers);
   const advice = adviceText(stage?.advice);
+  const access = writeAccess(coverage.my_role);
 
   async function resume() {
     if (!stage) return;
@@ -99,11 +103,13 @@ export function CellsHead({
                   <Mono>{stage.job_id}</Mono>
                   {stage.llm === "claude" ? <LlmBadge llm={stage.llm} /> : null}
                   {view.resumable ? (
-                    <Button type="button" variant="outline" size="sm" onClick={resume} disabled={busy}>
+                    <Button type="button" variant="outline" size="sm" onClick={resume} disabled={busy || !access.allowed}
+                            title={access.reason ?? undefined}>
                       재개
                     </Button>
                   ) : null}
                 </span>
+                {view.resumable ? <LockNote access={access} /> : null}
                 {view.note ? <span className="text-xs text-muted-foreground">{view.note}</span> : null}
                 {view.needsPat ? (
                   <Link to="/settings" className="w-fit text-xs underline underline-offset-4">
@@ -150,9 +156,11 @@ export function CellsHead({
             M2 앱이 세운 검토 잡이 끝난 대상이라 쟁점 · 종합이 저절로 서지 않았습니다. 검토 잡을 한 번 더 세우면(셀이 다 닫혀 호출
             없이 끝난다) 그 끝에서 사슬이 섭니다.
           </span>
-          <Button type="button" variant="outline" size="sm" onClick={startChain} disabled={busy}>
+          <Button type="button" variant="outline" size="sm" onClick={startChain} disabled={busy || !access.allowed}
+                  title={access.reason ?? undefined}>
             쟁점 · 종합 시작
           </Button>
+          <LockNote access={access} />
         </div>
       ) : null}
     </div>

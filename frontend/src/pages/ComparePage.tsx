@@ -1,5 +1,5 @@
 // 비교 화면 — base/target 선택·SameAsResolver·게이트·diff 생성·비교 가능성(ECAD · 파서 세대)·3층 DiffView·사건·선례·타깃 만들기(계획 §8.2.4 ComparePage 행).
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { GitCompare, Target } from "lucide-react";
 import { ApiError, isNotReady, riskApi } from "../api/risk.api";
@@ -11,6 +11,7 @@ import { EmptyBlock, ErrorBanner, LoadingBlock, NotReadyBlock } from "../compone
 import { Badge } from "../components/Badge";
 import { GateVerdictBadge } from "../components/GateBanner";
 import { SameAsResolver } from "../components/SameAsResolver";
+import { LockNote } from "../components/LockNote";
 import { Banner, Button, FormField, FormGrid, Mono, PageHeader, Select, SubPanel } from "../ui/primitives";
 import { fmtCell, fmtEpoch } from "../format";
 import {
@@ -24,6 +25,7 @@ import {
   parserGenerationNote,
 } from "../lib/compareView";
 import type { DiffRow } from "../lib/compareView";
+import { weakerRole, writeAccess } from "../lib/access";
 import type { Comparability, DiffBlocked, DiffEventRow, DiffLayer, GateRecord, Precedents, ProjectCard } from "../types";
 
 const LAYERS: Array<{ layer: DiffLayer; label: string }> = [
@@ -213,11 +215,18 @@ function ComparabilityTable({ comp }: { comp: Comparability }) {
 function DiffView({
   diffId,
   semanticBlocked,
+  onProject,
 }: {
   diffId: string;
   semanticBlocked: boolean;
+  /** 비교 본문의 과제(대상 과제 — diff_json.project_id)를 머리에 알린다 — '타깃 만들기' 를 그 과제의 내 역할로 가른다(OI-2). */
+  onProject?: (projectId: string) => void;
 }) {
   const doc = useAsync((signal) => riskApi.getDiff(diffId, { signal }), [diffId]);
+  const docProject = doc.data?.project_id ?? "";
+  useEffect(() => {
+    if (docProject) onProject?.(docProject);
+  }, [docProject, onProject]);
   const summary = useAsync((signal) => riskApi.getDiffSummary(diffId, { signal }), [diffId]);
   const events = useAsync((signal) => riskApi.getDiffEvents(diffId, { signal }), [diffId]);
   const precedents = useAsync((signal) => riskApi.getPrecedents(diffId, { signal }), [diffId]);
@@ -531,6 +540,13 @@ export default function ComparePage() {
   const projects = useAsync((signal) => riskApi.listProjects({ signal }), []);
   const [baseProject, setBaseProject] = useState("");
   const [targetProject, setTargetProject] = useState("");
+  const [diffProject, setDiffProject] = useState("");
+  /** 과제 목록 카드의 내 역할(my_role) — 모르는 과제(고르기 전 · 목록 밖)는 null 이라 잠그지 않는다(OI-2). */
+  const roleOf = (id: string) => (id ? projects.data?.projects.find((p) => p.id === id)?.my_role ?? null : null);
+  // 비교 만들기 · 쌍 대응 결정은 두 과제 모두 편집자 이상이다(MB-13 · MB-14) — 더 약한 역할로 가른다. 타깃은 비교의 대상 과제다.
+  const pairRole = weakerRole(roleOf(baseProject), roleOf(targetProject));
+  const pairAccess = writeAccess(pairRole);
+  const targetAccess = writeAccess(roleOf(diffProject));
   const [blocked, setBlocked] = useState<DiffBlocked | null>(null);
   const [g2, setG2] = useState<GateRecord | null>(null);
   const [busy, setBusy] = useState(false);
@@ -615,20 +631,22 @@ export default function ComparePage() {
         // 'diff 생성' 은 바로 아래 고르기 칸의 상태(두 스냅샷·G6)에 달려 있어 그 칸 옆에 남긴다.
         actions={
           diffId ? (
-            <Button type="button" onClick={createTarget} disabled={busy}>
+            <Button type="button" onClick={createTarget} disabled={busy || !targetAccess.allowed}
+                    title={targetAccess.reason ?? undefined}>
               <Target className="size-4" aria-hidden="true" />
               타깃 만들기
             </Button>
           ) : null
         }
       />
+      {diffId ? <LockNote access={targetAccess} /> : null}
 
       {/* diff 생성·타깃 만들기 둘이 같은 `error` 를 쓴다. 버튼 하나가 머리말로 올라갔으므로 배너도
           화면 맨 위에 둔다 — 아래 카드 안에 두면 타깃 만들기 실패가 긴 화면 밑에서 조용히 뜬다. */}
       <ErrorBanner error={error} />
 
       {/* diff 가 있으면 그 판정이 먼저다. 고르기·same-as 는 그 diff 를 만든 수단이라 아래로 내렸다. */}
-      {diffId ? <DiffView diffId={diffId} semanticBlocked={semanticBlocked} /> : null}
+      {diffId ? <DiffView diffId={diffId} semanticBlocked={semanticBlocked} onProject={setDiffProject} /> : null}
 
       <SectionCard title="비교할 스냅샷" subtitle="두 스냅샷의 구조 · 파라메트릭 · 의미 3층 diff 를 만듭니다.">
         <div className="flex flex-col gap-3">
@@ -671,20 +689,21 @@ export default function ComparePage() {
             <Button
               type="button"
               onClick={createDiff}
-              disabled={!ready || busy || blocked !== null}
-              title={blocked ? "G6 로 차단돼 diff 를 만들 수 없습니다." : undefined}
+              disabled={!ready || busy || blocked !== null || !pairAccess.allowed}
+              title={blocked ? "G6 로 차단돼 diff 를 만들 수 없습니다." : pairAccess.reason ?? undefined}
             >
               <GitCompare className="size-4" aria-hidden="true" />
               diff 생성
             </Button>
             {!ready ? <span className="text-sm text-muted-foreground">서로 다른 두 스냅샷을 고르세요.</span> : null}
+            <LockNote access={pairAccess} />
           </div>
         </div>
       </SectionCard>
 
       <SectionCard title="same-as 확정" subtitle="자동 매칭을 사람이 확정합니다 — 소스 앱에는 쓰지 않습니다.">
         {ready ? (
-          <SameAsResolver base={base} target={target} onG2={setG2} />
+          <SameAsResolver base={base} target={target} onG2={setG2} role={pairRole} />
         ) : (
           <EmptyBlock title="스냅샷을 두 개 고르면 매칭 후보가 나옵니다." />
         )}

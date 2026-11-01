@@ -10,6 +10,7 @@ import { PanelTranscript } from "./PanelTranscript";
 import { ReviewErrorBanner } from "./ReviewErrorBanner";
 import { SectionCard } from "./SectionCard";
 import { ErrorBanner, LoadingBlock } from "./StateBlocks";
+import { LockNote } from "./LockNote";
 import { Banner, Button, FormField, Input, Mono, Select } from "../ui/primitives";
 import {
   ISSUE_ROLE_LABEL,
@@ -26,7 +27,8 @@ import {
   labelOf,
 } from "../lib/issueView";
 import { fmtEpoch, fmtJson } from "../format";
-import type { IssueActed, IssueReargue, IssueRow } from "../types";
+import { writeAccess } from "../lib/access";
+import type { IssueActed, IssueReargue, IssueRow, ProjectRole } from "../types";
 
 const LIMIT = 100;
 const STATES = ["queued", "planned", "running", "resolved", "inconclusive", "untried_cap", "withdrawn", "skipped"];
@@ -112,12 +114,16 @@ export function IssuesCard({
   targetKey,
   active,
   onChanged,
+  role = null,
 }: {
   targetKey: string;
   /** 탭을 보고 있는가 — 볼 때만(볼 때마다) 첫 쪽을 받는다. 적던 사유는 탭을 바꿔도 남는다. */
   active: boolean;
   onChanged: () => void;
+  /** 대상 과제의 내 역할(진행판 my_role) — 올리기 · 건너뛰기는 편집자 이상이다(OI-2, 모르면 잠그지 않는다). */
+  role?: ProjectRole | null;
 }) {
+  const access = writeAccess(role);
   const [state, setState] = useState("");
   const [pClass, setPClass] = useState("");
   const [type, setType] = useState("");
@@ -234,15 +240,16 @@ export function IssuesCard({
       cell: (r) => {
         const can = issueActions(r);
         return (
-          <span className="flex flex-wrap items-center gap-1" title={can.inFlight ? "편성 · 도는 쟁점은 바꾸지 않습니다" : undefined}>
+          <span className="flex flex-wrap items-center gap-1"
+                title={can.inFlight ? "편성 · 도는 쟁점은 바꾸지 않습니다" : access.reason ?? undefined}>
             {can.queue || can.inFlight ? (
-              <Button type="button" variant="outline" size="sm" disabled={can.inFlight}
+              <Button type="button" variant="outline" size="sm" disabled={can.inFlight || !access.allowed}
                       onClick={(e) => { e.stopPropagation(); setActing({ row: r, action: "queue" }); setReason(""); setError(null); }}>
                 올리기…
               </Button>
             ) : null}
             {can.skip || can.inFlight ? (
-              <Button type="button" variant="outline" size="sm" disabled={can.inFlight}
+              <Button type="button" variant="outline" size="sm" disabled={can.inFlight || !access.allowed}
                       onClick={(e) => { e.stopPropagation(); setActing({ row: r, action: "skip" }); setReason(""); setError(null); }}>
                 건너뛰기…
               </Button>
@@ -264,6 +271,7 @@ export function IssuesCard({
         </Button>
       }
     >
+      <LockNote access={access} />
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <Select className="w-auto min-w-[9rem]" aria-label="쟁점 상태 거름" value={state} onChange={(e) => setState(e.target.value)}>
           <option value="">상태 전체</option>

@@ -22,6 +22,7 @@ import { ProjectAuditCard } from "../components/ProjectAuditCard";
 import { ProjectMembersCard } from "../components/ProjectMembersCard";
 import { ProjectMetaCard } from "../components/ProjectMetaCard";
 import { GateVerdictBadge } from "../components/GateBanner";
+import { LockNote } from "../components/LockNote";
 import {
   Banner,
   Button,
@@ -47,6 +48,7 @@ import {
 } from "../lib/capture";
 import type { SnapshotFailure } from "../lib/capture";
 import { myRole } from "../lib/projectMeta";
+import { adminAccess, writeAccess } from "../lib/access";
 import { FACET_ORDER } from "../types";
 import type {
   VocabBump,
@@ -59,6 +61,7 @@ import type {
   IfaceLedgerRow,
   JobHeader,
   ProjectDetail,
+  ProjectRole,
   ProjectSource,
   SnapshotCreate,
   SnapshotCreated,
@@ -174,12 +177,16 @@ function SourceCard({
   detail,
   adapters,
   onChanged,
+  role = null,
 }: {
   kind: "mcad" | "dyna";
   detail: ProjectDetail;
   adapters: AdapterEntry[];
   onChanged: () => void;
+  /** 내 역할(과제 상세 my_role) — 소스 연결은 편집자 이상이다(OI-2, 모르면 잠그지 않는다). */
+  role?: ProjectRole | null;
 }) {
+  const access = writeAccess(role);
   const source = detail.sources.find((s) => s.kind === kind);
   const candidates = adapters.filter((a) => a.kind === kind);
   const fields = REF_FIELDS[kind];
@@ -281,10 +288,12 @@ function SourceCard({
           <input type="checkbox" checked={bridge} onChange={(e) => setBridge(e.target.checked)} />
           <span className="text-sm text-muted-foreground">bridge_declared</span>
         </label>
-        <Button type="submit" variant="outline" className="self-start" disabled={busy || !ready}>
+        <Button type="submit" variant="outline" className="self-start" disabled={busy || !ready || !access.allowed}
+                title={access.reason ?? undefined}>
           <Link2 className="size-4" aria-hidden="true" />
           연결
         </Button>
+        <LockNote access={access} />
       </form>
     </SubPanel>
   );
@@ -313,6 +322,7 @@ function SnapshotForm({
   sources,
   onFrozen,
   onRejected,
+  role = null,
 }: {
   projectId: string;
   /** 과제의 소스 카드 — ECAD 카드가 붙어 있으면 기본 kinds 에 ecad 를 넣는다(ecad-1031 §6). */
@@ -321,7 +331,10 @@ function SnapshotForm({
   onFrozen: (snapshotId: string) => void;
   /** 거절된 캡처도 서버가 소스 카드를 다시 잰다(보드를 못 읽으면 카드가 '못 읽음') — 과제를 다시 받는다. */
   onRejected: () => void;
+  /** 내 역할(과제 상세 my_role) — 동결은 편집자 이상이다(OI-2, 모르면 잠그지 않는다). */
+  role?: ProjectRole | null;
 }) {
+  const access = writeAccess(role);
   const [label, setLabel] = useState("");
   const [kinds, setKinds] = useState<SourceKind[]>(() => defaultSnapshotKinds(sources));
   const [touched, setTouched] = useState(false);
@@ -394,7 +407,8 @@ function SnapshotForm({
       {failure?.kind === "model_too_large" && rejected ? (
         // 상한은 MCAD 리프와 ECAD 부품의 합이다(결정 3) — 무엇이 넘겼는지 한 줄로 보이고, 확인 뒤 거절된 그 본문에 allow_large 를 싣는다.
         <Banner tone="warn" title="모델이 크기 상한을 넘습니다." detail={modelTooLargeLine(failure.detail)}>
-          <Button type="button" size="sm" disabled={busy} onClick={() => void submit(allowLargeBody(rejected))}>
+          <Button type="button" size="sm" disabled={busy || !access.allowed} title={access.reason ?? undefined}
+                  onClick={() => void submit(allowLargeBody(rejected))}>
             그래도 동결
           </Button>
         </Banner>
@@ -485,15 +499,19 @@ function SnapshotForm({
           />
         </FormField>
       </FormGrid>
-      <Button type="submit" className="self-start" disabled={busy || kinds.length === 0 || reportIdsBad}>
+      <Button type="submit" className="self-start" disabled={busy || kinds.length === 0 || reportIdsBad || !access.allowed}
+              title={access.reason ?? undefined}>
         <Snowflake className="size-4" aria-hidden="true" />
         {busy ? "동결하는 중…" : "스냅샷 동결"}
       </Button>
+      <LockNote access={access} />
     </form>
   );
 }
 
-function DimForm({ projectId }: { projectId: string }) {
+function DimForm({ projectId, role = null }: { projectId: string; role?: ProjectRole | null }) {
+  // dims 정의는 편집자 이상이다(OI-2, 모르면 잠그지 않는다).
+  const access = writeAccess(role);
   const [name, setName] = useState("");
   const [kind, setKind] = useState("");
   const [unit, setUnit] = useState("");
@@ -543,15 +561,27 @@ function DimForm({ projectId }: { projectId: string }) {
           <Input value={extractor} onChange={(e) => setExtractor(e.target.value)} />
         </FormField>
       </FormGrid>
-      <Button type="submit" variant="outline" className="self-start" disabled={!ready}>
+      <Button type="submit" variant="outline" className="self-start" disabled={!ready || !access.allowed}
+              title={access.reason ?? undefined}>
         dim 정의 추가
       </Button>
+      <LockNote access={access} />
     </form>
   );
 }
 
 // 요구 탭(plan §2.8b·§8.2.4) — rr_requirements 표·등록·waive. 여유 계산은 SnapshotPage 의 sig:req.margin 이 보여준다.
-function RequirementsCard({ projectId, predecessorId }: { projectId: string; predecessorId?: string | null }) {
+function RequirementsCard({
+  projectId,
+  predecessorId,
+  role = null,
+}: {
+  projectId: string;
+  predecessorId?: string | null;
+  /** 내 역할(과제 상세 my_role) — 요구 저장 · 결정 · 승계는 편집자 이상이다(OI-2, 모르면 잠그지 않는다). */
+  role?: ProjectRole | null;
+}) {
+  const access = writeAccess(role);
   const rows = useAsync(() => riskApi.listRequirements(projectId), [projectId]);
   const [kind, setKind] = useState<RequirementKind>("dim_limit");
   const [name, setName] = useState("");
@@ -631,10 +661,12 @@ function RequirementsCard({ projectId, predecessorId }: { projectId: string; pre
       nowrap: true,
       cell: (r) => (
         <span className="flex flex-wrap items-center gap-2">
-          <Button type="button" variant="ghost" size="sm" onClick={() => decide(r.id, "confirmed")}>
+          <Button type="button" variant="ghost" size="sm" onClick={() => decide(r.id, "confirmed")} disabled={!access.allowed}
+                  title={access.reason ?? undefined}>
             확정
           </Button>
-          <Button type="button" variant="ghost" size="sm" onClick={() => decide(r.id, "waived")}>
+          <Button type="button" variant="ghost" size="sm" onClick={() => decide(r.id, "waived")} disabled={!access.allowed}
+                  title={access.reason ?? undefined}>
             waive
           </Button>
         </span>
@@ -647,6 +679,7 @@ function RequirementsCard({ projectId, predecessorId }: { projectId: string; pre
       title="요구"
       subtitle="요구는 스냅샷에 복사되지 않습니다 — 고쳐도 ir_hash 는 그대로이고 rr_state 만 다시 계산됩니다."
     >
+      <LockNote access={access} />
       <ErrorBanner error={error ?? rows.error} />
       {rows.loading ? <LoadingBlock /> : null}
       <DataTable
@@ -656,7 +689,8 @@ function RequirementsCard({ projectId, predecessorId }: { projectId: string; pre
         empty="등록된 요구가 없습니다 — 판정은 좌석 기준입니다(missing.req_absent)."
       />
       {predecessorId ? (
-        <Button type="button" variant="ghost" className="mt-3" onClick={inherit}>
+        <Button type="button" variant="ghost" className="mt-3" onClick={inherit} disabled={!access.allowed}
+                title={access.reason ?? undefined}>
           계보 과제에서 요구 승계
         </Button>
       ) : null}
@@ -689,7 +723,8 @@ function RequirementsCard({ projectId, predecessorId }: { projectId: string; pre
             <Input value={sourceRef} onChange={(e) => setSourceRef(e.target.value)} />
           </FormField>
         </FormGrid>
-        <Button type="submit" variant="outline" className="self-start" disabled={busy || name.trim() === ""}>
+        <Button type="submit" variant="outline" className="self-start" disabled={busy || name.trim() === "" || !access.allowed}
+                title={access.reason ?? undefined}>
           요구 저장
         </Button>
       </form>
@@ -697,7 +732,9 @@ function RequirementsCard({ projectId, predecessorId }: { projectId: string; pre
   );
 }
 
-function IfaceLedgerEditor({ projectId }: { projectId: string }) {
+function IfaceLedgerEditor({ projectId, role = null }: { projectId: string; role?: ProjectRole | null }) {
+  // 계면 확정 원장은 편집자 이상이다(OI-2, 모르면 잠그지 않는다).
+  const access = writeAccess(role);
   const [rows, setRows] = useState<IfaceLedgerRow[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -775,15 +812,18 @@ function IfaceLedgerEditor({ projectId }: { projectId: string }) {
         <Button
           type="button"
           variant="outline"
+          disabled={!access.allowed}
+          title={access.reason ?? undefined}
           onClick={() => setRows((p) => [...p, { pair_key: "", kind_override: null, status: "confirmed", note: null }])}
         >
           <Plus className="size-4" aria-hidden="true" />
           행 추가
         </Button>
-        <Button type="button" onClick={save} disabled={busy || rows.length === 0}>
+        <Button type="button" onClick={save} disabled={busy || rows.length === 0 || !access.allowed} title={access.reason ?? undefined}>
           저장
         </Button>
         <span className="text-sm text-muted-foreground">확정은 앱 원장에만 기록됩니다.</span>
+        <LockNote access={access} />
       </div>
       <p className="mt-3 mb-0 text-sm text-muted-foreground">
         저장하면 원장이 이 표의 내용으로 대체될 수 있습니다. 조회 경로가 아직 없어 표는 빈 상태에서 시작하고, 저장
@@ -793,7 +833,9 @@ function IfaceLedgerEditor({ projectId }: { projectId: string }) {
   );
 }
 
-function VocabCard() {
+function VocabCard({ riskAdmin }: { riskAdmin?: boolean }) {
+  // 사전 편집은 관리자(risk_admin_roles)만이다 — /me.risk_admin 이 거짓이면 잠그고 까닭을 보인다(OI-2, 모르면 잠그지 않는다).
+  const access = adminAccess(riskAdmin);
   const vocab = useAsync((signal) => riskApi.getVocab({ signal }), []);
   const [head, setHead] = useState("");
   const [aliases, setAliases] = useState("");
@@ -823,6 +865,7 @@ function VocabCard() {
       title="사전"
       subtitle="동의어 추가는 마이너, 삭제는 메이저 승급입니다. 메이저면 기존 ckey 를 다시 계산해야 합니다(§2.7.1)."
     >
+      <LockNote access={access} />
       <ErrorBanner error={error} />
       <ErrorBanner error={vocab.error} onRetry={vocab.reload} />
       {bump ? (
@@ -850,7 +893,8 @@ function VocabCard() {
           <Button
             type="button"
             variant="outline"
-            disabled={busy || !head.trim() || aliasList.length === 0}
+            disabled={busy || !head.trim() || aliasList.length === 0 || !access.allowed}
+            title={access.reason ?? undefined}
             onClick={() => run(() => riskApi.putVocabSynonym({ head: head.trim(), from: aliasList, op: "add" }))}
           >
             추가(마이너)
@@ -858,7 +902,8 @@ function VocabCard() {
           <Button
             type="button"
             variant="ghost"
-            disabled={busy || !head.trim() || aliasList.length === 0}
+            disabled={busy || !head.trim() || aliasList.length === 0 || !access.allowed}
+            title={access.reason ?? undefined}
             onClick={() => run(() => riskApi.putVocabSynonym({ head: head.trim(), from: aliasList, op: "remove" }))}
           >
             삭제(메이저)
@@ -875,7 +920,8 @@ function VocabCard() {
           <Button
             type="button"
             variant="outline"
-            disabled={busy || tokenList.length === 0}
+            disabled={busy || tokenList.length === 0 || !access.allowed}
+            title={access.reason ?? undefined}
             onClick={() => run(() => riskApi.putVocabStopTokens({ tokens: tokenList, op: "add" }))}
           >
             추가(마이너)
@@ -883,7 +929,8 @@ function VocabCard() {
           <Button
             type="button"
             variant="ghost"
-            disabled={busy || tokenList.length === 0}
+            disabled={busy || tokenList.length === 0 || !access.allowed}
+            title={access.reason ?? undefined}
             onClick={() => run(() => riskApi.putVocabStopTokens({ tokens: tokenList, op: "remove" }))}
           >
             삭제(메이저)
@@ -1108,7 +1155,10 @@ export default function ProjectPage() {
   useInterval(detail.reload, active ? POLL_MS : null);
 
   const email = me.data?.email ?? null;
-  const role = useMemo(() => myRole(members.data?.members, email), [members.data, email]);
+  // 내 역할 — 과제 상세의 my_role(서버 판정 — 구성원이 아닌 관리자는 null)이 정본이고, 그 칸을 싣지 않는 서버면 멤버 표로 센다. 쓰기
+  // 단추를 이 값으로 가른다(OI-2).
+  const fallbackRole = useMemo(() => myRole(members.data?.members, email), [members.data, email]);
+  const role: ProjectRole | null = detail.data && detail.data.my_role !== undefined ? detail.data.my_role : fallbackRole;
   /** 바꾸기 · 떼기 · 멤버 고치기는 과제 주인만 — 과제 행의 소유자가 나인가(멤버 표가 늦어도 갈린다). */
   const isOwner = detail.data !== null && email !== null && detail.data.project.owner_sub === email;
 
@@ -1344,6 +1394,7 @@ export default function ProjectPage() {
                     detail={detail.data as ProjectDetail}
                     adapters={adapters.data?.apps ?? []}
                     onChanged={detail.reload}
+                    role={role}
                   />
                 ))}
                 <EcadBoardCard
@@ -1365,6 +1416,7 @@ export default function ProjectPage() {
               sources={detail.data?.sources ?? []}
               onFrozen={openFrozen}
               onRejected={detail.reload}
+              role={role}
             />
           </SectionCard>
 
@@ -1396,7 +1448,7 @@ export default function ProjectPage() {
           </SectionCard>
 
           {/* 누른 행의 내용은 바로 아래에 와야 한다 — 전에는 타깃 표를 지나야 나왔다(열어 놓고도 못 찾는다). */}
-          {snapshotId ? <SnapshotPage snapshotId={snapshotId} /> : null}
+          {snapshotId ? <SnapshotPage snapshotId={snapshotId} role={role} /> : null}
 
           <SectionCard title="타깃">
             <DataTable
@@ -1412,14 +1464,15 @@ export default function ProjectPage() {
           <RequirementsCard
             projectId={projectId}
             predecessorId={(detail.data as ProjectDetail | null)?.project?.predecessor_project_id ?? null}
+            role={role}
           />
 
           <SectionCard title="dims 정의">
-            <DimForm projectId={projectId} />
+            <DimForm projectId={projectId} role={role} />
           </SectionCard>
 
           <SectionCard title="iface-ledger" subtitle="확정 원장은 앱 DB 에만 저장합니다.">
-            <IfaceLedgerEditor projectId={projectId} />
+            <IfaceLedgerEditor projectId={projectId} role={role} />
           </SectionCard>
       </TabPanel>
 
@@ -1430,7 +1483,7 @@ export default function ProjectPage() {
 
       {/* 사전은 과제가 아니라 전사 자산이다 — 과제 구역과 섞이지 않게 탭을 따로 둔다. */}
       <TabPanel active={tab === "vocab"} tab="vocab" idPrefix="proj">
-        <VocabCard />
+        <VocabCard riskAdmin={me.data?.risk_admin} />
       </TabPanel>
 
       <TabPanel active={tab === "members"} tab="members" idPrefix="proj">

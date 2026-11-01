@@ -198,6 +198,8 @@ export type Me = {
   anonymous: boolean;
   source: "bearer" | "cookie" | "sso" | "none";
   portal_pat: PortalPatSummary | null;
+  /** 부른 사람의 heax 역할이 risk_admin_roles 에 드는가 — 사전 편집 같은 관리자 쓰기를 미리 가른다(OI-2, 없으면 모름). */
+  risk_admin?: boolean;
   /** cred_key_present=false 면 PAT 등록이 422 `cred_key_absent` 로 거부된다(§8.2.7). */
   box: {
     hostname: string;
@@ -527,6 +529,8 @@ export type ProjectDetail = {
   jobs: JobHeader[];
   /** 성격 태그와 그 수(많은 순 10개) — 글자 목록이 아니라 `{tag, n}` 이다. 전에 글자로 적어 두어 태그가 있는 과제가 백지였다. */
   character_top_tags: Array<{ tag: string; n: number }>;
+  /** 부른 사람의 역할(과제 목록 카드와 같은 판정 — 구성원이 아닌 관리자는 null) — 쓰기 단추를 가른다(OI-2, 칸이 없으면 모름). */
+  my_role?: ProjectRole | null;
 };
 
 /**
@@ -1680,6 +1684,8 @@ export type UnitsSummary =
 
 export type Coverage = {
   target_key: string;
+  /** 부른 사람의 그 대상 과제 역할(과제 상세와 같은 판정) — 대상 화면의 쓰기 단추를 가른다(OI-2, 칸이 없으면 모름). */
+  my_role?: ProjectRole | null;
   job: CoverageJob;
   /** 셀 원장이 있는 대상만 객체다(패널 대상은 null). */
   review: CoverageReview | null;

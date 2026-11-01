@@ -10,12 +10,22 @@ import { EstimateBlock } from "./ReviewJobForm";
 import { ReviewErrorBanner } from "./ReviewErrorBanner";
 import { SectionCard } from "./SectionCard";
 import { EmptyBlock, ErrorBanner, LoadingBlock } from "./StateBlocks";
+import { LockNote } from "./LockNote";
 import { Banner, Button, FormField, Input, Mono, Select } from "../ui/primitives";
 import { cn } from "../lib/cn";
 import { CELL_STATES, cellStateLabel, disposeJobLine, hitsLine, reasonProblem } from "../lib/reviewView";
 import { cellKey, cellMatrix, cellShortLabel, cellTitle, ROUTE_LABEL } from "../lib/cellView";
 import { fmtEpoch } from "../format";
-import type { CallsEstimate, CellState, CellsDisposed, CellsSelector, CoverageReview, ReviewCellRow } from "../types";
+import { writeAccess } from "../lib/access";
+import type {
+  CallsEstimate,
+  CellState,
+  CellsDisposed,
+  CellsSelector,
+  CoverageReview,
+  ProjectRole,
+  ReviewCellRow,
+} from "../types";
 
 const PAGE = 500;
 const ROUTES = ["review", "filtered", "audit", "noinput"] as const;
@@ -62,13 +72,17 @@ export function CellGrid({
   review,
   active,
   onChanged,
+  role = null,
 }: {
   targetKey: string;
   review: CoverageReview;
   /** 탭을 보고 있는가 — 볼 때만(볼 때마다) 칸을 받는다. 고른 셀 · 적던 사유는 탭을 바꿔도 남는다. */
   active: boolean;
   onChanged: () => void;
+  /** 대상 과제의 내 역할(진행판 my_role) — 다시 · 넘김은 편집자 이상이다(OI-2, 모르면 잠그지 않는다). 칸 고르기 · 보기는 그대로다. */
+  role?: ProjectRole | null;
 }) {
+  const access = writeAccess(role);
   const [agent, setAgent] = useState("");
   const [domain, setDomain] = useState("");
   const [unit, setUnit] = useState("");
@@ -357,24 +371,29 @@ export function CellGrid({
 
       <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border pt-3">
         <span className="text-sm">고른 셀 {selected.size}개</span>
-        <Button type="button" size="sm" variant="outline" disabled={selected.size === 0} onClick={() => open({ kind: "retry", target: "selected" })}>
+        <Button type="button" size="sm" variant="outline" disabled={selected.size === 0 || !access.allowed}
+                title={access.reason ?? undefined} onClick={() => open({ kind: "retry", target: "selected" })}>
           다시…
         </Button>
-        <Button type="button" size="sm" variant="outline" disabled={selected.size === 0} onClick={() => open({ kind: "skip", target: "selected" })}>
+        <Button type="button" size="sm" variant="outline" disabled={selected.size === 0 || !access.allowed}
+                title={access.reason ?? undefined} onClick={() => open({ kind: "skip", target: "selected" })}>
           넘김…
         </Button>
         {jobId ? (
           <>
             <span className="mx-1 h-5 w-px bg-border" aria-hidden="true" />
             <span className="text-sm">이 잡({jobId.slice(0, 8)})의 실패 셀 전부</span>
-            <Button type="button" size="sm" variant="outline" onClick={() => open({ kind: "retry", target: "job_failed" })}>
+            <Button type="button" size="sm" variant="outline" disabled={!access.allowed} title={access.reason ?? undefined}
+                    onClick={() => open({ kind: "retry", target: "job_failed" })}>
               다시…
             </Button>
-            <Button type="button" size="sm" variant="outline" onClick={() => open({ kind: "skip", target: "job_failed" })}>
+            <Button type="button" size="sm" variant="outline" disabled={!access.allowed} title={access.reason ?? undefined}
+                    onClick={() => open({ kind: "skip", target: "job_failed" })}>
               넘김…
             </Button>
           </>
         ) : null}
+        <LockNote access={access} />
       </div>
       {result ? (
         <Banner

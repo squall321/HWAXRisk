@@ -572,6 +572,8 @@ def get_me(request: Request, ident: identity.Identity = Depends(identity.current
 def _me_payload(request: Request, ident: identity.Identity) -> dict:
     state = request.app.state
     payload = ident.to_dict()
+    # 사전 편집 · 큐레이션 같은 관리자 쓰기를 화면이 미리 가르는 칸(risk_admin_roles — 서버의 거절은 그대로, OI-2).
+    payload["risk_admin"] = (not ident.anonymous) and _is_admin(ident)
     portal_pat = None
     # 박스 불일치(이관 직후)면 _user_credentials 전부 무효(plan §5.2.5 (5)).
     if not ident.anonymous and state.box_match:
@@ -1111,6 +1113,9 @@ def get_project(project_id: str, ident: identity.Identity = Depends(identity.cur
                                **{k: v for k, v in _loads(j["progress_json"], {}).items() if k != runner.DEFERRED_KEY}}}
                  for j in jobs],
         "character_top_tags": tags,
+        # 부른 사람의 역할(owner · editor · viewer — 과제 목록 카드의 my_role 과 같은 판정, 구성원이 아닌 관리자는 null) — 화면이 쓰기
+        # 단추를 이 값으로 가른다(보기는 잠그고 까닭을 보인다, OI-2). 서버의 거절은 그대로다(화면은 미리 알릴 뿐이다).
+        "my_role": project_role(project_id, email),
     }
 
 
@@ -4044,8 +4049,14 @@ def post_cells_skip(target_key: str, body: CellsSkipBody, ident: identity.Identi
 # ================================================================ 커버리지·등록부·패널
 @router.get("/targets/{target_key}/coverage")
 def get_coverage(target_key: str, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """진행판 — 도메인별 상태·미착석 수·완결 레벨(레벨 계산은 registry.close_level)."""
-    return coverage_payload(target_key, owner_sub=_target_reader(target_key, _require_user(ident), admin=_is_admin(ident)))
+    """진행판 — 도메인별 상태·미착석 수·완결 레벨(레벨 계산은 registry.close_level).
+
+    `my_role` 은 부른 사람의 그 대상 과제 역할이다(과제 상세와 같은 판정 — 구성원이 아닌 관리자는 null). 대상 화면이 쓰기 단추를 이 값으로
+    가른다(OI-2) — MCP risk_get_coverage(같은 본체 coverage_payload)에는 싣지 않는다(MCP 신원은 역할을 쓰지 않는다)."""
+    email = _require_user(ident)
+    payload = coverage_payload(target_key, owner_sub=_target_reader(target_key, email, admin=_is_admin(ident)))
+    row = get_store().query_one("SELECT project_id FROM rr_targets WHERE target_key = ?", (target_key,))
+    return {**payload, "my_role": project_role(str(row["project_id"]), email) if row is not None else None}
 
 
 def coverage_payload(target_key: str, *, owner_sub: str | None = None) -> dict:

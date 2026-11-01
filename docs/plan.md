@@ -97,6 +97,8 @@
 - base `/apps/hwax_risk/api`(앱 내부 `/api`, `backend/app/routes.py`), 모든 핸들러는 `Depends(identity.current)`. 정본 §8.2.3 의 경로를 포함해 **97개**가 배선돼 있다(2026-10-31 실측 — 재설계 M2 · M3 와 ECAD · 백로그 경로 · 키 대장 읽기 포함).
 - 신원·메타 — `GET /health {ok, app_version, schema_version}` · `GET /me`(+`box{hostname, secrets_valid, cred_key_present}`) ·
   `PUT /me/portal-pat {pat|null}`(익명 401, 422 6종) · `GET /meta/{taxonomy, adapters, vocab, metrics}` · `POST /meta/metrics/recompute`.
+  화면의 쓰기 단추는 서버가 주는 역할로 가른다(2026-11-01) — 과제 상세 · 진행판(`GET /targets/{key}/coverage`)의 `my_role`(owner · editor ·
+  viewer, 구성원이 아닌 관리자는 null)과 `GET /me` 의 `risk_admin` — 보기는 잠기고 까닭 한 줄이 선다(서버의 거절은 그대로, context-notes OI-2).
 - 과제·소스·스냅샷 — `projects`(생성·조회(목록 · 상세는 구성원도 — 메타 열 · 멤버 · 내 역할)·`PATCH`(lifecycle·등급·`mcp_visibility`)·멤버·이양·폐기·감사·유사·dims·요구·`iface-ledger`) ·
   `sources`(같은 원천이 붙은 내 다른 과제(폐기 과제 제외)는 `duplicate_of` 로 알림) · `snapshots`(조회 — 상태는 지금 살아 있는 게이트 ack · `gates_hash` 를 얹는다·게이트 ack·`rule_hits`) · `sameas`(조회 — 답 머리에 `pair_key`·`decide` — 확정을 뒤집는 결정 · `merge_key` · 계면 별칭 철회
   `revoke_iface_alias` 는 같은 트랜잭션에서 키 전파 `rekey` 를 돈다, §5.9.5 · 병합된 키의 `confirm_key` 는 409 `key_merged`) · `part-keys/{ckey}`(키 대장 한 행 — 주인 · 그 키가 든 과제의 구성원, `mine` 은 내 원장 행인가 — 아니면 결정은 404) · `diffs`.

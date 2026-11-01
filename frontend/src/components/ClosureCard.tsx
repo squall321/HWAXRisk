@@ -10,10 +10,12 @@ import type { Column } from "./DataTable";
 import { ReviewErrorBanner } from "./ReviewErrorBanner";
 import { SectionCard } from "./SectionCard";
 import { ErrorBanner, LoadingBlock } from "./StateBlocks";
+import { LockNote } from "./LockNote";
 import { Banner, Button, FormField, Input, Mono } from "../ui/primitives";
 import { ackReasonProblem, ackStateText, canAck, canRevoke, depthRows, regressedNote, residualCounts } from "../lib/closureView";
 import { fmtEpoch } from "../format";
-import type { CloseAck, ClosureCells, Qualifier } from "../types";
+import { writeAccess } from "../lib/access";
+import type { CloseAck, ClosureCells, ProjectRole, Qualifier } from "../types";
 
 /** 확인 · 취소의 결과 한 줄 — 표기와 그 조작이 세운 보고서 판. */
 type Outcome = { text: string; level_label: string; report_version: number | null };
@@ -52,13 +54,20 @@ export function ClosureCard({
   active,
   onChanged,
   onOpenReport,
+  role = null,
 }: {
   targetKey: string;
   /** 탭을 보고 있는가 — 볼 때마다 다시 읽는다(적던 확인 사유는 탭을 바꿔도 남는다). */
   active: boolean;
   onChanged: () => void;
   onOpenReport: () => void;
+  /**
+   * 대상 과제의 내 역할(진행판 my_role) — 잔여 확인 · 확인 취소는 소유자(와 관리자)만이라 편집자 · 보기에게는 잠그고 까닭을 보인다(OI-2,
+   * 모르면 잠그지 않는다 — 구성원이 아닌 관리자는 서버가 받는다). '다시 세기' 는 읽기라 그대로다.
+   */
+  role?: ProjectRole | null;
 }) {
+  const access = writeAccess(role, "owner");
   const [mode, setMode] = useState<{ fresh: boolean; n: number }>({ fresh: false, n: 0 });
   /** fresh=1 을 이미 보낸 읽기 차례(mode.n). */
   const freshSent = useRef(-1);
@@ -176,12 +185,14 @@ export function ClosureCard({
       cell: (q) => (
         <span className="flex flex-wrap items-center gap-1">
           {canAck(q) ? (
-            <Button type="button" variant="outline" size="sm" onClick={() => { setAcking(q.item); setRevoking(null); setReason(""); setError(null); setChangedNote(null); }}>
+            <Button type="button" variant="outline" size="sm" disabled={!access.allowed} title={access.reason ?? undefined}
+                    onClick={() => { setAcking(q.item); setRevoking(null); setReason(""); setError(null); setChangedNote(null); }}>
               확인…
             </Button>
           ) : null}
           {canRevoke(q) ? (
-            <Button type="button" variant="ghost" size="sm" onClick={() => { setRevoking(q.item); setAcking(null); setError(null); }}>
+            <Button type="button" variant="ghost" size="sm" disabled={!access.allowed} title={access.reason ?? undefined}
+                    onClick={() => { setRevoking(q.item); setAcking(null); setError(null); }}>
               확인 취소…
             </Button>
           ) : null}
@@ -214,6 +225,7 @@ export function ClosureCard({
         </Button>
       }
     >
+      <LockNote access={access} />
       <ErrorBanner error={closure.error} onRetry={() => reload(false)} />
       {closure.loading && !closure.data ? <LoadingBlock /> : null}
       {closure.data && closure.data.flow === "panels" ? (

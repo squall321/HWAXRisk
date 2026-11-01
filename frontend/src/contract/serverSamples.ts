@@ -27,9 +27,11 @@ import type {
 function sample<T>() {
   return <U extends T>(value: U): T => value;
 }
-/** 카드 대조 대상 진행판 — 사슬(쟁점 잡 대기) · 종합 보고서 판 · 잔여 · 끝난 검토 잡(검토 순서는 앞 둘만). */
+/** 카드 대조 대상 진행판 — 사슬(쟁점 잡 대기) · 종합 보고서 판 · 잔여 · 끝난 검토 잡(검토 순서는 앞 둘만). 주인으로 받았다 — 웹 진행판이 싣는
+ * 부른 사람의 역할(my_role, 가지 wt1101/risk-open)을 더했다. */
 export const coverageCells = sample<Coverage>()({
   "target_key": "diff:220d3f493372488c978fefa91334eb1e",
+  "my_role": "owner",
   "job": null,
   "roster_size": 6,
   "by_domain": {
@@ -2459,7 +2461,8 @@ export const snapshotStateMargin = sample<Pick<SnapshotState, "signals" | "missi
  * 과제 상세(GET /projects/{id}) — 편집자로 받았다(구성원이 연다 — 가지 wt1031/risk-reads). 과제 행의 메타 열(코퍼스 제외 bool · 제품 연결
  * 배열 · 수명 주기를 shipped 로 바꿔 닫은 때가 찍혔다) · 멤버 표({email, role}) · 스냅샷 머리의 이름 · 판 · 강등 표지 전부. 스크래치 백엔드에서
  * 동결 잡 둘(DV1 · DV2 — 같은 초)과 손 픽스처 하나를 얼려 받았다. 대상 표는 비었다 — 대상 머리 타입(`unseated_n` · `superseded_by`)은
- * 이 응답이 싣지 않는 칸을 요구한다(FE-7 의 남긴 것, 이 견본 밖).
+ * 이 응답이 싣지 않는 칸을 요구한다(FE-7 의 남긴 것, 이 견본 밖). 부른 사람의 역할(my_role — 편집자)은 가지 wt1101/risk-open 이
+ * 더한 칸이다(쓰기 단추를 가른다).
  */
 export const projectDetailMember = sample<ProjectDetail>()({
   "project": {
@@ -2613,7 +2616,8 @@ export const projectDetailMember = sample<ProjectDetail>()({
   ],
   "targets": [],
   "jobs": [],
-  "character_top_tags": []
+  "character_top_tags": [],
+  "my_role": "editor"
 });
 
 /** 과제 목록(GET /projects) — 편집자로 받았다. 제 과제(owner)와 구성원 과제(editor), 카드마다 등급 · 수명 주기 · 코퍼스 제외 · 내 역할. */

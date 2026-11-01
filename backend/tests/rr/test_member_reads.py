@@ -38,6 +38,9 @@ MEMBER_GET_EXEMPT: dict[tuple[str, str], str] = {
 # 부른 사람에 매인 칸 — 구성원과 주인의 답이 이 칸에서만 갈린다.
 CALLER_FIELDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("GET", P + "/part-keys/{ckey}"): ("mine",),
+    # 부른 사람의 역할 — 화면이 쓰기 단추를 가른다(OI-2).
+    ("GET", P + "/projects/{project_id}"): ("my_role",),
+    ("GET", P + "/targets/{target_key}/coverage"): ("my_role",),
 }
 
 # MCP — 읽기 도구는 구성원이 주인과 같은 답을 받는다. 구성원이 주인과 같은 답을 받지 않는 것과 쓰기 도구는 까닭과 함께 따로 적는다(새
@@ -109,6 +112,17 @@ def test_editors_and_viewers_read_what_the_owner_reads(members, case):
     assert stranger[1] == GET_EXPECT.get(case, 404), (case, stranger[:3])
     if case in GET_EXPECT:                                     # 과제로 거르는 목록 — 남에게는 빈 목록이다
         assert _body(stranger)["total"] == 0 and _body(owner)["total"] > 0, (case, owner[2][:200])
+
+
+def test_the_project_and_target_screens_carry_the_callers_role(members):
+    """과제 상세 · 진행판의 `my_role` 은 부른 사람의 역할이다(과제 목록 카드와 같은 판정 — owner 는 과제 행의 주인 열, 구성원은 편집자 ·
+    보기 행, 구성원이 아닌 관리자는 null) — 화면이 쓰기 단추를 이 값으로 가른다(OI-2). 남은 그대로 없는 것과 같은 404 다."""
+    store, ids = members
+    for who, role in ((factories.ident(OWNER), "owner"), (factories.ident(EDITOR), "editor"), (factories.ident(VIEWER), "viewer"),
+                      (ADMIN, None)):
+        assert routes.get_project(ids["project"], ident=who)["my_role"] == role, who.email
+        assert routes.get_coverage(ids["target"], ident=who)["my_role"] == role, who.email
+    assert _answer(lambda: routes.get_project(ids["project"], ident=factories.ident(OTHER)))[1] == 404
 
 
 def test_the_brief_is_a_write_that_editors_get_and_viewers_do_not(members):

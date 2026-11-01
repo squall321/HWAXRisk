@@ -42,6 +42,7 @@ import { IssuesCard } from "../components/IssuesCard";
 import { SynthReport } from "../components/SynthReport";
 import { ClosureCard } from "../components/ClosureCard";
 import { RegistryCard } from "../components/RegistryCard";
+import { LockNote } from "../components/LockNote";
 import { panelJobPause, seatActions, seatReasonLabel, skipReasonProblem } from "../lib/targetView";
 import { JobSignalLine, ReviewWorkers } from "../components/JobSignals";
 import { JobCancelConfirm } from "../components/JobCancelConfirm";
@@ -49,6 +50,7 @@ import {
   Banner, Button, FormField, FormGrid, Input, Mono, PageHeader, Select, TabBar, TabPanel,
 } from "../ui/primitives";
 import { cn } from "../lib/cn";
+import { writeAccess } from "../lib/access";
 import { fmtEpoch, fmtNum, fmtPct } from "../format";
 import type {
   BriefPanel,
@@ -58,6 +60,7 @@ import type {
   EvidenceItem,
   ExternalSync,
   Panel,
+  ProjectRole,
   RegistryQuery,
   ResyncQueued,
   Seat,
@@ -221,6 +224,8 @@ function CoverageHeatmap({
   );
   const [acting, setActing] = useState<{ seat: Seat; mode: "skip" | "revert" } | null>(null);
   const [seatNote, setSeatNote] = useState<string | null>(null);
+  // 좌석 넘기기 · 되돌리기는 편집자 이상이다 — 보기에게는 잠그고 까닭을 보인다(OI-2, 진행판 my_role).
+  const access = writeAccess(coverage.my_role);
 
   const domains = Object.keys(coverage.by_domain);
   /** 열별 합계 — 도메인 행을 더한 값이다(새 판정이 아니다). */
@@ -284,12 +289,14 @@ function CoverageHeatmap({
         return (
           <span className="flex flex-wrap items-center gap-1">
             {can.skip ? (
-              <Button type="button" variant="ghost" size="sm" onClick={() => setActing({ seat: s, mode: "skip" })}>
+              <Button type="button" variant="ghost" size="sm" disabled={!access.allowed} title={access.reason ?? undefined}
+                      onClick={() => setActing({ seat: s, mode: "skip" })}>
                 넘기기…
               </Button>
             ) : null}
             {can.revert ? (
-              <Button type="button" variant="ghost" size="sm" onClick={() => setActing({ seat: s, mode: "revert" })}>
+              <Button type="button" variant="ghost" size="sm" disabled={!access.allowed} title={access.reason ?? undefined}
+                      onClick={() => setActing({ seat: s, mode: "revert" })}>
                 되돌리기…
               </Button>
             ) : null}
@@ -378,6 +385,7 @@ function CoverageHeatmap({
       {domain !== null ? (
         <div className="mt-3 flex flex-col gap-2">
           <h3 className="m-0 text-sm text-muted-foreground">{domain} 좌석</h3>
+          <LockNote access={access} />
           <ErrorBanner error={seats.error} onRetry={seats.reload} />
           {seats.loading && !seats.data ? <LoadingBlock /> : null}
           {seatNote ? <Banner tone="info" live="status" title={seatNote} /> : null}
@@ -558,6 +566,8 @@ function PanelRunner({
   /** 카드 대조 대상은 Tier 패널 잡을 세우지 않는다(422 flow_mismatch) — 만들기 칸을 두지 않고 남은 패널 잡의 줄 · 조작만 보인다. */
   creatable?: boolean;
 }) {
+  // 잡 만들기 · 조작은 편집자 이상이다 — 보기에게는 잠그고 까닭을 보인다(OI-2, 진행판 my_role).
+  const access = writeAccess(coverage?.my_role);
   const [tier, setTier] = useState<Tier>("B");
   const [concurrency, setConcurrency] = useState(1);
   const [modifiers, setModifiers] = useState("");
@@ -703,19 +713,23 @@ function PanelRunner({
       )}
       <div className="mt-3 flex flex-wrap items-center gap-2">
         {creatable ? (
-          <Button type="button" onClick={start} disabled={busy || !ready}>
+          <Button type="button" onClick={start} disabled={busy || !ready || !access.allowed} title={access.reason ?? undefined}>
             시작
           </Button>
         ) : null}
-        <Button type="button" variant="outline" onClick={() => control("pause")} disabled={busy || !job}>
+        <Button type="button" variant="outline" onClick={() => control("pause")} disabled={busy || !job || !access.allowed}
+                title={access.reason ?? undefined}>
           일시정지
         </Button>
-        <Button type="button" variant="outline" onClick={() => control("resume")} disabled={busy || !job}>
+        <Button type="button" variant="outline" onClick={() => control("resume")} disabled={busy || !job || !access.allowed}
+                title={access.reason ?? undefined}>
           재개
         </Button>
-        <Button type="button" variant="outline" onClick={() => job && setCancelFor(job.id)} disabled={busy || !job}>
+        <Button type="button" variant="outline" onClick={() => job && setCancelFor(job.id)}
+                disabled={busy || !job || !access.allowed} title={access.reason ?? undefined}>
           취소…
         </Button>
+        <LockNote access={access} />
         {creatable && llm === "claude" && !externalConsent ? (
           <span className="text-sm text-muted-foreground">반출 동의에 체크해야 시작할 수 있습니다.</span>
         ) : null}
@@ -1018,12 +1032,15 @@ function BriefTokens({ panels }: { panels: BriefPanel[] }) {
  * **타깃 화면에 들어가기만 해도** 브리프 탭을 한 번도 안 열고 토큰이 발급됐다(띄워 보고 잡았다).
  * 그 탭을 실제로 보고 있을 때만 부른다.
  */
-function RecallPreview({ targetKey, active }: { targetKey: string; active: boolean }) {
+function RecallPreview({ targetKey, active, role = null }: { targetKey: string; active: boolean; role?: ProjectRole | null }) {
   const [tier, setTier] = useState<string>("");
+  // 브리프는 읽기가 아니다 — 패널을 편성하고 brief_token 을 새로 낸다(편집자 이상, 보기는 403 — MB-14). 보기에게는 부르지 않고 까닭을
+  // 보인다(OI-2, 모르면 부른다 — 서버가 가른다).
+  const access = writeAccess(role);
   const brief = useAsync(
     (signal) => riskApi.getBrief(targetKey, tier === "" ? undefined : tier, { signal }),
     [targetKey, tier],
-    active,
+    active && access.allowed,
   );
   const [excluded, setExcluded] = useState<Set<string>>(new Set());
 
@@ -1053,6 +1070,7 @@ function RecallPreview({ targetKey, active }: { targetKey: string; active: boole
         </Select>
       }
     >
+      <LockNote access={access} />
       <ErrorBanner error={brief.error} onRetry={brief.reload} />
       {brief.loading && !brief.data ? <LoadingBlock /> : null}
       {brief.data ? (
@@ -1135,6 +1153,10 @@ function TargetView({ targetKey }: { targetKey: string }) {
 
   const job = coverage.data?.job ?? null;
   const polling = isPolling(coverage.data);
+  // 대상 과제의 내 역할(진행판 my_role) — 쓰기 단추를 가른다(OI-2). 모르면(null) 잠그지 않는다.
+  const role = coverage.data?.my_role ?? null;
+  const access = writeAccess(role);
+  const resyncAccess = writeAccess(role, "owner");
   useInterval(coverage.reload, polling ? POLL_MS : null);
 
   const [kind, refId] = useMemo(() => {
@@ -1224,11 +1246,13 @@ function TargetView({ targetKey }: { targetKey: string }) {
           <>
             {coverage.data ? <UnseatedBadge n={coverage.data.unseated_n} /> : null}
             <ExternalSyncBadge sync={sync ?? coverage.data?.external_sync ?? null} />
-            <Button type="button" variant="outline" onClick={resync} disabled={busy}>
+            <Button type="button" variant="outline" onClick={resync} disabled={busy || !resyncAccess.allowed}
+                    title={resyncAccess.reason ?? undefined}>
               <RefreshCw className="size-4" aria-hidden="true" />
               재동기
             </Button>
-            <Button type="button" variant="outline" onClick={refreshRoster} disabled={busy}>
+            <Button type="button" variant="outline" onClick={refreshRoster} disabled={busy || !access.allowed}
+                    title={access.reason ?? undefined}>
               <Users className="size-4" aria-hidden="true" />
               로스터 갱신
             </Button>
@@ -1244,6 +1268,10 @@ function TargetView({ targetKey }: { targetKey: string }) {
        * 보이면 '늘 보여야 하는 판정' 이 숨으므로 배지 한 칸만 여기 둔다.
        */}
       <SectionCard title="판정" subtitle="이 타깃을 지금 닫을 수 있는지입니다. 확정은 사람이 하고 후보는 집계입니다.">
+        {/* 보기면 쓰기 전부, 편집자면 주인만의 재동기 — 머리 단추가 잠긴 까닭을 한 줄로(OI-2). */}
+        <LockNote
+          access={access.allowed ? { ...resyncAccess, reason: resyncAccess.reason && `재동기는 ${resyncAccess.reason}` } : access}
+        />
         <ErrorBanner error={error} />
         <ErrorBanner error={coverage.error} onRetry={coverage.reload} />
         {rosterNote ? <p className="text-sm text-muted-foreground">{rosterNote}</p> : null}
@@ -1320,14 +1348,16 @@ function TargetView({ targetKey }: { targetKey: string }) {
             <EmptyBlock title="커버리지가 아직 없습니다." hint="타깃이 편성되면 도메인별 좌석 상태가 여기 쌓입니다." />
           )}
           {/* 보류 풀기는 패널 대상의 길이다 — 카드 대조 대상은 검토 잡을 만들 때 범위 안 보류가 저절로 풀린다(요청서 3-6). */}
-          {coverage.data && !cells ? <UndeferForm targetKey={targetKey} deferred={deferred} onChanged={reloadAll} /> : null}
+          {coverage.data && !cells ? (
+            <UndeferForm targetKey={targetKey} deferred={deferred} onChanged={reloadAll} role={role} />
+          ) : null}
         </SectionCard>
 
-        {review ? <ReviewBoard review={review} targetKey={targetKey} onChanged={reloadAll} /> : null}
+        {review ? <ReviewBoard review={review} targetKey={targetKey} onChanged={reloadAll} role={role} /> : null}
 
         <ReviewWorkers review={review} />
 
-        {cells && review ? <ReviewJobFormCard targetKey={targetKey} review={review} onChanged={reloadAll} /> : null}
+        {cells && review ? <ReviewJobFormCard targetKey={targetKey} review={review} onChanged={reloadAll} role={role} /> : null}
 
         {!cells || job ? (
           <SectionCard title="패널 실행" subtitle={polling ? "진행 중 — 5초마다 갱신합니다." : undefined}>
@@ -1339,14 +1369,16 @@ function TargetView({ targetKey }: { targetKey: string }) {
       {cells ? (
         <>
           <TabPanel active={tab === "cells"} tab="cells" idPrefix="tgt">
-            {review ? <CellGrid targetKey={targetKey} review={review} active={tab === "cells"} onChanged={reloadAll} /> : null}
+            {review ? (
+              <CellGrid targetKey={targetKey} review={review} active={tab === "cells"} onChanged={reloadAll} role={role} />
+            ) : null}
           </TabPanel>
           <TabPanel active={tab === "experts"} tab="experts" idPrefix="tgt">
             {/* 열 때만 받는다 — 전문가 359명 목록을 진행판과 함께 늘 받지 않는다. */}
             {tab === "experts" ? <ExpertReports targetKey={targetKey} /> : null}
           </TabPanel>
           <TabPanel active={tab === "issues"} tab="issues" idPrefix="tgt">
-            <IssuesCard targetKey={targetKey} active={tab === "issues"} onChanged={reloadAll} />
+            <IssuesCard targetKey={targetKey} active={tab === "issues"} onChanged={reloadAll} role={role} />
           </TabPanel>
           <TabPanel active={tab === "closure"} tab="closure" idPrefix="tgt">
             <ClosureCard
@@ -1354,6 +1386,7 @@ function TargetView({ targetKey }: { targetKey: string }) {
               active={tab === "closure"}
               onChanged={reloadAll}
               onOpenReport={() => setTab("report")}
+              role={role}
             />
           </TabPanel>
         </>
@@ -1369,12 +1402,15 @@ function TargetView({ targetKey }: { targetKey: string }) {
           query={registryQuery ?? {}}
           onQuery={setRegistryQuery}
           cells={cells}
+          role={role}
         />
       </TabPanel>
       <TabPanel active={tab === "report"} tab="report" idPrefix="tgt">
         {cells ? (
           // 종합 보고서는 판이 바뀌면 처음 쪽부터 받으므로 볼 때만 그린다(확인 · 사슬이 판을 세운 뒤 다시 열면 새 판이다).
-          tab === "report" ? <SynthReport targetKey={targetKey} stage={coverage.data?.stage ?? null} onChanged={reloadAll} /> : null
+          tab === "report" ? (
+            <SynthReport targetKey={targetKey} stage={coverage.data?.stage ?? null} onChanged={reloadAll} role={role} />
+          ) : null
         ) : (
           <ConsolidatedReportCard
             level={coverage.data?.level ?? null}
@@ -1393,7 +1429,7 @@ function TargetView({ targetKey }: { targetKey: string }) {
           </SectionCard>
         ) : (
           // active 를 넘긴다 — 이 호출은 서버에서 토큰을 **발급**하므로 보고 있을 때만 나가야 한다.
-          <RecallPreview targetKey={targetKey} active={tab === "brief"} />
+          <RecallPreview targetKey={targetKey} active={tab === "brief"} role={role} />
         )}
       </TabPanel>
       <TabPanel active={tab === "quality"} tab="quality" idPrefix="tgt">

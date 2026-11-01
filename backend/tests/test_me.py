@@ -83,7 +83,9 @@ def test_me_anonymous(client, wired):
     assert anon["reasons"] and all(set(r) == {"code"} for r in anon["reasons"])
     text = json.dumps(anon, ensure_ascii=False)
     assert str(config.settings.data_dir) not in text and not _ABS_PATH.search(text), text
-    assert set(body) == {"email", "display_name", "role", "organization", "anonymous", "source", "portal_pat", "box"}
+    assert set(body) == {"email", "display_name", "role", "organization", "anonymous", "source", "portal_pat", "box",
+                         "risk_admin"}
+    assert body["risk_admin"] is False
     # 로그인한 사람은 그대로 다 본다 — portal_base 는 진단값이다(틀리면 PAT 등록·패널이 전부 실패하는데 화면에 안 보이면 사람이
     # 토큰을 의심한다, 2026-09-30 실측).
     box = client.get("/api/me", headers=AUTH).json()["box"]
@@ -96,8 +98,17 @@ def test_me_anonymous(client, wired):
 def test_me_authenticated_without_pat(client, wired):
     body = client.get("/api/me", headers=AUTH).json()
     assert body["email"] == "bob@example.com" and body["anonymous"] is False and body["source"] == "bearer"
+    assert body["risk_admin"] is False                       # heax 역할 member — risk_admin_roles 밖(OI-2)
     # 등록이 없어도 객체다 — 자동 등록 칸(auto)이 '없음' 을 말한다(리스크 앱 사람 자격 R1).
     assert body["portal_pat"]["registered"] is False and body["portal_pat"]["auto"]["due_reason"] == "absent"
+
+
+def test_me_says_whether_the_caller_is_a_risk_admin(client, wired, monkeypatch):
+    """`risk_admin` — 부른 사람의 heax 역할이 risk_admin_roles 에 드는가(OI-2). 화면은 사전 편집 같은 관리자 쓰기를 이 칸으로 미리 가르고,
+    거절은 서버가 그대로 한다. 역할 목록을 바꾸면 따라간다."""
+    assert client.get("/api/me", headers=AUTH).json()["risk_admin"] is False
+    monkeypatch.setattr(config, "settings", dataclasses.replace(config.settings, risk_admin_roles=("member",)))
+    assert client.get("/api/me", headers=AUTH).json()["risk_admin"] is True
 
 
 def test_put_anonymous_is_401(client, wired):
