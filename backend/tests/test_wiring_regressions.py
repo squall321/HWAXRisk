@@ -1186,7 +1186,7 @@ def test_create_target_is_blocked_by_g6(risk_store, monkeypatch):
         " VALUES ('sblk', ?, '{}', '{}', '[]', '[]', ?, 1, ?)",
         (OWNER, json.dumps({"G6": {"pass": False, "reason": "unit_scale"}}), now))
 
-    ident = type("I", (), {"anonymous": False, "email": OWNER, "to_dict": lambda self: {"email": OWNER}})()
+    ident = type("I", (), {"anonymous": False, "email": OWNER, "role": None, "to_dict": lambda self: {"email": OWNER}})()
     with pytest.raises(AppError) as exc:
         routes.create_target(routes.TargetBody(kind="snap", ref_id="sblk", consent=True), ident=ident)
     assert (exc.value.code, exc.value.http_status) == ("gate_blocked", 409)
@@ -1200,12 +1200,13 @@ def test_anonymous_write_is_401_and_other_owner_is_404(risk_store, monkeypatch):
     monkeypatch.setattr(routes, "get_store", lambda: risk_store)
     target_key = _seed(risk_store)
 
-    anon = type("I", (), {"anonymous": True, "email": None, "to_dict": lambda self: {}})()
+    anon = type("I", (), {"anonymous": True, "email": None, "role": None, "to_dict": lambda self: {}})()
     with pytest.raises(AppError) as exc:
         routes.create_job(target_key, routes.JobBody(tier="A"), ident=anon)
     assert exc.value.http_status == 401
 
-    other = type("I", (), {"anonymous": False, "email": OTHER, "to_dict": lambda self: {"email": OTHER}})()
+    # 진짜 Identity 꼴 — role 칸이 늘 있다(읽기 문도 관리자 우회를 본다, OI-5).
+    other = type("I", (), {"anonymous": False, "email": OTHER, "role": None, "to_dict": lambda self: {"email": OTHER}})()
     with pytest.raises(AppError) as exc:
         routes.get_coverage(target_key, ident=other)
     assert (exc.value.code, exc.value.http_status) == ("E404", 404)

@@ -143,7 +143,7 @@ def test_the_lists_without_a_project_filter_carry_the_member_projects(members):
 
 def test_member_refs_resolve_in_the_snapshot_and_diff_scope(members):
     """스냅샷 · 비교 스코프의 참조(게이트 · 변경 항목)도 구성원이 연다 — 종전에는 스코프를 주인으로만 봐(D50 '그대로 둔 것') 구성원이
-    404 였다. 남은 없는 스냅샷 · 비교와 같은 404 다."""
+    404 였다. 관리자(risk_admin_roles — 구성원이 아니다)도 같은 답이다(OI-5). 남은 없는 스냅샷 · 비교와 같은 404 다."""
     store, ids = members
     cid = store.query_one("SELECT cid FROM rr_diff_events WHERE diff_id = ? ORDER BY cid LIMIT 1", (ids["diff"],))["cid"]
     scoped = {
@@ -153,8 +153,8 @@ def test_member_refs_resolve_in_the_snapshot_and_diff_scope(members):
     for name, call in scoped.items():
         owner = _answer(lambda call=call: call(ids, factories.ident(OWNER)))
         assert owner[1] == 200, (name, owner[:3])
-        for who in MEMBERS:
-            got = _answer(lambda call=call, who=who: call(ids, factories.ident(who)))
+        for who in (*MEMBERS, ADMIN):
+            got = _answer(lambda call=call, who=who: call(ids, who if isinstance(who, identity.Identity) else factories.ident(who)))
             assert got[1] == 200, (name, who, got[:3])
             assert _body(got) == _body(owner), (name, who)
         theirs = _answer(lambda call=call: call(ids, factories.ident(OTHER)))
@@ -307,6 +307,61 @@ def test_the_guide_walks_only_the_owners_rows(members, monkeypatch):
         assert forged_snapshot not in {s["id"] for s in out["facts"]["snapshots"]}, who
         assert "j" * 32 not in {j["id"] for j in out["facts"]["snapshot_jobs"]}, who
         assert (out["where"], out["facts"]["pair"]["target_snapshot_id"]) == ("done", ids["target_snapshot"]), who
+
+
+# ---------------------------------------------------------------- 관리자 읽기 우회(OI-5 — 포털 plan §0.6 · §5.2.1)
+ADMIN = identity.Identity(email="admin@example.com", display_name="관리자", role="admin", organization="qa", anonymous=False,
+                          source="bearer")
+# 관리자가 주인과 같은 답을 받지 않는 읽기 — 까닭이 있는 것만. 목록 셋은 발견이라 소유 ∪ 구성원 그대로다(관리자도 — 넓히지 않았다, OI-5).
+ADMIN_GET_EXEMPT: dict[tuple[str, str], str] = {
+    **MEMBER_GET_EXEMPT,
+    **{case: "발견 목록 — 소유 ∪ 구성원(MB-3) 그대로다. 관리자는 과제를 링크 · id 로 연다(OI-5 남긴 것)" for case in GET_EXPECT},
+}
+
+
+@pytest.mark.parametrize("case", sorted(set(GET_CASES) - set(ADMIN_GET_EXEMPT)), ids=lambda c: f"{c[0]} {c[1][len(P):]}")
+def test_an_admin_reads_what_the_owner_reads(members, case):
+    """관리자(risk_admin_roles)는 전 과제의 편집자이고(포털 plan §0.6 — owner ⊃ editor ⊃ viewer(읽기), §5.2.1 '멤버 행 없이 editor 로
+    통과') 쓰기에서는 이미 그랬다(MB-14) — 읽기도 구성원과 같은 문으로 연다(사용자 결정 11-01 · OI-5). 구성원이 아닌 관리자가 주인과 같은
+    답(200, 글 전체)을 받는다. 종전에는 과제 상세부터 없는 것과 같은 404 라 관리자가 쓰는 대상의 읽기 화면이 404 였다(MB-19)."""
+    store, ids = members
+    call, _supplied = GET_CASES[case]
+    drop = CALLER_FIELDS.get(case, ())
+    owner = _answer(lambda: call(ids, factories.ident(OWNER)))
+    got = _answer(lambda: call(ids, ADMIN))
+    assert got[1] == 200, (case, got[:3])
+    assert _body(got, drop) == _body(owner, drop), case
+
+
+def test_an_admin_opens_a_target_on_a_diff_it_now_reads(members):
+    """대상(diff) 만들기는 그 비교를 읽고(관리자는 이제 읽는다) 대상 과제의 편집자 이상이다(관리자는 편집자 — MB-14) — 관리자는 주인과 같은
+    답이다(이 비교에는 대상이 이미 열려 있어 둘 다 409 E409). 종전에는 비교를 읽는 판정이 관리자를 몰라 쓰기 문(_writer)의 관리자 우회까지
+    닿지 못하고 없는 비교와 같은 404 였다."""
+    store, ids = members
+    body = routes.TargetBody(kind="diff", ref_id=ids["diff"], consent=True)
+    owner = _answer(lambda: routes.create_target(body, ident=factories.ident(OWNER)))
+    got = _answer(lambda: routes.create_target(body, ident=ADMIN))
+    assert owner[:3] == got[:3] == ("E409", 409, f"이미 열린 타깃입니다 — {ids['target']}.{{}}"), (owner[:3], got[:3])
+
+
+def test_an_admin_keeps_the_discovery_lists_and_does_not_open_planted_rows(members, monkeypatch):
+    """넓히지 않은 것 — 목록 셋은 소유 ∪ 구성원 그대로라 구성원이 아닌 관리자에게 빈 목록이고, 남이 주인의 과제에 매단 행(RD-10)은 관리자에게도
+    없는 것과 같다(구성원 길과 같은 거름). MCP 길에는 관리자 우회가 없다(SEC-2 — 역할을 뗀다)."""
+    store, ids = members
+    for case in GET_EXPECT:
+        call, _supplied = GET_CASES[case]
+        assert _body(_answer(lambda call=call: call(ids, ADMIN)))["total"] == 0, case
+    forged_snapshot, forged_target = _forge(store, ids)
+    assert _answer(lambda: routes.get_snapshot(forged_snapshot, ident=ADMIN))[1] == 404
+    assert _answer(lambda: routes.get_coverage(forged_target, ident=ADMIN))[1] == 404
+    # 과제에 매이지 않은 원장 행(스냅샷 · 동결 잡이 없는 호출 원문)은 그 행의 주인만 연다 — 관리자가 읽는 것은 전 '과제' 다.
+    factories.seed_raw(store, "rr_snapshot_calls", {"call_id": "orphan-001", "job_id": "no-such-job", "owner_sub": OWNER, "seq": 1,
+                                                     "source_kind": "mcad", "channel": "mcp", "tool": "get_tree"},
+                       reason="과제를 가리키지 않는 호출 원문(잡 행이 지워진 옛 원장) — 생산자는 늘 잡 · 스냅샷과 함께 쓴다")
+    assert _answer(lambda: routes.get_ref("tool:orphan-001", ident=factories.ident(OWNER)))[1] == 200
+    assert _answer(lambda: routes.get_ref("tool:orphan-001", ident=ADMIN))[1] == 404
+    factories.act_as_delegate(monkeypatch, ADMIN.email)
+    assert _mcp(lambda: srv.risk_get_coverage(target_key=ids["target"]))[0] == "not_visible"
 
 
 # ---------------------------------------------------------------- 남이 그 과제에 매단 행(고침 전의 들여오기 — RD-10)
@@ -608,7 +663,8 @@ class _Field:
 
 def test_requirement_voc_and_paper_refs_resolve_for_members(risk_store, monkeypatch):
     """과제 스코프가 참조 글에 없는 req · voc · paper 도 구성원이 연다 — 부른 사람의 것이 없으면 구성원인 과제(그 과제 주인의 행)의 요구 ·
-    브리프 호출 원장에서 찾는다(D50 '그대로 둔 것' 을 닫았다 — 등록부 인용을 눌러 보는 구성원이 404 였다). 남은 없는 참조와 같은 404 다."""
+    브리프 호출 원장에서 찾는다(D50 '그대로 둔 것' 을 닫았다 — 등록부 인용을 눌러 보는 구성원이 404 였다). 관리자(구성원이 아니다)도 같은
+    답이다 — 전 과제(그 과제 주인의 행)에서 찾는다(OI-5). 남은 없는 참조와 같은 404 다."""
     store = risk_store
     monkeypatch.setattr(routes, "get_store", lambda: store)
     owner = factories.ident(OWNER)
@@ -633,8 +689,9 @@ def test_requirement_voc_and_paper_refs_resolve_for_members(risk_store, monkeypa
                         ("paper:10.1000/xyz", "paper:10.1000/nope")):
         mine = _answer(lambda ref=ref: routes.get_ref(ref, ident=owner))
         assert mine[1] == 200, (ref, mine[:3])
-        for who in MEMBERS:
-            got = _answer(lambda ref=ref, who=who: routes.get_ref(ref, ident=factories.ident(who)))
+        for who in (*MEMBERS, ADMIN):
+            got = _answer(lambda ref=ref, who=who: routes.get_ref(
+                ref, ident=who if isinstance(who, identity.Identity) else factories.ident(who)))
             assert got[1] == 200, (ref, who, got[:3])
             assert _body(got) == _body(mine), (ref, who)
         theirs = _answer(lambda ref=ref: routes.get_ref(ref, ident=factories.ident(OTHER)))

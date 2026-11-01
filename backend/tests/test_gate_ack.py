@@ -13,7 +13,7 @@ OWNER = "owner@example.com"
 
 def _ident(email: str | None = OWNER):
     # 웹 화면 신원(쿠키)의 모양 — 게이트 ack 의 감사 행이 source 로 입구를 가른다(사용자 결정 10-31).
-    return type("I", (), {"anonymous": email is None, "email": email, "source": "cookie",
+    return type("I", (), {"anonymous": email is None, "email": email, "role": None, "source": "cookie",
                           "to_dict": lambda self: {"email": email}})()
 
 
