@@ -877,7 +877,6 @@ _DDL_V5: list[str] = _split_statements(_DDL_V5_SQL)
 # 값은 리스크 앱이 그 사람의 PAT 로 스스로 부른 풀이(find_plm_task)의 결과 행에서만 적는다(PUT /api/projects/{id}/sp-subject · 일반 PATCH
 # 칸 밖). 차수는 새 칸 없이 stage 를 읽을 때 정규화한다(app/sp_subject.py). 재설계 M4 가 v6 에 두기로 적었던 rr_reports.ra_* 는 v8 로 간다(v7 은
 # F2 단면 자리 찾기 — 아래).
-# 아직 나가지 않았다 — 가지 wt1102/insight-m2 에만 있고 main 에 오르는 날 tests/test_store.py 의 PUSHED_DDL_SHA256[6] 가 굳는다.
 _DDL_V6_SQL = """
 ALTER TABLE rr_projects ADD COLUMN sp_task TEXT;          -- SP 허브 plm_task key(운영 허브는 과제명 — 과제코드가 아니다). 모르면 NULL
 CREATE INDEX IF NOT EXISTS ix_rr_projects_sp_task ON rr_projects(sp_task);
