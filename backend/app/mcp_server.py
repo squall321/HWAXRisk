@@ -1051,7 +1051,7 @@ async def risk_propose_board_transform(project_id: Annotated[str, Field(descript
                                        odb_job_id: Annotated[str | None, Field(description=_A_LOC_ODB)] = None,
                                        stepforge_project_id: Annotated[str | None, Field(description=_A_LOC_CAD)] = None,
                                        board_body: Annotated[str | None, Field(description=_A_TF_BODY_PROPOSE)] = None) -> dict:
-    """보드 ↔ CAD 변환 제안(읽기 전용) — 몸체 경로가 없으면 ODB 외곽 크기 · 두께에 맞는 CAD 보드 몸체 후보(board_body_candidates)를, 있으면 뒤집기 넷마다 고정홀 짝 · 외곽으로 가장 잘 맞춘 변환(식 · 원점 · 면)과 검증(오차 · 짝 · 모호함 · 까닭)을 검증을 지난 것부터 준다, 쓰지 않는다 — 고른 후보는 사용자에게 보이고 확인을 받아 risk_set_board_transform(source=proposed)으로 적는다, 지금 등록(current)도 함께 싣고 ODB 허브 · StepForge 는 위임으로 확인된 신원의 PAT 로만 읽는다."""
+    """보드 ↔ CAD 변환 제안(읽기 전용 · 편집자 이상 — 적기의 앞 단계) — 몸체 경로가 없으면 ODB 외곽 크기 · 두께에 맞는 CAD 보드 몸체 후보(board_body_candidates)를, 있으면 뒤집기 넷마다 고정홀 짝 · 외곽으로 가장 잘 맞춘 변환(식 · 원점 · 면)과 검증(오차 · 짝 · 모호함 · 까닭)을 검증을 지난 것부터 준다, 쓰지 않는다 — 고른 후보는 사용자에게 보이고 확인을 받아 risk_set_board_transform(source=proposed)으로 적는다, 지금 등록(current)도 함께 싣고 ODB 허브 · StepForge 는 위임으로 확인된 신원의 PAT 로만 읽는다."""
     return await _entry(entry.propose_board_transform, project_id=project_id, odb_job_id=odb_job_id,
                         stepforge_project_id=stepforge_project_id, board_body=board_body)
 

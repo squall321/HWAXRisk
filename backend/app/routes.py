@@ -2543,11 +2543,12 @@ class _LazyChannel:
             self.channel.close()
 
 
-def _project_viewer(project_id: str, ident: identity.Identity) -> str:
-    """구성원(보기 이상)이 읽는다 — 남 · 없는 과제는 같은 404, 구성원이 아닌 관리자는 열람 줄(과제 주제 읽기와 같은 문)."""
+def _project_viewer(project_id: str, ident: identity.Identity, need: str = "viewer") -> str:
+    """구성원(`need` 이상 — 기본 보기)이 읽는다 — 남 · 없는 과제는 같은 404, 등급 미달은 403, 구성원이 아닌 관리자는 열람 줄(과제 주제 읽기와
+    같은 문)."""
     email = _require_user(ident)
     if not _is_admin(ident):
-        require_role(project_id, email, "viewer")
+        require_role(project_id, email, need)
     elif get_store().query_one("SELECT id FROM rr_projects WHERE id = ?", (project_id,)) is None:
         raise AppError("E404", f"과제({project_id}) 를 찾을 수 없습니다.", 404)
     _note_admin_read(_admin_reader(ident), project_id)
@@ -2737,8 +2738,10 @@ def board_transform_proposal(project_id: str, email: str, *, odb_job_id: str | N
 @router.get("/projects/{project_id}/board-transforms/proposal")
 def get_board_transform_proposal(project_id: str, odb_job_id: str | None = None, stepforge_project_id: str | None = None,
                                  board_body: str | None = None, ident: identity.Identity = Depends(identity.current)) -> dict:
-    """변환 제안(쓰지 않는다) — 구성원이 부르고 ODB 허브 · StepForge 는 부른 사람의 PAT 로만 읽는다."""
-    email = _project_viewer(project_id, ident)
+    """변환 제안(쓰지 않는다) — 편집자 이상이 부르고(보기 403 · 남 404, 관리자는 열람 줄) ODB 허브 · StepForge 는 부른 사람의 PAT 로만 읽는다.
+    제안은 적기(편집자 이상)의 앞 단계이고 산 호출 둘(StepForge 구멍 찾기는 수십 초)과 원점 찾기를 돌린다 — 보기는 적지 못하므로 부르지 않는다
+    (반대 검토 F2-9)."""
+    email = _project_viewer(project_id, ident, need="editor")
     return board_transform_proposal(project_id, email, odb_job_id=odb_job_id, stepforge_project_id=stepforge_project_id,
                                     board_body=board_body)
 

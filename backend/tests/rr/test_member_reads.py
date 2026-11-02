@@ -35,8 +35,8 @@ MEMBER_GET_EXEMPT: dict[tuple[str, str], str] = {
         "읽기가 아니다 — 패널을 편성하고 패널마다 brief_token 을 새로 낸다(앞서 복사한 토큰이 무효가 된다). 토큰은 결과를 낼 사람의 열쇠라"
         " 쓰기 문(그 대상 과제의 편집자 이상 — MB-14)이다 — 보기는 403"),
     ("GET", P + "/projects/{project_id}/board-transforms/proposal"): (
-        "부른 사람의 PAT 로 ODB 허브 · StepForge 를 읽는 제안이라 답이 부른 사람의 자격에 매인다 — 이 원장에는 ECAD 보드가 없어 주인도 422"
-        " board_missing 이다(구성원 · 남 · 자격은 tests/test_locate_for_section.py 가 본다)"),
+        "적기의 앞 단계라 편집자 이상이다(보기 403 — 반대 검토 F2-9) · 부른 사람의 PAT 로 ODB 허브 · StepForge 를 읽어 답이 부른 사람의 자격에"
+        " 매인다 — 이 원장에는 ECAD 보드가 없어 주인도 422 board_missing 이다(보기 · 남 · 자격은 tests/test_locate_for_section.py 가 본다)"),
 }
 # 부른 사람에 매인 칸 — 구성원과 주인의 답이 이 칸에서만 갈린다.
 CALLER_FIELDS: dict[tuple[str, str], tuple[str, ...]] = {
@@ -58,8 +58,9 @@ MCP_READS: tuple[str, ...] = (
     "risk_locate_for_section",
 )
 MCP_MEMBER_EXEMPT: dict[str, str] = {
-    "risk_propose_board_transform": ("부른 사람의 PAT 로 ODB 허브 · StepForge 를 읽는 제안이라 답이 부른 사람의 자격에 매인다 — 이 원장에는"
-                                     " ECAD 보드가 없어 주인도 board_missing 이다(tests/test_locate_for_section.py 가 따로 본다)"),
+    "risk_propose_board_transform": ("적기의 앞 단계라 편집자 이상이다(보기 role_insufficient — 반대 검토 F2-9) · 부른 사람의 PAT 로 ODB 허브 ·"
+                                     " StepForge 를 읽어 답이 부른 사람의 자격에 매인다 — 이 원장에는 ECAD 보드가 없어 주인도 board_missing"
+                                     " 이다(tests/test_locate_for_section.py 가 따로 본다)"),
     "risk_get_brief": ("브리프 토큰의 패널을 동결하고 패널 품질을 쓴다 — 결과를 낼 수 있는 사람(그 대상 과제의 주인 · 편집자, MB-14)만이고"
                        " 보기는 role_insufficient 다(RV-1 — tests/rr/test_editor_writes.py)"),
     "risk_next_step": ("구성원에게도 연다(OI-3) — 그러나 답이 부른 사람에게 매인다(project.my_role · 자격 칸은 부른 사람의 등록 · 보기는"

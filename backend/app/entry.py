@@ -269,9 +269,11 @@ def locate_for_section(ident: identity.Identity, *, project_id: str, finding_id:
 
 def propose_board_transform(ident: identity.Identity, *, project_id: str, odb_job_id: str | None = None,
                             stepforge_project_id: str | None = None, board_body: str | None = None) -> dict:
-    """`GET /api/projects/{id}/board-transforms/proposal` 와 같은 함수 — 쓰지 않는다. 그 사람의 PAT 로 ODB 허브 · StepForge 를 읽는다."""
+    """`GET /api/projects/{id}/board-transforms/proposal` 와 같은 함수 — 쓰지 않는다. 그 사람의 PAT 로 ODB 허브 · StepForge 를 읽는다. 적기의 앞
+    단계라 웹과 같이 편집자 이상이다(보기 role_insufficient — MCP 신원에는 관리자 역할이 없다)."""
     email = require_delegate(ident)
     _visible(email, project_id)
+    routes.require_role(project_id, email, "editor")
     return routes.board_transform_proposal(project_id, email, odb_job_id=odb_job_id, stepforge_project_id=stepforge_project_id,
                                            board_body=board_body)
 

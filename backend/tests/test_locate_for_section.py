@@ -650,13 +650,19 @@ def test_an_admin_writes_as_an_editor_and_leaves_the_admin_marks(box):
 
 
 # ================================================================ 제안
-def test_the_proposal_offers_board_bodies_then_finds_the_hand_transform(box, frozen):
+def test_the_proposal_offers_board_bodies_then_finds_the_hand_transform(box, frozen, monkeypatch):
     """몸체 경로가 없으면 ODB 외곽 크기에 맞는 몸체(스냅샷)를 준다 — 보드 몸체가 첫째다. 경로를 주면 뒤집기 넷마다의 변환 후보와 검증을 주는데
-    첫 후보가 손 셈이다(쓰지 않는다). 그 후보를 그대로 적으면 verified 다."""
-    first = routes.get_board_transform_proposal(box.project, ident=_who(VIEWER))
+    첫 후보가 손 셈이다(쓰지 않는다). 그 후보를 그대로 적으면 verified 다. 제안은 적기의 앞 단계라 편집자 이상이다(반대 검토 F2-9 — 보기는
+    산 호출 둘과 원점 찾기를 돌릴 까닭이 없다): 보기는 웹 403 · MCP role_insufficient 이고 게이트웨이를 부르지 않는다."""
+    viewer = _refused(lambda: routes.get_board_transform_proposal(box.project, board_body=PCB, ident=_who(VIEWER)))
+    assert (viewer.code, viewer.http_status) == ("role_insufficient", 403) and box.gw.seen == []
+    factories.act_as_delegate(monkeypatch, VIEWER)
+    assert _call("risk_propose_board_transform", project_id=box.project, board_body=PCB)["error"] == "role_insufficient"
+    assert box.gw.seen == []
+    first = routes.get_board_transform_proposal(box.project, ident=_who(EDITOR))
     assert [c["path"] for c in first["board_body_candidates"]] == [PCB] and first["candidates"] == []
     assert first["board_body_candidates"][0]["error_mm"] == 0.0 and first["current"] is None
-    second = routes.get_board_transform_proposal(box.project, board_body=PCB, ident=_who(VIEWER))
+    second = routes.get_board_transform_proposal(box.project, board_body=PCB, ident=_who(EDITOR))
     top = second["candidates"][0]
     assert top["verification"]["ok"] and top["transform"] == {**HAND, "unit": "mm"}
     assert top["formula"].startswith("x_CAD = 82.13 − x_ODB · y_CAD = y_ODB + 2.82")
