@@ -12,7 +12,7 @@ description: |
   설계 IR 스냅샷·diff 위에서 HW/XD 전문가 패널이 리스크·개선·성격을 판정하고 등록부로 누적하는 심사 앱.
   과제의 MCAD(StepForge)·Dyna(DynaForge)·ECAD(ODB 허브 1단계 — 보드·적층·분류된 부품) 소스를 읽기 전용으로 동결해 rr_ir 스냅샷을 만들고,
   상태 평가(rr_state)·3층 diff(rr_diff)를 결론 없이 코드가 정리하며, 좌석 의견을 IR id 에 앵커된 원자로 앱 DB 에 누적한다.
-  - MCP 도구 34종(전부 실구현). 발견 7종 — risk_list_projects(여기서 시작) · risk_get_coverage · risk_list_panels ·
+  - MCP 도구 35종(전부 실구현). 발견 7종 — risk_list_projects(여기서 시작) · risk_get_coverage · risk_list_panels ·
     risk_get_panel_transcript · risk_taxonomy · risk_get_precedents · risk_similar_projects.
     원장 7종 — risk_get_snapshot · risk_get_diff · risk_get_registry · risk_claims_for_ref ·
     risk_submit_panel_result · risk_get_brief(brief_token 과 위임 신원 필요) · risk_add_finding. 범위 밖 id 는 not_visible 이다.
@@ -27,8 +27,8 @@ description: |
     risk_get_report(종합 보고서 판의 마크다운 쪽 — part=summary|domains|mechanisms|appendix|full, next_page 로 이어 받는다).
     ECAD 보드 2종 — risk_find_ecad_boards(ODB 허브 find_job 후보, 최대 10 · truncated — 고르는 것은 사람이다) ·
     risk_set_ecad_board(사람이 고른 job_id 를 과제에 붙이기·바꾸기, null 이면 떼기).
-    과제 주제 1종 — risk_set_project_subject(과제에 SP 허브 과제 key · 차수 달기 — key 는 그 사람의 PAT 로 다시 부른 find_plm_task 결과 행에서만,
-    null 이면 떼기).
+    과제 주제 2종 — risk_set_project_subject(과제에 SP 허브 과제 key · 차수 달기 — key 는 그 사람의 PAT 로 다시 부른 find_plm_task 결과 행에서만,
+    null 이면 떼기) · risk_find_projects_by_subject(SP 과제 key · 차수 · 설계 자료로 내 시야의 과제 · 지금 대상 · 등록부 앞 행 찾기, 읽기 전용).
   - 게이트웨이 사용자 위임: POST /api/auth/sso 가 공유 시크릿(secrets.env 의 HWAXRISK_HEAX_GATEWAY_SECRET)을 받아
     단기 HMAC 신원 단언을 내주므로, MCP 호출이 서비스 계정이 아니라 호출자 본인 시야로 돈다. 쓰기 도구(입구 10종·ECAD 보드 붙이기·과제 주제·
     결과 제출·사람 finding)와 브리프 수신 · ECAD 보드 찾기는 게이트웨이가 위임 헤더(X-Hwax-Delegate-Email)를 실어 받은 단언으로만 받고, 아니면

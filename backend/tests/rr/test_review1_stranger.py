@@ -488,6 +488,8 @@ MCP_EXEMPT: dict[str, str] = {
     "risk_list_projects": "발견 — id 인자가 없다(남의 과제가 목록에 없는지는 아래 시험이 본다)",
     "risk_taxonomy": "공용 어휘 — id 인자가 없다",
     "risk_find_ecad_boards": "ECAD 보드 찾기 — ODB 허브 find_job 후보뿐이고 과제 · 대상 id 인자가 없다",
+    "risk_find_projects_by_subject": ("주제로 과제 찾기 — 과제 · 대상 id 인자가 없고 부른 사람의 시야(visible_projects)로 거른다(남의 과제가 답에"
+                                      " 없는지는 아래 시험과 tests/test_sp_subject.py 가 본다)"),
 }
 MCP_CASES: dict[str, tuple[Callable[[dict], Any], tuple[str, ...]]] = {
     "risk_create_project": (lambda i: srv.risk_create_project(code=f"p-{uuid.uuid4().hex[:8]}", name="남의 과제",
@@ -580,7 +582,8 @@ def test_the_exempt_mcp_tools_do_not_name_the_owners_project_or_target(ledger, m
     """면제한 발견 · 어휘 도구도 남에게 주인의 과제 id · 대상 열쇠를 싣지 않는다."""
     store, ids = ledger
     factories.act_as_delegate(monkeypatch, OTHER)
-    for fn in (lambda: srv.risk_list_projects(), lambda: srv.risk_taxonomy(), lambda: srv.risk_find_ecad_boards(query="PRJ")):
+    for fn in (lambda: srv.risk_list_projects(), lambda: srv.risk_taxonomy(), lambda: srv.risk_find_ecad_boards(query="PRJ"),
+               lambda: srv.risk_find_projects_by_subject(), lambda: srv.risk_find_projects_by_subject(round="unknown")):
         _no_leak(_mcp(fn)[2], ids, ())
 
 

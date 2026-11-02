@@ -81,6 +81,8 @@ LIMITS = [
     ("risk_add_finding", "claim", f"최대 {_max_len(routes.HumanFindingBody, 'claim')}자"),
     ("risk_capture_snapshot", "report_ids", f"최대 {dyna_adapter.MAX_REPORTS}건"),
     ("risk_set_project_subject", "sp_task", f"최대 {sp_subject.SP_TASK_MAX}자"),
+    ("risk_find_projects_by_subject", "limit", f"1~{routes.SUBJECT_LIMIT_MAX} 사이로"),
+    ("risk_find_projects_by_subject", "limit", f"{srv.MCP_RESULT_CHARS:,}자"),
 ]
 
 
@@ -146,6 +148,8 @@ VOCAB = [
     ("risk_get_report", "part", synth.PARTS),
     # 과제 주제(과제 인사이트 그래프 M2b) — 차수 코드 열한 개
     ("risk_set_project_subject", "round", sp_subject.STAGES),
+    ("risk_find_projects_by_subject", "round", (*sp_subject.STAGES, sp_subject.ROUND_UNKNOWN)),
+    ("risk_find_projects_by_subject", "artifact_kind", tuple(routes.SUBJECT_ARTIFACTS)),
 ]
 
 

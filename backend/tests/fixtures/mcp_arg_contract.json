@@ -344,6 +344,18 @@
     "sp_task": {"anyOf": [{"type": "string"}, {"type": "null"}], "title": "Sp Task"},
     "round": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Round"}
    }
+  },
+  "risk_find_projects_by_subject": {
+   "params": [["sp_task", "POSITIONAL_OR_KEYWORD"], ["round", "POSITIONAL_OR_KEYWORD"], ["artifact_kind", "POSITIONAL_OR_KEYWORD"], ["artifact_id", "POSITIONAL_OR_KEYWORD"], ["limit", "POSITIONAL_OR_KEYWORD"], ["offset", "POSITIONAL_OR_KEYWORD"]],
+   "required": [],
+   "properties": {
+    "sp_task": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Sp Task"},
+    "round": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Round"},
+    "artifact_kind": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Artifact Kind"},
+    "artifact_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Artifact Id"},
+    "limit": {"default": 20, "title": "Limit", "type": "integer"},
+    "offset": {"default": 0, "title": "Offset", "type": "integer"}
+   }
   }
  }
 }

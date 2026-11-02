@@ -2385,6 +2385,112 @@ def put_sp_subject(project_id: str, body: SpSubjectBody, ident: identity.Identit
             "resolved_by": resolved_by}
 
 
+# 주제로 과제 찾기(MCP risk_find_projects_by_subject) — 한 번에 주는 과제 수(기본 · 상한)와 과제마다 싣는 등록부 앞 행 수.
+SUBJECT_LIMIT_DEFAULT, SUBJECT_LIMIT_MAX = 20, 50
+SUBJECT_REGISTRY_TOP = 5
+# 설계 자료 종류 → (rr_sources.kind, ref 의 열쇠) — 포털 contracts §9 · PLAN §4.4(기구 CAD project_id · 회로 보드 job_id · 해석 리포트 id).
+SUBJECT_ARTIFACTS: dict[str, tuple[str, str]] = {"mcad": ("mcad", "stepforge_project_id"), "ecad": ("ecad", "odb_job_id"),
+                                                 "cae": ("dyna_result", "report_ids")}
+# 등록부 앞 행에 옮기는 칸 — 상태 낱말 · stale_json 은 원장 그대로(번역하지 않는다). 대표 주장(claim)은 merged 에서 꺼낸다.
+SUBJECT_REGISTRY_COLS: tuple[str, ...] = (
+    "cluster_key", "status", "severity", "judgement", "attention", "priority", "support", "contested", "direction", "mechanism",
+    "change_kind", "subject_key", "issue_state", "stale_json")
+
+
+def _artifact_projects(store: Any, kind: str, value: str) -> set[str]:
+    """그 설계 자료 열쇠가 원천(rr_sources — 과제 주인의 행만, `_project_sources` 와 같은 거름)에 든 과제 — 열쇠는 대소문자를 가리지 않는다
+    (16진 id · ULID 둘 다 대소문자가 뜻이 없다). 해석 리포트는 dyna_result 원천의 report_ids 목록 가운데 하나다."""
+    source_kind, ref_key = SUBJECT_ARTIFACTS[kind]
+    want = value.strip().lower()
+    hits: set[str] = set()
+    for row in get_store().query(
+            "SELECT s.project_id AS project_id, s.ref_json AS ref_json FROM rr_sources s JOIN rr_projects p ON p.id = s.project_id"
+            " WHERE s.kind = ? AND s.owner_sub = p.owner_sub", (source_kind,)):
+        found = _loads(row["ref_json"], {}).get(ref_key)
+        if any(v not in (None, "") and str(v).strip().lower() == want for v in (found if isinstance(found, list) else [found])):
+            hits.add(row["project_id"])
+    return hits
+
+
+def _subject_registry_order(row: Mapping[str, Any]) -> tuple:
+    """등록부를 읽는 차례 — 주의 등급 → 우선순위 → 지지 영역 수 → 지지 전문가 수 → 키(카드 대조 대상의 `registry_payload` 차례 — 패널 대상도
+    두 흐름이 채우는 주의 등급 · 지지 수로 같은 차례에 선다)."""
+    return (registry_module.ATTENTION_ORDER.get(str(row.get("attention") or ""), 9), -float(row.get("priority") or 0),
+            -int(row.get("support_domains") or 0), -int(row.get("support_experts") or 0), str(row.get("cluster_key")))
+
+
+def _subject_project(store: Any, caller: dict, row: Mapping[str, Any], roles: Mapping[str, str]) -> dict:
+    """찾은 과제 하나 — 머리 · 지금 대상(대체되지 않은 과제 주인의 대상) · 등록부 앞 행. 등록부는 대상마다 MCP `risk_get_registry` 와 같은 문
+    (`mcp_scope_owner` → `registry_payload`)을 지난 행만이다."""
+    owner = row["owner_sub"]
+    targets = [dict(t) for t in store.query(
+        "SELECT target_key, kind, level, verdict_candidate, verdict_final, created_at FROM rr_targets"
+        " WHERE project_id = ? AND owner_sub = ? AND superseded_by IS NULL ORDER BY created_at DESC, target_key", (row["id"], owner))]
+    registry: list[dict] = []
+    for target in targets:
+        key = target["target_key"]
+        registry += [{"target_key": key, **dict(r)}
+                     for r in registry_payload(key, owner_sub=mcp_scope_owner("target", key, caller))["rows"]]
+    registry.sort(key=_subject_registry_order)
+    email = caller.get("email") if caller.get("kind") == "user" else None
+    return {"project_id": row["id"], "code": row["code"], "name": row["name"], "stage": row["stage"],
+            "round": sp_subject.norm_round(row["stage"]), "sp_task": row["sp_task"],
+            "my_role": "owner" if email and owner == email else roles.get(row["id"]),
+            "mcp_visibility": row["mcp_visibility"], "classification": row["classification"], "targets": targets,
+            "registry_top": [{"target_key": r["target_key"], **{c: r.get(c) for c in SUBJECT_REGISTRY_COLS},
+                              "claim": (r.get("merged") or {}).get("claim")} for r in registry[:SUBJECT_REGISTRY_TOP]],
+            "registry_total": len(registry)}
+
+
+def subject_projects_payload(caller: dict, *, sp_task: str | None = None, round: str | None = None,  # noqa: A002 — 계약의 인자 이름
+                             artifact_kind: str | None = None, artifact_id: str | None = None,
+                             limit: int = SUBJECT_LIMIT_DEFAULT, offset: int = 0) -> dict:
+    """MCP `risk_find_projects_by_subject` 본체 — 부른 사람이 MCP 로 볼 수 있는 과제(`visible_projects` — 소유 ∪ 구성원 ∪ 조직 공개, service 는
+    조직 공개만) 가운데 주제가 맞는 것(폐기된 과제는 빼고 · 새것부터). `sp_task` 는 글자 그대로, `round` 는 코드 · unknown(차수 모름만 —
+    stage 의 정규화가 None), 설계 자료는 `artifact_kind` + `artifact_id`(원천 열쇠). SP 과제도 설계 자료도 주지 않으면 SP 과제가 달린 과제만이다
+    (설계 자료로 찾을 때는 SP 과제가 없는 과제도 든다 — PLAN §4.7 '설계 자료 열쇠로 내 시야의 과제 찾기'). 한 번에 `limit`(1 ~ 50)이고 남으면
+    truncated · next_offset 이다."""
+    key = sp_task.strip() if isinstance(sp_task, str) and sp_task.strip() else None
+    want = sp_subject.parse_round_filter(round)
+    kind = str(artifact_kind or "").strip().lower() or None
+    value = str(artifact_id or "").strip() or None
+    if (kind is None) != (value is None):
+        raise AppError("E100", "artifact_kind 와 artifact_id 는 함께 줍니다.", 422)
+    if kind is not None and kind not in SUBJECT_ARTIFACTS:
+        raise AppError("E100", f"artifact_kind 는 {list(SUBJECT_ARTIFACTS)} 가운데 하나입니다 — {kind[:40]!r}.", 422)
+    take = max(1, min(SUBJECT_LIMIT_MAX, int(limit)))
+    skip = max(0, int(offset or 0))
+    store = get_store()
+    visible = visible_projects(caller)
+    rows: list[Any] = []
+    if visible:
+        where, params = [f"id IN ({','.join('?' for _ in visible)})", "status <> 'purged'"], list(visible)
+        if key is not None:
+            where.append("sp_task = ?")
+            params.append(key)
+        elif kind is None:
+            where.append("sp_task IS NOT NULL")
+        rows = store.query(
+            "SELECT id, owner_sub, code, name, stage, sp_task, mcp_visibility, classification FROM rr_projects"
+            f" WHERE {' AND '.join(where)} ORDER BY created_at DESC, id", tuple(params))
+    if kind is not None:
+        hits = _artifact_projects(store, kind, value)
+        rows = [r for r in rows if r["id"] in hits]
+    if want is not None:
+        rows = [r for r in rows if (sp_subject.norm_round(r["stage"]) is None if want == sp_subject.ROUND_UNKNOWN
+                                    else sp_subject.norm_round(r["stage"]) == want)]
+    page = rows[skip:skip + take]
+    email = caller.get("email") if caller.get("kind") == "user" else None
+    roles = ({r["project_id"]: r["role"] for r in store.query(
+        "SELECT project_id, role FROM rr_project_members WHERE email = ? AND role IN ('viewer', 'editor')", (email,))}
+        if email else {})
+    out = {"caller": caller.get("kind") or "service", "projects": [_subject_project(store, caller, r, roles) for r in page],
+           "total": len(rows), "truncated": skip + len(page) < len(rows)}
+    if out["truncated"]:
+        out["next_offset"] = skip + len(page)
+    return out
+
+
 class SnapshotBody(BaseModel):
     label: str | None = None
     kinds: list[str] = Field(default_factory=list)

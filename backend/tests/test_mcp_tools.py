@@ -51,8 +51,9 @@ TOOL_NAMES = [
     # ECAD 보드 2종(포털 docs/design-risk-review/ecad-1031 ER-01) — find_job 후보 찾기 · 사람이 고른 보드 붙이기(31 → 33).
     "risk_find_ecad_boards",
     "risk_set_ecad_board",
-    # 과제 주제(포털 docs/project-insight-graph contracts §9 — 과제 인사이트 그래프 M2b) — SP 과제 key · 차수 달기(33 → 34).
+    # 과제 주제(포털 docs/project-insight-graph contracts §9 — 과제 인사이트 그래프 M2b) — SP 과제 key · 차수 달기와 그것으로 찾기(33 → 35).
     "risk_set_project_subject",
+    "risk_find_projects_by_subject",
 ]
 ENTRY_TOOLS = TOOL_NAMES[TOOL_NAMES.index("risk_next_step"):TOOL_NAMES.index("risk_repersist_panel") + 1]
 # 도구별 대표 인자와, 빈 원장에서 기대하는 오류 코드(없으면 None = 정상 응답).
@@ -108,6 +109,10 @@ CALLS = [
     # 과제 주제 — 쓰기라 같은 문(그 사람의 PAT 로 풀이를 부르기 전에 위임 신원을 본다).
     ("risk_set_project_subject", {"project_id": "p1", "sp_task": "알파 개발_C2", "round": "dv1"}, "delegation_required"),
     ("risk_set_project_subject", {"project_id": "p1", "sp_task": None}, "delegation_required"),
+    # 주제로 찾기는 읽기 — 빈 원장에서 빈 목록(service 는 조직 공개만), 꼴이 틀린 거름은 422 다.
+    ("risk_find_projects_by_subject", {}, None),
+    ("risk_find_projects_by_subject", {"sp_task": "알파 개발_C2", "round": "C2"}, "round_invalid"),
+    ("risk_find_projects_by_subject", {"artifact_kind": "mcad"}, "E100"),
 ]
 _HANGUL = re.compile(r"[가-힣]")
 # 인자 이름에 비밀이 오면 게이트웨이·포털 절차·클라이언트 대화 기록에 값이 남는다(작업 지시서 A-11) — 포털 절차의
@@ -165,7 +170,7 @@ def test_signatures_follow_plan():
                  "risk_get_brief", "risk_list_projects", "risk_get_coverage", "risk_list_panels",
                  "risk_get_panel_transcript", "risk_taxonomy", "risk_get_precedents",
                  "risk_similar_projects", "risk_get_units", "risk_get_cells", "risk_get_expert_report",
-                 "risk_get_issues", "risk_get_report"):
+                 "risk_get_issues", "risk_get_report", "risk_find_projects_by_subject"):
         assert "actor" not in set(props(name))
     # 검토 단위 — 대상 하나에 목록·단위 하나를 고르고, 나머지는 offset 으로 이어 받는다.
     assert set(props("risk_get_units")) == {"target_key", "unit_id", "part", "offset"}
@@ -184,6 +189,12 @@ def test_signatures_follow_plan():
     assert set(props("risk_get_issues")) == {"target_key", "state", "p_class", "limit", "offset"}
     assert set(props("risk_get_report")) == {"target_key", "part", "version", "page"}
     assert (props("risk_get_report")["part"]["default"], props("risk_get_report")["page"]["default"]) == ("summary", 1)
+    # 주제로 찾기(과제 인사이트 그래프 M2b) — 거름은 전부 선택이고(다 비우면 SP 과제가 달린 과제 전부) 쪽은 limit · offset 이다.
+    assert set(props("risk_find_projects_by_subject")) == {"sp_task", "round", "artifact_kind", "artifact_id", "limit", "offset"}
+    assert not tools["risk_find_projects_by_subject"].inputSchema.get("required")
+    assert (props("risk_find_projects_by_subject")["limit"]["default"], props("risk_find_projects_by_subject")["offset"]["default"]) == (
+        20, 0)
+    assert "읽기 전용" in tools["risk_find_projects_by_subject"].description.strip()[:220]
     # 발견·조회는 인자가 최소여야 한다 — id 를 모르는 클라이언트가 첫 호출로 쓴다.
     assert set(props("risk_list_projects")) == set()
     assert set(props("risk_taxonomy")) == {"part", "offset"}

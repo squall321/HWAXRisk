@@ -30,6 +30,10 @@ from app.common import now_epoch
 from app.errors import AppError
 from tests import factories
 from tests.conftest import FIXTURES_DIR, REPO_ROOT
+from tests.rr.test_member_reads import _forge
+from tests.rr.test_review1_stranger import OTHER as LEDGER_STRANGER
+from tests.rr.test_review1_stranger import OWNER as LEDGER_OWNER
+from tests.rr.test_review1_stranger import ledger, template  # noqa: F401 — 등록부가 선 원장(검토 → 쟁점 → 종합) 픽스처 둘
 
 AGENT_SOURCE = REPO_ROOT.parent / "HWAXAgentServer" / "delib_subject.py"
 AGENT_NAMES = {"STAGES", "_SPACE_RE", "norm_round"}
@@ -139,15 +143,20 @@ def _who(email: str, source: str = "bearer") -> identity.Identity:
 
 
 class Gateway:
-    """게이트웨이 하나 — `/mcp`(JSON-RPC)만. 도구마다 답(본문 dict · ('error', 글) · ('text', 글) · 예외)을 정해 두고, 받은 요청마다 (무엇, 도구,
-    인자, Authorization)을 `seen` 에 적는다. 도구 답은 FastMCP 가 dict 를 내는 꼴(들여쓰기 2 JSON 글 한 덩이)이다."""
+    """게이트웨이 하나 — `/mcp`(JSON-RPC)와 `/tools-map`. 도구마다 답(본문 dict · 인자를 받아 본문을 내는 함수 · ('error', 글) · ('text', 글) ·
+    예외)을 정해 두고, 받은 요청마다 (무엇, 도구, 인자, Authorization)을 `seen` 에 적는다. 도구 답은 FastMCP 가 dict 를 내는 꼴(들여쓰기 2 JSON
+    글 한 덩이)이다. 도구 지도(`tool_map`)는 ECAD 보드 붙이기(find_job)만 읽는다."""
 
     def __init__(self) -> None:
         self.answers: dict[str, Any] = {}
+        self.tool_map: dict[str, str] = {}
         self.seen: list[tuple[str, str | None, dict | None, str | None]] = []
 
     def handle(self, request: httpx.Request) -> httpx.Response:
         auth = request.headers.get("authorization")
+        if request.method == "GET" and request.url.path.endswith("/tools-map") and self.tool_map:
+            self.seen.append(("tools-map", None, None, auth))
+            return httpx.Response(200, json={"map": dict(self.tool_map)})
         if request.method != "POST" or not request.url.path.endswith("/mcp"):
             self.seen.append((f"{request.method} {request.url.path}", None, None, auth))
             return httpx.Response(404, json={"detail": "not found"})
@@ -164,6 +173,8 @@ class Gateway:
         answer = self.answers.get(name, ("error", f"unknown tool: {name}"))
         if isinstance(answer, Exception):
             raise answer
+        if callable(answer):
+            answer = answer(args)
         if isinstance(answer, tuple):
             kind, text = answer
             return httpx.Response(200, json={"jsonrpc": "2.0", "id": rid, "result": {
@@ -455,3 +466,197 @@ def test_claude_sets_the_subject_through_the_same_route_as_a_delegate_only(box, 
     assert refused["error"] == "sp_task_not_confirmed" and KEY not in refused["message"]
     cleared = _call("risk_set_project_subject", project_id=box.project, sp_task=None)
     assert (cleared["sp_task"], cleared["changed"]) == (None, True)
+
+
+# ================================================================ 주제로 과제 찾기(MCP risk_find_projects_by_subject — 읽기)
+OTHER_KEY = "베타 개발_C1"
+MCAD_ID = "019A2B3C4D5E6F7A8B9C0D1"          # StepForge project_id(원천에는 사람이 준 꼴 그대로 — 대문자)
+REPORT_ID = "01HZX3K5Q9V8N7M6P5R4S3T2W1"      # DynaForge 리포트 ULID
+BOARD = "0123456789abcdef"                    # ODB 허브 job_id
+
+
+def _any_key(args: dict) -> dict:
+    """풀이 답 — 실제 응답 꼴(고정본의 첫 행)에 key · label 만 질의로 바꾼 한 행. 여러 과제에 서로 다른 key 를 다는 시험이 쓴다."""
+    body = copy.deepcopy(FIX["exact_and_partial"]["body"])
+    row = {**body["tasks"][0], "key": args["query"], "label": args["query"]}
+    return {**body, "query": args["query"], "count": 1, "tasks": [row]}
+
+
+def _made(owner: str, code: str, stage: str | None, key: str | None = None) -> str:
+    project_id = routes.create_project(routes.ProjectBody(code=code, name=f"과제 {code}", stage=stage, classification="internal"),
+                                       ident=_who(owner))["id"]
+    if key is not None:
+        _put(project_id, owner, key)
+    return project_id
+
+
+def _find(monkeypatch, who: str | None, **kwargs) -> dict:
+    """그 사람(None 이면 위임 신원 없음 — service)으로 MCP 찾기를 부른다."""
+    if who is None:
+        monkeypatch.setattr(srv, "_request", lambda: None)
+    else:
+        factories.act_as_delegate(monkeypatch, who)
+    return _call("risk_find_projects_by_subject", **kwargs)
+
+
+def _ids(out: dict) -> list[str]:
+    return [p["project_id"] for p in out["projects"]]
+
+
+@pytest.fixture
+def many(box) -> dict:
+    """주인의 과제 넷(같은 key 둘 — 차수 코드 · 꼴 아닌 stage, key 없는 과제, 다른 key)과 남의 비공개 과제(같은 key) 하나."""
+    box.gw.answers[sp_subject.RESOLVER_CALL] = _any_key
+    ids = {"coded": _made(OWNER, "F-1", "DV1", KEY), "free": _made(OWNER, "F-2", "dv", KEY), "bare": _made(OWNER, "F-3", "pv1"),
+           "other": _made(OWNER, "F-4", "mp", OTHER_KEY), "theirs": _made(STRANGER, "S-1", "DV1", KEY)}
+    return {"box": box, **ids}
+
+
+def test_find_by_key_returns_only_that_key_in_the_callers_sight(many, monkeypatch):
+    """sp_task 는 글자 그대로 — 그 key 의 보이는 과제만이고 key 가 없는 과제 · 다른 key · 남의 비공개 과제는 없다. 앞부분만 같은 key 는 걸리지
+    않는다. 답의 머리는 caller · total · truncated 이고 과제마다 계약의 칸이 다 있다."""
+    out = _find(monkeypatch, OWNER, sp_task=KEY)
+    assert (out["caller"], set(_ids(out)), out["total"], out["truncated"]) == ("user", {many["free"], many["coded"]}, 2, False)
+    first = next(p for p in out["projects"] if p["project_id"] == many["coded"])
+    assert set(first) == {"project_id", "code", "name", "stage", "round", "sp_task", "my_role", "mcp_visibility", "classification",
+                          "targets", "registry_top", "registry_total"}
+    assert (first["code"], first["stage"], first["round"], first["sp_task"], first["my_role"], first["mcp_visibility"],
+            first["classification"], first["targets"], first["registry_top"], first["registry_total"]) == (
+        "F-1", "DV1", "dv1", KEY, "owner", "private", "internal", [], [], 0)
+    assert _find(monkeypatch, OWNER, sp_task="알파 개발")["projects"] == []
+    assert set(_ids(_find(monkeypatch, OWNER, sp_task=f" {KEY} "))) == {many["free"], many["coded"]}      # 앞뒤 공백만 뗀다
+
+
+def test_find_without_filters_lists_only_projects_that_have_a_key(many, monkeypatch):
+    """거름을 다 비우면 SP 과제가 달린 보이는 과제 전부다 — key 없는 과제는 없다. 차수만 주어도 그렇다."""
+    assert set(_ids(_find(monkeypatch, OWNER))) == {many["coded"], many["free"], many["other"]}
+    assert _ids(_find(monkeypatch, OWNER, round="pv1")) == []                      # pv1 은 key 없는 과제뿐이다
+
+
+def test_find_by_round_takes_codes_and_unknown_only(many, monkeypatch):
+    """round 는 차수 코드(정규화 뒤 글자 그대로) · unknown(차수 모름 — stage 가 꼴이 아닌 과제만)이다. 꼴이 아니면 round_invalid."""
+    assert _ids(_find(monkeypatch, OWNER, sp_task=KEY, round="ＤＶ１")) == [many["coded"]]
+    assert _ids(_find(monkeypatch, OWNER, sp_task=KEY, round="unknown")) == [many["free"]]
+    assert _ids(_find(monkeypatch, OWNER, round="모름")) == [many["free"]]
+    assert _find(monkeypatch, OWNER, sp_task=KEY, round="dv")["error"] == "round_invalid"
+
+
+def test_find_follows_the_mcp_sight_of_the_caller(many, monkeypatch):
+    """시야는 MCP 의 것이다(visible_projects) — 구성원은 제 역할로 보고, 남은 제 과제만 본다. 조직 공개로 열면 남(역할 없음 — my_role null)과
+    위임 신원 없는 호출(service — 조직 공개만)도 본다. 폐기된 과제는 누구에게도 없다."""
+    box = many["box"]
+    routes.put_members(many["coded"], routes.MembersBody(members=[routes.MemberItem(email=VIEWER, role="viewer")]),
+                       ident=_who(OWNER))
+    seen = _find(monkeypatch, VIEWER, sp_task=KEY)
+    assert [(p["project_id"], p["my_role"]) for p in seen["projects"]] == [(many["coded"], "viewer")]
+    assert _ids(_find(monkeypatch, STRANGER, sp_task=KEY)) == [many["theirs"]]
+    assert _find(monkeypatch, None, sp_task=KEY) == {"caller": "service", "projects": [], "total": 0, "truncated": False}
+    routes.patch_project(many["coded"], routes.ProjectPatchBody(mcp_visibility="org"), ident=_who(OWNER))
+    theirs = _find(monkeypatch, STRANGER, sp_task=KEY)
+    assert {p["project_id"]: p["my_role"] for p in theirs["projects"]} == {many["theirs"]: "owner", many["coded"]: None}
+    service = _find(monkeypatch, None, sp_task=KEY)
+    assert (service["caller"], _ids(service), service["projects"][0]["my_role"]) == ("service", [many["coded"]], None)
+    box.store.execute("UPDATE rr_projects SET status = 'purged' WHERE id = ?", (many["coded"],))
+    assert _ids(_find(monkeypatch, OWNER, sp_task=KEY)) == [many["free"]]
+    assert _find(monkeypatch, None, sp_task=KEY)["projects"] == []
+
+
+def test_find_by_design_artifact_keys_reads_the_project_sources(many, monkeypatch):
+    """설계 자료 열쇠로 찾는다 — mcad 는 StepForge project_id, cae 는 dyna_result 원천의 report_ids 가운데 하나, ecad 는 붙은 보드의 job_id
+    (대소문자 무시). 설계 자료로 찾을 때는 SP 과제가 없는 과제도 든다. sp_task 와 함께 주면 둘 다 맞는 과제다. 종류 · 열쇠는 함께 준다."""
+    box = many["box"]
+    owner = _who(OWNER)
+    routes.add_source(many["bare"], routes.SourceBody(kind="mcad", app_key="heax-step_forge", ref={"stepforge_project_id": MCAD_ID}),
+                      ident=owner)
+    routes.add_source(many["coded"], routes.SourceBody(kind="dyna_result", app_key="heax-kooremapper_mcp",
+                                                       ref={"report_ids": [7, REPORT_ID]}), ident=owner)
+    box.gw.tool_map = {"find_job": "odb-hub"}
+    box.gw.answers["find_job"] = {"jobs": [{"job_id": BOARD, "project": "알파", "model": "SM-A100", "board_type": "main",
+                                            "revision": "C2", "original_filename": "a.tgz", "uploaded_at": 1}]}
+    routes.put_ecad_board(many["other"], routes.EcadBoardBody(odb_job_id=BOARD), ident=owner)
+    routes.add_source(many["theirs"], routes.SourceBody(kind="mcad", app_key="heax-step_forge",
+                                                        ref={"stepforge_project_id": MCAD_ID}), ident=_who(STRANGER))
+    assert _ids(_find(monkeypatch, OWNER, artifact_kind="mcad", artifact_id=MCAD_ID.lower())) == [many["bare"]]
+    assert _ids(_find(monkeypatch, OWNER, artifact_kind="CAE", artifact_id=REPORT_ID.lower())) == [many["coded"]]
+    assert _ids(_find(monkeypatch, OWNER, artifact_kind="ecad", artifact_id=BOARD.upper())) == [many["other"]]
+    assert _ids(_find(monkeypatch, OWNER, artifact_kind="cae", artifact_id="7")) == [many["coded"]]
+    assert _ids(_find(monkeypatch, OWNER, sp_task=OTHER_KEY, artifact_kind="cae", artifact_id=REPORT_ID)) == []
+    assert _ids(_find(monkeypatch, STRANGER, artifact_kind="mcad", artifact_id=MCAD_ID)) == [many["theirs"]]
+    assert _find(monkeypatch, OWNER, artifact_kind="mcad")["error"] == "E100"
+    assert _find(monkeypatch, OWNER, artifact_id=MCAD_ID)["error"] == "E100"
+    assert _find(monkeypatch, OWNER, artifact_kind="pcb", artifact_id=BOARD)["error"] == "E100"
+
+
+def test_find_pages_by_offset_and_shrinks_a_page_to_the_wire(many, monkeypatch):
+    """한 번에 limit(1 ~ 50 으로 죈다) 과제이고 남으면 truncated · next_offset 이다 — 다음 쪽은 offset 이다. MCP 결과 상한을 넘으면 과제 수를
+    줄여 나눈다(자르지 않는다)."""
+    first = _find(monkeypatch, OWNER, limit=2)
+    assert (len(first["projects"]), first["total"], first["truncated"], first["next_offset"]) == (2, 3, True, 2)
+    rest = _find(monkeypatch, OWNER, limit=2, offset=first["next_offset"])
+    assert (len(rest["projects"]), rest["truncated"], "next_offset" in rest) == (1, False, False)
+    assert set(_ids(first) + _ids(rest)) == {many["coded"], many["free"], many["other"]}
+    assert len(_find(monkeypatch, OWNER, limit=0)["projects"]) == 1 and _find(monkeypatch, OWNER, limit=999)["total"] == 3
+    one = srv._wire_chars({"x": _find(monkeypatch, OWNER, limit=1)["projects"]})
+    monkeypatch.setattr(srv, "MCP_RESULT_CHARS", one + 400)
+    fitted = _find(monkeypatch, OWNER)
+    assert (len(fitted["projects"]), fitted["truncated"], fitted["next_offset"]) == (1, True, 1)
+
+
+def test_both_subject_tools_are_risk_tools_closed_to_risk_review_seats():
+    """D-18 — 두 도구 이름이 risk_ 로 시작한다. 에이전트 엔진은 리스크 심사 좌석에 리스크 앱 도구를 이름으로 닫고(변경 · 스냅샷 둘만 연다 —
+    delib 엔진 _risk_designated_refusal 갈래 app), 자유 조회 접두에도 걸리지 않는다(포털 contracts §8)."""
+    names = {t.name for t in asyncio.run(srv.mcp.list_tools())}
+    for name in ("risk_set_project_subject", "risk_find_projects_by_subject"):
+        assert name in names and name.startswith("risk_") and name not in ("risk_get_diff", "risk_get_snapshot")
+
+
+def _registry_all(target_key: str) -> list[dict]:
+    """MCP risk_get_registry 가 이 신원에게 주는 그 대상의 등록부 행 전부(쪽을 다 잇는다)."""
+    page = srv.risk_get_registry(target_key=target_key)
+    rows = list(page["rows"])
+    while page.get("next_offset"):
+        page = srv.risk_get_registry(target_key=target_key, offset=page["next_offset"])
+        rows += page["rows"]
+    return [{"target_key": target_key, **r} for r in rows]
+
+
+def test_registry_rows_pass_the_same_door_as_risk_get_registry(ledger, monkeypatch):
+    """등록부 앞 행은 같은 사람이 risk_get_registry 로 받는 행과 같은 문을 지난 행이다 — 과제의 지금 대상(과제 주인의 대상만 — 남이 매단 대상은
+    빠진다)마다 그 도구의 행 전부를 주의 등급 → 우선순위 → 지지 영역 · 전문가 수 → 키 차례로 세운 앞 다섯(칸 값 · 대표 주장 그대로 — 상태 낱말 ·
+    stale_json 은 원장 그대로)과 그 수다. 그 대상을 risk_get_registry 로 못 보는 남에게는 과제째 없고, 조직 공개로 열면 남 · service 도 같은
+    행을 본다. 원장은 남 시험 표와 같은 생산자 사슬(검토 → 쟁점 → 종합)이다."""
+    store, ids = ledger
+    gw = Gateway()
+    gw.answers[sp_subject.RESOLVER_CALL] = _any_key
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", lambda _self, request: gw.handle(request))
+    owner = factories.ident(LEDGER_OWNER)
+    routes.put_sp_subject(ids["project"], routes.SpSubjectBody(sp_task=KEY, round="dv1"), ident=owner)
+    assert gw.calls(sp_subject.RESOLVER_CALL)                          # 원장 주인의 등록 PAT 로 풀었다
+    _forged_snapshot, forged_target = _forge(store, ids)               # 남이 주인의 과제에 매단 대상(RD-10) — 싣지 않는다
+
+    factories.act_as_delegate(monkeypatch, LEDGER_OWNER)
+    found = _call("risk_find_projects_by_subject", sp_task=KEY, round="dv1")
+    assert _ids(found) == [ids["project"]]
+    project = found["projects"][0]
+    assert [t["target_key"] for t in project["targets"]] == [ids["target"]] and forged_target != ids["target"]
+    assert set(project["targets"][0]) == {"target_key", "kind", "level", "verdict_candidate", "verdict_final", "created_at"}
+    full = [row for t in project["targets"] for row in _registry_all(t["target_key"])]
+    assert project["registry_total"] == len(full) > routes.SUBJECT_REGISTRY_TOP, len(full)
+    want = sorted(full, key=routes._subject_registry_order)[:routes.SUBJECT_REGISTRY_TOP]
+    assert [(r["target_key"], r["cluster_key"]) for r in project["registry_top"]] == [(r["target_key"], r["cluster_key"]) for r in want]
+    for got, row in zip(project["registry_top"], want):
+        assert {c: got[c] for c in routes.SUBJECT_REGISTRY_COLS} == {c: row.get(c) for c in routes.SUBJECT_REGISTRY_COLS}
+        assert got["claim"] == row["merged"]["claim"] and got["status"] in ("open", "rejected_in_panel", "verified", "dismissed",
+                                                                           "mitigated", "superseded")
+
+    factories.act_as_delegate(monkeypatch, LEDGER_STRANGER)
+    assert srv.risk_get_registry(target_key=ids["target"])["error"] == "not_visible"
+    assert _find(monkeypatch, LEDGER_STRANGER, sp_task=KEY)["projects"] == []
+    routes.patch_project(ids["project"], routes.ProjectPatchBody(mcp_visibility="org"), ident=owner)
+    theirs = _find(monkeypatch, LEDGER_STRANGER, sp_task=KEY)["projects"]
+    assert [(p["project_id"], p["my_role"]) for p in theirs] == [(ids["project"], None)]
+    assert theirs[0]["registry_top"] == project["registry_top"] and theirs[0]["registry_total"] == project["registry_total"]
+    assert [(r["target_key"], r["cluster_key"]) for r in _registry_all(ids["target"])] == [
+        (r["target_key"], r["cluster_key"]) for r in full]                 # 그 남이 risk_get_registry 로 받는 행과 같다
+    service = _find(monkeypatch, None, sp_task=KEY)
+    assert (service["caller"], _ids(service)) == ("service", [ids["project"]])
