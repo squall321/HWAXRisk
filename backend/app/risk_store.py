@@ -873,9 +873,20 @@ CREATE INDEX IF NOT EXISTS ix_rr_cluster_alias_owner_new ON rr_cluster_alias(own
 """
 _DDL_V5: list[str] = _split_statements(_DDL_V5_SQL)
 
+# v6 — 과제 인사이트 그래프 M2b(포털 docs/project-insight-graph contracts §9 · PLAN §4.7). 과제의 SP 허브 과제 key 한 칸과 그 색인이다 —
+# 값은 리스크 앱이 그 사람의 PAT 로 스스로 부른 풀이(find_plm_task)의 결과 행에서만 적는다(PUT /api/projects/{id}/sp-subject · 일반 PATCH
+# 칸 밖). 차수는 새 칸 없이 stage 를 읽을 때 정규화한다(app/sp_subject.py). 재설계 M4 가 v6 에 두기로 적었던 rr_reports.ra_* 는 다음 판(v7)이다.
+# 아직 나가지 않았다 — 가지 wt1102/insight-m2 에만 있고 main 에 오르는 날 tests/test_store.py 의 PUSHED_DDL_SHA256[6] 가 굳는다.
+_DDL_V6_SQL = """
+ALTER TABLE rr_projects ADD COLUMN sp_task TEXT;          -- SP 허브 plm_task key(운영 허브는 과제명 — 과제코드가 아니다). 모르면 NULL
+CREATE INDEX IF NOT EXISTS ix_rr_projects_sp_task ON rr_projects(sp_task);
+"""
+_DDL_V6: list[str] = _split_statements(_DDL_V6_SQL)
+
 # 버전 오름차순. 한 버전 = 한 트랜잭션. 허용 연산은 CREATE TABLE IF NOT EXISTS · ADD COLUMN · CREATE INDEX IF NOT EXISTS 뿐(plan §5.2.5 (6)).
 # 한 번 나간 버전의 문장은 고치지 않는다 — tests/test_store.py 가 버전마다 DDL 해시를 못 박는다.
-MIGRATIONS: list[tuple[int, list[str]]] = [(1, _DDL_V1), (2, _DDL_V2), (3, _DDL_V3), (4, _DDL_V4), (5, _DDL_V5)]
+MIGRATIONS: list[tuple[int, list[str]]] = [(1, _DDL_V1), (2, _DDL_V2), (3, _DDL_V3), (4, _DDL_V4), (5, _DDL_V5),
+                                           (6, _DDL_V6)]
 
 # ---------------------------------------------------------------- 이행 안전(WP5a R3 · 반대 검토 X2-01·X2-02)
 # 이행 전체(버전 읽기 → 사본 → 버전별 트랜잭션 → 사본 정리)를 감싸는 파일 잠금. 기다린다 — HEAXHub 는 헬스가 안 오면 같은
