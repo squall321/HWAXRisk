@@ -332,7 +332,9 @@ def test_a_wrong_mirror_is_refused_and_forcing_needs_a_reason_and_is_audited(box
     forced = _put(box, force=True, reason="기구 도면으로 확인했다", **wrong)["registration"]
     assert forced["status"] == "forced" and forced["reason"] == "기구 도면으로 확인했다"
     assert _audits(box.store)[-1]["reason"] == "기구 도면으로 확인했다"
-    found = _locate(box, x=30.0, y=-20.0)
+    # 강제한 (뒤집지 않은) 변환으로는 (30, −20) 이 보드 밖(x 112.13)이라 point_off_board 다 — 보드 안에 드는 좌표로 본다.
+    assert _locate(box, x=30.0, y=-20.0)["reason"]["code"] == "point_off_board"
+    found = _locate(box, x=-40.0, y=-20.0)
     assert found["status"] == "located" and found["warnings"][0].startswith("transform_forced")
 
 
@@ -394,6 +396,19 @@ def test_board_coordinates_without_a_side_land_mid_board_without_any_gateway_cal
     top = _locate(box, x=30.0, y=-20.0, side="top")
     assert top["mcad"]["z"] == 0.5 and top["body"] is None and top["body_candidates"]
     assert box.gw.seen == []
+
+
+def test_a_point_off_the_board_is_unknown_instead_of_naming_the_board(box, frozen):
+    """(반대 검토 R2) 면 없는 보드 좌표는 보드 몸체를 몸체로 낸다 — 종전에는 보드에서 수백 mm 떨어진 (500, 500) 도 located 이고 보드 몸체가
+    몸체 · F1 part 였다. 옮긴 자리가 CAD 보드 몸체 bbox(오차 상한 0.5 mm 만큼 너그럽게) 밖이면 unknown point_off_board 와 옮긴 자리 · 보드 bbox
+    다(자리 · F1 칸을 싣지 않는다). 가장자리에서 상한 안은 받는다."""
+    _put(box)
+    far = _locate(box, x=500.0, y=500.0)
+    assert (far["status"], far["reason"]["code"]) == ("unknown", "point_off_board") and "f1" not in far and "body" not in far
+    assert far["mapped"] == {"x": -417.87, "y": 502.82, "unit": "mm"} and far["board_bbox"] == PCB_BOX
+    edge = _locate(box, x=75.3, y=-47.5)                  # → (6.83, −44.68) — x 가 보드 가장자리(7.13)에서 0.3 mm 밖
+    assert edge["status"] == "located" and edge["body"]["path"] == PCB
+    assert _locate(box, x=76.0, y=-20.0)["reason"]["code"] == "point_off_board"        # 1 mm 밖
 
 
 def test_a_net_lands_on_its_pin_box_and_a_net_without_pin_coordinates_is_unknown(box):
@@ -488,10 +503,10 @@ def test_an_imported_registration_is_not_used_until_it_is_verified_here(box):
     body = "".join(export.iter_lines(box.store, OWNER, 0))
     box.store.execute("DELETE FROM rr_board_transforms")
     export.import_jsonl(box.store, OWNER, body)
-    out = _locate(box, x=1.0, y=2.0)
+    out = _locate(box, x=30.0, y=-20.0)
     assert out["status"] == "unknown" and out["reason"]["code"] == "transform_unverified" and "다시 적어" in out["reason"]["fix"]
     _put(box)
-    assert _locate(box, x=1.0, y=2.0)["status"] == "located"
+    assert _locate(box, x=30.0, y=-20.0)["status"] == "located"
 
 
 # ================================================================ 권한 · 신원 — 쓰기는 편집자 이상, 읽기는 구성원, 산 호출은 그 사람의 PAT 만

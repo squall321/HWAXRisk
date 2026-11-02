@@ -35,6 +35,8 @@ CONTAIN_TOL_MM = 0.01
 # 몸체가 그 부품이라고 말할 조건 — 면내 긴 변이 부품 크기의 두 배(또는 +1 mm) 안이고 자리가 그 몸체의 가운데 반 안이다. 그보다 크거나 비껴
 # 있으면 bbox 가 품을 뿐이다(쉴드캔 · 프레임) — 몸체로 말하지 않고 후보로만 싣는다.
 BODY_SIZE_FACTOR, BODY_SIZE_SLACK_MM = 2.0, 1.0
+# 옮긴 자리가 CAD 보드 몸체 bbox 에서 이만큼 넘게 밖이면 이 보드의 자리가 아니다(point_off_board) — 등록 검증의 오차 상한과 같다.
+OFF_BOARD_TOL_MM = bt.MAX_ERROR_MM
 # 핀 bbox 의 두 변 비가 이만큼 넘어야 긴 축으로 쓴다(정사각에 가까운 BGA 는 보드의 긴 변으로).
 PIN_AXIS_RATIO = 1.2
 CANDIDATES_MAX = 5
@@ -53,6 +55,8 @@ UNKNOWN: dict[str, str] = {
                              " 기록을 지웠다"),
     "transform_stale": ("등록 뒤에 찍은 스냅샷의 CAD 보드 몸체가 등록 때 읽은 자리와 오차 상한보다 다르다 — 그 사이 CAD 가 바뀌어 변환이 낡았다"
                         "(옛 자리를 내지 않는다)"),
+    "point_off_board": ("옮긴 자리가 CAD 보드 몸체(bbox, 상한만큼 너그럽게) 밖이다 — 이 보드의 자리가 아니다(다른 보드의 좌표 · 부품이거나 변환이"
+                        " 틀렸다)"),
     "refdes_not_found": "ODB 허브가 그 refdes 를 주지 않았다",
     "side_unknown": "그 부품이 보드의 어느 면(top · bottom)에 있는지 모른다",
     "point_unread": "ODB 허브의 답에서 부품 좌표를 읽지 못했다",
@@ -75,6 +79,8 @@ FIXES: dict[str, str] = {
     "transform_unverified": "같은 값을 다시 적어(PUT /api/projects/{id}/board-transforms · MCP risk_set_board_transform) 이 박스에서 검증한다.",
     "transform_stale": ("지금 CAD 로 다시 맞춘다 — GET /api/projects/{id}/board-transforms/proposal(MCP risk_propose_board_transform)의 후보를 보고"
                         " PUT /api/projects/{id}/board-transforms(MCP risk_set_board_transform)로 다시 적는다(적을 때 지금 CAD 로 다시 검증한다)."),
+    "point_off_board": ("좌표 · refdes · 넷이 이 보드(odb_job_id)의 것인지 본다 — 다른 보드면 그 odb_job_id 를 준다. 강제로 적은 변환이면 제안(GET"
+                        " /api/projects/{id}/board-transforms/proposal · MCP risk_propose_board_transform)을 보고 다시 적는다."),
     "side_unknown": "x · y 와 side 를 주어 다시 찾는다.",
     "net_pins_absent": "ODB 허브가 get_net 에 핀 좌표(pins[].x · y)를 내야 한다 — 그 전에는 refdes 나 보드 좌표로 찾는다.",
     "subject_not_placeable": "항목에 위치(몸체 경로 · 좌표)를 적거나(PUT /api/projects/{id}/item-location · MCP risk_set_item_location) refdes · 좌표로 찾는다.",
@@ -577,6 +583,15 @@ def locate_on_board(store: Any, project: Mapping[str, Any], *, input_: dict, odb
         if spot["pins_truncated"]:
             warnings.append("net_pins_truncated — 허브가 핀 목록을 잘랐다 — 넷의 bbox 가 모자랄 수 있다")
     x_cad, y_cad = t.apply(spot["x"], spot["y"])
+    bx0, by0, _bz0, bx1, by1, _bz1 = record["board_bbox"]
+    if not (bx0 - OFF_BOARD_TOL_MM <= x_cad <= bx1 + OFF_BOARD_TOL_MM and by0 - OFF_BOARD_TOL_MM <= y_cad <= by1 + OFF_BOARD_TOL_MM):
+        # 보드 밖의 자리 — 종전에는 면 없는 좌표가 어디든 보드 몸체를 몸체(F1 part)로 냈다(반대 검토 F2-9). 자리를 지어내지 않는다.
+        off = unknown("point_off_board", **context, transform=view,
+                      ecad={"x": round(spot["x"], bt.DIGITS), "y": round(spot["y"], bt.DIGITS), "unit": bt.UNIT},
+                      mapped={"x": x_cad, "y": y_cad, "unit": bt.UNIT}, board_bbox=[round(v, bt.DIGITS) for v in record["board_bbox"]])
+        if calls:
+            off["calls"] = calls
+        return off
     side = spot.get("side")
     if side is not None:
         face = bt.face_of(side, t.top_face)
