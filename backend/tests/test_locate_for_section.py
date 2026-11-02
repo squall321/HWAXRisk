@@ -707,6 +707,18 @@ def test_a_part_subject_goes_straight_to_its_body_and_planes_without_the_gateway
     assert (cluster["mcad"], cluster["body"]["path"], cluster["planes"]) == (out["mcad"], out["body"]["path"], out["planes"])
 
 
+def test_f1_handoff_planes_pass_through_the_point_so_point_plus_axis_is_the_same_cut(box, items):
+    """StepForge F1 은 두 단면을 `point=[x, y, z]` + `axis` 로 받는다(offset 만 주면 창 없는 온 평면이다 — StepForge 세션 11-02). 그러려면
+    평면마다 `point[axis] == offset` 이어야 한다 — 평면이 늘 그 점을 지나는 세로 단면임을 손잡이로 박는다(부품 주제 · 묶음 주제 둘 다)."""
+    for out in (_locate(box, finding_id=items["can"]["finding_id"]),
+                _locate(box, target_key=items["target"], cluster_key=items["can"]["cluster_key"])):
+        f1 = out["f1"]
+        assert f1["point"]["unit"] == "mm" and all(p["unit"] == "mm" for p in f1["planes"])
+        assert {p["axis"] for p in f1["planes"]} == {"x", "y"}, "두 평면은 x · y 법선의 세로 단면이다"
+        for p in f1["planes"]:
+            assert p["offset"] == f1["point"][p["axis"]], (p, f1["point"])
+
+
 def test_a_standing_part_still_gets_two_vertical_section_planes(box, monkeypatch):
     """(반대 검토 R4) 옆으로 선 FPCB(x 로 얇고 z 로 높다)가 주제면 — 종전에는 몸체 bbox 의 가장 얇은 변(x)을 두께로 보아 한 평면이 z 법선의 가로
     단면이었다. 두 평면은 늘 보드 법선 z 를 품는 세로 단면이다(F1 에 넘기는 꼴 그대로) — 면내 긴 축 y 를 품는 x 법선 평면이 앞이다."""

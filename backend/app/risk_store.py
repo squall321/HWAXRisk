@@ -883,8 +883,8 @@ CREATE INDEX IF NOT EXISTS ix_rr_projects_sp_task ON rr_projects(sp_task);
 """
 _DDL_V6: list[str] = _split_statements(_DDL_V6_SQL)
 
-# v7 — F2 단면 자리 찾기('CAD 그림을 보고서로' 긴급 11-02 · docs/f2-locate-for-section.md). 아직 나가지 않았다 — 가지 wt1102/f2-locate 에만 있고
-# main 에 오르는 날 tests/test_store.py 의 PUSHED_DDL_SHA256[7] 이 굳는다. 재설계 M4 의 rr_reports.ra_* 는 v8 로 간다.
+# v7 — F2 단면 자리 찾기('CAD 그림을 보고서로' 긴급 11-02 · docs/f2-locate-for-section.md). 2026-11-02 main 에 올라 굳었다 —
+# tests/test_store.py 의 PUSHED_DDL_SHA256[7] 이 지킨다. 바꿀 것은 v8 에(재설계 M4 의 rr_reports.ra_* 도 v8).
 # 보드 ↔ CAD 변환 등록부(과제마다 (ODB 보드, StepForge 과제) 한 행 — 원점 · 뒤집기 · 면과 등록 때 읽은 보드 몸체 z, 이 박스의 검증)와 리스크
 # 항목(finding · 등록부 묶음)의 위치 한 칸이다. 검증 칸(status · error_mm · verify_json · reason)은 이 박스의 일이라 반출 · 들여오기에 없다
 # (app/export.py — 들여온 행은 status 가 NULL 이고 위치 찾기가 쓰지 않는다).

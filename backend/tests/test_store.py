@@ -264,8 +264,8 @@ PUSHED_DDL_SHA256 = {
     # v6 은 2026-11-02 main 에 올라 굳었다(과제 인사이트 그래프 M2b — rr_projects.sp_task 와 색인) — 블록을 고치지 않는다. 바꿀 것은 v7 에 넣는다
     # (재설계 M4 의 rr_reports.ra_* 는 v8 — v7 은 F2 가 먼저 썼다).
     6: "339620c3fedb4d8e000ff87ecd9789f078a2a65c669edb45aa03723fb410e791",
-    # v7 은 아직 나가지 않았다 — F2 단면 자리 찾기(rr_board_transforms · rr_findings / rr_registry.location_json)이고 가지 wt1102/f2-locate 에만
-    # 있다. 그때까지는 블록을 고칠 수 있고 고치면 같은 커밋에서 이 값을 고친다. main 에 오르는 날 이 값이 굳는다(재설계 M4 의 ra_* 는 v8).
+    # v7 은 2026-11-02 main 에 올라 굳었다(F2 단면 자리 찾기 — rr_board_transforms · rr_findings / rr_registry.location_json) — 블록을 고치지
+    # 않는다. 바꿀 것은 v8 에 넣는다(재설계 M4 의 ra_* 도 v8).
     7: "1fc7eadfdaa4f509c8a150669d3d735869110bbf14939e417a9364c6016bd646",
 }
 SHARED_TABLES = {"rr_dim_vocab", "rr_delta_priors", "rr_rules", "rr_metrics"}

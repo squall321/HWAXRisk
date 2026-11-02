@@ -180,3 +180,23 @@ bbox · 시각)이 없는 행도 그렇다 — 과제 폐기는 `status` 를 남
   검증 답에 `checks.ambiguity.same_mirror` · `checks.thickness.tol_mm` · `checks.holes.odb_truncated`.
 - 쓰기 · 문 — 항목 위치의 모르는 몸체 경로는 422 `item_part_unknown`, 비교 대상의 항목은 두 과제를 다 읽어야 한다(아니면 404), 변환 제안은
   편집자 이상(보기 403 · MCP `role_insufficient`). 들여오기 답에 `location_invalid_dropped`(있을 때만).
+
+### F1 을 부르는 꼴(StepForge 세션과 맞춤 — 11-02)
+
+평면마다 한 번 부른다. 두 평면 모두 `point` + `axis` 로 넘기고 `offset` 은 쓰지 않는다 — F1 에서 `offset` 만 주면 창 없는 온 평면이고,
+`window_mm` 와 `offset` 을 함께 주면 거절한다. F2 의 평면은 늘 그 점을 지나므로 `point[axis] == plane.offset` 이다(시험이 지킨다).
+부품 경로는 위치가 아니라 `highlight` 로 넘긴다 — `part=` 는 평면을 몸체 bbox 가운데에 두어 큰 몸체(실드 캔 · 프레임)에서 자리에서 멀어진다.
+
+```
+section_pair_view(
+  projects=[f1.stepforge_project_id, <다른 판 과제 id …>],   # 2 ~ 6
+  point=[f1.point.x, f1.point.y, f1.point.z],
+  axis=plane.axis,                 # "x" 또는 "y"
+  window_mm=f1.window_mm,
+  unit="mm",
+  highlight=[f1.part] if f1.part else None)
+```
+
+F3 `section_batch` 는 행마다 같은 인자를 받아 두 평면을 한 잡의 두 행으로 보낼 수 있다. F1 의 JSON 에서 60 부품 상한 뒤 보지 못한 부품은
+`not_drawn` · `not_drawn_count` 다(`omitted` 는 잘린 행 수).
+
