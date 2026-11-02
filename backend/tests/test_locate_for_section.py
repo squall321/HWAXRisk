@@ -244,15 +244,16 @@ def box(risk_store, monkeypatch) -> Box:
     return Box(store=risk_store, gw=gw, project=project)
 
 
-def _freeze(store, project: str) -> dict:
-    """실제 캡처(mcad REST 트리 + 가짜 ODB 허브)로 그 과제의 스냅샷을 얼린다 — IR 과 스냅샷 id."""
+def _freeze(store, project: str, captured_at: int = 1761800000) -> dict:
+    """실제 캡처(mcad REST 트리 + 가짜 ODB 허브)로 그 과제의 스냅샷을 얼린다 — IR 과 스냅샷 id. 캡처 시각은 기본이 등록보다 앞이다(등록 뒤에
+    찍은 스냅샷은 captured_at 을 준다)."""
     hub = FakeOdbHub()
     hub.others = {name: body for name, body in recon.MCP_TOOLS_FULL.items()}
     hub.others["heaxstep_forge_list_parts"] = recon.MCP_TOOLS_FULL["list_parts"]
     card = {"kind": "mcad", "app_key": recon.APP_KEY, "ref": {"stepforge_project_id": SF}}
     captured = capture_with_hub(hub, JOB, extra_sources=[card], rest=recon._rest(_cad_routes()))
     frozen = ir_builder.freeze_snapshot(store, project_id=project, owner_sub=OWNER, label="cad", adapter_results=captured["results"],
-                                        calls=captured["calls"], snapshot_id=captured["snapshot_id"], captured_at=1761800000)
+                                        calls=captured["calls"], snapshot_id=captured["snapshot_id"], captured_at=captured_at)
     return {"snapshot_id": frozen["snapshot_id"], "ir": ir_builder.load_ir(store, frozen["snapshot_id"])}
 
 
@@ -422,6 +423,63 @@ def test_each_reason_a_place_cannot_be_found_is_named(box, frozen):
     assert _locate(box, refdes="U1005")["reason"]["code"] == "side_unknown"            # 가짜 허브의 보드에 U1005 는 없다
     routes.delete_ecad_board(box.project, ident=_who(OWNER))            # 과제에서 보드를 떼면 보드를 모른다
     assert _locate(box, refdes="U1001")["reason"]["code"] == "board_missing"
+
+
+def _moved(dx: float) -> list[tuple[str, list[float], str]]:
+    """CAD 조립 전체(보드 포함)를 +x 로 dx mm 옮긴 몸체 목록."""
+    return [(name, [b[0] + dx, b[1], b[2], b[3] + dx, b[4], b[5]], material) for name, b, material in BODIES]
+
+
+def test_a_board_moved_in_a_snapshot_taken_after_registration_makes_the_transform_stale(box, monkeypatch):
+    """(반대 검토 R1) 등록 뒤에 찍은 스냅샷에서 CAD 조립 전체(보드 포함)가 +x 로 5 mm 옮겨졌다 — 종전에는 변환이 그대로 located 였고 옛 자리 ·
+    평면(x 52.13)을 F1 에 넘기며 warnings 가 비었다(몸체 칸의 snapshot_board_moved 뿐). 이제 refdes · 넷 · 보드 좌표 모두 unknown
+    transform_stale 과 고칠 곳(지금 CAD 로 다시 맞춰 적기)이고 옛 자리 · F1 칸을 싣지 않는다. 낡았으면 허브를 부르지 않는다."""
+    _put(box)
+    monkeypatch.setitem(globals(), "BODIES", _moved(5.0))
+    snap = _freeze(box.store, box.project, captured_at=now_epoch() + 60)
+    box.gw.seen.clear()
+    for inputs in ({"refdes": "U1001"}, {"net": "VBAT"}, {"x": 30.0, "y": -20.0}):
+        out = _locate(box, **inputs)
+        assert out["status"] == "unknown" and out["reason"]["code"] == "transform_stale", (inputs, out.get("reason"))
+        assert "risk_set_board_transform" in out["reason"]["fix"] and "mcad" not in out and "f1" not in out
+        assert (out["snapshot_id"], out["board_moved_mm"]) == (snap["snapshot_id"], 5.0)
+    assert box.gw.seen == []
+    # 다시 적으면(지금 CAD 가 옮겨진 자리라고 답한다) 새 등록이 그 스냅샷과 맞아 다시 자리를 낸다.
+    box.gw.answers["heaxstep_forge_part_info"] = {**PART_INFO, "world_bbox": [v + 5.0 if i in (0, 3) else v for i, v in enumerate(PCB_BOX)]}
+    box.gw.answers["heaxstep_forge_corner_proximity"] = copy.deepcopy(CORNER)
+    for hole in box.gw.answers["heaxstep_forge_corner_proximity"]["parts"][0]["hole_list"]:
+        hole["center"][0] += 5.0
+    _put(box, offset_x=87.13)
+    again = _locate(box, refdes="U1001")
+    assert again["status"] == "located" and again["mcad"]["x"] == 57.13 and again["body"]["path"].endswith("/U1001_BODY")
+
+
+def test_a_snapshot_older_than_the_registration_keeps_the_point_and_skips_its_bodies(box, monkeypatch):
+    """등록보다 앞서 찍은 스냅샷이 다른 보드 자리를 보이면 낡은 것은 스냅샷이다(변환은 그 뒤의 CAD 로 검증됐다) — 자리는 그대로 내고 그
+    스냅샷으로 몸체를 찾지 않는다(몸체 칸에 까닭)."""
+    monkeypatch.setitem(globals(), "BODIES", _moved(5.0))
+    _freeze(box.store, box.project)                 # 등록보다 앞선 캡처 시각
+    _put(box)
+    out = _locate(box, refdes="U1001")
+    assert out["status"] == "located" and out["mcad"] == {"x": 52.13, "y": -17.18, "z": 0.5, "unit": "mm"}
+    assert out["body"] is None and out["body_note"].startswith("snapshot_board_moved") and out["f1"]["part"] is None
+
+
+def test_a_registration_without_its_verification_record_is_not_used(box):
+    """(반대 검토 c) 과제 폐기는 등록의 검증 기록(verify_json)을 지우고 status 는 verified 로 남긴다 — 종전에는 그 행으로 located 였다. 검증 기록이
+    없는 행은 검증하지 않은 것이다(transform_unverified). 다시 적으면 쓴다. 폐기된 과제는 다시 적을 수 없어 고칠 곳 대신 그렇게 말한다."""
+    _put(box)
+    box.store.execute("UPDATE rr_board_transforms SET verify_json = NULL")
+    wiped = _locate(box, x=30.0, y=-20.0)
+    assert (wiped["status"], wiped["reason"]["code"]) == ("unknown", "transform_unverified") and "risk_set_board_transform" in wiped["reason"]["fix"]
+    _put(box)
+    assert _locate(box, x=30.0, y=-20.0)["status"] == "located"
+    code = box.store.query_one("SELECT code FROM rr_projects WHERE id = ?", (box.project,))["code"]
+    routes.purge_project(box.project, routes.PurgeBody(code=code, reason="지운다"), ident=_who(OWNER))
+    assert box.store.query_one("SELECT status FROM rr_board_transforms")["status"] == "verified"
+    purged = _locate(box, x=30.0, y=-20.0)
+    assert (purged["status"], purged["reason"]["code"]) == ("unknown", "transform_unverified")
+    assert "fix" not in purged["reason"] and "폐기" in purged["reason"]["message"]
 
 
 def test_an_imported_registration_is_not_used_until_it_is_verified_here(box):

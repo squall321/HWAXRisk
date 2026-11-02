@@ -49,7 +49,10 @@ UNKNOWN: dict[str, str] = {
     "board_missing": "보드(ODB job_id)를 모른다 — 과제에 ECAD 보드가 붙지 않았고 odb_job_id 도 주지 않았다",
     "cad_project_missing": "CAD 과제(StepForge project_id)를 모른다 — 과제에 기구 CAD 원천이 없고 stepforge_project_id 도 주지 않았다",
     "transform_missing": "이 보드와 CAD 과제의 좌표 변환이 등록되지 않았다",
-    "transform_unverified": "등록된 변환을 이 박스에서 검증하지 않았다(다른 박스에서 들여온 행이다)",
+    "transform_unverified": ("등록된 변환을 이 박스에서 검증한 기록이 없다 — 다른 박스에서 들여온 행이거나(검증 칸은 들여오지 않는다) 과제 폐기가 검증"
+                             " 기록을 지웠다"),
+    "transform_stale": ("등록 뒤에 찍은 스냅샷의 CAD 보드 몸체가 등록 때 읽은 자리와 오차 상한보다 다르다 — 그 사이 CAD 가 바뀌어 변환이 낡았다"
+                        "(옛 자리를 내지 않는다)"),
     "refdes_not_found": "ODB 허브가 그 refdes 를 주지 않았다",
     "side_unknown": "그 부품이 보드의 어느 면(top · bottom)에 있는지 모른다",
     "point_unread": "ODB 허브의 답에서 부품 좌표를 읽지 못했다",
@@ -70,6 +73,8 @@ FIXES: dict[str, str] = {
     "transform_missing": ("후보를 GET /api/projects/{id}/board-transforms/proposal(MCP risk_propose_board_transform)로 보고 고른 값을"
                           " PUT /api/projects/{id}/board-transforms(MCP risk_set_board_transform)로 적는다 — 적을 때 이 박스에서 검증한다."),
     "transform_unverified": "같은 값을 다시 적어(PUT /api/projects/{id}/board-transforms · MCP risk_set_board_transform) 이 박스에서 검증한다.",
+    "transform_stale": ("지금 CAD 로 다시 맞춘다 — GET /api/projects/{id}/board-transforms/proposal(MCP risk_propose_board_transform)의 후보를 보고"
+                        " PUT /api/projects/{id}/board-transforms(MCP risk_set_board_transform)로 다시 적는다(적을 때 지금 CAD 로 다시 검증한다)."),
     "side_unknown": "x · y 와 side 를 주어 다시 찾는다.",
     "net_pins_absent": "ODB 허브가 get_net 에 핀 좌표(pins[].x · y)를 내야 한다 — 그 전에는 refdes 나 보드 좌표로 찾는다.",
     "subject_not_placeable": "항목에 위치(몸체 경로 · 좌표)를 적거나(PUT /api/projects/{id}/item-location · MCP risk_set_item_location) refdes · 좌표로 찾는다.",
@@ -312,14 +317,47 @@ def _source_app(ir: Mapping[str, Any], kind: str) -> str | None:
     return None
 
 
-def cad_snapshot(store: Any, project_id: str, owner_sub: str, stepforge_project_id: str) -> tuple[str, dict] | None:
-    """그 과제(주인의 행)의 가장 최근 스냅샷 가운데 그 StepForge 과제를 mcad 로 읽은 것 — (snapshot_id, ir)."""
-    for row in store.query("SELECT id FROM rr_snapshots WHERE project_id = ? AND owner_sub = ? ORDER BY created_at DESC, rowid DESC",
-                           (project_id, owner_sub)):
+def cad_snapshot(store: Any, project_id: str, owner_sub: str, stepforge_project_id: str) -> dict | None:
+    """그 과제(주인의 행)의 가장 최근 스냅샷 가운데 그 StepForge 과제를 mcad 로 읽은 것 — {snapshot_id, ir, captured_at}(captured_at 은
+    그 스냅샷이 CAD 를 읽은 때 — rr_snapshots.created_at)."""
+    for row in store.query("SELECT id, created_at FROM rr_snapshots WHERE project_id = ? AND owner_sub = ?"
+                           " ORDER BY created_at DESC, rowid DESC", (project_id, owner_sub)):
         ir = _ir(store, row["id"])
         if ir is not None and str(_source_ref(ir, "mcad").get("stepforge_project_id") or "") == stepforge_project_id:
-            return row["id"], ir
+            return {"snapshot_id": row["id"], "ir": ir, "captured_at": row["created_at"]}
     return None
+
+
+def verification_record(row: Mapping[str, Any]) -> dict | None:
+    """등록 행의 이 박스 검증 기록 — {verified_at, board_bbox(등록 때 읽은 CAD 보드 몸체 월드 bbox)}. 상태가 verified · forced 가 아니거나
+    검증 기록(verify_json — 검증 · 근거의 보드 bbox · 시각)이 없으면 None 이다: 들여온 행은 상태가 없고, 과제 폐기는 상태를 남긴 채 검증 기록을
+    지운다(반대 검토 F2-9 — 종전에는 그 행을 verified 로 읽어 자리를 냈다)."""
+    if row.get("status") not in ("verified", "forced"):
+        return None
+    stored = _loads(row.get("verify_json"), {})
+    bbox = _bbox6(((stored.get("evidence") or {}).get("cad") or {}).get("bbox")) if isinstance(stored.get("evidence"), Mapping) else None
+    verified_at = stored.get("verified_at")
+    if not isinstance(stored.get("verification"), Mapping) or bbox is None or isinstance(verified_at, bool) \
+            or not isinstance(verified_at, (int, float)):
+        return None
+    return {"verified_at": verified_at, "board_bbox": bbox}
+
+
+def cad_view(store: Any, project: Mapping[str, Any], row: Mapping[str, Any], record: Mapping[str, Any]) -> dict | None:
+    """그 CAD 과제를 읽은 최근 스냅샷과 그 안의 등록된 보드 몸체 — {snapshot_id, ir, captured_at, parts, board, box, moved_mm, newer}.
+    moved_mm 은 스냅샷 보드 bbox 와 등록 때 읽은 bbox 의 가장 큰 차(보드가 없거나 월드 bbox 가 없으면 None), newer 는 스냅샷이 검증 뒤(같은
+    초 포함 — 차례를 모르면 낡은 쪽으로 본다)에 CAD 를 읽었는가. 스냅샷이 없으면 None — 산 CAD 를 다시 부르지 않으므로 그때는 등록 뒤의 CAD
+    변경을 알 수 없다(설계 4절)."""
+    found = cad_snapshot(store, project["id"], project["owner_sub"], row["stepforge_project_id"])
+    if found is None:
+        return None
+    parts = _parts(found["ir"])
+    board = next((n for n in parts if str(n.get("local_key") or "") == row["board_body_path"]), None)
+    box = _bbox_of(board) if board is not None else None
+    moved = None if box is None else round(max(abs(a - b) for a, b in zip(box, record["board_bbox"])), bt.DIGITS)
+    captured = found["captured_at"]
+    return {**found, "parts": parts, "board": board, "box": box, "moved_mm": moved,
+            "newer": captured is None or captured >= record["verified_at"]}
 
 
 def _parts(ir: Mapping[str, Any]) -> list[dict]:
@@ -387,22 +425,18 @@ def _body_of(node: Mapping[str, Any], snapshot_id: str) -> dict:
 
 
 # ---------------------------------------------------------------- 보드 길(refdes · 넷 · 좌표)
-def _board_body(store: Any, project: Mapping[str, Any], row: Mapping[str, Any], probe: dict, *,
-                feature_long: float | None, mid_point: bool) -> tuple[dict | None, str | None, list[dict], str | None]:
-    """그 자리의 CAD 몸체 — (body, note, 후보, snapshot_id). 그 CAD 과제의 최근 스냅샷을 본다. 보드 몸체가 등록 때와 다르면 찾지 않는다."""
-    found = cad_snapshot(store, project["id"], project["owner_sub"], row["stepforge_project_id"])
-    if found is None:
+def _board_body(view: Mapping[str, Any] | None, probe: dict, *, feature_long: float | None,
+                mid_point: bool) -> tuple[dict | None, str | None, list[dict], str | None]:
+    """그 자리의 CAD 몸체 — (body, note, 후보, snapshot_id). 그 CAD 과제의 최근 스냅샷(`cad_view`)을 본다. 스냅샷의 보드 몸체가 등록 때와
+    다르면 찾지 않는다 — 여기 오는 것은 등록보다 앞서 찍은 스냅샷뿐이다(뒤에 찍은 스냅샷이면 변환이 낡은 것이라 위에서 transform_stale)."""
+    if view is None:
         return None, "no_cad_snapshot — 이 CAD 과제를 읽은 스냅샷이 과제에 없어 몸체를 찾지 않았다(점 · 평면은 그대로 쓴다)", [], None
-    snapshot_id, ir = found
-    parts = _parts(ir)
-    board = next((n for n in parts if str(n.get("local_key") or "") == row["board_body_path"]), None)
-    registered = ((_loads(row.get("verify_json"), {}).get("evidence") or {}).get("cad") or {}).get("bbox")
-    box = _bbox_of(board) if board is not None else None
-    if box is None:
+    snapshot_id, parts, board = view["snapshot_id"], view["parts"], view["board"]
+    if view["box"] is None:
         return None, "snapshot_board_absent — 스냅샷에 등록된 보드 몸체(월드 bbox)가 없어 몸체를 찾지 않았다", [], snapshot_id
-    if registered is not None and max(abs(a - b) for a, b in zip(box, registered)) > bt.MAX_ERROR_MM:
-        return None, ("snapshot_board_moved — 스냅샷의 보드 몸체가 등록 때 읽은 자리와 오차 상한보다 달라 몸체를 찾지 않았다(스냅샷이 낡았거나"
-                      " CAD 가 바뀌었다 — 다시 캡처하거나 다시 등록한다)"), [], snapshot_id
+    if view["moved_mm"] > bt.MAX_ERROR_MM:
+        return None, ("snapshot_board_moved — 등록보다 앞서 찍은 스냅샷의 보드 몸체가 등록 때 읽은 자리와 오차 상한보다 달라 그 스냅샷으로는"
+                      " 몸체를 찾지 않았다(변환은 그 뒤의 CAD 로 검증됐다 — 다시 캡처하면 몸체를 찾는다)"), [], snapshot_id
     if mid_point:
         return _body_of(board, snapshot_id), None, [], snapshot_id
     hits = []
@@ -499,16 +533,28 @@ def locate_on_board(store: Any, project: Mapping[str, Any], *, input_: dict, odb
     row = transform_row(store, project["id"], project["owner_sub"], odb_job_id, stepforge_project_id)
     if row is None:
         return unknown("transform_missing", **context)
-    if row["status"] not in ("verified", "forced"):
-        return unknown("transform_unverified", **context, transform=transform_view(row))
+    record = verification_record(row)
+    if record is None:
+        out = unknown("transform_unverified", **context, transform=transform_view(row))
+        if project.get("status") == "purged":
+            # 폐기된 과제는 다시 적을 수 없다(409 project_purged) — 고칠 곳 대신 그렇게 말한다.
+            out["reason"] = {"code": "transform_unverified",
+                             "message": "과제가 폐기되어 변환의 검증 기록이 지워졌다 — 이 과제로는 보드 자리를 찾지 않는다(폐기된 과제는 다시 적을 수 없다)"}
+        return out
     t = transform_of(row)
     view = transform_view(row)
+    snapshot = cad_view(store, project, row, record)
+    if snapshot is not None and snapshot["moved_mm"] is not None and snapshot["moved_mm"] > bt.MAX_ERROR_MM and snapshot["newer"]:
+        # 등록 뒤에 찍은 스냅샷이 보드가 옮겨졌다고 말한다 — CAD 가 바뀌어 변환이 낡았다. 옛 자리를 내지 않는다(반대 검토 F2-9 — 종전에는
+        # 옛 자리를 located 로 내고 몸체 칸에만 적었다). 산 호출 전이다.
+        return unknown("transform_stale", **context, transform=view, snapshot_id=snapshot["snapshot_id"],
+                       board_moved_mm=snapshot["moved_mm"], snapshot_board_bbox=[round(v, bt.DIGITS) for v in snapshot["box"]],
+                       registered_board_bbox=[round(v, bt.DIGITS) for v in record["board_bbox"]])
     warnings: list[str] = []
     if row["status"] == "forced":
         warnings.append(f"transform_forced — 검증을 지나지 못한 변환을 사람이 강제로 적었다(까닭 {', '.join(view['reasons']) or '-'} ·"
                         f" 사유 {row['reason'] or '-'}) — 자리를 그만큼 덜 믿는다")
-    board_ext = ((_loads(row.get("verify_json"), {}).get("evidence") or {}).get("cad") or {}).get("bbox")
-    board_extents = _extents(board_ext) if board_ext else {"x": 1.0, "y": 0.0}
+    board_extents = _extents(record["board_bbox"])
     calls: list[dict] = []
     kind = input_["kind"]
     if kind == "xy":
@@ -552,11 +598,11 @@ def locate_on_board(store: Any, project: Mapping[str, Any], *, input_: dict, odb
     if kind == "net":
         body, note, candidates, snapshot_id = None, "net — 넷은 몸체 하나로 정하지 않는다(점 · 평면을 쓴다)", [], None
     elif kind == "xy" and side is None:
-        body, note, candidates, snapshot_id = _board_body(store, project, row, probe, feature_long=None, mid_point=True)
+        body, note, candidates, snapshot_id = _board_body(snapshot, probe, feature_long=None, mid_point=True)
     else:
         # 좌표에는 대상 크기가 없어(feature_long None) 몸체로 말하지 않고 후보만 싣는다.
-        body, note, candidates, snapshot_id = _board_body(store, project, row, probe,
-                                                          feature_long=feature_long if kind == "refdes" else None, mid_point=False)
+        body, note, candidates, snapshot_id = _board_body(snapshot, probe, feature_long=feature_long if kind == "refdes" else None,
+                                                          mid_point=False)
     ecad = {"x": round(spot["x"], bt.DIGITS), "y": round(spot["y"], bt.DIGITS), "side": side, "unit": bt.UNIT,
             "center_basis": spot["center_basis"], "z_basis": z_basis}
     for key in ("placement", "pins", "pins_truncated", "side_basis"):
@@ -731,7 +777,7 @@ def body_candidates(store: Any, project: Mapping[str, Any], stepforge_project_id
     found = cad_snapshot(store, project["id"], project["owner_sub"], stepforge_project_id)
     if found is None:
         return [], "이 CAD 과제를 읽은 스냅샷이 과제에 없어 몸체 후보를 고르지 않았다 — board_body_path 를 직접 준다"
-    snapshot_id, ir = found
+    snapshot_id, ir = found["snapshot_id"], found["ir"]
     want = sorted((float(size[0]), float(size[1])), reverse=True)
     out = []
     for node in _parts(ir):
