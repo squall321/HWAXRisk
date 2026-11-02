@@ -520,20 +520,19 @@ def propose(odb: Mapping[str, Any], cad: Mapping[str, Any], *, max_error: float 
 def section_planes(point: Mapping[str, float], extents: Mapping[str, float]) -> tuple[list[dict], dict]:
     """자리를 지나는 세로 단면 둘 — (planes[긴 축 평면, 짧은 축 평면], plane_basis).
 
-    `extents` 는 대상의 축별 길이 {x, y, z}(모르는 축은 빼도 된다 — 없는 축은 0). 가장 얇은 축(두께)을 두 평면이 다 품는다. 나머지 둘 가운데
-    긴 축을 품는 평면(법선 = 짧은 축)이 앞, 긴 축에 수직인 평면(법선 = 긴 축)이 뒤다. 평면은 F1 이 받는 꼴 그대로 {axis, offset, unit} 이고
-    axis 는 평면의 법선 축이다(StepForge section_view 와 같은 뜻)."""
-    ext = {a: float(extents.get(a) or 0.0) for a in "xyz"}
-    thin = "z" if "z" not in extents else min("xyz", key=lambda a: (ext[a], "zyx".index(a)))
-    rest = [a for a in "xyz" if a != thin]
-    long_axis = max(rest, key=lambda a: (ext[a], -"xyz".index(a)))
-    short_axis = next(a for a in rest if a != long_axis)
+    두 평면은 늘 보드 법선 z 를 품는 세로 단면이라 법선은 x · y 가운데 하나다(설계 1절 — 반대 검토 F2-9: 종전에는 대상 bbox 의 가장 얇은 변을
+    두께로 보아 옆으로 선 FPCB · 브래킷에 z 법선의 가로 단면을 냈다). `extents` 는 대상의 축별 길이 {x, y, z} 이고 z 는 보지 않는다(없는 축은
+    0). x · y 가운데 긴 축을 품는 평면(법선 = 짧은 축)이 앞, 긴 축에 수직인 평면(법선 = 긴 축)이 뒤다(같으면 x 가 긴 축). 평면은 F1 이 받는
+    꼴 그대로 {axis, offset, unit} 이고 axis 는 평면의 법선 축이다(StepForge section_view 와 같은 뜻)."""
+    ext = {a: float(extents.get(a) or 0.0) for a in "xy"}
+    long_axis = max("xy", key=lambda a: (ext[a], -"xy".index(a)))
+    short_axis = "y" if long_axis == "x" else "x"
     planes = [{"axis": short_axis, "offset": _r(point[short_axis]), "unit": UNIT},
               {"axis": long_axis, "offset": _r(point[long_axis]), "unit": UNIT}]
-    basis = {"long_axis": long_axis, "short_axis": short_axis, "thickness_axis": thin,
+    basis = {"long_axis": long_axis, "short_axis": short_axis, "thickness_axis": "z",
              "order": ["long", "short"],
              "note": (f"앞 평면은 긴 축({long_axis})을 품는 단면(법선 {short_axis}), 뒤 평면은 짧은 축({short_axis})을 품는 단면(법선 {long_axis}) — "
-                      f"둘 다 두께 축({thin})을 품는다")}
+                      "둘 다 보드 법선 z 를 품는 세로 단면이다")}
     return planes, basis
 
 

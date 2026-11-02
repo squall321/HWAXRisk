@@ -209,10 +209,14 @@ def test_section_planes_follow_the_long_side_and_carry_the_unit():
     assert (basis["long_axis"], basis["short_axis"], basis["thickness_axis"]) == ("x", "y", "z")
     tall, _ = bt.section_planes(point, {"x": 1.0, "y": 3.0})
     assert tall == [{"axis": "x", "offset": 52.13, "unit": "mm"}, {"axis": "y", "offset": -17.18, "unit": "mm"}]
-    # 세 축을 다 주면 가장 얇은 축이 두께다 — 옆으로 선 브래킷(두께 x)은 y · z 평면이다.
+    # 두 평면은 늘 보드 법선 z 를 품는 세로 단면이다 — 옆으로 선 브래킷(x 로 얇고 z 로 높다)도 면내 긴 축 y 를 품는 x 법선 평면이 앞이다.
+    # 종전에는 가장 얇은 x 를 두께로 보아 z 법선(가로 단면)을 앞에 냈다(반대 검토 F2-9 — 설계 1절은 두 평면이 세로라고 적었다).
     bracket, basis = bt.section_planes({"x": 1.0, "y": 2.0, "z": 3.0}, {"x": 0.8, "y": 20.0, "z": 6.0})
-    assert bracket == [{"axis": "z", "offset": 3.0, "unit": "mm"}, {"axis": "y", "offset": 2.0, "unit": "mm"}]
-    assert basis["thickness_axis"] == "x"
+    assert bracket == [{"axis": "x", "offset": 1.0, "unit": "mm"}, {"axis": "y", "offset": 2.0, "unit": "mm"}]
+    assert basis["thickness_axis"] == "z"
+    # z 가 가장 긴 대상도 법선은 x · y 다.
+    tall_box, _ = bt.section_planes({"x": 1.0, "y": 2.0, "z": 3.0}, {"x": 3.0, "y": 0.5, "z": 9.0})
+    assert [p["axis"] for p in tall_box] == ["y", "x"]
 
 
 def test_the_window_is_three_times_the_long_side_within_bounds():

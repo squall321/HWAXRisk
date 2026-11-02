@@ -613,14 +613,14 @@ def _mcad_answer(node: Mapping[str, Any], snapshot_id: str, ir: Mapping[str, Any
     extents = _extents(box)
     unit = _unit_warning(ir)
     return located(input_=input_, project_id=project_id, stepforge_project_id=_source_ref(ir, "mcad").get("stepforge_project_id"),
-                   point=_center(box), extents=extents, plane_basis="body_bbox — 그 몸체 bbox 의 두 큰 변(두께 축은 가장 얇은 변)",
+                   point=_center(box), extents=extents, plane_basis="body_bbox — 그 몸체 bbox 의 면내 두 변(x · y — 두 단면은 늘 보드 법선 z 를 품는다)",
                    body=_body_of(node, snapshot_id), feature_long=max(extents.values()), warnings=warnings + ([unit] if unit else []),
                    snapshot_id=snapshot_id)
 
 
 def _interface_answer(pair: Sequence[Mapping[str, Any]], snapshot_id: str, ir: Mapping[str, Any], *, input_: dict, project_id: str,
                       warnings: list[str]) -> dict:
-    """계면(몸체 둘) — 두 bbox 가 겹치면(맞닿으면) 그 칸의 가운데와 두 큰 변, 떨어져 있으면 두 가운데의 가운데와 둘을 함께 품는 칸의 두 큰 변."""
+    """계면(몸체 둘) — 두 bbox 가 겹치면(맞닿으면) 그 칸의 가운데와 면내 두 변, 떨어져 있으면 두 가운데의 가운데와 둘을 함께 품는 칸의 면내 두 변."""
     boxes = [_bbox_of(n) for n in pair]
     if boxes[0] is None or boxes[1] is None:
         return unknown("bbox_world_absent", input=input_, project_id=project_id, snapshot_id=snapshot_id)
@@ -630,12 +630,12 @@ def _interface_answer(pair: Sequence[Mapping[str, Any]], snapshot_id: str, ir: M
     if all(lo[i] <= hi[i] + CONTAIN_TOL_MM for i in range(3)):
         region = [min(lo[i], hi[i]) for i in range(3)] + [max(lo[i], hi[i]) for i in range(3)]
         point, extents = _center(region), _extents(region)
-        basis = "interface_overlap — 두 몸체 bbox 가 겹친(맞닿은) 칸의 가운데와 그 칸의 두 큰 변"
+        basis = "interface_overlap — 두 몸체 bbox 가 겹친(맞닿은) 칸의 가운데와 그 칸의 면내 두 변"
     else:
         ca, cb = _center(a), _center(b)
         point = {k: (ca[k] + cb[k]) / 2 for k in "xyz"}
         extents = _extents([min(a[i], b[i]) for i in range(3)] + [max(a[i + 3], b[i + 3]) for i in range(3)])
-        basis = "interface_gap — 두 몸체 bbox 가 떨어져 있어 두 가운데의 가운데, 축은 둘을 함께 품는 칸의 두 큰 변"
+        basis = "interface_gap — 두 몸체 bbox 가 떨어져 있어 두 가운데의 가운데, 축은 둘을 함께 품는 칸의 면내 두 변"
     unit = _unit_warning(ir)
     out = located(input_=input_, project_id=project_id, stepforge_project_id=_source_ref(ir, "mcad").get("stepforge_project_id"),
                   point=point, extents=extents, plane_basis=basis, body=None,

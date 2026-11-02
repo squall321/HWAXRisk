@@ -536,6 +536,19 @@ def test_a_part_subject_goes_straight_to_its_body_and_planes_without_the_gateway
     assert (cluster["mcad"], cluster["body"]["path"], cluster["planes"]) == (out["mcad"], out["body"]["path"], out["planes"])
 
 
+def test_a_standing_part_still_gets_two_vertical_section_planes(box, monkeypatch):
+    """(반대 검토 R4) 옆으로 선 FPCB(x 로 얇고 z 로 높다)가 주제면 — 종전에는 몸체 bbox 의 가장 얇은 변(x)을 두께로 보아 한 평면이 z 법선의 가로
+    단면이었다. 두 평면은 늘 보드 법선 z 를 품는 세로 단면이다(F1 에 넘기는 꼴 그대로) — 면내 긴 축 y 를 품는 x 법선 평면이 앞이다."""
+    monkeypatch.setitem(globals(), "BODIES", list(BODIES) + [("SIDE_KEY_FPCB", [0.5, -30.0, -3.0, 1.0, -10.0, 4.0], "PI")])
+    snap = _freeze(box.store, box.project)
+    target = factories.make_target(box.store, "snap", snap["snapshot_id"], agents=factories.agents(("mech", "pcb")), owner=OWNER)
+    finding = _finding(box, target, _ckey(snap["ir"], "SIDE_KEY_FPCB"))
+    out = _locate(box, finding_id=finding["finding_id"])
+    assert out["status"] == "located" and out["mcad"] == {"x": 0.75, "y": -20.0, "z": 0.5, "unit": "mm"}
+    assert out["planes"] == [{"axis": "x", "offset": 0.75, "unit": "mm"}, {"axis": "y", "offset": -20.0, "unit": "mm"}]
+    assert out["plane_basis"]["thickness_axis"] == "z" and out["f1"]["planes"] == out["planes"]
+
+
 def test_an_interface_subject_lands_in_the_overlap_of_its_two_bodies(box, items):
     out = _locate(box, finding_id=items["pair"]["finding_id"])
     assert out["status"] == "located" and out["body"] is None and len(out["bodies"]) == 2
