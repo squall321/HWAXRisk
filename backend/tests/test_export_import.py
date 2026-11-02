@@ -354,7 +354,7 @@ def test_v4_tables_ride_the_export_except_the_local_card_packs(seeded, empty_sto
     assert export._EXPORT_SKIP_COLUMNS["rr_review_calls"] == ("result_gz",)
 
     body = "".join(export.iter_lines(seeded, ALICE, 0))
-    assert json.loads(body.splitlines()[0])["schema_version"] == LATEST_SCHEMA == 5
+    assert json.loads(body.splitlines()[0])["schema_version"] == LATEST_SCHEMA == 6      # v6 — 과제 인사이트 그래프 M2b
     assert not any(json.loads(ln)["table"] == "rr_card_packs" for ln in body.splitlines()[1:])
     export.import_jsonl(empty_store, ALICE, body)
     here, there = export.row_digest(empty_store, ALICE), export.row_digest(seeded, ALICE)

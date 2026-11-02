@@ -202,6 +202,9 @@ WRITES: dict[str, Write] = {
         code=w.ids["code"], reason="지운다"), ident=who), ("project.purge",)),
     "requirement.decide": Write("ledger", "editor", lambda w, who: routes.put_requirement(
         w.ids["requirement"], routes.RequirementDecision(status="confirmed"), ident=who), ("requirement.decide",)),
+    # 과제 주제(과제 인사이트 그래프 M2b) — 떼고 차수만 적는 부름(풀이 없이 stage 가 바뀐다).
+    "project.sp_subject": Write("ledger", "editor", lambda w, who: routes.put_sp_subject(
+        w.project, routes.SpSubjectBody(sp_task=None, round="dv1"), ident=who), ("project.sp_subject",)),
     "rekey(iface-ledger)": Write("ledger", "editor", lambda w, who: routes.put_iface_ledger(
         w.project, [routes.LedgerItem(pair_key=LEDGER_PAIR, status="rejected")], ident=who), ("rekey",),
         prepare=lambda w: routes.put_iface_ledger(w.project, [routes.LedgerItem(pair_key=LEDGER_PAIR, status="confirmed")],

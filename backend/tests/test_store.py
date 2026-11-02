@@ -259,6 +259,9 @@ PUSHED_DDL_SHA256 = {
     4: "f44b1630c19df06f0929485782c55253edf8a765858c1c30a824cb31b119c0b5",
     # v5 는 2026-10-15 main 에 올라 굳었다(재설계 M3 단계 D 리허설 a27e569 통과 뒤) — 블록을 고치지 않는다. 바꿀 것은 v6 에 넣는다.
     5: "25350889b546df9140150e8b55c7f1d1ebbe701fbf6e46ee91897db75fb89b13",
+    # v6 은 아직 나가지 않았다 — 과제 인사이트 그래프 M2b(rr_projects.sp_task 와 색인)이고 가지 wt1102/insight-m2 에만 있다. 그때까지는 블록을
+    # 고칠 수 있고 고치면 같은 커밋에서 이 값을 고친다. main 에 오르는 날 이 값이 굳는다(재설계 M4 의 rr_reports.ra_* 는 v7 로 간다).
+    6: "339620c3fedb4d8e000ff87ecd9789f078a2a65c669edb45aa03723fb410e791",
 }
 SHARED_TABLES = {"rr_dim_vocab", "rr_delta_priors", "rr_rules", "rr_metrics"}
 
@@ -808,5 +811,66 @@ def test_a_v4_db_rises_to_v5_once_with_one_v4_copy(tmp_path):
     con = sqlite3.connect(tmp_path / copies[0])
     try:
         assert con.execute("PRAGMA user_version").fetchone()[0] == 4
+    finally:
+        con.close()
+
+
+# ---------------------------------------------------------------- v6 — 과제 인사이트 그래프 M2b(포털 docs/project-insight-graph contracts §9)
+def test_v6_is_one_sp_task_column_and_its_index_on_projects(risk_store, tmp_path):
+    """v6 은 rr_projects.sp_task(TEXT · 기본값 없음 — 모르면 NULL) 한 칸과 그 색인 하나다. 차수는 새 칸 없이 stage 를 읽을 때 정규화하므로
+    차수 칸(sp_round 따위)이 없다. 재설계 M4 가 v6 에 두기로 적었던 rr_reports.ra_* 는 여기 없다(다음 판)."""
+    assert [v for v, _ in MIGRATIONS][:6] == [1, 2, 3, 4, 5, 6]
+    v6 = MIGRATIONS[5][1]
+    assert v6 == ["ALTER TABLE rr_projects ADD COLUMN sp_task TEXT;          -- SP 허브 plm_task key(운영 허브는 과제명 — 과제코드가"
+                  " 아니다). 모르면 NULL",
+                  "CREATE INDEX IF NOT EXISTS ix_rr_projects_sp_task ON rr_projects(sp_task);"]
+    db = tmp_path / "risk_review.db"
+    con = sqlite3.connect(db)
+    try:
+        column = next(r for r in con.execute("PRAGMA table_info(rr_projects)") if r[1] == "sp_task")
+        assert (column[2], column[3], column[4]) == ("TEXT", 0, None)              # 형 · NOT NULL 아님 · 기본값 없음
+        assert [r[2] for r in con.execute("PRAGMA index_info(ix_rr_projects_sp_task)")] == ["sp_task"]
+        assert {r[1]: r[2] for r in con.execute("PRAGMA index_list(rr_projects)")}["ix_rr_projects_sp_task"] == 0
+    finally:
+        con.close()
+    assert not {"sp_round", "round"} & _columns(db, "rr_projects")
+    assert not {"ra_entity_id", "ra_report_id"} & _columns(db, "rr_reports")
+
+
+def test_a_v5_db_rises_to_v6_once_with_one_v5_copy(tmp_path):
+    """행이 든 v5 DB 가 옛 과제 행을 그대로 둔 채 v6 으로 오르고 출발 버전 사본(pre-migrate-v5-*) 하나만 남는다. 두 번째 기동은 아무것도
+    하지 않는다. 옛 과제의 sp_task 는 비어 있다(NULL — 확인된 과제가 없다)."""
+    from app import risk_store as store_module
+
+    db = tmp_path / "risk_review.db"
+    v5 = RiskStore(db)
+    v5.open()
+    original = store_module.MIGRATIONS
+    try:
+        store_module.MIGRATIONS = original[:5]
+        assert v5.migrate() == 5
+        v5.execute("INSERT INTO rr_projects(id, owner_sub, code, name, stage, created_at, updated_at)"
+                   " VALUES ('P1','u','F7','F7','dv1',1,1)")
+    finally:
+        store_module.MIGRATIONS = original
+        v5.close()
+    assert "sp_task" not in _columns(db, "rr_projects")
+
+    for _ in range(2):
+        store = RiskStore(db)
+        store.open()
+        try:
+            store_module.MIGRATIONS = original[:6]
+            assert store.migrate() == 6
+            row = store.query_one("SELECT id, code, stage, sp_task FROM rr_projects")
+            assert dict(row) == {"id": "P1", "code": "F7", "stage": "dv1", "sp_task": None}
+        finally:
+            store_module.MIGRATIONS = original
+            store.close()
+        copies = [p.name for p in tmp_path.glob("risk_review.db.pre-migrate-*")]
+        assert len(copies) == 1 and copies[0].startswith("risk_review.db.pre-migrate-v5-"), copies
+    con = sqlite3.connect(tmp_path / copies[0])
+    try:
+        assert con.execute("PRAGMA user_version").fetchone()[0] == 5
     finally:
         con.close()

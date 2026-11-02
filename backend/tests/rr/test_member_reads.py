@@ -40,6 +40,8 @@ CALLER_FIELDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("GET", P + "/part-keys/{ckey}"): ("mine",),
     # 부른 사람의 역할 — 화면이 쓰기 단추를 가른다(OI-2).
     ("GET", P + "/projects/{project_id}"): ("my_role",),
+    # 과제 주제의 후보 힌트는 부른 사람의 PAT 로 읽는다(그 사람이 StepForge 를 보는 만큼) — 지금 값(sp_task · stage · round)은 같다.
+    ("GET", P + "/projects/{project_id}/sp-subject"): ("hint", "hint_note"),
     ("GET", P + "/targets/{target_key}/coverage"): ("my_role",),
 }
 
@@ -59,7 +61,7 @@ MCP_MEMBER_EXEMPT: dict[str, str] = {
 MCP_WRITES: tuple[str, ...] = (
     "risk_create_project", "risk_submit_panel_result", "risk_add_finding", "risk_add_source", "risk_capture_snapshot",
     "risk_ack_gate", "risk_decide_sameas", "risk_create_diff", "risk_open_target", "risk_start_job", "risk_job_action",
-    "risk_repersist_panel", "risk_set_ecad_board",
+    "risk_repersist_panel", "risk_set_ecad_board", "risk_set_project_subject",
 )
 # 보기가 지나는 쓰기 — 남의 것을 가리키지 않고 부른 사람 자신의 행을 쓴다. 대응 결정은 그 과제의 주인 · 편집자만 하게 돼(MB-13) 이 표에서
 # 빠졌다.

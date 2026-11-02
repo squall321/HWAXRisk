@@ -54,7 +54,8 @@ def _risen(tmp_path, frozen: str) -> RiskStore:
 def test_a_frozen_ledger_rises_to_v5_once_keeping_every_row(tmp_path, frozen):
     gz_path, version = FROZEN[frozen]
     db = _thaw(gz_path, tmp_path)
-    assert _user_version(db) == version < LATEST == 5
+    # 맨 뒤 판(v6 — 과제 인사이트 그래프 M2b)까지 오른다. v4 시험처럼 판 번호를 못 박지 않는다 — 옛 행이 그대로인지가 요지다.
+    assert _user_version(db) == version < LATEST
     before = _snapshot(db)
 
     for _ in range(2):                                          # 두 번째 기동은 아무것도 하지 않는다
