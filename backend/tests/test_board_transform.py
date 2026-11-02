@@ -91,6 +91,36 @@ def test_the_outline_alone_cannot_tell_the_mirror():
     assert check["checks"]["outline"]["error_mm"] == 0.0 and check["reasons"] == ["mirror_ambiguous"]
 
 
+def test_a_wrong_origin_matching_a_repeated_half_of_the_holes_is_refused():
+    """(반대 검토 R5) 고정홀 무리(지름 셋)가 평행이동으로 한 번 더 있는 보드 — 원점을 그 이동만큼(35 · 12 mm) 틀려도 한 무리(셋)가 오차 0 으로
+    맞는다. 종전에는 다른 뒤집기 셋만 견주고 짝 없는 구멍을 절반까지 받아 verified 였고 그 변환으로 찾은 자리는 모두 37 mm 어긋났다. 같은
+    뒤집기의 다른 원점이 더 많이(여섯) 맞추면 origin_ambiguous, 짝 없는 구멍이 절반이면 holes_mostly_unmatched 로 거절한다. 참 원점은 지난다."""
+    station = [(10.0, -40.0, 1.6), (14.0, -25.0, 1.0), (19.0, -37.0, 2.0)]
+    shift = (35.0, 12.0)
+    odb_holes = station + [(x + shift[0], y + shift[1], d) for x, y, d in station]
+    cad_holes = [(*HAND.apply(x, y), d) for x, y, d in odb_holes]
+    odb, cad = _odb(outline=False, holes=odb_holes), _cad(holes=cad_holes)
+    right = bt.verify(HAND, odb, cad)
+    assert right["ok"] and right["checks"]["holes"]["matched"] == 6, right["reasons"]
+    wrong = bt.Transform(True, False, 82.13 - shift[0], 2.82 + shift[1], "zmin")
+    check = bt.verify(wrong, odb, cad)
+    assert not check["ok"] and check["checks"]["holes"]["matched"] == 3 and check["error_mm"] == 0.0
+    assert {"origin_ambiguous", "holes_mostly_unmatched"} <= set(check["reasons"]), check["reasons"]
+    same = check["checks"]["ambiguity"]["same_mirror"]
+    assert same["competes"] and same["matched"] == 6 and (same["offset_x"], same["offset_y"]) == (82.13, 2.82)
+    # 그 변환이 지났다면 부품 하나(ODB 30, −20)가 37 mm 어긋난 자리에 섰다.
+    assert (wrong.apply(30.0, -20.0), HAND.apply(30.0, -20.0)) == ((17.13, -5.18), (52.13, -17.18))
+
+
+def test_half_the_holes_unmatched_is_no_longer_enough():
+    """짝 없는 ODB 고정홀이 절반이면 거절한다(종전은 절반 넘게만) — 넷 가운데 둘만 맞으면 holes_mostly_unmatched, 셋이 맞으면 받는다."""
+    extra = [(30.0, -10.0, 1.6), (55.0, -45.0, 1.6)]
+    two_of_four = bt.verify(HAND, _odb(holes=ODB_HOLES[:2] + extra), _cad())
+    assert "holes_mostly_unmatched" in two_of_four["reasons"] and two_of_four["checks"]["holes"]["matched"] == 2
+    three_of_four = bt.verify(HAND, _odb(holes=ODB_HOLES + extra[:1]), _cad())
+    assert three_of_four["ok"] and three_of_four["checks"]["holes"]["matched"] == 3, three_of_four["reasons"]
+
+
 def test_one_hole_without_the_outline_is_not_position_evidence():
     check = bt.verify(HAND, _odb(outline=False, holes=ODB_HOLES[:1]), _cad())
     assert "position_unverified" in check["reasons"] and check["checks"]["holes"]["matched"] == 1

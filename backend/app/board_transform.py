@@ -52,9 +52,11 @@ REASONS: dict[str, str] = {
     "size_mismatch": "ODB 외곽 크기와 CAD 보드 몸체 크기가 오차 상한보다 다르다 — 엉뚱한 몸체 · 단위(인치 머리) · 90° 회전을 의심한다",
     "outline_mismatch": "ODB 외곽 bbox 를 옮긴 자리가 CAD 보드 몸체 bbox 와 오차 상한보다 어긋난다",
     "holes_mismatch": "짝지은 구멍 가운데 오차 상한보다 먼 것이 있다",
-    "holes_mostly_unmatched": "ODB 고정홀 대부분이 CAD 구멍과 짝을 찾지 못했다",
+    "holes_mostly_unmatched": "ODB 고정홀의 절반 이상이 CAD 구멍과 짝을 찾지 못했다",
     "position_unverified": "자리 근거가 없다 — ODB 외곽 bbox 를 모르고 짝지은 구멍이 둘 미만이다(원점 · 뒤집기를 확인하지 못했다)",
     "mirror_ambiguous": "다른 뒤집기도 같은 근거를 같은 오차 안에서 설명한다 — 외곽 · 구멍이 대칭이라 뒤집기 · 면을 가르지 못한다",
+    "origin_ambiguous": ("같은 뒤집기의 다른 원점(상한의 두 배 넘게 떨어진)이 근거를 같은 수 이상 상한 안에서 설명한다 — 적은 원점을 확인하지"
+                         " 못했다(더 많이 맞추면 적은 원점이 틀렸다 — 제안을 본다)"),
     "cad_unit_suspect": "StepForge 과제에 mm 가 아닌 머리 단위로 선언된 파일이 있다 — CAD 값이 그 배수만큼 클 수 있다",
     "holes_too_many": (f"구멍이 너무 많아(한쪽 {HOLES_MAX}개 넘게, 또는 견줄 원점 후보가 {VOTE_EVAL_MAX}칸 넘게) 다른 원점 · 뒤집기를 다 재지"
                        " 못했다 — 모호하지 않은지 확인하지 못했다"),
@@ -415,36 +417,55 @@ def verify(t: Transform, odb: Mapping[str, Any], cad: Mapping[str, Any], *, max_
         errors.append(pos["hole_error_mm"])
         if pos["hole_error_mm"] > max_error:
             reasons.append("holes_mismatch")
-    if odb_holes and len(pos["lone_odb"]) > pos["matched"]:
+    # 짝 없는 ODB 고정홀이 절반 이상이면 거절한다 — 종전(절반 넘게)은 절반이 짝 없이 남아도 받아, 고정홀 무리가 평행이동으로 되풀이되는
+    # 보드에서 틀린 원점이 절반을 오차 0 으로 맞추고 지났다(반대 검토 F2-9). 모델에 없는 구멍 몇은 그대로 받는다.
+    if odb_holes and len(pos["lone_odb"]) >= pos["matched"]:
         reasons.append("holes_mostly_unmatched")
     if outline is None and pos["matched"] < MIN_HOLE_PAIRS:
         reasons.append("position_unverified")
     if alternatives and search.too_many:
         # 다른 뒤집기를 재지 않았다 — 모호하지 않다고 말할 수 없어 거절한다(강제 사유와 적을 수는 있다).
-        checks["ambiguity"] = {"ok": None, "alternatives": [],
+        checks["ambiguity"] = {"ok": None, "alternatives": [], "same_mirror": None,
                                "capped": {"odb_holes": len(odb_holes), "cad_holes": len(search.ev.cad_holes), "holes_max": HOLES_MAX}}
         reasons.append("holes_too_many")
     elif alternatives:
+        def rival(found: list[tuple[Transform, dict]]) -> dict | None:
+            # 겨루는 후보(상한 안에서 같은 수 이상)가 있으면 그것을 — 짝은 더 많아도 오차 상한 밖인 느슨한 후보가 앞에 서서 겨루는 후보를
+            # 가리지 않게 한다. 겨루는 것이 없으면 가장 좋은 후보를 싣는다.
+            if not found:
+                return None
+            other, opos = next(((o, p) for o, p in found if _position_ok(p, max_error) and p["matched"] >= pos["matched"]), found[0])
+            return {**other.as_dict(), "matched": opos["matched"], "hole_error_mm": opos["hole_error_mm"],
+                    "outline_error_mm": opos["outline"]["error_mm"] if opos["outline"] else None,
+                    "competes": _position_ok(opos, max_error) and opos["matched"] >= pos["matched"]}
+
         rivals = []
         unchecked = []
-        for mx, my in ((not t.mirror_x, t.mirror_y), (t.mirror_x, not t.mirror_y), (not t.mirror_x, not t.mirror_y)):
+        same = None
+        for mx, my in ((t.mirror_x, t.mirror_y), (not t.mirror_x, t.mirror_y), (t.mirror_x, not t.mirror_y),
+                       (not t.mirror_x, not t.mirror_y)):
             found, left = search.solutions(mx, my)
             if left >= max(pos["matched"], 1):
                 # 재지 못한 칸에 견줄 만큼 표가 남았다 — 그 칸에 같은 수 이상을 설명하는 원점이 있을 수 있다.
                 unchecked.append({"mirror_x": bool(mx), "mirror_y": bool(my), "votes_left": left})
-            if not found:
+            if (mx, my) == (t.mirror_x, t.mirror_y):
+                # 같은 뒤집기의 다른 원점(반대 검토 F2-9) — 상한의 두 배 넘게 떨어진 원점은 적은 원점과 짝 하나도 나누지 못한다(둘 다 상한
+                # 안이면 같은 짝의 두 원점 차는 상한의 두 배 안이다). 고정홀 무리가 되풀이되면 틀린 원점이 그 한 무리를 맞춘다.
+                same = rival([(o, p) for o, p in found
+                              if math.hypot(o.offset_x - t.offset_x, o.offset_y - t.offset_y) > 2 * max_error])
                 continue
-            other, opos = found[0]
-            competes = _position_ok(opos, max_error) and opos["matched"] >= pos["matched"]
-            rivals.append({**other.as_dict(), "matched": opos["matched"], "hole_error_mm": opos["hole_error_mm"],
-                           "outline_error_mm": opos["outline"]["error_mm"] if opos["outline"] else None,
-                           "competes": competes})
+            other = rival(found)
+            if other is not None:
+                rivals.append(other)
         ambiguous = any(r["competes"] for r in rivals)
-        checks["ambiguity"] = {"ok": not ambiguous and not unchecked, "alternatives": rivals}
+        shifted = bool(same and same["competes"])
+        checks["ambiguity"] = {"ok": not ambiguous and not shifted and not unchecked, "alternatives": rivals, "same_mirror": same}
         if unchecked:
             checks["ambiguity"]["capped"] = {"vote_eval_max": VOTE_EVAL_MAX, "unchecked": unchecked}
         if ambiguous:
             reasons.append("mirror_ambiguous")
+        if shifted:
+            reasons.append("origin_ambiguous")
         if unchecked:
             reasons.append("holes_too_many")
     checks["units"] = {"cad_unit_suspect": bool(cad.get("unit_suspect")), "unit": UNIT}
