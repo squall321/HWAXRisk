@@ -724,6 +724,13 @@ def clean_location(raw: Any) -> tuple[dict | None, str | None]:
     return {"part": part, "point": point, "set_by": set_by, "set_at": set_at}, None
 
 
+def item_missing(*, finding_id: str | None = None, target_key: str | None = None, cluster_key: str | None = None) -> AppError:
+    """그 과제에 없는 항목의 404 — 남의 것 · 못 읽는 비교의 항목도 같은 답이다(존재를 흘리지 않는다)."""
+    if finding_id is not None:
+        return AppError("E404", f"그 과제에 finding 이 없습니다 — {finding_id}.", 404)
+    return AppError("E404", f"그 과제에 등록부 묶음이 없습니다 — {target_key} · {cluster_key}.", 404)
+
+
 def item_row(store: Any, project: Mapping[str, Any], *, finding_id: str | None, target_key: str | None,
              cluster_key: str | None) -> dict:
     """그 과제(주인의 행)의 항목 하나 — {kind, finding_id | cluster_key, target_key, subject_key, location, location_problem}(위치는
@@ -732,7 +739,7 @@ def item_row(store: Any, project: Mapping[str, Any], *, finding_id: str | None, 
         row = store.query_one("SELECT finding_id, target_key, subject_key, location_json, owner_sub, project_id FROM rr_findings"
                               " WHERE finding_id = ?", (finding_id,))
         if row is None or row["project_id"] != project["id"] or row["owner_sub"] != project["owner_sub"]:
-            raise AppError("E404", f"그 과제에 finding 이 없습니다 — {finding_id}.", 404)
+            raise item_missing(finding_id=finding_id)
         location, problem = clean_location(row["location_json"])
         return {"kind": "finding", "finding_id": row["finding_id"], "target_key": row["target_key"],
                 "subject_key": row["subject_key"] or "", "location": location, "location_problem": problem}
@@ -742,10 +749,34 @@ def item_row(store: Any, project: Mapping[str, Any], *, finding_id: str | None, 
         " AND t.project_id = ? AND r.owner_sub = ? AND t.owner_sub = ?",
         (target_key, cluster_key, project["id"], project["owner_sub"], project["owner_sub"]))
     if row is None:
-        raise AppError("E404", f"그 과제에 등록부 묶음이 없습니다 — {target_key} · {cluster_key}.", 404)
+        raise item_missing(target_key=target_key, cluster_key=cluster_key)
     location, problem = clean_location(row["location_json"])
     return {"kind": "cluster", "cluster_key": row["cluster_key"], "target_key": row["target_key"],
             "subject_key": row["subject_key"] or "", "location": location, "location_problem": problem}
+
+
+def item_projects(store: Any, target_key: str) -> list[str]:
+    """항목 대상이 읽는 과제 — 현황 대상은 그 과제, 비교 대상은 비교의 두 과제(앞 판 과제 포함). 비교의 앞 판 스냅샷은 다른 과제의 것일 수
+    있어 위치 찾기 · 항목 위치 쓰기는 두 과제를 다 읽는 사람만 한다(MCP 비교 문 mcp_scope_owner · 웹 _diff_reader 와 같다 — 반대 검토
+    F2-9)."""
+    target = store.query_one("SELECT kind, ref_id, project_id FROM rr_targets WHERE target_key = ?", (target_key,))
+    if target is None:
+        return []
+    if target["kind"] != "diff":
+        return [target["project_id"]]
+    diff = store.query_one("SELECT base_project_id, target_project_id FROM rr_diffs WHERE id = ?", (target["ref_id"],))
+    projects = [diff["base_project_id"], diff["target_project_id"]] if diff is not None else []
+    return sorted({str(p) for p in [*projects, target["project_id"]] if p})
+
+
+def find_item_part(store: Any, target_key: str, part: str) -> tuple[str, dict] | None:
+    """항목 대상의 스냅샷(새 판 먼저)에서 그 몸체 경로의 MCAD 부품 노드 — (snapshot_id, 노드) 또는 None."""
+    for sid in item_snapshots(store, target_key):
+        ir = _ir(store, sid)
+        node = next((n for n in _parts(ir) if str(n.get("local_key") or "") == part), None) if ir is not None else None
+        if node is not None:
+            return sid, node
+    return None
 
 
 def item_snapshots(store: Any, target_key: str) -> list[str]:
@@ -828,11 +859,15 @@ def locate_item(store: Any, project: Mapping[str, Any], item: Mapping[str, Any],
             sf = (_source_ref(node_ir, "mcad").get("stepforge_project_id") if node_ir is not None else None) \
                 or next((_source_ref(ir, "mcad").get("stepforge_project_id") for _sid, ir in irs if _source_ref(ir, "mcad")), None) \
                 or stepforge_project_id
-            body = _body_of(node, node_sid) if node is not None else ({"path": part, "basis": "item_location"} if part else None)
+            note, warnings = None, []
+            if part is not None and node is None:
+                # 적힌 몸체 경로가 항목의 스냅샷에 없다(들여온 행 · 쓰기 확인 전에 적힌 것) — 몸체로 되싣지 않는다(반대 검토 F2-9). 점은 쓴다.
+                note = f"item_part_absent — {UNKNOWN['item_part_absent']} — 몸체로 싣지 않고 적힌 점만 쓴다"
+                warnings.append(f"item_part_absent — 항목 위치의 몸체 경로 {part[:200]!r} 가 항목의 스냅샷에 없다")
             return located(input_=input_, project_id=pid, stepforge_project_id=sf,
                            point={"x": point["x"], "y": point["y"], "z": point["z"]}, extents=extents,
-                           plane_basis=basis, body=body, feature_long=max(extents.values()) if box is not None else None,
-                           snapshot_id=node_sid)
+                           plane_basis=basis, body=_body_of(node, node_sid) if node is not None else None, body_note=note,
+                           feature_long=max(extents.values()) if box is not None else None, warnings=warnings, snapshot_id=node_sid)
         if node is None:
             return unknown("item_part_absent", input=input_, project_id=pid, body={"path": part}, snapshots=snapshots)
         return _mcad_answer(node, node_sid, node_ir, input_=input_, project_id=pid, warnings=["item_location — 적힌 몸체"])

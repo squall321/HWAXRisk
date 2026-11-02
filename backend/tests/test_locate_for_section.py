@@ -720,6 +720,58 @@ def test_an_item_location_is_set_by_editors_audited_and_used_first(box, items):
     assert _locate(box, finding_id=finding)["reason"]["code"] == "subject_not_placeable"
 
 
+def test_an_item_location_part_must_be_a_body_of_the_items_snapshot(box, items):
+    """(반대 검토 R8) 항목 위치의 몸체 경로를 확인하지 않아 아무 경로(남의 과제의 것도)나 적혔고 위치 찾기가 그것을 body · F1 part 로
+    되실었다. 이제 적을 때 그 항목의 스냅샷에 있는 MCAD 부품 경로만 받는다(422 item_part_unknown — 감사 없음). 이미 있는 모르는 경로(들여온 행 ·
+    고치기 전에 적힌 것)는 몸체로 되싣지 않고 점만 쓴다(경고와 함께). 점만 적힌 위치는 그 항목 스냅샷의 CAD 과제를 싣는다(반대 검토 b — 요청의
+    stepforge_project_id 가 달라도)."""
+    finding = items["asm"]["finding_id"]
+    stranger_path = "/OTHER_PROJECT/x.step/NOT_A_PART"
+    err = _refused(lambda: routes.put_item_location(box.project, routes.ItemLocationBody(
+        finding_id=finding, part=stranger_path, point=routes.ItemPoint(x=10.0, y=-5.0, z=0.5)), ident=_who(OWNER)))
+    assert (err.code, err.http_status) == ("item_part_unknown", 422) and err.detail["snapshots"] == [items["ir"]["snapshot_id"]]
+    assert _audits(box.store, "finding.location") == []
+    assert routes.put_item_location(box.project, routes.ItemLocationBody(finding_id=finding, part=PCB, point=None),
+                                    ident=_who(OWNER))["changed"]
+    box.store.execute("UPDATE rr_findings SET location_json = ? WHERE finding_id = ?",
+                      (json.dumps({"part": stranger_path, "point": {"x": 10.0, "y": -5.0, "z": 0.5, "unit": "mm"}}), finding))
+    echoed = _locate(box, finding_id=finding)
+    assert echoed["status"] == "located" and echoed["mcad"] == {"x": 10.0, "y": -5.0, "z": 0.5, "unit": "mm"}
+    assert echoed["body"] is None and echoed["f1"]["part"] is None and echoed["body_note"].startswith("item_part_absent")
+    assert echoed["warnings"][0].startswith("item_part_absent")
+    routes.put_item_location(box.project, routes.ItemLocationBody(finding_id=finding, part=None, point=routes.ItemPoint(x=10.0, y=-5.0, z=0.5)),
+                             ident=_who(OWNER))
+    only = _locate(box, finding_id=finding, stepforge_project_id="019f2other00000000000000b")
+    assert (only["stepforge_project_id"], only["f1"]["stepforge_project_id"]) == (SF, SF)
+
+
+def test_a_diff_items_place_is_read_only_by_someone_who_reads_both_projects(box, monkeypatch):
+    """(반대 검토 a) 비교 대상의 항목은 앞 판 스냅샷에서 자리를 찾는다 — 앞 판 과제는 다른 과제라 그 과제를 못 읽는 편집자가 그 과제의 몸체 자리를
+    꺼냈다. 비교는 두 과제를 다 읽는 사람이 연다(MCP 비교 문 · 웹 _diff_reader) — 위치 찾기와 항목 위치 쓰기도 그 문이다. 못 읽으면 없는 항목과
+    같은 404 이고, 앞 판 과제의 보기 구성원이 되면 연다(MCP 도 같다)."""
+    base_project = factories.make_project(box.store, owner=OWNER, code="F2-0")
+    monkeypatch.setitem(globals(), "BODIES", list(BODIES) + [("OLD_BRACKET", [20.0, -40.0, 1.15, 30.0, -35.0, 2.0], "AL")])
+    base = _freeze(box.store, base_project)
+    monkeypatch.setitem(globals(), "BODIES", [b for b in BODIES if b[0] != "OLD_BRACKET"])
+    target = _freeze(box.store, box.project)
+    diff = factories.make_diff(box.store, base["snapshot_id"], target["snapshot_id"], owner=OWNER)
+    diff_target = factories.make_target(box.store, "diff", diff["diff_id"], agents=factories.agents(("mech", "pcb")), owner=OWNER)
+    finding = _finding(box, diff_target, _ckey(base["ir"], "OLD_BRACKET"))["finding_id"]
+    mine = _locate(box, finding_id=finding)
+    assert mine["status"] == "located" and mine["body"]["path"].endswith("/OLD_BRACKET") and mine["snapshot_id"] == base["snapshot_id"]
+    hidden = _refused(lambda: _locate(box, EDITOR, finding_id=finding))
+    gone = _refused(lambda: _locate(box, EDITOR, finding_id="no-such-finding"))
+    assert (hidden.code, hidden.http_status) == (gone.code, gone.http_status) == ("E404", 404) and base_project not in hidden.message
+    write = routes.ItemLocationBody(finding_id=finding, part=None, point=routes.ItemPoint(x=1.0, y=2.0, z=3.0))
+    assert _refused(lambda: routes.put_item_location(box.project, write, ident=_who(EDITOR))).http_status == 404
+    factories.act_as_delegate(monkeypatch, EDITOR)
+    assert _call("risk_locate_for_section", project_id=box.project, finding_id=finding)["error"] == "E404"
+    routes.put_members(base_project, routes.MembersBody(members=[routes.MemberItem(email=EDITOR, role="viewer")]), ident=_who(OWNER))
+    assert _locate(box, EDITOR, finding_id=finding)["body"]["path"].endswith("/OLD_BRACKET")
+    assert _call("risk_locate_for_section", project_id=box.project, finding_id=finding)["status"] == "located"
+    assert routes.put_item_location(box.project, write, ident=_who(EDITOR))["changed"]
+
+
 def test_an_item_location_is_held_to_the_write_shape_on_import_and_on_read(box, items):
     """(반대 검토 R6) 항목 위치 칸은 들여오기로도 들어온다 — 종전에는 들인 {unit: inch} 를 mm 로 읽어 자리를 냈고 y · z 가 빠지면 KeyError(GET
     /locate 500)였다. 들여오기는 쓰기 본문과 같은 꼴만 받고 틀린 꼴은 그 칸만 버린다(location_invalid_dropped). 이미 저장된 틀린 꼴(손으로 넣은
@@ -753,7 +805,7 @@ def test_purge_blanks_paths_and_locations_and_transfer_moves_the_registration(bo
     """폐기는 등록의 몸체 경로 · 근거 · 사유와 항목 위치를 비우고(변환 값은 남는다), 이양은 등록을 새 주인에게 옮긴다."""
     _put(box)
     routes.put_item_location(box.project, routes.ItemLocationBody(target_key=items["target"], cluster_key=items["can"]["cluster_key"],
-                                                                  part="/PHONE/x", point=None), ident=_who(OWNER))
+                                                                  part=PCB, point=None), ident=_who(OWNER))
     routes.transfer_project(box.project, routes.TransferBody(to_email=EDITOR, reason="담당 교체"), ident=_who(OWNER))
     assert box.store.query_one("SELECT owner_sub FROM rr_board_transforms")["owner_sub"] == EDITOR
     assert _locate(box, EDITOR, x=30.0, y=-20.0)["status"] == "located"

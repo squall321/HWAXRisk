@@ -164,9 +164,10 @@ CASES: dict[tuple[str, str], tuple[Call, tuple[str, ...]]] = {
         ("project",)),
     ("DELETE", P + "/projects/{project_id}/board-transforms"): (
         lambda i, who: routes.delete_board_transform(i["project"], ident=who), ("project",)),
+    # 몸체 경로는 항목의 스냅샷에 있어야 적힌다(반대 검토 F2-9 — 없으면 422 item_part_unknown) — 점으로 적어 주인 · 편집자가 실제로 쓴다.
     ("PUT", P + "/projects/{project_id}/item-location"): (
         lambda i, who: routes.put_item_location(i["project"], routes.ItemLocationBody(
-            finding_id=i["human_finding"], part="/P/U1", point=None), ident=who), ("project", "human_finding")),
+            finding_id=i["human_finding"], part=None, point=routes.ItemPoint(x=1.0, y=2.0, z=3.0)), ident=who), ("project", "human_finding")),
     # 과제 주제(포털 docs/project-insight-graph contracts §9) — 과제 문이 풀이(게이트웨이)를 부르기 전이다. 떼고 차수만 적는 부름이라
     # 주인은 풀이 없이 지난다.
     ("PUT", P + "/projects/{project_id}/sp-subject"): (
@@ -562,7 +563,8 @@ MCP_CASES: dict[str, tuple[Callable[[dict], Any], tuple[str, ...]]] = {
     "risk_set_board_transform": (lambda i: srv.risk_set_board_transform(
         project_id=i["project"], board_body="/P/PCB", mirror_x=True, mirror_y=False, offset_x=82.13, offset_y=2.82, top_face="zmin"),
         ("project",)),
-    "risk_set_item_location": (lambda i: srv.risk_set_item_location(project_id=i["project"], part="/P/U1", point=None,
+    "risk_set_item_location": (lambda i: srv.risk_set_item_location(project_id=i["project"], part=None,
+                                                                    point={"x": 1.0, "y": 2.0, "z": 3.0},
                                                                     finding_id=i["human_finding"]), ("project", "human_finding")),
 }
 

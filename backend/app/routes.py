@@ -12,7 +12,7 @@ import re
 import secrets
 import sqlite3
 import time
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Callable, Literal, Mapping, Sequence
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
@@ -2554,6 +2554,31 @@ def _project_viewer(project_id: str, ident: identity.Identity) -> str:
     return email
 
 
+def _project_reads(ident: identity.Identity) -> Callable[[str], bool]:
+    """그 사람이 웹 읽기 문(구성원 — 보기 이상, 관리자는 구성원이 아니어도 — `_project_viewer`)으로 읽는 과제인가. 관리자가 구성원이 아닌 과제를
+    이것으로 읽으면 그 과제의 열람 줄을 남긴다(`_note_admin_read`)."""
+    email = _require_user(ident)
+    admin = _admin_reader(ident)
+
+    def reads(project_id: str) -> bool:
+        if project_role(project_id, email) is not None:
+            return True
+        if admin is None or get_store().query_one("SELECT id FROM rr_projects WHERE id = ?", (project_id,)) is None:
+            return False
+        _note_admin_read(admin, project_id)
+        return True
+
+    return reads
+
+
+def _item_readable(store: Any, item: Mapping[str, Any], project_id: str, reads: Callable[[str], bool]) -> None:
+    """항목 대상이 읽는 다른 과제(비교의 앞 판 과제)도 부른 사람이 읽어야 한다 — 아니면 없는 항목과 같은 404 다(반대 검토 F2-9 a — 비교는 두
+    과제를 다 읽는 사람이 연다: MCP mcp_scope_owner · 웹 _diff_reader. 앞 판 스냅샷의 몸체 자리를 못 읽는 과제에서 꺼내지 않는다)."""
+    if not all(reads(p) for p in locate_module.item_projects(store, item["target_key"]) if p != project_id):
+        raise locate_module.item_missing(finding_id=item.get("finding_id"), target_key=item.get("target_key"),
+                                         cluster_key=item.get("cluster_key"))
+
+
 def _locate_project(project_id: str) -> dict:
     row = get_store().query_one("SELECT id, owner_sub, status FROM rr_projects WHERE id = ?", (project_id,))
     if row is None:
@@ -2624,9 +2649,11 @@ def locate_input(*, finding_id: str | None = None, target_key: str | None = None
             "unit": board_transform_module.UNIT}
 
 
-def locate_payload(project_id: str, email: str, *, odb_job_id: str | None = None, stepforge_project_id: str | None = None,
-                   **inputs: Any) -> dict:
-    """`GET /projects/{id}/locate` 본체 — MCP `risk_locate_for_section` 과 같은 함수(문은 부르는 쪽이 지났다). 산 호출은 `email` 의 PAT 로만."""
+def locate_payload(project_id: str, email: str, *, reads: Callable[[str], bool], odb_job_id: str | None = None,
+                   stepforge_project_id: str | None = None, **inputs: Any) -> dict:
+    """`GET /projects/{id}/locate` 본체 — MCP `risk_locate_for_section` 과 같은 함수(과제 문은 부르는 쪽이 지났다). 산 호출은 `email` 의 PAT
+    로만. `reads` 는 부른 사람이 그 입구의 읽기 문으로 읽는 과제인가 — 항목이 비교 대상이면 앞 판 과제도 읽어야 한다(웹은 구성원 · 관리자,
+    MCP 는 MCP 시야)."""
     store = get_store()
     project = _locate_project(project_id)
     input_ = locate_input(**inputs)
@@ -2636,6 +2663,7 @@ def locate_payload(project_id: str, email: str, *, odb_job_id: str | None = None
         if input_["kind"] == "item":
             item = locate_module.item_row(store, project, finding_id=input_.get("finding_id"), target_key=input_.get("target_key"),
                                           cluster_key=input_.get("cluster_key"))
+            _item_readable(store, item, project_id, reads)
             return locate_module.locate_item(store, project, item, input_=input_, odb_job_id=board["odb_job_id"],
                                              stepforge_project_id=board["stepforge_project_id"], channel_factory=lazy)
         return locate_module.locate_on_board(store, project, input_=input_, odb_job_id=board["odb_job_id"],
@@ -2654,8 +2682,9 @@ def get_locate(project_id: str, finding_id: str | None = None, target_key: str |
     — F1 section_pair_view 에 그대로) · 창 · 변환 근거로 답한다. 못 정하면 status unknown 과 까닭이다. 보드 · CAD 과제는 비우면 과제의 원천에서.
     구성원(보기 이상)이 부르고 ODB 허브는 부른 사람의 PAT 로만 부른다."""
     email = _project_viewer(project_id, ident)
-    return locate_payload(project_id, email, finding_id=finding_id, target_key=target_key, cluster_key=cluster_key, refdes=refdes,
-                          net=net, x=x, y=y, side=side, odb_job_id=odb_job_id, stepforge_project_id=stepforge_project_id)
+    return locate_payload(project_id, email, reads=_project_reads(ident), finding_id=finding_id, target_key=target_key,
+                          cluster_key=cluster_key, refdes=refdes, net=net, x=x, y=y, side=side, odb_job_id=odb_job_id,
+                          stepforge_project_id=stepforge_project_id)
 
 
 @router.get("/projects/{project_id}/board-transforms")
@@ -2884,6 +2913,12 @@ def put_item_location(project_id: str, body: ItemLocationBody, ident: identity.I
                  "unit": board_transform_module.UNIT}
     item = locate_module.item_row(store, {"id": project_id, "owner_sub": project["owner_sub"]}, finding_id=picked.get("finding_id"),
                                   target_key=picked.get("target_key"), cluster_key=picked.get("cluster_key"))
+    _item_readable(store, item, project_id, _project_reads(ident))
+    if part is not None and locate_module.find_item_part(store, item["target_key"], part) is None:
+        # 그 항목의 스냅샷에 없는 몸체 경로는 적지 않는다 — 위치 찾기가 그것을 몸체 · F1 part 로 되실었다(반대 검토 F2-9).
+        raise AppError("item_part_unknown", f"그 몸체 경로가 항목의 스냅샷에 없습니다 — {part[:200]!r}. 스냅샷의 MCAD 부품 경로(local_key)를"
+                       " 적습니다.", 422, detail={"snapshots": locate_module.item_snapshots(store, item["target_key"]),
+                                                  "fix": "MCP risk_get_snapshot(또는 GET /api/snapshots/{id})의 부품 경로를 본다."})
     now = now_epoch()
     location = None if part is None and point is None else {"part": part, "point": point, "set_by": actor, "set_at": now}
     before = item["location"]

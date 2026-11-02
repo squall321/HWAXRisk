@@ -261,8 +261,9 @@ def locate_for_section(ident: identity.Identity, *, project_id: str, finding_id:
     """`GET /api/projects/{id}/locate` 와 같은 함수 — 읽기지만 ODB 허브를 그 사람의 PAT 로 부르므로 위임으로 확인된 신원만 받는다(F2)."""
     email = require_delegate(ident)
     _visible(email, project_id)
-    return routes.locate_payload(project_id, email, finding_id=finding_id, target_key=target_key, cluster_key=cluster_key,
-                                 refdes=refdes, net=net, x=x, y=y, side=side, odb_job_id=odb_job_id,
+    visible = set(routes.visible_projects({"kind": "user", "email": email}))
+    return routes.locate_payload(project_id, email, reads=visible.__contains__, finding_id=finding_id, target_key=target_key,
+                                 cluster_key=cluster_key, refdes=refdes, net=net, x=x, y=y, side=side, odb_job_id=odb_job_id,
                                  stepforge_project_id=stepforge_project_id)
 
 
