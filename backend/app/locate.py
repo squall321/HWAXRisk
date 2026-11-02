@@ -160,14 +160,38 @@ def _call(channel: Any, app_key: str, tool: str, args: Mapping[str, Any], calls:
     return None, why
 
 
+MM_WORDS: tuple[str, ...] = ("mm", "millimetre", "millimeter")
+
+
+def _odb_unit_problem(*replies: Any) -> str | None:
+    """ODB 허브 답이 mm 가 아닌 길이 단위를 말하면 그 칸(units · unit 과 값) — 허브는 길이를 다 mm 로 준다(레퍼런스 §3)지만 답이 다르게 말하면
+    mm 로 읽지 않는다(반대 검토 F2-9 — 종전에는 get_net 만 보았다). 칸이 없으면 mm 다."""
+    for reply in replies:
+        if not isinstance(reply, Mapping):
+            continue
+        for key in ("units", "unit"):
+            value = reply.get(key)
+            if value is not None and str(value).strip().lower() not in MM_WORDS:
+                return f"{key}={str(value)[:20]!r}"
+    return None
+
+
+def _count(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
 def read_odb_board(channel: Any, app_key: str, job_id: str, calls: list[dict]) -> dict:
-    """ODB 보드의 외곽 크기 · 두께 · 외곽 bbox(OH-04 — 있을 때만) · 고정홀. 못 읽은 칸은 None · 빈 목록이고 `notes` 가 까닭이다."""
+    """ODB 보드의 외곽 크기 · 두께 · 외곽 bbox(OH-04 — 있을 때만) · 고정홀. 못 읽은 칸은 None · 빈 목록이고 `notes` 가 까닭이다. 고정홀이
+    잘렸으면(쪽 상한을 넘었거나 받은 수가 허브가 말한 수 — total, 없으면 hole_count — 보다 적다) holes_truncated 와 notes 로 말한다."""
     out: dict[str, Any] = {"job_id": job_id, "size": None, "outline_bbox": None, "thickness_mm": None, "holes": [],
-                           "holes_read": False, "notes": []}
+                           "holes_read": False, "holes_truncated": False, "notes": []}
     volume, why = _call(channel, app_key, "get_volume_result", {"job_id": job_id}, calls)
     message = ecad_adapter.body_error(volume) if why is None else why
     board = volume.get("board") if why is None and isinstance(volume, Mapping) else None
-    if message is not None or not isinstance(board, Mapping):
+    unit = _odb_unit_problem(volume, board) if message is None else None
+    if unit is not None:
+        out["notes"].append(f"외곽 크기를 읽지 못했다 — get_volume_result 가 mm 가 아닌 단위로 답했다({unit})")
+    elif message is not None or not isinstance(board, Mapping):
         out["notes"].append(f"외곽 크기를 읽지 못했다 — {message or 'get_volume_result 에 board 가 없다'}")
     else:
         w, h = _num(board.get("x_mm")), _num(board.get("y_mm"))
@@ -178,23 +202,41 @@ def read_odb_board(channel: Any, app_key: str, job_id: str, calls: list[dict]) -
         if outline is not None and outline[0] < outline[2] and outline[1] < outline[3]:
             out["outline_bbox"] = outline
     holes: list[list[float]] = []
+    received, claimed = 0, None
     for page in range(1, HOLES_PAGES_MAX + 1):
         reply, why = _call(channel, app_key, "get_mounting_holes",
                            {"job_id": job_id, "page": page, "page_size": HOLES_PAGE_SIZE}, calls)
         message = ecad_adapter.body_error(reply) if why is None else why
+        unit = _odb_unit_problem(reply) if message is None else None
+        if unit is not None:
+            # 다른 단위를 말하는 쪽이 섞인 목록은 근거가 아니다 — 앞 쪽까지 버린다.
+            out["notes"].append(f"고정홀을 읽지 못했다 — get_mounting_holes 가 mm 가 아닌 단위로 답했다({unit})")
+            holes, out["holes_read"] = [], False
+            break
         if message is not None or not isinstance(reply, Mapping):
             out["notes"].append(f"고정홀을 읽지 못했다 — {message or 'get_mounting_holes 답이 객체가 아니다'}")
+            if holes:
+                out["holes_truncated"] = True     # 앞 쪽은 쓴다(종전과 같다) — 잘린 목록이다
             break
         out["holes_read"] = True
-        for hole in reply.get("holes") or ():
-            if isinstance(hole, Mapping):
-                x, y, d = _num(hole.get("x")), _num(hole.get("y")), _num(hole.get("diameter_mm"))
-                if x is not None and y is not None and d is not None and d > 0:
-                    holes.append([x, y, d])
+        if page == 1:
+            claimed = _count(reply.get("total")) if _count(reply.get("total")) is not None else _count(reply.get("hole_count"))
+        entries = [hole for hole in reply.get("holes") or () if isinstance(hole, Mapping)]
+        received += len(entries)
+        for hole in entries:
+            x, y, d = _num(hole.get("x")), _num(hole.get("y")), _num(hole.get("diameter_mm"))
+            if x is not None and y is not None and d is not None and d > 0:
+                holes.append([x, y, d])
         if reply.get("has_more") is not True:
             break
     else:
         out["notes"].append(f"고정홀이 {HOLES_PAGES_MAX}쪽을 넘어 앞의 {len(holes)}개만 봤다")
+        out["holes_truncated"] = True
+    if out["holes_read"] and not out["holes_truncated"] and claimed is not None and received < claimed:
+        # 허브가 말한 수보다 적게 받았다 — 쪽 넘김 칸(has_more) 없이 잘린 답이다(반대 검토 F2-9 — 종전에는 has_more 만 보았다). 받은 구멍만으로도
+        # 짝 · 모호함은 그대로 재므로 거절하지 않고 말한다(근거가 줄 뿐 틀린 짝이 생기지는 않는다).
+        out["notes"].append(f"고정홀이 {claimed}개라는데 {received}개만 받았다 — 쪽 넘김 칸 없이 잘린 답이라 짝이 모자랄 수 있다")
+        out["holes_truncated"] = True
     out["holes"] = holes
     return out
 
@@ -256,7 +298,7 @@ def verify_inputs(evidence: Mapping[str, Any]) -> tuple[dict, dict]:
     """근거 → board_transform.verify 의 두 입력."""
     odb, cad = evidence["odb"], evidence["cad"]
     return ({"size": odb["size"], "outline_bbox": odb["outline_bbox"], "thickness_mm": odb["thickness_mm"],
-             "holes": [tuple(h) for h in odb["holes"]]},
+             "holes": [tuple(h) for h in odb["holes"]], "holes_truncated": bool(odb.get("holes_truncated"))},
             {"bbox": cad["bbox"], "holes": [tuple(h) for h in cad["holes"]], "unit_suspect": cad["unit_suspect"]})
 
 
@@ -511,6 +553,9 @@ def _part_detail(channel: Any, app_key: str, job_id: str, refdes: str, calls: li
     message = ecad_adapter.body_error(detail)
     if message is not None or not isinstance(detail, Mapping):
         return None, unknown("refdes_not_found", message=f"{UNKNOWN['refdes_not_found']} — {message or '답이 객체가 아니다'}")
+    unit = _odb_unit_problem(detail)
+    if unit is not None:
+        return None, unknown("odb_unit_unexpected", message=f"{UNKNOWN['odb_unit_unexpected']}({unit})")
     x, y = _num(detail.get("x")), _num(detail.get("y"))
     pins = [(px, py) for px, py in ((_num(p.get("x")), _num(p.get("y"))) for p in detail.get("pins") or () if isinstance(p, Mapping))
             if px is not None and py is not None]
@@ -551,9 +596,9 @@ def _net_point(channel: Any, app_key: str, job_id: str, net: str, calls: list[di
     message = ecad_adapter.body_error(reply)
     if message is not None or not isinstance(reply, Mapping):
         return None, unknown("net_not_found", message=f"{UNKNOWN['net_not_found']} — {message or '답이 객체가 아니다'}")
-    units = str(reply.get("units") or "mm").strip().lower()
-    if units not in ("mm", "millimetre", "millimeter"):
-        return None, unknown("odb_unit_unexpected", message=f"{UNKNOWN['odb_unit_unexpected']}(units={units[:20]!r})")
+    unit = _odb_unit_problem(reply)
+    if unit is not None:
+        return None, unknown("odb_unit_unexpected", message=f"{UNKNOWN['odb_unit_unexpected']}({unit})")
     pins = [(px, py) for px, py in ((_num(p.get("x")), _num(p.get("y"))) for p in reply.get("pins") or () if isinstance(p, Mapping))
             if px is not None and py is not None]
     if not pins:

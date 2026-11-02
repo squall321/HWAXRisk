@@ -429,7 +429,9 @@ def verify(t: Transform, odb: Mapping[str, Any], cad: Mapping[str, Any], *, max_
                                   if pos["pairs"] else None),
                        "unmatched_odb": [{"x": _r(odb_holes[i][0]), "y": _r(odb_holes[i][1]), "d": _r(odb_holes[i][2])}
                                          for i in pos["lone_odb"]],
-                       "unmatched_cad": len(pos["lone_cad"])}
+                       "unmatched_cad": len(pos["lone_cad"]),
+                       # ODB 고정홀 목록이 잘렸는가(받은 수 < 허브가 말한 수 · 쪽 상한) — 거절하지 않고 알린다(받은 구멍만으로 짝 · 모호함을 잰다).
+                       "odb_truncated": bool(odb.get("holes_truncated"))}
     if pos["hole_error_mm"] is not None:
         errors.append(pos["hole_error_mm"])
         if pos["hole_error_mm"] > max_error:

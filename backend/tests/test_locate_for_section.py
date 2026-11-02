@@ -549,6 +549,46 @@ def test_a_registration_without_its_verification_record_is_not_used(box):
     assert "fix" not in purged["reason"] and "폐기" in purged["reason"]["message"]
 
 
+class _HubChannel:
+    """게이트웨이 없이 read_odb_board 를 부르는 채널 대역 — 도구 이름 끝으로 답을 고른다."""
+
+    def __init__(self, holes_reply: dict, volume: dict | None = None) -> None:
+        self.holes_reply, self.volume = holes_reply, volume or VOLUME
+
+    def call(self, name: str, args: dict, deadline: float | None = None) -> dict:
+        return {"ok": True, "result": copy.deepcopy(self.volume if name.endswith("get_volume_result") else self.holes_reply)}
+
+
+def test_a_hole_list_shorter_than_the_hubs_count_is_flagged_as_truncated():
+    """(반대 검토 R9) 허브 답(레퍼런스 §4.10 꼴 — 쪽 넘김 칸이 없다)이 hole_count 30 인데 holes 가 20 개면 잘린 답이다 — 종전에는 has_more 만
+    보아 다 읽은 것으로 쳤다(notes 빔). 받은 수가 허브가 말한 수(total, 없으면 hole_count)보다 적으면 holes_truncated 와 notes 로 말하고 검증의
+    checks.holes.odb_truncated 에 싣는다 — 받은 구멍만으로도 짝 · 모호함은 그대로 재므로 거절하지는 않는다. 수가 맞으면 말하지 않는다."""
+    from app import locate
+
+    short = {"hole_count": 30, "cutout_count": 0, "holes": [{"x": 8.0, "y": -44.0, "diameter_mm": 1.6}] * 20}
+    odb = locate.read_odb_board(_HubChannel(short), "odb-hub", JOB, [])
+    assert len(odb["holes"]) == 20 and odb["holes_truncated"] is True and odb["holes_read"] is True
+    assert [n for n in odb["notes"] if "30" in n and "20" in n]
+    odb_in, _cad_in = locate.verify_inputs({"odb": odb, "cad": {"bbox": PCB_BOX, "holes": [], "unit_suspect": False}})
+    assert bt.verify(bt.Transform(True, False, 82.13, 2.82, "zmin"), odb_in, {"bbox": PCB_BOX, "holes": []})["checks"]["holes"]["odb_truncated"]
+    whole = locate.read_odb_board(_HubChannel(copy.deepcopy(HOLES)), "odb-hub", JOB, [])
+    assert whole["holes_truncated"] is False and whole["notes"] == [] and len(whole["holes"]) == 3
+
+
+def test_odb_answers_that_name_another_length_unit_are_not_read_as_millimetres(box, frozen):
+    """ODB 허브는 길이를 다 mm 로 준다(레퍼런스 §3) — 그래도 답이 units · unit 칸으로 다른 단위를 말하면 mm 로 읽지 않는다(종전에는 get_net
+    만 보았다). 부품 답은 unknown odb_unit_unexpected, 외곽 크기 · 고정홀은 못 읽은 것으로 쳐서 등록 검증이 거절한다."""
+    _put(box)
+    box.gw.answers["odbhub_get_part_detail"] = lambda a: {**copy.deepcopy(DETAILS["U1001"]), "units": "inch"}
+    assert _locate(box, refdes="U1001")["reason"]["code"] == "odb_unit_unexpected"
+    box.gw.answers["odbhub_get_volume_result"] = {**VOLUME, "unit": "inch"}
+    assert "odb_size_unread" in _refused(lambda: _put(box)).detail["verification"]["reasons"]
+    box.gw.answers["odbhub_get_volume_result"] = VOLUME
+    box.gw.answers["odbhub_get_mounting_holes"] = {**HOLES, "units": "mil"}
+    refused = _refused(lambda: _put(box)).detail
+    assert "position_unverified" in refused["verification"]["reasons"] and refused["evidence"]["odb"]["holes"] == []
+
+
 def test_an_imported_registration_is_not_used_until_it_is_verified_here(box):
     """다른 박스에서 들여온 등록(검증 칸 없음 — status NULL)은 위치 찾기가 쓰지 않는다(transform_unverified · 다시 적어 검증한다)."""
     _put(box)
