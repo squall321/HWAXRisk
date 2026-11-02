@@ -481,14 +481,14 @@ def test_transfer_moves_the_owner_anchor_and_every_child_row(risk_store, monkeyp
     assert set(out["rows_updated"]["tables"]) >= set(routes.TRANSFER_PROJECT_TABLES)
 
     assert risk_store.query_one("SELECT owner_sub FROM rr_projects WHERE id = ?", (project_id,))["owner_sub"] == EDITOR
-    # 하위 11표에 옛 소유자가 남아 있으면 불변식 위반이다(SQL 카운트로 판정).
+    # 하위 12표에 옛 소유자가 남아 있으면 불변식 위반이다(SQL 카운트로 판정).
     mismatch = 0
     for table in routes.TRANSFER_PROJECT_TABLES:
         mismatch += int(risk_store.query_one(
             f"SELECT COUNT(*) AS n FROM {table} WHERE project_id = ? AND owner_sub != ?",
             (project_id, EDITOR))["n"])
     assert mismatch == 0
-    assert len(routes.TRANSFER_PROJECT_TABLES) == 11
+    assert len(routes.TRANSFER_PROJECT_TABLES) == 12          # v7 — F2 변환 등록부
     roles = {m["email"]: m["role"] for m in routes.get_members(project_id, ident=_ident(EDITOR))["members"]}
     assert roles == {EDITOR: "owner", OWNER: "editor"}
     assert risk_store.query_one("SELECT COUNT(*) AS n FROM rr_audit WHERE action = 'project.transfer'")["n"] == 1

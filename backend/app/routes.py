@@ -1471,6 +1471,8 @@ def _queue_visibility_retag(store: Any, project_id: str, visibility: str) -> int
 TRANSFER_PROJECT_TABLES: tuple[str, ...] = (
     "rr_project_members", "rr_sources", "rr_requirements", "rr_snapshots", "rr_snapshot_jobs",
     "rr_dim_defs", "rr_iface_ledger", "rr_targets", "rr_findings", "rr_character", "rr_labels",
+    # v7(F2 단면 자리 찾기) — 변환 등록부. 빠뜨리면 이양 뒤 새 주인의 반출 · 위치 찾기에서 사라진다.
+    "rr_board_transforms",
 )
 # 과제를 직접 가리키지 않고 스냅샷·타깃을 거쳐 달린 표. 같은 트랜잭션에서 함께 옮긴다.
 TRANSFER_DERIVED: tuple[tuple[str, str], ...] = (
@@ -1898,10 +1900,11 @@ PURGE_BLANK_SQL: tuple[tuple[str, str], ...] = (
                        " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_seat_opinions", "UPDATE rr_seat_opinions SET opinion_json = '', excerpt_for_rag = NULL"
                          " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
-    ("rr_findings", "UPDATE rr_findings SET finding_json = '' WHERE project_id = ?"),
+    # 항목 위치(v7 location_json)는 CAD 몸체 경로(부품 이름이 든다)와 좌표다 — 주장 본문과 함께 비운다.
+    ("rr_findings", "UPDATE rr_findings SET finding_json = '', location_json = NULL WHERE project_id = ?"),
     # 등록부 행의 병합 본문 — 대표 주장 · 근거 문장 · 인용(카드 인용 포함) · 쟁점 패널 덮어쓰기 앞 값이 든다(review1 M7). NOT NULL 이라
     # 빈 객체로 비운다 — 판정 열(심각도 · 판정 · 지지 수)과 행은 남는다.
-    ("rr_registry", "UPDATE rr_registry SET merged_json = '{}'"
+    ("rr_registry", "UPDATE rr_registry SET merged_json = '{}', location_json = NULL"
                     " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     # 인용 역색인의 인용 글 — finding_json 의 cites 와 같은 글이다(패널 finding 의 인용, 카드 대조 finding 의 card: 인용 — 카드 원문
     # 그대로, M2.md 5절 #18). 행·참조·원래 길이(quote_chars)는 남는다.
@@ -1951,6 +1954,9 @@ PURGE_BLANK_SQL: tuple[tuple[str, str], ...] = (
     ("rr_targets", "UPDATE rr_targets SET closure_json = NULL WHERE project_id = ?"),
     ("rr_unit_live", "UPDATE rr_unit_live SET lines_gz = NULL, plan_json = '[]', gaps_json = NULL"
                      " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    # v7(F2 단면 자리 찾기) — 변환 등록부의 CAD 몸체 경로(부품 이름이 든다) · 검증 근거(경로 · 좌표) · 강제 사유. 변환 값과 행은 남는다.
+    ("rr_board_transforms", "UPDATE rr_board_transforms SET board_body_path = '', verify_json = NULL, reason = NULL"
+                            " WHERE project_id = ?"),
 )
 
 
