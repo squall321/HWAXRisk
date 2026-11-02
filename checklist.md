@@ -1077,14 +1077,14 @@ B25 가 남긴 작은 것 하나(2026-10-31, context-notes BL-2) — 캡처가 �
 
 > 설계 `docs/f2-locate-for-section.md`. 결정과 까닭은 context-notes 'F2-1' 부터. F1(`section_pair_view`)은 StepForge 세션 몫이다.
 
-- [ ] 변환 계산 — 손대칭 · 검사(크기 · 평면 · 외곽 · 구멍 · 뒤집기 모호함) · 제안 · 평면 고르기(순수 함수 + 손 셈 예 시험)
-- [ ] 스키마 v7 — rr_board_transforms · rr_findings / rr_registry.location_json(허용 연산 · PUSHED_DDL_SHA256[7] · 반출 since · 이양 · 폐기 ·
-      들여오기는 검증 칸을 받지 않음) · 재설계 M4 의 rr_reports.ra_* 는 v8 로
-- [ ] 등록부 REST — 목록 · 제안 · 적기(검증 · 강제 · 감사) · 떼기 — 편집자 이상, 그 사람의 PAT 만
-- [ ] 위치 찾기 REST — 항목(위치 · 주제) · refdes · 넷 · 좌표 → MCAD 점 · 몸체 · 평면 둘 · F1 넘김 꼴(unit mm) · unknown 까닭
-- [ ] 항목 위치 쓰기 — PUT item-location(편집자 이상 · 감사)
-- [ ] MCP 넷 — risk_locate_for_section · risk_propose_board_transform(읽기, 위임 신원) · risk_set_board_transform · risk_set_item_location(쓰기) —
-      도구 표 · 인자 계약 · 남 · 구성원 · 편집자 · 관리자 표 · 매니페스트 · D-18 이름 시험
+- [x] 변환 계산 — 손대칭 · 검사(크기 · 평면 · 외곽 · 구멍 · 뒤집기 모호함) · 제안 · 평면 고르기(순수 함수 + 손 셈 예 시험)(F2-3 — d87bc3e)
+- [x] 스키마 v7 — rr_board_transforms · rr_findings / rr_registry.location_json(허용 연산 · PUSHED_DDL_SHA256[7] · 반출 since · 이양 · 폐기 ·
+      들여오기는 검증 칸을 받지 않음) · 재설계 M4 의 rr_reports.ra_* 는 v8 로(F2-4 — 27f55bb)
+- [x] 등록부 REST — 목록 · 제안 · 적기(검증 · 강제 · 감사) · 떼기 — 편집자 이상, 그 사람의 PAT 만(F2-5 — 11f47f8)
+- [x] 위치 찾기 REST — 항목(위치 · 주제) · refdes · 넷 · 좌표 → MCAD 점 · 몸체 · 평면 둘 · F1 넘김 꼴(unit mm) · unknown 까닭(F2-6 — 11f47f8)
+- [x] 항목 위치 쓰기 — PUT item-location(편집자 이상 · 감사)(F2-7 — 11f47f8)
+- [x] MCP 넷 — risk_locate_for_section · risk_propose_board_transform(읽기, 위임 신원) · risk_set_board_transform · risk_set_item_location(쓰기) —
+      도구 표 · 인자 계약 · 남 · 구성원 · 편집자 · 관리자 표 · 매니페스트 · D-18 이름 시험(F2-8 — 11f47f8)
 - [ ] 전체 시험(공유 잠금, -q 없이)
 - [ ] 반대 검토 하나(사본에서 — 부호 · 단위 · 권한 · 신원 · 스키마 굳힘 · 말없는 엉뚱한 자리) → 재현한 것 고침
 - [ ] (cae00) get_part_detail.side · get_net 인자와 핀 좌표 · get_mounting_holes 쪽 넘김 · 실제 보드로 손 셈 되찾기 — 설계 6절

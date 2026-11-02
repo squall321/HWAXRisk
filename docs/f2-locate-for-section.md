@@ -17,7 +17,7 @@ ODB top 면 = CAD 보드 몸체의 아래 면이었다. F2 는 그 셈과 단면
 | `x` · `y` (+ `side`) | 보드 좌표(ODB, mm). side 는 top · bottom(선택) |
 
 함께 `project_id`(필수), `odb_job_id` · `stepforge_project_id`(선택 — 비우면 과제의 원천 카드 ecad · mcad 에서). 항목은 그 항목의 스냅샷 원천이
-먼저다.
+먼저다. 산 호출은 refdes · 넷 · 등록 · 제안에만 있다 — 보드 좌표 · 항목 위치 · MCAD 주제는 게이트웨이를 부르지 않아 PAT 가 없어도 답한다.
 
 **출력** — 늘 `status` 가 있다.
 
@@ -43,7 +43,9 @@ bbox, 좌표는 보드의 긴 변. 어느 것을 썼는지 `plane_basis` 에 적
 - 식 — `x_CAD = s_x · x_ODB + offset_x`, `y_CAD = s_y · y_ODB + offset_y`(s = 뒤집으면 −1). 부품의 z 는 그 부품 면이 닿는 CAD 면의 z 다 —
   top 면 부품은 `top_face`, bottom 면 부품은 그 반대 면.
 - 누가 — 과제 주인 · 편집자(관리자는 편집자). 사람이 적거나(`source: manual`) 제안(`GET …/board-transforms/proposal`)에서 골라
-  적는다(`source: proposed`). 적기는 늘 이 박스에서 다시 검증한다. 바뀌면 감사 `project.board_transform` 한 줄.
+  적는다(`source: proposed`). 적기는 늘 이 박스에서 다시 검증한다. 바뀌면 감사 `project.board_transform` 한 줄(앞 · 뒤 · 까닭 · 강제 사유).
+- 입력 이름 — 몸체 경로는 REST 본문 · 질의와 MCP 인자에서 `board_body` 다(저장 칸 · 답의 칸은 `board_body_path`). 인자 이름에 `pat` 이 든
+  글자가 오지 못하게 하는 도구 시험(비밀 인자 검사)이 `path` 를 걸러서다.
 - 읽기 — 과제 구성원(보기 이상 · 관리자 열람 줄). MCP 는 그 사람이 보는 과제(소유 · 구성원 · 조직 공개).
 
 **왜 회전이 없나.** 등록부는 계약대로 원점 · 뒤집기 · 면만 둔다. 90° 돌아간 보드는 이 꼴로 못 적는다 — 외곽 크기 검사가 가로 · 세로가 바뀐
@@ -93,7 +95,8 @@ ODB 허브와 StepForge 를 **그 사람의 포털 PAT** 로 부른다(ECAD 보�
 | `net` | `odbhub_get_net` 의 `pins[]`{x, y} bbox | `net_not_found` · `net_pins_absent`(핀 좌표가 없다 — ODB 허브 몫) |
 | `x` · `y` | 그대로 변환 — side 가 없으면 z 는 보드 두께 가운데 | 변환 쪽 까닭 |
 
-몸체는 그 CAD 과제의 최근 스냅샷(같은 StepForge 과제를 읽은 것)에서 찾는다. 스냅샷의 보드 몸체 bbox 가 등록 때 읽은 것과 오차 상한 넘게
+몸체는 그 CAD 과제의 최근 스냅샷(같은 StepForge 과제를 읽은 것)에서 찾는다 — 산 StepForge 호출로 찾지 않는다(`part_location` 은 500행에서
+자르고, 스냅샷은 이미 얼린 원장이라 같은 답이 다시 나온다). 스냅샷의 보드 몸체 bbox 가 등록 때 읽은 것과 오차 상한 넘게
 다르면 찾지 않는다(`snapshot_board_moved`). 부품 면 바로 바깥(0.05 mm)을 품는 몸체 가운데 가장 작은 것이 그 부품 크기에 맞고 자리가 그 몸체의
 가운데 반 안일 때만 `body` 다 — 아니면 null 과 후보(bbox 가 품을 뿐이다). MCAD 항목은 그 몸체가 곧 `body` 다.
 
@@ -116,6 +119,8 @@ ODB 허브와 StepForge 를 **그 사람의 포털 PAT** 로 부른다(ECAD 보�
   (`part_info` · `corner_proximity`)의 꼴이다.
 - dev 에 없는 것 — ODB 허브는 cae00 에서만 닿는다. 그래서 아래는 cae00 에서 처음 확인한다.
   - `get_part_detail` 에 `side` 칸이 있는지(없으면 그 보드의 스냅샷 부품 노드 side 를 쓴다 — 없으면 `side_unknown`) · 핀 좌표가 보드 좌표인지.
+  - bottom 면 부품의 x · y 가 top 에서 본 같은 좌표계인지(ODB++ 규약 — 뒤집어 본 좌표면 bottom 부품이 그 축으로 거울상이 된다). 아는 bottom
+    부품 하나의 CAD 몸체 자리로 확인한다.
   - `get_net` 의 인자 이름(`net` 으로 부른다)과 핀 좌표(`pins[].x · y`)가 있는지 — 없으면 넷은 늘 `net_pins_absent` 다.
   - `get_mounting_holes` 의 쪽 넘김 칸(`has_more`)과 `diameter_mm` 가 CAD 구멍 지름과 같은 기준(마감 · 드릴)인지.
   - OH-04 외곽 bbox 의 자리와 꼴(`get_volume_result.board.outline_bbox` = [x_min, y_min, x_max, y_max])은 ODB 허브가 정해야 한다 — 그 전에는
