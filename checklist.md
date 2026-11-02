@@ -1056,3 +1056,17 @@ B25 가 남긴 작은 것 하나(2026-10-31, context-notes BL-2) — 캡처가 �
 - [ ] 브라우저로 못 본 것 — 이력 탭의 열람 줄 · 쓰기 줄 · '관리자 권한' 배지(서버 렌더 시험까지, AA-7)
 - [x] 리스크 전체 시험 한 번(공유 잠금, -q 없이, 2aa345d 의 트리) — 4,233 통과 · xfail 4 · 실패 0(rc 0, 13분 29초, AA-6)
 - [x] 리스크 전체 시험 한 번(공유 잠금, -q 없이, 78eee38 의 트리) — 4,282 통과 · xfail 4 · 실패 0(rc 0, 14분 3초, AA-8)
+
+
+## 과제 주제(SP 과제 · 차수) — 과제 인사이트 그래프 M2b 11-02(가지 `wt1102/insight-m2`, main d30bef6 위)
+
+> 포털 `docs/project-insight-graph/` contracts §9 의 리스크 앱 몫. 결정과 까닭은 context-notes 'SP-1' 부터.
+
+- [x] 스키마 v6 — rr_projects.sp_task + 색인(허용 연산 · 나간 판 그대로 · PUSHED_DDL_SHA256[6] 은 나가지 않았다는 주석과)(SP-1 — 13a8a42)
+- [x] 차수 정규화 — stage 를 읽을 때 norm_round(에이전트와 같은 규칙 — 형제 리포 원문과 견주는 시험)(SP-2 — 785e0e5)
+- [x] 쓰기 — PUT /api/projects/{id}/sp-subject · MCP risk_set_project_subject · GET 지금 값과 힌트(SP-3 ~ SP-5 — 860e273)
+- [x] 읽기 — MCP risk_find_projects_by_subject(시야 · 거름 · 대상 · 등록부 앞 행 · 쪽)(SP-6 — 0f79ef5)
+- [x] D-18 — 좌석 길(브리프 · 패널 질문 · 스냅샷 · 비교)에 sp_task 없음(SP-7 — 982111c)
+- [ ] (화면 세션) 과제 화면의 주제 칸(GET · PUT sp-subject — 409 sp_pat_absent · 422 sp_task_not_confirmed · round_invalid) · 이력 탭 이름표
+      `project.sp_subject` — 더하면 tests/test_audit_action_labels.py 의 LABEL_PENDING 에서 뺀다
+- [ ] 리스크 전체 시험 한 번(공유 잠금, -q 없이) — 부른 세션 몫

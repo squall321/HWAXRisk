@@ -6101,3 +6101,69 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
   문은 (관리자, 과제, 한국 날)마다 `rr_audit(scope='project', action='admin.write' | 'admin.read', after={day})` 한 행씩이고(한 문장 INSERT …
   SELECT … WHERE NOT EXISTS — 대상 감사 · '사람 개입 요약' · 반출에는 들지 않고 과제 이력에만 선다), 그 쓰기가 남기는 감사 행에는 after 에
   `via: "admin"` 을 싣는다(조회는 줄의 `via` 로 올린다, HWAXRisk context-notes AA-1 ~ AA-8)."
+
+
+## 과제 주제(SP 과제 · 차수) — 과제 인사이트 그래프 M2b 11-02(가지 `wt1102/insight-m2`, main d30bef6 위, 2026-11-02)
+
+> 사용자 승인 11-02. 정본 계획 · 계약은 포털 `docs/project-insight-graph/`(PLAN §4.6 · §4.7 'M2b', contracts §8 · §9)이고 에이전트 서버 ·
+> 게이트웨이 · 포털 몫은 그 세션이 같은 계약으로 짓는다. 이 리포 몫은 넷 — 스키마 v6 · 차수 정규화 · 쓰기(REST · MCP) · 읽기 MCP 와 D-18 시험.
+> 코드 커밋 13a8a42 · 785e0e5 · 860e273 · 0f79ef5 · 982111c, 번호는 SP-1 부터다.
+
+### SP-1. 스키마 v6 은 칸 하나와 색인 하나다
+- `rr_projects.sp_task TEXT`(SP 허브 plm_task key — 운영 허브는 과제명, 모르면 NULL) · `ix_rr_projects_sp_task`. 허용 연산(ADD COLUMN · CREATE
+  INDEX IF NOT EXISTS)만이고 나간 판 v1 ~ v5 는 그대로다. `PUSHED_DDL_SHA256[6]` 은 '아직 나가지 않았다' 주석과 함께 — main 에 오르는 날 굳는다.
+- 재설계 M4 가 v6 에 두기로 적었던 `rr_reports.ra_*` 는 v7 로 간다(v6 머리 주석 · CLAUDE.md 스키마 절). 판 번호를 못 박던 두 시험 줄(반출 머리
+  schema_version == 5 · v5 이행의 LATEST == 5)은 앞 판들이 한 대로 고쳤다.
+
+### SP-2. 차수는 새 칸 없이 stage 를 읽을 때 — 에이전트와 글자까지 같은 규칙
+- `app/sp_subject.py` 의 `norm_round` = 에이전트 `delib_subject.norm_round`(NFKC → 유니코드 White_Space 빼기 → 소문자 → 열한 코드). 시험이 형제 리포
+  원문에서 STAGES · `_SPACE_RE` · `norm_round` 만 AST 로 떼어 돌려 견준다(모듈을 import 하지 않는다 — 그 모듈의 다른 import 가 이 venv 에 없어도
+  되게, 원문이 없으면 건너뜀).
+- 과제 만들기의 stage 는 종전대로 글이다(포털 PG-33 — 웹 폼의 'dv' · 'pre1'). 꼴이 아닌 stage 는 읽을 때 차수 모름. 코드로 적는 길은 쓰기의 round 다
+  (꼴이 아니면 422 round_invalid · 비우면 stage 그대로).
+
+### SP-3. key 는 그 사람의 PAT 로 앱이 스스로 부른 풀이의 결과 행에서만
+- 자격은 ECAD 보드와 같다 — `_ecad_mcp_channel` 의 PAT 판정을 `_person_pat` 하나로 뗐고(동작 그대로) SP 풀이 · 힌트가 같은 함수를 쓴다. 박스 읽기
+  PAT 로 내려가지 않는다 — 없거나 곧 끝나면 409 `sp_pat_absent`(detail fix portal_pat)이고 게이트웨이에 아무것도 보내지 않는다.
+- 부름 — 게이트웨이 호출 전용 별칭 `heaxstep_forge_find_plm_task({query, limit: 50, full: true})` 를 `McpHttpClient`(ECAD · RA 와 같은 전송)로, 도구
+  지도 없이, 기한 20초. 결과 행 tasks[] 가운데 key 가 글자 그대로 같은 행이 꼭 하나이고 그 행이 비활성이 아닐 때만 적는다(같은 key 둘이면 하나가
+  비활성이어도 고르지 않는다 — 에이전트와 같은 규칙). query 되싣기는 근거가 아니다. 아니면 422 `sp_task_not_confirmed` 이고 까닭에 결과 행의 key ·
+  합쳐진 곳을 싣지 않는다(그 까닭을 StepForge 허가 없는 사람이 볼 수 있다).
+- 풀이 지문 {tool, at, sha256} — sha256 은 구조화 답의 열쇠 정렬 · 공백 없는 JSON 이다(rr_brief_calls 원문 지문과 같은 꼴). 에이전트는 답 글의
+  바이트를 해시하므로 두 지문은 같은 값이 아니다 — 같은 풀이인지는 도구 · 때로 본다.
+
+### SP-4. 쓰기 문은 과제 주인 · 편집자다(ECAD 보드와 다르다)
+- 계약 §9 와 PLAN §4.7 이 '주인 · 편집자' 다. 이 앱의 편집자 쓰기 문(`_project_writer` — MB-14, 관리자는 편집자 · 하루 한 줄 · via 표시)을 쓴다.
+  ECAD 보드 붙이기는 MB-14 가 주인만 남긴 쓰기다(그 표기 '포털 ecad-1031 — 그 사람 토큰') — 자격 길(그 사람의 PAT)은 같게 쓰되 문은 계약대로
+  편집자까지 연다. 풀이는 부른 사람(편집자)의 PAT 로 한다 — 그 사람이 StepForge 를 보는 만큼만 적는다.
+- 폐기된 과제는 409 project_purged(PATCH 와 같다). 일반 PATCH 칸에는 넣지 않았다(사람 글이 key 로 들어간다 — 시험이 지킨다).
+- 감사 project.sp_subject — 바뀌었을 때만 한 줄(앞 · 뒤 sp_task · stage · 풀이 지문, 입구는 신원 출처 — MCP 는 (mcp, 0)). 같은 값을 다시 보내면 풀이는
+  다시 부르고(지금도 산 key 인지가 근거다) 감사는 없다. 이력 탭 이름표는 화면 세션 몫이라 `tests/test_audit_action_labels.py` 의 LABEL_PENDING 에
+  청했다 — 화면이 이름표를 더하면 그 줄을 빼야 시험이 통과한다(면제가 남지 않게).
+
+### SP-5. 읽기 — 지금 값과 후보 힌트
+- `GET /api/projects/{id}/sp-subject` → {project_id, sp_task, stage, round, hint, hint_note}. 문은 과제 상세와 같다(구성원 · 관리자 열람 줄 · 남 404).
+- 힌트는 붙은 첫 mcad 원천의 `<app_key 하이픈 뺌>_get_project_meta(project_id)` 의 plm_task(key · label · active)와 plm_task_why.cause 다 — 부른
+  사람의 PAT 로 읽으므로 사람마다 다를 수 있다(구성원 표의 '부른 사람에 매인 칸'). 확인이 아니다 — 고르면 PUT 이 다시 푼다. 원천 · PAT 가 없거나
+  못 읽으면 hint null 과 까닭(읽기를 막지 않는다).
+
+### SP-6. 찾기 MCP — 시야는 MCP 의 것, 등록부는 risk_get_registry 와 같은 문
+- `risk_find_projects_by_subject` — visible_projects(소유 ∪ 구성원 ∪ 조직 공개, service 는 조직 공개만)에서 폐기된 과제를 뺀다. SP 과제도 설계 자료도
+  주지 않으면 SP 과제가 달린 과제만이다(PLAN §4.7 '설계 자료 열쇠로 내 시야의 과제 찾기' 라 설계 자료로 찾을 때는 SP 과제가 없는 과제도 든다).
+- 설계 자료는 과제 주인의 rr_sources 행만, 대소문자 무시다. cae 는 dyna_result 원천 ref 의 report_ids 뿐이다 — 캡처 본문이 준 report_ids(원천 ref 에
+  없는 것)는 보지 않는다(계약이 원천 행을 적었다).
+- 대상은 과제 주인의 대체되지 않은 대상(superseded_by 없음)만, 등록부는 대상마다 `mcp_scope_owner` → `registry_payload`(risk_get_registry 와 같은
+  문)를 지난 행을 주의 등급 → 우선순위 → 지지 영역 · 전문가 수 → 키 차례로 세운 앞 다섯과 그 수다. 상태 낱말 · stale_json 은 원장 그대로다.
+- 계약에 없던 offset 을 더했다 — 한 번에 limit(1 ~ 50, 기본 20)이고 MCP 결과 상한을 넘으면 과제 수를 줄여 next_offset 으로 나눈다(자르지 않는다).
+  답 머리에 total 도 있다.
+
+### SP-7. D-18 — 좌석 길에는 sp_task 가 없다
+- 훑기 — 브리프 · 러너 · 비교 · 상태는 rr_projects 를 칸을 골라 읽는다(SELECT * 없음). 반출은 열을 동적으로 읽어 sp_task 가 실린다(좌석이 아니다).
+- 시험 — 두 과제에 key 를 단 원장에서 브리프 · 패널 질문 · 스냅샷 · 비교의 모든 쪽에 key 가 없다. 두 도구 이름은 risk_ 로 시작해 엔진의 리스크
+  심사 지정 도구 거절(_risk_designated_refusal 의 app)과 자유 조회 접두 밖에 든다.
+
+### SP-8. 시험 · 남긴 것
+- 새 시험 파일 하나(tests/test_sp_subject.py — 76) · 고친 표(남 · 구성원 · 편집자 · 관리자 · 도구 목록 · 인자 계약 · 쓰기 도구 · 매니페스트 · 이력
+  이름표) · 변이 열여섯(풀이 규칙 일곱 · 찾기 일곱 · 좌석 누수 둘) 모두 잡힘. 전체 시험은 부른 세션이 공유 잠금으로 돌린다.
+- 남긴 것 — 화면(과제 화면의 주제 칸 · 이력 이름표 — 화면 세션), HEAXHub 의 매니페스트 등록 사본(35종 — 그 리포), 매니페스트의 'REST 64경로' 는
+  이 작업 전부터 낡았다(라우터의 경로가 그보다 많다).
