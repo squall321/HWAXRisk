@@ -720,6 +720,35 @@ def test_an_item_location_is_set_by_editors_audited_and_used_first(box, items):
     assert _locate(box, finding_id=finding)["reason"]["code"] == "subject_not_placeable"
 
 
+def test_an_item_location_is_held_to_the_write_shape_on_import_and_on_read(box, items):
+    """(반대 검토 R6) 항목 위치 칸은 들여오기로도 들어온다 — 종전에는 들인 {unit: inch} 를 mm 로 읽어 자리를 냈고 y · z 가 빠지면 KeyError(GET
+    /locate 500)였다. 들여오기는 쓰기 본문과 같은 꼴만 받고 틀린 꼴은 그 칸만 버린다(location_invalid_dropped). 이미 저장된 틀린 꼴(손으로 넣은
+    행 · 고치기 전 들여오기)은 위치 찾기가 unknown item_location_invalid 와 고칠 곳으로 답하고, 떼면(무엇을 적든 바뀐 것이다) 고쳐진다."""
+    finding = items["asm"]["finding_id"]
+    routes.put_item_location(box.project, routes.ItemLocationBody(finding_id=finding, part=None, point=routes.ItemPoint(x=1.0, y=2.0, z=3.0)),
+                             ident=_who(OWNER))
+    lines = []
+    for line in "".join(export.iter_lines(box.store, OWNER, 0)).splitlines():
+        obj = json.loads(line)
+        if obj.get("table") == "rr_findings" and (obj.get("row") or {}).get("finding_id") == finding:
+            obj["row"]["location_json"] = json.dumps({"part": None, "point": {"x": 1.0, "y": 2.0, "z": 3.0, "unit": "inch"}})
+        lines.append(json.dumps(obj, ensure_ascii=False))
+    box.store.execute("DELETE FROM rr_findings WHERE finding_id = ?", (finding,))
+    out = export.import_jsonl(box.store, OWNER, "\n".join(lines) + "\n")
+    assert out["inserted"] >= 1 and out["location_invalid_dropped"] == 1
+    assert box.store.query_one("SELECT location_json FROM rr_findings WHERE finding_id = ?", (finding,))["location_json"] is None
+    assert _locate(box, finding_id=finding)["reason"]["code"] == "subject_not_placeable"         # 위치가 없어 주제(조립)로 간다
+    for bad in ({"part": None, "point": {"x": 1.0}}, {"part": None, "point": {"x": 1.0, "y": 2.0, "z": 3.0, "unit": "inch"}},
+                {"part": None, "point": {"x": 1, "y": 2, "z": 3}, "extra": True}, {"part": None, "point": {"x": "1", "y": 2, "z": 3}}):
+        box.store.execute("UPDATE rr_findings SET location_json = ? WHERE finding_id = ?", (json.dumps(bad), finding))
+        found = _locate(box, finding_id=finding)
+        assert (found["status"], found["reason"]["code"]) == ("unknown", "item_location_invalid"), bad
+        assert "risk_set_item_location" in found["reason"]["fix"]
+    cleared = routes.put_item_location(box.project, routes.ItemLocationBody(finding_id=finding, part=None, point=None), ident=_who(OWNER))
+    assert cleared["changed"] and json.loads(_audits(box.store, "finding.location")[-1]["before_json"])["invalid"].startswith("point.x")
+    assert box.store.query_one("SELECT location_json FROM rr_findings WHERE finding_id = ?", (finding,))["location_json"] is None
+
+
 def test_purge_blanks_paths_and_locations_and_transfer_moves_the_registration(box, items):
     """폐기는 등록의 몸체 경로 · 근거 · 사유와 항목 위치를 비우고(변환 값은 남는다), 이양은 등록을 새 주인에게 옮긴다."""
     _put(box)

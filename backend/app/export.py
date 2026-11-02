@@ -117,6 +117,10 @@ _EXPORT_SKIP_COLUMNS: dict[str, tuple[str, ...]] = {"rr_panels": ("result_gz",),
 _IMPORT_DROP_COLUMNS: dict[str, tuple[str, ...]] = {"rr_projects": ("sp_task",), "rr_board_transforms": _TRANSFORM_CHECK_COLUMNS}
 # 들여오기 답에서 뺀 줄 수를 싣는 칸 — 표마다(뺀 것이 없으면 그 칸이 없다).
 _IMPORT_DROP_COUNTERS: dict[str, str] = {"rr_projects": "sp_task_dropped", "rr_board_transforms": "transform_checks_dropped"}
+# 항목 위치(v7 rr_findings · rr_registry.location_json)는 쓰기 본문과 같은 꼴(locate.clean_location — 모르는 칸 · mm 가 아닌 단위 · 빠진
+# 좌표는 틀렸다)일 때만 들인다. 틀린 꼴은 그 칸만 버리고(새 행은 NULL, 병합은 이 박스의 값 그대로) 뺀 줄 수를 location_invalid_dropped 로
+# 말한다 — 종전에는 그대로 들여 위치 찾기가 inch 를 mm 로 읽거나 500 으로 넘어졌다(반대 검토 F2-9).
+_IMPORT_LOCATION_COLUMNS: dict[str, tuple[str, ...]] = {"rr_findings": ("location_json",), "rr_registry": ("location_json",)}
 
 # 카드 인용은 판정당 이만큼만 박스 밖으로 나간다(사용자 결정 2026-10-12 — 재설계 M2.md 2절 · 5절 #18 · #21). 판정 행의 cq 는
 # cq_chars 에, 인용 역색인의 card: 인용은 quote_chars 에, JSON 열 안의 인용은 그 항목 옆 `<칸>_chars` 에 원래 길이를 적는다.
@@ -703,8 +707,11 @@ def import_jsonl(store: RiskStore, owner_sub: str, text: str) -> dict:
     rank = {table: index for index, table in enumerate(TABLE_ORDER)}
     items = sorted(items, key=lambda item: rank[item[0]])
 
+    from app.locate import clean_location  # noqa: PLC0415 — 들여오기 때만 쓰는 항목 위치 꼴(위치 찾기와 같은 규칙)
+
     inserted = merged = skipped = skipped_global = 0
     dropped: dict[str, int] = {}
+    locations_dropped = 0
     conflicts: list[dict] = []
     touched_targets: set[str] = set()
     with store.tx():
@@ -713,6 +720,11 @@ def import_jsonl(store: RiskStore, owner_sub: str, text: str) -> dict:
             drop = _IMPORT_DROP_COLUMNS.get(table, ())
             if any(row.get(c) is not None for c in drop):
                 dropped[table] = dropped.get(table, 0) + 1
+            bad = tuple(c for c in _IMPORT_LOCATION_COLUMNS.get(table, ())
+                        if row.get(c) is not None and clean_location(row.get(c))[1] is not None)
+            if bad:
+                locations_dropped += 1
+                drop = (*drop, *bad)
             row = {c: v for c, v in row.items() if c not in drop}     # 새 행은 NULL, 병합은 이 박스의 값 그대로(아래 assign)
             if "owner_sub" not in cols:            # 공용 표는 병합하지 않는다(GLOBAL_TABLES 주석 참조).
                 skipped_global += 1
@@ -806,6 +818,8 @@ def import_jsonl(store: RiskStore, owner_sub: str, text: str) -> dict:
     # 뺀 것이 있을 때만 — 받는 박스에서 주제 쓰기(PUT sp-subject) · 변환 다시 적기(PUT board-transforms)로 다시 단다
     for table, count in sorted(dropped.items()):
         out[_IMPORT_DROP_COUNTERS[table]] = count
+    if locations_dropped:                        # 받는 박스에서 항목 위치를 다시 적는다(PUT item-location)
+        out["location_invalid_dropped"] = locations_dropped
     return out
 
 

@@ -2887,7 +2887,9 @@ def put_item_location(project_id: str, body: ItemLocationBody, ident: identity.I
     now = now_epoch()
     location = None if part is None and point is None else {"part": part, "point": point, "set_by": actor, "set_at": now}
     before = item["location"]
-    changed = ({k: (before or {}).get(k) for k in ("part", "point")} if before else None) != (
+    # 꼴이 틀린 채 저장된 위치(들여온 행 — locate.clean_location)는 무엇을 적든 바뀐 것이다 — 떼거나 다시 적어 고친다.
+    invalid_before = item.get("location_problem")
+    changed = invalid_before is not None or ({k: (before or {}).get(k) for k in ("part", "point")} if before else None) != (
         {"part": part, "point": point} if location else None)
     finding = item["kind"] == "finding"
     action = "finding.location" if finding else "registry.location"
@@ -2903,7 +2905,8 @@ def put_item_location(project_id: str, body: ItemLocationBody, ident: identity.I
             subject = item["finding_id"] if finding else f"{item['target_key']}#{item['cluster_key']}"
             channel_name = AUDIT_CHANNELS.get(ident.source, "rest")
             _audit(store, actor, scope=scope, subject_id=subject, project_id=project_id, action=action,
-                   before={k: (before or {}).get(k) for k in ("part", "point")} if before else None,
+                   before=({k: (before or {}).get(k) for k in ("part", "point")} if before
+                           else ({"invalid": invalid_before} if invalid_before is not None else None)),
                    after={"part": part, "point": point} if location else None, channel=channel_name,
                    actor_verified=channel_name != "mcp", via=_admin_via(ident, project_id))
     return {"ok": True, "project_id": project_id, "item": {k: item[k] for k in ("kind", "target_key") if k in item}

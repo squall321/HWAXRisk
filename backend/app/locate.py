@@ -73,6 +73,7 @@ UNKNOWN: dict[str, str] = {
     "subject_nodes_absent": "항목의 스냅샷에 주제의 노드가 없다",
     "bbox_world_absent": "스냅샷의 그 몸체에 월드 bbox 가 없다(MCP 폴백 캡처 — 배치 좌표 없이 읽었다)",
     "item_part_absent": "항목 위치의 몸체 경로가 그 항목의 스냅샷에 없다",
+    "item_location_invalid": "항목 위치 칸이 쓰기 꼴에 맞지 않는다(모르는 칸 · mm 가 아닌 단위 · 빠지거나 유한하지 않은 좌표)",
     "snapshot_missing": "항목의 대상에 읽을 스냅샷이 없다",
 }
 FIXES: dict[str, str] = {
@@ -90,6 +91,8 @@ FIXES: dict[str, str] = {
     "subject_not_placeable": "항목에 위치(몸체 경로 · 좌표)를 적거나(PUT /api/projects/{id}/item-location · MCP risk_set_item_location) refdes · 좌표로 찾는다.",
     "subject_ambiguous": "후보 가운데 하나를 항목 위치로 적는다(PUT /api/projects/{id}/item-location · MCP risk_set_item_location).",
     "bbox_world_absent": "REST 로 다시 캡처해 배치 좌표가 든 스냅샷을 만들거나 항목에 좌표를 적는다.",
+    "item_location_invalid": ("항목 위치를 다시 적거나 뗀다(PUT /api/projects/{id}/item-location · MCP risk_set_item_location — part 와 point 를"
+                              " 둘 다 null 로 주면 뗀다)."),
 }
 
 
@@ -666,16 +669,73 @@ def locate_on_board(store: Any, project: Mapping[str, Any], *, input_: dict, odb
 
 
 # ---------------------------------------------------------------- 항목 길(위치 · 주제)
+LOCATION_KEYS: frozenset[str] = frozenset({"part", "point", "set_by", "set_at"})
+POINT_KEYS: frozenset[str] = frozenset({"x", "y", "z", "unit"})
+
+
+def clean_location(raw: Any) -> tuple[dict | None, str | None]:
+    """저장된 항목 위치를 쓰기 본문과 같은 엄격한 꼴로 읽는다 — (위치, None) · 없으면 (None, None) · 꼴이 틀리면 (None, 까닭).
+
+    꼴은 {part, point{x, y, z, unit}, set_by, set_at} 이고 규칙은 쓰기 본문(routes.ItemLocationBody · ItemPoint — 모르는 칸 거절 · 좌표는 유한한
+    수 · 단위는 mm, 빠지면 mm)과 같다. 들여온 행은 이 박스의 쓰기를 지나지 않아 읽을 때 · 들일 때(export) 다시 본다(반대 검토 F2-9 — 종전에는
+    unit inch 를 mm 로 읽었고 y · z 가 없으면 KeyError 로 500 이었다). part 와 point 가 다 비면 위치가 없는 것이다."""
+    if raw is None or raw == "":
+        return None, None
+    value = raw
+    if isinstance(raw, (str, bytes)):
+        try:
+            value = json.loads(raw)
+        except ValueError:
+            return None, "JSON 이 아니다"
+    if not isinstance(value, Mapping):
+        return None, "객체가 아니다"
+    extra = sorted(str(k) for k in set(value) - LOCATION_KEYS)
+    if extra:
+        return None, f"모르는 칸 {extra[:5]}"
+    part = value.get("part")
+    if part is not None:
+        if not isinstance(part, str) or len(part) > PATH_MAX:
+            return None, "part 가 경로 글이 아니다"
+        part = part.strip() or None
+    point = value.get("point")
+    if point is not None:
+        if not isinstance(point, Mapping):
+            return None, "point 가 객체가 아니다"
+        extra = sorted(str(k) for k in set(point) - POINT_KEYS)
+        if extra:
+            return None, f"point 에 모르는 칸 {extra[:5]}"
+        unit = point.get("unit")
+        if str(unit or bt.UNIT).strip().lower() != bt.UNIT:
+            return None, f"단위가 mm 가 아니다 — {str(unit)[:20]!r}"
+        coords: dict[str, float] = {}
+        for axis in "xyz":
+            v = point.get(axis)
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+                return None, f"point.{axis} 가 유한한 수(mm)가 아니다"
+            coords[axis] = float(v)
+        point = {**coords, "unit": bt.UNIT}
+    set_by, set_at = value.get("set_by"), value.get("set_at")
+    if set_by is not None and not isinstance(set_by, str):
+        return None, "set_by 가 글이 아니다"
+    if set_at is not None and (isinstance(set_at, bool) or not isinstance(set_at, (int, float))):
+        return None, "set_at 이 수가 아니다"
+    if part is None and point is None:
+        return None, None
+    return {"part": part, "point": point, "set_by": set_by, "set_at": set_at}, None
+
+
 def item_row(store: Any, project: Mapping[str, Any], *, finding_id: str | None, target_key: str | None,
              cluster_key: str | None) -> dict:
-    """그 과제(주인의 행)의 항목 하나 — {kind, finding_id | cluster_key, target_key, subject_key, location}. 없으면 404(남의 과제와 같은 답)."""
+    """그 과제(주인의 행)의 항목 하나 — {kind, finding_id | cluster_key, target_key, subject_key, location, location_problem}(위치는
+    `clean_location` 으로 읽은 것 — 꼴이 틀리면 None 과 까닭). 없으면 404(남의 과제와 같은 답)."""
     if finding_id is not None:
         row = store.query_one("SELECT finding_id, target_key, subject_key, location_json, owner_sub, project_id FROM rr_findings"
                               " WHERE finding_id = ?", (finding_id,))
         if row is None or row["project_id"] != project["id"] or row["owner_sub"] != project["owner_sub"]:
             raise AppError("E404", f"그 과제에 finding 이 없습니다 — {finding_id}.", 404)
+        location, problem = clean_location(row["location_json"])
         return {"kind": "finding", "finding_id": row["finding_id"], "target_key": row["target_key"],
-                "subject_key": row["subject_key"] or "", "location": _loads(row["location_json"], {}) or None}
+                "subject_key": row["subject_key"] or "", "location": location, "location_problem": problem}
     row = store.query_one(
         "SELECT r.cluster_key AS cluster_key, r.target_key AS target_key, r.subject_key AS subject_key, r.location_json AS location_json"
         " FROM rr_registry r JOIN rr_targets t ON t.target_key = r.target_key WHERE r.target_key = ? AND r.cluster_key = ?"
@@ -683,8 +743,9 @@ def item_row(store: Any, project: Mapping[str, Any], *, finding_id: str | None, 
         (target_key, cluster_key, project["id"], project["owner_sub"], project["owner_sub"]))
     if row is None:
         raise AppError("E404", f"그 과제에 등록부 묶음이 없습니다 — {target_key} · {cluster_key}.", 404)
+    location, problem = clean_location(row["location_json"])
     return {"kind": "cluster", "cluster_key": row["cluster_key"], "target_key": row["target_key"],
-            "subject_key": row["subject_key"] or "", "location": _loads(row["location_json"], {}) or None}
+            "subject_key": row["subject_key"] or "", "location": location, "location_problem": problem}
 
 
 def item_snapshots(store: Any, target_key: str) -> list[str]:
@@ -745,6 +806,9 @@ def locate_item(store: Any, project: Mapping[str, Any], item: Mapping[str, Any],
     pid = project["id"]
     snapshots = item_snapshots(store, item["target_key"])
     irs = [(sid, ir) for sid, ir in ((sid, _ir(store, sid)) for sid in snapshots) if ir is not None]
+    if item.get("location_problem"):
+        return unknown("item_location_invalid", message=f"{UNKNOWN['item_location_invalid']} — {item['location_problem']}", input=input_,
+                       project_id=pid)
     location = item.get("location") or {}
     if location:
         part = str(location.get("part") or "") or None
@@ -766,7 +830,7 @@ def locate_item(store: Any, project: Mapping[str, Any], item: Mapping[str, Any],
                 or stepforge_project_id
             body = _body_of(node, node_sid) if node is not None else ({"path": part, "basis": "item_location"} if part else None)
             return located(input_=input_, project_id=pid, stepforge_project_id=sf,
-                           point={"x": float(point["x"]), "y": float(point["y"]), "z": float(point["z"])}, extents=extents,
+                           point={"x": point["x"], "y": point["y"], "z": point["z"]}, extents=extents,
                            plane_basis=basis, body=body, feature_long=max(extents.values()) if box is not None else None,
                            snapshot_id=node_sid)
         if node is None:
