@@ -1067,6 +1067,7 @@ B25 가 남긴 작은 것 하나(2026-10-31, context-notes BL-2) — 캡처가 �
 - [x] 쓰기 — PUT /api/projects/{id}/sp-subject · MCP risk_set_project_subject · GET 지금 값과 힌트(SP-3 ~ SP-5 — 860e273)
 - [x] 읽기 — MCP risk_find_projects_by_subject(시야 · 거름 · 대상 · 등록부 앞 행 · 쪽)(SP-6 — 0f79ef5)
 - [x] D-18 — 좌석 길(브리프 · 패널 질문 · 스냅샷 · 비교)에 sp_task 없음(SP-7 — 982111c)
+- [x] 반대 검토(포털 세션) — 들여오기가 풀이 없이 sp_task 를 적던 것을 막고 반출에서도 뺐다 · 건너뜀 예산 분류(SP-9)
 - [ ] (화면 세션) 과제 화면의 주제 칸(GET · PUT sp-subject — 409 sp_pat_absent · 422 sp_task_not_confirmed · round_invalid) · 이력 탭 이름표
       `project.sp_subject` — 더하면 tests/test_audit_action_labels.py 의 LABEL_PENDING 에서 뺀다
 - [ ] 리스크 전체 시험 한 번(공유 잠금, -q 없이) — 부른 세션 몫

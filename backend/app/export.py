@@ -103,7 +103,11 @@ _SINCE_COLS: dict[str, tuple[str, ...]] = {
 # 반출에 싣지 않는 열 — 패널의 엔진 결과 원문(v3)은 그 박스에서 다시 저장할 때만 쓴다. 받은 쪽은 다시 저장할 일이 없고,
 # 그 원문에는 좌석이 받은 근거 글이 그대로 들어 있다(WP1 P-19). 들여오기는 빠진 열을 INSERT 에서 뺀다.
 # 검토 호출의 result 프레임(v4)도 같다 — 카드 인용 원문이 판정당 상한 없이 들어 있다.
-_EXPORT_SKIP_COLUMNS: dict[str, tuple[str, ...]] = {"rr_panels": ("result_gz",), "rr_review_calls": ("result_gz",)}
+# 과제의 SP 과제 key(v6 rr_projects.sp_task)는 이 박스의 풀이(그 사람의 PAT 로 앱이 부른 결과 행 — sp_subject)로만 선다. 반출에 싣지 않고
+# 들여오기도 받지 않는다(_IMPORT_DROP_COLUMNS) — 받으면 풀이 · 감사 없이 아무 key 나 단 과제가 남의 과제 보기에 선다(반대 검토 R1 11-02).
+_EXPORT_SKIP_COLUMNS: dict[str, tuple[str, ...]] = {"rr_panels": ("result_gz",), "rr_review_calls": ("result_gz",),
+                                                    "rr_projects": ("sp_task",)}
+_IMPORT_DROP_COLUMNS: dict[str, tuple[str, ...]] = {"rr_projects": ("sp_task",)}
 
 # 카드 인용은 판정당 이만큼만 박스 밖으로 나간다(사용자 결정 2026-10-12 — 재설계 M2.md 2절 · 5절 #18 · #21). 판정 행의 cq 는
 # cq_chars 에, 인용 역색인의 card: 인용은 quote_chars 에, JSON 열 안의 인용은 그 항목 옆 `<칸>_chars` 에 원래 길이를 적는다.
@@ -690,12 +694,16 @@ def import_jsonl(store: RiskStore, owner_sub: str, text: str) -> dict:
     rank = {table: index for index, table in enumerate(TABLE_ORDER)}
     items = sorted(items, key=lambda item: rank[item[0]])
 
-    inserted = merged = skipped = skipped_global = 0
+    inserted = merged = skipped = skipped_global = sp_task_dropped = 0
     conflicts: list[dict] = []
     touched_targets: set[str] = set()
     with store.tx():
         for table, row in items:
             cols, pks = meta[table]
+            drop = _IMPORT_DROP_COLUMNS.get(table, ())
+            if any(row.get(c) is not None for c in drop):
+                sp_task_dropped += 1
+            row = {c: v for c, v in row.items() if c not in drop}     # 새 행은 NULL, 병합은 이 박스의 값 그대로(아래 assign)
             if "owner_sub" not in cols:            # 공용 표는 병합하지 않는다(GLOBAL_TABLES 주석 참조).
                 skipped_global += 1
                 continue
@@ -758,7 +766,7 @@ def import_jsonl(store: RiskStore, owner_sub: str, text: str) -> dict:
                     conflicts.append({"table": table, "key": _key_of(row, pks), "reason": refused})
                     continue
                 # owner_sub 는 병합으로 바뀌지 않는다(소유자 이전은 이관의 일이 아니다).
-                assign = [c for c in cols if c not in pks and c != "owner_sub"]
+                assign = [c for c in cols if c not in pks and c != "owner_sub" and c not in drop]
                 store.execute(
                     f"UPDATE {table} SET {', '.join(f'{_quote(c)} = ?' for c in assign)} WHERE {where}",
                     tuple([values[c] for c in assign] + list(key_params)),
@@ -783,8 +791,11 @@ def import_jsonl(store: RiskStore, owner_sub: str, text: str) -> dict:
 
         registry_module.merge(store, target_key, owner_sub=owner_sub)
         recomputed += 1
-    return {"inserted": inserted, "merged": merged, "skipped": skipped, "skipped_global": skipped_global,
-            "recomputed_targets": recomputed, "conflicts": conflicts}
+    out = {"inserted": inserted, "merged": merged, "skipped": skipped, "skipped_global": skipped_global,
+           "recomputed_targets": recomputed, "conflicts": conflicts}
+    if sp_task_dropped:                          # 뺀 것이 있을 때만 — 받는 박스에서 주제 쓰기(PUT sp-subject)로 다시 단다
+        out["sp_task_dropped"] = sp_task_dropped
+    return out
 
 
 def row_digest(store: RiskStore, owner_sub: str) -> dict[str, tuple[int, str]]:

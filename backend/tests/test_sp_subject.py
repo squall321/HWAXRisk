@@ -662,6 +662,32 @@ def test_registry_rows_pass_the_same_door_as_risk_get_registry(ledger, monkeypat
     assert (service["caller"], _ids(service)) == ("service", [ids["project"]])
 
 
+# ================================================================ 반출 · 들여오기 — sp_task 는 이 박스의 풀이로만 선다
+def test_import_never_carries_an_sp_task_and_export_does_not_ship_one(box, monkeypatch):
+    """들여오기(박스 사이 이동 · 손으로 만든 줄)는 풀이를 지나지 않는다 — rr_projects 줄의 sp_task 는 버리고(새 행은 NULL) 뺀 줄 수를 답의
+    sp_task_dropped 로 말한다. 그렇지 않으면 아무 key 나 단 조직 공개 과제를 감사 없이 남의 과제 보기에 세울 수 있다(반대 검토 R1). 반출도
+    sp_task 를 싣지 않는다 — 받는 박스에서 주인이 다시 확인한다(그 박스의 풀이 · 감사). 들여온 과제는 주제 쓰기로만 key 를 얻는다."""
+    from app import export  # noqa: PLC0415
+
+    _put(box.project, OWNER, KEY)
+    assert _subject(box.store, box.project)[0] == KEY
+    lines = [json.loads(ln) for ln in "".join(export.iter_lines(box.store, OWNER, 0)).splitlines()[1:]]
+    shipped = [ln["row"] for ln in lines if ln["table"] == "rr_projects"]
+    assert shipped and all("sp_task" not in row for row in shipped), "반출은 sp_task 를 싣지 않는다"
+
+    head = {"schema_version": box.store.schema_version(), "app_version": "x", "origin": {}}
+    row = {"id": "p-imp", "owner_sub": OWNER, "code": "IMP-1", "name": "들여온 과제", "stage": "dv1", "sp_task": OTHER_KEY,
+           "mcp_visibility": "org", "created_at": 1, "updated_at": 1}
+    body = json.dumps(head) + "\n" + json.dumps({"table": "rr_projects", "row": row}, ensure_ascii=False) + "\n"
+    out = export.import_jsonl(box.store, OWNER, body)
+    assert (out["inserted"], out["sp_task_dropped"]) == (1, 1)
+    assert _subject(box.store, "p-imp") == (None, "dv1") and _audits(box.store, "p-imp") == []
+    assert _find(monkeypatch, STRANGER, sp_task=OTHER_KEY)["projects"] == [], "남의 시야에 그 key 로 서지 않는다"
+    plain = export.import_jsonl(box.store, OWNER, json.dumps(head) + "\n" + json.dumps(
+        {"table": "rr_projects", "row": {**row, "id": "p-imp2", "code": "IMP-2", "sp_task": None}}, ensure_ascii=False) + "\n")
+    assert plain["inserted"] == 1 and "sp_task_dropped" not in plain, "뺀 것이 없으면 답은 종전 꼴이다"
+
+
 # ================================================================ D-18 — 과제 주제는 좌석에 가지 않는다
 SENTINEL = "알파 개발_C2-좌석에-가면-안-되는-key"
 
