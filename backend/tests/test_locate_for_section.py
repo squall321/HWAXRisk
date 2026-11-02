@@ -635,3 +635,20 @@ def test_the_input_is_exactly_one_thing_with_finite_millimetres(box):
         err = _refused(lambda bad=bad: _locate(box, **bad))
         assert (err.code, err.http_status) == ("E100", 422), bad
     assert _refused(lambda: _locate(box, x=1.0, y=1.0, odb_job_id="not-a-job")).http_status == 422
+
+
+def test_an_unknown_key_is_refused_so_a_misspelled_unit_is_never_read_as_millimetres(box, monkeypatch):
+    """본문 꼴은 아는 칸만 받는다 — `units: inch` 처럼 철자가 다른 칸을 버리고 unit 기본값(mm)으로 읽으면 인치 값이 말없이 mm 가 된다. REST 본문
+    모델은 422 로, MCP 는 E100 으로 거절한다(변환 본문도 같다)."""
+    import pydantic
+
+    with pytest.raises(pydantic.ValidationError):
+        routes.ItemPoint(**{"x": 1.0, "y": 2.0, "z": 3.0, "units": "inch"})
+    with pytest.raises(pydantic.ValidationError):
+        routes.BoardTransformBody(board_body=PCB, **HAND, units="inch")
+    with pytest.raises(pydantic.ValidationError):
+        routes.ItemLocationBody(finding_id="f1", part=None, point=None, location={"x": 1})
+    factories.act_as_delegate(monkeypatch, OWNER)
+    out = _call("risk_set_item_location", project_id=box.project, part=None, finding_id="f1",
+                point={"x": 1.0, "y": 2.0, "z": 3.0, "units": "inch"})
+    assert out["error"] == "E100" and "units" in out["message"]

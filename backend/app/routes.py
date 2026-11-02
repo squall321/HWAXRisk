@@ -2715,6 +2715,8 @@ def get_board_transform_proposal(project_id: str, odb_job_id: str | None = None,
 
 
 class BoardTransformBody(BaseModel):
+    # 모르는 칸은 거절한다 — `units: inch` 같은 철자 다른 칸을 버리면 unit 기본값(mm)으로 말없이 읽힌다(F2 · 단위).
+    model_config = {"extra": "forbid"}
     odb_job_id: str | None = Field(default=None, max_length=64)
     stepforge_project_id: str | None = Field(default=None, max_length=LOCATE_CAD_ID_MAX)
     board_body: str = Field(min_length=1, max_length=locate_module.PATH_MAX)          # CAD 보드 몸체 경로(StepForge 트리 경로)
@@ -2846,6 +2848,7 @@ def delete_board_transform(project_id: str, odb_job_id: str | None = None, stepf
 
 
 class ItemPoint(BaseModel):
+    model_config = {"extra": "forbid"}         # 위와 같다 — 철자 다른 단위 칸이 mm 로 읽히지 않게
     x: float
     y: float
     z: float
@@ -2853,6 +2856,7 @@ class ItemPoint(BaseModel):
 
 
 class ItemLocationBody(BaseModel):
+    model_config = {"extra": "forbid"}
     finding_id: str | None = Field(default=None, max_length=LOCATE_KEY_MAX)
     target_key: str | None = Field(default=None, max_length=LOCATE_KEY_MAX)
     cluster_key: str | None = Field(default=None, max_length=LOCATE_KEY_MAX)
