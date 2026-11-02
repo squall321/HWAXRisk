@@ -873,7 +873,7 @@ CREATE INDEX IF NOT EXISTS ix_rr_cluster_alias_owner_new ON rr_cluster_alias(own
 """
 _DDL_V5: list[str] = _split_statements(_DDL_V5_SQL)
 
-# v6 — 과제 인사이트 그래프 M2b(포털 docs/project-insight-graph contracts §9 · PLAN §4.7). 과제의 SP 허브 과제 key 한 칸과 그 색인이다 —
+# v6 — 과제 인사이트 그래프 M2b(포털 docs/project-insight-graph contracts §9 · PLAN §4.7). 2026-11-02 main 에 올라 굳었다 — tests/test_store.py 의 PUSHED_DDL_SHA256[6] 가 지킨다. 바꿀 것은 v7 에. 과제의 SP 허브 과제 key 한 칸과 그 색인이다 —
 # 값은 리스크 앱이 그 사람의 PAT 로 스스로 부른 풀이(find_plm_task)의 결과 행에서만 적는다(PUT /api/projects/{id}/sp-subject · 일반 PATCH
 # 칸 밖). 차수는 새 칸 없이 stage 를 읽을 때 정규화한다(app/sp_subject.py). 재설계 M4 가 v6 에 두기로 적었던 rr_reports.ra_* 는 다음 판(v7)이다.
 # 아직 나가지 않았다 — 가지 wt1102/insight-m2 에만 있고 main 에 오르는 날 tests/test_store.py 의 PUSHED_DDL_SHA256[6] 가 굳는다.
