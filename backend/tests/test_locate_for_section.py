@@ -1,0 +1,637 @@
+# F2 단면 자리 찾기 시험 — 손 셈 예로 변환을 적고(검증 · 강제 · 감사) refdes · 넷 · 보드 좌표 · 리스크 항목을 MCAD 점 · 몸체 · 단면 둘로 찾는다(게이트웨이 대역 · 실제 캡처로 지은 스냅샷)
+"""설계 docs/f2-locate-for-section.md.
+
+  · 게이트웨이 대역은 httpx 전송 한 곳이다(소켓 0). 답의 꼴은 ODB 허브 레퍼런스(포털 docs/procedures/fixtures/odb-hub/reference.md §4.6 ·
+    §4.10 · §4.11)와 StepForge 원문(app/mcp_server.py part_info · corner_proximity)의 꼴이다 — 실물은 cae00 에서 처음 본다(설계 6절).
+  · 보드는 손 셈 예다 — `x_CAD = 82.13 − x_ODB`, `y_CAD = y_ODB + 2.82`, ODB top = CAD 보드 몸체의 아래 면(z 0.5). 외곽 70 × 50 mm 이고
+    대칭이 아닌 고정홀 셋이 있다(tests/test_board_transform.py 와 같은 보드).
+  · 스냅샷은 실제 캡처(adapters_registry.capture_all — mcad 는 StepForge REST 트리, ecad 는 tests/test_ecad_adapter 의 가짜 허브)로 짓는다.
+
+  실행:  .venv/bin/python -m pytest tests/test_locate_for_section.py
+"""
+from __future__ import annotations
+
+import asyncio
+import copy
+import json
+from dataclasses import dataclass
+from typing import Any
+
+import httpx
+import pytest
+
+import app.mcp_server as srv
+from app import board_transform as bt
+from app import config, export, identity, ir_builder, routes
+from app.common import now_epoch
+from app.errors import AppError
+from tests import factories
+from tests import test_adapters as recon
+from tests.test_ecad_adapter import JOB_STD, FakeOdbHub
+from tests.test_ecad_adapter import _capture as capture_with_hub
+
+OWNER = "f2-owner@example.com"
+EDITOR = "f2-editor@example.com"
+VIEWER = "f2-viewer@example.com"
+STRANGER = "f2-stranger@example.com"
+NOPAT = "f2-nopat@example.com"
+PATS = {OWNER: "owner-pat-not-real", EDITOR: "editor-pat-not-real", VIEWER: "viewer-pat-not-real", STRANGER: "stranger-pat-not-real"}
+BOX_PAT = "box-read-pat-not-real"
+SF = "019f2phone000000000000a1"
+JOB = JOB_STD
+PCB = "/PHONE/phone.step/PHONE_ASM/MAIN_PCB"
+
+# ---------------------------------------------------------------- 손 셈 보드(ODB 좌표)와 그 CAD(같은 보드를 손 셈 변환으로 옮긴 것)
+HAND = {"mirror_x": True, "mirror_y": False, "offset_x": 82.13, "offset_y": 2.82, "top_face": "zmin"}
+VOLUME = {"grand_total_mm3": 2275.0, "pkg_mass_kg": 0.004,
+          "board": {"outline_area_mm2": 3500.0, "x_mm": 70.0, "y_mm": 50.0, "thickness_mm": 0.65, "signal_layers": 8,
+                    "volume_mm3": 2275.0, "stackup_verdict": "standard", "stackup_id": "SU47-0.65T-8L-030"},
+          "report_url": "http://odb-hub.test/api/jobs/x/report/volume"}
+HOLES = {"hole_count": 3, "cutout_count": 0, "summary": "고정홀 3개",
+         "holes": [{"x": 8.0, "y": -44.0, "diameter_mm": 1.6, "nominal_mm": 1.6, "kind": "BOTH", "plating": "PLATED",
+                    "mount_attr": True, "confidence": "HIGH"},
+                   {"x": 70.0, "y": -5.0, "diameter_mm": 1.6, "nominal_mm": 1.6, "kind": "BOTH", "plating": "PLATED",
+                    "mount_attr": True, "confidence": "HIGH"},
+                   {"x": 40.0, "y": -30.0, "diameter_mm": 2.0, "nominal_mm": 2.0, "kind": "BOTH", "plating": "NON_PLATED",
+                    "mount_attr": True, "confidence": "HIGH"}],
+         "page": 1, "page_size": 100, "returned": 3, "total": 3, "has_more": False}
+PCB_BOX = [7.13, -45.18, 0.5, 77.13, 4.82, 1.15]
+PART_INFO = {"id": "n2", "name": "MAIN_PCB", "path": PCB, "kind": "solid", "volume": 2275.0, "bbox": [0, 0, 0, 70.0, 50.0, 0.65],
+             "world_bbox": PCB_BOX, "world_center": [42.13, -20.18, 0.825], "material": {"step": "FR4", "manual": None}, "tags": [],
+             "meta": {}, "interfaces": [], "interface_count": 0, "mesh": []}
+CORNER = {"project": "PHONE", "considered": 1, "scanned": 1, "with_holes": 1, "unexamined": 0, "partial": False,
+          "unexamined_parts": 0, "unexamined_list": [], "scan_budget_s": None, "unit": "mm",
+          "parts": [{"part": "MAIN_PCB", "path": PCB, "ok": True, "holes": 3, "obb_extents_mm": [70.0, 50.0, 0.65],
+                     "diagonal_mm": 86.04, "min_distance_mm": 3.0, "worst": None, "skipped_voids": 0, "unexamined": 0,
+                     "hole_list": [{"radius_mm": 0.8, "center": [74.13, -41.18, 0.5], "axis": [0.0, 0.0, 1.0]},
+                                   {"radius_mm": 0.8, "center": [12.13, -2.18, 1.15], "axis": [0.0, 0.0, -1.0]},
+                                   {"radius_mm": 1.0, "center": [42.13, -27.18, 0.825], "axis": [0.0, 0.0, 1.0]},
+                                   {"radius_mm": 0.4, "center": [30.0, -1.0, 0.8], "axis": [1.0, 0.0, 0.0]}]}],
+          "note": "거리는 꼭짓점에서 구멍 축선까지의 수직거리다"}
+
+
+def _detail(refdes: str, x: float, y: float, side: str | None, pins: list[tuple[float, float]], **more: Any) -> dict:
+    """get_part_detail(레퍼런스 §4.6 꼴) — 핀마다 넷 · 좌표."""
+    out = {"refdes": refdes, "pkg_name": "bga41f_W235L235_SB019_1_LT", "pkg_width": 2.4, "pkg_length": 1.2, "x": x, "y": y,
+           "rotation": 0.0, "mirror": side == "bottom", "device_type": "IC", "type": "IC", "pin_count": len(pins),
+           "pins": [{"pin_num": i, "name": f"A{i + 1}", "net": "N1", "pad": "r190", "x": px, "y": py} for i, (px, py) in enumerate(pins)],
+           "pins_truncated": False, "net_count": 1, **more}
+    if side is not None:
+        out["side"] = side
+    return out
+
+
+# U1001 은 top 면(손 셈 — CAD 아래 면 z 0.5 의 −z 쪽)이고 핀이 x 로 길다(2.4 × 1.2). U1003 은 bottom 면이고 CAD 에 몸체가 없다.
+DETAILS = {
+    "U1001": _detail("U1001", 30.0, -20.0, "top", [(28.8, -20.6), (31.2, -20.6), (28.8, -19.4), (31.2, -19.4)]),
+    "U1003": _detail("U1003", 45.0, -12.0, "bottom", [(44.5, -13.0), (45.5, -13.0), (44.5, -11.0), (45.5, -11.0)]),
+    # 허브 답에 side 가 없는 부품 — 스냅샷의 ECAD 부품 노드(U1002 는 가짜 허브의 top 부품)에서 면을 읽는다.
+    "U1002": _detail("U1002", 20.0, -40.0, None, [(19.0, -40.5), (21.0, -40.5), (19.0, -39.5), (21.0, -39.5)]),
+    "U1005": _detail("U1005", 60.0, -40.0, None, [(59.0, -40.5), (61.0, -40.5)]),
+}
+
+# ---------------------------------------------------------------- CAD 트리(StepForge REST tree.json 꼴) — 실제 mcad 어댑터가 노드를 짓는다
+BODIES = [
+    ("MAIN_PCB", PCB_BOX, "FR4"),
+    ("U1001_BODY", [50.93, -17.78, -0.3, 53.33, -16.58, 0.5], "EMC"),      # 손 셈 자리(52.13, −17.18)의 부품 몸체 — 아래 면 밑
+    ("SHIELD_CAN_1", [40.0, -25.0, -1.2, 60.0, -10.0, 0.5], "SUS"),        # U1001 을 덮는 쉴드캔(bbox 가 품을 뿐이다)
+    ("REAR_HOUSING", [0.0, -60.0, -3.0, 90.0, 10.0, 5.0], "PC"),          # 다 품는 하우징
+    ("SCREW_M14#1", [73.33, -41.98, -1.0, 74.93, -40.38, 1.65], "STEEL"),  # 같은 나사 둘 — 이름 꼬리 #n 을 떼면 같아 같은 정규 키다(모호한 주제)
+    ("SCREW_M14#2", [11.33, -2.98, -1.0, 12.93, -1.38, 1.65], "STEEL"),
+]
+
+
+def _tree() -> dict:
+    nodes = [{"id": "n0", "parent_id": None, "kind": "file", "name": "phone.step", "path": "/PHONE/phone.step", "depth": 1, "seq": 0,
+              "shape_def_id": None, "transform": None, "world_transform": None, "auto_named": False, "color": None},
+             {"id": "n1", "parent_id": "n0", "kind": "assembly", "name": "PHONE_ASM", "path": "/PHONE/phone.step/PHONE_ASM", "depth": 2,
+              "seq": 1, "shape_def_id": None, "transform": None, "world_transform": None, "auto_named": False, "color": None}]
+    defs: dict[str, dict] = {}
+    for i, (name, box, material) in enumerate(BODIES, start=2):
+        size = [box[3] - box[0], box[4] - box[1], box[5] - box[2]]
+        shape = "s-screw" if name.startswith("SCREW") else f"s{i}"
+        defs[shape] = {"kind": "solid", "bbox": [0.0, 0.0, 0.0, *size], "volume": size[0] * size[1] * size[2], "area": None,
+                       "centroid": [v / 2 for v in size], "material": material, "density": None, "density_unit": None,
+                       "instance_count": 2 if shape == "s-screw" else 1, "has_geometry": 1, "solid_count": 1,
+                       "construction_only": False, "xcaf_entry": f"0:1:1:{i}", "step_file": "phone.step"}
+        nodes.append({"id": f"n{i}", "parent_id": "n1", "kind": "instance", "name": name, "path": f"/PHONE/phone.step/PHONE_ASM/{name}",
+                      "depth": 3, "seq": i, "shape_def_id": shape, "transform": None,
+                      "world_transform": [[1, 0, 0, box[0]], [0, 1, 0, box[1]], [0, 0, 1, box[2]], [0, 0, 0, 1]],
+                      "auto_named": False, "color": None})
+    return {"project": "PHONE", "unit_system": "mm",
+            "files": [{"relpath": "phone.step", "sha256": "1" * 64, "size_bytes": 4096, "schema_ap": "AUTOMOTIVE_DESIGN",
+                       "header_unit": "millimetre"}],
+            "nodes": nodes, "shape_defs": defs,
+            "summary": {"files": 1, "shape_defs": len(defs), "nodes": len(nodes), "assemblies": 1, "instances": len(BODIES),
+                        "leaf_instances": len(BODIES), "max_depth": 3, "auto_named_nodes": 0, "auto_named_defs": 0,
+                        "defs_without_geometry": 0, "warnings": 0},
+            "warnings": []}
+
+
+def _cad_routes() -> dict:
+    base = f"/apps/step_forge/api/projects/{SF}"
+    tree = _tree()
+    parts = [{"id": n["id"], "shape_def_id": n["shape_def_id"], "name": n["name"], "path": n["path"], "kind": "solid"}
+             for n in tree["nodes"] if n["kind"] == "instance"]
+    # 쉴드캔이 보드에 붙어 있다(tied) — 계면 주제의 원천.
+    iface = {"counts": {"tied": 1}, "interfaces": [
+        {"id": 7, "node_a": "n2", "node_b": "n4", "name_a": "MAIN_PCB", "name_b": "SHIELD_CAN_1", "kind": "tied", "min_gap": 0.0,
+         "contact_area_est": 40.0, "band_width": 0.05, "penetration_depth": None, "penetration_volume": None, "cross_file": 0,
+         "status": "auto", "note": None}]}
+    return {base: {"id": SF, "name": "PHONE", "tol_config": {"tied_gap": 0.05, "clearance_gap": 1.0, "tied_area": 1.0,
+                                                             "tied_width": 0.05}},
+            f"{base}/tree": tree, f"{base}/artifacts/graph/": {"nodes": [], "edges": [], "orphans": [], "counts": {"tied": 1}},
+            f"{base}/parts": {"parts": parts}, f"{base}/interfaces": iface}
+
+
+# ---------------------------------------------------------------- 게이트웨이 대역
+class Gateway:
+    """게이트웨이 하나 — `/mcp`(JSON-RPC)와 `/tools-map`. 도구마다 답(본문 · 인자를 받아 본문을 내는 함수 · ('error', 글))을 정하고 받은
+    요청마다 (무엇, 도구, 인자, Authorization)을 `seen` 에 적는다. 답은 FastMCP 가 dict 를 내는 꼴(들여쓰기 JSON 글 한 덩이)이다."""
+
+    def __init__(self) -> None:
+        self.answers: dict[str, Any] = {}
+        self.tool_map: dict[str, str] = {}
+        self.seen: list[tuple[str, str | None, dict | None, str | None]] = []
+
+    def handle(self, request: httpx.Request) -> httpx.Response:
+        auth = request.headers.get("authorization")
+        if request.method == "GET" and request.url.path.endswith("/tools-map") and self.tool_map:
+            self.seen.append(("tools-map", None, None, auth))
+            return httpx.Response(200, json={"map": dict(self.tool_map)})
+        if request.method != "POST" or not request.url.path.endswith("/mcp"):
+            self.seen.append((f"{request.method} {request.url.path}", None, None, auth))
+            return httpx.Response(404, json={"detail": "not found"})
+        payload = json.loads(request.content.decode("utf-8") or "{}")
+        method, rid = payload.get("method"), payload.get("id")
+        if method == "initialize":
+            self.seen.append(("initialize", None, None, auth))
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": rid, "result": {}}, headers={"mcp-session-id": "sess-f2"})
+        if method == "notifications/initialized":
+            return httpx.Response(202)
+        name = str((payload.get("params") or {}).get("name") or "")
+        args = dict((payload.get("params") or {}).get("arguments") or {})
+        self.seen.append(("tools/call", name, args, auth))
+        answer = self.answers.get(name, ("error", f"unknown tool: {name}"))
+        if callable(answer):
+            answer = answer(args)
+        if isinstance(answer, tuple):
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": rid, "result": {
+                "isError": answer[0] == "error", "content": [{"type": "text", "text": answer[1]}]}})
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": rid, "result": {
+            "isError": False, "content": [{"type": "text", "text": json.dumps(answer, ensure_ascii=False, indent=2)}]}})
+
+    def calls(self, tool: str) -> list[tuple[dict | None, str | None]]:
+        return [(args, auth) for what, name, args, auth in self.seen if what == "tools/call" and name == tool]
+
+    def tools_called(self) -> list[str]:
+        return [name for what, name, _args, _auth in self.seen if what == "tools/call"]
+
+    def auths(self) -> set[str | None]:
+        return {auth for *_rest, auth in self.seen}
+
+
+def _hub_answers(gw: Gateway) -> None:
+    gw.answers.update({
+        "odbhub_get_volume_result": VOLUME, "odbhub_get_mounting_holes": HOLES, "heaxstep_forge_part_info": PART_INFO,
+        "heaxstep_forge_corner_proximity": CORNER,
+        "odbhub_get_part_detail": lambda a: copy.deepcopy(DETAILS.get(a.get("refdes"), {"error": "부품이 없습니다"})),
+        "odbhub_get_net": lambda a: ({"name": a.get("net"), "pin_count": 2, "units": "mm", "layers": [],
+                                      "pins": [{"refdes": "C1", "pin": "1", "x": 10.0, "y": -10.0},
+                                               {"refdes": "C2", "pin": "2", "x": 16.0, "y": -12.0}]}
+                                     if a.get("net") == "VBAT" else {"name": a.get("net"), "pin_count": 2, "units": "mm", "layers": []}),
+    })
+
+
+def _who(email: str, source: str = "bearer", role: str = "user") -> identity.Identity:
+    return identity.Identity(email=email, display_name="F2", role=role, organization="qa", anonymous=False, source=source)
+
+
+def _register(store, email: str) -> None:
+    store.upsert_credential(email, identity.encrypt_pat(PATS[email]).decode("ascii"), "sub", email, "[]", now_epoch() + 30 * 86400)
+
+
+@dataclass
+class Box:
+    store: Any
+    gw: Gateway
+    project: str
+
+
+@pytest.fixture
+def box(risk_store, monkeypatch) -> Box:
+    """주인의 과제(편집자 · 보기 구성원)에 ECAD 보드(JOB)와 기구 CAD 원천(SF)이 붙어 있다. 박스 읽기 PAT 는 늘 있다 — 산 호출이 그것으로
+    내려가지 않는지가 요지다. NOPAT 는 PAT 를 등록하지 않은 편집자다."""
+    gw = Gateway()
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", lambda _self, request: gw.handle(request))
+    monkeypatch.setattr(config, "load_secrets", lambda *_a, **_k: {"HWAXRISK_PORTAL_PAT": BOX_PAT})
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    for email in PATS:
+        _register(risk_store, email)
+    owner = _who(OWNER)
+    project = routes.create_project(routes.ProjectBody(code="F2-1", name="단면 자리", stage="DV1", classification="internal"),
+                                    ident=owner)["id"]
+    routes.put_members(project, routes.MembersBody(members=[routes.MemberItem(email=EDITOR, role="editor"),
+                                                            routes.MemberItem(email=VIEWER, role="viewer"),
+                                                            routes.MemberItem(email=NOPAT, role="editor")]), ident=owner)
+    gw.tool_map = {"find_job": "odb-hub"}
+    gw.answers["find_job"] = {"jobs": [{"job_id": JOB, "project": "PRJ-ALPHA", "model": "SM-X100", "board_type": "Main",
+                                        "revision": "0.7", "original_filename": "alpha_main_r07.tgz", "uploaded_at": 1}]}
+    routes.put_ecad_board(project, routes.EcadBoardBody(odb_job_id=JOB), ident=owner)
+    routes.add_source(project, routes.SourceBody(kind="mcad", app_key="heax-step_forge", ref={"stepforge_project_id": SF}), ident=owner)
+    _hub_answers(gw)
+    gw.seen.clear()
+    return Box(store=risk_store, gw=gw, project=project)
+
+
+def _freeze(store, project: str) -> dict:
+    """실제 캡처(mcad REST 트리 + 가짜 ODB 허브)로 그 과제의 스냅샷을 얼린다 — IR 과 스냅샷 id."""
+    hub = FakeOdbHub()
+    hub.others = {name: body for name, body in recon.MCP_TOOLS_FULL.items()}
+    hub.others["heaxstep_forge_list_parts"] = recon.MCP_TOOLS_FULL["list_parts"]
+    card = {"kind": "mcad", "app_key": recon.APP_KEY, "ref": {"stepforge_project_id": SF}}
+    captured = capture_with_hub(hub, JOB, extra_sources=[card], rest=recon._rest(_cad_routes()))
+    frozen = ir_builder.freeze_snapshot(store, project_id=project, owner_sub=OWNER, label="cad", adapter_results=captured["results"],
+                                        calls=captured["calls"], snapshot_id=captured["snapshot_id"], captured_at=1761800000)
+    return {"snapshot_id": frozen["snapshot_id"], "ir": ir_builder.load_ir(store, frozen["snapshot_id"])}
+
+
+@pytest.fixture
+def frozen(box) -> dict:
+    return _freeze(box.store, box.project)
+
+
+def _put(box: Box, who: str = OWNER, *, via: str = "bearer", role: str = "user", **change: Any) -> dict:
+    fields = {"board_body": PCB, **HAND, **change}
+    return routes.put_board_transform(box.project, routes.BoardTransformBody(**fields), ident=_who(who, via, role))
+
+
+def _locate(box: Box, who: str = OWNER, **inputs: Any) -> dict:
+    return routes.get_locate(box.project, **{**dict.fromkeys(("finding_id", "target_key", "cluster_key", "refdes", "net", "x", "y",
+                                                              "side", "odb_job_id", "stepforge_project_id")), **inputs},
+                             ident=_who(who))
+
+
+def _refused(call) -> AppError:
+    with pytest.raises(AppError) as err:
+        call()
+    return err.value
+
+
+def _audits(store, action: str = "project.board_transform") -> list[dict]:
+    return [dict(r) for r in store.query("SELECT owner_sub, actor, actor_verified, channel, scope, subject_id, before_json, after_json,"
+                                         " reason FROM rr_audit WHERE action = ? ORDER BY at, rowid", (action,))]
+
+
+def _call(tool: str, /, **kwargs) -> dict:
+    out = getattr(srv, tool)(**kwargs)
+    return asyncio.run(out) if asyncio.iscoroutine(out) else out
+
+
+# ================================================================ 변환 적기 — 검증 · 강제 · 감사
+def test_the_hand_transform_registers_as_verified_with_one_audit_row_and_the_persons_pat_only(box):
+    """손 셈을 적으면 이 박스에서 그 사람의 PAT 로 ODB 외곽 크기 · 고정홀과 CAD 보드 몸체 · 구멍을 읽어 검증하고(오차 0 · 짝 셋 · 모호하지
+    않음) verified 로 적는다. 등록 때 읽은 몸체 z 범위가 남고 감사 한 줄이다. 축이 z 가 아닌 CAD 구멍은 짝에 쓰지 않는다. 같은 값을 다시 적으면
+    다시 검증하되 감사는 없다. 박스 PAT 는 한 번도 나가지 않는다."""
+    out = _put(box)
+    reg = out["registration"]
+    assert out["changed"] is True and out["previous"] is None
+    assert (reg["status"], reg["error_mm"], reg["source"], reg["board_body_path"]) == ("verified", 0.0, "manual", PCB)
+    assert reg["formula"] == "x_CAD = 82.13 − x_ODB · y_CAD = y_ODB + 2.82 · ODB top → CAD 아래 면(zmin) · 단위 mm"
+    assert (reg["board_z_min"], reg["board_z_max"], reg["unit"]) == (0.5, 1.15, "mm")
+    check = reg["verification"]
+    assert check["ok"] and check["checks"]["holes"]["matched"] == 3 and check["checks"]["size"]["error_mm"] == 0.0
+    assert check["checks"]["outline"]["measured"] is False                      # 지금 허브에는 외곽 bbox(OH-04)가 없다
+    assert reg["evidence"]["cad"]["holes_off_axis"] == 1
+    assert box.gw.calls("odbhub_get_mounting_holes") == [({"job_id": JOB, "page": 1, "page_size": 100}, f"Bearer {PATS[OWNER]}")]
+    assert box.gw.calls("heaxstep_forge_corner_proximity") == [
+        ({"project_id": SF, "part": PCB, "limit": 500, "full": True}, f"Bearer {PATS[OWNER]}")]
+    assert box.gw.auths() == {f"Bearer {PATS[OWNER]}"}
+    rows = _audits(box.store)
+    assert [(r["actor"], r["channel"], r["scope"], r["subject_id"], r["before_json"]) for r in rows] == [
+        (OWNER, "rest", "project", box.project, None)]
+    assert json.loads(rows[0]["after_json"])["status"] == "verified" and rows[0]["reason"] is None
+
+    again = _put(box)
+    assert again["changed"] is False and again["previous"]["status"] == "verified" and len(_audits(box.store)) == 1
+    listed = routes.get_board_transforms(box.project, ident=_who(VIEWER))
+    assert [t["formula"] for t in listed["transforms"]] == [reg["formula"]] and listed["max_error_mm"] == bt.MAX_ERROR_MM
+
+
+def test_a_wrong_mirror_is_refused_and_forcing_needs_a_reason_and_is_audited(box):
+    """뒤집기를 빠뜨린 값은 검증을 지나지 못해 적지 않는다(422 transform_unverified — 까닭 · 오차 · 근거). 강제는 사유가 있어야 하고(422
+    reason_required) 사유와 함께면 forced 로 적고 감사 행에 사유를 남긴다. 강제한 변환으로 찾은 자리는 경고를 단다."""
+    wrong = {"mirror_x": False, "top_face": "zmax"}
+    err = _refused(lambda: _put(box, **wrong))
+    assert (err.code, err.http_status) == ("transform_unverified", 422)
+    assert "holes_mostly_unmatched" in err.detail["verification"]["reasons"] and "position_unverified" in err.detail["verification"]["reasons"]
+    assert routes.get_board_transforms(box.project, ident=_who(OWNER))["transforms"] == [] and _audits(box.store) == []
+    err = _refused(lambda: _put(box, force=True, **wrong))
+    assert (err.code, err.http_status) == ("reason_required", 422)
+    forced = _put(box, force=True, reason="기구 도면으로 확인했다", **wrong)["registration"]
+    assert forced["status"] == "forced" and forced["reason"] == "기구 도면으로 확인했다"
+    assert _audits(box.store)[-1]["reason"] == "기구 도면으로 확인했다"
+    found = _locate(box, x=30.0, y=-20.0)
+    assert found["status"] == "located" and found["warnings"][0].startswith("transform_forced")
+
+
+def test_a_face_against_the_mirror_is_refused_even_when_every_hole_matches(box):
+    """x 만 뒤집고 위 면이라 적으면 거울상이다 — 자리는 다 맞아도 거절한다(뒤집기와 면 가운데 하나만 틀린 부호 실수)."""
+    err = _refused(lambda: _put(box, top_face="zmax"))
+    assert err.detail["verification"]["reasons"] == ["handedness_mismatch"]
+
+
+def test_an_unreadable_cad_board_is_never_written_even_when_forced(box):
+    """CAD 보드 몸체를 못 읽으면 부품 면의 z 를 모른다 — 강제로도 적지 않는다."""
+    box.gw.answers["heaxstep_forge_part_info"] = ("error", "그런 파트가 없다: /PHONE/nope — list_parts 로 확인할 것")
+    err = _refused(lambda: _put(box, board_body="/PHONE/nope", force=True, reason="그래도"))
+    assert (err.code, err.http_status) == ("transform_cad_board_unread", 422) and "그런 파트가 없다" in err.message
+
+
+# ================================================================ 위치 찾기 — 보드 길
+def test_a_top_side_part_lands_on_the_bottom_face_through_the_hand_transform(box, frozen):
+    """손 셈 그대로 — U1001(ODB 핀 bbox 가운데 30, −20 · top 면)은 MCAD (52.13, −17.18) 이고 z 는 CAD 아래 면 0.5 다. 핀이 x 로 길어 앞
+    평면은 y = −17.18(긴 축을 품는다), 뒤 평면은 x = 52.13 이다 — F1 에 그대로 넘길 꼴(unit mm). 그 자리 바로 바깥을 품는 가장 작은 몸체가
+    부품 크기에 맞아 U1001_BODY 가 몸체다(쉴드캔 · 하우징은 후보로만)."""
+    _put(box)
+    box.gw.seen.clear()
+    out = _locate(box, refdes="U1001")
+    assert out["status"] == "located" and out["stepforge_project_id"] == SF and out["odb_job_id"] == JOB
+    assert out["mcad"] == {"x": 52.13, "y": -17.18, "z": 0.5, "unit": "mm"}
+    assert out["planes"] == [{"axis": "y", "offset": -17.18, "unit": "mm"}, {"axis": "x", "offset": 52.13, "unit": "mm"}]
+    assert out["plane_basis"]["long_axis"] == "x" and out["plane_basis"]["basis"].startswith("pins")
+    assert out["body"]["path"] == "/PHONE/phone.step/PHONE_ASM/U1001_BODY" and out["body"]["snapshot_id"] == frozen["snapshot_id"]
+    assert [c["path"].rsplit("/", 1)[-1] for c in out["body_candidates"]] == ["U1001_BODY", "SHIELD_CAN_1", "REAR_HOUSING"]
+    assert out["ecad"]["side"] == "top" and out["ecad"]["z_basis"].startswith("mount_face") and out["ecad"]["center_basis"] == "pins"
+    assert out["transform"]["formula"].startswith("x_CAD = 82.13 − x_ODB") and out["transform"]["status"] == "verified"
+    f1 = out["f1"]
+    assert (f1["stepforge_project_id"], f1["point"], f1["part"], f1["planes"], f1["window_mm"]) == (
+        SF, out["mcad"], out["body"]["path"], out["planes"], 10.0)
+    assert box.gw.tools_called() == ["odbhub_get_part_detail"] and box.gw.auths() == {f"Bearer {PATS[OWNER]}"}
+
+
+def test_a_bottom_side_part_sits_on_the_top_face_and_a_loose_box_is_not_called_its_body(box, frozen):
+    """U1003(bottom 면)은 CAD 위 면(z 1.15)에 앉는다. 그 자리를 품는 몸체는 하우징뿐이라(부품 몸체가 CAD 에 없다) 몸체로 말하지 않고 후보로만
+    싣는다 — 엉뚱한 몸체를 F1 에 넘기지 않는다."""
+    _put(box)
+    out = _locate(box, refdes="U1003")
+    assert out["mcad"] == {"x": 37.13, "y": -9.18, "z": 1.15, "unit": "mm"}
+    assert out["body"] is None and out["body_note"].startswith("bbox_only") and out["f1"]["part"] is None
+    assert [c["path"].rsplit("/", 1)[-1] for c in out["body_candidates"]] == ["REAR_HOUSING"]
+    # 핀이 y 로 길다(1 × 2) — 앞 평면은 x 법선이다.
+    assert out["planes"][0] == {"axis": "x", "offset": 37.13, "unit": "mm"}
+
+
+def test_board_coordinates_without_a_side_land_mid_board_without_any_gateway_call(box, frozen):
+    """보드 좌표는 변환만으로 자리가 선다 — 게이트웨이를 부르지 않는다(PAT 가 없어도 답한다). 면이 없으면 z 는 보드 두께 가운데이고 몸체는 보드
+    몸체다. 면을 주면 그 면이고 몸체는 후보로만(대상 크기가 없다)."""
+    _put(box)
+    box.gw.seen.clear()
+    mid = _locate(box, who=NOPAT, x=30.0, y=-20.0)
+    assert mid["mcad"] == {"x": 52.13, "y": -17.18, "z": 0.825, "unit": "mm"} and mid["body"]["path"] == PCB
+    assert mid["plane_basis"]["long_axis"] == "x" and mid["plane_basis"]["basis"].startswith("board")        # 보드가 x 로 길다
+    top = _locate(box, x=30.0, y=-20.0, side="top")
+    assert top["mcad"]["z"] == 0.5 and top["body"] is None and top["body_candidates"]
+    assert box.gw.seen == []
+
+
+def test_a_net_lands_on_its_pin_box_and_a_net_without_pin_coordinates_is_unknown(box):
+    """넷은 get_net 핀 좌표의 bbox 가운데다(z 는 보드 가운데 — 몸체는 정하지 않는다). 핀 좌표를 주지 않는 허브 답은 unknown net_pins_absent 와
+    고칠 곳(ODB 허브 몫)이다 — 지어내지 않는다."""
+    _put(box)
+    out = _locate(box, net="VBAT")
+    assert out["mcad"] == {"x": 69.13, "y": -8.18, "z": 0.825, "unit": "mm"} and out["body"] is None
+    assert box.gw.calls("odbhub_get_net")[0][0] == {"job_id": JOB, "net": "VBAT"}
+    none = _locate(box, net="GND")
+    assert none["status"] == "unknown" and none["reason"]["code"] == "net_pins_absent" and "ODB 허브" in none["reason"]["fix"]
+
+
+def test_each_reason_a_place_cannot_be_found_is_named(box, frozen):
+    """unknown 의 까닭 — 변환 미등록(고칠 곳과) · 보드를 모름 · 허브가 그 refdes 를 모름 · 면을 모름(허브 답에도 스냅샷에도 없다). 허브 답에 side
+    가 없으면 그 보드를 읽은 스냅샷의 ECAD 부품 면을 쓴다."""
+    missing = _locate(box, refdes="U1001")
+    assert missing["status"] == "unknown" and missing["reason"]["code"] == "transform_missing"
+    assert "risk_propose_board_transform" in missing["reason"]["fix"] and box.gw.seen == []
+    _put(box)
+    other = _locate(box, refdes="U1001", odb_job_id="0" * 16)
+    assert other["reason"]["code"] == "transform_missing" and other["odb_job_id"] == "0" * 16
+    assert _locate(box, refdes="NOPE")["reason"]["code"] == "refdes_not_found"
+    from_snapshot = _locate(box, refdes="U1002")
+    assert from_snapshot["status"] == "located" and from_snapshot["ecad"]["side"] == "top"
+    assert from_snapshot["ecad"]["side_basis"] == "snapshot"
+    assert _locate(box, refdes="U1005")["reason"]["code"] == "side_unknown"            # 가짜 허브의 보드에 U1005 는 없다
+    routes.delete_ecad_board(box.project, ident=_who(OWNER))            # 과제에서 보드를 떼면 보드를 모른다
+    assert _locate(box, refdes="U1001")["reason"]["code"] == "board_missing"
+
+
+def test_an_imported_registration_is_not_used_until_it_is_verified_here(box):
+    """다른 박스에서 들여온 등록(검증 칸 없음 — status NULL)은 위치 찾기가 쓰지 않는다(transform_unverified · 다시 적어 검증한다)."""
+    _put(box)
+    body = "".join(export.iter_lines(box.store, OWNER, 0))
+    box.store.execute("DELETE FROM rr_board_transforms")
+    export.import_jsonl(box.store, OWNER, body)
+    out = _locate(box, x=1.0, y=2.0)
+    assert out["status"] == "unknown" and out["reason"]["code"] == "transform_unverified" and "다시 적어" in out["reason"]["fix"]
+    _put(box)
+    assert _locate(box, x=1.0, y=2.0)["status"] == "located"
+
+
+# ================================================================ 권한 · 신원 — 쓰기는 편집자 이상, 읽기는 구성원, 산 호출은 그 사람의 PAT 만
+def test_writes_are_for_editors_and_reads_for_members_each_with_their_own_pat(box):
+    """보기는 403 · 남은 없는 과제와 같은 404 · 편집자는 적되 제 PAT 로 검증한다. 읽기(목록 · 찾기 · 제안)는 구성원 모두이고 산 호출은 부른 사람의
+    PAT 다. 남은 읽기도 404 다."""
+    err = _refused(lambda: _put(box, VIEWER))
+    assert (err.code, err.http_status) == ("role_insufficient", 403)
+    assert _refused(lambda: _put(box, STRANGER)).http_status == 404
+    assert box.gw.seen == []
+    assert _put(box, EDITOR)["registration"]["created_by"] == EDITOR
+    assert box.gw.auths() == {f"Bearer {PATS[EDITOR]}"}
+    box.gw.seen.clear()
+    assert _locate(box, VIEWER, refdes="U1001")["status"] == "located"
+    assert box.gw.auths() == {f"Bearer {PATS[VIEWER]}"}
+    for read in (lambda: _locate(box, STRANGER, x=1.0, y=1.0), lambda: routes.get_board_transforms(box.project, ident=_who(STRANGER)),
+                 lambda: routes.get_board_transform_proposal(box.project, ident=_who(STRANGER))):
+        assert _refused(read).http_status == 404
+    remove = _refused(lambda: routes.delete_board_transform(box.project, ident=_who(VIEWER)))
+    assert remove.http_status == 403
+    assert routes.delete_board_transform(box.project, ident=_who(EDITOR))["removed"] == 1
+    assert len(_audits(box.store)) == 2 and json.loads(_audits(box.store)[-1]["before_json"])["status"] == "verified"
+
+
+def test_without_the_persons_pat_nothing_is_sent_and_the_box_pat_is_never_used(box):
+    """그 사람의 PAT 가 없으면 적기 · 제안 · refdes 찾기는 409 locate_pat_absent 이고 게이트웨이에 아무것도 보내지 않는다 — 박스 읽기 PAT 로
+    내려가지 않는다."""
+    for call in (lambda: _put(box, NOPAT), lambda: routes.get_board_transform_proposal(box.project, ident=_who(NOPAT))):
+        err = _refused(call)
+        assert (err.code, err.http_status, err.detail) == ("locate_pat_absent", 409, {"fix": "portal_pat"})
+    _put(box)
+    box.gw.seen.clear()
+    err = _refused(lambda: _locate(box, NOPAT, refdes="U1001"))
+    assert err.code == "locate_pat_absent" and box.gw.seen == []
+
+
+def test_an_admin_writes_as_an_editor_and_leaves_the_admin_marks(box):
+    """관리자는 구성원이 아니어도 편집자로 적는다 — 감사 행에 관리자 표시(via admin)와 관리자 쓰기 줄이 선다."""
+    _register_admin = "f2-admin@example.com"
+    PATS[_register_admin] = "admin-pat-not-real"
+    try:
+        _register(box.store, _register_admin)
+        out = _put(box, _register_admin, role="admin")
+    finally:
+        PATS.pop(_register_admin)
+    assert out["registration"]["status"] == "verified"
+    assert json.loads(_audits(box.store)[-1]["after_json"])["via"] == "admin"
+    assert box.store.query_one("SELECT COUNT(*) AS n FROM rr_audit WHERE action = 'admin.write'")["n"] == 1
+
+
+# ================================================================ 제안
+def test_the_proposal_offers_board_bodies_then_finds_the_hand_transform(box, frozen):
+    """몸체 경로가 없으면 ODB 외곽 크기에 맞는 몸체(스냅샷)를 준다 — 보드 몸체가 첫째다. 경로를 주면 뒤집기 넷마다의 변환 후보와 검증을 주는데
+    첫 후보가 손 셈이다(쓰지 않는다). 그 후보를 그대로 적으면 verified 다."""
+    first = routes.get_board_transform_proposal(box.project, ident=_who(VIEWER))
+    assert [c["path"] for c in first["board_body_candidates"]] == [PCB] and first["candidates"] == []
+    assert first["board_body_candidates"][0]["error_mm"] == 0.0 and first["current"] is None
+    second = routes.get_board_transform_proposal(box.project, board_body=PCB, ident=_who(VIEWER))
+    top = second["candidates"][0]
+    assert top["verification"]["ok"] and top["transform"] == {**HAND, "unit": "mm"}
+    assert top["formula"].startswith("x_CAD = 82.13 − x_ODB · y_CAD = y_ODB + 2.82")
+    assert routes.get_board_transforms(box.project, ident=_who(OWNER))["transforms"] == []
+    taken = top["transform"]
+    out = _put(box, source="proposed", **{k: taken[k] for k in HAND})
+    assert out["registration"]["status"] == "verified" and out["registration"]["source"] == "proposed"
+    assert routes.get_board_transform_proposal(box.project, board_body=PCB, ident=_who(OWNER))["current"]["status"] == "verified"
+
+
+# ================================================================ 리스크 항목 — 위치 · 주제
+def _ckey(ir: dict, label: str) -> str:
+    return next(n["ckey"] for n in ir["nodes"] if n.get("label") == label)
+
+
+def _finding(box: Box, target_key: str, subject_key: str, claim: str = "간극이 작다") -> dict:
+    return routes.create_human_finding(target_key, routes.HumanFindingBody(subject_key=subject_key, claim=claim,
+                                                                           cites=[{"ref": "warn:f2", "quote": "근거"}]),
+                                       ident=_who(OWNER))
+
+
+@pytest.fixture
+def items(box, frozen) -> dict:
+    target = factories.make_target(box.store, "snap", frozen["snapshot_id"], agents=factories.agents(("mech", "pcb")), owner=OWNER)
+    ir = frozen["ir"]
+    made = {"target": target, "ir": ir}
+    for name, subject in (("can", _ckey(ir, "SHIELD_CAN_1")), ("pair", "|".join(sorted((_ckey(ir, "MAIN_PCB"), _ckey(ir, "SHIELD_CAN_1"))))),
+                          ("screws", _ckey(ir, "SCREW_M14#1")), ("chip", _ckey(ir, "U1002")), ("asm", "asm:PHONE_ASM")):
+        made[name] = _finding(box, target, subject, claim=f"{name} 주장")
+    return made
+
+
+def test_a_part_subject_goes_straight_to_its_body_and_planes_without_the_gateway(box, items):
+    """주제가 MCAD 몸체 하나면 그 스냅샷 몸체 bbox 가운데 · 몸체 · 두 큰 변의 평면이다 — 변환도 게이트웨이도 쓰지 않는다. 등록부 묶음도 같은
+    답이다."""
+    out = _locate(box, finding_id=items["can"]["finding_id"])
+    assert out["mcad"] == {"x": 50.0, "y": -17.5, "z": -0.35, "unit": "mm"}
+    assert out["body"]["path"].endswith("/SHIELD_CAN_1") and out["planes"] == [{"axis": "y", "offset": -17.5, "unit": "mm"},
+                                                                               {"axis": "x", "offset": 50.0, "unit": "mm"}]
+    assert out["stepforge_project_id"] == SF and out["window_mm"] == 60.0 and box.gw.seen == []
+    cluster = _locate(box, target_key=items["target"], cluster_key=items["can"]["cluster_key"])
+    assert (cluster["mcad"], cluster["body"]["path"], cluster["planes"]) == (out["mcad"], out["body"]["path"], out["planes"])
+
+
+def test_an_interface_subject_lands_in_the_overlap_of_its_two_bodies(box, items):
+    out = _locate(box, finding_id=items["pair"]["finding_id"])
+    assert out["status"] == "located" and out["body"] is None and len(out["bodies"]) == 2
+    assert out["mcad"] == {"x": 50.0, "y": -17.5, "z": 0.5, "unit": "mm"}          # 쉴드캔이 보드 아래 면에 맞닿은 칸
+    assert out["plane_basis"]["basis"].startswith("interface_overlap")
+
+
+def test_an_ambiguous_or_unplaceable_subject_is_unknown_with_its_candidates(box, items):
+    """같은 나사 둘(같은 정규 키)은 고르지 않고 후보를 준다. 조립 주제는 자리가 하나가 아니다."""
+    screws = _locate(box, finding_id=items["screws"]["finding_id"])
+    assert screws["reason"]["code"] == "subject_ambiguous" and len(screws["candidates"]) == 2
+    assert _locate(box, finding_id=items["asm"]["finding_id"])["reason"]["code"] == "subject_not_placeable"
+
+
+def test_an_ecad_part_subject_takes_the_board_path_through_the_registration(box, items):
+    """주제가 ECAD 부품이면 그 스냅샷의 보드로 refdes 길을 탄다 — 등록이 없으면 그 까닭, 있으면 손 셈 자리다."""
+    assert _locate(box, finding_id=items["chip"]["finding_id"])["reason"]["code"] == "transform_missing"
+    _put(box)
+    out = _locate(box, finding_id=items["chip"]["finding_id"])
+    assert out["status"] == "located" and out["input"]["via"] == {"refdes": "U1002"}
+    assert out["mcad"] == {"x": 62.13, "y": -37.18, "z": 0.5, "unit": "mm"}
+
+
+def test_an_item_location_is_set_by_editors_audited_and_used_first(box, items):
+    """항목 위치(점)를 적으면 위치 찾기가 주제보다 먼저 그 점을 쓴다. 편집자 이상만 적고(보기 403 · 남 404) 바뀌면 감사 한 줄이다. 둘 다 null 이면
+    뗀다. mm 가 아닌 단위는 받지 않는다."""
+    finding = items["asm"]["finding_id"]
+    body = routes.ItemLocationBody(finding_id=finding, part=None, point=routes.ItemPoint(x=10.0, y=-5.0, z=0.5))
+    assert _refused(lambda: routes.put_item_location(box.project, body, ident=_who(VIEWER))).http_status == 403
+    assert _refused(lambda: routes.put_item_location(box.project, body, ident=_who(STRANGER))).http_status == 404
+    inch = routes.ItemLocationBody(finding_id=finding, part=None, point=routes.ItemPoint(x=1.0, y=1.0, z=1.0, unit="inch"))
+    assert _refused(lambda: routes.put_item_location(box.project, inch, ident=_who(EDITOR))).code == "unit_unsupported"
+    out = routes.put_item_location(box.project, body, ident=_who(EDITOR))
+    assert out["changed"] and out["location"]["point"] == {"x": 10.0, "y": -5.0, "z": 0.5, "unit": "mm"}
+    found = _locate(box, finding_id=finding)
+    assert found["mcad"] == {"x": 10.0, "y": -5.0, "z": 0.5, "unit": "mm"} and found["plane_basis"]["basis"].startswith("item_location")
+    rows = _audits(box.store, "finding.location")
+    assert [(r["actor"], r["scope"], r["subject_id"]) for r in rows] == [(EDITOR, "finding", finding)]
+    same = routes.put_item_location(box.project, body, ident=_who(EDITOR))
+    assert same["changed"] is False and len(_audits(box.store, "finding.location")) == 1
+    cleared = routes.put_item_location(box.project, routes.ItemLocationBody(finding_id=finding, part=None, point=None),
+                                       ident=_who(OWNER))
+    assert cleared["changed"] and cleared["location"] is None
+    assert _locate(box, finding_id=finding)["reason"]["code"] == "subject_not_placeable"
+
+
+def test_purge_blanks_paths_and_locations_and_transfer_moves_the_registration(box, items):
+    """폐기는 등록의 몸체 경로 · 근거 · 사유와 항목 위치를 비우고(변환 값은 남는다), 이양은 등록을 새 주인에게 옮긴다."""
+    _put(box)
+    routes.put_item_location(box.project, routes.ItemLocationBody(target_key=items["target"], cluster_key=items["can"]["cluster_key"],
+                                                                  part="/PHONE/x", point=None), ident=_who(OWNER))
+    routes.transfer_project(box.project, routes.TransferBody(to_email=EDITOR, reason="담당 교체"), ident=_who(OWNER))
+    assert box.store.query_one("SELECT owner_sub FROM rr_board_transforms")["owner_sub"] == EDITOR
+    assert _locate(box, EDITOR, x=30.0, y=-20.0)["status"] == "located"
+    code = box.store.query_one("SELECT code FROM rr_projects WHERE id = ?", (box.project,))["code"]
+    routes.purge_project(box.project, routes.PurgeBody(code=code, reason="지운다"), ident=_who(EDITOR))
+    row = box.store.query_one("SELECT board_body_path, verify_json, reason, offset_x FROM rr_board_transforms")
+    assert (row["board_body_path"], row["verify_json"], row["reason"], row["offset_x"]) == ("", None, None, 82.13)
+    assert box.store.query_one("SELECT COUNT(*) AS n FROM rr_registry WHERE location_json IS NOT NULL")["n"] == 0
+
+
+# ================================================================ MCP — 위임 신원 · REST 와 같은 답 · D-18
+def test_the_mcp_tools_need_a_delegated_identity_and_answer_like_rest(box, frozen, monkeypatch):
+    """네 도구 다 위임으로 확인된 신원만 받는다(아니면 delegation_required). 위임 신원이면 REST 와 같은 함수의 답이고 산 호출은 그 사람의 PAT 다."""
+    for tool, args in (("risk_locate_for_section", {"project_id": box.project, "x": 1.0, "y": 1.0}),
+                       ("risk_propose_board_transform", {"project_id": box.project}),
+                       ("risk_set_board_transform", {"project_id": box.project, "remove": True}),
+                       ("risk_set_item_location", {"project_id": box.project, "part": None, "point": None, "finding_id": "f"})):
+        assert _call(tool, **args)["error"] == "delegation_required", tool
+    factories.act_as_delegate(monkeypatch, EDITOR)
+    written = _call("risk_set_board_transform", project_id=box.project, board_body=PCB, **HAND)
+    assert written["registration"]["status"] == "verified" and written["web"]["project"].endswith(box.project)
+    assert _audits(box.store)[-1]["channel"] == "mcp" and _audits(box.store)[-1]["actor_verified"] == 0
+    box.gw.seen.clear()
+    via_mcp = _call("risk_locate_for_section", project_id=box.project, refdes="U1001")
+    via_rest = _locate(box, EDITOR, refdes="U1001")
+    assert via_mcp == via_rest and box.gw.auths() == {f"Bearer {PATS[EDITOR]}"}
+    refused = _call("risk_set_board_transform", project_id=box.project, board_body=PCB, **{**HAND, "top_face": "zmax"})
+    assert refused["error"] == "transform_unverified" and refused["detail"]["verification"]["reasons"] == ["handedness_mismatch"]
+    factories.act_as_delegate(monkeypatch, STRANGER)
+    assert _call("risk_locate_for_section", project_id=box.project, x=1.0, y=1.0)["error"] == "not_visible"
+
+
+def test_the_f2_tools_are_risk_tools_closed_to_risk_review_seats():
+    """D-18 — 네 도구 이름이 risk_ 로 시작하고 좌석에 여는 둘(risk_get_diff · risk_get_snapshot)이 아니다. 에이전트 엔진은 리스크 심사 좌석의
+    지정 도구에서 리스크 앱 도구를 이름으로 닫는다(_risk_designated_refusal 의 app 갈래 — 매핑을 못 받아도 닫는다). 자유 조회 접두에도 걸리지
+    않는다(risk_ 는 자유 조회 허용 접두가 아니다)."""
+    names = {t.name for t in asyncio.run(srv.mcp.list_tools())}
+    for name in ("risk_locate_for_section", "risk_propose_board_transform", "risk_set_board_transform", "risk_set_item_location"):
+        assert name in names and name.startswith("risk_") and name not in ("risk_get_diff", "risk_get_snapshot")
+
+
+def test_the_input_is_exactly_one_thing_with_finite_millimetres(box):
+    """입력은 꼭 하나 — 없거나 둘이면 422, 좌표는 유한한 수, side 는 좌표와 함께만 top · bottom."""
+    for bad in ({}, {"refdes": "U1", "net": "N"}, {"x": 1.0}, {"x": float("nan"), "y": 1.0}, {"refdes": "U1", "side": "top"},
+                {"x": 1.0, "y": 1.0, "side": "left"}, {"target_key": "snap:x"}):
+        err = _refused(lambda bad=bad: _locate(box, **bad))
+        assert (err.code, err.http_status) == ("E100", 422), bad
+    assert _refused(lambda: _locate(box, x=1.0, y=1.0, odb_job_id="not-a-job")).http_status == 422
