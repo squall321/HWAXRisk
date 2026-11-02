@@ -29,11 +29,15 @@ CALL_TIMEOUT_S = 120.0
 HOLES_PAGE_SIZE, HOLES_PAGES_MAX = 100, 5
 # StepForge corner_proximity 의 줄 상한(MAX_ROWS) — 파트 하나를 지목하므로 구멍 줄의 상한이다.
 CAD_HOLES_LIMIT = 500
-# 부품 면 바로 바깥을 찔러 그 자리의 몸체를 찾는다 — 면 위 점은 보드와 부품 몸체 둘 다의 경계라 바깥으로 이만큼 비킨다.
-PROBE_MM = 0.05
+# 그 자리의 부품 몸체를 찾는 선분 — 부품 면에서 바깥으로 이만큼(반대 검토 F2-9). 몸체의 bbox 가 이 선분에 걸려야 후보다 — 몸체의 아래 면이
+# 보드 면에서 이만큼 안이어야 한다(BGA 볼 · 리드의 스탠드오프는 1 mm 안). 종전에는 면 바로 바깥 0.05 mm 의 한 점을 찔러 스탠드오프 0.2 mm 인
+# IC 몸체를 놓치고 그 위를 덮은 쉴드캔을 몸체로 냈다. ODB 허브에 부품 높이 칸이 없어 상수다 — 더 깊으면 부품 위에 쌓인 몸체(써멀 패드 ·
+# 덮개)까지 걸려 '여럿이라 고르지 않음' 이 는다.
+PROBE_REACH_MM = 1.0
 CONTAIN_TOL_MM = 0.01
-# 몸체가 그 부품이라고 말할 조건 — 면내 긴 변이 부품 크기의 두 배(또는 +1 mm) 안이고 자리가 그 몸체의 가운데 반 안이다. 그보다 크거나 비껴
-# 있으면 bbox 가 품을 뿐이다(쉴드캔 · 프레임) — 몸체로 말하지 않고 후보로만 싣는다.
+# 몸체가 그 부품이라고 말할 조건 — 면내 두 변(긴 · 짧은)이 각각 부품 크기(패키지 — 없으면 핀 bbox)의 절반 이상이고 두 배(또는 +1 mm) 이하이며,
+# 자리가 그 몸체의 가운데 반 안이고, 크기가 맞는 다른 후보를 품지 않는다(쉴드캔 · 하우징은 그 안의 부품을 품는다). 그런 몸체가 꼭 하나일 때만
+# 몸체다 — 없거나 여럿이면 null 과 후보(종전에는 위 한계만 있어 부품 가운데의 0.3 mm 볼을 몸체로 냈다).
 BODY_SIZE_FACTOR, BODY_SIZE_SLACK_MM = 2.0, 1.0
 # 옮긴 자리가 CAD 보드 몸체 bbox 에서 이만큼 넘게 밖이면 이 보드의 자리가 아니다(point_off_board) — 등록 검증의 오차 상한과 같다.
 OFF_BOARD_TOL_MM = bt.MAX_ERROR_MM
@@ -396,8 +400,17 @@ def _point(x: float, y: float, z: float) -> dict:
             "unit": bt.UNIT}
 
 
-def _contains(box: Sequence[float], p: Mapping[str, float], tol: float = CONTAIN_TOL_MM) -> bool:
-    return all(box[i] - tol <= p[a] <= box[i + 3] + tol for i, a in enumerate("xyz"))
+def _fits(extent: Mapping[str, float], size: Sequence[float]) -> bool:
+    """몸체의 면내 두 변(긴 · 짧은)이 각각 부품 크기(긴 · 짧은)의 절반 이상이고 두 배(또는 +1 mm) 이하인가."""
+    got = sorted((extent["x"], extent["y"]), reverse=True)
+    return all(want / BODY_SIZE_FACTOR <= have <= max(BODY_SIZE_FACTOR * want, want + BODY_SIZE_SLACK_MM) for have, want in zip(got, size))
+
+
+def _encloses(outer: Sequence[float], inner: Sequence[float]) -> bool:
+    """outer bbox 가 inner bbox 를 3차원으로 품는가(너그러움 CONTAIN_TOL_MM) — 같은 bbox 는 품지 않는다(서로 품어 둘 다 빠지지 않게)."""
+    if all(abs(outer[i] - inner[i]) <= CONTAIN_TOL_MM for i in range(6)):
+        return False
+    return all(outer[i] - CONTAIN_TOL_MM <= inner[i] and inner[i + 3] <= outer[i + 3] + CONTAIN_TOL_MM for i in range(3))
 
 
 # ---------------------------------------------------------------- 답 조립
@@ -431,10 +444,14 @@ def _body_of(node: Mapping[str, Any], snapshot_id: str) -> dict:
 
 
 # ---------------------------------------------------------------- 보드 길(refdes · 넷 · 좌표)
-def _board_body(view: Mapping[str, Any] | None, probe: dict, *, feature_long: float | None,
+def _board_body(view: Mapping[str, Any] | None, x: float, y: float, face: str | None, *, size: Sequence[float] | None,
                 mid_point: bool) -> tuple[dict | None, str | None, list[dict], str | None]:
     """그 자리의 CAD 몸체 — (body, note, 후보, snapshot_id). 그 CAD 과제의 최근 스냅샷(`cad_view`)을 본다. 스냅샷의 보드 몸체가 등록 때와
-    다르면 찾지 않는다 — 여기 오는 것은 등록보다 앞서 찍은 스냅샷뿐이다(뒤에 찍은 스냅샷이면 변환이 낡은 것이라 위에서 transform_stale)."""
+    다르면 찾지 않는다 — 여기 오는 것은 등록보다 앞서 찍은 스냅샷뿐이다(뒤에 찍은 스냅샷이면 변환이 낡은 것이라 위에서 transform_stale).
+
+    면 없는 보드 좌표(`mid_point`)는 보드 몸체다. 아니면 (x, y) 에서 부품 면(`face`) 바깥으로 PROBE_REACH_MM 까지의 선분에 걸리는 몸체가
+    후보이고, 부품 크기(`size` — 긴 · 짧은 변, 모르면 None)에 맞고 자리가 가운데 반 안이며 크기가 맞는 다른 후보를 품지도 그 위에 얹히지도 않은
+    몸체가 꼭 하나면 그것이 body 다. 후보는 크기가 맞는 것(fits_part)부터 부피 차례다."""
     if view is None:
         return None, "no_cad_snapshot — 이 CAD 과제를 읽은 스냅샷이 과제에 없어 몸체를 찾지 않았다(점 · 평면은 그대로 쓴다)", [], None
     snapshot_id, parts, board = view["snapshot_id"], view["parts"], view["board"]
@@ -443,27 +460,44 @@ def _board_body(view: Mapping[str, Any] | None, probe: dict, *, feature_long: fl
     if view["moved_mm"] > bt.MAX_ERROR_MM:
         return None, ("snapshot_board_moved — 등록보다 앞서 찍은 스냅샷의 보드 몸체가 등록 때 읽은 자리와 오차 상한보다 달라 그 스냅샷으로는"
                       " 몸체를 찾지 않았다(변환은 그 뒤의 CAD 로 검증됐다 — 다시 캡처하면 몸체를 찾는다)"), [], snapshot_id
-    if mid_point:
+    if mid_point or face is None:
         return _body_of(board, snapshot_id), None, [], snapshot_id
+    face_z = view["box"][5] if face == "zmax" else view["box"][2]
+    reach = sorted((face_z, face_z + bt.outward(face) * PROBE_REACH_MM))
     hits = []
     for node in parts:
         b = _bbox_of(node)
-        if node is board or b is None or not _contains(b, probe):
+        if node is board or b is None:
             continue
+        if not (b[0] - CONTAIN_TOL_MM <= x <= b[3] + CONTAIN_TOL_MM and b[1] - CONTAIN_TOL_MM <= y <= b[4] + CONTAIN_TOL_MM):
+            continue
+        if b[5] < reach[0] - CONTAIN_TOL_MM or b[2] > reach[1] + CONTAIN_TOL_MM:
+            continue                                # 그 면 바깥 선분에 걸리지 않는다(반대 면의 몸체 · 더 높이 쌓인 몸체)
         e = _extents(b)
-        hits.append((e["x"] * e["y"] * max(e["z"], 1e-9), node, b))
-    hits.sort(key=lambda h: (h[0], str(h[1].get("local_key") or "")))
-    listed = [{"path": str(n.get("local_key") or ""), "bbox": [round(v, bt.DIGITS) for v in b]} for _v, n, b in hits[:CANDIDATES_MAX]]
+        centred = abs(x - (b[0] + b[3]) / 2) <= 0.25 * e["x"] + CONTAIN_TOL_MM and abs(y - (b[1] + b[4]) / 2) <= 0.25 * e["y"] + CONTAIN_TOL_MM
+        fits = size is not None and centred and _fits(e, size)
+        hits.append((not fits, e["x"] * e["y"] * max(e["z"], 1e-9), str(node.get("local_key") or ""), node, b))
+    hits.sort(key=lambda h: h[:3])
+    listed = [{"path": path, "bbox": [round(v, bt.DIGITS) for v in b], "fits_part": not misfit}
+              for misfit, _v, path, _n, b in hits[:CANDIDATES_MAX]]
     if not hits:
-        return None, "no_body — 그 자리 바로 바깥을 품는 몸체가 스냅샷에 없다(부품이 CAD 에 없을 수 있다)", [], snapshot_id
-    _v, node, b = hits[0]
-    e = _extents(b)
-    long_side = max(e["x"], e["y"])
-    centred = all(abs(probe[a] - (b[i] + b[i + 3]) / 2) <= 0.25 * e[a] + CONTAIN_TOL_MM for i, a in enumerate("xy"))
-    if feature_long is not None and long_side <= max(BODY_SIZE_FACTOR * feature_long, feature_long + BODY_SIZE_SLACK_MM) and centred:
-        return _body_of(node, snapshot_id), None, listed, snapshot_id
-    return None, ("bbox_only — 그 자리를 품는 가장 작은 몸체가 부품 크기 · 자리와 맞지 않아 몸체로 말하지 않는다(bbox 가 품을 뿐이다 — 후보를"
-                  " 본다)"), listed, snapshot_id
+        return None, "no_body — 그 자리에서 면 바깥으로 걸리는 몸체가 스냅샷에 없다(부품이 CAD 에 없을 수 있다)", [], snapshot_id
+    if size is None:
+        return None, "bbox_only — 대상 크기를 몰라(보드 좌표) 몸체로 말하지 않는다(후보를 본다)", listed, snapshot_id
+    fitting = [h for h in hits if not h[0]]
+    inner = [h for h in fitting if not any(o is not h and _encloses(h[4], o[4]) for o in fitting)]
+    # 크기가 맞는 다른 후보의 바깥 쪽에 통째로 얹힌 몸체(써멀 패드 · PoP 의 위 패키지 · 덮개)는 그 자리에 실장된 부품이 아니다 — 보드 면에
+    # 가까운 쪽이 부품이다. z 가 겹치면(언더필처럼 옆을 두른 것) 가르지 않는다.
+    out_sign = bt.outward(face)
+    mounted = [h for h in inner if not any(
+        o is not h and (h[4][5] <= o[4][2] + CONTAIN_TOL_MM if out_sign < 0 else h[4][2] >= o[4][5] - CONTAIN_TOL_MM) for o in inner)]
+    if len(mounted) == 1:
+        return _body_of(mounted[0][3], snapshot_id), None, listed, snapshot_id
+    if not fitting:
+        return None, ("bbox_only — 그 자리에 걸리는 몸체 가운데 부품 크기 · 자리에 맞는 것이 없어 몸체로 말하지 않는다(bbox 가 품을 뿐이다 —"
+                      " 후보를 본다)"), listed, snapshot_id
+    return None, ("ambiguous — 부품 크기 · 자리에 맞고 서로 품지 않는 몸체가 여럿이라 고르지 않는다(후보의 fits_part 를 보고 항목 위치로"
+                  " 적는다)"), listed, snapshot_id
 
 
 def _part_detail(channel: Any, app_key: str, job_id: str, refdes: str, calls: list[dict]) -> tuple[dict | None, dict | None]:
@@ -488,6 +522,7 @@ def _part_detail(channel: Any, app_key: str, job_id: str, refdes: str, calls: li
         return None, unknown("point_unread")
     return {"x": cx, "y": cy, "ex": ex, "ey": ey, "center_basis": basis, "side": side if side in bt.SIDES else None,
             "placement": {"x": x, "y": y, "rotation": _num(detail.get("rotation"))}, "pkg_long": max(pkg) if pkg else None,
+            "pkg_size": sorted(pkg, reverse=True) if len(pkg) == 2 else None,
             "pins": len(pins), "pins_truncated": bool(detail.get("pins_truncated"))}, None
 
 
@@ -597,11 +632,9 @@ def locate_on_board(store: Any, project: Mapping[str, Any], *, input_: dict, odb
         face = bt.face_of(side, t.top_face)
         z = bt.face_z(face, row["board_z_min"], row["board_z_max"])
         z_basis = f"mount_face — {side} 면 부품이 닿는 CAD {bt.FACE_WORDS[face]}({face})"
-        probe = {"x": x_cad, "y": y_cad, "z": z + bt.outward(face) * PROBE_MM}
     else:
         face, z = None, (row["board_z_min"] + row["board_z_max"]) / 2
         z_basis = "board_mid — 면을 몰라 보드 두께 가운데"
-        probe = {"x": x_cad, "y": y_cad, "z": z}
     ex, ey = spot.get("ex"), spot.get("ey")
     decisive = ex is not None and ey is not None and max(ex, ey) > 0 and (min(ex, ey) == 0 or max(ex, ey) / min(ex, ey) >= PIN_AXIS_RATIO)
     if decisive:
@@ -612,12 +645,12 @@ def locate_on_board(store: Any, project: Mapping[str, Any], *, input_: dict, odb
     feature_long = max([v for v in (ex, ey, spot.get("pkg_long")) if v is not None] or [0.0]) or None
     if kind == "net":
         body, note, candidates, snapshot_id = None, "net — 넷은 몸체 하나로 정하지 않는다(점 · 평면을 쓴다)", [], None
-    elif kind == "xy" and side is None:
-        body, note, candidates, snapshot_id = _board_body(snapshot, probe, feature_long=None, mid_point=True)
     else:
-        # 좌표에는 대상 크기가 없어(feature_long None) 몸체로 말하지 않고 후보만 싣는다.
-        body, note, candidates, snapshot_id = _board_body(snapshot, probe, feature_long=feature_long if kind == "refdes" else None,
-                                                          mid_point=False)
+        # 부품 크기 — 패키지(긴 · 짧은 변), 없으면 핀 bbox. 좌표에는 대상 크기가 없어 몸체로 말하지 않고 후보만 싣는다(면 없는 좌표는 보드 몸체).
+        size = None
+        if kind == "refdes":
+            size = spot.get("pkg_size") or (sorted((ex, ey), reverse=True) if ex is not None and ey is not None else None)
+        body, note, candidates, snapshot_id = _board_body(snapshot, x_cad, y_cad, face, size=size, mid_point=kind == "xy" and side is None)
     ecad = {"x": round(spot["x"], bt.DIGITS), "y": round(spot["y"], bt.DIGITS), "side": side, "unit": bt.UNIT,
             "center_basis": spot["center_basis"], "z_basis": z_basis}
     for key in ("placement", "pins", "pins_truncated", "side_basis"):

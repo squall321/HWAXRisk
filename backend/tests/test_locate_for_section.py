@@ -385,6 +385,58 @@ def test_a_bottom_side_part_sits_on_the_top_face_and_a_loose_box_is_not_called_i
     assert out["planes"][0] == {"axis": "x", "offset": 37.13, "unit": "mm"}
 
 
+def test_an_ic_with_a_stand_off_under_a_shield_can_is_its_own_body(box, monkeypatch):
+    """(반대 검토 R3) U2000(top 면 · 패키지 10 × 8 · 핀 9 × 7) — CAD 몸체가 보드 면에서 0.2 mm 떠 있고(볼 스탠드오프) 쉴드캔이 그것을 덮는다.
+    종전에는 면 바로 바깥 0.05 mm 의 한 점만 찔러 IC 를 놓치고 쉴드캔(12 × 10 — 두 배 안)을 몸체 · F1 part 로 냈다. 이제 면 바깥 선분에 걸리는
+    몸체 가운데 크기가 맞고 크기가 맞는 다른 후보를 품지 않는 것이 몸체다 — 쉴드캔은 IC 를 품어 빠진다."""
+    pins = [(10.5, -33.5), (19.5, -33.5), (10.5, -26.5), (19.5, -26.5)]
+    monkeypatch.setitem(DETAILS, "U2000", _detail("U2000", 15.0, -30.0, "top", pins, pkg_width=10.0, pkg_length=8.0))
+    monkeypatch.setitem(globals(), "BODIES", list(BODIES) + [
+        ("U2000_BODY", [62.13, -31.18, -0.9, 72.13, -23.18, 0.3], "EMC"),        # 보드 아래 면(0.5)에서 0.2 mm 떠 있다
+        ("SHIELD_CAN_2", [61.13, -32.18, -1.3, 73.13, -22.18, 0.5], "SUS")])       # 보드 면에 붙어 IC 를 덮는다
+    _freeze(box.store, box.project)
+    _put(box)
+    out = _locate(box, refdes="U2000")
+    assert out["status"] == "located" and out["mcad"] == {"x": 67.13, "y": -27.18, "z": 0.5, "unit": "mm"}
+    assert out["body"]["path"].endswith("/U2000_BODY") and out["f1"]["part"] == out["body"]["path"] and out["body_note"] is None
+    fits = {c["path"].rsplit("/", 1)[-1]: c["fits_part"] for c in out["body_candidates"]}
+    assert fits == {"U2000_BODY": True, "SHIELD_CAN_2": True, "REAR_HOUSING": False}
+
+
+def test_a_tiny_body_at_the_part_centre_is_not_the_part(box, monkeypatch):
+    """(반대 검토 R3b) U1001 가운데의 0.3 mm 볼 몸체 — 종전에는 크기에 아래 한계가 없어 찌른 점을 품는 가장 작은 몸체(볼)를 IC 의 몸체로 냈다.
+    면내 두 변이 부품 크기의 절반 이상이어야 하므로 볼은 후보일 뿐이고 몸체는 U1001_BODY 다."""
+    monkeypatch.setitem(globals(), "BODIES", list(BODIES) + [("U1001_BALL_C3", [51.98, -17.33, 0.2, 52.28, -17.03, 0.5], "SAC")])
+    _freeze(box.store, box.project)
+    _put(box)
+    out = _locate(box, refdes="U1001")
+    assert out["body"]["path"].endswith("/U1001_BODY")
+    assert {c["path"].rsplit("/", 1)[-1]: c["fits_part"] for c in out["body_candidates"]}["U1001_BALL_C3"] is False
+
+
+def test_a_same_size_body_stacked_on_the_part_is_not_the_part(box, monkeypatch):
+    """부품 몸체 바깥 쪽에 같은 크기의 써멀 패드가 얹혀 있으면(선분이 둘 다 건드린다) 보드 면에 가까운 쪽이 실장된 부품이다 — 패드는 크기가
+    맞는 후보일 뿐이다(PoP 의 위 패키지 · 덮개도 같다)."""
+    monkeypatch.setitem(globals(), "BODIES", list(BODIES) + [("U1001_PAD", [50.93, -17.78, -0.6, 53.33, -16.58, -0.3], "SIL")])
+    _freeze(box.store, box.project)
+    _put(box)
+    out = _locate(box, refdes="U1001")
+    assert out["body"]["path"].endswith("/U1001_BODY")
+    assert [c["path"].rsplit("/", 1)[-1] for c in out["body_candidates"] if c["fits_part"]] == ["U1001_PAD", "U1001_BODY"]
+
+
+def test_two_bodies_of_the_part_size_that_neither_enclose_nor_stack_are_not_chosen_between(box, monkeypatch):
+    """크기 · 자리가 맞고 서로 품지도 얹히지도 않는 몸체가 둘이면(부품 둘레를 두른 언더필 몸체 — z 가 부품과 겹친다) 고르지 않는다 — body null
+    과 둘 다 fits_part 인 후보 · 까닭 ambiguous. F1 에 엉뚱한 part 를 넘기지 않고 사람이 항목 위치로 고른다."""
+    monkeypatch.setitem(globals(), "BODIES", list(BODIES) + [("U1001_UNDERFILL", [50.83, -17.88, 0.1, 53.43, -16.48, 0.5], "EPX")])
+    _freeze(box.store, box.project)
+    _put(box)
+    out = _locate(box, refdes="U1001")
+    assert out["status"] == "located" and out["body"] is None and out["f1"]["part"] is None
+    assert out["body_note"].startswith("ambiguous")
+    assert [c["path"].rsplit("/", 1)[-1] for c in out["body_candidates"] if c["fits_part"]] == ["U1001_UNDERFILL", "U1001_BODY"]
+
+
 def test_board_coordinates_without_a_side_land_mid_board_without_any_gateway_call(box, frozen):
     """보드 좌표는 변환만으로 자리가 선다 — 게이트웨이를 부르지 않는다(PAT 가 없어도 답한다). 면이 없으면 z 는 보드 두께 가운데이고 몸체는 보드
     몸체다. 면을 주면 그 면이고 몸체는 후보로만(대상 크기가 없다)."""
