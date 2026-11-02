@@ -143,12 +143,33 @@ def frontend_labels() -> dict[str, str]:
     return dict(re.findall(r"""^\s*["']([^"']+)["']\s*:\s*["']([^"']*)["']""", block.group(1), re.M))
 
 
+# 이름표를 화면 세션에 청한 행위 — 백엔드 세션은 frontend/ 를 고치지 않는다(HWAXRisk CLAUDE.md '나눠 맡는다'). 화면이 ACTION_LABEL 에 이름표를
+# 더하면 이 표에서 뺀다 — 이름표가 생겼는데 여기 남아 있으면 아래 시험이 붉다(면제가 낡지 않게). 값은 청하는 이름표와 까닭이다.
+LABEL_PENDING: dict[str, str] = {
+    "project.sp_subject": ("'과제 주제(SP 과제 · 차수)' — 과제 인사이트 그래프 M2b(포털 docs/project-insight-graph contracts §9)의"
+                           " PUT /api/projects/{id}/sp-subject · MCP risk_set_project_subject 가 쓴다"),
+}
+
+
 def test_every_audit_action_the_app_can_write_has_a_label_on_the_history_tab():
-    """앱 소스에서 끌어낸 행위마다 이력 탭 이름표가 있다(말이 빈 것도 없다). 없으면 그 행위와 쓰는 자리를 말한다."""
+    """앱 소스에서 끌어낸 행위마다 이력 탭 이름표가 있다(말이 빈 것도 없다) — 화면 세션에 청한 것(LABEL_PENDING)만 빼고. 없으면 그 행위와 쓰는
+    자리를 말한다."""
     actions = backend_actions()
     labels = frontend_labels()
-    missing = {name: sorted(where) for name, where in sorted(actions.items()) if not labels.get(name, "").strip()}
+    missing = {name: sorted(where) for name, where in sorted(actions.items())
+               if not labels.get(name, "").strip() and name not in LABEL_PENDING}
     assert not missing, f"이력 탭 이름표가 없는 감사 행위 — frontend ProjectAuditCard ACTION_LABEL 에 더한다: {missing}"
+
+
+def test_a_pending_label_is_still_written_and_still_missing():
+    """청한 이름표의 행위는 앱이 지금도 쓰고 화면에는 아직 이름표가 없다 — 화면이 이름표를 더했으면 LABEL_PENDING 에서 뺀다(면제가 남지
+    않게). 청하는 까닭이 적혀 있다."""
+    actions = backend_actions()
+    labels = frontend_labels()
+    assert set(LABEL_PENDING) <= set(actions), sorted(set(LABEL_PENDING) - set(actions))
+    landed = sorted(name for name in LABEL_PENDING if labels.get(name, "").strip())
+    assert not landed, f"화면에 이름표가 생겼다 — LABEL_PENDING 에서 뺀다: {landed}"
+    assert all(reason.strip() for reason in LABEL_PENDING.values())
 
 
 def test_the_scan_reaches_every_kind_of_audit_write():

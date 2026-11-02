@@ -24,7 +24,7 @@ from app import brief as brief_module
 from app import character, config, diff as diff_module
 from app import export as export_module
 from app import identity, ir_builder, learning, metrics, narrative, planner, ra_client, requirements, runner, sameas, taxonomy
-from app import expert_report, review_cells, review_runner
+from app import expert_report, review_cells, review_runner, sp_subject
 from app import roster as roster_module
 from app import state as state_module
 from app import units as units_module
@@ -2150,14 +2150,20 @@ def ecad_board_route_error(project_id: str) -> AppError:
                                    " risk_find_ecad_boards → risk_set_ecad_board)."})
 
 
+def _person_pat(email: str) -> str | None:
+    """그 사람의 등록된 포털 PAT — 없거나 폐기됐거나 풀리지 않거나 곧 끝나면(캡처와 같은 여유 CREDENTIAL_MARGIN_S) None 이다. 박스 읽기
+    PAT(HWAXRISK_PORTAL_PAT)로 내려가지 않는다 — ECAD 보드 찾기 · 붙이기 확인과 SP 과제 풀이 · 기구 CAD 과제 정보가 이 자격 하나다."""
+    credential = get_store().get_credential(email) or {}
+    if int(credential.get("pat_exp") or 0) <= now_epoch() + runner.CREDENTIAL_MARGIN_S:
+        return None
+    return identity.credential_pat(credential)
+
+
 def _ecad_mcp_channel(owner_sub: str) -> tuple[Any, dict]:
     """ECAD 보드 찾기 · 붙이기 확인의 게이트웨이 MCP 채널과 도구 지도 — 그 사람의 등록된 포털 PAT 하나다(사용자 결정 10-31). 없거나
     폐기됐거나 풀리지 않거나 곧 끝나면(캡처와 같은 여유 CREDENTIAL_MARGIN_S) 게이트웨이에 아무것도 보내기 전에 409 ecad_pat_absent 다 —
     박스 읽기 PAT(HWAXRISK_PORTAL_PAT)로 내려가지 않는다. 캡처도 같은 자격이라 찾아진 보드는 캡처도 읽는다."""
-    credential = get_store().get_credential(owner_sub) or {}
-    portal_pat = identity.credential_pat(credential)
-    if int(credential.get("pat_exp") or 0) <= now_epoch() + runner.CREDENTIAL_MARGIN_S:
-        portal_pat = None
+    portal_pat = _person_pat(owner_sub)
     if portal_pat is None:
         raise ecad_adapter.pat_absent_error()
     channels = adapters_registry.clients_from_settings(
@@ -2268,6 +2274,115 @@ def delete_ecad_board(project_id: str, ident: identity.Identity = Depends(identi
                    action="project.ecad_board", before={"odb_job_id": previous}, after={"odb_job_id": None},
                    channel=channel, actor_verified=channel != "mcp")
     return {"ok": True, "project_id": project_id, "removed": len(rows), "previous_odb_job_id": previous}
+
+
+# ---------------------------------------------------------------- 과제 주제 — SP 과제 key · 차수(포털 docs/project-insight-graph contracts §9, M2b)
+# 과제에 그 SP 허브 과제(key)와 차수를 단다 — 포털 과제 보기가 (과제, 차수) 칸에 이 과제를 싣는다(MCP risk_find_projects_by_subject). key 는
+# 리스크 앱이 그 사람의 PAT 로 스스로 부른 풀이의 결과 행에서만 적고(app/sp_subject.py), 차수는 stage 에 코드로 적는다. 일반 PATCH 칸에는 넣지
+# 않는다 — 넣으면 사람 글이 key 로 들어간다. 좌석(브리프 · 스냅샷 · 비교 · 패널 질문)에는 싣지 않는다(D-18 — 이 앱 안의 칸이다).
+class SpSubjectBody(BaseModel):
+    # null 이면 뗀다 — 빠뜨려서 떼지 않게 기본값 없이 받는다(ECAD 보드의 odb_job_id 와 같은 꼴).
+    sp_task: str | None = Field(max_length=sp_subject.SP_TASK_MAX)
+    round: str | None = Field(default=None, max_length=sp_subject.ROUND_MAX)
+
+
+def _sp_mcp_channel(email: str) -> Any:
+    """SP 과제 풀이 · 기구 CAD 과제 정보의 게이트웨이 MCP 채널 — 그 사람의 등록된 포털 PAT 하나다(`_person_pat` — ECAD 보드와 같은 자격). 없으면
+    None 이고 게이트웨이에 아무것도 보내지 않는다. 도구 지도는 받지 않는다(호출 전용 별칭으로 부른다)."""
+    portal_pat = _person_pat(email)
+    if portal_pat is None:
+        return None
+    return ra_client.McpHttpClient(config.settings.gateway_mcp, headers={"Authorization": f"Bearer {portal_pat}"},
+                                   timeout=adapters_base.source_timeout(config.settings))
+
+
+def _sp_hint(email: str, project_id: str) -> tuple[dict | None, str | None]:
+    """후보 힌트 — 과제에 붙은 기구 CAD 원천(첫 mcad 카드)의 StepForge get_project_meta.plm_task 를 부른 사람의 PAT 로 읽는다. 확인이 아니라 보일
+    후보다 — 사람이 고르면 PUT 이 풀이로 다시 확인한다(PLAN §4.3). 못 읽으면 (None, 까닭) — 읽기를 막지 않는다."""
+    source = next((s for s in _project_sources(project_id) if s["kind"] == "mcad"), None)
+    if source is None:
+        return None, "기구 CAD(StepForge) 원천이 붙지 않아 후보가 없다"
+    stepforge_id = str((source["ref"] or {}).get("stepforge_project_id") or "").strip()
+    if not stepforge_id:
+        return None, "기구 CAD 원천에 stepforge_project_id 가 없어 후보가 없다"
+    channel = _sp_mcp_channel(email)
+    if channel is None:
+        return None, ("부른 사람의 포털 PAT 가 없거나 곧 끝나 기구 CAD 과제 정보를 읽지 않았다 — 웹 설정 화면에서 포털 PAT 를 등록하면 후보가"
+                      " 보인다")
+    tool = sp_subject.gateway_alias(source["app_key"] or adapters_registry.default_app_key("mcad") or sp_subject.RESOLVER_APP,
+                                    sp_subject.PROJECT_META_TOOL)
+    try:
+        reply = channel.call(tool, {"project_id": stepforge_id}, deadline=time.monotonic() + sp_subject.RESOLVE_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 — 후보는 덤이다(읽기를 막지 않는다)
+        return None, f"기구 CAD 과제 정보({tool})를 읽지 못했다({type(exc).__name__})"
+    finally:
+        channel.close()
+    meta = reply.get("result") if reply.get("ok") else None
+    if not isinstance(meta, dict):
+        return None, f"기구 CAD 과제 정보({tool})를 읽지 못했다({reply.get('error') or '답이 객체가 아니다'})"
+    plm = meta.get("plm_task") if isinstance(meta.get("plm_task"), dict) else {}
+    why = meta.get("plm_task_why") if isinstance(meta.get("plm_task_why"), dict) else {}
+    return {"sp_task": plm.get("key"), "label": plm.get("label"), "active": plm.get("active"), "why": why.get("cause"),
+            "stepforge_project_id": stepforge_id, "tool": tool}, None
+
+
+@router.get("/projects/{project_id}/sp-subject")
+def get_sp_subject(project_id: str, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """과제 주제 — 지금 SP 과제 key · stage · 차수(stage 의 정규화 — 꼴이 아니면 null, 차수 모름)와 후보 힌트(`hint` — 붙은 기구 CAD 원천의
+    get_project_meta.plm_task 를 부른 사람의 PAT 로 읽은 것, 확인이 아니라 보일 후보 — 없으면 null 과 까닭 `hint_note`, 읽기를 막지 않는다).
+    구성원(보기 이상)이 읽는다 — 남은 없는 과제와 같은 404(과제 상세와 같은 문 — 구성원이 아닌 관리자는 열람 줄)."""
+    email = _require_user(ident)
+    if not _is_admin(ident):
+        require_role(project_id, email, "viewer")
+    elif get_store().query_one("SELECT id FROM rr_projects WHERE id = ?", (project_id,)) is None:
+        raise AppError("E404", f"과제({project_id}) 를 찾을 수 없습니다.", 404)
+    _note_admin_read(_admin_reader(ident), project_id)
+    row = get_store().query_one("SELECT sp_task, stage FROM rr_projects WHERE id = ?", (project_id,))
+    hint, note = _sp_hint(email, project_id)
+    return {"project_id": project_id, "sp_task": row["sp_task"], "stage": row["stage"],
+            "round": sp_subject.norm_round(row["stage"]), "hint": hint, "hint_note": note}
+
+
+@router.put("/projects/{project_id}/sp-subject")
+def put_sp_subject(project_id: str, body: SpSubjectBody, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """과제에 SP 과제 key · 차수를 달거나 뗀다 — 과제 주인 · 편집자(관리자는 편집자)만. `sp_task` 는 부른 사람의 포털 PAT 로 풀이
+    (heaxstep_forge_find_plm_task)를 스스로 불러 결과 행에 key 가 글자 그대로 같은 살아 있는 행이 꼭 하나일 때만 적는다(아니면 422
+    sp_task_not_confirmed · PAT 가 없으면 409 sp_pat_absent), null 이면 풀이 없이 뗀다. `round` 는 정규화해 열한 코드면 stage 에 코드로 적고(아니면
+    422 round_invalid), 비우면 stage 그대로다. 바뀌었을 때만 감사 한 줄(project.sp_subject — 앞 · 뒤와 풀이 지문 {tool, at, sha256})."""
+    actor = _require_user(ident)
+    owner_sub = _project_writer(project_id, ident)       # 주인 · 편집자 — 보기는 403, 남 · 없는 과제는 404
+    _project_row(project_id, owner_sub)
+    store = get_store()
+    if store.query_one("SELECT status FROM rr_projects WHERE id = ?", (project_id,))["status"] == "purged":
+        raise AppError("project_purged", "회수된 과제는 고칠 수 없습니다.", 409)
+    key = None if body.sp_task is None else body.sp_task.strip()
+    if key == "":
+        raise AppError("E100", "sp_task 가 비었습니다 — 떼려면 null 을 줍니다.", 422)
+    code = sp_subject.parse_round(body.round)
+    resolved_by = None
+    if key is not None:
+        channel = _sp_mcp_channel(actor)
+        if channel is None:
+            raise sp_subject.pat_absent_error()
+        try:
+            resolved_by = sp_subject.confirm(channel, key)
+        finally:
+            channel.close()
+    with store.tx():
+        before = store.query_one("SELECT sp_task, stage FROM rr_projects WHERE id = ?", (project_id,))
+        stage = code if code is not None else before["stage"]
+        changed = (key, stage) != (before["sp_task"], before["stage"])
+        if changed:
+            store.execute("UPDATE rr_projects SET sp_task = ?, stage = ?, updated_at = ? WHERE id = ?",
+                          (key, stage, now_epoch(), project_id))
+            channel_name = AUDIT_CHANNELS.get(ident.source, "rest")
+            _audit(store, actor, scope="project", subject_id=project_id, project_id=project_id, action="project.sp_subject",
+                   before={"sp_task": before["sp_task"], "stage": before["stage"]},
+                   after={"sp_task": key, "stage": stage, "resolved_by": resolved_by},
+                   channel=channel_name, actor_verified=channel_name != "mcp", via=_admin_via(ident, project_id))
+    return {"ok": True, "project_id": project_id, "sp_task": key, "stage": stage, "round": sp_subject.norm_round(stage),
+            "changed": changed, "previous": {"sp_task": before["sp_task"], "stage": before["stage"]},
+            "resolved_by": resolved_by}
 
 
 class SnapshotBody(BaseModel):

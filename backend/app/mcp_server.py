@@ -1,4 +1,4 @@
-# hwax-risk MCP 서버 — 도구 33종(발견 7 + 원장 7 + Claude 입구 12 + 검토 단위 1 + 카드 대조 검토 2 + 쟁점·종합 2 + ECAD 보드 2)은 REST 와 같은 함수를 부르는 접점이다(§6.11, LLM 을 부르지 않는다)
+# hwax-risk MCP 서버 — 도구 34종(발견 7 + 원장 7 + Claude 입구 12 + 검토 단위 1 + 카드 대조 검토 2 + 쟁점·종합 2 + ECAD 보드 2 + 과제 주제 1)은 REST 와 같은 함수를 부르는 접점이다(§6.11, LLM 을 부르지 않는다)
 from __future__ import annotations
 
 import logging
@@ -11,8 +11,8 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field, StrictBool
 from mcp.server.transport_security import TransportSecuritySettings
 
-from app import (brief, common, entry, expert_report, issues, planner, registry, review_cells, review_runner, routes, runner, synth,
-                 taxonomy)
+from app import (brief, common, entry, expert_report, issues, planner, registry, review_cells, review_runner, routes, runner,
+                 sp_subject, synth, taxonomy)
 from app.adapters import dyna as dyna_adapter
 from app.adapters import ecad as ecad_adapter
 from app.errors import AppError
@@ -331,6 +331,12 @@ _A_ECAD_QUERY = (f"찾을 말(1~{routes.ECAD_QUERY_MAX}자) — 과제 · 모델
                  f"{ecad_adapter.SEARCH_MAX}개이고 더 있으면 truncated 가 참이다.")
 _A_ECAD_JOB_ID = ("붙일 보드의 ODB 허브 job_id(16자리 16진) — risk_find_ecad_boards 후보 가운데 사용자가 고른 것을 그대로 준다. null 이면 "
                   "과제의 보드를 뗀다.")
+# 과제 주제 — SP 과제 key · 차수(포털 docs/project-insight-graph contracts §9, 과제 인사이트 그래프 M2b)
+_A_SP_TASK = (f"붙일 SP 허브 과제 key(최대 {sp_subject.SP_TASK_MAX}자) — find_plm_task 결과 행의 key 를 글자 그대로 준다(운영 허브는 과제명 — "
+              "과제코드가 아니다). 앱이 그 사람의 포털 PAT 로 풀이를 다시 불러 같은 key 의 살아 있는 행이 꼭 하나일 때만 적고(아니면 "
+              "sp_task_not_confirmed), null 이면 과제의 key 를 뗀다.")
+_A_ROUND = (f"차수(선택) — {' · '.join(sp_subject.STAGES)} 가운데 하나다(전각 · 공백 · 대소문자만 맞춘다 — 'dv' · '2차' · 'C2' 는 422 "
+            "round_invalid). 주면 과제의 stage 에 코드로 적고, 비우면 stage 는 그대로다.")
 
 
 @mcp.tool()
@@ -940,3 +946,15 @@ async def risk_set_ecad_board(project_id: Annotated[str, Field(description=_A_PR
                               odb_job_id: Annotated[str | None, Field(description=_A_ECAD_JOB_ID)]) -> dict:
     """과제에 ECAD 보드 붙이기 · 바꾸기 · 떼기 — 쓰기: risk_find_ecad_boards 의 후보를 사용자에게 보이고 사용자가 고른 job_id 와 과제를 확인한 뒤 부른다, 그 job_id 가 find_job 에 실제로 있을 때만 붙이고(없으면 ecad_board_not_found — 확인과 이후 캡처는 그 사람의 포털 PAT 로만 하고 없거나 곧 끝나면 ecad_pat_absent) odb_job_id=null 이면 뗀다, 카드는 과제마다 한 장이라 다른 보드를 주면 바꾼다(감사 한 줄), 이미 동결된 스냅샷은 그대로이고 다음 risk_capture_snapshot 부터 보드 · 적층 · 분류된 부품을 읽는다(부품 좌표 · 넷은 아직 없다 — 표지로 남는다)."""
     return await _entry(entry.set_ecad_board, project_id=project_id, odb_job_id=odb_job_id)
+
+
+# ================================================================ 과제 주제(포털 docs/project-insight-graph contracts §9 — 과제 인사이트 그래프 M2b)
+# 과제에 SP 허브 과제 key · 차수를 단다 — 포털 과제 보기가 (과제, 차수) 칸에 이 과제를 싣는다. key 는 앱이 그 사람의 PAT 로 부른 풀이의 결과
+# 행에서만 적는다(웹 PUT /api/projects/{id}/sp-subject 와 같은 함수). 이름이 risk_ 로 시작한다 — 리스크 심사 좌석에는 닿지 않는다(D-18 — 엔진이
+# 리스크 앱 도구를 이름으로 막는다).
+@mcp.tool()
+async def risk_set_project_subject(project_id: Annotated[str, Field(description=_A_PROJECT_ID)],
+                                   sp_task: Annotated[str | None, Field(description=_A_SP_TASK)],
+                                   round: Annotated[str | None, Field(description=_A_ROUND)] = None) -> dict:  # noqa: A002
+    """과제에 SP 과제(허브 과제 key)와 차수 달기 · 바꾸기 · 떼기 — 쓰기: 어느 과제에 어떤 SP 과제 key · 차수를 달지 사용자에게 확인한 뒤 부른다, key 는 find_plm_task 결과 행의 key 그대로이고 앱이 그 사람의 포털 PAT 로 풀이를 다시 불러 글자 그대로 같은 살아 있는 행이 꼭 하나일 때만 적는다(아니면 sp_task_not_confirmed 와 까닭 · PAT 가 없거나 곧 끝나면 sp_pat_absent), sp_task=null 이면 뗀다, 차수는 개발 단계 코드(pre · dv1 ~ dv3 · dvr · pv1 ~ pv3 · pvr · pra · mp)로 과제의 stage 에 적고 비우면 그대로다(꼴이 아니면 round_invalid), 과제 주인 · 편집자만 하고 바뀌면 감사 한 줄이며 포털 과제 보기가 (과제, 차수) 칸에 이 과제를 싣는다."""
+    return await _entry(entry.set_project_subject, project_id=project_id, sp_task=sp_task, round=round)

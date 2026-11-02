@@ -156,6 +156,11 @@ CASES: dict[tuple[str, str], tuple[Call, tuple[str, ...]]] = {
         ("project",)),
     ("DELETE", P + "/projects/{project_id}/ecad-board"): (
         lambda i, who: routes.delete_ecad_board(i["project"], ident=who), ("project",)),
+    # 과제 주제(포털 docs/project-insight-graph contracts §9) — 과제 문이 풀이(게이트웨이)를 부르기 전이다. 떼고 차수만 적는 부름이라
+    # 주인은 풀이 없이 지난다.
+    ("PUT", P + "/projects/{project_id}/sp-subject"): (
+        lambda i, who: routes.put_sp_subject(i["project"], routes.SpSubjectBody(sp_task=None, round="dv1"), ident=who),
+        ("project",)),
     ("POST", P + "/projects/{project_id}/snapshots"): (
         lambda i, who: routes.create_snapshot(i["project"], routes.SnapshotBody(kinds=["mcad"]), ident=who), ("project",)),
     ("POST", P + "/projects/{project_id}/dims"): (
@@ -388,6 +393,8 @@ GET_CASES: dict[tuple[str, str], tuple[Call, tuple[str, ...]]] = {
     ("GET", P + "/projects/{project_id}/character"): (
         lambda i, who: routes.get_character(i["project"], ident=who), ("project",)),
     ("GET", P + "/projects/{project_id}/similar"): (lambda i, who: routes.get_similar(i["project"], ident=who), ("project",)),
+    ("GET", P + "/projects/{project_id}/sp-subject"): (
+        lambda i, who: routes.get_sp_subject(i["project"], ident=who), ("project",)),
     ("GET", P + "/snapshots/{snapshot_id}"): (
         lambda i, who: routes.get_snapshot(i["target_snapshot"], ident=who), ("target_snapshot",)),
     ("GET", P + "/snapshots/{snapshot_id}/rule_hits"): (
@@ -527,6 +534,8 @@ MCP_CASES: dict[str, tuple[Callable[[dict], Any], tuple[str, ...]]] = {
     "risk_get_report": (lambda i: srv.risk_get_report(target_key=i["target"]), ("target",)),
     "risk_set_ecad_board": (lambda i: srv.risk_set_ecad_board(project_id=i["project"], odb_job_id="0123456789abcdef"),
                             ("project",)),
+    "risk_set_project_subject": (lambda i: srv.risk_set_project_subject(project_id=i["project"], sp_task=None, round="dv1"),
+                                 ("project",)),
 }
 
 

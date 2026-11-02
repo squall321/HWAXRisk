@@ -240,6 +240,15 @@ def set_ecad_board(ident: identity.Identity, *, project_id: str, odb_job_id: str
     return {**out, "web": web_paths(project_id=project_id)}
 
 
+def set_project_subject(ident: identity.Identity, *, project_id: str, sp_task: str | None,
+                        round: str | None = None) -> dict:  # noqa: A002 — 계약의 인자 이름(포털 docs/project-insight-graph contracts §9)
+    """`PUT /api/projects/{id}/sp-subject` — 과제의 SP 과제 key(그 사람의 PAT 로 부른 풀이의 결과 행에서만) · 차수를 달거나 뗀다. 같은 값을 다시
+    보내면 changed=false 다(풀이는 다시 부른다 — key 가 지금도 살아 있는지가 근거다)."""
+    require_delegate(ident)
+    out = routes.put_sp_subject(project_id, _body(routes.SpSubjectBody, sp_task=sp_task, round=round), ident=ident)
+    return {**out, "web": web_paths(project_id=project_id)}
+
+
 def running_snapshot_jobs(project_id: str) -> list[dict]:
     rows = routes.get_store().query(
         "SELECT id, label, started_at FROM rr_snapshot_jobs WHERE project_id = ? AND state = 'running'"

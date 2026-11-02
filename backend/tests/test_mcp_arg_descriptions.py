@@ -19,7 +19,7 @@ from mcp.server.fastmcp.exceptions import ToolError
 
 import app.mcp_server as srv
 from app import (brief, common, entry, expert_report, issues, narrative, planner, registry, review_cells, review_runner,
-                 routes, runner, synth, taxonomy, units)
+                 routes, runner, sp_subject, synth, taxonomy, units)
 from app.adapters import dyna as dyna_adapter
 
 CONTRACT = Path(__file__).resolve().parent / "fixtures" / "mcp_arg_contract.json"
@@ -80,6 +80,7 @@ LIMITS = [
     ("risk_create_project", "name", f"최대 {_max_len(routes.ProjectBody, 'name')}자"),
     ("risk_add_finding", "claim", f"최대 {_max_len(routes.HumanFindingBody, 'claim')}자"),
     ("risk_capture_snapshot", "report_ids", f"최대 {dyna_adapter.MAX_REPORTS}건"),
+    ("risk_set_project_subject", "sp_task", f"최대 {sp_subject.SP_TASK_MAX}자"),
 ]
 
 
@@ -143,6 +144,8 @@ VOCAB = [
     ("risk_get_expert_report", "part", expert_report.PARTS),
     ("risk_get_issues", "p_class", tuple(issues.P_ORDER)),
     ("risk_get_report", "part", synth.PARTS),
+    # 과제 주제(과제 인사이트 그래프 M2b) — 차수 코드 열한 개
+    ("risk_set_project_subject", "round", sp_subject.STAGES),
 ]
 
 

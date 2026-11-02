@@ -51,6 +51,8 @@ TOOL_NAMES = [
     # ECAD 보드 2종(포털 docs/design-risk-review/ecad-1031 ER-01) — find_job 후보 찾기 · 사람이 고른 보드 붙이기(31 → 33).
     "risk_find_ecad_boards",
     "risk_set_ecad_board",
+    # 과제 주제(포털 docs/project-insight-graph contracts §9 — 과제 인사이트 그래프 M2b) — SP 과제 key · 차수 달기(33 → 34).
+    "risk_set_project_subject",
 ]
 ENTRY_TOOLS = TOOL_NAMES[TOOL_NAMES.index("risk_next_step"):TOOL_NAMES.index("risk_repersist_panel") + 1]
 # 도구별 대표 인자와, 빈 원장에서 기대하는 오류 코드(없으면 None = 정상 응답).
@@ -103,6 +105,9 @@ CALLS = [
     ("risk_find_ecad_boards", {"query": "S26"}, "delegation_required"),
     ("risk_set_ecad_board", {"project_id": "p1", "odb_job_id": "0123456789abcdef"}, "delegation_required"),
     ("risk_set_ecad_board", {"project_id": "p1", "odb_job_id": None}, "delegation_required"),
+    # 과제 주제 — 쓰기라 같은 문(그 사람의 PAT 로 풀이를 부르기 전에 위임 신원을 본다).
+    ("risk_set_project_subject", {"project_id": "p1", "sp_task": "알파 개발_C2", "round": "dv1"}, "delegation_required"),
+    ("risk_set_project_subject", {"project_id": "p1", "sp_task": None}, "delegation_required"),
 ]
 _HANGUL = re.compile(r"[가-힣]")
 # 인자 이름에 비밀이 오면 게이트웨이·포털 절차·클라이언트 대화 기록에 값이 남는다(작업 지시서 A-11) — 포털 절차의
@@ -239,6 +244,13 @@ def test_entry_tool_signatures():
     head = tools["risk_set_ecad_board"].description.strip()[:220]
     assert "사용자에게" in head and "확인한 뒤 부른다" in head, head
     assert "읽기 전용" in tools["risk_find_ecad_boards"].description.strip()[:220]
+    # 과제 주제 — sp_task 는 null 이 뗀다는 뜻이라 기본값 없이 필수다(빠뜨려서 떼지 않게). round 는 선택이다(비우면 stage 그대로).
+    assert props("risk_set_project_subject") == {"project_id", "sp_task", "round"}
+    assert required("risk_set_project_subject") == {"project_id", "sp_task"}
+    assert "actor" not in props("risk_set_project_subject")
+    assert not [p for p in props("risk_set_project_subject") if _SECRET_ARG.search(p)]
+    head = tools["risk_set_project_subject"].description.strip()[:220]
+    assert "사용자에게" in head and "확인한 뒤 부른다" in head, head
 
 
 def test_write_tool_descriptions_ask_for_confirmation_first():

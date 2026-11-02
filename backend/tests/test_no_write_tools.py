@@ -105,11 +105,11 @@ def test_the_sender_holds_only_the_box_write_pat():
 # 이고(M2.md 4.7), 새로 든 risk_get_cells·risk_get_expert_report 는 읽기다. risk_get_brief 는 읽기지만 결과를 낼 신원에게만 열어
 # 같은 문을 지난다(RV-1).
 # ECAD 1단계(포털 docs/design-risk-review/ecad-1031 ER-01)가 둘을 더했다 — 보드 붙이기(쓰기)와, 그 사람의 PAT 로 게이트웨이를 부르는
-# 보드 찾기(읽기지만 같은 문).
+# 보드 찾기(읽기지만 같은 문). 과제 인사이트 그래프 M2b 가 과제 주제 달기(쓰기 — 그 사람의 PAT 로 풀이를 부른다)를 더했다.
 MCP_WRITE_TOOLS = frozenset({
     "risk_submit_panel_result", "risk_add_finding", "risk_create_project", "risk_add_source", "risk_capture_snapshot",
     "risk_ack_gate", "risk_decide_sameas", "risk_create_diff", "risk_open_target", "risk_start_job", "risk_job_action",
-    "risk_repersist_panel", "risk_set_ecad_board"})
+    "risk_repersist_panel", "risk_set_ecad_board", "risk_set_project_subject"})
 DELEGATE_GATED_READS = frozenset({"risk_get_brief", "risk_find_ecad_boards"})
 REVIEW_READERS = ("risk_get_units", "risk_get_cells", "risk_get_expert_report")
 
