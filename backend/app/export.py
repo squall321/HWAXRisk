@@ -97,6 +97,8 @@ _SINCE_COLS: dict[str, tuple[str, ...]] = {
     "rr_reports": ("created_at",),
     "rr_close_acks": ("revoked_at", "ack_at"),
     "rr_unit_live": ("updated_at", "created_at"),
+    # v7(F2 단면 자리 찾기) — 변환 등록부는 고쳐 쓰는 행이라 updated_at 이 먼저다.
+    "rr_board_transforms": ("updated_at", "created_at"),
 }
 
 
@@ -105,9 +107,20 @@ _SINCE_COLS: dict[str, tuple[str, ...]] = {
 # 검토 호출의 result 프레임(v4)도 같다 — 카드 인용 원문이 판정당 상한 없이 들어 있다.
 # 과제의 SP 과제 key(v6 rr_projects.sp_task)는 이 박스의 풀이(그 사람의 PAT 로 앱이 부른 결과 행 — sp_subject)로만 선다. 반출에 싣지 않고
 # 들여오기도 받지 않는다(_IMPORT_DROP_COLUMNS) — 받으면 풀이 · 감사 없이 아무 key 나 단 과제가 남의 과제 보기에 선다(반대 검토 R1 11-02).
+# 변환 등록부(v7 rr_board_transforms)의 검증 칸 — 상태 · 오차 · 근거 · 강제 사유 — 은 이 박스에서 그 사람의 PAT 로 ODB 허브 · StepForge 를 불러
+# 잰 것이다(docs/f2-locate-for-section.md 3절). 받는 박스가 검증하지 않은 'verified' 를 들이면 위치 찾기가 검증 없이 그 변환으로 자리를 낸다 —
+# 반출에 싣지 않고 들여오기도 받지 않는다(들인 행은 status 가 NULL 이라 위치 찾기가 transform_unverified 로 답하고, 받는 박스에서 다시 적어 검증한다).
+_TRANSFORM_CHECK_COLUMNS: tuple[str, ...] = ("status", "error_mm", "verify_json", "reason")
 _EXPORT_SKIP_COLUMNS: dict[str, tuple[str, ...]] = {"rr_panels": ("result_gz",), "rr_review_calls": ("result_gz",),
-                                                    "rr_projects": ("sp_task",)}
-_IMPORT_DROP_COLUMNS: dict[str, tuple[str, ...]] = {"rr_projects": ("sp_task",)}
+                                                    "rr_projects": ("sp_task",),
+                                                    "rr_board_transforms": _TRANSFORM_CHECK_COLUMNS}
+_IMPORT_DROP_COLUMNS: dict[str, tuple[str, ...]] = {"rr_projects": ("sp_task",), "rr_board_transforms": _TRANSFORM_CHECK_COLUMNS}
+# 들여오기 답에서 뺀 줄 수를 싣는 칸 — 표마다(뺀 것이 없으면 그 칸이 없다).
+_IMPORT_DROP_COUNTERS: dict[str, str] = {"rr_projects": "sp_task_dropped", "rr_board_transforms": "transform_checks_dropped"}
+# 항목 위치(v7 rr_findings · rr_registry.location_json)는 쓰기 본문과 같은 꼴(locate.clean_location — 모르는 칸 · mm 가 아닌 단위 · 빠진
+# 좌표는 틀렸다)일 때만 들인다. 틀린 꼴은 그 칸만 버리고(새 행은 NULL, 병합은 이 박스의 값 그대로) 뺀 줄 수를 location_invalid_dropped 로
+# 말한다 — 종전에는 그대로 들여 위치 찾기가 inch 를 mm 로 읽거나 500 으로 넘어졌다(반대 검토 F2-9).
+_IMPORT_LOCATION_COLUMNS: dict[str, tuple[str, ...]] = {"rr_findings": ("location_json",), "rr_registry": ("location_json",)}
 
 # 카드 인용은 판정당 이만큼만 박스 밖으로 나간다(사용자 결정 2026-10-12 — 재설계 M2.md 2절 · 5절 #18 · #21). 판정 행의 cq 는
 # cq_chars 에, 인용 역색인의 card: 인용은 quote_chars 에, JSON 열 안의 인용은 그 항목 옆 `<칸>_chars` 에 원래 길이를 적는다.
@@ -694,7 +707,11 @@ def import_jsonl(store: RiskStore, owner_sub: str, text: str) -> dict:
     rank = {table: index for index, table in enumerate(TABLE_ORDER)}
     items = sorted(items, key=lambda item: rank[item[0]])
 
-    inserted = merged = skipped = skipped_global = sp_task_dropped = 0
+    from app.locate import clean_location  # noqa: PLC0415 — 들여오기 때만 쓰는 항목 위치 꼴(위치 찾기와 같은 규칙)
+
+    inserted = merged = skipped = skipped_global = 0
+    dropped: dict[str, int] = {}
+    locations_dropped = 0
     conflicts: list[dict] = []
     touched_targets: set[str] = set()
     with store.tx():
@@ -702,7 +719,12 @@ def import_jsonl(store: RiskStore, owner_sub: str, text: str) -> dict:
             cols, pks = meta[table]
             drop = _IMPORT_DROP_COLUMNS.get(table, ())
             if any(row.get(c) is not None for c in drop):
-                sp_task_dropped += 1
+                dropped[table] = dropped.get(table, 0) + 1
+            bad = tuple(c for c in _IMPORT_LOCATION_COLUMNS.get(table, ())
+                        if row.get(c) is not None and clean_location(row.get(c))[1] is not None)
+            if bad:
+                locations_dropped += 1
+                drop = (*drop, *bad)
             row = {c: v for c, v in row.items() if c not in drop}     # 새 행은 NULL, 병합은 이 박스의 값 그대로(아래 assign)
             if "owner_sub" not in cols:            # 공용 표는 병합하지 않는다(GLOBAL_TABLES 주석 참조).
                 skipped_global += 1
@@ -793,8 +815,11 @@ def import_jsonl(store: RiskStore, owner_sub: str, text: str) -> dict:
         recomputed += 1
     out = {"inserted": inserted, "merged": merged, "skipped": skipped, "skipped_global": skipped_global,
            "recomputed_targets": recomputed, "conflicts": conflicts}
-    if sp_task_dropped:                          # 뺀 것이 있을 때만 — 받는 박스에서 주제 쓰기(PUT sp-subject)로 다시 단다
-        out["sp_task_dropped"] = sp_task_dropped
+    # 뺀 것이 있을 때만 — 받는 박스에서 주제 쓰기(PUT sp-subject) · 변환 다시 적기(PUT board-transforms)로 다시 단다
+    for table, count in sorted(dropped.items()):
+        out[_IMPORT_DROP_COUNTERS[table]] = count
+    if locations_dropped:                        # 받는 박스에서 항목 위치를 다시 적는다(PUT item-location)
+        out["location_invalid_dropped"] = locations_dropped
     return out
 
 

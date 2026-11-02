@@ -356,6 +356,64 @@
     "limit": {"default": 20, "title": "Limit", "type": "integer"},
     "offset": {"default": 0, "title": "Offset", "type": "integer"}
    }
+  },
+  "risk_locate_for_section": {
+   "params": [["project_id", "POSITIONAL_OR_KEYWORD"], ["finding_id", "POSITIONAL_OR_KEYWORD"], ["target_key", "POSITIONAL_OR_KEYWORD"], ["cluster_key", "POSITIONAL_OR_KEYWORD"], ["refdes", "POSITIONAL_OR_KEYWORD"], ["net", "POSITIONAL_OR_KEYWORD"], ["x", "POSITIONAL_OR_KEYWORD"], ["y", "POSITIONAL_OR_KEYWORD"], ["side", "POSITIONAL_OR_KEYWORD"], ["odb_job_id", "POSITIONAL_OR_KEYWORD"], ["stepforge_project_id", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["project_id"],
+   "properties": {
+    "project_id": {"title": "Project Id", "type": "string"},
+    "finding_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Finding Id"},
+    "target_key": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Target Key"},
+    "cluster_key": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Cluster Key"},
+    "refdes": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Refdes"},
+    "net": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Net"},
+    "x": {"anyOf": [{"type": "number"}, {"type": "null"}], "default": null, "title": "X"},
+    "y": {"anyOf": [{"type": "number"}, {"type": "null"}], "default": null, "title": "Y"},
+    "side": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Side"},
+    "odb_job_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Odb Job Id"},
+    "stepforge_project_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Stepforge Project Id"}
+   }
+  },
+  "risk_propose_board_transform": {
+   "params": [["project_id", "POSITIONAL_OR_KEYWORD"], ["odb_job_id", "POSITIONAL_OR_KEYWORD"], ["stepforge_project_id", "POSITIONAL_OR_KEYWORD"], ["board_body", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["project_id"],
+   "properties": {
+    "project_id": {"title": "Project Id", "type": "string"},
+    "odb_job_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Odb Job Id"},
+    "stepforge_project_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Stepforge Project Id"},
+    "board_body": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Board Body"}
+   }
+  },
+  "risk_set_board_transform": {
+   "params": [["project_id", "POSITIONAL_OR_KEYWORD"], ["remove", "POSITIONAL_OR_KEYWORD"], ["odb_job_id", "POSITIONAL_OR_KEYWORD"], ["stepforge_project_id", "POSITIONAL_OR_KEYWORD"], ["board_body", "POSITIONAL_OR_KEYWORD"], ["mirror_x", "POSITIONAL_OR_KEYWORD"], ["mirror_y", "POSITIONAL_OR_KEYWORD"], ["offset_x", "POSITIONAL_OR_KEYWORD"], ["offset_y", "POSITIONAL_OR_KEYWORD"], ["top_face", "POSITIONAL_OR_KEYWORD"], ["source", "POSITIONAL_OR_KEYWORD"], ["force", "POSITIONAL_OR_KEYWORD"], ["reason", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["project_id"],
+   "properties": {
+    "project_id": {"title": "Project Id", "type": "string"},
+    "remove": {"default": false, "title": "Remove", "type": "boolean"},
+    "odb_job_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Odb Job Id"},
+    "stepforge_project_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Stepforge Project Id"},
+    "board_body": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Board Body"},
+    "mirror_x": {"anyOf": [{"type": "boolean"}, {"type": "null"}], "default": null, "title": "Mirror X"},
+    "mirror_y": {"anyOf": [{"type": "boolean"}, {"type": "null"}], "default": null, "title": "Mirror Y"},
+    "offset_x": {"anyOf": [{"type": "number"}, {"type": "null"}], "default": null, "title": "Offset X"},
+    "offset_y": {"anyOf": [{"type": "number"}, {"type": "null"}], "default": null, "title": "Offset Y"},
+    "top_face": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Top Face"},
+    "source": {"default": "manual", "title": "Source", "type": "string"},
+    "force": {"default": false, "title": "Force", "type": "boolean"},
+    "reason": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Reason"}
+   }
+  },
+  "risk_set_item_location": {
+   "params": [["project_id", "POSITIONAL_OR_KEYWORD"], ["part", "POSITIONAL_OR_KEYWORD"], ["point", "POSITIONAL_OR_KEYWORD"], ["finding_id", "POSITIONAL_OR_KEYWORD"], ["target_key", "POSITIONAL_OR_KEYWORD"], ["cluster_key", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["part", "point", "project_id"],
+   "properties": {
+    "project_id": {"title": "Project Id", "type": "string"},
+    "part": {"anyOf": [{"type": "string"}, {"type": "null"}], "title": "Part"},
+    "point": {"anyOf": [{"additionalProperties": true, "type": "object"}, {"type": "null"}], "title": "Point"},
+    "finding_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Finding Id"},
+    "target_key": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Target Key"},
+    "cluster_key": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Cluster Key"}
+   }
   }
  }
 }

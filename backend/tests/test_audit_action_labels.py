@@ -148,6 +148,11 @@ def frontend_labels() -> dict[str, str]:
 LABEL_PENDING: dict[str, str] = {
     "project.sp_subject": ("'과제 주제(SP 과제 · 차수)' — 과제 인사이트 그래프 M2b(포털 docs/project-insight-graph contracts §9)의"
                            " PUT /api/projects/{id}/sp-subject · MCP risk_set_project_subject 가 쓴다"),
+    # F2 단면 자리 찾기(docs/f2-locate-for-section.md) — 화면 세션에 청한다.
+    "project.board_transform": ("'보드 ↔ CAD 변환' — PUT · DELETE /api/projects/{id}/board-transforms · MCP risk_set_board_transform 이 쓴다"
+                                "(강제면 사유가 reason 칸에)"),
+    "finding.location": "'항목 위치(finding)' — PUT /api/projects/{id}/item-location · MCP risk_set_item_location 이 쓴다",
+    "registry.location": "'항목 위치(등록부 묶음)' — PUT /api/projects/{id}/item-location · MCP risk_set_item_location 이 쓴다",
 }
 
 

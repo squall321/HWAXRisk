@@ -20,6 +20,8 @@ V4_TABLES = {"rr_unit_builds", "rr_units", "rr_expert_reports", "rr_review_cells
              "rr_card_packs", "rr_review_calls"}
 # v5(재설계 M3) 가 더한 표 — 쟁점·요약·종합 보고서·완결 확인 넷과 셀 꾸러미의 근거 꾸러미 실호출 하나(M3.md 4.2).
 V5_TABLES = {"rr_issues", "rr_summaries", "rr_reports", "rr_close_acks", "rr_unit_live"}
+# v7(F2 단면 자리 찾기) 가 더한 표 — 보드 ↔ CAD 변환 등록부(docs/f2-locate-for-section.md 2절).
+V7_TABLES = {"rr_board_transforms"}
 # §5.2 가 '41 표' 로 세는 근거 — 33 표 위에 v1 으로 더해진 8 표.
 ADDED_IN_41 = {"rr_project_members", "rr_gate_acks", "rr_registry_status_log", "rr_audit",
                "rr_panel_calls", "rr_cluster_alias", "rr_requirements", "rr_snapshot_jobs"}
@@ -100,11 +102,11 @@ def test_migrate_creates_v1_tables(risk_store, tmp_path):
     assert db_path.exists()
     tables = _tables(db_path)
     rr = {t for t in tables if t.startswith("rr_")}
-    # v1 표 41개는 정본 §5.2.2 전문 그대로이고, 뒤 버전이 더한 표(v2 rr_brief_calls · v4 재설계 M2 일곱 · v5 재설계 M3 다섯)가
+    # v1 표 41개는 정본 §5.2.2 전문 그대로이고, 뒤 버전이 더한 표(v2 rr_brief_calls · v4 재설계 M2 일곱 · v5 재설계 M3 다섯 · v7 F2 하나)가
     # 그 위에 붙는다.
     assert set(DDL_TABLES) <= rr
     assert len(DDL_TABLES) == 41
-    assert rr - set(DDL_TABLES) == {"rr_brief_calls"} | V4_TABLES | V5_TABLES
+    assert rr - set(DDL_TABLES) == {"rr_brief_calls"} | V4_TABLES | V5_TABLES | V7_TABLES
     assert HOUSEKEEPING <= tables
     assert tables - rr - HOUSEKEEPING <= {"sqlite_sequence"}
     assert _columns(db_path, "_schema_migrations") == {"version", "applied_at", "app_version"}
@@ -260,8 +262,11 @@ PUSHED_DDL_SHA256 = {
     # v5 는 2026-10-15 main 에 올라 굳었다(재설계 M3 단계 D 리허설 a27e569 통과 뒤) — 블록을 고치지 않는다. 바꿀 것은 v6 에 넣는다.
     5: "25350889b546df9140150e8b55c7f1d1ebbe701fbf6e46ee91897db75fb89b13",
     # v6 은 2026-11-02 main 에 올라 굳었다(과제 인사이트 그래프 M2b — rr_projects.sp_task 와 색인) — 블록을 고치지 않는다. 바꿀 것은 v7 에 넣는다
-    # (재설계 M4 의 rr_reports.ra_* 도 v7).
+    # (재설계 M4 의 rr_reports.ra_* 는 v8 — v7 은 F2 가 먼저 썼다).
     6: "339620c3fedb4d8e000ff87ecd9789f078a2a65c669edb45aa03723fb410e791",
+    # v7 은 아직 나가지 않았다 — F2 단면 자리 찾기(rr_board_transforms · rr_findings / rr_registry.location_json)이고 가지 wt1102/f2-locate 에만
+    # 있다. 그때까지는 블록을 고칠 수 있고 고치면 같은 커밋에서 이 값을 고친다. main 에 오르는 날 이 값이 굳는다(재설계 M4 의 ra_* 는 v8).
+    7: "1fc7eadfdaa4f509c8a150669d3d735869110bbf14939e417a9364c6016bd646",
 }
 SHARED_TABLES = {"rr_dim_vocab", "rr_delta_priors", "rr_rules", "rr_metrics"}
 
@@ -874,3 +879,76 @@ def test_a_v5_db_rises_to_v6_once_with_one_v5_copy(tmp_path):
         assert con.execute("PRAGMA user_version").fetchone()[0] == 5
     finally:
         con.close()
+
+
+# ---------------------------------------------------------------- v7 — F2 단면 자리 찾기(docs/f2-locate-for-section.md)
+V7_TRANSFORM_COLUMNS = {
+    "project_id", "odb_job_id", "stepforge_project_id", "owner_sub", "board_body_path", "mirror_x", "mirror_y", "offset_x",
+    "offset_y", "top_face", "board_z_min", "board_z_max", "source", "status", "error_mm", "verify_json", "reason", "created_by",
+    "created_at", "updated_by", "updated_at"}
+
+
+def test_v7_is_the_board_transform_registry_and_one_location_column_on_findings_and_registry(risk_store, tmp_path):
+    """v7 은 변환 등록부 한 표(과제 · ODB 보드 · StepForge 과제가 열쇠, 주인 열 · 검증 칸은 NULL 허용)와 finding · 등록부 묶음의 위치 한 칸씩
+    (TEXT · 기본값 없음)이다 — 허용 연산만이고 CHECK 가 없다. 재설계 M4 의 rr_reports.ra_* 는 여기 없다(v8)."""
+    assert [v for v, _ in MIGRATIONS][:7] == [1, 2, 3, 4, 5, 6, 7]
+    v7 = MIGRATIONS[6][1]
+    assert [s.split("(")[0].split()[:6] for s in v7] == [
+        ["CREATE", "TABLE", "IF", "NOT", "EXISTS", "rr_board_transforms"],
+        ["ALTER", "TABLE", "rr_findings", "ADD", "COLUMN", "location_json"],
+        ["ALTER", "TABLE", "rr_registry", "ADD", "COLUMN", "location_json"]]
+    db = tmp_path / "risk_review.db"
+    assert _columns(db, "rr_board_transforms") == V7_TRANSFORM_COLUMNS
+    con = sqlite3.connect(db)
+    try:
+        info = {r[1]: r for r in con.execute("PRAGMA table_info(rr_board_transforms)")}
+        assert [name for name, r in sorted(info.items(), key=lambda kv: kv[1][5]) if r[5]] == [
+            "project_id", "odb_job_id", "stepforge_project_id"]
+        nullable = {name for name, r in info.items() if not r[3]}
+        assert {"status", "error_mm", "verify_json", "reason"} <= nullable       # 들여온 행은 이 박스의 검증이 없다
+        assert not {"board_body_path", "mirror_x", "top_face", "board_z_min", "owner_sub"} & nullable
+        for table in ("rr_findings", "rr_registry"):
+            column = next(r for r in con.execute(f"PRAGMA table_info({table})") if r[1] == "location_json")
+            assert (column[2], column[3], column[4]) == ("TEXT", 0, None), table
+    finally:
+        con.close()
+    assert "rr_board_transforms" in TABLE_ORDER and "rr_board_transforms" not in LOCAL_ONLY_TABLES
+    assert not {"ra_entity_id", "ra_report_id"} & _columns(db, "rr_reports")
+
+
+def test_a_v6_db_rises_to_v7_once_with_one_v6_copy(tmp_path):
+    """행이 든 v6 DB 가 옛 finding · 등록부 행을 그대로 둔 채 v7 로 오르고 출발 버전 사본(pre-migrate-v6-*) 하나만 남는다. 두 번째 기동은
+    아무것도 하지 않는다. 옛 행의 위치는 비어 있고 등록부는 빈 표다."""
+    from app import risk_store as store_module
+
+    db = tmp_path / "risk_review.db"
+    v6 = RiskStore(db)
+    v6.open()
+    original = store_module.MIGRATIONS
+    try:
+        store_module.MIGRATIONS = original[:6]
+        assert v6.migrate() == 6
+        v6.execute("INSERT INTO rr_registry(target_key, cluster_key, owner_sub, merged_json) VALUES ('snap:s1','ck1','u','{}')")
+        v6.execute("INSERT INTO rr_findings(finding_id, claim_uid, target_key, project_id, owner_sub, direction, cluster_key,"
+                   " finding_json) VALUES ('f1','snap:s1#H1','snap:s1','P1','u','risk','ck1','{}')")
+    finally:
+        store_module.MIGRATIONS = original
+        v6.close()
+    assert "location_json" not in _columns(db, "rr_findings") and "rr_board_transforms" not in _tables(db)
+
+    for _ in range(2):
+        store = RiskStore(db)
+        store.open()
+        try:
+            store_module.MIGRATIONS = original[:7]
+            assert store.migrate() == 7
+            assert dict(store.query_one("SELECT finding_id, cluster_key, location_json FROM rr_findings")) == {
+                "finding_id": "f1", "cluster_key": "ck1", "location_json": None}
+            assert dict(store.query_one("SELECT cluster_key, location_json FROM rr_registry")) == {
+                "cluster_key": "ck1", "location_json": None}
+            assert store.query_one("SELECT COUNT(*) AS n FROM rr_board_transforms")["n"] == 0
+        finally:
+            store_module.MIGRATIONS = original
+            store.close()
+        copies = [p.name for p in tmp_path.glob("risk_review.db.pre-migrate-*")]
+        assert len(copies) == 1 and copies[0].startswith("risk_review.db.pre-migrate-v6-"), copies

@@ -12,7 +12,7 @@ import re
 import secrets
 import sqlite3
 import time
-from typing import Any, Literal, Mapping, Sequence
+from typing import Any, Callable, Literal, Mapping, Sequence
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
@@ -25,6 +25,8 @@ from app import character, config, diff as diff_module
 from app import export as export_module
 from app import identity, ir_builder, learning, metrics, narrative, planner, ra_client, requirements, runner, sameas, taxonomy
 from app import expert_report, review_cells, review_runner, sp_subject
+from app import board_transform as board_transform_module
+from app import locate as locate_module
 from app import roster as roster_module
 from app import state as state_module
 from app import units as units_module
@@ -1471,6 +1473,8 @@ def _queue_visibility_retag(store: Any, project_id: str, visibility: str) -> int
 TRANSFER_PROJECT_TABLES: tuple[str, ...] = (
     "rr_project_members", "rr_sources", "rr_requirements", "rr_snapshots", "rr_snapshot_jobs",
     "rr_dim_defs", "rr_iface_ledger", "rr_targets", "rr_findings", "rr_character", "rr_labels",
+    # v7(F2 단면 자리 찾기) — 변환 등록부. 빠뜨리면 이양 뒤 새 주인의 반출 · 위치 찾기에서 사라진다.
+    "rr_board_transforms",
 )
 # 과제를 직접 가리키지 않고 스냅샷·타깃을 거쳐 달린 표. 같은 트랜잭션에서 함께 옮긴다.
 TRANSFER_DERIVED: tuple[tuple[str, str], ...] = (
@@ -1898,10 +1902,11 @@ PURGE_BLANK_SQL: tuple[tuple[str, str], ...] = (
                        " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_seat_opinions", "UPDATE rr_seat_opinions SET opinion_json = '', excerpt_for_rag = NULL"
                          " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
-    ("rr_findings", "UPDATE rr_findings SET finding_json = '' WHERE project_id = ?"),
+    # 항목 위치(v7 location_json)는 CAD 몸체 경로(부품 이름이 든다)와 좌표다 — 주장 본문과 함께 비운다.
+    ("rr_findings", "UPDATE rr_findings SET finding_json = '', location_json = NULL WHERE project_id = ?"),
     # 등록부 행의 병합 본문 — 대표 주장 · 근거 문장 · 인용(카드 인용 포함) · 쟁점 패널 덮어쓰기 앞 값이 든다(review1 M7). NOT NULL 이라
     # 빈 객체로 비운다 — 판정 열(심각도 · 판정 · 지지 수)과 행은 남는다.
-    ("rr_registry", "UPDATE rr_registry SET merged_json = '{}'"
+    ("rr_registry", "UPDATE rr_registry SET merged_json = '{}', location_json = NULL"
                     " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     # 인용 역색인의 인용 글 — finding_json 의 cites 와 같은 글이다(패널 finding 의 인용, 카드 대조 finding 의 card: 인용 — 카드 원문
     # 그대로, M2.md 5절 #18). 행·참조·원래 길이(quote_chars)는 남는다.
@@ -1951,6 +1956,9 @@ PURGE_BLANK_SQL: tuple[tuple[str, str], ...] = (
     ("rr_targets", "UPDATE rr_targets SET closure_json = NULL WHERE project_id = ?"),
     ("rr_unit_live", "UPDATE rr_unit_live SET lines_gz = NULL, plan_json = '[]', gaps_json = NULL"
                      " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    # v7(F2 단면 자리 찾기) — 변환 등록부의 CAD 몸체 경로(부품 이름이 든다) · 검증 근거(경로 · 좌표) · 강제 사유. 변환 값과 행은 남는다.
+    ("rr_board_transforms", "UPDATE rr_board_transforms SET board_body_path = '', verify_json = NULL, reason = NULL"
+                            " WHERE project_id = ?"),
 )
 
 
@@ -2489,6 +2497,459 @@ def subject_projects_payload(caller: dict, *, sp_task: str | None = None, round:
     if out["truncated"]:
         out["next_offset"] = skip + len(page)
     return out
+
+
+# ---------------------------------------------------------------- F2 단면 자리 찾기 — 보드 ↔ CAD 변환 등록부 · 위치 찾기 · 항목 위치
+# (docs/f2-locate-for-section.md). 산 호출(ODB 허브 · StepForge)은 부른 사람의 등록된 포털 PAT 하나로만 한다 — 박스 읽기 PAT 로 내려가지 않는다(ECAD
+# 보드 · SP 과제 풀이와 같은 자격 `_person_pat`, 없으면 409 locate_pat_absent 이고 게이트웨이에 아무것도 보내지 않는다). 등록 · 항목 위치 쓰기는 과제
+# 주인 · 편집자(관리자는 편집자 — `_project_writer`), 읽기는 구성원(`_project_viewer` — 과제 상세와 같은 문). 자리를 정하지 못한 것은 오류가 아니라
+# status unknown 과 까닭이다(locate 모듈).
+TRANSFORM_SOURCES: tuple[str, ...] = ("manual", "proposed")
+TRANSFORM_REASON_MAX = 500
+LOCATE_REFDES_MAX, LOCATE_NET_MAX, LOCATE_KEY_MAX, LOCATE_CAD_ID_MAX = 64, 200, 300, 128
+
+
+def locate_pat_absent_error() -> AppError:
+    """부른 사람의 포털 PAT 가 없거나 곧 끝나 ODB 허브 · StepForge 를 부르지 않는다 — 409 `locate_pat_absent`(박스 읽기 PAT 로 내려가지 않는다)."""
+    return AppError("locate_pat_absent",
+                    "그 사람의 포털 PAT 가 없거나 곧 끝나 ODB 허브 · StepForge 를 부르지 않습니다 — 보드 좌표 · CAD 몸체는 그 사람의 PAT 로만 읽습니다"
+                    "(박스 읽기 PAT 로 내려가지 않습니다). 웹 설정 화면에서 포털 PAT 를 등록하거나 Claude 에서 hwax_risk 도구를 다시 불러 자동 등록한"
+                    " 뒤 다시 합니다.", 409, detail={"fix": "portal_pat"})
+
+
+def _locate_channel(email: str) -> Any:
+    """위치 찾기 · 변환 검증의 게이트웨이 MCP 채널 — 그 사람의 등록된 포털 PAT 하나다. 없으면 게이트웨이에 아무것도 보내기 전에 409."""
+    portal_pat = _person_pat(email)
+    if portal_pat is None:
+        raise locate_pat_absent_error()
+    return ra_client.McpHttpClient(config.settings.gateway_mcp, headers={"Authorization": f"Bearer {portal_pat}"},
+                                   timeout=adapters_base.source_timeout(config.settings))
+
+
+class _LazyChannel:
+    """처음 부를 때만 채널을 연다 — 항목 위치 · MCAD 주제 · 보드 좌표는 게이트웨이를 부르지 않는다(PAT 가 없어도 답한다)."""
+
+    def __init__(self, email: str) -> None:
+        self.email = email
+        self.channel: Any = None
+
+    def __call__(self) -> Any:
+        if self.channel is None:
+            self.channel = _locate_channel(self.email)
+        return self.channel
+
+    def close(self) -> None:
+        if self.channel is not None:
+            self.channel.close()
+
+
+def _project_viewer(project_id: str, ident: identity.Identity, need: str = "viewer") -> str:
+    """구성원(`need` 이상 — 기본 보기)이 읽는다 — 남 · 없는 과제는 같은 404, 등급 미달은 403, 구성원이 아닌 관리자는 열람 줄(과제 주제 읽기와
+    같은 문)."""
+    email = _require_user(ident)
+    if not _is_admin(ident):
+        require_role(project_id, email, need)
+    elif get_store().query_one("SELECT id FROM rr_projects WHERE id = ?", (project_id,)) is None:
+        raise AppError("E404", f"과제({project_id}) 를 찾을 수 없습니다.", 404)
+    _note_admin_read(_admin_reader(ident), project_id)
+    return email
+
+
+def _project_reads(ident: identity.Identity) -> Callable[[str], bool]:
+    """그 사람이 웹 읽기 문(구성원 — 보기 이상, 관리자는 구성원이 아니어도 — `_project_viewer`)으로 읽는 과제인가. 관리자가 구성원이 아닌 과제를
+    이것으로 읽으면 그 과제의 열람 줄을 남긴다(`_note_admin_read`)."""
+    email = _require_user(ident)
+    admin = _admin_reader(ident)
+
+    def reads(project_id: str) -> bool:
+        if project_role(project_id, email) is not None:
+            return True
+        if admin is None or get_store().query_one("SELECT id FROM rr_projects WHERE id = ?", (project_id,)) is None:
+            return False
+        _note_admin_read(admin, project_id)
+        return True
+
+    return reads
+
+
+def _item_readable(store: Any, item: Mapping[str, Any], project_id: str, reads: Callable[[str], bool]) -> None:
+    """항목 대상이 읽는 다른 과제(비교의 앞 판 과제)도 부른 사람이 읽어야 한다 — 아니면 없는 항목과 같은 404 다(반대 검토 F2-9 a — 비교는 두
+    과제를 다 읽는 사람이 연다: MCP mcp_scope_owner · 웹 _diff_reader. 앞 판 스냅샷의 몸체 자리를 못 읽는 과제에서 꺼내지 않는다)."""
+    if not all(reads(p) for p in locate_module.item_projects(store, item["target_key"]) if p != project_id):
+        raise locate_module.item_missing(finding_id=item.get("finding_id"), target_key=item.get("target_key"),
+                                         cluster_key=item.get("cluster_key"))
+
+
+def _locate_project(project_id: str) -> dict:
+    row = get_store().query_one("SELECT id, owner_sub, status FROM rr_projects WHERE id = ?", (project_id,))
+    if row is None:
+        raise AppError("E404", f"과제({project_id}) 를 찾을 수 없습니다.", 404)
+    return dict(row)
+
+
+def _board_defaults(project_id: str, odb_job_id: str | None, stepforge_project_id: str | None) -> dict:
+    """보드 · CAD 과제 — 준 값이 먼저, 없으면 과제의 원천 카드(주인의 행 — ecad 의 odb_job_id · mcad 의 stepforge_project_id). 부를 백엔드 키는
+    카드의 app_key(없으면 기본)다. 준 job_id 는 16자리 16진이어야 한다(아니면 422)."""
+    job = str(odb_job_id or "").strip() or None
+    if job is not None and not ecad_adapter.JOB_ID_RE.match(job):
+        raise AppError("E100", f"odb_job_id 는 ODB 허브 job_id(16자리 16진)입니다 — {job[:40]!r}.", 422)
+    cad = str(stepforge_project_id or "").strip() or None
+    if cad is not None and len(cad) > LOCATE_CAD_ID_MAX:
+        raise AppError("E100", f"stepforge_project_id 는 {LOCATE_CAD_ID_MAX}자 이하입니다.", 422)
+    sources = _project_sources(project_id)
+    ecad = next((s for s in sources if s["kind"] == "ecad"), None)
+    mcad = next((s for s in sources if s["kind"] == "mcad"), None)
+    return {"odb_job_id": job or (str((ecad or {}).get("ref", {}).get("odb_job_id") or "").strip() or None),
+            "stepforge_project_id": cad or (str((mcad or {}).get("ref", {}).get("stepforge_project_id") or "").strip() or None),
+            "odb_app": (ecad or {}).get("app_key") or locate_module.ODB_APP_KEY,
+            "cad_app": (mcad or {}).get("app_key") or locate_module.CAD_APP_KEY}
+
+
+def _finite(name: str, value: Any) -> float:
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        raise AppError("E100", f"{name} 는 유한한 수(mm)입니다 — {value!r}.", 422)
+    return float(value)
+
+
+def _unit_mm(unit: Any) -> None:
+    if str(unit or "mm").strip().lower() != board_transform_module.UNIT:
+        raise AppError("unit_unsupported", f"길이 단위는 mm 만 받습니다 — {str(unit)[:20]!r}.", 422, detail={"unit": board_transform_module.UNIT})
+
+
+def locate_input(*, finding_id: str | None = None, target_key: str | None = None, cluster_key: str | None = None,
+                 refdes: str | None = None, net: str | None = None, x: Any = None, y: Any = None, side: str | None = None) -> dict:
+    """입력 넷 가운데 꼭 하나 — 항목(finding_id 또는 target_key + cluster_key) · refdes · 넷 · 보드 좌표(x · y, side 는 선택). 아니면 422."""
+    def text(value: Any, limit: int, name: str) -> str | None:
+        value = str(value).strip() if value is not None else ""
+        if len(value) > limit:
+            raise AppError("E100", f"{name} 는 {limit}자 이하입니다.", 422)
+        return value or None
+
+    finding_id, target_key, cluster_key = (text(finding_id, LOCATE_KEY_MAX, "finding_id"), text(target_key, LOCATE_KEY_MAX, "target_key"),
+                                           text(cluster_key, LOCATE_KEY_MAX, "cluster_key"))
+    refdes, net = text(refdes, LOCATE_REFDES_MAX, "refdes"), text(net, LOCATE_NET_MAX, "net")
+    side = text(side, 10, "side")
+    given = [k for k, on in (("finding_id", finding_id), ("cluster", target_key or cluster_key), ("refdes", refdes), ("net", net),
+                             ("x · y", x is not None or y is not None)) if on]
+    if len(given) != 1:
+        raise AppError("E100", "찾을 것을 꼭 하나 줍니다 — 항목(finding_id 또는 target_key + cluster_key) · refdes · net · 보드 좌표(x · y) 가운데"
+                       f" 하나입니다(받은 것 {given or '없음'}).", 422)
+    if side is not None and (given != ["x · y"] or side.lower() not in board_transform_module.SIDES):
+        raise AppError("E100", f"side 는 보드 좌표와 함께만 top · bottom 가운데 하나입니다 — {side!r}.", 422)
+    if finding_id:
+        return {"kind": "item", "finding_id": finding_id}
+    if target_key or cluster_key:
+        if not (target_key and cluster_key):
+            raise AppError("E100", "등록부 묶음은 target_key 와 cluster_key 를 함께 줍니다.", 422)
+        return {"kind": "item", "target_key": target_key, "cluster_key": cluster_key}
+    if refdes:
+        return {"kind": "refdes", "refdes": refdes}
+    if net:
+        return {"kind": "net", "net": net}
+    return {"kind": "xy", "x": _finite("x", x), "y": _finite("y", y), "side": side.lower() if side else None,
+            "unit": board_transform_module.UNIT}
+
+
+def locate_payload(project_id: str, email: str, *, reads: Callable[[str], bool], odb_job_id: str | None = None,
+                   stepforge_project_id: str | None = None, **inputs: Any) -> dict:
+    """`GET /projects/{id}/locate` 본체 — MCP `risk_locate_for_section` 과 같은 함수(과제 문은 부르는 쪽이 지났다). 산 호출은 `email` 의 PAT
+    로만. `reads` 는 부른 사람이 그 입구의 읽기 문으로 읽는 과제인가 — 항목이 비교 대상이면 앞 판 과제도 읽어야 한다(웹은 구성원 · 관리자,
+    MCP 는 MCP 시야)."""
+    store = get_store()
+    project = _locate_project(project_id)
+    input_ = locate_input(**inputs)
+    board = _board_defaults(project_id, odb_job_id, stepforge_project_id)
+    lazy = _LazyChannel(email)
+    try:
+        if input_["kind"] == "item":
+            item = locate_module.item_row(store, project, finding_id=input_.get("finding_id"), target_key=input_.get("target_key"),
+                                          cluster_key=input_.get("cluster_key"))
+            _item_readable(store, item, project_id, reads)
+            return locate_module.locate_item(store, project, item, input_=input_, odb_job_id=board["odb_job_id"],
+                                             stepforge_project_id=board["stepforge_project_id"], channel_factory=lazy)
+        return locate_module.locate_on_board(store, project, input_=input_, odb_job_id=board["odb_job_id"],
+                                             stepforge_project_id=board["stepforge_project_id"], channel_factory=lazy,
+                                             odb_app=board["odb_app"])
+    finally:
+        lazy.close()
+
+
+@router.get("/projects/{project_id}/locate")
+def get_locate(project_id: str, finding_id: str | None = None, target_key: str | None = None, cluster_key: str | None = None,
+               refdes: str | None = None, net: str | None = None, x: float | None = None, y: float | None = None,
+               side: str | None = None, odb_job_id: str | None = None, stepforge_project_id: str | None = None,
+               ident: identity.Identity = Depends(identity.current)) -> dict:
+    """단면 자리 찾기 — 리스크 항목 · refdes · 넷 · 보드 좌표(mm) 가운데 하나를 MCAD 점(mm) · 그 자리의 CAD 몸체 · 단면 둘({axis, offset, unit: mm}
+    — F1 section_pair_view 에 그대로) · 창 · 변환 근거로 답한다. 못 정하면 status unknown 과 까닭이다. 보드 · CAD 과제는 비우면 과제의 원천에서.
+    구성원(보기 이상)이 부르고 ODB 허브는 부른 사람의 PAT 로만 부른다."""
+    email = _project_viewer(project_id, ident)
+    return locate_payload(project_id, email, reads=_project_reads(ident), finding_id=finding_id, target_key=target_key,
+                          cluster_key=cluster_key, refdes=refdes, net=net, x=x, y=y, side=side, odb_job_id=odb_job_id,
+                          stepforge_project_id=stepforge_project_id)
+
+
+@router.get("/projects/{project_id}/board-transforms")
+def get_board_transforms(project_id: str, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """과제의 보드 ↔ CAD 변환 등록 전부(식 · 값 · 상태 · 오차 · 검증과 근거) — 구성원이 읽는다. 산 호출이 없다."""
+    _project_viewer(project_id, ident)
+    project = _locate_project(project_id)
+    rows = locate_module.transform_rows(get_store(), project_id, project["owner_sub"])
+    return {"project_id": project_id, "max_error_mm": board_transform_module.MAX_ERROR_MM, "unit": board_transform_module.UNIT,
+            "transforms": [locate_module.transform_view(r, full=True) for r in rows]}
+
+
+def board_transform_proposal(project_id: str, email: str, *, odb_job_id: str | None = None, stepforge_project_id: str | None = None,
+                             board_body: str | None = None) -> dict:
+    """`GET …/board-transforms/proposal` 본체 — MCP `risk_propose_board_transform` 과 같은 함수. 쓰지 않는다. 몸체 경로가 없으면 ODB 외곽 크기에
+    맞는 몸체 후보(최근 스냅샷)를, 있으면 뒤집기 넷마다 가장 잘 맞는 변환과 그 검증을 준다(부른 사람의 PAT 로 ODB 허브 · StepForge 를 읽는다)."""
+    store = get_store()
+    project = _locate_project(project_id)
+    board = _board_defaults(project_id, odb_job_id, stepforge_project_id)
+    for key, code in (("odb_job_id", "board_missing"), ("stepforge_project_id", "cad_project_missing")):
+        if not board[key]:
+            raise AppError(code, locate_module.UNKNOWN[code] + ".", 422, detail={"fix": locate_module.FIXES[code]})
+    path = str(board_body or "").strip() or None
+    if path is not None and len(path) > locate_module.PATH_MAX:
+        raise AppError("E100", f"board_body 는 {locate_module.PATH_MAX}자 이하입니다.", 422)
+    current = locate_module.transform_row(store, project_id, project["owner_sub"], board["odb_job_id"], board["stepforge_project_id"])
+    head = {"project_id": project_id, "odb_job_id": board["odb_job_id"], "stepforge_project_id": board["stepforge_project_id"],
+            "max_error_mm": board_transform_module.MAX_ERROR_MM, "unit": board_transform_module.UNIT,
+            "current": locate_module.transform_view(current) if current is not None else None}
+    channel = _locate_channel(email)
+    try:
+        if path is None:
+            calls: list[dict] = []
+            odb = locate_module.read_odb_board(channel, board["odb_app"], board["odb_job_id"], calls)
+            found, note = locate_module.body_candidates(store, project, board["stepforge_project_id"], odb["size"], odb["thickness_mm"])
+            return {**head, "board_body_candidates": found, "board_body_note": note, "candidates": [],
+                    "odb": {k: odb[k] for k in ("size", "thickness_mm", "outline_bbox", "notes")}, "calls": calls,
+                    "next": "고른 몸체 경로를 board_body 로 주어 다시 부르면 변환 후보와 검증을 준다."}
+        evidence = locate_module.board_evidence(channel, odb_app=board["odb_app"], cad_app=board["cad_app"], job_id=board["odb_job_id"],
+                                                stepforge_project_id=board["stepforge_project_id"], body_path=path)
+    finally:
+        channel.close()
+    odb_in, cad_in = locate_module.verify_inputs(evidence)
+    return {**head, "board_body_path": evidence["cad"]["path"], "candidates": board_transform_module.propose(odb_in, cad_in),
+            "evidence": {"odb": evidence["odb"], "cad": evidence["cad"]}, "calls": evidence["calls"],
+            "next": "고른 후보의 값을 PUT /api/projects/{id}/board-transforms(MCP risk_set_board_transform, source=proposed)로 적는다 — 적을 때"
+                    " 다시 검증한다."}
+
+
+@router.get("/projects/{project_id}/board-transforms/proposal")
+def get_board_transform_proposal(project_id: str, odb_job_id: str | None = None, stepforge_project_id: str | None = None,
+                                 board_body: str | None = None, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """변환 제안(쓰지 않는다) — 편집자 이상이 부르고(보기 403 · 남 404, 관리자는 열람 줄) ODB 허브 · StepForge 는 부른 사람의 PAT 로만 읽는다.
+    제안은 적기(편집자 이상)의 앞 단계이고 산 호출 둘(StepForge 구멍 찾기는 수십 초)과 원점 찾기를 돌린다 — 보기는 적지 못하므로 부르지 않는다
+    (반대 검토 F2-9)."""
+    email = _project_viewer(project_id, ident, need="editor")
+    return board_transform_proposal(project_id, email, odb_job_id=odb_job_id, stepforge_project_id=stepforge_project_id,
+                                    board_body=board_body)
+
+
+class BoardTransformBody(BaseModel):
+    # 모르는 칸은 거절한다 — `units: inch` 같은 철자 다른 칸을 버리면 unit 기본값(mm)으로 말없이 읽힌다(F2 · 단위).
+    model_config = {"extra": "forbid"}
+    odb_job_id: str | None = Field(default=None, max_length=64)
+    stepforge_project_id: str | None = Field(default=None, max_length=LOCATE_CAD_ID_MAX)
+    board_body: str = Field(min_length=1, max_length=locate_module.PATH_MAX)          # CAD 보드 몸체 경로(StepForge 트리 경로)
+    mirror_x: bool
+    mirror_y: bool
+    offset_x: float
+    offset_y: float
+    top_face: str
+    unit: str = "mm"
+    source: str = "manual"
+    force: bool = False
+    reason: str | None = Field(default=None, max_length=TRANSFORM_REASON_MAX)
+
+
+def _transform_audit(row: Mapping[str, Any] | None) -> dict | None:
+    """감사 행의 앞 · 뒤 — 변환 값 · 몸체 · 상태 · 오차(근거 전부는 등록 행에 있다)."""
+    if row is None:
+        return None
+    return {"odb_job_id": row["odb_job_id"], "stepforge_project_id": row["stepforge_project_id"], "board_body_path": row["board_body_path"],
+            "mirror_x": bool(row["mirror_x"]), "mirror_y": bool(row["mirror_y"]), "offset_x": row["offset_x"], "offset_y": row["offset_y"],
+            "top_face": row["top_face"], "source": row["source"], "status": row["status"], "error_mm": row["error_mm"]}
+
+
+@router.put("/projects/{project_id}/board-transforms")
+def put_board_transform(project_id: str, body: BoardTransformBody, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """보드 ↔ CAD 변환을 적는다(같은 쌍이면 바꾼다) — 과제 주인 · 편집자(관리자는 편집자)만. 먼저 이 박스에서 부른 사람의 PAT 로 ODB 허브 · StepForge 를
+    읽어 검증한다(손대칭 · 평면 · 외곽 크기 · 외곽 자리 · 구멍 짝 · 뒤집기 모호함 · 단위, 상한 MAX_ERROR_MM). 지나지 못하면 422 transform_unverified
+    (detail 에 검증 전부)이고 force + 사유(reason)로만 적는다(status forced). CAD 보드 몸체를 못 읽으면 강제로도 적지 않는다(z 면을 모른다).
+    바뀌면 감사 project.board_transform 한 줄(앞 · 뒤 · 강제 사유)."""
+    actor = _require_user(ident)
+    owner_sub = _project_writer(project_id, ident)       # 주인 · 편집자 — 보기는 403, 남 · 없는 과제는 404
+    _project_row(project_id, owner_sub)
+    store = get_store()
+    if store.query_one("SELECT status FROM rr_projects WHERE id = ?", (project_id,))["status"] == "purged":
+        raise AppError("project_purged", "회수된 과제는 고칠 수 없습니다.", 409)
+    if body.top_face not in board_transform_module.FACES:
+        raise AppError("E100", f"top_face 는 {list(board_transform_module.FACES)} 가운데 하나입니다 — {body.top_face[:20]!r}.", 422)
+    if body.source not in TRANSFORM_SOURCES:
+        raise AppError("E100", f"source 는 {list(TRANSFORM_SOURCES)} 가운데 하나입니다 — {body.source[:20]!r}.", 422)
+    _unit_mm(body.unit)
+    offset_x, offset_y = _finite("offset_x", body.offset_x), _finite("offset_y", body.offset_y)
+    reason = (body.reason or "").strip() or None
+    if body.force and reason is None:
+        raise AppError("reason_required", "강제로 적을 때는 사유(reason)가 필요합니다 — 감사 행에 남습니다.", 422)
+    path = body.board_body.strip()
+    if not path:
+        raise AppError("E100", "board_body 가 비었습니다.", 422)
+    board = _board_defaults(project_id, body.odb_job_id, body.stepforge_project_id)
+    for key, code in (("odb_job_id", "board_missing"), ("stepforge_project_id", "cad_project_missing")):
+        if not board[key]:
+            raise AppError(code, locate_module.UNKNOWN[code] + ".", 422, detail={"fix": locate_module.FIXES[code]})
+    channel = _locate_channel(actor)
+    try:
+        evidence = locate_module.board_evidence(channel, odb_app=board["odb_app"], cad_app=board["cad_app"], job_id=board["odb_job_id"],
+                                                stepforge_project_id=board["stepforge_project_id"], body_path=path)
+    finally:
+        channel.close()
+    cad = evidence["cad"]
+    if cad["bbox"] is None:
+        raise AppError("transform_cad_board_unread",
+                       "CAD 보드 몸체를 읽지 못해 적지 않았습니다(강제로도 적지 않습니다 — 부품 면의 z 를 모릅니다) — " + "; ".join(cad["notes"]),
+                       422, detail={"evidence": {"cad": cad}, "calls": evidence["calls"]})
+    transform = board_transform_module.Transform(body.mirror_x, body.mirror_y, offset_x, offset_y, body.top_face)
+    odb_in, cad_in = locate_module.verify_inputs(evidence)
+    check = board_transform_module.verify(transform, odb_in, cad_in)
+    if not check["ok"] and not body.force:
+        raise AppError("transform_unverified",
+                       "검증을 지나지 못해 적지 않았습니다 — " + " / ".join(check["reason_text"]) +
+                       f" (오차 {check['error_mm']} mm · 상한 {check['max_error_mm']} mm). 값을 고치거나, 확인한 뒤 force 와 사유로 적습니다.", 422,
+                       detail={"verification": check, "evidence": {"odb": evidence["odb"], "cad": cad}, "calls": evidence["calls"],
+                               "fix": "GET /api/projects/{id}/board-transforms/proposal(MCP risk_propose_board_transform)의 후보를 본다."})
+    status = "verified" if check["ok"] else "forced"
+    now = now_epoch()
+    stored = {"verification": check, "evidence": {"odb": evidence["odb"], "cad": cad}, "calls": evidence["calls"],
+              "verified_at": now, "verified_by": actor}
+    key = (project_id, board["odb_job_id"], board["stepforge_project_id"])
+    values = (cad["path"], int(body.mirror_x), int(body.mirror_y), round(offset_x, board_transform_module.DIGITS),
+              round(offset_y, board_transform_module.DIGITS), body.top_face, cad["bbox"][2], cad["bbox"][5], body.source, status,
+              check["error_mm"], canonical_json(stored), reason if status == "forced" else None)
+    with store.tx():
+        before = locate_module.transform_row(store, project_id, owner_sub, board["odb_job_id"], board["stepforge_project_id"])
+        store.execute(
+            "INSERT INTO rr_board_transforms(project_id, odb_job_id, stepforge_project_id, owner_sub, board_body_path, mirror_x, mirror_y,"
+            " offset_x, offset_y, top_face, board_z_min, board_z_max, source, status, error_mm, verify_json, reason, created_by, created_at,"
+            " updated_by, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+            " ON CONFLICT(project_id, odb_job_id, stepforge_project_id) DO UPDATE SET board_body_path = excluded.board_body_path,"
+            " mirror_x = excluded.mirror_x, mirror_y = excluded.mirror_y, offset_x = excluded.offset_x, offset_y = excluded.offset_y,"
+            " top_face = excluded.top_face, board_z_min = excluded.board_z_min, board_z_max = excluded.board_z_max, source = excluded.source,"
+            " status = excluded.status, error_mm = excluded.error_mm, verify_json = excluded.verify_json, reason = excluded.reason,"
+            " updated_by = excluded.updated_by, updated_at = excluded.updated_at WHERE rr_board_transforms.owner_sub = excluded.owner_sub",
+            (*key, owner_sub, *values, actor, now, actor, now))
+        row = locate_module.transform_row(store, project_id, owner_sub, board["odb_job_id"], board["stepforge_project_id"])
+        if row is None:
+            raise AppError("E409", "그 열쇠의 변환 행이 다른 주인의 것이라 적지 않았습니다(들여오기가 남긴 행).", 409)
+        changed = _transform_audit(before) != _transform_audit(row)
+        if changed:
+            channel_name = AUDIT_CHANNELS.get(ident.source, "rest")
+            _audit(store, actor, scope="project", subject_id=project_id, project_id=project_id, action="project.board_transform",
+                   before=_transform_audit(before), after={**(_transform_audit(row) or {}), "reasons": check["reasons"]},
+                   reason=reason if status == "forced" else None, channel=channel_name, actor_verified=channel_name != "mcp",
+                   via=_admin_via(ident, project_id))
+    return {"ok": True, "project_id": project_id, "registration": locate_module.transform_view(row, full=True), "changed": changed,
+            "previous": locate_module.transform_view(before) if before is not None else None}
+
+
+@router.delete("/projects/{project_id}/board-transforms")
+def delete_board_transform(project_id: str, odb_job_id: str | None = None, stepforge_project_id: str | None = None,
+                           ident: identity.Identity = Depends(identity.current)) -> dict:
+    """변환 등록을 뗀다 — 과제 주인 · 편집자. 보드 · CAD 과제는 비우면 과제의 원천에서. 없으면 removed=0, 있으면 감사 한 줄."""
+    actor = _require_user(ident)
+    owner_sub = _project_writer(project_id, ident)
+    _project_row(project_id, owner_sub)
+    board = _board_defaults(project_id, odb_job_id, stepforge_project_id)
+    for key, code in (("odb_job_id", "board_missing"), ("stepforge_project_id", "cad_project_missing")):
+        if not board[key]:
+            raise AppError(code, locate_module.UNKNOWN[code] + ".", 422, detail={"fix": locate_module.FIXES[code]})
+    store = get_store()
+    with store.tx():
+        before = locate_module.transform_row(store, project_id, owner_sub, board["odb_job_id"], board["stepforge_project_id"])
+        if before is not None:
+            store.execute("DELETE FROM rr_board_transforms WHERE project_id = ? AND odb_job_id = ? AND stepforge_project_id = ?"
+                          " AND owner_sub = ?", (project_id, board["odb_job_id"], board["stepforge_project_id"], owner_sub))
+            channel_name = AUDIT_CHANNELS.get(ident.source, "rest")
+            _audit(store, actor, scope="project", subject_id=project_id, project_id=project_id, action="project.board_transform",
+                   before=_transform_audit(before), after=None, channel=channel_name, actor_verified=channel_name != "mcp",
+                   via=_admin_via(ident, project_id))
+    return {"ok": True, "project_id": project_id, "removed": int(before is not None),
+            "previous": locate_module.transform_view(before) if before is not None else None}
+
+
+class ItemPoint(BaseModel):
+    model_config = {"extra": "forbid"}         # 위와 같다 — 철자 다른 단위 칸이 mm 로 읽히지 않게
+    x: float
+    y: float
+    z: float
+    unit: str = "mm"
+
+
+class ItemLocationBody(BaseModel):
+    model_config = {"extra": "forbid"}
+    finding_id: str | None = Field(default=None, max_length=LOCATE_KEY_MAX)
+    target_key: str | None = Field(default=None, max_length=LOCATE_KEY_MAX)
+    cluster_key: str | None = Field(default=None, max_length=LOCATE_KEY_MAX)
+    # 둘 다 null 이면 위치를 뗀다 — 빠뜨려서 떼지 않게 기본값 없이 받는다.
+    part: str | None = Field(max_length=locate_module.PATH_MAX)
+    point: ItemPoint | None
+
+
+@router.put("/projects/{project_id}/item-location")
+def put_item_location(project_id: str, body: ItemLocationBody, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """리스크 항목(finding · 등록부 묶음)의 위치 — CAD 몸체 경로 · MCAD 점(mm) 가운데 하나 이상, 둘 다 null 이면 뗀다. 과제 주인 · 편집자만.
+    위치 찾기가 이 칸을 먼저 쓴다(주제 노드를 거치지 않고 바로 평면). 바뀌면 감사 finding.location · registry.location 한 줄."""
+    actor = _require_user(ident)
+    owner_sub = _project_writer(project_id, ident)
+    project = _project_row(project_id, owner_sub)
+    store = get_store()
+    if store.query_one("SELECT status FROM rr_projects WHERE id = ?", (project_id,))["status"] == "purged":
+        raise AppError("project_purged", "회수된 과제는 고칠 수 없습니다.", 409)
+    picked = locate_input(finding_id=body.finding_id, target_key=body.target_key, cluster_key=body.cluster_key)
+    part = (body.part or "").strip() or None
+    point = None
+    if body.point is not None:
+        _unit_mm(body.point.unit)
+        point = {"x": _finite("point.x", body.point.x), "y": _finite("point.y", body.point.y), "z": _finite("point.z", body.point.z),
+                 "unit": board_transform_module.UNIT}
+    item = locate_module.item_row(store, {"id": project_id, "owner_sub": project["owner_sub"]}, finding_id=picked.get("finding_id"),
+                                  target_key=picked.get("target_key"), cluster_key=picked.get("cluster_key"))
+    _item_readable(store, item, project_id, _project_reads(ident))
+    if part is not None and locate_module.find_item_part(store, item["target_key"], part) is None:
+        # 그 항목의 스냅샷에 없는 몸체 경로는 적지 않는다 — 위치 찾기가 그것을 몸체 · F1 part 로 되실었다(반대 검토 F2-9).
+        raise AppError("item_part_unknown", f"그 몸체 경로가 항목의 스냅샷에 없습니다 — {part[:200]!r}. 스냅샷의 MCAD 부품 경로(local_key)를"
+                       " 적습니다.", 422, detail={"snapshots": locate_module.item_snapshots(store, item["target_key"]),
+                                                  "fix": "MCP risk_get_snapshot(또는 GET /api/snapshots/{id})의 부품 경로를 본다."})
+    now = now_epoch()
+    location = None if part is None and point is None else {"part": part, "point": point, "set_by": actor, "set_at": now}
+    before = item["location"]
+    # 꼴이 틀린 채 저장된 위치(들여온 행 — locate.clean_location)는 무엇을 적든 바뀐 것이다 — 떼거나 다시 적어 고친다.
+    invalid_before = item.get("location_problem")
+    changed = invalid_before is not None or ({k: (before or {}).get(k) for k in ("part", "point")} if before else None) != (
+        {"part": part, "point": point} if location else None)
+    finding = item["kind"] == "finding"
+    action = "finding.location" if finding else "registry.location"
+    with store.tx():
+        if changed:
+            if finding:
+                store.execute("UPDATE rr_findings SET location_json = ?, updated_at = ? WHERE finding_id = ?",
+                              (canonical_json(location) if location else None, now, item["finding_id"]))
+            else:
+                store.execute("UPDATE rr_registry SET location_json = ?, updated_at = ? WHERE target_key = ? AND cluster_key = ?",
+                              (canonical_json(location) if location else None, now, item["target_key"], item["cluster_key"]))
+            scope = "finding" if finding else "registry"
+            subject = item["finding_id"] if finding else f"{item['target_key']}#{item['cluster_key']}"
+            channel_name = AUDIT_CHANNELS.get(ident.source, "rest")
+            _audit(store, actor, scope=scope, subject_id=subject, project_id=project_id, action=action,
+                   before=({k: (before or {}).get(k) for k in ("part", "point")} if before
+                           else ({"invalid": invalid_before} if invalid_before is not None else None)),
+                   after={"part": part, "point": point} if location else None, channel=channel_name,
+                   actor_verified=channel_name != "mcp", via=_admin_via(ident, project_id))
+    return {"ok": True, "project_id": project_id, "item": {k: item[k] for k in ("kind", "target_key") if k in item}
+            | ({"finding_id": item["finding_id"]} if item["kind"] == "finding" else {"cluster_key": item["cluster_key"]}),
+            "location": location if changed else before, "changed": changed, "previous": before}
 
 
 class SnapshotBody(BaseModel):

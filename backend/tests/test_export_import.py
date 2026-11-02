@@ -338,13 +338,15 @@ V4_EXPORTED = ("rr_unit_builds", "rr_units", "rr_expert_reports", "rr_review_cel
                "rr_review_calls")
 # v5(재설계 M3) — 쟁점·요약·보고서 판·완결 확인·근거 꾸러미 실호출. 박스 지역 표는 없다(M3.md 4.2).
 V5_EXPORTED = ("rr_issues", "rr_summaries", "rr_reports", "rr_close_acks", "rr_unit_live")
+# v7(F2 단면 자리 찾기) — 보드 ↔ CAD 변환 등록부(docs/f2-locate-for-section.md 2절). v5 표 뒤에 붙는다.
+V7_EXPORTED = ("rr_board_transforms",)
 
 
 def test_v4_tables_ride_the_export_except_the_local_card_packs(seeded, empty_store):
     """새 표 여섯은 반출 표 목록에서 v5 표 앞에 붙고 since 열이 실제 열이다. 카드 묶음은 박스 지역 사본이라 목록에 없다.
     새 표가 빈 원장도 빈 DB 로 왕복해 같은 행 수·해시다(행이 든 왕복은 C2 의 생산자가 생긴 뒤 본다)."""
     assert export.LOCAL_ONLY_TABLES == {"rr_card_packs"}
-    head = export.TABLE_ORDER[:-len(V5_EXPORTED)]
+    head = export.TABLE_ORDER[:-len(V5_EXPORTED) - len(V7_EXPORTED)]
     assert head[-len(V4_EXPORTED):] == V4_EXPORTED
     assert "rr_card_packs" not in export.TABLE_ORDER
     for table in V4_EXPORTED:
@@ -354,7 +356,7 @@ def test_v4_tables_ride_the_export_except_the_local_card_packs(seeded, empty_sto
     assert export._EXPORT_SKIP_COLUMNS["rr_review_calls"] == ("result_gz",)
 
     body = "".join(export.iter_lines(seeded, ALICE, 0))
-    assert json.loads(body.splitlines()[0])["schema_version"] == LATEST_SCHEMA == 6      # v6 — 과제 인사이트 그래프 M2b
+    assert json.loads(body.splitlines()[0])["schema_version"] == LATEST_SCHEMA == 7      # v7 — F2 단면 자리 찾기
     assert not any(json.loads(ln)["table"] == "rr_card_packs" for ln in body.splitlines()[1:])
     export.import_jsonl(empty_store, ALICE, body)
     here, there = export.row_digest(empty_store, ALICE), export.row_digest(seeded, ALICE)
@@ -364,10 +366,10 @@ def test_v4_tables_ride_the_export_except_the_local_card_packs(seeded, empty_sto
 
 
 def test_v5_tables_ride_the_export_at_the_end_with_real_since_columns(seeded, empty_store):
-    """v5 새 표 다섯은 반출 표 목록 끝에 붙고(박스 지역 표 없음), since 열이 실제 열이며 owner_sub 가 있다. 고쳐 쓰는 행은
+    """v5 새 표 다섯은 반출 표 목록에서 v7 표 앞에 붙고(박스 지역 표 없음), since 열이 실제 열이며 owner_sub 가 있다. 고쳐 쓰는 행은
     updated_at 이 먼저고, 완결 확인은 취소 시각(revoked_at)이 먼저다 — 취소가 since 반출에서 빠지지 않게. 새 표가 빈 v5 원장도
     빈 DB 로 왕복해 같은 행 수·해시다(행이 든 왕복은 각 표의 생산자 걸음이 본다 — tests/rr/test_v5_rows.py)."""
-    assert export.TABLE_ORDER[-len(V5_EXPORTED):] == V5_EXPORTED
+    assert export.TABLE_ORDER[-len(V5_EXPORTED) - len(V7_EXPORTED):-len(V7_EXPORTED)] == V5_EXPORTED
     assert not export.LOCAL_ONLY_TABLES & set(V5_EXPORTED)
     for table in V5_EXPORTED:
         cols, _ = export._table_meta(seeded, table)
@@ -383,6 +385,49 @@ def test_v5_tables_ride_the_export_at_the_end_with_real_since_columns(seeded, em
     here, there = export.row_digest(empty_store, ALICE), export.row_digest(seeded, ALICE)
     assert {t: here[t] for t in V5_EXPORTED} == {t: there[t] for t in V5_EXPORTED}
     assert all(here[t][0] == 0 for t in V5_EXPORTED)
+
+
+def test_v7_transform_registry_rides_the_export_without_this_boxs_checks(seeded, empty_store):
+    """v7 변환 등록부는 반출 표 목록 끝에 붙고 since 열이 실제 열이며 owner_sub 가 있다(남의 행은 실리지 않는다). 검증 칸(상태 · 오차 · 근거 ·
+    강제 사유)은 이 박스에서 그 사람의 PAT 로 잰 것이라 반출에 없고, 손으로 만든 줄이 'verified' 를 실어도 들여오기는 받지 않는다 — 들인 행은
+    status 가 NULL 이고(위치 찾기가 쓰지 않는다) 뺀 줄 수를 transform_checks_dropped 로 말한다. 항목 위치(location_json)는 등록부 행과
+    함께 왕복한다."""
+    assert export.TABLE_ORDER[-len(V7_EXPORTED):] == V7_EXPORTED
+    cols, _ = export._table_meta(seeded, "rr_board_transforms")
+    assert export._SINCE_COLS["rr_board_transforms"] == ("updated_at", "created_at") and "owner_sub" in cols
+    for owner, at in ((ALICE, 1_000), (BOB, 9_000)):
+        _insert(seeded, "rr_board_transforms", {
+            "project_id": f"p-{owner[:3]}", "odb_job_id": "0123456789abcdef", "stepforge_project_id": "SF1", "owner_sub": owner,
+            "board_body_path": "/P/PCB", "mirror_x": 1, "mirror_y": 0, "offset_x": 82.13, "offset_y": 2.82, "top_face": "zmin",
+            "board_z_min": 0.5, "board_z_max": 1.15, "source": "manual", "status": "verified", "error_mm": 0.0,
+            "verify_json": '{"checks":{}}', "reason": None, "created_by": owner, "created_at": at, "updated_by": owner,
+            "updated_at": at})
+    _insert(seeded, "rr_registry", {"target_key": "t-ali", "cluster_key": "ck1", "owner_sub": ALICE, "merged_json": "{}",
+                                    "updated_at": 1_000,
+                                    "location_json": '{"part":"/P/U1","point":{"unit":"mm","x":1.5,"y":2.0,"z":0.5}}'})
+    lines = [ln["row"] for ln in _lines(seeded)[1:] if ln["table"] == "rr_board_transforms"]
+    assert [r["owner_sub"] for r in lines] == [ALICE]
+    assert not set(export._TRANSFORM_CHECK_COLUMNS) & set(lines[0]) and lines[0]["offset_x"] == 82.13
+
+    out = export.import_jsonl(empty_store, ALICE, "".join(export.iter_lines(seeded, ALICE, 0)))
+    assert "transform_checks_dropped" not in out and "sp_task_dropped" not in out
+    got = empty_store.query_one("SELECT status, error_mm, verify_json, reason, mirror_x, offset_x, top_face, board_z_min"
+                                " FROM rr_board_transforms")
+    assert dict(got) == {"status": None, "error_mm": None, "verify_json": None, "reason": None, "mirror_x": 1,
+                         "offset_x": 82.13, "top_face": "zmin", "board_z_min": 0.5}
+    here, there = export.row_digest(empty_store, ALICE), export.row_digest(seeded, ALICE)
+    assert here["rr_board_transforms"] == there["rr_board_transforms"] and here["rr_registry"] == there["rr_registry"]
+    assert empty_store.query_one("SELECT location_json FROM rr_registry WHERE cluster_key = 'ck1'")["location_json"] == (
+        '{"part":"/P/U1","point":{"unit":"mm","x":1.5,"y":2.0,"z":0.5}}')
+
+    forged = {**lines[0], "odb_job_id": "fedcba9876543210", "status": "verified", "error_mm": 0.0, "verify_json": "{}",
+              "reason": "검증했다고 적는다"}
+    head = json.dumps(export.header_line(empty_store))
+    out = export.import_jsonl(empty_store, ALICE, head + "\n" + json.dumps({"table": "rr_board_transforms", "row": forged}) + "\n")
+    assert (out["inserted"], out["transform_checks_dropped"]) == (1, 1) and "sp_task_dropped" not in out
+    planted = empty_store.query_one("SELECT status, error_mm, verify_json, reason FROM rr_board_transforms"
+                                    " WHERE odb_job_id = 'fedcba9876543210'")
+    assert dict(planted) == {"status": None, "error_mm": None, "verify_json": None, "reason": None}
 
 
 def test_card_pack_lines_are_refused_on_import(empty_store):

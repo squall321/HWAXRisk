@@ -249,6 +249,61 @@ def set_project_subject(ident: identity.Identity, *, project_id: str, sp_task: s
     return {**out, "web": web_paths(project_id=project_id)}
 
 
+def _visible(email: str, project_id: str) -> None:
+    """위임으로 확인된 그 사람이 MCP 로 그 과제를 보는가 — 아니면 `not_visible`(읽기 문 mcp_scope_owner — 소유 · 구성원 · 조직 공개)."""
+    routes.mcp_scope_owner("project", project_id, {"kind": "user", "email": email})
+
+
+def locate_for_section(ident: identity.Identity, *, project_id: str, finding_id: str | None = None, target_key: str | None = None,
+                       cluster_key: str | None = None, refdes: str | None = None, net: str | None = None, x: float | None = None,
+                       y: float | None = None, side: str | None = None, odb_job_id: str | None = None,
+                       stepforge_project_id: str | None = None) -> dict:
+    """`GET /api/projects/{id}/locate` 와 같은 함수 — 읽기지만 ODB 허브를 그 사람의 PAT 로 부르므로 위임으로 확인된 신원만 받는다(F2)."""
+    email = require_delegate(ident)
+    _visible(email, project_id)
+    visible = set(routes.visible_projects({"kind": "user", "email": email}))
+    return routes.locate_payload(project_id, email, reads=visible.__contains__, finding_id=finding_id, target_key=target_key,
+                                 cluster_key=cluster_key, refdes=refdes, net=net, x=x, y=y, side=side, odb_job_id=odb_job_id,
+                                 stepforge_project_id=stepforge_project_id)
+
+
+def propose_board_transform(ident: identity.Identity, *, project_id: str, odb_job_id: str | None = None,
+                            stepforge_project_id: str | None = None, board_body: str | None = None) -> dict:
+    """`GET /api/projects/{id}/board-transforms/proposal` 와 같은 함수 — 쓰지 않는다. 그 사람의 PAT 로 ODB 허브 · StepForge 를 읽는다. 적기의 앞
+    단계라 웹과 같이 편집자 이상이다(보기 role_insufficient — MCP 신원에는 관리자 역할이 없다)."""
+    email = require_delegate(ident)
+    _visible(email, project_id)
+    routes.require_role(project_id, email, "editor")
+    return routes.board_transform_proposal(project_id, email, odb_job_id=odb_job_id, stepforge_project_id=stepforge_project_id,
+                                           board_body=board_body)
+
+
+def set_board_transform(ident: identity.Identity, *, project_id: str, remove: bool = False, odb_job_id: str | None = None,
+                        stepforge_project_id: str | None = None, board_body: str | None = None, mirror_x: bool | None = None,
+                        mirror_y: bool | None = None, offset_x: float | None = None, offset_y: float | None = None,
+                        top_face: str | None = None, source: str = "manual", force: bool = False, reason: str | None = None) -> dict:
+    """`PUT · DELETE /api/projects/{id}/board-transforms` — 적을 때는 이 박스에서 그 사람의 PAT 로 검증한 뒤(못 지나면 force + 사유로만), remove 면
+    뗀다. 빠진 값은 REST 본문 모델이 422 로 말한다."""
+    require_delegate(ident)
+    if remove:
+        out = routes.delete_board_transform(project_id, odb_job_id=odb_job_id, stepforge_project_id=stepforge_project_id, ident=ident)
+    else:
+        out = routes.put_board_transform(project_id, _body(
+            routes.BoardTransformBody, odb_job_id=odb_job_id, stepforge_project_id=stepforge_project_id, board_body=board_body,
+            mirror_x=mirror_x, mirror_y=mirror_y, offset_x=offset_x, offset_y=offset_y, top_face=top_face, source=source, force=force,
+            reason=reason), ident=ident)
+    return {**out, "web": web_paths(project_id=project_id)}
+
+
+def set_item_location(ident: identity.Identity, *, project_id: str, part: str | None, point: dict | None,
+                      finding_id: str | None = None, target_key: str | None = None, cluster_key: str | None = None) -> dict:
+    """`PUT /api/projects/{id}/item-location` — 리스크 항목의 위치(CAD 몸체 경로 · MCAD 점 mm)를 달거나(둘 다 null 이면) 뗀다."""
+    require_delegate(ident)
+    out = routes.put_item_location(project_id, _body(routes.ItemLocationBody, finding_id=finding_id, target_key=target_key,
+                                                     cluster_key=cluster_key, part=part, point=point), ident=ident)
+    return {**out, "web": web_paths(project_id=project_id)}
+
+
 def running_snapshot_jobs(project_id: str) -> list[dict]:
     rows = routes.get_store().query(
         "SELECT id, label, started_at FROM rr_snapshot_jobs WHERE project_id = ? AND state = 'running'"

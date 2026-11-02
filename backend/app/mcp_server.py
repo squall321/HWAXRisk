@@ -1,4 +1,4 @@
-# hwax-risk MCP 서버 — 도구 35종(발견 7 + 원장 7 + Claude 입구 12 + 검토 단위 1 + 카드 대조 검토 2 + 쟁점·종합 2 + ECAD 보드 2 + 과제 주제 2)은 REST 와 같은 함수를 부르는 접점이다(§6.11, LLM 을 부르지 않는다)
+# hwax-risk MCP 서버 — 도구 39종(발견 7 + 원장 7 + Claude 입구 12 + 검토 단위 1 + 카드 대조 검토 2 + 쟁점·종합 2 + ECAD 보드 2 + 과제 주제 2 + 단면 자리 4)은 REST 와 같은 함수를 부르는 접점이다(§6.11, LLM 을 부르지 않는다)
 from __future__ import annotations
 
 import logging
@@ -13,6 +13,8 @@ from mcp.server.transport_security import TransportSecuritySettings
 
 from app import (brief, common, entry, expert_report, issues, planner, registry, review_cells, review_runner, routes, runner,
                  sp_subject, synth, taxonomy)
+from app import board_transform as board_transform_module
+from app import locate as locate_module
 from app.adapters import dyna as dyna_adapter
 from app.adapters import ecad as ecad_adapter
 from app.errors import AppError
@@ -46,6 +48,9 @@ risk_job_action · risk_repersist_panel 이고, 무엇을 어디에 쓸지 사�
 risk_next_step 의 facts.review_order(영역마다 영역 안 순위 1~3 의 영역·순위·tier·입력 결손 — 전부는
 risk_get_coverage(order_offset=0) 쪽)를 보고 사용자가 고른다(코드가 고르지 않는다). 지켜보기는
 risk_get_coverage(review 칸) · risk_get_cells, 결과는 risk_get_expert_report 다.
+단면 자리(F2 — CAD 그림을 보고서로): risk_locate_for_section(읽기 — 항목 · refdes · 넷 · 보드 좌표를 MCAD 점 · 몸체 · 단면 둘로, F1
+section_pair_view 에 그대로 넘길 꼴) · risk_propose_board_transform(읽기 — 보드 ↔ CAD 변환 후보) · risk_set_board_transform ·
+risk_set_item_location(쓰기). 넷 다 위임으로 확인된 신원의 등록된 포털 PAT 로 ODB 허브 · StepForge 를 읽는다.
 PAT 는 인자로 받지 않는다 — 러너 자격은 웹 설정 화면에서 등록한다."""
 
 # loopback 바인드 + Caddy 경계 전제로 Host 검증(DNS rebinding 보호)은 끈다(LaminateAnalyzerMCP 선례).
@@ -343,6 +348,39 @@ _A_FIND_ROUND = (f"차수로 거른다 — {' · '.join(sp_subject.STAGES)} 가�
 _A_ARTIFACT_KIND = (f"설계 자료 종류 — {' · '.join(routes.SUBJECT_ARTIFACTS)}(mcad 는 StepForge project_id · ecad 는 ODB 허브 job_id · cae 는 "
                     "DynaForge 리포트 id — dyna_result 원천의 report_ids). artifact_id 와 함께 준다.")
 _A_ARTIFACT_ID = "설계 자료 열쇠(대소문자 무시) — 과제에 붙은 원천의 열쇠와 견준다. artifact_kind 와 함께 준다."
+# 단면 자리 찾기(F2 — docs/f2-locate-for-section.md)
+_A_LOC_FINDING = ("리스크 항목의 finding id(risk_add_finding 응답 · 등록부 행의 merged.finding_ids) — 이 과제 대상의 finding 이다. 항목 · refdes · net · "
+                  "x+y 가운데 하나만 준다.")
+_A_LOC_TARGET = "등록부 묶음의 대상 열쇠('snap:<id>' · 'diff:<id>') — cluster_key 와 함께 준다(이 과제의 대상)."
+_A_LOC_CLUSTER = "등록부 묶음 열쇠(risk_get_registry 행의 cluster_key) — target_key 와 함께 준다."
+_A_LOC_REFDES = (f"보드 부품 refdes(최대 {routes.LOCATE_REFDES_MAX}자) — ODB 허브 get_part_detail 로 좌표 · 면을 그 사람의 PAT 로 읽는다.")
+_A_LOC_NET = (f"넷 이름(최대 {routes.LOCATE_NET_MAX}자) — ODB 허브 get_net 의 핀 좌표 bbox 로 자리를 정한다(핀 좌표가 없으면 unknown "
+              "net_pins_absent).")
+_A_LOC_X = "보드 좌표 x(ODB 좌표계, mm) — y 와 함께 준다."
+_A_LOC_Y = "보드 좌표 y(ODB 좌표계, mm) — x 와 함께 준다."
+_A_LOC_SIDE = (f"보드 좌표의 면 — {' · '.join(board_transform_module.SIDES)}(선택, x · y 와 함께만). 주면 z 는 그 면이 닿는 CAD 면이고 비우면 보드 "
+               "두께 가운데다.")
+_A_LOC_ODB = "ODB 허브 job_id(16자리 16진, 선택) — 비우면 과제에 붙은 ECAD 보드다."
+_A_LOC_CAD = (f"StepForge project_id(선택, 최대 {routes.LOCATE_CAD_ID_MAX}자) — 비우면 과제의 기구 CAD 원천이다. 등록된 변환은 (보드, CAD 과제) "
+              "쌍마다다.")
+_A_TF_BODY_PROPOSE = (f"CAD 보드 몸체 경로(StepForge 트리 경로, 선택, 최대 {locate_module.PATH_MAX}자) — 비우면 ODB 외곽 크기에 맞는 몸체 후보를 "
+                      "최근 스냅샷에서 주고, 주면 뒤집기 넷마다의 변환 후보와 검증을 준다.")
+_A_TF_REMOVE = "참이면 그 (보드, CAD 과제) 쌍의 등록을 뗀다 — 다른 값은 보지 않는다. 거짓(기본)이면 적거나 바꾼다."
+_A_TF_BODY = (f"CAD 보드 몸체 경로(StepForge 트리 경로, 최대 {locate_module.PATH_MAX}자) — risk_propose_board_transform 의 board_body_candidates "
+              "에서 고른다. 적을 때 필수다.")
+_A_TF_MIRROR_X = "x 를 뒤집는가 — 참이면 x_CAD = offset_x − x_ODB, 거짓이면 x_CAD = x_ODB + offset_x 다(JSON 참 · 거짓만)."
+_A_TF_MIRROR_Y = "y 를 뒤집는가 — 참이면 y_CAD = offset_y − y_ODB, 거짓이면 y_CAD = y_ODB + offset_y 다(JSON 참 · 거짓만)."
+_A_TF_OFFSET_X = "x 원점(mm) — 변환식의 offset_x 다(예 82.13)."
+_A_TF_OFFSET_Y = "y 원점(mm) — 변환식의 offset_y 다(예 2.82)."
+_A_TF_FACE = (f"ODB top 면이 닿는 CAD 보드 몸체의 면 — {' · '.join(board_transform_module.FACES)}(zmax 위 면 · zmin 아래 면). 한 축만 뒤집으면 "
+              "zmin, 아니면 zmax 여야 검증을 지난다(손대칭).")
+_A_TF_SOURCE = f"출처 — {' · '.join(routes.TRANSFORM_SOURCES)}(제안 후보를 그대로 적으면 proposed)."
+_A_TF_FORCE = ("검증을 지나지 못한 변환을 그래도 적는다 — 사용자가 거절 까닭을 보고 확인한 뒤에만 참으로 주고 자동으로 채우지 않는다(reason "
+               "필수 · status forced · 감사에 남는다).")
+_A_TF_REASON = f"강제로 적는 사유(최대 {routes.TRANSFORM_REASON_MAX}자) — force 가 참이면 필수이고 감사 행에 남는다."
+_A_ITEM_FINDING = "위치를 달 finding id(risk_add_finding 응답 · 등록부 행의 merged.finding_ids) — target_key+cluster_key 와 둘 중 하나만 준다."
+_A_ITEM_PART = (f"항목 위치의 CAD 몸체 경로(StepForge 트리 경로, 최대 {locate_module.PATH_MAX}자) — point 와 둘 다 null 이면 위치를 뗀다.")
+_A_ITEM_POINT = "항목 위치의 MCAD 점 {x, y, z, unit} — 길이는 mm 이고 unit 은 mm 만 받는다. part 와 둘 다 null 이면 위치를 뗀다."
 _A_FIND_LIMIT = (f"한 번에 줄 과제 수 — 1~{routes.SUBJECT_LIMIT_MAX} 사이로 죄고(기본 {routes.SUBJECT_LIMIT_DEFAULT}), MCP 결과 상한"
                  f"({MCP_RESULT_CHARS:,}자)을 넘으면 더 줄인다(남은 것은 next_offset).")
 
@@ -984,3 +1022,68 @@ def risk_find_projects_by_subject(sp_task: Annotated[str | None, Field(descripti
             offset=offset), want, lambda page: len(page["projects"]))
 
     return _guarded(call)
+
+
+# ================================================================ 단면 자리 찾기(F2 — docs/f2-locate-for-section.md)
+# 항목 · refdes · 넷 · 보드 좌표를 MCAD 점 · 몸체 · 단면 둘로(F1 section_pair_view 에 그대로 넘길 꼴). 보드 ↔ CAD 변환은 과제마다 (보드, CAD 과제)
+# 쌍으로 등록하고 적을 때 이 박스에서 검증한다. 넷 다 위임으로 확인된 신원의 등록된 포털 PAT 로 ODB 허브 · StepForge 를 읽는다(박스 PAT 로 내려가지
+# 않는다). 이름이 risk_ 로 시작한다 — 리스크 심사 좌석에는 닿지 않는다(D-18 — 엔진 _risk_designated_refusal 의 app 갈래가 이름으로 닫는다).
+@mcp.tool()
+async def risk_locate_for_section(project_id: Annotated[str, Field(description=_A_PROJECT_ID)],
+                                  finding_id: Annotated[str | None, Field(description=_A_LOC_FINDING)] = None,
+                                  target_key: Annotated[str | None, Field(description=_A_LOC_TARGET)] = None,
+                                  cluster_key: Annotated[str | None, Field(description=_A_LOC_CLUSTER)] = None,
+                                  refdes: Annotated[str | None, Field(description=_A_LOC_REFDES)] = None,
+                                  net: Annotated[str | None, Field(description=_A_LOC_NET)] = None,
+                                  x: Annotated[float | None, Field(description=_A_LOC_X)] = None,
+                                  y: Annotated[float | None, Field(description=_A_LOC_Y)] = None,
+                                  side: Annotated[str | None, Field(description=_A_LOC_SIDE)] = None,
+                                  odb_job_id: Annotated[str | None, Field(description=_A_LOC_ODB)] = None,
+                                  stepforge_project_id: Annotated[str | None, Field(description=_A_LOC_CAD)] = None) -> dict:
+    """단면 자리 찾기(읽기 전용) — 리스크 항목(finding_id 또는 target_key+cluster_key) · refdes · net · 보드 좌표(x+y, side 선택) 가운데 하나를 받아 MCAD 점(mcad {x, y, z, unit mm}) · 그 자리의 CAD 몸체(body.path, 확신할 때만) · 단면 둘(planes — 긴 축 평면 먼저, 항목마다 {axis, offset, unit mm} 이고 axis 는 평면 법선) · window_mm · F1 section_pair_view 에 그대로 넘길 f1{stepforge_project_id, point, part, planes, window_mm} 과 변환 근거(transform — 식 · 상태 · 오차)를 준다, 자리를 못 정하면 status unknown 과 reason{code, message, fix}(변환 미등록 transform_missing 이면 risk_propose_board_transform → risk_set_board_transform), 보드 · CAD 과제는 비우면 과제의 원천이고 ODB 허브는 위임으로 확인된 신원의 PAT 로만 부른다(없으면 locate_pat_absent)."""
+    return await _entry(entry.locate_for_section, project_id=project_id, finding_id=finding_id, target_key=target_key,
+                        cluster_key=cluster_key, refdes=refdes, net=net, x=x, y=y, side=side, odb_job_id=odb_job_id,
+                        stepforge_project_id=stepforge_project_id)
+
+
+@mcp.tool()
+async def risk_propose_board_transform(project_id: Annotated[str, Field(description=_A_PROJECT_ID)],
+                                       odb_job_id: Annotated[str | None, Field(description=_A_LOC_ODB)] = None,
+                                       stepforge_project_id: Annotated[str | None, Field(description=_A_LOC_CAD)] = None,
+                                       board_body: Annotated[str | None, Field(description=_A_TF_BODY_PROPOSE)] = None) -> dict:
+    """보드 ↔ CAD 변환 제안(읽기 전용 · 편집자 이상 — 적기의 앞 단계) — 몸체 경로가 없으면 ODB 외곽 크기 · 두께에 맞는 CAD 보드 몸체 후보(board_body_candidates)를, 있으면 뒤집기 넷마다 고정홀 짝 · 외곽으로 가장 잘 맞춘 변환(식 · 원점 · 면)과 검증(오차 · 짝 · 모호함 · 까닭)을 검증을 지난 것부터 준다, 쓰지 않는다 — 고른 후보는 사용자에게 보이고 확인을 받아 risk_set_board_transform(source=proposed)으로 적는다, 지금 등록(current)도 함께 싣고 ODB 허브 · StepForge 는 위임으로 확인된 신원의 PAT 로만 읽는다."""
+    return await _entry(entry.propose_board_transform, project_id=project_id, odb_job_id=odb_job_id,
+                        stepforge_project_id=stepforge_project_id, board_body=board_body)
+
+
+@mcp.tool()
+async def risk_set_board_transform(project_id: Annotated[str, Field(description=_A_PROJECT_ID)],
+                                   remove: Annotated[StrictBool, Field(description=_A_TF_REMOVE)] = False,
+                                   odb_job_id: Annotated[str | None, Field(description=_A_LOC_ODB)] = None,
+                                   stepforge_project_id: Annotated[str | None, Field(description=_A_LOC_CAD)] = None,
+                                   board_body: Annotated[str | None, Field(description=_A_TF_BODY)] = None,
+                                   mirror_x: Annotated[StrictBool | None, Field(description=_A_TF_MIRROR_X)] = None,
+                                   mirror_y: Annotated[StrictBool | None, Field(description=_A_TF_MIRROR_Y)] = None,
+                                   offset_x: Annotated[float | None, Field(description=_A_TF_OFFSET_X)] = None,
+                                   offset_y: Annotated[float | None, Field(description=_A_TF_OFFSET_Y)] = None,
+                                   top_face: Annotated[str | None, Field(description=_A_TF_FACE)] = None,
+                                   source: Annotated[str, Field(description=_A_TF_SOURCE)] = "manual",
+                                   force: Annotated[StrictBool, Field(description=_A_TF_FORCE)] = False,
+                                   reason: Annotated[str | None, Field(description=_A_TF_REASON)] = None) -> dict:
+    """보드 ↔ CAD 변환 적기 · 바꾸기 · 떼기 — 쓰기: 어느 과제의 어느 (보드, CAD 과제)에 어떤 식(뒤집기 · 원점 mm · 면)을 적을지 사용자에게 보이고 확인한 뒤 부른다, 적기 전에 이 박스에서 그 사람의 PAT 로 ODB 외곽 · 고정홀과 CAD 보드 몸체를 읽어 검증하고(손대칭 · 평면 · 크기 · 자리 · 구멍 · 뒤집기 모호함, 상한 0.5 mm) 못 지나면 transform_unverified(까닭 · 오차)로 적지 않는다 — force=true 와 reason 으로만 적고(status forced) 감사에 남는다, remove=true 면 뗀다, 과제 주인 · 편집자만 한다."""
+    return await _entry(entry.set_board_transform, project_id=project_id, remove=remove, odb_job_id=odb_job_id,
+                        stepforge_project_id=stepforge_project_id, board_body=board_body, mirror_x=mirror_x,
+                        mirror_y=mirror_y, offset_x=offset_x, offset_y=offset_y, top_face=top_face, source=source, force=force,
+                        reason=reason)
+
+
+@mcp.tool()
+async def risk_set_item_location(project_id: Annotated[str, Field(description=_A_PROJECT_ID)],
+                                 part: Annotated[str | None, Field(description=_A_ITEM_PART)],
+                                 point: Annotated[dict | None, Field(description=_A_ITEM_POINT)],
+                                 finding_id: Annotated[str | None, Field(description=_A_ITEM_FINDING)] = None,
+                                 target_key: Annotated[str | None, Field(description=_A_LOC_TARGET)] = None,
+                                 cluster_key: Annotated[str | None, Field(description=_A_LOC_CLUSTER)] = None) -> dict:
+    """리스크 항목 위치 달기 · 떼기 — 쓰기: 어느 항목(finding_id 또는 target_key+cluster_key)에 어떤 CAD 몸체 경로 · MCAD 점(mm)을 달지 사용자에게 확인한 뒤 부른다, part 와 point 가 둘 다 null 이면 뗀다, risk_locate_for_section 이 이 위치를 먼저 써서 바로 단면 둘을 낸다, 과제 주인 · 편집자만 하고 바뀌면 감사 한 줄이다(패널을 다시 저장하면 그 패널의 finding 은 새로 서서 위치가 사라진다)."""
+    return await _entry(entry.set_item_location, project_id=project_id, part=part, point=point, finding_id=finding_id,
+                        target_key=target_key, cluster_key=cluster_key)

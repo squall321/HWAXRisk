@@ -875,18 +875,42 @@ _DDL_V5: list[str] = _split_statements(_DDL_V5_SQL)
 
 # v6 — 과제 인사이트 그래프 M2b(포털 docs/project-insight-graph contracts §9 · PLAN §4.7). 2026-11-02 main 에 올라 굳었다 — tests/test_store.py 의 PUSHED_DDL_SHA256[6] 가 지킨다. 바꿀 것은 v7 에. 과제의 SP 허브 과제 key 한 칸과 그 색인이다 —
 # 값은 리스크 앱이 그 사람의 PAT 로 스스로 부른 풀이(find_plm_task)의 결과 행에서만 적는다(PUT /api/projects/{id}/sp-subject · 일반 PATCH
-# 칸 밖). 차수는 새 칸 없이 stage 를 읽을 때 정규화한다(app/sp_subject.py). 재설계 M4 가 v6 에 두기로 적었던 rr_reports.ra_* 는 다음 판(v7)이다.
-# 아직 나가지 않았다 — 가지 wt1102/insight-m2 에만 있고 main 에 오르는 날 tests/test_store.py 의 PUSHED_DDL_SHA256[6] 가 굳는다.
+# 칸 밖). 차수는 새 칸 없이 stage 를 읽을 때 정규화한다(app/sp_subject.py). 재설계 M4 가 v6 에 두기로 적었던 rr_reports.ra_* 는 v8 로 간다(v7 은
+# F2 단면 자리 찾기 — 아래).
 _DDL_V6_SQL = """
 ALTER TABLE rr_projects ADD COLUMN sp_task TEXT;          -- SP 허브 plm_task key(운영 허브는 과제명 — 과제코드가 아니다). 모르면 NULL
 CREATE INDEX IF NOT EXISTS ix_rr_projects_sp_task ON rr_projects(sp_task);
 """
 _DDL_V6: list[str] = _split_statements(_DDL_V6_SQL)
 
+# v7 — F2 단면 자리 찾기('CAD 그림을 보고서로' 긴급 11-02 · docs/f2-locate-for-section.md). 아직 나가지 않았다 — 가지 wt1102/f2-locate 에만 있고
+# main 에 오르는 날 tests/test_store.py 의 PUSHED_DDL_SHA256[7] 이 굳는다. 재설계 M4 의 rr_reports.ra_* 는 v8 로 간다.
+# 보드 ↔ CAD 변환 등록부(과제마다 (ODB 보드, StepForge 과제) 한 행 — 원점 · 뒤집기 · 면과 등록 때 읽은 보드 몸체 z, 이 박스의 검증)와 리스크
+# 항목(finding · 등록부 묶음)의 위치 한 칸이다. 검증 칸(status · error_mm · verify_json · reason)은 이 박스의 일이라 반출 · 들여오기에 없다
+# (app/export.py — 들여온 행은 status 가 NULL 이고 위치 찾기가 쓰지 않는다).
+_DDL_V7_SQL = """
+CREATE TABLE IF NOT EXISTS rr_board_transforms (          -- 보드 ↔ CAD 좌표 변환 등록부. 과제마다 (ODB 보드, StepForge 과제) 한 행
+  project_id TEXT NOT NULL, odb_job_id TEXT NOT NULL, stepforge_project_id TEXT NOT NULL,
+  owner_sub TEXT NOT NULL,                       -- 과제 주인의 복제(하위 표 규약 §5.2.1)
+  board_body_path TEXT NOT NULL,                 -- CAD 보드 몸체 경로(StepForge 트리 경로)
+  mirror_x INTEGER NOT NULL, mirror_y INTEGER NOT NULL,   -- 1 이면 그 축을 뒤집는다(x_CAD = offset_x − x_ODB)
+  offset_x REAL NOT NULL, offset_y REAL NOT NULL,         -- mm
+  top_face TEXT NOT NULL,                        -- ODB top 면이 닿는 CAD 보드 몸체 면 — zmax(위 면) · zmin(아래 면)
+  board_z_min REAL NOT NULL, board_z_max REAL NOT NULL,   -- 등록 때 읽은 보드 몸체의 z 범위(mm) — 부품 면의 z
+  source TEXT NOT NULL,                          -- manual · proposed
+  status TEXT,                                   -- verified · forced — 이 박스의 검증(들여온 행은 NULL)
+  error_mm REAL, verify_json TEXT, reason TEXT,  -- 검증 오차 · 근거 전부 · 강제 사유
+  created_by TEXT, created_at INTEGER, updated_by TEXT, updated_at INTEGER,
+  PRIMARY KEY(project_id, odb_job_id, stepforge_project_id));
+ALTER TABLE rr_findings ADD COLUMN location_json TEXT;    -- 항목 위치 {part, point{x, y, z, unit}, set_by, set_at} — 없으면 NULL
+ALTER TABLE rr_registry ADD COLUMN location_json TEXT;    -- 등록부 묶음의 위치(같은 꼴)
+"""
+_DDL_V7: list[str] = _split_statements(_DDL_V7_SQL)
+
 # 버전 오름차순. 한 버전 = 한 트랜잭션. 허용 연산은 CREATE TABLE IF NOT EXISTS · ADD COLUMN · CREATE INDEX IF NOT EXISTS 뿐(plan §5.2.5 (6)).
 # 한 번 나간 버전의 문장은 고치지 않는다 — tests/test_store.py 가 버전마다 DDL 해시를 못 박는다.
 MIGRATIONS: list[tuple[int, list[str]]] = [(1, _DDL_V1), (2, _DDL_V2), (3, _DDL_V3), (4, _DDL_V4), (5, _DDL_V5),
-                                           (6, _DDL_V6)]
+                                           (6, _DDL_V6), (7, _DDL_V7)]
 
 # ---------------------------------------------------------------- 이행 안전(WP5a R3 · 반대 검토 X2-01·X2-02)
 # 이행 전체(버전 읽기 → 사본 → 버전별 트랜잭션 → 사본 정리)를 감싸는 파일 잠금. 기다린다 — HEAXHub 는 헬스가 안 오면 같은

@@ -156,6 +156,18 @@ CASES: dict[tuple[str, str], tuple[Call, tuple[str, ...]]] = {
         ("project",)),
     ("DELETE", P + "/projects/{project_id}/ecad-board"): (
         lambda i, who: routes.delete_ecad_board(i["project"], ident=who), ("project",)),
+    # 단면 자리 찾기(F2 — docs/f2-locate-for-section.md) — 쓰기 문(_project_writer · 과제 행)이 보드 · CAD 과제를 고르고 게이트웨이를 부르기
+    # 전이다. 이 원장에는 ECAD 보드가 없어 주인은 422 board_missing 이다(404 가 아니다).
+    ("PUT", P + "/projects/{project_id}/board-transforms"): (
+        lambda i, who: routes.put_board_transform(i["project"], routes.BoardTransformBody(
+            board_body="/P/PCB", mirror_x=True, mirror_y=False, offset_x=82.13, offset_y=2.82, top_face="zmin"), ident=who),
+        ("project",)),
+    ("DELETE", P + "/projects/{project_id}/board-transforms"): (
+        lambda i, who: routes.delete_board_transform(i["project"], ident=who), ("project",)),
+    # 몸체 경로는 항목의 스냅샷에 있어야 적힌다(반대 검토 F2-9 — 없으면 422 item_part_unknown) — 점으로 적어 주인 · 편집자가 실제로 쓴다.
+    ("PUT", P + "/projects/{project_id}/item-location"): (
+        lambda i, who: routes.put_item_location(i["project"], routes.ItemLocationBody(
+            finding_id=i["human_finding"], part=None, point=routes.ItemPoint(x=1.0, y=2.0, z=3.0)), ident=who), ("project", "human_finding")),
     # 과제 주제(포털 docs/project-insight-graph contracts §9) — 과제 문이 풀이(게이트웨이)를 부르기 전이다. 떼고 차수만 적는 부름이라
     # 주인은 풀이 없이 지난다.
     ("PUT", P + "/projects/{project_id}/sp-subject"): (
@@ -395,6 +407,13 @@ GET_CASES: dict[tuple[str, str], tuple[Call, tuple[str, ...]]] = {
     ("GET", P + "/projects/{project_id}/similar"): (lambda i, who: routes.get_similar(i["project"], ident=who), ("project",)),
     ("GET", P + "/projects/{project_id}/sp-subject"): (
         lambda i, who: routes.get_sp_subject(i["project"], ident=who), ("project",)),
+    # 단면 자리 찾기(F2) — 보드 좌표는 게이트웨이를 부르지 않는다(이 원장에는 보드가 없어 주인은 unknown board_missing 이다).
+    ("GET", P + "/projects/{project_id}/locate"): (
+        lambda i, who: routes.get_locate(i["project"], x=1.0, y=1.0, ident=who), ("project",)),
+    ("GET", P + "/projects/{project_id}/board-transforms"): (
+        lambda i, who: routes.get_board_transforms(i["project"], ident=who), ("project",)),
+    ("GET", P + "/projects/{project_id}/board-transforms/proposal"): (
+        lambda i, who: routes.get_board_transform_proposal(i["project"], ident=who), ("project",)),
     ("GET", P + "/snapshots/{snapshot_id}"): (
         lambda i, who: routes.get_snapshot(i["target_snapshot"], ident=who), ("target_snapshot",)),
     ("GET", P + "/snapshots/{snapshot_id}/rule_hits"): (
@@ -538,6 +557,15 @@ MCP_CASES: dict[str, tuple[Callable[[dict], Any], tuple[str, ...]]] = {
                             ("project",)),
     "risk_set_project_subject": (lambda i: srv.risk_set_project_subject(project_id=i["project"], sp_task=None, round="dv1"),
                                  ("project",)),
+    # 단면 자리 찾기(F2) — 읽기 둘은 MCP 시야 문(not_visible), 쓰기 둘은 웹 라우트의 쓰기 문(E404)이다.
+    "risk_locate_for_section": (lambda i: srv.risk_locate_for_section(project_id=i["project"], x=1.0, y=1.0), ("project",)),
+    "risk_propose_board_transform": (lambda i: srv.risk_propose_board_transform(project_id=i["project"]), ("project",)),
+    "risk_set_board_transform": (lambda i: srv.risk_set_board_transform(
+        project_id=i["project"], board_body="/P/PCB", mirror_x=True, mirror_y=False, offset_x=82.13, offset_y=2.82, top_face="zmin"),
+        ("project",)),
+    "risk_set_item_location": (lambda i: srv.risk_set_item_location(project_id=i["project"], part=None,
+                                                                    point={"x": 1.0, "y": 2.0, "z": 3.0},
+                                                                    finding_id=i["human_finding"]), ("project", "human_finding")),
 }
 
 

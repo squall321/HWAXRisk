@@ -1071,3 +1071,40 @@ B25 가 남긴 작은 것 하나(2026-10-31, context-notes BL-2) — 캡처가 �
 - [ ] (화면 세션) 과제 화면의 주제 칸(GET · PUT sp-subject — 409 sp_pat_absent · 422 sp_task_not_confirmed · round_invalid) · 이력 탭 이름표
       `project.sp_subject` — 더하면 tests/test_audit_action_labels.py 의 LABEL_PENDING 에서 뺀다
 - [ ] 리스크 전체 시험 한 번(공유 잠금, -q 없이) — 부른 세션 몫
+
+
+## F2 단면 자리 찾기(`risk_locate_for_section`) — 'CAD 그림을 보고서로' 긴급 11-02(가지 `wt1102/f2-locate`, main 842a691 위)
+
+> 설계 `docs/f2-locate-for-section.md`. 결정과 까닭은 context-notes 'F2-1' 부터. F1(`section_pair_view`)은 StepForge 세션 몫이다.
+
+- [x] 변환 계산 — 손대칭 · 검사(크기 · 평면 · 외곽 · 구멍 · 뒤집기 모호함) · 제안 · 평면 고르기(순수 함수 + 손 셈 예 시험)(F2-3 — d87bc3e)
+- [x] 스키마 v7 — rr_board_transforms · rr_findings / rr_registry.location_json(허용 연산 · PUSHED_DDL_SHA256[7] · 반출 since · 이양 · 폐기 ·
+      들여오기는 검증 칸을 받지 않음) · 재설계 M4 의 rr_reports.ra_* 는 v8 로(F2-4 — 27f55bb)
+- [x] 등록부 REST — 목록 · 제안 · 적기(검증 · 강제 · 감사) · 떼기 — 편집자 이상, 그 사람의 PAT 만(F2-5 — 11f47f8)
+- [x] 위치 찾기 REST — 항목(위치 · 주제) · refdes · 넷 · 좌표 → MCAD 점 · 몸체 · 평면 둘 · F1 넘김 꼴(unit mm) · unknown 까닭(F2-6 — 11f47f8)
+- [x] 항목 위치 쓰기 — PUT item-location(편집자 이상 · 감사)(F2-7 — 11f47f8)
+- [x] MCP 넷 — risk_locate_for_section · risk_propose_board_transform(읽기, 위임 신원) · risk_set_board_transform · risk_set_item_location(쓰기) —
+      도구 표 · 인자 계약 · 남 · 구성원 · 편집자 · 관리자 표 · 매니페스트 · D-18 이름 시험(F2-8 — 11f47f8)
+- [x] 반대 검토 하나(포털 세션의 검토 에이전트 · 사본 cfc7c78) → 재현 10/10 · 미확인 셋 판정 — 재현 시험을 뒤집어 옮김(옛 코드에서 짐), 결함마다
+      커밋 하나(F2-9 ~ F2-18)
+  - [x] 원점 찾기를 칸 투표로 · 구멍 수 상한(성능 — 20 × 100 11.5 → 0.05초, 3e0945e)
+  - [x] 같은 뒤집기의 다른 원점 · 짝 없는 고정홀 절반 · 느슨한 겨룸 상대(R5 — 81ab9f9)
+  - [x] 보드 두께 상한(R7 — 448fa94)
+  - [x] 두 평면은 늘 세로(R4 — 57802cc)
+  - [x] 등록 뒤 CAD 변경은 transform_stale · 검증 기록 없는 행은 transform_unverified(R1 · c — a406c88)
+  - [x] 보드 밖 자리는 point_off_board(R2 — 3851be8)
+  - [x] 몸체 찾기 — 면 바깥 선분 · 크기 두 쪽 · 품는 · 얹힌 몸체 · 여럿이면 null(R3 · R3b — 8e96a1b)
+  - [x] 항목 위치의 저장 꼴을 쓰기 규칙으로 읽고 들임(R6 — 5916a5d)
+  - [x] 항목 위치의 몸체 경로 확인 · 비교 대상은 두 과제 · 점만의 CAD 과제 확인(R8 · a · b — 4ee4076)
+  - [x] 잘린 고정홀 · 모든 ODB 답의 단위(R9 — 75867a5)
+  - [x] 변환 제안은 편집자 이상(8f64757)
+  - [x] v6 주석에 남은 '아직 나가지 않았다' 한 줄(96800ad — v7 의 표시는 그대로)
+- [x] 전체 시험(공유 잠금, -q 없이) — 96800ad 에서 4478 passed · 4 xfailed · rc 0(913.7초)
+- [ ] (cae00) get_part_detail.side · get_net 인자와 핀 좌표 · get_mounting_holes 쪽 넘김 · 실제 보드로 손 셈 되찾기 — 설계 6절
+- [ ] (cae00) 반대 검토 뒤 상수 — PROBE_REACH_MM · 크기 창(ambiguous 가 잦은지) · 두께 상한 · 짝 없는 절반 규칙 · 고정홀 total/hole_count — 설계 6절
+- [ ] (ODB 허브) OH-04 외곽 bbox · get_net 핀 좌표 · get_part_detail.side
+- [ ] (화면 세션) 등록부 · 위치 찾기 화면 · 이력 이름표 project.board_transform · finding.location · registry.location — 반대 검토 뒤의 새 까닭
+      (transform_stale · point_off_board · item_location_invalid · item_part_unknown · 검증의 thickness_mismatch · origin_ambiguous ·
+      holes_too_many) · 후보의 fits_part · 제안은 편집자 이상(설계 7절)
+- [ ] (StepForge F1 세션) 평면은 늘 세로(axis x · y) · body null 이 는다 — part 가 null 이면 point · planes 를 넘긴다(설계 7절)
+- [ ] (포털 세션) docs/risk-review-redesign/M3.md 274행 'rr_reports.ra_*(M4 의 v6 ADD COLUMN)' — v8 로

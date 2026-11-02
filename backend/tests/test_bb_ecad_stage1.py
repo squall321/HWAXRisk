@@ -73,8 +73,10 @@ def _board_search(client, ident: identity.Identity, project_id: str, query: str)
     """A2 — 보드 후보 창구를 경로 모양으로 찾아 TestClient 로 부른다(경로 · 인자 이름이 정해지지 않았다)."""
     from app.main import app
 
+    # F2 의 보드 ↔ CAD 변환 등록부(…/board-transforms · …/proposal)는 보드 후보 창구가 아니다 — 경로 이름에 board 가 들어 빼고 찾는다.
     paths = sorted({r.path for r in routes.router.routes
-                    if "GET" in (getattr(r, "methods", None) or set()) and re.search(r"ecad|odb|board", r.path, re.I)})
+                    if "GET" in (getattr(r, "methods", None) or set()) and re.search(r"ecad|odb|board", r.path, re.I)
+                    and "board-transforms" not in r.path})
     assert len(paths) == 1, f"가정 A2 — 보드 후보를 내는 GET 경로(ecad · odb · board)가 하나여야 한다 — {paths}"
     path = paths[0].replace("{project_id}", project_id)
     assert "{" not in path, f"가정 A2 — 모르는 경로 인자가 있다 — {paths[0]}"

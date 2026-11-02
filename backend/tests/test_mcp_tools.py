@@ -54,6 +54,11 @@ TOOL_NAMES = [
     # 과제 주제(포털 docs/project-insight-graph contracts §9 — 과제 인사이트 그래프 M2b) — SP 과제 key · 차수 달기와 그것으로 찾기(33 → 35).
     "risk_set_project_subject",
     "risk_find_projects_by_subject",
+    # 단면 자리 찾기(F2 — docs/f2-locate-for-section.md) — 위치 찾기 · 변환 제안(읽기)과 변환 적기 · 항목 위치(쓰기)(35 → 39).
+    "risk_locate_for_section",
+    "risk_propose_board_transform",
+    "risk_set_board_transform",
+    "risk_set_item_location",
 ]
 ENTRY_TOOLS = TOOL_NAMES[TOOL_NAMES.index("risk_next_step"):TOOL_NAMES.index("risk_repersist_panel") + 1]
 # 도구별 대표 인자와, 빈 원장에서 기대하는 오류 코드(없으면 None = 정상 응답).
@@ -113,6 +118,11 @@ CALLS = [
     ("risk_find_projects_by_subject", {}, None),
     ("risk_find_projects_by_subject", {"sp_task": "알파 개발_C2", "round": "C2"}, "round_invalid"),
     ("risk_find_projects_by_subject", {"artifact_kind": "mcad"}, "E100"),
+    # 단면 자리 찾기(F2) — 넷 다 그 사람의 PAT 로 게이트웨이를 부르거나 그 사람의 이름으로 쓰므로 위임 신원을 먼저 본다(읽기 둘도).
+    ("risk_locate_for_section", {"project_id": "p1", "refdes": "U1001"}, "delegation_required"),
+    ("risk_propose_board_transform", {"project_id": "p1"}, "delegation_required"),
+    ("risk_set_board_transform", {"project_id": "p1", "remove": True}, "delegation_required"),
+    ("risk_set_item_location", {"project_id": "p1", "part": None, "point": None, "finding_id": "f1"}, "delegation_required"),
 ]
 _HANGUL = re.compile(r"[가-힣]")
 # 인자 이름에 비밀이 오면 게이트웨이·포털 절차·클라이언트 대화 기록에 값이 남는다(작업 지시서 A-11) — 포털 절차의
@@ -262,6 +272,24 @@ def test_entry_tool_signatures():
     assert not [p for p in props("risk_set_project_subject") if _SECRET_ARG.search(p)]
     head = tools["risk_set_project_subject"].description.strip()[:220]
     assert "사용자에게" in head and "확인한 뒤 부른다" in head, head
+    # 단면 자리 찾기(F2) — 입력은 넷 가운데 하나라 project_id 말고는 다 선택이다. 쓰기 둘은 확인 뒤 부르고, 항목 위치의 part · point 는 null 이
+    # 뗀다는 뜻이라 기본값 없이 필수다(빠뜨려서 떼지 않게).
+    assert props("risk_locate_for_section") == {"project_id", "finding_id", "target_key", "cluster_key", "refdes", "net", "x", "y",
+                                                "side", "odb_job_id", "stepforge_project_id"}
+    assert required("risk_locate_for_section") == {"project_id"}
+    assert props("risk_propose_board_transform") == {"project_id", "odb_job_id", "stepforge_project_id", "board_body"}
+    assert props("risk_set_board_transform") == {"project_id", "remove", "odb_job_id", "stepforge_project_id", "board_body",
+                                                 "mirror_x", "mirror_y", "offset_x", "offset_y", "top_face", "source", "force", "reason"}
+    assert required("risk_set_board_transform") == {"project_id"}
+    assert props("risk_set_item_location") == {"project_id", "part", "point", "finding_id", "target_key", "cluster_key"}
+    assert required("risk_set_item_location") == {"project_id", "part", "point"}
+    for name in ("risk_locate_for_section", "risk_propose_board_transform", "risk_set_board_transform", "risk_set_item_location"):
+        assert "actor" not in props(name) and not [p for p in props(name) if _SECRET_ARG.search(p)], name
+    for name in ("risk_locate_for_section", "risk_propose_board_transform"):
+        assert "읽기 전용" in tools[name].description.strip()[:220], name
+    for name in ("risk_set_board_transform", "risk_set_item_location"):
+        head = tools[name].description.strip()[:220]
+        assert "사용자에게" in head and "확인한 뒤 부른다" in head, (name, head)
 
 
 def test_write_tool_descriptions_ask_for_confirmation_first():
