@@ -660,3 +660,46 @@ def test_registry_rows_pass_the_same_door_as_risk_get_registry(ledger, monkeypat
         (r["target_key"], r["cluster_key"]) for r in full]                 # 그 남이 risk_get_registry 로 받는 행과 같다
     service = _find(monkeypatch, None, sp_task=KEY)
     assert (service["caller"], _ids(service)) == ("service", [ids["project"]])
+
+
+# ================================================================ D-18 — 과제 주제는 좌석에 가지 않는다
+SENTINEL = "알파 개발_C2-좌석에-가면-안-되는-key"
+
+
+def test_a_projects_sp_task_never_reaches_the_seats(risk_store, monkeypatch):
+    """sp_task 는 리스크 앱 안의 칸이다 — 브리프(근거 E0 ~ E9 · 메타 — 넓은 창이라 줄이지 않는다) · 패널 질문 · 스냅샷 · 비교의 모든 쪽(REST · MCP
+    risk_get_snapshot · risk_get_diff 와 같은 함수)에 그 key 가 없다. 유사 · 계보 경로가 다른 과제를 읽으므로 두 과제 다 key 를 단다(D-18 —
+    포털 contracts §9 '좌석에는 싣지 않는다')."""
+    from app import brief, runner  # noqa: PLC0415
+
+    gw = Gateway()
+    gw.answers[sp_subject.RESOLVER_CALL] = _any_key
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", lambda _self, request: gw.handle(request))
+    monkeypatch.setattr(routes, "get_store", lambda: risk_store)
+    risk_store.upsert_credential(factories.OWNER, identity.encrypt_pat("syn-pat-not-real").decode("ascii"), "sub", factories.OWNER,
+                                 "[]", now_epoch() + 30 * 86400)
+    synth = factories.make_diff_target(risk_store, 40)
+    sibling = factories.make_diff_target(risk_store, 3, seed=11)
+    owner = factories.ident(factories.OWNER)
+    for project_id in (synth.project_id, sibling.project_id):
+        out = routes.put_sp_subject(project_id, routes.SpSubjectBody(sp_task=SENTINEL, round="dv1"), ident=owner)
+        assert out["sp_task"] == SENTINEL
+    assert risk_store.query_one("SELECT COUNT(*) AS n FROM rr_projects WHERE sp_task = ?", (SENTINEL,))["n"] == 2
+
+    def dumped(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False, default=str)
+
+    seat_texts = {
+        "brief": dumped(brief.build_brief(risk_store, synth.target_key, owner_sub=factories.OWNER, shield_lint=True,
+                                          profile=brief.web_profile(500_000))),
+        "panel_question": runner.panel_question(risk_store, synth.target_key),
+        "panel_question(diff_ref)": runner.panel_question(risk_store, synth.target_key, diff_ref=True),
+        **{f"snapshot:{part}": dumped(routes.snapshot_part(synth.target_snapshot_id, part, owner_sub=factories.OWNER))
+           for part in routes.SNAPSHOT_PARTS},
+        **{f"diff:{part}": dumped(routes.diff_part(synth.diff_id, part, owner_sub=factories.OWNER)) for part in routes.DIFF_PARTS},
+    }
+    # 빈손으로 지나가지 않게 — 브리프 · 스냅샷 IR · 변경 줄 · 패널 질문은 내용이 찬 답이다(합성 스냅샷에는 소스 호출이 없어 calls 는 빈 목록이다).
+    sizes = {name: len(seat_texts[name]) for name in ("brief", "snapshot:ir", "diff:lines", "panel_question")}
+    assert sizes["brief"] > 10_000 and sizes["snapshot:ir"] > 10_000 and sizes["diff:lines"] > 1_000 and sizes["panel_question"] > 300, sizes
+    leaked = sorted(name for name, text in seat_texts.items() if SENTINEL in text or "sp_task" in text)
+    assert not leaked, leaked
