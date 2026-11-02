@@ -133,6 +133,19 @@ def test_an_inch_header_board_fails_the_size_check_and_says_so():
     assert {"size_mismatch", "cad_unit_suspect"} <= set(check["reasons"]) and check["checks"]["size"]["error_mm"] > 1000
 
 
+def test_a_board_body_much_thicker_than_the_odb_board_is_refused():
+    """(반대 검토 R7) 아래 면 부품과 합쳐진 '보드 몸체'(2.35 mm)는 xy 가 보드와 같아 크기 · 구멍이 다 맞는다 — 종전에는 두께를 알려 주기만
+    해서 verified 였고 등록이 몸체 z 범위(−1.2)를 적어 top 면 부품마다 z 가 진짜 면(0.5)이 아닌 −1.2 였다. 두께 차가 상한(0.3 mm 와 ODB 두께의
+    절반 가운데 큰 것)을 넘으면 거절한다. ODB 두께가 조금 틀린 것(0.65 대 0.8)은 받고, ODB 두께를 모르면 재지 않는다."""
+    merged = [7.13, -45.18, -1.2, 77.13, 4.82, 1.15]
+    check = bt.verify(HAND, _odb(outline=False), _cad(bbox=merged))
+    assert not check["ok"] and check["reasons"] == ["thickness_mismatch"]
+    assert (check["checks"]["thickness"]["diff_mm"], check["checks"]["thickness"]["tol_mm"]) == (-1.7, 0.325)
+    assert bt.verify(HAND, _odb(outline=False), _cad(bbox=[7.13, -45.18, 0.35, 77.13, 4.82, 1.15]))["ok"]
+    blind = bt.verify(HAND, {**_odb(outline=False), "thickness_mm": None}, _cad(bbox=merged))
+    assert blind["ok"] and blind["checks"]["thickness"]["ok"] is None
+
+
 def test_a_board_standing_on_its_side_is_refused():
     """보드 법선이 CAD x 인 배치(가장 얇은 변이 x)는 이 변환으로 적지 않는다."""
     side = [0.5, 7.13, -45.18, 1.15, 77.13, 4.82]

@@ -22,6 +22,11 @@ MAX_ERROR_MM = 0.5
 # 넘는 짝도 짝으로 세워 '오차가 크다' 고 말한다. 반경 밖은 짝이 없는 구멍이다).
 HOLE_DIAMETER_TOL_MM = 0.3
 HOLE_PAIR_RADIUS_MM = 2.0
+# 보드 두께 — CAD 보드 몸체의 z 변과 ODB 두께의 차 상한은 이 둘 가운데 큰 것이다(0.3 mm · ODB 두께의 절반). ODB 안의 두께는 자주 틀려(허브
+# 문서) 넉넉히 두되, 보드가 아닌 몸체(아래 면 부품 · 하우징과 합쳐진 몸체 — 두께가 몇 배다)를 고르면 부품 면의 z 가 그 몸체 면으로 가므로
+# 거절한다(반대 검토 F2-9 — 종전에는 알려 주기만 해서 2.35 mm 몸체가 0.65 mm 보드로 verified 였다).
+THICKNESS_TOL_MM = 0.3
+THICKNESS_TOL_RATIO = 0.5
 # CAD 구멍의 축이 z 와 이루는 각 상한(약 5°) — 보드를 꿰뚫는 구멍만 평면 위 한 점으로 줄일 수 있다.
 HOLE_AXIS_COS_MIN = math.cos(math.radians(5.0))
 # 외곽 자리를 모를 때 자리 근거가 되는 구멍 짝의 수 — 둘이어야 원점과 뒤집기를 함께 가른다(하나는 원점만 정한다).
@@ -50,6 +55,8 @@ REASONS: dict[str, str] = {
     "cad_board_unread": "CAD 보드 몸체의 bbox 를 읽지 못했다",
     "odb_size_unread": "ODB 보드 외곽 크기(get_volume_result.board.x_mm · y_mm)를 읽지 못했다",
     "size_mismatch": "ODB 외곽 크기와 CAD 보드 몸체 크기가 오차 상한보다 다르다 — 엉뚱한 몸체 · 단위(인치 머리) · 90° 회전을 의심한다",
+    "thickness_mismatch": ("CAD 보드 몸체 두께가 ODB 보드 두께와 상한(0.3 mm 와 ODB 두께의 절반 가운데 큰 것)보다 다르다 — 보드가 아닌 몸체(부품 ·"
+                           " 하우징과 합쳐진 몸체)를 골랐거나 단위가 다르다 — 부품 면의 z 가 그 몸체의 면으로 간다"),
     "outline_mismatch": "ODB 외곽 bbox 를 옮긴 자리가 CAD 보드 몸체 bbox 와 오차 상한보다 어긋난다",
     "holes_mismatch": "짝지은 구멍 가운데 오차 상한보다 먼 것이 있다",
     "holes_mostly_unmatched": "ODB 고정홀의 절반 이상이 CAD 구멍과 짝을 찾지 못했다",
@@ -392,9 +399,19 @@ def verify(t: Transform, odb: Mapping[str, Any], cad: Mapping[str, Any], *, max_
         if size_err > max_error:
             reasons.append("size_mismatch")
     thickness = odb.get("thickness_mm")
-    checks["thickness"] = {"odb_mm": None if thickness is None else _r(thickness), "cad_mm": _r(ext[2]),
-                           "diff_mm": None if thickness is None else _r(float(thickness) - ext[2]),
-                           "note": "알려 주기만 한다 — ODB 안의 두께는 자주 틀린다(허브 문서)"}
+    thickness = float(thickness) if thickness is not None and float(thickness) > 0 else None
+    if thickness is None or not plane_ok:
+        checks["thickness"] = {"ok": None, "odb_mm": None if thickness is None else _r(thickness), "cad_mm": _r(ext[2]),
+                               "diff_mm": None if thickness is None else _r(thickness - ext[2]), "tol_mm": None,
+                               "note": ("ODB 두께를 몰라 재지 않았다" if thickness is None
+                                        else "보드 법선이 z 가 아니라 z 변이 두께가 아니다 — 재지 않았다")}
+    else:
+        tol = _r(max(THICKNESS_TOL_MM, THICKNESS_TOL_RATIO * thickness))
+        diff = _r(thickness - ext[2])
+        checks["thickness"] = {"ok": abs(diff) <= tol, "odb_mm": _r(thickness), "cad_mm": _r(ext[2]), "diff_mm": diff, "tol_mm": tol,
+                               "note": "ODB 안의 두께는 자주 틀려(허브 문서) 상한을 넉넉히 둔다 — 보드가 아닌 몸체(두께가 몇 배)를 잡는다"}
+        if abs(diff) > tol:
+            reasons.append("thickness_mismatch")
     if search is None:
         search = _Search(odb, cad, max_error)
     pos = _position(t, odb, cad, search.ev)
