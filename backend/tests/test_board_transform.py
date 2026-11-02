@@ -6,6 +6,9 @@
 """
 from __future__ import annotations
 
+import random
+import time
+
 import pytest
 
 from app import board_transform as bt
@@ -125,6 +128,34 @@ def test_the_proposal_finds_the_hand_transform_from_the_holes_alone():
 def test_the_proposal_has_nothing_without_position_evidence():
     assert bt.propose(_odb(outline=False, holes=()), _cad(holes=())) == []
     assert bt.propose(_odb(), {"bbox": None, "holes": []}) == []
+
+
+def test_the_search_is_not_quadratic_in_both_hole_lists():
+    """원점 찾기는 지름이 맞는 짝마다 칸에 표를 던지고 짝짓기는 짝 반경 칸 색인으로 이웃만 본다 — 종전에는 후보(짝)마다 짝짓기 전부를 다시
+    해 ODB² · CAD² 에 비례했고 20 × 100 구멍의 제안이 11초였다(반대 검토 F2-9, 보기 구성원도 부를 수 있었다). 손 셈 보드에 같은 지름의 구멍
+    17 개를 더하고 CAD 에는 그 짝과 소음 구멍 80 개를 섞어도 첫 후보가 손 셈(짝 20)이고 넉넉한 상한(2초 — 지금은 0.1초 안팎) 안에 끝난다."""
+    rng = random.Random(1)
+    extra = [(rng.uniform(1, 69), rng.uniform(-49, -1), 1.6) for _ in range(17)]
+    odb_holes = ODB_HOLES + extra
+    noise = [(rng.uniform(8, 76), rng.uniform(-44, 4), 1.6) for _ in range(80)]
+    cad_holes = [(*HAND.apply(x, y), d) for x, y, d in odb_holes] + noise
+    started = time.perf_counter()
+    candidates = bt.propose(_odb(outline=False, holes=odb_holes), _cad(holes=cad_holes))
+    elapsed = time.perf_counter() - started
+    assert elapsed < 2.0, elapsed
+    first = candidates[0]
+    assert first["transform"] == HAND.as_dict() and first["verification"]["ok"], first["verification"]["reasons"]
+    assert first["verification"]["checks"]["holes"]["matched"] == 20
+
+
+def test_too_many_holes_are_refused_with_the_reason_instead_of_a_long_search():
+    """한쪽 구멍이 상한(HOLES_MAX — 읽기 상한과 같다)보다 많으면 다른 원점 · 뒤집기를 재지 않고 그 까닭으로 거절한다(모호하지 않다고 말할 수
+    없다). 제안은 외곽을 모르면 후보가 없다."""
+    many = [(10.0 + 0.1 * i, -40.0, 1.6) for i in range(bt.HOLES_MAX + 1)]
+    check = bt.verify(HAND, _odb(outline=False, holes=many), _cad())
+    assert "holes_too_many" in check["reasons"] and not check["ok"]
+    assert check["checks"]["ambiguity"]["capped"]["odb_holes"] == bt.HOLES_MAX + 1
+    assert bt.propose(_odb(outline=False, holes=many), _cad()) == []
 
 
 def test_section_planes_follow_the_long_side_and_carry_the_unit():

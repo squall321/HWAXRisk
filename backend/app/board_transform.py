@@ -9,6 +9,7 @@ ODB 는 top 에서 본 오른손 좌표계(x, y, top 법선)이고 보드는 강
 """
 from __future__ import annotations
 
+import bisect
 import math
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence
@@ -25,6 +26,15 @@ HOLE_PAIR_RADIUS_MM = 2.0
 HOLE_AXIS_COS_MIN = math.cos(math.radians(5.0))
 # 외곽 자리를 모를 때 자리 근거가 되는 구멍 짝의 수 — 둘이어야 원점과 뒤집기를 함께 가른다(하나는 원점만 정한다).
 MIN_HOLE_PAIRS = 2
+# 일의 상한(반대 검토 F2-9) — 원점 찾기는 지름이 맞는 (ODB, CAD) 구멍 짝마다 한 번 표를 던지고(구멍 수의 곱), 짝짓기는 짝 반경 칸 색인으로
+# 이웃만 본다. 한쪽 구멍이 이보다 많으면 찾지 않고 거절한다(holes_too_many — 강제 사유와 적을 수는 있다). 읽기 상한(ODB 고정홀 5쪽 × 100 ·
+# StepForge corner_proximity 500줄)과 같은 값이라 산 근거로는 넘지 않는다 — 순수 함수를 직접 부르는 쪽의 울타리다.
+HOLES_MAX = 500
+# 원점 투표 칸(mm) — 오차 상한과 같다. 한 원점에 맞는 짝의 원점은 그 원점에서 상한 안이라 그 칸과 이웃 칸(3 × 3) 안에 든다.
+VOTE_CELL_MM = MAX_ERROR_MM
+# 한 뒤집기에서 정밀하게 재는 원점 후보(이웃을 접은 칸)의 상한 — 표가 많은 칸부터. 남은 칸에 아직 견줄 만큼 표가 있으면 다 재지 못한
+# 것이라 모호함을 확인하지 못했다고 말한다(holes_too_many).
+VOTE_EVAL_MAX = 64
 FACES: tuple[str, ...] = ("zmax", "zmin")
 SIDES: tuple[str, ...] = ("top", "bottom")
 FACE_WORDS = {"zmax": "위 면", "zmin": "아래 면"}
@@ -46,6 +56,8 @@ REASONS: dict[str, str] = {
     "position_unverified": "자리 근거가 없다 — ODB 외곽 bbox 를 모르고 짝지은 구멍이 둘 미만이다(원점 · 뒤집기를 확인하지 못했다)",
     "mirror_ambiguous": "다른 뒤집기도 같은 근거를 같은 오차 안에서 설명한다 — 외곽 · 구멍이 대칭이라 뒤집기 · 면을 가르지 못한다",
     "cad_unit_suspect": "StepForge 과제에 mm 가 아닌 머리 단위로 선언된 파일이 있다 — CAD 값이 그 배수만큼 클 수 있다",
+    "holes_too_many": (f"구멍이 너무 많아(한쪽 {HOLES_MAX}개 넘게, 또는 견줄 원점 후보가 {VOTE_EVAL_MAX}칸 넘게) 다른 원점 · 뒤집기를 다 재지"
+                       " 못했다 — 모호하지 않은지 확인하지 못했다"),
 }
 
 
@@ -130,14 +142,54 @@ def board_extents(bbox: Sequence[float]) -> tuple[float, float, float]:
     return x1 - x0, y1 - y0, z1 - z0
 
 
+def _cell(x: float, y: float, size: float) -> tuple[int, int]:
+    return math.floor(x / size), math.floor(y / size)
+
+
+_NEIGHBOURS: tuple[tuple[int, int], ...] = tuple((dx, dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1))
+
+
+class _Evidence:
+    """한 근거의 구멍 — 수로 다듬은 두 목록과 CAD 구멍의 색인 둘(짝 반경 칸 · 지름 차례). 검증 · 제안이 같은 근거를 여러 번 재도 한 번만
+    짓는다."""
+
+    def __init__(self, odb: Mapping[str, Any], cad: Mapping[str, Any]) -> None:
+        self.odb_holes = _holes(odb.get("holes"))
+        self.cad_holes = _holes(cad.get("holes"))
+        self.cells: dict[tuple[int, int], list[int]] = {}
+        for j, (x, y, _d) in enumerate(self.cad_holes):
+            self.cells.setdefault(_cell(x, y, HOLE_PAIR_RADIUS_MM), []).append(j)
+        self.by_diameter = sorted((d, j) for j, (_x, _y, d) in enumerate(self.cad_holes))
+        self.diameters = [d for d, _j in self.by_diameter]
+
+    def near(self, x: float, y: float) -> Iterable[int]:
+        """(x, y) 에서 짝 반경 안일 수 있는 CAD 구멍 번호 — 칸 크기가 반경이라 이웃 아홉 칸이면 다 든다."""
+        cx, cy = _cell(x, y, HOLE_PAIR_RADIUS_MM)
+        for dx, dy in _NEIGHBOURS:
+            yield from self.cells.get((cx + dx, cy + dy), ())
+
+    def same_diameter(self, diameter: float) -> Iterable[int]:
+        """지름 차가 상한 안인 CAD 구멍 번호(차례로 찾은 범위를 같은 비교로 다시 거른다 — 부동소수 경계까지 짝짓기와 같다)."""
+        lo = bisect.bisect_left(self.diameters, diameter - HOLE_DIAMETER_TOL_MM - 1e-9)
+        hi = bisect.bisect_right(self.diameters, diameter + HOLE_DIAMETER_TOL_MM + 1e-9)
+        for cd, j in self.by_diameter[lo:hi]:
+            if abs(diameter - cd) <= HOLE_DIAMETER_TOL_MM:
+                yield j
+
+
 def pair_holes(t: Transform, odb_holes: Sequence[tuple[float, float, float]],
-               cad_holes: Sequence[tuple[float, float, float]]) -> tuple[list[dict], list[int], list[int]]:
+               cad_holes: Sequence[tuple[float, float, float]],
+               evidence: _Evidence | None = None) -> tuple[list[dict], list[int], list[int]]:
     """ODB 구멍을 옮겨 CAD 구멍과 짝짓는다 — 지름 차가 `HOLE_DIAMETER_TOL_MM` 안이고 `HOLE_PAIR_RADIUS_MM` 안인 쌍을 가까운 것부터 겹치지
-    않게. 반환 (짝[{odb, cad, odb_mapped, distance_mm}], 짝 없는 ODB 번호, 짝 없는 CAD 번호)."""
+    않게. 반환 (짝[{odb, cad, odb_mapped, distance_mm}], 짝 없는 ODB 번호, 짝 없는 CAD 번호). CAD 구멍은 짝 반경 칸 색인으로 이웃만 본다
+    (같은 짝 후보 · 같은 차례 — 구멍 수의 곱이 아니라 합에 비례한다)."""
+    if evidence is None:
+        evidence = _Evidence({"holes": odb_holes}, {"holes": cad_holes})
     mapped = [t.apply(x, y) for x, y, _d in odb_holes]
     options = []
     for i, ((ox, oy), (_x, _y, od)) in enumerate(zip(mapped, odb_holes)):
-        for j, (cx, cy, cd) in enumerate(cad_holes):
+        for j in evidence.near(ox, oy):
+            cx, cy, cd = cad_holes[j]
             if abs(od - cd) > HOLE_DIAMETER_TOL_MM:
                 continue
             dist = math.hypot(cx - ox, cy - oy)
@@ -173,10 +225,11 @@ def _outline_error(t: Transform, outline: Sequence[float] | None, cad_bbox: Sequ
     return {"mapped": [xs[0], ys[0], xs[1], ys[1]], "edges": edges, "error_mm": _r(max(abs(v) for v in edges.values()))}
 
 
-def _position(t: Transform, odb: Mapping[str, Any], cad: Mapping[str, Any]) -> dict:
+def _position(t: Transform, odb: Mapping[str, Any], cad: Mapping[str, Any], evidence: _Evidence | None = None) -> dict:
     """원점 · 뒤집기의 근거(외곽 자리 · 구멍 짝)만 잰다 — 크기 · 손대칭과 무관한 몫."""
+    ev = evidence if evidence is not None else _Evidence(odb, cad)
     outline = _outline_error(t, odb.get("outline_bbox"), cad["bbox"])
-    pairs, lone_odb, lone_cad = pair_holes(t, _holes(odb.get("holes")), _holes(cad.get("holes")))
+    pairs, lone_odb, lone_cad = pair_holes(t, ev.odb_holes, ev.cad_holes, ev)
     hole_err = max((p["distance_mm"] for p in pairs), default=None)
     return {"outline": outline, "pairs": pairs, "lone_odb": lone_odb, "lone_cad": lone_cad, "hole_error_mm": hole_err,
             "matched": len(pairs)}
@@ -192,57 +245,122 @@ def _position_ok(pos: Mapping[str, Any], max_error: float) -> bool:
     return pos["hole_error_mm"] is None or pos["hole_error_mm"] <= max_error
 
 
-def best_offset(mirror_x: bool, mirror_y: bool, odb: Mapping[str, Any], cad: Mapping[str, Any]) -> Transform | None:
-    """그 뒤집기에서 근거를 가장 잘 설명하는 원점 — 후보는 외곽 bbox 가운데 맞춤과 지름이 맞는 구멍 짝마다의 원점이다. 짝 수가 많고, 외곽
-    오차 · 구멍 오차가 작은 것을 고른 뒤 짝의 평균으로 다듬는다. 근거가 하나도 없으면 None."""
-    sx, sy = (-1 if mirror_x else 1), (-1 if mirror_y else 1)
-    face = implied_top_face(mirror_x, mirror_y)
-    odb_holes, cad_holes = _holes(odb.get("holes")), _holes(cad.get("holes"))
-    candidates: list[tuple[float, float]] = []
-    outline = odb.get("outline_bbox")
-    if outline is not None:
-        ox0, oy0, ox1, oy1 = (float(v) for v in outline)
-        cx0, cy0, _z0, cx1, cy1, _z1 = (float(v) for v in cad["bbox"])
-        candidates.append(((cx0 + cx1) / 2 - sx * (ox0 + ox1) / 2, (cy0 + cy1) / 2 - sy * (oy0 + oy1) / 2))
-    for ox, oy, od in odb_holes:
-        for cx, cy, cd in cad_holes:
-            if abs(od - cd) <= HOLE_DIAMETER_TOL_MM:
-                candidates.append((cx - sx * ox, cy - sy * oy))
-    if not candidates:
-        return None
-    seen: set[tuple[float, float]] = set()
-    best: tuple[tuple, Transform] | None = None
-    for tx, ty in candidates:
-        key = (round(tx, 6), round(ty, 6))
-        if key in seen:
+def _votes(sx: int, sy: int, ev: _Evidence) -> dict[tuple[int, int], list]:
+    """지름이 맞는 (ODB, CAD) 구멍 짝마다 그 짝을 겹치는 원점에 표를 던진다 — {칸: [ODB 구멍 번호 집합, 원점 x 합, y 합, 짝 수]}."""
+    cells: dict[tuple[int, int], list] = {}
+    for i, (ox, oy, od) in enumerate(ev.odb_holes):
+        for j in ev.same_diameter(od):
+            cx, cy, _cd = ev.cad_holes[j]
+            tx, ty = cx - sx * ox, cy - sy * oy
+            key = _cell(tx, ty, VOTE_CELL_MM)
+            slot = cells.get(key)
+            if slot is None:
+                slot = cells[key] = [set(), 0.0, 0.0, 0]
+            slot[0].add(i)
+            slot[1] += tx
+            slot[2] += ty
+            slot[3] += 1
+    return cells
+
+
+def _ranked(cells: Mapping[tuple[int, int], list]) -> list[tuple[int, float, float]]:
+    """원점 후보 칸의 차례 — [(표, 그 칸과 이웃 칸 원점의 평균 x, y)], 표가 많은 것부터(같으면 칸 차례).
+
+    표는 이웃 아홉 칸의 서로 다른 ODB 구멍 수를 칸마다 더한 것이다 — 한 구멍이 두 칸에 들면 두 번 세어 위로만 어림한다(정밀한 짝 수는
+    `_position` 이 잰다). 한 원점에 맞는 짝은 그 원점의 칸과 이웃 칸 안에 들어 그 칸의 표가 짝 수 이상이다. 뽑은 칸의 이웃은 접는다 — 한
+    원점이 칸 경계에 걸쳐 여러 후보가 되지 않게. 상한의 두 배 넘게 떨어진 두 원점의 칸은 서로 이웃이 아니라 접히지 않는다."""
+    score: dict[tuple[int, int], int] = {}
+    for kx, ky in cells:
+        score[(kx, ky)] = sum(len(cells[(kx + dx, ky + dy)][0]) for dx, dy in _NEIGHBOURS if (kx + dx, ky + dy) in cells)
+    out: list[tuple[int, float, float]] = []
+    folded: set[tuple[int, int]] = set()
+    for kx, ky in sorted(score, key=lambda k: (-score[k], k)):
+        if (kx, ky) in folded:
             continue
-        seen.add(key)
-        t = Transform(bool(mirror_x), bool(mirror_y), tx, ty, face)
-        pos = _position(t, odb, cad)
-        if pos["pairs"]:
-            # 짝 평균으로 다듬는다(평행이동만의 최소 제곱) — 같은 짝 수에서 오차가 줄어든다.
-            mx = sum(p["cad"]["x"] - sx * p["odb"]["x"] for p in pos["pairs"]) / len(pos["pairs"])
-            my = sum(p["cad"]["y"] - sy * p["odb"]["y"] for p in pos["pairs"]) / len(pos["pairs"])
-            refined = Transform(bool(mirror_x), bool(mirror_y), mx, my, face)
-            again = _position(refined, odb, cad)
-            if again["matched"] >= pos["matched"]:
-                t, pos = refined, again
-        score = (-pos["matched"], pos["outline"]["error_mm"] if pos["outline"] else 0.0,
-                 pos["hole_error_mm"] if pos["hole_error_mm"] is not None else 0.0, key)
-        if best is None or score < best[0]:
-            best = (score, t)
-    assert best is not None
-    t = best[1]
-    return Transform(t.mirror_x, t.mirror_y, _r(t.offset_x), _r(t.offset_y), t.top_face)
+        sum_x = sum_y = 0.0
+        count = 0
+        for dx, dy in _NEIGHBOURS:
+            folded.add((kx + dx, ky + dy))
+            slot = cells.get((kx + dx, ky + dy))
+            if slot is not None:
+                sum_x, sum_y, count = sum_x + slot[1], sum_y + slot[2], count + slot[3]
+        out.append((score[(kx, ky)], sum_x / count, sum_y / count))
+    return out
+
+
+class _Search:
+    """한 근거에서 뒤집기마다의 원점 후보를 재 둔다 — 투표는 뒤집기마다 한 번이고 검증 · 제안이 그 결과를 함께 쓴다.
+
+    후보는 외곽 bbox 가운데 맞춤(외곽을 알 때)과 투표 칸(표가 많은 것부터 `VOTE_EVAL_MAX` 칸)이다. 후보마다 짝을 재고 짝의 평균으로 다듬어
+    (평행이동만의 최소 제곱 — 같은 짝 수에서 오차가 줄어든다) 짝 수가 많고 외곽 오차 · 구멍 오차가 작은 차례로 세운다. 상한 안으로 겹치는
+    원점은 하나로 접는다. 종전에는 지름이 맞는 짝마다 짝짓기 전부를 다시 해 ODB² · CAD² 에 비례했다(10 × 100 구멍에 제안 3.3 초)."""
+
+    def __init__(self, odb: Mapping[str, Any], cad: Mapping[str, Any], max_error: float = MAX_ERROR_MM) -> None:
+        self.odb, self.cad, self.max_error = odb, cad, max_error
+        self.ev = _Evidence(odb, cad)
+        self.too_many = len(self.ev.odb_holes) > HOLES_MAX or len(self.ev.cad_holes) > HOLES_MAX
+        self._found: dict[tuple[bool, bool], tuple[list[tuple[Transform, dict]], int]] = {}
+
+    def solutions(self, mirror_x: bool, mirror_y: bool) -> tuple[list[tuple[Transform, dict]], int]:
+        """그 뒤집기의 원점 후보 [(변환, 근거)] 를 좋은 차례로, 그리고 재지 못하고 남은 칸 가운데 가장 많은 표(남은 칸이 없으면 0)."""
+        key = (bool(mirror_x), bool(mirror_y))
+        if key not in self._found:
+            self._found[key] = self._solve(*key)
+        return self._found[key]
+
+    def _solve(self, mirror_x: bool, mirror_y: bool) -> tuple[list[tuple[Transform, dict]], int]:
+        sx, sy = (-1 if mirror_x else 1), (-1 if mirror_y else 1)
+        face = implied_top_face(mirror_x, mirror_y)
+        starts: list[tuple[float, float]] = []
+        outline = self.odb.get("outline_bbox")
+        if outline is not None and self.cad.get("bbox") is not None:
+            ox0, oy0, ox1, oy1 = (float(v) for v in outline)
+            cx0, cy0, _z0, cx1, cy1, _z1 = (float(v) for v in self.cad["bbox"])
+            starts.append(((cx0 + cx1) / 2 - sx * (ox0 + ox1) / 2, (cy0 + cy1) / 2 - sy * (oy0 + oy1) / 2))
+        left = 0
+        if not self.too_many:
+            ranked = _ranked(_votes(sx, sy, self.ev))
+            starts += [(x, y) for _score, x, y in ranked[:VOTE_EVAL_MAX]]
+            left = ranked[VOTE_EVAL_MAX][0] if len(ranked) > VOTE_EVAL_MAX else 0
+        found: list[tuple[tuple, Transform, dict]] = []
+        for tx, ty in starts:
+            t = Transform(mirror_x, mirror_y, tx, ty, face)
+            pos = _position(t, self.odb, self.cad, self.ev)
+            if pos["pairs"]:
+                mx = sum(p["cad"]["x"] - sx * p["odb"]["x"] for p in pos["pairs"]) / len(pos["pairs"])
+                my = sum(p["cad"]["y"] - sy * p["odb"]["y"] for p in pos["pairs"]) / len(pos["pairs"])
+                refined = Transform(mirror_x, mirror_y, mx, my, face)
+                again = _position(refined, self.odb, self.cad, self.ev)
+                if again["matched"] >= pos["matched"]:
+                    t, pos = refined, again
+            t = Transform(mirror_x, mirror_y, _r(t.offset_x), _r(t.offset_y), face)
+            pos = _position(t, self.odb, self.cad, self.ev)
+            score = (-pos["matched"], pos["outline"]["error_mm"] if pos["outline"] else 0.0,
+                     pos["hole_error_mm"] if pos["hole_error_mm"] is not None else 0.0, (t.offset_x, t.offset_y))
+            found.append((score, t, pos))
+        found.sort(key=lambda f: f[0])
+        unique: list[tuple[Transform, dict]] = []
+        for _score, t, pos in found:
+            if not any(math.hypot(t.offset_x - u.offset_x, t.offset_y - u.offset_y) <= self.max_error for u, _p in unique):
+                unique.append((t, pos))
+        return unique, left
+
+
+def best_offset(mirror_x: bool, mirror_y: bool, odb: Mapping[str, Any], cad: Mapping[str, Any], *,
+                search: _Search | None = None) -> Transform | None:
+    """그 뒤집기에서 근거를 가장 잘 설명하는 원점(`_Search`) — 근거가 하나도 없으면(또는 구멍이 상한보다 많고 외곽을 모르면) None."""
+    found, _left = (search or _Search(odb, cad)).solutions(mirror_x, mirror_y)
+    return found[0][0] if found else None
 
 
 def verify(t: Transform, odb: Mapping[str, Any], cad: Mapping[str, Any], *, max_error: float = MAX_ERROR_MM,
-           alternatives: bool = True) -> dict:
+           alternatives: bool = True, search: _Search | None = None) -> dict:
     """등록 검증 — `{ok, error_mm, max_error_mm, reasons[], reason_text[], checks{…}}`.
 
     `odb` = {size: (x_mm, y_mm) | None, outline_bbox: [x0, y0, x1, y1] | None, thickness_mm, holes: [(x, y, d)]},
     `cad` = {bbox: [x0, y0, z0, x1, y1, z1] | None, holes: [(x, y, d)] — z 축 구멍만, unit_suspect: bool}.
-    거절 까닭이 하나도 없을 때만 ok 다. 오차는 외곽 크기 · 외곽 자리 · 구멍 짝 가운데 큰 것(잰 것만)이다."""
+    거절 까닭이 하나도 없을 때만 ok 다. 오차는 외곽 크기 · 외곽 자리 · 구멍 짝 가운데 큰 것(잰 것만)이다. `search` 는 같은 근거의 원점 찾기를
+    나눠 쓸 때(제안)만 준다."""
     reasons: list[str] = []
     checks: dict[str, Any] = {}
     implied = implied_top_face(t.mirror_x, t.mirror_y)
@@ -275,7 +393,9 @@ def verify(t: Transform, odb: Mapping[str, Any], cad: Mapping[str, Any], *, max_
     checks["thickness"] = {"odb_mm": None if thickness is None else _r(thickness), "cad_mm": _r(ext[2]),
                            "diff_mm": None if thickness is None else _r(float(thickness) - ext[2]),
                            "note": "알려 주기만 한다 — ODB 안의 두께는 자주 틀린다(허브 문서)"}
-    pos = _position(t, odb, cad)
+    if search is None:
+        search = _Search(odb, cad, max_error)
+    pos = _position(t, odb, cad, search.ev)
     outline = pos["outline"]
     checks["outline"] = ({"measured": False, "note": "ODB 외곽 bbox(OH-04)가 없어 외곽 자리를 재지 못했다"} if outline is None
                          else {"measured": True, **outline, "ok": outline["error_mm"] <= max_error})
@@ -283,8 +403,8 @@ def verify(t: Transform, odb: Mapping[str, Any], cad: Mapping[str, Any], *, max_
         errors.append(outline["error_mm"])
         if outline["error_mm"] > max_error:
             reasons.append("outline_mismatch")
-    odb_holes = _holes(odb.get("holes"))
-    checks["holes"] = {"odb": len(odb_holes), "cad": len(_holes(cad.get("holes"))), "matched": pos["matched"],
+    odb_holes = search.ev.odb_holes
+    checks["holes"] = {"odb": len(odb_holes), "cad": len(search.ev.cad_holes), "matched": pos["matched"],
                        "pairs": pos["pairs"], "error_mm": pos["hole_error_mm"],
                        "rms_mm": (_r(math.sqrt(sum(p["distance_mm"] ** 2 for p in pos["pairs"]) / len(pos["pairs"])))
                                   if pos["pairs"] else None),
@@ -299,21 +419,34 @@ def verify(t: Transform, odb: Mapping[str, Any], cad: Mapping[str, Any], *, max_
         reasons.append("holes_mostly_unmatched")
     if outline is None and pos["matched"] < MIN_HOLE_PAIRS:
         reasons.append("position_unverified")
-    if alternatives:
+    if alternatives and search.too_many:
+        # 다른 뒤집기를 재지 않았다 — 모호하지 않다고 말할 수 없어 거절한다(강제 사유와 적을 수는 있다).
+        checks["ambiguity"] = {"ok": None, "alternatives": [],
+                               "capped": {"odb_holes": len(odb_holes), "cad_holes": len(search.ev.cad_holes), "holes_max": HOLES_MAX}}
+        reasons.append("holes_too_many")
+    elif alternatives:
         rivals = []
+        unchecked = []
         for mx, my in ((not t.mirror_x, t.mirror_y), (t.mirror_x, not t.mirror_y), (not t.mirror_x, not t.mirror_y)):
-            other = best_offset(mx, my, odb, cad)
-            if other is None:
+            found, left = search.solutions(mx, my)
+            if left >= max(pos["matched"], 1):
+                # 재지 못한 칸에 견줄 만큼 표가 남았다 — 그 칸에 같은 수 이상을 설명하는 원점이 있을 수 있다.
+                unchecked.append({"mirror_x": bool(mx), "mirror_y": bool(my), "votes_left": left})
+            if not found:
                 continue
-            opos = _position(other, odb, cad)
+            other, opos = found[0]
             competes = _position_ok(opos, max_error) and opos["matched"] >= pos["matched"]
             rivals.append({**other.as_dict(), "matched": opos["matched"], "hole_error_mm": opos["hole_error_mm"],
                            "outline_error_mm": opos["outline"]["error_mm"] if opos["outline"] else None,
                            "competes": competes})
         ambiguous = any(r["competes"] for r in rivals)
-        checks["ambiguity"] = {"ok": not ambiguous, "alternatives": rivals}
+        checks["ambiguity"] = {"ok": not ambiguous and not unchecked, "alternatives": rivals}
+        if unchecked:
+            checks["ambiguity"]["capped"] = {"vote_eval_max": VOTE_EVAL_MAX, "unchecked": unchecked}
         if ambiguous:
             reasons.append("mirror_ambiguous")
+        if unchecked:
+            reasons.append("holes_too_many")
     checks["units"] = {"cad_unit_suspect": bool(cad.get("unit_suspect")), "unit": UNIT}
     if cad.get("unit_suspect"):
         reasons.append("cad_unit_suspect")
@@ -326,16 +459,18 @@ def _verdict(reasons: list[str], checks: dict, errors: list[float], max_error: f
 
 
 def propose(odb: Mapping[str, Any], cad: Mapping[str, Any], *, max_error: float = MAX_ERROR_MM) -> list[dict]:
-    """뒤집기 넷마다 가장 잘 맞는 원점(면은 손대칭으로)과 그 검증 — 검증을 지난 것 → 짝 수 → 오차 차례. 근거가 없으면 빈 목록."""
+    """뒤집기 넷마다 가장 잘 맞는 원점(면은 손대칭으로)과 그 검증 — 검증을 지난 것 → 짝 수 → 오차 차례. 근거가 없으면 빈 목록. 원점 찾기는
+    뒤집기마다 한 번이고 네 검증이 나눠 쓴다(`_Search`)."""
     out = []
     if cad.get("bbox") is None:
         return out
+    search = _Search(odb, cad, max_error)
     for mx in (False, True):
         for my in (False, True):
-            t = best_offset(mx, my, odb, cad)
+            t = best_offset(mx, my, odb, cad, search=search)
             if t is None:
                 continue
-            check = verify(t, odb, cad, max_error=max_error)
+            check = verify(t, odb, cad, max_error=max_error, search=search)
             out.append({"transform": t.as_dict(), "formula": t.formula(), "verification": check})
     out.sort(key=lambda c: (not c["verification"]["ok"], -c["verification"]["checks"]["holes"]["matched"],
                             c["verification"]["error_mm"] if c["verification"]["error_mm"] is not None else math.inf,
