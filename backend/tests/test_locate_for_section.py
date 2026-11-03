@@ -22,7 +22,7 @@ import pytest
 
 import app.mcp_server as srv
 from app import board_transform as bt
-from app import config, export, identity, ir_builder, routes
+from app import config, export, identity, ir_builder, locate, routes
 from app.common import now_epoch
 from app.errors import AppError
 from tests import factories
@@ -381,6 +381,7 @@ def test_a_bottom_side_part_sits_on_the_top_face_and_a_loose_box_is_not_called_i
     assert out["mcad"] == {"x": 37.13, "y": -9.18, "z": 1.15, "unit": "mm"}
     assert out["body"] is None and out["body_note"].startswith("bbox_only") and out["f1"]["part"] is None
     assert [c["path"].rsplit("/", 1)[-1] for c in out["body_candidates"]] == ["REAR_HOUSING"]
+    assert all("highlight" not in c for c in out["f1"]["calls"]), "몸체가 없으면 강조할 것도 없다 — 후보를 F1 에 넘기지 않는다"
     # 핀이 y 로 길다(1 × 2) — 앞 평면은 x 법선이다.
     assert out["planes"][0] == {"axis": "x", "offset": 37.13, "unit": "mm"}
 
@@ -717,6 +718,35 @@ def test_f1_handoff_planes_pass_through_the_point_so_point_plus_axis_is_the_same
         assert {p["axis"] for p in f1["planes"]} == {"x", "y"}, "두 평면은 x · y 법선의 세로 단면이다"
         for p in f1["planes"]:
             assert p["offset"] == f1["point"][p["axis"]], (p, f1["point"])
+
+
+# StepForge F1 section_pair_view 가 받는 인자(게이트웨이 tools/list 11-03 — StepForge main 5979a26). 이 밖의 이름을 싣지 않는다.
+F1_ARGS = {"projects", "part", "point", "axis", "offset", "window_mm", "dims", "highlight", "caption", "format", "unit", "full"}
+
+
+def test_f1_calls_are_the_exact_section_pair_view_arguments_per_plane(box, items):
+    """(11-03 dev 실호출) 답을 읽은 모델이 f1 의 칸을 그대로 넘기면 F1 이 거절했다 — point 사전은 목록 검사에서, planes 의 offset 에 window_mm 를
+    더하면 '창은 자리 둘레' 로. 그래서 평면마다 그대로 부를 인자 calls 를 싣는다 — 점은 [x, y, z] 목록 · offset 없음 · 몸체는 part 가 아니라
+    highlight(part= 는 평면을 몸체 bbox 가운데로 옮긴다) · projects 는 이 과제의 CAD 하나(견줄 판은 부르는 쪽이 더한다)."""
+    for out in (_locate(box, finding_id=items["can"]["finding_id"]),
+                _locate(box, target_key=items["target"], cluster_key=items["can"]["cluster_key"])):
+        f1, mcad = out["f1"], out["mcad"]
+        assert [c["axis"] for c in f1["calls"]] == [p["axis"] for p in out["planes"]], "평면 차례 그대로 하나씩"
+        for call in f1["calls"]:
+            assert set(call) <= F1_ARGS and "offset" not in call and "part" not in call, call
+            assert call["point"] == [mcad["x"], mcad["y"], mcad["z"]] and isinstance(call["point"], list)
+            assert (call["window_mm"], call["unit"], call["projects"]) == (out["window_mm"], "mm", [SF])
+            assert call["highlight"] == [out["body"]["path"]]
+        json.dumps(f1["calls"])
+        assert "calls" in f1["note"] and "offset" in f1["note"] and "highlight" in f1["note"]
+
+
+def test_f1_calls_without_a_cad_project_leave_projects_for_the_caller_and_say_so():
+    """CAD 과제 id 를 모르는 답 — projects 를 비우고(지어내지 않는다) 채워 부르라고 말한다."""
+    out = locate.located(input_={"kind": "xy"}, project_id="p1", stepforge_project_id=None,
+                         point={"x": 1.0, "y": 2.0, "z": 0.5}, extents={"x": 4.0, "y": 2.0, "z": 1.0}, plane_basis="test", body=None)
+    assert [c["projects"] for c in out["f1"]["calls"]] == [[], []]
+    assert out["f1"]["note"].endswith(locate.F1_NO_CAD_NOTE) and all("highlight" not in c for c in out["f1"]["calls"])
 
 
 def test_a_standing_part_still_gets_two_vertical_section_planes(box, monkeypatch):
