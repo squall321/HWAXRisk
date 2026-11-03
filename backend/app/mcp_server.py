@@ -48,8 +48,8 @@ risk_job_action · risk_repersist_panel 이고, 무엇을 어디에 쓸지 사�
 risk_next_step 의 facts.review_order(영역마다 영역 안 순위 1~3 의 영역·순위·tier·입력 결손 — 전부는
 risk_get_coverage(order_offset=0) 쪽)를 보고 사용자가 고른다(코드가 고르지 않는다). 지켜보기는
 risk_get_coverage(review 칸) · risk_get_cells, 결과는 risk_get_expert_report 다.
-단면 자리(F2 — CAD 그림을 보고서로): risk_locate_for_section(읽기 — 항목 · refdes · 넷 · 보드 좌표를 MCAD 점 · 몸체 · 단면 둘로, F1
-section_pair_view 에 그대로 넘길 꼴) · risk_propose_board_transform(읽기 — 보드 ↔ CAD 변환 후보) · risk_set_board_transform ·
+단면 자리(F2 — CAD 그림을 보고서로): risk_locate_for_section(읽기 — 항목 · refdes · 넷 · 보드 좌표를 MCAD 점 · 몸체 · 단면 둘로, 평면마다 F1
+section_pair_view 에 그대로 부를 인자 f1.calls) · risk_propose_board_transform(읽기 — 보드 ↔ CAD 변환 후보) · risk_set_board_transform ·
 risk_set_item_location(쓰기). 넷 다 위임으로 확인된 신원의 등록된 포털 PAT 로 ODB 허브 · StepForge 를 읽는다.
 PAT 는 인자로 받지 않는다 — 러너 자격은 웹 설정 화면에서 등록한다."""
 
@@ -1025,7 +1025,7 @@ def risk_find_projects_by_subject(sp_task: Annotated[str | None, Field(descripti
 
 
 # ================================================================ 단면 자리 찾기(F2 — docs/f2-locate-for-section.md)
-# 항목 · refdes · 넷 · 보드 좌표를 MCAD 점 · 몸체 · 단면 둘로(F1 section_pair_view 에 그대로 넘길 꼴). 보드 ↔ CAD 변환은 과제마다 (보드, CAD 과제)
+# 항목 · refdes · 넷 · 보드 좌표를 MCAD 점 · 몸체 · 단면 둘로(평면마다 F1 section_pair_view 에 그대로 부를 인자 f1.calls). 보드 ↔ CAD 변환은 과제마다 (보드, CAD 과제)
 # 쌍으로 등록하고 적을 때 이 박스에서 검증한다. 넷 다 위임으로 확인된 신원의 등록된 포털 PAT 로 ODB 허브 · StepForge 를 읽는다(박스 PAT 로 내려가지
 # 않는다). 이름이 risk_ 로 시작한다 — 리스크 심사 좌석에는 닿지 않는다(D-18 — 엔진 _risk_designated_refusal 의 app 갈래가 이름으로 닫는다).
 @mcp.tool()
@@ -1040,7 +1040,7 @@ async def risk_locate_for_section(project_id: Annotated[str, Field(description=_
                                   side: Annotated[str | None, Field(description=_A_LOC_SIDE)] = None,
                                   odb_job_id: Annotated[str | None, Field(description=_A_LOC_ODB)] = None,
                                   stepforge_project_id: Annotated[str | None, Field(description=_A_LOC_CAD)] = None) -> dict:
-    """단면 자리 찾기(읽기 전용) — 리스크 항목(finding_id 또는 target_key+cluster_key) · refdes · net · 보드 좌표(x+y, side 선택) 가운데 하나를 받아 MCAD 점(mcad {x, y, z, unit mm}) · 그 자리의 CAD 몸체(body.path, 확신할 때만) · 단면 둘(planes — 긴 축 평면 먼저, 항목마다 {axis, offset, unit mm} 이고 axis 는 평면 법선) · window_mm · F1 section_pair_view 에 그대로 넘길 f1{stepforge_project_id, point, part, planes, window_mm} 과 변환 근거(transform — 식 · 상태 · 오차)를 준다, 자리를 못 정하면 status unknown 과 reason{code, message, fix}(변환 미등록 transform_missing 이면 risk_propose_board_transform → risk_set_board_transform), 보드 · CAD 과제는 비우면 과제의 원천이고 ODB 허브는 위임으로 확인된 신원의 PAT 로만 부른다(없으면 locate_pat_absent)."""
+    """단면 자리 찾기(읽기 전용) — 리스크 항목(finding_id 또는 target_key+cluster_key) · refdes · net · 보드 좌표(x+y, side 선택) 가운데 하나를 받아 MCAD 점(mcad {x, y, z, unit mm}) · 그 자리의 CAD 몸체(body.path, 확신할 때만) · 단면 둘(planes — 긴 축 평면 먼저, 항목마다 {axis, offset, unit mm} 이고 axis 는 평면 법선) · window_mm · 평면마다 F1 section_pair_view 에 그대로 부를 인자 f1.calls(점 [x, y, z] 목록 · axis · window_mm · 몸체는 highlight — projects 에 견줄 다른 판을 더해 2 ~ 6개, offset 은 넘기지 않는다)와 변환 근거(transform — 식 · 상태 · 오차)를 준다, 자리를 못 정하면 status unknown 과 reason{code, message, fix}(변환 미등록 transform_missing 이면 risk_propose_board_transform → risk_set_board_transform), 보드 · CAD 과제는 비우면 과제의 원천이고 ODB 허브는 위임으로 확인된 신원의 PAT 로만 부른다(없으면 locate_pat_absent)."""
     return await _entry(entry.locate_for_section, project_id=project_id, finding_id=finding_id, target_key=target_key,
                         cluster_key=cluster_key, refdes=refdes, net=net, x=x, y=y, side=side, odb_job_id=odb_job_id,
                         stepforge_project_id=stepforge_project_id)

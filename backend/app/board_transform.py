@@ -524,8 +524,9 @@ def section_planes(point: Mapping[str, float], extents: Mapping[str, float]) -> 
 
     두 평면은 늘 보드 법선 z 를 품는 세로 단면이라 법선은 x · y 가운데 하나다(설계 1절 — 반대 검토 F2-9: 종전에는 대상 bbox 의 가장 얇은 변을
     두께로 보아 옆으로 선 FPCB · 브래킷에 z 법선의 가로 단면을 냈다). `extents` 는 대상의 축별 길이 {x, y, z} 이고 z 는 보지 않는다(없는 축은
-    0). x · y 가운데 긴 축을 품는 평면(법선 = 짧은 축)이 앞, 긴 축에 수직인 평면(법선 = 긴 축)이 뒤다(같으면 x 가 긴 축). 평면은 F1 이 받는
-    꼴 그대로 {axis, offset, unit} 이고 axis 는 평면의 법선 축이다(StepForge section_view 와 같은 뜻)."""
+    0). x · y 가운데 긴 축을 품는 평면(법선 = 짧은 축)이 앞, 긴 축에 수직인 평면(법선 = 긴 축)이 뒤다(같으면 x 가 긴 축). 평면은
+    {axis, offset, unit} 이고 axis 는 평면의 법선 축이다(StepForge section_view 와 같은 뜻). F1 section_pair_view 에는 offset 이 아니라 그 점 +
+    axis 로 넘긴다(locate.f1_calls — offset 에 창을 더하면 F1 이 거절한다)."""
     ext = {a: float(extents.get(a) or 0.0) for a in "xy"}
     long_axis = max("xy", key=lambda a: (ext[a], -"xy".index(a)))
     short_axis = "y" if long_axis == "x" else "x"

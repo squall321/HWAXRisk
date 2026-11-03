@@ -2680,7 +2680,7 @@ def get_locate(project_id: str, finding_id: str | None = None, target_key: str |
                side: str | None = None, odb_job_id: str | None = None, stepforge_project_id: str | None = None,
                ident: identity.Identity = Depends(identity.current)) -> dict:
     """단면 자리 찾기 — 리스크 항목 · refdes · 넷 · 보드 좌표(mm) 가운데 하나를 MCAD 점(mm) · 그 자리의 CAD 몸체 · 단면 둘({axis, offset, unit: mm}
-    — F1 section_pair_view 에 그대로) · 창 · 변환 근거로 답한다. 못 정하면 status unknown 과 까닭이다. 보드 · CAD 과제는 비우면 과제의 원천에서.
+    — F1 section_pair_view 에는 평면마다 f1.calls 의 인자 그대로) · 창 · 변환 근거로 답한다. 못 정하면 status unknown 과 까닭이다. 보드 · CAD 과제는 비우면 과제의 원천에서.
     구성원(보기 이상)이 부르고 ODB 허브는 부른 사람의 PAT 로만 부른다."""
     email = _project_viewer(project_id, ident)
     return locate_payload(project_id, email, reads=_project_reads(ident), finding_id=finding_id, target_key=target_key,

@@ -459,6 +459,29 @@ def _encloses(outer: Sequence[float], inner: Sequence[float]) -> bool:
 
 
 # ---------------------------------------------------------------- 답 조립
+# F1 에 넘기는 법 — 답을 읽은 모델이 f1 의 칸을 그대로 넘기면 F1 이 거절했다(11-03 dev 실호출: point 사전은 목록 검사에서, planes 의 offset 에
+# window_mm 를 더하면 '창은 자리 둘레' 로 거절 · offset 만이면 창 없는 온 평면). 그래서 평면마다 그대로 부를 인자(calls)를 싣는다.
+F1_CALLS_NOTE = ("F1 section_pair_view 는 평면마다 calls 의 한 줄을 그대로 부른다 — projects 에 견줄 다른 판의 과제 id 를 더해 2 ~ 6개로(F3 "
+                 "section_batch 는 이 줄들을 rows 로). point 는 [x, y, z] 목록이고 offset 은 넘기지 않는다(offset 과 window_mm 를 함께 주면 F1 이 "
+                 "거절하고, offset 만이면 창 없는 온 평면이다). 몸체 경로는 part= 가 아니라 highlight 다(part= 는 평면을 몸체 bbox 가운데로 옮긴다)")
+F1_NO_CAD_NOTE = " · 이 답에는 CAD 과제 id 가 없다 — projects 를 채워 부른다"
+
+
+def f1_calls(stepforge_project_id: str | None, mcad: Mapping[str, Any], planes: Sequence[Mapping[str, Any]], window: float,
+             part: str | None) -> list[dict]:
+    """평면마다 F1 section_pair_view 에 그대로 부를 인자 — 점은 [x, y, z] 목록 · 평면은 axis 하나(offset 없음 — 평면이 늘 그 점을 지난다) ·
+    몸체는 highlight. projects 에는 이 과제의 CAD 과제 하나만 싣는다(모르면 빈 목록) — 견줄 다른 판은 부르는 쪽이 더한다."""
+    calls = []
+    for plane in planes:
+        call: dict[str, Any] = {"projects": [stepforge_project_id] if stepforge_project_id else [],
+                                "point": [mcad["x"], mcad["y"], mcad["z"]], "axis": plane["axis"], "window_mm": window,
+                                "unit": bt.UNIT}
+        if part:
+            call["highlight"] = [part]
+        calls.append(call)
+    return calls
+
+
 def located(*, input_: dict, project_id: str, stepforge_project_id: str | None, point: Mapping[str, float],
             extents: Mapping[str, float], plane_basis: str, body: dict | None, body_note: str | None = None,
             candidates: Sequence[dict] = (), feature_long: float | None = None, transform: dict | None = None,
@@ -472,8 +495,8 @@ def located(*, input_: dict, project_id: str, stepforge_project_id: str | None, 
         "odb_job_id": odb_job_id, "mcad": mcad, "body": body, "body_note": body_note, "body_candidates": list(candidates),
         "planes": planes, "plane_basis": {**basis, "basis": plane_basis}, "window_mm": window,
         "f1": {"stepforge_project_id": stepforge_project_id, "point": mcad, "part": (body or {}).get("path"), "planes": planes,
-               "window_mm": window,
-               "note": "F1 section_pair_view 의 자리 입력은 part · point · axis+offset 가운데 하나다 — planes 의 항목은 그대로 넘긴다"},
+               "window_mm": window, "calls": f1_calls(stepforge_project_id, mcad, planes, window, (body or {}).get("path")),
+               "note": F1_CALLS_NOTE + ("" if stepforge_project_id else F1_NO_CAD_NOTE)},
         "warnings": list(warnings)}
     if snapshot_id is not None:
         out["snapshot_id"] = snapshot_id
