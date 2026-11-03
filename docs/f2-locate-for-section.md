@@ -153,6 +153,9 @@ bbox · 시각)이 없는 행도 그렇다 — 과제 폐기는 `status` 를 남
 - dev — 계산(변환 · 손대칭 · 검사 · 모호함 · 제안 · 평면)과 저장 · 권한 · 감사 · MCP 문은 시험으로 본다. 손 셈 예(x 뒤집기 · y 원점 · 아래 면)를
   그대로 되짚는다. 가짜 응답은 ODB 허브 레퍼런스(포털 `docs/procedures/fixtures/odb-hub/reference.md` §4.6 · §4.10 · §4.11)와 StepForge 원문
   (`part_info` · `corner_proximity`)의 꼴이다.
+- dev 11-03 — F2 → F1 실호출. `located` 를 StepForge 시험 과제(postdeploy, 판 셋 쌓음)의 PLATE_2 세계 bbox 로 짓고(`_mcad_answer` 와 같은 차례)
+  `f1.calls` 를 견줄 판 하나만 더해 게이트웨이로 F1 에 보냈다 — 두 평면 다 그림 한 장(JPEG 165 KB · 게이트웨이 그림 보관 `fig_…`) · 평면 자리가
+  그 점(법선 Y · X 의 5.0) · 창 30 mm 가운데 [5.0, 1.5] · 강조가 두 판에서 맞음. 같은 날 `f1` 칸을 그대로 넘긴 세 꼴은 거절 · 온 평면이었다.
 - dev 에 없는 것 — ODB 허브는 cae00 에서만 닿는다. 그래서 아래는 cae00 에서 처음 확인한다.
   - `get_part_detail` 에 `side` 칸이 있는지(없으면 그 보드의 스냅샷 부품 노드 side 를 쓴다 — 없으면 `side_unknown`) · 핀 좌표가 보드 좌표인지.
   - bottom 면 부품의 x · y 가 top 에서 본 같은 좌표계인지(ODB++ 규약 — 뒤집어 본 좌표면 bottom 부품이 그 축으로 거울상이 된다). 아는 bottom
@@ -181,21 +184,23 @@ bbox · 시각)이 없는 행도 그렇다 — 과제 폐기는 `status` 를 남
 - 쓰기 · 문 — 항목 위치의 모르는 몸체 경로는 422 `item_part_unknown`, 비교 대상의 항목은 두 과제를 다 읽어야 한다(아니면 404), 변환 제안은
   편집자 이상(보기 403 · MCP `role_insufficient`). 들여오기 답에 `location_invalid_dropped`(있을 때만).
 
-### F1 을 부르는 꼴(StepForge 세션과 맞춤 — 11-02)
+### F1 을 부르는 꼴(StepForge 세션과 맞춤 — 11-02 · 답에 그대로 부를 인자 `f1.calls` — 11-03)
 
-평면마다 한 번 부른다. 두 평면 모두 `point` + `axis` 로 넘기고 `offset` 은 쓰지 않는다 — F1 에서 `offset` 만 주면 창 없는 온 평면이고,
+평면마다 한 번 부른다. 답의 `f1.calls` 가 평면마다 그대로 부를 인자다 — `projects` 에 견줄 다른 판의 과제 id 를 더해 2 ~ 6개로 만들기만 한다
+(11-03 — 답의 `f1` 칸을 그대로 넘기면 F1 이 거절했다 — `f1.point` 사전은 목록 검사에서, `planes` 의 `offset` 에 `window_mm` 를 더하면 '창은 자리
+둘레' 로, `offset` 만이면 창 없는 온 평면). 두 평면 모두 `point` + `axis` 로 넘기고 `offset` 은 쓰지 않는다 — F1 에서 `offset` 만 주면 창 없는 온 평면이고,
 `window_mm` 와 `offset` 을 함께 주면 거절한다. F2 의 평면은 늘 그 점을 지나므로 `point[axis] == plane.offset` 이다(시험이 지킨다).
 부품 경로는 위치가 아니라 `highlight` 로 넘긴다 — `part=` 는 평면을 몸체 bbox 가운데에 두어 큰 몸체(실드 캔 · 프레임)에서 자리에서 멀어진다.
 
 ```
-section_pair_view(
-  projects=[f1.stepforge_project_id, <다른 판 과제 id …>],   # 2 ~ 6
-  point=[f1.point.x, f1.point.y, f1.point.z],
-  axis=plane.axis,                 # "x" 또는 "y"
-  window_mm=f1.window_mm,
-  unit="mm",
-  highlight=[f1.part] if f1.part else None)
+f1.calls[i] = {projects: [f1.stepforge_project_id],   # CAD 과제를 모르면 [] — note 가 말한다
+               point: [x, y, z], axis: "x" | "y", window_mm, unit: "mm",
+               highlight: [몸체 경로]}                  # 몸체가 없으면 칸이 없다
+section_pair_view(**{**f1.calls[i], "projects": f1.calls[i]["projects"] + [<다른 판 과제 id …>]})   # 2 ~ 6
 ```
+
+몸체 경로는 R1 과제의 경로(과제 이름이 뿌리)지만 F1 이 같은 경로를 뿌리를 떼고 견주어 다른 판에서도 같은 파트가 강조된다(11-03 dev —
+`highlight.unmatched` 빈 목록, `highlight.parts` 에 두 판의 경로).
 
 F3 `section_batch` 는 행마다 같은 인자를 받아 두 평면을 한 잡의 두 행으로 보낼 수 있다. F1 의 JSON 에서 60 부품 상한 뒤 보지 못한 부품은
 `not_drawn` · `not_drawn_count` 다(`omitted` 는 잘린 행 수).
