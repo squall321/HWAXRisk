@@ -5,6 +5,7 @@ import base64
 import contextvars
 import logging
 import os
+import re
 import secrets as secrets_module
 import stat
 from collections.abc import Iterator, Mapping
@@ -156,12 +157,12 @@ DEFAULT_REVIEW_CALL_TIMEOUT_S = 18000
 
 @dataclass(frozen=True)
 class Knob:
-    """검토 손잡이 하나 — 환경변수 이름 · Settings 속성 · 코드 기본값 · 형(int|bool|choice) · 정수의 하한(그 밑은 기동을 막는다) ·
-    선택지(choice 의 낱말 — 그 밖의 값은 기동을 막는다)."""
+    """검토 손잡이 하나 — 환경변수 이름 · Settings 속성 · 코드 기본값 · 형(int|bool|choice|tools) · 정수의 하한(그 밑은 기동을 막는다) ·
+    선택지(choice 의 낱말 — 그 밖의 값은 기동을 막는다). tools 는 쉼표로 가른 도구 이름의 차례(off 면 빈 차례)다."""
 
     env: str
     attr: str
-    default: int | bool | str
+    default: int | bool | str | tuple
     kind: str = "int"
     minimum: int = 0
     choices: tuple[str, ...] = ()
@@ -211,8 +212,18 @@ ISSUE_KNOBS: tuple[Knob, ...] = (
     Knob("HWAXRISK_SUMMARY_MAX_CHARGED", "risk_summary_max_charged", 2, minimum=1),
     Knob("HWAXRISK_SUMMARY_INFRA_MAX", "risk_summary_infra_max", 6, minimum=1),
 )
+# 패널 손잡이 — 외부 사례 DB 의 지정 도구(HWAXPortal docs/siren-delib RK-12 · 사용자 결정 11-06). 보통 패널은 지정 도구 상한(6)의 남은 자리만큼,
+# 쟁점 패널은 상한까지 이 차례로 싣는다 — 게이트웨이가 그 이름을 내놓을 때만(planner.case_tools — 없는 박스는 그대로). off 면 싣지 않는다.
+DEFAULT_CASE_TOOLS = ("siren_list_groups", "siren_search_cases", "siren_get_case")
+PANEL_KNOBS: tuple[Knob, ...] = (
+    Knob("HWAXRISK_CASE_TOOLS", "risk_case_tools", DEFAULT_CASE_TOOLS, "tools"),
+)
 # knobs.env 가 읽는 손잡이 전부 — 출처(env · knobs.env · default)와 검증이 같다.
-BOX_KNOBS: tuple[Knob, ...] = REVIEW_KNOBS + PAT_KNOBS + ISSUE_KNOBS
+BOX_KNOBS: tuple[Knob, ...] = REVIEW_KNOBS + PAT_KNOBS + ISSUE_KNOBS + PANEL_KNOBS
+# tools 손잡이 — 도구 이름의 꼴(게이트웨이 노출 이름)과 수 상한(포털 DelibOpts.tools 의 max_length 와 같은 6), 끄는 낱말.
+_KNOB_TOOL_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+KNOB_TOOLS_MAX = 6
+_KNOB_TOOLS_OFF = ("off", "none", "0")
 # 손잡이 불리언의 낱말 — 그 밖의 값은 기동을 막는다(다른 스위치의 _bool 처럼 기본값으로 돌지 않는다).
 _KNOB_TRUE = ("1", "true", "yes", "on")
 _KNOB_FALSE = ("0", "false", "no", "off")
@@ -317,6 +328,7 @@ class Settings:
     risk_issue_max_charged: int = 2
     risk_summary_max_charged: int = 2
     risk_summary_infra_max: int = 6
+    risk_case_tools: tuple[str, ...] = DEFAULT_CASE_TOOLS
     knob_sources: tuple[tuple[str, str], ...] = ()
 
 
@@ -511,6 +523,15 @@ def load_review_knobs(data_dir: Path, env: Mapping[str, str] | None = None) -> t
                 raise RuntimeError(f"{knob.env}={raw!r} 은 {' · '.join(knob.choices)} 가운데 하나가 아닙니다({where}) —"
                                    f" 고치거나 지우면 기본값 {knob.default} 로 돈다.")
             values[knob.attr] = token
+        elif knob.kind == "tools":
+            if raw.lower() in _KNOB_TOOLS_OFF:
+                values[knob.attr] = ()
+            else:
+                names = tuple(dict.fromkeys(t.strip() for t in raw.split(",") if t.strip()))
+                if not names or len(names) > KNOB_TOOLS_MAX or not all(_KNOB_TOOL_RE.fullmatch(t) for t in names):
+                    raise RuntimeError(f"{knob.env}={raw!r} 은 쉼표로 가른 도구 이름({KNOB_TOOLS_MAX}개까지 — 영문 · 숫자 · _ . : -)이"
+                                       f" 아닙니다({where}) — 끄려면 off, 지우면 기본값 {','.join(knob.default)} 로 돈다.")
+                values[knob.attr] = names
         else:
             try:
                 value = int(raw)
@@ -573,6 +594,20 @@ def issue_knobs(cfg: object | None = None) -> dict[str, dict]:
     sources = dict(getattr(cfg, "knob_sources", ()) or ())
     return {knob.env: {"value": getattr(cfg, knob.attr, knob.default), "source": sources.get(knob.env, "default")}
             for knob in ISSUE_KNOBS}
+
+
+def panel_knobs(cfg: object | None = None) -> dict[str, dict]:
+    """GET /api/meta/runtime 의 `knobs` 에 더하는 패널 손잡이(외부 사례 DB 지정 도구 — RK-12) — {환경변수 이름: {value, source}}."""
+    cfg = settings if cfg is None else cfg
+    sources = dict(getattr(cfg, "knob_sources", ()) or ())
+    return {knob.env: {"value": list(getattr(cfg, knob.attr, knob.default)), "source": sources.get(knob.env, "default")}
+            for knob in PANEL_KNOBS}
+
+
+def case_tools_knob(cfg: object | None = None) -> tuple[str, ...]:
+    """외부 사례 DB 의 지정 도구 차례(HWAXRISK_CASE_TOOLS) — 빈 차례면 싣지 않는다."""
+    cfg = settings if cfg is None else cfg
+    return tuple(getattr(cfg, "risk_case_tools", DEFAULT_CASE_TOOLS) or ())
 
 
 def pat_renew_before_s(cfg: object | None = None) -> int:

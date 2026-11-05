@@ -309,8 +309,60 @@ def _domain_sizes(rows: Sequence[Mapping[str, Any]]) -> dict[str, int]:
 
 
 # ---------------------------------------------------------------- 지정 도구·예산(plan §6.6.4·§6.10.2)
+def case_tools(room: int, *, settings: Any | None = None, tool_map: Mapping[str, str] | None = None) -> list[str]:
+    """외부 사례 DB 의 지정 도구(HWAXRISK_CASE_TOOLS — 기본 SIREN 의 그룹 목록 → 사례 검색 → 사례 카드, HWAXPortal docs/siren-delib RK-12)
+    가운데 게이트웨이가 지금 내놓는 것을 손잡이 차례 그대로 `room` 개까지. 같은 부품 · 현상의 과거 사례와 대책을 패널이 보게 한다.
+
+    부르는 곳은 러너가 패널을 엔진에 보내기 직전(`runner._run_planned_panel` → `case_tools_plan`) 하나다 — 요청서 RK-12 의 '러너가 패널 심의를 띄울 때' 다. 계획 ·
+    비용 어림(과제 만들기의 tier_plan)은 게이트웨이를 묻지 않는다(외부 호출 0 시험의 전제). 게이트웨이 /tools-map(사람 시야와 상관없는 전체
+    지도 — `adapters.registry.gateway_tool_map`, 캐시)에 없으면 싣지 않는다 — SIREN 이 없는 박스(dev)는 그대로다. 지도를 못 읽으면 빈 지도라
+    싣지 않는다(없는 도구를 실으면 엔진이 패널마다 '지정 도구 없음' 을 남긴다). 잡 주인이 그쪽 토큰을 등록하지 않았으면 엔진이 부를 때 거절되고
+    경고(conn_unregistered)로 알린다 — 러너가 패널에 남긴다. 차례는 엔진도 지킨다(목록 · 검색을 먼저 — 같은 무리 안에서는 받은 차례, HA-37)."""
+    names = config.case_tools_knob(_cfg(settings))
+    if room <= 0 or not names:
+        return []
+    if tool_map is None:
+        from app.adapters import registry as adapters_registry  # noqa: PLC0415 — 어댑터가 planner 를 쓰는 자리가 있어 늦게 읽는다
+        tool_map = adapters_registry.gateway_tool_map()
+    return [n for n in names if n in tool_map][:room]
+
+
+# 외부 사례 DB 를 싣지 않은 까닭(패널 품질의 case_tools_skipped — 기록이지 표지가 아니다). SIREN 이 없는 박스(dev)의 '없음' 은 적지 않는다(늘 그렇다).
+CASE_SKIP_CLAUDE = "claude_job"          # Claude(외부) 잡 — 반출 동의문이 외부 사례 DB 를 말하지 않는다(반대 검토 11-06)
+CASE_SKIP_CAP = "llm_cap"                # 패널 호출 상한(HWAXRISK_PANEL_LLM_CAP)에 자리가 없다 — 예산 문이 이미 줄인 패널
+CASE_SKIP_UNREAD = "gateway_unread"      # 게이트웨이 도구 지도를 못 읽었다 — '도구가 없다' 와 '못 물어봤다' 는 다르다(_status_of 와 같은 자세)
+
+
+def case_tools_plan(panel: Mapping[str, Any], sent: Sequence[str], *, settings: Any | None = None, claude: bool = False,
+                    tool_map: Mapping[str, str] | None = None) -> tuple[list[str], str]:
+    """러너가 패널을 띄울 때 붙일 외부 사례 DB 의 지정 도구와, 붙이지 않았으면 그 까닭(CASE_SKIP_*, 없으면 '') — RK-12.
+
+    `sent` 는 이미 실은 지정 도구다. 지정 도구 상한(6)의 남은 자리와 패널 호출 상한의 남은 몫(도구 하나가 인자 짓기 LLM 을 두 번까지 — 예산식의
+    2T)을 함께 지킨다 — 예산 문이 라운드 · 도구를 줄인 패널(est_high 가 상한 곁)에는 싣지 않는다. 손잡이가 off 면 ('', 기록 없음)."""
+    cfg = _cfg(settings)
+    if not config.case_tools_knob(cfg):
+        return [], ""
+    if claude:
+        return [], CASE_SKIP_CLAUDE
+    room = MAX_TOOLS - len(sent)
+    budget = panel.get("budget") or {}
+    est = budget.get("est_high") or (len(panel.get("seats") or []) + 1) * int(panel.get("rounds") or ROUNDS) + 3
+    fit = max(0, (int(cfg.risk_panel_llm_cap) - int(est)) // 2)
+    if room <= 0:
+        return [], ""
+    if fit <= 0:
+        return [], CASE_SKIP_CAP
+    if tool_map is None:
+        from app.adapters import registry as adapters_registry  # noqa: PLC0415 — 어댑터가 planner 를 쓰는 자리가 있어 늦게 읽는다
+        tool_map = adapters_registry.gateway_tool_map()
+    if not tool_map:
+        return [], CASE_SKIP_UNREAD
+    return case_tools(min(room, fit), settings=cfg, tool_map=tool_map), ""
+
+
 def planned_tools(store: Any, target_key: str) -> list[str]:
-    """패널 공통 지정 도구(≤6) — diff 는 pair 조합, snap 은 single 조합. 전사 분포 도구는 넣지 않는다."""
+    """패널 공통 지정 도구(≤6) — diff 는 pair 조합, snap 은 single 조합. 전사 분포 도구는 넣지 않는다. 외부 사례 DB 의 지정 도구는 여기서 싣지
+    않는다 — 러너가 패널을 띄울 때 남은 자리에 붙인다(`case_tools` — 계획 · 비용 어림은 게이트웨이를 묻지 않는다)."""
     row = store.query_one("SELECT kind, report_ids_json FROM rr_targets WHERE target_key = ?", (target_key,))
     if row is None:
         raise AppError("E404", f"타깃이 없습니다: {target_key}", 404)

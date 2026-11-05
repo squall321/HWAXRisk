@@ -345,6 +345,25 @@ def attribute_events(
     }
 
 
+# 엔진이 외부 연결(선언 백엔드)의 미연결 · 한도 초과를 알리는 경고 code(engine_client.CONN_WARNING_CODES 와 같다 — 러너가 패널 품질 표지로 옮긴다).
+CONN_FLAGS = ("conn_unregistered", "conn_rate_limited")
+
+
+def conn_notes(events: Sequence[Mapping[str, Any]] | None) -> dict[str, list[str]]:
+    """엔진 경고 가운데 외부 연결(SIREN 등)의 미연결(잡 주인의 등록 토큰 없음 · 401) · 한도 초과(429) — {code: [표시 이름 …]}(HWAXPortal
+    docs/siren-delib RK-12). 이름은 경고의 labels(게이트웨이 앱 표시 이름), 없으면 backends(백엔드 키)다. 패널은 그대로 갔다 — 그 외부 사례가
+    좌석에 가지 않았다는 것을 패널 결과(quality)에 남겨 화면 · 보고서가 '○○ 미연결' 로 보이게 한다."""
+    out: dict[str, list[str]] = {}
+    for event in events or ():
+        code = str(event.get("code") or "")
+        if str(event.get("kind") or "") != "warning" or code not in CONN_FLAGS:
+            continue
+        names = [str(v) for v in (event.get("labels") or event.get("backends") or []) if str(v).strip()] or ["?"]
+        bucket = out.setdefault(code, [])
+        bucket.extend(n for n in names if n not in bucket)
+    return out
+
+
 def withheld_by_engine(events: Sequence[Mapping[str, Any]] | None) -> list[str]:
     """엔진이 화면 카드로만 띄우고 좌석에는 주지 않은 것 — `evidence.included=false` 중 좌석 귀속이 아닌 카드.
 
@@ -881,7 +900,8 @@ STARTED_BY_APP = "app"
 def _issue_delib_opts(store: Any, panel: Mapping[str, Any], *, user_memo: str | None, loss: dict | None,
                       profile: Any) -> dict:
     """쟁점 패널의 delib_opts(M3 S3-7) — 근거는 `brief.build_issue_brief`(I1 → I4 → … → M, 좌석 계약 I0c 를 둘째 칸에), 질문은
-    `issues.issue_question`, 지정 도구 없음, 3라운드 고정(panel_budget 을 쓰지 않는다), 보고서 저장 없음(save_report 0 — X3),
+    `issues.issue_question`, 지정 도구는 비워 두고(러너가 띄울 때 외부 사례 DB 의 지정 도구를 붙인다 — planner.case_tools_plan, RK-12), 3라운드
+    고정(panel_budget 을 쓰지 않는다), 보고서 저장 없음(save_report 0 — X3),
     검색어는 질문 그대로. `loss` 에는 브리프의 절단·방패와 12칸을 넘겨 빠진 항목을 적는다."""
     from app import issues  # noqa: PLC0415 — issues 는 이 모듈을 쓴다.
 
@@ -2036,6 +2056,16 @@ def _run_planned_panel(store: Any, settings: Any, engine: PanelEngine, job: Mapp
             store, settings, panel, user_memo=params.get("user_memo") or "", narrative_mod=narrative_mod, loss=loss,
             profile=profile, diff_ref=diff_ref, exclude=excluded,
         )
+        # 외부 사례 DB(SIREN)의 지정 도구 — 패널을 띄울 때 지정 도구 상한(6)의 남은 자리에 손잡이 차례대로(보통 패널은 대개 둘, 지정 도구가 없는
+        # 쟁점 패널은 셋), 게이트웨이가 그 도구를 내놓을 때만(HWAXPortal docs/siren-delib RK-12 — 사용자 결정 11-06). 실은 것 · 싣지 않은 까닭은
+        # 브리프 동결과 패널 품질(case_tools · case_tools_skipped)에 남는다. Claude 잡에는 싣지 않는다 — 반출 동의문이 외부 사례 DB 를 말하지 않는다.
+        # 패널 호출 상한도 지킨다(planner.case_tools_plan). 잡 주인이 그쪽 토큰이 없으면 엔진이 경고(conn_unregistered)로 알리고 패널은 그대로 간다.
+        case, case_skip = planner.case_tools_plan(panel, delib_opts.get("tools") or [], settings=settings, claude=llm is not None)
+        if case:
+            delib_opts = {**delib_opts, "tools": [*(delib_opts.get("tools") or []), *case]}
+            loss["case_tools"] = case
+        if case_skip:
+            loss["case_tools_skipped"] = case_skip
         if llm is not None:
             # 외부 응답자 심의 — 엔진은 동의 표지가 JSON true 여야 과제를 만든다(사람의 동의는 검토 잡을 만들 때 받아 잡에 물려 왔다).
             # target_key 는 엔진이 외부 과제 머리에 싣는 대상 열쇠다(X-D8 ⑦ — 쟁점 패널 질문은 '[쟁점 …]' 로 시작해 엔진이 질문 머리에서
@@ -2933,7 +2963,9 @@ def _complete_panel(
         new_clusters = int((merged or {}).get("new_clusters") or 0)
         escalated = list((merged or {}).get("escalated") or ())
 
-        llm_calls = len(turns) + attribution["lookups"] * 3 + len(panel["tools"]) + 3
+        # 러너가 띄울 때 붙인 외부 사례 도구도 지정 도구다(RK-12 — 계획의 tools 에는 없다)
+        llm_calls = (len(turns) + attribution["lookups"] * 3 + len(panel["tools"])
+                     + len((frozen_brief or {}).get("case_tools") or []) + 3)
         # 실제로 어느 자격으로 돌았는지는 엔진이 안다 — 잡의 사전 판정은 폴백값이다. 다만 엔진은 넘겨받은 사람의
         # PAT 를 'owner' 로만 부르므로, 러너가 요청자를 넘겼으면 그것은 요청자 자격이다.
         credential = str(result.get("credential") or job.get("credential") or "service")
@@ -2965,6 +2997,12 @@ def _complete_panel(
             if frozen_brief and frozen_brief.get(lost):
                 quality[lost] = frozen_brief[lost]
                 quality["flags"].append(lost)
+        # 외부 사례 DB 의 지정 도구를 실었으면 그 이름, 싣지 않았으면 그 까닭(RK-12) — 기록이지 표지가 아니다(미연결 · 한도 초과는 아래 conn_notes 가
+        # 플래그로 남긴다).
+        if frozen_brief and frozen_brief.get("case_tools"):
+            quality["case_tools"] = list(frozen_brief["case_tools"])
+        if frozen_brief and frozen_brief.get("case_tools_skipped"):
+            quality["case_tools_skipped"] = str(frozen_brief["case_tools_skipped"])
         # 앱이 지식카드 검색어를 실어 보냈는데 엔진이 질문으로 찾았다 — 옛 포털과 섞였을 때의 유일한 신호다(workorder-c 5절 1).
         ignored = sorted(k for k, q in (attribution.get("knowledge_queries") or {}).items() if q == "question")
         if frozen_brief and frozen_brief.get("knowledge_query_sent") and ignored:
@@ -2975,6 +3013,10 @@ def _complete_panel(
         if withheld:
             quality["engine_withheld"] = withheld
             quality["flags"].append("engine_withheld")
+        # 외부 연결(SIREN 등)의 미연결 · 한도 초과 — 이름 목록으로 남긴다(화면 · 보고서가 '○○ 미연결' 로 보인다, RK-12). 패널은 그대로 간 것이다.
+        for code, names in conn_notes(events).items():
+            quality[code] = names
+            quality["flags"].append(code)
         if escalated and "registry_escalated" not in quality["flags"]:
             # 사람이 닫았던 행이 더 강한 근거로 재제기됐다 — 사람이 다시 볼 자리다(plan §4.7.1).
             quality["flags"].append("registry_escalated")
