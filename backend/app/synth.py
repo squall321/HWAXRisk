@@ -773,6 +773,19 @@ def _panel_judge(quality_json: Any, tool_mode: Any = None) -> str:
     return ""
 
 
+def _panel_conn(quality_json: Any) -> str:
+    """쟁점 패널 한 줄의 외부 연결 꼬리(HWAXPortal docs/siren-delib RK-12) — 외부 사례 DB(SIREN 등)를 잡 주인 토큰으로 부르지 못했으면 '○○ 미연결',
+    호출 한도를 넘었으면 '○○ 한도 초과'. 없으면 빈 글."""
+    quality = _loads(quality_json, {}) or {}
+    parts = [f"{name} 미연결" for name in _as_names(quality.get("conn_unregistered"))]
+    parts += [f"{name} 한도 초과" for name in _as_names(quality.get("conn_rate_limited"))]
+    return f" · 외부 사례: {' · '.join(parts)}" if parts else ""
+
+
+def _as_names(value: Any) -> list[str]:
+    return [str(v) for v in value if str(v).strip()] if isinstance(value, list) else []
+
+
 def _judge_lines(store: RiskStore, target_key: str) -> list[str]:
     """보고서 머리의 판단 LLM 줄(Claude 길 X-2) — 카드 대조 · 요약 호출(review_quality.judge_llm)과 쟁점 패널에서 외부 응답자가 답한 것이
     있거나 어긋남이 있을 때만. 없으면 [](GLM 대상 — 보고서 글은 종전 그대로)."""
@@ -874,6 +887,7 @@ def build_report(store: RiskStore, target_key: str, *, closure_result: Mapping[s
 
     minutes = ["## 쟁점 패널"]
     minutes += [f"- {r['id']} · 쟁점 {r['issue_id']} · {r['status']}{_panel_judge(r['quality_json'], r['tool_mode'])}"
+                f"{_panel_conn(r['quality_json'])}"
                 for r in store.query(
                     "SELECT id, issue_id, status, quality_json, tool_mode FROM rr_panels WHERE target_key = ? AND kind = 'issue'"
                     " ORDER BY panel_no", (target_key,))]

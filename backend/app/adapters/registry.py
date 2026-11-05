@@ -97,7 +97,14 @@ def discover_adapters(*, token: str | None = None, force: bool = False,
 
     registry = GatewayRegistry(config.settings.gateway_mcp, token=token, client=client)
     try:
-        gateway_read = bool(registry.load())
+        tool_map = registry.load()
+        gateway_read = bool(tool_map)
+        if gateway_read and registry._error is None:
+            # 같은 /tools-map 답이다 — 지도도 같은 캐시에 담는다(gateway_tool_map 과 같은 칸). 러너가 패널을 띄울 때의 외부 사례 DB 확인
+            # (planner.case_tools_plan — HWAXPortal docs/siren-delib RK-12)이 발견 바로 뒤에 게이트웨이를 다시 묻지 않게.
+            with _discovery_lock:
+                _discovery_cache["tool_map"] = dict(tool_map)
+                _discovery_cache["tool_map_at"] = now
         rows = []
         for adapter in ADAPTERS:
             probe = registry.probe(adapter.kind, adapter.app_key)

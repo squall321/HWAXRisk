@@ -50,6 +50,9 @@ DEFAULT_AGENT_URL = "http://127.0.0.1:9009"
 FIELD_MAX = 200                        # 진행판에 싣는 마지막 단계 글의 상한(화면 표시 — 저장 경로는 자르지 않는다)
 # 자격 강등 경고 — 계획 문구(_pat_degraded)와 agent-server 실제 코드(credential_degraded) 둘 다 받는다.
 PAT_DEGRADED_CODES = ("_pat_degraded", "credential_degraded")
+# 엔진이 외부 연결(선언 백엔드 — SIREN 등)의 미연결(잡 주인의 등록 토큰 없음 · 401) · 한도 초과(429)를 알리는 경고(HWAXPortal docs/siren-delib RK-12).
+# 러너가 패널 품질 표지(quality.conn_unregistered · conn_rate_limited)로 옮긴다.
+CONN_WARNING_CODES = ("conn_unregistered", "conn_rate_limited")
 # 포털 릴레이가 에이전트 서버의 침묵 한도(AGENT_STREAM_IDLE_TIMEOUT_S)로 구독을 끊으며 보내는 error 코드.
 # 침묵 한도 셋 중 가장 안쪽이라 이것이 먼저 온다 — 앱이 재는 침묵과 같은 사정이다(엔진은 계속 돌 수 있다).
 PORTAL_STREAM_IDLE_CODE = "agent_stream_idle"
@@ -262,6 +265,13 @@ def collect_stream(frames: Iterable[tuple[str, dict]]) -> dict:
             for key in ("message", "knob"):
                 if data.get(key):
                     warning[key] = _text(data.get(key))
+            if code in CONN_WARNING_CODES:
+                # 외부 연결(엔진이 부른 지정 도구 · 좌석 조회)의 미연결 · 한도 초과 — 어느 백엔드 · 이름 · 도구인지 남긴다(러너가 패널 품질 표지로
+                # 옮긴다 — HWAXPortal docs/siren-delib RK-12). 글을 읽어 가르지 않는다.
+                for key in ("backends", "labels", "tools"):
+                    vals = data.get(key)
+                    if isinstance(vals, list):
+                        warning[key] = [_text(v) for v in vals if isinstance(v, str) and v.strip()][:16]
             add(warning)
         elif name == "error":
             error_code = str(data.get("code") or "error")

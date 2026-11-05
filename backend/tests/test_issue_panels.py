@@ -1061,3 +1061,31 @@ def test_a_long_cited_section_is_kept_whole_when_everything_fits_and_cut_to_its_
     assert "가운데 인용 둘레 1,000자" in tight["result"] and tight["counts"]["excerpt"] == 1
     whole, _scope = brief._issue_i6(store, key, cards)
     assert long_text in whole["result"], "budget 을 안 주면(직접 부름) 원문 그대로다"
+
+
+# ---------------------------------------------------------------- 외부 사례 DB(SIREN — HWAXPortal docs/siren-delib RK-12)
+def test_an_issue_panel_carries_the_case_db_tools_and_records_an_unconnected_owner(store, monkeypatch, tmp_path):
+    """쟁점 패널(부품 하나 · 메커니즘 하나)은 게이트웨이가 SIREN 을 내놓으면 러너가 띄울 때 그룹 목록 → 사례 검색 → 사례 카드를 지정 도구로 싣는다
+    (사용자 결정 11-06). 엔진이 잡 주인의 토큰이 없다고 알리면(conn_unregistered) 패널은 그대로 끝나고 품질 표지로 남는다."""
+    from app.adapters import registry as adapters_registry
+    siren = ["siren_list_groups", "siren_search_cases", "siren_get_case"]
+    monkeypatch.setattr(adapters_registry, "gateway_tool_map", lambda **_k: {n: "siren" for n in siren})
+    key, (unit,) = _ledger(store)
+    _select(store, monkeypatch, tmp_path, key)
+
+    class _Unconnected(IssuePanelEngine):
+        def run(self, delib_opts, *, owner_sub=None):
+            res = dict(super().run(delib_opts, owner_sub=owner_sub))
+            res["events"] = [*res["events"], {"kind": "warning", "code": "conn_unregistered", "labels": ["SIREN"],
+                                              "backends": ["siren"], "tools": list(siren)}]
+            return res
+
+    engine = _Unconnected(store)
+    results = _run_issues(store, config.settings, engine, key)
+    assert results[0]["status"] == "done", results
+    assert engine.calls[0]["tools"] == siren, "러너가 띄울 때 붙인다 — 쟁점 패널은 지정 도구가 없어 셋 다"
+    panel = store.query_one("SELECT budget_json, quality_json FROM rr_panels WHERE id = ?", (results[0]["panel_id"],))
+    assert json.loads(panel["budget_json"])["tools_planned"] == [], "계획은 종전 그대로(게이트웨이를 묻지 않는다)"
+    quality = json.loads(panel["quality_json"])
+    assert quality["case_tools"] == siren
+    assert "conn_unregistered" in quality["flags"] and quality["conn_unregistered"] == ["SIREN"]
