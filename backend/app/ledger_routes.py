@@ -14,7 +14,8 @@ from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
-from app import identity, ledger, routes
+from app import evidence_bundle, identity, ledger, routes
+from app.errors import AppError
 
 router = APIRouter(prefix="/api")
 
@@ -139,3 +140,50 @@ def get_version_export(target_key: str, version: int, fmt: str = Query("csv"),
         return PlainTextResponse(out["text"], media_type="text/csv; charset=utf-8",
                                  headers={"X-Export-Id": out["export_id"]})
     return out["table"]
+
+
+# ---------------------------------------------------------------- RK-02 근거 묶음
+class BundleBody(BaseModel):
+    version: int | None = None
+    codes: list[str] | None = Field(default=None, max_length=ledger.LAYER_ROWS_MAX)
+    template: dict[str, Any]
+    mask: bool = True
+
+
+@router.post("/targets/{target_key}/evidence-bundles")
+def post_evidence_bundle(target_key: str, body: BundleBody, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """근거 묶음 만들기(contracts §1) — 엔진 상한을 넘으면 422 와 까닭. 같은 입력이면 같은 묶음(created false). 편집자 이상."""
+    owner, actor = writer(target_key, ident)
+    return evidence_bundle.build(routes.get_store(), target_key, owner, version=body.version, codes=body.codes,
+                                 template=body.template, mask=body.mask, actor=actor)
+
+
+def _bundle_missing(bundle_id: str) -> AppError:
+    return AppError("E404", f"근거 묶음을 찾을 수 없습니다 — {bundle_id}.", 404)
+
+
+def bundle_payload(bundle_id: str, *, owner_sub: str) -> dict:
+    """받기 본체 — 그 묶음의 대상이 owner 의 것이 아니면 없는 묶음과 같은 404 다."""
+    row = evidence_bundle.bundle_row(routes.get_store(), bundle_id)
+    if row is None:
+        raise _bundle_missing(bundle_id)
+    try:
+        target_owner(row["target_key"], owner_sub)
+    except AppError:
+        raise _bundle_missing(bundle_id) from None
+    return evidence_bundle.payload(row)
+
+
+def bundle_target(bundle_id: str) -> str | None:
+    row = evidence_bundle.bundle_row(routes.get_store(), bundle_id)
+    return None if row is None else str(row["target_key"])
+
+
+@router.get("/evidence-bundles/{bundle_id}")
+def get_evidence_bundle(bundle_id: str, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """근거 묶음 받기 — {bundle_id, target_key, version, fingerprint, evidence}. evidence 를 고치지 않고 deliberate_start(evidence=…) 에 넣는다.
+    그 대상의 구성원이 읽는다."""
+    target_key = bundle_target(bundle_id)
+    if target_key is None:
+        raise _bundle_missing(bundle_id)
+    return bundle_payload(bundle_id, owner_sub=reader(target_key, ident))

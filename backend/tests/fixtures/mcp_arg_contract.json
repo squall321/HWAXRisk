@@ -471,6 +471,25 @@
     "fmt": {"default": "json", "title": "Fmt", "type": "string"},
     "offset": {"default": 0, "title": "Offset", "type": "integer"}
    }
+  },
+  "risk_build_evidence_bundle": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["template", "POSITIONAL_OR_KEYWORD"], ["version", "POSITIONAL_OR_KEYWORD"], ["codes", "POSITIONAL_OR_KEYWORD"], ["mask", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["target_key", "template"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"},
+    "template": {"additionalProperties": true, "title": "Template", "type": "object"},
+    "version": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Version"},
+    "codes": {"anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}], "default": null, "title": "Codes"},
+    "mask": {"default": true, "title": "Mask", "type": "boolean"}
+   }
+  },
+  "risk_get_evidence_bundle": {
+   "params": [["bundle_id", "POSITIONAL_OR_KEYWORD"], ["offset", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["bundle_id"],
+   "properties": {
+    "bundle_id": {"title": "Bundle Id", "type": "string"},
+    "offset": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Offset"}
+   }
   }
  }
 }

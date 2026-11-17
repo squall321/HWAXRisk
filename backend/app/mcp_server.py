@@ -1189,3 +1189,49 @@ def risk_ledger_export(target_key: Annotated[str, Field(description=_A_TARGET_KE
         return ledger_routes.note_page(out, owner_sub=owner_sub, actor=actor)
 
     return _scoped("target", target_key, call, target_key)
+
+
+# ================================================================ 근거 묶음(RK-02 — contracts §1)
+_A_BUNDLE_TEMPLATE = ("묶음 틀 {name, caps{칸: 자}, total_cap} — caps 의 칸은 칸 정의에 등록된 이름만(그 밖은 bundle_unknown_fields 422), 칸 하나가 "
+                      "근거 항목 하나이고 상한은 그 항목 글 전체의 자수다. 틀 차례로 채우며 합 상한이 남은 만큼만 다음 칸에 준다.")
+_A_BUNDLE_VERSION = "실을 판정표 판 번호 — 비우면 가장 새 판이다."
+_A_BUNDLE_CODES = "실을 행 코드 목록 — 비우면 그 판의 행 전부다(그 판에 없는 코드는 422). 색인이 실은 코드 전부를 적는다."
+_A_BUNDLE_MASK = "참이면 칸 값의 개인정보 꼴(메일 · 전화 · 사설 IP · 주민번호 · 표지 붙은 사번)을 [가림:…] 으로 가린다(기본 참 — 데이터 수는 건드리지 않는다)."
+_A_BUNDLE_ID = "근거 묶음 id(eb-… — risk_build_evidence_bundle 응답의 bundle_id · risk_ledger_overview 의 bundles[].bundle_id)."
+_A_BUNDLE_OFFSET = (f"비우면 evidence 전부를 한 번에 준다(엔진 · deliberate_start 에 그대로 넣는 길 — contracts §1). 숫자를 주면 그 항목(0부터)부터 "
+                    f"MCP 결과 상한({MCP_RESULT_CHARS:,}자) 안의 쪽이고 남으면 next_offset 이다(Claude 에서 직접 읽을 때).")
+
+
+@mcp.tool()
+async def risk_build_evidence_bundle(target_key: Annotated[str, Field(description=_A_TARGET_KEY)],
+                                     template: Annotated[dict, Field(description=_A_BUNDLE_TEMPLATE)],
+                                     version: Annotated[int | None, Field(description=_A_BUNDLE_VERSION)] = None,
+                                     codes: Annotated[list[str] | None, Field(description=_A_BUNDLE_CODES)] = None,
+                                     mask: Annotated[StrictBool, Field(description=_A_BUNDLE_MASK)] = True) -> dict:
+    """심의 근거 묶음 만들기 — 쓰기: 어느 판의 어느 행 · 칸을 어떤 상한으로 실을지 사용자에게 보이고 확인한 뒤 부른다, 판정표 행을 엔진 근거 항목 꼴({source, tool, args, result, key})로 묶고 맨 앞은 늘 색인(실은 행 코드 전부 · 판 · 칸 정의 판 · 묶음 id · 본문 지문 · '이 목록 밖의 행은 싣지 않았다 — 없다는 뜻이 아니다')이다, 칸 값은 표기 규칙(등급 [등급 A조] · 유형① · 주의 A · VRD-COND)으로 적고 개인정보 꼴은 가린다, 엔진 상한(항목 수 · 합 자수 — 넘으면 bundle_too_many_items · bundle_too_large 422 와 넘은 값 · 상한)을 넘으면 만들지 않는다, 답은 bundle_id · fingerprint · items_n · total_chars · 칸별 자수와 잘림 · masked_n · limits 이고 같은 입력이면 같은 묶음이다(created false), 대상의 편집자 이상만 한다."""
+    return await _entry(ledger_entry.build_bundle, target_key=target_key, template=template, version=version, codes=codes, mask=mask)
+
+
+@mcp.tool()
+def risk_get_evidence_bundle(bundle_id: Annotated[str, Field(description=_A_BUNDLE_ID)],
+                             offset: Annotated[int | None, Field(description=_A_BUNDLE_OFFSET)] = None) -> dict:
+    """근거 묶음 받기(읽기 전용) — {bundle_id, target_key, version, fingerprint, evidence} 이고 evidence 를 고치지 않고 deliberate_start(evidence=…) 에 넣는다(지문은 sha256(json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))) — 받는 쪽이 다시 재어 같은지 본다), 묶음이 커서 Claude 에서 직접 읽으면 offset 으로 쪽을 받는다(그때는 그 쪽의 항목만이라 지문을 다시 재지 않는다), 그 대상을 볼 수 있는 사람만 연다(범위 밖 · 없는 묶음은 not_visible)."""
+    def call() -> dict:
+        target_key = ledger_routes.bundle_target(bundle_id) or bundle_id
+        owner_sub = routes.mcp_scope_owner("target", target_key, _caller())
+        full = ledger_routes.bundle_payload(bundle_id, owner_sub=owner_sub)
+        if offset is None:
+            return full
+        start = max(0, int(offset))
+        items = full["evidence"]
+
+        def page(take: int) -> dict:
+            rows = items[start:start + take]
+            out = {**full, "evidence": rows, "offset": start, "items_n": len(items), "paged": True}
+            if start + len(rows) < len(items):
+                out["next_offset"] = start + len(rows)
+            return out
+
+        return _fit_list(page, max(1, len(items) - start), lambda out: len(out["evidence"]))
+
+    return _guarded(call)

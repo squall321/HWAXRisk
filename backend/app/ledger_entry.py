@@ -25,3 +25,10 @@ def build(ident: identity.Identity, *, target_key: str, layers: list[Any], base_
     entry.require_delegate(ident)
     body = entry._body(ledger_routes.BuildBody, base_version=base_version, layers=layers, colset_version=colset_version)
     return ledger_routes.post_version(target_key, body, ident=ident)
+
+
+def build_bundle(ident: identity.Identity, *, target_key: str, template: dict, version: int | None = None,
+                 codes: list[str] | None = None, mask: bool = True) -> dict:
+    entry.require_delegate(ident)
+    body = entry._body(ledger_routes.BundleBody, version=version, codes=codes, template=template, mask=mask)
+    return ledger_routes.post_evidence_bundle(target_key, body, ident=ident)

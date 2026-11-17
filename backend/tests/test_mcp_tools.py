@@ -66,6 +66,9 @@ TOOL_NAMES = [
     "risk_ledger_build",
     "risk_ledger_diff",
     "risk_ledger_export",
+    # 근거 묶음(RK-02 — contracts §1) — 만들기(쓰기) · 받기(읽기)(45 → 47).
+    "risk_build_evidence_bundle",
+    "risk_get_evidence_bundle",
 ]
 ENTRY_TOOLS = TOOL_NAMES[TOOL_NAMES.index("risk_next_step"):TOOL_NAMES.index("risk_repersist_panel") + 1]
 # 도구별 대표 인자와, 빈 원장에서 기대하는 오류 코드(없으면 None = 정상 응답).
@@ -138,6 +141,9 @@ CALLS = [
     ("risk_ledger_build", {"target_key": "snap:s1", "layers": ["ly-1"]}, "delegation_required"),
     ("risk_ledger_diff", {"target_key": "snap:s1", "version": 2}, "not_visible"),
     ("risk_ledger_export", {"target_key": "snap:s1"}, "not_visible"),
+    ("risk_build_evidence_bundle", {"target_key": "snap:s1", "template": {"name": "틀", "caps": {"칸": 10}, "total_cap": 10}},
+     "delegation_required"),
+    ("risk_get_evidence_bundle", {"bundle_id": "eb-none"}, "not_visible"),
 ]
 _HANGUL = re.compile(r"[가-힣]")
 # 인자 이름에 비밀이 오면 게이트웨이·포털 절차·클라이언트 대화 기록에 값이 남는다(작업 지시서 A-11) — 포털 절차의
