@@ -502,8 +502,11 @@ def export_table(store: Any, target_key: str, version: int | None = None) -> dic
             "code_label": colset["body"].get("code_label") or "code", "columns": columns, "rows": rows}
 
 
-# 스프레드시트가 수식으로 읽는 글 칸의 머리(CSV 수식 주입 — 반대 검토 L1). '-' 는 뒤가 수가 아닐 때만이다(-0.3 은 값이다).
-_FORMULA_HEAD = re.compile(r"^(?:[=+@\t\r]|-(?![0-9.]))")
+# 스프레드시트가 수식으로 읽는 글 칸의 머리(CSV 수식 주입 — 반대 검토 L1). 이 글자로 시작해도 칸 전체가 수 글(-12.5 · -1,234 · +3e2)이면 값이다 —
+# '-' 뒤가 숫자라는 것만으로는 수가 아니다(-1+1 · -0.5+cmd|… · -.5+HYPERLINK(…) 는 수식이다, 반대 검토 2차 3).
+_FORMULA_HEAD = re.compile(r"^[=+\-@\t\r]")
+# 수 글 — 부호 · 숫자(천 단위 쉼표 묶음 가능) · 소수 · 지수만. float() 는 inf · nan · 밑줄 · 앞뒤 빈칸도 받아 쓰지 않는다.
+_PLAIN_NUMBER = re.compile(r"[+-]?(?:\d+(?:,\d{3})*(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", re.ASCII)
 
 
 def formula_guard(value: Any) -> tuple[Any, bool]:
@@ -514,15 +517,14 @@ def formula_guard(value: Any) -> tuple[Any, bool]:
 
 
 def _number_text(value: str) -> float | None:
-    try:
-        return float(value.replace(",", ""))
-    except ValueError:
+    if not _PLAIN_NUMBER.fullmatch(value):
         return None
+    return float(value.replace(",", ""))
 
 
 def table_csv(table: Mapping[str, Any], codes: Sequence[str] | None = None, *, raw: bool = False) -> tuple[str, int]:
     """CSV 글과 막은 칸 수 — 첫 줄은 보안 문구(한 칸), 둘째 줄이 칸 머리(코드 칸 + 칸 정의 차례), 이어 코드 차례의 행. 빈 칸은 빈 글이다. `raw` 가
-    아니면 수식으로 읽힐 글 칸(=, +, @, 탭 · CR 로 시작하거나 - 뒤가 수가 아닌 것) 앞에 ' 를 붙인다 — 원본 표와 바이트까지 견줄 때만 raw 다."""
+    아니면 수식으로 읽힐 글 칸(=, +, -, @, 탭 · CR 로 시작하는데 칸 전체가 수 글이 아닌 것) 앞에 ' 를 붙인다 — 원본 표와 바이트까지 견줄 때만 raw 다."""
     buf = io.StringIO()
     writer = csv.writer(buf, lineterminator="\n")
     guarded = 0

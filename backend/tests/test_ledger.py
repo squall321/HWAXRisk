@@ -378,3 +378,15 @@ def test_an_ownership_transfer_moves_every_ledger_row_to_the_new_owner(ledger_bo
         assert ledger_box.store.query_one(f"SELECT COUNT(*) AS n FROM {table} WHERE owner_sub != ?", (EDITOR,))["n"] == 0, table
         assert out["rows_updated"]["tables"].get(table), table
     assert ledger_routes.get_ledger(ledger_box.target_key, ident=factories.ident(EDITOR))["latest_version"] == 2
+
+
+@pytest.mark.parametrize("value", ["-1+1", "-1+cmd|' /C calc'!A0", "-0.5+cmd|'/C calc'!A0", "-.5+HYPERLINK(\"http://x\")", "-inf", "-1,2",
+                                   "+1+1", "=1", "@A1", "\t1", "\r1", "-", "+", "-1 ", "-1_000"])
+def test_the_formula_guard_catches_a_signed_number_followed_by_a_formula(value):
+    """반대 검토 2차 3 — '-' 뒤가 숫자라는 것만 보고 통과시켜 -1+cmd|… 가 그대로 나갔다. 수식 머리 글자로 시작하는데 칸 전체가 수 글이 아니면 막는다."""
+    assert ledger.formula_guard(value) == ("'" + value, True)
+
+
+@pytest.mark.parametrize("value", ["-12.5", "-1,234", "-1,234.5", "+1", "-0.3", "-.5", "-1e5", "+3E-2", "-0", "1+1", "PART-A", " =1", 12, -3.5, True])
+def test_the_formula_guard_leaves_plain_numbers_and_other_text_alone(value):
+    assert ledger.formula_guard(value) == (value, False)
