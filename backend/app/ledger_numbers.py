@@ -11,8 +11,9 @@
 """
 from __future__ import annotations
 
+import bisect
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -34,9 +35,58 @@ _UNITS = ("mm", "cm", "um", "µm", "μm", "nm", "m", "MPa", "GPa", "kPa", "Pa", 
 _UNIT_ALT = "|".join(re.escape(u) for u in sorted(_UNITS, key=len, reverse=True))
 # id 꼴 — 글자로 시작해 하이픈 · 밑줄로 이은 마디(R-001 · MET-STRESS · PART-A)이거나 글자 + 숫자(U1001 · DV1).
 _ID_RE = re.compile(r"(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)+|[A-Za-z]+[0-9][A-Za-z0-9]*)(?![A-Za-z0-9_-])")
-_NUM_RE = re.compile(r"(?<![A-Za-z0-9_.])(-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?)(?![0-9]|\.\d|,\d{3})"
-                     rf"(?:\s?({_UNIT_ALT})(?![A-Za-z]))?")
+# 수 — 한 번 훑기(선형)로 자른다. 옛 정규식(천 단위 묶음을 되짚는 꼴)은 '111,111,…' 글에서 길이의 제곱으로 느려져 2백만 자 글이 서버를 붙들었다
+# (반대 검토 H1). 숫자 · 쉼표 덩이를 소유 한정자로 한 번에 집고, 천 단위 묶음(1,234,567)인지는 파이썬이 가른다 — 묶음이 아니면 쉼표마다 따로 센
+# 수다(1,2,3 → 1 · 2 · 3). 바로 뒤에 '.숫자' 가 이어지는 덩이(1.2.3 — 판 · 조항 번호)는 수가 아니다. 단위는 덩이 끝에서 따로 맞춘다.
+_NUM_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_.])-?\d[\d,]*+(?:\.\d++)?+(?:[eE][-+]?\d++)?+")
+_UNIT_AT_RE = re.compile(rf"\s?({_UNIT_ALT})(?![A-Za-z])")
+_GROUPED_RE = re.compile(r"\d{1,3}(?:,\d{3})+")
+_DOT_DIGIT_RE = re.compile(r"\.\d")
+_TAIL_RE = re.compile(r"[.eE]")
 _FAMILY_RE = re.compile(r"^([A-Za-z]+[-_]?)")
+
+
+def numbers_in(text: str) -> Iterator[tuple[int, int, str, str | None]]:
+    """글의 수를 차례로 — (값 시작, 단위까지 끝, 값 글, 단위). 값 글은 쓴 그대로(1,234.5 — to_decimal 이 쉼표를 뗀다)."""
+    for m in _NUM_TOKEN_RE.finditer(text):
+        end = m.end()
+        if _DOT_DIGIT_RE.match(text, end):
+            continue
+        raw = m.group(0).rstrip(",")
+        start = m.start()
+        sign = "-" if raw.startswith("-") else ""
+        body = raw[len(sign):]
+        cut = _TAIL_RE.search(body)
+        head, tail = (body[:cut.start()], body[cut.start():]) if cut else (body, "")
+        if "," not in head or _GROUPED_RE.fullmatch(head):
+            pieces = [(start, raw)]
+        else:
+            pieces, at = [], start + len(sign)
+            parts = head.split(",")
+            for n, part in enumerate(parts):
+                if part:
+                    text_part = (sign if n == 0 else "") + part + (tail if n == len(parts) - 1 else "")
+                    pieces.append((at - (len(sign) if n == 0 else 0), text_part))
+                at += len(part) + 1
+        last_end = start + len(raw)
+        unit_m = _UNIT_AT_RE.match(text, last_end)
+        for n, (at, value) in enumerate(pieces):
+            if n == len(pieces) - 1 and unit_m:
+                yield at, unit_m.end(), value, unit_m.group(1)
+            else:
+                yield at, at + len(value), value, None
+
+
+class _IdSpans:
+    """id 꼴 낱말의 자리 — 수가 그 안에서 시작하는지를 이분 탐색으로 본다(수 × 낱말 짝을 다 보지 않는다)."""
+
+    def __init__(self, spans: Sequence[tuple[int, int]]) -> None:
+        self.starts = [s for s, _ in spans]
+        self.ends = [e for _, e in spans]
+
+    def covers(self, at: int) -> bool:
+        i = bisect.bisect_right(self.starts, at) - 1
+        return i >= 0 and at < self.ends[i]
 
 
 def to_decimal(raw: Any) -> Decimal | None:
@@ -191,6 +241,9 @@ def check(store: Any, target_key: str, *, text: str | None = None, bundle_id: st
     metric_keys = {n["metric_key"] for n in ledger_now["numbers"] if n["metric_key"]}
     known_ids = codes | metric_keys | {b["code"] for b in ledger_now["forbidden"] if b["code"] != "*"}
     families = {m.group(1) for k in known_ids for m in [_FAMILY_RE.match(k)] if m and m.group(1).endswith(("-", "_"))}
+    bans: dict[Decimal, list[dict]] = {}
+    for ban in ledger_now["forbidden"]:
+        bans.setdefault(to_decimal(ban["value_text"]), []).append(ban)
     found = {"numbers": 0, "matched": 0}
     lists: dict[str, list[dict]] = {"not_in_ledger": [], "forbidden": [], "unit_mismatch": [], "unknown_ids": []}
     for where, line_code, line in segments:
@@ -203,31 +256,31 @@ def check(store: Any, target_key: str, *, text: str | None = None, bundle_id: st
             if family and family.group(1) in families and token not in known_ids:
                 lists["unknown_ids"].append(_hit(where, line, m.start(1), m.end(1), token=token, code=context_code,
                                                  family=family.group(1)))
-        for m in _NUM_RE.finditer(line):
-            if any(s <= m.start(1) < e for s, e in id_spans):
+        inside = _IdSpans(id_spans)
+        for start, end, raw, unit in numbers_in(line):
+            if inside.covers(start):
                 continue
-            value = to_decimal(m.group(1))
+            value = to_decimal(raw)
             if value is None:
                 continue
-            unit = m.group(2)
             found["numbers"] += 1
-            base = {"token": m.group(0).strip(), "value": m.group(1), "unit": unit, "code": context_code,
-                    "kind": "decimal" if ("." in m.group(1) or "e" in m.group(1).lower()) else "integer"}
+            base = {"token": line[start:end].strip(), "value": raw, "unit": unit, "code": context_code,
+                    "kind": "decimal" if ("." in raw or "e" in raw.lower()) else "integer"}
             same = values.get(value)
             if not same:
-                lists["not_in_ledger"].append(_hit(where, line, m.start(), m.end(), **base))
+                lists["not_in_ledger"].append(_hit(where, line, start, end, **base))
             else:
                 found["matched"] += 1
                 units = {unit_key(n["unit"]) for n in same if n["unit"]}
                 if unit and units and unit_key(unit) not in units:
-                    lists["unit_mismatch"].append(_hit(where, line, m.start(), m.end(), **base, ledger=[
+                    lists["unit_mismatch"].append(_hit(where, line, start, end, **base, ledger=[
                         {"name": n["name"], "revision": n["revision"], "unit": n["unit"], "metric_key": n["metric_key"]} for n in same]))
-            for ban in ledger_now["forbidden"]:
-                if to_decimal(ban["value_text"]) != value or (ban["code"] != "*" and ban["code"] != context_code):
+            for ban in bans.get(value, ()):
+                if ban["code"] != "*" and ban["code"] != context_code:
                     continue
                 if ban["unit"] and unit and unit_key(ban["unit"]) != unit_key(unit):
                     continue
-                lists["forbidden"].append(_hit(where, line, m.start(), m.end(), **base, forbidden_code=ban["code"], reason=ban["reason"]))
+                lists["forbidden"].append(_hit(where, line, start, end, **base, forbidden_code=ban["code"], reason=ban["reason"]))
     counts = {"numbers": found["numbers"], "matched": found["matched"], **{k: len(v) for k, v in lists.items()}}
     out = {"target_key": target_key, "source": source, "version": version, "ledger_hash": ledger_now["hash"],
            "numbers_in_ledger": len(ledger_now["numbers"]), "forbidden_in_ledger": len(ledger_now["forbidden"]), "counts": counts}

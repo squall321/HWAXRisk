@@ -26,7 +26,8 @@ _PHONE = re.compile(
     r")(?![\w.-]|\.\d)")
 _IPV4 = re.compile(r"(?<![\w.])(\d{1,3}(?:\.\d{1,3}){3})(?![\w]|\.\d)")
 _RRN = re.compile(r"(?<![\w.-])\d{6}-[1-4]\d{6}(?![\w.-])")
-_EMPLOYEE = re.compile(r"((?:사번|사원\s?번호|employee\s?(?:id|no\.?|number)|emp\.?\s?no\.?)\s*[:：=]?\s*)([A-Za-z]{0,3}\d{4,10})(?![\w])",
+# 표지와 id 사이 — '\s*(?:[:：=]\s*)?' 다(옛 '\s*[:：=]?\s*' 는 빈칸 덩이를 두 \s* 가 나눠 가지며 길이의 제곱으로 되짚었다 — 반대 검토 H1).
+_EMPLOYEE = re.compile(r"((?:사번|사원\s?번호|employee\s?(?:id|no\.?|number)|emp\.?\s?no\.?)\s*(?:[:：=]\s*)?)([A-Za-z]{0,3}\d{4,10})(?![\w])",
                        re.I)
 _PRIVATE_NETS = tuple(ipaddress.IPv4Network(n) for n in ((10 << 24, 8), ((172 << 24) | (16 << 16), 12), ((192 << 24) | (168 << 16), 16)))
 

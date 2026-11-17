@@ -66,10 +66,10 @@ def _number_refs(cells: Mapping[str, Any], numbers: Sequence[Mapping[str, Any]])
         if isinstance(value, bool) or value is None:
             continue
         text = str(value)
-        spans = [m.span(1) for m in ledger_numbers._ID_RE.finditer(text)]
-        for m in ledger_numbers._NUM_RE.finditer(text):
-            if not any(s <= m.start(1) < e for s, e in spans):
-                number = ledger_numbers.to_decimal(m.group(1))
+        inside = ledger_numbers._IdSpans([m.span(1) for m in ledger_numbers._ID_RE.finditer(text)])
+        for start, _end, raw, _unit in ledger_numbers.numbers_in(text):
+            if not inside.covers(start):
+                number = ledger_numbers.to_decimal(raw)
                 if number is not None:
                     found.add(number)
     return [{k: n[k] for k in ("name", "revision", "value_text", "unit", "metric_key", "source_file", "line")}
