@@ -198,3 +198,27 @@ def test_purge_blanks_the_ledger_text_but_keeps_the_heads(ledger_box):
     code, status = _refused(ledger_routes.post_layer, ledger_box.target_key,
                             ledger_routes.LayerBody(name="회수 뒤 층", order=99, rows={"R-001": {"비고": "x"}}), ident=factories.ident(OWNER))
     assert (code, status) == ("project_purged", 409)
+
+
+V8_TABLES = ("rr_ledger_templates", "rr_ledger_layers", "rr_ledger_versions", "rr_ledger_rows", "rr_ledger_cells", "rr_evidence_bundles",
+             "rr_ledger_numbers", "rr_ledger_forbidden", "rr_ledger_exports")
+
+
+def test_an_ownership_transfer_moves_every_ledger_row_to_the_new_owner(ledger_box):
+    """반대 검토 M2 — 이양이 v8 표 아홉을 옮기지 않아 새 주인의 읽기(대상 주인의 행) · 반출에서 판정표가 사라졌다. 이양 뒤 옛 주인 행은 0 이고 새
+    주인이 그대로 읽는다."""
+    seed_ledger(ledger_box)
+    owner = factories.ident(OWNER)
+    ledger_routes.post_evidence_bundle(ledger_box.target_key, ledger_routes.BundleBody(
+        template={"name": "틀", "caps": {"부품": 2000}, "total_cap": 2000}), ident=owner)
+    ledger_routes.put_numbers(ledger_box.target_key, ledger_routes.NumbersBody(
+        numbers=[{"name": "합성 값", "value": 1.5}], forbidden=[{"code": "*", "value": 9.9, "reason": "합성 금지값"}]), ident=owner)
+    ledger_routes.get_version_export(ledger_box.target_key, 2, fmt="json", ident=owner)
+    moved = dict(routes.TRANSFER_DERIVED)
+    assert all(table in moved for table in V8_TABLES)
+    assert all(ledger_box.store.query_one(f"SELECT COUNT(*) AS n FROM {t}")["n"] > 0 for t in V8_TABLES)
+    out = routes.transfer_project(ledger_box.project_id, routes.TransferBody(to_email=EDITOR, reason="담당 교체"), ident=owner)
+    for table in V8_TABLES:
+        assert ledger_box.store.query_one(f"SELECT COUNT(*) AS n FROM {table} WHERE owner_sub != ?", (EDITOR,))["n"] == 0, table
+        assert out["rows_updated"]["tables"].get(table), table
+    assert ledger_routes.get_ledger(ledger_box.target_key, ident=factories.ident(EDITOR))["latest_version"] == 2

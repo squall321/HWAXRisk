@@ -1519,6 +1519,17 @@ TRANSFER_DERIVED: tuple[tuple[str, str], ...] = (
     ("rr_reports", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_close_acks", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_unit_live", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    # v8(판정표 원장 — HWAXPortal docs/request-1117) — 틀 · 층 · 판 · 행 · 덮은 칸 · 근거 묶음 · 숫자 원장 · 금지값 · 내보내기 기록. 빠뜨리면 이양 뒤
+    # 새 주인의 읽기(대상 주인의 행) · 반출에서 판정표가 사라진다(반대 검토 M2).
+    ("rr_ledger_templates", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_layers", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_versions", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_rows", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_cells", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_evidence_bundles", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_numbers", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_forbidden", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_exports", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
 )
 
 
