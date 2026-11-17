@@ -22,6 +22,9 @@ V4_TABLES = {"rr_unit_builds", "rr_units", "rr_expert_reports", "rr_review_cells
 V5_TABLES = {"rr_issues", "rr_summaries", "rr_reports", "rr_close_acks", "rr_unit_live"}
 # v7(F2 단면 자리 찾기) 가 더한 표 — 보드 ↔ CAD 변환 등록부(docs/f2-locate-for-section.md 2절).
 V7_TABLES = {"rr_board_transforms"}
+# v8(판정표 원장 — HWAXPortal docs/request-1117) 가 더한 표 — 틀 · 층 · 판 · 행 · 덮은 칸 · 근거 묶음 · 숫자 원장 · 금지값 · 내보내기 기록.
+V8_TABLES = {"rr_ledger_templates", "rr_ledger_layers", "rr_ledger_versions", "rr_ledger_rows", "rr_ledger_cells",
+             "rr_evidence_bundles", "rr_ledger_numbers", "rr_ledger_forbidden", "rr_ledger_exports"}
 # §5.2 가 '41 표' 로 세는 근거 — 33 표 위에 v1 으로 더해진 8 표.
 ADDED_IN_41 = {"rr_project_members", "rr_gate_acks", "rr_registry_status_log", "rr_audit",
                "rr_panel_calls", "rr_cluster_alias", "rr_requirements", "rr_snapshot_jobs"}
@@ -106,7 +109,7 @@ def test_migrate_creates_v1_tables(risk_store, tmp_path):
     # 그 위에 붙는다.
     assert set(DDL_TABLES) <= rr
     assert len(DDL_TABLES) == 41
-    assert rr - set(DDL_TABLES) == {"rr_brief_calls"} | V4_TABLES | V5_TABLES | V7_TABLES
+    assert rr - set(DDL_TABLES) == {"rr_brief_calls"} | V4_TABLES | V5_TABLES | V7_TABLES | V8_TABLES
     assert HOUSEKEEPING <= tables
     assert tables - rr - HOUSEKEEPING <= {"sqlite_sequence"}
     assert _columns(db_path, "_schema_migrations") == {"version", "applied_at", "app_version"}
@@ -262,11 +265,14 @@ PUSHED_DDL_SHA256 = {
     # v5 는 2026-10-15 main 에 올라 굳었다(재설계 M3 단계 D 리허설 a27e569 통과 뒤) — 블록을 고치지 않는다. 바꿀 것은 v6 에 넣는다.
     5: "25350889b546df9140150e8b55c7f1d1ebbe701fbf6e46ee91897db75fb89b13",
     # v6 은 2026-11-02 main 에 올라 굳었다(과제 인사이트 그래프 M2b — rr_projects.sp_task 와 색인) — 블록을 고치지 않는다. 바꿀 것은 v7 에 넣는다
-    # (재설계 M4 의 rr_reports.ra_* 는 v8 — v7 은 F2 가 먼저 썼다).
+    # (재설계 M4 의 rr_reports.ra_* 는 v9 — v7 은 F2 가, v8 은 판정표 원장이 먼저 썼다).
     6: "339620c3fedb4d8e000ff87ecd9789f078a2a65c669edb45aa03723fb410e791",
     # v7 은 2026-11-02 main 에 올라 굳었다(F2 단면 자리 찾기 — rr_board_transforms · rr_findings / rr_registry.location_json) — 블록을 고치지
-    # 않는다. 바꿀 것은 v8 에 넣는다(재설계 M4 의 ra_* 도 v8).
+    # 않는다. 바꿀 것은 v8 에 넣는다(재설계 M4 의 ra_* 는 v9 — context-notes R-3).
     7: "1fc7eadfdaa4f509c8a150669d3d735869110bbf14939e417a9364c6016bd646",
+    # v8 — 판정표 원장(HWAXPortal docs/request-1117 RK-01 ~ RK-05). 판을 더하는 커밋이 해시를 같이 적는다 — main 에 오르는 날 굳고 그 뒤로는 고치지
+    # 않는다. 바꿀 것은 v9 에 넣는다(재설계 M4 의 rr_reports.ra_* 도 v9).
+    8: "8bc7b692591776f474116e485ebfd06354a2be0996ee1c0ad8951357bd88cf31",
 }
 SHARED_TABLES = {"rr_dim_vocab", "rr_delta_priors", "rr_rules", "rr_metrics"}
 
@@ -823,7 +829,7 @@ def test_a_v4_db_rises_to_v5_once_with_one_v4_copy(tmp_path):
 # ---------------------------------------------------------------- v6 — 과제 인사이트 그래프 M2b(포털 docs/project-insight-graph contracts §9)
 def test_v6_is_one_sp_task_column_and_its_index_on_projects(risk_store, tmp_path):
     """v6 은 rr_projects.sp_task(TEXT · 기본값 없음 — 모르면 NULL) 한 칸과 그 색인 하나다. 차수는 새 칸 없이 stage 를 읽을 때 정규화하므로
-    차수 칸(sp_round 따위)이 없다. 재설계 M4 가 v6 에 두기로 적었던 rr_reports.ra_* 는 여기 없다(다음 판)."""
+    차수 칸(sp_round 따위)이 없다. 재설계 M4 가 v6 에 두기로 적었던 rr_reports.ra_* 는 여기 없다(v9)."""
     assert [v for v, _ in MIGRATIONS][:6] == [1, 2, 3, 4, 5, 6]
     v6 = MIGRATIONS[5][1]
     assert v6 == ["ALTER TABLE rr_projects ADD COLUMN sp_task TEXT;          -- SP 허브 plm_task key(운영 허브는 과제명 — 과제코드가"
@@ -890,7 +896,7 @@ V7_TRANSFORM_COLUMNS = {
 
 def test_v7_is_the_board_transform_registry_and_one_location_column_on_findings_and_registry(risk_store, tmp_path):
     """v7 은 변환 등록부 한 표(과제 · ODB 보드 · StepForge 과제가 열쇠, 주인 열 · 검증 칸은 NULL 허용)와 finding · 등록부 묶음의 위치 한 칸씩
-    (TEXT · 기본값 없음)이다 — 허용 연산만이고 CHECK 가 없다. 재설계 M4 의 rr_reports.ra_* 는 여기 없다(v8)."""
+    (TEXT · 기본값 없음)이다 — 허용 연산만이고 CHECK 가 없다. 재설계 M4 의 rr_reports.ra_* 는 여기 없다(v9)."""
     assert [v for v, _ in MIGRATIONS][:7] == [1, 2, 3, 4, 5, 6, 7]
     v7 = MIGRATIONS[6][1]
     assert [s.split("(")[0].split()[:6] for s in v7] == [
@@ -952,3 +958,68 @@ def test_a_v6_db_rises_to_v7_once_with_one_v6_copy(tmp_path):
             store.close()
         copies = [p.name for p in tmp_path.glob("risk_review.db.pre-migrate-*")]
         assert len(copies) == 1 and copies[0].startswith("risk_review.db.pre-migrate-v6-"), copies
+
+
+V8_KEYS = {
+    "rr_ledger_templates": ["target_key", "kind", "version"],
+    "rr_ledger_layers": ["layer_id"],
+    "rr_ledger_versions": ["target_key", "version"],
+    "rr_ledger_rows": ["target_key", "version", "code"],
+    "rr_ledger_cells": ["target_key", "version", "seq"],
+    "rr_evidence_bundles": ["bundle_id"],
+    "rr_ledger_numbers": ["target_key", "name", "revision"],
+    "rr_ledger_forbidden": ["target_key", "code", "value_text"],
+    "rr_ledger_exports": ["export_id"],
+}
+
+
+def test_v8_is_the_ledger_block_of_new_tables_only(risk_store, tmp_path):
+    """v8 은 판정표 원장의 새 표 아홉과 색인 셋뿐이다(허용 연산 — 옛 표를 건드리지 않는다). 표마다 대상 열쇠 · 주인 열이 있고(반출 · 들여오기 ·
+    회수가 대상의 과제를 따른다) 반출 표 목록 끝에 붙는다. 재설계 M4 의 rr_reports.ra_* 는 여기 없다(v9 — context-notes R-3)."""
+    assert [v for v, _ in MIGRATIONS][:8] == [1, 2, 3, 4, 5, 6, 7, 8]
+    v8 = MIGRATIONS[7][1]
+    assert all(s.startswith(("CREATE TABLE IF NOT EXISTS ", "CREATE INDEX IF NOT EXISTS ")) for s in v8), v8
+    assert sum(s.startswith("CREATE INDEX") for s in v8) == 3
+    assert set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", "\n".join(v8))) == V8_TABLES == set(V8_KEYS)
+    db = tmp_path / "risk_review.db"
+    con = sqlite3.connect(db)
+    try:
+        for table, keys in V8_KEYS.items():
+            info = con.execute(f"PRAGMA table_info({table})").fetchall()
+            assert [r[1] for r in sorted((r for r in info if r[5]), key=lambda r: r[5])] == keys, table
+            assert {"target_key", "owner_sub"} <= {r[1] for r in info}, table
+    finally:
+        con.close()
+    assert set(TABLE_ORDER[-len(V8_TABLES):]) == V8_TABLES and not LOCAL_ONLY_TABLES & V8_TABLES
+    assert not {"ra_entity_id", "ra_report_id"} & _columns(db, "rr_reports")
+
+
+def test_a_v7_db_rises_to_v8_once_with_one_v7_copy(tmp_path):
+    """행이 든 v7 DB 가 옛 행을 그대로 둔 채 v8 로 오르고 출발 버전 사본(pre-migrate-v7-*) 하나만 남는다. 두 번째 기동은 아무것도 하지 않는다.
+    새 표는 빈 표다."""
+    from app import risk_store as store_module
+
+    db = tmp_path / "risk_review.db"
+    v7 = RiskStore(db)
+    v7.open()
+    original = store_module.MIGRATIONS
+    try:
+        store_module.MIGRATIONS = original[:7]
+        assert v7.migrate() == 7
+        v7.execute("INSERT INTO rr_registry(target_key, cluster_key, owner_sub, merged_json) VALUES ('snap:s1','ck1','u','{}')")
+    finally:
+        store_module.MIGRATIONS = original
+        v7.close()
+    assert not V8_TABLES & _tables(db)
+
+    for _ in range(2):
+        store = RiskStore(db)
+        store.open()
+        try:
+            assert store.migrate() == 8
+            assert store.query_one("SELECT cluster_key FROM rr_registry")["cluster_key"] == "ck1"
+            assert all(store.query_one(f"SELECT COUNT(*) AS n FROM {t}")["n"] == 0 for t in V8_TABLES)
+        finally:
+            store.close()
+        copies = [p.name for p in tmp_path.glob("risk_review.db.pre-migrate-*")]
+        assert len(copies) == 1 and copies[0].startswith("risk_review.db.pre-migrate-v7-"), copies

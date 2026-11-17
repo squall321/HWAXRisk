@@ -1960,6 +1960,25 @@ PURGE_BLANK_SQL: tuple[tuple[str, str], ...] = (
     # v7(F2 단면 자리 찾기) — 변환 등록부의 CAD 몸체 경로(부품 이름이 든다) · 검증 근거(경로 · 좌표) · 강제 사유. 변환 값과 행은 남는다.
     ("rr_board_transforms", "UPDATE rr_board_transforms SET board_body_path = '', verify_json = NULL, reason = NULL"
                             " WHERE project_id = ?"),
+    # v8(판정표 원장 — HWAXPortal docs/request-1117) — 칸 이름 · 셀 값 · 층 이름 · 원천 파일 · 근거 묶음 본문 · 숫자 정의 · 금지 사유는 과제 고유
+    # 낱말이 든다. 판 · 층 · 행의 머리(판 번호 · 차례 · 수 · 지문)와 코드는 남는다. 근거 묶음 본문은 NOT NULL 이라 빈 목록의 gzip 이다.
+    ("rr_ledger_templates", "UPDATE rr_ledger_templates SET body_json = '{}'"
+                            " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_layers", "UPDATE rr_ledger_layers SET name = '', source_file = NULL, rows_json = '{}', meta_json = NULL"
+                         " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_versions", "UPDATE rr_ledger_versions SET layers_json = '[]'"
+                           " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_rows", "UPDATE rr_ledger_rows SET cells_json = '{}'"
+                       " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_cells", "UPDATE rr_ledger_cells SET layer_name = '', source_file = NULL, col = '', value_json = NULL,"
+                        " prev_json = NULL WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_evidence_bundles", f"UPDATE rr_evidence_bundles SET evidence_gz = X'{_EMPTY_PAGES_GZ.hex()}', template_json = '{{}}',"
+                            " per_field_json = '{}'"
+                            " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_numbers", "UPDATE rr_ledger_numbers SET definition = NULL, source_file = NULL"
+                          " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_forbidden", "UPDATE rr_ledger_forbidden SET reason = '[purged]'"
+                            " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
 )
 
 

@@ -875,8 +875,8 @@ _DDL_V5: list[str] = _split_statements(_DDL_V5_SQL)
 
 # v6 — 과제 인사이트 그래프 M2b(포털 docs/project-insight-graph contracts §9 · PLAN §4.7). 2026-11-02 main 에 올라 굳었다 — tests/test_store.py 의 PUSHED_DDL_SHA256[6] 가 지킨다. 바꿀 것은 v7 에. 과제의 SP 허브 과제 key 한 칸과 그 색인이다 —
 # 값은 리스크 앱이 그 사람의 PAT 로 스스로 부른 풀이(find_plm_task)의 결과 행에서만 적는다(PUT /api/projects/{id}/sp-subject · 일반 PATCH
-# 칸 밖). 차수는 새 칸 없이 stage 를 읽을 때 정규화한다(app/sp_subject.py). 재설계 M4 가 v6 에 두기로 적었던 rr_reports.ra_* 는 v8 로 간다(v7 은
-# F2 단면 자리 찾기 — 아래).
+# 칸 밖). 차수는 새 칸 없이 stage 를 읽을 때 정규화한다(app/sp_subject.py). 재설계 M4 가 v6 에 두기로 적었던 rr_reports.ra_* 는 v9 로 간다(v7 은
+# F2 단면 자리 찾기, v8 은 판정표 원장 — 아래).
 _DDL_V6_SQL = """
 ALTER TABLE rr_projects ADD COLUMN sp_task TEXT;          -- SP 허브 plm_task key(운영 허브는 과제명 — 과제코드가 아니다). 모르면 NULL
 CREATE INDEX IF NOT EXISTS ix_rr_projects_sp_task ON rr_projects(sp_task);
@@ -884,7 +884,7 @@ CREATE INDEX IF NOT EXISTS ix_rr_projects_sp_task ON rr_projects(sp_task);
 _DDL_V6: list[str] = _split_statements(_DDL_V6_SQL)
 
 # v7 — F2 단면 자리 찾기('CAD 그림을 보고서로' 긴급 11-02 · docs/f2-locate-for-section.md). 2026-11-02 main 에 올라 굳었다 —
-# tests/test_store.py 의 PUSHED_DDL_SHA256[7] 이 지킨다. 바꿀 것은 v8 에(재설계 M4 의 rr_reports.ra_* 도 v8).
+# tests/test_store.py 의 PUSHED_DDL_SHA256[7] 이 지킨다. 바꿀 것은 v8 뒤 판에(재설계 M4 의 rr_reports.ra_* 는 v9 — v8 은 판정표 원장이 먼저 썼다).
 # 보드 ↔ CAD 변환 등록부(과제마다 (ODB 보드, StepForge 과제) 한 행 — 원점 · 뒤집기 · 면과 등록 때 읽은 보드 몸체 z, 이 박스의 검증)와 리스크
 # 항목(finding · 등록부 묶음)의 위치 한 칸이다. 검증 칸(status · error_mm · verify_json · reason)은 이 박스의 일이라 반출 · 들여오기에 없다
 # (app/export.py — 들여온 행은 status 가 NULL 이고 위치 찾기가 쓰지 않는다).
@@ -907,10 +907,75 @@ ALTER TABLE rr_registry ADD COLUMN location_json TEXT;    -- 등록부 묶음의
 """
 _DDL_V7: list[str] = _split_statements(_DDL_V7_SQL)
 
+# v8 — 판정표 원장(HWAXPortal docs/request-1117 RK-01 ~ RK-05 · contracts.md). 칸 정의 · facts 틀 · 결정 칸 대응은 대상마다 판을 매긴 데이터로
+# 등록한다(과제 고유 칸을 코드에 박지 않는다 — context-notes R-2). 판정표 판 = 기준 판 + 덮어쓰기 층(차례대로 덮고 덮은 앞 값을 칸마다 남긴다),
+# 행 열쇠는 코드다. 근거 묶음 · 숫자 원장 · 금지값 · 내보내기 기록이 함께 선다. 모든 표가 대상 열쇠(target_key)에 매달려 반출 · 들여오기 · 회수가
+# 대상의 과제를 따른다(export._select · _refusal). 재설계 M4 의 rr_reports.ra_* 는 v9 로 간다(context-notes R-3). main 에 오르는 날
+# tests/test_store.py 의 PUSHED_DDL_SHA256[8] 이 굳는다(해시는 판을 더하는 이 커밋이 같이 적는다).
+_DDL_V8_SQL = """
+CREATE TABLE IF NOT EXISTS rr_ledger_templates (          -- 판정표 틀의 판 — 칸 정의(columns) · facts 틀(facts) · 결정 칸 대응(decision_map)
+  target_key TEXT NOT NULL, kind TEXT NOT NULL,           -- 종류 낱말은 app/ledger.py TEMPLATE_KINDS(CHECK 없음 — 어휘 확장이 허용 연산 안)
+  version INTEGER NOT NULL, owner_sub TEXT NOT NULL,      -- 종류마다 1, 2, … 판 · 대상 주인의 복제(§5.2.1)
+  body_json TEXT NOT NULL, body_hash TEXT NOT NULL,       -- 정규 JSON 과 그 sha256 — 같은 몸이면 새 판을 세우지 않는다
+  created_by TEXT, created_at INTEGER,
+  PRIMARY KEY(target_key, kind, version));
+CREATE TABLE IF NOT EXISTS rr_ledger_layers (             -- 덮어쓰기 층 — 판을 지을 때 차례(layer_order)대로 덮는다(큰 차례가 이긴다)
+  layer_id TEXT PRIMARY KEY, target_key TEXT NOT NULL, owner_sub TEXT NOT NULL,
+  name TEXT NOT NULL, layer_order INTEGER NOT NULL, source_file TEXT,
+  origin TEXT NOT NULL,                                   -- manual · decision(결정 반영 — RK-03)
+  colset_version INTEGER NOT NULL,                        -- 칸 이름을 대조한 칸 정의 판
+  rows_json TEXT NOT NULL, rows_hash TEXT NOT NULL,       -- {코드: {칸: 값}} 정규 JSON 과 그 지문
+  meta_json TEXT,                                         -- 결정 반영의 칸별 상태 · 표결 · 합의 문장 대조(origin=decision)
+  created_by TEXT, created_at INTEGER);
+CREATE INDEX IF NOT EXISTS ix_rr_ledger_layers_target ON rr_ledger_layers(target_key, created_at);
+CREATE TABLE IF NOT EXISTS rr_ledger_versions (           -- 판정표 판 — 기준 판 + 층들의 결과(행은 rr_ledger_rows, 덮은 칸은 rr_ledger_cells)
+  target_key TEXT NOT NULL, version INTEGER NOT NULL, owner_sub TEXT NOT NULL,
+  based_on INTEGER,                                       -- 기준 판(빈 표에서 지었으면 NULL)
+  colset_version INTEGER NOT NULL, notice TEXT NOT NULL,  -- 칸 정의 판 · 내보내기 첫 줄의 보안 문구
+  layers_json TEXT NOT NULL,                              -- 덮은 차례 [{layer_id, name, order, source_file, rows, cells, changed}]
+  inputs_hash TEXT NOT NULL,                              -- (기준 판, 층 차례, 칸 정의 판)의 지문 — 같으면 새 판을 세우지 않는다
+  rows_n INTEGER NOT NULL, rows_hash TEXT NOT NULL, grade_changed_n INTEGER,
+  created_by TEXT, created_at INTEGER,
+  PRIMARY KEY(target_key, version));
+CREATE TABLE IF NOT EXISTS rr_ledger_rows (               -- 판정표 판의 행 — 열쇠는 코드(참조번호는 리비전마다 바뀐다)
+  target_key TEXT NOT NULL, version INTEGER NOT NULL, code TEXT NOT NULL, owner_sub TEXT NOT NULL,
+  cells_json TEXT NOT NULL,                               -- {칸: 값}
+  PRIMARY KEY(target_key, version, code));
+CREATE TABLE IF NOT EXISTS rr_ledger_cells (              -- 판을 지을 때 층이 덮은 칸 하나하나 — 덮어쓰기 차례와 덮은 앞 값의 기록
+  target_key TEXT NOT NULL, version INTEGER NOT NULL, seq INTEGER NOT NULL, owner_sub TEXT NOT NULL,
+  layer_id TEXT NOT NULL, layer_name TEXT NOT NULL, layer_order INTEGER NOT NULL, source_file TEXT,
+  code TEXT NOT NULL, col TEXT NOT NULL,
+  value_json TEXT, prev_json TEXT,                        -- 덮은 값 · 그 앞 값(없던 칸이면 NULL)
+  PRIMARY KEY(target_key, version, seq));
+CREATE TABLE IF NOT EXISTS rr_evidence_bundles (          -- 심의 근거 묶음(RK-02) — evidence 는 엔진 근거 항목 그대로이고 맨 앞이 색인이다
+  bundle_id TEXT PRIMARY KEY, target_key TEXT NOT NULL, owner_sub TEXT NOT NULL,
+  version INTEGER NOT NULL, colset_version INTEGER NOT NULL,
+  inputs_hash TEXT NOT NULL, template_json TEXT NOT NULL, codes_json TEXT NOT NULL,
+  evidence_gz BLOB NOT NULL, fingerprint TEXT NOT NULL,   -- 정규 JSON 의 gzip · contracts §1 지문
+  items_n INTEGER NOT NULL, total_chars INTEGER NOT NULL, per_field_json TEXT NOT NULL, masked_n INTEGER NOT NULL,
+  created_by TEXT, created_at INTEGER);
+CREATE INDEX IF NOT EXISTS ix_rr_evidence_bundles_target ON rr_evidence_bundles(target_key, created_at);
+CREATE TABLE IF NOT EXISTS rr_ledger_numbers (            -- 숫자 원장(RK-04) — 이름 · 값 · 단위 · 정의 · 리비전 · 출처 · 줄 · 지표 키
+  target_key TEXT NOT NULL, name TEXT NOT NULL, revision TEXT NOT NULL, owner_sub TEXT NOT NULL,   -- 리비전이 없으면 ''
+  value_text TEXT NOT NULL, unit TEXT, definition TEXT, source_file TEXT, line INTEGER, metric_key TEXT,
+  updated_by TEXT, updated_at INTEGER,
+  PRIMARY KEY(target_key, name, revision));
+CREATE TABLE IF NOT EXISTS rr_ledger_forbidden (          -- 코드별 금지값(RK-04) — code '*' 는 모든 코드
+  target_key TEXT NOT NULL, code TEXT NOT NULL, value_text TEXT NOT NULL, owner_sub TEXT NOT NULL,
+  unit TEXT, reason TEXT NOT NULL, updated_by TEXT, updated_at INTEGER,
+  PRIMARY KEY(target_key, code, value_text));
+CREATE TABLE IF NOT EXISTS rr_ledger_exports (            -- 판정표 내보내기 · 보고 묶음 기록(RK-01 · RK-05) — 누가 어느 판을 어떤 꼴로 냈나
+  export_id TEXT PRIMARY KEY, target_key TEXT NOT NULL, owner_sub TEXT NOT NULL,
+  version INTEGER NOT NULL, kind TEXT NOT NULL,           -- csv · json · report_bundle
+  template_version INTEGER, rows_n INTEGER, sha256 TEXT, actor TEXT, created_at INTEGER);
+CREATE INDEX IF NOT EXISTS ix_rr_ledger_exports_target ON rr_ledger_exports(target_key, created_at);
+"""
+_DDL_V8: list[str] = _split_statements(_DDL_V8_SQL)
+
 # 버전 오름차순. 한 버전 = 한 트랜잭션. 허용 연산은 CREATE TABLE IF NOT EXISTS · ADD COLUMN · CREATE INDEX IF NOT EXISTS 뿐(plan §5.2.5 (6)).
 # 한 번 나간 버전의 문장은 고치지 않는다 — tests/test_store.py 가 버전마다 DDL 해시를 못 박는다.
 MIGRATIONS: list[tuple[int, list[str]]] = [(1, _DDL_V1), (2, _DDL_V2), (3, _DDL_V3), (4, _DDL_V4), (5, _DDL_V5),
-                                           (6, _DDL_V6), (7, _DDL_V7)]
+                                           (6, _DDL_V6), (7, _DDL_V7), (8, _DDL_V8)]
 
 # ---------------------------------------------------------------- 이행 안전(WP5a R3 · 반대 검토 X2-01·X2-02)
 # 이행 전체(버전 읽기 → 사본 → 버전별 트랜잭션 → 사본 정리)를 감싸는 파일 잠금. 기다린다 — HEAXHub 는 헬스가 안 오면 같은
