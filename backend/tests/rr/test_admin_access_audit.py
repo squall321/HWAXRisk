@@ -446,6 +446,8 @@ ADMIN_WRITE_EXEMPT: dict[tuple[str, str], str] = {
     ("PUT", P + "/registry/{cluster_key:path}/visibility"): "부른 사람 자신의 등록부 행만이다(소유자 전용 — 관리자 우회가 없다)",
     ("POST", P + "/targets/{target_key}/resync"): "대상 소유자만이다(관리자 우회가 없다)",
     ("PUT", P + "/curation/{queue_id}"): "부른 사람 자신의 큐만이다(관리자 우회가 없다)",
+    ("POST", P + "/targets/{target_key}/numbers/check"): (
+        "읽기다(숫자 점검 RK-04 — 본문이 길어 POST) — 관리자에게는 읽기 문의 열람 줄이고 쓰기 문을 지나지 않는다"),
 }
 # 표의 부름이 문을 지나지 않는 꼴(대상 없이 부르면 부른 사람 자신의 행이다)인 경로 — 대상을 고른 꼴로 부른다.
 ADMIN_WRITE_CALLS: dict[tuple[str, str], Callable[[dict, Any], Any]] = {

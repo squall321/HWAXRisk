@@ -59,6 +59,25 @@ TOOL_NAMES = [
     "risk_propose_board_transform",
     "risk_set_board_transform",
     "risk_set_item_location",
+    # 판정표 원장(RK-01 — HWAXPortal docs/request-1117) — 한눈 · 틀 · 층 · 판 짓기(쓰기 셋)와 판 비교 · 내보내기(39 → 45).
+    "risk_ledger_overview",
+    "risk_ledger_put_template",
+    "risk_ledger_put_layer",
+    "risk_ledger_build",
+    "risk_ledger_diff",
+    "risk_ledger_export",
+    # 근거 묶음(RK-02 — contracts §1) — 만들기(쓰기) · 받기(읽기)(45 → 47).
+    "risk_build_evidence_bundle",
+    "risk_get_evidence_bundle",
+    # 원천의 출처 표지(RK-06) — 읽기 전용(47 → 48). 스냅샷 · 등록부 · 단면 자리 · 길잡이 답에도 같은 꼴이 붙는다.
+    "risk_get_provenance",
+    # 결정 → 판정표 층(RK-03 — contracts §3) — 쓰기(48 → 49).
+    "risk_ledger_apply_decision",
+    # 숫자 원장 · 금지값 점검(RK-04) — 적기(쓰기) · 점검(읽기)(49 → 51).
+    "risk_numbers_put",
+    "risk_numbers_check",
+    # 보고 묶음(RK-05) — 읽기 · 내보내기 기록(51 → 52).
+    "risk_export_report_bundle",
 ]
 ENTRY_TOOLS = TOOL_NAMES[TOOL_NAMES.index("risk_next_step"):TOOL_NAMES.index("risk_repersist_panel") + 1]
 # 도구별 대표 인자와, 빈 원장에서 기대하는 오류 코드(없으면 None = 정상 응답).
@@ -123,6 +142,22 @@ CALLS = [
     ("risk_propose_board_transform", {"project_id": "p1"}, "delegation_required"),
     ("risk_set_board_transform", {"project_id": "p1", "remove": True}, "delegation_required"),
     ("risk_set_item_location", {"project_id": "p1", "part": None, "point": None, "finding_id": "f1"}, "delegation_required"),
+    # 판정표 원장(RK-01) — 판정표 · 묶음 읽기는 구성원만이라(사용자 결정 11-17) 신원이 없으면 REST 와 같은 unauthorized, 쓰기는 위임 신원을 먼저 본다.
+    ("risk_ledger_overview", {"target_key": "snap:s1"}, "unauthorized"),
+    ("risk_ledger_put_template", {"target_key": "snap:s1", "kind": "columns", "body": {"columns": []}}, "delegation_required"),
+    ("risk_ledger_put_layer", {"target_key": "snap:s1", "name": "층", "order": 1, "rows": {"R-001": {"칸": 1}}},
+     "delegation_required"),
+    ("risk_ledger_build", {"target_key": "snap:s1", "layers": ["ly-1"]}, "delegation_required"),
+    ("risk_ledger_diff", {"target_key": "snap:s1", "version": 2}, "unauthorized"),
+    ("risk_ledger_export", {"target_key": "snap:s1"}, "unauthorized"),
+    ("risk_build_evidence_bundle", {"target_key": "snap:s1", "template": {"name": "틀", "caps": {"칸": 10}, "total_cap": 10}},
+     "delegation_required"),
+    ("risk_get_evidence_bundle", {"bundle_id": "eb_none"}, "unauthorized"),
+    ("risk_get_provenance", {"project_id": "p1"}, "not_visible"),
+    ("risk_ledger_apply_decision", {"target_key": "snap:s1", "decision_text": "결정"}, "delegation_required"),
+    ("risk_numbers_put", {"target_key": "snap:s1", "numbers": []}, "delegation_required"),
+    ("risk_numbers_check", {"target_key": "snap:s1", "text": "12.5 mm"}, "unauthorized"),
+    ("risk_export_report_bundle", {"target_key": "snap:s1"}, "unauthorized"),
 ]
 _HANGUL = re.compile(r"[가-힣]")
 # 인자 이름에 비밀이 오면 게이트웨이·포털 절차·클라이언트 대화 기록에 값이 남는다(작업 지시서 A-11) — 포털 절차의

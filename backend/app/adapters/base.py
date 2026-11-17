@@ -360,7 +360,10 @@ class CallRecorder:
         duration_ms = int((time.monotonic() - began) * 1000)
         call_id = self._next_call_id()
         ok = bool(reply.get("ok"))
-        error = None if ok else str(reply.get("error") or "unknown_error")
+        # 게이트웨이의 읽기 전용 거절(GW-02 — ra_client.gateway_refusal)은 그 글(`read_only: <도구> — <까닭>`)을 오류로 남긴다 — 'tool_error' 낱말만
+        # 남기면 호출 행 · 경고 · 캡처 실패 글에서 무엇이 왜 막혔는지가 사라진다.
+        refusal = reply.get("refusal") if not ok and isinstance(reply.get("refusal"), Mapping) else None
+        error = None if ok else (str(refusal.get("message") or "read_only") if refusal else str(reply.get("error") or "unknown_error"))
         # 이 답 **자신의** 오류 — FallbackRestClient 가 엮은 답은 `own_error` 에 그 호출이 받은 것만 싣는다(건너뛴 행은 None — 부르지도
         # 않았다). 글에 앞선 다리의 ReadTimeout 이 섞여 있어도 이 행이 기다린 것은 아니다(R3-3). HTTP 거절의 본문(detail)에 그 낱말이
         # 있어도 전송 시간 초과가 아니다.
@@ -385,9 +388,12 @@ class CallRecorder:
             "error": error, "contract_ok": contract["contract_ok"],
             "contract_missing": sorted(set(contract["missing"]) | set(contract["type_mismatch"])),
         })
-        return {"ok": ok, "result": reply.get("result"), "call_id": call_id,
-                "http_status": reply.get("http_status"), "error": error,
-                "contract_ok": contract["contract_ok"], "contract_missing": contract["missing"]}
+        out = {"ok": ok, "result": reply.get("result"), "call_id": call_id,
+               "http_status": reply.get("http_status"), "error": error,
+               "contract_ok": contract["contract_ok"], "contract_missing": contract["missing"]}
+        if refusal is not None:
+            out["refusal"] = dict(refusal)
+        return out
 
     def call_ids(self, source_kind: str | None = None) -> list[str]:
         """지금까지 남긴 call_id 목록(kind 로 거를 수 있다). AdapterResult.call_ids 의 값이다."""
@@ -476,6 +482,8 @@ def probe_app_version(recorder: Any, kind: str, *, app_key: str | None = None) -
         return dict(UNKNOWN_APP_VERSION)
     app_block = body.get("app") if isinstance(body.get("app"), Mapping) else {}
     version = body.get("version") or body.get("app_version") or app_block.get("version")
-    extra = {k: body[k] for k in ("build", "commit", "started_at", "schema_version") if k in body}
+    # env — 소스 앱의 운영 · 개발 표지(DynaForge system_status 의 env: development | production). provenance(RK-06)가 '개발 박스를 읽었나' 를
+    # 이 값으로 본다. 없으면 싣지 않는다(지어내지 않는다).
+    extra = {k: body[k] for k in ("build", "commit", "started_at", "schema_version", "env") if k in body}
     return {"version": str(version) if version else None, "captured_via": tool if version else None,
             "extra": extra or None}

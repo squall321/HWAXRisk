@@ -99,6 +99,17 @@ _SINCE_COLS: dict[str, tuple[str, ...]] = {
     "rr_unit_live": ("updated_at", "created_at"),
     # v7(F2 단면 자리 찾기) — 변환 등록부는 고쳐 쓰는 행이라 updated_at 이 먼저다.
     "rr_board_transforms": ("updated_at", "created_at"),
+    # v8(판정표 원장 — HWAXPortal docs/request-1117) — 틀 · 층 · 판 · 묶음 · 내보내기 기록은 한 번 쓰고 고치지 않는다. 판의 행 · 덮은 칸은 시각 열이
+    # 없는 자식 표라 전부 싣는다. 숫자 원장 · 금지값은 통째로 갈아 쓰는 행이라 updated_at 이다.
+    "rr_ledger_templates": ("created_at",),
+    "rr_ledger_layers": ("created_at",),
+    "rr_ledger_versions": ("created_at",),
+    "rr_ledger_rows": (),
+    "rr_ledger_cells": (),
+    "rr_evidence_bundles": ("created_at",),
+    "rr_ledger_numbers": ("updated_at",),
+    "rr_ledger_forbidden": ("updated_at",),
+    "rr_ledger_exports": ("created_at",),
 }
 
 

@@ -340,13 +340,16 @@ V4_EXPORTED = ("rr_unit_builds", "rr_units", "rr_expert_reports", "rr_review_cel
 V5_EXPORTED = ("rr_issues", "rr_summaries", "rr_reports", "rr_close_acks", "rr_unit_live")
 # v7(F2 단면 자리 찾기) — 보드 ↔ CAD 변환 등록부(docs/f2-locate-for-section.md 2절). v5 표 뒤에 붙는다.
 V7_EXPORTED = ("rr_board_transforms",)
+# v8(판정표 원장 — HWAXPortal docs/request-1117) — 틀 · 층 · 판 · 행 · 덮은 칸 · 근거 묶음 · 숫자 원장 · 금지값 · 내보내기 기록. v7 표 뒤에 붙는다.
+V8_EXPORTED = ("rr_ledger_templates", "rr_ledger_layers", "rr_ledger_versions", "rr_ledger_rows", "rr_ledger_cells",
+               "rr_evidence_bundles", "rr_ledger_numbers", "rr_ledger_forbidden", "rr_ledger_exports")
 
 
 def test_v4_tables_ride_the_export_except_the_local_card_packs(seeded, empty_store):
     """새 표 여섯은 반출 표 목록에서 v5 표 앞에 붙고 since 열이 실제 열이다. 카드 묶음은 박스 지역 사본이라 목록에 없다.
     새 표가 빈 원장도 빈 DB 로 왕복해 같은 행 수·해시다(행이 든 왕복은 C2 의 생산자가 생긴 뒤 본다)."""
     assert export.LOCAL_ONLY_TABLES == {"rr_card_packs"}
-    head = export.TABLE_ORDER[:-len(V5_EXPORTED) - len(V7_EXPORTED)]
+    head = export.TABLE_ORDER[:-len(V5_EXPORTED) - len(V7_EXPORTED) - len(V8_EXPORTED)]
     assert head[-len(V4_EXPORTED):] == V4_EXPORTED
     assert "rr_card_packs" not in export.TABLE_ORDER
     for table in V4_EXPORTED:
@@ -356,7 +359,7 @@ def test_v4_tables_ride_the_export_except_the_local_card_packs(seeded, empty_sto
     assert export._EXPORT_SKIP_COLUMNS["rr_review_calls"] == ("result_gz",)
 
     body = "".join(export.iter_lines(seeded, ALICE, 0))
-    assert json.loads(body.splitlines()[0])["schema_version"] == LATEST_SCHEMA == 7      # v7 — F2 단면 자리 찾기
+    assert json.loads(body.splitlines()[0])["schema_version"] == LATEST_SCHEMA == 8      # v8 — 판정표 원장
     assert not any(json.loads(ln)["table"] == "rr_card_packs" for ln in body.splitlines()[1:])
     export.import_jsonl(empty_store, ALICE, body)
     here, there = export.row_digest(empty_store, ALICE), export.row_digest(seeded, ALICE)
@@ -369,7 +372,8 @@ def test_v5_tables_ride_the_export_at_the_end_with_real_since_columns(seeded, em
     """v5 새 표 다섯은 반출 표 목록에서 v7 표 앞에 붙고(박스 지역 표 없음), since 열이 실제 열이며 owner_sub 가 있다. 고쳐 쓰는 행은
     updated_at 이 먼저고, 완결 확인은 취소 시각(revoked_at)이 먼저다 — 취소가 since 반출에서 빠지지 않게. 새 표가 빈 v5 원장도
     빈 DB 로 왕복해 같은 행 수·해시다(행이 든 왕복은 각 표의 생산자 걸음이 본다 — tests/rr/test_v5_rows.py)."""
-    assert export.TABLE_ORDER[-len(V5_EXPORTED) - len(V7_EXPORTED):-len(V7_EXPORTED)] == V5_EXPORTED
+    tail = len(V7_EXPORTED) + len(V8_EXPORTED)
+    assert export.TABLE_ORDER[-len(V5_EXPORTED) - tail:-tail] == V5_EXPORTED
     assert not export.LOCAL_ONLY_TABLES & set(V5_EXPORTED)
     for table in V5_EXPORTED:
         cols, _ = export._table_meta(seeded, table)
@@ -388,11 +392,11 @@ def test_v5_tables_ride_the_export_at_the_end_with_real_since_columns(seeded, em
 
 
 def test_v7_transform_registry_rides_the_export_without_this_boxs_checks(seeded, empty_store):
-    """v7 변환 등록부는 반출 표 목록 끝에 붙고 since 열이 실제 열이며 owner_sub 가 있다(남의 행은 실리지 않는다). 검증 칸(상태 · 오차 · 근거 ·
+    """v7 변환 등록부는 반출 표 목록에서 v8 표 앞에 붙고 since 열이 실제 열이며 owner_sub 가 있다(남의 행은 실리지 않는다). 검증 칸(상태 · 오차 · 근거 ·
     강제 사유)은 이 박스에서 그 사람의 PAT 로 잰 것이라 반출에 없고, 손으로 만든 줄이 'verified' 를 실어도 들여오기는 받지 않는다 — 들인 행은
     status 가 NULL 이고(위치 찾기가 쓰지 않는다) 뺀 줄 수를 transform_checks_dropped 로 말한다. 항목 위치(location_json)는 등록부 행과
     함께 왕복한다."""
-    assert export.TABLE_ORDER[-len(V7_EXPORTED):] == V7_EXPORTED
+    assert export.TABLE_ORDER[-len(V7_EXPORTED) - len(V8_EXPORTED):-len(V8_EXPORTED)] == V7_EXPORTED
     cols, _ = export._table_meta(seeded, "rr_board_transforms")
     assert export._SINCE_COLS["rr_board_transforms"] == ("updated_at", "created_at") and "owner_sub" in cols
     for owner, at in ((ALICE, 1_000), (BOB, 9_000)):
@@ -535,3 +539,21 @@ def test_import_route_inserts_then_reports_mismatch(client, wired):
 
 def test_import_route_is_401_for_anonymous(client, wired):
     assert client.post("/api/import", content=b"{}\n").status_code == 401
+
+
+def test_v8_ledger_tables_ride_the_export_at_the_end_with_real_since_columns(seeded, empty_store):
+    """v8 판정표 원장의 새 표 아홉은 반출 표 목록 끝에 붙고(박스 지역 표 없음) since 열이 실제 열이며 대상 열쇠 · owner_sub 가 있다 — 반출 ·
+    들여오기가 대상의 과제로 거른다. 판의 행 · 덮은 칸은 시각 열이 없는 자식 표라 since 와 상관없이 다 싣는다. 새 표가 빈 원장도 빈 DB 로
+    왕복해 같은 행 수 · 해시다(행이 든 왕복은 tests/test_ledger.py 가 생산자 함수로 본다)."""
+    assert export.TABLE_ORDER[-len(V8_EXPORTED):] == V8_EXPORTED
+    assert not export.LOCAL_ONLY_TABLES & set(V8_EXPORTED)
+    for table in V8_EXPORTED:
+        cols, _ = export._table_meta(seeded, table)
+        assert table in export._SINCE_COLS and set(export._SINCE_COLS[table]) <= set(cols), table
+        assert "owner_sub" in cols and "target_key" in cols, table
+    assert export._SINCE_COLS["rr_ledger_rows"] == () and export._SINCE_COLS["rr_ledger_cells"] == ()
+    body = "".join(export.iter_lines(seeded, ALICE, 0))
+    export.import_jsonl(empty_store, ALICE, body)
+    here, there = export.row_digest(empty_store, ALICE), export.row_digest(seeded, ALICE)
+    assert {t: here[t] for t in V8_EXPORTED} == {t: there[t] for t in V8_EXPORTED}
+    assert all(here[t][0] == 0 for t in V8_EXPORTED)

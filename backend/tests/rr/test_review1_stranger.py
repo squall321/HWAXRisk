@@ -21,16 +21,22 @@ import pytest
 from fastapi.routing import APIRoute
 
 import app.mcp_server as srv
-from app import export, metrics, routes
+from app import export, ledger_routes, metrics, routes
 from app.errors import AppError
 from app.risk_store import RiskStore
 from tests import factories
+from tests import ledger_support
 from tests.rr.test_review1_closure import _chained
 from tests.synth import review_rig as rig
 
 OWNER = rig.OWNER
 OTHER = "stranger@example.com"
 CAPS = {"risk_issue_panel_cap": 1, "risk_issue_panel_hard_cap": 1}
+LEDGER_TEMPLATE = {"name": "남 시험 틀", "caps": {"부품": 2000, "최종 등급": 2000}, "total_cap": 4000}
+LEDGER_LAYER = {"name": "남의 층", "order": 1, "rows": {"R-001": {"비고": "남이 적어 본다"}}}
+LEDGER_MAPPING = {"fields": {"claim": "비고"}}
+LEDGER_NUMBERS = [{"name": "합성 값", "value": 12.5, "unit": "mm"}]
+LEDGER_DECISION = '```json\n{"schema": "risk_spec", "findings": [{"id": "F1", "code": "R-001", "claim": "결정의 주장"}]}\n```'
 
 
 # ---------------------------------------------------------------- 원장
@@ -55,7 +61,17 @@ def _ids(store: RiskStore, key: str) -> dict[str, str]:
                              " ORDER BY family_key LIMIT 1", (key,))["family_key"]
     clusters = [r["cluster_key"] for r in store.query("SELECT cluster_key FROM rr_registry WHERE target_key = ? AND"
                                                        " family_key = ? ORDER BY cluster_key", (key, family))]
+    # 판정표 원장(HWAXPortal docs/request-1117) — 칸 정의 · 판 둘 · 근거 묶음 하나를 주인의 라우트로 세운다.
+    with factories.routes_store(store):
+        ledger_routes.put_template(key, "columns", ledger_support.COLUMNS, ident=owner)
+        ledger_routes.put_template(key, "facts", {"keys": [{"key": "id", "from": "@code"}, {"key": "grade", "from": "최종 등급"}]},
+                                   ident=owner)
+        ledger_routes.post_version(key, ledger_routes.BuildBody(layers=[{"name": "기준 행", "order": 10, "rows": ledger_support.BASE_ROWS}]),
+                                   ident=owner)
+        ledger_routes.post_version(key, ledger_routes.BuildBody(base_version=1, layers=ledger_support.LAYERS), ident=owner)
+        bundle = ledger_routes.post_evidence_bundle(key, ledger_routes.BundleBody(template=LEDGER_TEMPLATE), ident=owner)["bundle_id"]
     return {
+        "bundle": bundle,
         "project": target["project_id"], "code": project["code"], "target": key, "diff": target["ref_id"],
         "base_snapshot": diff["base_snapshot_id"], "target_snapshot": diff["target_snapshot_id"],
         "job": store.query_one("SELECT id FROM rr_jobs WHERE target_key = ? AND mode = 'reviews'", (key,))["id"],
@@ -269,6 +285,26 @@ CASES: dict[tuple[str, str], tuple[Call, tuple[str, ...]]] = {
     ("PUT", P + "/curation/{queue_id}"): (
         lambda i, who: routes.put_curation(i["queue"], routes.CurationDecisionBody(decision="confirmed", reason="확인"),
                                            ident=who), ("queue",)),
+    # 판정표 원장(HWAXPortal docs/request-1117) — 쓰기 문(_target_writer · 대상 행)이 원장을 고치기 전이다.
+    ("PUT", P + "/targets/{target_key}/ledger/templates/{kind}"): (
+        lambda i, who: ledger_routes.put_template(i["target"], "columns", ledger_support.COLUMNS, ident=who), ("target",)),
+    ("POST", P + "/targets/{target_key}/ledger/layers"): (
+        lambda i, who: ledger_routes.post_layer(i["target"], ledger_routes.LayerBody(**LEDGER_LAYER), ident=who), ("target",)),
+    ("POST", P + "/targets/{target_key}/ledger/versions"): (
+        lambda i, who: ledger_routes.post_version(i["target"], ledger_routes.BuildBody(base_version=1, layers=[LEDGER_LAYER]),
+                                                  ident=who), ("target",)),
+    ("POST", P + "/targets/{target_key}/evidence-bundles"): (
+        lambda i, who: ledger_routes.post_evidence_bundle(i["target"], ledger_routes.BundleBody(template=LEDGER_TEMPLATE),
+                                                          ident=who), ("target",)),
+    ("POST", P + "/targets/{target_key}/ledger/layers/from-decision"): (
+        lambda i, who: ledger_routes.post_layer_from_decision(i["target"], ledger_routes.DecisionBody(
+            decision_text=LEDGER_DECISION, mapping=LEDGER_MAPPING), ident=who), ("target",)),
+    ("PUT", P + "/targets/{target_key}/numbers"): (
+        lambda i, who: ledger_routes.put_numbers(i["target"], ledger_routes.NumbersBody(numbers=LEDGER_NUMBERS), ident=who), ("target",)),
+    # 숫자 점검은 읽기다(본문이 길어 POST) — 남에게는 없는 대상과 같은 404 다.
+    ("POST", P + "/targets/{target_key}/numbers/check"): (
+        lambda i, who: ledger_routes.post_numbers_check(i["target"], ledger_routes.NumbersCheckBody(text="R-001 은 12.5 mm 다"),
+                                                        ident=who), ("target",)),
 }
 
 
@@ -293,8 +329,11 @@ def _owner_ack(ids: dict, store: RiskStore) -> Any:
                                    ident=factories.ident(OWNER))
 
 
+ROUTERS = (routes.router, ledger_routes.router)          # 판정표 원장 라우터(RK-01 ~ RK-06)도 같은 표에 든다
+
+
 def _mutating_routes() -> set[tuple[str, str]]:
-    return {(method, route.path) for route in routes.router.routes if isinstance(route, APIRoute)
+    return {(method, route.path) for router in ROUTERS for route in router.routes if isinstance(route, APIRoute)
             for method in route.methods if method in ("POST", "PUT", "PATCH", "DELETE")}
 
 
@@ -392,6 +431,7 @@ GET_EXEMPT: dict[tuple[str, str], str] = {
     ("GET", P + "/curation"): "제 큐레이션 큐 — id 인자가 없다(아래 시험)",
     ("GET", P + "/patterns"): "제 패턴 — id 인자가 없다(아래 시험)",
     ("GET", P + "/ecad/boards"): "ECAD 보드 찾기 — ODB 허브 find_job 후보뿐이고 과제 · 대상 인자가 없다(아래 시험)",
+    ("GET", P + "/taxonomy/labels"): "공용 표기 규칙(RK-07) — 인자가 없다",
 }
 GET_CASES: dict[tuple[str, str], tuple[Call, tuple[str, ...]]] = {
     ("GET", P + "/projects/{project_id}"): (lambda i, who: routes.get_project(i["project"], ident=who), ("project",)),
@@ -451,13 +491,26 @@ GET_CASES: dict[tuple[str, str], tuple[Call, tuple[str, ...]]] = {
     ("GET", P + "/panels/{panel_id}/transcript"): (
         lambda i, who: routes.get_panel_transcript(i["panel"], ident=who), ("panel",)),
     ("GET", P + "/panels/{panel_id}/brief"): (lambda i, who: routes.get_panel_brief(i["panel"], ident=who), ("panel",)),
+    # 판정표 원장(HWAXPortal docs/request-1117) — 대상의 구성원이 읽는다.
+    ("GET", P + "/targets/{target_key}/ledger"): (lambda i, who: ledger_routes.get_ledger(i["target"], ident=who), ("target",)),
+    ("GET", P + "/targets/{target_key}/ledger/versions/{version}/diff"): (
+        lambda i, who: ledger_routes.get_version_diff(i["target"], 2, ident=who), ("target",)),
+    ("GET", P + "/targets/{target_key}/ledger/versions/{version}/export"): (
+        lambda i, who: ledger_routes.get_version_export(i["target"], 2, fmt="json", ident=who), ("target",)),
+    ("GET", P + "/evidence-bundles/{bundle_id}"): (
+        lambda i, who: ledger_routes.get_evidence_bundle(i["bundle"], ident=who), ("bundle",)),
+    ("GET", P + "/projects/{project_id}/provenance"): (
+        lambda i, who: ledger_routes.get_provenance(i["project"], ident=who), ("project",)),
+    ("GET", P + "/targets/{target_key}/ledger/versions/{version}/report-bundle"): (
+        lambda i, who: ledger_routes.get_report_bundle(i["target"], 2, ident=who), ("target",)),
 }
 # 남이 받는 답 — 기본은 없는 것과 같은 404 다. 과제로 거르는 목록은 남의 과제를 주면 없는 과제를 준 때와 같은 빈 목록이다.
 GET_EXPECT: dict[tuple[str, str], int] = {("GET", P + "/diffs"): 200, ("GET", P + "/targets"): 200, ("GET", P + "/reports"): 200}
 
 
 def _reading_routes() -> set[tuple[str, str]]:
-    return {("GET", route.path) for route in routes.router.routes if isinstance(route, APIRoute) and "GET" in route.methods}
+    return {("GET", route.path) for router in ROUTERS for route in router.routes if isinstance(route, APIRoute)
+            and "GET" in route.methods}
 
 
 def test_every_reading_route_in_the_router_is_in_this_table():
@@ -566,6 +619,24 @@ MCP_CASES: dict[str, tuple[Callable[[dict], Any], tuple[str, ...]]] = {
     "risk_set_item_location": (lambda i: srv.risk_set_item_location(project_id=i["project"], part=None,
                                                                     point={"x": 1.0, "y": 2.0, "z": 3.0},
                                                                     finding_id=i["human_finding"]), ("project", "human_finding")),
+    # 판정표 원장(HWAXPortal docs/request-1117) — 읽기는 MCP 시야 문(not_visible), 쓰기는 웹 라우트의 쓰기 문(E404)이다.
+    "risk_ledger_overview": (lambda i: srv.risk_ledger_overview(target_key=i["target"]), ("target",)),
+    "risk_ledger_put_template": (lambda i: srv.risk_ledger_put_template(target_key=i["target"], kind="columns",
+                                                                        body=ledger_support.COLUMNS), ("target",)),
+    "risk_ledger_put_layer": (lambda i: srv.risk_ledger_put_layer(target_key=i["target"], **LEDGER_LAYER), ("target",)),
+    "risk_ledger_build": (lambda i: srv.risk_ledger_build(target_key=i["target"], base_version=1, layers=[LEDGER_LAYER]),
+                          ("target",)),
+    "risk_ledger_diff": (lambda i: srv.risk_ledger_diff(target_key=i["target"], version=2), ("target",)),
+    "risk_ledger_export": (lambda i: srv.risk_ledger_export(target_key=i["target"], version=2), ("target",)),
+    "risk_build_evidence_bundle": (lambda i: srv.risk_build_evidence_bundle(target_key=i["target"], template=LEDGER_TEMPLATE),
+                                   ("target",)),
+    "risk_get_evidence_bundle": (lambda i: srv.risk_get_evidence_bundle(bundle_id=i["bundle"]), ("bundle",)),
+    "risk_get_provenance": (lambda i: srv.risk_get_provenance(project_id=i["project"]), ("project",)),
+    "risk_ledger_apply_decision": (lambda i: srv.risk_ledger_apply_decision(target_key=i["target"], decision_text=LEDGER_DECISION,
+                                                                            mapping=LEDGER_MAPPING), ("target",)),
+    "risk_numbers_put": (lambda i: srv.risk_numbers_put(target_key=i["target"], numbers=LEDGER_NUMBERS), ("target",)),
+    "risk_numbers_check": (lambda i: srv.risk_numbers_check(target_key=i["target"], text="R-001 은 12.5 mm 다"), ("target",)),
+    "risk_export_report_bundle": (lambda i: srv.risk_export_report_bundle(target_key=i["target"], version=2), ("target",)),
 }
 
 

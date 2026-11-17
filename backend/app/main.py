@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app import config, engine_client, identity, ra_client, review_quality, review_runner
 from app.errors import AppError
+from app.ledger_routes import router as ledger_router
 from app.mcp_server import mcp
 from app.risk_store import close_store, get_store
 from app.routes import PAT_MIN_REMAINING_S, PORTAL_PAT_WANTED, router as api_router
@@ -283,6 +284,7 @@ def health_warnings() -> list[str]:
 
 # 모든 /api/* 는 StaticFiles 마운트보다 먼저 등록한다.
 app.include_router(api_router)
+app.include_router(ledger_router)          # 판정표 원장(RK-01 ~ RK-06 — HWAXPortal docs/request-1117)
 
 # MCP streamable HTTP — streamable_http_app() 의 실체는 Route('/mcp', StreamableHTTPASGIApp) 하나뿐이라 그 Route 를
 # 메인 라우터에 그대로 이식하면 리다이렉트 없이 exact '/mcp' 로 매칭된다(MaterialTwinWeb 패턴).

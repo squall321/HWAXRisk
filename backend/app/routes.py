@@ -23,10 +23,11 @@ from pydantic import BaseModel, Field, model_validator
 from app import brief as brief_module
 from app import character, config, diff as diff_module
 from app import export as export_module
-from app import identity, ir_builder, learning, metrics, narrative, planner, ra_client, requirements, runner, sameas, taxonomy
+from app import identity, ir_builder, labels, learning, metrics, narrative, planner, ra_client, requirements, runner, sameas, taxonomy
 from app import expert_report, review_cells, review_runner, sp_subject
 from app import board_transform as board_transform_module
 from app import locate as locate_module
+from app import provenance as provenance_module
 from app import roster as roster_module
 from app import state as state_module
 from app import units as units_module
@@ -659,6 +660,13 @@ def get_taxonomy() -> dict:
     return {**taxonomy.load_taxonomy(), "mech_owners": taxonomy.load_json(taxonomy.MECH_OWNERS_ASSET)}
 
 
+@router.get("/taxonomy/labels")
+def get_taxonomy_labels() -> dict:
+    """축별 표기 규칙(RK-07) — 등급 · 증거 유형 · 주의 등급 · 판정의 값 → 표시 글과 판정의 SP 키, 단독 대문자 검사 규칙. 어휘라 신원 없이 연다
+    (`GET /meta/taxonomy` 와 같다)."""
+    return labels.labels_payload()
+
+
 @router.get("/meta/adapters")
 def get_adapters(ident: identity.Identity = Depends(identity.current)) -> dict:
     """`{apps:[{app_key, kind, tools_ok, choices[]}]}`(plan §8.2.3·§8.2.4 ProjectPage 소스 카드).
@@ -694,7 +702,8 @@ def get_runtime(request: Request, ident: identity.Identity = Depends(identity.cu
     return {
         # 검토 손잡이 + PAT 자동 등록 손잡이(HWAXRISK_PAT_RENEW_BEFORE_S · HWAXRISK_PAT_AUTO_RETRY_S) — 같은 knobs.env 에서 읽는다.
         "knobs": {**config.review_knobs(), **config.pat_knobs(), **config.issue_knobs(),   # + 쟁점 손잡이(M3 S3-6)
-                  **config.panel_knobs()},   # + 패널 손잡이(외부 사례 DB 지정 도구 — HWAXPortal docs/siren-delib RK-12)
+                  **config.panel_knobs(),    # + 패널 손잡이(외부 사례 DB 지정 도구 — HWAXPortal docs/siren-delib RK-12)
+                  **config.ledger_knobs()},  # + 근거 묶음 상한(HWAXPortal docs/request-1117 RK-02)
         "knobs_file": str(config.settings.data_dir / config.KNOBS_FILENAME),
         # 박스 자격 글(GET /api/me 의 box.reasons)이 '데이터 디렉터리' 라고만 하는 그 경로(SEC-6 — 화면 글은 경로를 싣지 않는다).
         "data_dir": str(config.settings.data_dir),
@@ -1510,6 +1519,17 @@ TRANSFER_DERIVED: tuple[tuple[str, str], ...] = (
     ("rr_reports", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_close_acks", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
     ("rr_unit_live", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    # v8(판정표 원장 — HWAXPortal docs/request-1117) — 틀 · 층 · 판 · 행 · 덮은 칸 · 근거 묶음 · 숫자 원장 · 금지값 · 내보내기 기록. 빠뜨리면 이양 뒤
+    # 새 주인의 읽기(대상 주인의 행) · 반출에서 판정표가 사라진다(반대 검토 M2).
+    ("rr_ledger_templates", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_layers", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_versions", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_rows", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_cells", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_evidence_bundles", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_numbers", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_forbidden", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_exports", "target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
 )
 
 
@@ -1960,6 +1980,25 @@ PURGE_BLANK_SQL: tuple[tuple[str, str], ...] = (
     # v7(F2 단면 자리 찾기) — 변환 등록부의 CAD 몸체 경로(부품 이름이 든다) · 검증 근거(경로 · 좌표) · 강제 사유. 변환 값과 행은 남는다.
     ("rr_board_transforms", "UPDATE rr_board_transforms SET board_body_path = '', verify_json = NULL, reason = NULL"
                             " WHERE project_id = ?"),
+    # v8(판정표 원장 — HWAXPortal docs/request-1117) — 칸 이름 · 셀 값 · 층 이름 · 원천 파일 · 근거 묶음 본문 · 숫자 정의 · 금지 사유는 과제 고유
+    # 낱말이 든다. 판 · 층 · 행의 머리(판 번호 · 차례 · 수 · 지문)와 코드는 남는다. 근거 묶음 본문은 NOT NULL 이라 빈 목록의 gzip 이다.
+    ("rr_ledger_templates", "UPDATE rr_ledger_templates SET body_json = '{}'"
+                            " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_layers", "UPDATE rr_ledger_layers SET name = '', source_file = NULL, rows_json = '{}', meta_json = NULL"
+                         " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_versions", "UPDATE rr_ledger_versions SET layers_json = '[]', notice = '[purged]'"
+                           " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_rows", "UPDATE rr_ledger_rows SET cells_json = '{}'"
+                       " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_cells", "UPDATE rr_ledger_cells SET layer_name = '', source_file = NULL, col = '', value_json = NULL,"
+                        " prev_json = NULL WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_evidence_bundles", f"UPDATE rr_evidence_bundles SET evidence_gz = X'{_EMPTY_PAGES_GZ.hex()}', template_json = '{{}}',"
+                            " per_field_json = '{}'"
+                            " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    # 숫자 원장 · 금지값은 열쇠(이름 · 리비전 · 값)부터 과제 글이다 — 행을 지운다(반대 검토 L2 · 2차 5). 열쇠를 행 번호 글('[purged:<행>]')로 갈던
+    # 때는 그 글을 이름으로 적은 행이 기본 키를 겹치게 해 회수가 통째로 멈췄다. 회수된 대상은 읽기 · 쓰기가 409 라 수를 남길 곳도 없다.
+    ("rr_ledger_numbers", "DELETE FROM rr_ledger_numbers WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_forbidden", "DELETE FROM rr_ledger_forbidden WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
 )
 
 
@@ -2666,13 +2705,16 @@ def locate_payload(project_id: str, email: str, *, reads: Callable[[str], bool],
             item = locate_module.item_row(store, project, finding_id=input_.get("finding_id"), target_key=input_.get("target_key"),
                                           cluster_key=input_.get("cluster_key"))
             _item_readable(store, item, project_id, reads)
-            return locate_module.locate_item(store, project, item, input_=input_, odb_job_id=board["odb_job_id"],
-                                             stepforge_project_id=board["stepforge_project_id"], channel_factory=lazy)
-        return locate_module.locate_on_board(store, project, input_=input_, odb_job_id=board["odb_job_id"],
-                                             stepforge_project_id=board["stepforge_project_id"], channel_factory=lazy,
-                                             odb_app=board["odb_app"])
+            out = locate_module.locate_item(store, project, item, input_=input_, odb_job_id=board["odb_job_id"],
+                                            stepforge_project_id=board["stepforge_project_id"], channel_factory=lazy)
+        else:
+            out = locate_module.locate_on_board(store, project, input_=input_, odb_job_id=board["odb_job_id"],
+                                                stepforge_project_id=board["stepforge_project_id"], channel_factory=lazy,
+                                                odb_app=board["odb_app"])
     finally:
         lazy.close()
+    # 원천의 출처 표지(RK-06 — HWAXPortal docs/request-1117) — 자리를 낸 MCAD 사본이 어디까지 처리된 것인지 함께 본다(웹 · MCP 같은 답).
+    return {**out, "provenance": provenance_module.project_provenance(store, project_id)}
 
 
 @router.get("/projects/{project_id}/locate")
@@ -5295,12 +5337,12 @@ def post_report(target_key: str, body: ReportBody = ReportBody(),
 
 
 # ---------------------------------------------------------------- 어휘 쪽(재설계 M3 S3-10 — MCP risk_taxonomy 의 와이어 한도)
-TAXONOMY_PARTS: tuple[str, ...] = ("index", "mechanism", "mech_owners", "maps")
+TAXONOMY_PARTS: tuple[str, ...] = ("index", "mechanism", "mech_owners", "maps", "labels")
 
 
 def taxonomy_payload(part: str = "index", *, offset: int = 0, limit: int | None = None) -> dict:
     """통제 어휘를 쪽으로 — index(메커니즘 밖의 축 전부 · 어휘 색인 · 배정표 머리) · mechanism(메커니즘 행) · mech_owners(메커니즘 →
-    영역 배정표와 승인 상태 review_status) · maps(동의어·실패 사상). 행이 긴 쪽은 limit·offset 으로 나눈다(자르지 않는다)."""
+    영역 배정표와 승인 상태 review_status) · maps(동의어·실패 사상) · labels(축별 표기 규칙 — RK-07). 행이 긴 쪽은 limit·offset 으로 나눈다(자르지 않는다)."""
     if part not in TAXONOMY_PARTS:
         raise AppError("E100", f"part 는 {list(TAXONOMY_PARTS)} 가운데 하나다 — {part!r}.", 422)
     doc = taxonomy.load_taxonomy()
@@ -5314,6 +5356,9 @@ def taxonomy_payload(part: str = "index", *, offset: int = 0, limit: int | None 
                 "vocab": taxonomy.vocab_index(), "promotable_axes": character.promotable_axes()}
     if part == "maps":
         return {**head, "synonyms": doc.get("synonyms"), "failure_map": doc.get("failure_map"), "voc_map": doc.get("voc_map")}
+    if part == "labels":
+        # 축별 표기 규칙(RK-07 — HWAXPortal docs/request-1117) — 등급 · 증거 유형 · 주의 등급 · 판정의 표시 글과 SP 판정 키.
+        return {**head, "labels": labels.labels_payload()}
     rows = (list((doc.get("axes") or {}).get("mechanism") or ()) if part == "mechanism"
             else list(taxonomy.load_json(taxonomy.MECH_OWNERS_ASSET).get("rows") or ()))
     start = max(0, int(offset or 0))

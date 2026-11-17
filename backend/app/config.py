@@ -218,8 +218,16 @@ DEFAULT_CASE_TOOLS = ("siren_list_groups", "siren_search_cases", "siren_get_case
 PANEL_KNOBS: tuple[Knob, ...] = (
     Knob("HWAXRISK_CASE_TOOLS", "risk_case_tools", DEFAULT_CASE_TOOLS, "tools"),
 )
+# 판정표 근거 묶음의 상한(HWAXPortal docs/request-1117 RK-02 · contracts §1) — 심의 엔진이 받는 근거 항목 수 · 합 자수(11-17 deliberate_jobs limits
+# 120 · 135,538)다. 넘는 묶음은 만들 때 422 로 거절한다(엔진이 뒤쪽 항목을 말없이 빼지 않게). 엔진 상한이 바뀌면 박스에서 이 값을 맞춘다.
+DEFAULT_BUNDLE_MAX_ITEMS = 120
+DEFAULT_BUNDLE_MAX_CHARS = 135_538
+LEDGER_KNOBS: tuple[Knob, ...] = (
+    Knob("HWAXRISK_BUNDLE_MAX_ITEMS", "risk_bundle_max_items", DEFAULT_BUNDLE_MAX_ITEMS, minimum=2),
+    Knob("HWAXRISK_BUNDLE_MAX_CHARS", "risk_bundle_max_chars", DEFAULT_BUNDLE_MAX_CHARS, minimum=1),
+)
 # knobs.env 가 읽는 손잡이 전부 — 출처(env · knobs.env · default)와 검증이 같다.
-BOX_KNOBS: tuple[Knob, ...] = REVIEW_KNOBS + PAT_KNOBS + ISSUE_KNOBS + PANEL_KNOBS
+BOX_KNOBS: tuple[Knob, ...] = REVIEW_KNOBS + PAT_KNOBS + ISSUE_KNOBS + PANEL_KNOBS + LEDGER_KNOBS
 # tools 손잡이 — 도구 이름의 꼴(게이트웨이 노출 이름)과 수 상한(포털 DelibOpts.tools 의 max_length 와 같은 6), 끄는 낱말.
 _KNOB_TOOL_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
 KNOB_TOOLS_MAX = 6
@@ -329,6 +337,8 @@ class Settings:
     risk_summary_max_charged: int = 2
     risk_summary_infra_max: int = 6
     risk_case_tools: tuple[str, ...] = DEFAULT_CASE_TOOLS
+    risk_bundle_max_items: int = DEFAULT_BUNDLE_MAX_ITEMS
+    risk_bundle_max_chars: int = DEFAULT_BUNDLE_MAX_CHARS
     knob_sources: tuple[tuple[str, str], ...] = ()
 
 
@@ -602,6 +612,21 @@ def panel_knobs(cfg: object | None = None) -> dict[str, dict]:
     sources = dict(getattr(cfg, "knob_sources", ()) or ())
     return {knob.env: {"value": list(getattr(cfg, knob.attr, knob.default)), "source": sources.get(knob.env, "default")}
             for knob in PANEL_KNOBS}
+
+
+def ledger_knobs(cfg: object | None = None) -> dict[str, dict]:
+    """GET /api/meta/runtime 의 `knobs` 에 더하는 판정표 근거 묶음 상한(RK-02) — {환경변수 이름: {value, source}}."""
+    cfg = settings if cfg is None else cfg
+    sources = dict(getattr(cfg, "knob_sources", ()) or ())
+    return {knob.env: {"value": getattr(cfg, knob.attr, knob.default), "source": sources.get(knob.env, "default")}
+            for knob in LEDGER_KNOBS}
+
+
+def bundle_limits(cfg: object | None = None) -> dict[str, int]:
+    """근거 묶음 상한 — {items, chars}(엔진 deliberate_jobs limits 와 같은 값이 기본이다)."""
+    cfg = settings if cfg is None else cfg
+    return {"items": int(getattr(cfg, "risk_bundle_max_items", DEFAULT_BUNDLE_MAX_ITEMS)),
+            "chars": int(getattr(cfg, "risk_bundle_max_chars", DEFAULT_BUNDLE_MAX_CHARS))}
 
 
 def case_tools_knob(cfg: object | None = None) -> tuple[str, ...]:

@@ -19,7 +19,7 @@ from urllib.parse import quote
 
 from pydantic import BaseModel, ValidationError
 
-from app import brief, config, identity, planner, review_cells, review_ops, review_runner, routes, runner
+from app import brief, config, identity, planner, provenance, review_cells, review_ops, review_runner, routes, runner
 from app import roster as roster_module
 from app import units as units_module
 from app import state as state_module
@@ -827,7 +827,9 @@ def next_step(ident: identity.Identity, *, project_id: str | None = None) -> dic
             steps = _viewer_steps(steps, blocked)
         return {**head, "project": {**{k: project[k] for k in ("id", "code", "name", "stage", "predecessor_project_id")},
                                     "my_role": role},
-                "web": web, "where": where, "blocked": blocked, "next": steps, "notes": notes, "facts": facts}
+                "web": web, "where": where, "blocked": blocked, "next": steps, "notes": notes, "facts": facts,
+                # 원천의 출처 표지(RK-06) — 가장 새 스냅샷(없으면 원천 카드)의 앱 키 · 단계 신호 · 판 · 환경 · 개수와 경고.
+                "provenance": provenance.project_provenance(store, project_id)}
 
     # 1. 소스
     if not sources:

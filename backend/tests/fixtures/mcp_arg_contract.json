@@ -414,6 +414,135 @@
     "target_key": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Target Key"},
     "cluster_key": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Cluster Key"}
    }
+  },
+  "risk_ledger_overview": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["target_key"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"}
+   }
+  },
+  "risk_ledger_put_template": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["kind", "POSITIONAL_OR_KEYWORD"], ["body", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["body", "kind", "target_key"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"},
+    "kind": {"title": "Kind", "type": "string"},
+    "body": {"additionalProperties": true, "title": "Body", "type": "object"}
+   }
+  },
+  "risk_ledger_put_layer": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["name", "POSITIONAL_OR_KEYWORD"], ["order", "POSITIONAL_OR_KEYWORD"], ["rows", "POSITIONAL_OR_KEYWORD"], ["source_file", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["name", "order", "rows", "target_key"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"},
+    "name": {"title": "Name", "type": "string"},
+    "order": {"title": "Order", "type": "integer"},
+    "rows": {"additionalProperties": true, "title": "Rows", "type": "object"},
+    "source_file": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Source File"}
+   }
+  },
+  "risk_ledger_build": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["layers", "POSITIONAL_OR_KEYWORD"], ["base_version", "POSITIONAL_OR_KEYWORD"], ["colset_version", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["layers", "target_key"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"},
+    "layers": {"items": {}, "title": "Layers", "type": "array"},
+    "base_version": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Base Version"},
+    "colset_version": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Colset Version"}
+   }
+  },
+  "risk_ledger_diff": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["version", "POSITIONAL_OR_KEYWORD"], ["base", "POSITIONAL_OR_KEYWORD"], ["offset", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["target_key", "version"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"},
+    "version": {"title": "Version", "type": "integer"},
+    "base": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Base"},
+    "offset": {"default": 0, "title": "Offset", "type": "integer"}
+   }
+  },
+  "risk_ledger_export": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["version", "POSITIONAL_OR_KEYWORD"], ["fmt", "POSITIONAL_OR_KEYWORD"], ["offset", "POSITIONAL_OR_KEYWORD"], ["raw", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["target_key"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"},
+    "version": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Version"},
+    "fmt": {"default": "json", "title": "Fmt", "type": "string"},
+    "offset": {"default": 0, "title": "Offset", "type": "integer"},
+    "raw": {"default": false, "title": "Raw", "type": "boolean"}
+   }
+  },
+  "risk_build_evidence_bundle": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["template", "POSITIONAL_OR_KEYWORD"], ["version", "POSITIONAL_OR_KEYWORD"], ["codes", "POSITIONAL_OR_KEYWORD"], ["mask", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["target_key", "template"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"},
+    "template": {"additionalProperties": true, "title": "Template", "type": "object"},
+    "version": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Version"},
+    "codes": {"anyOf": [{"items": {"type": "string"}, "type": "array"}, {"type": "null"}], "default": null, "title": "Codes"},
+    "mask": {"default": true, "title": "Mask", "type": "boolean"}
+   }
+  },
+  "risk_get_evidence_bundle": {
+   "params": [["bundle_id", "POSITIONAL_OR_KEYWORD"], ["offset", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["bundle_id"],
+   "properties": {
+    "bundle_id": {"title": "Bundle Id", "type": "string"},
+    "offset": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Offset"}
+   }
+  },
+  "risk_get_provenance": {
+   "params": [["project_id", "POSITIONAL_OR_KEYWORD"], ["snapshot_id", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["project_id"],
+   "properties": {
+    "project_id": {"title": "Project Id", "type": "string"},
+    "snapshot_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Snapshot Id"}
+   }
+  },
+  "risk_ledger_apply_decision": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["decision_json", "POSITIONAL_OR_KEYWORD"], ["decision_text", "POSITIONAL_OR_KEYWORD"], ["job_id", "POSITIONAL_OR_KEYWORD"], ["mapping", "POSITIONAL_OR_KEYWORD"], ["mapping_version", "POSITIONAL_OR_KEYWORD"], ["version", "POSITIONAL_OR_KEYWORD"], ["layer_name", "POSITIONAL_OR_KEYWORD"], ["layer_order", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["target_key"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"},
+    "decision_json": {"anyOf": [{"additionalProperties": true, "type": "object"}, {"type": "null"}], "default": null, "title": "Decision Json"},
+    "decision_text": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Decision Text"},
+    "job_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Job Id"},
+    "mapping": {"anyOf": [{"additionalProperties": true, "type": "object"}, {"type": "null"}], "default": null, "title": "Mapping"},
+    "mapping_version": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Mapping Version"},
+    "version": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Version"},
+    "layer_name": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Layer Name"},
+    "layer_order": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Layer Order"}
+   }
+  },
+  "risk_numbers_put": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["numbers", "POSITIONAL_OR_KEYWORD"], ["forbidden", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["numbers", "target_key"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"},
+    "numbers": {"items": {}, "title": "Numbers", "type": "array"},
+    "forbidden": {"anyOf": [{"items": {}, "type": "array"}, {"type": "null"}], "default": null, "title": "Forbidden"}
+   }
+  },
+  "risk_numbers_check": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["text", "POSITIONAL_OR_KEYWORD"], ["bundle_id", "POSITIONAL_OR_KEYWORD"], ["code", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["target_key"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"},
+    "text": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Text"},
+    "bundle_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Bundle Id"},
+    "code": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Code"}
+   }
+  },
+  "risk_export_report_bundle": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["version", "POSITIONAL_OR_KEYWORD"], ["template_version", "POSITIONAL_OR_KEYWORD"], ["offset", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["target_key"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"},
+    "version": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Version"},
+    "template_version": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Template Version"},
+    "offset": {"default": 0, "title": "Offset", "type": "integer"}
+   }
   }
  }
 }

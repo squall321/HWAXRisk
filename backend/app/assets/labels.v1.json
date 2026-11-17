@@ -1,0 +1,30 @@
+{
+  "labels_version": "1.0",
+  "note": "등급 · 증거 유형 · 주의 등급 · 판정이 같은 글자(A · B · C …)를 써서 좌석이 축을 섞어 읽었다(HWAXPortal docs/request-1117 RK-07). 축마다 표기를 갈라 축 낱말이 붙은 글만 쓴다. 근거 묶음(RK-02) · 보고 묶음(RK-05)이 이 표기를 쓰고, 축 낱말 없는 단독 대문자 A ~ J 를 센다.",
+  "axes": {
+    "grade": {
+      "word": "등급",
+      "meaning": "판정표의 리스크 등급(1차 · 최종 등급 칸)",
+      "values": {"A": "[등급 A조]", "B": "[등급 B조]", "C": "[등급 C조]"}
+    },
+    "type": {
+      "word": "유형",
+      "meaning": "증거 유형 A ~ J — 글자 대신 동그라미 숫자로 적는다",
+      "values": {"A": "유형①", "B": "유형②", "C": "유형③", "D": "유형④", "E": "유형⑤",
+                 "F": "유형⑥", "G": "유형⑦", "H": "유형⑧", "I": "유형⑨", "J": "유형⑩"}
+    },
+    "attention": {
+      "word": "주의",
+      "meaning": "앱 등록부의 주의 등급(읽는 차례 — 판정이 아니다, registry.attention_of)",
+      "values": {"A": "주의 A", "B": "주의 B", "C": "주의 C", "D": "주의 D"}
+    },
+    "verdict": {
+      "word": "판정",
+      "meaning": "risk_spec verdict 를 SP 판정 키로 적는다",
+      "values": {"go": "VRD-GO", "conditional": "VRD-COND", "no-go": "VRD-NOGO", "undetermined": "VRD-UNDET"},
+      "sp_keys": {"go": "VRD-GO", "conditional": "VRD-COND", "no-go": "VRD-NOGO", "undetermined": "VRD-UNDET"},
+      "sp_keys_status": "unconfirmed",
+      "sp_keys_note": "VRD-COND 는 요청서에 적힌 키다. 나머지 셋은 같은 꼴로 정한 자리이고 SP 판정 사전과 대조 전이다(대조되면 이 파일만 고친다)."
+    }
+  }
+}

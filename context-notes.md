@@ -6327,3 +6327,49 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
   지울 뿐이고(감사 한 줄), 폐기가 이미 근거를 지웠으며 위치 찾기는 검증 기록 없는 행을 쓰지 않는다. 적기 · 항목 위치(새 값을 들인다)는 종전대로
   409 project_purged 다.
 - cae00 실데이터에서 다시 볼 것 — 몸체 상수(PROBE_REACH_MM · 크기 창) · 두께 상한 · 짝 없는 절반 규칙 · 고정홀 수 칸(설계 6절).
+
+## 2026-11-17 판정표 원장(RK-01 ~ RK-07 — 포털 docs/request-1117, 가지 wt1117/rk)
+
+설계는 `docs/ledger-rk01-07.md`, 화면 요청은 `docs/ledger-frontend-request.md`. 리포 사이 꼴은 포털 `docs/request-1117/contracts.md`.
+
+- LG-1 v8 은 새 표 아홉(rr_ledger_* · rr_evidence_bundles)과 색인 셋뿐이다. 모두 target_key 에 매달아 반출 · 들여오기 · 회수가 대상의 과제를 따른다.
+  재설계 M4 의 rr_reports.ra_* 는 v9 로 민다(포털 R-3). 판을 더하는 커밋이 PUSHED_DDL_SHA256[8] 을 같이 적었다(나가기 전이라 굳지 않았다).
+- LG-2 칸 정의 · facts 틀 · 결정 칸 대응은 같은 표(rr_ledger_templates)의 세 종류이고 대상마다 판을 매긴다 — 과제 고유 칸을 코드에 박지 않는다(R-2).
+  칸 정의를 과제 단위가 아니라 대상 단위로 둔 것은 모든 도구가 대상 열쇠를 받기 때문이다(다른 대상이면 한 번 더 등록한다).
+- LG-3 감사 행(rr_audit)은 쓰지 않는다 — 새 행위 이름표가 화면 이력 탭에 없으면 test_audit_action_labels 가 막는다(화면은 이 가지 밖). 쓴 사람은
+  각 표의 created_by · updated_by, 내보내기는 rr_ledger_exports 다.
+- LG-4 근거 묶음 색인은 자기 지문을 담을 수 없다 — 묶음의 fingerprint 는 contracts §1 식 그대로 evidence 전체, 색인에는 '본문 지문'(색인 뒤 항목)을
+  싣는다. 칸 하나가 항목 하나, 칸 이름은 칸 정의의 중립 이름만(판정 낱말이 든 칸 이름은 칸 정의에서 받지 않는다), key 는 기계 이름이다.
+- LG-5 (뒤집힘 — LG-13) 처음에는 MCP 읽기 문을 다른 읽기 도구와 같은 mcp_scope_owner(조직 공개 포함)로 두었다. 근거 묶음 받기는 기본이 evidence
+  전부(엔진 DL-01 이 그대로 넣는다), offset 을 주면 와이어 쪽이다.
+- LG-6 결정 반영의 job_id 길 — 11-17 엔진은 view=decision_json 을 모른다(full · summary). 도구 오류면 summary 결정문을 쪽마다 잇고 표결은 그 답의
+  votes.tally(agree · conditional · oppose · abstain)를 쓴다. 한국어 표결 낱말(찬성 · 조건부 · 반대)도 같은 칸으로 모은다.
+- LG-7 provenance 는 앱이 가진 값만 — StepForge 단계 · 판, DynaForge 덱에 적힌 요소 수 · 덱 판은 앱이 부르는 도구가 내지 않아 null · unknown · needs 다.
+  DynaForge system_status 의 env 는 캡처가 app_version.extra.env 로 남기고 게이트웨이 낱말 dev · prod · unknown 으로 싣는다(사용자 결정 D5).
+- LG-8 인용 형식 cite(C1) — 근거 묶음 risk_bundle · eb_, 보고 묶음 risk_report_bundle · rb_. source_version 은 'v<판>/c<칸 정의 판>' 글이다.
+- LG-9 판정 SP 키는 VRD-COND 만 요청서에 있었다 — 나머지(VRD-GO · VRD-NOGO · VRD-UNDET)는 같은 꼴의 자리이고 labels 자산에
+  sp_keys_status=unconfirmed 로 둔다(SP 판정 사전과 대조되면 그 자산만 고친다).
+- LG-10 게이트웨이 읽기 전용 거절(GW-02 앱 쪽) — McpHttpClient 답은 error 낱말을 tool_error 그대로 두고 refusal 칸에 거절 글을 더한다(그 낱말로
+  가르는 locate · sp_subject · RA 보내기는 바뀌지 않는다). CallRecorder 는 거절이면 호출 행 · 답의 error 를 거절 글로 바꿔 싣는다(캡처 경고 ·
+  rr_snapshot_calls.error 에 글이 남는다 — 어댑터는 error 낱말로 가르지 않는다). ECAD 보드 찾기는 409 ecad_read_only 와 detail.refusal 이다.
+- LG-11 개인정보 가림(반대 검토 M3 · L4) — 앞뒤 거르개는 ASCII 다(한글이 붙은 꼴도 가린다). 부품 · 넷(U1@PCB.TOP) · 그림 배율 · 파일 확장자 도메인은
+  메일이 아니고, 주민번호 꼴은 앞 여섯이 날짜일 때만, 사설 IP 꼴 앞에 조항 · 절 · 표 · 그림 낱말이 오면 조항 번호다. 셀의 줄 가르는 글자는 다 접는다.
+- LG-12 근거 묶음은 늘 가린다 — 사용자 결정(11-17). 게이트웨이가 `heax-hwax_risk:risk_get_evidence_bundle` 을 제 가림에서 빼므로(그 가림이 묶음 글을 고쳐
+  엔진의 지문 대조가 깨졌다) 이 앱이 묶음 가림의 유일한 자리다. `mask=false` 는 422 `bundle_mask_required`. 틀의 칸 차례는 [[칸, 자] …] 로 지문 · 저장에
+  든다(반대 검토 M4).
+- LG-13 판정표 · 근거 묶음 · 숫자 점검 · 보고 묶음의 MCP 읽기는 구성원만이다 — 사용자 결정(11-17). REST 와 같은 문(_target_reader)과 같은 거절(신원 없음
+  401 unauthorized · 남 404 E404 — 조직 공개 과제라도)이다. 출처 표지 · 기존 읽기 도구(등록부 등)는 그대로 mcp_scope_owner 다. 이 여섯 도구는 스레드에서
+  돈다(반대 검토 L3).
+- LG-14 반대 검토 L1 · L2 · M5 — csv 는 수식으로 읽힐 글 칸 앞에 ' 를 붙인다(raw=true 는 원본 대조용). 회수는 판 보안 문구 · 숫자 원장 열쇠 · 금지값을
+  비우고, 회수된 과제의 대상은 읽기 · 쓰기 모두 409 project_purged 다. 쪽으로 나누지 않는 요약 목록은 MCP 쪽마다 앞 200개와 <칸>_total, 쪽 답의
+  cite.scope 는 코드 수만이다.
+- LG-15 반대 검토 2차(11-17) 여덟 — ① ② MCP 요약 목록은 200개로 자르기만 하고, 쪽으로 나누는 칸(changes · facts)과 같이 재어 줄이지 않는다(한 항목만
+  실은 쪽도 넘칠 때만 더 줄인다 — 같이 재면 요약 목록이 먼저 비었다). 보고 묶음의 그림은 그 쪽 코드의 것 전부이고 한 쪽 200개를 넘길 코드부터 다음
+  쪽이다(코드 하나가 혼자 넘으면 그 하나는 싣는다). ③ csv 수식 머리는 = + - @ 탭 CR 이고 칸 전체가 수 글(부호 · 천 단위 쉼표 · 소수 · 지수만)일
+  때만 그대로 둔다 — float() 는 inf · nan · 밑줄 · 빈칸을 받아 쓰지 않는다. ④ 가림 — refdes 예외는 마지막 마디가 판 층 · 넷 낱말일 때만, md · zip 은
+  최상위라 확장자가 아니다, 확장자가 붙은 주소는 주소 몫만 가린다, 배율 이름은 그림 확장자일 때만, 조항 낱말은 낱말 머리여야 한다(한글 · 로마자
+  바로 뒤면 다른 낱말의 끝), 사번 빈칸에 U+3000. 낱말 목록(판 층 · 넷)은 작게 둔다 — TOP · BOT 은 실제 최상위(.top · .bot)와도 겹치지만 refdes 꼴 로컬
+  (U1 · R12) · 다 대문자 도메인과 함께일 때만 빼므로 받아들였다(검토가 그 목록을 정했다). 늘릴 때는 실제 최상위와 겹치는지 본다. ⑤ 회수는 숫자 원장 · 금지값 행을 지운다 — 열쇠를 '[purged:<행>]' 로 갈면 그 글을 이름으로 적은 행이 회수를 멈춘다. ⑥ numbers_in
+  은 옛 정규식(_OLD_NUM_PATTERN, 남겨 둔 참조)과 같은 결과를 내고 다른 갈래는 하나다(묶음이 못 되는 ASCII 덩이 + ',ddd' — 옛 것이 버린 수를
+  센다); 시험이 무작위 글 4만 개로 그 밖의 차이가 없음을 잰다. ⑦ 한눈은 가장 새 200개 · <칸>_older_omitted. ⑧ 칸 글 끝의 줄바꿈도 ⏎ 로 남긴다
+  (지문이 바뀌는 것은 끝에 줄바꿈이 있는 칸의 묶음뿐이다 — 나가기 전이라 굳은 지문이 없다).
