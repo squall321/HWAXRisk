@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import bisect
 import re
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -192,26 +192,45 @@ def current(store: Any, target_key: str) -> dict:
 
 
 # ---------------------------------------------------------------- 점검
-def _segments_of_bundle(evidence: Sequence[Mapping[str, Any]]) -> list[tuple[str, str | None, str]]:
+def _segments_of_bundle(evidence: Sequence[Mapping[str, Any]]) -> Iterator[tuple[str, str | None, str]]:
     """근거 묶음 → (위치 이름, 줄의 코드, 줄 글) — 색인 · 칸 머리 · 잘림 안내 줄은 원장 값이 아니라 뺀다."""
-    out = []
     for item in evidence[1:]:
         lines = str(item.get("result") or "").split("\n")
         for n, line in enumerate(lines[1:], start=2):
             if line.startswith("… "):
                 continue
             code, sep, value = line.partition(" | ")
-            out.append((f"{item.get('key')}:{n}", code if sep else None, value if sep else line))
-    return out
+            yield f"{item.get('key')}:{n}", code if sep else None, value if sep else line
 
 
-def _segments_of_text(text: str, codes: set[str]) -> list[tuple[str, str | None, str]]:
-    """글 → 줄마다 (위치 이름, 그 줄에 나온 원장 코드 하나(여럿이면 첫 것), 줄 글)."""
-    out = []
-    for n, line in enumerate(text.split("\n"), start=1):
+def _segments_of_text(text: str, codes: set[str]) -> Iterator[tuple[str, str | None, str]]:
+    """글 → 줄마다 (위치 이름, 그 줄에 나온 원장 코드 하나(여럿이면 첫 것), 줄 글) — 차례로 내 줄 목록을 통째로 들지 않는다."""
+    start = 0
+    n = 1
+    while True:
+        end = text.find("\n", start)
+        line = text[start:] if end == -1 else text[start:end]
         found = next((m.group(1) for m in _ID_RE.finditer(line) if m.group(1) in codes), None)
-        out.append((f"line:{n}", found, line))
-    return out
+        yield f"line:{n}", found, line
+        if end == -1:
+            return
+        start, n = end + 1, n + 1
+
+
+class _Findings:
+    """점검이 찾은 것 — 수는 다 세고 행은 목록마다 앞 FINDINGS_SHOWN_MAX 개만 짓는다(반대 검토 M1 — 2백만 자 글이 백만 개 행 · 수백 MB 를
+    지었다). `make` 는 실을 때만 부른다."""
+
+    KEYS = ("not_in_ledger", "forbidden", "unit_mismatch", "unknown_ids")
+
+    def __init__(self) -> None:
+        self.rows: dict[str, list[dict]] = {k: [] for k in self.KEYS}
+        self.n: dict[str, int] = {k: 0 for k in self.KEYS}
+
+    def add(self, key: str, make: Callable[[], dict]) -> None:
+        self.n[key] += 1
+        if len(self.rows[key]) < FINDINGS_SHOWN_MAX:
+            self.rows[key].append(make())
 
 
 def check(store: Any, target_key: str, *, text: str | None = None, bundle_id: str | None = None, code: str | None = None) -> dict:
@@ -245,7 +264,7 @@ def check(store: Any, target_key: str, *, text: str | None = None, bundle_id: st
     for ban in ledger_now["forbidden"]:
         bans.setdefault(to_decimal(ban["value_text"]), []).append(ban)
     found = {"numbers": 0, "matched": 0}
-    lists: dict[str, list[dict]] = {"not_in_ledger": [], "forbidden": [], "unit_mismatch": [], "unknown_ids": []}
+    found_rows = _Findings()
     for where, line_code, line in segments:
         context_code = code or line_code
         id_spans = []
@@ -254,8 +273,8 @@ def check(store: Any, target_key: str, *, text: str | None = None, bundle_id: st
             token = m.group(1)
             family = _FAMILY_RE.match(token)
             if family and family.group(1) in families and token not in known_ids:
-                lists["unknown_ids"].append(_hit(where, line, m.start(1), m.end(1), token=token, code=context_code,
-                                                 family=family.group(1)))
+                found_rows.add("unknown_ids", lambda m=m, token=token, family=family: _hit(
+                    where, line, m.start(1), m.end(1), token=token, code=context_code, family=family.group(1)))
         inside = _IdSpans(id_spans)
         for start, end, raw, unit in numbers_in(line):
             if inside.covers(start):
@@ -268,26 +287,27 @@ def check(store: Any, target_key: str, *, text: str | None = None, bundle_id: st
                     "kind": "decimal" if ("." in raw or "e" in raw.lower()) else "integer"}
             same = values.get(value)
             if not same:
-                lists["not_in_ledger"].append(_hit(where, line, start, end, **base))
+                found_rows.add("not_in_ledger", lambda start=start, end=end, base=base: _hit(where, line, start, end, **base))
             else:
                 found["matched"] += 1
                 units = {unit_key(n["unit"]) for n in same if n["unit"]}
                 if unit and units and unit_key(unit) not in units:
-                    lists["unit_mismatch"].append(_hit(where, line, start, end, **base, ledger=[
+                    found_rows.add("unit_mismatch", lambda start=start, end=end, base=base, same=same: _hit(where, line, start, end, **base, ledger=[
                         {"name": n["name"], "revision": n["revision"], "unit": n["unit"], "metric_key": n["metric_key"]} for n in same]))
             for ban in bans.get(value, ()):
                 if ban["code"] != "*" and ban["code"] != context_code:
                     continue
                 if ban["unit"] and unit and unit_key(ban["unit"]) != unit_key(unit):
                     continue
-                lists["forbidden"].append(_hit(where, line, start, end, **base, forbidden_code=ban["code"], reason=ban["reason"]))
-    counts = {"numbers": found["numbers"], "matched": found["matched"], **{k: len(v) for k, v in lists.items()}}
+                found_rows.add("forbidden", lambda start=start, end=end, base=base, ban=ban: _hit(
+                    where, line, start, end, **base, forbidden_code=ban["code"], reason=ban["reason"]))
+    counts = {"numbers": found["numbers"], "matched": found["matched"], **found_rows.n}
     out = {"target_key": target_key, "source": source, "version": version, "ledger_hash": ledger_now["hash"],
            "numbers_in_ledger": len(ledger_now["numbers"]), "forbidden_in_ledger": len(ledger_now["forbidden"]), "counts": counts}
-    for key, rows in lists.items():
-        out[key] = rows[:FINDINGS_SHOWN_MAX]
-        if len(rows) > FINDINGS_SHOWN_MAX:
-            out[f"{key}_truncated"] = len(rows) - FINDINGS_SHOWN_MAX
+    for key, rows in found_rows.rows.items():
+        out[key] = rows
+        if found_rows.n[key] > len(rows):
+            out[f"{key}_truncated"] = found_rows.n[key] - len(rows)
     return out
 
 

@@ -13,7 +13,10 @@ import pytest
 from app import ledger, ledger_decision, ledger_routes
 from app.errors import AppError
 from tests import factories
-from tests.ledger_support import OWNER, STRANGER, VIEWER, call, ledger_box, seed_ledger  # noqa: F401
+from tests import ledger_support
+from tests.ledger_support import OWNER, STRANGER, VIEWER, call, seed_ledger
+
+ledger_box = ledger_support.ledger_box          # 판정표 시험 상자(tests/ledger_support.py)를 이 모듈에도 건다
 
 MAPPING = {"code_field": "code", "fields": {"grade": "최종 등급", "owner_domain": "결정 출처", "claim": "비고", "subject.part": "부품"}}
 SPEC = {"schema": "risk_spec", "version": "1.0", "findings": [

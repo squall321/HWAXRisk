@@ -10,7 +10,10 @@ import pytest
 from app import ledger_numbers, ledger_routes
 from app.errors import AppError
 from tests import factories
-from tests.ledger_support import EDITOR, OWNER, STRANGER, VIEWER, call, ledger_box, seed_ledger  # noqa: F401
+from tests import ledger_support
+from tests.ledger_support import EDITOR, OWNER, STRANGER, VIEWER, call, seed_ledger
+
+ledger_box = ledger_support.ledger_box          # 판정표 시험 상자(tests/ledger_support.py)를 이 모듈에도 건다
 
 NUMBERS = [
     {"name": "최대 응력", "value": 412.5, "unit": "MPa", "definition": "합성 정의", "revision": "r2", "source_file": "stress.csv", "line": 7,
@@ -108,3 +111,20 @@ def test_decimals_and_units_compare_by_value():
     assert ledger_numbers.to_decimal("1,234.50") == ledger_numbers.to_decimal(1234.5)
     assert ledger_numbers.to_decimal("열") is None and ledger_numbers.to_decimal(True) is None
     assert ledger_numbers.unit_key("µm") == ledger_numbers.unit_key("um") and ledger_numbers.unit_key("MPa") == "mpa"
+
+
+def test_a_huge_text_counts_every_finding_but_keeps_only_the_first_rows(ledger_box):
+    """반대 검토 M1 — 2백만 자 글이 백만 개의 행(수백 MB)을 지었다. 수는 다 세고 행은 목록마다 앞 FINDINGS_SHOWN_MAX 개만 짓는다."""
+    import tracemalloc
+
+    _put(ledger_box)
+    text = "1 " * 200_000 + "\n" + "R-777 " * 2_000
+    tracemalloc.start()
+    try:
+        out = ledger_numbers.check(ledger_box.store, ledger_box.target_key, text=text)
+        _current, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert out["counts"]["not_in_ledger"] == 200_000 and len(out["not_in_ledger"]) == ledger_numbers.FINDINGS_SHOWN_MAX
+    assert out["not_in_ledger_truncated"] == 200_000 - ledger_numbers.FINDINGS_SHOWN_MAX
+    assert peak < 40_000_000, peak

@@ -15,7 +15,10 @@ from app import ledger_routes, provenance, routes
 from app.adapters import base as adapters_base
 from app.errors import AppError
 from tests import factories
-from tests.ledger_support import OWNER, STRANGER, VIEWER, call, ledger_box  # noqa: F401
+from tests import ledger_support
+from tests.ledger_support import OWNER, STRANGER, VIEWER, call
+
+ledger_box = ledger_support.ledger_box          # 판정표 시험 상자(tests/ledger_support.py)를 이 모듈에도 건다
 
 
 def _results(*, detect_absent: bool = False, interfaces: int | None = None, dyna_app_key: str | None = "heax-kooremapper_mcp",

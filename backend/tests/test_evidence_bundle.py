@@ -15,7 +15,10 @@ import pytest
 from app import config, evidence_bundle, labels, ledger_routes
 from app.errors import AppError
 from tests import factories
-from tests.ledger_support import CODES, OWNER, STRANGER, VIEWER, call, ledger_box, seed_ledger  # noqa: F401
+from tests import ledger_support
+from tests.ledger_support import CODES, OWNER, STRANGER, VIEWER, call, seed_ledger
+
+ledger_box = ledger_support.ledger_box          # 판정표 시험 상자(tests/ledger_support.py)를 이 모듈에도 건다
 
 TEMPLATE = {"name": "합성 6칸", "caps": {"부품": 2600, "고장 모드": 5200, "1차 등급": 6500, "최종 등급": 2600, "근거 유형": 2400,
                                         "비고": 1800}, "total_cap": 20000}

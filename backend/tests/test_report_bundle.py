@@ -11,7 +11,10 @@ import pytest
 from app import labels, ledger_routes
 from app.errors import AppError
 from tests import factories
-from tests.ledger_support import CODES, OWNER, STRANGER, VIEWER, call, ledger_box, seed_ledger  # noqa: F401
+from tests import ledger_support
+from tests.ledger_support import CODES, OWNER, STRANGER, VIEWER, call, seed_ledger
+
+ledger_box = ledger_support.ledger_box          # 판정표 시험 상자(tests/ledger_support.py)를 이 모듈에도 건다
 
 FACTS = {"keys": [
     {"key": "id", "from": "@code"}, {"key": "area", "from": None}, {"key": "part", "from": "부품"}, {"key": "mode", "from": "고장 모드"},
