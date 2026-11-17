@@ -188,7 +188,7 @@ def build(store: Any, target_key: str, owner_sub: str, *, version: int | None, c
         raise AppError("bundle_too_large", f"근거 합 {total_chars:,}자가 엔진 상한 {limits['chars']:,}자를 넘는다 — 틀의 상한이나 행을 줄인다.",
                        422, detail={"chars": total_chars, "limit": limits["chars"], "limits": limits})
     fp = fingerprint(evidence)
-    check = labels.check_summary(labels.check_obj([item["result"] for item in evidence]))
+    check = labels.scan_summary([item["result"] for item in evidence])
     meta = {"per_field": per_field, "omitted_fields": omitted_fields, "label_check": check, "limits": limits}
     # 같은 입력을 둘이 함께 만들면 같은 id 다 — 늦은 쪽은 먼저 선 행을 돌려받는다(INSERT OR IGNORE).
     store.execute("INSERT OR IGNORE INTO rr_evidence_bundles(bundle_id, target_key, owner_sub, version, colset_version, inputs_hash, template_json,"

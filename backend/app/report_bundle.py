@@ -131,7 +131,7 @@ def build(store: Any, target_key: str, *, version: int | None, template_version:
                 reasons[item["key"]] = why or "값이 없다"
             _set(facts, item["key"], value)
         facts_out.append({"code": code, "facts": facts, "null_reasons": reasons})
-    check = labels.check_summary(labels.check_obj([f["facts"] for f in facts_out]))
+    check = labels.scan_summary([f["facts"] for f in facts_out])
     all_sources = sorted({(s["version"], s["order"], s["layer"], s["source_file"] or "") for v in sources.values() for s in v})
     body = {"notice": head["notice"], "target_key": target_key, "version": version, "colset_version": colset["version"],
             "template_version": tpl["version"], "labels_version": labels.load_labels().get("labels_version"), "facts": facts_out,

@@ -59,3 +59,12 @@ def test_labels_part_rides_the_taxonomy_tool_and_the_rest_route():
 def test_the_rest_route_answers_without_identity(client):
     r = client.get("/api/taxonomy/labels")
     assert r.status_code == 200 and r.json()["axes"]["grade"]["values"]["A"] == "[등급 A조]"
+
+
+def test_the_summary_counts_everything_but_builds_only_the_samples():
+    """큰 묶음에서 위반 행을 다 짓지 않는다 — 수는 check_obj 와 같고 보기 행은 앞 VIOLATION_SAMPLES_MAX 개다(행 꼴도 같다)."""
+    value = {"rows": ["A " * 3000, "[등급 A조] B"]}
+    full = labels.check_obj(value)
+    summary = labels.scan_summary(value)
+    assert summary["violations_n"] == len(full) == 3001
+    assert summary["violations"] == full[:labels.VIOLATION_SAMPLES_MAX] and summary["truncated"] == 3001 - labels.VIOLATION_SAMPLES_MAX

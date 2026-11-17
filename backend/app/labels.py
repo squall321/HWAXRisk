@@ -89,10 +89,7 @@ def check_text(text: str, *, path: str = "") -> list[dict]:
     for m in _STANDALONE.finditer(text or ""):
         if _axis_near(text, m.start(), m.end(), words):
             continue
-        line = text.count("\n", 0, m.start()) + 1
-        col = m.start() - (text.rfind("\n", 0, m.start()) + 1) + 1
-        ctx = text[max(0, m.start() - CONTEXT_CHARS):m.end() + CONTEXT_CHARS].replace("\n", " ")
-        out.append({"path": path, "offset": m.start(), "line": line, "col": col, "letter": m.group(1), "context": ctx})
+        out.append(_violation(text, m, path))
     return out
 
 
@@ -110,3 +107,36 @@ def check_obj(value: Any, *, path: str = "") -> list[dict]:
 def check_summary(violations: list[dict]) -> dict:
     return {"violations_n": len(violations), "violations": violations[:VIOLATION_SAMPLES_MAX],
             "truncated": max(0, len(violations) - VIOLATION_SAMPLES_MAX)}
+
+
+def scan_summary(value: Any) -> dict:
+    """check_summary(check_obj(value)) 와 같은 꼴 — 다 세되 보기 행은 앞 VIOLATION_SAMPLES_MAX 개만 짓는다(큰 묶음에서 행을 다 짓지 않는다)."""
+    words = axis_words()
+    samples: list[dict] = []
+    count = 0
+
+    def walk(item: Any, path: str) -> None:
+        nonlocal count
+        if isinstance(item, str):
+            for m in _STANDALONE.finditer(item):
+                if _axis_near(item, m.start(), m.end(), words):
+                    continue
+                count += 1
+                if len(samples) < VIOLATION_SAMPLES_MAX:
+                    samples.append(_violation(item, m, path))
+        elif isinstance(item, Mapping):
+            for k, v in item.items():
+                walk(v, f"{path}.{k}" if path else str(k))
+        elif isinstance(item, (list, tuple)):
+            for i, v in enumerate(item):
+                walk(v, f"{path}[{i}]")
+
+    walk(value, "")
+    return {"violations_n": count, "violations": samples, "truncated": max(0, count - len(samples))}
+
+
+def _violation(text: str, m: re.Match, path: str) -> dict:
+    line = text.count("\n", 0, m.start()) + 1
+    col = m.start() - (text.rfind("\n", 0, m.start()) + 1) + 1
+    ctx = text[max(0, m.start() - CONTEXT_CHARS):m.end() + CONTEXT_CHARS].replace("\n", " ")
+    return {"path": path, "offset": m.start(), "line": line, "col": col, "letter": m.group(1), "context": ctx}
