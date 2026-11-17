@@ -53,8 +53,10 @@ facts 키 · 실제 판정표는 PC 수용 때 등록하는 데이터다. 아래
   않았다(없다는 뜻이 아니다)'. 색인은 자기 지문을 담을 수 없어 '본문 지문'(색인 뒤 항목들의 같은 셈)을 싣는다 — 묶음의 `fingerprint` 는
   contracts §1 의 식 그대로 evidence 전체의 것이다. 칸 상한은 그 항목 글 전체(머리 · 잘림 안내 포함), 합 상한은 틀 차례로 남은 만큼이다. 엔진 상한
   (`HWAXRISK_BUNDLE_MAX_ITEMS` · `HWAXRISK_BUNDLE_MAX_CHARS`, 기본 120 · 135,538 — knobs.env)은 `result` 글자 합(색인 포함)으로 잰다.
-- **가림**(`app/pii.py`) — 메일 · 휴대 · 지역 전화(하이픈 · 빈칸으로 가른 꼴, +82) · 사설 IPv4 · 주민번호 꼴 · 표지 붙은 사번. 가르지 않은 긴 숫자열 ·
-  소수 · 코드 · 버전은 건드리지 않는다(게이트웨이 HG-21 의 교훈). 사람 이름은 꼴로 가르지 않는다.
+- **가림**(`app/pii.py`) — 근거 묶음은 늘 가린다(끌 수 없다 — `mask=false` 는 422, 사용자 결정 11-17: 게이트웨이가 묶음 받기를 제 가림에서 빼므로 이 앱이
+  묶음 가림의 유일한 자리다). 메일 · 휴대 · 지역 전화 · 사설 IPv4 · 주민번호 꼴(날짜일 때만) · 표지 붙은 사번 — 거르개는 ASCII 라 한글이 붙은 꼴도 가린다.
+  가르지 않은 긴 숫자열 · 소수 · 코드 · 버전 · 부품 · 넷 이름(U1@PCB.TOP) · 그림 이름 · 조항 번호는 건드리지 않는다(게이트웨이 HG-21 의 교훈). 사람 이름은 꼴로
+  가르지 않는다. 틀의 칸 차례가 묶음 지문에 든다(차례가 항목 key 와 합 상한 나누기를 정한다).
 - **결정 반영** — `decision_json` · `decision_text` · `job_id` 가운데 하나. job_id 는 그 사람의 포털 PAT 로 게이트웨이 `deliberate_result` 를
   `view="decision_json"` 으로 먼저 부르고, 엔진이 그 꼴을 모르면 `view="summary"` 의 결정문을 쪽마다 이어 읽는다(표결은 그 답의 votes.tally).
   표결 칸은 엔진 원장 그대로의 영문 칸 — agree · conditional · oppose · abstain · responded · total(contracts §6). risk_spec 이 null 이면 엔진의

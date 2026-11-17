@@ -67,6 +67,12 @@ def _template(raw: Any, columns: Sequence[str]) -> dict:
     return {"name": name, "caps": dict(caps), "total_cap": total}
 
 
+def _ordered(tpl: Mapping[str, Any]) -> dict:
+    """틀의 칸 차례를 지키는 꼴 — caps 를 [[칸, 자] …] 로(정규 JSON 은 객체 열쇠를 정렬해 차례를 잃는다 — 차례가 항목 key f01 … 과 합 상한 나누기를
+    정한다, 반대 검토 M4)."""
+    return {"name": tpl["name"], "caps": [[col, cap] for col, cap in tpl["caps"].items()], "total_cap": tpl["total_cap"]}
+
+
 def _cell_text(value: Any, axis: str | None) -> str:
     if ledger.is_empty(value):
         return EMPTY_CELL
@@ -100,6 +106,10 @@ def _pack(header: str, lines: list[tuple[str, str]], cap: int) -> tuple[str, lis
 
 def build(store: Any, target_key: str, owner_sub: str, *, version: int | None, codes: Sequence[str] | None, template: Any,
           mask: bool = True, actor: str, cfg: Any = None) -> dict:
+    if mask is not True:
+        # 사용자 결정(11-17) — 게이트웨이가 묶음 받기를 제 가림에서 빼므로(가림이 묶음 글을 고쳐 엔진의 지문 대조가 깨졌다) 묶음은 이 앱이 늘 가린다.
+        raise AppError("bundle_mask_required", "근거 묶음은 늘 개인정보를 가린다 — 가림을 끌 수 없다(mask=false 는 받지 않는다, 사용자 결정 11-17).",
+                       422, detail={"mask": mask})
     head = ledger.version_head(store, target_key, version)
     version = int(head["version"])
     colset = ledger.require_columns(store, target_key, head["colset_version"])
@@ -116,7 +126,7 @@ def build(store: Any, target_key: str, owner_sub: str, *, version: int | None, c
             raise AppError("bundle_unknown_codes", f"그 판에 없는 코드 — {unknown[:20]}.", 422, detail={"unknown_codes": unknown})
         picked = sorted(dict.fromkeys(codes), key=ledger.code_sort_key)
     inputs = {"target_key": target_key, "version": version, "colset_version": colset["version"], "rows_hash": head["rows_hash"],
-              "codes": picked, "template": tpl, "mask": bool(mask)}
+              "codes": picked, "template": _ordered(tpl), "mask": True}
     inputs_hash = sha256_hex(canonical_json(inputs))
     bundle_id = ID_PREFIX + inputs_hash[:24]
     same = store.query_one("SELECT * FROM rr_evidence_bundles WHERE bundle_id = ?", (bundle_id,))
@@ -135,9 +145,8 @@ def build(store: Any, target_key: str, owner_sub: str, *, version: int | None, c
         lines = []
         for code in picked:
             text = _cell_text(rows[code].get(col), axis)
-            if mask:
-                text, hit = pii.mask_text(text)
-                masked_n += hit
+            text, hit = pii.mask_text(text)
+            masked_n += hit
             lines.append((code, f"{code} | {text}"))
         header = f"[판정표 칸 {n:02d}] {col} — 판 v{version} · 행 {len(picked)}개(코드 차례, 한 줄에 코드 하나)"
         room = min(cap, total_budget)
@@ -163,7 +172,7 @@ def build(store: Any, target_key: str, owner_sub: str, *, version: int | None, c
     if omitted_fields:
         index_lines.append("합 상한이 모자라 싣지 못한 칸: " + " · ".join(f"'{c}'" for c in omitted_fields) + "(값이 없다는 뜻이 아니다).")
     index_lines.append("[표기] 등급은 [등급 A조] 꼴 · 증거 유형은 유형① 꼴 · 주의 등급은 주의 A 꼴 · 판정은 SP 판정 키(VRD-COND 꼴)로 적었다."
-                       + (" 개인정보 꼴(메일 · 전화 · 사설 IP · 주민번호 · 사번)은 [가림:…] 으로 가렸다." if mask else ""))
+                       + " 개인정보 꼴(메일 · 전화 · 사설 IP · 주민번호 · 사번)은 [가림:…] 으로 가렸다(묶음은 늘 가린다 — 끌 수 없다).")
     index_lines.append(INDEX_TAIL)
     index = {"source": f"리스크 앱 근거 묶음 {bundle_id} · 판정표 v{version} · 색인", "tool": TOOL,
              "args": {"bundle_id": bundle_id, "part": "index"}, "result": "\n".join(index_lines), "key": f"b{short}.idx"}
@@ -185,7 +194,7 @@ def build(store: Any, target_key: str, owner_sub: str, *, version: int | None, c
     store.execute("INSERT OR IGNORE INTO rr_evidence_bundles(bundle_id, target_key, owner_sub, version, colset_version, inputs_hash, template_json,"
                   " codes_json, evidence_gz, fingerprint, items_n, total_chars, per_field_json, masked_n, created_by, created_at)"
                   " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                  (bundle_id, target_key, owner_sub, version, colset["version"], inputs_hash, canonical_json({**tpl, "mask": bool(mask)}),
+                  (bundle_id, target_key, owner_sub, version, colset["version"], inputs_hash, canonical_json({**_ordered(tpl), "mask": True}),
                    canonical_json(picked), gzip.compress(canonical_json(evidence).encode("utf-8"), mtime=0), fp, items_n, total_chars,
                    canonical_json(meta), masked_n, actor, now_epoch()))
     return {**_build_view(store.query_one("SELECT * FROM rr_evidence_bundles WHERE bundle_id = ?", (bundle_id,))), "created": True}

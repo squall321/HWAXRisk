@@ -132,8 +132,20 @@ def test_personal_shapes_in_cells_are_masked_and_counted_but_numbers_stay(ledger
     note = next(item for item in evidence_bundle.payload(evidence_bundle.bundle_row(ledger_box.store, built["bundle_id"]))["evidence"]
                 if "'비고'" in item["source"])["result"]
     assert "R-001 | 담당 [가림:메일] · [가림:전화]" in note and "R-002 | 두께 4.352099001761481 · 간극 0.05" in note
-    plain = _build(ledger_box, version=3, mask=False)
-    assert plain["masked_n"] == 0 and plain["bundle_id"] != built["bundle_id"]
+    # 묶음은 늘 가린다(사용자 결정 11-17) — mask=false 는 받지 않는다.
+    refused = _refused(_build, ledger_box, version=3, mask=False)
+    assert (refused.code, refused.http_status) == ("bundle_mask_required", 422)
+    assert "끌 수 없다" in evidence_bundle.payload(evidence_bundle.bundle_row(ledger_box.store, built["bundle_id"]))["evidence"][0]["result"]
+
+
+def test_the_order_of_the_template_caps_is_part_of_the_bundle(ledger_box):
+    """반대 검토 M4 — 칸 차례가 항목 key(f01 …)와 합 상한 나누기를 정하는데 지문이 정렬한 칸으로 재어 차례만 다른 틀이 같은 묶음이 됐다."""
+    seed_ledger(ledger_box)
+    one = _build(ledger_box, template={"name": "차례", "caps": {"부품": 900, "비고": 900}, "total_cap": 1000})
+    two = _build(ledger_box, template={"name": "차례", "caps": {"비고": 900, "부품": 900}, "total_cap": 1000})
+    assert one["bundle_id"] != two["bundle_id"] and one["per_field"]["부품"]["key"].endswith("f01") and two["per_field"]["비고"]["key"].endswith("f01")
+    stored = ledger_box.store.query_one("SELECT template_json FROM rr_evidence_bundles WHERE bundle_id = ?", (two["bundle_id"],))
+    assert json.loads(stored["template_json"])["caps"] == [["비고", 900], ["부품", 900]]
 
 
 def test_the_same_inputs_are_the_same_bundle_and_the_gates_hold(ledger_box):
