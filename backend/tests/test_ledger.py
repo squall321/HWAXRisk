@@ -287,6 +287,75 @@ def test_mcp_summary_lists_are_capped_with_their_totals(ledger_box):
     assert srv._wire_chars(out) <= srv.MCP_RESULT_CHARS
 
 
+def _pages(tool: str, **args) -> list[dict]:
+    from app import mcp_server as srv
+
+    pages, offset = [], 0
+    while True:
+        out = call(tool, **args, offset=offset)
+        assert "error" not in out, out
+        assert srv._wire_chars(out) <= srv.MCP_RESULT_CHARS, (tool, offset, srv._wire_chars(out))
+        pages.append(out)
+        if "next_offset" not in out:
+            return pages
+        assert out["next_offset"] > offset
+        offset = out["next_offset"]
+
+
+def test_mcp_diff_summary_lists_keep_200_on_every_page_while_the_changes_page(ledger_box):
+    """반대 검토 2차 1 — 요약 목록을 바뀐 칸 전부와 같이 재어 반씩 줄이던 탓에 바뀐 칸이 많으면 든 코드 목록이 비었다. 이제 요약 목록은 쪽마다 앞
+    200개와 <칸>_total 이고, 바뀐 칸은 쪽으로 빠짐없이 온다."""
+    seed_ledger(ledger_box)
+    owner = factories.ident(OWNER)
+    rows = {f"N-{i:04d}": {"비고": "새 행"} for i in range(1, 451)}
+    rows.update({code: {"비고": "긴 비고 " * 900, "고장 모드": "긴 모드 " * 900} for code in CODES})
+    ledger_routes.post_version(ledger_box.target_key, ledger_routes.BuildBody(base_version=2, layers=[
+        {"name": "새 코드와 긴 수정", "order": 60, "rows": rows}]), ident=owner)
+    ledger_box.act_as(VIEWER)
+    pages = _pages("risk_ledger_diff", target_key=ledger_box.target_key, version=3)
+    rest = ledger_routes.get_version_diff(ledger_box.target_key, 3, ident=factories.ident(VIEWER))
+    assert len(pages) >= 3
+    for out in pages:
+        assert out["codes_added"] == rest["codes_added"][:200] and out["codes_added_total"] == 450
+        assert out["codes_removed"] == rest["codes_removed"] and "codes_removed_total" not in out
+        assert out["changed_cells_n"] == rest["changed_cells_n"]
+    assert [c for out in pages for c in out["changes"]] == rest["changes"]
+
+
+def test_cap_lists_slices_shrinks_only_when_told_and_can_keep_the_newest():
+    from app import mcp_server as srv
+
+    out = {"a": list(range(300)), "b": list(range(10)), "big": "x" * 50_000}
+    sliced = srv._cap_lists(out, ("a", "b"))
+    assert sliced["a"] == list(range(200)) and sliced["a_total"] == 300 and sliced["b"] == list(range(10)) and "b_total" not in sliced
+    newest = srv._cap_lists(out, ("a", "b"), newest=True)
+    assert newest["a"] == list(range(100, 300)) and newest["a_total"] == 300 and newest["a_older_omitted"] == 100
+    assert "b_older_omitted" not in newest
+    shrunk = srv._cap_lists(out, ("a", "b"), fits=lambda got: len(got["a"]) + len(got["b"]) <= 60)
+    assert len(shrunk["a"]) + len(shrunk["b"]) <= 60 and shrunk["a_total"] == 300 and shrunk["a"] == list(range(len(shrunk["a"])))
+    again = srv._cap_lists(shrunk, ("a",), fits=lambda got: len(got["a"]) <= 10)
+    assert again["a_total"] == 300                    # 이미 적힌 원래 수를 그대로 쓴다
+
+
+def test_mcp_overview_keeps_the_newest_layers_and_says_how_many_older_were_left_out(ledger_box):
+    """반대 검토 2차 7 — 한눈이 가장 옛 200개를 두었다. 이제 가장 새 것을 두고(와이어에 맞게 더 줄일 때도 옛 것부터 버린다) 버린 옛 것의 수를 적는다."""
+    seed_ledger(ledger_box)
+    owner = factories.ident(OWNER)
+    for i in range(1, 251):
+        ledger_routes.post_layer(ledger_box.target_key, ledger_routes.LayerBody(
+            name=f"합성 층 {i:03d}", order=100 + i, rows={"R-001": {"비고": f"층 {i}"}}), ident=owner)
+    ledger_box.act_as(VIEWER)
+    out = call("risk_ledger_overview", target_key=ledger_box.target_key)
+    from app import mcp_server as srv
+
+    rest = ledger_routes.get_ledger(ledger_box.target_key, ident=factories.ident(VIEWER))
+    kept = out["layers"]
+    assert srv._wire_chars(out) <= srv.MCP_RESULT_CHARS and 0 < len(kept) <= 200
+    assert kept == rest["layers"][-len(kept):] and kept[-1]["name"] == "합성 층 250"
+    assert out["layers_total"] == len(rest["layers"]) and out["layers_older_omitted"] == len(rest["layers"]) - len(kept)
+    assert out["versions"] == rest["versions"] and "versions_older_omitted" not in out
+
+
 V8_TABLES = ("rr_ledger_templates", "rr_ledger_layers", "rr_ledger_versions", "rr_ledger_rows", "rr_ledger_cells", "rr_evidence_bundles",
              "rr_ledger_numbers", "rr_ledger_forbidden", "rr_ledger_exports")
 

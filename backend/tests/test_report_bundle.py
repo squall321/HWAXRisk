@@ -101,3 +101,39 @@ def test_mcp_pages_the_facts_and_logs_once_per_call(ledger_box):
     assert all(f["code"] in {i["code"] for i in rest["facts"]} for f in rest["figures"])
     ledger_box.act_as(STRANGER)
     assert call("risk_export_report_bundle", target_key=ledger_box.target_key)["error"] == "E404"
+
+
+def test_mcp_pages_deliver_every_figure_source_and_number_for_400_codes(ledger_box):
+    """반대 검토 2차 2 — 쪽 안에서 와이어에 맞추느라 facts 를 자르기 전에 그림 · 출처 · 숫자 목록이 먼저 비었다. 코드 400개(코드마다 그림 둘 · 긴
+    비고 · 숫자 원장 값)에서 쪽을 다 받으면 그림은 빠짐없이 그 쪽 코드의 것으로 · 출처 층과 숫자 참조는 첫 쪽에 다 온다."""
+    _seed(ledger_box)
+    owner = factories.ident(OWNER)
+    ledger_routes.put_numbers(ledger_box.target_key, ledger_routes.NumbersBody(numbers=[
+        {"name": f"합성 수치 {i:02d}", "value": 7000 + i, "unit": "MPa"} for i in range(60)]), ident=owner)
+    new = [f"R-{i:04d}" for i in range(1, 401)]
+    layers = [{"name": f"합성 층 {n:02d}", "order": 100 + n, "source_file": f"part-{n:02d}.csv",
+               "rows": {code: {"그림": f"fig-{code}-a; fig-{code}-b", "비고": f"값 {7000 + i % 60} MPa " + "긴 비고 " * 40}
+                        for i, code in enumerate(new) if i % 30 == n}} for n in range(30)]
+    ledger_routes.post_version(ledger_box.target_key, ledger_routes.BuildBody(base_version=3, layers=layers), ident=owner)
+    ledger_box.act_as(VIEWER)
+    from app import mcp_server as srv
+
+    full = ledger_routes.get_report_bundle(ledger_box.target_key, 4, ident=factories.ident(VIEWER))
+    assert len(full["figures"]) > 800 and len(full["numbers"]) == 60 and len(full["sources"]) > 30
+    pages, offset = [], 0
+    while True:
+        out = call("risk_export_report_bundle", target_key=ledger_box.target_key, version=4, offset=offset)
+        assert srv._wire_chars(out) <= srv.MCP_RESULT_CHARS and out["facts"]
+        codes = {i["code"] for i in out["facts"]}
+        assert all(f["code"] in codes for f in out["figures"]) and len(out["figures"]) <= srv.LIST_CAP
+        assert "figures_total" not in out
+        pages.append(out)
+        if "next_offset" not in out:
+            break
+        offset = out["next_offset"]
+    assert len(pages) >= 5
+    assert [i["code"] for p in pages for i in p["facts"]] == [i["code"] for i in full["facts"]]
+    assert [f for p in pages for f in p["figures"]] == full["figures"]
+    assert pages[0]["sources"] == full["sources"] and pages[0]["numbers"] == full["numbers"]
+    assert "sources_total" not in pages[0] and "numbers_total" not in pages[0]
+    assert all(p["sources"] == [] and p["sources_total"] == len(full["sources"]) and p["numbers_total"] == 60 for p in pages[1:])

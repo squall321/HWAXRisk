@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from collections.abc import Callable, Sequence
 from typing import Annotated, Any
 
@@ -1175,26 +1176,36 @@ async def _member_read(fn: Callable[[str, str, str], dict], target_key: str | No
     return await anyio.to_thread.run_sync(lambda: _guarded(call))
 
 
-def _cap_lists(out: dict, keys: Sequence[str], cap: int = LIST_CAP) -> dict:
-    """쪽마다 되풀이되는 요약 목록(쪽으로 나누지 않는 칸)을 앞 `cap` 개로 줄이고 원래 수를 <칸>_total 에 적는다 — 와이어가 그래도 모자라면 반씩 더
-    줄인다(반대 검토 M5). 전부는 REST 답이다."""
-    totals = {k: len(out.get(k) or []) for k in keys if isinstance(out.get(k), list)}
-    keep = {k: min(n, cap) for k, n in totals.items()}
+def _cap_lists(out: dict, keys: Sequence[str], cap: int = LIST_CAP, *, fits: Callable[[dict], bool] | None = None,
+               newest: bool = False) -> dict:
+    """쪽마다 되풀이되는 요약 목록(쪽으로 나누지 않는 칸)을 `cap` 개로 자르고 원래 수를 <칸>_total 에 적는다 — newest 면 목록 뒤(가장 새 것) `cap`
+    개를 두고 버린 옛 것의 수를 <칸>_older_omitted 에 적는다(반대 검토 2차 7). `fits` 를 주면 그것이 참이 될 때까지 가장 긴 목록을 반씩 더 줄인다 —
+    무엇으로 잴지는 부르는 쪽이 정한다(반대 검토 2차 1 · 2 — 쪽으로 나누는 칸까지 같이 재면 요약 목록이 먼저 빈다). 이미 <칸>_total 이 적힌 답은 그
+    수를 원래 수로 쓴다. 전부는 REST 답이다."""
+    lists = {k: out[k] for k in keys if isinstance(out.get(k), list)}
+    totals = {k: int(out.get(f"{k}_total") or len(v)) for k, v in lists.items()}
+    keep = {k: min(len(v), cap) for k, v in lists.items()}
 
     def shaped() -> dict:
         got = dict(out)
         for k, n in keep.items():
-            got[k] = out[k][:n]
+            got[k] = lists[k][len(lists[k]) - n:] if newest else lists[k][:n]
             if n < totals[k]:
                 got[f"{k}_total"] = totals[k]
+                if newest:
+                    got[f"{k}_older_omitted"] = totals[k] - n
         return got
 
     got = shaped()
-    while _wire_chars(got) > MCP_RESULT_CHARS and any(n > 0 for n in keep.values()):
+    while fits is not None and not fits(got) and any(n > 0 for n in keep.values()):
         k = max(keep, key=keep.get)
         keep[k] //= 2
         got = shaped()
     return got
+
+
+def _wire_fits(out: dict) -> bool:
+    return _wire_chars(out) <= MCP_RESULT_CHARS
 
 
 def _cite_brief(cite: Any) -> Any:
@@ -1208,9 +1219,10 @@ def _cite_brief(cite: Any) -> Any:
 
 @mcp.tool()
 async def risk_ledger_overview(target_key: Annotated[str, Field(description=_A_TARGET_KEY)]) -> dict:
-    """판정표 원장 한눈(읽기 전용) — 틀 종류별 판(columns · facts · decision_map) · 판정표 판 목록(기준 판 · 칸 정의 판 · 행 수 · 등급 바뀐 코드 수) · 판에 아직 쓰지 않은 층(used false) · 근거 묶음 · 숫자 원장 수 · 최근 내보내기를 준다(목록은 앞 200개와 <칸>_total — 전부는 REST), 판정표 도구의 시작이다(칸 정의가 없으면 risk_ledger_put_template(kind='columns') 부터), 그 대상의 구성원만 읽는다(조직 공개로 열리지 않는다)."""
+    """판정표 원장 한눈(읽기 전용) — 틀 종류별 판(columns · facts · decision_map) · 판정표 판 목록(기준 판 · 칸 정의 판 · 행 수 · 등급 바뀐 코드 수) · 판에 아직 쓰지 않은 층(used false) · 근거 묶음 · 숫자 원장 수 · 최근 내보내기를 준다(판 · 층 · 묶음 목록은 가장 새 200개까지이고 — 와이어에 맞게 더 줄일 때도 옛 것부터 버린다 — 줄였으면 <칸>_total 과 버린 옛 것의 수 <칸>_older_omitted, 전부는 REST), 판정표 도구의 시작이다(칸 정의가 없으면 risk_ledger_put_template(kind='columns') 부터), 그 대상의 구성원만 읽는다(조직 공개로 열리지 않는다)."""
     return await _member_read(lambda key, owner, _email: _cap_lists(ledger_routes.overview_payload(key, owner_sub=owner),
-                                                                    ("layers", "bundles", "versions")), target_key)
+                                                                    ("layers", "bundles", "versions"), newest=True,
+                                                                    fits=_wire_fits), target_key)
 
 
 @mcp.tool()
@@ -1248,18 +1260,19 @@ async def risk_ledger_diff(target_key: Annotated[str, Field(description=_A_TARGE
                            offset: Annotated[int, Field(description=_A_LEDGER_OFFSET)] = 0) -> dict:
     """판정표 두 판 비교(읽기 전용) — 바뀐 칸(code · column · before · after — 칸 정의 차례 · 코드 차례) · 든 · 빠진 코드 · 바뀐 코드 수 · 바뀐 칸 수 · 등급 칸과 등급이 바뀐 코드 수(두 판에 다 있는 코드만)를 준다, 수는 늘 전부이고 changes 는 와이어 상한 안에서 쪽으로 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다 — 든 · 빠진 · 등급 바뀐 코드 목록은 쪽마다 앞 200개와 <칸>_total, 전부는 REST), 빈 칸(null · 빈 글)은 서로 같다, 그 대상의 구성원만 읽는다."""
     def call(key: str, owner_sub: str, _email: str) -> dict:
-        full = _cap_lists(ledger_routes.diff_payload(key, version, base, owner_sub=owner_sub),
-                          ("codes_added", "codes_removed", "grade_changed_codes"))
-        start = max(0, int(offset or 0))
+        full = ledger_routes.diff_payload(key, version, base, owner_sub=owner_sub)
+        changes, start = full["changes"], max(0, int(offset or 0))
 
-        def page(take: int) -> dict:
-            rows = full["changes"][start:start + take]
-            out = {**full, "changes": rows, "offset": start}
-            if start + len(rows) < len(full["changes"]):
+        def page(head: dict, take: int) -> dict:
+            rows = changes[start:start + take]
+            out = {**head, "changes": rows, "offset": start}
+            if start + len(rows) < len(changes):
                 out["next_offset"] = start + len(rows)
             return out
 
-        return _fit_list(page, max(1, len(full["changes"]) - start), lambda out: len(out["changes"]))
+        # 요약 목록은 앞 200개로 자를 뿐이고, 바뀐 칸 하나만 실은 쪽도 넘칠 때만 더 줄인다 — 바뀐 칸 전부와 같이 재지 않는다(반대 검토 2차 1).
+        head = _cap_lists(full, ("codes_added", "codes_removed", "grade_changed_codes"), fits=lambda got: _wire_fits(page(got, 1)))
+        return _fit_list(lambda take: page(head, take), max(1, len(changes) - start), lambda out: len(out["changes"]))
 
     return await _member_read(call, target_key)
 
@@ -1413,6 +1426,7 @@ def _fit_findings(out: dict) -> dict:
 
 
 # ================================================================ 보고 묶음(RK-05)
+_RB_LISTS = ("figures", "sources", "numbers")
 _A_FACTS_VERSION = "facts 틀의 판 — 비우면 가장 새 판이다(틀이 없으면 ledger_facts_template_missing 409)."
 _A_RB_OFFSET = f"건너뛸 코드 수(0부터) — 앞 응답의 next_offset 을 준다. facts 는 MCP 결과 상한({MCP_RESULT_CHARS:,}자) 안의 쪽이다."
 
@@ -1422,15 +1436,24 @@ async def risk_export_report_bundle(target_key: Annotated[str, Field(description
                                     version: Annotated[int | None, Field(description=_A_LEDGER_VERSION_OPT)] = None,
                                     template_version: Annotated[int | None, Field(description=_A_FACTS_VERSION)] = None,
                                     offset: Annotated[int, Field(description=_A_RB_OFFSET)] = 0) -> dict:
-    """판정표 판 → 보고 묶음(읽기 · 기록 한 줄) — 첫 칸 notice(보안 문구) · report_bundle_id(rb_ 머리 — 같은 판 · 같은 틀이면 같은 id) · 인용 형식 cite(source_kind risk_report_bundle) · 코드마다 facts(등록된 facts 틀의 키 전부 — 값이 없으면 null 이고 null_reasons 에 까닭) · 그림 참조(figures) · 그 코드를 덮은 층(sources — 판 · 층 · 원천 파일) · 숫자 원장 참조(numbers)와 표기 규칙 검사(label_check — 단독 대문자 A ~ J 수)를 준다, facts 는 와이어 상한 안에서 쪽으로 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(머리 · 수 · 지문은 쪽마다 같다), 쪽 답의 그림은 그 쪽 코드의 것 · 출처 층 · 숫자 참조는 첫 쪽에만 · cite.scope 의 코드는 수만이다(전부는 REST), 그리기는 ReportArchive 몫이다, 그 대상의 구성원만 읽는다."""
+    """판정표 판 → 보고 묶음(읽기 · 기록 한 줄) — 첫 칸 notice(보안 문구) · report_bundle_id(rb_ 머리 — 같은 판 · 같은 틀이면 같은 id) · 인용 형식 cite(source_kind risk_report_bundle) · 코드마다 facts(등록된 facts 틀의 키 전부 — 값이 없으면 null 이고 null_reasons 에 까닭) · 그림 참조(figures) · 그 코드를 덮은 층(sources — 판 · 층 · 원천 파일) · 숫자 원장 참조(numbers)와 표기 규칙 검사(label_check — 단독 대문자 A ~ J 수)를 준다, facts 는 와이어 상한 안에서 쪽으로 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(머리 · 수 · 지문은 쪽마다 같다), 쪽 답의 그림은 그 쪽 코드의 것 전부(한 쪽에 200개까지 — 넘칠 코드부터는 다음 쪽) · 출처 층 · 숫자 참조는 첫 쪽에만(200개까지와 <칸>_total) · cite.scope 의 코드는 수만이다(전부는 REST), 그리기는 ReportArchive 몫이다, 그 대상의 구성원만 읽는다."""
     def call(key: str, owner_sub: str, actor: str) -> dict:
         full = ledger_routes.report_bundle_payload(key, version, template_version, owner_sub=owner_sub)
         start = max(0, int(offset or 0))
 
+        per_code = Counter(f["code"] for f in full["figures"])
+
         def page(take: int) -> dict:
-            rows = full["facts"][start:start + take]
+            rows, figures_n = [], 0
+            for r in full["facts"][start:start + take]:
+                # 그림은 그 쪽 코드의 것을 다 싣는다 — 한 쪽의 그림이 200개를 넘을 코드부터는 다음 쪽이다(코드 하나가 혼자 넘으면 그 하나는 싣는다).
+                if rows and figures_n + per_code[r["code"]] > LIST_CAP:
+                    break
+                rows.append(r)
+                figures_n += per_code[r["code"]]
             codes = {r["code"] for r in rows}
-            # 쪽마다 그 쪽 코드의 그림만 · 출처 층 · 숫자 참조는 첫 쪽에만(뒤 쪽은 수만) · 인용 형식의 코드는 수만(반대 검토 M5).
+            # 출처 층 · 숫자 참조는 첫 쪽에만(뒤 쪽은 수만) · 인용 형식의 코드는 수만(반대 검토 M5). 여기서는 200개로 자를 뿐이다 — 와이어에 맞추는
+            # 것은 facts 쪽 수다(반대 검토 2차 2 — 쪽 안에서 줄이면 facts 를 자르기 전에 그림 · 출처 · 숫자가 빈다).
             out = {**full, "facts": rows, "offset": start, "cite": _cite_brief(full["cite"]),
                    "figures": [f for f in full["figures"] if f["code"] in codes],
                    "sources": full["sources"] if start == 0 else [], "numbers": full["numbers"] if start == 0 else []}
@@ -1438,9 +1461,10 @@ async def risk_export_report_bundle(target_key: Annotated[str, Field(description
                 out["sources_total"], out["numbers_total"] = len(full["sources"]), len(full["numbers"])
             if start + len(rows) < len(full["facts"]):
                 out["next_offset"] = start + len(rows)
-            return _cap_lists(out, ("figures", "sources", "numbers"))
+            return _cap_lists(out, _RB_LISTS)
 
         out = _fit_list(page, max(1, len(full["facts"]) - start), lambda got: len(got["facts"]))
+        out = _cap_lists(out, _RB_LISTS, fits=_wire_fits)      # facts 하나만 실은 쪽도 넘칠 때만 줄인다(한 번)
         return ledger_routes.note_report_bundle(out, owner_sub=owner_sub, actor=actor)
 
     return await _member_read(call, target_key)
