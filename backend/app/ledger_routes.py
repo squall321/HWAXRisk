@@ -35,9 +35,13 @@ def reader(target_key: str, ident: identity.Identity) -> str:
 
 
 def writer(target_key: str, ident: identity.Identity) -> tuple[str, str]:
-    """REST 쓰기 — (쓸 행의 주인, 쓴 사람). 보기는 403 role_insufficient, 남 · 없는 대상은 404 다."""
+    """REST 쓰기 — (쓸 행의 주인, 쓴 사람). 보기는 403 role_insufficient, 남 · 없는 대상은 404 다. 회수된 과제의 대상은 409 project_purged 다(회수가
+    비운 원장 글을 다시 들이지 않는다 — 다른 쓰기 경로와 같다)."""
     owner = routes._target_writer(target_key, ident)
-    routes._target_row(target_key, owner)
+    target = routes._target_row(target_key, owner)
+    project = routes.get_store().query_one("SELECT status FROM rr_projects WHERE id = ?", (target["project_id"],))
+    if project is not None and project["status"] == "purged":
+        raise AppError("project_purged", "회수된 과제는 고칠 수 없습니다.", 409)
     return owner, routes._require_user(ident)
 
 

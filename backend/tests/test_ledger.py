@@ -192,3 +192,7 @@ def test_purge_blanks_the_ledger_text_but_keeps_the_heads(ledger_box):
     assert {r["body_json"] for r in store.query("SELECT body_json FROM rr_ledger_templates")} == {"{}"}
     assert {r["source_file"] for r in store.query("SELECT source_file FROM rr_ledger_layers")} == {None}
     assert store.query_one("SELECT rows_n FROM rr_ledger_versions WHERE version = 2")["rows_n"] == 13
+    # 회수된 과제의 대상에는 더 쓰지 않는다(읽기는 그대로 — 비운 글이다).
+    code, status = _refused(ledger_routes.post_layer, ledger_box.target_key,
+                            ledger_routes.LayerBody(name="회수 뒤 층", order=99, rows={"R-001": {"비고": "x"}}), ident=factories.ident(OWNER))
+    assert (code, status) == ("project_purged", 409)

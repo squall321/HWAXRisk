@@ -180,7 +180,8 @@ def build(store: Any, target_key: str, owner_sub: str, *, version: int | None, c
     fp = fingerprint(evidence)
     check = labels.check_summary(labels.check_obj([item["result"] for item in evidence]))
     meta = {"per_field": per_field, "omitted_fields": omitted_fields, "label_check": check, "limits": limits}
-    store.execute("INSERT INTO rr_evidence_bundles(bundle_id, target_key, owner_sub, version, colset_version, inputs_hash, template_json,"
+    # 같은 입력을 둘이 함께 만들면 같은 id 다 — 늦은 쪽은 먼저 선 행을 돌려받는다(INSERT OR IGNORE).
+    store.execute("INSERT OR IGNORE INTO rr_evidence_bundles(bundle_id, target_key, owner_sub, version, colset_version, inputs_hash, template_json,"
                   " codes_json, evidence_gz, fingerprint, items_n, total_chars, per_field_json, masked_n, created_by, created_at)"
                   " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                   (bundle_id, target_key, owner_sub, version, colset["version"], inputs_hash, canonical_json({**tpl, "mask": bool(mask)}),
