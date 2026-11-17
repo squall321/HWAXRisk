@@ -6327,3 +6327,27 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
   지울 뿐이고(감사 한 줄), 폐기가 이미 근거를 지웠으며 위치 찾기는 검증 기록 없는 행을 쓰지 않는다. 적기 · 항목 위치(새 값을 들인다)는 종전대로
   409 project_purged 다.
 - cae00 실데이터에서 다시 볼 것 — 몸체 상수(PROBE_REACH_MM · 크기 창) · 두께 상한 · 짝 없는 절반 규칙 · 고정홀 수 칸(설계 6절).
+
+## 2026-11-17 판정표 원장(RK-01 ~ RK-07 — 포털 docs/request-1117, 가지 wt1117/rk)
+
+설계는 `docs/ledger-rk01-07.md`, 화면 요청은 `docs/ledger-frontend-request.md`. 리포 사이 꼴은 포털 `docs/request-1117/contracts.md`.
+
+- LG-1 v8 은 새 표 아홉(rr_ledger_* · rr_evidence_bundles)과 색인 셋뿐이다. 모두 target_key 에 매달아 반출 · 들여오기 · 회수가 대상의 과제를 따른다.
+  재설계 M4 의 rr_reports.ra_* 는 v9 로 민다(포털 R-3). 판을 더하는 커밋이 PUSHED_DDL_SHA256[8] 을 같이 적었다(나가기 전이라 굳지 않았다).
+- LG-2 칸 정의 · facts 틀 · 결정 칸 대응은 같은 표(rr_ledger_templates)의 세 종류이고 대상마다 판을 매긴다 — 과제 고유 칸을 코드에 박지 않는다(R-2).
+  칸 정의를 과제 단위가 아니라 대상 단위로 둔 것은 모든 도구가 대상 열쇠를 받기 때문이다(다른 대상이면 한 번 더 등록한다).
+- LG-3 감사 행(rr_audit)은 쓰지 않는다 — 새 행위 이름표가 화면 이력 탭에 없으면 test_audit_action_labels 가 막는다(화면은 이 가지 밖). 쓴 사람은
+  각 표의 created_by · updated_by, 내보내기는 rr_ledger_exports 다.
+- LG-4 근거 묶음 색인은 자기 지문을 담을 수 없다 — 묶음의 fingerprint 는 contracts §1 식 그대로 evidence 전체, 색인에는 '본문 지문'(색인 뒤 항목)을
+  싣는다. 칸 하나가 항목 하나, 칸 이름은 칸 정의의 중립 이름만(판정 낱말이 든 칸 이름은 칸 정의에서 받지 않는다), key 는 기계 이름이다.
+- LG-5 MCP 읽기 문은 다른 읽기 도구와 같은 mcp_scope_owner(소유 · 구성원 · 조직 공개)다 — contracts 의 '구성원' 은 REST 문이다. 조직 공개는 주인이
+  켠 MCP 노출이라 등록부와 같은 범위로 둔다. 근거 묶음 받기는 기본이 evidence 전부(엔진 DL-01 이 그대로 넣는다), offset 을 주면 와이어 쪽이다.
+- LG-6 결정 반영의 job_id 길 — 11-17 엔진은 view=decision_json 을 모른다(full · summary). 도구 오류면 summary 결정문을 쪽마다 잇고 표결은 그 답의
+  votes.tally(agree · conditional · oppose · abstain)를 쓴다. 한국어 표결 낱말(찬성 · 조건부 · 반대)도 같은 칸으로 모은다.
+- LG-7 provenance 는 앱이 가진 값만 — StepForge 단계 · 판, DynaForge 덱에 적힌 요소 수 · 덱 판은 앱이 부르는 도구가 내지 않아 null · unknown · needs 다.
+  DynaForge system_status 의 env 는 캡처가 app_version.extra.env 로 남기고 게이트웨이 낱말 dev · prod · unknown 으로 싣는다(사용자 결정 D5).
+- LG-8 인용 형식 cite(C1) — 근거 묶음 risk_bundle · eb_, 보고 묶음 risk_report_bundle · rb_. source_version 은 'v<판>/c<칸 정의 판>' 글이다.
+- LG-9 판정 SP 키는 VRD-COND 만 요청서에 있었다 — 나머지(VRD-GO · VRD-NOGO · VRD-UNDET)는 같은 꼴의 자리이고 labels 자산에
+  sp_keys_status=unconfirmed 로 둔다(SP 판정 사전과 대조되면 그 자산만 고친다).
+- LG-10 게이트웨이 읽기 전용 거절(GW-02 앱 쪽) — McpHttpClient 답의 refusal 칸 · CallRecorder 호출 행의 error · ECAD 보드 찾기 409 ecad_read_only 가
+  그 글을 그대로 싣는다(error 낱말은 tool_error 그대로라 낱말로 가르는 곳이 바뀌지 않는다).

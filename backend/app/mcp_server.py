@@ -1,4 +1,4 @@
-# hwax-risk MCP 서버 — 도구 39종(발견 7 + 원장 7 + Claude 입구 12 + 검토 단위 1 + 카드 대조 검토 2 + 쟁점·종합 2 + ECAD 보드 2 + 과제 주제 2 + 단면 자리 4)은 REST 와 같은 함수를 부르는 접점이다(§6.11, LLM 을 부르지 않는다)
+# hwax-risk MCP 서버 — 도구 52종(발견 7 + 원장 7 + Claude 입구 12 + 검토 단위 1 + 카드 대조 검토 2 + 쟁점·종합 2 + ECAD 보드 2 + 과제 주제 2 + 단면 자리 4 + 판정표 원장 13)은 REST 와 같은 함수를 부르는 접점이다(§6.11, LLM 을 부르지 않는다)
 from __future__ import annotations
 
 import logging
@@ -55,6 +55,12 @@ risk_get_coverage(review 칸) · risk_get_cells, 결과는 risk_get_expert_repor
 단면 자리(F2 — CAD 그림을 보고서로): risk_locate_for_section(읽기 — 항목 · refdes · 넷 · 보드 좌표를 MCAD 점 · 몸체 · 단면 둘로, 평면마다 F1
 section_pair_view 에 그대로 부를 인자 f1.calls) · risk_propose_board_transform(읽기 — 보드 ↔ CAD 변환 후보) · risk_set_board_transform ·
 risk_set_item_location(쓰기). 넷 다 위임으로 확인된 신원의 등록된 포털 PAT 로 ODB 허브 · StepForge 를 읽는다.
+판정표 원장(HWAXPortal docs/request-1117 — 대상마다): risk_ledger_overview(시작) · risk_ledger_put_template(칸 정의 columns · facts 틀 ·
+결정 칸 대응 decision_map — 과제 고유 칸은 이 틀로만) · risk_ledger_put_layer · risk_ledger_build(층을 order 차례로 덮어 판 — 덮은 앞 값이 남는다) ·
+risk_ledger_diff · risk_ledger_export(csv · json, 첫 줄 보안 문구) · risk_build_evidence_bundle(심의 근거 묶음 — 색인 맨 앞 · 칸별 상한 · 가림 ·
+엔진 상한 거절) · risk_get_evidence_bundle(evidence 를 deliberate_start 에 그대로) · risk_ledger_apply_decision(결정 → 층, 칸 상태 · 표결 대조) ·
+risk_numbers_put · risk_numbers_check · risk_export_report_bundle(facts · 그림 · 출처 · 숫자 참조) · risk_get_provenance(원천의 단계 신호 · 판 ·
+환경 · 개수와 모르는 칸). 쓰기는 대상의 편집자 이상이고 위임 신원만이다. 등급 · 유형 · 주의 · 판정 표기는 risk_taxonomy(part='labels').
 PAT 는 인자로 받지 않는다 — 러너 자격은 웹 설정 화면에서 등록한다."""
 
 # loopback 바인드 + Caddy 경계 전제로 Host 검증(DNS rebinding 보호)은 끈다(LaminateAnalyzerMCP 선례).
