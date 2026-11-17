@@ -79,7 +79,12 @@ def _cell_text(value: Any, axis: str | None) -> str:
     shown, _ = labels.label_value(axis, value)
     text = shown if isinstance(shown, str) else canonical_json(shown)
     # 한 줄에 코드 하나 — 줄을 가르는 글자 전부(\n · \r · \v · \f · \x1c ~ \x1e · \x85 · \u2028 · \u2029 — str.splitlines)를 접는다(반대 검토 L4).
-    return NEWLINE_MARK.join(text.splitlines()) if text else text
+    # 끝의 줄바꿈도 표지로 남긴다 — splitlines 는 끝의 빈 줄을 버려 'a\n' 과 'a' 가 같은 글이 되었다(반대 검토 2차 8).
+    if not text:
+        return text
+    lines = text.splitlines()
+    folded = NEWLINE_MARK.join(lines)
+    return folded + NEWLINE_MARK if text.splitlines(keepends=True)[-1] != lines[-1] else folded
 
 
 def _pack(header: str, lines: list[tuple[str, str]], cap: int) -> tuple[str, list[str]]:

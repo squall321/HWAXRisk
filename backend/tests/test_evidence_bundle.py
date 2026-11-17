@@ -189,3 +189,11 @@ def test_every_line_breaking_character_in_a_cell_is_folded(ledger_box):
     note = next(item for item in evidence_bundle.payload(evidence_bundle.bundle_row(ledger_box.store, built["bundle_id"]))["evidence"]
                 if "'비고'" in item["source"])["result"]
     assert note.splitlines()[2] == "R-002 | 가 ⏎ 나 ⏎ 다 ⏎ 라 ⏎ 마" and len(note.splitlines()) == 3
+
+
+@pytest.mark.parametrize("cell,want", [
+    ("가\n", "가 ⏎ "), ("가\r\n나\r\n", "가 ⏎ 나 ⏎ "), ("가\n\n", "가 ⏎  ⏎ "), ("가 ", "가 ⏎ "), ("가\n나", "가 ⏎ 나"), ("가", "가"),
+])
+def test_a_trailing_line_break_keeps_its_mark(cell, want):
+    """반대 검토 2차 8 — splitlines 가 끝의 줄바꿈을 버려 '가\\n' 과 '가' 가 같은 글이 되었다. 끝의 줄바꿈도 ⏎ 로 남기고, 줄바꿈이 없는 글은 그대로다."""
+    assert evidence_bundle._cell_text(cell, None) == want
