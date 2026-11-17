@@ -6349,5 +6349,8 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
 - LG-8 인용 형식 cite(C1) — 근거 묶음 risk_bundle · eb_, 보고 묶음 risk_report_bundle · rb_. source_version 은 'v<판>/c<칸 정의 판>' 글이다.
 - LG-9 판정 SP 키는 VRD-COND 만 요청서에 있었다 — 나머지(VRD-GO · VRD-NOGO · VRD-UNDET)는 같은 꼴의 자리이고 labels 자산에
   sp_keys_status=unconfirmed 로 둔다(SP 판정 사전과 대조되면 그 자산만 고친다).
-- LG-10 게이트웨이 읽기 전용 거절(GW-02 앱 쪽) — McpHttpClient 답의 refusal 칸 · CallRecorder 호출 행의 error · ECAD 보드 찾기 409 ecad_read_only 가
-  그 글을 그대로 싣는다(error 낱말은 tool_error 그대로라 낱말로 가르는 곳이 바뀌지 않는다).
+- LG-10 게이트웨이 읽기 전용 거절(GW-02 앱 쪽) — McpHttpClient 답은 error 낱말을 tool_error 그대로 두고 refusal 칸에 거절 글을 더한다(그 낱말로
+  가르는 locate · sp_subject · RA 보내기는 바뀌지 않는다). CallRecorder 는 거절이면 호출 행 · 답의 error 를 거절 글로 바꿔 싣는다(캡처 경고 ·
+  rr_snapshot_calls.error 에 글이 남는다 — 어댑터는 error 낱말로 가르지 않는다). ECAD 보드 찾기는 409 ecad_read_only 와 detail.refusal 이다.
+- LG-11 개인정보 가림(반대 검토 M3 · L4) — 앞뒤 거르개는 ASCII 다(한글이 붙은 꼴도 가린다). 부품 · 넷(U1@PCB.TOP) · 그림 배율 · 파일 확장자 도메인은
+  메일이 아니고, 주민번호 꼴은 앞 여섯이 날짜일 때만, 사설 IP 꼴 앞에 조항 · 절 · 표 · 그림 낱말이 오면 조항 번호다. 셀의 줄 가르는 글자는 다 접는다.

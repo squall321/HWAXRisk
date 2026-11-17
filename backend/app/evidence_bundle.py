@@ -72,7 +72,8 @@ def _cell_text(value: Any, axis: str | None) -> str:
         return EMPTY_CELL
     shown, _ = labels.label_value(axis, value)
     text = shown if isinstance(shown, str) else canonical_json(shown)
-    return text.replace("\r\n", "\n").replace("\r", "\n").replace("\n", NEWLINE_MARK)
+    # 한 줄에 코드 하나 — 줄을 가르는 글자 전부(\n · \r · \v · \f · \x1c ~ \x1e · \x85 · \u2028 · \u2029 — str.splitlines)를 접는다(반대 검토 L4).
+    return NEWLINE_MARK.join(text.splitlines()) if text else text
 
 
 def _pack(header: str, lines: list[tuple[str, str]], cap: int) -> tuple[str, list[str]]:

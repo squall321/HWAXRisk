@@ -163,3 +163,15 @@ def test_mcp_returns_the_whole_evidence_by_default_and_pages_on_request(ledger_b
     ledger_box.act_as(STRANGER)
     assert call("risk_get_evidence_bundle", bundle_id=built["bundle_id"])["error"] == "not_visible"
     assert call("risk_get_evidence_bundle", bundle_id="eb_none")["error"] == "not_visible"
+
+
+def test_every_line_breaking_character_in_a_cell_is_folded(ledger_box):
+    """반대 검토 L4 — \\v · \\u2028 · \\u2029 따위도 줄을 가른다(str.splitlines). 한 줄에 코드 하나를 지키려 다 접는다."""
+    seed_ledger(ledger_box)
+    owner = factories.ident(OWNER)
+    ledger_routes.post_version(ledger_box.target_key, ledger_routes.BuildBody(base_version=2, layers=[
+        {"name": "갈린 비고", "order": 93, "rows": {"R-002": {"비고": "가\x0b나 다 라\x85마"}}}]), ident=owner)
+    built = _build(ledger_box, version=3, codes=["R-001", "R-002"])
+    note = next(item for item in evidence_bundle.payload(evidence_bundle.bundle_row(ledger_box.store, built["bundle_id"]))["evidence"]
+                if "'비고'" in item["source"])["result"]
+    assert note.splitlines()[2] == "R-002 | 가 ⏎ 나 ⏎ 다 ⏎ 라 ⏎ 마" and len(note.splitlines()) == 3
