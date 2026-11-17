@@ -15,6 +15,7 @@ from app import (brief, common, entry, expert_report, issues, planner, registry,
                  sp_subject, synth, taxonomy)
 from app import board_transform as board_transform_module
 from app import ledger as ledger_module
+from app import ledger_numbers as ledger_numbers_module
 from app import ledger_entry, ledger_routes
 from app import provenance as provenance_module
 from app import locate as locate_module
@@ -1304,3 +1305,47 @@ async def risk_ledger_apply_decision(target_key: Annotated[str, Field(descriptio
     return await _entry(ledger_entry.apply_decision, target_key=target_key, decision_json=decision_json, decision_text=decision_text,
                         job_id=job_id, mapping=mapping, mapping_version=mapping_version, version=version, layer_name=layer_name,
                         layer_order=layer_order)
+
+
+# ================================================================ 숫자 원장 · 금지값 점검(RK-04)
+_A_NUMBERS = (f"숫자 행 목록(최대 {ledger_numbers_module.NUMBERS_MAX:,}개) [{{name, value, unit?, definition?, revision?, source_file?, line?, "
+              "metric_key?}}] — value 는 수, (name, revision)이 겹치면 422, metric_key 는 MET-STRESS 꼴이다. 지금 원장을 통째로 갈아 쓴다.")
+_A_FORBIDDEN = (f"금지값 목록(최대 {ledger_numbers_module.FORBIDDEN_MAX:,}개) [{{code, value, unit?, reason}}] — code 는 원장 코드이거나 '*'(모든 코드), "
+                "reason 은 필수다. 비우면 금지값이 없다.")
+_A_CHECK_TEXT = "점검할 글(결정문 · 보고서 초안 따위) — bundle_id 와 함께 주지 않는다. 줄마다 그 줄에 나온 원장 코드를 금지값의 코드로 본다."
+_A_CHECK_BUNDLE = "점검할 근거 묶음 id(eb_ … — 그 대상의 묶음만) — 칸 항목의 'R-001 | 값' 줄은 그 줄의 코드를 안다. text 와 함께 주지 않는다."
+_A_CHECK_CODE = "모든 줄을 이 코드의 글로 보고 금지값을 견준다 — 비우면 줄마다 그 줄의 코드다."
+
+
+@mcp.tool()
+async def risk_numbers_put(target_key: Annotated[str, Field(description=_A_TARGET_KEY)],
+                           numbers: Annotated[list, Field(description=_A_NUMBERS)],
+                           forbidden: Annotated[list | None, Field(description=_A_FORBIDDEN)] = None) -> dict:
+    """숫자 원장 · 금지값 적기 — 쓰기: 어떤 수(이름 · 값 · 단위 · 정의 · 리비전 · 출처 파일 · 줄 · 지표 키)와 코드별 금지값(까닭 필수)을 적을지 사용자에게 보이고 확인한 뒤 부른다, 그 대상의 원장을 통째로 갈아 쓰고 같은 몸이면 바꾸지 않는다(changed false), 대상의 편집자 이상만 한다."""
+    return await _entry(ledger_entry.put_numbers, target_key=target_key, numbers=numbers, forbidden=forbidden)
+
+
+@mcp.tool()
+def risk_numbers_check(target_key: Annotated[str, Field(description=_A_TARGET_KEY)],
+                       text: Annotated[str | None, Field(description=_A_CHECK_TEXT)] = None,
+                       bundle_id: Annotated[str | None, Field(description=_A_CHECK_BUNDLE)] = None,
+                       code: Annotated[str | None, Field(description=_A_CHECK_CODE)] = None) -> dict:
+    """글 · 근거 묶음의 수 점검(읽기 전용 — 쓰지 않는다) — 숫자 원장과 대조해 원장에 없는 수(not_in_ledger — 작은 정수까지 센다) · 금지값 쓰임(forbidden — 코드 '*' 는 어디서나, 아니면 그 코드의 줄에서) · 단위 불일치(unit_mismatch — 같은 값에 다른 단위) · 원장에 없는 id 꼴(unknown_ids — 원장 코드 · 지표 키와 같은 머리인데 없는 R-… · MET-…)의 수(counts)와 위치(where · col · 앞뒤 글, 목록마다 앞 500개 — 와이어가 모자라면 더 줄이고 shown_per_list 에 적는다)를 준다, 코드 · 키 꼴 낱말 속 숫자는 수로 세지 않는다."""
+    def call(key: str, *, owner_sub: str) -> dict:
+        body = entry._body(ledger_routes.NumbersCheckBody, text=text, bundle_id=bundle_id, code=code)
+        return _fit_findings(ledger_routes.numbers_check_payload(key, body, owner_sub=owner_sub))
+
+    return _scoped("target", target_key, call, target_key)
+
+
+_CHECK_LISTS = ("not_in_ledger", "forbidden", "unit_mismatch", "unknown_ids")
+
+
+def _fit_findings(out: dict) -> dict:
+    """점검 답이 MCP_RESULT_CHARS 를 넘으면 목록마다 앞 몇 개로 줄인다 — 수(counts)는 늘 전부이고, 줄인 것은 shown_per_list 에 적는다(전부는 REST
+    POST /api/targets/{key}/numbers/check)."""
+    keep = max((len(out.get(k) or []) for k in _CHECK_LISTS), default=0)
+    while _wire_chars(out) > MCP_RESULT_CHARS and keep > 1:
+        keep = max(1, keep // 2)
+        out = {**out, **{k: (out.get(k) or [])[:keep] for k in _CHECK_LISTS}, "shown_per_list": keep}
+    return out

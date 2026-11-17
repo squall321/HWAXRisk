@@ -41,3 +41,9 @@ def apply_decision(ident: identity.Identity, *, target_key: str, decision_json: 
     body = entry._body(ledger_routes.DecisionBody, decision_json=decision_json, decision_text=decision_text, job_id=job_id,
                        mapping=mapping, mapping_version=mapping_version, version=version, layer_name=layer_name, layer_order=layer_order)
     return ledger_routes.post_layer_from_decision(target_key, body, ident=ident)
+
+
+def put_numbers(ident: identity.Identity, *, target_key: str, numbers: list[dict], forbidden: list[dict] | None = None) -> dict:
+    entry.require_delegate(ident)
+    body = entry._body(ledger_routes.NumbersBody, numbers=numbers, forbidden=forbidden or [])
+    return ledger_routes.put_numbers(target_key, body, ident=ident)

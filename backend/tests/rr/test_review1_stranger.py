@@ -35,6 +35,7 @@ CAPS = {"risk_issue_panel_cap": 1, "risk_issue_panel_hard_cap": 1}
 LEDGER_TEMPLATE = {"name": "남 시험 틀", "caps": {"부품": 2000, "최종 등급": 2000}, "total_cap": 4000}
 LEDGER_LAYER = {"name": "남의 층", "order": 1, "rows": {"R-001": {"비고": "남이 적어 본다"}}}
 LEDGER_MAPPING = {"fields": {"claim": "비고"}}
+LEDGER_NUMBERS = [{"name": "합성 값", "value": 12.5, "unit": "mm"}]
 LEDGER_DECISION = '```json\n{"schema": "risk_spec", "findings": [{"id": "F1", "code": "R-001", "claim": "결정의 주장"}]}\n```'
 
 
@@ -296,6 +297,12 @@ CASES: dict[tuple[str, str], tuple[Call, tuple[str, ...]]] = {
     ("POST", P + "/targets/{target_key}/ledger/layers/from-decision"): (
         lambda i, who: ledger_routes.post_layer_from_decision(i["target"], ledger_routes.DecisionBody(
             decision_text=LEDGER_DECISION, mapping=LEDGER_MAPPING), ident=who), ("target",)),
+    ("PUT", P + "/targets/{target_key}/numbers"): (
+        lambda i, who: ledger_routes.put_numbers(i["target"], ledger_routes.NumbersBody(numbers=LEDGER_NUMBERS), ident=who), ("target",)),
+    # 숫자 점검은 읽기다(본문이 길어 POST) — 남에게는 없는 대상과 같은 404 다.
+    ("POST", P + "/targets/{target_key}/numbers/check"): (
+        lambda i, who: ledger_routes.post_numbers_check(i["target"], ledger_routes.NumbersCheckBody(text="R-001 은 12.5 mm 다"),
+                                                        ident=who), ("target",)),
 }
 
 
@@ -623,6 +630,8 @@ MCP_CASES: dict[str, tuple[Callable[[dict], Any], tuple[str, ...]]] = {
     "risk_get_provenance": (lambda i: srv.risk_get_provenance(project_id=i["project"]), ("project",)),
     "risk_ledger_apply_decision": (lambda i: srv.risk_ledger_apply_decision(target_key=i["target"], decision_text=LEDGER_DECISION,
                                                                             mapping=LEDGER_MAPPING), ("target",)),
+    "risk_numbers_put": (lambda i: srv.risk_numbers_put(target_key=i["target"], numbers=LEDGER_NUMBERS), ("target",)),
+    "risk_numbers_check": (lambda i: srv.risk_numbers_check(target_key=i["target"], text="R-001 은 12.5 mm 다"), ("target",)),
 }
 
 

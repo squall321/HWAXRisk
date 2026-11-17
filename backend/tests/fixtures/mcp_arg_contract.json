@@ -513,6 +513,25 @@
     "layer_name": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Layer Name"},
     "layer_order": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Layer Order"}
    }
+  },
+  "risk_numbers_put": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["numbers", "POSITIONAL_OR_KEYWORD"], ["forbidden", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["numbers", "target_key"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"},
+    "numbers": {"items": {}, "title": "Numbers", "type": "array"},
+    "forbidden": {"anyOf": [{"items": {}, "type": "array"}, {"type": "null"}], "default": null, "title": "Forbidden"}
+   }
+  },
+  "risk_numbers_check": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["text", "POSITIONAL_OR_KEYWORD"], ["bundle_id", "POSITIONAL_OR_KEYWORD"], ["code", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["target_key"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"},
+    "text": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Text"},
+    "bundle_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Bundle Id"},
+    "code": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Code"}
+   }
   }
  }
 }

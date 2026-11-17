@@ -14,7 +14,7 @@ from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
-from app import config, evidence_bundle, identity, ledger, ledger_decision, provenance, ra_client, routes
+from app import config, evidence_bundle, identity, ledger, ledger_decision, ledger_numbers, provenance, ra_client, routes
 from app.adapters import base as adapters_base
 from app.errors import AppError
 
@@ -265,3 +265,34 @@ def post_layer_from_decision(target_key: str, body: DecisionBody, ident: identit
     return ledger_decision.apply(store, target_key, owner, decision=decision, source=source, mapping=body.mapping,
                                  mapping_version=body.mapping_version, version=body.version, layer_name=body.layer_name,
                                  layer_order=body.layer_order, actor=actor)
+
+
+# ---------------------------------------------------------------- RK-04 숫자 원장 · 금지값 점검
+class NumbersBody(BaseModel):
+    numbers: list[dict[str, Any]] = Field(default_factory=list, max_length=ledger_numbers.NUMBERS_MAX)
+    forbidden: list[dict[str, Any]] = Field(default_factory=list, max_length=ledger_numbers.FORBIDDEN_MAX)
+
+
+@router.put("/targets/{target_key}/numbers")
+def put_numbers(target_key: str, body: NumbersBody, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """숫자 원장 · 금지값을 통째로 갈아 쓴다(같은 몸이면 changed false). 편집자 이상."""
+    owner, actor = writer(target_key, ident)
+    return ledger_numbers.put(routes.get_store(), target_key, owner, numbers=body.numbers, forbidden=body.forbidden, actor=actor)
+
+
+class NumbersCheckBody(BaseModel):
+    text: str | None = Field(default=None, max_length=ledger_numbers.TEXT_MAX)
+    bundle_id: str | None = Field(default=None, max_length=80)
+    code: str | None = Field(default=None, max_length=ledger.CODE_MAX)
+
+
+def numbers_check_payload(target_key: str, body: NumbersCheckBody, *, owner_sub: str) -> dict:
+    target_owner(target_key, owner_sub)
+    return ledger_numbers.check(routes.get_store(), target_key, text=body.text, bundle_id=body.bundle_id, code=body.code)
+
+
+@router.post("/targets/{target_key}/numbers/check")
+def post_numbers_check(target_key: str, body: NumbersCheckBody, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """글 · 근거 묶음의 수를 숫자 원장 · 금지값과 대조한다(읽기 — 쓰지 않는다) — 원장에 없는 수 · 금지값 쓰임 · 단위 불일치 · 원장에 없는 id 꼴의
+    수와 위치. 그 대상의 구성원이 부른다."""
+    return numbers_check_payload(target_key, body, owner_sub=reader(target_key, ident))

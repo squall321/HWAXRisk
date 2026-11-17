@@ -57,7 +57,7 @@ MCP_READS: tuple[str, ...] = (
     # 단면 자리 찾기(F2) — 보드 좌표 찾기는 게이트웨이를 부르지 않아 구성원 모두 같은 답이다(이 원장에는 보드가 없어 unknown).
     "risk_locate_for_section",
     # 판정표 원장(HWAXPortal docs/request-1117) — 한눈 · 판 비교 · 근거 묶음 받기 · 원천 출처 표지.
-    "risk_ledger_overview", "risk_ledger_diff", "risk_get_evidence_bundle", "risk_get_provenance",
+    "risk_ledger_overview", "risk_ledger_diff", "risk_get_evidence_bundle", "risk_get_provenance", "risk_numbers_check",
 )
 MCP_MEMBER_EXEMPT: dict[str, str] = {
     "risk_propose_board_transform": ("적기의 앞 단계라 편집자 이상이다(보기 role_insufficient — 반대 검토 F2-9) · 부른 사람의 PAT 로 ODB 허브 ·"
@@ -75,6 +75,7 @@ MCP_WRITES: tuple[str, ...] = (
     "risk_ack_gate", "risk_decide_sameas", "risk_create_diff", "risk_open_target", "risk_start_job", "risk_job_action",
     "risk_repersist_panel", "risk_set_ecad_board", "risk_set_project_subject", "risk_set_board_transform", "risk_set_item_location",
     "risk_ledger_put_template", "risk_ledger_put_layer", "risk_ledger_build", "risk_build_evidence_bundle", "risk_ledger_apply_decision",
+    "risk_numbers_put",
 )
 # 보기가 지나는 쓰기 — 남의 것을 가리키지 않고 부른 사람 자신의 행을 쓴다. 대응 결정은 그 과제의 주인 · 편집자만 하게 돼(MB-13) 이 표에서
 # 빠졌다.
@@ -82,6 +83,8 @@ VIEWER_WRITES_OWN: dict[tuple[str, str], str] = {
     ("POST", P + "/projects"): "제 과제를 만든다(앞 과제가 구성원 과제라 계보가 선다 — 남이면 404)",
     ("POST", P + "/projects/{project_id}/requirements/inherit"): (
         "제 과제로 승계한다 — 원본은 보기가 읽는 구성원 과제이고 쓰는 것은 제 과제의 요구다(MB-14)"),
+    ("POST", P + "/targets/{target_key}/numbers/check"): (
+        "쓰기가 아니다 — 숫자 점검(RK-04)은 읽기이고 본문(글)이 길어 POST 다. 구성원 모두 부르고 원장을 바꾸지 않는다"),
 }
 
 
