@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import bisect
 import re
+from array import array
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -35,46 +36,110 @@ _UNITS = ("mm", "cm", "um", "µm", "μm", "nm", "m", "MPa", "GPa", "kPa", "Pa", 
 _UNIT_ALT = "|".join(re.escape(u) for u in sorted(_UNITS, key=len, reverse=True))
 # id 꼴 — 글자로 시작해 하이픈 · 밑줄로 이은 마디(R-001 · MET-STRESS · PART-A)이거나 글자 + 숫자(U1001 · DV1).
 _ID_RE = re.compile(r"(?<![A-Za-z0-9_.-])([A-Za-z][A-Za-z0-9]*(?:[-_][A-Za-z0-9]+)+|[A-Za-z]+[0-9][A-Za-z0-9]*)(?![A-Za-z0-9_-])")
-# 수 — 한 번 훑기(선형)로 자른다. 옛 정규식(천 단위 묶음을 되짚는 꼴)은 '111,111,…' 글에서 길이의 제곱으로 느려져 2백만 자 글이 서버를 붙들었다
-# (반대 검토 H1). 숫자 · 쉼표 덩이를 소유 한정자로 한 번에 집고, 천 단위 묶음(1,234,567)인지는 파이썬이 가른다 — 묶음이 아니면 쉼표마다 따로 센
-# 수다(1,2,3 → 1 · 2 · 3). 바로 뒤에 '.숫자' 가 이어지는 덩이(1.2.3 — 판 · 조항 번호)는 수가 아니다. 단위는 덩이 끝에서 따로 맞춘다.
-_NUM_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9_.])-?\d[\d,]*+(?:\.\d++)?+(?:[eE][-+]?\d++)?+")
+# 수 — 옛 정규식(_OLD_NUM_PATTERN — 천 단위 묶음을 되짚는 꼴)은 '111,111,…' 글에서 길이의 제곱으로 느려져 2백만 자 글이 서버를 붙들었다(반대 검토
+# H1). numbers_in 은 그 정규식의 finditer 와 같은 (시작, 끝, 값, 단위)를 한 번 훑기로 낸다 — 정규식이 되짚는 자리를 미리 센 배열(숫자 덩이 길이 ·
+# 마지막 비ASCII 숫자 자리 · ',ddd' 묶음 사슬 수)로 같은 차례에 견준다(정규식의 \d 는 유니코드 숫자, 뒤 거르개의 [0-9] 는 ASCII 그대로).
+# 옛 정규식과 다른 것은 하나다 — 쉼표 뒤 세 자리가 이어지는데 천 단위 묶음이 못 되는 ASCII 숫자 덩이(111,1111 의 111 · 12,3456 의 12 · 1234,567 의
+# 1234)를 옛 정규식은 말없이 버렸고 여기서는 수로 센다(뒤 덩이는 옛 정규식 그대로). 시험이 짧은 무작위 글에서 이 한 갈래 밖의 차이가 없음을 잰다.
+_OLD_NUM_PATTERN = (r"(?<![A-Za-z0-9_.])(-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?:[eE][-+]?\d+)?)(?![0-9]|\.\d|,\d{3})"
+                    rf"(?:\s?({_UNIT_ALT})(?![A-Za-z]))?")
+_NUM_START_RE = re.compile(r"(?<![A-Za-z0-9_.])-?\d")
+_DEC_RUN_RE = re.compile(r"\d+")
 _UNIT_AT_RE = re.compile(rf"\s?({_UNIT_ALT})(?![A-Za-z])")
-_GROUPED_RE = re.compile(r"\d{1,3}(?:,\d{3})+")
-_DOT_DIGIT_RE = re.compile(r"\.\d")
-_TAIL_RE = re.compile(r"[.eE]")
 _FAMILY_RE = re.compile(r"^([A-Za-z]+[-_]?)")
+
+
+def _ascii_digit(c: str) -> bool:
+    return "0" <= c <= "9"
 
 
 def numbers_in(text: str) -> Iterator[tuple[int, int, str, str | None]]:
     """글의 수를 차례로 — (값 시작, 단위까지 끝, 값 글, 단위). 값 글은 쓴 그대로(1,234.5 — to_decimal 이 쉼표를 뗀다)."""
-    for m in _NUM_TOKEN_RE.finditer(text):
-        end = m.end()
-        if _DOT_DIGIT_RE.match(text, end):
+    n = len(text)
+    starts = [m.start() for m in _NUM_START_RE.finditer(text)]
+    if not starts:
+        return
+    size = n + 6
+    run = array("i", [0]) * size          # j 에서 시작하는 \d 덩이 길이
+    last_na = array("i", [-1]) * size     # j 까지(같은 덩이 안) 마지막 비ASCII 숫자 자리
+    for m in _DEC_RUN_RE.finditer(text):
+        a, b = m.span()
+        na = -1
+        for j in range(a, b):
+            if not _ascii_digit(text[j]):
+                na = j
+            last_na[j] = na
+            run[j] = b - j
+    grp = array("i", [0]) * size          # j(쉼표)에서 시작하는 ',\d{3}' 묶음이 몇 번 이어지나
+    for j in range(n - 1, -1, -1):
+        if text[j] == "," and run[j + 1] >= 3:
+            grp[j] = 1 + grp[j + 4]
+
+    def lookahead_ok(e: int) -> bool:          # (?![0-9]|\.\d|,\d{3})
+        if e >= n:
+            return True
+        c = text[e]
+        if _ascii_digit(c):
+            return False
+        if c == "." and run[e + 1] >= 1:
+            return False
+        return not (c == "," and run[e + 1] >= 3)
+
+    def shorter(first: int, end: int) -> int | None:
+        """덩이 [first, end) 를 더 짧게 끊을 자리 — 다음 글자가 비ASCII 숫자일 때만 뒤 거르개를 지난다(가장 긴 것)."""
+        q = last_na[end - 1]
+        return q if q >= first + 1 else None
+
+    def exponent_ends(pos: int) -> list[int]:   # (?:[eE][-+]?\d+)? 의 되짚기 차례(없음은 부르는 쪽이 뒤에 둔다)
+        if pos >= n or text[pos] not in "eE":
+            return []
+        q0 = pos + 1 + (1 if pos + 1 < n and text[pos + 1] in "+-" else 0)
+        x = run[q0] if q0 < n else 0
+        if x < 1:
+            return []
+        out = [q0 + x]
+        cut = shorter(q0, q0 + x)
+        if cut is not None:
+            out.append(cut)
+        return out
+
+    def tail_end(e: int) -> int | None:         # (?:\.\d+)?(?:[eE][-+]?\d+)? 뒤 거르개를 지나는 첫 끝
+        ends: list[int] = []
+        if e < n and text[e] == "." and run[e + 1] >= 1:
+            e2 = e + 1 + run[e + 1]
+            ends += exponent_ends(e2) + [e2]
+            cut = shorter(e + 1, e2)
+            if cut is not None:
+                ends.append(cut)
+        ends += exponent_ends(e) + [e]
+        return next((x for x in ends if lookahead_ok(x)), None)
+
+    resume = 0
+    for i in starts:
+        if i < resume:
             continue
-        raw = m.group(0).rstrip(",")
-        start = m.start()
-        sign = "-" if raw.startswith("-") else ""
-        body = raw[len(sign):]
-        cut = _TAIL_RE.search(body)
-        head, tail = (body[:cut.start()], body[cut.start():]) if cut else (body, "")
-        if "," not in head or _GROUPED_RE.fullmatch(head):
-            pieces = [(start, raw)]
+        p = i + (1 if text[i] == "-" else 0)
+        d = run[p]
+        end = None
+        if d <= 3 and p + d < n and text[p + d] == "," and grp[p + d] >= 1:     # \d{1,3}(?:,\d{3})+ — 묶음은 끝까지만 된다
+            end = tail_end(p + d + 4 * grp[p + d])
+        if end is None:
+            end = tail_end(p + d)                                                 # \d+ — 덩이 끝까지
+        if end is None:
+            end = shorter(p, p + d)                                               # \d+ 를 더 짧게(비ASCII 숫자 앞)
+        if end is None:
+            if text[p + d:p + d + 1] == "," and run[p + d + 1] >= 3 and all(_ascii_digit(c) for c in text[p:p + d]):
+                # 옛 정규식이 버리던 갈래(111,1111 의 111) — 묶음이 못 되는 ASCII 덩이를 수로 센다. 단위는 쉼표 뒤라 붙지 않는다.
+                yield i, p + d, text[i:p + d], None
+                resume = p + d
+            continue
+        unit_m = _UNIT_AT_RE.match(text, end)
+        if unit_m:
+            yield i, unit_m.end(), text[i:end], unit_m.group(1)
+            resume = unit_m.end()
         else:
-            pieces, at = [], start + len(sign)
-            parts = head.split(",")
-            for n, part in enumerate(parts):
-                if part:
-                    text_part = (sign if n == 0 else "") + part + (tail if n == len(parts) - 1 else "")
-                    pieces.append((at - (len(sign) if n == 0 else 0), text_part))
-                at += len(part) + 1
-        last_end = start + len(raw)
-        unit_m = _UNIT_AT_RE.match(text, last_end)
-        for n, (at, value) in enumerate(pieces):
-            if n == len(pieces) - 1 and unit_m:
-                yield at, unit_m.end(), value, unit_m.group(1)
-            else:
-                yield at, at + len(value), value, None
+            yield i, end, text[i:end], None
+            resume = end
 
 
 class _IdSpans:

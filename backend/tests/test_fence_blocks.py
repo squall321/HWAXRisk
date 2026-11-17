@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import random
+import re
 import time
 
 import pytest
@@ -99,3 +100,58 @@ def test_the_employee_pattern_is_linear(text):
 ])
 def test_the_number_tokenizer_cuts_values_and_units(text, want):
     assert [(value, unit) for _s, _e, value, unit in ledger_numbers.numbers_in(text)] == want
+
+
+OLD_NUM = re.compile(ledger_numbers._OLD_NUM_PATTERN)
+NUM_ALPHABET = list("0123456789") + [",", ".", "e", "E", "-", "+", " ", "m", "mm", "1,234", ","]
+
+
+def _old_numbers(text: str) -> list[tuple[int, int, str, str | None]]:
+    return [(m.start(), m.end(), m.group(1), m.group(2)) for m in OLD_NUM.finditer(text)]
+
+
+def _documented_extras(text: str, old: list[tuple]) -> list[tuple]:
+    """옛 정규식과 다른 한 갈래(반대 검토 2차 6) — 옛 정규식이 시작하지 못한 자리의 ASCII 숫자 덩이(부호 포함)가 쉼표 + 세 자리 앞에서 끝나면 그 덩이를
+    수로 센다. 옛 정규식의 자리를 그대로 따라가며 따로 셈한다(numbers_in 의 셈을 빌리지 않는다)."""
+    covered = [(s, e) for s, e, *_ in old]
+    out, i, n = [], 0, len(text)
+    while i < n:
+        if any(s <= i < e for s, e in covered):
+            i += 1
+            continue
+        lookbehind = i == 0 or not re.match(r"[A-Za-z0-9_.]", text[i - 1])
+        p = i + 1 if text[i] == "-" else i
+        if lookbehind and p < n and text[p].isdigit():
+            q = p
+            while q < n and "0" <= text[q] <= "9":
+                q += 1
+            if q > p and re.match(r",[0-9]{3}", text[q:q + 4]) and text[p:q].isascii():
+                out.append((i, q, text[i:q], None))
+                i = q
+                continue
+        i += 1
+    return out
+
+
+def test_numbers_in_matches_the_old_regex_except_the_one_documented_class():
+    """옛 숫자 정규식과 짧은 무작위 글 수만 개로 견준다 — 다른 것은 '묶음이 못 되는 덩이가 쉼표 + 세 자리 앞에서 끝나면 센다' 한 갈래뿐이고, 그 갈래는
+    따로 셈한 목록과 같다."""
+    rng = random.Random(2117)
+    differing = 0
+    for _ in range(40000):
+        s = "".join(rng.choice(NUM_ALPHABET) for _ in range(rng.randint(1, 14)))
+        old = _old_numbers(s)
+        new = list(ledger_numbers.numbers_in(s))
+        want = sorted(old + _documented_extras(s, old))
+        assert new == want, (s, old, new)
+        differing += new != old
+    assert differing > 0                    # 그 갈래는 실제로 나온다(시험이 빈 것이 아니다)
+
+
+@pytest.mark.parametrize("text", [
+    "1,234,56", "023,1,234", "1,234,5 mm", "2,.6mm", "1.5e3.2", "1,2.3.4", "1,234.5,678", "1.5,234", "values 10,20,30", "1,000,000.5 MPa",
+    "12,345mm", "-1,234", "-1,2", "2,3 mm", "1,234５", "３３,１２３", "1５,234", "１.２３４", "２e５", "x-12,3456",
+])
+def test_numbers_in_hand_cases_follow_the_old_regex(text):
+    old = _old_numbers(text)
+    assert list(ledger_numbers.numbers_in(text)) == sorted(old + _documented_extras(text, old)), text
