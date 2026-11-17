@@ -6373,3 +6373,12 @@ L5 · L6 · L7 · L8 이고, 나머지(H1 · M1 · M2 · M6~M9 · L1~L3 · L9 ·
   은 옛 정규식(_OLD_NUM_PATTERN, 남겨 둔 참조)과 같은 결과를 내고 다른 갈래는 하나다(묶음이 못 되는 ASCII 덩이 + ',ddd' — 옛 것이 버린 수를
   센다); 시험이 무작위 글 4만 개로 그 밖의 차이가 없음을 잰다. ⑦ 한눈은 가장 새 200개 · <칸>_older_omitted. ⑧ 칸 글 끝의 줄바꿈도 ⏎ 로 남긴다
   (지문이 바뀌는 것은 끝에 줄바꿈이 있는 칸의 묶음뿐이다 — 나가기 전이라 굳은 지문이 없다).
+- LG-16 출처 표지(RK-06) 2차 — StepForge D-706(main 93918cf1)과 KooRemapper DF-14(c37bd03)가 청한 칸을 냈다. 캡처가 그 답을 얼린다 —
+  mcad 는 과제 상세 REST(이미 부르던 `GET /api/projects/{id}`)의 stage · stage_code · revision · copy_stage 를, REST 없는 캡처는 읽기 MCP 답의
+  copy_stage(더 진행된 사본이 있을 때만 온다 — 없으면 '없다' 가 아니라 모름)를 `sources[mcad].provenance` 에, system_status 의 env · env_raw ·
+  env_why · instance · app 을 `app_version.extra` 에. dyna 는 inspect_file 맨 위 sha256(예전 meta.sha256 읽기는 늘 비었다 — ref 의 지문이 먼저인
+  차례는 그대로) · modelmeta 의 element_id_collisions · parts_missing 을 `sources[dyna].provenance` 에, 리포트 답의 environment 를
+  `sources[dyna_result].provenance` 에 얼리고, dyna 캡처가 이제 system_status 를 부른다(전에는 부르지 않아 실제 캡처의 dyna env 가 늘 모름이었다 —
+  1차 RK-06 의 빈 곳). rr_ir.v1 의 source 에 선택 칸 provenance(객체 · null)를 더했다 — additionalProperties false 라 새 칸 없이는 ref 에 섞어야
+  했다(ref 는 원천의 열쇠다). 판 대조는 두 쪽 다 값이 있을 때만 잰다 — MCAD 쪽은 정한 판의 rev_label, 덱 쪽은 아직 없다(늘 unknown). 앱이 이미
+  내는 칸은 needs 에서 뺐다(옛 판의 캡처는 각 칸의 unknown 까닭이 말한다).

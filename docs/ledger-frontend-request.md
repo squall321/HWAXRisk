@@ -19,6 +19,6 @@
 6. **결정 반영 미리 보기** — `POST …/ledger/layers/from-decision` 답의 `cells`(상태별 색 — filled · empty · conflict · no_source) · `counts` ·
    `consistency`(match false 면 경고 띠 — '결정문은 만장일치를 말하는데 표결에 조건부 · 반대가 있다') · `notes`.
 7. **숫자 점검** — `POST …/numbers/check` 답의 네 목록(원장에 없는 수 · 금지값 · 단위 불일치 · 원장에 없는 id)을 위치(where · col · 앞뒤 글)와 함께.
-8. **출처 표지** — 과제 화면에 `GET /api/projects/{id}/provenance` 의 `warnings`(이른 사본 · 빈/옛 앱 키 · 운영 아닌 env · 요소 없는 파트)를 띠로,
+8. **출처 표지** — 과제 화면에 `GET /api/projects/{id}/provenance` 의 `warnings`(이른 사본 · 더 진행된 사본 · 빈/옛 앱 키 · 운영 아닌 env · 요소 없는 파트 · 요소 id 충돌 · 빠진 파트 · 운영 아닌 리포트)를 띠로,
    `checks` 를 상태 칩(ok · warn · unknown)으로, `unknown` 칸은 '모름 — 까닭' 으로 보인다.
 9. **표기** — 등급 · 증거 유형 · 주의 등급 · 판정 글자는 `GET /api/taxonomy/labels` 의 표시 글로 보인다(같은 글자를 축 낱말 없이 쓰지 않는다).

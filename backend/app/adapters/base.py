@@ -482,8 +482,11 @@ def probe_app_version(recorder: Any, kind: str, *, app_key: str | None = None) -
         return dict(UNKNOWN_APP_VERSION)
     app_block = body.get("app") if isinstance(body.get("app"), Mapping) else {}
     version = body.get("version") or body.get("app_version") or app_block.get("version")
-    # env — 소스 앱의 운영 · 개발 표지(DynaForge system_status 의 env: development | production). provenance(RK-06)가 '개발 박스를 읽었나' 를
-    # 이 값으로 본다. 없으면 싣지 않는다(지어내지 않는다).
-    extra = {k: body[k] for k in ("build", "commit", "started_at", "schema_version", "env") if k in body}
+    # env — 소스 앱의 운영 · 개발 표지(DynaForge system_status 의 env: development | production · StepForge D-706 의 env: dev | prod | null 과
+    # env_raw · env_why · instance{server, pid, host} · app). provenance(RK-06)가 '개발 박스를 읽었나' · 어느 서버였나를 이 값으로 본다. 없으면 싣지
+    # 않는다(지어내지 않는다).
+    extra = {k: body[k] for k in ("build", "commit", "started_at", "schema_version", "env", "env_raw", "env_why", "instance") if k in body}
+    if isinstance(body.get("app"), str):
+        extra["app"] = body["app"]
     return {"version": str(version) if version else None, "captured_via": tool if version else None,
             "extra": extra or None}

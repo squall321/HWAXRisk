@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
+from app.adapters import base
 from app.adapters.base import AdapterResult, CallRecorder, Principal, Probe, SourceAdapter
 from app.common import canonical_json, now_epoch, sha256_hex
 
@@ -114,7 +115,9 @@ class DynaAdapter(SourceAdapter):
         if meta.get("truncated_scan"):
             degraded.add("truncated_scan")
 
-        sha256 = str(ref.get("sha256") or meta.get("sha256") or "")
+        # 덱 지문은 inspect_file 답의 맨 위 칸이다(KooRemapper c37bd03 — 파일 행의 sha256). 예전에는 meta.sha256 을 읽어 늘 비었다(그 칸은
+        # 없다) — ref 에 지문을 주지 않은 원천은 덱 지문 없이 얼었다. meta.sha256 은 그 칸을 내던 옛 꼴이 있으면 받는다.
+        sha256 = str(ref.get("sha256") or payload.get("sha256") or meta.get("sha256") or "")
         modelmeta = meta.get("modelmeta") if isinstance(meta.get("modelmeta"), Mapping) else {}
         connectivity = modelmeta.get("connectivity") if isinstance(modelmeta.get("connectivity"), Mapping) else {}
         if connectivity.get("edges_truncated"):
@@ -142,15 +145,23 @@ class DynaAdapter(SourceAdapter):
         else:
             degraded.add("detect_absent")
 
+        # 버전 · 환경(system_status — env 는 development · production 원래 낱말)은 선택 호출이다(실패해도 캡처를 멈추지 않는다 — RK-06).
+        app_version = base.probe_app_version(recorder, KIND, app_key=app_key)
         source = {
             "kind": KIND, "app_key": app_key, "adapter_version": ADAPTER_VERSION, "channel": "mcp",
-            "ref": {"session_id": session_id, "file_id": file_id, "filename": ref.get("filename") or meta.get("filename"),
+            "ref": {"session_id": session_id, "file_id": file_id, "filename": ref.get("filename") or payload.get("filename")
+                    or meta.get("filename"),
                     "sha256": sha256 or None, "origin_job_id": ref.get("origin_job_id"),
                     "modelmeta_detect": bool(detect_file_id), "detect_result_file_id": detect_file_id,
                     "includes": list(meta.get("includes") or [])},
             "source_hash": sha256 or None,
             "stats": _stats(meta, connectivity, nodes),
             "conventions": dict(modelmeta.get("conventions") or {}),
+            "app_version": app_version,
+            # 덱 요소 id 충돌(RK-06 — KooRemapper DF-14 · 11-17 바이너리부터). 같은 번호의 뒤 카드에 덮여 잃은 요소 정의 수와 요소가 다 빠져
+            # 목록에 없는 파트 수 — 11-17 전에 올린 파일(옛 바이너리)은 둘 다 null 이다(0 이 아니라 모름). ir_hash 입력이 아니다.
+            "provenance": {"element_id_collisions": _count(modelmeta.get("element_id_collisions")),
+                           "parts_missing": _count(modelmeta.get("parts_missing"))},
             "degraded": sorted(degraded), "captured_at": captured_at,
         }
         return {"source": source, "nodes": nodes, "edges": edges, "warnings": warnings,
@@ -183,6 +194,7 @@ class DynaResultAdapter(SourceAdapter):
 
         warnings: list[dict] = []
         summaries: list[dict] = []
+        read_ids: list[str] = []
         for report_id in report_ids:
             reply = recorder.call("mcp", "report_summary", {"report_id": report_id},
                                   source_kind=RESULT_KIND, app_key=app_key)
@@ -190,6 +202,7 @@ class DynaResultAdapter(SourceAdapter):
                 warnings.append(_warn("report_unreadable", f"리포트를 읽지 못했다 — {reply['error']}", report_id))
                 continue
             summaries.append(dict(reply["result"] or {}))
+            read_ids.append(report_id)
         if not summaries:
             return _absent(app_key, captured_at, "dyna_result_absent", "지정한 리포트를 하나도 읽지 못했다.",
                            kind=RESULT_KIND)
@@ -200,6 +213,10 @@ class DynaResultAdapter(SourceAdapter):
             "ref": {"report_ids": report_ids, "report_kind": sorted(kinds)[0] if len(kinds) == 1 else None,
                     "session_id": ref.get("session_id")},
             "source_hash": sha256_hex(canonical_json(sorted(report_ids))),
+            # 리포트를 낸 서버의 환경(RK-06 — KooRemapper D5, 리포트 답의 environment: dev · prod · unknown). 못 읽은 리포트 · 그 칸을 내기 전 판은
+            # 싣지 않는다(지어내지 않는다).
+            "provenance": {"report_environment": {rid: s.get("environment")
+                                                  for rid, s in zip(read_ids, summaries) if s.get("environment") is not None}},
             "degraded": [], "captured_at": captured_at,
         }
         if len(kinds) > 1:
@@ -385,6 +402,11 @@ def corpus_context(recorder: CallRecorder, *, app_key: str | None, captured_at: 
         if isinstance(result, Mapping):
             usage.update(result)
     return {"corpus_usage": usage if ok else None}
+
+
+def _count(value: Any) -> int | None:
+    """0 이상의 정수만 수로 받는다 — null · 글 · 참거짓은 모름(None)이다."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
 def _stats(meta: Mapping[str, Any], connectivity: Mapping[str, Any],
