@@ -31,7 +31,7 @@ facts 키 · 실제 판정표는 PC 수용 때 등록하는 데이터다. 아래
 | 층 쌓기 | `risk_ledger_put_layer` | `POST …/ledger/layers` | 편집자 |
 | 판 짓기 | `risk_ledger_build` | `POST …/ledger/versions` | 편집자 |
 | 판 비교 | `risk_ledger_diff` | `GET …/ledger/versions/{v}/diff?base=` | 읽기 |
-| 내보내기 | `risk_ledger_export` | `GET …/ledger/versions/{v}/export?fmt=csv\|json&raw=` | 읽기(기록) — csv 는 수식으로 읽힐 글 칸 앞에 `'`(raw=true 면 그대로) |
+| 내보내기 | `risk_ledger_export` | `GET …/ledger/versions/{v}/export?fmt=csv\|json&raw=` | 읽기(기록) — csv 는 수식으로 읽힐 글 칸(= + - @ 탭 CR 로 시작하는데 칸 전체가 수 글이 아닌 것) 앞에 `'`(raw=true 면 그대로) |
 | 근거 묶음 | `risk_build_evidence_bundle` · `risk_get_evidence_bundle` | `POST …/evidence-bundles` · `GET /api/evidence-bundles/{id}` | 편집자 · 읽기 |
 | 결정 반영 | `risk_ledger_apply_decision` | `POST …/ledger/layers/from-decision` | 편집자 |
 | 숫자 원장 | `risk_numbers_put` · `risk_numbers_check` | `PUT …/numbers` · `POST …/numbers/check` | 편집자 · 읽기 |
@@ -40,7 +40,13 @@ facts 키 · 실제 판정표는 PC 수용 때 등록하는 데이터다. 아래
 | 표기 규칙 | `risk_taxonomy(part="labels")` | `GET /api/taxonomy/labels` | 공용 |
 
 읽기는 대상의 구성원이다 — MCP 도 REST 와 같은 문 · 같은 거절이고 조직 공개로 넓히지 않는다(사용자 결정 11-17 — 출처 표지 · 기존 읽기 도구는 그대로).
-쓰기는 편집자 이상이고 MCP 쓰기는 게이트웨이 위임 신원만이다. 회수된 과제의 대상은 읽기 · 쓰기 모두 409 `project_purged` 다.
+쓰기는 편집자 이상이고 MCP 쓰기는 게이트웨이 위임 신원만이다. 회수된 과제의 대상은 읽기 · 쓰기 모두 409 `project_purged` 다(회수는 숫자 원장 ·
+금지값 행을 지운다).
+
+MCP 답의 쪽 — 쪽으로 나누는 칸(판 비교의 changes · 보고 묶음의 facts · 내보내기의 rows)은 와이어 상한 안의 쪽이고 `next_offset` 으로 이어 받는다.
+쪽마다 되풀이되는 요약 목록(판 비교의 든 · 빠진 · 등급 바뀐 코드)은 200개까지와 `<칸>_total` 이고, 쪽으로 나누는 칸과 같이 재어 줄이지 않는다(한
+항목만 실은 쪽도 넘칠 때만 더 줄인다). 보고 묶음의 그림은 그 쪽 코드의 것 전부(한 쪽 200개까지 — 넘칠 코드부터 다음 쪽), 출처 층 · 숫자 참조는
+첫 쪽에. 한눈의 판 · 층 · 묶음 목록은 가장 새 200개와 `<칸>_total` · `<칸>_older_omitted`. 전부는 REST 답이다.
 
 ## 3. 정한 것
 
@@ -56,14 +62,16 @@ facts 키 · 실제 판정표는 PC 수용 때 등록하는 데이터다. 아래
   (`HWAXRISK_BUNDLE_MAX_ITEMS` · `HWAXRISK_BUNDLE_MAX_CHARS`, 기본 120 · 135,538 — knobs.env)은 `result` 글자 합(색인 포함)으로 잰다.
 - **가림**(`app/pii.py`) — 근거 묶음은 늘 가린다(끌 수 없다 — `mask=false` 는 422, 사용자 결정 11-17: 게이트웨이가 묶음 받기를 제 가림에서 빼므로 이 앱이
   묶음 가림의 유일한 자리다). 메일 · 휴대 · 지역 전화 · 사설 IPv4 · 주민번호 꼴(날짜일 때만) · 표지 붙은 사번 — 거르개는 ASCII 라 한글이 붙은 꼴도 가린다.
-  가르지 않은 긴 숫자열 · 소수 · 코드 · 버전 · 부품 · 넷 이름(U1@PCB.TOP) · 그림 이름 · 조항 번호는 건드리지 않는다(게이트웨이 HG-21 의 교훈). 사람 이름은 꼴로
-  가르지 않는다. 틀의 칸 차례가 묶음 지문에 든다(차례가 항목 key 와 합 상한 나누기를 정한다).
+  가르지 않은 긴 숫자열 · 소수 · 코드 · 버전 · 부품 · 넷 이름(U1@PCB.TOP — 마지막 마디가 판 층 · 넷 낱말일 때만) · 그림 이름(icon@2x.png · plot@a.pdf) ·
+  조항 번호(낱말 머리의 조항 · 표 · § 뒤)는 건드리지 않는다(게이트웨이 HG-21 의 교훈). 확장자가 붙은 주소는 주소 몫만 가린다(…@<도메인>.pdf →
+  `[가림:메일].pdf`). 사람 이름은 꼴로 가르지 않는다. 칸 글 끝의 줄바꿈도 ⏎ 로 남는다. 틀의 칸 차례가 묶음 지문에 든다(차례가 항목 key 와 합 상한 나누기를 정한다).
 - **결정 반영** — `decision_json` · `decision_text` · `job_id` 가운데 하나. job_id 는 그 사람의 포털 PAT 로 게이트웨이 `deliberate_result` 를
   `view="decision_json"` 으로 먼저 부르고, 엔진이 그 꼴을 모르면 `view="summary"` 의 결정문을 쪽마다 이어 읽는다(표결은 그 답의 votes.tally).
   표결 칸은 엔진 원장 그대로의 영문 칸 — agree · conditional · oppose · abstain · responded · total(contracts §6). risk_spec 이 null 이면 엔진의
   parse_error 를 까닭으로 422 다.
   칸마다 filled · empty · conflict · no_source — conflict 칸도 층에 싣는다(판 짓기가 덮을지는 사람이 본다). 패널 결과 다시 저장의 길은 쓰지 않는다.
-- **숫자 점검** — 작은 정수까지 세고, 코드 · 키 꼴 낱말 속 숫자는 수로 보지 않는다. 원장 코드 · 지표 키와 같은 머리인데 원장에 없는 id 는
+- **숫자 점검** — 작은 정수까지 세고, 코드 · 키 꼴 낱말 속 숫자는 수로 보지 않는다. 수 자르기는 옛 숫자 정규식과 같은 결과를 한 번 훑기로 낸다
+  (다른 것은 하나 — 천 단위 묶음이 못 되는 덩이가 쉼표 + 세 자리 앞에서 끝나면(111,1111 의 111) 옛 정규식은 버렸고 여기서는 센다). 원장 코드 · 지표 키와 같은 머리인데 원장에 없는 id 는
   unknown_ids 다. 근거 묶음을 주면 줄마다 코드를 안다.
 - **보고 묶음** — 틀의 키를 전부 채운다(빈 키는 null 과 `null_reasons`). id 는 내용 지문(`rb_`), 근거 묶음은 `eb_` — id 만으로 둘이 갈린다.
 - **인용 형식**(contracts §5 C1) — 두 묶음 모두 `cite{source_platform: "hwax_risk", source_kind: risk_bundle | risk_report_bundle, source_id,
