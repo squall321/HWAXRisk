@@ -1,6 +1,7 @@
 # 원천의 출처 표지(RK-06) 시험 — 앱이 가진 값만(지어내지 않는다) · 모르는 칸은 까닭 · 이른 사본 · 빈/옛 앱 키 · 운영 아닌 env · 요소 없는 파트 경고, 스냅샷 · 등록부 · 단면 자리 · 길잡이 응답에 붙는다
 """HWAXPortal docs/request-1117 RK-06. 스냅샷은 실 어댑터 꼴의 픽스처(factories.fixture_adapter_results)를 고쳐 얼린다 — 검출 흔적 없음 · 앱 키 · 환경 표지 ·
-덱 파트 수만 바꾼다. 원천 앱이 내지 않는 칸(StepForge 단계 · 판, 덱에 적힌 요소 수 · 덱 판)은 늘 null 과 까닭이다(11-17 dev 소스 대조).
+덱 파트 수 · 캡처가 얼린 출처 칸(sources[].provenance — StepForge D-706 의 단계 · 판 · 사본 단계, KooRemapper DF-14 의 요소 id 충돌 · 빠진 파트,
+리포트 환경)만 바꾼다. 그 칸이 없는 옛 캡처는 null 과 까닭이고, 덱 판은 DynaForge 가 아직 내지 않아 늘 모름이다.
 
   실행:  .venv/bin/python -m pytest tests/test_provenance.py
 """
@@ -22,9 +23,18 @@ ledger_box = ledger_support.ledger_box          # 판정표 시험 상자(tests/
 
 
 def _results(*, detect_absent: bool = False, interfaces: int | None = None, dyna_app_key: str | None = "heax-kooremapper_mcp",
-             env: str | None = None, parts_declared: int | None = None) -> list[dict]:
+             env: str | None = None, parts_declared: int | None = None, mcad_marks: dict | None = None, mcad_extra: dict | None = None,
+             dyna_marks: dict | None = None, report_env: dict | None = None) -> list[dict]:
     results = copy.deepcopy(factories.fixture_adapter_results())
     mcad, dyna = results[0]["source"], results[1]["source"]
+    if mcad_marks is not None:
+        mcad["provenance"] = mcad_marks
+    if mcad_extra is not None:
+        mcad["app_version"] = {"version": "0.9.0", "captured_via": "heaxstep_forge_system_status", "extra": mcad_extra}
+    if dyna_marks is not None:
+        dyna["provenance"] = dyna_marks
+    if report_env is not None:
+        results[2]["source"]["provenance"] = {"report_environment": report_env}
     if detect_absent:
         mcad["degraded"] = sorted({*mcad.get("degraded", []), "detect_absent"})
     if interfaces is not None:
@@ -55,18 +65,21 @@ def test_a_healthy_capture_carries_what_the_apps_returned_and_names_what_they_di
     assert out["basis"] == "snapshot" and out["snapshot_id"] == snapshot_id
     mcad, dyna = out["mcad"], out["dyna"]
     assert mcad["stepforge_project_id"] == "001a02ba21cd51064a68c35" and mcad["detect_job_id"] == "01JDET"
-    assert mcad["stage"] is None and mcad["revision"] is None and set(mcad["unknown"]) >= {"stage", "revision", "env"}
+    assert mcad["stage"] is None and mcad["revision"] is None and set(mcad["unknown"]) >= {"stage", "revision", "env", "copy_stage"}
+    assert "얼리지 않았다" in mcad["unknown"]["stage"]                    # 그 칸을 얼리기 전의 캡처(옛 스냅샷)는 모름이다
     assert mcad["signals"] == {"detect_absent": False, "interfaces": 2, "leaf_instances": 3, "degraded": []}
     assert dyna["app_key"] == "heax-kooremapper_mcp" and dyna["deck_file"] == "assembled_tied.k"
     assert (dyna["env"], dyna["env_raw"]) == ("prod", "production") and mcad["env"] == "unknown"     # 게이트웨이 낱말(사용자 결정 D5)
     assert dyna["elements_read"] == 9800 and dyna["elements_declared"] is None and "elements_declared" in dyna["unknown"]
+    assert dyna["element_id_collisions"] is None and "얼리지 않았다" in dyna["unknown"]["element_id_collisions"]
     assert (dyna["parts_declared"], dyna["parts_read"]) == (2, 2) and dyna["report_ids"] is None
     assert out["ecad"] == {"attached": False}
     assert _codes(out) == []
     checks = {c["check"]: c["status"] for c in out["checks"]}
-    assert checks == {"mcad_stage": "unknown", "dyna_app_key": "ok", "dyna_env": "ok", "deck_elements": "unknown",
-                      "dyna_parts": "ok", "revision_match": "unknown"}
-    assert {n["for"] for n in out["needs"]} >= {"mcad.stage", "mcad.revision", "dyna.elements_declared", "dyna.deck_version"}
+    assert checks == {"mcad_stage": "unknown", "mcad_copy": "unknown", "dyna_app_key": "ok", "dyna_env": "ok", "deck_elements": "unknown",
+                      "deck_parts_missing": "unknown", "dyna_parts": "ok", "dyna_report_env": "unknown", "revision_match": "unknown"}
+    # StepForge 단계 · 판 · 환경과 DynaForge 요소 id 충돌은 그 앱이 이미 낸다 — needs 에는 아직 안 내는 것만 남는다.
+    assert {n["for"] for n in out["needs"]} == {"dyna.deck_version", "dyna.instance"}
 
 
 def test_an_early_copy_an_empty_or_retired_key_a_dev_env_and_parts_without_elements_are_warned(ledger_box):
@@ -144,3 +157,98 @@ def test_the_capture_keeps_the_env_marker_the_source_app_returns():
     recorder = types.SimpleNamespace(mcp_available=True, call=lambda *a, **k: next(replies))
     assert adapters_base.probe_app_version(recorder, "dyna")["extra"] == {"env": "production"}
     assert adapters_base.probe_app_version(recorder, "dyna")["extra"] is None
+
+
+PARSED_COPY = {"detail_read": True, "stage": "파싱까지", "stage_code": "parsed",
+               "revision": {"decided": True, "rev_label": "REV-B", "rev_seq": 2, "model_key": "MODEL-A", "task_code": "TASK-A",
+                            "status": "current"},
+               "copy_stage": {"project_id": "001a02ba21cd51064a68c35", "how_far": "parsed", "how_far_words": "파싱까지",
+                              "steps_done": ["parsed"], "more_advanced": "sf-copy-2", "why": "이 과제는 파싱까지다", "copies_n": 1},
+               "copy_stage_via": "rest"}
+SF_EXTRA = {"app": "step_forge", "build": {"sha": "93918cf1", "at": None, "source": "git-workdir"}, "env": "dev", "env_raw": "development",
+            "instance": {"server": "srv-token-1", "pid": 4242, "host": "box-a"}}
+
+
+def test_a_parsed_only_copy_with_a_more_advanced_sibling_is_named_from_the_frozen_stepforge_marks(ledger_box):
+    """StepForge D-706 — 과제 상세가 단계 · 판 · 사본 단계를 냈고 캡처가 얼렸다. 파싱까지만 된 사본이면 경고 · 더 진행된 사본이 있으면 그 id 를 댄다
+    (좌석이 파싱까지만 된 사본을 읽고 MCAD 를 null 로 결론 낸 함정). 환경은 게이트웨이 낱말과 원래 낱말 둘 다다."""
+    project_id, _ = _project_with(ledger_box, _results(mcad_marks=PARSED_COPY, mcad_extra=SF_EXTRA, env="production"), "PROV-SF")
+    out = provenance.project_provenance(ledger_box.store, project_id)
+    mcad = out["mcad"]
+    assert (mcad["stage"], mcad["stage_code"]) == ("파싱까지", "parsed") and mcad["revision"]["rev_label"] == "REV-B"
+    assert mcad["copy_stage"]["more_advanced"] == "sf-copy-2"
+    assert (mcad["env"], mcad["env_raw"], mcad["instance"]["host"], mcad["build"]["sha"]) == ("dev", "development", "box-a", "93918cf1")
+    assert not {"stage", "revision", "copy_stage", "env"} & set(mcad["unknown"])
+    assert _codes(out) == ["mcad_early_stage", "mcad_more_advanced_copy"]
+    early = next(w for w in out["warnings"] if w["code"] == "mcad_early_stage")
+    assert early["evidence"]["stage_code"] == "parsed"
+    copy_warning = next(w for w in out["warnings"] if w["code"] == "mcad_more_advanced_copy")
+    assert copy_warning["evidence"]["more_advanced"] == "sf-copy-2" and copy_warning["evidence"]["via"] == "rest"
+    checks = {c["check"]: c for c in out["checks"]}
+    assert checks["mcad_stage"]["status"] == "warn" and checks["mcad_copy"]["status"] == "warn"
+    # 판 대조는 두 쪽 다 값이 있을 때만이다 — 덱 판은 DynaForge 가 아직 내지 않는다.
+    assert checks["revision_match"]["status"] == "unknown" and "덱 판을 모른다" in checks["revision_match"]["why"]
+    assert "MCAD 판을 모른다" not in checks["revision_match"]["why"]
+
+
+def test_the_app_stage_wins_over_the_signals_and_a_stepforge_without_env_says_why(ledger_box):
+    marks = {**PARSED_COPY, "stage": "검출까지", "stage_code": "detected",
+             "copy_stage": {**PARSED_COPY["copy_stage"], "how_far": "detected", "more_advanced": None, "why": "가장 진행됐다"}}
+    no_env = {**{k: v for k, v in SF_EXTRA.items() if k not in ("env", "env_raw")}, "env": None, "env_raw": None,
+              "env_why": "배포 설정 STEPFORGE_ENV 가 없다"}
+    project_id, _ = _project_with(ledger_box, _results(detect_absent=True, interfaces=0, mcad_marks=marks, mcad_extra=no_env), "PROV-SF2")
+    out = provenance.project_provenance(ledger_box.store, project_id)
+    checks = {c["check"]: c["status"] for c in out["checks"]}
+    assert checks["mcad_stage"] == "ok" and checks["mcad_copy"] == "ok" and "mcad_early_stage" not in _codes(out)
+    assert out["mcad"]["env"] == "unknown" and "STEPFORGE_ENV" in out["mcad"]["unknown"]["env"]
+    # MCP 만의 캡처(과제 상세 없음) — 사본 단계가 MCP 답에 없으면 '없다' 가 아니라 모른다.
+    mcp_only = {"detail_read": False, "stage": None, "stage_code": None, "revision": None, "copy_stage": None, "copy_stage_via": None}
+    other, _ = _project_with(ledger_box, _results(mcad_marks=mcp_only), "PROV-SF3")
+    got = provenance.project_provenance(ledger_box.store, other)["mcad"]["unknown"]
+    assert "과제 상세(REST)를 읽지 못했다" in got["stage"] and "더 진행된 사본이 있을 때만" in got["copy_stage"]
+
+
+def test_the_revision_check_compares_only_when_both_sides_have_a_value(ledger_box, monkeypatch):
+    """덱 판은 DynaForge 가 아직 내지 않는다 — 대조를 켜는 자리만 본다(덱 쪽에 값이 생기면 정한 MCAD 판의 이름과 견준다)."""
+    real = provenance._dyna
+
+    def with_deck(label):
+        def fake(*args, **kwargs):
+            out = real(*args, **kwargs)
+            out["deck_version"] = label
+            return out
+        return fake
+
+    project_id, _ = _project_with(ledger_box, _results(mcad_marks=PARSED_COPY), "PROV-REV")
+    monkeypatch.setattr(provenance, "_dyna", with_deck("REV-C"))
+    out = provenance.project_provenance(ledger_box.store, project_id)
+    assert "revision_mismatch" in _codes(out) and {c["check"]: c["status"] for c in out["checks"]}["revision_match"] == "warn"
+    monkeypatch.setattr(provenance, "_dyna", with_deck("REV-B"))
+    assert {c["check"]: c["status"] for c in provenance.project_provenance(ledger_box.store, project_id)["checks"]}["revision_match"] == "ok"
+    undecided = {**PARSED_COPY, "revision": {"decided": False, "rev_label": None, "rev_seq": None, "model_key": None, "task_code": "TASK-A",
+                                             "status": None}}
+    other, _ = _project_with(ledger_box, _results(mcad_marks=undecided), "PROV-REV2")
+    check = next(c for c in provenance.project_provenance(ledger_box.store, other)["checks"] if c["check"] == "revision_match")
+    assert check["status"] == "unknown" and "decided false" in check["why"]
+
+
+def test_deck_element_id_collisions_and_missing_parts_are_warned_and_old_files_stay_unknown(ledger_box):
+    """KooRemapper DF-14 — 같은 번호의 뒤 카드에 덮여 잃은 요소 · 요소가 다 빠져 목록에 없는 파트(파트 944개를 잃은 함정). 덱에 적힌 요소 수는 읽은
+    요소 + 잃은 요소다. 11-17 전에 올린 파일은 둘 다 null 이라 0 이 아니라 모름이다. 리포트 환경이 운영이 아니면 경고다."""
+    project_id, _ = _project_with(ledger_box, _results(env="production", dyna_marks={"element_id_collisions": 120, "parts_missing": 3},
+                                                       report_env={"r1": "dev"}), "PROV-DF")
+    out = provenance.project_provenance(ledger_box.store, project_id)
+    dyna = out["dyna"]
+    assert (dyna["element_id_collisions"], dyna["parts_missing"], dyna["elements_declared"]) == (120, 3, 9800 + 120)
+    assert {"dyna_element_id_collisions", "dyna_parts_missing", "dyna_report_env_not_production"} <= set(_codes(out))
+    assert dyna["report_environment"] == {"r1": "dev"} and dyna["unknown"]["deck_version"].startswith("DynaForge 가 덱 판")
+    checks = {c["check"]: c["status"] for c in out["checks"]}
+    assert (checks["deck_elements"], checks["deck_parts_missing"], checks["dyna_report_env"]) == ("warn", "warn", "warn")
+    clean, _ = _project_with(ledger_box, _results(env="production", dyna_marks={"element_id_collisions": 0, "parts_missing": 0},
+                                                  report_env={"r1": "prod"}), "PROV-DF2")
+    ok = provenance.project_provenance(ledger_box.store, clean)
+    assert {c["check"]: c["status"] for c in ok["checks"]}["deck_elements"] == "ok" and ok["dyna"]["elements_declared"] == 9800
+    assert not {"dyna_element_id_collisions", "dyna_parts_missing", "dyna_report_env_not_production"} & set(_codes(ok))
+    old, _ = _project_with(ledger_box, _results(dyna_marks={"element_id_collisions": None, "parts_missing": None}), "PROV-DF3")
+    stale = provenance.project_provenance(ledger_box.store, old)["dyna"]
+    assert stale["element_id_collisions"] is None and "0 이 아니라 모른다" in stale["unknown"]["element_id_collisions"]

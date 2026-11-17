@@ -31,6 +31,12 @@ JOB_TOL_KEYS: tuple[str, ...] = ("tied_gap", "clearance_gap", "tied_area", "tied
 # tree.json 노드 kind → IR 노드 kind. 소스 어휘는 core/model.py 의 5종뿐이고(step-file·assembly·instance +
 # project-root·file-group), project-root·file-group 은 노드로 만들지 않는다(plan §2.3).
 NODE_KIND_MAP: dict[str, str] = {"step-file": "file", "assembly": "assembly", "instance": "part"}
+# 과제 단계 · 설계 판 · 같은 CAD 사본의 단계(리스크 앱 RK-06 — StepForge D-706, main 93918cf1 부터). 과제 상세 REST(`GET /api/projects/{id}`)가
+# stage · stage_code · revision · copy_stage[] 를 늘 싣고, 읽기 MCP 답은 더 진행된 사본이 있거나 이름으로 사본을 골랐을 때만 copy_stage[] 를 싣는다.
+# 캡처가 받은 그대로 sources[mcad].provenance 에 얼린다 — 나중 읽기는 다시 부르지 않는다. ir_hash 입력이 아니다.
+STAGE_CODES: tuple[str, ...] = ("empty", "files", "parsed", "detected", "deck")
+REVISION_KEYS: tuple[str, ...] = ("decided", "rev_label", "rev_seq", "model_key", "task_code", "status")
+COPY_STAGE_KEYS: tuple[str, ...] = ("project_id", "how_far", "how_far_words", "steps_done", "more_advanced", "picked", "why")
 
 
 # ---------------------------------------------------------------- 타입 정규화(recon §4 9항 · plan §2.13.1)
@@ -283,7 +289,7 @@ class McadAdapter(SourceAdapter):
                         app_key: str | None, mcp_tree: Mapping[str, Any],
                         captured_at: int, degraded: set[str], warnings: list[dict],
                         detect_job_id: Any, detect_finished_at: Any,
-                        job_params: Mapping[str, Any]) -> AdapterResult:
+                        job_params: Mapping[str, Any], marks: Mapping[str, Any] | None = None) -> AdapterResult:
         """mcad 필수 호출 실패 마감(plan §2.2 missing 표 · §2.5.1 · §2.13.3).
 
         `summary` 로 `sources[mcad].stats` 만 채우고 **노드·엣지를 하나도 만들지 않는다.** 소스 행은 남긴다 —
@@ -314,6 +320,7 @@ class McadAdapter(SourceAdapter):
             "scope": None,
             "stats": _stats(None, mcp_tree, [], 0, 0, {}),
             "app_version": None,
+            "provenance": dict(marks) if marks is not None else None,
             "degraded": sorted(degraded),
             "captured_at": captured_at,
         }
@@ -340,8 +347,14 @@ class McadAdapter(SourceAdapter):
         degraded: set[str] = set()
         warnings: list[dict] = []
 
+        copy_rows: list[tuple[str, Any]] = []
+
         def mcp(tool: str, args: Mapping[str, Any]) -> dict:
-            return recorder.call("mcp", tool, args, source_kind=KIND, app_key=app_key)
+            reply = recorder.call("mcp", tool, args, source_kind=KIND, app_key=app_key)
+            # 읽기 답의 사본 단계(D-706 — 더 진행된 사본이 있거나 이름으로 골랐을 때만 싣는다)는 출처 표지(RK-06)에 쓴다.
+            if reply.get("ok") and isinstance(reply.get("result"), Mapping) and "copy_stage" in reply["result"]:
+                copy_rows.append((tool, reply["result"]["copy_stage"]))
+            return reply
 
         def rest(path: str, params: Mapping[str, Any] | None = None) -> dict:
             return recorder.call("rest", f"/apps/{slug}/api{path}", params, source_kind=KIND, app_key=app_key)
@@ -373,11 +386,14 @@ class McadAdapter(SourceAdapter):
         graph: dict | None = None
         parts_rest: list[dict] = []
         tol_config: dict | None = None
+        detail_body: Mapping[str, Any] | None = None
         if recorder.rest_available:
             detail = rest(f"/projects/{project_id}")
             if detail["ok"] and isinstance(detail["result"], Mapping):
-                # 응답은 {project, files, counts} 봉투이고 tol_config 는 TEXT 컬럼(JSON 문자열)이다(recon 실측).
+                # 응답은 {project, files, counts} 봉투이고 tol_config 는 TEXT 컬럼(JSON 문자열)이다(recon 실측). D-706 판부터 stage ·
+                # stage_code · revision · copy_stage 가 같은 봉투에 온다(RK-06 — _stage_marks).
                 body = detail["result"]
+                detail_body = body
                 inner = body.get("project")
                 raw_tol = (inner if isinstance(inner, Mapping) else body).get("tol_config")
                 if isinstance(raw_tol, str):
@@ -435,7 +451,7 @@ class McadAdapter(SourceAdapter):
                                             mcp_tree=mcp_tree, captured_at=captured_at,
                                             degraded=degraded, warnings=warnings,
                                             detect_job_id=detect_job_id, detect_finished_at=detect_finished_at,
-                                            job_params=job_params)
+                                            job_params=job_params, marks=_stage_marks(detail_body, copy_rows, project_id))
             reply = mcp("list_parts", {"project_id": project_id, "limit": MCP_IFACE_LIMIT})
             parts_mcp = _rows(reply["result"], "parts") if reply["ok"] else []
             parts_call = reply["call_id"]
@@ -591,6 +607,8 @@ class McadAdapter(SourceAdapter):
             "stats": _stats(tree, mcp_tree, nodes, len(iface_rows), orphan_n, graph_counts, iface_truncated),
             # 소스 앱 버전은 ir_hash 입력이 아니다 — 쌍의 comparability.app_version_parity 가 이 값을 본다(§2.2).
             "app_version": app_version,
+            # 단계 · 판 · 사본 단계(RK-06) — 받은 그대로 얼린다(ir_hash 입력이 아니다).
+            "provenance": _stage_marks(detail_body, copy_rows, project_id),
             "degraded": sorted(degraded),
             "captured_at": captured_at,
         }
@@ -609,6 +627,42 @@ class McadAdapter(SourceAdapter):
 
 
 # ---------------------------------------------------------------- 조립 도우미
+def _copy_row(rows: Any, project_id: str) -> dict | None:
+    """copy_stage 목록에서 이 과제의 줄 — 사본 목록(copies)은 수만 남긴다(이름은 다른 과제의 것이다)."""
+    if not isinstance(rows, list):
+        return None
+    for row in rows:
+        if isinstance(row, Mapping) and str(row.get("project_id") or "") == project_id:
+            out = {k: row[k] for k in COPY_STAGE_KEYS if k in row}
+            if isinstance(row.get("copies"), list):
+                out["copies_n"] = len(row["copies"])
+            return out
+    return None
+
+
+def _stage_marks(detail: Mapping[str, Any] | None, copy_rows: Sequence[tuple[str, Any]], project_id: str) -> dict:
+    """과제 상세 REST 와 읽기 MCP 답에서 받은 단계 · 판 · 사본 단계 — 앱이 낸 것만(없으면 null). `detail_read` 는 과제 상세를 읽었나다 — 읽었는데
+    칸이 없으면 그 칸을 내기 전 판의 StepForge 이고, 못 읽었으면(MCP 만의 캡처) 모르는 것이다(provenance 가 까닭을 가른다)."""
+    marks: dict[str, Any] = {"detail_read": detail is not None, "stage": None, "stage_code": None, "revision": None,
+                             "copy_stage": None, "copy_stage_via": None}
+    if detail is not None:
+        stage, code, revision = detail.get("stage"), detail.get("stage_code"), detail.get("revision")
+        marks["stage"] = stage if isinstance(stage, str) and stage else None
+        marks["stage_code"] = code if isinstance(code, str) and code else None
+        if isinstance(revision, Mapping):
+            marks["revision"] = {k: revision.get(k) for k in REVISION_KEYS}
+        row = _copy_row(detail.get("copy_stage"), project_id)
+        if row is not None:
+            marks["copy_stage"], marks["copy_stage_via"] = row, "rest"
+    if marks["copy_stage"] is None:
+        for tool, rows in copy_rows:
+            row = _copy_row(rows, project_id)
+            if row is not None:
+                marks["copy_stage"], marks["copy_stage_via"] = row, f"mcp:{tool}"
+                break
+    return marks
+
+
 def _warn(code: str, message: str, ref: str | None) -> dict:
     return {"severity": "WARNING", "code": code, "message": message, "ref": ref, "source_kind": KIND}
 

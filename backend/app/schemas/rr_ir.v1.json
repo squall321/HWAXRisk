@@ -100,6 +100,10 @@
             "extra": {"type": ["object", "null"]}
           }
         },
+        "provenance": {
+          "description": "원천 앱이 캡처 때 말한 출처 표지(리스크 앱 RK-06) — mcad 는 과제 상세의 단계 · 판 · 사본 단계. ir_hash 입력이 아니다.",
+          "type": ["object", "null"]
+        },
         "binding": {
           "type": "object",
           "required": ["bound_to_dyna_source_hash", "method"],

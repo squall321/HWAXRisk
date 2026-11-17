@@ -1642,3 +1642,98 @@ def test_the_real_bridge_carries_its_stale_verdict_and_blocks_pid_map_until_chec
     assert len(records) == 2, records
     assert all(r["score"] == 1.0 and r["status"] == "auto" for r in records)
     assert records[0]["evidence"]["bridge"]["join_key"].startswith("file+name:")
+
+
+# ---------------------------------------------------------------- 출처 표지를 캡처 때 얼린다(RK-06 — StepForge D-706 · KooRemapper DF-14 · D5)
+# StepForge 과제 상세(app/rest.py get_project)의 봉투 그대로 — {project, files, counts} 에 stage · stage_code(app/projects.py STAGE_WORDS ·
+# stage_code) · copy_stage[](app/copies.py block(always=True, full=True)) · revision(core/revisions.py summary_cells 의 여섯 칸)이 붙는다.
+DETAIL_D706 = {
+    "project": {"id": SF_PROJECT, "name": "sif-e2e", "code": "TASK-A", "extras": {},
+                "tol_config": {"tied_gap": 0.05, "clearance_gap": 1.0, "tied_area": 1.0, "tied_width": 0.05}},
+    "files": [], "counts": {"parts": 3, "defs": 2, "interfaces": 1},
+    "stage": "파싱까지", "stage_code": "parsed",
+    "copy_stage": [{"project_id": SF_PROJECT, "how_far": "parsed", "how_far_words": "파싱까지", "steps_done": ["parsed"],
+                    "copies": [{"project_id": "sf-copy-2", "name": "sif-e2e copy", "how_far": "detected"}],
+                    "more_advanced": "sf-copy-2",
+                    "why": "이 과제는 파싱까지다 — 같은 CAD 의 사본 sf-copy-2은 검출 완료 · 관계 · 구조 · 대응은 그 사본으로"}],
+    "revision": {"decided": True, "rev_label": "REV-B", "rev_seq": 2, "model_key": "MODEL-A", "task_code": "TASK-A", "status": "current"},
+}
+# StepForge system_status(app/mcp_server.py) — app · build(config.build_info) · env(config.deploy_env 의 dev | prod | null) · env_raw · env_why · instance.
+SF_STATUS_D706 = {"status": "ok", "version": "0.9.0", "data_root": "/srv/sf-data", "projects": 3, "running_jobs": 0, "pending_jobs": 0,
+                  "interfaces": 10, "app": "step_forge", "build": {"sha": "93918cf1", "at": None, "source": "git-workdir"},
+                  "env": "dev", "env_raw": "development", "instance": {"server": "srv-token-1", "pid": 4242, "host": "box-a"}}
+SF_STATUS_NO_ENV = {**{k: v for k, v in SF_STATUS_D706.items() if k not in ("env", "env_raw")}, "env": None, "env_raw": None,
+                    "env_why": "배포 설정 STEPFORGE_ENV 가 없다 — 이 서버는 자기 환경(dev · prod)을 모른다(지어내지 않는다)"}
+
+
+def test_mcad_freezes_the_stepforge_stage_revision_copy_stage_and_env_at_capture():
+    tools = dict(MCP_TOOLS_FULL, heaxstep_forge_system_status=SF_STATUS_D706)
+    result, _ = _capture_mcad(tools=tools, routes=dict(REST_ROUTES, **{BASE: DETAIL_D706}))
+    source = result["source"]
+    assert source["provenance"] == {
+        "detail_read": True, "stage": "파싱까지", "stage_code": "parsed",
+        "revision": {"decided": True, "rev_label": "REV-B", "rev_seq": 2, "model_key": "MODEL-A", "task_code": "TASK-A", "status": "current"},
+        "copy_stage": {"project_id": SF_PROJECT, "how_far": "parsed", "how_far_words": "파싱까지", "steps_done": ["parsed"],
+                       "more_advanced": "sf-copy-2", "why": DETAIL_D706["copy_stage"][0]["why"], "copies_n": 1},
+        "copy_stage_via": "rest"}
+    assert source["tol_known_keys"] == ["clearance_gap", "tied_area", "tied_gap", "tied_width"]      # 봉투 안의 tol_config 도 그대로 읽는다
+    extra = source["app_version"]["extra"]
+    assert source["app_version"]["version"] == "0.9.0" and extra["app"] == "step_forge" and extra["build"]["sha"] == "93918cf1"
+    assert (extra["env"], extra["env_raw"], extra["instance"]) == ("dev", "development", {"server": "srv-token-1", "pid": 4242, "host": "box-a"})
+    schema = json.loads((Path(ir_builder.__file__).parent / "schemas" / "rr_ir.v1.json").read_text(encoding="utf-8"))
+    source_schema = {**schema["definitions"]["source"], "definitions": schema["definitions"]}
+    assert list(Draft7Validator(source_schema).iter_errors(source)) == []
+
+    unknown, _ = _capture_mcad(tools=dict(MCP_TOOLS_FULL, heaxstep_forge_system_status=SF_STATUS_NO_ENV))
+    assert unknown["source"]["app_version"]["extra"]["env"] is None and "STEPFORGE_ENV" in unknown["source"]["app_version"]["extra"]["env_why"]
+    # 그 칸을 내기 전 판의 과제 상세 — 읽었지만 칸이 없다(null · detail_read 참)
+    assert unknown["source"]["provenance"] == {"detail_read": True, "stage": None, "stage_code": None, "revision": None,
+                                               "copy_stage": None, "copy_stage_via": None}
+
+
+def test_mcad_mcp_only_capture_takes_copy_stage_from_a_read_answer():
+    """REST 없이 MCP 만으로 캡처하면 과제 상세가 없다 — 읽기 MCP 답이 더 진행된 사본을 말하면(D-706 copy_stage 한 줄) 그것만 얼린다."""
+    row = {"project_id": SF_PROJECT, "how_far": "parsed", "more_advanced": "sf-copy-2", "why": "이 과제는 파싱까지다"}
+    tools = dict(MCP_TOOLS_FULL, interface_graph={**IFACE_GRAPH, "copy_stage": [row]})
+    result, _ = _capture_mcad(rest_token=None, tools=tools)
+    marks = result["source"]["provenance"]
+    assert result["source"]["channel"] == "mcp" and marks["detail_read"] is False and marks["stage"] is None
+    assert marks["copy_stage"] == row and marks["copy_stage_via"] == "mcp:interface_graph"
+
+
+# KooRemapper inspect_file(platform/backend/app/modules/sessions/routes.py · c37bd03) — {filename, sha256(파일 행), meta}. meta.modelmeta 는
+# runner/kfile_modelmeta.py 가 고른 칸이고 element_id_collisions · parts_missing 은 11-17 바이너리부터(옛 바이너리는 null).
+def _inspect_d14(collisions, missing, *, sha=KSHA):
+    body = json.loads(json.dumps(INSPECT_FILE))
+    body["filename"], body["sha256"] = "assembled_tied.k", sha
+    body["meta"]["modelmeta"].update(element_id_collisions=collisions, parts_missing=missing)
+    return body
+
+
+def test_dyna_reads_the_deck_sha256_at_the_top_and_freezes_collisions_and_env():
+    status = {"version": "0.1.0", "env": "production"}                 # KooRemapper /system/status — env 는 KOORM_APP_ENV 원래 낱말
+    recorder = CallRecorder("cafe0000deadbeef", mcp=_mcp({"inspect_file": _inspect_d14(120, 3),
+                                                          "heaxkooremapper_mcp_system_status": status}))
+    result = dyna_adapter.DynaAdapter(DYNA_APP_KEY).capture({"session_id": "01JSES", "file_id": "01JFIL"}, _principal(), recorder)
+    source = result["source"]
+    # ref 에 지문을 주지 않아도 덱 지문이 산다(예전에는 meta.sha256 을 읽어 늘 비었다).
+    assert source["ref"]["sha256"] == KSHA and source["source_hash"] == KSHA and source["ref"]["filename"] == "assembled_tied.k"
+    assert {n["canon_key"] for n in result["nodes"] if n["kind"] == "pid"} == {f"dyna:{KSHA[:8]}:1", f"dyna:{KSHA[:8]}:2"}
+    assert source["provenance"] == {"element_id_collisions": 120, "parts_missing": 3}
+    assert source["app_version"] == {"version": "0.1.0", "captured_via": "heaxkooremapper_mcp_system_status", "extra": {"env": "production"}}
+    old = dyna_adapter.DynaAdapter(DYNA_APP_KEY).capture(
+        {"session_id": "01JSES", "file_id": "01JFIL"}, _principal(),
+        CallRecorder("cafe0000deadbeef", mcp=_mcp({"inspect_file": _inspect_d14(None, None)})))
+    assert old["source"]["provenance"] == {"element_id_collisions": None, "parts_missing": None}      # 옛 바이너리 — 0 이 아니라 모름
+    assert old["source"]["app_version"]["version"] is None                                         # system_status 는 선택 호출이다
+    given = dyna_adapter.DynaAdapter(DYNA_APP_KEY).capture(
+        {"session_id": "01JSES", "file_id": "01JFIL", "sha256": "f" * 64}, _principal(),
+        CallRecorder("cafe0000deadbeef", mcp=_mcp({"inspect_file": _inspect_d14(0, 0)})))
+    assert given["source"]["ref"]["sha256"] == "f" * 64                                          # ref 의 지문이 먼저다(예전 차례 그대로)
+
+
+def test_dyna_result_freezes_the_environment_each_report_answer_names():
+    summaries = {"r1": {"id": "r1", "kind": "sphere", "environment": "prod"}, "r2": {"id": "r2", "kind": "sphere"}}
+    recorder = CallRecorder("cafe0000deadbeef", mcp=_report_mcp(summaries, {}))
+    result = dyna_adapter.DynaResultAdapter(DYNA_APP_KEY).capture({"report_ids": ["r1", "r2"]}, _principal(), recorder)
+    assert result["source"]["provenance"] == {"report_environment": {"r1": "prod"}}           # 그 칸을 내기 전 판의 답(r2)은 싣지 않는다
