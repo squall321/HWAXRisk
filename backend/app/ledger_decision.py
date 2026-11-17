@@ -32,11 +32,13 @@ SUMMARY_VIEW = "summary"
 RESULT_TIMEOUT_S = 60.0
 SUMMARY_PARTS_MAX = 40
 CELLS_SHOWN_MAX = 2000
-# 표결 낱말 — 엔진(agree · conditional · oppose · abstain)과 한국어 꼴(동의 · 찬성 · 조건부 · 반대 · 미표명 · 기권)을 같은 칸으로 모은다.
+# 표결 칸 — 엔진 원장 그대로의 영문 칸(contracts §6 — agree · conditional · oppose · abstain · responded · total)이 정본이다. 한국어 꼴(찬성 · 조건부 ·
+# 반대 · 미표명)은 §3 의 자리 표시였고 손으로 만든 결정 JSON 을 위해 같은 칸으로 모아 받는다.
 TALLY_KEYS: dict[str, str] = {
-    "agree": "agree", "찬성": "agree", "동의": "agree",
-    "conditional": "conditional", "조건부": "conditional", "조건부 동의": "conditional", "조건부동의": "conditional",
-    "oppose": "oppose", "반대": "oppose", "abstain": "abstain", "미표명": "abstain", "기권": "abstain", "total": "total",
+    "agree": "agree", "conditional": "conditional", "oppose": "oppose", "abstain": "abstain", "responded": "responded",
+    "total": "total",
+    "찬성": "agree", "동의": "agree", "조건부": "conditional", "조건부 동의": "conditional", "조건부동의": "conditional",
+    "반대": "oppose", "미표명": "abstain", "기권": "abstain",
 }
 # 만장일치를 말하는 문장 꼴(결정문 글 · 엔진 consensus_claim).
 _CONSENSUS_RE = re.compile(r"(전원\s*(?:합의|동의|찬성|일치)|만장\s*일치|이견\s*(?:없|이\s*없)|모든\s*좌석이\s*동의|모두\s*동의|unanimous(?:ly)?)",
@@ -91,20 +93,24 @@ def consistency(claim: str | None, tally: Mapping[str, Any] | None, engine: Mapp
 
 
 def _from_decision_json(raw: Mapping[str, Any]) -> dict:
-    """엔진 답 전체({job_id, job, template, decision_json, consistency}) 또는 decision_json({risk_spec, votes, cites}) 또는 risk_spec 그대로."""
+    """엔진 답 전체(contracts §6 — {job_id, status, view, job, template, decision_json, consistency, parse_error?}) 또는 decision_json({risk_spec,
+    votes{tally, unanimous, by_seat}, cites}) 또는 risk_spec 그대로. risk_spec 이 null 이면 엔진의 parse_error(와 잡 상태)를 까닭으로 422 다."""
     engine_consistency = raw.get("consistency") if isinstance(raw.get("consistency"), Mapping) else None
     body = raw.get("decision_json") if "decision_json" in raw else raw
+    why = raw.get("parse_error") or (body.get("parse_error") if isinstance(body, Mapping) else None)
+    status = raw.get("status")
     if body is None:
-        raise AppError("decision_unparsable", "엔진이 결정 JSON 을 내지 못했다 — " + str(raw.get("parse_error") or "까닭 없음"), 422,
-                       detail={"parse_error": raw.get("parse_error")})
+        raise AppError("decision_unparsable", "엔진이 결정 JSON 을 내지 못했다 — " + str(why or (f"잡 상태 {status}" if status else "까닭 없음")),
+                       422, detail={"parse_error": why, "status": status})
     if not isinstance(body, Mapping):
         raise ledger._bad("decision_json 은 객체다.")
     spec = body.get("risk_spec") if isinstance(body.get("risk_spec"), Mapping) else (body if body.get("schema") == "risk_spec" else None)
     if spec is None:
-        raise AppError("decision_unparsable", "decision_json 에 risk_spec 이 없다(schema 가 risk_spec 인 객체).", 422)
+        raise AppError("decision_unparsable", "decision_json 에 risk_spec 이 없다(schema 가 risk_spec 인 객체)" + (f" — {why}" if why else "") + ".",
+                       422, detail={"parse_error": why, "status": status})
     votes = body.get("votes") if isinstance(body.get("votes"), Mapping) else {}
     return {"risk_spec": dict(spec), "tally": _normalize_tally(votes.get("tally")), "engine_consistency": engine_consistency,
-            "text": None, "votes_source": "decision_json" if votes.get("tally") else None}
+            "unanimous": votes.get("unanimous"), "text": None, "votes_source": "decision_json" if votes.get("tally") else None}
 
 
 def _from_text(text: str) -> dict:

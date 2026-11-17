@@ -57,6 +57,8 @@ facts 키 · 실제 판정표는 PC 수용 때 등록하는 데이터다. 아래
   소수 · 코드 · 버전은 건드리지 않는다(게이트웨이 HG-21 의 교훈). 사람 이름은 꼴로 가르지 않는다.
 - **결정 반영** — `decision_json` · `decision_text` · `job_id` 가운데 하나. job_id 는 그 사람의 포털 PAT 로 게이트웨이 `deliberate_result` 를
   `view="decision_json"` 으로 먼저 부르고, 엔진이 그 꼴을 모르면 `view="summary"` 의 결정문을 쪽마다 이어 읽는다(표결은 그 답의 votes.tally).
+  표결 칸은 엔진 원장 그대로의 영문 칸 — agree · conditional · oppose · abstain · responded · total(contracts §6). risk_spec 이 null 이면 엔진의
+  parse_error 를 까닭으로 422 다.
   칸마다 filled · empty · conflict · no_source — conflict 칸도 층에 싣는다(판 짓기가 덮을지는 사람이 본다). 패널 결과 다시 저장의 길은 쓰지 않는다.
 - **숫자 점검** — 작은 정수까지 세고, 코드 · 키 꼴 낱말 속 숫자는 수로 보지 않는다. 원장 코드 · 지표 키와 같은 머리인데 원장에 없는 id 는
   unknown_ids 다. 근거 묶음을 주면 줄마다 코드를 안다.

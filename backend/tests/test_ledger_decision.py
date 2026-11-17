@@ -137,6 +137,18 @@ def test_a_job_id_reads_the_summary_pages_when_the_engine_has_no_decision_json_v
     assert out["source"] == {"kind": "job_id", "job_id": "job-1", "view_used": "summary", "votes_known": True, "votes_source": "summary"}
     assert out["tally"]["conditional"] == 1 and out["consistency"]["match"] is False
     assert out["layer"]["source_file"] == "deliberation:job-1" and out["layer"]["name"] == "결정 반영 job-1"
+    # 엔진 가지(contracts §6)의 꼴 — 영문 표결 칸(responded · total 포함)과 risk_spec null 의 parse_error.
+    engine = {"job_id": "job-3", "status": "done", "view": "decision_json", "job": "risk-review", "template": "risk-review",
+              "decision_json": {"risk_spec": SPEC, "votes": {"tally": {"agree": 3, "conditional": 0, "oppose": 1, "abstain": 0,
+                                                                       "responded": 4, "total": 4}, "unanimous": False, "by_seat": []},
+                                "cites": [{"key": "b000000.f01", "n": 2}]},
+              "consistency": {"consensus_claim": None, "tally": {}, "match": None, "note": ""}}
+    exact = _apply(ledger_box, decision_json=engine, mapping=MAPPING, layer_name="엔진 꼴")
+    assert exact["tally"] == {"agree": 3, "conditional": 0, "oppose": 1, "abstain": 0, "responded": 4, "total": 4}
+    with pytest.raises(AppError) as exc:
+        _apply(ledger_box, decision_json={**engine, "decision_json": {"risk_spec": None, "votes": {}}, "parse_error": "펜스가 깨졌다"},
+               mapping=MAPPING)
+    assert exc.value.code == "decision_unparsable" and "펜스가 깨졌다" in exc.value.message
     newer = FakeGateway(knows_json=True)
     monkeypatch.setattr(ledger_routes, "decision_channel", lambda email: newer)
     got = _apply(ledger_box, job_id="job-2", mapping=MAPPING)
