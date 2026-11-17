@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field, model_validator
 from app import brief as brief_module
 from app import character, config, diff as diff_module
 from app import export as export_module
-from app import identity, ir_builder, learning, metrics, narrative, planner, ra_client, requirements, runner, sameas, taxonomy
+from app import identity, ir_builder, labels, learning, metrics, narrative, planner, ra_client, requirements, runner, sameas, taxonomy
 from app import expert_report, review_cells, review_runner, sp_subject
 from app import board_transform as board_transform_module
 from app import locate as locate_module
@@ -657,6 +657,13 @@ def put_portal_pat_auto(body: PortalPatAutoBody, ident: identity.Identity = Depe
 def get_taxonomy() -> dict:
     """리스크 택소노미와 메커니즘 → 영역 배정표(review_status 포함 — 사람이 훑고 승인한다, 재설계 M3 S3-2)."""
     return {**taxonomy.load_taxonomy(), "mech_owners": taxonomy.load_json(taxonomy.MECH_OWNERS_ASSET)}
+
+
+@router.get("/taxonomy/labels")
+def get_taxonomy_labels() -> dict:
+    """축별 표기 규칙(RK-07) — 등급 · 증거 유형 · 주의 등급 · 판정의 값 → 표시 글과 판정의 SP 키, 단독 대문자 검사 규칙. 어휘라 신원 없이 연다
+    (`GET /meta/taxonomy` 와 같다)."""
+    return labels.labels_payload()
 
 
 @router.get("/meta/adapters")
@@ -5314,12 +5321,12 @@ def post_report(target_key: str, body: ReportBody = ReportBody(),
 
 
 # ---------------------------------------------------------------- 어휘 쪽(재설계 M3 S3-10 — MCP risk_taxonomy 의 와이어 한도)
-TAXONOMY_PARTS: tuple[str, ...] = ("index", "mechanism", "mech_owners", "maps")
+TAXONOMY_PARTS: tuple[str, ...] = ("index", "mechanism", "mech_owners", "maps", "labels")
 
 
 def taxonomy_payload(part: str = "index", *, offset: int = 0, limit: int | None = None) -> dict:
     """통제 어휘를 쪽으로 — index(메커니즘 밖의 축 전부 · 어휘 색인 · 배정표 머리) · mechanism(메커니즘 행) · mech_owners(메커니즘 →
-    영역 배정표와 승인 상태 review_status) · maps(동의어·실패 사상). 행이 긴 쪽은 limit·offset 으로 나눈다(자르지 않는다)."""
+    영역 배정표와 승인 상태 review_status) · maps(동의어·실패 사상) · labels(축별 표기 규칙 — RK-07). 행이 긴 쪽은 limit·offset 으로 나눈다(자르지 않는다)."""
     if part not in TAXONOMY_PARTS:
         raise AppError("E100", f"part 는 {list(TAXONOMY_PARTS)} 가운데 하나다 — {part!r}.", 422)
     doc = taxonomy.load_taxonomy()
@@ -5333,6 +5340,9 @@ def taxonomy_payload(part: str = "index", *, offset: int = 0, limit: int | None 
                 "vocab": taxonomy.vocab_index(), "promotable_axes": character.promotable_axes()}
     if part == "maps":
         return {**head, "synonyms": doc.get("synonyms"), "failure_map": doc.get("failure_map"), "voc_map": doc.get("voc_map")}
+    if part == "labels":
+        # 축별 표기 규칙(RK-07 — HWAXPortal docs/request-1117) — 등급 · 증거 유형 · 주의 등급 · 판정의 표시 글과 SP 판정 키.
+        return {**head, "labels": labels.labels_payload()}
     rows = (list((doc.get("axes") or {}).get("mechanism") or ()) if part == "mechanism"
             else list(taxonomy.load_json(taxonomy.MECH_OWNERS_ASSET).get("rows") or ()))
     start = max(0, int(offset or 0))

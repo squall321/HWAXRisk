@@ -163,7 +163,7 @@ _A_ORDER_OFFSET = (f"카드 대조 대상의 검토 순서 전부를 이 자리(
 _A_SEAT_OFFSET = f"건너뛸 좌석 행 수(0부터) — 앞 응답의 next_seat_offset 을 준다. 한 쪽은 MCP 결과 상한({MCP_RESULT_CHARS:,}자) 안이다."
 _A_PANEL_KIND = "패널 종류로 거른다 — coverage(좌석을 채우는 패널) · issue(쟁점 패널). 비우면 전부다."
 _A_TAX_PART = f"볼 쪽 — {' · '.join(routes.TAXONOMY_PARTS)}(무엇이 드는지는 도구 설명). 그 밖은 422 다."
-_A_TAX_OFFSET = "mechanism · mech_owners 의 행을 건너뛸 수(0부터) — 앞 응답의 next_offset 을 준다. index · maps 에는 쓰지 않는다."
+_A_TAX_OFFSET = "mechanism · mech_owners 의 행을 건너뛸 수(0부터) — 앞 응답의 next_offset 을 준다. index · maps · labels 에는 쓰지 않는다."
 _A_SIMILAR_K = f"과제 수 — 벡터 · 서술 경로와 합친 목록(merged)에 건다(계보 · subject 경로는 아니다). 1~{SIMILAR_K_MAX} 사이로 죈다."
 _A_SNAP_PART = f"볼 쪽 — {' · '.join(routes.SNAPSHOT_PARTS)}. nodes · edges 는 한 번에 최대 {NODE_LIMIT}행씩 준다."
 _A_SNAP_OFFSET = "nodes · edges 의 행을 건너뛸 수(0부터) — truncated 면 응답의 next_offset 을 준다. 다른 쪽에는 쓰지 않는다."
@@ -467,7 +467,7 @@ def risk_get_panel_transcript(panel_id: Annotated[str, Field(description=_A_PANE
 @mcp.tool()
 def risk_taxonomy(part: Annotated[str, Field(description=_A_TAX_PART)] = "index",
                   offset: Annotated[int, Field(description=_A_TAX_OFFSET)] = 0) -> dict:
-    """통제 어휘 — severity·judgement·direction·domain 등 허용값(추측해 넣으면 422 다), part='index' 는 메커니즘 밖의 축 전부·어휘 색인·메커니즘 → 영역 배정표의 머리(review_status — 승인 전이면 draft), part='mechanism' 은 메커니즘 행, 'mech_owners' 는 배정표 행(owners·related), 'maps' 는 동의어·실패 사상이고, 행 쪽은 약 2만 5천 자씩 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다)."""
+    """통제 어휘 — severity·judgement·direction·domain 등 허용값(추측해 넣으면 422 다), part='index' 는 메커니즘 밖의 축 전부·어휘 색인·메커니즘 → 영역 배정표의 머리(review_status — 승인 전이면 draft), part='mechanism' 은 메커니즘 행, 'mech_owners' 는 배정표 행(owners·related), 'maps' 는 동의어·실패 사상, 'labels' 는 축별 표기 규칙(등급 [등급 A조] · 증거 유형 유형① · 주의 등급 주의 A · 판정 SP 키 VRD-COND 꼴 — 근거 묶음 · 보고 묶음이 이 표시 글만 쓴다)이고, 행 쪽은 약 2만 5천 자씩 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다)."""
     def call() -> dict:
         if part in ("mechanism", "mech_owners"):
             total = routes.taxonomy_payload(part, offset=0)["total"]
