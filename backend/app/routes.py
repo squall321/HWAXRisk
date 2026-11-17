@@ -1995,12 +1995,10 @@ PURGE_BLANK_SQL: tuple[tuple[str, str], ...] = (
     ("rr_evidence_bundles", f"UPDATE rr_evidence_bundles SET evidence_gz = X'{_EMPTY_PAGES_GZ.hex()}', template_json = '{{}}',"
                             " per_field_json = '{}'"
                             " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
-    # 숫자 원장 · 금지값은 열쇠(이름 · 리비전 · 값)부터 과제 글이다 — 행은 남기고(수는 남는다) 열쇠를 행 번호로 갈아 비운다(반대 검토 L2).
-    ("rr_ledger_numbers", "UPDATE rr_ledger_numbers SET name = '[purged:' || rowid || ']', revision = '', value_text = '0', unit = NULL,"
-                          " definition = NULL, source_file = NULL, line = NULL, metric_key = NULL"
-                          " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
-    ("rr_ledger_forbidden", "UPDATE rr_ledger_forbidden SET value_text = '[purged:' || rowid || ']', unit = NULL, reason = '[purged]'"
-                            " WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    # 숫자 원장 · 금지값은 열쇠(이름 · 리비전 · 값)부터 과제 글이다 — 행을 지운다(반대 검토 L2 · 2차 5). 열쇠를 행 번호 글('[purged:<행>]')로 갈던
+    # 때는 그 글을 이름으로 적은 행이 기본 키를 겹치게 해 회수가 통째로 멈췄다. 회수된 대상은 읽기 · 쓰기가 409 라 수를 남길 곳도 없다.
+    ("rr_ledger_numbers", "DELETE FROM rr_ledger_numbers WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
+    ("rr_ledger_forbidden", "DELETE FROM rr_ledger_forbidden WHERE target_key IN (SELECT target_key FROM rr_targets WHERE project_id = ?)"),
 )
 
 

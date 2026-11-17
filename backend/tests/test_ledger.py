@@ -222,11 +222,24 @@ def test_purge_blanks_the_number_ledger_keys_and_the_bundle(ledger_box):
         template={"name": "틀", "caps": {"부품": 2000}, "total_cap": 2000}), ident=owner)["bundle_id"]
     routes.purge_project(ledger_box.project_id, routes.PurgeBody(code="LEDGER-1", reason="시험 회수"), ident=owner)
     store = ledger_box.store
-    number = dict(store.query_one("SELECT name, revision, value_text, unit, metric_key FROM rr_ledger_numbers"))
-    assert number["name"].startswith("[purged:") and number == {**number, "revision": "", "value_text": "0", "unit": None, "metric_key": None}
-    ban = dict(store.query_one("SELECT code, value_text, unit, reason FROM rr_ledger_forbidden"))
-    assert ban["value_text"].startswith("[purged:") and (ban["unit"], ban["reason"]) == (None, "[purged]")
+    assert store.query_one("SELECT COUNT(*) AS n FROM rr_ledger_numbers")["n"] == 0           # 열쇠부터 과제 글이라 행을 지운다(2차 5)
+    assert store.query_one("SELECT COUNT(*) AS n FROM rr_ledger_forbidden")["n"] == 0
     assert _refused(ledger_routes.get_evidence_bundle, bundle, ident=factories.ident(VIEWER)) == ("project_purged", 409)
+
+
+@pytest.mark.parametrize("crafted", ["[purged:1]", "[purged:2]", "[purged:3]"])
+def test_a_number_named_like_the_old_purge_key_cannot_block_the_purge(ledger_box, crafted):
+    """반대 검토 2차 5 — 회수가 이름을 '[purged:<행 번호>]' 로 갈던 때는 그 글을 이름으로 적은 숫자 행이 기본 키를 겹치게 해 회수가 통째로 멈췄다."""
+    seed_ledger(ledger_box)
+    owner = factories.ident(OWNER)
+    ledger_routes.put_numbers(ledger_box.target_key, ledger_routes.NumbersBody(
+        numbers=[{"name": "합성 응력", "value": 1}, {"name": crafted, "value": 2}, {"name": "합성 변위", "value": 3}],
+        forbidden=[{"code": "R-001", "value": 9.9, "reason": "합성 금지"}, {"code": "R-002", "value": 1, "reason": "합성 금지"}]), ident=owner)
+    routes.purge_project(ledger_box.project_id, routes.PurgeBody(code="LEDGER-1", reason="시험 회수"), ident=owner)
+    store = ledger_box.store
+    assert store.query_one("SELECT status FROM rr_projects WHERE id = ?", (ledger_box.project_id,))["status"] == "purged"
+    assert store.query_one("SELECT COUNT(*) AS n FROM rr_ledger_numbers")["n"] == 0
+    assert store.query_one("SELECT COUNT(*) AS n FROM rr_ledger_forbidden")["n"] == 0
 
 
 def test_the_csv_export_guards_formula_cells_unless_raw_is_asked(ledger_box):
