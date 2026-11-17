@@ -34,6 +34,8 @@ OTHER = "stranger@example.com"
 CAPS = {"risk_issue_panel_cap": 1, "risk_issue_panel_hard_cap": 1}
 LEDGER_TEMPLATE = {"name": "남 시험 틀", "caps": {"부품": 2000, "최종 등급": 2000}, "total_cap": 4000}
 LEDGER_LAYER = {"name": "남의 층", "order": 1, "rows": {"R-001": {"비고": "남이 적어 본다"}}}
+LEDGER_MAPPING = {"fields": {"claim": "비고"}}
+LEDGER_DECISION = '```json\n{"schema": "risk_spec", "findings": [{"id": "F1", "code": "R-001", "claim": "결정의 주장"}]}\n```'
 
 
 # ---------------------------------------------------------------- 원장
@@ -291,6 +293,9 @@ CASES: dict[tuple[str, str], tuple[Call, tuple[str, ...]]] = {
     ("POST", P + "/targets/{target_key}/evidence-bundles"): (
         lambda i, who: ledger_routes.post_evidence_bundle(i["target"], ledger_routes.BundleBody(template=LEDGER_TEMPLATE),
                                                           ident=who), ("target",)),
+    ("POST", P + "/targets/{target_key}/ledger/layers/from-decision"): (
+        lambda i, who: ledger_routes.post_layer_from_decision(i["target"], ledger_routes.DecisionBody(
+            decision_text=LEDGER_DECISION, mapping=LEDGER_MAPPING), ident=who), ("target",)),
 }
 
 
@@ -616,6 +621,8 @@ MCP_CASES: dict[str, tuple[Callable[[dict], Any], tuple[str, ...]]] = {
                                    ("target",)),
     "risk_get_evidence_bundle": (lambda i: srv.risk_get_evidence_bundle(bundle_id=i["bundle"]), ("bundle",)),
     "risk_get_provenance": (lambda i: srv.risk_get_provenance(project_id=i["project"]), ("project",)),
+    "risk_ledger_apply_decision": (lambda i: srv.risk_ledger_apply_decision(target_key=i["target"], decision_text=LEDGER_DECISION,
+                                                                            mapping=LEDGER_MAPPING), ("target",)),
 }
 
 

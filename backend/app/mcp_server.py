@@ -1274,3 +1274,33 @@ def risk_get_provenance(project_id: Annotated[str, Field(description=_A_PROJECT_
                         snapshot_id: Annotated[str | None, Field(description=_A_PROV_SNAPSHOT)] = None) -> dict:
     """원천의 출처 표지(읽기 전용) — mcad(StepForge 과제 id · 이름 · 검출 잡 · 단계 신호 · 앱 판) · dyna(앱 키 — 게이트웨이 list_tool_apps 이름 · 환경 env — 게이트웨이 낱말 dev · prod · unknown · 덱 파일 · 읽은 요소 수 · 덱 파트 수와 요소가 있는 파트 수) · ecad(ODB job_id · 보드 이름 · revision)를 앱이 실제로 가진 값만 싣고, 원천 앱이 내지 않는 칸(StepForge 단계 · 판, 덱에 적힌 요소 수 · 덱 판)은 null 과 unknown 의 까닭, 그 앱이 내줘야 할 것은 needs 다, warnings 는 이른 사본(검출 흔적 없음 · 계면 0) · 빈 앱 키 · 옛 앱 키 · 운영 아닌 env · 요소 없는 파트 · 판 불일치이고 checks 는 검사마다 ok · warn · unknown 이다, 좌석 · 사람이 MCAD 를 null 로 읽거나 개발 박스의 덱을 운영으로 읽기 전에 본다."""
     return _scoped("project", project_id, ledger_routes.provenance_payload, project_id, snapshot_id)
+
+
+# ================================================================ 결정 → 판정표 층(RK-03 — contracts §3)
+_A_DEC_JSON = ("결정 JSON — 엔진 deliberate_result(view='decision_json') 답 전체나 그 안의 decision_json({risk_spec, votes{tally}, cites}). decision_text · "
+               "job_id 와 함께 주지 않는다.")
+_A_DEC_TEXT = "결정문 글 — 마지막 ```json 펜스(없으면 끝의 균형 중괄호)의 schema 가 risk_spec 인 객체를 읽는다. 표결은 모른다고 말한다."
+_A_DEC_JOB = ("심의 잡 id(deliberate_start 의 job_id) — 앱이 부른 사람의 포털 PAT 로 게이트웨이 deliberate_result 를 읽는다(decision_json 꼴이 없으면 "
+              "summary 의 결정문 글 · 표결).")
+_A_DEC_MAPPING = ("칸 대응 {fields: {결정 칸 경로: 원장 칸}, code_field?, items?} — 비우면 등록된 decision_map 틀이다. code_field(기본 code)가 결정 항목 "
+                  "안에서 원장 코드를 쥔 경로, items(기본 ['findings'])가 risk_spec 의 항목 목록이다.")
+_A_DEC_MAP_VERSION = "등록된 decision_map 틀의 판 — 비우면 가장 새 판이다(mapping 을 주면 쓰지 않는다)."
+_A_DEC_VERSION = "앞 값을 견줄 판정표 판 — 비우면 가장 새 판이다(판이 없으면 앞 값이 모두 빈 칸이다)."
+_A_DEC_LAYER_NAME = f"쌓을 층 이름(최대 {ledger_module.NAME_MAX}자) — 비우면 '결정 반영 <job_id 또는 입력 종류>' 다."
+_A_DEC_LAYER_ORDER = "쌓을 층의 차례 — 비우면 이 대상 층 가운데 가장 큰 차례 + 10 이다(가장 늦게 덮는다)."
+
+
+@mcp.tool()
+async def risk_ledger_apply_decision(target_key: Annotated[str, Field(description=_A_TARGET_KEY)],
+                                     decision_json: Annotated[dict | None, Field(description=_A_DEC_JSON)] = None,
+                                     decision_text: Annotated[str | None, Field(description=_A_DEC_TEXT)] = None,
+                                     job_id: Annotated[str | None, Field(description=_A_DEC_JOB)] = None,
+                                     mapping: Annotated[dict | None, Field(description=_A_DEC_MAPPING)] = None,
+                                     mapping_version: Annotated[int | None, Field(description=_A_DEC_MAP_VERSION)] = None,
+                                     version: Annotated[int | None, Field(description=_A_DEC_VERSION)] = None,
+                                     layer_name: Annotated[str | None, Field(description=_A_DEC_LAYER_NAME)] = None,
+                                     layer_order: Annotated[int | None, Field(description=_A_DEC_LAYER_ORDER)] = None) -> dict:
+    """결정 → 판정표 층 — 쓰기: 어느 결정(결정 JSON · 결정문 글 · 심의 job_id 가운데 하나)을 어느 칸 대응으로 옮길지 사용자에게 확인한 뒤 부른다, 결정 항목마다 code_field 가 원장 코드이고 칸마다 상태(filled 앞 값이 비었거나 같다 · conflict 앞 값과 다르다 — 층에 싣고 표시 · empty 값이 비었다 · no_source 결정에 그 칸이 없다)와 상태별 수 · 표결 집계 · 합의 문장 대조(consistency — '전원 합의' 꼴인데 조건부 · 반대가 있으면 match=false)를 주고 채운 칸을 덮어쓰기 층 하나(origin decision)로 쌓는다, 판은 아직 바뀌지 않으니 risk_ledger_build 로 덮는다, 패널 결과 다시 저장의 길은 쓰지 않아 등록부 · 항목 위치를 건드리지 않는다, 대상의 편집자 이상만 한다(job_id 는 부른 사람의 PAT — 없으면 decision_pat_absent)."""
+    return await _entry(ledger_entry.apply_decision, target_key=target_key, decision_json=decision_json, decision_text=decision_text,
+                        job_id=job_id, mapping=mapping, mapping_version=mapping_version, version=version, layer_name=layer_name,
+                        layer_order=layer_order)

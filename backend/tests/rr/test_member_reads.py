@@ -74,7 +74,7 @@ MCP_WRITES: tuple[str, ...] = (
     "risk_create_project", "risk_submit_panel_result", "risk_add_finding", "risk_add_source", "risk_capture_snapshot",
     "risk_ack_gate", "risk_decide_sameas", "risk_create_diff", "risk_open_target", "risk_start_job", "risk_job_action",
     "risk_repersist_panel", "risk_set_ecad_board", "risk_set_project_subject", "risk_set_board_transform", "risk_set_item_location",
-    "risk_ledger_put_template", "risk_ledger_put_layer", "risk_ledger_build", "risk_build_evidence_bundle",
+    "risk_ledger_put_template", "risk_ledger_put_layer", "risk_ledger_build", "risk_build_evidence_bundle", "risk_ledger_apply_decision",
 )
 # 보기가 지나는 쓰기 — 남의 것을 가리키지 않고 부른 사람 자신의 행을 쓴다. 대응 결정은 그 과제의 주인 · 편집자만 하게 돼(MB-13) 이 표에서
 # 빠졌다.

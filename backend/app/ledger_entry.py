@@ -32,3 +32,12 @@ def build_bundle(ident: identity.Identity, *, target_key: str, template: dict, v
     entry.require_delegate(ident)
     body = entry._body(ledger_routes.BundleBody, version=version, codes=codes, template=template, mask=mask)
     return ledger_routes.post_evidence_bundle(target_key, body, ident=ident)
+
+
+def apply_decision(ident: identity.Identity, *, target_key: str, decision_json: dict | None = None, decision_text: str | None = None,
+                   job_id: str | None = None, mapping: dict | None = None, mapping_version: int | None = None,
+                   version: int | None = None, layer_name: str | None = None, layer_order: int | None = None) -> dict:
+    entry.require_delegate(ident)
+    body = entry._body(ledger_routes.DecisionBody, decision_json=decision_json, decision_text=decision_text, job_id=job_id,
+                       mapping=mapping, mapping_version=mapping_version, version=version, layer_name=layer_name, layer_order=layer_order)
+    return ledger_routes.post_layer_from_decision(target_key, body, ident=ident)

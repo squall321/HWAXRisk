@@ -14,7 +14,8 @@ from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
-from app import evidence_bundle, identity, ledger, provenance, routes
+from app import config, evidence_bundle, identity, ledger, ledger_decision, provenance, ra_client, routes
+from app.adapters import base as adapters_base
 from app.errors import AppError
 
 router = APIRouter(prefix="/api")
@@ -219,3 +220,48 @@ def get_provenance(project_id: str, snapshot_id: str | None = None, ident: ident
     email = routes._require_user(ident)
     return provenance_payload(project_id, snapshot_id,
                               owner_sub=routes._project_reader(project_id, email, admin=routes._admin_reader(ident)))
+
+
+# ---------------------------------------------------------------- RK-03 결정 → 판정표 층
+DECISION_TEXT_MAX = 2_000_000
+
+
+class DecisionBody(BaseModel):
+    decision_json: dict[str, Any] | None = None
+    decision_text: str | None = Field(default=None, max_length=DECISION_TEXT_MAX)
+    job_id: str | None = Field(default=None, max_length=80)
+    mapping: dict[str, Any] | None = None
+    mapping_version: int | None = None
+    version: int | None = None
+    layer_name: str | None = Field(default=None, max_length=ledger.NAME_MAX)
+    layer_order: int | None = None
+
+
+def decision_pat_absent_error() -> AppError:
+    return AppError("decision_pat_absent",
+                    "그 사람의 포털 PAT 가 없거나 곧 끝나 심의 결과를 읽지 않습니다 — 심의 결과는 그 사람의 PAT 로만 읽습니다(박스 읽기 PAT 로 내려가지"
+                    " 않습니다). 웹 설정 화면에서 포털 PAT 를 등록하거나 Claude 에서 hwax_risk 도구를 다시 불러 자동 등록한 뒤 다시 합니다.", 409,
+                    detail={"fix": "portal_pat"})
+
+
+def decision_channel(email: str) -> Any:
+    """심의 결과를 읽는 게이트웨이 MCP 채널 — 부른 사람의 등록된 포털 PAT 하나(없으면 게이트웨이에 아무것도 보내기 전에 409)."""
+    portal_pat = routes._person_pat(email)
+    if portal_pat is None:
+        raise decision_pat_absent_error()
+    return ra_client.McpHttpClient(config.settings.gateway_mcp, headers={"Authorization": f"Bearer {portal_pat}"},
+                                   timeout=adapters_base.source_timeout(config.settings))
+
+
+@router.post("/targets/{target_key}/ledger/layers/from-decision")
+def post_layer_from_decision(target_key: str, body: DecisionBody, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """결정 → 판정표 층(RK-03) — 결정 JSON · 결정문 글 · 심의 job_id 가운데 하나를 칸 대응으로 원장 칸에 옮겨 층 하나로 쌓는다(판은 아직 바뀌지
+    않는다). 칸마다 filled · empty · conflict · no_source, 표결 · 합의 문장 대조가 답에 실린다. 편집자 이상 — job_id 는 부른 사람의 PAT 로 읽는다."""
+    owner, actor = writer(target_key, ident)
+    store = routes.get_store()
+    ledger_decision.resolve_mapping(store, target_key, body.mapping, body.mapping_version)     # 대응이 없으면 게이트웨이를 부르기 전에 409
+    decision, source = ledger_decision.read_decision(decision_json=body.decision_json, decision_text=body.decision_text,
+                                                     job_id=body.job_id, channel_factory=lambda: decision_channel(actor))
+    return ledger_decision.apply(store, target_key, owner, decision=decision, source=source, mapping=body.mapping,
+                                 mapping_version=body.mapping_version, version=body.version, layer_name=body.layer_name,
+                                 layer_order=body.layer_order, actor=actor)

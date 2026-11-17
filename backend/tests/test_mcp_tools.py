@@ -71,6 +71,8 @@ TOOL_NAMES = [
     "risk_get_evidence_bundle",
     # 원천의 출처 표지(RK-06) — 읽기 전용(47 → 48). 스냅샷 · 등록부 · 단면 자리 · 길잡이 답에도 같은 꼴이 붙는다.
     "risk_get_provenance",
+    # 결정 → 판정표 층(RK-03 — contracts §3) — 쓰기(48 → 49).
+    "risk_ledger_apply_decision",
 ]
 ENTRY_TOOLS = TOOL_NAMES[TOOL_NAMES.index("risk_next_step"):TOOL_NAMES.index("risk_repersist_panel") + 1]
 # 도구별 대표 인자와, 빈 원장에서 기대하는 오류 코드(없으면 None = 정상 응답).
@@ -147,6 +149,7 @@ CALLS = [
      "delegation_required"),
     ("risk_get_evidence_bundle", {"bundle_id": "eb_none"}, "not_visible"),
     ("risk_get_provenance", {"project_id": "p1"}, "not_visible"),
+    ("risk_ledger_apply_decision", {"target_key": "snap:s1", "decision_text": "결정"}, "delegation_required"),
 ]
 _HANGUL = re.compile(r"[가-힣]")
 # 인자 이름에 비밀이 오면 게이트웨이·포털 절차·클라이언트 대화 기록에 값이 남는다(작업 지시서 A-11) — 포털 절차의

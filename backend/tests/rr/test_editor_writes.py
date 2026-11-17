@@ -207,6 +207,7 @@ EDITOR_WRITES: frozenset[tuple[str, str]] = frozenset({
     ("POST", P + "/targets/{target_key}/ledger/layers"),
     ("POST", P + "/targets/{target_key}/ledger/versions"),
     ("POST", P + "/targets/{target_key}/evidence-bundles"),
+    ("POST", P + "/targets/{target_key}/ledger/layers/from-decision"),
 })
 # 계획서가 주인(· 관리자 · 작성자)에게 남긴 쓰기 — 편집자 · 보기의 상태와 까닭. 404 는 그 경로가 부른 사람의 행만 고르는 것이다(주인의 행이
 # 없는 것과 같다 — 화면은 404 를 '소유자 불일치' 로 보인다, plan §8.2.4).
@@ -604,7 +605,7 @@ MCP_EDITOR_WRITES: frozenset[str] = frozenset({
     "risk_submit_panel_result", "risk_add_finding", "risk_add_source", "risk_capture_snapshot", "risk_ack_gate",
     "risk_decide_sameas", "risk_create_diff", "risk_open_target", "risk_start_job", "risk_job_action", "risk_repersist_panel",
     "risk_set_project_subject", "risk_set_board_transform", "risk_set_item_location",
-    "risk_ledger_put_template", "risk_ledger_put_layer", "risk_ledger_build", "risk_build_evidence_bundle",
+    "risk_ledger_put_template", "risk_ledger_put_layer", "risk_ledger_build", "risk_build_evidence_bundle", "risk_ledger_apply_decision",
 })
 MCP_OWNER_ONLY_WRITES: dict[str, str] = {"risk_set_ecad_board": "ECAD 보드 붙이기 · 떼기는 과제 주인만(웹 라우트를 그대로 부른다)"}
 MCP_OWN_WRITES: dict[str, str] = {"risk_create_project": "제 과제를 만든다(앞 과제가 구성원 과제라 계보가 선다)"}
