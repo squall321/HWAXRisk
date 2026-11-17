@@ -59,6 +59,13 @@ TOOL_NAMES = [
     "risk_propose_board_transform",
     "risk_set_board_transform",
     "risk_set_item_location",
+    # 판정표 원장(RK-01 — HWAXPortal docs/request-1117) — 한눈 · 틀 · 층 · 판 짓기(쓰기 셋)와 판 비교 · 내보내기(39 → 45).
+    "risk_ledger_overview",
+    "risk_ledger_put_template",
+    "risk_ledger_put_layer",
+    "risk_ledger_build",
+    "risk_ledger_diff",
+    "risk_ledger_export",
 ]
 ENTRY_TOOLS = TOOL_NAMES[TOOL_NAMES.index("risk_next_step"):TOOL_NAMES.index("risk_repersist_panel") + 1]
 # 도구별 대표 인자와, 빈 원장에서 기대하는 오류 코드(없으면 None = 정상 응답).
@@ -123,6 +130,14 @@ CALLS = [
     ("risk_propose_board_transform", {"project_id": "p1"}, "delegation_required"),
     ("risk_set_board_transform", {"project_id": "p1", "remove": True}, "delegation_required"),
     ("risk_set_item_location", {"project_id": "p1", "part": None, "point": None, "finding_id": "f1"}, "delegation_required"),
+    # 판정표 원장(RK-01) — 읽기는 범위 밖 대상의 존재를 숨기고, 쓰기는 위임 신원을 먼저 본다.
+    ("risk_ledger_overview", {"target_key": "snap:s1"}, "not_visible"),
+    ("risk_ledger_put_template", {"target_key": "snap:s1", "kind": "columns", "body": {"columns": []}}, "delegation_required"),
+    ("risk_ledger_put_layer", {"target_key": "snap:s1", "name": "층", "order": 1, "rows": {"R-001": {"칸": 1}}},
+     "delegation_required"),
+    ("risk_ledger_build", {"target_key": "snap:s1", "layers": ["ly-1"]}, "delegation_required"),
+    ("risk_ledger_diff", {"target_key": "snap:s1", "version": 2}, "not_visible"),
+    ("risk_ledger_export", {"target_key": "snap:s1"}, "not_visible"),
 ]
 _HANGUL = re.compile(r"[가-힣]")
 # 인자 이름에 비밀이 오면 게이트웨이·포털 절차·클라이언트 대화 기록에 값이 남는다(작업 지시서 A-11) — 포털 절차의

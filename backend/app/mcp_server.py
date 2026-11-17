@@ -14,6 +14,8 @@ from mcp.server.transport_security import TransportSecuritySettings
 from app import (brief, common, entry, expert_report, issues, planner, registry, review_cells, review_runner, routes, runner,
                  sp_subject, synth, taxonomy)
 from app import board_transform as board_transform_module
+from app import ledger as ledger_module
+from app import ledger_entry, ledger_routes
 from app import locate as locate_module
 from app.adapters import dyna as dyna_adapter
 from app.adapters import ecad as ecad_adapter
@@ -1087,3 +1089,103 @@ async def risk_set_item_location(project_id: Annotated[str, Field(description=_A
     """리스크 항목 위치 달기 · 떼기 — 쓰기: 어느 항목(finding_id 또는 target_key+cluster_key)에 어떤 CAD 몸체 경로 · MCAD 점(mm)을 달지 사용자에게 확인한 뒤 부른다, part 와 point 가 둘 다 null 이면 뗀다, risk_locate_for_section 이 이 위치를 먼저 써서 바로 단면 둘을 낸다, 과제 주인 · 편집자만 하고 바뀌면 감사 한 줄이다(패널을 다시 저장하면 그 패널의 finding 은 새로 서서 위치가 사라진다)."""
     return await _entry(entry.set_item_location, project_id=project_id, part=part, point=point, finding_id=finding_id,
                         target_key=target_key, cluster_key=cluster_key)
+
+
+# ================================================================ 판정표 원장(RK-01 — HWAXPortal docs/request-1117)
+# 칸 정의는 대상마다 데이터로 등록한다(과제 고유 칸을 코드에 박지 않는다). 판 = 기준 판 + 덮어쓰기 층(차례대로 덮고 덮은 앞 값을 칸마다 남긴다), 행
+# 열쇠는 코드다. 읽기는 다른 읽기 도구와 같은 문(mcp_scope_owner — 소유 · 구성원 · 조직 공개), 쓰기는 위임으로 확인된 신원의 편집자 이상이다.
+_A_LEDGER_VERSION = "판정표 판 번호(1부터 — risk_ledger_overview 의 versions[].version · risk_ledger_build 응답의 version)."
+_A_LEDGER_VERSION_OPT = "판정표 판 번호 — 비우면 가장 새 판이다(risk_ledger_overview 의 latest_version)."
+_A_LEDGER_KIND = (f"틀 종류 — {' · '.join(ledger_module.TEMPLATE_KINDS)}(columns 는 칸 정의 · facts 는 보고 묶음 틀 · decision_map 은 결정 칸 → "
+                  "원장 칸 대응). 그 밖은 422 다.")
+_A_LEDGER_BODY = ("틀 몸 — columns 는 {columns: [{name, order, grade?, sp_key?, axis?, figure?}], notice?, code_label?}(칸 이름에 판정 낱말을 "
+                  "쓰면 422), facts 는 {keys: [{key, from}]}(from 은 원장 칸 · @code · @version · @sources · @figures · @numbers · null), "
+                  "decision_map 은 {fields: {결정 칸 경로: 원장 칸}, code_field?, items?} 이다.")
+_A_LAYER_NAME = f"층 이름(최대 {ledger_module.NAME_MAX}자) — 예 '기준 행' · '수정 반영'."
+_A_LAYER_ORDER = "덮는 차례(정수) — 작은 차례가 먼저 덮고 큰 차례가 이긴다. 한 번 짓기 안에서 겹치면 422 다."
+_A_LAYER_ROWS = "덮을 값 {코드: {칸: 값}} — 칸은 칸 정의에 있는 이름만, 값은 글 · 수 · 참거짓 · null(null 은 그 칸을 비운다)."
+_A_LAYER_SOURCE = f"그 층의 원천 파일 이름(최대 {ledger_module.SOURCE_FILE_MAX}자) — 사람이 준 글자 그대로 남는다. 비워도 된다."
+_A_BUILD_LAYERS = (f"덮을 층 목록(최대 {ledger_module.BUILD_LAYERS_MAX}개) — risk_ledger_put_layer 의 layer_id 이거나 그 자리에서 쌓을 "
+                   "{name, order, rows, source_file} 객체다. 차례는 order 가 정한다(목록 차례가 아니다).")
+_A_BUILD_BASE = "기준 판 번호 — 그 판의 행 위에 덮는다. 비우면 빈 표에서 짓는다."
+_A_BUILD_COLSET = "칸 정의 판 번호 — 비우면 가장 새 칸 정의다."
+_A_DIFF_BASE = "견줄 판 번호 — 비우면 그 판의 기준 판이다."
+_A_EXPORT_FMT = f"내보낼 꼴 — {' · '.join(ledger_module.EXPORT_FORMATS)}(csv 는 첫 줄이 보안 문구이고 둘째 줄이 칸 머리다)."
+_A_LEDGER_OFFSET = f"건너뛸 행 수(0부터) — 앞 응답의 next_offset 을 준다. 한 쪽은 MCP 결과 상한({MCP_RESULT_CHARS:,}자) 안이다."
+
+
+def _actor() -> str:
+    return str(_caller().get("email") or "service")
+
+
+@mcp.tool()
+def risk_ledger_overview(target_key: Annotated[str, Field(description=_A_TARGET_KEY)]) -> dict:
+    """판정표 원장 한눈(읽기 전용) — 틀 종류별 판(columns · facts · decision_map) · 판정표 판 목록(기준 판 · 칸 정의 판 · 행 수 · 등급 바뀐 코드 수) · 판에 아직 쓰지 않은 층(used false) · 근거 묶음 · 숫자 원장 수 · 최근 내보내기를 준다, 판정표 도구의 시작이다(칸 정의가 없으면 risk_ledger_put_template(kind='columns') 부터)."""
+    return _scoped("target", target_key, ledger_routes.overview_payload, target_key)
+
+
+@mcp.tool()
+async def risk_ledger_put_template(target_key: Annotated[str, Field(description=_A_TARGET_KEY)],
+                                   kind: Annotated[str, Field(description=_A_LEDGER_KIND)],
+                                   body: Annotated[dict, Field(description=_A_LEDGER_BODY)]) -> dict:
+    """판정표 틀 한 판 적기 — 쓰기: 칸 정의(칸 이름 · 차례 · 등급 칸 · SP 사전 키 칸 · 표기 축 · 그림 칸)나 facts 틀 · 결정 칸 대응을 사용자에게 보이고 확인한 뒤 부른다, 과제 고유 칸은 코드가 아니라 이 틀로만 들어간다, 같은 몸이면 지금 판을 돌려주고(created false) 다르면 새 판(version 이 하나 오른다)이다, 칸 이름에 판정 낱말(FAIL · 치명 따위)이 들면 422 다(좌석이 칸 이름을 판정으로 인용한다), 대상의 편집자 이상만 한다."""
+    return await _entry(ledger_entry.put_template, target_key=target_key, kind=kind, body=body)
+
+
+@mcp.tool()
+async def risk_ledger_put_layer(target_key: Annotated[str, Field(description=_A_TARGET_KEY)],
+                                name: Annotated[str, Field(description=_A_LAYER_NAME)],
+                                order: Annotated[int, Field(description=_A_LAYER_ORDER)],
+                                rows: Annotated[dict, Field(description=_A_LAYER_ROWS)],
+                                source_file: Annotated[str | None, Field(description=_A_LAYER_SOURCE)] = None) -> dict:
+    """덮어쓰기 층 하나 쌓기 — 쓰기: 어떤 행 · 칸을 어떤 차례로 덮을지 사용자에게 확인한 뒤 부른다, 판은 아직 바뀌지 않고 risk_ledger_build 가 층 차례대로 덮는다, 칸 정의에 없는 칸은 ledger_unknown_columns(422)다, 같은 (이름 · 차례 · 원천 · 행)이면 그 층을 돌려준다(created false), 답의 layer_id 를 risk_ledger_build 의 layers 에 준다, 대상의 편집자 이상만 한다."""
+    return await _entry(ledger_entry.put_layer, target_key=target_key, name=name, order=order, rows=rows, source_file=source_file)
+
+
+@mcp.tool()
+async def risk_ledger_build(target_key: Annotated[str, Field(description=_A_TARGET_KEY)],
+                            layers: Annotated[list, Field(description=_A_BUILD_LAYERS)],
+                            base_version: Annotated[int | None, Field(description=_A_BUILD_BASE)] = None,
+                            colset_version: Annotated[int | None, Field(description=_A_BUILD_COLSET)] = None) -> dict:
+    """판정표 판 짓기 — 쓰기: 기준 판과 덮을 층 차례를 사용자에게 보이고 확인한 뒤 부른다, 층을 order 차례로 덮어(같은 칸이면 뒤 층이 이긴다) 새 판을 세우고 덮은 칸마다 그 앞 값을 남긴다, 답은 판 번호 · 행 수(행으로 센다 — 파일 줄이 아니다) · 층마다 덮은 칸 · 바뀐 칸 · 새 코드 수 · 등급이 바뀐 코드(두 판에 다 있는 코드)다, 같은 (기준 판 · 층 · 칸 정의 판)이면 지은 판을 돌려준다(created false), 대상의 편집자 이상만 한다."""
+    return await _entry(ledger_entry.build, target_key=target_key, layers=layers, base_version=base_version,
+                        colset_version=colset_version)
+
+
+@mcp.tool()
+def risk_ledger_diff(target_key: Annotated[str, Field(description=_A_TARGET_KEY)],
+                     version: Annotated[int, Field(description=_A_LEDGER_VERSION)],
+                     base: Annotated[int | None, Field(description=_A_DIFF_BASE)] = None,
+                     offset: Annotated[int, Field(description=_A_LEDGER_OFFSET)] = 0) -> dict:
+    """판정표 두 판 비교(읽기 전용) — 바뀐 칸(code · column · before · after — 칸 정의 차례 · 코드 차례) · 든 · 빠진 코드 · 바뀐 코드 수 · 바뀐 칸 수 · 등급 칸과 등급이 바뀐 코드 수(두 판에 다 있는 코드만)를 준다, 수는 늘 전부이고 changes 는 와이어 상한 안에서 쪽으로 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다), 빈 칸(null · 빈 글)은 서로 같다."""
+    def call(key: str, *, owner_sub: str) -> dict:
+        full = ledger_routes.diff_payload(key, version, base, owner_sub=owner_sub)
+        start = max(0, int(offset or 0))
+
+        def page(take: int) -> dict:
+            rows = full["changes"][start:start + take]
+            out = {**full, "changes": rows, "offset": start}
+            if start + len(rows) < len(full["changes"]):
+                out["next_offset"] = start + len(rows)
+            return out
+
+        return _fit_list(page, max(1, len(full["changes"]) - start), lambda out: len(out["changes"]))
+
+    return _scoped("target", target_key, call, target_key)
+
+
+@mcp.tool()
+def risk_ledger_export(target_key: Annotated[str, Field(description=_A_TARGET_KEY)],
+                       version: Annotated[int | None, Field(description=_A_LEDGER_VERSION_OPT)] = None,
+                       fmt: Annotated[str, Field(description=_A_EXPORT_FMT)] = "json",
+                       offset: Annotated[int, Field(description=_A_LEDGER_OFFSET)] = 0) -> dict:
+    """판정표 판 내보내기(읽기 · 기록 한 줄) — csv(text 의 첫 줄이 보안 문구 · 둘째 줄이 칸 머리 · 이어 코드 차례의 행) 또는 json(table 의 첫 칸 notice · columns · rows)이고 값은 원장 그대로다(표기 규칙을 입히지 않는다), 행은 와이어 상한 안에서 쪽으로 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(쪽마다 보안 문구 · 칸 머리가 앞에 선다), 누가 어느 판을 냈는지 내보내기 기록(export_id)이 남는다."""
+    actor = _actor()
+
+    def call(key: str, *, owner_sub: str) -> dict:
+        total = ledger_routes.export_page(key, version, fmt, owner_sub=owner_sub, offset=offset, limit=1)["rows_n"]
+        out = _fit_list(lambda take: ledger_routes.export_page(key, version, fmt, owner_sub=owner_sub, offset=offset, limit=take),
+                        max(1, total - max(0, int(offset or 0))), lambda page: page["page_rows"])
+        return ledger_routes.note_page(out, owner_sub=owner_sub, actor=actor)
+
+    return _scoped("target", target_key, call, target_key)

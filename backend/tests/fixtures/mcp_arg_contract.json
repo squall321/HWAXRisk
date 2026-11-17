@@ -414,6 +414,63 @@
     "target_key": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Target Key"},
     "cluster_key": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Cluster Key"}
    }
+  },
+  "risk_ledger_overview": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["target_key"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"}
+   }
+  },
+  "risk_ledger_put_template": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["kind", "POSITIONAL_OR_KEYWORD"], ["body", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["body", "kind", "target_key"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"},
+    "kind": {"title": "Kind", "type": "string"},
+    "body": {"additionalProperties": true, "title": "Body", "type": "object"}
+   }
+  },
+  "risk_ledger_put_layer": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["name", "POSITIONAL_OR_KEYWORD"], ["order", "POSITIONAL_OR_KEYWORD"], ["rows", "POSITIONAL_OR_KEYWORD"], ["source_file", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["name", "order", "rows", "target_key"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"},
+    "name": {"title": "Name", "type": "string"},
+    "order": {"title": "Order", "type": "integer"},
+    "rows": {"additionalProperties": true, "title": "Rows", "type": "object"},
+    "source_file": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Source File"}
+   }
+  },
+  "risk_ledger_build": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["layers", "POSITIONAL_OR_KEYWORD"], ["base_version", "POSITIONAL_OR_KEYWORD"], ["colset_version", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["layers", "target_key"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"},
+    "layers": {"items": {}, "title": "Layers", "type": "array"},
+    "base_version": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Base Version"},
+    "colset_version": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Colset Version"}
+   }
+  },
+  "risk_ledger_diff": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["version", "POSITIONAL_OR_KEYWORD"], ["base", "POSITIONAL_OR_KEYWORD"], ["offset", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["target_key", "version"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"},
+    "version": {"title": "Version", "type": "integer"},
+    "base": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Base"},
+    "offset": {"default": 0, "title": "Offset", "type": "integer"}
+   }
+  },
+  "risk_ledger_export": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["version", "POSITIONAL_OR_KEYWORD"], ["fmt", "POSITIONAL_OR_KEYWORD"], ["offset", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["target_key"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"},
+    "version": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Version"},
+    "fmt": {"default": "json", "title": "Fmt", "type": "string"},
+    "offset": {"default": 0, "title": "Offset", "type": "integer"}
+   }
   }
  }
 }
