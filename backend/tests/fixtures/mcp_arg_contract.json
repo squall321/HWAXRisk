@@ -490,6 +490,14 @@
     "bundle_id": {"title": "Bundle Id", "type": "string"},
     "offset": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Offset"}
    }
+  },
+  "risk_get_provenance": {
+   "params": [["project_id", "POSITIONAL_OR_KEYWORD"], ["snapshot_id", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["project_id"],
+   "properties": {
+    "project_id": {"title": "Project Id", "type": "string"},
+    "snapshot_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Snapshot Id"}
+   }
   }
  }
 }

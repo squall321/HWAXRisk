@@ -16,6 +16,7 @@ from app import (brief, common, entry, expert_report, issues, planner, registry,
 from app import board_transform as board_transform_module
 from app import ledger as ledger_module
 from app import ledger_entry, ledger_routes
+from app import provenance as provenance_module
 from app import locate as locate_module
 from app.adapters import dyna as dyna_adapter
 from app.adapters import ecad as ecad_adapter
@@ -501,9 +502,14 @@ def risk_similar_projects(project_id: Annotated[str, Field(description=_A_PROJEC
 def risk_get_snapshot(snapshot_id: Annotated[str, Field(description=_A_SNAPSHOT_ID)],
                       part: Annotated[str, Field(description=_A_SNAP_PART)],
                       offset: Annotated[int, Field(description=_A_SNAP_OFFSET)] = 0) -> dict:
-    """스냅샷 조회(part ∈ ir|state|nodes|edges|calls|rule_hits, nodes·edges 는 한 번에 500 + truncated 이고 next_offset 을 offset 으로 주면 이어 받는다)."""
+    """스냅샷 조회(part ∈ ir|state|nodes|edges|calls|rule_hits, nodes·edges 는 한 번에 500 + truncated 이고 next_offset 을 offset 으로 주면 이어 받는다), 답마다 provenance(원천의 앱 키 · 단계 신호 · 판 · 환경 · 개수와 모르는 칸의 까닭 · 경고 — risk_get_provenance 와 같은 꼴)가 붙는다."""
     limit = NODE_LIMIT if part in ("nodes", "edges") else None
-    return _scoped("snapshot", snapshot_id, routes.snapshot_part, snapshot_id, part, limit=limit, offset=offset)
+
+    def call(key: str, *, owner_sub: str) -> dict:
+        out = routes.snapshot_part(key, part, owner_sub=owner_sub, limit=limit, offset=offset)
+        return {**out, "provenance": ledger_routes.snapshot_provenance(key)}
+
+    return _scoped("snapshot", snapshot_id, call, snapshot_id)
 
 
 @mcp.tool()
@@ -528,18 +534,28 @@ def risk_get_registry(target_key: Annotated[str, Field(description=_A_TARGET_KEY
                       offset: Annotated[int, Field(description=_A_REG_OFFSET)] = 0,
                       attention: Annotated[str | None, Field(description=_A_ATTENTION)] = None,
                       unit_id: Annotated[str | None, Field(description=_A_REG_UNIT)] = None) -> dict:
-    """타깃 등록부(rr_registry 행 한 번에 최대 200 + verdict 후보) 조회, status·severity·domain·attention(주의 등급 A·B·C·D — 쉼표로 여럿)·unit_id 로 거르고 한 번에 약 2만 5천 자 안에서 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다), 쪽은 (family_key, cluster_key) 순이고 쪽마다 ledger_rev(거른 목록 전체의 지문)가 오니 앞 쪽과 다르면 그사이 원장이 바뀐 것이라 offset 0 부터 다시 받는다, 카드 대조 대상의 행에는 지지 수 넷(전문가·영역·단위·검증)·주의 등급·쟁점 상태와 merged.claimed(hold 전 주장값)·distribution 이 있다, 행에 merged_json 은 없고(merged 와 같은 내용) 한 행이 혼자 상한을 넘으면 merged 의 긴 목록을 앞 몇 개와 원래 길이(merged.lists_total)로 준다(전부는 웹 REST GET /api/targets/{key}/registry)."""
+    """타깃 등록부(rr_registry 행 한 번에 최대 200 + verdict 후보) 조회, status·severity·domain·attention(주의 등급 A·B·C·D — 쉼표로 여럿)·unit_id 로 거르고 한 번에 약 2만 5천 자 안에서 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(자르지 않는다), 쪽은 (family_key, cluster_key) 순이고 쪽마다 ledger_rev(거른 목록 전체의 지문)가 오니 앞 쪽과 다르면 그사이 원장이 바뀐 것이라 offset 0 부터 다시 받는다, 카드 대조 대상의 행에는 지지 수 넷(전문가·영역·단위·검증)·주의 등급·쟁점 상태와 merged.claimed(hold 전 주장값)·distribution 이 있다, 행에 merged_json 은 없고(merged 와 같은 내용) 한 행이 혼자 상한을 넘으면 merged 의 긴 목록을 앞 몇 개와 원래 길이(merged.lists_total)로 준다(전부는 웹 REST GET /api/targets/{key}/registry), 답에 그 대상 스냅샷의 provenance(원천 출처 표지 — risk_get_provenance 꼴)가 붙는다."""
     def rows(key: str, *, owner_sub: str) -> dict:
         def page(take: int, keep: int | None = None) -> dict:
             out = routes.registry_payload(key, owner_sub=owner_sub, status=status, severity=severity, domain=domain,
                                           attention=attention, unit_id=unit_id, limit=take, offset=offset)
-            return {**out, "rows": [_registry_row(r, keep) for r in out["rows"]]}
+            return {**out, "rows": [_registry_row(r, keep) for r in out["rows"]], "provenance": shown["provenance"]}
 
-        out = _fit_rows(page, REGISTRY_LIMIT)
-        for keep in REGISTRY_LIST_KEEP:
-            if _wire_chars(out) <= MCP_RESULT_CHARS:
-                break
-            out = page(len(out["rows"]), keep)          # 한 행이 혼자 넘는다 — 그 행의 긴 목록을 줄인다(next_offset 은 그대로)
+        def fit() -> dict:
+            out = _fit_rows(page, REGISTRY_LIMIT)
+            for keep in REGISTRY_LIST_KEEP:
+                if _wire_chars(out) <= MCP_RESULT_CHARS:
+                    break
+                out = page(len(out["rows"]), keep)      # 한 행이 혼자 넘는다 — 그 행의 긴 목록을 줄인다(next_offset 은 그대로)
+            return out
+
+        # 출처 표지(RK-06)는 첫 쪽에 전부, 뒤 쪽 · 와이어가 모자란 쪽에는 짧은 꼴(경고 코드 · 검사 상태 — 전부는 risk_get_provenance)이다.
+        full = ledger_routes.target_provenance(key)
+        shown = {"provenance": full if not offset else provenance_module.brief(full)}
+        out = fit()
+        if _wire_chars(out) > MCP_RESULT_CHARS and shown["provenance"] is full and full is not None:
+            shown["provenance"] = provenance_module.brief(full)
+            out = fit()
         return out
 
     return _scoped("target", target_key, rows, target_key)
@@ -674,7 +690,7 @@ def risk_add_finding(
 # 같은 호출을 두 번 해도 같은 행이다 — 게이트웨이의 사람별 길은 실패하면 한 번 더 부른다.
 @mcp.tool()
 async def risk_next_step(project_id: Annotated[str | None, Field(description=_A_NEXT_PROJECT)] = None) -> dict:
-    """Claude 입구의 길잡이(읽기 전용) — 과제가 어느 단계(소스·캡처·리비전·same-as·비교·심사 대상·명단·잡·결과)이고 무엇이 막혔는지(고칠 곳 fix)와 다음에 부를 도구·인자(next)를 한 번에 준다, project_id 없이 부르면 내 과제 목록이고 acting_as 는 이 호출이 누구로 해석됐는지다, 과제 구성원(편집자 · 보기)도 부를 수 있고 project.my_role 이 내 역할이다 — 보기에게는 쓰기 걸음 대신 role_insufficient 막힘이 선다(쓰기는 과제 주인 · 편집자만)."""
+    """Claude 입구의 길잡이(읽기 전용) — 과제가 어느 단계(소스·캡처·리비전·same-as·비교·심사 대상·명단·잡·결과)이고 무엇이 막혔는지(고칠 곳 fix)와 다음에 부를 도구·인자(next)를 한 번에 준다, project_id 없이 부르면 내 과제 목록이고 acting_as 는 이 호출이 누구로 해석됐는지다, 과제 구성원(편집자 · 보기)도 부를 수 있고 project.my_role 이 내 역할이다 — 보기에게는 쓰기 걸음 대신 role_insufficient 막힘이 선다(쓰기는 과제 주인 · 편집자만), 과제를 주면 provenance(원천 출처 표지 — risk_get_provenance 꼴)가 붙는다."""
     return _fit_guide(await _entry(entry.next_step, project_id=project_id))
 
 
@@ -867,7 +883,7 @@ def _fit_guide(out: dict) -> dict:
     로스터). 줄인 셈은 facts.review_order_page 에 적고, 전부는 risk_get_coverage(order_offset=0) 쪽이다."""
     facts = out.get("facts") if isinstance(out, dict) else None
     if not isinstance(facts, dict) or not isinstance(facts.get("review_order"), list):
-        return out
+        return _fit_provenance(out)
     rows, meta = facts["review_order"], dict(facts.get("review_order_page") or {})
     top = int(meta.get("top_per_domain") or routes.REVIEW_ORDER_TOP)
     while _wire_chars(out) > MCP_RESULT_CHARS and top > 1:
@@ -877,6 +893,14 @@ def _fit_guide(out: dict) -> dict:
         if len(rows) < int(meta.get("total") or 0):
             meta["next_order_offset"] = 0
         out = {**out, "facts": {**facts, "review_order": rows, "review_order_page": meta}}
+    return _fit_provenance(out)
+
+
+def _fit_provenance(out: dict) -> dict:
+    """답이 MCP_RESULT_CHARS 를 넘으면 출처 표지를 짧은 꼴(경고 코드 · 검사 상태 — 전부는 risk_get_provenance)로 바꾼다(RK-06)."""
+    if isinstance(out, dict) and isinstance(out.get("provenance"), dict) and not out["provenance"].get("brief") \
+            and _wire_chars(out) > MCP_RESULT_CHARS:
+        return {**out, "provenance": provenance_module.brief(out["provenance"])}
     return out
 
 
@@ -1042,7 +1066,7 @@ async def risk_locate_for_section(project_id: Annotated[str, Field(description=_
                                   side: Annotated[str | None, Field(description=_A_LOC_SIDE)] = None,
                                   odb_job_id: Annotated[str | None, Field(description=_A_LOC_ODB)] = None,
                                   stepforge_project_id: Annotated[str | None, Field(description=_A_LOC_CAD)] = None) -> dict:
-    """단면 자리 찾기(읽기 전용) — 리스크 항목(finding_id 또는 target_key+cluster_key) · refdes · net · 보드 좌표(x+y, side 선택) 가운데 하나를 받아 MCAD 점(mcad {x, y, z, unit mm}) · 그 자리의 CAD 몸체(body.path, 확신할 때만) · 단면 둘(planes — 긴 축 평면 먼저, 항목마다 {axis, offset, unit mm} 이고 axis 는 평면 법선) · window_mm · 평면마다 F1 section_pair_view 에 그대로 부를 인자 f1.calls(점 [x, y, z] 목록 · axis · window_mm · 몸체는 highlight — projects 에 견줄 다른 판을 더해 2 ~ 6개, offset 은 넘기지 않는다)와 변환 근거(transform — 식 · 상태 · 오차)를 준다, 자리를 못 정하면 status unknown 과 reason{code, message, fix}(변환 미등록 transform_missing 이면 risk_propose_board_transform → risk_set_board_transform), 보드 · CAD 과제는 비우면 과제의 원천이고 ODB 허브는 위임으로 확인된 신원의 PAT 로만 부른다(없으면 locate_pat_absent)."""
+    """단면 자리 찾기(읽기 전용) — 리스크 항목(finding_id 또는 target_key+cluster_key) · refdes · net · 보드 좌표(x+y, side 선택) 가운데 하나를 받아 MCAD 점(mcad {x, y, z, unit mm}) · 그 자리의 CAD 몸체(body.path, 확신할 때만) · 단면 둘(planes — 긴 축 평면 먼저, 항목마다 {axis, offset, unit mm} 이고 axis 는 평면 법선) · window_mm · 평면마다 F1 section_pair_view 에 그대로 부를 인자 f1.calls(점 [x, y, z] 목록 · axis · window_mm · 몸체는 highlight — projects 에 견줄 다른 판을 더해 2 ~ 6개, offset 은 넘기지 않는다)와 변환 근거(transform — 식 · 상태 · 오차) · 원천 출처 표지(provenance — risk_get_provenance 꼴)를 준다, 자리를 못 정하면 status unknown 과 reason{code, message, fix}(변환 미등록 transform_missing 이면 risk_propose_board_transform → risk_set_board_transform), 보드 · CAD 과제는 비우면 과제의 원천이고 ODB 허브는 위임으로 확인된 신원의 PAT 로만 부른다(없으면 locate_pat_absent)."""
     return await _entry(entry.locate_for_section, project_id=project_id, finding_id=finding_id, target_key=target_key,
                         cluster_key=cluster_key, refdes=refdes, net=net, x=x, y=y, side=side, odb_job_id=odb_job_id,
                         stepforge_project_id=stepforge_project_id)
@@ -1218,7 +1242,11 @@ def risk_get_evidence_bundle(bundle_id: Annotated[str, Field(description=_A_BUND
     """근거 묶음 받기(읽기 전용) — {bundle_id, target_key, version, fingerprint, evidence} 이고 evidence 를 고치지 않고 deliberate_start(evidence=…) 에 넣는다(지문은 sha256(json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))) — 받는 쪽이 다시 재어 같은지 본다), 묶음이 커서 Claude 에서 직접 읽으면 offset 으로 쪽을 받는다(그때는 그 쪽의 항목만이라 지문을 다시 재지 않는다), 그 대상을 볼 수 있는 사람만 연다(범위 밖 · 없는 묶음은 not_visible)."""
     def call() -> dict:
         target_key = ledger_routes.bundle_target(bundle_id) or bundle_id
-        owner_sub = routes.mcp_scope_owner("target", target_key, _caller())
+        try:
+            owner_sub = routes.mcp_scope_owner("target", target_key, _caller())
+        except AppError as exc:
+            # 묶음 id 로 부른 사람에게 그 묶음의 대상 열쇠를 흘리지 않는다 — 없는 묶음과 같은 글이다.
+            raise AppError(exc.code, f"볼 수 없는 id 입니다 — {bundle_id}.", exc.http_status) from None
         full = ledger_routes.bundle_payload(bundle_id, owner_sub=owner_sub)
         if offset is None:
             return full
@@ -1235,3 +1263,14 @@ def risk_get_evidence_bundle(bundle_id: Annotated[str, Field(description=_A_BUND
         return _fit_list(page, max(1, len(items) - start), lambda out: len(out["evidence"]))
 
     return _guarded(call)
+
+
+# ================================================================ 원천의 출처 표지(RK-06)
+_A_PROV_SNAPSHOT = "볼 스냅샷 id — 비우면 그 과제의 가장 새 스냅샷이다(스냅샷이 없으면 원천 카드만 본다). 그 과제의 스냅샷이 아니면 404 다."
+
+
+@mcp.tool()
+def risk_get_provenance(project_id: Annotated[str, Field(description=_A_PROJECT_ID)],
+                        snapshot_id: Annotated[str | None, Field(description=_A_PROV_SNAPSHOT)] = None) -> dict:
+    """원천의 출처 표지(읽기 전용) — mcad(StepForge 과제 id · 이름 · 검출 잡 · 단계 신호 · 앱 판) · dyna(앱 키 — 게이트웨이 list_tool_apps 이름 · 환경 env — 게이트웨이 낱말 dev · prod · unknown · 덱 파일 · 읽은 요소 수 · 덱 파트 수와 요소가 있는 파트 수) · ecad(ODB job_id · 보드 이름 · revision)를 앱이 실제로 가진 값만 싣고, 원천 앱이 내지 않는 칸(StepForge 단계 · 판, 덱에 적힌 요소 수 · 덱 판)은 null 과 unknown 의 까닭, 그 앱이 내줘야 할 것은 needs 다, warnings 는 이른 사본(검출 흔적 없음 · 계면 0) · 빈 앱 키 · 옛 앱 키 · 운영 아닌 env · 요소 없는 파트 · 판 불일치이고 checks 는 검사마다 ok · warn · unknown 이다, 좌석 · 사람이 MCAD 를 null 로 읽거나 개발 박스의 덱을 운영으로 읽기 전에 본다."""
+    return _scoped("project", project_id, ledger_routes.provenance_payload, project_id, snapshot_id)

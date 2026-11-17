@@ -27,6 +27,7 @@ from app import identity, ir_builder, labels, learning, metrics, narrative, plan
 from app import expert_report, review_cells, review_runner, sp_subject
 from app import board_transform as board_transform_module
 from app import locate as locate_module
+from app import provenance as provenance_module
 from app import roster as roster_module
 from app import state as state_module
 from app import units as units_module
@@ -2693,13 +2694,16 @@ def locate_payload(project_id: str, email: str, *, reads: Callable[[str], bool],
             item = locate_module.item_row(store, project, finding_id=input_.get("finding_id"), target_key=input_.get("target_key"),
                                           cluster_key=input_.get("cluster_key"))
             _item_readable(store, item, project_id, reads)
-            return locate_module.locate_item(store, project, item, input_=input_, odb_job_id=board["odb_job_id"],
-                                             stepforge_project_id=board["stepforge_project_id"], channel_factory=lazy)
-        return locate_module.locate_on_board(store, project, input_=input_, odb_job_id=board["odb_job_id"],
-                                             stepforge_project_id=board["stepforge_project_id"], channel_factory=lazy,
-                                             odb_app=board["odb_app"])
+            out = locate_module.locate_item(store, project, item, input_=input_, odb_job_id=board["odb_job_id"],
+                                            stepforge_project_id=board["stepforge_project_id"], channel_factory=lazy)
+        else:
+            out = locate_module.locate_on_board(store, project, input_=input_, odb_job_id=board["odb_job_id"],
+                                                stepforge_project_id=board["stepforge_project_id"], channel_factory=lazy,
+                                                odb_app=board["odb_app"])
     finally:
         lazy.close()
+    # 원천의 출처 표지(RK-06 — HWAXPortal docs/request-1117) — 자리를 낸 MCAD 사본이 어디까지 처리된 것인지 함께 본다(웹 · MCP 같은 답).
+    return {**out, "provenance": provenance_module.project_provenance(store, project_id)}
 
 
 @router.get("/projects/{project_id}/locate")

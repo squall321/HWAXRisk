@@ -56,6 +56,8 @@ MCP_READS: tuple[str, ...] = (
     "risk_get_cells", "risk_get_expert_report", "risk_get_issues", "risk_get_report",
     # 단면 자리 찾기(F2) — 보드 좌표 찾기는 게이트웨이를 부르지 않아 구성원 모두 같은 답이다(이 원장에는 보드가 없어 unknown).
     "risk_locate_for_section",
+    # 판정표 원장(HWAXPortal docs/request-1117) — 한눈 · 판 비교 · 근거 묶음 받기 · 원천 출처 표지.
+    "risk_ledger_overview", "risk_ledger_diff", "risk_get_evidence_bundle", "risk_get_provenance",
 )
 MCP_MEMBER_EXEMPT: dict[str, str] = {
     "risk_propose_board_transform": ("적기의 앞 단계라 편집자 이상이다(보기 role_insufficient — 반대 검토 F2-9) · 부른 사람의 PAT 로 ODB 허브 ·"
@@ -65,11 +67,14 @@ MCP_MEMBER_EXEMPT: dict[str, str] = {
                        " 보기는 role_insufficient 다(RV-1 — tests/rr/test_editor_writes.py)"),
     "risk_next_step": ("구성원에게도 연다(OI-3) — 그러나 답이 부른 사람에게 매인다(project.my_role · 자격 칸은 부른 사람의 등록 · 보기는"
                        " 쓰기 걸음 대신 role_insufficient 막힘)라 주인과 같은 답이 아니다 — 아래 길잡이 시험이 따로 본다"),
+    "risk_ledger_export": ("구성원 모두 읽는다 — 그러나 부를 때마다 내보내기 기록(rr_ledger_exports)이 서고 답에 그 export_id 가 붙어 주인과 글이"
+                           " 같지 않다(보기의 내보내기는 tests/test_ledger.py 가 본다)"),
 }
 MCP_WRITES: tuple[str, ...] = (
     "risk_create_project", "risk_submit_panel_result", "risk_add_finding", "risk_add_source", "risk_capture_snapshot",
     "risk_ack_gate", "risk_decide_sameas", "risk_create_diff", "risk_open_target", "risk_start_job", "risk_job_action",
     "risk_repersist_panel", "risk_set_ecad_board", "risk_set_project_subject", "risk_set_board_transform", "risk_set_item_location",
+    "risk_ledger_put_template", "risk_ledger_put_layer", "risk_ledger_build", "risk_build_evidence_bundle",
 )
 # 보기가 지나는 쓰기 — 남의 것을 가리키지 않고 부른 사람 자신의 행을 쓴다. 대응 결정은 그 과제의 주인 · 편집자만 하게 돼(MB-13) 이 표에서
 # 빠졌다.

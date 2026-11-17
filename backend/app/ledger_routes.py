@@ -14,7 +14,7 @@ from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
-from app import evidence_bundle, identity, ledger, routes
+from app import evidence_bundle, identity, ledger, provenance, routes
 from app.errors import AppError
 
 router = APIRouter(prefix="/api")
@@ -187,3 +187,35 @@ def get_evidence_bundle(bundle_id: str, ident: identity.Identity = Depends(ident
     if target_key is None:
         raise _bundle_missing(bundle_id)
     return bundle_payload(bundle_id, owner_sub=reader(target_key, ident))
+
+
+# ---------------------------------------------------------------- RK-06 원천의 출처 표지
+def snapshot_provenance(snapshot_id: str) -> dict | None:
+    """그 스냅샷의 과제 · 그 스냅샷의 출처 표지(문은 부르는 쪽 — 스냅샷을 읽은 사람에게만 붙인다)."""
+    store = routes.get_store()
+    row = store.query_one("SELECT project_id FROM rr_snapshots WHERE id = ?", (snapshot_id,))
+    return None if row is None else provenance.project_provenance(store, row["project_id"], snapshot_id=snapshot_id)
+
+
+def target_provenance(target_key: str) -> dict | None:
+    """그 대상의 스냅샷(snap 은 그 스냅샷, diff 는 뒤 스냅샷)의 출처 표지(문은 부르는 쪽)."""
+    return provenance.target_provenance(routes.get_store(), target_key)
+
+
+def provenance_payload(project_id: str, snapshot_id: str | None = None, *, owner_sub: str) -> dict:
+    """출처 표지 본체 — 그 owner 의 과제가 아니면 404, 준 스냅샷이 그 과제의 것이 아니면 404 다."""
+    routes._project_row(project_id, owner_sub)
+    store = routes.get_store()
+    if snapshot_id is not None and store.query_one("SELECT 1 FROM rr_snapshots WHERE id = ? AND project_id = ?",
+                                                   (snapshot_id, project_id)) is None:
+        raise AppError("E404", f"스냅샷을 찾을 수 없습니다 — {snapshot_id}.", 404)
+    return provenance.project_provenance(store, project_id, snapshot_id=snapshot_id)
+
+
+@router.get("/projects/{project_id}/provenance")
+def get_provenance(project_id: str, snapshot_id: str | None = None, ident: identity.Identity = Depends(identity.current)) -> dict:
+    """원천의 출처 표지 — StepForge 과제 · 단계 신호 · 판, DynaForge 앱 키 · 환경 · 덱 · 요소 · 파트 수, ODB 보드 · revision 과 모르는 칸의 까닭 ·
+    경고(이른 사본 · 빈 앱 키 · 옛 앱 키 · 운영 아닌 환경 · 요소 없는 파트 · 판 불일치). 그 과제의 구성원이 읽는다."""
+    email = routes._require_user(ident)
+    return provenance_payload(project_id, snapshot_id,
+                              owner_sub=routes._project_reader(project_id, email, admin=routes._admin_reader(ident)))
