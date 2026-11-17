@@ -46,6 +46,8 @@ CALLER_FIELDS: dict[tuple[str, str], tuple[str, ...]] = {
     # 과제 주제의 후보 힌트는 부른 사람의 PAT 로 읽는다(그 사람이 StepForge 를 보는 만큼) — 지금 값(sp_task · stage · round)은 같다.
     ("GET", P + "/projects/{project_id}/sp-subject"): ("hint", "hint_note"),
     ("GET", P + "/targets/{target_key}/coverage"): ("my_role",),
+    # 보고 묶음(RK-05)은 부를 때마다 내보내기 기록이 서고 그 id 가 답에 붙는다 — 묶음(id · 지문 · facts)은 같다.
+    ("GET", P + "/targets/{target_key}/ledger/versions/{version}/report-bundle"): ("export_id",),
 }
 
 # MCP — 읽기 도구는 구성원이 주인과 같은 답을 받는다. 구성원이 주인과 같은 답을 받지 않는 것과 쓰기 도구는 까닭과 함께 따로 적는다(새
@@ -69,6 +71,8 @@ MCP_MEMBER_EXEMPT: dict[str, str] = {
                        " 쓰기 걸음 대신 role_insufficient 막힘)라 주인과 같은 답이 아니다 — 아래 길잡이 시험이 따로 본다"),
     "risk_ledger_export": ("구성원 모두 읽는다 — 그러나 부를 때마다 내보내기 기록(rr_ledger_exports)이 서고 답에 그 export_id 가 붙어 주인과 글이"
                            " 같지 않다(보기의 내보내기는 tests/test_ledger.py 가 본다)"),
+    "risk_export_report_bundle": ("구성원 모두 읽는다 — 내보내기 기록의 export_id 가 답에 붙어 주인과 글이 같지 않다(묶음 id · facts 는 같다 —"
+                                  " tests/test_report_bundle.py)"),
 }
 MCP_WRITES: tuple[str, ...] = (
     "risk_create_project", "risk_submit_panel_result", "risk_add_finding", "risk_add_source", "risk_capture_snapshot",

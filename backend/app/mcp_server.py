@@ -1349,3 +1349,33 @@ def _fit_findings(out: dict) -> dict:
         keep = max(1, keep // 2)
         out = {**out, **{k: (out.get(k) or [])[:keep] for k in _CHECK_LISTS}, "shown_per_list": keep}
     return out
+
+
+# ================================================================ 보고 묶음(RK-05)
+_A_FACTS_VERSION = "facts 틀의 판 — 비우면 가장 새 판이다(틀이 없으면 ledger_facts_template_missing 409)."
+_A_RB_OFFSET = f"건너뛸 코드 수(0부터) — 앞 응답의 next_offset 을 준다. facts 는 MCP 결과 상한({MCP_RESULT_CHARS:,}자) 안의 쪽이다."
+
+
+@mcp.tool()
+def risk_export_report_bundle(target_key: Annotated[str, Field(description=_A_TARGET_KEY)],
+                              version: Annotated[int | None, Field(description=_A_LEDGER_VERSION_OPT)] = None,
+                              template_version: Annotated[int | None, Field(description=_A_FACTS_VERSION)] = None,
+                              offset: Annotated[int, Field(description=_A_RB_OFFSET)] = 0) -> dict:
+    """판정표 판 → 보고 묶음(읽기 · 기록 한 줄) — 첫 칸 notice(보안 문구) · report_bundle_id(rb_ 머리 — 같은 판 · 같은 틀이면 같은 id) · 인용 형식 cite(source_kind risk_report_bundle) · 코드마다 facts(등록된 facts 틀의 키 전부 — 값이 없으면 null 이고 null_reasons 에 까닭) · 그림 참조(figures) · 그 코드를 덮은 층(sources — 판 · 층 · 원천 파일) · 숫자 원장 참조(numbers)와 표기 규칙 검사(label_check — 단독 대문자 A ~ J 수)를 준다, facts 는 와이어 상한 안에서 쪽으로 주어 남으면 next_offset 을 offset 으로 주고 이어 받는다(머리 · 수 · 지문은 쪽마다 같다), 그리기는 ReportArchive 몫이다."""
+    actor = _actor()
+
+    def call(key: str, *, owner_sub: str) -> dict:
+        full = ledger_routes.report_bundle_payload(key, version, template_version, owner_sub=owner_sub)
+        start = max(0, int(offset or 0))
+
+        def page(take: int) -> dict:
+            rows = full["facts"][start:start + take]
+            out = {**full, "facts": rows, "offset": start}
+            if start + len(rows) < len(full["facts"]):
+                out["next_offset"] = start + len(rows)
+            return out
+
+        out = _fit_list(page, max(1, len(full["facts"]) - start), lambda got: len(got["facts"]))
+        return ledger_routes.note_report_bundle(out, owner_sub=owner_sub, actor=actor)
+
+    return _scoped("target", target_key, call, target_key)

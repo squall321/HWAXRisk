@@ -532,6 +532,16 @@
     "bundle_id": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Bundle Id"},
     "code": {"anyOf": [{"type": "string"}, {"type": "null"}], "default": null, "title": "Code"}
    }
+  },
+  "risk_export_report_bundle": {
+   "params": [["target_key", "POSITIONAL_OR_KEYWORD"], ["version", "POSITIONAL_OR_KEYWORD"], ["template_version", "POSITIONAL_OR_KEYWORD"], ["offset", "POSITIONAL_OR_KEYWORD"]],
+   "required": ["target_key"],
+   "properties": {
+    "target_key": {"title": "Target Key", "type": "string"},
+    "version": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Version"},
+    "template_version": {"anyOf": [{"type": "integer"}, {"type": "null"}], "default": null, "title": "Template Version"},
+    "offset": {"default": 0, "title": "Offset", "type": "integer"}
+   }
   }
  }
 }

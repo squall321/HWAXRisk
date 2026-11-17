@@ -64,6 +64,8 @@ def _ids(store: RiskStore, key: str) -> dict[str, str]:
     # 판정표 원장(HWAXPortal docs/request-1117) — 칸 정의 · 판 둘 · 근거 묶음 하나를 주인의 라우트로 세운다.
     with factories.routes_store(store):
         ledger_routes.put_template(key, "columns", ledger_support.COLUMNS, ident=owner)
+        ledger_routes.put_template(key, "facts", {"keys": [{"key": "id", "from": "@code"}, {"key": "grade", "from": "최종 등급"}]},
+                                   ident=owner)
         ledger_routes.post_version(key, ledger_routes.BuildBody(layers=[{"name": "기준 행", "order": 10, "rows": ledger_support.BASE_ROWS}]),
                                    ident=owner)
         ledger_routes.post_version(key, ledger_routes.BuildBody(base_version=1, layers=ledger_support.LAYERS), ident=owner)
@@ -499,6 +501,8 @@ GET_CASES: dict[tuple[str, str], tuple[Call, tuple[str, ...]]] = {
         lambda i, who: ledger_routes.get_evidence_bundle(i["bundle"], ident=who), ("bundle",)),
     ("GET", P + "/projects/{project_id}/provenance"): (
         lambda i, who: ledger_routes.get_provenance(i["project"], ident=who), ("project",)),
+    ("GET", P + "/targets/{target_key}/ledger/versions/{version}/report-bundle"): (
+        lambda i, who: ledger_routes.get_report_bundle(i["target"], 2, ident=who), ("target",)),
 }
 # 남이 받는 답 — 기본은 없는 것과 같은 404 다. 과제로 거르는 목록은 남의 과제를 주면 없는 과제를 준 때와 같은 빈 목록이다.
 GET_EXPECT: dict[tuple[str, str], int] = {("GET", P + "/diffs"): 200, ("GET", P + "/targets"): 200, ("GET", P + "/reports"): 200}
@@ -632,6 +636,7 @@ MCP_CASES: dict[str, tuple[Callable[[dict], Any], tuple[str, ...]]] = {
                                                                             mapping=LEDGER_MAPPING), ("target",)),
     "risk_numbers_put": (lambda i: srv.risk_numbers_put(target_key=i["target"], numbers=LEDGER_NUMBERS), ("target",)),
     "risk_numbers_check": (lambda i: srv.risk_numbers_check(target_key=i["target"], text="R-001 은 12.5 mm 다"), ("target",)),
+    "risk_export_report_bundle": (lambda i: srv.risk_export_report_bundle(target_key=i["target"], version=2), ("target",)),
 }
 
 

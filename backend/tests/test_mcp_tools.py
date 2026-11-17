@@ -76,6 +76,8 @@ TOOL_NAMES = [
     # 숫자 원장 · 금지값 점검(RK-04) — 적기(쓰기) · 점검(읽기)(49 → 51).
     "risk_numbers_put",
     "risk_numbers_check",
+    # 보고 묶음(RK-05) — 읽기 · 내보내기 기록(51 → 52).
+    "risk_export_report_bundle",
 ]
 ENTRY_TOOLS = TOOL_NAMES[TOOL_NAMES.index("risk_next_step"):TOOL_NAMES.index("risk_repersist_panel") + 1]
 # 도구별 대표 인자와, 빈 원장에서 기대하는 오류 코드(없으면 None = 정상 응답).
@@ -155,6 +157,7 @@ CALLS = [
     ("risk_ledger_apply_decision", {"target_key": "snap:s1", "decision_text": "결정"}, "delegation_required"),
     ("risk_numbers_put", {"target_key": "snap:s1", "numbers": []}, "delegation_required"),
     ("risk_numbers_check", {"target_key": "snap:s1", "text": "12.5 mm"}, "not_visible"),
+    ("risk_export_report_bundle", {"target_key": "snap:s1"}, "not_visible"),
 ]
 _HANGUL = re.compile(r"[가-힣]")
 # 인자 이름에 비밀이 오면 게이트웨이·포털 절차·클라이언트 대화 기록에 값이 남는다(작업 지시서 A-11) — 포털 절차의

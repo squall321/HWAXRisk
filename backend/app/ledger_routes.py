@@ -14,7 +14,8 @@ from fastapi import APIRouter, Body, Depends, Query
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
-from app import config, evidence_bundle, identity, ledger, ledger_decision, ledger_numbers, provenance, ra_client, routes
+from app import (config, evidence_bundle, identity, ledger, ledger_decision, ledger_numbers, provenance, ra_client, report_bundle,
+                 routes)
 from app.adapters import base as adapters_base
 from app.errors import AppError
 
@@ -296,3 +297,28 @@ def post_numbers_check(target_key: str, body: NumbersCheckBody, ident: identity.
     """글 · 근거 묶음의 수를 숫자 원장 · 금지값과 대조한다(읽기 — 쓰지 않는다) — 원장에 없는 수 · 금지값 쓰임 · 단위 불일치 · 원장에 없는 id 꼴의
     수와 위치. 그 대상의 구성원이 부른다."""
     return numbers_check_payload(target_key, body, owner_sub=reader(target_key, ident))
+
+
+# ---------------------------------------------------------------- RK-05 보고 묶음
+def report_bundle_payload(target_key: str, version: int | None, template_version: int | None = None, *, owner_sub: str) -> dict:
+    """보고 묶음 본체(기록 없이) — 그 owner 의 대상이 아니면 404."""
+    target_owner(target_key, owner_sub)
+    return report_bundle.build(routes.get_store(), target_key, version=version, template_version=template_version)
+
+
+def note_report_bundle(out: dict, *, owner_sub: str, actor: str) -> dict:
+    """보고 묶음 내보내기의 기록 한 행 — 지문은 묶음 전체(쪽이 아니라)의 것이다."""
+    out["export_id"] = ledger.note_export(routes.get_store(), out["target_key"], owner_sub, version=out["version"], kind="report_bundle",
+                                          rows_n=out["counts"]["codes"], body=out["sha256"], actor=actor,
+                                          template_version=out["template_version"])
+    return out
+
+
+@router.get("/targets/{target_key}/ledger/versions/{version}/report-bundle")
+def get_report_bundle(target_key: str, version: int, template_version: int | None = None,
+                      ident: identity.Identity = Depends(identity.current)) -> dict:
+    """판정표 판 → 보고 묶음(RK-05) — 코드마다 facts(틀의 키 전부 · 빈 키는 null 과 까닭) · 그림 참조 · 출처 층 · 숫자 원장 참조와 인용 형식 cite.
+    그리기는 ReportArchive 몫이다. 그 대상의 구성원이 읽고 내보내기 기록이 남는다."""
+    owner = reader(target_key, ident)
+    return note_report_bundle(report_bundle_payload(target_key, version, template_version, owner_sub=owner), owner_sub=owner,
+                              actor=routes._require_user(ident))
