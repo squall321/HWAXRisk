@@ -13,6 +13,7 @@
 - 엔진 상한(항목 수 · 합 자수 — config.bundle_limits)을 넘으면 만들지 않고 422(넘은 값 · 상한). 합 자수는 항목 `result` 글자 수의 합(색인 포함)이다.
 - 지문 = sha256(json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":"))) 의 hex(contracts §1). 색인은 자기 지문을 담을 수
   없어 '본문 지문'(색인 뒤 항목들의 같은 셈)을 싣는다.
+- 묶음 id 는 eb_ 머리이고 만들기 · 받기 답에 인용 형식 cite(contracts §5 C1 — source_kind risk_bundle)가 붙는다.
 """
 from __future__ import annotations
 
@@ -27,6 +28,11 @@ from app.common import canonical_json, now_epoch, sha256_hex
 from app.errors import AppError
 
 TOOL = "risk_get_evidence_bundle"
+# 인용 형식(contracts §5 C1 — 플랫폼 공용) — 묶음마다 cite 를 싣는다. source_kind 는 엔진 DL-01 ref.kind 와 같은 낱말이고, id 머리는 보고 묶음(rb_)과
+# 헷갈리지 않게 eb_ 다.
+SOURCE_PLATFORM = "hwax_risk"
+SOURCE_KIND = "risk_bundle"
+ID_PREFIX = "eb_"
 KEY_RE = re.compile(r"^[A-Za-z0-9_.-]{1,24}$")
 TEMPLATE_NAME_MAX = 64
 CAP_MAX = 150_000
@@ -111,12 +117,12 @@ def build(store: Any, target_key: str, owner_sub: str, *, version: int | None, c
     inputs = {"target_key": target_key, "version": version, "colset_version": colset["version"], "rows_hash": head["rows_hash"],
               "codes": picked, "template": tpl, "mask": bool(mask)}
     inputs_hash = sha256_hex(canonical_json(inputs))
-    bundle_id = "eb-" + inputs_hash[:24]
+    bundle_id = ID_PREFIX + inputs_hash[:24]
     same = store.query_one("SELECT * FROM rr_evidence_bundles WHERE bundle_id = ?", (bundle_id,))
     if same is not None:
         return {**_build_view(same), "created": False}
 
-    short = bundle_id[3:9]
+    short = bundle_id[len(ID_PREFIX):len(ID_PREFIX) + 6]
     total_budget = tpl["total_cap"]
     masked_n = 0
     fields: list[dict] = []
@@ -183,6 +189,13 @@ def build(store: Any, target_key: str, owner_sub: str, *, version: int | None, c
     return {**_build_view(store.query_one("SELECT * FROM rr_evidence_bundles WHERE bundle_id = ?", (bundle_id,))), "created": True}
 
 
+def cite(row: Mapping[str, Any]) -> dict:
+    """인용 형식(C1) — {source_platform, source_kind, source_id, source_version(판정표 판/칸 정의 판), scope(대상 · 실은 코드)}."""
+    return {"source_platform": SOURCE_PLATFORM, "source_kind": SOURCE_KIND, "source_id": row["bundle_id"],
+            "source_version": f"v{row['version']}/c{row['colset_version']}",
+            "scope": {"target_key": row["target_key"], "codes": json.loads(row["codes_json"] or "[]")}}
+
+
 def _build_view(row: Mapping[str, Any]) -> dict:
     """만들기 답(contracts §1) — {bundle_id, fingerprint, items_n, total_chars, per_field{칸: {chars, truncated}}, masked_n, limits} 와 덤."""
     meta = json.loads(row["per_field_json"] or "{}")
@@ -190,7 +203,7 @@ def _build_view(row: Mapping[str, Any]) -> dict:
             "colset_version": row["colset_version"], "fingerprint": row["fingerprint"], "items_n": row["items_n"],
             "total_chars": row["total_chars"], "per_field": meta.get("per_field") or {}, "masked_n": row["masked_n"],
             "limits": meta.get("limits") or config.bundle_limits(), "omitted_fields": meta.get("omitted_fields") or [],
-            "codes_n": len(json.loads(row["codes_json"] or "[]")), "label_check": meta.get("label_check"),
+            "codes_n": len(json.loads(row["codes_json"] or "[]")), "label_check": meta.get("label_check"), "cite": cite(row),
             "created_by": row["created_by"], "created_at": row["created_at"]}
 
 
@@ -206,4 +219,4 @@ def evidence_of(row: Mapping[str, Any]) -> list[dict]:
 def payload(row: Mapping[str, Any]) -> dict:
     """받기 답(contracts §1) — `evidence` 를 고치지 않고 deliberate_start(evidence=…) 에 넣는다."""
     return {"bundle_id": row["bundle_id"], "target_key": row["target_key"], "version": row["version"],
-            "fingerprint": row["fingerprint"], "evidence": evidence_of(row)}
+            "fingerprint": row["fingerprint"], "cite": cite(row), "evidence": evidence_of(row)}

@@ -145,7 +145,7 @@ CALLS = [
     ("risk_ledger_export", {"target_key": "snap:s1"}, "not_visible"),
     ("risk_build_evidence_bundle", {"target_key": "snap:s1", "template": {"name": "틀", "caps": {"칸": 10}, "total_cap": 10}},
      "delegation_required"),
-    ("risk_get_evidence_bundle", {"bundle_id": "eb-none"}, "not_visible"),
+    ("risk_get_evidence_bundle", {"bundle_id": "eb_none"}, "not_visible"),
     ("risk_get_provenance", {"project_id": "p1"}, "not_visible"),
 ]
 _HANGUL = re.compile(r"[가-힣]")

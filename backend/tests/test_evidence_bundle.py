@@ -35,7 +35,7 @@ def _refused(fn, *args, **kwargs) -> AppError:
 def test_the_index_comes_first_and_names_every_row_and_what_was_left_out(ledger_box):
     seed_ledger(ledger_box)
     built = _build(ledger_box)
-    assert built["created"] is True and built["bundle_id"].startswith("eb-") and built["items_n"] == 1 + len(TEMPLATE["caps"])
+    assert built["created"] is True and built["bundle_id"].startswith("eb_") and built["items_n"] == 1 + len(TEMPLATE["caps"])
     got = ledger_routes.get_evidence_bundle(built["bundle_id"], ident=factories.ident(VIEWER))
     evidence = got["evidence"]
     index = evidence[0]
@@ -51,6 +51,10 @@ def test_the_index_comes_first_and_names_every_row_and_what_was_left_out(ledger_
     assert first[0].startswith("[판정표 칸 01] 부품 — 판 v2 · 행 13개") and first[1] == "R-001 | PART-A" and len(first) == 14
     # 지문은 contracts §1 의 식이고, 받는 쪽이 다시 재면 같다.
     assert got["fingerprint"] == built["fingerprint"] == evidence_bundle.fingerprint(evidence)
+    # 인용 형식(contracts §5 C1) — 플랫폼 · 종류(엔진 ref.kind 와 같은 risk_bundle) · id · 판/칸 정의 판 · 범위.
+    assert got["cite"] == built["cite"] == {"source_platform": "hwax_risk", "source_kind": "risk_bundle", "source_id": built["bundle_id"],
+                                            "source_version": "v2/c1",
+                                            "scope": {"target_key": ledger_box.target_key, "codes": [*CODES, "R-013"]}}
     assert json.loads(json.dumps(evidence)) == evidence
 
 
@@ -138,7 +142,7 @@ def test_the_same_inputs_are_the_same_bundle_and_the_gates_hold(ledger_box):
     assert _refused(ledger_routes.post_evidence_bundle, ledger_box.target_key, body, ident=factories.ident(VIEWER)).code == (
         "role_insufficient")
     assert _refused(ledger_routes.get_evidence_bundle, first["bundle_id"], ident=factories.ident(STRANGER)).code == "E404"
-    assert _refused(ledger_routes.get_evidence_bundle, "eb-none", ident=factories.ident(VIEWER)).code == "E404"
+    assert _refused(ledger_routes.get_evidence_bundle, "eb_none", ident=factories.ident(VIEWER)).code == "E404"
 
 
 def test_mcp_returns_the_whole_evidence_by_default_and_pages_on_request(ledger_box):
@@ -155,4 +159,4 @@ def test_mcp_returns_the_whole_evidence_by_default_and_pages_on_request(ledger_b
     assert first["paged"] is True and first["evidence"][0] == whole["evidence"][0]
     ledger_box.act_as(STRANGER)
     assert call("risk_get_evidence_bundle", bundle_id=built["bundle_id"])["error"] == "not_visible"
-    assert call("risk_get_evidence_bundle", bundle_id="eb-none")["error"] == "not_visible"
+    assert call("risk_get_evidence_bundle", bundle_id="eb_none")["error"] == "not_visible"
