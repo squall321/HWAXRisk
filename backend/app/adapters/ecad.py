@@ -193,6 +193,11 @@ def search_boards(channel: Any, tool_map: Mapping[str, str], query: str, *,
                        detail={"app_key": backend, "tools_missing": ["find_job"]})
     reply = channel.call(tool, {"query": query})
     if not reply.get("ok"):
+        refusal = reply.get("refusal") if isinstance(reply.get("refusal"), Mapping) else None
+        if refusal is not None:
+            # 게이트웨이의 읽기 전용 거절(GW-02) — 그 글(도구 이름 · 까닭)을 그대로 말한다(종전에는 'tool_error' 낱말만 남았다).
+            raise AppError("ecad_read_only", f"게이트웨이가 ODB 허브 {tool} 을 읽기 전용 토큰으로 막았습니다 — {refusal.get('message')}", 409,
+                           detail={"app_key": backend, "tool": tool, "refusal": dict(refusal)})
         raise AppError("ecad_unreachable", f"ODB 허브 {tool} 호출이 실패했습니다 — {reply.get('error')}.", 409,
                        detail={"app_key": backend, "tool": tool})
     payload = reply.get("result")

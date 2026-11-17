@@ -37,6 +37,31 @@ class _DeadlineExceeded(httpx.ReadTimeout):
     """호출에 정해 둔 벽시계 기한이 지났다 — 상대가 조용했던 것(침묵 한도)과 가른다. 올릴 손잡이가 서로 다르다."""
 
 
+# 게이트웨이의 읽기 전용 거절(HWAXPortal docs/request-1117 GW-02) — 읽기 전용 포털 PAT(scopes 에 read 만)로 조회가 아닌 도구를 부르면 게이트웨이가
+# isError 결과의 글을 `read_only: <도구> — <까닭>` 으로 준다. 종전에는 앱이 'tool_error' 낱말만 남겨 무엇이 왜 막혔는지가 사라졌다 — 거절 글과 도구
+# 이름을 답의 `refusal` 에 싣는다(error 낱말은 그대로 tool_error — 낱말로 가르는 곳이 바뀌지 않는다).
+READ_ONLY_PREFIX = "read_only:"
+_READ_ONLY_TOOL_RE = re.compile(r"^read_only:\s*'?([^'\s—]+)'?")
+
+
+def gateway_refusal(detail: Any, called: str | None = None) -> dict | None:
+    """도구 오류의 글이 게이트웨이의 읽기 전용 거절이면 {reason: 'read-only', tool, message}, 아니면 None. 도구 이름은 글에서 읽고(게이트웨이가 안쪽
+    이름으로 바꿔 말할 수 있다) 없으면 부른 이름이다."""
+    if not isinstance(detail, str) or not detail.strip().startswith(READ_ONLY_PREFIX):
+        return None
+    text = " ".join(detail.split())
+    hit = _READ_ONLY_TOOL_RE.match(text)
+    return {"reason": "read-only", "tool": hit.group(1) if hit else called, "message": text[:500]}
+
+
+def failure_text(reply: Mapping[str, Any]) -> str:
+    """실패한 답을 사람이 읽을 낱말로 — 읽기 전용 거절이면 그 글(도구 이름 · 까닭), 아니면 error 낱말."""
+    refusal = reply.get("refusal") if isinstance(reply.get("refusal"), Mapping) else None
+    if refusal:
+        return str(refusal.get("message") or f"read_only: {refusal.get('tool')}")
+    return str(reply.get("error") or "unknown_error")
+
+
 class McpHttpClient:
     """streamable-http MCP 엔드포인트에 JSON-RPC 로 tools/call 하는 최소 클라이언트.
 
@@ -220,7 +245,12 @@ class McpHttpClient:
             return reply
         result = reply["result"] if isinstance(reply["result"], Mapping) else {}
         if result.get("isError"):
-            return {"ok": False, "error": "tool_error", "detail": self._unwrap(result)}
+            detail = self._unwrap(result)
+            out = {"ok": False, "error": "tool_error", "detail": detail}
+            refusal = gateway_refusal(detail, name)
+            if refusal is not None:
+                out["refusal"] = refusal
+            return out
         return {"ok": True, "result": self._unwrap(result)}
 
     def list_tools(self, *, deadline: float | None = None) -> dict:
